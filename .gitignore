@@ -38,7 +38,10 @@ qrc_*.cpp
 Log/
 Result/
 Temp/
-dist/
+dist/*
+!dist/installer/
+dist/installer/*
+!dist/installer/NoTeaching-Robot-Setup.exe
 
 # Local manuals / archives / backups
 KAREL_Ver9_3.txt
