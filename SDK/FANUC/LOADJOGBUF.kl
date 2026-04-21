@@ -1,0 +1,145 @@
+PROGRAM LOADJOGBUF
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'Load jog PR buffer'
+%ENVIRONMENT sysdef
+%ENVIRONMENT REGOPE
+%ENVIRONMENT STRNG
+
+VAR
+  status    : INTEGER
+  is_real   : BOOLEAN
+  flag_int  : INTEGER
+  flag_real : REAL
+  data_file : FILE
+  line      : STRING[254]
+  token     : STRING[64]
+  reg_no    : INTEGER
+  pos_type  : INTEGER
+  idx       : INTEGER
+  val_idx   : INTEGER
+  vals      : ARRAY[9] OF REAL
+  xyz_pos   : XYZWPR
+  jnt_pos   : JOINTPOS
+  xyz_cfg   : CONFIG
+
+ROUTINE SetLoadStatus(value : INTEGER)
+VAR
+  reg_status : INTEGER
+BEGIN
+  SET_INT_REG(84, value, reg_status)
+END SetLoadStatus
+
+ROUTINE FindChar(src : STRING; token_str : STRING) : INTEGER
+VAR
+  i   : INTEGER
+  one : STRING[1]
+BEGIN
+  FOR i = 1 TO STR_LEN(src) DO
+    one = SUB_STR(src, i, 1)
+    IF one = token_str THEN
+      RETURN(i)
+    ENDIF
+  ENDFOR
+  RETURN(0)
+END FindChar
+
+ROUTINE PopToken(rest : STRING; token_out : STRING)
+VAR
+  comma_pos : INTEGER
+BEGIN
+  comma_pos = FindChar(rest, ',')
+  IF comma_pos <= 0 THEN
+    token_out = rest
+    rest = ''
+  ELSE
+    token_out = SUB_STR(rest, 1, comma_pos - 1)
+    rest = SUB_STR(rest, comma_pos + 1, STR_LEN(rest) - comma_pos)
+  ENDIF
+END PopToken
+
+BEGIN
+  SetLoadStatus(-100)
+
+  GET_REG(83, is_real, flag_int, flag_real, status)
+  IF status <> 0 THEN
+    SetLoadStatus(-101)
+    RETURN
+  ENDIF
+  IF flag_int = 2 THEN
+    SetLoadStatus(1)
+    RETURN
+  ENDIF
+  IF flag_int <> 1 THEN
+    SetLoadStatus(-102)
+    RETURN
+  ENDIF
+
+  OPEN FILE data_file('RO', 'MD:JOGBUF.DT')
+  status = IO_STATUS(data_file)
+  IF status <> 0 THEN
+    SetLoadStatus(-201)
+    WRITE('LOADJOGBUF OPEN FAIL ', status, CR)
+    RETURN
+  ENDIF
+
+  FOR idx = 1 TO 20 DO
+    READ data_file(line)
+    status = IO_STATUS(data_file)
+    IF status <> 0 THEN
+      CLOSE FILE data_file
+      SetLoadStatus(-202)
+      WRITE('LOADJOGBUF READ FAIL ', status, CR)
+      RETURN
+    ENDIF
+
+    PopToken(line, token)
+    CNV_STR_INT(token, reg_no)
+    PopToken(line, token)
+    CNV_STR_INT(token, pos_type)
+
+    FOR val_idx = 1 TO 9 DO
+      PopToken(line, token)
+      CNV_STR_REAL(token, vals[val_idx])
+    ENDFOR
+
+    IF pos_type = 0 THEN
+      xyz_pos = CURPOS(0, 0)
+      xyz_pos.x = vals[1]
+      xyz_pos.y = vals[2]
+      xyz_pos.z = vals[3]
+      xyz_pos.w = vals[4]
+      xyz_pos.p = vals[5]
+      xyz_pos.r = vals[6]
+      CNV_STR_CONF('N U T, 0, 0, 0', xyz_cfg, status)
+      IF status <> 0 THEN
+        CLOSE FILE data_file
+        SetLoadStatus(-301)
+        WRITE('LOADJOGBUF CONF FAIL ', status, CR)
+        RETURN
+      ENDIF
+      xyz_pos.config_data = xyz_cfg
+      SET_POS_REG(reg_no, xyz_pos, status)
+    ELSE
+      CNV_REL_JPOS(vals, jnt_pos, status)
+      IF status <> 0 THEN
+        CLOSE FILE data_file
+        SetLoadStatus(-302)
+        WRITE('LOADJOGBUF JPOS FAIL ', status, CR)
+        RETURN
+      ENDIF
+      SET_JPOS_REG(reg_no, jnt_pos, status)
+    ENDIF
+
+    IF status <> 0 THEN
+      CLOSE FILE data_file
+      SetLoadStatus(-303)
+      WRITE('LOADJOGBUF SET FAIL ', status, CR)
+      RETURN
+    ENDIF
+  ENDFOR
+
+  CLOSE FILE data_file
+  SetLoadStatus(1)
+END LOADJOGBUF

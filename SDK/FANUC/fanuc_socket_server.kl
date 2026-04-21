@@ -1,0 +1,77 @@
+PROGRAM fanuc_socket_server
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%ENVIRONMENT REGOPE
+
+CONST
+  PORT_NUM = 9000
+  BUF_SIZE = 256
+
+VAR
+  srv_file : FILE
+  cli_file : FILE
+  status   : INTEGER
+  cmd      : STRING[BUF_SIZE]
+  reply    : STRING[BUF_SIZE]
+  port_str : STRING[16]
+
+ROUTINE build_port_string
+BEGIN
+  CNV_INT_STR(PORT_NUM, port_str)
+END build_port_string
+
+ROUTINE send_line(msg : STRING)
+BEGIN
+  WRITE cli_file(msg, CR)
+END send_line
+
+ROUTINE read_line(line : STRING)
+BEGIN
+  line = ''
+  READ cli_file(line)
+END read_line
+
+ROUTINE handle_command(line : STRING)
+BEGIN
+  IF line = 'HELLO' THEN
+    send_line('OK')
+  ELSE
+    IF line = 'GET_STATUS' THEN
+      send_line('STATUS:READY')
+    ELSE
+      send_line('ERR:UNKNOWN_CMD')
+    ENDIF
+  ENDIF
+END handle_command
+
+BEGIN
+  build_port_string
+
+  OPEN FILE srv_file('SERVER:' + port_str, RW)
+  IF IO_STATUS(srv_file) <> 0 THEN
+    WRITE('SERVER OPEN FAILED', CR)
+    ABORT
+  ENDIF
+
+  WRITE('SERVER LISTENING ON PORT ', PORT_NUM, CR)
+
+  -- 等待客户端连接
+  OPEN FILE cli_file('SERVER:' + port_str, RW)
+  IF IO_STATUS(cli_file) <> 0 THEN
+    WRITE('CLIENT OPEN FAILED', CR)
+    CLOSE FILE srv_file
+    ABORT
+  ENDIF
+
+  WRITE('CLIENT CONNECTED', CR)
+
+  WHILE TRUE DO
+    read_line(cmd)
+    IF cmd <> '' THEN
+      handle_command(cmd)
+    ENDIF
+  ENDWHILE
+
+  CLOSE FILE cli_file
+  CLOSE FILE srv_file
+END fanuc_socket_server

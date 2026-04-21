@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>QtWidgetsApplication4Class</class>
+ <widget class="QMainWindow" name="QtWidgetsApplication4Class">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>760</width>
+     <height>820</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>QtWidgetsApplication4</string>
+  </property>
+  <widget class="QWidget" name="centralWidget">
+   <widget class="QPushButton" name="RunTest">
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>40</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>发送常驻服务</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="WeldProcessBtn">
+    <property name="geometry">
+     <rect>
+      <x>220</x>
+      <y>40</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>工艺参数</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FunctionTestBtn">
+    <property name="geometry">
+     <rect>
+      <x>400</x>
+      <y>40</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>功能测试</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="MeasureThenWeldBtn">
+    <property name="geometry">
+     <rect>
+      <x>580</x>
+      <y>40</y>
+      <width>140</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>先测后焊</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucConnectBtn">
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>130</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>FANUC连接</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucDisconnectBtn">
+    <property name="geometry">
+     <rect>
+      <x>220</x>
+      <y>130</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>FANUC断开</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucGetPosBtn">
+    <property name="geometry">
+     <rect>
+      <x>400</x>
+      <y>130</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>读取当前位置</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="PreciseMeasureEditBtn">
+    <property name="geometry">
+     <rect>
+      <x>400</x>
+      <y>130</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>精测量数据</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucGetPulseBtn">
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>220</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>读取关节脉冲</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucCheckDoneBtn">
+    <property name="geometry">
+     <rect>
+      <x>220</x>
+      <y>220</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>检查运行完成</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucSetGetIntBtn">
+    <property name="geometry">
+     <rect>
+      <x>400</x>
+      <y>220</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>写读INT寄存器</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="RobotJogBtn">
+    <property name="geometry">
+     <rect>
+      <x>580</x>
+      <y>220</y>
+      <width>140</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>点动控制</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucSetSpeedBtn">
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>310</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>设置速度</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucCallJobBtn">
+    <property name="geometry">
+     <rect>
+      <x>220</x>
+      <y>310</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>调用任务</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucUploadLsBtn">
+    <property name="geometry">
+     <rect>
+      <x>400</x>
+      <y>310</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>发送LS程序</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucMovlTestBtn">
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>400</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>MOVL往返测试</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucMovjTestBtn">
+    <property name="geometry">
+     <rect>
+      <x>220</x>
+      <y>400</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>MOVJ J2/J3 +5°</string>
+    </property>
+   </widget>
+   <widget class="QPlainTextEdit" name="FanucMonitorText">
+    <property name="geometry">
+     <rect>
+      <x>400</x>
+      <y>490</y>
+      <width>320</width>
+      <height>120</height>
+     </rect>
+    </property>
+    <property name="readOnly">
+     <bool>true</bool>
+    </property>
+    <property name="plainText">
+     <string>状态: 等待监控数据...</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="FanucMoveZeroBtn">
+    <property name="geometry">
+     <rect>
+      <x>400</x>
+      <y>400</y>
+      <width>160</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>运动到零位</string>
+    </property>
+   </widget>
+   <widget class="QPushButton" name="GrooveCameraTestBtn">
+    <property name="geometry">
+     <rect>
+      <x>580</x>
+      <y>130</y>
+      <width>140</width>
+      <height>60</height>
+     </rect>
+    </property>
+    <property name="checkable">
+     <bool>true</bool>
+    </property>
+    <property name="text">
+     <string>坡口相机测试</string>
+    </property>
+   </widget>
+    <widget class="QPlainTextEdit" name="GrooveCameraText">
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>620</y>
+      <width>680</width>
+      <height>220</height>
+     </rect>
+     </property>
+    <property name="readOnly">
+     <bool>true</bool>
+    </property>
+    <property name="plainText">
+     <string>坡口相机数据: 等待测试...</string>
+    </property>
+   </widget>
+  </widget>
+  <widget class="QMenuBar" name="menuBar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>760</width>
+     <height>33</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QToolBar" name="mainToolBar">
+   <attribute name="toolBarArea">
+    <enum>TopToolBarArea</enum>
+   </attribute>
+   <attribute name="toolBarBreak">
+    <bool>false</bool>
+   </attribute>
+  </widget>
+  <widget class="QStatusBar" name="statusBar"/>
+ </widget>
+ <layoutdefault spacing="6" margin="11"/>
+ <resources>
+  <include location="QtWidgetsApplication4.qrc"/>
+ </resources>
+ <connections>
+  <connection>
+   <sender>RunTest</sender>
+   <signal>clicked()</signal>
+   <receiver>QtWidgetsApplication4Class</receiver>
+   <slot>RobotRunTest()</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>437</x>
+     <y>299</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>433</x>
+     <y>205</y>
+    </hint>
+   </hints>
+  </connection>
+ </connections>
+ <slots>
+  <slot>RobotRunTest()</slot>
+ </slots>
+</ui>

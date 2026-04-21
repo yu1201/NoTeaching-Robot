@@ -1,0 +1,419 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>WeldProcessDialog</class>
+ <widget class="QDialog" name="WeldProcessDialog">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1480</width>
+    <height>900</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>工艺参数编辑</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QWidget" name="topPanel">
+     <layout class="QVBoxLayout" name="verticalLayout_2">
+      <item>
+       <widget class="QLabel" name="titleLabel">
+        <property name="text">
+         <string>工艺参数</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="descLabel">
+        <property name="text">
+         <string>Qt Designer 预览骨架。运行时会由代码加载真实的工艺列表、焊道列表和参数控件。</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="horizontalLayoutTop">
+        <item>
+         <widget class="QLabel" name="labelUseWeld">
+          <property name="text">
+           <string>当前使用工艺号</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QSpinBox" name="useWeldSpin"/>
+        </item>
+        <item>
+         <widget class="QLabel" name="labelUseWeave">
+          <property name="text">
+           <string>当前使用摆动号</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QSpinBox" name="useWeaveSpin"/>
+        </item>
+        <item>
+         <spacer name="horizontalSpacerTop">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QWidget" name="contentWidget">
+     <layout class="QHBoxLayout" name="contentPreviewLayout">
+      <item>
+       <widget class="QFrame" name="leftPreviewFrame">
+        <property name="minimumSize">
+         <size>
+          <width>420</width>
+          <height>0</height>
+         </size>
+        </property>
+        <property name="frameShape">
+         <enum>QFrame::StyledPanel</enum>
+        </property>
+        <layout class="QVBoxLayout" name="verticalLayout_3">
+         <item>
+          <widget class="QLabel" name="previewListTitle">
+           <property name="text">
+            <string>工艺列表</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="weldActionLayout">
+           <item>
+            <widget class="QPushButton" name="previewAddWeldBtn">
+             <property name="minimumSize">
+              <size>
+               <width>28</width>
+               <height>28</height>
+              </size>
+             </property>
+             <property name="maximumSize">
+              <size>
+               <width>28</width>
+               <height>28</height>
+              </size>
+             </property>
+             <property name="text">
+              <string>+</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="previewRemoveWeldBtn">
+             <property name="minimumSize">
+              <size>
+               <width>28</width>
+               <height>28</height>
+              </size>
+             </property>
+             <property name="maximumSize">
+              <size>
+               <width>28</width>
+               <height>28</height>
+              </size>
+             </property>
+             <property name="text">
+              <string>-</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="horizontalSpacerPreviewList">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>40</width>
+               <height>20</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QHBoxLayout" name="previewListRow">
+           <item>
+            <widget class="QListWidget" name="previewWeldList">
+             <item>
+              <property name="text">
+               <string>1. 焊角10 | 焊脚10.0</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>2. 焊角6 | 焊脚6.0</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>3. 焊角8 | 焊脚8.0</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+           <item>
+            <widget class="QFrame" name="previewBeadFrame">
+             <property name="minimumSize">
+              <size>
+               <width>92</width>
+               <height>0</height>
+              </size>
+             </property>
+             <property name="maximumSize">
+              <size>
+               <width>92</width>
+               <height>16777215</height>
+              </size>
+             </property>
+             <property name="frameShape">
+              <enum>QFrame::StyledPanel</enum>
+             </property>
+             <layout class="QVBoxLayout" name="verticalLayout_4">
+              <item>
+               <layout class="QHBoxLayout" name="beadActionLayout">
+                <item>
+                 <widget class="QPushButton" name="previewAddBeadBtn">
+                  <property name="minimumSize">
+                   <size>
+                    <width>28</width>
+                    <height>28</height>
+                   </size>
+                  </property>
+                  <property name="maximumSize">
+                   <size>
+                    <width>28</width>
+                    <height>28</height>
+                   </size>
+                  </property>
+                  <property name="text">
+                   <string>+</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="previewRemoveBeadBtn">
+                  <property name="minimumSize">
+                   <size>
+                    <width>28</width>
+                    <height>28</height>
+                   </size>
+                  </property>
+                  <property name="maximumSize">
+                   <size>
+                    <width>28</width>
+                    <height>28</height>
+                   </size>
+                  </property>
+                  <property name="text">
+                   <string>-</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </item>
+              <item>
+               <widget class="QListWidget" name="previewBeadList">
+                <item>
+                 <property name="text">
+                  <string>焊道1</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>焊道2</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>焊道3</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+             </layout>
+            </widget>
+           </item>
+          </layout>
+         </item>
+        </layout>
+       </widget>
+      </item>
+      <item>
+       <widget class="QFrame" name="rightPreviewFrame">
+        <property name="frameShape">
+         <enum>QFrame::StyledPanel</enum>
+        </property>
+        <layout class="QVBoxLayout" name="verticalLayout_5">
+         <item>
+          <layout class="QHBoxLayout" name="previewTabLayout">
+           <item>
+            <widget class="QPushButton" name="previewNormalTab">
+             <property name="text">
+              <string>常规工艺参数</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="previewWeaveTab">
+             <property name="text">
+              <string>摆动参数</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <spacer name="horizontalSpacerPreviewTab">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size>
+               <width>40</width>
+               <height>20</height>
+              </size>
+             </property>
+            </spacer>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <layout class="QGridLayout" name="previewGroupGrid">
+           <item row="0" column="0">
+            <widget class="QGroupBox" name="previewBasicGroup">
+             <property name="title">
+              <string>基础工艺参数</string>
+             </property>
+             <layout class="QFormLayout" name="formLayoutPreviewBasic">
+              <item row="0" column="0">
+               <widget class="QLabel" name="labelPreview1">
+                <property name="text">
+                 <string>工件名称</string>
+                </property>
+               </widget>
+              </item>
+              <item row="0" column="1">
+               <widget class="QLineEdit" name="lineEditPreview1"/>
+              </item>
+              <item row="1" column="0">
+               <widget class="QLabel" name="labelPreview2">
+                <property name="text">
+                 <string>焊接类型</string>
+                </property>
+               </widget>
+              </item>
+              <item row="1" column="1">
+               <widget class="QLineEdit" name="lineEditPreview2"/>
+              </item>
+             </layout>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="QGroupBox" name="previewStartGroup">
+             <property name="title">
+              <string>引弧参数</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="2">
+            <widget class="QGroupBox" name="previewStopGroup">
+             <property name="title">
+              <string>收弧参数</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="0">
+            <widget class="QGroupBox" name="previewWeldGroup">
+             <property name="title">
+              <string>焊接与运动参数</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="1">
+            <widget class="QGroupBox" name="previewWrapGroup">
+             <property name="title">
+              <string>搭接/包角参数</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="2">
+            <widget class="QGroupBox" name="previewWeaveGroup">
+             <property name="title">
+              <string>摆动参数</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+        </layout>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="statusLabel">
+     <property name="text">
+      <string/>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <layout class="QHBoxLayout" name="horizontalLayout">
+     <item>
+      <spacer name="horizontalSpacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+     <item>
+      <widget class="QPushButton" name="reloadBtn">
+       <property name="text">
+        <string>重新读取</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="saveBtn">
+       <property name="text">
+        <string>保存当前工艺</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="closeBtn">
+       <property name="text">
+        <string>关闭</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

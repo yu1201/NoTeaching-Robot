@@ -1,0 +1,108 @@
+PROGRAM FANUC_RESIDENT_SERVICE
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'Resident TCP server service entry'
+%ENVIRONMENT sysdef
+%ENVIRONMENT fdev
+%ENVIRONMENT flbt
+%ENVIRONMENT REGOPE
+
+VAR
+  channel : FILE
+  status  : INTEGER
+  cmd     : STRING[254]
+  entry   : INTEGER
+  session_on : BOOLEAN
+  service_on : BOOLEAN
+  stop_is_real : BOOLEAN
+  stop_value : INTEGER
+  stop_real : REAL
+
+ROUTINE DispatchCommand(ch : FILE; cmd : STRING) FROM FANUC_SERVICE_LIB
+
+ROUTINE InitServerPort
+BEGIN
+  SET_VAR(entry, '*SYSTEM*', '$HOSTS_CFG[4].$SERVER_PORT', 9000, status)
+END InitServerPort
+
+ROUTINE ClearStopFlag
+BEGIN
+  SET_INT_REG(99, 0, status)
+END ClearStopFlag
+
+ROUTINE CheckStopFlag
+BEGIN
+  GET_REG(99, stop_is_real, stop_value, stop_real, status)
+  IF status = 0 THEN
+    IF NOT stop_is_real THEN
+      IF stop_value <> 0 THEN
+        service_on = FALSE
+        session_on = FALSE
+      ENDIF
+    ENDIF
+  ENDIF
+END CheckStopFlag
+
+BEGIN
+  service_on = TRUE
+  SET_FILE_ATR(channel, ATR_IA)
+  InitServerPort
+  ClearStopFlag
+  WRITE('FANUC resident TCP server started', CR)
+  WRITE('Mode: ROBOT=SERVER, PC=CLIENT, TAG=S4:, PORT=9000', CR)
+
+  WHILE service_on DO
+    MSG_CONNECT('S4:', status)
+    WRITE('MSG_CONNECT STATUS=', status, CR)
+    IF status <> 0 THEN
+      CheckStopFlag
+      DELAY(500)
+    ELSE
+    WRITE('Waiting for TCP client on S4 port 9000...', CR)
+    CLR_IO_STAT(channel)
+    OPEN FILE channel('rw', 'S4:')
+    status = IO_STATUS(channel)
+    IF status = 0 THEN
+      WRITE('Client connected', CR)
+      session_on = TRUE
+      WHILE session_on DO
+        BYTES_AHEAD(channel, entry, status)
+        IF status <> 0 THEN
+          session_on = FALSE
+        ELSE
+          IF entry > 0 THEN
+            READ channel(cmd)
+            status = IO_STATUS(channel)
+            IF status <> 0 THEN
+              session_on = FALSE
+            ELSE
+              IF cmd <> '' THEN
+                DispatchCommand(channel, cmd)
+                cmd = ''
+                CheckStopFlag
+              ENDIF
+            ENDIF
+          ELSE
+            CheckStopFlag
+            DELAY(50)
+          ENDIF
+        ENDIF
+      ENDWHILE
+      CLOSE FILE channel
+      CLR_IO_STAT(channel)
+      WRITE('Client disconnected, waiting for next client', CR)
+    ELSE
+      WRITE('OPEN S4 STATUS=', status, CR)
+      CLR_IO_STAT(channel)
+    ENDIF
+    CLR_IO_STAT(channel)
+    MSG_DISCO('S4:', status)
+    WRITE('MSG_DISCO S4 STATUS=', status, CR)
+    DELAY(500)
+    ENDIF
+  ENDWHILE
+
+  MSG_DISCO('S4:', status)
+  WRITE('FANUC resident TCP server stopped', CR)
+END FANUC_RESIDENT_SERVICE

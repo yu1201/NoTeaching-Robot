@@ -1,0 +1,154 @@
+PROGRAM FANUC_MONITOR_SERVICE
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'FANUC monitor TCP server'
+%ENVIRONMENT sysdef
+%ENVIRONMENT fdev
+%ENVIRONMENT flbt
+%ENVIRONMENT REGOPE
+
+VAR
+  channel    : FILE
+  status     : INTEGER
+  entry      : INTEGER
+  session_on : BOOLEAN
+  seq        : INTEGER
+  robot_ms   : INTEGER
+  moving     : BOOLEAN
+  done       : INTEGER
+  pos        : XYZWPREXT
+  jpos       : JOINTPOS
+  vals       : ARRAY[9] OF REAL
+  service_on : BOOLEAN
+  stop_is_real : BOOLEAN
+  stop_value : INTEGER
+  stop_real : REAL
+
+ROUTINE InitMonitorPort
+BEGIN
+  SET_VAR(entry, '*SYSTEM*', '$HOSTS_CFG[5].$SERVER_PORT', 9001, status)
+END InitMonitorPort
+
+ROUTINE ClearStopFlag
+BEGIN
+  SET_INT_REG(99, 0, status)
+END ClearStopFlag
+
+ROUTINE CheckStopFlag
+BEGIN
+  GET_REG(99, stop_is_real, stop_value, stop_real, status)
+  IF status = 0 THEN
+    IF NOT stop_is_real THEN
+      IF stop_value <> 0 THEN
+        service_on = FALSE
+        session_on = FALSE
+      ENDIF
+    ENDIF
+  ENDIF
+END CheckStopFlag
+
+ROUTINE UpdateDoneState
+BEGIN
+  done = -1
+  GET_VAR(entry, '*SYSTEM*', '$MOR_GRP[1].$ROB_MOVE', moving, status)
+  IF status = 0 THEN
+    IF moving THEN
+      done = 0
+    ELSE
+      done = 1
+    ENDIF
+  ENDIF
+END UpdateDoneState
+
+ROUTINE WriteMonitorFrame(ch : FILE)
+BEGIN
+  vals[1] = 0.0
+  vals[2] = 0.0
+  vals[3] = 0.0
+  vals[4] = 0.0
+  vals[5] = 0.0
+  vals[6] = 0.0
+  vals[7] = 0.0
+  vals[8] = 0.0
+  vals[9] = 0.0
+
+  UpdateDoneState
+  pos = CURPOS(0, 0)
+  jpos = CURJPOS(0, 0)
+  CNV_JPOS_REL(jpos, vals, status)
+
+  WRITE ch('MON:',
+           seq, ',',
+           robot_ms, ',',
+           done, ',',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, ',',
+           vals[1]::10::3, ',',
+           vals[2]::10::3, ',',
+           vals[3]::10::3, ',',
+           vals[4]::10::3, ',',
+           vals[5]::10::3, ',',
+           vals[6]::10::3, ',',
+           vals[7]::10::3, ',',
+           vals[8]::10::3, ',',
+           vals[9]::10::3, CR)
+END WriteMonitorFrame
+
+BEGIN
+  service_on = TRUE
+  seq = 0
+  robot_ms = 0
+  SET_FILE_ATR(channel, ATR_IA)
+  InitMonitorPort
+  ClearStopFlag
+  WRITE('FANUC monitor TCP server started', CR)
+  WRITE('Mode: ROBOT=SERVER, PC=CLIENT, TAG=S5:, PORT=9001', CR)
+
+  WHILE service_on DO
+    MSG_CONNECT('S5:', status)
+    WRITE('MON MSG_CONNECT STATUS=', status, CR)
+    IF status <> 0 THEN
+      CheckStopFlag
+      DELAY(500)
+    ELSE
+      WRITE('Waiting for TCP client on S5 port 9001...', CR)
+      CLR_IO_STAT(channel)
+      OPEN FILE channel('rw', 'S5:')
+      status = IO_STATUS(channel)
+      IF status = 0 THEN
+        WRITE('Monitor client connected', CR)
+        session_on = TRUE
+        WHILE session_on DO
+          WriteMonitorFrame(channel)
+          status = IO_STATUS(channel)
+          IF status <> 0 THEN
+            session_on = FALSE
+          ELSE
+            seq = seq + 1
+            robot_ms = robot_ms + 50
+            CheckStopFlag
+            DELAY(50)
+          ENDIF
+        ENDWHILE
+        CLOSE FILE channel
+        CLR_IO_STAT(channel)
+        WRITE('Monitor client disconnected', CR)
+      ELSE
+        WRITE('OPEN S5 STATUS=', status, CR)
+        CLR_IO_STAT(channel)
+      ENDIF
+      CLR_IO_STAT(channel)
+      MSG_DISCO('S5:', status)
+      WRITE('MON MSG_DISCO S5 STATUS=', status, CR)
+      DELAY(500)
+    ENDIF
+  ENDWHILE
+
+  MSG_DISCO('S5:', status)
+  WRITE('FANUC monitor TCP server stopped', CR)
+END FANUC_MONITOR_SERVICE

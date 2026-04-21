@@ -1,0 +1,44 @@
+# Visual Studio / Qt build artifacts
+.vs/
+QtWidget.*/
+x64/
+Debug/
+Release/
+GeneratedFiles/
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*_autogen/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.ipch
+*.ilk
+*.pdb
+*.obj
+*.idb
+*.tlog
+*.lastbuildstate
+*.recipe
+*.log
+*.tmp
+*.cache
+
+# Runtime deployment / generated binaries
+*.exe
+*.dll
+*.lib
+*.exp
+*.pc
+*.tp
+*.var
+
+# Local outputs
+Log/
+Result/
+Temp/
+
+# Editor / OS noise
+Thumbs.db
+Desktop.ini

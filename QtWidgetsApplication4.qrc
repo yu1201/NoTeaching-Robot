@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="QtWidgetsApplication4">
+        <file>icons/chevron-down.svg</file>
+        <file>icons/minimal_robot_icon_blue_black.svg</file>
+    </qresource>
+</RCC>

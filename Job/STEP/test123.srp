@@ -1,0 +1,15 @@
+WHILE(1)DO
+PTP(ap0,dyn0,ola0,tool1,WORLD);
+PTP(cp1,V10,NULL,tool1,WORLD);
+PTP(cp2,V10,NULL,tool1,WORLD);
+Lin(cp3,dyn1,ola0,eVAR,tool1,WORLD);
+ARCON(arcon0,arc0,int0,retry0,real0);
+ARCOFF(arcoff0);
+WLin(ap0,dyn1,ola0,eVAR,wd0,td0,tool1,WORLD);
+WaitTime(int0,TRUE);
+IF(int1==1)THEN
+END_IF
+WeaveStart(wd0,td0);
+WeaveEnd();
+ARCSET(arc0,START,real0);
+END_WHILE
