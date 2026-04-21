@@ -9,6 +9,14 @@
 - 先测后焊流程
 - 相机参数、手眼矩阵、精测量参数编辑
 
+## 下载
+
+- 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
+- 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
+- 当前版本安装包：<https://github.com/yu1201/NoTeaching-Robot/releases/tag/v2026.04.21>
+
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup.exe`，不用自己编译源码。
+
 ## 开发环境
 
 当前工程按本机路径配置，直接编译前需要先准备以下依赖：
