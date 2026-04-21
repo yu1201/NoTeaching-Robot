@@ -1,0 +1,9 @@
+PROGRAM WELDPROGRAM
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%COMMENT = 'Uploaded special motion placeholder'
+
+BEGIN
+  WRITE('WELDPROGRAM START', CR)
+  WRITE('Implement weld motion with your site TP/KAREL contract.', CR)
+END WELDPROGRAM

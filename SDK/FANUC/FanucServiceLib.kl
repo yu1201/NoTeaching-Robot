@@ -1,0 +1,637 @@
+PROGRAM FANUC_SERVICE_LIB
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'Shared helpers for resident service'
+%ENVIRONMENT sysdef
+%ENVIRONMENT REGOPE
+%ENVIRONMENT MULTI
+%ENVIRONMENT STRNG
+
+VAR
+  g_status  : INTEGER
+  g_entry   : INTEGER
+  g_bool    : BOOLEAN
+  g_int     : INTEGER
+  g_real    : REAL
+  g_text1   : STRING[254]
+  g_text2   : STRING[254]
+  g_text3   : STRING[254]
+
+ROUTINE WriteOk(ch : FILE; payload : STRING)
+BEGIN
+  IF payload = '' THEN
+    WRITE ch('OK', CR)
+  ELSE
+    WRITE ch('OK:', payload, CR)
+  ENDIF
+END WriteOk
+
+ROUTINE WriteErr(ch : FILE; payload : STRING)
+BEGIN
+  WRITE ch('ERR:', payload, CR)
+END WriteErr
+
+ROUTINE WriteCurrentPos(ch : FILE)
+VAR
+  pos : XYZWPREXT
+BEGIN
+  DELAY(100)
+  pos = CURPOS(0,0)
+  WRITE ch('POS:',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, CR)
+END WriteCurrentPos
+
+ROUTINE WriteCurrentPos00(ch : FILE)
+VAR
+  pos : XYZWPREXT
+BEGIN
+  pos = CURPOS(0,0)
+  WRITE ch('POS00:',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, CR)
+END WriteCurrentPos00
+
+ROUTINE WriteCurrentPos001(ch : FILE)
+VAR
+  pos : XYZWPREXT
+BEGIN
+  pos = CURPOS(0,0,1)
+  WRITE ch('POS001:',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, CR)
+END WriteCurrentPos001
+
+ROUTINE WriteCurrentPos01(ch : FILE)
+VAR
+  pos : XYZWPREXT
+BEGIN
+  pos = CURPOS(0,1)
+  WRITE ch('POS01:',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, CR)
+END WriteCurrentPos01
+
+ROUTINE WriteCurrentPos10(ch : FILE)
+VAR
+  pos : XYZWPREXT
+BEGIN
+  pos = CURPOS(1,0)
+  WRITE ch('POS10:',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, CR)
+END WriteCurrentPos10
+
+ROUTINE WriteCurrentPos11(ch : FILE)
+VAR
+  pos : XYZWPREXT
+BEGIN
+  pos = CURPOS(1,1)
+  WRITE ch('POS11:',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, CR)
+END WriteCurrentPos11
+
+ROUTINE WriteCurrentPos011(ch : FILE)
+VAR
+  pos : XYZWPREXT
+BEGIN
+  pos = CURPOS(0,1,1)
+  WRITE ch('POS011:',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, CR)
+END WriteCurrentPos011
+
+ROUTINE WriteCurrentPos111(ch : FILE)
+VAR
+  pos : XYZWPREXT
+BEGIN
+  pos = CURPOS(1,1,1)
+  WRITE ch('POS111:',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, CR)
+END WriteCurrentPos111
+
+ROUTINE WriteCurrentPulse(ch : FILE; axis_count : INTEGER)
+VAR
+  jpos : JOINTPOS
+  vals : ARRAY[9] OF REAL
+BEGIN
+  vals[1] = 0.0
+  vals[2] = 0.0
+  vals[3] = 0.0
+  vals[4] = 0.0
+  vals[5] = 0.0
+  vals[6] = 0.0
+
+  jpos = CURJPOS(0,0)
+  CNV_JPOS_REL(jpos, vals, g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'GET_PULSE_FAIL')
+    RETURN
+  ENDIF
+
+  IF axis_count <= 6 THEN
+    WRITE ch('PULSE:',
+             vals[1]::10::3, ',',
+             vals[2]::10::3, ',',
+             vals[3]::10::3, ',',
+             vals[4]::10::3, ',',
+             vals[5]::10::3, ',',
+             vals[6]::10::3, ',',
+             0.0::10::3, ',',
+             0.0::10::3, ',',
+             0.0::10::3, CR)
+    RETURN
+  ENDIF
+
+  IF axis_count = 7 THEN
+    WRITE ch('PULSE:',
+             vals[1]::10::3, ',',
+             vals[2]::10::3, ',',
+             vals[3]::10::3, ',',
+             vals[4]::10::3, ',',
+             vals[5]::10::3, ',',
+             vals[6]::10::3, ',',
+             vals[7]::10::3, ',',
+             0.0::10::3, ',',
+             0.0::10::3, CR)
+    RETURN
+  ENDIF
+
+  IF axis_count = 8 THEN
+    WRITE ch('PULSE:',
+             vals[1]::10::3, ',',
+             vals[2]::10::3, ',',
+             vals[3]::10::3, ',',
+             vals[4]::10::3, ',',
+             vals[5]::10::3, ',',
+             vals[6]::10::3, ',',
+             vals[7]::10::3, ',',
+             vals[8]::10::3, ',',
+             0.0::10::3, CR)
+    RETURN
+  ENDIF
+
+  WRITE ch('PULSE:',
+           vals[1]::10::3, ',',
+           vals[2]::10::3, ',',
+           vals[3]::10::3, ',',
+           vals[4]::10::3, ',',
+           vals[5]::10::3, ',',
+           vals[6]::10::3, ',',
+           vals[7]::10::3, ',',
+           vals[8]::10::3, ',',
+           vals[9]::10::3, CR)
+END WriteCurrentPulse
+
+ROUTINE WriteDoneState(ch : FILE)
+VAR
+  moving : BOOLEAN
+BEGIN
+  GET_VAR(g_entry, '*SYSTEM*', '$MOR_GRP[1].$ROB_MOVE', moving, g_status)
+  IF g_status = 0 THEN
+    IF moving THEN
+      WRITE ch('DONE:0', CR)
+    ELSE
+      WRITE ch('DONE:1', CR)
+    ENDIF
+  ELSE
+    WRITE ch('DONE:-1', CR)
+  ENDIF
+END WriteDoneState
+
+ROUTINE FindChar(src : STRING; token : STRING) : INTEGER
+VAR
+  i   : INTEGER
+  one : STRING[1]
+BEGIN
+  FOR i = 1 TO STR_LEN(src) DO
+    one = SUB_STR(src, i, 1)
+    IF one = token THEN
+      RETURN(i)
+    ENDIF
+  ENDFOR
+  RETURN(0)
+END FindChar
+
+ROUTINE Payload(cmd : STRING; prefix_len : INTEGER; out_str : STRING)
+BEGIN
+  out_str = SUB_STR(cmd, prefix_len + 1, STR_LEN(cmd) - prefix_len)
+END Payload
+
+ROUTINE DoSetInt(ch : FILE; cmd : STRING)
+VAR
+  comma_pos : INTEGER
+  reg_name  : STRING[64]
+  reg_value : STRING[64]
+  reg_index : INTEGER
+BEGIN
+  Payload(cmd, 8, g_text1)
+  comma_pos = FindChar(g_text1, ',')
+  IF comma_pos <= 1 THEN
+    WriteErr(ch, 'BAD_SET_INT')
+    RETURN
+  ENDIF
+
+  reg_name = SUB_STR(g_text1, 1, comma_pos - 1)
+  reg_value = SUB_STR(g_text1, comma_pos + 1, STR_LEN(g_text1) - comma_pos)
+
+  IF SUB_STR(reg_name, 1, 3) = 'INT' THEN
+    CNV_STR_INT(SUB_STR(reg_name, 4, STR_LEN(reg_name) - 3), reg_index)
+  ELSE
+    IF reg_name = 'WELD_TRACK_NO' THEN
+      reg_index = 30
+    ELSE
+      WriteErr(ch, 'UNSUPPORTED_INT_NAME')
+      RETURN
+    ENDIF
+  ENDIF
+
+  CNV_STR_INT(reg_value, g_int)
+  SET_INT_REG(reg_index, g_int, g_status)
+  IF g_status = 0 THEN
+    WriteOk(ch, '')
+  ELSE
+    WriteErr(ch, 'SET_INT_FAIL')
+  ENDIF
+END DoSetInt
+
+ROUTINE DoGetInt(ch : FILE; cmd : STRING)
+VAR
+  comma_pos : INTEGER
+  reg_type  : STRING[16]
+  reg_index : INTEGER
+BEGIN
+  Payload(cmd, 8, g_text1)
+  comma_pos = FindChar(g_text1, ',')
+  IF comma_pos <= 0 THEN
+    WriteErr(ch, 'BAD_GET_INT')
+    RETURN
+  ENDIF
+
+  reg_type = SUB_STR(g_text1, 1, comma_pos - 1)
+  IF reg_type <> 'INT' THEN
+    WriteErr(ch, 'UNSUPPORTED_GET_INT')
+    RETURN
+  ENDIF
+
+  CNV_STR_INT(SUB_STR(g_text1, comma_pos + 1, STR_LEN(g_text1) - comma_pos), reg_index)
+  GET_REG(reg_index, g_bool, g_int, g_real, g_status)
+  IF g_status = 0 THEN
+    IF g_bool THEN
+      WRITE ch('INT:', g_real::10::3, CR)
+    ELSE
+      WRITE ch('INT:', g_int, CR)
+    ENDIF
+  ELSE
+    WriteErr(ch, 'GET_INT_FAIL')
+  ENDIF
+END DoGetInt
+
+ROUTINE DoCallJob(ch : FILE; cmd : STRING)
+BEGIN
+  Payload(cmd, 9, g_text1)
+  RUN_TASK(g_text1, 1, FALSE, FALSE, 1, g_status)
+  IF g_status = 0 THEN
+    WriteOk(ch, '')
+  ELSE
+    WriteErr(ch, 'CALL_JOB_FAIL')
+  ENDIF
+END DoCallJob
+
+ROUTINE DoSetTpSpeed(ch : FILE; cmd : STRING)
+BEGIN
+  Payload(cmd, 13, g_text1)
+  CNV_STR_INT(g_text1, g_int)
+  SET_INT_REG(17, g_int, g_status)
+  IF g_status = 0 THEN
+    WriteOk(ch, '')
+  ELSE
+    WriteErr(ch, 'SET_TP_SPEED_FAIL')
+  ENDIF
+END DoSetTpSpeed
+
+ROUTINE DoStopService(ch : FILE)
+BEGIN
+  SET_INT_REG(99, 1, g_status)
+  IF g_status = 0 THEN
+    WriteOk(ch, 'STOPPING')
+  ELSE
+    WriteErr(ch, 'STOP_SERVICE_FAIL')
+  ENDIF
+END DoStopService
+
+ROUTINE PopToken(rest : STRING; token : STRING)
+VAR
+  comma_pos : INTEGER
+BEGIN
+  comma_pos = FindChar(rest, ',')
+  IF comma_pos <= 0 THEN
+    token = rest
+    rest = ''
+  ELSE
+    token = SUB_STR(rest, 1, comma_pos - 1)
+    rest = SUB_STR(rest, comma_pos + 1, STR_LEN(rest) - comma_pos)
+  ENDIF
+END PopToken
+
+ROUTINE DoSetPosVar(ch : FILE; cmd : STRING)
+VAR
+  cmd_body : STRING[254]
+  token    : STRING[64]
+  reg_no   : INTEGER
+  pos_type : INTEGER
+  idx      : INTEGER
+  vals     : ARRAY[9] OF REAL
+  xyz_pos  : XYZWPR
+  jnt_pos  : JOINTPOS
+  xyz_cfg  : CONFIG
+BEGIN
+  Payload(cmd, 12, cmd_body)
+
+  PopToken(cmd_body, token)
+  CNV_STR_INT(token, reg_no)
+  PopToken(cmd_body, token)
+  CNV_STR_INT(token, pos_type)
+
+  FOR idx = 1 TO 9 DO
+    vals[idx] = 0.0
+  ENDFOR
+
+  FOR idx = 1 TO 8 DO
+    PopToken(cmd_body, token)
+    CNV_STR_REAL(token, vals[idx])
+  ENDFOR
+
+  IF pos_type = 0 THEN
+    xyz_pos = CURPOS(0, 0)
+    xyz_pos.x = vals[1]
+    xyz_pos.y = vals[2]
+    xyz_pos.z = vals[3]
+    xyz_pos.w = vals[4]
+    xyz_pos.p = vals[5]
+    xyz_pos.r = vals[6]
+    CNV_STR_CONF('N U T, 0, 0, 0', xyz_cfg, g_status)
+    IF g_status <> 0 THEN
+      WriteErr(ch, 'BAD_CONFIG')
+      RETURN
+    ENDIF
+    xyz_pos.config_data = xyz_cfg
+    SET_POS_REG(reg_no, xyz_pos, g_status)
+  ELSE
+    CNV_REL_JPOS(vals, jnt_pos, g_status)
+    IF g_status <> 0 THEN
+      WriteErr(ch, 'BAD_JPOS')
+      RETURN
+    ENDIF
+    SET_JPOS_REG(reg_no, jnt_pos, g_status)
+  ENDIF
+
+  IF g_status = 0 THEN
+    WriteOk(ch, '')
+  ELSE
+    WriteErr(ch, 'SET_POS_VAR_FAIL')
+  ENDIF
+END DoSetPosVar
+
+ROUTINE DoGetPosVar(ch : FILE; cmd : STRING)
+VAR
+  cmd_body : STRING[254]
+  token    : STRING[64]
+  reg_no   : INTEGER
+  move_type : INTEGER
+  pos_type : INTEGER
+  num_axes : INTEGER
+  pos      : XYZWPREXT
+  cfg_text : STRING[32]
+BEGIN
+  Payload(cmd, 12, cmd_body)
+
+  PopToken(cmd_body, token)
+  CNV_STR_INT(token, reg_no)
+  PopToken(cmd_body, token)
+  CNV_STR_INT(token, move_type)
+
+  POS_REG_TYPE(reg_no, 1, pos_type, num_axes, g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'GET_POS_TYPE_FAIL')
+    RETURN
+  ENDIF
+
+  pos = GET_POS_REG(reg_no, g_status, 1)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'GET_POS_REG_FAIL')
+    RETURN
+  ENDIF
+
+  CNV_CONF_STR(pos.config_data, cfg_text)
+  WRITE ch('POSVAR:',
+           reg_no, ',',
+           pos_type, ',',
+           num_axes, ',',
+           pos.x::10::3, ',',
+           pos.y::10::3, ',',
+           pos.z::10::3, ',',
+           pos.w::10::3, ',',
+           pos.p::10::3, ',',
+           pos.r::10::3, ',',
+           cfg_text, CR)
+END DoGetPosVar
+
+ROUTINE DispatchCommand(ch : FILE; cmd : STRING)
+BEGIN
+  IF cmd = 'HELLO' THEN
+    WriteOk(ch, 'READY')
+    RETURN
+  ENDIF
+
+  IF cmd = 'CHECK_DONE' THEN
+    WriteDoneState(ch)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_CUR_POS' THEN
+    WriteCurrentPos(ch)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_CUR_POS_00' THEN
+    WriteCurrentPos00(ch)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_CUR_POS_001' THEN
+    WriteCurrentPos001(ch)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_CUR_POS_01' THEN
+    WriteCurrentPos01(ch)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_CUR_POS_10' THEN
+    WriteCurrentPos10(ch)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_CUR_POS_11' THEN
+    WriteCurrentPos11(ch)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_CUR_POS_011' THEN
+    WriteCurrentPos011(ch)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_CUR_POS_111' THEN
+    WriteCurrentPos111(ch)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_CUR_PULSE' THEN
+    WriteCurrentPulse(ch, 6)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd, 1, 14) = 'GET_CUR_PULSE:' THEN
+    Payload(cmd, 14, g_text1)
+    CNV_STR_INT(g_text1, g_int)
+    WriteCurrentPulse(ch, g_int)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_USER_PROGRAM' THEN
+    WRITE ch('PROGRAM:FANUC_RESIDENT_SERVICE;LIB=20260420_CONFIG_COMMA_DIAG', CR)
+    RETURN
+  ENDIF
+  IF cmd = 'GET_USER_PROJECT' THEN
+    WRITE ch('PROJECT:MD', CR)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd, 1, 8) = 'SET_INT:' THEN
+    DoSetInt(ch, cmd)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd, 1, 8) = 'GET_INT:' THEN
+    DoGetInt(ch, cmd)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd, 1, 9) = 'CALL_JOB:' THEN
+    DoCallJob(ch, cmd)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd, 1, 13) = 'SET_TP_SPEED:' THEN
+    DoSetTpSpeed(ch, cmd)
+    RETURN
+  ENDIF
+  IF cmd = 'STOP_SERVICE' THEN
+    DoStopService(ch)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,9) = 'SET_REAL:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,12) = 'SET_POS_VAR:' THEN
+    DoSetPosVar(ch, cmd)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,12) = 'GET_POS_VAR:' THEN
+    DoGetPosVar(ch, cmd)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,10) = 'SET_SPEED:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,18) = 'LOAD_USER_PROGRAM:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF cmd = 'UNLOAD_USER_PROGRAM' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF cmd = 'PROGRAM_START' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF cmd = 'PROGRAM_STOP' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF cmd = 'SERVO_ON' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF cmd = 'SERVO_OFF' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF cmd = 'CLEAR_ALARM' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,13) = 'SET_SYS_MODE:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,12) = 'SET_TOOL_NO:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,14) = 'GET_TOOL_DATA:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,16) = 'AXIS_PULSE_MOVE:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,9) = 'POS_MOVE:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,17) = 'MOVE_BY_JOB_AXIS:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,16) = 'MOVE_BY_JOB_POS:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,19) = 'MOVE_BY_JOB_VECTOR:' THEN
+    WriteOk(ch, '')
+    RETURN
+  ENDIF
+
+  WriteErr(ch, 'UNKNOWN_CMD')
+END DispatchCommand
+
+BEGIN
+END FANUC_SERVICE_LIB

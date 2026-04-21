@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="120" y1="80" x2="904" y2="944" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#081426"/>
+      <stop offset="55%" stop-color="#0B1F3D"/>
+      <stop offset="100%" stop-color="#07111F"/>
+    </linearGradient>
+
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+      gradientTransform="translate(512 438) rotate(90) scale(320 320)">
+      <stop offset="0%" stop-color="#173B74" stop-opacity="0.42"/>
+      <stop offset="100%" stop-color="#173B74" stop-opacity="0"/>
+    </radialGradient>
+
+    <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="220" fill="url(#bg)"/>
+  <rect x="140" y="140" width="744" height="744" rx="120" stroke="#274A7F" stroke-width="2.5" opacity="0.75"/>
+  <circle cx="512" cy="440" r="300" fill="url(#glow)"/>
+
+  <g filter="url(#softGlow)" stroke="#C9F2FF" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+    <!-- antenna -->
+    <line x1="512" y1="230" x2="512" y2="274"/>
+    <circle cx="512" cy="206" r="18"/>
+
+    <!-- head -->
+    <rect x="368" y="278" width="288" height="156" rx="46"/>
+    <line x1="354" y1="344" x2="354" y2="382"/>
+    <line x1="670" y1="344" x2="670" y2="382"/>
+    <circle cx="454" cy="356" r="20" fill="#C9F2FF" stroke="none"/>
+    <circle cx="570" cy="356" r="20" fill="#C9F2FF" stroke="none"/>
+
+    <!-- neck -->
+    <line x1="446" y1="462" x2="578" y2="462"/>
+
+    <!-- body -->
+    <rect x="390" y="486" width="244" height="156" rx="34"/>
+    <rect x="486" y="535" width="52" height="52" rx="4"/>
+
+    <!-- arms -->
+    <path d="M390 546C364 546 350 562 350 584C350 606 364 620 390 620"/>
+    <path d="M634 546C660 546 674 562 674 584C674 606 660 620 634 620"/>
+
+    <line x1="346" y1="630" x2="332" y2="662"/>
+    <line x1="678" y1="630" x2="692" y2="662"/>
+
+    <path d="M320 686C320 662 338 648 360 648C381 648 398 664 398 684"/>
+    <path d="M704 686C704 662 686 648 664 648C643 648 626 664 626 684"/>
+
+    <path d="M316 718C316 700 330 686 348 686C366 686 380 700 380 718"/>
+    <path d="M708 718C708 700 694 686 676 686C658 686 644 700 644 718"/>
+
+    <!-- lower body -->
+    <path d="M430 658H594"/>
+    <path d="M444 658C444 680 460 694 480 694H544C564 694 580 680 580 658"/>
+
+    <!-- legs -->
+    <line x1="442" y1="734" x2="442" y2="750"/>
+    <line x1="470" y1="734" x2="470" y2="750"/>
+    <line x1="554" y1="734" x2="554" y2="750"/>
+    <line x1="582" y1="734" x2="582" y2="750"/>
+
+    <!-- feet -->
+    <path d="M412 790V772C412 750 428 734 450 734H470C492 734 508 750 508 772V790Z"/>
+    <path d="M516 790V772C516 750 532 734 554 734H574C596 734 612 750 612 772V790Z"/>
+  </g>
+</svg>

@@ -1,0 +1,736 @@
+################################################################
+#CameraType：相机类型：0：大恒相机，1：全景相机，2：梅卡曼德相机 3：维感3D相机
+################################################################
+# ExposureTime：维感相机曝光
+# GainLevel：维感相机：飞点消除滤波
+
+#机器人A，线扫相机号为-1时认为没有线扫
+[Base]
+CameraNum=3
+MeasureCameraNo=1
+TrackCameraNo=0
+LineScanCameraNo=2
+ScanNum=1
+
+[CAMERA0]
+CameraType=0
+CameraName=跟踪相机
+CameraNameEN=TrackCamera
+
+#大恒相机，梅卡曼德相机IP
+DeviceAddress=192.168.170.11
+
+#梅卡曼德相机端口号
+DevicePort=5577
+
+#相机工具
+#CameraTool_dX=152.615493
+#CameraTool_dY=38.447931
+#CameraTool_dZ=709.471751
+#CameraTool_dRX=0.0
+#CameraTool_dRY=-45.00
+#CameraTool_dRZ=180.0
+
+CameraTool_dX = 117.844226
+CameraTool_dY = 74.004004
+CameraTool_dZ = 711.011851
+CameraTool_dRX= 0.0
+CameraTool_dRY= -45.00
+CameraTool_dRZ= 180.0
+
+#开程序时是否自动打开 仅大恒相机有效
+AutoOpen=0
+
+#大恒相机安装位置：-1：机器人以外 0-5分别表示安装在机器人1-6轴上 其他无效
+InstallPos=5
+
+#图像翻转模式 0不翻转 1左右翻转 2上下翻转 3左右+上下翻转
+ImageFlipMode=0
+
+#大恒相机参数
+#CameraAcquisitionMode:	0:软触发，1~4：硬触发信号0~3，5：连续采集
+CameraAcquisitionMode= 5
+#CallBackMode：0:不使用回调函数，1：回调等待模式，2：回调存图模式
+CallBackMode = 0
+ExposureTime=500.0
+GainLevel=17.000000
+MaxWidth=2448
+MaxHeight=2048
+RoiWidth=2448
+RoiHeight=2048
+RoiOffsetX=0
+RoiOffsetY=0
+StrobeLine1=1
+StrobeLine2=2
+
+#全景相机参数
+#DepthCameraType：全景相机类型：2：2代全景相机，3：3代全景相机
+DepthCameraType=2
+DepthWidth=512
+DepthHeight=424
+ColorWidth=1920
+ColorHeight=1080
+InfraredWidth=512
+InfraredHeight=424
+
+#大恒相机内参
+KEY_DX=0.00345
+KEY_DY=0.00345
+KEY_F=25.42942018
+KEY_LEN=-186.37632359
+KEY_CTAN=-0.36576532
+
+#大恒相机，全景相机手眼关系
+KEY_CAMERA_READY_ROBOT_POS_DX=1009.93330
+KEY_CAMERA_READY_ROBOT_POS_DY=86.7124
+KEY_CAMERA_READY_ROBOT_POS_DZ=2213.63760
+KEY_CAMERA_READY_ROBOT_POS_DRX=12.3423
+KEY_CAMERA_READY_ROBOT_POS_DRY=-17.1008
+KEY_CAMERA_READY_ROBOT_POS_DRZ=-4.5782
+
+KEY_CAMERA_READY_ROBOT_S_PULSE=-37535
+KEY_CAMERA_READY_ROBOT_L_PULSE=-61874
+KEY_CAMERA_READY_ROBOT_U_PULSE=49831
+KEY_CAMERA_READY_ROBOT_R_PULSE=-43177
+KEY_CAMERA_READY_ROBOT_B_PULSE=-124820
+KEY_CAMERA_READY_ROBOT_T_PULSE=406383
+
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DX=1009.12310
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DY=12.8417
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DZ=2197.3956
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRX=-1.9205
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRY=-3.7899
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRZ=-0.9212
+
+KEY_N_CAM_X_AXIS_DIR_IN_ROBOT_BASE=1
+KEY_N_CAM_Y_AXIS_DIR_IN_ROBOT_BASE=2
+KEY_N_CAM_Z_AXIS_DIR_IN_ROBOT_BASE=3
+
+#点云补偿
+PointCloudCompenX=0
+PointCloudCompenY=0
+PointCloudCompenZ=0
+
+#大恒相机，梅卡曼德相机转换矩阵
+TransMatrix0_0=-0.0472569
+TransMatrix0_1=-1.00846
+TransMatrix0_2=-0.0137412
+TransMatrix0_3=-177.325
+TransMatrix1_0=-0.991433
+TransMatrix1_1=0.0454335
+TransMatrix1_2=0.0180826
+TransMatrix1_3=-2034.62
+TransMatrix2_0=-0.0122878
+TransMatrix2_1=0.0161235
+TransMatrix2_2=-1.00325 
+TransMatrix2_3=-542.061
+TransMatrix3_0=0
+TransMatrix3_1=0
+TransMatrix3_2=0
+TransMatrix3_3=1
+
+#大恒相机，梅卡曼德相机补偿矩阵
+TransMatrix_Compen0_0=1
+TransMatrix_Compen0_1=0
+TransMatrix_Compen0_2= 0
+TransMatrix_Compen0_3=0
+TransMatrix_Compen1_0=0
+TransMatrix_Compen1_1=1
+TransMatrix_Compen1_2=0
+TransMatrix_Compen1_3=0
+TransMatrix_Compen2_0=0
+TransMatrix_Compen2_1= 0
+TransMatrix_Compen2_2=1
+TransMatrix_Compen2_3=0
+TransMatrix_Compen3_0=0
+TransMatrix_Compen3_1=0
+TransMatrix_Compen3_2=0
+TransMatrix_Compen3_3=1
+
+#梅卡曼德相机转换关系
+RotateDegree=0.000000
+DirX=0
+DirY=0
+DirZ=0
+X=0
+Y=0
+Z=0
+
+#大恒相机，全景相机内参矩阵
+CameraMatrix0_0= 1477.24
+CameraMatrix0_1= 0
+CameraMatrix0_2= 1221.55
+CameraMatrix1_0= 0
+CameraMatrix1_1= 1477.14
+CameraMatrix1_2= 1012.37
+CameraMatrix2_0= 0
+CameraMatrix2_1= 0
+CameraMatrix2_2= 1
+
+#大恒相机新方法线扫激光平面方程系数
+LineLaserCalibrationResult0 = 0.00105707
+LineLaserCalibrationResult1 = -0.709321
+LineLaserCalibrationResult2 = 0.704885
+LineLaserCalibrationResult3 = 300.733
+
+#大恒相机，全景相机畸变参数
+EnableUndistort= 0
+DistCoeffs0_0= -0.120153
+DistCoeffs1_0= 0.120459
+DistCoeffs2_0= 0.000172201
+DistCoeffs3_0= -0.000260104
+DistCoeffs4_0= 0.073712
+
+#IO参数
+#闪光灯
+SupLEDIO=-1
+SupLED1IO=-1
+SupLED2IO=-1
+#防飞溅气路
+AirSolenoidValueIO=-1
+#镜头盖开关
+AntisplashIO=-1
+#镜头盖检测
+AntisplashOpenedIO=-1
+AntisplashClosedIO=-1
+#激光线
+LeaserLineNum=1
+LeaserLine0=0201
+LaserIOName0=TrackLaser
+#电源
+CameraPowerIO=-1
+PointCloudCompenX=0.000000
+PointCloudCompenY=0.000000
+
+[CAMERA1]
+CameraType=0
+CameraName=测量相机
+CameraNameEN=MeasureCam
+
+#大恒相机，梅卡曼德相机IP
+DeviceAddress=192.168.170.11
+
+#梅卡曼德相机端口号
+DevicePort=5577
+
+#相机工具
+CameraTool_dX = 208.078146
+CameraTool_dY = 32.168483
+CameraTool_dZ = 884.625171
+CameraTool_dRX= 0.0
+CameraTool_dRY= -45.00
+CameraTool_dRZ= 180.0
+
+#CameraTool_dX=159.150483
+#CameraTool_dY= -60.247006
+#CameraTool_dZ= 689.001399
+#CameraTool_dRX=0.0
+#CameraTool_dRY=-45.00
+#CameraTool_dRZ=180.0
+
+#开程序时是否自动打开 仅大恒相机有效
+AutoOpen=0
+
+#大恒相机安装位置：-1：机器人以外 0-5分别表示安装在机器人1-6轴上 其他无效
+InstallPos=5
+
+#图像翻转模式 0不翻转 1左右翻转 2上下翻转 3左右+上下翻转
+ImageFlipMode=0
+
+#大恒相机参数
+#CameraAcquisitionMode:	0:软触发，1~4：硬触发信号0~3，5：连续采集
+CameraAcquisitionMode= 5
+#CallBackMode：0:不使用回调函数，1：回调等待模式，2：回调存图模式
+CallBackMode = 2
+
+ExposureTime=1500
+GainLevel=17.000000
+MaxWidth=2448
+MaxHeight=2048
+RoiWidth=2448
+RoiHeight=2048
+RoiOffsetX=0
+RoiOffsetY=0
+StrobeLine1=1
+StrobeLine2=2
+
+#全景相机参数
+#DepthCameraType：全景相机类型：2：2代全景相机，3：3代全景相机
+DepthCameraType=2
+DepthWidth=512
+DepthHeight=424
+ColorWidth=1920
+ColorHeight=1080
+InfraredWidth=512
+InfraredHeight=424
+
+#大恒相机内参
+KEY_DX=0.00345
+KEY_DY=0.00345
+KEY_F=26.83216088
+KEY_LEN=-373.99470662
+KEY_CTAN=-0.49862179
+
+#大恒相机，全景相机手眼关系
+KEY_CAMERA_READY_ROBOT_POS_DX=1009.7617
+KEY_CAMERA_READY_ROBOT_POS_DY=85.7185
+KEY_CAMERA_READY_ROBOT_POS_DZ=2013.6155
+KEY_CAMERA_READY_ROBOT_POS_DRX=12.3403
+KEY_CAMERA_READY_ROBOT_POS_DRY=-17.0979
+KEY_CAMERA_READY_ROBOT_POS_DRZ=-4.5807
+
+KEY_CAMERA_READY_ROBOT_S_PULSE=-37405
+KEY_CAMERA_READY_ROBOT_L_PULSE=-67353
+KEY_CAMERA_READY_ROBOT_U_PULSE=75817
+KEY_CAMERA_READY_ROBOT_R_PULSE=-40058
+KEY_CAMERA_READY_ROBOT_B_PULSE=-143948
+KEY_CAMERA_READY_ROBOT_T_PULSE=398366
+
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DX=1008.52310
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DY=13.6417
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DZ=2198.1956
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRX=-1.9205
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRY=-3.7899
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRZ=-0.9212
+
+KEY_N_CAM_X_AXIS_DIR_IN_ROBOT_BASE=1
+KEY_N_CAM_Y_AXIS_DIR_IN_ROBOT_BASE=2
+KEY_N_CAM_Z_AXIS_DIR_IN_ROBOT_BASE=3
+
+#点云补偿
+PointCloudCompenX=0
+PointCloudCompenY=0
+PointCloudCompenZ=0
+
+#大恒相机，梅卡曼德相机转换矩阵
+TransMatrix0_0=-0.0472569
+TransMatrix0_1=-1.00846
+TransMatrix0_2=-0.0137412
+TransMatrix0_3=-177.325
+TransMatrix1_0=-0.991433
+TransMatrix1_1=0.0454335
+TransMatrix1_2=0.0180826
+TransMatrix1_3=-2034.62
+TransMatrix2_0=-0.0122878
+TransMatrix2_1=0.0161235
+TransMatrix2_2=-1.00325 
+TransMatrix2_3=-542.061
+TransMatrix3_0=0
+TransMatrix3_1=0
+TransMatrix3_2=0
+TransMatrix3_3=1
+
+#大恒相机，梅卡曼德相机补偿矩阵
+TransMatrix_Compen0_0=1
+TransMatrix_Compen0_1=0
+TransMatrix_Compen0_2= 0
+TransMatrix_Compen0_3=0
+TransMatrix_Compen1_0=0
+TransMatrix_Compen1_1=1
+TransMatrix_Compen1_2=0
+TransMatrix_Compen1_3=0
+TransMatrix_Compen2_0=0
+TransMatrix_Compen2_1= 0
+TransMatrix_Compen2_2=1
+TransMatrix_Compen2_3=0
+TransMatrix_Compen3_0=0
+TransMatrix_Compen3_1=0
+TransMatrix_Compen3_2=0
+TransMatrix_Compen3_3=1
+
+#梅卡曼德相机转换关系
+RotateDegree=0.000000
+DirX=0
+DirY=0
+DirZ=0
+X=0
+Y=0
+Z=0
+
+#大恒相机，全景相机内参矩阵
+CameraMatrix0_0= 1477.24
+CameraMatrix0_1= 0
+CameraMatrix0_2= 1221.55
+CameraMatrix1_0= 0
+CameraMatrix1_1= 1477.14
+CameraMatrix1_2= 1012.37
+CameraMatrix2_0= 0
+CameraMatrix2_1= 0
+CameraMatrix2_2= 1
+
+#大恒相机新方法线扫激光平面方程系数
+LineLaserCalibrationResult0 = 0.00105707
+LineLaserCalibrationResult1 = -0.709321
+LineLaserCalibrationResult2 = 0.704885
+LineLaserCalibrationResult3 = 300.733
+
+#大恒相机，全景相机畸变参数
+EnableUndistort= 0
+DistCoeffs0_0= -0.120153
+DistCoeffs1_0= 0.120459
+DistCoeffs2_0= 0.000172201
+DistCoeffs3_0= -0.000260104
+DistCoeffs4_0= 0.073712
+
+#IO参数
+#闪光灯
+SupLEDIO=-1
+SupLED1IO=-1
+SupLED2IO=-1
+#防飞溅气路
+AirSolenoidValueIO=-1
+#镜头盖开关
+AntisplashIO=-1
+#镜头盖检测
+AntisplashOpenedIO=-1
+AntisplashClosedIO=-1
+#激光线
+LeaserLineNum=1
+LeaserLine0=0207
+LaserIOName0=MeasureLaser
+#电源
+CameraPowerIO=-1
+
+[CAMERA2]
+CameraType=0
+CameraName=线扫相机1
+CameraNameEN=LineScanCamera
+
+#大恒相机，梅卡曼德相机IP
+DeviceAddress=192.168.0.3
+
+#梅卡曼德相机端口号
+DevicePort=5577
+
+#相机工具
+CameraTool_dX = 0.0
+CameraTool_dY = 0.0
+CameraTool_dZ = 0.0
+CameraTool_dRX= 0.0
+CameraTool_dRY= 0.0
+CameraTool_dRZ= 0.0
+
+#开程序时是否自动打开 仅大恒相机有效
+AutoOpen=0
+
+#大恒相机安装位置：-1：机器人以外 0-5分别表示安装在机器人1-6轴上
+InstallPos=0
+
+#图像翻转模式 0不翻转 1左右翻转 2上下翻转 3左右+上下翻转
+ImageFlipMode=0
+
+#大恒相机参数
+#CameraAcquisitionMode:	0:软触发，1~4：硬触发信号0~3，5：连续采集
+CameraAcquisitionMode= 5
+#CallBackMode：0:不使用回调函数，1：回调等待模式，2：回调存图模式
+CallBackMode = 0
+
+ExposureTime=20000.0
+GainLevel=24.000000
+MaxWidth=3840
+MaxHeight=2748
+RoiWidth=3840
+RoiHeight=500
+RoiOffsetX=0
+RoiOffsetY=1200
+StrobeLine1=1
+StrobeLine2=2
+
+#全景相机参数
+#DepthCameraType：全景相机类型：2：2代全景相机，3：3代全景相机
+DepthCameraType=2
+DepthWidth=512
+DepthHeight=424
+ColorWidth=1920
+ColorHeight=1080
+InfraredWidth=512
+InfraredHeight=424
+
+#大恒相机内参
+KEY_DX=0.00234
+KEY_DY=0.00234
+KEY_F= 3.46853969
+KEY_LEN=458.03327100
+KEY_CTAN=0.44795797
+
+#大恒相机，全景相机手眼关系
+KEY_CAMERA_READY_ROBOT_POS_DX= 1246.089
+KEY_CAMERA_READY_ROBOT_POS_DY= -31.079
+KEY_CAMERA_READY_ROBOT_POS_DZ= 1045.779
+KEY_CAMERA_READY_ROBOT_POS_DRX= -144.50329
+KEY_CAMERA_READY_ROBOT_POS_DRY= -51.235199
+KEY_CAMERA_READY_ROBOT_POS_DRZ= -24.525400
+
+KEY_CAMERA_READY_ROBOT_S_PULSE= 7605
+KEY_CAMERA_READY_ROBOT_L_PULSE= -153636
+KEY_CAMERA_READY_ROBOT_U_PULSE= 137634
+KEY_CAMERA_READY_ROBOT_R_PULSE= -255070
+KEY_CAMERA_READY_ROBOT_B_PULSE= 9891
+KEY_CAMERA_READY_ROBOT_T_PULSE= 210264
+
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DX=1186.586
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DY=92.926
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DZ=-905.502
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRX=-166.8123
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRY=43.7136
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRZ=-170.9835
+
+KEY_N_CAM_X_AXIS_DIR_IN_ROBOT_BASE=1
+KEY_N_CAM_Y_AXIS_DIR_IN_ROBOT_BASE=-2
+KEY_N_CAM_Z_AXIS_DIR_IN_ROBOT_BASE=-3
+
+#点云补偿
+PointCloudCompenX=0
+PointCloudCompenY=0
+PointCloudCompenZ=0
+
+#大恒相机，梅卡曼德相机转换矩阵
+TransMatrix0_0=-1.12732  
+TransMatrix0_1= -0.0657329  
+TransMatrix0_2= -0.0404107  
+TransMatrix0_3= 371.558
+TransMatrix1_0= 0.0832534   
+TransMatrix1_1= -1.21004  
+TransMatrix1_2= 0.136179  
+TransMatrix1_3=  -395.871
+TransMatrix2_0= 0.0133004  
+TransMatrix2_1= -0.199672 
+TransMatrix2_2= 1.06587  
+TransMatrix2_3= 825.989
+TransMatrix3_0=0
+TransMatrix3_1=0
+TransMatrix3_2=0
+TransMatrix3_3=1
+
+#大恒相机，梅卡曼德相机补偿矩阵
+TransMatrix_Compen0_0=1
+TransMatrix_Compen0_1=0
+TransMatrix_Compen0_2= 0
+TransMatrix_Compen0_3=0
+TransMatrix_Compen1_0=0
+TransMatrix_Compen1_1=1
+TransMatrix_Compen1_2=0
+TransMatrix_Compen1_3=0
+TransMatrix_Compen2_0=0
+TransMatrix_Compen2_1= 0
+TransMatrix_Compen2_2=1
+TransMatrix_Compen2_3=0
+TransMatrix_Compen3_0=0
+TransMatrix_Compen3_1=0
+TransMatrix_Compen3_2=0
+TransMatrix_Compen3_3=1
+
+#梅卡曼德相机转换关系
+RotateDegree=0.000000
+DirX=0
+DirY=0
+DirZ=0
+X=0
+Y=0
+Z=0
+
+#大恒相机，全景相机内参矩阵
+CameraMatrix0_0= 3032.44  
+CameraMatrix0_1= 0
+CameraMatrix0_2= 1874.09
+CameraMatrix1_0= 0
+CameraMatrix1_1= 3033.69  
+CameraMatrix1_2=1306.31
+CameraMatrix2_0= 0
+CameraMatrix2_1= 0
+CameraMatrix2_2= 1
+
+#大恒相机新方法线扫激光平面方程系数
+LineLaserCalibrationResult0 = 0.00494192  
+LineLaserCalibrationResult1 = 0.927832  
+LineLaserCalibrationResult2 =0.372965  
+LineLaserCalibrationResult3 = 629.292
+
+#大恒相机，全景相机畸变参数
+EnableUndistort= 0
+DistCoeffs0_0= -0.138143
+DistCoeffs1_0= 0.226756  
+DistCoeffs2_0= 0.000168813  
+DistCoeffs3_0=-0.000128752
+DistCoeffs4_0=-0.129771
+
+#IO参数
+#闪光灯
+SupLEDIO=-1
+SupLED1IO=-1
+SupLED2IO=-1
+#防飞溅气路
+AirSolenoidValueIO=-1
+#镜头盖开关
+AntisplashIO=-1
+#镜头盖检测
+AntisplashOpenedIO=-1
+AntisplashClosedIO=-1
+#激光线
+LeaserLineNum=1
+LeaserLine0=0207
+LaserIOName0=LineScanLaser1
+#电源
+CameraPowerIO=-1
+[CAMERA3]
+CameraType=0
+CameraName=线扫相机2
+CameraNameEN=LineScanCamera
+
+#大恒相机，梅卡曼德相机IP
+DeviceAddress=192.168.2.2
+
+#梅卡曼德相机端口号
+DevicePort=5577
+
+#相机工具
+CameraTool_dX = 0.0
+CameraTool_dY = 0.0
+CameraTool_dZ = 0.0
+CameraTool_dRX= 0.0
+CameraTool_dRY= -45.0
+CameraTool_dRZ= 0.0
+
+#开程序时是否自动打开 仅大恒相机有效
+AutoOpen=0
+
+#大恒相机安装位置：-1：机器人以外 0-5分别表示安装在机器人1-6轴上 其他无效
+InstallPos=-1
+
+#图像翻转模式 0不翻转 1左右翻转 2上下翻转 3左右+上下翻转
+ImageFlipMode=0
+
+#大恒相机参数
+#CameraAcquisitionMode:	0:软触发，1~4：硬触发信号0~3，5：连续采集
+CameraAcquisitionMode= 5
+#CallBackMode：0:不使用回调函数，1：回调等待模式，2：回调存图模式
+CallBackMode = 0
+ExposureTime=5000.0
+GainLevel=17.000000
+MaxWidth=3840
+MaxHeight=2748
+RoiWidth=3840
+RoiHeight=2748
+RoiOffsetX=0
+RoiOffsetY=0
+StrobeLine1=1
+StrobeLine2=2
+
+#全景相机参数
+#DepthCameraType：全景相机类型：2：2代全景相机，3：3代全景相机
+DepthCameraType=2
+DepthWidth=512
+DepthHeight=424
+ColorWidth=1920
+ColorHeight=1080
+InfraredWidth=512
+InfraredHeight=424
+
+#大恒相机内参
+KEY_DX=0.00234
+KEY_DY=0.00234
+KEY_F= 3.46853969
+KEY_LEN=458.03327100
+KEY_CTAN=0.44795797
+
+#大恒相机，全景相机手眼关系
+KEY_CAMERA_READY_ROBOT_POS_DX= -18.290000
+KEY_CAMERA_READY_ROBOT_POS_DY= -805.69000
+KEY_CAMERA_READY_ROBOT_POS_DZ= 1412.69000
+KEY_CAMERA_READY_ROBOT_POS_DRX=-178.84000
+KEY_CAMERA_READY_ROBOT_POS_DRY=-0.270000
+KEY_CAMERA_READY_ROBOT_POS_DRZ=-1.090000
+
+KEY_CAMERA_READY_ROBOT_S_PULSE=-120000
+KEY_CAMERA_READY_ROBOT_L_PULSE=-100000
+KEY_CAMERA_READY_ROBOT_U_PULSE=-85000
+KEY_CAMERA_READY_ROBOT_R_PULSE= 0
+KEY_CAMERA_READY_ROBOT_B_PULSE= 85000
+KEY_CAMERA_READY_ROBOT_T_PULSE= 0
+
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DX= 321.462
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DY= 1777.462
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DZ= 287.317
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRX= -177.925
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRY= -1.8298
+KEY_MOVE_TO_CAMERA_READY_ROBOT_POS_DRZ= 177.6905
+
+KEY_N_CAM_X_AXIS_DIR_IN_ROBOT_BASE=2
+KEY_N_CAM_Y_AXIS_DIR_IN_ROBOT_BASE=1
+KEY_N_CAM_Z_AXIS_DIR_IN_ROBOT_BASE=-3
+
+#点云补偿
+PointCloudCompenX=0
+PointCloudCompenY=0
+PointCloudCompenZ=0
+
+#大恒相机，梅卡曼德相机转换矩阵
+TransMatrix0_0= 0.0210735
+TransMatrix0_1= 0.989004
+TransMatrix0_2= 0.181186 
+TransMatrix0_3= -717.2
+TransMatrix1_0=-1.00372
+TransMatrix1_1= 0.0208818
+TransMatrix1_2=0.00148899
+TransMatrix1_3=-1203.63
+TransMatrix2_0= -0.00291946
+TransMatrix2_1= -0.177986
+TransMatrix2_2= 0.964765
+TransMatrix2_3=-36.2634
+TransMatrix3_0=0.0000000000
+TransMatrix3_1=0.0000000000
+TransMatrix3_2=0.0000000000
+TransMatrix3_3=1.0000000000
+
+#梅卡曼德相机转换关系
+RotateDegree=0.000000
+DirX=0
+DirY=0
+DirZ=0
+X=0
+Y=0
+Z=0
+
+#大恒相机，全景相机内参矩阵
+CameraMatrix0_0= 3045.04
+CameraMatrix0_1=0.0000000000
+CameraMatrix0_2= 1965.31
+CameraMatrix1_0=0.0000000000
+CameraMatrix1_1= 3044.45 
+CameraMatrix1_2= 1336.39
+CameraMatrix2_0=0.0000000000
+CameraMatrix2_1=0.0000000000
+CameraMatrix2_2=1.0000000000
+
+#大恒相机新方法线扫激光平面方程系数
+LineLaserCalibrationResult0 = 0.003532
+LineLaserCalibrationResult1 = -0.94646
+LineLaserCalibrationResult2 = 0.322801 
+LineLaserCalibrationResult3 = 666.018
+
+#大恒相机，全景相机畸变参数
+EnableUndistort= 0
+DistCoeffs0_0=-0.122954
+DistCoeffs1_0= 0.175142
+DistCoeffs2_0=-0.000731827
+DistCoeffs3_0=-0.000332224
+DistCoeffs4_0=-0.0224409
+
+#IO参数
+#闪光灯
+SupLEDIO=-1
+SupLED1IO=-1
+SupLED2IO=-1
+#防飞溅气路
+AirSolenoidValueIO=-1
+#镜头盖开关
+AntisplashIO=-1
+#镜头盖检测
+AntisplashOpenedIO=-1
+AntisplashClosedIO=-1
+#激光线
+LeaserLineNum=1
+LeaserLine0=0207
+LaserIOName0=LineScanLaser1
+#电源
+CameraPowerIO=-1

@@ -1,0 +1,196 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{33999BB4-0CAC-4630-9BEF-9412C862BA40}</ProjectGuid>
+    <Keyword>QtVS_v304</Keyword>
+    <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">10.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">10.0</WindowsTargetPlatformVersion>
+    <QtMsBuild Condition="'$(QtMsBuild)'=='' OR !Exists('$(QtMsBuild)\qt.targets')">$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v143</PlatformToolset>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Condition="Exists('$(QtMsBuild)\qt_defaults.props')">
+    <Import Project="$(QtMsBuild)\qt_defaults.props" />
+  </ImportGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
+    <QtInstall>qt6.7</QtInstall>
+    <QtModules>core;gui;widgets;network</QtModules>
+    <QtBuildConfig>debug</QtBuildConfig>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
+    <QtInstall>qt6.7</QtInstall>
+    <QtModules>core;gui;widgets;network</QtModules>
+    <QtBuildConfig>release</QtBuildConfig>
+  </PropertyGroup>
+  <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
+    <Message Importance="High" Text="QtMsBuild: could not locate qt.targets, qt.props; project may not build correctly." />
+  </Target>
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="$(QtMsBuild)\Qt.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="$(QtMsBuild)\Qt.props" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <LocalDebuggerEnvironment>PATH=E:\workspace\soft\QT\6.7.3\msvc2022_64\bin;E:\OpenCV4.6.0\build\x64\vc15\bin;%PATH%</LocalDebuggerEnvironment>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <LocalDebuggerEnvironment>PATH=E:\workspace\soft\QT\6.7.3\msvc2022_64\bin;E:\OpenCV4.6.0\build\x64\vc15\bin;%PATH%</LocalDebuggerEnvironment>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Link>
+      <AdditionalLibraryDirectories>C:\Program Files\orocos_kdl\lib;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\lib;E:\OpenCV4.6.0\build\x64\vc15\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>orocos-kdld.lib;Robot-SDKd.lib;Qt6Networkd.lib;opencv_world460d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <DisableSpecificWarnings>4828</DisableSpecificWarnings>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
+    <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="Configuration">
+    <ClCompile>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <AdditionalLibraryDirectories>C:\Program Files\orocos_kdl\lib;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\lib;E:\OpenCV4.6.0\build\x64\vc15\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>orocos-kdl.lib;Robot-SDK.lib;Qt6Network.lib;opencv_world460.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\ContralUnit.cpp" />
+    <ClCompile Include="src\CameraParamDialog.cpp" />
+    <ClCompile Include="src\FTPClient.cpp" />
+    <ClCompile Include="src\FANUCRobotDriver.cpp" />
+    <ClCompile Include="src\FunctionTestDialog.cpp" />
+    <ClCompile Include="src\HandEyeMatrixConfig.cpp" />
+    <ClCompile Include="src\HandEyeMatrixDialog.cpp" />
+    <ClCompile Include="src\LineCoarseScan.cpp" />
+    <ClCompile Include="src\MeasureThenWeldDialog.cpp" />
+    <ClCompile Include="src\MeasureThenWeldService.cpp" />
+    <ClCompile Include="src\MeasureThenWeldWorkflow.cpp" />
+    <ClCompile Include="src\MeasureWelding.cpp" />
+    <ClCompile Include="src\PreciseMeasureEditDialog.cpp" />
+    <ClCompile Include="src\RobotCalculation.cpp" />
+    <ClCompile Include="src\RobotDataHelper.cpp" />
+    <ClCompile Include="src\WeldProcessFile.cpp" />
+    <ClCompile Include="src\WeldProcessDialog.cpp" />
+    <ClCompile Include="src\OPini.cpp" />
+    <ClCompile Include="src\RobotLog.cpp" />
+    <ClCompile Include="src\RobotDriverAdaptor.cpp" />
+    <ClCompile Include="src\RobotMessage.cpp" />
+    <ClCompile Include="src\RobotJogDialog.cpp" />
+    <ClCompile Include="src\StepRobotDriver.cpp" />
+    <ClCompile Include="src\WindowStyleHelper.cpp" />
+    <ClCompile Include="src\groove\clientudpformsensorworker.cpp" />
+    <ClCompile Include="src\groove\framebuffer.cpp" />
+    <ClCompile Include="src\groove\pointcloundresultframe.cpp" />
+    <ClCompile Include="src\groove\threadsafebuffer.cpp" />
+    <QtRcc Include="QtWidgetsApplication4.qrc" />
+    <ResourceCompile Include="QtWidgetsApplication4.rc" />
+    <QtUic Include="QtWidgetsApplication4.ui" />
+    <QtUic Include="WeldProcessDialog.ui" />
+    <QtMoc Include="include\QtWidgetsApplication4.h" />
+    <QtMoc Include="include\MeasureThenWeldDialog.h" />
+    <QtMoc Include="include\WeldProcessDialog.h" />
+    <QtMoc Include="include\groove\clientudpformsensorworker.h" />
+    <ClCompile Include="src\Const.cpp" />
+    <ClCompile Include="src\QtWidgetsApplication4.cpp" />
+    <ClCompile Include="src\main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="include\Const.h" />
+    <ClInclude Include="include\CameraParamDialog.h" />
+    <ClInclude Include="include\ContralUnit.h" />
+    <ClInclude Include="include\FANUCRobotDriver.h" />
+    <ClInclude Include="include\FunctionTestDialog.h" />
+    <ClInclude Include="include\FTPClient.h" />
+    <ClInclude Include="include\HandEyeMatrixConfig.h" />
+    <ClInclude Include="include\HandEyeMatrixDialog.h" />
+    <ClInclude Include="include\LineCoarseScan.h" />
+    <ClInclude Include="include\MeasureThenWeldService.h" />
+    <ClInclude Include="include\MeasureThenWeldWorkflow.h" />
+    <ClInclude Include="include\MeasureWelding.h" />
+    <ClInclude Include="include\OPini.h" />
+    <ClInclude Include="include\PreciseMeasureEditDialog.h" />
+    <ClInclude Include="include\RobotCalculation.h" />
+    <ClInclude Include="include\RobotDataHelper.h" />
+    <ClInclude Include="include\RobotDriverAdaptor.h" />
+    <ClInclude Include="include\RobotLog.h" />
+    <ClInclude Include="include\RobotMessage.h" />
+    <ClInclude Include="include\RobotJogDialog.h" />
+    <ClInclude Include="include\STEPRobotDriver.h" />
+    <ClInclude Include="include\WindowStyleHelper.h" />
+    <ClInclude Include="include\WeldProcessFile.h" />
+    <ClInclude Include="include\groove\framebuffer.h" />
+    <ClInclude Include="include\groove\pointcloundresultframe.h" />
+    <ClInclude Include="include\groove\threadsafebuffer.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">
+    <Import Project="$(QtMsBuild)\qt.targets" />
+  </ImportGroup>
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+  <Target Name="AfterBuildDebug" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <Exec Command="&quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw &quot;$(TargetPath)&quot;" />
+    <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460d.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+  <Target Name="AfterBuildRelease" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <Exec Command="&quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw &quot;$(TargetPath)&quot;" />
+    <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
