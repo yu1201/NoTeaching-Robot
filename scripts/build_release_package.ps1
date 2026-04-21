@@ -1,5 +1,7 @@
 param(
     [switch]$SkipBuild,
+    [switch]$SkipVcRedistDownload,
+    [switch]$SkipFanucCompilerTools,
     [string]$Configuration = "Release",
     [string]$Platform = "x64"
 )
@@ -33,6 +35,29 @@ function Copy-DirectoryContent {
 
     New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
     Copy-Item -Path (Join-Path $SourceDir "*") -Destination $TargetDir -Recurse -Force
+}
+
+function Download-FileIfNeeded {
+    param(
+        [string]$Url,
+        [string]$TargetPath
+    )
+
+    if (Test-Path -LiteralPath $TargetPath) {
+        return $true
+    }
+
+    $targetParent = Split-Path -Parent $TargetPath
+    New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $TargetPath -UseBasicParsing
+        return $true
+    }
+    catch {
+        Write-Warning ("Failed to download prerequisite from {0}. {1}" -f $Url, $_.Exception.Message)
+        return $false
+    }
 }
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -140,6 +165,36 @@ Get-ChildItem -LiteralPath $fanucSourceDir -File | Where-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $fanucTargetDir $_.Name) -Force
 }
 
+if (-not $SkipFanucCompilerTools) {
+    $fanucCompilerSourceDir = Find-FirstExistingPath @(
+        "C:\Program Files (x86)\FANUC\WinOLPC\bin",
+        "C:\Program Files\FANUC\WinOLPC\bin"
+    )
+
+    if ($fanucCompilerSourceDir) {
+        $fanucCompilerTargetDir = Join-Path $packageDir "Tools\FANUC\WinOLPC\bin"
+        New-Item -ItemType Directory -Path $fanucCompilerTargetDir -Force | Out-Null
+        Get-ChildItem -LiteralPath $fanucCompilerSourceDir -File | Where-Object {
+            $_.Extension.ToLowerInvariant() -in @(".exe", ".dll", ".ini")
+        } | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $fanucCompilerTargetDir $_.Name) -Force
+        }
+    }
+    else {
+        Write-Warning "FANUC WinOLPC bin directory was not found. FANUC compile tools were not bundled."
+    }
+}
+
+$redistDir = Join-Path $packageDir "Prerequisites"
+New-Item -ItemType Directory -Path $redistDir -Force | Out-Null
+if (-not $SkipVcRedistDownload) {
+    $vcRedistTarget = Join-Path $redistDir "vc_redist.x64.exe"
+    $vcRedistOk = Download-FileIfNeeded -Url "https://aka.ms/vc14/vc_redist.x64.exe" -TargetPath $vcRedistTarget
+    if (-not $vcRedistOk) {
+        Write-Warning "VC++ runtime installer was not bundled. The target PC may need a manual runtime install."
+    }
+}
+
 foreach ($runtimeDir in @("Log", "Result", "Temp")) {
     New-Item -ItemType Directory -Path (Join-Path $packageDir $runtimeDir) -Force | Out-Null
 }
@@ -151,8 +206,10 @@ $notes = @(
     "1. This package was generated from the local Release build output.",
     "2. The application writes logs, results and editable config files next to the executable.",
     "3. Because of that, the installer defaults to a user-writable folder instead of Program Files.",
-    "4. If STEP functions are required on the target PC, vendor runtime components may still be needed.",
-    "5. If the target PC misses VC++ runtime, install Microsoft Visual C++ 2015-2022 Redistributable (x64)."
+    "4. The installer bundles the Microsoft Visual C++ 2015-2022 Redistributable x64 installer and can run it automatically.",
+    "5. The package also bundles FANUC WinOLPC compile tools when they are available on the build PC.",
+    "6. Please make sure your FANUC tool redistribution follows your license agreement.",
+    "7. If STEP functions are required on the target PC, vendor runtime components may still be needed."
 )
 $notes | Set-Content -LiteralPath $notesPath -Encoding UTF8
 

@@ -1,5 +1,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 
 #include "FANUCRobotDriver.h"
 
@@ -588,14 +589,50 @@ namespace
 		return out.good();
 	}
 
+	std::filesystem::path FanucGetExecutableDir()
+	{
+		char modulePath[MAX_PATH] = {};
+		const DWORD length = GetModuleFileNameA(nullptr, modulePath, MAX_PATH);
+		if (length == 0 || length >= MAX_PATH)
+		{
+			std::error_code ec;
+			return std::filesystem::current_path(ec);
+		}
+
+		return std::filesystem::path(std::string(modulePath, length)).parent_path();
+	}
+
+	std::string FanucFindCompilerToolPath(const std::string& fileName)
+	{
+		const std::filesystem::path exeDir = FanucGetExecutableDir();
+		std::vector<std::filesystem::path> candidates =
+		{
+			exeDir / "Tools" / "FANUC" / "WinOLPC" / "bin" / fileName,
+			exeDir / "SDK" / "FANUC" / "WinOLPC" / "bin" / fileName,
+			std::filesystem::path("C:\\Program Files (x86)\\FANUC\\WinOLPC\\bin") / fileName,
+			std::filesystem::path("C:\\Program Files\\FANUC\\WinOLPC\\bin") / fileName
+		};
+
+		for (const auto& candidate : candidates)
+		{
+			std::error_code ec;
+			if (std::filesystem::exists(candidate, ec))
+			{
+				return candidate.string();
+			}
+		}
+
+		return candidates.front().string();
+	}
+
 	std::string FanucGetKtransPath()
 	{
-		return "C:\\Program Files (x86)\\FANUC\\WinOLPC\\bin\\ktrans.exe";
+		return FanucFindCompilerToolPath("ktrans.exe");
 	}
 
 	std::string FanucGetMaketpPath()
 	{
-		return "C:\\Program Files (x86)\\FANUC\\WinOLPC\\bin\\maketp.exe";
+		return FanucFindCompilerToolPath("maketp.exe");
 	}
 
 	bool FanucFileExists(const std::string& filePath)
