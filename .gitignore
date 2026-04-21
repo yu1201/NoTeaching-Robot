@@ -39,6 +39,17 @@ Log/
 Result/
 Temp/
 
+# Local manuals / archives / backups
+KAREL_Ver9_3.txt
+SDK/STEP/*.zip
+SDK/STEP/*.pdf
+SDK/STEP/STEP_SDK_V2_4_0.txt
+SDK/STEP/SR.SDK_C++_X64_Win_V2.4.1.20250801/
+SDK/STEP/SR.SDK_C++_X64_Win_V2.4.1.20250801-1/
+Data/RobotA - 副本/
+Data/RobotPara - 副本.ini
+Data/RobotPara - 副本 (2).ini
+
 # Editor / OS noise
 Thumbs.db
 Desktop.ini
