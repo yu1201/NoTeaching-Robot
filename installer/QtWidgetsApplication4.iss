@@ -1,4 +1,5 @@
 #define MyAppName "NoTeaching-Robot"
+#define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
   #define MyAppVersion "2026.04.21"
 #endif
@@ -49,6 +50,34 @@ Filename: "{app}\Prerequisites\vc_redist.x64.exe"; Parameters: "/install /quiet 
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
+function GetInstalledAppVersion(var Version: string): Boolean;
+var
+  UninstallKey: string;
+begin
+  UninstallKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{' + '{#MyAppGuid}' + '}_is1';
+  Result :=
+    RegQueryStringValue(HKLM64, UninstallKey, 'DisplayVersion', Version) or
+    RegQueryStringValue(HKLM, UninstallKey, 'DisplayVersion', Version) or
+    RegQueryStringValue(HKCU, UninstallKey, 'DisplayVersion', Version);
+end;
+
+function InitializeSetup(): Boolean;
+var
+  InstalledVersion: string;
+begin
+  Result := True;
+  if GetInstalledAppVersion(InstalledVersion) and (InstalledVersion = '{#MyAppVersion}') then
+  begin
+    MsgBox(
+      ExpandConstant('{#MyAppName}') + ' ' + InstalledVersion +
+      ' 已经安装，本次不再重复安装。' + #13#10 +
+      '如果需要重新安装，请先卸载旧版本或重新生成新版本安装包。',
+      mbInformation,
+      MB_OK);
+    Result := False;
+  end;
+end;
+
 function VcRedistInstallerExists: Boolean;
 begin
   Result := FileExists(ExpandConstant('{app}\Prerequisites\vc_redist.x64.exe'));
