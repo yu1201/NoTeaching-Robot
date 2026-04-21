@@ -107,6 +107,29 @@ namespace
 		return parts.join(", ");
 	}
 
+	QString BuildAppVersionText()
+	{
+		const QString version = QCoreApplication::applicationVersion().trimmed();
+		return version.isEmpty() ? QStringLiteral("未标注版本") : version;
+	}
+
+	QString BuildAboutText()
+	{
+		const QString versionText = BuildAppVersionText();
+		return QStringLiteral(
+			"软件名称：%1\n"
+			"版本号：v%2\n"
+			"项目仓库：https://github.com/yu1201/NoTeaching-Robot\n"
+			"安装目录：%3\n"
+			"\n"
+			"说明：\n"
+			"1. 当前安装包已包含 Qt / OpenCV 运行库。\n"
+			"2. 安装程序会自动补装 VC++ 运行库。\n"
+			"3. 如需现场编译 FANUC 程序，安装包已附带 WinOLPC 编译工具。")
+			.arg(QCoreApplication::applicationName(),
+				versionText,
+				QDir::toNativeSeparators(QCoreApplication::applicationDirPath()));
+	}
 }
 
 QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
@@ -138,6 +161,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	{
 		ui.statusBar->hide();
 	}
+	setWindowTitle(QString("%1 v%2").arg(QCoreApplication::applicationName(), BuildAppVersionText()));
 	setMinimumSize(920, 700);
 	setStyleSheet(
 		"QMainWindow, QWidget { background: #111820; color: #ECF3F4; }"
@@ -157,9 +181,23 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	rootLayout->setSpacing(14);
 	setCentralWidget(mainPanel);
 
+	QHBoxLayout* titleLayout = new QHBoxLayout();
+	titleLayout->setSpacing(10);
 	QLabel* titleLabel = new QLabel("机器人控制与调试中心");
 	titleLabel->setStyleSheet("font-size: 26px; font-weight: bold; color: #F7FCFC; letter-spacing: 1px;");
-	rootLayout->addWidget(titleLabel);
+	QLabel* versionLabel = new QLabel(QString("v%1").arg(BuildAppVersionText()));
+	versionLabel->setStyleSheet(
+		"QLabel { background: #173041; color: #9ED8DB; border: 1px solid #3C6173; "
+		"border-radius: 10px; padding: 4px 10px; font-size: 13px; font-weight: bold; }");
+	QPushButton* aboutButton = new QPushButton("关于");
+	aboutButton->setMinimumHeight(32);
+	aboutButton->setMaximumWidth(88);
+	aboutButton->setStyleSheet("QPushButton { padding: 6px 12px; font-size: 13px; border-radius: 10px; }");
+	titleLayout->addWidget(titleLabel);
+	titleLayout->addWidget(versionLabel, 0, Qt::AlignVCenter);
+	titleLayout->addStretch(1);
+	titleLayout->addWidget(aboutButton, 0, Qt::AlignVCenter);
+	rootLayout->addLayout(titleLayout);
 
 	QGroupBox* entryGroup = new QGroupBox("常用功能");
 	QGridLayout* entryLayout = new QGridLayout(entryGroup);
@@ -258,6 +296,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(ui.MeasureThenWeldBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenMeasureThenWeldDialog);
 	connect(ui.PreciseMeasureEditBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenPreciseMeasureEditDialog);
 	connect(m_pCameraParamBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenCameraParamDialog);
+	connect(aboutButton, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenAboutDialog);
 	connect(ui.FanucConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucConnectTest);
 	connect(ui.FanucDisconnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucDisconnectTest);
 	connect(ui.FanucGetPosBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucGetCurrentPosTest);
@@ -384,6 +423,15 @@ QtWidgetsApplication4::~QtWidgetsApplication4()
 	}
 	delete m_pContralUnit;
 	m_pContralUnit = nullptr;
+}
+
+void QtWidgetsApplication4::OpenAboutDialog()
+{
+	QMessageBox aboutBox(this);
+	aboutBox.setWindowTitle("关于");
+	aboutBox.setIcon(QMessageBox::Information);
+	aboutBox.setText(BuildAboutText());
+	aboutBox.exec();
 }
 
 void QtWidgetsApplication4::ApplyStartupArguments(const QStringList& arguments)
