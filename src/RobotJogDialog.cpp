@@ -177,7 +177,7 @@ void RobotJogDialog::BuildUi()
 
 	QLabel* title = new QLabel("机器人点动控制");
 	title->setObjectName("TitleLabel");
-	QLabel* subtitle = new QLabel("长按轴旁边的 - / + 按钮连续点动，松开即停止继续下发指令；编辑目标值后可手动运动到指定位置。");
+	QLabel* subtitle = new QLabel("当前版本已临时禁用长按连续点动，仅保留单击步进和编辑目标值后运动到指定位置。");
 	subtitle->setObjectName("SubTitleLabel");
 
 	m_stateLabel = new QLabel("状态: 等待数据...");
@@ -201,10 +201,11 @@ void RobotJogDialog::BuildUi()
 	jointSpeedLayout->addWidget(m_jointSpeedEdit);
 	jointSpeedLayout->addWidget(new QLabel("%"));
 
-	m_stopButton = new QPushButton("停止点动");
+	m_stopButton = new QPushButton("长按已禁用");
 	m_stopButton->setObjectName("DangerButton");
 	m_stopButton->setMinimumHeight(48);
-	connect(m_stopButton, &QPushButton::clicked, this, [this]() { StopJog(); });
+	m_stopButton->setEnabled(false);
+	m_stopButton->setToolTip("当前版本仅保留单击步进和运动到指定位置。");
 	connect(m_cartesianSpeedEdit, &QLineEdit::editingFinished, this, [this]() { SaveSpeedSettings(); });
 	connect(m_jointSpeedEdit, &QLineEdit::editingFinished, this, [this]() { SaveSpeedSettings(); });
 
@@ -300,10 +301,8 @@ void RobotJogDialog::AddAxisRow(QGridLayout* layout, int row, const QString& axi
 	QPushButton* minusButton = CreateJogButton("-");
 	QPushButton* plusButton = CreateJogButton("+");
 
-	connect(minusButton, &QPushButton::pressed, this, [this, mode, axisIndex]() { StartJog(mode, axisIndex, -1); });
-	connect(minusButton, &QPushButton::released, this, [this, mode, axisIndex]() { StepJog(mode, axisIndex, -1); });
-	connect(plusButton, &QPushButton::pressed, this, [this, mode, axisIndex]() { StartJog(mode, axisIndex, 1); });
-	connect(plusButton, &QPushButton::released, this, [this, mode, axisIndex]() { StepJog(mode, axisIndex, 1); });
+	connect(minusButton, &QPushButton::clicked, this, [this, mode, axisIndex]() { StepJog(mode, axisIndex, -1); });
+	connect(plusButton, &QPushButton::clicked, this, [this, mode, axisIndex]() { StepJog(mode, axisIndex, 1); });
 
 	layout->addWidget(axisLabel, row, 0);
 	layout->addWidget(targetEdit, row, 1);
@@ -541,40 +540,32 @@ void RobotJogDialog::BeginJog()
 
 void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 {
-	if (m_jogStartTimer != nullptr && m_jogStartTimer->isActive())
+	if (m_fanucDriver == nullptr)
 	{
-		m_jogStartTimer->stop();
-		if (m_fanucDriver == nullptr)
-		{
-			return;
-		}
-
-		if (mode == JogMode::Cartesian)
-		{
-			T_ROBOT_COORS target = m_fanucDriver->GetCurrentPos();
-			const double stepDistance = CartesianSpeed() * STREAM_POINT_TIME_SEC / 60.0;
-			AddCartesianDelta(target, axisIndex, static_cast<double>(direction) * stepDistance);
-			const double robotSpeed = std::max(1.0, CartesianSpeed() / 60.0);
-			LogCartesianPoint(m_fanucDriver, "点动界面单击生成直角目标点", target);
-			m_fanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), m_fanucDriver->m_nExternalAxleType, "MOVL");
-			SetCartesianTargetEditors(target);
-		}
-		else
-		{
-			T_ANGLE_PULSE target = m_fanucDriver->GetCurrentPulse();
-			const double stepDeg = std::max(0.25, JointSpeed()) * STREAM_POINT_TIME_SEC;
-			const double pulseUnit = AxisPulseUnit(m_fanucDriver, axisIndex);
-			const long deltaPulse = pulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(static_cast<double>(direction) * stepDeg / pulseUnit));
-			AddJointDelta(target, axisIndex, deltaPulse);
-			const double robotSpeed = std::clamp(JointSpeed(), 1.0, 100.0);
-			LogJointPoint(m_fanucDriver, "点动界面单击生成关节目标点", target);
-			m_fanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), m_fanucDriver->m_nExternalAxleType, "MOVJ");
-			SetJointTargetEditors(target);
-		}
 		return;
 	}
 
-	StopJog();
+	if (mode == JogMode::Cartesian)
+	{
+		T_ROBOT_COORS target = m_fanucDriver->GetCurrentPos();
+		const double stepDistance = CartesianSpeed() * STREAM_POINT_TIME_SEC / 60.0;
+		AddCartesianDelta(target, axisIndex, static_cast<double>(direction) * stepDistance);
+		const double robotSpeed = std::max(1.0, CartesianSpeed() / 60.0);
+		LogCartesianPoint(m_fanucDriver, "点动界面单击生成直角目标点", target);
+		m_fanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), m_fanucDriver->m_nExternalAxleType, "MOVL");
+		SetCartesianTargetEditors(target);
+		return;
+	}
+
+	T_ANGLE_PULSE target = m_fanucDriver->GetCurrentPulse();
+	const double stepDeg = std::max(0.25, JointSpeed()) * STREAM_POINT_TIME_SEC;
+	const double pulseUnit = AxisPulseUnit(m_fanucDriver, axisIndex);
+	const long deltaPulse = pulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(static_cast<double>(direction) * stepDeg / pulseUnit));
+	AddJointDelta(target, axisIndex, deltaPulse);
+	const double robotSpeed = std::clamp(JointSpeed(), 1.0, 100.0);
+	LogJointPoint(m_fanucDriver, "点动界面单击生成关节目标点", target);
+	m_fanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), m_fanucDriver->m_nExternalAxleType, "MOVJ");
+	SetJointTargetEditors(target);
 }
 
 void RobotJogDialog::StopJog()
