@@ -38,6 +38,7 @@ qrc_*.cpp
 Log/
 Result/
 Temp/
+dist/
 
 # Local manuals / archives / backups
 KAREL_Ver9_3.txt
