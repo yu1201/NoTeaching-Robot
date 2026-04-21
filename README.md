@@ -31,6 +31,18 @@
 - `Job`：示例任务/缓存任务文件
 - `icons`：界面图标资源
 
+## 文档
+
+项目代码和 Notion 文档是绑定维护的。GitHub 里保留了一份便于直接预览的 Markdown 版本，Notion 继续作为协作主文档。
+
+- Notion 总入口：<https://www.notion.so/336c868d819b80a181c7ef8a393b53ad>
+- GitHub 文档索引：[`docs/README.md`](docs/README.md)
+- 工作流程：[`docs/workflow.md`](docs/workflow.md)
+- 界面说明：[`docs/ui.md`](docs/ui.md)
+- 波纹板项目方案：[`docs/wavy-board-plan.md`](docs/wavy-board-plan.md)
+- 问题表摘要：[`docs/issues.md`](docs/issues.md)
+- 工作记录摘要：[`docs/worklog.md`](docs/worklog.md)
+
 ## 当前功能
 
 ### STEP / FANUC 驱动
