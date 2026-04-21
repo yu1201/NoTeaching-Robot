@@ -45,6 +45,7 @@ private slots:
     void FanucMovjTest();
     void FanucMoveZeroTest();
     void OpenRobotJogDialog();
+    void OpenAboutDialog();
     void GrooveCameraTest(bool checked);
     void UpdateGrooveCameraData();
 
