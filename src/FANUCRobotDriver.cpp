@@ -2525,15 +2525,45 @@ bool FANUCRobotCtrl::SetPosVar(int nIndex, T_ANGLE_PULSE tRobotPulse, int scoper
 // 读取位置寄存器；当前协议仅保留基础返回，后续可按现场需要补完整解析。
 int FANUCRobotCtrl::GetPosVar(long lPvarIndex, double array[6], int config[7], int MoveType)
 {
-	(void)config;
 	std::string response;
 	if (!FanucRequest(this, "GET_POS_VAR:" + std::to_string(lPvarIndex) + "," + std::to_string(MoveType), response))
 	{
 		return -1;
 	}
-	if (!FanucStartsWith(response, "POSVAR:") || !FanucParseDoubles(FanucResponsePayload(response), array, 6))
+	if (!FanucStartsWith(response, "POSVAR:"))
 	{
 		return -1;
+	}
+
+	const std::vector<std::string> parts = FanucSplit(FanucResponsePayload(response), ',');
+	if (parts.size() < 6)
+	{
+		return -1;
+	}
+
+	size_t valueOffset = 0;
+	if (parts.size() >= 9)
+	{
+		// FANUC 常驻服务返回格式：index, type, cfgFlag, X, Y, Z, W, P, R, N U T, ...
+		// 这里跳过前三个元信息字段，只取后面的 XYZWPR。
+		valueOffset = 3;
+	}
+	if (parts.size() < valueOffset + 6)
+	{
+		return -1;
+	}
+
+	for (size_t i = 0; i < 6; ++i)
+	{
+		array[i] = atof(parts[valueOffset + i].c_str());
+	}
+
+	if (config != nullptr)
+	{
+		for (int i = 0; i < 7; ++i)
+		{
+			config[i] = 0;
+		}
 	}
 	return 0;
 }

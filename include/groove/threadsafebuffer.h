@@ -55,6 +55,15 @@ public:
         return true;
     }
 
+    bool back(T& outFrame) const {
+        QMutexLocker locker(&m_mutex);
+        if (m_queue.isEmpty()) {
+            return false;
+        }
+        outFrame = m_queue.back();
+        return true;
+    }
+
     // 从缓冲区获取帧（出队）
     bool dequeue(T& frame, int timeout = -1) {
         QMutexLocker locker(&m_mutex);

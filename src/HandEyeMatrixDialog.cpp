@@ -28,7 +28,7 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(const QString& robotName, const QString
 {
     setWindowTitle(QString("%1 %2 手眼矩阵参数").arg(robotName, cameraSection));
     ApplyUnifiedWindowChrome(this);
-    resize(760, 620);
+    ResizeWindowForAvailableGeometry(this, QSize(760, 620), 0.76, 0.76);
     setStyleSheet(
         "QDialog { background: #111820; color: #ECF3F4; }"
         "QGroupBox { border: 1px solid #2E4656; border-radius: 12px; margin-top: 18px; padding: 14px; font-weight: bold; color: #9ED8DB; }"

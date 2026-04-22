@@ -1087,7 +1087,23 @@ void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 
 void QtWidgetsApplication4::OpenCameraParamDialog()
 {
-	CameraParamDialog* dialog = new CameraParamDialog(m_pContralUnit, this);
+	auto startCamera = [this](QString& cameraIP) -> bool
+		{
+			if (!LoadGrooveCameraIP(cameraIP))
+			{
+				return false;
+			}
+			ThreadSafeBuffer<udpDataShow>::Instance().clear();
+			emit startAllCommThreads(cameraIP);
+			return true;
+		};
+
+	auto stopCamera = [this]()
+		{
+			emit stopAllCommThreads();
+		};
+
+	CameraParamDialog* dialog = new CameraParamDialog(m_pContralUnit, startCamera, stopCamera, this);
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
 	dialog->show();
 	dialog->raise();

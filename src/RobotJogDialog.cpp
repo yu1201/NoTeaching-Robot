@@ -146,7 +146,7 @@ RobotJogDialog::RobotJogDialog(FANUCRobotCtrl* fanucDriver, QWidget* parent)
 	setWindowTitle("机器人点动控制");
 	ApplyUnifiedWindowChrome(this);
 	setMinimumSize(860, 600);
-	resize(1120, 680);
+	ResizeWindowForAvailableGeometry(this, QSize(1120, 680), 0.86, 0.78);
 	BuildUi();
 	ApplyStyle();
 	LoadSpeedSettings();

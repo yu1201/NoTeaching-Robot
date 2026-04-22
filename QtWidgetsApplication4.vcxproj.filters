@@ -91,7 +91,13 @@
     <ClCompile Include="src\FunctionTestDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\HandEyeCalibrationDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\LineCoarseScan.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\LaserWeldFilterDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\MeasureThenWeldDialog.cpp">
@@ -165,6 +171,9 @@
     <ClInclude Include="include\FunctionTestDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\HandEyeCalibrationDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\LineCoarseScan.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -172,6 +181,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\HandEyeMatrixDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\LaserWeldFilterDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\MeasureThenWeldService.h">

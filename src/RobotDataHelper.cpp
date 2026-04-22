@@ -6,7 +6,11 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
+#include <QStringConverter>
+#include <QTextStream>
 
 namespace
 {
@@ -57,6 +61,109 @@ QString RobotDataHelper::BuildProjectPath(const QString& relativePath)
 {
     const QString root = FindProjectRootPath();
     return ToNativeAbsolutePath(QDir(root).filePath(relativePath));
+}
+
+// ===== 激光点文件 =====
+
+bool RobotDataHelper::LoadIndexedPoint3DFile(const QString& filePath, QVector<RobotCalculation::IndexedPoint3D>& points, QString* error)
+{
+    points.clear();
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        if (error != nullptr)
+        {
+            *error = "打开点文件失败: " + ToNativeAbsolutePath(filePath);
+        }
+        return false;
+    }
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+
+    int lineNumber = 0;
+    while (!stream.atEnd())
+    {
+        QString line = stream.readLine().trimmed();
+        ++lineNumber;
+        if (line.isEmpty())
+        {
+            continue;
+        }
+
+        line.remove('"');
+        const QStringList parts = line.contains(',')
+            ? line.split(',', Qt::SkipEmptyParts)
+            : line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+
+        if (parts.size() < 4)
+        {
+            continue;
+        }
+
+        bool indexOk = false;
+        bool xOk = false;
+        bool yOk = false;
+        bool zOk = false;
+        const int index = parts[0].trimmed().toInt(&indexOk);
+        const double x = parts[1].trimmed().toDouble(&xOk);
+        const double y = parts[2].trimmed().toDouble(&yOk);
+        const double z = parts[3].trimmed().toDouble(&zOk);
+
+        if (!(indexOk && xOk && yOk && zOk))
+        {
+            if (points.isEmpty())
+            {
+                continue;
+            }
+
+            if (error != nullptr)
+            {
+                *error = QString("解析点文件失败，第 %1 行格式无效: %2").arg(lineNumber).arg(line);
+            }
+            return false;
+        }
+
+        RobotCalculation::IndexedPoint3D point;
+        point.index = index;
+        point.point = Eigen::Vector3d(x, y, z);
+        points.push_back(point);
+    }
+
+    if (points.isEmpty())
+    {
+        if (error != nullptr)
+        {
+            *error = "点文件中没有读取到有效点: " + ToNativeAbsolutePath(filePath);
+        }
+        return false;
+    }
+    return true;
+}
+
+bool RobotDataHelper::SaveTextFileLines(const QString& filePath, const QStringList& lines, QString* error)
+{
+    QFileInfo info(filePath);
+    QDir().mkpath(info.absolutePath());
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    {
+        if (error != nullptr)
+        {
+            *error = "保存文本文件失败: " + ToNativeAbsolutePath(filePath);
+        }
+        return false;
+    }
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    for (const QString& line : lines)
+    {
+        stream << line << "\n";
+    }
+    return true;
 }
 
 // ===== 机器人列表 / 驱动 =====

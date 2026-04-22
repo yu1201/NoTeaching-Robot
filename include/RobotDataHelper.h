@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Const.h"
+#include "RobotCalculation.h"
 
 #include <QPair>
 #include <QString>
@@ -61,6 +62,10 @@ public:
     static bool ReadPreciseCoors(const QString& robotName, const QString& prefix, T_ROBOT_COORS& coors, QString* error = nullptr);
     static bool WritePreciseCoors(const QString& robotName, const QString& prefix, const T_ROBOT_COORS& coors, QString* error = nullptr);
     static bool WritePreciseParamValue(const QString& robotName, const QString& key, const QString& value, QString* error = nullptr);
+
+    // ===== 激光点文件 =====
+    static bool LoadIndexedPoint3DFile(const QString& filePath, QVector<RobotCalculation::IndexedPoint3D>& points, QString* error = nullptr);
+    static bool SaveTextFileLines(const QString& filePath, const QStringList& lines, QString* error = nullptr);
 
     // ===== 底层 ini 读写 =====
     static bool ReadPulse(const QString& filePath, const QString& sectionName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error = nullptr);
