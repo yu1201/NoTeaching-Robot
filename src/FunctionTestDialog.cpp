@@ -1,6 +1,7 @@
 #include "FunctionTestDialog.h"
 
 #include "FANUCRobotDriver.h"
+#include "LaserWeldFilterDialog.h"
 #include "WindowStyleHelper.h"
 
 #include <QCloseEvent>
@@ -57,7 +58,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
 {
     setWindowTitle("功能测试");
     ApplyUnifiedWindowChrome(this);
-    resize(760, 560);
+    ResizeWindowForAvailableGeometry(this, QSize(760, 560), 0.76, 0.74);
 
     setStyleSheet(
         "QDialog { background: #101820; color: #E8F1F2; }"
@@ -112,6 +113,12 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
     motionLayout->addWidget(m_pMoveZeroBtn, 2, 0);
     groupLayout->addWidget(motionGroup, 0, 1);
 
+    QGroupBox* offlineGroup = new QGroupBox("离线数据处理");
+    QGridLayout* offlineLayout = new QGridLayout(offlineGroup);
+    QPushButton* filterLaserBtn = CreateTestButton("焊道滤波测试");
+    offlineLayout->addWidget(filterLaserBtn, 0, 0);
+    groupLayout->addWidget(offlineGroup, 1, 0, 1, 2);
+
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
     m_pLogText->setPlainText("功能测试日志：等待操作...");
@@ -128,6 +135,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
     connect(m_pMovlTestBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucMovlTest);
     connect(m_pMovjTestBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucMovjTest);
     connect(m_pMoveZeroBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucMoveZeroTest);
+    connect(filterLaserBtn, &QPushButton::clicked, this, &FunctionTestDialog::OpenLaserWeldFilterTest);
 }
 
 void FunctionTestDialog::closeEvent(QCloseEvent* event)
@@ -545,4 +553,11 @@ void FunctionTestDialog::FanucMoveZeroTest()
                     QMessageBox::information(self, "运动到零位", message);
                 }, Qt::QueuedConnection);
         }).detach();
+}
+
+void FunctionTestDialog::OpenLaserWeldFilterTest()
+{
+    AppendLog("打开焊道滤波测试工具...");
+    LaserWeldFilterDialog dialog(this);
+    dialog.exec();
 }

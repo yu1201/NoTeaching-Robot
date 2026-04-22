@@ -44,7 +44,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, StartCam
 {
     setWindowTitle("先测后焊");
     ApplyUnifiedWindowChrome(this);
-    resize(620, 430);
+    ResizeWindowForAvailableGeometry(this, QSize(620, 430), 0.68, 0.62);
     setStyleSheet(
         "QDialog { background: #111820; color: #ECF3F4; }"
         "QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 12px; padding: 12px 18px; font-size: 16px; }"
@@ -60,7 +60,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, StartCam
     titleLabel->setStyleSheet("font-size: 22px; font-weight: bold; color: #F7FCFC;");
     rootLayout->addWidget(titleLabel);
 
-    QLabel* hintLabel = new QLabel("预设参数：读取 PreciseMeasureParam.ini 并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点。");
+    QLabel* hintLabel = new QLabel("预设参数：读取 PreciseMeasureParam.ini 并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点，并在扫描后自动执行“原始轨迹拟合 -> 梯形模板拟合”。");
     rootLayout->addWidget(hintLabel);
 
     QGridLayout* buttonLayout = new QGridLayout();

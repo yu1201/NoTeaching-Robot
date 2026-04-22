@@ -158,7 +158,6 @@ void PreciseMeasureEditDialog::BuildUi()
     setObjectName("PreciseMeasureEditDialog");
     setWindowFlags(windowFlags() | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint);
     setMinimumSize(720, 520);
-    resize(980, 680);
     setStyleSheet(
         "QDialog#PreciseMeasureEditDialog { background: #111820; color: #ECF3F4; }"
         "QWidget#PreciseMeasurePage { background: #111820; color: #ECF3F4; }"
@@ -267,6 +266,7 @@ void PreciseMeasureEditDialog::BuildUi()
     connect(saveBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::SaveAllParamEdits);
     UpdateAdaptiveLayout();
     ApplyUnifiedWindowChrome(this);
+    ResizeWindowForAvailableGeometry(this, QSize(980, 680), 0.84, 0.78);
 }
 
 void PreciseMeasureEditDialog::resizeEvent(QResizeEvent* event)
