@@ -4,6 +4,8 @@
 
 #include <QDialog>
 
+#include <functional>
+
 class QComboBox;
 class QLabel;
 class QLineEdit;
@@ -13,13 +15,21 @@ class QWidget;
 class CameraParamDialog : public QDialog
 {
 public:
-    explicit CameraParamDialog(ContralUnit* pContralUnit, QWidget* parent = nullptr);
+    using StartCameraFunc = std::function<bool(QString&)>;
+    using StopCameraFunc = std::function<void()>;
+
+    explicit CameraParamDialog(
+        ContralUnit* pContralUnit,
+        StartCameraFunc startCamera,
+        StopCameraFunc stopCamera,
+        QWidget* parent = nullptr);
 
 private:
     void LoadRobotList();
     void LoadCameraList();
     void UpdateCurrentCameraInfo();
     void OpenHandEyeDialog();
+    void OpenHandEyeCalibrationDialog();
     QString CurrentRobotName() const;
     QString CurrentCameraSection() const;
     QString CurrentCameraIniPath() const;
@@ -28,6 +38,8 @@ private:
     void AppendLog(const QString& text);
 
     ContralUnit* m_pContralUnit = nullptr;
+    StartCameraFunc m_startCamera;
+    StopCameraFunc m_stopCamera;
     QComboBox* m_pRobotCombo = nullptr;
     QComboBox* m_pCameraCombo = nullptr;
     QLabel* m_pPathLabel = nullptr;

@@ -116,8 +116,10 @@
     <ClCompile Include="src\FTPClient.cpp" />
     <ClCompile Include="src\FANUCRobotDriver.cpp" />
     <ClCompile Include="src\FunctionTestDialog.cpp" />
+    <ClCompile Include="src\HandEyeCalibrationDialog.cpp" />
     <ClCompile Include="src\HandEyeMatrixConfig.cpp" />
     <ClCompile Include="src\HandEyeMatrixDialog.cpp" />
+    <ClCompile Include="src\LaserWeldFilterDialog.cpp" />
     <ClCompile Include="src\LineCoarseScan.cpp" />
     <ClCompile Include="src\MeasureThenWeldDialog.cpp" />
     <ClCompile Include="src\MeasureThenWeldService.cpp" />
@@ -158,8 +160,10 @@
     <ClInclude Include="include\FANUCRobotDriver.h" />
     <ClInclude Include="include\FunctionTestDialog.h" />
     <ClInclude Include="include\FTPClient.h" />
+    <ClInclude Include="include\HandEyeCalibrationDialog.h" />
     <ClInclude Include="include\HandEyeMatrixConfig.h" />
     <ClInclude Include="include\HandEyeMatrixDialog.h" />
+    <ClInclude Include="include\LaserWeldFilterDialog.h" />
     <ClInclude Include="include\LineCoarseScan.h" />
     <ClInclude Include="include\MeasureThenWeldService.h" />
     <ClInclude Include="include\MeasureThenWeldWorkflow.h" />

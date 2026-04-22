@@ -1,5 +1,6 @@
 #include "CameraParamDialog.h"
 
+#include "HandEyeCalibrationDialog.h"
 #include "HandEyeMatrixConfig.h"
 #include "HandEyeMatrixDialog.h"
 #include "RobotDataHelper.h"
@@ -17,15 +18,22 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSplitter>
+#include <QSizePolicy>
 #include <QVBoxLayout>
 
-CameraParamDialog::CameraParamDialog(ContralUnit* pContralUnit, QWidget* parent)
+CameraParamDialog::CameraParamDialog(
+    ContralUnit* pContralUnit,
+    StartCameraFunc startCamera,
+    StopCameraFunc stopCamera,
+    QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
+    , m_startCamera(startCamera)
+    , m_stopCamera(stopCamera)
 {
     setWindowTitle("相机参数");
     ApplyUnifiedWindowChrome(this);
-    resize(980, 700);
+    ResizeWindowForAvailableGeometry(this, QSize(1020, 660), 0.82, 0.76);
     setStyleSheet(
         "QDialog { background: #111820; color: #ECF3F4; }"
         "QGroupBox { border: 1px solid #2E4656; border-radius: 12px; margin-top: 18px; padding: 14px; font-weight: bold; color: #9ED8DB; }"
@@ -49,6 +57,8 @@ CameraParamDialog::CameraParamDialog(ContralUnit* pContralUnit, QWidget* parent)
     rootLayout->addWidget(hintLabel);
 
     QGroupBox* baseGroup = new QGroupBox("基础信息");
+    baseGroup->setMaximumHeight(176);
+    baseGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     QVBoxLayout* baseLayout = new QVBoxLayout(baseGroup);
     QHBoxLayout* robotLayout = new QHBoxLayout();
     robotLayout->addWidget(new QLabel("机器人："));
@@ -60,14 +70,17 @@ CameraParamDialog::CameraParamDialog(ContralUnit* pContralUnit, QWidget* parent)
     baseLayout->addLayout(robotLayout);
     m_pPathLabel = new QLabel("手眼参数文件：");
     m_pPathLabel->setWordWrap(true);
+    m_pPathLabel->setMaximumHeight(40);
     baseLayout->addWidget(m_pPathLabel);
     m_pCameraPathLabel = new QLabel("相机参数文件：");
     m_pCameraPathLabel->setWordWrap(true);
+    m_pCameraPathLabel->setMaximumHeight(40);
     baseLayout->addWidget(m_pCameraPathLabel);
     rootLayout->addWidget(baseGroup);
 
     QSplitter* contentSplitter = new QSplitter(Qt::Horizontal, this);
     contentSplitter->setChildrenCollapsible(false);
+    contentSplitter->setHandleWidth(8);
 
     QWidget* leftPanel = new QWidget(this);
     QVBoxLayout* leftLayout = new QVBoxLayout(leftPanel);
@@ -75,14 +88,20 @@ CameraParamDialog::CameraParamDialog(ContralUnit* pContralUnit, QWidget* parent)
     leftLayout->setSpacing(12);
 
     QGroupBox* handEyeGroup = new QGroupBox("手眼矩阵");
+    handEyeGroup->setMaximumHeight(190);
+    handEyeGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     QVBoxLayout* handEyeLayout = new QVBoxLayout(handEyeGroup);
     QPushButton* handEyeBtn = new QPushButton("手眼矩阵参数");
+    QPushButton* handEyeCalibrationBtn = new QPushButton("手眼标定");
     handEyeBtn->setMinimumHeight(48);
+    handEyeCalibrationBtn->setMinimumHeight(48);
     handEyeLayout->addWidget(handEyeBtn);
+    handEyeLayout->addWidget(handEyeCalibrationBtn);
     handEyeLayout->addWidget(new QLabel("独立打开 3x3 旋转矩阵和 3x1 平移向量编辑窗口。"));
     leftLayout->addWidget(handEyeGroup);
 
     QGroupBox* cameraGroup = new QGroupBox("测量相机基础参数");
+    cameraGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     QGridLayout* cameraLayout = new QGridLayout(cameraGroup);
     cameraLayout->setHorizontalSpacing(10);
     cameraLayout->setVerticalSpacing(10);
@@ -111,21 +130,26 @@ CameraParamDialog::CameraParamDialog(ContralUnit* pContralUnit, QWidget* parent)
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
-    m_pLogText->setMinimumHeight(170);
+    m_pLogText->setMinimumHeight(96);
+    m_pLogText->setMaximumHeight(140);
+    m_pLogText->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     leftLayout->addWidget(m_pLogText, 1);
 
     QGroupBox* previewGroup = new QGroupBox("图像显示预留区");
     QVBoxLayout* previewLayout = new QVBoxLayout(previewGroup);
     m_pImagePlaceholder = new QLabel("这里预留相机图像显示区域\n\n后续可以放：\n1. 实时图像\n2. 当前三维点信息\n3. 采集状态与触发状态");
     m_pImagePlaceholder->setAlignment(Qt::AlignCenter);
-    m_pImagePlaceholder->setMinimumSize(320, 420);
+    m_pImagePlaceholder->setMinimumSize(240, 280);
+    m_pImagePlaceholder->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_pImagePlaceholder->setStyleSheet("QLabel { background: #081018; border: 1px dashed #385366; border-radius: 12px; color: #9ED8DB; font-size: 18px; }");
     previewLayout->addWidget(m_pImagePlaceholder, 1);
+    previewGroup->setMinimumWidth(280);
 
     contentSplitter->addWidget(leftPanel);
     contentSplitter->addWidget(previewGroup);
     contentSplitter->setStretchFactor(0, 3);
     contentSplitter->setStretchFactor(1, 2);
+    contentSplitter->setSizes({ 620, 360 });
     rootLayout->addWidget(contentSplitter, 1);
 
     connect(m_pRobotCombo, &QComboBox::currentIndexChanged, this, [this]()
@@ -135,6 +159,7 @@ CameraParamDialog::CameraParamDialog(ContralUnit* pContralUnit, QWidget* parent)
         });
     connect(m_pCameraCombo, &QComboBox::currentIndexChanged, this, [this]() { UpdateCurrentCameraInfo(); });
     connect(handEyeBtn, &QPushButton::clicked, this, [this]() { OpenHandEyeDialog(); });
+    connect(handEyeCalibrationBtn, &QPushButton::clicked, this, [this]() { OpenHandEyeCalibrationDialog(); });
     connect(reloadBtn, &QPushButton::clicked, this, [this]() { LoadCameraParam(); });
     connect(saveBtn, &QPushButton::clicked, this, [this]() { SaveCameraParam(); });
 
@@ -196,6 +221,19 @@ void CameraParamDialog::UpdateCurrentCameraInfo()
 void CameraParamDialog::OpenHandEyeDialog()
 {
     HandEyeMatrixDialog dialog(CurrentRobotName(), CurrentCameraSection(), this);
+    dialog.exec();
+    UpdateCurrentCameraInfo();
+}
+
+void CameraParamDialog::OpenHandEyeCalibrationDialog()
+{
+    HandEyeCalibrationDialog dialog(
+        m_pContralUnit,
+        CurrentRobotName(),
+        CurrentCameraSection(),
+        m_startCamera,
+        m_stopCamera,
+        this);
     dialog.exec();
     UpdateCurrentCameraInfo();
 }

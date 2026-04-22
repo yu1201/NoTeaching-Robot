@@ -33,6 +33,7 @@ private:
     void FanucMovlTest();
     void FanucMovjTest();
     void FanucMoveZeroTest();
+    void OpenLaserWeldFilterTest();
 
 private:
     ContralUnit* m_pContralUnit = nullptr;
