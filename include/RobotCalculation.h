@@ -80,9 +80,45 @@ public:
         int extendedCount = 0;
     };
 
+    enum class LowerWeldPointType
+    {
+        Start = 1,
+        End = 2,
+        InnerCorner = 3,
+        OuterCorner = 4,
+        Normal = 5,
+        Noise = 6
+    };
+
+    struct LowerWeldClassifiedPoint
+    {
+        int index = 0;
+        Eigen::Vector3d point = Eigen::Vector3d::Zero();
+        LowerWeldPointType type = LowerWeldPointType::Normal;
+        QString source;
+    };
+
+    struct LowerWeldClassificationResult
+    {
+        bool ok = false;
+        QString error;
+        QVector<LowerWeldClassifiedPoint> points;
+        int startCount = 0;
+        int endCount = 0;
+        int innerCornerCount = 0;
+        int outerCornerCount = 0;
+        int normalCount = 0;
+        int noiseCount = 0;
+    };
+
     static T_ROBOT_COORS InterpolateRobotPose(const std::vector<TimestampedRobotPose>& robotSamples, qint64 targetTimestampMs);
     static Eigen::Vector3d CalcLaserPointInRobot(const T_ROBOT_COORS& robotPose, const Eigen::Vector3d& cameraPoint, const HandEyeMatrixConfig& calibration);
     static LowerWeldFilterResult FilterLowerWeldPath(const QVector<IndexedPoint3D>& inputPoints, const LowerWeldFilterParams& params);
+    static LowerWeldClassificationResult ClassifyLowerWeldPoints(
+        const LowerWeldFilterResult& filterResult,
+        SampleAxis sampleAxis);
+    static int LowerWeldPointTypeCode(LowerWeldPointType type);
+    static QString LowerWeldPointTypeName(LowerWeldPointType type);
     static QString RobotPoseCsv(qint64 timestampMs, const T_ROBOT_COORS& pose);
     static QString Vector3Csv(qint64 timestampMs, const Eigen::Vector3d& point, const QString& extra = QString());
     static QString RobotPoseIndexedCsv(int index, const T_ROBOT_COORS& pose);

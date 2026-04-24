@@ -49,7 +49,7 @@ private:
     bool UploadRobotHandEyeCheckProgram(QString* error = nullptr);
     bool UploadAutoCalibrationProgram();
     bool StartAutoCalibration();
-    bool EnsureCameraReadyForAutoCalibration(QString* error = nullptr);
+    bool EnsureCameraReady(const QString& sceneName, Eigen::Vector3d* cameraPointOut = nullptr, QString* error = nullptr);
     void OpenMatrixDialog();
 
     bool ReadLatestCameraPoint(Eigen::Vector3d& cameraPoint, QString* error = nullptr) const;

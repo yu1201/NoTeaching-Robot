@@ -3,10 +3,12 @@
 #include "ContralUnit.h"
 
 #include <QDialog>
+#include <QVector>
 
 class QPushButton;
 class QPlainTextEdit;
 class FANUCRobotCtrl;
+class QTimer;
 
 // 功能测试子界面：把主界面上的 FANUC 调试/运动测试按钮集中管理。
 class FunctionTestDialog : public QDialog
@@ -20,6 +22,7 @@ protected:
 private:
     FANUCRobotCtrl* GetFirstFanucDriver();
     bool IsMotionBusy() const;
+    void RefreshMotionButtonState();
     void AppendLog(const QString& text);
 
     void FanucGetCurrentPosTest();
@@ -41,6 +44,8 @@ private:
     QPushButton* m_pMovjTestBtn = nullptr;
     QPushButton* m_pMoveZeroBtn = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
+    QTimer* m_pMotionStateTimer = nullptr;
+    QVector<QPushButton*> m_motionButtons;
 
     bool m_bFanucMovlForward = true;
     bool m_bFanucMovlRunning = false;

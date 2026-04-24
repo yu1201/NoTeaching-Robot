@@ -4,6 +4,8 @@ PROGRAM FANUC_SERVICE_LIB
 %NOABORT = ERROR + COMMAND
 %COMMENT = 'Shared helpers for resident service'
 %ENVIRONMENT sysdef
+%ENVIRONMENT kclop
+%ENVIRONMENT fdev
 %ENVIRONMENT REGOPE
 %ENVIRONMENT MULTI
 %ENVIRONMENT STRNG
@@ -14,9 +16,39 @@ VAR
   g_bool    : BOOLEAN
   g_int     : INTEGER
   g_real    : REAL
+  g_state_real : REAL
+  g_state_is_real : BOOLEAN
   g_text1   : STRING[254]
   g_text2   : STRING[254]
   g_text3   : STRING[254]
+  g_active_task_name : STRING[36]
+  g_target_file : FILE
+
+ROUTINE ClearActiveTask
+BEGIN
+  g_active_task_name = ''
+  SET_INT_REG(98, 1, g_status)
+END ClearActiveTask
+
+ROUTINE WriteCallJobTargetFile(target_name : STRING) : BOOLEAN
+BEGIN
+  SET_FILE_ATR(g_target_file, ATR_IA)
+  OPEN FILE g_target_file('rw', 'MD:fanuc_call_job.txt')
+  g_status = IO_STATUS(g_target_file)
+  IF g_status <> 0 THEN
+    RETURN(FALSE)
+  ENDIF
+
+  WRITE g_target_file(target_name, CR)
+  g_status = IO_STATUS(g_target_file)
+  CLOSE FILE g_target_file
+  CLR_IO_STAT(g_target_file)
+
+  IF g_status = 0 THEN
+    RETURN(TRUE)
+  ENDIF
+  RETURN(FALSE)
+END WriteCallJobTargetFile
 
 ROUTINE WriteOk(ch : FILE; payload : STRING)
 BEGIN

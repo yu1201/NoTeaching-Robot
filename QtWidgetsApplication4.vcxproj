@@ -13,6 +13,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{33999BB4-0CAC-4630-9BEF-9412C862BA40}</ProjectGuid>
     <Keyword>QtVS_v304</Keyword>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
     <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">10.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">10.0</WindowsTargetPlatformVersion>
     <QtMsBuild Condition="'$(QtMsBuild)'=='' OR !Exists('$(QtMsBuild)\qt.targets')">$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
@@ -75,11 +76,12 @@
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <DisableSpecificWarnings>4828</DisableSpecificWarnings>
+      <AdditionalOptions>/bigobj /Zm2000 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
     <ClCompile>
-      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <MultiProcessorCompilation>false</MultiProcessorCompilation>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
@@ -91,12 +93,13 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="Configuration">
     <ClCompile>
-      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <MultiProcessorCompilation>false</MultiProcessorCompilation>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
+      <AdditionalOptions>/bigobj /Zm2000 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -190,11 +193,11 @@
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
   <Target Name="AfterBuildDebug" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
-    <Exec Command="&quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw &quot;$(TargetPath)&quot;" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460d.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="AfterBuildRelease" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
-    <Exec Command="&quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw &quot;$(TargetPath)&quot;" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
 </Project>

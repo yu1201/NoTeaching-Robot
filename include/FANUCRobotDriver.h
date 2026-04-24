@@ -44,6 +44,28 @@ public:
 
 	// 程序调用与监控通道：CallJob走S4控制通道，Monitor走S5独立推送通道。
 	bool CallJob(std::string sJobName);
+	// 通用TP完成检测：约定程序启动后写入运行态(默认10/20)，完成时写入完成态(默认1)。
+	bool CallJobAndWaitStateDone(
+		std::string sJobName,
+		int nStateReg = 92,
+		int nDoneState = 1,
+		int nStartStateA = 10,
+		int nStartStateB = 20,
+		int nStartTimeoutMs = 5000,
+		int nFinishTimeoutMs = 10000,
+		int nDelayTime = 100,
+		int* pLastState = nullptr,
+		bool bResetStateBeforeCall = true);
+	// 通用寄存器完成检测：适合程序已启动、只需要等待状态寄存器从运行态进入完成态的场景。
+	bool WaitStateDone(
+		int nStateReg = 93,
+		int nDoneState = 1,
+		int nStartStateA = 10,
+		int nStartStateB = 20,
+		int nStartTimeoutMs = 3000,
+		int nFinishTimeoutMs = 120000,
+		int nDelayTime = 100,
+		int* pLastState = nullptr);
 	bool StopRobotServices();
 	bool StartMonitor(int nPort = 0);
 	void StopMonitor();
@@ -51,6 +73,11 @@ public:
 
 	// 连续运动：生成并上传临时程序，适合多点路径/特殊运动；与下方固定TP单点运动区分。
 	int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo) override;
+	int UploadMultiPointTpProgram(
+		const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo,
+		std::string* pProgramName = nullptr,
+		std::string* pLocalLsPath = nullptr,
+		std::string* pRemoteTpPath = nullptr);
 	bool StartContinuousMoveQueue(int nMoveType, double dSpeed);
 	bool PushContinuousMovePoint(const T_ROBOT_MOVE_INFO& moveInfo);
 	bool PushContinuousMovePoint(const T_ROBOT_COORS& target, double dSpeed);
@@ -136,8 +163,12 @@ public:
 	T_ROBOT_COORS m_tMonitorPos;
 	T_ANGLE_PULSE m_tMonitorPulse;
 	int m_nMonitorDone;
+	int m_nMonitorDoneRaw;
+	int m_nMonitorDoneCandidate;
+	int m_nMonitorDoneStableCount;
 	long long m_llMonitorRobotMs;
 	long long m_llMonitorPcRecvMs;
+	std::atomic<long long> m_llLastCallJobPcMs;
 
 private:
 	void ContinuousMoveWorker();

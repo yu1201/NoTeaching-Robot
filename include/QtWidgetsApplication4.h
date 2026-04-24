@@ -63,6 +63,8 @@ private:
     FANUCRobotCtrl* GetFirstFanucDriverForCli() const;
     bool UploadFanucServiceBundleForCli(FANUCRobotCtrl* pFanucDriver);
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
+    void RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
+    void RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const;
 
     Ui::QtWidgetsApplication4Class ui;
     ContralUnit* m_pContralUnit;

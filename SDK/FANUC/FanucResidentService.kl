@@ -20,6 +20,7 @@ VAR
   stop_real : REAL
 
 ROUTINE DispatchCommand(ch : FILE; cmd : STRING) FROM FANUC_SERVICE_LIB
+ROUTINE ClearActiveTask FROM FANUC_SERVICE_LIB
 
 ROUTINE InitServerPort
 BEGIN
@@ -49,6 +50,7 @@ BEGIN
   SET_FILE_ATR(channel, ATR_IA)
   InitServerPort
   ClearStopFlag
+  ClearActiveTask
   WRITE('FANUC resident TCP server started', CR)
   WRITE('Mode: ROBOT=SERVER, PC=CLIENT, TAG=S4:, PORT=9000', CR)
 

@@ -18,6 +18,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QStringList>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -67,7 +68,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
         "QPushButton { background: #1F3542; color: #F4FAFA; border: 1px solid #3C6475; border-radius: 10px; padding: 8px 14px; }"
         "QPushButton:hover { background: #2C5364; border-color: #63C7D1; }"
         "QPushButton:pressed { background: #16303A; }"
-        "QPushButton:disabled { background: #26313A; color: #778893; border-color: #34434B; }"
+        "QPushButton:disabled { background: #171f27; color: #68757e; border-color: #2b3943; }"
         "QPlainTextEdit { background: #0B1117; color: #BFE7EA; border: 1px solid #2E4656; border-radius: 10px; padding: 8px; }"
         "QLabel { color: #B8C7CC; }");
 
@@ -111,6 +112,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
     motionLayout->addWidget(m_pMovlTestBtn, 0, 0);
     motionLayout->addWidget(m_pMovjTestBtn, 1, 0);
     motionLayout->addWidget(m_pMoveZeroBtn, 2, 0);
+    m_motionButtons = { m_pMovlTestBtn, m_pMovjTestBtn, m_pMoveZeroBtn };
     groupLayout->addWidget(motionGroup, 0, 1);
 
     QGroupBox* offlineGroup = new QGroupBox("离线数据处理");
@@ -136,6 +138,12 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
     connect(m_pMovjTestBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucMovjTest);
     connect(m_pMoveZeroBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucMoveZeroTest);
     connect(filterLaserBtn, &QPushButton::clicked, this, &FunctionTestDialog::OpenLaserWeldFilterTest);
+
+    m_pMotionStateTimer = new QTimer(this);
+    m_pMotionStateTimer->setInterval(200);
+    connect(m_pMotionStateTimer, &QTimer::timeout, this, &FunctionTestDialog::RefreshMotionButtonState);
+    m_pMotionStateTimer->start();
+    RefreshMotionButtonState();
 }
 
 void FunctionTestDialog::closeEvent(QCloseEvent* event)
@@ -176,6 +184,25 @@ FANUCRobotCtrl* FunctionTestDialog::GetFirstFanucDriver()
 bool FunctionTestDialog::IsMotionBusy() const
 {
     return m_bFanucMovlRunning || m_bFanucMovjRunning || m_bFanucMoveZeroRunning;
+}
+
+void FunctionTestDialog::RefreshMotionButtonState()
+{
+    bool busy = IsMotionBusy();
+    if (!busy && m_pContralUnit != nullptr && !m_pContralUnit->m_vtContralUnitInfo.empty())
+    {
+        RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[0].pUnitDriver);
+        FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
+        busy = (pFanucDriver != nullptr && pFanucDriver->CheckDonePassive() == 0);
+    }
+
+    for (QPushButton* button : m_motionButtons)
+    {
+        if (button != nullptr)
+        {
+            button->setEnabled(!busy);
+        }
+    }
 }
 
 void FunctionTestDialog::AppendLog(const QString& text)
@@ -401,7 +428,7 @@ void FunctionTestDialog::FanucMovlTest()
     const bool moveForward = m_bFanucMovlForward;
     m_bFanucMovlForward = !m_bFanucMovlForward;
     m_bFanucMovlRunning = true;
-    m_pMovlTestBtn->setEnabled(false);
+    RefreshMotionButtonState();
     AppendLog(QString("开始 MOVL %1 100mm 测试...").arg(moveForward ? "Y+" : "Y-"));
 
     QPointer<FunctionTestDialog> self(this);
@@ -424,7 +451,7 @@ void FunctionTestDialog::FanucMovlTest()
                         return;
                     }
                     self->m_bFanucMovlRunning = false;
-                    self->m_pMovlTestBtn->setEnabled(true);
+                    self->RefreshMotionButtonState();
                     self->AppendLog(message);
                     QMessageBox::information(self, "MOVL往返测试", message);
                 }, Qt::QueuedConnection);
@@ -445,7 +472,7 @@ void FunctionTestDialog::FanucMovjTest()
     }
 
     m_bFanucMovjRunning = true;
-    m_pMovjTestBtn->setEnabled(false);
+    RefreshMotionButtonState();
     AppendLog("开始 MOVJ J2/J3 +5deg 测试...");
 
     QPointer<FunctionTestDialog> self(this);
@@ -474,7 +501,7 @@ void FunctionTestDialog::FanucMovjTest()
                         return;
                     }
                     self->m_bFanucMovjRunning = false;
-                    self->m_pMovjTestBtn->setEnabled(true);
+                    self->RefreshMotionButtonState();
                     self->AppendLog(message);
                     QMessageBox::information(self, "MOVJ测试", message);
                 }, Qt::QueuedConnection);
@@ -506,7 +533,7 @@ void FunctionTestDialog::FanucMoveZeroTest()
     }
 
     m_bFanucMoveZeroRunning = true;
-    m_pMoveZeroBtn->setEnabled(false);
+    RefreshMotionButtonState();
     AppendLog("开始 MOVJ 到零位...");
 
     QPointer<FunctionTestDialog> self(this);
@@ -548,7 +575,7 @@ void FunctionTestDialog::FanucMoveZeroTest()
                         return;
                     }
                     self->m_bFanucMoveZeroRunning = false;
-                    self->m_pMoveZeroBtn->setEnabled(true);
+                    self->RefreshMotionButtonState();
                     self->AppendLog(message);
                     QMessageBox::information(self, "运动到零位", message);
                 }, Qt::QueuedConnection);

@@ -135,6 +135,7 @@ RobotJogDialog::RobotJogDialog(FANUCRobotCtrl* fanucDriver, QWidget* parent)
 	, m_cartesianSpeedEdit(nullptr)
 	, m_jointSpeedEdit(nullptr)
 	, m_stopButton(nullptr)
+	, m_motionTaskRunning(false)
 	, m_jogActive(false)
 	, m_currentMode(JogMode::Cartesian)
 	, m_currentAxis(0)
@@ -232,6 +233,7 @@ void RobotJogDialog::BuildUi()
 	QPushButton* moveCartButton = new QPushButton("运动到指定位置");
 	cartActionLayout->addWidget(readCartButton);
 	cartActionLayout->addWidget(moveCartButton);
+	m_motionButtons.push_back(moveCartButton);
 	cartBoxLayout->addLayout(cartGrid);
 	cartBoxLayout->addLayout(cartActionLayout);
 	connect(readCartButton, &QPushButton::clicked, this, &RobotJogDialog::ReadCurrentCartesianTarget);
@@ -253,6 +255,7 @@ void RobotJogDialog::BuildUi()
 	QPushButton* moveJointButton = new QPushButton("运动到指定位置");
 	jointActionLayout->addWidget(readJointButton);
 	jointActionLayout->addWidget(moveJointButton);
+	m_motionButtons.push_back(moveJointButton);
 	jointBoxLayout->addLayout(jointGrid);
 	jointBoxLayout->addLayout(jointActionLayout);
 	connect(readJointButton, &QPushButton::clicked, this, &RobotJogDialog::ReadCurrentJointTarget);
@@ -282,8 +285,10 @@ void RobotJogDialog::ApplyStyle()
 		"QPushButton { background: #1d2a38; border: 1px solid #33475d; border-radius: 12px; color: #eef7ff; font-size: 15px; font-weight: 650; padding: 8px 14px; }"
 		"QPushButton:hover { background: #26384a; border-color: #4e6c8d; }"
 		"QPushButton:pressed { background: #2f9e6f; border-color: #5ee1a7; color: #07100c; }"
+		"QPushButton:disabled { background: #18212b; border-color: #253340; color: #6f7f8d; }"
 		"QPushButton#DangerButton { background: #3a1d24; border-color: #7a3442; color: #ffdce3; }"
 		"QPushButton#DangerButton:hover { background: #512633; }"
+		"QPushButton#DangerButton:disabled { background: #2a2125; border-color: #4a373d; color: #8f757d; }"
 	);
 }
 
@@ -303,6 +308,8 @@ void RobotJogDialog::AddAxisRow(QGridLayout* layout, int row, const QString& axi
 
 	connect(minusButton, &QPushButton::clicked, this, [this, mode, axisIndex]() { StepJog(mode, axisIndex, -1); });
 	connect(plusButton, &QPushButton::clicked, this, [this, mode, axisIndex]() { StepJog(mode, axisIndex, 1); });
+	m_motionButtons.push_back(minusButton);
+	m_motionButtons.push_back(plusButton);
 
 	layout->addWidget(axisLabel, row, 0);
 	layout->addWidget(targetEdit, row, 1);
@@ -380,6 +387,10 @@ void RobotJogDialog::MoveToCartesianTarget()
 		QMessageBox::warning(this, "点动控制", "FANUC驱动无效。");
 		return;
 	}
+	if (IsMotionBusy())
+	{
+		return;
+	}
 	StopJog();
 
 	T_ROBOT_COORS target;
@@ -394,6 +405,7 @@ void RobotJogDialog::MoveToCartesianTarget()
 	LogCartesianPoint(m_fanucDriver, "点动界面从直角编辑框发送目标点", target);
 	FANUCRobotCtrl* driver = m_fanucDriver;
 	QPointer<RobotJogDialog> self(this);
+	SetMotionTaskRunning(true);
 	std::thread([self, driver, target, robotSpeed]()
 		{
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
@@ -404,6 +416,7 @@ void RobotJogDialog::MoveToCartesianTarget()
 					{
 						return;
 					}
+					self->SetMotionTaskRunning(false);
 					if (!moveOk || done <= 0)
 					{
 						QMessageBox::warning(self, "运动到指定位置", QString("直角坐标运动失败，CheckRobotDone=%1").arg(done));
@@ -417,6 +430,10 @@ void RobotJogDialog::MoveToJointTarget()
 	if (m_fanucDriver == nullptr)
 	{
 		QMessageBox::warning(this, "点动控制", "FANUC驱动无效。");
+		return;
+	}
+	if (IsMotionBusy())
+	{
 		return;
 	}
 	StopJog();
@@ -433,6 +450,7 @@ void RobotJogDialog::MoveToJointTarget()
 	LogJointPoint(m_fanucDriver, "点动界面从关节编辑框发送目标点", target);
 	FANUCRobotCtrl* driver = m_fanucDriver;
 	QPointer<RobotJogDialog> self(this);
+	SetMotionTaskRunning(true);
 	std::thread([self, driver, target, robotSpeed]()
 		{
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
@@ -443,6 +461,7 @@ void RobotJogDialog::MoveToJointTarget()
 					{
 						return;
 					}
+					self->SetMotionTaskRunning(false);
 					if (!moveOk || done <= 0)
 					{
 						QMessageBox::warning(self, "运动到指定位置", QString("关节脉冲运动失败，CheckRobotDone=%1").arg(done));
@@ -453,9 +472,12 @@ void RobotJogDialog::MoveToJointTarget()
 
 void RobotJogDialog::StartJog(JogMode mode, int axisIndex, int direction)
 {
-	if (m_fanucDriver == nullptr)
+	if (m_fanucDriver == nullptr || IsMotionBusy())
 	{
-		QMessageBox::warning(this, "点动控制", "FANUC驱动无效。");
+		if (m_fanucDriver == nullptr)
+		{
+			QMessageBox::warning(this, "点动控制", "FANUC驱动无效。");
+		}
 		return;
 	}
 
@@ -481,6 +503,7 @@ void RobotJogDialog::BeginJog()
 	m_streamJointSpeed = JointSpeed();
 	m_jogActive = true;
 	m_nextStreamStep = 0;
+	UpdateMotionButtonState();
 
 	if (mode == JogMode::Cartesian)
 	{
@@ -514,6 +537,7 @@ void RobotJogDialog::BeginJog()
 	if (!m_fanucDriver->StartContinuousMoveQueue(mode == JogMode::Cartesian ? MOVL : MOVJ, robotSpeed))
 	{
 		m_jogActive = false;
+		UpdateMotionButtonState();
 		QMessageBox::warning(this, "点动控制", "启动连续运动队列失败。");
 		return;
 	}
@@ -544,6 +568,10 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 	{
 		return;
 	}
+	if (IsMotionBusy())
+	{
+		return;
+	}
 
 	if (mode == JogMode::Cartesian)
 	{
@@ -552,7 +580,26 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 		AddCartesianDelta(target, axisIndex, static_cast<double>(direction) * stepDistance);
 		const double robotSpeed = std::max(1.0, CartesianSpeed() / 60.0);
 		LogCartesianPoint(m_fanucDriver, "点动界面单击生成直角目标点", target);
-		m_fanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), m_fanucDriver->m_nExternalAxleType, "MOVL");
+		SetMotionTaskRunning(true);
+		FANUCRobotCtrl* driver = m_fanucDriver;
+		QPointer<RobotJogDialog> self(this);
+		std::thread([self, driver, target, robotSpeed]()
+			{
+				const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
+				const int done = moveOk ? driver->CheckRobotDone(100) : -1;
+				QMetaObject::invokeMethod(qApp, [self, moveOk, done]()
+					{
+						if (self == nullptr)
+						{
+							return;
+						}
+						self->SetMotionTaskRunning(false);
+						if (!moveOk || done <= 0)
+						{
+							QMessageBox::warning(self, "点动控制", QString("直角步进失败，CheckRobotDone=%1").arg(done));
+						}
+					}, Qt::QueuedConnection);
+			}).detach();
 		SetCartesianTargetEditors(target);
 		return;
 	}
@@ -564,7 +611,26 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 	AddJointDelta(target, axisIndex, deltaPulse);
 	const double robotSpeed = std::clamp(JointSpeed(), 1.0, 100.0);
 	LogJointPoint(m_fanucDriver, "点动界面单击生成关节目标点", target);
-	m_fanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), m_fanucDriver->m_nExternalAxleType, "MOVJ");
+	SetMotionTaskRunning(true);
+	FANUCRobotCtrl* driver = m_fanucDriver;
+	QPointer<RobotJogDialog> self(this);
+	std::thread([self, driver, target, robotSpeed]()
+		{
+			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
+			const int done = moveOk ? driver->CheckRobotDone(100) : -1;
+			QMetaObject::invokeMethod(qApp, [self, moveOk, done]()
+				{
+					if (self == nullptr)
+					{
+						return;
+					}
+					self->SetMotionTaskRunning(false);
+					if (!moveOk || done <= 0)
+					{
+						QMessageBox::warning(self, "点动控制", QString("关节步进失败，CheckRobotDone=%1").arg(done));
+					}
+				}, Qt::QueuedConnection);
+		}).detach();
 	SetJointTargetEditors(target);
 }
 
@@ -582,6 +648,7 @@ void RobotJogDialog::StopJog()
 	{
 		m_fanucDriver->RequestEndContinuousMoveQueue();
 	}
+	UpdateMotionButtonState();
 }
 
 void RobotJogDialog::FeedNextPoint()
@@ -625,6 +692,7 @@ void RobotJogDialog::RefreshStateText()
 	const T_ANGLE_PULSE pulse = m_fanucDriver->GetCurrentPulsePassive();
 	const int done = m_fanucDriver->CheckDonePassive();
 	const QString doneText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知(%1)").arg(done));
+	UpdateMotionButtonState();
 
 	m_stateLabel->setText(QString(
 		"状态: %1    robot_ms=%2    pc_recv_ms=%3\n"
@@ -645,6 +713,33 @@ void RobotJogDialog::RefreshStateText()
 		.arg(pulse.nRPulse)
 		.arg(pulse.nBPulse)
 		.arg(pulse.nTPulse));
+}
+
+void RobotJogDialog::UpdateMotionButtonState()
+{
+	const bool busy = IsMotionBusy();
+	for (QPushButton* button : m_motionButtons)
+	{
+		if (button != nullptr)
+		{
+			button->setEnabled(!busy);
+		}
+	}
+}
+
+void RobotJogDialog::SetMotionTaskRunning(bool running)
+{
+	m_motionTaskRunning = running;
+	UpdateMotionButtonState();
+}
+
+bool RobotJogDialog::IsMotionBusy() const
+{
+	if (m_jogActive || m_motionTaskRunning)
+	{
+		return true;
+	}
+	return m_fanucDriver != nullptr && m_fanucDriver->CheckDonePassive() == 0;
 }
 
 double RobotJogDialog::CartesianSpeed() const
