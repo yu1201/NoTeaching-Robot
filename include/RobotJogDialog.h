@@ -40,6 +40,9 @@ private:
 	void StopJog();
 	void FeedNextPoint();
 	void RefreshStateText();
+	void UpdateMotionButtonState();
+	void SetMotionTaskRunning(bool running);
+	bool IsMotionBusy() const;
 	double CartesianSpeed() const;
 	double JointSpeed() const;
 	T_ROBOT_COORS BuildCartesianStreamPoint(int stepIndex) const;
@@ -57,9 +60,11 @@ private:
 	QLineEdit* m_cartesianSpeedEdit;
 	QLineEdit* m_jointSpeedEdit;
 	QPushButton* m_stopButton;
+	QVector<QPushButton*> m_motionButtons;
 	QVector<QLineEdit*> m_cartesianTargetEdits;
 	QVector<QLineEdit*> m_jointTargetEdits;
 	bool m_jogActive;
+	bool m_motionTaskRunning;
 	JogMode m_currentMode;
 	int m_currentAxis;
 	int m_currentDirection;

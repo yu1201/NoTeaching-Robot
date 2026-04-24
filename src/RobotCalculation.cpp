@@ -1342,6 +1342,224 @@ QString RobotCalculation::RobotPoseCsv(qint64 timestampMs, const T_ROBOT_COORS& 
         .arg(pose.dBZ, 0, 'f', 6);
 }
 
+RobotCalculation::LowerWeldClassificationResult RobotCalculation::ClassifyLowerWeldPoints(
+    const LowerWeldFilterResult& filterResult,
+    SampleAxis sampleAxis)
+{
+    LowerWeldClassificationResult result;
+    if (!filterResult.ok)
+    {
+        result.error = filterResult.error.isEmpty()
+            ? "滤波结果无效，无法分类。"
+            : filterResult.error;
+        return result;
+    }
+    if (filterResult.points.isEmpty())
+    {
+        result.error = "滤波结果为空，无法分类。";
+        return result;
+    }
+
+    result.points.reserve(filterResult.points.size());
+    QVector<double> primaryValues;
+    primaryValues.reserve(filterResult.points.size());
+    const int pointCount = static_cast<int>(filterResult.points.size());
+
+    for (const LowerWeldFilterPoint& point : filterResult.points)
+    {
+        LowerWeldClassifiedPoint classifiedPoint;
+        classifiedPoint.index = point.index;
+        classifiedPoint.point = point.point;
+        classifiedPoint.type = LowerWeldPointType::Normal;
+        classifiedPoint.source = point.source;
+        result.points.push_back(classifiedPoint);
+
+        if (sampleAxis == SampleAxis::AxisY)
+        {
+            primaryValues.push_back(point.point.x());
+        }
+        else
+        {
+            primaryValues.push_back(point.point.y());
+        }
+    }
+
+    auto percentileValue = [](QVector<double> values, double percentile) -> double
+    {
+        if (values.isEmpty())
+        {
+            return 0.0;
+        }
+        std::sort(values.begin(), values.end());
+        const double clampedPercentile = std::clamp(percentile, 0.0, 1.0);
+        const int index = static_cast<int>(std::round(clampedPercentile * (values.size() - 1)));
+        return values[index];
+    };
+
+    QVector<double> slopes;
+    slopes.reserve(result.points.size());
+    for (int index = 0; index < pointCount; ++index)
+    {
+        const int previousIndex = std::max(0, index - 1);
+        const int nextIndex = std::min(pointCount - 1, index + 1);
+        const double previousAxis = (sampleAxis == SampleAxis::AxisY)
+            ? result.points[previousIndex].point.y()
+            : result.points[previousIndex].point.x();
+        const double nextAxis = (sampleAxis == SampleAxis::AxisY)
+            ? result.points[nextIndex].point.y()
+            : result.points[nextIndex].point.x();
+        const double deltaAxis = nextAxis - previousAxis;
+        if (std::abs(deltaAxis) < 1e-6)
+        {
+            slopes.push_back(0.0);
+            continue;
+        }
+        const double deltaPrimary = primaryValues[nextIndex] - primaryValues[previousIndex];
+        slopes.push_back(deltaPrimary / deltaAxis);
+    }
+
+    const double lowRiseThreshold = percentileValue(primaryValues, 0.30);
+    const double lowFallThreshold = percentileValue(primaryValues, 0.32);
+    const double highThreshold = percentileValue(primaryValues, 0.64);
+    const double startFlatSlopeThreshold = 0.25;
+    const double risingSlopeThreshold = 0.40;
+    const double fallingSlopeThreshold = -0.45;
+
+    enum class LowerWeldPhase
+    {
+        SeekingStart,
+        LowPlatform,
+        RisingEdge,
+        HighPlatform,
+        FallingEdge
+    };
+
+    LowerWeldPhase phase = LowerWeldPhase::SeekingStart;
+    bool startAssigned = false;
+
+    if (!result.points.isEmpty())
+    {
+        for (int index = 0; index < result.points.size(); ++index)
+        {
+            const double primary = primaryValues[index];
+            const double slope = slopes[index];
+
+            if (!startAssigned)
+            {
+                if (primary <= lowFallThreshold && std::abs(slope) <= startFlatSlopeThreshold)
+                {
+                    result.points[index].type = LowerWeldPointType::Start;
+                    result.startCount = 1;
+                    startAssigned = true;
+                    phase = LowerWeldPhase::LowPlatform;
+                }
+                continue;
+            }
+
+            switch (phase)
+            {
+            case LowerWeldPhase::LowPlatform:
+                if (slope >= risingSlopeThreshold && primary >= lowRiseThreshold)
+                {
+                    result.points[index].type = LowerWeldPointType::InnerCorner;
+                    ++result.innerCornerCount;
+                    phase = LowerWeldPhase::RisingEdge;
+                }
+                break;
+            case LowerWeldPhase::RisingEdge:
+                if (primary >= highThreshold)
+                {
+                    result.points[index].type = LowerWeldPointType::OuterCorner;
+                    ++result.outerCornerCount;
+                    phase = LowerWeldPhase::HighPlatform;
+                }
+                break;
+            case LowerWeldPhase::HighPlatform:
+                if (slope <= fallingSlopeThreshold && primary >= highThreshold)
+                {
+                    result.points[index].type = LowerWeldPointType::OuterCorner;
+                    ++result.outerCornerCount;
+                    phase = LowerWeldPhase::FallingEdge;
+                }
+                break;
+            case LowerWeldPhase::FallingEdge:
+                if (primary <= lowFallThreshold)
+                {
+                    result.points[index].type = LowerWeldPointType::InnerCorner;
+                    ++result.innerCornerCount;
+                    phase = LowerWeldPhase::LowPlatform;
+                }
+                break;
+            case LowerWeldPhase::SeekingStart:
+            default:
+                break;
+            }
+        }
+    }
+
+    if (!startAssigned)
+    {
+        result.points.front().type = LowerWeldPointType::Start;
+        result.startCount = 1;
+    }
+
+    if (result.points.size() >= 2)
+    {
+        result.points.back().type = LowerWeldPointType::End;
+        result.endCount = 1;
+    }
+
+    for (const LowerWeldClassifiedPoint& point : result.points)
+    {
+        switch (point.type)
+        {
+        case LowerWeldPointType::Start:
+            break;
+        case LowerWeldPointType::End:
+            break;
+        case LowerWeldPointType::InnerCorner:
+            break;
+        case LowerWeldPointType::OuterCorner:
+            break;
+        case LowerWeldPointType::Noise:
+            ++result.noiseCount;
+            break;
+        case LowerWeldPointType::Normal:
+        default:
+            ++result.normalCount;
+            break;
+        }
+    }
+
+    result.ok = true;
+    return result;
+}
+
+int RobotCalculation::LowerWeldPointTypeCode(LowerWeldPointType type)
+{
+    return static_cast<int>(type);
+}
+
+QString RobotCalculation::LowerWeldPointTypeName(LowerWeldPointType type)
+{
+    switch (type)
+    {
+    case LowerWeldPointType::Start:
+        return "start";
+    case LowerWeldPointType::End:
+        return "end";
+    case LowerWeldPointType::InnerCorner:
+        return "inner_corner";
+    case LowerWeldPointType::OuterCorner:
+        return "outer_corner";
+    case LowerWeldPointType::Noise:
+        return "noise";
+    case LowerWeldPointType::Normal:
+    default:
+        return "normal";
+    }
+}
+
 QString RobotCalculation::Vector3Csv(qint64 timestampMs, const Eigen::Vector3d& point, const QString& extra)
 {
     QString line = QString("%1,%2,%3,%4")

@@ -4,6 +4,7 @@
 #include "HandEyeMatrixConfig.h"
 #include "MeasureThenWeldService.h"
 #include "OPini.h"
+#include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
 #include "groove/threadsafebuffer.h"
@@ -13,6 +14,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QGridLayout>
 #include <QLabel>
@@ -29,9 +31,35 @@
 
 namespace
 {
+constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
+constexpr auto WELD_POSE_SEAM_COMP_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
+
 double SafeSpeed(double value, double fallback)
 {
     return value > 0.0 ? value : fallback;
+}
+
+QString ResolveLaserPointDirFromSelection(const QString& selectedDir)
+{
+    const QFileInfo selectedInfo(selectedDir);
+    if (!selectedInfo.exists() || !selectedInfo.isDir())
+    {
+        return QString();
+    }
+
+    const QDir dir(selectedInfo.absoluteFilePath());
+    if (QFileInfo::exists(dir.filePath(WELD_POSE_FILE_NAME)))
+    {
+        return dir.absolutePath();
+    }
+
+    const QString laserDir = dir.filePath("LaserPoint");
+    if (QFileInfo::exists(QDir(laserDir).filePath(WELD_POSE_FILE_NAME)))
+    {
+        return QDir(laserDir).absolutePath();
+    }
+
+    return QString();
 }
 }
 
@@ -60,16 +88,19 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, StartCam
     titleLabel->setStyleSheet("font-size: 22px; font-weight: bold; color: #F7FCFC;");
     rootLayout->addWidget(titleLabel);
 
-    QLabel* hintLabel = new QLabel("预设参数：读取 PreciseMeasureParam.ini 并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点，并在扫描后自动执行“原始轨迹拟合 -> 梯形模板拟合”。");
+    QLabel* hintLabel = new QLabel("预设参数：读取 PreciseMeasureParam.ini 并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点，并在扫描后自动执行 PreservePath 拟合、焊道分类、焊接姿态生成和焊道补偿。也可以跳过扫描，直接选历史结果文件夹焊接。");
     rootLayout->addWidget(hintLabel);
 
     QGridLayout* buttonLayout = new QGridLayout();
     m_pPresetParamBtn = new QPushButton("预设参数");
+    m_pSkipScanWeldBtn = new QPushButton("跳过扫描焊接");
     m_pLineScanProcessBtn = new QPushButton("线扫处理");
     m_pPresetParamBtn->setMinimumHeight(64);
+    m_pSkipScanWeldBtn->setMinimumHeight(64);
     m_pLineScanProcessBtn->setMinimumHeight(64);
     buttonLayout->addWidget(m_pPresetParamBtn, 0, 0);
     buttonLayout->addWidget(m_pLineScanProcessBtn, 0, 1);
+    buttonLayout->addWidget(m_pSkipScanWeldBtn, 1, 0, 1, 2);
     rootLayout->addLayout(buttonLayout);
 
     m_pLogText = new QPlainTextEdit();
@@ -78,6 +109,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, StartCam
     rootLayout->addWidget(m_pLogText, 1);
 
     connect(m_pPresetParamBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunPresetParamFlow);
+    connect(m_pSkipScanWeldBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunSkipScanWeldFlow);
     connect(m_pLineScanProcessBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunLineScanProcess);
 }
 
@@ -221,6 +253,37 @@ bool MeasureThenWeldDialog::ConfirmContinue(const QString& actionName)
     return confirmed;
 }
 
+bool MeasureThenWeldDialog::ShowCheckpointDialog(const QString& title, const QString& detail)
+{
+    SetFlowStep(QString("关键节点确认：%1").arg(title));
+
+    if (QThread::currentThread() != thread())
+    {
+        bool confirmed = false;
+        QPointer<MeasureThenWeldDialog> self(this);
+        QMetaObject::invokeMethod(qApp, [self, title, detail, &confirmed]()
+            {
+                if (self == nullptr)
+                {
+                    confirmed = false;
+                    return;
+                }
+                confirmed = self->ShowCheckpointDialog(title, detail);
+            }, Qt::BlockingQueuedConnection);
+        return confirmed;
+    }
+
+    const QMessageBox::StandardButton ret = QMessageBox::question(
+        this,
+        title,
+        detail + "\n\n选择“确定”继续，选择“取消”终止当前流程。",
+        QMessageBox::Ok | QMessageBox::Cancel,
+        QMessageBox::Ok);
+    const bool confirmed = (ret == QMessageBox::Ok);
+    AppendLog(QString("关键节点[%1]：%2").arg(title).arg(confirmed ? "已确认继续" : "已取消流程"));
+    return confirmed;
+}
+
 void MeasureThenWeldDialog::RunPresetParamFlow()
 {
     if (m_bRunning)
@@ -255,6 +318,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
             QString message;
             QString cameraIP;
             QString savedPath;
+            QString executeSummary;
 
             QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok]()
                 {
@@ -319,7 +383,86 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                     // 4. 扫描结束后收枪到安全姿态。
                     ok = self != nullptr && self->MovePulseListAndWait(pFanucDriver, param.vtEndSafePulse, SafeSpeed(param.dRunSpeed, 1.0), "收枪姿态");
                 }
-                message = ok ? QString("预设参数流程完成。\n点文件：%1").arg(savedPath) : "预设参数流程失败，请查看流程日志。";
+                if (ok)
+                {
+                    const QFileInfo weldPoseFileInfo(savedPath);
+                    if (!weldPoseFileInfo.isFile())
+                    {
+                        if (self != nullptr)
+                        {
+                            self->AppendLog(QString("未生成可下发的焊接姿态文件，当前结果=%1").arg(savedPath));
+                        }
+                        ok = false;
+                        message = "预设参数流程已完成测量，但未生成可下发的焊接姿态文件。";
+                    }
+                }
+                if (ok)
+                {
+                    ok = self != nullptr && self->ShowCheckpointDialog(
+                        "扫描完成",
+                        QString("扫描、拟合、焊道分类和焊接姿态生成已完成。\n焊接姿态文件：%1").arg(savedPath));
+                }
+                if (ok)
+                {
+                    ok = self != nullptr && self->ConfirmContinue("移动到焊接下枪安全位置并执行焊接轨迹");
+                }
+                if (ok)
+                {
+                    QString executeError;
+                    T_ROBOT_COORS startSafeCoors;
+                    T_ROBOT_COORS endSafeCoors;
+                    if (self != nullptr)
+                    {
+                        self->SetFlowStep("准备执行焊接轨迹");
+                        self->AppendLog(QString("开始执行焊接轨迹：%1").arg(savedPath));
+                    }
+
+                    ok = self != nullptr
+                        && self->m_pService != nullptr
+                        && self->m_pService->ExecuteWeldPoseFileWithSafePos(
+                            pFanucDriver,
+                            savedPath,
+                            executeSummary,
+                            executeError,
+                            &startSafeCoors,
+                            &endSafeCoors,
+                            [self](const QString& text) { if (self != nullptr) self->AppendLog(text); },
+                            [self](const QString& text) { if (self != nullptr) self->SetFlowStep(text); },
+                            [self](const QString& title, const QString& detail) -> bool
+                            {
+                                return self != nullptr && self->ShowCheckpointDialog(title, detail);
+                            });
+                    if (ok)
+                    {
+                        if (self != nullptr)
+                        {
+                            self->AppendLog(QString("焊接轨迹执行完成：%1").arg(executeSummary));
+                        }
+                        message = QString("预设参数流程完成。\n结果位置：%1\n执行结果：%2\n下枪安全位置：%3\n收枪安全位置：%4")
+                            .arg(savedPath)
+                            .arg(executeSummary)
+                            .arg(QString("%1, %2, %3")
+                                .arg(startSafeCoors.dX, 0, 'f', 3)
+                                .arg(startSafeCoors.dY, 0, 'f', 3)
+                                .arg(startSafeCoors.dZ, 0, 'f', 3))
+                            .arg(QString("%1, %2, %3")
+                                .arg(endSafeCoors.dX, 0, 'f', 3)
+                                .arg(endSafeCoors.dY, 0, 'f', 3)
+                                .arg(endSafeCoors.dZ, 0, 'f', 3));
+                    }
+                    else
+                    {
+                        if (self != nullptr)
+                        {
+                            self->AppendLog(QString("焊接轨迹执行失败：%1").arg(executeError));
+                        }
+                        message = QString("预设参数流程已完成测量，但焊接轨迹执行失败。\n%1").arg(executeError);
+                    }
+                }
+                else if (message.isEmpty())
+                {
+                    message = "预设参数流程失败，请查看流程日志。";
+                }
             }
 
             QMetaObject::invokeMethod(qApp, [self, message, ok]()
@@ -343,6 +486,211 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                     else
                     {
                         QMessageBox::warning(self, "预设参数", message);
+                    }
+                }, Qt::QueuedConnection);
+        }).detach();
+}
+
+void MeasureThenWeldDialog::RunSkipScanWeldFlow()
+{
+    if (m_bRunning)
+    {
+        QMessageBox::information(this, "先测后焊", "流程正在运行。");
+        return;
+    }
+
+    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
+    if (pFanucDriver == nullptr)
+    {
+        return;
+    }
+
+    T_PRECISE_MEASURE_PARAM param;
+    QString error;
+    if (!LoadPresetParam(pFanucDriver, param, error))
+    {
+        QMessageBox::warning(this, "跳过扫描焊接", error);
+        return;
+    }
+
+    const QString defaultDir = RobotDataHelper::BuildProjectPath(
+        QString("Result/%1").arg(QString::fromStdString(param.sRobotName)));
+    const QString selectedDir = QFileDialog::getExistingDirectory(
+        this,
+        "选择先测后焊结果文件夹",
+        defaultDir,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (selectedDir.isEmpty())
+    {
+        return;
+    }
+
+    const QString laserDir = ResolveLaserPointDirFromSelection(selectedDir);
+    if (laserDir.isEmpty())
+    {
+        QMessageBox::warning(
+            this,
+            "跳过扫描焊接",
+            QString("在所选目录中未找到姿态文件 %1。\n请选择结果目录本身，或其下的 LaserPoint 目录。")
+                .arg(WELD_POSE_FILE_NAME));
+        return;
+    }
+
+    const QString poseFilePath = QDir(laserDir).filePath(WELD_POSE_FILE_NAME);
+    const QString seamCompPath = QDir(laserDir).filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
+    if (!QFileInfo::exists(poseFilePath))
+    {
+        QMessageBox::warning(
+            this,
+            "跳过扫描焊接",
+            QString("未找到姿态文件：%1").arg(poseFilePath));
+        return;
+    }
+
+    SetRunning(true);
+    SetFlowStep("已选择历史结果，准备按当前补偿参数重建焊接文件");
+    AppendLog(QString("跳过扫描模式：结果目录=%1").arg(selectedDir));
+    AppendLog(QString("姿态文件=%1").arg(poseFilePath));
+    AppendLog(QString("补偿后文件将输出到=%1").arg(seamCompPath));
+
+    QPointer<MeasureThenWeldDialog> self(this);
+    std::thread([self, pFanucDriver, param, selectedDir, poseFilePath, seamCompPath]()
+        {
+            bool ok = true;
+            QString message;
+            QString processError;
+            QString seamCompSummary;
+            QString executeSummary;
+            T_ROBOT_COORS startSafeCoors;
+            T_ROBOT_COORS endSafeCoors;
+
+            if (self != nullptr)
+            {
+                ok = self->ShowCheckpointDialog(
+                    "跳过扫描确认",
+                    QString("已选择结果目录：%1\n将读取姿态文件：%2\n并按当前焊道补偿参数重新生成补偿后文件。")
+                        .arg(selectedDir)
+                        .arg(poseFilePath));
+            }
+
+            if (ok)
+            {
+                if (self != nullptr)
+                {
+                    self->SetFlowStep("正在根据姿态文件重建焊道补偿结果");
+                }
+                ok = self != nullptr
+                    && self->m_pService != nullptr
+                    && self->m_pService->ApplyWeldSeamCompToPoseFile(
+                        QString::fromStdString(param.sRobotName),
+                        poseFilePath,
+                        seamCompPath,
+                        seamCompSummary,
+                        processError);
+                if (self != nullptr)
+                {
+                    if (ok)
+                    {
+                        self->AppendLog(QString("焊道补偿文件已更新：%1").arg(seamCompPath));
+                        self->AppendLog(QString("焊道补偿摘要：%1").arg(seamCompSummary));
+                    }
+                    else
+                    {
+                        self->AppendLog(QString("重新生成焊道补偿文件失败：%1").arg(processError));
+                    }
+                }
+            }
+
+            if (ok)
+            {
+                ok = self != nullptr && self->ShowCheckpointDialog(
+                    "补偿完成",
+                    QString("姿态文件：%1\n补偿文件：%2\n%3")
+                        .arg(poseFilePath)
+                        .arg(seamCompPath)
+                        .arg(seamCompSummary));
+            }
+
+            if (ok)
+            {
+                ok = self != nullptr && self->ConfirmContinue("移动到焊接下枪安全位置并执行焊接轨迹");
+            }
+
+            if (ok)
+            {
+                if (self != nullptr)
+                {
+                    self->SetFlowStep("准备执行跳过扫描后的焊接轨迹");
+                    self->AppendLog(QString("开始执行焊接轨迹：%1").arg(seamCompPath));
+                }
+
+                ok = self != nullptr
+                    && self->m_pService != nullptr
+                    && self->m_pService->ExecuteWeldPoseFileWithSafePos(
+                        pFanucDriver,
+                        seamCompPath,
+                        executeSummary,
+                        processError,
+                        &startSafeCoors,
+                        &endSafeCoors,
+                        [self](const QString& text) { if (self != nullptr) self->AppendLog(text); },
+                        [self](const QString& text) { if (self != nullptr) self->SetFlowStep(text); },
+                        [self](const QString& title, const QString& detail) -> bool
+                        {
+                            return self != nullptr && self->ShowCheckpointDialog(title, detail);
+                        });
+                if (ok)
+                {
+                    if (self != nullptr)
+                    {
+                        self->AppendLog(QString("焊接轨迹执行完成：%1").arg(executeSummary));
+                    }
+                    message = QString("跳过扫描焊接完成。\n结果目录：%1\n姿态文件：%2\n补偿文件：%3\n执行结果：%4\n下枪安全位置：%5\n收枪安全位置：%6")
+                        .arg(selectedDir)
+                        .arg(poseFilePath)
+                        .arg(seamCompPath)
+                        .arg(executeSummary)
+                        .arg(QString("%1, %2, %3")
+                            .arg(startSafeCoors.dX, 0, 'f', 3)
+                            .arg(startSafeCoors.dY, 0, 'f', 3)
+                            .arg(startSafeCoors.dZ, 0, 'f', 3))
+                        .arg(QString("%1, %2, %3")
+                            .arg(endSafeCoors.dX, 0, 'f', 3)
+                            .arg(endSafeCoors.dY, 0, 'f', 3)
+                            .arg(endSafeCoors.dZ, 0, 'f', 3));
+                }
+                else
+                {
+                    if (self != nullptr)
+                    {
+                        self->AppendLog(QString("焊接轨迹执行失败：%1").arg(processError));
+                    }
+                    message = QString("跳过扫描后焊接失败。\n%1").arg(processError);
+                }
+            }
+            else if (message.isEmpty())
+            {
+                message = processError.isEmpty()
+                    ? QString("跳过扫描焊接流程失败，请查看流程日志。")
+                    : QString("跳过扫描焊接流程失败。\n%1").arg(processError);
+            }
+
+            QMetaObject::invokeMethod(qApp, [self, message, ok]()
+                {
+                    if (self == nullptr)
+                    {
+                        return;
+                    }
+                    self->SetFlowStep(ok ? "流程完成" : "流程失败，请查看流程日志");
+                    self->AppendLog(ok ? "跳过扫描焊接流程完成。" : "跳过扫描焊接流程失败。");
+                    self->SetRunning(false);
+                    if (ok)
+                    {
+                        QMessageBox::information(self, "跳过扫描焊接", message);
+                    }
+                    else
+                    {
+                        QMessageBox::warning(self, "跳过扫描焊接", message);
                     }
                 }, Qt::QueuedConnection);
         }).detach();
@@ -398,5 +746,6 @@ void MeasureThenWeldDialog::SetRunning(bool running)
 {
     m_bRunning = running;
     m_pPresetParamBtn->setEnabled(!running);
+    m_pSkipScanWeldBtn->setEnabled(!running);
     m_pLineScanProcessBtn->setEnabled(!running);
 }

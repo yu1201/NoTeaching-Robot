@@ -15,6 +15,10 @@
 constexpr bool IsDefaultBlocked = false;
 
 namespace STEPROBOTSDK{
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4251)
+#endif
 class __declspec(dllexport) RobotComClient {
 public:
   RobotComClient();
@@ -599,4 +603,7 @@ private:
   int SDKRefConvertCMD(SDKInstructRefConvert m_OriPos, HMIPos& m_TransPos);
 
 };
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 } // namespace STEPROBOTSDK

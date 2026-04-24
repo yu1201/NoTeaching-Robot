@@ -5,8 +5,10 @@
 #include "CameraParamDialog.h"
 #include "FunctionTestDialog.h"
 #include "MeasureThenWeldDialog.h"
+#include "MeasureThenWeldService.h"
 #include "OPini.h"
 #include "PreciseMeasureEditDialog.h"
+#include "RobotCalculation.h"
 #include "RobotDataHelper.h"
 #include "RobotJogDialog.h"
 #include "WindowStyleHelper.h"
@@ -30,6 +32,7 @@
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QSet>
 #include <QThread>
 #include <QTimer>
 #include <QToolBar>
@@ -40,6 +43,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <limits>
 #include <thread>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -66,6 +70,36 @@ namespace
 			}
 		}
 		return QString();
+	}
+
+	QString BuildWeldSeamCompOutputPath(const QString& inputFilePath)
+	{
+		const QFileInfo inputInfo(inputFilePath);
+		const QString suffix = inputInfo.completeSuffix();
+		const QString fileName = suffix.isEmpty()
+			? QString("%1_SeamComp").arg(inputInfo.completeBaseName())
+			: QString("%1_SeamComp.%2").arg(inputInfo.completeBaseName(), suffix);
+		return inputInfo.dir().filePath(fileName);
+	}
+
+	QString InferRobotNameFromResultPath(const QString& inputFilePath)
+	{
+		const QString normalizedPath = QDir::fromNativeSeparators(
+			QFileInfo(inputFilePath).absoluteFilePath());
+		const QStringList pathParts = normalizedPath.split('/', Qt::SkipEmptyParts);
+		for (int index = 0; index + 1 < pathParts.size(); ++index)
+		{
+			if (pathParts[index].compare("Result", Qt::CaseInsensitive) == 0)
+			{
+				const QString robotName = pathParts[index + 1].trimmed();
+				if (!robotName.isEmpty())
+				{
+					return robotName;
+				}
+				break;
+			}
+		}
+		return "RobotA";
 	}
 
 	FANUCRobotCtrl* GetFirstFanucDriver(ContralUnit* contralUnit, QWidget* parent)
@@ -129,6 +163,111 @@ namespace
 			.arg(QCoreApplication::applicationName(),
 				versionText,
 				QDir::toNativeSeparators(QCoreApplication::applicationDirPath()));
+	}
+
+	RobotCalculation::SampleAxis InferLaserSampleAxis(
+		const QVector<RobotCalculation::IndexedPoint3D>& points)
+	{
+		if (points.size() < 2)
+		{
+			return RobotCalculation::SampleAxis::AxisY;
+		}
+
+		QVector<double> xValues;
+		QVector<double> yValues;
+		xValues.reserve(points.size());
+		yValues.reserve(points.size());
+		for (const RobotCalculation::IndexedPoint3D& point : points)
+		{
+			xValues.push_back(point.point.x());
+			yValues.push_back(point.point.y());
+		}
+
+		auto percentileValue = [](QVector<double> values, double percentile) -> double
+		{
+			if (values.isEmpty())
+			{
+				return 0.0;
+			}
+			std::sort(values.begin(), values.end());
+			const double clampedPercentile = std::clamp(percentile, 0.0, 1.0);
+			const int index = static_cast<int>(std::round(clampedPercentile * (values.size() - 1)));
+			return values[index];
+		};
+
+		const double robustMinX = percentileValue(xValues, 0.05);
+		const double robustMaxX = percentileValue(xValues, 0.95);
+		const double robustMinY = percentileValue(yValues, 0.05);
+		const double robustMaxY = percentileValue(yValues, 0.95);
+		return (robustMaxX - robustMinX) > (robustMaxY - robustMinY)
+			? RobotCalculation::SampleAxis::AxisX
+			: RobotCalculation::SampleAxis::AxisY;
+	}
+
+	RobotCalculation::LowerWeldFilterParams BuildCliOriginalTrackFitParams(
+		RobotCalculation::SampleAxis sampleAxis)
+	{
+		RobotCalculation::LowerWeldFilterParams params;
+		params.sampleAxis = sampleAxis;
+		params.fitMode = RobotCalculation::LowerWeldFitMode::PreservePath;
+		params.zThreshold = -230.0;
+		params.zJumpThreshold = 3.0;
+		params.zContinuityThreshold = 2.0;
+		params.segmentBreakDistance = 6.0;
+		params.keepLongestSegmentOnly = true;
+		params.sampleStep = 2.0;
+		params.searchWindow = 8.0;
+		params.lineFitTrimCount = 0;
+		params.piecewiseFitTolerance = 4.0;
+		params.piecewiseMinSegmentPoints = 10;
+		params.minPointCount = 4;
+		params.smoothRadius = 3;
+		return params;
+	}
+
+	RobotCalculation::LowerWeldFilterParams BuildCliTrapezoidFitParams(
+		const RobotCalculation::LowerWeldFilterParams& originalFitParams)
+	{
+		RobotCalculation::LowerWeldFilterParams params = originalFitParams;
+		params.fitMode = RobotCalculation::LowerWeldFitMode::TrapezoidFit;
+		params.zThreshold = std::numeric_limits<double>::max();
+		params.zJumpThreshold = 0.0;
+		params.zContinuityThreshold = 0.0;
+		params.keepLongestSegmentOnly = false;
+		params.searchWindow = std::max(2.0, originalFitParams.sampleStep);
+		params.lineFitTrimCount = 0;
+		params.piecewiseFitTolerance = std::max(5.0, originalFitParams.piecewiseFitTolerance);
+		params.piecewiseMinSegmentPoints = std::max(12, originalFitParams.piecewiseMinSegmentPoints);
+		params.minPointCount = 2;
+		params.smoothRadius = 0;
+		return params;
+	}
+
+	QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
+		const QVector<RobotCalculation::LowerWeldFilterPoint>& points)
+	{
+		QVector<RobotCalculation::IndexedPoint3D> indexedPoints;
+		indexedPoints.reserve(points.size());
+		for (const RobotCalculation::LowerWeldFilterPoint& point : points)
+		{
+			RobotCalculation::IndexedPoint3D indexedPoint;
+			indexedPoint.index = point.index;
+			indexedPoint.point = point.point;
+			indexedPoints.push_back(indexedPoint);
+		}
+		return indexedPoints;
+	}
+
+	QString BuildClassifiedOutputPath(const QString& inputPath)
+	{
+		const QFileInfo info(inputPath);
+		return info.dir().filePath(info.completeBaseName() + "_Classified.txt");
+	}
+
+	QString BuildNoiseOutputPath(const QString& outputPath)
+	{
+		const QFileInfo info(outputPath);
+		return info.dir().filePath(info.completeBaseName() + "_Noise.txt");
 	}
 }
 
@@ -466,6 +605,10 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --fanuc-pr20-diag                 仅读取 FANUC PR[20] 诊断点\n";
 		out << "  --fanuc-raw <CMD>                 发送一条原始 FANUC 服务命令\n";
 		out << "  --fanuc-call <PROGRAM>            调用机器人程序\n";
+		out << "  --laser-classify <FILE>           对激光点云做去噪/拟合/起终点拐点分类\n";
+		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
+		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用 WeldSeamCompParam.ini 补偿\n";
+		out << "  --apply-weld-seam-comp-output <FILE> 指定补偿结果输出文件，默认另存 _SeamComp\n";
 		out << "  --quit-after <ms>                 指定毫秒后退出程序\n";
 		out.flush();
 		QTimer::singleShot(0, QCoreApplication::instance(), &QCoreApplication::quit);
@@ -491,6 +634,32 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	{
 		LogCommandLineMessage("CLI 打开相机参数窗口");
 		OpenCameraParamDialog();
+	}
+
+	const int laserClassifyIndex = arguments.indexOf("--laser-classify");
+	if (laserClassifyIndex >= 0 && laserClassifyIndex + 1 < arguments.size())
+	{
+		const QString inputPath = arguments[laserClassifyIndex + 1];
+		QString outputPath;
+		const int laserOutputIndex = arguments.indexOf("--laser-classify-output");
+		if (laserOutputIndex >= 0 && laserOutputIndex + 1 < arguments.size())
+		{
+			outputPath = arguments[laserOutputIndex + 1];
+		}
+		RunLaserClassifyForCli(inputPath, outputPath);
+	}
+
+	const int weldSeamCompIndex = arguments.indexOf("--apply-weld-seam-comp");
+	if (weldSeamCompIndex >= 0 && weldSeamCompIndex + 1 < arguments.size())
+	{
+		const QString inputPath = arguments[weldSeamCompIndex + 1];
+		QString outputPath;
+		const int weldSeamCompOutputIndex = arguments.indexOf("--apply-weld-seam-comp-output");
+		if (weldSeamCompOutputIndex >= 0 && weldSeamCompOutputIndex + 1 < arguments.size())
+		{
+			outputPath = arguments[weldSeamCompOutputIndex + 1];
+		}
+		RunWeldSeamCompForCli(inputPath, outputPath);
 	}
 
 	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriverForCli();
@@ -669,6 +838,7 @@ bool QtWidgetsApplication4::UploadFanucServiceBundleForCli(FANUCRobotCtrl* pFanu
 		{ "服务库", "SDK/FANUC/FanucServiceLib.kl", QString(), 0 },
 		{ "常驻服务", "SDK/FANUC/FanucResidentService.kl", QString(), 0 },
 		{ "监控服务", "SDK/FANUC/FanucMonitorService.kl", QString(), 0 },
+		{ "通用任务运行器", "SDK/FANUC/FanucJobRunner.kl", QString(), 0 },
 		{ "点动缓冲加载程序", "SDK/FANUC/LOADJOGBUF.kl", QString(), 0 },
 		{ "合并启动TP", "SDK/FANUC/STARTALL.tp", "/md/STARTALL.tp", 1 },
 		{ "直角点动TP", "SDK/FANUC/FANUC_JOGL.ls", QString(), 2 },
@@ -746,6 +916,196 @@ void QtWidgetsApplication4::RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanu
 		LogCommandLineMessage(QString("CLI FANUC DIAG %1 -> %2")
 			.arg(command, QString::fromStdString(response)));
 	}
+}
+
+void QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const
+{
+	QString normalizedInputPath = QDir::fromNativeSeparators(inputPath.trimmed());
+	if (normalizedInputPath.isEmpty())
+	{
+		LogCommandLineMessage("CLI 激光点云分类失败：输入文件为空。");
+		return;
+	}
+
+	QFileInfo inputInfo(normalizedInputPath);
+	if (!inputInfo.isAbsolute())
+	{
+		inputInfo = QFileInfo(QDir::current().filePath(normalizedInputPath));
+	}
+	if (!inputInfo.exists())
+	{
+		LogCommandLineMessage(QString("CLI 激光点云分类失败：未找到输入文件 %1")
+			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
+		return;
+	}
+
+	QVector<RobotCalculation::IndexedPoint3D> inputPoints;
+	QString error;
+	if (!RobotDataHelper::LoadIndexedPoint3DFile(inputInfo.absoluteFilePath(), inputPoints, &error))
+	{
+		LogCommandLineMessage("CLI 激光点云分类失败：" + error);
+		return;
+	}
+
+	const RobotCalculation::SampleAxis sampleAxis = InferLaserSampleAxis(inputPoints);
+	const RobotCalculation::LowerWeldFilterParams originalParams = BuildCliOriginalTrackFitParams(sampleAxis);
+	const RobotCalculation::LowerWeldFilterResult originalFitResult =
+		RobotCalculation::FilterLowerWeldPath(inputPoints, originalParams);
+	if (!originalFitResult.ok)
+	{
+		LogCommandLineMessage("CLI 激光点云分类失败，原始轨迹拟合失败：" + originalFitResult.error);
+		return;
+	}
+
+	const RobotCalculation::LowerWeldClassificationResult classifiedResult =
+		RobotCalculation::ClassifyLowerWeldPoints(originalFitResult, originalParams.sampleAxis);
+	if (!classifiedResult.ok)
+	{
+		LogCommandLineMessage("CLI 激光点云分类失败，点位分类失败：" + classifiedResult.error);
+		return;
+	}
+
+	const QString normalizedOutputPath = outputPath.trimmed().isEmpty()
+		? BuildClassifiedOutputPath(inputInfo.absoluteFilePath())
+		: QDir::fromNativeSeparators(outputPath.trimmed());
+	const QString classifiedOutputPath = QFileInfo(normalizedOutputPath).isAbsolute()
+		? QFileInfo(normalizedOutputPath).absoluteFilePath()
+		: QFileInfo(QDir::current().filePath(normalizedOutputPath)).absoluteFilePath();
+	const QString noiseOutputPath = BuildNoiseOutputPath(classifiedOutputPath);
+
+	QSet<int> validIndexes;
+	validIndexes.reserve(originalFitResult.points.size());
+	for (const RobotCalculation::LowerWeldFilterPoint& point : originalFitResult.points)
+	{
+		validIndexes.insert(point.index);
+	}
+
+	QStringList classifiedLines;
+	classifiedLines << "# index x y z type_code type_name source";
+	classifiedLines << "# 1=start 2=end 3=inner_corner 4=outer_corner 5=normal 6=noise";
+	for (const RobotCalculation::LowerWeldClassifiedPoint& point : classifiedResult.points)
+	{
+		classifiedLines << QString("%1 %2 %3 %4 %5 %6 %7")
+			.arg(point.index)
+			.arg(point.point.x(), 0, 'f', 6)
+			.arg(point.point.y(), 0, 'f', 6)
+			.arg(point.point.z(), 0, 'f', 6)
+			.arg(RobotCalculation::LowerWeldPointTypeCode(point.type))
+			.arg(RobotCalculation::LowerWeldPointTypeName(point.type))
+			.arg(point.source.isEmpty() ? "-" : point.source);
+	}
+
+	QStringList noiseLines;
+	noiseLines << "# index x y z type_code type_name source";
+	noiseLines << "# noise points filtered out before final weld fit";
+	int noiseCount = 0;
+	for (const RobotCalculation::IndexedPoint3D& point : inputPoints)
+	{
+		if (validIndexes.contains(point.index))
+		{
+			continue;
+		}
+
+		++noiseCount;
+		noiseLines << QString("%1 %2 %3 %4 %5 %6 %7")
+			.arg(point.index)
+			.arg(point.point.x(), 0, 'f', 6)
+			.arg(point.point.y(), 0, 'f', 6)
+			.arg(point.point.z(), 0, 'f', 6)
+			.arg(RobotCalculation::LowerWeldPointTypeCode(RobotCalculation::LowerWeldPointType::Noise))
+			.arg(RobotCalculation::LowerWeldPointTypeName(RobotCalculation::LowerWeldPointType::Noise))
+			.arg("raw_noise");
+	}
+
+	if (!RobotDataHelper::SaveTextFileLines(classifiedOutputPath, classifiedLines, &error))
+	{
+		LogCommandLineMessage("CLI 激光点云分类失败，保存分类文件失败：" + error);
+		return;
+	}
+	if (!RobotDataHelper::SaveTextFileLines(noiseOutputPath, noiseLines, &error))
+	{
+		LogCommandLineMessage("CLI 激光点云分类失败，保存杂点文件失败：" + error);
+		return;
+	}
+
+	LogCommandLineMessage(QString("CLI 激光点云分类完成（原始拟合）：输入=%1，主轴=%2，分类点=%3，杂点=%4")
+		.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath()))
+		.arg(sampleAxis == RobotCalculation::SampleAxis::AxisX ? "X" : "Y")
+		.arg(classifiedResult.points.size())
+		.arg(noiseCount));
+	LogCommandLineMessage(QString("CLI 分类统计：起点=%1 终点=%2 内拐点=%3 外拐点=%4 普通点=%5")
+		.arg(classifiedResult.startCount)
+		.arg(classifiedResult.endCount)
+		.arg(classifiedResult.innerCornerCount)
+		.arg(classifiedResult.outerCornerCount)
+		.arg(classifiedResult.normalCount));
+	LogCommandLineMessage(QString("CLI 分类结果文件：%1")
+		.arg(QDir::toNativeSeparators(classifiedOutputPath)));
+	LogCommandLineMessage(QString("CLI 杂点文件：%1")
+		.arg(QDir::toNativeSeparators(noiseOutputPath)));
+}
+
+void QtWidgetsApplication4::RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const
+{
+	QString normalizedInputPath = QDir::fromNativeSeparators(inputPath.trimmed());
+	if (normalizedInputPath.isEmpty())
+	{
+		LogCommandLineMessage("CLI 焊道补偿失败：输入文件为空。");
+		return;
+	}
+
+	QFileInfo inputInfo(normalizedInputPath);
+	if (!inputInfo.isAbsolute())
+	{
+		inputInfo = QFileInfo(QDir::current().filePath(normalizedInputPath));
+	}
+	if (!inputInfo.exists())
+	{
+		LogCommandLineMessage(QString("CLI 焊道补偿失败：未找到输入文件 %1")
+			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
+		return;
+	}
+
+	const QString normalizedOutputPath = outputPath.trimmed().isEmpty()
+		? BuildWeldSeamCompOutputPath(inputInfo.absoluteFilePath())
+		: QDir::fromNativeSeparators(outputPath.trimmed());
+	const QString resolvedOutputPath = QFileInfo(normalizedOutputPath).isAbsolute()
+		? QFileInfo(normalizedOutputPath).absoluteFilePath()
+		: QFileInfo(QDir::current().filePath(normalizedOutputPath)).absoluteFilePath();
+
+	const Qt::CaseSensitivity pathCaseSensitivity =
+#ifdef Q_OS_WIN
+		Qt::CaseInsensitive;
+#else
+		Qt::CaseSensitive;
+#endif
+	if (QString::compare(inputInfo.absoluteFilePath(), resolvedOutputPath, pathCaseSensitivity) == 0)
+	{
+		LogCommandLineMessage(QString("CLI 焊道补偿失败：输出文件不能覆盖输入文件 %1")
+			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
+		return;
+	}
+
+	const QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath());
+	MeasureThenWeldService service;
+	QString summary;
+	QString error;
+	if (!service.ApplyWeldSeamCompToPoseFile(
+		robotName,
+		inputInfo.absoluteFilePath(),
+		resolvedOutputPath,
+		summary,
+		error))
+	{
+		LogCommandLineMessage("CLI 焊道补偿失败：" + error);
+		return;
+	}
+
+	LogCommandLineMessage(QString("CLI 焊道补偿完成：输入=%1，输出=%2，机器人=%3")
+		.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath()))
+		.arg(QDir::toNativeSeparators(resolvedOutputPath))
+		.arg(robotName));
+	LogCommandLineMessage("CLI 焊道补偿摘要：" + summary);
 }
 
 bool QtWidgetsApplication4::LoadGrooveCameraIP(QString& cameraIP) const
@@ -921,13 +1281,14 @@ void QtWidgetsApplication4::RobotRunTest()
 		const QString serviceLibPath = FindProjectFilePath("SDK/FANUC/FanucServiceLib.kl");
 		const QString residentServicePath = FindProjectFilePath("SDK/FANUC/FanucResidentService.kl");
 		const QString monitorServicePath = FindProjectFilePath("SDK/FANUC/FanucMonitorService.kl");
+		const QString jobRunnerPath = FindProjectFilePath("SDK/FANUC/FanucJobRunner.kl");
 		const QString loadJogBufferPath = FindProjectFilePath("SDK/FANUC/LOADJOGBUF.kl");
 		const QString startAllPath = FindProjectFilePath("SDK/FANUC/STARTALL.tp");
 		const QString joglPath = FindProjectFilePath("SDK/FANUC/FANUC_JOGL.ls");
 		const QString jogjPath = FindProjectFilePath("SDK/FANUC/FANUC_JOGJ.ls");
-		if (serviceLibPath.isEmpty() || residentServicePath.isEmpty() || monitorServicePath.isEmpty() || loadJogBufferPath.isEmpty() || startAllPath.isEmpty() || joglPath.isEmpty() || jogjPath.isEmpty())
+		if (serviceLibPath.isEmpty() || residentServicePath.isEmpty() || monitorServicePath.isEmpty() || jobRunnerPath.isEmpty() || loadJogBufferPath.isEmpty() || startAllPath.isEmpty() || joglPath.isEmpty() || jogjPath.isEmpty())
 		{
-			QMessageBox::warning(this, "FANUC测试程序", "未找到测试程序文件：FanucServiceLib.kl / FanucResidentService.kl / FanucMonitorService.kl / LOADJOGBUF.kl / STARTALL.tp / FANUC_JOGL.ls / FANUC_JOGJ.ls");
+			QMessageBox::warning(this, "FANUC测试程序", "未找到测试程序文件：FanucServiceLib.kl / FanucResidentService.kl / FanucMonitorService.kl / FanucJobRunner.kl / LOADJOGBUF.kl / STARTALL.tp / FANUC_JOGL.ls / FANUC_JOGJ.ls");
 			return;
 		}
 
@@ -952,6 +1313,14 @@ void QtWidgetsApplication4::RobotRunTest()
 		if (monitorRet != 0)
 		{
 			QMessageBox::warning(this, "FANUC测试程序", GetStr("监控服务发送失败，返回码=%d\n文件=%s", monitorRet, monitorServicePathBytes.constData()).c_str());
+			return;
+		}
+
+		const QByteArray jobRunnerPathBytes = jobRunnerPath.toLocal8Bit();
+		const int jobRunnerRet = pFanucDriver->UploadKlFile(jobRunnerPathBytes.constData());
+		if (jobRunnerRet != 0)
+		{
+			QMessageBox::warning(this, "FANUC测试程序", GetStr("通用任务运行器发送失败，返回码=%d\n文件=%s", jobRunnerRet, jobRunnerPathBytes.constData()).c_str());
 			return;
 		}
 
@@ -988,10 +1357,11 @@ void QtWidgetsApplication4::RobotRunTest()
 		}
 
 		QMessageBox::information(this, "FANUC测试程序",
-			GetStr("常驻服务、监控服务、点动缓冲程序和点动TP发送成功。\n\n现在请在示教器重新运行 STARTALL，确认服务已启动后再点击确定。\n\n文件：\n%s\n%s\n%s\n%s\n%s\n%s\n%s",
+			GetStr("常驻服务、监控服务、通用任务运行器、点动缓冲程序和点动TP发送成功。\n\n现在请在示教器重新运行 STARTALL，确认服务已启动后再点击确定。\n\n文件：\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s",
 				serviceLibPathBytes.constData(),
 				residentServicePathBytes.constData(),
 				monitorServicePathBytes.constData(),
+				jobRunnerPathBytes.constData(),
 				loadJogBufferPathBytes.constData(),
 				startAllPathBytes.constData(),
 				joglPathBytes.constData(),

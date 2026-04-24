@@ -42,7 +42,9 @@ constexpr int kHandEyeAutoLastSampleStep = 16;
 constexpr int kHandEyeAutoDoneStep = 999;
 constexpr int kHandEyeAutoAbortValue = -1;
 constexpr const char* kHandEyeAutoProgramName = "FANUC_HECALIB";
+constexpr int kHandEyeRobotCheckStartPrIndex = 79;
 constexpr int kHandEyeRobotCheckPrIndex = 80;
+constexpr int kHandEyeRobotCheckStateReg = 92;
 constexpr const char* kHandEyeRobotCheckProgramName = "FANUC_HECHECK";
 
 QString FormatDouble(double value, int precision = 6)
@@ -609,16 +611,21 @@ bool HandEyeCalibrationDialog::CaptureSample(int index)
     return true;
 }
 
-bool HandEyeCalibrationDialog::EnsureCameraReadyForAutoCalibration(QString* error)
+bool HandEyeCalibrationDialog::EnsureCameraReady(const QString& sceneName, Eigen::Vector3d* cameraPointOut, QString* error)
 {
     Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
     QString latestError;
     if (ReadLatestCameraPoint(cameraPoint, &latestError))
     {
-        AppendLog(QString("自动标定前检查完成：相机已在线，相机点=(%1, %2, %3)")
+        AppendLog(QString("%1：相机已在线，相机点=(%2, %3, %4)")
+            .arg(sceneName)
             .arg(cameraPoint.x(), 0, 'f', 3)
             .arg(cameraPoint.y(), 0, 'f', 3)
             .arg(cameraPoint.z(), 0, 'f', 3));
+        if (cameraPointOut != nullptr)
+        {
+            *cameraPointOut = cameraPoint;
+        }
         return true;
     }
 
@@ -632,7 +639,7 @@ bool HandEyeCalibrationDialog::EnsureCameraReadyForAutoCalibration(QString* erro
     }
 
     QString cameraIP;
-    AppendLog(QString("自动标定前未检测到有效相机点，准备自动打开相机。原因：%1").arg(latestError));
+    AppendLog(QString("%1：未检测到有效相机点，准备自动打开相机。原因：%2").arg(sceneName, latestError));
     if (!m_startCamera(cameraIP))
     {
         if (error != nullptr)
@@ -642,7 +649,7 @@ bool HandEyeCalibrationDialog::EnsureCameraReadyForAutoCalibration(QString* erro
         return false;
     }
 
-    AppendLog(QString("已触发相机启动：%1，等待首帧三维点...").arg(cameraIP));
+    AppendLog(QString("%1：已触发相机启动：%2，等待首帧三维点...").arg(sceneName, cameraIP));
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 3s;
@@ -650,18 +657,23 @@ bool HandEyeCalibrationDialog::EnsureCameraReadyForAutoCalibration(QString* erro
     {
         if (ReadLatestCameraPoint(cameraPoint, &latestError))
         {
-            AppendLog(QString("相机启动成功，首帧三维点=(%1, %2, %3)")
+            AppendLog(QString("%1：相机启动成功，首帧三维点=(%2, %3, %4)")
+                .arg(sceneName)
                 .arg(cameraPoint.x(), 0, 'f', 3)
                 .arg(cameraPoint.y(), 0, 'f', 3)
                 .arg(cameraPoint.z(), 0, 'f', 3));
+            if (cameraPointOut != nullptr)
+            {
+                *cameraPointOut = cameraPoint;
+            }
             return true;
         }
-        std::this_thread::sleep_for(100ms);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     if (error != nullptr)
     {
-        *error = QString("相机已尝试打开，但 3 秒内未收到有效三维点：%1").arg(latestError);
+        *error = QString("%1：相机已尝试打开，但 3 秒内未收到有效三维点：%2").arg(sceneName, latestError);
     }
     return false;
 }
@@ -733,7 +745,7 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
     }
 
     Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
-    if (!ReadLatestCameraPoint(cameraPoint, &error))
+    if (!EnsureCameraReady("手眼参数检测前检查", &cameraPoint, &error))
     {
         QMessageBox::warning(this, "手眼标定", error);
         AppendLog("手眼参数检测失败：" + error);
@@ -765,45 +777,58 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
     FANUCRobotCtrl* fanucDriver = CurrentFanucDriver(nullptr);
     if (fanucDriver != nullptr)
     {
-        QString uploadError;
-        if (!UploadRobotHandEyeCheckProgram(&uploadError))
-        {
-            AppendLog(QString("机器人手眼检测程序自动上传失败，将继续尝试直接调用机器人现有程序：%1").arg(uploadError));
-        }
+        AppendLog(QString("机器人手眼检测使用机器人侧现有程序：%1；SENSOR 指令由现场 TP 程序提供，不在检测时自动编译上传。")
+            .arg(kHandEyeRobotCheckProgramName));
 
         int config[7] = { 0 };
-        double pr80Seed[8] =
+        double prStartSeed[8] =
         {
             robotPose.dX, robotPose.dY, robotPose.dZ,
             robotPose.dRX, robotPose.dRY, robotPose.dRZ,
             robotPose.dBX, robotPose.dBY
         };
-        if (!fanucDriver->SetPosVar(kHandEyeRobotCheckPrIndex, pr80Seed, POSVAR, 1, config, ENGINEEVAR, POSVAR))
+        if (!fanucDriver->SetPosVar(kHandEyeRobotCheckStartPrIndex, prStartSeed, POSVAR, 1, config, ENGINEEVAR, POSVAR))
         {
-            error = QString("写入 PR[%1] 失败，无法启动机器人手眼检测。").arg(kHandEyeRobotCheckPrIndex);
+            error = QString("写入 PR[%1] 失败，无法启动机器人手眼检测。").arg(kHandEyeRobotCheckStartPrIndex);
             QMessageBox::warning(this, "手眼标定", error);
             AppendLog("手眼参数检测失败：" + error);
             return false;
         }
-        AppendLog(QString("已将当前位置写入 PR[%1]，准备调用机器人手眼检测程序。").arg(kHandEyeRobotCheckPrIndex));
+        AppendLog(QString("已将当前位置写入 PR[%1]，准备调用机器人手眼检测程序。")
+            .arg(kHandEyeRobotCheckStartPrIndex));
 
-        if (!fanucDriver->CallJob(kHandEyeRobotCheckProgramName))
+        AppendLog(QString("准备调用机器人手眼检测程序：%1，按 R[%2]=10/20/1 这套状态流程等待完成。")
+            .arg(kHandEyeRobotCheckProgramName)
+            .arg(kHandEyeRobotCheckStateReg));
+
+        int robotState = 0;
+        if (!fanucDriver->CallJobAndWaitStateDone(
+            kHandEyeRobotCheckProgramName,
+            kHandEyeRobotCheckStateReg,
+            1,
+            10,
+            20,
+            5000,
+            10000,
+            100,
+            &robotState,
+            true))
         {
-            error = QString("调用机器人程序 %1 失败。若本机 WinOLPC 不支持 SENSOR 指令，请先在机器人侧手动创建同名 TP。").arg(kHandEyeRobotCheckProgramName);
+            error = QString("机器人程序 %1 未按状态寄存器约定完成，R[%2] 最终=%3。请确认 TP 程序里有 R[%2]=10/20/1。")
+                .arg(kHandEyeRobotCheckProgramName)
+                .arg(kHandEyeRobotCheckStateReg)
+                .arg(robotState);
             QMessageBox::warning(this, "手眼标定", error);
             AppendLog("手眼参数检测失败：" + error);
             return false;
         }
 
-        const int waitRet = fanucDriver->CheckRobotDone(200);
-        if (waitRet < 0)
-        {
-            error = QString("等待机器人程序 %1 执行完成失败，返回=%2。").arg(kHandEyeRobotCheckProgramName).arg(waitRet);
-            QMessageBox::warning(this, "手眼标定", error);
-            AppendLog("手眼参数检测失败：" + error);
-            return false;
-        }
+        AppendLog(QString("机器人程序已完成：R[%1]=%2，准备读取 PR[%3]。")
+            .arg(kHandEyeRobotCheckStateReg)
+            .arg(robotState)
+            .arg(kHandEyeRobotCheckPrIndex));
 
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         double pr80[6] = { 0.0 };
         if (fanucDriver->GetPosVar(kHandEyeRobotCheckPrIndex, pr80, config, POSVAR) != 0)
         {
@@ -884,6 +909,108 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
         .arg(laserPoint.z(), 0, 'f', 3)
         .arg(robotDetailText);
     QMessageBox::information(this, "手眼参数检测", resultText);
+
+    if (fanucDriver != nullptr)
+    {
+        const QString moveQuestion = QString(
+            "是否运动到本地矩阵计算的激光点？\n\n"
+            "目标点：\n"
+            "X=%1  Y=%2  Z=%3\n\n"
+            "运动方式：MOVL\n"
+            "速度：500 mm/min\n"
+            "姿态：保持当前姿态不变")
+            .arg(laserPoint.x(), 0, 'f', 3)
+            .arg(laserPoint.y(), 0, 'f', 3)
+            .arg(laserPoint.z(), 0, 'f', 3);
+
+        if (QMessageBox::question(
+            this,
+            "运动到激光点",
+            moveQuestion,
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No) == QMessageBox::Yes)
+        {
+            if (fanucDriver->CheckDonePassive() == 0)
+            {
+                const QString busyMessage = "机器人当前处于运动中，未执行运动到激光点。";
+                QMessageBox::warning(this, "运动到激光点", busyMessage);
+                AppendLog(busyMessage);
+                return false;
+            }
+
+            T_ROBOT_COORS targetPose = robotPose;
+            targetPose.dX = laserPoint.x();
+            targetPose.dY = laserPoint.y();
+            targetPose.dZ = laserPoint.z();
+
+            AppendLog(QString("开始运动到激光点：X=%1 Y=%2 Z=%3，MOVL 500 mm/min。")
+                .arg(targetPose.dX, 0, 'f', 3)
+                .arg(targetPose.dY, 0, 'f', 3)
+                .arg(targetPose.dZ, 0, 'f', 3));
+
+            const bool moveOk = fanucDriver->MoveByJob(
+                targetPose,
+                T_ROBOT_MOVE_SPEED(500.0, 0.0, 0.0),
+                fanucDriver->m_nExternalAxleType,
+                "MOVL");
+            const int done = moveOk ? fanucDriver->CheckRobotDone(100) : -1;
+            if (!moveOk || done <= 0)
+            {
+                const QString moveError = QString("运动到激光点失败：Move=%1，CheckRobotDone=%2")
+                    .arg(moveOk ? "OK" : "FAIL")
+                    .arg(done);
+                QMessageBox::warning(this, "运动到激光点", moveError);
+                AppendLog(moveError);
+                return false;
+            }
+
+            AppendLog("已运动到激光点。");
+            QMessageBox::information(this, "运动到激光点", "已运动到激光点。");
+
+            const QString returnQuestion = QString(
+                "是否退回扫描位置？\n\n"
+                "扫描位置：\n"
+                "X=%1  Y=%2  Z=%3\n\n"
+                "运动方式：MOVL\n"
+                "速度：500 mm/min\n"
+                "姿态：恢复检测开始时的扫描姿态")
+                .arg(robotPose.dX, 0, 'f', 3)
+                .arg(robotPose.dY, 0, 'f', 3)
+                .arg(robotPose.dZ, 0, 'f', 3);
+
+            if (QMessageBox::question(
+                this,
+                "退回扫描位置",
+                returnQuestion,
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No) == QMessageBox::Yes)
+            {
+                AppendLog(QString("开始退回扫描位置：X=%1 Y=%2 Z=%3，MOVL 500 mm/min。")
+                    .arg(robotPose.dX, 0, 'f', 3)
+                    .arg(robotPose.dY, 0, 'f', 3)
+                    .arg(robotPose.dZ, 0, 'f', 3));
+
+                const bool returnOk = fanucDriver->MoveByJob(
+                    robotPose,
+                    T_ROBOT_MOVE_SPEED(500.0, 0.0, 0.0),
+                    fanucDriver->m_nExternalAxleType,
+                    "MOVL");
+                const int returnDone = returnOk ? fanucDriver->CheckRobotDone(100) : -1;
+                if (!returnOk || returnDone <= 0)
+                {
+                    const QString returnError = QString("退回扫描位置失败：Move=%1，CheckRobotDone=%2")
+                        .arg(returnOk ? "OK" : "FAIL")
+                        .arg(returnDone);
+                    QMessageBox::warning(this, "退回扫描位置", returnError);
+                    AppendLog(returnError);
+                    return false;
+                }
+
+                AppendLog("已退回扫描位置。");
+                QMessageBox::information(this, "退回扫描位置", "已退回扫描位置。");
+            }
+        }
+    }
     return true;
 }
 
@@ -1102,7 +1229,7 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
         return false;
     }
 
-    if (!EnsureCameraReadyForAutoCalibration(&error))
+    if (!EnsureCameraReady("自动标定前检查", nullptr, &error))
     {
         m_bAutoCalibrationRunning.store(false);
         QMessageBox::warning(this, "手眼标定", error);
