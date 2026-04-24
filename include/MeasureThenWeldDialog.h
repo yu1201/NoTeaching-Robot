@@ -72,9 +72,11 @@ private:
 
     // 每个危险动作前弹窗确认；取消会退出当前流程。
     bool ConfirmContinue(const QString& actionName);
+    bool ShowCheckpointDialog(const QString& title, const QString& detail);
 
     // 预设参数流程入口和线扫处理占位入口。
     void RunPresetParamFlow();
+    void RunSkipScanWeldFlow();
     void RunLineScanProcess();
     void AppendLog(const QString& text);
     void SetFlowStep(const QString& text);
@@ -87,6 +89,7 @@ private:
     StopCameraFunc m_stopCamera;
 
     QPushButton* m_pPresetParamBtn = nullptr;
+    QPushButton* m_pSkipScanWeldBtn = nullptr;
     QPushButton* m_pLineScanProcessBtn = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
 

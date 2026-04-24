@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QIODevice>
 #include <QtEndian>
+#include <limits>
 #include <vector>
 #include <opencv2/core.hpp>
 
@@ -174,7 +175,14 @@ struct PointCloundResultFrame
     {
         QByteArray body = serializeBody();
         checksum = calculateChecksum(body);
-        totalSize = headerSize + body.size() + sizeof(quint32);
+        const qsizetype maxBodySize = static_cast<qsizetype>(
+            std::numeric_limits<quint32>::max() - headerSize - sizeof(quint32));
+        if (body.size() > maxBodySize)
+        {
+            qWarning() << "PointCloundResultFrame body is too large:" << body.size();
+            return {};
+        }
+        totalSize = headerSize + static_cast<quint32>(body.size()) + sizeof(quint32);
 
         QByteArray packet;
         QDataStream s(&packet, QIODevice::WriteOnly);

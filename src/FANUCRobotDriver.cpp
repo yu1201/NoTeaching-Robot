@@ -22,6 +22,8 @@ namespace
 {
 	const int FANUC_SOCKET_TIMEOUT_MS = 3000;
 	const size_t FANUC_SOCKET_MAX_LINE_SIZE = 4096;
+	const int FANUC_DEFAULT_MOTION_STATE_REG = 93;
+	const int FANUC_WELD_PATH_CNT_VALUE = 50;
 
 	long long FanucElapsedMs(std::chrono::steady_clock::time_point start)
 	{
@@ -393,35 +395,47 @@ namespace
 		const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
 		const T_AXISUNIT& axisUnit)
 	{
-		const size_t lineCount = moveInfos.size() + 3;
+		const size_t lineCount = moveInfos.size() + 5;
 		std::ostringstream oss;
 		oss << FanucBuildLsHeader(programName, lineCount, "Auto FANUC move");
 		oss << "/MN" << "\n";
 		oss << "   1:  UFRAME_NUM=0 ;" << "\n";
 		oss << "   2:  UTOOL_NUM=1 ;" << "\n";
+		oss << GetStr("%4u:  R[%d]=10 ;",
+			static_cast<unsigned>(3),
+			FANUC_DEFAULT_MOTION_STATE_REG) << "\n";
 
 		for (size_t i = 0; i < moveInfos.size(); ++i)
 		{
 			const T_ROBOT_MOVE_INFO& info = moveInfos[i];
 			const size_t pointIndex = i + 1;
-			const size_t lineIndex = i + 3;
+			const size_t lineIndex = i + 4;
+			const bool useFine = (i == 0) || (i + 1 == moveInfos.size());
+			const std::string termination = useFine
+				? "FINE"
+				: GetStr("CNT%d", FANUC_WELD_PATH_CNT_VALUE);
 			if (info.nMoveType == MOVL)
 			{
-				oss << GetStr("%4u:  L P[%u] %.0fmm/sec FINE ;",
+				oss << GetStr("%4u:  L P[%u] %.0fmm/sec %s ;",
 					static_cast<unsigned>(lineIndex),
 					static_cast<unsigned>(pointIndex),
-					FanucLinearSpeed(info.tSpeed.dSpeed)) << "\n";
+					FanucLinearSpeed(info.tSpeed.dSpeed),
+					termination.c_str()) << "\n";
 			}
 			else
 			{
-				oss << GetStr("%4u:  J P[%u] %d%% FINE ;",
+				oss << GetStr("%4u:  J P[%u] %d%% %s ;",
 					static_cast<unsigned>(lineIndex),
 					static_cast<unsigned>(pointIndex),
-					FanucSpeedPercent(info.tSpeed.dSpeed)) << "\n";
+					FanucSpeedPercent(info.tSpeed.dSpeed),
+					termination.c_str()) << "\n";
 			}
 		}
 
-		oss << GetStr("%4u:  END ;", static_cast<unsigned>(moveInfos.size() + 3)) << "\n";
+		oss << GetStr("%4u:  R[%d]=1 ;",
+			static_cast<unsigned>(moveInfos.size() + 4),
+			FANUC_DEFAULT_MOTION_STATE_REG) << "\n";
+		oss << GetStr("%4u:  END ;", static_cast<unsigned>(moveInfos.size() + 5)) << "\n";
 		oss << "/POS" << "\n";
 		for (size_t i = 0; i < moveInfos.size(); ++i)
 		{
@@ -641,6 +655,87 @@ namespace
 		return std::filesystem::exists(filePath, ec);
 	}
 
+	std::filesystem::path FanucAbsolutePath(const std::string& filePath)
+	{
+		std::error_code ec;
+		const std::filesystem::path path(filePath);
+		const std::filesystem::path absolutePath = std::filesystem::absolute(path, ec);
+		return ec ? path : absolutePath;
+	}
+
+	std::string FanucTrim(const std::string& text)
+	{
+		const size_t begin = text.find_first_not_of(" \t\r\n");
+		if (begin == std::string::npos)
+		{
+			return std::string();
+		}
+		const size_t end = text.find_last_not_of(" \t\r\n");
+		return text.substr(begin, end - begin + 1);
+	}
+
+	std::string FanucToLower(std::string text)
+	{
+		std::transform(text.begin(), text.end(), text.begin(),
+			[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+		return text;
+	}
+
+	std::filesystem::path FanucReadWinOlpcOutputDir()
+	{
+		const std::string robotIniPath = FanucFindCompilerToolPath("robot.ini");
+		std::ifstream input(robotIniPath);
+		if (!input.is_open())
+		{
+			return std::filesystem::path();
+		}
+
+		std::string line;
+		while (std::getline(input, line))
+		{
+			if (!FanucStartsWith(line, "Output="))
+			{
+				continue;
+			}
+
+			const std::string outputDir = FanucTrim(line.substr(std::string("Output=").size()));
+			if (!outputDir.empty())
+			{
+				return std::filesystem::path(outputDir);
+			}
+		}
+
+		return std::filesystem::path();
+	}
+
+	std::filesystem::path FanucFindCompiledTpInOutputDir(const std::filesystem::path& requestedTpPath)
+	{
+		const std::filesystem::path outputDir = FanucReadWinOlpcOutputDir();
+		std::error_code ec;
+		if (outputDir.empty() || !std::filesystem::exists(outputDir, ec))
+		{
+			return std::filesystem::path();
+		}
+
+		const std::string wantedStem = FanucToLower(requestedTpPath.stem().string());
+		for (const auto& entry : std::filesystem::directory_iterator(outputDir, ec))
+		{
+			if (ec || !entry.is_regular_file())
+			{
+				continue;
+			}
+
+			const std::filesystem::path candidate = entry.path();
+			if (FanucToLower(candidate.stem().string()) == wantedStem
+				&& FanucToLower(candidate.extension().string()) == ".tp")
+			{
+				return candidate;
+			}
+		}
+
+		return std::filesystem::path();
+	}
+
 	std::string FanucBuildProgramPath(const std::string& unitName, const std::string& fileName)
 	{
 		std::vector<std::string> candidates =
@@ -673,6 +768,8 @@ namespace
 	{
 		const auto compileStart = std::chrono::steady_clock::now();
 		const std::string ktransPath = FanucGetKtransPath();
+		const std::filesystem::path absoluteKlPath = FanucAbsolutePath(klPath);
+		const std::filesystem::path absolutePcPath = FanucAbsolutePath(pcPath);
 		if (!FanucFileExists(ktransPath))
 		{
 			if (pLog != nullptr)
@@ -684,15 +781,15 @@ namespace
 		}
 
 		std::error_code ec;
-		std::filesystem::remove(pcPath, ec);
+		std::filesystem::remove(absolutePcPath, ec);
 
 		const std::string ktransWorkDir = std::filesystem::path(ktransPath).parent_path().string();
 		const std::wstring exePathW(ktransPath.begin(), ktransPath.end());
 		const std::wstring workDirW(ktransWorkDir.begin(), ktransWorkDir.end());
 		const std::wstring commandTextW =
 			L"\"" + exePathW + L"\" \"" +
-			std::wstring(klPath.begin(), klPath.end()) + L"\" \"" +
-			std::wstring(pcPath.begin(), pcPath.end()) + L"\"";
+			absoluteKlPath.wstring() + L"\" \"" +
+			absolutePcPath.wstring() + L"\"";
 		std::vector<wchar_t> commandLine(commandTextW.begin(), commandTextW.end());
 		commandLine.push_back(L'\0');
 
@@ -731,13 +828,13 @@ namespace
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
 
-		if (exitCode != 0 || !FanucFileExists(pcPath))
+		if (exitCode != 0 || !FanucFileExists(absolutePcPath.string()))
 		{
 			if (pLog != nullptr)
 			{
 				pLog->write(LogColor::ERR,
 					"FANUC 编译失败：ktrans 返回码=%lu，KL=%s，PC=%s，WorkDir=%s | 耗时=%lldms",
-					static_cast<unsigned long>(exitCode), klPath.c_str(), pcPath.c_str(), ktransWorkDir.c_str(),
+					static_cast<unsigned long>(exitCode), absoluteKlPath.string().c_str(), absolutePcPath.string().c_str(), ktransWorkDir.c_str(),
 					FanucElapsedMs(compileStart));
 			}
 			return false;
@@ -746,7 +843,7 @@ namespace
 		if (pLog != nullptr)
 		{
 			pLog->write(LogColor::SUCCESS, "FANUC 编译成功：%s | 耗时=%lldms",
-				pcPath.c_str(), FanucElapsedMs(compileStart));
+				absolutePcPath.string().c_str(), FanucElapsedMs(compileStart));
 		}
 		return true;
 	}
@@ -755,6 +852,8 @@ namespace
 	{
 		const auto compileStart = std::chrono::steady_clock::now();
 		const std::string maketpPath = FanucGetMaketpPath();
+		const std::filesystem::path absoluteLsPath = FanucAbsolutePath(lsPath);
+		const std::filesystem::path absoluteTpPath = FanucAbsolutePath(tpPath);
 		if (!FanucFileExists(maketpPath))
 		{
 			if (pLog != nullptr)
@@ -766,15 +865,16 @@ namespace
 		}
 
 		std::error_code ec;
-		std::filesystem::remove(tpPath, ec);
+		std::filesystem::create_directories(absoluteTpPath.parent_path(), ec);
+		std::filesystem::remove(absoluteTpPath, ec);
 
 		const std::string maketpWorkDir = std::filesystem::path(maketpPath).parent_path().string();
 		const std::wstring exePathW(maketpPath.begin(), maketpPath.end());
 		const std::wstring workDirW(maketpWorkDir.begin(), maketpWorkDir.end());
 		const std::wstring commandTextW =
 			L"\"" + exePathW + L"\" \"" +
-			std::wstring(lsPath.begin(), lsPath.end()) + L"\" \"" +
-			std::wstring(tpPath.begin(), tpPath.end()) + L"\"";
+			absoluteLsPath.wstring() + L"\" \"" +
+			absoluteTpPath.wstring() + L"\"";
 		std::vector<wchar_t> commandLine(commandTextW.begin(), commandTextW.end());
 		commandLine.push_back(L'\0');
 
@@ -813,13 +913,33 @@ namespace
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
 
-		if (exitCode != 0 || !FanucFileExists(tpPath))
+		if (exitCode == 0 && !FanucFileExists(absoluteTpPath.string()))
+		{
+			const std::filesystem::path fallbackTpPath = FanucFindCompiledTpInOutputDir(absoluteTpPath);
+			if (!fallbackTpPath.empty())
+			{
+				std::filesystem::copy_file(
+					fallbackTpPath,
+					absoluteTpPath,
+					std::filesystem::copy_options::overwrite_existing,
+					ec);
+				if (!ec && pLog != nullptr)
+				{
+					pLog->write(LogColor::DEFAULT,
+						"FANUC TP编译产物已从 WinOLPC 输出目录复制：%s -> %s",
+						fallbackTpPath.string().c_str(),
+						absoluteTpPath.string().c_str());
+				}
+			}
+		}
+
+		if (exitCode != 0 || !FanucFileExists(absoluteTpPath.string()))
 		{
 			if (pLog != nullptr)
 			{
 				pLog->write(LogColor::ERR,
 					"FANUC TP编译失败：maketp 返回码=%lu，LS=%s，TP=%s，WorkDir=%s | 耗时=%lldms",
-					static_cast<unsigned long>(exitCode), lsPath.c_str(), tpPath.c_str(), maketpWorkDir.c_str(),
+					static_cast<unsigned long>(exitCode), absoluteLsPath.string().c_str(), absoluteTpPath.string().c_str(), maketpWorkDir.c_str(),
 					FanucElapsedMs(compileStart));
 			}
 			return false;
@@ -828,7 +948,7 @@ namespace
 		if (pLog != nullptr)
 		{
 			pLog->write(LogColor::SUCCESS, "FANUC TP编译成功：%s | 耗时=%lldms",
-				tpPath.c_str(), FanucElapsedMs(compileStart));
+				absoluteTpPath.string().c_str(), FanucElapsedMs(compileStart));
 		}
 		return true;
 	}
@@ -846,8 +966,12 @@ FANUCRobotCtrl::FANUCRobotCtrl(std::string strUnitName, RobotLog* pLog)
 	m_nMonitorPort(9001),
 	m_sMonitorText("状态: 监控未连接"),
 	m_nMonitorDone(-1),
+	m_nMonitorDoneRaw(-1),
+	m_nMonitorDoneCandidate(-1),
+	m_nMonitorDoneStableCount(0),
 	m_llMonitorRobotMs(0),
 	m_llMonitorPcRecvMs(0),
+	m_llLastCallJobPcMs(0),
 	m_continuousMoveRunning(false),
 	m_continuousMoveStopRequested(false),
 	m_continuousMoveRobotStarted(false),
@@ -875,6 +999,10 @@ FANUCRobotCtrl::~FANUCRobotCtrl()
 
 namespace
 {
+	constexpr long long FANUC_DONE_STARTUP_GUARD_MS = 1200;
+	constexpr int FANUC_DONE_PASSIVE_STABLE_COUNT = 3;
+	constexpr int FANUC_DONE_ACTIVE_STABLE_COUNT = 4;
+
 	bool FanucEnsureSocket(FANUCRobotCtrl* ctrl)
 	{
 		if (ctrl == nullptr)
@@ -1249,7 +1377,7 @@ T_ANGLE_PULSE FANUCRobotCtrl::GetCurrentPulsePassive(long long* pRobotMs, long l
 	return m_tMonitorPulse;
 }
 
-// 主动读取机器人运行状态：0=运行中，1=停止/完成，-1=通信或解析失败。
+// 主动读取最近一次 CALL_JOB 程序状态：0=程序运行中，1=程序停止/完成，-1=通信或解析失败。
 int FANUCRobotCtrl::CheckDone()
 {
 	std::string response;
@@ -1279,7 +1407,7 @@ int FANUCRobotCtrl::CheckDonePassive(long long* pRobotMs, long long* pPcRecvMs)
 	return m_nMonitorDone;
 }
 
-// 阻塞等待机器人运动结束；通信失败会返回-1，避免断线时永久卡住。
+// 阻塞等待最近一次 CALL_JOB 程序结束；通信失败会返回-1，避免断线时永久卡住。
 int FANUCRobotCtrl::CheckRobotDone(int nDelayTime)
 {
 	if (nDelayTime <= 0)
@@ -1303,10 +1431,13 @@ int FANUCRobotCtrl::CheckRobotDone(int nDelayTime)
 			return nRet;
 		}
 
-		if (nRet != 0)
+		const long long lastCallJobPcMs = m_llLastCallJobPcMs.load();
+		const bool startupGuardActive = (lastCallJobPcMs > 0 && (FanucSteadyMs() - lastCallJobPcMs) < FANUC_DONE_STARTUP_GUARD_MS);
+
+		if (nRet != 0 && !startupGuardActive)
 		{
 			++nStableDoneCount;
-			if (nStableDoneCount >= 2)
+			if (nStableDoneCount >= FANUC_DONE_ACTIVE_STABLE_COUNT)
 			{
 				return nRet;
 			}
@@ -1316,7 +1447,7 @@ int FANUCRobotCtrl::CheckRobotDone(int nDelayTime)
 			nStableDoneCount = 0;
 			if (m_pRobotLog != nullptr && FanucElapsedMs(lastLogTime) >= 5000)
 			{
-				m_pRobotLog->write(LogColor::DEFAULT, "FANUC CheckRobotDone 等待机器人运行结束...");
+				m_pRobotLog->write(LogColor::DEFAULT, "FANUC CheckRobotDone 等待机器人程序运行结束...");
 				lastLogTime = std::chrono::steady_clock::now();
 			}
 		}
@@ -1329,7 +1460,237 @@ int FANUCRobotCtrl::CheckRobotDone(int nDelayTime)
 bool FANUCRobotCtrl::CallJob(std::string sJobName)
 {
 	std::string response;
-	return FanucRequest(this, "CALL_JOB:" + sJobName, response) && FanucIsOkResponse(response);
+	const bool ok = FanucRequest(this, "CALL_JOB:" + sJobName, response) && FanucIsOkResponse(response);
+	if (ok)
+	{
+		m_llLastCallJobPcMs.store(FanucSteadyMs());
+		std::lock_guard<std::mutex> lock(m_monitorMutex);
+		m_nMonitorDone = 0;
+		m_nMonitorDoneRaw = 0;
+		m_nMonitorDoneCandidate = 0;
+		m_nMonitorDoneStableCount = 0;
+	}
+	return ok;
+}
+
+bool FANUCRobotCtrl::CallJobAndWaitStateDone(
+	std::string sJobName,
+	int nStateReg,
+	int nDoneState,
+	int nStartStateA,
+	int nStartStateB,
+	int nStartTimeoutMs,
+	int nFinishTimeoutMs,
+	int nDelayTime,
+	int* pLastState,
+	bool bResetStateBeforeCall)
+{
+	if (pLastState != nullptr)
+	{
+		*pLastState = 0;
+	}
+
+	if (nDelayTime <= 0)
+	{
+		nDelayTime = 100;
+	}
+
+	if (nStartTimeoutMs <= 0)
+	{
+		nStartTimeoutMs = 5000;
+	}
+
+	if (nFinishTimeoutMs <= 0)
+	{
+		nFinishTimeoutMs = 10000;
+	}
+
+	if (bResetStateBeforeCall)
+	{
+		if (!SetIntVar(nStateReg, 0))
+		{
+			if (m_pRobotLog != nullptr)
+			{
+				m_pRobotLog->write(LogColor::ERR,
+					"FANUC CallJobAndWaitStateDone 初始化状态寄存器失败：Program=%s R[%d]",
+					sJobName.c_str(), nStateReg);
+			}
+			return false;
+		}
+
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::DEFAULT,
+				"FANUC CallJobAndWaitStateDone 已清零 R[%d]，准备启动程序：%s",
+				nStateReg, sJobName.c_str());
+		}
+	}
+
+	if (!CallJob(sJobName))
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"FANUC CallJobAndWaitStateDone 调用程序失败：Program=%s",
+				sJobName.c_str());
+		}
+		return false;
+	}
+
+	if (m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::DEFAULT,
+			"FANUC CallJobAndWaitStateDone 已调用程序：%s，等待 R[%d] 进入运行态(%d/%d)或完成态(%d)。",
+			sJobName.c_str(), nStateReg, nStartStateA, nStartStateB, nDoneState);
+	}
+
+	int lastState = 0;
+	if (!WaitStateDone(
+		nStateReg,
+		nDoneState,
+		nStartStateA,
+		nStartStateB,
+		nStartTimeoutMs,
+		nFinishTimeoutMs,
+		nDelayTime,
+		&lastState))
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"FANUC CallJobAndWaitStateDone 等待状态寄存器失败：Program=%s R[%d]=%d",
+				sJobName.c_str(), nStateReg, lastState);
+		}
+		if (pLastState != nullptr)
+		{
+			*pLastState = lastState;
+		}
+		return false;
+	}
+
+	const int jobDone = CheckRobotDone(nDelayTime);
+	if (jobDone <= 0)
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"FANUC CallJobAndWaitStateDone 程序已写完成态，但任务退出失败：Program=%s CheckRobotDone=%d",
+				sJobName.c_str(), jobDone);
+		}
+		if (pLastState != nullptr)
+		{
+			*pLastState = lastState;
+		}
+		return false;
+	}
+
+	if (m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::DEFAULT,
+			"FANUC CallJobAndWaitStateDone 完成：Program=%s R[%d]=%d CheckRobotDone=%d",
+			sJobName.c_str(), nStateReg, lastState, jobDone);
+	}
+
+	if (pLastState != nullptr)
+	{
+		*pLastState = lastState;
+	}
+	return true;
+}
+
+bool FANUCRobotCtrl::WaitStateDone(
+	int nStateReg,
+	int nDoneState,
+	int nStartStateA,
+	int nStartStateB,
+	int nStartTimeoutMs,
+	int nFinishTimeoutMs,
+	int nDelayTime,
+	int* pLastState)
+{
+	if (pLastState != nullptr)
+	{
+		*pLastState = 0;
+	}
+
+	if (nDelayTime <= 0)
+	{
+		nDelayTime = 100;
+	}
+
+	if (nStartTimeoutMs <= 0)
+	{
+		nStartTimeoutMs = 3000;
+	}
+
+	if (nFinishTimeoutMs <= 0)
+	{
+		nFinishTimeoutMs = 120000;
+	}
+
+	int lastState = 0;
+	bool hasStarted = false;
+	const auto startDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(nStartTimeoutMs);
+	while (std::chrono::steady_clock::now() < startDeadline)
+	{
+		lastState = GetIntVar(nStateReg);
+		if (lastState == nStartStateA || lastState == nStartStateB || lastState == nDoneState)
+		{
+			hasStarted = true;
+			break;
+		}
+		Sleep(nDelayTime);
+	}
+
+	if (!hasStarted)
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"FANUC WaitStateDone 未检测到程序启动：R[%d]=%d",
+				nStateReg, lastState);
+		}
+		if (pLastState != nullptr)
+		{
+			*pLastState = lastState;
+		}
+		return false;
+	}
+
+	if (lastState != nDoneState)
+	{
+		const auto finishDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(nFinishTimeoutMs);
+		while (std::chrono::steady_clock::now() < finishDeadline)
+		{
+			lastState = GetIntVar(nStateReg);
+			if (lastState == nDoneState)
+			{
+				break;
+			}
+			Sleep(nDelayTime);
+		}
+	}
+
+	if (lastState != nDoneState)
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"FANUC WaitStateDone 未检测到完成态：R[%d]=%d 期望=%d",
+				nStateReg, lastState, nDoneState);
+		}
+		if (pLastState != nullptr)
+		{
+			*pLastState = lastState;
+		}
+		return false;
+	}
+
+	if (pLastState != nullptr)
+	{
+		*pLastState = lastState;
+	}
+	return true;
 }
 
 // 请求机器人侧常驻/监控服务自行退出；随后关闭本地S4/S5连接。
@@ -1973,9 +2334,45 @@ bool FANUCRobotCtrl::StartMonitor(int nPort)
 					{
 						m_tMonitorPos = pos;
 						m_tMonitorPulse = pulse;
-						m_nMonitorDone = done;
+						m_nMonitorDoneRaw = done;
 						m_llMonitorRobotMs = robotMs;
 						m_llMonitorPcRecvMs = pcRecvMs;
+
+						if (done < 0)
+						{
+							m_nMonitorDone = -1;
+							m_nMonitorDoneCandidate = -1;
+							m_nMonitorDoneStableCount = 0;
+						}
+						else if (done == 0)
+						{
+							m_nMonitorDone = 0;
+							m_nMonitorDoneCandidate = 0;
+							m_nMonitorDoneStableCount = 0;
+						}
+						else
+						{
+							if (m_nMonitorDoneCandidate == done)
+							{
+								++m_nMonitorDoneStableCount;
+							}
+							else
+							{
+								m_nMonitorDoneCandidate = done;
+								m_nMonitorDoneStableCount = 1;
+							}
+
+							const long long lastCallJobPcMs = m_llLastCallJobPcMs.load();
+							const bool startupGuardActive = (lastCallJobPcMs > 0 && (pcRecvMs - lastCallJobPcMs) < FANUC_DONE_STARTUP_GUARD_MS);
+							if (!startupGuardActive && m_nMonitorDoneStableCount >= FANUC_DONE_PASSIVE_STABLE_COUNT)
+							{
+								m_nMonitorDone = done;
+							}
+							else
+							{
+								m_nMonitorDone = 0;
+							}
+						}
 					}
 				}
 
@@ -1985,6 +2382,10 @@ bool FANUCRobotCtrl::StartMonitor(int nPort)
 				{
 					std::lock_guard<std::mutex> lock(m_monitorMutex);
 					m_sMonitorText = "状态: 监控连接断开，正在重连...";
+					m_nMonitorDone = -1;
+					m_nMonitorDoneRaw = -1;
+					m_nMonitorDoneCandidate = -1;
+					m_nMonitorDoneStableCount = 0;
 					Sleep(500);
 				}
 			}
@@ -2128,6 +2529,99 @@ int FANUCRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMo
 			remotePcPath.c_str(), remoteVarPath.c_str());
 	}
 
+	return 0;
+}
+
+int FANUCRobotCtrl::UploadMultiPointTpProgram(
+	const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo,
+	std::string* pProgramName,
+	std::string* pLocalLsPath,
+	std::string* pRemoteTpPath)
+{
+	if (vtRobotMoveInfo.empty())
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR, "FANUC UploadMultiPointTpProgram 失败：轨迹点为空");
+		}
+		return -1;
+	}
+
+	const std::string programName = FanucMakeTpProgramName();
+	const std::string localDir = ".\\Job\\FANUC";
+	const std::string lsFileName = programName + ".ls";
+	const std::string localLsPath = localDir + "\\" + lsFileName;
+	const std::string remoteTpPath = "/md/" + programName + ".tp";
+
+	try
+	{
+		std::filesystem::create_directories(localDir);
+	}
+	catch (const std::exception& e)
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR, "FANUC UploadMultiPointTpProgram 创建目录失败：%s", e.what());
+		}
+		return -2;
+	}
+
+	const std::string lsContent = FanucBuildTpMoveLsContent(programName, vtRobotMoveInfo, m_tAxisUnit);
+	if (!FanucWriteTextFile(localLsPath, lsContent))
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR, "FANUC UploadMultiPointTpProgram 生成LS失败：%s", localLsPath.c_str());
+		}
+		return -3;
+	}
+
+	if (m_pRobotLog != nullptr)
+	{
+		for (size_t i = 0; i < vtRobotMoveInfo.size(); ++i)
+		{
+			FanucLogMovePoint(m_pRobotLog, "FANUC 多点TP下发", static_cast<int>(i + 1), vtRobotMoveInfo[i], &m_tAxisUnit);
+		}
+		m_pRobotLog->write(LogColor::SUCCESS,
+			"FANUC 多点TP轨迹已生成 | Program=%s | PointCount=%d | LocalLS=%s",
+			programName.c_str(),
+			static_cast<int>(vtRobotMoveInfo.size()),
+			localLsPath.c_str());
+	}
+
+	const int uploadRet = UploadLsFile(localLsPath, "/md/");
+	if (uploadRet != 0)
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"FANUC UploadMultiPointTpProgram 上传失败 | Program=%s | Ret=%d",
+				programName.c_str(),
+				uploadRet);
+		}
+		return uploadRet;
+	}
+
+	if (pProgramName != nullptr)
+	{
+		*pProgramName = programName;
+	}
+	if (pLocalLsPath != nullptr)
+	{
+		*pLocalLsPath = localLsPath;
+	}
+	if (pRemoteTpPath != nullptr)
+	{
+		*pRemoteTpPath = remoteTpPath;
+	}
+
+	if (m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::SUCCESS,
+			"FANUC 多点TP下发完成 | Program=%s | RemoteTP=%s | 当前仅下发，不自动执行",
+			programName.c_str(),
+			remoteTpPath.c_str());
+	}
 	return 0;
 }
 
@@ -2816,6 +3310,15 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 		{
 			ctrl->m_pRobotLog->write(LogColor::SUCCESS, "FANUC 固定TP已上传：%s", remoteTpPath.c_str());
 		}
+	}
+
+	if (!ctrl->SetIntVar(93, 0))
+	{
+		if (ctrl->m_pRobotLog != nullptr)
+		{
+			ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC 固定TP运动初始化 R[93] 失败：%s", programName.c_str());
+		}
+		return false;
 	}
 
 	if (!ctrl->CallJob(programName))

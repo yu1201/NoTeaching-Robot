@@ -15,7 +15,6 @@ VAR
   session_on : BOOLEAN
   seq        : INTEGER
   robot_ms   : INTEGER
-  moving     : BOOLEAN
   done       : INTEGER
   pos        : XYZWPREXT
   jpos       : JOINTPOS
@@ -24,6 +23,9 @@ VAR
   stop_is_real : BOOLEAN
   stop_value : INTEGER
   stop_real : REAL
+  done_is_real : BOOLEAN
+  done_int     : INTEGER
+  done_real    : REAL
 
 ROUTINE InitMonitorPort
 BEGIN
@@ -51,12 +53,16 @@ END CheckStopFlag
 ROUTINE UpdateDoneState
 BEGIN
   done = -1
-  GET_VAR(entry, '*SYSTEM*', '$MOR_GRP[1].$ROB_MOVE', moving, status)
+  GET_REG(98, done_is_real, done_int, done_real, status)
   IF status = 0 THEN
-    IF moving THEN
-      done = 0
+    IF done_is_real THEN
+      done = -1
     ELSE
-      done = 1
+      IF done_int = 0 THEN
+        done = 0
+      ELSE
+        done = 1
+      ENDIF
     ENDIF
   ENDIF
 END UpdateDoneState
