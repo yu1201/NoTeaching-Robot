@@ -13,9 +13,17 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前版本安装包：<https://github.com/yu1201/NoTeaching-Robot/releases/tag/v2026.04.21>
+- 当前源码版本：[`v2026.04.24`](https://github.com/yu1201/NoTeaching-Robot/tree/v2026.04.24)
 
 建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup.exe`，不用自己编译源码。
+
+## 2026-04-24 更新
+
+- 打通先测后焊焊接执行链路：下枪/收枪安全位、多点 TP 下发、寄存器统一完成判断、关键节点确认弹窗
+- 焊接轨迹新增 `CNT` 过渡，减少每点 `FINE` 带来的停顿
+- 新增“跳过扫描焊接”，可直接读取历史姿态文件并按当前补偿参数重生成补偿后文件再执行
+- 焊接结果文件拆分为“姿态文件”与“补偿后文件”两层输出
+- Release 构建稳定配置调整为 `/Zm2000`，默认关闭 `/MP`
 
 ## 开发环境
 
