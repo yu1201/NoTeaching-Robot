@@ -50,6 +50,9 @@
     <ClCompile Include="src\QtWidgetsApplication4.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\CameraFrameCache.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
@@ -121,6 +124,9 @@
     <ClCompile Include="src\RobotDataHelper.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\WeldSeamCompDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\WeldProcessFile.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -151,6 +157,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Const.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\CameraFrameCache.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\CameraParamDialog.h">
@@ -220,6 +229,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WindowStyleHelper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\WeldSeamCompDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldProcessFile.h">

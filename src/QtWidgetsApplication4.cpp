@@ -1,5 +1,7 @@
 #include "QtWidgetsApplication4.h"
 #include <QMessageBox>  // 弹窗头文件，测试用
+#include "CameraFrameCache.h"
+#include "CameraFrameAccessGuard.h"
 #include "FTPClient.h"
 #include "FANUCRobotDriver.h"
 #include "CameraParamDialog.h"
@@ -13,9 +15,9 @@
 #include "RobotJogDialog.h"
 #include "WindowStyleHelper.h"
 #include "WeldProcessDialog.h"
+#include "WeldSeamCompDialog.h"
 #include "groove/clientudpformsensorworker.h"
 #include "groove/framebuffer.h"
-#include "groove/threadsafebuffer.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -30,6 +32,7 @@
 #include <QMenuBar>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QSet>
@@ -280,6 +283,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_robotLogDisplayTimer(nullptr)
 	, m_pRobotLogText(nullptr)
 	, m_pCameraParamBtn(nullptr)
+	, m_pWeldSeamCompBtn(nullptr)
 	, m_bFanucMovlForward(true)
 	, m_bFanucMovlRunning(false)
 	, m_bFanucMovjRunning(false)
@@ -342,12 +346,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QGridLayout* entryLayout = new QGridLayout(entryGroup);
 	entryLayout->setSpacing(12);
 	m_pCameraParamBtn = new QPushButton("相机参数", entryGroup);
+	m_pWeldSeamCompBtn = new QPushButton("焊道补偿", entryGroup);
 	const QList<QPushButton*> entryButtons = {
 		ui.RunTest,
 		ui.WeldProcessBtn,
 		ui.FunctionTestBtn,
 		ui.MeasureThenWeldBtn,
 		ui.PreciseMeasureEditBtn,
+		m_pWeldSeamCompBtn,
 		m_pCameraParamBtn,
 		ui.RobotJogBtn,
 		ui.FanucConnectBtn,
@@ -434,6 +440,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(ui.FunctionTestBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenFunctionTestDialog);
 	connect(ui.MeasureThenWeldBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenMeasureThenWeldDialog);
 	connect(ui.PreciseMeasureEditBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenPreciseMeasureEditDialog);
+	connect(m_pWeldSeamCompBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenWeldSeamCompDialog);
 	connect(m_pCameraParamBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenCameraParamDialog);
 	connect(aboutButton, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenAboutDialog);
 	connect(ui.FanucConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucConnectTest);
@@ -469,6 +476,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_clientUDPFormSensorThread, &QThread::finished, m_clientUDPFormSensorWorker, &QObject::deleteLater);
 	m_clientUDPFormSensorWorker->moveToThread(m_clientUDPFormSensorThread);
 	m_clientUDPFormSensorThread->start();
+	CameraFrameCache::Instance().Start();
 
 	m_grooveCameraDisplayTimer = new QTimer(this);
 	connect(m_grooveCameraDisplayTimer, &QTimer::timeout, this, &QtWidgetsApplication4::UpdateGrooveCameraData);
@@ -553,6 +561,7 @@ QtWidgetsApplication4::~QtWidgetsApplication4()
 	{
 		m_robotLogDisplayTimer->stop();
 	}
+	CameraFrameCache::Instance().Stop();
 	if (m_clientUDPFormSensorWorker != nullptr && m_clientUDPFormSensorThread != nullptr && m_clientUDPFormSensorThread->isRunning())
 	{
 		QMetaObject::invokeMethod(m_clientUDPFormSensorWorker, "stopReceive", Qt::BlockingQueuedConnection);
@@ -605,6 +614,9 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --fanuc-pr20-diag                 仅读取 FANUC PR[20] 诊断点\n";
 		out << "  --fanuc-raw <CMD>                 发送一条原始 FANUC 服务命令\n";
 		out << "  --fanuc-call <PROGRAM>            调用机器人程序\n";
+		out << "  --measure-then-weld-scan-only-repeat <N> 自动执行先测后焊扫描流程N次，仅到收枪安全位置，不执行焊接\n";
+		out << "  --measure-then-weld-scan-speed <mm/min> 覆盖本次CLI先测后焊扫描速度，不修改ini\n";
+		out << "  --measure-then-weld-camera-offset-ms <ms> 覆盖本次CLI相机时间补偿，不修改ini\n";
 		out << "  --laser-classify <FILE>           对激光点云做去噪/拟合/起终点拐点分类\n";
 		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
 		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用 WeldSeamCompParam.ini 补偿\n";
@@ -634,6 +646,43 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	{
 		LogCommandLineMessage("CLI 打开相机参数窗口");
 		OpenCameraParamDialog();
+	}
+
+	const int scanOnlyRepeatIndex = arguments.indexOf("--measure-then-weld-scan-only-repeat");
+	int scanOnlyRepeatCount = 0;
+	if (scanOnlyRepeatIndex >= 0 && scanOnlyRepeatIndex + 1 < arguments.size())
+	{
+		bool ok = false;
+		scanOnlyRepeatCount = arguments[scanOnlyRepeatIndex + 1].toInt(&ok);
+		if (!ok || scanOnlyRepeatCount <= 0)
+		{
+			LogCommandLineMessage("CLI 先测后焊扫描重复次数无效，请使用 --measure-then-weld-scan-only-repeat <N>。");
+			scanOnlyRepeatCount = 0;
+		}
+	}
+	const int scanSpeedOverrideIndex = arguments.indexOf("--measure-then-weld-scan-speed");
+	double scanSpeedOverrideMmPerMin = 0.0;
+	if (scanSpeedOverrideIndex >= 0 && scanSpeedOverrideIndex + 1 < arguments.size())
+	{
+		bool ok = false;
+		scanSpeedOverrideMmPerMin = arguments[scanSpeedOverrideIndex + 1].toDouble(&ok);
+		if (!ok || !std::isfinite(scanSpeedOverrideMmPerMin) || scanSpeedOverrideMmPerMin <= 0.0)
+		{
+			LogCommandLineMessage("CLI 先测后焊扫描速度无效，请使用 --measure-then-weld-scan-speed <mm/min>。");
+			scanSpeedOverrideMmPerMin = 0.0;
+		}
+	}
+	const int cameraOffsetOverrideIndex = arguments.indexOf("--measure-then-weld-camera-offset-ms");
+	double cameraTimeOffsetOverrideMs = std::numeric_limits<double>::quiet_NaN();
+	if (cameraOffsetOverrideIndex >= 0 && cameraOffsetOverrideIndex + 1 < arguments.size())
+	{
+		bool ok = false;
+		cameraTimeOffsetOverrideMs = arguments[cameraOffsetOverrideIndex + 1].toDouble(&ok);
+		if (!ok || !std::isfinite(cameraTimeOffsetOverrideMs))
+		{
+			LogCommandLineMessage("CLI 相机时间补偿无效，请使用 --measure-then-weld-camera-offset-ms <ms>。");
+			cameraTimeOffsetOverrideMs = std::numeric_limits<double>::quiet_NaN();
+		}
 	}
 
 	const int laserClassifyIndex = arguments.indexOf("--laser-classify");
@@ -668,7 +717,8 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		|| arguments.contains("--fanuc-curpos-diag")
 		|| arguments.contains("--fanuc-pr20-diag")
 		|| arguments.contains("--fanuc-raw")
-		|| arguments.contains("--fanuc-call");
+		|| arguments.contains("--fanuc-call")
+		|| scanOnlyRepeatCount > 0;
 	if (needsFanuc && pFanucDriver == nullptr)
 	{
 		LogCommandLineMessage("CLI 未找到 FANUC 驱动，跳过 FANUC 命令。");
@@ -679,7 +729,8 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			|| arguments.contains("--fanuc-curpos-diag")
 			|| arguments.contains("--fanuc-pr20-diag")
 			|| arguments.contains("--fanuc-raw")
-			|| arguments.contains("--fanuc-call");
+			|| arguments.contains("--fanuc-call")
+			|| scanOnlyRepeatCount > 0;
 
 		bool uploadOk = true;
 		if (arguments.contains("--fanuc-upload-services"))
@@ -743,6 +794,16 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		{
 			const std::string response = pFanucDriver->SendRawCommandForTest("GET_POS_VAR:20,0");
 			LogCommandLineMessage(QString("CLI FANUC PR20 -> %1").arg(QString::fromStdString(response)));
+		}
+
+		if (socketReady && scanOnlyRepeatCount > 0)
+		{
+			const bool scanOk = RunMeasureThenWeldScanOnlyRepeatForCli(
+				pFanucDriver,
+				scanOnlyRepeatCount,
+				scanSpeedOverrideMmPerMin,
+				cameraTimeOffsetOverrideMs);
+			LogCommandLineMessage(QString("CLI 先测后焊扫描重复流程%1。").arg(scanOk ? "完成" : "失败"));
 		}
 	}
 
@@ -1108,6 +1169,149 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(const QString& inputPath, cons
 	LogCommandLineMessage("CLI 焊道补偿摘要：" + summary);
 }
 
+bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
+	FANUCRobotCtrl* pFanucDriver,
+	int repeatCount,
+	double scanSpeedOverrideMmPerMin,
+	double cameraTimeOffsetOverrideMs)
+{
+	if (pFanucDriver == nullptr)
+	{
+		LogCommandLineMessage("CLI 先测后焊扫描失败：机器人驱动为空。");
+		return false;
+	}
+	if (repeatCount <= 0)
+	{
+		LogCommandLineMessage("CLI 先测后焊扫描失败：重复次数必须大于0。");
+		return false;
+	}
+
+	QString cameraIP;
+	if (!LoadGrooveCameraIP(cameraIP))
+	{
+		LogCommandLineMessage("CLI 先测后焊扫描失败：未读取到测量相机IP。");
+		return false;
+	}
+	CameraFrameAccess::ScopedMeasureThenWeldExclusive cameraExclusive;
+	if (!cameraExclusive.acquired())
+	{
+		LogCommandLineMessage("CLI 先测后焊扫描失败：相机帧正在被先测后焊流程独占。");
+		return false;
+	}
+
+	MeasureThenWeldService service;
+	auto appendLog = [this](const QString& text)
+		{
+			LogCommandLineMessage("CLI 先测后焊扫描：" + text);
+		};
+	auto setFlowStep = [this](const QString& text)
+		{
+			LogCommandLineMessage("CLI 流程节点：" + text);
+		};
+
+	CameraFrameCache::Instance().Clear();
+	emit startAllCommThreads(cameraIP);
+	LogCommandLineMessage(QString("CLI 先测后焊扫描：相机接收已启动 %1，准备重复 %2 次。")
+		.arg(cameraIP)
+		.arg(repeatCount));
+	QThread::msleep(500);
+
+	bool allOk = true;
+	for (int repeatIndex = 1; repeatIndex <= repeatCount; ++repeatIndex)
+	{
+		T_PRECISE_MEASURE_PARAM param;
+		QString error;
+		if (!service.LoadPresetParam(pFanucDriver, param, error))
+		{
+			LogCommandLineMessage(QString("CLI 第%1次扫描失败：读取预设参数失败：%2")
+				.arg(repeatIndex)
+				.arg(error));
+			allOk = false;
+			break;
+		}
+		if (std::isfinite(scanSpeedOverrideMmPerMin) && scanSpeedOverrideMmPerMin > 0.0)
+		{
+			param.dScanSpeed = scanSpeedOverrideMmPerMin;
+		}
+		if (std::isfinite(cameraTimeOffsetOverrideMs))
+		{
+			param.dCameraTimeOffsetMs = cameraTimeOffsetOverrideMs;
+		}
+
+		QString savedPath;
+		LogCommandLineMessage(QString("CLI 第%1/%2次扫描开始：参数=%3 [%4]，ScanSpeed=%5 mm/min%6，CameraReadFps=%7，CameraTimeOffsetMs=%8%9")
+			.arg(repeatIndex)
+			.arg(repeatCount)
+			.arg(QString::fromStdString(param.sIniFilePath))
+			.arg(QString::fromStdString(param.sSectionName))
+			.arg(param.dScanSpeed, 0, 'f', 3)
+			.arg(std::isfinite(scanSpeedOverrideMmPerMin) && scanSpeedOverrideMmPerMin > 0.0 ? "（CLI覆盖）" : "")
+			.arg(param.dCameraReadFps, 0, 'f', 3)
+			.arg(param.dCameraTimeOffsetMs, 0, 'f', 3)
+			.arg(std::isfinite(cameraTimeOffsetOverrideMs) ? "（CLI覆盖）" : ""));
+
+		const double runSpeed = std::isfinite(param.dRunSpeed) && param.dRunSpeed > 0.0
+			? param.dRunSpeed
+			: 1.0;
+		bool ok = service.MovePulseListAndWait(
+			pFanucDriver,
+			param.vtStartSafePulse,
+			runSpeed,
+			QString("CLI第%1次下枪安全姿态").arg(repeatIndex),
+			appendLog,
+			setFlowStep);
+		if (ok)
+		{
+			ok = service.MoveCoorsAndWait(
+				pFanucDriver,
+				param.tStartPos,
+				runSpeed,
+				QString("CLI第%1次扫描起点").arg(repeatIndex),
+				appendLog,
+				setFlowStep);
+		}
+		if (ok)
+		{
+			ok = service.ScanMoveAndCollect(
+				pFanucDriver,
+				param,
+				savedPath,
+				appendLog,
+				setFlowStep);
+		}
+		if (ok)
+		{
+			ok = service.MovePulseListAndWait(
+				pFanucDriver,
+				param.vtEndSafePulse,
+				runSpeed,
+				QString("CLI第%1次收枪安全姿态").arg(repeatIndex),
+				appendLog,
+				setFlowStep);
+		}
+
+		if (!ok)
+		{
+			LogCommandLineMessage(QString("CLI 第%1次扫描流程失败，已停止后续重复。").arg(repeatIndex));
+			allOk = false;
+			break;
+		}
+
+		const QString savedText = savedPath.isEmpty()
+			? QString("扫描文件已保存，未生成焊接姿态文件")
+			: QString("最终姿态/补偿文件=%1").arg(QDir::toNativeSeparators(savedPath));
+		LogCommandLineMessage(QString("CLI 第%1/%2次扫描完成，已到收枪安全位置，%3")
+			.arg(repeatIndex)
+			.arg(repeatCount)
+			.arg(savedText));
+	}
+
+	emit stopAllCommThreads();
+	QThread::msleep(300);
+	LogCommandLineMessage("CLI 先测后焊扫描：相机接收已停止。");
+	return allOk;
+}
+
 bool QtWidgetsApplication4::LoadGrooveCameraIP(QString& cameraIP) const
 {
 	std::string robotName = "RobotA";
@@ -1191,6 +1395,14 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 {
 	if (checked)
 	{
+		if (CameraFrameAccess::IsMeasureThenWeldExclusive())
+		{
+			QMessageBox::information(this, "坡口相机测试", "先测后焊正在独占相机帧，当前不能启动相机预览。");
+			QSignalBlocker blocker(ui.GrooveCameraTestBtn);
+			ui.GrooveCameraTestBtn->setChecked(false);
+			return;
+		}
+
 		QString cameraIP;
 		if (!LoadGrooveCameraIP(cameraIP))
 		{
@@ -1199,8 +1411,8 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 			return;
 		}
 
-		ThreadSafeBuffer<udpDataShow>::Instance().clear();
-		ui.GrooveCameraText->setPlainText(QString("正在接收 CAMERA0：%1\n本地UDP端口：50005").arg(cameraIP));
+		CameraFrameCache::Instance().Clear();
+		ui.GrooveCameraText->setPlainText(QString("正在接收 CAMERA0：%1\n本地UDP端口：50004").arg(cameraIP));
 		emit startAllCommThreads(cameraIP);
 		m_grooveCameraDisplayTimer->start(100);
 	}
@@ -1217,10 +1429,15 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 
 void QtWidgetsApplication4::UpdateGrooveCameraData()
 {
+	if (CameraFrameAccess::IsMeasureThenWeldExclusive())
+	{
+		return;
+	}
+
 	udpDataShow frame;
 	udpDataShow latestFrame;
 	bool hasFrame = false;
-	while (ThreadSafeBuffer<udpDataShow>::Instance().dequeue(frame, 0))
+	if (CameraFrameCache::Instance().Latest(frame))
 	{
 		latestFrame = frame;
 		hasFrame = true;
@@ -1234,16 +1451,20 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 		"点云数量: %1\n"
 		"拟合点数量: %2\n"
 		"目标点: X=%3  Y=%4  Z=%5\n"
-		"点云X预览: %6\n"
-		"点云Y预览: %7\n"
-		"拟合X预览: %8\n"
-		"拟合Y预览: %9\n"
-		"错误信息: %10")
+		"相机帧时间戳: %6\n"
+		"相机计算帧率: %7 fps\n"
+		"点云X预览: %8\n"
+		"点云Y预览: %9\n"
+		"拟合X预览: %10\n"
+		"拟合Y预览: %11\n"
+		"错误信息: %12")
 		.arg(latestFrame.XData.size())
 		.arg(latestFrame.fitLineX.size())
 		.arg(latestFrame.targetPoint.x, 0, 'f', 3)
 		.arg(latestFrame.targetPoint.y, 0, 'f', 3)
 		.arg(latestFrame.targetPoint.z, 0, 'f', 3)
+		.arg(latestFrame.timestamp)
+		.arg(latestFrame.mFps, 0, 'f', 2)
 		.arg(FormatVectorPreview(latestFrame.XData))
 		.arg(FormatVectorPreview(latestFrame.YData))
 		.arg(FormatVectorPreview(latestFrame.fitLineX))
@@ -1421,7 +1642,20 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 			{
 				return false;
 			}
-			ThreadSafeBuffer<udpDataShow>::Instance().clear();
+			if (m_grooveCameraDisplayTimer != nullptr && m_grooveCameraDisplayTimer->isActive())
+			{
+				m_grooveCameraDisplayTimer->stop();
+			}
+			if (ui.GrooveCameraTestBtn != nullptr && ui.GrooveCameraTestBtn->isChecked())
+			{
+				QSignalBlocker blocker(ui.GrooveCameraTestBtn);
+				ui.GrooveCameraTestBtn->setChecked(false);
+			}
+			if (ui.GrooveCameraText != nullptr)
+			{
+				ui.GrooveCameraText->appendPlainText("先测后焊已接管相机帧，主界面预览已暂停。");
+			}
+			CameraFrameCache::Instance().Clear();
 			emit startAllCommThreads(cameraIP);
 			return true;
 		};
@@ -1455,15 +1689,30 @@ void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 	dialog->activateWindow();
 }
 
+void QtWidgetsApplication4::OpenWeldSeamCompDialog()
+{
+	WeldSeamCompDialog* dialog = new WeldSeamCompDialog(m_pContralUnit, this);
+	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	dialog->show();
+	dialog->raise();
+	dialog->activateWindow();
+}
+
 void QtWidgetsApplication4::OpenCameraParamDialog()
 {
+	if (CameraFrameAccess::IsMeasureThenWeldExclusive())
+	{
+		QMessageBox::information(this, "相机参数", "先测后焊正在独占相机帧，当前不能打开相机参数/手眼读取。");
+		return;
+	}
+
 	auto startCamera = [this](QString& cameraIP) -> bool
 		{
 			if (!LoadGrooveCameraIP(cameraIP))
 			{
 				return false;
 			}
-			ThreadSafeBuffer<udpDataShow>::Instance().clear();
+			CameraFrameCache::Instance().Clear();
 			emit startAllCommThreads(cameraIP);
 			return true;
 		};

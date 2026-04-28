@@ -9,6 +9,7 @@
 #include <QString>
 
 class QComboBox;
+class QCloseEvent;
 class QGridLayout;
 class QGroupBox;
 class QLineEdit;
@@ -24,6 +25,7 @@ public:
     explicit PreciseMeasureEditDialog(ContralUnit* pContralUnit, QWidget* parent = nullptr);
 
 protected:
+    void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
 private:
@@ -35,7 +37,7 @@ private:
     void TeachEndPos();
     void TeachEndSafePulse();
     void ReloadCurrentParam();
-    void SaveAllParamEdits();
+    bool SaveAllParamEdits();
     void SaveManualStartSafePulse();
     void SaveManualStartPos();
     void SaveManualEndPos();
@@ -63,6 +65,9 @@ private:
     void ClearOtherParamEditors();
     void UpdateAdaptiveLayout();
     void RebuildPulseGroupLayout(bool wide);
+    bool HasUnsavedChanges() const;
+    QString BuildSnapshot() const;
+    void MarkCleanSnapshot();
     void AppendLog(const QString& text);
 
 private:
@@ -79,4 +84,5 @@ private:
     QMap<QString, QLineEdit*> m_otherParamEditors;
     bool m_bWideAdaptiveLayout = true;
     bool m_bLoading = false;
+    QString m_cleanSnapshot;
 };

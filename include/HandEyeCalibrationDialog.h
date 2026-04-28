@@ -11,6 +11,7 @@
 #include <functional>
 
 class QLabel;
+class QCloseEvent;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
@@ -32,6 +33,7 @@ public:
         QWidget* parent = nullptr);
 
 private:
+    void closeEvent(QCloseEvent* event) override;
     struct SampleWidgets
     {
         QLabel* pStateLabel = nullptr;
@@ -70,6 +72,9 @@ private:
     void UpdatePathLabels();
     void UpdateSampleStates();
     void SelectSampleTab(int index);
+    bool HasUnsavedChanges() const;
+    QString BuildSnapshot() const;
+    void MarkCleanSnapshot();
     void AppendLog(const QString& text);
 
     ContralUnit* m_pContralUnit = nullptr;
@@ -90,4 +95,5 @@ private:
     QVector<QLineEdit*> m_tcpEdits;
     QVector<SampleWidgets> m_sampleWidgets;
     std::atomic_bool m_bAutoCalibrationRunning = false;
+    QString m_cleanSnapshot;
 };

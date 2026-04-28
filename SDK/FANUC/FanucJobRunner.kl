@@ -1,0 +1,63 @@
+PROGRAM FANUC_JOB_RUNNER
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'Generic KCL runner for CALL_JOB'
+%ENVIRONMENT sysdef
+%ENVIRONMENT fdev
+%ENVIRONMENT regope
+%ENVIRONMENT strng
+%ENVIRONMENT kclop
+
+VAR
+  status      : INTEGER
+  target_file : FILE
+  target_name : STRING[36]
+  cmd_text    : STRING[80]
+
+ROUTINE SetJobState(state_value : INTEGER)
+BEGIN
+  SET_INT_REG(98, state_value, status)
+END SetJobState
+
+ROUTINE ReadTargetName(out_name : STRING)
+BEGIN
+  out_name = ''
+  SET_FILE_ATR(target_file, ATR_IA)
+  OPEN FILE target_file('rw', 'MD:fanuc_call_job.txt')
+  status = IO_STATUS(target_file)
+  IF status <> 0 THEN
+    RETURN
+  ENDIF
+
+  READ target_file(out_name)
+  status = IO_STATUS(target_file)
+  CLOSE FILE target_file
+  CLR_IO_STAT(target_file)
+END ReadTargetName
+
+BEGIN
+  SetJobState(0)
+  KCL('SET VERIFY OFF', status)
+  ReadTargetName(target_name)
+
+  IF (status <> 0) OR (target_name = '') THEN
+    SetJobState(-1)
+    RETURN
+  ENDIF
+
+  cmd_text = 'RUN ' + target_name
+  KCL(cmd_text, status)
+  IF status <> 0 THEN
+    SetJobState(-1)
+    RETURN
+  ENDIF
+
+  KCL('WAIT DONE', status)
+  IF status <> 0 THEN
+    SetJobState(-1)
+    RETURN
+  ENDIF
+
+  SetJobState(1)
+END FANUC_JOB_RUNNER

@@ -2,7 +2,9 @@
 #define FRAMEBUFFER_H
 
 #include <QVector>
-#include <opencv2/core.hpp>
+#include <QtGlobal>
+#include <opencv2/opencv.hpp>
+#include <vector>
 
 struct udpDataShow
 {
@@ -13,6 +15,9 @@ struct udpDataShow
     QVector<double> fitLineY;
     QVector<double> targetX;  
     QVector<double> targetY;
+    float mFps = 0.0f;
+    std::vector<cv::Point3d> allResultPoint;
+    qulonglong timestamp;
 
     QString errorMessage;
 

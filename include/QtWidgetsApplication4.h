@@ -9,6 +9,8 @@
 #include <QString>
 #include <QStringList>
 
+#include <limits>
+
 class ClientUDPFormSensorWorker;
 class FANUCRobotCtrl;
 class QPlainTextEdit;
@@ -31,6 +33,7 @@ private slots:
     void OpenFunctionTestDialog();
     void OpenMeasureThenWeldDialog();
     void OpenPreciseMeasureEditDialog();
+    void OpenWeldSeamCompDialog();
     void OpenCameraParamDialog();
     void FanucConnectTest();
     void FanucDisconnectTest();
@@ -65,6 +68,11 @@ private:
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
     void RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
     void RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const;
+    bool RunMeasureThenWeldScanOnlyRepeatForCli(
+        FANUCRobotCtrl* pFanucDriver,
+        int repeatCount,
+        double scanSpeedOverrideMmPerMin = 0.0,
+        double cameraTimeOffsetOverrideMs = std::numeric_limits<double>::quiet_NaN());
 
     Ui::QtWidgetsApplication4Class ui;
     ContralUnit* m_pContralUnit;
@@ -74,6 +82,7 @@ private:
     QTimer* m_robotLogDisplayTimer;
     QPlainTextEdit* m_pRobotLogText;
     QPushButton* m_pCameraParamBtn;
+    QPushButton* m_pWeldSeamCompBtn;
     bool m_bFanucMovlForward;
     bool m_bFanucMovlRunning;
     bool m_bFanucMovjRunning;

@@ -221,19 +221,19 @@ void LaserWeldFilterDialog::BuildUi()
 
 void LaserWeldFilterDialog::ApplyStyle()
 {
-    setStyleSheet(
+    setStyleSheet(QString(
         "QDialog { background: #101820; color: #E8F1F2; }"
         "QLabel { color: #B8C7CC; }"
         "QLabel#TitleLabel { font-size: 24px; font-weight: 700; color: #F4FAFA; }"
         "QLabel#HintLabel { color: #8FA7B0; }"
         "QGroupBox { border: 1px solid #2E4656; border-radius: 12px; margin-top: 18px; padding: 14px; font-weight: bold; }"
         "QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; color: #9ED8DB; }"
-        "QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox { background: #0B1117; color: #F4FAFA; border: 1px solid #2E4656; border-radius: 10px; padding: 6px 10px; min-height: 34px; }"
-        "QComboBox QAbstractItemView { background: #12202A; color: #F4FAFA; selection-background-color: #1F4F5C; }"
+        "QLineEdit, QDoubleSpinBox, QSpinBox { background: #0B1117; color: #F4FAFA; border: 1px solid #2E4656; border-radius: 10px; padding: 6px 10px; min-height: 34px; }"
         "QPushButton { background: #1F3542; color: #F4FAFA; border: 1px solid #3C6475; border-radius: 10px; padding: 8px 14px; }"
         "QPushButton:hover { background: #2C5364; border-color: #63C7D1; }"
         "QPushButton:pressed { background: #16303A; }"
-        "QPlainTextEdit { background: #0B1117; color: #BFE7EA; border: 1px solid #2E4656; border-radius: 10px; padding: 8px; }");
+        "QPlainTextEdit { background: #0B1117; color: #BFE7EA; border: 1px solid #2E4656; border-radius: 10px; padding: 8px; }")
+        + UnifiedComboBoxStyleSheet());
 }
 
 void LaserWeldFilterDialog::LoadSettings()

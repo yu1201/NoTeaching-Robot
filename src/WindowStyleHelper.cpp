@@ -3,11 +3,15 @@
 #include <algorithm>
 
 #include <QApplication>
+#include <QAbstractButton>
 #include <QDialog>
 #include <QEvent>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QScreen>
+#include <QString>
 #include <QTimer>
 #include <QWidget>
 #include <QWindow>
@@ -210,9 +214,9 @@ void ApplyUnifiedWindowChrome(QWidget* widget)
         setAttribute(hwnd, 20, &darkMode, sizeof(darkMode));
         setAttribute(hwnd, 19, &darkMode, sizeof(darkMode));
 
-        const COLORREF captionColor = RGB(17, 24, 32);
+        const COLORREF captionColor = RGB(6, 14, 22);
         const COLORREF textColor = RGB(236, 243, 244);
-        const COLORREF borderColor = RGB(46, 70, 86);
+        const COLORREF borderColor = RGB(36, 62, 76);
         setAttribute(hwnd, 35, &captionColor, sizeof(captionColor));
         setAttribute(hwnd, 36, &textColor, sizeof(textColor));
         setAttribute(hwnd, 34, &borderColor, sizeof(borderColor));
@@ -220,6 +224,42 @@ void ApplyUnifiedWindowChrome(QWidget* widget)
 
     FreeLibrary(dwmapi);
 #endif
+}
+
+QString UnifiedComboBoxStyleSheet()
+{
+    return QStringLiteral(
+        "QComboBox { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 7px; padding: 4px 6px; min-height: 24px; padding-left: 8px; padding-right: 24px; }"
+        "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 24px; border-left: 1px solid #385366; border-top-right-radius: 7px; border-bottom-right-radius: 7px; background: #0B1117; }"
+        "QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
+        "QComboBox QAbstractItemView { background: #12202A; color: #F4FAFA; selection-background-color: #1F4F5C; }");
+}
+
+bool ConfirmCloseWithUnsavedChanges(
+    QWidget* widget,
+    const QString& title,
+    const std::function<bool()>& saveCallback)
+{
+    QMessageBox messageBox(widget);
+    messageBox.setWindowTitle(title);
+    messageBox.setIcon(QMessageBox::Question);
+    messageBox.setText("当前界面有未保存的修改，是否保存后关闭？");
+    QPushButton* saveButton = messageBox.addButton("保存", QMessageBox::AcceptRole);
+    QPushButton* discardButton = messageBox.addButton("不保存", QMessageBox::DestructiveRole);
+    messageBox.addButton("取消", QMessageBox::RejectRole);
+    messageBox.setDefaultButton(saveButton);
+    messageBox.exec();
+
+    QAbstractButton* clickedButton = messageBox.clickedButton();
+    if (clickedButton == saveButton)
+    {
+        return saveCallback ? saveCallback() : true;
+    }
+    if (clickedButton == discardButton)
+    {
+        return true;
+    }
+    return false;
 }
 
 void ResizeWindowForAvailableGeometry(

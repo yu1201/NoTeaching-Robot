@@ -20,9 +20,11 @@ struct T_PRECISE_MEASURE_PARAM
     std::string sIniFilePath;
     std::string sSectionName = "Postion0";
 
-    // PreciseMeasureParam.ini 中的运行速度和扫描速度。
+    // PreciseMeasureParam.ini 中的运行速度、扫描速度和相机读取/时间补偿参数。
     double dScanSpeed = 0.0;
     double dRunSpeed = 0.0;
+    double dCameraReadFps = 100.0;
+    double dCameraTimeOffsetMs = 0.0;
     double dAcc = 0.0;
     double dDec = 0.0;
 
@@ -65,7 +67,7 @@ private:
     bool MovePulseListAndWait(FANUCRobotCtrl* pFanucDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name);
     bool MoveCoorsAndWait(FANUCRobotCtrl* pFanucDriver, const T_ROBOT_COORS& coors, double speed, const QString& name);
 
-    // 扫描段：机器人从 StartPos 运动到 EndPos，同时每 10ms 读取相机缓存点。
+    // 扫描段：机器人从 StartPos 运动到 EndPos，同时按配置帧率读取相机缓存点。
     bool ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath);
     QString BuildResultDir(const std::string& robotName) const;
     bool SaveTextLines(const QString& filePath, const std::vector<QString>& lines, QString& error) const;
