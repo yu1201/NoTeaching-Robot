@@ -7,6 +7,7 @@
 #include <functional>
 
 class QComboBox;
+class QCloseEvent;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -25,6 +26,7 @@ public:
         QWidget* parent = nullptr);
 
 private:
+    void closeEvent(QCloseEvent* event) override;
     void LoadRobotList();
     void LoadCameraList();
     void UpdateCurrentCameraInfo();
@@ -35,6 +37,9 @@ private:
     QString CurrentCameraIniPath() const;
     bool LoadCameraParam();
     bool SaveCameraParam();
+    bool HasUnsavedChanges() const;
+    QString BuildSnapshot() const;
+    void MarkCleanSnapshot();
     void AppendLog(const QString& text);
 
     ContralUnit* m_pContralUnit = nullptr;
@@ -52,4 +57,5 @@ private:
     QLineEdit* m_pGainLevelEdit = nullptr;
     QLineEdit* m_pCameraTypeEdit = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
+    QString m_cleanSnapshot;
 };

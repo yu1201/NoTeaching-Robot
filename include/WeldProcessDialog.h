@@ -13,6 +13,7 @@ class WeldProcessDialog;
 QT_END_NAMESPACE
 
 class QDoubleSpinBox;
+class QCloseEvent;
 class QFormLayout;
 class QGridLayout;
 class QLineEdit;
@@ -31,7 +32,7 @@ public:
 
 private slots:
     void ReloadData();
-    void SaveData();
+    bool SaveData();
     void OnWeldSelectionChanged(int row);
     void OnBeadSelectionChanged(int row);
     void OnWeldGroupsReordered();
@@ -41,6 +42,7 @@ private slots:
     void RemoveBead();
 
 private:
+    void closeEvent(QCloseEvent* event) override;
     void BuildEditorUi();
     void ApplyDialogStyle();
     void LoadToUi(int preferredGroupRow = -1, int preferredBeadRow = -1);
@@ -61,6 +63,9 @@ private:
     QLineEdit* AddSingleTextField(QFormLayout* layout, const QString& label);
     QDoubleSpinBox* AddSingleDoubleField(QFormLayout* layout, const QString& label, int decimals = 3);
     QSpinBox* AddSingleIntField(QFormLayout* layout, const QString& label, int minimum = -999999, int maximum = 999999);
+    bool HasUnsavedChanges() const;
+    QString BuildSnapshot() const;
+    void MarkCleanSnapshot();
 
 private:
     Ui::WeldProcessDialog* ui = nullptr;
@@ -125,4 +130,5 @@ private:
     QSpinBox* m_delayTypeRightSpin = nullptr;
     QDoubleSpinBox* m_rotAngleLeftSpin = nullptr;
     QDoubleSpinBox* m_rotAngleRightSpin = nullptr;
+    QString m_cleanSnapshot;
 };

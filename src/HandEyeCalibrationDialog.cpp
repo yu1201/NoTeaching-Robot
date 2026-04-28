@@ -1,5 +1,7 @@
 #include "HandEyeCalibrationDialog.h"
 
+#include "CameraFrameCache.h"
+#include "CameraFrameAccessGuard.h"
 #include "FANUCRobotDriver.h"
 #include "HandEyeMatrixDialog.h"
 #include "RobotCalculation.h"
@@ -7,9 +9,9 @@
 #include "RobotDriverAdaptor.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
-#include "groove/threadsafebuffer.h"
 
 #include <QApplication>
+#include <QCloseEvent>
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
@@ -23,6 +25,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QStringList>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -397,9 +400,27 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     connect(computeBtn, &QPushButton::clicked, this, [this]() { ComputeAndSaveMatrix(); });
     connect(testBtn, &QPushButton::clicked, this, [this]() { TestHandEyeMatrix(); });
     connect(matrixBtn, &QPushButton::clicked, this, [this]() { OpenMatrixDialog(); });
-    connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
+    connect(closeBtn, &QPushButton::clicked, this, &QDialog::close);
 
     LoadConfig();
+}
+
+void HandEyeCalibrationDialog::closeEvent(QCloseEvent* event)
+{
+    if (!HasUnsavedChanges())
+    {
+        QDialog::closeEvent(event);
+        return;
+    }
+
+    if (ConfirmCloseWithUnsavedChanges(this, "手眼标定", [this]() { return SaveConfig(); }))
+    {
+        event->accept();
+    }
+    else
+    {
+        event->ignore();
+    }
 }
 
 bool HandEyeCalibrationDialog::LoadConfig()
@@ -432,6 +453,7 @@ bool HandEyeCalibrationDialog::LoadConfig()
     }
     SelectSampleTab(expandedIndex);
     AppendLog(QString("已读取标定文件：%1").arg(filePath));
+    MarkCleanSnapshot();
     return true;
 }
 
@@ -448,6 +470,7 @@ bool HandEyeCalibrationDialog::SaveConfig()
     UpdateSampleStates();
     AppendLog("手眼标定采样数据已保存。");
     QMessageBox::information(this, "手眼标定", "采样数据已保存。");
+    MarkCleanSnapshot();
     return true;
 }
 
@@ -496,6 +519,7 @@ bool HandEyeCalibrationDialog::SaveConfigSilently(QString* error)
         return false;
     }
     UpdatePathLabels();
+    MarkCleanSnapshot();
     return true;
 }
 
@@ -1504,8 +1528,17 @@ void HandEyeCalibrationDialog::OpenMatrixDialog()
 
 bool HandEyeCalibrationDialog::ReadLatestCameraPoint(Eigen::Vector3d& cameraPoint, QString* error) const
 {
+    if (CameraFrameAccess::IsMeasureThenWeldExclusive())
+    {
+        if (error != nullptr)
+        {
+            *error = "先测后焊正在独占相机帧，当前不允许手眼标定读取相机队列。";
+        }
+        return false;
+    }
+
     udpDataShow frame;
-    if (!ThreadSafeBuffer<udpDataShow>::Instance().back(frame))
+    if (!CameraFrameCache::Instance().Latest(frame))
     {
         if (error != nullptr)
         {
@@ -1751,6 +1784,38 @@ void HandEyeCalibrationDialog::SelectSampleTab(int index)
         return;
     }
     m_pSampleTabWidget->setCurrentIndex(index);
+}
+
+bool HandEyeCalibrationDialog::HasUnsavedChanges() const
+{
+    return BuildSnapshot() != m_cleanSnapshot;
+}
+
+QString HandEyeCalibrationDialog::BuildSnapshot() const
+{
+    QStringList fields;
+    fields << m_robotName << m_cameraSection;
+    for (QLineEdit* edit : m_tcpEdits)
+    {
+        fields << (edit != nullptr ? edit->text().trimmed() : QString());
+    }
+    for (const SampleWidgets& sample : m_sampleWidgets)
+    {
+        for (QLineEdit* edit : sample.robotEdits)
+        {
+            fields << (edit != nullptr ? edit->text().trimmed() : QString());
+        }
+        for (QLineEdit* edit : sample.cameraEdits)
+        {
+            fields << (edit != nullptr ? edit->text().trimmed() : QString());
+        }
+    }
+    return fields.join('\n');
+}
+
+void HandEyeCalibrationDialog::MarkCleanSnapshot()
+{
+    m_cleanSnapshot = BuildSnapshot();
 }
 
 void HandEyeCalibrationDialog::AppendLog(const QString& text)

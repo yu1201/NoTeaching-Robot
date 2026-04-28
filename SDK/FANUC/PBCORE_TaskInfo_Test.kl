@@ -1,0 +1,23 @@
+PROGRAM PBCORE_TASKINFO_TEST
+%NOLOCKGROUP
+%ENVIRONMENT SYSDEF
+%ENVIRONMENT MULTI
+%ENVIRONMENT PBCORE
+
+VAR
+  task_name : STRING[32]
+  status : INTEGER
+  task_no : INTEGER
+  attr_out : INTEGER
+  dummy : STRING[2]
+  reg_status : INTEGER
+
+BEGIN
+  task_name = 'STARTALL'
+  task_no = 0
+
+  GET_TSK_INFO(task_name, task_no, TSK_STATUS, attr_out, dummy, status)
+
+  SET_INT_REG(90, status, reg_status)
+  SET_INT_REG(91, attr_out, reg_status)
+END PBCORE_TASKINFO_TEST

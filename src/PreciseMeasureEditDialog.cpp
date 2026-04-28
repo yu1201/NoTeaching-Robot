@@ -6,6 +6,7 @@
 #include "WindowStyleHelper.h"
 
 #include <QComboBox>
+#include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -24,6 +25,7 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QSplitter>
+#include <QStringList>
 #include <QVariant>
 #include <QVBoxLayout>
 
@@ -72,6 +74,11 @@ bool IsDedicatedPulseKey(const QString& key)
         || key.compare("EndSafePulseNum", Qt::CaseInsensitive) == 0;
 }
 
+constexpr auto CAMERA_READ_FPS_KEY = "CameraReadFps";
+constexpr auto CAMERA_TIME_OFFSET_MS_KEY = "CameraTimeOffsetMs";
+constexpr double DEFAULT_CAMERA_READ_FPS = 100.0;
+constexpr double DEFAULT_CAMERA_TIME_OFFSET_MS = -300.0;
+
 QString PreciseParamDisplayName(const QString& key)
 {
     static const QMap<QString, QString> names = {
@@ -116,6 +123,8 @@ QString PreciseParamDisplayName(const QString& key)
         { "ImgEnd_x", "图像结束X" },
         { "Scanlength", "扫描长度" },
         { "ScanDir", "扫描方向" },
+        { CAMERA_READ_FPS_KEY, "相机读取帧率" },
+        { CAMERA_TIME_OFFSET_MS_KEY, "相机时间补偿(ms)" },
         { "ImgStartX", "图像起始X" },
         { "ImgEndX", "图像结束X" },
         { "TableScanDir", "料台扫描方向" },
@@ -141,6 +150,33 @@ QString PreciseCommentText(const QString& line)
     return text;
 }
 
+void AddOtherParamEditor(QGridLayout* layout, QMap<QString, QLineEdit*>& editors, int& row, int& colInGroup, const QString& key, const QString& value)
+{
+    if (layout == nullptr || editors.contains(key))
+    {
+        return;
+    }
+
+    QLabel* label = new QLabel(PreciseParamDisplayName(key));
+    QLineEdit* edit = new QLineEdit(value);
+    label->setToolTip(key);
+    edit->setToolTip(key);
+    edit->setProperty("paramKey", key);
+    edit->setMinimumWidth(90);
+    edit->setMaximumWidth(130);
+    editors.insert(key, edit);
+
+    const int uiCol = colInGroup * 2;
+    layout->addWidget(label, row, uiCol);
+    layout->addWidget(edit, row, uiCol + 1);
+    ++colInGroup;
+    if (colInGroup >= 2)
+    {
+        ++row;
+        colInGroup = 0;
+    }
+}
+
 }
 
 PreciseMeasureEditDialog::PreciseMeasureEditDialog(ContralUnit* pContralUnit, QWidget* parent)
@@ -158,7 +194,7 @@ void PreciseMeasureEditDialog::BuildUi()
     setObjectName("PreciseMeasureEditDialog");
     setWindowFlags(windowFlags() | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint);
     setMinimumSize(720, 520);
-    setStyleSheet(
+    setStyleSheet(QString(
         "QDialog#PreciseMeasureEditDialog { background: #111820; color: #ECF3F4; }"
         "QWidget#PreciseMeasurePage { background: #111820; color: #ECF3F4; }"
         "QWidget#PrecisePulsePanel, QWidget#PreciseOtherPanel { background: #111820; color: #ECF3F4; }"
@@ -167,17 +203,15 @@ void PreciseMeasureEditDialog::BuildUi()
         "QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; color: #9ED8DB; }"
         "QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 8px 14px; }"
         "QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
-        "QComboBox, QLineEdit { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 7px; padding: 4px 6px; }"
-        "QComboBox { min-height: 24px; padding-left: 8px; padding-right: 24px; }"
-        "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 24px; border-left: 1px solid #385366; border-top-right-radius: 7px; border-bottom-right-radius: 7px; background: #0B1117; }"
-        "QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
+        "QLineEdit { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 7px; padding: 4px 6px; }"
         "QScrollArea#PrecisePageScroll { background: #111820; border: none; }"
         "QScrollArea#PrecisePageScroll > QWidget > QWidget { background: #111820; }"
         "QScrollBar:vertical { background: #111820; width: 12px; margin: 0; }"
         "QScrollBar::handle:vertical { background: #385366; border-radius: 6px; min-height: 24px; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
-        "QLabel { color: #BACBD1; }");
+        "QLabel { color: #BACBD1; }")
+        + UnifiedComboBoxStyleSheet());
 
     QVBoxLayout* outerLayout = new QVBoxLayout(this);
     outerLayout->setContentsMargins(0, 0, 0, 0);
@@ -374,11 +408,29 @@ void PreciseMeasureEditDialog::ReloadCurrentParam()
     LoadCurrentParam();
 }
 
-void PreciseMeasureEditDialog::SaveAllParamEdits()
+void PreciseMeasureEditDialog::closeEvent(QCloseEvent* event)
+{
+    if (!HasUnsavedChanges())
+    {
+        QDialog::closeEvent(event);
+        return;
+    }
+
+    if (ConfirmCloseWithUnsavedChanges(this, "精测量数据修改", [this]() { return SaveAllParamEdits(); }))
+    {
+        event->accept();
+    }
+    else
+    {
+        event->ignore();
+    }
+}
+
+bool PreciseMeasureEditDialog::SaveAllParamEdits()
 {
     if (m_bLoading)
     {
-        return;
+        return false;
     }
 
     T_ANGLE_PULSE startSafePulse;
@@ -393,7 +445,7 @@ void PreciseMeasureEditDialog::SaveAllParamEdits()
     {
         QMessageBox::warning(this, "保存参数", error);
         AppendLog("保存失败：" + error);
-        return;
+        return false;
     }
 
     if (!WritePulse("StartSafePulse0", startSafePulse, error)
@@ -403,7 +455,7 @@ void PreciseMeasureEditDialog::SaveAllParamEdits()
     {
         QMessageBox::warning(this, "保存参数", error);
         AppendLog("保存失败：" + error);
-        return;
+        return false;
     }
 
     for (auto it = m_otherParamEditors.cbegin(); it != m_otherParamEditors.cend(); ++it)
@@ -418,12 +470,14 @@ void PreciseMeasureEditDialog::SaveAllParamEdits()
         {
             QMessageBox::warning(this, "保存参数", error);
             AppendLog("其它参数保存失败：" + error);
-            return;
+            return false;
         }
     }
 
+    MarkCleanSnapshot();
     AppendLog("精测量参数已统一保存。");
     QMessageBox::information(this, "保存参数", "精测量参数保存完成。");
+    return true;
 }
 
 void PreciseMeasureEditDialog::SaveManualStartSafePulse()
@@ -440,6 +494,7 @@ void PreciseMeasureEditDialog::SaveManualStartSafePulse()
         AppendLog("下枪安全位置手动保存失败：" + error);
         return;
     }
+    MarkCleanSnapshot();
     AppendLog("下枪安全位置手动修改已保存。");
 }
 
@@ -457,6 +512,7 @@ void PreciseMeasureEditDialog::SaveManualStartPos()
         AppendLog("起点手动保存失败：" + error);
         return;
     }
+    MarkCleanSnapshot();
     AppendLog("起点手动修改已保存。");
 }
 
@@ -474,6 +530,7 @@ void PreciseMeasureEditDialog::SaveManualEndPos()
         AppendLog("终点手动保存失败：" + error);
         return;
     }
+    MarkCleanSnapshot();
     AppendLog("终点手动修改已保存。");
 }
 
@@ -491,6 +548,7 @@ void PreciseMeasureEditDialog::SaveManualEndSafePulse()
         AppendLog("收枪安全位置手动保存失败：" + error);
         return;
     }
+    MarkCleanSnapshot();
     AppendLog("收枪安全位置手动修改已保存。");
 }
 
@@ -600,6 +658,7 @@ bool PreciseMeasureEditDialog::LoadCurrentParam()
         AppendLog("未读取到扫描终点直角参数，请重新示教并保存。" + endPosError);
     }
     AppendLog(QString("已读取 %1 的精测量点位和其它参数。").arg(CurrentRobotName()));
+    MarkCleanSnapshot();
     return true;
 }
 
@@ -737,25 +796,33 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
                 pendingComments.clear();
             }
 
-            QLabel* label = new QLabel(PreciseParamDisplayName(key));
-            QLineEdit* edit = new QLineEdit(value);
-            label->setToolTip(key);
-            edit->setToolTip(key);
-            edit->setProperty("paramKey", key);
-            m_otherParamEditors.insert(key, edit);
-            edit->setMinimumWidth(90);
-            edit->setMaximumWidth(130);
-            const int uiCol = colInGroup * 2;
-            m_pOtherParamLayout->addWidget(label, row, uiCol);
-            m_pOtherParamLayout->addWidget(edit, row, uiCol + 1);
-            ++colInGroup;
-            if (colInGroup >= 2)
-            {
-                ++row;
-                colInGroup = 0;
-            }
+            AddOtherParamEditor(m_pOtherParamLayout, m_otherParamEditors, row, colInGroup, key, value);
             hasOtherParam = true;
         }
+    }
+
+    if (!m_otherParamEditors.contains(CAMERA_READ_FPS_KEY))
+    {
+        AddOtherParamEditor(
+            m_pOtherParamLayout,
+            m_otherParamEditors,
+            row,
+            colInGroup,
+            CAMERA_READ_FPS_KEY,
+            QString::number(DEFAULT_CAMERA_READ_FPS, 'f', 0));
+        hasOtherParam = true;
+    }
+
+    if (!m_otherParamEditors.contains(CAMERA_TIME_OFFSET_MS_KEY))
+    {
+        AddOtherParamEditor(
+            m_pOtherParamLayout,
+            m_otherParamEditors,
+            row,
+            colInGroup,
+            CAMERA_TIME_OFFSET_MS_KEY,
+            QString::number(DEFAULT_CAMERA_TIME_OFFSET_MS, 'f', 0));
+        hasOtherParam = true;
     }
 
     if (!hasOtherParam)
@@ -1048,7 +1115,33 @@ void PreciseMeasureEditDialog::SaveOtherParamEdit()
         AppendLog("其它参数保存失败：" + error);
         return;
     }
+    MarkCleanSnapshot();
     AppendLog(QString("其它参数已保存：%1=%2").arg(PreciseParamDisplayName(key), value));
+}
+
+bool PreciseMeasureEditDialog::HasUnsavedChanges() const
+{
+    return BuildSnapshot() != m_cleanSnapshot;
+}
+
+QString PreciseMeasureEditDialog::BuildSnapshot() const
+{
+    QStringList fields;
+    fields << CurrentRobotName();
+    for (auto it = m_editors.cbegin(); it != m_editors.cend(); ++it)
+    {
+        fields << it.key() << (it.value() != nullptr ? it.value()->text().trimmed() : QString());
+    }
+    for (auto it = m_otherParamEditors.cbegin(); it != m_otherParamEditors.cend(); ++it)
+    {
+        fields << it.key() << (it.value() != nullptr ? it.value()->text().trimmed() : QString());
+    }
+    return fields.join('\n');
+}
+
+void PreciseMeasureEditDialog::MarkCleanSnapshot()
+{
+    m_cleanSnapshot = BuildSnapshot();
 }
 
 void PreciseMeasureEditDialog::AppendLog(const QString& text)

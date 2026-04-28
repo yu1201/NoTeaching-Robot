@@ -7,6 +7,7 @@
 #include "WindowStyleHelper.h"
 
 #include <QComboBox>
+#include <QCloseEvent>
 #include <QDir>
 #include <QFileInfo>
 #include <QGridLayout>
@@ -17,6 +18,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QStringList>
 #include <QSplitter>
 #include <QSizePolicy>
 #include <QVBoxLayout>
@@ -34,17 +36,16 @@ CameraParamDialog::CameraParamDialog(
     setWindowTitle("相机参数");
     ApplyUnifiedWindowChrome(this);
     ResizeWindowForAvailableGeometry(this, QSize(1020, 660), 0.82, 0.76);
-    setStyleSheet(
+    setStyleSheet(QString(
         "QDialog { background: #111820; color: #ECF3F4; }"
         "QGroupBox { border: 1px solid #2E4656; border-radius: 12px; margin-top: 18px; padding: 14px; font-weight: bold; color: #9ED8DB; }"
         "QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 8px; }"
         "QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 9px 16px; }"
         "QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
-        "QComboBox, QLineEdit { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 8px; padding: 6px 10px; min-height: 26px; }"
-        "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 24px; border-left: 1px solid #385366; }"
-        "QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
+        "QLineEdit { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 8px; padding: 6px 10px; min-height: 26px; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
-        "QLabel { color: #BACBD1; }");
+        "QLabel { color: #BACBD1; }")
+        + UnifiedComboBoxStyleSheet());
 
     QVBoxLayout* rootLayout = new QVBoxLayout(this);
 
@@ -166,6 +167,24 @@ CameraParamDialog::CameraParamDialog(
     LoadRobotList();
 }
 
+void CameraParamDialog::closeEvent(QCloseEvent* event)
+{
+    if (!HasUnsavedChanges())
+    {
+        QDialog::closeEvent(event);
+        return;
+    }
+
+    if (ConfirmCloseWithUnsavedChanges(this, "相机参数", [this]() { return SaveCameraParam(); }))
+    {
+        event->accept();
+    }
+    else
+    {
+        event->ignore();
+    }
+}
+
 void CameraParamDialog::LoadRobotList()
 {
     m_pRobotCombo->clear();
@@ -273,6 +292,7 @@ bool CameraParamDialog::LoadCameraParam()
 
     m_pCameraSectionLabel->setText(QString("当前分组：%1").arg(param.sectionName));
     AppendLog(QString("已读取相机参数：%1 [%2]").arg(CurrentCameraIniPath(), param.sectionName));
+    MarkCleanSnapshot();
     return true;
 }
 
@@ -294,7 +314,31 @@ bool CameraParamDialog::SaveCameraParam()
     }
 
     AppendLog(QString("相机参数已保存：%1 [%2]").arg(CurrentCameraIniPath(), param.sectionName));
+    MarkCleanSnapshot();
     return true;
+}
+
+bool CameraParamDialog::HasUnsavedChanges() const
+{
+    return BuildSnapshot() != m_cleanSnapshot;
+}
+
+QString CameraParamDialog::BuildSnapshot() const
+{
+    return QStringList{
+        CurrentRobotName(),
+        CurrentCameraSection(),
+        m_pDeviceAddressEdit != nullptr ? m_pDeviceAddressEdit->text().trimmed() : QString(),
+        m_pDevicePortEdit != nullptr ? m_pDevicePortEdit->text().trimmed() : QString(),
+        m_pExposureTimeEdit != nullptr ? m_pExposureTimeEdit->text().trimmed() : QString(),
+        m_pGainLevelEdit != nullptr ? m_pGainLevelEdit->text().trimmed() : QString(),
+        m_pCameraTypeEdit != nullptr ? m_pCameraTypeEdit->text().trimmed() : QString()
+    }.join('\n');
+}
+
+void CameraParamDialog::MarkCleanSnapshot()
+{
+    m_cleanSnapshot = BuildSnapshot();
 }
 
 void CameraParamDialog::AppendLog(const QString& text)

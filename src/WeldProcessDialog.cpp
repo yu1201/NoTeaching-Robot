@@ -5,6 +5,7 @@
 #include <QAbstractSpinBox>
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
+#include <QCloseEvent>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -145,7 +146,7 @@ WeldProcessDialog::WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* pa
 
     connect(ui->reloadBtn, &QPushButton::clicked, this, &WeldProcessDialog::ReloadData);
     connect(ui->saveBtn, &QPushButton::clicked, this, &WeldProcessDialog::SaveData);
-    connect(ui->closeBtn, &QPushButton::clicked, this, &WeldProcessDialog::reject);
+    connect(ui->closeBtn, &QPushButton::clicked, this, &QDialog::close);
     connect(m_weldListWidget, &QListWidget::currentRowChanged, this, &WeldProcessDialog::OnWeldSelectionChanged);
     ui->useWeldSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     ui->useWeaveSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
@@ -159,6 +160,24 @@ WeldProcessDialog::WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* pa
 WeldProcessDialog::~WeldProcessDialog()
 {
     delete ui;
+}
+
+void WeldProcessDialog::closeEvent(QCloseEvent* event)
+{
+    if (!HasUnsavedChanges())
+    {
+        QDialog::closeEvent(event);
+        return;
+    }
+
+    if (ConfirmCloseWithUnsavedChanges(this, "工艺参数", [this]() { return SaveData(); }))
+    {
+        event->accept();
+    }
+    else
+    {
+        event->ignore();
+    }
 }
 
 void WeldProcessDialog::BuildEditorUi()
@@ -591,6 +610,7 @@ void WeldProcessDialog::LoadToUi(int preferredGroupRow, int preferredBeadRow)
         .arg(QString::fromLocal8Bit(m_file.GetWeaveIniFilePath().c_str()))
         .arg(QString::fromLocal8Bit(m_file.GetWeldIniFilePath().c_str())));
     m_isLoading = false;
+    MarkCleanSnapshot();
 }
 
 void WeldProcessDialog::ReloadData()
@@ -836,61 +856,62 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     m_isLoading = false;
 }
 
-void WeldProcessDialog::SaveData()
+bool WeldProcessDialog::SaveData()
 {
     if (!m_file.Init())
     {
         ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
-        return;
+        return false;
     }
 
     const int currentRow = CurrentWeldIndex();
     if (currentRow < 0 || currentRow >= static_cast<int>(m_file.GetWeldParaList().size()))
     {
         ShowError("请先选择工艺和焊道。");
-        return;
+        return false;
     }
 
     if (!m_file.UpdateUseWeaveTypeNo(ui->useWeaveSpin->value()))
     {
         ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
-        return;
+        return false;
     }
     if (!m_file.UpdateUseWeldParaNo(currentRow))
     {
         ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
-        return;
+        return false;
     }
 
     T_WELD_PARA weldItem;
     if (!CollectWeldFromUi(weldItem))
     {
         ShowError("当前焊接工艺参数存在非法值。");
-        return;
+        return false;
     }
 
     T_WeaveDate weaveItem;
     if (!CollectWeaveFromUi(weaveItem))
     {
         ShowError("当前摆动参数存在非法值。");
-        return;
+        return false;
     }
 
     if (!m_file.UpdateWeldPara(currentRow, weldItem))
     {
         ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
-        return;
+        return false;
     }
     if (!m_file.UpdateWeaveType(weldItem.nWeaveTypeNo, weaveItem))
     {
         ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
-        return;
+        return false;
     }
 
     ui->statusLabel->setText("保存成功");
     QMessageBox::information(this, "工艺参数", "参数已保存。");
     LoadToUi(m_weldListWidget != nullptr ? m_weldListWidget->currentRow() : -1,
         m_beadListWidget != nullptr ? m_beadListWidget->currentRow() : -1);
+    return true;
 }
 
 bool WeldProcessDialog::CollectWeaveFromUi(T_WeaveDate& out) const
@@ -1101,4 +1122,65 @@ void WeldProcessDialog::RemoveBead()
 void WeldProcessDialog::ShowError(const QString& message) const
 {
     QMessageBox::critical(const_cast<WeldProcessDialog*>(this), "工艺参数", message);
+}
+
+bool WeldProcessDialog::HasUnsavedChanges() const
+{
+    return BuildSnapshot() != m_cleanSnapshot;
+}
+
+QString WeldProcessDialog::BuildSnapshot() const
+{
+    QStringList fields;
+    fields << QString::number(m_weldListWidget != nullptr ? m_weldListWidget->currentRow() : -1)
+           << QString::number(m_beadListWidget != nullptr ? m_beadListWidget->currentRow() : -1)
+           << (m_workPeaceEdit != nullptr ? m_workPeaceEdit->text().trimmed() : QString())
+           << (m_weldTypeEdit != nullptr ? m_weldTypeEdit->text().trimmed() : QString())
+           << QString::number(m_weldAngleSizeSpin != nullptr ? m_weldAngleSizeSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_standWeldDirSpin != nullptr ? m_standWeldDirSpin->value() : 0)
+           << QString::number(m_weldMethodSpin != nullptr ? m_weldMethodSpin->value() : 0)
+           << QString::number(m_weaveTypeNoSpin != nullptr ? m_weaveTypeNoSpin->value() : 0)
+           << QString::number(m_startArcCurrentSpin != nullptr ? m_startArcCurrentSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_startArcVoltageSpin != nullptr ? m_startArcVoltageSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_startWaitTimeSpin != nullptr ? m_startWaitTimeSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_trackCurrentSpin != nullptr ? m_trackCurrentSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_trackVoltageSpin != nullptr ? m_trackVoltageSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_weldVelocitySpin != nullptr ? m_weldVelocitySpin->value() : 0.0, 'f', 6)
+           << QString::number(m_crosswiseOffsetSpin != nullptr ? m_crosswiseOffsetSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_verticalOffsetSpin != nullptr ? m_verticalOffsetSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapConditionNoSpin != nullptr ? m_wrapConditionNoSpin->value() : 0)
+           << QString::number(m_weldAngleSpin != nullptr ? m_weldAngleSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_weldDipAngleSpin != nullptr ? m_weldDipAngleSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_stopArcCurrentSpin != nullptr ? m_stopArcCurrentSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_stopArcVoltageSpin != nullptr ? m_stopArcVoltageSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_stopWaitTimeSpin != nullptr ? m_stopWaitTimeSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapCurrent1Spin != nullptr ? m_wrapCurrent1Spin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapVoltage1Spin != nullptr ? m_wrapVoltage1Spin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapWaitTime1Spin != nullptr ? m_wrapWaitTime1Spin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapCurrent2Spin != nullptr ? m_wrapCurrent2Spin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapVoltage2Spin != nullptr ? m_wrapVoltage2Spin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapWaitTime2Spin != nullptr ? m_wrapWaitTime2Spin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapCurrent3Spin != nullptr ? m_wrapCurrent3Spin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapVoltage3Spin != nullptr ? m_wrapVoltage3Spin->value() : 0.0, 'f', 6)
+           << QString::number(m_wrapWaitTime3Spin != nullptr ? m_wrapWaitTime3Spin->value() : 0.0, 'f', 6)
+           << QString::number(m_weaveTypeSpin != nullptr ? m_weaveTypeSpin->value() : 0)
+           << QString::number(m_freqSpin != nullptr ? m_freqSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_ampLeftSpin != nullptr ? m_ampLeftSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_ampRightSpin != nullptr ? m_ampRightSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_stopTimeLeftSpin != nullptr ? m_stopTimeLeftSpin->value() : 0)
+           << QString::number(m_stopTimeCenterSpin != nullptr ? m_stopTimeCenterSpin->value() : 0)
+           << QString::number(m_stopTimeRightSpin != nullptr ? m_stopTimeRightSpin->value() : 0)
+           << QString::number(m_rotAngleXSpin != nullptr ? m_rotAngleXSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_rotAngleZSpin != nullptr ? m_rotAngleZSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_delayTypeLeftSpin != nullptr ? m_delayTypeLeftSpin->value() : 0)
+           << QString::number(m_delayTypeCenterSpin != nullptr ? m_delayTypeCenterSpin->value() : 0)
+           << QString::number(m_delayTypeRightSpin != nullptr ? m_delayTypeRightSpin->value() : 0)
+           << QString::number(m_rotAngleLeftSpin != nullptr ? m_rotAngleLeftSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_rotAngleRightSpin != nullptr ? m_rotAngleRightSpin->value() : 0.0, 'f', 6);
+    return fields.join('\n');
+}
+
+void WeldProcessDialog::MarkCleanSnapshot()
+{
+    m_cleanSnapshot = BuildSnapshot();
 }
