@@ -115,6 +115,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\ContralUnit.cpp" />
+    <ClCompile Include="src\CameraFrameCache.cpp" />
     <ClCompile Include="src\CameraParamDialog.cpp" />
     <ClCompile Include="src\FTPClient.cpp" />
     <ClCompile Include="src\FANUCRobotDriver.cpp" />
@@ -131,6 +132,7 @@
     <ClCompile Include="src\PreciseMeasureEditDialog.cpp" />
     <ClCompile Include="src\RobotCalculation.cpp" />
     <ClCompile Include="src\RobotDataHelper.cpp" />
+    <ClCompile Include="src\WeldSeamCompDialog.cpp" />
     <ClCompile Include="src\WeldProcessFile.cpp" />
     <ClCompile Include="src\WeldProcessDialog.cpp" />
     <ClCompile Include="src\OPini.cpp" />
@@ -158,6 +160,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Const.h" />
+    <ClInclude Include="include\CameraFrameCache.h" />
     <ClInclude Include="include\CameraParamDialog.h" />
     <ClInclude Include="include\ContralUnit.h" />
     <ClInclude Include="include\FANUCRobotDriver.h" />
@@ -181,6 +184,7 @@
     <ClInclude Include="include\RobotJogDialog.h" />
     <ClInclude Include="include\STEPRobotDriver.h" />
     <ClInclude Include="include\WindowStyleHelper.h" />
+    <ClInclude Include="include\WeldSeamCompDialog.h" />
     <ClInclude Include="include\WeldProcessFile.h" />
     <ClInclude Include="include\groove\framebuffer.h" />
     <ClInclude Include="include\groove\pointcloundresultframe.h" />

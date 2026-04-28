@@ -3,6 +3,7 @@
 #include "HandEyeMatrixConfig.h"
 #include "WindowStyleHelper.h"
 
+#include <QCloseEvent>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -11,6 +12,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QStringList>
 #include <QVBoxLayout>
 
 namespace
@@ -101,9 +103,27 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(const QString& robotName, const QString
 
     connect(reloadBtn, &QPushButton::clicked, this, [this]() { LoadConfig(); });
     connect(saveBtn, &QPushButton::clicked, this, [this]() { SaveConfig(); });
-    connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
+    connect(closeBtn, &QPushButton::clicked, this, &QDialog::close);
 
     LoadConfig();
+}
+
+void HandEyeMatrixDialog::closeEvent(QCloseEvent* event)
+{
+    if (!HasUnsavedChanges())
+    {
+        QDialog::closeEvent(event);
+        return;
+    }
+
+    if (ConfirmCloseWithUnsavedChanges(this, "手眼矩阵参数", [this]() { return SaveConfig(); }))
+    {
+        event->accept();
+    }
+    else
+    {
+        event->ignore();
+    }
 }
 
 bool HandEyeMatrixDialog::LoadConfig()
@@ -131,6 +151,7 @@ bool HandEyeMatrixDialog::LoadConfig()
         m_translationEdits[index]->setText(FormatDoubleValue(config.translation(index)));
     }
     AppendLog("已读取手眼矩阵参数。");
+    MarkCleanSnapshot();
     return true;
 }
 
@@ -176,7 +197,33 @@ bool HandEyeMatrixDialog::SaveConfig()
     m_pPathLabel->setText(QString("参数文件：%1").arg(filePath));
     AppendLog("手眼矩阵参数已保存。");
     QMessageBox::information(this, "手眼矩阵参数", "保存完成。");
+    MarkCleanSnapshot();
     return true;
+}
+
+bool HandEyeMatrixDialog::HasUnsavedChanges() const
+{
+    return BuildSnapshot() != m_cleanSnapshot;
+}
+
+QString HandEyeMatrixDialog::BuildSnapshot() const
+{
+    QStringList fields;
+    fields << m_robotName << m_cameraSection;
+    for (QLineEdit* edit : m_rotationEdits)
+    {
+        fields << (edit != nullptr ? edit->text().trimmed() : QString());
+    }
+    for (QLineEdit* edit : m_translationEdits)
+    {
+        fields << (edit != nullptr ? edit->text().trimmed() : QString());
+    }
+    return fields.join('\n');
+}
+
+void HandEyeMatrixDialog::MarkCleanSnapshot()
+{
+    m_cleanSnapshot = BuildSnapshot();
 }
 
 void HandEyeMatrixDialog::AppendLog(const QString& text)

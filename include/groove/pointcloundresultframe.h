@@ -4,11 +4,10 @@
 #include <QByteArray>
 #include <QDataStream>
 #include <QDebug>
-#include <QIODevice>
 #include <QtEndian>
-#include <limits>
 #include <vector>
 #include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 struct PointCloundResultFrame
 {
@@ -29,11 +28,12 @@ struct PointCloundResultFrame
     std::vector<cv::Point2d> calcPoints2D;
     cv::Point3d             resultPoints3D;
     QString                 errorMsg;
+    float                   calcFrameRate = 0.0f;
 
     quint32 checksum = 0;
 
     // ------------------------------
-    // 极速内存拷贝（兼容大端序，上位机可解析）
+    // 极速内存拷贝
     // ------------------------------
     QByteArray compressMat(const cv::Mat& mat) const
     {
@@ -54,7 +54,7 @@ struct PointCloundResultFrame
     }
 
     // ------------------------------
-    // 极速解压缩（兼容大端序）
+    // 极速解压缩
     // ------------------------------
     cv::Mat decompressMat(const QByteArray& bytes) const
     {
@@ -131,6 +131,7 @@ struct PointCloundResultFrame
 
         s << resultPoints3D.x << resultPoints3D.y << resultPoints3D.z;
         s << errorMsg;
+        s << calcFrameRate;
 
         return body;
     }
@@ -164,6 +165,7 @@ struct PointCloundResultFrame
 
         s >> resultPoints3D.x >> resultPoints3D.y >> resultPoints3D.z;
         s >> errorMsg;
+        s >> calcFrameRate;
 
         return true;
     }
@@ -175,14 +177,7 @@ struct PointCloundResultFrame
     {
         QByteArray body = serializeBody();
         checksum = calculateChecksum(body);
-        const qsizetype maxBodySize = static_cast<qsizetype>(
-            std::numeric_limits<quint32>::max() - headerSize - sizeof(quint32));
-        if (body.size() > maxBodySize)
-        {
-            qWarning() << "PointCloundResultFrame body is too large:" << body.size();
-            return {};
-        }
-        totalSize = headerSize + static_cast<quint32>(body.size()) + sizeof(quint32);
+        totalSize = headerSize + body.size() + sizeof(quint32);
 
         QByteArray packet;
         QDataStream s(&packet, QIODevice::WriteOnly);

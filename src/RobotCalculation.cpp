@@ -427,26 +427,26 @@ Eigen::Matrix3d RobotCalculation::FanucRot(double w, double p, double r)
     return RotZ(r) * RotY(p) * RotX(w);
 }
 
-T_ROBOT_COORS RobotCalculation::InterpolateRobotPose(const std::vector<TimestampedRobotPose>& robotSamples, qint64 targetTimestampMs)
+T_ROBOT_COORS RobotCalculation::InterpolateRobotPose(const std::vector<TimestampedRobotPose>& robotSamples, qint64 targetTimestampUs)
 {
     if (robotSamples.empty())
     {
         return T_ROBOT_COORS();
     }
 
-    if (targetTimestampMs <= robotSamples.front().timestampMs)
+    if (targetTimestampUs <= robotSamples.front().timestampUs)
     {
         return robotSamples.front().pose;
     }
-    if (targetTimestampMs >= robotSamples.back().timestampMs)
+    if (targetTimestampUs >= robotSamples.back().timestampUs)
     {
         return robotSamples.back().pose;
     }
 
-    const auto upper = std::lower_bound(robotSamples.begin(), robotSamples.end(), targetTimestampMs,
+    const auto upper = std::lower_bound(robotSamples.begin(), robotSamples.end(), targetTimestampUs,
         [](const TimestampedRobotPose& sample, qint64 timestamp)
         {
-            return sample.timestampMs < timestamp;
+            return sample.timestampUs < timestamp;
         });
 
     if (upper == robotSamples.begin())
@@ -455,8 +455,8 @@ T_ROBOT_COORS RobotCalculation::InterpolateRobotPose(const std::vector<Timestamp
     }
 
     const auto lower = upper - 1;
-    const qint64 dt = upper->timestampMs - lower->timestampMs;
-    const double ratio = dt > 0 ? static_cast<double>(targetTimestampMs - lower->timestampMs) / static_cast<double>(dt) : 0.0;
+    const qint64 dt = upper->timestampUs - lower->timestampUs;
+    const double ratio = dt > 0 ? static_cast<double>(targetTimestampUs - lower->timestampUs) / static_cast<double>(dt) : 0.0;
 
     auto lerp = [ratio](double a, double b)
         {
@@ -1327,10 +1327,10 @@ RobotCalculation::LowerWeldFilterResult RobotCalculation::FilterLowerWeldPath(
     return result;
 }
 
-QString RobotCalculation::RobotPoseCsv(qint64 timestampMs, const T_ROBOT_COORS& pose)
+QString RobotCalculation::RobotPoseCsv(qint64 timestampUs, const T_ROBOT_COORS& pose)
 {
     return QString("%1,%2,%3,%4,%5,%6,%7,%8,%9,%10")
-        .arg(QString::number(timestampMs))
+        .arg(QString::number(timestampUs))
         .arg(pose.dX, 0, 'f', 6)
         .arg(pose.dY, 0, 'f', 6)
         .arg(pose.dZ, 0, 'f', 6)
@@ -1560,10 +1560,10 @@ QString RobotCalculation::LowerWeldPointTypeName(LowerWeldPointType type)
     }
 }
 
-QString RobotCalculation::Vector3Csv(qint64 timestampMs, const Eigen::Vector3d& point, const QString& extra)
+QString RobotCalculation::Vector3Csv(qint64 timestampUs, const Eigen::Vector3d& point, const QString& extra)
 {
     QString line = QString("%1,%2,%3,%4")
-        .arg(QString::number(timestampMs))
+        .arg(QString::number(timestampUs))
         .arg(point.x(), 0, 'f', 6)
         .arg(point.y(), 0, 'f', 6)
         .arg(point.z(), 0, 'f', 6);

@@ -1,5 +1,6 @@
 #include "MeasureThenWeldDialog.h"
 
+#include "CameraFrameAccessGuard.h"
 #include "FANUCRobotDriver.h"
 #include "HandEyeMatrixConfig.h"
 #include "MeasureThenWeldService.h"
@@ -7,7 +8,6 @@
 #include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
-#include "groove/threadsafebuffer.h"
 
 #include <QCloseEvent>
 #include <QCoreApplication>
@@ -305,6 +305,11 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
         QMessageBox::warning(this, "预设参数", error);
         return;
     }
+    if (!CameraFrameAccess::TryBeginMeasureThenWeldExclusive())
+    {
+        QMessageBox::information(this, "预设参数", "已有先测后焊流程正在独占相机帧，请等待当前流程结束。");
+        return;
+    }
 
     SetRunning(true);
     SetFlowStep("读取预设参数完成，准备启动相机");
@@ -469,6 +474,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 {
                     if (self == nullptr)
                     {
+                        CameraFrameAccess::EndMeasureThenWeldExclusive();
                         return;
                     }
                     if (self->m_stopCamera)
@@ -476,6 +482,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         // 流程正常完成、失败或用户取消，都会关闭相机接收。
                         self->m_stopCamera();
                     }
+                    CameraFrameAccess::EndMeasureThenWeldExclusive();
                     self->SetFlowStep(ok ? "流程完成" : "流程失败，请查看流程日志");
                     self->AppendLog(ok ? "相机接收已停止，流程完成。" : "相机接收已停止，流程失败。");
                     self->SetRunning(false);

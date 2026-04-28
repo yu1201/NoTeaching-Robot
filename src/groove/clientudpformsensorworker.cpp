@@ -1,12 +1,13 @@
 #include "groove/clientudpformsensorworker.h"
 #include <QDebug>
 #include <QDataStream>
+#include <QIODevice>
 #include <QVariant>
 #include "groove/pointcloundresultframe.h"
 #include "groove/threadsafebuffer.h"
 #include "groove/framebuffer.h"
 
-#define UDP_SENDER_PORT 50005
+#define UDP_SENDER_PORT 50004
 
 ClientUDPFormSensorWorker::ClientUDPFormSensorWorker(QObject* parent)
     : QObject(parent)
@@ -36,8 +37,8 @@ void ClientUDPFormSensorWorker::startReceive(const QString& serverIP)
 
     // 新建UDP
     m_udp = new QUdpSocket(this);
-    m_udp->setSocketOption(QAbstractSocket::KeepAliveOption, QVariant(1));
-    m_udp->setSocketOption(QAbstractSocket::LowDelayOption, QVariant(1));
+    m_udp->setSocketOption(QAbstractSocket::KeepAliveOption, 1);
+    m_udp->setSocketOption(QAbstractSocket::LowDelayOption, 1);
 
     if (!m_udp->bind(QHostAddress::AnyIPv4, UDP_SENDER_PORT)) {
         qDebug() << "UDP 绑定失败:" << UDP_SENDER_PORT;
@@ -123,7 +124,7 @@ void ClientUDPFormSensorWorker::readPendingDatagrams()
 
         if (m_expectedSize <= 0)
         {
-            if (m_receiveBuffer.size() >= (int)PointCloundResultFrame::HEADER_SIZE)
+            while (m_receiveBuffer.size() >= (int)PointCloundResultFrame::HEADER_SIZE)
             {
                 QDataStream s(m_receiveBuffer);
                 s.setByteOrder(QDataStream::BigEndian);
@@ -135,14 +136,13 @@ void ClientUDPFormSensorWorker::readPendingDatagrams()
                     hdrSz == PointCloundResultFrame::HEADER_SIZE)
                 {
                     m_expectedSize = totalSz;
+                    break;
                 }
-                else
-                {
-                    m_receiveBuffer.remove(0, 1);
-                    continue;
-                }
+
+                m_receiveBuffer.remove(0, 1);
             }
-            else
+
+            if (m_expectedSize <= 0)
             {
                 continue;
             }
@@ -181,8 +181,12 @@ void ClientUDPFormSensorWorker::readPendingDatagrams()
             udpFrame.targetY = targetY;
             udpFrame.errorMessage = frame.errorMsg;
             udpFrame.targetPoint = frame.resultPoints3D;
+            udpFrame.allResultPoint = frame.dataPoints3D;
+            udpFrame.mFps = frame.calcFrameRate;
+            udpFrame.timestamp = frame.timestamp;
 
             ThreadSafeBuffer<udpDataShow>::Instance().enqueue(udpFrame);
+            qDebug() << "frame====================" << frame.timestamp << ";" << frame.calcFrameRate;
         }
 
         m_receiveBuffer.clear();

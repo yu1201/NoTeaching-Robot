@@ -8,6 +8,7 @@
 class QPushButton;
 class QPlainTextEdit;
 class FANUCRobotCtrl;
+class RobotDriverAdaptor;
 class QTimer;
 
 // 功能测试子界面：把主界面上的 FANUC 调试/运动测试按钮集中管理。
@@ -21,9 +22,11 @@ protected:
 
 private:
     FANUCRobotCtrl* GetFirstFanucDriver();
+    RobotDriverAdaptor* GetFirstRobotDriverAdaptor();
     bool IsMotionBusy() const;
     void RefreshMotionButtonState();
     void AppendLog(const QString& text);
+    QString EnsureKinematicsSampleFilePath();
 
     void FanucGetCurrentPosTest();
     void FanucGetCurrentPulseTest();
@@ -36,6 +39,8 @@ private:
     void FanucMovlTest();
     void FanucMovjTest();
     void FanucMoveZeroTest();
+    void FanucCaptureKinematicsSample();
+    void FitDhParametersFromSamples();
     void OpenLaserWeldFilterTest();
 
 private:
@@ -46,6 +51,8 @@ private:
     QPlainTextEdit* m_pLogText = nullptr;
     QTimer* m_pMotionStateTimer = nullptr;
     QVector<QPushButton*> m_motionButtons;
+    QString m_kinematicsSampleFilePath;
+    int m_kinematicsSampleCount = 0;
 
     bool m_bFanucMovlForward = true;
     bool m_bFanucMovlRunning = false;

@@ -5,6 +5,7 @@
 #include <QVector>
 
 class QLabel;
+class QCloseEvent;
 class QLineEdit;
 class QPlainTextEdit;
 
@@ -14,8 +15,12 @@ public:
     explicit HandEyeMatrixDialog(const QString& robotName, const QString& cameraSection, QWidget* parent = nullptr);
 
 private:
+    void closeEvent(QCloseEvent* event) override;
     bool LoadConfig();
     bool SaveConfig();
+    bool HasUnsavedChanges() const;
+    QString BuildSnapshot() const;
+    void MarkCleanSnapshot();
     void AppendLog(const QString& text);
 
     QString m_robotName;
@@ -24,4 +29,5 @@ private:
     QPlainTextEdit* m_pLogText = nullptr;
     QVector<QLineEdit*> m_rotationEdits;
     QVector<QLineEdit*> m_translationEdits;
+    QString m_cleanSnapshot;
 };
