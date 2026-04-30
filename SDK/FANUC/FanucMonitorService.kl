@@ -6,6 +6,7 @@ PROGRAM FANUC_MONITOR_SERVICE
 %ENVIRONMENT sysdef
 %ENVIRONMENT fdev
 %ENVIRONMENT flbt
+%ENVIRONMENT MOTN
 %ENVIRONMENT REGOPE
 
 VAR
@@ -26,6 +27,15 @@ VAR
   done_is_real : BOOLEAN
   done_int     : INTEGER
   done_real    : REAL
+  utool:POSITION
+  uframe:POSITION
+  out_pos:POSITION
+  wjnt_cfg:CONFIG
+  ext_ang:ARRAY[3] OF REAL
+  pos_1:XYZWPR
+  config_ref:INTEGER
+  reg_status:INTEGER
+  kine_status:INTEGER
 
 ROUTINE InitMonitorPort
 BEGIN
@@ -80,10 +90,26 @@ BEGIN
   vals[9] = 0.0
 
   UpdateDoneState
-  pos = CURPOS(0, 0)
+  pos_1 = CURPOS(0, 0)
   jpos = CURJPOS(0, 0)
+  reg_status = 0
+  utool = GET_POS_REG(3, reg_status) -- 获得PR[3]的工具坐标
+  IF reg_status = 0 THEN
+    uframe = GET_POS_REG(4, reg_status) -- 获得PR[4]的用户坐标
+  ENDIF
   CNV_JPOS_REL(jpos, vals, status)
-
+  config_ref = 0
+  IF reg_status = 0 THEN
+    JOINT2POS(jpos, uframe, utool, config_ref, out_pos, wjnt_cfg, ext_ang, kine_status)
+    IF kine_status = 0 THEN
+      pos = out_pos
+    ELSE
+      pos = pos_1
+    ENDIF
+  ELSE
+    pos = pos_1
+  ENDIF
+  
   WRITE ch('MON:',
            seq, ',',
            robot_ms, ',',

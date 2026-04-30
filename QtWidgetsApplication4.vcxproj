@@ -111,6 +111,7 @@
     </Link>
     <ClCompile>
       <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -141,6 +142,8 @@
     <ClCompile Include="src\RobotMessage.cpp" />
     <ClCompile Include="src\RobotJogDialog.cpp" />
     <ClCompile Include="src\StepRobotDriver.cpp" />
+    <ClCompile Include="src\SkDataClass.cpp" />
+    <ClCompile Include="src\SkFunction.cpp" />
     <ClCompile Include="src\WindowStyleHelper.cpp" />
     <ClCompile Include="src\groove\clientudpformsensorworker.cpp" />
     <ClCompile Include="src\groove\framebuffer.cpp" />
@@ -182,6 +185,9 @@
     <ClInclude Include="include\RobotLog.h" />
     <ClInclude Include="include\RobotMessage.h" />
     <ClInclude Include="include\RobotJogDialog.h" />
+    <ClInclude Include="include\SkDataClass.h" />
+    <ClInclude Include="include\SkFunction.h" />
+    <ClInclude Include="include\SkGrooveRecog_global.h" />
     <ClInclude Include="include\STEPRobotDriver.h" />
     <ClInclude Include="include\WindowStyleHelper.h" />
     <ClInclude Include="include\WeldSeamCompDialog.h" />

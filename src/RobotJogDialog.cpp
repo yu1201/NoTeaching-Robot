@@ -358,6 +358,24 @@ void RobotJogDialog::SaveSpeedSettings() const
 	settings.setValue("Speed/Joint", JointSpeed());
 }
 
+void RobotJogDialog::ShowMessageOnUiThread(QMessageBox::Icon icon, const QString& title, const QString& text)
+{
+	QPointer<RobotJogDialog> self(this);
+	QMetaObject::invokeMethod(this, [self, icon, title, text]()
+		{
+			if (self == nullptr)
+			{
+				return;
+			}
+			QMessageBox msgBox(self);
+			msgBox.setIcon(icon);
+			msgBox.setWindowTitle(title);
+			msgBox.setText(text);
+			msgBox.addButton("确定", QMessageBox::AcceptRole);
+			msgBox.exec();
+		}, Qt::QueuedConnection);
+}
+
 void RobotJogDialog::ReadCurrentCartesianTarget()
 {
 	if (m_fanucDriver == nullptr)
@@ -406,11 +424,15 @@ void RobotJogDialog::MoveToCartesianTarget()
 	FANUCRobotCtrl* driver = m_fanucDriver;
 	QPointer<RobotJogDialog> self(this);
 	SetMotionTaskRunning(true);
-	std::thread([self, driver, target, robotSpeed]()
+		std::thread([self, driver, target, robotSpeed]()
 		{
+			if (self == nullptr)
+			{
+				return;
+			}
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
 			const int done = moveOk ? driver->CheckRobotDone(100) : -1;
-			QMetaObject::invokeMethod(qApp, [self, moveOk, done]()
+			QMetaObject::invokeMethod(self.data(), [self, moveOk, done]()
 				{
 					if (self == nullptr)
 					{
@@ -419,7 +441,7 @@ void RobotJogDialog::MoveToCartesianTarget()
 					self->SetMotionTaskRunning(false);
 					if (!moveOk || done <= 0)
 					{
-						QMessageBox::warning(self, "运动到指定位置", QString("直角坐标运动失败，CheckRobotDone=%1").arg(done));
+						self->ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", QString("直角坐标运动失败，CheckRobotDone=%1").arg(done));
 					}
 				}, Qt::QueuedConnection);
 		}).detach();
@@ -451,11 +473,15 @@ void RobotJogDialog::MoveToJointTarget()
 	FANUCRobotCtrl* driver = m_fanucDriver;
 	QPointer<RobotJogDialog> self(this);
 	SetMotionTaskRunning(true);
-	std::thread([self, driver, target, robotSpeed]()
+		std::thread([self, driver, target, robotSpeed]()
 		{
+			if (self == nullptr)
+			{
+				return;
+			}
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
 			const int done = moveOk ? driver->CheckRobotDone(100) : -1;
-			QMetaObject::invokeMethod(qApp, [self, moveOk, done]()
+			QMetaObject::invokeMethod(self.data(), [self, moveOk, done]()
 				{
 					if (self == nullptr)
 					{
@@ -464,7 +490,7 @@ void RobotJogDialog::MoveToJointTarget()
 					self->SetMotionTaskRunning(false);
 					if (!moveOk || done <= 0)
 					{
-						QMessageBox::warning(self, "运动到指定位置", QString("关节脉冲运动失败，CheckRobotDone=%1").arg(done));
+						self->ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", QString("关节脉冲运动失败，CheckRobotDone=%1").arg(done));
 					}
 				}, Qt::QueuedConnection);
 		}).detach();

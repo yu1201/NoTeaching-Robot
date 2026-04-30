@@ -1253,6 +1253,9 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         int end = 0;
         int nextBegin = 0;
         int transitionBegin = std::numeric_limits<int>::max();
+        double beginDistance = 0.0;
+        double endDistance = 0.0;
+        double transitionBeginDistance = std::numeric_limits<double>::max();
         RobotCalculation::LowerWeldPointType beginType = RobotCalculation::LowerWeldPointType::Normal;
         RobotCalculation::LowerWeldPointType endMarkerType = RobotCalculation::LowerWeldPointType::Normal;
         QString kind;
@@ -1344,6 +1347,13 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         return lines;
     }
 
+    QVector<double> distanceFromStart(result.points.size(), 0.0);
+    for (int index = 1; index < result.points.size(); ++index)
+    {
+        distanceFromStart[index] = distanceFromStart[index - 1]
+            + (result.points[index].point - result.points[index - 1].point).norm();
+    }
+
     std::vector<SegmentInfo> segments;
     double previousSegmentRz = preset.gunToolBaseRz;
     for (size_t segmentIndex = 0; segmentIndex + 1 < keyPointPositions.size(); ++segmentIndex)
@@ -1382,6 +1392,8 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             accumulatedDistance += (result.points[index + 1].point - result.points[index].point).norm();
             segment.distanceToEnd[index - segment.begin] = accumulatedDistance;
         }
+        segment.beginDistance = distanceFromStart[segment.begin];
+        segment.endDistance = distanceFromStart[segment.end];
 
         if (segmentIndex + 1 < segments.capacity())
         {
@@ -1397,6 +1409,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
                 if (remainingDistance >= preset.cornerTransitionLeadDistance)
                 {
                     segment.transitionBegin = std::min(segment.end, index + 1);
+                    segment.transitionBeginDistance = distanceFromStart[segment.transitionBegin];
                     break;
                 }
                 segment.transitionBegin = index;
@@ -1522,12 +1535,6 @@ std::vector<QString> BuildSegmentPoseOutputLines(
 
     const int weldBeginCandidate = segments.front().begin;
     const int weldEndCandidate = segments.back().end;
-    QVector<double> distanceFromStart(result.points.size(), 0.0);
-    for (int index = weldBeginCandidate + 1; index <= weldEndCandidate; ++index)
-    {
-        distanceFromStart[index] = distanceFromStart[index - 1]
-            + (result.points[index].point - result.points[index - 1].point).norm();
-    }
 
     int weldStartIndex = weldBeginCandidate;
     if (preset.weldStartSkipDistance > 1e-6)
@@ -1699,13 +1706,125 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         return bestIndex;
     };
 
-    QVector<WeldPoseFileRecord> records;
-    records.reserve(weldEndIndex - weldStartIndex + 1);
+    QVector<double> sampleDistances;
+    sampleDistances.reserve(static_cast<int>((weldEndIndex - weldStartIndex + 1) * 2));
+    constexpr double kExpandedSampleStepMm = 2.0;
+    for (double distance = distanceFromStart[weldStartIndex];
+         distance <= distanceFromStart[weldEndIndex] + 1e-9;
+         distance += kExpandedSampleStepMm)
+    {
+        sampleDistances.push_back(distance);
+    }
 
-    int weldIndex = 1;
     for (int pointIndex = weldStartIndex; pointIndex <= weldEndIndex; ++pointIndex)
     {
-        const int segmentIndex = findSegmentIndex(pointIndex);
+        const RobotCalculation::LowerWeldPointType pointType = result.points[pointIndex].type;
+        if (pointType == RobotCalculation::LowerWeldPointType::Normal
+            || pointType == RobotCalculation::LowerWeldPointType::Noise)
+        {
+            continue;
+        }
+
+        const double pointDistance = distanceFromStart[pointIndex];
+        if (pointDistance >= distanceFromStart[weldStartIndex] - 1e-9
+            && pointDistance <= distanceFromStart[weldEndIndex] + 1e-9)
+        {
+            sampleDistances.push_back(pointDistance);
+        }
+    }
+
+    sampleDistances.push_back(distanceFromStart[weldStartIndex]);
+    sampleDistances.push_back(distanceFromStart[weldEndIndex]);
+    std::sort(sampleDistances.begin(), sampleDistances.end());
+    sampleDistances.erase(std::unique(sampleDistances.begin(), sampleDistances.end(),
+        [](double left, double right)
+        {
+            return std::abs(left - right) <= 1e-6;
+        }), sampleDistances.end());
+
+    auto samplePointTypeAtDistance = [&](double sampleDistance, int lowerIndex) -> RobotCalculation::LowerWeldPointType
+    {
+        for (int pointIndex = weldStartIndex; pointIndex <= weldEndIndex; ++pointIndex)
+        {
+            const RobotCalculation::LowerWeldPointType pointType = result.points[pointIndex].type;
+            if (pointType == RobotCalculation::LowerWeldPointType::Normal
+                || pointType == RobotCalculation::LowerWeldPointType::Noise)
+            {
+                continue;
+            }
+
+            if (std::abs(distanceFromStart[pointIndex] - sampleDistance) <= 1e-6)
+            {
+                return pointType;
+            }
+        }
+
+        if (lowerIndex >= weldStartIndex && lowerIndex <= weldEndIndex)
+        {
+            return result.points[lowerIndex].type == RobotCalculation::LowerWeldPointType::Noise
+                ? RobotCalculation::LowerWeldPointType::Normal
+                : RobotCalculation::LowerWeldPointType::Normal;
+        }
+        return RobotCalculation::LowerWeldPointType::Normal;
+    };
+
+    auto samplePointOnPath = [&](double sampleDistance, int& sourceIndex, int& sourceNextIndex) -> Eigen::Vector3d
+    {
+        if (sampleDistance <= distanceFromStart[weldStartIndex] + 1e-9)
+        {
+            sourceIndex = weldStartIndex;
+            sourceNextIndex = weldStartIndex;
+            return result.points[weldStartIndex].point;
+        }
+        if (sampleDistance >= distanceFromStart[weldEndIndex] - 1e-9)
+        {
+            sourceIndex = weldEndIndex;
+            sourceNextIndex = weldEndIndex;
+            return result.points[weldEndIndex].point;
+        }
+
+        auto upperIt = std::upper_bound(
+            distanceFromStart.begin() + weldStartIndex,
+            distanceFromStart.begin() + weldEndIndex + 1,
+            sampleDistance);
+        int upperIndex = static_cast<int>(upperIt - distanceFromStart.begin());
+        upperIndex = std::clamp(upperIndex, weldStartIndex + 1, weldEndIndex);
+        const int lowerIndex = upperIndex - 1;
+        const double beginDistance = distanceFromStart[lowerIndex];
+        const double endDistance = distanceFromStart[upperIndex];
+        sourceIndex = lowerIndex;
+        sourceNextIndex = upperIndex;
+        if (std::abs(endDistance - beginDistance) <= 1e-9)
+        {
+            return result.points[lowerIndex].point;
+        }
+
+        const double ratio = std::clamp((sampleDistance - beginDistance) / (endDistance - beginDistance), 0.0, 1.0);
+        return result.points[lowerIndex].point
+            + (result.points[upperIndex].point - result.points[lowerIndex].point) * ratio;
+    };
+
+    QVector<WeldPoseFileRecord> records;
+    records.reserve(sampleDistances.size());
+
+    int weldIndex = 1;
+    for (double sampleDistance : sampleDistances)
+    {
+        if (sampleDistance < distanceFromStart[weldStartIndex] - 1e-9
+            || sampleDistance > distanceFromStart[weldEndIndex] + 1e-9)
+        {
+            continue;
+        }
+
+        int sourceIndex = weldStartIndex;
+        int sourceNextIndex = weldStartIndex;
+        const Eigen::Vector3d sampledPoint = samplePointOnPath(sampleDistance, sourceIndex, sourceNextIndex);
+
+        int segmentIndex = findSegmentIndex(sourceIndex);
+        if (segmentIndex < 0)
+        {
+            segmentIndex = findSegmentIndex(sourceNextIndex);
+        }
         if (segmentIndex < 0)
         {
             continue;
@@ -1717,13 +1836,13 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             ? NormalizeAngleNear(segments[segmentIndex + 1].fixedRz, segment.fixedRz)
             : segment.fixedRz;
         const bool inTransition = hasNextSegment
-            && segment.transitionBegin != std::numeric_limits<int>::max()
-            && pointIndex >= segment.transitionBegin;
+            && segment.transitionBeginDistance < std::numeric_limits<double>::max()
+            && sampleDistance >= segment.transitionBeginDistance;
 
         double pointRz = segment.fixedRz;
         if (inTransition && preset.cornerTransitionLeadDistance > 1e-6)
         {
-            const double remainingDistance = segment.distanceToEnd[pointIndex - segment.begin];
+            const double remainingDistance = std::max(0.0, segment.endDistance - sampleDistance);
             const double transitionRatio = 1.0
                 - (remainingDistance / preset.cornerTransitionLeadDistance);
             pointRz = segment.fixedRz
@@ -1731,9 +1850,12 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         }
         pointRz = NormalizeAngleToFanucRange(pointRz);
 
+        const RobotCalculation::LowerWeldPointType pointType =
+            samplePointTypeAtDistance(sampleDistance, sourceIndex);
+
         double pointRx = preset.rx;
         double pointRy = preset.ry;
-        Eigen::Vector3d point = result.points[pointIndex].point;
+        Eigen::Vector3d point = sampledPoint;
         const int poseCompSlotIndex = findNearestPoseCompSlot(pointRx, pointRy, pointRz);
         if (poseCompSlotIndex >= 0)
         {
@@ -1747,7 +1869,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
 
         WeldPoseFileRecord record;
         record.weldIndex = weldIndex++;
-        record.rawIndex = result.points[pointIndex].index;
+        record.rawIndex = result.points[sourceIndex].index;
         record.point = point;
         record.rx = pointRx;
         record.ry = pointRy;
@@ -1755,7 +1877,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         record.bx = param.tStartPos.dBX;
         record.by = param.tStartPos.dBY;
         record.bz = param.tStartPos.dBZ;
-        record.pointType = RobotCalculation::LowerWeldPointTypeName(result.points[pointIndex].type);
+        record.pointType = RobotCalculation::LowerWeldPointTypeName(pointType);
         record.segmentKind = inTransition ? (segment.kind + "_transition") : segment.kind;
         records.push_back(record);
     }
@@ -2543,61 +2665,52 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
     const RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);
     if (setFlowStep)
     {
-        setFlowStep("扫描完成，正在进行 PreservePath 拟合");
+        setFlowStep("扫描完成，正在进行先测后焊特征分析");
     }
     if (appendLog)
     {
-        appendLog(QString("开始 PreservePath 拟合：采样主轴=%1，步长=%2 mm，搜索窗口=%3 mm，分段容差=%4 mm，每段最少点数=%5")
+        appendLog(QString("开始先测后焊特征分析：采样主轴=%1，重采样步长=%2 mm，拐点拟合容差=%3 mm，每段最少点数=%4")
             .arg(SampleAxisName(originalFitParams.sampleAxis))
             .arg(originalFitParams.sampleStep, 0, 'f', 3)
-            .arg(originalFitParams.searchWindow, 0, 'f', 3)
             .arg(originalFitParams.piecewiseFitTolerance, 0, 'f', 3)
             .arg(originalFitParams.piecewiseMinSegmentPoints));
     }
 
-    const RobotCalculation::LowerWeldFilterResult originalFitResult =
-        RobotCalculation::FilterLowerWeldPath(laserFitInput, originalFitParams);
-    if (!originalFitResult.ok)
+    const RobotCalculation::MeasureThenWeldAnalysisResult originalAnalysis =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(laserFitInput, originalFitParams);
+    if (!originalAnalysis.ok)
     {
         if (appendLog)
         {
-            appendLog(QString("PreservePath 拟合失败：%1").arg(originalFitResult.error));
+            appendLog(QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error));
             appendLog("已保留原始激光点文件，可先按原始点云继续分析。");
         }
         return true;
     }
 
-    if (!SaveTextLines(preservePathFitPath, BuildFilterOutputLines(originalFitResult), error))
+    if (!SaveTextLines(preservePathFitPath, BuildFilterOutputLines(originalAnalysis.filterResult), error))
     {
         if (appendLog)
         {
-            appendLog(QString("保存 PreservePath 拟合结果失败：%1").arg(error));
+            appendLog(QString("保存先测后焊特征提取结果失败：%1").arg(error));
         }
         return true;
     }
 
     if (appendLog)
     {
-        appendLog(FilterResultSummary("PreservePath 拟合", originalFitParams, originalFitResult, preservePathFitPath));
+        appendLog(QString("先测后焊特征提取完成：输入=%1，输出=%2，文件=%3")
+            .arg(originalAnalysis.filterResult.inputPointCount)
+            .arg(originalAnalysis.filterResult.points.size())
+            .arg(preservePathFitPath));
+        appendLog(FilterResultSummary("先测后焊特征提取", originalFitParams, originalAnalysis.filterResult, preservePathFitPath));
     }
 
     if (setFlowStep)
     {
-        setFlowStep("PreservePath 拟合完成，正在进行焊道分类");
+        setFlowStep("先测后焊特征提取完成，正在进行焊道分类");
     }
-    const RobotCalculation::LowerWeldClassificationResult classifiedResult =
-        RobotCalculation::ClassifyLowerWeldPoints(originalFitResult, originalFitParams.sampleAxis);
-    if (!classifiedResult.ok)
-    {
-        if (appendLog)
-        {
-            appendLog(QString("焊道分类失败：%1").arg(classifiedResult.error));
-            appendLog(QString("已保留 PreservePath 拟合结果：%1").arg(preservePathFitPath));
-        }
-        return true;
-    }
-
-    if (!SaveTextLines(classifiedPath, BuildClassifiedOutputLines(classifiedResult), error))
+    if (!SaveTextLines(classifiedPath, BuildClassifiedOutputLines(originalAnalysis.classificationResult), error))
     {
         if (appendLog)
         {
@@ -2606,7 +2719,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
         return true;
     }
 
-    if (!SaveTextLines(classifiedNoisePath, BuildNoiseOutputLines(laserFitInput, originalFitResult), error))
+    if (!SaveTextLines(classifiedNoisePath, BuildNoiseOutputLines(laserFitInput, originalAnalysis.filterResult), error))
     {
         if (appendLog)
         {
@@ -2622,7 +2735,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
         int innerCount = 0;
         int outerCount = 0;
         int normalCount = 0;
-        for (const RobotCalculation::LowerWeldClassifiedPoint& point : classifiedResult.points)
+        for (const RobotCalculation::LowerWeldClassifiedPoint& point : originalAnalysis.classificationResult.points)
         {
             switch (point.type)
             {
@@ -2654,6 +2767,13 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
             .arg(normalCount)
             .arg(classifiedPath));
         appendLog(QString("焊道杂点文件：%1").arg(classifiedNoisePath));
+        appendLog(QString("先测后焊特征分析摘要：输入=%1，下层候选=%2，输出=%3，剔除Z突变=%4，剔除Z连续异常=%5，连续段剔除=%6")
+            .arg(originalAnalysis.filterResult.inputPointCount)
+            .arg(originalAnalysis.filterResult.lowerPointCount)
+            .arg(originalAnalysis.filterResult.points.size())
+            .arg(originalAnalysis.filterResult.zJumpRejectedCount)
+            .arg(originalAnalysis.filterResult.zContinuityRejectedCount)
+            .arg(originalAnalysis.filterResult.segmentRejectedCount));
     }
 
     const WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
@@ -2680,7 +2800,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
     }
 
     const std::vector<QString> weldPoseLines =
-        BuildSegmentPoseOutputLines(classifiedResult, param, weldPosePreset, appendLog);
+        BuildSegmentPoseOutputLines(originalAnalysis.classificationResult, param, weldPosePreset, appendLog);
     if (!weldPoseLines.empty())
     {
         if (!SaveTextLines(weldPosePath, weldPoseLines, error))
