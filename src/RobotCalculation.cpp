@@ -1,4 +1,5 @@
 #include "RobotCalculation.h"
+#include "SkFunction.h"
 
 #include <algorithm>
 #include <cmath>
@@ -25,6 +26,54 @@ Eigen::Vector3d SetSampleAxisValue(const Eigen::Vector3d& point, RobotCalculatio
         adjusted.y() = axisValue;
     }
     return adjusted;
+}
+
+RobotCalculation::LowerWeldPointType GroovePointTypeForIndex(int index, int totalCount)
+{
+    using PointType = RobotCalculation::LowerWeldPointType;
+    if (totalCount <= 0)
+    {
+        return PointType::Normal;
+    }
+    if (index <= 0)
+    {
+        return PointType::Start;
+    }
+    if (index >= totalCount - 1)
+    {
+        return PointType::End;
+    }
+    return (index % 2 == 1) ? PointType::InnerCorner : PointType::OuterCorner;
+}
+
+void AppendExpandedGroovePoint(
+    QVector<RobotCalculation::LowerWeldClassifiedPoint>& points,
+    int& nextIndex,
+    const Eigen::Vector3d& point,
+    RobotCalculation::LowerWeldPointType type,
+    const QString& source)
+{
+    RobotCalculation::LowerWeldClassifiedPoint classifiedPoint;
+    classifiedPoint.index = nextIndex++;
+    classifiedPoint.point = point;
+    classifiedPoint.type = type;
+    classifiedPoint.source = source;
+    points.push_back(classifiedPoint);
+}
+
+std::vector<SkPoint3D> ToSkPoint3DList(const QVector<RobotCalculation::IndexedPoint3D>& inputPoints)
+{
+    std::vector<SkPoint3D> points;
+    points.reserve(static_cast<size_t>(inputPoints.size()));
+    for (const RobotCalculation::IndexedPoint3D& inputPoint : inputPoints)
+    {
+        points.emplace_back(
+            inputPoint.point.x(),
+            inputPoint.point.y(),
+            inputPoint.point.z(),
+            inputPoint.index);
+    }
+    return points;
 }
 
 double MedianValue(QVector<double> values)
@@ -1527,6 +1576,183 @@ RobotCalculation::LowerWeldClassificationResult RobotCalculation::ClassifyLowerW
         case LowerWeldPointType::Normal:
         default:
             ++result.normalCount;
+            break;
+        }
+    }
+
+    result.ok = true;
+    return result;
+}
+
+RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPath(
+    const QVector<IndexedPoint3D>& inputPoints,
+    const LowerWeldFilterParams& params)
+{
+    MeasureThenWeldAnalysisResult result;
+    result.filterResult = FilterLowerWeldPath(inputPoints, params);
+    if (!result.filterResult.ok)
+    {
+        result.error = result.filterResult.error;
+        return result;
+    }
+
+    result.classificationResult = ClassifyLowerWeldPoints(result.filterResult, params.sampleAxis);
+    if (!result.classificationResult.ok)
+    {
+        result.error = result.classificationResult.error;
+        return result;
+    }
+
+    result.ok = true;
+    return result;
+}
+
+RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+    const QVector<IndexedPoint3D>& inputPoints,
+    const LowerWeldFilterParams& params)
+{
+    MeasureThenWeldAnalysisResult result;
+    result.filterResult.inputPointCount = inputPoints.size();
+
+    if (inputPoints.isEmpty())
+    {
+        result.error = "输入点为空，无法分析。";
+        return result;
+    }
+    if (params.sampleStep <= 0.0)
+    {
+        result.error = "采样步长必须大于 0。";
+        return result;
+    }
+
+    QVector<IndexedPoint3D> validPoints;
+    validPoints.reserve(inputPoints.size());
+    for (const IndexedPoint3D& sample : inputPoints)
+    {
+        if (!IsFinitePoint(sample.point))
+        {
+            continue;
+        }
+        validPoints.push_back(sample);
+    }
+
+    result.filterResult.lowerPointCount = validPoints.size();
+    if (validPoints.size() < std::max(2, params.minPointCount))
+    {
+        result.error = QString("有效点太少，仅 %1 个，无法进行特征提取。")
+            .arg(validPoints.size());
+        return result;
+    }
+
+    const std::vector<SkPoint3D> grooveInputPoints = ToSkPoint3DList(validPoints);
+    std::vector<SkPoint3D> turningPoints;
+    if (getGrooveTurningPoints(grooveInputPoints, turningPoints) != TRUE || turningPoints.size() < 2)
+    {
+        result.error = "特征点提取失败，未找到可用的起点/终点/拐点。";
+        return result;
+    }
+
+    result.filterResult.points.reserve(validPoints.size());
+    for (const IndexedPoint3D& point : validPoints)
+    {
+        LowerWeldFilterPoint outputPoint;
+        outputPoint.index = result.filterResult.points.size() + 1;
+        outputPoint.point = point.point;
+        outputPoint.source = "original";
+        result.filterResult.points.push_back(outputPoint);
+    }
+
+    result.filterResult.measuredCount = static_cast<int>(turningPoints.size());
+    result.filterResult.interpolatedCount = 0;
+    result.filterResult.extendedCount = 0;
+    result.filterResult.fitSegmentCount = 1;
+    result.filterResult.ok = true;
+
+    const double expandStepMm = params.sampleStep > 0.0 ? params.sampleStep : 2.0;
+    const int turningPointCount = static_cast<int>(turningPoints.size());
+
+    result.classificationResult.points.clear();
+    result.classificationResult.points.reserve(
+        static_cast<int>(turningPoints.size()) + static_cast<int>(turningPoints.size()) * 8);
+    result.classificationResult.ok = true;
+    result.classificationResult.error.clear();
+
+    int nextIndex = 1;
+    int interpolatedCount = 0;
+    for (int index = 0; index < turningPointCount; ++index)
+    {
+        const SkPoint3D& turningPoint = turningPoints[static_cast<size_t>(index)];
+        const Eigen::Vector3d currentPoint(turningPoint.x, turningPoint.y, turningPoint.z);
+        const LowerWeldPointType pointType = GroovePointTypeForIndex(index, turningPointCount);
+        AppendExpandedGroovePoint(
+            result.classificationResult.points,
+            nextIndex,
+            currentPoint,
+            pointType,
+            "turning");
+
+        if (index + 1 >= turningPointCount)
+        {
+            continue;
+        }
+
+        const SkPoint3D& nextTurningPoint = turningPoints[static_cast<size_t>(index + 1)];
+        const Eigen::Vector3d nextPoint(nextTurningPoint.x, nextTurningPoint.y, nextTurningPoint.z);
+        const Eigen::Vector3d delta = nextPoint - currentPoint;
+        const double segmentLength = delta.norm();
+        if (segmentLength <= std::numeric_limits<double>::epsilon())
+        {
+            continue;
+        }
+
+        if (expandStepMm > std::numeric_limits<double>::epsilon())
+        {
+            for (double distance = expandStepMm; distance < segmentLength - 1e-9; distance += expandStepMm)
+            {
+                const double ratio = distance / segmentLength;
+                const Eigen::Vector3d expandedPoint = currentPoint + delta * ratio;
+                AppendExpandedGroovePoint(
+                    result.classificationResult.points,
+                    nextIndex,
+                    expandedPoint,
+                    LowerWeldPointType::Normal,
+                    "expanded_2mm");
+                ++interpolatedCount;
+            }
+        }
+    }
+
+    result.filterResult.measuredCount = turningPointCount;
+    result.filterResult.interpolatedCount = interpolatedCount;
+    result.filterResult.extendedCount = result.classificationResult.points.size();
+    result.classificationResult.startCount = 0;
+    result.classificationResult.endCount = 0;
+    result.classificationResult.innerCornerCount = 0;
+    result.classificationResult.outerCornerCount = 0;
+    result.classificationResult.normalCount = 0;
+    result.classificationResult.noiseCount = 0;
+    for (const LowerWeldClassifiedPoint& point : result.classificationResult.points)
+    {
+        switch (point.type)
+        {
+        case LowerWeldPointType::Start:
+            ++result.classificationResult.startCount;
+            break;
+        case LowerWeldPointType::End:
+            ++result.classificationResult.endCount;
+            break;
+        case LowerWeldPointType::InnerCorner:
+            ++result.classificationResult.innerCornerCount;
+            break;
+        case LowerWeldPointType::OuterCorner:
+            ++result.classificationResult.outerCornerCount;
+            break;
+        case LowerWeldPointType::Noise:
+            ++result.classificationResult.noiseCount;
+            break;
+        case LowerWeldPointType::Normal:
+        default:
+            ++result.classificationResult.normalCount;
             break;
         }
     }

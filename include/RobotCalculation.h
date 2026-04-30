@@ -111,12 +111,26 @@ public:
         int noiseCount = 0;
     };
 
+    struct MeasureThenWeldAnalysisResult
+    {
+        bool ok = false;
+        QString error;
+        LowerWeldFilterResult filterResult;
+        LowerWeldClassificationResult classificationResult;
+    };
+
     static T_ROBOT_COORS InterpolateRobotPose(const std::vector<TimestampedRobotPose>& robotSamples, qint64 targetTimestampUs);
     static Eigen::Vector3d CalcLaserPointInRobot(const T_ROBOT_COORS& robotPose, const Eigen::Vector3d& cameraPoint, const HandEyeMatrixConfig& calibration);
     static LowerWeldFilterResult FilterLowerWeldPath(const QVector<IndexedPoint3D>& inputPoints, const LowerWeldFilterParams& params);
     static LowerWeldClassificationResult ClassifyLowerWeldPoints(
         const LowerWeldFilterResult& filterResult,
         SampleAxis sampleAxis);
+    static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPath(
+        const QVector<IndexedPoint3D>& inputPoints,
+        const LowerWeldFilterParams& params);
+    static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPathDirect(
+        const QVector<IndexedPoint3D>& inputPoints,
+        const LowerWeldFilterParams& params);
     static int LowerWeldPointTypeCode(LowerWeldPointType type);
     static QString LowerWeldPointTypeName(LowerWeldPointType type);
     static QString RobotPoseCsv(qint64 timestampUs, const T_ROBOT_COORS& pose);

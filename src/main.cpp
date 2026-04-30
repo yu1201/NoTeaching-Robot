@@ -31,7 +31,7 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName("NoTeaching-Robot");
-    app.setApplicationVersion("2026.04.28");
+    app.setApplicationVersion("2026.04.30");
     app.setOrganizationName("yu1201");
     SetWorkingDirectoryToProjectRoot();
     app.setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));

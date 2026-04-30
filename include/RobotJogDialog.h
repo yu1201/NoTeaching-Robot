@@ -2,6 +2,7 @@
 
 #include <QDialog>
 #include <QLabel>
+#include <QMessageBox>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTimer>
@@ -51,6 +52,7 @@ private:
 	bool ReadJointTargetFromEditors(T_ANGLE_PULSE& target, QString& error) const;
 	void SetCartesianTargetEditors(const T_ROBOT_COORS& target);
 	void SetJointTargetEditors(const T_ANGLE_PULSE& target);
+	void ShowMessageOnUiThread(QMessageBox::Icon icon, const QString& title, const QString& text);
 
 	FANUCRobotCtrl* m_fanucDriver;
 	QTimer* m_jogStartTimer;
