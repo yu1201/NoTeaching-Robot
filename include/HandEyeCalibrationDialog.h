@@ -48,6 +48,7 @@ private:
     bool CaptureSample(int index);
     bool ComputeAndSaveMatrix();
     bool TestHandEyeMatrix();
+    bool CheckCameraTimestampIntervals();
     bool UploadRobotHandEyeCheckProgram(QString* error = nullptr);
     bool UploadAutoCalibrationProgram();
     bool StartAutoCalibration();

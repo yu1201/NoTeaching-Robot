@@ -1,5 +1,7 @@
 #include "FunctionTestDialog.h"
 
+#include "CameraFrameAccessGuard.h"
+#include "CameraFrameCache.h"
 #include "FANUCRobotDriver.h"
 #include "LaserWeldFilterDialog.h"
 #include "RobotDataHelper.h"
@@ -11,6 +13,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QGridLayout>
@@ -44,12 +47,32 @@ constexpr double kDhOrientationResidualWeight = 5.0;
 constexpr double kDhRegularizationWeight = 0.1;
 constexpr int kDhFitMinSampleCount = 8;
 constexpr int kDhFitRecommendedSampleCount = 20;
+constexpr int kRobotCameraTimestampCheckDurationMs = 60000;
+
+struct IntervalStats
+{
+    int count = 0;
+    double min = 0.0;
+    double max = 0.0;
+    double mean = 0.0;
+    double median = 0.0;
+    double stddev = 0.0;
+};
 
 struct KinematicsFitSample
 {
     int index = 0;
     T_ANGLE_PULSE pulse;
     T_ROBOT_COORS measuredPose;
+};
+
+struct RobotTimestampSample
+{
+    int index = 0;
+    qint64 robotTimestampUs = 0;
+    qint64 pcReceiveTimestampUs = 0;
+    T_ROBOT_COORS pose;
+    int done = -1;
 };
 
 QString FindProjectFilePathForFunctionTest(const QString& relativePath)
@@ -109,6 +132,87 @@ bool IsNearlyZero(double value)
 QString FormatDouble(double value)
 {
     return QString::number(value, 'f', 6);
+}
+
+QString CsvEscapeForFunctionTest(const QString& value)
+{
+    QString escaped = value;
+    escaped.replace("\"", "\"\"");
+    if (escaped.contains(',') || escaped.contains('"') || escaped.contains('\n') || escaped.contains('\r'))
+    {
+        escaped = "\"" + escaped + "\"";
+    }
+    return escaped;
+}
+
+qint64 FunctionTestSteadyNowUs()
+{
+    return static_cast<qint64>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+IntervalStats CalcIntervalStats(QVector<double> values)
+{
+    IntervalStats stats;
+    stats.count = values.size();
+    if (values.isEmpty())
+    {
+        return stats;
+    }
+
+    std::sort(values.begin(), values.end());
+    stats.min = values.front();
+    stats.max = values.back();
+    if ((values.size() % 2) == 0)
+    {
+        stats.median = (values[values.size() / 2 - 1] + values[values.size() / 2]) * 0.5;
+    }
+    else
+    {
+        stats.median = values[values.size() / 2];
+    }
+
+    double sum = 0.0;
+    for (double value : values)
+    {
+        sum += value;
+    }
+    stats.mean = sum / static_cast<double>(values.size());
+
+    double variance = 0.0;
+    for (double value : values)
+    {
+        const double diff = value - stats.mean;
+        variance += diff * diff;
+    }
+    stats.stddev = std::sqrt(variance / static_cast<double>(values.size()));
+    return stats;
+}
+
+QString FormatStatsLine(const QString& name, const IntervalStats& stats, const QString& unit, int precision = 3)
+{
+    if (stats.count <= 0)
+    {
+        return QString("%1：无有效数据").arg(name);
+    }
+
+    return QString("%1：N=%2 平均=%3%4 中位=%5%4 最小=%6%4 最大=%7%4 标准差=%8%4")
+        .arg(name)
+        .arg(stats.count)
+        .arg(stats.mean, 0, 'f', precision)
+        .arg(unit)
+        .arg(stats.median, 0, 'f', precision)
+        .arg(stats.min, 0, 'f', precision)
+        .arg(stats.max, 0, 'f', precision)
+        .arg(stats.stddev, 0, 'f', precision);
+}
+
+QString BuildRobotCameraTimestampCheckPath(const QString& robotName)
+{
+    const QString dirPath = RobotDataHelper::BuildProjectPath(QString("Result/%1/TimestampCheck").arg(robotName));
+    QDir().mkpath(dirPath);
+    return QDir::toNativeSeparators(QDir(dirPath).filePath(
+        QString("RobotCameraTimestampCheck_%1.csv").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"))));
 }
 
 bool HasMeaningfulToolOffset(const T_ROBOT_COORS& tool)
@@ -670,6 +774,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
     QPushButton* callJobBtn = CreateTestButton("调用任务");
     QPushButton* uploadLsBtn = CreateTestButton("发送LS程序");
     QPushButton* curposDiagBtn = CreateTestButton("CURPOS诊断");
+    QPushButton* timestampDiagBtn = CreateTestButton("机器人+相机时间戳");
     basicLayout->addWidget(setSpeedBtn, 0, 0);
     basicLayout->addWidget(getPosBtn, 0, 1);
     basicLayout->addWidget(getPulseBtn, 1, 0);
@@ -678,6 +783,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
     basicLayout->addWidget(callJobBtn, 2, 1);
     basicLayout->addWidget(uploadLsBtn, 3, 0);
     basicLayout->addWidget(curposDiagBtn, 3, 1);
+    basicLayout->addWidget(timestampDiagBtn, 4, 0, 1, 2);
     groupLayout->addWidget(basicGroup, 0, 0);
 
     QGroupBox* motionGroup = new QGroupBox("运动测试");
@@ -718,6 +824,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
     connect(callJobBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucCallJobTest);
     connect(uploadLsBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucUploadLsTest);
     connect(curposDiagBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucCurposDiagnosticTest);
+    connect(timestampDiagBtn, &QPushButton::clicked, this, &FunctionTestDialog::RobotCameraTimestampDiagnosticTest);
     connect(m_pMovlTestBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucMovlTest);
     connect(m_pMovjTestBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucMovjTest);
     connect(m_pMoveZeroBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucMoveZeroTest);
@@ -933,6 +1040,360 @@ void FunctionTestDialog::FanucCurposDiagnosticTest()
     const QString message = lines.join("\n");
     AppendLog("CURPOS诊断:\n" + message);
     QMessageBox::information(this, "CURPOS诊断", message);
+}
+
+void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
+{
+    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
+    if (pFanucDriver == nullptr)
+    {
+        return;
+    }
+
+    if (CameraFrameAccess::IsMeasureThenWeldExclusive())
+    {
+        const QString message = "先测后焊正在独占相机帧，当前不允许做机器人+相机时间戳检测。";
+        AppendLog(message);
+        QMessageBox::warning(this, "机器人+相机时间戳", message);
+        return;
+    }
+
+    RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstRobotDriverAdaptor();
+    const QString robotName = DefaultRobotName(pRobotDriverAdaptor);
+    CameraFrameCache::Instance().Start();
+    const std::uint64_t beginCameraSequence = CameraFrameCache::Instance().Mark();
+
+    QVector<RobotTimestampSample> robotSamples;
+    robotSamples.reserve(512);
+    long long lastRobotMs = std::numeric_limits<long long>::min();
+    long long lastPcRecvMs = std::numeric_limits<long long>::min();
+    int duplicateRobotReadCount = 0;
+    int missingRobotTimestampCount = 0;
+
+    AppendLog(QString("机器人+相机时间戳检测开始：采集 %1 ms。").arg(kRobotCameraTimestampCheckDurationMs));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRobotCameraTimestampCheckDurationMs);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        long long robotMs = 0;
+        long long pcRecvMs = 0;
+        const T_ROBOT_COORS pose = pFanucDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
+        const int done = pFanucDriver->CheckDonePassive();
+
+        if (robotMs > 0 && pcRecvMs > 0)
+        {
+            if (robotMs != lastRobotMs || pcRecvMs != lastPcRecvMs)
+            {
+                RobotTimestampSample sample;
+                sample.index = robotSamples.size() + 1;
+                sample.robotTimestampUs = static_cast<qint64>(robotMs) * 1000;
+                sample.pcReceiveTimestampUs = static_cast<qint64>(pcRecvMs) * 1000;
+                sample.pose = pose;
+                sample.done = done;
+                robotSamples.push_back(sample);
+                lastRobotMs = robotMs;
+                lastPcRecvMs = pcRecvMs;
+            }
+            else
+            {
+                ++duplicateRobotReadCount;
+            }
+        }
+        else
+        {
+            ++missingRobotTimestampCount;
+        }
+
+        QApplication::processEvents(QEventLoop::AllEvents, 10);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    const std::uint64_t endCameraSequence = CameraFrameCache::Instance().Mark();
+    const std::vector<CameraFrameCache::TimedFrame> cameraFrames =
+        CameraFrameCache::Instance().TimedFramesBetween(beginCameraSequence, endCameraSequence);
+
+    QVector<double> cameraTimestampDeltaMs;
+    QVector<double> cameraSystemDeltaMs;
+    QVector<double> cameraRatioValues;
+    int invalidCameraTimestampCount = 0;
+    int cameraBackwardsCount = 0;
+    int cameraDuplicateCount = 0;
+    int cameraSystemNonIncreasingCount = 0;
+
+    QVector<double> robotTimestampDeltaMs;
+    QVector<double> robotSystemDeltaMs;
+    QVector<double> robotRatioValues;
+    int robotBackwardsCount = 0;
+    int robotDuplicateTimestampCount = 0;
+    int robotSystemNonIncreasingCount = 0;
+
+    QStringList csvLines;
+    csvLines.push_back(
+        "event_index,source,system_time_us,source_index,sequence,camera_timestamp_us,camera_delta_us,camera_system_delta_us,camera_to_system_ratio,"
+        "robot_timestamp_us,robot_delta_us,robot_system_delta_us,robot_to_system_ratio,"
+        "robot_x,robot_y,robot_z,robot_rx,robot_ry,robot_rz,done,target_x,target_y,target_z,error");
+
+    struct EventRow
+    {
+        qint64 systemTimeUs = 0;
+        QStringList fields;
+    };
+    QVector<EventRow> events;
+    events.reserve(static_cast<int>(cameraFrames.size()) + robotSamples.size());
+
+    for (int index = 0; index < static_cast<int>(cameraFrames.size()); ++index)
+    {
+        const CameraFrameCache::TimedFrame& frame = cameraFrames[static_cast<std::size_t>(index)];
+        QString cameraDeltaText;
+        QString cameraSystemDeltaText;
+        QString cameraRatioText;
+
+        if (frame.cameraTimestampUs <= 0)
+        {
+            ++invalidCameraTimestampCount;
+        }
+
+        if (index > 0)
+        {
+            const CameraFrameCache::TimedFrame& prev = cameraFrames[static_cast<std::size_t>(index - 1)];
+            const qint64 cameraDeltaUs = frame.cameraTimestampUs - prev.cameraTimestampUs;
+            const qint64 systemDeltaUs = frame.receiveTimestampUs - prev.receiveTimestampUs;
+            cameraDeltaText = QString::number(cameraDeltaUs);
+            cameraSystemDeltaText = QString::number(systemDeltaUs);
+
+            if (cameraDeltaUs < 0)
+            {
+                ++cameraBackwardsCount;
+            }
+            else if (cameraDeltaUs == 0)
+            {
+                ++cameraDuplicateCount;
+            }
+            if (systemDeltaUs <= 0)
+            {
+                ++cameraSystemNonIncreasingCount;
+            }
+
+            if (cameraDeltaUs > 0 && systemDeltaUs > 0)
+            {
+                const double ratio = static_cast<double>(cameraDeltaUs) / static_cast<double>(systemDeltaUs);
+                cameraRatioText = QString::number(ratio, 'f', 6);
+                cameraTimestampDeltaMs.push_back(static_cast<double>(cameraDeltaUs) / 1000.0);
+                cameraSystemDeltaMs.push_back(static_cast<double>(systemDeltaUs) / 1000.0);
+                cameraRatioValues.push_back(ratio);
+            }
+        }
+
+        QStringList fields;
+        fields
+            << "0"
+            << "camera"
+            << QString::number(frame.receiveTimestampUs)
+            << QString::number(index + 1)
+            << QString::number(frame.sequence)
+            << QString::number(frame.cameraTimestampUs)
+            << cameraDeltaText
+            << cameraSystemDeltaText
+            << cameraRatioText
+            << "" << "" << "" << ""
+            << "" << "" << "" << "" << "" << "" << ""
+            << QString::number(frame.targetPoint.x, 'f', 6)
+            << QString::number(frame.targetPoint.y, 'f', 6)
+            << QString::number(frame.targetPoint.z, 'f', 6)
+            << CsvEscapeForFunctionTest(frame.errorMessage);
+
+        EventRow event;
+        event.systemTimeUs = frame.receiveTimestampUs;
+        event.fields = fields;
+        events.push_back(event);
+    }
+
+    for (int index = 0; index < robotSamples.size(); ++index)
+    {
+        const RobotTimestampSample& sample = robotSamples[index];
+        QString robotDeltaText;
+        QString robotSystemDeltaText;
+        QString robotRatioText;
+
+        if (index > 0)
+        {
+            const RobotTimestampSample& prev = robotSamples[index - 1];
+            const qint64 robotDeltaUs = sample.robotTimestampUs - prev.robotTimestampUs;
+            const qint64 systemDeltaUs = sample.pcReceiveTimestampUs - prev.pcReceiveTimestampUs;
+            robotDeltaText = QString::number(robotDeltaUs);
+            robotSystemDeltaText = QString::number(systemDeltaUs);
+
+            if (robotDeltaUs < 0)
+            {
+                ++robotBackwardsCount;
+            }
+            else if (robotDeltaUs == 0)
+            {
+                ++robotDuplicateTimestampCount;
+            }
+            if (systemDeltaUs <= 0)
+            {
+                ++robotSystemNonIncreasingCount;
+            }
+
+            if (robotDeltaUs > 0 && systemDeltaUs > 0)
+            {
+                const double ratio = static_cast<double>(robotDeltaUs) / static_cast<double>(systemDeltaUs);
+                robotRatioText = QString::number(ratio, 'f', 6);
+                robotTimestampDeltaMs.push_back(static_cast<double>(robotDeltaUs) / 1000.0);
+                robotSystemDeltaMs.push_back(static_cast<double>(systemDeltaUs) / 1000.0);
+                robotRatioValues.push_back(ratio);
+            }
+        }
+
+        QStringList fields;
+        fields
+            << "0"
+            << "robot"
+            << QString::number(sample.pcReceiveTimestampUs)
+            << QString::number(sample.index)
+            << ""
+            << "" << "" << "" << ""
+            << QString::number(sample.robotTimestampUs)
+            << robotDeltaText
+            << robotSystemDeltaText
+            << robotRatioText
+            << QString::number(sample.pose.dX, 'f', 6)
+            << QString::number(sample.pose.dY, 'f', 6)
+            << QString::number(sample.pose.dZ, 'f', 6)
+            << QString::number(sample.pose.dRX, 'f', 6)
+            << QString::number(sample.pose.dRY, 'f', 6)
+            << QString::number(sample.pose.dRZ, 'f', 6)
+            << QString::number(sample.done)
+            << "" << "" << "" << "";
+
+        EventRow event;
+        event.systemTimeUs = sample.pcReceiveTimestampUs;
+        event.fields = fields;
+        events.push_back(event);
+    }
+
+    std::sort(events.begin(), events.end(), [](const EventRow& a, const EventRow& b)
+        {
+            return a.systemTimeUs < b.systemTimeUs;
+        });
+    for (int index = 0; index < events.size(); ++index)
+    {
+        events[index].fields[0] = QString::number(index + 1);
+        csvLines.push_back(JoinCsvRow(events[index].fields));
+    }
+
+    const IntervalStats cameraTimestampStats = CalcIntervalStats(cameraTimestampDeltaMs);
+    const IntervalStats cameraSystemStats = CalcIntervalStats(cameraSystemDeltaMs);
+    const IntervalStats cameraRatioStats = CalcIntervalStats(cameraRatioValues);
+    const IntervalStats robotTimestampStats = CalcIntervalStats(robotTimestampDeltaMs);
+    const IntervalStats robotSystemStats = CalcIntervalStats(robotSystemDeltaMs);
+    const IntervalStats robotRatioStats = CalcIntervalStats(robotRatioValues);
+
+    qint64 cameraTotalTimestampUs = 0;
+    qint64 cameraTotalSystemUs = 0;
+    if (cameraFrames.size() >= 2)
+    {
+        cameraTotalTimestampUs = cameraFrames.back().cameraTimestampUs - cameraFrames.front().cameraTimestampUs;
+        cameraTotalSystemUs = cameraFrames.back().receiveTimestampUs - cameraFrames.front().receiveTimestampUs;
+    }
+    qint64 robotTotalTimestampUs = 0;
+    qint64 robotTotalSystemUs = 0;
+    if (robotSamples.size() >= 2)
+    {
+        robotTotalTimestampUs = robotSamples.back().robotTimestampUs - robotSamples.front().robotTimestampUs;
+        robotTotalSystemUs = robotSamples.back().pcReceiveTimestampUs - robotSamples.front().pcReceiveTimestampUs;
+    }
+
+    const double cameraTotalRatio = cameraTotalSystemUs > 0
+        ? static_cast<double>(cameraTotalTimestampUs) / static_cast<double>(cameraTotalSystemUs)
+        : 0.0;
+    const double robotTotalRatio = robotTotalSystemUs > 0
+        ? static_cast<double>(robotTotalTimestampUs) / static_cast<double>(robotTotalSystemUs)
+        : 0.0;
+    const double cameraVsRobotScale = std::abs(robotTotalRatio) > 1e-12
+        ? cameraTotalRatio / robotTotalRatio
+        : 0.0;
+    const double cameraRatioCvPercent = std::abs(cameraRatioStats.mean) > 1e-12
+        ? cameraRatioStats.stddev / std::abs(cameraRatioStats.mean) * 100.0
+        : 0.0;
+    const double robotRatioCvPercent = std::abs(robotRatioStats.mean) > 1e-12
+        ? robotRatioStats.stddev / std::abs(robotRatioStats.mean) * 100.0
+        : 0.0;
+
+    QString conclusion;
+    if (cameraFrames.size() < 3 || robotSamples.size() < 3)
+    {
+        conclusion = "结论：相机或机器人有效样本不足，无法判断两边时间轴。";
+    }
+    else if (std::abs(cameraTotalRatio - 1.0) <= 0.05
+        && std::abs(robotTotalRatio - 1.0) <= 0.05
+        && std::abs(cameraVsRobotScale - 1.0) <= 0.05)
+    {
+        conclusion = "结论：相机timestamp、机器人robot_ms与本机接收时间的总时长比例都接近 1，时间单位假设基本成立。";
+    }
+    else
+    {
+        conclusion = QString("结论：时间比例存在偏差。camera/system=%1，robot/system=%2，camera/robot=%3。")
+            .arg(cameraTotalRatio, 0, 'f', 6)
+            .arg(robotTotalRatio, 0, 'f', 6)
+            .arg(cameraVsRobotScale, 0, 'f', 6);
+    }
+
+    const QString csvPath = BuildRobotCameraTimestampCheckPath(robotName);
+    QString saveError;
+    const bool saveOk = RobotDataHelper::SaveTextFileLines(csvPath, csvLines, &saveError);
+
+    const QString resultText = QString(
+        "采集时长：%1 ms\n"
+        "相机帧数：%2，机器人样本数：%3\n"
+        "相机总时长：timestamp=%4 ms，system=%5 ms，比例=%6\n"
+        "机器人总时长：robot_ms=%7 ms，system=%8 ms，比例=%9\n"
+        "相机/机器人比例：%10\n\n"
+        "%11\n%12\n%13\n"
+        "相机比例CV：%14%\n\n"
+        "%15\n%16\n%17\n"
+        "机器人比例CV：%18%\n\n"
+        "异常统计：相机无效=%19，倒退=%20，重复=%21，system非递增=%22；机器人缺时间=%23，重复读取=%24，倒退=%25，重复timestamp=%26，system非递增=%27\n\n"
+        "%28\n\n"
+        "CSV：%29")
+        .arg(kRobotCameraTimestampCheckDurationMs)
+        .arg(cameraFrames.size())
+        .arg(robotSamples.size())
+        .arg(static_cast<double>(cameraTotalTimestampUs) / 1000.0, 0, 'f', 3)
+        .arg(static_cast<double>(cameraTotalSystemUs) / 1000.0, 0, 'f', 3)
+        .arg(cameraTotalRatio, 0, 'f', 6)
+        .arg(static_cast<double>(robotTotalTimestampUs) / 1000.0, 0, 'f', 3)
+        .arg(static_cast<double>(robotTotalSystemUs) / 1000.0, 0, 'f', 3)
+        .arg(robotTotalRatio, 0, 'f', 6)
+        .arg(cameraVsRobotScale, 0, 'f', 6)
+        .arg(FormatStatsLine("相机timestamp间隔", cameraTimestampStats, " ms"))
+        .arg(FormatStatsLine("相机system间隔", cameraSystemStats, " ms"))
+        .arg(FormatStatsLine("相机 timestamp/system 比例", cameraRatioStats, "", 6))
+        .arg(cameraRatioCvPercent, 0, 'f', 2)
+        .arg(FormatStatsLine("机器人robot_ms间隔", robotTimestampStats, " ms"))
+        .arg(FormatStatsLine("机器人system间隔", robotSystemStats, " ms"))
+        .arg(FormatStatsLine("机器人 robot_ms/system 比例", robotRatioStats, "", 6))
+        .arg(robotRatioCvPercent, 0, 'f', 2)
+        .arg(invalidCameraTimestampCount)
+        .arg(cameraBackwardsCount)
+        .arg(cameraDuplicateCount)
+        .arg(cameraSystemNonIncreasingCount)
+        .arg(missingRobotTimestampCount)
+        .arg(duplicateRobotReadCount)
+        .arg(robotBackwardsCount)
+        .arg(robotDuplicateTimestampCount)
+        .arg(robotSystemNonIncreasingCount)
+        .arg(conclusion)
+        .arg(saveOk ? csvPath : QString("保存失败：%1").arg(saveError));
+
+    AppendLog(QString("机器人+相机时间戳检测完成：相机帧=%1，机器人样本=%2，camera/system=%3，robot/system=%4，camera/robot=%5，CSV=%6")
+        .arg(cameraFrames.size())
+        .arg(robotSamples.size())
+        .arg(cameraTotalRatio, 0, 'f', 6)
+        .arg(robotTotalRatio, 0, 'f', 6)
+        .arg(cameraVsRobotScale, 0, 'f', 6)
+        .arg(saveOk ? csvPath : QString("保存失败")));
+    QMessageBox::information(this, "机器人+相机时间戳", resultText);
 }
 
 void FunctionTestDialog::FanucCheckDoneTest()
