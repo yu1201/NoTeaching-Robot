@@ -27,6 +27,7 @@
 #include <QSizePolicy>
 #include <QSplitter>
 #include <QStringList>
+#include <QTextDocument>
 #include <QVariant>
 #include <QVBoxLayout>
 
@@ -295,6 +296,7 @@ void PreciseMeasureEditDialog::BuildUi()
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
+    m_pLogText->document()->setMaximumBlockCount(1000);
     m_pLogText->setMaximumHeight(100);
     m_pLogText->setPlainText("日志：等待读取参数...");
     rootLayout->addWidget(m_pLogText);

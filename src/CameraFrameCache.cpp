@@ -52,7 +52,7 @@ void CameraFrameCache::Stop()
 void CameraFrameCache::Clear()
 {
     std::lock_guard<std::mutex> locker(m_mutex);
-    m_frames.clear();
+    std::deque<CachedFrame>().swap(m_frames);
     m_nextSequence = 0;
 }
 

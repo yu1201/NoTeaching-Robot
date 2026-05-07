@@ -2506,12 +2506,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     CameraFrameCache::Instance().Start();
     CameraFrameCache::Instance().Clear();
 
-    std::vector<udpDataShow> scanCameraFrames;
     std::vector<TimestampedCameraPoint> cameraSamples;
     std::vector<TimestampedCameraPoint> matchedCameraSamples;
     std::vector<RobotCalculation::TimestampedRobotPose> robotSamples;
     QVector<RobotCalculation::IndexedPoint3D> laserFitInput;
-    scanCameraFrames.reserve(10000);
     cameraSamples.reserve(10000);
     matchedCameraSamples.reserve(10000);
     robotSamples.reserve(1000);
@@ -2645,7 +2643,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             return true;
         };
 
-    auto pullScanCameraFramesTo = [&scanCameraFrames, &lastPulledCameraSequence](std::uint64_t targetSequence)
+    auto pullScanCameraFramesTo = [&lastPulledCameraSequence, &appendCameraFrame](std::uint64_t targetSequence)
         {
             if (targetSequence <= lastPulledCameraSequence)
             {
@@ -2655,7 +2653,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             const std::vector<udpDataShow> frames = CameraFrameCache::Instance().FramesBetween(
                 lastPulledCameraSequence,
                 targetSequence);
-            scanCameraFrames.insert(scanCameraFrames.end(), frames.begin(), frames.end());
+            for (const udpDataShow& frame : frames)
+            {
+                appendCameraFrame(frame);
+            }
             lastPulledCameraSequence = targetSequence;
         };
 
@@ -2762,10 +2763,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         scanEndCameraSequence = CameraFrameCache::Instance().Mark();
         pullScanCameraFramesTo(scanEndCameraSequence);
     }
-    for (const udpDataShow& frame : scanCameraFrames)
-    {
-        appendCameraFrame(frame);
-    }
+    CameraFrameCache::Instance().Clear();
 
     resolveReadyCameraSamples();
 
@@ -2991,8 +2989,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             .arg(static_cast<int>(robotSamples.size()))
             .arg(static_cast<int>(matchedCameraSamples.size()))
             .arg(resultDir));
-        appendLog(QString("扫描期间全局缓存帧=%1，缓存序号范围=(%2, %3]")
-            .arg(static_cast<int>(scanCameraFrames.size()))
+        appendLog(QString("扫描期间已处理相机帧=%1，缓存序号范围=(%2, %3]")
+            .arg(static_cast<int>(cameraSamples.size() + invalidCameraTimestampCount + cameraBeforeRobotTimeBaseCount))
             .arg(scanStartCameraSequence)
             .arg(scanEndCameraSequence));
         if (hasCameraToRobotTimeOffset)

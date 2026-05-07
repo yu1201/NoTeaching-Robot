@@ -24,6 +24,9 @@ private:
     void resetReceiveState();
 
 private:
+    static constexpr int MAX_FRAME_PACKET_SIZE = 16 * 1024 * 1024;
+    static constexpr int MAX_RECEIVE_BUFFER_SIZE = 2 * MAX_FRAME_PACKET_SIZE;
+
     QByteArray      m_receiveBuffer;
     qint32          m_expectedSize;
 

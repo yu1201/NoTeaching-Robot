@@ -21,6 +21,7 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
+#include <QTextDocument>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -210,6 +211,7 @@ void LaserWeldFilterDialog::BuildUi()
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
+    m_pLogText->document()->setMaximumBlockCount(1200);
     m_pLogText->setPlainText("滤波日志：等待选择文件...");
     rootLayout->addWidget(m_pLogText, 1);
 

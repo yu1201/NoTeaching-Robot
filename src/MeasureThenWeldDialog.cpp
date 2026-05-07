@@ -23,6 +23,7 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QTextDocument>
 #include <QTextStream>
 #include <QThread>
 #include <QVBoxLayout>
@@ -123,6 +124,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, StartCam
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
+    m_pLogText->document()->setMaximumBlockCount(1600);
     m_pLogText->setPlainText("流程日志：等待操作...");
     rootLayout->addWidget(m_pLogText, 1);
 

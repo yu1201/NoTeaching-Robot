@@ -20,9 +20,12 @@
 #include "groove/clientudpformsensorworker.h"
 #include "groove/framebuffer.h"
 #include <QCoreApplication>
+#include <QComboBox>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QInputDialog>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -44,9 +47,11 @@
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QSet>
+#include <QSettings>
 #include <QThread>
 #include <QTimer>
 #include <QToolBar>
+#include <QTextDocument>
 #include <QTextStream>
 #include <QVBoxLayout>
 #include <QStringList>
@@ -66,6 +71,10 @@
 
 namespace
 {
+	const QString kRoleOperator = QStringLiteral("operator");
+	const QString kRoleEngineer = QStringLiteral("engineer");
+	const QString kRoleAdmin = QStringLiteral("admin");
+
 	QString FindProjectFilePath(const QString& relativePath)
 	{
 		QDir dir(QCoreApplication::applicationDirPath());
@@ -335,7 +344,17 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_robotLogDisplayTimer(nullptr)
 	, m_pMainStack(nullptr)
 	, m_pDashboardPage(nullptr)
+	, m_pManagementPage(nullptr)
 	, m_pRobotLogText(nullptr)
+	, m_pCurrentUserLabel(nullptr)
+	, m_pManagementUserLabel(nullptr)
+	, m_pPermissionHintLabel(nullptr)
+	, m_pLoginNameEdit(nullptr)
+	, m_pLoginPasswordEdit(nullptr)
+	, m_pRegisterNameEdit(nullptr)
+	, m_pRegisterPasswordEdit(nullptr)
+	, m_pRegisterRoleCombo(nullptr)
+	, m_pAccountLogText(nullptr)
 	, m_pCameraParamBtn(nullptr)
 	, m_pWeldSeamCompBtn(nullptr)
 	, m_pWeldProcessPage(nullptr)
@@ -349,10 +368,20 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_bFanucMovlRunning(false)
 	, m_bFanucMovjRunning(false)
 	, m_bFanucMoveZeroRunning(false)
+	, m_sCurrentUserName(QStringLiteral("访客"))
+	, m_sCurrentUserRole(kRoleOperator)
 	, m_bFanucMonitorReading(false)
 {
 	ui.setupUi(this);
 	ApplyUnifiedWindowChrome(this);
+	if (ui.FanucMonitorText != nullptr)
+	{
+		ui.FanucMonitorText->document()->setMaximumBlockCount(200);
+	}
+	if (ui.GrooveCameraText != nullptr)
+	{
+		ui.GrooveCameraText->document()->setMaximumBlockCount(200);
+	}
 	if (ui.menuBar != nullptr)
 	{
 		ui.menuBar->clear();
@@ -422,10 +451,143 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	aboutButton->setMaximumWidth(88);
 	aboutButton->setStyleSheet("QPushButton { padding: 6px 12px; font-size: 13px; border-radius: 10px; }");
 	aboutButton->hide();
+	m_pCurrentUserLabel = new QLabel(m_pDashboardPage);
+	m_pCurrentUserLabel->setStyleSheet("QLabel { color: #9ED8DB; padding: 5px 10px; border: 1px solid #2E4656; border-radius: 10px; background: #101923; }");
+	QPushButton* managementEntryButton = new QPushButton("管理页面", m_pDashboardPage);
+	managementEntryButton->setMinimumHeight(34);
+	managementEntryButton->setMinimumWidth(110);
+	managementEntryButton->setStyleSheet("QPushButton { padding: 6px 14px; font-size: 14px; border-radius: 10px; }");
 	titleLayout->addWidget(titleLabel);
 	titleLayout->addWidget(versionLabel, 0, Qt::AlignVCenter);
 	titleLayout->addStretch(1);
+	titleLayout->addWidget(m_pCurrentUserLabel, 0, Qt::AlignVCenter);
+	titleLayout->addWidget(managementEntryButton, 0, Qt::AlignVCenter);
 	dashboardLayout->addLayout(titleLayout);
+
+	QLabel* homeHintLabel = new QLabel("主页面向现场快速操作：先连接服务，再按流程执行扫描/焊接；高级参数、调试和账号管理进入管理页面。", m_pDashboardPage);
+	homeHintLabel->setWordWrap(true);
+	homeHintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
+	dashboardLayout->addWidget(homeHintLabel);
+
+	auto makeLargeButton = [](const QString& text, QWidget* parent) -> QPushButton*
+		{
+			QPushButton* button = new QPushButton(text, parent);
+			button->setMinimumHeight(72);
+			button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+			button->setStyleSheet(
+				"QPushButton { font-size: 17px; font-weight: 600; text-align: left; padding: 12px 18px; border-radius: 12px; }"
+				"QPushButton:hover { background: #2D5465; border-color: #72D4DD; }");
+			return button;
+		};
+
+	QGroupBox* quickGroup = new QGroupBox("新手快速操作", m_pDashboardPage);
+	QGridLayout* quickLayout = new QGridLayout(quickGroup);
+	quickLayout->setSpacing(12);
+	QPushButton* quickConnectBtn = makeLargeButton("连接服务\n启动机器人/相机通讯", quickGroup);
+	QPushButton* quickMeasureBtn = makeLargeButton("先测后焊\n按预设流程扫描并焊接", quickGroup);
+	QPushButton* quickPreviewBtn = makeLargeButton("坡口相机预览\n查看当前相机点云/帧数据", quickGroup);
+	QPushButton* quickPositionBtn = makeLargeButton("读取当前位置\n快速查看机器人姿态", quickGroup);
+	QPushButton* quickCalibrationBtn = makeLargeButton("标定与相机参数\n手眼标定、矩阵和相机配置", quickGroup);
+	QPushButton* quickManageBtn = makeLargeButton("管理页面\n工艺、补偿、调试、账号权限", quickGroup);
+	quickPreviewBtn->setCheckable(true);
+	quickLayout->addWidget(quickConnectBtn, 0, 0);
+	quickLayout->addWidget(quickMeasureBtn, 0, 1);
+	quickLayout->addWidget(quickPreviewBtn, 0, 2);
+	quickLayout->addWidget(quickPositionBtn, 1, 0);
+	quickLayout->addWidget(quickCalibrationBtn, 1, 1);
+	quickLayout->addWidget(quickManageBtn, 1, 2);
+	dashboardLayout->addWidget(quickGroup, 0);
+
+	m_pManagementPage = new QWidget(m_pMainStack);
+	QVBoxLayout* managementLayout = new QVBoxLayout(m_pManagementPage);
+	managementLayout->setContentsMargins(0, 0, 0, 0);
+	managementLayout->setSpacing(14);
+	m_pMainStack->addWidget(m_pManagementPage);
+
+	QHBoxLayout* managementTitleLayout = new QHBoxLayout();
+	QLabel* managementTitleLabel = new QLabel("管理页面", m_pManagementPage);
+	managementTitleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #F7FCFC;");
+	m_pManagementUserLabel = new QLabel(m_pManagementPage);
+	m_pManagementUserLabel->setStyleSheet("QLabel { color: #9ED8DB; padding: 5px 10px; border: 1px solid #2E4656; border-radius: 10px; background: #101923; }");
+	QPushButton* backHomeBtn = new QPushButton("返回主页", m_pManagementPage);
+	backHomeBtn->setMinimumWidth(110);
+	managementTitleLayout->addWidget(managementTitleLabel);
+	managementTitleLayout->addStretch(1);
+	managementTitleLayout->addWidget(m_pManagementUserLabel);
+	managementTitleLayout->addWidget(backHomeBtn);
+	managementLayout->addLayout(managementTitleLayout);
+
+	m_pPermissionHintLabel = new QLabel(m_pManagementPage);
+	m_pPermissionHintLabel->setWordWrap(true);
+	m_pPermissionHintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
+	managementLayout->addWidget(m_pPermissionHintLabel);
+
+	QSplitter* managementSplitter = new QSplitter(Qt::Horizontal, m_pManagementPage);
+	managementSplitter->setChildrenCollapsible(false);
+
+	QGroupBox* accountGroup = new QGroupBox("人员账号", managementSplitter);
+	QVBoxLayout* accountLayout = new QVBoxLayout(accountGroup);
+	QFormLayout* loginLayout = new QFormLayout();
+	m_pLoginNameEdit = new QLineEdit(accountGroup);
+	m_pLoginPasswordEdit = new QLineEdit(accountGroup);
+	m_pLoginPasswordEdit->setEchoMode(QLineEdit::Password);
+	m_pLoginNameEdit->setPlaceholderText("账号");
+	m_pLoginPasswordEdit->setPlaceholderText("密码");
+	loginLayout->addRow("账号", m_pLoginNameEdit);
+	loginLayout->addRow("密码", m_pLoginPasswordEdit);
+	accountLayout->addLayout(loginLayout);
+	QHBoxLayout* loginButtonLayout = new QHBoxLayout();
+	QPushButton* loginBtn = new QPushButton("登录", accountGroup);
+	QPushButton* logoutBtn = new QPushButton("退出登录", accountGroup);
+	loginButtonLayout->addWidget(loginBtn);
+	loginButtonLayout->addWidget(logoutBtn);
+	accountLayout->addLayout(loginButtonLayout);
+
+	QLabel* registerTitle = new QLabel("注册账号（管理员权限）", accountGroup);
+	registerTitle->setStyleSheet("font-weight: 600; color: #9ED8DB; margin-top: 8px;");
+	accountLayout->addWidget(registerTitle);
+	QFormLayout* registerLayout = new QFormLayout();
+	m_pRegisterNameEdit = new QLineEdit(accountGroup);
+	m_pRegisterPasswordEdit = new QLineEdit(accountGroup);
+	m_pRegisterPasswordEdit->setEchoMode(QLineEdit::Password);
+	m_pRegisterRoleCombo = new QComboBox(accountGroup);
+	m_pRegisterRoleCombo->addItem("操作员", kRoleOperator);
+	m_pRegisterRoleCombo->addItem("工程师", kRoleEngineer);
+	m_pRegisterRoleCombo->addItem("管理员", kRoleAdmin);
+	registerLayout->addRow("新账号", m_pRegisterNameEdit);
+	registerLayout->addRow("新密码", m_pRegisterPasswordEdit);
+	registerLayout->addRow("权限", m_pRegisterRoleCombo);
+	accountLayout->addLayout(registerLayout);
+	QPushButton* registerBtn = new QPushButton("注册账号", accountGroup);
+	accountLayout->addWidget(registerBtn);
+	m_pAccountLogText = new QPlainTextEdit(accountGroup);
+	m_pAccountLogText->setReadOnly(true);
+	m_pAccountLogText->document()->setMaximumBlockCount(300);
+	m_pAccountLogText->setMaximumHeight(140);
+	m_pAccountLogText->setPlainText("账号日志：默认管理员 admin/admin 会在首次启动时自动创建。");
+	accountLayout->addWidget(m_pAccountLogText, 1);
+
+	QGroupBox* adminGroup = new QGroupBox("管理功能", managementSplitter);
+	QGridLayout* adminLayout = new QGridLayout(adminGroup);
+	adminLayout->setSpacing(12);
+	QPushButton* adminProcessBtn = makeLargeButton("工艺参数\n编辑焊接工艺和摆动参数", adminGroup);
+	QPushButton* adminPreciseBtn = makeLargeButton("精测量参数\n编辑扫描点和安全点", adminGroup);
+	QPushButton* adminCameraBtn = makeLargeButton("相机/标定\n相机参数、手眼矩阵和标定", adminGroup);
+	QPushButton* adminCompBtn = makeLargeButton("焊道补偿\n姿态补偿和焊道偏移", adminGroup);
+	QPushButton* adminJogBtn = makeLargeButton("点动控制\n手动读取/运动到指定位置", adminGroup);
+	QPushButton* adminDebugBtn = makeLargeButton("功能测试\n寄存器、程序上传和诊断", adminGroup);
+	adminLayout->addWidget(adminProcessBtn, 0, 0);
+	adminLayout->addWidget(adminPreciseBtn, 0, 1);
+	adminLayout->addWidget(adminCameraBtn, 0, 2);
+	adminLayout->addWidget(adminCompBtn, 1, 0);
+	adminLayout->addWidget(adminJogBtn, 1, 1);
+	adminLayout->addWidget(adminDebugBtn, 1, 2);
+
+	managementSplitter->addWidget(accountGroup);
+	managementSplitter->addWidget(adminGroup);
+	managementSplitter->setStretchFactor(0, 1);
+	managementSplitter->setStretchFactor(1, 2);
+	managementLayout->addWidget(managementSplitter, 1);
 
 	QGroupBox* entryGroup = new QGroupBox("常用功能", mainPanel);
 	QGridLayout* entryLayout = new QGridLayout(entryGroup);
@@ -492,6 +654,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QMenu* helpMenu = ui.menuBar != nullptr ? ui.menuBar->addMenu("帮助(H)") : nullptr;
 
 	addCommandAction(fileMenu, "首页监控", [this]() { ShowDashboardPage(); }, false);
+	addCommandAction(fileMenu, "管理页面", [this]() { ShowManagementPage(); }, false);
 	if (fileMenu != nullptr)
 	{
 		fileMenu->addSeparator();
@@ -530,13 +693,13 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addCommandAction(debugMenu, "读取当前位置", [this]() { FanucGetCurrentPosTest(); }, false);
 	addCommandAction(debugMenu, "读取当前脉冲", [this]() { FanucGetCurrentPulseTest(); }, false);
 	addCommandAction(debugMenu, "检查完成状态", [this]() { FanucCheckDoneTest(); }, false);
-	addCommandAction(debugMenu, "读写整型寄存器", [this]() { FanucSetGetIntTest(); }, false);
-	addCommandAction(debugMenu, "设置TP速度", [this]() { FanucSetTpSpeedTest(); }, false);
-	addCommandAction(debugMenu, "调用程序", [this]() { FanucCallJobTest(); }, false);
-	addCommandAction(debugMenu, "上传LS", [this]() { FanucUploadLsTest(); }, false);
-	addCommandAction(debugMenu, "MOVL测试", [this]() { FanucMovlTest(); }, false);
-	addCommandAction(debugMenu, "MOVJ测试", [this]() { FanucMovjTest(); }, false);
-	addCommandAction(debugMenu, "运动到零位", [this]() { FanucMoveZeroTest(); }, false);
+	addCommandAction(debugMenu, "读写整型寄存器", [this]() { if (RequirePermission(kRoleEngineer, "读写整型寄存器")) FanucSetGetIntTest(); }, false);
+	addCommandAction(debugMenu, "设置TP速度", [this]() { if (RequirePermission(kRoleEngineer, "设置TP速度")) FanucSetTpSpeedTest(); }, false);
+	addCommandAction(debugMenu, "调用程序", [this]() { if (RequirePermission(kRoleEngineer, "调用程序")) FanucCallJobTest(); }, false);
+	addCommandAction(debugMenu, "上传LS", [this]() { if (RequirePermission(kRoleEngineer, "上传LS")) FanucUploadLsTest(); }, false);
+	addCommandAction(debugMenu, "MOVL测试", [this]() { if (RequirePermission(kRoleEngineer, "MOVL测试")) FanucMovlTest(); }, false);
+	addCommandAction(debugMenu, "MOVJ测试", [this]() { if (RequirePermission(kRoleEngineer, "MOVJ测试")) FanucMovjTest(); }, false);
+	addCommandAction(debugMenu, "运动到零位", [this]() { if (RequirePermission(kRoleEngineer, "运动到零位")) FanucMoveZeroTest(); }, false);
 
 	const QList<QPair<QString, QString>> menuLogActions = {
 		{ "系统日志", "Log/Log.txt" },
@@ -608,6 +771,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	logLayout->addLayout(logButtonLayout);
 	m_pRobotLogText = new QPlainTextEdit();
 	m_pRobotLogText->setReadOnly(true);
+	m_pRobotLogText->document()->setMaximumBlockCount(1200);
 	m_pRobotLogText->setPlainText("日志：等待读取...");
 	logLayout->addWidget(m_pRobotLogText, 1);
 
@@ -625,6 +789,25 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	infoSplitter->setStretchFactor(1, 1);
 	dashboardLayout->addWidget(infoSplitter, 1);
 	dashboardLayout->addWidget(entryGroup, 0);
+
+	connect(managementEntryButton, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowManagementPage);
+	connect(quickManageBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowManagementPage);
+	connect(backHomeBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowDashboardPage);
+	connect(quickConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucConnectTest);
+	connect(quickMeasureBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenMeasureThenWeldDialog);
+	connect(quickPositionBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucGetCurrentPosTest);
+	connect(quickCalibrationBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenCameraParamDialog);
+	connect(quickPreviewBtn, &QPushButton::toggled, ui.GrooveCameraTestBtn, &QPushButton::setChecked);
+	connect(ui.GrooveCameraTestBtn, &QPushButton::toggled, quickPreviewBtn, &QPushButton::setChecked);
+	connect(loginBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::LoginCurrentAccount);
+	connect(logoutBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::LogoutCurrentAccount);
+	connect(registerBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RegisterAccount);
+	connect(adminProcessBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenWeldProcessDialog);
+	connect(adminPreciseBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenPreciseMeasureEditDialog);
+	connect(adminCameraBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenCameraParamDialog);
+	connect(adminCompBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenWeldSeamCompDialog);
+	connect(adminJogBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenRobotJogDialog);
+	connect(adminDebugBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenFunctionTestDialog);
 
 	connect(ui.RunTest, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotRunTest);
 	connect(ui.WeldProcessBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenWeldProcessDialog);
@@ -659,6 +842,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	ui.FanucMovlTestBtn->hide();
 	ui.FanucMovjTestBtn->hide();
 	ui.FanucMoveZeroBtn->hide();
+
+	EnsureDefaultAdminAccount();
+	RefreshAccountUi();
 
 	m_clientUDPFormSensorWorker = new ClientUDPFormSensorWorker();
 	m_clientUDPFormSensorThread = new QThread(this);
@@ -808,6 +994,278 @@ void QtWidgetsApplication4::ShowDashboardPage()
 	{
 		m_pMainStack->setCurrentWidget(m_pDashboardPage);
 	}
+}
+
+void QtWidgetsApplication4::ShowManagementPage()
+{
+	if (m_pMainStack != nullptr && m_pManagementPage != nullptr)
+	{
+		m_pMainStack->setCurrentWidget(m_pManagementPage);
+		RefreshAccountUi();
+	}
+}
+
+QString QtWidgetsApplication4::AccountConfigPath() const
+{
+	return RobotDataHelper::BuildProjectPath("Data/Accounts.ini");
+}
+
+QString QtWidgetsApplication4::RoleDisplayName(const QString& role) const
+{
+	if (role == kRoleAdmin)
+	{
+		return "管理员";
+	}
+	if (role == kRoleEngineer)
+	{
+		return "工程师";
+	}
+	return "操作员";
+}
+
+int QtWidgetsApplication4::RoleLevel(const QString& role) const
+{
+	if (role == kRoleAdmin)
+	{
+		return 3;
+	}
+	if (role == kRoleEngineer)
+	{
+		return 2;
+	}
+	return 1;
+}
+
+bool QtWidgetsApplication4::RequirePermission(const QString& minimumRole, const QString& actionName)
+{
+	if (RoleLevel(m_sCurrentUserRole) >= RoleLevel(minimumRole))
+	{
+		return true;
+	}
+
+	QMessageBox::information(
+		this,
+		"权限不足",
+		QString("%1 需要 %2 或更高权限。\n当前用户：%3（%4）")
+			.arg(actionName, RoleDisplayName(minimumRole), m_sCurrentUserName, RoleDisplayName(m_sCurrentUserRole)));
+	ShowManagementPage();
+	return false;
+}
+
+void QtWidgetsApplication4::EnsureDefaultAdminAccount()
+{
+	const QString accountPath = AccountConfigPath();
+	QSettings settings(accountPath, QSettings::IniFormat);
+	settings.beginGroup("Users");
+	const bool hasAccount = !settings.childGroups().isEmpty();
+	settings.endGroup();
+	if (hasAccount)
+	{
+		return;
+	}
+
+	QString error;
+	SaveAccount("admin", "admin", kRoleAdmin, error);
+}
+
+void QtWidgetsApplication4::RefreshAccountUi()
+{
+	const QString userText = QString("当前用户：%1（%2）").arg(m_sCurrentUserName, RoleDisplayName(m_sCurrentUserRole));
+	if (m_pCurrentUserLabel != nullptr)
+	{
+		m_pCurrentUserLabel->setText(userText);
+	}
+	if (m_pManagementUserLabel != nullptr)
+	{
+		m_pManagementUserLabel->setText(userText);
+	}
+	if (m_pPermissionHintLabel != nullptr)
+	{
+		m_pPermissionHintLabel->setText(
+			"权限说明：操作员可进行主页快速操作和信息查看；工程师可进入工艺、标定、补偿、点动和功能测试；管理员可注册账号并分配权限。首次启动默认管理员为 admin / admin。");
+	}
+
+	const bool canRegister = RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
+	if (m_pRegisterNameEdit != nullptr)
+	{
+		m_pRegisterNameEdit->setEnabled(canRegister);
+	}
+	if (m_pRegisterPasswordEdit != nullptr)
+	{
+		m_pRegisterPasswordEdit->setEnabled(canRegister);
+	}
+	if (m_pRegisterRoleCombo != nullptr)
+	{
+		m_pRegisterRoleCombo->setEnabled(canRegister);
+	}
+}
+
+bool QtWidgetsApplication4::VerifyAccount(const QString& userName, const QString& password, QString& role, QString& error) const
+{
+	const QString normalizedUser = userName.trimmed();
+	if (normalizedUser.isEmpty() || password.isEmpty())
+	{
+		error = "账号和密码不能为空。";
+		return false;
+	}
+
+	QSettings settings(AccountConfigPath(), QSettings::IniFormat);
+	settings.beginGroup("Users");
+	if (!settings.childGroups().contains(normalizedUser))
+	{
+		settings.endGroup();
+		error = "账号不存在。";
+		return false;
+	}
+
+	settings.beginGroup(normalizedUser);
+	const QString expectedHash = settings.value("PasswordHash").toString();
+	role = settings.value("Role", kRoleOperator).toString();
+	settings.endGroup();
+	settings.endGroup();
+
+	const QString actualHash = QString::fromLatin1(
+		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
+	if (expectedHash.compare(actualHash, Qt::CaseInsensitive) != 0)
+	{
+		error = "密码不正确。";
+		return false;
+	}
+	return true;
+}
+
+bool QtWidgetsApplication4::SaveAccount(const QString& userName, const QString& password, const QString& role, QString& error) const
+{
+	const QString normalizedUser = userName.trimmed();
+	if (normalizedUser.size() < 3 || normalizedUser.size() > 32)
+	{
+		error = "账号长度需要在 3 到 32 个字符之间。";
+		return false;
+	}
+	for (const QChar& ch : normalizedUser)
+	{
+		if (!(ch.isLetterOrNumber() || ch == '_' || ch == '-' || ch == '.'))
+		{
+			error = "账号只能包含字母、数字、中文、下划线、中划线或点。";
+			return false;
+		}
+	}
+	if (password.size() < 3)
+	{
+		error = "密码至少需要 3 个字符。";
+		return false;
+	}
+	if (role != kRoleOperator && role != kRoleEngineer && role != kRoleAdmin)
+	{
+		error = "权限类型无效。";
+		return false;
+	}
+
+	const QString accountPath = AccountConfigPath();
+	const QFileInfo accountInfo(accountPath);
+	QDir dir;
+	if (!dir.mkpath(accountInfo.absolutePath()))
+	{
+		error = "创建账号目录失败：" + QDir::toNativeSeparators(accountInfo.absolutePath());
+		return false;
+	}
+
+	QSettings settings(accountPath, QSettings::IniFormat);
+	settings.beginGroup("Users");
+	if (settings.childGroups().contains(normalizedUser))
+	{
+		settings.endGroup();
+		error = "账号已存在。";
+		return false;
+	}
+
+	settings.beginGroup(normalizedUser);
+	const QString hash = QString::fromLatin1(
+		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
+	settings.setValue("PasswordHash", hash);
+	settings.setValue("Role", role);
+	settings.setValue("CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate));
+	settings.endGroup();
+	settings.endGroup();
+	settings.sync();
+
+	if (settings.status() != QSettings::NoError)
+	{
+		error = "写入账号文件失败：" + accountPath;
+		return false;
+	}
+	return true;
+}
+
+void QtWidgetsApplication4::LoginCurrentAccount()
+{
+	if (m_pLoginNameEdit == nullptr || m_pLoginPasswordEdit == nullptr)
+	{
+		return;
+	}
+
+	QString role;
+	QString error;
+	const QString userName = m_pLoginNameEdit->text().trimmed();
+	if (!VerifyAccount(userName, m_pLoginPasswordEdit->text(), role, error))
+	{
+		QMessageBox::warning(this, "账号登录", error);
+		return;
+	}
+
+	m_sCurrentUserName = userName;
+	m_sCurrentUserRole = role;
+	m_pLoginPasswordEdit->clear();
+	if (m_pAccountLogText != nullptr)
+	{
+		m_pAccountLogText->appendPlainText(QString("[%1] %2 登录成功，权限：%3")
+			.arg(QDateTime::currentDateTime().toString("HH:mm:ss"), m_sCurrentUserName, RoleDisplayName(m_sCurrentUserRole)));
+	}
+	RefreshAccountUi();
+}
+
+void QtWidgetsApplication4::LogoutCurrentAccount()
+{
+	m_sCurrentUserName = "访客";
+	m_sCurrentUserRole = kRoleOperator;
+	if (m_pAccountLogText != nullptr)
+	{
+		m_pAccountLogText->appendPlainText(QString("[%1] 已退出登录，当前为访客操作员权限。")
+			.arg(QDateTime::currentDateTime().toString("HH:mm:ss")));
+	}
+	RefreshAccountUi();
+}
+
+void QtWidgetsApplication4::RegisterAccount()
+{
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
+	{
+		QMessageBox::information(this, "注册账号", "注册账号需要管理员权限。请先使用管理员账号登录。");
+		return;
+	}
+	if (m_pRegisterNameEdit == nullptr || m_pRegisterPasswordEdit == nullptr || m_pRegisterRoleCombo == nullptr)
+	{
+		return;
+	}
+
+	const QString role = m_pRegisterRoleCombo->currentData().toString();
+	QString error;
+	if (!SaveAccount(m_pRegisterNameEdit->text(), m_pRegisterPasswordEdit->text(), role, error))
+	{
+		QMessageBox::warning(this, "注册账号", error);
+		return;
+	}
+
+	if (m_pAccountLogText != nullptr)
+	{
+		m_pAccountLogText->appendPlainText(QString("[%1] 已注册账号 %2，权限：%3")
+			.arg(QDateTime::currentDateTime().toString("HH:mm:ss"),
+				m_pRegisterNameEdit->text().trimmed(),
+				RoleDisplayName(role)));
+	}
+	m_pRegisterNameEdit->clear();
+	m_pRegisterPasswordEdit->clear();
+	RefreshAccountUi();
 }
 
 void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page)
@@ -1762,6 +2220,7 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 		}
 		emit stopAllCommThreads();
 		ui.GrooveCameraText->appendPlainText("已停止坡口相机接收。");
+		CameraFrameCache::Instance().Clear();
 	}
 }
 
@@ -1953,6 +2412,10 @@ void QtWidgetsApplication4::RobotRunTest()
 
 void QtWidgetsApplication4::OpenWeldProcessDialog()
 {
+	if (!RequirePermission(kRoleEngineer, "工艺参数"))
+	{
+		return;
+	}
 	if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
 	{
 		QMessageBox::warning(this, "工艺参数", "未找到可用的控制单元。");
@@ -1969,6 +2432,10 @@ void QtWidgetsApplication4::OpenWeldProcessDialog()
 
 void QtWidgetsApplication4::OpenFunctionTestDialog()
 {
+	if (!RequirePermission(kRoleEngineer, "功能测试"))
+	{
+		return;
+	}
 	if (m_pFunctionTestPage == nullptr)
 	{
 		m_pFunctionTestPage = new FunctionTestDialog(m_pContralUnit, m_pMainStack);
@@ -2030,6 +2497,10 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 
 void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 {
+	if (!RequirePermission(kRoleEngineer, "精测量参数"))
+	{
+		return;
+	}
 	if (m_pPreciseMeasureEditPage == nullptr)
 	{
 		m_pPreciseMeasureEditPage = new PreciseMeasureEditDialog(m_pContralUnit, m_pMainStack);
@@ -2040,6 +2511,10 @@ void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 
 void QtWidgetsApplication4::OpenWeldSeamCompDialog()
 {
+	if (!RequirePermission(kRoleEngineer, "焊道补偿"))
+	{
+		return;
+	}
 	if (m_pWeldSeamCompPage == nullptr)
 	{
 		m_pWeldSeamCompPage = new WeldSeamCompDialog(m_pContralUnit, m_pMainStack);
@@ -2050,6 +2525,10 @@ void QtWidgetsApplication4::OpenWeldSeamCompDialog()
 
 void QtWidgetsApplication4::OpenCameraParamDialog()
 {
+	if (!RequirePermission(kRoleEngineer, "相机参数/手眼标定"))
+	{
+		return;
+	}
 	if (CameraFrameAccess::IsMeasureThenWeldExclusive())
 	{
 		QMessageBox::information(this, "相机参数", "先测后焊正在独占相机帧，当前不能打开相机参数/手眼读取。");
@@ -2414,6 +2893,10 @@ void QtWidgetsApplication4::FanucMoveZeroTest()
 
 void QtWidgetsApplication4::OpenRobotJogDialog()
 {
+	if (!RequirePermission(kRoleEngineer, "点动控制"))
+	{
+		return;
+	}
 	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
 	if (pFanucDriver == nullptr)
 	{

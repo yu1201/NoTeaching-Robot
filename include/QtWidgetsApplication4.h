@@ -17,7 +17,10 @@ class FANUCRobotCtrl;
 class FunctionTestDialog;
 class MeasureThenWeldDialog;
 class PreciseMeasureEditDialog;
+class QComboBox;
 class QEvent;
+class QLabel;
+class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QResizeEvent;
@@ -72,8 +75,20 @@ signals:
 
 private:
     void ShowDashboardPage();
+    void ShowManagementPage();
     void ShowEmbeddedPage(QWidget* page);
     void PrepareEmbeddedPage(QWidget* page);
+    QString AccountConfigPath() const;
+    QString RoleDisplayName(const QString& role) const;
+    int RoleLevel(const QString& role) const;
+    bool RequirePermission(const QString& minimumRole, const QString& actionName);
+    void EnsureDefaultAdminAccount();
+    void RefreshAccountUi();
+    bool VerifyAccount(const QString& userName, const QString& password, QString& role, QString& error) const;
+    bool SaveAccount(const QString& userName, const QString& password, const QString& role, QString& error) const;
+    void LoginCurrentAccount();
+    void LogoutCurrentAccount();
+    void RegisterAccount();
     bool LoadGrooveCameraIP(QString& cameraIP) const;
     void LoadRobotLogFile(const QString& relativePath, bool forceRefresh = false);
     void RunCommandLineActions(const QStringList& arguments);
@@ -100,7 +115,17 @@ private:
     QTimer* m_robotLogDisplayTimer;
     QStackedWidget* m_pMainStack;
     QWidget* m_pDashboardPage;
+    QWidget* m_pManagementPage;
     QPlainTextEdit* m_pRobotLogText;
+    QLabel* m_pCurrentUserLabel;
+    QLabel* m_pManagementUserLabel;
+    QLabel* m_pPermissionHintLabel;
+    QLineEdit* m_pLoginNameEdit;
+    QLineEdit* m_pLoginPasswordEdit;
+    QLineEdit* m_pRegisterNameEdit;
+    QLineEdit* m_pRegisterPasswordEdit;
+    QComboBox* m_pRegisterRoleCombo;
+    QPlainTextEdit* m_pAccountLogText;
     QPushButton* m_pCameraParamBtn;
     QPushButton* m_pWeldSeamCompBtn;
     WeldProcessDialog* m_pWeldProcessPage;
@@ -114,6 +139,8 @@ private:
     bool m_bFanucMovlRunning;
     bool m_bFanucMovjRunning;
     bool m_bFanucMoveZeroRunning;
+    QString m_sCurrentUserName;
+    QString m_sCurrentUserRole;
     QString m_sMeasureThenWeldStatus;
     QString m_sCurrentRobotLogPath;
     QString m_sLastRobotLogFilePath;
