@@ -2,6 +2,7 @@
 
 #include "OPini.h"
 #include "RobotDataHelper.h"
+#include "WeldPoseAverageUpdater.h"
 #include "WindowStyleHelper.h"
 
 #include <QButtonGroup>
@@ -14,6 +15,7 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -222,6 +224,9 @@ void WeldSeamCompDialog::BuildUi()
     rootLayout->addWidget(m_pPathLabel);
 
     QHBoxLayout* actionLayout = new QHBoxLayout();
+    m_pUpdatePoseAverageBtn = new QPushButton("一键更新姿态均值");
+    m_pUpdatePoseAverageBtn->setMinimumWidth(170);
+    actionLayout->addWidget(m_pUpdatePoseAverageBtn);
     actionLayout->addStretch(1);
     m_pReloadBtn = new QPushButton("重新读取");
     m_pSaveBtn = new QPushButton("保存");
@@ -261,6 +266,23 @@ void WeldSeamCompDialog::BuildUi()
         });
     connect(m_pReloadBtn, &QPushButton::clicked, this, [this]() { LoadCurrentParam(); });
     connect(m_pSaveBtn, &QPushButton::clicked, this, [this]() { SaveCurrentParam(); });
+    connect(m_pUpdatePoseAverageBtn, &QPushButton::clicked, this, [this]()
+        {
+            const QString defaultPath = WeldPoseAverageUpdater::DefaultInputHint(CurrentRobotName());
+            bool ok = false;
+            const QString inputPath = QInputDialog::getText(
+                this,
+                "一键更新焊道姿态均值",
+                "输入 PreciseLaserPoint_WeldPose_2mm.txt 或对应结果目录：",
+                QLineEdit::Normal,
+                QDir::toNativeSeparators(defaultPath),
+                &ok);
+            if (!ok)
+            {
+                return;
+            }
+            RunOfflinePoseAverageUpdate(inputPath);
+        });
 
     RefreshTypeCombo();
     RefreshEditor();
@@ -555,7 +577,7 @@ void WeldSeamCompDialog::RefreshEditor()
     {
         m_pHintLabel->setText(m_mode == CompMode::Pose
             ? QString("姿态补偿：按当前点姿态匹配下方姿态值，匹配成功后将 X/Y/Z 补偿按当前姿态旋转到世界坐标后叠加。")
-            : QString("焊道补偿：Z 为世界 Z 向；枪反向为垂直 Z 轴和焊道方向的侧向；焊道方向为沿点序切线方向。"));
+            : QString("焊道补偿：Z 为世界 Z 向；波纹板枪反向使用整体焊接方向计算法向，其他焊缝使用沿点序切线的侧向。"));
     }
 
     if (m_mode == CompMode::Pose)
@@ -774,6 +796,68 @@ QString WeldSeamCompDialog::BuildSnapshot() const
 void WeldSeamCompDialog::MarkCleanSnapshot()
 {
     m_cleanSnapshot = BuildSnapshot();
+}
+
+void WeldSeamCompDialog::RunOfflinePoseAverageUpdate(const QString& inputPath)
+{
+    const QString trimmedInputPath = inputPath.trimmed();
+    if (trimmedInputPath.isEmpty())
+    {
+        QMessageBox::warning(this, "一键更新焊道姿态均值", "输入路径不能为空。");
+        AppendLog("姿态均值更新取消：输入路径为空。");
+        return;
+    }
+
+    QString editorError;
+    StoreEditorValues(false, editorError);
+    if (HasUnsavedChanges())
+    {
+        const QMessageBox::StandardButton choice = QMessageBox::question(
+            this,
+            "一键更新焊道姿态均值",
+            "当前补偿参数有未保存修改。是否先保存再更新姿态均值？",
+            QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+            QMessageBox::Yes);
+        if (choice == QMessageBox::Cancel)
+        {
+            AppendLog("姿态均值更新取消：用户保留未保存修改。");
+            return;
+        }
+        if (choice == QMessageBox::Yes && !SaveCurrentParam())
+        {
+            AppendLog("姿态均值更新取消：保存当前补偿参数失败。");
+            return;
+        }
+    }
+
+    WeldPoseAverageUpdater::UpdateResult result;
+    QString error;
+    if (!WeldPoseAverageUpdater::UpdateFromInput(trimmedInputPath, CurrentRobotName(), result, error))
+    {
+        QMessageBox::warning(this, "一键更新焊道姿态均值", error);
+        AppendLog("姿态均值更新失败：" + error);
+        return;
+    }
+
+    LoadCurrentParam();
+    for (const QString& line : result.reportLines)
+    {
+        AppendLog(line);
+    }
+
+    const QString message = QString(
+        "姿态均值更新完成。\n\n"
+        "机器人：%1\n"
+        "新增姿态组：%2\n"
+        "复用姿态组：%3\n"
+        "异常值过滤：%4\n"
+        "报告：%5")
+        .arg(result.robotName)
+        .arg(result.addedSlotCount)
+        .arg(result.reusedSlotCount)
+        .arg(result.anyOutlierFiltered ? "有" : "无")
+        .arg(QDir::toNativeSeparators(result.reportPath));
+    QMessageBox::information(this, "一键更新焊道姿态均值", message);
 }
 
 void WeldSeamCompDialog::AppendLog(const QString& text)

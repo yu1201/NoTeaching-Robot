@@ -24,6 +24,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QSizePolicy>
 #include <QSplitter>
 #include <QStringList>
 #include <QVariant>
@@ -218,11 +219,14 @@ void PreciseMeasureEditDialog::BuildUi()
     QScrollArea* pageScrollArea = new QScrollArea();
     pageScrollArea->setObjectName("PrecisePageScroll");
     pageScrollArea->setWidgetResizable(true);
+    pageScrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    pageScrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     pageScrollArea->setFrameShape(QFrame::NoFrame);
     outerLayout->addWidget(pageScrollArea);
 
     QWidget* pageWidget = new QWidget();
     pageWidget->setObjectName("PreciseMeasurePage");
+    pageWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     QVBoxLayout* rootLayout = new QVBoxLayout(pageWidget);
     rootLayout->setContentsMargins(22, 18, 22, 18);
     pageScrollArea->setWidget(pageWidget);

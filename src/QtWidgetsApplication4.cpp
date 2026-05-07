@@ -14,6 +14,7 @@
 #include "RobotDataHelper.h"
 #include "RobotJogDialog.h"
 #include "WindowStyleHelper.h"
+#include "WeldPoseAverageUpdater.h"
 #include "WeldProcessDialog.h"
 #include "WeldSeamCompDialog.h"
 #include "groove/clientudpformsensorworker.h"
@@ -27,13 +28,20 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
+#include <QAction>
 #include <QMetaObject>
+#include <QMenu>
 #include <QMenuBar>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStatusBar>
 #include <QSet>
 #include <QThread>
@@ -45,6 +53,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <thread>
@@ -127,6 +136,49 @@ namespace
 			return nullptr;
 		}
 		return pFanucDriver;
+	}
+
+	template <typename DialogType>
+	DialogType* PrepareTaskbarDialog(DialogType* dialog, QWidget* owner)
+	{
+		if (dialog == nullptr)
+		{
+			return nullptr;
+		}
+
+		dialog->setAttribute(Qt::WA_DeleteOnClose);
+		dialog->setParent(nullptr);
+		dialog->setWindowModality(Qt::NonModal);
+		Qt::WindowFlags flags = dialog->windowFlags();
+		flags &= ~Qt::WindowType_Mask;
+		flags |= Qt::Window
+			| Qt::WindowTitleHint
+			| Qt::WindowSystemMenuHint
+			| Qt::WindowMinimizeButtonHint
+			| Qt::WindowMaximizeButtonHint
+			| Qt::WindowCloseButtonHint;
+		dialog->setWindowFlags(flags);
+		if (owner != nullptr)
+		{
+			dialog->setWindowIcon(owner->windowIcon());
+			QObject::connect(owner, &QObject::destroyed, dialog, &QWidget::close);
+		}
+#ifdef Q_OS_WIN
+		const HWND hwnd = reinterpret_cast<HWND>(dialog->winId());
+		LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+		exStyle &= ~WS_EX_TOOLWINDOW;
+		exStyle |= WS_EX_APPWINDOW;
+		SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle);
+		SetWindowPos(
+			hwnd,
+			nullptr,
+			0,
+			0,
+			0,
+			0,
+			SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+#endif
+		return dialog;
 	}
 
 	QString FormatVectorPreview(const QVector<double>& values, int maxCount = 5)
@@ -281,9 +333,18 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_clientUDPFormSensorThread(nullptr)
 	, m_grooveCameraDisplayTimer(nullptr)
 	, m_robotLogDisplayTimer(nullptr)
+	, m_pMainStack(nullptr)
+	, m_pDashboardPage(nullptr)
 	, m_pRobotLogText(nullptr)
 	, m_pCameraParamBtn(nullptr)
 	, m_pWeldSeamCompBtn(nullptr)
+	, m_pWeldProcessPage(nullptr)
+	, m_pFunctionTestPage(nullptr)
+	, m_pMeasureThenWeldPage(nullptr)
+	, m_pPreciseMeasureEditPage(nullptr)
+	, m_pWeldSeamCompPage(nullptr)
+	, m_pCameraParamPage(nullptr)
+	, m_pRobotJogPage(nullptr)
 	, m_bFanucMovlForward(true)
 	, m_bFanucMovlRunning(false)
 	, m_bFanucMovjRunning(false)
@@ -294,10 +355,16 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	ApplyUnifiedWindowChrome(this);
 	if (ui.menuBar != nullptr)
 	{
-		ui.menuBar->hide();
+		ui.menuBar->clear();
+		ui.menuBar->show();
 	}
 	if (ui.mainToolBar != nullptr)
 	{
+		ui.mainToolBar->clear();
+		ui.mainToolBar->setMovable(false);
+		ui.mainToolBar->setFloatable(false);
+		ui.mainToolBar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+		ui.mainToolBar->setIconSize(QSize(18, 18));
 		ui.mainToolBar->hide();
 	}
 	if (ui.statusBar != nullptr)
@@ -315,7 +382,15 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"QPushButton:pressed { background: #18303B; }"
 		"QPushButton:checked { background: #305F55; border-color: #7BD8B3; }"
 		"QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 12px; padding: 10px; font-family: Consolas, 'Microsoft YaHei UI'; }"
-		"QMenuBar, QStatusBar, QToolBar { background: #0B1117; color: #ECF3F4; }"
+		"QMenuBar, QStatusBar, QToolBar { background: #0B1117; color: #ECF3F4; spacing: 4px; }"
+		"QMenuBar::item { padding: 5px 10px; background: transparent; }"
+		"QMenuBar::item:selected { background: #223240; }"
+		"QMenu { background: #101820; color: #ECF3F4; border: 1px solid #2E4656; padding: 4px; }"
+		"QMenu::item { padding: 6px 28px 6px 20px; }"
+		"QMenu::item:selected { background: #2D5465; }"
+		"QToolButton { background: transparent; color: #ECF3F4; border: 1px solid transparent; border-radius: 4px; padding: 5px 8px; }"
+		"QToolButton:hover { background: #223240; border-color: #3C6173; }"
+		"QToolButton:checked { background: #305F55; border-color: #7BD8B3; }"
 		"QLabel { color: #BACBD1; }");
 
 	QWidget* mainPanel = new QWidget(this);
@@ -324,25 +399,35 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	rootLayout->setSpacing(14);
 	setCentralWidget(mainPanel);
 
+	m_pMainStack = new QStackedWidget(mainPanel);
+	m_pMainStack->setContentsMargins(0, 0, 0, 0);
+	m_pMainStack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	m_pDashboardPage = new QWidget(m_pMainStack);
+	QVBoxLayout* dashboardLayout = new QVBoxLayout(m_pDashboardPage);
+	dashboardLayout->setContentsMargins(0, 0, 0, 0);
+	dashboardLayout->setSpacing(14);
+	m_pMainStack->addWidget(m_pDashboardPage);
+	rootLayout->addWidget(m_pMainStack, 1);
+
 	QHBoxLayout* titleLayout = new QHBoxLayout();
 	titleLayout->setSpacing(10);
-	QLabel* titleLabel = new QLabel("机器人控制与调试中心");
+	QLabel* titleLabel = new QLabel("机器人控制与调试中心", m_pDashboardPage);
 	titleLabel->setStyleSheet("font-size: 26px; font-weight: bold; color: #F7FCFC; letter-spacing: 1px;");
-	QLabel* versionLabel = new QLabel(QString("v%1").arg(BuildAppVersionText()));
+	QLabel* versionLabel = new QLabel(QString("v%1").arg(BuildAppVersionText()), m_pDashboardPage);
 	versionLabel->setStyleSheet(
 		"QLabel { background: #173041; color: #9ED8DB; border: 1px solid #3C6173; "
 		"border-radius: 10px; padding: 4px 10px; font-size: 13px; font-weight: bold; }");
-	QPushButton* aboutButton = new QPushButton("关于");
+	QPushButton* aboutButton = new QPushButton("关于", m_pDashboardPage);
 	aboutButton->setMinimumHeight(32);
 	aboutButton->setMaximumWidth(88);
 	aboutButton->setStyleSheet("QPushButton { padding: 6px 12px; font-size: 13px; border-radius: 10px; }");
+	aboutButton->hide();
 	titleLayout->addWidget(titleLabel);
 	titleLayout->addWidget(versionLabel, 0, Qt::AlignVCenter);
 	titleLayout->addStretch(1);
-	titleLayout->addWidget(aboutButton, 0, Qt::AlignVCenter);
-	rootLayout->addLayout(titleLayout);
+	dashboardLayout->addLayout(titleLayout);
 
-	QGroupBox* entryGroup = new QGroupBox("常用功能");
+	QGroupBox* entryGroup = new QGroupBox("常用功能", mainPanel);
 	QGridLayout* entryLayout = new QGridLayout(entryGroup);
 	entryLayout->setSpacing(12);
 	m_pCameraParamBtn = new QPushButton("相机参数", entryGroup);
@@ -366,6 +451,111 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		button->setMinimumHeight(52);
 		entryLayout->addWidget(button, i / 3, i % 3);
 	}
+	entryGroup->hide();
+
+	auto addCommandAction = [this](QMenu* menu, const QString& text, const std::function<void()>& handler, bool addToToolbar = true) -> QAction*
+		{
+			QAction* action = new QAction(text, this);
+			if (menu != nullptr)
+			{
+				menu->addAction(action);
+			}
+			if (addToToolbar && ui.mainToolBar != nullptr)
+			{
+				ui.mainToolBar->addAction(action);
+			}
+			connect(action, &QAction::triggered, this, [handler]()
+				{
+					if (handler)
+					{
+						handler();
+					}
+				});
+			return action;
+		};
+
+	auto addToolbarSeparator = [this]()
+		{
+			if (ui.mainToolBar != nullptr)
+			{
+				ui.mainToolBar->addSeparator();
+			}
+		};
+
+	QMenu* fileMenu = ui.menuBar != nullptr ? ui.menuBar->addMenu("文件(F)") : nullptr;
+	QMenu* robotMenu = ui.menuBar != nullptr ? ui.menuBar->addMenu("机器人(R)") : nullptr;
+	QMenu* measureMenu = ui.menuBar != nullptr ? ui.menuBar->addMenu("测量(M)") : nullptr;
+	QMenu* cameraMenu = ui.menuBar != nullptr ? ui.menuBar->addMenu("相机(C)") : nullptr;
+	QMenu* weldMenu = ui.menuBar != nullptr ? ui.menuBar->addMenu("焊接(W)") : nullptr;
+	QMenu* debugMenu = ui.menuBar != nullptr ? ui.menuBar->addMenu("调试(D)") : nullptr;
+	QMenu* logMenu = ui.menuBar != nullptr ? ui.menuBar->addMenu("日志(L)") : nullptr;
+	QMenu* helpMenu = ui.menuBar != nullptr ? ui.menuBar->addMenu("帮助(H)") : nullptr;
+
+	addCommandAction(fileMenu, "首页监控", [this]() { ShowDashboardPage(); }, false);
+	if (fileMenu != nullptr)
+	{
+		fileMenu->addSeparator();
+	}
+	addCommandAction(robotMenu, "运行测试", [this]() { RobotRunTest(); });
+	addCommandAction(robotMenu, "连接服务", [this]() { FanucConnectTest(); });
+	addCommandAction(robotMenu, "断开服务", [this]() { FanucDisconnectTest(); });
+	addCommandAction(robotMenu, "点动控制", [this]() { OpenRobotJogDialog(); });
+	addToolbarSeparator();
+	addCommandAction(measureMenu, "先测后焊", [this]() { OpenMeasureThenWeldDialog(); });
+	addCommandAction(measureMenu, "精测量参数", [this]() { OpenPreciseMeasureEditDialog(); });
+	addToolbarSeparator();
+	addCommandAction(cameraMenu, "相机参数", [this]() { OpenCameraParamDialog(); });
+	QAction* cameraPreviewAction = new QAction("坡口相机预览", this);
+	cameraPreviewAction->setCheckable(true);
+	cameraPreviewAction->setChecked(ui.GrooveCameraTestBtn != nullptr && ui.GrooveCameraTestBtn->isChecked());
+	if (cameraMenu != nullptr)
+	{
+		cameraMenu->addAction(cameraPreviewAction);
+	}
+	if (ui.mainToolBar != nullptr)
+	{
+		ui.mainToolBar->addAction(cameraPreviewAction);
+	}
+	connect(cameraPreviewAction, &QAction::toggled, ui.GrooveCameraTestBtn, &QPushButton::setChecked);
+	connect(ui.GrooveCameraTestBtn, &QPushButton::toggled, cameraPreviewAction, &QAction::setChecked);
+	addToolbarSeparator();
+	addCommandAction(weldMenu, "工艺参数", [this]() { OpenWeldProcessDialog(); });
+	addCommandAction(weldMenu, "焊道补偿", [this]() { OpenWeldSeamCompDialog(); });
+	addToolbarSeparator();
+	addCommandAction(debugMenu, "功能测试", [this]() { OpenFunctionTestDialog(); });
+	if (debugMenu != nullptr)
+	{
+		debugMenu->addSeparator();
+	}
+	addCommandAction(debugMenu, "读取当前位置", [this]() { FanucGetCurrentPosTest(); }, false);
+	addCommandAction(debugMenu, "读取当前脉冲", [this]() { FanucGetCurrentPulseTest(); }, false);
+	addCommandAction(debugMenu, "检查完成状态", [this]() { FanucCheckDoneTest(); }, false);
+	addCommandAction(debugMenu, "读写整型寄存器", [this]() { FanucSetGetIntTest(); }, false);
+	addCommandAction(debugMenu, "设置TP速度", [this]() { FanucSetTpSpeedTest(); }, false);
+	addCommandAction(debugMenu, "调用程序", [this]() { FanucCallJobTest(); }, false);
+	addCommandAction(debugMenu, "上传LS", [this]() { FanucUploadLsTest(); }, false);
+	addCommandAction(debugMenu, "MOVL测试", [this]() { FanucMovlTest(); }, false);
+	addCommandAction(debugMenu, "MOVJ测试", [this]() { FanucMovjTest(); }, false);
+	addCommandAction(debugMenu, "运动到零位", [this]() { FanucMoveZeroTest(); }, false);
+
+	const QList<QPair<QString, QString>> menuLogActions = {
+		{ "系统日志", "Log/Log.txt" },
+		{ "运行日志", "Log/RobotRunLog.txt" },
+		{ "机器人A日志", "Log/RobotALog.txt" },
+		{ "控制单元日志", "Log/ContralUnit.txt" },
+		{ "焊接日志", "Log/WeldProcessFile.txt" }
+	};
+	for (const QPair<QString, QString>& item : menuLogActions)
+	{
+		addCommandAction(logMenu, item.first, [this, item]() { LoadRobotLogFile(item.second, true); }, false);
+	}
+	QAction* aboutAction = addCommandAction(helpMenu, "关于", [this]() { OpenAboutDialog(); }, false);
+	if (fileMenu != nullptr)
+	{
+		fileMenu->addAction(aboutAction);
+		fileMenu->addSeparator();
+	}
+	addCommandAction(fileMenu, "退出", [this]() { close(); }, false);
 
 	QSplitter* infoSplitter = new QSplitter(Qt::Horizontal);
 	infoSplitter->setChildrenCollapsible(false);
@@ -433,9 +623,10 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	infoSplitter->addWidget(cameraGroup);
 	infoSplitter->setStretchFactor(0, 1);
 	infoSplitter->setStretchFactor(1, 1);
-	rootLayout->addWidget(infoSplitter, 1);
-	rootLayout->addWidget(entryGroup, 0);
+	dashboardLayout->addWidget(infoSplitter, 1);
+	dashboardLayout->addWidget(entryGroup, 0);
 
+	connect(ui.RunTest, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotRunTest);
 	connect(ui.WeldProcessBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenWeldProcessDialog);
 	connect(ui.FunctionTestBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenFunctionTestDialog);
 	connect(ui.MeasureThenWeldBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenMeasureThenWeldDialog);
@@ -573,6 +764,125 @@ QtWidgetsApplication4::~QtWidgetsApplication4()
 	m_pContralUnit = nullptr;
 }
 
+bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
+{
+	if (event != nullptr && event->type() == QEvent::Close)
+	{
+		if (watched == m_pWeldProcessPage
+			|| watched == m_pFunctionTestPage
+			|| watched == m_pMeasureThenWeldPage
+			|| watched == m_pPreciseMeasureEditPage
+			|| watched == m_pWeldSeamCompPage
+			|| watched == m_pCameraParamPage
+			|| watched == m_pRobotJogPage)
+		{
+			QTimer::singleShot(0, this, [this]() { ShowDashboardPage(); });
+		}
+	}
+
+	return QMainWindow::eventFilter(watched, event);
+}
+
+void QtWidgetsApplication4::resizeEvent(QResizeEvent* event)
+{
+	QMainWindow::resizeEvent(event);
+	if (m_pMainStack == nullptr)
+	{
+		return;
+	}
+
+	QWidget* currentPage = m_pMainStack->currentWidget();
+	if (currentPage != nullptr && currentPage != m_pDashboardPage)
+	{
+		currentPage->setGeometry(m_pMainStack->contentsRect());
+		if (QLayout* pageLayout = currentPage->layout())
+		{
+			pageLayout->activate();
+		}
+	}
+}
+
+void QtWidgetsApplication4::ShowDashboardPage()
+{
+	if (m_pMainStack != nullptr && m_pDashboardPage != nullptr)
+	{
+		m_pMainStack->setCurrentWidget(m_pDashboardPage);
+	}
+}
+
+void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page)
+{
+	if (page == nullptr || m_pMainStack == nullptr)
+	{
+		return;
+	}
+
+	page->setAttribute(Qt::WA_DeleteOnClose, false);
+	page->setParent(m_pMainStack);
+	page->setWindowFlags(Qt::Widget);
+	page->setWindowModality(Qt::NonModal);
+	page->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	page->setMinimumSize(0, 0);
+	page->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+	page->setGeometry(m_pMainStack->contentsRect());
+
+	const QList<QScrollArea*> scrollAreas = page->findChildren<QScrollArea*>();
+	for (QScrollArea* scrollArea : scrollAreas)
+	{
+		if (scrollArea == nullptr)
+		{
+			continue;
+		}
+		scrollArea->setWidgetResizable(true);
+		scrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+		scrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+		if (QWidget* scrollWidget = scrollArea->widget())
+		{
+			scrollWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+		}
+	}
+
+	page->installEventFilter(this);
+	if (m_pMainStack->indexOf(page) < 0)
+	{
+		m_pMainStack->addWidget(page);
+	}
+}
+
+void QtWidgetsApplication4::ShowEmbeddedPage(QWidget* page)
+{
+	if (page == nullptr || m_pMainStack == nullptr)
+	{
+		return;
+	}
+
+	PrepareEmbeddedPage(page);
+	m_pMainStack->setCurrentWidget(page);
+	page->setGeometry(m_pMainStack->contentsRect());
+	page->show();
+	if (QLayout* stackLayout = m_pMainStack->layout())
+	{
+		stackLayout->activate();
+	}
+	if (QLayout* pageLayout = page->layout())
+	{
+		pageLayout->activate();
+	}
+	page->setGeometry(m_pMainStack->contentsRect());
+	page->setFocus(Qt::OtherFocusReason);
+	QTimer::singleShot(0, this, [this, page]()
+		{
+			if (m_pMainStack != nullptr && m_pMainStack->currentWidget() == page)
+			{
+				page->setGeometry(m_pMainStack->contentsRect());
+				if (QLayout* pageLayout = page->layout())
+				{
+					pageLayout->activate();
+				}
+			}
+		});
+}
+
 void QtWidgetsApplication4::OpenAboutDialog()
 {
 	QMessageBox aboutBox(this);
@@ -621,6 +931,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
 		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用 WeldSeamCompParam.ini 补偿\n";
 		out << "  --apply-weld-seam-comp-output <FILE> 指定补偿结果输出文件，默认另存 _SeamComp\n";
+		out << "  --update-weld-pose-average <FILE_OR_DIR> 离线统计四类焊道平均姿态并更新补偿姿态库\n";
 		out << "  --quit-after <ms>                 指定毫秒后退出程序\n";
 		out.flush();
 		QTimer::singleShot(0, QCoreApplication::instance(), &QCoreApplication::quit);
@@ -709,6 +1020,12 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			outputPath = arguments[weldSeamCompOutputIndex + 1];
 		}
 		RunWeldSeamCompForCli(inputPath, outputPath);
+	}
+
+	const int updateWeldPoseAverageIndex = arguments.indexOf("--update-weld-pose-average");
+	if (updateWeldPoseAverageIndex >= 0 && updateWeldPoseAverageIndex + 1 < arguments.size())
+	{
+		RunUpdateWeldPoseAverageForCli(arguments[updateWeldPoseAverageIndex + 1]);
 	}
 
 	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriverForCli();
@@ -1169,6 +1486,27 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(const QString& inputPath, cons
 	LogCommandLineMessage("CLI 焊道补偿摘要：" + summary);
 }
 
+void QtWidgetsApplication4::RunUpdateWeldPoseAverageForCli(const QString& inputPath) const
+{
+	WeldPoseAverageUpdater::UpdateResult result;
+	QString error;
+	if (!WeldPoseAverageUpdater::UpdateFromInput(inputPath, QString(), result, error))
+	{
+		LogCommandLineMessage("CLI 姿态均值更新失败：" + error);
+		return;
+	}
+
+	for (const QString& line : result.reportLines)
+	{
+		LogCommandLineMessage(line);
+	}
+	LogCommandLineMessage(QString("CLI 姿态均值更新完成：机器人=%1，新增姿态组=%2，复用姿态组=%3，报告=%4")
+		.arg(result.robotName)
+		.arg(result.addedSlotCount)
+		.arg(result.reusedSlotCount)
+		.arg(QDir::toNativeSeparators(result.reportPath)));
+}
+
 bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 	FANUCRobotCtrl* pFanucDriver,
 	int repeatCount,
@@ -1621,17 +1959,22 @@ void QtWidgetsApplication4::OpenWeldProcessDialog()
 		return;
 	}
 
-	WeldProcessDialog dlg(m_pContralUnit->m_vtContralUnitInfo[0], this);
-	dlg.exec();
+	if (m_pWeldProcessPage == nullptr)
+	{
+		m_pWeldProcessPage = new WeldProcessDialog(m_pContralUnit->m_vtContralUnitInfo[0], m_pMainStack);
+		PrepareEmbeddedPage(m_pWeldProcessPage);
+	}
+	ShowEmbeddedPage(m_pWeldProcessPage);
 }
 
 void QtWidgetsApplication4::OpenFunctionTestDialog()
 {
-	FunctionTestDialog* dialog = new FunctionTestDialog(m_pContralUnit, this);
-	dialog->setAttribute(Qt::WA_DeleteOnClose);
-	dialog->show();
-	dialog->raise();
-	dialog->activateWindow();
+	if (m_pFunctionTestPage == nullptr)
+	{
+		m_pFunctionTestPage = new FunctionTestDialog(m_pContralUnit, m_pMainStack);
+		PrepareEmbeddedPage(m_pFunctionTestPage);
+	}
+	ShowEmbeddedPage(m_pFunctionTestPage);
 }
 
 void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
@@ -1665,37 +2008,44 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 			emit stopAllCommThreads();
 		};
 
-	MeasureThenWeldDialog* dialog = new MeasureThenWeldDialog(m_pContralUnit, startCamera, stopCamera, this);
-	dialog->setAttribute(Qt::WA_DeleteOnClose);
-	connect(dialog, &MeasureThenWeldDialog::FlowStepChanged, this, [this](const QString& text)
-		{
-			m_sMeasureThenWeldStatus = text;
-			if (ui.FanucMonitorText != nullptr && ui.FanucMonitorText->toPlainText().isEmpty())
+	if (m_pMeasureThenWeldPage == nullptr)
+	{
+		m_pMeasureThenWeldPage = new MeasureThenWeldDialog(
+			m_pContralUnit,
+			startCamera,
+			stopCamera,
+			m_pMainStack);
+		PrepareEmbeddedPage(m_pMeasureThenWeldPage);
+		connect(m_pMeasureThenWeldPage, &MeasureThenWeldDialog::FlowStepChanged, this, [this](const QString& text)
 			{
-				ui.FanucMonitorText->setPlainText(text);
-			}
-		});
-	dialog->show();
-	dialog->raise();
-	dialog->activateWindow();
+				m_sMeasureThenWeldStatus = text;
+				if (ui.FanucMonitorText != nullptr && ui.FanucMonitorText->toPlainText().isEmpty())
+				{
+					ui.FanucMonitorText->setPlainText(text);
+				}
+			});
+	}
+	ShowEmbeddedPage(m_pMeasureThenWeldPage);
 }
 
 void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 {
-	PreciseMeasureEditDialog* dialog = new PreciseMeasureEditDialog(m_pContralUnit, this);
-	dialog->setAttribute(Qt::WA_DeleteOnClose);
-	dialog->show();
-	dialog->raise();
-	dialog->activateWindow();
+	if (m_pPreciseMeasureEditPage == nullptr)
+	{
+		m_pPreciseMeasureEditPage = new PreciseMeasureEditDialog(m_pContralUnit, m_pMainStack);
+		PrepareEmbeddedPage(m_pPreciseMeasureEditPage);
+	}
+	ShowEmbeddedPage(m_pPreciseMeasureEditPage);
 }
 
 void QtWidgetsApplication4::OpenWeldSeamCompDialog()
 {
-	WeldSeamCompDialog* dialog = new WeldSeamCompDialog(m_pContralUnit, this);
-	dialog->setAttribute(Qt::WA_DeleteOnClose);
-	dialog->show();
-	dialog->raise();
-	dialog->activateWindow();
+	if (m_pWeldSeamCompPage == nullptr)
+	{
+		m_pWeldSeamCompPage = new WeldSeamCompDialog(m_pContralUnit, m_pMainStack);
+		PrepareEmbeddedPage(m_pWeldSeamCompPage);
+	}
+	ShowEmbeddedPage(m_pWeldSeamCompPage);
 }
 
 void QtWidgetsApplication4::OpenCameraParamDialog()
@@ -1722,11 +2072,16 @@ void QtWidgetsApplication4::OpenCameraParamDialog()
 			emit stopAllCommThreads();
 		};
 
-	CameraParamDialog* dialog = new CameraParamDialog(m_pContralUnit, startCamera, stopCamera, this);
-	dialog->setAttribute(Qt::WA_DeleteOnClose);
-	dialog->show();
-	dialog->raise();
-	dialog->activateWindow();
+	if (m_pCameraParamPage == nullptr)
+	{
+		m_pCameraParamPage = new CameraParamDialog(
+			m_pContralUnit,
+			startCamera,
+			stopCamera,
+			m_pMainStack);
+		PrepareEmbeddedPage(m_pCameraParamPage);
+	}
+	ShowEmbeddedPage(m_pCameraParamPage);
 }
 
 void QtWidgetsApplication4::FanucConnectTest()
@@ -2065,9 +2420,10 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 		return;
 	}
 
-	RobotJogDialog* dialog = new RobotJogDialog(pFanucDriver, this);
-	dialog->setAttribute(Qt::WA_DeleteOnClose);
-	dialog->show();
-	dialog->raise();
-	dialog->activateWindow();
+	if (m_pRobotJogPage == nullptr)
+	{
+		m_pRobotJogPage = new RobotJogDialog(pFanucDriver, m_pMainStack);
+		PrepareEmbeddedPage(m_pRobotJogPage);
+	}
+	ShowEmbeddedPage(m_pRobotJogPage);
 }

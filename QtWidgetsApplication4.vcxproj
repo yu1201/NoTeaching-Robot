@@ -133,6 +133,7 @@
     <ClCompile Include="src\PreciseMeasureEditDialog.cpp" />
     <ClCompile Include="src\RobotCalculation.cpp" />
     <ClCompile Include="src\RobotDataHelper.cpp" />
+    <ClCompile Include="src\WeldPoseAverageUpdater.cpp" />
     <ClCompile Include="src\WeldSeamCompDialog.cpp" />
     <ClCompile Include="src\WeldProcessFile.cpp" />
     <ClCompile Include="src\WeldProcessDialog.cpp" />
@@ -190,6 +191,7 @@
     <ClInclude Include="include\SkGrooveRecog_global.h" />
     <ClInclude Include="include\STEPRobotDriver.h" />
     <ClInclude Include="include\WindowStyleHelper.h" />
+    <ClInclude Include="include\WeldPoseAverageUpdater.h" />
     <ClInclude Include="include\WeldSeamCompDialog.h" />
     <ClInclude Include="include\WeldProcessFile.h" />
     <ClInclude Include="include\groove\framebuffer.h" />

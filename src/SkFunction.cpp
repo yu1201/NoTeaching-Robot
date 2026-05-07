@@ -1453,7 +1453,22 @@ int getGrooveTurningPoints(std::vector<SkPoint3D> outPoints, std::vector<SkPoint
             newBorder.leftEndP = pLeft;
             newBorder.rightEndP = pRight;
             newBorder.leftLine = Linesegment;
-            newBorder.grooveP = Midpoint;
+
+            double minDist = 1e9;
+            SkPoint3D realTurnPoint = Midpoint;
+            for (const auto& p : dataIn) {
+
+                double dy = p.y - Midpoint.y;
+                double dz = p.z - Midpoint.z;
+                double dist = dy * dy + dz * dz;
+
+                if (dist < minDist) {
+                    minDist = dist;
+                    realTurnPoint = p;
+                }
+            }
+            newBorder.grooveP = realTurnPoint;
+            //newBorder.grooveP = Midpoint;
             newBorder.grooveType = 0;
             Grooves.push_back(newBorder);
         }
@@ -1466,7 +1481,7 @@ int getGrooveTurningPoints(std::vector<SkPoint3D> outPoints, std::vector<SkPoint
     }
 
     std::vector<SkPoint3D> sortedTurningPoints;
-    sortedTurningPoints.push_back(Grooves.front().leftEndP);
+    sortedTurningPoints.push_back(Grooves.front().grooveP);
     for (int i = 0; i < static_cast<int>(Grooves.size()) - 1; i++)
     {
         SkPoint3D intersectP;
@@ -1492,7 +1507,7 @@ int getGrooveTurningPoints(std::vector<SkPoint3D> outPoints, std::vector<SkPoint
         }
         sortedTurningPoints.push_back(realTurnPoint);
     }
-    sortedTurningPoints.push_back(Grooves.back().rightEndP);
+    sortedTurningPoints.push_back(Grooves.back().grooveP);
 
     for (const auto& pt : sortedTurningPoints)
     {
@@ -1527,7 +1542,7 @@ int getGrooveTurningPoints(std::vector<SkPoint3D> outPoints, std::vector<SkPoint
     }
 
     std::sort(TurningPoint.begin(), TurningPoint.end(), [](const SkPoint3D& a, const SkPoint3D& b) {
-        return a.order < b.order;
+        return a.order > b.order;
         });
     return TRUE;
 }

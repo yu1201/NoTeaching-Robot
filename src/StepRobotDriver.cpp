@@ -1,8 +1,12 @@
 #include "STEPRobotDriver.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <string>
 
 namespace
 {
@@ -35,7 +39,32 @@ namespace
 		return GetStr("ap%u", static_cast<unsigned>(index));
 	}
 
-	std::string StepBuildSrdContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+	double StepPulseToJoint(long pulse, double pulseUnit)
+	{
+		return pulseUnit == 0.0 ? static_cast<double>(pulse) : static_cast<double>(pulse) * pulseUnit;
+	}
+
+	long StepJointToPulse(double joint, double pulseUnit)
+	{
+		return pulseUnit == 0.0 ? static_cast<long>(std::lround(joint)) : static_cast<long>(std::lround(joint / pulseUnit));
+	}
+
+	AXISPOS StepToAxisPos(const T_ANGLE_PULSE& tRobotPulse, const T_AXISUNIT& axisUnit)
+	{
+		AXISPOS value = {};
+		value.m_Joint[0] = StepPulseToJoint(tRobotPulse.nSPulse, axisUnit.dSPulseUnit);
+		value.m_Joint[1] = StepPulseToJoint(tRobotPulse.nLPulse, axisUnit.dLPulseUnit);
+		value.m_Joint[2] = StepPulseToJoint(tRobotPulse.nUPulse, axisUnit.dUPulseUnit);
+		value.m_Joint[3] = StepPulseToJoint(tRobotPulse.nRPulse, axisUnit.dRPulseUnit);
+		value.m_Joint[4] = StepPulseToJoint(tRobotPulse.nBPulse, axisUnit.dBPulseUnit);
+		value.m_Joint[5] = StepPulseToJoint(tRobotPulse.nTPulse, axisUnit.dTPulseUnit);
+		value.m_AuxJoint[0] = StepPulseToJoint(tRobotPulse.lBXPulse, axisUnit.dBXPulseUnit);
+		value.m_AuxJoint[1] = StepPulseToJoint(tRobotPulse.lBYPulse, axisUnit.dBYPulseUnit);
+		value.m_AuxJoint[2] = StepPulseToJoint(tRobotPulse.lBZPulse, axisUnit.dBZPulseUnit);
+		return value;
+	}
+
+	std::string StepBuildSrdContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, const T_AXISUNIT& axisUnit)
 	{
 		std::ostringstream oss;
 		oss << std::fixed << std::setprecision(6);
@@ -55,9 +84,15 @@ namespace
 				<< ", 0.0, 0.0, 0.0,0 }" << "\n";
 
 			oss << "AXISPOS " << axisName << " := {  "
-				<< info.tPulse.nSPulse << ", " << info.tPulse.nLPulse << ", " << info.tPulse.nUPulse << ", "
-				<< info.tPulse.nRPulse << ", " << info.tPulse.nBPulse << ", " << info.tPulse.nTPulse << ", "
-				<< info.tPulse.lBXPulse << ", " << info.tPulse.lBYPulse << ", " << info.tPulse.lBZPulse
+				<< StepPulseToJoint(info.tPulse.nSPulse, axisUnit.dSPulseUnit) << ", "
+				<< StepPulseToJoint(info.tPulse.nLPulse, axisUnit.dLPulseUnit) << ", "
+				<< StepPulseToJoint(info.tPulse.nUPulse, axisUnit.dUPulseUnit) << ", "
+				<< StepPulseToJoint(info.tPulse.nRPulse, axisUnit.dRPulseUnit) << ", "
+				<< StepPulseToJoint(info.tPulse.nBPulse, axisUnit.dBPulseUnit) << ", "
+				<< StepPulseToJoint(info.tPulse.nTPulse, axisUnit.dTPulseUnit) << ", "
+				<< StepPulseToJoint(info.tPulse.lBXPulse, axisUnit.dBXPulseUnit) << ", "
+				<< StepPulseToJoint(info.tPulse.lBYPulse, axisUnit.dBYPulseUnit) << ", "
+				<< StepPulseToJoint(info.tPulse.lBZPulse, axisUnit.dBZPulseUnit)
 				<< ", 0.0, 0.0,0.0 }" << "\n";
 
 			const long speed = StepClampPositiveLong(info.tSpeed.dSpeed, 1000);
@@ -138,21 +173,6 @@ namespace
 		return value;
 	}
 
-	AXISPOS StepToAxisPos(const T_ANGLE_PULSE& tRobotPulse)
-	{
-		AXISPOS value = {};
-		value.m_Joint[0] = tRobotPulse.nSPulse;
-		value.m_Joint[1] = tRobotPulse.nLPulse;
-		value.m_Joint[2] = tRobotPulse.nUPulse;
-		value.m_Joint[3] = tRobotPulse.nRPulse;
-		value.m_Joint[4] = tRobotPulse.nBPulse;
-		value.m_Joint[5] = tRobotPulse.nTPulse;
-		value.m_AuxJoint[0] = tRobotPulse.lBXPulse;
-		value.m_AuxJoint[1] = tRobotPulse.lBYPulse;
-		value.m_AuxJoint[2] = tRobotPulse.lBZPulse;
-		return value;
-	}
-
 	SDynamicPercent StepToDynamicPercent(double vel, double acc, double dec, double jerk = -1.0, double tjolt = -1.0)
 	{
 		SDynamicPercent value = {};
@@ -165,6 +185,339 @@ namespace
 		value.m_JointPercent = value.m_SegmentDynamic;
 		return value;
 	}
+
+	int StepMoveTypeFromJobName(const std::string& jobName)
+	{
+		std::string upper = jobName;
+		std::transform(upper.begin(), upper.end(), upper.begin(),
+			[](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+		return upper == "MOVL" || upper == "LIN" || upper == "LINE" ? MOVL : MOVJ;
+	}
+
+	int StepSpeedToPercent(double speed)
+	{
+		if (speed <= 0.0)
+		{
+			return -1;
+		}
+		return std::max(1, std::min(100, static_cast<int>(std::lround(speed))));
+	}
+
+	std::string StepCurrentToolName(STEPRobotCtrl* ctrl)
+	{
+		if (ctrl == nullptr || ctrl->m_pSTEPRobotClient == nullptr)
+		{
+			return "Default";
+		}
+		const std::string tool = ctrl->m_pSTEPRobotClient->getToolName();
+		return tool.empty() ? "Default" : tool;
+	}
+
+	std::string StepCurrentRefName(STEPRobotCtrl* ctrl)
+	{
+		if (ctrl == nullptr || ctrl->m_pSTEPRobotClient == nullptr)
+		{
+			return "WORLD";
+		}
+		const std::string ref = ctrl->m_pSTEPRobotClient->getTeachRefSysNam();
+		return ref.empty() ? "WORLD" : ref;
+	}
+
+	HMIPos StepMakeAxisHmiPos(const T_ANGLE_PULSE& pulse, const T_AXISUNIT& axisUnit, bool hasExternalAxis)
+	{
+		HMIPos pos = {};
+		pos.m_PosType = hasExternalAxis ? eAxisPos : eRobotAxisPos;
+		pos.m_Pos.m_Joint[0] = StepPulseToJoint(pulse.nSPulse, axisUnit.dSPulseUnit);
+		pos.m_Pos.m_Joint[1] = StepPulseToJoint(pulse.nLPulse, axisUnit.dLPulseUnit);
+		pos.m_Pos.m_Joint[2] = StepPulseToJoint(pulse.nUPulse, axisUnit.dUPulseUnit);
+		pos.m_Pos.m_Joint[3] = StepPulseToJoint(pulse.nRPulse, axisUnit.dRPulseUnit);
+		pos.m_Pos.m_Joint[4] = StepPulseToJoint(pulse.nBPulse, axisUnit.dBPulseUnit);
+		pos.m_Pos.m_Joint[5] = StepPulseToJoint(pulse.nTPulse, axisUnit.dTPulseUnit);
+		pos.m_Pos.m_AuxPos[0] = StepPulseToJoint(pulse.lBXPulse, axisUnit.dBXPulseUnit);
+		pos.m_Pos.m_AuxPos[1] = StepPulseToJoint(pulse.lBYPulse, axisUnit.dBYPulseUnit);
+		pos.m_Pos.m_AuxPos[2] = StepPulseToJoint(pulse.lBZPulse, axisUnit.dBZPulseUnit);
+		return pos;
+	}
+
+	HMIPos StepMakeCartHmiPos(const T_ROBOT_COORS& coors, bool hasExternalAxis)
+	{
+		HMIPos pos = {};
+		pos.m_PosType = hasExternalAxis ? eCartPos : eRobotCartPos;
+		pos.m_Pos.m_CartPos.m_X = coors.dX;
+		pos.m_Pos.m_CartPos.m_Y = coors.dY;
+		pos.m_Pos.m_CartPos.m_Z = coors.dZ;
+		pos.m_Pos.m_CartPos.m_A = coors.dRX;
+		pos.m_Pos.m_CartPos.m_B = coors.dRY;
+		pos.m_Pos.m_CartPos.m_C = coors.dRZ;
+		pos.m_Pos.m_CartPos.m_Mode = 0;
+		pos.m_Pos.m_AuxPos[0] = coors.dBX;
+		pos.m_Pos.m_AuxPos[1] = coors.dBY;
+		pos.m_Pos.m_AuxPos[2] = coors.dBZ;
+		return pos;
+	}
+
+	SDKOverlap StepNoOverlap()
+	{
+		SDKOverlap ovl = {};
+		ovl.m_tcp_distance = -1.0;
+		ovl.m_Percent = -1.0;
+		ovl.m_OveTyp = static_cast<OVERLAPTYPE>(0);
+		return ovl;
+	}
+
+	bool StepWaitProgramName(STEPRobotCtrl* ctrl, const std::string& expected, int timeoutMs)
+	{
+		if (ctrl == nullptr || ctrl->m_pSTEPRobotClient == nullptr)
+		{
+			return false;
+		}
+		for (int elapsed = 0; elapsed <= timeoutMs; elapsed += 50)
+		{
+			if (ctrl->m_pSTEPRobotClient->getProgramName() == expected)
+			{
+				return true;
+			}
+			Sleep(50);
+		}
+		return false;
+	}
+
+	bool StepWaitProgramState(STEPRobotCtrl* ctrl, PROGRAMSTATE expected, int timeoutMs)
+	{
+		if (ctrl == nullptr || ctrl->m_pSTEPRobotClient == nullptr)
+		{
+			return false;
+		}
+		for (int elapsed = 0; elapsed <= timeoutMs; elapsed += 50)
+		{
+			if (ctrl->m_pSTEPRobotClient->getProgramState() == expected)
+			{
+				return true;
+			}
+			Sleep(50);
+		}
+		return false;
+	}
+
+	bool StepUnloadProgram(STEPRobotCtrl* ctrl)
+	{
+		if (ctrl == nullptr || ctrl->m_pSTEPRobotClient == nullptr)
+		{
+			return false;
+		}
+
+		const std::string program = ctrl->GetUserProgram();
+		if (program.empty())
+		{
+			return true;
+		}
+
+		int ret = 0;
+		if (program == "SDK")
+		{
+			ret = ctrl->m_pSTEPRobotClient->SDKSimulateProgramKill(true);
+		}
+		else
+		{
+			ret = ctrl->m_pSTEPRobotClient->ProgramKillCmd(ctrl->GetUserProject(), program, true);
+		}
+
+		if (ret != 0)
+		{
+			if (ctrl->m_pRobotLog != nullptr)
+			{
+				ctrl->m_pRobotLog->write(LogColor::ERR, "STEP 卸载当前程序失败：%s,原因:%s", program.c_str(), GetErrorText(ret));
+			}
+			return false;
+		}
+		return StepWaitProgramName(ctrl, std::string(), 3000);
+	}
+
+	bool StepPrepareSdkProgram(STEPRobotCtrl* ctrl)
+	{
+		if (ctrl == nullptr || ctrl->m_pSTEPRobotClient == nullptr)
+		{
+			return false;
+		}
+		if (ctrl->m_pSTEPRobotClient->getProgramState() == eRun)
+		{
+			if (ctrl->m_pRobotLog != nullptr)
+			{
+				ctrl->m_pRobotLog->write(LogColor::ERR, "STEP 运动下发失败：机器人程序仍在运行");
+			}
+			return false;
+		}
+
+		if (!StepUnloadProgram(ctrl))
+		{
+			return false;
+		}
+
+		int ret = ctrl->m_pSTEPRobotClient->SDKSimulateProgramLoad(true);
+		if (ret != 0)
+		{
+			if (ctrl->m_pRobotLog != nullptr)
+			{
+				ctrl->m_pRobotLog->write(LogColor::ERR, "STEP 加载SDK模拟程序失败,原因:%s", GetErrorText(ret));
+			}
+			return false;
+		}
+		if (!StepWaitProgramName(ctrl, "SDK", 3000))
+		{
+			if (ctrl->m_pRobotLog != nullptr)
+			{
+				ctrl->m_pRobotLog->write(LogColor::ERR, "STEP 等待SDK模拟程序加载超时");
+			}
+			return false;
+		}
+
+		if (!ctrl->Prog_startRun_Py())
+		{
+			return false;
+		}
+		return StepWaitProgramState(ctrl, eRun, 3000);
+	}
+
+	bool StepRunSimulateMove(STEPRobotCtrl* ctrl, const T_ROBOT_MOVE_INFO& moveInfo)
+	{
+		if (ctrl == nullptr || ctrl->m_pSTEPRobotClient == nullptr)
+		{
+			return false;
+		}
+		if (!StepPrepareSdkProgram(ctrl))
+		{
+			return false;
+		}
+
+		const bool hasExternalAxis = ctrl->m_nExternalAxleType != 0;
+		const int dyn = StepSpeedToPercent(moveInfo.tSpeed.dSpeed);
+		const SDKOverlap ovl = StepNoOverlap();
+		const std::string tool = StepCurrentToolName(ctrl);
+		const std::string ref = StepCurrentRefName(ctrl);
+		const int moveType = moveInfo.nMoveType == MOVL ? MOVL : MOVJ;
+
+		int ret = 0;
+		if (moveType == MOVL)
+		{
+			HMIPos endPos = StepMakeCartHmiPos(moveInfo.tCoord, hasExternalAxis);
+			ret = ctrl->m_pSTEPRobotClient->SDKSimulateLinProCmd(endPos, dyn, ovl, eOriNULL, tool, ref, 1);
+		}
+		else
+		{
+			HMIPos endPos = StepMakeAxisHmiPos(moveInfo.tPulse, ctrl->m_tAxisUnit, hasExternalAxis);
+			ret = ctrl->m_pSTEPRobotClient->SDKSimulatePTPProCmd(endPos, dyn, ovl, tool, ref, 1);
+		}
+
+		if (ret != 0)
+		{
+			if (ctrl->m_pRobotLog != nullptr)
+			{
+				ctrl->m_pRobotLog->write(LogColor::ERR, "STEP 写入%s语句失败,原因:%s", moveType == MOVL ? "Lin" : "PTP", GetErrorText(ret));
+			}
+			return false;
+		}
+
+		ret = ctrl->m_pSTEPRobotClient->SDKSimulateEOFCmd(2);
+		if (ret != 0)
+		{
+			if (ctrl->m_pRobotLog != nullptr)
+			{
+				ctrl->m_pRobotLog->write(LogColor::ERR, "STEP 写入EOF语句失败,原因:%s", GetErrorText(ret));
+			}
+			return false;
+		}
+
+		int errorLine = 0;
+		ret = ctrl->m_pSTEPRobotClient->SDKSimulateProgramSend(errorLine);
+		if (ret != 0)
+		{
+			if (ctrl->m_pRobotLog != nullptr)
+			{
+				ctrl->m_pRobotLog->write(LogColor::ERR, "STEP 发送运动语句失败,原因:%s,错误行:%d", GetErrorText(ret), errorLine);
+			}
+			return false;
+		}
+
+		if (ctrl->m_pRobotLog != nullptr)
+		{
+			ctrl->m_pRobotLog->write(LogColor::SUCCESS, "STEP %s运动已下发 | Speed=%d | Tool=%s | Ref=%s",
+				moveType == MOVL ? "Lin" : "PTP", dyn, tool.c_str(), ref.c_str());
+		}
+		return true;
+	}
+
+	int StepNormalizeAxisIndex(int axisNo)
+	{
+		return axisNo >= 1 && axisNo <= 9 ? axisNo - 1 : axisNo;
+	}
+
+	void StepSetPulseByIndex(T_ANGLE_PULSE& pulse, int axisIndex, long value)
+	{
+		switch (axisIndex)
+		{
+		case 0: pulse.nSPulse = value; break;
+		case 1: pulse.nLPulse = value; break;
+		case 2: pulse.nUPulse = value; break;
+		case 3: pulse.nRPulse = value; break;
+		case 4: pulse.nBPulse = value; break;
+		case 5: pulse.nTPulse = value; break;
+		case 6: pulse.lBXPulse = value; break;
+		case 7: pulse.lBYPulse = value; break;
+		case 8: pulse.lBZPulse = value; break;
+		default: break;
+		}
+	}
+
+	long StepGetPulseByIndex(const T_ANGLE_PULSE& pulse, int axisIndex)
+	{
+		switch (axisIndex)
+		{
+		case 0: return pulse.nSPulse;
+		case 1: return pulse.nLPulse;
+		case 2: return pulse.nUPulse;
+		case 3: return pulse.nRPulse;
+		case 4: return pulse.nBPulse;
+		case 5: return pulse.nTPulse;
+		case 6: return pulse.lBXPulse;
+		case 7: return pulse.lBYPulse;
+		case 8: return pulse.lBZPulse;
+		default: return 0;
+		}
+	}
+
+	void StepSetCoorsByIndex(T_ROBOT_COORS& coors, int axisIndex, double value)
+	{
+		switch (axisIndex)
+		{
+		case 0: coors.dX = value; break;
+		case 1: coors.dY = value; break;
+		case 2: coors.dZ = value; break;
+		case 3: coors.dRX = value; break;
+		case 4: coors.dRY = value; break;
+		case 5: coors.dRZ = value; break;
+		case 6: coors.dBX = value; break;
+		case 7: coors.dBY = value; break;
+		case 8: coors.dBZ = value; break;
+		default: break;
+		}
+	}
+
+	double StepGetCoorsByIndex(const T_ROBOT_COORS& coors, int axisIndex)
+	{
+		switch (axisIndex)
+		{
+		case 0: return coors.dX;
+		case 1: return coors.dY;
+		case 2: return coors.dZ;
+		case 3: return coors.dRX;
+		case 4: return coors.dRY;
+		case 5: return coors.dRZ;
+		case 6: return coors.dBX;
+		case 7: return coors.dBY;
+		case 8: return coors.dBZ;
+		default: return 0.0;
+		}
+	}
 }
 
 
@@ -173,6 +526,7 @@ STEPRobotCtrl::STEPRobotCtrl(std::string strUnitName, RobotLog* pLog)
 
 {
 	m_pSTEPRobotClient = new RobotComClient();
+	m_bLocalDebugMark = false;
 	InitRobotDriver(strUnitName);
 	m_hMutex = CreateMutexA(NULL, FALSE, "Mutex");
 	//InitSocket(m_sSocketIP.c_str(), m_nSocketPort);
@@ -277,8 +631,7 @@ double STEPRobotCtrl::GetCurrentPulse(int nAxisNo)
 	{
 		return 0;
 	}
-	dPulse = dPulse / m_tAxisUnit.GetValueByIndex(nAxisNo);
-	return dPulse;
+	return static_cast<double>(StepJointToPulse(dPulse, m_tAxisUnit.GetValueByIndex(nAxisNo)));
 }
 
 T_ANGLE_PULSE STEPRobotCtrl::GetCurrentPulse()
@@ -381,7 +734,7 @@ bool STEPRobotCtrl::UnLoadUserProgramer()
 	sNowProgram = GetUserProgram();
 	sNowProject = GetUserProject();
 	int nRet = 0;
-	nRet = m_pSTEPRobotClient->ProgramKillCmd(sNowProgram, sNowProject, true);
+	nRet = m_pSTEPRobotClient->ProgramKillCmd(sNowProject, sNowProgram, true);
 	if (nRet != 0)
 	{
 		showErrorMessage(
@@ -394,10 +747,27 @@ bool STEPRobotCtrl::UnLoadUserProgramer()
 	return true;
 }
 
-//设置当前模式 0-手动模式，1-自动模式，3-外部自动
+//设置当前模式：兼容旧调用的 0/1/2，也支持直接传 SDK 的 MODEKEY 值。
 bool STEPRobotCtrl::SetSysMode(int nMode)
 {
-	if (nMode < 0 || nMode>3)
+	MODEKEY eMode = MANUAL;
+	if (nMode == 0)
+	{
+		eMode = MANUAL;
+	}
+	else if (nMode == 1)
+	{
+		eMode = AUTO;
+	}
+	else if (nMode == 2)
+	{
+		eMode = AUTO_EXT;
+	}
+	else if (nMode == MANUAL || nMode == AUTO || nMode == AUTO_EXT || nMode == START || nMode == STOP || nMode == MSTOP)
+	{
+		eMode = static_cast<MODEKEY>(nMode);
+	}
+	else
 	{
 		showErrorMessage(
 			nullptr,
@@ -405,7 +775,6 @@ bool STEPRobotCtrl::SetSysMode(int nMode)
 		);
 		return false;
 	}
-	MODEKEY eMode = MODEKEY(nMode);
 	int nRet = m_pSTEPRobotClient->SetModeCmd(eMode,true);
 	if (nRet != 0)
 	{
@@ -499,7 +868,7 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 	}
 
 	const std::string sSrpContent = StepBuildSrpContent(vtRobotMoveInfo);
-	const std::string sSrdContent = StepBuildSrdContent(vtRobotMoveInfo);
+	const std::string sSrdContent = StepBuildSrdContent(vtRobotMoveInfo, m_tAxisUnit);
 
 	if (!StepWriteTextFile(sLocalProgramFile, sSrpContent))
 	{
@@ -775,7 +1144,7 @@ bool STEPRobotCtrl::SetPosVar(int nIndex, T_ANGLE_PULSE tRobotPulse, int scoper)
 	const std::string sProjectName = GetUserProject();
 	const std::string sProgramName = StepGetProgramScopeName(this, scoper);
 	const std::string sVarName = StepBuildPosVarName(nIndex, PULSEVAR);
-	const AXISPOS value = StepToAxisPos(tRobotPulse);
+	const AXISPOS value = StepToAxisPos(tRobotPulse, m_tAxisUnit);
 
 	const int nRet = m_pSTEPRobotClient->VariableAxisposModifyCmd(sProjectName, sProgramName, sVarName, value);
 	if (nRet != 0)
@@ -933,4 +1302,283 @@ bool STEPRobotCtrl::SetRealVar(int nIndex, double value, const char* cStrPreFix,
 		return false;
 	}
 	return true;
+}
+
+bool STEPRobotCtrl::WaitStateDone(
+	int nStateReg,
+	int nDoneState,
+	int nStartStateA,
+	int nStartStateB,
+	int nStartTimeoutMs,
+	int nFinishTimeoutMs,
+	int nDelayTime,
+	int* pLastState)
+{
+	(void)nStateReg;
+	const int delay = std::max(1, nDelayTime);
+	int state = CheckDone();
+	if (pLastState != nullptr)
+	{
+		*pLastState = state;
+	}
+
+	bool observedStart = state == nStartStateA || state == nStartStateB;
+	for (int elapsed = 0; !observedStart && elapsed < nStartTimeoutMs; elapsed += delay)
+	{
+		Sleep(delay);
+		state = CheckDone();
+		if (pLastState != nullptr)
+		{
+			*pLastState = state;
+		}
+		observedStart = state == nStartStateA || state == nStartStateB;
+	}
+
+	if (!observedStart && nStartTimeoutMs > 0)
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::WARNING,
+				"STEP WaitStateDone 未观察到启动状态，继续等待完成 | LastState=%d",
+				state);
+		}
+	}
+
+	for (int elapsed = 0; elapsed < nFinishTimeoutMs; elapsed += delay)
+	{
+		state = CheckDone();
+		if (pLastState != nullptr)
+		{
+			*pLastState = state;
+		}
+		if (state == nDoneState)
+		{
+			return true;
+		}
+		Sleep(delay);
+	}
+
+	if (m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::ERR,
+			"STEP WaitStateDone 等待完成超时 | DoneState=%d | LastState=%d",
+			nDoneState, state);
+	}
+	return false;
+}
+
+bool STEPRobotCtrl::CallJobAndWaitStateDone(
+	std::string sJobName,
+	int nStateReg,
+	int nDoneState,
+	int nStartStateA,
+	int nStartStateB,
+	int nStartTimeoutMs,
+	int nFinishTimeoutMs,
+	int nDelayTime,
+	int* pLastState,
+	bool bResetStateBeforeCall)
+{
+	(void)bResetStateBeforeCall;
+	if (!CallJob(sJobName))
+	{
+		return false;
+	}
+	return WaitStateDone(
+		nStateReg,
+		nDoneState,
+		nStartStateA,
+		nStartStateB,
+		nStartTimeoutMs,
+		nFinishTimeoutMs,
+		nDelayTime,
+		pLastState);
+}
+
+bool STEPRobotCtrl::AxisPulseMove(int nAxisNo, long lDist, long lRobotSpd, int nCoorType, int nMovtype, int nToolNo, long lCoordFrm)
+{
+	(void)nCoorType;
+	(void)nToolNo;
+	(void)lCoordFrm;
+
+	const int axisIndex = StepNormalizeAxisIndex(nAxisNo);
+	if (axisIndex < 0 || axisIndex > 8)
+	{
+		showErrorMessage(nullptr, "STEP 关节单轴运动失败,轴号越界:%d", nAxisNo);
+		return false;
+	}
+
+	T_ANGLE_PULSE target = GetCurrentPulse();
+	const long current = StepGetPulseByIndex(target, axisIndex);
+	StepSetPulseByIndex(target, axisIndex, nMovtype == ABSVAR ? lDist : current + lDist);
+
+	return MoveByJob(target, T_ROBOT_MOVE_SPEED(static_cast<double>(lRobotSpd), 0.0, 0.0), m_nExternalAxleType, "MOVJ");
+}
+
+bool STEPRobotCtrl::PosMove(int nAxisNo, double dDist, long lRobotSpd, int nCoorType, int nMovtype, int config[7], int nToolNo, long lCoordFrm)
+{
+	(void)config;
+	(void)nToolNo;
+	(void)lCoordFrm;
+
+	if (nCoorType == PULSEVAR)
+	{
+		return AxisPulseMove(nAxisNo, static_cast<long>(std::lround(dDist)), lRobotSpd, nCoorType, nMovtype, nToolNo, lCoordFrm);
+	}
+
+	const int axisIndex = StepNormalizeAxisIndex(nAxisNo);
+	if (axisIndex < 0 || axisIndex > 8)
+	{
+		showErrorMessage(nullptr, "STEP 直角单轴运动失败,轴号越界:%d", nAxisNo);
+		return false;
+	}
+
+	T_ROBOT_COORS target = GetCurrentPos();
+	const double current = StepGetCoorsByIndex(target, axisIndex);
+	StepSetCoorsByIndex(target, axisIndex, nMovtype == ABSVAR ? dDist : current + dDist);
+
+	return MoveByJob(target, T_ROBOT_MOVE_SPEED(static_cast<double>(lRobotSpd), 0.0, 0.0), m_nExternalAxleType, "MOVL");
+}
+
+bool STEPRobotCtrl::PosMove(int nAxisNo, double dDist, long lRobotSpd, int nCoorType, int nMovtype, int nToolNo, long lCoordFrm)
+{
+	int config[7] = { 0 };
+	return PosMove(nAxisNo, dDist, lRobotSpd, nCoorType, nMovtype, config, nToolNo, lCoordFrm);
+}
+
+bool STEPRobotCtrl::MoveByJob(int Axis, double Distence, int config[7], double speed, int ifAbsoluteM, int ifJoint)
+{
+	const int moveType = ifAbsoluteM ? ABSVAR : RELVAR;
+	if (ifJoint)
+	{
+		return AxisPulseMove(Axis, static_cast<long>(std::lround(Distence)), static_cast<long>(std::lround(speed)), PULSEVAR, moveType);
+	}
+	return PosMove(Axis, Distence, static_cast<long>(std::lround(speed)), POSVAR, moveType, config);
+}
+
+bool STEPRobotCtrl::MoveByJob(double Distence[8], int config[7], double speed, int ifAbsolutM, int ifJoint)
+{
+	(void)config;
+	if (Distence == nullptr)
+	{
+		return false;
+	}
+
+	if (ifJoint)
+	{
+		T_ANGLE_PULSE target = ifAbsolutM ? T_ANGLE_PULSE() : GetCurrentPulse();
+		const long values[8] =
+		{
+			static_cast<long>(std::lround(Distence[0])),
+			static_cast<long>(std::lround(Distence[1])),
+			static_cast<long>(std::lround(Distence[2])),
+			static_cast<long>(std::lround(Distence[3])),
+			static_cast<long>(std::lround(Distence[4])),
+			static_cast<long>(std::lround(Distence[5])),
+			static_cast<long>(std::lround(Distence[6])),
+			static_cast<long>(std::lround(Distence[7]))
+		};
+		for (int i = 0; i < 8; ++i)
+		{
+			const long current = ifAbsolutM ? 0 : StepGetPulseByIndex(target, i);
+			StepSetPulseByIndex(target, i, current + values[i]);
+		}
+		return MoveByJob(target, T_ROBOT_MOVE_SPEED(speed, 0.0, 0.0), m_nExternalAxleType, "MOVJ");
+	}
+
+	T_ROBOT_COORS target = ifAbsolutM ? T_ROBOT_COORS() : GetCurrentPos();
+	for (int i = 0; i < 8; ++i)
+	{
+		const double current = ifAbsolutM ? 0.0 : StepGetCoorsByIndex(target, i);
+		StepSetCoorsByIndex(target, i, current + Distence[i]);
+	}
+	return MoveByJob(target, T_ROBOT_MOVE_SPEED(speed, 0.0, 0.0), m_nExternalAxleType, "MOVL");
+}
+
+bool STEPRobotCtrl::MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType, std::string JobName, int config[7])
+{
+	(void)nExternalAxleType;
+	(void)config;
+	if (dRobotJointCoord == nullptr)
+	{
+		return false;
+	}
+
+	const int moveType = StepMoveTypeFromJobName(JobName);
+	if (nPVarType == POSVAR || moveType == MOVL)
+	{
+		T_ROBOT_COORS target(
+			dRobotJointCoord[0], dRobotJointCoord[1], dRobotJointCoord[2],
+			dRobotJointCoord[3], dRobotJointCoord[4], dRobotJointCoord[5],
+			dRobotJointCoord[6], dRobotJointCoord[7], 0.0);
+		return MoveByJob(target, tPulseMove, nExternalAxleType, "MOVL");
+	}
+
+	T_ANGLE_PULSE target(
+		static_cast<long>(std::lround(dRobotJointCoord[0])),
+		static_cast<long>(std::lround(dRobotJointCoord[1])),
+		static_cast<long>(std::lround(dRobotJointCoord[2])),
+		static_cast<long>(std::lround(dRobotJointCoord[3])),
+		static_cast<long>(std::lround(dRobotJointCoord[4])),
+		static_cast<long>(std::lround(dRobotJointCoord[5])),
+		static_cast<long>(std::lround(dRobotJointCoord[6])),
+		static_cast<long>(std::lround(dRobotJointCoord[7])),
+		0);
+	return MoveByJob(target, tPulseMove, nExternalAxleType, "MOVJ");
+}
+
+bool STEPRobotCtrl::MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName, int isconfig, int config[7])
+{
+	(void)nExternalAxleType;
+	(void)JobName;
+	(void)isconfig;
+	(void)config;
+
+	T_ROBOT_MOVE_INFO moveInfo;
+	moveInfo.nMoveType = MOVL;
+	moveInfo.tCoord = tRobotJointCoord;
+	moveInfo.tSpeed = tPulseMove;
+	return StepRunSimulateMove(this, moveInfo);
+}
+
+bool STEPRobotCtrl::MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName)
+{
+	(void)nExternalAxleType;
+	(void)JobName;
+
+	T_ROBOT_MOVE_INFO moveInfo;
+	moveInfo.nMoveType = MOVJ;
+	moveInfo.tPulse = tRobotJointCoord;
+	moveInfo.tSpeed = tPulseMove;
+	return StepRunSimulateMove(this, moveInfo);
+}
+
+bool STEPRobotCtrl::SendWeldTriangleWeaveProgram(int nWeldTrackNum)
+{
+	(void)nWeldTrackNum;
+	if (m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::WARNING, "STEP 三角摆焊程序下发暂未绑定具体工艺参数，已拒绝执行");
+	}
+	return false;
+}
+
+bool STEPRobotCtrl::SendWeldLWeaveProgram(int nWeldTrackNum)
+{
+	(void)nWeldTrackNum;
+	if (m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::WARNING, "STEP L型摆焊程序下发暂未绑定具体工艺参数，已拒绝执行");
+	}
+	return false;
+}
+
+bool STEPRobotCtrl::SendWeldProgram(int nWeldTrackNum)
+{
+	(void)nWeldTrackNum;
+	if (m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::WARNING, "STEP 普通焊接程序下发暂未绑定具体工艺参数，已拒绝执行");
+	}
+	return false;
 }
