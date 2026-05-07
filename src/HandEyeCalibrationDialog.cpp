@@ -14,6 +14,7 @@
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -30,6 +31,7 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -49,6 +51,7 @@ constexpr int kHandEyeRobotCheckStartPrIndex = 79;
 constexpr int kHandEyeRobotCheckPrIndex = 80;
 constexpr int kHandEyeRobotCheckStateReg = 92;
 constexpr const char* kHandEyeRobotCheckProgramName = "FANUC_HECHECK";
+constexpr int kCameraTimestampCheckDurationMs = 5000;
 
 QString FormatDouble(double value, int precision = 6)
 {
@@ -69,6 +72,14 @@ QString BuildHandEyeCalibrationReportPath(const QString& robotName, const QStrin
 {
     const QFileInfo calibrationInfo(GetHandEyeCalibrationIniPath(robotName, cameraSection));
     return QDir::toNativeSeparators(calibrationInfo.dir().filePath(QString("HandEyeCalibrationReport_%1.txt").arg(cameraSection)));
+}
+
+QString BuildCameraTimestampCheckPath(const QString& robotName, const QString& cameraSection)
+{
+    const QFileInfo calibrationInfo(GetHandEyeCalibrationIniPath(robotName, cameraSection));
+    const QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    return QDir::toNativeSeparators(calibrationInfo.dir().filePath(
+        QString("CameraTimestampCheck_%1_%2.csv").arg(cameraSection, stamp)));
 }
 
 QString FormatPoseSummary(const T_ROBOT_COORS& pose)
@@ -140,6 +151,82 @@ QString SampleStateText(const HandEyeCalibrationSample& sample)
         .arg(sample.cameraPoint.x(), 0, 'f', 3)
         .arg(sample.cameraPoint.y(), 0, 'f', 3)
         .arg(sample.cameraPoint.z(), 0, 'f', 3);
+}
+
+struct IntervalStats
+{
+    int count = 0;
+    double min = 0.0;
+    double max = 0.0;
+    double mean = 0.0;
+    double median = 0.0;
+    double stddev = 0.0;
+};
+
+IntervalStats CalcIntervalStats(QVector<double> values)
+{
+    IntervalStats stats;
+    stats.count = values.size();
+    if (values.isEmpty())
+    {
+        return stats;
+    }
+
+    std::sort(values.begin(), values.end());
+    stats.min = values.front();
+    stats.max = values.back();
+    if ((values.size() % 2) == 0)
+    {
+        stats.median = (values[values.size() / 2 - 1] + values[values.size() / 2]) * 0.5;
+    }
+    else
+    {
+        stats.median = values[values.size() / 2];
+    }
+
+    double sum = 0.0;
+    for (double value : values)
+    {
+        sum += value;
+    }
+    stats.mean = sum / static_cast<double>(values.size());
+
+    double variance = 0.0;
+    for (double value : values)
+    {
+        const double diff = value - stats.mean;
+        variance += diff * diff;
+    }
+    stats.stddev = std::sqrt(variance / static_cast<double>(values.size()));
+    return stats;
+}
+
+QString FormatStatsLine(const QString& name, const IntervalStats& stats, const QString& unit, int precision = 3)
+{
+    if (stats.count <= 0)
+    {
+        return QString("%1：无有效数据").arg(name);
+    }
+    return QString("%1：N=%2  平均=%3%4  中位=%5%4  最小=%6%4  最大=%7%4  标准差=%8%4")
+        .arg(name)
+        .arg(stats.count)
+        .arg(stats.mean, 0, 'f', precision)
+        .arg(unit)
+        .arg(stats.median, 0, 'f', precision)
+        .arg(stats.min, 0, 'f', precision)
+        .arg(stats.max, 0, 'f', precision)
+        .arg(stats.stddev, 0, 'f', precision);
+}
+
+QString CsvEscape(const QString& value)
+{
+    QString escaped = value;
+    escaped.replace("\"", "\"\"");
+    if (escaped.contains(',') || escaped.contains('"') || escaped.contains('\n') || escaped.contains('\r'))
+    {
+        escaped = "\"" + escaped + "\"";
+    }
+    return escaped;
 }
 }
 
@@ -379,6 +466,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     QPushButton* saveBtn = new QPushButton("保存采样数据");
     QPushButton* computeBtn = new QPushButton("计算矩阵并写入");
     QPushButton* testBtn = new QPushButton("手眼参数检测");
+    QPushButton* timestampCheckBtn = new QPushButton("相机时间戳检测");
     QPushButton* matrixBtn = new QPushButton("打开矩阵参数");
     QPushButton* closeBtn = new QPushButton("关闭");
     buttonLayout->addWidget(m_pUploadAutoProgramBtn);
@@ -388,6 +476,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     buttonLayout->addWidget(saveBtn);
     buttonLayout->addWidget(computeBtn);
     buttonLayout->addWidget(testBtn);
+    buttonLayout->addWidget(timestampCheckBtn);
     buttonLayout->addWidget(matrixBtn);
     buttonLayout->addWidget(closeBtn);
     rootLayout->addLayout(buttonLayout);
@@ -399,6 +488,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     connect(saveBtn, &QPushButton::clicked, this, [this]() { SaveConfig(); });
     connect(computeBtn, &QPushButton::clicked, this, [this]() { ComputeAndSaveMatrix(); });
     connect(testBtn, &QPushButton::clicked, this, [this]() { TestHandEyeMatrix(); });
+    connect(timestampCheckBtn, &QPushButton::clicked, this, [this]() { CheckCameraTimestampIntervals(); });
     connect(matrixBtn, &QPushButton::clicked, this, [this]() { OpenMatrixDialog(); });
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::close);
 
@@ -1036,6 +1126,208 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
         }
     }
     return true;
+}
+
+bool HandEyeCalibrationDialog::CheckCameraTimestampIntervals()
+{
+    if (CameraFrameAccess::IsMeasureThenWeldExclusive())
+    {
+        const QString error = "先测后焊正在独占相机帧，当前不允许检测相机时间戳。";
+        QMessageBox::warning(this, "相机时间戳检测", error);
+        AppendLog("相机时间戳检测失败：" + error);
+        return false;
+    }
+
+    QString error;
+    Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
+    if (!EnsureCameraReady("相机时间戳检测前检查", &cameraPoint, &error))
+    {
+        QMessageBox::warning(this, "相机时间戳检测", error);
+        AppendLog("相机时间戳检测失败：" + error);
+        return false;
+    }
+
+    CameraFrameCache::Instance().Start();
+    const std::uint64_t beginSequence = CameraFrameCache::Instance().Mark();
+    AppendLog(QString("相机时间戳检测开始：采集 %1 ms，比较相机timestamp间隔和本机接收间隔。")
+        .arg(kCameraTimestampCheckDurationMs));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kCameraTimestampCheckDurationMs);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        QApplication::processEvents(QEventLoop::AllEvents, 20);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    const std::uint64_t endSequence = CameraFrameCache::Instance().Mark();
+    const std::vector<CameraFrameCache::TimedFrame> frames =
+        CameraFrameCache::Instance().TimedFramesBetween(beginSequence, endSequence);
+
+    if (frames.size() < 3)
+    {
+        const QString message = QString("采集到的相机帧不足：%1 帧，请确认相机数据在刷新。").arg(frames.size());
+        QMessageBox::warning(this, "相机时间戳检测", message);
+        AppendLog("相机时间戳检测失败：" + message);
+        return false;
+    }
+
+    QVector<double> cameraDeltaMs;
+    QVector<double> systemDeltaMs;
+    QVector<double> ratioValues;
+    int invalidCameraTimestampCount = 0;
+    int invalidSystemTimestampCount = 0;
+    int cameraBackwardsCount = 0;
+    int cameraDuplicateCount = 0;
+    int systemNonIncreasingCount = 0;
+
+    QStringList csvLines;
+    csvLines.push_back("index,sequence,camera_timestamp_us,system_recv_timestamp_us,camera_delta_us,system_delta_us,camera_to_system_ratio,target_x,target_y,target_z,error");
+
+    for (int index = 0; index < static_cast<int>(frames.size()); ++index)
+    {
+        const CameraFrameCache::TimedFrame& frame = frames[static_cast<std::size_t>(index)];
+        QString cameraDeltaText;
+        QString systemDeltaText;
+        QString ratioText;
+
+        if (frame.cameraTimestampUs <= 0)
+        {
+            ++invalidCameraTimestampCount;
+        }
+        if (frame.receiveTimestampUs <= 0)
+        {
+            ++invalidSystemTimestampCount;
+        }
+
+        if (index > 0)
+        {
+            const CameraFrameCache::TimedFrame& prev = frames[static_cast<std::size_t>(index - 1)];
+            const qint64 cameraDeltaUs = frame.cameraTimestampUs - prev.cameraTimestampUs;
+            const qint64 systemDeltaUs = frame.receiveTimestampUs - prev.receiveTimestampUs;
+
+            cameraDeltaText = QString::number(cameraDeltaUs);
+            systemDeltaText = QString::number(systemDeltaUs);
+
+            if (cameraDeltaUs < 0)
+            {
+                ++cameraBackwardsCount;
+            }
+            else if (cameraDeltaUs == 0)
+            {
+                ++cameraDuplicateCount;
+            }
+
+            if (systemDeltaUs <= 0)
+            {
+                ++systemNonIncreasingCount;
+            }
+
+            if (cameraDeltaUs > 0 && systemDeltaUs > 0)
+            {
+                const double ratio = static_cast<double>(cameraDeltaUs) / static_cast<double>(systemDeltaUs);
+                ratioText = QString::number(ratio, 'f', 6);
+                cameraDeltaMs.push_back(static_cast<double>(cameraDeltaUs) / 1000.0);
+                systemDeltaMs.push_back(static_cast<double>(systemDeltaUs) / 1000.0);
+                ratioValues.push_back(ratio);
+            }
+        }
+
+        QStringList fields;
+        fields
+            << QString::number(index + 1)
+            << QString::number(frame.sequence)
+            << QString::number(frame.cameraTimestampUs)
+            << QString::number(frame.receiveTimestampUs)
+            << cameraDeltaText
+            << systemDeltaText
+            << ratioText
+            << QString::number(frame.targetPoint.x, 'f', 6)
+            << QString::number(frame.targetPoint.y, 'f', 6)
+            << QString::number(frame.targetPoint.z, 'f', 6)
+            << CsvEscape(frame.errorMessage);
+        csvLines.push_back(fields.join(','));
+    }
+
+    const IntervalStats cameraStats = CalcIntervalStats(cameraDeltaMs);
+    const IntervalStats systemStats = CalcIntervalStats(systemDeltaMs);
+    const IntervalStats ratioStats = CalcIntervalStats(ratioValues);
+
+    qint64 totalCameraUs = 0;
+    qint64 totalSystemUs = 0;
+    if (!frames.empty())
+    {
+        totalCameraUs = frames.back().cameraTimestampUs - frames.front().cameraTimestampUs;
+        totalSystemUs = frames.back().receiveTimestampUs - frames.front().receiveTimestampUs;
+    }
+    const double totalRatio = totalSystemUs > 0
+        ? static_cast<double>(totalCameraUs) / static_cast<double>(totalSystemUs)
+        : 0.0;
+    const double ratioCvPercent = std::abs(ratioStats.mean) > 1e-12
+        ? ratioStats.stddev / std::abs(ratioStats.mean) * 100.0
+        : 0.0;
+
+    QString conclusion;
+    if (ratioStats.count <= 0)
+    {
+        conclusion = "结论：没有可用的相邻帧间隔，无法判断。";
+    }
+    else if (std::abs(ratioStats.mean - 1.0) <= 0.05 && ratioCvPercent <= 5.0)
+    {
+        conclusion = "结论：相机timestamp增量和本机接收时间增量基本一致，按 us 使用的单位假设暂时成立。";
+    }
+    else if (ratioCvPercent <= 5.0)
+    {
+        conclusion = QString("结论：两组时间间隔比例比较稳定，但比例不是 1。相机timestamp可能有固定单位倍率，平均倍率=%1。")
+            .arg(ratioStats.mean, 0, 'f', 6);
+    }
+    else
+    {
+        conclusion = QString("结论：两组时间间隔比例不稳定，可能存在缓存批量取帧、跳帧、相机timestamp异常或系统接收抖动。比例CV=%1%。")
+            .arg(ratioCvPercent, 0, 'f', 2);
+    }
+
+    const QString csvPath = BuildCameraTimestampCheckPath(m_robotName, m_cameraSection);
+    QString saveError;
+    const bool saveOk = RobotDataHelper::SaveTextFileLines(csvPath, csvLines, &saveError);
+
+    const QString resultText = QString(
+        "采集帧数：%1\n"
+        "序号范围：(%2, %3]\n"
+        "相机总时长：%4 ms\n"
+        "系统总时长：%5 ms\n"
+        "总时长比例 camera/system：%6\n\n"
+        "%7\n"
+        "%8\n"
+        "%9\n"
+        "比例CV：%10%\n\n"
+        "异常统计：camera无效=%11，camera倒退=%12，camera重复=%13，system无效=%14，system非递增=%15\n\n"
+        "%16\n\n"
+        "CSV：%17")
+        .arg(frames.size())
+        .arg(beginSequence)
+        .arg(endSequence)
+        .arg(static_cast<double>(totalCameraUs) / 1000.0, 0, 'f', 3)
+        .arg(static_cast<double>(totalSystemUs) / 1000.0, 0, 'f', 3)
+        .arg(totalRatio, 0, 'f', 6)
+        .arg(FormatStatsLine("相机timestamp间隔", cameraStats, " ms"))
+        .arg(FormatStatsLine("本机接收间隔", systemStats, " ms"))
+        .arg(FormatStatsLine("camera/system间隔比例", ratioStats, "", 6))
+        .arg(ratioCvPercent, 0, 'f', 2)
+        .arg(invalidCameraTimestampCount)
+        .arg(cameraBackwardsCount)
+        .arg(cameraDuplicateCount)
+        .arg(invalidSystemTimestampCount)
+        .arg(systemNonIncreasingCount)
+        .arg(conclusion)
+        .arg(saveOk ? csvPath : QString("保存失败：%1").arg(saveError));
+
+    AppendLog(QString("相机时间戳检测完成：帧数=%1，camera/system平均比例=%2，比例CV=%3%，CSV=%4")
+        .arg(frames.size())
+        .arg(ratioStats.mean, 0, 'f', 6)
+        .arg(ratioCvPercent, 0, 'f', 2)
+        .arg(saveOk ? csvPath : QString("保存失败")));
+    QMessageBox::information(this, "相机时间戳检测", resultText);
+    return saveOk;
 }
 
 bool HandEyeCalibrationDialog::UploadRobotHandEyeCheckProgram(QString* error)

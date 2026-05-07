@@ -8,6 +8,7 @@ PROGRAM FANUC_MONITOR_SERVICE
 %ENVIRONMENT flbt
 %ENVIRONMENT MOTN
 %ENVIRONMENT REGOPE
+%ENVIRONMENT TIM
 
 VAR
   channel    : FILE
@@ -16,6 +17,11 @@ VAR
   session_on : BOOLEAN
   seq        : INTEGER
   robot_ms   : INTEGER
+  frame_ms   : INTEGER
+  last_us    : INTEGER
+  current_us : INTEGER
+  delta_us   : INTEGER
+  remain_us  : INTEGER
   done       : INTEGER
   pos        : XYZWPREXT
   jpos       : JOINTPOS
@@ -60,6 +66,20 @@ BEGIN
   ENDIF
 END CheckStopFlag
 
+ROUTINE UpdateFrameTime
+BEGIN
+  current_us = GET_USEC_TIM
+  delta_us = GET_USEC_SUB(current_us, last_us)
+  IF delta_us < 0 THEN
+    delta_us = 0
+  ENDIF
+  delta_us = delta_us + remain_us
+  robot_ms = robot_ms + (delta_us DIV 1000)
+  remain_us = delta_us MOD 1000
+  last_us = current_us
+  frame_ms = robot_ms
+END UpdateFrameTime
+
 ROUTINE UpdateDoneState
 BEGIN
   done = -1
@@ -90,6 +110,7 @@ BEGIN
   vals[9] = 0.0
 
   UpdateDoneState
+  UpdateFrameTime
   pos_1 = CURPOS(0, 0)
   jpos = CURJPOS(0, 0)
   reg_status = 0
@@ -112,7 +133,7 @@ BEGIN
   
   WRITE ch('MON:',
            seq, ',',
-           robot_ms, ',',
+           frame_ms, ',',
            done, ',',
            pos.x::10::3, ',',
            pos.y::10::3, ',',
@@ -135,6 +156,9 @@ BEGIN
   service_on = TRUE
   seq = 0
   robot_ms = 0
+  frame_ms = 0
+  remain_us = 0
+  last_us = GET_USEC_TIM
   SET_FILE_ATR(channel, ATR_IA)
   InitMonitorPort
   ClearStopFlag
@@ -154,6 +178,8 @@ BEGIN
       status = IO_STATUS(channel)
       IF status = 0 THEN
         WRITE('Monitor client connected', CR)
+        last_us = GET_USEC_TIM
+        remain_us = 0
         session_on = TRUE
         WHILE session_on DO
           WriteMonitorFrame(channel)
@@ -162,7 +188,6 @@ BEGIN
             session_on = FALSE
           ELSE
             seq = seq + 1
-            robot_ms = robot_ms + 50
             CheckStopFlag
             DELAY(50)
           ENDIF
