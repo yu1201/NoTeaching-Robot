@@ -27,6 +27,7 @@
 #include <QPushButton>
 #include <QStringConverter>
 #include <QStringList>
+#include <QTextDocument>
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -813,6 +814,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* paren
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
+    m_pLogText->document()->setMaximumBlockCount(1200);
     m_pLogText->setPlainText("功能测试日志：等待操作...");
     rootLayout->addWidget(m_pLogText, 1);
 

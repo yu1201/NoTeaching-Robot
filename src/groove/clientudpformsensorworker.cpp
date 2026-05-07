@@ -121,6 +121,12 @@ void ClientUDPFormSensorWorker::readPendingDatagrams()
         buf.resize(m_udp->pendingDatagramSize());
         m_udp->readDatagram(buf.data(), buf.size());
         m_receiveBuffer.append(buf);
+        if (m_receiveBuffer.size() > MAX_RECEIVE_BUFFER_SIZE)
+        {
+            qWarning() << "UDP receive buffer overflow, reset:" << m_receiveBuffer.size();
+            resetReceiveState();
+            continue;
+        }
 
         if (m_expectedSize <= 0)
         {
@@ -135,6 +141,12 @@ void ClientUDPFormSensorWorker::readPendingDatagrams()
                 if (magic == PointCloundResultFrame::MAGIC_NUMBER &&
                     hdrSz == PointCloundResultFrame::HEADER_SIZE)
                 {
+                    if (totalSz < PointCloundResultFrame::HEADER_SIZE || totalSz > MAX_FRAME_PACKET_SIZE)
+                    {
+                        qWarning() << "Invalid UDP frame size:" << totalSz;
+                        m_receiveBuffer.remove(0, 1);
+                        continue;
+                    }
                     m_expectedSize = totalSz;
                     break;
                 }
@@ -186,7 +198,6 @@ void ClientUDPFormSensorWorker::readPendingDatagrams()
             udpFrame.timestamp = frame.timestamp;
 
             ThreadSafeBuffer<udpDataShow>::Instance().enqueue(udpFrame);
-            qDebug() << "frame====================" << frame.timestamp << ";" << frame.calcFrameRate;
         }
 
         m_receiveBuffer.clear();
