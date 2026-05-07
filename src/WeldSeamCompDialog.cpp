@@ -21,6 +21,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QStringList>
+#include <QTextDocument>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -233,6 +234,7 @@ void WeldSeamCompDialog::BuildUi()
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
+    m_pLogText->document()->setMaximumBlockCount(1000);
     m_pLogText->setMaximumHeight(110);
     m_pLogText->setPlainText("日志：等待读取补偿参数...");
     rootLayout->addWidget(m_pLogText, 1);

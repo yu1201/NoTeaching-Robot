@@ -13,6 +13,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QStringList>
+#include <QTextDocument>
 #include <QVBoxLayout>
 
 namespace
@@ -98,6 +99,7 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(const QString& robotName, const QString
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
+    m_pLogText->document()->setMaximumBlockCount(800);
     m_pLogText->setMinimumHeight(130);
     rootLayout->addWidget(m_pLogText, 1);
 

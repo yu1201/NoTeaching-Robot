@@ -21,6 +21,7 @@
 #include <QStringList>
 #include <QSplitter>
 #include <QSizePolicy>
+#include <QTextDocument>
 #include <QVBoxLayout>
 
 CameraParamDialog::CameraParamDialog(
@@ -131,6 +132,7 @@ CameraParamDialog::CameraParamDialog(
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
+    m_pLogText->document()->setMaximumBlockCount(800);
     m_pLogText->setMinimumHeight(96);
     m_pLogText->setMaximumHeight(140);
     m_pLogText->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);

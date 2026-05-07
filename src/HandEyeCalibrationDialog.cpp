@@ -29,6 +29,7 @@
 #include <QStringList>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QTextDocument>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -310,6 +311,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
+    m_pLogText->document()->setMaximumBlockCount(1200);
     m_pLogText->setMinimumHeight(64);
     m_pLogText->setMaximumHeight(78);
     logLayout->addWidget(m_pLogText, 1);
