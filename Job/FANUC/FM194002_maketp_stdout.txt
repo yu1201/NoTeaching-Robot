@@ -1,0 +1,2 @@
+MakeTP V9.40-1, Copyright (C) 2004, FANUC Robotics America, Inc.
+A robot has not been defined yet, run Setrobot.

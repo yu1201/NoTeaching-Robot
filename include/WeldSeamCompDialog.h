@@ -74,6 +74,7 @@ private:
     QString BuildSnapshot() const;
     void MarkCleanSnapshot();
     void AppendLog(const QString& text);
+    void RunOfflinePoseAverageUpdate(const QString& inputPath);
     QString CurrentRobotName() const;
     QString CurrentPoseParamPath() const;
     QString CurrentSeamParamPath() const;
@@ -97,6 +98,7 @@ private:
     QPlainTextEdit* m_pLogText = nullptr;
     QPushButton* m_pReloadBtn = nullptr;
     QPushButton* m_pSaveBtn = nullptr;
+    QPushButton* m_pUpdatePoseAverageBtn = nullptr;
     QVector<CompType> m_poseTypes;
     QVector<PoseCompRow> m_poseRows;
     QVector<SeamCompRow> m_seamRows;

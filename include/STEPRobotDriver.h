@@ -58,6 +58,26 @@ public:
 
 	int CheckDone();
 	int CheckRobotDone(int nDelayTime = 200);
+	bool WaitStateDone(
+		int nStateReg = 0,
+		int nDoneState = eStop,
+		int nStartStateA = eRun,
+		int nStartStateB = ePause,
+		int nStartTimeoutMs = 3000,
+		int nFinishTimeoutMs = 120000,
+		int nDelayTime = 100,
+		int* pLastState = nullptr);
+	bool CallJobAndWaitStateDone(
+		std::string sJobName,
+		int nStateReg = 0,
+		int nDoneState = eStop,
+		int nStartStateA = eRun,
+		int nStartStateB = ePause,
+		int nStartTimeoutMs = 5000,
+		int nFinishTimeoutMs = 120000,
+		int nDelayTime = 100,
+		int* pLastState = nullptr,
+		bool bResetStateBeforeCall = true);
 
 	bool CallJob(std::string sJobName);
 

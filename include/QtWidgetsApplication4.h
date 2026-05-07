@@ -12,11 +12,21 @@
 #include <limits>
 
 class ClientUDPFormSensorWorker;
+class CameraParamDialog;
 class FANUCRobotCtrl;
+class FunctionTestDialog;
+class MeasureThenWeldDialog;
+class PreciseMeasureEditDialog;
+class QEvent;
 class QPlainTextEdit;
 class QPushButton;
+class QResizeEvent;
+class QStackedWidget;
 class QThread;
 class QTimer;
+class RobotJogDialog;
+class WeldProcessDialog;
+class WeldSeamCompDialog;
 
 class QtWidgetsApplication4 : public QMainWindow
 {
@@ -26,6 +36,10 @@ public:
     QtWidgetsApplication4(QWidget *parent = nullptr);
     ~QtWidgetsApplication4();
     void ApplyStartupArguments(const QStringList& arguments);
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private slots:
     void RobotRunTest();
@@ -57,6 +71,9 @@ signals:
     void stopAllCommThreads();
 
 private:
+    void ShowDashboardPage();
+    void ShowEmbeddedPage(QWidget* page);
+    void PrepareEmbeddedPage(QWidget* page);
     bool LoadGrooveCameraIP(QString& cameraIP) const;
     void LoadRobotLogFile(const QString& relativePath, bool forceRefresh = false);
     void RunCommandLineActions(const QStringList& arguments);
@@ -68,6 +85,7 @@ private:
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
     void RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
     void RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const;
+    void RunUpdateWeldPoseAverageForCli(const QString& inputPath) const;
     bool RunMeasureThenWeldScanOnlyRepeatForCli(
         FANUCRobotCtrl* pFanucDriver,
         int repeatCount,
@@ -80,9 +98,18 @@ private:
     QThread* m_clientUDPFormSensorThread;
     QTimer* m_grooveCameraDisplayTimer;
     QTimer* m_robotLogDisplayTimer;
+    QStackedWidget* m_pMainStack;
+    QWidget* m_pDashboardPage;
     QPlainTextEdit* m_pRobotLogText;
     QPushButton* m_pCameraParamBtn;
     QPushButton* m_pWeldSeamCompBtn;
+    WeldProcessDialog* m_pWeldProcessPage;
+    FunctionTestDialog* m_pFunctionTestPage;
+    MeasureThenWeldDialog* m_pMeasureThenWeldPage;
+    PreciseMeasureEditDialog* m_pPreciseMeasureEditPage;
+    WeldSeamCompDialog* m_pWeldSeamCompPage;
+    CameraParamDialog* m_pCameraParamPage;
+    RobotJogDialog* m_pRobotJogPage;
     bool m_bFanucMovlForward;
     bool m_bFanucMovlRunning;
     bool m_bFanucMovjRunning;

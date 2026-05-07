@@ -210,11 +210,57 @@ bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& 
             return true;
         }
         else {
-            // 上传失败：日志+错误弹窗
-            std::string errMsg = "文件上传失败 | 本地：" + localFilePath + " | 远程：" + remoteFilePath + " | " + getFtpErrorMsg();
-            m_log->write(LogColor::ERR, errMsg.c_str());
-            m_log->write(LogColor::ERR, "FTP上传失败耗时 | PutFile=%lldms | Total=%lldms | 远程=%s",
+            // 复用的 FTP 会话偶发失效时，先记录首次错误，再断线重连重试一次。
+            const std::string firstError = getFtpErrorMsg();
+            m_log->write(LogColor::ERR, "文件上传首次失败 | 本地：%s | 远程：%s | %s",
+                localFilePath.c_str(), remoteFilePath.c_str(), firstError.c_str());
+            m_log->write(LogColor::ERR, "FTP上传首次失败耗时 | PutFile=%lldms | Total=%lldms | 远程=%s",
                 putMs, ElapsedMs(totalStart), remoteFilePath.c_str());
+            m_log->write(LogColor::WARNING, "FTP上传准备重连后重试：%s", remoteFilePath.c_str());
+
+            closeFtpSession();
+            const auto retryConnectStart = std::chrono::steady_clock::now();
+            if (connectFtpServer()) {
+                m_log->write(LogColor::DEFAULT, "FTP上传重试阶段耗时 | Connect=%lldms | 远程=%s",
+                    ElapsedMs(retryConnectStart), remoteFilePath.c_str());
+                if (!remoteParentDir.empty()) {
+                    createRemoteDirRecursive(remoteParentDir);
+                }
+                FtpDeleteFileA(m_hFtpSession, remoteFilePath.c_str());
+
+                const auto retryPutStart = std::chrono::steady_clock::now();
+                uploadOk = FtpPutFileA(m_hFtpSession,
+                    localFilePath.c_str(),
+                    remoteFilePath.c_str(),
+                    FTP_TRANSFER_TYPE_BINARY,
+                    0);
+                const long long retryPutMs = ElapsedMs(retryPutStart);
+                if (uploadOk) {
+                    std::string successMsg = "文件上传成功 | 本地：" + localFilePath + " | 远程：" + remoteFilePath;
+                    m_log->write(LogColor::SUCCESS, successMsg.c_str());
+                    m_log->write(LogColor::SUCCESS, "FTP上传重试成功 | PutFile=%lldms | Total=%lldms | 远程=%s",
+                        retryPutMs, ElapsedMs(totalStart), remoteFilePath.c_str());
+                    return true;
+                }
+
+                const std::string retryError = getFtpErrorMsg();
+                std::string errMsg = "文件上传失败 | 本地：" + localFilePath
+                    + " | 远程：" + remoteFilePath
+                    + " | 首次错误：" + firstError
+                    + " | 重试错误：" + retryError;
+                m_log->write(LogColor::ERR, errMsg.c_str());
+                m_log->write(LogColor::ERR, "FTP上传重试失败耗时 | PutFile=%lldms | Total=%lldms | 远程=%s",
+                    retryPutMs, ElapsedMs(totalStart), remoteFilePath.c_str());
+                showErrorMessage("FTP错误", "%s", errMsg.c_str());
+                closeFtpSession();
+                return false;
+            }
+
+            std::string errMsg = "文件上传失败 | 本地：" + localFilePath
+                + " | 远程：" + remoteFilePath
+                + " | 首次错误：" + firstError
+                + " | 重连FTP失败";
+            m_log->write(LogColor::ERR, errMsg.c_str());
             showErrorMessage("FTP错误", "%s", errMsg.c_str());
             closeFtpSession();
             return false;

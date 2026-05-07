@@ -6,6 +6,7 @@
 #include "MeasureThenWeldService.h"
 #include "OPini.h"
 #include "RobotDataHelper.h"
+#include "RobotDriverAdaptor.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
 
@@ -60,6 +61,23 @@ QString ResolveLaserPointDirFromSelection(const QString& selectedDir)
     }
 
     return QString();
+}
+
+QString DialogRobotBrandName(const RobotDriverAdaptor* pRobotDriver)
+{
+    if (pRobotDriver == nullptr)
+    {
+        return "UNKNOWN";
+    }
+    if (pRobotDriver->m_nRobotType == ROBOT_TYPE_STEP)
+    {
+        return "STEP";
+    }
+    if (pRobotDriver->m_nRobotType == ROBOT_TYPE_FANUC)
+    {
+        return "FANUC";
+    }
+    return QString("RobotType=%1").arg(pRobotDriver->m_nRobotType);
 }
 }
 
@@ -124,7 +142,7 @@ void MeasureThenWeldDialog::closeEvent(QCloseEvent* event)
     QDialog::closeEvent(event);
 }
 
-FANUCRobotCtrl* MeasureThenWeldDialog::GetFirstFanucDriver()
+RobotDriverAdaptor* MeasureThenWeldDialog::GetFirstSupportedRobotDriver()
 {
     if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
     {
@@ -139,18 +157,26 @@ FANUCRobotCtrl* MeasureThenWeldDialog::GetFirstFanucDriver()
         return nullptr;
     }
 
-    FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
-    if (pFanucDriver == nullptr)
+    if (pRobotDriverAdaptor->m_nRobotType != ROBOT_TYPE_FANUC
+        && pRobotDriverAdaptor->m_nRobotType != ROBOT_TYPE_STEP)
     {
-        QMessageBox::warning(this, "先测后焊", "当前控制单元不是 FANUC 驱动。");
+        QMessageBox::warning(
+            this,
+            "先测后焊",
+            QString("当前控制单元暂不支持先测后焊：%1。当前仅支持 FANUC/STEP。")
+                .arg(DialogRobotBrandName(pRobotDriverAdaptor)));
         return nullptr;
     }
-    return pFanucDriver;
+
+    AppendLog(QString("已识别当前控制单元：%1，机器人=%2")
+        .arg(DialogRobotBrandName(pRobotDriverAdaptor))
+        .arg(QString::fromStdString(pRobotDriverAdaptor->m_sRobotName)));
+    return pRobotDriverAdaptor;
 }
 
-bool MeasureThenWeldDialog::LoadPresetParam(FANUCRobotCtrl* pFanucDriver, T_PRECISE_MEASURE_PARAM& param, QString& error)
+bool MeasureThenWeldDialog::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error)
 {
-    return m_pService != nullptr && m_pService->LoadPresetParam(pFanucDriver, param, error);
+    return m_pService != nullptr && m_pService->LoadPresetParam(pRobotDriver, param, error);
 }
 
 bool MeasureThenWeldDialog::ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const
@@ -168,10 +194,10 @@ bool MeasureThenWeldDialog::ReadPulseList(COPini& ini, const std::string& countK
     return m_pService != nullptr && m_pService->ReadPulseList(ini, countKey, prefix, pulses, error);
 }
 
-bool MeasureThenWeldDialog::MovePulseAndWait(FANUCRobotCtrl* pFanucDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name)
+bool MeasureThenWeldDialog::MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name)
 {
     return m_pService != nullptr && m_pService->MovePulseAndWait(
-        pFanucDriver,
+        pRobotDriver,
         pulse,
         speed,
         name,
@@ -179,10 +205,10 @@ bool MeasureThenWeldDialog::MovePulseAndWait(FANUCRobotCtrl* pFanucDriver, const
         [this](const QString& text) { SetFlowStep(text); });
 }
 
-bool MeasureThenWeldDialog::MovePulseListAndWait(FANUCRobotCtrl* pFanucDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name)
+bool MeasureThenWeldDialog::MovePulseListAndWait(RobotDriverAdaptor* pRobotDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name)
 {
     return m_pService != nullptr && m_pService->MovePulseListAndWait(
-        pFanucDriver,
+        pRobotDriver,
         pulses,
         speed,
         name,
@@ -190,10 +216,10 @@ bool MeasureThenWeldDialog::MovePulseListAndWait(FANUCRobotCtrl* pFanucDriver, c
         [this](const QString& text) { SetFlowStep(text); });
 }
 
-bool MeasureThenWeldDialog::MoveCoorsAndWait(FANUCRobotCtrl* pFanucDriver, const T_ROBOT_COORS& coors, double speed, const QString& name)
+bool MeasureThenWeldDialog::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, const T_ROBOT_COORS& coors, double speed, const QString& name)
 {
     return m_pService != nullptr && m_pService->MoveCoorsAndWait(
-        pFanucDriver,
+        pRobotDriver,
         coors,
         speed,
         name,
@@ -201,10 +227,10 @@ bool MeasureThenWeldDialog::MoveCoorsAndWait(FANUCRobotCtrl* pFanucDriver, const
         [this](const QString& text) { SetFlowStep(text); });
 }
 
-bool MeasureThenWeldDialog::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath)
+bool MeasureThenWeldDialog::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath)
 {
     return m_pService != nullptr && m_pService->ScanMoveAndCollect(
-        pFanucDriver,
+        pRobotDriver,
         param,
         savedPath,
         [this](const QString& text) { AppendLog(text); },
@@ -292,15 +318,15 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
         return;
     }
 
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstSupportedRobotDriver();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
 
     T_PRECISE_MEASURE_PARAM param;
     QString error;
-    if (!LoadPresetParam(pFanucDriver, param, error))
+    if (!LoadPresetParam(pRobotDriver, param, error))
     {
         QMessageBox::warning(this, "预设参数", error);
         return;
@@ -317,7 +343,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
 
     // 机器人运动和扫描采集放到后台线程，避免 UI 被 CheckRobotDone 和文件保存卡住。
     QPointer<MeasureThenWeldDialog> self(this);
-    std::thread([self, pFanucDriver, param]()
+    std::thread([self, pRobotDriver, param]()
         {
             bool ok = true;
             QString message;
@@ -356,7 +382,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 {
                     self->SetFlowStep("准备移动到下枪安全姿态");
                     // 1. 下枪前先到安全姿态，避免直接切入扫描起点。
-                    ok = self != nullptr && self->MovePulseListAndWait(pFanucDriver, param.vtStartSafePulse, SafeSpeed(param.dRunSpeed, 1.0), "下枪安全姿态");
+                    ok = self != nullptr && self->MovePulseListAndWait(pRobotDriver, param.vtStartSafePulse, SafeSpeed(param.dRunSpeed, 1.0), "下枪安全姿态");
                 }
                 if (ok)
                 {
@@ -366,7 +392,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 {
                     self->SetFlowStep("准备移动到扫描起点");
                     // 2. 到扫描起点使用直线运动，保持扫描段的空间姿态连续。
-                    ok = self != nullptr && self->MoveCoorsAndWait(pFanucDriver, param.tStartPos, SafeSpeed(param.dRunSpeed, 1.0), "扫描起点");
+                    ok = self != nullptr && self->MoveCoorsAndWait(pRobotDriver, param.tStartPos, SafeSpeed(param.dRunSpeed, 1.0), "扫描起点");
                 }
                 if (ok)
                 {
@@ -376,7 +402,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 {
                     self->SetFlowStep("准备扫描终点并采集相机点");
                     // 3. 从扫描起点运动到扫描终点，同时按 10ms 周期读取相机点。
-                    ok = self != nullptr && self->ScanMoveAndCollect(pFanucDriver, param, savedPath);
+                    ok = self != nullptr && self->ScanMoveAndCollect(pRobotDriver, param, savedPath);
                 }
                 if (ok)
                 {
@@ -386,7 +412,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 {
                     self->SetFlowStep("准备移动到收枪姿态");
                     // 4. 扫描结束后收枪到安全姿态。
-                    ok = self != nullptr && self->MovePulseListAndWait(pFanucDriver, param.vtEndSafePulse, SafeSpeed(param.dRunSpeed, 1.0), "收枪姿态");
+                    ok = self != nullptr && self->MovePulseListAndWait(pRobotDriver, param.vtEndSafePulse, SafeSpeed(param.dRunSpeed, 1.0), "收枪姿态");
                 }
                 if (ok)
                 {
@@ -425,7 +451,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                     ok = self != nullptr
                         && self->m_pService != nullptr
                         && self->m_pService->ExecuteWeldPoseFileWithSafePos(
-                            pFanucDriver,
+                            pRobotDriver,
                             savedPath,
                             executeSummary,
                             executeError,
@@ -506,15 +532,15 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
         return;
     }
 
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstSupportedRobotDriver();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
 
     T_PRECISE_MEASURE_PARAM param;
     QString error;
-    if (!LoadPresetParam(pFanucDriver, param, error))
+    if (!LoadPresetParam(pRobotDriver, param, error))
     {
         QMessageBox::warning(this, "跳过扫描焊接", error);
         return;
@@ -561,7 +587,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
     AppendLog(QString("补偿后文件将输出到=%1").arg(seamCompPath));
 
     QPointer<MeasureThenWeldDialog> self(this);
-    std::thread([self, pFanucDriver, param, selectedDir, poseFilePath, seamCompPath]()
+    std::thread([self, pRobotDriver, param, selectedDir, poseFilePath, seamCompPath]()
         {
             bool ok = true;
             QString message;
@@ -634,7 +660,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                 ok = self != nullptr
                     && self->m_pService != nullptr
                     && self->m_pService->ExecuteWeldPoseFileWithSafePos(
-                        pFanucDriver,
+                        pRobotDriver,
                         seamCompPath,
                         executeSummary,
                         processError,

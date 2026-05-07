@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
     const QStringList arguments = app.arguments();
     if (!arguments.contains("--no-show"))
     {
-        window.show();
+        window.showMaximized();
     }
     window.ApplyStartupArguments(arguments);
     return app.exec();
