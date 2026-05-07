@@ -54,5 +54,5 @@ private:
     std::thread m_thread;
     std::atomic_bool m_running{ false };
     std::uint64_t m_nextSequence = 0;
-    std::size_t m_maxCachedFrames = 50000;
+    std::size_t m_maxCachedFrames = 8000;
 };
