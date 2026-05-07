@@ -4,6 +4,15 @@
 
 #include <chrono>
 
+namespace
+{
+qint64 CameraFrameCacheSteadyNowUs()
+{
+    return static_cast<qint64>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+}
+
 CameraFrameCache& CameraFrameCache::Instance()
 {
     static CameraFrameCache cache;
@@ -80,6 +89,27 @@ std::vector<udpDataShow> CameraFrameCache::FramesBetween(std::uint64_t beginExcl
     return result;
 }
 
+std::vector<CameraFrameCache::TimedFrame> CameraFrameCache::TimedFramesBetween(std::uint64_t beginExclusive, std::uint64_t endInclusive) const
+{
+    std::vector<TimedFrame> result;
+    std::lock_guard<std::mutex> locker(m_mutex);
+    result.reserve(m_frames.size());
+    for (const CachedFrame& cachedFrame : m_frames)
+    {
+        if (cachedFrame.sequence > beginExclusive && cachedFrame.sequence <= endInclusive)
+        {
+            TimedFrame frame;
+            frame.sequence = cachedFrame.sequence;
+            frame.cameraTimestampUs = static_cast<qint64>(cachedFrame.frame.timestamp);
+            frame.receiveTimestampUs = cachedFrame.receiveTimestampUs;
+            frame.targetPoint = cachedFrame.frame.targetPoint;
+            frame.errorMessage = cachedFrame.frame.errorMessage;
+            result.push_back(frame);
+        }
+    }
+    return result;
+}
+
 int CameraFrameCache::CachedCount() const
 {
     std::lock_guard<std::mutex> locker(m_mutex);
@@ -113,6 +143,7 @@ void CameraFrameCache::StoreFrame(const udpDataShow& frame)
     std::lock_guard<std::mutex> locker(m_mutex);
     CachedFrame cachedFrame;
     cachedFrame.sequence = ++m_nextSequence;
+    cachedFrame.receiveTimestampUs = CameraFrameCacheSteadyNowUs();
     cachedFrame.frame = frame;
     m_frames.push_back(cachedFrame);
     while (m_frames.size() > m_maxCachedFrames)

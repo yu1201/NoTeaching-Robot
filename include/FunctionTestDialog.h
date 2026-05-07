@@ -36,6 +36,7 @@ private:
     void FanucCallJobTest();
     void FanucUploadLsTest();
     void FanucCurposDiagnosticTest();
+    void RobotCameraTimestampDiagnosticTest();
     void FanucMovlTest();
     void FanucMovjTest();
     void FanucMoveZeroTest();

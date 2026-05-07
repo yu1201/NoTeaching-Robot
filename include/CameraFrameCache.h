@@ -12,6 +12,15 @@
 class CameraFrameCache
 {
 public:
+    struct TimedFrame
+    {
+        std::uint64_t sequence = 0;
+        qint64 cameraTimestampUs = 0;
+        qint64 receiveTimestampUs = 0;
+        cv::Point3d targetPoint;
+        QString errorMessage;
+    };
+
     static CameraFrameCache& Instance();
 
     void Start();
@@ -21,12 +30,14 @@ public:
     std::uint64_t Mark() const;
     bool Latest(udpDataShow& frame) const;
     std::vector<udpDataShow> FramesBetween(std::uint64_t beginExclusive, std::uint64_t endInclusive) const;
+    std::vector<TimedFrame> TimedFramesBetween(std::uint64_t beginExclusive, std::uint64_t endInclusive) const;
     int CachedCount() const;
 
 private:
     struct CachedFrame
     {
         std::uint64_t sequence = 0;
+        qint64 receiveTimestampUs = 0;
         udpDataShow frame;
     };
 
