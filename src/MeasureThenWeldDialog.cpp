@@ -64,9 +64,10 @@ QString ResolveLaserPointDirFromSelection(const QString& selectedDir)
 }
 }
 
-MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, StartCameraFunc startCamera, StopCameraFunc stopCamera, QWidget* parent)
+MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
+    , m_unitIndex(unitIndex)
     , m_pService(new MeasureThenWeldService())
     , m_startCamera(startCamera)
     , m_stopCamera(stopCamera)
@@ -128,13 +129,13 @@ void MeasureThenWeldDialog::closeEvent(QCloseEvent* event)
 
 FANUCRobotCtrl* MeasureThenWeldDialog::GetFirstFanucDriver()
 {
-    if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
+    if (m_pContralUnit == nullptr || m_unitIndex < 0 || m_unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
         QMessageBox::warning(this, "先测后焊", "未找到可用的控制单元。");
         return nullptr;
     }
 
-    RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[0].pUnitDriver);
+    RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
     if (pRobotDriverAdaptor == nullptr)
     {
         QMessageBox::warning(this, "先测后焊", "当前控制单元未创建驱动。");

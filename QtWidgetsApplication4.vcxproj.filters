@@ -124,6 +124,9 @@
     <ClCompile Include="src\RobotDataHelper.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\WeldPoseAverageUpdater.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\WeldSeamCompDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -229,6 +232,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WindowStyleHelper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\WeldPoseAverageUpdater.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldSeamCompDialog.h">
