@@ -15,7 +15,7 @@ class QTimer;
 class FunctionTestDialog : public QDialog
 {
 public:
-    explicit FunctionTestDialog(ContralUnit* pContralUnit, QWidget* parent = nullptr);
+    explicit FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex = 0, QWidget* parent = nullptr);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -46,6 +46,7 @@ private:
 
 private:
     ContralUnit* m_pContralUnit = nullptr;
+    int m_unitIndex = 0;
     QPushButton* m_pMovlTestBtn = nullptr;
     QPushButton* m_pMovjTestBtn = nullptr;
     QPushButton* m_pMoveZeroBtn = nullptr;

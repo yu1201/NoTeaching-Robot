@@ -345,6 +345,13 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pMainStack(nullptr)
 	, m_pDashboardPage(nullptr)
 	, m_pManagementPage(nullptr)
+	, m_pRobotSelectorCombo(nullptr)
+	, m_pRobotSelectorLabel(nullptr)
+	, m_nCurrentRobotUnitIndex(-1)
+	, m_nWeldProcessPageUnitIndex(-1)
+	, m_nFunctionTestPageUnitIndex(-1)
+	, m_nMeasureThenWeldPageUnitIndex(-1)
+	, m_nRobotJogPageUnitIndex(-1)
 	, m_pRobotLogText(nullptr)
 	, m_pCurrentUserLabel(nullptr)
 	, m_pManagementUserLabel(nullptr)
@@ -385,7 +392,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	if (ui.menuBar != nullptr)
 	{
 		ui.menuBar->clear();
-		ui.menuBar->show();
+		ui.menuBar->hide();
 	}
 	if (ui.mainToolBar != nullptr)
 	{
@@ -453,6 +460,15 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	aboutButton->hide();
 	m_pCurrentUserLabel = new QLabel(m_pDashboardPage);
 	m_pCurrentUserLabel->setStyleSheet("QLabel { color: #9ED8DB; padding: 5px 10px; border: 1px solid #2E4656; border-radius: 10px; background: #101923; }");
+	m_pRobotSelectorLabel = new QLabel("机器人：", m_pDashboardPage);
+	m_pRobotSelectorLabel->setStyleSheet("QLabel { color: #BACBD1; font-weight: 600; }");
+	m_pRobotSelectorCombo = new QComboBox(m_pDashboardPage);
+	m_pRobotSelectorCombo->setMinimumWidth(180);
+	m_pRobotSelectorCombo->setStyleSheet(
+		"QComboBox { background: #101820; color: #ECF3F4; border: 1px solid #3C6173; border-radius: 10px; padding: 6px 12px; }"
+		"QComboBox:hover { border-color: #72D4DD; }"
+		"QComboBox::drop-down { border: 0px; width: 28px; }"
+		"QComboBox QAbstractItemView { background: #101820; color: #ECF3F4; selection-background-color: #2D5465; }");
 	QPushButton* managementEntryButton = new QPushButton("管理页面", m_pDashboardPage);
 	managementEntryButton->setMinimumHeight(34);
 	managementEntryButton->setMinimumWidth(110);
@@ -461,6 +477,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	titleLayout->addWidget(versionLabel, 0, Qt::AlignVCenter);
 	titleLayout->addStretch(1);
 	titleLayout->addWidget(m_pCurrentUserLabel, 0, Qt::AlignVCenter);
+	titleLayout->addWidget(m_pRobotSelectorLabel, 0, Qt::AlignVCenter);
+	titleLayout->addWidget(m_pRobotSelectorCombo, 0, Qt::AlignVCenter);
 	titleLayout->addWidget(managementEntryButton, 0, Qt::AlignVCenter);
 	dashboardLayout->addLayout(titleLayout);
 
@@ -872,13 +890,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QTimer* fanucMonitorTimer = new QTimer(this);
 	connect(fanucMonitorTimer, &QTimer::timeout, this, [this]()
 		{
-			if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
-			{
-				return;
-			}
-
-			RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[0].pUnitDriver);
-			FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
+			FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 			if (pFanucDriver == nullptr)
 			{
 				return;
@@ -925,6 +937,21 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	//FtpClient* pFTP = new FtpClient(ContralUnitLog, "192.168.39.222");
 	//pFTP->downloadFile("/UserPrograms/testcyh.sr/test1.srp", ".//Job//STEP//test1.srp");
 	m_pContralUnit = new ContralUnit();
+	RefreshRobotSelectorUi();
+	if (m_pRobotSelectorCombo != nullptr)
+	{
+		connect(m_pRobotSelectorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
+			{
+				if (m_pRobotSelectorCombo != nullptr)
+				{
+					const int unitIndex = m_pRobotSelectorCombo->currentData().toInt();
+					if (unitIndex >= 0)
+					{
+						m_nCurrentRobotUnitIndex = unitIndex;
+					}
+				}
+			});
+	}
 
 }
 
@@ -1003,6 +1030,118 @@ void QtWidgetsApplication4::ShowManagementPage()
 		m_pMainStack->setCurrentWidget(m_pManagementPage);
 		RefreshAccountUi();
 	}
+}
+
+int QtWidgetsApplication4::CurrentRobotUnitIndex() const
+{
+    if (m_pRobotSelectorCombo != nullptr)
+    {
+        const int unitIndex = m_pRobotSelectorCombo->currentData().toInt();
+        if (unitIndex >= 0)
+        {
+            return unitIndex;
+        }
+    }
+    if (m_nCurrentRobotUnitIndex >= 0
+        && m_pContralUnit != nullptr
+        && m_nCurrentRobotUnitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        return m_nCurrentRobotUnitIndex;
+    }
+    if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
+    {
+        return -1;
+    }
+    return 0;
+}
+
+const T_CONTRAL_UNIT* QtWidgetsApplication4::CurrentContralUnit() const
+{
+    const int unitIndex = CurrentRobotUnitIndex();
+    if (m_pContralUnit == nullptr
+        || unitIndex < 0
+        || unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        return nullptr;
+    }
+    return &m_pContralUnit->m_vtContralUnitInfo[unitIndex];
+}
+
+FANUCRobotCtrl* QtWidgetsApplication4::GetCurrentFanucDriver(QWidget* parent) const
+{
+    const T_CONTRAL_UNIT* unitInfo = CurrentContralUnit();
+    if (unitInfo == nullptr)
+    {
+        QMessageBox::warning(parent, "FANUC测试", "未找到可用的控制单元。");
+        return nullptr;
+    }
+
+    RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
+    if (pRobotDriverAdaptor == nullptr)
+    {
+        QMessageBox::warning(parent, "FANUC测试", "当前控制单元未创建驱动。");
+        return nullptr;
+    }
+
+    FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
+    if (pFanucDriver == nullptr)
+    {
+        QMessageBox::warning(parent, "FANUC测试", "当前选择的控制单元不是 FANUC 驱动。");
+        return nullptr;
+    }
+    return pFanucDriver;
+}
+
+void QtWidgetsApplication4::RefreshRobotSelectorUi()
+{
+    if (m_pRobotSelectorCombo == nullptr)
+    {
+        return;
+    }
+
+    QSignalBlocker blocker(m_pRobotSelectorCombo);
+    const int previousIndex = CurrentRobotUnitIndex();
+    m_pRobotSelectorCombo->clear();
+    if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
+    {
+        m_pRobotSelectorCombo->addItem("无可用机器人", -1);
+        m_pRobotSelectorCombo->setEnabled(false);
+        if (m_pRobotSelectorLabel != nullptr)
+        {
+            m_pRobotSelectorLabel->setVisible(false);
+        }
+        return;
+    }
+
+    for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
+    {
+        RobotDriverAdaptor* driver = static_cast<RobotDriverAdaptor*>(unitInfo.pUnitDriver);
+        const QString robotName = QString::fromStdString(
+            driver != nullptr && !driver->m_sRobotName.empty() ? driver->m_sRobotName : unitInfo.sUnitName);
+        const QString displayName = QString::fromStdString(
+            driver != nullptr && !driver->m_sCustomName.empty() ? driver->m_sCustomName : unitInfo.sChineseName);
+        const QString label = displayName.isEmpty() || displayName == robotName
+            ? robotName
+            : QString("%1 (%2)").arg(displayName, robotName);
+        m_pRobotSelectorCombo->addItem(label, unitInfo.nUnitNo);
+    }
+
+    if (m_pRobotSelectorLabel != nullptr)
+    {
+        m_pRobotSelectorLabel->setVisible(m_pContralUnit->m_vtContralUnitInfo.size() > 0);
+    }
+    int comboIndex = -1;
+    if (previousIndex >= 0)
+    {
+        comboIndex = m_pRobotSelectorCombo->findData(previousIndex);
+    }
+    if (comboIndex < 0)
+    {
+        comboIndex = 0;
+    }
+    m_pRobotSelectorCombo->setCurrentIndex(comboIndex);
+    m_nCurrentRobotUnitIndex = m_pRobotSelectorCombo->currentData().toInt();
+    m_pRobotSelectorCombo->setEnabled(m_pRobotSelectorCombo->count() > 1);
 }
 
 QString QtWidgetsApplication4::AccountConfigPath() const
@@ -2111,9 +2250,10 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 bool QtWidgetsApplication4::LoadGrooveCameraIP(QString& cameraIP) const
 {
 	std::string robotName = "RobotA";
-	if (m_pContralUnit != nullptr && !m_pContralUnit->m_vtContralUnitInfo.empty() && !m_pContralUnit->m_vtContralUnitInfo[0].sUnitName.empty())
+	const T_CONTRAL_UNIT* currentUnit = CurrentContralUnit();
+	if (currentUnit != nullptr && !currentUnit->sUnitName.empty())
 	{
-		robotName = m_pContralUnit->m_vtContralUnitInfo[0].sUnitName;
+		robotName = currentUnit->sUnitName;
 	}
 
     RobotDataHelper::CameraParamData cameraParam;
@@ -2279,8 +2419,14 @@ void QtWidgetsApplication4::RobotRunTest()
 		return;
 	}
 
-	T_CONTRAL_UNIT& contralUnitInfo = m_pContralUnit->m_vtContralUnitInfo[0];
-	RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(contralUnitInfo.pUnitDriver);
+	const T_CONTRAL_UNIT* currentUnit = CurrentContralUnit();
+	if (currentUnit == nullptr)
+	{
+		QMessageBox::warning(this, "测试程序", "未找到当前选择的控制单元。");
+		return;
+	}
+
+	RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(currentUnit->pUnitDriver);
 	if (pRobotDriverAdaptor == nullptr)
 	{
 		QMessageBox::warning(this, "测试程序", "当前控制单元未创建驱动。");
@@ -2390,14 +2536,16 @@ void QtWidgetsApplication4::RobotRunTest()
 	T_ANGLE_PULSE tNowPulse = pRobotDriverAdaptor->GetCurrentPulse();
 	T_ANGLE_PULSE testPulse = tNowPulse;
 	if (testPulse.nSPulse == 0 && testPulse.nLPulse == 0 && testPulse.nUPulse == 0 &&
-		testPulse.nRPulse == 0 && testPulse.nBPulse == 0 && testPulse.nTPulse == 0) {
+		testPulse.nRPulse == 0 && testPulse.nBPulse == 0 && testPulse.nTPulse == 0)
+	{
 		testPulse = T_ANGLE_PULSE(90000, 180000, 0, 0, 0, 0, 0, 0, 0);
 	}
 
 	T_ANGLE_PULSE bestResult;
 	const bool ok = pRobotDriverAdaptor->RunKinematicsSelfTest(testPulse, T_ROBOT_COORS(), &bestResult);
 
-	if (ok) {
+	if (ok)
+	{
 		QMessageBox::information(
 			this,
 			"运动学自检",
@@ -2405,7 +2553,8 @@ void QtWidgetsApplication4::RobotRunTest()
 				bestResult.nSPulse, bestResult.nLPulse, bestResult.nUPulse,
 				bestResult.nRPulse, bestResult.nBPulse, bestResult.nTPulse).c_str());
 	}
-	else {
+	else
+	{
 		QMessageBox::warning(this, "运动学自检", "FK -> IK -> FK 自检失败，请查看日志。");
 	}
 }
@@ -2416,15 +2565,23 @@ void QtWidgetsApplication4::OpenWeldProcessDialog()
 	{
 		return;
 	}
-	if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
+	const T_CONTRAL_UNIT* currentUnit = CurrentContralUnit();
+	if (currentUnit == nullptr)
 	{
 		QMessageBox::warning(this, "工艺参数", "未找到可用的控制单元。");
 		return;
 	}
 
+	const int currentUnitIndex = CurrentRobotUnitIndex();
+	if (m_pWeldProcessPage != nullptr && m_nWeldProcessPageUnitIndex != currentUnitIndex)
+	{
+		delete m_pWeldProcessPage;
+		m_pWeldProcessPage = nullptr;
+	}
 	if (m_pWeldProcessPage == nullptr)
 	{
-		m_pWeldProcessPage = new WeldProcessDialog(m_pContralUnit->m_vtContralUnitInfo[0], m_pMainStack);
+		m_pWeldProcessPage = new WeldProcessDialog(*currentUnit, m_pMainStack);
+		m_nWeldProcessPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pWeldProcessPage);
 	}
 	ShowEmbeddedPage(m_pWeldProcessPage);
@@ -2436,9 +2593,16 @@ void QtWidgetsApplication4::OpenFunctionTestDialog()
 	{
 		return;
 	}
+	const int currentUnitIndex = CurrentRobotUnitIndex();
+	if (m_pFunctionTestPage != nullptr && m_nFunctionTestPageUnitIndex != currentUnitIndex)
+	{
+		delete m_pFunctionTestPage;
+		m_pFunctionTestPage = nullptr;
+	}
 	if (m_pFunctionTestPage == nullptr)
 	{
-		m_pFunctionTestPage = new FunctionTestDialog(m_pContralUnit, m_pMainStack);
+		m_pFunctionTestPage = new FunctionTestDialog(m_pContralUnit, currentUnitIndex, m_pMainStack);
+		m_nFunctionTestPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pFunctionTestPage);
 	}
 	ShowEmbeddedPage(m_pFunctionTestPage);
@@ -2475,13 +2639,21 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 			emit stopAllCommThreads();
 		};
 
+	const int currentUnitIndex = CurrentRobotUnitIndex();
+	if (m_pMeasureThenWeldPage != nullptr && m_nMeasureThenWeldPageUnitIndex != currentUnitIndex)
+	{
+		delete m_pMeasureThenWeldPage;
+		m_pMeasureThenWeldPage = nullptr;
+	}
 	if (m_pMeasureThenWeldPage == nullptr)
 	{
 		m_pMeasureThenWeldPage = new MeasureThenWeldDialog(
 			m_pContralUnit,
+			currentUnitIndex,
 			startCamera,
 			stopCamera,
 			m_pMainStack);
+		m_nMeasureThenWeldPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pMeasureThenWeldPage);
 		connect(m_pMeasureThenWeldPage, &MeasureThenWeldDialog::FlowStepChanged, this, [this](const QString& text)
 			{
@@ -2565,7 +2737,7 @@ void QtWidgetsApplication4::OpenCameraParamDialog()
 
 void QtWidgetsApplication4::FanucConnectTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2584,7 +2756,7 @@ void QtWidgetsApplication4::FanucConnectTest()
 
 void QtWidgetsApplication4::FanucDisconnectTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2596,7 +2768,7 @@ void QtWidgetsApplication4::FanucDisconnectTest()
 
 void QtWidgetsApplication4::FanucGetCurrentPosTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2612,7 +2784,7 @@ void QtWidgetsApplication4::FanucGetCurrentPosTest()
 
 void QtWidgetsApplication4::FanucGetCurrentPulseTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2629,7 +2801,7 @@ void QtWidgetsApplication4::FanucGetCurrentPulseTest()
 
 void QtWidgetsApplication4::FanucCheckDoneTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2641,7 +2813,7 @@ void QtWidgetsApplication4::FanucCheckDoneTest()
 
 void QtWidgetsApplication4::FanucSetGetIntTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2672,7 +2844,7 @@ void QtWidgetsApplication4::FanucSetGetIntTest()
 
 void QtWidgetsApplication4::FanucSetTpSpeedTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2692,7 +2864,7 @@ void QtWidgetsApplication4::FanucSetTpSpeedTest()
 
 void QtWidgetsApplication4::FanucCallJobTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2713,7 +2885,7 @@ void QtWidgetsApplication4::FanucCallJobTest()
 
 void QtWidgetsApplication4::FanucUploadLsTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2740,7 +2912,7 @@ void QtWidgetsApplication4::FanucUploadLsTest()
 
 void QtWidgetsApplication4::FanucMovlTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2779,7 +2951,7 @@ void QtWidgetsApplication4::FanucMovlTest()
 
 void QtWidgetsApplication4::FanucMovjTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2822,7 +2994,7 @@ void QtWidgetsApplication4::FanucMovjTest()
 
 void QtWidgetsApplication4::FanucMoveZeroTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
@@ -2897,15 +3069,22 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 	{
 		return;
 	}
-	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver(m_pContralUnit, this);
+	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
 	if (pFanucDriver == nullptr)
 	{
 		return;
 	}
 
+	const int currentUnitIndex = CurrentRobotUnitIndex();
+	if (m_pRobotJogPage != nullptr && m_nRobotJogPageUnitIndex != currentUnitIndex)
+	{
+		delete m_pRobotJogPage;
+		m_pRobotJogPage = nullptr;
+	}
 	if (m_pRobotJogPage == nullptr)
 	{
 		m_pRobotJogPage = new RobotJogDialog(pFanucDriver, m_pMainStack);
+		m_nRobotJogPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pRobotJogPage);
 	}
 	ShowEmbeddedPage(m_pRobotJogPage);

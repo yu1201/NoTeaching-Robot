@@ -734,9 +734,10 @@ QString BuildDhParameterReport(
 }
 }
 
-FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, QWidget* parent)
+FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex, QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
+    , m_unitIndex(unitIndex)
 {
     setWindowTitle("功能测试");
     ApplyUnifiedWindowChrome(this);
@@ -854,13 +855,13 @@ void FunctionTestDialog::closeEvent(QCloseEvent* event)
 
 FANUCRobotCtrl* FunctionTestDialog::GetFirstFanucDriver()
 {
-    if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
+    if (m_pContralUnit == nullptr || m_unitIndex < 0 || m_unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
         QMessageBox::warning(this, "FANUC测试", "未找到可用的控制单元。");
         return nullptr;
     }
 
-    RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[0].pUnitDriver);
+    RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
     if (pRobotDriverAdaptor == nullptr)
     {
         QMessageBox::warning(this, "FANUC测试", "当前控制单元未创建驱动。");
@@ -878,14 +879,14 @@ FANUCRobotCtrl* FunctionTestDialog::GetFirstFanucDriver()
 
 RobotDriverAdaptor* FunctionTestDialog::GetFirstRobotDriverAdaptor()
 {
-    if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
+    if (m_pContralUnit == nullptr || m_unitIndex < 0 || m_unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
         QMessageBox::warning(this, "运动学样本", "未找到可用的控制单元。");
         return nullptr;
     }
 
     RobotDriverAdaptor* pRobotDriverAdaptor =
-        static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[0].pUnitDriver);
+        static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
     if (pRobotDriverAdaptor == nullptr)
     {
         QMessageBox::warning(this, "运动学样本", "当前控制单元未创建驱动。");
@@ -902,9 +903,9 @@ bool FunctionTestDialog::IsMotionBusy() const
 void FunctionTestDialog::RefreshMotionButtonState()
 {
     bool busy = IsMotionBusy();
-    if (!busy && m_pContralUnit != nullptr && !m_pContralUnit->m_vtContralUnitInfo.empty())
+    if (!busy && m_pContralUnit != nullptr && m_unitIndex >= 0 && m_unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
-        RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[0].pUnitDriver);
+        RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
         FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
         busy = (pFanucDriver != nullptr && pFanucDriver->CheckDonePassive() == 0);
     }

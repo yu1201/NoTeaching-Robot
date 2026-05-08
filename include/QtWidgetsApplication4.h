@@ -78,6 +78,10 @@ private:
     void ShowManagementPage();
     void ShowEmbeddedPage(QWidget* page);
     void PrepareEmbeddedPage(QWidget* page);
+    void RefreshRobotSelectorUi();
+    int CurrentRobotUnitIndex() const;
+    const T_CONTRAL_UNIT* CurrentContralUnit() const;
+    FANUCRobotCtrl* GetCurrentFanucDriver(QWidget* parent) const;
     QString AccountConfigPath() const;
     QString RoleDisplayName(const QString& role) const;
     int RoleLevel(const QString& role) const;
@@ -116,6 +120,13 @@ private:
     QStackedWidget* m_pMainStack;
     QWidget* m_pDashboardPage;
     QWidget* m_pManagementPage;
+    QComboBox* m_pRobotSelectorCombo;
+    QLabel* m_pRobotSelectorLabel;
+    int m_nCurrentRobotUnitIndex;
+    int m_nWeldProcessPageUnitIndex;
+    int m_nFunctionTestPageUnitIndex;
+    int m_nMeasureThenWeldPageUnitIndex;
+    int m_nRobotJogPageUnitIndex;
     QPlainTextEdit* m_pRobotLogText;
     QLabel* m_pCurrentUserLabel;
     QLabel* m_pManagementUserLabel;

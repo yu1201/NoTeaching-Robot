@@ -45,7 +45,7 @@ public:
     using StartCameraFunc = std::function<bool(QString&)>;
     using StopCameraFunc = std::function<void()>;
 
-    MeasureThenWeldDialog(ContralUnit* pContralUnit, StartCameraFunc startCamera, StopCameraFunc stopCamera, QWidget* parent = nullptr);
+    MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, QWidget* parent = nullptr);
 
 signals:
     void FlowStepChanged(const QString& text);
@@ -86,6 +86,7 @@ private:
 
 private:
     ContralUnit* m_pContralUnit = nullptr;
+    int m_unitIndex = 0;
     MeasureThenWeldService* m_pService = nullptr;
     StartCameraFunc m_startCamera;
     StopCameraFunc m_stopCamera;
