@@ -33,20 +33,20 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
-#include <limits>
 #include <thread>
 
 namespace
 {
-constexpr int kHandEyeAutoStateReg = 90;
-constexpr int kHandEyeAutoAckReg = 91;
 constexpr int kHandEyeAutoTargetStep = 10;
 constexpr int kHandEyeAutoFirstSampleStep = 11;
 constexpr int kHandEyeAutoLastSampleStep = 16;
 constexpr int kHandEyeAutoDoneStep = 999;
 constexpr int kHandEyeAutoAbortValue = -1;
+constexpr double kHandEyeAutoMoveSpeedMmPerMin = 500.0;
+constexpr int kHandEyeAutoMoveDoneTimeoutMs = 180000;
 constexpr const char* kHandEyeAutoProgramName = "FANUC_HECALIB";
 constexpr int kHandEyeRobotCheckStartPrIndex = 79;
 constexpr int kHandEyeRobotCheckPrIndex = 80;
@@ -105,13 +105,13 @@ QString FormatAutoCalibrationState(int state)
     }
     if (state == kHandEyeAutoTargetStep)
     {
-        return "自动标定状态：当前停在 PR[10] / 固定标定目标点，已完成 0/6 组";
+        return "自动标定状态：当前停在位置变量[10] / 固定标定目标点，已完成 0/6 组";
     }
     if (state >= kHandEyeAutoFirstSampleStep && state <= kHandEyeAutoLastSampleStep)
     {
         const int sampleIndex = state - kHandEyeAutoFirstSampleStep + 1;
         const int completedCount = std::max(0, sampleIndex - 1);
-        return QString("自动标定状态：当前停在 PR[%1] / 第 %2 组采样，已完成 %3/6 组")
+        return QString("自动标定状态：当前停在位置变量[%1] / 第 %2 组采样，已完成 %3/6 组")
             .arg(state)
             .arg(sampleIndex)
             .arg(completedCount);
@@ -131,15 +131,155 @@ QString DescribeAutoCalibrationPoint(int step)
 {
     if (step == kHandEyeAutoTargetStep)
     {
-        return "PR[10] 固定标定目标点";
+        return "位置变量[10] 固定标定目标点";
     }
     if (step >= kHandEyeAutoFirstSampleStep && step <= kHandEyeAutoLastSampleStep)
     {
-        return QString("PR[%1] 第 %2 组采样点")
+        return QString("位置变量[%1] 第 %2 组采样点")
             .arg(step)
             .arg(step - kHandEyeAutoFirstSampleStep + 1);
     }
-    return QString("PR[%1]").arg(step);
+    return QString("位置变量[%1]").arg(step);
+}
+
+struct HandEyeAutoTarget
+{
+    int varIndex = 0;
+    T_ROBOT_COORS target;
+    std::array<int, 7> config = {};
+};
+
+T_ROBOT_COORS PoseFromPosVarArray(const double values[6])
+{
+    T_ROBOT_COORS pose;
+    pose.dX = values[0];
+    pose.dY = values[1];
+    pose.dZ = values[2];
+    pose.dRX = values[3];
+    pose.dRY = values[4];
+    pose.dRZ = values[5];
+    return pose;
+}
+
+bool IsFinitePose(const T_ROBOT_COORS& pose)
+{
+    return std::isfinite(pose.dX)
+        && std::isfinite(pose.dY)
+        && std::isfinite(pose.dZ)
+        && std::isfinite(pose.dRX)
+        && std::isfinite(pose.dRY)
+        && std::isfinite(pose.dRZ);
+}
+
+bool ReadAutoCalibrationTarget(
+    RobotDriverAdaptor* driver,
+    int varIndex,
+    HandEyeAutoTarget& target,
+    QString* error)
+{
+    if (driver == nullptr)
+    {
+        if (error != nullptr)
+        {
+            *error = "机器人驱动为空。";
+        }
+        return false;
+    }
+
+    double values[6] = {};
+    int config[7] = {};
+    const int ret = driver->GetPosVar(varIndex, values, config, POSVAR);
+    if (ret != 0)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("读取位置变量[%1]失败，返回码=%2。").arg(varIndex).arg(ret);
+        }
+        return false;
+    }
+
+    target.varIndex = varIndex;
+    target.target = PoseFromPosVarArray(values);
+    for (int i = 0; i < 7; ++i)
+    {
+        target.config[static_cast<size_t>(i)] = config[i];
+    }
+
+    if (!IsFinitePose(target.target))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("位置变量[%1]包含无效数值。").arg(varIndex);
+        }
+        return false;
+    }
+    return true;
+}
+
+bool WaitGenericRobotDone(
+    RobotDriverAdaptor* driver,
+    int timeoutMs,
+    int pollIntervalMs,
+    QString* error)
+{
+    if (driver == nullptr)
+    {
+        if (error != nullptr)
+        {
+            *error = "机器人驱动为空。";
+        }
+        return false;
+    }
+
+    if (pollIntervalMs <= 0)
+    {
+        pollIntervalMs = 100;
+    }
+
+    const auto startTime = std::chrono::steady_clock::now();
+    bool seenRunning = false;
+    int stableDoneCount = 0;
+    int lastState = -1;
+
+    while (true)
+    {
+        lastState = driver->CheckDone();
+        if (lastState < 0)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("读取机器人运行状态失败，返回码=%1。").arg(lastState);
+            }
+            return false;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const int elapsedMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count());
+        if (lastState == 0)
+        {
+            seenRunning = true;
+            stableDoneCount = 0;
+        }
+        else if (seenRunning || elapsedMs >= 1000)
+        {
+            ++stableDoneCount;
+            if (stableDoneCount >= 2)
+            {
+                return true;
+            }
+        }
+
+        if (elapsedMs >= timeoutMs)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("等待机器人到位超时，最后状态=%1。").arg(lastState);
+            }
+            return false;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));
+    }
 }
 
 QString SampleStateText(const HandEyeCalibrationSample& sample)
@@ -462,8 +602,8 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
 
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     buttonLayout->setSpacing(10);
-    m_pUploadAutoProgramBtn = new QPushButton("发送自动标定程序");
-    m_pAutoCalibrationBtn = new QPushButton("自动标定 PR10~PR16");
+    m_pUploadAutoProgramBtn = new QPushButton("发送FANUC自动程序");
+    m_pAutoCalibrationBtn = new QPushButton("自动标定 变量10~16");
     QPushButton* reloadBtn = new QPushButton("重新读取");
     QPushButton* saveBtn = new QPushButton("保存采样数据");
     QPushButton* computeBtn = new QPushButton("计算矩阵并写入");
@@ -1373,11 +1513,11 @@ void HandEyeCalibrationDialog::SetAutoCalibrationUiRunning(bool running)
     if (m_pAutoCalibrationBtn != nullptr)
     {
         m_pAutoCalibrationBtn->setEnabled(!running);
-        m_pAutoCalibrationBtn->setText(running ? "自动标定进行中..." : "自动标定 PR10~PR16");
+        m_pAutoCalibrationBtn->setText(running ? "自动标定进行中..." : "自动标定 变量10~16");
     }
     if (running)
     {
-        SetAutoCalibrationStateText("自动标定状态：已启动，等待机器人到达 PR[10]，已完成 0/6 组");
+        SetAutoCalibrationStateText("自动标定状态：已启动，等待机器人到达位置变量[10]，已完成 0/6 组");
     }
     else if (m_pAutoStateLabel != nullptr
         && (m_pAutoStateLabel->text().contains("进行中")
@@ -1510,8 +1650,8 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
     }
 
     QString error;
-    FANUCRobotCtrl* fanucDriver = CurrentFanucDriver(&error);
-    if (fanucDriver == nullptr)
+    RobotDriverAdaptor* driver = CurrentDriver(&error);
+    if (driver == nullptr)
     {
         m_bAutoCalibrationRunning.store(false);
         QMessageBox::warning(this, "手眼标定", error);
@@ -1519,26 +1659,16 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
         return false;
     }
 
-    const QString lsPath = FindHandEyeAutoProgramPath();
-    if (lsPath.isEmpty())
-    {
-        m_bAutoCalibrationRunning.store(false);
-        const QString message = "未找到自动标定程序文件：SDK/FANUC/FANUC_HECALIB.ls";
-        QMessageBox::warning(this, "手眼标定", message);
-        AppendLog(message);
-        return false;
-    }
-
     const auto answer = QMessageBox::question(
         this,
         "自动标定",
         "请确认已经完成以下准备：\n"
-        "1. PR[10] 示教为固定标定目标点。\n"
-        "2. PR[11]~PR[16] 示教为六组采样点。\n"
+        "1. 位置变量[10] 示教为固定标定目标点。\n"
+        "2. 位置变量[11]~[16] 示教为六组采样点。\n"
         "3. 相机实时三维点通信正常。\n"
         "4. 机器人服务已启动。\n"
         "5. 后续每次到位后，都会弹窗确认是否采集当前点。\n\n"
-        "确认后程序会上传并调用 FANUC_HECALIB，机器人每到一个点会等待上位机确认是否采集，确认后再走下一个点。",
+        "确认后上位机会逐点读取位置变量，调用通用 MOVL 运动，到位后读取当前位置并采集相机点。",
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::Yes);
     if (answer != QMessageBox::Yes)
@@ -1555,43 +1685,28 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
         return false;
     }
 
-    const QByteArray lsPathBytes = lsPath.toLocal8Bit();
-    const int uploadRet = fanucDriver->UploadLsFile(lsPathBytes.constData());
-    if (uploadRet != 0)
+    QVector<HandEyeAutoTarget> targets;
+    targets.reserve(kHandEyeAutoLastSampleStep - kHandEyeAutoTargetStep + 1);
+    for (int varIndex = kHandEyeAutoTargetStep; varIndex <= kHandEyeAutoLastSampleStep; ++varIndex)
     {
-        m_bAutoCalibrationRunning.store(false);
-        const QString message = QString("自动标定程序发送失败，返回码=%1，文件=%2").arg(uploadRet).arg(lsPath);
-        QMessageBox::warning(this, "手眼标定", message);
-        AppendLog(message);
-        return false;
-    }
-
-    if (!fanucDriver->SetIntVar(kHandEyeAutoStateReg, 0) || !fanucDriver->SetIntVar(kHandEyeAutoAckReg, 0))
-    {
-        m_bAutoCalibrationRunning.store(false);
-        const QString message = QString("自动标定启动失败：初始化寄存器 R[%1]/R[%2] 失败。")
-            .arg(kHandEyeAutoStateReg)
-            .arg(kHandEyeAutoAckReg);
-        QMessageBox::warning(this, "手眼标定", message);
-        AppendLog(message);
-        return false;
-    }
-
-    if (!fanucDriver->CallJob(kHandEyeAutoProgramName))
-    {
-        m_bAutoCalibrationRunning.store(false);
-        const QString message = QString("自动标定程序调用失败：%1").arg(kHandEyeAutoProgramName);
-        QMessageBox::warning(this, "手眼标定", message);
-        AppendLog(message);
-        return false;
+        HandEyeAutoTarget target;
+        if (!ReadAutoCalibrationTarget(driver, varIndex, target, &error))
+        {
+            m_bAutoCalibrationRunning.store(false);
+            QMessageBox::warning(this, "手眼标定", error);
+            AppendLog("自动标定启动失败：" + error);
+            return false;
+        }
+        targets.push_back(target);
     }
 
     SetAutoCalibrationUiRunning(true);
-    AppendLog(QString("自动标定已启动：程序=%1，等待 PR[10] 到位...").arg(kHandEyeAutoProgramName));
-    AppendLog(QString("握手寄存器：R[%1]=当前步骤，R[%2]=上位机确认值。").arg(kHandEyeAutoStateReg).arg(kHandEyeAutoAckReg));
+    AppendLog(QString("自动标定已启动：机器人=%1，已读取位置变量[10]~[16]，MOVL速度=%2 mm/min。")
+        .arg(m_robotName)
+        .arg(kHandEyeAutoMoveSpeedMmPerMin, 0, 'f', 1));
 
     QPointer<HandEyeCalibrationDialog> self(this);
-    std::thread([self, fanucDriver]()
+    std::thread([self, driver, targets]()
         {
             using namespace std::chrono_literals;
 
@@ -1607,15 +1722,15 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                         }, Qt::QueuedConnection);
                 };
 
-            auto postState = [self](int state)
+            auto postState = [self](const QString& stateText)
                 {
-                    QMetaObject::invokeMethod(qApp, [self, state]()
+                    QMetaObject::invokeMethod(qApp, [self, stateText]()
                         {
                             if (self == nullptr)
                             {
                                 return;
                             }
-                            self->SetAutoCalibrationStateText(FormatAutoCalibrationState(state));
+                            self->SetAutoCalibrationStateText(stateText);
                         }, Qt::QueuedConnection);
                 };
 
@@ -1666,147 +1781,124 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                         }, Qt::QueuedConnection);
                 };
 
-            auto readRobotPose = [fanucDriver]() -> T_ROBOT_COORS
-                {
-                    long long robotMs = 0;
-                    long long pcMs = 0;
-                    const T_ROBOT_COORS passivePose = fanucDriver->GetCurrentPosPassive(&robotMs, &pcMs);
-                    if (robotMs > 0 || pcMs > 0)
-                    {
-                        return passivePose;
-                    }
-                    return fanucDriver->GetCurrentPos();
-                };
-
-            auto abortRobot = [fanucDriver]()
-                {
-                    fanucDriver->SetIntVar(kHandEyeAutoAckReg, kHandEyeAutoAbortValue);
-                };
-
-            int lastHandledState = std::numeric_limits<int>::min();
-            auto lastProgressTime = std::chrono::steady_clock::now();
-
-            while (true)
+            for (const HandEyeAutoTarget& target : targets)
             {
                 if (self == nullptr)
                 {
-                    abortRobot();
                     return;
                 }
 
-                const int state = fanucDriver->GetIntVar(kHandEyeAutoStateReg);
-                if (state == kHandEyeAutoDoneStep)
+                postState(QString("自动标定状态：正在移动到%1。").arg(DescribeAutoCalibrationPoint(target.varIndex)));
+                postLog(QString("开始移动到%1：%2")
+                    .arg(DescribeAutoCalibrationPoint(target.varIndex))
+                    .arg(FormatPoseSummary(target.target)));
+
+                int config[7] = {};
+                for (int i = 0; i < 7; ++i)
                 {
-                    postState(state);
-                    bool computeOk = false;
-                    QMetaObject::invokeMethod(self.data(), [&computeOk, self]()
+                    config[i] = target.config[static_cast<size_t>(i)];
+                }
+
+                const bool moveOk = driver->MoveByJob(
+                    target.target,
+                    T_ROBOT_MOVE_SPEED(kHandEyeAutoMoveSpeedMmPerMin, 0.0, 0.0),
+                    driver->m_nExternalAxleType,
+                    "MOVL",
+                    1,
+                    config);
+                if (!moveOk)
+                {
+                    finish(QString("自动标定移动失败：%1。").arg(DescribeAutoCalibrationPoint(target.varIndex)), true, false);
+                    return;
+                }
+
+                QString waitError;
+                if (!WaitGenericRobotDone(driver, kHandEyeAutoMoveDoneTimeoutMs, 100, &waitError))
+                {
+                    finish(QString("自动标定等待到位失败：%1，%2").arg(DescribeAutoCalibrationPoint(target.varIndex), waitError), true, false);
+                    return;
+                }
+
+                std::this_thread::sleep_for(200ms);
+                postState(FormatAutoCalibrationState(target.varIndex));
+                postLog(QString("机器人已到达%1，等待确认是否采集...").arg(DescribeAutoCalibrationPoint(target.varIndex)));
+
+                if (!confirmCapture(target.varIndex))
+                {
+                    finish(QString("自动标定已中止：用户取消采集 %1。").arg(DescribeAutoCalibrationPoint(target.varIndex)), true, false);
+                    return;
+                }
+
+                const T_ROBOT_COORS robotPose = driver->GetCurrentPos();
+                if (!IsFinitePose(robotPose))
+                {
+                    finish(QString("自动标定采样失败：%1 到位后读取当前位置无效。").arg(DescribeAutoCalibrationPoint(target.varIndex)), true, false);
+                    return;
+                }
+
+                QString applyError;
+                bool applyOk = false;
+                if (target.varIndex == kHandEyeAutoTargetStep)
+                {
+                    QMetaObject::invokeMethod(self.data(), [&applyOk, &applyError, self, robotPose]()
                         {
                             if (self == nullptr)
                             {
+                                applyError = "界面已关闭，无法写入固定标定目标点。";
                                 return;
                             }
-                            computeOk = self->ComputeAndSaveMatrix();
+                            applyOk = self->ApplyCapturedTargetPoint(robotPose, &applyError);
                         }, Qt::BlockingQueuedConnection);
-
-                    if (computeOk)
-                    {
-                        finish("自动标定完成，PR[10]~PR[16] 采样和矩阵计算均已写入。", false, false);
-                    }
-                    else
-                    {
-                        finish("自动标定采样完成，但矩阵计算失败，请检查采样数据。", false, false);
-                    }
-                    return;
                 }
-
-                if (state == kHandEyeAutoAbortValue)
+                else
                 {
-                    postState(state);
-                    finish("机器人侧自动标定程序已中止。", true, false);
-                    return;
-                }
-
-                if (state >= kHandEyeAutoTargetStep && state <= kHandEyeAutoLastSampleStep && state != lastHandledState)
-                {
-                    postState(state);
-                    lastHandledState = state;
-                    lastProgressTime = std::chrono::steady_clock::now();
-                    postLog(QString("机器人已到达 PR[%1]，等待确认是否采集...").arg(state));
-
-                    if (!confirmCapture(state))
+                    Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
+                    if (!self->ReadLatestCameraPoint(cameraPoint, &applyError))
                     {
-                        abortRobot();
-                        finish(QString("自动标定已中止：用户取消采集 %1。").arg(DescribeAutoCalibrationPoint(state)), true, false);
+                        finish(QString("自动标定采样失败：%1 的相机点无效：%2")
+                            .arg(DescribeAutoCalibrationPoint(target.varIndex), applyError), true, false);
                         return;
                     }
 
-                    postLog(QString("用户已确认采集：%1").arg(DescribeAutoCalibrationPoint(state)));
-                    std::this_thread::sleep_for(200ms);
-
-                    const T_ROBOT_COORS robotPose = readRobotPose();
-                    QString applyError;
-                    bool applyOk = false;
-
-                    if (state == kHandEyeAutoTargetStep)
-                    {
-                        QMetaObject::invokeMethod(self.data(), [&applyOk, &applyError, self, robotPose]()
-                            {
-                                if (self == nullptr)
-                                {
-                                    applyError = "界面已关闭，无法写入固定标定目标点。";
-                                    return;
-                                }
-                                applyOk = self->ApplyCapturedTargetPoint(robotPose, &applyError);
-                            }, Qt::BlockingQueuedConnection);
-                    }
-                    else
-                    {
-                        Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
-                        if (!self->ReadLatestCameraPoint(cameraPoint, &applyError))
+                    const int sampleIndex = target.varIndex - kHandEyeAutoFirstSampleStep;
+                    QMetaObject::invokeMethod(self.data(), [&applyOk, &applyError, self, sampleIndex, robotPose, cameraPoint]()
                         {
-                            abortRobot();
-                            finish(QString("自动标定采样失败：PR[%1] 的相机点无效：%2").arg(state).arg(applyError), true, false);
-                            return;
-                        }
-
-                        const int sampleIndex = state - kHandEyeAutoFirstSampleStep;
-                        QMetaObject::invokeMethod(self.data(), [&applyOk, &applyError, self, sampleIndex, robotPose, cameraPoint]()
+                            if (self == nullptr)
                             {
-                                if (self == nullptr)
-                                {
-                                    applyError = "界面已关闭，无法写入自动采样数据。";
-                                    return;
-                                }
-                                applyOk = self->ApplyCapturedSample(sampleIndex, robotPose, cameraPoint, &applyError);
-                            }, Qt::BlockingQueuedConnection);
-                    }
-
-                    if (!applyOk)
-                    {
-                        abortRobot();
-                        finish(QString("自动标定写入失败：PR[%1] -> %2").arg(state).arg(applyError), true, false);
-                        return;
-                    }
-
-                    if (!fanucDriver->SetIntVar(kHandEyeAutoAckReg, state))
-                    {
-                        abortRobot();
-                        finish(QString("自动标定放行失败：无法写入确认寄存器 R[%1]=%2。").arg(kHandEyeAutoAckReg).arg(state), true, false);
-                        return;
-                    }
-
-                    postLog(QString("PR[%1] 采样完成，已确认放行。").arg(state));
+                                applyError = "界面已关闭，无法写入自动采样数据。";
+                                return;
+                            }
+                            applyOk = self->ApplyCapturedSample(sampleIndex, robotPose, cameraPoint, &applyError);
+                        }, Qt::BlockingQueuedConnection);
                 }
 
-                const auto now = std::chrono::steady_clock::now();
-                if (now - lastProgressTime > std::chrono::minutes(3))
+                if (!applyOk)
                 {
-                    abortRobot();
-                    finish("自动标定超时：长时间未收到新的到位步骤，请检查机器人程序是否卡住。", true, false);
+                    finish(QString("自动标定写入失败：%1 -> %2").arg(DescribeAutoCalibrationPoint(target.varIndex), applyError), true, false);
                     return;
                 }
 
-                std::this_thread::sleep_for(80ms);
+                postLog(QString("%1 采样完成。").arg(DescribeAutoCalibrationPoint(target.varIndex)));
+            }
+
+            postState(FormatAutoCalibrationState(kHandEyeAutoDoneStep));
+            bool computeOk = false;
+            QMetaObject::invokeMethod(self.data(), [&computeOk, self]()
+                {
+                    if (self == nullptr)
+                    {
+                        return;
+                    }
+                    computeOk = self->ComputeAndSaveMatrix();
+                }, Qt::BlockingQueuedConnection);
+
+            if (computeOk)
+            {
+                finish("自动标定完成，位置变量[10]~[16] 采样和矩阵计算均已写入。", false, false);
+            }
+            else
+            {
+                finish("自动标定采样完成，但矩阵计算失败，请检查采样数据。", false, false);
             }
         }).detach();
 

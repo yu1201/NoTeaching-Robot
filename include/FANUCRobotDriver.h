@@ -38,9 +38,9 @@ public:
 	int CheckRobotDone(int nDelayTime = 200);
 
 	// 被动状态读取：读取S5监控线程最后一帧缓存，不占用控制socket；时间戳同时返回机器人累计毫秒和PC接收毫秒。
-	T_ROBOT_COORS GetCurrentPosPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr);
-	T_ANGLE_PULSE GetCurrentPulsePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr);
-	int CheckDonePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr);
+	T_ROBOT_COORS GetCurrentPosPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
+	T_ANGLE_PULSE GetCurrentPulsePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
+	int CheckDonePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
 
 	// 程序调用与监控通道：CallJob走S4控制通道，Monitor走S5独立推送通道。
 	bool CallJob(std::string sJobName);
@@ -125,7 +125,7 @@ public:
 	//bool SetPosVar(int nIndex, AXISPOS eRobotCoors, int scoper = ENGINEEVAR);
 	//bool SetPosVar(int nIndex, JointsPos eRobotCoors, int scoper = ENGINEEVAR);
 
-	int GetPosVar(long lPvarIndex, double array[6], int config[7] = { 0 }, int MoveType = POSVAR);
+	int GetPosVar(long lPvarIndex, double array[6], int config[7] = { 0 }, int MoveType = POSVAR) override;
 
 	// 速度与寄存器：R[17]作为固定TP速度寄存器，INT/REAL用于工艺参数或兼容接口。
 	bool SetSpeed(const char* name, double* speed, int scord = ENGINEEVAR);

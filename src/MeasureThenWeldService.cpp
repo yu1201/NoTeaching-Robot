@@ -1908,18 +1908,78 @@ double FanucLinearSpeedMmPerSecFromConfig(double speedMmPerMin, double fallbackM
     const double converted = speedMmPerMin / 60.0;
     return converted > 0.0 ? converted : fallbackMmPerSec;
 }
+
+double LinearCommandSpeedForRobot(RobotDriverAdaptor* pRobotDriver, double speedMmPerMin, double fallback)
+{
+    if (pRobotDriver != nullptr && dynamic_cast<FANUCRobotCtrl*>(pRobotDriver) != nullptr)
+    {
+        return FanucLinearSpeedMmPerSecFromConfig(speedMmPerMin, fallback);
+    }
+    return speedMmPerMin > 0.0 ? speedMmPerMin : fallback;
 }
 
-bool MeasureThenWeldService::LoadPresetParam(FANUCRobotCtrl* pFanucDriver, T_PRECISE_MEASURE_PARAM& param, QString& error) const
+QString LinearCommandSpeedUnitText(RobotDriverAdaptor* pRobotDriver)
 {
-    if (pFanucDriver == nullptr)
+    return (pRobotDriver != nullptr && dynamic_cast<FANUCRobotCtrl*>(pRobotDriver) != nullptr)
+        ? QStringLiteral("mm/sec")
+        : QStringLiteral("mm/min");
+}
+
+bool WaitRobotMotionDone(
+    RobotDriverAdaptor* pRobotDriver,
+    const QString& name,
+    const MeasureThenWeldService::LogCallback& appendLog,
+    int startTimeoutMs = 3000,
+    int finishTimeoutMs = 120000,
+    int pollDelayMs = 100)
+{
+    if (pRobotDriver == nullptr)
+    {
+        return false;
+    }
+
+    if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
+    {
+        int lastState = 0;
+        const bool doneOk = pFanucDriver->WaitStateDone(
+            FANUC_MOTION_STATE_REG,
+            1,
+            10,
+            20,
+            startTimeoutMs,
+            finishTimeoutMs,
+            pollDelayMs,
+            &lastState);
+        if (appendLog)
+        {
+            appendLog(QString("运动结束：%1, R[%2]=%3, WaitStateDone=%4")
+                .arg(name)
+                .arg(FANUC_MOTION_STATE_REG)
+                .arg(lastState)
+                .arg(doneOk ? 1 : 0));
+        }
+        return doneOk;
+    }
+
+    const int done = pRobotDriver->CheckRobotDone(pollDelayMs);
+    if (appendLog)
+    {
+        appendLog(QString("运动结束：%1, CheckRobotDone=%2").arg(name).arg(done));
+    }
+    return done > 0;
+}
+}
+
+bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error) const
+{
+    if (pRobotDriver == nullptr)
     {
         error = "机器人驱动为空。";
         return false;
     }
 
     param = T_PRECISE_MEASURE_PARAM();
-    param.sRobotName = pFanucDriver->m_sRobotName.empty() ? "RobotA" : pFanucDriver->m_sRobotName;
+    param.sRobotName = pRobotDriver->m_sRobotName.empty() ? "RobotA" : pRobotDriver->m_sRobotName;
 
     const QString robotName = QString::fromStdString(param.sRobotName);
     const QString iniPath = RobotDataHelper::PreciseMeasureParamPath(robotName);
@@ -2025,8 +2085,12 @@ bool MeasureThenWeldService::ReadPulseList(COPini& ini, const std::string& count
     return true;
 }
 
-bool MeasureThenWeldService::MovePulseAndWait(FANUCRobotCtrl* pFanucDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const
+bool MeasureThenWeldService::MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const
 {
+    if (pRobotDriver == nullptr)
+    {
+        return false;
+    }
     if (setFlowStep)
     {
         setFlowStep(QString("正在运动：%1").arg(name));
@@ -2036,7 +2100,7 @@ bool MeasureThenWeldService::MovePulseAndWait(FANUCRobotCtrl* pFanucDriver, cons
         appendLog(QString("开始运动：%1").arg(name));
     }
 
-    const bool moveOk = pFanucDriver->MoveByJob(pulse, T_ROBOT_MOVE_SPEED(speed, 0.0, 0.0), pFanucDriver->m_nExternalAxleType, "MOVJ");
+    const bool moveOk = pRobotDriver->MoveByJob(pulse, T_ROBOT_MOVE_SPEED(speed, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
     if (!moveOk)
     {
         if (appendLog)
@@ -2046,24 +2110,14 @@ bool MeasureThenWeldService::MovePulseAndWait(FANUCRobotCtrl* pFanucDriver, cons
         return false;
     }
 
-    int lastState = 0;
-    const bool doneOk = pFanucDriver->WaitStateDone(FANUC_MOTION_STATE_REG, 1, 10, 20, 3000, 120000, 100, &lastState);
-    if (appendLog)
-    {
-        appendLog(QString("运动结束：%1, R[%2]=%3, WaitStateDone=%4")
-            .arg(name)
-            .arg(FANUC_MOTION_STATE_REG)
-            .arg(lastState)
-            .arg(doneOk ? 1 : 0));
-    }
-    return doneOk;
+    return WaitRobotMotionDone(pRobotDriver, name, appendLog);
 }
 
-bool MeasureThenWeldService::MovePulseListAndWait(FANUCRobotCtrl* pFanucDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const
+bool MeasureThenWeldService::MovePulseListAndWait(RobotDriverAdaptor* pRobotDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const
 {
     for (size_t index = 0; index < pulses.size(); ++index)
     {
-        if (!MovePulseAndWait(pFanucDriver, pulses[index], speed, QString("%1[%2]").arg(name).arg(index), appendLog, setFlowStep))
+        if (!MovePulseAndWait(pRobotDriver, pulses[index], speed, QString("%1[%2]").arg(name).arg(index), appendLog, setFlowStep))
         {
             return false;
         }
@@ -2071,22 +2125,28 @@ bool MeasureThenWeldService::MovePulseListAndWait(FANUCRobotCtrl* pFanucDriver, 
     return true;
 }
 
-bool MeasureThenWeldService::MoveCoorsAndWait(FANUCRobotCtrl* pFanucDriver, const T_ROBOT_COORS& coors, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const
+bool MeasureThenWeldService::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, const T_ROBOT_COORS& coors, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const
 {
-    const double fanucSpeed = FanucLinearSpeedMmPerSecFromConfig(speed, 1.0);
+    if (pRobotDriver == nullptr)
+    {
+        return false;
+    }
+    const double commandSpeed = LinearCommandSpeedForRobot(pRobotDriver, speed, 1.0);
+    const QString commandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
     if (setFlowStep)
     {
         setFlowStep(QString("正在直线运动：%1").arg(name));
     }
     if (appendLog)
     {
-        appendLog(QString("开始直线运动：%1，配置速度= %2 mm/min，下发速度= %3 mm/sec")
+        appendLog(QString("开始直线运动：%1，配置速度= %2 mm/min，下发速度= %3 %4")
             .arg(name)
             .arg(speed, 0, 'f', 3)
-            .arg(fanucSpeed, 0, 'f', 3));
+            .arg(commandSpeed, 0, 'f', 3)
+            .arg(commandSpeedUnit));
     }
 
-    const bool moveOk = pFanucDriver->MoveByJob(coors, T_ROBOT_MOVE_SPEED(fanucSpeed, 0.0, 0.0), pFanucDriver->m_nExternalAxleType, "MOVL");
+    const bool moveOk = pRobotDriver->MoveByJob(coors, T_ROBOT_MOVE_SPEED(commandSpeed, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
     if (!moveOk)
     {
         if (appendLog)
@@ -2096,22 +2156,18 @@ bool MeasureThenWeldService::MoveCoorsAndWait(FANUCRobotCtrl* pFanucDriver, cons
         return false;
     }
 
-    int lastState = 0;
-    const bool doneOk = pFanucDriver->WaitStateDone(FANUC_MOTION_STATE_REG, 1, 10, 20, 3000, 120000, 100, &lastState);
-    if (appendLog)
-    {
-        appendLog(QString("直线运动结束：%1, R[%2]=%3, WaitStateDone=%4")
-            .arg(name)
-            .arg(FANUC_MOTION_STATE_REG)
-            .arg(lastState)
-            .arg(doneOk ? 1 : 0));
-    }
-    return doneOk;
+    return WaitRobotMotionDone(pRobotDriver, name, appendLog);
 }
 
-bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep) const
+bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep) const
 {
-    const double fanucScanSpeed = FanucLinearSpeedMmPerSecFromConfig(param.dScanSpeed, 1.0);
+    if (pRobotDriver == nullptr)
+    {
+        return false;
+    }
+    FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver);
+    const double scanCommandSpeed = LinearCommandSpeedForRobot(pRobotDriver, param.dScanSpeed, 1.0);
+    const QString scanCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
     const double configuredCameraReadFps = (std::isfinite(param.dCameraReadFps) && param.dCameraReadFps > 0.0)
         ? param.dCameraReadFps
         : DEFAULT_CAMERA_READ_FPS;
@@ -2228,12 +2284,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
                 droppedHeadCameraCount);
         };
 
-    auto appendRobotPose = [&robotSamples, pFanucDriver, &lastRobotMonitorMs, &passiveRobotSamplingActive, &resolveReadyCameraSamples]()
+    auto appendRobotPose = [&robotSamples, pRobotDriver, &lastRobotMonitorMs, &passiveRobotSamplingActive, &resolveReadyCameraSamples]()
         {
             RobotCalculation::TimestampedRobotPose sample;
             long long robotMs = 0;
             long long pcRecvMs = 0;
-            const T_ROBOT_COORS passivePose = pFanucDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
+            const T_ROBOT_COORS passivePose = pRobotDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
             if (pcRecvMs > 0)
             {
                 if (passiveRobotSamplingActive && robotMs == lastRobotMonitorMs)
@@ -2246,9 +2302,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
                 lastRobotMonitorMs = robotMs;
                 passiveRobotSamplingActive = true;
             }
-            else
+            if (sample.timestampUs <= 0)
             {
-                sample.pose = pFanucDriver->GetCurrentPos();
+                sample.pose = pRobotDriver->GetCurrentPos();
                 sample.timestampUs = SteadyNowUs();
             }
 
@@ -2281,19 +2337,20 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
 
     if (appendLog)
     {
-        appendLog(QString("开始扫描运动：相机帧由全局缓存线程独立读取，配置相机读取帧率=%1 fps（约 %2 ms/帧，用于时间间隔统计），机器人位姿约 %3 ms 采样；机器人位姿优先使用机器人端robot_ms，相机帧timestamp会在首帧处映射到robot_ms时间轴，并叠加相机时间补偿 %4 ms。配置扫描速度= %5 mm/min，下发速度= %6 mm/sec")
+        appendLog(QString("开始扫描运动：相机帧由全局缓存线程独立读取，配置相机读取帧率=%1 fps（约 %2 ms/帧，用于时间间隔统计），机器人位姿约 %3 ms 采样；机器人位姿使用被动时间轴（FANUC=机器人端robot_ms，STEP/其他=PC steady ms），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %4 ms。配置扫描速度= %5 mm/min，下发速度= %6 %7")
             .arg(actualCameraReadFps, 0, 'f', 2)
             .arg(cameraReadIntervalMs)
             .arg(ROBOT_SAMPLE_INTERVAL_MS)
             .arg(param.dCameraTimeOffsetMs, 0, 'f', 3)
             .arg(param.dScanSpeed, 0, 'f', 3)
-            .arg(fanucScanSpeed, 0, 'f', 3));
+            .arg(scanCommandSpeed, 0, 'f', 3)
+            .arg(scanCommandSpeedUnit));
     }
 
-    const bool moveOk = pFanucDriver->MoveByJob(
+    const bool moveOk = pRobotDriver->MoveByJob(
         param.tEndPos,
-        T_ROBOT_MOVE_SPEED(fanucScanSpeed, 0.0, 0.0),
-        pFanucDriver->m_nExternalAxleType,
+        T_ROBOT_MOVE_SPEED(scanCommandSpeed, 0.0, 0.0),
+        pRobotDriver->m_nExternalAxleType,
         "MOVL");
     if (!moveOk)
     {
@@ -2316,8 +2373,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
         if ((nowMs - lastRobotPollMs) >= ROBOT_SAMPLE_INTERVAL_MS)
         {
             lastRobotPollMs = nowMs;
-            motionState = pFanucDriver->GetIntVar(FANUC_MOTION_STATE_REG);
-            if (motionState == 10 || motionState == 20 || motionState == 1)
+            motionState = pFanucDriver != nullptr
+                ? pFanucDriver->GetIntVar(FANUC_MOTION_STATE_REG)
+                : pRobotDriver->CheckDone();
+            const bool isRunningState = pFanucDriver != nullptr
+                ? (motionState == 10 || motionState == 20 || motionState == 1)
+                : (motionState == 0);
+            const bool isDoneState = pFanucDriver != nullptr
+                ? (motionState == 1)
+                : (motionState == 2 || motionState == 1);
+            if (isRunningState)
             {
                 if (!motionStarted)
                 {
@@ -2340,7 +2405,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
                 }
                 pullScanCameraFrames();
             }
-            if (motionStarted && motionState == 1)
+            if (motionStarted && isDoneState)
             {
                 scanEndCameraSequence = CameraFrameCache::Instance().Mark();
                 pullScanCameraFramesTo(scanEndCameraSequence);
@@ -2607,7 +2672,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, co
             .arg(scanEndCameraSequence));
         if (hasCameraToRobotTimeOffset)
         {
-            appendLog(QString("相机时间轴映射到机器人robot_ms：首帧相机timestamp=%1 us，对齐机器人时间=%2 us，映射偏移=%3 us，额外补偿=%4 ms。")
+            appendLog(QString("相机时间轴映射到机器人采样时间轴：首帧相机timestamp=%1 us，对齐机器人时间=%2 us，映射偏移=%3 us，额外补偿=%4 ms。")
                 .arg(firstCameraRawTimestampUs)
                 .arg(firstRobotTimestampUs)
                 .arg(cameraToRobotTimeOffsetUs)
@@ -2948,7 +3013,7 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
 }
 
 bool MeasureThenWeldService::DownlinkWeldPoseFile(
-    FANUCRobotCtrl* pFanucDriver,
+    RobotDriverAdaptor* pRobotDriver,
     const QString& poseFilePath,
     double linearSpeedConfigMmPerMin,
     QString& summary,
@@ -2958,7 +3023,7 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
     error.clear();
     (void)linearSpeedConfigMmPerMin;
 
-    if (pFanucDriver == nullptr)
+    if (pRobotDriver == nullptr)
     {
         error = "机器人驱动为空。";
         return false;
@@ -2970,42 +3035,62 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
         return false;
     }
 
-    const double linearSpeedMmPerSec =
-        FanucLinearSpeedMmPerSecFromConfig(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 1.0);
+    const double linearCommandSpeed =
+        LinearCommandSpeedForRobot(pRobotDriver, FANUC_WELD_PATH_SPEED_MM_PER_MIN, 1.0);
+    const QString linearCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
     std::vector<T_ROBOT_MOVE_INFO> moveInfos;
-    if (!BuildWeldPoseMoveInfos(records, linearSpeedMmPerSec, moveInfos, error))
+    if (!BuildWeldPoseMoveInfos(records, linearCommandSpeed, moveInfos, error))
     {
         return false;
     }
 
-    std::string programName;
-    std::string localLsPath;
-    std::string remoteTpPath;
-    const int downlinkRet = pFanucDriver->UploadMultiPointTpProgram(
-        moveInfos,
-        &programName,
-        &localLsPath,
-        &remoteTpPath);
-    if (downlinkRet != 0)
+    if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
     {
-        error = QString("下发焊接轨迹失败：ret=%1，姿态文件=%2")
-            .arg(downlinkRet)
+        std::string programName;
+        std::string localLsPath;
+        std::string remoteTpPath;
+        const int downlinkRet = pFanucDriver->UploadMultiPointTpProgram(
+            moveInfos,
+            &programName,
+            &localLsPath,
+            &remoteTpPath);
+        if (downlinkRet != 0)
+        {
+            error = QString("下发焊接轨迹失败：ret=%1，姿态文件=%2")
+                .arg(downlinkRet)
+                .arg(QDir::toNativeSeparators(QFileInfo(poseFilePath).absoluteFilePath()));
+            return false;
+        }
+
+        summary = QString("点数=%1，焊接速度固定=%2 mm/min (下发=%3 %4)，程序=%5，本地LS=%6，远程TP=%7，当前仅下发未自动执行")
+            .arg(static_cast<int>(moveInfos.size()))
+            .arg(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 0, 'f', 3)
+            .arg(linearCommandSpeed, 0, 'f', 3)
+            .arg(linearCommandSpeedUnit)
+            .arg(QString::fromStdString(programName))
+            .arg(QDir::toNativeSeparators(QString::fromStdString(localLsPath)))
+            .arg(QString::fromStdString(remoteTpPath));
+        return true;
+    }
+
+    const int ret = pRobotDriver->ContiMoveAny(moveInfos);
+    if (ret != 0)
+    {
+        error = QString("STEP焊接轨迹下发/启动失败：ret=%1，姿态文件=%2")
+            .arg(ret)
             .arg(QDir::toNativeSeparators(QFileInfo(poseFilePath).absoluteFilePath()));
         return false;
     }
-
-    summary = QString("点数=%1，焊接速度固定=%2 mm/min (%3 mm/sec)，程序=%4，本地LS=%5，远程TP=%6，当前仅下发未自动执行")
+    summary = QString("点数=%1，焊接速度固定=%2 mm/min (下发=%3 %4)，STEP使用ContiMoveAny生成、上传并启动程序")
         .arg(static_cast<int>(moveInfos.size()))
         .arg(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 0, 'f', 3)
-        .arg(linearSpeedMmPerSec, 0, 'f', 3)
-        .arg(QString::fromStdString(programName))
-        .arg(QDir::toNativeSeparators(QString::fromStdString(localLsPath)))
-        .arg(QString::fromStdString(remoteTpPath));
+        .arg(linearCommandSpeed, 0, 'f', 3)
+        .arg(linearCommandSpeedUnit);
     return true;
 }
 
 bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
-    FANUCRobotCtrl* pFanucDriver,
+    RobotDriverAdaptor* pRobotDriver,
     const QString& poseFilePath,
     QString& summary,
     QString& error,
@@ -3018,7 +3103,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     summary.clear();
     error.clear();
 
-    if (pFanucDriver == nullptr)
+    if (pRobotDriver == nullptr)
     {
         error = "机器人驱动为空。";
         return false;
@@ -3042,10 +3127,13 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         return false;
     }
 
-    const double weldLinearSpeedMmPerSec =
+    const double weldCommandSpeed =
+        LinearCommandSpeedForRobot(pRobotDriver, FANUC_WELD_PATH_SPEED_MM_PER_MIN, 1.0);
+    const QString weldCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
+    const double weldEstimateSpeedMmPerSec =
         FanucLinearSpeedMmPerSecFromConfig(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 1.0);
     std::vector<T_ROBOT_MOVE_INFO> moveInfos;
-    if (!BuildWeldPoseMoveInfos(records, weldLinearSpeedMmPerSec, moveInfos, error))
+    if (!BuildWeldPoseMoveInfos(records, weldCommandSpeed, moveInfos, error))
     {
         return false;
     }
@@ -3065,144 +3153,215 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         appendLog(QString("收枪安全位置：%1").arg(RobotCoorsText(endSafeCoors)));
     }
 
-    const double safeMoveSpeedMmPerSec =
-        FanucLinearSpeedMmPerSecFromConfig(FANUC_SAFE_MOVE_SPEED_MM_PER_MIN, 1.0);
-    if (setFlowStep)
-    {
-        setFlowStep("正在移动到下枪安全位置，并行下发焊接轨迹");
-    }
-    if (appendLog)
-    {
-        appendLog(QString("开始直线运动：下枪安全位置，配置速度= %1 mm/min，下发速度= %2 mm/sec")
-            .arg(FANUC_SAFE_MOVE_SPEED_MM_PER_MIN, 0, 'f', 3)
-            .arg(safeMoveSpeedMmPerSec, 0, 'f', 3));
-    }
-
-    if (!pFanucDriver->MoveByJob(
-        startSafeCoors,
-        T_ROBOT_MOVE_SPEED(safeMoveSpeedMmPerSec, 0.0, 0.0),
-        pFanucDriver->m_nExternalAxleType,
-        "MOVL"))
-    {
-        error = "启动下枪安全位置直线运动失败。";
-        return false;
-    }
-    if (appendLog)
-    {
-        appendLog("下枪安全位置运动已启动，开始并行下发焊接轨迹程序。");
-    }
-
-    std::string programName;
-    std::string localLsPath;
-    std::string remoteTpPath;
-    const int downlinkRet = pFanucDriver->UploadMultiPointTpProgram(
-        moveInfos,
-        &programName,
-        &localLsPath,
-        &remoteTpPath);
-    if (downlinkRet != 0)
-    {
-        error = QString("下发焊接轨迹失败：ret=%1，姿态文件=%2。机器人可能仍在移动到下枪安全位置。")
-            .arg(downlinkRet)
-            .arg(QDir::toNativeSeparators(QFileInfo(poseFilePath).absoluteFilePath()));
-        return false;
-    }
-
-    int startSafeLastState = 0;
-    const bool startSafeDoneOk = pFanucDriver->WaitStateDone(
-        FANUC_MOTION_STATE_REG, 1, 10, 20, 3000, 120000, 100, &startSafeLastState);
-    if (appendLog)
-    {
-        appendLog(QString("直线运动结束：下枪安全位置, R[%1]=%2, WaitStateDone=%3")
-            .arg(FANUC_MOTION_STATE_REG)
-            .arg(startSafeLastState)
-            .arg(startSafeDoneOk ? 1 : 0));
-    }
-    if (!startSafeDoneOk)
-    {
-        error = QString("下枪安全位置未完成，R[%1]=%2，取消运行焊接轨迹。")
-            .arg(FANUC_MOTION_STATE_REG)
-            .arg(startSafeLastState);
-        return false;
-    }
-
-    if (checkpoint && !checkpoint(
-        "焊前确认",
-        QString("下枪安全位置已到位，焊接轨迹程序也已下发完成。\n"
-                "下枪安全位置：%1\n"
-                "焊接程序：%2\n"
-                "是否开始执行焊道？")
-            .arg(RobotCoorsText(startSafeCoors))
-            .arg(QString::fromStdString(programName))))
-    {
-        error = "用户在焊前确认节点取消了流程。";
-        return false;
-    }
-
-    const QString downlinkSummary =
-        QString("点数=%1，焊接速度固定=%2 mm/min (%3 mm/sec)，程序=%4，本地LS=%5，远程TP=%6")
-            .arg(static_cast<int>(moveInfos.size()))
-            .arg(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 0, 'f', 3)
-            .arg(weldLinearSpeedMmPerSec, 0, 'f', 3)
-            .arg(QString::fromStdString(programName))
-            .arg(QDir::toNativeSeparators(QString::fromStdString(localLsPath)))
-            .arg(QString::fromStdString(remoteTpPath));
-    const QString programNameText = QString::fromStdString(programName);
+    QString downlinkSummary;
+    QString programNameText;
+    int lastState = 0;
     const double pathLengthMm = EstimateMoveInfosPathLengthMm(moveInfos);
-    const double estimatedRunMs = weldLinearSpeedMmPerSec > 1e-6
-        ? (pathLengthMm / weldLinearSpeedMmPerSec) * 1000.0
+    const double estimatedRunMs = weldEstimateSpeedMmPerSec > 1e-6
+        ? (pathLengthMm / weldEstimateSpeedMmPerSec) * 1000.0
         : 0.0;
     const int finishTimeoutMs = static_cast<int>(std::clamp(
         estimatedRunMs * 2.0 + 30000.0,
         120000.0,
         1800000.0));
 
-    if (setFlowStep)
+    if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
     {
-        setFlowStep(QString("正在执行焊接轨迹程序：%1").arg(programNameText));
-    }
-    if (appendLog)
-    {
-        appendLog(QString("开始执行焊接轨迹程序：%1，轨迹长度≈%2 mm，预计运行≈%3 s，完成超时=%4 s")
-            .arg(programNameText)
-            .arg(pathLengthMm, 0, 'f', 3)
-            .arg(estimatedRunMs / 1000.0, 0, 'f', 1)
-            .arg(finishTimeoutMs / 1000.0));
-    }
+        const double safeMoveSpeedMmPerSec =
+            FanucLinearSpeedMmPerSecFromConfig(FANUC_SAFE_MOVE_SPEED_MM_PER_MIN, 1.0);
+        if (setFlowStep)
+        {
+            setFlowStep("正在移动到下枪安全位置，并行下发焊接轨迹");
+        }
+        if (appendLog)
+        {
+            appendLog(QString("开始直线运动：下枪安全位置，配置速度= %1 mm/min，下发速度= %2 mm/sec")
+                .arg(FANUC_SAFE_MOVE_SPEED_MM_PER_MIN, 0, 'f', 3)
+                .arg(safeMoveSpeedMmPerSec, 0, 'f', 3));
+        }
 
-    int lastState = 0;
-    if (!pFanucDriver->CallJobAndWaitStateDone(
-        programName,
-        FANUC_MOTION_STATE_REG,
-        1,
-        10,
-        20,
-        5000,
-        finishTimeoutMs,
-        100,
-        &lastState,
-        true))
-    {
-        error = QString("焊接轨迹程序执行失败：%1，R[%2]=%3")
-            .arg(programNameText)
-            .arg(FANUC_MOTION_STATE_REG)
-            .arg(lastState);
-        return false;
-    }
+        if (!pFanucDriver->MoveByJob(
+            startSafeCoors,
+            T_ROBOT_MOVE_SPEED(safeMoveSpeedMmPerSec, 0.0, 0.0),
+            pFanucDriver->m_nExternalAxleType,
+            "MOVL"))
+        {
+            error = "启动下枪安全位置直线运动失败。";
+            return false;
+        }
+        if (appendLog)
+        {
+            appendLog("下枪安全位置运动已启动，开始并行下发焊接轨迹程序。");
+        }
 
-    if (appendLog)
+        std::string programName;
+        std::string localLsPath;
+        std::string remoteTpPath;
+        const int downlinkRet = pFanucDriver->UploadMultiPointTpProgram(
+            moveInfos,
+            &programName,
+            &localLsPath,
+            &remoteTpPath);
+        if (downlinkRet != 0)
+        {
+            error = QString("下发焊接轨迹失败：ret=%1，姿态文件=%2。机器人可能仍在移动到下枪安全位置。")
+                .arg(downlinkRet)
+                .arg(QDir::toNativeSeparators(QFileInfo(poseFilePath).absoluteFilePath()));
+            return false;
+        }
+
+        int startSafeLastState = 0;
+        const bool startSafeDoneOk = pFanucDriver->WaitStateDone(
+            FANUC_MOTION_STATE_REG, 1, 10, 20, 3000, 120000, 100, &startSafeLastState);
+        if (appendLog)
+        {
+            appendLog(QString("直线运动结束：下枪安全位置, R[%1]=%2, WaitStateDone=%3")
+                .arg(FANUC_MOTION_STATE_REG)
+                .arg(startSafeLastState)
+                .arg(startSafeDoneOk ? 1 : 0));
+        }
+        if (!startSafeDoneOk)
+        {
+            error = QString("下枪安全位置未完成，R[%1]=%2，取消运行焊接轨迹。")
+                .arg(FANUC_MOTION_STATE_REG)
+                .arg(startSafeLastState);
+            return false;
+        }
+
+        if (checkpoint && !checkpoint(
+            "焊前确认",
+            QString("下枪安全位置已到位，焊接轨迹程序也已下发完成。\n"
+                    "下枪安全位置：%1\n"
+                    "焊接程序：%2\n"
+                    "是否开始执行焊道？")
+                .arg(RobotCoorsText(startSafeCoors))
+                .arg(QString::fromStdString(programName))))
+        {
+            error = "用户在焊前确认节点取消了流程。";
+            return false;
+        }
+
+        downlinkSummary =
+            QString("点数=%1，焊接速度固定=%2 mm/min (下发=%3 %4)，程序=%5，本地LS=%6，远程TP=%7")
+                .arg(static_cast<int>(moveInfos.size()))
+                .arg(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 0, 'f', 3)
+                .arg(weldCommandSpeed, 0, 'f', 3)
+                .arg(weldCommandSpeedUnit)
+                .arg(QString::fromStdString(programName))
+                .arg(QDir::toNativeSeparators(QString::fromStdString(localLsPath)))
+                .arg(QString::fromStdString(remoteTpPath));
+        programNameText = QString::fromStdString(programName);
+
+        if (setFlowStep)
+        {
+            setFlowStep(QString("正在执行焊接轨迹程序：%1").arg(programNameText));
+        }
+        if (appendLog)
+        {
+            appendLog(QString("开始执行焊接轨迹程序：%1，轨迹长度≈%2 mm，预计运行≈%3 s，完成超时=%4 s")
+                .arg(programNameText)
+                .arg(pathLengthMm, 0, 'f', 3)
+                .arg(estimatedRunMs / 1000.0, 0, 'f', 1)
+                .arg(finishTimeoutMs / 1000.0));
+        }
+
+        if (!pFanucDriver->CallJobAndWaitStateDone(
+            programName,
+            FANUC_MOTION_STATE_REG,
+            1,
+            10,
+            20,
+            5000,
+            finishTimeoutMs,
+            100,
+            &lastState,
+            true))
+        {
+            error = QString("焊接轨迹程序执行失败：%1，R[%2]=%3")
+                .arg(programNameText)
+                .arg(FANUC_MOTION_STATE_REG)
+                .arg(lastState);
+            return false;
+        }
+
+        if (appendLog)
+        {
+            appendLog(QString("焊接轨迹程序执行完成：%1，R[%2]=%3")
+                .arg(programNameText)
+                .arg(FANUC_MOTION_STATE_REG)
+                .arg(lastState));
+        }
+    }
+    else
     {
-        appendLog(QString("焊接轨迹程序执行完成：%1，R[%2]=%3")
-            .arg(programNameText)
-            .arg(FANUC_MOTION_STATE_REG)
-            .arg(lastState));
+        if (!MoveCoorsAndWait(
+            pRobotDriver,
+            startSafeCoors,
+            FANUC_SAFE_MOVE_SPEED_MM_PER_MIN,
+            "下枪安全位置",
+            appendLog,
+            setFlowStep))
+        {
+            error = "移动到下枪安全位置失败。";
+            return false;
+        }
+
+        if (checkpoint && !checkpoint(
+            "焊前确认",
+            QString("下枪安全位置已到位，STEP 将生成、上传并启动焊接轨迹。\n"
+                    "下枪安全位置：%1\n"
+                    "点数：%2\n"
+                    "是否开始执行焊道？")
+                .arg(RobotCoorsText(startSafeCoors))
+                .arg(static_cast<int>(moveInfos.size()))))
+        {
+            error = "用户在焊前确认节点取消了流程。";
+            return false;
+        }
+
+        programNameText = "STEP ContiMoveAny";
+        downlinkSummary =
+            QString("点数=%1，焊接速度固定=%2 mm/min (下发=%3 %4)，STEP使用ContiMoveAny生成、上传并启动程序")
+                .arg(static_cast<int>(moveInfos.size()))
+                .arg(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 0, 'f', 3)
+                .arg(weldCommandSpeed, 0, 'f', 3)
+                .arg(weldCommandSpeedUnit);
+
+        if (setFlowStep)
+        {
+            setFlowStep("正在执行STEP焊接轨迹程序");
+        }
+        if (appendLog)
+        {
+            appendLog(QString("开始执行STEP焊接轨迹：轨迹长度≈%1 mm，预计运行≈%2 s，完成超时=%3 s")
+                .arg(pathLengthMm, 0, 'f', 3)
+                .arg(estimatedRunMs / 1000.0, 0, 'f', 1)
+                .arg(finishTimeoutMs / 1000.0));
+        }
+
+        const int ret = pRobotDriver->ContiMoveAny(moveInfos);
+        if (ret != 0)
+        {
+            error = QString("STEP焊接轨迹下发/启动失败：ret=%1").arg(ret);
+            return false;
+        }
+
+        lastState = pRobotDriver->CheckRobotDone(100);
+        if (lastState <= 0)
+        {
+            error = QString("STEP焊接轨迹等待完成失败：CheckRobotDone=%1").arg(lastState);
+            return false;
+        }
+        if (appendLog)
+        {
+            appendLog(QString("STEP焊接轨迹执行完成：CheckRobotDone=%1").arg(lastState));
+        }
     }
 
     if (checkpoint && !checkpoint(
         "焊后确认",
-        QString("焊接轨迹已执行完成。\n程序：%1\nR[%2]=%3\n是否继续移动到收枪安全位置？")
+        QString("焊接轨迹已执行完成。\n程序：%1\n完成状态=%2\n是否继续移动到收枪安全位置？")
             .arg(programNameText)
-            .arg(FANUC_MOTION_STATE_REG)
             .arg(lastState)))
     {
         error = "用户在焊后确认节点取消了流程。";
@@ -3210,7 +3369,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     }
 
     if (!MoveCoorsAndWait(
-        pFanucDriver,
+        pRobotDriver,
         endSafeCoors,
         FANUC_SAFE_MOVE_SPEED_MM_PER_MIN,
         "收枪安全位置",

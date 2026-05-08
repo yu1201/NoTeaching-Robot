@@ -1,6 +1,7 @@
 #include "RobotJogDialog.h"
 
 #include "FANUCRobotDriver.h"
+#include "RobotDriverAdaptor.h"
 #include "WindowStyleHelper.h"
 
 #include <QApplication>
@@ -36,7 +37,7 @@ namespace
 		return button;
 	}
 
-	double AxisPulseUnit(const FANUCRobotCtrl* driver, int axisIndex)
+	double AxisPulseUnit(const RobotDriverAdaptor* driver, int axisIndex)
 	{
 		if (driver == nullptr)
 		{
@@ -94,7 +95,16 @@ namespace
 		return QCoreApplication::applicationDirPath() + "/RobotJogDialog.ini";
 	}
 
-	void LogCartesianPoint(FANUCRobotCtrl* driver, const char* prefix, const T_ROBOT_COORS& pos)
+	double CartesianCommandSpeed(RobotDriverAdaptor* driver, double speedMmPerMin)
+	{
+		if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
+		{
+			return std::max(1.0, speedMmPerMin / 60.0);
+		}
+		return std::max(1.0, speedMmPerMin);
+	}
+
+	void LogCartesianPoint(RobotDriverAdaptor* driver, const char* prefix, const T_ROBOT_COORS& pos)
 	{
 		if (driver == nullptr || driver->m_pRobotLog == nullptr || prefix == nullptr)
 		{
@@ -109,7 +119,7 @@ namespace
 			pos.dBX, pos.dBY, pos.dBZ);
 	}
 
-	void LogJointPoint(FANUCRobotCtrl* driver, const char* prefix, const T_ANGLE_PULSE& pulse)
+	void LogJointPoint(RobotDriverAdaptor* driver, const char* prefix, const T_ANGLE_PULSE& pulse)
 	{
 		if (driver == nullptr || driver->m_pRobotLog == nullptr || prefix == nullptr)
 		{
@@ -125,9 +135,9 @@ namespace
 	}
 }
 
-RobotJogDialog::RobotJogDialog(FANUCRobotCtrl* fanucDriver, QWidget* parent)
+RobotJogDialog::RobotJogDialog(RobotDriverAdaptor* robotDriver, QWidget* parent)
 	: QDialog(parent)
-	, m_fanucDriver(fanucDriver)
+	, m_robotDriver(robotDriver)
 	, m_jogStartTimer(new QTimer(this))
 	, m_jogTimer(new QTimer(this))
 	, m_stateTimer(new QTimer(this))
@@ -378,31 +388,31 @@ void RobotJogDialog::ShowMessageOnUiThread(QMessageBox::Icon icon, const QString
 
 void RobotJogDialog::ReadCurrentCartesianTarget()
 {
-	if (m_fanucDriver == nullptr)
+	if (m_robotDriver == nullptr)
 	{
 		return;
 	}
-	const T_ROBOT_COORS current = m_fanucDriver->GetCurrentPos();
-	LogCartesianPoint(m_fanucDriver, "点动界面读取当前位置并保存到直角编辑框", current);
+	const T_ROBOT_COORS current = m_robotDriver->GetCurrentPos();
+	LogCartesianPoint(m_robotDriver, "点动界面读取当前位置并保存到直角编辑框", current);
 	SetCartesianTargetEditors(current);
 }
 
 void RobotJogDialog::ReadCurrentJointTarget()
 {
-	if (m_fanucDriver == nullptr)
+	if (m_robotDriver == nullptr)
 	{
 		return;
 	}
-	const T_ANGLE_PULSE current = m_fanucDriver->GetCurrentPulse();
-	LogJointPoint(m_fanucDriver, "点动界面读取当前位置并保存到关节编辑框", current);
+	const T_ANGLE_PULSE current = m_robotDriver->GetCurrentPulse();
+	LogJointPoint(m_robotDriver, "点动界面读取当前位置并保存到关节编辑框", current);
 	SetJointTargetEditors(current);
 }
 
 void RobotJogDialog::MoveToCartesianTarget()
 {
-	if (m_fanucDriver == nullptr)
+	if (m_robotDriver == nullptr)
 	{
-		QMessageBox::warning(this, "点动控制", "FANUC驱动无效。");
+		QMessageBox::warning(this, "点动控制", "机器人驱动无效。");
 		return;
 	}
 	if (IsMotionBusy())
@@ -419,9 +429,9 @@ void RobotJogDialog::MoveToCartesianTarget()
 		return;
 	}
 
-	const double robotSpeed = std::max(1.0, CartesianSpeed() / 60.0);
-	LogCartesianPoint(m_fanucDriver, "点动界面从直角编辑框发送目标点", target);
-	FANUCRobotCtrl* driver = m_fanucDriver;
+	const double robotSpeed = CartesianCommandSpeed(m_robotDriver, CartesianSpeed());
+	LogCartesianPoint(m_robotDriver, "点动界面从直角编辑框发送目标点", target);
+	RobotDriverAdaptor* driver = m_robotDriver;
 	QPointer<RobotJogDialog> self(this);
 	SetMotionTaskRunning(true);
 		std::thread([self, driver, target, robotSpeed]()
@@ -449,9 +459,9 @@ void RobotJogDialog::MoveToCartesianTarget()
 
 void RobotJogDialog::MoveToJointTarget()
 {
-	if (m_fanucDriver == nullptr)
+	if (m_robotDriver == nullptr)
 	{
-		QMessageBox::warning(this, "点动控制", "FANUC驱动无效。");
+		QMessageBox::warning(this, "点动控制", "机器人驱动无效。");
 		return;
 	}
 	if (IsMotionBusy())
@@ -469,8 +479,8 @@ void RobotJogDialog::MoveToJointTarget()
 	}
 
 	const double robotSpeed = std::clamp(JointSpeed(), 1.0, 100.0);
-	LogJointPoint(m_fanucDriver, "点动界面从关节编辑框发送目标点", target);
-	FANUCRobotCtrl* driver = m_fanucDriver;
+	LogJointPoint(m_robotDriver, "点动界面从关节编辑框发送目标点", target);
+	RobotDriverAdaptor* driver = m_robotDriver;
 	QPointer<RobotJogDialog> self(this);
 	SetMotionTaskRunning(true);
 		std::thread([self, driver, target, robotSpeed]()
@@ -498,11 +508,11 @@ void RobotJogDialog::MoveToJointTarget()
 
 void RobotJogDialog::StartJog(JogMode mode, int axisIndex, int direction)
 {
-	if (m_fanucDriver == nullptr || IsMotionBusy())
+	if (m_robotDriver == nullptr || IsMotionBusy())
 	{
-		if (m_fanucDriver == nullptr)
+		if (m_robotDriver == nullptr)
 		{
-			QMessageBox::warning(this, "点动控制", "FANUC驱动无效。");
+			QMessageBox::warning(this, "点动控制", "机器人驱动无效。");
 		}
 		return;
 	}
@@ -519,7 +529,7 @@ void RobotJogDialog::StartJog(JogMode mode, int axisIndex, int direction)
 
 void RobotJogDialog::BeginJog()
 {
-	if (m_fanucDriver == nullptr || m_currentDirection == 0 || m_jogActive)
+	if (m_robotDriver == nullptr || m_currentDirection == 0 || m_jogActive)
 	{
 		return;
 	}
@@ -533,22 +543,22 @@ void RobotJogDialog::BeginJog()
 
 	if (mode == JogMode::Cartesian)
 	{
-		m_streamBasePos = m_fanucDriver->GetCurrentPos();
+		m_streamBasePos = m_robotDriver->GetCurrentPos();
 		m_lastStreamPos = m_streamBasePos;
 	}
 	else
 	{
-		m_streamBasePulse = m_fanucDriver->GetCurrentPulse();
+		m_streamBasePulse = m_robotDriver->GetCurrentPulse();
 		m_lastStreamPulse = m_streamBasePulse;
 	}
 
 	const double robotSpeed = mode == JogMode::Cartesian
-		? std::max(1.0, m_streamCartesianSpeed / 60.0)
+		? CartesianCommandSpeed(m_robotDriver, m_streamCartesianSpeed)
 		: std::clamp(m_streamJointSpeed, 1.0, 100.0);
 
-	if (m_fanucDriver->m_pRobotLog != nullptr)
+	if (m_robotDriver->m_pRobotLog != nullptr)
 	{
-		m_fanucDriver->m_pRobotLog->write(LogColor::DEFAULT,
+		m_robotDriver->m_pRobotLog->write(LogColor::DEFAULT,
 			"点动界面长按开始: mode=%s axis=%d direction=%d speed=%.3f baseCart=(X=%.3f Y=%.3f Z=%.3f RX=%.3f RY=%.3f RZ=%.3f) baseJoint=(J1=%ld J2=%ld J3=%ld J4=%ld J5=%ld J6=%ld)",
 			mode == JogMode::Cartesian ? "MOVL" : "MOVJ",
 			m_currentAxis,
@@ -560,7 +570,16 @@ void RobotJogDialog::BeginJog()
 			m_streamBasePulse.nRPulse, m_streamBasePulse.nBPulse, m_streamBasePulse.nTPulse);
 	}
 
-	if (!m_fanucDriver->StartContinuousMoveQueue(mode == JogMode::Cartesian ? MOVL : MOVJ, robotSpeed))
+	FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver);
+	if (fanucDriver == nullptr)
+	{
+		m_jogActive = false;
+		UpdateMotionButtonState();
+		QMessageBox::information(this, "点动控制", "当前机器人暂不支持长按连续点动，请使用单击步进或目标点运动。");
+		return;
+	}
+
+	if (!fanucDriver->StartContinuousMoveQueue(mode == JogMode::Cartesian ? MOVL : MOVJ, robotSpeed))
 	{
 		m_jogActive = false;
 		UpdateMotionButtonState();
@@ -573,14 +592,14 @@ void RobotJogDialog::BeginJog()
 		if (mode == JogMode::Cartesian)
 		{
 			m_lastStreamPos = BuildCartesianStreamPoint(i);
-			LogCartesianPoint(m_fanucDriver, GetStr("点动界面长按预装MOVL点[%d]", i).c_str(), m_lastStreamPos);
-			m_fanucDriver->PushContinuousMovePoint(m_lastStreamPos, robotSpeed);
+			LogCartesianPoint(m_robotDriver, GetStr("点动界面长按预装MOVL点[%d]", i).c_str(), m_lastStreamPos);
+			fanucDriver->PushContinuousMovePoint(m_lastStreamPos, robotSpeed);
 		}
 		else
 		{
 			m_lastStreamPulse = BuildJointStreamPoint(i);
-			LogJointPoint(m_fanucDriver, GetStr("点动界面长按预装MOVJ点[%d]", i).c_str(), m_lastStreamPulse);
-			m_fanucDriver->PushContinuousMovePoint(m_lastStreamPulse, robotSpeed);
+			LogJointPoint(m_robotDriver, GetStr("点动界面长按预装MOVJ点[%d]", i).c_str(), m_lastStreamPulse);
+			fanucDriver->PushContinuousMovePoint(m_lastStreamPulse, robotSpeed);
 		}
 	}
 
@@ -590,7 +609,7 @@ void RobotJogDialog::BeginJog()
 
 void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 {
-	if (m_fanucDriver == nullptr)
+	if (m_robotDriver == nullptr)
 	{
 		return;
 	}
@@ -601,13 +620,13 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 
 	if (mode == JogMode::Cartesian)
 	{
-		T_ROBOT_COORS target = m_fanucDriver->GetCurrentPos();
+		T_ROBOT_COORS target = m_robotDriver->GetCurrentPos();
 		const double stepDistance = CartesianSpeed() * STREAM_POINT_TIME_SEC / 60.0;
 		AddCartesianDelta(target, axisIndex, static_cast<double>(direction) * stepDistance);
-		const double robotSpeed = std::max(1.0, CartesianSpeed() / 60.0);
-		LogCartesianPoint(m_fanucDriver, "点动界面单击生成直角目标点", target);
+		const double robotSpeed = CartesianCommandSpeed(m_robotDriver, CartesianSpeed());
+		LogCartesianPoint(m_robotDriver, "点动界面单击生成直角目标点", target);
 		SetMotionTaskRunning(true);
-		FANUCRobotCtrl* driver = m_fanucDriver;
+		RobotDriverAdaptor* driver = m_robotDriver;
 		QPointer<RobotJogDialog> self(this);
 		std::thread([self, driver, target, robotSpeed]()
 			{
@@ -630,15 +649,15 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 		return;
 	}
 
-	T_ANGLE_PULSE target = m_fanucDriver->GetCurrentPulse();
+	T_ANGLE_PULSE target = m_robotDriver->GetCurrentPulse();
 	const double stepDeg = std::max(0.25, JointSpeed()) * STREAM_POINT_TIME_SEC;
-	const double pulseUnit = AxisPulseUnit(m_fanucDriver, axisIndex);
+	const double pulseUnit = AxisPulseUnit(m_robotDriver, axisIndex);
 	const long deltaPulse = pulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(static_cast<double>(direction) * stepDeg / pulseUnit));
 	AddJointDelta(target, axisIndex, deltaPulse);
 	const double robotSpeed = std::clamp(JointSpeed(), 1.0, 100.0);
-	LogJointPoint(m_fanucDriver, "点动界面单击生成关节目标点", target);
+	LogJointPoint(m_robotDriver, "点动界面单击生成关节目标点", target);
 	SetMotionTaskRunning(true);
-	FANUCRobotCtrl* driver = m_fanucDriver;
+	RobotDriverAdaptor* driver = m_robotDriver;
 	QPointer<RobotJogDialog> self(this);
 	std::thread([self, driver, target, robotSpeed]()
 		{
@@ -670,16 +689,19 @@ void RobotJogDialog::StopJog()
 		m_jogStartTimer->stop();
 	}
 	m_jogTimer->stop();
-	if (wasActive && m_fanucDriver != nullptr)
+	if (wasActive && m_robotDriver != nullptr)
 	{
-		m_fanucDriver->RequestEndContinuousMoveQueue();
+		if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver))
+		{
+			fanucDriver->RequestEndContinuousMoveQueue();
+		}
 	}
 	UpdateMotionButtonState();
 }
 
 void RobotJogDialog::FeedNextPoint()
 {
-	if (!m_jogActive || m_fanucDriver == nullptr)
+	if (!m_jogActive || m_robotDriver == nullptr)
 	{
 		return;
 	}
@@ -688,35 +710,46 @@ void RobotJogDialog::FeedNextPoint()
 	const T_ROBOT_COORS cartTarget = BuildCartesianStreamPoint(stepIndex);
 	const T_ANGLE_PULSE jointTarget = BuildJointStreamPoint(stepIndex);
 	const double robotSpeed = mode == JogMode::Cartesian
-		? std::max(1.0, m_streamCartesianSpeed / 60.0)
+		? CartesianCommandSpeed(m_robotDriver, m_streamCartesianSpeed)
 		: std::clamp(m_streamJointSpeed, 1.0, 100.0);
 	if (mode == JogMode::Cartesian)
 	{
 		m_lastStreamPos = cartTarget;
-		LogCartesianPoint(m_fanucDriver, GetStr("点动界面长按追加MOVL点[%d]", stepIndex).c_str(), cartTarget);
-		m_fanucDriver->PushContinuousMovePoint(cartTarget, robotSpeed);
+		LogCartesianPoint(m_robotDriver, GetStr("点动界面长按追加MOVL点[%d]", stepIndex).c_str(), cartTarget);
+		if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver))
+		{
+			fanucDriver->PushContinuousMovePoint(cartTarget, robotSpeed);
+		}
 	}
 	else
 	{
 		m_lastStreamPulse = jointTarget;
-		LogJointPoint(m_fanucDriver, GetStr("点动界面长按追加MOVJ点[%d]", stepIndex).c_str(), jointTarget);
-		m_fanucDriver->PushContinuousMovePoint(jointTarget, robotSpeed);
+		LogJointPoint(m_robotDriver, GetStr("点动界面长按追加MOVJ点[%d]", stepIndex).c_str(), jointTarget);
+		if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver))
+		{
+			fanucDriver->PushContinuousMovePoint(jointTarget, robotSpeed);
+		}
 	}
 	++m_nextStreamStep;
 }
 
 void RobotJogDialog::RefreshStateText()
 {
-	if (m_stateLabel == nullptr || m_fanucDriver == nullptr)
+	if (m_stateLabel == nullptr || m_robotDriver == nullptr)
 	{
 		return;
 	}
 
 	long long robotMs = 0;
 	long long pcRecvMs = 0;
-	const T_ROBOT_COORS pos = m_fanucDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
-	const T_ANGLE_PULSE pulse = m_fanucDriver->GetCurrentPulsePassive();
-	const int done = m_fanucDriver->CheckDonePassive();
+	FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver);
+	if (fanucDriver != nullptr)
+	{
+		fanucDriver->StartMonitor();
+	}
+	const T_ROBOT_COORS pos = m_robotDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
+	const T_ANGLE_PULSE pulse = m_robotDriver->GetCurrentPulsePassive();
+	const int done = m_robotDriver->CheckDonePassive();
 	const QString doneText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知(%1)").arg(done));
 	UpdateMotionButtonState();
 
@@ -765,7 +798,11 @@ bool RobotJogDialog::IsMotionBusy() const
 	{
 		return true;
 	}
-	return m_fanucDriver != nullptr && m_fanucDriver->CheckDonePassive() == 0;
+	if (m_robotDriver == nullptr)
+	{
+		return false;
+	}
+	return m_robotDriver->CheckDonePassive() == 0;
 }
 
 double RobotJogDialog::CartesianSpeed() const
@@ -806,7 +843,14 @@ bool RobotJogDialog::ReadCartesianTargetFromEditors(T_ROBOT_COORS& target, QStri
 		}
 	}
 
-	target = m_fanucDriver == nullptr ? T_ROBOT_COORS() : m_fanucDriver->GetCurrentPosPassive();
+	if (m_robotDriver == nullptr)
+	{
+		target = T_ROBOT_COORS();
+	}
+	else
+	{
+		target = m_robotDriver->GetCurrentPosPassive();
+	}
 	target.dX = values[0];
 	target.dY = values[1];
 	target.dZ = values[2];
@@ -842,7 +886,14 @@ bool RobotJogDialog::ReadJointTargetFromEditors(T_ANGLE_PULSE& target, QString& 
 		}
 	}
 
-	target = m_fanucDriver == nullptr ? T_ANGLE_PULSE() : m_fanucDriver->GetCurrentPulsePassive();
+	if (m_robotDriver == nullptr)
+	{
+		target = T_ANGLE_PULSE();
+	}
+	else
+	{
+		target = m_robotDriver->GetCurrentPulsePassive();
+	}
 	target.nSPulse = values[0];
 	target.nLPulse = values[1];
 	target.nUPulse = values[2];
@@ -891,7 +942,7 @@ T_ANGLE_PULSE RobotJogDialog::BuildJointStreamPoint(int stepIndex) const
 	const double speedPercent = m_streamJointSpeed;
 	const double degPerSecond = std::max(0.25, speedPercent);
 	const double deltaDeg = static_cast<double>(m_currentDirection) * degPerSecond * STREAM_POINT_TIME_SEC * static_cast<double>(stepIndex + 1);
-	const double pulseUnit = AxisPulseUnit(m_fanucDriver, m_currentAxis);
+	const double pulseUnit = AxisPulseUnit(m_robotDriver, m_currentAxis);
 	const long deltaPulse = pulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(deltaDeg / pulseUnit));
 	AddJointDelta(target, m_currentAxis, deltaPulse);
 	return target;

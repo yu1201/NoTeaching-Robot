@@ -19,6 +19,7 @@
 #include "WeldSeamCompDialog.h"
 #include "groove/clientudpformsensorworker.h"
 #include "groove/framebuffer.h"
+#include <QByteArray>
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -26,6 +27,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QInputDialog>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -34,6 +36,8 @@
 #include <QLayout>
 #include <QLineEdit>
 #include <QAction>
+#include <QCheckBox>
+#include <QFrame>
 #include <QMetaObject>
 #include <QMenu>
 #include <QMenuBar>
@@ -43,9 +47,16 @@
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QGraphicsDropShadowEffect>
+#include <QPixmap>
+#include <QTableWidget>
+#include <QHeaderView>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStandardItem>
+#include <QStandardItemModel>
+#include <QScreen>
 #include <QSet>
 #include <QSettings>
 #include <QThread>
@@ -74,6 +85,119 @@ namespace
 	const QString kRoleOperator = QStringLiteral("operator");
 	const QString kRoleEngineer = QStringLiteral("engineer");
 	const QString kRoleAdmin = QStringLiteral("admin");
+
+	QString DecodeConfigText(const std::string& text)
+	{
+		if (text.empty())
+		{
+			return QString();
+		}
+
+		const QByteArray bytes(text.data(), static_cast<int>(text.size()));
+#ifdef Q_OS_WIN
+		const auto decodeWindowsCodePage = [&bytes](UINT codePage, DWORD flags) -> QString
+			{
+				const int wideLength = MultiByteToWideChar(
+					codePage,
+					flags,
+					bytes.constData(),
+					bytes.size(),
+					nullptr,
+					0);
+				if (wideLength <= 0)
+				{
+					return QString();
+				}
+				std::wstring wideText(static_cast<size_t>(wideLength), L'\0');
+				MultiByteToWideChar(
+					codePage,
+					flags,
+					bytes.constData(),
+					bytes.size(),
+					wideText.data(),
+					wideLength);
+				return QString::fromWCharArray(wideText.data(), wideLength);
+			};
+
+		QString decodedUtf8Text = decodeWindowsCodePage(CP_UTF8, MB_ERR_INVALID_CHARS);
+		if (!decodedUtf8Text.isNull() && !decodedUtf8Text.contains(QChar(0xfffd)))
+		{
+			return decodedUtf8Text;
+		}
+		QString decodedGbkText = decodeWindowsCodePage(936, 0);
+		if (!decodedGbkText.isNull())
+		{
+			return decodedGbkText;
+		}
+#endif
+		const QString utf8Text = QString::fromUtf8(bytes.constData(), bytes.size());
+		if (!utf8Text.contains(QChar(0xfffd)))
+		{
+			return utf8Text;
+		}
+		return QString::fromLocal8Bit(bytes.constData(), bytes.size());
+	}
+
+	QString RobotDriverTypeText(const RobotDriverAdaptor* driver)
+	{
+		if (driver == nullptr)
+		{
+			return "未知类型";
+		}
+		switch (driver->m_nRobotType)
+		{
+		case ROBOT_TYPE_STEP:
+			return "STEP";
+		case ROBOT_TYPE_FANUC:
+			return "FANUC";
+		default:
+			return QString("未知类型%1").arg(driver->m_nRobotType);
+		}
+	}
+
+	void CenterWindowOnScreen(QWidget* window)
+	{
+		if (window == nullptr)
+		{
+			return;
+		}
+
+		QScreen* screen = QGuiApplication::screenAt(window->frameGeometry().center());
+		if (screen == nullptr)
+		{
+			screen = QGuiApplication::primaryScreen();
+		}
+		if (screen == nullptr)
+		{
+			return;
+		}
+
+		QRect frame = window->frameGeometry();
+		frame.moveCenter(screen->availableGeometry().center());
+		window->move(frame.topLeft());
+	}
+
+	QPushButton* EmbeddedBackButton(QWidget* page)
+	{
+		if (page == nullptr)
+		{
+			return nullptr;
+		}
+		return page->findChild<QPushButton*>("EmbeddedBackToDashboardButton", Qt::FindDirectChildrenOnly);
+	}
+
+	void PositionEmbeddedBackButton(QWidget* page)
+	{
+		QPushButton* backButton = EmbeddedBackButton(page);
+		if (page == nullptr || backButton == nullptr)
+		{
+			return;
+		}
+		const QSize buttonSize(118, 38);
+		backButton->setFixedSize(buttonSize);
+		backButton->move(std::max(16, page->width() - buttonSize.width() - 22), 16);
+		backButton->raise();
+	}
 
 	QString FindProjectFilePath(const QString& relativePath)
 	{
@@ -333,6 +457,358 @@ namespace
 		const QFileInfo info(outputPath);
 		return info.dir().filePath(info.completeBaseName() + "_Noise.txt");
 	}
+
+	QString AccountManagementConfigPath()
+	{
+		return RobotDataHelper::BuildProjectPath("Data/Accounts.ini");
+	}
+
+	QString HashAccountPassword(const QString& userName, const QString& password)
+	{
+		return QString::fromLatin1(
+			QCryptographicHash::hash(QString("%1\n%2").arg(userName.trimmed(), password).toUtf8(), QCryptographicHash::Sha256).toHex());
+	}
+
+	QString DisplayRoleNameForAccount(const QString& role)
+	{
+		if (role == kRoleAdmin)
+		{
+			return "管理员";
+		}
+		if (role == kRoleEngineer)
+		{
+			return "工程师";
+		}
+		return "操作员";
+	}
+
+	class AccountManagementDialog final : public QDialog
+	{
+	public:
+		explicit AccountManagementDialog(QWidget* parent = nullptr)
+			: QDialog(parent)
+		{
+			setWindowTitle("账号管理");
+			ApplyUnifiedWindowChrome(this);
+			ResizeWindowForAvailableGeometry(this, QSize(980, 700), 0.82, 0.78);
+			setStyleSheet(
+				"QDialog { background: #111820; color: #ECF3F4; }"
+				"QGroupBox { border: 1px solid #2E4656; border-radius: 12px; margin-top: 16px; padding-top: 12px; }"
+				"QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color: #9ED8DB; }"
+				"QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 10px 14px; }"
+				"QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
+				"QPushButton:pressed { background: #18303B; }"
+				"QLineEdit, QComboBox, QPlainTextEdit, QTableWidget { background: #081018; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 8px; padding: 6px 8px; }"
+				"QHeaderView::section { background: #13202A; color: #BFE8EC; border: 0px; padding: 6px; }");
+
+			QVBoxLayout* rootLayout = new QVBoxLayout(this);
+			QLabel* titleLabel = new QLabel("账号管理");
+			titleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #F7FCFC;");
+			rootLayout->addWidget(titleLabel);
+			QLabel* hintLabel = new QLabel("这里可以新增账号、修改权限、重置密码或删除账号。仅管理员可使用。");
+			hintLabel->setWordWrap(true);
+			hintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
+			rootLayout->addWidget(hintLabel);
+
+			QGroupBox* createGroup = new QGroupBox("新增账号", this);
+			QFormLayout* createForm = new QFormLayout(createGroup);
+			m_createUserEdit = new QLineEdit(createGroup);
+			m_createPassEdit = new QLineEdit(createGroup);
+			m_createPassEdit->setEchoMode(QLineEdit::Password);
+			m_createRoleCombo = new QComboBox(createGroup);
+			m_createRoleCombo->addItem("操作员", kRoleOperator);
+			m_createRoleCombo->addItem("工程师", kRoleEngineer);
+			m_createRoleCombo->addItem("管理员", kRoleAdmin);
+			createForm->addRow("账号", m_createUserEdit);
+			createForm->addRow("密码", m_createPassEdit);
+			createForm->addRow("权限", m_createRoleCombo);
+			QHBoxLayout* createButtonLayout = new QHBoxLayout();
+			QPushButton* createBtn = new QPushButton("创建账号", createGroup);
+			QPushButton* refreshBtn = new QPushButton("刷新列表", createGroup);
+			createButtonLayout->addWidget(createBtn);
+			createButtonLayout->addWidget(refreshBtn);
+			createForm->addRow(createButtonLayout);
+			rootLayout->addWidget(createGroup);
+
+			QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
+			splitter->setChildrenCollapsible(false);
+			QGroupBox* listGroup = new QGroupBox("账号列表", splitter);
+			QVBoxLayout* listLayout = new QVBoxLayout(listGroup);
+			m_accountTable = new QTableWidget(listGroup);
+			m_accountTable->setColumnCount(3);
+			m_accountTable->setHorizontalHeaderLabels(QStringList() << "账号" << "权限" << "创建时间");
+			m_accountTable->horizontalHeader()->setStretchLastSection(true);
+			m_accountTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+			m_accountTable->setSelectionMode(QAbstractItemView::SingleSelection);
+			m_accountTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+			listLayout->addWidget(m_accountTable);
+
+			QGroupBox* editGroup = new QGroupBox("编辑选中账号", splitter);
+			QVBoxLayout* editLayout = new QVBoxLayout(editGroup);
+			QFormLayout* editForm = new QFormLayout();
+			m_editRoleCombo = new QComboBox(editGroup);
+			m_editRoleCombo->addItem("操作员", kRoleOperator);
+			m_editRoleCombo->addItem("工程师", kRoleEngineer);
+			m_editRoleCombo->addItem("管理员", kRoleAdmin);
+			m_editPassEdit = new QLineEdit(editGroup);
+			m_editPassEdit->setEchoMode(QLineEdit::Password);
+			m_editPassEdit->setPlaceholderText("留空表示不修改密码");
+			editForm->addRow("权限", m_editRoleCombo);
+			editForm->addRow("新密码", m_editPassEdit);
+			editLayout->addLayout(editForm);
+			QHBoxLayout* editButtonLayout = new QHBoxLayout();
+			QPushButton* saveBtn = new QPushButton("保存修改", editGroup);
+			QPushButton* deleteBtn = new QPushButton("删除账号", editGroup);
+			QPushButton* closeBtn = new QPushButton("关闭", editGroup);
+			editButtonLayout->addWidget(saveBtn);
+			editButtonLayout->addWidget(deleteBtn);
+			editButtonLayout->addWidget(closeBtn);
+			editLayout->addLayout(editButtonLayout);
+			m_logText = new QPlainTextEdit(editGroup);
+			m_logText->setReadOnly(true);
+			m_logText->document()->setMaximumBlockCount(300);
+			m_logText->setMaximumHeight(160);
+			editLayout->addWidget(m_logText, 1);
+
+			splitter->addWidget(listGroup);
+			splitter->addWidget(editGroup);
+			splitter->setStretchFactor(0, 2);
+			splitter->setStretchFactor(1, 1);
+			rootLayout->addWidget(splitter, 1);
+
+			connect(createBtn, &QPushButton::clicked, this, [this]()
+				{
+					if (CreateAccount())
+					{
+						LoadAccounts();
+					}
+				});
+			connect(refreshBtn, &QPushButton::clicked, this, [this]() { LoadAccounts(); });
+			connect(saveBtn, &QPushButton::clicked, this, [this]()
+				{
+					if (UpdateAccount())
+					{
+						LoadAccounts();
+					}
+				});
+			connect(deleteBtn, &QPushButton::clicked, this, [this]()
+				{
+					if (DeleteAccount())
+					{
+						LoadAccounts();
+					}
+				});
+			connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
+			connect(m_accountTable, &QTableWidget::itemSelectionChanged, this, [this]() { SyncEditorFromSelection(); });
+			LoadAccounts();
+		}
+
+	private:
+		void AppendLog(const QString& text)
+		{
+			if (m_logText != nullptr)
+			{
+				m_logText->appendPlainText(text);
+			}
+		}
+
+		QString SelectedAccount() const
+		{
+			if (m_accountTable == nullptr)
+			{
+				return QString();
+			}
+			const int row = m_accountTable->currentRow();
+			if (row < 0)
+			{
+				return QString();
+			}
+			QTableWidgetItem* item = m_accountTable->item(row, 0);
+			return item != nullptr ? item->text().trimmed() : QString();
+		}
+
+		void LoadAccounts()
+		{
+			if (m_accountTable == nullptr)
+			{
+				return;
+			}
+
+			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
+			settings.beginGroup("Users");
+			const QStringList users = settings.childGroups();
+			m_accountTable->setRowCount(0);
+			int row = 0;
+			for (const QString& user : users)
+			{
+				settings.beginGroup(user);
+				const QString role = settings.value("Role", kRoleOperator).toString();
+				const QString createdAt = settings.value("CreatedAt").toString();
+				settings.endGroup();
+				m_accountTable->insertRow(row);
+				m_accountTable->setItem(row, 0, new QTableWidgetItem(user));
+				m_accountTable->setItem(row, 1, new QTableWidgetItem(DisplayRoleNameForAccount(role)));
+				m_accountTable->setItem(row, 2, new QTableWidgetItem(createdAt));
+				++row;
+			}
+			settings.endGroup();
+			if (row > 0)
+			{
+				m_accountTable->selectRow(0);
+			}
+			AppendLog(QString("已刷新账号列表，共 %1 个账号。").arg(row));
+		}
+
+		void SyncEditorFromSelection()
+		{
+			const QString user = SelectedAccount();
+			if (user.isEmpty())
+			{
+				return;
+			}
+			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
+			settings.beginGroup("Users");
+			settings.beginGroup(user);
+			const QString role = settings.value("Role", kRoleOperator).toString();
+			settings.endGroup();
+			settings.endGroup();
+			const int roleIndex = m_editRoleCombo->findData(role);
+			if (roleIndex >= 0)
+			{
+				m_editRoleCombo->setCurrentIndex(roleIndex);
+			}
+		}
+
+		bool CreateAccount()
+		{
+			const QString userName = m_createUserEdit->text().trimmed();
+			const QString password = m_createPassEdit->text();
+			const QString role = m_createRoleCombo->currentData().toString();
+			if (userName.size() < 4)
+			{
+				QMessageBox::warning(this, "新增账号", "账号至少需要 4 个字符。");
+				return false;
+			}
+			if (password.size() < 8)
+			{
+				QMessageBox::warning(this, "新增账号", "密码至少需要 8 个字符。");
+				return false;
+			}
+			if (role != kRoleOperator && role != kRoleEngineer && role != kRoleAdmin)
+			{
+				QMessageBox::warning(this, "新增账号", "权限类型无效。");
+				return false;
+			}
+
+			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
+			settings.beginGroup("Users");
+			if (settings.childGroups().contains(userName))
+			{
+				settings.endGroup();
+				QMessageBox::warning(this, "新增账号", "账号已存在。");
+				return false;
+			}
+			settings.beginGroup(userName);
+			settings.setValue("PasswordHash", HashAccountPassword(userName, password));
+			settings.setValue("Role", role);
+			settings.setValue("CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate));
+			settings.endGroup();
+			settings.endGroup();
+			settings.sync();
+			if (settings.status() != QSettings::NoError)
+			{
+				QMessageBox::warning(this, "新增账号", "写入账号文件失败。");
+				return false;
+			}
+
+			m_createUserEdit->clear();
+			m_createPassEdit->clear();
+			AppendLog(QString("已创建账号 %1，权限：%2。").arg(userName, DisplayRoleNameForAccount(role)));
+			return true;
+		}
+
+		bool UpdateAccount()
+		{
+			const QString userName = SelectedAccount();
+			if (userName.isEmpty())
+			{
+				QMessageBox::warning(this, "保存修改", "请先选择一个账号。");
+				return false;
+			}
+
+			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
+			settings.beginGroup("Users");
+			if (!settings.childGroups().contains(userName))
+			{
+				settings.endGroup();
+				QMessageBox::warning(this, "保存修改", "账号不存在。");
+				return false;
+			}
+			settings.beginGroup(userName);
+			settings.setValue("Role", m_editRoleCombo->currentData().toString());
+			const QString newPassword = m_editPassEdit->text();
+			if (!newPassword.isEmpty())
+			{
+				if (newPassword.size() < 8)
+				{
+					settings.endGroup();
+					settings.endGroup();
+					QMessageBox::warning(this, "保存修改", "新密码至少需要 8 个字符。");
+					return false;
+				}
+				settings.setValue("PasswordHash", HashAccountPassword(userName, newPassword));
+			}
+			settings.setValue("UpdatedAt", QDateTime::currentDateTime().toString(Qt::ISODate));
+			settings.endGroup();
+			settings.endGroup();
+			settings.sync();
+			if (settings.status() != QSettings::NoError)
+			{
+				QMessageBox::warning(this, "保存修改", "保存账号失败。");
+				return false;
+			}
+			m_editPassEdit->clear();
+			AppendLog(QString("已更新账号 %1 的权限与密码。").arg(userName));
+			return true;
+		}
+
+		bool DeleteAccount()
+		{
+			const QString userName = SelectedAccount();
+			if (userName.isEmpty())
+			{
+				QMessageBox::warning(this, "删除账号", "请先选择一个账号。");
+				return false;
+			}
+			if (QMessageBox::question(this, "删除账号", QString("确定删除账号 %1 吗？").arg(userName),
+				QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+			{
+				return false;
+			}
+
+			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
+			settings.beginGroup("Users");
+			settings.remove(userName);
+			settings.endGroup();
+			settings.sync();
+			if (settings.status() != QSettings::NoError)
+			{
+				QMessageBox::warning(this, "删除账号", "删除账号失败。");
+				return false;
+			}
+			AppendLog(QString("已删除账号 %1。").arg(userName));
+			return true;
+		}
+
+	private:
+		QTableWidget* m_accountTable = nullptr;
+		QLineEdit* m_createUserEdit = nullptr;
+		QLineEdit* m_createPassEdit = nullptr;
+		QComboBox* m_createRoleCombo = nullptr;
+		QComboBox* m_editRoleCombo = nullptr;
+		QLineEdit* m_editPassEdit = nullptr;
+		QPlainTextEdit* m_logText = nullptr;
+	};
 }
 
 QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
@@ -343,6 +819,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_grooveCameraDisplayTimer(nullptr)
 	, m_robotLogDisplayTimer(nullptr)
 	, m_pMainStack(nullptr)
+	, m_pAuthPage(nullptr)
 	, m_pDashboardPage(nullptr)
 	, m_pManagementPage(nullptr)
 	, m_pRobotSelectorCombo(nullptr)
@@ -356,12 +833,21 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pCurrentUserLabel(nullptr)
 	, m_pManagementUserLabel(nullptr)
 	, m_pPermissionHintLabel(nullptr)
+	, m_pAuthTitleLabel(nullptr)
+	, m_pAuthHintLabel(nullptr)
+	, m_pLoginNameCombo(nullptr)
 	, m_pLoginNameEdit(nullptr)
 	, m_pLoginPasswordEdit(nullptr)
-	, m_pRegisterNameEdit(nullptr)
-	, m_pRegisterPasswordEdit(nullptr)
-	, m_pRegisterRoleCombo(nullptr)
+	, m_pAuthConfirmPasswordRow(nullptr)
+	, m_pAuthConfirmPasswordEdit(nullptr)
 	, m_pAccountLogText(nullptr)
+	, m_pAutoLoginCheck(nullptr)
+	, m_pRememberPasswordCheck(nullptr)
+	, m_pAuthLoginModeBtn(nullptr)
+	, m_pAuthRegisterModeBtn(nullptr)
+	, m_pAuthSubmitBtn(nullptr)
+	, m_pGuestLoginBtn(nullptr)
+	, m_pAccountManagementAction(nullptr)
 	, m_pCameraParamBtn(nullptr)
 	, m_pWeldSeamCompBtn(nullptr)
 	, m_pWeldProcessPage(nullptr)
@@ -377,6 +863,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_bFanucMoveZeroRunning(false)
 	, m_sCurrentUserName(QStringLiteral("访客"))
 	, m_sCurrentUserRole(kRoleOperator)
+	, m_sAuthHintOverride()
+	, m_bAuthRegisterMode(false)
+	, m_bPendingOpenManagementAfterLogin(false)
 	, m_bFanucMonitorReading(false)
 {
 	ui.setupUi(this);
@@ -431,13 +920,272 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 	QWidget* mainPanel = new QWidget(this);
 	QVBoxLayout* rootLayout = new QVBoxLayout(mainPanel);
-	rootLayout->setContentsMargins(22, 18, 22, 18);
-	rootLayout->setSpacing(14);
+	rootLayout->setContentsMargins(0, 0, 0, 0);
+	rootLayout->setSpacing(0);
 	setCentralWidget(mainPanel);
 
 	m_pMainStack = new QStackedWidget(mainPanel);
 	m_pMainStack->setContentsMargins(0, 0, 0, 0);
 	m_pMainStack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+	m_pAuthPage = new QWidget(m_pMainStack);
+	m_pAuthPage->setObjectName("AuthPage");
+	m_pAuthPage->setStyleSheet(
+		"QWidget#AuthPage {"
+		"  background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0C121A, stop:0.55 #132033, stop:1 #0F1824);"
+		"}");
+	QVBoxLayout* authLayout = new QVBoxLayout(m_pAuthPage);
+	authLayout->setContentsMargins(24, 24, 24, 24);
+	authLayout->setSpacing(0);
+	m_pMainStack->addWidget(m_pAuthPage);
+
+	QWidget* authCard = new QWidget(m_pAuthPage);
+	authCard->setObjectName("AuthCard");
+	authCard->setMaximumWidth(360);
+	authCard->setStyleSheet(
+		"QWidget#AuthCard { background: transparent; border: none; }"
+		"QWidget#AuthCard QLabel { color: #BACBD1; }"
+		"QWidget#AuthCard QCheckBox { color: #AFC8CE; font-size: 13px; spacing: 6px; }"
+		"QWidget#AuthCard QCheckBox::indicator { width: 18px; height: 18px; }"
+		"QWidget#AuthCard QCheckBox::indicator:unchecked { border: 1px solid #4B6275; border-radius: 9px; background: #101820; }"
+		"QWidget#AuthCard QCheckBox::indicator:checked { border: 1px solid #67B5FF; border-radius: 9px; background: #67B5FF; }");
+	QGraphicsDropShadowEffect* authShadow = new QGraphicsDropShadowEffect(authCard);
+	authShadow->setBlurRadius(0);
+	authShadow->setOffset(0, 0);
+	authShadow->setColor(QColor(0, 0, 0, 0));
+	authCard->setGraphicsEffect(authShadow);
+
+	QVBoxLayout* authCardLayout = new QVBoxLayout(authCard);
+	authCardLayout->setContentsMargins(0, 0, 0, 0);
+	authCardLayout->setSpacing(8);
+
+	QHBoxLayout* avatarRowLayout = new QHBoxLayout();
+	avatarRowLayout->setContentsMargins(0, 0, 0, 0);
+	avatarRowLayout->addStretch(1);
+	QLabel* avatarLabel = new QLabel(authCard);
+	avatarLabel->setFixedSize(126, 126);
+	avatarLabel->setAlignment(Qt::AlignCenter);
+	avatarLabel->setStyleSheet(
+		"QLabel { background: #101923; border-radius: 63px; border: 1px solid #2E4256; }");
+	QPixmap avatarPixmap(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg");
+	if (!avatarPixmap.isNull())
+	{
+		avatarLabel->setPixmap(avatarPixmap.scaled(88, 88, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+	}
+	avatarRowLayout->addWidget(avatarLabel, 0, Qt::AlignHCenter);
+	avatarRowLayout->addStretch(1);
+	authCardLayout->addLayout(avatarRowLayout);
+
+	m_pAuthHintLabel = new QLabel("软件启动后先登录；没有账号时可切换到注册，只创建操作员权限。", authCard);
+	m_pAuthHintLabel->setAlignment(Qt::AlignCenter);
+	m_pAuthHintLabel->setWordWrap(true);
+	m_pAuthHintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 11px; }");
+	m_pAuthHintLabel->hide();
+	authCardLayout->addWidget(m_pAuthHintLabel);
+
+	QHBoxLayout* authModeLayout = new QHBoxLayout();
+	authModeLayout->setContentsMargins(0, 0, 0, 0);
+	authModeLayout->setSpacing(26);
+	m_pAuthLoginModeBtn = new QPushButton("登录", authCard);
+	m_pAuthRegisterModeBtn = new QPushButton("注册", authCard);
+	m_pAuthLoginModeBtn->setCheckable(true);
+	m_pAuthRegisterModeBtn->setCheckable(true);
+	m_pAuthLoginModeBtn->setCursor(Qt::PointingHandCursor);
+	m_pAuthRegisterModeBtn->setCursor(Qt::PointingHandCursor);
+	m_pAuthLoginModeBtn->setMinimumHeight(28);
+	m_pAuthRegisterModeBtn->setMinimumHeight(28);
+	m_pAuthLoginModeBtn->setFixedWidth(86);
+	m_pAuthRegisterModeBtn->setFixedWidth(86);
+	m_pAuthLoginModeBtn->setFlat(true);
+	m_pAuthRegisterModeBtn->setFlat(true);
+	m_pAuthLoginModeBtn->setStyleSheet(
+		"QPushButton { color: #AFC8CE; border: none; background: transparent; font-size: 15px; }"
+		"QPushButton:checked { color: #72D4DD; font-weight: 700; }");
+	m_pAuthRegisterModeBtn->setStyleSheet(
+		"QPushButton { color: #AFC8CE; border: none; background: transparent; font-size: 15px; }"
+		"QPushButton:checked { color: #72D4DD; font-weight: 700; }");
+	authModeLayout->addStretch(1);
+	authModeLayout->addWidget(m_pAuthLoginModeBtn);
+	authModeLayout->addWidget(m_pAuthRegisterModeBtn);
+	authModeLayout->addStretch(1);
+	authCardLayout->addLayout(authModeLayout);
+
+	QFormLayout* authForm = new QFormLayout();
+	authForm->setContentsMargins(0, 0, 0, 0);
+	authForm->setSpacing(9);
+	authForm->setFormAlignment(Qt::AlignHCenter | Qt::AlignTop);
+	m_pLoginNameCombo = new QComboBox(authCard);
+	m_pLoginNameCombo->setEditable(true);
+	m_pLoginNameCombo->setInsertPolicy(QComboBox::NoInsert);
+	m_pLoginNameCombo->setMaxVisibleItems(8);
+	m_pLoginNameEdit = m_pLoginNameCombo->lineEdit();
+	m_pLoginPasswordEdit = new QLineEdit(authCard);
+	m_pAuthConfirmPasswordRow = new QWidget(authCard);
+	m_pAuthConfirmPasswordRow->setFixedSize(300, 44);
+	QHBoxLayout* confirmRowLayout = new QHBoxLayout(m_pAuthConfirmPasswordRow);
+	confirmRowLayout->setContentsMargins(0, 0, 0, 0);
+	confirmRowLayout->setSpacing(0);
+	QLabel* confirmPasswordLabel = new QLabel("确认密码", m_pAuthConfirmPasswordRow);
+	m_pAuthConfirmPasswordEdit = new QLineEdit(m_pAuthConfirmPasswordRow);
+	m_pLoginPasswordEdit->setEchoMode(QLineEdit::Password);
+	m_pAuthConfirmPasswordEdit->setEchoMode(QLineEdit::Password);
+	m_pLoginNameEdit->setPlaceholderText("请输入账号");
+	m_pLoginPasswordEdit->setPlaceholderText("请输入密码");
+	m_pAuthConfirmPasswordEdit->setPlaceholderText("再次输入密码");
+	m_pLoginNameCombo->setFixedSize(300, 44);
+	m_pLoginPasswordEdit->setFixedSize(300, 44);
+	m_pAuthConfirmPasswordEdit->setFixedSize(300, 44);
+	auto styleAuthEdit = [](QLineEdit* edit)
+		{
+			edit->setStyleSheet(
+				"QLineEdit {"
+				"  background: #0F1720;"
+				"  color: #F7FCFC;"
+				"  border: 1px solid #2E4256;"
+				"  border-radius: 11px;"
+				"  padding: 0 14px;"
+				"  font-size: 14px;"
+				"}"
+				"QLineEdit:focus { border-color: #72D4DD; }");
+		};
+	m_pLoginNameEdit->setStyleSheet(
+		"QLineEdit {"
+		"  background: transparent;"
+		"  color: #F7FCFC;"
+		"  border: none;"
+		"  padding: 0 10px;"
+		"  font-size: 14px;"
+		"}");
+	styleAuthEdit(m_pLoginPasswordEdit);
+	styleAuthEdit(m_pAuthConfirmPasswordEdit);
+	m_pLoginNameCombo->setStyleSheet(
+		"QComboBox {"
+		"  background: #0F1720;"
+		"  color: #F7FCFC;"
+		"  border: 1px solid #2E4256;"
+		"  border-radius: 11px;"
+		"  padding: 0 34px 0 0;"
+		"  font-size: 14px;"
+		"}"
+		"QComboBox:focus { border-color: #72D4DD; }"
+		"QComboBox::drop-down { border: none; width: 30px; }"
+		"QComboBox QAbstractItemView { background: #101820; color: #ECF3F4; selection-background-color: #2D5465; border: 1px solid #2E4256; }");
+	confirmPasswordLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 12px; }");
+	confirmPasswordLabel->hide();
+	authForm->addRow(m_pLoginNameCombo);
+	authForm->addRow(m_pLoginPasswordEdit);
+	confirmRowLayout->addWidget(m_pAuthConfirmPasswordEdit, 1);
+	authForm->addRow(m_pAuthConfirmPasswordRow);
+	authCardLayout->addLayout(authForm);
+
+	QHBoxLayout* optionLayout = new QHBoxLayout();
+	optionLayout->setContentsMargins(0, 0, 0, 0);
+	optionLayout->setSpacing(14);
+	m_pRememberPasswordCheck = new QCheckBox("记住密码", authCard);
+	m_pAutoLoginCheck = new QCheckBox("自动登录", authCard);
+	optionLayout->addStretch(1);
+	optionLayout->addWidget(m_pRememberPasswordCheck);
+	optionLayout->addWidget(m_pAutoLoginCheck);
+	optionLayout->addStretch(1);
+	authCardLayout->addLayout(optionLayout);
+
+	QHBoxLayout* authButtonLayout = new QHBoxLayout();
+	authButtonLayout->setContentsMargins(0, 0, 0, 0);
+	authButtonLayout->setSpacing(12);
+	m_pAuthSubmitBtn = new QPushButton("登录", authCard);
+	QPushButton* authCancelBtn = new QPushButton("退出登录", authCard);
+	m_pGuestLoginBtn = new QPushButton("游客登录", authCard);
+	m_pAuthSubmitBtn->setCursor(Qt::PointingHandCursor);
+	authCancelBtn->setCursor(Qt::PointingHandCursor);
+	m_pGuestLoginBtn->setCursor(Qt::PointingHandCursor);
+	m_pAuthSubmitBtn->setFixedSize(144, 42);
+	authCancelBtn->setFixedSize(144, 42);
+	m_pGuestLoginBtn->setFixedSize(300, 34);
+	m_pAuthSubmitBtn->setStyleSheet(
+		"QPushButton {"
+		"  background: #67B5FF;"
+		"  color: #FFFFFF;"
+		"  border: none;"
+		"  border-radius: 11px;"
+		"  font-size: 15px;"
+		"  font-weight: 700;"
+		"}"
+		"QPushButton:hover { background: #5AA8F3; }"
+		"QPushButton:pressed { background: #4B97EA; }");
+	authCancelBtn->setStyleSheet(
+		"QPushButton {"
+		"  background: #16212D;"
+		"  color: #AFC8CE;"
+		"  border: 1px solid #2E4256;"
+		"  border-radius: 11px;"
+		"  font-size: 13px;"
+		"}"
+		"QPushButton:hover { background: #1B2835; }");
+	m_pGuestLoginBtn->setStyleSheet(
+		"QPushButton {"
+		"  background: transparent;"
+		"  color: #AFC8CE;"
+		"  border: none;"
+		"  font-size: 13px;"
+		"}"
+		"QPushButton:hover { color: #72D4DD; }");
+	authButtonLayout->addStretch(1);
+	authButtonLayout->addWidget(m_pAuthSubmitBtn);
+	authButtonLayout->addWidget(authCancelBtn);
+	authButtonLayout->addStretch(1);
+	authCardLayout->addLayout(authButtonLayout);
+	authCardLayout->addWidget(m_pGuestLoginBtn, 0, Qt::AlignHCenter);
+
+	m_pAccountLogText = new QPlainTextEdit(authCard);
+	m_pAccountLogText->setReadOnly(true);
+	m_pAccountLogText->document()->setMaximumBlockCount(300);
+	m_pAccountLogText->setMaximumHeight(54);
+	m_pAccountLogText->hide();
+	m_pAccountLogText->setStyleSheet(
+		"QPlainTextEdit {"
+		"  background: rgba(13, 20, 29, 0.88);"
+		"  color: #AFC8CE;"
+		"  border: 1px solid #2E4256;"
+		"  border-radius: 12px;"
+		"  padding: 8px;"
+		"  font-size: 12px;"
+		"}");
+	m_pAccountLogText->setPlainText("账号日志：等待登录或注册...");
+	authCardLayout->addWidget(m_pAccountLogText, 1);
+
+	authLayout->addStretch(1);
+	authLayout->addWidget(authCard, 0, Qt::AlignHCenter);
+	authLayout->addStretch(1);
+
+	connect(m_pAuthLoginModeBtn, &QPushButton::clicked, this, [this]()
+		{
+			SetAuthRegisterMode(false);
+		});
+	connect(m_pAuthRegisterModeBtn, &QPushButton::clicked, this, [this]()
+		{
+			SetAuthRegisterMode(true);
+		});
+	connect(m_pAuthSubmitBtn, &QPushButton::clicked, this, [this]()
+		{
+			if (m_bAuthRegisterMode)
+			{
+				RegisterAccount();
+			}
+			else
+			{
+				LoginCurrentAccount();
+			}
+		});
+	connect(authCancelBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::LogoutCurrentAccount);
+	connect(m_pGuestLoginBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::LoginAsGuest);
+	connect(m_pLoginNameCombo, &QComboBox::currentTextChanged, this, [this](const QString& userName)
+		{
+			if (!m_bAuthRegisterMode)
+			{
+				FillSavedPasswordForUser(userName);
+			}
+		});
+
 	m_pDashboardPage = new QWidget(m_pMainStack);
 	QVBoxLayout* dashboardLayout = new QVBoxLayout(m_pDashboardPage);
 	dashboardLayout->setContentsMargins(0, 0, 0, 0);
@@ -469,6 +1217,10 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"QComboBox:hover { border-color: #72D4DD; }"
 		"QComboBox::drop-down { border: 0px; width: 28px; }"
 		"QComboBox QAbstractItemView { background: #101820; color: #ECF3F4; selection-background-color: #2D5465; }");
+	QPushButton* dashboardLogoutButton = new QPushButton("退出登录", m_pDashboardPage);
+	dashboardLogoutButton->setMinimumHeight(34);
+	dashboardLogoutButton->setMinimumWidth(96);
+	dashboardLogoutButton->setStyleSheet("QPushButton { padding: 6px 14px; font-size: 14px; border-radius: 10px; }");
 	QPushButton* managementEntryButton = new QPushButton("管理页面", m_pDashboardPage);
 	managementEntryButton->setMinimumHeight(34);
 	managementEntryButton->setMinimumWidth(110);
@@ -479,6 +1231,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	titleLayout->addWidget(m_pCurrentUserLabel, 0, Qt::AlignVCenter);
 	titleLayout->addWidget(m_pRobotSelectorLabel, 0, Qt::AlignVCenter);
 	titleLayout->addWidget(m_pRobotSelectorCombo, 0, Qt::AlignVCenter);
+	titleLayout->addWidget(dashboardLogoutButton, 0, Qt::AlignVCenter);
 	titleLayout->addWidget(managementEntryButton, 0, Qt::AlignVCenter);
 	dashboardLayout->addLayout(titleLayout);
 
@@ -516,96 +1269,91 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	quickLayout->addWidget(quickManageBtn, 1, 2);
 	dashboardLayout->addWidget(quickGroup, 0);
 
-	m_pManagementPage = new QWidget(m_pMainStack);
+	m_pManagementPage = new QWidget(this, Qt::Window);
+	m_pManagementPage->setWindowTitle("管理页面");
+	ApplyUnifiedWindowChrome(m_pManagementPage);
+	ResizeWindowForAvailableGeometry(m_pManagementPage, QSize(1120, 760), 0.88, 0.82);
+	m_pManagementPage->setStyleSheet(
+		"QWidget { background: #111820; color: #ECF3F4; }"
+		"QGroupBox { border: 1px solid #2E4656; border-radius: 12px; margin-top: 16px; padding-top: 12px; }"
+		"QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color: #9ED8DB; }"
+		"QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 10px 14px; }"
+		"QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
+		"QPushButton:pressed { background: #18303B; }"
+		"QLineEdit, QComboBox, QPlainTextEdit { background: #081018; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 8px; padding: 6px 8px; }"
+		"QMenuBar { background: #0B1117; color: #ECF3F4; border-bottom: 1px solid #223743; }"
+		"QMenuBar::item:selected { background: #244554; }"
+		"QMenu { background: #101923; color: #ECF3F4; border: 1px solid #2C4653; }"
+		"QMenu::item:selected { background: #2B5363; }");
 	QVBoxLayout* managementLayout = new QVBoxLayout(m_pManagementPage);
-	managementLayout->setContentsMargins(0, 0, 0, 0);
-	managementLayout->setSpacing(14);
-	m_pMainStack->addWidget(m_pManagementPage);
+	managementLayout->setContentsMargins(18, 14, 18, 18);
+	managementLayout->setSpacing(12);
+
+	QMenuBar* managementMenuBar = new QMenuBar(m_pManagementPage);
+	managementLayout->setMenuBar(managementMenuBar);
+
+	auto addManagementAction = [this](QMenu* menu, const QString& text, const std::function<void()>& handler) -> QAction*
+		{
+			QAction* action = new QAction(text, m_pManagementPage);
+			if (menu != nullptr)
+			{
+				menu->addAction(action);
+			}
+			connect(action, &QAction::triggered, this, [handler]()
+				{
+					if (handler)
+					{
+						handler();
+					}
+				});
+			return action;
+		};
+
+	QMenu* managementHomeMenu = managementMenuBar->addMenu("主页");
+	QMenu* managementAccountMenu = managementMenuBar->addMenu("账号");
+	QMenu* managementProcessMenu = managementMenuBar->addMenu("工艺");
+	QMenu* managementCameraMenu = managementMenuBar->addMenu("相机");
+	QMenu* managementDebugMenu = managementMenuBar->addMenu("调试");
+
+	addManagementAction(managementHomeMenu, "返回主页", [this]() { ShowDashboardPage(); });
+	addManagementAction(managementHomeMenu, "关闭管理界面", [this]() { if (m_pManagementPage != nullptr) { m_pManagementPage->hide(); } });
+	m_pAccountManagementAction = addManagementAction(managementAccountMenu, "账号管理", [this]() { OpenAccountManagementDialog(); });
+	m_pAccountManagementAction->setEnabled(false);
+	addManagementAction(managementProcessMenu, "工艺参数", [this]() { OpenWeldProcessDialog(); });
+	addManagementAction(managementProcessMenu, "精测量参数", [this]() { OpenPreciseMeasureEditDialog(); });
+	addManagementAction(managementCameraMenu, "相机参数", [this]() { OpenCameraParamDialog(); });
+	addManagementAction(managementCameraMenu, "焊道补偿", [this]() { OpenWeldSeamCompDialog(); });
+	addManagementAction(managementDebugMenu, "点动控制", [this]() { OpenRobotJogDialog(); });
+	addManagementAction(managementDebugMenu, "功能测试", [this]() { OpenFunctionTestDialog(); });
 
 	QHBoxLayout* managementTitleLayout = new QHBoxLayout();
 	QLabel* managementTitleLabel = new QLabel("管理页面", m_pManagementPage);
 	managementTitleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #F7FCFC;");
 	m_pManagementUserLabel = new QLabel(m_pManagementPage);
 	m_pManagementUserLabel->setStyleSheet("QLabel { color: #9ED8DB; padding: 5px 10px; border: 1px solid #2E4656; border-radius: 10px; background: #101923; }");
-	QPushButton* backHomeBtn = new QPushButton("返回主页", m_pManagementPage);
-	backHomeBtn->setMinimumWidth(110);
 	managementTitleLayout->addWidget(managementTitleLabel);
 	managementTitleLayout->addStretch(1);
 	managementTitleLayout->addWidget(m_pManagementUserLabel);
-	managementTitleLayout->addWidget(backHomeBtn);
 	managementLayout->addLayout(managementTitleLayout);
 
-	m_pPermissionHintLabel = new QLabel(m_pManagementPage);
+	m_pPermissionHintLabel = new QLabel("管理功能请从上方菜单栏进入，下面只保留账号和状态信息。", m_pManagementPage);
 	m_pPermissionHintLabel->setWordWrap(true);
 	m_pPermissionHintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
 	managementLayout->addWidget(m_pPermissionHintLabel);
 
-	QSplitter* managementSplitter = new QSplitter(Qt::Horizontal, m_pManagementPage);
-	managementSplitter->setChildrenCollapsible(false);
-
-	QGroupBox* accountGroup = new QGroupBox("人员账号", managementSplitter);
-	QVBoxLayout* accountLayout = new QVBoxLayout(accountGroup);
-	QFormLayout* loginLayout = new QFormLayout();
-	m_pLoginNameEdit = new QLineEdit(accountGroup);
-	m_pLoginPasswordEdit = new QLineEdit(accountGroup);
-	m_pLoginPasswordEdit->setEchoMode(QLineEdit::Password);
-	m_pLoginNameEdit->setPlaceholderText("账号");
-	m_pLoginPasswordEdit->setPlaceholderText("密码");
-	loginLayout->addRow("账号", m_pLoginNameEdit);
-	loginLayout->addRow("密码", m_pLoginPasswordEdit);
-	accountLayout->addLayout(loginLayout);
-	QHBoxLayout* loginButtonLayout = new QHBoxLayout();
-	QPushButton* loginBtn = new QPushButton("登录", accountGroup);
-	QPushButton* logoutBtn = new QPushButton("退出登录", accountGroup);
-	loginButtonLayout->addWidget(loginBtn);
-	loginButtonLayout->addWidget(logoutBtn);
-	accountLayout->addLayout(loginButtonLayout);
-
-	QLabel* registerTitle = new QLabel("注册账号（管理员权限）", accountGroup);
-	registerTitle->setStyleSheet("font-weight: 600; color: #9ED8DB; margin-top: 8px;");
-	accountLayout->addWidget(registerTitle);
-	QFormLayout* registerLayout = new QFormLayout();
-	m_pRegisterNameEdit = new QLineEdit(accountGroup);
-	m_pRegisterPasswordEdit = new QLineEdit(accountGroup);
-	m_pRegisterPasswordEdit->setEchoMode(QLineEdit::Password);
-	m_pRegisterRoleCombo = new QComboBox(accountGroup);
-	m_pRegisterRoleCombo->addItem("操作员", kRoleOperator);
-	m_pRegisterRoleCombo->addItem("工程师", kRoleEngineer);
-	m_pRegisterRoleCombo->addItem("管理员", kRoleAdmin);
-	registerLayout->addRow("新账号", m_pRegisterNameEdit);
-	registerLayout->addRow("新密码", m_pRegisterPasswordEdit);
-	registerLayout->addRow("权限", m_pRegisterRoleCombo);
-	accountLayout->addLayout(registerLayout);
-	QPushButton* registerBtn = new QPushButton("注册账号", accountGroup);
-	accountLayout->addWidget(registerBtn);
-	m_pAccountLogText = new QPlainTextEdit(accountGroup);
-	m_pAccountLogText->setReadOnly(true);
-	m_pAccountLogText->document()->setMaximumBlockCount(300);
-	m_pAccountLogText->setMaximumHeight(140);
-	m_pAccountLogText->setPlainText("账号日志：默认管理员 admin/admin 会在首次启动时自动创建。");
-	accountLayout->addWidget(m_pAccountLogText, 1);
-
-	QGroupBox* adminGroup = new QGroupBox("管理功能", managementSplitter);
-	QGridLayout* adminLayout = new QGridLayout(adminGroup);
-	adminLayout->setSpacing(12);
-	QPushButton* adminProcessBtn = makeLargeButton("工艺参数\n编辑焊接工艺和摆动参数", adminGroup);
-	QPushButton* adminPreciseBtn = makeLargeButton("精测量参数\n编辑扫描点和安全点", adminGroup);
-	QPushButton* adminCameraBtn = makeLargeButton("相机/标定\n相机参数、手眼矩阵和标定", adminGroup);
-	QPushButton* adminCompBtn = makeLargeButton("焊道补偿\n姿态补偿和焊道偏移", adminGroup);
-	QPushButton* adminJogBtn = makeLargeButton("点动控制\n手动读取/运动到指定位置", adminGroup);
-	QPushButton* adminDebugBtn = makeLargeButton("功能测试\n寄存器、程序上传和诊断", adminGroup);
-	adminLayout->addWidget(adminProcessBtn, 0, 0);
-	adminLayout->addWidget(adminPreciseBtn, 0, 1);
-	adminLayout->addWidget(adminCameraBtn, 0, 2);
-	adminLayout->addWidget(adminCompBtn, 1, 0);
-	adminLayout->addWidget(adminJogBtn, 1, 1);
-	adminLayout->addWidget(adminDebugBtn, 1, 2);
-
-	managementSplitter->addWidget(accountGroup);
-	managementSplitter->addWidget(adminGroup);
-	managementSplitter->setStretchFactor(0, 1);
-	managementSplitter->setStretchFactor(1, 2);
-	managementLayout->addWidget(managementSplitter, 1);
+	QGroupBox* managementInfoGroup = new QGroupBox("管理说明", m_pManagementPage);
+	QVBoxLayout* managementInfoLayout = new QVBoxLayout(managementInfoGroup);
+	QLabel* managementInfoLabel = new QLabel(
+		"管理页面仅保留菜单栏入口，不再放大按钮。只有工程师或管理员可以进入管理页面；其中“账号管理”仅管理员可用。",
+		managementInfoGroup);
+	managementInfoLabel->setWordWrap(true);
+	managementInfoLayout->addWidget(managementInfoLabel);
+	QPlainTextEdit* managementLogText = new QPlainTextEdit(managementInfoGroup);
+	managementLogText->setReadOnly(true);
+	managementLogText->document()->setMaximumBlockCount(120);
+	managementLogText->setPlainText("管理页面提示：请从菜单栏打开工艺、标定、补偿、点动和功能测试。");
+	managementInfoLayout->addWidget(managementLogText, 1);
+	managementLayout->addWidget(managementInfoGroup, 1);
 
 	QGroupBox* entryGroup = new QGroupBox("常用功能", mainPanel);
 	QGridLayout* entryLayout = new QGridLayout(entryGroup);
@@ -632,6 +1380,16 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		entryLayout->addWidget(button, i / 3, i % 3);
 	}
 	entryGroup->hide();
+
+	m_robotOperationWidgets = {
+		quickConnectBtn,
+		quickMeasureBtn,
+		quickPreviewBtn,
+		quickPositionBtn,
+		quickCalibrationBtn,
+		m_pWeldSeamCompBtn,
+		m_pCameraParamBtn
+	};
 
 	auto addCommandAction = [this](QMenu* menu, const QString& text, const std::function<void()>& handler, bool addToToolbar = true) -> QAction*
 		{
@@ -809,23 +1567,25 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	dashboardLayout->addWidget(entryGroup, 0);
 
 	connect(managementEntryButton, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowManagementPage);
+	connect(dashboardLogoutButton, &QPushButton::clicked, this, &QtWidgetsApplication4::LogoutCurrentAccount);
 	connect(quickManageBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowManagementPage);
-	connect(backHomeBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowDashboardPage);
 	connect(quickConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucConnectTest);
 	connect(quickMeasureBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenMeasureThenWeldDialog);
 	connect(quickPositionBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucGetCurrentPosTest);
 	connect(quickCalibrationBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenCameraParamDialog);
 	connect(quickPreviewBtn, &QPushButton::toggled, ui.GrooveCameraTestBtn, &QPushButton::setChecked);
 	connect(ui.GrooveCameraTestBtn, &QPushButton::toggled, quickPreviewBtn, &QPushButton::setChecked);
-	connect(loginBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::LoginCurrentAccount);
-	connect(logoutBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::LogoutCurrentAccount);
-	connect(registerBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RegisterAccount);
-	connect(adminProcessBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenWeldProcessDialog);
-	connect(adminPreciseBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenPreciseMeasureEditDialog);
-	connect(adminCameraBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenCameraParamDialog);
-	connect(adminCompBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenWeldSeamCompDialog);
-	connect(adminJogBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenRobotJogDialog);
-	connect(adminDebugBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenFunctionTestDialog);
+	connect(m_pRememberPasswordCheck, &QCheckBox::toggled, this, [this](bool checked)
+		{
+			if (m_pAutoLoginCheck != nullptr)
+			{
+				m_pAutoLoginCheck->setEnabled(checked);
+				if (!checked)
+				{
+					m_pAutoLoginCheck->setChecked(false);
+				}
+			}
+		});
 
 	connect(ui.RunTest, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotRunTest);
 	connect(ui.WeldProcessBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenWeldProcessDialog);
@@ -863,6 +1623,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 	EnsureDefaultAdminAccount();
 	RefreshAccountUi();
+	LoadLoginState();
+	ShowAuthPage();
+	TryAutoLogin();
 
 	m_clientUDPFormSensorWorker = new ClientUDPFormSensorWorker();
 	m_clientUDPFormSensorThread = new QThread(this);
@@ -890,18 +1653,28 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QTimer* fanucMonitorTimer = new QTimer(this);
 	connect(fanucMonitorTimer, &QTimer::timeout, this, [this]()
 		{
-			FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-			if (pFanucDriver == nullptr)
+			RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(nullptr);
+			if (pRobotDriver == nullptr)
 			{
+				if (ui.FanucMonitorText != nullptr && ui.FanucMonitorText->toPlainText().isEmpty())
+				{
+					ui.FanucMonitorText->setPlainText("状态: 未选择可用机器人驱动。\n现场操作已禁用，管理页面仍可使用。");
+				}
 				return;
 			}
 
-			pFanucDriver->StartMonitor();
 			long long robotMs = 0;
 			long long pcRecvMs = 0;
-			const T_ROBOT_COORS pos = pFanucDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
-			const T_ANGLE_PULSE pulse = pFanucDriver->GetCurrentPulsePassive();
-			const int done = pFanucDriver->CheckDonePassive();
+			T_ROBOT_COORS pos;
+			T_ANGLE_PULSE pulse;
+			int done = -1;
+			if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
+			{
+				pFanucDriver->StartMonitor();
+			}
+			pos = pRobotDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
+			pulse = pRobotDriver->GetCurrentPulsePassive();
+			done = pRobotDriver->CheckDonePassive();
 			const QString stateText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知/异常(%1)").arg(done));
 			QString monitorText = QString(
 				"状态: %1\n"
@@ -938,6 +1711,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	//pFTP->downloadFile("/UserPrograms/testcyh.sr/test1.srp", ".//Job//STEP//test1.srp");
 	m_pContralUnit = new ContralUnit();
 	RefreshRobotSelectorUi();
+	RefreshRobotOperationAvailability();
 	if (m_pRobotSelectorCombo != nullptr)
 	{
 		connect(m_pRobotSelectorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
@@ -947,8 +1721,19 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 					const int unitIndex = m_pRobotSelectorCombo->currentData().toInt();
 					if (unitIndex >= 0)
 					{
+						QString issueText;
+						if (!IsRobotUnitDriverReady(unitIndex, &issueText))
+						{
+							QMessageBox::warning(this, "机器人类型错误",
+								QString("%1\n已切回可用机器人；如果没有可用机器人，主页现场操作将保持禁用。")
+									.arg(issueText));
+							RefreshRobotSelectorUi();
+							RefreshRobotOperationAvailability();
+							return;
+						}
 						m_nCurrentRobotUnitIndex = unitIndex;
 					}
+					RefreshRobotOperationAvailability();
 				}
 			});
 	}
@@ -979,6 +1764,13 @@ QtWidgetsApplication4::~QtWidgetsApplication4()
 
 bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 {
+	if (event != nullptr && event->type() == QEvent::Resize)
+	{
+		if (QWidget* page = qobject_cast<QWidget*>(watched))
+		{
+			PositionEmbeddedBackButton(page);
+		}
+	}
 	if (event != nullptr && event->type() == QEvent::Close)
 	{
 		if (watched == m_pWeldProcessPage
@@ -1008,6 +1800,7 @@ void QtWidgetsApplication4::resizeEvent(QResizeEvent* event)
 	if (currentPage != nullptr && currentPage != m_pDashboardPage)
 	{
 		currentPage->setGeometry(m_pMainStack->contentsRect());
+		PositionEmbeddedBackButton(currentPage);
 		if (QLayout* pageLayout = currentPage->layout())
 		{
 			pageLayout->activate();
@@ -1017,18 +1810,65 @@ void QtWidgetsApplication4::resizeEvent(QResizeEvent* event)
 
 void QtWidgetsApplication4::ShowDashboardPage()
 {
+	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+	setMinimumSize(920, 700);
+	if (!isMaximized() && !isFullScreen())
+	{
+		resize(1120, 760);
+		showMaximized();
+	}
+
 	if (m_pMainStack != nullptr && m_pDashboardPage != nullptr)
 	{
 		m_pMainStack->setCurrentWidget(m_pDashboardPage);
+	}
+	if (m_pManagementPage != nullptr)
+	{
+		m_pManagementPage->hide();
+	}
+	if (m_pMainStack != nullptr)
+	{
+		m_pMainStack->show();
 	}
 }
 
 void QtWidgetsApplication4::ShowManagementPage()
 {
-	if (m_pMainStack != nullptr && m_pManagementPage != nullptr)
+	if (isMaximized() || isFullScreen())
 	{
-		m_pMainStack->setCurrentWidget(m_pManagementPage);
+		showNormal();
+	}
+	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+	setMinimumSize(920, 700);
+	if (width() < 1120 || height() < 760)
+	{
+		resize(1120, 760);
+		CenterWindowOnScreen(this);
+	}
+
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		const QMessageBox::StandardButton button = QMessageBox::question(
+			this,
+			"权限不足",
+			QString("管理页面需要工程师或管理员权限。\n当前用户：%1（%2）\n是否重新登录？")
+				.arg(m_sCurrentUserName, RoleDisplayName(m_sCurrentUserRole)),
+			QMessageBox::Yes | QMessageBox::No,
+			QMessageBox::Yes);
+		if (button == QMessageBox::Yes)
+		{
+			m_bPendingOpenManagementAfterLogin = true;
+			ShowAuthPage("管理页面需要工程师或管理员权限，请重新登录。");
+		}
+		return;
+	}
+
+	if (m_pManagementPage != nullptr)
+	{
 		RefreshAccountUi();
+		m_pManagementPage->show();
+		m_pManagementPage->raise();
+		m_pManagementPage->activateWindow();
 	}
 }
 
@@ -1058,38 +1898,180 @@ int QtWidgetsApplication4::CurrentRobotUnitIndex() const
 const T_CONTRAL_UNIT* QtWidgetsApplication4::CurrentContralUnit() const
 {
     const int unitIndex = CurrentRobotUnitIndex();
-    if (m_pContralUnit == nullptr
-        || unitIndex < 0
-        || unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    if (m_pContralUnit == nullptr || unitIndex < 0)
     {
         return nullptr;
     }
-    return &m_pContralUnit->m_vtContralUnitInfo[unitIndex];
+    for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
+    {
+        if (unitInfo.nUnitNo == unitIndex)
+        {
+            return &unitInfo;
+        }
+    }
+    if (unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        return &m_pContralUnit->m_vtContralUnitInfo[unitIndex];
+    }
+    return nullptr;
 }
 
-FANUCRobotCtrl* QtWidgetsApplication4::GetCurrentFanucDriver(QWidget* parent) const
+bool QtWidgetsApplication4::IsRobotUnitDriverReady(int unitIndex, QString* issueText) const
 {
-    const T_CONTRAL_UNIT* unitInfo = CurrentContralUnit();
-    if (unitInfo == nullptr)
+    if (issueText != nullptr)
     {
-        QMessageBox::warning(parent, "FANUC测试", "未找到可用的控制单元。");
-        return nullptr;
+        issueText->clear();
+    }
+    if (m_pContralUnit == nullptr || unitIndex < 0)
+    {
+        if (issueText != nullptr)
+        {
+            *issueText = "未选择可用机器人。";
+        }
+        return false;
     }
 
+    const T_CONTRAL_UNIT* unitInfo = nullptr;
+    for (const T_CONTRAL_UNIT& candidate : m_pContralUnit->m_vtContralUnitInfo)
+    {
+        if (candidate.nUnitNo == unitIndex)
+        {
+            unitInfo = &candidate;
+            break;
+        }
+    }
+    if (unitInfo == nullptr && unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        unitInfo = &m_pContralUnit->m_vtContralUnitInfo[unitIndex];
+    }
+    if (unitInfo == nullptr)
+    {
+        if (issueText != nullptr)
+        {
+            *issueText = QString("未找到编号为 %1 的机器人配置。").arg(unitIndex);
+        }
+        return false;
+    }
+
+    const QString robotName = DecodeConfigText(unitInfo->sUnitName);
+    const QString displayName = DecodeConfigText(unitInfo->sChineseName);
+    const QString robotLabel = displayName.isEmpty()
+        ? robotName
+        : QString("%1 (%2)").arg(displayName, robotName);
     RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
     if (pRobotDriverAdaptor == nullptr)
     {
-        QMessageBox::warning(parent, "FANUC测试", "当前控制单元未创建驱动。");
+        if (issueText != nullptr)
+        {
+            *issueText = QString("机器人类型错误：%1 的 RobotType 不支持或驱动未创建。").arg(robotLabel);
+        }
+        return false;
+    }
+    return true;
+}
+
+int QtWidgetsApplication4::FindFirstReadyRobotUnitIndex() const
+{
+    if (m_pContralUnit == nullptr)
+    {
+        return -1;
+    }
+    for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
+    {
+        if (IsRobotUnitDriverReady(unitInfo.nUnitNo))
+        {
+            return unitInfo.nUnitNo;
+        }
+    }
+    return -1;
+}
+
+void QtWidgetsApplication4::RefreshRobotOperationAvailability()
+{
+    QString issueText;
+    const bool hasReadyDriver = IsRobotUnitDriverReady(CurrentRobotUnitIndex(), &issueText);
+    for (const QPointer<QWidget>& widget : m_robotOperationWidgets)
+    {
+        if (!widget.isNull())
+        {
+            widget->setEnabled(hasReadyDriver);
+            widget->setToolTip(hasReadyDriver ? QString() : "未选择可用机器人驱动，现场操作已禁用。");
+        }
+    }
+    if (!hasReadyDriver)
+    {
+        if (ui.FanucMonitorText != nullptr)
+        {
+            ui.FanucMonitorText->setPlainText(QString("状态: 机器人类型错误/不可用\n%1\n现场操作已禁用，管理页面仍可使用。").arg(issueText));
+        }
+    }
+}
+
+RobotDriverAdaptor* QtWidgetsApplication4::GetCurrentRobotDriver(QWidget* parent)
+{
+    QString issueText;
+    if (!IsRobotUnitDriverReady(CurrentRobotUnitIndex(), &issueText))
+    {
+        const int fallbackUnitIndex = FindFirstReadyRobotUnitIndex();
+        if (fallbackUnitIndex >= 0 && fallbackUnitIndex != CurrentRobotUnitIndex())
+        {
+            if (m_pRobotSelectorCombo != nullptr)
+            {
+                const int comboIndex = m_pRobotSelectorCombo->findData(fallbackUnitIndex);
+                if (comboIndex >= 0)
+                {
+                    QSignalBlocker blocker(m_pRobotSelectorCombo);
+                    m_pRobotSelectorCombo->setCurrentIndex(comboIndex);
+                }
+            }
+            m_nCurrentRobotUnitIndex = fallbackUnitIndex;
+            RefreshRobotOperationAvailability();
+            if (parent != nullptr)
+            {
+                QMessageBox::warning(parent, "机器人类型错误",
+                    QString("%1\n已切回可用机器人，请确认后重新执行操作。").arg(issueText));
+            }
+            return nullptr;
+        }
+
+        m_nCurrentRobotUnitIndex = -1;
+        RefreshRobotOperationAvailability();
+        if (parent != nullptr)
+        {
+            QMessageBox::warning(parent, "机器人类型错误",
+                QString("%1\n没有可用机器人驱动，主页现场操作已禁用，管理页面仍可使用。").arg(issueText));
+        }
         return nullptr;
     }
 
-    FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
-    if (pFanucDriver == nullptr)
+    const T_CONTRAL_UNIT* unitInfo = CurrentContralUnit();
+    if (unitInfo == nullptr)
     {
-        QMessageBox::warning(parent, "FANUC测试", "当前选择的控制单元不是 FANUC 驱动。");
         return nullptr;
     }
-    return pFanucDriver;
+    return static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
+}
+
+FANUCRobotCtrl* QtWidgetsApplication4::GetCurrentFanucDriver(QWidget* parent)
+{
+    RobotDriverAdaptor* pRobotDriverAdaptor = GetCurrentRobotDriver(parent);
+    if (pRobotDriverAdaptor == nullptr)
+    {
+        return nullptr;
+    }
+
+    FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
+    if (fanucDriver == nullptr && parent != nullptr)
+    {
+        const QString robotName = DecodeConfigText(pRobotDriverAdaptor->m_sRobotName);
+        const QString displayName = DecodeConfigText(pRobotDriverAdaptor->m_sCustomName);
+        const QString robotLabel = displayName.isEmpty()
+            ? robotName
+            : QString("%1 (%2)").arg(displayName, robotName);
+        QMessageBox::warning(parent, "驱动类型不匹配",
+            QString("当前功能需要 FANUC 驱动。\n当前选择：%1，驱动已创建但不是 FANUC。").arg(robotLabel));
+    }
+    return fanucDriver;
 }
 
 void QtWidgetsApplication4::RefreshRobotSelectorUi()
@@ -1106,6 +2088,7 @@ void QtWidgetsApplication4::RefreshRobotSelectorUi()
     {
         m_pRobotSelectorCombo->addItem("无可用机器人", -1);
         m_pRobotSelectorCombo->setEnabled(false);
+        m_nCurrentRobotUnitIndex = -1;
         if (m_pRobotSelectorLabel != nullptr)
         {
             m_pRobotSelectorLabel->setVisible(false);
@@ -1113,17 +2096,47 @@ void QtWidgetsApplication4::RefreshRobotSelectorUi()
         return;
     }
 
+    int firstReadyComboIndex = -1;
+    int readyCount = 0;
     for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
     {
         RobotDriverAdaptor* driver = static_cast<RobotDriverAdaptor*>(unitInfo.pUnitDriver);
-        const QString robotName = QString::fromStdString(
+        const QString robotName = DecodeConfigText(
             driver != nullptr && !driver->m_sRobotName.empty() ? driver->m_sRobotName : unitInfo.sUnitName);
-        const QString displayName = QString::fromStdString(
-            driver != nullptr && !driver->m_sCustomName.empty() ? driver->m_sCustomName : unitInfo.sChineseName);
-        const QString label = displayName.isEmpty() || displayName == robotName
-            ? robotName
-            : QString("%1 (%2)").arg(displayName, robotName);
+        QString displayName = DecodeConfigText(unitInfo.sChineseName);
+        if (displayName.isEmpty())
+        {
+            displayName = DecodeConfigText(
+                driver != nullptr && !driver->m_sCustomName.empty() ? driver->m_sCustomName : unitInfo.sUnitName);
+        }
+        const QString typeText = RobotDriverTypeText(driver);
+        QString label = robotName.isEmpty()
+            ? QString("%1 / %2").arg(displayName, typeText)
+            : QString("%1 / %2 (%3)").arg(displayName, typeText, robotName);
+        const bool driverReady = IsRobotUnitDriverReady(unitInfo.nUnitNo);
+        if (!driverReady)
+        {
+            label += "（类型错误）";
+        }
         m_pRobotSelectorCombo->addItem(label, unitInfo.nUnitNo);
+        const int itemIndex = m_pRobotSelectorCombo->count() - 1;
+        if (driverReady)
+        {
+            if (firstReadyComboIndex < 0)
+            {
+                firstReadyComboIndex = itemIndex;
+            }
+            ++readyCount;
+        }
+        else if (QStandardItemModel* model = qobject_cast<QStandardItemModel*>(m_pRobotSelectorCombo->model()))
+        {
+            if (QStandardItem* item = model->item(itemIndex))
+            {
+                item->setEnabled(false);
+                item->setSelectable(false);
+                item->setToolTip("机器人类型错误或驱动未创建，主页现场操作不可用。");
+            }
+        }
     }
 
     if (m_pRobotSelectorLabel != nullptr)
@@ -1131,17 +2144,25 @@ void QtWidgetsApplication4::RefreshRobotSelectorUi()
         m_pRobotSelectorLabel->setVisible(m_pContralUnit->m_vtContralUnitInfo.size() > 0);
     }
     int comboIndex = -1;
-    if (previousIndex >= 0)
+    if (previousIndex >= 0 && IsRobotUnitDriverReady(previousIndex))
     {
         comboIndex = m_pRobotSelectorCombo->findData(previousIndex);
     }
     if (comboIndex < 0)
     {
-        comboIndex = 0;
+        comboIndex = firstReadyComboIndex;
+    }
+    if (comboIndex < 0)
+    {
+        m_pRobotSelectorCombo->clear();
+        m_pRobotSelectorCombo->addItem("无可用机器人驱动", -1);
+        m_pRobotSelectorCombo->setEnabled(false);
+        m_nCurrentRobotUnitIndex = -1;
+        return;
     }
     m_pRobotSelectorCombo->setCurrentIndex(comboIndex);
     m_nCurrentRobotUnitIndex = m_pRobotSelectorCombo->currentData().toInt();
-    m_pRobotSelectorCombo->setEnabled(m_pRobotSelectorCombo->count() > 1);
+    m_pRobotSelectorCombo->setEnabled(readyCount > 1 || m_pRobotSelectorCombo->count() > readyCount);
 }
 
 QString QtWidgetsApplication4::AccountConfigPath() const
@@ -1182,13 +2203,24 @@ bool QtWidgetsApplication4::RequirePermission(const QString& minimumRole, const 
 		return true;
 	}
 
-	QMessageBox::information(
+	const QMessageBox::StandardButton button = QMessageBox::question(
 		this,
 		"权限不足",
-		QString("%1 需要 %2 或更高权限。\n当前用户：%3（%4）")
-			.arg(actionName, RoleDisplayName(minimumRole), m_sCurrentUserName, RoleDisplayName(m_sCurrentUserRole)));
-	ShowManagementPage();
+		QString("%1 需要 %2 或更高权限。\n当前用户：%3（%4）\n是否重新登录？")
+			.arg(actionName, RoleDisplayName(minimumRole), m_sCurrentUserName, RoleDisplayName(m_sCurrentUserRole)),
+		QMessageBox::Yes | QMessageBox::No,
+		QMessageBox::Yes);
+	if (button == QMessageBox::Yes)
+	{
+		ShowAuthPage(QString("%1 需要 %2 或更高权限，请重新登录。")
+			.arg(actionName, RoleDisplayName(minimumRole)));
+	}
 	return false;
+}
+
+QString QtWidgetsApplication4::LoginStateConfigPath() const
+{
+	return RobotDataHelper::BuildProjectPath("Data/LoginState.ini");
 }
 
 void QtWidgetsApplication4::EnsureDefaultAdminAccount()
@@ -1221,21 +2253,256 @@ void QtWidgetsApplication4::RefreshAccountUi()
 	if (m_pPermissionHintLabel != nullptr)
 	{
 		m_pPermissionHintLabel->setText(
-			"权限说明：操作员可进行主页快速操作和信息查看；工程师可进入工艺、标定、补偿、点动和功能测试；管理员可注册账号并分配权限。首次启动默认管理员为 admin / admin。");
+			"权限说明：登录后可进入主页；工程师或管理员可打开管理页面；管理员还可进入账号管理。首次启动默认管理员为 admin / admin。");
 	}
 
-	const bool canRegister = RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
-	if (m_pRegisterNameEdit != nullptr)
+	if (m_pAccountManagementAction != nullptr)
 	{
-		m_pRegisterNameEdit->setEnabled(canRegister);
+		m_pAccountManagementAction->setEnabled(RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin));
 	}
-	if (m_pRegisterPasswordEdit != nullptr)
+}
+
+void QtWidgetsApplication4::SetAuthRegisterMode(bool registerMode)
+{
+	m_bAuthRegisterMode = registerMode;
+	RefreshAuthModeUi();
+}
+
+void QtWidgetsApplication4::RefreshAuthModeUi()
+{
+	if (m_pAuthLoginModeBtn != nullptr)
 	{
-		m_pRegisterPasswordEdit->setEnabled(canRegister);
+		QSignalBlocker blockerLogin(m_pAuthLoginModeBtn);
+		m_pAuthLoginModeBtn->setChecked(!m_bAuthRegisterMode);
 	}
-	if (m_pRegisterRoleCombo != nullptr)
+	if (m_pAuthRegisterModeBtn != nullptr)
 	{
-		m_pRegisterRoleCombo->setEnabled(canRegister);
+		QSignalBlocker blockerRegister(m_pAuthRegisterModeBtn);
+		m_pAuthRegisterModeBtn->setChecked(m_bAuthRegisterMode);
+	}
+	if (m_pAuthSubmitBtn != nullptr)
+	{
+		m_pAuthSubmitBtn->setText(m_bAuthRegisterMode ? "注册账号" : "登录");
+	}
+	if (m_pAuthHintLabel != nullptr)
+	{
+		if (!m_sAuthHintOverride.trimmed().isEmpty())
+		{
+			m_pAuthHintLabel->setText(m_sAuthHintOverride);
+			m_pAuthHintLabel->show();
+		}
+		else
+		{
+			m_pAuthHintLabel->setText(m_bAuthRegisterMode
+				? "注册账号只能创建操作员权限，账号至少 4 位，密码至少 8 位，并且需要确认密码一致。"
+				: "软件启动后先进行账号登录；如没有账号，可切到注册模式创建操作员账号。");
+			m_pAuthHintLabel->hide();
+		}
+	}
+	if (m_pAuthConfirmPasswordRow != nullptr)
+	{
+		m_pAuthConfirmPasswordRow->setVisible(m_bAuthRegisterMode);
+	}
+	if (m_pRememberPasswordCheck != nullptr)
+	{
+		m_pRememberPasswordCheck->setVisible(!m_bAuthRegisterMode);
+	}
+	if (m_pAutoLoginCheck != nullptr)
+	{
+		m_pAutoLoginCheck->setVisible(!m_bAuthRegisterMode);
+		if (!m_bAuthRegisterMode)
+		{
+			m_pAutoLoginCheck->setEnabled(m_pRememberPasswordCheck == nullptr || m_pRememberPasswordCheck->isChecked());
+		}
+	}
+	if (m_pGuestLoginBtn != nullptr)
+	{
+		m_pGuestLoginBtn->setVisible(!m_bAuthRegisterMode);
+	}
+}
+
+void QtWidgetsApplication4::LoadLoginState()
+{
+	if (m_pLoginNameEdit == nullptr || m_pLoginPasswordEdit == nullptr || m_pRememberPasswordCheck == nullptr || m_pAutoLoginCheck == nullptr)
+	{
+		return;
+	}
+
+	QSettings settings(LoginStateConfigPath(), QSettings::IniFormat);
+	const QString userName = settings.value("UserName").toString();
+	const bool rememberPassword = settings.value("RememberPassword", false).toBool();
+	const bool autoLogin = settings.value("AutoLogin", false).toBool();
+	const QByteArray passwordBytes = QByteArray::fromBase64(settings.value("PasswordBase64").toByteArray());
+	const QString password = QString::fromUtf8(passwordBytes);
+
+	RefreshLoginNameHistory();
+	if (!userName.trimmed().isEmpty())
+	{
+		if (m_pLoginNameCombo != nullptr)
+		{
+			m_pLoginNameCombo->setCurrentText(userName);
+		}
+		else
+		{
+			m_pLoginNameEdit->setText(userName);
+		}
+	}
+	if (rememberPassword)
+	{
+		const QString savedPassword = settings.value(QString("SavedPasswords/%1").arg(userName)).toByteArray().isEmpty()
+			? password
+			: QString::fromUtf8(QByteArray::fromBase64(settings.value(QString("SavedPasswords/%1").arg(userName)).toByteArray()));
+		m_pLoginPasswordEdit->setText(savedPassword);
+	}
+	m_pRememberPasswordCheck->setChecked(rememberPassword);
+	m_pAutoLoginCheck->setChecked(rememberPassword && autoLogin);
+	m_pAutoLoginCheck->setEnabled(rememberPassword);
+}
+
+void QtWidgetsApplication4::SaveLoginState() const
+{
+	if (m_pLoginNameEdit == nullptr || m_pLoginPasswordEdit == nullptr || m_pRememberPasswordCheck == nullptr || m_pAutoLoginCheck == nullptr)
+	{
+		return;
+	}
+
+	QSettings settings(LoginStateConfigPath(), QSettings::IniFormat);
+	const QString userName = m_pLoginNameEdit->text().trimmed();
+	QStringList history = settings.value("AccountHistory").toStringList();
+	history.removeAll(userName);
+	if (!userName.isEmpty())
+	{
+		history.prepend(userName);
+	}
+	while (history.size() > 10)
+	{
+		history.removeLast();
+	}
+	settings.setValue("AccountHistory", history);
+	settings.setValue("UserName", userName);
+	settings.setValue("RememberPassword", m_pRememberPasswordCheck->isChecked());
+	settings.setValue("AutoLogin", m_pRememberPasswordCheck->isChecked() && m_pAutoLoginCheck->isChecked());
+	if (m_pRememberPasswordCheck->isChecked())
+	{
+		settings.setValue("PasswordBase64", m_pLoginPasswordEdit->text().toUtf8().toBase64());
+		settings.setValue(QString("SavedPasswords/%1").arg(userName), m_pLoginPasswordEdit->text().toUtf8().toBase64());
+	}
+	else
+	{
+		settings.remove("PasswordBase64");
+		settings.remove("AutoLogin");
+		settings.remove(QString("SavedPasswords/%1").arg(userName));
+	}
+	settings.sync();
+}
+
+void QtWidgetsApplication4::RefreshLoginNameHistory()
+{
+	if (m_pLoginNameCombo == nullptr)
+	{
+		return;
+	}
+
+	const QString currentName = m_pLoginNameCombo->currentText();
+	QSettings settings(LoginStateConfigPath(), QSettings::IniFormat);
+	QStringList history = settings.value("AccountHistory").toStringList();
+	const QString lastUser = settings.value("UserName").toString().trimmed();
+	if (!lastUser.isEmpty() && !history.contains(lastUser))
+	{
+		history.prepend(lastUser);
+	}
+	history.removeDuplicates();
+
+	QSignalBlocker blocker(m_pLoginNameCombo);
+	m_pLoginNameCombo->clear();
+	m_pLoginNameCombo->addItems(history);
+	m_pLoginNameCombo->setCurrentText(currentName.isEmpty() ? lastUser : currentName);
+}
+
+void QtWidgetsApplication4::FillSavedPasswordForUser(const QString& userName)
+{
+	if (m_pLoginPasswordEdit == nullptr || m_pRememberPasswordCheck == nullptr || m_pAutoLoginCheck == nullptr)
+	{
+		return;
+	}
+
+	const QString normalizedUser = userName.trimmed();
+	if (normalizedUser.isEmpty())
+	{
+		return;
+	}
+
+	QSettings settings(LoginStateConfigPath(), QSettings::IniFormat);
+	const QByteArray savedBytes = settings.value(QString("SavedPasswords/%1").arg(normalizedUser)).toByteArray();
+	if (!savedBytes.isEmpty())
+	{
+		m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(savedBytes)));
+		m_pRememberPasswordCheck->setChecked(true);
+		m_pAutoLoginCheck->setEnabled(true);
+		return;
+	}
+
+	if (settings.value("UserName").toString().trimmed() == normalizedUser
+		&& settings.value("RememberPassword", false).toBool())
+	{
+		const QByteArray legacyBytes = settings.value("PasswordBase64").toByteArray();
+		if (!legacyBytes.isEmpty())
+		{
+			m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(legacyBytes)));
+			m_pRememberPasswordCheck->setChecked(true);
+			m_pAutoLoginCheck->setEnabled(true);
+			return;
+		}
+	}
+
+	m_pLoginPasswordEdit->clear();
+	m_pRememberPasswordCheck->setChecked(false);
+	m_pAutoLoginCheck->setChecked(false);
+	m_pAutoLoginCheck->setEnabled(false);
+}
+
+bool QtWidgetsApplication4::TryAutoLogin()
+{
+	if (m_pAutoLoginCheck == nullptr || !m_pAutoLoginCheck->isChecked())
+	{
+		return false;
+	}
+	if (m_pLoginNameEdit == nullptr || m_pLoginPasswordEdit == nullptr)
+	{
+		return false;
+	}
+	if (m_pLoginNameEdit->text().trimmed().isEmpty() || m_pLoginPasswordEdit->text().isEmpty())
+	{
+		return false;
+	}
+
+	LoginCurrentAccount();
+	return RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleOperator) && m_pMainStack != nullptr && m_pMainStack->currentWidget() == m_pDashboardPage;
+}
+
+void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
+{
+	if (m_pMainStack == nullptr || m_pAuthPage == nullptr)
+	{
+		return;
+	}
+
+	const QSize authWindowSize(360, 500);
+	if (isMaximized() || isFullScreen())
+	{
+		showNormal();
+	}
+	setMinimumSize(authWindowSize);
+	setMaximumSize(authWindowSize);
+	resize(authWindowSize);
+	CenterWindowOnScreen(this);
+
+	m_sAuthHintOverride = promptMessage.trimmed();
+	SetAuthRegisterMode(false);
+	m_pMainStack->setCurrentWidget(m_pAuthPage);
+	if (m_pLoginNameEdit != nullptr)
+	{
+		m_pLoginNameEdit->setFocus(Qt::OtherFocusReason);
 	}
 }
 
@@ -1354,42 +2621,85 @@ void QtWidgetsApplication4::LoginCurrentAccount()
 
 	m_sCurrentUserName = userName;
 	m_sCurrentUserRole = role;
-	m_pLoginPasswordEdit->clear();
+	SaveLoginState();
+	RefreshLoginNameHistory();
+	if (m_pRememberPasswordCheck == nullptr || !m_pRememberPasswordCheck->isChecked())
+	{
+		m_pLoginPasswordEdit->clear();
+	}
 	if (m_pAccountLogText != nullptr)
 	{
 		m_pAccountLogText->appendPlainText(QString("[%1] %2 登录成功，权限：%3")
 			.arg(QDateTime::currentDateTime().toString("HH:mm:ss"), m_sCurrentUserName, RoleDisplayName(m_sCurrentUserRole)));
 	}
 	RefreshAccountUi();
+	SetAuthRegisterMode(false);
+	if (m_bPendingOpenManagementAfterLogin && RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer))
+	{
+		m_bPendingOpenManagementAfterLogin = false;
+		ShowManagementPage();
+		return;
+	}
+	m_bPendingOpenManagementAfterLogin = false;
+	ShowDashboardPage();
+}
+
+void QtWidgetsApplication4::LoginAsGuest()
+{
+	m_sCurrentUserName = "游客";
+	m_sCurrentUserRole = kRoleOperator;
+	m_bPendingOpenManagementAfterLogin = false;
+	if (m_pAccountLogText != nullptr)
+	{
+		m_pAccountLogText->appendPlainText(QString("[%1] 游客登录，权限：%2")
+			.arg(QDateTime::currentDateTime().toString("HH:mm:ss"), RoleDisplayName(m_sCurrentUserRole)));
+	}
+	RefreshAccountUi();
+	SetAuthRegisterMode(false);
+	ShowDashboardPage();
 }
 
 void QtWidgetsApplication4::LogoutCurrentAccount()
 {
 	m_sCurrentUserName = "访客";
 	m_sCurrentUserRole = kRoleOperator;
+	m_bPendingOpenManagementAfterLogin = false;
 	if (m_pAccountLogText != nullptr)
 	{
 		m_pAccountLogText->appendPlainText(QString("[%1] 已退出登录，当前为访客操作员权限。")
 			.arg(QDateTime::currentDateTime().toString("HH:mm:ss")));
 	}
 	RefreshAccountUi();
+	ShowAuthPage();
 }
 
 void QtWidgetsApplication4::RegisterAccount()
 {
-	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
-	{
-		QMessageBox::information(this, "注册账号", "注册账号需要管理员权限。请先使用管理员账号登录。");
-		return;
-	}
-	if (m_pRegisterNameEdit == nullptr || m_pRegisterPasswordEdit == nullptr || m_pRegisterRoleCombo == nullptr)
+	if (m_pLoginNameEdit == nullptr || m_pLoginPasswordEdit == nullptr || m_pAuthConfirmPasswordEdit == nullptr)
 	{
 		return;
 	}
 
-	const QString role = m_pRegisterRoleCombo->currentData().toString();
+	const QString role = kRoleOperator;
+	const QString normalizedUser = m_pLoginNameEdit->text().trimmed();
+	if (normalizedUser.size() < 4)
+	{
+		QMessageBox::warning(this, "注册账号", "账号至少需要 4 个字符。");
+		return;
+	}
+	const QString password = m_pLoginPasswordEdit->text();
+	if (password.size() < 8)
+	{
+		QMessageBox::warning(this, "注册账号", "密码至少需要 8 个字符。");
+		return;
+	}
+	if (m_pAuthConfirmPasswordEdit->text() != password)
+	{
+		QMessageBox::warning(this, "注册账号", "两次输入的密码不一致。");
+		return;
+	}
 	QString error;
-	if (!SaveAccount(m_pRegisterNameEdit->text(), m_pRegisterPasswordEdit->text(), role, error))
+	if (!SaveAccount(m_pLoginNameEdit->text(), password, role, error))
 	{
 		QMessageBox::warning(this, "注册账号", error);
 		return;
@@ -1399,12 +2709,40 @@ void QtWidgetsApplication4::RegisterAccount()
 	{
 		m_pAccountLogText->appendPlainText(QString("[%1] 已注册账号 %2，权限：%3")
 			.arg(QDateTime::currentDateTime().toString("HH:mm:ss"),
-				m_pRegisterNameEdit->text().trimmed(),
+				normalizedUser,
 				RoleDisplayName(role)));
 	}
-	m_pRegisterNameEdit->clear();
-	m_pRegisterPasswordEdit->clear();
+	m_pLoginPasswordEdit->clear();
+	m_pAuthConfirmPasswordEdit->clear();
+	SetAuthRegisterMode(false);
+	if (m_pLoginNameEdit != nullptr)
+	{
+		m_pLoginNameEdit->setText(normalizedUser);
+		m_pLoginNameEdit->setFocus(Qt::OtherFocusReason);
+	}
+	if (m_pRememberPasswordCheck != nullptr)
+	{
+		m_pRememberPasswordCheck->setChecked(false);
+	}
+	if (m_pAutoLoginCheck != nullptr)
+	{
+		m_pAutoLoginCheck->setChecked(false);
+		m_pAutoLoginCheck->setEnabled(false);
+	}
+	QMessageBox::information(this, "注册账号", "注册成功。请使用新账号登录。");
 	RefreshAccountUi();
+}
+
+void QtWidgetsApplication4::OpenAccountManagementDialog()
+{
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
+	{
+		QMessageBox::information(this, "账号管理", "账号管理仅管理员可用。");
+		return;
+	}
+
+	AccountManagementDialog dialog(this);
+	dialog.exec();
 }
 
 void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page)
@@ -1422,6 +2760,35 @@ void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page)
 	page->setMinimumSize(0, 0);
 	page->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
 	page->setGeometry(m_pMainStack->contentsRect());
+
+	if (EmbeddedBackButton(page) == nullptr)
+	{
+		QPushButton* backButton = new QPushButton("返回主页", page);
+		backButton->setObjectName("EmbeddedBackToDashboardButton");
+		backButton->setCursor(Qt::PointingHandCursor);
+		backButton->setFocusPolicy(Qt::NoFocus);
+		backButton->setToolTip("返回大按钮主页");
+		backButton->setStyleSheet(
+			"QPushButton#EmbeddedBackToDashboardButton {"
+			"background: #1F3542; color: #F4FAFA; border: 1px solid #4B7184;"
+			"border-radius: 10px; padding: 7px 14px; font-size: 14px; font-weight: 600;"
+			"}"
+			"QPushButton#EmbeddedBackToDashboardButton:hover { background: #2D5465; border-color: #72D4DD; }"
+			"QPushButton#EmbeddedBackToDashboardButton:pressed { background: #18303B; }");
+		connect(backButton, &QPushButton::clicked, this, [this, page]()
+			{
+				if (page == nullptr)
+				{
+					ShowDashboardPage();
+					return;
+				}
+				if (page->close())
+				{
+					ShowDashboardPage();
+				}
+			});
+	}
+	PositionEmbeddedBackButton(page);
 
 	const QList<QScrollArea*> scrollAreas = page->findChildren<QScrollArea*>();
 	for (QScrollArea* scrollArea : scrollAreas)
@@ -1457,6 +2824,7 @@ void QtWidgetsApplication4::ShowEmbeddedPage(QWidget* page)
 	m_pMainStack->setCurrentWidget(page);
 	page->setGeometry(m_pMainStack->contentsRect());
 	page->show();
+	PositionEmbeddedBackButton(page);
 	if (QLayout* stackLayout = m_pMainStack->layout())
 	{
 		stackLayout->activate();
@@ -1472,6 +2840,7 @@ void QtWidgetsApplication4::ShowEmbeddedPage(QWidget* page)
 			if (m_pMainStack != nullptr && m_pMainStack->currentWidget() == page)
 			{
 				page->setGeometry(m_pMainStack->contentsRect());
+				PositionEmbeddedBackButton(page);
 				if (QLayout* pageLayout = page->layout())
 				{
 					pageLayout->activate();
@@ -1510,7 +2879,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		QTextStream out(stdout);
 		out << "QtWidgetsApplication4 command line options:\n";
 		out << "  --no-show                         不显示主窗口，适合自动测试\n";
-		out << "  --open-function-test              打开 FANUC 功能测试窗口\n";
+		out << "  --open-function-test              打开机器人功能测试窗口\n";
 		out << "  --open-jog                        打开机器人点动控制窗口\n";
 		out << "  --open-precise-measure            打开精测量数据修改窗口\n";
 		out << "  --open-camera-param               打开相机参数窗口\n";
@@ -2737,44 +4106,62 @@ void QtWidgetsApplication4::OpenCameraParamDialog()
 
 void QtWidgetsApplication4::FanucConnectTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
 
-	const bool ok = pFanucDriver->InitSocket(pFanucDriver->m_sSocketIP.c_str(), static_cast<u_short>(pFanucDriver->m_nSocketPort));
+	const bool ok = pRobotDriver->InitSocket(pRobotDriver->m_sSocketIP.c_str(), static_cast<u_short>(pRobotDriver->m_nSocketPort));
+	int ftpRet = -1;
 	if (ok)
 	{
-		QMessageBox::information(this, "FANUC连接", GetStr("连接成功：%s:%d", pFanucDriver->m_sSocketIP.c_str(), pFanucDriver->m_nSocketPort).c_str());
+		if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
+		{
+			pFanucDriver->StartMonitor();
+		}
+		ftpRet = pRobotDriver->InitFtp();
+		QMessageBox::information(
+			this,
+			"机器人连接",
+			GetStr("机器人连接成功：%s:%d\nFTP初始化返回：%d",
+				pRobotDriver->m_sSocketIP.c_str(),
+				pRobotDriver->m_nSocketPort,
+				ftpRet).c_str());
 	}
 	else
 	{
-		QMessageBox::warning(this, "FANUC连接", GetStr("连接失败：%s:%d", pFanucDriver->m_sSocketIP.c_str(), pFanucDriver->m_nSocketPort).c_str());
+		QMessageBox::warning(this, "机器人连接", GetStr("连接失败：%s:%d", pRobotDriver->m_sSocketIP.c_str(), pRobotDriver->m_nSocketPort).c_str());
 	}
 }
 
 void QtWidgetsApplication4::FanucDisconnectTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
 
-	const bool ok = pFanucDriver->StopRobotServices();
-	QMessageBox::information(this, "FANUC断开", ok ? "已请求机器人服务退出，并断开本地连接。" : "请求机器人服务退出失败，已尝试断开本地连接。");
+	bool ok = true;
+	if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
+	{
+		ok = pFanucDriver->StopRobotServices();
+		pFanucDriver->StopMonitor();
+	}
+	ok = pRobotDriver->CloseSocket() && ok;
+	QMessageBox::information(this, "机器人断开", ok ? "已断开当前机器人连接。" : "机器人断开时返回失败，请检查日志。");
 }
 
 void QtWidgetsApplication4::FanucGetCurrentPosTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
 
-	const T_ROBOT_COORS pos = pFanucDriver->GetCurrentPos();
+	const T_ROBOT_COORS pos = pRobotDriver->GetCurrentPos();
 	QMessageBox::information(
 		this,
 		"读取当前位置",
@@ -2784,13 +4171,13 @@ void QtWidgetsApplication4::FanucGetCurrentPosTest()
 
 void QtWidgetsApplication4::FanucGetCurrentPulseTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
 
-	const T_ANGLE_PULSE pulse = pFanucDriver->GetCurrentPulse();
+	const T_ANGLE_PULSE pulse = pRobotDriver->GetCurrentPulse();
 	QMessageBox::information(
 		this,
 		"读取关节脉冲",
@@ -2801,20 +4188,20 @@ void QtWidgetsApplication4::FanucGetCurrentPulseTest()
 
 void QtWidgetsApplication4::FanucCheckDoneTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
 
-	const int done = pFanucDriver->CheckDone();
+	const int done = pRobotDriver->CheckDone();
 	QMessageBox::information(this, "检查运行完成", GetStr("CheckDone 返回值：%d", done).c_str());
 }
 
 void QtWidgetsApplication4::FanucSetGetIntTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
@@ -2832,20 +4219,20 @@ void QtWidgetsApplication4::FanucSetGetIntTest()
 		return;
 	}
 
-	if (!pFanucDriver->SetIntVar(index, value))
+	if (!pRobotDriver->SetIntVar(index, value))
 	{
 		QMessageBox::warning(this, "写读INT寄存器", GetStr("写入 INT%d 失败。", index).c_str());
 		return;
 	}
 
-	const int readValue = pFanucDriver->GetIntVar(index);
+	const int readValue = pRobotDriver->GetIntVar(index);
 	QMessageBox::information(this, "写读INT寄存器", GetStr("写入 INT%d=%d\n读取值=%d", index, value, readValue).c_str());
 }
 
 void QtWidgetsApplication4::FanucSetTpSpeedTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
@@ -2857,15 +4244,15 @@ void QtWidgetsApplication4::FanucSetTpSpeedTest()
 		return;
 	}
 
-	const bool setOk = pFanucDriver->SetTpSpeed(speed);
+	const bool setOk = pRobotDriver->SetTpSpeed(speed);
 	const std::string message = setOk ? GetStr("设置速度成功：%d", speed) : GetStr("设置速度失败：%d", speed);
 	QMessageBox::information(this, "设置速度", message.c_str());
 }
 
 void QtWidgetsApplication4::FanucCallJobTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
@@ -2878,15 +4265,15 @@ void QtWidgetsApplication4::FanucCallJobTest()
 	}
 
 	const QByteArray jobNameBytes = jobName.trimmed().toLocal8Bit();
-	const bool callOk = pFanucDriver->CallJob(jobNameBytes.constData());
+	const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
 	const std::string message = callOk ? GetStr("调用任务成功：%s", jobNameBytes.constData()) : GetStr("调用任务失败：%s", jobNameBytes.constData());
 	QMessageBox::information(this, "调用任务", message.c_str());
 }
 
 void QtWidgetsApplication4::FanucUploadLsTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
@@ -2899,6 +4286,12 @@ void QtWidgetsApplication4::FanucUploadLsTest()
 	}
 
 	const QByteArray lsPathBytes = lsPath.toLocal8Bit();
+	FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver);
+	if (pFanucDriver == nullptr)
+	{
+		QMessageBox::information(this, "发送LS程序", "LS 编译/上传是 FANUC 专用功能；STEP 请使用通用 FTP 上传或焊道下发流程。");
+		return;
+	}
 	const int ret = pFanucDriver->UploadLsFile(lsPathBytes.constData());
 	if (ret == 0)
 	{
@@ -2912,8 +4305,8 @@ void QtWidgetsApplication4::FanucUploadLsTest()
 
 void QtWidgetsApplication4::FanucMovlTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
@@ -2928,13 +4321,13 @@ void QtWidgetsApplication4::FanucMovlTest()
 	m_bFanucMovlRunning = true;
 	ui.FanucMovlTestBtn->setEnabled(false);
 
-	std::thread([this, pFanucDriver, moveForward]()
+	std::thread([this, pRobotDriver, moveForward]()
 		{
-			T_ROBOT_COORS target = pFanucDriver->GetCurrentPos();
+			T_ROBOT_COORS target = pRobotDriver->GetCurrentPos();
 			target.dY += moveForward ? 100.0 : -100.0;
 
-			const bool moveOk = pFanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pFanucDriver->m_nExternalAxleType, "MOVL");
-			const int done = moveOk ? pFanucDriver->CheckRobotDone(200) : -1;
+			const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
+			const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
 			const QString message = QString("MOVL %1 100mm\nMove=%2\nCheckRobotDone=%3")
 				.arg(moveForward ? "Y+" : "Y-")
 				.arg(moveOk ? "OK" : "FAIL")
@@ -2951,8 +4344,8 @@ void QtWidgetsApplication4::FanucMovlTest()
 
 void QtWidgetsApplication4::FanucMovjTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
@@ -2965,18 +4358,18 @@ void QtWidgetsApplication4::FanucMovjTest()
 	m_bFanucMovjRunning = true;
 	ui.FanucMovjTestBtn->setEnabled(false);
 
-	std::thread([this, pFanucDriver]()
+	std::thread([this, pRobotDriver]()
 		{
-			T_ANGLE_PULSE target = pFanucDriver->GetCurrentPulse();
-			const double j2PulseUnit = pFanucDriver->m_tAxisUnit.dLPulseUnit;
-			const double j3PulseUnit = pFanucDriver->m_tAxisUnit.dUPulseUnit;
+			T_ANGLE_PULSE target = pRobotDriver->GetCurrentPulse();
+			const double j2PulseUnit = pRobotDriver->m_tAxisUnit.dLPulseUnit;
+			const double j3PulseUnit = pRobotDriver->m_tAxisUnit.dUPulseUnit;
 			const long j2DeltaPulse = j2PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j2PulseUnit));
 			const long j3DeltaPulse = j3PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j3PulseUnit));
 			target.nLPulse += j2DeltaPulse;
 			target.nUPulse += j3DeltaPulse;
 
-			const bool moveOk = pFanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pFanucDriver->m_nExternalAxleType, "MOVJ");
-			const int done = moveOk ? pFanucDriver->CheckRobotDone(200) : -1;
+			const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
+			const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
 			const QString message = QString("MOVJ J2/J3 +5deg\nJ2DeltaPulse=%1\nJ3DeltaPulse=%2\nMove=%3\nCheckRobotDone=%4\n提示：固定TP当前用R[17]%，测试速度取1%%。")
 				.arg(j2DeltaPulse)
 				.arg(j3DeltaPulse)
@@ -2994,8 +4387,8 @@ void QtWidgetsApplication4::FanucMovjTest()
 
 void QtWidgetsApplication4::FanucMoveZeroTest()
 {
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
@@ -3019,14 +4412,14 @@ void QtWidgetsApplication4::FanucMoveZeroTest()
 	m_bFanucMoveZeroRunning = true;
 	ui.FanucMoveZeroBtn->setEnabled(false);
 
-	std::thread([this, pFanucDriver]()
+	std::thread([this, pRobotDriver]()
 		{
 			const T_ANGLE_PULSE zeroPulse = T_ANGLE_PULSE();
 			const T_ROBOT_MOVE_SPEED speed(1.0, 0.0, 0.0);
-			const bool moveOk = pFanucDriver->MoveByJob(zeroPulse, speed, pFanucDriver->m_nExternalAxleType, "MOVJ");
-			const int done = moveOk ? pFanucDriver->CheckRobotDone(200) : -1;
-			const T_ROBOT_COORS pos = pFanucDriver->GetCurrentPos();
-			const T_ANGLE_PULSE pulse = pFanucDriver->GetCurrentPulse();
+			const bool moveOk = pRobotDriver->MoveByJob(zeroPulse, speed, pRobotDriver->m_nExternalAxleType, "MOVJ");
+			const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+			const T_ROBOT_COORS pos = pRobotDriver->GetCurrentPos();
+			const T_ANGLE_PULSE pulse = pRobotDriver->GetCurrentPulse();
 
 			const QString message = QString(
 				"MOVJ 到零位\n"
@@ -3069,8 +4462,8 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 	{
 		return;
 	}
-	FANUCRobotCtrl* pFanucDriver = GetCurrentFanucDriver(this);
-	if (pFanucDriver == nullptr)
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
@@ -3083,7 +4476,7 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 	}
 	if (m_pRobotJogPage == nullptr)
 	{
-		m_pRobotJogPage = new RobotJogDialog(pFanucDriver, m_pMainStack);
+		m_pRobotJogPage = new RobotJogDialog(pRobotDriver, m_pMainStack);
 		m_nRobotJogPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pRobotJogPage);
 	}

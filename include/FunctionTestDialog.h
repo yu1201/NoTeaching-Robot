@@ -11,7 +11,7 @@ class FANUCRobotCtrl;
 class RobotDriverAdaptor;
 class QTimer;
 
-// 功能测试子界面：把主界面上的 FANUC 调试/运动测试按钮集中管理。
+// 功能测试子界面：把主界面上的机器人调试/运动测试按钮集中管理。
 class FunctionTestDialog : public QDialog
 {
 public:

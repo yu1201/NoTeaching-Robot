@@ -1,5 +1,29 @@
 #include "RobotDriverAdaptor.h"
 
+#include <chrono>
+
+namespace
+{
+    long long RobotDriverSteadyMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    void FillPcPassiveTimestamp(long long* pRobotMs, long long* pPcRecvMs, long long pcMs)
+    {
+        // Non-monitor drivers use PC steady time as the temporary robot timeline.
+        if (pRobotMs != nullptr)
+        {
+            *pRobotMs = pcMs;
+        }
+        if (pPcRecvMs != nullptr)
+        {
+            *pPcRecvMs = pcMs;
+        }
+    }
+}
+
 
 RobotDriverAdaptor::RobotDriverAdaptor(std::string sRobotName,RobotLog* pRobotLog)
     : m_nExternalAxleType(0),
@@ -566,7 +590,146 @@ T_ANGLE_PULSE RobotDriverAdaptor::GetCurrentPulse()
     return T_ANGLE_PULSE();
 }
 
+T_ROBOT_COORS RobotDriverAdaptor::GetCurrentPosPassive(long long* pRobotMs, long long* pPcRecvMs)
+{
+    const long long pcMs = RobotDriverSteadyMs();
+    T_ROBOT_COORS pose = GetCurrentPos();
+    FillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
+    return pose;
+}
+
+T_ANGLE_PULSE RobotDriverAdaptor::GetCurrentPulsePassive(long long* pRobotMs, long long* pPcRecvMs)
+{
+    const long long pcMs = RobotDriverSteadyMs();
+    T_ANGLE_PULSE pulse = GetCurrentPulse();
+    FillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
+    return pulse;
+}
+
+int RobotDriverAdaptor::CheckDonePassive(long long* pRobotMs, long long* pPcRecvMs)
+{
+    const long long pcMs = RobotDriverSteadyMs();
+    const int done = CheckDone();
+    FillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
+    return done;
+}
+
 int RobotDriverAdaptor::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo)
 {
     return 0;
+}
+
+int RobotDriverAdaptor::CheckDone()
+{
+    return -1;
+}
+
+int RobotDriverAdaptor::CheckRobotDone(int nDelayTime)
+{
+    (void)nDelayTime;
+    return CheckDone();
+}
+
+bool RobotDriverAdaptor::CallJob(std::string sJobName)
+{
+    (void)sJobName;
+    return false;
+}
+
+int RobotDriverAdaptor::InitFtp()
+{
+    return -1;
+}
+
+int RobotDriverAdaptor::UploadFile(std::string LocalFilePath, std::string RemoteFilePath)
+{
+    (void)LocalFilePath;
+    (void)RemoteFilePath;
+    return -1;
+}
+
+int RobotDriverAdaptor::DownloadFile(std::string RemoteFilePath, std::string LocalFilePath)
+{
+    (void)RemoteFilePath;
+    (void)LocalFilePath;
+    return -1;
+}
+
+bool RobotDriverAdaptor::SetTpSpeed(int speed)
+{
+    (void)speed;
+    return false;
+}
+
+int RobotDriverAdaptor::GetIntVar(int nIndex, const char* cStrPreFix)
+{
+    (void)nIndex;
+    (void)cStrPreFix;
+    return 0;
+}
+
+bool RobotDriverAdaptor::SetIntVar(int nIndex, int nValue, int score, const char* cStrPreFix)
+{
+    (void)nIndex;
+    (void)nValue;
+    (void)score;
+    (void)cStrPreFix;
+    return false;
+}
+
+bool RobotDriverAdaptor::SetIntVar(const char* name, int value, int score)
+{
+    (void)name;
+    (void)value;
+    (void)score;
+    return false;
+}
+
+bool RobotDriverAdaptor::SetRealVar(int nIndex, double value, const char* cStrPreFix, int score)
+{
+    (void)nIndex;
+    (void)value;
+    (void)cStrPreFix;
+    (void)score;
+    return false;
+}
+
+int RobotDriverAdaptor::GetPosVar(long lPvarIndex, double array[6], int config[7], int MoveType)
+{
+    (void)lPvarIndex;
+    (void)array;
+    (void)config;
+    (void)MoveType;
+    return -1;
+}
+
+bool RobotDriverAdaptor::MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName, int isconfig, int config[7])
+{
+    (void)tRobotJointCoord;
+    (void)tPulseMove;
+    (void)nExternalAxleType;
+    (void)JobName;
+    (void)isconfig;
+    (void)config;
+    return false;
+}
+
+bool RobotDriverAdaptor::MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName)
+{
+    (void)tRobotJointCoord;
+    (void)tPulseMove;
+    (void)nExternalAxleType;
+    (void)JobName;
+    return false;
+}
+
+bool RobotDriverAdaptor::MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType, std::string JobName, int config[7])
+{
+    (void)dRobotJointCoord;
+    (void)tPulseMove;
+    (void)nExternalAxleType;
+    (void)nPVarType;
+    (void)JobName;
+    (void)config;
+    return false;
 }

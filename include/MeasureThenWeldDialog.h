@@ -9,10 +9,10 @@
 #include <functional>
 #include <vector>
 
-class FANUCRobotCtrl;
 class MeasureThenWeldService;
 class QPushButton;
 class QPlainTextEdit;
+class RobotDriverAdaptor;
 
 struct T_PRECISE_MEASURE_PARAM
 {
@@ -54,21 +54,21 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
-    FANUCRobotCtrl* GetFirstFanucDriver();
+    RobotDriverAdaptor* GetRobotDriver();
 
     // 读取 Data/<RobotName>/PreciseMeasureParam.ini 中当前启用的 PostionN 分组。
-    bool LoadPresetParam(FANUCRobotCtrl* pFanucDriver, T_PRECISE_MEASURE_PARAM& param, QString& error);
+    bool LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error);
     bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
     bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
     bool ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;
 
     // 单段/多段脉冲运动，内部会阻塞等待机器人运动结束。
-    bool MovePulseAndWait(FANUCRobotCtrl* pFanucDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name);
-    bool MovePulseListAndWait(FANUCRobotCtrl* pFanucDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name);
-    bool MoveCoorsAndWait(FANUCRobotCtrl* pFanucDriver, const T_ROBOT_COORS& coors, double speed, const QString& name);
+    bool MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name);
+    bool MovePulseListAndWait(RobotDriverAdaptor* pRobotDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name);
+    bool MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, const T_ROBOT_COORS& coors, double speed, const QString& name);
 
     // 扫描段：机器人从 StartPos 运动到 EndPos，同时按配置帧率读取相机缓存点。
-    bool ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath);
+    bool ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath);
     QString BuildResultDir(const std::string& robotName) const;
     bool SaveTextLines(const QString& filePath, const std::vector<QString>& lines, QString& error) const;
 

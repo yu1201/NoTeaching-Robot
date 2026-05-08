@@ -455,11 +455,11 @@ bool STEPRobotCtrl::CallJob(std::string sJobName)
 {
 	std::string sNowProjName = GetUserProject();
 	
-	if (0 != LoadUserProgram(sNowProjName, sJobName))
+	if (!LoadUserProgram(sNowProjName, sJobName))
 	{
 		return false;
 	}
-	if (0 != Prog_startRun_Py())
+	if (!Prog_startRun_Py())
 	{
 		return false;
 	}
@@ -663,19 +663,38 @@ bool STEPRobotCtrl::GetToolData(int nToolNo, T_ROBOT_COORS adRobotToolData)
 //FTP建立连接
 int STEPRobotCtrl::InitFtp()
 {
-	m_pFTP = new FtpClient(m_pRobotLog, m_sFTPIP, m_nFTPPort, m_sFTPUser, m_sFTPPassWord);
+	if (m_pFTP == nullptr)
+	{
+		m_pFTP = new FtpClient(m_pRobotLog, m_sFTPIP, m_nFTPPort, m_sFTPUser, m_sFTPPassWord);
+	}
 	return 0;
 }
 
 //上传文件给埃斯顿机器人，埃斯顿为RemoteFilePath，本地为LocalFilePath    //  .//MultiPos_Mv1.erd 
 int STEPRobotCtrl::UploadFile(std::string LocalFilePath, std::string RemoteFilePath)
 {
-	return m_pFTP->uploadFile(LocalFilePath, RemoteFilePath);
+	if (m_pFTP == nullptr)
+	{
+		InitFtp();
+	}
+	if (m_pFTP == nullptr)
+	{
+		return -1;
+	}
+	return m_pFTP->uploadFile(LocalFilePath, RemoteFilePath) ? 0 : -1;
 }
 //下载文件,埃斯顿为RemoteFilePath，本地为LocalFilePath
 int STEPRobotCtrl::DownloadFile(std::string RemoteFilePath, std::string LocalFilePath)
 {
-	return m_pFTP->downloadFile(RemoteFilePath,LocalFilePath);
+	if (m_pFTP == nullptr)
+	{
+		InitFtp();
+	}
+	if (m_pFTP == nullptr)
+	{
+		return -1;
+	}
+	return m_pFTP->downloadFile(RemoteFilePath, LocalFilePath) ? 0 : -1;
 }
 
 //清除报警信息+
@@ -933,4 +952,74 @@ bool STEPRobotCtrl::SetRealVar(int nIndex, double value, const char* cStrPreFix,
 		return false;
 	}
 	return true;
+}
+
+bool STEPRobotCtrl::MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName, int isconfig, int config[7])
+{
+	(void)nExternalAxleType;
+	(void)isconfig;
+	(void)config;
+
+	T_ROBOT_MOVE_INFO moveInfo;
+	moveInfo.nMoveType = (JobName == "MOVJ" || JobName == "movj") ? MOVJ : MOVL;
+	moveInfo.tCoord = tRobotJointCoord;
+	moveInfo.tSpeed = tPulseMove;
+	moveInfo.nMoveDevice = 0;
+	moveInfo.nTrackNo = 0;
+	moveInfo.adBasePosVar[0] = tRobotJointCoord.dBX;
+	moveInfo.adBasePosVar[1] = tRobotJointCoord.dBY;
+	moveInfo.adBasePosVar[2] = tRobotJointCoord.dBZ;
+
+	return ContiMoveAny(std::vector<T_ROBOT_MOVE_INFO>{ moveInfo }) == 0;
+}
+
+bool STEPRobotCtrl::MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName)
+{
+	(void)nExternalAxleType;
+
+	T_ROBOT_MOVE_INFO moveInfo;
+	moveInfo.nMoveType = (JobName == "MOVL" || JobName == "movl") ? MOVL : MOVJ;
+	moveInfo.tPulse = tRobotJointCoord;
+	moveInfo.tSpeed = tPulseMove;
+	moveInfo.nMoveDevice = 0;
+	moveInfo.nTrackNo = 0;
+	moveInfo.adBasePosVar[0] = static_cast<double>(tRobotJointCoord.lBXPulse);
+	moveInfo.adBasePosVar[1] = static_cast<double>(tRobotJointCoord.lBYPulse);
+	moveInfo.adBasePosVar[2] = static_cast<double>(tRobotJointCoord.lBZPulse);
+
+	return ContiMoveAny(std::vector<T_ROBOT_MOVE_INFO>{ moveInfo }) == 0;
+}
+
+bool STEPRobotCtrl::MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType, std::string JobName, int config[7])
+{
+	(void)config;
+	if (dRobotJointCoord == nullptr)
+	{
+		return false;
+	}
+
+	if (nPVarType == POSVAR || JobName == "MOVL" || JobName == "movl")
+	{
+		T_ROBOT_COORS coors;
+		coors.dX = dRobotJointCoord[0];
+		coors.dY = dRobotJointCoord[1];
+		coors.dZ = dRobotJointCoord[2];
+		coors.dRX = dRobotJointCoord[3];
+		coors.dRY = dRobotJointCoord[4];
+		coors.dRZ = dRobotJointCoord[5];
+		coors.dBX = dRobotJointCoord[6];
+		coors.dBY = dRobotJointCoord[7];
+		return MoveByJob(coors, tPulseMove, nExternalAxleType, JobName);
+	}
+
+	T_ANGLE_PULSE pulse;
+	pulse.nSPulse = static_cast<long>(dRobotJointCoord[0]);
+	pulse.nLPulse = static_cast<long>(dRobotJointCoord[1]);
+	pulse.nUPulse = static_cast<long>(dRobotJointCoord[2]);
+	pulse.nRPulse = static_cast<long>(dRobotJointCoord[3]);
+	pulse.nBPulse = static_cast<long>(dRobotJointCoord[4]);
+	pulse.nTPulse = static_cast<long>(dRobotJointCoord[5]);
+	pulse.lBXPulse = static_cast<long>(dRobotJointCoord[6]);
+	pulse.lBYPulse = static_cast<long>(dRobotJointCoord[7]);
+	return MoveByJob(pulse, tPulseMove, nExternalAxleType, JobName);
 }

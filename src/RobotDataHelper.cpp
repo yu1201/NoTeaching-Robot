@@ -4,6 +4,7 @@
 #include "OPini.h"
 #include "RobotDriverAdaptor.h"
 
+#include <QByteArray>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -11,12 +12,70 @@
 #include <QRegularExpression>
 #include <QStringConverter>
 #include <QTextStream>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 namespace
 {
 QString ToNativeAbsolutePath(const QString& path)
 {
     return QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+}
+
+QString DecodeConfigTextForRobotData(const std::string& text)
+{
+    if (text.empty())
+    {
+        return QString();
+    }
+
+    const QByteArray bytes(text.data(), static_cast<int>(text.size()));
+#ifdef Q_OS_WIN
+    const auto decodeWindowsCodePage = [&bytes](UINT codePage, DWORD flags) -> QString
+        {
+            const int wideLength = MultiByteToWideChar(
+                codePage,
+                flags,
+                bytes.constData(),
+                bytes.size(),
+                nullptr,
+                0);
+            if (wideLength <= 0)
+            {
+                return QString();
+            }
+            std::wstring wideText(static_cast<size_t>(wideLength), L'\0');
+            MultiByteToWideChar(
+                codePage,
+                flags,
+                bytes.constData(),
+                bytes.size(),
+                wideText.data(),
+                wideLength);
+            return QString::fromWCharArray(wideText.data(), wideLength);
+        };
+
+    const QString decodedUtf8Text = decodeWindowsCodePage(CP_UTF8, MB_ERR_INVALID_CHARS);
+    if (!decodedUtf8Text.isNull() && !decodedUtf8Text.contains(QChar(0xfffd)))
+    {
+        return decodedUtf8Text;
+    }
+    const QString gbkText = decodeWindowsCodePage(936, 0);
+    if (!gbkText.isNull())
+    {
+        return gbkText;
+    }
+#endif
+    const QString fallbackUtf8Text = QString::fromUtf8(bytes.constData(), bytes.size());
+    if (!fallbackUtf8Text.contains(QChar(0xfffd)))
+    {
+        return fallbackUtf8Text;
+    }
+    return QString::fromLocal8Bit(bytes.constData(), bytes.size());
 }
 }
 
@@ -177,14 +236,14 @@ QVector<RobotDataHelper::RobotInfo> RobotDataHelper::LoadRobotList(ContralUnit* 
         {
             const T_CONTRAL_UNIT& unitInfo = pContralUnit->m_vtContralUnitInfo[index];
             RobotDriverAdaptor* pDriver = static_cast<RobotDriverAdaptor*>(unitInfo.pUnitDriver);
-            const QString robotName = QString::fromStdString(
+            const QString robotName = DecodeConfigTextForRobotData(
                 pDriver != nullptr && !pDriver->m_sRobotName.empty() ? pDriver->m_sRobotName : unitInfo.sUnitName);
             if (robotName.isEmpty())
             {
                 continue;
             }
 
-            const QString customName = QString::fromStdString(
+            const QString customName = DecodeConfigTextForRobotData(
                 pDriver != nullptr && !pDriver->m_sCustomName.empty() ? pDriver->m_sCustomName : unitInfo.sChineseName);
 
             RobotInfo info;
