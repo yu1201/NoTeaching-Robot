@@ -6,6 +6,8 @@
 
 #include <atomic>
 #include <QDateTime>
+#include <QList>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 
@@ -15,6 +17,7 @@ class ClientUDPFormSensorWorker;
 class CameraParamDialog;
 class FANUCRobotCtrl;
 class FunctionTestDialog;
+class QCheckBox;
 class MeasureThenWeldDialog;
 class PreciseMeasureEditDialog;
 class QComboBox;
@@ -27,9 +30,11 @@ class QResizeEvent;
 class QStackedWidget;
 class QThread;
 class QTimer;
+class RobotDriverAdaptor;
 class RobotJogDialog;
 class WeldProcessDialog;
 class WeldSeamCompDialog;
+class QAction;
 
 class QtWidgetsApplication4 : public QMainWindow
 {
@@ -79,20 +84,35 @@ private:
     void ShowEmbeddedPage(QWidget* page);
     void PrepareEmbeddedPage(QWidget* page);
     void RefreshRobotSelectorUi();
+    void RefreshRobotOperationAvailability();
     int CurrentRobotUnitIndex() const;
     const T_CONTRAL_UNIT* CurrentContralUnit() const;
-    FANUCRobotCtrl* GetCurrentFanucDriver(QWidget* parent) const;
+    bool IsRobotUnitDriverReady(int unitIndex, QString* issueText = nullptr) const;
+    int FindFirstReadyRobotUnitIndex() const;
+    RobotDriverAdaptor* GetCurrentRobotDriver(QWidget* parent);
+    FANUCRobotCtrl* GetCurrentFanucDriver(QWidget* parent);
     QString AccountConfigPath() const;
     QString RoleDisplayName(const QString& role) const;
     int RoleLevel(const QString& role) const;
     bool RequirePermission(const QString& minimumRole, const QString& actionName);
     void EnsureDefaultAdminAccount();
     void RefreshAccountUi();
+    QString LoginStateConfigPath() const;
+    void LoadLoginState();
+    void SaveLoginState() const;
+    void RefreshLoginNameHistory();
+    void FillSavedPasswordForUser(const QString& userName);
+    bool TryAutoLogin();
+    void ShowAuthPage(const QString& promptMessage = QString());
     bool VerifyAccount(const QString& userName, const QString& password, QString& role, QString& error) const;
     bool SaveAccount(const QString& userName, const QString& password, const QString& role, QString& error) const;
+    void SetAuthRegisterMode(bool registerMode);
+    void RefreshAuthModeUi();
     void LoginCurrentAccount();
+    void LoginAsGuest();
     void LogoutCurrentAccount();
     void RegisterAccount();
+    void OpenAccountManagementDialog();
     bool LoadGrooveCameraIP(QString& cameraIP) const;
     void LoadRobotLogFile(const QString& relativePath, bool forceRefresh = false);
     void RunCommandLineActions(const QStringList& arguments);
@@ -118,6 +138,7 @@ private:
     QTimer* m_grooveCameraDisplayTimer;
     QTimer* m_robotLogDisplayTimer;
     QStackedWidget* m_pMainStack;
+    QWidget* m_pAuthPage;
     QWidget* m_pDashboardPage;
     QWidget* m_pManagementPage;
     QComboBox* m_pRobotSelectorCombo;
@@ -131,12 +152,22 @@ private:
     QLabel* m_pCurrentUserLabel;
     QLabel* m_pManagementUserLabel;
     QLabel* m_pPermissionHintLabel;
+    QLabel* m_pAuthTitleLabel;
+    QLabel* m_pAuthHintLabel;
+    QComboBox* m_pLoginNameCombo;
     QLineEdit* m_pLoginNameEdit;
     QLineEdit* m_pLoginPasswordEdit;
-    QLineEdit* m_pRegisterNameEdit;
-    QLineEdit* m_pRegisterPasswordEdit;
-    QComboBox* m_pRegisterRoleCombo;
+    QWidget* m_pAuthConfirmPasswordRow;
+    QLineEdit* m_pAuthConfirmPasswordEdit;
     QPlainTextEdit* m_pAccountLogText;
+    QCheckBox* m_pAutoLoginCheck;
+    QCheckBox* m_pRememberPasswordCheck;
+    QPushButton* m_pAuthLoginModeBtn;
+    QPushButton* m_pAuthRegisterModeBtn;
+    QPushButton* m_pAuthSubmitBtn;
+    QPushButton* m_pGuestLoginBtn;
+    QAction* m_pAccountManagementAction = nullptr;
+    QList<QPointer<QWidget>> m_robotOperationWidgets;
     QPushButton* m_pCameraParamBtn;
     QPushButton* m_pWeldSeamCompBtn;
     WeldProcessDialog* m_pWeldProcessPage;
@@ -153,6 +184,9 @@ private:
     QString m_sCurrentUserName;
     QString m_sCurrentUserRole;
     QString m_sMeasureThenWeldStatus;
+    QString m_sAuthHintOverride;
+    bool m_bAuthRegisterMode;
+    bool m_bPendingOpenManagementAfterLogin = false;
     QString m_sCurrentRobotLogPath;
     QString m_sLastRobotLogFilePath;
     QDateTime m_lastRobotLogModified;

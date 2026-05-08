@@ -756,11 +756,11 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
 
     QVBoxLayout* rootLayout = new QVBoxLayout(this);
 
-    QLabel* titleLabel = new QLabel("FANUC 功能测试区");
+    QLabel* titleLabel = new QLabel("机器人功能测试区");
     titleLabel->setStyleSheet("font-size: 20px; font-weight: bold; color: #F4FAFA;");
     rootLayout->addWidget(titleLabel);
 
-    QLabel* hintLabel = new QLabel("这里集中放置设置速度、读取位置、检查运行、往返运动、零位运动等测试功能，避免主界面继续堆按钮。");
+    QLabel* hintLabel = new QLabel("这里集中放置设置速度、读取位置、检查运行、往返运动、零位运动等测试功能；FANUC 专用按钮会在非 FANUC 驱动下禁用。");
     rootLayout->addWidget(hintLabel);
 
     QGridLayout* groupLayout = new QGridLayout();
@@ -774,8 +774,8 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     QPushButton* checkDoneBtn = CreateTestButton("检查运行完成");
     QPushButton* setGetIntBtn = CreateTestButton("写读INT寄存器");
     QPushButton* callJobBtn = CreateTestButton("调用任务");
-    QPushButton* uploadLsBtn = CreateTestButton("发送LS程序");
-    QPushButton* curposDiagBtn = CreateTestButton("CURPOS诊断");
+    QPushButton* uploadLsBtn = CreateTestButton("发送FANUC LS");
+    QPushButton* curposDiagBtn = CreateTestButton("FANUC CURPOS诊断");
     QPushButton* timestampDiagBtn = CreateTestButton("机器人+相机时间戳");
     basicLayout->addWidget(setSpeedBtn, 0, 0);
     basicLayout->addWidget(getPosBtn, 0, 1);
@@ -787,6 +787,20 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     basicLayout->addWidget(curposDiagBtn, 3, 1);
     basicLayout->addWidget(timestampDiagBtn, 4, 0, 1, 2);
     groupLayout->addWidget(basicGroup, 0, 0);
+
+    RobotDriverAdaptor* initialDriver = nullptr;
+    if (m_pContralUnit != nullptr
+        && m_unitIndex >= 0
+        && m_unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        initialDriver = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
+    }
+    const bool initialFanucDriver = dynamic_cast<FANUCRobotCtrl*>(initialDriver) != nullptr;
+    uploadLsBtn->setEnabled(initialFanucDriver);
+    curposDiagBtn->setEnabled(initialFanucDriver);
+    const QString fanucOnlyTip = "该测试依赖 FANUC 常驻服务/LS 程序，当前机器人不是 FANUC 时不可用。";
+    uploadLsBtn->setToolTip(initialFanucDriver ? QString() : fanucOnlyTip);
+    curposDiagBtn->setToolTip(initialFanucDriver ? QString() : fanucOnlyTip);
 
     QGroupBox* motionGroup = new QGroupBox("运动测试");
     QGridLayout* motionLayout = new QGridLayout(motionGroup);
@@ -881,7 +895,7 @@ RobotDriverAdaptor* FunctionTestDialog::GetFirstRobotDriverAdaptor()
 {
     if (m_pContralUnit == nullptr || m_unitIndex < 0 || m_unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
-        QMessageBox::warning(this, "运动学样本", "未找到可用的控制单元。");
+        QMessageBox::warning(this, "功能测试", "未找到可用的控制单元。");
         return nullptr;
     }
 
@@ -889,7 +903,7 @@ RobotDriverAdaptor* FunctionTestDialog::GetFirstRobotDriverAdaptor()
         static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
     if (pRobotDriverAdaptor == nullptr)
     {
-        QMessageBox::warning(this, "运动学样本", "当前控制单元未创建驱动。");
+        QMessageBox::warning(this, "功能测试", "当前控制单元未创建驱动。");
         return nullptr;
     }
     return pRobotDriverAdaptor;
@@ -906,8 +920,7 @@ void FunctionTestDialog::RefreshMotionButtonState()
     if (!busy && m_pContralUnit != nullptr && m_unitIndex >= 0 && m_unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
         RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
-        FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
-        busy = (pFanucDriver != nullptr && pFanucDriver->CheckDonePassive() == 0);
+        busy = pRobotDriverAdaptor != nullptr && pRobotDriverAdaptor->CheckDonePassive() == 0;
     }
 
     for (QPushButton* button : m_motionButtons)
@@ -970,14 +983,18 @@ QString FunctionTestDialog::EnsureKinematicsSampleFilePath()
 
 void FunctionTestDialog::FanucGetCurrentPosTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
 
-    const T_ROBOT_COORS pos = pFanucDriver->GetCurrentPos();
-    const QString message = QString("当前位置: X=%1, Y=%2, Z=%3, RX=%4, RY=%5, RZ=%6")
+    long long robotMs = 0;
+    long long pcRecvMs = 0;
+    const T_ROBOT_COORS pos = pRobotDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
+    const QString message = QString("当前位置: robot_ms=%1, pc_recv_ms=%2, X=%3, Y=%4, Z=%5, RX=%6, RY=%7, RZ=%8")
+        .arg(robotMs)
+        .arg(pcRecvMs)
         .arg(pos.dX, 0, 'f', 3)
         .arg(pos.dY, 0, 'f', 3)
         .arg(pos.dZ, 0, 'f', 3)
@@ -990,14 +1007,18 @@ void FunctionTestDialog::FanucGetCurrentPosTest()
 
 void FunctionTestDialog::FanucGetCurrentPulseTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
 
-    const T_ANGLE_PULSE pulse = pFanucDriver->GetCurrentPulse();
-    const QString message = QString("关节脉冲: S=%1, L=%2, U=%3, R=%4, B=%5, T=%6, EX1=%7, EX2=%8, EX3=%9")
+    long long robotMs = 0;
+    long long pcRecvMs = 0;
+    const T_ANGLE_PULSE pulse = pRobotDriver->GetCurrentPulsePassive(&robotMs, &pcRecvMs);
+    const QString message = QString("关节脉冲: robot_ms=%1, pc_recv_ms=%2, S=%3, L=%4, U=%5, R=%6, B=%7, T=%8, EX1=%9, EX2=%10, EX3=%11")
+        .arg(robotMs)
+        .arg(pcRecvMs)
         .arg(pulse.nSPulse)
         .arg(pulse.nLPulse)
         .arg(pulse.nUPulse)
@@ -1047,10 +1068,14 @@ void FunctionTestDialog::FanucCurposDiagnosticTest()
 
 void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstRobotDriverAdaptor();
+    if (pRobotDriverAdaptor == nullptr)
     {
         return;
+    }
+    if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor))
+    {
+        pFanucDriver->StartMonitor();
     }
 
     if (CameraFrameAccess::IsMeasureThenWeldExclusive())
@@ -1061,7 +1086,6 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
         return;
     }
 
-    RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstRobotDriverAdaptor();
     const QString robotName = DefaultRobotName(pRobotDriverAdaptor);
     CameraFrameCache::Instance().Start();
     const std::uint64_t beginCameraSequence = CameraFrameCache::Instance().Mark();
@@ -1073,14 +1097,15 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
     int duplicateRobotReadCount = 0;
     int missingRobotTimestampCount = 0;
 
-    AppendLog(QString("机器人+相机时间戳检测开始：采集 %1 ms。").arg(kRobotCameraTimestampCheckDurationMs));
+    AppendLog(QString("机器人+相机时间戳检测开始：采集 %1 ms；FANUC 使用 robot_ms，STEP/其他使用 PC steady ms。")
+        .arg(kRobotCameraTimestampCheckDurationMs));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRobotCameraTimestampCheckDurationMs);
     while (std::chrono::steady_clock::now() < deadline)
     {
         long long robotMs = 0;
         long long pcRecvMs = 0;
-        const T_ROBOT_COORS pose = pFanucDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
-        const int done = pFanucDriver->CheckDonePassive();
+        const T_ROBOT_COORS pose = pRobotDriverAdaptor->GetCurrentPosPassive(&robotMs, &pcRecvMs);
+        const int done = pRobotDriverAdaptor->CheckDonePassive();
 
         if (robotMs > 0 && pcRecvMs > 0)
         {
@@ -1350,7 +1375,7 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
         "采集时长：%1 ms\n"
         "相机帧数：%2，机器人样本数：%3\n"
         "相机总时长：timestamp=%4 ms，system=%5 ms，比例=%6\n"
-        "机器人总时长：robot_ms=%7 ms，system=%8 ms，比例=%9\n"
+        "机器人总时长：robot_time=%7 ms，system=%8 ms，比例=%9\n"
         "相机/机器人比例：%10\n\n"
         "%11\n%12\n%13\n"
         "相机比例CV：%14%\n\n"
@@ -1373,9 +1398,9 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
         .arg(FormatStatsLine("相机system间隔", cameraSystemStats, " ms"))
         .arg(FormatStatsLine("相机 timestamp/system 比例", cameraRatioStats, "", 6))
         .arg(cameraRatioCvPercent, 0, 'f', 2)
-        .arg(FormatStatsLine("机器人robot_ms间隔", robotTimestampStats, " ms"))
+        .arg(FormatStatsLine("机器人时间轴间隔", robotTimestampStats, " ms"))
         .arg(FormatStatsLine("机器人system间隔", robotSystemStats, " ms"))
-        .arg(FormatStatsLine("机器人 robot_ms/system 比例", robotRatioStats, "", 6))
+        .arg(FormatStatsLine("机器人 time/system 比例", robotRatioStats, "", 6))
         .arg(robotRatioCvPercent, 0, 'f', 2)
         .arg(invalidCameraTimestampCount)
         .arg(cameraBackwardsCount)
@@ -1401,22 +1426,27 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
 
 void FunctionTestDialog::FanucCheckDoneTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
 
-    const int done = pFanucDriver->CheckDone();
-    const QString message = QString("CheckDone 返回值：%1").arg(done);
+    long long robotMs = 0;
+    long long pcRecvMs = 0;
+    const int done = pRobotDriver->CheckDonePassive(&robotMs, &pcRecvMs);
+    const QString message = QString("CheckDone 返回值：%1，robot_ms=%2，pc_recv_ms=%3")
+        .arg(done)
+        .arg(robotMs)
+        .arg(pcRecvMs);
     AppendLog(message);
     QMessageBox::information(this, "检查运行完成", message);
 }
 
 void FunctionTestDialog::FanucSetGetIntTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
@@ -1434,13 +1464,13 @@ void FunctionTestDialog::FanucSetGetIntTest()
         return;
     }
 
-    if (!pFanucDriver->SetIntVar(index, value))
+    if (!pRobotDriver->SetIntVar(index, value))
     {
         QMessageBox::warning(this, "写读INT寄存器", GetStr("写入 INT%d 失败。", index).c_str());
         return;
     }
 
-    const int readValue = pFanucDriver->GetIntVar(index);
+    const int readValue = pRobotDriver->GetIntVar(index);
     const QString message = QString("写入 INT%1=%2, 读取值=%3").arg(index).arg(value).arg(readValue);
     AppendLog(message);
     QMessageBox::information(this, "写读INT寄存器", message);
@@ -1448,8 +1478,8 @@ void FunctionTestDialog::FanucSetGetIntTest()
 
 void FunctionTestDialog::FanucSetTpSpeedTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
@@ -1461,7 +1491,7 @@ void FunctionTestDialog::FanucSetTpSpeedTest()
         return;
     }
 
-    const bool setOk = pFanucDriver->SetTpSpeed(speed);
+    const bool setOk = pRobotDriver->SetTpSpeed(speed);
     const QString message = setOk ? QString("设置速度成功：%1").arg(speed) : QString("设置速度失败：%1").arg(speed);
     AppendLog(message);
     QMessageBox::information(this, "设置速度", message);
@@ -1469,8 +1499,8 @@ void FunctionTestDialog::FanucSetTpSpeedTest()
 
 void FunctionTestDialog::FanucCallJobTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
@@ -1483,7 +1513,7 @@ void FunctionTestDialog::FanucCallJobTest()
     }
 
     const QByteArray jobNameBytes = jobName.trimmed().toLocal8Bit();
-    const bool callOk = pFanucDriver->CallJob(jobNameBytes.constData());
+    const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
     const QString message = callOk ? QString("调用任务成功：%1").arg(jobName.trimmed()) : QString("调用任务失败：%1").arg(jobName.trimmed());
     AppendLog(message);
     QMessageBox::information(this, "调用任务", message);
@@ -1522,8 +1552,8 @@ void FunctionTestDialog::FanucUploadLsTest()
 
 void FunctionTestDialog::FanucMovlTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
@@ -1540,13 +1570,13 @@ void FunctionTestDialog::FanucMovlTest()
     AppendLog(QString("开始 MOVL %1 100mm 测试...").arg(moveForward ? "Y+" : "Y-"));
 
     QPointer<FunctionTestDialog> self(this);
-    std::thread([self, pFanucDriver, moveForward]()
+    std::thread([self, pRobotDriver, moveForward]()
         {
-            T_ROBOT_COORS target = pFanucDriver->GetCurrentPos();
+            T_ROBOT_COORS target = pRobotDriver->GetCurrentPos();
             target.dY += moveForward ? 100.0 : -100.0;
 
-            const bool moveOk = pFanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pFanucDriver->m_nExternalAxleType, "MOVL");
-            const int done = moveOk ? pFanucDriver->CheckRobotDone(200) : -1;
+            const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
+            const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
             const QString message = QString("MOVL %1 100mm, Move=%2, CheckRobotDone=%3")
                 .arg(moveForward ? "Y+" : "Y-")
                 .arg(moveOk ? "OK" : "FAIL")
@@ -1568,8 +1598,8 @@ void FunctionTestDialog::FanucMovlTest()
 
 void FunctionTestDialog::FanucMovjTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
@@ -1584,18 +1614,18 @@ void FunctionTestDialog::FanucMovjTest()
     AppendLog("开始 MOVJ J2/J3 +5deg 测试...");
 
     QPointer<FunctionTestDialog> self(this);
-    std::thread([self, pFanucDriver]()
+    std::thread([self, pRobotDriver]()
         {
-            T_ANGLE_PULSE target = pFanucDriver->GetCurrentPulse();
-            const double j2PulseUnit = pFanucDriver->m_tAxisUnit.dLPulseUnit;
-            const double j3PulseUnit = pFanucDriver->m_tAxisUnit.dUPulseUnit;
+            T_ANGLE_PULSE target = pRobotDriver->GetCurrentPulse();
+            const double j2PulseUnit = pRobotDriver->m_tAxisUnit.dLPulseUnit;
+            const double j3PulseUnit = pRobotDriver->m_tAxisUnit.dUPulseUnit;
             const long j2DeltaPulse = j2PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j2PulseUnit));
             const long j3DeltaPulse = j3PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j3PulseUnit));
             target.nLPulse += j2DeltaPulse;
             target.nUPulse += j3DeltaPulse;
 
-            const bool moveOk = pFanucDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pFanucDriver->m_nExternalAxleType, "MOVJ");
-            const int done = moveOk ? pFanucDriver->CheckRobotDone(200) : -1;
+            const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
+            const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
             const QString message = QString("MOVJ J2/J3 +5deg, J2DeltaPulse=%1, J3DeltaPulse=%2, Move=%3, CheckRobotDone=%4")
                 .arg(j2DeltaPulse)
                 .arg(j3DeltaPulse)
@@ -1618,8 +1648,8 @@ void FunctionTestDialog::FanucMovjTest()
 
 void FunctionTestDialog::FanucMoveZeroTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    if (pRobotDriver == nullptr)
     {
         return;
     }
@@ -1645,14 +1675,14 @@ void FunctionTestDialog::FanucMoveZeroTest()
     AppendLog("开始 MOVJ 到零位...");
 
     QPointer<FunctionTestDialog> self(this);
-    std::thread([self, pFanucDriver]()
+    std::thread([self, pRobotDriver]()
         {
             const T_ANGLE_PULSE zeroPulse = T_ANGLE_PULSE();
             const T_ROBOT_MOVE_SPEED speed(1.0, 0.0, 0.0);
-            const bool moveOk = pFanucDriver->MoveByJob(zeroPulse, speed, pFanucDriver->m_nExternalAxleType, "MOVJ");
-            const int done = moveOk ? pFanucDriver->CheckRobotDone(200) : -1;
-            const T_ROBOT_COORS pos = pFanucDriver->GetCurrentPos();
-            const T_ANGLE_PULSE pulse = pFanucDriver->GetCurrentPulse();
+            const bool moveOk = pRobotDriver->MoveByJob(zeroPulse, speed, pRobotDriver->m_nExternalAxleType, "MOVJ");
+            const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+            const T_ROBOT_COORS pos = pRobotDriver->GetCurrentPos();
+            const T_ANGLE_PULSE pulse = pRobotDriver->GetCurrentPulse();
 
             const QString message = QString(
                 "MOVJ 到零位, Move=%1, CheckRobotDone=%2\n"
@@ -1692,12 +1722,6 @@ void FunctionTestDialog::FanucMoveZeroTest()
 
 void FunctionTestDialog::FanucCaptureKinematicsSample()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
-    {
-        return;
-    }
-
     RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstRobotDriverAdaptor();
     if (pRobotDriverAdaptor == nullptr)
     {
@@ -1710,8 +1734,8 @@ void FunctionTestDialog::FanucCaptureKinematicsSample()
         return;
     }
 
-    const T_ANGLE_PULSE pulse = pFanucDriver->GetCurrentPulse();
-    const T_ROBOT_COORS robotPose = pFanucDriver->GetCurrentPos();
+    const T_ANGLE_PULSE pulse = pRobotDriverAdaptor->GetCurrentPulse();
+    const T_ROBOT_COORS robotPose = pRobotDriverAdaptor->GetCurrentPos();
     QString toolName;
     const T_ROBOT_COORS toolCoors = EffectiveKinematicsTool(pRobotDriverAdaptor, &toolName);
     T_ROBOT_COORS modelPose;

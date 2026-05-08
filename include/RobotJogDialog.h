@@ -10,13 +10,13 @@
 
 #include "Const.h"
 
-class FANUCRobotCtrl;
+class RobotDriverAdaptor;
 class QGridLayout;
 
 class RobotJogDialog : public QDialog
 {
 public:
-	explicit RobotJogDialog(FANUCRobotCtrl* fanucDriver, QWidget* parent = nullptr);
+	explicit RobotJogDialog(RobotDriverAdaptor* robotDriver, QWidget* parent = nullptr);
 	~RobotJogDialog() override;
 
 private:
@@ -54,7 +54,7 @@ private:
 	void SetJointTargetEditors(const T_ANGLE_PULSE& target);
 	void ShowMessageOnUiThread(QMessageBox::Icon icon, const QString& title, const QString& text);
 
-	FANUCRobotCtrl* m_fanucDriver;
+	RobotDriverAdaptor* m_robotDriver;
 	QTimer* m_jogStartTimer;
 	QTimer* m_jogTimer;
 	QTimer* m_stateTimer;

@@ -40,7 +40,25 @@ public:
     virtual T_ROBOT_COORS GetCurrentPos();
     virtual double GetCurrentPulse(int nAxisNo);
     virtual T_ANGLE_PULSE GetCurrentPulse();
+    virtual T_ROBOT_COORS GetCurrentPosPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr);
+    virtual T_ANGLE_PULSE GetCurrentPulsePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr);
+    virtual int CheckDonePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr);
     virtual int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo);
+    virtual int CheckDone();
+    virtual int CheckRobotDone(int nDelayTime = 200);
+    virtual bool CallJob(std::string sJobName);
+    virtual int InitFtp();
+    virtual int UploadFile(std::string LocalFilePath, std::string RemoteFilePath);
+    virtual int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath);
+    virtual bool SetTpSpeed(int speed);
+    virtual int GetIntVar(int nIndex, const char* cStrPreFix = "INT");
+    virtual bool SetIntVar(int nIndex, int nValue, int score = 2, const char* cStrPreFix = "INT");
+    virtual bool SetIntVar(const char* name, int value, int score = 2);
+    virtual bool SetRealVar(int nIndex, double value, const char* cStrPreFix = "REAL", int score = 1);
+    virtual int GetPosVar(long lPvarIndex, double array[6], int config[7] = { 0 }, int MoveType = POSVAR);
+    virtual bool MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVL", int isconfig = 1, int config[7] = { 0 });
+    virtual bool MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVJ");
+    virtual bool MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType = PULSEVAR, std::string JobName = "MOVJ", int config[7] = { 0 });
 
 private:
     void CreateFanucChain();

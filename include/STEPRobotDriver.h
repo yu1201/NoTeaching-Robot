@@ -56,10 +56,10 @@ public:
 	T_ANGLE_PULSE GetCurrentPulse() override;
 
 
-	int CheckDone();
-	int CheckRobotDone(int nDelayTime = 200);
+	int CheckDone() override;
+	int CheckRobotDone(int nDelayTime = 200) override;
 
-	bool CallJob(std::string sJobName);
+	bool CallJob(std::string sJobName) override;
 
 	//任意点集 坐标类型、插补方式、速度 的连续运动
 	int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo) override;
@@ -71,11 +71,11 @@ public:
 	bool SendWeldProgram(int nWeldTrackNum);
 
 	//初始化ftp
-	int InitFtp();
+	int InitFtp() override;
 	//上传文件给埃斯顿机器人，埃斯顿为RemoteFilePath，本地为LocalFilePath    //  .//MultiPos_Mv1.erd 
-	int UploadFile(std::string LocalFilePath, std::string RemoteFilePath);
+	int UploadFile(std::string LocalFilePath, std::string RemoteFilePath) override;
 	//下载文件,埃斯顿为RemoteFilePath，本地为LocalFilePath
-	int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath);
+	int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath) override;
 
 	bool ServoOff();
 	bool ServoOn();
@@ -85,7 +85,7 @@ public:
 	//设置当前模式 0-手动模式，1-自动模式，2-远程模式，-1-报错
 	bool SetSysMode(int mode);
 	//设置示教器速度
-	bool SetTpSpeed(int speed);//设置TP示教器上的速度%
+	bool SetTpSpeed(int speed) override;//设置TP示教器上的速度%
 
 	//获取当前程序名
 	std::string GetUserProgram();
@@ -126,7 +126,7 @@ public:
 	bool SetPosVar(int nIndex, AXISPOS eRobotCoors, int scoper = ENGINEEVAR);
 	bool SetPosVar(int nIndex, JointsPos eRobotCoors, int scoper = ENGINEEVAR);
 
-	int GetPosVar(long lPvarIndex, double array[6], int config[7] = { 0 }, int MoveType = POSVAR);
+	int GetPosVar(long lPvarIndex, double array[6], int config[7] = { 0 }, int MoveType = POSVAR) override;
 
 	// 埃斯顿机器人专用: 速度变量读写
 	bool SetSpeed(const char* name, double* speed, int scord = ENGINEEVAR); //char设置单个速度
@@ -136,13 +136,13 @@ public:
 	////摆焊参数
 	//bool SetWeaveDate(const char* name, ESTUN_WeaveDate WeaveDate, int scope = 2);
 	//获取一个指定I变量
-	int GetIntVar(int nIndex, const char* cStrPreFix = "INT");
+	int GetIntVar(int nIndex, const char* cStrPreFix = "INT") override;
 	//设置一个指定I变量
-	bool SetIntVar(int nIndex, int nValue, int score = 2, const char* cStrPreFix = "INT");
+	bool SetIntVar(int nIndex, int nValue, int score = 2, const char* cStrPreFix = "INT") override;
 	//设置一个指定I变量
-	bool SetIntVar(const char* name, int value, int score = 2);
+	bool SetIntVar(const char* name, int value, int score = 2) override;
 	//设置Real变量
-	bool SetRealVar(int nIndex, double value, const char* cStrPreFix = "REAL", int score = 1);//主要用于发送电流电压 scoper,0-系统，1-全局，2-工程，3-程序
+	bool SetRealVar(int nIndex, double value, const char* cStrPreFix = "REAL", int score = 1) override;//主要用于发送电流电压 scoper,0-系统，1-全局，2-工程，3-程序
 
 	/****************************************************运动函数****************************************************/
 
@@ -156,10 +156,10 @@ public:
 	bool MoveByJob(double Distence[8], int config[7], double speed, int ifAbsolutM, int ifJoint);
 
 	//通用移动函数	
-	bool MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType = PULSEVAR, std::string JobName = "MOVJ", int config[7] = { 0 });
-	bool MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVL", int isconfig = 1, int config[7] = { 0 });////默认 mode值Cf值为零	
+	bool MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType = PULSEVAR, std::string JobName = "MOVJ", int config[7] = { 0 }) override;
+	bool MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVL", int isconfig = 1, int config[7] = { 0 }) override;////默认 mode值Cf值为零	
 
-	bool MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVJ");
+	bool MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVJ") override;
 
 
 

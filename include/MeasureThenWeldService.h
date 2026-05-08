@@ -6,7 +6,7 @@
 #include <functional>
 #include <vector>
 
-class FANUCRobotCtrl;
+class RobotDriverAdaptor;
 
 class MeasureThenWeldService
 {
@@ -15,11 +15,11 @@ public:
     using StepCallback = std::function<void(const QString&)>;
     using CheckpointCallback = std::function<bool(const QString&, const QString&)>;
 
-    bool LoadPresetParam(FANUCRobotCtrl* pFanucDriver, T_PRECISE_MEASURE_PARAM& param, QString& error) const;
-    bool MovePulseAndWait(FANUCRobotCtrl* pFanucDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
-    bool MovePulseListAndWait(FANUCRobotCtrl* pFanucDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
-    bool MoveCoorsAndWait(FANUCRobotCtrl* pFanucDriver, const T_ROBOT_COORS& coors, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
-    bool ScanMoveAndCollect(FANUCRobotCtrl* pFanucDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
+    bool LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error) const;
+    bool MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
+    bool MovePulseListAndWait(RobotDriverAdaptor* pRobotDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
+    bool MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, const T_ROBOT_COORS& coors, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
+    bool ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
 
     QString BuildResultDir(const std::string& robotName) const;
     bool SaveTextLines(const QString& filePath, const std::vector<QString>& lines, QString& error) const;
@@ -30,13 +30,13 @@ public:
         QString& summary,
         QString& error) const;
     bool DownlinkWeldPoseFile(
-        FANUCRobotCtrl* pFanucDriver,
+        RobotDriverAdaptor* pRobotDriver,
         const QString& poseFilePath,
         double linearSpeedConfigMmPerMin,
         QString& summary,
         QString& error) const;
     bool ExecuteWeldPoseFileWithSafePos(
-        FANUCRobotCtrl* pFanucDriver,
+        RobotDriverAdaptor* pRobotDriver,
         const QString& poseFilePath,
         QString& summary,
         QString& error,
