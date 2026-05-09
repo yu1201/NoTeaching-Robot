@@ -104,6 +104,28 @@ namespace
 		return std::max(1.0, speedMmPerMin);
 	}
 
+	QString MotionFailureText(RobotDriverAdaptor* driver, const QString& action, int done)
+	{
+		QString text = QString("%1失败，CheckRobotDone=%2").arg(action).arg(done);
+		if (driver == nullptr)
+		{
+			return text;
+		}
+
+		const std::string lastError = driver->GetLastRobotError();
+		if (!lastError.empty())
+		{
+			text += "\n最近错误：" + QString::fromLocal8Bit(lastError.c_str());
+		}
+
+		const std::string statusText = driver->GetRobotStatusText();
+		if (!statusText.empty() && statusText != lastError)
+		{
+			text += "\n当前状态：" + QString::fromLocal8Bit(statusText.c_str());
+		}
+		return text;
+	}
+
 	void LogCartesianPoint(RobotDriverAdaptor* driver, const char* prefix, const T_ROBOT_COORS& pos)
 	{
 		if (driver == nullptr || driver->m_pRobotLog == nullptr || prefix == nullptr)
@@ -442,7 +464,8 @@ void RobotJogDialog::MoveToCartesianTarget()
 			}
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
 			const int done = moveOk ? driver->CheckRobotDone(100) : -1;
-			QMetaObject::invokeMethod(self.data(), [self, moveOk, done]()
+			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "直角坐标运动", done) : QString();
+			QMetaObject::invokeMethod(self.data(), [self, moveOk, done, failureText]()
 				{
 					if (self == nullptr)
 					{
@@ -451,7 +474,7 @@ void RobotJogDialog::MoveToCartesianTarget()
 					self->SetMotionTaskRunning(false);
 					if (!moveOk || done <= 0)
 					{
-						self->ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", QString("直角坐标运动失败，CheckRobotDone=%1").arg(done));
+						self->ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", failureText);
 					}
 				}, Qt::QueuedConnection);
 		}).detach();
@@ -491,7 +514,8 @@ void RobotJogDialog::MoveToJointTarget()
 			}
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
 			const int done = moveOk ? driver->CheckRobotDone(100) : -1;
-			QMetaObject::invokeMethod(self.data(), [self, moveOk, done]()
+			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "关节脉冲运动", done) : QString();
+			QMetaObject::invokeMethod(self.data(), [self, moveOk, done, failureText]()
 				{
 					if (self == nullptr)
 					{
@@ -500,7 +524,7 @@ void RobotJogDialog::MoveToJointTarget()
 					self->SetMotionTaskRunning(false);
 					if (!moveOk || done <= 0)
 					{
-						self->ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", QString("关节脉冲运动失败，CheckRobotDone=%1").arg(done));
+						self->ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", failureText);
 					}
 				}, Qt::QueuedConnection);
 		}).detach();
@@ -632,7 +656,8 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 			{
 				const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
 				const int done = moveOk ? driver->CheckRobotDone(100) : -1;
-				QMetaObject::invokeMethod(qApp, [self, moveOk, done]()
+				const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "直角步进", done) : QString();
+				QMetaObject::invokeMethod(qApp, [self, moveOk, done, failureText]()
 					{
 						if (self == nullptr)
 						{
@@ -641,7 +666,7 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 						self->SetMotionTaskRunning(false);
 						if (!moveOk || done <= 0)
 						{
-							QMessageBox::warning(self, "点动控制", QString("直角步进失败，CheckRobotDone=%1").arg(done));
+							QMessageBox::warning(self, "点动控制", failureText);
 						}
 					}, Qt::QueuedConnection);
 			}).detach();
@@ -663,7 +688,8 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 		{
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
 			const int done = moveOk ? driver->CheckRobotDone(100) : -1;
-			QMetaObject::invokeMethod(qApp, [self, moveOk, done]()
+			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "关节步进", done) : QString();
+			QMetaObject::invokeMethod(qApp, [self, moveOk, done, failureText]()
 				{
 					if (self == nullptr)
 					{
@@ -672,7 +698,7 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 					self->SetMotionTaskRunning(false);
 					if (!moveOk || done <= 0)
 					{
-						QMessageBox::warning(self, "点动控制", QString("关节步进失败，CheckRobotDone=%1").arg(done));
+						QMessageBox::warning(self, "点动控制", failureText);
 					}
 				}, Qt::QueuedConnection);
 		}).detach();

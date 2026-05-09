@@ -157,7 +157,7 @@ bool FtpClient::connectFtpServer() {
 }
 
 // 真实文件上传逻辑
-bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& remoteFilePath) {
+bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& remoteFilePath, bool deleteBeforeUpload) {
     const auto totalStart = std::chrono::steady_clock::now();
     // 1. 日志记录上传开始
     m_log->write(LogColor::DEFAULT, "开始上传文件 | 本地：%s | 远程：%s",
@@ -181,15 +181,20 @@ bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& 
         m_log->write(LogColor::DEFAULT, "FTP上传阶段耗时 | EnsureDir=%lldms | Dir=%s",
             ElapsedMs(dirStart), remoteParentDir.c_str());
 
-        // FANUC 控制器有时不会稳定覆盖同名文件，上传前先静默删除旧文件。
-        const auto deleteStart = std::chrono::steady_clock::now();
-        if (FtpDeleteFileA(m_hFtpSession, remoteFilePath.c_str())) {
-            m_log->write(LogColor::DEFAULT, "上传前已删除远程旧文件：%s | 耗时=%lldms",
-                remoteFilePath.c_str(), ElapsedMs(deleteStart));
+        if (deleteBeforeUpload) {
+            // FANUC 控制器有时不会稳定覆盖同名文件，上传前先静默删除旧文件。
+            const auto deleteStart = std::chrono::steady_clock::now();
+            if (FtpDeleteFileA(m_hFtpSession, remoteFilePath.c_str())) {
+                m_log->write(LogColor::DEFAULT, "上传前已删除远程旧文件：%s | 耗时=%lldms",
+                    remoteFilePath.c_str(), ElapsedMs(deleteStart));
+            }
+            else {
+                m_log->write(LogColor::DEFAULT, "上传前未删除到远程旧文件，将继续上传：%s | 耗时=%lldms | %s",
+                    remoteFilePath.c_str(), ElapsedMs(deleteStart), getFtpErrorMsg().c_str());
+            }
         }
         else {
-            m_log->write(LogColor::DEFAULT, "上传前未删除到远程旧文件，将继续上传：%s | 耗时=%lldms | %s",
-                remoteFilePath.c_str(), ElapsedMs(deleteStart), getFtpErrorMsg().c_str());
+            m_log->write(LogColor::DEFAULT, "跳过上传前删除，直接覆盖远程文件：%s", remoteFilePath.c_str());
         }
 
         // 3. 执行FTP上传（WinINet API）

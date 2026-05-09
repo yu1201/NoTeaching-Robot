@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 
 namespace
 {
@@ -10,6 +11,9 @@ namespace
 	{
 		return "ContiMoveAny";
 	}
+
+	constexpr const char* kStepDynamicJobProjectName = "PCRobot";
+	constexpr const char* kStepProjectVariableProgramName = "_project";
 
 	long StepClampPositiveLong(double value, long defaultValue)
 	{
@@ -25,6 +29,72 @@ namespace
 		return GetStr("dyn%u", static_cast<unsigned>(index));
 	}
 
+	bool StepHasSrSuffix(const std::string& value)
+	{
+		if (value.size() < 3)
+		{
+			return false;
+		}
+
+		const char dot = value[value.size() - 3];
+		const char s = value[value.size() - 2];
+		const char r = value[value.size() - 1];
+		return dot == '.'
+			&& (s == 's' || s == 'S')
+			&& (r == 'r' || r == 'R');
+	}
+
+	std::string StepNormalizeProjectName(std::string projectName)
+	{
+		while (StepHasSrSuffix(projectName))
+		{
+			projectName.resize(projectName.size() - 3);
+		}
+		return projectName;
+	}
+
+	std::string StepBuildRemoteProjectDir(const std::string& projectName)
+	{
+		return "/UserPrograms/" + StepNormalizeProjectName(projectName) + ".sr";
+	}
+
+	std::string StepCString(const char* text, size_t capacity)
+	{
+		if (text == nullptr)
+		{
+			return std::string();
+		}
+		size_t length = 0;
+		while (length < capacity && text[length] != '\0')
+		{
+			++length;
+		}
+		return std::string(text, length);
+	}
+
+	const char* StepProgramStateText(int state)
+	{
+		switch (state)
+		{
+		case STEPROBOTSDK::eRun: return "运行";
+		case STEPROBOTSDK::ePause: return "暂停";
+		case STEPROBOTSDK::eStop: return "停止";
+		case STEPROBOTSDK::eReturn: return "未知";
+		default: return "未识别";
+		}
+	}
+
+	const char* StepMessageTypeText(STEPROBOTSDK::MESSAGETYPE type)
+	{
+		switch (type)
+		{
+		case STEPROBOTSDK::eInfo: return "Info";
+		case STEPROBOTSDK::eWarning: return "Warning";
+		case STEPROBOTSDK::eError: return "Error";
+		default: return "Unknown";
+		}
+	}
+
 	std::string StepBuildCartPosName(size_t index)
 	{
 		return GetStr("cp%u", static_cast<unsigned>(index));
@@ -35,11 +105,15 @@ namespace
 		return GetStr("ap%u", static_cast<unsigned>(index));
 	}
 
+	std::string StepBuildOverlapName(size_t index)
+	{
+		return GetStr("olr%u", static_cast<unsigned>(index));
+	}
+
 	std::string StepBuildSrdContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
 	{
 		std::ostringstream oss;
 		oss << std::fixed << std::setprecision(6);
-		oss << "OVERLAPABS ola0 := {  0, 0, 0,0 }" << "\n";
 
 		for (size_t i = 0; i < moveInfos.size(); ++i)
 		{
@@ -48,17 +122,22 @@ namespace
 			const std::string axisName = StepBuildAxisPosName(i);
 			const std::string dynName = StepBuildDynamicName(i);
 
-			oss << "CARTPOS " << cartName << " := {  "
-				<< info.tCoord.dX << ", " << info.tCoord.dY << ", " << info.tCoord.dZ << ", "
-				<< info.tCoord.dRX << ", " << info.tCoord.dRY << ", " << info.tCoord.dRZ << ", "
-				<< info.adBasePosVar[0] << ", " << info.adBasePosVar[1] << ", " << info.adBasePosVar[2]
-				<< ", 0.0, 0.0, 0.0,0 }" << "\n";
-
-			oss << "AXISPOS " << axisName << " := {  "
-				<< info.tPulse.nSPulse << ", " << info.tPulse.nLPulse << ", " << info.tPulse.nUPulse << ", "
-				<< info.tPulse.nRPulse << ", " << info.tPulse.nBPulse << ", " << info.tPulse.nTPulse << ", "
-				<< info.tPulse.lBXPulse << ", " << info.tPulse.lBYPulse << ", " << info.tPulse.lBZPulse
-				<< ", 0.0, 0.0,0.0 }" << "\n";
+			if (info.nPosType == PULSEVAR)
+			{
+				oss << "AXISPOS " << axisName << " := {  "
+					<< info.tPulse.nSPulse << ", " << info.tPulse.nLPulse << ", " << info.tPulse.nUPulse << ", "
+					<< info.tPulse.nRPulse << ", " << info.tPulse.nBPulse << ", " << info.tPulse.nTPulse << ", "
+					<< info.tPulse.lBXPulse << ", " << info.tPulse.lBYPulse << ", " << info.tPulse.lBZPulse
+					<< ", 0.0, 0.0,0.0 }" << "\n";
+			}
+			else
+			{
+				oss << "CARTPOS " << cartName << " := {  "
+					<< info.tCoord.dX << ", " << info.tCoord.dY << ", " << info.tCoord.dZ << ", "
+					<< info.tCoord.dRX << ", " << info.tCoord.dRY << ", " << info.tCoord.dRZ << ", "
+					<< info.adBasePosVar[0] << ", " << info.adBasePosVar[1] << ", " << info.adBasePosVar[2]
+					<< ", 0.0, 0.0, 0.0,0 }" << "\n";
+			}
 
 			const long speed = StepClampPositiveLong(info.tSpeed.dSpeed, 1000);
 			const long acc = StepClampPositiveLong(info.tSpeed.dACC, speed * 2);
@@ -67,6 +146,7 @@ namespace
 			oss << "DYNAMIC " << dynName << " := {  "
 				<< speed << ", " << acc << ", " << dec
 				<< ", 50000, 90, 270, 270, 2700, 100, 200, 200,200 }" << "\n";
+			oss << "OVERLAPREL " << StepBuildOverlapName(i) << " := 20" << "\n";
 		}
 
 		return oss.str();
@@ -82,14 +162,16 @@ namespace
 			const std::string cartName = StepBuildCartPosName(i);
 			const std::string axisName = StepBuildAxisPosName(i);
 			const std::string dynName = StepBuildDynamicName(i);
+			const std::string overlapName = StepBuildOverlapName(i);
+			const std::string targetName = info.nPosType == PULSEVAR ? axisName : cartName;
 
 			if (info.nMoveType == MOVL)
 			{
-				oss << "Lin(" << cartName << "," << dynName << ",ola0,tool1,WORLD);" << "\n";
+				oss << "Lin(" << targetName << "," << dynName << "," << overlapName << ",NULL,tool1,WORLD);" << "\n";
 			}
 			else
 			{
-				oss << "PTP(" << axisName << "," << dynName << ",ola0,tool1,WORLD);" << "\n";
+				oss << "PTP(" << targetName << "," << dynName << "," << overlapName << ",tool1,WORLD);" << "\n";
 			}
 		}
 
@@ -98,13 +180,29 @@ namespace
 
 	bool StepWriteTextFile(const std::string& filePath, const std::string& content)
 	{
-		std::ofstream out(filePath, std::ios::out | std::ios::trunc);
+		std::ofstream out(filePath, std::ios::out | std::ios::binary | std::ios::trunc);
 		if (!out.is_open())
 		{
 			return false;
 		}
 
-		out << content;
+		std::string normalized;
+		normalized.reserve(content.size());
+		for (size_t i = 0; i < content.size(); ++i)
+		{
+			if (content[i] == '\r')
+			{
+				if (i + 1 < content.size() && content[i + 1] == '\n')
+				{
+					continue;
+				}
+				normalized.push_back('\n');
+				continue;
+			}
+			normalized.push_back(content[i]);
+		}
+
+		out.write(normalized.data(), static_cast<std::streamsize>(normalized.size()));
 		return out.good();
 	}
 
@@ -114,7 +212,7 @@ namespace
 		{
 			return std::string();
 		}
-		return scoper == PROGRAMVAR ? ctrl->GetUserProgram() : std::string();
+		return scoper == PROGRAMVAR ? ctrl->GetUserProgram() : std::string(kStepProjectVariableProgramName);
 	}
 
 	std::string StepBuildPosVarName(int nIndex, int nPVarType)
@@ -170,6 +268,11 @@ namespace
 
 STEPRobotCtrl::STEPRobotCtrl(std::string strUnitName, RobotLog* pLog)
 	: RobotDriverAdaptor(strUnitName, pLog)
+	, m_hMutex(nullptr)
+	, m_bLocalDebugMark(false)
+	, m_bSocketConnected(false)
+	, m_sStepProjectName()
+	, m_pSTEPRobotClient(nullptr)
 
 {
 	m_pSTEPRobotClient = new RobotComClient();
@@ -195,6 +298,12 @@ bool STEPRobotCtrl::InitRobotDriver(std::string strUnitName)
 	cIni.ReadString("SocketPort", &m_nSocketPort);
 	cIni.ReadString("RobotType", &m_nRobotType);
 	cIni.ReadString("RobotBrand", (int*)&m_eRobotBrand);
+	cIni.ReadString("StepProjectName", m_sStepProjectName);
+	if (m_sStepProjectName.empty())
+	{
+		cIni.ReadString("ProjectName", m_sStepProjectName);
+	}
+	m_sStepProjectName = StepNormalizeProjectName(m_sStepProjectName);
 	cIni.ReadString("FTPIP", m_sFTPIP);
 	cIni.ReadString("FTPPort", &m_nFTPPort);
 	cIni.ReadString("FTPUser", m_sFTPUser);
@@ -212,15 +321,19 @@ bool STEPRobotCtrl::InitRobotDriver(std::string strUnitName)
 
 bool STEPRobotCtrl::InitSocket(const char* ip, u_short Port, bool ifRecord)
 {
+	ClearLastRobotError();
 	int nRet = 0;
 	if (!m_bLocalDebugMark)
 	{
 		nRet = m_pSTEPRobotClient->init(ip, Port);
 		if (0 != nRet)
 		{
+			m_bSocketConnected = false;
+			SetLastRobotError(GetStr("STEP连接失败：IP=%s Port=%hu 原因=%s(%d)", ip == nullptr ? "" : ip, Port, GetErrorText(nRet), nRet));
 			return false;
 		}
 	}
+	m_bSocketConnected = true;
 	return true;
 }
 
@@ -235,7 +348,54 @@ bool STEPRobotCtrl::CloseSocket()
 			return false;
 		}
 	}
+	m_bSocketConnected = false;
 	return true;
+}
+
+bool STEPRobotCtrl::IsConnected()
+{
+	if (m_bLocalDebugMark)
+	{
+		return true;
+	}
+	if (m_pSTEPRobotClient == nullptr || !m_bSocketConnected)
+	{
+		return false;
+	}
+	const int sdkConnectStatus = m_pSTEPRobotClient->ConnectStatus();
+	return sdkConnectStatus >= 0;
+}
+
+std::string STEPRobotCtrl::GetRobotStatusText()
+{
+	if (m_pSTEPRobotClient == nullptr)
+	{
+		return "STEP状态：客户端未初始化";
+	}
+
+	const int connectStatus = m_bLocalDebugMark ? 1 : m_pSTEPRobotClient->ConnectStatus();
+	const int programState = static_cast<int>(m_pSTEPRobotClient->getProgramState());
+	const int motorState = m_pSTEPRobotClient->getMotorEnableState();
+	const STEPROBOTSDK::MessageData message = m_pSTEPRobotClient->getMessageData();
+	const std::string messageText = StepCString(message.m_MessageString, sizeof(message.m_MessageString));
+	const std::string messageSource = StepCString(message.m_MessageSource, sizeof(message.m_MessageSource));
+
+	std::ostringstream oss;
+	oss << "STEP状态：本地连接=" << (m_bSocketConnected ? "已连接" : "未连接")
+		<< "，SDK连接码=" << connectStatus
+		<< "，程序=" << StepProgramStateText(programState) << "(" << programState << ")"
+		<< "，使能=" << (motorState == 1 ? "上使能" : "未使能") << "(" << motorState << ")"
+		<< "，消息类型=" << StepMessageTypeText(message.m_MessageType)
+		<< "，消息ID=" << message.m_MessageID;
+	if (!messageSource.empty())
+	{
+		oss << "，来源=" << messageSource;
+	}
+	if (!messageText.empty())
+	{
+		oss << "，消息=" << messageText;
+	}
+	return oss.str();
 }
 
 double STEPRobotCtrl::GetCurrentPos(int nAxisNo) 
@@ -298,22 +458,44 @@ T_ANGLE_PULSE STEPRobotCtrl::GetCurrentPulse()
 
 int STEPRobotCtrl::CheckDone()
 {
+	if (m_pSTEPRobotClient == nullptr)
+	{
+		SetLastRobotError("STEP完成状态检测失败：客户端未初始化");
+		return -1;
+	}
 	//PROGRAMSTATE getProgramState();
 	int nRet = m_pSTEPRobotClient->getProgramState();   //0	运行，1 暂停，2 停止，3 未知
 	return nRet;
 }
 int STEPRobotCtrl::CheckRobotDone(int nDelayTime)
 {
+	if (nDelayTime <= 0)
+	{
+		nDelayTime = 200;
+	}
 	int nRet = -1;
 	while (1)
 	{
 		nRet = CheckDone();
-		if (0 != nRet)
+		if (STEPROBOTSDK::eRun != nRet)
 		{
 			Sleep(nDelayTime);
 			nRet = CheckDone();
-			if (0 != nRet)
+			if (STEPROBOTSDK::eRun != nRet)
 			{
+				const STEPROBOTSDK::MessageData message = m_pSTEPRobotClient != nullptr
+					? m_pSTEPRobotClient->getMessageData()
+					: STEPROBOTSDK::MessageData();
+				if (nRet != STEPROBOTSDK::eStop || message.m_MessageType == STEPROBOTSDK::eError)
+				{
+					const std::string statusText = GetRobotStatusText();
+					SetLastRobotError("STEP运动未正常完成：" + statusText);
+					if (m_pRobotLog != nullptr)
+					{
+						m_pRobotLog->write(LogColor::ERR, "%s", GetLastRobotError().c_str());
+					}
+					return -1000 - nRet;
+				}
 				return nRet;
 			}
 		}
@@ -334,18 +516,20 @@ std::string STEPRobotCtrl::GetUserProject()
 	return sProgramName;
 }
 
-bool STEPRobotCtrl::LoadUserProgram(std::string sProjName, std::string sProgName)
+bool STEPRobotCtrl::LoadUserProgram(std::string sProjName, std::string sProgName, bool bForceReload)
 {
 	std::string sNowProject, sNowProgram;
 	sNowProgram = GetUserProgram();
 	sNowProject = GetUserProject();
 	int nRet = 0;
 	std::vector<int> vnErrLine;
-	if (sProjName != sNowProject ||sProgName!=sNowProgram)
+	if (bForceReload || sProjName != sNowProject || sProgName != sNowProgram)
 	{
 		nRet = m_pSTEPRobotClient->ProgramLoadCmd(sProjName,sProgName,vnErrLine,true);
 		if (nRet != 0)
 		{
+			SetLastRobotError(GetStr("STEP加载程序失败：Project=%s Program=%s 原因=%s(%d)",
+				sProjName.c_str(), sProgName.c_str(), GetErrorText(nRet), nRet));
 			showErrorMessage(
 				nullptr,
 				"加载程序失败,失败原因:%s",
@@ -370,7 +554,23 @@ bool STEPRobotCtrl::LoadUserProgram(std::string sProjName, std::string sProgName
 
 			// 弹出所有错误行
 			showWarnMessage(nullptr, "程序语法错误", ss.str().c_str());
+			SetLastRobotError(GetStr("STEP加载程序失败：Project=%s Program=%s 存在语法错误，错误行数=%d",
+				sProjName.c_str(), sProgName.c_str(), static_cast<int>(vnErrLine.size())));
+			return false;
 		}
+
+		for (int i = 0; i < 40; ++i)
+		{
+			if (GetUserProgram() == sProgName)
+			{
+				return true;
+			}
+			Sleep(50);
+		}
+
+		SetLastRobotError(GetStr("STEP加载程序超时：Project=%s Program=%s 当前Program=%s",
+			sProjName.c_str(), sProgName.c_str(), GetUserProgram().c_str()));
+		return false;
 	}
 	return true;
 }
@@ -379,11 +579,17 @@ bool STEPRobotCtrl::UnLoadUserProgramer()
 {
 	std::string sNowProject, sNowProgram;
 	sNowProgram = GetUserProgram();
-	sNowProject = GetUserProject();
+	sNowProject = StepNormalizeProjectName(GetUserProject());
+	if (sNowProgram.empty() || sNowProject.empty())
+	{
+		return true;
+	}
 	int nRet = 0;
-	nRet = m_pSTEPRobotClient->ProgramKillCmd(sNowProgram, sNowProject, true);
+	nRet = m_pSTEPRobotClient->ProgramKillCmd(sNowProject, sNowProgram, true);
 	if (nRet != 0)
 	{
+		SetLastRobotError(GetStr("STEP卸载程序失败：Project=%s Program=%s 原因=%s(%d)",
+			sNowProject.c_str(), sNowProgram.c_str(), GetErrorText(nRet), nRet));
 		showErrorMessage(
 			nullptr,
 			"卸载程序失败,失败原因:%s",
@@ -391,14 +597,35 @@ bool STEPRobotCtrl::UnLoadUserProgramer()
 		);
 		return false;
 	}
-	return true;
+	for (int i = 0; i < 40; ++i)
+	{
+		if (GetUserProgram().empty())
+		{
+			return true;
+		}
+		Sleep(50);
+	}
+
+	SetLastRobotError(GetStr("STEP卸载程序超时：Project=%s Program=%s 当前Program=%s",
+		sNowProject.c_str(), sNowProgram.c_str(), GetUserProgram().c_str()));
+	m_pRobotLog->write(LogColor::ERR, "STEP卸载程序超时：Project=%s Program=%s",
+		sNowProject.c_str(), sNowProgram.c_str());
+	return false;
 }
 
 //设置当前模式 0-手动模式，1-自动模式，3-外部自动
 bool STEPRobotCtrl::SetSysMode(int nMode)
 {
-	if (nMode < 0 || nMode>3)
+	const bool validMode =
+		nMode == MODEKEY::MANUAL
+		|| nMode == MODEKEY::AUTO
+		|| nMode == MODEKEY::AUTO_EXT
+		|| nMode == MODEKEY::START
+		|| nMode == MODEKEY::STOP
+		|| nMode == MODEKEY::MSTOP;
+	if (!validMode)
 	{
+		SetLastRobotError(GetStr("STEP设置模式失败：模式=%d 超出范围", nMode));
 		showErrorMessage(
 			nullptr,
 			"设置当前模式:%d失败,失败原因:模式选择错误",nMode
@@ -409,6 +636,7 @@ bool STEPRobotCtrl::SetSysMode(int nMode)
 	int nRet = m_pSTEPRobotClient->SetModeCmd(eMode,true);
 	if (nRet != 0)
 	{
+		SetLastRobotError(GetStr("STEP设置模式失败：模式=%d 原因=%s(%d)", nMode, GetErrorText(nRet), nRet));
 		showErrorMessage(
 			nullptr,
 			"设置当前模式:%d失败,失败原因:%s", nMode,
@@ -425,6 +653,7 @@ bool STEPRobotCtrl::Prog_startRun_Py()
 	int nRet = m_pSTEPRobotClient->SetModeCmd(MODEKEY::START, true);
 	if (nRet != 0)
 	{
+		SetLastRobotError(GetStr("STEP启动程序失败：原因=%s(%d)，%s", GetErrorText(nRet), nRet, GetRobotStatusText().c_str()));
 		showErrorMessage(
 			nullptr,
 			"运行程序失败,失败原因:%s",
@@ -441,6 +670,7 @@ bool STEPRobotCtrl::Prog_stop_Py()
 	int nRet = m_pSTEPRobotClient->SetModeCmd(MODEKEY::STOP, true);
 	if (nRet != 0)
 	{
+		SetLastRobotError(GetStr("STEP停止程序失败：原因=%s(%d)，%s", GetErrorText(nRet), nRet, GetRobotStatusText().c_str()));
 		showErrorMessage(
 			nullptr,
 			"停止程序失败,失败原因:%s",
@@ -468,23 +698,21 @@ bool STEPRobotCtrl::CallJob(std::string sJobName)
 
 int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo)
 {
+	ClearLastRobotError();
 	if (vtRobotMoveInfo.empty())
 	{
+		SetLastRobotError("STEP连续运动失败：轨迹点为空");
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 失败：轨迹点为空");
 		return -1;
 	}
 
-	std::string sProjectName = GetUserProject();
-	if (sProjectName.empty())
-	{
-		sProjectName = m_sRobotName.empty() ? "DefaultProject" : m_sRobotName;
-	}
+	const std::string sProjectName = StepNormalizeProjectName(kStepDynamicJobProjectName);
 
 	const std::string sProgramName = StepMakeProgramName();
 	const std::string sLocalDir = ".\\Job\\STEP";
 	const std::string sLocalProgramFile = sLocalDir + "\\" + sProgramName + ".srp";
 	const std::string sLocalDataFile = sLocalDir + "\\" + sProgramName + ".srd";
-	const std::string sRemoteBaseDir = "/UserPrograms/" + sProjectName + ".sr";
+	const std::string sRemoteBaseDir = StepBuildRemoteProjectDir(sProjectName);
 	const std::string sRemoteProgramFile = sRemoteBaseDir + "/" + sProgramName + ".srp";
 	const std::string sRemoteDataFile = sRemoteBaseDir + "/" + sProgramName + ".srd";
 
@@ -494,6 +722,7 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 	}
 	catch (const std::exception& e)
 	{
+		SetLastRobotError(GetStr("STEP连续运动失败：创建本地目录失败，%s", e.what()));
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 创建本地目录失败：%s", e.what());
 		return -2;
 	}
@@ -503,11 +732,13 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 
 	if (!StepWriteTextFile(sLocalProgramFile, sSrpContent))
 	{
+		SetLastRobotError(GetStr("STEP连续运动失败：写入SRP失败，%s", sLocalProgramFile.c_str()));
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 写入SRP失败：%s", sLocalProgramFile.c_str());
 		return -3;
 	}
 	if (!StepWriteTextFile(sLocalDataFile, sSrdContent))
 	{
+		SetLastRobotError(GetStr("STEP连续运动失败：写入SRD失败，%s", sLocalDataFile.c_str()));
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 写入SRD失败：%s", sLocalDataFile.c_str());
 		return -4;
 	}
@@ -516,44 +747,81 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 		"STEP ContiMoveAny 已生成程序 | Project=%s | Program=%s | PointCount=%d",
 		sProjectName.c_str(), sProgramName.c_str(), static_cast<int>(vtRobotMoveInfo.size()));
 
+	const std::string sCurrentProgram = GetUserProgram();
+	if (!sCurrentProgram.empty())
+	{
+		const int nProgramState = CheckDone();
+		if (nProgramState == STEPROBOTSDK::eRun || nProgramState == STEPROBOTSDK::ePause)
+		{
+			if (!Prog_stop_Py())
+			{
+				SetLastRobotError(GetStr("STEP连续运动失败：停止当前程序失败，%s，%s",
+					sCurrentProgram.c_str(), GetRobotStatusText().c_str()));
+				m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 停止当前程序失败：%s", sCurrentProgram.c_str());
+				return -5;
+			}
+
+			bool bStopped = false;
+			for (int i = 0; i < 40; ++i)
+			{
+				if (CheckDone() == STEPROBOTSDK::eStop)
+				{
+					bStopped = true;
+					break;
+				}
+				Sleep(50);
+			}
+			if (!bStopped)
+			{
+				SetLastRobotError(GetStr("STEP连续运动失败：等待当前程序停止超时，%s，%s",
+					sCurrentProgram.c_str(), GetRobotStatusText().c_str()));
+				m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 等待当前程序停止超时：%s", sCurrentProgram.c_str());
+				return -5;
+			}
+		}
+
+		if (!UnLoadUserProgramer())
+		{
+			SetLastRobotError(GetStr("STEP连续运动失败：卸载当前程序失败，%s，%s",
+				sCurrentProgram.c_str(), GetRobotStatusText().c_str()));
+			m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 卸载当前程序失败：%s", sCurrentProgram.c_str());
+			return -5;
+		}
+		m_pRobotLog->write(LogColor::SUCCESS, "STEP ContiMoveAny 已卸载当前程序：%s", sCurrentProgram.c_str());
+	}
+
 	if (m_pFTP == nullptr)
 	{
 		InitFtp();
 	}
 	if (m_pFTP == nullptr)
 	{
+		SetLastRobotError("STEP连续运动失败：初始化FTP失败");
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 初始化FTP失败");
-		return -5;
-	}
-
-	if (!m_pFTP->uploadFile(sLocalProgramFile, sRemoteProgramFile))
-	{
-		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 上传SRP失败：%s", sRemoteProgramFile.c_str());
 		return -6;
 	}
-	if (!m_pFTP->uploadFile(sLocalDataFile, sRemoteDataFile))
+
+	if (!m_pFTP->uploadFile(sLocalProgramFile, sRemoteProgramFile, false))
 	{
-		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 上传SRD失败：%s", sRemoteDataFile.c_str());
+		SetLastRobotError(GetStr("STEP连续运动失败：上传SRP失败，%s", sRemoteProgramFile.c_str()));
+		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 上传SRP失败：%s", sRemoteProgramFile.c_str());
 		return -7;
+	}
+	if (!m_pFTP->uploadFile(sLocalDataFile, sRemoteDataFile, false))
+	{
+		SetLastRobotError(GetStr("STEP连续运动失败：上传SRD失败，%s", sRemoteDataFile.c_str()));
+		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 上传SRD失败：%s", sRemoteDataFile.c_str());
+		return -8;
 	}
 
 	m_pRobotLog->write(LogColor::SUCCESS,
 		"STEP ContiMoveAny 上传完成 | SRP=%s | SRD=%s",
 		sRemoteProgramFile.c_str(), sRemoteDataFile.c_str());
 
-	const std::string sCurrentProgram = GetUserProgram();
-	if (!sCurrentProgram.empty())
+	if (!LoadUserProgram(sProjectName, sProgramName, true))
 	{
-		if (!UnLoadUserProgramer())
-		{
-			m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 卸载当前程序失败：%s", sCurrentProgram.c_str());
-			return -8;
-		}
-		m_pRobotLog->write(LogColor::SUCCESS, "STEP ContiMoveAny 已卸载当前程序：%s", sCurrentProgram.c_str());
-	}
-
-	if (!LoadUserProgram(sProjectName, sProgramName))
-	{
+		SetLastRobotError(GetStr("STEP连续运动失败：加载程序失败，Project=%s Program=%s，%s",
+			sProjectName.c_str(), sProgramName.c_str(), GetRobotStatusText().c_str()));
 		m_pRobotLog->write(LogColor::ERR,
 			"STEP ContiMoveAny 加载程序失败 | Project=%s | Program=%s",
 			sProjectName.c_str(), sProgramName.c_str());
@@ -564,9 +832,128 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 		"STEP ContiMoveAny 已加载程序 | Project=%s | Program=%s",
 		sProjectName.c_str(), sProgramName.c_str());
 
+	const auto failRunPrepare = [this, &sProgramName](const char* stepName, int ret) -> int
+		{
+			SetLastRobotError(GetStr("STEP连续运动失败：启动前%s失败，Program=%s，返回=%d，%s",
+				stepName, sProgramName.c_str(), ret, GetRobotStatusText().c_str()));
+			m_pRobotLog->write(LogColor::ERR, "%s", GetLastRobotError().c_str());
+			return -10;
+		};
+
+	int nPrepareRet = m_pSTEPRobotClient->AllAlarmConfirmCmd();
+	if (nPrepareRet != 0)
+	{
+		return failRunPrepare("清除报警", nPrepareRet);
+	}
+
+	if (m_pSTEPRobotClient->getOperationMode() != STEPROBOTSDK::eAutomatic)
+	{
+		nPrepareRet = m_pSTEPRobotClient->SetModeCmd(STEPROBOTSDK::MODEKEY::AUTO, true);
+		if (nPrepareRet != 0)
+		{
+			return failRunPrepare("切换自动模式", nPrepareRet);
+		}
+
+		bool bAutoMode = false;
+		for (int i = 0; i < 20; ++i)
+		{
+			if (m_pSTEPRobotClient->getOperationMode() == STEPROBOTSDK::eAutomatic)
+			{
+				bAutoMode = true;
+				break;
+			}
+			Sleep(50);
+		}
+		if (!bAutoMode)
+		{
+			return failRunPrepare("等待自动模式", 0);
+		}
+	}
+
+	if (m_pSTEPRobotClient->getMotorEnableState() == 0)
+	{
+		nPrepareRet = m_pSTEPRobotClient->EnableMotorCmd();
+		if (nPrepareRet != 0)
+		{
+			return failRunPrepare("上使能", nPrepareRet);
+		}
+
+		bool bEnabled = false;
+		for (int i = 0; i < 20; ++i)
+		{
+			if (m_pSTEPRobotClient->getMotorEnableState() == 1)
+			{
+				bEnabled = true;
+				break;
+			}
+			Sleep(50);
+		}
+		if (!bEnabled)
+		{
+			return failRunPrepare("等待使能", 0);
+		}
+	}
+
+	if (m_pSTEPRobotClient->getProgramMode() != STEPROBOTSDK::eContinue)
+	{
+		nPrepareRet = m_pSTEPRobotClient->ProgramRunModeCmd(static_cast<int>(STEPROBOTSDK::eContinue));
+		if (nPrepareRet != 0)
+		{
+			return failRunPrepare("切换连续运行模式", nPrepareRet);
+		}
+
+		bool bContinueMode = false;
+		for (int i = 0; i < 20; ++i)
+		{
+			if (m_pSTEPRobotClient->getProgramMode() == STEPROBOTSDK::eContinue)
+			{
+				bContinueMode = true;
+				break;
+			}
+			Sleep(50);
+		}
+		if (!bContinueMode)
+		{
+			return failRunPrepare("等待连续运行模式", 0);
+		}
+	}
+
 	if (!Prog_startRun_Py())
 	{
+		SetLastRobotError(GetStr("STEP连续运动失败：启动程序失败，Program=%s，%s",
+			sProgramName.c_str(), GetRobotStatusText().c_str()));
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 启动程序失败：%s", sProgramName.c_str());
+		return -10;
+	}
+
+	bool bStarted = false;
+	for (int i = 0; i < 50; ++i)
+	{
+		const int nProgramState = CheckDone();
+		if (nProgramState == STEPROBOTSDK::eRun)
+		{
+			bStarted = true;
+			break;
+		}
+
+		const STEPROBOTSDK::MessageData message = m_pSTEPRobotClient != nullptr
+			? m_pSTEPRobotClient->getMessageData()
+			: STEPROBOTSDK::MessageData();
+		if (message.m_MessageType == STEPROBOTSDK::eError)
+		{
+			SetLastRobotError(GetStr("STEP连续运动失败：启动后控制器报错，Program=%s，%s",
+				sProgramName.c_str(), GetRobotStatusText().c_str()));
+			m_pRobotLog->write(LogColor::ERR, "%s", GetLastRobotError().c_str());
+			return -10;
+		}
+
+		Sleep(20);
+	}
+	if (!bStarted)
+	{
+		SetLastRobotError(GetStr("STEP连续运动失败：启动后未进入运行态，Program=%s，%s",
+			sProgramName.c_str(), GetRobotStatusText().c_str()));
+		m_pRobotLog->write(LogColor::ERR, "%s", GetLastRobotError().c_str());
 		return -10;
 	}
 
@@ -578,7 +965,7 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 bool STEPRobotCtrl::ServoOff()
 {
 	int nRet = 0;
-	//当前机器人未使能状态
+	//当前机器人使能时执行下使能
 	if (m_pSTEPRobotClient->getMotorEnableState() == 1)
 	{
 		nRet = m_pSTEPRobotClient->EnableMotorCmd();
@@ -598,7 +985,7 @@ bool STEPRobotCtrl::ServoOff()
 bool STEPRobotCtrl::ServoOn()
 {
 	int nRet = 0;
-	//当前机器人未使能状态
+	//当前机器人未使能时执行上使能
 	if (m_pSTEPRobotClient->getMotorEnableState() == 0)
 	{
 		nRet = m_pSTEPRobotClient->EnableMotorCmd();
@@ -607,7 +994,7 @@ bool STEPRobotCtrl::ServoOn()
 	{
 		showErrorMessage(
 			nullptr,
-			"下使能失败,失败原因:%s",
+			"上使能失败,失败原因:%s",
 			GetErrorText(nRet)   // 直接用全局错误库
 		);
 		return false;
@@ -681,7 +1068,7 @@ int STEPRobotCtrl::UploadFile(std::string LocalFilePath, std::string RemoteFileP
 	{
 		return -1;
 	}
-	return m_pFTP->uploadFile(LocalFilePath, RemoteFilePath) ? 0 : -1;
+	return m_pFTP->uploadFile(LocalFilePath, RemoteFilePath, false) ? 0 : -1;
 }
 //下载文件,埃斯顿为RemoteFilePath，本地为LocalFilePath
 int STEPRobotCtrl::DownloadFile(std::string RemoteFilePath, std::string LocalFilePath)
@@ -836,16 +1223,26 @@ bool STEPRobotCtrl::SetPosVar(int nIndex, JointsPos eRobotCoors, int scoper)
 int STEPRobotCtrl::GetPosVar(long lPvarIndex, double array[6], int config[7], int MoveType)
 {
 	(void)config;
-	const std::string sProjectName = GetUserProject();
-	const std::string sProgramName = GetUserProgram();
+	const std::string sProjectName = StepNormalizeProjectName(kStepDynamicJobProjectName);
+	const std::string sProgramName = kStepProjectVariableProgramName;
 	const std::string sVarName = StepBuildPosVarName(static_cast<int>(lPvarIndex), MoveType);
 
 	if (MoveType == PULSEVAR)
 	{
 		AXISPOS value = {};
-		const int nRet = m_pSTEPRobotClient->VariableAxisposReadCmd(sProjectName, sProgramName, sVarName, value);
+		int nRet = m_pSTEPRobotClient->VariableAxisposReadCmd(sProjectName, sProgramName, sVarName, value);
 		if (nRet != 0)
 		{
+			const int fallbackRet = m_pSTEPRobotClient->VariableAxisposReadCmd(sProjectName, std::string(), sVarName, value);
+			if (fallbackRet == 0)
+			{
+				nRet = 0;
+			}
+		}
+		if (nRet != 0)
+		{
+			SetLastRobotError(GetStr("STEP读取工程关节变量失败：Project=%s Program=%s Var=%s 原因=%s(%d)。请确认 PCRobot/_project.srd 中已定义 ap%d。",
+				sProjectName.c_str(), sProgramName.c_str(), sVarName.c_str(), GetErrorText(nRet), nRet, static_cast<int>(lPvarIndex)));
 			return nRet;
 		}
 		for (int i = 0; i < 6; ++i)
@@ -856,9 +1253,19 @@ int STEPRobotCtrl::GetPosVar(long lPvarIndex, double array[6], int config[7], in
 	}
 
 	CARTPOS value = {};
-	const int nRet = m_pSTEPRobotClient->VariableCartposReadCmd(sProjectName, sProgramName, sVarName, value);
+	int nRet = m_pSTEPRobotClient->VariableCartposReadCmd(sProjectName, sProgramName, sVarName, value);
 	if (nRet != 0)
 	{
+		const int fallbackRet = m_pSTEPRobotClient->VariableCartposReadCmd(sProjectName, std::string(), sVarName, value);
+		if (fallbackRet == 0)
+		{
+			nRet = 0;
+		}
+	}
+	if (nRet != 0)
+	{
+		SetLastRobotError(GetStr("STEP读取工程直角变量失败：Project=%s Program=%s Var=%s 原因=%s(%d)。请确认 PCRobot/_project.srd 中已定义 cp%d。",
+			sProjectName.c_str(), sProgramName.c_str(), sVarName.c_str(), GetErrorText(nRet), nRet, static_cast<int>(lPvarIndex)));
 		return nRet;
 	}
 	for (int i = 0; i < 6; ++i)
@@ -960,8 +1367,10 @@ bool STEPRobotCtrl::MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED
 	(void)isconfig;
 	(void)config;
 
-	T_ROBOT_MOVE_INFO moveInfo;
+	ClearLastRobotError();
+	T_ROBOT_MOVE_INFO moveInfo = {};
 	moveInfo.nMoveType = (JobName == "MOVJ" || JobName == "movj") ? MOVJ : MOVL;
+	moveInfo.nPosType = POSVAR;
 	moveInfo.tCoord = tRobotJointCoord;
 	moveInfo.tSpeed = tPulseMove;
 	moveInfo.nMoveDevice = 0;
@@ -970,15 +1379,22 @@ bool STEPRobotCtrl::MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED
 	moveInfo.adBasePosVar[1] = tRobotJointCoord.dBY;
 	moveInfo.adBasePosVar[2] = tRobotJointCoord.dBZ;
 
-	return ContiMoveAny(std::vector<T_ROBOT_MOVE_INFO>{ moveInfo }) == 0;
+	const int ret = ContiMoveAny(std::vector<T_ROBOT_MOVE_INFO>{ moveInfo });
+	if (ret != 0 && GetLastRobotError().empty())
+	{
+		SetLastRobotError(GetStr("STEP直角运动下发失败：ret=%d", ret));
+	}
+	return ret == 0;
 }
 
 bool STEPRobotCtrl::MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName)
 {
 	(void)nExternalAxleType;
 
-	T_ROBOT_MOVE_INFO moveInfo;
+	ClearLastRobotError();
+	T_ROBOT_MOVE_INFO moveInfo = {};
 	moveInfo.nMoveType = (JobName == "MOVL" || JobName == "movl") ? MOVL : MOVJ;
+	moveInfo.nPosType = PULSEVAR;
 	moveInfo.tPulse = tRobotJointCoord;
 	moveInfo.tSpeed = tPulseMove;
 	moveInfo.nMoveDevice = 0;
@@ -987,7 +1403,12 @@ bool STEPRobotCtrl::MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED
 	moveInfo.adBasePosVar[1] = static_cast<double>(tRobotJointCoord.lBYPulse);
 	moveInfo.adBasePosVar[2] = static_cast<double>(tRobotJointCoord.lBZPulse);
 
-	return ContiMoveAny(std::vector<T_ROBOT_MOVE_INFO>{ moveInfo }) == 0;
+	const int ret = ContiMoveAny(std::vector<T_ROBOT_MOVE_INFO>{ moveInfo });
+	if (ret != 0 && GetLastRobotError().empty())
+	{
+		SetLastRobotError(GetStr("STEP关节运动下发失败：ret=%d", ret));
+	}
+	return ret == 0;
 }
 
 bool STEPRobotCtrl::MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType, std::string JobName, int config[7])
@@ -995,6 +1416,7 @@ bool STEPRobotCtrl::MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPuls
 	(void)config;
 	if (dRobotJointCoord == nullptr)
 	{
+		SetLastRobotError("STEP运动失败：目标点为空");
 		return false;
 	}
 

@@ -21,13 +21,13 @@ public:
 
     explicit CameraParamDialog(
         ContralUnit* pContralUnit,
+        const QString& robotName,
         StartCameraFunc startCamera,
         StopCameraFunc stopCamera,
         QWidget* parent = nullptr);
 
 private:
     void closeEvent(QCloseEvent* event) override;
-    void LoadRobotList();
     void LoadCameraList();
     void UpdateCurrentCameraInfo();
     void OpenHandEyeDialog();
@@ -43,9 +43,9 @@ private:
     void AppendLog(const QString& text);
 
     ContralUnit* m_pContralUnit = nullptr;
+    QString m_robotName;
     StartCameraFunc m_startCamera;
     StopCameraFunc m_stopCamera;
-    QComboBox* m_pRobotCombo = nullptr;
     QComboBox* m_pCameraCombo = nullptr;
     QLabel* m_pPathLabel = nullptr;
     QLabel* m_pCameraPathLabel = nullptr;

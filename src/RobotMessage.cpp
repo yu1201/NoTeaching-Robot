@@ -1,6 +1,10 @@
 #include "RobotMessage.h"
 
+#include <QCoreApplication>
+#include <QMetaObject>
+#include <QPushButton>
 #include <QString>
+#include <QThread>
 #include <vector>
 
 namespace
@@ -29,6 +33,56 @@ std::string formatStringV(const char* format, va_list args)
     std::vector<char> buffer(bufferSize);
     vsnprintf(buffer.data(), bufferSize, format, args);
     return std::string(buffer.data());
+}
+
+void showMessageOnGuiThread(QMessageBox::Icon icon, const QString& title, const QString& text)
+{
+    auto show = [icon, title, text]()
+    {
+        QMessageBox msgBox(nullptr);
+        msgBox.setIcon(icon);
+        msgBox.setWindowTitle(title);
+        msgBox.setText(text);
+        msgBox.addButton("确定", QMessageBox::AcceptRole);
+        msgBox.exec();
+    };
+
+    QCoreApplication* app = QCoreApplication::instance();
+    if (app == nullptr || QThread::currentThread() == app->thread())
+    {
+        show();
+        return;
+    }
+
+    QMetaObject::invokeMethod(app, show, Qt::QueuedConnection);
+}
+
+bool showConfirmOnGuiThread(const QString& title, const QString& text)
+{
+    auto ask = [title, text]() -> bool
+    {
+        QMessageBox msgBox(nullptr);
+        msgBox.setIcon(QMessageBox::Question);
+        msgBox.setWindowTitle(title);
+        msgBox.setText(text);
+        QAbstractButton* yesButton = msgBox.addButton("是", QMessageBox::YesRole);
+        msgBox.addButton("否", QMessageBox::NoRole);
+        msgBox.exec();
+        return msgBox.clickedButton() == yesButton;
+    };
+
+    QCoreApplication* app = QCoreApplication::instance();
+    if (app == nullptr || QThread::currentThread() == app->thread())
+    {
+        return ask();
+    }
+
+    bool result = false;
+    QMetaObject::invokeMethod(app, [&result, ask]()
+        {
+            result = ask();
+        }, Qt::BlockingQueuedConnection);
+    return result;
 }
 }
 
@@ -59,12 +113,10 @@ void showInfoMessage(const std::string& title, const char* format, ...)
     std::string msgStr = formatStringV(format, args);
     va_end(args);
 
-    QMessageBox msgBox(nullptr);
-    msgBox.setIcon(QMessageBox::Information);
-    msgBox.setWindowTitle(QString::fromLocal8Bit(title.c_str()));
-    msgBox.setText(QString::fromUtf8(msgStr.c_str()));
-    msgBox.addButton("确定", QMessageBox::AcceptRole);
-    msgBox.exec();
+    showMessageOnGuiThread(
+        QMessageBox::Information,
+        QString::fromLocal8Bit(title.c_str()),
+        QString::fromUtf8(msgStr.c_str()));
 }
 
 void showInfoMessage(const char* title, const char* format, ...)
@@ -79,12 +131,10 @@ void showInfoMessage(const char* title, const char* format, ...)
     std::string msgStr = formatStringV(format, args);
     va_end(args);
 
-    QMessageBox msgBox(nullptr);
-    msgBox.setIcon(QMessageBox::Information);
-    msgBox.setWindowTitle(QString::fromLocal8Bit(safeTitle(title).c_str()));
-    msgBox.setText(QString::fromUtf8(msgStr.c_str()));
-    msgBox.addButton("确定", QMessageBox::AcceptRole);
-    msgBox.exec();
+    showMessageOnGuiThread(
+        QMessageBox::Information,
+        QString::fromLocal8Bit(safeTitle(title).c_str()),
+        QString::fromUtf8(msgStr.c_str()));
 }
 
 // 格式化警告弹窗实现
@@ -99,12 +149,10 @@ void showWarnMessage(const std::string& title, const char* format, ...) {
     std::string msgStr = formatStringV(format, args);
     va_end(args);
 
-    QMessageBox msgBox(nullptr);
-    msgBox.setIcon(QMessageBox::Warning);
-    msgBox.setWindowTitle(QString::fromLocal8Bit(title.c_str()));
-    msgBox.setText(QString::fromUtf8(msgStr.c_str()));
-    msgBox.addButton("确定", QMessageBox::AcceptRole);
-    msgBox.exec();
+    showMessageOnGuiThread(
+        QMessageBox::Warning,
+        QString::fromLocal8Bit(title.c_str()),
+        QString::fromUtf8(msgStr.c_str()));
 }
 
 void showWarnMessage(const char* title, const char* format, ...)
@@ -119,12 +167,10 @@ void showWarnMessage(const char* title, const char* format, ...)
     std::string msgStr = formatStringV(format, args);
     va_end(args);
 
-    QMessageBox msgBox(nullptr);
-    msgBox.setIcon(QMessageBox::Warning);
-    msgBox.setWindowTitle(QString::fromLocal8Bit(safeTitle(title).c_str()));
-    msgBox.setText(QString::fromUtf8(msgStr.c_str()));
-    msgBox.addButton("确定", QMessageBox::AcceptRole);
-    msgBox.exec();
+    showMessageOnGuiThread(
+        QMessageBox::Warning,
+        QString::fromLocal8Bit(safeTitle(title).c_str()),
+        QString::fromUtf8(msgStr.c_str()));
 }
 
 // 格式化错误弹窗（基础版）
@@ -139,12 +185,10 @@ void showErrorMessage(const std::string& title, const char* format, ...) {
     std::string msgStr = formatStringV(format, args);
     va_end(args);
 
-    QMessageBox msgBox(nullptr);
-    msgBox.setIcon(QMessageBox::Critical);
-    msgBox.setWindowTitle(QString::fromLocal8Bit(title.c_str()));
-    msgBox.setText(QString::fromUtf8(msgStr.c_str()));
-    msgBox.addButton("确定", QMessageBox::AcceptRole);
-    msgBox.exec();
+    showMessageOnGuiThread(
+        QMessageBox::Critical,
+        QString::fromLocal8Bit(title.c_str()),
+        QString::fromUtf8(msgStr.c_str()));
 }
 
 void showErrorMessage(const char* title, const char* format, ...)
@@ -159,12 +203,10 @@ void showErrorMessage(const char* title, const char* format, ...)
     std::string msgStr = formatStringV(format, args);
     va_end(args);
 
-    QMessageBox msgBox(nullptr);
-    msgBox.setIcon(QMessageBox::Critical);
-    msgBox.setWindowTitle(QString::fromLocal8Bit(safeTitle(title).c_str()));
-    msgBox.setText(QString::fromUtf8(msgStr.c_str()));
-    msgBox.addButton("确定", QMessageBox::AcceptRole);
-    msgBox.exec();
+    showMessageOnGuiThread(
+        QMessageBox::Critical,
+        QString::fromLocal8Bit(safeTitle(title).c_str()),
+        QString::fromUtf8(msgStr.c_str()));
 }
 
 // 格式化确认弹窗实现
@@ -179,13 +221,9 @@ bool showConfirmMessage(const std::string& title, const char* format, ...) {
     std::string msgStr = formatStringV(format, args);
     va_end(args);
 
-    QMessageBox msgBox(nullptr);
-    msgBox.setIcon(QMessageBox::Question);
-    msgBox.setWindowTitle(QString::fromLocal8Bit(title.c_str()));
-    msgBox.setText(QString::fromUtf8(msgStr.c_str()));
-    msgBox.addButton("是", QMessageBox::YesRole);
-    msgBox.addButton("否", QMessageBox::NoRole);
-    return (msgBox.exec() == QMessageBox::Yes);
+    return showConfirmOnGuiThread(
+        QString::fromLocal8Bit(title.c_str()),
+        QString::fromUtf8(msgStr.c_str()));
 }
 
 bool showConfirmMessage(const char* title, const char* format, ...)
@@ -200,11 +238,7 @@ bool showConfirmMessage(const char* title, const char* format, ...)
     std::string msgStr = formatStringV(format, args);
     va_end(args);
 
-    QMessageBox msgBox(nullptr);
-    msgBox.setIcon(QMessageBox::Question);
-    msgBox.setWindowTitle(QString::fromLocal8Bit(safeTitle(title).c_str()));
-    msgBox.setText(QString::fromUtf8(msgStr.c_str()));
-    msgBox.addButton("是", QMessageBox::YesRole);
-    msgBox.addButton("否", QMessageBox::NoRole);
-    return (msgBox.exec() == QMessageBox::Yes);
+    return showConfirmOnGuiThread(
+        QString::fromLocal8Bit(safeTitle(title).c_str()),
+        QString::fromUtf8(msgStr.c_str()));
 }
