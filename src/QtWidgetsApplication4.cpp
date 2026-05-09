@@ -13,6 +13,7 @@
 #include "RobotCalculation.h"
 #include "RobotDataHelper.h"
 #include "RobotJogDialog.h"
+#include "STEPRobotDriver.h"
 #include "WindowStyleHelper.h"
 #include "WeldPoseAverageUpdater.h"
 #include "WeldProcessDialog.h"
@@ -847,6 +848,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pAuthRegisterModeBtn(nullptr)
 	, m_pAuthSubmitBtn(nullptr)
 	, m_pGuestLoginBtn(nullptr)
+	, m_pDashboardConnectBtn(nullptr)
+	, m_pDashboardClearAlarmBtn(nullptr)
+	, m_pDashboardModeBtn(nullptr)
 	, m_pAccountManagementAction(nullptr)
 	, m_pCameraParamBtn(nullptr)
 	, m_pWeldSeamCompBtn(nullptr)
@@ -1255,18 +1259,25 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QGridLayout* quickLayout = new QGridLayout(quickGroup);
 	quickLayout->setSpacing(12);
 	QPushButton* quickConnectBtn = makeLargeButton("连接服务\n启动机器人/相机通讯", quickGroup);
+	m_pDashboardConnectBtn = quickConnectBtn;
+	m_pDashboardClearAlarmBtn = makeLargeButton("清除报警\n确认并清除机器人报警", quickGroup);
+	m_pDashboardModeBtn = makeLargeButton("模式切换\n选择新时达机器人模式", quickGroup);
 	QPushButton* quickMeasureBtn = makeLargeButton("先测后焊\n按预设流程扫描并焊接", quickGroup);
 	QPushButton* quickPreviewBtn = makeLargeButton("坡口相机预览\n查看当前相机点云/帧数据", quickGroup);
+	QPushButton* quickJogBtn = makeLargeButton("点动控制\n单步移动/目标点运动", quickGroup);
 	QPushButton* quickPositionBtn = makeLargeButton("读取当前位置\n快速查看机器人姿态", quickGroup);
 	QPushButton* quickCalibrationBtn = makeLargeButton("标定与相机参数\n手眼标定、矩阵和相机配置", quickGroup);
 	QPushButton* quickManageBtn = makeLargeButton("管理页面\n工艺、补偿、调试、账号权限", quickGroup);
 	quickPreviewBtn->setCheckable(true);
 	quickLayout->addWidget(quickConnectBtn, 0, 0);
-	quickLayout->addWidget(quickMeasureBtn, 0, 1);
-	quickLayout->addWidget(quickPreviewBtn, 0, 2);
-	quickLayout->addWidget(quickPositionBtn, 1, 0);
-	quickLayout->addWidget(quickCalibrationBtn, 1, 1);
-	quickLayout->addWidget(quickManageBtn, 1, 2);
+	quickLayout->addWidget(m_pDashboardClearAlarmBtn, 0, 1);
+	quickLayout->addWidget(m_pDashboardModeBtn, 0, 2);
+	quickLayout->addWidget(quickMeasureBtn, 1, 0);
+	quickLayout->addWidget(quickPreviewBtn, 1, 1);
+	quickLayout->addWidget(quickJogBtn, 1, 2);
+	quickLayout->addWidget(quickPositionBtn, 2, 0);
+	quickLayout->addWidget(quickCalibrationBtn, 2, 1);
+	quickLayout->addWidget(quickManageBtn, 2, 2);
 	dashboardLayout->addWidget(quickGroup, 0);
 
 	m_pManagementPage = new QWidget(this, Qt::Window);
@@ -1383,8 +1394,11 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 	m_robotOperationWidgets = {
 		quickConnectBtn,
+		m_pDashboardClearAlarmBtn,
+		m_pDashboardModeBtn,
 		quickMeasureBtn,
 		quickPreviewBtn,
+		quickJogBtn,
 		quickPositionBtn,
 		quickCalibrationBtn,
 		m_pWeldSeamCompBtn,
@@ -1569,9 +1583,12 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(managementEntryButton, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowManagementPage);
 	connect(dashboardLogoutButton, &QPushButton::clicked, this, &QtWidgetsApplication4::LogoutCurrentAccount);
 	connect(quickManageBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowManagementPage);
-	connect(quickConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucConnectTest);
+	connect(quickConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ToggleCurrentRobotConnection);
+	connect(m_pDashboardClearAlarmBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotClearAlarmTest);
+	connect(m_pDashboardModeBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotSwitchStepMode);
 	connect(quickMeasureBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenMeasureThenWeldDialog);
 	connect(quickPositionBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucGetCurrentPosTest);
+	connect(quickJogBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenRobotJogDialog);
 	connect(quickCalibrationBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenCameraParamDialog);
 	connect(quickPreviewBtn, &QPushButton::toggled, ui.GrooveCameraTestBtn, &QPushButton::setChecked);
 	connect(ui.GrooveCameraTestBtn, &QPushButton::toggled, quickPreviewBtn, &QPushButton::setChecked);
@@ -1595,7 +1612,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pWeldSeamCompBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenWeldSeamCompDialog);
 	connect(m_pCameraParamBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenCameraParamDialog);
 	connect(aboutButton, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenAboutDialog);
-	connect(ui.FanucConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucConnectTest);
+	connect(ui.FanucConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ToggleCurrentRobotConnection);
 	connect(ui.FanucDisconnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucDisconnectTest);
 	connect(ui.FanucGetPosBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucGetCurrentPosTest);
 	connect(ui.FanucGetPulseBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucGetCurrentPulseTest);
@@ -1712,6 +1729,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pContralUnit = new ContralUnit();
 	RefreshRobotSelectorUi();
 	RefreshRobotOperationAvailability();
+	QTimer* robotConnectionUiTimer = new QTimer(this);
+	connect(robotConnectionUiTimer, &QTimer::timeout, this, &QtWidgetsApplication4::RefreshDashboardConnectionState);
+	robotConnectionUiTimer->start(1000);
 	if (m_pRobotSelectorCombo != nullptr)
 	{
 		connect(m_pRobotSelectorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
@@ -1998,6 +2018,7 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
             widget->setToolTip(hasReadyDriver ? QString() : "未选择可用机器人驱动，现场操作已禁用。");
         }
     }
+    RefreshDashboardConnectionState();
     if (!hasReadyDriver)
     {
         if (ui.FanucMonitorText != nullptr)
@@ -2005,6 +2026,65 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
             ui.FanucMonitorText->setPlainText(QString("状态: 机器人类型错误/不可用\n%1\n现场操作已禁用，管理页面仍可使用。").arg(issueText));
         }
     }
+}
+
+bool QtWidgetsApplication4::IsCurrentRobotConnected()
+{
+	QString issueText;
+	if (!IsRobotUnitDriverReady(CurrentRobotUnitIndex(), &issueText))
+	{
+		return false;
+	}
+	const T_CONTRAL_UNIT* unitInfo = CurrentContralUnit();
+	if (unitInfo == nullptr)
+	{
+		return false;
+	}
+	RobotDriverAdaptor* driver = static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
+	return driver != nullptr && driver->IsConnected();
+}
+
+void QtWidgetsApplication4::RefreshDashboardConnectionState()
+{
+	const bool connected = IsCurrentRobotConnected();
+	RobotDriverAdaptor* currentDriver = nullptr;
+	if (const T_CONTRAL_UNIT* unitInfo = CurrentContralUnit())
+	{
+		currentDriver = static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
+	}
+	const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(currentDriver) != nullptr;
+	if (m_pDashboardConnectBtn != nullptr)
+	{
+		m_pDashboardConnectBtn->setText(connected
+			? "断开连接\n停止当前机器人通讯"
+			: "连接服务\n启动机器人/相机通讯");
+		m_pDashboardConnectBtn->setToolTip(connected
+			? "当前机器人已连接，点击后断开连接。"
+			: "当前机器人未连接，点击后连接并初始化通讯。");
+	}
+	if (ui.FanucConnectBtn != nullptr)
+	{
+		ui.FanucConnectBtn->setText(connected ? "断开连接" : "连接服务");
+	}
+	if (m_pDashboardModeBtn != nullptr)
+	{
+		m_pDashboardModeBtn->setVisible(isStepDriver);
+		m_pDashboardModeBtn->setToolTip(isStepDriver
+			? "切换新时达机器人模式。"
+			: "FANUC 不显示新时达模式切换。");
+	}
+}
+
+void QtWidgetsApplication4::ToggleCurrentRobotConnection()
+{
+	if (IsCurrentRobotConnected())
+	{
+		FanucDisconnectTest();
+	}
+	else
+	{
+		FanucConnectTest();
+	}
 }
 
 RobotDriverAdaptor* QtWidgetsApplication4::GetCurrentRobotDriver(QWidget* parent)
@@ -4092,13 +4172,36 @@ void QtWidgetsApplication4::OpenCameraParamDialog()
 			emit stopAllCommThreads();
 		};
 
+	QString robotName = "RobotA";
+	if (const T_CONTRAL_UNIT* currentUnit = CurrentContralUnit())
+	{
+		const QString selectedRobotName = QString::fromStdString(currentUnit->sUnitName).trimmed();
+		if (!selectedRobotName.isEmpty())
+		{
+			robotName = selectedRobotName;
+		}
+	}
+
+	if (m_pCameraParamPage != nullptr && m_sCameraParamPageRobotName != robotName)
+	{
+		if (m_pMainStack != nullptr)
+		{
+			m_pMainStack->removeWidget(m_pCameraParamPage);
+		}
+		m_pCameraParamPage->deleteLater();
+		m_pCameraParamPage = nullptr;
+		m_sCameraParamPageRobotName.clear();
+	}
+
 	if (m_pCameraParamPage == nullptr)
 	{
 		m_pCameraParamPage = new CameraParamDialog(
 			m_pContralUnit,
+			robotName,
 			startCamera,
 			stopCamera,
 			m_pMainStack);
+		m_sCameraParamPageRobotName = robotName;
 		PrepareEmbeddedPage(m_pCameraParamPage);
 	}
 	ShowEmbeddedPage(m_pCameraParamPage);
@@ -4111,28 +4214,58 @@ void QtWidgetsApplication4::FanucConnectTest()
 	{
 		return;
 	}
+	if (pRobotDriver->IsConnected())
+	{
+		RefreshDashboardConnectionState();
+		QMessageBox::information(this, "机器人连接", "当前机器人已经连接。");
+		return;
+	}
 
 	const bool ok = pRobotDriver->InitSocket(pRobotDriver->m_sSocketIP.c_str(), static_cast<u_short>(pRobotDriver->m_nSocketPort));
 	int ftpRet = -1;
 	if (ok)
 	{
+		QStringList connectSteps;
 		if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
 		{
 			pFanucDriver->StartMonitor();
 		}
+		if (STEPRobotCtrl* pStepDriver = dynamic_cast<STEPRobotCtrl*>(pRobotDriver))
+		{
+			const bool alarmOk = pStepDriver->cleanAlarm();
+			const bool modeOk = pStepDriver->SetSysMode(2);
+			const bool servoOk = pStepDriver->ServoOn();
+			connectSteps
+				<< QString("STEP清除报警：%1").arg(alarmOk ? "成功" : "失败")
+				<< QString("STEP切换自动模式：%1").arg(modeOk ? "成功" : "失败")
+				<< QString("STEP上使能：%1").arg(servoOk ? "成功" : "失败");
+			if (pRobotDriver->m_pRobotLog != nullptr)
+			{
+				pRobotDriver->m_pRobotLog->write(
+					alarmOk && modeOk && servoOk ? LogColor::SUCCESS : LogColor::WARNING,
+					"STEP连接初始化 | 清报警=%d 自动模式=%d 上使能=%d",
+					alarmOk ? 1 : 0,
+					modeOk ? 1 : 0,
+					servoOk ? 1 : 0);
+			}
+		}
 		ftpRet = pRobotDriver->InitFtp();
+		const QString extraText = connectSteps.isEmpty()
+			? QString()
+			: QString("\n%1").arg(connectSteps.join('\n'));
 		QMessageBox::information(
 			this,
 			"机器人连接",
-			GetStr("机器人连接成功：%s:%d\nFTP初始化返回：%d",
+			QString::fromStdString(GetStr("机器人连接成功：%s:%d\nFTP初始化返回：%d",
 				pRobotDriver->m_sSocketIP.c_str(),
 				pRobotDriver->m_nSocketPort,
-				ftpRet).c_str());
+				ftpRet)) + extraText);
 	}
 	else
 	{
 		QMessageBox::warning(this, "机器人连接", GetStr("连接失败：%s:%d", pRobotDriver->m_sSocketIP.c_str(), pRobotDriver->m_nSocketPort).c_str());
 	}
+	RefreshDashboardConnectionState();
 }
 
 void QtWidgetsApplication4::FanucDisconnectTest()
@@ -4151,6 +4284,151 @@ void QtWidgetsApplication4::FanucDisconnectTest()
 	}
 	ok = pRobotDriver->CloseSocket() && ok;
 	QMessageBox::information(this, "机器人断开", ok ? "已断开当前机器人连接。" : "机器人断开时返回失败，请检查日志。");
+	RefreshDashboardConnectionState();
+}
+
+void QtWidgetsApplication4::RobotClearAlarmTest()
+{
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
+	{
+		return;
+	}
+	if (!pRobotDriver->IsConnected())
+	{
+		QMessageBox::warning(this, "清除报警", "当前机器人未连接，请先连接机器人。");
+		RefreshDashboardConnectionState();
+		return;
+	}
+	const bool ok = pRobotDriver->cleanAlarm();
+	const bool servoOk = ok ? pRobotDriver->ServoOn() : false;
+	if (pRobotDriver->m_pRobotLog != nullptr)
+	{
+		pRobotDriver->m_pRobotLog->write(
+			ok && servoOk ? LogColor::SUCCESS : LogColor::WARNING,
+			"主页清除报警并上使能 | 清报警=%d 上使能=%d",
+			ok ? 1 : 0,
+			servoOk ? 1 : 0);
+	}
+	QMessageBox::information(
+		this,
+		"清除报警",
+		ok
+			? QString("机器人报警已清除。\n上使能：%1").arg(servoOk ? "成功" : "失败，请查看日志或示教器报警。")
+			: "清除报警失败，请查看日志或示教器报警。");
+}
+
+void QtWidgetsApplication4::RobotSwitchStepMode()
+{
+	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
+	if (pRobotDriver == nullptr)
+	{
+		return;
+	}
+	STEPRobotCtrl* pStepDriver = dynamic_cast<STEPRobotCtrl*>(pRobotDriver);
+	if (pStepDriver == nullptr)
+	{
+		QMessageBox::information(this, "模式切换", "当前机器人不是新时达机器人，已隐藏/禁用模式切换。");
+		RefreshDashboardConnectionState();
+		return;
+	}
+	if (!pStepDriver->IsConnected())
+	{
+		QMessageBox::warning(this, "模式切换", "当前新时达机器人未连接，请先连接机器人。");
+		RefreshDashboardConnectionState();
+		return;
+	}
+
+	struct StepModeOption
+	{
+		const char* text;
+		int mode;
+	};
+	const StepModeOption options[] = {
+		{ "手动模式 (MANUAL=1)", MODEKEY::MANUAL },
+		{ "自动模式 (AUTO=2)", MODEKEY::AUTO },
+		{ "外部自动模式 (AUTO_EXT=3)", MODEKEY::AUTO_EXT },
+		{ "开始/运行 (START=4)", MODEKEY::START },
+		{ "停止 (STOP=23)", MODEKEY::STOP },
+		{ "停止点动 (MSTOP=100)", MODEKEY::MSTOP }
+	};
+	QStringList modeItems;
+	for (const StepModeOption& option : options)
+	{
+		modeItems << QString::fromUtf8(option.text);
+	}
+
+	bool ok = false;
+	const QString selectedText = QInputDialog::getItem(
+		this,
+		"新时达模式切换",
+		"选择要切换的模式：",
+		modeItems,
+		1,
+		false,
+		&ok);
+	if (!ok || selectedText.isEmpty())
+	{
+		return;
+	}
+
+	int selectedMode = -1;
+	for (int i = 0; i < modeItems.size(); ++i)
+	{
+		if (modeItems[i] == selectedText)
+		{
+			selectedMode = options[i].mode;
+			break;
+		}
+	}
+	if (selectedMode < 0)
+	{
+		QMessageBox::warning(this, "模式切换", "未识别选择的模式。");
+		return;
+	}
+
+	if (selectedMode == MODEKEY::START)
+	{
+		const QMessageBox::StandardButton confirm = QMessageBox::question(
+			this,
+			"确认开始",
+			"START 会启动当前已加载程序，确认要切换到开始/运行吗？",
+			QMessageBox::Yes | QMessageBox::No,
+			QMessageBox::No);
+		if (confirm != QMessageBox::Yes)
+		{
+			return;
+		}
+	}
+
+	const bool modeOk = pStepDriver->SetSysMode(selectedMode);
+	if (pRobotDriver->m_pRobotLog != nullptr)
+	{
+		pRobotDriver->m_pRobotLog->write(
+			modeOk ? LogColor::SUCCESS : LogColor::WARNING,
+			"主页STEP模式切换 | mode=%d(%s) result=%d",
+			selectedMode,
+			GetModeText(selectedMode),
+			modeOk ? 1 : 0);
+	}
+	if (modeOk)
+	{
+		QMessageBox::information(
+			this,
+			"模式切换",
+			QString("新时达机器人已切换到：%1").arg(QString::fromUtf8(GetModeText(selectedMode))));
+	}
+	else
+	{
+		const QString errorText = QString::fromStdString(pStepDriver->GetLastRobotError());
+		QMessageBox::warning(
+			this,
+			"模式切换",
+			errorText.isEmpty()
+				? "新时达模式切换失败，请查看日志或示教器报警。"
+				: QString("新时达模式切换失败：\n%1").arg(errorText));
+	}
+	RefreshDashboardConnectionState();
 }
 
 void QtWidgetsApplication4::FanucGetCurrentPosTest()

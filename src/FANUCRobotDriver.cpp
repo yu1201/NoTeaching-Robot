@@ -1021,12 +1021,17 @@ namespace
 		response.clear();
 		if (!FanucEnsureSocket(ctrl))
 		{
+			if (ctrl != nullptr)
+			{
+				ctrl->SetLastRobotError("FANUC请求失败：控制socket未连接，CMD=" + command);
+			}
 			return false;
 		}
 
 		SOCKET sock = FanucGetSocket(ctrl->m_uSocketHandle);
 		if (sock == INVALID_SOCKET)
 		{
+			ctrl->SetLastRobotError("FANUC请求失败：socket句柄无效，CMD=" + command);
 			return false;
 		}
 
@@ -1039,6 +1044,7 @@ namespace
 				{
 					ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC Socket CMD=%s 等待互斥锁超时", command.c_str());
 				}
+				ctrl->SetLastRobotError("FANUC请求失败：等待socket互斥锁超时，CMD=" + command);
 				return false;
 			}
 		}
@@ -1060,6 +1066,7 @@ namespace
 
 		if (!sent || !recvOk)
 		{
+			ctrl->SetLastRobotError("FANUC请求失败：CMD=" + command + " RSP=" + response);
 			ctrl->CloseSocket();
 		}
 
@@ -1263,6 +1270,11 @@ bool FANUCRobotCtrl::CloseSocket()
 	return true;
 }
 
+bool FANUCRobotCtrl::IsConnected()
+{
+	return m_bSocketConnected;
+}
+
 // 主动读取单轴笛卡尔坐标，内部会请求完整当前位置后取对应分量。
 double FANUCRobotCtrl::GetCurrentPos(int nAxisNo)
 {
@@ -1383,10 +1395,15 @@ int FANUCRobotCtrl::CheckDone()
 	std::string response;
 	if (!FanucRequest(this, "CHECK_DONE", response))
 	{
+		if (GetLastRobotError().empty())
+		{
+			SetLastRobotError("FANUC完成状态检测失败：CHECK_DONE无响应");
+		}
 		return -1;
 	}
 	if (!FanucStartsWith(response, "DONE:"))
 	{
+		SetLastRobotError("FANUC完成状态检测失败：响应格式异常，RSP=" + response);
 		return -1;
 	}
 	return atoi(FanucResponsePayload(response).c_str());
@@ -1424,6 +1441,7 @@ int FANUCRobotCtrl::CheckRobotDone(int nDelayTime)
 		nRet = CheckDone();
 		if (nRet < 0)
 		{
+			SetLastRobotError("FANUC等待运动完成失败：" + GetRobotStatusText() + "，最近错误=" + GetLastRobotError());
 			if (m_pRobotLog != nullptr)
 			{
 				m_pRobotLog->write(LogColor::ERR, "FANUC CheckRobotDone 检测失败，返回=%d", nRet);
@@ -1469,6 +1487,10 @@ bool FANUCRobotCtrl::CallJob(std::string sJobName)
 		m_nMonitorDoneRaw = 0;
 		m_nMonitorDoneCandidate = 0;
 		m_nMonitorDoneStableCount = 0;
+	}
+	else
+	{
+		SetLastRobotError("FANUC调用程序失败：Program=" + sJobName + " RSP=" + response + "，" + GetRobotStatusText());
 	}
 	return ok;
 }
@@ -1644,6 +1666,8 @@ bool FANUCRobotCtrl::WaitStateDone(
 
 	if (!hasStarted)
 	{
+		SetLastRobotError(GetStr("FANUC等待运动启动失败：R[%d]=%d，期望运行态=%d/%d 或完成态=%d，%s",
+			nStateReg, lastState, nStartStateA, nStartStateB, nDoneState, GetRobotStatusText().c_str()));
 		if (m_pRobotLog != nullptr)
 		{
 			m_pRobotLog->write(LogColor::ERR,
@@ -1673,6 +1697,8 @@ bool FANUCRobotCtrl::WaitStateDone(
 
 	if (lastState != nDoneState)
 	{
+		SetLastRobotError(GetStr("FANUC等待运动完成失败：R[%d]=%d，期望=%d，%s",
+			nStateReg, lastState, nDoneState, GetRobotStatusText().c_str()));
 		if (m_pRobotLog != nullptr)
 		{
 			m_pRobotLog->write(LogColor::ERR,
@@ -2420,6 +2446,24 @@ std::string FANUCRobotCtrl::GetMonitorText()
 {
 	std::lock_guard<std::mutex> lock(m_monitorMutex);
 	return m_sMonitorText;
+}
+
+std::string FANUCRobotCtrl::GetRobotStatusText()
+{
+	std::ostringstream oss;
+	oss << "FANUC状态：连接=" << (m_bSocketConnected ? "已连接" : "未连接");
+	{
+		std::lock_guard<std::mutex> lock(m_monitorMutex);
+		oss << "，被动Done=" << m_nMonitorDone
+			<< "，原始Done=" << m_nMonitorDoneRaw
+			<< "，robot_ms=" << m_llMonitorRobotMs
+			<< "，pc_recv_ms=" << m_llMonitorPcRecvMs;
+		if (!m_sMonitorText.empty())
+		{
+			oss << "，监控=" << m_sMonitorText;
+		}
+	}
+	return oss.str();
 }
 
 // ===================== 连续运动与特殊程序上传 =====================
@@ -3214,10 +3258,18 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 	// This avoids invoking maketp.exe for every small jog command.
 	if (ctrl == nullptr || moveInfos.empty())
 	{
+		if (ctrl != nullptr)
+		{
+			ctrl->ClearLastRobotError();
+			ctrl->SetLastRobotError("FANUC固定TP运动失败：目标点为空");
+		}
 		return false;
 	}
+	ctrl->ClearLastRobotError();
 	if (moveInfos.size() != 1)
 	{
+		ctrl->SetLastRobotError(GetStr("FANUC固定TP运动失败：当前只支持单点调用，PointCount=%d",
+			static_cast<int>(moveInfos.size())));
 		if (ctrl->m_pRobotLog != nullptr)
 		{
 			ctrl->m_pRobotLog->write(LogColor::ERR,
@@ -3240,6 +3292,7 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 	const std::string localTpPath = FanucFixedMoveTpPath(ctrl->m_sRobotName, moveType);
 	if (localTpPath.empty())
 	{
+		ctrl->SetLastRobotError("FANUC固定TP运动失败：固定TP不存在，Program=" + programName);
 		if (ctrl->m_pRobotLog != nullptr)
 		{
 			ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC 固定TP不存在：%s.tp", programName.c_str());
@@ -3253,6 +3306,8 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 
 	if (!ctrl->SetTpSpeed(speed))
 	{
+		ctrl->SetLastRobotError(GetStr("FANUC固定TP运动失败：设置速度失败，Speed=%d，%s",
+			speed, ctrl->GetRobotStatusText().c_str()));
 		if (ctrl->m_pRobotLog != nullptr)
 		{
 			ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC 固定TP运动设置速度失败：%d", speed);
@@ -3284,6 +3339,7 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 	}
 	if (!setTargetOk)
 	{
+		ctrl->SetLastRobotError("FANUC固定TP运动失败：设置PR[1]失败，Program=" + programName + "，" + ctrl->GetRobotStatusText());
 		if (ctrl->m_pRobotLog != nullptr)
 		{
 			ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC 固定TP运动设置PR[1]失败：%s", programName.c_str());
@@ -3299,6 +3355,7 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 		const std::string remoteTpPath = "/md/" + programName + ".tp";
 		if (ctrl->UploadFile(localTpPath, remoteTpPath) != 0)
 		{
+			ctrl->SetLastRobotError("FANUC固定TP运动失败：上传TP失败，Remote=" + remoteTpPath + "，" + ctrl->GetRobotStatusText());
 			if (ctrl->m_pRobotLog != nullptr)
 			{
 				ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC 固定TP上传失败：%s", remoteTpPath.c_str());
@@ -3314,6 +3371,7 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 
 	if (!ctrl->SetIntVar(93, 0))
 	{
+		ctrl->SetLastRobotError("FANUC固定TP运动失败：初始化R[93]失败，Program=" + programName + "，" + ctrl->GetRobotStatusText());
 		if (ctrl->m_pRobotLog != nullptr)
 		{
 			ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC 固定TP运动初始化 R[93] 失败：%s", programName.c_str());
@@ -3323,6 +3381,7 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 
 	if (!ctrl->CallJob(programName))
 	{
+		ctrl->SetLastRobotError("FANUC固定TP运动失败：启动程序失败，Program=" + programName + "，" + ctrl->GetRobotStatusText());
 		if (ctrl->m_pRobotLog != nullptr)
 		{
 			ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC TP运动启动失败：%s", programName.c_str());

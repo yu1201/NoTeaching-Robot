@@ -27,6 +27,8 @@ public:
 	// 初始化与控制连接：机器人侧S4作为TCP服务器，上位机作为客户端请求/应答。
 	bool InitSocket(const char* ip, u_short Port, bool ifRecode = false) override;
 	bool CloseSocket() override;
+	bool IsConnected() override;
+	std::string GetRobotStatusText() override;
 	bool InitRobotDriver(std::string strUnitName) override;
 
 	// 主动状态读取：通过控制socket实时请求机器人数据，会占用S4控制通道。
@@ -102,8 +104,8 @@ public:
 
 	// 机器人基础控制：当前大多通过常驻服务命令转发，未实现的命令由机器人侧返回或占位OK。
 	bool ServoOff();
-	bool ServoOn();
-	bool cleanAlarm();
+	bool ServoOn() override;
+	bool cleanAlarm() override;
 	bool SetSysMode(int mode);
 	bool SetTpSpeed(int speed);
 

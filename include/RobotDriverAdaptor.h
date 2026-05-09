@@ -5,6 +5,7 @@
 #include <string>   // 必须包含，否则无法使用std::string
 #include <iostream> // 用于输出string（cout）
 #include <sstream>  // 用于string和数字的转换（stringstream）
+#include <mutex>
 #include <vector>
 #include <KDL/frames.hpp>
 #include <KDL/chain.hpp>
@@ -36,6 +37,13 @@ public:
 
     virtual bool InitSocket(const char* ip, u_short Port, bool ifRecode = false);
     virtual bool CloseSocket();
+    virtual bool IsConnected();
+    virtual bool cleanAlarm();
+    virtual bool ServoOn();
+    void ClearLastRobotError();
+    void SetLastRobotError(const std::string& error);
+    std::string GetLastRobotError() const;
+    virtual std::string GetRobotStatusText();
     virtual double GetCurrentPos(int nAxisNo);
     virtual T_ROBOT_COORS GetCurrentPos();
     virtual double GetCurrentPulse(int nAxisNo);
@@ -114,7 +122,9 @@ public:
 	E_ROBOT_BRAND m_eRobotBrand;						//机器人品牌
 	//----------------------------------------KDL运动学部分------------------------------------//
 	KDL::Chain m_pFanucChain;
-	//----------------------------------------日志相关----------------------------------------//
+    //----------------------------------------日志相关----------------------------------------//
 	RobotLog* m_pRobotLog; // 日志实例（默认路径：Log/robot_log.txt，开启控制台输出）
     FtpClient* m_pFTP;
+    mutable std::mutex m_lastRobotErrorMutex;
+    std::string m_sLastRobotError;
 };

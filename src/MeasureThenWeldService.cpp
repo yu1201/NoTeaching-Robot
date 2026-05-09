@@ -13,6 +13,7 @@
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QSet>
+#include <QStringList>
 #include <QStringConverter>
 #include <QTextStream>
 
@@ -1925,6 +1926,27 @@ QString LinearCommandSpeedUnitText(RobotDriverAdaptor* pRobotDriver)
         : QStringLiteral("mm/min");
 }
 
+QString RobotMotionStatusText(RobotDriverAdaptor* pRobotDriver)
+{
+    if (pRobotDriver == nullptr)
+    {
+        return QString();
+    }
+
+    QStringList details;
+    const std::string lastError = pRobotDriver->GetLastRobotError();
+    if (!lastError.empty())
+    {
+        details << QString("最近错误：%1").arg(QString::fromLocal8Bit(lastError.c_str()));
+    }
+    const std::string statusText = pRobotDriver->GetRobotStatusText();
+    if (!statusText.empty() && statusText != lastError)
+    {
+        details << QString("当前状态：%1").arg(QString::fromLocal8Bit(statusText.c_str()));
+    }
+    return details.join("；");
+}
+
 bool WaitRobotMotionDone(
     RobotDriverAdaptor* pRobotDriver,
     const QString& name,
@@ -1957,6 +1979,14 @@ bool WaitRobotMotionDone(
                 .arg(FANUC_MOTION_STATE_REG)
                 .arg(lastState)
                 .arg(doneOk ? 1 : 0));
+            if (!doneOk)
+            {
+                const QString detail = RobotMotionStatusText(pRobotDriver);
+                if (!detail.isEmpty())
+                {
+                    appendLog(QString("运动异常：%1，%2").arg(name, detail));
+                }
+            }
         }
         return doneOk;
     }
@@ -1965,6 +1995,14 @@ bool WaitRobotMotionDone(
     if (appendLog)
     {
         appendLog(QString("运动结束：%1, CheckRobotDone=%2").arg(name).arg(done));
+        if (done <= 0)
+        {
+            const QString detail = RobotMotionStatusText(pRobotDriver);
+            if (!detail.isEmpty())
+            {
+                appendLog(QString("运动异常：%1，%2").arg(name, detail));
+            }
+        }
     }
     return done > 0;
 }
@@ -2105,7 +2143,10 @@ bool MeasureThenWeldService::MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, 
     {
         if (appendLog)
         {
-            appendLog(QString("运动失败：%1").arg(name));
+            const QString detail = RobotMotionStatusText(pRobotDriver);
+            appendLog(detail.isEmpty()
+                ? QString("运动失败：%1").arg(name)
+                : QString("运动失败：%1，%2").arg(name, detail));
         }
         return false;
     }
@@ -2151,7 +2192,10 @@ bool MeasureThenWeldService::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, 
     {
         if (appendLog)
         {
-            appendLog(QString("直线运动失败：%1").arg(name));
+            const QString detail = RobotMotionStatusText(pRobotDriver);
+            appendLog(detail.isEmpty()
+                ? QString("直线运动失败：%1").arg(name)
+                : QString("直线运动失败：%1，%2").arg(name, detail));
         }
         return false;
     }
@@ -3342,14 +3386,20 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         const int ret = pRobotDriver->ContiMoveAny(moveInfos);
         if (ret != 0)
         {
-            error = QString("STEP焊接轨迹下发/启动失败：ret=%1").arg(ret);
+            const QString detail = RobotMotionStatusText(pRobotDriver);
+            error = detail.isEmpty()
+                ? QString("STEP焊接轨迹下发/启动失败：ret=%1").arg(ret)
+                : QString("STEP焊接轨迹下发/启动失败：ret=%1，%2").arg(ret).arg(detail);
             return false;
         }
 
         lastState = pRobotDriver->CheckRobotDone(100);
         if (lastState <= 0)
         {
-            error = QString("STEP焊接轨迹等待完成失败：CheckRobotDone=%1").arg(lastState);
+            const QString detail = RobotMotionStatusText(pRobotDriver);
+            error = detail.isEmpty()
+                ? QString("STEP焊接轨迹等待完成失败：CheckRobotDone=%1").arg(lastState)
+                : QString("STEP焊接轨迹等待完成失败：CheckRobotDone=%1，%2").arg(lastState).arg(detail);
             return false;
         }
         if (appendLog)

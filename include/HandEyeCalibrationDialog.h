@@ -12,6 +12,7 @@
 
 class QLabel;
 class QCloseEvent;
+class QDoubleSpinBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
@@ -53,6 +54,7 @@ private:
     bool UploadAutoCalibrationProgram();
     bool StartAutoCalibration();
     bool EnsureCameraReady(const QString& sceneName, Eigen::Vector3d* cameraPointOut = nullptr, QString* error = nullptr);
+    bool EnsureCameraStarted(const QString& sceneName, QString* error = nullptr);
     void OpenMatrixDialog();
 
     bool ReadLatestCameraPoint(Eigen::Vector3d& cameraPoint, QString* error = nullptr) const;
@@ -89,6 +91,7 @@ private:
     QLabel* m_pCalibrationPathLabel = nullptr;
     QLabel* m_pMatrixPathLabel = nullptr;
     QLabel* m_pReportPathLabel = nullptr;
+    QDoubleSpinBox* m_pAutoMoveSpeedSpin = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
     QPushButton* m_pUploadAutoProgramBtn = nullptr;
     QPushButton* m_pAutoCalibrationBtn = nullptr;

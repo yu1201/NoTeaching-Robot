@@ -59,6 +59,8 @@ private slots:
     void OpenCameraParamDialog();
     void FanucConnectTest();
     void FanucDisconnectTest();
+    void RobotClearAlarmTest();
+    void RobotSwitchStepMode();
     void FanucGetCurrentPosTest();
     void FanucGetCurrentPulseTest();
     void FanucCheckDoneTest();
@@ -85,6 +87,9 @@ private:
     void PrepareEmbeddedPage(QWidget* page);
     void RefreshRobotSelectorUi();
     void RefreshRobotOperationAvailability();
+    void RefreshDashboardConnectionState();
+    bool IsCurrentRobotConnected();
+    void ToggleCurrentRobotConnection();
     int CurrentRobotUnitIndex() const;
     const T_CONTRAL_UNIT* CurrentContralUnit() const;
     bool IsRobotUnitDriverReady(int unitIndex, QString* issueText = nullptr) const;
@@ -166,6 +171,9 @@ private:
     QPushButton* m_pAuthRegisterModeBtn;
     QPushButton* m_pAuthSubmitBtn;
     QPushButton* m_pGuestLoginBtn;
+    QPushButton* m_pDashboardConnectBtn;
+    QPushButton* m_pDashboardClearAlarmBtn;
+    QPushButton* m_pDashboardModeBtn;
     QAction* m_pAccountManagementAction = nullptr;
     QList<QPointer<QWidget>> m_robotOperationWidgets;
     QPushButton* m_pCameraParamBtn;
@@ -176,6 +184,7 @@ private:
     PreciseMeasureEditDialog* m_pPreciseMeasureEditPage;
     WeldSeamCompDialog* m_pWeldSeamCompPage;
     CameraParamDialog* m_pCameraParamPage;
+    QString m_sCameraParamPageRobotName;
     RobotJogDialog* m_pRobotJogPage;
     bool m_bFanucMovlForward;
     bool m_bFanucMovlRunning;

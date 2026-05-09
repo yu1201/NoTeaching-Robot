@@ -14,7 +14,9 @@
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -30,12 +32,14 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QTextDocument>
+#include <QTextStream>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <thread>
 
 namespace
@@ -47,6 +51,11 @@ constexpr int kHandEyeAutoDoneStep = 999;
 constexpr int kHandEyeAutoAbortValue = -1;
 constexpr double kHandEyeAutoMoveSpeedMmPerMin = 500.0;
 constexpr int kHandEyeAutoMoveDoneTimeoutMs = 180000;
+constexpr int kHandEyeAutoNoMotionTimeoutMs = 8000;
+constexpr double kHandEyeAutoMoveDetectMm = 0.05;
+constexpr double kHandEyeAutoRotateDetectDeg = 0.05;
+constexpr double kHandEyeAutoArrivePositionToleranceMm = 2.0;
+constexpr double kHandEyeAutoArriveRotationToleranceDeg = 3.0;
 constexpr const char* kHandEyeAutoProgramName = "FANUC_HECALIB";
 constexpr int kHandEyeRobotCheckStartPrIndex = 79;
 constexpr int kHandEyeRobotCheckPrIndex = 80;
@@ -171,6 +180,32 @@ bool IsFinitePose(const T_ROBOT_COORS& pose)
         && std::isfinite(pose.dRZ);
 }
 
+double PoseTranslationDistance(const T_ROBOT_COORS& a, const T_ROBOT_COORS& b)
+{
+    const double dx = a.dX - b.dX;
+    const double dy = a.dY - b.dY;
+    const double dz = a.dZ - b.dZ;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+double AngleDiffDeg(double a, double b)
+{
+    double diff = std::fmod(a - b + 180.0, 360.0);
+    if (diff < 0.0)
+    {
+        diff += 360.0;
+    }
+    return diff - 180.0;
+}
+
+double PoseRotationDistance(const T_ROBOT_COORS& a, const T_ROBOT_COORS& b)
+{
+    const double drx = AngleDiffDeg(a.dRX, b.dRX);
+    const double dry = AngleDiffDeg(a.dRY, b.dRY);
+    const double drz = AngleDiffDeg(a.dRZ, b.dRZ);
+    return std::sqrt(drx * drx + dry * dry + drz * drz);
+}
+
 bool ReadAutoCalibrationTarget(
     RobotDriverAdaptor* driver,
     int varIndex,
@@ -193,7 +228,10 @@ bool ReadAutoCalibrationTarget(
     {
         if (error != nullptr)
         {
-            *error = QString("读取位置变量[%1]失败，返回码=%2。").arg(varIndex).arg(ret);
+            const QString detail = QString::fromLocal8Bit(driver->GetLastRobotError().c_str());
+            *error = detail.isEmpty()
+                ? QString("读取位置变量[%1]失败，返回码=%2。").arg(varIndex).arg(ret)
+                : QString("读取位置变量[%1]失败，返回码=%2，%3").arg(varIndex).arg(ret).arg(detail);
         }
         return false;
     }
@@ -220,7 +258,9 @@ bool WaitGenericRobotDone(
     RobotDriverAdaptor* driver,
     int timeoutMs,
     int pollIntervalMs,
-    QString* error)
+    QString* error,
+    const T_ROBOT_COORS* targetPose = nullptr,
+    const std::function<void(const QString&)>& progressLog = {})
 {
     if (driver == nullptr)
     {
@@ -238,8 +278,13 @@ bool WaitGenericRobotDone(
 
     const auto startTime = std::chrono::steady_clock::now();
     bool seenRunning = false;
+    bool movementSeen = false;
+    const T_ROBOT_COORS startPose = driver->GetCurrentPos();
+    T_ROBOT_COORS lastPose = startPose;
+    const bool hasStartPose = IsFinitePose(startPose);
     int stableDoneCount = 0;
     int lastState = -1;
+    int lastLogSecond = -1;
 
     while (true)
     {
@@ -259,12 +304,90 @@ bool WaitGenericRobotDone(
         {
             seenRunning = true;
             stableDoneCount = 0;
+
+            const T_ROBOT_COORS currentPose = driver->GetCurrentPos();
+            if (IsFinitePose(currentPose))
+            {
+                lastPose = currentPose;
+                if (hasStartPose)
+                {
+                    const double moveDelta = PoseTranslationDistance(startPose, currentPose);
+                    const double rotateDelta = PoseRotationDistance(startPose, currentPose);
+                    if (moveDelta >= kHandEyeAutoMoveDetectMm || rotateDelta >= kHandEyeAutoRotateDetectDeg)
+                    {
+                        movementSeen = true;
+                    }
+                }
+            }
+
+            const int elapsedSecond = elapsedMs / 1000;
+            if (progressLog && elapsedSecond != lastLogSecond)
+            {
+                lastLogSecond = elapsedSecond;
+                progressLog(QString("等待机器人到位：已运行 %1 s，状态=%2，当前位置=%3")
+                    .arg(elapsedSecond)
+                    .arg(lastState)
+                    .arg(FormatPoseSummary(lastPose)));
+            }
+
+            if (hasStartPose
+                && !movementSeen
+                && elapsedMs >= kHandEyeAutoNoMotionTimeoutMs)
+            {
+                if (error != nullptr)
+                {
+                    *error = QString("机器人程序已进入运行态，但 %1 ms 内当前位置未变化。当前状态：%2")
+                        .arg(kHandEyeAutoNoMotionTimeoutMs)
+                        .arg(QString::fromLocal8Bit(driver->GetRobotStatusText().c_str()));
+                }
+                return false;
+            }
         }
         else if (seenRunning || elapsedMs >= 1000)
         {
             ++stableDoneCount;
             if (stableDoneCount >= 2)
             {
+                if (targetPose != nullptr)
+                {
+                    const T_ROBOT_COORS finalPose = driver->GetCurrentPos();
+                    if (!IsFinitePose(finalPose))
+                    {
+                        if (error != nullptr)
+                        {
+                            *error = "机器人状态已停止，但读取当前位置无效，无法确认是否真正到位。";
+                        }
+                        return false;
+                    }
+
+                    const double positionError = PoseTranslationDistance(finalPose, *targetPose);
+                    const double rotationError = PoseRotationDistance(finalPose, *targetPose);
+                    if (progressLog)
+                    {
+                        progressLog(QString("到位位置复核：XYZ误差=%1 mm，姿态误差=%2 deg；目标=%3；当前=%4")
+                            .arg(positionError, 0, 'f', 3)
+                            .arg(rotationError, 0, 'f', 3)
+                            .arg(FormatPoseSummary(*targetPose))
+                            .arg(FormatPoseSummary(finalPose)));
+                    }
+
+                    if (positionError > kHandEyeAutoArrivePositionToleranceMm
+                        || rotationError > kHandEyeAutoArriveRotationToleranceDeg)
+                    {
+                        if (error != nullptr)
+                        {
+                            *error = QString("机器人状态已停止，但当前位置未到目标。XYZ误差=%1 mm(阈值%2)，姿态误差=%3 deg(阈值%4)。目标=%5；当前=%6；当前状态：%7")
+                                .arg(positionError, 0, 'f', 3)
+                                .arg(kHandEyeAutoArrivePositionToleranceMm, 0, 'f', 3)
+                                .arg(rotationError, 0, 'f', 3)
+                                .arg(kHandEyeAutoArriveRotationToleranceDeg, 0, 'f', 3)
+                                .arg(FormatPoseSummary(*targetPose))
+                                .arg(FormatPoseSummary(finalPose))
+                                .arg(QString::fromLocal8Bit(driver->GetRobotStatusText().c_str()));
+                        }
+                        return false;
+                    }
+                }
                 return true;
             }
         }
@@ -273,7 +396,9 @@ bool WaitGenericRobotDone(
         {
             if (error != nullptr)
             {
-                *error = QString("等待机器人到位超时，最后状态=%1。").arg(lastState);
+                *error = QString("等待机器人到位超时，最后状态=%1，当前状态：%2")
+                    .arg(lastState)
+                    .arg(QString::fromLocal8Bit(driver->GetRobotStatusText().c_str()));
             }
             return false;
         }
@@ -395,6 +520,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
         "QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 8px 14px; }"
         "QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
         "QLineEdit { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 8px; padding: 6px 8px; min-width: 88px; }"
+        "QDoubleSpinBox { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 8px; padding: 6px 8px; min-width: 150px; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
         "QScrollArea { border: none; }"
         "QLabel { color: #BACBD1; }");
@@ -410,7 +536,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     rootLayout->addWidget(hintLabel);
 
     QGroupBox* baseGroup = new QGroupBox("基础信息 / 运行日志");
-    baseGroup->setMaximumHeight(168);
+    baseGroup->setMaximumHeight(188);
     QHBoxLayout* baseLayout = new QHBoxLayout(baseGroup);
     baseLayout->setSpacing(10);
 
@@ -426,6 +552,25 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     m_pAutoStateLabel = new QLabel("自动标定状态：待启动");
     m_pAutoStateLabel->setStyleSheet("font-weight: bold; color: #F3D37A;");
     infoLayout->addWidget(m_pAutoStateLabel);
+
+    QWidget* autoSpeedRow = new QWidget(infoPanel);
+    QHBoxLayout* autoSpeedLayout = new QHBoxLayout(autoSpeedRow);
+    autoSpeedLayout->setContentsMargins(0, 0, 0, 0);
+    autoSpeedLayout->setSpacing(8);
+    QLabel* autoSpeedLabel = new QLabel("自动标定速度：");
+    m_pAutoMoveSpeedSpin = new QDoubleSpinBox(autoSpeedRow);
+    m_pAutoMoveSpeedSpin->setRange(1.0, 10000.0);
+    m_pAutoMoveSpeedSpin->setDecimals(1);
+    m_pAutoMoveSpeedSpin->setSingleStep(50.0);
+    m_pAutoMoveSpeedSpin->setValue(kHandEyeAutoMoveSpeedMmPerMin);
+    m_pAutoMoveSpeedSpin->setSuffix(" mm/min");
+    m_pAutoMoveSpeedSpin->setAlignment(Qt::AlignRight);
+    m_pAutoMoveSpeedSpin->setKeyboardTracking(false);
+    m_pAutoMoveSpeedSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    autoSpeedLayout->addWidget(autoSpeedLabel);
+    autoSpeedLayout->addWidget(m_pAutoMoveSpeedSpin);
+    autoSpeedLayout->addStretch(1);
+    infoLayout->addWidget(autoSpeedRow);
 
     m_pCalibrationPathLabel = new QLabel("标定文件：");
     m_pCalibrationPathLabel->setWordWrap(true);
@@ -932,6 +1077,32 @@ bool HandEyeCalibrationDialog::EnsureCameraReady(const QString& sceneName, Eigen
         *error = QString("%1：相机已尝试打开，但 3 秒内未收到有效三维点：%2").arg(sceneName, latestError);
     }
     return false;
+}
+
+bool HandEyeCalibrationDialog::EnsureCameraStarted(const QString& sceneName, QString* error)
+{
+    if (!m_startCamera)
+    {
+        if (error != nullptr)
+        {
+            *error = "未配置自动开相机回调，无法启动相机接收。";
+        }
+        return false;
+    }
+
+    QString cameraIP;
+    if (!m_startCamera(cameraIP))
+    {
+        if (error != nullptr)
+        {
+            *error = "自动打开相机失败，请检查 CameraParam.ini 中的设备地址。";
+        }
+        return false;
+    }
+
+    AppendLog(QString("%1：已触发相机启动：%2，本步骤不等待三维点有效。")
+        .arg(sceneName, cameraIP));
+    return true;
 }
 
 bool HandEyeCalibrationDialog::ComputeAndSaveMatrix()
@@ -1515,6 +1686,10 @@ void HandEyeCalibrationDialog::SetAutoCalibrationUiRunning(bool running)
         m_pAutoCalibrationBtn->setEnabled(!running);
         m_pAutoCalibrationBtn->setText(running ? "自动标定进行中..." : "自动标定 变量10~16");
     }
+    if (m_pAutoMoveSpeedSpin != nullptr)
+    {
+        m_pAutoMoveSpeedSpin->setEnabled(!running);
+    }
     if (running)
     {
         SetAutoCalibrationStateText("自动标定状态：已启动，等待机器人到达位置变量[10]，已完成 0/6 组");
@@ -1677,7 +1852,7 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
         return false;
     }
 
-    if (!EnsureCameraReady("自动标定前检查", nullptr, &error))
+    if (!EnsureCameraStarted("自动标定前检查", &error))
     {
         m_bAutoCalibrationRunning.store(false);
         QMessageBox::warning(this, "手眼标定", error);
@@ -1700,13 +1875,17 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
         targets.push_back(target);
     }
 
+    const double autoMoveSpeedMmPerMin = (m_pAutoMoveSpeedSpin != nullptr)
+        ? m_pAutoMoveSpeedSpin->value()
+        : kHandEyeAutoMoveSpeedMmPerMin;
+
     SetAutoCalibrationUiRunning(true);
     AppendLog(QString("自动标定已启动：机器人=%1，已读取位置变量[10]~[16]，MOVL速度=%2 mm/min。")
         .arg(m_robotName)
-        .arg(kHandEyeAutoMoveSpeedMmPerMin, 0, 'f', 1));
+        .arg(autoMoveSpeedMmPerMin, 0, 'f', 1));
 
     QPointer<HandEyeCalibrationDialog> self(this);
-    std::thread([self, driver, targets]()
+    std::thread([self, driver, targets, autoMoveSpeedMmPerMin]()
         {
             using namespace std::chrono_literals;
 
@@ -1801,19 +1980,22 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
 
                 const bool moveOk = driver->MoveByJob(
                     target.target,
-                    T_ROBOT_MOVE_SPEED(kHandEyeAutoMoveSpeedMmPerMin, 0.0, 0.0),
+                    T_ROBOT_MOVE_SPEED(autoMoveSpeedMmPerMin, 0.0, 0.0),
                     driver->m_nExternalAxleType,
                     "MOVL",
                     1,
                     config);
                 if (!moveOk)
                 {
-                    finish(QString("自动标定移动失败：%1。").arg(DescribeAutoCalibrationPoint(target.varIndex)), true, false);
+                    const QString detail = QString::fromLocal8Bit(driver->GetLastRobotError().c_str());
+                    finish(QString("自动标定移动失败：%1。%2")
+                        .arg(DescribeAutoCalibrationPoint(target.varIndex))
+                        .arg(detail.isEmpty() ? QString() : QString("原因：%1").arg(detail)), true, false);
                     return;
                 }
 
                 QString waitError;
-                if (!WaitGenericRobotDone(driver, kHandEyeAutoMoveDoneTimeoutMs, 100, &waitError))
+                if (!WaitGenericRobotDone(driver, kHandEyeAutoMoveDoneTimeoutMs, 100, &waitError, &target.target, postLog))
                 {
                     finish(QString("自动标定等待到位失败：%1，%2").arg(DescribeAutoCalibrationPoint(target.varIndex), waitError), true, false);
                     return;
@@ -2209,5 +2391,14 @@ void HandEyeCalibrationDialog::AppendLog(const QString& text)
     if (m_pLogText != nullptr)
     {
         m_pLogText->appendPlainText(text);
+    }
+
+    QDir().mkpath("Log");
+    QFile logFile("Log/HandEyeCalibrationLog.txt");
+    if (logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+    {
+        QTextStream stream(&logFile);
+        stream << "[" << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz") << "] "
+               << text << '\n';
     }
 }

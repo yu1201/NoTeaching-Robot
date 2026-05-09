@@ -571,6 +571,44 @@ bool RobotDriverAdaptor::CloseSocket()
     return true;
 }
 
+bool RobotDriverAdaptor::IsConnected()
+{
+    return false;
+}
+
+bool RobotDriverAdaptor::cleanAlarm()
+{
+    return false;
+}
+
+bool RobotDriverAdaptor::ServoOn()
+{
+    return false;
+}
+
+void RobotDriverAdaptor::ClearLastRobotError()
+{
+    std::lock_guard<std::mutex> lock(m_lastRobotErrorMutex);
+    m_sLastRobotError.clear();
+}
+
+void RobotDriverAdaptor::SetLastRobotError(const std::string& error)
+{
+    std::lock_guard<std::mutex> lock(m_lastRobotErrorMutex);
+    m_sLastRobotError = error;
+}
+
+std::string RobotDriverAdaptor::GetLastRobotError() const
+{
+    std::lock_guard<std::mutex> lock(m_lastRobotErrorMutex);
+    return m_sLastRobotError;
+}
+
+std::string RobotDriverAdaptor::GetRobotStatusText()
+{
+    return GetLastRobotError();
+}
+
 double RobotDriverAdaptor::GetCurrentPos(int nAxisNo)
 {
     return 0;

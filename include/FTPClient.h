@@ -31,7 +31,7 @@ public:
     bool createRemoteDirRecursive(const std::string& remoteDir);
 
     // 核心FTP操作（真实实现）
-    bool uploadFile(const std::string& localFilePath, const std::string& remoteFilePath);
+    bool uploadFile(const std::string& localFilePath, const std::string& remoteFilePath, bool deleteBeforeUpload = true);
     bool downloadFile(const std::string& remoteFilePath, const std::string& localFilePath);
     bool deleteFile(const std::string& remoteFilePath);
 

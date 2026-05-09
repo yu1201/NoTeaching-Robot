@@ -264,6 +264,7 @@ struct T_ROBOT_MOVE_INFO
 	T_ROBOT_COORS tCoord;	//坐标
 	T_ANGLE_PULSE tPulse;	//坐标
 	int nMoveType = MOVJ;	//移动方式
+	int nPosType = POSVAR;	//目标变量类型：POSVAR 使用 CARTPOS，PULSEVAR 使用 AXISPOS
 	T_ROBOT_MOVE_SPEED tSpeed;	//移动速度
 	int nMoveDevice = -1;
 	int nTrackNo = -1;

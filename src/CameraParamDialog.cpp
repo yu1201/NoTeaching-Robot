@@ -26,11 +26,13 @@
 
 CameraParamDialog::CameraParamDialog(
     ContralUnit* pContralUnit,
+    const QString& robotName,
     StartCameraFunc startCamera,
     StopCameraFunc stopCamera,
     QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
+    , m_robotName(robotName.trimmed().isEmpty() ? QString("RobotA") : robotName.trimmed())
     , m_startCamera(startCamera)
     , m_stopCamera(stopCamera)
 {
@@ -64,8 +66,9 @@ CameraParamDialog::CameraParamDialog(
     QVBoxLayout* baseLayout = new QVBoxLayout(baseGroup);
     QHBoxLayout* robotLayout = new QHBoxLayout();
     robotLayout->addWidget(new QLabel("机器人："));
-    m_pRobotCombo = new QComboBox();
-    robotLayout->addWidget(m_pRobotCombo, 1);
+    QLabel* robotNameLabel = new QLabel(m_robotName);
+    robotNameLabel->setStyleSheet("QLabel { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 8px; padding: 6px 10px; min-height: 26px; }");
+    robotLayout->addWidget(robotNameLabel, 1);
     robotLayout->addWidget(new QLabel("相机："));
     m_pCameraCombo = new QComboBox();
     robotLayout->addWidget(m_pCameraCombo, 1);
@@ -155,18 +158,14 @@ CameraParamDialog::CameraParamDialog(
     contentSplitter->setSizes({ 620, 360 });
     rootLayout->addWidget(contentSplitter, 1);
 
-    connect(m_pRobotCombo, &QComboBox::currentIndexChanged, this, [this]()
-        {
-            LoadCameraList();
-            UpdateCurrentCameraInfo();
-        });
     connect(m_pCameraCombo, &QComboBox::currentIndexChanged, this, [this]() { UpdateCurrentCameraInfo(); });
     connect(handEyeBtn, &QPushButton::clicked, this, [this]() { OpenHandEyeDialog(); });
     connect(handEyeCalibrationBtn, &QPushButton::clicked, this, [this]() { OpenHandEyeCalibrationDialog(); });
     connect(reloadBtn, &QPushButton::clicked, this, [this]() { LoadCameraParam(); });
     connect(saveBtn, &QPushButton::clicked, this, [this]() { SaveCameraParam(); });
 
-    LoadRobotList();
+    LoadCameraList();
+    UpdateCurrentCameraInfo();
 }
 
 void CameraParamDialog::closeEvent(QCloseEvent* event)
@@ -185,21 +184,6 @@ void CameraParamDialog::closeEvent(QCloseEvent* event)
     {
         event->ignore();
     }
-}
-
-void CameraParamDialog::LoadRobotList()
-{
-    m_pRobotCombo->clear();
-    const QVector<RobotDataHelper::RobotInfo> robots = RobotDataHelper::LoadRobotList(m_pContralUnit);
-    for (const RobotDataHelper::RobotInfo& info : robots)
-    {
-        if (m_pRobotCombo->findData(info.robotName) < 0)
-        {
-            m_pRobotCombo->addItem(info.displayName, info.robotName);
-        }
-    }
-    LoadCameraList();
-    UpdateCurrentCameraInfo();
 }
 
 void CameraParamDialog::LoadCameraList()
@@ -261,7 +245,7 @@ void CameraParamDialog::OpenHandEyeCalibrationDialog()
 
 QString CameraParamDialog::CurrentRobotName() const
 {
-    return m_pRobotCombo != nullptr ? m_pRobotCombo->currentData().toString() : QString("RobotA");
+    return m_robotName.isEmpty() ? QString("RobotA") : m_robotName;
 }
 
 QString CameraParamDialog::CurrentCameraSection() const

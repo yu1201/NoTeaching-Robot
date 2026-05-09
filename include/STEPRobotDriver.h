@@ -25,12 +25,12 @@ inline const char* GetModeText(int nMode)
 {
 	switch (nMode)
 	{
-	case 0:      return "手动";
-	case 1:     return "自动";
-	case 2:     return "外部自动";
-	case 3:     return "开始";
-	case 4:     return "停止";
-	case 5:     return "停止点动";
+	case 1:      return "手动";
+	case 2:      return "自动";
+	case 3:      return "外部自动";
+	case 4:      return "开始";
+	case 23:     return "停止";
+	case 100:    return "停止点动";
 	default:     return "未知错误";
 	}
 }
@@ -47,6 +47,8 @@ public:
 
 	bool InitSocket(const char* ip, u_short Port, bool ifRecode = false) override;
 	bool CloseSocket() override;
+	bool IsConnected() override;
+	std::string GetRobotStatusText() override;
 	bool InitRobotDriver(std::string strUnitName) override;
 
 
@@ -78,11 +80,11 @@ public:
 	int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath) override;
 
 	bool ServoOff();
-	bool ServoOn();
+	bool ServoOn() override;
 
 	//清除报警信息+
-	bool cleanAlarm();
-	//设置当前模式 0-手动模式，1-自动模式，2-远程模式，-1-报错
+	bool cleanAlarm() override;
+	//设置当前模式：1-手动，2-自动，3-外部自动，4-开始，23-停止。
 	bool SetSysMode(int mode);
 	//设置示教器速度
 	bool SetTpSpeed(int speed) override;//设置TP示教器上的速度%
@@ -94,7 +96,7 @@ public:
 	std::string GetUserProject();
 
 	//加载程序 设置变量前要先加载程序
-	bool LoadUserProgram(std::string projName, std::string progName);
+	bool LoadUserProgram(std::string projName, std::string progName, bool forceReload = false);
 	//卸载程序 卸载的是目前加载的程序
 	bool UnLoadUserProgramer();
 
@@ -165,6 +167,8 @@ public:
 
 	HANDLE m_hMutex;
 	bool m_bLocalDebugMark;
+	bool m_bSocketConnected;
+	std::string m_sStepProjectName;
 	RobotComClient* m_pSTEPRobotClient;
 
 };
