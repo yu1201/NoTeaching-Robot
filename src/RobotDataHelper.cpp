@@ -12,6 +12,7 @@
 #include <QRegularExpression>
 #include <QStringConverter>
 #include <QTextStream>
+#include <algorithm>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -76,6 +77,175 @@ QString DecodeConfigTextForRobotData(const std::string& text)
         return fallbackUtf8Text;
     }
     return QString::fromLocal8Bit(bytes.constData(), bytes.size());
+}
+
+QString ReadTextFileSmart(const QString& path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        return QString();
+    }
+    const QByteArray bytes = file.readAll();
+    QString text = QString::fromUtf8(bytes);
+    if (text.contains(QChar(0xfffd)))
+    {
+        text = QString::fromLocal8Bit(bytes);
+    }
+    text.replace("\r\n", "\n");
+    text.replace('\r', '\n');
+    return text;
+}
+
+QStringList ExtractIniSectionLines(const QString& content, const QString& sectionName)
+{
+    QStringList result;
+    bool inSection = false;
+    const QStringList lines = content.split('\n');
+    for (const QString& line : lines)
+    {
+        const QString trimmed = line.trimmed();
+        if (trimmed.startsWith('[') && trimmed.endsWith(']'))
+        {
+            const QString currentSection = trimmed.mid(1, trimmed.size() - 2).trimmed();
+            if (inSection && currentSection.compare(sectionName, Qt::CaseInsensitive) != 0)
+            {
+                break;
+            }
+            inSection = currentSection.compare(sectionName, Qt::CaseInsensitive) == 0;
+            continue;
+        }
+        if (inSection)
+        {
+            result << line;
+        }
+    }
+    while (!result.isEmpty() && result.last().trimmed().isEmpty())
+    {
+        result.removeLast();
+    }
+    return result;
+}
+
+QStringList ZeroIniSectionValues(const QStringList& lines)
+{
+    QStringList result;
+    for (const QString& line : lines)
+    {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || trimmed.startsWith('#') || trimmed.startsWith(';'))
+        {
+            result << line;
+            continue;
+        }
+        const int equalPos = line.indexOf('=');
+        if (equalPos <= 0)
+        {
+            result << line;
+            continue;
+        }
+        result << QString("%1=0").arg(line.left(equalPos).trimmed());
+    }
+    return result;
+}
+
+QStringList DefaultScanParamLines()
+{
+    return QStringList()
+        << "#0号测量位置"
+        << "#位置软极限"
+        << "YMaxCar=0"
+        << "YMinCar=0"
+        << "YMaxRobot=0"
+        << "YMinRobot=0"
+        << "XMax=0"
+        << "XMin=0"
+        << "ZMax=0"
+        << "ZMin=0"
+        << ""
+        << "#速度参数"
+        << "ScanSpeed=0"
+        << "RunSpeed=0"
+        << "CameraReadFps=0"
+        << "CameraTimeOffsetMs=0"
+        << "dAcc=0"
+        << "dDec=0"
+        << "UseComputedScanSafe=0"
+        << "ScanSafeOffsetDistanceMm=0"
+        << "ScanSafeGunAngleDeg=0"
+        << "ScanSafeXDirection=0"
+        << "ScanSafeLiftHeightMm=0"
+        << "ScanSafeFlipWarnThresholdDeg=0"
+        << ""
+        << "#下枪安全位置"
+        << "StartSafePulseNum=0"
+        << "StartSafePulse0.nS=0"
+        << "StartSafePulse0.nL=0"
+        << "StartSafePulse0.nU=0"
+        << "StartSafePulse0.nR=0"
+        << "StartSafePulse0.nB=0"
+        << "StartSafePulse0.nT=0"
+        << "StartSafePulse0.lBX=0"
+        << "StartSafePulse0.lBY=0"
+        << "StartSafePulse0.lBZ=0"
+        << ""
+        << "#机器人扫描起点位置姿态"
+        << "StartPulse.nS=0"
+        << "StartPulse.nL=0"
+        << "StartPulse.nU=0"
+        << "StartPulse.nR=0"
+        << "StartPulse.nB=0"
+        << "StartPulse.nT=0"
+        << "StartPulse.lBX=0"
+        << "StartPulse.lBY=0"
+        << "StartPulse.lBZ=0"
+        << "StartPos.X=0"
+        << "StartPos.Y=0"
+        << "StartPos.Z=0"
+        << "StartPos.RX=0"
+        << "StartPos.RY=0"
+        << "StartPos.RZ=0"
+        << "StartPos.BX=0"
+        << "StartPos.BY=0"
+        << "StartPos.BZ=0"
+        << ""
+        << "#机器人扫描终点位置姿态"
+        << "EndPos.X=0"
+        << "EndPos.Y=0"
+        << "EndPos.Z=0"
+        << "EndPos.RX=0"
+        << "EndPos.RY=0"
+        << "EndPos.RZ=0"
+        << "EndPos.BX=0"
+        << "EndPos.BY=0"
+        << "EndPos.BZ=0"
+        << ""
+        << "#收枪安全位置"
+        << "EndSafePulseNum=0"
+        << "EndSafePulse0.nS=0"
+        << "EndSafePulse0.nL=0"
+        << "EndSafePulse0.nU=0"
+        << "EndSafePulse0.nR=0"
+        << "EndSafePulse0.nB=0"
+        << "EndSafePulse0.nT=0"
+        << "EndSafePulse0.lBX=0"
+        << "EndSafePulse0.lBY=0"
+        << "EndSafePulse0.lBZ=0";
+}
+
+QStringList DefaultWeldParamLines()
+{
+    return QStringList()
+        << "WorldCoorDir=0"
+        << "RobotInstallDir=0"
+        << "GunAngle=0"
+        << "GunLaserAngle=0"
+        << "GunCameraAngle=0"
+        << "NormalWeldRx=0"
+        << "NormalWeldRy=0"
+        << "CornerTransitionLeadDis=0"
+        << "WeldStartSkipDis=0"
+        << "WeldEndSkipDis=0";
 }
 }
 
@@ -471,8 +641,147 @@ QString RobotDataHelper::PreciseMeasureParamPath(const QString& robotName)
     return BuildProjectPath(QString("Data/%1/PreciseMeasureParam.ini").arg(robotName));
 }
 
+QString RobotDataHelper::WeldLineParamPath(const QString& robotName)
+{
+    return BuildProjectPath(QString("Data/%1/WeldLineParam.ini").arg(robotName));
+}
+
+QString RobotDataHelper::MeasureWeldParamPath(const QString& robotName)
+{
+    return BuildProjectPath(QString("Data/%1/MeasureWeldParam.ini").arg(robotName));
+}
+
+QString RobotDataHelper::MeasureWeldScanSectionName(int groupIndex)
+{
+    return QString("MeasureGroup%1.Scan").arg(std::max(0, groupIndex));
+}
+
+QString RobotDataHelper::MeasureWeldWeldSectionName(int groupIndex)
+{
+    return QString("MeasureGroup%1.Weld").arg(std::max(0, groupIndex));
+}
+
+bool RobotDataHelper::EnsureMeasureWeldParamFile(const QString& robotName, QString* error)
+{
+    const QString newPath = MeasureWeldParamPath(robotName);
+    if (QFileInfo::exists(newPath))
+    {
+        return true;
+    }
+
+    const QString precisePath = PreciseMeasureParamPath(robotName);
+    const QString weldPath = WeldLineParamPath(robotName);
+    const QString preciseText = ReadTextFileSmart(precisePath);
+    const QString weldText = ReadTextFileSmart(weldPath);
+    if (preciseText.isEmpty() && weldText.isEmpty())
+    {
+        if (error != nullptr)
+        {
+            *error = QString("未找到可迁移的参数文件：%1 / %2").arg(precisePath, weldPath);
+        }
+        return false;
+    }
+
+    COPini preciseIni;
+    int groupCount = 1;
+    int useGroupNo = 0;
+    if (preciseIni.SetFileName(precisePath.toLocal8Bit().constData()))
+    {
+        preciseIni.SetSectionName("ALLPostion");
+        preciseIni.ReadString(false, "ALLPostionNum", &groupCount);
+        preciseIni.ReadString(false, "UsePostionNo", &useGroupNo);
+    }
+    groupCount = std::max(1, groupCount);
+    if (useGroupNo < 0 || useGroupNo >= groupCount)
+    {
+        useGroupNo = 0;
+    }
+
+    QStringList output;
+    output << "[MeasureWeldGroups]";
+    output << QString("GroupCount=%1").arg(groupCount);
+    output << QString("UseGroupNo=%1").arg(useGroupNo);
+    for (int index = 0; index < groupCount; ++index)
+    {
+        output << QString("Group%1Name=参数组%2").arg(index).arg(index + 1);
+    }
+    output << "";
+
+    QStringList weldLines = ExtractIniSectionLines(weldText, "WeldNormalParam0");
+    if (weldLines.isEmpty())
+    {
+        weldLines = DefaultWeldParamLines();
+    }
+    for (int index = 0; index < groupCount; ++index)
+    {
+        QStringList scanLines = ExtractIniSectionLines(preciseText, QString("Postion%1").arg(index));
+        if (scanLines.isEmpty())
+        {
+            scanLines = DefaultScanParamLines();
+        }
+        output << QString("[%1]").arg(MeasureWeldScanSectionName(index));
+        output << scanLines;
+        output << "";
+        output << QString("[%1]").arg(MeasureWeldWeldSectionName(index));
+        output << weldLines;
+        output << "";
+    }
+
+    QDir().mkpath(QFileInfo(newPath).absolutePath());
+    QFile file(newPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("创建测量焊接参数文件失败：%1").arg(newPath);
+        }
+        return false;
+    }
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    stream << output.join("\n") << "\n";
+    return true;
+}
+
+int RobotDataHelper::MeasureWeldCurrentGroupIndex(const QString& robotName, QString* error)
+{
+    if (!EnsureMeasureWeldParamFile(robotName, error))
+    {
+        return 0;
+    }
+    COPini ini;
+    const QString path = MeasureWeldParamPath(robotName);
+    if (!ini.SetFileName(path.toLocal8Bit().constData()))
+    {
+        if (error != nullptr)
+        {
+            *error = "打开测量焊接参数文件失败：" + path;
+        }
+        return 0;
+    }
+    int useNo = 0;
+    ini.SetSectionName("MeasureWeldGroups");
+    ini.ReadString(false, "UseGroupNo", &useNo);
+    return std::max(0, useNo);
+}
+
+QString RobotDataHelper::MeasureWeldCurrentScanSectionName(const QString& robotName, QString* error)
+{
+    return MeasureWeldScanSectionName(MeasureWeldCurrentGroupIndex(robotName, error));
+}
+
+QString RobotDataHelper::MeasureWeldCurrentWeldSectionName(const QString& robotName, QString* error)
+{
+    return MeasureWeldWeldSectionName(MeasureWeldCurrentGroupIndex(robotName, error));
+}
+
 QString RobotDataHelper::PreciseMeasureSectionName(const QString& robotName, QString* error)
 {
+    if (QFileInfo::exists(MeasureWeldParamPath(robotName)) || EnsureMeasureWeldParamFile(robotName, nullptr))
+    {
+        return MeasureWeldCurrentScanSectionName(robotName, error);
+    }
+
     const QString path = PreciseMeasureParamPath(robotName);
     COPini ini;
     if (!ini.SetFileName(path.toLocal8Bit().constData()))

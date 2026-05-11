@@ -1,6 +1,6 @@
 # 波纹板项目方案
 
-- 人工整理日期：`2026-05-09`
+- 人工整理日期：`2026-05-11`
 - Notion 页面：<https://www.notion.so/70cdcb1e8cf241bbb9cc10742d12ae20>
 
 ## 项目目标
@@ -21,7 +21,7 @@
 - FANUC 常驻服务通信
 - 固定 TP 调用的 `MOVJ / MOVL`
 - 先测后焊预设参数流程
-- 精测量参数编辑
+- 测量焊接参数编辑
 - 相机参数与手眼矩阵配置
 - 扫描结果导出
 - STEP 版本连接、变量读写、点动目标运动、MOVL/MOVJ 和先测后焊执行入口
@@ -44,7 +44,7 @@
 ### 读取层
 
 - ini / txt / 参数文件读取已逐步收敛到统一的数据辅助类
-- 精测量参数、相机参数、手眼矩阵都以本地文件为主
+- 测量焊接参数、相机参数、手眼矩阵都以本地文件为主
 
 ### 计算层
 
@@ -58,7 +58,7 @@
 
 ### 输入
 
-- `Data/<RobotName>/PreciseMeasureParam.ini`
+- `Data/<RobotName>/MeasureWeldParam.ini`
 - `Data/<RobotName>/CameraParam*.ini`
 - `Data/<RobotName>/HandEyeMatrix_*.ini`
 

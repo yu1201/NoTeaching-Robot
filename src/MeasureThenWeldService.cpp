@@ -565,9 +565,12 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
     WeldPosePreset preset;
     preset.rx = param.tStartPos.dRX;
     preset.ry = param.tStartPos.dRY;
-    preset.weldLineSectionName = "WeldNormalParam0";
-    preset.weldLineFilePath = RobotDataHelper::BuildProjectPath(
-        QString("Data/%1/WeldLineParam.ini").arg(QString::fromStdString(param.sRobotName)));
+    preset.weldLineSectionName = param.sWeldSectionName.empty()
+        ? QStringLiteral("WeldNormalParam0")
+        : QString::fromStdString(param.sWeldSectionName);
+    preset.weldLineFilePath = param.sWeldParamFilePath.empty()
+        ? RobotDataHelper::WeldLineParamPath(QString::fromStdString(param.sRobotName))
+        : QString::fromStdString(param.sWeldParamFilePath);
     preset.poseCompFilePath = RobotDataHelper::BuildProjectPath(
         QString("Data/%1/WeldPoseCompParam.ini").arg(QString::fromStdString(param.sRobotName)));
     preset.seamCompFilePath = RobotDataHelper::BuildProjectPath(
@@ -1028,6 +1031,50 @@ QString RobotCoorsText(const T_ROBOT_COORS& coors)
         .arg(coors.dBX, 0, 'f', 3)
         .arg(coors.dBY, 0, 'f', 3)
         .arg(coors.dBZ, 0, 'f', 3);
+}
+
+double DegToRad(double deg)
+{
+    return deg * M_PI / 180.0;
+}
+
+T_ROBOT_COORS BuildScanSafeCoorsFromAnchor(
+    const T_ROBOT_COORS& anchor,
+    const T_PRECISE_MEASURE_PARAM& param)
+{
+    const double distance = std::isfinite(param.dScanSafeOffsetDistanceMm) && param.dScanSafeOffsetDistanceMm > 0.0
+        ? param.dScanSafeOffsetDistanceMm
+        : 150.0;
+    const double angleDeg = std::isfinite(param.dScanSafeGunAngleDeg)
+        ? param.dScanSafeGunAngleDeg
+        : 30.0;
+    const double angleRad = DegToRad(angleDeg);
+    const double xSign = param.nScanSafeXDirection >= 0 ? 1.0 : -1.0;
+
+    T_ROBOT_COORS safe = anchor;
+    safe.dX += xSign * distance * std::sin(angleRad);
+    safe.dZ += distance * std::cos(angleRad);
+    return safe;
+}
+
+double PulseDeltaDeg(long currentPulse, long targetPulse, double pulseUnit)
+{
+    if (!std::isfinite(pulseUnit) || std::abs(pulseUnit) <= 1e-12)
+    {
+        return 0.0;
+    }
+    return std::abs(static_cast<double>(currentPulse - targetPulse) * pulseUnit);
+}
+
+double MaxWristDeltaDeg(
+    const T_ANGLE_PULSE& currentPulse,
+    const T_ANGLE_PULSE& targetPulse,
+    const T_AXISUNIT& axisUnit)
+{
+    const double r = PulseDeltaDeg(currentPulse.nRPulse, targetPulse.nRPulse, axisUnit.dRPulseUnit);
+    const double b = PulseDeltaDeg(currentPulse.nBPulse, targetPulse.nBPulse, axisUnit.dBPulseUnit);
+    const double t = PulseDeltaDeg(currentPulse.nTPulse, targetPulse.nTPulse, axisUnit.dTPulseUnit);
+    return std::max({ r, b, t });
 }
 
 bool TryBuildWeldSafeCoors(
@@ -2020,10 +2067,14 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     param.sRobotName = pRobotDriver->m_sRobotName.empty() ? "RobotA" : pRobotDriver->m_sRobotName;
 
     const QString robotName = QString::fromStdString(param.sRobotName);
-    const QString iniPath = RobotDataHelper::PreciseMeasureParamPath(robotName);
+    QString ensureError;
+    const bool hasUnifiedParam = RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &ensureError);
+    const QString iniPath = hasUnifiedParam
+        ? RobotDataHelper::MeasureWeldParamPath(robotName)
+        : RobotDataHelper::PreciseMeasureParamPath(robotName);
     if (!QFileInfo::exists(iniPath))
     {
-        error = QString("未找到参数文件：%1").arg(iniPath);
+        error = ensureError.isEmpty() ? QString("未找到参数文件：%1").arg(iniPath) : ensureError;
         return false;
     }
 
@@ -2037,9 +2088,30 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     }
 
     int useNo = 0;
-    ini.SetSectionName("ALLPostion");
-    ini.ReadString(false, "UsePostionNo", &useNo);
-    param.sSectionName = "Postion" + std::to_string(useNo);
+    if (hasUnifiedParam)
+    {
+        std::string groupName;
+        ini.SetSectionName("MeasureWeldGroups");
+        ini.ReadString(false, "UseGroupNo", &useNo);
+        ini.ReadString(false, QString("Group%1Name").arg(useNo).toStdString(), groupName);
+        param.nParamGroupIndex = std::max(0, useNo);
+        param.sParamGroupName = groupName.empty()
+            ? QString("参数组%1").arg(param.nParamGroupIndex + 1)
+            : QString::fromStdString(groupName);
+        param.sSectionName = RobotDataHelper::MeasureWeldScanSectionName(param.nParamGroupIndex).toStdString();
+        param.sWeldSectionName = RobotDataHelper::MeasureWeldWeldSectionName(param.nParamGroupIndex).toStdString();
+        param.sWeldParamFilePath = iniPath.toLocal8Bit().constData();
+    }
+    else
+    {
+        ini.SetSectionName("ALLPostion");
+        ini.ReadString(false, "UsePostionNo", &useNo);
+        param.nParamGroupIndex = std::max(0, useNo);
+        param.sParamGroupName = QString("参数组%1").arg(param.nParamGroupIndex + 1);
+        param.sSectionName = "Postion" + std::to_string(useNo);
+        param.sWeldSectionName = "WeldNormalParam0";
+        param.sWeldParamFilePath = RobotDataHelper::WeldLineParamPath(robotName).toLocal8Bit().constData();
+    }
 
     ini.SetSectionName(param.sSectionName);
     ini.ReadString(false, "ScanSpeed", &param.dScanSpeed);
@@ -2049,6 +2121,15 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     ini.ReadString(false, "dAcc", &param.dAcc);
     ini.ReadString(false, "dDec", &param.dDec);
 
+    int useComputedScanSafe = 1;
+    ini.ReadString(false, "UseComputedScanSafe", &useComputedScanSafe);
+    param.bUseComputedScanSafe = (useComputedScanSafe != 0);
+    ini.ReadString(false, "ScanSafeOffsetDistanceMm", &param.dScanSafeOffsetDistanceMm);
+    ini.ReadString(false, "ScanSafeGunAngleDeg", &param.dScanSafeGunAngleDeg);
+    ini.ReadString(false, "ScanSafeXDirection", &param.nScanSafeXDirection);
+    ini.ReadString(false, "ScanSafeLiftHeightMm", &param.dScanSafeLiftHeightMm);
+    ini.ReadString(false, "ScanSafeFlipWarnThresholdDeg", &param.dScanSafeFlipWarnThresholdDeg);
+
     if (!std::isfinite(param.dCameraReadFps) || param.dCameraReadFps <= 0.0)
     {
         param.dCameraReadFps = DEFAULT_CAMERA_READ_FPS;
@@ -2057,11 +2138,37 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     {
         param.dCameraTimeOffsetMs = 0.0;
     }
+    if (!std::isfinite(param.dScanSafeOffsetDistanceMm) || param.dScanSafeOffsetDistanceMm <= 0.0)
+    {
+        param.dScanSafeOffsetDistanceMm = 150.0;
+    }
+    if (!std::isfinite(param.dScanSafeGunAngleDeg))
+    {
+        param.dScanSafeGunAngleDeg = 30.0;
+    }
+    if (param.nScanSafeXDirection == 0)
+    {
+        param.nScanSafeXDirection = -1;
+    }
+    if (!std::isfinite(param.dScanSafeLiftHeightMm) || param.dScanSafeLiftHeightMm < 0.0)
+    {
+        param.dScanSafeLiftHeightMm = 150.0;
+    }
+    if (!std::isfinite(param.dScanSafeFlipWarnThresholdDeg) || param.dScanSafeFlipWarnThresholdDeg <= 0.0)
+    {
+        param.dScanSafeFlipWarnThresholdDeg = 90.0;
+    }
 
-    if (!ReadPulseList(ini, "StartSafePulseNum", "StartSafePulse", param.vtStartSafePulse, error)
+    if (!ReadPulse(ini, "StartPulse", param.tStartPulse, error)
         || !ReadCoors(ini, "StartPos", param.tStartPos, error)
-        || !ReadCoors(ini, "EndPos", param.tEndPos, error)
-        || !ReadPulseList(ini, "EndSafePulseNum", "EndSafePulse", param.vtEndSafePulse, error))
+        || !ReadCoors(ini, "EndPos", param.tEndPos, error))
+    {
+        return false;
+    }
+
+    if (!param.bUseComputedScanSafe
+        && (!ReadPulseList(ini, "StartSafePulseNum", "StartSafePulse", param.vtStartSafePulse, error)
+            || !ReadPulseList(ini, "EndSafePulseNum", "EndSafePulse", param.vtEndSafePulse, error)))
     {
         return false;
     }
@@ -2094,7 +2201,7 @@ bool MeasureThenWeldService::ReadCoors(COPini& ini, const std::string& prefix, T
     const int ok = ini.ReadString(prefix + ".", "", coors);
     if (ok <= 0)
     {
-        error = QString("读取直角坐标失败：%1，请在“精测量数据修改”里重新示教并保存扫描起点/终点。")
+        error = QString("读取直角坐标失败：%1，请在“测量焊接参数”里重新示教并保存扫描起点/终点。")
             .arg(QString::fromStdString(prefix));
         return false;
     }
@@ -2201,6 +2308,119 @@ bool MeasureThenWeldService::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, 
     }
 
     return WaitRobotMotionDone(pRobotDriver, name, appendLog);
+}
+
+bool MeasureThenWeldService::MoveScanStartSafeAndWait(
+    RobotDriverAdaptor* pRobotDriver,
+    const T_PRECISE_MEASURE_PARAM& param,
+    double speed,
+    const LogCallback& appendLog,
+    const StepCallback& setFlowStep,
+    const CheckpointCallback& checkpoint) const
+{
+    if (pRobotDriver == nullptr)
+    {
+        return false;
+    }
+
+    if (!param.bUseComputedScanSafe)
+    {
+        return MovePulseListAndWait(pRobotDriver, param.vtStartSafePulse, speed, "下枪安全姿态", appendLog, setFlowStep);
+    }
+
+    const T_ROBOT_COORS startSafeCoors = BuildScanSafeCoorsFromAnchor(param.tStartPos, param);
+    if (appendLog)
+    {
+        appendLog(QString("扫描下枪安全位置按配置推算：起点=%1，安全位=%2，偏移=%3mm，枪角=%4deg，X方向=%5")
+            .arg(RobotCoorsText(param.tStartPos))
+            .arg(RobotCoorsText(startSafeCoors))
+            .arg(param.dScanSafeOffsetDistanceMm, 0, 'f', 3)
+            .arg(param.dScanSafeGunAngleDeg, 0, 'f', 3)
+            .arg(param.nScanSafeXDirection >= 0 ? "X+" : "X-"));
+    }
+
+    const T_ANGLE_PULSE currentPulse = pRobotDriver->GetCurrentPulse();
+    const double maxWristDeltaDeg = MaxWristDeltaDeg(currentPulse, param.tStartPulse, pRobotDriver->m_tAxisUnit);
+    const double warnThresholdDeg = param.dScanSafeFlipWarnThresholdDeg > 0.0
+        ? param.dScanSafeFlipWarnThresholdDeg
+        : 90.0;
+    if (maxWristDeltaDeg >= warnThresholdDeg)
+    {
+        const QString detail = QString(
+            "当前关节姿态和扫描起点示教关节姿态差异较大，最大腕部轴差≈%1°，阈值=%2°。\n"
+            "为降低姿态翻转时碰撞风险，流程将先原地抬高 %3mm，再在高位切换到扫描起点姿态，最后移动到扫描下枪安全位置。\n"
+            "扫描起点关节：R=%4 B=%5 T=%6\n"
+            "当前关节：R=%7 B=%8 T=%9")
+            .arg(maxWristDeltaDeg, 0, 'f', 3)
+            .arg(warnThresholdDeg, 0, 'f', 3)
+            .arg(param.dScanSafeLiftHeightMm, 0, 'f', 3)
+            .arg(param.tStartPulse.nRPulse)
+            .arg(param.tStartPulse.nBPulse)
+            .arg(param.tStartPulse.nTPulse)
+            .arg(currentPulse.nRPulse)
+            .arg(currentPulse.nBPulse)
+            .arg(currentPulse.nTPulse);
+
+        if (checkpoint && !checkpoint("扫描姿态翻转风险提醒", detail))
+        {
+            if (appendLog)
+            {
+                appendLog("用户取消扫描姿态翻转保护流程。");
+            }
+            return false;
+        }
+
+        T_ROBOT_COORS currentCoors = pRobotDriver->GetCurrentPos();
+        const double liftHeight = std::max(0.0, param.dScanSafeLiftHeightMm);
+        if (liftHeight > 1e-6)
+        {
+            T_ROBOT_COORS liftCoors = currentCoors;
+            liftCoors.dZ += liftHeight;
+            if (!MoveCoorsAndWait(pRobotDriver, liftCoors, speed, "扫描姿态切换抬高点", appendLog, setFlowStep))
+            {
+                return false;
+            }
+            currentCoors = liftCoors;
+        }
+
+        T_ROBOT_COORS highPoseCoors = currentCoors;
+        highPoseCoors.dRX = param.tStartPos.dRX;
+        highPoseCoors.dRY = param.tStartPos.dRY;
+        highPoseCoors.dRZ = param.tStartPos.dRZ;
+        if (!MoveCoorsAndWait(pRobotDriver, highPoseCoors, speed, "高位切换扫描起点姿态", appendLog, setFlowStep))
+        {
+            return false;
+        }
+    }
+
+    return MoveCoorsAndWait(pRobotDriver, startSafeCoors, speed, "扫描下枪安全位置", appendLog, setFlowStep);
+}
+
+bool MeasureThenWeldService::MoveScanEndSafeAndWait(
+    RobotDriverAdaptor* pRobotDriver,
+    const T_PRECISE_MEASURE_PARAM& param,
+    double speed,
+    const LogCallback& appendLog,
+    const StepCallback& setFlowStep) const
+{
+    if (pRobotDriver == nullptr)
+    {
+        return false;
+    }
+
+    if (!param.bUseComputedScanSafe)
+    {
+        return MovePulseListAndWait(pRobotDriver, param.vtEndSafePulse, speed, "收枪姿态", appendLog, setFlowStep);
+    }
+
+    const T_ROBOT_COORS endSafeCoors = BuildScanSafeCoorsFromAnchor(param.tEndPos, param);
+    if (appendLog)
+    {
+        appendLog(QString("扫描收枪安全位置按配置推算：终点=%1，安全位=%2")
+            .arg(RobotCoorsText(param.tEndPos))
+            .arg(RobotCoorsText(endSafeCoors)));
+    }
+    return MoveCoorsAndWait(pRobotDriver, endSafeCoors, speed, "扫描收枪安全位置", appendLog, setFlowStep);
 }
 
 bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep) const

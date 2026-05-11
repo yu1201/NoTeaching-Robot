@@ -15,6 +15,10 @@ void ApplyUnifiedWindowChrome(QWidget* widget);
 // 统一深色主题下拉框样式，后续所有 QComboBox 优先复用这个模板。
 QString UnifiedComboBoxStyleSheet();
 
+// 统一压缩短内容控件宽度，避免输入框、下拉框和普通按钮跟随整行无限拉长。
+// 如确实需要保持宽控件，可给控件设置属性 _keep_wide_control=true。
+void ApplyCompactControlWidths(QWidget* widget);
+
 // 关闭有手动保存按钮的窗口时，统一询问是否保存未保存修改。
 bool ConfirmCloseWithUnsavedChanges(
     QWidget* widget,

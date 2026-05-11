@@ -18,9 +18,13 @@ struct T_PRECISE_MEASURE_PARAM
 {
     std::string sRobotName;
     std::string sIniFilePath;
-    std::string sSectionName = "Postion0";
+    std::string sSectionName = "MeasureGroup0.Scan";
+    std::string sWeldParamFilePath;
+    std::string sWeldSectionName = "MeasureGroup0.Weld";
+    int nParamGroupIndex = 0;
+    QString sParamGroupName = "参数组1";
 
-    // PreciseMeasureParam.ini 中的运行速度、扫描速度和相机读取/时间补偿参数。
+    // MeasureWeldParam.ini 当前参数组中的运行速度、扫描速度和相机读取/时间补偿参数。
     double dScanSpeed = 0.0;
     double dRunSpeed = 0.0;
     double dCameraReadFps = 100.0;
@@ -31,9 +35,18 @@ struct T_PRECISE_MEASURE_PARAM
     // 预设流程动作点：下枪安全姿态 -> 扫描起点 -> 扫描终点 -> 收枪安全姿态。
     // 安全姿态保留脉冲点，扫描起终点改为直角坐标点。
     std::vector<T_ANGLE_PULSE> vtStartSafePulse;
+    T_ANGLE_PULSE tStartPulse;
     T_ROBOT_COORS tStartPos;
     T_ROBOT_COORS tEndPos;
     std::vector<T_ANGLE_PULSE> vtEndSafePulse;
+
+    // 扫描安全位推算参数：由扫描起点/终点直角位姿按枪方向偏移得到安全位。
+    bool bUseComputedScanSafe = true;
+    double dScanSafeOffsetDistanceMm = 150.0;
+    double dScanSafeGunAngleDeg = 30.0;
+    int nScanSafeXDirection = -1;
+    double dScanSafeLiftHeightMm = 150.0;
+    double dScanSafeFlipWarnThresholdDeg = 90.0;
 };
 
 // 先测后焊入口界面：当前实现“预设参数线扫采集”，线扫处理按钮先保留空函数。
@@ -56,7 +69,7 @@ protected:
 private:
     RobotDriverAdaptor* GetRobotDriver();
 
-    // 读取 Data/<RobotName>/PreciseMeasureParam.ini 中当前启用的 PostionN 分组。
+    // 读取 Data/<RobotName>/MeasureWeldParam.ini 中当前启用的测量焊接参数组。
     bool LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error);
     bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
     bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
@@ -66,6 +79,8 @@ private:
     bool MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name);
     bool MovePulseListAndWait(RobotDriverAdaptor* pRobotDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name);
     bool MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, const T_ROBOT_COORS& coors, double speed, const QString& name);
+    bool MoveScanStartSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed);
+    bool MoveScanEndSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed);
 
     // 扫描段：机器人从 StartPos 运动到 EndPos，同时按配置帧率读取相机缓存点。
     bool ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath);
@@ -80,6 +95,7 @@ private:
     void RunPresetParamFlow();
     void RunSkipScanWeldFlow();
     void RunLineScanProcess();
+    void OpenScanSafeParamDialog();
     void AppendLog(const QString& text);
     void SetFlowStep(const QString& text);
     void SetRunning(bool running);
@@ -94,6 +110,7 @@ private:
     QPushButton* m_pPresetParamBtn = nullptr;
     QPushButton* m_pSkipScanWeldBtn = nullptr;
     QPushButton* m_pLineScanProcessBtn = nullptr;
+    QPushButton* m_pScanSafeParamBtn = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
 
     bool m_bRunning = false;

@@ -11,24 +11,30 @@
 #include "groove/framebuffer.h"
 
 #include <QCloseEvent>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QGridLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QDoubleSpinBox>
 #include <QTextDocument>
 #include <QTextStream>
 #include <QThread>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <thread>
 
 namespace
@@ -91,19 +97,22 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     titleLabel->setStyleSheet("font-size: 22px; font-weight: bold; color: #F7FCFC;");
     rootLayout->addWidget(titleLabel);
 
-    QLabel* hintLabel = new QLabel("预设参数：读取 PreciseMeasureParam.ini 并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点，并在扫描后自动执行 PreservePath 拟合、焊道分类、焊接姿态生成和焊道补偿。也可以跳过扫描，直接选历史结果文件夹焊接。");
+    QLabel* hintLabel = new QLabel("预设参数：读取 MeasureWeldParam.ini 当前参数组，并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点，并在扫描后自动执行 PreservePath 拟合、焊道分类、焊接姿态生成和焊道补偿。也可以跳过扫描，直接选历史结果文件夹焊接。");
     rootLayout->addWidget(hintLabel);
 
     QGridLayout* buttonLayout = new QGridLayout();
     m_pPresetParamBtn = new QPushButton("预设参数");
     m_pSkipScanWeldBtn = new QPushButton("跳过扫描焊接");
     m_pLineScanProcessBtn = new QPushButton("线扫处理");
+    m_pScanSafeParamBtn = new QPushButton("扫描安全参数");
     m_pPresetParamBtn->setMinimumHeight(64);
     m_pSkipScanWeldBtn->setMinimumHeight(64);
     m_pLineScanProcessBtn->setMinimumHeight(64);
+    m_pScanSafeParamBtn->setMinimumHeight(64);
     buttonLayout->addWidget(m_pPresetParamBtn, 0, 0);
     buttonLayout->addWidget(m_pLineScanProcessBtn, 0, 1);
-    buttonLayout->addWidget(m_pSkipScanWeldBtn, 1, 0, 1, 2);
+    buttonLayout->addWidget(m_pScanSafeParamBtn, 1, 0);
+    buttonLayout->addWidget(m_pSkipScanWeldBtn, 1, 1);
     rootLayout->addLayout(buttonLayout);
 
     m_pLogText = new QPlainTextEdit();
@@ -115,6 +124,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     connect(m_pPresetParamBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunPresetParamFlow);
     connect(m_pSkipScanWeldBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunSkipScanWeldFlow);
     connect(m_pLineScanProcessBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunLineScanProcess);
+    connect(m_pScanSafeParamBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::OpenScanSafeParamDialog);
 }
 
 void MeasureThenWeldDialog::closeEvent(QCloseEvent* event)
@@ -195,6 +205,27 @@ bool MeasureThenWeldDialog::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, c
         coors,
         speed,
         name,
+        [this](const QString& text) { AppendLog(text); },
+        [this](const QString& text) { SetFlowStep(text); });
+}
+
+bool MeasureThenWeldDialog::MoveScanStartSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed)
+{
+    return m_pService != nullptr && m_pService->MoveScanStartSafeAndWait(
+        pRobotDriver,
+        param,
+        speed,
+        [this](const QString& text) { AppendLog(text); },
+        [this](const QString& text) { SetFlowStep(text); },
+        [this](const QString& title, const QString& detail) { return ShowCheckpointDialog(title, detail); });
+}
+
+bool MeasureThenWeldDialog::MoveScanEndSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed)
+{
+    return m_pService != nullptr && m_pService->MoveScanEndSafeAndWait(
+        pRobotDriver,
+        param,
+        speed,
         [this](const QString& text) { AppendLog(text); },
         [this](const QString& text) { SetFlowStep(text); });
 }
@@ -282,6 +313,153 @@ bool MeasureThenWeldDialog::ShowCheckpointDialog(const QString& title, const QSt
     return confirmed;
 }
 
+void MeasureThenWeldDialog::OpenScanSafeParamDialog()
+{
+    if (m_bRunning)
+    {
+        QMessageBox::information(this, "扫描安全参数", "流程正在运行，不能修改扫描安全参数。");
+        return;
+    }
+
+    RobotDriverAdaptor* pRobotDriver = GetRobotDriver();
+    if (pRobotDriver == nullptr)
+    {
+        return;
+    }
+
+    T_PRECISE_MEASURE_PARAM param;
+    QString error;
+    if (!LoadPresetParam(pRobotDriver, param, error))
+    {
+        QMessageBox::warning(this, "扫描安全参数", error);
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("扫描安全参数");
+    ApplyUnifiedWindowChrome(&dialog);
+    dialog.setStyleSheet(
+        "QDialog { background: #111820; color: #ECF3F4; }"
+        "QLabel { color: #BACBD1; }"
+        "QCheckBox { color: #DDECEF; }"
+        "QDoubleSpinBox { background: #000000; color: #F5FAFA; border: 1px solid #385366; border-radius: 0px; padding: 6px 34px 6px 10px; min-height: 28px; }"
+        "QDoubleSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 24px; border-left: 1px solid #385366; border-bottom: 1px solid #385366; border-radius: 0px; background: #000000; }"
+        "QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 24px; border-left: 1px solid #385366; border-radius: 0px; background: #000000; }"
+        "QDoubleSpinBox::up-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-up.svg); width: 10px; height: 7px; }"
+        "QDoubleSpinBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 10px; height: 7px; }"
+        "QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover { background: #101820; }"
+        "QComboBox { background: #000000; color: #F5FAFA; border: 1px solid #385366; border-radius: 0px; padding: 6px 36px 6px 10px; min-height: 28px; }"
+        "QComboBox::drop-down { border-left: 1px solid #385366; border-radius: 0px; width: 30px; background: #000000; }"
+        "QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
+        "QComboBox QAbstractItemView { background: #000000; color: #F4FAFA; selection-background-color: #1F4F5C; border: 1px solid #385366; border-radius: 0px; outline: 0px; }"
+        "QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 8px 16px; }"
+        "QPushButton:hover { background: #2D5465; border-color: #72D4DD; }");
+
+    QVBoxLayout* rootLayout = new QVBoxLayout(&dialog);
+    QLabel* titleLabel = new QLabel("扫描安全位推算参数");
+    titleLabel->setStyleSheet("font-size: 20px; font-weight: bold; color: #F7FCFC;");
+    rootLayout->addWidget(titleLabel);
+
+    QLabel* hintLabel = new QLabel(
+        "只影响扫描段：由扫描起点/终点直角位姿按枪方向偏移生成安全位。"
+        "焊接轨迹自己的下枪/收枪安全位置不在这里修改。");
+    hintLabel->setWordWrap(true);
+    rootLayout->addWidget(hintLabel);
+
+    QCheckBox* useComputedCheck = new QCheckBox("使用起点/终点直角位姿推算扫描安全位");
+    useComputedCheck->setChecked(param.bUseComputedScanSafe);
+
+    auto makeSpin = [](double minValue, double maxValue, double value, const QString& suffix) {
+        QDoubleSpinBox* spin = new QDoubleSpinBox();
+        spin->setRange(minValue, maxValue);
+        spin->setDecimals(3);
+        spin->setSingleStep(1.0);
+        spin->setValue(value);
+        spin->setSuffix(suffix);
+        spin->setAlignment(Qt::AlignRight);
+        return spin;
+    };
+
+    QDoubleSpinBox* offsetSpin = makeSpin(1.0, 1000.0, param.dScanSafeOffsetDistanceMm, " mm");
+    QDoubleSpinBox* gunAngleSpin = makeSpin(-89.0, 89.0, param.dScanSafeGunAngleDeg, " deg");
+    QComboBox* xDirectionCombo = new QComboBox();
+    xDirectionCombo->addItem("X- 方向", -1);
+    xDirectionCombo->addItem("X+ 方向", 1);
+    xDirectionCombo->setCurrentIndex(param.nScanSafeXDirection >= 0 ? 1 : 0);
+    QDoubleSpinBox* liftSpin = makeSpin(0.0, 1000.0, param.dScanSafeLiftHeightMm, " mm");
+    QDoubleSpinBox* flipWarnSpin = makeSpin(1.0, 360.0, param.dScanSafeFlipWarnThresholdDeg, " deg");
+
+    QFormLayout* formLayout = new QFormLayout();
+    formLayout->addRow("", useComputedCheck);
+    formLayout->addRow("安全偏移距离：", offsetSpin);
+    formLayout->addRow("枪倾角：", gunAngleSpin);
+    formLayout->addRow("X 偏移方向：", xDirectionCombo);
+    formLayout->addRow("姿态切换抬高：", liftSpin);
+    formLayout->addRow("姿态翻转提醒阈值：", flipWarnSpin);
+    rootLayout->addLayout(formLayout);
+
+    QLabel* previewLabel = new QLabel();
+    previewLabel->setWordWrap(true);
+    rootLayout->addWidget(previewLabel);
+
+    QLabel* pathLabel = new QLabel(QString("配置文件：%1\n当前位置类型：%2 [%3]")
+        .arg(QDir::toNativeSeparators(QString::fromStdString(param.sIniFilePath)))
+        .arg(param.sParamGroupName)
+        .arg(QString::fromStdString(param.sSectionName)));
+    pathLabel->setWordWrap(true);
+    rootLayout->addWidget(pathLabel);
+
+    auto updatePreview = [=]() {
+        const double distance = offsetSpin->value();
+        const double angleRad = gunAngleSpin->value() * M_PI / 180.0;
+        const double xSign = xDirectionCombo->currentData().toInt() >= 0 ? 1.0 : -1.0;
+        const double dx = xSign * distance * std::sin(angleRad);
+        const double dz = distance * std::cos(angleRad);
+        previewLabel->setText(QString("当前计算：X偏移=%1 mm，Z抬高=%2 mm。起点安全位≈ X=%3, Y=%4, Z=%5")
+            .arg(dx, 0, 'f', 3)
+            .arg(dz, 0, 'f', 3)
+            .arg(param.tStartPos.dX + dx, 0, 'f', 3)
+            .arg(param.tStartPos.dY, 0, 'f', 3)
+            .arg(param.tStartPos.dZ + dz, 0, 'f', 3));
+    };
+    connect(offsetSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, updatePreview);
+    connect(gunAngleSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, updatePreview);
+    connect(xDirectionCombo, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, updatePreview);
+    updatePreview();
+
+    QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    rootLayout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]()
+        {
+            COPini ini;
+            if (!ini.SetFileName(param.sIniFilePath))
+            {
+                QMessageBox::warning(&dialog, "扫描安全参数", "打开配置文件失败。");
+                return;
+            }
+            ini.SetSectionName(param.sSectionName);
+            const bool ok =
+                ini.WriteString("UseComputedScanSafe", useComputedCheck->isChecked() ? 1 : 0)
+                && ini.WriteString("ScanSafeOffsetDistanceMm", offsetSpin->value(), 6)
+                && ini.WriteString("ScanSafeGunAngleDeg", gunAngleSpin->value(), 6)
+                && ini.WriteString("ScanSafeXDirection", xDirectionCombo->currentData().toInt())
+                && ini.WriteString("ScanSafeLiftHeightMm", liftSpin->value(), 6)
+                && ini.WriteString("ScanSafeFlipWarnThresholdDeg", flipWarnSpin->value(), 6);
+            if (!ok)
+            {
+                QMessageBox::warning(&dialog, "扫描安全参数", "写入配置失败，请检查文件权限。");
+                return;
+            }
+            dialog.accept();
+        });
+
+    if (dialog.exec() == QDialog::Accepted)
+    {
+        AppendLog("扫描安全参数已保存。");
+    }
+}
+
 void MeasureThenWeldDialog::RunPresetParamFlow()
 {
     if (m_bRunning)
@@ -311,7 +489,10 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
 
     SetRunning(true);
     SetFlowStep("读取预设参数完成，准备启动相机");
-    AppendLog(QString("已读取参数：%1 [%2]").arg(QString::fromStdString(param.sIniFilePath)).arg(QString::fromStdString(param.sSectionName)));
+    AppendLog(QString("已读取参数：%1，位置类型=%2 [%3]")
+        .arg(QString::fromStdString(param.sIniFilePath))
+        .arg(param.sParamGroupName)
+        .arg(QString::fromStdString(param.sSectionName)));
 
     // 机器人运动和扫描采集放到后台线程，避免 UI 被 CheckRobotDone 和文件保存卡住。
     QPointer<MeasureThenWeldDialog> self(this);
@@ -344,17 +525,17 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                     {
                         if (self != nullptr)
                         {
-                            self->SetFlowStep(QString("相机接收已启动：%1，准备下枪安全姿态").arg(cameraIP));
+                            self->SetFlowStep(QString("相机接收已启动：%1，准备扫描下枪安全位置").arg(cameraIP));
                             self->AppendLog(QString("相机接收已启动：%1").arg(cameraIP));
                         }
                     }, Qt::QueuedConnection);
 
-                ok = self != nullptr && self->ConfirmContinue("下枪安全姿态");
+                ok = self != nullptr && self->ConfirmContinue("扫描下枪安全位置");
                 if (ok)
                 {
-                    self->SetFlowStep("准备移动到下枪安全姿态");
-                    // 1. 下枪前先到安全姿态，避免直接切入扫描起点。
-                    ok = self != nullptr && self->MovePulseListAndWait(pRobotDriver, param.vtStartSafePulse, SafeSpeed(param.dRunSpeed, 1.0), "下枪安全姿态");
+                    self->SetFlowStep("准备移动到扫描下枪安全位置");
+                    // 1. 扫描前按起点位姿和配置推算安全位置，避免直接切入扫描起点。
+                    ok = self != nullptr && self->MoveScanStartSafeAndWait(pRobotDriver, param, SafeSpeed(param.dRunSpeed, 1.0));
                 }
                 if (ok)
                 {
@@ -378,13 +559,13 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 }
                 if (ok)
                 {
-                    ok = self != nullptr && self->ConfirmContinue("收枪姿态");
+                    ok = self != nullptr && self->ConfirmContinue("扫描收枪安全位置");
                 }
                 if (ok)
                 {
-                    self->SetFlowStep("准备移动到收枪姿态");
-                    // 4. 扫描结束后收枪到安全姿态。
-                    ok = self != nullptr && self->MovePulseListAndWait(pRobotDriver, param.vtEndSafePulse, SafeSpeed(param.dRunSpeed, 1.0), "收枪姿态");
+                    self->SetFlowStep("准备移动到扫描收枪安全位置");
+                    // 4. 扫描结束后按终点位姿和同一配置推算安全位置。
+                    ok = self != nullptr && self->MoveScanEndSafeAndWait(pRobotDriver, param, SafeSpeed(param.dRunSpeed, 1.0));
                 }
                 if (ok)
                 {

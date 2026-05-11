@@ -56,6 +56,14 @@ public:
 
     // ===== 精测量参数 =====
     static QString PreciseMeasureParamPath(const QString& robotName);
+    static QString WeldLineParamPath(const QString& robotName);
+    static QString MeasureWeldParamPath(const QString& robotName);
+    static bool EnsureMeasureWeldParamFile(const QString& robotName, QString* error = nullptr);
+    static QString MeasureWeldScanSectionName(int groupIndex);
+    static QString MeasureWeldWeldSectionName(int groupIndex);
+    static int MeasureWeldCurrentGroupIndex(const QString& robotName, QString* error = nullptr);
+    static QString MeasureWeldCurrentScanSectionName(const QString& robotName, QString* error = nullptr);
+    static QString MeasureWeldCurrentWeldSectionName(const QString& robotName, QString* error = nullptr);
     static QString PreciseMeasureSectionName(const QString& robotName, QString* error = nullptr);
     static bool ReadPrecisePulse(const QString& robotName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error = nullptr);
     static bool WritePrecisePulse(const QString& robotName, const QString& prefix, const T_ANGLE_PULSE& pulse, QString* error = nullptr);
