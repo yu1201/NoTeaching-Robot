@@ -83,8 +83,13 @@ signals:
 private:
     void ShowDashboardPage();
     void ShowManagementPage();
+    void ShowManagementHomePage();
     void ShowEmbeddedPage(QWidget* page);
+    void ShowManagementEmbeddedPage(QWidget* page);
     void PrepareEmbeddedPage(QWidget* page);
+    void PrepareEmbeddedPage(QWidget* page, QStackedWidget* targetStack);
+    QStackedWidget* CurrentEmbeddedTargetStack() const;
+    void ShowCurrentEmbeddedPage(QWidget* page);
     void RefreshRobotSelectorUi();
     void RefreshRobotOperationAvailability();
     void RefreshDashboardConnectionState();
@@ -118,6 +123,9 @@ private:
     void LogoutCurrentAccount();
     void RegisterAccount();
     void OpenAccountManagementDialog();
+    void SetDebugLogMode(bool enabled);
+    void RefreshDebugLogButtonUi();
+    void ApplyDebugLogVisibility(QWidget* page);
     bool LoadGrooveCameraIP(QString& cameraIP) const;
     void LoadRobotLogFile(const QString& relativePath, bool forceRefresh = false);
     void RunCommandLineActions(const QStringList& arguments);
@@ -146,6 +154,9 @@ private:
     QWidget* m_pAuthPage;
     QWidget* m_pDashboardPage;
     QWidget* m_pManagementPage;
+    QStackedWidget* m_pManagementStack;
+    QWidget* m_pManagementHomePage;
+    QWidget* m_pAccountManagementPage;
     QComboBox* m_pRobotSelectorCombo;
     QLabel* m_pRobotSelectorLabel;
     int m_nCurrentRobotUnitIndex;
@@ -174,6 +185,7 @@ private:
     QPushButton* m_pDashboardConnectBtn;
     QPushButton* m_pDashboardClearAlarmBtn;
     QPushButton* m_pDashboardModeBtn;
+    QPushButton* m_pDashboardDebugLogBtn;
     QAction* m_pAccountManagementAction = nullptr;
     QList<QPointer<QWidget>> m_robotOperationWidgets;
     QPushButton* m_pCameraParamBtn;
@@ -195,7 +207,9 @@ private:
     QString m_sMeasureThenWeldStatus;
     QString m_sAuthHintOverride;
     bool m_bAuthRegisterMode;
+    bool m_bOpenEmbeddedInManagement;
     bool m_bPendingOpenManagementAfterLogin = false;
+    bool m_bDebugLogMode;
     QString m_sCurrentRobotLogPath;
     QString m_sLastRobotLogFilePath;
     QDateTime m_lastRobotLogModified;

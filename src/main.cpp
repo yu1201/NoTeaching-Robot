@@ -31,7 +31,7 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName("NoTeaching-Robot");
-    app.setApplicationVersion("2026.05.09");
+    app.setApplicationVersion("2026.05.11");
     app.setOrganizationName("yu1201");
     SetWorkingDirectoryToProjectRoot();
     app.setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
     const QStringList arguments = app.arguments();
     if (!arguments.contains("--no-show"))
     {
-        window.show();
+        window.showMaximized();
     }
     window.ApplyStartupArguments(arguments);
     return app.exec();
