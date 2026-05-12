@@ -1,6 +1,5 @@
 #include "FunctionTestDialog.h"
 
-#include "CameraFrameAccessGuard.h"
 #include "CameraFrameCache.h"
 #include "FANUCRobotDriver.h"
 #include "LaserWeldFilterDialog.h"
@@ -734,10 +733,11 @@ QString BuildDhParameterReport(
 }
 }
 
-FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex, QWidget* parent)
+FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex, CameraFrameCache* cameraCache, QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
     , m_unitIndex(unitIndex)
+    , m_pCameraCache(cameraCache)
 {
     setWindowTitle("功能测试");
     ApplyUnifiedWindowChrome(this);
@@ -1078,17 +1078,17 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
         pFanucDriver->StartMonitor();
     }
 
-    if (CameraFrameAccess::IsMeasureThenWeldExclusive())
+    if (m_pCameraCache == nullptr)
     {
-        const QString message = "先测后焊正在独占相机帧，当前不允许做机器人+相机时间戳检测。";
+        const QString message = "当前机器人没有可用的专属相机缓存，请确认机器人相机线程已初始化。";
         AppendLog(message);
         QMessageBox::warning(this, "机器人+相机时间戳", message);
         return;
     }
 
     const QString robotName = DefaultRobotName(pRobotDriverAdaptor);
-    CameraFrameCache::Instance().Start();
-    const std::uint64_t beginCameraSequence = CameraFrameCache::Instance().Mark();
+    CameraFrameCache* cameraCache = m_pCameraCache;
+    const std::uint64_t beginCameraSequence = cameraCache->Mark();
 
     QVector<RobotTimestampSample> robotSamples;
     robotSamples.reserve(512);
@@ -1135,9 +1135,9 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    const std::uint64_t endCameraSequence = CameraFrameCache::Instance().Mark();
+    const std::uint64_t endCameraSequence = cameraCache->Mark();
     const std::vector<CameraFrameCache::TimedFrame> cameraFrames =
-        CameraFrameCache::Instance().TimedFramesBetween(beginCameraSequence, endCameraSequence);
+        cameraCache->TimedFramesBetween(beginCameraSequence, endCameraSequence);
 
     QVector<double> cameraTimestampDeltaMs;
     QVector<double> cameraSystemDeltaMs;

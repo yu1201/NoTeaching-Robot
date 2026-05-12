@@ -10,6 +10,7 @@
 #include <vector>
 
 class MeasureThenWeldService;
+class CameraFrameCache;
 class QPushButton;
 class QPlainTextEdit;
 class RobotDriverAdaptor;
@@ -58,7 +59,7 @@ public:
     using StartCameraFunc = std::function<bool(QString&)>;
     using StopCameraFunc = std::function<void()>;
 
-    MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, QWidget* parent = nullptr);
+    MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraFrameCache* cameraCache, QWidget* parent = nullptr);
 
 signals:
     void FlowStepChanged(const QString& text);
@@ -106,6 +107,7 @@ private:
     MeasureThenWeldService* m_pService = nullptr;
     StartCameraFunc m_startCamera;
     StopCameraFunc m_stopCamera;
+    CameraFrameCache* m_pCameraCache = nullptr;
 
     QPushButton* m_pPresetParamBtn = nullptr;
     QPushButton* m_pSkipScanWeldBtn = nullptr;

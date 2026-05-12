@@ -29,12 +29,14 @@ CameraParamDialog::CameraParamDialog(
     const QString& robotName,
     StartCameraFunc startCamera,
     StopCameraFunc stopCamera,
+    CameraFrameCache* cameraCache,
     QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
     , m_robotName(robotName.trimmed().isEmpty() ? QString("RobotA") : robotName.trimmed())
     , m_startCamera(startCamera)
     , m_stopCamera(stopCamera)
+    , m_pCameraCache(cameraCache)
 {
     setWindowTitle("相机参数");
     ApplyUnifiedWindowChrome(this);
@@ -238,6 +240,7 @@ void CameraParamDialog::OpenHandEyeCalibrationDialog()
         CurrentCameraSection(),
         m_startCamera,
         m_stopCamera,
+        m_pCameraCache,
         this);
     dialog.exec();
     UpdateCurrentCameraInfo();

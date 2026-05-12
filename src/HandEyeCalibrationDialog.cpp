@@ -1,7 +1,6 @@
 #include "HandEyeCalibrationDialog.h"
 
 #include "CameraFrameCache.h"
-#include "CameraFrameAccessGuard.h"
 #include "FANUCRobotDriver.h"
 #include "HandEyeMatrixDialog.h"
 #include "RobotCalculation.h"
@@ -502,6 +501,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     const QString& cameraSection,
     StartCameraFunc startCamera,
     StopCameraFunc stopCamera,
+    CameraFrameCache* cameraCache,
     QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
@@ -509,6 +509,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     , m_cameraSection(cameraSection)
     , m_startCamera(startCamera)
     , m_stopCamera(stopCamera)
+    , m_pCameraCache(cameraCache)
 {
     setWindowTitle(QString("%1 %2 手眼标定").arg(robotName, cameraSection));
     ApplyUnifiedWindowChrome(this);
@@ -1443,14 +1444,6 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
 
 bool HandEyeCalibrationDialog::CheckCameraTimestampIntervals()
 {
-    if (CameraFrameAccess::IsMeasureThenWeldExclusive())
-    {
-        const QString error = "先测后焊正在独占相机帧，当前不允许检测相机时间戳。";
-        QMessageBox::warning(this, "相机时间戳检测", error);
-        AppendLog("相机时间戳检测失败：" + error);
-        return false;
-    }
-
     QString error;
     Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
     if (!EnsureCameraReady("相机时间戳检测前检查", &cameraPoint, &error))
@@ -1460,8 +1453,16 @@ bool HandEyeCalibrationDialog::CheckCameraTimestampIntervals()
         return false;
     }
 
-    CameraFrameCache::Instance().Start();
-    const std::uint64_t beginSequence = CameraFrameCache::Instance().Mark();
+    if (m_pCameraCache == nullptr)
+    {
+        const QString message = "当前机器人没有可用的专属相机缓存，请确认机器人相机线程已初始化。";
+        QMessageBox::warning(this, "相机时间戳检测", message);
+        AppendLog("相机时间戳检测失败：" + message);
+        return false;
+    }
+
+    CameraFrameCache* cache = m_pCameraCache;
+    const std::uint64_t beginSequence = cache->Mark();
     AppendLog(QString("相机时间戳检测开始：采集 %1 ms，比较相机timestamp间隔和本机接收间隔。")
         .arg(kCameraTimestampCheckDurationMs));
 
@@ -1472,9 +1473,9 @@ bool HandEyeCalibrationDialog::CheckCameraTimestampIntervals()
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
-    const std::uint64_t endSequence = CameraFrameCache::Instance().Mark();
+    const std::uint64_t endSequence = cache->Mark();
     const std::vector<CameraFrameCache::TimedFrame> frames =
-        CameraFrameCache::Instance().TimedFramesBetween(beginSequence, endSequence);
+        cache->TimedFramesBetween(beginSequence, endSequence);
 
     if (frames.size() < 3)
     {
@@ -2096,17 +2097,17 @@ void HandEyeCalibrationDialog::OpenMatrixDialog()
 
 bool HandEyeCalibrationDialog::ReadLatestCameraPoint(Eigen::Vector3d& cameraPoint, QString* error) const
 {
-    if (CameraFrameAccess::IsMeasureThenWeldExclusive())
+    if (m_pCameraCache == nullptr)
     {
         if (error != nullptr)
         {
-            *error = "先测后焊正在独占相机帧，当前不允许手眼标定读取相机队列。";
+            *error = "当前机器人没有可用的专属相机缓存，请确认机器人相机线程已初始化。";
         }
         return false;
     }
 
     udpDataShow frame;
-    if (!CameraFrameCache::Instance().Latest(frame))
+    if (!m_pCameraCache->Latest(frame))
     {
         if (error != nullptr)
         {

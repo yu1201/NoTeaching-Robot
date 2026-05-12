@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <QDateTime>
+#include <QHash>
 #include <QList>
 #include <QPointer>
 #include <QString>
@@ -14,6 +15,7 @@
 #include <limits>
 
 class ClientUDPFormSensorWorker;
+class CameraFrameCache;
 class CameraParamDialog;
 class FANUCRobotCtrl;
 class FunctionTestDialog;
@@ -76,10 +78,6 @@ private slots:
     void GrooveCameraTest(bool checked);
     void UpdateGrooveCameraData();
 
-signals:
-    void startAllCommThreads(const QString& serverIP);
-    void stopAllCommThreads();
-
 private:
     void ShowDashboardPage();
     void ShowManagementPage();
@@ -126,7 +124,18 @@ private:
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
     void ApplyDebugLogVisibility(QWidget* page);
+    QString CameraReceiveModeConfigPath() const;
+    void LoadCameraReceiveMode();
+    void SaveCameraReceiveMode() const;
+    void RefreshCameraReceiveModeButtonUi();
+    void SetSharedScanCameraReceiverMode(bool enabled);
     bool LoadGrooveCameraIP(QString& cameraIP) const;
+    bool LoadGrooveCameraIPForUnit(int unitIndex, QString& cameraIP) const;
+    bool LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort) const;
+    void InitializeScanCameraRuntimes();
+    void StopScanCameraRuntimes();
+    bool EnsureScanCameraRunningForUnit(int unitIndex, QString& cameraIP, bool clearCache);
+    CameraFrameCache* ScanCameraCacheForUnit(int unitIndex) const;
     void LoadRobotLogFile(const QString& relativePath, bool forceRefresh = false);
     void RunCommandLineActions(const QStringList& arguments);
     void LogCommandLineMessage(const QString& message) const;
@@ -145,9 +154,8 @@ private:
         double cameraTimeOffsetOverrideMs = std::numeric_limits<double>::quiet_NaN());
 
     Ui::QtWidgetsApplication4Class ui;
+    struct CameraRuntime;
     ContralUnit* m_pContralUnit;
-    ClientUDPFormSensorWorker* m_clientUDPFormSensorWorker;
-    QThread* m_clientUDPFormSensorThread;
     QTimer* m_grooveCameraDisplayTimer;
     QTimer* m_robotLogDisplayTimer;
     QStackedWidget* m_pMainStack;
@@ -168,6 +176,7 @@ private:
     QLabel* m_pCurrentUserLabel;
     QLabel* m_pManagementUserLabel;
     QLabel* m_pPermissionHintLabel;
+    QPushButton* m_pManagementCameraReceiveModeBtn;
     QLabel* m_pAuthTitleLabel;
     QLabel* m_pAuthHintLabel;
     QComboBox* m_pLoginNameCombo;
@@ -198,6 +207,11 @@ private:
     CameraParamDialog* m_pCameraParamPage;
     QString m_sCameraParamPageRobotName;
     RobotJogDialog* m_pRobotJogPage;
+    QHash<int, CameraRuntime*> m_scanCameraRuntimes;
+    QHash<int, CameraRuntime*> m_scanCameraReceiversByPort;
+    QHash<QString, int> m_scanCameraUnitByIP;
+    QHash<int, QPointer<MeasureThenWeldDialog>> m_measureThenWeldPages;
+    QHash<int, QPointer<RobotJogDialog>> m_robotJogPages;
     bool m_bFanucMovlForward;
     bool m_bFanucMovlRunning;
     bool m_bFanucMovjRunning;
@@ -210,6 +224,7 @@ private:
     bool m_bOpenEmbeddedInManagement;
     bool m_bPendingOpenManagementAfterLogin = false;
     bool m_bDebugLogMode;
+    bool m_bUseSharedScanCameraReceiver;
     QString m_sCurrentRobotLogPath;
     QString m_sLastRobotLogFilePath;
     QDateTime m_lastRobotLogModified;

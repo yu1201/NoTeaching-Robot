@@ -149,7 +149,6 @@
     <ClCompile Include="src\groove\clientudpformsensorworker.cpp" />
     <ClCompile Include="src\groove\framebuffer.cpp" />
     <ClCompile Include="src\groove\pointcloundresultframe.cpp" />
-    <ClCompile Include="src\groove\threadsafebuffer.cpp" />
     <QtRcc Include="QtWidgetsApplication4.qrc" />
     <ResourceCompile Include="QtWidgetsApplication4.rc" />
     <QtUic Include="QtWidgetsApplication4.ui" />
@@ -196,7 +195,6 @@
     <ClInclude Include="include\WeldProcessFile.h" />
     <ClInclude Include="include\groove\framebuffer.h" />
     <ClInclude Include="include\groove\pointcloundresultframe.h" />
-    <ClInclude Include="include\groove\threadsafebuffer.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">

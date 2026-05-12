@@ -1,6 +1,5 @@
 #include "MeasureThenWeldDialog.h"
 
-#include "CameraFrameAccessGuard.h"
 #include "FANUCRobotDriver.h"
 #include "HandEyeMatrixConfig.h"
 #include "MeasureThenWeldService.h"
@@ -71,13 +70,14 @@ QString ResolveLaserPointDirFromSelection(const QString& selectedDir)
 }
 }
 
-MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, QWidget* parent)
+MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraFrameCache* cameraCache, QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
     , m_unitIndex(unitIndex)
     , m_pService(new MeasureThenWeldService())
     , m_startCamera(startCamera)
     , m_stopCamera(stopCamera)
+    , m_pCameraCache(cameraCache)
 {
     setWindowTitle("先测后焊");
     ApplyUnifiedWindowChrome(this);
@@ -237,7 +237,8 @@ bool MeasureThenWeldDialog::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver,
         param,
         savedPath,
         [this](const QString& text) { AppendLog(text); },
-        [this](const QString& text) { SetFlowStep(text); });
+        [this](const QString& text) { SetFlowStep(text); },
+        m_pCameraCache);
 }
 
 QString MeasureThenWeldDialog::BuildResultDir(const std::string& robotName) const
@@ -481,12 +482,6 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
         QMessageBox::warning(this, "预设参数", error);
         return;
     }
-    if (!CameraFrameAccess::TryBeginMeasureThenWeldExclusive())
-    {
-        QMessageBox::information(this, "预设参数", "已有先测后焊流程正在独占相机帧，请等待当前流程结束。");
-        return;
-    }
-
     SetRunning(true);
     SetFlowStep("读取预设参数完成，准备启动相机");
     AppendLog(QString("已读取参数：%1，位置类型=%2 [%3]")
@@ -653,17 +648,15 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 {
                     if (self == nullptr)
                     {
-                        CameraFrameAccess::EndMeasureThenWeldExclusive();
                         return;
                     }
                     if (self->m_stopCamera)
                     {
-                        // 流程正常完成、失败或用户取消，都会关闭相机接收。
+                        // 流程正常完成、失败或用户取消，都会释放流程侧相机占用。
                         self->m_stopCamera();
                     }
-                    CameraFrameAccess::EndMeasureThenWeldExclusive();
                     self->SetFlowStep(ok ? "流程完成" : "流程失败，请查看流程日志");
-                    self->AppendLog(ok ? "相机接收已停止，流程完成。" : "相机接收已停止，流程失败。");
+                    self->AppendLog(ok ? "流程完成。" : "流程失败。");
                     self->SetRunning(false);
                     if (ok)
                     {
