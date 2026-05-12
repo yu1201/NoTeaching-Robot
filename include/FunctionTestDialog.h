@@ -10,12 +10,13 @@ class QPlainTextEdit;
 class FANUCRobotCtrl;
 class RobotDriverAdaptor;
 class QTimer;
+class CameraFrameCache;
 
 // 功能测试子界面：把主界面上的机器人调试/运动测试按钮集中管理。
 class FunctionTestDialog : public QDialog
 {
 public:
-    explicit FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex = 0, QWidget* parent = nullptr);
+    explicit FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex = 0, CameraFrameCache* cameraCache = nullptr, QWidget* parent = nullptr);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -47,6 +48,7 @@ private:
 private:
     ContralUnit* m_pContralUnit = nullptr;
     int m_unitIndex = 0;
+    CameraFrameCache* m_pCameraCache = nullptr;
     QPushButton* m_pMovlTestBtn = nullptr;
     QPushButton* m_pMovjTestBtn = nullptr;
     QPushButton* m_pMoveZeroBtn = nullptr;

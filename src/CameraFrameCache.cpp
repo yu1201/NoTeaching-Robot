@@ -1,7 +1,5 @@
 #include "CameraFrameCache.h"
 
-#include "groove/threadsafebuffer.h"
-
 #include <chrono>
 
 namespace
@@ -13,12 +11,6 @@ qint64 CameraFrameCacheSteadyNowUs()
 }
 }
 
-CameraFrameCache& CameraFrameCache::Instance()
-{
-    static CameraFrameCache cache;
-    return cache;
-}
-
 CameraFrameCache::~CameraFrameCache()
 {
     Stop();
@@ -26,27 +18,12 @@ CameraFrameCache::~CameraFrameCache()
 
 void CameraFrameCache::Start()
 {
-    bool expected = false;
-    if (!m_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
-    {
-        return;
-    }
-
-    m_thread = std::thread(&CameraFrameCache::ThreadMain, this);
+    // Camera frames are pushed directly by the per-robot UDP workers.
 }
 
 void CameraFrameCache::Stop()
 {
-    bool expected = true;
-    if (!m_running.compare_exchange_strong(expected, false, std::memory_order_acq_rel))
-    {
-        return;
-    }
-
-    if (m_thread.joinable())
-    {
-        m_thread.join();
-    }
+    // No shared queue thread is used anymore.
 }
 
 void CameraFrameCache::Clear()
@@ -54,6 +31,11 @@ void CameraFrameCache::Clear()
     std::lock_guard<std::mutex> locker(m_mutex);
     std::deque<CachedFrame>().swap(m_frames);
     m_nextSequence = 0;
+}
+
+void CameraFrameCache::AppendFrame(const udpDataShow& frame)
+{
+    StoreFrame(frame);
 }
 
 std::uint64_t CameraFrameCache::Mark() const
@@ -114,28 +96,6 @@ int CameraFrameCache::CachedCount() const
 {
     std::lock_guard<std::mutex> locker(m_mutex);
     return static_cast<int>(m_frames.size());
-}
-
-void CameraFrameCache::ThreadMain()
-{
-    while (m_running.load(std::memory_order_acquire))
-    {
-        udpDataShow frame;
-        if (ThreadSafeBuffer<udpDataShow>::Instance().dequeue(frame, 20))
-        {
-            StoreFrame(frame);
-            while (ThreadSafeBuffer<udpDataShow>::Instance().dequeue(frame, 0))
-            {
-                StoreFrame(frame);
-            }
-        }
-    }
-
-    udpDataShow frame;
-    while (ThreadSafeBuffer<udpDataShow>::Instance().dequeue(frame, 0))
-    {
-        StoreFrame(frame);
-    }
 }
 
 void CameraFrameCache::StoreFrame(const udpDataShow& frame)

@@ -2423,12 +2423,19 @@ bool MeasureThenWeldService::MoveScanEndSafeAndWait(
     return MoveCoorsAndWait(pRobotDriver, endSafeCoors, speed, "扫描收枪安全位置", appendLog, setFlowStep);
 }
 
-bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep) const
+bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep, CameraFrameCache* cameraCache) const
 {
     if (pRobotDriver == nullptr)
     {
         return false;
     }
+    if (cameraCache == nullptr)
+    {
+        appendLog("扫描失败：当前机器人没有可用的专属相机缓存。");
+        setFlowStep("扫描失败：相机缓存未初始化");
+        return false;
+    }
+    CameraFrameCache* frameCache = cameraCache;
     FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver);
     const double scanCommandSpeed = LinearCommandSpeedForRobot(pRobotDriver, param.dScanSpeed, 1.0);
     const QString scanCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
@@ -2445,8 +2452,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         setFlowStep("扫描运动中，正在采集相机点、机器人位置和激光点");
     }
 
-    CameraFrameCache::Instance().Start();
-    CameraFrameCache::Instance().Clear();
+    frameCache->Clear();
 
     std::vector<TimestampedCameraPoint> cameraSamples;
     std::vector<TimestampedCameraPoint> matchedCameraSamples;
@@ -2577,14 +2583,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             return true;
         };
 
-    auto pullScanCameraFramesTo = [&lastPulledCameraSequence, &appendCameraFrame](std::uint64_t targetSequence)
+    auto pullScanCameraFramesTo = [frameCache, &lastPulledCameraSequence, &appendCameraFrame](std::uint64_t targetSequence)
         {
             if (targetSequence <= lastPulledCameraSequence)
             {
                 return;
             }
 
-            const std::vector<udpDataShow> frames = CameraFrameCache::Instance().FramesBetween(
+            const std::vector<udpDataShow> frames = frameCache->FramesBetween(
                 lastPulledCameraSequence,
                 targetSequence);
             for (const udpDataShow& frame : frames)
@@ -2594,14 +2600,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             lastPulledCameraSequence = targetSequence;
         };
 
-    auto pullScanCameraFrames = [&pullScanCameraFramesTo]()
+    auto pullScanCameraFrames = [frameCache, &pullScanCameraFramesTo]()
         {
-            pullScanCameraFramesTo(CameraFrameCache::Instance().Mark());
+            pullScanCameraFramesTo(frameCache->Mark());
         };
 
     if (appendLog)
     {
-        appendLog(QString("开始扫描运动：相机帧由全局缓存线程独立读取，配置相机读取帧率=%1 fps（约 %2 ms/帧，用于时间间隔统计），机器人位姿约 %3 ms 采样；机器人位姿使用被动时间轴（FANUC=机器人端robot_ms，STEP/其他=PC steady ms），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %4 ms。配置扫描速度= %5 mm/min，下发速度= %6 %7")
+        appendLog(QString("开始扫描运动：相机帧由当前机器人专属缓存读取，配置相机读取帧率=%1 fps（约 %2 ms/帧，用于时间间隔统计），机器人位姿约 %3 ms 采样；机器人位姿使用被动时间轴（FANUC=机器人端robot_ms，STEP/其他=PC steady ms），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %4 ms。配置扫描速度= %5 mm/min，下发速度= %6 %7")
             .arg(actualCameraReadFps, 0, 'f', 2)
             .arg(cameraReadIntervalMs)
             .arg(ROBOT_SAMPLE_INTERVAL_MS)
@@ -2650,7 +2656,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             {
                 if (!motionStarted)
                 {
-                    scanStartCameraSequence = CameraFrameCache::Instance().Mark();
+                    scanStartCameraSequence = frameCache->Mark();
                     lastPulledCameraSequence = scanStartCameraSequence;
                     if (appendLog)
                     {
@@ -2671,7 +2677,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             }
             if (motionStarted && isDoneState)
             {
-                scanEndCameraSequence = CameraFrameCache::Instance().Mark();
+                scanEndCameraSequence = frameCache->Mark();
                 pullScanCameraFramesTo(scanEndCameraSequence);
                 break;
             }
@@ -2701,10 +2707,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
 
     if (scanEndCameraSequence == 0)
     {
-        scanEndCameraSequence = CameraFrameCache::Instance().Mark();
+        scanEndCameraSequence = frameCache->Mark();
         pullScanCameraFramesTo(scanEndCameraSequence);
     }
-    CameraFrameCache::Instance().Clear();
+    frameCache->Clear();
 
     resolveReadyCameraSamples();
 

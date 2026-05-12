@@ -2,11 +2,9 @@
 
 #include "groove/framebuffer.h"
 
-#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <mutex>
-#include <thread>
 #include <vector>
 
 class CameraFrameCache
@@ -21,11 +19,15 @@ public:
         QString errorMessage;
     };
 
-    static CameraFrameCache& Instance();
+    CameraFrameCache() = default;
+    ~CameraFrameCache();
+    CameraFrameCache(const CameraFrameCache&) = delete;
+    CameraFrameCache& operator=(const CameraFrameCache&) = delete;
 
     void Start();
     void Stop();
     void Clear();
+    void AppendFrame(const udpDataShow& frame);
 
     std::uint64_t Mark() const;
     bool Latest(udpDataShow& frame) const;
@@ -41,18 +43,10 @@ private:
         udpDataShow frame;
     };
 
-    CameraFrameCache() = default;
-    ~CameraFrameCache();
-    CameraFrameCache(const CameraFrameCache&) = delete;
-    CameraFrameCache& operator=(const CameraFrameCache&) = delete;
-
-    void ThreadMain();
     void StoreFrame(const udpDataShow& frame);
 
     mutable std::mutex m_mutex;
     std::deque<CachedFrame> m_frames;
-    std::thread m_thread;
-    std::atomic_bool m_running{ false };
     std::uint64_t m_nextSequence = 0;
     std::size_t m_maxCachedFrames = 8000;
 };

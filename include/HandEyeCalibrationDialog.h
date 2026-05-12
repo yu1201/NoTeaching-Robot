@@ -18,6 +18,7 @@ class QPlainTextEdit;
 class QPushButton;
 class QTabWidget;
 class FANUCRobotCtrl;
+class CameraFrameCache;
 
 class HandEyeCalibrationDialog : public QDialog
 {
@@ -31,6 +32,7 @@ public:
         const QString& cameraSection,
         StartCameraFunc startCamera,
         StopCameraFunc stopCamera,
+        CameraFrameCache* cameraCache,
         QWidget* parent = nullptr);
 
 private:
@@ -86,6 +88,7 @@ private:
     HandEyeCalibrationConfig m_config;
     StartCameraFunc m_startCamera;
     StopCameraFunc m_stopCamera;
+    CameraFrameCache* m_pCameraCache = nullptr;
 
     QLabel* m_pAutoStateLabel = nullptr;
     QLabel* m_pCalibrationPathLabel = nullptr;

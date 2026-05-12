@@ -8,6 +8,7 @@
 
 class QComboBox;
 class QCloseEvent;
+class CameraFrameCache;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -24,6 +25,7 @@ public:
         const QString& robotName,
         StartCameraFunc startCamera,
         StopCameraFunc stopCamera,
+        CameraFrameCache* cameraCache,
         QWidget* parent = nullptr);
 
 private:
@@ -46,6 +48,7 @@ private:
     QString m_robotName;
     StartCameraFunc m_startCamera;
     StopCameraFunc m_stopCamera;
+    CameraFrameCache* m_pCameraCache = nullptr;
     QComboBox* m_pCameraCombo = nullptr;
     QLabel* m_pPathLabel = nullptr;
     QLabel* m_pCameraPathLabel = nullptr;

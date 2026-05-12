@@ -154,9 +154,6 @@
     <ClCompile Include="src\groove\pointcloundresultframe.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\groove\threadsafebuffer.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Const.h">
@@ -247,9 +244,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\groove\pointcloundresultframe.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="include\groove\threadsafebuffer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

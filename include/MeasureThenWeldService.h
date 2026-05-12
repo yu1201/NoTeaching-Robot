@@ -7,6 +7,7 @@
 #include <vector>
 
 class RobotDriverAdaptor;
+class CameraFrameCache;
 
 class MeasureThenWeldService
 {
@@ -21,7 +22,7 @@ public:
     bool MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, const T_ROBOT_COORS& coors, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
     bool MoveScanStartSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed, const LogCallback& appendLog, const StepCallback& setFlowStep, const CheckpointCallback& checkpoint) const;
     bool MoveScanEndSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
-    bool ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
+    bool ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep, CameraFrameCache* cameraCache) const;
 
     QString BuildResultDir(const std::string& robotName) const;
     bool SaveTextLines(const QString& filePath, const std::vector<QString>& lines, QString& error) const;
