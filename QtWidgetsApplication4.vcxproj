@@ -76,7 +76,7 @@
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <DisableSpecificWarnings>4828</DisableSpecificWarnings>
-      <AdditionalOptions>/bigobj /Zm2000 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /bigobj /Zm2000 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
@@ -99,7 +99,7 @@
       <ConformanceMode>true</ConformanceMode>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <AdditionalOptions>/bigobj /Zm2000 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /bigobj /Zm2000 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -184,6 +184,7 @@
     <ClInclude Include="include\RobotDriverAdaptor.h" />
     <ClInclude Include="include\RobotLog.h" />
     <ClInclude Include="include\RobotMessage.h" />
+    <ClInclude Include="include\RobotPoseTransform.h" />
     <ClInclude Include="include\RobotJogDialog.h" />
     <ClInclude Include="include\SkDataClass.h" />
     <ClInclude Include="include\SkFunction.h" />

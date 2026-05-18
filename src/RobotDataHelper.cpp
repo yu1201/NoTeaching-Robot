@@ -10,6 +10,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QSet>
+#include <QStringList>
 #include <QStringConverter>
 #include <QTextStream>
 #include <algorithm>
@@ -236,16 +238,134 @@ QStringList DefaultScanParamLines()
 QStringList DefaultWeldParamLines()
 {
     return QStringList()
-        << "WorldCoorDir=0"
-        << "RobotInstallDir=0"
-        << "GunAngle=0"
-        << "GunLaserAngle=0"
-        << "GunCameraAngle=0"
-        << "NormalWeldRx=0"
-        << "NormalWeldRy=0"
-        << "CornerTransitionLeadDis=0"
-        << "WeldStartSkipDis=0"
-        << "WeldEndSkipDis=0";
+        << "#焊接执行"
+        << "WeldEnable=1 ;1焊接，0空跑"
+        << "WeldSpeedMmPerMin=400 ;焊接速度(mm/min)"
+        << "DryRunSpeedMmPerMin=1000 ;空跑速度(mm/min)"
+        << "WeldSafeMoveSpeedMmPerMin=1000 ;下枪/收枪安全位移动速度(mm/min)"
+        << ""
+        << "#坐标和枪角"
+        << "WorldCoorDir=0 ;世界Z方向"
+        << "RobotInstallDir=0 ;机器人安装方向"
+        << "GunAngle=0 ;焊枪角度"
+        << "GunLaserAngle=0 ;激光与焊枪夹角"
+        << "GunCameraAngle=0 ;相机与焊枪夹角"
+        << ""
+        << "#焊接姿态"
+        << "NormalWeldRx=0 ;平焊RX"
+        << "NormalWeldRy=0 ;平焊RY"
+        << "CornerTransitionLeadDis=0 ;拐点过渡距离(mm)"
+        << "WeldStartSkipDis=0 ;起点跳过距离(mm)"
+        << "WeldEndSkipDis=0 ;终点跳过距离(mm)"
+        << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)";
+}
+
+QStringList DefaultWeldRuntimeParamLines(const QSet<QString>& existingKeys)
+{
+    QStringList lines;
+    QStringList runtimeLines;
+    if (!existingKeys.contains("WeldEnable"))
+    {
+        runtimeLines << "WeldEnable=1 ;1焊接，0空跑";
+    }
+    if (!existingKeys.contains("WeldSpeedMmPerMin"))
+    {
+        runtimeLines << "WeldSpeedMmPerMin=400 ;焊接速度(mm/min)";
+    }
+    if (!existingKeys.contains("DryRunSpeedMmPerMin"))
+    {
+        runtimeLines << "DryRunSpeedMmPerMin=1000 ;空跑速度(mm/min)";
+    }
+    if (!existingKeys.contains("WeldSafeMoveSpeedMmPerMin"))
+    {
+        runtimeLines << "WeldSafeMoveSpeedMmPerMin=1000 ;下枪/收枪安全位移动速度(mm/min)";
+    }
+    if (!runtimeLines.isEmpty())
+    {
+        lines << "#焊接执行" << runtimeLines;
+    }
+    if (!existingKeys.contains("WeldRzGainDeg"))
+    {
+        if (!lines.isEmpty())
+        {
+            lines << "";
+        }
+        lines << "#焊接姿态" << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)";
+    }
+    return lines;
+}
+
+void AppendMissingWeldRuntimeParams(QStringList& output, const QSet<QString>& keys, bool& changed)
+{
+    const QStringList missingLines = DefaultWeldRuntimeParamLines(keys);
+    if (missingLines.isEmpty())
+    {
+        return;
+    }
+
+    if (!output.isEmpty() && !output.last().trimmed().isEmpty())
+    {
+        output << "";
+    }
+    output << missingLines;
+    changed = true;
+}
+
+bool EnsureWeldRuntimeParamsInFile(const QString& filePath, QString* error)
+{
+    const QString content = ReadTextFileSmart(filePath);
+    if (content.isEmpty())
+    {
+        return true;
+    }
+
+    QStringList output;
+    const QStringList lines = content.split('\n');
+    bool inWeldSection = false;
+    bool changed = false;
+    QSet<QString> keys;
+
+    for (const QString& line : lines)
+    {
+        const QString trimmed = line.trimmed();
+        if (trimmed.startsWith('[') && trimmed.endsWith(']'))
+        {
+            if (inWeldSection)
+            {
+                AppendMissingWeldRuntimeParams(output, keys, changed);
+            }
+            const QString sectionName = trimmed.mid(1, trimmed.size() - 2).trimmed();
+            inWeldSection = sectionName.startsWith("MeasureGroup", Qt::CaseInsensitive)
+                && sectionName.endsWith(".Weld", Qt::CaseInsensitive);
+            keys.clear();
+        }
+
+        if (inWeldSection)
+        {
+            const int equalPos = line.indexOf('=');
+            if (equalPos > 0)
+            {
+                keys.insert(line.left(equalPos).trimmed());
+            }
+        }
+        output << line;
+    }
+
+    if (inWeldSection)
+    {
+        AppendMissingWeldRuntimeParams(output, keys, changed);
+    }
+
+    while (!output.isEmpty() && output.last().trimmed().isEmpty())
+    {
+        output.removeLast();
+    }
+
+    if (!changed)
+    {
+        return true;
+    }
+    return RobotDataHelper::SaveTextFileLines(filePath, output, error);
 }
 }
 
@@ -636,16 +756,6 @@ bool RobotDataHelper::SaveCameraParam(const QString& robotName, const CameraPara
 
 // ===== 精测量参数 =====
 
-QString RobotDataHelper::PreciseMeasureParamPath(const QString& robotName)
-{
-    return BuildProjectPath(QString("Data/%1/PreciseMeasureParam.ini").arg(robotName));
-}
-
-QString RobotDataHelper::WeldLineParamPath(const QString& robotName)
-{
-    return BuildProjectPath(QString("Data/%1/WeldLineParam.ini").arg(robotName));
-}
-
 QString RobotDataHelper::MeasureWeldParamPath(const QString& robotName)
 {
     return BuildProjectPath(QString("Data/%1/MeasureWeldParam.ini").arg(robotName));
@@ -666,36 +776,11 @@ bool RobotDataHelper::EnsureMeasureWeldParamFile(const QString& robotName, QStri
     const QString newPath = MeasureWeldParamPath(robotName);
     if (QFileInfo::exists(newPath))
     {
-        return true;
+        return EnsureWeldRuntimeParamsInFile(newPath, error);
     }
 
-    const QString precisePath = PreciseMeasureParamPath(robotName);
-    const QString weldPath = WeldLineParamPath(robotName);
-    const QString preciseText = ReadTextFileSmart(precisePath);
-    const QString weldText = ReadTextFileSmart(weldPath);
-    if (preciseText.isEmpty() && weldText.isEmpty())
-    {
-        if (error != nullptr)
-        {
-            *error = QString("未找到可迁移的参数文件：%1 / %2").arg(precisePath, weldPath);
-        }
-        return false;
-    }
-
-    COPini preciseIni;
     int groupCount = 1;
     int useGroupNo = 0;
-    if (preciseIni.SetFileName(precisePath.toLocal8Bit().constData()))
-    {
-        preciseIni.SetSectionName("ALLPostion");
-        preciseIni.ReadString(false, "ALLPostionNum", &groupCount);
-        preciseIni.ReadString(false, "UsePostionNo", &useGroupNo);
-    }
-    groupCount = std::max(1, groupCount);
-    if (useGroupNo < 0 || useGroupNo >= groupCount)
-    {
-        useGroupNo = 0;
-    }
 
     QStringList output;
     output << "[MeasureWeldGroups]";
@@ -707,23 +792,13 @@ bool RobotDataHelper::EnsureMeasureWeldParamFile(const QString& robotName, QStri
     }
     output << "";
 
-    QStringList weldLines = ExtractIniSectionLines(weldText, "WeldNormalParam0");
-    if (weldLines.isEmpty())
-    {
-        weldLines = DefaultWeldParamLines();
-    }
     for (int index = 0; index < groupCount; ++index)
     {
-        QStringList scanLines = ExtractIniSectionLines(preciseText, QString("Postion%1").arg(index));
-        if (scanLines.isEmpty())
-        {
-            scanLines = DefaultScanParamLines();
-        }
         output << QString("[%1]").arg(MeasureWeldScanSectionName(index));
-        output << scanLines;
+        output << DefaultScanParamLines();
         output << "";
         output << QString("[%1]").arg(MeasureWeldWeldSectionName(index));
-        output << weldLines;
+        output << DefaultWeldParamLines();
         output << "";
     }
 
@@ -740,7 +815,8 @@ bool RobotDataHelper::EnsureMeasureWeldParamFile(const QString& robotName, QStri
     QTextStream stream(&file);
     stream.setEncoding(QStringConverter::Utf8);
     stream << output.join("\n") << "\n";
-    return true;
+    file.close();
+    return EnsureWeldRuntimeParamsInFile(newPath, error);
 }
 
 int RobotDataHelper::MeasureWeldCurrentGroupIndex(const QString& robotName, QString* error)
@@ -773,85 +849,6 @@ QString RobotDataHelper::MeasureWeldCurrentScanSectionName(const QString& robotN
 QString RobotDataHelper::MeasureWeldCurrentWeldSectionName(const QString& robotName, QString* error)
 {
     return MeasureWeldWeldSectionName(MeasureWeldCurrentGroupIndex(robotName, error));
-}
-
-QString RobotDataHelper::PreciseMeasureSectionName(const QString& robotName, QString* error)
-{
-    if (QFileInfo::exists(MeasureWeldParamPath(robotName)) || EnsureMeasureWeldParamFile(robotName, nullptr))
-    {
-        return MeasureWeldCurrentScanSectionName(robotName, error);
-    }
-
-    const QString path = PreciseMeasureParamPath(robotName);
-    COPini ini;
-    if (!ini.SetFileName(path.toLocal8Bit().constData()))
-    {
-        if (error != nullptr)
-        {
-            *error = "打开参数文件失败：" + path;
-        }
-        return QString();
-    }
-
-    int useNo = 0;
-    ini.SetSectionName("ALLPostion");
-    ini.ReadString(false, "UsePostionNo", &useNo);
-    return QString("Postion%1").arg(useNo);
-}
-
-bool RobotDataHelper::ReadPrecisePulse(const QString& robotName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error)
-{
-    const QString filePath = PreciseMeasureParamPath(robotName);
-    const QString sectionName = PreciseMeasureSectionName(robotName, error);
-    if (filePath.isEmpty() || sectionName.isEmpty())
-    {
-        return false;
-    }
-    return ReadPulse(filePath, sectionName, prefix, pulse, error);
-}
-
-bool RobotDataHelper::WritePrecisePulse(const QString& robotName, const QString& prefix, const T_ANGLE_PULSE& pulse, QString* error)
-{
-    const QString filePath = PreciseMeasureParamPath(robotName);
-    const QString sectionName = PreciseMeasureSectionName(robotName, error);
-    if (filePath.isEmpty() || sectionName.isEmpty())
-    {
-        return false;
-    }
-    return WritePulse(filePath, sectionName, prefix, pulse, error);
-}
-
-bool RobotDataHelper::ReadPreciseCoors(const QString& robotName, const QString& prefix, T_ROBOT_COORS& coors, QString* error)
-{
-    const QString filePath = PreciseMeasureParamPath(robotName);
-    const QString sectionName = PreciseMeasureSectionName(robotName, error);
-    if (filePath.isEmpty() || sectionName.isEmpty())
-    {
-        return false;
-    }
-    return ReadCoors(filePath, sectionName, prefix, coors, error);
-}
-
-bool RobotDataHelper::WritePreciseCoors(const QString& robotName, const QString& prefix, const T_ROBOT_COORS& coors, QString* error)
-{
-    const QString filePath = PreciseMeasureParamPath(robotName);
-    const QString sectionName = PreciseMeasureSectionName(robotName, error);
-    if (filePath.isEmpty() || sectionName.isEmpty())
-    {
-        return false;
-    }
-    return WriteCoors(filePath, sectionName, prefix, coors, error);
-}
-
-bool RobotDataHelper::WritePreciseParamValue(const QString& robotName, const QString& key, const QString& value, QString* error)
-{
-    const QString filePath = PreciseMeasureParamPath(robotName);
-    const QString sectionName = PreciseMeasureSectionName(robotName, error);
-    if (filePath.isEmpty() || sectionName.isEmpty())
-    {
-        return false;
-    }
-    return WriteParamValue(filePath, sectionName, key, value, error);
 }
 
 // ===== 底层 ini 读写 =====
@@ -958,12 +955,39 @@ bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionN
     }
     ini.SetSectionName(sectionName.toStdString());
 
-    const int ok = ini.ReadString((prefix + ".").toStdString(), "", coors);
-    if (ok <= 0)
+    coors = T_ROBOT_COORS();
+    QStringList missingKeys;
+
+    auto readRequired = [&ini, &prefix, &missingKeys](const QString& suffix, double& value)
+        {
+            const QString key = prefix + "." + suffix;
+            if (ini.ReadString(false, key.toStdString(), &value) <= 0)
+            {
+                missingKeys << key;
+            }
+        };
+    auto readOptional = [&ini, &prefix](const QString& suffix, double& value)
+        {
+            const QString key = prefix + "." + suffix;
+            ini.ReadString(false, key.toStdString(), &value);
+        };
+
+    readRequired("X", coors.dX);
+    readRequired("Y", coors.dY);
+    readRequired("Z", coors.dZ);
+    readRequired("RX", coors.dRX);
+    readRequired("RY", coors.dRY);
+    readRequired("RZ", coors.dRZ);
+    readOptional("BX", coors.dBX);
+    readOptional("BY", coors.dBY);
+    readOptional("BZ", coors.dBZ);
+
+    if (!missingKeys.isEmpty())
     {
         if (error != nullptr)
         {
-            *error = QString("读取失败：%1，文件=%2，分组=%3").arg(prefix, filePath, sectionName);
+            *error = QString("读取失败：%1，缺少 %2，文件=%3，分组=%4")
+                .arg(prefix, missingKeys.join(", "), filePath, sectionName);
         }
         return false;
     }

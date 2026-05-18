@@ -34,6 +34,7 @@ public:
         StopCameraFunc stopCamera,
         CameraFrameCache* cameraCache,
         QWidget* parent = nullptr);
+    bool MatrixComputedThisSession() const { return m_bMatrixComputedThisSession; }
 
 private:
     void closeEvent(QCloseEvent* event) override;
@@ -102,5 +103,6 @@ private:
     QVector<QLineEdit*> m_tcpEdits;
     QVector<SampleWidgets> m_sampleWidgets;
     std::atomic_bool m_bAutoCalibrationRunning = false;
+    bool m_bMatrixComputedThisSession = false;
     QString m_cleanSnapshot;
 };

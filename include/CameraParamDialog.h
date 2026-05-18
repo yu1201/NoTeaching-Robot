@@ -19,6 +19,7 @@ class CameraParamDialog : public QDialog
 public:
     using StartCameraFunc = std::function<bool(QString&)>;
     using StopCameraFunc = std::function<void()>;
+    using SetupStatusChangedFunc = std::function<void()>;
 
     explicit CameraParamDialog(
         ContralUnit* pContralUnit,
@@ -26,6 +27,7 @@ public:
         StartCameraFunc startCamera,
         StopCameraFunc stopCamera,
         CameraFrameCache* cameraCache,
+        SetupStatusChangedFunc setupStatusChanged = nullptr,
         QWidget* parent = nullptr);
 
 private:
@@ -48,6 +50,7 @@ private:
     QString m_robotName;
     StartCameraFunc m_startCamera;
     StopCameraFunc m_stopCamera;
+    SetupStatusChangedFunc m_setupStatusChanged;
     CameraFrameCache* m_pCameraCache = nullptr;
     QComboBox* m_pCameraCombo = nullptr;
     QLabel* m_pPathLabel = nullptr;

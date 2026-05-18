@@ -13,6 +13,7 @@ class HandEyeMatrixDialog : public QDialog
 {
 public:
     explicit HandEyeMatrixDialog(const QString& robotName, const QString& cameraSection, QWidget* parent = nullptr);
+    bool SavedThisSession() const { return m_bSavedThisSession; }
 
 private:
     void closeEvent(QCloseEvent* event) override;
@@ -29,5 +30,6 @@ private:
     QPlainTextEdit* m_pLogText = nullptr;
     QVector<QLineEdit*> m_rotationEdits;
     QVector<QLineEdit*> m_translationEdits;
+    bool m_bSavedThisSession = false;
     QString m_cleanSnapshot;
 };

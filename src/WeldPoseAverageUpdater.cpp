@@ -6,6 +6,7 @@
 
 #include "OPini.h"
 #include "RobotDataHelper.h"
+#include "RobotMessage.h"
 
 #include <QDateTime>
 #include <QDir>
@@ -418,11 +419,11 @@ PoseLibrary LoadPoseLibrary(const QString& path)
         std::string text;
         if (ini.ReadString(false, "Name", text) > 0)
         {
-            slot.name = QString::fromLocal8Bit(text.c_str());
+            slot.name = DecodeRobotMessageText(text);
         }
         if (ini.ReadString(false, "SegmentKind", text) > 0)
         {
-            slot.segmentKind = QString::fromStdString(text);
+            slot.segmentKind = DecodeRobotMessageText(text);
         }
         ReadIniDouble(ini, "Rx", slot.rx);
         ReadIniDouble(ini, "Ry", slot.ry);

@@ -48,5 +48,5 @@ private:
     mutable std::mutex m_mutex;
     std::deque<CachedFrame> m_frames;
     std::uint64_t m_nextSequence = 0;
-    std::size_t m_maxCachedFrames = 8000;
+    std::size_t m_maxCachedFrames = 2000;
 };

@@ -1,6 +1,5 @@
 #include "WeldProcessFile.h"
 
-#include "OPini.h"
 #include "RobotLog.h"
 #include "RobotMessage.h"
 
@@ -88,12 +87,12 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
 
     if (!fs::exists(m_sWeaveIniFilePath) || !fs::exists(m_sWeldIniFilePath))
     {
-        if (!TryMigrateFromIni())
-        {
-            LogError("%s", m_sLastError.c_str());
-            ShowError(m_sLastError);
-            return false;
-        }
+        m_sLastError = GetStr("未找到工艺 txt 文件：%s / %s",
+            m_sWeaveIniFilePath.c_str(),
+            m_sWeldIniFilePath.c_str());
+        LogError("%s", m_sLastError.c_str());
+        ShowError(m_sLastError);
+        return false;
     }
 
     if (!LoadWeaveTxt())
@@ -567,144 +566,6 @@ bool WeldProcessFile::SaveWeldTxt() const
     {
         out << JoinLine(BuildWeldFields(item), kDelimiter) << "\n";
     }
-    return true;
-}
-
-bool WeldProcessFile::TryMigrateFromIni()
-{
-    const fs::path txtDir = fs::path(m_sWeldIniFilePath).parent_path();
-    fs::create_directories(txtDir);
-
-    const fs::path oldWeaveIni = txtDir / "WeaveDate.ini";
-    const fs::path oldWeldIni = txtDir / "WeldPara.ini";
-
-    if (!fs::exists(oldWeaveIni) || !fs::exists(oldWeldIni))
-    {
-        m_sLastError = "未找到 txt 文件，也未找到可迁移的 ini 文件。";
-        return false;
-    }
-
-    if (!ImportWeaveFromIni(oldWeaveIni.string()))
-    {
-        return false;
-    }
-    if (!ImportWeldFromIni(oldWeldIni.string()))
-    {
-        return false;
-    }
-    EnsureDefaultLayerRows();
-    NormalizeWeldOrderKeepGroupOrder();
-
-    if (!SaveWeaveTxt() || !SaveWeldTxt())
-    {
-        return false;
-    }
-    return true;
-}
-
-bool WeldProcessFile::ImportWeaveFromIni(const std::string& iniPath)
-{
-    COPini reader;
-    reader.SetFileName(iniPath);
-    reader.SetSectionName("ALLWeaveType");
-
-    if (reader.ReadString("ALLWeaveTypeNum", &m_nAllWeaveTypeNum) <= 0 || m_nAllWeaveTypeNum <= 0)
-    {
-        m_sLastError = "迁移 ini 时读取 ALLWeaveTypeNum 失败。";
-        return false;
-    }
-    if (reader.ReadString("UseWeaveTypeNo", &m_nUseWeaveTypeNo) <= 0)
-    {
-        m_nUseWeaveTypeNo = 0;
-    }
-
-    m_vtWeaveTypeList.clear();
-    for (int i = 0; i < m_nAllWeaveTypeNum; ++i)
-    {
-        T_WeaveDate item {};
-        const std::string sectionName = GetStr("WeaveType%d", i);
-        reader.SetSectionName(sectionName);
-        if (reader.ReadString("Type", &item.Type) <= 0) return false;
-        if (reader.ReadString("Freq", &item.Freq) <= 0) return false;
-        if (reader.ReadString("Amp_L", &item.Amp_L) <= 0) return false;
-        if (reader.ReadString("Amp_R", &item.Amp_R) <= 0) return false;
-        if (reader.ReadString("StopTime_L", &item.StopTime_L) <= 0) return false;
-        if (reader.ReadString("StopTime_C", &item.StopTime_C) <= 0) return false;
-        if (reader.ReadString("StopTime_R", &item.StopTime_R) <= 0) return false;
-        if (reader.ReadString("RotAngle_X", &item.RotAngle_X) <= 0) return false;
-        if (reader.ReadString("RotAngle_Z", &item.RotAngle_Z) <= 0) return false;
-        if (reader.ReadString("DelayType_L", &item.DelayType_L) <= 0) return false;
-        if (reader.ReadString("DelayType_C", &item.DelayType_C) <= 0) return false;
-        if (reader.ReadString("DelayType_R", &item.DelayType_R) <= 0) return false;
-        if (reader.ReadString("RotAngle_L", &item.RotAngle_L) <= 0) return false;
-        if (reader.ReadString("RotAngle_R", &item.RotAngle_R) <= 0) return false;
-        m_vtWeaveTypeList.push_back(item);
-    }
-    std::sort(m_vtWeaveTypeList.begin(), m_vtWeaveTypeList.end(), [](const T_WeaveDate& a, const T_WeaveDate& b)
-        {
-            return a.Type < b.Type;
-        });
-    m_nAllWeaveTypeNum = static_cast<int>(m_vtWeaveTypeList.size());
-    m_nUseWeaveTypeNo = qBound(0, m_nUseWeaveTypeNo, qMax(0, m_nAllWeaveTypeNum - 1));
-    return true;
-}
-
-bool WeldProcessFile::ImportWeldFromIni(const std::string& iniPath)
-{
-    COPini reader;
-    reader.SetFileName(iniPath);
-    reader.SetSectionName("ALLWeldPara");
-
-    if (reader.ReadString("ALLWeldParaNum", &m_nAllWeldParaNum) <= 0 || m_nAllWeldParaNum <= 0)
-    {
-        m_sLastError = "迁移 ini 时读取 ALLWeldParaNum 失败。";
-        return false;
-    }
-    if (reader.ReadString("UseWeldParaNo", &m_nUseWeldParaNo) <= 0)
-    {
-        m_nUseWeldParaNo = 0;
-    }
-
-    m_vtWeldParaList.clear();
-    for (int i = 0; i < m_nAllWeldParaNum; ++i)
-    {
-        T_WELD_PARA item {};
-        const std::string sectionName = GetStr("WeldPara%d", i);
-        reader.SetSectionName(sectionName);
-        if (reader.ReadString("strWorkPeace", item.strWorkPeace) <= 0) return false;
-        if (reader.ReadString("strWeldType", item.strWeldType) <= 0) return false;
-        if (reader.ReadString("dWeldAngleSize", &item.dWeldAngleSize) <= 0) return false;
-        if (reader.ReadString("nLayerNo", &item.nLayerNo) <= 0) return false;
-        if (reader.ReadString("dStartArcCurrent", &item.dStartArcCurrent) <= 0) return false;
-        if (reader.ReadString("dStartArcVoltage", &item.dStartArcVoltage) <= 0) return false;
-        if (reader.ReadString("dStartWaitTime", &item.dStartWaitTime) <= 0) return false;
-        if (reader.ReadString("dTrackCurrent", &item.dTrackCurrent) <= 0) return false;
-        if (reader.ReadString("dTrackVoltage", &item.dTrackVoltage) <= 0) return false;
-        if (reader.ReadString("WeldVelocity", &item.WeldVelocity) <= 0) return false;
-        if (reader.ReadString("dStopArcCurrent", &item.dStopArcCurrent) <= 0) return false;
-        if (reader.ReadString("dStopArcVoltage", &item.dStopArcVoltage) <= 0) return false;
-        if (reader.ReadString("dStopWaitTime", &item.dStopWaitTime) <= 0) return false;
-        if (reader.ReadString("dWrapCurrentt1", &item.dWrapCurrentt1) <= 0) return false;
-        if (reader.ReadString("dWrapVoltage1", &item.dWrapVoltage1) <= 0) return false;
-        if (reader.ReadString("dWrapWaitTime1", &item.dWrapWaitTime1) <= 0) return false;
-        if (reader.ReadString("dWrapCurrentt2", &item.dWrapCurrentt2) <= 0) return false;
-        if (reader.ReadString("dWrapVoltage2", &item.dWrapVoltage2) <= 0) return false;
-        if (reader.ReadString("dWrapWaitTime2", &item.dWrapWaitTime2) <= 0) return false;
-        if (reader.ReadString("dWrapCurrentt3", &item.dWrapCurrentt3) <= 0) return false;
-        if (reader.ReadString("dWrapVoltage3", &item.dWrapVoltage3) <= 0) return false;
-        if (reader.ReadString("dWrapWaitTime3", &item.dWrapWaitTime3) <= 0) return false;
-        if (reader.ReadString("CrosswiseOffset", &item.CrosswiseOffset) <= 0) return false;
-        if (reader.ReadString("verticalOffset", &item.verticalOffset) <= 0) return false;
-        if (reader.ReadString("nWrapConditionNo", &item.nWrapConditionNo) <= 0) return false;
-        if (reader.ReadString("dWeldAngle", &item.dWeldAngle) <= 0) return false;
-        if (reader.ReadString("dWeldDipAngle", &item.dWeldDipAngle) <= 0) return false;
-        if (reader.ReadString("nStandWeldDir", &item.nStandWeldDir) <= 0) return false;
-        if (reader.ReadString("WeaveTypeNo", &item.nWeaveTypeNo) <= 0) return false;
-        if (reader.ReadString("nWeldMethod", &item.nWeldMethod) <= 0) return false;
-        m_vtWeldParaList.push_back(item);
-    }
-    m_nAllWeldParaNum = static_cast<int>(m_vtWeldParaList.size());
-    m_nUseWeldParaNo = qBound(0, m_nUseWeldParaNo, qMax(0, m_nAllWeldParaNum - 1));
     return true;
 }
 

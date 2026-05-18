@@ -21,12 +21,14 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
 #include <QDoubleSpinBox>
+#include <QSignalBlocker>
 #include <QTextDocument>
 #include <QTextStream>
 #include <QThread>
@@ -38,6 +40,8 @@
 
 namespace
 {
+constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
+constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
 constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
 constexpr auto WELD_POSE_SEAM_COMP_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
 
@@ -55,15 +59,20 @@ QString ResolveLaserPointDirFromSelection(const QString& selectedDir)
     }
 
     const QDir dir(selectedInfo.absoluteFilePath());
-    if (QFileInfo::exists(dir.filePath(WELD_POSE_FILE_NAME)))
+    if (QFileInfo::exists(dir.filePath(RAW_LASER_FILE_NAME))
+        || QFileInfo::exists(dir.filePath(PRESERVE_PATH_FILE_NAME))
+        || QFileInfo::exists(dir.filePath(WELD_POSE_FILE_NAME)))
     {
         return dir.absolutePath();
     }
 
     const QString laserDir = dir.filePath("LaserPoint");
-    if (QFileInfo::exists(QDir(laserDir).filePath(WELD_POSE_FILE_NAME)))
+    const QDir nestedLaserDir(laserDir);
+    if (QFileInfo::exists(nestedLaserDir.filePath(RAW_LASER_FILE_NAME))
+        || QFileInfo::exists(nestedLaserDir.filePath(PRESERVE_PATH_FILE_NAME))
+        || QFileInfo::exists(nestedLaserDir.filePath(WELD_POSE_FILE_NAME)))
     {
-        return QDir(laserDir).absolutePath();
+        return nestedLaserDir.absolutePath();
     }
 
     return QString();
@@ -88,6 +97,9 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
         "QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
         "QPushButton:pressed { background: #18303B; }"
         "QPushButton:disabled { background: #27323A; color: #7D8B91; border-color: #364650; }"
+        "QCheckBox { color: #BFE8EC; spacing: 8px; font-size: 15px; }"
+        "QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #5C7A8B; background: #0B1117; }"
+        "QCheckBox::indicator:checked { background: #1E8AA0; border-color: #72D4DD; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
         "QLabel { color: #BACBD1; }");
 
@@ -99,6 +111,18 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
 
     QLabel* hintLabel = new QLabel("预设参数：读取 MeasureWeldParam.ini 当前参数组，并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点，并在扫描后自动执行 PreservePath 拟合、焊道分类、焊接姿态生成和焊道补偿。也可以跳过扫描，直接选历史结果文件夹焊接。");
     rootLayout->addWidget(hintLabel);
+
+    QHBoxLayout* modeLayout = new QHBoxLayout();
+    QLabel* modeLabel = new QLabel("运行模式：");
+    modeLabel->setStyleSheet("font-weight: bold; color: #9ED8DB;");
+    m_pActualWeldCheck = new QCheckBox("实际焊接");
+    m_pActualWeldCheck->setChecked(true);
+    QLabel* modeHintLabel = new QLabel("取消勾选后只空跑轨迹，使用焊接参数里的空跑速度。");
+    modeLayout->addWidget(modeLabel);
+    modeLayout->addWidget(m_pActualWeldCheck);
+    modeLayout->addWidget(modeHintLabel);
+    modeLayout->addStretch();
+    rootLayout->addLayout(modeLayout);
 
     QGridLayout* buttonLayout = new QGridLayout();
     m_pPresetParamBtn = new QPushButton("预设参数");
@@ -125,6 +149,8 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     connect(m_pSkipScanWeldBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunSkipScanWeldFlow);
     connect(m_pLineScanProcessBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunLineScanProcess);
     connect(m_pScanSafeParamBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::OpenScanSafeParamDialog);
+    connect(m_pActualWeldCheck, &QCheckBox::toggled, this, &MeasureThenWeldDialog::SaveWeldModeToParam);
+    RefreshWeldModeFromParam();
 }
 
 void MeasureThenWeldDialog::closeEvent(QCloseEvent* event)
@@ -482,12 +508,18 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
         QMessageBox::warning(this, "预设参数", error);
         return;
     }
+    param.bDoActualWeld = IsActualWeldModeChecked();
     SetRunning(true);
     SetFlowStep("读取预设参数完成，准备启动相机");
     AppendLog(QString("已读取参数：%1，位置类型=%2 [%3]")
         .arg(QString::fromStdString(param.sIniFilePath))
         .arg(param.sParamGroupName)
         .arg(QString::fromStdString(param.sSectionName)));
+    AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min")
+        .arg(param.bDoActualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑"))
+        .arg(param.dWeldSpeedMmPerMin, 0, 'f', 3)
+        .arg(param.dDryRunSpeedMmPerMin, 0, 'f', 3)
+        .arg(param.dWeldSafeMoveSpeedMmPerMin, 0, 'f', 3));
 
     // 机器人运动和扫描采集放到后台线程，避免 UI 被 CheckRobotDone 和文件保存卡住。
     QPointer<MeasureThenWeldDialog> self(this);
@@ -601,6 +633,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         && self->m_pService->ExecuteWeldPoseFileWithSafePos(
                             pRobotDriver,
                             savedPath,
+                            param,
                             executeSummary,
                             executeError,
                             &startSafeCoors,
@@ -691,6 +724,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
         QMessageBox::warning(this, "跳过扫描焊接", error);
         return;
     }
+    param.bDoActualWeld = IsActualWeldModeChecked();
 
     const QString defaultDir = RobotDataHelper::BuildProjectPath(
         QString("Result/%1").arg(QString::fromStdString(param.sRobotName)));
@@ -710,36 +744,46 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
         QMessageBox::warning(
             this,
             "跳过扫描焊接",
-            QString("在所选目录中未找到姿态文件 %1。\n请选择结果目录本身，或其下的 LaserPoint 目录。")
-                .arg(WELD_POSE_FILE_NAME));
+            QString("在所选目录中未找到原始激光点或历史姿态文件。\n请选择结果目录本身，或其下的 LaserPoint 目录。"));
         return;
     }
 
+    const QString preservePath = QDir(laserDir).filePath(PRESERVE_PATH_FILE_NAME);
     const QString poseFilePath = QDir(laserDir).filePath(WELD_POSE_FILE_NAME);
     const QString seamCompPath = QDir(laserDir).filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
-    if (!QFileInfo::exists(poseFilePath))
-    {
-        QMessageBox::warning(
-            this,
-            "跳过扫描焊接",
-            QString("未找到姿态文件：%1").arg(poseFilePath));
-        return;
-    }
 
     SetRunning(true);
-    SetFlowStep("已选择历史结果，准备按当前补偿参数重建焊接文件");
+    SetFlowStep("已选择历史结果，准备重新计算三份焊接文件");
     AppendLog(QString("跳过扫描模式：结果目录=%1").arg(selectedDir));
+    AppendLog(QString("LaserPoint目录=%1").arg(laserDir));
+    AppendLog(QString("PreservePath文件将输出到=%1").arg(preservePath));
     AppendLog(QString("姿态文件=%1").arg(poseFilePath));
     AppendLog(QString("补偿后文件将输出到=%1").arg(seamCompPath));
+    AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min，RZ增益=%5 deg")
+        .arg(param.bDoActualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑"))
+        .arg(param.dWeldSpeedMmPerMin, 0, 'f', 3)
+        .arg(param.dDryRunSpeedMmPerMin, 0, 'f', 3)
+        .arg(param.dWeldSafeMoveSpeedMmPerMin, 0, 'f', 3)
+        .arg(param.dWeldRzGainDeg, 0, 'f', 3));
 
     QPointer<MeasureThenWeldDialog> self(this);
-    std::thread([self, pRobotDriver, param, selectedDir, poseFilePath, seamCompPath]()
+    std::thread([self,
+                 pRobotDriver,
+                 param,
+                 selectedDir,
+                 laserDir,
+                 preservePath = QString(preservePath),
+                 poseFilePath = QString(poseFilePath),
+                 seamCompPath = QString(seamCompPath)]() mutable
         {
             bool ok = true;
             QString message;
             QString processError;
-            QString seamCompSummary;
+            QString rebuildSummary;
             QString executeSummary;
+            QString rebuildPreservePath = preservePath;
+            QString rebuildPoseFilePath = poseFilePath;
+            QString rebuildSeamCompPath = seamCompPath;
             T_ROBOT_COORS startSafeCoors;
             T_ROBOT_COORS endSafeCoors;
 
@@ -747,35 +791,43 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
             {
                 ok = self->ShowCheckpointDialog(
                     "跳过扫描确认",
-                    QString("已选择结果目录：%1\n将读取姿态文件：%2\n并按当前焊道补偿参数重新生成补偿后文件。")
+                    QString("已选择结果目录：%1\n将按当前参数重新计算：\n%2\n%3\n%4")
                         .arg(selectedDir)
-                        .arg(poseFilePath));
+                        .arg(preservePath)
+                        .arg(poseFilePath)
+                        .arg(seamCompPath));
             }
 
             if (ok)
             {
                 if (self != nullptr)
                 {
-                    self->SetFlowStep("正在根据姿态文件重建焊道补偿结果");
+                    self->SetFlowStep("正在从历史LaserPoint重新计算三份焊接文件");
                 }
                 ok = self != nullptr
                     && self->m_pService != nullptr
-                    && self->m_pService->ApplyWeldSeamCompToPoseFile(
-                        QString::fromStdString(param.sRobotName),
-                        poseFilePath,
-                        seamCompPath,
-                        seamCompSummary,
-                        processError);
+                    && self->m_pService->RebuildWeldFilesFromLaserDir(
+                        param,
+                        laserDir,
+                        rebuildPreservePath,
+                        rebuildPoseFilePath,
+                        rebuildSeamCompPath,
+                        rebuildSummary,
+                        processError,
+                        [self](const QString& text) { if (self != nullptr) self->AppendLog(text); },
+                        [self](const QString& text) { if (self != nullptr) self->SetFlowStep(text); });
                 if (self != nullptr)
                 {
                     if (ok)
                     {
-                        self->AppendLog(QString("焊道补偿文件已更新：%1").arg(seamCompPath));
-                        self->AppendLog(QString("焊道补偿摘要：%1").arg(seamCompSummary));
+                        self->AppendLog(QString("跳过扫描重建完成：%1").arg(rebuildSummary));
+                        preservePath = rebuildPreservePath;
+                        poseFilePath = rebuildPoseFilePath;
+                        seamCompPath = rebuildSeamCompPath;
                     }
                     else
                     {
-                        self->AppendLog(QString("重新生成焊道补偿文件失败：%1").arg(processError));
+                        self->AppendLog(QString("跳过扫描重建文件失败：%1").arg(processError));
                     }
                 }
             }
@@ -784,10 +836,11 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
             {
                 ok = self != nullptr && self->ShowCheckpointDialog(
                     "补偿完成",
-                    QString("姿态文件：%1\n补偿文件：%2\n%3")
+                    QString("PreservePath：%1\n姿态文件：%2\n补偿文件：%3\n%4")
+                        .arg(preservePath)
                         .arg(poseFilePath)
                         .arg(seamCompPath)
-                        .arg(seamCompSummary));
+                        .arg(rebuildSummary));
             }
 
             if (ok)
@@ -808,6 +861,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                     && self->m_pService->ExecuteWeldPoseFileWithSafePos(
                         pRobotDriver,
                         seamCompPath,
+                        param,
                         executeSummary,
                         processError,
                         &startSafeCoors,
@@ -882,6 +936,77 @@ void MeasureThenWeldDialog::RunLineScanProcess()
     QMessageBox::information(this, "线扫处理", "线扫处理暂时为空函数，后续接入点云处理算法。");
 }
 
+void MeasureThenWeldDialog::RefreshWeldModeFromParam()
+{
+    if (m_pActualWeldCheck == nullptr || m_pService == nullptr)
+    {
+        return;
+    }
+
+    RobotDriverAdaptor* pRobotDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, m_unitIndex);
+    if (pRobotDriver == nullptr)
+    {
+        return;
+    }
+
+    T_PRECISE_MEASURE_PARAM param;
+    QString error;
+    if (!m_pService->LoadPresetParam(pRobotDriver, param, error))
+    {
+        return;
+    }
+
+    const QSignalBlocker blocker(m_pActualWeldCheck);
+    m_pActualWeldCheck->setChecked(param.bDoActualWeld);
+    m_pActualWeldCheck->setToolTip(QString("勾选后按焊接速度运行：%1 mm/min\n取消勾选后按空跑速度运行：%2 mm/min\n下枪/收枪安全位置速度：%3 mm/min")
+        .arg(param.dWeldSpeedMmPerMin, 0, 'f', 3)
+        .arg(param.dDryRunSpeedMmPerMin, 0, 'f', 3)
+        .arg(param.dWeldSafeMoveSpeedMmPerMin, 0, 'f', 3));
+}
+
+void MeasureThenWeldDialog::SaveWeldModeToParam(bool doActualWeld)
+{
+    if (m_bRunning || m_pService == nullptr)
+    {
+        return;
+    }
+
+    RobotDriverAdaptor* pRobotDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, m_unitIndex);
+    if (pRobotDriver == nullptr)
+    {
+        return;
+    }
+
+    T_PRECISE_MEASURE_PARAM param;
+    QString error;
+    if (!m_pService->LoadPresetParam(pRobotDriver, param, error))
+    {
+        AppendLog("保存焊接/空跑模式失败：" + error);
+        return;
+    }
+
+    const QString paramPath = QString::fromStdString(param.sWeldParamFilePath.empty()
+        ? param.sIniFilePath
+        : param.sWeldParamFilePath);
+    if (!RobotDataHelper::WriteParamValue(
+        paramPath,
+        QString::fromStdString(param.sWeldSectionName),
+        "WeldEnable",
+        doActualWeld ? "1" : "0",
+        &error))
+    {
+        AppendLog("保存焊接/空跑模式失败：" + error);
+        return;
+    }
+
+    AppendLog(QString("运行模式已切换为：%1").arg(doActualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑")));
+}
+
+bool MeasureThenWeldDialog::IsActualWeldModeChecked() const
+{
+    return m_pActualWeldCheck == nullptr || m_pActualWeldCheck->isChecked();
+}
+
 void MeasureThenWeldDialog::AppendLog(const QString& text)
 {
     if (QThread::currentThread() != thread())
@@ -927,4 +1052,9 @@ void MeasureThenWeldDialog::SetRunning(bool running)
     m_pPresetParamBtn->setEnabled(!running);
     m_pSkipScanWeldBtn->setEnabled(!running);
     m_pLineScanProcessBtn->setEnabled(!running);
+    m_pScanSafeParamBtn->setEnabled(!running);
+    if (m_pActualWeldCheck != nullptr)
+    {
+        m_pActualWeldCheck->setEnabled(!running);
+    }
 }

@@ -2,6 +2,7 @@
 
 #include "OPini.h"
 #include "RobotDataHelper.h"
+#include "RobotMessage.h"
 #include "WindowStyleHelper.h"
 
 #include <QButtonGroup>
@@ -396,11 +397,11 @@ void WeldSeamCompDialog::LoadPoseParam(const QString& path)
         ini.SetSectionName(row.sectionName.toStdString());
         if (ini.ReadString(false, "Name", text) > 0)
         {
-            row.name = QString::fromLocal8Bit(text.c_str());
+            row.name = DecodeRobotMessageText(text);
         }
         if (ini.ReadString(false, "SegmentKind", text) > 0)
         {
-            row.segmentKind = QString::fromStdString(text);
+            row.segmentKind = DecodeRobotMessageText(text);
         }
         if (row.segmentKind.isEmpty() && defaultIndex < m_poseTypes.size())
         {
@@ -454,11 +455,11 @@ void WeldSeamCompDialog::LoadSeamParam(const QString& path)
         ini.SetSectionName(row.sectionName.toStdString());
         if (ini.ReadString(false, "Name", text) > 0)
         {
-            row.name = QString::fromLocal8Bit(text.c_str());
+            row.name = DecodeRobotMessageText(text);
         }
         if (ini.ReadString(false, "SegmentKind", text) > 0)
         {
-            row.segmentKind = QString::fromStdString(text);
+            row.segmentKind = DecodeRobotMessageText(text);
         }
 
         ReadIniDouble(ini, "WeldZComp", row.weldZComp);

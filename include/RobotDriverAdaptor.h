@@ -5,7 +5,11 @@
 #include <string>   // 必须包含，否则无法使用std::string
 #include <iostream> // 用于输出string（cout）
 #include <sstream>  // 用于string和数字的转换（stringstream）
+#include <atomic>
+#include <cstdint>
+#include <deque>
 #include <mutex>
+#include <thread>
 #include <vector>
 #include <KDL/frames.hpp>
 #include <KDL/chain.hpp>
@@ -51,6 +55,23 @@ public:
     virtual T_ROBOT_COORS GetCurrentPosPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr);
     virtual T_ANGLE_PULSE GetCurrentPulsePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr);
     virtual int CheckDonePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr);
+    struct StateSnapshot
+    {
+        std::uint64_t sequence = 0;
+        long long robotMs = 0;
+        long long pcRecvMs = 0;
+        T_ROBOT_COORS pose;
+        T_ANGLE_PULSE pulse;
+        int done = -1;
+        bool valid = false;
+    };
+    bool StartStateMonitor(int intervalMs = 50);
+    void StopStateMonitor();
+    bool IsStateMonitorRunning() const;
+    bool LatestStateSnapshot(StateSnapshot& snapshot) const;
+    std::vector<StateSnapshot> StateSnapshotsBetween(std::uint64_t beginExclusive, std::uint64_t endInclusive) const;
+    std::uint64_t StateMonitorMark() const;
+    int StateMonitorCachedCount() const;
     virtual int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo);
     virtual int CheckDone();
     virtual int CheckRobotDone(int nDelayTime = 200);
@@ -59,6 +80,7 @@ public:
     virtual int UploadFile(std::string LocalFilePath, std::string RemoteFilePath);
     virtual int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath);
     virtual bool SetTpSpeed(int speed);
+    virtual bool GetToolData(int nToolNo, T_ROBOT_COORS& robotToolData);
     virtual int GetIntVar(int nIndex, const char* cStrPreFix = "INT");
     virtual bool SetIntVar(int nIndex, int nValue, int score = 2, const char* cStrPreFix = "INT");
     virtual bool SetIntVar(const char* name, int value, int score = 2);
@@ -70,6 +92,8 @@ public:
 
 private:
     void CreateFanucChain();
+    void StateMonitorWorker(int intervalMs);
+    void StoreStateSnapshot(const StateSnapshot& snapshot);
     void rotationMatrixToRPY(const KDL::Rotation& rot, double& rx, double& ry, double& rz);
     void CoorsToKDLFrame(const T_ROBOT_COORS& coors, KDL::Frame& frame);
     KDL::Frame CalculateFlangeFrame(const T_ROBOT_COORS& tcp_target, const T_ROBOT_COORS& tool_coors);
@@ -85,6 +109,9 @@ private:
     bool IsDuplicateSolution(const std::vector<double>& new_sol, const std::vector<std::vector<double>>& exist_sols);
     // 4. 关节角度→脉冲转换（适配T_ANGLE_PULSE）
     void JointAngleToPulse(const std::vector<double>& joint_angles_deg, T_ANGLE_PULSE& pulse);
+
+protected:
+    virtual void PrepareStateMonitor();
 
 //----------------------------------------变量类--------------------------------------------//
 public:
@@ -127,4 +154,12 @@ public:
     FtpClient* m_pFTP;
     mutable std::mutex m_lastRobotErrorMutex;
     std::string m_sLastRobotError;
+
+private:
+    static constexpr std::size_t kStateMonitorMaxFrames = 200;
+    mutable std::mutex m_stateMonitorMutex;
+    std::deque<StateSnapshot> m_stateMonitorFrames;
+    std::thread m_stateMonitorThread;
+    std::atomic_bool m_stateMonitorRunning;
+    std::uint64_t m_stateMonitorNextSequence;
 };

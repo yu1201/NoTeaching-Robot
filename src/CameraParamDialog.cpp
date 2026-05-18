@@ -3,6 +3,7 @@
 #include "HandEyeCalibrationDialog.h"
 #include "HandEyeMatrixConfig.h"
 #include "HandEyeMatrixDialog.h"
+#include "OPini.h"
 #include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
 
@@ -23,6 +24,39 @@
 #include <QSizePolicy>
 #include <QTextDocument>
 #include <QVBoxLayout>
+#include <utility>
+
+namespace
+{
+    std::string ToIniBytes(const QString& text)
+    {
+        return text.toLocal8Bit().toStdString();
+    }
+
+    bool WriteRobotSetupReadyFlag(const QString& robotName, const QString& key, QString* error = nullptr)
+    {
+        const QString path = RobotDataHelper::BuildProjectPath(QString("Data/%1/RobotPara.ini").arg(robotName));
+        COPini ini;
+        if (!ini.SetFileName(false, ToIniBytes(path)))
+        {
+            if (error != nullptr)
+            {
+                *error = QString("打开机器人参数文件失败：%1").arg(path);
+            }
+            return false;
+        }
+        ini.SetSectionName("SetupStatus");
+        if (!ini.WriteString(ToIniBytes(key), 1))
+        {
+            if (error != nullptr)
+            {
+                *error = QString("写入设置完成状态失败：%1 [%2]").arg(path, key);
+            }
+            return false;
+        }
+        return true;
+    }
+}
 
 CameraParamDialog::CameraParamDialog(
     ContralUnit* pContralUnit,
@@ -30,12 +64,14 @@ CameraParamDialog::CameraParamDialog(
     StartCameraFunc startCamera,
     StopCameraFunc stopCamera,
     CameraFrameCache* cameraCache,
+    SetupStatusChangedFunc setupStatusChanged,
     QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
     , m_robotName(robotName.trimmed().isEmpty() ? QString("RobotA") : robotName.trimmed())
     , m_startCamera(startCamera)
     , m_stopCamera(stopCamera)
+    , m_setupStatusChanged(std::move(setupStatusChanged))
     , m_pCameraCache(cameraCache)
 {
     setWindowTitle("相机参数");
@@ -229,6 +265,22 @@ void CameraParamDialog::OpenHandEyeDialog()
 {
     HandEyeMatrixDialog dialog(CurrentRobotName(), CurrentCameraSection(), this);
     dialog.exec();
+    if (dialog.SavedThisSession())
+    {
+        QString setupError;
+        if (WriteRobotSetupReadyFlag(CurrentRobotName(), "HandEyeReady", &setupError))
+        {
+            AppendLog("手眼矩阵已保存，手眼标定相关流程入口已允许启用。");
+            if (m_setupStatusChanged)
+            {
+                m_setupStatusChanged();
+            }
+        }
+        else
+        {
+            AppendLog(setupError);
+        }
+    }
     UpdateCurrentCameraInfo();
 }
 
@@ -243,6 +295,22 @@ void CameraParamDialog::OpenHandEyeCalibrationDialog()
         m_pCameraCache,
         this);
     dialog.exec();
+    if (dialog.MatrixComputedThisSession())
+    {
+        QString setupError;
+        if (WriteRobotSetupReadyFlag(CurrentRobotName(), "HandEyeReady", &setupError))
+        {
+            AppendLog("手眼标定已完成，相关流程入口已允许启用。");
+            if (m_setupStatusChanged)
+            {
+                m_setupStatusChanged();
+            }
+        }
+        else
+        {
+            AppendLog(setupError);
+        }
+    }
     UpdateCurrentCameraInfo();
 }
 
@@ -303,6 +371,19 @@ bool CameraParamDialog::SaveCameraParam()
     }
 
     AppendLog(QString("相机参数已保存：%1 [%2]").arg(CurrentCameraIniPath(), param.sectionName));
+    QString setupError;
+    if (WriteRobotSetupReadyFlag(CurrentRobotName(), "CameraParamReady", &setupError))
+    {
+        AppendLog("相机参数设置已完成，相关相机功能入口已允许启用。");
+        if (m_setupStatusChanged)
+        {
+            m_setupStatusChanged();
+        }
+    }
+    else
+    {
+        AppendLog(setupError);
+    }
     MarkCleanSnapshot();
     return true;
 }

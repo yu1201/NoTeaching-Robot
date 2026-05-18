@@ -1,6 +1,23 @@
 #include "ContralUnit.h"
 #include "Const.h"
 
+namespace
+{
+    void ReleaseRobotDrivers(std::vector<T_CONTRAL_UNIT>& units)
+    {
+        for (T_CONTRAL_UNIT& unit : units)
+        {
+            if (unit.pUnitDriver != nullptr)
+            {
+                RobotDriverAdaptor* driver = static_cast<RobotDriverAdaptor*>(unit.pUnitDriver);
+                driver->StopStateMonitor();
+                delete driver;
+                unit.pUnitDriver = nullptr;
+            }
+        }
+    }
+}
+
 ContralUnit::ContralUnit()
 {
     InitContralUnit();
@@ -8,6 +25,7 @@ ContralUnit::ContralUnit()
 
 ContralUnit::~ContralUnit()
 {
+    ReleaseRobotDrivers(m_vtContralUnitInfo);
 }
 
 bool ContralUnit::InitContralUnit()
@@ -31,6 +49,7 @@ bool ContralUnit::InitContralUnit()
         return false;
     }
 
+    ReleaseRobotDrivers(m_vtContralUnitInfo);
     m_vtContralUnitInfo.clear();
 
     // 循环读取每个单元
@@ -115,6 +134,15 @@ bool ContralUnit::InitContralUnit()
                         info.sUnitName.c_str(), nRobotType);
                     bRtn = false;
                 }
+            }
+        }
+
+        if (info.pUnitDriver != nullptr)
+        {
+            RobotDriverAdaptor* driver = static_cast<RobotDriverAdaptor*>(info.pUnitDriver);
+            if (!driver->StartStateMonitor(50))
+            {
+                ContralUnitLog->write(LogColor::WARNING, "%s 状态监控线程启动失败", info.sUnitName.c_str());
             }
         }
 

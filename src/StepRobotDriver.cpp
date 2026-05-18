@@ -1,8 +1,11 @@
 #include "STEPRobotDriver.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace
@@ -15,18 +18,78 @@ namespace
 	constexpr const char* kStepDynamicJobProjectName = "PCRobot";
 	constexpr const char* kStepProjectVariableProgramName = "_project";
 
-	long StepClampPositiveLong(double value, long defaultValue)
+	double StepClampPositiveDouble(double value, double defaultValue)
 	{
-		if (value <= 0.0)
+		if (!std::isfinite(value) || value <= 0.0)
 		{
 			return defaultValue;
 		}
-		return static_cast<long>(value);
+		return value;
+	}
+
+	double StepLinearSpeedMmPerSecFromConfig(double speedMmPerMin, double fallbackMmPerSec = 1.0)
+	{
+		if (!std::isfinite(speedMmPerMin) || speedMmPerMin <= 0.0)
+		{
+			return fallbackMmPerSec;
+		}
+		const double converted = speedMmPerMin / 60.0;
+		return converted > 0.0 ? converted : fallbackMmPerSec;
+	}
+
+	double StepJointSpeedPercent(double speed)
+	{
+		if (!std::isfinite(speed) || speed <= 0.0)
+		{
+			return 20.0;
+		}
+
+		double percent = speed;
+		if (percent > 100.0)
+		{
+			percent /= 100.0;
+		}
+		return std::clamp(percent, 1.0, 100.0);
+	}
+
+	struct StepDynamicValues
+	{
+		double segmentVel = 1.0;
+		double segmentAcc = 3.0;
+		double segmentDec = 3.0;
+		double segmentJerk = 50000.0;
+		double oriVel = 90.0;
+		double oriAcc = 270.0;
+		double oriDec = 270.0;
+		double oriJerk = 2700.0;
+		double jointVel = 20.0;
+		double jointAcc = 40.0;
+		double jointDec = 40.0;
+		double jointJerk = 200.0;
+	};
+
+	StepDynamicValues StepBuildDynamicValues(const T_ROBOT_MOVE_SPEED& speed)
+	{
+		StepDynamicValues value;
+		value.segmentVel = StepLinearSpeedMmPerSecFromConfig(speed.dSpeed, 1.0);
+		value.segmentAcc = speed.dACC > 0.0
+			? StepLinearSpeedMmPerSecFromConfig(speed.dACC, value.segmentVel * 3.0)
+			: value.segmentVel * 3.0;
+		value.segmentDec = speed.dDEC > 0.0
+			? StepLinearSpeedMmPerSecFromConfig(speed.dDEC, value.segmentVel * 3.0)
+			: value.segmentVel * 3.0;
+		value.segmentJerk = std::max(50000.0, value.segmentAcc * 10.0);
+
+		value.jointVel = StepJointSpeedPercent(speed.dSpeed);
+		value.jointAcc = std::clamp(value.jointVel * 2.0, 1.0, 200.0);
+		value.jointDec = value.jointAcc;
+		value.jointJerk = 200.0;
+		return value;
 	}
 
 	std::string StepBuildDynamicName(size_t index)
 	{
-		return GetStr("dyn%u", static_cast<unsigned>(index));
+		return GetStr("ntdyn%u", static_cast<unsigned>(index));
 	}
 
 	bool StepHasSrSuffix(const std::string& value)
@@ -97,20 +160,51 @@ namespace
 
 	std::string StepBuildCartPosName(size_t index)
 	{
-		return GetStr("cp%u", static_cast<unsigned>(index));
+		return GetStr("ntcp%u", static_cast<unsigned>(index));
 	}
 
 	std::string StepBuildAxisPosName(size_t index)
 	{
-		return GetStr("ap%u", static_cast<unsigned>(index));
+		return GetStr("ntap%u", static_cast<unsigned>(index));
+	}
+
+	std::vector<std::string> StepBuildToolNameCandidates(int toolNo)
+	{
+		return {
+			GetStr("tool%d", toolNo),
+			GetStr("TOOL%d", toolNo)
+		};
+	}
+
+	bool StepIsInvalidExternalPulse(long pulse)
+	{
+		return pulse <= static_cast<long>(std::numeric_limits<int>::min()) + 1L;
+	}
+
+	double StepPulseToPosition(long pulse, double pulseUnit)
+	{
+		if (!std::isfinite(pulseUnit) || std::abs(pulseUnit) < 1e-12)
+		{
+			return static_cast<double>(pulse);
+		}
+		return static_cast<double>(pulse) * pulseUnit;
+	}
+
+	double StepExternalPulseToPosition(long pulse, double pulseUnit)
+	{
+		if (StepIsInvalidExternalPulse(pulse))
+		{
+			return 0.0;
+		}
+		return StepPulseToPosition(pulse, pulseUnit);
 	}
 
 	std::string StepBuildOverlapName(size_t index)
 	{
-		return GetStr("olr%u", static_cast<unsigned>(index));
+		return GetStr("ntolr%u", static_cast<unsigned>(index));
 	}
 
-	std::string StepBuildSrdContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+	std::string StepBuildSrdContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, const T_AXISUNIT& axisUnit)
 	{
 		std::ostringstream oss;
 		oss << std::fixed << std::setprecision(6);
@@ -125,9 +219,15 @@ namespace
 			if (info.nPosType == PULSEVAR)
 			{
 				oss << "AXISPOS " << axisName << " := {  "
-					<< info.tPulse.nSPulse << ", " << info.tPulse.nLPulse << ", " << info.tPulse.nUPulse << ", "
-					<< info.tPulse.nRPulse << ", " << info.tPulse.nBPulse << ", " << info.tPulse.nTPulse << ", "
-					<< info.tPulse.lBXPulse << ", " << info.tPulse.lBYPulse << ", " << info.tPulse.lBZPulse
+					<< StepPulseToPosition(info.tPulse.nSPulse, axisUnit.dSPulseUnit) << ", "
+					<< StepPulseToPosition(info.tPulse.nLPulse, axisUnit.dLPulseUnit) << ", "
+					<< StepPulseToPosition(info.tPulse.nUPulse, axisUnit.dUPulseUnit) << ", "
+					<< StepPulseToPosition(info.tPulse.nRPulse, axisUnit.dRPulseUnit) << ", "
+					<< StepPulseToPosition(info.tPulse.nBPulse, axisUnit.dBPulseUnit) << ", "
+					<< StepPulseToPosition(info.tPulse.nTPulse, axisUnit.dTPulseUnit) << ", "
+					<< StepExternalPulseToPosition(info.tPulse.lBXPulse, axisUnit.dBXPulseUnit) << ", "
+					<< StepExternalPulseToPosition(info.tPulse.lBYPulse, axisUnit.dBYPulseUnit) << ", "
+					<< StepExternalPulseToPosition(info.tPulse.lBZPulse, axisUnit.dBZPulseUnit)
 					<< ", 0.0, 0.0,0.0 }" << "\n";
 			}
 			else
@@ -139,13 +239,16 @@ namespace
 					<< ", 0.0, 0.0, 0.0,0 }" << "\n";
 			}
 
-			const long speed = StepClampPositiveLong(info.tSpeed.dSpeed, 1000);
-			const long acc = StepClampPositiveLong(info.tSpeed.dACC, speed * 2);
-			const long dec = StepClampPositiveLong(info.tSpeed.dDEC, speed * 2);
+			const StepDynamicValues dyn = StepBuildDynamicValues(info.tSpeed);
 
 			oss << "DYNAMIC " << dynName << " := {  "
-				<< speed << ", " << acc << ", " << dec
-				<< ", 50000, 90, 270, 270, 2700, 100, 200, 200,200 }" << "\n";
+				<< StepClampPositiveDouble(dyn.segmentVel, 1.0) << ", "
+				<< StepClampPositiveDouble(dyn.segmentAcc, 3.0) << ", "
+				<< StepClampPositiveDouble(dyn.segmentDec, 3.0) << ", "
+				<< StepClampPositiveDouble(dyn.segmentJerk, 50000.0) << ", "
+				<< dyn.oriVel << ", " << dyn.oriAcc << ", " << dyn.oriDec << ", " << dyn.oriJerk << ", "
+				<< dyn.jointVel << ", " << dyn.jointAcc << ", " << dyn.jointDec << "," << dyn.jointJerk
+				<< " }" << "\n";
 			oss << "OVERLAPREL " << StepBuildOverlapName(i) << " := 20" << "\n";
 		}
 
@@ -236,18 +339,18 @@ namespace
 		return value;
 	}
 
-	AXISPOS StepToAxisPos(const T_ANGLE_PULSE& tRobotPulse)
+	AXISPOS StepToAxisPos(const T_ANGLE_PULSE& tRobotPulse, const T_AXISUNIT& axisUnit)
 	{
 		AXISPOS value = {};
-		value.m_Joint[0] = tRobotPulse.nSPulse;
-		value.m_Joint[1] = tRobotPulse.nLPulse;
-		value.m_Joint[2] = tRobotPulse.nUPulse;
-		value.m_Joint[3] = tRobotPulse.nRPulse;
-		value.m_Joint[4] = tRobotPulse.nBPulse;
-		value.m_Joint[5] = tRobotPulse.nTPulse;
-		value.m_AuxJoint[0] = tRobotPulse.lBXPulse;
-		value.m_AuxJoint[1] = tRobotPulse.lBYPulse;
-		value.m_AuxJoint[2] = tRobotPulse.lBZPulse;
+		value.m_Joint[0] = StepPulseToPosition(tRobotPulse.nSPulse, axisUnit.dSPulseUnit);
+		value.m_Joint[1] = StepPulseToPosition(tRobotPulse.nLPulse, axisUnit.dLPulseUnit);
+		value.m_Joint[2] = StepPulseToPosition(tRobotPulse.nUPulse, axisUnit.dUPulseUnit);
+		value.m_Joint[3] = StepPulseToPosition(tRobotPulse.nRPulse, axisUnit.dRPulseUnit);
+		value.m_Joint[4] = StepPulseToPosition(tRobotPulse.nBPulse, axisUnit.dBPulseUnit);
+		value.m_Joint[5] = StepPulseToPosition(tRobotPulse.nTPulse, axisUnit.dTPulseUnit);
+		value.m_AuxJoint[0] = StepExternalPulseToPosition(tRobotPulse.lBXPulse, axisUnit.dBXPulseUnit);
+		value.m_AuxJoint[1] = StepExternalPulseToPosition(tRobotPulse.lBYPulse, axisUnit.dBYPulseUnit);
+		value.m_AuxJoint[2] = StepExternalPulseToPosition(tRobotPulse.lBZPulse, axisUnit.dBZPulseUnit);
 		return value;
 	}
 
@@ -284,6 +387,7 @@ STEPRobotCtrl::STEPRobotCtrl(std::string strUnitName, RobotLog* pLog)
 
 STEPRobotCtrl::~STEPRobotCtrl()
 {
+	StopStateMonitor();
 }
 
 bool STEPRobotCtrl::InitRobotDriver(std::string strUnitName)
@@ -728,7 +832,7 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 	}
 
 	const std::string sSrpContent = StepBuildSrpContent(vtRobotMoveInfo);
-	const std::string sSrdContent = StepBuildSrdContent(vtRobotMoveInfo);
+	const std::string sSrdContent = StepBuildSrdContent(vtRobotMoveInfo, m_tAxisUnit);
 
 	if (!StepWriteTextFile(sLocalProgramFile, sSrpContent))
 	{
@@ -788,6 +892,13 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 			return -5;
 		}
 		m_pRobotLog->write(LogColor::SUCCESS, "STEP ContiMoveAny 已卸载当前程序：%s", sCurrentProgram.c_str());
+	}
+
+	if (m_pFTP != nullptr)
+	{
+		m_pRobotLog->write(LogColor::DEFAULT, "STEP ContiMoveAny 上传前重建FTP客户端，避免复用失效会话");
+		delete m_pFTP;
+		m_pFTP = nullptr;
 	}
 
 	if (m_pFTP == nullptr)
@@ -1004,47 +1115,90 @@ bool STEPRobotCtrl::ServoOn()
 
 bool STEPRobotCtrl::SetRobotToolNo(int nToolNo)
 {
-	int nRet = 0;
-	std::string sToolName = GetStr("TOOL%d",nToolNo);
-	nRet = m_pSTEPRobotClient->ToolSetCmd(sToolName);
-
-	if (nRet != 0)
+	if (m_pSTEPRobotClient == nullptr)
 	{
-		showErrorMessage(
-			nullptr,
-			"工具设置失败,失败原因:%s",
-			GetErrorText(nRet)   // 直接用全局错误库
-		);
+		SetLastRobotError("STEP工具设置失败：SDK客户端未初始化。");
 		return false;
 	}
-	return true;
+
+	int lastRet = 0;
+	for (const std::string& toolName : StepBuildToolNameCandidates(nToolNo))
+	{
+		lastRet = m_pSTEPRobotClient->ToolSetCmd(toolName);
+		if (lastRet == 0)
+		{
+			ClearLastRobotError();
+			return true;
+		}
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::WARNING, "STEP工具设置失败 | tool=%s ret=%d reason=%s", toolName.c_str(), lastRet, GetErrorText(lastRet));
+		}
+	}
+
+	SetLastRobotError(GetStr("STEP工具设置失败：tool%d/TOOL%d 均失败，最后错误=%s(%d)",
+		nToolNo,
+		nToolNo,
+		GetErrorText(lastRet),
+		lastRet));
+	return false;
 }
 
-bool STEPRobotCtrl::GetToolData(int nToolNo, T_ROBOT_COORS adRobotToolData)
+bool STEPRobotCtrl::GetToolData(int nToolNo, T_ROBOT_COORS& adRobotToolData)
 {
-	int nRet = 0;
 	adRobotToolData = T_ROBOT_COORS();
-	std::string sToolName = GetStr("TOOL%d", nToolNo);
-	STEPROBOTSDK::Tool tTool = { false,0,0,0,0,0,0 };
-	nRet = m_pSTEPRobotClient->VariableToolReadCmd(sToolName, tTool);
-
-	if (nRet != 0)
+	if (m_pSTEPRobotClient == nullptr)
 	{
-		showErrorMessage(
-			nullptr,
-			"工具获取失败,失败原因:%s",
-			GetErrorText(nRet)   // 直接用全局错误库
-		);
+		SetLastRobotError("STEP工具读取失败：SDK客户端未初始化。");
 		return false;
 	}
 
-	adRobotToolData.dX = tTool.X;
-	adRobotToolData.dY = tTool.Y;
-	adRobotToolData.dZ = tTool.Z;
-	adRobotToolData.dRX = tTool.A;
-	adRobotToolData.dRY = tTool.B;
-	adRobotToolData.dRZ = tTool.C;
-	return true;
+	int lastRet = 0;
+	std::string lastToolName;
+	STEPROBOTSDK::Tool tTool = { false,0,0,0,0,0,0 };
+	for (const std::string& toolName : StepBuildToolNameCandidates(nToolNo))
+	{
+		tTool = STEPROBOTSDK::Tool{ false,0,0,0,0,0,0 };
+		lastToolName = toolName;
+		lastRet = m_pSTEPRobotClient->VariableToolReadCmd(toolName, tTool);
+		if (lastRet == 0)
+		{
+			adRobotToolData.dX = tTool.X;
+			adRobotToolData.dY = tTool.Y;
+			adRobotToolData.dZ = tTool.Z;
+			adRobotToolData.dRX = tTool.A;
+			adRobotToolData.dRY = tTool.B;
+			adRobotToolData.dRZ = tTool.C;
+			ClearLastRobotError();
+			if (m_pRobotLog != nullptr)
+			{
+				m_pRobotLog->write(
+					LogColor::SUCCESS,
+					"STEP工具读取成功 | tool=%s X=%.6f Y=%.6f Z=%.6f A=%.6f B=%.6f C=%.6f fixed=%d",
+					toolName.c_str(),
+					tTool.X,
+					tTool.Y,
+					tTool.Z,
+					tTool.A,
+					tTool.B,
+					tTool.C,
+					tTool.Fixed ? 1 : 0);
+			}
+			return true;
+		}
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::WARNING, "STEP工具读取失败 | tool=%s ret=%d reason=%s", toolName.c_str(), lastRet, GetErrorText(lastRet));
+		}
+	}
+
+	SetLastRobotError(GetStr("STEP工具读取失败：tool%d/TOOL%d 均失败，最后尝试=%s，错误=%s(%d)",
+		nToolNo,
+		nToolNo,
+		lastToolName.c_str(),
+		GetErrorText(lastRet),
+		lastRet));
+	return false;
 }
 
 //FTP建立连接
@@ -1181,7 +1335,7 @@ bool STEPRobotCtrl::SetPosVar(int nIndex, T_ANGLE_PULSE tRobotPulse, int scoper)
 	const std::string sProjectName = GetUserProject();
 	const std::string sProgramName = StepGetProgramScopeName(this, scoper);
 	const std::string sVarName = StepBuildPosVarName(nIndex, PULSEVAR);
-	const AXISPOS value = StepToAxisPos(tRobotPulse);
+	const AXISPOS value = StepToAxisPos(tRobotPulse, m_tAxisUnit);
 
 	const int nRet = m_pSTEPRobotClient->VariableAxisposModifyCmd(sProjectName, sProgramName, sVarName, value);
 	if (nRet != 0)

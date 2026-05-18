@@ -35,6 +35,10 @@
     };
 	// 格式化字符串函数（来自Const.cpp）
 	std::string formatString(const char* format, ...);
+
+    // 弹窗/机器人错误文本解码：优先 UTF-8，失败后兼容 GBK/本地编码，避免不同工控机代码页导致中文乱码。
+    QString DecodeRobotMessageText(const std::string& text);
+    QString DecodeRobotMessageText(const char* text);
     /**
      * @brief 格式化信息弹窗
      * @param parent 父窗口

@@ -225,6 +225,9 @@
     <ClInclude Include="include\RobotMessage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\RobotPoseTransform.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\RobotJogDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>

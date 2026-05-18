@@ -13,9 +13,19 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.05.12`
+- 当前源码版本：`v2026.05.18`
 
 建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup.exe`，不用自己编译源码。
+
+## 2026-05-18 更新
+
+- 版本号更新为 `v2026.05.18`，启动器版本和安装脚本默认版本已同步
+- 管理页面新增控制单元管理：支持读取 `Data` 下已保存机器人、启用/停用、中文名、IP、端口、FTP、STEP 工程和工件类型维护
+- 新建控制单元加入向导流程，当前工件类型支持波纹板；新建时会从 `Data/WorkpieceTemplates/CorrugatedPlate` 复制测量、焊接、相机、手眼和补偿默认参数
+- 相机参数和手眼标定接入首次设置状态：向导可跳过，但跳过后会禁用依赖功能；完成相机参数保存或手眼矩阵保存后自动解除对应功能限制
+- 删除旧兼容参数读取和迁移逻辑，测量焊接统一使用 `MeasureWeldParam.ini`，工艺参数继续使用 `WeldPara.txt` / `WeaveDate.txt`
+- 修复控制单元保存重载时相机接收线程旧诊断信号晚到导致崩溃的问题，重建相机 runtime 时会校验对象存活状态
+- 构建验证：`Debug x64` 编译通过；本次提交不包含安装包二进制
 
 ## 2026-05-12 更新
 

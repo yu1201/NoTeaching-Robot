@@ -13,6 +13,7 @@ struct HandEyeMatrixConfig
 {
     Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
     Eigen::Vector3d translation = Eigen::Vector3d::Zero();
+    int robotType = ROBOT_TYPE_FANUC;
 };
 
 struct HandEyeCalibrationSample
@@ -47,3 +48,5 @@ bool EnsureHandEyeCalibrationIni(const QString& robotName, const QString& camera
 bool LoadHandEyeCalibrationConfig(const QString& robotName, const QString& cameraSection, HandEyeCalibrationConfig& config, QString* error = nullptr, QString* filePathOut = nullptr);
 bool SaveHandEyeCalibrationConfig(const QString& robotName, const QString& cameraSection, const HandEyeCalibrationConfig& config, QString* error = nullptr, QString* filePathOut = nullptr);
 bool ComputeHandEyeMatrixFromCalibration(const HandEyeCalibrationConfig& calibration, HandEyeMatrixConfig& config, QString* error = nullptr);
+bool ComputeHandEyeMatrixFromCalibration(const QString& robotName, const HandEyeCalibrationConfig& calibration, HandEyeMatrixConfig& config, QString* error = nullptr);
+bool ComputeHandEyeMatrixFromCalibration(int robotType, const HandEyeCalibrationConfig& calibration, HandEyeMatrixConfig& config, QString* error = nullptr);

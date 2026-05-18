@@ -1,0 +1,7 @@
+Lin(cp0,dyn0,olr0,NULL,tool1,WORLD);
+Lin(cp1,dyn1,olr1,NULL,tool1,WORLD);
+Lin(cp2,dyn2,olr2,NULL,tool1,WORLD);
+Lin(cp3,dyn3,olr3,NULL,tool1,WORLD);
+Lin(cp4,dyn4,olr4,NULL,tool1,WORLD);
+Lin(cp5,dyn5,olr5,NULL,tool1,WORLD);
+Lin(cp6,dyn6,olr6,NULL,tool1,WORLD);
