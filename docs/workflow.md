@@ -1,16 +1,23 @@
 # 工作流程
 
-- 人工整理日期：`2026-04-21`
+- 人工整理日期：`2026-05-18`
 - Notion 页面：<https://www.notion.so/336c868d819b8193871ee2c86237c6f0>
 
 ## 总体说明
 
-当前工程已经具备 STEP / FANUC 两套驱动入口。FANUC 继续走常驻服务/TP 文件方案，STEP 现场流程逐步接入通用驱动接口与 `PCRobot` 工程动态 Job。
+当前工程已经具备 STEP / FANUC 两套驱动入口。FANUC 继续走常驻服务/TP 文件方案，STEP 现场流程逐步接入通用驱动接口与 `PCRobot` 工程动态 Job。控制单元管理负责维护机器人启用状态、通讯参数、工件类型和首次配置状态。
 
 - `RobotType=1`：新时达 STEP 驱动
 - `RobotType=2`：FANUC 驱动
 
 驱动创建逻辑已经在控制单元中按类型切换，便于后续继续补第三方机器人。
+
+## 控制单元与首次配置
+
+- 管理页面从 `Data` 下读取已保存的机器人文件夹。
+- 每个控制单元可维护中文名、IP、端口、FTP、STEP 工程路径、工件类型和启用状态。
+- 新建控制单元通过向导完成，当前工件类型支持波纹板，并从 `Data/WorkpieceTemplates/CorrugatedPlate` 复制默认参数。
+- 相机参数和手眼标定可跳过；跳过后依赖功能入口会禁用，完成保存后自动解除限制。
 
 ## FANUC 当前落地流程
 
@@ -29,7 +36,7 @@
 
 先测后焊流程读取：
 
-- `PreciseMeasureParam.ini`
+- `MeasureWeldParam.ini`
 - 相机参数 ini
 - 手眼矩阵 ini
 
@@ -48,7 +55,7 @@
 4. 确认后执行 `MOVL` 到扫描起点
 5. 扫描段执行 `MOVL` 到扫描终点，同时采集相机点和机器人位姿
 6. 确认后执行 `MOVJ` 到收枪安全位
-7. 保存扫描结果文件
+7. 保存目标点云、完整工件点云和后续焊接结果文件
 
 每一段动作前都有确认弹窗，取消后会退出当前流程。
 
@@ -73,12 +80,12 @@
 
 ## 采样与插值
 
-- 相机采样当前按约 `10ms` 频率处理
-- 机器人位姿当前按约 `50ms` 周期读取
+- 相机帧按机器人维度缓存，缓存默认约 `2000` 帧
+- 机器人监控线程按机器人维度常驻采样，供当前位置和扫描插值使用
 - 激光点计算时，以相机时间为主时间轴
 - 使用相邻两个机器人时间戳做线性插值
 
-当前相机真实时间戳尚未正式接入，暂时使用 PC 接收时刻模拟。
+FANUC 使用机器人侧时间轴，STEP 当前仍临时使用 PC steady 时间轴参与匹配。
 
 ## 输出文件
 
@@ -87,6 +94,10 @@
 - `Result/<RobotName>/yyyyMMdd_NNN/CameraPoint/PreciseCameraPoint.txt`
 - `Result/<RobotName>/yyyyMMdd_NNN/RobotPoint/PreciseRobotPoint.txt`
 - `Result/<RobotName>/yyyyMMdd_NNN/LaserPoint/PreciseLaserPoint.txt`
+- `Result/<RobotName>/yyyyMMdd_NNN/LaserPoint/PreciseLaserPoint_WorkpieceCloud.txt`
+- `Result/<RobotName>/yyyyMMdd_NNN/LaserPoint/PreciseLaserPoint_PreservePath_2mm.txt`
+- `Result/<RobotName>/yyyyMMdd_NNN/LaserPoint/PreciseLaserPoint_WeldPose_2mm.txt`
+- `Result/<RobotName>/yyyyMMdd_NNN/LaserPoint/PreciseLaserPoint_WeldPose_2mm_SeamComp.txt`
 
 当前文件内容为：
 
