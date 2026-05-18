@@ -72,6 +72,7 @@ public:
 	bool StartMonitor(int nPort = 0);
 	void StopMonitor();
 	std::string GetMonitorText();
+	void PrepareStateMonitor() override;
 
 	// 连续运动：生成并上传临时程序，适合多点路径/特殊运动；与下方固定TP单点运动区分。
 	int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo) override;
@@ -120,7 +121,7 @@ public:
 
 	// 工具与位置寄存器：SetPosVar最终由KAREL服务写PR，Cartesian写SET_POS_REG，Joint写SET_JPOS_REG。
 	bool SetRobotToolNo(int nToolNo);
-	bool GetToolData(int unToolNo, T_ROBOT_COORS adRobotToolData);
+	bool GetToolData(int unToolNo, T_ROBOT_COORS& adRobotToolData) override;
 	bool SetPosVar(int nIndex, double pos[8], int nPVarType, int isconfig, int config[7] = { 0 }, int scoper = ENGINEEVAR, int Coord = POSVAR);
 	void SetPosVar(int nIndex, T_ROBOT_COORS tRobotCoors, int isconfig = 1, int config[7] = { 0 }, int scoper = ENGINEEVAR);
 	bool SetPosVar(int nIndex, T_ANGLE_PULSE tRobotPulse, int scoper = ENGINEEVAR);

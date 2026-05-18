@@ -5,6 +5,7 @@
 #include "LaserWeldFilterDialog.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
+#include "RobotMessage.h"
 #include "WindowStyleHelper.h"
 
 #include <QApplication>
@@ -920,7 +921,10 @@ void FunctionTestDialog::RefreshMotionButtonState()
     if (!busy && m_pContralUnit != nullptr && m_unitIndex >= 0 && m_unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
         RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
-        busy = pRobotDriverAdaptor != nullptr && pRobotDriverAdaptor->CheckDonePassive() == 0;
+        RobotDriverAdaptor::StateSnapshot snapshot;
+        busy = pRobotDriverAdaptor != nullptr
+            && pRobotDriverAdaptor->LatestStateSnapshot(snapshot)
+            && snapshot.done == 0;
     }
 
     for (QPushButton* button : m_motionButtons)
@@ -991,7 +995,14 @@ void FunctionTestDialog::FanucGetCurrentPosTest()
 
     long long robotMs = 0;
     long long pcRecvMs = 0;
-    const T_ROBOT_COORS pos = pRobotDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
+    T_ROBOT_COORS pos;
+    RobotDriverAdaptor::StateSnapshot snapshot;
+    if (pRobotDriver->LatestStateSnapshot(snapshot))
+    {
+        robotMs = snapshot.robotMs;
+        pcRecvMs = snapshot.pcRecvMs;
+        pos = snapshot.pose;
+    }
     const QString message = QString("当前位置: robot_ms=%1, pc_recv_ms=%2, X=%3, Y=%4, Z=%5, RX=%6, RY=%7, RZ=%8")
         .arg(robotMs)
         .arg(pcRecvMs)
@@ -1015,7 +1026,14 @@ void FunctionTestDialog::FanucGetCurrentPulseTest()
 
     long long robotMs = 0;
     long long pcRecvMs = 0;
-    const T_ANGLE_PULSE pulse = pRobotDriver->GetCurrentPulsePassive(&robotMs, &pcRecvMs);
+    T_ANGLE_PULSE pulse;
+    RobotDriverAdaptor::StateSnapshot snapshot;
+    if (pRobotDriver->LatestStateSnapshot(snapshot))
+    {
+        robotMs = snapshot.robotMs;
+        pcRecvMs = snapshot.pcRecvMs;
+        pulse = snapshot.pulse;
+    }
     const QString message = QString("关节脉冲: robot_ms=%1, pc_recv_ms=%2, S=%3, L=%4, U=%5, R=%6, B=%7, T=%8, EX1=%9, EX2=%10, EX3=%11")
         .arg(robotMs)
         .arg(pcRecvMs)
@@ -1058,7 +1076,7 @@ void FunctionTestDialog::FanucCurposDiagnosticTest()
     for (const QString& command : commands)
     {
         const std::string response = pFanucDriver->SendRawCommandForTest(command.toStdString());
-        lines << QString("%1 -> %2").arg(command, QString::fromStdString(response));
+        lines << QString("%1 -> %2").arg(command, DecodeRobotMessageText(response));
     }
 
     const QString message = lines.join("\n");
@@ -1073,10 +1091,7 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
     {
         return;
     }
-    if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor))
-    {
-        pFanucDriver->StartMonitor();
-    }
+    pRobotDriverAdaptor->StartStateMonitor(50);
 
     if (m_pCameraCache == nullptr)
     {
@@ -1094,6 +1109,7 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
     robotSamples.reserve(512);
     long long lastRobotMs = std::numeric_limits<long long>::min();
     long long lastPcRecvMs = std::numeric_limits<long long>::min();
+    std::uint64_t lastRobotSequence = 0;
     int duplicateRobotReadCount = 0;
     int missingRobotTimestampCount = 0;
 
@@ -1102,24 +1118,29 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRobotCameraTimestampCheckDurationMs);
     while (std::chrono::steady_clock::now() < deadline)
     {
-        long long robotMs = 0;
-        long long pcRecvMs = 0;
-        const T_ROBOT_COORS pose = pRobotDriverAdaptor->GetCurrentPosPassive(&robotMs, &pcRecvMs);
-        const int done = pRobotDriverAdaptor->CheckDonePassive();
-
-        if (robotMs > 0 && pcRecvMs > 0)
+        RobotDriverAdaptor::StateSnapshot snapshot;
+        if (!pRobotDriverAdaptor->LatestStateSnapshot(snapshot) || !snapshot.valid)
         {
-            if (robotMs != lastRobotMs || pcRecvMs != lastPcRecvMs)
+            ++missingRobotTimestampCount;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        if (snapshot.robotMs > 0 && snapshot.pcRecvMs > 0)
+        {
+            if (snapshot.sequence != lastRobotSequence
+                && (snapshot.robotMs != lastRobotMs || snapshot.pcRecvMs != lastPcRecvMs))
             {
                 RobotTimestampSample sample;
                 sample.index = robotSamples.size() + 1;
-                sample.robotTimestampUs = static_cast<qint64>(robotMs) * 1000;
-                sample.pcReceiveTimestampUs = static_cast<qint64>(pcRecvMs) * 1000;
-                sample.pose = pose;
-                sample.done = done;
+                sample.robotTimestampUs = static_cast<qint64>(snapshot.robotMs) * 1000;
+                sample.pcReceiveTimestampUs = static_cast<qint64>(snapshot.pcRecvMs) * 1000;
+                sample.pose = snapshot.pose;
+                sample.done = snapshot.done;
                 robotSamples.push_back(sample);
-                lastRobotMs = robotMs;
-                lastPcRecvMs = pcRecvMs;
+                lastRobotMs = snapshot.robotMs;
+                lastPcRecvMs = snapshot.pcRecvMs;
+                lastRobotSequence = snapshot.sequence;
             }
             else
             {
@@ -1434,7 +1455,14 @@ void FunctionTestDialog::FanucCheckDoneTest()
 
     long long robotMs = 0;
     long long pcRecvMs = 0;
-    const int done = pRobotDriver->CheckDonePassive(&robotMs, &pcRecvMs);
+    int done = -1;
+    RobotDriverAdaptor::StateSnapshot snapshot;
+    if (pRobotDriver->LatestStateSnapshot(snapshot))
+    {
+        robotMs = snapshot.robotMs;
+        pcRecvMs = snapshot.pcRecvMs;
+        done = snapshot.done;
+    }
     const QString message = QString("CheckDone 返回值：%1，robot_ms=%2，pc_recv_ms=%3")
         .arg(done)
         .arg(robotMs)
@@ -1466,7 +1494,7 @@ void FunctionTestDialog::FanucSetGetIntTest()
 
     if (!pRobotDriver->SetIntVar(index, value))
     {
-        QMessageBox::warning(this, "写读INT寄存器", GetStr("写入 INT%d 失败。", index).c_str());
+        QMessageBox::warning(this, "写读INT寄存器", DecodeRobotMessageText(GetStr("写入 INT%d 失败。", index)));
         return;
     }
 

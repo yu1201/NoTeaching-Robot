@@ -111,8 +111,8 @@ public:
 	bool SetRobotToolNo(int nToolNo);
 
 	/****************************************************信息获取****************************************************/
-	//获取工具信息	+		
-	bool GetToolData(int unToolNo, T_ROBOT_COORS adRobotToolData);
+	//获取工具信息	+
+	bool GetToolData(int unToolNo, T_ROBOT_COORS& adRobotToolData) override;
 
 	/****************************************************变量读写****************************************************/
 	//,int nToolNo = 1 scoper,0-系统，1-全局，2-工程，3-程序

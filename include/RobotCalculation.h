@@ -138,10 +138,4 @@ public:
     static QString RobotPoseIndexedCsv(int index, const T_ROBOT_COORS& pose);
     static QString Vector3IndexedCsv(int index, const Eigen::Vector3d& point, const QString& extra = QString());
     static QString Vector3IndexedSpaceText(int index, const Eigen::Vector3d& point, const QString& extra = QString());
-
-private:
-    static Eigen::Matrix3d RotX(double w);
-    static Eigen::Matrix3d RotY(double p);
-    static Eigen::Matrix3d RotZ(double r);
-    static Eigen::Matrix3d FanucRot(double w, double p, double r);
 };

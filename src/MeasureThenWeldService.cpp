@@ -5,6 +5,8 @@
 #include "HandEyeMatrixConfig.h"
 #include "OPini.h"
 #include "RobotDataHelper.h"
+#include "RobotMessage.h"
+#include "RobotPoseTransform.h"
 #include "groove/framebuffer.h"
 
 #include <QDateTime>
@@ -18,24 +20,35 @@
 #include <QTextStream>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <limits>
+#include <mutex>
 #include <thread>
+#include <utility>
 
 namespace
 {
 constexpr int FANUC_MOTION_STATE_REG = 93;
 constexpr double FANUC_WELD_PATH_SPEED_MM_PER_MIN = 400.0;
-constexpr double FANUC_SAFE_MOVE_SPEED_MM_PER_MIN = 1000.0;
+constexpr double DEFAULT_WELD_SAFE_MOVE_SPEED_MM_PER_MIN = 1000.0;
+constexpr double DEFAULT_DRY_RUN_SPEED_MM_PER_MIN = 1000.0;
 constexpr double WELD_SAFE_OFFSET_DISTANCE_MM = 30.0;
 constexpr double DEFAULT_CAMERA_READ_FPS = 100.0;
 constexpr qint64 ROBOT_SAMPLE_INTERVAL_MS = 50;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_WAIT_MS = 500;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_POLL_MS = 10;
+constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
+constexpr auto WORKPIECE_CLOUD_FILE_NAME = "PreciseLaserPoint_WorkpieceCloud.txt";
+constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
+constexpr auto CLASSIFIED_FILE_NAME = "PreciseLaserPoint_Classified.txt";
+constexpr auto CLASSIFIED_NOISE_FILE_NAME = "PreciseLaserPoint_Classified_Noise.txt";
 constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
 constexpr auto WELD_POSE_SEAM_COMP_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
 
@@ -58,6 +71,7 @@ struct TimestampedCameraPoint
     qint64 rawDeltaUs = 0;
     qint64 timestampUs = 0;
     Eigen::Vector3d point = Eigen::Vector3d::Zero();
+    std::vector<Eigen::Vector3d> linePoints;
     QString error;
 };
 
@@ -126,14 +140,18 @@ struct WeldPosePreset
     QString poseCompFilePath;
     QString seamCompFilePath;
     QString robotParaPath;
+    int robotType = ROBOT_TYPE_FANUC;
     QString seamKind = "CorrugatedPlate";
     double rx = 0.0;
     double ry = 0.0;
+    double measureReferenceRy = 0.0;
+    double measureReferenceRz = 0.0;
     double gunToolBaseRz = 180.0;
     double poseMatchMaxErrorDeg = 5.0;
     double cornerTransitionLeadDistance = 10.0;
     double weldStartSkipDistance = 10.0;
     double weldEndSkipDistance = 10.0;
+    double weldRzGainDeg = 0.0;
     std::vector<PoseCompSlot> poseCompSlots;
     std::vector<SeamCompSlot> seamCompSlots;
     bool weldLineFromIni = false;
@@ -201,6 +219,36 @@ struct RobotInterpolationWindow
     qint64 prevTimestampUs = 0;
     qint64 nextTimestampUs = 0;
     double ratio = 0.0;
+};
+
+struct QueuedScanCameraFrame
+{
+    int sampleIndex = 0;
+    qint64 rawTimestampUs = 0;
+    qint64 rawDeltaUs = 0;
+    qint64 timestampUs = 0;
+    udpDataShow frame;
+};
+
+struct ProcessedScanWorkpiecePoint
+{
+    int linePointIndex = 0;
+    Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
+    Eigen::Vector3d workpiecePoint = Eigen::Vector3d::Zero();
+};
+
+struct ProcessedScanCameraSample
+{
+    TimestampedCameraPoint sample;
+    QString status;
+    RobotInterpolationWindow robotWindow;
+    bool hasRobotPose = false;
+    bool hasLaserPoint = false;
+    bool contributedWorkpieceFrame = false;
+    T_ROBOT_COORS robotPose;
+    Eigen::Vector3d laserPoint = Eigen::Vector3d::Zero();
+    std::vector<ProcessedScanWorkpiecePoint> workpiecePoints;
+    int skippedWorkpieceCloudPointCount = 0;
 };
 
 RobotInterpolationWindow FindRobotInterpolationWindow(
@@ -420,6 +468,32 @@ double NormalizeLineAxisDeviationFromYAxis(double directionDeg)
     return deviation;
 }
 
+double ProjectLineAxisDeviationToPoseRz(double axisDeviationDeg, double measureReferenceRyDeg)
+{
+    const double tiltFactor = std::abs(std::sin(measureReferenceRyDeg * M_PI / 180.0));
+    if (tiltFactor <= 1e-6)
+    {
+        return 0.0;
+    }
+
+    const double deviationRad = axisDeviationDeg * M_PI / 180.0;
+    if (std::abs(std::cos(deviationRad)) <= 1e-6)
+    {
+        return std::copysign(90.0, axisDeviationDeg);
+    }
+
+    return std::atan(std::tan(deviationRad) * tiltFactor) * 180.0 / M_PI;
+}
+
+double SelectAxisRzNearReference(double baseRzDeg, double referenceRzDeg)
+{
+    const double optionForward = NormalizeAngleNear(baseRzDeg, referenceRzDeg);
+    const double optionReverse = NormalizeAngleNear(baseRzDeg + 180.0, referenceRzDeg);
+    const double forwardDistance = std::abs(optionForward - referenceRzDeg);
+    const double reverseDistance = std::abs(optionReverse - referenceRzDeg);
+    return reverseDistance < forwardDistance ? optionReverse : optionForward;
+}
+
 double AngleDistanceDeg(double angleDeg, double referenceDeg)
 {
     return std::abs(NormalizeAngleNear(angleDeg, referenceDeg) - referenceDeg);
@@ -437,50 +511,6 @@ double PoseDistanceDeg(
     const double deltaRy = ryDeg - referenceRyDeg;
     const double deltaRz = AngleDistanceDeg(rzDeg, referenceRzDeg);
     return std::sqrt(deltaRx * deltaRx + deltaRy * deltaRy + deltaRz * deltaRz);
-}
-
-Eigen::Matrix3d RotXDeg(double angleDeg)
-{
-    const double angleRad = angleDeg * M_PI / 180.0;
-    const double c = std::cos(angleRad);
-    const double s = std::sin(angleRad);
-    Eigen::Matrix3d matrix = Eigen::Matrix3d::Identity();
-    matrix(1, 1) = c;
-    matrix(1, 2) = -s;
-    matrix(2, 1) = s;
-    matrix(2, 2) = c;
-    return matrix;
-}
-
-Eigen::Matrix3d RotYDeg(double angleDeg)
-{
-    const double angleRad = angleDeg * M_PI / 180.0;
-    const double c = std::cos(angleRad);
-    const double s = std::sin(angleRad);
-    Eigen::Matrix3d matrix = Eigen::Matrix3d::Identity();
-    matrix(0, 0) = c;
-    matrix(0, 2) = s;
-    matrix(2, 0) = -s;
-    matrix(2, 2) = c;
-    return matrix;
-}
-
-Eigen::Matrix3d RotZDeg(double angleDeg)
-{
-    const double angleRad = angleDeg * M_PI / 180.0;
-    const double c = std::cos(angleRad);
-    const double s = std::sin(angleRad);
-    Eigen::Matrix3d matrix = Eigen::Matrix3d::Identity();
-    matrix(0, 0) = c;
-    matrix(0, 1) = -s;
-    matrix(1, 0) = s;
-    matrix(1, 1) = c;
-    return matrix;
-}
-
-Eigen::Matrix3d FanucRotDeg(double rxDeg, double ryDeg, double rzDeg)
-{
-    return RotZDeg(rzDeg) * RotYDeg(ryDeg) * RotXDeg(rxDeg);
 }
 
 Eigen::Vector3d HorizontalUnitOrZero(const Eigen::Vector3d& vector)
@@ -565,11 +595,18 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
     WeldPosePreset preset;
     preset.rx = param.tStartPos.dRX;
     preset.ry = param.tStartPos.dRY;
+    preset.weldRzGainDeg = param.dWeldRzGainDeg;
+    const double startRy = param.tStartPos.dRY;
+    const double endRyNearStart = NormalizeAngleNear(param.tEndPos.dRY, startRy);
+    preset.measureReferenceRy = (startRy + endRyNearStart) * 0.5;
+    const double startRz = NormalizeAngleToFanucRange(param.tStartPos.dRZ);
+    const double endRzNearStart = NormalizeAngleNear(param.tEndPos.dRZ, startRz);
+    preset.measureReferenceRz = NormalizeAngleToFanucRange((startRz + endRzNearStart) * 0.5);
     preset.weldLineSectionName = param.sWeldSectionName.empty()
         ? QStringLiteral("WeldNormalParam0")
         : QString::fromStdString(param.sWeldSectionName);
     preset.weldLineFilePath = param.sWeldParamFilePath.empty()
-        ? RobotDataHelper::WeldLineParamPath(QString::fromStdString(param.sRobotName))
+        ? QString::fromStdString(param.sIniFilePath)
         : QString::fromStdString(param.sWeldParamFilePath);
     preset.poseCompFilePath = RobotDataHelper::BuildProjectPath(
         QString("Data/%1/WeldPoseCompParam.ini").arg(QString::fromStdString(param.sRobotName)));
@@ -597,11 +634,13 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
             double cornerTransitionLeadDistance = preset.cornerTransitionLeadDistance;
             double weldStartSkipDistance = preset.weldStartSkipDistance;
             double weldEndSkipDistance = preset.weldEndSkipDistance;
+            double weldRzGainDeg = preset.weldRzGainDeg;
             const bool hasNormalRx = TryReadIniDouble(ini, "NormalWeldRx", rx);
             const bool hasNormalRy = TryReadIniDouble(ini, "NormalWeldRy", ry);
             TryReadIniDouble(ini, "CornerTransitionLeadDis", cornerTransitionLeadDistance);
             TryReadIniDouble(ini, "WeldStartSkipDis", weldStartSkipDistance);
             TryReadIniDouble(ini, "WeldEndSkipDis", weldEndSkipDistance);
+            TryReadIniDouble(ini, "WeldRzGainDeg", weldRzGainDeg);
             if (!(hasNormalRx && hasNormalRy))
             {
                 rx = preset.rx;
@@ -619,6 +658,7 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
             preset.cornerTransitionLeadDistance = std::max(0.0, cornerTransitionLeadDistance);
             preset.weldStartSkipDistance = std::max(0.0, weldStartSkipDistance);
             preset.weldEndSkipDistance = std::max(0.0, weldEndSkipDistance);
+            preset.weldRzGainDeg = std::isfinite(weldRzGainDeg) ? weldRzGainDeg : 0.0;
             preset.weldLineFromIni = true;
         }
     }
@@ -717,6 +757,11 @@ load_pose_comp:
         COPini robotIni;
         if (robotIni.SetFileName(preset.robotParaPath.toStdString()))
         {
+            int robotType = preset.robotType;
+            robotIni.SetSectionName("BaseParam");
+            robotIni.ReadString(false, "RobotType", &robotType);
+            preset.robotType = RobotPoseTransform::NormalizeRobotType(robotType);
+
             robotIni.SetSectionName("Tool");
             double gunToolBaseRz = preset.gunToolBaseRz;
             if (TryReadIniDouble(robotIni, "GunTool_dRZ", gunToolBaseRz))
@@ -988,9 +1033,7 @@ const WeldPosePreset::SeamCompSlot* FindSeamCompSlotForRecord(
         return slot;
     }
 
-    // Backward compatibility: old configs had a single CorrugatedPlate slot
-    // applied to the whole weld seam.
-    return FindSeamCompSlotByKind(preset, preset.seamKind);
+    return nullptr;
 }
 
 Eigen::Vector3d ResolveHorizontalTangentDirection(
@@ -1080,6 +1123,7 @@ double MaxWristDeltaDeg(
 bool TryBuildWeldSafeCoors(
     const QVector<WeldPoseFileRecord>& records,
     int pointIndex,
+    int robotType,
     T_ROBOT_COORS& safeCoors,
     QString& error)
 {
@@ -1118,8 +1162,14 @@ bool TryBuildWeldSafeCoors(
         return false;
     }
 
+    Eigen::Vector3d safeGunAxis = Eigen::Vector3d::UnitY();
+    if (robotType == ROBOT_TYPE_STEP)
+    {
+        safeGunAxis = -safeGunAxis;
+    }
     const Eigen::Vector3d gunDirection = HorizontalUnitOrZero(
-        FanucRotDeg(anchor.rx, anchor.ry, anchor.rz) * Eigen::Vector3d::UnitY());
+        RobotPoseTransform::RotationFromAnglesDeg(anchor.rx, anchor.ry, anchor.rz, robotType)
+        * safeGunAxis);
     if (gunDirection.head<2>().norm() > 1e-9
         && lateralDirection.head<2>().dot(gunDirection.head<2>()) < 0.0)
     {
@@ -1218,8 +1268,173 @@ struct WeldSeamCompApplyStats
     int zAdjustedCount = 0;
     int gunDirAdjustedCount = 0;
     int seamDirAdjustedCount = 0;
+    int selfIntersectionTrimCount = 0;
+    int selfIntersectionRemovedPointCount = 0;
     QSet<QString> usedSlots;
 };
+
+struct WeldPathIntersection
+{
+    int firstSegmentIndex = -1;
+    int secondSegmentIndex = -1;
+    double firstRatio = 0.0;
+    double secondRatio = 0.0;
+    Eigen::Vector2d point = Eigen::Vector2d::Zero();
+};
+
+double Cross2d(const Eigen::Vector2d& left, const Eigen::Vector2d& right)
+{
+    return left.x() * right.y() - left.y() * right.x();
+}
+
+bool TryFindFirstWeldPathSelfIntersection(
+    const QVector<WeldPoseFileRecord>& records,
+    WeldPathIntersection& intersection)
+{
+    constexpr double kMinSegmentLengthMm = 1e-6;
+    constexpr double kIntersectionEpsilon = 1e-6;
+    intersection = WeldPathIntersection();
+
+    if (records.size() < 4)
+    {
+        return false;
+    }
+
+    for (int firstIndex = 0; firstIndex + 1 < records.size(); ++firstIndex)
+    {
+        const Eigen::Vector2d firstBegin(
+            records[firstIndex].point.x(),
+            records[firstIndex].point.y());
+        const Eigen::Vector2d firstEnd(
+            records[firstIndex + 1].point.x(),
+            records[firstIndex + 1].point.y());
+        const Eigen::Vector2d firstDelta = firstEnd - firstBegin;
+        if (firstDelta.norm() <= kMinSegmentLengthMm)
+        {
+            continue;
+        }
+
+        for (int secondIndex = firstIndex + 2; secondIndex + 1 < records.size(); ++secondIndex)
+        {
+            const Eigen::Vector2d secondBegin(
+                records[secondIndex].point.x(),
+                records[secondIndex].point.y());
+            const Eigen::Vector2d secondEnd(
+                records[secondIndex + 1].point.x(),
+                records[secondIndex + 1].point.y());
+            const Eigen::Vector2d secondDelta = secondEnd - secondBegin;
+            if (secondDelta.norm() <= kMinSegmentLengthMm)
+            {
+                continue;
+            }
+
+            const double denominator = Cross2d(firstDelta, secondDelta);
+            if (std::abs(denominator) <= 1e-9)
+            {
+                continue;
+            }
+
+            const Eigen::Vector2d beginDelta = secondBegin - firstBegin;
+            const double firstRatio = Cross2d(beginDelta, secondDelta) / denominator;
+            const double secondRatio = Cross2d(beginDelta, firstDelta) / denominator;
+            if (firstRatio <= kIntersectionEpsilon
+                || firstRatio >= 1.0 - kIntersectionEpsilon
+                || secondRatio <= kIntersectionEpsilon
+                || secondRatio >= 1.0 - kIntersectionEpsilon)
+            {
+                continue;
+            }
+
+            intersection.firstSegmentIndex = firstIndex;
+            intersection.secondSegmentIndex = secondIndex;
+            intersection.firstRatio = firstRatio;
+            intersection.secondRatio = secondRatio;
+            intersection.point = firstBegin + firstDelta * firstRatio;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+WeldPoseFileRecord InterpolateWeldPoseRecord(
+    const WeldPoseFileRecord& begin,
+    const WeldPoseFileRecord& end,
+    double ratio)
+{
+    const double safeRatio = std::clamp(ratio, 0.0, 1.0);
+    WeldPoseFileRecord record = begin;
+    record.rawIndex = static_cast<int>(std::lround(
+        begin.rawIndex + (end.rawIndex - begin.rawIndex) * safeRatio));
+    record.point = begin.point + (end.point - begin.point) * safeRatio;
+    record.rx = begin.rx + (NormalizeAngleNear(end.rx, begin.rx) - begin.rx) * safeRatio;
+    record.ry = begin.ry + (NormalizeAngleNear(end.ry, begin.ry) - begin.ry) * safeRatio;
+    record.rz = NormalizeAngleToFanucRange(
+        begin.rz + (NormalizeAngleNear(end.rz, begin.rz) - begin.rz) * safeRatio);
+    record.bx = begin.bx + (end.bx - begin.bx) * safeRatio;
+    record.by = begin.by + (end.by - begin.by) * safeRatio;
+    record.bz = begin.bz + (end.bz - begin.bz) * safeRatio;
+    if (safeRatio >= 0.5)
+    {
+        record.pointType = end.pointType;
+        record.segmentKind = end.segmentKind;
+    }
+    return record;
+}
+
+void RenumberWeldPoseRecords(QVector<WeldPoseFileRecord>& records)
+{
+    for (int index = 0; index < records.size(); ++index)
+    {
+        records[index].weldIndex = index + 1;
+    }
+}
+
+void TrimWeldPathSelfIntersections(
+    QVector<WeldPoseFileRecord>& records,
+    WeldSeamCompApplyStats& stats)
+{
+    constexpr int kMaxTrimIterations = 256;
+    int iteration = 0;
+
+    WeldPathIntersection intersection;
+    while (iteration < kMaxTrimIterations
+        && TryFindFirstWeldPathSelfIntersection(records, intersection))
+    {
+        const int firstIndex = intersection.firstSegmentIndex;
+        const int secondIndex = intersection.secondSegmentIndex;
+        if (firstIndex < 0
+            || secondIndex <= firstIndex + 1
+            || secondIndex + 1 >= records.size())
+        {
+            break;
+        }
+
+        WeldPoseFileRecord junctionRecord = InterpolateWeldPoseRecord(
+            records[secondIndex],
+            records[secondIndex + 1],
+            intersection.secondRatio);
+        junctionRecord.point.x() = intersection.point.x();
+        junctionRecord.point.y() = intersection.point.y();
+
+        records[firstIndex + 1] = junctionRecord;
+        const int eraseBegin = firstIndex + 2;
+        const int eraseEndExclusive = secondIndex + 1;
+        if (eraseBegin < eraseEndExclusive)
+        {
+            stats.selfIntersectionRemovedPointCount += eraseEndExclusive - eraseBegin;
+            records.erase(records.begin() + eraseBegin, records.begin() + eraseEndExclusive);
+        }
+
+        ++stats.selfIntersectionTrimCount;
+        ++iteration;
+    }
+
+    if (stats.selfIntersectionTrimCount > 0)
+    {
+        RenumberWeldPoseRecords(records);
+    }
+}
 
 WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
     const WeldPosePreset& preset,
@@ -1237,6 +1452,9 @@ WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
     {
         basePoints.push_back(record.point);
     }
+
+    Eigen::Vector3d previousGunCompDirection = Eigen::Vector3d::Zero();
+    bool hasPreviousGunCompDirection = false;
 
     for (int index = 0; index < records.size(); ++index)
     {
@@ -1262,7 +1480,8 @@ WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
         if (std::abs(seamCompSlot->weldGunDirComp) > 1e-6)
         {
             const Eigen::Vector3d gunDirection = HorizontalUnitOrZero(
-                FanucRotDeg(record.rx, record.ry, record.rz) * Eigen::Vector3d::UnitY());
+                RobotPoseTransform::RotationFromAnglesDeg(record.rx, record.ry, record.rz, preset.robotType)
+                * Eigen::Vector3d::UnitY());
             Eigen::Vector3d lateralDirection = HorizontalUnitOrZero(
                 Eigen::Vector3d::UnitZ().cross(seamDirection));
             if (lateralDirection.head<2>().norm() > 1e-9)
@@ -1272,8 +1491,15 @@ WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
                 {
                     lateralDirection = -lateralDirection;
                 }
+                if (hasPreviousGunCompDirection
+                    && lateralDirection.head<2>().dot(previousGunCompDirection.head<2>()) < 0.0)
+                {
+                    lateralDirection = -lateralDirection;
+                }
 
                 record.point += lateralDirection * seamCompSlot->weldGunDirComp;
+                previousGunCompDirection = lateralDirection;
+                hasPreviousGunCompDirection = true;
                 ++stats.gunDirAdjustedCount;
             }
         }
@@ -1286,6 +1512,7 @@ WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
         }
     }
 
+    TrimWeldPathSelfIntersections(records, stats);
     return stats;
 }
 
@@ -1309,6 +1536,8 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         QString kind;
         double fixedRz = 0.0;
         double directionDeg = 0.0;
+        double baseRz = 0.0;
+        double projectedRzDeviation = 0.0;
         bool directionValid = false;
         QVector<double> distanceToEnd;
     };
@@ -1403,7 +1632,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     }
 
     std::vector<SegmentInfo> segments;
-    double previousSegmentRz = preset.gunToolBaseRz;
+    double previousSegmentRz = preset.measureReferenceRz;
     for (size_t segmentIndex = 0; segmentIndex + 1 < keyPointPositions.size(); ++segmentIndex)
     {
         SegmentInfo segment;
@@ -1427,8 +1656,13 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         if (segmentValid)
         {
             const double axisDeviationDeg = NormalizeLineAxisDeviationFromYAxis(segmentDirectionDeg);
-            const double baseRz = preset.gunToolBaseRz + axisDeviationDeg;
-            segmentRz = NormalizeAngleNear(baseRz, previousSegmentRz);
+            const double projectedRzDeviation =
+                ProjectLineAxisDeviationToPoseRz(axisDeviationDeg, preset.measureReferenceRy);
+            const double baseRz = preset.measureReferenceRz - projectedRzDeviation;
+            segment.projectedRzDeviation = projectedRzDeviation;
+            segment.baseRz = NormalizeAngleToFanucRange(baseRz);
+            const double selectedRz = SelectAxisRzNearReference(baseRz, preset.measureReferenceRz);
+            segmentRz = NormalizeAngleNear(selectedRz, previousSegmentRz);
         }
 
         segment.fixedRz = NormalizeAngleToFanucRange(segmentRz);
@@ -1703,11 +1937,14 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         const double segmentWeldSeamDirComp = seamCompSlot != nullptr ? seamCompSlot->weldSeamDirComp : 0.0;
         if (appendLog)
         {
-            appendLog(QString("焊道姿态段 %1: 点[%2-%3], 固定RZ=%4 deg, RX=%5 deg, RY=%6 deg, 焊道种类=%7, 过渡起点=%8, 起点跳过=%9 mm, 终点跳过=%10 mm, Z补偿=%11 mm, 枪向补偿=%12 mm, 焊道方向补偿=%13 mm")
+            appendLog(QString("焊道姿态段 %1: 点[%2-%3], 固定RZ=%4 deg, 投影RZ=%5 deg, 测量参考RZ=%6 deg, RZ投影偏差=%7 deg, RX=%8 deg, RY=%9 deg, 焊道种类=%10, 过渡起点=%11, 起点跳过=%12 mm, 终点跳过=%13 mm, Z补偿=%14 mm, 枪向补偿=%15 mm, 焊道方向补偿=%16 mm")
                 .arg(segment.kind)
                 .arg(result.points[segment.begin].index)
                 .arg(result.points[segment.end].index)
                 .arg(segment.fixedRz, 0, 'f', 3)
+                .arg(segment.baseRz, 0, 'f', 3)
+                .arg(preset.measureReferenceRz, 0, 'f', 3)
+                .arg(segment.projectedRzDeviation, 0, 'f', 3)
                 .arg(preset.rx, 0, 'f', 3)
                 .arg(preset.ry, 0, 'f', 3)
                 .arg(preset.seamKind)
@@ -1896,7 +2133,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             pointRz = segment.fixedRz
                 + (nextSegmentRz - segment.fixedRz) * std::clamp(transitionRatio, 0.0, 1.0);
         }
-        pointRz = NormalizeAngleToFanucRange(pointRz);
+        pointRz = NormalizeAngleToFanucRange(pointRz + preset.weldRzGainDeg);
 
         const RobotCalculation::LowerWeldPointType pointType =
             samplePointTypeAtDistance(sampleDistance, sourceIndex);
@@ -1911,7 +2148,8 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             const Eigen::Vector3d poseCompLocal(slot.compX, slot.compY, slot.compZ);
             if (poseCompLocal.norm() > 1e-9)
             {
-                point += FanucRotDeg(pointRx, pointRy, pointRz) * poseCompLocal;
+                point += RobotPoseTransform::RotationFromAnglesDeg(pointRx, pointRy, pointRz, preset.robotType)
+                    * poseCompLocal;
             }
         }
 
@@ -1984,12 +2222,12 @@ QString RobotMotionStatusText(RobotDriverAdaptor* pRobotDriver)
     const std::string lastError = pRobotDriver->GetLastRobotError();
     if (!lastError.empty())
     {
-        details << QString("最近错误：%1").arg(QString::fromLocal8Bit(lastError.c_str()));
+        details << QString("最近错误：%1").arg(DecodeRobotMessageText(lastError));
     }
     const std::string statusText = pRobotDriver->GetRobotStatusText();
     if (!statusText.empty() && statusText != lastError)
     {
-        details << QString("当前状态：%1").arg(QString::fromLocal8Bit(statusText.c_str()));
+        details << QString("当前状态：%1").arg(DecodeRobotMessageText(statusText));
     }
     return details.join("；");
 }
@@ -2068,10 +2306,14 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
 
     const QString robotName = QString::fromStdString(param.sRobotName);
     QString ensureError;
-    const bool hasUnifiedParam = RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &ensureError);
-    const QString iniPath = hasUnifiedParam
-        ? RobotDataHelper::MeasureWeldParamPath(robotName)
-        : RobotDataHelper::PreciseMeasureParamPath(robotName);
+    if (!RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &ensureError))
+    {
+        error = ensureError.isEmpty()
+            ? QString("创建或打开测量焊接参数文件失败：%1").arg(RobotDataHelper::MeasureWeldParamPath(robotName))
+            : ensureError;
+        return false;
+    }
+    const QString iniPath = RobotDataHelper::MeasureWeldParamPath(robotName);
     if (!QFileInfo::exists(iniPath))
     {
         error = ensureError.isEmpty() ? QString("未找到参数文件：%1").arg(iniPath) : ensureError;
@@ -2088,30 +2330,17 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     }
 
     int useNo = 0;
-    if (hasUnifiedParam)
-    {
-        std::string groupName;
-        ini.SetSectionName("MeasureWeldGroups");
-        ini.ReadString(false, "UseGroupNo", &useNo);
-        ini.ReadString(false, QString("Group%1Name").arg(useNo).toStdString(), groupName);
-        param.nParamGroupIndex = std::max(0, useNo);
-        param.sParamGroupName = groupName.empty()
-            ? QString("参数组%1").arg(param.nParamGroupIndex + 1)
-            : QString::fromStdString(groupName);
-        param.sSectionName = RobotDataHelper::MeasureWeldScanSectionName(param.nParamGroupIndex).toStdString();
-        param.sWeldSectionName = RobotDataHelper::MeasureWeldWeldSectionName(param.nParamGroupIndex).toStdString();
-        param.sWeldParamFilePath = iniPath.toLocal8Bit().constData();
-    }
-    else
-    {
-        ini.SetSectionName("ALLPostion");
-        ini.ReadString(false, "UsePostionNo", &useNo);
-        param.nParamGroupIndex = std::max(0, useNo);
-        param.sParamGroupName = QString("参数组%1").arg(param.nParamGroupIndex + 1);
-        param.sSectionName = "Postion" + std::to_string(useNo);
-        param.sWeldSectionName = "WeldNormalParam0";
-        param.sWeldParamFilePath = RobotDataHelper::WeldLineParamPath(robotName).toLocal8Bit().constData();
-    }
+    std::string groupName;
+    ini.SetSectionName("MeasureWeldGroups");
+    ini.ReadString(false, "UseGroupNo", &useNo);
+    ini.ReadString(false, QString("Group%1Name").arg(useNo).toStdString(), groupName);
+    param.nParamGroupIndex = std::max(0, useNo);
+    param.sParamGroupName = groupName.empty()
+        ? QString("参数组%1").arg(param.nParamGroupIndex + 1)
+        : QString::fromStdString(groupName);
+    param.sSectionName = RobotDataHelper::MeasureWeldScanSectionName(param.nParamGroupIndex).toStdString();
+    param.sWeldSectionName = RobotDataHelper::MeasureWeldWeldSectionName(param.nParamGroupIndex).toStdString();
+    param.sWeldParamFilePath = iniPath.toLocal8Bit().constData();
 
     ini.SetSectionName(param.sSectionName);
     ini.ReadString(false, "ScanSpeed", &param.dScanSpeed);
@@ -2121,6 +2350,30 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     ini.ReadString(false, "dAcc", &param.dAcc);
     ini.ReadString(false, "dDec", &param.dDec);
 
+    COPini weldIni;
+    COPini* pWeldIni = &ini;
+    const QString weldParamPath = QString::fromStdString(param.sWeldParamFilePath.empty()
+        ? param.sIniFilePath
+        : param.sWeldParamFilePath);
+    if (weldParamPath != iniPath)
+    {
+        if (!weldIni.SetFileName(weldParamPath.toLocal8Bit().constData()))
+        {
+            error = QString("打开焊接参数文件失败：%1").arg(weldParamPath);
+            return false;
+        }
+        pWeldIni = &weldIni;
+    }
+    pWeldIni->SetSectionName(param.sWeldSectionName);
+    int doActualWeld = 1;
+    pWeldIni->ReadString(false, "WeldEnable", &doActualWeld);
+    pWeldIni->ReadString(false, "WeldSpeedMmPerMin", &param.dWeldSpeedMmPerMin);
+    pWeldIni->ReadString(false, "DryRunSpeedMmPerMin", &param.dDryRunSpeedMmPerMin);
+    pWeldIni->ReadString(false, "WeldSafeMoveSpeedMmPerMin", &param.dWeldSafeMoveSpeedMmPerMin);
+    pWeldIni->ReadString(false, "WeldRzGainDeg", &param.dWeldRzGainDeg);
+    param.bDoActualWeld = (doActualWeld != 0);
+
+    ini.SetSectionName(param.sSectionName);
     int useComputedScanSafe = 1;
     ini.ReadString(false, "UseComputedScanSafe", &useComputedScanSafe);
     param.bUseComputedScanSafe = (useComputedScanSafe != 0);
@@ -2137,6 +2390,22 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     if (!std::isfinite(param.dCameraTimeOffsetMs))
     {
         param.dCameraTimeOffsetMs = 0.0;
+    }
+    if (!std::isfinite(param.dWeldSpeedMmPerMin) || param.dWeldSpeedMmPerMin <= 0.0)
+    {
+        param.dWeldSpeedMmPerMin = FANUC_WELD_PATH_SPEED_MM_PER_MIN;
+    }
+    if (!std::isfinite(param.dDryRunSpeedMmPerMin) || param.dDryRunSpeedMmPerMin <= 0.0)
+    {
+        param.dDryRunSpeedMmPerMin = DEFAULT_DRY_RUN_SPEED_MM_PER_MIN;
+    }
+    if (!std::isfinite(param.dWeldSafeMoveSpeedMmPerMin) || param.dWeldSafeMoveSpeedMmPerMin <= 0.0)
+    {
+        param.dWeldSafeMoveSpeedMmPerMin = DEFAULT_WELD_SAFE_MOVE_SPEED_MM_PER_MIN;
+    }
+    if (!std::isfinite(param.dWeldRzGainDeg))
+    {
+        param.dWeldRzGainDeg = 0.0;
     }
     if (!std::isfinite(param.dScanSafeOffsetDistanceMm) || param.dScanSafeOffsetDistanceMm <= 0.0)
     {
@@ -2159,18 +2428,31 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
         param.dScanSafeFlipWarnThresholdDeg = 90.0;
     }
 
-    if (!ReadPulse(ini, "StartPulse", param.tStartPulse, error)
-        || !ReadCoors(ini, "StartPos", param.tStartPos, error)
+    QString pulseError;
+    param.bHasStartPulse = ReadPulse(ini, "StartPulse", param.tStartPulse, pulseError);
+    if (!param.bHasStartPulse)
+    {
+        param.tStartPulse = T_ANGLE_PULSE();
+        error.clear();
+    }
+
+    if (!ReadCoors(ini, "StartPos", param.tStartPos, error)
         || !ReadCoors(ini, "EndPos", param.tEndPos, error))
     {
         return false;
     }
 
-    if (!param.bUseComputedScanSafe
-        && (!ReadPulseList(ini, "StartSafePulseNum", "StartSafePulse", param.vtStartSafePulse, error)
-            || !ReadPulseList(ini, "EndSafePulseNum", "EndSafePulse", param.vtEndSafePulse, error)))
+    if (!param.bUseComputedScanSafe)
     {
-        return false;
+        if (!ReadPulseList(ini, "StartSafePulseNum", "StartSafePulse", param.vtStartSafePulse, error)
+            || !ReadPulseList(ini, "EndSafePulseNum", "EndSafePulse", param.vtEndSafePulse, error))
+        {
+            return false;
+        }
+        if (param.vtStartSafePulse.empty() || param.vtEndSafePulse.empty())
+        {
+            param.bUseComputedScanSafe = true;
+        }
     }
 
     return true;
@@ -2198,11 +2480,37 @@ bool MeasureThenWeldService::ReadPulse(COPini& ini, const std::string& prefix, T
 
 bool MeasureThenWeldService::ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const
 {
-    const int ok = ini.ReadString(prefix + ".", "", coors);
-    if (ok <= 0)
+    coors = T_ROBOT_COORS();
+    QStringList missingKeys;
+
+    auto readRequired = [&ini, &prefix, &missingKeys](const char* suffix, double& value)
+        {
+            const std::string key = prefix + "." + suffix;
+            if (ini.ReadString(false, key, &value) <= 0)
+            {
+                missingKeys << QString::fromStdString(key);
+            }
+        };
+    auto readOptional = [&ini, &prefix](const char* suffix, double& value)
+        {
+            const std::string key = prefix + "." + suffix;
+            ini.ReadString(false, key, &value);
+        };
+
+    readRequired("X", coors.dX);
+    readRequired("Y", coors.dY);
+    readRequired("Z", coors.dZ);
+    readRequired("RX", coors.dRX);
+    readRequired("RY", coors.dRY);
+    readRequired("RZ", coors.dRZ);
+    readOptional("BX", coors.dBX);
+    readOptional("BY", coors.dBY);
+    readOptional("BZ", coors.dBZ);
+
+    if (!missingKeys.isEmpty())
     {
-        error = QString("读取直角坐标失败：%1，请在“测量焊接参数”里重新示教并保存扫描起点/终点。")
-            .arg(QString::fromStdString(prefix));
+        error = QString("读取直角坐标失败：%1，缺少 %2，请在“测量焊接参数”里重新示教并保存扫描起点/终点。")
+            .arg(QString::fromStdString(prefix), missingKeys.join(", "));
         return false;
     }
     return true;
@@ -2214,7 +2522,8 @@ bool MeasureThenWeldService::ReadPulseList(COPini& ini, const std::string& count
     ini.ReadString(false, countKey, &count);
     if (count <= 0)
     {
-        count = 1;
+        pulses.clear();
+        return true;
     }
 
     pulses.clear();
@@ -2323,9 +2632,13 @@ bool MeasureThenWeldService::MoveScanStartSafeAndWait(
         return false;
     }
 
-    if (!param.bUseComputedScanSafe)
+    if (!param.bUseComputedScanSafe && !param.vtStartSafePulse.empty())
     {
         return MovePulseListAndWait(pRobotDriver, param.vtStartSafePulse, speed, "下枪安全姿态", appendLog, setFlowStep);
+    }
+    if (!param.bUseComputedScanSafe && appendLog)
+    {
+        appendLog("下枪安全姿态未配置有效脉冲点，自动改用扫描安全位置推算。");
     }
 
     const T_ROBOT_COORS startSafeCoors = BuildScanSafeCoorsFromAnchor(param.tStartPos, param);
@@ -2339,58 +2652,65 @@ bool MeasureThenWeldService::MoveScanStartSafeAndWait(
             .arg(param.nScanSafeXDirection >= 0 ? "X+" : "X-"));
     }
 
-    const T_ANGLE_PULSE currentPulse = pRobotDriver->GetCurrentPulse();
-    const double maxWristDeltaDeg = MaxWristDeltaDeg(currentPulse, param.tStartPulse, pRobotDriver->m_tAxisUnit);
-    const double warnThresholdDeg = param.dScanSafeFlipWarnThresholdDeg > 0.0
-        ? param.dScanSafeFlipWarnThresholdDeg
-        : 90.0;
-    if (maxWristDeltaDeg >= warnThresholdDeg)
+    if (param.bHasStartPulse)
     {
-        const QString detail = QString(
-            "当前关节姿态和扫描起点示教关节姿态差异较大，最大腕部轴差≈%1°，阈值=%2°。\n"
-            "为降低姿态翻转时碰撞风险，流程将先原地抬高 %3mm，再在高位切换到扫描起点姿态，最后移动到扫描下枪安全位置。\n"
-            "扫描起点关节：R=%4 B=%5 T=%6\n"
-            "当前关节：R=%7 B=%8 T=%9")
-            .arg(maxWristDeltaDeg, 0, 'f', 3)
-            .arg(warnThresholdDeg, 0, 'f', 3)
-            .arg(param.dScanSafeLiftHeightMm, 0, 'f', 3)
-            .arg(param.tStartPulse.nRPulse)
-            .arg(param.tStartPulse.nBPulse)
-            .arg(param.tStartPulse.nTPulse)
-            .arg(currentPulse.nRPulse)
-            .arg(currentPulse.nBPulse)
-            .arg(currentPulse.nTPulse);
-
-        if (checkpoint && !checkpoint("扫描姿态翻转风险提醒", detail))
+        const T_ANGLE_PULSE currentPulse = pRobotDriver->GetCurrentPulse();
+        const double maxWristDeltaDeg = MaxWristDeltaDeg(currentPulse, param.tStartPulse, pRobotDriver->m_tAxisUnit);
+        const double warnThresholdDeg = param.dScanSafeFlipWarnThresholdDeg > 0.0
+            ? param.dScanSafeFlipWarnThresholdDeg
+            : 90.0;
+        if (maxWristDeltaDeg >= warnThresholdDeg)
         {
-            if (appendLog)
+            const QString detail = QString(
+                "当前关节姿态和扫描起点示教关节姿态差异较大，最大腕部轴差≈%1°，阈值=%2°。\n"
+                "为降低姿态翻转时碰撞风险，流程将先原地抬高 %3mm，再在高位切换到扫描起点姿态，最后移动到扫描下枪安全位置。\n"
+                "扫描起点关节：R=%4 B=%5 T=%6\n"
+                "当前关节：R=%7 B=%8 T=%9")
+                .arg(maxWristDeltaDeg, 0, 'f', 3)
+                .arg(warnThresholdDeg, 0, 'f', 3)
+                .arg(param.dScanSafeLiftHeightMm, 0, 'f', 3)
+                .arg(param.tStartPulse.nRPulse)
+                .arg(param.tStartPulse.nBPulse)
+                .arg(param.tStartPulse.nTPulse)
+                .arg(currentPulse.nRPulse)
+                .arg(currentPulse.nBPulse)
+                .arg(currentPulse.nTPulse);
+
+            if (checkpoint && !checkpoint("扫描姿态翻转风险提醒", detail))
             {
-                appendLog("用户取消扫描姿态翻转保护流程。");
+                if (appendLog)
+                {
+                    appendLog("用户取消扫描姿态翻转保护流程。");
+                }
+                return false;
             }
-            return false;
-        }
 
-        T_ROBOT_COORS currentCoors = pRobotDriver->GetCurrentPos();
-        const double liftHeight = std::max(0.0, param.dScanSafeLiftHeightMm);
-        if (liftHeight > 1e-6)
-        {
-            T_ROBOT_COORS liftCoors = currentCoors;
-            liftCoors.dZ += liftHeight;
-            if (!MoveCoorsAndWait(pRobotDriver, liftCoors, speed, "扫描姿态切换抬高点", appendLog, setFlowStep))
+            T_ROBOT_COORS currentCoors = pRobotDriver->GetCurrentPos();
+            const double liftHeight = std::max(0.0, param.dScanSafeLiftHeightMm);
+            if (liftHeight > 1e-6)
+            {
+                T_ROBOT_COORS liftCoors = currentCoors;
+                liftCoors.dZ += liftHeight;
+                if (!MoveCoorsAndWait(pRobotDriver, liftCoors, speed, "扫描姿态切换抬高点", appendLog, setFlowStep))
+                {
+                    return false;
+                }
+                currentCoors = liftCoors;
+            }
+
+            T_ROBOT_COORS highPoseCoors = currentCoors;
+            highPoseCoors.dRX = param.tStartPos.dRX;
+            highPoseCoors.dRY = param.tStartPos.dRY;
+            highPoseCoors.dRZ = param.tStartPos.dRZ;
+            if (!MoveCoorsAndWait(pRobotDriver, highPoseCoors, speed, "高位切换扫描起点姿态", appendLog, setFlowStep))
             {
                 return false;
             }
-            currentCoors = liftCoors;
         }
-
-        T_ROBOT_COORS highPoseCoors = currentCoors;
-        highPoseCoors.dRX = param.tStartPos.dRX;
-        highPoseCoors.dRY = param.tStartPos.dRY;
-        highPoseCoors.dRZ = param.tStartPos.dRZ;
-        if (!MoveCoorsAndWait(pRobotDriver, highPoseCoors, speed, "高位切换扫描起点姿态", appendLog, setFlowStep))
-        {
-            return false;
-        }
+    }
+    else if (appendLog)
+    {
+        appendLog("扫描起点关节脉冲未配置，跳过姿态翻转风险判断，仅按直角位姿推算安全位。");
     }
 
     return MoveCoorsAndWait(pRobotDriver, startSafeCoors, speed, "扫描下枪安全位置", appendLog, setFlowStep);
@@ -2408,9 +2728,13 @@ bool MeasureThenWeldService::MoveScanEndSafeAndWait(
         return false;
     }
 
-    if (!param.bUseComputedScanSafe)
+    if (!param.bUseComputedScanSafe && !param.vtEndSafePulse.empty())
     {
         return MovePulseListAndWait(pRobotDriver, param.vtEndSafePulse, speed, "收枪姿态", appendLog, setFlowStep);
+    }
+    if (!param.bUseComputedScanSafe && appendLog)
+    {
+        appendLog("收枪姿态未配置有效脉冲点，自动改用扫描安全位置推算。");
     }
 
     const T_ROBOT_COORS endSafeCoors = BuildScanSafeCoorsFromAnchor(param.tEndPos, param);
@@ -2452,24 +2776,50 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         setFlowStep("扫描运动中，正在采集相机点、机器人位置和激光点");
     }
 
+    HandEyeMatrixConfig calibration = GetDefaultHandEyeMatrixConfig();
+    QString calibrationError;
+    QString calibrationPath;
+    const QString cameraSection = RobotDataHelper::MeasureCameraSection(QString::fromStdString(param.sRobotName));
+    if (LoadHandEyeMatrixConfig(QString::fromStdString(param.sRobotName), cameraSection, calibration, &calibrationError, &calibrationPath))
+    {
+        if (appendLog)
+        {
+            appendLog(QString("已读取手眼矩阵参数：%1 [%2]").arg(calibrationPath, cameraSection));
+        }
+    }
+    else if (appendLog)
+    {
+        appendLog(QString("读取手眼矩阵参数失败，已回退默认值：%1 [%2]").arg(calibrationError, cameraSection));
+    }
+
     frameCache->Clear();
+
+    std::vector<RobotCalculation::TimestampedRobotPose> robotSamples;
+    robotSamples.reserve(1000);
+    std::mutex robotSamplesMutex;
+    std::condition_variable robotSamplesCv;
+
+    std::deque<QueuedScanCameraFrame> pendingCameraFrames;
+    std::mutex pendingCameraFramesMutex;
+    std::condition_variable pendingCameraFramesCv;
+    std::atomic_bool cameraEnqueueFinished(false);
+
+    std::vector<ProcessedScanCameraSample> processedCameraSamples;
+    std::mutex processedCameraSamplesMutex;
 
     std::vector<TimestampedCameraPoint> cameraSamples;
     std::vector<TimestampedCameraPoint> matchedCameraSamples;
-    std::vector<RobotCalculation::TimestampedRobotPose> robotSamples;
     QVector<RobotCalculation::IndexedPoint3D> laserFitInput;
     cameraSamples.reserve(10000);
     matchedCameraSamples.reserve(10000);
-    robotSamples.reserve(1000);
     laserFitInput.reserve(10000);
     long long lastRobotMonitorMs = std::numeric_limits<long long>::min();
     bool passiveRobotSamplingActive = false;
-    std::size_t nextPendingCameraIndex = 0;
-    int droppedHeadCameraCount = 0;
     int invalidCameraTimestampCount = 0;
     int cameraBeforeRobotTimeBaseCount = 0;
     int cameraTimestampBackwardsCount = 0;
     int cameraTimestampJumpCount = 0;
+    int enqueuedCameraSampleCount = 0;
     qint64 lastCameraRawTimestampUs = 0;
     qint64 maxCameraRawDeltaUs = 0;
     const qint64 cameraTimestampJumpWarnUs = std::max<qint64>(50000, cameraReadIntervalMs * 4000);
@@ -2479,12 +2829,15 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     qint64 firstRobotTimestampUs = 0;
     bool hasCameraTimeBaseRobotTimestamp = false;
     qint64 cameraTimeBaseRobotTimestampUs = 0;
+    qint64 latestEnqueuedCameraTimestampUs = 0;
     std::uint64_t scanStartCameraSequence = 0;
     std::uint64_t scanEndCameraSequence = 0;
     std::uint64_t lastPulledCameraSequence = 0;
 
     auto appendCameraFrame = [
-        &cameraSamples,
+        &pendingCameraFrames,
+        &pendingCameraFramesMutex,
+        &pendingCameraFramesCv,
         cameraTimeOffsetUs,
         &invalidCameraTimestampCount,
         &cameraBeforeRobotTimeBaseCount,
@@ -2498,7 +2851,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         &firstCameraRawTimestampUs,
         &firstRobotTimestampUs,
         &hasCameraTimeBaseRobotTimestamp,
-        &cameraTimeBaseRobotTimestampUs](const udpDataShow& frame)
+        &cameraTimeBaseRobotTimestampUs,
+        &latestEnqueuedCameraTimestampUs,
+        &enqueuedCameraSampleCount](const udpDataShow& frame)
         {
             const qint64 rawTimestampUs = static_cast<qint64>(frame.timestamp);
             if (rawTimestampUs <= 0)
@@ -2535,41 +2890,40 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                 hasCameraToRobotTimeOffset = true;
             }
 
-            cameraSamples.push_back(TimestampedCameraPoint{
-                static_cast<int>(cameraSamples.size()) + 1,
-                rawTimestampUs,
-                rawDeltaUs,
-                rawTimestampUs + cameraToRobotTimeOffsetUs + cameraTimeOffsetUs,
-                Eigen::Vector3d(frame.targetPoint.x, frame.targetPoint.y, frame.targetPoint.z),
-                frame.errorMessage });
+            {
+                std::lock_guard<std::mutex> locker(pendingCameraFramesMutex);
+                QueuedScanCameraFrame queuedFrame;
+                queuedFrame.sampleIndex = ++enqueuedCameraSampleCount;
+                queuedFrame.rawTimestampUs = rawTimestampUs;
+                queuedFrame.rawDeltaUs = rawDeltaUs;
+                queuedFrame.timestampUs = rawTimestampUs + cameraToRobotTimeOffsetUs + cameraTimeOffsetUs;
+                queuedFrame.frame = frame;
+                latestEnqueuedCameraTimestampUs = queuedFrame.timestampUs;
+                pendingCameraFrames.push_back(std::move(queuedFrame));
+            }
+            pendingCameraFramesCv.notify_one();
         };
 
-    auto resolveReadyCameraSamples = [&cameraSamples, &nextPendingCameraIndex, &robotSamples, &matchedCameraSamples, &droppedHeadCameraCount]()
-        {
-            ResolveCameraSamplesAgainstRobotTimeline(
-                cameraSamples,
-                nextPendingCameraIndex,
-                robotSamples,
-                matchedCameraSamples,
-                droppedHeadCameraCount);
-        };
-
-    auto appendRobotPose = [&robotSamples, pRobotDriver, &lastRobotMonitorMs, &passiveRobotSamplingActive, &resolveReadyCameraSamples]()
+    auto appendRobotPose = [
+        &robotSamples,
+        &robotSamplesMutex,
+        &robotSamplesCv,
+        pRobotDriver,
+        &lastRobotMonitorMs,
+        &passiveRobotSamplingActive]()
         {
             RobotCalculation::TimestampedRobotPose sample;
-            long long robotMs = 0;
-            long long pcRecvMs = 0;
-            const T_ROBOT_COORS passivePose = pRobotDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
-            if (pcRecvMs > 0)
+            RobotDriverAdaptor::StateSnapshot snapshot;
+            if (pRobotDriver->LatestStateSnapshot(snapshot) && snapshot.valid)
             {
-                if (passiveRobotSamplingActive && robotMs == lastRobotMonitorMs)
+                if (passiveRobotSamplingActive && snapshot.robotMs == lastRobotMonitorMs)
                 {
                     return false;
                 }
 
-                sample.pose = passivePose;
-                sample.timestampUs = static_cast<qint64>(robotMs) * 1000;
-                lastRobotMonitorMs = robotMs;
+                sample.pose = snapshot.pose;
+                sample.timestampUs = static_cast<qint64>(snapshot.robotMs) * 1000;
+                lastRobotMonitorMs = snapshot.robotMs;
                 passiveRobotSamplingActive = true;
             }
             if (sample.timestampUs <= 0)
@@ -2578,9 +2932,18 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                 sample.timestampUs = SteadyNowUs();
             }
 
-            robotSamples.push_back(sample);
-            resolveReadyCameraSamples();
+            {
+                std::lock_guard<std::mutex> locker(robotSamplesMutex);
+                robotSamples.push_back(sample);
+            }
+            robotSamplesCv.notify_all();
             return true;
+        };
+
+    auto latestRobotTimestampUs = [&robotSamples, &robotSamplesMutex]()
+        {
+            std::lock_guard<std::mutex> locker(robotSamplesMutex);
+            return robotSamples.empty() ? 0 : robotSamples.back().timestampUs;
         };
 
     auto pullScanCameraFramesTo = [frameCache, &lastPulledCameraSequence, &appendCameraFrame](std::uint64_t targetSequence)
@@ -2605,13 +2968,170 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             pullScanCameraFramesTo(frameCache->Mark());
         };
 
+    const unsigned int hardwareThreads = std::thread::hardware_concurrency();
+    const int processingWorkerCount = std::max(
+        1,
+        std::min(4, static_cast<int>(hardwareThreads > 1 ? hardwareThreads - 1 : 1)));
+    const qint64 processingWallStartMs = SteadyNowMs();
+    std::vector<std::thread> processingWorkers;
+    processingWorkers.reserve(static_cast<std::size_t>(processingWorkerCount));
+    for (int workerIndex = 0; workerIndex < processingWorkerCount; ++workerIndex)
+    {
+        processingWorkers.emplace_back([&]()
+            {
+                while (true)
+                {
+                    QueuedScanCameraFrame queuedFrame;
+                    {
+                        std::unique_lock<std::mutex> locker(pendingCameraFramesMutex);
+                        pendingCameraFramesCv.wait(locker, [&]()
+                            {
+                                return !pendingCameraFrames.empty() || cameraEnqueueFinished.load();
+                            });
+                        if (pendingCameraFrames.empty())
+                        {
+                            if (cameraEnqueueFinished.load())
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        queuedFrame = std::move(pendingCameraFrames.front());
+                        pendingCameraFrames.pop_front();
+                    }
+
+                    ProcessedScanCameraSample processed;
+                    processed.sample.sampleIndex = queuedFrame.sampleIndex;
+                    processed.sample.rawTimestampUs = queuedFrame.rawTimestampUs;
+                    processed.sample.rawDeltaUs = queuedFrame.rawDeltaUs;
+                    processed.sample.timestampUs = queuedFrame.timestampUs;
+                    processed.sample.point = Eigen::Vector3d(
+                        queuedFrame.frame.targetPoint.x,
+                        queuedFrame.frame.targetPoint.y,
+                        queuedFrame.frame.targetPoint.z);
+                    processed.sample.error = queuedFrame.frame.errorMessage;
+
+                    std::vector<RobotCalculation::TimestampedRobotPose> interpolationSamples;
+                    {
+                        std::unique_lock<std::mutex> locker(robotSamplesMutex);
+                        while (true)
+                        {
+                            if (robotSamples.empty())
+                            {
+                                if (cameraEnqueueFinished.load())
+                                {
+                                    processed.status = "unmatched_no_robot_sample";
+                                    break;
+                                }
+                            }
+                            else if (queuedFrame.timestampUs < robotSamples.front().timestampUs)
+                            {
+                                processed.status = "unmatched_before_robot";
+                                break;
+                            }
+                            else if (queuedFrame.timestampUs <= robotSamples.back().timestampUs)
+                            {
+                                processed.robotWindow = FindRobotInterpolationWindow(robotSamples, queuedFrame.timestampUs);
+                                if (processed.robotWindow.prevIndex > 0)
+                                {
+                                    const int prevZeroIndex = std::clamp(
+                                        processed.robotWindow.prevIndex - 1,
+                                        0,
+                                        static_cast<int>(robotSamples.size()) - 1);
+                                    const int nextZeroIndex = std::clamp(
+                                        processed.robotWindow.nextIndex - 1,
+                                        0,
+                                        static_cast<int>(robotSamples.size()) - 1);
+                                    interpolationSamples.push_back(robotSamples[static_cast<std::size_t>(prevZeroIndex)]);
+                                    if (nextZeroIndex != prevZeroIndex)
+                                    {
+                                        interpolationSamples.push_back(robotSamples[static_cast<std::size_t>(nextZeroIndex)]);
+                                    }
+                                }
+                                break;
+                            }
+                            else if (cameraEnqueueFinished.load())
+                            {
+                                processed.status = "unmatched_after_robot";
+                                break;
+                            }
+
+                            robotSamplesCv.wait_for(locker, std::chrono::milliseconds(CAMERA_ROBOT_MATCH_TAIL_POLL_MS));
+                        }
+                    }
+
+                    if (!interpolationSamples.empty())
+                    {
+                        processed.robotPose = RobotCalculation::InterpolateRobotPose(interpolationSamples, queuedFrame.timestampUs);
+                        processed.hasRobotPose = true;
+                        processed.contributedWorkpieceFrame = !queuedFrame.frame.allResultPoint.empty();
+                        processed.workpiecePoints.reserve(queuedFrame.frame.allResultPoint.size());
+                        for (int linePointIndex = 0; linePointIndex < static_cast<int>(queuedFrame.frame.allResultPoint.size()); ++linePointIndex)
+                        {
+                            const cv::Point3d& sourcePoint = queuedFrame.frame.allResultPoint[static_cast<std::size_t>(linePointIndex)];
+                            const Eigen::Vector3d cameraLinePoint(sourcePoint.x, sourcePoint.y, sourcePoint.z);
+                            constexpr double kZeroPointEps = 1e-9;
+                            const bool isZeroPoint =
+                                std::abs(cameraLinePoint.x()) <= kZeroPointEps
+                                && std::abs(cameraLinePoint.y()) <= kZeroPointEps
+                                && std::abs(cameraLinePoint.z()) <= kZeroPointEps;
+                            if (!IsFiniteCameraPoint(cameraLinePoint) || isZeroPoint)
+                            {
+                                ++processed.skippedWorkpieceCloudPointCount;
+                                continue;
+                            }
+
+                            ProcessedScanWorkpiecePoint cloudPoint;
+                            cloudPoint.linePointIndex = linePointIndex + 1;
+                            cloudPoint.cameraPoint = cameraLinePoint;
+                            cloudPoint.workpiecePoint =
+                                RobotCalculation::CalcLaserPointInRobot(processed.robotPose, cameraLinePoint, calibration);
+                            processed.workpiecePoints.push_back(cloudPoint);
+                        }
+
+                        if (ShouldSkipLaserCalc(processed.sample))
+                        {
+                            processed.status = "skip_invalid_camera_point";
+                        }
+                        else
+                        {
+                            processed.status = "laser_ok";
+                            processed.laserPoint =
+                                RobotCalculation::CalcLaserPointInRobot(processed.robotPose, processed.sample.point, calibration);
+                            processed.hasLaserPoint = true;
+                        }
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> locker(processedCameraSamplesMutex);
+                        processedCameraSamples.push_back(std::move(processed));
+                    }
+                }
+            });
+    }
+    auto finishCameraProcessingWorkers = [&]()
+        {
+            cameraEnqueueFinished.store(true);
+            pendingCameraFramesCv.notify_all();
+            robotSamplesCv.notify_all();
+            for (std::thread& worker : processingWorkers)
+            {
+                if (worker.joinable())
+                {
+                    worker.join();
+                }
+            }
+        };
+
     if (appendLog)
     {
-        appendLog(QString("开始扫描运动：相机帧由当前机器人专属缓存读取，配置相机读取帧率=%1 fps（约 %2 ms/帧，用于时间间隔统计），机器人位姿约 %3 ms 采样；机器人位姿使用被动时间轴（FANUC=机器人端robot_ms，STEP/其他=PC steady ms），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %4 ms。配置扫描速度= %5 mm/min，下发速度= %6 %7")
+        appendLog(QString("开始扫描运动：相机帧由当前机器人专属缓存读取，配置相机读取帧率=%1 fps（约 %2 ms/帧，用于时间间隔统计），机器人位姿约 %3 ms 采样；机器人位姿使用被动时间轴（FANUC=机器人端robot_ms，STEP/其他=PC steady ms），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %4 ms。点云转换使用 %5 个后台处理线程。配置扫描速度= %6 mm/min，下发速度= %7 %8")
             .arg(actualCameraReadFps, 0, 'f', 2)
             .arg(cameraReadIntervalMs)
             .arg(ROBOT_SAMPLE_INTERVAL_MS)
             .arg(param.dCameraTimeOffsetMs, 0, 'f', 3)
+            .arg(processingWorkerCount)
             .arg(param.dScanSpeed, 0, 'f', 3)
             .arg(scanCommandSpeed, 0, 'f', 3)
             .arg(scanCommandSpeedUnit));
@@ -2628,6 +3148,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         {
             appendLog("扫描终点运动启动失败。");
         }
+        finishCameraProcessingWorkers();
         return false;
     }
 
@@ -2668,10 +3189,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             if (motionStarted)
             {
                 appendRobotPose();
-                if (!hasCameraTimeBaseRobotTimestamp && !robotSamples.empty())
+                if (!hasCameraTimeBaseRobotTimestamp)
                 {
-                    cameraTimeBaseRobotTimestampUs = robotSamples.back().timestampUs;
-                    hasCameraTimeBaseRobotTimestamp = true;
+                    const qint64 latestRobotUs = latestRobotTimestampUs();
+                    if (latestRobotUs > 0)
+                    {
+                        cameraTimeBaseRobotTimestampUs = latestRobotUs;
+                        hasCameraTimeBaseRobotTimestamp = true;
+                    }
                 }
                 pullScanCameraFrames();
             }
@@ -2689,6 +3214,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                 {
                     appendLog(QString("扫描运动未在 3s 内进入运行态：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
                 }
+                finishCameraProcessingWorkers();
                 return false;
             }
             if (motionStarted && elapsedMs > 120000)
@@ -2697,6 +3223,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                 {
                     appendLog(QString("扫描运动等待完成超时：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
                 }
+                finishCameraProcessingWorkers();
                 return false;
             }
         }
@@ -2704,6 +3231,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     appendRobotPose();
+    const qint64 scanMotionElapsedMs = SteadyNowMs() - motionStartMs;
 
     if (scanEndCameraSequence == 0)
     {
@@ -2712,26 +3240,22 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     }
     frameCache->Clear();
 
-    resolveReadyCameraSamples();
-
     bool tailWaitTriggered = false;
     const qint64 tailWaitStartMs = SteadyNowMs();
-    while (nextPendingCameraIndex < cameraSamples.size()
-        && !robotSamples.empty()
-        && cameraSamples[nextPendingCameraIndex].timestampUs > robotSamples.back().timestampUs
+    while (latestEnqueuedCameraTimestampUs > 0
+        && latestRobotTimestampUs() > 0
+        && latestEnqueuedCameraTimestampUs > latestRobotTimestampUs()
         && (SteadyNowMs() - tailWaitStartMs) < CAMERA_ROBOT_MATCH_TAIL_WAIT_MS)
     {
         if (!tailWaitTriggered && appendLog)
         {
-            appendLog(QString("检测到 %1 个相机点时间戳晚于最新机器人位姿，开始等待机器人监控时间追上（最长 %2 ms）。")
-                .arg(static_cast<int>(cameraSamples.size() - nextPendingCameraIndex))
+            appendLog(QString("检测到相机时间戳晚于最新机器人位姿，开始等待机器人监控时间追上（最长 %1 ms）。")
                 .arg(CAMERA_ROBOT_MATCH_TAIL_WAIT_MS));
         }
         tailWaitTriggered = true;
 
         appendRobotPose();
-        if (nextPendingCameraIndex >= cameraSamples.size()
-            || cameraSamples[nextPendingCameraIndex].timestampUs <= robotSamples.back().timestampUs)
+        if (latestEnqueuedCameraTimestampUs <= latestRobotTimestampUs())
         {
             break;
         }
@@ -2739,8 +3263,44 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         std::this_thread::sleep_for(std::chrono::milliseconds(CAMERA_ROBOT_MATCH_TAIL_POLL_MS));
     }
 
-    resolveReadyCameraSamples();
-    const int droppedTailCameraCount = static_cast<int>(cameraSamples.size() - nextPendingCameraIndex);
+    const qint64 tailWaitElapsedMs = tailWaitTriggered ? (SteadyNowMs() - tailWaitStartMs) : 0;
+    const qint64 processingJoinStartMs = SteadyNowMs();
+    finishCameraProcessingWorkers();
+    const qint64 postMotionProcessingWaitMs = SteadyNowMs() - processingJoinStartMs;
+    const qint64 parallelProcessingElapsedMs = SteadyNowMs() - processingWallStartMs;
+
+    {
+        std::lock_guard<std::mutex> locker(processedCameraSamplesMutex);
+        std::sort(processedCameraSamples.begin(), processedCameraSamples.end(),
+            [](const ProcessedScanCameraSample& left, const ProcessedScanCameraSample& right)
+            {
+                return left.sample.sampleIndex < right.sample.sampleIndex;
+            });
+        cameraSamples.reserve(processedCameraSamples.size());
+        matchedCameraSamples.reserve(processedCameraSamples.size());
+        for (const ProcessedScanCameraSample& processed : processedCameraSamples)
+        {
+            cameraSamples.push_back(processed.sample);
+            if (processed.hasRobotPose)
+            {
+                matchedCameraSamples.push_back(processed.sample);
+            }
+        }
+    }
+
+    int droppedHeadCameraCount = 0;
+    int droppedTailCameraCount = 0;
+    for (const ProcessedScanCameraSample& processed : processedCameraSamples)
+    {
+        if (processed.status == "unmatched_before_robot")
+        {
+            ++droppedHeadCameraCount;
+        }
+        else if (processed.status == "unmatched_after_robot")
+        {
+            ++droppedTailCameraCount;
+        }
+    }
 
     const QString resultDir = BuildResultDir(param.sRobotName);
     const QString cameraDir = QDir(resultDir).filePath("CameraPoint");
@@ -2752,54 +3312,39 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
 
     const QString cameraPath = QDir(cameraDir).filePath("PreciseCameraPoint.txt");
     const QString robotPath = QDir(robotDir).filePath("PreciseRobotPoint.txt");
-    const QString laserPath = QDir(laserDir).filePath("PreciseLaserPoint.txt");
+    const QString laserPath = QDir(laserDir).filePath(RAW_LASER_FILE_NAME);
+    const QString workpieceCloudPath = QDir(laserDir).filePath(WORKPIECE_CLOUD_FILE_NAME);
     const QString matchDebugPath = QDir(laserDir).filePath("PreciseLaserPoint_MatchDebug.csv");
-    const QString preservePathFitPath = QDir(laserDir).filePath("PreciseLaserPoint_PreservePath_2mm.txt");
-    const QString classifiedPath = QDir(laserDir).filePath("PreciseLaserPoint_Classified.txt");
-    const QString classifiedNoisePath = QDir(laserDir).filePath("PreciseLaserPoint_Classified_Noise.txt");
+    const QString preservePathFitPath = QDir(laserDir).filePath(PRESERVE_PATH_FILE_NAME);
+    const QString classifiedPath = QDir(laserDir).filePath(CLASSIFIED_FILE_NAME);
+    const QString classifiedNoisePath = QDir(laserDir).filePath(CLASSIFIED_NOISE_FILE_NAME);
     const QString weldPosePath = QDir(laserDir).filePath(WELD_POSE_FILE_NAME);
     const QString weldPoseSeamCompPath = QDir(laserDir).filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
     savedPath = resultDir;
 
+    const qint64 outputBuildStartMs = SteadyNowMs();
     std::vector<QString> cameraLines;
     std::vector<QString> robotLines;
     std::vector<QString> laserLines;
+    std::vector<QString> workpieceCloudLines;
     std::vector<QString> matchDebugLines;
     cameraLines.reserve(cameraSamples.size() + 1);
     robotLines.reserve(matchedCameraSamples.size() + 1);
     laserLines.reserve(matchedCameraSamples.size() + 1);
+    workpieceCloudLines.reserve(cameraSamples.size() * 16 + 1);
     matchDebugLines.reserve(cameraSamples.size() + 1);
     cameraLines.push_back("index,x,y,z,error");
     robotLines.push_back("index,x,y,z,rx,ry,rz,bx,by,bz");
     laserLines.push_back("index,x,y,z");
+    workpieceCloudLines.push_back("index frame_index line_point_index x y z camera_x camera_y camera_z robot_x robot_y robot_z robot_rx robot_ry robot_rz");
     matchDebugLines.push_back("index,status,camera_raw_timestamp_us,camera_raw_delta_us,mapped_robot_timestamp_us,prev_robot_index,prev_robot_timestamp_us,next_robot_index,next_robot_timestamp_us,interp_ratio,camera_x,camera_y,camera_z,robot_x,robot_y,robot_z,robot_rx,robot_ry,robot_rz,robot_bx,robot_by,robot_bz,laser_x,laser_y,laser_z,error");
 
-    HandEyeMatrixConfig calibration = GetDefaultHandEyeMatrixConfig();
-    QString calibrationError;
-    QString calibrationPath;
-    const QString cameraSection = RobotDataHelper::MeasureCameraSection(QString::fromStdString(param.sRobotName));
-    if (LoadHandEyeMatrixConfig(QString::fromStdString(param.sRobotName), cameraSection, calibration, &calibrationError, &calibrationPath))
-    {
-        if (appendLog)
-        {
-            appendLog(QString("已读取手眼矩阵参数：%1 [%2]").arg(calibrationPath, cameraSection));
-        }
-    }
-    else if (appendLog)
-    {
-        appendLog(QString("读取手眼矩阵参数失败，已回退默认值：%1 [%2]").arg(calibrationError, cameraSection));
-    }
-
+    const qint64 cameraLineBuildStartMs = SteadyNowMs();
     for (const TimestampedCameraPoint& sample : cameraSamples)
     {
         cameraLines.push_back(RobotCalculation::Vector3IndexedCsv(sample.sampleIndex, sample.point, sample.error));
     }
-
-    QSet<int> matchedCameraIndexes;
-    for (const TimestampedCameraPoint& sample : matchedCameraSamples)
-    {
-        matchedCameraIndexes.insert(sample.sampleIndex);
-    }
+    const qint64 cameraLineBuildElapsedMs = SteadyNowMs() - cameraLineBuildStartMs;
 
     int skippedLaserCount = 0;
     int unmatchedBeforeRobotCount = 0;
@@ -2808,65 +3353,80 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     int laserIndexGapCount = 0;
     int maxLaserIndexGap = 0;
     int lastLaserIndex = -1;
-    for (const TimestampedCameraPoint& sample : cameraSamples)
+    int workpieceCloudFrameCount = 0;
+    int workpieceCloudPointCount = 0;
+    int skippedWorkpieceCloudPointCount = 0;
+    int workpieceCloudPointIndex = 1;
+    const qint64 pointComputeStartMs = SteadyNowMs();
+    for (const ProcessedScanCameraSample& processed : processedCameraSamples)
     {
+        const TimestampedCameraPoint& sample = processed.sample;
         const int index = sample.sampleIndex;
-        QString status;
-        bool hasRobotPose = false;
-        bool hasLaserPoint = false;
-        T_ROBOT_COORS interpolatedPose;
-        Eigen::Vector3d laserPoint = Eigen::Vector3d::Zero();
-        RobotInterpolationWindow robotWindow;
-        if (robotSamples.empty())
+        const QString& status = processed.status;
+        if (status == "unmatched_before_robot")
         {
-            status = "unmatched_no_robot_sample";
-            ++unmatchedUnknownCount;
-        }
-        else if (sample.timestampUs < robotSamples.front().timestampUs)
-        {
-            status = "unmatched_before_robot";
             ++unmatchedBeforeRobotCount;
         }
-        else if (sample.timestampUs > robotSamples.back().timestampUs)
+        else if (status == "unmatched_after_robot")
         {
-            status = "unmatched_after_robot";
             ++unmatchedAfterRobotCount;
         }
-        else
+        else if (status == "skip_invalid_camera_point")
         {
-            robotWindow = FindRobotInterpolationWindow(robotSamples, sample.timestampUs);
-            interpolatedPose = RobotCalculation::InterpolateRobotPose(robotSamples, sample.timestampUs);
-            hasRobotPose = true;
-            if (!matchedCameraIndexes.contains(index))
-            {
-                status = "unmatched_not_resolved";
-                ++unmatchedUnknownCount;
-            }
-            else if (ShouldSkipLaserCalc(sample))
-            {
-                status = "skip_invalid_camera_point";
-                ++skippedLaserCount;
-            }
-            else
-            {
-                status = "laser_ok";
-                laserPoint = RobotCalculation::CalcLaserPointInRobot(interpolatedPose, sample.point, calibration);
-                hasLaserPoint = true;
-                if (lastLaserIndex > 0 && index - lastLaserIndex > 1)
-                {
-                    ++laserIndexGapCount;
-                    maxLaserIndexGap = std::max(maxLaserIndexGap, index - lastLaserIndex - 1);
-                }
-                lastLaserIndex = index;
+            ++skippedLaserCount;
+        }
+        else if (status != "laser_ok")
+        {
+            ++unmatchedUnknownCount;
+        }
 
-                robotLines.push_back(RobotCalculation::RobotPoseIndexedCsv(index, interpolatedPose));
-                laserLines.push_back(RobotCalculation::Vector3IndexedCsv(index, laserPoint));
-
-                RobotCalculation::IndexedPoint3D laserFitPoint;
-                laserFitPoint.index = index;
-                laserFitPoint.point = laserPoint;
-                laserFitInput.push_back(laserFitPoint);
+        if (processed.contributedWorkpieceFrame)
+        {
+            ++workpieceCloudFrameCount;
+        }
+        skippedWorkpieceCloudPointCount += processed.skippedWorkpieceCloudPointCount;
+        if (processed.hasRobotPose)
+        {
+            for (const ProcessedScanWorkpiecePoint& cloudPoint : processed.workpiecePoints)
+            {
+                QStringList cloudFields;
+                cloudFields
+                    << QString::number(workpieceCloudPointIndex++)
+                    << QString::number(index)
+                    << QString::number(cloudPoint.linePointIndex)
+                    << QString::number(cloudPoint.workpiecePoint.x(), 'f', 6)
+                    << QString::number(cloudPoint.workpiecePoint.y(), 'f', 6)
+                    << QString::number(cloudPoint.workpiecePoint.z(), 'f', 6)
+                    << QString::number(cloudPoint.cameraPoint.x(), 'f', 6)
+                    << QString::number(cloudPoint.cameraPoint.y(), 'f', 6)
+                    << QString::number(cloudPoint.cameraPoint.z(), 'f', 6)
+                    << QString::number(processed.robotPose.dX, 'f', 6)
+                    << QString::number(processed.robotPose.dY, 'f', 6)
+                    << QString::number(processed.robotPose.dZ, 'f', 6)
+                    << QString::number(processed.robotPose.dRX, 'f', 6)
+                    << QString::number(processed.robotPose.dRY, 'f', 6)
+                    << QString::number(processed.robotPose.dRZ, 'f', 6);
+                workpieceCloudLines.push_back(cloudFields.join(' '));
+                ++workpieceCloudPointCount;
             }
+        }
+
+        if (processed.hasLaserPoint)
+        {
+            if (lastLaserIndex > 0 && index - lastLaserIndex > 1)
+            {
+                ++laserIndexGapCount;
+                maxLaserIndexGap = std::max(maxLaserIndexGap, index - lastLaserIndex - 1);
+            }
+            lastLaserIndex = index;
+
+            robotLines.push_back(RobotCalculation::RobotPoseIndexedCsv(index, processed.robotPose));
+            laserLines.push_back(RobotCalculation::Vector3IndexedCsv(index, processed.laserPoint));
+
+            RobotCalculation::IndexedPoint3D laserFitPoint;
+            laserFitPoint.index = index;
+            laserFitPoint.point = processed.laserPoint;
+            laserFitInput.push_back(laserFitPoint);
         }
 
         QStringList fields;
@@ -2876,37 +3436,37 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             << QString::number(sample.rawTimestampUs)
             << QString::number(sample.rawDeltaUs)
             << QString::number(sample.timestampUs)
-            << QString::number(robotWindow.prevIndex)
-            << QString::number(robotWindow.prevTimestampUs)
-            << QString::number(robotWindow.nextIndex)
-            << QString::number(robotWindow.nextTimestampUs)
-            << QString::number(robotWindow.ratio, 'f', 6)
+            << QString::number(processed.robotWindow.prevIndex)
+            << QString::number(processed.robotWindow.prevTimestampUs)
+            << QString::number(processed.robotWindow.nextIndex)
+            << QString::number(processed.robotWindow.nextTimestampUs)
+            << QString::number(processed.robotWindow.ratio, 'f', 6)
             << QString::number(sample.point.x(), 'f', 6)
             << QString::number(sample.point.y(), 'f', 6)
             << QString::number(sample.point.z(), 'f', 6);
-        if (hasRobotPose)
+        if (processed.hasRobotPose)
         {
             fields
-                << QString::number(interpolatedPose.dX, 'f', 6)
-                << QString::number(interpolatedPose.dY, 'f', 6)
-                << QString::number(interpolatedPose.dZ, 'f', 6)
-                << QString::number(interpolatedPose.dRX, 'f', 6)
-                << QString::number(interpolatedPose.dRY, 'f', 6)
-                << QString::number(interpolatedPose.dRZ, 'f', 6)
-                << QString::number(interpolatedPose.dBX, 'f', 6)
-                << QString::number(interpolatedPose.dBY, 'f', 6)
-                << QString::number(interpolatedPose.dBZ, 'f', 6);
+                << QString::number(processed.robotPose.dX, 'f', 6)
+                << QString::number(processed.robotPose.dY, 'f', 6)
+                << QString::number(processed.robotPose.dZ, 'f', 6)
+                << QString::number(processed.robotPose.dRX, 'f', 6)
+                << QString::number(processed.robotPose.dRY, 'f', 6)
+                << QString::number(processed.robotPose.dRZ, 'f', 6)
+                << QString::number(processed.robotPose.dBX, 'f', 6)
+                << QString::number(processed.robotPose.dBY, 'f', 6)
+                << QString::number(processed.robotPose.dBZ, 'f', 6);
         }
         else
         {
             fields << "" << "" << "" << "" << "" << "" << "" << "" << "";
         }
-        if (hasLaserPoint)
+        if (processed.hasLaserPoint)
         {
             fields
-                << QString::number(laserPoint.x(), 'f', 6)
-                << QString::number(laserPoint.y(), 'f', 6)
-                << QString::number(laserPoint.z(), 'f', 6);
+                << QString::number(processed.laserPoint.x(), 'f', 6)
+                << QString::number(processed.laserPoint.y(), 'f', 6)
+                << QString::number(processed.laserPoint.z(), 'f', 6);
         }
         else
         {
@@ -2915,12 +3475,27 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         fields << CsvEscape(sample.error);
         matchDebugLines.push_back(fields.join(','));
     }
+    const qint64 pointComputeElapsedMs = SteadyNowMs() - pointComputeStartMs;
+    const qint64 outputBuildElapsedMs = SteadyNowMs() - outputBuildStartMs;
 
     QString error;
-    if (!SaveTextLines(cameraPath, cameraLines, error)
-        || !SaveTextLines(robotPath, robotLines, error)
-        || !SaveTextLines(laserPath, laserLines, error)
-        || !SaveTextLines(matchDebugPath, matchDebugLines, error))
+    auto saveTextLinesTimed = [this, &error](const QString& filePath, const std::vector<QString>& lines, qint64& elapsedMs)
+        {
+            const qint64 saveStartMs = SteadyNowMs();
+            const bool ok = SaveTextLines(filePath, lines, error);
+            elapsedMs = SteadyNowMs() - saveStartMs;
+            return ok;
+        };
+    qint64 saveCameraElapsedMs = 0;
+    qint64 saveRobotElapsedMs = 0;
+    qint64 saveLaserElapsedMs = 0;
+    qint64 saveWorkpieceCloudElapsedMs = 0;
+    qint64 saveMatchDebugElapsedMs = 0;
+    if (!saveTextLinesTimed(cameraPath, cameraLines, saveCameraElapsedMs)
+        || !saveTextLinesTimed(robotPath, robotLines, saveRobotElapsedMs)
+        || !saveTextLinesTimed(laserPath, laserLines, saveLaserElapsedMs)
+        || !saveTextLinesTimed(workpieceCloudPath, workpieceCloudLines, saveWorkpieceCloudElapsedMs)
+        || !saveTextLinesTimed(matchDebugPath, matchDebugLines, saveMatchDebugElapsedMs))
     {
         if (appendLog)
         {
@@ -2928,6 +3503,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         }
         return false;
     }
+    const qint64 saveAllElapsedMs =
+        saveCameraElapsedMs
+        + saveRobotElapsedMs
+        + saveLaserElapsedMs
+        + saveWorkpieceCloudElapsedMs
+        + saveMatchDebugElapsedMs;
 
     if (appendLog)
     {
@@ -2974,6 +3555,24 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         appendLog(QString("激光计算有效点=%1，跳过异常相机点=%2")
             .arg(static_cast<int>(laserLines.size()) - 1)
             .arg(skippedLaserCount));
+        appendLog(QString("完整工件点云：参与帧=%1，点数=%2，跳过异常线点=%3")
+            .arg(workpieceCloudFrameCount)
+            .arg(workpieceCloudPointCount)
+            .arg(skippedWorkpieceCloudPointCount));
+        appendLog(QString("扫描耗时统计：运动等待=%1 ms，尾部匹配等待=%2 ms，并行点云处理墙钟=%3 ms（运动后等待=%4 ms），输出构建=%5 ms（相机文本=%6 ms，明细组装=%7 ms），文件写入=%8 ms（相机=%9 ms，机器人=%10 ms，激光=%11 ms，完整点云=%12 ms，匹配明细=%13 ms）。")
+            .arg(scanMotionElapsedMs)
+            .arg(tailWaitElapsedMs)
+            .arg(parallelProcessingElapsedMs)
+            .arg(postMotionProcessingWaitMs)
+            .arg(outputBuildElapsedMs)
+            .arg(cameraLineBuildElapsedMs)
+            .arg(pointComputeElapsedMs)
+            .arg(saveAllElapsedMs)
+            .arg(saveCameraElapsedMs)
+            .arg(saveRobotElapsedMs)
+            .arg(saveLaserElapsedMs)
+            .arg(saveWorkpieceCloudElapsedMs)
+            .arg(saveMatchDebugElapsedMs));
         appendLog(QString("激光点序号断点统计：断点段数=%1，最大连续缺失帧数=%2，匹配前丢弃=%3，匹配后丢弃=%4，未知未匹配=%5")
             .arg(laserIndexGapCount)
             .arg(maxLaserIndexGap)
@@ -2983,6 +3582,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         appendLog(QString("相机点文件：%1").arg(cameraPath));
         appendLog(QString("机器人插值位姿文件：%1").arg(robotPath));
         appendLog(QString("激光点文件：%1").arg(laserPath));
+        appendLog(QString("完整工件点云文件：%1").arg(workpieceCloudPath));
         appendLog(QString("相机-机器人-激光匹配明细文件：%1").arg(matchDebugPath));
     }
 
@@ -3112,9 +3712,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     const WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
     if (appendLog)
     {
-        appendLog(QString("焊接姿态参数：RX=%1, RY=%2, 拐点前过渡=%3 mm, 起点跳过=%4 mm, 终点跳过=%5 mm, 姿态补偿槽=%6, 焊道补偿槽=%7, 基础参数来源=%8, 姿态补偿来源=%9, 焊道补偿来源=%10")
+        appendLog(QString("焊接姿态参数：RX=%1, RY=%2, RZ增益=%3 deg, 拐点前过渡=%4 mm, 起点跳过=%5 mm, 终点跳过=%6 mm, 姿态补偿槽=%7, 焊道补偿槽=%8, 基础参数来源=%9, 姿态补偿来源=%10, 焊道补偿来源=%11")
             .arg(weldPosePreset.rx, 0, 'f', 3)
             .arg(weldPosePreset.ry, 0, 'f', 3)
+            .arg(weldPosePreset.weldRzGainDeg, 0, 'f', 3)
             .arg(weldPosePreset.cornerTransitionLeadDistance, 0, 'f', 3)
             .arg(weldPosePreset.weldStartSkipDistance, 0, 'f', 3)
             .arg(weldPosePreset.weldEndSkipDistance, 0, 'f', 3)
@@ -3176,6 +3777,162 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     else if (appendLog)
     {
         appendLog("焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。");
+    }
+    return true;
+}
+
+bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
+    const T_PRECISE_MEASURE_PARAM& param,
+    const QString& laserDir,
+    QString& preservePath,
+    QString& weldPosePath,
+    QString& seamCompPath,
+    QString& summary,
+    QString& error,
+    const LogCallback& appendLog,
+    const StepCallback& setFlowStep) const
+{
+    preservePath.clear();
+    weldPosePath.clear();
+    seamCompPath.clear();
+    summary.clear();
+    error.clear();
+
+    const QDir dir(laserDir);
+    if (!dir.exists())
+    {
+        error = QString("LaserPoint目录不存在：%1").arg(laserDir);
+        return false;
+    }
+
+    preservePath = dir.filePath(PRESERVE_PATH_FILE_NAME);
+    const QString classifiedPath = dir.filePath(CLASSIFIED_FILE_NAME);
+    const QString classifiedNoisePath = dir.filePath(CLASSIFIED_NOISE_FILE_NAME);
+    weldPosePath = dir.filePath(WELD_POSE_FILE_NAME);
+    seamCompPath = dir.filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
+
+    QString sourceLaserPath = dir.filePath(RAW_LASER_FILE_NAME);
+    if (!QFileInfo::exists(sourceLaserPath))
+    {
+        if (QFileInfo::exists(preservePath))
+        {
+            sourceLaserPath = preservePath;
+            if (appendLog)
+            {
+                appendLog(QString("未找到原始激光点文件 %1，临时使用已有 PreservePath 文件作为重建输入。").arg(RAW_LASER_FILE_NAME));
+            }
+        }
+        else
+        {
+            error = QString("未找到原始激光点文件：%1").arg(dir.filePath(RAW_LASER_FILE_NAME));
+            return false;
+        }
+    }
+
+    QVector<RobotCalculation::IndexedPoint3D> laserFitInput;
+    if (!RobotDataHelper::LoadIndexedPoint3DFile(sourceLaserPath, laserFitInput, &error))
+    {
+        return false;
+    }
+    if (laserFitInput.size() < 2)
+    {
+        error = QString("激光有效点过少（%1），无法重建焊接文件。").arg(laserFitInput.size());
+        return false;
+    }
+
+    const RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);
+    if (setFlowStep)
+    {
+        setFlowStep("正在重新计算 PreservePath、焊接姿态和焊道补偿文件");
+    }
+    if (appendLog)
+    {
+        appendLog(QString("跳过扫描重建输入：%1，点数=%2").arg(sourceLaserPath).arg(laserFitInput.size()));
+        appendLog(QString("开始先测后焊特征分析：采样主轴=%1，重采样步长=%2 mm，拐点拟合容差=%3 mm，每段最少点数=%4")
+            .arg(SampleAxisName(originalFitParams.sampleAxis))
+            .arg(originalFitParams.sampleStep, 0, 'f', 3)
+            .arg(originalFitParams.piecewiseFitTolerance, 0, 'f', 3)
+            .arg(originalFitParams.piecewiseMinSegmentPoints));
+    }
+
+    const RobotCalculation::MeasureThenWeldAnalysisResult originalAnalysis =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(laserFitInput, originalFitParams);
+    if (!originalAnalysis.ok)
+    {
+        error = QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error);
+        return false;
+    }
+
+    if (!SaveTextLines(preservePath, BuildFilterOutputLines(originalAnalysis.filterResult), error))
+    {
+        return false;
+    }
+    if (!SaveTextLines(classifiedPath, BuildClassifiedOutputLines(originalAnalysis.classificationResult), error))
+    {
+        return false;
+    }
+    if (!SaveTextLines(classifiedNoisePath, BuildNoiseOutputLines(laserFitInput, originalAnalysis.filterResult), error))
+    {
+        return false;
+    }
+
+    const WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
+    if (appendLog)
+    {
+        appendLog(QString("先测后焊特征提取完成：输入=%1，输出=%2，文件=%3")
+            .arg(originalAnalysis.filterResult.inputPointCount)
+            .arg(originalAnalysis.filterResult.points.size())
+            .arg(preservePath));
+        appendLog(QString("焊道分类文件：%1").arg(classifiedPath));
+        appendLog(QString("焊道杂点文件：%1").arg(classifiedNoisePath));
+        appendLog(QString("焊接姿态参数：RX=%1, RY=%2, RZ增益=%3 deg, 拐点前过渡=%4 mm, 起点跳过=%5 mm, 终点跳过=%6 mm")
+            .arg(weldPosePreset.rx, 0, 'f', 3)
+            .arg(weldPosePreset.ry, 0, 'f', 3)
+            .arg(weldPosePreset.weldRzGainDeg, 0, 'f', 3)
+            .arg(weldPosePreset.cornerTransitionLeadDistance, 0, 'f', 3)
+            .arg(weldPosePreset.weldStartSkipDistance, 0, 'f', 3)
+            .arg(weldPosePreset.weldEndSkipDistance, 0, 'f', 3));
+    }
+
+    if (setFlowStep)
+    {
+        setFlowStep("特征分析完成，正在生成焊接姿态");
+    }
+    const std::vector<QString> weldPoseLines =
+        BuildSegmentPoseOutputLines(originalAnalysis.classificationResult, param, weldPosePreset, appendLog);
+    if (weldPoseLines.empty())
+    {
+        error = "焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。";
+        return false;
+    }
+    if (!SaveTextLines(weldPosePath, weldPoseLines, error))
+    {
+        return false;
+    }
+
+    if (setFlowStep)
+    {
+        setFlowStep("焊接姿态已生成，正在生成焊道补偿文件");
+    }
+    QString seamCompSummary;
+    if (!ApplyWeldSeamCompToPoseFile(
+        QString::fromStdString(param.sRobotName),
+        weldPosePath,
+        seamCompPath,
+        seamCompSummary,
+        error))
+    {
+        return false;
+    }
+
+    summary = QString("重建完成：PreservePath=%1；WeldPose=%2；SeamComp=%3；%4")
+        .arg(preservePath, weldPosePath, seamCompPath, seamCompSummary);
+    if (appendLog)
+    {
+        appendLog(QString("PreservePath文件：%1").arg(preservePath));
+        appendLog(QString("焊接姿态文件：%1").arg(weldPosePath));
+        appendLog(QString("焊道补偿文件：%1").arg(seamCompPath));
+        appendLog(QString("焊道补偿摘要：%1").arg(seamCompSummary));
     }
     return true;
 }
@@ -3272,12 +4029,14 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
 
     QStringList usedSlots = compStats.usedSlots.values();
     usedSlots.sort();
-    summary = QString("焊道补偿完成：点数=%1，使用槽位=%2，Z补偿点数=%3，枪反向补偿点数=%4，焊道方向补偿点数=%5，配置=%6")
+    summary = QString("焊道补偿完成：点数=%1，使用槽位=%2，Z补偿点数=%3，枪反向补偿点数=%4，焊道方向补偿点数=%5，自交裁剪=%6次，删除回折点=%7，配置=%8")
         .arg(records.size())
         .arg(usedSlots.isEmpty() ? QString("无匹配槽位") : usedSlots.join(","))
         .arg(compStats.zAdjustedCount)
         .arg(compStats.gunDirAdjustedCount)
         .arg(compStats.seamDirAdjustedCount)
+        .arg(compStats.selfIntersectionTrimCount)
+        .arg(compStats.selfIntersectionRemovedPointCount)
         .arg(QDir::toNativeSeparators(preset.seamCompFilePath));
     return true;
 }
@@ -3291,7 +4050,10 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
 {
     summary.clear();
     error.clear();
-    (void)linearSpeedConfigMmPerMin;
+    const double selectedSpeedMmPerMin =
+        (std::isfinite(linearSpeedConfigMmPerMin) && linearSpeedConfigMmPerMin > 0.0)
+        ? linearSpeedConfigMmPerMin
+        : FANUC_WELD_PATH_SPEED_MM_PER_MIN;
 
     if (pRobotDriver == nullptr)
     {
@@ -3306,7 +4068,7 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
     }
 
     const double linearCommandSpeed =
-        LinearCommandSpeedForRobot(pRobotDriver, FANUC_WELD_PATH_SPEED_MM_PER_MIN, 1.0);
+        LinearCommandSpeedForRobot(pRobotDriver, selectedSpeedMmPerMin, 1.0);
     const QString linearCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
     std::vector<T_ROBOT_MOVE_INFO> moveInfos;
     if (!BuildWeldPoseMoveInfos(records, linearCommandSpeed, moveInfos, error))
@@ -3332,9 +4094,9 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
             return false;
         }
 
-        summary = QString("点数=%1，焊接速度固定=%2 mm/min (下发=%3 %4)，程序=%5，本地LS=%6，远程TP=%7，当前仅下发未自动执行")
+        summary = QString("点数=%1，轨迹速度=%2 mm/min (下发=%3 %4)，程序=%5，本地LS=%6，远程TP=%7，当前仅下发未自动执行")
             .arg(static_cast<int>(moveInfos.size()))
-            .arg(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 0, 'f', 3)
+            .arg(selectedSpeedMmPerMin, 0, 'f', 3)
             .arg(linearCommandSpeed, 0, 'f', 3)
             .arg(linearCommandSpeedUnit)
             .arg(QString::fromStdString(programName))
@@ -3351,9 +4113,9 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
             .arg(QDir::toNativeSeparators(QFileInfo(poseFilePath).absoluteFilePath()));
         return false;
     }
-    summary = QString("点数=%1，焊接速度固定=%2 mm/min (下发=%3 %4)，STEP使用ContiMoveAny生成、上传并启动程序")
+    summary = QString("点数=%1，轨迹速度=%2 mm/min (下发=%3 %4)，STEP使用ContiMoveAny生成、上传并启动程序")
         .arg(static_cast<int>(moveInfos.size()))
-        .arg(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 0, 'f', 3)
+        .arg(selectedSpeedMmPerMin, 0, 'f', 3)
         .arg(linearCommandSpeed, 0, 'f', 3)
         .arg(linearCommandSpeedUnit);
     return true;
@@ -3362,6 +4124,7 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
 bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     RobotDriverAdaptor* pRobotDriver,
     const QString& poseFilePath,
+    const T_PRECISE_MEASURE_PARAM& param,
     QString& summary,
     QString& error,
     T_ROBOT_COORS* pStartSafeCoors,
@@ -3385,23 +4148,36 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         return false;
     }
 
+    const WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
     T_ROBOT_COORS startSafeCoors;
-    if (!TryBuildWeldSafeCoors(records, 0, startSafeCoors, error))
+    if (!TryBuildWeldSafeCoors(records, 0, weldPosePreset.robotType, startSafeCoors, error))
     {
         return false;
     }
 
     T_ROBOT_COORS endSafeCoors;
-    if (!TryBuildWeldSafeCoors(records, records.size() - 1, endSafeCoors, error))
+    if (!TryBuildWeldSafeCoors(records, records.size() - 1, weldPosePreset.robotType, endSafeCoors, error))
     {
         return false;
     }
 
+    const double selectedWeldSpeedMmPerMin = param.bDoActualWeld
+        ? param.dWeldSpeedMmPerMin
+        : param.dDryRunSpeedMmPerMin;
+    const double weldSpeedMmPerMin =
+        (std::isfinite(selectedWeldSpeedMmPerMin) && selectedWeldSpeedMmPerMin > 0.0)
+        ? selectedWeldSpeedMmPerMin
+        : (param.bDoActualWeld ? FANUC_WELD_PATH_SPEED_MM_PER_MIN : DEFAULT_DRY_RUN_SPEED_MM_PER_MIN);
+    const double safeMoveSpeedMmPerMin =
+        (std::isfinite(param.dWeldSafeMoveSpeedMmPerMin) && param.dWeldSafeMoveSpeedMmPerMin > 0.0)
+        ? param.dWeldSafeMoveSpeedMmPerMin
+        : DEFAULT_WELD_SAFE_MOVE_SPEED_MM_PER_MIN;
+    const QString weldModeText = param.bDoActualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑");
     const double weldCommandSpeed =
-        LinearCommandSpeedForRobot(pRobotDriver, FANUC_WELD_PATH_SPEED_MM_PER_MIN, 1.0);
+        LinearCommandSpeedForRobot(pRobotDriver, weldSpeedMmPerMin, 1.0);
     const QString weldCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
     const double weldEstimateSpeedMmPerSec =
-        FanucLinearSpeedMmPerSecFromConfig(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 1.0);
+        FanucLinearSpeedMmPerSecFromConfig(weldSpeedMmPerMin, 1.0);
     std::vector<T_ROBOT_MOVE_INFO> moveInfos;
     if (!BuildWeldPoseMoveInfos(records, weldCommandSpeed, moveInfos, error))
     {
@@ -3421,6 +4197,11 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     {
         appendLog(QString("下枪安全位置：%1").arg(RobotCoorsText(startSafeCoors)));
         appendLog(QString("收枪安全位置：%1").arg(RobotCoorsText(endSafeCoors)));
+        appendLog(QString("焊接轨迹模式：%1，配置速度=%2 mm/min，下发速度=%3 %4")
+            .arg(weldModeText)
+            .arg(weldSpeedMmPerMin, 0, 'f', 3)
+            .arg(weldCommandSpeed, 0, 'f', 3)
+            .arg(weldCommandSpeedUnit));
     }
 
     QString downlinkSummary;
@@ -3438,7 +4219,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
     {
         const double safeMoveSpeedMmPerSec =
-            FanucLinearSpeedMmPerSecFromConfig(FANUC_SAFE_MOVE_SPEED_MM_PER_MIN, 1.0);
+            FanucLinearSpeedMmPerSecFromConfig(safeMoveSpeedMmPerMin, 1.0);
         if (setFlowStep)
         {
             setFlowStep("正在移动到下枪安全位置，并行下发焊接轨迹");
@@ -3446,7 +4227,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         if (appendLog)
         {
             appendLog(QString("开始直线运动：下枪安全位置，配置速度= %1 mm/min，下发速度= %2 mm/sec")
-                .arg(FANUC_SAFE_MOVE_SPEED_MM_PER_MIN, 0, 'f', 3)
+                .arg(safeMoveSpeedMmPerMin, 0, 'f', 3)
                 .arg(safeMoveSpeedMmPerSec, 0, 'f', 3));
         }
 
@@ -3501,9 +4282,11 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         if (checkpoint && !checkpoint(
             "焊前确认",
             QString("下枪安全位置已到位，焊接轨迹程序也已下发完成。\n"
-                    "下枪安全位置：%1\n"
-                    "焊接程序：%2\n"
+                    "运行模式：%1\n"
+                    "下枪安全位置：%2\n"
+                    "焊接程序：%3\n"
                     "是否开始执行焊道？")
+                .arg(weldModeText)
                 .arg(RobotCoorsText(startSafeCoors))
                 .arg(QString::fromStdString(programName))))
         {
@@ -3512,9 +4295,10 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         }
 
         downlinkSummary =
-            QString("点数=%1，焊接速度固定=%2 mm/min (下发=%3 %4)，程序=%5，本地LS=%6，远程TP=%7")
+            QString("点数=%1，模式=%2，轨迹速度=%3 mm/min (下发=%4 %5)，程序=%6，本地LS=%7，远程TP=%8")
                 .arg(static_cast<int>(moveInfos.size()))
-                .arg(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 0, 'f', 3)
+                .arg(weldModeText)
+                .arg(weldSpeedMmPerMin, 0, 'f', 3)
                 .arg(weldCommandSpeed, 0, 'f', 3)
                 .arg(weldCommandSpeedUnit)
                 .arg(QString::fromStdString(programName))
@@ -3567,7 +4351,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         if (!MoveCoorsAndWait(
             pRobotDriver,
             startSafeCoors,
-            FANUC_SAFE_MOVE_SPEED_MM_PER_MIN,
+            safeMoveSpeedMmPerMin,
             "下枪安全位置",
             appendLog,
             setFlowStep))
@@ -3579,9 +4363,11 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         if (checkpoint && !checkpoint(
             "焊前确认",
             QString("下枪安全位置已到位，STEP 将生成、上传并启动焊接轨迹。\n"
-                    "下枪安全位置：%1\n"
-                    "点数：%2\n"
+                    "运行模式：%1\n"
+                    "下枪安全位置：%2\n"
+                    "点数：%3\n"
                     "是否开始执行焊道？")
+                .arg(weldModeText)
                 .arg(RobotCoorsText(startSafeCoors))
                 .arg(static_cast<int>(moveInfos.size()))))
         {
@@ -3591,9 +4377,10 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
 
         programNameText = "STEP ContiMoveAny";
         downlinkSummary =
-            QString("点数=%1，焊接速度固定=%2 mm/min (下发=%3 %4)，STEP使用ContiMoveAny生成、上传并启动程序")
+            QString("点数=%1，模式=%2，轨迹速度=%3 mm/min (下发=%4 %5)，STEP使用ContiMoveAny生成、上传并启动程序")
                 .arg(static_cast<int>(moveInfos.size()))
-                .arg(FANUC_WELD_PATH_SPEED_MM_PER_MIN, 0, 'f', 3)
+                .arg(weldModeText)
+                .arg(weldSpeedMmPerMin, 0, 'f', 3)
                 .arg(weldCommandSpeed, 0, 'f', 3)
                 .arg(weldCommandSpeedUnit);
 
@@ -3647,7 +4434,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     if (!MoveCoorsAndWait(
         pRobotDriver,
         endSafeCoors,
-        FANUC_SAFE_MOVE_SPEED_MM_PER_MIN,
+        safeMoveSpeedMmPerMin,
         "收枪安全位置",
         appendLog,
         setFlowStep))
@@ -3656,9 +4443,9 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         return false;
     }
 
-    summary = QString("%1；安全移动速度固定=%2 mm/min；起点安全位=%3；终点安全位=%4")
+    summary = QString("%1；安全移动速度=%2 mm/min；起点安全位=%3；终点安全位=%4")
         .arg(downlinkSummary)
-        .arg(FANUC_SAFE_MOVE_SPEED_MM_PER_MIN, 0, 'f', 3)
+        .arg(safeMoveSpeedMmPerMin, 0, 'f', 3)
         .arg(RobotCoorsText(startSafeCoors))
         .arg(RobotCoorsText(endSafeCoors));
     return true;

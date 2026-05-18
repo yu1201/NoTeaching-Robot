@@ -80,6 +80,78 @@ bool IsDedicatedPulseKey(const QString& key)
         || key.compare("EndSafePulseNum", Qt::CaseInsensitive) == 0;
 }
 
+bool HasMeaningfulPulse(const T_ANGLE_PULSE& pulse)
+{
+    return pulse.nSPulse != 0
+        || pulse.nLPulse != 0
+        || pulse.nUPulse != 0
+        || pulse.nRPulse != 0
+        || pulse.nBPulse != 0
+        || pulse.nTPulse != 0
+        || pulse.lBXPulse != 0
+        || pulse.lBYPulse != 0
+        || pulse.lBZPulse != 0;
+}
+
+QString PulseListCountValue(const T_ANGLE_PULSE& pulse)
+{
+    return HasMeaningfulPulse(pulse) ? QStringLiteral("1") : QStringLiteral("0");
+}
+
+QStringList MinimalScanSectionLinesForPrecise()
+{
+    QStringList lines;
+    lines
+        << "StartSafePulseNum=0"
+        << "StartSafePulse0.nS=0"
+        << "StartSafePulse0.nL=0"
+        << "StartSafePulse0.nU=0"
+        << "StartSafePulse0.nR=0"
+        << "StartSafePulse0.nB=0"
+        << "StartSafePulse0.nT=0"
+        << "StartSafePulse0.lBX=0"
+        << "StartSafePulse0.lBY=0"
+        << "StartSafePulse0.lBZ=0"
+        << "StartPulse.nS=0"
+        << "StartPulse.nL=0"
+        << "StartPulse.nU=0"
+        << "StartPulse.nR=0"
+        << "StartPulse.nB=0"
+        << "StartPulse.nT=0"
+        << "StartPulse.lBX=0"
+        << "StartPulse.lBY=0"
+        << "StartPulse.lBZ=0"
+        << "StartPos.X=0"
+        << "StartPos.Y=0"
+        << "StartPos.Z=0"
+        << "StartPos.RX=0"
+        << "StartPos.RY=0"
+        << "StartPos.RZ=0"
+        << "StartPos.BX=0"
+        << "StartPos.BY=0"
+        << "StartPos.BZ=0"
+        << "EndPos.X=0"
+        << "EndPos.Y=0"
+        << "EndPos.Z=0"
+        << "EndPos.RX=0"
+        << "EndPos.RY=0"
+        << "EndPos.RZ=0"
+        << "EndPos.BX=0"
+        << "EndPos.BY=0"
+        << "EndPos.BZ=0"
+        << "EndSafePulseNum=0"
+        << "EndSafePulse0.nS=0"
+        << "EndSafePulse0.nL=0"
+        << "EndSafePulse0.nU=0"
+        << "EndSafePulse0.nR=0"
+        << "EndSafePulse0.nB=0"
+        << "EndSafePulse0.nT=0"
+        << "EndSafePulse0.lBX=0"
+        << "EndSafePulse0.lBY=0"
+        << "EndSafePulse0.lBZ=0";
+    return lines;
+}
+
 constexpr auto CAMERA_READ_FPS_KEY = "CameraReadFps";
 constexpr auto CAMERA_TIME_OFFSET_MS_KEY = "CameraTimeOffsetMs";
 constexpr double DEFAULT_CAMERA_READ_FPS = 100.0;
@@ -250,6 +322,55 @@ QString PreciseParamDisplayName(const QString& key)
         { "ImgEndX", "图像结束X" },
         { "TableScanDir", "料台扫描方向" },
         { "ExAxisEnable", "外部轴使能" },
+        { "WeldEnable", "焊接开关" },
+        { "WeldSpeedMmPerMin", "焊接速度" },
+        { "DryRunSpeedMmPerMin", "空跑速度" },
+        { "WeldSafeMoveSpeedMmPerMin", "安全位速度" },
+        { "WorldCoorDir", "世界Z方向" },
+        { "RobotInstallDir", "机器人安装方向" },
+        { "GunAngle", "焊枪角度" },
+        { "GunLaserAngle", "激光枪夹角" },
+        { "GunCameraAngle", "相机枪夹角" },
+        { "RotateToCamRxDir", "转相机RX方向" },
+        { "HandEyeDis", "手眼距离" },
+        { "MeasureDisThreshold", "端点测量阈值" },
+        { "FlatMeasureRx", "平焊测量RX" },
+        { "FlatMeasureRy", "平焊测量RY" },
+        { "FlatWeldRx", "平焊焊接RX" },
+        { "FlatWeldRy", "平焊焊接RY" },
+        { "NormalWeldRx", "平焊RX" },
+        { "NormalWeldRy", "平焊RY" },
+        { "CornerTransitionLeadDis", "拐点过渡距离" },
+        { "WeldStartSkipDis", "起点跳过距离" },
+        { "WeldEndSkipDis", "终点跳过距离" },
+        { "WeldRzGainDeg", "焊接RZ增益" },
+        { "StandWeldRx", "立焊RX" },
+        { "StandWeldRy", "立焊RY" },
+        { "TransitionsRx", "过渡RX" },
+        { "TransitionsRy", "过渡RY" },
+        { "StandWeldScanFreeRx", "立焊扫描RX" },
+        { "StandWeldScanFreeRy", "立焊扫描RY" },
+        { "StandWeldScanDis", "立焊扫描距离" },
+        { "StandWeldScanOffsetRz", "立焊扫描RZ偏移" },
+        { "WeldNorAngleInHome", "安全位法向" },
+        { "EndpointSearchDis", "端点搜索长度" },
+        { "StartSearchOffeset_RZ", "起点RZ偏移" },
+        { "EndSearchOffeset_RZ", "终点RZ偏移" },
+        { "GunDownBackSafeDis", "收下枪安全距" },
+        { "ShortSeamThreshold", "短焊缝阈值" },
+        { "LengthSeamThreshold", "长焊缝阈值" },
+        { "PointSpacing", "测量点间距" },
+        { "CleanGunDis", "清枪距离" },
+        { "FlatWeldContinue", "平焊连续" },
+        { "CheckCollideEnable", "干涉检测" },
+        { "WeldDirection", "焊接方向" },
+        { "SameSideRelativeDisToBaseCenter", "同侧安全距" },
+        { "ContralateralRelativeDisToBaseCenter", "对侧安全距" },
+        { "ContralateralExAxisOffset", "对侧外轴偏移" },
+        { "SameSideRelativeExPosDir", "同侧外轴方向" },
+        { "StandInitWeldRy", "立焊初始RY" },
+        { "JudgeOpenTrackLength", "跟踪开启长度" },
+        { "RemoveCloud", "去点云料台" },
     };
 
     const auto it = names.find(key);
@@ -755,11 +876,11 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
         QStringList weldLines = ExtractSectionLinesForPrecise(content, RobotDataHelper::MeasureWeldWeldSectionName(oldIndex));
         if (scanLines.isEmpty())
         {
-            scanLines << "StartSafePulseNum=0" << "StartPulse.nS=0" << "StartPos.X=0" << "EndPos.X=0" << "EndSafePulseNum=0";
+            scanLines = MinimalScanSectionLinesForPrecise();
         }
         if (weldLines.isEmpty())
         {
-            weldLines << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0";
+            weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
         }
 
         output << QString("[%1]").arg(RobotDataHelper::MeasureWeldScanSectionName(newIndex));
@@ -886,8 +1007,10 @@ bool PreciseMeasureEditDialog::SaveAllParamEdits()
     }
 
     if (!WritePulse("StartSafePulse0", startSafePulse, error)
+        || !WriteParamValue(CurrentSectionName(&error), "StartSafePulseNum", PulseListCountValue(startSafePulse), error)
         || !WriteCoors("StartPos", startPos, error)
         || !WriteCoors("EndPos", endPos, error)
+        || !WriteParamValue(CurrentSectionName(&error), "EndSafePulseNum", PulseListCountValue(endSafePulse), error)
         || !WritePulse("EndSafePulse0", endSafePulse, error))
     {
         QMessageBox::warning(this, "保存参数", error);
@@ -942,7 +1065,9 @@ void PreciseMeasureEditDialog::SaveManualStartSafePulse()
 
     T_ANGLE_PULSE pulse;
     QString error;
-    if (!GetPulseFromEditors("StartSafePulse0", pulse, error) || !WritePulse("StartSafePulse0", pulse, error))
+    if (!GetPulseFromEditors("StartSafePulse0", pulse, error)
+        || !WritePulse("StartSafePulse0", pulse, error)
+        || !WriteParamValue(CurrentSectionName(&error), "StartSafePulseNum", PulseListCountValue(pulse), error))
     {
         AppendLog("下枪安全位置手动保存失败：" + error);
         return;
@@ -1001,7 +1126,9 @@ void PreciseMeasureEditDialog::SaveManualEndSafePulse()
 
     T_ANGLE_PULSE pulse;
     QString error;
-    if (!GetPulseFromEditors("EndSafePulse0", pulse, error) || !WritePulse("EndSafePulse0", pulse, error))
+    if (!GetPulseFromEditors("EndSafePulse0", pulse, error)
+        || !WritePulse("EndSafePulse0", pulse, error)
+        || !WriteParamValue(CurrentSectionName(&error), "EndSafePulseNum", PulseListCountValue(pulse), error))
     {
         AppendLog("收枪安全位置手动保存失败：" + error);
         return;
@@ -1495,11 +1622,11 @@ bool PreciseMeasureEditDialog::CreateParamGroup(bool copyCurrent, QString& error
     }
     if (scanLines.isEmpty())
     {
-        scanLines << "StartSafePulseNum=0" << "StartPulse.nS=0" << "StartPos.X=0" << "EndPos.X=0" << "EndSafePulseNum=0";
+        scanLines = MinimalScanSectionLinesForPrecise();
     }
     if (weldLines.isEmpty())
     {
-        weldLines << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0";
+        weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
     }
 
     if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "GroupCount", QString::number(newIndex + 1), &error)

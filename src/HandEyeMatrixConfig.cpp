@@ -1,6 +1,7 @@
 #include "HandEyeMatrixConfig.h"
 
 #include "OPini.h"
+#include "RobotPoseTransform.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -13,8 +14,6 @@
 
 namespace
 {
-constexpr double kHandEyePi = 3.14159265358979323846;
-
 QString FindProjectRootPathForHandEye()
 {
     QDir dir(QCoreApplication::applicationDirPath());
@@ -41,7 +40,8 @@ QString BuildHandEyeIniTemplate(const QString& robotName, const QString& cameraS
     stream << "[Base]\n";
     stream << "Version=1\n";
     stream << "RobotName=" << robotName << "\n";
-    stream << "CameraSection=" << cameraSection << "\n\n";
+    stream << "CameraSection=" << cameraSection << "\n";
+    stream << "RobotType=" << RobotPoseTransform::NormalizeRobotType(config.robotType) << "\n\n";
     stream << "[HandEyeMatrix]\n";
     stream << "# 手眼矩阵参数：机器人局部坐标 = R_opt * 相机坐标 + t_opt\n";
     stream << "# 旋转矩阵\n";
@@ -104,41 +104,6 @@ QString BuildHandEyeCalibrationIniTemplate(const QString& robotName, const QStri
     return text;
 }
 
-Eigen::Matrix3d RotX(double w)
-{
-    const double c = std::cos(w);
-    const double s = std::sin(w);
-    return (Eigen::Matrix3d() << 1.0, 0.0, 0.0,
-                                  0.0, c, -s,
-                                  0.0, s, c).finished();
-}
-
-Eigen::Matrix3d RotY(double p)
-{
-    const double c = std::cos(p);
-    const double s = std::sin(p);
-    return (Eigen::Matrix3d() << c, 0.0, s,
-                                  0.0, 1.0, 0.0,
-                                  -s, 0.0, c).finished();
-}
-
-Eigen::Matrix3d RotZ(double r)
-{
-    const double c = std::cos(r);
-    const double s = std::sin(r);
-    return (Eigen::Matrix3d() << c, -s, 0.0,
-                                  s, c, 0.0,
-                                  0.0, 0.0, 1.0).finished();
-}
-
-Eigen::Matrix3d FanucRotation(const T_ROBOT_COORS& pose)
-{
-    const double w = pose.dRX * kHandEyePi / 180.0;
-    const double p = pose.dRY * kHandEyePi / 180.0;
-    const double r = pose.dRZ * kHandEyePi / 180.0;
-    return RotZ(r) * RotY(p) * RotX(w);
-}
-
 Eigen::Vector3d ToPositionVector(const T_ROBOT_COORS& pose)
 {
     return Eigen::Vector3d(pose.dX, pose.dY, pose.dZ);
@@ -167,6 +132,21 @@ bool WriteDoubleValue(COPini& ini, const char* key, double value)
 bool WriteIntValue(COPini& ini, const char* key, int value)
 {
     return ini.WriteString(key, value);
+}
+
+int ReadRobotTypeForHandEye(const QString& robotName)
+{
+    COPini ini;
+    const std::string robotParaPath = DATA_PATH + robotName.toStdString() + "\\RobotPara.ini";
+    if (!ini.SetFileName(robotParaPath))
+    {
+        return ROBOT_TYPE_FANUC;
+    }
+
+    int robotType = ROBOT_TYPE_FANUC;
+    ini.SetSectionName("BaseParam");
+    ini.ReadString(false, "RobotType", &robotType);
+    return RobotPoseTransform::NormalizeRobotType(robotType);
 }
 }
 
@@ -201,6 +181,7 @@ QString GetHandEyeCalibrationIniPath(const QString& robotName, const QString& ca
 HandEyeMatrixConfig GetDefaultHandEyeMatrixConfig()
 {
     HandEyeMatrixConfig config;
+    config.robotType = ROBOT_TYPE_FANUC;
     config.rotation <<
         0.10801231, 0.98625159, 0.12506452,
         0.96930084, -0.13242660, 0.20716921,
@@ -252,8 +233,10 @@ bool EnsureHandEyeMatrixIni(const QString& robotName, const QString& cameraSecti
         return false;
     }
 
+    HandEyeMatrixConfig defaultConfig = GetDefaultHandEyeMatrixConfig();
+    defaultConfig.robotType = ReadRobotTypeForHandEye(robotName);
     QTextStream stream(&file);
-    stream << BuildHandEyeIniTemplate(robotName, cameraSection, GetDefaultHandEyeMatrixConfig());
+    stream << BuildHandEyeIniTemplate(robotName, cameraSection, defaultConfig);
     return true;
 }
 
@@ -278,6 +261,7 @@ bool LoadHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
         }
         return false;
     }
+    config.robotType = ReadRobotTypeForHandEye(robotName);
     ini.SetSectionName("HandEyeMatrix");
 
     auto readValue = [&ini, error, filePath](const QString& key, double& value) -> bool
@@ -339,6 +323,7 @@ bool SaveHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
     ini.WriteString("Version", 1);
     ini.WriteString("RobotName", robotName.toStdString());
     ini.WriteString("CameraSection", cameraSection.toStdString());
+    ini.WriteString("RobotType", RobotPoseTransform::NormalizeRobotType(config.robotType));
     ini.SetSectionName("HandEyeMatrix");
 
     auto writeValue = [&ini, error, filePath](const QString& key, double value) -> bool
@@ -556,6 +541,17 @@ bool SaveHandEyeCalibrationConfig(const QString& robotName, const QString& camer
 
 bool ComputeHandEyeMatrixFromCalibration(const HandEyeCalibrationConfig& calibration, HandEyeMatrixConfig& config, QString* error)
 {
+    return ComputeHandEyeMatrixFromCalibration(ROBOT_TYPE_FANUC, calibration, config, error);
+}
+
+bool ComputeHandEyeMatrixFromCalibration(const QString& robotName, const HandEyeCalibrationConfig& calibration, HandEyeMatrixConfig& config, QString* error)
+{
+    return ComputeHandEyeMatrixFromCalibration(ReadRobotTypeForHandEye(robotName), calibration, config, error);
+}
+
+bool ComputeHandEyeMatrixFromCalibration(int robotType, const HandEyeCalibrationConfig& calibration, HandEyeMatrixConfig& config, QString* error)
+{
+    const int normalizedRobotType = RobotPoseTransform::NormalizeRobotType(robotType);
     const Eigen::Vector3d tcpWorld = ToPositionVector(calibration.tcpPoint);
     QVector<Eigen::Vector3d> cameraPoints;
     QVector<Eigen::Vector3d> robotLocalPoints;
@@ -572,7 +568,8 @@ bool ComputeHandEyeMatrixFromCalibration(const HandEyeCalibrationConfig& calibra
             continue;
         }
 
-        const Eigen::Matrix3d robotRotation = FanucRotation(sample.robotPose);
+        const Eigen::Matrix3d robotRotation =
+            RobotPoseTransform::RotationFromPose(sample.robotPose, normalizedRobotType);
         const Eigen::Vector3d robotWorld = ToPositionVector(sample.robotPose);
         const Eigen::Vector3d robotLocalPoint = robotRotation.transpose() * (tcpWorld - robotWorld);
 
@@ -642,5 +639,6 @@ bool ComputeHandEyeMatrixFromCalibration(const HandEyeCalibrationConfig& calibra
 
     config.rotation = rotation;
     config.translation = translation;
+    config.robotType = normalizedRobotType;
     return true;
 }

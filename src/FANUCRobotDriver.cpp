@@ -986,6 +986,7 @@ FANUCRobotCtrl::FANUCRobotCtrl(std::string strUnitName, RobotLog* pLog)
 
 FANUCRobotCtrl::~FANUCRobotCtrl()
 {
+	StopStateMonitor();
 	EndContinuousMoveQueue();
 	StopMonitor();
 	CloseSocket();
@@ -2290,6 +2291,11 @@ void FANUCRobotCtrl::ContinuousMoveWorker()
 
 // ===================== 被动监控通道 =====================
 
+void FANUCRobotCtrl::PrepareStateMonitor()
+{
+	StartMonitor();
+}
+
 // 启动S5监控线程；端口默认来自RobotPara.ini的MonitorPort。
 bool FANUCRobotCtrl::StartMonitor(int nPort)
 {
@@ -2976,12 +2982,25 @@ bool FANUCRobotCtrl::SetRobotToolNo(int nToolNo)
 	return FanucRequest(this, "SET_TOOL_NO:" + std::to_string(nToolNo), response) && FanucIsOkResponse(response);
 }
 
-// 获取工具数据；当前预留协议入口。
-bool FANUCRobotCtrl::GetToolData(int unToolNo, T_ROBOT_COORS adRobotToolData)
+// 获取工具数据；机器人侧服务需要返回 TOOL:x,y,z,rx,ry,rz。
+bool FANUCRobotCtrl::GetToolData(int unToolNo, T_ROBOT_COORS& adRobotToolData)
 {
-	(void)adRobotToolData;
+	adRobotToolData = T_ROBOT_COORS();
 	std::string response;
-	return FanucRequest(this, "GET_TOOL_DATA:" + std::to_string(unToolNo), response) && FanucStartsWith(response, "TOOL:");
+	if (!FanucRequest(this, "GET_TOOL_DATA:" + std::to_string(unToolNo), response))
+	{
+		return false;
+	}
+
+	double values[6] = {};
+	if (!FanucStartsWith(response, "TOOL:") || !FanucParseDoubles(FanucResponsePayload(response), values, 6))
+	{
+		SetLastRobotError("FANUC工具读取失败：机器人服务未返回 TOOL:x,y,z,rx,ry,rz，RSP=" + response);
+		return false;
+	}
+
+	adRobotToolData = T_ROBOT_COORS(values[0], values[1], values[2], values[3], values[4], values[5], 0, 0, 0);
+	return true;
 }
 
 // ===================== 寄存器与变量读写 =====================

@@ -55,8 +55,6 @@ public:
     static bool SaveCameraParam(const QString& robotName, const CameraParamData& param, QString* error = nullptr);
 
     // ===== 精测量参数 =====
-    static QString PreciseMeasureParamPath(const QString& robotName);
-    static QString WeldLineParamPath(const QString& robotName);
     static QString MeasureWeldParamPath(const QString& robotName);
     static bool EnsureMeasureWeldParamFile(const QString& robotName, QString* error = nullptr);
     static QString MeasureWeldScanSectionName(int groupIndex);
@@ -64,12 +62,6 @@ public:
     static int MeasureWeldCurrentGroupIndex(const QString& robotName, QString* error = nullptr);
     static QString MeasureWeldCurrentScanSectionName(const QString& robotName, QString* error = nullptr);
     static QString MeasureWeldCurrentWeldSectionName(const QString& robotName, QString* error = nullptr);
-    static QString PreciseMeasureSectionName(const QString& robotName, QString* error = nullptr);
-    static bool ReadPrecisePulse(const QString& robotName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error = nullptr);
-    static bool WritePrecisePulse(const QString& robotName, const QString& prefix, const T_ANGLE_PULSE& pulse, QString* error = nullptr);
-    static bool ReadPreciseCoors(const QString& robotName, const QString& prefix, T_ROBOT_COORS& coors, QString* error = nullptr);
-    static bool WritePreciseCoors(const QString& robotName, const QString& prefix, const T_ROBOT_COORS& coors, QString* error = nullptr);
-    static bool WritePreciseParamValue(const QString& robotName, const QString& key, const QString& value, QString* error = nullptr);
 
     // ===== 激光点文件 =====
     static bool LoadIndexedPoint3DFile(const QString& filePath, QVector<RobotCalculation::IndexedPoint3D>& points, QString* error = nullptr);

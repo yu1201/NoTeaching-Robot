@@ -1,5 +1,6 @@
 #include "RobotDriverAdaptor.h"
 
+#include <algorithm>
 #include <chrono>
 
 namespace
@@ -29,7 +30,9 @@ RobotDriverAdaptor::RobotDriverAdaptor(std::string sRobotName,RobotLog* pRobotLo
     : m_nExternalAxleType(0),
     m_nRobotAxisCount(6),
     m_pRobotLog(pRobotLog), // 初始化日志：指定路径+控制台输出
-    m_pFTP(nullptr)
+    m_pFTP(nullptr),
+    m_stateMonitorRunning(false),
+    m_stateMonitorNextSequence(0)
 {
     LoadRobotKinematicsPara(sRobotName, m_tKinematics, m_tAxisUnit, m_tAxisLimitAngle);
     LoadRobotExternalAxlePara(sRobotName);
@@ -40,6 +43,7 @@ RobotDriverAdaptor::RobotDriverAdaptor(std::string sRobotName,RobotLog* pRobotLo
 
 RobotDriverAdaptor::~RobotDriverAdaptor()
 {
+    StopStateMonitor();
     if (m_pFTP != nullptr)
     {
         delete m_pFTP;
@@ -652,6 +656,148 @@ int RobotDriverAdaptor::CheckDonePassive(long long* pRobotMs, long long* pPcRecv
     return done;
 }
 
+void RobotDriverAdaptor::PrepareStateMonitor()
+{
+}
+
+bool RobotDriverAdaptor::StartStateMonitor(int intervalMs)
+{
+    if (intervalMs <= 0)
+    {
+        intervalMs = 50;
+    }
+
+    bool expected = false;
+    if (!m_stateMonitorRunning.compare_exchange_strong(expected, true))
+    {
+        return true;
+    }
+
+    PrepareStateMonitor();
+    try
+    {
+        m_stateMonitorThread = std::thread(&RobotDriverAdaptor::StateMonitorWorker, this, intervalMs);
+    }
+    catch (...)
+    {
+        m_stateMonitorRunning.store(false);
+        if (m_pRobotLog != nullptr)
+        {
+            m_pRobotLog->write(LogColor::ERR, "机器人状态监控线程启动失败");
+        }
+        return false;
+    }
+
+    if (m_pRobotLog != nullptr)
+    {
+        m_pRobotLog->write(LogColor::SUCCESS,
+            "机器人状态监控线程已启动，采样间隔=%dms，缓存=%zu帧",
+            intervalMs,
+            kStateMonitorMaxFrames);
+    }
+    return true;
+}
+
+void RobotDriverAdaptor::StopStateMonitor()
+{
+    m_stateMonitorRunning.store(false);
+    if (m_stateMonitorThread.joinable())
+    {
+        m_stateMonitorThread.join();
+    }
+}
+
+bool RobotDriverAdaptor::IsStateMonitorRunning() const
+{
+    return m_stateMonitorRunning.load();
+}
+
+bool RobotDriverAdaptor::LatestStateSnapshot(StateSnapshot& snapshot) const
+{
+    std::lock_guard<std::mutex> lock(m_stateMonitorMutex);
+    if (m_stateMonitorFrames.empty())
+    {
+        return false;
+    }
+    snapshot = m_stateMonitorFrames.back();
+    return true;
+}
+
+std::vector<RobotDriverAdaptor::StateSnapshot> RobotDriverAdaptor::StateSnapshotsBetween(
+    std::uint64_t beginExclusive,
+    std::uint64_t endInclusive) const
+{
+    std::vector<StateSnapshot> result;
+    std::lock_guard<std::mutex> lock(m_stateMonitorMutex);
+    for (const StateSnapshot& frame : m_stateMonitorFrames)
+    {
+        if (frame.sequence > beginExclusive && frame.sequence <= endInclusive)
+        {
+            result.push_back(frame);
+        }
+    }
+    return result;
+}
+
+std::uint64_t RobotDriverAdaptor::StateMonitorMark() const
+{
+    std::lock_guard<std::mutex> lock(m_stateMonitorMutex);
+    return m_stateMonitorFrames.empty() ? 0 : m_stateMonitorFrames.back().sequence;
+}
+
+int RobotDriverAdaptor::StateMonitorCachedCount() const
+{
+    std::lock_guard<std::mutex> lock(m_stateMonitorMutex);
+    return static_cast<int>(m_stateMonitorFrames.size());
+}
+
+void RobotDriverAdaptor::StoreStateSnapshot(const StateSnapshot& snapshot)
+{
+    StateSnapshot stored = snapshot;
+    std::lock_guard<std::mutex> lock(m_stateMonitorMutex);
+    stored.sequence = ++m_stateMonitorNextSequence;
+    m_stateMonitorFrames.push_back(stored);
+    while (m_stateMonitorFrames.size() > kStateMonitorMaxFrames)
+    {
+        m_stateMonitorFrames.pop_front();
+    }
+}
+
+void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
+{
+    while (m_stateMonitorRunning.load())
+    {
+        const long long nowMs = RobotDriverSteadyMs();
+        StateSnapshot snapshot;
+        snapshot.robotMs = nowMs;
+        snapshot.pcRecvMs = nowMs;
+        snapshot.done = -1;
+        snapshot.valid = false;
+
+        if (IsConnected())
+        {
+            long long poseRobotMs = 0;
+            long long posePcRecvMs = 0;
+            long long pulseRobotMs = 0;
+            long long pulsePcRecvMs = 0;
+            long long doneRobotMs = 0;
+            long long donePcRecvMs = 0;
+
+            snapshot.pose = GetCurrentPosPassive(&poseRobotMs, &posePcRecvMs);
+            snapshot.pulse = GetCurrentPulsePassive(&pulseRobotMs, &pulsePcRecvMs);
+            snapshot.done = CheckDonePassive(&doneRobotMs, &donePcRecvMs);
+
+            snapshot.robotMs = poseRobotMs > 0 ? poseRobotMs : (doneRobotMs > 0 ? doneRobotMs : nowMs);
+            snapshot.pcRecvMs = posePcRecvMs > 0 ? posePcRecvMs : (donePcRecvMs > 0 ? donePcRecvMs : nowMs);
+            snapshot.valid = snapshot.pcRecvMs > 0;
+        }
+
+        StoreStateSnapshot(snapshot);
+        const int sleepMs = snapshot.valid ? intervalMs : std::max(intervalMs, 200);
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+    }
+}
+
 int RobotDriverAdaptor::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo)
 {
     return 0;
@@ -696,6 +842,14 @@ int RobotDriverAdaptor::DownloadFile(std::string RemoteFilePath, std::string Loc
 bool RobotDriverAdaptor::SetTpSpeed(int speed)
 {
     (void)speed;
+    return false;
+}
+
+bool RobotDriverAdaptor::GetToolData(int nToolNo, T_ROBOT_COORS& robotToolData)
+{
+    (void)nToolNo;
+    robotToolData = T_ROBOT_COORS();
+    SetLastRobotError("当前机器人驱动不支持读取工具坐标。");
     return false;
 }
 

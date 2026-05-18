@@ -9,6 +9,7 @@
 #include <QHash>
 #include <QList>
 #include <QPointer>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -63,6 +64,7 @@ private slots:
     void FanucDisconnectTest();
     void RobotClearAlarmTest();
     void RobotSwitchStepMode();
+    void ReadTool1ToGunTool();
     void FanucGetCurrentPosTest();
     void FanucGetCurrentPulseTest();
     void FanucCheckDoneTest();
@@ -94,6 +96,8 @@ private:
     bool IsCurrentRobotConnected();
     void ToggleCurrentRobotConnection();
     int CurrentRobotUnitIndex() const;
+    QString CurrentRobotName() const;
+    bool IsCurrentRobotSetupReady(bool requireCameraParam, bool requireHandEye, QString* issueText = nullptr) const;
     const T_CONTRAL_UNIT* CurrentContralUnit() const;
     bool IsRobotUnitDriverReady(int unitIndex, QString* issueText = nullptr) const;
     int FindFirstReadyRobotUnitIndex() const;
@@ -121,6 +125,7 @@ private:
     void LogoutCurrentAccount();
     void RegisterAccount();
     void OpenAccountManagementDialog();
+    void OpenControlUnitManagementDialog();
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
     void ApplyDebugLogVisibility(QWidget* page);
@@ -142,6 +147,8 @@ private:
     void EnsureCommandLineConsole() const;
     void WaitForCommandLineEnter(const QString& message) const;
     FANUCRobotCtrl* GetFirstFanucDriverForCli() const;
+    RobotDriverAdaptor* GetRobotDriverForCli(const QStringList& arguments, QString* robotLabelOut = nullptr) const;
+    void RunRobotMotionForCli(const QStringList& arguments);
     bool UploadFanucServiceBundleForCli(FANUCRobotCtrl* pFanucDriver);
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
     void RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
@@ -165,6 +172,7 @@ private:
     QStackedWidget* m_pManagementStack;
     QWidget* m_pManagementHomePage;
     QWidget* m_pAccountManagementPage;
+    QWidget* m_pControlUnitManagementPage;
     QComboBox* m_pRobotSelectorCombo;
     QLabel* m_pRobotSelectorLabel;
     int m_nCurrentRobotUnitIndex;
@@ -197,6 +205,8 @@ private:
     QPushButton* m_pDashboardDebugLogBtn;
     QAction* m_pAccountManagementAction = nullptr;
     QList<QPointer<QWidget>> m_robotOperationWidgets;
+    QList<QPointer<QWidget>> m_cameraParamDependentWidgets;
+    QList<QPointer<QWidget>> m_handEyeDependentWidgets;
     QPushButton* m_pCameraParamBtn;
     QPushButton* m_pWeldSeamCompBtn;
     WeldProcessDialog* m_pWeldProcessPage;
@@ -210,6 +220,7 @@ private:
     QHash<int, CameraRuntime*> m_scanCameraRuntimes;
     QHash<int, CameraRuntime*> m_scanCameraReceiversByPort;
     QHash<QString, int> m_scanCameraUnitByIP;
+    QSet<CameraRuntime*> m_liveScanCameraRuntimes;
     QHash<int, QPointer<MeasureThenWeldDialog>> m_measureThenWeldPages;
     QHash<int, QPointer<RobotJogDialog>> m_robotJogPages;
     bool m_bFanucMovlForward;

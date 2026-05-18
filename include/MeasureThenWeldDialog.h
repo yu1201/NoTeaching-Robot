@@ -11,6 +11,7 @@
 
 class MeasureThenWeldService;
 class CameraFrameCache;
+class QCheckBox;
 class QPushButton;
 class QPlainTextEdit;
 class RobotDriverAdaptor;
@@ -33,9 +34,17 @@ struct T_PRECISE_MEASURE_PARAM
     double dAcc = 0.0;
     double dDec = 0.0;
 
+    // 焊接段运行参数：界面可切换实际焊接/空跑，不焊接时使用空跑速度。
+    bool bDoActualWeld = true;
+    double dWeldSpeedMmPerMin = 400.0;
+    double dDryRunSpeedMmPerMin = 1000.0;
+    double dWeldSafeMoveSpeedMmPerMin = 1000.0;
+    double dWeldRzGainDeg = 0.0;
+
     // 预设流程动作点：下枪安全姿态 -> 扫描起点 -> 扫描终点 -> 收枪安全姿态。
     // 安全姿态保留脉冲点，扫描起终点改为直角坐标点。
     std::vector<T_ANGLE_PULSE> vtStartSafePulse;
+    bool bHasStartPulse = false;
     T_ANGLE_PULSE tStartPulse;
     T_ROBOT_COORS tStartPos;
     T_ROBOT_COORS tEndPos;
@@ -97,6 +106,9 @@ private:
     void RunSkipScanWeldFlow();
     void RunLineScanProcess();
     void OpenScanSafeParamDialog();
+    void RefreshWeldModeFromParam();
+    void SaveWeldModeToParam(bool doActualWeld);
+    bool IsActualWeldModeChecked() const;
     void AppendLog(const QString& text);
     void SetFlowStep(const QString& text);
     void SetRunning(bool running);
@@ -113,6 +125,7 @@ private:
     QPushButton* m_pSkipScanWeldBtn = nullptr;
     QPushButton* m_pLineScanProcessBtn = nullptr;
     QPushButton* m_pScanSafeParamBtn = nullptr;
+    QCheckBox* m_pActualWeldCheck = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
 
     bool m_bRunning = false;

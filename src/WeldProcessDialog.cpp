@@ -1,5 +1,6 @@
 #include "WeldProcessDialog.h"
 #include "ui_WeldProcessDialog.h"
+#include "RobotMessage.h"
 #include "WindowStyleHelper.h"
 
 #include <QAbstractSpinBox>
@@ -595,7 +596,7 @@ void WeldProcessDialog::LoadToUi(int preferredGroupRow, int preferredBeadRow)
     m_isLoading = true;
     if (!m_file.Init())
     {
-        const QString err = QString::fromLocal8Bit(m_file.GetLastError().c_str());
+        const QString err = DecodeRobotMessageText(m_file.GetLastError());
         ui->statusLabel->setText("读取失败: " + err);
         m_isLoading = false;
         ShowError(err);
@@ -610,8 +611,8 @@ void WeldProcessDialog::LoadToUi(int preferredGroupRow, int preferredBeadRow)
     PopulateWeldList(preferredGroupRow);
     PopulateBeadList(preferredBeadRow);
     ui->statusLabel->setText(QString("读取完成: %1 / %2")
-        .arg(QString::fromLocal8Bit(m_file.GetWeaveIniFilePath().c_str()))
-        .arg(QString::fromLocal8Bit(m_file.GetWeldIniFilePath().c_str())));
+        .arg(DecodeRobotMessageText(m_file.GetWeaveIniFilePath()))
+        .arg(DecodeRobotMessageText(m_file.GetWeldIniFilePath())));
     m_isLoading = false;
     MarkCleanSnapshot();
 }
@@ -667,7 +668,7 @@ QString WeldProcessDialog::BuildWeldDisplayName(int index, const T_WELD_PARA& it
 {
     return QString("%1. %2 | 焊脚%3")
         .arg(index + 1)
-        .arg(QString::fromLocal8Bit(item.strWorkPeace.c_str()))
+        .arg(DecodeRobotMessageText(item.strWorkPeace))
         .arg(item.dWeldAngleSize, 0, 'f', 1);
 }
 
@@ -689,7 +690,7 @@ int WeldProcessDialog::GroupCount() const
 QString WeldProcessDialog::BuildGroupKey(const T_WELD_PARA& item) const
 {
     return QString("%1|%2")
-        .arg(QString::fromLocal8Bit(item.strWorkPeace.c_str()))
+        .arg(DecodeRobotMessageText(item.strWorkPeace))
         .arg(item.dWeldAngleSize, 0, 'f', 3);
 }
 
@@ -802,8 +803,8 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     ui->useWeldSpin->setValue(groupDisplayIndex);
     ui->useWeaveSpin->setValue(weld.nWeaveTypeNo);
 
-    m_workPeaceEdit->setText(QString::fromLocal8Bit(weld.strWorkPeace.c_str()));
-    m_weldTypeEdit->setText(QString::fromLocal8Bit(weld.strWeldType.c_str()));
+    m_workPeaceEdit->setText(DecodeRobotMessageText(weld.strWorkPeace));
+    m_weldTypeEdit->setText(DecodeRobotMessageText(weld.strWeldType));
     m_weldAngleSizeSpin->setValue(weld.dWeldAngleSize);
     m_standWeldDirSpin->setValue(weld.nStandWeldDir);
     m_weldMethodSpin->setValue(weld.nWeldMethod);
@@ -863,7 +864,7 @@ bool WeldProcessDialog::SaveData()
 {
     if (!m_file.Init())
     {
-        ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return false;
     }
 
@@ -876,12 +877,12 @@ bool WeldProcessDialog::SaveData()
 
     if (!m_file.UpdateUseWeaveTypeNo(ui->useWeaveSpin->value()))
     {
-        ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return false;
     }
     if (!m_file.UpdateUseWeldParaNo(currentRow))
     {
-        ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return false;
     }
 
@@ -901,12 +902,12 @@ bool WeldProcessDialog::SaveData()
 
     if (!m_file.UpdateWeldPara(currentRow, weldItem))
     {
-        ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return false;
     }
     if (!m_file.UpdateWeaveType(weldItem.nWeaveTypeNo, weaveItem))
     {
-        ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return false;
     }
 
@@ -1000,7 +1001,7 @@ void WeldProcessDialog::OnWeldGroupsReordered()
 
     if (!m_file.ReorderWeldGroups(orderedKeys))
     {
-        ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return;
     }
     LoadToUi(currentRow, currentBeadRow);
@@ -1041,7 +1042,7 @@ void WeldProcessDialog::AddBead()
     int newIndex = -1;
     if (!m_file.AddWeldPara(item, newIndex))
     {
-        ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return;
     }
     LoadToUi(m_weldListWidget->currentRow(), static_cast<int>(indices.size()));
@@ -1065,7 +1066,7 @@ void WeldProcessDialog::AddWeldGroup()
     int newIndex = -1;
     if (!m_file.AddWeldPara(item, newIndex))
     {
-        ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return;
     }
     LoadToUi(GroupCount() - 1, 0);
@@ -1090,7 +1091,7 @@ void WeldProcessDialog::RemoveWeldGroup()
     {
         if (!m_file.RemoveWeldPara(indices[i]))
         {
-            ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+            ShowError(DecodeRobotMessageText(m_file.GetLastError()));
             return;
         }
     }
@@ -1116,7 +1117,7 @@ void WeldProcessDialog::RemoveBead()
     const int beadRow = m_beadListWidget != nullptr ? m_beadListWidget->currentRow() : 0;
     if (!m_file.RemoveWeldPara(weldIndex))
     {
-        ShowError(QString::fromLocal8Bit(m_file.GetLastError().c_str()));
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return;
     }
     LoadToUi(m_weldListWidget->currentRow(), qMax(0, beadRow - 1));

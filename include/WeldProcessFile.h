@@ -52,9 +52,6 @@ private:
     bool LoadWeldTxt();
     bool SaveWeaveTxt() const;
     bool SaveWeldTxt() const;
-    bool TryMigrateFromIni();
-    bool ImportWeaveFromIni(const std::string& iniPath);
-    bool ImportWeldFromIni(const std::string& iniPath);
     void EnsureDefaultLayerRows();
     void NormalizeWeldOrderKeepGroupOrder();
     bool BindWeldToWeave();

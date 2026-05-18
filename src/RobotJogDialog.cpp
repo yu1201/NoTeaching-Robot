@@ -2,6 +2,7 @@
 
 #include "FANUCRobotDriver.h"
 #include "RobotDriverAdaptor.h"
+#include "RobotMessage.h"
 #include "WindowStyleHelper.h"
 
 #include <QApplication>
@@ -115,13 +116,13 @@ namespace
 		const std::string lastError = driver->GetLastRobotError();
 		if (!lastError.empty())
 		{
-			text += "\n最近错误：" + QString::fromLocal8Bit(lastError.c_str());
+			text += "\n最近错误：" + DecodeRobotMessageText(lastError);
 		}
 
 		const std::string statusText = driver->GetRobotStatusText();
 		if (!statusText.empty() && statusText != lastError)
 		{
-			text += "\n当前状态：" + QString::fromLocal8Bit(statusText.c_str());
+			text += "\n当前状态：" + DecodeRobotMessageText(statusText);
 		}
 		return text;
 	}
@@ -768,14 +769,18 @@ void RobotJogDialog::RefreshStateText()
 
 	long long robotMs = 0;
 	long long pcRecvMs = 0;
-	FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver);
-	if (fanucDriver != nullptr)
+	T_ROBOT_COORS pos;
+	T_ANGLE_PULSE pulse;
+	int done = -1;
+	RobotDriverAdaptor::StateSnapshot snapshot;
+	if (m_robotDriver->LatestStateSnapshot(snapshot))
 	{
-		fanucDriver->StartMonitor();
+		robotMs = snapshot.robotMs;
+		pcRecvMs = snapshot.pcRecvMs;
+		pos = snapshot.pose;
+		pulse = snapshot.pulse;
+		done = snapshot.done;
 	}
-	const T_ROBOT_COORS pos = m_robotDriver->GetCurrentPosPassive(&robotMs, &pcRecvMs);
-	const T_ANGLE_PULSE pulse = m_robotDriver->GetCurrentPulsePassive();
-	const int done = m_robotDriver->CheckDonePassive();
 	const QString doneText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知(%1)").arg(done));
 	UpdateMotionButtonState();
 
@@ -828,7 +833,12 @@ bool RobotJogDialog::IsMotionBusy() const
 	{
 		return false;
 	}
-	return m_robotDriver->CheckDonePassive() == 0;
+	RobotDriverAdaptor::StateSnapshot snapshot;
+	if (m_robotDriver->LatestStateSnapshot(snapshot))
+	{
+		return snapshot.done == 0;
+	}
+	return false;
 }
 
 double RobotJogDialog::CartesianSpeed() const
@@ -875,7 +885,8 @@ bool RobotJogDialog::ReadCartesianTargetFromEditors(T_ROBOT_COORS& target, QStri
 	}
 	else
 	{
-		target = m_robotDriver->GetCurrentPosPassive();
+		RobotDriverAdaptor::StateSnapshot snapshot;
+		target = m_robotDriver->LatestStateSnapshot(snapshot) ? snapshot.pose : T_ROBOT_COORS();
 	}
 	target.dX = values[0];
 	target.dY = values[1];
@@ -918,7 +929,8 @@ bool RobotJogDialog::ReadJointTargetFromEditors(T_ANGLE_PULSE& target, QString& 
 	}
 	else
 	{
-		target = m_robotDriver->GetCurrentPulsePassive();
+		RobotDriverAdaptor::StateSnapshot snapshot;
+		target = m_robotDriver->LatestStateSnapshot(snapshot) ? snapshot.pulse : T_ANGLE_PULSE();
 	}
 	target.nSPulse = values[0];
 	target.nLPulse = values[1];

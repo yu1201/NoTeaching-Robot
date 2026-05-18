@@ -1,4 +1,5 @@
 #include "RobotCalculation.h"
+#include "RobotPoseTransform.h"
 #include "SkFunction.h"
 
 #include <algorithm>
@@ -7,8 +8,6 @@
 
 namespace
 {
-constexpr double kMeasurePi = 3.14159265358979323846;
-
 double SampleAxisValue(const Eigen::Vector3d& point, RobotCalculation::SampleAxis axis)
 {
     return axis == RobotCalculation::SampleAxis::AxisX ? point.x() : point.y();
@@ -444,38 +443,6 @@ QVector<int> BuildPiecewiseBreakpoints(const QVector<Eigen::Vector3d>& points,
 }
 }
 
-Eigen::Matrix3d RobotCalculation::RotX(double w)
-{
-    const double c = std::cos(w);
-    const double s = std::sin(w);
-    return (Eigen::Matrix3d() << 1.0, 0.0, 0.0,
-                                  0.0, c, -s,
-                                  0.0, s, c).finished();
-}
-
-Eigen::Matrix3d RobotCalculation::RotY(double p)
-{
-    const double c = std::cos(p);
-    const double s = std::sin(p);
-    return (Eigen::Matrix3d() << c, 0.0, s,
-                                  0.0, 1.0, 0.0,
-                                  -s, 0.0, c).finished();
-}
-
-Eigen::Matrix3d RobotCalculation::RotZ(double r)
-{
-    const double c = std::cos(r);
-    const double s = std::sin(r);
-    return (Eigen::Matrix3d() << c, -s, 0.0,
-                                  s, c, 0.0,
-                                  0.0, 0.0, 1.0).finished();
-}
-
-Eigen::Matrix3d RobotCalculation::FanucRot(double w, double p, double r)
-{
-    return RotZ(r) * RotY(p) * RotX(w);
-}
-
 T_ROBOT_COORS RobotCalculation::InterpolateRobotPose(const std::vector<TimestampedRobotPose>& robotSamples, qint64 targetTimestampUs)
 {
     if (robotSamples.empty())
@@ -528,10 +495,8 @@ Eigen::Vector3d RobotCalculation::CalcLaserPointInRobot(const T_ROBOT_COORS& rob
     const Eigen::Vector3d& cameraPoint,
     const HandEyeMatrixConfig& calibration)
 {
-    const double w = robotPose.dRX * kMeasurePi / 180.0;
-    const double p = robotPose.dRY * kMeasurePi / 180.0;
-    const double r = robotPose.dRZ * kMeasurePi / 180.0;
-    const Eigen::Matrix3d robotRotation = FanucRot(w, p, r);
+    const Eigen::Matrix3d robotRotation =
+        RobotPoseTransform::RotationFromPose(robotPose, calibration.robotType);
     return robotRotation * (calibration.rotation * cameraPoint + calibration.translation)
         + Eigen::Vector3d(robotPose.dX, robotPose.dY, robotPose.dZ);
 }

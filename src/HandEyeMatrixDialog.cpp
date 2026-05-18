@@ -198,6 +198,7 @@ bool HandEyeMatrixDialog::SaveConfig()
 
     m_pPathLabel->setText(QString("参数文件：%1").arg(filePath));
     AppendLog("手眼矩阵参数已保存。");
+    m_bSavedThisSession = true;
     QMessageBox::information(this, "手眼矩阵参数", "保存完成。");
     MarkCleanSnapshot();
     return true;

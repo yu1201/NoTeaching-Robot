@@ -6,6 +6,8 @@
 #include "RobotCalculation.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
+#include "RobotMessage.h"
+#include "RobotPoseTransform.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
 
@@ -14,6 +16,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QDebug>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -39,7 +42,9 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <thread>
+#include <vector>
 
 namespace
 {
@@ -91,6 +96,15 @@ QString BuildCameraTimestampCheckPath(const QString& robotName, const QString& c
         QString("CameraTimestampCheck_%1_%2.csv").arg(cameraSection, stamp)));
 }
 
+QString BuildHandEyeCalibrationDiagnosticPath(const QString& robotName, const QString& cameraSection, const QString& sceneName)
+{
+    const QFileInfo calibrationInfo(GetHandEyeCalibrationIniPath(robotName, cameraSection));
+    const QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+    const QString safeSceneName = sceneName.isEmpty() ? QString("Check") : sceneName;
+    return QDir::toNativeSeparators(calibrationInfo.dir().filePath(
+        QString("HandEyeCalibrationDiagnostic_%1_%2_%3.txt").arg(cameraSection, safeSceneName, stamp)));
+}
+
 QString FormatPoseSummary(const T_ROBOT_COORS& pose)
 {
     return QString("X=%1 Y=%2 Z=%3 RX=%4 RY=%5 RZ=%6 BX=%7 BY=%8 BZ=%9")
@@ -103,6 +117,196 @@ QString FormatPoseSummary(const T_ROBOT_COORS& pose)
         .arg(pose.dBX, 0, 'f', 6)
         .arg(pose.dBY, 0, 'f', 6)
         .arg(pose.dBZ, 0, 'f', 6);
+}
+
+QString FormatVectorSummary(const Eigen::Vector3d& point, int precision = 6)
+{
+    return QString("X=%1 Y=%2 Z=%3")
+        .arg(point.x(), 0, 'f', precision)
+        .arg(point.y(), 0, 'f', precision)
+        .arg(point.z(), 0, 'f', precision);
+}
+
+Eigen::Vector3d PosePositionVector(const T_ROBOT_COORS& pose)
+{
+    return Eigen::Vector3d(pose.dX, pose.dY, pose.dZ);
+}
+
+bool IsFiniteDiagnosticVector(const Eigen::Vector3d& value)
+{
+    return std::isfinite(value.x()) && std::isfinite(value.y()) && std::isfinite(value.z());
+}
+
+struct HandEyeDiagnosticSummary
+{
+    int validSampleCount = 0;
+    int validPairCount = 0;
+    double sampleRmseMm = 0.0;
+    double sampleMaxErrorMm = 0.0;
+    double pairMeanDiffMm = 0.0;
+    double pairMaxAbsDiffMm = 0.0;
+};
+
+QString FormatHandEyeDiagnosticSummary(const HandEyeDiagnosticSummary& summary)
+{
+    return QString("有效样本=%1，样本RMSE=%2 mm，样本最大误差=%3 mm，距离对=%4，距离差平均=%5 mm，距离差最大绝对值=%6 mm")
+        .arg(summary.validSampleCount)
+        .arg(summary.sampleRmseMm, 0, 'f', 3)
+        .arg(summary.sampleMaxErrorMm, 0, 'f', 3)
+        .arg(summary.validPairCount)
+        .arg(summary.pairMeanDiffMm, 0, 'f', 3)
+        .arg(summary.pairMaxAbsDiffMm, 0, 'f', 3);
+}
+
+QStringList BuildHandEyeDiagnosticLines(
+    const HandEyeCalibrationConfig& calibration,
+    const HandEyeMatrixConfig& matrix,
+    HandEyeDiagnosticSummary* summaryOut = nullptr)
+{
+    HandEyeDiagnosticSummary summary;
+    QStringList lines;
+    const Eigen::Vector3d tcpWorld = PosePositionVector(calibration.tcpPoint);
+
+    struct DiagnosticSample
+    {
+        int index = 0;
+        Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
+        Eigen::Vector3d robotLocalPoint = Eigen::Vector3d::Zero();
+    };
+    std::vector<DiagnosticSample> validSamples;
+
+    lines << "[HandEyeDiagnostics]";
+    lines << QString("TcpWorld %1").arg(FormatVectorSummary(tcpWorld));
+    lines << "";
+    lines << "[SampleErrors]";
+
+    double sampleErrorSquareSum = 0.0;
+    for (int index = 0; index < calibration.samples.size(); ++index)
+    {
+        const HandEyeCalibrationSample& sample = calibration.samples[index];
+        if (!sample.valid)
+        {
+            lines << QString("Sample %1 Valid=0 Skip=not_collected").arg(index + 1);
+            continue;
+        }
+        if (!IsFiniteDiagnosticVector(sample.cameraPoint))
+        {
+            lines << QString("Sample %1 Valid=1 Skip=invalid_camera_point Camera %2")
+                .arg(index + 1)
+                .arg(FormatVectorSummary(sample.cameraPoint));
+            continue;
+        }
+
+        const Eigen::Matrix3d robotRotation =
+            RobotPoseTransform::RotationFromPose(sample.robotPose, matrix.robotType);
+        const Eigen::Vector3d robotWorld = PosePositionVector(sample.robotPose);
+        const Eigen::Vector3d robotLocalPoint = robotRotation.transpose() * (tcpWorld - robotWorld);
+        const Eigen::Vector3d matrixLocalPoint = matrix.rotation * sample.cameraPoint + matrix.translation;
+        const Eigen::Vector3d worldTargetPoint = robotRotation * matrixLocalPoint + robotWorld;
+        const Eigen::Vector3d localError = matrixLocalPoint - robotLocalPoint;
+        const Eigen::Vector3d worldError = worldTargetPoint - tcpWorld;
+        const double errorNorm = worldError.norm();
+
+        if (!IsFiniteDiagnosticVector(robotLocalPoint)
+            || !IsFiniteDiagnosticVector(matrixLocalPoint)
+            || !IsFiniteDiagnosticVector(worldTargetPoint)
+            || !std::isfinite(errorNorm))
+        {
+            lines << QString("Sample %1 Valid=1 Skip=invalid_calculation Robot %2 Camera %3")
+                .arg(index + 1)
+                .arg(FormatPoseSummary(sample.robotPose))
+                .arg(FormatVectorSummary(sample.cameraPoint));
+            continue;
+        }
+
+        ++summary.validSampleCount;
+        sampleErrorSquareSum += errorNorm * errorNorm;
+        summary.sampleMaxErrorMm = std::max(summary.sampleMaxErrorMm, errorNorm);
+        validSamples.push_back({ index + 1, sample.cameraPoint, robotLocalPoint });
+
+        lines << QString("Sample %1").arg(index + 1);
+        lines << QString("  RobotPose %1").arg(FormatPoseSummary(sample.robotPose));
+        lines << QString("  CameraPoint %1").arg(FormatVectorSummary(sample.cameraPoint));
+        lines << QString("  RobotLocalExpected %1").arg(FormatVectorSummary(robotLocalPoint));
+        lines << QString("  MatrixLocalCalculated %1").arg(FormatVectorSummary(matrixLocalPoint));
+        lines << QString("  LocalError %1 Norm=%2")
+            .arg(FormatVectorSummary(localError))
+            .arg(localError.norm(), 0, 'f', 6);
+        lines << QString("  WorldTargetCalculated %1").arg(FormatVectorSummary(worldTargetPoint));
+        lines << QString("  TcpWorldError %1 Norm=%2")
+            .arg(FormatVectorSummary(worldError))
+            .arg(errorNorm, 0, 'f', 6);
+    }
+
+    if (summary.validSampleCount > 0)
+    {
+        summary.sampleRmseMm = std::sqrt(sampleErrorSquareSum / static_cast<double>(summary.validSampleCount));
+    }
+
+    lines << "";
+    lines << "[PairDistanceCheck]";
+    double pairDiffSum = 0.0;
+    for (std::size_t left = 0; left < validSamples.size(); ++left)
+    {
+        for (std::size_t right = left + 1; right < validSamples.size(); ++right)
+        {
+            const double cameraDistance = (validSamples[right].cameraPoint - validSamples[left].cameraPoint).norm();
+            const double robotLocalDistance = (validSamples[right].robotLocalPoint - validSamples[left].robotLocalPoint).norm();
+            const double diff = cameraDistance - robotLocalDistance;
+            ++summary.validPairCount;
+            pairDiffSum += diff;
+            summary.pairMaxAbsDiffMm = std::max(summary.pairMaxAbsDiffMm, std::abs(diff));
+
+            lines << QString("Pair %1-%2 CameraDist=%3 RobotLocalDist=%4 Diff(Camera-RobotLocal)=%5")
+                .arg(validSamples[left].index)
+                .arg(validSamples[right].index)
+                .arg(cameraDistance, 0, 'f', 6)
+                .arg(robotLocalDistance, 0, 'f', 6)
+                .arg(diff, 0, 'f', 6);
+        }
+    }
+    if (summary.validPairCount > 0)
+    {
+        summary.pairMeanDiffMm = pairDiffSum / static_cast<double>(summary.validPairCount);
+    }
+
+    lines << "";
+    lines << "[Summary]";
+    lines << FormatHandEyeDiagnosticSummary(summary);
+    if (summary.sampleRmseMm > 2.0 || summary.pairMaxAbsDiffMm > 2.0)
+    {
+        lines << "Warning 标定数据刚体一致性偏差较大；优先检查相机三维标定/单位、采样点是否同一物理TCP、机器人姿态/工具号和相机缓存帧。";
+    }
+
+    if (summaryOut != nullptr)
+    {
+        *summaryOut = summary;
+    }
+    return lines;
+}
+
+bool SaveHandEyeDiagnosticFile(
+    const QString& robotName,
+    const QString& cameraSection,
+    const QString& sceneName,
+    const HandEyeCalibrationConfig& calibration,
+    const HandEyeMatrixConfig& matrix,
+    QString* filePathOut = nullptr,
+    QString* summaryTextOut = nullptr,
+    QString* error = nullptr)
+{
+    HandEyeDiagnosticSummary summary;
+    const QStringList lines = BuildHandEyeDiagnosticLines(calibration, matrix, &summary);
+    const QString filePath = BuildHandEyeCalibrationDiagnosticPath(robotName, cameraSection, sceneName);
+    if (filePathOut != nullptr)
+    {
+        *filePathOut = filePath;
+    }
+    if (summaryTextOut != nullptr)
+    {
+        *summaryTextOut = FormatHandEyeDiagnosticSummary(summary);
+    }
+    return RobotDataHelper::SaveTextFileLines(filePath, lines, error);
 }
 
 QString FormatAutoCalibrationState(int state)
@@ -227,7 +431,7 @@ bool ReadAutoCalibrationTarget(
     {
         if (error != nullptr)
         {
-            const QString detail = QString::fromLocal8Bit(driver->GetLastRobotError().c_str());
+            const QString detail = DecodeRobotMessageText(driver->GetLastRobotError());
             *error = detail.isEmpty()
                 ? QString("读取位置变量[%1]失败，返回码=%2。").arg(varIndex).arg(ret)
                 : QString("读取位置变量[%1]失败，返回码=%2，%3").arg(varIndex).arg(ret).arg(detail);
@@ -337,7 +541,7 @@ bool WaitGenericRobotDone(
                 {
                     *error = QString("机器人程序已进入运行态，但 %1 ms 内当前位置未变化。当前状态：%2")
                         .arg(kHandEyeAutoNoMotionTimeoutMs)
-                        .arg(QString::fromLocal8Bit(driver->GetRobotStatusText().c_str()));
+                        .arg(DecodeRobotMessageText(driver->GetRobotStatusText()));
                 }
                 return false;
             }
@@ -382,7 +586,7 @@ bool WaitGenericRobotDone(
                                 .arg(kHandEyeAutoArriveRotationToleranceDeg, 0, 'f', 3)
                                 .arg(FormatPoseSummary(*targetPose))
                                 .arg(FormatPoseSummary(finalPose))
-                                .arg(QString::fromLocal8Bit(driver->GetRobotStatusText().c_str()));
+                                .arg(DecodeRobotMessageText(driver->GetRobotStatusText()));
                         }
                         return false;
                     }
@@ -397,7 +601,7 @@ bool WaitGenericRobotDone(
             {
                 *error = QString("等待机器人到位超时，最后状态=%1，当前状态：%2")
                     .arg(lastState)
-                    .arg(QString::fromLocal8Bit(driver->GetRobotStatusText().c_str()));
+                    .arg(DecodeRobotMessageText(driver->GetRobotStatusText()));
             }
             return false;
         }
@@ -1117,7 +1321,7 @@ bool HandEyeCalibrationDialog::ComputeAndSaveMatrix()
     }
 
     HandEyeMatrixConfig matrix;
-    if (!ComputeHandEyeMatrixFromCalibration(m_config, matrix, &error))
+    if (!ComputeHandEyeMatrixFromCalibration(m_robotName, m_config, matrix, &error))
     {
         QMessageBox::warning(this, "手眼标定", error);
         AppendLog("计算矩阵失败：" + error);
@@ -1131,6 +1335,7 @@ bool HandEyeCalibrationDialog::ComputeAndSaveMatrix()
         AppendLog("写入矩阵失败：" + error);
         return false;
     }
+    m_bMatrixComputedThisSession = true;
 
     UpdatePathLabels();
     AppendLog("手眼矩阵计算完成：");
@@ -1146,6 +1351,27 @@ bool HandEyeCalibrationDialog::ComputeAndSaveMatrix()
         .arg(matrix.translation.x(), 0, 'f', 6)
         .arg(matrix.translation.y(), 0, 'f', 6)
         .arg(matrix.translation.z(), 0, 'f', 6));
+
+    QString diagnosticPath;
+    QString diagnosticSummary;
+    QString diagnosticError;
+    if (SaveHandEyeDiagnosticFile(
+        m_robotName,
+        m_cameraSection,
+        "Compute",
+        m_config,
+        matrix,
+        &diagnosticPath,
+        &diagnosticSummary,
+        &diagnosticError))
+    {
+        AppendLog(QString("手眼标定诊断：%1").arg(diagnosticSummary));
+        AppendLog(QString("手眼标定诊断文件：%1").arg(diagnosticPath));
+    }
+    else
+    {
+        AppendLog(QString("手眼标定诊断文件保存失败：%1").arg(diagnosticError));
+    }
 
     QString reportPath;
     if (!ExportCalibrationReport(matrix, &reportPath, &error))
@@ -1173,11 +1399,17 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
     }
 
     Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
-    if (!EnsureCameraReady("手眼参数检测前检查", &cameraPoint, &error))
+    QString currentCameraError;
+    bool hasCurrentCameraPoint = EnsureCameraReady("手眼参数检测前检查", &cameraPoint, &error);
+    if (!hasCurrentCameraPoint)
     {
-        QMessageBox::warning(this, "手眼标定", error);
-        AppendLog("手眼参数检测失败：" + error);
-        return false;
+        currentCameraError = error;
+        QMessageBox::warning(
+            this,
+            "手眼标定",
+            "当前相机点获取失败，将跳过当前点检测，仅计算每组采样目标点。\n\n原因：" + currentCameraError);
+        AppendLog("手眼参数检测：当前相机点获取失败，已跳过当前点检测：" + currentCameraError);
+        error.clear();
     }
 
     HandEyeMatrixConfig matrix;
@@ -1189,21 +1421,114 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
         return false;
     }
 
-    const T_ROBOT_COORS robotPose = driver->GetCurrentPos();
-    const Eigen::Vector3d laserPoint = RobotCalculation::CalcLaserPointInRobot(robotPose, cameraPoint, matrix);
-    if (!std::isfinite(laserPoint.x()) || !std::isfinite(laserPoint.y()) || !std::isfinite(laserPoint.z()))
+    HandEyeCalibrationConfig checkConfig = m_config;
+    checkConfig.samples.resize(kHandEyeCalibrationSampleCount);
+    bool parseOk = false;
+    QString parseError;
+    for (int index = 0; index < m_sampleWidgets.size() && index < checkConfig.samples.size(); ++index)
     {
-        const QString calcError = "根据当前手眼矩阵计算出的激光位置无效。";
-        QMessageBox::warning(this, "手眼标定", calcError);
-        AppendLog("手眼参数检测失败：" + calcError);
-        return false;
+        HandEyeCalibrationSample& sample = checkConfig.samples[index];
+        sample.robotPose = ReadRobotPoseEditors(m_sampleWidgets[index].robotEdits, &parseOk, &parseError);
+        if (!parseOk)
+        {
+            error = QString("第 %1 组机器人位姿无效：%2").arg(index + 1).arg(parseError);
+            QMessageBox::warning(this, "手眼标定", error);
+            AppendLog("手眼参数检测失败：" + error);
+            return false;
+        }
+
+        sample.cameraPoint = ReadVectorEditors(m_sampleWidgets[index].cameraEdits, &parseOk, &parseError);
+        if (!parseOk)
+        {
+            error = QString("第 %1 组相机点无效：%2").arg(index + 1).arg(parseError);
+            QMessageBox::warning(this, "手眼标定", error);
+            AppendLog("手眼参数检测失败：" + error);
+            return false;
+        }
+    }
+
+    QStringList sampleTargetLines;
+    QStringList sampleTargetLogLines;
+    int validSampleTargetCount = 0;
+    for (int index = 0; index < checkConfig.samples.size(); ++index)
+    {
+        const HandEyeCalibrationSample& sample = checkConfig.samples[index];
+        if (!sample.valid)
+        {
+            sampleTargetLines.push_back(QString("第%1组：未采集，跳过。").arg(index + 1));
+            sampleTargetLogLines.push_back(QString("第%1组：未采集，跳过。").arg(index + 1));
+            continue;
+        }
+
+        const Eigen::Vector3d sampleTarget =
+            RobotCalculation::CalcLaserPointInRobot(sample.robotPose, sample.cameraPoint, matrix);
+        if (!std::isfinite(sampleTarget.x()) ||
+            !std::isfinite(sampleTarget.y()) ||
+            !std::isfinite(sampleTarget.z()))
+        {
+            sampleTargetLines.push_back(QString("第%1组：目标点计算结果无效。").arg(index + 1));
+            sampleTargetLogLines.push_back(QString("第%1组：目标点计算结果无效。").arg(index + 1));
+            continue;
+        }
+
+        ++validSampleTargetCount;
+        sampleTargetLines.push_back(QString("第%1组：X=%2  Y=%3  Z=%4")
+            .arg(index + 1)
+            .arg(sampleTarget.x(), 0, 'f', 3)
+            .arg(sampleTarget.y(), 0, 'f', 3)
+            .arg(sampleTarget.z(), 0, 'f', 3));
+        sampleTargetLogLines.push_back(QString(
+            "第%1组：Robot=(%2, %3, %4, %5, %6, %7) Camera=(%8, %9, %10) Target=(%11, %12, %13)")
+            .arg(index + 1)
+            .arg(sample.robotPose.dX, 0, 'f', 3)
+            .arg(sample.robotPose.dY, 0, 'f', 3)
+            .arg(sample.robotPose.dZ, 0, 'f', 3)
+            .arg(sample.robotPose.dRX, 0, 'f', 3)
+            .arg(sample.robotPose.dRY, 0, 'f', 3)
+            .arg(sample.robotPose.dRZ, 0, 'f', 3)
+            .arg(sample.cameraPoint.x(), 0, 'f', 3)
+            .arg(sample.cameraPoint.y(), 0, 'f', 3)
+            .arg(sample.cameraPoint.z(), 0, 'f', 3)
+            .arg(sampleTarget.x(), 0, 'f', 3)
+            .arg(sampleTarget.y(), 0, 'f', 3)
+            .arg(sampleTarget.z(), 0, 'f', 3));
+    }
+    if (validSampleTargetCount == 0)
+    {
+        sampleTargetLines.push_back("没有可计算的已采集采样组。");
+        sampleTargetLogLines.push_back("没有可计算的已采集采样组。");
+    }
+
+    const T_ROBOT_COORS robotPose = driver->GetCurrentPos();
+    Eigen::Vector3d laserPoint = Eigen::Vector3d::Zero();
+    bool hasLocalLaserPoint = false;
+    QString localLaserText = "当前相机点未获取，已跳过当前点本地矩阵计算。";
+    if (hasCurrentCameraPoint)
+    {
+        laserPoint = RobotCalculation::CalcLaserPointInRobot(robotPose, cameraPoint, matrix);
+        hasLocalLaserPoint =
+            std::isfinite(laserPoint.x()) &&
+            std::isfinite(laserPoint.y()) &&
+            std::isfinite(laserPoint.z());
+        if (hasLocalLaserPoint)
+        {
+            localLaserText = QString("X=%1  Y=%2  Z=%3")
+                .arg(laserPoint.x(), 0, 'f', 3)
+                .arg(laserPoint.y(), 0, 'f', 3)
+                .arg(laserPoint.z(), 0, 'f', 3);
+        }
+        else
+        {
+            localLaserText = "根据当前手眼矩阵计算出的激光位置无效，已跳过当前点 TP 对比和运动。";
+            AppendLog("手眼参数检测：当前点本地矩阵结果无效，已跳过当前点 TP 对比和运动。");
+        }
     }
 
     Eigen::Vector3d robotLaserPoint = Eigen::Vector3d::Zero();
     bool hasRobotResult = false;
     QString robotDetailText = "机器人程序结果：当前驱动不是 FANUC，未执行 TP 对比。";
     FANUCRobotCtrl* fanucDriver = CurrentFanucDriver(nullptr);
-    if (fanucDriver != nullptr)
+    if (fanucDriver != nullptr && hasLocalLaserPoint)
     {
         AppendLog(QString("机器人手眼检测使用机器人侧现有程序：%1；SENSOR 指令由现场 TP 程序提供，不在检测时自动编译上传。")
             .arg(kHandEyeRobotCheckProgramName));
@@ -1289,20 +1614,37 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
             .arg(delta.y(), 0, 'f', 3)
             .arg(delta.z(), 0, 'f', 3);
     }
+    else if (fanucDriver != nullptr)
+    {
+        robotDetailText = "机器人程序结果：当前点检测已跳过，未执行 TP 对比。";
+    }
 
-    AppendLog(QString("手眼参数检测：Robot=(%1, %2, %3, %4, %5, %6) Camera=(%7, %8, %9) LocalLaser=(%10, %11, %12)")
-        .arg(robotPose.dX, 0, 'f', 3)
-        .arg(robotPose.dY, 0, 'f', 3)
-        .arg(robotPose.dZ, 0, 'f', 3)
-        .arg(robotPose.dRX, 0, 'f', 3)
-        .arg(robotPose.dRY, 0, 'f', 3)
-        .arg(robotPose.dRZ, 0, 'f', 3)
-        .arg(cameraPoint.x(), 0, 'f', 3)
-        .arg(cameraPoint.y(), 0, 'f', 3)
-        .arg(cameraPoint.z(), 0, 'f', 3)
-        .arg(laserPoint.x(), 0, 'f', 3)
-        .arg(laserPoint.y(), 0, 'f', 3)
-        .arg(laserPoint.z(), 0, 'f', 3));
+    if (hasLocalLaserPoint)
+    {
+        AppendLog(QString("手眼参数检测：Robot=(%1, %2, %3, %4, %5, %6) Camera=(%7, %8, %9) LocalLaser=(%10, %11, %12)")
+            .arg(robotPose.dX, 0, 'f', 3)
+            .arg(robotPose.dY, 0, 'f', 3)
+            .arg(robotPose.dZ, 0, 'f', 3)
+            .arg(robotPose.dRX, 0, 'f', 3)
+            .arg(robotPose.dRY, 0, 'f', 3)
+            .arg(robotPose.dRZ, 0, 'f', 3)
+            .arg(cameraPoint.x(), 0, 'f', 3)
+            .arg(cameraPoint.y(), 0, 'f', 3)
+            .arg(cameraPoint.z(), 0, 'f', 3)
+            .arg(laserPoint.x(), 0, 'f', 3)
+            .arg(laserPoint.y(), 0, 'f', 3)
+            .arg(laserPoint.z(), 0, 'f', 3));
+    }
+    else
+    {
+        AppendLog(QString("手眼参数检测：当前点检测已跳过。Robot=(%1, %2, %3, %4, %5, %6)")
+            .arg(robotPose.dX, 0, 'f', 3)
+            .arg(robotPose.dY, 0, 'f', 3)
+            .arg(robotPose.dZ, 0, 'f', 3)
+            .arg(robotPose.dRX, 0, 'f', 3)
+            .arg(robotPose.dRY, 0, 'f', 3)
+            .arg(robotPose.dRZ, 0, 'f', 3));
+    }
     if (hasRobotResult)
     {
         AppendLog(QString("机器人程序检测：PR[%1]=(%2, %3, %4)")
@@ -1312,16 +1654,52 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
             .arg(robotLaserPoint.z(), 0, 'f', 3));
     }
 
+    QString diagnosticPath;
+    QString diagnosticSummary;
+    QString diagnosticError;
+    if (SaveHandEyeDiagnosticFile(
+        m_robotName,
+        m_cameraSection,
+        "Test",
+        checkConfig,
+        matrix,
+        &diagnosticPath,
+        &diagnosticSummary,
+        &diagnosticError))
+    {
+        AppendLog(QString("手眼参数检测诊断：%1").arg(diagnosticSummary));
+        AppendLog(QString("手眼参数检测诊断文件：%1").arg(diagnosticPath));
+    }
+    else
+    {
+        AppendLog(QString("手眼参数检测诊断文件保存失败：%1").arg(diagnosticError));
+    }
+
+    AppendLog("手眼参数检测：每组采样目标点计算结果");
+    for (const QString& line : sampleTargetLogLines)
+    {
+        AppendLog(line);
+    }
+
+    const QString cameraPointText = hasCurrentCameraPoint
+        ? QString("X=%1  Y=%2  Z=%3")
+            .arg(cameraPoint.x(), 0, 'f', 3)
+            .arg(cameraPoint.y(), 0, 'f', 3)
+            .arg(cameraPoint.z(), 0, 'f', 3)
+        : QString("获取失败，已跳过当前点检测。\n原因：%1").arg(currentCameraError);
+
     const QString resultText = QString(
         "矩阵文件：%1\n\n"
         "当前位置：\n"
         "X=%2  Y=%3  Z=%4\n"
         "RX=%5  RY=%6  RZ=%7\n\n"
         "相机点：\n"
-        "X=%8  Y=%9  Z=%10\n\n"
+        "%8\n\n"
         "本地矩阵结果：\n"
-        "X=%11  Y=%12  Z=%13\n\n"
-        "%14")
+        "%9\n\n"
+        "每组采样目标点：\n"
+        "%10\n\n"
+        "%11")
         .arg(matrixFilePath)
         .arg(robotPose.dX, 0, 'f', 3)
         .arg(robotPose.dY, 0, 'f', 3)
@@ -1329,16 +1707,13 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
         .arg(robotPose.dRX, 0, 'f', 3)
         .arg(robotPose.dRY, 0, 'f', 3)
         .arg(robotPose.dRZ, 0, 'f', 3)
-        .arg(cameraPoint.x(), 0, 'f', 3)
-        .arg(cameraPoint.y(), 0, 'f', 3)
-        .arg(cameraPoint.z(), 0, 'f', 3)
-        .arg(laserPoint.x(), 0, 'f', 3)
-        .arg(laserPoint.y(), 0, 'f', 3)
-        .arg(laserPoint.z(), 0, 'f', 3)
+        .arg(cameraPointText)
+        .arg(localLaserText)
+        .arg(sampleTargetLines.join("\n"))
         .arg(robotDetailText);
     QMessageBox::information(this, "手眼参数检测", resultText);
 
-    if (fanucDriver != nullptr)
+    if (fanucDriver != nullptr && hasLocalLaserPoint)
     {
         const QString moveQuestion = QString(
             "是否运动到本地矩阵计算的激光点？\n\n"
@@ -1358,7 +1733,8 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
             QMessageBox::Yes | QMessageBox::No,
             QMessageBox::No) == QMessageBox::Yes)
         {
-            if (fanucDriver->CheckDonePassive() == 0)
+            RobotDriverAdaptor::StateSnapshot snapshot;
+            if (fanucDriver->LatestStateSnapshot(snapshot) && snapshot.done == 0)
             {
                 const QString busyMessage = "机器人当前处于运动中，未执行运动到激光点。";
                 QMessageBox::warning(this, "运动到激光点", busyMessage);
@@ -1756,6 +2132,9 @@ bool HandEyeCalibrationDialog::ExportCalibrationReport(const HandEyeMatrixConfig
         .arg(matrix.translation.y(), 0, 'f', 12)
         .arg(matrix.translation.z(), 0, 'f', 12);
 
+    lines << "";
+    lines.append(BuildHandEyeDiagnosticLines(m_config, matrix));
+
     return RobotDataHelper::SaveTextFileLines(reportPath, lines, error);
 }
 
@@ -1988,7 +2367,7 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                     config);
                 if (!moveOk)
                 {
-                    const QString detail = QString::fromLocal8Bit(driver->GetLastRobotError().c_str());
+                    const QString detail = DecodeRobotMessageText(driver->GetLastRobotError());
                     finish(QString("自动标定移动失败：%1。%2")
                         .arg(DescribeAutoCalibrationPoint(target.varIndex))
                         .arg(detail.isEmpty() ? QString() : QString("原因：%1").arg(detail)), true, false);
@@ -2389,6 +2768,8 @@ void HandEyeCalibrationDialog::MarkCleanSnapshot()
 
 void HandEyeCalibrationDialog::AppendLog(const QString& text)
 {
+    qDebug().noquote() << "[HandEyeCalibration]" << text;
+
     if (m_pLogText != nullptr)
     {
         m_pLogText->appendPlainText(text);
