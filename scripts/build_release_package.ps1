@@ -124,34 +124,33 @@ Get-ChildItem -LiteralPath $buildDir -Directory | ForEach-Object {
 $dataSourceDir = Join-Path $repoRoot "Data"
 $dataTargetDir = Join-Path $packageDir "Data"
 New-Item -ItemType Directory -Path $dataTargetDir -Force | Out-Null
-Get-ChildItem -LiteralPath $dataSourceDir -Directory -Force | Where-Object {
-    $_.Name -notlike "*副本*"
-} | ForEach-Object {
-    $sourceRoot = $_.FullName
-    $targetRoot = Join-Path $dataTargetDir $_.Name
-    New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
-
-    Get-ChildItem -LiteralPath $sourceRoot -Recurse -Force | Where-Object {
-        $_.Name -notlike "*副本*"
-    } | ForEach-Object {
-        $relativePath = $_.FullName.Substring($sourceRoot.Length).TrimStart('\')
-        $targetPath = Join-Path $targetRoot $relativePath
-
-        if ($_.PSIsContainer) {
-            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
-        }
-        else {
-            $targetParent = Split-Path -Parent $targetPath
-            New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
-            Copy-Item -LiteralPath $_.FullName -Destination $targetPath -Force
-        }
-    }
+$trackedDataFiles = @()
+try {
+    $trackedDataFiles = & git -C $repoRoot -c core.quotePath=false ls-files -- Data 2>$null
+}
+catch {
+    $trackedDataFiles = @()
 }
 
-Get-ChildItem -LiteralPath $dataSourceDir -File -Force | Where-Object {
-    $_.Name -notlike "*副本*"
-} | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $dataTargetDir $_.Name) -Force
+if ($trackedDataFiles.Count -gt 0) {
+    $trackedDataFiles | Where-Object {
+        $_ -and ($_ -notmatch '副本')
+    } | ForEach-Object {
+        $relativePath = $_ -replace '/', '\'
+        $sourcePath = Join-Path $repoRoot $relativePath
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            return
+        }
+
+        $targetPath = Join-Path $packageDir $relativePath
+        $targetParent = Split-Path -Parent $targetPath
+        New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+        Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Force
+    }
+}
+else {
+    Write-Warning "git tracked file list was unavailable. Falling back to copying Data recursively."
+    Copy-DirectoryContent -SourceDir $dataSourceDir -TargetDir $dataTargetDir
 }
 
 Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "icons") -TargetDir (Join-Path $packageDir "icons")

@@ -4,6 +4,7 @@
 #include "WindowStyleHelper.h"
 
 #include <QCloseEvent>
+#include <QDoubleValidator>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -21,6 +22,20 @@ namespace
 QString FormatDoubleValue(double value)
 {
     return QString::number(value, 'f', 12);
+}
+
+void ApplyNumericEdit(QLineEdit* edit)
+{
+    if (edit == nullptr)
+    {
+        return;
+    }
+    QDoubleValidator* validator = new QDoubleValidator(-1.0e12, 1.0e12, 12, edit);
+    validator->setNotation(QDoubleValidator::StandardNotation);
+    edit->setValidator(validator);
+    edit->setProperty("touchKeyboardLayout", QStringLiteral("numeric"));
+    edit->setInputMethodHints(Qt::ImhFormattedNumbersOnly);
+    edit->setAlignment(Qt::AlignRight);
 }
 }
 
@@ -66,6 +81,7 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(const QString& robotName, const QString
         {
             QLabel* label = new QLabel(QString("R%1%2").arg(row).arg(col));
             QLineEdit* edit = new QLineEdit();
+            ApplyNumericEdit(edit);
             rotationLayout->addWidget(label, row, col * 2);
             rotationLayout->addWidget(edit, row, col * 2 + 1);
             m_rotationEdits.push_back(edit);
@@ -81,6 +97,7 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(const QString& robotName, const QString
     {
         QLabel* label = new QLabel(QString("T%1").arg(index));
         QLineEdit* edit = new QLineEdit();
+        ApplyNumericEdit(edit);
         translationLayout->addWidget(label, 0, index * 2);
         translationLayout->addWidget(edit, 0, index * 2 + 1);
         m_translationEdits.push_back(edit);

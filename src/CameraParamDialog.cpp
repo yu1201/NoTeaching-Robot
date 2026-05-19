@@ -1,5 +1,6 @@
 #include "CameraParamDialog.h"
 
+#include "CameraBasicParamDialog.h"
 #include "HandEyeCalibrationDialog.h"
 #include "HandEyeMatrixConfig.h"
 #include "HandEyeMatrixDialog.h"
@@ -8,14 +9,11 @@
 #include "WindowStyleHelper.h"
 
 #include <QComboBox>
-#include <QCloseEvent>
 #include <QDir>
 #include <QFileInfo>
-#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -144,31 +142,18 @@ CameraParamDialog::CameraParamDialog(
     leftLayout->addWidget(handEyeGroup);
 
     QGroupBox* cameraGroup = new QGroupBox("测量相机基础参数");
-    cameraGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
-    QGridLayout* cameraLayout = new QGridLayout(cameraGroup);
-    cameraLayout->setHorizontalSpacing(10);
-    cameraLayout->setVerticalSpacing(10);
+    cameraGroup->setMaximumHeight(170);
+    cameraGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    QVBoxLayout* cameraLayout = new QVBoxLayout(cameraGroup);
     m_pCameraSectionLabel = new QLabel("当前分组：CAMERA0");
-    cameraLayout->addWidget(m_pCameraSectionLabel, 0, 0, 1, 4);
-    cameraLayout->addWidget(new QLabel("设备IP"), 1, 0);
-    m_pDeviceAddressEdit = new QLineEdit();
-    cameraLayout->addWidget(m_pDeviceAddressEdit, 1, 1);
-    cameraLayout->addWidget(new QLabel("端口"), 1, 2);
-    m_pDevicePortEdit = new QLineEdit();
-    cameraLayout->addWidget(m_pDevicePortEdit, 1, 3);
-    cameraLayout->addWidget(new QLabel("曝光"), 2, 0);
-    m_pExposureTimeEdit = new QLineEdit();
-    cameraLayout->addWidget(m_pExposureTimeEdit, 2, 1);
-    cameraLayout->addWidget(new QLabel("增益"), 2, 2);
-    m_pGainLevelEdit = new QLineEdit();
-    cameraLayout->addWidget(m_pGainLevelEdit, 2, 3);
-    cameraLayout->addWidget(new QLabel("相机类型"), 3, 0);
-    m_pCameraTypeEdit = new QLineEdit();
-    cameraLayout->addWidget(m_pCameraTypeEdit, 3, 1);
-    QPushButton* reloadBtn = new QPushButton("重新读取相机参数");
-    QPushButton* saveBtn = new QPushButton("保存相机参数");
-    cameraLayout->addWidget(reloadBtn, 4, 2);
-    cameraLayout->addWidget(saveBtn, 4, 3);
+    cameraLayout->addWidget(m_pCameraSectionLabel);
+    QLabel* cameraTip = new QLabel("相机 IP、端口、曝光、增益和相机类型现在在独立弹窗中维护，便于相机参数页和新建引导复用。");
+    cameraTip->setWordWrap(true);
+    cameraTip->setStyleSheet("QLabel { color: #8EB7BF; }");
+    cameraLayout->addWidget(cameraTip);
+    QPushButton* openCameraBasicBtn = new QPushButton("打开相机基础参数");
+    openCameraBasicBtn->setMinimumHeight(46);
+    cameraLayout->addWidget(openCameraBasicBtn);
     leftLayout->addWidget(cameraGroup);
 
     m_pLogText = new QPlainTextEdit();
@@ -197,31 +182,12 @@ CameraParamDialog::CameraParamDialog(
     rootLayout->addWidget(contentSplitter, 1);
 
     connect(m_pCameraCombo, &QComboBox::currentIndexChanged, this, [this]() { UpdateCurrentCameraInfo(); });
+    connect(openCameraBasicBtn, &QPushButton::clicked, this, [this]() { OpenCameraBasicParamDialog(); });
     connect(handEyeBtn, &QPushButton::clicked, this, [this]() { OpenHandEyeDialog(); });
     connect(handEyeCalibrationBtn, &QPushButton::clicked, this, [this]() { OpenHandEyeCalibrationDialog(); });
-    connect(reloadBtn, &QPushButton::clicked, this, [this]() { LoadCameraParam(); });
-    connect(saveBtn, &QPushButton::clicked, this, [this]() { SaveCameraParam(); });
 
     LoadCameraList();
     UpdateCurrentCameraInfo();
-}
-
-void CameraParamDialog::closeEvent(QCloseEvent* event)
-{
-    if (!HasUnsavedChanges())
-    {
-        QDialog::closeEvent(event);
-        return;
-    }
-
-    if (ConfirmCloseWithUnsavedChanges(this, "相机参数", [this]() { return SaveCameraParam(); }))
-    {
-        event->accept();
-    }
-    else
-    {
-        event->ignore();
-    }
 }
 
 void CameraParamDialog::LoadCameraList()
@@ -257,8 +223,26 @@ void CameraParamDialog::UpdateCurrentCameraInfo()
 
     m_pPathLabel->setText(QString("手眼参数文件：%1").arg(filePath));
     m_pCameraPathLabel->setText(QString("相机参数文件：%1").arg(RobotDataHelper::CameraParamPath(robotName)));
+    if (m_pCameraSectionLabel != nullptr)
+    {
+        m_pCameraSectionLabel->setText(QString("当前分组：%1").arg(CurrentCameraSection()));
+    }
     AppendLog(QString("当前机器人：%1，当前相机：%2").arg(robotName, CurrentCameraSection()));
-    LoadCameraParam();
+}
+
+void CameraParamDialog::OpenCameraBasicParamDialog()
+{
+    CameraBasicParamDialog dialog(
+        CurrentRobotName(),
+        CurrentCameraSection(),
+        m_setupStatusChanged,
+        this);
+    dialog.exec();
+    if (dialog.SavedThisSession())
+    {
+        AppendLog("相机基础参数已保存。");
+    }
+    UpdateCurrentCameraInfo();
 }
 
 void CameraParamDialog::OpenHandEyeDialog()
@@ -324,91 +308,6 @@ QString CameraParamDialog::CurrentCameraSection() const
     return m_pCameraCombo != nullptr && m_pCameraCombo->currentIndex() >= 0
         ? m_pCameraCombo->currentData().toString()
         : QString("CAMERA0");
-}
-
-QString CameraParamDialog::CurrentCameraIniPath() const
-{
-    return RobotDataHelper::CameraParamPath(CurrentRobotName());
-}
-
-bool CameraParamDialog::LoadCameraParam()
-{
-    RobotDataHelper::CameraParamData param;
-    QString error;
-    if (!RobotDataHelper::LoadCameraParam(CurrentRobotName(), CurrentCameraSection(), param, &error))
-    {
-        AppendLog(error);
-        return false;
-    }
-
-    m_pDeviceAddressEdit->setText(param.deviceAddress);
-    m_pDevicePortEdit->setText(param.devicePort);
-    m_pExposureTimeEdit->setText(param.exposureTime);
-    m_pGainLevelEdit->setText(param.gainLevel);
-    m_pCameraTypeEdit->setText(param.cameraType);
-
-    m_pCameraSectionLabel->setText(QString("当前分组：%1").arg(param.sectionName));
-    AppendLog(QString("已读取相机参数：%1 [%2]").arg(CurrentCameraIniPath(), param.sectionName));
-    MarkCleanSnapshot();
-    return true;
-}
-
-bool CameraParamDialog::SaveCameraParam()
-{
-    RobotDataHelper::CameraParamData param;
-    param.sectionName = CurrentCameraSection();
-    param.deviceAddress = m_pDeviceAddressEdit->text().trimmed();
-    param.devicePort = m_pDevicePortEdit->text().trimmed();
-    param.exposureTime = m_pExposureTimeEdit->text().trimmed();
-    param.gainLevel = m_pGainLevelEdit->text().trimmed();
-    param.cameraType = m_pCameraTypeEdit->text().trimmed();
-
-    QString error;
-    if (!RobotDataHelper::SaveCameraParam(CurrentRobotName(), param, &error))
-    {
-        AppendLog(error);
-        return false;
-    }
-
-    AppendLog(QString("相机参数已保存：%1 [%2]").arg(CurrentCameraIniPath(), param.sectionName));
-    QString setupError;
-    if (WriteRobotSetupReadyFlag(CurrentRobotName(), "CameraParamReady", &setupError))
-    {
-        AppendLog("相机参数设置已完成，相关相机功能入口已允许启用。");
-        if (m_setupStatusChanged)
-        {
-            m_setupStatusChanged();
-        }
-    }
-    else
-    {
-        AppendLog(setupError);
-    }
-    MarkCleanSnapshot();
-    return true;
-}
-
-bool CameraParamDialog::HasUnsavedChanges() const
-{
-    return BuildSnapshot() != m_cleanSnapshot;
-}
-
-QString CameraParamDialog::BuildSnapshot() const
-{
-    return QStringList{
-        CurrentRobotName(),
-        CurrentCameraSection(),
-        m_pDeviceAddressEdit != nullptr ? m_pDeviceAddressEdit->text().trimmed() : QString(),
-        m_pDevicePortEdit != nullptr ? m_pDevicePortEdit->text().trimmed() : QString(),
-        m_pExposureTimeEdit != nullptr ? m_pExposureTimeEdit->text().trimmed() : QString(),
-        m_pGainLevelEdit != nullptr ? m_pGainLevelEdit->text().trimmed() : QString(),
-        m_pCameraTypeEdit != nullptr ? m_pCameraTypeEdit->text().trimmed() : QString()
-    }.join('\n');
-}
-
-void CameraParamDialog::MarkCleanSnapshot()
-{
-    m_cleanSnapshot = BuildSnapshot();
 }
 
 void CameraParamDialog::AppendLog(const QString& text)

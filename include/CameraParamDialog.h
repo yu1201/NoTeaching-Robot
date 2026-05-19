@@ -7,10 +7,8 @@
 #include <functional>
 
 class QComboBox;
-class QCloseEvent;
 class CameraFrameCache;
 class QLabel;
-class QLineEdit;
 class QPlainTextEdit;
 class QWidget;
 
@@ -31,19 +29,13 @@ public:
         QWidget* parent = nullptr);
 
 private:
-    void closeEvent(QCloseEvent* event) override;
     void LoadCameraList();
     void UpdateCurrentCameraInfo();
+    void OpenCameraBasicParamDialog();
     void OpenHandEyeDialog();
     void OpenHandEyeCalibrationDialog();
     QString CurrentRobotName() const;
     QString CurrentCameraSection() const;
-    QString CurrentCameraIniPath() const;
-    bool LoadCameraParam();
-    bool SaveCameraParam();
-    bool HasUnsavedChanges() const;
-    QString BuildSnapshot() const;
-    void MarkCleanSnapshot();
     void AppendLog(const QString& text);
 
     ContralUnit* m_pContralUnit = nullptr;
@@ -57,11 +49,5 @@ private:
     QLabel* m_pCameraPathLabel = nullptr;
     QLabel* m_pImagePlaceholder = nullptr;
     QLabel* m_pCameraSectionLabel = nullptr;
-    QLineEdit* m_pDeviceAddressEdit = nullptr;
-    QLineEdit* m_pDevicePortEdit = nullptr;
-    QLineEdit* m_pExposureTimeEdit = nullptr;
-    QLineEdit* m_pGainLevelEdit = nullptr;
-    QLineEdit* m_pCameraTypeEdit = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
-    QString m_cleanSnapshot;
 };

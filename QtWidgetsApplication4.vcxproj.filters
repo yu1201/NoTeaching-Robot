@@ -53,6 +53,9 @@
     <ClCompile Include="src\CameraFrameCache.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\CameraBasicParamDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
@@ -142,6 +145,9 @@
     <ClCompile Include="src\RobotJogDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\TouchKeyboardManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\WindowStyleHelper.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -160,6 +166,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\CameraFrameCache.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\CameraBasicParamDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\CameraParamDialog.h">
@@ -229,6 +238,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotJogDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\TouchKeyboardManager.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WindowStyleHelper.h">

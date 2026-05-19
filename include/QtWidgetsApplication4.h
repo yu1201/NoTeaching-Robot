@@ -35,6 +35,7 @@ class QThread;
 class QTimer;
 class RobotDriverAdaptor;
 class RobotJogDialog;
+class TouchKeyboardManager;
 class WeldProcessDialog;
 class WeldSeamCompDialog;
 class QAction;
@@ -82,6 +83,7 @@ private slots:
 
 private:
     void ShowDashboardPage();
+    void ShowCurrentUserMenu();
     void ShowManagementPage();
     void ShowManagementHomePage();
     void ShowEmbeddedPage(QWidget* page);
@@ -134,6 +136,7 @@ private:
     void SaveCameraReceiveMode() const;
     void RefreshCameraReceiveModeButtonUi();
     void SetSharedScanCameraReceiverMode(bool enabled);
+    void RefreshTouchKeyboardModeUi();
     bool LoadGrooveCameraIP(QString& cameraIP) const;
     bool LoadGrooveCameraIPForUnit(int unitIndex, QString& cameraIP) const;
     bool LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort) const;
@@ -181,10 +184,11 @@ private:
     int m_nMeasureThenWeldPageUnitIndex;
     int m_nRobotJogPageUnitIndex;
     QPlainTextEdit* m_pRobotLogText;
-    QLabel* m_pCurrentUserLabel;
+    QPushButton* m_pCurrentUserButton;
     QLabel* m_pManagementUserLabel;
     QLabel* m_pPermissionHintLabel;
     QPushButton* m_pManagementCameraReceiveModeBtn;
+    QComboBox* m_pTouchKeyboardModeCombo;
     QLabel* m_pAuthTitleLabel;
     QLabel* m_pAuthHintLabel;
     QComboBox* m_pLoginNameCombo;
@@ -217,6 +221,7 @@ private:
     CameraParamDialog* m_pCameraParamPage;
     QString m_sCameraParamPageRobotName;
     RobotJogDialog* m_pRobotJogPage;
+    TouchKeyboardManager* m_pTouchKeyboardManager;
     QHash<int, CameraRuntime*> m_scanCameraRuntimes;
     QHash<int, CameraRuntime*> m_scanCameraReceiversByPort;
     QHash<QString, int> m_scanCameraUnitByIP;

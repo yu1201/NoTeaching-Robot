@@ -68,6 +68,41 @@ QPoint ResolveCenteredPosition(const QRect& available, const QRect& frame)
     return QPoint((std::max)(available.left(), centeredX), (std::max)(available.top(), centeredY));
 }
 
+void ApplyWindowsTitleBarTheme(QWidget* widget)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+
+#ifdef Q_OS_WIN
+    using DwmSetWindowAttributeProc = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+    HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");
+    if (dwmapi == nullptr)
+    {
+        return;
+    }
+
+    auto setAttribute = reinterpret_cast<DwmSetWindowAttributeProc>(GetProcAddress(dwmapi, "DwmSetWindowAttribute"));
+    if (setAttribute != nullptr)
+    {
+        HWND hwnd = reinterpret_cast<HWND>(widget->winId());
+        const BOOL darkMode = TRUE;
+        setAttribute(hwnd, 20, &darkMode, sizeof(darkMode));
+        setAttribute(hwnd, 19, &darkMode, sizeof(darkMode));
+
+        const COLORREF captionColor = RGB(6, 14, 22);
+        const COLORREF textColor = RGB(236, 243, 244);
+        const COLORREF borderColor = RGB(36, 62, 76);
+        setAttribute(hwnd, 35, &captionColor, sizeof(captionColor));
+        setAttribute(hwnd, 36, &textColor, sizeof(textColor));
+        setAttribute(hwnd, 34, &borderColor, sizeof(borderColor));
+    }
+
+    FreeLibrary(dwmapi);
+#endif
+}
+
 int ClampedControlWidth(int value, int minimum, int maximum)
 {
     return (std::min)((std::max)(value, minimum), maximum);
@@ -351,7 +386,6 @@ void ApplyUnifiedWindowChrome(QWidget* widget)
     {
         widget->setMinimumSize(0, 0);
         widget->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-        widget->setWindowState(widget->windowState() | Qt::WindowMaximized);
     }
 
     if (QDialog* dialog = qobject_cast<QDialog*>(widget))
@@ -365,33 +399,18 @@ void ApplyUnifiedWindowChrome(QWidget* widget)
     QTimer::singleShot(0, widget, [widget]() { ClampWindowToAvailableGeometry(widget); });
 
     widget->setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
+    RefreshUnifiedWindowTitleBar(widget);
+}
 
-#ifdef Q_OS_WIN
-    using DwmSetWindowAttributeProc = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
-    HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");
-    if (dwmapi == nullptr)
+void RefreshUnifiedWindowTitleBar(QWidget* widget)
+{
+    if (widget == nullptr)
     {
         return;
     }
 
-    auto setAttribute = reinterpret_cast<DwmSetWindowAttributeProc>(GetProcAddress(dwmapi, "DwmSetWindowAttribute"));
-    if (setAttribute != nullptr)
-    {
-        HWND hwnd = reinterpret_cast<HWND>(widget->winId());
-        const BOOL darkMode = TRUE;
-        setAttribute(hwnd, 20, &darkMode, sizeof(darkMode));
-        setAttribute(hwnd, 19, &darkMode, sizeof(darkMode));
-
-        const COLORREF captionColor = RGB(6, 14, 22);
-        const COLORREF textColor = RGB(236, 243, 244);
-        const COLORREF borderColor = RGB(36, 62, 76);
-        setAttribute(hwnd, 35, &captionColor, sizeof(captionColor));
-        setAttribute(hwnd, 36, &textColor, sizeof(textColor));
-        setAttribute(hwnd, 34, &borderColor, sizeof(borderColor));
-    }
-
-    FreeLibrary(dwmapi);
-#endif
+    widget->setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
+    ApplyWindowsTitleBarTheme(widget);
 }
 
 QString UnifiedComboBoxStyleSheet()

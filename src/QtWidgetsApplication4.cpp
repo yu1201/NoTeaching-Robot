@@ -3,8 +3,10 @@
 #include "CameraFrameCache.h"
 #include "FTPClient.h"
 #include "FANUCRobotDriver.h"
+#include "CameraBasicParamDialog.h"
 #include "CameraParamDialog.h"
 #include "FunctionTestDialog.h"
+#include "HandEyeCalibrationDialog.h"
 #include "MeasureThenWeldDialog.h"
 #include "MeasureThenWeldService.h"
 #include "OPini.h"
@@ -14,18 +16,21 @@
 #include "RobotJogDialog.h"
 #include "RobotMessage.h"
 #include "STEPRobotDriver.h"
+#include "TouchKeyboardManager.h"
 #include "WindowStyleHelper.h"
 #include "WeldPoseAverageUpdater.h"
 #include "WeldProcessDialog.h"
 #include "WeldSeamCompDialog.h"
 #include "groove/clientudpformsensorworker.h"
 #include "groove/framebuffer.h"
+#include <QApplication>
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDialog>
 #include <QDir>
+#include <QDoubleValidator>
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -35,9 +40,11 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHostAddress>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QIntValidator>
 #include <QAction>
 #include <QCheckBox>
 #include <QFrame>
@@ -108,9 +115,209 @@ namespace
 		return text.toLocal8Bit().toStdString();
 	}
 
+	void MarkNumericEditGlobal(QLineEdit* edit)
+	{
+		if (edit == nullptr)
+		{
+			return;
+		}
+		edit->setProperty("touchKeyboardLayout", QStringLiteral("numeric"));
+		edit->setInputMethodHints(Qt::ImhFormattedNumbersOnly);
+	}
+
+	class IpAddressEdit final : public QWidget
+	{
+	public:
+		explicit IpAddressEdit(QWidget* parent = nullptr)
+			: QWidget(parent)
+		{
+			QHBoxLayout* layout = new QHBoxLayout(this);
+			layout->setContentsMargins(0, 0, 0, 0);
+			layout->setSpacing(3);
+			for (int index = 0; index < 4; ++index)
+			{
+				QLineEdit* partEdit = new QLineEdit(this);
+				partEdit->setFixedSize(48, 36);
+				partEdit->setMaxLength(3);
+				partEdit->setAlignment(Qt::AlignCenter);
+				partEdit->setStyleSheet(
+					"QLineEdit { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; "
+					"border-radius: 0px; padding: 4px 3px; }"
+					"QLineEdit:focus { border-color: #72D4DD; }");
+				partEdit->setValidator(new QIntValidator(0, 255, partEdit));
+				partEdit->installEventFilter(this);
+				MarkNumericEditGlobal(partEdit);
+				connect(partEdit, &QLineEdit::textEdited, this, [this, index](const QString& text)
+					{
+						if (text.size() >= 3 && m_partEdits.value(index)->hasAcceptableInput())
+						{
+							FocusPart(index + 1);
+						}
+					});
+				m_partEdits.push_back(partEdit);
+				layout->addWidget(partEdit);
+				if (index < 3)
+				{
+					QLabel* dotLabel = new QLabel(".", this);
+					dotLabel->setFixedWidth(6);
+					dotLabel->setAlignment(Qt::AlignCenter);
+					dotLabel->setStyleSheet("QLabel { color: #CFEFF5; }");
+					layout->addWidget(dotLabel);
+				}
+			}
+			setFixedWidth(228);
+			setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+		}
+
+		QString text() const
+		{
+			bool hasAnyPart = false;
+			QStringList parts;
+			for (const QLineEdit* partEdit : m_partEdits)
+			{
+				const QString part = partEdit != nullptr ? partEdit->text().trimmed() : QString();
+				hasAnyPart = hasAnyPart || !part.isEmpty();
+				parts.push_back(part);
+			}
+			return hasAnyPart ? parts.join(".") : QString();
+		}
+
+		void setText(const QString& ip)
+		{
+			const QStringList parts = ip.trimmed().split('.', Qt::KeepEmptyParts);
+			for (int index = 0; index < m_partEdits.size(); ++index)
+			{
+				m_partEdits[index]->setText(index < parts.size() ? parts.at(index).trimmed().left(3) : QString());
+			}
+		}
+
+		bool isEmpty() const
+		{
+			for (const QLineEdit* partEdit : m_partEdits)
+			{
+				if (partEdit != nullptr && !partEdit->text().trimmed().isEmpty())
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		bool isComplete() const
+		{
+			for (const QLineEdit* partEdit : m_partEdits)
+			{
+				if (partEdit == nullptr || partEdit->text().trimmed().isEmpty() || !partEdit->hasAcceptableInput())
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+
+		QList<QLineEdit*> partEdits() const
+		{
+			return m_partEdits;
+		}
+
+	protected:
+		bool eventFilter(QObject* watched, QEvent* event) override
+		{
+			if (event->type() != QEvent::KeyPress)
+			{
+				return QWidget::eventFilter(watched, event);
+			}
+			QKeyEvent* keyEvent = static_cast<QKeyEvent*>(event);
+			const int index = m_partEdits.indexOf(qobject_cast<QLineEdit*>(watched));
+			if (index < 0)
+			{
+				return QWidget::eventFilter(watched, event);
+			}
+			if (keyEvent->key() == Qt::Key_Period || keyEvent->key() == Qt::Key_Comma)
+			{
+				FocusPart(index + 1);
+				return true;
+			}
+			if (keyEvent->key() == Qt::Key_Backspace && m_partEdits[index]->text().isEmpty())
+			{
+				FocusPart(index - 1);
+				return true;
+			}
+			return QWidget::eventFilter(watched, event);
+		}
+
+	private:
+		void FocusPart(int index)
+		{
+			if (index < 0 || index >= m_partEdits.size() || m_partEdits[index] == nullptr)
+			{
+				return;
+			}
+			m_partEdits[index]->setFocus();
+			m_partEdits[index]->selectAll();
+		}
+
+		QList<QLineEdit*> m_partEdits;
+	};
+
+	void ConnectIpAddressEdited(IpAddressEdit* ipEdit, QObject* context, const std::function<void()>& callback)
+	{
+		if (ipEdit == nullptr || context == nullptr)
+		{
+			return;
+		}
+		for (QLineEdit* partEdit : ipEdit->partEdits())
+		{
+			QObject::connect(partEdit, &QLineEdit::textEdited, context, [callback](const QString&)
+				{
+					callback();
+				});
+		}
+	}
+
+	void SetFormRowVisible(QFormLayout* form, QWidget* fieldWidget, bool visible)
+	{
+		if (fieldWidget == nullptr)
+		{
+			return;
+		}
+		if (form != nullptr)
+		{
+			if (QWidget* label = form->labelForField(fieldWidget))
+			{
+				label->setVisible(visible);
+			}
+		}
+		fieldWidget->setVisible(visible);
+	}
+
 	QString RobotParaPathForSetup(const QString& robotName)
 	{
 		return RobotDataHelper::BuildProjectPath(QString("Data/%1/RobotPara.ini").arg(robotName));
+	}
+
+	bool WriteRobotSetupReadyFlagGlobal(const QString& robotName, const QString& key, QString* error = nullptr)
+	{
+		COPini ini;
+		const QString path = RobotParaPathForSetup(robotName);
+		if (!ini.SetFileName(false, ToIniBytesGlobal(path)))
+		{
+			if (error != nullptr)
+			{
+				*error = QString("打开机器人参数文件失败：%1").arg(path);
+			}
+			return false;
+		}
+		ini.SetSectionName("SetupStatus");
+		if (!ini.WriteString(ToIniBytesGlobal(key), 1))
+		{
+			if (error != nullptr)
+			{
+				*error = QString("写入设置完成状态失败：%1 [%2]").arg(path, key);
+			}
+			return false;
+		}
+		return true;
 	}
 
 	QString ReadIniStringGlobal(COPini& ini, const QString& key, const QString& fallback = QString())
@@ -258,6 +465,19 @@ namespace
 		QRect frame = window->frameGeometry();
 		frame.moveCenter(screen->availableGeometry().center());
 		window->move(frame.topLeft());
+	}
+
+	void ShowMaximizedWithUnifiedChrome(QWidget* window)
+	{
+		if (window == nullptr)
+		{
+			return;
+		}
+
+		window->showMaximized();
+		RefreshUnifiedWindowTitleBar(window);
+		QTimer::singleShot(0, window, [window]() { RefreshUnifiedWindowTitleBar(window); });
+		QTimer::singleShot(120, window, [window]() { RefreshUnifiedWindowTitleBar(window); });
 	}
 
 	QPushButton* EmbeddedBackButton(QWidget* page)
@@ -792,6 +1012,8 @@ namespace
 				"QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
 				"QPushButton:pressed { background: #18303B; }"
 				"QLineEdit, QPlainTextEdit, QTableWidget { background: #081018; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 8px; padding: 6px 8px; }"
+				"QTableWidget::item:selected { background: #8BE8F2; color: #071018; }"
+				"QTableWidget::item:selected:!active { background: #6FCFDC; color: #071018; }"
 				"QComboBox { background: #000000; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 0px; padding: 6px 34px 6px 8px; }"
 				"QComboBox::drop-down { border-left: 1px solid #2C4653; border-radius: 0px; width: 28px; background: #000000; }"
 				"QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
@@ -1124,9 +1346,18 @@ namespace
 	class ControlUnitManagementDialog final : public QDialog
 	{
 	public:
-		explicit ControlUnitManagementDialog(std::function<void()> reloadCallback, QWidget* parent = nullptr)
+		using OpenCameraBasicParamFunc = std::function<bool(const QString&, const QString&)>;
+		using OpenHandEyeCalibrationFunc = std::function<bool(const QString&, const QString&)>;
+
+		explicit ControlUnitManagementDialog(
+			std::function<void()> reloadCallback,
+			OpenCameraBasicParamFunc openCameraBasicParam,
+			OpenHandEyeCalibrationFunc openHandEyeCalibration,
+			QWidget* parent = nullptr)
 			: QDialog(parent)
 			, m_reloadCallback(std::move(reloadCallback))
+			, m_openCameraBasicParam(std::move(openCameraBasicParam))
+			, m_openHandEyeCalibration(std::move(openHandEyeCalibration))
 		{
 			setWindowTitle("机器人控制单元管理");
 			ApplyUnifiedWindowChrome(this);
@@ -1139,6 +1370,8 @@ namespace
 				"QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
 				"QPushButton:pressed { background: #18303B; }"
 				"QLineEdit, QPlainTextEdit, QTableWidget { background: #081018; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 8px; padding: 6px 8px; }"
+				"QTableWidget::item:selected { background: #8BE8F2; color: #071018; }"
+				"QTableWidget::item:selected:!active { background: #6FCFDC; color: #071018; }"
 				"QLineEdit[readOnly=\"true\"] { color: #91A7AE; background: #0A121A; }"
 				"QComboBox { background: #000000; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 0px; padding: 6px 34px 6px 8px; }"
 				"QComboBox::drop-down { border-left: 1px solid #2C4653; border-radius: 0px; width: 28px; background: #000000; }"
@@ -1194,6 +1427,7 @@ namespace
 			QFormLayout* form = new QFormLayout();
 			form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
 			form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+			m_editorForm = form;
 
 			m_unitNameEdit = new QLineEdit(editGroup);
 			m_chineseNameEdit = new QLineEdit(editGroup);
@@ -1207,16 +1441,18 @@ namespace
 			m_robotTypeCombo->addItem("FANUC", ROBOT_TYPE_FANUC);
 			m_robotTypeCombo->addItem("STEP", ROBOT_TYPE_STEP);
 			m_unitTypeEdit = new QLineEdit(editGroup);
-			m_socketIpEdit = new QLineEdit(editGroup);
+			m_socketIpEdit = new IpAddressEdit(editGroup);
 			m_socketPortEdit = new QLineEdit(editGroup);
 			m_monitorPortEdit = new QLineEdit(editGroup);
-			m_ftpIpEdit = new QLineEdit(editGroup);
+			m_ftpIpEdit = new IpAddressEdit(editGroup);
 			m_ftpPortEdit = new QLineEdit(editGroup);
 			m_ftpUserEdit = new QLineEdit(editGroup);
 			m_ftpPasswordEdit = new QLineEdit(editGroup);
 			m_stepProjectEdit = new QLineEdit(editGroup);
 
-			for (QLineEdit* edit : { m_unitNameEdit, m_chineseNameEdit, m_customNameEdit, m_socketIpEdit, m_ftpIpEdit, m_ftpUserEdit, m_ftpPasswordEdit, m_stepProjectEdit })
+			m_socketIpEdit->setFixedWidth(228);
+			m_ftpIpEdit->setFixedWidth(228);
+			for (QLineEdit* edit : { m_unitNameEdit, m_chineseNameEdit, m_customNameEdit, m_ftpUserEdit, m_ftpPasswordEdit, m_stepProjectEdit })
 			{
 				edit->setFixedWidth(260);
 			}
@@ -1224,7 +1460,12 @@ namespace
 			{
 				edit->setFixedWidth(120);
 				edit->setAlignment(Qt::AlignRight);
+				MarkNumericEditGlobal(edit);
 			}
+			m_unitTypeEdit->setValidator(new QIntValidator(0, 9999, m_unitTypeEdit));
+			m_socketPortEdit->setValidator(new QIntValidator(0, 65535, m_socketPortEdit));
+			m_monitorPortEdit->setValidator(new QIntValidator(0, 65535, m_monitorPortEdit));
+			m_ftpPortEdit->setValidator(new QIntValidator(0, 65535, m_ftpPortEdit));
 			m_robotTypeCombo->setFixedWidth(160);
 			m_workpieceTypeCombo->setFixedWidth(160);
 
@@ -1280,6 +1521,20 @@ namespace
 			connect(saveReloadBtn, &QPushButton::clicked, this, [this]() { SaveCurrent(true); });
 			connect(reloadBtn, &QPushButton::clicked, this, [this]() { ReloadControlUnits(); });
 			connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
+			ConnectIpAddressEdited(m_socketIpEdit, this, [this]()
+				{
+					SyncEditorFtpIpWithSocketIp();
+				});
+			connect(m_robotTypeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]()
+				{
+					ApplyFtpCredentialForRobotType(
+						m_robotTypeCombo->currentData().toInt(),
+						m_ftpUserEdit,
+						m_ftpPasswordEdit,
+						true);
+					ApplyEditorRobotTypeUi();
+					SyncEditorFtpIpWithSocketIp();
+				});
 
 			LoadUnits(false);
 		}
@@ -1306,6 +1561,12 @@ namespace
 			QString workpieceType = kWorkpieceCorrugatedPlate;
 			bool cameraParamReady = true;
 			bool handEyeReady = true;
+		};
+
+		struct FtpCredential
+		{
+			QString user;
+			QString password;
 		};
 
 		static QString ControlInfoPath()
@@ -1341,6 +1602,40 @@ namespace
 				return value;
 			}
 			return fallback;
+		}
+
+		static FtpCredential DefaultFtpCredentialForRobotType(int robotType)
+		{
+			const QString templateRobot = robotType == ROBOT_TYPE_STEP ? "RobotB" : "RobotA";
+			FtpCredential credential;
+			credential.user = robotType == ROBOT_TYPE_STEP ? "root" : "anonymous";
+			credential.password = robotType == ROBOT_TYPE_STEP ? "STEP_ROBOT_SRH" : QString();
+
+			COPini robotIni;
+			if (robotIni.SetFileName(ToIniBytes(RobotParaPath(templateRobot))))
+			{
+				robotIni.SetSectionName("BaseParam");
+				credential.user = ReadIniString(robotIni, "FTPUser", credential.user);
+				credential.password = ReadIniString(robotIni, "FTPPassWord", credential.password);
+			}
+			return credential;
+		}
+
+		static void ApplyFtpCredentialForRobotType(
+			int robotType,
+			QLineEdit* userEdit,
+			QLineEdit* passwordEdit,
+			bool forceOverwrite)
+		{
+			const FtpCredential credential = DefaultFtpCredentialForRobotType(robotType);
+			if (userEdit != nullptr && (forceOverwrite || userEdit->text().trimmed().isEmpty()))
+			{
+				userEdit->setText(credential.user);
+			}
+			if (passwordEdit != nullptr && (forceOverwrite || passwordEdit->text().isEmpty()))
+			{
+				passwordEdit->setText(credential.password);
+			}
 		}
 
 		static bool WriteIniString(COPini& ini, const QString& key, const QString& value)
@@ -1580,11 +1875,36 @@ namespace
 			m_socketIpEdit->setText(unit.socketIP);
 			m_socketPortEdit->setText(QString::number(unit.socketPort));
 			m_monitorPortEdit->setText(unit.monitorPort > 0 ? QString::number(unit.monitorPort) : QString());
-			m_ftpIpEdit->setText(unit.ftpIP);
+			m_ftpIpEdit->setText(unit.ftpIP.isEmpty() ? unit.socketIP : unit.ftpIP);
 			m_ftpPortEdit->setText(QString::number(unit.ftpPort));
 			m_ftpUserEdit->setText(unit.ftpUser);
 			m_ftpPasswordEdit->setText(unit.ftpPassword);
 			m_stepProjectEdit->setText(unit.stepProjectName);
+			m_lastEditorSocketIpForFtp = unit.socketIP;
+			ApplyEditorRobotTypeUi();
+		}
+
+		void ApplyEditorRobotTypeUi()
+		{
+			const bool isStep = m_robotTypeCombo != nullptr
+				&& m_robotTypeCombo->currentData().toInt() == ROBOT_TYPE_STEP;
+			SetFormRowVisible(m_editorForm, m_monitorPortEdit, !isStep);
+			SetFormRowVisible(m_editorForm, m_stepProjectEdit, isStep);
+		}
+
+		void SyncEditorFtpIpWithSocketIp()
+		{
+			if (m_socketIpEdit == nullptr || m_ftpIpEdit == nullptr)
+			{
+				return;
+			}
+			const QString socketIp = m_socketIpEdit->text().trimmed();
+			const QString ftpIp = m_ftpIpEdit->text().trimmed();
+			if (!socketIp.isEmpty() && (ftpIp.isEmpty() || ftpIp == m_lastEditorSocketIpForFtp))
+			{
+				m_ftpIpEdit->setText(socketIp);
+			}
+			m_lastEditorSocketIpForFtp = socketIp;
 		}
 
 		void PrepareNewUnit(bool copySelected)
@@ -1612,7 +1932,9 @@ namespace
 				unit.socketPort = 9000;
 				unit.monitorPort = 9001;
 				unit.ftpPort = 21;
-				unit.ftpUser = "anonymous";
+				const FtpCredential ftpCredential = DefaultFtpCredentialForRobotType(unit.robotType);
+				unit.ftpUser = ftpCredential.user;
+				unit.ftpPassword = ftpCredential.password;
 				unit.cameraParamReady = false;
 				unit.handEyeReady = false;
 			}
@@ -1621,9 +1943,37 @@ namespace
 				AppendLog("已取消新建控制单元向导。");
 				return;
 			}
-			m_editingRow = -1;
-			FillEditor(unit, false);
-			AppendLog(copySelected ? "向导已生成复制控制单元，请确认后保存。" : "向导已生成新控制单元，请确认后保存。");
+
+			for (const UnitConfig& existingUnit : m_units)
+			{
+				if (existingUnit.unitName.compare(unit.unitName, Qt::CaseInsensitive) == 0)
+				{
+					QMessageBox::warning(this, "控制单元管理", "内部名已存在，新增控制单元请换一个内部名。");
+					return;
+				}
+			}
+
+			QList<UnitConfig> nextUnits = m_units;
+			unit.unitNo = unit.enabled ? nextUnits.size() : -1;
+			nextUnits.push_back(unit);
+
+			QString error;
+			if (!WriteControlInfo(nextUnits, error) || !WriteRobotPara(unit, true, error))
+			{
+				QMessageBox::warning(this, "控制单元管理", error);
+				return;
+			}
+
+			NormalizeRuntimeUnitNumbers(nextUnits);
+			m_units = nextUnits;
+			RefreshTable();
+			SelectUnit(unit.unitName);
+			m_editingRow = m_units.size() - 1;
+			if (m_editingRow >= 0 && m_editingRow < m_units.size())
+			{
+				FillEditor(m_units.at(m_editingRow), true);
+			}
+			AppendLog(copySelected ? "已创建复制控制单元，并刷新到列表。" : "已创建新控制单元，并刷新到列表。");
 		}
 
 		bool RunNewUnitWizard(UnitConfig& unit, bool copySelected)
@@ -1698,7 +2048,7 @@ namespace
 
 			QWidget* socketPage = makePage();
 			QFormLayout* socketForm = qobject_cast<QFormLayout*>(socketPage->layout());
-			QLineEdit* socketIpEdit = new QLineEdit(socketPage);
+			IpAddressEdit* socketIpEdit = new IpAddressEdit(socketPage);
 			QLineEdit* socketPortEdit = new QLineEdit(socketPage);
 			QLineEdit* monitorPortEdit = new QLineEdit(socketPage);
 			QLineEdit* unitTypeEdit = new QLineEdit(socketPage);
@@ -1706,12 +2056,16 @@ namespace
 			socketPortEdit->setText(unit.socketPort > 0 ? QString::number(unit.socketPort) : QString());
 			monitorPortEdit->setText(unit.monitorPort > 0 ? QString::number(unit.monitorPort) : QString());
 			unitTypeEdit->setText(QString::number(unit.unitType));
-			socketIpEdit->setFixedWidth(300);
+    socketIpEdit->setFixedWidth(228);
 			for (QLineEdit* edit : { socketPortEdit, monitorPortEdit, unitTypeEdit })
 			{
 				edit->setFixedWidth(140);
 				edit->setAlignment(Qt::AlignRight);
+				MarkNumericEditGlobal(edit);
 			}
+			socketPortEdit->setValidator(new QIntValidator(0, 65535, socketPortEdit));
+			monitorPortEdit->setValidator(new QIntValidator(0, 65535, monitorPortEdit));
+			unitTypeEdit->setValidator(new QIntValidator(0, 9999, unitTypeEdit));
 			socketForm->addRow("Socket IP", socketIpEdit);
 			socketForm->addRow("Socket端口", socketPortEdit);
 			socketForm->addRow("监控端口", monitorPortEdit);
@@ -1724,22 +2078,25 @@ namespace
 
 			QWidget* ftpPage = makePage();
 			QFormLayout* ftpForm = qobject_cast<QFormLayout*>(ftpPage->layout());
-			QLineEdit* ftpIpEdit = new QLineEdit(ftpPage);
+			IpAddressEdit* ftpIpEdit = new IpAddressEdit(ftpPage);
 			QLineEdit* ftpPortEdit = new QLineEdit(ftpPage);
 			QLineEdit* ftpUserEdit = new QLineEdit(ftpPage);
 			QLineEdit* ftpPasswordEdit = new QLineEdit(ftpPage);
 			QLineEdit* stepProjectEdit = new QLineEdit(ftpPage);
-			ftpIpEdit->setText(unit.ftpIP);
+			ftpIpEdit->setText(unit.ftpIP.isEmpty() ? unit.socketIP : unit.ftpIP);
 			ftpPortEdit->setText(unit.ftpPort > 0 ? QString::number(unit.ftpPort) : "21");
 			ftpUserEdit->setText(unit.ftpUser);
 			ftpPasswordEdit->setText(unit.ftpPassword);
 			stepProjectEdit->setText(unit.stepProjectName);
-			for (QLineEdit* edit : { ftpIpEdit, ftpUserEdit, ftpPasswordEdit, stepProjectEdit })
+    ftpIpEdit->setFixedWidth(228);
+			for (QLineEdit* edit : { ftpUserEdit, ftpPasswordEdit, stepProjectEdit })
 			{
 				edit->setFixedWidth(300);
 			}
 			ftpPortEdit->setFixedWidth(140);
 			ftpPortEdit->setAlignment(Qt::AlignRight);
+			ftpPortEdit->setValidator(new QIntValidator(0, 65535, ftpPortEdit));
+			MarkNumericEditGlobal(ftpPortEdit);
 			ftpForm->addRow("FTP IP", ftpIpEdit);
 			ftpForm->addRow("FTP端口", ftpPortEdit);
 			ftpForm->addRow("FTP用户", ftpUserEdit);
@@ -1751,26 +2108,68 @@ namespace
 			ftpForm->addRow(QString(), ftpTip);
 			stack->addWidget(ftpPage);
 
-			QWidget* setupPage = makePage();
-			QFormLayout* setupForm = qobject_cast<QFormLayout*>(setupPage->layout());
-			QCheckBox* cameraReadyCheck = new QCheckBox("本次已完成相机参数设置", setupPage);
-			QCheckBox* handEyeReadyCheck = new QCheckBox("本次已完成手眼标定", setupPage);
+			QWidget* cameraSetupPage = makePage();
+			QFormLayout* cameraSetupForm = qobject_cast<QFormLayout*>(cameraSetupPage->layout());
+			QCheckBox* cameraReadyCheck = new QCheckBox("本次已完成相机基础参数设置", cameraSetupPage);
 			cameraReadyCheck->setChecked(copySelected ? unit.cameraParamReady : false);
+			QPushButton* openCameraBasicBtn = new QPushButton("打开相机基础参数界面", cameraSetupPage);
+			openCameraBasicBtn->setFixedWidth(220);
+			QLabel* cameraSetupTip = new QLabel(
+				"可以在这里直接打开相机 IP、端口、曝光、增益等基础参数弹窗。若暂时跳过，相机预览和先测后焊等依赖相机的入口会保持禁用。",
+				cameraSetupPage);
+			cameraSetupTip->setWordWrap(true);
+			cameraSetupTip->setStyleSheet("QLabel { color: #8EB7BF; }");
+			cameraSetupForm->addRow("相机基础参数", openCameraBasicBtn);
+			cameraSetupForm->addRow("完成状态", cameraReadyCheck);
+			cameraSetupForm->addRow(QString(), cameraSetupTip);
+			stack->addWidget(cameraSetupPage);
+
+			QWidget* handEyeSetupPage = makePage();
+			QFormLayout* handEyeSetupForm = qobject_cast<QFormLayout*>(handEyeSetupPage->layout());
+			QCheckBox* handEyeReadyCheck = new QCheckBox("本次已完成手眼标定", handEyeSetupPage);
 			handEyeReadyCheck->setChecked(copySelected ? unit.handEyeReady : false);
-			QLabel* setupTip = new QLabel(
-				"可以先跳过相机参数或手眼标定。跳过后，坡口相机预览和先测后焊等相关功能会禁用；首次进入“相机参数/手眼标定”完成保存后会自动启用。",
-				setupPage);
-			setupTip->setWordWrap(true);
-			setupTip->setStyleSheet("QLabel { color: #8EB7BF; }");
-			setupForm->addRow("相机参数", cameraReadyCheck);
-			setupForm->addRow("手眼标定", handEyeReadyCheck);
-			setupForm->addRow(QString(), setupTip);
-			stack->addWidget(setupPage);
+			QPushButton* openHandEyeCalibrationBtn = new QPushButton("打开手眼标定界面", handEyeSetupPage);
+			openHandEyeCalibrationBtn->setFixedWidth(220);
+			QLabel* handEyeSetupTip = new QLabel(
+				"手眼标定可以先跳过。跳过后，先测后焊等依赖手眼矩阵的流程会禁用；完成标定并生成矩阵后会自动解除限制。",
+				handEyeSetupPage);
+			handEyeSetupTip->setWordWrap(true);
+			handEyeSetupTip->setStyleSheet("QLabel { color: #8EB7BF; }");
+			handEyeSetupForm->addRow("手眼标定", openHandEyeCalibrationBtn);
+			handEyeSetupForm->addRow("完成状态", handEyeReadyCheck);
+			handEyeSetupForm->addRow(QString(), handEyeSetupTip);
+			stack->addWidget(handEyeSetupPage);
 
 			bool typeDefaultsApplied = copySelected;
+			int lastDefaultRobotType = robotTypeCombo->currentData().toInt();
+			QString lastSocketIpForFtp = unit.socketIP;
+			auto syncFtpIpWithSocketIp = [&]()
+				{
+					const QString socketIp = socketIpEdit->text().trimmed();
+					const QString ftpIp = ftpIpEdit->text().trimmed();
+					if (!socketIp.isEmpty() && (ftpIp.isEmpty() || ftpIp == lastSocketIpForFtp))
+					{
+						ftpIpEdit->setText(socketIp);
+					}
+					lastSocketIpForFtp = socketIp;
+				};
+			auto updateTypeSpecificFields = [&]()
+				{
+					const bool isStep = robotTypeCombo->currentData().toInt() == ROBOT_TYPE_STEP;
+					SetFormRowVisible(socketForm, monitorPortEdit, !isStep);
+					SetFormRowVisible(ftpForm, stepProjectEdit, isStep);
+					socketTip->setText(isStep
+						? "STEP 默认 Socket=30312；该型号没有监控端口，界面会自动隐藏。"
+						: "FANUC 默认 Socket=9000、监控=9001。");
+					ftpTip->setText(isStep
+						? "STEP 工程名用于程序上传路径，默认 PCRobot。FTP IP 默认跟随机器人 Socket IP。"
+						: "FANUC 不需要 STEP 工程名，FTP IP 默认跟随机器人 Socket IP。向导完成后还需要点击“保存配置”写入文件。");
+				};
+			ConnectIpAddressEdited(socketIpEdit, &wizard, syncFtpIpWithSocketIp);
 			auto applyTypeDefaults = [&]()
 				{
 					const int robotType = robotTypeCombo->currentData().toInt();
+					const bool forceFtpDefaults = !typeDefaultsApplied || robotType != lastDefaultRobotType;
 					if (robotType == ROBOT_TYPE_STEP)
 					{
 						if (socketPortEdit->text().trimmed().isEmpty() || !typeDefaultsApplied)
@@ -1780,10 +2179,6 @@ namespace
 						if (monitorPortEdit->text().trimmed() == "9001" || !typeDefaultsApplied)
 						{
 							monitorPortEdit->clear();
-						}
-						if (ftpUserEdit->text().trimmed().isEmpty() || !typeDefaultsApplied)
-						{
-							ftpUserEdit->setText("root");
 						}
 					}
 					else
@@ -1796,16 +2191,16 @@ namespace
 						{
 							monitorPortEdit->setText("9001");
 						}
-						if (ftpUserEdit->text().trimmed().isEmpty() || !typeDefaultsApplied)
-						{
-							ftpUserEdit->setText("anonymous");
-						}
 					}
+					ApplyFtpCredentialForRobotType(robotType, ftpUserEdit, ftpPasswordEdit, forceFtpDefaults);
 					if (ftpPortEdit->text().trimmed().isEmpty())
 					{
 						ftpPortEdit->setText("21");
 					}
+					updateTypeSpecificFields();
+					syncFtpIpWithSocketIp();
 					typeDefaultsApplied = true;
+					lastDefaultRobotType = robotType;
 				};
 			applyTypeDefaults();
 			connect(robotTypeCombo, &QComboBox::currentIndexChanged, &wizard, [applyTypeDefaults]() mutable { applyTypeDefaults(); });
@@ -1830,10 +2225,11 @@ namespace
 					prevBtn->setEnabled(index > 0);
 					nextBtn->setText(index == stack->count() - 1 ? "完成" : "下一步");
 					const QStringList hints = {
-						"第 1 步 / 4：设置控制单元名称、机器人类型和工件类型。",
-						"第 2 步 / 4：设置机器人 Socket 通讯参数。",
-						"第 3 步 / 4：设置 FTP 和 STEP 工程参数。",
-						"第 4 步 / 4：确认相机参数和手眼标定是否已完成；跳过后相关功能会暂时禁用。"
+						"第 1 步 / 5：设置控制单元名称、机器人类型和工件类型。",
+						"第 2 步 / 5：设置机器人 Socket 通讯参数。",
+						"第 3 步 / 5：设置 FTP 和 STEP 工程参数。",
+						"第 4 步 / 5：是否打开相机基础参数界面；跳过后相机相关功能会暂时禁用。",
+						"第 5 步 / 5：是否打开手眼标定界面；跳过后先测后焊等流程会暂时禁用。"
 					};
 					stepHintLabel->setText(hints.value(index));
 				};
@@ -1884,9 +2280,14 @@ namespace
 					}
 					if (stack->currentIndex() == 1)
 					{
-						if (socketIpEdit->text().trimmed().isEmpty())
+						if (socketIpEdit->isEmpty())
 						{
 							QMessageBox::warning(&wizard, "新建控制单元向导", "Socket IP 不能为空。");
+							return false;
+						}
+						if (!socketIpEdit->isComplete())
+						{
+							QMessageBox::warning(&wizard, "新建控制单元向导", "Socket IP 必须是 4 段 0-255 的数字。");
 							return false;
 						}
 						int ignored = 0;
@@ -1894,7 +2295,8 @@ namespace
 						{
 							return false;
 						}
-						if (!validatePort(monitorPortEdit->text(), "监控端口", true, ignored))
+						if (robotTypeCombo->currentData().toInt() != ROBOT_TYPE_STEP
+							&& !validatePort(monitorPortEdit->text(), "监控端口", true, ignored))
 						{
 							return false;
 						}
@@ -1907,9 +2309,14 @@ namespace
 						}
 						return true;
 					}
-					if (stack->currentIndex() == 2 && ftpIpEdit->text().trimmed().isEmpty())
+					if (stack->currentIndex() == 2 && ftpIpEdit->isEmpty())
 					{
 						QMessageBox::warning(&wizard, "新建控制单元向导", "FTP IP 不能为空。");
+						return false;
+					}
+					if (stack->currentIndex() == 2 && !ftpIpEdit->isComplete())
+					{
+						QMessageBox::warning(&wizard, "新建控制单元向导", "FTP IP 必须是 4 段 0-255 的数字。");
 						return false;
 					}
 					if (stack->currentIndex() != 2)
@@ -1919,6 +2326,85 @@ namespace
 					int ignored = 0;
 					return validatePort(ftpPortEdit->text(), "FTP端口", false, ignored);
 				};
+
+			auto buildWizardDraft = [&]() -> UnitConfig
+				{
+					UnitConfig draft = unit;
+					draft.unitName = unitNameEdit->text().trimmed();
+					draft.chineseName = chineseNameEdit->text().trimmed();
+					draft.customName = customNameEdit->text().trimmed();
+					if (draft.customName.isEmpty())
+					{
+						draft.customName = draft.chineseName;
+					}
+					draft.robotType = robotTypeCombo->currentData().toInt();
+					draft.workpieceType = workpieceCombo->currentData().toString();
+					draft.enabled = true;
+					draft.cameraParamReady = cameraReadyCheck->isChecked();
+					draft.handEyeReady = handEyeReadyCheck->isChecked();
+					draft.unitType = unitTypeEdit->text().trimmed().toInt();
+					draft.socketIP = socketIpEdit->text().trimmed();
+					draft.socketPort = socketPortEdit->text().trimmed().toInt();
+					draft.monitorPort = draft.robotType == ROBOT_TYPE_STEP ? 0 : monitorPortEdit->text().trimmed().toInt();
+					draft.ftpIP = ftpIpEdit->text().trimmed();
+					draft.ftpPort = ftpPortEdit->text().trimmed().toInt();
+					draft.ftpUser = ftpUserEdit->text().trimmed();
+					draft.ftpPassword = ftpPasswordEdit->text();
+					draft.stepProjectName = draft.robotType == ROBOT_TYPE_STEP ? stepProjectEdit->text().trimmed() : QString();
+					return draft;
+				};
+
+			auto prepareWizardRobotFiles = [&](const UnitConfig& draft) -> bool
+				{
+					QString error;
+					if (!WriteRobotPara(draft, true, error))
+					{
+						QMessageBox::warning(&wizard, "新建控制单元向导", error);
+						return false;
+					}
+					return true;
+				};
+
+			connect(openCameraBasicBtn, &QPushButton::clicked, &wizard, [&]()
+				{
+					UnitConfig draft = buildWizardDraft();
+					if (!prepareWizardRobotFiles(draft))
+					{
+						return;
+					}
+					const QString cameraSection = RobotDataHelper::MeasureCameraSection(draft.unitName);
+					if (m_openCameraBasicParam && m_openCameraBasicParam(draft.unitName, cameraSection))
+					{
+						cameraReadyCheck->setChecked(true);
+						AppendLog(QString("向导中已完成 %1 的相机基础参数。").arg(draft.unitName));
+					}
+				});
+
+			connect(openHandEyeCalibrationBtn, &QPushButton::clicked, &wizard, [&]()
+				{
+					UnitConfig draft = buildWizardDraft();
+					if (!prepareWizardRobotFiles(draft))
+					{
+						return;
+					}
+					const bool alreadyLoaded = std::any_of(m_units.cbegin(), m_units.cend(), [&draft](const UnitConfig& existingUnit)
+						{
+							return existingUnit.unitName.compare(draft.unitName, Qt::CaseInsensitive) == 0;
+						});
+					if (!alreadyLoaded)
+					{
+						QMessageBox::information(
+							&wizard,
+							"新建控制单元向导",
+							"新控制单元尚未保存并重载，手眼标定界面可以先打开查看参数；实际采集前请完成向导、保存并重载控制单元。");
+					}
+					const QString cameraSection = RobotDataHelper::MeasureCameraSection(draft.unitName);
+					if (m_openHandEyeCalibration && m_openHandEyeCalibration(draft.unitName, cameraSection))
+					{
+						handEyeReadyCheck->setChecked(true);
+						AppendLog(QString("向导中已完成 %1 的手眼标定。").arg(draft.unitName));
+					}
+				});
 
 			connect(prevBtn, &QPushButton::clicked, &wizard, [&]()
 				{
@@ -1964,7 +2450,8 @@ namespace
 			unit.socketIP = socketIpEdit->text().trimmed();
 			unit.socketPort = socketPortEdit->text().trimmed().toInt();
 			unit.monitorPort = 0;
-			if (validatePort(monitorPortEdit->text(), "监控端口", true, parsedValue))
+			if (unit.robotType != ROBOT_TYPE_STEP
+				&& validatePort(monitorPortEdit->text(), "监控端口", true, parsedValue))
 			{
 				unit.monitorPort = parsedValue;
 			}
@@ -1972,7 +2459,7 @@ namespace
 			unit.ftpPort = ftpPortEdit->text().trimmed().toInt();
 			unit.ftpUser = ftpUserEdit->text().trimmed();
 			unit.ftpPassword = ftpPasswordEdit->text();
-			unit.stepProjectName = stepProjectEdit->text().trimmed();
+			unit.stepProjectName = unit.robotType == ROBOT_TYPE_STEP ? stepProjectEdit->text().trimmed() : QString();
 			return true;
 		}
 
@@ -2016,7 +2503,7 @@ namespace
 			unit.ftpIP = m_ftpIpEdit->text().trimmed();
 			unit.ftpUser = m_ftpUserEdit->text().trimmed();
 			unit.ftpPassword = m_ftpPasswordEdit->text();
-			unit.stepProjectName = m_stepProjectEdit->text().trimmed();
+			unit.stepProjectName = unit.robotType == ROBOT_TYPE_STEP ? m_stepProjectEdit->text().trimmed() : QString();
 			if (unit.customName.isEmpty())
 			{
 				unit.customName = unit.chineseName;
@@ -2038,9 +2525,19 @@ namespace
 				error = "Socket IP 不能为空。";
 				return false;
 			}
+			if (!m_socketIpEdit->isComplete())
+			{
+				error = "Socket IP 必须是 4 段 0-255 的数字。";
+				return false;
+			}
 			if (unit.ftpIP.isEmpty())
 			{
 				error = "FTP IP 不能为空。";
+				return false;
+			}
+			if (!m_ftpIpEdit->isComplete())
+			{
+				error = "FTP IP 必须是 4 段 0-255 的数字。";
 				return false;
 			}
 			if (unit.workpieceType.isEmpty())
@@ -2064,7 +2561,7 @@ namespace
 			}
 			const QString monitorPortText = m_monitorPortEdit->text().trimmed();
 			unit.monitorPort = 0;
-			if (!monitorPortText.isEmpty())
+			if (unit.robotType != ROBOT_TYPE_STEP && !monitorPortText.isEmpty())
 			{
 				unit.monitorPort = monitorPortText.toInt(&ok);
 				if (!ok || unit.monitorPort <= 0 || unit.monitorPort > 65535)
@@ -2337,6 +2834,8 @@ namespace
 
 	private:
 		std::function<void()> m_reloadCallback;
+		OpenCameraBasicParamFunc m_openCameraBasicParam;
+		OpenHandEyeCalibrationFunc m_openHandEyeCalibration;
 		QList<UnitConfig> m_units;
 		int m_editingRow = -1;
 		QTableWidget* m_unitTable = nullptr;
@@ -2349,14 +2848,16 @@ namespace
 		QCheckBox* m_handEyeReadyCheck = nullptr;
 		QComboBox* m_robotTypeCombo = nullptr;
 		QLineEdit* m_unitTypeEdit = nullptr;
-		QLineEdit* m_socketIpEdit = nullptr;
+		IpAddressEdit* m_socketIpEdit = nullptr;
 		QLineEdit* m_socketPortEdit = nullptr;
 		QLineEdit* m_monitorPortEdit = nullptr;
-		QLineEdit* m_ftpIpEdit = nullptr;
+		IpAddressEdit* m_ftpIpEdit = nullptr;
 		QLineEdit* m_ftpPortEdit = nullptr;
 		QLineEdit* m_ftpUserEdit = nullptr;
 		QLineEdit* m_ftpPasswordEdit = nullptr;
 		QLineEdit* m_stepProjectEdit = nullptr;
+		QFormLayout* m_editorForm = nullptr;
+		QString m_lastEditorSocketIpForFtp;
 		QPlainTextEdit* m_logText = nullptr;
 	};
 }
@@ -2398,10 +2899,11 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_nMeasureThenWeldPageUnitIndex(-1)
 	, m_nRobotJogPageUnitIndex(-1)
 	, m_pRobotLogText(nullptr)
-	, m_pCurrentUserLabel(nullptr)
+	, m_pCurrentUserButton(nullptr)
 	, m_pManagementUserLabel(nullptr)
 	, m_pPermissionHintLabel(nullptr)
 	, m_pManagementCameraReceiveModeBtn(nullptr)
+	, m_pTouchKeyboardModeCombo(nullptr)
 	, m_pAuthTitleLabel(nullptr)
 	, m_pAuthHintLabel(nullptr)
 	, m_pLoginNameCombo(nullptr)
@@ -2430,6 +2932,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pWeldSeamCompPage(nullptr)
 	, m_pCameraParamPage(nullptr)
 	, m_pRobotJogPage(nullptr)
+	, m_pTouchKeyboardManager(nullptr)
 	, m_bFanucMovlForward(true)
 	, m_bFanucMovlRunning(false)
 	, m_bFanucMovjRunning(false)
@@ -2446,6 +2949,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 {
 	ui.setupUi(this);
 	ApplyUnifiedWindowChrome(this);
+	m_pTouchKeyboardManager = new TouchKeyboardManager(this);
+	m_pTouchKeyboardManager->LoadSettings();
+	m_pTouchKeyboardManager->Install(qApp);
 	if (ui.FanucMonitorText != nullptr)
 	{
 		ui.FanucMonitorText->document()->setMaximumBlockCount(200);
@@ -2765,11 +3271,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 	m_pDashboardPage = new QWidget(m_pMainStack);
 	QVBoxLayout* dashboardLayout = new QVBoxLayout(m_pDashboardPage);
-	dashboardLayout->setContentsMargins(0, 0, 0, 0);
+	dashboardLayout->setContentsMargins(24, 18, 24, 24);
 	dashboardLayout->setSpacing(14);
 	m_pMainStack->addWidget(m_pDashboardPage);
 	rootLayout->addWidget(m_pMainStack, 1);
 
+	QVBoxLayout* dashboardHeaderLayout = new QVBoxLayout();
+	dashboardHeaderLayout->setContentsMargins(0, 0, 0, 0);
+	dashboardHeaderLayout->setSpacing(8);
 	QHBoxLayout* titleLayout = new QHBoxLayout();
 	titleLayout->setSpacing(10);
 	QLabel* titleLabel = new QLabel("机器人控制与调试中心", m_pDashboardPage);
@@ -2783,8 +3292,15 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	aboutButton->setMaximumWidth(88);
 	aboutButton->setStyleSheet("QPushButton { padding: 6px 12px; font-size: 13px; border-radius: 10px; }");
 	aboutButton->hide();
-	m_pCurrentUserLabel = new QLabel(m_pDashboardPage);
-	m_pCurrentUserLabel->setStyleSheet("QLabel { color: #9ED8DB; padding: 5px 10px; border: 1px solid #2E4656; border-radius: 10px; background: #101923; }");
+	m_pCurrentUserButton = new QPushButton(m_pDashboardPage);
+	m_pCurrentUserButton->setCursor(Qt::PointingHandCursor);
+	m_pCurrentUserButton->setMinimumHeight(34);
+	m_pCurrentUserButton->setToolTip("点击打开账号菜单");
+	m_pCurrentUserButton->setStyleSheet(
+		"QPushButton { color: #9ED8DB; padding: 5px 10px; border: 1px solid #2E4656; "
+		"border-radius: 10px; background: #101923; font-size: 14px; text-align: left; }"
+		"QPushButton:hover { border-color: #72D4DD; background: #152230; }"
+		"QPushButton:pressed { background: #0D171F; }");
 	m_pRobotSelectorLabel = new QLabel("机器人：", m_pDashboardPage);
 	m_pRobotSelectorLabel->setStyleSheet("QLabel { color: #BACBD1; font-weight: 600; }");
 	m_pRobotSelectorCombo = new QComboBox(m_pDashboardPage);
@@ -2796,23 +3312,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"QComboBox::drop-down { border-left: 1px solid #3C6173; border-radius: 0px; width: 30px; background: #000000; }"
 		"QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
 		"QComboBox QAbstractItemView { background: #000000; color: #ECF3F4; selection-background-color: #2D5465; border: 1px solid #3C6173; border-radius: 0px; outline: 0px; }");
-	QPushButton* dashboardLogoutButton = new QPushButton("退出登录", m_pDashboardPage);
-	dashboardLogoutButton->setMinimumHeight(34);
-	dashboardLogoutButton->setMinimumWidth(96);
-	dashboardLogoutButton->setStyleSheet("QPushButton { padding: 6px 14px; font-size: 14px; border-radius: 10px; }");
-	QPushButton* managementEntryButton = new QPushButton("管理页面", m_pDashboardPage);
-	managementEntryButton->setMinimumHeight(34);
-	managementEntryButton->setMinimumWidth(110);
-	managementEntryButton->setStyleSheet("QPushButton { padding: 6px 14px; font-size: 14px; border-radius: 10px; }");
 	titleLayout->addWidget(titleLabel);
 	titleLayout->addWidget(versionLabel, 0, Qt::AlignVCenter);
 	titleLayout->addStretch(1);
-	titleLayout->addWidget(m_pCurrentUserLabel, 0, Qt::AlignVCenter);
+	titleLayout->addWidget(m_pCurrentUserButton, 0, Qt::AlignVCenter);
 	titleLayout->addWidget(m_pRobotSelectorLabel, 0, Qt::AlignVCenter);
 	titleLayout->addWidget(m_pRobotSelectorCombo, 0, Qt::AlignVCenter);
-	titleLayout->addWidget(dashboardLogoutButton, 0, Qt::AlignVCenter);
-	titleLayout->addWidget(managementEntryButton, 0, Qt::AlignVCenter);
-	dashboardLayout->addLayout(titleLayout);
+	dashboardHeaderLayout->addLayout(titleLayout);
+	dashboardLayout->addLayout(dashboardHeaderLayout);
 
 	QLabel* homeHintLabel = new QLabel("主页面向现场快速操作：流程和子界面入口使用大按钮；连接、清报警、模式切换和调试日志放在右侧小工具区。", m_pDashboardPage);
 	homeHintLabel->setWordWrap(true);
@@ -2975,11 +3482,21 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pManagementCameraReceiveModeBtn->setMinimumHeight(34);
 	m_pManagementCameraReceiveModeBtn->setMinimumWidth(150);
 	m_pManagementCameraReceiveModeBtn->setStyleSheet("QPushButton { padding: 6px 14px; font-size: 14px; border-radius: 10px; }");
+	QLabel* touchKeyboardLabel = new QLabel("虚拟键盘：", m_pManagementHomePage);
+	touchKeyboardLabel->setStyleSheet("QLabel { color: #9ED8DB; padding-left: 8px; }");
+	m_pTouchKeyboardModeCombo = new QComboBox(m_pManagementHomePage);
+	m_pTouchKeyboardModeCombo->addItem(TouchKeyboardManager::ModeDisplayName(TouchKeyboardManager::Mode::Auto), TouchKeyboardManager::ModeToStorageString(TouchKeyboardManager::Mode::Auto));
+	m_pTouchKeyboardModeCombo->addItem(TouchKeyboardManager::ModeDisplayName(TouchKeyboardManager::Mode::Always), TouchKeyboardManager::ModeToStorageString(TouchKeyboardManager::Mode::Always));
+	m_pTouchKeyboardModeCombo->addItem(TouchKeyboardManager::ModeDisplayName(TouchKeyboardManager::Mode::Never), TouchKeyboardManager::ModeToStorageString(TouchKeyboardManager::Mode::Never));
+	m_pTouchKeyboardModeCombo->setFixedSize(110, 34);
+	m_pTouchKeyboardModeCombo->setToolTip("自动：触摸输入时弹出；总是：输入框聚焦即弹出；从不：禁用虚拟键盘。");
 	m_pManagementUserLabel = new QLabel(m_pManagementHomePage);
 	m_pManagementUserLabel->setStyleSheet("QLabel { color: #9ED8DB; padding: 5px 10px; border: 1px solid #2E4656; border-radius: 10px; background: #101923; }");
 	managementTitleLayout->addWidget(managementTitleLabel);
 	managementTitleLayout->addStretch(1);
 	managementTitleLayout->addWidget(m_pManagementCameraReceiveModeBtn);
+	managementTitleLayout->addWidget(touchKeyboardLabel);
+	managementTitleLayout->addWidget(m_pTouchKeyboardModeCombo);
 	managementTitleLayout->addWidget(m_pManagementUserLabel);
 	managementHomeLayout->addLayout(managementTitleLayout);
 
@@ -3005,6 +3522,15 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pManagementCameraReceiveModeBtn, &QPushButton::toggled, this, [this](bool checked)
 		{
 			SetSharedScanCameraReceiverMode(checked);
+		});
+	connect(m_pTouchKeyboardModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
+		{
+			if (m_pTouchKeyboardModeCombo == nullptr || m_pTouchKeyboardManager == nullptr || index < 0)
+			{
+				return;
+			}
+
+			m_pTouchKeyboardManager->SetMode(TouchKeyboardManager::ModeFromStorageString(m_pTouchKeyboardModeCombo->itemData(index).toString()));
 		});
 
 	QGroupBox* entryGroup = new QGroupBox("常用功能", mainPanel);
@@ -3232,8 +3758,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	dashboardLayout->addWidget(infoSplitter, 1);
 	dashboardLayout->addWidget(entryGroup, 0);
 
-	connect(managementEntryButton, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowManagementPage);
-	connect(dashboardLogoutButton, &QPushButton::clicked, this, &QtWidgetsApplication4::LogoutCurrentAccount);
+	connect(m_pCurrentUserButton, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowCurrentUserMenu);
 	connect(m_pDashboardDebugLogBtn, &QPushButton::toggled, this, &QtWidgetsApplication4::SetDebugLogMode);
 	connect(m_pDashboardConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ToggleCurrentRobotConnection);
 	connect(m_pDashboardClearAlarmBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotClearAlarmTest);
@@ -3294,6 +3819,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	EnsureDefaultAdminAccount();
 	RefreshAccountUi();
 	LoadCameraReceiveMode();
+	RefreshTouchKeyboardModeUi();
 	LoadLoginState();
 	ShowAuthPage();
 	TryAutoLogin();
@@ -3516,12 +4042,13 @@ void QtWidgetsApplication4::resizeEvent(QResizeEvent* event)
 void QtWidgetsApplication4::ShowDashboardPage()
 {
 	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-	setMinimumSize(920, 700);
-	if (!isMaximized() && !isFullScreen())
+	setMinimumSize(1280, 700);
+	if (isMaximized() || isFullScreen())
 	{
-		resize(1120, 760);
-		showMaximized();
+		showNormal();
 	}
+	resize(minimumSize());
+	CenterWindowOnScreen(this);
 
 	if (m_pMainStack != nullptr && m_pDashboardPage != nullptr)
 	{
@@ -3537,20 +4064,40 @@ void QtWidgetsApplication4::ShowDashboardPage()
 	}
 }
 
-void QtWidgetsApplication4::ShowManagementPage()
+void QtWidgetsApplication4::ShowCurrentUserMenu()
 {
-	if (isMaximized() || isFullScreen())
+	if (m_pCurrentUserButton == nullptr)
 	{
-		showNormal();
-	}
-	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-	setMinimumSize(920, 700);
-	if (width() < 1120 || height() < 760)
-	{
-		resize(1120, 760);
-		CenterWindowOnScreen(this);
+		return;
 	}
 
+	QMenu menu(this);
+	menu.setStyleSheet(
+		"QMenu { background: #000000; color: #ECF3F4; border: 1px solid #3C6173; padding: 4px; }"
+		"QMenu::item { padding: 8px 28px 8px 14px; min-width: 120px; }"
+		"QMenu::item:selected { background: #2D5465; color: #FFFFFF; }");
+
+	QAction* logoutAction = menu.addAction("退出登录");
+	QAction* managementAction = nullptr;
+	if (RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin))
+	{
+		managementAction = menu.addAction("管理界面");
+	}
+
+	const QPoint menuPos = m_pCurrentUserButton->mapToGlobal(QPoint(0, m_pCurrentUserButton->height() + 4));
+	QAction* selectedAction = menu.exec(menuPos);
+	if (selectedAction == logoutAction)
+	{
+		LogoutCurrentAccount();
+	}
+	else if (selectedAction != nullptr && selectedAction == managementAction)
+	{
+		ShowManagementPage();
+	}
+}
+
+void QtWidgetsApplication4::ShowManagementPage()
+{
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		const QMessageBox::StandardButton button = QMessageBox::question(
@@ -3570,9 +4117,11 @@ void QtWidgetsApplication4::ShowManagementPage()
 
 	if (m_pManagementPage != nullptr)
 	{
+		m_pManagementPage->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+		m_pManagementPage->setMinimumSize(920, 700);
 		RefreshAccountUi();
 		ShowManagementHomePage();
-		m_pManagementPage->show();
+		ShowMaximizedWithUnifiedChrome(m_pManagementPage);
 		m_pManagementPage->raise();
 		m_pManagementPage->activateWindow();
 	}
@@ -3586,7 +4135,7 @@ void QtWidgetsApplication4::ShowManagementHomePage()
 	}
 	if (m_pManagementPage != nullptr)
 	{
-		m_pManagementPage->show();
+		ShowMaximizedWithUnifiedChrome(m_pManagementPage);
 		m_pManagementPage->raise();
 		m_pManagementPage->activateWindow();
 	}
@@ -4115,9 +4664,9 @@ void QtWidgetsApplication4::EnsureDefaultAdminAccount()
 void QtWidgetsApplication4::RefreshAccountUi()
 {
 	const QString userText = QString("当前用户：%1（%2）").arg(m_sCurrentUserName, RoleDisplayName(m_sCurrentUserRole));
-	if (m_pCurrentUserLabel != nullptr)
+	if (m_pCurrentUserButton != nullptr)
 	{
-		m_pCurrentUserLabel->setText(userText);
+		m_pCurrentUserButton->setText(userText);
 	}
 	if (m_pManagementUserLabel != nullptr)
 	{
@@ -4240,6 +4789,19 @@ void QtWidgetsApplication4::RefreshCameraReceiveModeButtonUi()
 		m_bUseSharedScanCameraReceiver
 		? "共享模式：同一UDP端口只开一个接收线程，再按相机IP分发到各机器人缓存。"
 		: "独立模式：每个机器人独立打开UDP接收线程，适合每台相机使用不同本地端口。");
+}
+
+void QtWidgetsApplication4::RefreshTouchKeyboardModeUi()
+{
+	if (m_pTouchKeyboardModeCombo == nullptr || m_pTouchKeyboardManager == nullptr)
+	{
+		return;
+	}
+
+	const QString storageValue = TouchKeyboardManager::ModeToStorageString(m_pTouchKeyboardManager->CurrentMode());
+	const int index = m_pTouchKeyboardModeCombo->findData(storageValue);
+	QSignalBlocker blocker(m_pTouchKeyboardModeCombo);
+	m_pTouchKeyboardModeCombo->setCurrentIndex(index >= 0 ? index : 0);
 }
 
 void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
@@ -4505,10 +5067,12 @@ void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 
 	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
 	setMinimumSize(920, 700);
-	if (!isMaximized() && !isFullScreen())
+	if (isMaximized() || isFullScreen())
 	{
-		showMaximized();
+		showNormal();
 	}
+	resize(minimumSize());
+	CenterWindowOnScreen(this);
 
 	m_sAuthHintOverride = promptMessage.trimmed();
 	SetAuthRegisterMode(false);
@@ -4794,9 +5358,76 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 			RefreshDashboardConnectionState();
 		};
 
+	auto unitIndexForRobotName = [this](const QString& robotName) -> int
+		{
+			if (m_pContralUnit == nullptr)
+			{
+				return -1;
+			}
+			for (int index = 0; index < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()); ++index)
+			{
+				const T_CONTRAL_UNIT& unitInfo = m_pContralUnit->m_vtContralUnitInfo.at(index);
+				if (DecodeConfigText(unitInfo.sUnitName).trimmed().compare(robotName, Qt::CaseInsensitive) == 0)
+				{
+					return index;
+				}
+			}
+			return -1;
+		};
+
+	auto openCameraBasicParam = [this](const QString& robotName, const QString& cameraSection) -> bool
+		{
+			CameraBasicParamDialog dialog(
+				robotName,
+				cameraSection,
+				[this]() { RefreshRobotOperationAvailability(); },
+				this);
+			dialog.exec();
+			return dialog.SavedThisSession();
+		};
+
+	auto openHandEyeCalibration = [this, unitIndexForRobotName](const QString& robotName, const QString& cameraSection) -> bool
+		{
+			const int unitIndex = unitIndexForRobotName(robotName);
+			auto startCamera = [this, unitIndex](QString& cameraIP) -> bool
+				{
+					if (unitIndex < 0)
+					{
+						return false;
+					}
+					return EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true);
+				};
+			auto stopCamera = []()
+				{
+				};
+
+			HandEyeCalibrationDialog dialog(
+				m_pContralUnit,
+				robotName,
+				cameraSection,
+				startCamera,
+				stopCamera,
+				unitIndex >= 0 ? ScanCameraCacheForUnit(unitIndex) : nullptr,
+				this);
+			dialog.exec();
+			if (!dialog.MatrixComputedThisSession())
+			{
+				return false;
+			}
+
+			QString setupError;
+			if (!WriteRobotSetupReadyFlagGlobal(robotName, "HandEyeReady", &setupError))
+			{
+				QMessageBox::warning(this, "手眼标定", setupError);
+				return false;
+			}
+			RefreshRobotOperationAvailability();
+			return true;
+		};
+
 	if (m_pManagementStack == nullptr)
 	{
-		ControlUnitManagementDialog dialog(reloadControlUnits, this);
+		ControlUnitManagementDialog dialog(reloadControlUnits, openCameraBasicParam, openHandEyeCalibration, this);
 		dialog.exec();
 		return;
 	}
@@ -4808,7 +5439,7 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 		m_pControlUnitManagementPage = nullptr;
 	}
 
-	m_pControlUnitManagementPage = new ControlUnitManagementDialog(reloadControlUnits, m_pManagementStack);
+	m_pControlUnitManagementPage = new ControlUnitManagementDialog(reloadControlUnits, openCameraBasicParam, openHandEyeCalibration, m_pManagementStack);
 	PrepareEmbeddedPage(m_pControlUnitManagementPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pControlUnitManagementPage);
 }
@@ -4842,8 +5473,16 @@ void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page, QStackedWidget* t
 	page->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
 	page->setGeometry(targetStack->contentsRect());
 
+	const bool targetIsManagement = targetStack == m_pManagementStack;
 	QPushButton* backButton = EmbeddedBackButton(page);
-	if (backButton == nullptr)
+	if (targetIsManagement)
+	{
+		if (backButton != nullptr)
+		{
+			backButton->hide();
+		}
+	}
+	else if (backButton == nullptr)
 	{
 		backButton = new QPushButton(page);
 		backButton->setObjectName("EmbeddedBackToDashboardButton");
@@ -4878,10 +5517,13 @@ void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page, QStackedWidget* t
 				}
 			});
 	}
-	const bool targetIsManagement = targetStack == m_pManagementStack;
-	backButton->setText(targetIsManagement ? "返回管理" : "返回主页");
-	backButton->setToolTip(targetIsManagement ? "返回管理页面" : "返回大按钮主页");
-	PositionEmbeddedBackButton(page);
+	if (backButton != nullptr && !targetIsManagement)
+	{
+		backButton->setText("返回主页");
+		backButton->setToolTip("返回大按钮主页");
+		backButton->show();
+		PositionEmbeddedBackButton(page);
+	}
 
 	const QList<QScrollArea*> scrollAreas = page->findChildren<QScrollArea*>();
 	for (QScrollArea* scrollArea : scrollAreas)
@@ -4991,7 +5633,7 @@ void QtWidgetsApplication4::ShowManagementEmbeddedPage(QWidget* page)
 	QTimer::singleShot(160, this, refreshPageGeometry);
 	if (m_pManagementPage != nullptr)
 	{
-		m_pManagementPage->show();
+		ShowMaximizedWithUnifiedChrome(m_pManagementPage);
 		m_pManagementPage->raise();
 		m_pManagementPage->activateWindow();
 	}
