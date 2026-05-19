@@ -12,6 +12,9 @@ class QWidget;
 // 同时会按当前屏幕可用区域（已扣除任务栏）自动限制窗口尺寸。
 void ApplyUnifiedWindowChrome(QWidget* widget);
 
+// 窗口显示或最大化后，补刷新 Windows 原生标题栏颜色。
+void RefreshUnifiedWindowTitleBar(QWidget* widget);
+
 // 统一深色主题下拉框样式，后续所有 QComboBox 优先复用这个模板。
 QString UnifiedComboBoxStyleSheet();
 

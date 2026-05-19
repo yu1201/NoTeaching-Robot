@@ -15,6 +15,7 @@
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDir>
+#include <QDoubleValidator>
 #include <QDoubleSpinBox>
 #include <QDebug>
 #include <QEventLoop>
@@ -70,6 +71,20 @@ constexpr int kCameraTimestampCheckDurationMs = 5000;
 QString FormatDouble(double value, int precision = 6)
 {
     return QString::number(value, 'f', precision);
+}
+
+void ApplyHandEyeNumericEdit(QLineEdit* edit)
+{
+    if (edit == nullptr)
+    {
+        return;
+    }
+    QDoubleValidator* validator = new QDoubleValidator(-1.0e12, 1.0e12, 6, edit);
+    validator->setNotation(QDoubleValidator::StandardNotation);
+    edit->setValidator(validator);
+    edit->setProperty("touchKeyboardLayout", QStringLiteral("numeric"));
+    edit->setInputMethodHints(Qt::ImhFormattedNumbersOnly);
+    edit->setAlignment(Qt::AlignRight);
 }
 
 QString FindHandEyeAutoProgramPath()
@@ -822,6 +837,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     {
         QLabel* label = new QLabel(poseLabels[index]);
         QLineEdit* edit = new QLineEdit();
+        ApplyHandEyeNumericEdit(edit);
         tcpLayout->addWidget(label, index, 0);
         tcpLayout->addWidget(edit, index, 1);
         m_tcpEdits.push_back(edit);
@@ -886,6 +902,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
         {
             QLabel* label = new QLabel(robotLabels[fieldIndex]);
             QLineEdit* edit = new QLineEdit();
+            ApplyHandEyeNumericEdit(edit);
             edit->setMinimumWidth(280);
             edit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             const int columnPair = fieldIndex < 3 ? 0 : 1;
@@ -908,6 +925,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
         {
             QLabel* label = new QLabel(cameraLabels[row]);
             QLineEdit* edit = new QLineEdit();
+            ApplyHandEyeNumericEdit(edit);
             edit->setMinimumWidth(220);
             edit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             cameraGrid->addWidget(label, row, 0);

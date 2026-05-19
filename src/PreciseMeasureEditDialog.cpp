@@ -11,6 +11,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QDoubleValidator>
 #include <QFile>
 #include <QFileInfo>
 #include <QGridLayout>
@@ -32,8 +33,10 @@
 #include <QTextStream>
 #include <QTimer>
 #include <QVariant>
+#include <QIntValidator>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <limits>
 
 namespace
 {
@@ -66,6 +69,41 @@ QLineEdit* CreateValueEdit(int minWidth = 76, int maxWidth = 110)
     edit->setMaximumWidth(maxWidth);
     edit->setAlignment(Qt::AlignRight);
     return edit;
+}
+
+void MarkNumericEdit(QLineEdit* edit)
+{
+    if (edit == nullptr)
+    {
+        return;
+    }
+    edit->setProperty("touchKeyboardLayout", QStringLiteral("numeric"));
+    edit->setInputMethodHints(Qt::ImhFormattedNumbersOnly);
+}
+
+QDoubleValidator* CreateDoubleValidator(QObject* parent)
+{
+    QDoubleValidator* validator = new QDoubleValidator(-1.0e12, 1.0e12, 6, parent);
+    validator->setNotation(QDoubleValidator::StandardNotation);
+    return validator;
+}
+
+QIntValidator* CreateIntValidator(QObject* parent)
+{
+    return new QIntValidator(std::numeric_limits<int>::min(), std::numeric_limits<int>::max(), parent);
+}
+
+bool LooksNumericValue(const QString& value)
+{
+    const QString trimmed = value.trimmed();
+    if (trimmed.isEmpty())
+    {
+        return true;
+    }
+
+    bool ok = false;
+    trimmed.toDouble(&ok);
+    return ok;
 }
 
 bool IsDedicatedPulseKey(const QString& key)
@@ -412,6 +450,11 @@ void AddOtherParamEditor(QGridLayout* layout, QMap<QString, QLineEdit*>& editors
     edit->setMinimumWidth(90);
     edit->setMaximumWidth(130);
     edit->setAlignment(Qt::AlignRight);
+    if (LooksNumericValue(displayValue))
+    {
+        edit->setValidator(CreateDoubleValidator(edit));
+        MarkNumericEdit(edit);
+    }
     editors.insert(editorId, edit);
 
     const int uiCol = colInGroup * 2;
@@ -475,6 +518,8 @@ void PreciseMeasureEditDialog::BuildUi()
     QScrollArea* pageScrollArea = new QScrollArea();
     pageScrollArea->setObjectName("PrecisePageScroll");
     pageScrollArea->setWidgetResizable(true);
+    pageScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     pageScrollArea->setFrameShape(QFrame::NoFrame);
     outerLayout->addWidget(pageScrollArea);
 
@@ -532,6 +577,7 @@ void PreciseMeasureEditDialog::BuildUi()
     headerLayout->addStretch(1);
     headerLayout->addWidget(reloadBtn, 0, Qt::AlignTop);
     headerLayout->addWidget(saveBtn, 0, Qt::AlignTop);
+    headerLayout->addSpacing(142);
     rootLayout->addLayout(headerLayout);
 
     m_pContentSplitter = new QSplitter(Qt::Horizontal);
@@ -1666,6 +1712,8 @@ QGroupBox* PreciseMeasureEditDialog::CreatePulseGroup(const QString& title, cons
     {
         QLabel* label = new QLabel(axes[i]);
         QLineEdit* edit = CreateValueEdit();
+        edit->setValidator(CreateIntValidator(edit));
+        MarkNumericEdit(edit);
         m_editors.insert(AxisKey(groupName, axes[i]), edit);
         layout->addWidget(label, i / 3, (i % 3) * 2);
         layout->addWidget(edit, i / 3, (i % 3) * 2 + 1);
@@ -1693,6 +1741,8 @@ QGroupBox* PreciseMeasureEditDialog::CreateCoorsGroup(const QString& title, cons
     {
         QLabel* label = new QLabel(axes[i]);
         QLineEdit* edit = CreateValueEdit(88, 118);
+        edit->setValidator(CreateDoubleValidator(edit));
+        MarkNumericEdit(edit);
         m_editors.insert(AxisKey(groupName, axes[i]), edit);
         layout->addWidget(label, i / 3, (i % 3) * 2);
         layout->addWidget(edit, i / 3, (i % 3) * 2 + 1);

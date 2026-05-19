@@ -1,7 +1,7 @@
 #define MyAppName "NoTeaching-Robot"
 #define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.05.18"
+  #define MyAppVersion "2026.05.19.2"
 #endif
 #define MyAppPublisher "yu1201"
 #define MyAppExeName "QtWidgetsApplication4.exe"
@@ -38,8 +38,17 @@ Name: "{app}\Log"
 Name: "{app}\Result"
 Name: "{app}\Temp"
 
+[InstallDelete]
+; 模版允许随安装包更新，避免旧模版残留；现场机器人参数不在这里删除。
+Type: filesandordirs; Name: "{app}\Data\WorkpieceTemplates"
+
 [Files]
-Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 程序文件正常覆盖，但 Data 目录单独处理，避免升级时覆盖现场保存的机器人参数。
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Data\*"
+; 工件默认模版可以覆盖，供新建控制单元复制最新默认值。
+Source: "{#MySourceDir}\Data\WorkpieceTemplates\*"; DestDir: "{app}\Data\WorkpieceTemplates"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; 除模版外，Data 只补齐不存在的文件：新增文件会安装，已有机器人/账号/参数文件不会被覆盖。
+Source: "{#MySourceDir}\Data\*"; DestDir: "{app}\Data"; Flags: ignoreversion recursesubdirs createallsubdirs onlyifdoesntexist; Excludes: "WorkpieceTemplates\*"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

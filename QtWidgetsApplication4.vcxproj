@@ -117,6 +117,7 @@
   <ItemGroup>
     <ClCompile Include="src\ContralUnit.cpp" />
     <ClCompile Include="src\CameraFrameCache.cpp" />
+    <ClCompile Include="src\CameraBasicParamDialog.cpp" />
     <ClCompile Include="src\CameraParamDialog.cpp" />
     <ClCompile Include="src\FTPClient.cpp" />
     <ClCompile Include="src\FANUCRobotDriver.cpp" />
@@ -145,6 +146,7 @@
     <ClCompile Include="src\StepRobotDriver.cpp" />
     <ClCompile Include="src\SkDataClass.cpp" />
     <ClCompile Include="src\SkFunction.cpp" />
+    <ClCompile Include="src\TouchKeyboardManager.cpp" />
     <ClCompile Include="src\WindowStyleHelper.cpp" />
     <ClCompile Include="src\groove\clientudpformsensorworker.cpp" />
     <ClCompile Include="src\groove\framebuffer.cpp" />
@@ -164,6 +166,7 @@
   <ItemGroup>
     <ClInclude Include="include\Const.h" />
     <ClInclude Include="include\CameraFrameCache.h" />
+    <ClInclude Include="include\CameraBasicParamDialog.h" />
     <ClInclude Include="include\CameraParamDialog.h" />
     <ClInclude Include="include\ContralUnit.h" />
     <ClInclude Include="include\FANUCRobotDriver.h" />
@@ -190,6 +193,7 @@
     <ClInclude Include="include\SkFunction.h" />
     <ClInclude Include="include\SkGrooveRecog_global.h" />
     <ClInclude Include="include\STEPRobotDriver.h" />
+    <ClInclude Include="include\TouchKeyboardManager.h" />
     <ClInclude Include="include\WindowStyleHelper.h" />
     <ClInclude Include="include\WeldPoseAverageUpdater.h" />
     <ClInclude Include="include\WeldSeamCompDialog.h" />
