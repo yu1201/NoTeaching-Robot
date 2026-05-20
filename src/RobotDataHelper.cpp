@@ -15,6 +15,7 @@
 #include <QStringConverter>
 #include <QTextStream>
 #include <algorithm>
+#include <limits>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -255,6 +256,7 @@ QStringList DefaultWeldParamLines()
         << "NormalWeldRx=0 ;平焊RX"
         << "NormalWeldRy=0 ;平焊RY"
         << "CornerTransitionLeadDis=0 ;拐点过渡距离(mm)"
+        << "CornerArcRadiusMm=2 ;拐点圆弧半径(mm)"
         << "WeldStartSkipDis=0 ;起点跳过距离(mm)"
         << "WeldEndSkipDis=0 ;终点跳过距离(mm)"
         << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)";
@@ -284,13 +286,22 @@ QStringList DefaultWeldRuntimeParamLines(const QSet<QString>& existingKeys)
     {
         lines << "#焊接执行" << runtimeLines;
     }
+    QStringList poseLines;
+    if (!existingKeys.contains("CornerArcRadiusMm"))
+    {
+        poseLines << "CornerArcRadiusMm=2 ;拐点圆弧半径(mm)";
+    }
     if (!existingKeys.contains("WeldRzGainDeg"))
+    {
+        poseLines << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)";
+    }
+    if (!poseLines.isEmpty())
     {
         if (!lines.isEmpty())
         {
             lines << "";
         }
-        lines << "#焊接姿态" << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)";
+        lines << "#焊接姿态" << poseLines;
     }
     return lines;
 }
@@ -455,7 +466,7 @@ bool RobotDataHelper::LoadIndexedPoint3DFile(const QString& filePath, QVector<Ro
         bool xOk = false;
         bool yOk = false;
         bool zOk = false;
-        const int index = parts[0].trimmed().toInt(&indexOk);
+        const qlonglong rawIndex = parts[0].trimmed().toLongLong(&indexOk);
         const double x = parts[1].trimmed().toDouble(&xOk);
         const double y = parts[2].trimmed().toDouble(&yOk);
         const double z = parts[3].trimmed().toDouble(&zOk);
@@ -475,7 +486,10 @@ bool RobotDataHelper::LoadIndexedPoint3DFile(const QString& filePath, QVector<Ro
         }
 
         RobotCalculation::IndexedPoint3D point;
-        point.index = index;
+        point.index = (rawIndex >= std::numeric_limits<int>::min()
+            && rawIndex <= std::numeric_limits<int>::max())
+            ? static_cast<int>(rawIndex)
+            : points.size() + 1;
         point.point = Eigen::Vector3d(x, y, z);
         points.push_back(point);
     }

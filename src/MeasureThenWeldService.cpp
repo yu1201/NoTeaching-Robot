@@ -47,6 +47,7 @@ constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_POLL_MS = 10;
 constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
 constexpr auto WORKPIECE_CLOUD_FILE_NAME = "PreciseLaserPoint_WorkpieceCloud.txt";
 constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
+constexpr auto KEY_POINTS_FILE_NAME = "PreciseLaserPoint_KeyPoints.txt";
 constexpr auto CLASSIFIED_FILE_NAME = "PreciseLaserPoint_Classified.txt";
 constexpr auto CLASSIFIED_NOISE_FILE_NAME = "PreciseLaserPoint_Classified_Noise.txt";
 constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
@@ -149,6 +150,7 @@ struct WeldPosePreset
     double gunToolBaseRz = 180.0;
     double poseMatchMaxErrorDeg = 5.0;
     double cornerTransitionLeadDistance = 10.0;
+    double cornerArcRadiusMm = 2.0;
     double weldStartSkipDistance = 10.0;
     double weldEndSkipDistance = 10.0;
     double weldRzGainDeg = 0.0;
@@ -375,6 +377,32 @@ std::vector<QString> BuildClassifiedOutputLines(const RobotCalculation::LowerWel
             .arg(RobotCalculation::LowerWeldPointTypeCode(point.type))
             .arg(RobotCalculation::LowerWeldPointTypeName(point.type))
             .arg(point.source));
+    }
+    return lines;
+}
+
+std::vector<QString> BuildKeyPointOutputLines(const QVector<RobotCalculation::LowerWeldClassifiedPoint>& points)
+{
+    std::vector<QString> lines;
+    lines.reserve(static_cast<size_t>(points.size()) + 2);
+    lines.push_back("# source_index x y z type_code type_name source");
+    lines.push_back("# 1=start 2=end 3=inner_corner 4=outer_corner");
+    for (const RobotCalculation::LowerWeldClassifiedPoint& point : points)
+    {
+        if (point.type == RobotCalculation::LowerWeldPointType::Normal
+            || point.type == RobotCalculation::LowerWeldPointType::Noise)
+        {
+            continue;
+        }
+
+        lines.push_back(QString("%1 %2 %3 %4 %5 %6 %7")
+            .arg(point.index)
+            .arg(point.point.x(), 0, 'f', 6)
+            .arg(point.point.y(), 0, 'f', 6)
+            .arg(point.point.z(), 0, 'f', 6)
+            .arg(RobotCalculation::LowerWeldPointTypeCode(point.type))
+            .arg(RobotCalculation::LowerWeldPointTypeName(point.type))
+            .arg(point.source.isEmpty() ? "-" : point.source));
     }
     return lines;
 }
@@ -632,12 +660,14 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
             double rx = preset.rx;
             double ry = preset.ry;
             double cornerTransitionLeadDistance = preset.cornerTransitionLeadDistance;
+            double cornerArcRadiusMm = preset.cornerArcRadiusMm;
             double weldStartSkipDistance = preset.weldStartSkipDistance;
             double weldEndSkipDistance = preset.weldEndSkipDistance;
             double weldRzGainDeg = preset.weldRzGainDeg;
             const bool hasNormalRx = TryReadIniDouble(ini, "NormalWeldRx", rx);
             const bool hasNormalRy = TryReadIniDouble(ini, "NormalWeldRy", ry);
             TryReadIniDouble(ini, "CornerTransitionLeadDis", cornerTransitionLeadDistance);
+            TryReadIniDouble(ini, "CornerArcRadiusMm", cornerArcRadiusMm);
             TryReadIniDouble(ini, "WeldStartSkipDis", weldStartSkipDistance);
             TryReadIniDouble(ini, "WeldEndSkipDis", weldEndSkipDistance);
             TryReadIniDouble(ini, "WeldRzGainDeg", weldRzGainDeg);
@@ -656,6 +686,7 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
             preset.rx = rx;
             preset.ry = ry;
             preset.cornerTransitionLeadDistance = std::max(0.0, cornerTransitionLeadDistance);
+            preset.cornerArcRadiusMm = std::max(0.0, cornerArcRadiusMm);
             preset.weldStartSkipDistance = std::max(0.0, weldStartSkipDistance);
             preset.weldEndSkipDistance = std::max(0.0, weldEndSkipDistance);
             preset.weldRzGainDeg = std::isfinite(weldRzGainDeg) ? weldRzGainDeg : 0.0;
@@ -1434,6 +1465,224 @@ void TrimWeldPathSelfIntersections(
     {
         RenumberWeldPoseRecords(records);
     }
+}
+
+struct WeldCornerArcApplyStats
+{
+    int inputPointCount = 0;
+    int outputPointCount = 0;
+    int roundedCornerCount = 0;
+    double radiusMm = 0.0;
+
+    int insertedPointCount() const
+    {
+        return outputPointCount - inputPointCount;
+    }
+};
+
+bool IsWeldCornerPointType(const QString& pointType)
+{
+    const QString normalized = pointType.trimmed().toLower();
+    return normalized.contains("corner") || normalized.contains(QStringLiteral("拐"));
+}
+
+bool IsWeldSegmentKindChange(
+    const WeldPoseFileRecord& prev,
+    const WeldPoseFileRecord& next)
+{
+    const QString prevKind = NormalizeSeamCompSegmentKind(prev.segmentKind).trimmed();
+    const QString nextKind = NormalizeSeamCompSegmentKind(next.segmentKind).trimmed();
+    return !prevKind.isEmpty()
+        && !nextKind.isEmpty()
+        && prevKind.compare(nextKind, Qt::CaseInsensitive) != 0;
+}
+
+double EstimateWeldPoseStepMm(const QVector<WeldPoseFileRecord>& records)
+{
+    QVector<double> lengths;
+    lengths.reserve(records.size() > 1 ? records.size() - 1 : 0);
+    for (int index = 1; index < records.size(); ++index)
+    {
+        const double length = (records[index].point - records[index - 1].point).norm();
+        if (std::isfinite(length) && length > 1e-6)
+        {
+            lengths.push_back(length);
+        }
+    }
+
+    if (lengths.isEmpty())
+    {
+        return 2.0;
+    }
+
+    std::sort(lengths.begin(), lengths.end());
+    return std::clamp(lengths[lengths.size() / 2], 0.5, 5.0);
+}
+
+QString WeldArcSegmentKind(const QString& segmentKind)
+{
+    QString normalized = NormalizeSeamCompSegmentKind(segmentKind).trimmed();
+    if (normalized.isEmpty())
+    {
+        normalized = "arc";
+    }
+    if (!normalized.endsWith("_arc", Qt::CaseInsensitive))
+    {
+        normalized += "_arc";
+    }
+    return normalized;
+}
+
+void AppendWeldPoseRecordIfNotDuplicate(
+    QVector<WeldPoseFileRecord>& records,
+    const WeldPoseFileRecord& record)
+{
+    constexpr double kDuplicateDistanceMm = 1e-6;
+    if (!records.isEmpty()
+        && (records.back().point - record.point).norm() <= kDuplicateDistanceMm)
+    {
+        records.back() = record;
+        return;
+    }
+
+    records.push_back(record);
+}
+
+WeldCornerArcApplyStats ApplyCornerArcTransitionToWeldPoseRecords(
+    const WeldPosePreset& preset,
+    QVector<WeldPoseFileRecord>& records)
+{
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kMinCornerAngleRad = 15.0 * kPi / 180.0;
+    constexpr double kAutoCornerAngleRad = 30.0 * kPi / 180.0;
+    constexpr double kMaxCornerAngleRad = 165.0 * kPi / 180.0;
+    constexpr double kMinArcRadiusMm = 0.05;
+    constexpr double kMinSegmentLengthMm = 1e-6;
+
+    WeldCornerArcApplyStats stats;
+    stats.inputPointCount = records.size();
+    stats.outputPointCount = records.size();
+    stats.radiusMm = preset.cornerArcRadiusMm;
+
+    if (records.size() < 3 || preset.cornerArcRadiusMm <= kMinArcRadiusMm)
+    {
+        return stats;
+    }
+
+    const double sampleStepMm = EstimateWeldPoseStepMm(records);
+    QVector<WeldPoseFileRecord> roundedRecords;
+    roundedRecords.reserve(records.size() + records.size() / 4);
+    roundedRecords.push_back(records.front());
+
+    for (int index = 1; index + 1 < records.size(); ++index)
+    {
+        const WeldPoseFileRecord& prev = records[index - 1];
+        const WeldPoseFileRecord& corner = records[index];
+        const WeldPoseFileRecord& next = records[index + 1];
+
+        const Eigen::Vector3d incoming = corner.point - prev.point;
+        const Eigen::Vector3d outgoing = next.point - corner.point;
+        const double incomingLength = incoming.norm();
+        const double outgoingLength = outgoing.norm();
+        if (incomingLength <= kMinSegmentLengthMm || outgoingLength <= kMinSegmentLengthMm)
+        {
+            AppendWeldPoseRecordIfNotDuplicate(roundedRecords, corner);
+            continue;
+        }
+
+        const Eigen::Vector3d incomingDir = incoming / incomingLength;
+        const Eigen::Vector3d outgoingDir = outgoing / outgoingLength;
+        const double cosTheta = std::clamp(incomingDir.dot(outgoingDir), -0.999999, 0.999999);
+        const double theta = std::acos(cosTheta);
+        const bool markedCorner = IsWeldCornerPointType(corner.pointType)
+            || IsWeldSegmentKindChange(prev, next);
+        if (theta < kMinCornerAngleRad
+            || theta > kMaxCornerAngleRad
+            || (!markedCorner && theta < kAutoCornerAngleRad))
+        {
+            AppendWeldPoseRecordIfNotDuplicate(roundedRecords, corner);
+            continue;
+        }
+
+        const double tanHalf = std::tan(theta * 0.5);
+        if (!std::isfinite(tanHalf) || std::abs(tanHalf) <= 1e-9)
+        {
+            AppendWeldPoseRecordIfNotDuplicate(roundedRecords, corner);
+            continue;
+        }
+
+        // theta is the path deflection angle. The fillet tangent distance is
+        // r * tan(theta / 2), not r / tan(theta / 2).
+        double tangentDistanceMm = preset.cornerArcRadiusMm * tanHalf;
+        const double maxTangentDistanceMm = std::min(incomingLength, outgoingLength) * 0.45;
+        if (maxTangentDistanceMm <= kMinArcRadiusMm)
+        {
+            AppendWeldPoseRecordIfNotDuplicate(roundedRecords, corner);
+            continue;
+        }
+        if (tangentDistanceMm > maxTangentDistanceMm)
+        {
+            tangentDistanceMm = maxTangentDistanceMm;
+        }
+
+        const double actualRadiusMm = tangentDistanceMm / tanHalf;
+        if (!std::isfinite(actualRadiusMm) || actualRadiusMm <= kMinArcRadiusMm)
+        {
+            AppendWeldPoseRecordIfNotDuplicate(roundedRecords, corner);
+            continue;
+        }
+
+        const Eigen::Vector3d normalComponent = outgoingDir - incomingDir * cosTheta;
+        const double normalLength = normalComponent.norm();
+        if (normalLength <= 1e-9)
+        {
+            AppendWeldPoseRecordIfNotDuplicate(roundedRecords, corner);
+            continue;
+        }
+
+        const Eigen::Vector3d planeX = incomingDir;
+        const Eigen::Vector3d planeY = normalComponent / normalLength;
+        const Eigen::Vector3d tangentIn = corner.point - incomingDir * tangentDistanceMm;
+        const Eigen::Vector3d tangentOut = corner.point + outgoingDir * tangentDistanceMm;
+        const Eigen::Vector3d center = tangentIn + planeY * actualRadiusMm;
+        const Eigen::Vector3d startVector = tangentIn - center;
+        const double startAngle = std::atan2(startVector.dot(planeY), startVector.dot(planeX));
+        const double arcLengthMm = actualRadiusMm * theta;
+        const int stepCount = std::max(2, static_cast<int>(std::ceil(arcLengthMm / sampleStepMm)));
+        const QString arcSegmentKind = WeldArcSegmentKind(corner.segmentKind);
+        const QString arcPointType = corner.pointType.trimmed().isEmpty()
+            ? QStringLiteral("arc")
+            : (corner.pointType + "_arc");
+
+        for (int arcIndex = 0; arcIndex <= stepCount; ++arcIndex)
+        {
+            const double ratio = static_cast<double>(arcIndex) / static_cast<double>(stepCount);
+            WeldPoseFileRecord arcRecord = InterpolateWeldPoseRecord(prev, next, ratio);
+            const double angle = startAngle + theta * ratio;
+            arcRecord.point = center
+                + planeX * (std::cos(angle) * actualRadiusMm)
+                + planeY * (std::sin(angle) * actualRadiusMm);
+            if (arcIndex == stepCount)
+            {
+                arcRecord.point = tangentOut;
+            }
+            else if (arcIndex == 0)
+            {
+                arcRecord.point = tangentIn;
+            }
+            arcRecord.pointType = arcPointType;
+            arcRecord.segmentKind = arcSegmentKind;
+            AppendWeldPoseRecordIfNotDuplicate(roundedRecords, arcRecord);
+        }
+
+        ++stats.roundedCornerCount;
+    }
+
+    AppendWeldPoseRecordIfNotDuplicate(roundedRecords, records.back());
+    records = std::move(roundedRecords);
+    RenumberWeldPoseRecords(records);
+    stats.outputPointCount = records.size();
+    return stats;
 }
 
 WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
@@ -3316,6 +3565,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     const QString workpieceCloudPath = QDir(laserDir).filePath(WORKPIECE_CLOUD_FILE_NAME);
     const QString matchDebugPath = QDir(laserDir).filePath("PreciseLaserPoint_MatchDebug.csv");
     const QString preservePathFitPath = QDir(laserDir).filePath(PRESERVE_PATH_FILE_NAME);
+    const QString keyPointsPath = QDir(laserDir).filePath(KEY_POINTS_FILE_NAME);
     const QString classifiedPath = QDir(laserDir).filePath(CLASSIFIED_FILE_NAME);
     const QString classifiedNoisePath = QDir(laserDir).filePath(CLASSIFIED_NOISE_FILE_NAME);
     const QString weldPosePath = QDir(laserDir).filePath(WELD_POSE_FILE_NAME);
@@ -3652,6 +3902,15 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         return true;
     }
 
+    if (!SaveTextLines(keyPointsPath, BuildKeyPointOutputLines(originalAnalysis.keyPoints), error))
+    {
+        if (appendLog)
+        {
+            appendLog(QString("保存起终点/拐点结果失败：%1").arg(error));
+        }
+        return true;
+    }
+
     if (!SaveTextLines(classifiedNoisePath, BuildNoiseOutputLines(laserFitInput, originalAnalysis.filterResult), error))
     {
         if (appendLog)
@@ -3699,6 +3958,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             .arg(outerCount)
             .arg(normalCount)
             .arg(classifiedPath));
+        appendLog(QString("起终点/拐点文件：%1").arg(keyPointsPath));
         appendLog(QString("焊道杂点文件：%1").arg(classifiedNoisePath));
         appendLog(QString("先测后焊特征分析摘要：输入=%1，下层候选=%2，输出=%3，剔除Z突变=%4，剔除Z连续异常=%5，连续段剔除=%6")
             .arg(originalAnalysis.filterResult.inputPointCount)
@@ -3806,6 +4066,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     }
 
     preservePath = dir.filePath(PRESERVE_PATH_FILE_NAME);
+    const QString keyPointsPath = dir.filePath(KEY_POINTS_FILE_NAME);
     const QString classifiedPath = dir.filePath(CLASSIFIED_FILE_NAME);
     const QString classifiedNoisePath = dir.filePath(CLASSIFIED_NOISE_FILE_NAME);
     weldPosePath = dir.filePath(WELD_POSE_FILE_NAME);
@@ -3871,6 +4132,10 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     {
         return false;
     }
+    if (!SaveTextLines(keyPointsPath, BuildKeyPointOutputLines(originalAnalysis.keyPoints), error))
+    {
+        return false;
+    }
     if (!SaveTextLines(classifiedNoisePath, BuildNoiseOutputLines(laserFitInput, originalAnalysis.filterResult), error))
     {
         return false;
@@ -3884,6 +4149,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             .arg(originalAnalysis.filterResult.points.size())
             .arg(preservePath));
         appendLog(QString("焊道分类文件：%1").arg(classifiedPath));
+        appendLog(QString("起终点/拐点文件：%1").arg(keyPointsPath));
         appendLog(QString("焊道杂点文件：%1").arg(classifiedNoisePath));
         appendLog(QString("焊接姿态参数：RX=%1, RY=%2, RZ增益=%3 deg, 拐点前过渡=%4 mm, 起点跳过=%5 mm, 终点跳过=%6 mm")
             .arg(weldPosePreset.rx, 0, 'f', 3)
@@ -4012,11 +4278,12 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
         : robotName.trimmed().toStdString();
     const WeldPosePreset preset = LoadWeldPosePreset(param);
 
+    const WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
+    const WeldCornerArcApplyStats arcStats = ApplyCornerArcTransitionToWeldPoseRecords(preset, records);
+
     QStringList outputLines;
     outputLines.reserve(records.size() + 1);
     outputLines << "weld_index raw_index x y z rx ry rz bx by bz point_type segment_kind";
-
-    const WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
     for (const WeldPoseFileRecord& record : records)
     {
         outputLines << BuildWeldPoseFileRecordLine(record);
@@ -4029,7 +4296,7 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
 
     QStringList usedSlots = compStats.usedSlots.values();
     usedSlots.sort();
-    summary = QString("焊道补偿完成：点数=%1，使用槽位=%2，Z补偿点数=%3，枪反向补偿点数=%4，焊道方向补偿点数=%5，自交裁剪=%6次，删除回折点=%7，配置=%8")
+    summary = QString("焊道补偿完成：点数=%1，使用槽位=%2，Z补偿点数=%3，枪反向补偿点数=%4，焊道方向补偿点数=%5，自交裁剪=%6次，删除回折点=%7，圆弧过渡=%8处，半径=%9mm，新增点=%10，配置=%11")
         .arg(records.size())
         .arg(usedSlots.isEmpty() ? QString("无匹配槽位") : usedSlots.join(","))
         .arg(compStats.zAdjustedCount)
@@ -4037,6 +4304,9 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
         .arg(compStats.seamDirAdjustedCount)
         .arg(compStats.selfIntersectionTrimCount)
         .arg(compStats.selfIntersectionRemovedPointCount)
+        .arg(arcStats.roundedCornerCount)
+        .arg(arcStats.radiusMm, 0, 'f', 3)
+        .arg(arcStats.insertedPointCount())
         .arg(QDir::toNativeSeparators(preset.seamCompFilePath));
     return true;
 }

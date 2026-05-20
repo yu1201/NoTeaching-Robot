@@ -117,6 +117,7 @@ public:
         QString error;
         LowerWeldFilterResult filterResult;
         LowerWeldClassificationResult classificationResult;
+        QVector<LowerWeldClassifiedPoint> keyPoints;
     };
 
     static T_ROBOT_COORS InterpolateRobotPose(const std::vector<TimestampedRobotPose>& robotSamples, qint64 targetTimestampUs);
@@ -129,6 +130,9 @@ public:
         const QVector<IndexedPoint3D>& inputPoints,
         const LowerWeldFilterParams& params);
     static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPathDirect(
+        const QVector<IndexedPoint3D>& inputPoints,
+        const LowerWeldFilterParams& params);
+    static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPathGeometry(
         const QVector<IndexedPoint3D>& inputPoints,
         const LowerWeldFilterParams& params);
     static int LowerWeldPointTypeCode(LowerWeldPointType type);

@@ -30,6 +30,7 @@
 #include <QCryptographicHash>
 #include <QDialog>
 #include <QDir>
+#include <QDirIterator>
 #include <QDoubleValidator>
 #include <QFile>
 #include <QFileInfo>
@@ -965,10 +966,35 @@ namespace
 		return info.dir().filePath(info.completeBaseName() + "_Classified.txt");
 	}
 
+	QString BuildGeometryClassifiedOutputPath(const QString& inputPath)
+	{
+		const QFileInfo info(inputPath);
+		return info.dir().filePath(info.completeBaseName() + "_Classified_Geometry.txt");
+	}
+
 	QString BuildNoiseOutputPath(const QString& outputPath)
 	{
 		const QFileInfo info(outputPath);
 		return info.dir().filePath(info.completeBaseName() + "_Noise.txt");
+	}
+
+	QString BuildKeyPointsOutputPath(const QString& classifiedOutputPath)
+	{
+		const QFileInfo info(classifiedOutputPath);
+		QString baseName = info.completeBaseName();
+		if (baseName.contains("_Classified_Geometry"))
+		{
+			baseName.replace("_Classified_Geometry", "_KeyPoints_Geometry");
+		}
+		else if (baseName.contains("_Classified"))
+		{
+			baseName.replace("_Classified", "_KeyPoints");
+		}
+		else
+		{
+			baseName += "_KeyPoints";
+		}
+		return info.dir().filePath(baseName + ".txt");
 	}
 
 	QString AccountManagementConfigPath()
@@ -5683,6 +5709,43 @@ void QtWidgetsApplication4::ApplyStartupArguments(const QStringList& arguments)
 
 void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 {
+	auto containsAnyArgument = [&arguments](std::initializer_list<const char*> names) -> bool
+		{
+			for (const char* name : names)
+			{
+				if (arguments.contains(QString::fromLatin1(name)))
+				{
+					return true;
+				}
+			}
+			return false;
+		};
+
+	const bool opensWindowForCli = containsAnyArgument({
+		"--open-function-test",
+		"--open-jog",
+		"--open-precise-measure",
+		"--open-camera-param"
+		});
+	const bool hasAutoExitCliAction = containsAnyArgument({
+		"--no-show",
+		"--robot-connect",
+		"--robot-movel",
+		"--robot-movel-relative",
+		"--robot-movj",
+		"--fanuc-connect",
+		"--fanuc-upload-services",
+		"--fanuc-curpos-diag",
+		"--fanuc-pr20-diag",
+		"--fanuc-raw",
+		"--fanuc-call",
+		"--measure-then-weld-scan-only-repeat",
+		"--laser-classify",
+		"--laser-classify-dir",
+		"--apply-weld-seam-comp",
+		"--update-weld-pose-average"
+		});
+
 	if (arguments.contains("--help-cli"))
 	{
 		QTextStream out(stdout);
@@ -5711,6 +5774,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --measure-then-weld-scan-speed <mm/min> 覆盖本次CLI先测后焊扫描速度，不修改ini\n";
 		out << "  --measure-then-weld-camera-offset-ms <ms> 覆盖本次CLI相机时间补偿，不修改ini\n";
 		out << "  --laser-classify <FILE>           对激光点云做去噪/拟合/起终点拐点分类\n";
+		out << "  --laser-classify-dir <DIR>        批量处理目录下所有 PreciseLaserPoint.txt\n";
 		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
 		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用 WeldSeamCompParam.ini 补偿\n";
 		out << "  --apply-weld-seam-comp-output <FILE> 指定补偿结果输出文件，默认另存 _SeamComp\n";
@@ -5790,6 +5854,12 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			outputPath = arguments[laserOutputIndex + 1];
 		}
 		RunLaserClassifyForCli(inputPath, outputPath);
+	}
+
+	const int laserClassifyDirIndex = arguments.indexOf("--laser-classify-dir");
+	if (laserClassifyDirIndex >= 0 && laserClassifyDirIndex + 1 < arguments.size())
+	{
+		RunLaserClassifyDirForCli(arguments[laserClassifyDirIndex + 1]);
 	}
 
 	const int weldSeamCompIndex = arguments.indexOf("--apply-weld-seam-comp");
@@ -5910,15 +5980,22 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	}
 
 	const int quitAfterIndex = arguments.indexOf("--quit-after");
+	bool hasExplicitQuitAfter = false;
 	if (quitAfterIndex >= 0 && quitAfterIndex + 1 < arguments.size())
 	{
 		bool ok = false;
 		const int quitAfterMs = arguments[quitAfterIndex + 1].toInt(&ok);
 		if (ok && quitAfterMs >= 0)
 		{
+			hasExplicitQuitAfter = true;
 			LogCommandLineMessage(QString("CLI 动作完成，将在 %1 ms 后退出").arg(quitAfterMs));
 			QTimer::singleShot(quitAfterMs, QCoreApplication::instance(), &QCoreApplication::quit);
 		}
+	}
+	if (!opensWindowForCli && !hasExplicitQuitAfter && hasAutoExitCliAction)
+	{
+		LogCommandLineMessage("CLI 动作完成，自动退出。");
+		QTimer::singleShot(0, QCoreApplication::instance(), &QCoreApplication::quit);
 	}
 }
 
@@ -6402,13 +6479,13 @@ void QtWidgetsApplication4::RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanu
 	}
 }
 
-void QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const
+bool QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const
 {
 	QString normalizedInputPath = QDir::fromNativeSeparators(inputPath.trimmed());
 	if (normalizedInputPath.isEmpty())
 	{
 		LogCommandLineMessage("CLI 激光点云分类失败：输入文件为空。");
-		return;
+		return false;
 	}
 
 	QFileInfo inputInfo(normalizedInputPath);
@@ -6420,7 +6497,7 @@ void QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 	{
 		LogCommandLineMessage(QString("CLI 激光点云分类失败：未找到输入文件 %1")
 			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
-		return;
+		return false;
 	}
 
 	QVector<RobotCalculation::IndexedPoint3D> inputPoints;
@@ -6428,26 +6505,20 @@ void QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 	if (!RobotDataHelper::LoadIndexedPoint3DFile(inputInfo.absoluteFilePath(), inputPoints, &error))
 	{
 		LogCommandLineMessage("CLI 激光点云分类失败：" + error);
-		return;
+		return false;
 	}
 
 	const RobotCalculation::SampleAxis sampleAxis = InferLaserSampleAxis(inputPoints);
 	const RobotCalculation::LowerWeldFilterParams originalParams = BuildCliOriginalTrackFitParams(sampleAxis);
-	const RobotCalculation::LowerWeldFilterResult originalFitResult =
-		RobotCalculation::FilterLowerWeldPath(inputPoints, originalParams);
-	if (!originalFitResult.ok)
+	const RobotCalculation::MeasureThenWeldAnalysisResult analysisResult =
+		RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(inputPoints, originalParams);
+	if (!analysisResult.ok)
 	{
-		LogCommandLineMessage("CLI 激光点云分类失败，原始轨迹拟合失败：" + originalFitResult.error);
-		return;
+		LogCommandLineMessage("CLI 激光点云分类失败，起终点/拐点特征提取失败：" + analysisResult.error);
+		return false;
 	}
-
-	const RobotCalculation::LowerWeldClassificationResult classifiedResult =
-		RobotCalculation::ClassifyLowerWeldPoints(originalFitResult, originalParams.sampleAxis);
-	if (!classifiedResult.ok)
-	{
-		LogCommandLineMessage("CLI 激光点云分类失败，点位分类失败：" + classifiedResult.error);
-		return;
-	}
+	const RobotCalculation::LowerWeldFilterResult& originalFitResult = analysisResult.filterResult;
+	const RobotCalculation::LowerWeldClassificationResult& classifiedResult = analysisResult.classificationResult;
 
 	const QString normalizedOutputPath = outputPath.trimmed().isEmpty()
 		? BuildClassifiedOutputPath(inputInfo.absoluteFilePath())
@@ -6456,6 +6527,7 @@ void QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 		? QFileInfo(normalizedOutputPath).absoluteFilePath()
 		: QFileInfo(QDir::current().filePath(normalizedOutputPath)).absoluteFilePath();
 	const QString noiseOutputPath = BuildNoiseOutputPath(classifiedOutputPath);
+	const QString keyPointsOutputPath = BuildKeyPointsOutputPath(classifiedOutputPath);
 
 	QSet<int> validIndexes;
 	validIndexes.reserve(originalFitResult.points.size());
@@ -6470,6 +6542,27 @@ void QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 	for (const RobotCalculation::LowerWeldClassifiedPoint& point : classifiedResult.points)
 	{
 		classifiedLines << QString("%1 %2 %3 %4 %5 %6 %7")
+			.arg(point.index)
+			.arg(point.point.x(), 0, 'f', 6)
+			.arg(point.point.y(), 0, 'f', 6)
+			.arg(point.point.z(), 0, 'f', 6)
+			.arg(RobotCalculation::LowerWeldPointTypeCode(point.type))
+			.arg(RobotCalculation::LowerWeldPointTypeName(point.type))
+			.arg(point.source.isEmpty() ? "-" : point.source);
+	}
+
+	QStringList keyPointLines;
+	keyPointLines << "# source_index x y z type_code type_name source";
+	keyPointLines << "# 1=start 2=end 3=inner_corner 4=outer_corner";
+	for (const RobotCalculation::LowerWeldClassifiedPoint& point : analysisResult.keyPoints)
+	{
+		if (point.type == RobotCalculation::LowerWeldPointType::Normal
+			|| point.type == RobotCalculation::LowerWeldPointType::Noise)
+		{
+			continue;
+		}
+
+		keyPointLines << QString("%1 %2 %3 %4 %5 %6 %7")
 			.arg(point.index)
 			.arg(point.point.x(), 0, 'f', 6)
 			.arg(point.point.y(), 0, 'f', 6)
@@ -6504,15 +6597,20 @@ void QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 	if (!RobotDataHelper::SaveTextFileLines(classifiedOutputPath, classifiedLines, &error))
 	{
 		LogCommandLineMessage("CLI 激光点云分类失败，保存分类文件失败：" + error);
-		return;
+		return false;
+	}
+	if (!RobotDataHelper::SaveTextFileLines(keyPointsOutputPath, keyPointLines, &error))
+	{
+		LogCommandLineMessage("CLI 激光点云分类失败，保存起终点/拐点文件失败：" + error);
+		return false;
 	}
 	if (!RobotDataHelper::SaveTextFileLines(noiseOutputPath, noiseLines, &error))
 	{
 		LogCommandLineMessage("CLI 激光点云分类失败，保存杂点文件失败：" + error);
-		return;
+		return false;
 	}
 
-	LogCommandLineMessage(QString("CLI 激光点云分类完成（原始拟合）：输入=%1，主轴=%2，分类点=%3，杂点=%4")
+	LogCommandLineMessage(QString("CLI 激光点云分类完成（起终点/拐点特征）：输入=%1，主轴=%2，分类点=%3，杂点=%4")
 		.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath()))
 		.arg(sampleAxis == RobotCalculation::SampleAxis::AxisX ? "X" : "Y")
 		.arg(classifiedResult.points.size())
@@ -6525,8 +6623,68 @@ void QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 		.arg(classifiedResult.normalCount));
 	LogCommandLineMessage(QString("CLI 分类结果文件：%1")
 		.arg(QDir::toNativeSeparators(classifiedOutputPath)));
+	LogCommandLineMessage(QString("CLI 起终点/拐点文件：%1")
+		.arg(QDir::toNativeSeparators(keyPointsOutputPath)));
 	LogCommandLineMessage(QString("CLI 杂点文件：%1")
 		.arg(QDir::toNativeSeparators(noiseOutputPath)));
+	return true;
+}
+
+void QtWidgetsApplication4::RunLaserClassifyDirForCli(const QString& dirPath) const
+{
+	QString normalizedDirPath = QDir::fromNativeSeparators(dirPath.trimmed());
+	if (normalizedDirPath.isEmpty())
+	{
+		LogCommandLineMessage("CLI 批量激光点云分类失败：目录为空。");
+		return;
+	}
+
+	QDir rootDir(normalizedDirPath);
+	if (!rootDir.isAbsolute())
+	{
+		rootDir = QDir(QDir::current().filePath(normalizedDirPath));
+	}
+	if (!rootDir.exists())
+	{
+		LogCommandLineMessage(QString("CLI 批量激光点云分类失败：未找到目录 %1")
+			.arg(QDir::toNativeSeparators(rootDir.absolutePath())));
+		return;
+	}
+
+	int totalCount = 0;
+	int successCount = 0;
+	QStringList failedFiles;
+	QDirIterator iterator(
+		rootDir.absolutePath(),
+		QStringList() << "PreciseLaserPoint.txt",
+		QDir::Files,
+		QDirIterator::Subdirectories);
+	while (iterator.hasNext())
+	{
+		const QString inputFilePath = iterator.next();
+		const QString outputFilePath = BuildGeometryClassifiedOutputPath(inputFilePath);
+		++totalCount;
+		if (RunLaserClassifyForCli(inputFilePath, outputFilePath))
+		{
+			++successCount;
+			continue;
+		}
+		failedFiles << QDir::toNativeSeparators(inputFilePath);
+	}
+
+	LogCommandLineMessage(QString("CLI 批量激光点云分类完成：目录=%1，总数=%2，成功=%3，失败=%4")
+		.arg(QDir::toNativeSeparators(rootDir.absolutePath()))
+		.arg(totalCount)
+		.arg(successCount)
+		.arg(failedFiles.size()));
+	if (!failedFiles.isEmpty())
+	{
+		LogCommandLineMessage("CLI 批量失败文件：");
+		for (const QString& failedFile : failedFiles)
+		{
+			LogCommandLineMessage("  " + failedFile);
+		}
+	}
 }
 
 void QtWidgetsApplication4::RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const
