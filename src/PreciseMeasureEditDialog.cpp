@@ -379,6 +379,7 @@ QString PreciseParamDisplayName(const QString& key)
         { "NormalWeldRx", "平焊RX" },
         { "NormalWeldRy", "平焊RY" },
         { "CornerTransitionLeadDis", "拐点过渡距离" },
+        { "CornerArcRadiusMm", "拐点圆弧半径" },
         { "WeldStartSkipDis", "起点跳过距离" },
         { "WeldEndSkipDis", "终点跳过距离" },
         { "WeldRzGainDeg", "焊接RZ增益" },
@@ -926,7 +927,7 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
         }
         if (weldLines.isEmpty())
         {
-            weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
+            weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "CornerArcRadiusMm=2" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
         }
 
         output << QString("[%1]").arg(RobotDataHelper::MeasureWeldScanSectionName(newIndex));
@@ -1672,7 +1673,7 @@ bool PreciseMeasureEditDialog::CreateParamGroup(bool copyCurrent, QString& error
     }
     if (weldLines.isEmpty())
     {
-        weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
+        weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "CornerArcRadiusMm=2" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
     }
 
     if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "GroupCount", QString::number(newIndex + 1), &error)

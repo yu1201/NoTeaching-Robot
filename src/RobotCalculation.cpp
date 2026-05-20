@@ -1,10 +1,11 @@
 #include "RobotCalculation.h"
 #include "RobotPoseTransform.h"
-#include "SkFunction.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+
+#include <QPair>
 
 namespace
 {
@@ -27,24 +28,6 @@ Eigen::Vector3d SetSampleAxisValue(const Eigen::Vector3d& point, RobotCalculatio
     return adjusted;
 }
 
-RobotCalculation::LowerWeldPointType GroovePointTypeForIndex(int index, int totalCount)
-{
-    using PointType = RobotCalculation::LowerWeldPointType;
-    if (totalCount <= 0)
-    {
-        return PointType::Normal;
-    }
-    if (index <= 0)
-    {
-        return PointType::Start;
-    }
-    if (index >= totalCount - 1)
-    {
-        return PointType::End;
-    }
-    return (index % 2 == 1) ? PointType::InnerCorner : PointType::OuterCorner;
-}
-
 void AppendExpandedGroovePoint(
     QVector<RobotCalculation::LowerWeldClassifiedPoint>& points,
     int& nextIndex,
@@ -60,19 +43,2152 @@ void AppendExpandedGroovePoint(
     points.push_back(classifiedPoint);
 }
 
-std::vector<SkPoint3D> ToSkPoint3DList(const QVector<RobotCalculation::IndexedPoint3D>& inputPoints)
+struct GeometryProjectedPoint
 {
-    std::vector<SkPoint3D> points;
-    points.reserve(static_cast<size_t>(inputPoints.size()));
-    for (const RobotCalculation::IndexedPoint3D& inputPoint : inputPoints)
+    int inputIndex = 0;
+    Eigen::Vector3d point = Eigen::Vector3d::Zero();
+    double s = 0.0;
+    double h = 0.0;
+    double n = 0.0;
+    double smoothH = 0.0;
+    double smoothN = 0.0;
+};
+
+Eigen::Vector3d UnitAxis(int dimension)
+{
+    Eigen::Vector3d axis = Eigen::Vector3d::Zero();
+    axis(std::max(0, std::min(2, dimension))) = 1.0;
+    return axis;
+}
+
+int DominantDimension(const Eigen::Vector3d& axis)
+{
+    int dimension = 0;
+    double value = std::abs(axis.x());
+    if (std::abs(axis.y()) > value)
     {
-        points.emplace_back(
-            inputPoint.point.x(),
-            inputPoint.point.y(),
-            inputPoint.point.z(),
-            inputPoint.index);
+        dimension = 1;
+        value = std::abs(axis.y());
     }
-    return points;
+    if (std::abs(axis.z()) > value)
+    {
+        dimension = 2;
+    }
+    return dimension;
+}
+
+QPair<Eigen::Vector3d, Eigen::Vector3d> BuildGeometryAxes(
+    const QVector<RobotCalculation::IndexedPoint3D>& validPoints,
+    const Eigen::Vector3d& center)
+{
+    Eigen::Vector3d mainAxis = Eigen::Vector3d::UnitY();
+    Eigen::Vector3d sideAxis = Eigen::Vector3d::UnitX();
+
+    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+    for (const RobotCalculation::IndexedPoint3D& sample : validPoints)
+    {
+        const Eigen::Vector3d delta = sample.point - center;
+        covariance += delta * delta.transpose();
+    }
+    covariance /= static_cast<double>(std::max(1, static_cast<int>(validPoints.size())));
+
+    bool hasPcaAxes = false;
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+    if (solver.info() == Eigen::Success)
+    {
+        mainAxis = solver.eigenvectors().col(2);
+        sideAxis = solver.eigenvectors().col(1);
+        hasPcaAxes = mainAxis.squaredNorm() > std::numeric_limits<double>::epsilon()
+            && sideAxis.squaredNorm() > std::numeric_limits<double>::epsilon();
+    }
+
+    if (!hasPcaAxes)
+    {
+        Eigen::Vector3d minPoint = validPoints.first().point;
+        Eigen::Vector3d maxPoint = validPoints.first().point;
+        for (const RobotCalculation::IndexedPoint3D& sample : validPoints)
+        {
+            minPoint = minPoint.cwiseMin(sample.point);
+            maxPoint = maxPoint.cwiseMax(sample.point);
+        }
+
+        const Eigen::Vector3d ranges = maxPoint - minPoint;
+        int mainDimension = 0;
+        if (ranges.y() > ranges.x())
+        {
+            mainDimension = 1;
+        }
+        if (ranges.z() > ranges(mainDimension))
+        {
+            mainDimension = 2;
+        }
+
+        int sideDimension = mainDimension == 0 ? 1 : 0;
+        for (int dimension = 0; dimension < 3; ++dimension)
+        {
+            if (dimension != mainDimension && ranges(dimension) > ranges(sideDimension))
+            {
+                sideDimension = dimension;
+            }
+        }
+
+        mainAxis = UnitAxis(mainDimension);
+        sideAxis = UnitAxis(sideDimension);
+    }
+
+    if (mainAxis.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        mainAxis = Eigen::Vector3d::UnitY();
+    }
+    mainAxis.normalize();
+
+    const Eigen::Vector3d scanDelta = validPoints.last().point - validPoints.first().point;
+    if (mainAxis.dot(scanDelta) < 0.0)
+    {
+        mainAxis = -mainAxis;
+    }
+
+    sideAxis -= mainAxis * sideAxis.dot(mainAxis);
+    if (sideAxis.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        sideAxis = UnitAxis((DominantDimension(mainAxis) + 1) % 3);
+        sideAxis -= mainAxis * sideAxis.dot(mainAxis);
+    }
+    if (sideAxis.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        sideAxis = Eigen::Vector3d::UnitX();
+    }
+    sideAxis.normalize();
+
+    const int dominantSideDimension = DominantDimension(sideAxis);
+    if (sideAxis(dominantSideDimension) < 0.0)
+    {
+        sideAxis = -sideAxis;
+    }
+
+    return qMakePair(mainAxis, sideAxis);
+}
+
+void SmoothGeometryProjectedPoints(QVector<GeometryProjectedPoint>* projected, int smoothRadius)
+{
+    if (projected == nullptr || projected->isEmpty())
+    {
+        return;
+    }
+
+    const int radius = std::max(1, std::min(8, smoothRadius));
+    const QVector<GeometryProjectedPoint> source = *projected;
+    const int projectedCount = static_cast<int>(source.size());
+    for (int index = 0; index < projectedCount; ++index)
+    {
+        const int begin = std::max(0, index - radius);
+        const int end = std::min(projectedCount - 1, index + radius);
+        double sideSum = 0.0;
+        double normalSum = 0.0;
+        int count = 0;
+        for (int sampleIndex = begin; sampleIndex <= end; ++sampleIndex)
+        {
+            sideSum += source[sampleIndex].h;
+            normalSum += source[sampleIndex].n;
+            ++count;
+        }
+        (*projected)[index].smoothH = count > 0 ? sideSum / static_cast<double>(count) : source[index].h;
+        (*projected)[index].smoothN = count > 0 ? normalSum / static_cast<double>(count) : source[index].n;
+    }
+}
+
+QVector<GeometryProjectedPoint> ProjectGeometryPoints(
+    const QVector<RobotCalculation::IndexedPoint3D>& validPoints,
+    const Eigen::Vector3d& center,
+    const Eigen::Vector3d& mainAxis,
+    const Eigen::Vector3d& sideAxis,
+    const Eigen::Vector3d& normalAxis,
+    int smoothRadius)
+{
+    QVector<GeometryProjectedPoint> projected;
+    projected.reserve(validPoints.size());
+    for (const RobotCalculation::IndexedPoint3D& sample : validPoints)
+    {
+        const Eigen::Vector3d delta = sample.point - center;
+        GeometryProjectedPoint point;
+        point.inputIndex = sample.index;
+        point.point = sample.point;
+        point.s = delta.dot(mainAxis);
+        point.h = delta.dot(sideAxis);
+        point.n = delta.dot(normalAxis);
+        point.smoothH = point.h;
+        point.smoothN = point.n;
+        projected.push_back(point);
+    }
+
+    SmoothGeometryProjectedPoints(&projected, smoothRadius);
+    return projected;
+}
+
+double GeometryDistanceToSegment2D(
+    const QVector<GeometryProjectedPoint>& points,
+    int first,
+    int last,
+    int index)
+{
+    const double x1 = points[first].s;
+    const double y1 = points[first].smoothH;
+    const double x2 = points[last].s;
+    const double y2 = points[last].smoothH;
+    const double x0 = points[index].s;
+    const double y0 = points[index].smoothH;
+
+    const double dx = x2 - x1;
+    const double dy = y2 - y1;
+    const double denominator = dx * dx + dy * dy;
+    if (denominator <= std::numeric_limits<double>::epsilon())
+    {
+        const double px = x0 - x1;
+        const double py = y0 - y1;
+        return std::sqrt(px * px + py * py);
+    }
+
+    const double ratio = ((x0 - x1) * dx + (y0 - y1) * dy) / denominator;
+    const double projectedX = x1 + ratio * dx;
+    const double projectedY = y1 + ratio * dy;
+    const double px = x0 - projectedX;
+    const double py = y0 - projectedY;
+    return std::sqrt(px * px + py * py);
+}
+
+void DouglasPeuckerGeometry(
+    const QVector<GeometryProjectedPoint>& points,
+    int first,
+    int last,
+    double tolerance,
+    QVector<char>& keep)
+{
+    if (last <= first + 1)
+    {
+        return;
+    }
+
+    double maxDistance = -1.0;
+    int maxIndex = -1;
+    for (int index = first + 1; index < last; ++index)
+    {
+        const double distance = GeometryDistanceToSegment2D(points, first, last, index);
+        if (distance > maxDistance)
+        {
+            maxDistance = distance;
+            maxIndex = index;
+        }
+    }
+
+    if (maxIndex >= 0 && maxDistance > tolerance)
+    {
+        keep[maxIndex] = 1;
+        DouglasPeuckerGeometry(points, first, maxIndex, tolerance, keep);
+        DouglasPeuckerGeometry(points, maxIndex, last, tolerance, keep);
+    }
+}
+
+QVector<int> BuildGeometryKeyIndexes(
+    const QVector<GeometryProjectedPoint>& projected,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    QVector<int> keyIndexes;
+    if (projected.isEmpty())
+    {
+        return keyIndexes;
+    }
+    if (projected.size() == 1)
+    {
+        keyIndexes.push_back(0);
+        return keyIndexes;
+    }
+
+    const double tolerance = std::max(0.5, std::min(8.0, params.piecewiseFitTolerance > 0.0
+        ? params.piecewiseFitTolerance
+        : 2.0));
+    QVector<char> keep(projected.size(), 0);
+    keep[0] = 1;
+    keep[projected.size() - 1] = 1;
+    DouglasPeuckerGeometry(projected, 0, projected.size() - 1, tolerance, keep);
+
+    for (int index = 0; index < keep.size(); ++index)
+    {
+        if (keep[index])
+        {
+            keyIndexes.push_back(index);
+        }
+    }
+
+    const double minSegmentLength = std::max(4.0, params.sampleStep * 2.0);
+    bool removed = true;
+    while (removed && keyIndexes.size() > 2)
+    {
+        removed = false;
+        for (int index = 1; index + 1 < keyIndexes.size(); ++index)
+        {
+            const Eigen::Vector3d& previous = projected[keyIndexes[index - 1]].point;
+            const Eigen::Vector3d& current = projected[keyIndexes[index]].point;
+            const Eigen::Vector3d& next = projected[keyIndexes[index + 1]].point;
+            if ((current - previous).norm() < minSegmentLength || (next - current).norm() < minSegmentLength)
+            {
+                keyIndexes.removeAt(index);
+                removed = true;
+                break;
+            }
+        }
+    }
+
+    if (keyIndexes.size() < 2)
+    {
+        keyIndexes.clear();
+        keyIndexes.push_back(0);
+        keyIndexes.push_back(projected.size() - 1);
+    }
+
+    return keyIndexes;
+}
+
+double GeometrySmoothHRange(const QVector<GeometryProjectedPoint>& projected)
+{
+    if (projected.isEmpty())
+    {
+        return 0.0;
+    }
+
+    double minValue = projected.first().smoothH;
+    double maxValue = projected.first().smoothH;
+    for (const GeometryProjectedPoint& point : projected)
+    {
+        minValue = std::min(minValue, point.smoothH);
+        maxValue = std::max(maxValue, point.smoothH);
+    }
+    return maxValue - minValue;
+}
+
+double GeometrySmoothHMedian(const QVector<GeometryProjectedPoint>& projected)
+{
+    QVector<double> values;
+    values.reserve(projected.size());
+    for (const GeometryProjectedPoint& point : projected)
+    {
+        values.push_back(point.smoothH);
+    }
+    if (values.isEmpty())
+    {
+        return 0.0;
+    }
+
+    std::sort(values.begin(), values.end());
+    const int middle = values.size() / 2;
+    if (values.size() % 2 == 1)
+    {
+        return values[middle];
+    }
+    return (values[middle - 1] + values[middle]) * 0.5;
+}
+
+QVector<int> PruneRedundantSameSideGeometryKeys(
+    const QVector<GeometryProjectedPoint>& projected,
+    QVector<int> keyIndexes)
+{
+    if (keyIndexes.size() <= 4)
+    {
+        return keyIndexes;
+    }
+
+    const double medianH = GeometrySmoothHMedian(projected);
+    const double sideDeadband = std::max(0.5, GeometrySmoothHRange(projected) * 0.05);
+    auto sideSign = [&](int keyIndex) -> int
+    {
+        const double delta = projected[keyIndex].smoothH - medianH;
+        if (delta > sideDeadband)
+        {
+            return 1;
+        }
+        if (delta < -sideDeadband)
+        {
+            return -1;
+        }
+        return 0;
+    };
+
+    bool removed = true;
+    while (removed && keyIndexes.size() > 4)
+    {
+        removed = false;
+        for (int index = 1; index + 1 < keyIndexes.size() - 1; ++index)
+        {
+            const int previousSign = sideSign(keyIndexes[index - 1]);
+            const int currentSign = sideSign(keyIndexes[index]);
+            const int nextSign = sideSign(keyIndexes[index + 1]);
+            if (currentSign == 0 || previousSign != currentSign || nextSign != currentSign)
+            {
+                continue;
+            }
+
+            // A corrugated seam needs both ends of a high/low platform. A third
+            // key on the same side is usually a small kink inside that platform,
+            // and keeping it creates crossed 2 mm expansion segments.
+            keyIndexes.removeAt(index);
+            removed = true;
+            break;
+        }
+    }
+
+    return keyIndexes;
+}
+
+struct GeometryFittedLine2D
+{
+    Eigen::Vector2d point = Eigen::Vector2d::Zero();
+    Eigen::Vector2d direction = Eigen::Vector2d::UnitX();
+    bool valid = false;
+};
+
+struct GeometryFittedScalarLine
+{
+    double centerS = 0.0;
+    double centerValue = 0.0;
+    double slope = 0.0;
+    bool valid = false;
+
+    double valueAt(double station) const
+    {
+        return centerValue + slope * (station - centerS);
+    }
+};
+
+double Cross2D(const Eigen::Vector2d& first, const Eigen::Vector2d& second)
+{
+    return first.x() * second.y() - first.y() * second.x();
+}
+
+double GeometryMedianScalar(QVector<double> values);
+
+Eigen::Vector2d GeometryProjection2D(const GeometryProjectedPoint& point)
+{
+    return Eigen::Vector2d(point.s, point.h);
+}
+
+Eigen::Vector2d GeometrySmoothedProjection2D(const GeometryProjectedPoint& point)
+{
+    return Eigen::Vector2d(point.s, point.smoothH);
+}
+
+double GeometryPointToSegmentDistance2D(
+    const Eigen::Vector2d& point,
+    const Eigen::Vector2d& first,
+    const Eigen::Vector2d& second)
+{
+    const Eigen::Vector2d segment = second - first;
+    const double denominator = segment.squaredNorm();
+    if (denominator <= std::numeric_limits<double>::epsilon())
+    {
+        return (point - first).norm();
+    }
+
+    const double ratio = std::max(0.0, std::min(1.0, (point - first).dot(segment) / denominator));
+    return (point - (first + segment * ratio)).norm();
+}
+
+double NearestGeometryProjectionDistance(
+    const QVector<GeometryProjectedPoint>& projected,
+    const Eigen::Vector2d& projection,
+    int firstIndex,
+    int lastIndex)
+{
+    if (projected.isEmpty())
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const int begin = std::max(0, std::min(firstIndex, lastIndex));
+    const int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    double nearestDistance = std::numeric_limits<double>::infinity();
+    for (int index = begin; index <= end; ++index)
+    {
+        nearestDistance = std::min(
+            nearestDistance,
+            (GeometrySmoothedProjection2D(projected[index]) - projection).norm());
+    }
+    return nearestDistance;
+}
+
+bool GeometryLocalMainBand(
+    const QVector<GeometryProjectedPoint>& projected,
+    double station,
+    double stationRadius,
+    double baseThreshold,
+    double* medianH,
+    double* threshold,
+    int* supportCount)
+{
+    QVector<double> values;
+    values.reserve(32);
+    for (const GeometryProjectedPoint& point : projected)
+    {
+        if (std::abs(point.s - station) <= stationRadius)
+        {
+            values.push_back(point.smoothH);
+        }
+    }
+    if (values.size() < 8)
+    {
+        return false;
+    }
+
+    const double medianValue = GeometryMedianScalar(values);
+    QVector<double> deviations;
+    deviations.reserve(values.size());
+    for (double value : values)
+    {
+        deviations.push_back(std::abs(value - medianValue));
+    }
+
+    const double madValue = GeometryMedianScalar(deviations);
+    const double thresholdValue = std::max(baseThreshold, std::min(8.0, madValue * 4.0 + 0.8));
+    int support = 0;
+    for (double value : values)
+    {
+        if (std::abs(value - medianValue) <= thresholdValue)
+        {
+            ++support;
+        }
+    }
+
+    if (support * 2 < values.size())
+    {
+        return false;
+    }
+
+    if (medianH != nullptr)
+    {
+        *medianH = medianValue;
+    }
+    if (threshold != nullptr)
+    {
+        *threshold = thresholdValue;
+    }
+    if (supportCount != nullptr)
+    {
+        *supportCount = support;
+    }
+    return true;
+}
+
+Eigen::Vector3d GeometryPointFromProjection(
+    const Eigen::Vector3d& center,
+    const Eigen::Vector3d& mainAxis,
+    const Eigen::Vector3d& sideAxis,
+    const Eigen::Vector3d& normalAxis,
+    const Eigen::Vector2d& projection,
+    double normalValue)
+{
+    return center
+        + mainAxis * projection.x()
+        + sideAxis * projection.y()
+        + normalAxis * normalValue;
+}
+
+GeometryFittedLine2D FitGeometrySegmentLine(
+    const QVector<GeometryProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex)
+{
+    GeometryFittedLine2D line;
+    if (projected.isEmpty())
+    {
+        return line;
+    }
+
+    const int begin = std::max(0, std::min(firstIndex, lastIndex));
+    const int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    const int pointCount = end - begin + 1;
+    if (pointCount <= 1)
+    {
+        return line;
+    }
+
+    // Trim a small transition area near corners, but keep enough samples for
+    // short segments. The fitted line represents the local straight edge, not
+    // the rounded/noisy turning area.
+    const int trim = pointCount >= 12 ? std::min(pointCount / 6, 8) : 0;
+    const int fitBegin = begin + trim;
+    const int fitEnd = end - trim;
+    const int fitCount = fitEnd - fitBegin + 1;
+    if (fitCount < 2)
+    {
+        const Eigen::Vector2d p0 = GeometrySmoothedProjection2D(projected[begin]);
+        const Eigen::Vector2d p1 = GeometrySmoothedProjection2D(projected[end]);
+        const Eigen::Vector2d direction = p1 - p0;
+        if (direction.squaredNorm() <= std::numeric_limits<double>::epsilon())
+        {
+            return line;
+        }
+        line.point = (p0 + p1) * 0.5;
+        line.direction = direction.normalized();
+        line.valid = true;
+        return line;
+    }
+
+    Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        centroid += GeometrySmoothedProjection2D(projected[index]);
+    }
+    centroid /= static_cast<double>(fitCount);
+
+    Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero();
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        const Eigen::Vector2d delta = GeometrySmoothedProjection2D(projected[index]) - centroid;
+        covariance += delta * delta.transpose();
+    }
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(covariance);
+    if (solver.info() == Eigen::Success)
+    {
+        line.direction = solver.eigenvectors().col(1);
+    }
+    else
+    {
+        line.direction = GeometrySmoothedProjection2D(projected[end]) - GeometrySmoothedProjection2D(projected[begin]);
+    }
+
+    if (line.direction.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        return line;
+    }
+    line.direction.normalize();
+
+    const Eigen::Vector2d segmentDirection = GeometrySmoothedProjection2D(projected[end]) - GeometrySmoothedProjection2D(projected[begin]);
+    if (line.direction.dot(segmentDirection) < 0.0)
+    {
+        line.direction = -line.direction;
+    }
+
+    line.point = centroid;
+    line.valid = true;
+    return line;
+}
+
+double GeometryMedianScalar(QVector<double> values)
+{
+    if (values.isEmpty())
+    {
+        return 0.0;
+    }
+    std::sort(values.begin(), values.end());
+    const int middle = values.size() / 2;
+    if ((values.size() % 2) == 1)
+    {
+        return values[middle];
+    }
+    return (values[middle - 1] + values[middle]) * 0.5;
+}
+
+double GeometryMedianSmoothHInRange(
+    const QVector<GeometryProjectedPoint>& projected,
+    int begin,
+    int end)
+{
+    QVector<double> values;
+    const int clampedBegin = std::max(0, begin);
+    const int clampedEnd = std::min(static_cast<int>(projected.size()) - 1, end);
+    if (clampedEnd < clampedBegin)
+    {
+        return 0.0;
+    }
+
+    values.reserve(clampedEnd - clampedBegin + 1);
+    for (int index = clampedBegin; index <= clampedEnd; ++index)
+    {
+        values.push_back(projected[index].smoothH);
+    }
+    return GeometryMedianScalar(values);
+}
+
+double GeometryMadSmoothHInRange(
+    const QVector<GeometryProjectedPoint>& projected,
+    int begin,
+    int end,
+    double medianValue)
+{
+    QVector<double> deviations;
+    const int clampedBegin = std::max(0, begin);
+    const int clampedEnd = std::min(static_cast<int>(projected.size()) - 1, end);
+    if (clampedEnd < clampedBegin)
+    {
+        return 0.0;
+    }
+
+    deviations.reserve(clampedEnd - clampedBegin + 1);
+    for (int index = clampedBegin; index <= clampedEnd; ++index)
+    {
+        deviations.push_back(std::abs(projected[index].smoothH - medianValue));
+    }
+    return GeometryMedianScalar(deviations);
+}
+
+double GeometryMedianSmoothNInRange(
+    const QVector<GeometryProjectedPoint>& projected,
+    int begin,
+    int end)
+{
+    QVector<double> values;
+    const int clampedBegin = std::max(0, begin);
+    const int clampedEnd = std::min(static_cast<int>(projected.size()) - 1, end);
+    if (clampedEnd < clampedBegin)
+    {
+        return 0.0;
+    }
+
+    values.reserve(clampedEnd - clampedBegin + 1);
+    for (int index = clampedBegin; index <= clampedEnd; ++index)
+    {
+        values.push_back(projected[index].smoothN);
+    }
+    return GeometryMedianScalar(values);
+}
+
+double GeometryMadSmoothNInRange(
+    const QVector<GeometryProjectedPoint>& projected,
+    int begin,
+    int end,
+    double medianValue)
+{
+    QVector<double> deviations;
+    const int clampedBegin = std::max(0, begin);
+    const int clampedEnd = std::min(static_cast<int>(projected.size()) - 1, end);
+    if (clampedEnd < clampedBegin)
+    {
+        return 0.0;
+    }
+
+    deviations.reserve(clampedEnd - clampedBegin + 1);
+    for (int index = clampedBegin; index <= clampedEnd; ++index)
+    {
+        deviations.push_back(std::abs(projected[index].smoothN - medianValue));
+    }
+    return GeometryMedianScalar(deviations);
+}
+
+double GeometryLocalNormalValue(
+    const QVector<GeometryProjectedPoint>& projected,
+    int fallbackIndex,
+    double station,
+    double stationRadius,
+    double baseThreshold)
+{
+    if (projected.isEmpty())
+    {
+        return 0.0;
+    }
+
+    const int clampedFallback = std::max(0, std::min(fallbackIndex, static_cast<int>(projected.size()) - 1));
+    double mainBandH = 0.0;
+    double mainBandThreshold = 0.0;
+    const bool hasMainBand = GeometryLocalMainBand(
+        projected,
+        station,
+        stationRadius,
+        baseThreshold,
+        &mainBandH,
+        &mainBandThreshold,
+        nullptr);
+
+    QVector<double> values;
+    values.reserve(32);
+    for (const GeometryProjectedPoint& point : projected)
+    {
+        if (std::abs(point.s - station) > stationRadius)
+        {
+            continue;
+        }
+        if (hasMainBand && std::abs(point.smoothH - mainBandH) > mainBandThreshold * 1.35)
+        {
+            continue;
+        }
+        values.push_back(point.smoothN);
+    }
+
+    if (values.size() >= 4)
+    {
+        return GeometryMedianScalar(values);
+    }
+
+    values.clear();
+    const int indexRadius = 8;
+    const int begin = std::max(0, clampedFallback - indexRadius);
+    const int end = std::min(static_cast<int>(projected.size()) - 1, clampedFallback + indexRadius);
+    values.reserve(end - begin + 1);
+    for (int index = begin; index <= end; ++index)
+    {
+        values.push_back(projected[index].smoothN);
+    }
+
+    return values.isEmpty() ? projected[clampedFallback].smoothN : GeometryMedianScalar(values);
+}
+
+QVector<int> PruneGeometrySpikeDrivenKeys(
+    const QVector<GeometryProjectedPoint>& projected,
+    QVector<int> keyIndexes,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    if (projected.size() < 24 || keyIndexes.size() <= 3)
+    {
+        return keyIndexes;
+    }
+
+    const int projectedCount = static_cast<int>(projected.size());
+    const int smoothRadius = std::max(1, params.smoothRadius);
+    const int baselineRadius = std::max(18, std::min(90, smoothRadius * 8 + 26));
+    const int guardCount = std::max(4, std::min(14, baselineRadius / 5));
+    const double baseThreshold = std::max(1.8, std::min(6.0, params.piecewiseFitTolerance * 1.4 + 0.8));
+    const double maxSpikeSpan = std::max(10.0, std::min(48.0, params.sampleStep * 20.0));
+
+    bool removed = true;
+    while (removed && keyIndexes.size() > 3)
+    {
+        removed = false;
+        for (int keyPosition = 1; keyPosition + 1 < keyIndexes.size(); ++keyPosition)
+        {
+            const int keyIndex = keyIndexes[keyPosition];
+            if (keyIndex <= guardCount || keyIndex + guardCount >= projectedCount)
+            {
+                continue;
+            }
+
+            const int previousKey = keyIndexes[keyPosition - 1];
+            const int nextKey = keyIndexes[keyPosition + 1];
+            const double previousSpan = std::abs(projected[keyIndex].s - projected[previousKey].s);
+            const double nextSpan = std::abs(projected[nextKey].s - projected[keyIndex].s);
+            if (previousSpan < params.sampleStep * 2.0 || nextSpan < params.sampleStep * 2.0)
+            {
+                continue;
+            }
+
+            const int leftBegin = std::max(previousKey, keyIndex - baselineRadius);
+            const int leftEnd = keyIndex - guardCount;
+            const int rightBegin = keyIndex + guardCount;
+            const int rightEnd = std::min(nextKey, keyIndex + baselineRadius);
+            if (leftEnd - leftBegin + 1 < 5 || rightEnd - rightBegin + 1 < 5)
+            {
+                continue;
+            }
+
+            const double leftMedian = GeometryMedianSmoothHInRange(projected, leftBegin, leftEnd);
+            const double rightMedian = GeometryMedianSmoothHInRange(projected, rightBegin, rightEnd);
+            const double baseline = (leftMedian + rightMedian) * 0.5;
+            const double localMedian = GeometryMedianSmoothHInRange(projected, leftBegin, rightEnd);
+            const double localMad = GeometryMadSmoothHInRange(projected, leftBegin, rightEnd, localMedian);
+            const double threshold = std::max(baseThreshold, std::min(8.0, localMad * 3.5 + 0.8));
+            const double sideGap = std::abs(leftMedian - rightMedian);
+            const double prominence = std::abs(projected[keyIndex].smoothH - baseline);
+
+            // Real corrugation corners change the baseline on both sides. A short
+            // lifted branch/noise island usually has similar side baselines and a
+            // single high/low key in the middle; do not let that key anchor the
+            // expanded weld line.
+            if (sideGap > threshold * 1.35 || prominence < threshold * 1.35)
+            {
+                continue;
+            }
+
+            const int sign = projected[keyIndex].smoothH >= baseline ? 1 : -1;
+            int runBegin = keyIndex;
+            int runEnd = keyIndex;
+            while (runBegin - 1 > previousKey
+                && sign * (projected[runBegin - 1].smoothH - baseline) > threshold * 0.75)
+            {
+                --runBegin;
+            }
+            while (runEnd + 1 < nextKey
+                && sign * (projected[runEnd + 1].smoothH - baseline) > threshold * 0.75)
+            {
+                ++runEnd;
+            }
+
+            const double runSpan = std::abs(projected[runEnd].s - projected[runBegin].s);
+            const int runCount = runEnd - runBegin + 1;
+            if (runSpan <= maxSpikeSpan || runCount <= 24)
+            {
+                keyIndexes.removeAt(keyPosition);
+                removed = true;
+                break;
+            }
+        }
+    }
+
+    return keyIndexes;
+}
+
+QVector<GeometryProjectedPoint> RemoveGeometryProjectedBranchOutliers(
+    const QVector<GeometryProjectedPoint>& projected,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    int* rejectedCount)
+{
+    if (rejectedCount != nullptr)
+    {
+        *rejectedCount = 0;
+    }
+    if (projected.size() < 32)
+    {
+        return projected;
+    }
+
+    QVector<GeometryProjectedPoint> current = projected;
+    int totalRejected = 0;
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        const int projectedCount = static_cast<int>(current.size());
+        const int smoothRadius = std::max(1, params.smoothRadius);
+        const int baselineRadius = std::max(24, std::min(120, smoothRadius * 10 + 34));
+        const int guardCount = std::max(5, std::min(18, baselineRadius / 5));
+        const double baseThreshold = std::max(1.6, std::min(5.5, params.piecewiseFitTolerance * 1.25 + 0.7));
+        const double maxBranchSpan = std::max(28.0, std::min(110.0, params.sampleStep * 45.0));
+        const double sameStationRadius = std::max(6.0, std::min(36.0, params.sampleStep * 18.0));
+        const int minSameStationNeighborCount = 10;
+
+        QVector<char> candidate(projectedCount, 0);
+        for (int index = guardCount; index + guardCount < projectedCount; ++index)
+        {
+            const int leftBegin = std::max(0, index - baselineRadius);
+            const int leftEnd = index - guardCount;
+            const int rightBegin = index + guardCount;
+            const int rightEnd = std::min(projectedCount - 1, index + baselineRadius);
+            if (leftEnd - leftBegin + 1 < 6 || rightEnd - rightBegin + 1 < 6)
+            {
+                continue;
+            }
+
+            const double leftMedian = GeometryMedianSmoothHInRange(current, leftBegin, leftEnd);
+            const double rightMedian = GeometryMedianSmoothHInRange(current, rightBegin, rightEnd);
+            const double baseline = (leftMedian + rightMedian) * 0.5;
+            const double localMedian = GeometryMedianSmoothHInRange(current, leftBegin, rightEnd);
+            const double localMad = GeometryMadSmoothHInRange(current, leftBegin, rightEnd, localMedian);
+            const double threshold = std::max(baseThreshold, std::min(7.5, localMad * 3.0 + 0.7));
+            const double sideGap = std::abs(leftMedian - rightMedian);
+            const double prominence = std::abs(current[index].smoothH - baseline);
+            const double leftNormalMedian = GeometryMedianSmoothNInRange(current, leftBegin, leftEnd);
+            const double rightNormalMedian = GeometryMedianSmoothNInRange(current, rightBegin, rightEnd);
+            const double normalBaseline = (leftNormalMedian + rightNormalMedian) * 0.5;
+            const double localNormalMedian = GeometryMedianSmoothNInRange(current, leftBegin, rightEnd);
+            const double localNormalMad = GeometryMadSmoothNInRange(current, leftBegin, rightEnd, localNormalMedian);
+            const double normalThreshold = std::max(baseThreshold, std::min(7.5, localNormalMad * 3.0 + 0.7));
+            const double normalSideGap = std::abs(leftNormalMedian - rightNormalMedian);
+            const double normalProminence = std::abs(current[index].smoothN - normalBaseline);
+
+            // If both sides stay on the same baseline but the middle suddenly
+            // leaves it, this is usually a laser branch/noise island rather
+            // than a real corrugated-plate corner.
+            bool isBranchCandidate = false;
+            if (sideGap <= threshold * 1.25 && prominence >= threshold * 1.25)
+            {
+                isBranchCandidate = true;
+            }
+            if (normalSideGap <= normalThreshold * 1.25 && normalProminence >= normalThreshold * 1.25)
+            {
+                isBranchCandidate = true;
+            }
+
+            // A branch can be contiguous in acquisition order, so left/right
+            // medians alone may treat it as a valid local segment.  Compare
+            // points at the same scan station instead: if most nearby samples
+            // form a main band and this point sits well outside it, remove it
+            // before segment fitting/intersection.
+            int sameBegin = index;
+            while (sameBegin > 0 && current[index].s - current[sameBegin - 1].s <= sameStationRadius)
+            {
+                --sameBegin;
+            }
+            int sameEnd = index;
+            while (sameEnd + 1 < projectedCount && current[sameEnd + 1].s - current[index].s <= sameStationRadius)
+            {
+                ++sameEnd;
+            }
+
+            const int sameCount = sameEnd - sameBegin + 1;
+            if (sameCount >= minSameStationNeighborCount)
+            {
+                QVector<double> sameStationValues;
+                QVector<double> sameStationNormalValues;
+                sameStationValues.reserve(sameCount);
+                sameStationNormalValues.reserve(sameCount);
+                for (int sameIndex = sameBegin; sameIndex <= sameEnd; ++sameIndex)
+                {
+                    if (sameIndex != index)
+                    {
+                        sameStationValues.push_back(current[sameIndex].smoothH);
+                        sameStationNormalValues.push_back(current[sameIndex].smoothN);
+                    }
+                }
+
+                const double sameMedian = GeometryMedianScalar(sameStationValues);
+                QVector<double> sameDeviations;
+                sameDeviations.reserve(sameStationValues.size());
+                for (double value : sameStationValues)
+                {
+                    sameDeviations.push_back(std::abs(value - sameMedian));
+                }
+
+                const double sameMad = GeometryMedianScalar(sameDeviations);
+                const double sameThreshold = std::max(baseThreshold, std::min(8.0, sameMad * 4.0 + 0.8));
+                int mainBandSupport = 0;
+                for (double value : sameStationValues)
+                {
+                    if (std::abs(value - sameMedian) <= sameThreshold)
+                    {
+                        ++mainBandSupport;
+                    }
+                }
+
+                const double pointDelta = std::abs(current[index].smoothH - sameMedian);
+                if (pointDelta >= sameThreshold * 1.35
+                    && pointDelta >= baseThreshold * 1.6
+                    && mainBandSupport * 2 >= sameStationValues.size())
+                {
+                    isBranchCandidate = true;
+                }
+
+                const double sameNormalMedian = GeometryMedianScalar(sameStationNormalValues);
+                QVector<double> sameNormalDeviations;
+                sameNormalDeviations.reserve(sameStationNormalValues.size());
+                for (double value : sameStationNormalValues)
+                {
+                    sameNormalDeviations.push_back(std::abs(value - sameNormalMedian));
+                }
+
+                const double sameNormalMad = GeometryMedianScalar(sameNormalDeviations);
+                const double sameNormalThreshold = std::max(baseThreshold, std::min(8.0, sameNormalMad * 4.0 + 0.8));
+                int normalBandSupport = 0;
+                for (double value : sameStationNormalValues)
+                {
+                    if (std::abs(value - sameNormalMedian) <= sameNormalThreshold)
+                    {
+                        ++normalBandSupport;
+                    }
+                }
+
+                const double normalPointDelta = std::abs(current[index].smoothN - sameNormalMedian);
+                if (normalPointDelta >= sameNormalThreshold * 1.35
+                    && normalPointDelta >= baseThreshold * 1.6
+                    && normalBandSupport * 2 >= sameStationNormalValues.size())
+                {
+                    isBranchCandidate = true;
+                }
+            }
+
+            if (isBranchCandidate)
+            {
+                candidate[index] = 1;
+            }
+        }
+
+        QVector<char> keep(projectedCount, 1);
+        int passRejected = 0;
+        for (int index = 0; index < projectedCount;)
+        {
+            if (!candidate[index])
+            {
+                ++index;
+                continue;
+            }
+
+            const int runBegin = index;
+            while (index < projectedCount && candidate[index])
+            {
+                ++index;
+            }
+            const int runEnd = index - 1;
+            const double runSpan = std::abs(current[runEnd].s - current[runBegin].s);
+            const int runCount = runEnd - runBegin + 1;
+            if (runSpan <= maxBranchSpan || runCount <= 72)
+            {
+                for (int removeIndex = runBegin; removeIndex <= runEnd; ++removeIndex)
+                {
+                    keep[removeIndex] = 0;
+                    ++passRejected;
+                }
+            }
+        }
+
+        if (passRejected <= 0 || projectedCount - passRejected < 16)
+        {
+            break;
+        }
+
+        QVector<GeometryProjectedPoint> filtered;
+        filtered.reserve(projectedCount - passRejected);
+        for (int index = 0; index < projectedCount; ++index)
+        {
+            if (keep[index])
+            {
+                filtered.push_back(current[index]);
+            }
+        }
+        current = filtered;
+        SmoothGeometryProjectedPoints(&current, params.smoothRadius);
+        totalRejected += passRejected;
+    }
+
+    if (rejectedCount != nullptr)
+    {
+        *rejectedCount = totalRejected;
+    }
+    return current;
+}
+
+double GeometryClampUnit(double value)
+{
+    return std::max(-1.0, std::min(1.0, value));
+}
+
+Eigen::Vector2d OrientGeometryDirection(Eigen::Vector2d direction, const Eigen::Vector2d& reference)
+{
+    if (direction.norm() < 1e-9)
+    {
+        return direction;
+    }
+    direction.normalize();
+    if (reference.norm() > 1e-9 && direction.dot(reference) < 0.0)
+    {
+        direction = -direction;
+    }
+    return direction;
+}
+
+double GeometryLineDirectionAngle(const Eigen::Vector2d& first, const Eigen::Vector2d& second)
+{
+    if (first.norm() < 1e-9 || second.norm() < 1e-9)
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+    const Eigen::Vector2d firstNormalized = first.normalized();
+    const Eigen::Vector2d secondNormalized = second.normalized();
+    return std::acos(GeometryClampUnit(std::abs(firstNormalized.dot(secondNormalized))));
+}
+
+double GeometryPointLineDistance2D(const Eigen::Vector2d& point, const GeometryFittedLine2D& line)
+{
+    if (!line.valid || line.direction.norm() < 1e-9)
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+    return std::abs(Cross2D(point - line.point, line.direction.normalized()));
+}
+
+GeometryFittedLine2D FitGeometryRobustSegmentLine(
+    const QVector<GeometryProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex)
+{
+    GeometryFittedLine2D fallbackLine = FitGeometrySegmentLine(projected, firstIndex, lastIndex);
+    if (!fallbackLine.valid || projected.isEmpty())
+    {
+        return fallbackLine;
+    }
+
+    const int begin = std::max(0, std::min(firstIndex, lastIndex));
+    const int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    const int pointCount = end - begin + 1;
+    if (pointCount < 14)
+    {
+        return fallbackLine;
+    }
+
+    const int edgeTrim = std::min(12, std::max(2, pointCount / 10));
+    const int fitBegin = begin + edgeTrim;
+    const int fitEnd = end - edgeTrim;
+    const int fitCount = fitEnd - fitBegin + 1;
+    if (fitCount < 8)
+    {
+        return fallbackLine;
+    }
+
+    Eigen::Vector2d segmentDirection =
+        GeometrySmoothedProjection2D(projected[end]) - GeometrySmoothedProjection2D(projected[begin]);
+    if (segmentDirection.norm() < 1e-6)
+    {
+        segmentDirection = fallbackLine.direction;
+    }
+    segmentDirection = OrientGeometryDirection(segmentDirection, fallbackLine.direction);
+    if (segmentDirection.norm() < 1e-9)
+    {
+        return fallbackLine;
+    }
+
+    struct DirectionSample
+    {
+        Eigen::Vector2d direction = Eigen::Vector2d::Zero();
+        double weight = 1.0;
+        int begin = 0;
+        int end = 0;
+    };
+
+    QVector<DirectionSample> samples;
+    const int windowPoints = std::max(6, std::min(28, std::max(6, fitCount / 4)));
+    const int stepPoints = std::max(3, windowPoints / 2);
+    for (int windowBegin = fitBegin; windowBegin <= fitEnd - 4; windowBegin += stepPoints)
+    {
+        const int windowEnd = std::min(fitEnd, windowBegin + windowPoints - 1);
+        if (windowEnd - windowBegin + 1 < 5)
+        {
+            continue;
+        }
+
+        const GeometryFittedLine2D windowLine = FitGeometrySegmentLine(projected, windowBegin, windowEnd);
+        if (!windowLine.valid)
+        {
+            continue;
+        }
+
+        DirectionSample sample;
+        sample.direction = OrientGeometryDirection(windowLine.direction, segmentDirection);
+        sample.weight = std::max(1.0, std::abs(projected[windowEnd].s - projected[windowBegin].s));
+        sample.begin = windowBegin;
+        sample.end = windowEnd;
+        samples.push_back(sample);
+    }
+
+    if (samples.size() < 2)
+    {
+        return fallbackLine;
+    }
+
+    auto averageDirection = [&](const QVector<DirectionSample>& directionSamples) -> Eigen::Vector2d {
+        Eigen::Vector2d sum = Eigen::Vector2d::Zero();
+        for (const DirectionSample& sample : directionSamples)
+        {
+            sum += OrientGeometryDirection(sample.direction, segmentDirection) * sample.weight;
+        }
+        if (sum.norm() < 1e-9)
+        {
+            return fallbackLine.direction;
+        }
+        return OrientGeometryDirection(sum, segmentDirection);
+    };
+
+    const double kPi = 3.14159265358979323846;
+    Eigen::Vector2d robustDirection = averageDirection(samples);
+    QVector<DirectionSample> keptSamples;
+    const double angleLimit = 15.0 * kPi / 180.0;
+    for (const DirectionSample& sample : samples)
+    {
+        if (GeometryLineDirectionAngle(sample.direction, robustDirection) <= angleLimit)
+        {
+            keptSamples.push_back(sample);
+        }
+    }
+    if (keptSamples.size() >= 2)
+    {
+        robustDirection = averageDirection(keptSamples);
+    }
+
+    QVector<char> acceptedPoint(fitCount, 1);
+    if (keptSamples.size() >= 2 && keptSamples.size() < samples.size())
+    {
+        acceptedPoint.fill(0);
+        for (const DirectionSample& sample : keptSamples)
+        {
+            const int acceptedBegin = std::max(fitBegin, sample.begin);
+            const int acceptedEnd = std::min(fitEnd, sample.end);
+            for (int index = acceptedBegin; index <= acceptedEnd; ++index)
+            {
+                acceptedPoint[index - fitBegin] = 1;
+            }
+        }
+
+        int acceptedCount = 0;
+        for (char accepted : acceptedPoint)
+        {
+            if (accepted)
+            {
+                ++acceptedCount;
+            }
+        }
+        if (acceptedCount < std::max(4, fitCount / 3))
+        {
+            acceptedPoint.fill(1);
+        }
+    }
+
+    QVector<double> normalValues;
+    normalValues.reserve(fitCount);
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        normalValues.push_back(projected[index].smoothN);
+    }
+    const double normalMedian = GeometryMedianScalar(normalValues);
+    QVector<double> normalDeviations;
+    normalDeviations.reserve(normalValues.size());
+    for (double value : normalValues)
+    {
+        normalDeviations.push_back(std::abs(value - normalMedian));
+    }
+    const double normalMad = GeometryMedianScalar(normalDeviations);
+    const double normalLimit = std::max(1.2, std::min(8.0, normalMad * 4.0 + 0.8));
+    int normalBandSupport = 0;
+    for (double value : normalValues)
+    {
+        if (std::abs(value - normalMedian) <= normalLimit)
+        {
+            ++normalBandSupport;
+        }
+    }
+    if (normalBandSupport >= std::max(5, fitCount * 2 / 3))
+    {
+        int acceptedCount = 0;
+        for (int index = fitBegin; index <= fitEnd; ++index)
+        {
+            if (std::abs(projected[index].smoothN - normalMedian) > normalLimit)
+            {
+                acceptedPoint[index - fitBegin] = 0;
+            }
+            if (acceptedPoint[index - fitBegin])
+            {
+                ++acceptedCount;
+            }
+        }
+        if (acceptedCount < std::max(4, fitCount / 3))
+        {
+            acceptedPoint.fill(1);
+        }
+    }
+
+    auto isAcceptedPoint = [&](int index) -> bool {
+        if (index < fitBegin || index > fitEnd)
+        {
+            return false;
+        }
+        return acceptedPoint[index - fitBegin] != 0;
+    };
+
+    GeometryFittedLine2D robustLine;
+    robustLine.valid = true;
+    robustLine.direction = robustDirection;
+
+    const double dirX = robustDirection.x();
+    const double dirY = robustDirection.y();
+    double normalX = -dirY;
+    double normalY = dirX;
+    const double normalLength = std::sqrt(normalX * normalX + normalY * normalY);
+    if (normalLength > 1e-9)
+    {
+        normalX /= normalLength;
+        normalY /= normalLength;
+    }
+    else
+    {
+        normalX = 0.0;
+        normalY = 1.0;
+    }
+
+    QVector<double> axisValues;
+    QVector<double> normalOffsets;
+    axisValues.reserve(fitCount);
+    normalOffsets.reserve(fitCount);
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        if (!isAcceptedPoint(index))
+        {
+            continue;
+        }
+        const double x = projected[index].s;
+        const double y = projected[index].smoothH;
+        axisValues.push_back(x * dirX + y * dirY);
+        normalOffsets.push_back(x * normalX + y * normalY);
+    }
+    if (axisValues.isEmpty() || normalOffsets.isEmpty())
+    {
+        return fallbackLine;
+    }
+    const double medianAxisValue = GeometryMedianScalar(axisValues);
+    const double medianNormalOffset = GeometryMedianScalar(normalOffsets);
+    robustLine.point.x() = dirX * medianAxisValue + normalX * medianNormalOffset;
+    robustLine.point.y() = dirY * medianAxisValue + normalY * medianNormalOffset;
+
+    auto scalarDistanceToRobustLine = [&](const GeometryProjectedPoint& projectedPoint) -> double {
+        const double deltaX = projectedPoint.s - robustLine.point.x();
+        const double deltaY = projectedPoint.smoothH - robustLine.point.y();
+        return std::abs(deltaX * dirY - deltaY * dirX);
+    };
+
+    QVector<double> distances;
+    distances.reserve(fitCount);
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        if (!isAcceptedPoint(index))
+        {
+            continue;
+        }
+        distances.push_back(scalarDistanceToRobustLine(projected[index]));
+    }
+    const double medianDistance = GeometryMedianScalar(distances);
+    const double distanceLimit = std::max(1.0, std::min(8.0, medianDistance * 3.0 + 0.5));
+
+    QVector<double> inlierAxisValues;
+    QVector<double> inlierNormalOffsets;
+    inlierAxisValues.reserve(fitCount);
+    inlierNormalOffsets.reserve(fitCount);
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        if (!isAcceptedPoint(index))
+        {
+            continue;
+        }
+        if (scalarDistanceToRobustLine(projected[index]) <= distanceLimit)
+        {
+            const double x = projected[index].s;
+            const double y = projected[index].smoothH;
+            inlierAxisValues.push_back(x * dirX + y * dirY);
+            inlierNormalOffsets.push_back(x * normalX + y * normalY);
+        }
+    }
+    if (inlierAxisValues.size() >= std::max(4, fitCount / 3))
+    {
+        const double inlierMedianAxisValue = GeometryMedianScalar(inlierAxisValues);
+        const double inlierMedianNormalOffset = GeometryMedianScalar(inlierNormalOffsets);
+        robustLine.point.x() = dirX * inlierMedianAxisValue + normalX * inlierMedianNormalOffset;
+        robustLine.point.y() = dirY * inlierMedianAxisValue + normalY * inlierMedianNormalOffset;
+    }
+
+    return robustLine;
+}
+
+QVector<GeometryFittedLine2D> BuildRobustGeometrySegmentLines(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes)
+{
+    QVector<GeometryFittedLine2D> segmentLines;
+    if (keyIndexes.size() < 2)
+    {
+        return segmentLines;
+    }
+
+    segmentLines.reserve(keyIndexes.size() - 1);
+    for (int index = 0; index + 1 < keyIndexes.size(); ++index)
+    {
+        segmentLines.push_back(FitGeometryRobustSegmentLine(projected, keyIndexes[index], keyIndexes[index + 1]));
+    }
+    return segmentLines;
+}
+
+GeometryFittedLine2D FitGeometryLocalSegmentLineWithSpan(
+    const QVector<GeometryProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex,
+    bool useLastSide,
+    double localSpan)
+{
+    if (projected.isEmpty())
+    {
+        return GeometryFittedLine2D();
+    }
+
+    int begin = std::max(0, std::min(firstIndex, lastIndex));
+    int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    if (end <= begin + 2)
+    {
+        return FitGeometrySegmentLine(projected, begin, end);
+    }
+
+    const double totalSpan = std::abs(projected[end].s - projected[begin].s);
+    const double clampedLocalSpan = std::max(8.0, std::min(80.0, localSpan));
+    if (totalSpan > clampedLocalSpan)
+    {
+        if (useLastSide)
+        {
+            while (begin + 4 < end && std::abs(projected[end].s - projected[begin].s) > clampedLocalSpan)
+            {
+                ++begin;
+            }
+        }
+        else
+        {
+            while (begin + 4 < end && std::abs(projected[end].s - projected[begin].s) > clampedLocalSpan)
+            {
+                --end;
+            }
+        }
+    }
+
+    return FitGeometryRobustSegmentLine(projected, begin, end);
+}
+
+GeometryFittedScalarLine FitGeometrySegmentNormalLine(
+    const QVector<GeometryProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex)
+{
+    GeometryFittedScalarLine line;
+    if (projected.isEmpty())
+    {
+        return line;
+    }
+
+    const int begin = std::max(0, std::min(firstIndex, lastIndex));
+    const int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    const int pointCount = end - begin + 1;
+    if (pointCount < 2)
+    {
+        return line;
+    }
+
+    const int trim = pointCount >= 12 ? std::min(pointCount / 6, 8) : 0;
+    const int fitBegin = begin + trim;
+    const int fitEnd = end - trim;
+    const int fitCount = fitEnd - fitBegin + 1;
+    if (fitCount < 2)
+    {
+        return line;
+    }
+
+    QVector<double> normalValues;
+    normalValues.reserve(fitCount);
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        normalValues.push_back(projected[index].smoothN);
+    }
+
+    const double normalMedian = GeometryMedianScalar(normalValues);
+    QVector<double> deviations;
+    deviations.reserve(normalValues.size());
+    for (double value : normalValues)
+    {
+        deviations.push_back(std::abs(value - normalMedian));
+    }
+    const double normalMad = GeometryMedianScalar(deviations);
+    const double normalLimit = std::max(1.2, std::min(8.0, normalMad * 4.0 + 0.8));
+
+    QVector<int> acceptedIndexes;
+    acceptedIndexes.reserve(fitCount);
+    int normalBandSupport = 0;
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        if (std::abs(projected[index].smoothN - normalMedian) <= normalLimit)
+        {
+            ++normalBandSupport;
+        }
+    }
+
+    const bool useNormalBand = normalBandSupport >= std::max(4, fitCount * 2 / 3);
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        if (!useNormalBand || std::abs(projected[index].smoothN - normalMedian) <= normalLimit)
+        {
+            acceptedIndexes.push_back(index);
+        }
+    }
+
+    if (acceptedIndexes.size() < 2)
+    {
+        line.centerS = projected[(fitBegin + fitEnd) / 2].s;
+        line.centerValue = normalMedian;
+        line.slope = 0.0;
+        line.valid = true;
+        return line;
+    }
+
+    double meanS = 0.0;
+    double meanN = 0.0;
+    for (int index : acceptedIndexes)
+    {
+        meanS += projected[index].s;
+        meanN += projected[index].smoothN;
+    }
+    meanS /= static_cast<double>(acceptedIndexes.size());
+    meanN /= static_cast<double>(acceptedIndexes.size());
+
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (int index : acceptedIndexes)
+    {
+        const double deltaS = projected[index].s - meanS;
+        numerator += deltaS * (projected[index].smoothN - meanN);
+        denominator += deltaS * deltaS;
+    }
+
+    line.centerS = meanS;
+    line.centerValue = meanN;
+    line.slope = denominator > 1e-9 ? numerator / denominator : 0.0;
+    line.valid = true;
+    return line;
+}
+
+GeometryFittedScalarLine FitGeometryLocalSegmentNormalLineWithSpan(
+    const QVector<GeometryProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex,
+    bool useLastSide,
+    double localSpan)
+{
+    if (projected.isEmpty())
+    {
+        return GeometryFittedScalarLine();
+    }
+
+    int begin = std::max(0, std::min(firstIndex, lastIndex));
+    int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    if (end <= begin + 2)
+    {
+        return FitGeometrySegmentNormalLine(projected, begin, end);
+    }
+
+    const double totalSpan = std::abs(projected[end].s - projected[begin].s);
+    const double clampedLocalSpan = std::max(8.0, std::min(80.0, localSpan));
+    if (totalSpan > clampedLocalSpan)
+    {
+        if (useLastSide)
+        {
+            while (begin + 4 < end && std::abs(projected[end].s - projected[begin].s) > clampedLocalSpan)
+            {
+                ++begin;
+            }
+        }
+        else
+        {
+            while (begin + 4 < end && std::abs(projected[end].s - projected[begin].s) > clampedLocalSpan)
+            {
+                --end;
+            }
+        }
+    }
+
+    return FitGeometrySegmentNormalLine(projected, begin, end);
+}
+
+GeometryFittedLine2D FitGeometryLocalSegmentLine(
+    const QVector<GeometryProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex,
+    bool useLastSide)
+{
+    if (projected.isEmpty())
+    {
+        return GeometryFittedLine2D();
+    }
+
+    const int begin = std::max(0, std::min(firstIndex, lastIndex));
+    const int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    const double totalSpan = begin < end ? std::abs(projected[end].s - projected[begin].s) : 0.0;
+    return FitGeometryLocalSegmentLineWithSpan(
+        projected,
+        firstIndex,
+        lastIndex,
+        useLastSide,
+        std::max(20.0, std::min(80.0, totalSpan * 0.6)));
+}
+
+bool IntersectGeometryLines(
+    const GeometryFittedLine2D& first,
+    const GeometryFittedLine2D& second,
+    Eigen::Vector2d* intersection)
+{
+    if (intersection == nullptr || !first.valid || !second.valid)
+    {
+        return false;
+    }
+
+    const double denominator = Cross2D(first.direction, second.direction);
+    if (std::abs(denominator) < 1e-6)
+    {
+        return false;
+    }
+
+    const Eigen::Vector2d delta = second.point - first.point;
+    const double ratio = Cross2D(delta, second.direction) / denominator;
+    *intersection = first.point + first.direction * ratio;
+    return std::isfinite(intersection->x()) && std::isfinite(intersection->y());
+}
+
+bool IsGeometryCornerProjectionUsable(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    int keyPosition,
+    const Eigen::Vector2d& candidate,
+    const Eigen::Vector2d& reference)
+{
+    if (keyPosition <= 0 || keyPosition + 1 >= keyIndexes.size())
+    {
+        return true;
+    }
+    if (!std::isfinite(candidate.x()) || !std::isfinite(candidate.y()))
+    {
+        return false;
+    }
+
+    const double previousS = projected[keyIndexes[keyPosition - 1]].s;
+    const double nextS = projected[keyIndexes[keyPosition + 1]].s;
+    const double minS = std::min(previousS, nextS);
+    const double maxS = std::max(previousS, nextS);
+    const double span = std::max(1.0, maxS - minS);
+    const double margin = std::max(5.0, std::min(14.0, span * 0.12));
+    if (candidate.x() < minS - margin || candidate.x() > maxS + margin)
+    {
+        return false;
+    }
+
+    const double maxCornerShift = std::max(5.0, std::min(18.0, span * 0.14));
+    if ((candidate - reference).norm() > maxCornerShift)
+    {
+        return false;
+    }
+
+    const int begin = keyIndexes[keyPosition - 1];
+    const int end = keyIndexes[keyPosition + 1];
+    const double maxCloudDistance = std::max(2.5, std::min(6.0, span * 0.05));
+    if (NearestGeometryProjectionDistance(projected, candidate, begin, end) > maxCloudDistance)
+    {
+        return false;
+    }
+
+    double mainBandH = 0.0;
+    double mainBandThreshold = 0.0;
+    const double stationRadius = std::max(6.0, std::min(36.0, span * 0.08));
+    const double baseThreshold = std::max(1.6, std::min(5.5, span * 0.015 + 0.8));
+    if (GeometryLocalMainBand(
+        projected,
+        candidate.x(),
+        stationRadius,
+        baseThreshold,
+        &mainBandH,
+        &mainBandThreshold,
+        nullptr))
+    {
+        const double mainBandDelta = std::abs(candidate.y() - mainBandH);
+        if (mainBandDelta >= mainBandThreshold * 1.35
+            && mainBandDelta >= baseThreshold * 1.6)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+QVector<Eigen::Vector3d> BuildFittedGeometryKeyPoints(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    const Eigen::Vector3d& center,
+    const Eigen::Vector3d& mainAxis,
+    const Eigen::Vector3d& sideAxis,
+    const Eigen::Vector3d& normalAxis)
+{
+    QVector<Eigen::Vector3d> keyPoints;
+    keyPoints.reserve(keyIndexes.size());
+    if (keyIndexes.isEmpty())
+    {
+        return keyPoints;
+    }
+
+    const QVector<GeometryFittedLine2D> segmentLines = BuildRobustGeometrySegmentLines(projected, keyIndexes);
+
+    for (int index = 0; index < keyIndexes.size(); ++index)
+    {
+        const int keyIndex = keyIndexes[index];
+        Eigen::Vector2d projection = (index == 0 || index + 1 == keyIndexes.size())
+            ? GeometryProjection2D(projected[keyIndex])
+            : GeometrySmoothedProjection2D(projected[keyIndex]);
+        double normalValue = (index == 0 || index + 1 == keyIndexes.size())
+            ? projected[keyIndex].n
+            : projected[keyIndex].smoothN;
+        if (index > 0 && index + 1 < keyIndexes.size())
+        {
+            const double previousS = projected[keyIndexes[index - 1]].s;
+            const double nextS = projected[keyIndexes[index + 1]].s;
+            const double span = std::max(1.0, std::abs(nextS - previousS));
+            bool hasBestIntersection = false;
+            double bestScore = std::numeric_limits<double>::infinity();
+            Eigen::Vector2d bestIntersection = projection;
+            auto considerIntersection = [&](const Eigen::Vector2d& candidate, double shiftWeight)
+            {
+                if (!IsGeometryCornerProjectionUsable(projected, keyIndexes, index, candidate, projection))
+                {
+                    return;
+                }
+
+                const double cloudDistance = NearestGeometryProjectionDistance(
+                    projected,
+                    candidate,
+                    keyIndexes[index - 1],
+                    keyIndexes[index + 1]);
+                const double score = cloudDistance + (candidate - projection).norm() * shiftWeight;
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    bestIntersection = candidate;
+                    hasBestIntersection = true;
+                }
+            };
+
+            if (index - 1 < segmentLines.size() && index < segmentLines.size())
+            {
+                Eigen::Vector2d intersection = projection;
+                if (IntersectGeometryLines(segmentLines[index - 1], segmentLines[index], &intersection))
+                {
+                    considerIntersection(intersection, 0.22);
+                }
+            }
+
+            const double candidateSpans[] = {
+                std::max(10.0, span * 0.18),
+                std::max(14.0, span * 0.28),
+                std::max(20.0, span * 0.40),
+                std::max(28.0, span * 0.55),
+                std::max(36.0, std::min(80.0, span * 0.70))
+            };
+
+            for (double localSpan : candidateSpans)
+            {
+                const GeometryFittedLine2D leftLine = FitGeometryLocalSegmentLineWithSpan(
+                    projected,
+                    keyIndexes[index - 1],
+                    keyIndex,
+                    true,
+                    localSpan);
+                const GeometryFittedLine2D rightLine = FitGeometryLocalSegmentLineWithSpan(
+                    projected,
+                    keyIndex,
+                    keyIndexes[index + 1],
+                    false,
+                    localSpan);
+                Eigen::Vector2d intersection = projection;
+                if (IntersectGeometryLines(leftLine, rightLine, &intersection))
+                {
+                    considerIntersection(intersection, 0.15);
+                }
+            }
+
+            if (hasBestIntersection)
+            {
+                projection = bestIntersection;
+            }
+
+            const double stationRadius = std::max(6.0, std::min(36.0, span * 0.08));
+            const double baseThreshold = std::max(1.6, std::min(5.5, span * 0.015 + 0.8));
+            const double localNormalValue = GeometryLocalNormalValue(
+                projected,
+                keyIndex,
+                projection.x(),
+                stationRadius,
+                baseThreshold);
+            QVector<double> normalCandidates;
+            normalCandidates.reserve(12);
+            for (double localSpan : candidateSpans)
+            {
+                const GeometryFittedScalarLine leftNormalLine = FitGeometryLocalSegmentNormalLineWithSpan(
+                    projected,
+                    keyIndexes[index - 1],
+                    keyIndex,
+                    true,
+                    localSpan);
+                const GeometryFittedScalarLine rightNormalLine = FitGeometryLocalSegmentNormalLineWithSpan(
+                    projected,
+                    keyIndex,
+                    keyIndexes[index + 1],
+                    false,
+                    localSpan);
+                if (leftNormalLine.valid)
+                {
+                    const double value = leftNormalLine.valueAt(projection.x());
+                    if (std::isfinite(value))
+                    {
+                        normalCandidates.push_back(value);
+                    }
+                }
+                if (rightNormalLine.valid)
+                {
+                    const double value = rightNormalLine.valueAt(projection.x());
+                    if (std::isfinite(value))
+                    {
+                        normalCandidates.push_back(value);
+                    }
+                }
+            }
+
+            if (normalCandidates.size() >= 2)
+            {
+                const double segmentNormalMedian = GeometryMedianScalar(normalCandidates);
+                const double localDelta = std::abs(localNormalValue - segmentNormalMedian);
+                if (localDelta <= std::max(1.8, baseThreshold * 1.5))
+                {
+                    normalCandidates.push_back(localNormalValue);
+                }
+                normalValue = GeometryMedianScalar(normalCandidates);
+            }
+            else
+            {
+                normalValue = localNormalValue;
+            }
+        }
+
+        keyPoints.push_back(GeometryPointFromProjection(
+            center,
+            mainAxis,
+            sideAxis,
+            normalAxis,
+            projection,
+            normalValue));
+    }
+
+    return keyPoints;
+}
+
+QVector<int> RefineGeometryKeysBySegmentDeviation(
+    const QVector<GeometryProjectedPoint>& projected,
+    QVector<int> keyIndexes,
+    const Eigen::Vector3d& center,
+    const Eigen::Vector3d& mainAxis,
+    const Eigen::Vector3d& sideAxis,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    if (projected.size() < 4 || keyIndexes.size() < 2)
+    {
+        return keyIndexes;
+    }
+
+    const double tolerance = params.piecewiseFitTolerance > 0.0 ? params.piecewiseFitTolerance : 2.0;
+    const double maxSegmentDeviation = std::max(2.5, std::min(6.0, tolerance * 2.0));
+    const int projectedCount = static_cast<int>(projected.size());
+    const int maxKeyCount = std::min(96, std::max(16, projectedCount / 6));
+
+    for (int iteration = 0; iteration < 64 && keyIndexes.size() < maxKeyCount; ++iteration)
+    {
+        bool inserted = false;
+        for (int segmentIndex = 0; segmentIndex + 1 < keyIndexes.size(); ++segmentIndex)
+        {
+            const int begin = std::min(keyIndexes[segmentIndex], keyIndexes[segmentIndex + 1]);
+            const int end = std::max(keyIndexes[segmentIndex], keyIndexes[segmentIndex + 1]);
+            if (end <= begin + 4)
+            {
+                continue;
+            }
+
+            // Segment refinement must be driven by the measured smoothed path,
+            // not by already-intersected key points.  Otherwise one bad local
+            // intersection can pull the next refinement round away from the
+            // actual point cloud and create the visible crossed/raised lines.
+            const Eigen::Vector2d firstProjection = GeometrySmoothedProjection2D(projected[begin]);
+            const Eigen::Vector2d secondProjection = GeometrySmoothedProjection2D(projected[end]);
+            const int edgeGap = std::max(2, std::min(8, (end - begin) / 10));
+            const double normalMedian = GeometryMedianSmoothNInRange(projected, begin, end);
+            const double normalMad = GeometryMadSmoothNInRange(projected, begin, end, normalMedian);
+            const double normalLimit = std::max(1.2, std::min(8.0, normalMad * 4.0 + 0.8));
+            int normalSupport = 0;
+            for (int sampleIndex = begin; sampleIndex <= end; ++sampleIndex)
+            {
+                if (std::abs(projected[sampleIndex].smoothN - normalMedian) <= normalLimit)
+                {
+                    ++normalSupport;
+                }
+            }
+            const bool useNormalGate = normalSupport >= std::max(6, (end - begin + 1) * 2 / 3);
+
+            double maxDistance = 0.0;
+            int maxDistanceIndex = -1;
+            for (int sampleIndex = begin + edgeGap; sampleIndex <= end - edgeGap; ++sampleIndex)
+            {
+                if (useNormalGate
+                    && std::abs(projected[sampleIndex].smoothN - normalMedian) > normalLimit)
+                {
+                    continue;
+                }
+
+                const double distance = GeometryPointToSegmentDistance2D(
+                    GeometrySmoothedProjection2D(projected[sampleIndex]),
+                    firstProjection,
+                    secondProjection);
+                if (distance > maxDistance)
+                {
+                    maxDistance = distance;
+                    maxDistanceIndex = sampleIndex;
+                }
+            }
+
+            if (maxDistanceIndex > begin
+                && maxDistanceIndex < end
+                && maxDistance > maxSegmentDeviation)
+            {
+                keyIndexes.insert(segmentIndex + 1, maxDistanceIndex);
+                inserted = true;
+                break;
+            }
+        }
+
+        if (!inserted)
+        {
+            break;
+        }
+    }
+
+    return keyIndexes;
+}
+
+QVector<int> PruneNonMonotonicFittedGeometryKeys(
+    const QVector<GeometryProjectedPoint>& projected,
+    QVector<int> keyIndexes,
+    const Eigen::Vector3d& center,
+    const Eigen::Vector3d& mainAxis,
+    const Eigen::Vector3d& sideAxis,
+    const Eigen::Vector3d& normalAxis)
+{
+    if (keyIndexes.size() <= 3)
+    {
+        return keyIndexes;
+    }
+
+    bool removed = true;
+    while (removed && keyIndexes.size() > 3)
+    {
+        removed = false;
+        const QVector<Eigen::Vector3d> fittedKeyPoints = BuildFittedGeometryKeyPoints(
+            projected,
+            keyIndexes,
+            center,
+            mainAxis,
+            sideAxis,
+            normalAxis);
+        if (fittedKeyPoints.size() != keyIndexes.size())
+        {
+            return keyIndexes;
+        }
+
+        double previousS = (fittedKeyPoints.first() - center).dot(mainAxis);
+        for (int index = 1; index < fittedKeyPoints.size(); ++index)
+        {
+            const double currentS = (fittedKeyPoints[index] - center).dot(mainAxis);
+            if (currentS > previousS + 1e-6)
+            {
+                previousS = currentS;
+                continue;
+            }
+
+            int removeIndex = index;
+            if (removeIndex >= keyIndexes.size() - 1)
+            {
+                removeIndex = keyIndexes.size() - 2;
+            }
+            if (removeIndex <= 0)
+            {
+                removeIndex = 1;
+            }
+
+            keyIndexes.removeAt(removeIndex);
+            removed = true;
+            break;
+        }
+    }
+
+    return keyIndexes;
+}
+
+RobotCalculation::LowerWeldPointType GeometryCornerType(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    int keyPosition)
+{
+    using PointType = RobotCalculation::LowerWeldPointType;
+    if (keyPosition <= 0)
+    {
+        return PointType::Start;
+    }
+    if (keyPosition >= keyIndexes.size() - 1)
+    {
+        return PointType::End;
+    }
+
+    const double previous = projected[keyIndexes[keyPosition - 1]].smoothH;
+    const double current = projected[keyIndexes[keyPosition]].smoothH;
+    const double next = projected[keyIndexes[keyPosition + 1]].smoothH;
+    const double prominence = current - (previous + next) * 0.5;
+    return prominence >= 0.0 ? PointType::InnerCorner : PointType::OuterCorner;
+}
+
+double GeometryCornerProminence(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    int keyPosition)
+{
+    if (keyPosition <= 0 || keyPosition >= keyIndexes.size() - 1)
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const double previous = projected[keyIndexes[keyPosition - 1]].smoothH;
+    const double current = projected[keyIndexes[keyPosition]].smoothH;
+    const double next = projected[keyIndexes[keyPosition + 1]].smoothH;
+    return current - (previous + next) * 0.5;
+}
+
+QVector<int> MergeAdjacentGeometryCorners(
+    const QVector<GeometryProjectedPoint>& projected,
+    QVector<int> keyIndexes)
+{
+    if (keyIndexes.size() <= 3)
+    {
+        return keyIndexes;
+    }
+
+    bool removed = true;
+    while (removed && keyIndexes.size() > 3)
+    {
+        removed = false;
+        for (int index = 1; index + 1 < keyIndexes.size() - 1; ++index)
+        {
+            const RobotCalculation::LowerWeldPointType currentType =
+                GeometryCornerType(projected, keyIndexes, index);
+            const RobotCalculation::LowerWeldPointType nextType =
+                GeometryCornerType(projected, keyIndexes, index + 1);
+            if (currentType != nextType)
+            {
+                continue;
+            }
+
+            const double currentProminence = std::abs(GeometryCornerProminence(projected, keyIndexes, index));
+            const double nextProminence = std::abs(GeometryCornerProminence(projected, keyIndexes, index + 1));
+            keyIndexes.removeAt(currentProminence < nextProminence ? index : index + 1);
+            removed = true;
+            break;
+        }
+    }
+
+    return keyIndexes;
+}
+
+void CountLowerWeldClassifiedPoints(RobotCalculation::LowerWeldClassificationResult& result)
+{
+    result.startCount = 0;
+    result.endCount = 0;
+    result.innerCornerCount = 0;
+    result.outerCornerCount = 0;
+    result.normalCount = 0;
+    result.noiseCount = 0;
+    for (const RobotCalculation::LowerWeldClassifiedPoint& point : result.points)
+    {
+        switch (point.type)
+        {
+        case RobotCalculation::LowerWeldPointType::Start:
+            ++result.startCount;
+            break;
+        case RobotCalculation::LowerWeldPointType::End:
+            ++result.endCount;
+            break;
+        case RobotCalculation::LowerWeldPointType::InnerCorner:
+            ++result.innerCornerCount;
+            break;
+        case RobotCalculation::LowerWeldPointType::OuterCorner:
+            ++result.outerCornerCount;
+            break;
+        case RobotCalculation::LowerWeldPointType::Noise:
+            ++result.noiseCount;
+            break;
+        case RobotCalculation::LowerWeldPointType::Normal:
+        default:
+            ++result.normalCount;
+            break;
+        }
+    }
 }
 
 double MedianValue(QVector<double> values)
@@ -105,6 +2221,126 @@ double ValueRange(const QVector<double>& values)
 bool IsFinitePoint(const Eigen::Vector3d& point)
 {
     return std::isfinite(point.x()) && std::isfinite(point.y()) && std::isfinite(point.z());
+}
+
+Eigen::Vector3d MedianGeometryPoint(
+    const QVector<RobotCalculation::IndexedPoint3D>& points,
+    int begin,
+    int end,
+    int skipIndex)
+{
+    QVector<double> xs;
+    QVector<double> ys;
+    QVector<double> zs;
+    xs.reserve(std::max(0, end - begin));
+    ys.reserve(std::max(0, end - begin));
+    zs.reserve(std::max(0, end - begin));
+    for (int index = begin; index <= end; ++index)
+    {
+        if (index == skipIndex)
+        {
+            continue;
+        }
+
+        xs.push_back(points[index].point.x());
+        ys.push_back(points[index].point.y());
+        zs.push_back(points[index].point.z());
+    }
+
+    return Eigen::Vector3d(
+        MedianValue(xs),
+        MedianValue(ys),
+        MedianValue(zs));
+}
+
+QVector<RobotCalculation::IndexedPoint3D> RemoveGeometryLocalOutliers(
+    const QVector<RobotCalculation::IndexedPoint3D>& points,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    int* rejectedCount)
+{
+    if (rejectedCount != nullptr)
+    {
+        *rejectedCount = 0;
+    }
+    if (points.size() < 9)
+    {
+        return points;
+    }
+
+    const int radius = std::max(4, std::min(10, params.smoothRadius + 3));
+    const double configuredThreshold = params.zContinuityThreshold > 0.0
+        ? params.zContinuityThreshold * 1.25
+        : 2.5;
+    const double baseThreshold = std::max(2.0, std::min(6.0, configuredThreshold));
+
+    QVector<RobotCalculation::IndexedPoint3D> current = points;
+    int totalRejected = 0;
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        QVector<char> keep(current.size(), 1);
+        int passRejected = 0;
+        for (int index = 0; index < current.size(); ++index)
+        {
+            const int begin = std::max(0, index - radius);
+            const int end = std::min(static_cast<int>(current.size()) - 1, index + radius);
+            if (end - begin < 4)
+            {
+                continue;
+            }
+
+            const Eigen::Vector3d localMedian = MedianGeometryPoint(current, begin, end, index);
+            QVector<double> localDistances;
+            localDistances.reserve(end - begin);
+            for (int sampleIndex = begin; sampleIndex <= end; ++sampleIndex)
+            {
+                if (sampleIndex == index)
+                {
+                    continue;
+                }
+
+                localDistances.push_back((current[sampleIndex].point - localMedian).norm());
+            }
+
+            const double localMedianDistance = MedianValue(localDistances);
+            const double dynamicThreshold = std::max(
+                baseThreshold,
+                std::min(8.0, localMedianDistance * 6.0 + 0.5));
+            const double currentDistance = (current[index].point - localMedian).norm();
+            if (currentDistance > dynamicThreshold)
+            {
+                keep[index] = 0;
+                ++passRejected;
+            }
+        }
+
+        if (passRejected <= 0)
+        {
+            break;
+        }
+
+        QVector<RobotCalculation::IndexedPoint3D> filtered;
+        filtered.reserve(current.size() - passRejected);
+        for (int index = 0; index < current.size(); ++index)
+        {
+            if (keep[index])
+            {
+                filtered.push_back(current[index]);
+            }
+        }
+
+        current = filtered;
+        totalRejected += passRejected;
+        if (current.size() < 9)
+        {
+            break;
+        }
+    }
+
+    if (rejectedCount != nullptr)
+    {
+        *rejectedCount = totalRejected;
+    }
+    return current;
 }
 
 QPair<double, double> LinearFit1D(const QVector<double>& xs, const QVector<double>& ys)
@@ -1572,7 +3808,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
     return result;
 }
 
-RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathGeometry(
     const QVector<IndexedPoint3D>& inputPoints,
     const LowerWeldFilterParams& params)
 {
@@ -1594,75 +3830,167 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
     validPoints.reserve(inputPoints.size());
     for (const IndexedPoint3D& sample : inputPoints)
     {
-        if (!IsFinitePoint(sample.point))
+        if (IsFinitePoint(sample.point))
         {
-            continue;
+            validPoints.push_back(sample);
         }
-        validPoints.push_back(sample);
     }
 
-    result.filterResult.lowerPointCount = validPoints.size();
-    if (validPoints.size() < std::max(2, params.minPointCount))
+    int denoiseRejectedCount = 0;
+    const QVector<IndexedPoint3D> denoisedPoints =
+        RemoveGeometryLocalOutliers(validPoints, params, &denoiseRejectedCount);
+
+    if (denoisedPoints.size() < std::max(2, params.minPointCount))
     {
-        result.error = QString("有效点太少，仅 %1 个，无法进行特征提取。")
-            .arg(validPoints.size());
+        result.error = QString("有效点太少，仅 %1 个，无法进行几何特征提取。")
+            .arg(denoisedPoints.size());
         return result;
     }
 
-    const std::vector<SkPoint3D> grooveInputPoints = ToSkPoint3DList(validPoints);
-    std::vector<SkPoint3D> turningPoints;
-    if (getGrooveTurningPoints(grooveInputPoints, turningPoints) != TRUE || turningPoints.size() < 2)
+    Eigen::Vector3d center = Eigen::Vector3d::Zero();
+    for (const IndexedPoint3D& sample : denoisedPoints)
     {
-        result.error = "特征点提取失败，未找到可用的起点/终点/拐点。";
+        center += sample.point;
+    }
+    center /= static_cast<double>(denoisedPoints.size());
+
+    const QPair<Eigen::Vector3d, Eigen::Vector3d> axes = BuildGeometryAxes(denoisedPoints, center);
+    Eigen::Vector3d normalAxis = axes.first.cross(axes.second);
+    if (normalAxis.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        normalAxis = UnitAxis((DominantDimension(axes.first) + 2) % 3);
+        normalAxis -= axes.first * normalAxis.dot(axes.first);
+        normalAxis -= axes.second * normalAxis.dot(axes.second);
+    }
+    if (normalAxis.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        normalAxis = Eigen::Vector3d::UnitZ();
+    }
+    normalAxis.normalize();
+
+    QVector<GeometryProjectedPoint> projected = ProjectGeometryPoints(
+        denoisedPoints,
+        center,
+        axes.first,
+        axes.second,
+        normalAxis,
+        params.smoothRadius);
+    int projectedBranchRejectedCount = 0;
+    projected = RemoveGeometryProjectedBranchOutliers(projected, params, &projectedBranchRejectedCount);
+    denoiseRejectedCount += projectedBranchRejectedCount;
+
+    result.filterResult.lowerPointCount = projected.size();
+    result.filterResult.zContinuityRejectedCount = denoiseRejectedCount;
+    if (projected.size() < std::max(2, params.minPointCount))
+    {
+        result.error = QString("有效点太少，仅 %1 个，无法进行几何特征提取。")
+            .arg(projected.size());
         return result;
     }
 
-    result.filterResult.points.reserve(validPoints.size());
-    for (const IndexedPoint3D& point : validPoints)
+    QVector<int> keyIndexes = PruneRedundantSameSideGeometryKeys(
+        projected,
+        BuildGeometryKeyIndexes(projected, params));
+    keyIndexes = PruneGeometrySpikeDrivenKeys(projected, keyIndexes, params);
+    keyIndexes = PruneNonMonotonicFittedGeometryKeys(
+        projected,
+        keyIndexes,
+        center,
+        axes.first,
+        axes.second,
+        normalAxis);
+    keyIndexes = RefineGeometryKeysBySegmentDeviation(
+        projected,
+        keyIndexes,
+        center,
+        axes.first,
+        axes.second,
+        params);
+    keyIndexes = PruneGeometrySpikeDrivenKeys(projected, keyIndexes, params);
+    keyIndexes = PruneNonMonotonicFittedGeometryKeys(
+        projected,
+        keyIndexes,
+        center,
+        axes.first,
+        axes.second,
+        normalAxis);
+    if (keyIndexes.size() < 2)
+    {
+        result.error = "几何特征提取失败，未找到可用的起点/终点。";
+        return result;
+    }
+    const QVector<Eigen::Vector3d> fittedKeyPoints = BuildFittedGeometryKeyPoints(
+        projected,
+        keyIndexes,
+        center,
+        axes.first,
+        axes.second,
+        normalAxis);
+    if (fittedKeyPoints.size() != keyIndexes.size())
+    {
+        result.error = "几何特征拟合失败，无法生成拟合交点。";
+        return result;
+    }
+
+    result.filterResult.points.reserve(projected.size());
+    for (const GeometryProjectedPoint& point : projected)
     {
         LowerWeldFilterPoint outputPoint;
-        outputPoint.index = result.filterResult.points.size() + 1;
+        outputPoint.index = point.inputIndex;
         outputPoint.point = point.point;
-        outputPoint.source = "original";
+        outputPoint.source = denoiseRejectedCount > 0 ? "geometry_denoised" : "geometry_original";
         result.filterResult.points.push_back(outputPoint);
     }
 
-    result.filterResult.measuredCount = static_cast<int>(turningPoints.size());
+    const int keyPointCount = static_cast<int>(keyIndexes.size());
+    result.filterResult.measuredCount = keyPointCount;
     result.filterResult.interpolatedCount = 0;
     result.filterResult.extendedCount = 0;
-    result.filterResult.fitSegmentCount = 1;
+    result.filterResult.fitSegmentCount = std::max(1, keyPointCount - 1);
     result.filterResult.ok = true;
 
     const double expandStepMm = params.sampleStep > 0.0 ? params.sampleStep : 2.0;
-    const int turningPointCount = static_cast<int>(turningPoints.size());
-
+    result.keyPoints.clear();
+    result.keyPoints.reserve(keyIndexes.size());
     result.classificationResult.points.clear();
-    result.classificationResult.points.reserve(
-        static_cast<int>(turningPoints.size()) + static_cast<int>(turningPoints.size()) * 8);
+    result.classificationResult.points.reserve(keyIndexes.size() * 8);
     result.classificationResult.ok = true;
     result.classificationResult.error.clear();
 
     int nextIndex = 1;
     int interpolatedCount = 0;
-    for (int index = 0; index < turningPointCount; ++index)
+    for (int index = 0; index < keyIndexes.size(); ++index)
     {
-        const SkPoint3D& turningPoint = turningPoints[static_cast<size_t>(index)];
-        const Eigen::Vector3d currentPoint(turningPoint.x, turningPoint.y, turningPoint.z);
-        const LowerWeldPointType pointType = GroovePointTypeForIndex(index, turningPointCount);
+        const Eigen::Vector3d currentPoint = fittedKeyPoints[index];
+        const LowerWeldPointType pointType = GeometryCornerType(projected, keyIndexes, index);
+        const QString source = pointType == LowerWeldPointType::Start
+            ? "geometry_start"
+            : (pointType == LowerWeldPointType::End
+                ? "geometry_end"
+                : (pointType == LowerWeldPointType::InnerCorner
+                    ? "geometry_inner"
+                    : "geometry_outer"));
+
+        LowerWeldClassifiedPoint keyPoint;
+        keyPoint.index = projected[keyIndexes[index]].inputIndex;
+        keyPoint.point = currentPoint;
+        keyPoint.type = pointType;
+        keyPoint.source = source;
+        result.keyPoints.push_back(keyPoint);
+
         AppendExpandedGroovePoint(
             result.classificationResult.points,
             nextIndex,
             currentPoint,
             pointType,
-            "turning");
+            source);
 
-        if (index + 1 >= turningPointCount)
+        if (index + 1 >= keyIndexes.size())
         {
             continue;
         }
 
-        const SkPoint3D& nextTurningPoint = turningPoints[static_cast<size_t>(index + 1)];
-        const Eigen::Vector3d nextPoint(nextTurningPoint.x, nextTurningPoint.y, nextTurningPoint.z);
+        const Eigen::Vector3d nextPoint = fittedKeyPoints[index + 1];
         const Eigen::Vector3d delta = nextPoint - currentPoint;
         const double segmentLength = delta.norm();
         if (segmentLength <= std::numeric_limits<double>::epsilon())
@@ -1670,60 +3998,32 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
             continue;
         }
 
-        if (expandStepMm > std::numeric_limits<double>::epsilon())
+        for (double distance = expandStepMm; distance < segmentLength - 1e-9; distance += expandStepMm)
         {
-            for (double distance = expandStepMm; distance < segmentLength - 1e-9; distance += expandStepMm)
-            {
-                const double ratio = distance / segmentLength;
-                const Eigen::Vector3d expandedPoint = currentPoint + delta * ratio;
-                AppendExpandedGroovePoint(
-                    result.classificationResult.points,
-                    nextIndex,
-                    expandedPoint,
-                    LowerWeldPointType::Normal,
-                    "expanded_2mm");
-                ++interpolatedCount;
-            }
+            const double ratio = distance / segmentLength;
+            AppendExpandedGroovePoint(
+                result.classificationResult.points,
+                nextIndex,
+                currentPoint + delta * ratio,
+                LowerWeldPointType::Normal,
+                "geometry_2mm");
+            ++interpolatedCount;
         }
     }
 
-    result.filterResult.measuredCount = turningPointCount;
     result.filterResult.interpolatedCount = interpolatedCount;
     result.filterResult.extendedCount = result.classificationResult.points.size();
-    result.classificationResult.startCount = 0;
-    result.classificationResult.endCount = 0;
-    result.classificationResult.innerCornerCount = 0;
-    result.classificationResult.outerCornerCount = 0;
-    result.classificationResult.normalCount = 0;
-    result.classificationResult.noiseCount = 0;
-    for (const LowerWeldClassifiedPoint& point : result.classificationResult.points)
-    {
-        switch (point.type)
-        {
-        case LowerWeldPointType::Start:
-            ++result.classificationResult.startCount;
-            break;
-        case LowerWeldPointType::End:
-            ++result.classificationResult.endCount;
-            break;
-        case LowerWeldPointType::InnerCorner:
-            ++result.classificationResult.innerCornerCount;
-            break;
-        case LowerWeldPointType::OuterCorner:
-            ++result.classificationResult.outerCornerCount;
-            break;
-        case LowerWeldPointType::Noise:
-            ++result.classificationResult.noiseCount;
-            break;
-        case LowerWeldPointType::Normal:
-        default:
-            ++result.classificationResult.normalCount;
-            break;
-        }
-    }
+    CountLowerWeldClassifiedPoints(result.classificationResult);
 
     result.ok = true;
     return result;
+}
+
+RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+    const QVector<IndexedPoint3D>& inputPoints,
+    const LowerWeldFilterParams& params)
+{
+    return AnalyzeMeasureThenWeldLowerWeldPathGeometry(inputPoints, params);
 }
 
 int RobotCalculation::LowerWeldPointTypeCode(LowerWeldPointType type)

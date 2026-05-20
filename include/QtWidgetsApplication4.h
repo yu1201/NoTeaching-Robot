@@ -154,7 +154,8 @@ private:
     void RunRobotMotionForCli(const QStringList& arguments);
     bool UploadFanucServiceBundleForCli(FANUCRobotCtrl* pFanucDriver);
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
-    void RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
+    bool RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
+    void RunLaserClassifyDirForCli(const QString& dirPath) const;
     void RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const;
     void RunUpdateWeldPoseAverageForCli(const QString& inputPath) const;
     bool RunMeasureThenWeldScanOnlyRepeatForCli(
