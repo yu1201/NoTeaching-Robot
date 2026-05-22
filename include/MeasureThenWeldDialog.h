@@ -39,6 +39,8 @@ struct T_PRECISE_MEASURE_PARAM
     double dWeldSpeedMmPerMin = 400.0;
     double dDryRunSpeedMmPerMin = 1000.0;
     double dWeldSafeMoveSpeedMmPerMin = 1000.0;
+    // 焊接轨迹下枪/收枪安全位相对首尾焊点的回退距离，对应 MeasureWeldParam.ini 的 GunDownBackSafeDis。
+    double dGunDownBackSafeDis = 70.0;
     double dWeldRzGainDeg = 0.0;
 
     // 预设流程动作点：下枪安全姿态 -> 扫描起点 -> 扫描终点 -> 收枪安全姿态。

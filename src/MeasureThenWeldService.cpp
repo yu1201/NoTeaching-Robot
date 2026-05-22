@@ -39,7 +39,7 @@ constexpr int FANUC_MOTION_STATE_REG = 93;
 constexpr double FANUC_WELD_PATH_SPEED_MM_PER_MIN = 400.0;
 constexpr double DEFAULT_WELD_SAFE_MOVE_SPEED_MM_PER_MIN = 1000.0;
 constexpr double DEFAULT_DRY_RUN_SPEED_MM_PER_MIN = 1000.0;
-constexpr double WELD_SAFE_OFFSET_DISTANCE_MM = 30.0;
+constexpr double WELD_SAFE_OFFSET_DISTANCE_MM = 70.0;
 constexpr double DEFAULT_CAMERA_READ_FPS = 100.0;
 constexpr qint64 ROBOT_SAMPLE_INTERVAL_MS = 50;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_WAIT_MS = 500;
@@ -1062,7 +1062,8 @@ const WeldPosePreset::SeamCompSlot* FindSeamCompSlotForRecord(
         return slot;
     }
 
-    return nullptr;
+    // 未按具体段类型配置时，回退到当前工件类型的通用焊道补偿槽。
+    return FindSeamCompSlotByKind(preset, preset.seamKind);
 }
 
 Eigen::Vector3d ResolveHorizontalTangentDirection(
@@ -1152,6 +1153,7 @@ double MaxWristDeltaDeg(
 bool TryBuildWeldSafeCoors(
     const QVector<WeldPoseFileRecord>& records,
     int pointIndex,
+    double safeOffsetDistanceMm,
     int robotType,
     T_ROBOT_COORS& safeCoors,
     QString& error)
@@ -1204,11 +1206,20 @@ bool TryBuildWeldSafeCoors(
     {
         lateralDirection = -lateralDirection;
     }
+    // 焊接下枪/收枪安全位现场约定从世界 X- 侧回撤，避免补偿后枪向判断把安全位推到 X+。
+    if (lateralDirection.x() > 0.0)
+    {
+        lateralDirection = -lateralDirection;
+    }
 
+    const double safeOffsetDistance =
+        std::isfinite(safeOffsetDistanceMm) && safeOffsetDistanceMm > 0.0
+        ? safeOffsetDistanceMm
+        : WELD_SAFE_OFFSET_DISTANCE_MM;
     const Eigen::Vector3d safeOffsetDirection =
         (Eigen::Vector3d::UnitZ() + lateralDirection).normalized();
     const Eigen::Vector3d safePoint =
-        anchor.point + safeOffsetDirection * WELD_SAFE_OFFSET_DISTANCE_MM;
+        anchor.point + safeOffsetDirection * safeOffsetDistance;
 
     safeCoors = T_ROBOT_COORS(
         safePoint.x(),
@@ -2617,6 +2628,7 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     pWeldIni->ReadString(false, "WeldSpeedMmPerMin", &param.dWeldSpeedMmPerMin);
     pWeldIni->ReadString(false, "DryRunSpeedMmPerMin", &param.dDryRunSpeedMmPerMin);
     pWeldIni->ReadString(false, "WeldSafeMoveSpeedMmPerMin", &param.dWeldSafeMoveSpeedMmPerMin);
+    pWeldIni->ReadString(false, "GunDownBackSafeDis", &param.dGunDownBackSafeDis);
     pWeldIni->ReadString(false, "WeldRzGainDeg", &param.dWeldRzGainDeg);
     param.bDoActualWeld = (doActualWeld != 0);
 
@@ -2649,6 +2661,10 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     if (!std::isfinite(param.dWeldSafeMoveSpeedMmPerMin) || param.dWeldSafeMoveSpeedMmPerMin <= 0.0)
     {
         param.dWeldSafeMoveSpeedMmPerMin = DEFAULT_WELD_SAFE_MOVE_SPEED_MM_PER_MIN;
+    }
+    if (!std::isfinite(param.dGunDownBackSafeDis) || param.dGunDownBackSafeDis <= 0.0)
+    {
+        param.dGunDownBackSafeDis = WELD_SAFE_OFFSET_DISTANCE_MM;
     }
     if (!std::isfinite(param.dWeldRzGainDeg))
     {
@@ -4405,13 +4421,13 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
 
     const WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
     T_ROBOT_COORS startSafeCoors;
-    if (!TryBuildWeldSafeCoors(records, 0, weldPosePreset.robotType, startSafeCoors, error))
+    if (!TryBuildWeldSafeCoors(records, 0, param.dGunDownBackSafeDis, weldPosePreset.robotType, startSafeCoors, error))
     {
         return false;
     }
 
     T_ROBOT_COORS endSafeCoors;
-    if (!TryBuildWeldSafeCoors(records, records.size() - 1, weldPosePreset.robotType, endSafeCoors, error))
+    if (!TryBuildWeldSafeCoors(records, records.size() - 1, param.dGunDownBackSafeDis, weldPosePreset.robotType, endSafeCoors, error))
     {
         return false;
     }
@@ -4450,6 +4466,8 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
 
     if (appendLog)
     {
+        appendLog(QString("焊接安全位：回退距离=%1 mm，横向约束=X-")
+            .arg(param.dGunDownBackSafeDis, 0, 'f', 3));
         appendLog(QString("下枪安全位置：%1").arg(RobotCoorsText(startSafeCoors)));
         appendLog(QString("收枪安全位置：%1").arg(RobotCoorsText(endSafeCoors)));
         appendLog(QString("焊接轨迹模式：%1，配置速度=%2 mm/min，下发速度=%3 %4")

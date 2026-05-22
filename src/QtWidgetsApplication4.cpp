@@ -46,6 +46,7 @@
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QLineF>
 #include <QIntValidator>
 #include <QAction>
 #include <QCheckBox>
@@ -2922,6 +2923,7 @@ namespace
 		void SetFrame(const udpDataShow& frame, const QString& statusText, const ViewState& viewState)
 		{
 			m_profilePoints.clear();
+			m_trendLines.clear();
 			m_hasTargetPoint = false;
 			m_fps = frame.mFps;
 			m_timestamp = frame.timestamp;
@@ -2948,6 +2950,18 @@ namespace
 					{
 						m_profilePoints.push_back(projectedPoint);
 					}
+				}
+			}
+
+			const int trendPointCount = std::min(frame.fitLineX.size(), frame.fitLineY.size());
+			m_trendLines.reserve(trendPointCount / 2);
+			for (int index = 0; index + 1 < trendPointCount; index += 2)
+			{
+				const QPointF start(frame.fitLineX.at(index), frame.fitLineY.at(index));
+				const QPointF end(frame.fitLineX.at(index + 1), frame.fitLineY.at(index + 1));
+				if (IsFinitePoint(start) && IsFinitePoint(end) && QLineF(start, end).length() > 1.0e-6)
+				{
+					m_trendLines.push_back(QLineF(start, end));
 				}
 			}
 
@@ -2986,6 +3000,17 @@ namespace
 			m_timestamp = 0;
 			m_statusText = statusText;
 			m_viewState = ViewState();
+			m_trendLines.clear();
+			update();
+		}
+
+		void SetShowTrendLines(bool showTrendLines)
+		{
+			if (m_showTrendLines == showTrendLines)
+			{
+				return;
+			}
+			m_showTrendLines = showTrendLines;
 			update();
 		}
 
@@ -3030,6 +3055,10 @@ namespace
 
 			DrawGrid(painter, plotRect, minX, maxX, minY, maxY);
 			DrawPointSeries(painter, m_profilePoints, mapPoint, QColor(0, 255, 48), 2.0);
+			if (m_showTrendLines)
+			{
+				DrawTrendLines(painter, m_trendLines, mapPoint, plotRect);
+			}
 			if (m_hasTargetPoint)
 			{
 				QPen targetPen(QColor(255, 48, 48));
@@ -3319,6 +3348,48 @@ namespace
 			}
 		}
 
+		template<typename Mapper>
+		static void DrawTrendLines(
+			QPainter& painter,
+			const QVector<QLineF>& lines,
+			const Mapper& mapper,
+			const QRectF& plotRect)
+		{
+			if (lines.isEmpty())
+			{
+				return;
+			}
+
+			const QColor colors[] =
+			{
+				QColor(255, 205, 54),
+				QColor(68, 210, 255),
+				QColor(255, 92, 190)
+			};
+			const double extendLength = std::max(plotRect.width(), plotRect.height()) * 2.0;
+			for (int index = 0; index < lines.size(); ++index)
+			{
+				const QPointF start = mapper(lines.at(index).p1());
+				const QPointF end = mapper(lines.at(index).p2());
+				QLineF screenLine(start, end);
+				if (screenLine.length() <= 1.0)
+				{
+					continue;
+				}
+
+				const double dx = (end.x() - start.x()) / screenLine.length();
+				const double dy = (end.y() - start.y()) / screenLine.length();
+				const QPointF center((start.x() + end.x()) * 0.5, (start.y() + end.y()) * 0.5);
+				QPen linePen(colors[index % 3]);
+				linePen.setWidthF(2.5);
+				linePen.setCapStyle(Qt::RoundCap);
+				painter.setPen(linePen);
+				painter.drawLine(
+					center - QPointF(dx * extendLength, dy * extendLength),
+					center + QPointF(dx * extendLength, dy * extendLength));
+			}
+		}
+
 		void DrawOverlay(QPainter& painter, const QRectF& plotRect) const
 		{
 			QFont fpsFont = painter.font();
@@ -3346,8 +3417,10 @@ namespace
 		}
 
 		QVector<QPointF> m_profilePoints;
+		QVector<QLineF> m_trendLines;
 		QPointF m_targetPoint;
 		bool m_hasTargetPoint = false;
+		bool m_showTrendLines = false;
 		double m_fps = 0.0;
 		qulonglong m_timestamp = 0;
 		QString m_statusText;
@@ -3362,11 +3435,17 @@ namespace
 		filterOptions.enableDominantLineSegmentFilter = true;
 		filterOptions.dominantLineMinSegmentCount = 2;
 		filterOptions.dominantLineMaxSegmentCount = 3;
+		filterOptions.dominantLineTrendRecoverDistanceMinMm = 2.0;
+		filterOptions.dominantLineTrendRecoverDistanceStepScale = 5.0;
+		filterOptions.dominantLineTrendRecoverEndpointToleranceMm = 3.0;
+		filterOptions.dominantLineFastSampleCount = 160;
+		filterOptions.dominantLineFastCandidateCount = 128;
 		filterOptions.profileComponentKeepStandalone = true;
 		filterOptions.profileRunKeepStandalone = true;
 
 		udpDataShow filteredFrame = frame;
-		filteredFrame.allResultPoint = FilterSingleFrameLaserPoint3D(frame.allResultPoint, filterOptions);
+		std::vector<LaserFramePoint3DTrendLine> trendLines;
+		filteredFrame.allResultPoint = FilterSingleFrameLaserPoint3D(frame.allResultPoint, filterOptions, &trendLines);
 		filteredFrame.XData.clear();
 		filteredFrame.YData.clear();
 		filteredFrame.XData.reserve(static_cast<int>(filteredFrame.allResultPoint.size()));
@@ -3378,6 +3457,15 @@ namespace
 		}
 		filteredFrame.fitLineX.clear();
 		filteredFrame.fitLineY.clear();
+		filteredFrame.fitLineX.reserve(static_cast<int>(trendLines.size() * 2));
+		filteredFrame.fitLineY.reserve(static_cast<int>(trendLines.size() * 2));
+		for (const LaserFramePoint3DTrendLine& line : trendLines)
+		{
+			filteredFrame.fitLineX.append(line.start.y);
+			filteredFrame.fitLineY.append(line.start.z);
+			filteredFrame.fitLineX.append(line.end.y);
+			filteredFrame.fitLineY.append(line.end.z);
+		}
 		return filteredFrame;
 	}
 
@@ -3405,6 +3493,11 @@ namespace
 				button->setMinimumSize(150, 44);
 				toolbarLayout->addWidget(button);
 			}
+			m_trendLineButton = new QPushButton("三段线", this);
+			m_trendLineButton->setCheckable(true);
+			m_trendLineButton->setMinimumSize(120, 44);
+			toolbarLayout->addSpacing(12);
+			toolbarLayout->addWidget(m_trendLineButton);
 			toolbarLayout->addStretch(1);
 			mainLayout->addLayout(toolbarLayout);
 
@@ -3421,6 +3514,11 @@ namespace
 			connect(m_filteredButton, &QPushButton::clicked, this, [this]()
 				{
 					SetFilteredMode(true);
+				});
+			connect(m_trendLineButton, &QPushButton::clicked, this, [this]()
+				{
+					m_showTrendLines = (m_trendLineButton != nullptr && m_trendLineButton->isChecked());
+					RefreshView(false, true);
 				});
 			SetFilteredMode(false);
 			adjustSize();
@@ -3612,6 +3710,7 @@ namespace
 			const QString modeText = m_showFiltered
 				? (showCachedFiltered ? "滤波后" : "滤波后计算中")
 				: "滤波前";
+			m_view->SetShowTrendLines(m_showTrendLines && showCachedFiltered);
 			m_view->SetFrame(frame, QString("%1  %2").arg(m_statusText, modeText), CurrentModeViewState());
 			SaveCurrentViewState();
 		}
@@ -3619,11 +3718,13 @@ namespace
 		GroovePointCloudView* m_view = nullptr;
 		QPushButton* m_rawButton = nullptr;
 		QPushButton* m_filteredButton = nullptr;
+		QPushButton* m_trendLineButton = nullptr;
 		udpDataShow m_rawFrame;
 		udpDataShow m_filteredFrame;
 		QString m_statusText;
 		bool m_hasFrame = false;
 		bool m_showFiltered = false;
+		bool m_showTrendLines = false;
 		bool m_filteredFrameValid = false;
 		bool m_filterBuildRunning = false;
 		qint64 m_lastFilteredBuildMs = 0;

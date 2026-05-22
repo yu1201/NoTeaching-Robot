@@ -240,6 +240,11 @@ LaserFramePoint3DFilterOptions BuildThreeSegmentCameraFrameFilterOptions()
     options.enableDominantLineSegmentFilter = true;
     options.dominantLineMinSegmentCount = 2;
     options.dominantLineMaxSegmentCount = 3;
+    options.dominantLineTrendRecoverDistanceMinMm = 2.0;
+    options.dominantLineTrendRecoverDistanceStepScale = 5.0;
+    options.dominantLineTrendRecoverEndpointToleranceMm = 3.0;
+    options.dominantLineFastSampleCount = 160;
+    options.dominantLineFastCandidateCount = 128;
     options.profileComponentKeepStandalone = true;
     options.profileRunKeepStandalone = true;
     return options;

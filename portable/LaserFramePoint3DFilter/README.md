@@ -33,7 +33,7 @@ std::vector<cv::Point3d> allResultPoint;
 
 已知是三段式轮廓时，可打开 `enableDominantLineSegmentFilter`。这个模式不依赖输入点序连续，而是在截面二维平面里按空间距离搜索最长的 2-3 条直线段，适合原始帧中间区域被反光点穿插、点序来回跳的情况。主线段确定后，默认会再按 `enableDominantLineTrendRecovery` 把三条趋势线延长到相邻交点，形成折线，然后只从剩余点里捞回贴近折线且投影落在折线段内的点，避免拐角附近整团点被直接删掉，也避免超出折线端点的点被误回收。
 
-三段模式的快速搜索由 `dominantLineFastSampleCount` 和 `dominantLineFastCandidateCount` 控制。前者限制抽样点数量，后者限制进入精排的候选线数量；数值越小越快，数值越大越稳。当前默认值按 60FPS 预览优先设置，疑难点云如果漏线，可以先提高 `dominantLineFastSampleCount`。
+三段模式的快速搜索由 `dominantLineFastSampleCount` 和 `dominantLineFastCandidateCount` 控制。前者限制抽样点数量，后者限制进入精排的候选线数量；数值越小越快，数值越大越稳。当前默认值按 60FPS 预览优先设置，疑难点云如果漏线，可以先提高 `dominantLineFastSampleCount`。如果两个参数都设为 `-1`，会关闭快速采样，改走旧的全角度搜索。
 
 ## 使用示例
 
@@ -49,8 +49,8 @@ options.clusterBridgeMaxIndexGap = 80;         // 小簇桥接保留时，前后
 options.profileComponentKeepStandalone = false;// 默认删除独立反光分支
 options.profileRunKeepStandalone = false;      // 默认只保留最大连续激光线
 options.enableDominantLineSegmentFilter = true;// 已知三段式轮廓时，只保留最长的2-3段主直线
-options.dominantLineFastSampleCount = 80;      // 快速候选线抽样点上限，越小越快
-options.dominantLineFastCandidateCount = 64;   // 进入精排的候选线数量，越大越稳
+options.dominantLineFastSampleCount = 80;      // 快速候选线抽样点上限，越小越快；和下方同时设为-1可关闭采样
+options.dominantLineFastCandidateCount = 64;   // 进入精排的候选线数量，越大越稳；和上方同时设为-1可关闭采样
 options.enableDominantLineTrendRecovery = true;// 按三段交点折线，回收贴近折线内部的点
 
 std::vector<cv::Point3d> filtered = FilterSingleFrameLaserPoint3D(allResultPoint, options);

@@ -8,8 +8,14 @@
 
 std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
     const std::vector<cv::Point3d>& inputPoints,
-    const LaserFramePoint3DFilterOptions& options)
+    const LaserFramePoint3DFilterOptions& options,
+    std::vector<LaserFramePoint3DTrendLine>* trendLines)
 {
+    if (trendLines != nullptr)
+    {
+        trendLines->clear();
+    }
+
     std::vector<cv::Point3d> finitePoints;
     finitePoints.reserve(inputPoints.size());
     for (const cv::Point3d& point : inputPoints)
@@ -72,6 +78,22 @@ std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
             return point.z;
         default:
             return point.x;
+        }
+    };
+
+    const auto setProfileCoordinate = [](cv::Point3d& point, const int axis, const double value)
+    {
+        switch (axis)
+        {
+        case 1:
+            point.y = value;
+            break;
+        case 2:
+            point.z = value;
+            break;
+        default:
+            point.x = value;
+            break;
         }
     };
 
@@ -215,12 +237,91 @@ std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
 
         std::vector<int> remainingIndices;
         remainingIndices.reserve(sourcePoints.size());
+        std::vector<unsigned char> candidatePoint(sourcePoints.size(), 1);
+        {
+            // Fit dominant trends from stable-sized profile clusters only; recovery still checks all source points.
+            const double candidateLinkRadius = std::max(splitGap, lineDistanceThreshold * 3.0);
+            std::vector<int> componentOfPoint(sourcePoints.size(), -1);
+            std::vector<int> queue;
+            queue.reserve(sourcePoints.size());
+            for (int seed = 0; seed < static_cast<int>(sourcePoints.size()); ++seed)
+            {
+                if (componentOfPoint[seed] >= 0)
+                {
+                    continue;
+                }
+
+                const int componentIndex = seed;
+                componentOfPoint[seed] = componentIndex;
+                queue.clear();
+                queue.push_back(seed);
+                std::vector<int> component;
+                component.reserve(32);
+                double minA = profileA[seed];
+                double maxA = profileA[seed];
+                double minB = profileB[seed];
+                double maxB = profileB[seed];
+                for (int queueIndex = 0; queueIndex < static_cast<int>(queue.size()); ++queueIndex)
+                {
+                    const int current = queue[queueIndex];
+                    component.push_back(current);
+                    minA = std::min(minA, profileA[current]);
+                    maxA = std::max(maxA, profileA[current]);
+                    minB = std::min(minB, profileB[current]);
+                    maxB = std::max(maxB, profileB[current]);
+
+                    for (int candidate = 0; candidate < static_cast<int>(sourcePoints.size()); ++candidate)
+                    {
+                        if (componentOfPoint[candidate] >= 0)
+                        {
+                            continue;
+                        }
+
+                        const double deltaA = profileA[current] - profileA[candidate];
+                        const double deltaB = profileB[current] - profileB[candidate];
+                        if (std::sqrt(deltaA * deltaA + deltaB * deltaB) <= candidateLinkRadius)
+                        {
+                            componentOfPoint[candidate] = componentIndex;
+                            queue.push_back(candidate);
+                        }
+                    }
+                }
+
+                const double span = std::max(maxA - minA, maxB - minB);
+                const bool canFitDominantLine =
+                    component.size() >= static_cast<size_t>(minPointCountPerSegment)
+                    && span >= options.dominantLineMinSpanMm;
+                if (!canFitDominantLine)
+                {
+                    for (int pointIndex : component)
+                    {
+                        candidatePoint[pointIndex] = 0;
+                    }
+                }
+            }
+        }
+
         for (int i = 0; i < static_cast<int>(sourcePoints.size()); ++i)
         {
-            remainingIndices.push_back(i);
+            if (candidatePoint[i])
+            {
+                remainingIndices.push_back(i);
+            }
+        }
+        if (remainingIndices.size() < static_cast<size_t>(minSegmentCount * minPointCountPerSegment))
+        {
+            remainingIndices.clear();
+            remainingIndices.reserve(sourcePoints.size());
+            for (int i = 0; i < static_cast<int>(sourcePoints.size()); ++i)
+            {
+                remainingIndices.push_back(i);
+            }
         }
 
         std::vector<SegmentCandidate> selectedSegments;
+        const bool useFastDominantLineSearch =
+            !(options.dominantLineFastSampleCount == -1
+                && options.dominantLineFastCandidateCount == -1);
         const auto selectFastPairCandidate = [&](const std::vector<int>& activeIndices,
                                                  SegmentCandidate& bestCandidate) -> bool
         {
@@ -462,31 +563,34 @@ std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
             return hasBestCandidate;
         };
 
-        for (int segmentIndex = 0; segmentIndex < maxSegmentCount; ++segmentIndex)
+        if (useFastDominantLineSearch)
         {
-            SegmentCandidate bestCandidate;
-            if (!selectFastPairCandidate(remainingIndices, bestCandidate))
+            for (int segmentIndex = 0; segmentIndex < maxSegmentCount; ++segmentIndex)
             {
-                break;
-            }
-
-            selectedSegments.push_back(bestCandidate);
-            std::vector<unsigned char> removePoint(sourcePoints.size(), 0);
-            for (int pointIndex : bestCandidate.indices)
-            {
-                removePoint[pointIndex] = 1;
-            }
-
-            std::vector<int> nextRemainingIndices;
-            nextRemainingIndices.reserve(remainingIndices.size());
-            for (int pointIndex : remainingIndices)
-            {
-                if (!removePoint[pointIndex])
+                SegmentCandidate bestCandidate;
+                if (!selectFastPairCandidate(remainingIndices, bestCandidate))
                 {
-                    nextRemainingIndices.push_back(pointIndex);
+                    break;
                 }
+
+                selectedSegments.push_back(bestCandidate);
+                std::vector<unsigned char> removePoint(sourcePoints.size(), 0);
+                for (int pointIndex : bestCandidate.indices)
+                {
+                    removePoint[pointIndex] = 1;
+                }
+
+                std::vector<int> nextRemainingIndices;
+                nextRemainingIndices.reserve(remainingIndices.size());
+                for (int pointIndex : remainingIndices)
+                {
+                    if (!removePoint[pointIndex])
+                    {
+                        nextRemainingIndices.push_back(pointIndex);
+                    }
+                }
+                remainingIndices.swap(nextRemainingIndices);
             }
-            remainingIndices.swap(nextRemainingIndices);
         }
 
         if (selectedSegments.size() < static_cast<size_t>(minSegmentCount))
@@ -695,6 +799,35 @@ std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
             return sourcePoints;
         }
 
+        if (trendLines != nullptr)
+        {
+            trendLines->clear();
+            trendLines->reserve(selectedSegments.size());
+            for (const SegmentCandidate& segment : selectedSegments)
+            {
+                const int referenceIndex = segment.indices.empty() ? 0 : segment.indices.front();
+                const auto makeEndpoint = [&](const double projection) -> cv::Point3d
+                {
+                    cv::Point3d endpoint = sourcePoints[referenceIndex];
+                    setProfileCoordinate(
+                        endpoint,
+                        profileAxis0,
+                        segment.directionA * projection + segment.normalA * segment.rho);
+                    setProfileCoordinate(
+                        endpoint,
+                        profileAxis1,
+                        segment.directionB * projection + segment.normalB * segment.rho);
+                    return endpoint;
+                };
+
+                LaserFramePoint3DTrendLine line;
+                line.start = makeEndpoint(segment.projectionMin);
+                line.end = makeEndpoint(segment.projectionMax);
+                line.pointCount = segment.count;
+                trendLines->push_back(line);
+            }
+        }
+
         std::vector<unsigned char> keepPoint(sourcePoints.size(), 0);
         for (const SegmentCandidate& segment : selectedSegments)
         {
@@ -883,6 +1016,7 @@ std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
         {
             return dominantRawPoints;
         }
+        return finitePoints;
     }
 
     std::vector<double> stepDistances;
@@ -1858,4 +1992,11 @@ std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
     }
 
     return filteredPoints;
+}
+
+std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
+    const std::vector<cv::Point3d>& inputPoints,
+    const LaserFramePoint3DFilterOptions& options)
+{
+    return FilterSingleFrameLaserPoint3D(inputPoints, options, nullptr);
 }

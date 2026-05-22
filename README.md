@@ -13,9 +13,9 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.05.20`
+- 当前源码版本：`v2026.05.22`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.05.22.exe`，不用自己编译源码。
 
 ## 2026-05-22 更新
 
@@ -23,7 +23,7 @@
 - 坡口相机预览增加原始/滤波点云弹窗，支持缩放、平移、目标点显示；功能测试页可导出当前帧滤波结果
 - 登录页补齐账号历史、按账号保存密码和游客登录，卡片布局继续收紧
 - 先测后焊完整工件点云 `PreciseLaserPoint_WorkpieceCloud.txt` 只保留 `index x y z`
-- 构建验证：`Debug x64` 编译通过；本次为源码和文档同步，不包含新版安装包
+- 构建验证：`Debug x64` 编译通过；已生成版本化安装包 `NoTeaching-Robot-Setup-v2026.05.22.exe`，打包时 `Data` 默认参数从 Git index 导出，避免夹带本地现场配置
 
 ## 2026-05-20 更新
 

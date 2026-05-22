@@ -20,7 +20,9 @@
 - 登录体验与输出文件
   - 登录页支持历史账号下拉、按账号保存密码、游客登录和更紧凑的卡片式布局
   - 先测后焊完整工件点云文件 `PreciseLaserPoint_WorkpieceCloud.txt` 简化为 `index x y z`
-  - `Debug x64` 编译通过
+  - 应用版本更新为 `v2026.05.22`
+  - `Release x64` 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.05.22.exe`
+  - 安装包默认 `Data` 参数改为从 Git index 导出，避免未提交现场配置混入安装包
 
 ## 2026-05-20
 
