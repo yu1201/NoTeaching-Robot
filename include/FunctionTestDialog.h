@@ -44,6 +44,7 @@ private:
     void FanucCaptureKinematicsSample();
     void FitDhParametersFromSamples();
     void OpenLaserWeldFilterTest();
+    void ExportCurrentCameraFramePointFilterTest();
 
 private:
     ContralUnit* m_pContralUnit = nullptr;

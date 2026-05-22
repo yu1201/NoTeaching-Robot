@@ -7,6 +7,7 @@
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
 #include "WindowStyleHelper.h"
+#include "../portable/LaserFramePoint3DFilter/LaserFramePoint3DFilter.h"
 
 #include <QApplication>
 #include <QCloseEvent>
@@ -33,12 +34,14 @@
 #include <QVBoxLayout>
 
 #include <Eigen/Dense>
+#include <opencv2/core/types.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
 #include <thread>
+#include <vector>
 
 namespace
 {
@@ -74,6 +77,14 @@ struct RobotTimestampSample
     qint64 pcReceiveTimestampUs = 0;
     T_ROBOT_COORS pose;
     int done = -1;
+};
+
+struct LaserFramePoint3D
+{
+    int index = 0;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
 };
 
 QString FindProjectFilePathForFunctionTest(const QString& relativePath)
@@ -214,6 +225,414 @@ QString BuildRobotCameraTimestampCheckPath(const QString& robotName)
     QDir().mkpath(dirPath);
     return QDir::toNativeSeparators(QDir(dirPath).filePath(
         QString("RobotCameraTimestampCheck_%1.csv").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"))));
+}
+
+QString BuildCameraFramePointFilterTestDir(const QString& robotName)
+{
+    const QString dirPath = RobotDataHelper::BuildProjectPath(QString("Result/%1/CameraFrameFilterTest").arg(robotName));
+    QDir().mkpath(dirPath);
+    return QDir::toNativeSeparators(QFileInfo(dirPath).absoluteFilePath());
+}
+
+LaserFramePoint3DFilterOptions BuildThreeSegmentCameraFrameFilterOptions()
+{
+    LaserFramePoint3DFilterOptions options;
+    options.enableDominantLineSegmentFilter = true;
+    options.dominantLineMinSegmentCount = 2;
+    options.dominantLineMaxSegmentCount = 3;
+    options.profileComponentKeepStandalone = true;
+    options.profileRunKeepStandalone = true;
+    return options;
+}
+
+// Deprecated local reference: runtime code uses portable/LaserFramePoint3DFilter.
+// Standalone 3D filter for one laser frame.
+// inputPoints: 一帧激光线三维点，要求按激光线顺序排列。
+// options: 所有会影响滤波强度的参数，默认值适合当前坡口相机单帧毛刺过滤。
+// return: 滤波后的三维点，直接返回 cv::Point3d，便于调用方直接使用相机帧 allResultPoint。
+std::vector<cv::Point3d> DeprecatedLocalFilterSingleFrameLaserPoint3D(
+    const std::vector<cv::Point3d>& inputPoints,
+    const LaserFramePoint3DFilterOptions& options = LaserFramePoint3DFilterOptions())
+{
+    std::vector<cv::Point3d> finitePoints;
+    finitePoints.reserve(inputPoints.size());
+    for (const cv::Point3d& point : inputPoints)
+    {
+        if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z))
+        {
+            finitePoints.push_back(point);
+        }
+    }
+
+    const int minPointCount = std::max(1, options.minPointCount);
+    if (finitePoints.size() < static_cast<size_t>(minPointCount))
+    {
+        return finitePoints;
+    }
+
+    const auto medianValue = [](std::vector<double> values) -> double
+    {
+        if (values.empty())
+        {
+            return 0.0;
+        }
+
+        std::sort(values.begin(), values.end());
+        const size_t mid = values.size() / 2;
+        if ((values.size() % 2) == 0)
+        {
+            return (values[mid - 1] + values[mid]) * 0.5;
+        }
+        return values[mid];
+    };
+
+    const auto distance3D = [](const cv::Point3d& a, const cv::Point3d& b) -> double
+    {
+        const double dx = a.x - b.x;
+        const double dy = a.y - b.y;
+        const double dz = a.z - b.z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+
+    const auto pointSegmentDistance3D = [&distance3D](const cv::Point3d& point,
+                                                       const cv::Point3d& segmentStart,
+                                                       const cv::Point3d& segmentEnd) -> double
+    {
+        const double vx = segmentEnd.x - segmentStart.x;
+        const double vy = segmentEnd.y - segmentStart.y;
+        const double vz = segmentEnd.z - segmentStart.z;
+        const double wx = point.x - segmentStart.x;
+        const double wy = point.y - segmentStart.y;
+        const double wz = point.z - segmentStart.z;
+        const double lengthSquared = vx * vx + vy * vy + vz * vz;
+        if (lengthSquared <= 1.0e-12)
+        {
+            return distance3D(point, segmentStart);
+        }
+
+        const double tRaw = (wx * vx + wy * vy + wz * vz) / lengthSquared;
+        const double t = std::max(0.0, std::min(1.0, tRaw));
+        cv::Point3d projection;
+        projection.x = segmentStart.x + vx * t;
+        projection.y = segmentStart.y + vy * t;
+        projection.z = segmentStart.z + vz * t;
+        return distance3D(point, projection);
+    };
+
+    std::vector<double> stepDistances;
+    stepDistances.reserve(finitePoints.size() - 1);
+    for (int i = 1; i < static_cast<int>(finitePoints.size()); ++i)
+    {
+        const double step = distance3D(finitePoints[i - 1], finitePoints[i]);
+        if (step > 1.0e-9)
+        {
+            stepDistances.push_back(step);
+        }
+    }
+
+    const double medianStep = stepDistances.empty() ? 0.0 : medianValue(stepDistances);
+    const double supportRadius = std::max(options.supportRadiusMinMm, medianStep * options.supportRadiusStepScale);
+
+    const int medianWindowRadius = std::max(1, options.medianWindowRadius);
+    std::vector<double> residuals;
+    residuals.reserve(finitePoints.size());
+
+    for (int i = 0; i < static_cast<int>(finitePoints.size()); ++i)
+    {
+        std::vector<double> xs;
+        std::vector<double> ys;
+        std::vector<double> zs;
+        xs.reserve(medianWindowRadius * 2 + 1);
+        ys.reserve(medianWindowRadius * 2 + 1);
+        zs.reserve(medianWindowRadius * 2 + 1);
+
+        const int begin = std::max(0, i - medianWindowRadius);
+        const int end = std::min(static_cast<int>(finitePoints.size()) - 1, i + medianWindowRadius);
+        for (int j = begin; j <= end; ++j)
+        {
+            xs.push_back(finitePoints[j].x);
+            ys.push_back(finitePoints[j].y);
+            zs.push_back(finitePoints[j].z);
+        }
+
+        cv::Point3d localMedian;
+        localMedian.x = medianValue(xs);
+        localMedian.y = medianValue(ys);
+        localMedian.z = medianValue(zs);
+        residuals.push_back(distance3D(finitePoints[i], localMedian));
+    }
+
+    const double residualMedian = medianValue(residuals);
+    std::vector<double> absoluteDeviation;
+    absoluteDeviation.reserve(residuals.size());
+    for (double residual : residuals)
+    {
+        absoluteDeviation.push_back(std::abs(residual - residualMedian));
+    }
+
+    const double mad = medianValue(absoluteDeviation);
+    const double robustSigma = 1.4826 * mad;
+    const double threshold = std::max(options.residualThresholdMinMm,
+                                      residualMedian + robustSigma * options.residualSigmaScale);
+    const double bridgeDistanceThreshold = std::max(options.bridgeDistanceThresholdMinMm,
+                                                    medianStep * options.bridgeDistanceStepScale);
+    const double bridgeMaxLength = std::max(options.bridgeMaxLengthMinMm,
+                                            medianStep * options.bridgeMaxLengthStepScale);
+
+    std::vector<char> keep(finitePoints.size(), 1);
+    const int supportIndexRadius = std::max(1, options.supportIndexRadius);
+    const int endpointPreserveCount = std::max(0, options.endpointPreserveCount);
+    const int endpointMinSupportCount = std::max(0, options.endpointMinSupportCount);
+    const int middleMinSupportCount = std::max(0, options.middleMinSupportCount);
+    const int localSpikeSupportMaxCount = std::max(0, options.localSpikeSupportMaxCount);
+    for (int i = 0; i < static_cast<int>(finitePoints.size()); ++i)
+    {
+        int supportCount = 0;
+        const int supportBegin = std::max(0, i - supportIndexRadius);
+        const int supportEnd = std::min(static_cast<int>(finitePoints.size()) - 1, i + supportIndexRadius);
+        for (int j = supportBegin; j <= supportEnd; ++j)
+        {
+            if (j == i)
+            {
+                continue;
+            }
+
+            if (distance3D(finitePoints[i], finitePoints[j]) <= supportRadius)
+            {
+                ++supportCount;
+            }
+        }
+
+        const bool isEndpoint = (i < endpointPreserveCount
+            || i >= static_cast<int>(finitePoints.size()) - endpointPreserveCount);
+        const int minSupportCount = isEndpoint ? endpointMinSupportCount : middleMinSupportCount;
+        const bool hasLocalSupport = supportCount >= minSupportCount;
+        const bool isLocalSpike = supportCount <= localSpikeSupportMaxCount
+            && residuals[i] > std::max(options.localSpikeThresholdMinMm,
+                                       threshold * options.localSpikeThresholdScale);
+
+        keep[i] = hasLocalSupport && !isLocalSpike && residuals[i] <= threshold;
+    }
+
+    if (options.enableBridgeSpikeFilter)
+    {
+        const int bridgeInnerGap = std::max(1, options.bridgeInnerGap);
+        const int bridgeOuterRadius = std::max(bridgeInnerGap + 1, options.bridgeOuterRadius);
+        const int bridgeMinNeighborCount = std::max(1, options.bridgeMinNeighborCount);
+
+        for (int i = bridgeInnerGap; i < static_cast<int>(finitePoints.size()) - bridgeInnerGap; ++i)
+        {
+            std::vector<double> prevXs;
+            std::vector<double> prevYs;
+            std::vector<double> prevZs;
+            std::vector<double> nextXs;
+            std::vector<double> nextYs;
+            std::vector<double> nextZs;
+            prevXs.reserve(bridgeOuterRadius - bridgeInnerGap + 1);
+            prevYs.reserve(bridgeOuterRadius - bridgeInnerGap + 1);
+            prevZs.reserve(bridgeOuterRadius - bridgeInnerGap + 1);
+            nextXs.reserve(bridgeOuterRadius - bridgeInnerGap + 1);
+            nextYs.reserve(bridgeOuterRadius - bridgeInnerGap + 1);
+            nextZs.reserve(bridgeOuterRadius - bridgeInnerGap + 1);
+
+            const int prevBegin = std::max(0, i - bridgeOuterRadius);
+            const int prevEnd = std::max(0, i - bridgeInnerGap);
+            const int nextBegin = std::min(static_cast<int>(finitePoints.size()) - 1, i + bridgeInnerGap);
+            const int nextEnd = std::min(static_cast<int>(finitePoints.size()) - 1, i + bridgeOuterRadius);
+            for (int j = prevBegin; j <= prevEnd; ++j)
+            {
+                if (!keep[j])
+                {
+                    continue;
+                }
+                prevXs.push_back(finitePoints[j].x);
+                prevYs.push_back(finitePoints[j].y);
+                prevZs.push_back(finitePoints[j].z);
+            }
+            for (int j = nextBegin; j <= nextEnd; ++j)
+            {
+                if (!keep[j])
+                {
+                    continue;
+                }
+                nextXs.push_back(finitePoints[j].x);
+                nextYs.push_back(finitePoints[j].y);
+                nextZs.push_back(finitePoints[j].z);
+            }
+
+            if (prevXs.size() < static_cast<size_t>(bridgeMinNeighborCount)
+                || nextXs.size() < static_cast<size_t>(bridgeMinNeighborCount))
+            {
+                continue;
+            }
+
+            cv::Point3d prevMedian;
+            prevMedian.x = medianValue(prevXs);
+            prevMedian.y = medianValue(prevYs);
+            prevMedian.z = medianValue(prevZs);
+
+            cv::Point3d nextMedian;
+            nextMedian.x = medianValue(nextXs);
+            nextMedian.y = medianValue(nextYs);
+            nextMedian.z = medianValue(nextZs);
+
+            const double bridgeLength = distance3D(prevMedian, nextMedian);
+            const double bridgeDistance = pointSegmentDistance3D(finitePoints[i], prevMedian, nextMedian);
+            if (bridgeLength <= bridgeMaxLength && bridgeDistance > bridgeDistanceThreshold)
+            {
+                keep[i] = 0;
+            }
+        }
+    }
+
+    if (options.enableSmallClusterFilter)
+    {
+        std::vector<int> keptIndices;
+        keptIndices.reserve(finitePoints.size());
+        for (int i = 0; i < static_cast<int>(finitePoints.size()); ++i)
+        {
+            if (keep[i])
+            {
+                keptIndices.push_back(i);
+            }
+        }
+
+        if (keptIndices.size() >= static_cast<size_t>(minPointCount))
+        {
+            struct ClusterStat
+            {
+                int count = 0;
+                double minX = std::numeric_limits<double>::max();
+                double maxX = -std::numeric_limits<double>::max();
+                double minY = std::numeric_limits<double>::max();
+                double maxY = -std::numeric_limits<double>::max();
+                double minZ = std::numeric_limits<double>::max();
+                double maxZ = -std::numeric_limits<double>::max();
+            };
+
+            const double clusterLinkRadius = std::max(options.clusterLinkRadiusMinMm,
+                                                      medianStep * options.clusterLinkRadiusStepScale);
+            std::vector<int> clusterOfPoint(keptIndices.size(), -1);
+            std::vector<ClusterStat> clusters;
+            for (int seed = 0; seed < static_cast<int>(keptIndices.size()); ++seed)
+            {
+                if (clusterOfPoint[seed] >= 0)
+                {
+                    continue;
+                }
+
+                const int clusterIndex = static_cast<int>(clusters.size());
+                clusters.push_back(ClusterStat());
+                std::vector<int> stack;
+                stack.push_back(seed);
+                clusterOfPoint[seed] = clusterIndex;
+
+                while (!stack.empty())
+                {
+                    const int current = stack.back();
+                    stack.pop_back();
+                    const cv::Point3d& currentPoint = finitePoints[keptIndices[current]];
+                    ClusterStat& cluster = clusters[clusterIndex];
+                    ++cluster.count;
+                    cluster.minX = std::min(cluster.minX, currentPoint.x);
+                    cluster.maxX = std::max(cluster.maxX, currentPoint.x);
+                    cluster.minY = std::min(cluster.minY, currentPoint.y);
+                    cluster.maxY = std::max(cluster.maxY, currentPoint.y);
+                    cluster.minZ = std::min(cluster.minZ, currentPoint.z);
+                    cluster.maxZ = std::max(cluster.maxZ, currentPoint.z);
+
+                    for (int candidate = 0; candidate < static_cast<int>(keptIndices.size()); ++candidate)
+                    {
+                        if (clusterOfPoint[candidate] >= 0)
+                        {
+                            continue;
+                        }
+                        if (distance3D(currentPoint, finitePoints[keptIndices[candidate]]) <= clusterLinkRadius)
+                        {
+                            clusterOfPoint[candidate] = clusterIndex;
+                            stack.push_back(candidate);
+                        }
+                    }
+                }
+            }
+
+            int largestClusterCount = 0;
+            for (const ClusterStat& cluster : clusters)
+            {
+                largestClusterCount = std::max(largestClusterCount, cluster.count);
+            }
+
+            const int minClusterCount = std::max(1, options.clusterMinPointCount);
+            const int ratioClusterCount = std::max(1, static_cast<int>(
+                std::ceil(largestClusterCount * std::max(0.0, std::min(1.0, options.clusterMinSizeRatioToLargest)))));
+            const int spanMinPointCount = std::max(3, minClusterCount / 2);
+            for (int localIndex = 0; localIndex < static_cast<int>(keptIndices.size()); ++localIndex)
+            {
+                const ClusterStat& cluster = clusters[clusterOfPoint[localIndex]];
+                const double spanXY = std::max(cluster.maxX - cluster.minX, cluster.maxY - cluster.minY);
+                const double span = std::max(spanXY, cluster.maxZ - cluster.minZ);
+                const bool isLargestCluster = cluster.count == largestClusterCount;
+                const bool isValidSecondaryCluster = cluster.count >= minClusterCount
+                    && cluster.count >= ratioClusterCount
+                    && cluster.count >= spanMinPointCount
+                    && span >= options.clusterMinSpanMm;
+                const bool keepCluster = isLargestCluster || isValidSecondaryCluster;
+                if (!keepCluster)
+                {
+                    keep[keptIndices[localIndex]] = 0;
+                }
+            }
+        }
+    }
+
+    std::vector<cv::Point3d> filteredPoints;
+    filteredPoints.reserve(finitePoints.size());
+    for (int i = 0; i < static_cast<int>(finitePoints.size()); ++i)
+    {
+        if (keep[i])
+        {
+            filteredPoints.push_back(finitePoints[i]);
+        }
+    }
+
+    return filteredPoints;
+}
+
+std::vector<LaserFramePoint3D> BuildLaserFramePoint3DList(const std::vector<cv::Point3d>& sourcePoints)
+{
+    std::vector<LaserFramePoint3D> points;
+    points.reserve(sourcePoints.size());
+    for (int i = 0; i < static_cast<int>(sourcePoints.size()); ++i)
+    {
+        const cv::Point3d& point = sourcePoints[i];
+        points.push_back({ i + 1, point.x, point.y, point.z });
+    }
+    return points;
+}
+
+bool WriteLaserFramePoint3DFile(const QString& filePath, const std::vector<LaserFramePoint3D>& points, QString* error)
+{
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("打开文件失败: %1").arg(NativeAbsolutePath(filePath));
+        }
+        return false;
+    }
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    stream << "index,x,y,z\n";
+    for (const LaserFramePoint3D& point : points)
+    {
+        stream << point.index << ','
+            << QString::number(point.x, 'f', 6) << ','
+            << QString::number(point.y, 'f', 6) << ','
+            << QString::number(point.z, 'f', 6) << '\n';
+    }
+    return true;
 }
 
 bool HasMeaningfulToolOffset(const T_ROBOT_COORS& tool)
@@ -817,7 +1236,9 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     QGroupBox* offlineGroup = new QGroupBox("离线数据处理");
     QGridLayout* offlineLayout = new QGridLayout(offlineGroup);
     QPushButton* filterLaserBtn = CreateTestButton("焊道滤波测试");
+    QPushButton* currentFrameFilterBtn = CreateTestButton("当前帧点云滤波");
     offlineLayout->addWidget(filterLaserBtn, 0, 0);
+    offlineLayout->addWidget(currentFrameFilterBtn, 1, 0);
     groupLayout->addWidget(offlineGroup, 1, 1);
 
     QGroupBox* kinematicsGroup = new QGroupBox("运动学/DH");
@@ -849,6 +1270,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     connect(saveKinematicsSampleBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucCaptureKinematicsSample);
     connect(fitDhBtn, &QPushButton::clicked, this, &FunctionTestDialog::FitDhParametersFromSamples);
     connect(filterLaserBtn, &QPushButton::clicked, this, &FunctionTestDialog::OpenLaserWeldFilterTest);
+    connect(currentFrameFilterBtn, &QPushButton::clicked, this, &FunctionTestDialog::ExportCurrentCameraFramePointFilterTest);
 
     m_pMotionStateTimer = new QTimer(this);
     m_pMotionStateTimer->setInterval(200);
@@ -1933,6 +2355,82 @@ void FunctionTestDialog::FitDhParametersFromSamples()
 
     AppendLog(message);
     QMessageBox::information(this, "拟合DH参数", message);
+}
+
+void FunctionTestDialog::ExportCurrentCameraFramePointFilterTest()
+{
+    RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstRobotDriverAdaptor();
+    if (pRobotDriverAdaptor == nullptr)
+    {
+        return;
+    }
+
+    if (m_pCameraCache == nullptr)
+    {
+        const QString message = "当前机器人没有可用的专属相机缓存，请确认机器人相机线程已初始化。";
+        AppendLog(message);
+        QMessageBox::warning(this, "当前帧点云滤波", message);
+        return;
+    }
+
+    udpDataShow frame;
+    if (!m_pCameraCache->Latest(frame))
+    {
+        const QString message = "当前相机缓存中没有可用帧。";
+        AppendLog(message);
+        QMessageBox::warning(this, "当前帧点云滤波", message);
+        return;
+    }
+
+    if (frame.allResultPoint.empty())
+    {
+        const QString message = QString("当前帧没有 allResultPoint 点云数据，timestamp=%1。")
+            .arg(frame.timestamp);
+        AppendLog(message);
+        QMessageBox::warning(this, "当前帧点云滤波", message);
+        return;
+    }
+
+    const QString robotName = DefaultRobotName(pRobotDriverAdaptor);
+    const QString outputDir = BuildCameraFramePointFilterTestDir(robotName);
+    if (!QFileInfo::exists(outputDir))
+    {
+        const QString message = "创建当前帧点云滤波输出目录失败:\n" + outputDir;
+        AppendLog(message);
+        QMessageBox::warning(this, "当前帧点云滤波", message);
+        return;
+    }
+
+    const LaserFramePoint3DFilterOptions filterOptions = BuildThreeSegmentCameraFrameFilterOptions();
+    const std::vector<cv::Point3d> filteredFramePoints = FilterSingleFrameLaserPoint3D(frame.allResultPoint, filterOptions);
+    const std::vector<LaserFramePoint3D> rawPoints = BuildLaserFramePoint3DList(frame.allResultPoint);
+    const std::vector<LaserFramePoint3D> filteredPoints = BuildLaserFramePoint3DList(filteredFramePoints);
+
+    const QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+    const QString rawPath = QDir(outputDir).filePath(QString("CameraFrame3D_Raw_%1.txt").arg(timestamp));
+    const QString filteredPath = QDir(outputDir).filePath(QString("CameraFrame3D_Filtered_%1.txt").arg(timestamp));
+
+    QString error;
+    if (!WriteLaserFramePoint3DFile(rawPath, rawPoints, &error))
+    {
+        AppendLog(error);
+        QMessageBox::warning(this, "当前帧点云滤波", error);
+        return;
+    }
+    if (!WriteLaserFramePoint3DFile(filteredPath, filteredPoints, &error))
+    {
+        AppendLog(error);
+        QMessageBox::warning(this, "当前帧点云滤波", error);
+        return;
+    }
+
+    const QString message = QString("当前帧三维点云滤波完成：原始点=%1，滤波后=%2。\n原始文件：%3\n滤波文件：%4")
+        .arg(rawPoints.size())
+        .arg(filteredPoints.size())
+        .arg(NativeAbsolutePath(rawPath))
+        .arg(NativeAbsolutePath(filteredPath));
+    AppendLog(message);
+    QMessageBox::information(this, "当前帧点云滤波", message);
 }
 
 void FunctionTestDialog::OpenLaserWeldFilterTest()

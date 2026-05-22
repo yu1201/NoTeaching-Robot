@@ -21,6 +21,7 @@
 #include "WeldPoseAverageUpdater.h"
 #include "WeldProcessDialog.h"
 #include "WeldSeamCompDialog.h"
+#include "../portable/LaserFramePoint3DFilter/LaserFramePoint3DFilter.h"
 #include "groove/clientudpformsensorworker.h"
 #include "groove/framebuffer.h"
 #include <QApplication>
@@ -49,9 +50,12 @@
 #include <QAction>
 #include <QCheckBox>
 #include <QFrame>
+#include <QFontMetrics>
 #include <QMetaObject>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMouseEvent>
+#include <QPainter>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -59,6 +63,7 @@
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QGraphicsDropShadowEffect>
+#include <QPointer>
 #include <QPixmap>
 #include <QRegularExpression>
 #include <QTableWidget>
@@ -77,6 +82,7 @@
 #include <QTextDocument>
 #include <QTextStream>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 #include <QStringList>
 #include <algorithm>
 #include <cmath>
@@ -2886,6 +2892,745 @@ namespace
 		QString m_lastEditorSocketIpForFtp;
 		QPlainTextEdit* m_logText = nullptr;
 	};
+
+	class GroovePointCloudView final : public QWidget
+	{
+	public:
+		struct ViewState
+		{
+			double baseMinX = -120.0;
+			double baseMaxX = 120.0;
+			double baseMinY = -600.0;
+			double baseMaxY = -160.0;
+			double zoomFactor = 1.0;
+			QPointF panOffset;
+			bool hasBaseBounds = false;
+		};
+
+		explicit GroovePointCloudView(QWidget* parent = nullptr)
+			: QWidget(parent)
+		{
+			setFixedSize(960, 960);
+			setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+		}
+
+		QSize sizeHint() const override
+		{
+			return QSize(width(), height());
+		}
+
+		void SetFrame(const udpDataShow& frame, const QString& statusText, const ViewState& viewState)
+		{
+			m_profilePoints.clear();
+			m_hasTargetPoint = false;
+			m_fps = frame.mFps;
+			m_timestamp = frame.timestamp;
+			m_statusText = statusText;
+			m_viewState = viewState;
+
+			const int pointCount = std::min(frame.XData.size(), frame.YData.size());
+			m_profilePoints.reserve(pointCount > 0 ? pointCount : static_cast<int>(frame.allResultPoint.size()));
+			for (int index = 0; index < pointCount; ++index)
+			{
+				const QPointF point(frame.XData.at(index), frame.YData.at(index));
+				if (IsFinitePoint(point))
+				{
+					m_profilePoints.push_back(point);
+				}
+			}
+
+			if (m_profilePoints.isEmpty())
+			{
+				for (const cv::Point3d& point : frame.allResultPoint)
+				{
+					const QPointF projectedPoint(point.y, point.z);
+					if (IsFinitePoint(projectedPoint))
+					{
+						m_profilePoints.push_back(projectedPoint);
+					}
+				}
+			}
+
+			for (int index = std::min(frame.targetX.size(), frame.targetY.size()) - 1; index >= 0; --index)
+			{
+				const QPointF point(frame.targetX.at(index), frame.targetY.at(index));
+				if (IsFinitePoint(point))
+				{
+					m_targetPoint = point;
+					m_hasTargetPoint = true;
+					break;
+				}
+			}
+			if (!m_hasTargetPoint)
+			{
+				const QPointF point(frame.targetPoint.y, frame.targetPoint.z);
+				if (IsFinitePoint(point))
+				{
+					m_targetPoint = point;
+					m_hasTargetPoint = true;
+				}
+			}
+
+			if (!m_viewState.hasBaseBounds)
+			{
+				FitViewToCurrentFrame();
+			}
+			update();
+		}
+
+		void ClearPreview(const QString& statusText)
+		{
+			m_profilePoints.clear();
+			m_hasTargetPoint = false;
+			m_fps = 0.0;
+			m_timestamp = 0;
+			m_statusText = statusText;
+			m_viewState = ViewState();
+			update();
+		}
+
+		ViewState CurrentViewState() const
+		{
+			return m_viewState;
+		}
+
+	protected:
+		void paintEvent(QPaintEvent* event) override
+		{
+			Q_UNUSED(event);
+
+			QPainter painter(this);
+			painter.setRenderHint(QPainter::Antialiasing, true);
+			painter.fillRect(rect(), QColor(18, 18, 18));
+
+			const QRectF contentRect = rect().adjusted(12, 12, -12, -12);
+			const double plotSide = std::max(1.0, std::min(contentRect.width(), contentRect.height()));
+			const QRectF plotRect(
+				contentRect.left() + (contentRect.width() - plotSide) * 0.5,
+				contentRect.top() + (contentRect.height() - plotSide) * 0.5,
+				plotSide,
+				plotSide);
+			painter.fillRect(plotRect, QColor(14, 15, 15));
+			painter.setClipRect(plotRect);
+
+			double minX = 0.0;
+			double maxX = 0.0;
+			double minY = 0.0;
+			double maxY = 0.0;
+			ComputeViewBounds(minX, maxX, minY, maxY);
+
+			const double xScale = plotRect.width() / (maxX - minX);
+			const double yScale = plotRect.height() / (maxY - minY);
+			auto mapPoint = [plotRect, minX, minY, xScale, yScale](const QPointF& point) -> QPointF
+			{
+				return QPointF(
+					plotRect.left() + (point.x() - minX) * xScale,
+					plotRect.bottom() - (point.y() - minY) * yScale);
+			};
+
+			DrawGrid(painter, plotRect, minX, maxX, minY, maxY);
+			DrawPointSeries(painter, m_profilePoints, mapPoint, QColor(0, 255, 48), 2.0);
+			if (m_hasTargetPoint)
+			{
+				QPen targetPen(QColor(255, 48, 48));
+				targetPen.setWidthF(5.0);
+				targetPen.setCapStyle(Qt::RoundCap);
+				painter.setPen(targetPen);
+				painter.drawPoint(mapPoint(m_targetPoint));
+			}
+
+			painter.setClipping(false);
+			DrawOverlay(painter, plotRect);
+		}
+
+		void wheelEvent(QWheelEvent* event) override
+		{
+			const QPoint angleDelta = event->angleDelta();
+			if (angleDelta.y() == 0)
+			{
+				QWidget::wheelEvent(event);
+				return;
+			}
+
+			const double zoomStep = angleDelta.y() > 0 ? 1.18 : (1.0 / 1.18);
+			m_viewState.zoomFactor = std::clamp(m_viewState.zoomFactor * zoomStep, 0.25, 20.0);
+			event->accept();
+			update();
+		}
+
+		void mousePressEvent(QMouseEvent* event) override
+		{
+			if (event->button() == Qt::MiddleButton)
+			{
+				m_isPanning = true;
+				m_lastPanMousePos = event->position();
+				setCursor(Qt::ClosedHandCursor);
+				event->accept();
+				return;
+			}
+			QWidget::mousePressEvent(event);
+		}
+
+		void mouseMoveEvent(QMouseEvent* event) override
+		{
+			if (m_isPanning)
+			{
+				double minX = 0.0;
+				double maxX = 0.0;
+				double minY = 0.0;
+				double maxY = 0.0;
+				ComputeViewBounds(minX, maxX, minY, maxY);
+
+				const QRectF plotRect = ComputePlotRect();
+				const double xScale = plotRect.width() / std::max(1.0e-9, maxX - minX);
+				const double yScale = plotRect.height() / std::max(1.0e-9, maxY - minY);
+				const QPointF delta = event->position() - m_lastPanMousePos;
+				m_viewState.panOffset += QPointF(-delta.x() / xScale, delta.y() / yScale);
+				m_lastPanMousePos = event->position();
+				event->accept();
+				update();
+				return;
+			}
+			QWidget::mouseMoveEvent(event);
+		}
+
+		void mouseReleaseEvent(QMouseEvent* event) override
+		{
+			if (event->button() == Qt::MiddleButton && m_isPanning)
+			{
+				m_isPanning = false;
+				unsetCursor();
+				event->accept();
+				return;
+			}
+			QWidget::mouseReleaseEvent(event);
+		}
+
+	private:
+		QRectF ComputePlotRect() const
+		{
+			const QRectF contentRect = rect().adjusted(12, 12, -12, -12);
+			const double plotSide = std::max(1.0, std::min(contentRect.width(), contentRect.height()));
+			return QRectF(
+				contentRect.left() + (contentRect.width() - plotSide) * 0.5,
+				contentRect.top() + (contentRect.height() - plotSide) * 0.5,
+				plotSide,
+				plotSide);
+		}
+
+		void FitViewToCurrentFrame()
+		{
+			bool hasBounds = false;
+			double minX = 0.0;
+			double maxX = 0.0;
+			double minY = 0.0;
+			double maxY = 0.0;
+			IncludeBounds(m_profilePoints, hasBounds, minX, maxX, minY, maxY);
+			if (!hasBounds)
+			{
+				minX = -120.0;
+				maxX = 120.0;
+				minY = -600.0;
+				maxY = -160.0;
+			}
+			NormalizePreviewBounds(minX, maxX, minY, maxY);
+			m_viewState.baseMinX = minX;
+			m_viewState.baseMaxX = maxX;
+			m_viewState.baseMinY = minY;
+			m_viewState.baseMaxY = maxY;
+			m_viewState.zoomFactor = 1.0;
+			m_viewState.panOffset = QPointF();
+			m_viewState.hasBaseBounds = true;
+		}
+
+		void ComputeViewBounds(double& minX, double& maxX, double& minY, double& maxY) const
+		{
+			if (m_viewState.hasBaseBounds)
+			{
+				minX = m_viewState.baseMinX;
+				maxX = m_viewState.baseMaxX;
+				minY = m_viewState.baseMinY;
+				maxY = m_viewState.baseMaxY;
+			}
+			else
+			{
+				minX = -120.0;
+				maxX = 120.0;
+				minY = -600.0;
+				maxY = -160.0;
+			}
+			ApplyZoomToBounds(minX, maxX, minY, maxY, m_viewState.zoomFactor);
+			minX += m_viewState.panOffset.x();
+			maxX += m_viewState.panOffset.x();
+			minY += m_viewState.panOffset.y();
+			maxY += m_viewState.panOffset.y();
+		}
+
+		static bool IsFiniteValue(double value)
+		{
+			return std::isfinite(value);
+		}
+
+		static bool IsFinitePoint(const QPointF& point)
+		{
+			return IsFiniteValue(point.x()) && IsFiniteValue(point.y());
+		}
+
+		static void IncludeBounds(
+			const QPointF& point,
+			bool& hasBounds,
+			double& minX,
+			double& maxX,
+			double& minY,
+			double& maxY)
+		{
+			if (!IsFinitePoint(point))
+			{
+				return;
+			}
+			if (!hasBounds)
+			{
+				minX = maxX = point.x();
+				minY = maxY = point.y();
+				hasBounds = true;
+				return;
+			}
+			minX = std::min(minX, point.x());
+			maxX = std::max(maxX, point.x());
+			minY = std::min(minY, point.y());
+			maxY = std::max(maxY, point.y());
+		}
+
+		static void IncludeBounds(
+			const QVector<QPointF>& points,
+			bool& hasBounds,
+			double& minX,
+			double& maxX,
+			double& minY,
+			double& maxY)
+		{
+			for (const QPointF& point : points)
+			{
+				IncludeBounds(point, hasBounds, minX, maxX, minY, maxY);
+			}
+		}
+
+		static void NormalizePreviewBounds(double& minX, double& maxX, double& minY, double& maxY)
+		{
+			const double centerX = (minX + maxX) * 0.5;
+			const double centerY = (minY + maxY) * 0.5;
+			const double dataSpanX = std::max(1.0, maxX - minX);
+			const double dataSpanY = std::max(1.0, maxY - minY);
+			const double spanX = std::max(220.0, dataSpanX * 1.16);
+			const double spanY = std::max(450.0, dataSpanY * 1.24);
+			minX = centerX - spanX * 0.5;
+			maxX = centerX + spanX * 0.5;
+			minY = centerY - spanY * 0.5;
+			maxY = centerY + spanY * 0.5;
+		}
+
+		static void ApplyZoomToBounds(double& minX, double& maxX, double& minY, double& maxY, double zoomFactor)
+		{
+			zoomFactor = std::clamp(zoomFactor, 0.25, 20.0);
+			const double centerX = (minX + maxX) * 0.5;
+			const double centerY = (minY + maxY) * 0.5;
+			const double spanX = (maxX - minX) / zoomFactor;
+			const double spanY = (maxY - minY) / zoomFactor;
+			minX = centerX - spanX * 0.5;
+			maxX = centerX + spanX * 0.5;
+			minY = centerY - spanY * 0.5;
+			maxY = centerY + spanY * 0.5;
+		}
+
+		static void DrawGrid(
+			QPainter& painter,
+			const QRectF& plotRect,
+			double minX,
+			double maxX,
+			double minY,
+			double maxY)
+		{
+			QPen gridPen(QColor(190, 190, 190, 150));
+			gridPen.setStyle(Qt::DotLine);
+			gridPen.setWidthF(1.0);
+			painter.setPen(gridPen);
+			const int gridCount = 4;
+			for (int index = 0; index <= gridCount; ++index)
+			{
+				const double x = plotRect.left() + plotRect.width() * index / gridCount;
+				const double y = plotRect.top() + plotRect.height() * index / gridCount;
+				painter.drawLine(QPointF(x, plotRect.top()), QPointF(x, plotRect.bottom()));
+				painter.drawLine(QPointF(plotRect.left(), y), QPointF(plotRect.right(), y));
+			}
+
+			QPen axisPen(QColor(230, 230, 230, 190));
+			axisPen.setStyle(Qt::SolidLine);
+			axisPen.setWidthF(1.0);
+			painter.setPen(axisPen);
+			painter.drawLine(QPointF(plotRect.center().x(), plotRect.top()), QPointF(plotRect.center().x(), plotRect.bottom()));
+			painter.drawLine(QPointF(plotRect.left(), plotRect.center().y()), QPointF(plotRect.right(), plotRect.center().y()));
+
+			QFont labelFont = painter.font();
+			labelFont.setPointSize(8);
+			painter.setFont(labelFont);
+			painter.setPen(QColor(220, 220, 220));
+			QFontMetrics labelMetrics(labelFont);
+			for (int index = 0; index <= gridCount; ++index)
+			{
+				const double x = plotRect.left() + plotRect.width() * index / gridCount;
+				const double y = plotRect.top() + plotRect.height() * index / gridCount;
+				const double labelX = minX + (maxX - minX) * index / gridCount;
+				const double labelY = maxY - (maxY - minY) * index / gridCount;
+				if (index > 0)
+				{
+					const QString xText = QString::number(labelX, 'f', 0);
+					const int textWidth = labelMetrics.horizontalAdvance(xText);
+					double labelLeft = x - textWidth * 0.5;
+					labelLeft = std::clamp(labelLeft, plotRect.left() + 6.0, plotRect.right() - textWidth - 6.0);
+					painter.drawText(QPointF(labelLeft, plotRect.bottom() - 6.0), xText);
+				}
+				if (index < gridCount)
+				{
+					const QString yText = QString::number(labelY, 'f', 0);
+					painter.drawText(QPointF(plotRect.left() + 6.0, y - 6.0), yText);
+				}
+			}
+		}
+
+		template<typename Mapper>
+		static void DrawPointSeries(
+			QPainter& painter,
+			const QVector<QPointF>& points,
+			const Mapper& mapper,
+			const QColor& color,
+			double pointWidth)
+		{
+			if (points.isEmpty())
+			{
+				return;
+			}
+			QPen pointPen(color.lighter(110));
+			pointPen.setWidthF(pointWidth);
+			painter.setPen(pointPen);
+			const int drawStep = points.size() > 4000 ? 3 : (points.size() > 2000 ? 2 : 1);
+			for (int index = 0; index < points.size(); index += drawStep)
+			{
+				painter.drawPoint(mapper(points.at(index)));
+			}
+		}
+
+		void DrawOverlay(QPainter& painter, const QRectF& plotRect) const
+		{
+			QFont fpsFont = painter.font();
+			fpsFont.setPointSize(18);
+			fpsFont.setBold(false);
+			painter.setFont(fpsFont);
+			const QString fpsText = QString("FPS:%1").arg(m_fps, 0, 'f', 2);
+			QFontMetrics fpsMetrics(fpsFont);
+			QRectF fpsRect = fpsMetrics.boundingRect(fpsText).adjusted(-10, -6, 10, 6);
+			fpsRect.moveTopLeft(plotRect.topLeft() + QPointF(10, 10));
+			painter.setPen(QPen(QColor(230, 230, 230), 1.0));
+			painter.setBrush(QColor(0, 0, 0, 210));
+			painter.drawRoundedRect(fpsRect, 4, 4);
+			painter.setPen(QColor(255, 255, 255));
+			painter.drawText(fpsRect, Qt::AlignCenter, fpsText);
+
+			QFont statusFont = painter.font();
+			statusFont.setPointSize(9);
+			painter.setFont(statusFont);
+			painter.setPen(QColor(190, 230, 240));
+			const QString status = m_profilePoints.isEmpty()
+				? (m_statusText.isEmpty() ? QStringLiteral("等待相机点云...") : m_statusText)
+				: QStringLiteral("%1  点数:%2  时间戳:%3").arg(m_statusText).arg(m_profilePoints.size()).arg(m_timestamp);
+			painter.drawText(plotRect.adjusted(12, 12, -12, -12), Qt::AlignRight | Qt::AlignTop | Qt::TextWordWrap, status);
+		}
+
+		QVector<QPointF> m_profilePoints;
+		QPointF m_targetPoint;
+		bool m_hasTargetPoint = false;
+		double m_fps = 0.0;
+		qulonglong m_timestamp = 0;
+		QString m_statusText;
+		ViewState m_viewState;
+		QPointF m_lastPanMousePos;
+		bool m_isPanning = false;
+	};
+
+	static udpDataShow BuildFilteredGroovePreviewFrame(const udpDataShow& frame)
+	{
+		LaserFramePoint3DFilterOptions filterOptions;
+		filterOptions.enableDominantLineSegmentFilter = true;
+		filterOptions.dominantLineMinSegmentCount = 2;
+		filterOptions.dominantLineMaxSegmentCount = 3;
+		filterOptions.profileComponentKeepStandalone = true;
+		filterOptions.profileRunKeepStandalone = true;
+
+		udpDataShow filteredFrame = frame;
+		filteredFrame.allResultPoint = FilterSingleFrameLaserPoint3D(frame.allResultPoint, filterOptions);
+		filteredFrame.XData.clear();
+		filteredFrame.YData.clear();
+		filteredFrame.XData.reserve(static_cast<int>(filteredFrame.allResultPoint.size()));
+		filteredFrame.YData.reserve(static_cast<int>(filteredFrame.allResultPoint.size()));
+		for (const cv::Point3d& point : filteredFrame.allResultPoint)
+		{
+			filteredFrame.XData.append(point.y);
+			filteredFrame.YData.append(point.z);
+		}
+		filteredFrame.fitLineX.clear();
+		filteredFrame.fitLineY.clear();
+		return filteredFrame;
+	}
+
+	class GroovePointCloudDialog final : public QDialog
+	{
+	public:
+		explicit GroovePointCloudDialog(QWidget* parent = nullptr)
+			: QDialog(parent)
+		{
+			setWindowTitle("坡口相机点云预览");
+			setModal(false);
+			setAttribute(Qt::WA_DeleteOnClose, true);
+
+			QVBoxLayout* mainLayout = new QVBoxLayout(this);
+			mainLayout->setContentsMargins(14, 14, 14, 14);
+			mainLayout->setSpacing(10);
+
+			QHBoxLayout* toolbarLayout = new QHBoxLayout();
+			toolbarLayout->addStretch(1);
+			m_rawButton = new QPushButton("滤波前", this);
+			m_filteredButton = new QPushButton("滤波后", this);
+			for (QPushButton* button : { m_rawButton, m_filteredButton })
+			{
+				button->setCheckable(true);
+				button->setMinimumSize(150, 44);
+				toolbarLayout->addWidget(button);
+			}
+			toolbarLayout->addStretch(1);
+			mainLayout->addLayout(toolbarLayout);
+
+			m_view = new GroovePointCloudView(this);
+			const int plotSide = ComputePlotSide(parent);
+			m_view->setFixedSize(plotSide, plotSide);
+			m_view->ClearPreview("等待相机点云...");
+			mainLayout->addWidget(m_view, 1, Qt::AlignCenter);
+
+			connect(m_rawButton, &QPushButton::clicked, this, [this]()
+				{
+					SetFilteredMode(false);
+				});
+			connect(m_filteredButton, &QPushButton::clicked, this, [this]()
+				{
+					SetFilteredMode(true);
+				});
+			SetFilteredMode(false);
+			adjustSize();
+			setMinimumSize(sizeHint());
+			resize(sizeHint());
+		}
+
+		void SetFrame(const udpDataShow& rawFrame, const QString& statusText)
+		{
+			const bool sourceChanged = m_hasFrame && (m_statusText != statusText);
+			if (sourceChanged)
+			{
+				ResetViewStates();
+				m_filteredFrameValid = false;
+				m_filterBuildRunning = false;
+				++m_filterBuildGeneration;
+			}
+			m_rawFrame = rawFrame;
+			m_statusText = statusText;
+			m_hasFrame = true;
+			RefreshView();
+		}
+
+		void ClearPreview(const QString& statusText)
+		{
+			m_hasFrame = false;
+			m_statusText = statusText;
+			m_filteredFrameValid = false;
+			m_filterBuildRunning = false;
+			++m_filterBuildGeneration;
+			ResetViewStates();
+			if (m_view != nullptr)
+			{
+				m_view->ClearPreview(statusText);
+			}
+		}
+
+	private:
+		static int ComputePlotSide(QWidget* parent)
+		{
+			const QScreen* screen = nullptr;
+			if (parent != nullptr)
+			{
+				screen = parent->screen();
+			}
+			if (screen == nullptr)
+			{
+				screen = QGuiApplication::primaryScreen();
+			}
+
+			int maxSide = 1080;
+			if (screen != nullptr)
+			{
+				const QRect available = screen->availableGeometry();
+				maxSide = std::min(available.width() - 120, available.height() - 170);
+			}
+			return std::max(520, std::min(maxSide, 1080));
+		}
+
+		void SetFilteredMode(bool showFiltered)
+		{
+			if (m_showFiltered != showFiltered)
+			{
+				SaveCurrentViewState();
+			}
+			m_showFiltered = showFiltered;
+			if (m_rawButton != nullptr)
+			{
+				m_rawButton->setChecked(!m_showFiltered);
+			}
+			if (m_filteredButton != nullptr)
+			{
+				m_filteredButton->setChecked(m_showFiltered);
+			}
+			RefreshView(true, false);
+		}
+
+		void ResetViewStates()
+		{
+			m_rawViewState = GroovePointCloudView::ViewState();
+			m_filteredViewState = GroovePointCloudView::ViewState();
+		}
+
+		GroovePointCloudView::ViewState& CurrentModeViewState()
+		{
+			return m_showFiltered ? m_filteredViewState : m_rawViewState;
+		}
+
+		void SaveCurrentViewState()
+		{
+			if (m_view == nullptr)
+			{
+				return;
+			}
+			CurrentModeViewState() = m_view->CurrentViewState();
+		}
+
+		void RequestFilteredFrame(bool forceBuild)
+		{
+			if (!m_hasFrame)
+			{
+				return;
+			}
+			if (m_filteredFrameValid && m_filteredFrame.timestamp == m_rawFrame.timestamp)
+			{
+				return;
+			}
+			if (m_filterBuildRunning)
+			{
+				return;
+			}
+
+			const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+			constexpr qint64 kFilteredPreviewMinIntervalMs = 100;
+			if (!forceBuild && m_filteredFrameValid && (nowMs - m_lastFilteredBuildMs) < kFilteredPreviewMinIntervalMs)
+			{
+				return;
+			}
+
+			m_filterBuildRunning = true;
+			m_lastFilteredBuildMs = nowMs;
+			const udpDataShow rawFrame = m_rawFrame;
+			const quint64 buildGeneration = m_filterBuildGeneration;
+			QPointer<GroovePointCloudDialog> dialog(this);
+			QThread* filterThread = QThread::create([dialog, rawFrame, buildGeneration]() mutable
+				{
+					udpDataShow filteredFrame = BuildFilteredGroovePreviewFrame(rawFrame);
+					if (dialog == nullptr)
+					{
+						return;
+					}
+					QMetaObject::invokeMethod(dialog.data(), [dialog, filteredFrame = std::move(filteredFrame), buildGeneration]() mutable
+						{
+							if (dialog != nullptr)
+							{
+								dialog->FinishFilteredFrame(std::move(filteredFrame), buildGeneration);
+							}
+						}, Qt::QueuedConnection);
+				});
+			connect(filterThread, &QThread::finished, filterThread, &QObject::deleteLater);
+			filterThread->start();
+		}
+
+		void FinishFilteredFrame(udpDataShow filteredFrame, quint64 buildGeneration)
+		{
+			if (buildGeneration != m_filterBuildGeneration)
+			{
+				return;
+			}
+			m_filterBuildRunning = false;
+			m_filteredFrame = std::move(filteredFrame);
+			m_filteredFrameValid = true;
+			if (m_showFiltered)
+			{
+				if (m_hasFrame && m_filteredFrame.timestamp != m_rawFrame.timestamp)
+				{
+					RequestFilteredFrame(false);
+				}
+				RefreshView(false, false);
+			}
+		}
+
+		void RefreshView(bool forceFilteredBuild = false, bool saveCurrentViewState = true)
+		{
+			if (m_view == nullptr)
+			{
+				return;
+			}
+			if (saveCurrentViewState)
+			{
+				SaveCurrentViewState();
+			}
+			if (!m_hasFrame)
+			{
+				m_view->ClearPreview(m_statusText);
+				return;
+			}
+			if (m_showFiltered)
+			{
+				RequestFilteredFrame(forceFilteredBuild);
+			}
+			const bool showCachedFiltered = m_showFiltered && m_filteredFrameValid;
+			if (m_showFiltered && !showCachedFiltered)
+			{
+				m_view->ClearPreview(QString("%1  滤波后计算中").arg(m_statusText));
+				return;
+			}
+			const udpDataShow& frame = showCachedFiltered ? m_filteredFrame : m_rawFrame;
+			const QString modeText = m_showFiltered
+				? (showCachedFiltered ? "滤波后" : "滤波后计算中")
+				: "滤波前";
+			m_view->SetFrame(frame, QString("%1  %2").arg(m_statusText, modeText), CurrentModeViewState());
+			SaveCurrentViewState();
+		}
+
+		GroovePointCloudView* m_view = nullptr;
+		QPushButton* m_rawButton = nullptr;
+		QPushButton* m_filteredButton = nullptr;
+		udpDataShow m_rawFrame;
+		udpDataShow m_filteredFrame;
+		QString m_statusText;
+		bool m_hasFrame = false;
+		bool m_showFiltered = false;
+		bool m_filteredFrameValid = false;
+		bool m_filterBuildRunning = false;
+		qint64 m_lastFilteredBuildMs = 0;
+		quint64 m_filterBuildGeneration = 0;
+		GroovePointCloudView::ViewState m_rawViewState;
+		GroovePointCloudView::ViewState m_filteredViewState;
+	};
 }
 
 struct QtWidgetsApplication4::CameraRuntime
@@ -2925,6 +3670,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_nMeasureThenWeldPageUnitIndex(-1)
 	, m_nRobotJogPageUnitIndex(-1)
 	, m_pRobotLogText(nullptr)
+	, m_pGroovePointCloudDialog(nullptr)
 	, m_pCurrentUserButton(nullptr)
 	, m_pManagementUserLabel(nullptr)
 	, m_pPermissionHintLabel(nullptr)
@@ -3722,6 +4468,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 	QGroupBox* monitorGroup = new QGroupBox("机器人监控");
 	QVBoxLayout* monitorLayout = new QVBoxLayout(monitorGroup);
+	ui.FanucMonitorText->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+	ui.FanucMonitorText->setMinimumWidth(420);
+	monitorGroup->setMaximumWidth(1050);
 	monitorLayout->addWidget(ui.FanucMonitorText);
 
 	QGroupBox* logGroup = new QGroupBox("运行日志");
@@ -3775,12 +4524,17 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	robotInfoSplitter->setStretchFactor(1, 1);
 
 	QGroupBox* cameraGroup = new QGroupBox("坡口相机数据");
+	cameraGroup->setMinimumWidth(420);
 	QVBoxLayout* cameraLayout = new QVBoxLayout(cameraGroup);
-	cameraLayout->addWidget(ui.GrooveCameraText);
+	cameraLayout->setSpacing(8);
+	ui.GrooveCameraText->setMinimumHeight(220);
+	ui.GrooveCameraText->setMaximumHeight(QWIDGETSIZE_MAX);
+	cameraLayout->addWidget(ui.GrooveCameraText, 1);
 	infoSplitter->addWidget(robotInfoSplitter);
 	infoSplitter->addWidget(cameraGroup);
-	infoSplitter->setStretchFactor(0, 1);
-	infoSplitter->setStretchFactor(1, 1);
+	infoSplitter->setStretchFactor(0, 3);
+	infoSplitter->setStretchFactor(1, 2);
+	infoSplitter->setSizes(QList<int>() << 1100 << 520);
 	dashboardLayout->addWidget(infoSplitter, 1);
 	dashboardLayout->addWidget(entryGroup, 0);
 
@@ -4855,7 +5609,7 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 		QString cameraIP;
 		const int unitIndex = CurrentRobotUnitIndex();
 		EnsureScanCameraRunningForUnit(unitIndex, cameraIP, false);
-		m_grooveCameraDisplayTimer->start(100);
+		m_grooveCameraDisplayTimer->start(33);
 	}
 	if (ui.GrooveCameraText != nullptr)
 	{
@@ -7324,6 +8078,27 @@ void QtWidgetsApplication4::LoadRobotLogFile(const QString& relativePath, bool f
 	m_nLastRobotLogSize = fileSize;
 }
 
+void QtWidgetsApplication4::OpenGroovePointCloudDialog()
+{
+	if (m_pGroovePointCloudDialog == nullptr)
+	{
+		GroovePointCloudDialog* dialog = new GroovePointCloudDialog(this);
+		m_pGroovePointCloudDialog = dialog;
+		connect(dialog, &QObject::destroyed, this, [this]()
+			{
+				m_pGroovePointCloudDialog = nullptr;
+				if (ui.GrooveCameraTestBtn != nullptr && ui.GrooveCameraTestBtn->isChecked())
+				{
+					ui.GrooveCameraTestBtn->setChecked(false);
+				}
+			});
+	}
+
+	m_pGroovePointCloudDialog->show();
+	m_pGroovePointCloudDialog->raise();
+	m_pGroovePointCloudDialog->activateWindow();
+}
+
 void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 {
 	if (checked)
@@ -7353,7 +8128,12 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 			.arg(cameraIP)
 			.arg(cameraPort > 0 ? cameraPort : 50004)
 			.arg(m_bUseSharedScanCameraReceiver ? "共享端口/IP分发" : "独立线程/独立端口"));
-		m_grooveCameraDisplayTimer->start(100);
+		OpenGroovePointCloudDialog();
+		if (m_pGroovePointCloudDialog != nullptr)
+		{
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview("正在等待相机帧...");
+		}
+		m_grooveCameraDisplayTimer->start(33);
 	}
 	else
 	{
@@ -7362,6 +8142,10 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 			m_grooveCameraDisplayTimer->stop();
 		}
 		ui.GrooveCameraText->appendPlainText("已停止坡口相机预览。");
+		if (m_pGroovePointCloudDialog != nullptr)
+		{
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview("已停止坡口相机预览。");
+		}
 	}
 }
 
@@ -7371,6 +8155,10 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 	CameraFrameCache* cache = ScanCameraCacheForUnit(unitIndex);
 	if (cache == nullptr)
 	{
+		if (m_pGroovePointCloudDialog != nullptr)
+		{
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview("当前机器人没有相机缓存。");
+		}
 		return;
 	}
 
@@ -7434,6 +8222,10 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 	{
 		diagnosticLines << "状态: 暂未从当前机器人专属缓存取到相机帧。";
 		ui.GrooveCameraText->setPlainText(diagnosticLines.join('\n'));
+		if (m_pGroovePointCloudDialog != nullptr)
+		{
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(diagnosticLines.join("  "));
+		}
 		return;
 	}
 
@@ -7463,6 +8255,16 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 		.arg(FormatVectorPreview(latestFrame.fitLineY))
 		.arg(latestFrame.errorMessage.isEmpty() ? "无" : latestFrame.errorMessage);
 	ui.GrooveCameraText->setPlainText(text);
+	if (m_pGroovePointCloudDialog != nullptr)
+	{
+		const QString statusText = QString("Robot%1  %2:%3")
+			.arg(unitIndex)
+			.arg(cameraIP)
+			.arg(cameraPort);
+		static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetFrame(
+			latestFrame,
+			statusText);
+	}
 }
 
 
