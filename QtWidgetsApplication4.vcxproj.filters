@@ -97,6 +97,9 @@
     <ClCompile Include="src\FunctionTestDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="portable\LaserFramePoint3DFilter\LaserFramePoint3DFilter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\HandEyeCalibrationDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -187,6 +190,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\FunctionTestDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="portable\LaserFramePoint3DFilter\LaserFramePoint3DFilter.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\HandEyeCalibrationDialog.h">

@@ -80,6 +80,7 @@ private slots:
     void OpenAboutDialog();
     void GrooveCameraTest(bool checked);
     void UpdateGrooveCameraData();
+    void OpenGroovePointCloudDialog();
 
 private:
     void ShowDashboardPage();
@@ -185,6 +186,7 @@ private:
     int m_nMeasureThenWeldPageUnitIndex;
     int m_nRobotJogPageUnitIndex;
     QPlainTextEdit* m_pRobotLogText;
+    QWidget* m_pGroovePointCloudDialog;
     QPushButton* m_pCurrentUserButton;
     QLabel* m_pManagementUserLabel;
     QLabel* m_pPermissionHintLabel;

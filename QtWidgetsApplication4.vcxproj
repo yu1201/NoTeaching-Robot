@@ -122,6 +122,11 @@
     <ClCompile Include="src\FTPClient.cpp" />
     <ClCompile Include="src\FANUCRobotDriver.cpp" />
     <ClCompile Include="src\FunctionTestDialog.cpp" />
+    <ClCompile Include="portable\LaserFramePoint3DFilter\LaserFramePoint3DFilter.cpp">
+      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">MaxSpeed</Optimization>
+      <IntrinsicFunctions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</IntrinsicFunctions>
+      <BasicRuntimeChecks Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Default</BasicRuntimeChecks>
+    </ClCompile>
     <ClCompile Include="src\HandEyeCalibrationDialog.cpp" />
     <ClCompile Include="src\HandEyeMatrixConfig.cpp" />
     <ClCompile Include="src\HandEyeMatrixDialog.cpp" />
@@ -171,6 +176,7 @@
     <ClInclude Include="include\ContralUnit.h" />
     <ClInclude Include="include\FANUCRobotDriver.h" />
     <ClInclude Include="include\FunctionTestDialog.h" />
+    <ClInclude Include="portable\LaserFramePoint3DFilter\LaserFramePoint3DFilter.h" />
     <ClInclude Include="include\FTPClient.h" />
     <ClInclude Include="include\HandEyeCalibrationDialog.h" />
     <ClInclude Include="include\HandEyeMatrixConfig.h" />

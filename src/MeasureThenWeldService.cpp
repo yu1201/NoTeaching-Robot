@@ -234,8 +234,6 @@ struct QueuedScanCameraFrame
 
 struct ProcessedScanWorkpiecePoint
 {
-    int linePointIndex = 0;
-    Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
     Eigen::Vector3d workpiecePoint = Eigen::Vector3d::Zero();
 };
 
@@ -3332,8 +3330,6 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                             }
 
                             ProcessedScanWorkpiecePoint cloudPoint;
-                            cloudPoint.linePointIndex = linePointIndex + 1;
-                            cloudPoint.cameraPoint = cameraLinePoint;
                             cloudPoint.workpiecePoint =
                                 RobotCalculation::CalcLaserPointInRobot(processed.robotPose, cameraLinePoint, calibration);
                             processed.workpiecePoints.push_back(cloudPoint);
@@ -3586,7 +3582,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     cameraLines.push_back("index,x,y,z,error");
     robotLines.push_back("index,x,y,z,rx,ry,rz,bx,by,bz");
     laserLines.push_back("index,x,y,z");
-    workpieceCloudLines.push_back("index frame_index line_point_index x y z camera_x camera_y camera_z robot_x robot_y robot_z robot_rx robot_ry robot_rz");
+    workpieceCloudLines.push_back("index x y z");
     matchDebugLines.push_back("index,status,camera_raw_timestamp_us,camera_raw_delta_us,mapped_robot_timestamp_us,prev_robot_index,prev_robot_timestamp_us,next_robot_index,next_robot_timestamp_us,interp_ratio,camera_x,camera_y,camera_z,robot_x,robot_y,robot_z,robot_rx,robot_ry,robot_rz,robot_bx,robot_by,robot_bz,laser_x,laser_y,laser_z,error");
 
     const qint64 cameraLineBuildStartMs = SteadyNowMs();
@@ -3642,20 +3638,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                 QStringList cloudFields;
                 cloudFields
                     << QString::number(workpieceCloudPointIndex++)
-                    << QString::number(index)
-                    << QString::number(cloudPoint.linePointIndex)
                     << QString::number(cloudPoint.workpiecePoint.x(), 'f', 6)
                     << QString::number(cloudPoint.workpiecePoint.y(), 'f', 6)
-                    << QString::number(cloudPoint.workpiecePoint.z(), 'f', 6)
-                    << QString::number(cloudPoint.cameraPoint.x(), 'f', 6)
-                    << QString::number(cloudPoint.cameraPoint.y(), 'f', 6)
-                    << QString::number(cloudPoint.cameraPoint.z(), 'f', 6)
-                    << QString::number(processed.robotPose.dX, 'f', 6)
-                    << QString::number(processed.robotPose.dY, 'f', 6)
-                    << QString::number(processed.robotPose.dZ, 'f', 6)
-                    << QString::number(processed.robotPose.dRX, 'f', 6)
-                    << QString::number(processed.robotPose.dRY, 'f', 6)
-                    << QString::number(processed.robotPose.dRZ, 'f', 6);
+                    << QString::number(cloudPoint.workpiecePoint.z(), 'f', 6);
                 workpieceCloudLines.push_back(cloudFields.join(' '));
                 ++workpieceCloudPointCount;
             }
