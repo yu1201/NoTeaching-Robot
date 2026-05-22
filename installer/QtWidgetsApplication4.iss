@@ -1,7 +1,10 @@
 #define MyAppName "NoTeaching-Robot"
 #define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.05.20"
+  #define MyAppVersion "2026.05.22"
+#endif
+#ifndef MyOutputBaseFilename
+  #define MyOutputBaseFilename "NoTeaching-Robot-Setup-v2026.05.22"
 #endif
 #define MyAppPublisher "yu1201"
 #define MyAppExeName "QtWidgetsApplication4.exe"
@@ -23,7 +26,7 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 OutputDir=..\dist\installer
-OutputBaseFilename=NoTeaching-Robot-Setup
+OutputBaseFilename={#MyOutputBaseFilename}
 SetupIconFile=..\icons\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 

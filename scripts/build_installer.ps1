@@ -1,6 +1,7 @@
 param(
     [switch]$SkipPackageBuild,
-    [string]$AppVersion = (Get-Date -Format "yyyy.MM.dd")
+    [string]$AppVersion = (Get-Date -Format "yyyy.MM.dd"),
+    [string]$OutputBaseFilename = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,6 +60,10 @@ $packageScript = Join-Path $scriptRoot "build_release_package.ps1"
 $issPath = Join-Path $repoRoot "installer\QtWidgetsApplication4.iss"
 $packageDir = Join-Path $repoRoot "dist\QtWidgetsApplication4"
 
+if ([string]::IsNullOrWhiteSpace($OutputBaseFilename)) {
+    $OutputBaseFilename = "NoTeaching-Robot-Setup-v$AppVersion"
+}
+
 if (-not $SkipPackageBuild) {
     & $packageScript
     if ($LASTEXITCODE -ne 0) {
@@ -77,11 +82,13 @@ if (-not $isccPath) {
 }
 
 Write-Host "Compiling Inno Setup installer..."
-& $isccPath "/DMyAppVersion=$AppVersion" $issPath
+& $isccPath "/DMyAppVersion=$AppVersion" "/DMyOutputBaseFilename=$OutputBaseFilename" $issPath
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
 }
 
+$installerPath = Join-Path (Join-Path $repoRoot "dist\installer") "$OutputBaseFilename.exe"
+
 Write-Host ""
-Write-Host "Installer output folder:"
-Write-Host "  $(Join-Path $repoRoot 'dist\installer')"
+Write-Host "Installer output:"
+Write-Host "  $installerPath"

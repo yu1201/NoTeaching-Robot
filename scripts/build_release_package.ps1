@@ -133,19 +133,15 @@ catch {
 }
 
 if ($trackedDataFiles.Count -gt 0) {
+    $packagePrefix = ($packageDir -replace '\\', '/') + '/'
     $trackedDataFiles | Where-Object {
         $_ -and ($_ -notmatch '副本')
     } | ForEach-Object {
-        $relativePath = $_ -replace '/', '\'
-        $sourcePath = Join-Path $repoRoot $relativePath
-        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-            return
+        $gitPath = $_ -replace '\\', '/'
+        & git -C $repoRoot checkout-index --force --prefix=$packagePrefix -- $gitPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to copy tracked Data file from git index: $gitPath"
         }
-
-        $targetPath = Join-Path $packageDir $relativePath
-        $targetParent = Split-Path -Parent $targetPath
-        New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
-        Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Force
     }
 }
 else {

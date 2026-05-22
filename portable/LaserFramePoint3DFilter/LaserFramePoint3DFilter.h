@@ -112,16 +112,26 @@ struct LaserFramePoint3DFilterOptions
     double dominantLineSplitGapMinMm = 1.2;
     double dominantLineSplitGapStepScale = 8.0;
     // 快速候选线搜索的抽样点上限。数值越小越快，但极端点云下可能漏掉真实长线。
-    int dominantLineFastSampleCount = 80;
+    // 和 dominantLineFastCandidateCount 同时设为 -1 时，关闭快速采样，改走全角度搜索。
+    int dominantLineFastSampleCount = -1;
     // 对抽样生成的粗候选线做精排的数量。数值越大越稳，但耗时会上升。
-    int dominantLineFastCandidateCount = 64;
+    // 和 dominantLineFastSampleCount 同时设为 -1 时，关闭快速采样，改走全角度搜索。
+    int dominantLineFastCandidateCount = -1;
 
     // 三段折线回收：主线段确定后，先把三条趋势线延长到相邻交点形成折线。
     // 再从剩余点里捞回贴近折线、且投影落在折线段内的点。
     bool enableDominantLineTrendRecovery = true;
-    double dominantLineTrendRecoverDistanceMinMm = 1.2;             //1.2
-    double dominantLineTrendRecoverDistanceStepScale = 3.0;         //3.0
-    double dominantLineTrendRecoverEndpointToleranceMm = 1;
+    double dominantLineTrendRecoverDistanceMinMm = 2.0;             //1.2
+    double dominantLineTrendRecoverDistanceStepScale = 5.0;         //3.0
+    double dominantLineTrendRecoverEndpointToleranceMm = 3.0;
+};
+
+// 三段式主趋势线诊断输出：start/end 使用原始三维坐标轴，只在 profileAxis0/profileAxis1 平面上修正为拟合直线端点。
+struct LaserFramePoint3DTrendLine
+{
+    cv::Point3d start;
+    cv::Point3d end;
+    int pointCount = 0;
 };
 
 // inputPoints: 一帧激光线三维点，要求按激光线顺序排列。
@@ -130,3 +140,9 @@ struct LaserFramePoint3DFilterOptions
 std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
     const std::vector<cv::Point3d>& inputPoints,
     const LaserFramePoint3DFilterOptions& options = LaserFramePoint3DFilterOptions());
+
+// trendLines: 可选诊断输出，返回本次三段式滤波真正选中的主趋势线，用于实时预览判断拟合是否跑偏。
+std::vector<cv::Point3d> FilterSingleFrameLaserPoint3D(
+    const std::vector<cv::Point3d>& inputPoints,
+    const LaserFramePoint3DFilterOptions& options,
+    std::vector<LaserFramePoint3DTrendLine>* trendLines);
