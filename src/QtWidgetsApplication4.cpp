@@ -22,7 +22,7 @@
 #include "WeldProcessDialog.h"
 #include "WeldSeamCompDialog.h"
 #include "../portable/LaserFramePoint3DFilter/LaserFramePoint3DFilter.h"
-#include "groove/clientudpformsensorworker.h"
+#include "groove/tcpsensorclientworker.h"
 #include "groove/framebuffer.h"
 #include <QApplication>
 #include <QByteArray>
@@ -1053,13 +1053,35 @@ namespace
 				"QComboBox QAbstractItemView { background: #000000; color: #ECF3F4; selection-background-color: #2D5465; border: 1px solid #2C4653; border-radius: 0px; outline: 0px; }"
 				"QHeaderView::section { background: #13202A; color: #BFE8EC; border: 0px; padding: 6px; }");
 
-			QVBoxLayout* rootLayout = new QVBoxLayout(this);
+			QVBoxLayout* outerLayout = new QVBoxLayout(this);
+			outerLayout->setContentsMargins(0, 0, 0, 0);
+			outerLayout->setSpacing(0);
+			QScrollArea* pageScrollArea = new QScrollArea(this);
+			pageScrollArea->setObjectName("AdaptiveWindowScrollArea");
+			pageScrollArea->setWidgetResizable(true);
+			pageScrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+			pageScrollArea->setFrameShape(QFrame::NoFrame);
+			pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+			pageScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+			outerLayout->addWidget(pageScrollArea);
+
+			QWidget* pageWidget = new QWidget(pageScrollArea);
+			pageWidget->setMinimumWidth(960);
+			QVBoxLayout* rootLayout = new QVBoxLayout(pageWidget);
+			rootLayout->setContentsMargins(12, 10, 12, 12);
+			rootLayout->setSpacing(8);
+			pageScrollArea->setWidget(pageWidget);
+
 			QLabel* titleLabel = new QLabel("账号管理");
 			titleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #F7FCFC;");
+			titleLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+			titleLabel->setFixedHeight(34);
 			rootLayout->addWidget(titleLabel);
 			QLabel* hintLabel = new QLabel("这里可以新增账号、修改权限、重置密码或删除账号。仅管理员可使用。");
 			hintLabel->setWordWrap(true);
 			hintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
+			hintLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+			hintLabel->setMaximumHeight(48);
 			rootLayout->addWidget(hintLabel);
 
 			QGroupBox* createGroup = new QGroupBox("新增账号", this);
@@ -1412,26 +1434,46 @@ namespace
 				"QComboBox QAbstractItemView { background: #000000; color: #ECF3F4; selection-background-color: #2D5465; border: 1px solid #2C4653; border-radius: 0px; outline: 0px; }"
 				"QHeaderView::section { background: #13202A; color: #BFE8EC; border: 0px; padding: 6px; }");
 
-			QVBoxLayout* rootLayout = new QVBoxLayout(this);
+			QVBoxLayout* outerLayout = new QVBoxLayout(this);
+			outerLayout->setContentsMargins(0, 0, 0, 0);
+			outerLayout->setSpacing(0);
+			QScrollArea* pageScrollArea = new QScrollArea(this);
+			pageScrollArea->setObjectName("AdaptiveWindowScrollArea");
+			pageScrollArea->setWidgetResizable(true);
+			pageScrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+			pageScrollArea->setFrameShape(QFrame::NoFrame);
+			pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+			pageScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+			outerLayout->addWidget(pageScrollArea);
+
+			QWidget* pageWidget = new QWidget(pageScrollArea);
+			pageWidget->setMinimumWidth(1080);
+			QVBoxLayout* rootLayout = new QVBoxLayout(pageWidget);
 			rootLayout->setContentsMargins(18, 16, 18, 18);
 			rootLayout->setSpacing(12);
+			pageScrollArea->setWidget(pageWidget);
 
-			QLabel* titleLabel = new QLabel("机器人控制单元管理", this);
+			QLabel* titleLabel = new QLabel("机器人控制单元管理", pageWidget);
 			titleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #F7FCFC;");
+			titleLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+			titleLabel->setMaximumHeight(44);
 			rootLayout->addWidget(titleLabel);
 
 			QLabel* hintLabel = new QLabel(
 				"这里维护 ContralUnitInfo.ini 的控制单元列表，以及每个机器人 RobotPara.ini 里的 IP、端口和 FTP 参数。保存后建议重新加载控制单元，正在运行流程时不要重载。",
-				this);
+				pageWidget);
 			hintLabel->setWordWrap(true);
+			hintLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 			hintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
+			hintLabel->setFixedHeight(34);
 			rootLayout->addWidget(hintLabel);
 
-			QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
+			QSplitter* splitter = new QSplitter(Qt::Horizontal, pageWidget);
 			splitter->setChildrenCollapsible(false);
 
 			QGroupBox* listGroup = new QGroupBox("控制单元列表", splitter);
 			QVBoxLayout* listLayout = new QVBoxLayout(listGroup);
+			listLayout->setSpacing(6);
 			m_unitTable = new QTableWidget(listGroup);
 			m_unitTable->setColumnCount(11);
 			m_unitTable->setHorizontalHeaderLabels(QStringList()
@@ -1457,9 +1499,12 @@ namespace
 
 			QGroupBox* editGroup = new QGroupBox("编辑控制单元", splitter);
 			QVBoxLayout* editLayout = new QVBoxLayout(editGroup);
+			editLayout->setSpacing(6);
 			QFormLayout* form = new QFormLayout();
 			form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
 			form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+			form->setHorizontalSpacing(8);
+			form->setVerticalSpacing(4);
 			m_editorForm = form;
 
 			m_unitNameEdit = new QLineEdit(editGroup);
@@ -3736,7 +3781,7 @@ namespace
 
 struct QtWidgetsApplication4::CameraRuntime
 {
-	ClientUDPFormSensorWorker* worker = nullptr;
+	TcpSensorClientWorker* worker = nullptr;
 	QThread* thread = nullptr;
 	CameraFrameCache* cache = nullptr;
 	QString cameraIP;
@@ -3817,7 +3862,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_bOpenEmbeddedInManagement(false)
 	, m_bPendingOpenManagementAfterLogin(false)
 	, m_bDebugLogMode(false)
-	, m_bUseSharedScanCameraReceiver(true)
+	, m_bUseSharedScanCameraReceiver(false)
 	, m_bFanucMonitorReading(false)
 {
 	ui.setupUi(this);
@@ -5645,7 +5690,13 @@ QString QtWidgetsApplication4::CameraReceiveModeConfigPath() const
 void QtWidgetsApplication4::LoadCameraReceiveMode()
 {
 	QSettings settings(CameraReceiveModeConfigPath(), QSettings::IniFormat);
-	m_bUseSharedScanCameraReceiver = settings.value("Camera/UseSharedReceiver", true).toBool();
+	const bool savedSharedUdpMode = settings.value("Camera/UseSharedReceiver", false).toBool();
+	m_bUseSharedScanCameraReceiver = false;
+	if (savedSharedUdpMode)
+	{
+		settings.setValue("Camera/UseSharedReceiver", false);
+		settings.sync();
+	}
 	RefreshCameraReceiveModeButtonUi();
 }
 
@@ -5664,12 +5715,10 @@ void QtWidgetsApplication4::RefreshCameraReceiveModeButtonUi()
 	}
 
 	QSignalBlocker blocker(m_pManagementCameraReceiveModeBtn);
-	m_pManagementCameraReceiveModeBtn->setChecked(m_bUseSharedScanCameraReceiver);
-	m_pManagementCameraReceiveModeBtn->setText(m_bUseSharedScanCameraReceiver ? "相机接收：共享" : "相机接收：独立");
-	m_pManagementCameraReceiveModeBtn->setToolTip(
-		m_bUseSharedScanCameraReceiver
-		? "共享模式：同一UDP端口只开一个接收线程，再按相机IP分发到各机器人缓存。"
-		: "独立模式：每个机器人独立打开UDP接收线程，适合每台相机使用不同本地端口。");
+	m_pManagementCameraReceiveModeBtn->setChecked(false);
+	m_pManagementCameraReceiveModeBtn->setEnabled(false);
+	m_pManagementCameraReceiveModeBtn->setText("相机接收：TCP独立");
+	m_pManagementCameraReceiveModeBtn->setToolTip("新版TCP相机客户端按相机IP独立连接，旧UDP共享端口模式不再使用。");
 }
 
 void QtWidgetsApplication4::RefreshTouchKeyboardModeUi()
@@ -5687,6 +5736,8 @@ void QtWidgetsApplication4::RefreshTouchKeyboardModeUi()
 
 void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 {
+	// TCP客户端无法复用旧UDP共享端口/IP分发模式，界面开关统一落到独立连接。
+	enabled = false;
 	if (m_bUseSharedScanCameraReceiver == enabled)
 	{
 		RefreshCameraReceiveModeButtonUi();
@@ -5714,10 +5765,7 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 	}
 	if (ui.GrooveCameraText != nullptr)
 	{
-		ui.GrooveCameraText->appendPlainText(
-			m_bUseSharedScanCameraReceiver
-			? "相机接收模式已切换为：共享端口/IP分发。"
-			: "相机接收模式已切换为：独立线程/独立端口。");
+		ui.GrooveCameraText->appendPlainText("相机接收模式保持为：TCP独立连接。");
 	}
 }
 
@@ -6355,6 +6403,7 @@ void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page, QStackedWidget* t
 	page->setGeometry(targetStack->contentsRect());
 
 	const bool targetIsManagement = targetStack == m_pManagementStack;
+	page->setProperty("_management_embedded_page", targetIsManagement);
 	QPushButton* backButton = EmbeddedBackButton(page);
 	if (targetIsManagement)
 	{
@@ -6428,6 +6477,7 @@ void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page, QStackedWidget* t
 		targetStack->addWidget(page);
 	}
 	ApplyCompactControlWidths(page);
+	ApplyAdaptiveScrollSupport(page);
 	ApplyDebugLogVisibility(page);
 	QTimer::singleShot(80, page, [page]() { ApplyCompactControlWidths(page); });
 	QPointer<QWidget> pagePtr(page);
@@ -7765,7 +7815,7 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 
 bool QtWidgetsApplication4::LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort) const
 {
-	constexpr int kDefaultGrooveCameraPort = 50004;
+	constexpr int kDefaultTcpSensorPort = 50006;
 	std::string robotName = "RobotA";
 	const T_CONTRAL_UNIT* selectedUnit = nullptr;
 	if (m_pContralUnit != nullptr)
@@ -7808,11 +7858,8 @@ bool QtWidgetsApplication4::LoadGrooveCameraEndpointForUnit(int unitIndex, QStri
 	}
 
 	cameraIP = cameraParam.deviceAddress.trimmed();
-	bool okPort = false;
-	const int configuredPort = cameraParam.devicePort.trimmed().toInt(&okPort);
-	cameraPort = (okPort && configuredPort > 0 && configuredPort <= 65535)
-		? configuredPort
-		: kDefaultGrooveCameraPort;
+	// DevicePort 仍保留旧UDP端口配置；新版坡口相机TCP预览固定连接 PointCloundTcpServer。
+	cameraPort = kDefaultTcpSensorPort;
 	return true;
 }
 
@@ -7835,108 +7882,6 @@ void QtWidgetsApplication4::InitializeScanCameraRuntimes()
 	}
 
 	m_scanCameraUnitByIP.clear();
-	if (m_bUseSharedScanCameraReceiver)
-	{
-		QHash<int, QHash<QString, CameraFrameCache*>> targetsByPort;
-		for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
-		{
-			if (m_scanCameraRuntimes.contains(unitInfo.nUnitNo))
-			{
-				continue;
-			}
-
-			CameraRuntime* runtime = new CameraRuntime();
-			runtime->cache = new CameraFrameCache();
-			m_liveScanCameraRuntimes.insert(runtime);
-			QString cameraIP;
-			int cameraPort = 0;
-			if (LoadGrooveCameraEndpointForUnit(unitInfo.nUnitNo, cameraIP, cameraPort))
-			{
-				const QString cameraKey = NormalizeCameraAddressKey(cameraIP);
-				runtime->cameraIP = cameraIP;
-				runtime->cameraPort = cameraPort;
-				runtime->running = true;
-				runtime->cameraStatus = QString("等待共享UDP端口 %1 的相机数据").arg(cameraPort);
-				m_scanCameraUnitByIP.insert(cameraKey, unitInfo.nUnitNo);
-				targetsByPort[cameraPort].insert(cameraKey, runtime->cache);
-			}
-			else
-			{
-				runtime->cameraStatus = "未配置扫描相机 DeviceAddress";
-			}
-			m_scanCameraRuntimes.insert(unitInfo.nUnitNo, runtime);
-		}
-
-		for (auto portIt = targetsByPort.constBegin(); portIt != targetsByPort.constEnd(); ++portIt)
-		{
-			const int cameraPort = portIt.key();
-			CameraRuntime* receiverRuntime = new CameraRuntime();
-			m_liveScanCameraRuntimes.insert(receiverRuntime);
-			receiverRuntime->worker = new ClientUDPFormSensorWorker(nullptr);
-			receiverRuntime->worker->setDispatchTargets(portIt.value());
-			receiverRuntime->thread = new QThread(this);
-			receiverRuntime->cameraIP = "共享接收";
-			receiverRuntime->cameraPort = cameraPort;
-			connect(receiverRuntime->worker, &ClientUDPFormSensorWorker::diagnosticChanged, this,
-				[this, receiverRuntime](
-					qint64 datagramCount,
-					qint64 filteredDatagramCount,
-					qint64 decodedFrameCount,
-					qint64 decodeFailedCount,
-					qint64 appendedFrameCount,
-					const QString& statusText)
-				{
-					if (receiverRuntime == nullptr || !m_liveScanCameraRuntimes.contains(receiverRuntime))
-					{
-						return;
-					}
-					receiverRuntime->datagramCount = datagramCount;
-					receiverRuntime->filteredDatagramCount = filteredDatagramCount;
-					receiverRuntime->decodedFrameCount = decodedFrameCount;
-					receiverRuntime->decodeFailedCount = decodeFailedCount;
-					receiverRuntime->appendedFrameCount = appendedFrameCount;
-					receiverRuntime->cameraStatus = statusText;
-				});
-			connect(receiverRuntime->worker, &ClientUDPFormSensorWorker::targetDiagnosticChanged, this,
-				[this, receiverRuntime](
-					const QString& targetIP,
-					qint64 datagramCount,
-					qint64 filteredDatagramCount,
-					qint64 decodedFrameCount,
-					qint64 decodeFailedCount,
-					qint64 appendedFrameCount,
-					const QString& statusText)
-				{
-					if (receiverRuntime == nullptr || !m_liveScanCameraRuntimes.contains(receiverRuntime))
-					{
-						return;
-					}
-					const int unitIndex = m_scanCameraUnitByIP.value(NormalizeCameraAddressKey(targetIP), -1);
-					CameraRuntime* runtime = m_scanCameraRuntimes.value(unitIndex, nullptr);
-					if (runtime == nullptr)
-					{
-						return;
-					}
-					runtime->datagramCount = datagramCount;
-					runtime->filteredDatagramCount = filteredDatagramCount;
-					runtime->decodedFrameCount = decodedFrameCount;
-					runtime->decodeFailedCount = decodeFailedCount;
-					runtime->appendedFrameCount = appendedFrameCount;
-					runtime->cameraStatus = statusText;
-				});
-			connect(receiverRuntime->thread, &QThread::finished, receiverRuntime->worker, &QObject::deleteLater);
-			receiverRuntime->worker->moveToThread(receiverRuntime->thread);
-			receiverRuntime->thread->start();
-			QMetaObject::invokeMethod(
-				receiverRuntime->worker,
-				"startReceiveDemux",
-				Qt::BlockingQueuedConnection,
-				Q_ARG(int, cameraPort));
-			receiverRuntime->running = true;
-			m_scanCameraReceiversByPort.insert(cameraPort, receiverRuntime);
-		}
-		return;
-	}
 
 	for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
 	{
@@ -7947,10 +7892,10 @@ void QtWidgetsApplication4::InitializeScanCameraRuntimes()
 
 		CameraRuntime* runtime = new CameraRuntime();
 		runtime->cache = new CameraFrameCache();
-		runtime->worker = new ClientUDPFormSensorWorker(runtime->cache);
+		runtime->worker = new TcpSensorClientWorker(runtime->cache);
 		runtime->thread = new QThread(this);
 		m_liveScanCameraRuntimes.insert(runtime);
-		connect(runtime->worker, &ClientUDPFormSensorWorker::diagnosticChanged, this,
+		connect(runtime->worker, &TcpSensorClientWorker::diagnosticChanged, this,
 			[this, runtime](
 				qint64 datagramCount,
 				qint64 filteredDatagramCount,
@@ -8002,7 +7947,7 @@ void QtWidgetsApplication4::StopScanCameraRuntimes()
 			&& runtime->thread != nullptr
 			&& runtime->thread->isRunning())
 		{
-			QMetaObject::invokeMethod(runtime->worker, "stopReceive", Qt::BlockingQueuedConnection);
+			QMetaObject::invokeMethod(runtime->worker, "stopClient", Qt::BlockingQueuedConnection);
 		}
 		if (runtime->thread != nullptr)
 		{
@@ -8037,37 +7982,15 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 	}
 
 	CameraRuntime* runtime = m_scanCameraRuntimes.value(unitIndex, nullptr);
-	if (m_bUseSharedScanCameraReceiver)
-	{
-		if (runtime == nullptr
-			|| runtime->cameraIP != cameraIP
-			|| runtime->cameraPort != cameraPort
-			|| !m_scanCameraReceiversByPort.contains(cameraPort))
-		{
-			StopScanCameraRuntimes();
-			InitializeScanCameraRuntimes();
-			runtime = m_scanCameraRuntimes.value(unitIndex, nullptr);
-		}
-		if (runtime == nullptr)
-		{
-			return false;
-		}
-		if (runtime->cache != nullptr && clearCache)
-		{
-			runtime->cache->Clear();
-		}
-		cameraIP = runtime->cameraIP;
-		return !cameraIP.trimmed().isEmpty();
-	}
 
 	if (runtime == nullptr)
 	{
 		runtime = new CameraRuntime();
 		runtime->cache = new CameraFrameCache();
-		runtime->worker = new ClientUDPFormSensorWorker(runtime->cache);
+		runtime->worker = new TcpSensorClientWorker(runtime->cache);
 		runtime->thread = new QThread(this);
 		m_liveScanCameraRuntimes.insert(runtime);
-		connect(runtime->worker, &ClientUDPFormSensorWorker::diagnosticChanged, this,
+		connect(runtime->worker, &TcpSensorClientWorker::diagnosticChanged, this,
 			[this, runtime](
 				qint64 datagramCount,
 				qint64 filteredDatagramCount,
@@ -8104,7 +8027,7 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 	{
 		QMetaObject::invokeMethod(
 			runtime->worker,
-			"startReceive",
+			"startClient",
 			Qt::BlockingQueuedConnection,
 			Q_ARG(QString, cameraIP),
 			Q_ARG(int, cameraPort));
@@ -8224,11 +8147,11 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 		const int cameraPort = m_scanCameraRuntimes.value(unitIndex, nullptr) != nullptr
 			? m_scanCameraRuntimes.value(unitIndex)->cameraPort
 			: 0;
-		ui.GrooveCameraText->setPlainText(QString("正在预览 Robot%1 扫描相机：%2\n本地UDP端口：%3\n接收模式：%4")
+		ui.GrooveCameraText->setPlainText(QString("正在预览 Robot%1 扫描相机：%2\nTCP端口：%3\n接收模式：%4")
 			.arg(unitIndex)
 			.arg(cameraIP)
-			.arg(cameraPort > 0 ? cameraPort : 50004)
-			.arg(m_bUseSharedScanCameraReceiver ? "共享端口/IP分发" : "独立线程/独立端口"));
+			.arg(cameraPort > 0 ? cameraPort : 50006)
+			.arg("TCP独立连接"));
 		OpenGroovePointCloudDialog();
 		if (m_pGroovePointCloudDialog != nullptr)
 		{
@@ -8281,35 +8204,22 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 	}
 	if (cameraPort <= 0)
 	{
-		cameraPort = 50004;
-	}
-
-	int samePortRuntimeCount = 0;
-	for (CameraRuntime* candidate : m_scanCameraRuntimes)
-	{
-		if (candidate != nullptr && candidate->cameraPort == cameraPort)
-		{
-			++samePortRuntimeCount;
-		}
+		cameraPort = 50006;
 	}
 
 	QStringList diagnosticLines;
 	diagnosticLines
 		<< QString("当前机器人: Robot%1").arg(unitIndex)
-		<< QString("接收模式: %1").arg(m_bUseSharedScanCameraReceiver ? "共享端口/IP分发" : "独立线程/独立端口")
+		<< QString("接收模式: TCP独立连接")
 		<< QString("当前相机IP: %1").arg(cameraIP)
-		<< QString("本地UDP端口: %1").arg(cameraPort)
+		<< QString("TCP端口: %1").arg(cameraPort)
 		<< QString("相机线程状态: %1").arg(runtime != nullptr && !runtime->cameraStatus.isEmpty() ? runtime->cameraStatus : "未收到线程状态")
-		<< QString("UDP包数: %1").arg(runtime != nullptr ? runtime->datagramCount : 0)
-		<< QString("IP过滤包数: %1").arg(runtime != nullptr ? runtime->filteredDatagramCount : 0)
+		<< QString("TCP接收次数: %1").arg(runtime != nullptr ? runtime->datagramCount : 0)
+		<< QString("丢弃/跳过次数: %1").arg(runtime != nullptr ? runtime->filteredDatagramCount : 0)
 		<< QString("解码成功帧: %1").arg(runtime != nullptr ? runtime->decodedFrameCount : 0)
 		<< QString("解码失败帧: %1").arg(runtime != nullptr ? runtime->decodeFailedCount : 0)
 		<< QString("写入缓存帧: %1").arg(runtime != nullptr ? runtime->appendedFrameCount : 0)
 		<< QString("当前缓存帧: %1").arg(cache->CachedCount());
-	if (!m_bUseSharedScanCameraReceiver && samePortRuntimeCount > 1)
-	{
-		diagnosticLines << QString("端口复用提示: 当前有 %1 个相机线程绑定同一个本地端口，可能发生UDP包被其它socket抢走后过滤。").arg(samePortRuntimeCount);
-	}
 
 	udpDataShow frame;
 	udpDataShow latestFrame;

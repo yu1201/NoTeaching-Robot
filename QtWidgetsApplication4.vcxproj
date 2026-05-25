@@ -127,6 +127,7 @@
       <IntrinsicFunctions Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</IntrinsicFunctions>
       <BasicRuntimeChecks Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Default</BasicRuntimeChecks>
     </ClCompile>
+    <ClCompile Include="src\groove\tcpsensorclientworker.cpp" />
     <ClCompile Include="src\HandEyeCalibrationDialog.cpp" />
     <ClCompile Include="src\HandEyeMatrixConfig.cpp" />
     <ClCompile Include="src\HandEyeMatrixDialog.cpp" />
@@ -153,7 +154,6 @@
     <ClCompile Include="src\SkFunction.cpp" />
     <ClCompile Include="src\TouchKeyboardManager.cpp" />
     <ClCompile Include="src\WindowStyleHelper.cpp" />
-    <ClCompile Include="src\groove\clientudpformsensorworker.cpp" />
     <ClCompile Include="src\groove\framebuffer.cpp" />
     <ClCompile Include="src\groove\pointcloundresultframe.cpp" />
     <QtRcc Include="QtWidgetsApplication4.qrc" />
@@ -163,7 +163,6 @@
     <QtMoc Include="include\QtWidgetsApplication4.h" />
     <QtMoc Include="include\MeasureThenWeldDialog.h" />
     <QtMoc Include="include\WeldProcessDialog.h" />
-    <QtMoc Include="include\groove\clientudpformsensorworker.h" />
     <ClCompile Include="src\Const.cpp" />
     <ClCompile Include="src\QtWidgetsApplication4.cpp" />
     <ClCompile Include="src\main.cpp" />
@@ -176,6 +175,7 @@
     <ClInclude Include="include\ContralUnit.h" />
     <ClInclude Include="include\FANUCRobotDriver.h" />
     <ClInclude Include="include\FunctionTestDialog.h" />
+    <QtMoc Include="include\groove\tcpsensorclientworker.h" />
     <ClInclude Include="portable\LaserFramePoint3DFilter\LaserFramePoint3DFilter.h" />
     <ClInclude Include="include\FTPClient.h" />
     <ClInclude Include="include\HandEyeCalibrationDialog.h" />

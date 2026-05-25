@@ -11,11 +11,13 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFileInfo>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QStringList>
 #include <QSplitter>
@@ -86,14 +88,35 @@ CameraParamDialog::CameraParamDialog(
         "QLabel { color: #BACBD1; }")
         + UnifiedComboBoxStyleSheet());
 
-    QVBoxLayout* rootLayout = new QVBoxLayout(this);
+    QVBoxLayout* outerLayout = new QVBoxLayout(this);
+    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->setSpacing(0);
+    QScrollArea* pageScrollArea = new QScrollArea(this);
+    pageScrollArea->setObjectName("AdaptiveWindowScrollArea");
+    pageScrollArea->setWidgetResizable(true);
+    pageScrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    pageScrollArea->setFrameShape(QFrame::NoFrame);
+    pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    pageScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    outerLayout->addWidget(pageScrollArea);
+
+    QWidget* pageWidget = new QWidget(pageScrollArea);
+    pageWidget->setMinimumWidth(1020);
+    QVBoxLayout* rootLayout = new QVBoxLayout(pageWidget);
+    rootLayout->setContentsMargins(18, 16, 18, 18);
+    rootLayout->setSpacing(12);
+    pageScrollArea->setWidget(pageWidget);
 
     QLabel* titleLabel = new QLabel("相机参数");
     titleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #F7FCFC;");
+    titleLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    titleLabel->setMaximumHeight(44);
     rootLayout->addWidget(titleLabel);
 
     QLabel* hintLabel = new QLabel("相机参数独立管理。当前支持手眼矩阵和测量相机基础连接参数，右侧预留图像显示区，后面可以直接接实时图像。");
     hintLabel->setWordWrap(true);
+    hintLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    hintLabel->setMaximumHeight(56);
     rootLayout->addWidget(hintLabel);
 
     QGroupBox* baseGroup = new QGroupBox("基础信息");

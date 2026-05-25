@@ -1,6 +1,7 @@
 param(
     [switch]$SkipPackageBuild,
-    [string]$AppVersion = (Get-Date -Format "yyyy.MM.dd"),
+    # Include hour/minute so multiple installer builds on the same day are distinguishable.
+    [string]$AppVersion = (Get-Date -Format "yyyy.MM.dd.HHmm"),
     [string]$OutputBaseFilename = ""
 )
 
@@ -74,6 +75,14 @@ if (-not $SkipPackageBuild) {
 if (-not (Test-Path -LiteralPath $packageDir)) {
     throw "Package directory is missing: $packageDir"
 }
+
+$buildInfoPath = Join-Path $packageDir "BUILD_VERSION.txt"
+@(
+    "NoTeaching-Robot",
+    "Version: $AppVersion",
+    "Installer: $OutputBaseFilename.exe",
+    "BuiltAt: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+) | Set-Content -LiteralPath $buildInfoPath -Encoding UTF8
 
 $isccPath = Find-InnoSetupCompiler
 
