@@ -1,4 +1,5 @@
 #include "QtWidgetsApplication4.h"
+#include "WindowStyleHelper.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -31,8 +32,9 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName("NoTeaching-Robot");
-    app.setApplicationVersion("2026.05.22");
+    app.setApplicationVersion("2026.05.25.1826");
     app.setOrganizationName("yu1201");
+    ConfigureApplicationFontFallback();
     SetWorkingDirectoryToProjectRoot();
     app.setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
 

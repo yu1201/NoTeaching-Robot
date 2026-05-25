@@ -13,9 +13,18 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.05.22`
+- 当前源码版本：`v2026.05.25.1826`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.05.22.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.05.25.1826.exe`，不用自己编译源码。
+
+## 2026-05-25 更新
+
+- 平板低分辨率界面调整：管理页、账号管理、控制单元管理、相机参数和测量焊接参数页补齐内部横向/纵向滚动，避免控件被裁掉或无法点击
+- 窗口辅助改为打开窗口时处理一次，管理内嵌页不再被外层统一 `QScrollArea` 包装，避免外层滚动区拦截控件事件
+- 测量焊接参数页不再从 `MeasureWeldParam.ini` 注释读取折叠标题，改为按参数 key 固定中文分组，兼容安装升级时保留的旧 `Data`
+- 坡口相机接收切换为 `PointCloundTcpServer` TCP 独立连接，固定端口 `50006`，诊断文案同步为 TCP 接收状态
+- 先测后焊工件点云生成修正 `allResultPoint` 的 Z 轴符号，生成前统一到目标点使用的相机坐标约定
+- 构建验证：`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.05.25.1826.exe`
 
 ## 2026-05-22 更新
 

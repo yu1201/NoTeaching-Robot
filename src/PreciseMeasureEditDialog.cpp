@@ -26,6 +26,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QSet>
 #include <QSizePolicy>
 #include <QSplitter>
 #include <QStringList>
@@ -420,6 +421,104 @@ QString PreciseParamDisplayName(const QString& key)
     return key;
 }
 
+QString ScanParamGroupTitleForKey(const QString& key)
+{
+    const QString normalized = key.trimmed();
+    static const QSet<QString> softLimitKeys = {
+        "YMaxCar", "YMinCar", "YMaxRobot", "YMinRobot", "XMax", "XMin", "ZMax", "ZMin"
+    };
+    static const QSet<QString> speedKeys = {
+        "ScanSpeed", "RunSpeed", "CameraReadFps", "CameraTimeOffsetMs", "dAcc", "dDec",
+        "UseComputedScanSafe", "ScanSafeOffsetDistanceMm", "ScanSafeGunAngleDeg",
+        "ScanSafeXDirection", "ScanSafeLiftHeightMm", "ScanSafeFlipWarnThresholdDeg"
+    };
+    static const QSet<QString> tableKeys = { "TableY", "TableZ" };
+    static const QSet<QString> carInitKeys = { "ScanStartCarLoction", "ScanEndtCarLoction" };
+    static const QSet<QString> range3DKeys = {
+        "Range_XMax", "Range_XMin", "Range_YMax", "Range_YMin", "Range_ZMax", "Range_ZMin"
+    };
+    static const QSet<QString> range2DKeys = { "ImgStart_x", "ImgEnd_x", "ImgStart_y", "ImgEnd_y", "ImgStartX", "ImgEndX" };
+
+    if (softLimitKeys.contains(normalized))
+    {
+        return QStringLiteral("位置软极限");
+    }
+    if (speedKeys.contains(normalized))
+    {
+        return QStringLiteral("速度参数");
+    }
+    if (tableKeys.contains(normalized))
+    {
+        return QStringLiteral("料台大小");
+    }
+    if (carInitKeys.contains(normalized))
+    {
+        return QStringLiteral("大车初始位置");
+    }
+    if (normalized.compare("Scanlength", Qt::CaseInsensitive) == 0
+        || normalized.compare("ScanLength", Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("扫描长度");
+    }
+    if (normalized.compare("ScanDir", Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("扫描方向 123表示xyz(世界坐标系) 正负表示方向");
+    }
+    if (normalized.compare("ExAxisEnable", Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("外部轴使能 1运动外部轴 0运动机器人");
+    }
+    if (range3DKeys.contains(normalized))
+    {
+        return QStringLiteral("线扫点云处理范围 三维");
+    }
+    if (range2DKeys.contains(normalized))
+    {
+        return QStringLiteral("线扫点云处理范围 二维");
+    }
+    return QStringLiteral("通用参数");
+}
+
+QString WeldParamGroupTitleForKey(const QString& key)
+{
+    const QString normalized = key.trimmed();
+    static const QSet<QString> executeKeys = {
+        "WeldEnable", "WeldSpeedMmPerMin", "DryRunSpeedMmPerMin", "WeldSafeMoveSpeedMmPerMin"
+    };
+    static const QSet<QString> coordinateKeys = {
+        "WorldCoorDir", "RobotInstallDir", "GunAngle", "GunLaserAngle", "GunCameraAngle",
+        "RotateToCamRxDir", "HandEyeDis", "MeasureDisThreshold"
+    };
+    static const QSet<QString> poseKeys = {
+        "FlatMeasureRx", "FlatMeasureRy", "FlatWeldRx", "FlatWeldRy", "NormalWeldRx",
+        "NormalWeldRy", "CornerTransitionLeadDis", "CornerArcRadiusMm", "WeldStartSkipDis",
+        "WeldEndSkipDis", "WeldRzGainDeg", "StandWeldRx", "StandWeldRy", "TransitionsRx",
+        "TransitionsRy", "StandWeldScanFreeRx", "StandWeldScanFreeRy", "StandWeldScanDis",
+        "StandWeldScanOffsetRz", "WeldNorAngleInHome", "EndpointSearchDis",
+        "StartSearchOffeset_RZ", "EndSearchOffeset_RZ", "GunDownBackSafeDis",
+        "ShortSeamThreshold", "LengthSeamThreshold", "PointSpacing", "StandInitWeldRy"
+    };
+
+    if (executeKeys.contains(normalized))
+    {
+        return QStringLiteral("焊接执行");
+    }
+    if (coordinateKeys.contains(normalized))
+    {
+        return QStringLiteral("坐标和枪角");
+    }
+    if (poseKeys.contains(normalized))
+    {
+        return QStringLiteral("焊接姿态");
+    }
+    return QStringLiteral("焊接流程参数");
+}
+
+QString OtherParamGroupTitleForKey(const QString& key, bool weldSection)
+{
+    return weldSection ? WeldParamGroupTitleForKey(key) : ScanParamGroupTitleForKey(key);
+}
+
 QString PreciseCommentText(const QString& line)
 {
     QString text = line.trimmed();
@@ -508,8 +607,16 @@ void PreciseMeasureEditDialog::BuildUi()
         "QScrollArea#PrecisePageScroll { background: #111820; border: none; }"
         "QScrollArea#PrecisePageScroll > QWidget > QWidget { background: #111820; }"
         "QScrollBar:vertical { background: #111820; width: 12px; margin: 0; }"
+        "QScrollBar:vertical:disabled { background: transparent; }"
         "QScrollBar::handle:vertical { background: #385366; border-radius: 6px; min-height: 24px; }"
+        "QScrollBar::handle:vertical:disabled { background: transparent; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar::add-page:vertical:disabled, QScrollBar::sub-page:vertical:disabled { background: transparent; }"
+        "QScrollBar:horizontal { background: #111820; height: 12px; margin: 0; }"
+        "QScrollBar::handle:horizontal { background: #385366; border-radius: 6px; min-width: 24px; }"
+        "QScrollBar::handle:horizontal:hover { background: #4D7488; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
         "QLabel { color: #BACBD1; }")
         + UnifiedComboBoxStyleSheet());
@@ -519,13 +626,15 @@ void PreciseMeasureEditDialog::BuildUi()
     QScrollArea* pageScrollArea = new QScrollArea();
     pageScrollArea->setObjectName("PrecisePageScroll");
     pageScrollArea->setWidgetResizable(true);
+    pageScrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     pageScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
-    pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     pageScrollArea->setFrameShape(QFrame::NoFrame);
     outerLayout->addWidget(pageScrollArea);
 
     QWidget* pageWidget = new QWidget();
     pageWidget->setObjectName("PreciseMeasurePage");
+    pageWidget->setMinimumWidth(1600);
     QVBoxLayout* rootLayout = new QVBoxLayout(pageWidget);
     rootLayout->setContentsMargins(22, 18, 22, 18);
     pageScrollArea->setWidget(pageWidget);
@@ -1405,8 +1514,8 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
         return false;
     }
 
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    QString content = ReadTextFileSmartForPrecise(path);
+    if (content.isEmpty())
     {
         AppendLog("读取其它参数失败：打开参数文件失败：" + path);
         return false;
@@ -1415,18 +1524,16 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
     m_bLoading = true;
     ClearOtherParamEditors();
 
-    QString content = QString::fromLocal8Bit(file.readAll());
-    content.replace("\r\n", "\n");
-    content.replace('\r', '\n');
-
     bool hasOtherParam = false;
     int outerRow = 0;
     int row = 0;
     int colInGroup = 0;
     QGridLayout* currentGroupLayout = nullptr;
-    auto createCollapsibleGroup = [this, &outerRow, &row, &colInGroup, &currentGroupLayout](const QString& rawTitle, const QString& categoryTitle = QString()) -> QGridLayout*
+    QString currentGroupTitle;
+    auto createCollapsibleGroup = [this, &outerRow, &row, &colInGroup, &currentGroupLayout, &currentGroupTitle](const QString& rawTitle, const QString& categoryTitle = QString()) -> QGridLayout*
         {
             QString title = rawTitle.trimmed().isEmpty() ? QStringLiteral("通用参数") : rawTitle.trimmed();
+            currentGroupTitle = title;
             row = 0;
             colInGroup = 0;
 
@@ -1488,8 +1595,9 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
     auto loadSectionParams = [&](const QString& targetSection, const QString& categoryTitle, bool skipDedicatedKeys)
         {
             bool inSection = false;
-            QStringList pendingComments;
+            const bool weldSection = categoryTitle == QStringLiteral("焊接参数");
             currentGroupLayout = nullptr;
+            currentGroupTitle.clear();
             row = 0;
             colInGroup = 0;
             const QStringList lines = content.split('\n');
@@ -1504,8 +1612,8 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
                         break;
                     }
                     inSection = currentSection.compare(targetSection, Qt::CaseInsensitive) == 0;
-                    pendingComments.clear();
                     currentGroupLayout = nullptr;
+                    currentGroupTitle.clear();
                     colInGroup = 0;
                     continue;
                 }
@@ -1517,11 +1625,8 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
 
                 if (trimmed.startsWith('#'))
                 {
-                    const QString comment = PreciseCommentText(trimmed);
-                    if (!comment.isEmpty())
-                    {
-                        pendingComments << comment;
-                    }
+                    // 参数文件会随现场 Data 保留，历史文件注释可能是 UTF-8/GBK/乱码混杂。
+                    // 界面分组标题固定按 key 归类，注释只保留在文件里，不参与显示。
                     continue;
                 }
 
@@ -1532,20 +1637,20 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
                     const QString value = line.mid(pos + 1).trimmed();
                     if (skipDedicatedKeys && IsDedicatedPulseKey(key))
                     {
-                        pendingComments.clear();
                         currentGroupLayout = nullptr;
+                        currentGroupTitle.clear();
                         row = 0;
                         colInGroup = 0;
                         continue;
                     }
 
-                    if (!pendingComments.isEmpty())
+                    const QString groupTitle = OtherParamGroupTitleForKey(key, weldSection);
+                    if (currentGroupLayout == nullptr || currentGroupTitle != groupTitle)
                     {
-                        currentGroupLayout = createCollapsibleGroup(pendingComments.join("  "), categoryTitle);
-                        pendingComments.clear();
+                        currentGroupLayout = createCollapsibleGroup(groupTitle, categoryTitle);
                     }
 
-                    AddOtherParamEditor(ensureGroup(QStringLiteral("通用参数"), categoryTitle), m_otherParamEditors, row, colInGroup, targetSection, key, value);
+                    AddOtherParamEditor(currentGroupLayout, m_otherParamEditors, row, colInGroup, targetSection, key, value);
                     hasOtherParam = true;
                 }
             }

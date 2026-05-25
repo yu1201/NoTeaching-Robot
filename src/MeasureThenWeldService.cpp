@@ -3333,7 +3333,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                         for (int linePointIndex = 0; linePointIndex < static_cast<int>(queuedFrame.frame.allResultPoint.size()); ++linePointIndex)
                         {
                             const cv::Point3d& sourcePoint = queuedFrame.frame.allResultPoint[static_cast<std::size_t>(linePointIndex)];
-                            const Eigen::Vector3d cameraLinePoint(sourcePoint.x, sourcePoint.y, sourcePoint.z);
+                            // allResultPoint 的 Z 轴符号与 targetPoint 相反；生成工件点云前先统一到 targetPoint 使用的相机坐标约定。
+                            const Eigen::Vector3d cameraLinePoint(sourcePoint.x, sourcePoint.y, -sourcePoint.z);
                             constexpr double kZeroPointEps = 1e-9;
                             const bool isZeroPoint =
                                 std::abs(cameraLinePoint.x()) <= kZeroPointEps

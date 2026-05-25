@@ -26,7 +26,7 @@ if not "%EXIT_CODE%"=="0" (
 )
 
 echo [OK] Installer build finished.
-echo [OK] Output: E:\WorkFile\bowen\QtWidgetsApplication4\dist\installer\NoTeaching-Robot-Setup.exe
+echo [OK] Output directory: E:\WorkFile\bowen\QtWidgetsApplication4\dist\installer
 echo.
 pause
 exit /b 0

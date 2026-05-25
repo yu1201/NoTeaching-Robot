@@ -4,17 +4,26 @@
 
 #include <QApplication>
 #include <QAbstractButton>
+#include <QAbstractItemView>
 #include <QAbstractSpinBox>
+#include <QBoxLayout>
 #include <QDialog>
 #include <QEvent>
 #include <QFormLayout>
+#include <QFont>
+#include <QFontDatabase>
+#include <QFrame>
 #include <QGuiApplication>
+#include <QGridLayout>
 #include <QIcon>
 #include <QComboBox>
 #include <QLineEdit>
 #include <QLayout>
+#include <QMainWindow>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QScreen>
 #include <QSizePolicy>
 #include <QString>
@@ -29,6 +38,12 @@
 
 namespace
 {
+const char kAdaptiveScrollInstalledProperty[] = "_adaptive_scroll_installed";
+const char kAdaptiveScrollAreaProperty[] = "_adaptive_window_scroll_area";
+const char kAdaptiveScrollContentProperty[] = "_adaptive_window_scroll_content";
+
+void EnsureAdaptiveScrollSupport(QWidget* widget);
+
 QRect ResolveAvailableGeometry(QWidget* widget)
 {
     if (widget == nullptr)
@@ -49,6 +64,50 @@ QRect ResolveAvailableGeometry(QWidget* widget)
         return primary->availableGeometry();
     }
     return QRect();
+}
+
+QString ResolveChineseCapableFontFamily()
+{
+    const QStringList families = QFontDatabase::families();
+    const QStringList candidates = {
+        QStringLiteral("Microsoft YaHei UI"),
+        QStringLiteral("Microsoft YaHei"),
+        QStringLiteral("微软雅黑"),
+        QStringLiteral("SimHei"),
+        QStringLiteral("黑体"),
+        QStringLiteral("SimSun"),
+        QStringLiteral("宋体"),
+        QStringLiteral("Arial Unicode MS")
+    };
+
+    for (const QString& candidate : candidates)
+    {
+        if (families.contains(candidate, Qt::CaseInsensitive))
+        {
+            return candidate;
+        }
+    }
+    return QApplication::font().family();
+}
+
+QFont ChineseCapableFont(const QFont& baseFont = QApplication::font())
+{
+    QFont font(baseFont);
+    const QString family = ResolveChineseCapableFontFamily();
+    if (!family.trimmed().isEmpty())
+    {
+        font.setFamily(family);
+    }
+    return font;
+}
+
+void ApplyChineseCapableFont(QWidget* widget)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+    widget->setFont(ChineseCapableFont(widget->font()));
 }
 
 QRect ResolveUsableGeometry(QWidget* widget)
@@ -192,6 +251,11 @@ void CompactComboBox(QComboBox* combo)
     {
         return;
     }
+    ApplyChineseCapableFont(combo);
+    if (QAbstractItemView* view = combo->view())
+    {
+        ApplyChineseCapableFont(view);
+    }
 
     int maxTextWidth = CompactTextWidth(combo, combo->currentText(), 58);
     for (int i = 0; i < combo->count(); ++i)
@@ -323,6 +387,246 @@ void ClampWindowToAvailableGeometry(QWidget* widget)
     widget->setProperty("_clamping_window_geometry", false);
 }
 
+QString AdaptiveScrollAreaStyleSheet()
+{
+    return QStringLiteral(
+        "QScrollArea#AdaptiveWindowScrollArea { background: transparent; border: none; }"
+        "QScrollArea#AdaptiveWindowScrollArea > QWidget > QWidget { background: transparent; }"
+        "QScrollBar:vertical { background: #0B1117; width: 12px; margin: 0px; }"
+        "QScrollBar:vertical:disabled { background: transparent; }"
+        "QScrollBar::handle:vertical { background: #385366; border-radius: 6px; min-height: 28px; }"
+        "QScrollBar::handle:vertical:disabled { background: transparent; }"
+        "QScrollBar::handle:vertical:hover { background: #4D7488; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+        "QScrollBar::add-page:vertical:disabled, QScrollBar::sub-page:vertical:disabled { background: transparent; }"
+        "QScrollBar:horizontal { background: #0B1117; height: 12px; margin: 0px; }"
+        "QScrollBar::handle:horizontal { background: #385366; border-radius: 6px; min-width: 28px; }"
+        "QScrollBar::handle:horizontal:hover { background: #4D7488; }"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }"
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }");
+}
+
+void ConfigureAdaptiveScrollArea(QScrollArea* scrollArea)
+{
+    if (scrollArea == nullptr)
+    {
+        return;
+    }
+
+    scrollArea->setProperty(kAdaptiveScrollAreaProperty, true);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    if (scrollArea->horizontalScrollBarPolicy() != Qt::ScrollBarAlwaysOff)
+    {
+        scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    }
+    // Reserve vertical scrollbar space up front. Pages with collapsible/dropdown
+    // sections can otherwise shrink horizontally when overflow first appears.
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
+    scrollArea->viewport()->setAutoFillBackground(false);
+    scrollArea->setStyleSheet(AdaptiveScrollAreaStyleSheet());
+    if (QWidget* content = scrollArea->widget())
+    {
+        content->setProperty(kAdaptiveScrollContentProperty, true);
+        content->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    }
+}
+
+void RelaxWindowMinimumSizeForAdaptiveScroll(QWidget* widget)
+{
+    if (widget == nullptr || !widget->isWindow())
+    {
+        return;
+    }
+
+    const int relaxedWidth = widget->minimumWidth() > 0
+        ? (std::min)(widget->minimumWidth(), 480)
+        : 0;
+    const int relaxedHeight = widget->minimumHeight() > 0
+        ? (std::min)(widget->minimumHeight(), 320)
+        : 0;
+    widget->setMinimumSize(relaxedWidth, relaxedHeight);
+}
+
+QBoxLayout* CreateMirroredBoxLayout(QLayout* sourceLayout, QWidget* parent)
+{
+    QBoxLayout::Direction direction = QBoxLayout::TopToBottom;
+    if (QBoxLayout* sourceBox = qobject_cast<QBoxLayout*>(sourceLayout))
+    {
+        direction = sourceBox->direction();
+    }
+
+    QBoxLayout* contentLayout = new QBoxLayout(direction, parent);
+    QMargins margins = sourceLayout != nullptr ? sourceLayout->contentsMargins() : QMargins();
+    contentLayout->setContentsMargins(margins);
+    contentLayout->setSpacing(sourceLayout != nullptr ? sourceLayout->spacing() : -1);
+    return contentLayout;
+}
+
+void ConfigureExistingScrollAreas(QWidget* widget)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+
+    const QList<QScrollArea*> scrollAreas = widget->findChildren<QScrollArea*>();
+    for (QScrollArea* scrollArea : scrollAreas)
+    {
+        ConfigureAdaptiveScrollArea(scrollArea);
+    }
+}
+
+bool LayoutHasSingleScrollArea(QLayout* layout, QScrollArea** outScrollArea)
+{
+    if (outScrollArea != nullptr)
+    {
+        *outScrollArea = nullptr;
+    }
+    if (layout == nullptr || layout->count() != 1)
+    {
+        return false;
+    }
+
+    QLayoutItem* item = layout->itemAt(0);
+    QScrollArea* scrollArea = item != nullptr ? qobject_cast<QScrollArea*>(item->widget()) : nullptr;
+    if (scrollArea == nullptr)
+    {
+        return false;
+    }
+    if (outScrollArea != nullptr)
+    {
+        *outScrollArea = scrollArea;
+    }
+    return true;
+}
+
+bool WrapMainWindowCentralWidget(QMainWindow* mainWindow)
+{
+    if (mainWindow == nullptr)
+    {
+        return false;
+    }
+
+    // Main dashboards usually have responsive splitters/layouts. Wrapping the whole
+    // central widget makes QScrollArea use sizeHint as an overflow signal, so a page
+    // that could have compressed cleanly may show an unnecessary scrollbar.
+    ConfigureExistingScrollAreas(mainWindow);
+    return false;
+}
+
+bool WrapLayoutInAdaptiveScrollArea(QWidget* widget)
+{
+    if (widget == nullptr)
+    {
+        return false;
+    }
+    if (widget->property(kAdaptiveScrollContentProperty).toBool())
+    {
+        return false;
+    }
+
+    QLayout* rootLayout = widget->layout();
+    if (rootLayout == nullptr || rootLayout->count() <= 0)
+    {
+        return false;
+    }
+    if (widget->property("_management_embedded_page").toBool())
+    {
+        // Management subpages are interactive dialogs embedded as widgets. Keep
+        // their root layout intact; only configure scroll areas they own.
+        ConfigureExistingScrollAreas(widget);
+        return false;
+    }
+    if (rootLayout->menuBar() != nullptr)
+    {
+        // Keep top-level menu bars in their original root layout; moving only
+        // layout items into a scroll area can compress the menu/title region.
+        ConfigureExistingScrollAreas(widget);
+        return false;
+    }
+
+    QScrollArea* existingScrollArea = nullptr;
+    if (LayoutHasSingleScrollArea(rootLayout, &existingScrollArea))
+    {
+        ConfigureAdaptiveScrollArea(existingScrollArea);
+        return true;
+    }
+
+    QBoxLayout* rootBox = qobject_cast<QBoxLayout*>(rootLayout);
+    QGridLayout* rootGrid = qobject_cast<QGridLayout*>(rootLayout);
+    if (rootBox == nullptr && rootGrid == nullptr)
+    {
+        return false;
+    }
+
+    QWidget* contentWidget = new QWidget(widget);
+    contentWidget->setObjectName("AdaptiveWindowScrollContent");
+    contentWidget->setProperty(kAdaptiveScrollContentProperty, true);
+    contentWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+
+    QBoxLayout* contentLayout = CreateMirroredBoxLayout(rootLayout, contentWidget);
+    contentWidget->setLayout(contentLayout);
+    while (rootLayout->count() > 0)
+    {
+        QLayoutItem* item = rootLayout->takeAt(0);
+        if (item != nullptr)
+        {
+            contentLayout->addItem(item);
+        }
+    }
+
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->setSpacing(0);
+
+    QScrollArea* scrollArea = new QScrollArea(widget);
+    scrollArea->setObjectName("AdaptiveWindowScrollArea");
+    ConfigureAdaptiveScrollArea(scrollArea);
+    scrollArea->setWidget(contentWidget);
+
+    if (rootBox != nullptr)
+    {
+        rootBox->addWidget(scrollArea);
+        return true;
+    }
+
+    rootGrid->addWidget(scrollArea, 0, 0, 1, 1);
+    return true;
+}
+
+void EnsureAdaptiveScrollSupport(QWidget* widget)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+    if (widget->property(kAdaptiveScrollInstalledProperty).toBool())
+    {
+        ConfigureExistingScrollAreas(widget);
+        return;
+    }
+
+    bool installed = false;
+    if (QMainWindow* mainWindow = qobject_cast<QMainWindow*>(widget))
+    {
+        installed = WrapMainWindowCentralWidget(mainWindow);
+    }
+    else
+    {
+        installed = WrapLayoutInAdaptiveScrollArea(widget);
+    }
+
+    if (installed)
+    {
+        widget->setProperty(kAdaptiveScrollInstalledProperty, true);
+        RelaxWindowMinimumSizeForAdaptiveScroll(widget);
+    }
+    ConfigureExistingScrollAreas(widget);
+}
+
 class WindowGeometryGuard final : public QObject
 {
 public:
@@ -348,6 +652,7 @@ protected:
         switch (event->type())
         {
         case QEvent::Show:
+            EnsureAdaptiveScrollSupport(widget);
             ClampWindowToAvailableGeometry(widget);
             QTimer::singleShot(60, widget, [widget]() { ClampWindowToAvailableGeometry(widget); });
             QTimer::singleShot(160, widget, [widget]() { ClampWindowToAvailableGeometry(widget); });
@@ -402,6 +707,26 @@ void ApplyUnifiedWindowChrome(QWidget* widget)
     RefreshUnifiedWindowTitleBar(widget);
 }
 
+void ConfigureApplicationFontFallback()
+{
+    if (qApp == nullptr)
+    {
+        return;
+    }
+
+    QFont font = ChineseCapableFont(qApp->font());
+    if (font.pointSize() <= 0)
+    {
+        font.setPointSize(10);
+    }
+    qApp->setFont(font);
+}
+
+void ApplyAdaptiveScrollSupport(QWidget* widget)
+{
+    EnsureAdaptiveScrollSupport(widget);
+}
+
 void RefreshUnifiedWindowTitleBar(QWidget* widget)
 {
     if (widget == nullptr)
@@ -416,10 +741,10 @@ void RefreshUnifiedWindowTitleBar(QWidget* widget)
 QString UnifiedComboBoxStyleSheet()
 {
     return QStringLiteral(
-        "QComboBox { background: #000000; color: #F5FAFA; border: 1px solid #385366; border-radius: 0px; padding: 4px 34px 4px 8px; min-height: 24px; }"
+        "QComboBox { background: #000000; color: #F5FAFA; border: 1px solid #385366; border-radius: 0px; padding: 4px 34px 4px 8px; min-height: 24px; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'SimSun', 'Arial Unicode MS'; }"
         "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 28px; border-left: 1px solid #385366; border-radius: 0px; background: #000000; }"
         "QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
-        "QComboBox QAbstractItemView { background: #000000; color: #F4FAFA; selection-background-color: #1F4F5C; border: 1px solid #385366; border-radius: 0px; outline: 0px; }");
+        "QComboBox QAbstractItemView { background: #000000; color: #F4FAFA; selection-background-color: #1F4F5C; border: 1px solid #385366; border-radius: 0px; outline: 0px; font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'SimSun', 'Arial Unicode MS'; }");
 }
 
 void ApplyCompactControlWidths(QWidget* widget)

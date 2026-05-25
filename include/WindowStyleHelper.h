@@ -12,6 +12,12 @@ class QWidget;
 // 同时会按当前屏幕可用区域（已扣除任务栏）自动限制窗口尺寸。
 void ApplyUnifiedWindowChrome(QWidget* widget);
 
+// 设置应用默认中文字体 fallback，避免下拉框、菜单和标题在缺少默认中文字库的设备上乱码。
+void ConfigureApplicationFontFallback();
+
+// 给窗口或嵌入页加一层按需显示的横/纵滚动区；内容没有超出时滚动条保持隐藏。
+void ApplyAdaptiveScrollSupport(QWidget* widget);
+
 // 窗口显示或最大化后，补刷新 Windows 原生标题栏颜色。
 void RefreshUnifiedWindowTitleBar(QWidget* widget);
 

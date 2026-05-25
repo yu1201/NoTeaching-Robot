@@ -44,9 +44,6 @@
     <QtMoc Include="include\WeldProcessDialog.h">
       <Filter>Header Files</Filter>
     </QtMoc>
-    <QtMoc Include="include\groove\clientudpformsensorworker.h">
-      <Filter>Header Files</Filter>
-    </QtMoc>
     <ClCompile Include="src\QtWidgetsApplication4.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -154,13 +151,19 @@
     <ClCompile Include="src\WindowStyleHelper.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\groove\clientudpformsensorworker.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="src\groove\framebuffer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\groove\pointcloundresultframe.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\SkDataClass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\SkFunction.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\groove\tcpsensorclientworker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -267,5 +270,19 @@
     <ClInclude Include="include\groove\pointcloundresultframe.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\SkDataClass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\SkFunction.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\SkGrooveRecog_global.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <QtMoc Include="include\groove\tcpsensorclientworker.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
   </ItemGroup>
 </Project>
