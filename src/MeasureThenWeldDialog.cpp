@@ -6,6 +6,8 @@
 #include "OPini.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotDataHelper.h"
+#include "RobotMessage.h"
+#include "WeldProcessFile.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
 
@@ -14,12 +16,10 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
-#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFormLayout>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -27,15 +27,14 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
-#include <QDoubleSpinBox>
 #include <QSignalBlocker>
+#include <QStringList>
 #include <QTextDocument>
 #include <QTextStream>
 #include <QThread>
 #include <QVBoxLayout>
 
 #include <algorithm>
-#include <cmath>
 #include <thread>
 
 namespace
@@ -77,20 +76,42 @@ QString ResolveLaserPointDirFromSelection(const QString& selectedDir)
 
     return QString();
 }
+
+QString BuildWeldProcessGroupKey(const T_WELD_PARA& weld)
+{
+    return QString("%1|%2")
+        .arg(DecodeRobotMessageText(weld.strWorkPeace))
+        .arg(weld.dWeldAngleSize, 0, 'f', 3);
 }
 
-MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraFrameCache* cameraCache, QWidget* parent)
+int CountWeldProcessLayers(const std::vector<T_WELD_PARA>& weldList, const QString& groupKey)
+{
+    int layerCount = 0;
+    for (const T_WELD_PARA& weld : weldList)
+    {
+        if (BuildWeldProcessGroupKey(weld) == groupKey)
+        {
+            ++layerCount;
+        }
+    }
+    return std::max(1, layerCount);
+}
+}
+
+MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraCacheFunc cameraCacheForUnit, QWidget* parent)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
     , m_unitIndex(unitIndex)
     , m_pService(new MeasureThenWeldService())
     , m_startCamera(startCamera)
     , m_stopCamera(stopCamera)
-    , m_pCameraCache(cameraCache)
+    , m_cameraCacheForUnit(cameraCacheForUnit)
+    , m_pCameraCache(nullptr)
 {
     setWindowTitle("先测后焊");
+    MarkDirectMouseInputWindow(this);
     ApplyUnifiedWindowChrome(this);
-    ResizeWindowForAvailableGeometry(this, QSize(620, 430), 0.68, 0.62);
+    ResizeWindowForAvailableGeometry(this, QSize(760, 500), 0.72, 0.66);
     setStyleSheet(
         "QDialog { background: #111820; color: #ECF3F4; }"
         "QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 12px; padding: 12px 18px; font-size: 16px; }"
@@ -100,6 +121,10 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
         "QCheckBox { color: #BFE8EC; spacing: 8px; font-size: 15px; }"
         "QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #5C7A8B; background: #0B1117; }"
         "QCheckBox::indicator:checked { background: #1E8AA0; border-color: #72D4DD; }"
+        "QComboBox { background: #05090D; color: #F5FAFA; border: 1px solid #36586A; padding: 4px 8px; min-height: 26px; }"
+        "QComboBox::drop-down { width: 34px; border-left: 1px solid #36586A; background: #05090D; }"
+        "QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
+        "QComboBox QAbstractItemView { background: #081018; color: #F5FAFA; selection-background-color: #2D7D8C; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
         "QLabel { color: #BACBD1; }");
 
@@ -110,7 +135,28 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     rootLayout->addWidget(titleLabel);
 
     QLabel* hintLabel = new QLabel("预设参数：读取 MeasureWeldParam.ini 当前参数组，并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点，并在扫描后自动执行 PreservePath 拟合、焊道分类、焊接姿态生成和焊道补偿。也可以跳过扫描，直接选历史结果文件夹焊接。");
+    hintLabel->setWordWrap(true);
     rootLayout->addWidget(hintLabel);
+
+    QGridLayout* selectorLayout = new QGridLayout();
+    selectorLayout->setHorizontalSpacing(14);
+    selectorLayout->setVerticalSpacing(8);
+    selectorLayout->addWidget(new QLabel("机器人："), 0, 0);
+    m_pRobotCombo = new QComboBox();
+    m_pRobotCombo->setMinimumWidth(220);
+    m_pRobotCombo->setMaximumWidth(340);
+    selectorLayout->addWidget(m_pRobotCombo, 0, 1);
+    selectorLayout->addWidget(new QLabel("位置类型："), 0, 2);
+    m_pParamGroupCombo = new QComboBox();
+    m_pParamGroupCombo->setMinimumWidth(210);
+    m_pParamGroupCombo->setMaximumWidth(320);
+    selectorLayout->addWidget(m_pParamGroupCombo, 0, 3);
+    selectorLayout->addWidget(new QLabel("焊接工艺："), 1, 0);
+    m_pWeldProcessCombo = new QComboBox();
+    m_pWeldProcessCombo->setMinimumWidth(360);
+    selectorLayout->addWidget(m_pWeldProcessCombo, 1, 1, 1, 3);
+    selectorLayout->setColumnStretch(4, 1);
+    rootLayout->addLayout(selectorLayout);
 
     QHBoxLayout* modeLayout = new QHBoxLayout();
     QLabel* modeLabel = new QLabel("运行模式：");
@@ -128,15 +174,12 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     m_pPresetParamBtn = new QPushButton("预设参数");
     m_pSkipScanWeldBtn = new QPushButton("跳过扫描焊接");
     m_pLineScanProcessBtn = new QPushButton("线扫处理");
-    m_pScanSafeParamBtn = new QPushButton("扫描安全参数");
     m_pPresetParamBtn->setMinimumHeight(64);
     m_pSkipScanWeldBtn->setMinimumHeight(64);
     m_pLineScanProcessBtn->setMinimumHeight(64);
-    m_pScanSafeParamBtn->setMinimumHeight(64);
     buttonLayout->addWidget(m_pPresetParamBtn, 0, 0);
     buttonLayout->addWidget(m_pLineScanProcessBtn, 0, 1);
-    buttonLayout->addWidget(m_pScanSafeParamBtn, 1, 0);
-    buttonLayout->addWidget(m_pSkipScanWeldBtn, 1, 1);
+    buttonLayout->addWidget(m_pSkipScanWeldBtn, 1, 0, 1, 2);
     rootLayout->addLayout(buttonLayout);
 
     m_pLogText = new QPlainTextEdit();
@@ -148,9 +191,11 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     connect(m_pPresetParamBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunPresetParamFlow);
     connect(m_pSkipScanWeldBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunSkipScanWeldFlow);
     connect(m_pLineScanProcessBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunLineScanProcess);
-    connect(m_pScanSafeParamBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::OpenScanSafeParamDialog);
     connect(m_pActualWeldCheck, &QCheckBox::toggled, this, &MeasureThenWeldDialog::SaveWeldModeToParam);
-    RefreshWeldModeFromParam();
+    connect(m_pRobotCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnRobotChanged);
+    connect(m_pParamGroupCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnParamGroupChanged);
+    connect(m_pWeldProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnWeldProcessChanged);
+    LoadRobotList();
 }
 
 void MeasureThenWeldDialog::closeEvent(QCloseEvent* event)
@@ -164,8 +209,309 @@ void MeasureThenWeldDialog::closeEvent(QCloseEvent* event)
     QDialog::closeEvent(event);
 }
 
+void MeasureThenWeldDialog::LoadRobotList()
+{
+    if (m_pRobotCombo == nullptr)
+    {
+        return;
+    }
+
+    m_bLoadingSelectors = true;
+    m_pRobotCombo->clear();
+
+    const QVector<RobotDataHelper::RobotInfo> robots = RobotDataHelper::LoadRobotList(m_pContralUnit);
+    int selectedIndex = -1;
+    for (const RobotDataHelper::RobotInfo& info : robots)
+    {
+        const int row = m_pRobotCombo->count();
+        m_pRobotCombo->addItem(info.displayName, info.unitIndex);
+        m_pRobotCombo->setItemData(row, info.robotName, Qt::UserRole + 1);
+        if (info.unitIndex == m_unitIndex)
+        {
+            selectedIndex = row;
+        }
+    }
+
+    if (selectedIndex < 0 && m_pRobotCombo->count() > 0)
+    {
+        selectedIndex = 0;
+    }
+    if (selectedIndex >= 0)
+    {
+        m_pRobotCombo->setCurrentIndex(selectedIndex);
+        m_unitIndex = m_pRobotCombo->currentData().toInt();
+    }
+
+    m_bLoadingSelectors = false;
+    LoadParamGroups();
+    LoadWeldProcessList();
+    RefreshWeldModeFromParam();
+}
+
+void MeasureThenWeldDialog::LoadParamGroups()
+{
+    if (m_pParamGroupCombo == nullptr)
+    {
+        return;
+    }
+
+    m_bLoadingSelectors = true;
+    m_pParamGroupCombo->clear();
+
+    const QString robotName = CurrentRobotName();
+    QString error;
+    if (robotName.isEmpty() || !RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &error))
+    {
+        if (!error.isEmpty())
+        {
+            AppendLog("读取位置类型失败：" + error);
+        }
+        m_bLoadingSelectors = false;
+        return;
+    }
+
+    COPini ini;
+    const QString path = RobotDataHelper::MeasureWeldParamPath(robotName);
+    if (!ini.SetFileName(path.toLocal8Bit().constData()))
+    {
+        AppendLog("读取位置类型失败：打开参数文件失败：" + path);
+        m_bLoadingSelectors = false;
+        return;
+    }
+
+    int groupCount = 1;
+    int useNo = 0;
+    ini.SetSectionName("MeasureWeldGroups");
+    ini.ReadString(false, "GroupCount", &groupCount);
+    ini.ReadString(false, "UseGroupNo", &useNo);
+    groupCount = std::max(1, groupCount);
+    useNo = std::clamp(useNo, 0, groupCount - 1);
+    for (int index = 0; index < groupCount; ++index)
+    {
+        std::string groupName;
+        ini.ReadString(false, QString("Group%1Name").arg(index).toStdString(), groupName);
+        const QString displayName = groupName.empty()
+            ? QString("参数组%1").arg(index + 1)
+            : DecodeRobotMessageText(groupName);
+        m_pParamGroupCombo->addItem(QString("%1 / Group%2").arg(displayName).arg(index), index);
+    }
+    m_pParamGroupCombo->setCurrentIndex(useNo);
+    m_bLoadingSelectors = false;
+}
+
+void MeasureThenWeldDialog::LoadWeldProcessList()
+{
+    if (m_pWeldProcessCombo == nullptr)
+    {
+        return;
+    }
+
+    m_bLoadingSelectors = true;
+    m_pWeldProcessCombo->clear();
+    m_pWeldProcessCombo->setEnabled(false);
+
+    if (m_pContralUnit == nullptr
+        || m_unitIndex < 0
+        || m_unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        m_bLoadingSelectors = false;
+        return;
+    }
+
+    WeldProcessFile processFile(*m_pContralUnit, m_unitIndex);
+    const std::vector<T_WELD_PARA>& weldList = processFile.GetWeldParaList();
+    QString selectedKey;
+    if (!weldList.empty())
+    {
+        const int useIndex = std::clamp(processFile.GetUseWeldParaNo(), 0, static_cast<int>(weldList.size()) - 1);
+        selectedKey = BuildWeldProcessGroupKey(weldList[useIndex]);
+    }
+    int selectedComboIndex = 0;
+    QStringList seenKeys;
+    for (int index = 0; index < static_cast<int>(weldList.size()); ++index)
+    {
+        const T_WELD_PARA& weld = weldList[index];
+        const QString groupKey = BuildWeldProcessGroupKey(weld);
+        if (seenKeys.contains(groupKey))
+        {
+            continue;
+        }
+        seenKeys.append(groupKey);
+        const QString workpiece = DecodeRobotMessageText(weld.strWorkPeace);
+        const int layerCount = CountWeldProcessLayers(weldList, groupKey);
+        const QString layerText = layerCount > 1 ? QString(" | 共%1层").arg(layerCount) : QString();
+        const QString displayName = QString("%1. %2 | 焊脚%3%4")
+            .arg(m_pWeldProcessCombo->count() + 1)
+            .arg(workpiece.isEmpty() ? QStringLiteral("未命名工艺") : workpiece)
+            .arg(weld.dWeldAngleSize, 0, 'f', 1)
+            .arg(layerText);
+        m_pWeldProcessCombo->addItem(displayName, index);
+        if (groupKey == selectedKey)
+        {
+            selectedComboIndex = m_pWeldProcessCombo->count() - 1;
+        }
+    }
+
+    if (m_pWeldProcessCombo->count() > 0)
+    {
+        m_pWeldProcessCombo->setEnabled(true);
+        m_pWeldProcessCombo->setCurrentIndex(std::clamp(selectedComboIndex, 0, m_pWeldProcessCombo->count() - 1));
+    }
+    else
+    {
+        const QString errorText = DecodeRobotMessageText(processFile.GetLastError());
+        m_pWeldProcessCombo->addItem(errorText.isEmpty() ? QStringLiteral("未读取到焊接工艺") : errorText, -1);
+    }
+
+    m_bLoadingSelectors = false;
+}
+
+void MeasureThenWeldDialog::OnRobotChanged(int index)
+{
+    Q_UNUSED(index);
+    if (m_bLoadingSelectors || m_pRobotCombo == nullptr)
+    {
+        return;
+    }
+
+    m_unitIndex = m_pRobotCombo->currentData().toInt();
+    m_pCameraCache = ResolveCameraCacheForUnit(m_unitIndex);
+    LoadParamGroups();
+    LoadWeldProcessList();
+    RefreshWeldModeFromParam();
+    AppendLog(QString("当前机器人已切换为：%1").arg(m_pRobotCombo->currentText()));
+}
+
+void MeasureThenWeldDialog::OnParamGroupChanged(int index)
+{
+    Q_UNUSED(index);
+    if (m_bLoadingSelectors || m_bRunning)
+    {
+        return;
+    }
+
+    QString error;
+    if (!SaveCurrentParamGroupSelection(error))
+    {
+        AppendLog("切换位置类型失败：" + error);
+        return;
+    }
+    RefreshWeldModeFromParam();
+    AppendLog(QString("当前位置类型已切换为：%1").arg(m_pParamGroupCombo != nullptr ? m_pParamGroupCombo->currentText() : QString()));
+}
+
+void MeasureThenWeldDialog::OnWeldProcessChanged(int index)
+{
+    Q_UNUSED(index);
+    if (m_bLoadingSelectors || m_bRunning)
+    {
+        return;
+    }
+
+    QString error;
+    if (!SaveCurrentWeldProcessSelection(error))
+    {
+        AppendLog("切换焊接工艺失败：" + error);
+        return;
+    }
+    AppendLog(QString("当前焊接工艺已切换为：%1").arg(m_pWeldProcessCombo != nullptr ? m_pWeldProcessCombo->currentText() : QString()));
+}
+
+QString MeasureThenWeldDialog::CurrentRobotName() const
+{
+    if (m_pRobotCombo != nullptr && m_pRobotCombo->currentIndex() >= 0)
+    {
+        const QString robotName = m_pRobotCombo->currentData(Qt::UserRole + 1).toString();
+        if (!robotName.trimmed().isEmpty())
+        {
+            return robotName.trimmed();
+        }
+    }
+
+    RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, m_unitIndex);
+    if (driver != nullptr && !driver->m_sRobotName.empty())
+    {
+        return QString::fromStdString(driver->m_sRobotName);
+    }
+    return QString();
+}
+
+int MeasureThenWeldDialog::CurrentParamGroupIndex() const
+{
+    if (m_pParamGroupCombo != nullptr && m_pParamGroupCombo->currentIndex() >= 0)
+    {
+        return std::max(0, m_pParamGroupCombo->currentData().toInt());
+    }
+    return 0;
+}
+
+bool MeasureThenWeldDialog::SaveCurrentParamGroupSelection(QString& error) const
+{
+    const QString robotName = CurrentRobotName();
+    if (robotName.isEmpty())
+    {
+        error = "未选择机器人。";
+        return false;
+    }
+    return RobotDataHelper::WriteParamValue(
+        RobotDataHelper::MeasureWeldParamPath(robotName),
+        "MeasureWeldGroups",
+        "UseGroupNo",
+        QString::number(CurrentParamGroupIndex()),
+        &error);
+}
+
+bool MeasureThenWeldDialog::SaveCurrentWeldProcessSelection(QString& error) const
+{
+    if (m_pWeldProcessCombo == nullptr || m_pWeldProcessCombo->currentIndex() < 0)
+    {
+        error = "未选择焊接工艺。";
+        return false;
+    }
+    if (m_pContralUnit == nullptr
+        || m_unitIndex < 0
+        || m_unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        error = "未选择有效机器人。";
+        return false;
+    }
+
+    const int weldProcessIndex = m_pWeldProcessCombo->currentData().toInt();
+    if (weldProcessIndex < 0)
+    {
+        error = "当前焊接工艺无效。";
+        return false;
+    }
+
+    WeldProcessFile processFile(*m_pContralUnit, m_unitIndex);
+    if (!processFile.UpdateUseWeldParaNo(weldProcessIndex))
+    {
+        error = DecodeRobotMessageText(processFile.GetLastError());
+        if (error.isEmpty())
+        {
+            error = "写入焊接工艺选择失败。";
+        }
+        return false;
+    }
+    return true;
+}
+
+CameraFrameCache* MeasureThenWeldDialog::ResolveCameraCacheForUnit(int unitIndex)
+{
+    if (m_cameraCacheForUnit)
+    {
+        return m_cameraCacheForUnit(unitIndex);
+    }
+    return m_pCameraCache;
+}
+
 RobotDriverAdaptor* MeasureThenWeldDialog::GetRobotDriver()
 {
+    if (m_pRobotCombo != nullptr && m_pRobotCombo->currentIndex() >= 0)
+    {
+        m_unitIndex = m_pRobotCombo->currentData().toInt();
+    }
+
     if (m_pContralUnit == nullptr || m_unitIndex < 0 || m_unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
         QMessageBox::warning(this, "先测后焊", "未找到可用的控制单元。");
@@ -184,6 +530,14 @@ RobotDriverAdaptor* MeasureThenWeldDialog::GetRobotDriver()
 
 bool MeasureThenWeldDialog::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error)
 {
+    if (!SaveCurrentParamGroupSelection(error))
+    {
+        return false;
+    }
+    if (m_pWeldProcessCombo != nullptr && m_pWeldProcessCombo->isEnabled() && !SaveCurrentWeldProcessSelection(error))
+    {
+        return false;
+    }
     return m_pService != nullptr && m_pService->LoadPresetParam(pRobotDriver, param, error);
 }
 
@@ -340,153 +694,6 @@ bool MeasureThenWeldDialog::ShowCheckpointDialog(const QString& title, const QSt
     return confirmed;
 }
 
-void MeasureThenWeldDialog::OpenScanSafeParamDialog()
-{
-    if (m_bRunning)
-    {
-        QMessageBox::information(this, "扫描安全参数", "流程正在运行，不能修改扫描安全参数。");
-        return;
-    }
-
-    RobotDriverAdaptor* pRobotDriver = GetRobotDriver();
-    if (pRobotDriver == nullptr)
-    {
-        return;
-    }
-
-    T_PRECISE_MEASURE_PARAM param;
-    QString error;
-    if (!LoadPresetParam(pRobotDriver, param, error))
-    {
-        QMessageBox::warning(this, "扫描安全参数", error);
-        return;
-    }
-
-    QDialog dialog(this);
-    dialog.setWindowTitle("扫描安全参数");
-    ApplyUnifiedWindowChrome(&dialog);
-    dialog.setStyleSheet(
-        "QDialog { background: #111820; color: #ECF3F4; }"
-        "QLabel { color: #BACBD1; }"
-        "QCheckBox { color: #DDECEF; }"
-        "QDoubleSpinBox { background: #000000; color: #F5FAFA; border: 1px solid #385366; border-radius: 0px; padding: 6px 34px 6px 10px; min-height: 28px; }"
-        "QDoubleSpinBox::up-button { subcontrol-origin: border; subcontrol-position: top right; width: 24px; border-left: 1px solid #385366; border-bottom: 1px solid #385366; border-radius: 0px; background: #000000; }"
-        "QDoubleSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 24px; border-left: 1px solid #385366; border-radius: 0px; background: #000000; }"
-        "QDoubleSpinBox::up-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-up.svg); width: 10px; height: 7px; }"
-        "QDoubleSpinBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 10px; height: 7px; }"
-        "QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover { background: #101820; }"
-        "QComboBox { background: #000000; color: #F5FAFA; border: 1px solid #385366; border-radius: 0px; padding: 6px 36px 6px 10px; min-height: 28px; }"
-        "QComboBox::drop-down { border-left: 1px solid #385366; border-radius: 0px; width: 30px; background: #000000; }"
-        "QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
-        "QComboBox QAbstractItemView { background: #000000; color: #F4FAFA; selection-background-color: #1F4F5C; border: 1px solid #385366; border-radius: 0px; outline: 0px; }"
-        "QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 8px 16px; }"
-        "QPushButton:hover { background: #2D5465; border-color: #72D4DD; }");
-
-    QVBoxLayout* rootLayout = new QVBoxLayout(&dialog);
-    QLabel* titleLabel = new QLabel("扫描安全位推算参数");
-    titleLabel->setStyleSheet("font-size: 20px; font-weight: bold; color: #F7FCFC;");
-    rootLayout->addWidget(titleLabel);
-
-    QLabel* hintLabel = new QLabel(
-        "只影响扫描段：由扫描起点/终点直角位姿按枪方向偏移生成安全位。"
-        "焊接轨迹自己的下枪/收枪安全位置不在这里修改。");
-    hintLabel->setWordWrap(true);
-    rootLayout->addWidget(hintLabel);
-
-    QCheckBox* useComputedCheck = new QCheckBox("使用起点/终点直角位姿推算扫描安全位");
-    useComputedCheck->setChecked(param.bUseComputedScanSafe);
-
-    auto makeSpin = [](double minValue, double maxValue, double value, const QString& suffix) {
-        QDoubleSpinBox* spin = new QDoubleSpinBox();
-        spin->setRange(minValue, maxValue);
-        spin->setDecimals(3);
-        spin->setSingleStep(1.0);
-        spin->setValue(value);
-        spin->setSuffix(suffix);
-        spin->setAlignment(Qt::AlignRight);
-        return spin;
-    };
-
-    QDoubleSpinBox* offsetSpin = makeSpin(1.0, 1000.0, param.dScanSafeOffsetDistanceMm, " mm");
-    QDoubleSpinBox* gunAngleSpin = makeSpin(-89.0, 89.0, param.dScanSafeGunAngleDeg, " deg");
-    QComboBox* xDirectionCombo = new QComboBox();
-    xDirectionCombo->addItem("X- 方向", -1);
-    xDirectionCombo->addItem("X+ 方向", 1);
-    xDirectionCombo->setCurrentIndex(param.nScanSafeXDirection >= 0 ? 1 : 0);
-    QDoubleSpinBox* liftSpin = makeSpin(0.0, 1000.0, param.dScanSafeLiftHeightMm, " mm");
-    QDoubleSpinBox* flipWarnSpin = makeSpin(1.0, 360.0, param.dScanSafeFlipWarnThresholdDeg, " deg");
-
-    QFormLayout* formLayout = new QFormLayout();
-    formLayout->addRow("", useComputedCheck);
-    formLayout->addRow("安全偏移距离：", offsetSpin);
-    formLayout->addRow("枪倾角：", gunAngleSpin);
-    formLayout->addRow("X 偏移方向：", xDirectionCombo);
-    formLayout->addRow("姿态切换抬高：", liftSpin);
-    formLayout->addRow("姿态翻转提醒阈值：", flipWarnSpin);
-    rootLayout->addLayout(formLayout);
-
-    QLabel* previewLabel = new QLabel();
-    previewLabel->setWordWrap(true);
-    rootLayout->addWidget(previewLabel);
-
-    QLabel* pathLabel = new QLabel(QString("配置文件：%1\n当前位置类型：%2 [%3]")
-        .arg(QDir::toNativeSeparators(QString::fromStdString(param.sIniFilePath)))
-        .arg(param.sParamGroupName)
-        .arg(QString::fromStdString(param.sSectionName)));
-    pathLabel->setWordWrap(true);
-    rootLayout->addWidget(pathLabel);
-
-    auto updatePreview = [=]() {
-        const double distance = offsetSpin->value();
-        const double angleRad = gunAngleSpin->value() * M_PI / 180.0;
-        const double xSign = xDirectionCombo->currentData().toInt() >= 0 ? 1.0 : -1.0;
-        const double dx = xSign * distance * std::sin(angleRad);
-        const double dz = distance * std::cos(angleRad);
-        previewLabel->setText(QString("当前计算：X偏移=%1 mm，Z抬高=%2 mm。起点安全位≈ X=%3, Y=%4, Z=%5")
-            .arg(dx, 0, 'f', 3)
-            .arg(dz, 0, 'f', 3)
-            .arg(param.tStartPos.dX + dx, 0, 'f', 3)
-            .arg(param.tStartPos.dY, 0, 'f', 3)
-            .arg(param.tStartPos.dZ + dz, 0, 'f', 3));
-    };
-    connect(offsetSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, updatePreview);
-    connect(gunAngleSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), &dialog, updatePreview);
-    connect(xDirectionCombo, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, updatePreview);
-    updatePreview();
-
-    QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
-    rootLayout->addWidget(buttons);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&]()
-        {
-            COPini ini;
-            if (!ini.SetFileName(param.sIniFilePath))
-            {
-                QMessageBox::warning(&dialog, "扫描安全参数", "打开配置文件失败。");
-                return;
-            }
-            ini.SetSectionName(param.sSectionName);
-            const bool ok =
-                ini.WriteString("UseComputedScanSafe", useComputedCheck->isChecked() ? 1 : 0)
-                && ini.WriteString("ScanSafeOffsetDistanceMm", offsetSpin->value(), 6)
-                && ini.WriteString("ScanSafeGunAngleDeg", gunAngleSpin->value(), 6)
-                && ini.WriteString("ScanSafeXDirection", xDirectionCombo->currentData().toInt())
-                && ini.WriteString("ScanSafeLiftHeightMm", liftSpin->value(), 6)
-                && ini.WriteString("ScanSafeFlipWarnThresholdDeg", flipWarnSpin->value(), 6);
-            if (!ok)
-            {
-                QMessageBox::warning(&dialog, "扫描安全参数", "写入配置失败，请检查文件权限。");
-                return;
-            }
-            dialog.accept();
-        });
-
-    if (dialog.exec() == QDialog::Accepted)
-    {
-        AppendLog("扫描安全参数已保存。");
-    }
-}
-
 void MeasureThenWeldDialog::RunPresetParamFlow()
 {
     if (m_bRunning)
@@ -509,6 +716,8 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
         return;
     }
     param.bDoActualWeld = IsActualWeldModeChecked();
+    const int unitIndexForRun = m_unitIndex;
+    m_pCameraCache = ResolveCameraCacheForUnit(unitIndexForRun);
     SetRunning(true);
     SetFlowStep("读取预设参数完成，准备启动相机");
     AppendLog(QString("已读取参数：%1，位置类型=%2 [%3]")
@@ -523,7 +732,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
 
     // 机器人运动和扫描采集放到后台线程，避免 UI 被 CheckRobotDone 和文件保存卡住。
     QPointer<MeasureThenWeldDialog> self(this);
-    std::thread([self, pRobotDriver, param]()
+    std::thread([self, pRobotDriver, param, unitIndexForRun]()
         {
             bool ok = true;
             QString message;
@@ -531,7 +740,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
             QString savedPath;
             QString executeSummary;
 
-            QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok]()
+            QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok, unitIndexForRun]()
                 {
                     // 相机 UDP 线程由主界面统一管理，这里通过回调启动。
                     if (self == nullptr)
@@ -539,7 +748,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         ok = false;
                         return;
                     }
-                    ok = self->m_startCamera ? self->m_startCamera(cameraIP) : false;
+                    ok = self->m_startCamera ? self->m_startCamera(unitIndexForRun, cameraIP) : false;
                 }, Qt::BlockingQueuedConnection);
 
             if (!ok)
@@ -943,7 +1152,7 @@ void MeasureThenWeldDialog::RefreshWeldModeFromParam()
         return;
     }
 
-    RobotDriverAdaptor* pRobotDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, m_unitIndex);
+    RobotDriverAdaptor* pRobotDriver = GetRobotDriver();
     if (pRobotDriver == nullptr)
     {
         return;
@@ -971,7 +1180,7 @@ void MeasureThenWeldDialog::SaveWeldModeToParam(bool doActualWeld)
         return;
     }
 
-    RobotDriverAdaptor* pRobotDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, m_unitIndex);
+    RobotDriverAdaptor* pRobotDriver = GetRobotDriver();
     if (pRobotDriver == nullptr)
     {
         return;
@@ -1052,9 +1261,20 @@ void MeasureThenWeldDialog::SetRunning(bool running)
     m_pPresetParamBtn->setEnabled(!running);
     m_pSkipScanWeldBtn->setEnabled(!running);
     m_pLineScanProcessBtn->setEnabled(!running);
-    m_pScanSafeParamBtn->setEnabled(!running);
     if (m_pActualWeldCheck != nullptr)
     {
         m_pActualWeldCheck->setEnabled(!running);
+    }
+    if (m_pRobotCombo != nullptr)
+    {
+        m_pRobotCombo->setEnabled(!running);
+    }
+    if (m_pParamGroupCombo != nullptr)
+    {
+        m_pParamGroupCombo->setEnabled(!running);
+    }
+    if (m_pWeldProcessCombo != nullptr)
+    {
+        m_pWeldProcessCombo->setEnabled(!running && m_pWeldProcessCombo->count() > 0 && m_pWeldProcessCombo->currentData().toInt() >= 0);
     }
 }

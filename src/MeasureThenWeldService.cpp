@@ -7,6 +7,7 @@
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
 #include "RobotPoseTransform.h"
+#include "STEPRobotDriver.h"
 #include "groove/framebuffer.h"
 
 #include <QDateTime>
@@ -150,10 +151,29 @@ struct WeldPosePreset
     double gunToolBaseRz = 180.0;
     double poseMatchMaxErrorDeg = 5.0;
     double cornerTransitionLeadDistance = 10.0;
-    double cornerArcRadiusMm = 2.0;
+    double cornerArcRadiusMm = 0.0;
     double weldStartSkipDistance = 10.0;
     double weldEndSkipDistance = 10.0;
     double weldRzGainDeg = 0.0;
+    double stepOverlapRel = 20.0;
+    int weldDirection = 1;
+    bool weldProcessLoaded = false;
+    bool cornerArcRadiusFromWeldProcess = false;
+    bool transitionSpeedEnabled = false;
+    bool transitionCurrentVoltageEnabled = false;
+    bool transitionCurrentVoltageEnableMismatch = false;
+    double startArcCurrent = 0.0;
+    double startArcVoltage = 0.0;
+    double startArcWaitTime = 0.0;
+    double weldCurrent = 0.0;
+    double weldVoltage = 0.0;
+    double weldProcessSpeedMmPerMin = 0.0;
+    double stopArcCurrent = 0.0;
+    double stopArcVoltage = 0.0;
+    double stopArcWaitTime = 0.0;
+    double transitionSpeedMmPerMin = 0.0;
+    double transitionCurrent = 0.0;
+    double transitionVoltage = 0.0;
     std::vector<PoseCompSlot> poseCompSlots;
     std::vector<SeamCompSlot> seamCompSlots;
     bool weldLineFromIni = false;
@@ -616,12 +636,246 @@ void InitializeDefaultSeamCompSlots(std::vector<WeldPosePreset::SeamCompSlot>& s
     }
 }
 
+bool TryParseWeldProcessDouble(const QStringList& fields, int index, double& value)
+{
+    if (index < 0 || index >= fields.size())
+    {
+        return false;
+    }
+
+    bool ok = false;
+    const double parsed = fields[index].trimmed().toDouble(&ok);
+    if (!ok)
+    {
+        return false;
+    }
+
+    value = parsed;
+    return true;
+}
+
+bool TryParseWeldProcessInt(const QStringList& fields, int index, int& value)
+{
+    if (index < 0 || index >= fields.size())
+    {
+        return false;
+    }
+
+    bool ok = false;
+    const int parsed = fields[index].trimmed().toInt(&ok);
+    if (!ok)
+    {
+        return false;
+    }
+
+    value = parsed;
+    return true;
+}
+
+bool TryParseWeldProcessRow(const QStringList& fields, T_WELD_PARA& weldPara)
+{
+    if (fields.size() < 30)
+    {
+        return false;
+    }
+
+    weldPara = {};
+    weldPara.strWorkPeace = fields.value(0).trimmed().toLocal8Bit().constData();
+    weldPara.strWeldType = fields.value(1).trimmed().toLocal8Bit().constData();
+
+    bool ok = TryParseWeldProcessDouble(fields, 4, weldPara.dStartArcCurrent)
+        && TryParseWeldProcessDouble(fields, 5, weldPara.dStartArcVoltage)
+        && TryParseWeldProcessDouble(fields, 6, weldPara.dStartWaitTime)
+        && TryParseWeldProcessDouble(fields, 7, weldPara.dTrackCurrent)
+        && TryParseWeldProcessDouble(fields, 8, weldPara.dTrackVoltage)
+        && TryParseWeldProcessDouble(fields, 9, weldPara.WeldVelocity)
+        && TryParseWeldProcessDouble(fields, 10, weldPara.dStopArcCurrent)
+        && TryParseWeldProcessDouble(fields, 11, weldPara.dStopArcVoltage)
+        && TryParseWeldProcessDouble(fields, 12, weldPara.dStopWaitTime);
+    if (!ok)
+    {
+        return false;
+    }
+
+    const auto parseOptionalDouble = [&](int index, double& value, double fallback) -> bool
+        {
+            value = fallback;
+            if (index >= fields.size())
+            {
+                return true;
+            }
+            return TryParseWeldProcessDouble(fields, index, value);
+        };
+    const auto parseOptionalInt = [&](int index, int& value, int fallback) -> bool
+        {
+            value = fallback;
+            if (index >= fields.size())
+            {
+                return true;
+            }
+            return TryParseWeldProcessInt(fields, index, value);
+        };
+
+    return parseOptionalDouble(39, weldPara.dCornerArcTransitionRadius, 0.0)
+        && parseOptionalDouble(40, weldPara.dCornerArcTransitionSpeed, 0.0)
+        && parseOptionalDouble(41, weldPara.dCornerArcTransitionCurrent, 0.0)
+        && parseOptionalDouble(42, weldPara.dCornerArcTransitionVoltage, 0.0)
+        && parseOptionalInt(43, weldPara.nCornerArcTransitionRadiusEnable, 0)
+        && parseOptionalInt(44, weldPara.nCornerArcTransitionSpeedEnable, 0)
+        && parseOptionalInt(45, weldPara.nCornerArcTransitionCurrentEnable, 0)
+        && parseOptionalInt(46, weldPara.nCornerArcTransitionVoltageEnable, 0);
+}
+
+bool TryLoadActiveWeldProcessParam(const QString& robotName, T_WELD_PARA& weldPara)
+{
+    if (robotName.trimmed().isEmpty())
+    {
+        return false;
+    }
+
+    const QString weldFilePath = RobotDataHelper::BuildProjectPath(
+        QString("Data/%1/WeldPara.txt").arg(robotName.trimmed()));
+    QFile file(weldFilePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        return false;
+    }
+
+    int useIndex = 0;
+    QVector<QStringList> weldRows;
+    QTextStream in(&file);
+    while (!in.atEnd())
+    {
+        const QString rawLine = in.readLine();
+        const QString line = rawLine.trimmed();
+        if (line.isEmpty() || line.startsWith('#'))
+        {
+            continue;
+        }
+
+        const QStringList fields = rawLine.split('\t', Qt::KeepEmptyParts);
+        if (fields.isEmpty())
+        {
+            continue;
+        }
+
+        const QString tag = fields[0].trimmed();
+        if (tag.compare("USE", Qt::CaseInsensitive) == 0)
+        {
+            if (fields.size() >= 2)
+            {
+                bool ok = false;
+                const int parsed = fields[1].trimmed().toInt(&ok);
+                if (ok)
+                {
+                    useIndex = parsed;
+                }
+            }
+            continue;
+        }
+
+        weldRows.push_back(fields);
+    }
+
+    if (weldRows.isEmpty())
+    {
+        return false;
+    }
+
+    useIndex = qBound(0, useIndex, weldRows.size() - 1);
+    return TryParseWeldProcessRow(weldRows[useIndex], weldPara);
+}
+
+T_PRECISE_MEASURE_PARAM BuildMeasureWeldParamShell(const QString& robotName)
+{
+    T_PRECISE_MEASURE_PARAM param;
+    const QString normalizedRobotName = robotName.trimmed().isEmpty()
+        ? QStringLiteral("RobotA")
+        : robotName.trimmed();
+    param.sRobotName = normalizedRobotName.toStdString();
+
+    QString ensureError;
+    RobotDataHelper::EnsureMeasureWeldParamFile(normalizedRobotName, &ensureError);
+    const QString iniPath = RobotDataHelper::MeasureWeldParamPath(normalizedRobotName);
+    param.sIniFilePath = iniPath.toLocal8Bit().constData();
+    param.sWeldParamFilePath = param.sIniFilePath;
+
+    int groupIndex = 0;
+    COPini ini;
+    if (ini.SetFileName(param.sIniFilePath))
+    {
+        std::string groupName;
+        ini.SetSectionName("MeasureWeldGroups");
+        ini.ReadString(false, "UseGroupNo", &groupIndex);
+        groupIndex = std::max(0, groupIndex);
+        ini.ReadString(false, QString("Group%1Name").arg(groupIndex).toStdString(), groupName);
+        if (!groupName.empty())
+        {
+            param.sParamGroupName = QString::fromStdString(groupName);
+        }
+    }
+    param.nParamGroupIndex = groupIndex;
+    param.sSectionName = RobotDataHelper::MeasureWeldScanSectionName(groupIndex).toStdString();
+    param.sWeldSectionName = RobotDataHelper::MeasureWeldWeldSectionName(groupIndex).toStdString();
+    return param;
+}
+
+void ApplyActiveWeldProcessToPreset(const T_PRECISE_MEASURE_PARAM& param, WeldPosePreset& preset)
+{
+    T_WELD_PARA weldPara = {};
+    if (!TryLoadActiveWeldProcessParam(QString::fromStdString(param.sRobotName), weldPara))
+    {
+        return;
+    }
+
+    preset.weldProcessLoaded = true;
+    preset.startArcCurrent = weldPara.dStartArcCurrent;
+    preset.startArcVoltage = weldPara.dStartArcVoltage;
+    preset.startArcWaitTime = weldPara.dStartWaitTime;
+    preset.weldCurrent = weldPara.dTrackCurrent;
+    preset.weldVoltage = weldPara.dTrackVoltage;
+    preset.weldProcessSpeedMmPerMin = weldPara.WeldVelocity;
+    preset.stopArcCurrent = weldPara.dStopArcCurrent;
+    preset.stopArcVoltage = weldPara.dStopArcVoltage;
+    preset.stopArcWaitTime = weldPara.dStopWaitTime;
+
+    if (weldPara.nCornerArcTransitionRadiusEnable != 0
+        && std::isfinite(weldPara.dCornerArcTransitionRadius))
+    {
+        preset.cornerArcRadiusMm = std::max(2.0, weldPara.dCornerArcTransitionRadius);
+        preset.cornerArcRadiusFromWeldProcess = true;
+    }
+
+    if (weldPara.nCornerArcTransitionSpeedEnable != 0
+        && std::isfinite(weldPara.dCornerArcTransitionSpeed)
+        && weldPara.dCornerArcTransitionSpeed > 0.0)
+    {
+        preset.transitionSpeedEnabled = true;
+        preset.transitionSpeedMmPerMin = weldPara.dCornerArcTransitionSpeed;
+    }
+
+    const bool transitionCurrentEnabled = weldPara.nCornerArcTransitionCurrentEnable != 0;
+    const bool transitionVoltageEnabled = weldPara.nCornerArcTransitionVoltageEnable != 0;
+    preset.transitionCurrentVoltageEnableMismatch = transitionCurrentEnabled != transitionVoltageEnabled;
+    if (transitionCurrentEnabled
+        && transitionVoltageEnabled
+        && std::isfinite(weldPara.dCornerArcTransitionCurrent)
+        && std::isfinite(weldPara.dCornerArcTransitionVoltage))
+    {
+        preset.transitionCurrentVoltageEnabled = true;
+        preset.transitionCurrent = weldPara.dCornerArcTransitionCurrent;
+        preset.transitionVoltage = weldPara.dCornerArcTransitionVoltage;
+    }
+}
+
 WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
 {
     WeldPosePreset preset;
     preset.rx = param.tStartPos.dRX;
     preset.ry = param.tStartPos.dRY;
     preset.weldRzGainDeg = param.dWeldRzGainDeg;
+    preset.stepOverlapRel = std::isfinite(param.dStepOverlapRel) ? std::max(0.0, param.dStepOverlapRel) : 20.0;
+    preset.weldDirection = param.nWeldDirection < 0 ? -1 : 1;
     const double startRy = param.tStartPos.dRY;
     const double endRyNearStart = NormalizeAngleNear(param.tEndPos.dRY, startRy);
     preset.measureReferenceRy = (startRy + endRyNearStart) * 0.5;
@@ -658,17 +912,21 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
             double rx = preset.rx;
             double ry = preset.ry;
             double cornerTransitionLeadDistance = preset.cornerTransitionLeadDistance;
-            double cornerArcRadiusMm = preset.cornerArcRadiusMm;
             double weldStartSkipDistance = preset.weldStartSkipDistance;
             double weldEndSkipDistance = preset.weldEndSkipDistance;
             double weldRzGainDeg = preset.weldRzGainDeg;
+            double stepOverlapRel = preset.stepOverlapRel;
+            int weldDirection = preset.weldDirection;
             const bool hasNormalRx = TryReadIniDouble(ini, "NormalWeldRx", rx);
             const bool hasNormalRy = TryReadIniDouble(ini, "NormalWeldRy", ry);
             TryReadIniDouble(ini, "CornerTransitionLeadDis", cornerTransitionLeadDistance);
-            TryReadIniDouble(ini, "CornerArcRadiusMm", cornerArcRadiusMm);
             TryReadIniDouble(ini, "WeldStartSkipDis", weldStartSkipDistance);
             TryReadIniDouble(ini, "WeldEndSkipDis", weldEndSkipDistance);
             TryReadIniDouble(ini, "WeldRzGainDeg", weldRzGainDeg);
+            TryReadIniDouble(ini, "StepOverlapRel", stepOverlapRel);
+            ini.ReadString(false, "WeldDirection", &weldDirection);
+            preset.stepOverlapRel = std::isfinite(stepOverlapRel) ? std::max(0.0, stepOverlapRel) : 20.0;
+            preset.weldDirection = weldDirection < 0 ? -1 : 1;
             if (!(hasNormalRx && hasNormalRy))
             {
                 rx = preset.rx;
@@ -684,7 +942,6 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
             preset.rx = rx;
             preset.ry = ry;
             preset.cornerTransitionLeadDistance = std::max(0.0, cornerTransitionLeadDistance);
-            preset.cornerArcRadiusMm = std::max(0.0, cornerArcRadiusMm);
             preset.weldStartSkipDistance = std::max(0.0, weldStartSkipDistance);
             preset.weldEndSkipDistance = std::max(0.0, weldEndSkipDistance);
             preset.weldRzGainDeg = std::isfinite(weldRzGainDeg) ? weldRzGainDeg : 0.0;
@@ -693,6 +950,8 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
     }
 
 load_pose_comp:
+    ApplyActiveWeldProcessToPreset(param, preset);
+
     if (QFileInfo::exists(preset.poseCompFilePath))
     {
         COPini poseIni;
@@ -974,6 +1233,27 @@ bool TryParseWeldPoseFileRecord(const QString& line, WeldPoseFileRecord& record)
     return true;
 }
 
+void ApplyWeldDirectionToExecutionRecords(const WeldPosePreset& preset, QVector<WeldPoseFileRecord>& records)
+{
+    if (preset.weldDirection >= 0 || records.size() < 2)
+    {
+        return;
+    }
+
+    std::reverse(records.begin(), records.end());
+    for (int index = 0; index < records.size(); ++index)
+    {
+        records[index].weldIndex = index + 1;
+    }
+}
+
+QString WeldDirectionText(const WeldPosePreset& preset)
+{
+    return preset.weldDirection < 0
+        ? QStringLiteral("终点到起点")
+        : QStringLiteral("起点到终点");
+}
+
 bool LoadWeldPoseFileRecords(
     const QString& filePath,
     QVector<WeldPoseFileRecord>& records,
@@ -1238,10 +1518,31 @@ bool BuildWeldPoseMoveInfos(
     const QVector<WeldPoseFileRecord>& records,
     double linearSpeedMmPerSec,
     std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
-    QString& error)
+    QString& error,
+    const WeldPosePreset* preset = nullptr,
+    double transitionLinearSpeed = 0.0,
+    bool enableWeldProcess = false)
 {
     moveInfos.clear();
     moveInfos.reserve(static_cast<size_t>(records.size()));
+
+    const bool useWeldProcess = enableWeldProcess
+        && preset != nullptr
+        && preset->weldProcessLoaded;
+    if (useWeldProcess && preset->transitionCurrentVoltageEnableMismatch)
+    {
+        error = "拐点过渡电流和过渡电压必须同时启用或同时关闭，请检查当前焊接工艺参数。";
+        return false;
+    }
+
+    const auto isCornerArcRecord = [](const WeldPoseFileRecord& record) -> bool
+        {
+            const QString tag = (record.pointType + " " + record.segmentKind).trimmed().toLower();
+            return tag.contains("_arc")
+                || tag.contains("transition")
+                || tag.contains(QStringLiteral("过渡"))
+                || tag.contains(QStringLiteral("圆弧"));
+        };
 
     int externalAxisPointCount = 0;
     for (const WeldPoseFileRecord& record : records)
@@ -1250,6 +1551,15 @@ bool BuildWeldPoseMoveInfos(
         {
             ++externalAxisPointCount;
         }
+
+        const bool isTransitionPoint = isCornerArcRecord(record);
+        const bool useTransitionSpeed = preset != nullptr
+            && preset->transitionSpeedEnabled
+            && transitionLinearSpeed > 0.0
+            && isTransitionPoint;
+        const bool useTransitionWeldParams = useWeldProcess
+            && preset->transitionCurrentVoltageEnabled
+            && isTransitionPoint;
 
         T_ROBOT_MOVE_INFO moveInfo;
         moveInfo.nMoveType = MOVL;
@@ -1263,12 +1573,36 @@ bool BuildWeldPoseMoveInfos(
             record.bx,
             record.by,
             record.bz);
-        moveInfo.tSpeed = T_ROBOT_MOVE_SPEED(linearSpeedMmPerSec, 0.0, 0.0);
+        moveInfo.tSpeed = T_ROBOT_MOVE_SPEED(
+            useTransitionSpeed ? transitionLinearSpeed : linearSpeedMmPerSec,
+            0.0,
+            0.0);
+        moveInfo.dOverlapRel = preset != nullptr ? preset->stepOverlapRel : 20.0;
         moveInfo.nMoveDevice = 0;
         moveInfo.nTrackNo = 0;
         moveInfo.adBasePosVar[0] = record.bx;
         moveInfo.adBasePosVar[1] = record.by;
         moveInfo.adBasePosVar[2] = record.bz;
+        if (useWeldProcess)
+        {
+            moveInfo.bWeldProcessEnabled = true;
+            moveInfo.bUseTransitionWeldParams = useTransitionWeldParams;
+            moveInfo.dArcStartCurrent = preset->startArcCurrent;
+            moveInfo.dArcStartVoltage = preset->startArcVoltage;
+            moveInfo.dArcStartWaitTime = preset->startArcWaitTime;
+            moveInfo.dWeldCurrent = useTransitionWeldParams
+                ? preset->transitionCurrent
+                : preset->weldCurrent;
+            moveInfo.dWeldVoltage = useTransitionWeldParams
+                ? preset->transitionVoltage
+                : preset->weldVoltage;
+            moveInfo.dWeldSpeedMmPerMin = (useTransitionSpeed && preset->transitionSpeedMmPerMin > 0.0)
+                ? preset->transitionSpeedMmPerMin
+                : preset->weldProcessSpeedMmPerMin;
+            moveInfo.dArcEndCurrent = preset->stopArcCurrent;
+            moveInfo.dArcEndVoltage = preset->stopArcVoltage;
+            moveInfo.dArcEndWaitTime = preset->stopArcWaitTime;
+        }
         moveInfos.push_back(moveInfo);
     }
 
@@ -1278,6 +1612,12 @@ bool BuildWeldPoseMoveInfos(
             .arg(externalAxisPointCount);
         moveInfos.clear();
         return false;
+    }
+
+    if (useWeldProcess && !moveInfos.empty())
+    {
+        moveInfos.front().bArcStartBeforeMove = true;
+        moveInfos.back().bArcEndAfterMove = true;
     }
 
     return true;
@@ -1565,15 +1905,18 @@ WeldCornerArcApplyStats ApplyCornerArcTransitionToWeldPoseRecords(
     constexpr double kMinCornerAngleRad = 15.0 * kPi / 180.0;
     constexpr double kAutoCornerAngleRad = 30.0 * kPi / 180.0;
     constexpr double kMaxCornerAngleRad = 165.0 * kPi / 180.0;
-    constexpr double kMinArcRadiusMm = 0.05;
+    constexpr double kMinEnabledArcRadiusMm = 2.0;
     constexpr double kMinSegmentLengthMm = 1e-6;
 
     WeldCornerArcApplyStats stats;
     stats.inputPointCount = records.size();
     stats.outputPointCount = records.size();
-    stats.radiusMm = preset.cornerArcRadiusMm;
+    const double effectiveRadiusMm = preset.cornerArcRadiusMm > 0.0
+        ? std::max(kMinEnabledArcRadiusMm, preset.cornerArcRadiusMm)
+        : 0.0;
+    stats.radiusMm = effectiveRadiusMm;
 
-    if (records.size() < 3 || preset.cornerArcRadiusMm <= kMinArcRadiusMm)
+    if (records.size() < 3 || effectiveRadiusMm <= 0.0)
     {
         return stats;
     }
@@ -1622,9 +1965,9 @@ WeldCornerArcApplyStats ApplyCornerArcTransitionToWeldPoseRecords(
 
         // theta is the path deflection angle. The fillet tangent distance is
         // r * tan(theta / 2), not r / tan(theta / 2).
-        double tangentDistanceMm = preset.cornerArcRadiusMm * tanHalf;
+        double tangentDistanceMm = effectiveRadiusMm * tanHalf;
         const double maxTangentDistanceMm = std::min(incomingLength, outgoingLength) * 0.45;
-        if (maxTangentDistanceMm <= kMinArcRadiusMm)
+        if (maxTangentDistanceMm <= kMinSegmentLengthMm)
         {
             AppendWeldPoseRecordIfNotDuplicate(roundedRecords, corner);
             continue;
@@ -1635,7 +1978,7 @@ WeldCornerArcApplyStats ApplyCornerArcTransitionToWeldPoseRecords(
         }
 
         const double actualRadiusMm = tangentDistanceMm / tanHalf;
-        if (!std::isfinite(actualRadiusMm) || actualRadiusMm <= kMinArcRadiusMm)
+        if (!std::isfinite(actualRadiusMm) || actualRadiusMm < kMinEnabledArcRadiusMm)
         {
             AppendWeldPoseRecordIfNotDuplicate(roundedRecords, corner);
             continue;
@@ -2628,6 +2971,8 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     pWeldIni->ReadString(false, "WeldSpeedMmPerMin", &param.dWeldSpeedMmPerMin);
     pWeldIni->ReadString(false, "DryRunSpeedMmPerMin", &param.dDryRunSpeedMmPerMin);
     pWeldIni->ReadString(false, "WeldSafeMoveSpeedMmPerMin", &param.dWeldSafeMoveSpeedMmPerMin);
+    pWeldIni->ReadString(false, "StepOverlapRel", &param.dStepOverlapRel);
+    pWeldIni->ReadString(false, "WeldDirection", &param.nWeldDirection);
     pWeldIni->ReadString(false, "GunDownBackSafeDis", &param.dGunDownBackSafeDis);
     pWeldIni->ReadString(false, "WeldRzGainDeg", &param.dWeldRzGainDeg);
     param.bDoActualWeld = (doActualWeld != 0);
@@ -2662,6 +3007,12 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     {
         param.dWeldSafeMoveSpeedMmPerMin = DEFAULT_WELD_SAFE_MOVE_SPEED_MM_PER_MIN;
     }
+    if (!std::isfinite(param.dStepOverlapRel))
+    {
+        param.dStepOverlapRel = 20.0;
+    }
+    param.dStepOverlapRel = std::max(0.0, param.dStepOverlapRel);
+    param.nWeldDirection = param.nWeldDirection < 0 ? -1 : 1;
     if (!std::isfinite(param.dGunDownBackSafeDis) || param.dGunDownBackSafeDis <= 0.0)
     {
         param.dGunDownBackSafeDis = WELD_SAFE_OFFSET_DISTANCE_MM;
@@ -3440,12 +3791,19 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                 if (!motionStarted)
                 {
                     scanStartCameraSequence = frameCache->Mark();
-                    lastPulledCameraSequence = scanStartCameraSequence;
-                    if (appendLog)
-                    {
-                        appendLog(QString("扫描运动状态寄存器进入运行态：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
-                    }
-                }
+					lastPulledCameraSequence = scanStartCameraSequence;
+					if (appendLog)
+					{
+						if (pFanucDriver != nullptr)
+						{
+							appendLog(QString("扫描运动状态寄存器进入运行态：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
+						}
+						else
+						{
+							appendLog(QString("扫描运动进入运行态：CheckDone=%1").arg(motionState));
+						}
+					}
+				}
                 motionStarted = true;
             }
             if (motionStarted)
@@ -3470,21 +3828,35 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             }
 
             const qint64 elapsedMs = SteadyNowMs() - motionStartMs;
-            if (!motionStarted && elapsedMs > 3000)
-            {
-                if (appendLog)
-                {
-                    appendLog(QString("扫描运动未在 3s 内进入运行态：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
-                }
-                finishCameraProcessingWorkers();
-                return false;
+			if (!motionStarted && elapsedMs > 3000)
+			{
+				if (appendLog)
+				{
+					if (pFanucDriver != nullptr)
+					{
+						appendLog(QString("扫描运动未在 3s 内进入运行态：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
+					}
+					else
+					{
+						appendLog(QString("扫描运动未在 3s 内进入运行态：CheckDone=%1").arg(motionState));
+					}
+				}
+				finishCameraProcessingWorkers();
+				return false;
             }
-            if (motionStarted && elapsedMs > 120000)
-            {
-                if (appendLog)
-                {
-                    appendLog(QString("扫描运动等待完成超时：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
-                }
+			if (motionStarted && elapsedMs > 120000)
+			{
+				if (appendLog)
+				{
+					if (pFanucDriver != nullptr)
+					{
+						appendLog(QString("扫描运动等待完成超时：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
+					}
+					else
+					{
+						appendLog(QString("扫描运动等待完成超时：CheckDone=%1").arg(motionState));
+					}
+				}
                 finishCameraProcessingWorkers();
                 return false;
             }
@@ -4274,10 +4646,7 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
         return false;
     }
 
-    T_PRECISE_MEASURE_PARAM param;
-    param.sRobotName = robotName.trimmed().isEmpty()
-        ? std::string("RobotA")
-        : robotName.trimmed().toStdString();
+    T_PRECISE_MEASURE_PARAM param = BuildMeasureWeldParamShell(robotName);
     const WeldPosePreset preset = LoadWeldPosePreset(param);
 
     const WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
@@ -4313,6 +4682,145 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
     return true;
 }
 
+bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
+    const QString& robotName,
+    const QString& poseFilePath,
+    const QString& outputDir,
+    bool actualWeld,
+    double weldSpeedMmPerMin,
+    QString& programName,
+    QString& srpPath,
+    QString& srdPath,
+    QString& summary,
+    QString& error) const
+{
+    programName.clear();
+    srpPath.clear();
+    srdPath.clear();
+    summary.clear();
+    error.clear();
+
+    QFileInfo poseInfo(QDir::fromNativeSeparators(poseFilePath.trimmed()));
+    if (!poseInfo.isAbsolute())
+    {
+        poseInfo = QFileInfo(QDir::current().filePath(poseInfo.filePath()));
+    }
+    if (!poseInfo.exists() || !poseInfo.isFile())
+    {
+        error = QString("焊接姿态文件不存在：%1")
+            .arg(QDir::toNativeSeparators(poseInfo.absoluteFilePath()));
+        return false;
+    }
+
+    QVector<WeldPoseFileRecord> records;
+    if (!LoadWeldPoseFileRecords(poseInfo.absoluteFilePath(), records, error))
+    {
+        return false;
+    }
+
+    T_PRECISE_MEASURE_PARAM param = BuildMeasureWeldParamShell(robotName);
+    const WeldPosePreset preset = LoadWeldPosePreset(param);
+    ApplyWeldDirectionToExecutionRecords(preset, records);
+    const double effectiveWeldSpeedMmPerMin =
+        (std::isfinite(weldSpeedMmPerMin) && weldSpeedMmPerMin > 0.0)
+        ? weldSpeedMmPerMin
+        : ((std::isfinite(preset.weldProcessSpeedMmPerMin) && preset.weldProcessSpeedMmPerMin > 0.0)
+            ? preset.weldProcessSpeedMmPerMin
+            : FANUC_WELD_PATH_SPEED_MM_PER_MIN);
+    const double transitionCommandSpeed =
+        (preset.transitionSpeedEnabled && preset.transitionSpeedMmPerMin > 0.0)
+        ? preset.transitionSpeedMmPerMin
+        : 0.0;
+
+    std::vector<T_ROBOT_MOVE_INFO> moveInfos;
+    if (!BuildWeldPoseMoveInfos(
+        records,
+        effectiveWeldSpeedMmPerMin,
+        moveInfos,
+        error,
+        &preset,
+        transitionCommandSpeed,
+        true))
+    {
+        return false;
+    }
+
+    QString resolvedOutputDir = outputDir.trimmed();
+    if (resolvedOutputDir.isEmpty())
+    {
+        resolvedOutputDir = RobotDataHelper::BuildProjectPath("Job/STEP");
+    }
+    else
+    {
+        QFileInfo outputInfo(QDir::fromNativeSeparators(resolvedOutputDir));
+        resolvedOutputDir = outputInfo.isAbsolute()
+            ? outputInfo.absoluteFilePath()
+            : QFileInfo(QDir::current().filePath(outputInfo.filePath())).absoluteFilePath();
+    }
+
+    const std::string generatedProgramName = STEPRobotCtrl::MakeTimestampWeldProgramName();
+    T_AXISUNIT axisUnit;
+    std::string localSrpPath;
+    std::string localSrdPath;
+    std::string writeError;
+    if (!STEPRobotCtrl::WriteContiMoveAnyFiles(
+        moveInfos,
+        QDir::toNativeSeparators(resolvedOutputDir).toStdString(),
+        generatedProgramName,
+        axisUnit,
+        &localSrpPath,
+        &localSrdPath,
+        &writeError,
+        actualWeld))
+    {
+        error = QString("生成STEP焊接程序失败：%1").arg(QString::fromStdString(writeError));
+        return false;
+    }
+
+    programName = QString::fromStdString(generatedProgramName);
+    srpPath = QDir::toNativeSeparators(QString::fromStdString(localSrpPath));
+    srdPath = QDir::toNativeSeparators(QString::fromStdString(localSrdPath));
+    summary = QString("STEP焊接程序生成完成：程序=%1，模式=%2，方向=%3，点数=%4，轨迹速度=%5 mm/min，OVERLAPREL=%6，SRP=%7，SRD=%8")
+        .arg(programName)
+        .arg(actualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑"))
+        .arg(WeldDirectionText(preset))
+        .arg(static_cast<int>(moveInfos.size()))
+        .arg(effectiveWeldSpeedMmPerMin, 0, 'f', 3)
+        .arg(preset.stepOverlapRel, 0, 'f', 3)
+        .arg(srpPath)
+        .arg(srdPath);
+    if (!preset.weldProcessLoaded)
+    {
+        summary += "；未读取到当前焊接工艺参数，本次文件不包含起弧/停弧工艺语句";
+    }
+    else
+    {
+        summary += QString("；工艺=%1A/%2V -> %3A/%4V -> %5A/%6V")
+            .arg(preset.startArcCurrent, 0, 'f', 3)
+            .arg(preset.startArcVoltage, 0, 'f', 3)
+            .arg(preset.weldCurrent, 0, 'f', 3)
+            .arg(preset.weldVoltage, 0, 'f', 3)
+            .arg(preset.stopArcCurrent, 0, 'f', 3)
+            .arg(preset.stopArcVoltage, 0, 'f', 3);
+        if (preset.transitionSpeedEnabled)
+        {
+            summary += QString("；过渡速度=%1 mm/min")
+                .arg(preset.transitionSpeedMmPerMin, 0, 'f', 3);
+        }
+        if (preset.transitionCurrentVoltageEnabled)
+        {
+            summary += QString("；过渡电流电压=%1A/%2V")
+                .arg(preset.transitionCurrent, 0, 'f', 3)
+                .arg(preset.transitionVoltage, 0, 'f', 3);
+        }
+        if (!actualWeld)
+        {
+            summary += "；实际焊接变量=0，运行时跳过ARCON/ARCSET/ARCOFF";
+        }
+    }
+    return true;
+}
+
 bool MeasureThenWeldService::DownlinkWeldPoseFile(
     RobotDriverAdaptor* pRobotDriver,
     const QString& poseFilePath,
@@ -4342,8 +4850,11 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
     const double linearCommandSpeed =
         LinearCommandSpeedForRobot(pRobotDriver, selectedSpeedMmPerMin, 1.0);
     const QString linearCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
+    const T_PRECISE_MEASURE_PARAM param = BuildMeasureWeldParamShell(QString::fromStdString(pRobotDriver->m_sRobotName));
+    const WeldPosePreset preset = LoadWeldPosePreset(param);
+    ApplyWeldDirectionToExecutionRecords(preset, records);
     std::vector<T_ROBOT_MOVE_INFO> moveInfos;
-    if (!BuildWeldPoseMoveInfos(records, linearCommandSpeed, moveInfos, error))
+    if (!BuildWeldPoseMoveInfos(records, linearCommandSpeed, moveInfos, error, &preset))
     {
         return false;
     }
@@ -4377,7 +4888,18 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
         return true;
     }
 
-    const int ret = pRobotDriver->ContiMoveAny(moveInfos);
+    QString stepProgramNameText = "ContiMoveAny";
+    int ret = 0;
+    if (STEPRobotCtrl* pStepDriver = dynamic_cast<STEPRobotCtrl*>(pRobotDriver))
+    {
+        const std::string stepProgramName = STEPRobotCtrl::MakeTimestampWeldProgramName();
+        stepProgramNameText = QString::fromStdString(stepProgramName);
+        ret = pStepDriver->ContiMoveAnyWithProgramName(moveInfos, stepProgramName);
+    }
+    else
+    {
+        ret = pRobotDriver->ContiMoveAny(moveInfos);
+    }
     if (ret != 0)
     {
         error = QString("STEP焊接轨迹下发/启动失败：ret=%1，姿态文件=%2")
@@ -4385,11 +4907,13 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
             .arg(QDir::toNativeSeparators(QFileInfo(poseFilePath).absoluteFilePath()));
         return false;
     }
-    summary = QString("点数=%1，轨迹速度=%2 mm/min (下发=%3 %4)，STEP使用ContiMoveAny生成、上传并启动程序")
+    summary = QString("点数=%1，方向=%2，轨迹速度=%3 mm/min (下发=%4 %5)，STEP使用%6生成、上传并启动程序")
         .arg(static_cast<int>(moveInfos.size()))
+        .arg(WeldDirectionText(preset))
         .arg(selectedSpeedMmPerMin, 0, 'f', 3)
         .arg(linearCommandSpeed, 0, 'f', 3)
-        .arg(linearCommandSpeedUnit);
+        .arg(linearCommandSpeedUnit)
+        .arg(stepProgramNameText);
     return true;
 }
 
@@ -4421,6 +4945,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     }
 
     const WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
+    ApplyWeldDirectionToExecutionRecords(weldPosePreset, records);
     T_ROBOT_COORS startSafeCoors;
     if (!TryBuildWeldSafeCoors(records, 0, param.dGunDownBackSafeDis, weldPosePreset.robotType, startSafeCoors, error))
     {
@@ -4447,11 +4972,22 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     const QString weldModeText = param.bDoActualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑");
     const double weldCommandSpeed =
         LinearCommandSpeedForRobot(pRobotDriver, weldSpeedMmPerMin, 1.0);
+    const double transitionCommandSpeed =
+        (weldPosePreset.transitionSpeedEnabled && weldPosePreset.transitionSpeedMmPerMin > 0.0)
+        ? LinearCommandSpeedForRobot(pRobotDriver, weldPosePreset.transitionSpeedMmPerMin, weldCommandSpeed)
+        : 0.0;
     const QString weldCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
     const double weldEstimateSpeedMmPerSec =
         FanucLinearSpeedMmPerSecFromConfig(weldSpeedMmPerMin, 1.0);
     std::vector<T_ROBOT_MOVE_INFO> moveInfos;
-    if (!BuildWeldPoseMoveInfos(records, weldCommandSpeed, moveInfos, error))
+    if (!BuildWeldPoseMoveInfos(
+        records,
+        weldCommandSpeed,
+        moveInfos,
+        error,
+        &weldPosePreset,
+        transitionCommandSpeed,
+        param.bDoActualWeld))
     {
         return false;
     }
@@ -4476,6 +5012,42 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             .arg(weldSpeedMmPerMin, 0, 'f', 3)
             .arg(weldCommandSpeed, 0, 'f', 3)
             .arg(weldCommandSpeedUnit));
+        appendLog(QString("焊接方向：%1").arg(WeldDirectionText(weldPosePreset)));
+        if (param.bDoActualWeld)
+        {
+            if (weldPosePreset.weldProcessLoaded)
+            {
+                appendLog(QString("焊接工艺：起弧=%1A/%2V，焊接=%3A/%4V，停弧=%5A/%6V")
+                    .arg(weldPosePreset.startArcCurrent, 0, 'f', 3)
+                    .arg(weldPosePreset.startArcVoltage, 0, 'f', 3)
+                    .arg(weldPosePreset.weldCurrent, 0, 'f', 3)
+                    .arg(weldPosePreset.weldVoltage, 0, 'f', 3)
+                    .arg(weldPosePreset.stopArcCurrent, 0, 'f', 3)
+                    .arg(weldPosePreset.stopArcVoltage, 0, 'f', 3));
+                if (weldPosePreset.cornerArcRadiusFromWeldProcess)
+                {
+                    appendLog(QString("拐点圆弧半径使用当前工艺参数：%1 mm")
+                        .arg(weldPosePreset.cornerArcRadiusMm, 0, 'f', 3));
+                }
+                if (weldPosePreset.transitionSpeedEnabled)
+                {
+                    appendLog(QString("拐点过渡速度启用：%1 mm/min (下发=%2 %3)")
+                        .arg(weldPosePreset.transitionSpeedMmPerMin, 0, 'f', 3)
+                        .arg(transitionCommandSpeed, 0, 'f', 3)
+                        .arg(weldCommandSpeedUnit));
+                }
+                if (weldPosePreset.transitionCurrentVoltageEnabled)
+                {
+                    appendLog(QString("拐点过渡电流电压启用：%1A/%2V")
+                        .arg(weldPosePreset.transitionCurrent, 0, 'f', 3)
+                        .arg(weldPosePreset.transitionVoltage, 0, 'f', 3));
+                }
+            }
+            else
+            {
+                appendLog("未读取到当前焊接工艺参数，本次只按轨迹运动执行，不生成起弧/停弧工艺语句。");
+            }
+        }
     }
 
     QString downlinkSummary;
@@ -4649,28 +5221,36 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             return false;
         }
 
-        programNameText = "STEP ContiMoveAny";
+        std::string stepProgramName = STEPRobotCtrl::MakeTimestampWeldProgramName();
+        STEPRobotCtrl* pStepDriver = dynamic_cast<STEPRobotCtrl*>(pRobotDriver);
+        programNameText = pStepDriver != nullptr
+            ? QString::fromStdString(stepProgramName)
+            : QStringLiteral("STEP ContiMoveAny");
         downlinkSummary =
-            QString("点数=%1，模式=%2，轨迹速度=%3 mm/min (下发=%4 %5)，STEP使用ContiMoveAny生成、上传并启动程序")
+            QString("点数=%1，模式=%2，轨迹速度=%3 mm/min (下发=%4 %5)，STEP使用%6生成、上传并启动程序")
                 .arg(static_cast<int>(moveInfos.size()))
                 .arg(weldModeText)
                 .arg(weldSpeedMmPerMin, 0, 'f', 3)
                 .arg(weldCommandSpeed, 0, 'f', 3)
-                .arg(weldCommandSpeedUnit);
+                .arg(weldCommandSpeedUnit)
+                .arg(programNameText);
 
         if (setFlowStep)
         {
-            setFlowStep("正在执行STEP焊接轨迹程序");
+            setFlowStep(QString("正在执行STEP焊接轨迹程序：%1").arg(programNameText));
         }
         if (appendLog)
         {
-            appendLog(QString("开始执行STEP焊接轨迹：轨迹长度≈%1 mm，预计运行≈%2 s，完成超时=%3 s")
+            appendLog(QString("开始执行STEP焊接轨迹：程序=%1，轨迹长度≈%2 mm，预计运行≈%3 s，完成超时=%4 s")
+                .arg(programNameText)
                 .arg(pathLengthMm, 0, 'f', 3)
                 .arg(estimatedRunMs / 1000.0, 0, 'f', 1)
                 .arg(finishTimeoutMs / 1000.0));
         }
 
-        const int ret = pRobotDriver->ContiMoveAny(moveInfos);
+        const int ret = pStepDriver != nullptr
+            ? pStepDriver->ContiMoveAnyWithProgramName(moveInfos, stepProgramName)
+            : pRobotDriver->ContiMoveAny(moveInfos);
         if (ret != 0)
         {
             const QString detail = RobotMotionStatusText(pRobotDriver);

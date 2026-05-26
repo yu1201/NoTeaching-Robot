@@ -65,6 +65,17 @@ public:
 
 	//任意点集 坐标类型、插补方式、速度 的连续运动
 	int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo) override;
+	int ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo, const std::string& programName);
+	static std::string MakeTimestampWeldProgramName();
+	static bool WriteContiMoveAnyFiles(
+		const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo,
+		const std::string& localDir,
+		const std::string& programName,
+		const T_AXISUNIT& axisUnit,
+		std::string* localProgramFile = nullptr,
+		std::string* localDataFile = nullptr,
+		std::string* errorText = nullptr,
+		bool actualWeld = true);
 
 	bool SendWeldTriangleWeaveProgram(int nWeldTrackNum);
 

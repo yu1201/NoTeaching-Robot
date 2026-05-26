@@ -80,10 +80,12 @@
 #include <QThread>
 #include <QTimer>
 #include <QToolBar>
+#include <QTextCursor>
 #include <QTextDocument>
 #include <QTextStream>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+#include <QStringConverter>
 #include <QStringList>
 #include <algorithm>
 #include <cmath>
@@ -121,6 +123,11 @@ namespace
 	std::string ToIniBytesGlobal(const QString& text)
 	{
 		return text.toLocal8Bit().toStdString();
+	}
+
+	void ConfigureUtf8TextStream(QTextStream& stream)
+	{
+		stream.setEncoding(QStringConverter::Utf8);
 	}
 
 	void MarkNumericEditGlobal(QLineEdit* edit)
@@ -3450,15 +3457,6 @@ namespace
 			painter.drawRoundedRect(fpsRect, 4, 4);
 			painter.setPen(QColor(255, 255, 255));
 			painter.drawText(fpsRect, Qt::AlignCenter, fpsText);
-
-			QFont statusFont = painter.font();
-			statusFont.setPointSize(9);
-			painter.setFont(statusFont);
-			painter.setPen(QColor(190, 230, 240));
-			const QString status = m_profilePoints.isEmpty()
-				? (m_statusText.isEmpty() ? QStringLiteral("等待相机点云...") : m_statusText)
-				: QStringLiteral("%1  点数:%2  时间戳:%3").arg(m_statusText).arg(m_profilePoints.size()).arg(m_timestamp);
-			painter.drawText(plotRect.adjusted(12, 12, -12, -12), Qt::AlignRight | Qt::AlignTop | Qt::TextWordWrap, status);
 		}
 
 		QVector<QPointF> m_profilePoints;
@@ -3522,11 +3520,12 @@ namespace
 		{
 			setWindowTitle("坡口相机点云预览");
 			setModal(false);
+			setWindowFlag(Qt::WindowStaysOnTopHint, true);
 			setAttribute(Qt::WA_DeleteOnClose, true);
 
 			QVBoxLayout* mainLayout = new QVBoxLayout(this);
-			mainLayout->setContentsMargins(14, 14, 14, 14);
-			mainLayout->setSpacing(10);
+			mainLayout->setContentsMargins(ScalePixels(14), ScalePixels(14), ScalePixels(14), ScalePixels(14));
+			mainLayout->setSpacing(ScalePixels(10));
 
 			QHBoxLayout* toolbarLayout = new QHBoxLayout();
 			toolbarLayout->addStretch(1);
@@ -3535,22 +3534,35 @@ namespace
 			for (QPushButton* button : { m_rawButton, m_filteredButton })
 			{
 				button->setCheckable(true);
-				button->setMinimumSize(150, 44);
+				button->setMinimumSize(ScalePixels(150), ScalePixels(44));
 				toolbarLayout->addWidget(button);
 			}
 			m_trendLineButton = new QPushButton("三段线", this);
 			m_trendLineButton->setCheckable(true);
-			m_trendLineButton->setMinimumSize(120, 44);
-			toolbarLayout->addSpacing(12);
+			m_trendLineButton->setMinimumSize(ScalePixels(120), ScalePixels(44));
+			toolbarLayout->addSpacing(ScalePixels(12));
 			toolbarLayout->addWidget(m_trendLineButton);
 			toolbarLayout->addStretch(1);
 			mainLayout->addLayout(toolbarLayout);
 
 			m_view = new GroovePointCloudView(this);
-			const int plotSide = ComputePlotSide(parent);
+			const int plotSide = ScalePixels(ComputePlotSide(parent));
 			m_view->setFixedSize(plotSide, plotSide);
 			m_view->ClearPreview("等待相机点云...");
-			mainLayout->addWidget(m_view, 1, Qt::AlignCenter);
+
+			m_infoText = new QPlainTextEdit(this);
+			m_infoText->setReadOnly(true);
+			m_infoText->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+			m_infoText->setMinimumWidth(ScalePixels(340));
+			m_infoText->setMaximumWidth(ScalePixels(430));
+			m_infoText->setMinimumHeight(std::min(plotSide, ScalePixels(520)));
+			m_infoText->setPlainText("坡口相机数据：等待测试...");
+
+			QHBoxLayout* contentLayout = new QHBoxLayout();
+			contentLayout->setSpacing(ScalePixels(12));
+			contentLayout->addWidget(m_view, 1, Qt::AlignCenter);
+			contentLayout->addWidget(m_infoText, 0);
+			mainLayout->addLayout(contentLayout, 1);
 
 			connect(m_rawButton, &QPushButton::clicked, this, [this]()
 				{
@@ -3571,7 +3583,7 @@ namespace
 			resize(sizeHint());
 		}
 
-		void SetFrame(const udpDataShow& rawFrame, const QString& statusText)
+		void SetFrame(const udpDataShow& rawFrame, const QString& statusText, const QString& detailText)
 		{
 			const bool sourceChanged = m_hasFrame && (m_statusText != statusText);
 			if (sourceChanged)
@@ -3583,14 +3595,16 @@ namespace
 			}
 			m_rawFrame = rawFrame;
 			m_statusText = statusText;
+			UpdateInfoText(detailText);
 			m_hasFrame = true;
 			RefreshView();
 		}
 
-		void ClearPreview(const QString& statusText)
+		void ClearPreview(const QString& statusText, const QString& detailText = QString())
 		{
 			m_hasFrame = false;
 			m_statusText = statusText;
+			UpdateInfoText(detailText.isEmpty() ? statusText : detailText);
 			m_filteredFrameValid = false;
 			m_filterBuildRunning = false;
 			++m_filterBuildGeneration;
@@ -3602,6 +3616,12 @@ namespace
 		}
 
 	private:
+		static int ScalePixels(int value)
+		{
+			constexpr double kPreviewUiScale = 0.8;
+			return std::max(1, static_cast<int>(std::round(value * kPreviewUiScale)));
+		}
+
 		static int ComputePlotSide(QWidget* parent)
 		{
 			const QScreen* screen = nullptr;
@@ -3618,9 +3638,19 @@ namespace
 			if (screen != nullptr)
 			{
 				const QRect available = screen->availableGeometry();
-				maxSide = std::min(available.width() - 120, available.height() - 170);
+				maxSide = std::min(available.width() - 560, available.height() - 170);
 			}
 			return std::max(520, std::min(maxSide, 1080));
+		}
+
+		void UpdateInfoText(const QString& text)
+		{
+			if (m_infoText == nullptr)
+			{
+				return;
+			}
+			m_infoText->setPlainText(text.trimmed().isEmpty() ? QStringLiteral("坡口相机数据：等待测试...") : text);
+			m_infoText->moveCursor(QTextCursor::Start);
 		}
 
 		void SetFilteredMode(bool showFiltered)
@@ -3761,6 +3791,7 @@ namespace
 		}
 
 		GroovePointCloudView* m_view = nullptr;
+		QPlainTextEdit* m_infoText = nullptr;
 		QPushButton* m_rawButton = nullptr;
 		QPushButton* m_filteredButton = nullptr;
 		QPushButton* m_trendLineButton = nullptr;
@@ -3877,6 +3908,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	if (ui.GrooveCameraText != nullptr)
 	{
 		ui.GrooveCameraText->document()->setMaximumBlockCount(200);
+		ui.GrooveCameraText->hide();
 	}
 	if (ui.menuBar != nullptr)
 	{
@@ -4275,10 +4307,12 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	quickLayout->setSpacing(12);
 	QPushButton* quickMeasureBtn = makeLargeButton("先测后焊\n按预设流程扫描并焊接", quickGroup);
 	QPushButton* quickJogBtn = makeLargeButton("点动控制\n单步移动/目标点运动", quickGroup);
+	QPushButton* quickTeachPositionBtn = makeLargeButton("扫描位置示教\n下枪/起点/终点/收枪", quickGroup);
 	QPushButton* quickCalibrationBtn = makeLargeButton("标定与相机参数\n手眼标定、矩阵和相机配置", quickGroup);
 	quickLayout->addWidget(quickMeasureBtn, 0, 0);
 	quickLayout->addWidget(quickJogBtn, 0, 1);
-	quickLayout->addWidget(quickCalibrationBtn, 1, 0, 1, 2);
+	quickLayout->addWidget(quickTeachPositionBtn, 1, 0);
+	quickLayout->addWidget(quickCalibrationBtn, 1, 1);
 	dashboardActionLayout->addWidget(quickGroup, 1);
 
 	QGroupBox* toolGroup = new QGroupBox("现场小工具", m_pDashboardPage);
@@ -4485,6 +4519,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		quickMeasureBtn,
 		quickPreviewBtn,
 		quickJogBtn,
+		quickTeachPositionBtn,
 		quickPositionBtn,
 		quickCalibrationBtn,
 		m_pWeldSeamCompBtn,
@@ -4551,6 +4586,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addCommandAction(robotMenu, "点动控制", [this]() { OpenRobotJogDialog(); });
 	addToolbarSeparator();
 	addCommandAction(measureMenu, "先测后焊", [this]() { OpenMeasureThenWeldDialog(); });
+	addCommandAction(measureMenu, "扫描位置示教", [this]() { OpenPositionTeachDialog(); });
 	addCommandAction(measureMenu, "测量焊接参数", [this]() { OpenPreciseMeasureEditDialog(); });
 	addToolbarSeparator();
 	addCommandAction(cameraMenu, "相机参数", [this]() { OpenCameraParamDialog(); });
@@ -4605,9 +4641,6 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		fileMenu->addSeparator();
 	}
 	addCommandAction(fileMenu, "退出", [this]() { close(); }, false);
-
-	QSplitter* infoSplitter = new QSplitter(Qt::Horizontal);
-	infoSplitter->setChildrenCollapsible(false);
 
 	QSplitter* robotInfoSplitter = new QSplitter(Qt::Vertical);
 	robotInfoSplitter->setChildrenCollapsible(false);
@@ -4669,19 +4702,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	robotInfoSplitter->setStretchFactor(0, 1);
 	robotInfoSplitter->setStretchFactor(1, 1);
 
-	QGroupBox* cameraGroup = new QGroupBox("坡口相机数据");
-	cameraGroup->setMinimumWidth(420);
-	QVBoxLayout* cameraLayout = new QVBoxLayout(cameraGroup);
-	cameraLayout->setSpacing(8);
-	ui.GrooveCameraText->setMinimumHeight(220);
-	ui.GrooveCameraText->setMaximumHeight(QWIDGETSIZE_MAX);
-	cameraLayout->addWidget(ui.GrooveCameraText, 1);
-	infoSplitter->addWidget(robotInfoSplitter);
-	infoSplitter->addWidget(cameraGroup);
-	infoSplitter->setStretchFactor(0, 3);
-	infoSplitter->setStretchFactor(1, 2);
-	infoSplitter->setSizes(QList<int>() << 1100 << 520);
-	dashboardLayout->addWidget(infoSplitter, 1);
+	dashboardLayout->addWidget(robotInfoSplitter, 1);
 	dashboardLayout->addWidget(entryGroup, 0);
 
 	connect(m_pCurrentUserButton, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowCurrentUserMenu);
@@ -4691,6 +4712,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pDashboardModeBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotSwitchStepMode);
 	connect(quickReadTool1Btn, &QPushButton::clicked, this, &QtWidgetsApplication4::ReadTool1ToGunTool);
 	connect(quickMeasureBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenMeasureThenWeldDialog);
+	connect(quickTeachPositionBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenPositionTeachDialog);
 	connect(quickPositionBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucGetCurrentPosTest);
 	connect(quickJogBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenRobotJogDialog);
 	connect(quickCalibrationBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenCameraParamDialog);
@@ -5763,10 +5785,7 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 		EnsureScanCameraRunningForUnit(unitIndex, cameraIP, false);
 		m_grooveCameraDisplayTimer->start(33);
 	}
-	if (ui.GrooveCameraText != nullptr)
-	{
-		ui.GrooveCameraText->appendPlainText("相机接收模式保持为：TCP独立连接。");
-	}
+	m_sGrooveCameraStatusText = "相机接收模式保持为：TCP独立连接。";
 }
 
 void QtWidgetsApplication4::SetAuthRegisterMode(bool registerMode)
@@ -6648,12 +6667,14 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		"--laser-classify",
 		"--laser-classify-dir",
 		"--apply-weld-seam-comp",
+		"--generate-step-weld-program",
 		"--update-weld-pose-average"
 		});
 
 	if (arguments.contains("--help-cli"))
 	{
 		QTextStream out(stdout);
+		ConfigureUtf8TextStream(out);
 		out << "QtWidgetsApplication4 command line options:\n";
 		out << "  --no-show                         不显示主窗口，适合自动测试\n";
 		out << "  --open-function-test              打开机器人功能测试窗口\n";
@@ -6675,7 +6696,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --fanuc-pr20-diag                 仅读取 FANUC PR[20] 诊断点\n";
 		out << "  --fanuc-raw <CMD>                 发送一条原始 FANUC 服务命令\n";
 		out << "  --fanuc-call <PROGRAM>            调用机器人程序\n";
-		out << "  --measure-then-weld-scan-only-repeat <N> 自动执行先测后焊扫描流程N次，仅到收枪安全位置，不执行焊接\n";
+		out << "  --measure-then-weld-scan-only-repeat <N> 自动执行先测后焊扫描流程N次，仅到收枪安全位置，不执行焊接，目标机器人同--robot\n";
 		out << "  --measure-then-weld-scan-speed <mm/min> 覆盖本次CLI先测后焊扫描速度，不修改ini\n";
 		out << "  --measure-then-weld-camera-offset-ms <ms> 覆盖本次CLI相机时间补偿，不修改ini\n";
 		out << "  --laser-classify <FILE>           对激光点云做去噪/拟合/起终点拐点分类\n";
@@ -6683,6 +6704,10 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
 		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用 WeldSeamCompParam.ini 补偿\n";
 		out << "  --apply-weld-seam-comp-output <FILE> 指定补偿结果输出文件，默认另存 _SeamComp\n";
+		out << "  --generate-step-weld-program <FILE> 根据焊接姿态文件生成 STEP Weld_时间.srp/.srd，默认按实际焊接生成ARCON/ARCOFF\n";
+		out << "  --generate-step-weld-program-output-dir <DIR> 指定 STEP 焊接程序输出目录，默认 Job\\STEP\n";
+		out << "  --generate-step-weld-program-dry-run 按空跑轨迹生成 STEP 文件，实际焊接变量置0并跳过焊接指令\n";
+		out << "  --generate-step-weld-speed <mm/min> 覆盖本次 STEP 文件轨迹速度，不修改ini\n";
 		out << "  --update-weld-pose-average <FILE_OR_DIR> 离线统计四类焊道平均姿态并更新补偿姿态库\n";
 		out << "  --quit-after <ms>                 指定毫秒后退出程序\n";
 		out.flush();
@@ -6780,6 +6805,34 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		RunWeldSeamCompForCli(inputPath, outputPath);
 	}
 
+	const int generateStepWeldIndex = arguments.indexOf("--generate-step-weld-program");
+	if (generateStepWeldIndex >= 0 && generateStepWeldIndex + 1 < arguments.size())
+	{
+		const QString inputPath = arguments[generateStepWeldIndex + 1];
+		QString outputDir;
+		const int stepOutputDirIndex = arguments.indexOf("--generate-step-weld-program-output-dir");
+		if (stepOutputDirIndex >= 0 && stepOutputDirIndex + 1 < arguments.size())
+		{
+			outputDir = arguments[stepOutputDirIndex + 1];
+		}
+
+		double weldSpeedMmPerMin = 0.0;
+		const int stepSpeedIndex = arguments.indexOf("--generate-step-weld-speed");
+		if (stepSpeedIndex >= 0 && stepSpeedIndex + 1 < arguments.size())
+		{
+			bool ok = false;
+			weldSpeedMmPerMin = arguments[stepSpeedIndex + 1].toDouble(&ok);
+			if (!ok || !std::isfinite(weldSpeedMmPerMin) || weldSpeedMmPerMin <= 0.0)
+			{
+				LogCommandLineMessage("CLI STEP焊接程序速度无效，将使用当前工艺速度或默认速度。");
+				weldSpeedMmPerMin = 0.0;
+			}
+		}
+
+		const bool actualWeld = !arguments.contains("--generate-step-weld-program-dry-run");
+		RunGenerateStepWeldProgramForCli(inputPath, outputDir, actualWeld, weldSpeedMmPerMin);
+	}
+
 	const int updateWeldPoseAverageIndex = arguments.indexOf("--update-weld-pose-average");
 	if (updateWeldPoseAverageIndex >= 0 && updateWeldPoseAverageIndex + 1 < arguments.size())
 	{
@@ -6788,14 +6841,55 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 
 	RunRobotMotionForCli(arguments);
 
+	if (scanOnlyRepeatCount > 0)
+	{
+		QString robotLabel;
+		int scanUnitIndex = -1;
+		RobotDriverAdaptor* scanDriver = GetRobotDriverForCli(arguments, &robotLabel, &scanUnitIndex);
+		if (scanDriver == nullptr)
+		{
+			LogCommandLineMessage("CLI 先测后焊扫描失败：未找到可用机器人。");
+		}
+		else
+		{
+			bool connected = scanDriver->IsConnected();
+			if (!connected)
+			{
+				connected = scanDriver->InitSocket(scanDriver->m_sSocketIP.c_str(), static_cast<u_short>(scanDriver->m_nSocketPort));
+			}
+			LogCommandLineMessage(QString("CLI 先测后焊扫描机器人连接%1：%2，地址=%3:%4")
+				.arg(connected ? "成功" : "失败")
+				.arg(robotLabel)
+				.arg(QString::fromStdString(scanDriver->m_sSocketIP))
+				.arg(scanDriver->m_nSocketPort));
+			if (!connected)
+			{
+				const QString lastError = DecodeRobotMessageText(scanDriver->GetLastRobotError());
+				if (!lastError.isEmpty())
+				{
+					LogCommandLineMessage(QString("CLI 先测后焊扫描机器人连接错误：%1").arg(lastError));
+				}
+			}
+			else
+			{
+				const bool scanOk = RunMeasureThenWeldScanOnlyRepeatForCli(
+					scanDriver,
+					scanUnitIndex,
+					scanOnlyRepeatCount,
+					scanSpeedOverrideMmPerMin,
+					cameraTimeOffsetOverrideMs);
+				LogCommandLineMessage(QString("CLI 先测后焊扫描重复流程%1。").arg(scanOk ? "完成" : "失败"));
+			}
+		}
+	}
+
 	FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriverForCli();
 	const bool needsFanuc = arguments.contains("--fanuc-connect")
 		|| arguments.contains("--fanuc-upload-services")
 		|| arguments.contains("--fanuc-curpos-diag")
 		|| arguments.contains("--fanuc-pr20-diag")
 		|| arguments.contains("--fanuc-raw")
-		|| arguments.contains("--fanuc-call")
-		|| scanOnlyRepeatCount > 0;
+		|| arguments.contains("--fanuc-call");
 	if (needsFanuc && pFanucDriver == nullptr)
 	{
 		LogCommandLineMessage("CLI 未找到 FANUC 驱动，跳过 FANUC 命令。");
@@ -6806,8 +6900,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			|| arguments.contains("--fanuc-curpos-diag")
 			|| arguments.contains("--fanuc-pr20-diag")
 			|| arguments.contains("--fanuc-raw")
-			|| arguments.contains("--fanuc-call")
-			|| scanOnlyRepeatCount > 0;
+			|| arguments.contains("--fanuc-call");
 
 		bool uploadOk = true;
 		if (arguments.contains("--fanuc-upload-services"))
@@ -6873,15 +6966,6 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			LogCommandLineMessage(QString("CLI FANUC PR20 -> %1").arg(QString::fromStdString(response)));
 		}
 
-		if (socketReady && scanOnlyRepeatCount > 0)
-		{
-			const bool scanOk = RunMeasureThenWeldScanOnlyRepeatForCli(
-				pFanucDriver,
-				scanOnlyRepeatCount,
-				scanSpeedOverrideMmPerMin,
-				cameraTimeOffsetOverrideMs);
-			LogCommandLineMessage(QString("CLI 先测后焊扫描重复流程%1。").arg(scanOk ? "完成" : "失败"));
-		}
 	}
 
 	const int quitAfterIndex = arguments.indexOf("--quit-after");
@@ -6908,7 +6992,9 @@ void QtWidgetsApplication4::LogCommandLineMessage(const QString& message) const
 {
 	const QString line = QString("[%1] %2")
 		.arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz"), message);
-	QTextStream(stdout) << line << Qt::endl;
+	QTextStream out(stdout);
+	ConfigureUtf8TextStream(out);
+	out << line << Qt::endl;
 
 	QString logPath = FindProjectFilePath("Log/RobotALog.txt");
 	if (logPath.isEmpty())
@@ -6921,6 +7007,7 @@ void QtWidgetsApplication4::LogCommandLineMessage(const QString& message) const
 	if (file.open(QIODevice::Append | QIODevice::Text))
 	{
 		QTextStream stream(&file);
+		ConfigureUtf8TextStream(stream);
 		stream << line << "\n";
 	}
 }
@@ -6940,6 +7027,8 @@ void QtWidgetsApplication4::EnsureCommandLineConsole() const
 	freopen_s(&stream, "CONOUT$", "w", stdout);
 	freopen_s(&stream, "CONOUT$", "w", stderr);
 	freopen_s(&stream, "CONIN$", "r", stdin);
+	SetConsoleOutputCP(CP_UTF8);
+	SetConsoleCP(CP_UTF8);
 	std::ios::sync_with_stdio(true);
 #endif
 }
@@ -6948,7 +7037,9 @@ void QtWidgetsApplication4::WaitForCommandLineEnter(const QString& message) cons
 {
 	EnsureCommandLineConsole();
 	LogCommandLineMessage(message);
-	QTextStream(stdout) << "\n" << message << "\n按回车继续..." << Qt::flush;
+	QTextStream out(stdout);
+	ConfigureUtf8TextStream(out);
+	out << "\n" << message << "\n按回车继续..." << Qt::flush;
 	std::string unusedLine;
 	std::getline(std::cin, unusedLine);
 	LogCommandLineMessage("CLI 已收到回车，继续执行后续命令。");
@@ -6961,15 +7052,29 @@ FANUCRobotCtrl* QtWidgetsApplication4::GetFirstFanucDriverForCli() const
 		return nullptr;
 	}
 
-	RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[0].pUnitDriver);
-	return dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
+	for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
+	{
+		RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(unitInfo.pUnitDriver);
+		if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor))
+		{
+			return pFanucDriver;
+		}
+	}
+	return nullptr;
 }
 
-RobotDriverAdaptor* QtWidgetsApplication4::GetRobotDriverForCli(const QStringList& arguments, QString* robotLabelOut) const
+RobotDriverAdaptor* QtWidgetsApplication4::GetRobotDriverForCli(
+	const QStringList& arguments,
+	QString* robotLabelOut,
+	int* unitIndexOut) const
 {
 	if (robotLabelOut != nullptr)
 	{
 		robotLabelOut->clear();
+	}
+	if (unitIndexOut != nullptr)
+	{
+		*unitIndexOut = -1;
 	}
 	if (m_pContralUnit == nullptr || m_pContralUnit->m_vtContralUnitInfo.empty())
 	{
@@ -7076,6 +7181,10 @@ RobotDriverAdaptor* QtWidgetsApplication4::GetRobotDriverForCli(const QStringLis
 	if (robotLabelOut != nullptr)
 	{
 		*robotLabelOut = robotLabel;
+	}
+	if (unitIndexOut != nullptr)
+	{
+		*unitIndexOut = selectedUnit->nUnitNo;
 	}
 	if (driver == nullptr)
 	{
@@ -7655,6 +7764,63 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(const QString& inputPath, cons
 	LogCommandLineMessage("CLI 焊道补偿摘要：" + summary);
 }
 
+void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
+	const QString& inputPath,
+	const QString& outputDir,
+	bool actualWeld,
+	double weldSpeedMmPerMin) const
+{
+	QString normalizedInputPath = QDir::fromNativeSeparators(inputPath.trimmed());
+	if (normalizedInputPath.isEmpty())
+	{
+		LogCommandLineMessage("CLI STEP焊接程序生成失败：输入文件为空。");
+		return;
+	}
+
+	QFileInfo inputInfo(normalizedInputPath);
+	if (!inputInfo.isAbsolute())
+	{
+		inputInfo = QFileInfo(QDir::current().filePath(normalizedInputPath));
+	}
+	if (!inputInfo.exists())
+	{
+		LogCommandLineMessage(QString("CLI STEP焊接程序生成失败：未找到输入文件 %1")
+			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
+		return;
+	}
+
+	const QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath());
+	MeasureThenWeldService service;
+	QString programName;
+	QString srpPath;
+	QString srdPath;
+	QString summary;
+	QString error;
+	if (!service.GenerateStepWeldProgramFiles(
+		robotName,
+		inputInfo.absoluteFilePath(),
+		outputDir,
+		actualWeld,
+		weldSpeedMmPerMin,
+		programName,
+		srpPath,
+		srdPath,
+		summary,
+		error))
+	{
+		LogCommandLineMessage("CLI STEP焊接程序生成失败：" + error);
+		return;
+	}
+
+	LogCommandLineMessage(QString("CLI STEP焊接程序生成完成：输入=%1，机器人=%2，程序=%3")
+		.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath()))
+		.arg(robotName)
+		.arg(programName));
+	LogCommandLineMessage("CLI STEP焊接程序摘要：" + summary);
+	LogCommandLineMessage("CLI STEP SRP：" + srpPath);
+	LogCommandLineMessage("CLI STEP SRD：" + srdPath);
+}
+
 void QtWidgetsApplication4::RunUpdateWeldPoseAverageForCli(const QString& inputPath) const
 {
 	WeldPoseAverageUpdater::UpdateResult result;
@@ -7677,12 +7843,13 @@ void QtWidgetsApplication4::RunUpdateWeldPoseAverageForCli(const QString& inputP
 }
 
 bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
-	FANUCRobotCtrl* pFanucDriver,
+	RobotDriverAdaptor* pRobotDriver,
+	int unitIndex,
 	int repeatCount,
 	double scanSpeedOverrideMmPerMin,
 	double cameraTimeOffsetOverrideMs)
 {
-	if (pFanucDriver == nullptr)
+	if (pRobotDriver == nullptr)
 	{
 		LogCommandLineMessage("CLI 先测后焊扫描失败：机器人驱动为空。");
 		return false;
@@ -7693,7 +7860,22 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 		return false;
 	}
 
-	const int unitIndex = CurrentRobotUnitIndex();
+	if (unitIndex < 0 && m_pContralUnit != nullptr)
+	{
+		for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
+		{
+			if (unitInfo.pUnitDriver == pRobotDriver)
+			{
+				unitIndex = unitInfo.nUnitNo;
+				break;
+			}
+		}
+	}
+	if (unitIndex < 0)
+	{
+		unitIndex = CurrentRobotUnitIndex();
+	}
+
 	QString cameraIP;
 	if (!EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true))
 	{
@@ -7722,7 +7904,7 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 	{
 		T_PRECISE_MEASURE_PARAM param;
 		QString error;
-		if (!service.LoadPresetParam(pFanucDriver, param, error))
+		if (!service.LoadPresetParam(pRobotDriver, param, error))
 		{
 			LogCommandLineMessage(QString("CLI 第%1次扫描失败：读取预设参数失败：%2")
 				.arg(repeatIndex)
@@ -7755,7 +7937,7 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 			? param.dRunSpeed
 			: 1.0;
 		bool ok = service.MovePulseListAndWait(
-			pFanucDriver,
+			pRobotDriver,
 			param.vtStartSafePulse,
 			runSpeed,
 			QString("CLI第%1次下枪安全姿态").arg(repeatIndex),
@@ -7764,7 +7946,7 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 		if (ok)
 		{
 			ok = service.MoveCoorsAndWait(
-				pFanucDriver,
+				pRobotDriver,
 				param.tStartPos,
 				runSpeed,
 				QString("CLI第%1次扫描起点").arg(repeatIndex),
@@ -7774,7 +7956,7 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 		if (ok)
 		{
 			ok = service.ScanMoveAndCollect(
-				pFanucDriver,
+				pRobotDriver,
 				param,
 				savedPath,
 				appendLog,
@@ -7784,7 +7966,7 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 		if (ok)
 		{
 			ok = service.MovePulseListAndWait(
-				pFanucDriver,
+				pRobotDriver,
 				param.vtEndSafePulse,
 				runSpeed,
 				QString("CLI第%1次收枪安全姿态").arg(repeatIndex),
@@ -8118,9 +8300,28 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 			});
 	}
 
+	m_pGroovePointCloudDialog->setWindowFlag(Qt::WindowStaysOnTopHint, true);
 	m_pGroovePointCloudDialog->show();
 	m_pGroovePointCloudDialog->raise();
 	m_pGroovePointCloudDialog->activateWindow();
+}
+
+void QtWidgetsApplication4::StartGrooveCameraPreview()
+{
+	if (ui.GrooveCameraTestBtn != nullptr)
+	{
+		if (!ui.GrooveCameraTestBtn->isChecked())
+		{
+			ui.GrooveCameraTestBtn->setChecked(true);
+		}
+		else
+		{
+			OpenGroovePointCloudDialog();
+		}
+		return;
+	}
+
+	GrooveCameraTest(true);
 }
 
 void QtWidgetsApplication4::GrooveCameraTest(bool checked)
@@ -8147,17 +8348,22 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 		const int cameraPort = m_scanCameraRuntimes.value(unitIndex, nullptr) != nullptr
 			? m_scanCameraRuntimes.value(unitIndex)->cameraPort
 			: 0;
-		ui.GrooveCameraText->setPlainText(QString("正在预览 Robot%1 扫描相机：%2\nTCP端口：%3\n接收模式：%4")
+		m_sGrooveCameraStatusText = QString("正在预览 Robot%1 扫描相机：%2\nTCP端口：%3\n接收模式：%4")
 			.arg(unitIndex)
 			.arg(cameraIP)
 			.arg(cameraPort > 0 ? cameraPort : 50006)
-			.arg("TCP独立连接"));
+			.arg("TCP独立连接");
 		OpenGroovePointCloudDialog();
 		if (m_pGroovePointCloudDialog != nullptr)
 		{
-			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview("正在等待相机帧...");
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(
+				"正在等待相机帧...",
+				m_sGrooveCameraStatusText);
 		}
-		m_grooveCameraDisplayTimer->start(33);
+		if (m_grooveCameraDisplayTimer != nullptr)
+		{
+			m_grooveCameraDisplayTimer->start(33);
+		}
 	}
 	else
 	{
@@ -8165,10 +8371,12 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 		{
 			m_grooveCameraDisplayTimer->stop();
 		}
-		ui.GrooveCameraText->appendPlainText("已停止坡口相机预览。");
+		m_sGrooveCameraStatusText = "已停止坡口相机预览。";
 		if (m_pGroovePointCloudDialog != nullptr)
 		{
-			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview("已停止坡口相机预览。");
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(
+				m_sGrooveCameraStatusText,
+				m_sGrooveCameraStatusText);
 		}
 	}
 }
@@ -8232,10 +8440,12 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 	if (!hasFrame)
 	{
 		diagnosticLines << "状态: 暂未从当前机器人专属缓存取到相机帧。";
-		ui.GrooveCameraText->setPlainText(diagnosticLines.join('\n'));
+		m_sGrooveCameraStatusText = diagnosticLines.join('\n');
 		if (m_pGroovePointCloudDialog != nullptr)
 		{
-			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(diagnosticLines.join("  "));
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(
+				diagnosticLines.join("  "),
+				m_sGrooveCameraStatusText);
 		}
 		return;
 	}
@@ -8265,7 +8475,7 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 		.arg(FormatVectorPreview(latestFrame.fitLineX))
 		.arg(FormatVectorPreview(latestFrame.fitLineY))
 		.arg(latestFrame.errorMessage.isEmpty() ? "无" : latestFrame.errorMessage);
-	ui.GrooveCameraText->setPlainText(text);
+	m_sGrooveCameraStatusText = text;
 	if (m_pGroovePointCloudDialog != nullptr)
 	{
 		const QString statusText = QString("Robot%1  %2:%3")
@@ -8274,7 +8484,8 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 			.arg(cameraPort);
 		static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetFrame(
 			latestFrame,
-			statusText);
+			statusText,
+			m_sGrooveCameraStatusText);
 	}
 }
 
@@ -8502,9 +8713,9 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		return;
 	}
 
-	auto startCamera = [this, currentUnitIndex](QString& cameraIP) -> bool
+	auto startCamera = [this](int unitIndex, QString& cameraIP) -> bool
 		{
-			if (!EnsureScanCameraRunningForUnit(currentUnitIndex, cameraIP, true))
+			if (!EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true))
 			{
 				return false;
 			}
@@ -8517,15 +8728,24 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 				QSignalBlocker blocker(ui.GrooveCameraTestBtn);
 				ui.GrooveCameraTestBtn->setChecked(false);
 			}
-			if (ui.GrooveCameraText != nullptr)
-			{
-				ui.GrooveCameraText->appendPlainText("先测后焊已接管相机帧，主界面预览已暂停。");
-			}
+			m_sGrooveCameraStatusText = "先测后焊已接管相机帧，主界面预览已暂停。";
 			return true;
 		};
 
 	auto stopCamera = []()
 		{
+		};
+
+	auto cameraCacheForUnit = [this](int unitIndex) -> CameraFrameCache*
+		{
+			CameraFrameCache* cameraCache = ScanCameraCacheForUnit(unitIndex);
+			if (cameraCache == nullptr)
+			{
+				QString ignoredIP;
+				EnsureScanCameraRunningForUnit(unitIndex, ignoredIP, false);
+				cameraCache = ScanCameraCacheForUnit(unitIndex);
+			}
+			return cameraCache;
 		};
 
 	QPointer<MeasureThenWeldDialog> existingPage = m_measureThenWeldPages.value(currentUnitIndex);
@@ -8539,20 +8759,12 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		return;
 	}
 
-	CameraFrameCache* cameraCache = ScanCameraCacheForUnit(currentUnitIndex);
-	if (cameraCache == nullptr)
-	{
-		QString ignoredIP;
-		EnsureScanCameraRunningForUnit(currentUnitIndex, ignoredIP, false);
-		cameraCache = ScanCameraCacheForUnit(currentUnitIndex);
-	}
-
 	MeasureThenWeldDialog* page = new MeasureThenWeldDialog(
 		m_pContralUnit,
 		currentUnitIndex,
 		startCamera,
 		stopCamera,
-		cameraCache,
+		cameraCacheForUnit,
 		this);
 	page->setWindowModality(Qt::NonModal);
 	m_measureThenWeldPages.insert(currentUnitIndex, page);
@@ -8594,10 +8806,28 @@ void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
 	if (m_pPreciseMeasureEditPage == nullptr)
 	{
-		m_pPreciseMeasureEditPage = new PreciseMeasureEditDialog(m_pContralUnit, targetStack);
+		m_pPreciseMeasureEditPage = new PreciseMeasureEditDialog(
+			m_pContralUnit,
+			targetStack,
+			false,
+			[this]() { StartGrooveCameraPreview(); });
 		PrepareEmbeddedPage(m_pPreciseMeasureEditPage, targetStack);
 	}
 	ShowCurrentEmbeddedPage(m_pPreciseMeasureEditPage);
+}
+
+void QtWidgetsApplication4::OpenPositionTeachDialog()
+{
+	PreciseMeasureEditDialog* dialog = new PreciseMeasureEditDialog(
+		m_pContralUnit,
+		this,
+		true,
+		[this]() { StartGrooveCameraPreview(); });
+	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	ApplyDebugLogVisibility(dialog);
+	dialog->show();
+	dialog->raise();
+	dialog->activateWindow();
 }
 
 void QtWidgetsApplication4::OpenWeldSeamCompDialog()

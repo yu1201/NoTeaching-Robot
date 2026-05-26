@@ -100,6 +100,23 @@ if ($windeployqtPath) {
     if ($LASTEXITCODE -ne 0) {
         throw "windeployqt failed with exit code $LASTEXITCODE."
     }
+
+    $qtRoot = Split-Path -Parent (Split-Path -Parent $windeployqtPath)
+    $qtTranslationsDir = Join-Path $qtRoot "translations"
+    $buildTranslationsDir = Join-Path $buildDir "translations"
+    if (Test-Path -LiteralPath $buildTranslationsDir) {
+        Remove-Item -LiteralPath $buildTranslationsDir -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $buildTranslationsDir -Force | Out-Null
+    foreach ($translationFile in @("qt_zh_CN.qm", "qtbase_zh_CN.qm")) {
+        $sourceTranslation = Join-Path $qtTranslationsDir $translationFile
+        if (Test-Path -LiteralPath $sourceTranslation) {
+            Copy-Item -LiteralPath $sourceTranslation -Destination (Join-Path $buildTranslationsDir $translationFile) -Force
+        }
+        else {
+            Write-Warning "Qt translation file was not found: $sourceTranslation"
+        }
+    }
 }
 else {
     Write-Warning "windeployqt.exe was not found. Qt runtime deployment was skipped."
@@ -150,6 +167,17 @@ else {
 }
 
 Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "icons") -TargetDir (Join-Path $packageDir "icons")
+
+$diagnosticToolsSourceDir = Join-Path $repoRoot "tools"
+$diagnosticToolsTargetDir = Join-Path $packageDir "tools"
+if (Test-Path -LiteralPath $diagnosticToolsSourceDir) {
+    New-Item -ItemType Directory -Path $diagnosticToolsTargetDir -Force | Out-Null
+    Get-ChildItem -LiteralPath $diagnosticToolsSourceDir -File | Where-Object {
+        $_.Extension.ToLowerInvariant() -in @(".ps1", ".cmd", ".bat", ".txt", ".md")
+    } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $diagnosticToolsTargetDir $_.Name) -Force
+    }
+}
 
 $fanucSourceDir = Join-Path $repoRoot "SDK\FANUC"
 $fanucTargetDir = Join-Path $packageDir "SDK\FANUC"

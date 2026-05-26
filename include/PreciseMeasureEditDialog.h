@@ -7,11 +7,15 @@
 #include <QList>
 #include <QMap>
 #include <QString>
+#include <functional>
 
 class QComboBox;
 class QCloseEvent;
+class QCheckBox;
+class QDoubleSpinBox;
 class QGridLayout;
 class QGroupBox;
+class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
@@ -23,7 +27,11 @@ class RobotDriverAdaptor;
 class PreciseMeasureEditDialog : public QDialog
 {
 public:
-    explicit PreciseMeasureEditDialog(ContralUnit* pContralUnit, QWidget* parent = nullptr);
+    explicit PreciseMeasureEditDialog(
+        ContralUnit* pContralUnit,
+        QWidget* parent = nullptr,
+        bool positionTeachOnly = false,
+        std::function<void()> openCameraPreviewCallback = nullptr);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -42,6 +50,7 @@ private:
     void TeachStartPos();
     void TeachEndPos();
     void TeachEndSafePulse();
+    void OpenPositionTeachDialog();
     void ReloadCurrentParam();
     bool SaveAllParamEdits();
     void SaveManualStartSafePulse();
@@ -49,6 +58,7 @@ private:
     void SaveManualEndPos();
     void SaveManualEndSafePulse();
     void SaveOtherParamEdit();
+    void SaveOtherParamComboEdit(QComboBox* combo);
 
     RobotDriverAdaptor* GetSelectedRobotDriver();
     QString CurrentRobotName() const;
@@ -63,6 +73,11 @@ private:
     bool ReadCoors(const QString& prefix, T_ROBOT_COORS& coors, QString& error) const;
     bool WriteCoors(const QString& prefix, const T_ROBOT_COORS& coors, QString& error) const;
     bool LoadOtherParams();
+    QWidget* CreateScanSafeParamPanel();
+    bool LoadScanSafeParams();
+    bool SaveScanSafeParams(QString& error) const;
+    void UpdateScanSafePreview();
+    void UpdateComputedScanSafeUiState();
     bool WriteParamValue(const QString& sectionName, const QString& key, const QString& value, QString& error) const;
     bool SaveGroupMetadata(QString& error) const;
     bool CreateParamGroup(bool copyCurrent, QString& error);
@@ -85,6 +100,8 @@ private:
 
 private:
     ContralUnit* m_pContralUnit = nullptr;
+    bool m_bPositionTeachOnly = false;
+    std::function<void()> m_openCameraPreviewCallback;
     QComboBox* m_pRobotCombo = nullptr;
     QComboBox* m_pGroupCombo = nullptr;
     QLineEdit* m_pGroupNameEdit = nullptr;
@@ -96,10 +113,22 @@ private:
     QPushButton* m_pScanParamTabBtn = nullptr;
     QPushButton* m_pWeldParamTabBtn = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
+    QGroupBox* m_pStartSafePulseGroup = nullptr;
+    QGroupBox* m_pEndSafePulseGroup = nullptr;
+    QWidget* m_pScanSafeParamPanel = nullptr;
+    QCheckBox* m_pUseComputedScanSafeCheck = nullptr;
+    QDoubleSpinBox* m_pScanSafeOffsetSpin = nullptr;
+    QDoubleSpinBox* m_pScanSafeGunAngleSpin = nullptr;
+    QComboBox* m_pScanSafeXDirectionCombo = nullptr;
+    QDoubleSpinBox* m_pScanSafeLiftSpin = nullptr;
+    QDoubleSpinBox* m_pScanSafeFlipWarnSpin = nullptr;
+    QLabel* m_pScanSafePreviewLabel = nullptr;
+    QLabel* m_pScanSafePathLabel = nullptr;
     QList<QWidget*> m_pulseGroupWidgets;
     QList<QWidget*> m_otherParamSectionWidgets;
     QMap<QString, QLineEdit*> m_editors;
     QMap<QString, QLineEdit*> m_otherParamEditors;
+    QMap<QString, QComboBox*> m_otherParamComboEditors;
     T_ANGLE_PULSE m_taughtStartPulse;
     bool m_hasTaughtStartPulse = false;
     bool m_bWideAdaptiveLayout = true;

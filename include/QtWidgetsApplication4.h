@@ -59,6 +59,7 @@ private slots:
     void OpenFunctionTestDialog();
     void OpenMeasureThenWeldDialog();
     void OpenPreciseMeasureEditDialog();
+    void OpenPositionTeachDialog();
     void OpenWeldSeamCompDialog();
     void OpenCameraParamDialog();
     void FanucConnectTest();
@@ -81,6 +82,7 @@ private slots:
     void GrooveCameraTest(bool checked);
     void UpdateGrooveCameraData();
     void OpenGroovePointCloudDialog();
+    void StartGrooveCameraPreview();
 
 private:
     void ShowDashboardPage();
@@ -151,16 +153,25 @@ private:
     void EnsureCommandLineConsole() const;
     void WaitForCommandLineEnter(const QString& message) const;
     FANUCRobotCtrl* GetFirstFanucDriverForCli() const;
-    RobotDriverAdaptor* GetRobotDriverForCli(const QStringList& arguments, QString* robotLabelOut = nullptr) const;
+    RobotDriverAdaptor* GetRobotDriverForCli(
+        const QStringList& arguments,
+        QString* robotLabelOut = nullptr,
+        int* unitIndexOut = nullptr) const;
     void RunRobotMotionForCli(const QStringList& arguments);
     bool UploadFanucServiceBundleForCli(FANUCRobotCtrl* pFanucDriver);
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
     bool RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
     void RunLaserClassifyDirForCli(const QString& dirPath) const;
     void RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const;
+    void RunGenerateStepWeldProgramForCli(
+        const QString& inputPath,
+        const QString& outputDir,
+        bool actualWeld,
+        double weldSpeedMmPerMin) const;
     void RunUpdateWeldPoseAverageForCli(const QString& inputPath) const;
     bool RunMeasureThenWeldScanOnlyRepeatForCli(
-        FANUCRobotCtrl* pFanucDriver,
+        RobotDriverAdaptor* pRobotDriver,
+        int unitIndex,
         int repeatCount,
         double scanSpeedOverrideMmPerMin = 0.0,
         double cameraTimeOffsetOverrideMs = std::numeric_limits<double>::quiet_NaN());
@@ -223,6 +234,7 @@ private:
     WeldSeamCompDialog* m_pWeldSeamCompPage;
     CameraParamDialog* m_pCameraParamPage;
     QString m_sCameraParamPageRobotName;
+    QString m_sGrooveCameraStatusText;
     RobotJogDialog* m_pRobotJogPage;
     TouchKeyboardManager* m_pTouchKeyboardManager;
     QHash<int, CameraRuntime*> m_scanCameraRuntimes;

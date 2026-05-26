@@ -178,6 +178,7 @@ RobotJogDialog::RobotJogDialog(RobotDriverAdaptor* robotDriver, QWidget* parent)
 	, m_streamJointSpeed(1.0)
 {
 	setWindowTitle("机器人点动控制");
+	MarkDirectMouseInputWindow(this);
 	ApplyUnifiedWindowChrome(this);
 	setMinimumSize(860, 600);
 	ResizeWindowForAvailableGeometry(this, QSize(1120, 680), 0.86, 0.78);

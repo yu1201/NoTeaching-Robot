@@ -26,7 +26,8 @@ RobotLog& WeldProcessLogger()
 namespace fs = std::filesystem;
 constexpr char kDelimiter = '\t';
 constexpr int kWeaveFieldCount = 14;
-constexpr int kWeldFieldCount = 30;
+constexpr int kWeldBaseFieldCount = 30;
+constexpr int kWeldFieldCount = 47;
 }
 
 WeldProcessFile::WeldProcessFile(const T_CONTRAL_UNIT& tContralUnitInfo)
@@ -737,14 +738,15 @@ bool WeldProcessFile::ParseWeaveLine(const std::vector<std::string>& fields, T_W
 
 bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WELD_PARA& tWeldPara) const
 {
-    if (static_cast<int>(fields.size()) != kWeldFieldCount)
+    if (static_cast<int>(fields.size()) < kWeldBaseFieldCount
+        || static_cast<int>(fields.size()) > kWeldFieldCount)
     {
         return false;
     }
 
     tWeldPara.strWorkPeace = fields[0];
     tWeldPara.strWeldType = fields[1];
-    return TryParseDouble(fields[2], tWeldPara.dWeldAngleSize)
+    bool ok = TryParseDouble(fields[2], tWeldPara.dWeldAngleSize)
         && TryParseInt(fields[3], tWeldPara.nLayerNo)
         && TryParseDouble(fields[4], tWeldPara.dStartArcCurrent)
         && TryParseDouble(fields[5], tWeldPara.dStartArcVoltage)
@@ -772,6 +774,41 @@ bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WE
         && TryParseInt(fields[27], tWeldPara.nStandWeldDir)
         && TryParseInt(fields[28], tWeldPara.nWeaveTypeNo)
         && TryParseInt(fields[29], tWeldPara.nWeldMethod);
+    if (!ok)
+    {
+        return false;
+    }
+
+    const bool oldFormat = static_cast<int>(fields.size()) == kWeldBaseFieldCount;
+    const int defaultWrapEnable = oldFormat ? 1 : 0;
+    auto parseOptionalInt = [&](int index, int& target, int defaultValue)
+    {
+        target = defaultValue;
+        return index >= static_cast<int>(fields.size()) || TryParseInt(fields[index], target);
+    };
+    auto parseOptionalDouble = [&](int index, double& target, double defaultValue)
+    {
+        target = defaultValue;
+        return index >= static_cast<int>(fields.size()) || TryParseDouble(fields[index], target);
+    };
+
+    return parseOptionalInt(30, tWeldPara.nWrapCurrent1Enable, defaultWrapEnable)
+        && parseOptionalInt(31, tWeldPara.nWrapVoltage1Enable, defaultWrapEnable)
+        && parseOptionalInt(32, tWeldPara.nWrapWaitTime1Enable, defaultWrapEnable)
+        && parseOptionalInt(33, tWeldPara.nWrapCurrent2Enable, defaultWrapEnable)
+        && parseOptionalInt(34, tWeldPara.nWrapVoltage2Enable, defaultWrapEnable)
+        && parseOptionalInt(35, tWeldPara.nWrapWaitTime2Enable, defaultWrapEnable)
+        && parseOptionalInt(36, tWeldPara.nWrapCurrent3Enable, defaultWrapEnable)
+        && parseOptionalInt(37, tWeldPara.nWrapVoltage3Enable, defaultWrapEnable)
+        && parseOptionalInt(38, tWeldPara.nWrapWaitTime3Enable, defaultWrapEnable)
+        && parseOptionalDouble(39, tWeldPara.dCornerArcTransitionRadius, 0.0)
+        && parseOptionalDouble(40, tWeldPara.dCornerArcTransitionSpeed, 0.0)
+        && parseOptionalDouble(41, tWeldPara.dCornerArcTransitionCurrent, 0.0)
+        && parseOptionalDouble(42, tWeldPara.dCornerArcTransitionVoltage, 0.0)
+        && parseOptionalInt(43, tWeldPara.nCornerArcTransitionRadiusEnable, 0)
+        && parseOptionalInt(44, tWeldPara.nCornerArcTransitionSpeedEnable, 0)
+        && parseOptionalInt(45, tWeldPara.nCornerArcTransitionCurrentEnable, 0)
+        && parseOptionalInt(46, tWeldPara.nCornerArcTransitionVoltageEnable, 0);
 }
 
 std::vector<std::string> WeldProcessFile::BuildWeaveFields(const T_WeaveDate& tWeaveDate) const
@@ -826,7 +863,24 @@ std::vector<std::string> WeldProcessFile::BuildWeldFields(const T_WELD_PARA& tWe
         ToText(tWeldPara.dWeldDipAngle),
         std::to_string(tWeldPara.nStandWeldDir),
         std::to_string(tWeldPara.nWeaveTypeNo),
-        std::to_string(tWeldPara.nWeldMethod)
+        std::to_string(tWeldPara.nWeldMethod),
+        std::to_string(tWeldPara.nWrapCurrent1Enable),
+        std::to_string(tWeldPara.nWrapVoltage1Enable),
+        std::to_string(tWeldPara.nWrapWaitTime1Enable),
+        std::to_string(tWeldPara.nWrapCurrent2Enable),
+        std::to_string(tWeldPara.nWrapVoltage2Enable),
+        std::to_string(tWeldPara.nWrapWaitTime2Enable),
+        std::to_string(tWeldPara.nWrapCurrent3Enable),
+        std::to_string(tWeldPara.nWrapVoltage3Enable),
+        std::to_string(tWeldPara.nWrapWaitTime3Enable),
+        ToText(tWeldPara.dCornerArcTransitionRadius),
+        ToText(tWeldPara.dCornerArcTransitionSpeed),
+        ToText(tWeldPara.dCornerArcTransitionCurrent),
+        ToText(tWeldPara.dCornerArcTransitionVoltage),
+        std::to_string(tWeldPara.nCornerArcTransitionRadiusEnable),
+        std::to_string(tWeldPara.nCornerArcTransitionSpeedEnable),
+        std::to_string(tWeldPara.nCornerArcTransitionCurrentEnable),
+        std::to_string(tWeldPara.nCornerArcTransitionVoltageEnable)
     };
 }
 

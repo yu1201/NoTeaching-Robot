@@ -266,9 +266,23 @@ struct T_ROBOT_MOVE_INFO
 	int nMoveType = MOVJ;	//移动方式
 	int nPosType = POSVAR;	//目标变量类型：POSVAR 使用 CARTPOS，PULSEVAR 使用 AXISPOS
 	T_ROBOT_MOVE_SPEED tSpeed;	//移动速度
+	double dOverlapRel = 20.0; // STEP连续运动过渡比例，对应SRD里的OVERLAPREL。
 	int nMoveDevice = -1;
 	int nTrackNo = -1;
 	double adBasePosVar[3]; //外部轴坐标(MP_USR_VAR_INFO中最多支持8轴)
+	bool bWeldProcessEnabled = false; // true时生成焊接工艺语句，false时保持普通运动
+	bool bArcStartBeforeMove = false; // 第一个焊接点前起弧
+	bool bArcEndAfterMove = false; // 最后一个焊接点后收弧
+	bool bUseTransitionWeldParams = false; // 当前点使用拐点过渡电流电压
+	double dArcStartCurrent = 0.0;
+	double dArcStartVoltage = 0.0;
+	double dArcStartWaitTime = 0.0;
+	double dWeldCurrent = 0.0;
+	double dWeldVoltage = 0.0;
+	double dWeldSpeedMmPerMin = 0.0;
+	double dArcEndCurrent = 0.0;
+	double dArcEndVoltage = 0.0;
+	double dArcEndWaitTime = 0.0;
 };
 
 typedef struct
@@ -325,6 +339,25 @@ typedef struct
 
 	// CO2/混合气 实心/药芯 脉冲/直流 1.2/1.4 等不同组合
 	int nWeldMethod; // 焊接方法 1脉冲分别/0直流分别 （0立焊 1平焊）
+
+	int nWrapCurrent1Enable; // 包角段1电流启用
+	int nWrapVoltage1Enable; // 包角段1电压启用
+	int nWrapWaitTime1Enable; // 包角段1时间启用
+	int nWrapCurrent2Enable; // 包角段2电流启用
+	int nWrapVoltage2Enable; // 包角段2电压启用
+	int nWrapWaitTime2Enable; // 包角段2时间启用
+	int nWrapCurrent3Enable; // 包角段3电流启用
+	int nWrapVoltage3Enable; // 包角段3电压启用
+	int nWrapWaitTime3Enable; // 包角段3时间启用
+
+	double dCornerArcTransitionRadius; // 拐点圆弧过渡半径
+	double dCornerArcTransitionSpeed; // 拐点圆弧过渡速度
+	double dCornerArcTransitionCurrent; // 拐点圆弧过渡电流
+	double dCornerArcTransitionVoltage; // 拐点圆弧过渡电压
+	int nCornerArcTransitionRadiusEnable; // 拐点圆弧过渡半径启用
+	int nCornerArcTransitionSpeedEnable; // 拐点圆弧过渡速度启用
+	int nCornerArcTransitionCurrentEnable; // 拐点圆弧过渡电流启用
+	int nCornerArcTransitionVoltageEnable; // 拐点圆弧过渡电压启用
 
 	T_WeaveDate tWeaveParam; // 摆动参数(埃斯顿摆动需要动态写入使用)
 }T_WELD_PARA;
