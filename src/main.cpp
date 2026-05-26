@@ -4,7 +4,10 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QIcon>
+#include <QLibraryInfo>
+#include <QLocale>
 #include <QStringList>
+#include <QTranslator>
 #include <QtWidgets/QApplication>
 
 namespace
@@ -26,14 +29,45 @@ void SetWorkingDirectoryToProjectRoot()
         }
     }
 }
+
+void InstallChineseQtTranslations(QApplication& app)
+{
+    QLocale::setDefault(QLocale(QLocale::Chinese, QLocale::China));
+
+    static QTranslator qtTranslator;
+    static QTranslator qtBaseTranslator;
+
+    const QStringList translationDirs = {
+        QDir(QCoreApplication::applicationDirPath()).filePath("translations"),
+        QLibraryInfo::path(QLibraryInfo::TranslationsPath)
+    };
+
+    auto installTranslator = [&app, &translationDirs](QTranslator& translator, const QString& baseName)
+    {
+        for (const QString& dir : translationDirs)
+        {
+            if (translator.load(baseName, dir))
+            {
+                app.installTranslator(&translator);
+                return;
+            }
+        }
+    };
+
+    // Load Qt's own Chinese translations so standard dialog buttons such as
+    // OK/Cancel/Yes/No stay Chinese on machines that do not have Qt installed.
+    installTranslator(qtTranslator, QStringLiteral("qt_zh_CN"));
+    installTranslator(qtBaseTranslator, QStringLiteral("qtbase_zh_CN"));
+}
 }
 
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName("NoTeaching-Robot");
-    app.setApplicationVersion("2026.05.25.1826");
+    app.setApplicationVersion("2026.05.26.1959");
     app.setOrganizationName("yu1201");
+    InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();
     SetWorkingDirectoryToProjectRoot();
     app.setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));

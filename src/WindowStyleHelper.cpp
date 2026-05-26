@@ -41,6 +41,9 @@ namespace
 const char kAdaptiveScrollInstalledProperty[] = "_adaptive_scroll_installed";
 const char kAdaptiveScrollAreaProperty[] = "_adaptive_window_scroll_area";
 const char kAdaptiveScrollContentProperty[] = "_adaptive_window_scroll_content";
+const char kAdaptiveScrollAutoWrappedProperty[] = "_adaptive_window_auto_wrapped";
+const char kAdaptiveScrollCheckPendingProperty[] = "_adaptive_scroll_check_pending";
+const char kDirectMouseInputWindowProperty[] = "_direct_mouse_input_window";
 
 void EnsureAdaptiveScrollSupport(QWidget* widget);
 
@@ -504,6 +507,140 @@ bool LayoutHasSingleScrollArea(QLayout* layout, QScrollArea** outScrollArea)
     return true;
 }
 
+bool LayoutHasSingleAutoWrappedScrollArea(QLayout* layout, QScrollArea** outScrollArea)
+{
+    QScrollArea* scrollArea = nullptr;
+    if (!LayoutHasSingleScrollArea(layout, &scrollArea))
+    {
+        if (outScrollArea != nullptr)
+        {
+            *outScrollArea = nullptr;
+        }
+        return false;
+    }
+    if (scrollArea == nullptr || !scrollArea->property(kAdaptiveScrollAutoWrappedProperty).toBool())
+    {
+        if (outScrollArea != nullptr)
+        {
+            *outScrollArea = nullptr;
+        }
+        return false;
+    }
+    if (outScrollArea != nullptr)
+    {
+        *outScrollArea = scrollArea;
+    }
+    return true;
+}
+
+QSize RequiredLayoutSize(QLayout* layout)
+{
+    if (layout == nullptr)
+    {
+        return QSize();
+    }
+
+    const QSize minimum = layout->minimumSize();
+    if (minimum.isValid() && !minimum.isEmpty())
+    {
+        return minimum;
+    }
+    return layout->sizeHint();
+}
+
+bool LayoutNeedsAdaptiveScroll(QWidget* widget, QLayout* layout)
+{
+    if (widget == nullptr || layout == nullptr)
+    {
+        return false;
+    }
+
+    const QSize required = RequiredLayoutSize(layout).expandedTo(widget->minimumSize());
+    if (!required.isValid() || required.isEmpty())
+    {
+        return false;
+    }
+
+    constexpr int kTolerance = 8;
+    const QSize current = widget->contentsRect().size();
+    if (current.isValid()
+        && (required.width() > current.width() + kTolerance
+            || required.height() > current.height() + kTolerance))
+    {
+        return true;
+    }
+
+    const QRect available = ResolveUsableGeometry(widget);
+    if (!available.isValid())
+    {
+        return false;
+    }
+
+    const bool isDialog = qobject_cast<QDialog*>(widget) != nullptr;
+    const double widthRatio = isDialog ? 0.88 : 0.94;
+    const double heightRatio = isDialog ? 0.86 : 0.92;
+    const QSize availableSize = available.size();
+    const int widthLimit = (std::min)(availableSize.width(), static_cast<int>(availableSize.width() * widthRatio));
+    const int heightLimit = (std::min)(availableSize.height(), static_cast<int>(availableSize.height() * heightRatio));
+    return required.width() > widthLimit + kTolerance
+        || required.height() > heightLimit + kTolerance;
+}
+
+bool UnwrapAdaptiveScrollAreaIfPossible(QWidget* widget, bool force = false)
+{
+    if (widget == nullptr)
+    {
+        return false;
+    }
+
+    QLayout* rootLayout = widget->layout();
+    QBoxLayout* rootBox = qobject_cast<QBoxLayout*>(rootLayout);
+    if (rootBox == nullptr)
+    {
+        return false;
+    }
+
+    QScrollArea* scrollArea = nullptr;
+    if (!LayoutHasSingleAutoWrappedScrollArea(rootBox, &scrollArea) || scrollArea == nullptr)
+    {
+        return false;
+    }
+
+    QWidget* contentWidget = scrollArea->widget();
+    QLayout* contentLayout = contentWidget != nullptr ? contentWidget->layout() : nullptr;
+    if (contentLayout == nullptr)
+    {
+        return false;
+    }
+    if (!force && LayoutNeedsAdaptiveScroll(widget, contentLayout))
+    {
+        return false;
+    }
+
+    QLayoutItem* scrollItem = rootBox->takeAt(0);
+    delete scrollItem;
+
+    const QMargins margins = contentLayout->contentsMargins();
+    const int spacing = contentLayout->spacing();
+    while (contentLayout->count() > 0)
+    {
+        QLayoutItem* item = contentLayout->takeAt(0);
+        if (item != nullptr)
+        {
+            rootBox->addItem(item);
+        }
+    }
+
+    rootBox->setContentsMargins(margins);
+    rootBox->setSpacing(spacing);
+
+    scrollArea->takeWidget();
+    scrollArea->deleteLater();
+    contentWidget->deleteLater();
+    widget->setProperty(kAdaptiveScrollInstalledProperty, false);
+    return true;
+}
+
 bool WrapMainWindowCentralWidget(QMainWindow* mainWindow)
 {
     if (mainWindow == nullptr)
@@ -526,6 +663,11 @@ bool WrapLayoutInAdaptiveScrollArea(QWidget* widget)
     }
     if (widget->property(kAdaptiveScrollContentProperty).toBool())
     {
+        return false;
+    }
+    if (widget->property(kDirectMouseInputWindowProperty).toBool())
+    {
+        ConfigureExistingScrollAreas(widget);
         return false;
     }
 
@@ -553,13 +695,18 @@ bool WrapLayoutInAdaptiveScrollArea(QWidget* widget)
     if (LayoutHasSingleScrollArea(rootLayout, &existingScrollArea))
     {
         ConfigureAdaptiveScrollArea(existingScrollArea);
-        return true;
+        return false;
     }
 
     QBoxLayout* rootBox = qobject_cast<QBoxLayout*>(rootLayout);
     QGridLayout* rootGrid = qobject_cast<QGridLayout*>(rootLayout);
     if (rootBox == nullptr && rootGrid == nullptr)
     {
+        return false;
+    }
+    if (!LayoutNeedsAdaptiveScroll(widget, rootLayout))
+    {
+        ConfigureExistingScrollAreas(widget);
         return false;
     }
 
@@ -584,6 +731,7 @@ bool WrapLayoutInAdaptiveScrollArea(QWidget* widget)
 
     QScrollArea* scrollArea = new QScrollArea(widget);
     scrollArea->setObjectName("AdaptiveWindowScrollArea");
+    scrollArea->setProperty(kAdaptiveScrollAutoWrappedProperty, true);
     ConfigureAdaptiveScrollArea(scrollArea);
     scrollArea->setWidget(contentWidget);
 
@@ -603,8 +751,15 @@ void EnsureAdaptiveScrollSupport(QWidget* widget)
     {
         return;
     }
+    if (widget->property(kDirectMouseInputWindowProperty).toBool())
+    {
+        UnwrapAdaptiveScrollAreaIfPossible(widget, true);
+        ConfigureExistingScrollAreas(widget);
+        return;
+    }
     if (widget->property(kAdaptiveScrollInstalledProperty).toBool())
     {
+        UnwrapAdaptiveScrollAreaIfPossible(widget);
         ConfigureExistingScrollAreas(widget);
         return;
     }
@@ -625,6 +780,24 @@ void EnsureAdaptiveScrollSupport(QWidget* widget)
         RelaxWindowMinimumSizeForAdaptiveScroll(widget);
     }
     ConfigureExistingScrollAreas(widget);
+}
+
+void ScheduleAdaptiveScrollSupport(QWidget* widget)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+    if (widget->property(kAdaptiveScrollCheckPendingProperty).toBool())
+    {
+        return;
+    }
+
+    widget->setProperty(kAdaptiveScrollCheckPendingProperty, true);
+    QTimer::singleShot(0, widget, [widget]() {
+        widget->setProperty(kAdaptiveScrollCheckPendingProperty, false);
+        EnsureAdaptiveScrollSupport(widget);
+    });
 }
 
 class WindowGeometryGuard final : public QObject
@@ -652,13 +825,24 @@ protected:
         switch (event->type())
         {
         case QEvent::Show:
-            EnsureAdaptiveScrollSupport(widget);
             ClampWindowToAvailableGeometry(widget);
-            QTimer::singleShot(60, widget, [widget]() { ClampWindowToAvailableGeometry(widget); });
-            QTimer::singleShot(160, widget, [widget]() { ClampWindowToAvailableGeometry(widget); });
+            EnsureAdaptiveScrollSupport(widget);
+            ScheduleAdaptiveScrollSupport(widget);
+            QTimer::singleShot(60, widget, [widget]() {
+                ClampWindowToAvailableGeometry(widget);
+                EnsureAdaptiveScrollSupport(widget);
+            });
+            QTimer::singleShot(160, widget, [widget]() {
+                ClampWindowToAvailableGeometry(widget);
+                EnsureAdaptiveScrollSupport(widget);
+            });
+            break;
+        case QEvent::Resize:
+            ScheduleAdaptiveScrollSupport(widget);
             break;
         case QEvent::WindowStateChange:
             ClampWindowToAvailableGeometry(widget);
+            ScheduleAdaptiveScrollSupport(widget);
             break;
         default:
             break;
@@ -725,6 +909,15 @@ void ConfigureApplicationFontFallback()
 void ApplyAdaptiveScrollSupport(QWidget* widget)
 {
     EnsureAdaptiveScrollSupport(widget);
+}
+
+void MarkDirectMouseInputWindow(QWidget* widget)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+    widget->setProperty(kDirectMouseInputWindowProperty, true);
 }
 
 void RefreshUnifiedWindowTitleBar(QWidget* widget)

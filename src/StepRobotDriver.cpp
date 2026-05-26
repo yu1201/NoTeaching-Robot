@@ -1,9 +1,11 @@
 #include "STEPRobotDriver.h"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <cmath>
+#include <ctime>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -15,8 +17,37 @@ namespace
 		return "ContiMoveAny";
 	}
 
+	std::string StepSanitizeProgramName(std::string programName)
+	{
+		if (programName.empty())
+		{
+			programName = StepMakeProgramName();
+		}
+
+		for (char& ch : programName)
+		{
+			const unsigned char value = static_cast<unsigned char>(ch);
+			if (value < 32
+				|| ch == '<'
+				|| ch == '>'
+				|| ch == ':'
+				|| ch == '"'
+				|| ch == '/'
+				|| ch == '\\'
+				|| ch == '|'
+				|| ch == '?'
+				|| ch == '*'
+				|| ch == '.')
+			{
+				ch = '_';
+			}
+		}
+		return programName.empty() ? StepMakeProgramName() : programName;
+	}
+
 	constexpr const char* kStepDynamicJobProjectName = "PCRobot";
 	constexpr const char* kStepProjectVariableProgramName = "_project";
+	constexpr const char* kStepActualWeldFlagName = "ntactualweld";
 
 	double StepClampPositiveDouble(double value, double defaultValue)
 	{
@@ -204,17 +235,183 @@ namespace
 		return GetStr("ntolr%u", static_cast<unsigned>(index));
 	}
 
-	std::string StepBuildSrdContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, const T_AXISUNIT& axisUnit)
+	void StepAppendFileComment(std::ostringstream& oss, const char* text)
+	{
+		oss << "// " << text << "\n";
+	}
+
+	void StepAppendFileComment(std::ostringstream& oss, const std::string& text)
+	{
+		StepAppendFileComment(oss, text.c_str());
+	}
+
+	void StepAppendActualWeldGuardedCommand(std::ostringstream& oss, const char* command)
+	{
+		oss << "IF(" << kStepActualWeldFlagName << "==1)THEN" << "\n";
+		oss << command << "\n";
+		oss << "END_IF" << "\n";
+	}
+
+	bool StepNearlyEqual(double left, double right)
+	{
+		return std::abs(left - right) <= 1e-9;
+	}
+
+	bool StepDynamicValuesEqual(const StepDynamicValues& left, const StepDynamicValues& right)
+	{
+		return StepNearlyEqual(left.segmentVel, right.segmentVel)
+			&& StepNearlyEqual(left.segmentAcc, right.segmentAcc)
+			&& StepNearlyEqual(left.segmentDec, right.segmentDec)
+			&& StepNearlyEqual(left.segmentJerk, right.segmentJerk)
+			&& StepNearlyEqual(left.oriVel, right.oriVel)
+			&& StepNearlyEqual(left.oriAcc, right.oriAcc)
+			&& StepNearlyEqual(left.oriDec, right.oriDec)
+			&& StepNearlyEqual(left.oriJerk, right.oriJerk)
+			&& StepNearlyEqual(left.jointVel, right.jointVel)
+			&& StepNearlyEqual(left.jointAcc, right.jointAcc)
+			&& StepNearlyEqual(left.jointDec, right.jointDec)
+			&& StepNearlyEqual(left.jointJerk, right.jointJerk);
+	}
+
+	struct StepVariablePlan
+	{
+		std::vector<size_t> dynamicIndexes;
+		std::vector<StepDynamicValues> dynamicValues;
+	};
+
+	StepVariablePlan StepBuildVariablePlan(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+	{
+		StepVariablePlan plan;
+		plan.dynamicIndexes.reserve(moveInfos.size());
+		for (const T_ROBOT_MOVE_INFO& info : moveInfos)
+		{
+			const StepDynamicValues dyn = StepBuildDynamicValues(info.tSpeed);
+			size_t dynamicIndex = plan.dynamicValues.size();
+			for (size_t index = 0; index < plan.dynamicValues.size(); ++index)
+			{
+				if (StepDynamicValuesEqual(plan.dynamicValues[index], dyn))
+				{
+					dynamicIndex = index;
+					break;
+				}
+			}
+			if (dynamicIndex == plan.dynamicValues.size())
+			{
+				plan.dynamicValues.push_back(dyn);
+			}
+			plan.dynamicIndexes.push_back(dynamicIndex);
+		}
+		return plan;
+	}
+
+	void StepAppendDynamicLine(std::ostringstream& oss, const std::string& dynName, const StepDynamicValues& dyn)
+	{
+		oss << "DYNAMIC " << dynName << " := {  "
+			<< StepClampPositiveDouble(dyn.segmentVel, 1.0) << ", "
+			<< StepClampPositiveDouble(dyn.segmentAcc, 3.0) << ", "
+			<< StepClampPositiveDouble(dyn.segmentDec, 3.0) << ", "
+			<< StepClampPositiveDouble(dyn.segmentJerk, 50000.0) << ", "
+			<< dyn.oriVel << ", " << dyn.oriAcc << ", " << dyn.oriDec << ", " << dyn.oriJerk << ", "
+			<< dyn.jointVel << ", " << dyn.jointAcc << ", " << dyn.jointDec << "," << dyn.jointJerk
+			<< " }" << "\n";
+	}
+
+	double StepOverlapRelValue(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+	{
+		for (const T_ROBOT_MOVE_INFO& info : moveInfos)
+		{
+			if (std::isfinite(info.dOverlapRel))
+			{
+				return std::max(0.0, info.dOverlapRel);
+			}
+		}
+		return 20.0;
+	}
+
+	bool StepHasWeldProcess(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+	{
+		return std::any_of(moveInfos.begin(), moveInfos.end(),
+			[](const T_ROBOT_MOVE_INFO& info)
+			{
+				return info.bWeldProcessEnabled;
+			});
+	}
+
+	bool StepHasTransitionWeldProcess(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+	{
+		return std::any_of(moveInfos.begin(), moveInfos.end(),
+			[](const T_ROBOT_MOVE_INFO& info)
+			{
+				return info.bWeldProcessEnabled && info.bUseTransitionWeldParams;
+			});
+	}
+
+	const T_ROBOT_MOVE_INFO* StepFirstWeldProcessInfo(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+	{
+		for (const T_ROBOT_MOVE_INFO& info : moveInfos)
+		{
+			if (info.bWeldProcessEnabled)
+			{
+				return &info;
+			}
+		}
+		return nullptr;
+	}
+
+	const T_ROBOT_MOVE_INFO* StepFirstNormalWeldProcessInfo(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+	{
+		for (const T_ROBOT_MOVE_INFO& info : moveInfos)
+		{
+			if (info.bWeldProcessEnabled && !info.bUseTransitionWeldParams)
+			{
+				return &info;
+			}
+		}
+		return StepFirstWeldProcessInfo(moveInfos);
+	}
+
+	double StepFiniteOrDefault(double value, double fallback)
+	{
+		return std::isfinite(value) ? value : fallback;
+	}
+
+	double StepWeldDataSpeed(const T_ROBOT_MOVE_INFO& info)
+	{
+		if (std::isfinite(info.dWeldSpeedMmPerMin) && info.dWeldSpeedMmPerMin > 0.0)
+		{
+			return info.dWeldSpeedMmPerMin;
+		}
+		return std::isfinite(info.tSpeed.dSpeed) && info.tSpeed.dSpeed > 0.0 ? info.tSpeed.dSpeed : 0.0;
+	}
+
+	std::string StepBuildArcDataLine(
+		const char* name,
+		double current,
+		double voltage,
+		double speedMmPerMin)
 	{
 		std::ostringstream oss;
 		oss << std::fixed << std::setprecision(6);
+		oss << "ARCDATA " << name << " := {  "
+			<< StepFiniteOrDefault(voltage, 0.0) << ", "
+			<< StepFiniteOrDefault(current, 0.0) << ", "
+			<< StepFiniteOrDefault(speedMmPerMin, 0.0) << ", "
+			<< "0.0, NULL, FALSE, FALSE, 100, 250, 250, 30.00, 15.00, 0, 0, 0,0.0 }" << "\n";
+		return oss.str();
+	}
 
+	std::string StepBuildSrdContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, const T_AXISUNIT& axisUnit, bool actualWeld)
+	{
+		std::ostringstream oss;
+		oss << std::fixed << std::setprecision(6);
+		const StepVariablePlan variablePlan = StepBuildVariablePlan(moveInfos);
+
+		StepAppendFileComment(oss, "点位数据：SRP运动语句使用的TCP/AP变量");
 		for (size_t i = 0; i < moveInfos.size(); ++i)
 		{
 			const T_ROBOT_MOVE_INFO& info = moveInfos[i];
 			const std::string cartName = StepBuildCartPosName(i);
 			const std::string axisName = StepBuildAxisPosName(i);
-			const std::string dynName = StepBuildDynamicName(i);
 
 			if (info.nPosType == PULSEVAR)
 			{
@@ -238,18 +435,68 @@ namespace
 					<< info.adBasePosVar[0] << ", " << info.adBasePosVar[1] << ", " << info.adBasePosVar[2]
 					<< ", 0.0, 0.0, 0.0,0 }" << "\n";
 			}
+		}
 
-			const StepDynamicValues dyn = StepBuildDynamicValues(info.tSpeed);
+		StepAppendFileComment(oss, "速度数据：共享DYNAMIC变量");
+		for (size_t index = 0; index < variablePlan.dynamicValues.size(); ++index)
+		{
+			StepAppendDynamicLine(oss, StepBuildDynamicName(index), variablePlan.dynamicValues[index]);
+		}
+		if (!moveInfos.empty())
+		{
+			StepAppendFileComment(oss, "连续过渡比例：共享OVERLAPREL变量");
+			oss << "OVERLAPREL " << StepBuildOverlapName(0) << " := " << StepOverlapRelValue(moveInfos) << "\n";
+		}
 
-			oss << "DYNAMIC " << dynName << " := {  "
-				<< StepClampPositiveDouble(dyn.segmentVel, 1.0) << ", "
-				<< StepClampPositiveDouble(dyn.segmentAcc, 3.0) << ", "
-				<< StepClampPositiveDouble(dyn.segmentDec, 3.0) << ", "
-				<< StepClampPositiveDouble(dyn.segmentJerk, 50000.0) << ", "
-				<< dyn.oriVel << ", " << dyn.oriAcc << ", " << dyn.oriDec << ", " << dyn.oriJerk << ", "
-				<< dyn.jointVel << ", " << dyn.jointAcc << ", " << dyn.jointDec << "," << dyn.jointJerk
-				<< " }" << "\n";
-			oss << "OVERLAPREL " << StepBuildOverlapName(i) << " := 20" << "\n";
+		if (StepHasWeldProcess(moveInfos))
+		{
+			const T_ROBOT_MOVE_INFO* processInfo = StepFirstWeldProcessInfo(moveInfos);
+			const T_ROBOT_MOVE_INFO* normalProcessInfo = StepFirstNormalWeldProcessInfo(moveInfos);
+			if (processInfo != nullptr && normalProcessInfo != nullptr)
+			{
+				StepAppendFileComment(oss, "实际焊接开关：1执行ARCON/ARCSET/ARCOFF，0空跑跳过焊接指令");
+				oss << "INT " << kStepActualWeldFlagName << " := " << (actualWeld ? 1 : 0) << "\n";
+				StepAppendFileComment(oss, "焊接数据：起弧参数");
+				oss << "ARCONDATA ntarcon0 := {  0, "
+					<< StepFiniteOrDefault(processInfo->dArcStartCurrent, 0.0) << ", "
+					<< StepFiniteOrDefault(processInfo->dArcStartVoltage, 0.0) << ", "
+					<< static_cast<unsigned>(std::max(0.0, StepFiniteOrDefault(processInfo->dArcStartWaitTime, 0.0))) << ", 0, 0,NULL }" << "\n";
+				StepAppendFileComment(oss, "正常焊接参数：电流/电压/速度");
+				oss << StepBuildArcDataLine(
+					"ntarc0",
+					normalProcessInfo->dWeldCurrent,
+					normalProcessInfo->dWeldVoltage,
+					StepWeldDataSpeed(*normalProcessInfo));
+
+				if (StepHasTransitionWeldProcess(moveInfos))
+				{
+					const auto transitionIt = std::find_if(moveInfos.begin(), moveInfos.end(),
+						[](const T_ROBOT_MOVE_INFO& info)
+						{
+							return info.bWeldProcessEnabled && info.bUseTransitionWeldParams;
+					});
+					if (transitionIt != moveInfos.end())
+					{
+						StepAppendFileComment(oss, "拐点过渡参数：电流/电压/速度");
+						oss << StepBuildArcDataLine(
+							"ntarctrans0",
+							transitionIt->dWeldCurrent,
+							transitionIt->dWeldVoltage,
+							StepWeldDataSpeed(*transitionIt));
+					}
+				}
+
+				StepAppendFileComment(oss, "焊接辅助数据：重试/实数/停弧/摆焊/跟踪");
+				oss << "INT ntint0 := 0" << "\n";
+				oss << "ARCRETRYDATA ntretry0 := {  1000, 0, 1000, 50, 0, 0, FALSE, 20, 50,5 }" << "\n";
+				oss << "REAL ntreal0 := 0.0" << "\n";
+				oss << "ARCOFFDATA ntarcoff0 := {  0, 0, "
+					<< StepFiniteOrDefault(processInfo->dArcEndCurrent, 0.0) << ", "
+					<< StepFiniteOrDefault(processInfo->dArcEndVoltage, 0.0) << ", "
+					<< static_cast<unsigned>(std::max(0.0, StepFiniteOrDefault(processInfo->dArcEndWaitTime, 0.0))) << ",NULL }" << "\n";
+				oss << "WEAVEDATA ntwd0 := {  eTCPWeave, eSinFreq, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, FALSE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,0.0 }" << "\n";
+				oss << "TRACKDATA nttd0 := {  3, 100, 100, 100, eSample, 0.0, 2, 1, 3.0, 100, eDistance, 200, 2, 0, 1, 600, 0, 0, 0, 0, 0, 0, 0, 0, 1, 600, 0, 0, 0, 0, 0, 0,0 }" << "\n";
+			}
 		}
 
 		return oss.str();
@@ -258,24 +505,64 @@ namespace
 	std::string StepBuildSrpContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
 	{
 		std::ostringstream oss;
+		const StepVariablePlan variablePlan = StepBuildVariablePlan(moveInfos);
+		const std::string sharedOverlapName = StepBuildOverlapName(0);
+		const bool hasWeldProcess = StepHasWeldProcess(moveInfos);
+		if (hasWeldProcess)
+		{
+			StepAppendFileComment(oss, "实际焊接开关变量：" + std::string(kStepActualWeldFlagName) + "，1执行焊接指令，0空跑跳过");
+			StepAppendFileComment(oss, "焊接开始：使用起弧参数起弧");
+			StepAppendActualWeldGuardedCommand(oss, "ARCON(ntarcon0,ntarc0,ntint0,ntretry0,ntreal0);");
+			StepAppendFileComment(oss, "切换正常焊接参数");
+			StepAppendActualWeldGuardedCommand(oss, "ARCSET(ntarc0,START,ntreal0);");
+		}
+
+		bool usingTransitionWeldParams = false;
 
 		for (size_t i = 0; i < moveInfos.size(); ++i)
 		{
 			const T_ROBOT_MOVE_INFO& info = moveInfos[i];
 			const std::string cartName = StepBuildCartPosName(i);
 			const std::string axisName = StepBuildAxisPosName(i);
-			const std::string dynName = StepBuildDynamicName(i);
-			const std::string overlapName = StepBuildOverlapName(i);
+			const size_t dynamicIndex = i < variablePlan.dynamicIndexes.size() ? variablePlan.dynamicIndexes[i] : 0;
+			const std::string dynName = StepBuildDynamicName(dynamicIndex);
 			const std::string targetName = info.nPosType == PULSEVAR ? axisName : cartName;
 
-			if (info.nMoveType == MOVL)
+			if (hasWeldProcess && info.bWeldProcessEnabled)
 			{
-				oss << "Lin(" << targetName << "," << dynName << "," << overlapName << ",NULL,tool1,WORLD);" << "\n";
+				const bool needTransition = info.bUseTransitionWeldParams;
+				if (needTransition)
+				{
+					if (!usingTransitionWeldParams)
+					{
+						// 进入拐点过渡段时切一次过渡电流电压，段内连续点沿用该工艺。
+						StepAppendFileComment(oss, "进入拐点过渡参数");
+						StepAppendActualWeldGuardedCommand(oss, "ARCSET(ntarctrans0,START,ntreal0);");
+					}
+				}
+				else if (usingTransitionWeldParams)
+				{
+					// 离开拐点过渡段时恢复正常焊接电流电压。
+					StepAppendFileComment(oss, "退出拐点过渡参数，恢复正常焊接参数");
+					StepAppendActualWeldGuardedCommand(oss, "ARCSET(ntarc0,START,ntreal0);");
+				}
+				usingTransitionWeldParams = needTransition;
+				oss << "WLin(" << targetName << "," << dynName << "," << sharedOverlapName << ",eVAR,ntwd0,nttd0,tool1,WORLD);" << "\n";
+			}
+			else if (info.nMoveType == MOVL)
+			{
+				oss << "Lin(" << targetName << "," << dynName << "," << sharedOverlapName << ",NULL,tool1,WORLD);" << "\n";
 			}
 			else
 			{
-				oss << "PTP(" << targetName << "," << dynName << "," << overlapName << ",tool1,WORLD);" << "\n";
+				oss << "PTP(" << targetName << "," << dynName << "," << sharedOverlapName << ",tool1,WORLD);" << "\n";
 			}
+		}
+
+		if (hasWeldProcess)
+		{
+			StepAppendFileComment(oss, "焊接结束：使用停弧参数停弧");
+			StepAppendActualWeldGuardedCommand(oss, "ARCOFF(ntarcoff0);");
 		}
 
 		return oss.str();
@@ -366,6 +653,99 @@ namespace
 		value.m_JointPercent = value.m_SegmentDynamic;
 		return value;
 	}
+}
+
+std::string STEPRobotCtrl::MakeTimestampWeldProgramName()
+{
+	const auto now = std::chrono::system_clock::now();
+	const std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+	const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+	std::tm localTime = {};
+#if defined(_WIN32)
+	localtime_s(&localTime, &nowTime);
+#else
+	localtime_r(&nowTime, &localTime);
+#endif
+
+	std::ostringstream oss;
+	oss << "Weld_" << std::put_time(&localTime, "%Y%m%d_%H%M%S")
+		<< "_" << std::setw(3) << std::setfill('0') << nowMs.count();
+	return StepSanitizeProgramName(oss.str());
+}
+
+bool STEPRobotCtrl::WriteContiMoveAnyFiles(
+	const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo,
+	const std::string& localDir,
+	const std::string& programName,
+	const T_AXISUNIT& axisUnit,
+	std::string* localProgramFile,
+	std::string* localDataFile,
+	std::string* errorText,
+	bool actualWeld)
+{
+	if (vtRobotMoveInfo.empty())
+	{
+		if (errorText != nullptr)
+		{
+			*errorText = "轨迹点为空";
+		}
+		return false;
+	}
+
+	const std::string safeProgramName = StepSanitizeProgramName(programName);
+	const std::string targetDir = localDir.empty() ? ".\\Job\\STEP" : localDir;
+	const std::filesystem::path dirPath(targetDir);
+	const std::filesystem::path srpPath = dirPath / (safeProgramName + ".srp");
+	const std::filesystem::path srdPath = dirPath / (safeProgramName + ".srd");
+
+	try
+	{
+		std::filesystem::create_directories(dirPath);
+	}
+	catch (const std::exception& e)
+	{
+		if (errorText != nullptr)
+		{
+			*errorText = std::string("创建本地目录失败：") + e.what();
+		}
+		return false;
+	}
+
+	const std::string srpContent = StepBuildSrpContent(vtRobotMoveInfo);
+	const std::string srdContent = StepBuildSrdContent(vtRobotMoveInfo, axisUnit, actualWeld);
+	const std::string srpPathText = srpPath.string();
+	const std::string srdPathText = srdPath.string();
+
+	if (!StepWriteTextFile(srpPathText, srpContent))
+	{
+		if (errorText != nullptr)
+		{
+			*errorText = "写入SRP失败：" + srpPathText;
+		}
+		return false;
+	}
+	if (!StepWriteTextFile(srdPathText, srdContent))
+	{
+		if (errorText != nullptr)
+		{
+			*errorText = "写入SRD失败：" + srdPathText;
+		}
+		return false;
+	}
+
+	if (localProgramFile != nullptr)
+	{
+		*localProgramFile = srpPathText;
+	}
+	if (localDataFile != nullptr)
+	{
+		*localDataFile = srdPathText;
+	}
+	if (errorText != nullptr)
+	{
+		errorText->clear();
+	}
+	return true;
 }
 
 
@@ -802,6 +1182,11 @@ bool STEPRobotCtrl::CallJob(std::string sJobName)
 
 int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo)
 {
+	return ContiMoveAnyWithProgramName(vtRobotMoveInfo, StepMakeProgramName());
+}
+
+int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo, const std::string& programName)
+{
 	ClearLastRobotError();
 	if (vtRobotMoveInfo.empty())
 	{
@@ -812,7 +1197,7 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 
 	const std::string sProjectName = StepNormalizeProjectName(kStepDynamicJobProjectName);
 
-	const std::string sProgramName = StepMakeProgramName();
+	const std::string sProgramName = StepSanitizeProgramName(programName);
 	const std::string sLocalDir = ".\\Job\\STEP";
 	const std::string sLocalProgramFile = sLocalDir + "\\" + sProgramName + ".srp";
 	const std::string sLocalDataFile = sLocalDir + "\\" + sProgramName + ".srd";
@@ -832,7 +1217,7 @@ int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMov
 	}
 
 	const std::string sSrpContent = StepBuildSrpContent(vtRobotMoveInfo);
-	const std::string sSrdContent = StepBuildSrdContent(vtRobotMoveInfo, m_tAxisUnit);
+	const std::string sSrdContent = StepBuildSrdContent(vtRobotMoveInfo, m_tAxisUnit, true);
 
 	if (!StepWriteTextFile(sLocalProgramFile, sSrpContent))
 	{

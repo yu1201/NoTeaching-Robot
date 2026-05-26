@@ -14,6 +14,7 @@ QT_END_NAMESPACE
 
 class QDoubleSpinBox;
 class QCloseEvent;
+class QCheckBox;
 class QFormLayout;
 class QGridLayout;
 class QLineEdit;
@@ -56,13 +57,19 @@ private:
     int CurrentWeldIndex() const;
     QLineEdit* AddTextField(QGridLayout* layout, const QString& label);
     QDoubleSpinBox* AddDoubleField(QGridLayout* layout, const QString& label, int decimals = 3);
+    QDoubleSpinBox* AddDoubleFieldWithUnit(QGridLayout* layout, const QString& label, const QString& unit, int decimals = 3);
+    QDoubleSpinBox* AddEnabledDoubleField(QGridLayout* layout, const QString& label, QCheckBox** enableCheck, int decimals = 3);
+    QDoubleSpinBox* AddEnabledDoubleFieldWithUnit(QGridLayout* layout, const QString& label, QCheckBox** enableCheck, const QString& unit, int decimals = 3);
     QSpinBox* AddIntField(QGridLayout* layout, const QString& label, int minimum = -999999, int maximum = 999999);
+    QSpinBox* AddIntFieldWithUnit(QGridLayout* layout, const QString& label, const QString& unit, int minimum = -999999, int maximum = 999999);
     bool CollectWeaveFromUi(T_WeaveDate& out) const;
     bool CollectWeldFromUi(T_WELD_PARA& out) const;
     void ShowError(const QString& message) const;
     QLineEdit* AddSingleTextField(QFormLayout* layout, const QString& label);
     QDoubleSpinBox* AddSingleDoubleField(QFormLayout* layout, const QString& label, int decimals = 3);
+    QDoubleSpinBox* AddSingleDoubleFieldWithUnit(QFormLayout* layout, const QString& label, const QString& unit, int decimals = 3);
     QSpinBox* AddSingleIntField(QFormLayout* layout, const QString& label, int minimum = -999999, int maximum = 999999);
+    QSpinBox* AddSingleIntFieldWithUnit(QFormLayout* layout, const QString& label, const QString& unit, int minimum = -999999, int maximum = 999999);
     bool HasUnsavedChanges() const;
     QString BuildSnapshot() const;
     void MarkCleanSnapshot();
@@ -80,7 +87,10 @@ private:
     QPushButton* m_removeBeadButton = nullptr;
     QPushButton* m_normalPageButton = nullptr;
     QPushButton* m_weavePageButton = nullptr;
+    QPushButton* m_wrapParamButton = nullptr;
+    QPushButton* m_cornerTransitionParamButton = nullptr;
     QStackedWidget* m_editorStack = nullptr;
+    QStackedWidget* m_specialParamStack = nullptr;
 
     QLineEdit* m_workPeaceEdit = nullptr;
     QLineEdit* m_weldTypeEdit = nullptr;
@@ -115,6 +125,24 @@ private:
     QDoubleSpinBox* m_wrapCurrent3Spin = nullptr;
     QDoubleSpinBox* m_wrapVoltage3Spin = nullptr;
     QDoubleSpinBox* m_wrapWaitTime3Spin = nullptr;
+    QCheckBox* m_wrapCurrent1EnableCheck = nullptr;
+    QCheckBox* m_wrapVoltage1EnableCheck = nullptr;
+    QCheckBox* m_wrapWaitTime1EnableCheck = nullptr;
+    QCheckBox* m_wrapCurrent2EnableCheck = nullptr;
+    QCheckBox* m_wrapVoltage2EnableCheck = nullptr;
+    QCheckBox* m_wrapWaitTime2EnableCheck = nullptr;
+    QCheckBox* m_wrapCurrent3EnableCheck = nullptr;
+    QCheckBox* m_wrapVoltage3EnableCheck = nullptr;
+    QCheckBox* m_wrapWaitTime3EnableCheck = nullptr;
+
+    QDoubleSpinBox* m_cornerTransitionRadiusSpin = nullptr;
+    QDoubleSpinBox* m_cornerTransitionSpeedSpin = nullptr;
+    QDoubleSpinBox* m_cornerTransitionCurrentSpin = nullptr;
+    QDoubleSpinBox* m_cornerTransitionVoltageSpin = nullptr;
+    QCheckBox* m_cornerTransitionRadiusEnableCheck = nullptr;
+    QCheckBox* m_cornerTransitionSpeedEnableCheck = nullptr;
+    QCheckBox* m_cornerTransitionCurrentEnableCheck = nullptr;
+    QCheckBox* m_cornerTransitionVoltageEnableCheck = nullptr;
 
     QSpinBox* m_weaveTypeSpin = nullptr;
     QDoubleSpinBox* m_freqSpin = nullptr;

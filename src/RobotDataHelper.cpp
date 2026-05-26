@@ -244,6 +244,8 @@ QStringList DefaultWeldParamLines()
         << "WeldSpeedMmPerMin=400 ;焊接速度(mm/min)"
         << "DryRunSpeedMmPerMin=1000 ;空跑速度(mm/min)"
         << "WeldSafeMoveSpeedMmPerMin=1000 ;下枪/收枪安全位移动速度(mm/min)"
+        << "StepOverlapRel=20 ;STEP连续过渡比例(OVERLAPREL)"
+        << "WeldDirection=1 ;焊接方向：1起点到终点，-1终点到起点"
         << ""
         << "#坐标和枪角"
         << "WorldCoorDir=0 ;世界Z方向"
@@ -256,7 +258,6 @@ QStringList DefaultWeldParamLines()
         << "NormalWeldRx=0 ;平焊RX"
         << "NormalWeldRy=0 ;平焊RY"
         << "CornerTransitionLeadDis=0 ;拐点过渡距离(mm)"
-        << "CornerArcRadiusMm=2 ;拐点圆弧半径(mm)"
         << "WeldStartSkipDis=0 ;起点跳过距离(mm)"
         << "WeldEndSkipDis=0 ;终点跳过距离(mm)"
         << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)";
@@ -282,15 +283,19 @@ QStringList DefaultWeldRuntimeParamLines(const QSet<QString>& existingKeys)
     {
         runtimeLines << "WeldSafeMoveSpeedMmPerMin=1000 ;下枪/收枪安全位移动速度(mm/min)";
     }
+    if (!existingKeys.contains("StepOverlapRel"))
+    {
+        runtimeLines << "StepOverlapRel=20 ;STEP连续过渡比例(OVERLAPREL)";
+    }
+    if (!existingKeys.contains("WeldDirection"))
+    {
+        runtimeLines << "WeldDirection=1 ;焊接方向：1起点到终点，-1终点到起点";
+    }
     if (!runtimeLines.isEmpty())
     {
         lines << "#焊接执行" << runtimeLines;
     }
     QStringList poseLines;
-    if (!existingKeys.contains("CornerArcRadiusMm"))
-    {
-        poseLines << "CornerArcRadiusMm=2 ;拐点圆弧半径(mm)";
-    }
     if (!existingKeys.contains("WeldRzGainDeg"))
     {
         poseLines << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)";

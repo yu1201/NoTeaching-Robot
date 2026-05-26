@@ -13,9 +13,18 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.05.25.1826`
+- 当前源码版本：`v2026.05.26.1959`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.05.25.1826.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.05.26.1959.exe`，不用自己编译源码。
+
+## 2026-05-26 更新
+
+- STEP 焊接程序生成完善：焊接姿态文件可离线生成 `Weld_时间.srp/.srd`，实际焊接模式写入 `ARCON/ARCSET/ARCOFF`，空跑模式通过变量跳过焊接指令
+- 焊接工艺新增包角参数启用项和拐点过渡半径/速度/电流/电压启用项，STEP 轨迹生成可读取当前工艺参数
+- 测量焊接参数新增扫描位置示教入口、计算安全位参数、焊接方向和 STEP 过渡比例；先测后焊扫描 CLI 支持按 `--robot` 指定 STEP/FANUC 机器人
+- 坡口相机 FPS 离线检测工具加入安装包，界面测试结束后停留显示平均帧数和一帧样例点云数据
+- Qt 中文翻译文件随 Release 和安装包部署，减少平板系统标准按钮显示英文的问题
+- 构建验证：`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.05.26.1959.exe`
 
 ## 2026-05-25 更新
 

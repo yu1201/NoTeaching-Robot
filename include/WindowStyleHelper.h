@@ -18,6 +18,9 @@ void ConfigureApplicationFontFallback();
 // 给窗口或嵌入页加一层按需显示的横/纵滚动区；内容没有超出时滚动条保持隐藏。
 void ApplyAdaptiveScrollSupport(QWidget* widget);
 
+// 点动、流程执行等实时操作窗口需要直接接收鼠标事件，不套通用外层滚动区。
+void MarkDirectMouseInputWindow(QWidget* widget);
+
 // 窗口显示或最大化后，补刷新 Windows 原生标题栏颜色。
 void RefreshUnifiedWindowTitleBar(QWidget* widget);
 

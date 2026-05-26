@@ -145,15 +145,16 @@ QtWidgetsApplication4.exe --no-show --fanuc-curpos-diag
 执行内容：
 
 - 加载先测后焊预设参数。
-- 确保当前机器人单元的扫描相机运行。
+- 按 `--robot` / `--robot-unit` 指定的机器人运行；不指定时使用当前或第一个可用机器人。
+- 确保所选机器人单元的扫描相机运行。
 - 每轮执行起点安全位、扫描起点、扫描采集、终点安全位。
-- 当前流程依赖 FANUC 服务连接。
+- STEP / FANUC 都走通用机器人驱动；只有 `--fanuc-*` 命令仍依赖 FANUC 服务连接。
 
 示例：
 
 ```powershell
-QtWidgetsApplication4.exe --no-show --measure-then-weld-scan-only-repeat 3
-QtWidgetsApplication4.exe --no-show --measure-then-weld-scan-only-repeat 5 --measure-then-weld-scan-speed 600 --measure-then-weld-camera-offset-ms -35
+QtWidgetsApplication4.exe --no-show --robot RobotC --measure-then-weld-scan-only-repeat 3
+QtWidgetsApplication4.exe --no-show --robot RobotC --measure-then-weld-scan-only-repeat 5 --measure-then-weld-scan-speed 600 --measure-then-weld-camera-offset-ms -35
 ```
 
 ## 7. 离线激光点云与焊道处理 CLI
@@ -228,7 +229,7 @@ QtWidgetsApplication4.exe --no-show --apply-weld-seam-comp "D:\pose.txt" --apply
 | --- | --- | --- |
 | `--generate-step-weld-program` | `<FILE>` | 根据焊接姿态文件生成 STEP `Weld_时间.srp/.srd`。默认生成实际焊接程序，包含 `ARCON/ARCOFF`。 |
 | `--generate-step-weld-program-output-dir` | `<DIR>` | 指定 STEP 焊接程序输出目录，默认 `Job\STEP`。 |
-| `--generate-step-weld-program-dry-run` | 无 | 按空跑轨迹生成 STEP 文件，不写起弧/停弧工艺语句。 |
+| `--generate-step-weld-program-dry-run` | 无 | 按空跑轨迹生成 STEP 文件，实际焊接变量置 0，运行时跳过 `ARCON/ARCSET/ARCOFF`。 |
 | `--generate-step-weld-speed` | `<mm/min>` | 覆盖本次 STEP 文件轨迹速度，不修改 ini。 |
 
 说明：
@@ -282,6 +283,7 @@ QtWidgetsApplication4.exe --no-show `
 
 ```powershell
 QtWidgetsApplication4.exe --no-show `
+  --robot RobotC `
   --measure-then-weld-scan-only-repeat 3 `
   --measure-then-weld-scan-speed 600 `
   --measure-then-weld-camera-offset-ms -35

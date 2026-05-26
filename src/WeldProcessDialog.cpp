@@ -6,6 +6,7 @@
 #include <QAbstractSpinBox>
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -21,6 +22,7 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPushButton>
+#include <QSizePolicy>
 #include <QStackedWidget>
 #include <QSpinBox>
 #include <QStyleOptionSpinBox>
@@ -31,8 +33,9 @@ namespace
 {
 constexpr double kDoubleMin = -999999.0;
 constexpr double kDoubleMax = 999999.0;
-constexpr int kGridFieldWidth = 132;
+constexpr int kGridFieldWidth = 112;
 constexpr int kSingleFieldWidth = 164;
+constexpr int kSpinFieldHeight = 32;
 
 class PlusMinusDoubleSpinBox : public QDoubleSpinBox
 {
@@ -46,12 +49,20 @@ protected:
     void paintEvent(QPaintEvent* event) override
     {
         QDoubleSpinBox::paintEvent(event);
-        DrawPlusMinus();
+        if (buttonSymbols() != QAbstractSpinBox::NoButtons)
+        {
+            DrawPlusMinus();
+        }
     }
 
 private:
     void DrawPlusMinus()
     {
+        if (buttonSymbols() == QAbstractSpinBox::NoButtons)
+        {
+            return;
+        }
+
         QStyleOptionSpinBox option;
         initStyleOption(&option);
 
@@ -82,12 +93,20 @@ protected:
     void paintEvent(QPaintEvent* event) override
     {
         QSpinBox::paintEvent(event);
-        DrawPlusMinus();
+        if (buttonSymbols() != QAbstractSpinBox::NoButtons)
+        {
+            DrawPlusMinus();
+        }
     }
 
 private:
     void DrawPlusMinus()
     {
+        if (buttonSymbols() == QAbstractSpinBox::NoButtons)
+        {
+            return;
+        }
+
         QStyleOptionSpinBox option;
         initStyleOption(&option);
 
@@ -106,13 +125,17 @@ private:
     }
 };
 
-QGridLayout* CreateTwoColumnForm(QGroupBox* group)
+QGridLayout* CreateTwoColumnForm(QWidget* parent)
 {
-    auto* layout = new QGridLayout(group);
+    auto* layout = new QGridLayout(parent);
     layout->setContentsMargins(12, 8, 12, 12);
-    layout->setHorizontalSpacing(8);
+    layout->setHorizontalSpacing(6);
     layout->setVerticalSpacing(8);
+    layout->setColumnMinimumWidth(0, 82);
+    layout->setColumnMinimumWidth(2, 82);
+    layout->setColumnStretch(0, 0);
     layout->setColumnStretch(1, 1);
+    layout->setColumnStretch(2, 0);
     layout->setColumnStretch(3, 1);
     return layout;
 }
@@ -131,8 +154,115 @@ void AddTwoColumnField(QGridLayout* layout, const QString& labelText, QWidget* f
 
     QLabel* label = new QLabel(labelText, layout->parentWidget());
     label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    label->setMinimumWidth(82);
+    label->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
     layout->addWidget(label, row, col);
     layout->addWidget(field, row, col + 1);
+}
+
+int UnitLabelWidth(const QString& unit)
+{
+    const QString trimmed = unit.trimmed();
+    if (trimmed.isEmpty())
+    {
+        return 0;
+    }
+    if (trimmed == "mm/min")
+    {
+        return 58;
+    }
+    return 36;
+}
+
+QLabel* CreateUnitLabel(QWidget* parent, const QString& unit)
+{
+    auto* label = new QLabel(unit, parent);
+    label->setObjectName("fieldUnitLabel");
+    label->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    label->setFixedWidth(UnitLabelWidth(unit));
+    return label;
+}
+
+QWidget* WrapFieldWithUnit(QWidget* parent, QWidget* field, const QString& unit)
+{
+    if (unit.trimmed().isEmpty())
+    {
+        return field;
+    }
+
+    auto* host = new QWidget(parent);
+    host->setObjectName("fieldUnitHost");
+    auto* layout = new QHBoxLayout(host);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(5);
+    layout->addWidget(field);
+    layout->addWidget(CreateUnitLabel(host, unit));
+    layout->addStretch(1);
+    host->setMinimumWidth(kGridFieldWidth + UnitLabelWidth(unit) + 5);
+    return host;
+}
+
+void PrepareFlatSpinBox(QAbstractSpinBox* spin, int width)
+{
+    if (spin == nullptr)
+    {
+        return;
+    }
+
+    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    spin->setFrame(false);
+    spin->setFixedWidth(width > 2 ? width - 2 : width);
+    spin->setFixedHeight(kSpinFieldHeight > 2 ? kSpinFieldHeight - 2 : kSpinFieldHeight);
+    if (QLineEdit* editor = spin->findChild<QLineEdit*>())
+    {
+        editor->setFrame(false);
+    }
+}
+
+QFrame* WrapSpinFieldFrame(QWidget* parent, QAbstractSpinBox* spin, int width)
+{
+    auto* frame = new QFrame(parent);
+    frame->setObjectName("spinFieldFrame");
+    frame->setFixedSize(width, kSpinFieldHeight);
+
+    PrepareFlatSpinBox(spin, width);
+
+    auto* layout = new QHBoxLayout(frame);
+    layout->setContentsMargins(1, 1, 1, 1);
+    layout->setSpacing(0);
+    layout->addWidget(spin);
+    return frame;
+}
+
+QFrame* CreateTabConnectorLine(QWidget* parent, int fixedWidth = -1)
+{
+    auto* line = new QFrame(parent);
+    line->setObjectName("tabConnectorLine");
+    line->setFrameShape(QFrame::NoFrame);
+    line->setFixedHeight(1);
+    if (fixedWidth >= 0)
+    {
+        line->setFixedWidth(fixedWidth);
+        line->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    }
+    else
+    {
+        line->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+    return line;
+}
+
+bool IsChecked(const QCheckBox* check)
+{
+    return check != nullptr && check->isChecked();
+}
+
+void SetChecked(QCheckBox* check, int value)
+{
+    if (check != nullptr)
+    {
+        check->setChecked(value != 0);
+    }
 }
 }
 
@@ -280,20 +410,21 @@ void WeldProcessDialog::BuildEditorUi()
     tabHostLayout->setSpacing(0);
 
     auto* switchRow = new QHBoxLayout();
-    switchRow->setContentsMargins(18, 8, 0, 0);
+    switchRow->setContentsMargins(0, 0, 0, 0);
     switchRow->setSpacing(0);
     m_normalPageButton = new QPushButton("常规工艺参数", editorRoot);
     m_weavePageButton = new QPushButton("摆动参数", editorRoot);
-    m_normalPageButton->setObjectName("topTabButton");
-    m_weavePageButton->setObjectName("topTabButton");
+    m_normalPageButton->setObjectName("tabStripButton");
+    m_weavePageButton->setObjectName("tabStripButton");
     m_normalPageButton->setCheckable(true);
     m_weavePageButton->setCheckable(true);
     m_normalPageButton->setChecked(true);
-    m_normalPageButton->setMinimumHeight(40);
-    m_weavePageButton->setMinimumHeight(40);
+    m_normalPageButton->setMinimumHeight(42);
+    m_weavePageButton->setMinimumHeight(42);
+    switchRow->addWidget(CreateTabConnectorLine(tabHostContainer, 18), 0, Qt::AlignBottom);
     switchRow->addWidget(m_normalPageButton);
     switchRow->addWidget(m_weavePageButton);
-    switchRow->addStretch();
+    switchRow->addWidget(CreateTabConnectorLine(tabHostContainer), 1, Qt::AlignBottom);
     tabHostLayout->addLayout(switchRow);
 
     auto* editorFrame = new QFrame(editorRoot);
@@ -311,7 +442,7 @@ void WeldProcessDialog::BuildEditorUi()
     basicLayout->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     m_workPeaceEdit = AddSingleTextField(basicLayout, "工件名称");
     m_weldTypeEdit = AddSingleTextField(basicLayout, "焊接类型");
-    m_weldAngleSizeSpin = AddSingleDoubleField(basicLayout, "焊脚尺寸");
+    m_weldAngleSizeSpin = AddSingleDoubleFieldWithUnit(basicLayout, "焊脚尺寸", "mm");
     m_standWeldDirSpin = AddSingleIntField(basicLayout, "立焊方向", 0, 1);
     m_weldMethodSpin = AddSingleIntField(basicLayout, "焊接方法", 0, 999);
     m_weaveTypeNoSpin = AddSingleIntField(basicLayout, "关联摆动号", 0, 9999);
@@ -324,9 +455,9 @@ void WeldProcessDialog::BuildEditorUi()
     startLayout->setHorizontalSpacing(10);
     startLayout->setVerticalSpacing(9);
     startLayout->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
-    m_startArcCurrentSpin = AddSingleDoubleField(startLayout, "引弧电流");
-    m_startArcVoltageSpin = AddSingleDoubleField(startLayout, "引弧电压");
-    m_startWaitTimeSpin = AddSingleDoubleField(startLayout, "引弧时间");
+    m_startArcCurrentSpin = AddSingleDoubleFieldWithUnit(startLayout, "引弧电流", "A");
+    m_startArcVoltageSpin = AddSingleDoubleFieldWithUnit(startLayout, "引弧电压", "V");
+    m_startWaitTimeSpin = AddSingleDoubleFieldWithUnit(startLayout, "引弧时间", "s");
     startGroup->setMinimumWidth(300);
 
     auto* stopGroup = new QGroupBox("收弧参数", editorRoot);
@@ -336,52 +467,99 @@ void WeldProcessDialog::BuildEditorUi()
     stopLayout->setHorizontalSpacing(10);
     stopLayout->setVerticalSpacing(9);
     stopLayout->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
-    m_stopArcCurrentSpin = AddSingleDoubleField(stopLayout, "收弧电流");
-    m_stopArcVoltageSpin = AddSingleDoubleField(stopLayout, "收弧电压");
-    m_stopWaitTimeSpin = AddSingleDoubleField(stopLayout, "收弧时间");
+    m_stopArcCurrentSpin = AddSingleDoubleFieldWithUnit(stopLayout, "收弧电流", "A");
+    m_stopArcVoltageSpin = AddSingleDoubleFieldWithUnit(stopLayout, "收弧电压", "V");
+    m_stopWaitTimeSpin = AddSingleDoubleFieldWithUnit(stopLayout, "收弧时间", "s");
     stopGroup->setMinimumWidth(300);
 
     auto* weldGroup = new QGroupBox("焊接与运动参数", editorRoot);
     auto* weldLayout = CreateTwoColumnForm(weldGroup);
-    m_trackCurrentSpin = AddDoubleField(weldLayout, "焊接电流");
-    m_trackVoltageSpin = AddDoubleField(weldLayout, "焊接电压");
-    m_weldVelocitySpin = AddDoubleField(weldLayout, "焊接速度");
-    m_crosswiseOffsetSpin = AddDoubleField(weldLayout, "横向补偿");
-    m_verticalOffsetSpin = AddDoubleField(weldLayout, "竖向补偿");
+    m_trackCurrentSpin = AddDoubleFieldWithUnit(weldLayout, "焊接电流", "A");
+    m_trackVoltageSpin = AddDoubleFieldWithUnit(weldLayout, "焊接电压", "V");
+    m_weldVelocitySpin = AddDoubleFieldWithUnit(weldLayout, "焊接速度", "mm/min");
+    m_crosswiseOffsetSpin = AddDoubleFieldWithUnit(weldLayout, "横向补偿", "mm");
+    m_verticalOffsetSpin = AddDoubleFieldWithUnit(weldLayout, "竖向补偿", "mm");
     m_wrapConditionNoSpin = AddIntField(weldLayout, "摆动条件号", 0, 9999);
-    m_weldAngleSpin = AddDoubleField(weldLayout, "焊接角度");
-    m_weldDipAngleSpin = AddDoubleField(weldLayout, "焊接倾角");
+    m_weldAngleSpin = AddDoubleFieldWithUnit(weldLayout, "焊接角度", "deg");
+    m_weldDipAngleSpin = AddDoubleFieldWithUnit(weldLayout, "焊接倾角", "deg");
     weldGroup->setMinimumWidth(460);
 
-    auto* wrapGroup = new QGroupBox("搭接/包角参数", editorRoot);
-    auto* wrapLayout = CreateTwoColumnForm(wrapGroup);
-    m_wrapCurrent1Spin = AddDoubleField(wrapLayout, "段1电流");
-    m_wrapVoltage1Spin = AddDoubleField(wrapLayout, "段1电压");
-    m_wrapWaitTime1Spin = AddDoubleField(wrapLayout, "段1时间");
-    m_wrapCurrent2Spin = AddDoubleField(wrapLayout, "段2电流");
-    m_wrapVoltage2Spin = AddDoubleField(wrapLayout, "段2电压");
-    m_wrapWaitTime2Spin = AddDoubleField(wrapLayout, "段2时间");
-    m_wrapCurrent3Spin = AddDoubleField(wrapLayout, "段3电流");
-    m_wrapVoltage3Spin = AddDoubleField(wrapLayout, "段3电压");
-    m_wrapWaitTime3Spin = AddDoubleField(wrapLayout, "段3时间");
-    wrapGroup->setMinimumWidth(460);
+    auto* specialGroup = new QFrame(editorRoot);
+    specialGroup->setObjectName("inlineTabHost");
+    auto* specialLayout = new QVBoxLayout(specialGroup);
+    specialLayout->setContentsMargins(0, 0, 0, 0);
+    specialLayout->setSpacing(0);
+
+    auto* specialSwitchRow = new QHBoxLayout();
+    specialSwitchRow->setContentsMargins(0, 0, 0, 0);
+    specialSwitchRow->setSpacing(0);
+    m_wrapParamButton = new QPushButton("包角参数", specialGroup);
+    m_cornerTransitionParamButton = new QPushButton("拐点过渡参数", specialGroup);
+    specialSwitchRow->addWidget(CreateTabConnectorLine(specialGroup, 18), 0, Qt::AlignBottom);
+    for (QPushButton* button : { m_wrapParamButton, m_cornerTransitionParamButton })
+    {
+        button->setObjectName("tabStripButton");
+        button->setCheckable(true);
+        button->setMinimumHeight(40);
+        specialSwitchRow->addWidget(button);
+    }
+    m_wrapParamButton->setChecked(false);
+    m_wrapParamButton->setEnabled(false);
+    m_wrapParamButton->setToolTip("暂未开放");
+    m_cornerTransitionParamButton->setChecked(true);
+    specialSwitchRow->addWidget(CreateTabConnectorLine(specialGroup), 1, Qt::AlignBottom);
+    specialLayout->addLayout(specialSwitchRow);
+
+    auto* wrapPage = new QWidget(specialGroup);
+    wrapPage->setEnabled(false);
+    auto* wrapLayout = CreateTwoColumnForm(wrapPage);
+    m_wrapCurrent1Spin = AddEnabledDoubleFieldWithUnit(wrapLayout, "段1电流", &m_wrapCurrent1EnableCheck, "A");
+    m_wrapVoltage1Spin = AddEnabledDoubleFieldWithUnit(wrapLayout, "段1电压", &m_wrapVoltage1EnableCheck, "V");
+    m_wrapWaitTime1Spin = AddEnabledDoubleFieldWithUnit(wrapLayout, "段1时间", &m_wrapWaitTime1EnableCheck, "s");
+    m_wrapCurrent2Spin = AddEnabledDoubleFieldWithUnit(wrapLayout, "段2电流", &m_wrapCurrent2EnableCheck, "A");
+    m_wrapVoltage2Spin = AddEnabledDoubleFieldWithUnit(wrapLayout, "段2电压", &m_wrapVoltage2EnableCheck, "V");
+    m_wrapWaitTime2Spin = AddEnabledDoubleFieldWithUnit(wrapLayout, "段2时间", &m_wrapWaitTime2EnableCheck, "s");
+    m_wrapCurrent3Spin = AddEnabledDoubleFieldWithUnit(wrapLayout, "段3电流", &m_wrapCurrent3EnableCheck, "A");
+    m_wrapVoltage3Spin = AddEnabledDoubleFieldWithUnit(wrapLayout, "段3电压", &m_wrapVoltage3EnableCheck, "V");
+    m_wrapWaitTime3Spin = AddEnabledDoubleFieldWithUnit(wrapLayout, "段3时间", &m_wrapWaitTime3EnableCheck, "s");
+
+    auto* cornerPage = new QWidget(specialGroup);
+    auto* cornerLayout = CreateTwoColumnForm(cornerPage);
+    m_cornerTransitionRadiusSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "圆弧过渡半径", &m_cornerTransitionRadiusEnableCheck, "mm");
+    m_cornerTransitionRadiusSpin->setMinimum(2.0);
+    m_cornerTransitionSpeedSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "过渡速度", &m_cornerTransitionSpeedEnableCheck, "mm/min");
+    m_cornerTransitionCurrentSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "过渡电流", &m_cornerTransitionCurrentEnableCheck, "A");
+    m_cornerTransitionVoltageSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "过渡电压", &m_cornerTransitionVoltageEnableCheck, "V");
+
+    m_specialParamStack = new QStackedWidget(specialGroup);
+    m_specialParamStack->addWidget(wrapPage);
+    m_specialParamStack->addWidget(cornerPage);
+    m_specialParamStack->setCurrentIndex(1);
+    auto* specialPanel = new QFrame(specialGroup);
+    specialPanel->setObjectName("inlineTabPanel");
+    auto* specialPanelLayout = new QVBoxLayout(specialPanel);
+    specialPanelLayout->setContentsMargins(8, 8, 8, 8);
+    specialPanelLayout->setSpacing(0);
+    specialPanelLayout->addWidget(m_specialParamStack);
+    specialLayout->addWidget(specialPanel);
+    specialGroup->setMinimumWidth(520);
 
     auto* weaveGroup = new QGroupBox("摆动参数", editorRoot);
     auto* weaveLayout = CreateTwoColumnForm(weaveGroup);
     m_weaveTypeSpin = AddIntField(weaveLayout, "摆动类型", 0, 9999);
-    m_freqSpin = AddDoubleField(weaveLayout, "频率");
-    m_ampLeftSpin = AddDoubleField(weaveLayout, "左摆幅");
-    m_ampRightSpin = AddDoubleField(weaveLayout, "右摆幅");
-    m_stopTimeLeftSpin = AddIntField(weaveLayout, "左停留", 0, 999999);
-    m_stopTimeCenterSpin = AddIntField(weaveLayout, "中停留", 0, 999999);
-    m_stopTimeRightSpin = AddIntField(weaveLayout, "右停留", 0, 999999);
-    m_rotAngleXSpin = AddDoubleField(weaveLayout, "X旋转角");
-    m_rotAngleZSpin = AddDoubleField(weaveLayout, "Z旋转角");
+    m_freqSpin = AddDoubleFieldWithUnit(weaveLayout, "频率", "Hz");
+    m_ampLeftSpin = AddDoubleFieldWithUnit(weaveLayout, "左摆幅", "mm");
+    m_ampRightSpin = AddDoubleFieldWithUnit(weaveLayout, "右摆幅", "mm");
+    m_stopTimeLeftSpin = AddIntFieldWithUnit(weaveLayout, "左停留", "ms", 0, 999999);
+    m_stopTimeCenterSpin = AddIntFieldWithUnit(weaveLayout, "中停留", "ms", 0, 999999);
+    m_stopTimeRightSpin = AddIntFieldWithUnit(weaveLayout, "右停留", "ms", 0, 999999);
+    m_rotAngleXSpin = AddDoubleFieldWithUnit(weaveLayout, "X旋转角", "deg");
+    m_rotAngleZSpin = AddDoubleFieldWithUnit(weaveLayout, "Z旋转角", "deg");
     m_delayTypeLeftSpin = AddIntField(weaveLayout, "左延时类型", 0, 999);
     m_delayTypeCenterSpin = AddIntField(weaveLayout, "中延时类型", 0, 999);
     m_delayTypeRightSpin = AddIntField(weaveLayout, "右延时类型", 0, 999);
-    m_rotAngleLeftSpin = AddDoubleField(weaveLayout, "左摆角");
-    m_rotAngleRightSpin = AddDoubleField(weaveLayout, "右摆角");
+    m_rotAngleLeftSpin = AddDoubleFieldWithUnit(weaveLayout, "左摆角", "deg");
+    m_rotAngleRightSpin = AddDoubleFieldWithUnit(weaveLayout, "右摆角", "deg");
     weaveGroup->setMinimumWidth(500);
 
     auto* topRow = new QHBoxLayout();
@@ -393,7 +571,7 @@ void WeldProcessDialog::BuildEditorUi()
     auto* bottomRow = new QHBoxLayout();
     bottomRow->setSpacing(10);
     bottomRow->addWidget(weldGroup, 1);
-    bottomRow->addWidget(wrapGroup, 1);
+    bottomRow->addWidget(specialGroup, 1);
 
     auto* normalPage = new QWidget(editorRoot);
     auto* normalPageOuterLayout = new QVBoxLayout(normalPage);
@@ -444,6 +622,18 @@ void WeldProcessDialog::BuildEditorUi()
             m_weavePageButton->setChecked(true);
             m_editorStack->setCurrentIndex(1);
         });
+    connect(m_wrapParamButton, &QPushButton::clicked, this, [this]()
+        {
+            m_wrapParamButton->setChecked(true);
+            m_cornerTransitionParamButton->setChecked(false);
+            m_specialParamStack->setCurrentIndex(0);
+        });
+    connect(m_cornerTransitionParamButton, &QPushButton::clicked, this, [this]()
+        {
+            m_wrapParamButton->setChecked(false);
+            m_cornerTransitionParamButton->setChecked(true);
+            m_specialParamStack->setCurrentIndex(1);
+        });
     connect(m_addBeadButton, &QPushButton::clicked, this, &WeldProcessDialog::AddBead);
     connect(m_removeBeadButton, &QPushButton::clicked, this, &WeldProcessDialog::RemoveBead);
     connect(m_addWeldButton, &QPushButton::clicked, this, &WeldProcessDialog::AddWeldGroup);
@@ -462,10 +652,12 @@ void WeldProcessDialog::ApplyDialogStyle()
 {
     setStyleSheet(
         "QDialog{background:#111820;color:#ECF3F4;}"
-        "QFrame#leftPanel,QFrame#beadPanel,QGroupBox,QFrame#editorPagePanel,QFrame#tabHostPanel{background:#111820;border:1px solid #2E4656;border-radius:14px;}"
+        "QFrame#leftPanel,QFrame#beadPanel,QGroupBox,QFrame#editorPagePanel,QFrame#tabHostPanel,QFrame#inlineTabPanel{background:#111820;border:1px solid #2E4656;border-radius:14px;}"
+        "QFrame#inlineTabHost{background:transparent;border:none;}"
         "QWidget#topPanel{background:#111820;border:none;}"
         "QStackedWidget{background:transparent;}"
-        "QFrame#tabHostPanel{padding-top:0px;border-radius:14px;margin-top:8px;}"
+        "QFrame#tabHostPanel,QFrame#inlineTabPanel{padding-top:0px;border-radius:0px;margin-top:0px;border-top:0px;}"
+        "QFrame#tabConnectorLine{background:#2E4656;border:none;min-height:1px;max-height:1px;}"
         "QFrame#editorPagePanel{border:none;background:transparent;border-radius:0px;}"
         "QGroupBox{margin-top:0px;padding:30px 14px 14px 14px;font-weight:600;}"
         "QGroupBox::title{subcontrol-origin:padding;subcontrol-position:top left;left:12px;top:7px;padding:0;color:#9ED8DB;background:transparent;}"
@@ -474,8 +666,10 @@ void WeldProcessDialog::ApplyDialogStyle()
         "QLabel#sectionTitle{font-size:16px;font-weight:600;color:#9ED8DB;}"
         "QLabel{color:#BACBD1;}"
         "QLineEdit,QListWidget{background:#0B1117;color:#F5FAFA;border:1px solid #385366;border-radius:8px;padding:4px 8px;selection-background-color:#2D5465;selection-color:#F5FAFA;}"
-        "QSpinBox,QDoubleSpinBox{background:#000000;color:#F5FAFA;border:1px solid #385366;border-radius:0px;padding:4px 34px 4px 8px;selection-background-color:#2D5465;selection-color:#F5FAFA;}"
-        "QSpinBox,QDoubleSpinBox{padding-right:36px;min-height:24px;}"
+        "QFrame#spinFieldFrame{background:#000000;border:1px solid #385366;border-radius:0px;}"
+        "QSpinBox,QDoubleSpinBox{background:transparent;color:#F5FAFA;border:none;border-radius:0px;padding:0px 8px;selection-background-color:#2D5465;selection-color:#F5FAFA;min-height:26px;}"
+        "QSpinBox QLineEdit,QDoubleSpinBox QLineEdit{background:transparent;border:none;border-radius:0px;padding:0px;color:#F5FAFA;}"
+        "QLabel#fieldUnitLabel{color:#9ED8DB;}"
         "QSpinBox::up-button,QDoubleSpinBox::up-button{"
             "subcontrol-origin:border;"
             "subcontrol-position:top right;"
@@ -496,32 +690,42 @@ void WeldProcessDialog::ApplyDialogStyle()
         "QSpinBox::up-arrow,QDoubleSpinBox::up-arrow{image:url(:/QtWidgetsApplication4/icons/chevron-up.svg);width:10px;height:7px;}"
         "QSpinBox::down-arrow,QDoubleSpinBox::down-arrow{image:url(:/QtWidgetsApplication4/icons/chevron-down.svg);width:10px;height:7px;}"
         "QSpinBox::up-button:hover,QDoubleSpinBox::up-button:hover,QSpinBox::down-button:hover,QDoubleSpinBox::down-button:hover{background:#101820;}"
+        "QCheckBox{color:#BACBD1;spacing:5px;}"
+        "QCheckBox::indicator{width:16px;height:16px;border:1px solid #3C6173;background:#0B1117;border-radius:3px;}"
+        "QCheckBox::indicator:checked{background:#2D8F7D;border-color:#7BD8B3;}"
+        "QCheckBox::indicator:hover{border-color:#72D4DD;}"
         "QPushButton{background:#233645;color:#F5FAFA;border:1px solid #3C6173;border-radius:10px;padding:7px 14px;}"
         "QPushButton:hover{background:#2D5465;border-color:#72D4DD;}"
         "QPushButton:pressed{background:#18303B;}"
         "QPushButton#saveBtn{background:#2D5465;border-color:#72D4DD;color:#FFFFFF;font-weight:600;}"
         "QPushButton#saveBtn:hover{background:#347084;}"
         "QPushButton:checked{background:#305F55;border-color:#7BD8B3;color:#F5FAFA;}"
-        "QPushButton#topTabButton{"
+        "QPushButton#tabStripButton{"
             "background:#172530;"
             "color:#BACBD1;"
             "border:1px solid #2E4656;"
-            "border-top-left-radius:10px;"
-            "border-top-right-radius:10px;"
-            "border-bottom-left-radius:10px;"
-            "border-bottom-right-radius:10px;"
+            "border-top-left-radius:0px;"
+            "border-top-right-radius:0px;"
+            "border-bottom-left-radius:0px;"
+            "border-bottom-right-radius:0px;"
+            "border-bottom:0px;"
             "padding:8px 24px;"
-            "margin-right:4px;"
+            "margin-right:-1px;"
             "min-width:152px;"
-            "max-width:190px;"
             "font-weight:600;"
         "}"
-        "QPushButton#topTabButton:hover{background:#233645;color:#F5FAFA;border-color:#72D4DD;}"
-        "QPushButton#topTabButton:checked{"
+        "QPushButton#tabStripButton:hover{background:#233645;color:#F5FAFA;border-color:#72D4DD;}"
+        "QPushButton#tabStripButton:checked{"
             "background:#233645;"
             "color:#9ED8DB;"
             "border-color:#72D4DD;"
+            "border-bottom:0px;"
         "}"
+        "QPushButton#tabStripButton:disabled{background:#101820;color:#61727A;border-color:#263742;}"
+        "QFrame#spinFieldFrame:disabled{background:#080C10;border-color:#253947;}"
+        "QSpinBox:disabled,QDoubleSpinBox:disabled,QLineEdit:disabled{color:#61727A;background:#080C10;border-color:#253947;}"
+        "QCheckBox:disabled{color:#61727A;}"
+        "QCheckBox::indicator:disabled{background:#080C10;border-color:#253947;}"
         "QPushButton#roundActionButton{border-radius:12px;padding:0;font-size:16px;font-weight:700;min-width:24px;max-width:24px;min-height:24px;max-height:24px;}"
         "QListWidget::item{padding:8px 10px;border-bottom:1px solid #1E303B;border-radius:6px;margin:1px;}"
         "QListWidget::item:hover{background:#172530;}"
@@ -545,24 +749,67 @@ QLineEdit* WeldProcessDialog::AddTextField(QGridLayout* layout, const QString& l
 
 QDoubleSpinBox* WeldProcessDialog::AddDoubleField(QGridLayout* layout, const QString& label, int decimals)
 {
+    return AddDoubleFieldWithUnit(layout, label, QString(), decimals);
+}
+
+QDoubleSpinBox* WeldProcessDialog::AddDoubleFieldWithUnit(QGridLayout* layout, const QString& label, const QString& unit, int decimals)
+{
     auto* spin = new PlusMinusDoubleSpinBox(this);
     spin->setDecimals(decimals);
     spin->setRange(kDoubleMin, kDoubleMax);
-    spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
-    spin->setFixedWidth(kGridFieldWidth);
-    spin->setFixedHeight(28);
-    AddTwoColumnField(layout, label, spin);
+    AddTwoColumnField(layout, label, WrapFieldWithUnit(this, WrapSpinFieldFrame(this, spin, kGridFieldWidth), unit));
+    return spin;
+}
+
+QDoubleSpinBox* WeldProcessDialog::AddEnabledDoubleField(QGridLayout* layout, const QString& label, QCheckBox** enableCheck, int decimals)
+{
+    return AddEnabledDoubleFieldWithUnit(layout, label, enableCheck, QString(), decimals);
+}
+
+QDoubleSpinBox* WeldProcessDialog::AddEnabledDoubleFieldWithUnit(QGridLayout* layout, const QString& label, QCheckBox** enableCheck, const QString& unit, int decimals)
+{
+    auto* spin = new PlusMinusDoubleSpinBox(this);
+    spin->setDecimals(decimals);
+    spin->setRange(kDoubleMin, kDoubleMax);
+    auto* spinFrame = WrapSpinFieldFrame(this, spin, kGridFieldWidth);
+
+    auto* check = new QCheckBox("启用", this);
+    check->setObjectName("fieldEnableCheck");
+    check->setFixedWidth(50);
+    spin->setEnabled(false);
+    connect(check, &QCheckBox::toggled, spin, &QWidget::setEnabled);
+
+    auto* fieldHost = new QWidget(this);
+    auto* fieldLayout = new QHBoxLayout(fieldHost);
+    fieldLayout->setContentsMargins(0, 0, 0, 0);
+    fieldLayout->setSpacing(5);
+    fieldLayout->addWidget(check);
+    fieldLayout->addWidget(spinFrame);
+    if (!unit.trimmed().isEmpty())
+    {
+        fieldLayout->addWidget(CreateUnitLabel(fieldHost, unit));
+    }
+    fieldLayout->addStretch(1);
+    fieldHost->setMinimumWidth(50 + kGridFieldWidth + UnitLabelWidth(unit) + 10);
+
+    if (enableCheck != nullptr)
+    {
+        *enableCheck = check;
+    }
+    AddTwoColumnField(layout, label, fieldHost);
     return spin;
 }
 
 QSpinBox* WeldProcessDialog::AddIntField(QGridLayout* layout, const QString& label, int minimum, int maximum)
 {
+    return AddIntFieldWithUnit(layout, label, QString(), minimum, maximum);
+}
+
+QSpinBox* WeldProcessDialog::AddIntFieldWithUnit(QGridLayout* layout, const QString& label, const QString& unit, int minimum, int maximum)
+{
     auto* spin = new PlusMinusSpinBox(this);
     spin->setRange(minimum, maximum);
-    spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
-    spin->setFixedWidth(kGridFieldWidth);
-    spin->setFixedHeight(28);
-    AddTwoColumnField(layout, label, spin);
+    AddTwoColumnField(layout, label, WrapFieldWithUnit(this, WrapSpinFieldFrame(this, spin, kGridFieldWidth), unit));
     return spin;
 }
 
@@ -577,24 +824,28 @@ QLineEdit* WeldProcessDialog::AddSingleTextField(QFormLayout* layout, const QStr
 
 QDoubleSpinBox* WeldProcessDialog::AddSingleDoubleField(QFormLayout* layout, const QString& label, int decimals)
 {
+    return AddSingleDoubleFieldWithUnit(layout, label, QString(), decimals);
+}
+
+QDoubleSpinBox* WeldProcessDialog::AddSingleDoubleFieldWithUnit(QFormLayout* layout, const QString& label, const QString& unit, int decimals)
+{
     auto* spin = new PlusMinusDoubleSpinBox(this);
     spin->setDecimals(decimals);
     spin->setRange(kDoubleMin, kDoubleMax);
-    spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
-    spin->setFixedWidth(kSingleFieldWidth);
-    spin->setFixedHeight(28);
-    layout->addRow(label, spin);
+    layout->addRow(label, WrapFieldWithUnit(this, WrapSpinFieldFrame(this, spin, kSingleFieldWidth), unit));
     return spin;
 }
 
 QSpinBox* WeldProcessDialog::AddSingleIntField(QFormLayout* layout, const QString& label, int minimum, int maximum)
 {
+    return AddSingleIntFieldWithUnit(layout, label, QString(), minimum, maximum);
+}
+
+QSpinBox* WeldProcessDialog::AddSingleIntFieldWithUnit(QFormLayout* layout, const QString& label, const QString& unit, int minimum, int maximum)
+{
     auto* spin = new PlusMinusSpinBox(this);
     spin->setRange(minimum, maximum);
-    spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
-    spin->setFixedWidth(kSingleFieldWidth);
-    spin->setFixedHeight(28);
-    layout->addRow(label, spin);
+    layout->addRow(label, WrapFieldWithUnit(this, WrapSpinFieldFrame(this, spin, kSingleFieldWidth), unit));
     return spin;
 }
 
@@ -844,6 +1095,24 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     m_wrapCurrent3Spin->setValue(weld.dWrapCurrentt3);
     m_wrapVoltage3Spin->setValue(weld.dWrapVoltage3);
     m_wrapWaitTime3Spin->setValue(weld.dWrapWaitTime3);
+    SetChecked(m_wrapCurrent1EnableCheck, weld.nWrapCurrent1Enable);
+    SetChecked(m_wrapVoltage1EnableCheck, weld.nWrapVoltage1Enable);
+    SetChecked(m_wrapWaitTime1EnableCheck, weld.nWrapWaitTime1Enable);
+    SetChecked(m_wrapCurrent2EnableCheck, weld.nWrapCurrent2Enable);
+    SetChecked(m_wrapVoltage2EnableCheck, weld.nWrapVoltage2Enable);
+    SetChecked(m_wrapWaitTime2EnableCheck, weld.nWrapWaitTime2Enable);
+    SetChecked(m_wrapCurrent3EnableCheck, weld.nWrapCurrent3Enable);
+    SetChecked(m_wrapVoltage3EnableCheck, weld.nWrapVoltage3Enable);
+    SetChecked(m_wrapWaitTime3EnableCheck, weld.nWrapWaitTime3Enable);
+
+    m_cornerTransitionRadiusSpin->setValue(weld.dCornerArcTransitionRadius);
+    m_cornerTransitionSpeedSpin->setValue(weld.dCornerArcTransitionSpeed);
+    m_cornerTransitionCurrentSpin->setValue(weld.dCornerArcTransitionCurrent);
+    m_cornerTransitionVoltageSpin->setValue(weld.dCornerArcTransitionVoltage);
+    SetChecked(m_cornerTransitionRadiusEnableCheck, weld.nCornerArcTransitionRadiusEnable);
+    SetChecked(m_cornerTransitionSpeedEnableCheck, weld.nCornerArcTransitionSpeedEnable);
+    SetChecked(m_cornerTransitionCurrentEnableCheck, weld.nCornerArcTransitionCurrentEnable);
+    SetChecked(m_cornerTransitionVoltageEnableCheck, weld.nCornerArcTransitionVoltageEnable);
 
     const auto& weaveList = m_file.GetWeaveTypeList();
     if (weld.nWeaveTypeNo >= 0 && weld.nWeaveTypeNo < static_cast<int>(weaveList.size()))
@@ -968,6 +1237,31 @@ bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
     out.dWrapCurrentt3 = m_wrapCurrent3Spin->value();
     out.dWrapVoltage3 = m_wrapVoltage3Spin->value();
     out.dWrapWaitTime3 = m_wrapWaitTime3Spin->value();
+    out.nWrapCurrent1Enable = IsChecked(m_wrapCurrent1EnableCheck) ? 1 : 0;
+    out.nWrapVoltage1Enable = IsChecked(m_wrapVoltage1EnableCheck) ? 1 : 0;
+    out.nWrapWaitTime1Enable = IsChecked(m_wrapWaitTime1EnableCheck) ? 1 : 0;
+    out.nWrapCurrent2Enable = IsChecked(m_wrapCurrent2EnableCheck) ? 1 : 0;
+    out.nWrapVoltage2Enable = IsChecked(m_wrapVoltage2EnableCheck) ? 1 : 0;
+    out.nWrapWaitTime2Enable = IsChecked(m_wrapWaitTime2EnableCheck) ? 1 : 0;
+    out.nWrapCurrent3Enable = IsChecked(m_wrapCurrent3EnableCheck) ? 1 : 0;
+    out.nWrapVoltage3Enable = IsChecked(m_wrapVoltage3EnableCheck) ? 1 : 0;
+    out.nWrapWaitTime3Enable = IsChecked(m_wrapWaitTime3EnableCheck) ? 1 : 0;
+    out.dCornerArcTransitionRadius = m_cornerTransitionRadiusSpin->value();
+    out.dCornerArcTransitionSpeed = m_cornerTransitionSpeedSpin->value();
+    out.dCornerArcTransitionCurrent = m_cornerTransitionCurrentSpin->value();
+    out.dCornerArcTransitionVoltage = m_cornerTransitionVoltageSpin->value();
+    out.nCornerArcTransitionRadiusEnable = IsChecked(m_cornerTransitionRadiusEnableCheck) ? 1 : 0;
+    out.nCornerArcTransitionSpeedEnable = IsChecked(m_cornerTransitionSpeedEnableCheck) ? 1 : 0;
+    out.nCornerArcTransitionCurrentEnable = IsChecked(m_cornerTransitionCurrentEnableCheck) ? 1 : 0;
+    out.nCornerArcTransitionVoltageEnable = IsChecked(m_cornerTransitionVoltageEnableCheck) ? 1 : 0;
+    if (out.nCornerArcTransitionCurrentEnable != out.nCornerArcTransitionVoltageEnable)
+    {
+        QMessageBox::warning(
+            const_cast<WeldProcessDialog*>(this),
+            "参数错误",
+            "拐点过渡电流和过渡电压必须同时启用或同时关闭。");
+        return false;
+    }
     out.CrosswiseOffset = m_crosswiseOffsetSpin->value();
     out.verticalOffset = m_verticalOffsetSpin->value();
     out.nWrapConditionNo = m_wrapConditionNoSpin->value();
@@ -1174,6 +1468,23 @@ QString WeldProcessDialog::BuildSnapshot() const
            << QString::number(m_wrapCurrent3Spin != nullptr ? m_wrapCurrent3Spin->value() : 0.0, 'f', 6)
            << QString::number(m_wrapVoltage3Spin != nullptr ? m_wrapVoltage3Spin->value() : 0.0, 'f', 6)
            << QString::number(m_wrapWaitTime3Spin != nullptr ? m_wrapWaitTime3Spin->value() : 0.0, 'f', 6)
+           << QString::number(IsChecked(m_wrapCurrent1EnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_wrapVoltage1EnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_wrapWaitTime1EnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_wrapCurrent2EnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_wrapVoltage2EnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_wrapWaitTime2EnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_wrapCurrent3EnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_wrapVoltage3EnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_wrapWaitTime3EnableCheck) ? 1 : 0)
+           << QString::number(m_cornerTransitionRadiusSpin != nullptr ? m_cornerTransitionRadiusSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_cornerTransitionSpeedSpin != nullptr ? m_cornerTransitionSpeedSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_cornerTransitionCurrentSpin != nullptr ? m_cornerTransitionCurrentSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_cornerTransitionVoltageSpin != nullptr ? m_cornerTransitionVoltageSpin->value() : 0.0, 'f', 6)
+           << QString::number(IsChecked(m_cornerTransitionRadiusEnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_cornerTransitionSpeedEnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_cornerTransitionCurrentEnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_cornerTransitionVoltageEnableCheck) ? 1 : 0)
            << QString::number(m_weaveTypeSpin != nullptr ? m_weaveTypeSpin->value() : 0)
            << QString::number(m_freqSpin != nullptr ? m_freqSpin->value() : 0.0, 'f', 6)
            << QString::number(m_ampLeftSpin != nullptr ? m_ampLeftSpin->value() : 0.0, 'f', 6)

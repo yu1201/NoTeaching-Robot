@@ -5,12 +5,14 @@
 #include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QByteArray>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QDoubleValidator>
 #include <QFile>
 #include <QFileInfo>
@@ -30,6 +32,7 @@
 #include <QSizePolicy>
 #include <QSplitter>
 #include <QStringList>
+#include <QSignalBlocker>
 #include <QTextDocument>
 #include <QTextStream>
 #include <QTimer>
@@ -37,7 +40,9 @@
 #include <QIntValidator>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cmath>
 #include <limits>
+#include <utility>
 
 namespace
 {
@@ -116,7 +121,13 @@ bool IsDedicatedPulseKey(const QString& key)
         || key.startsWith("StartSafePulse0.", Qt::CaseInsensitive)
         || key.startsWith("EndSafePulse0.", Qt::CaseInsensitive)
         || key.compare("StartSafePulseNum", Qt::CaseInsensitive) == 0
-        || key.compare("EndSafePulseNum", Qt::CaseInsensitive) == 0;
+        || key.compare("EndSafePulseNum", Qt::CaseInsensitive) == 0
+        || key.compare("UseComputedScanSafe", Qt::CaseInsensitive) == 0
+        || key.compare("ScanSafeOffsetDistanceMm", Qt::CaseInsensitive) == 0
+        || key.compare("ScanSafeGunAngleDeg", Qt::CaseInsensitive) == 0
+        || key.compare("ScanSafeXDirection", Qt::CaseInsensitive) == 0
+        || key.compare("ScanSafeLiftHeightMm", Qt::CaseInsensitive) == 0
+        || key.compare("ScanSafeFlipWarnThresholdDeg", Qt::CaseInsensitive) == 0;
 }
 
 bool HasMeaningfulPulse(const T_ANGLE_PULSE& pulse)
@@ -259,6 +270,16 @@ QString ReadTextFileSmartForPrecise(const QString& path)
     return text;
 }
 
+bool IsObsoletePreciseParamKey(const QString& key)
+{
+    return key.trimmed().compare("CornerArcRadiusMm", Qt::CaseInsensitive) == 0;
+}
+
+bool IsWeldDirectionParamKey(const QString& key)
+{
+    return key.trimmed().compare("WeldDirection", Qt::CaseInsensitive) == 0;
+}
+
 QStringList ExtractSectionLinesForPrecise(const QString& content, const QString& sectionName)
 {
     QStringList result;
@@ -279,6 +300,11 @@ QStringList ExtractSectionLinesForPrecise(const QString& content, const QString&
         }
         if (inSection)
         {
+            const int equalPos = line.indexOf('=');
+            if (equalPos > 0 && IsObsoletePreciseParamKey(line.left(equalPos)))
+            {
+                continue;
+            }
             result << line;
         }
     }
@@ -304,6 +330,10 @@ QStringList ZeroSectionValuesForPrecise(const QStringList& lines)
         if (equalPos <= 0)
         {
             result << line;
+            continue;
+        }
+        if (IsObsoletePreciseParamKey(line.left(equalPos)))
+        {
             continue;
         }
         result << QString("%1=0").arg(line.left(equalPos).trimmed());
@@ -365,6 +395,7 @@ QString PreciseParamDisplayName(const QString& key)
         { "WeldSpeedMmPerMin", "焊接速度" },
         { "DryRunSpeedMmPerMin", "空跑速度" },
         { "WeldSafeMoveSpeedMmPerMin", "安全位速度" },
+        { "StepOverlapRel", "STEP过渡比例" },
         { "WorldCoorDir", "世界Z方向" },
         { "RobotInstallDir", "机器人安装方向" },
         { "GunAngle", "焊枪角度" },
@@ -380,7 +411,6 @@ QString PreciseParamDisplayName(const QString& key)
         { "NormalWeldRx", "平焊RX" },
         { "NormalWeldRy", "平焊RY" },
         { "CornerTransitionLeadDis", "拐点过渡距离" },
-        { "CornerArcRadiusMm", "拐点圆弧半径" },
         { "WeldStartSkipDis", "起点跳过距离" },
         { "WeldEndSkipDis", "终点跳过距离" },
         { "WeldRzGainDeg", "焊接RZ增益" },
@@ -483,7 +513,8 @@ QString WeldParamGroupTitleForKey(const QString& key)
 {
     const QString normalized = key.trimmed();
     static const QSet<QString> executeKeys = {
-        "WeldEnable", "WeldSpeedMmPerMin", "DryRunSpeedMmPerMin", "WeldSafeMoveSpeedMmPerMin"
+        "WeldEnable", "WeldSpeedMmPerMin", "DryRunSpeedMmPerMin", "WeldSafeMoveSpeedMmPerMin",
+        "StepOverlapRel", "WeldDirection"
     };
     static const QSet<QString> coordinateKeys = {
         "WorldCoorDir", "RobotInstallDir", "GunAngle", "GunLaserAngle", "GunCameraAngle",
@@ -491,7 +522,7 @@ QString WeldParamGroupTitleForKey(const QString& key)
     };
     static const QSet<QString> poseKeys = {
         "FlatMeasureRx", "FlatMeasureRy", "FlatWeldRx", "FlatWeldRy", "NormalWeldRx",
-        "NormalWeldRy", "CornerTransitionLeadDis", "CornerArcRadiusMm", "WeldStartSkipDis",
+        "NormalWeldRy", "CornerTransitionLeadDis", "WeldStartSkipDis",
         "WeldEndSkipDis", "WeldRzGainDeg", "StandWeldRx", "StandWeldRy", "TransitionsRx",
         "TransitionsRy", "StandWeldScanFreeRx", "StandWeldScanFreeRy", "StandWeldScanDis",
         "StandWeldScanOffsetRz", "WeldNorAngleInHome", "EndpointSearchDis",
@@ -530,10 +561,39 @@ QString PreciseCommentText(const QString& line)
     return text;
 }
 
-void AddOtherParamEditor(QGridLayout* layout, QMap<QString, QLineEdit*>& editors, int& row, int& colInGroup, const QString& sectionName, const QString& key, const QString& value)
+QString ValueForWriteWithInlineComment(const QComboBox* combo)
 {
+    if (combo == nullptr)
+    {
+        return QString();
+    }
+
+    QString value = combo->currentData().toString();
+    const QString comment = combo->property("inlineComment").toString().trimmed();
+    if (!comment.isEmpty())
+    {
+        value += " " + comment;
+    }
+    return value;
+}
+
+void AddOtherParamEditor(
+    QGridLayout* layout,
+    QMap<QString, QLineEdit*>& editors,
+    QMap<QString, QComboBox*>& comboEditors,
+    int& row,
+    int& colInGroup,
+    const QString& sectionName,
+    const QString& key,
+    const QString& value)
+{
+    if (IsObsoletePreciseParamKey(key))
+    {
+        return;
+    }
+
     const QString editorId = EditorId(sectionName, key);
-    if (layout == nullptr || editors.contains(editorId))
+    if (layout == nullptr || editors.contains(editorId) || comboEditors.contains(editorId))
     {
         return;
     }
@@ -541,8 +601,36 @@ void AddOtherParamEditor(QGridLayout* layout, QMap<QString, QLineEdit*>& editors
     QString inlineComment;
     const QString displayValue = DisplayValueFromRawIniValue(value, &inlineComment);
     QLabel* label = new QLabel(PreciseParamDisplayName(key));
-    QLineEdit* edit = new QLineEdit(displayValue);
     label->setToolTip(key);
+    const int uiCol = colInGroup * 2;
+
+    if (IsWeldDirectionParamKey(key))
+    {
+        QComboBox* combo = new QComboBox();
+        combo->addItem(QStringLiteral("起点到终点"), QStringLiteral("1"));
+        combo->addItem(QStringLiteral("终点到起点"), QStringLiteral("-1"));
+        bool ok = false;
+        const int direction = displayValue.trimmed().toInt(&ok);
+        combo->setCurrentIndex(ok && direction < 0 ? 1 : 0);
+        combo->setToolTip(inlineComment.isEmpty() ? key : QString("%1\n%2").arg(key, inlineComment));
+        combo->setProperty("paramSection", sectionName);
+        combo->setProperty("paramKey", key);
+        combo->setProperty("inlineComment", inlineComment);
+        combo->setMinimumWidth(130);
+        combo->setMaximumWidth(190);
+        comboEditors.insert(editorId, combo);
+        layout->addWidget(label, row, uiCol);
+        layout->addWidget(combo, row, uiCol + 1);
+        ++colInGroup;
+        if (colInGroup >= 2)
+        {
+            ++row;
+            colInGroup = 0;
+        }
+        return;
+    }
+
+    QLineEdit* edit = new QLineEdit(displayValue);
     edit->setToolTip(inlineComment.isEmpty() ? key : QString("%1\n%2").arg(key, inlineComment));
     edit->setProperty("paramSection", sectionName);
     edit->setProperty("paramKey", key);
@@ -557,7 +645,6 @@ void AddOtherParamEditor(QGridLayout* layout, QMap<QString, QLineEdit*>& editors
     }
     editors.insert(editorId, edit);
 
-    const int uiCol = colInGroup * 2;
     layout->addWidget(label, row, uiCol);
     layout->addWidget(edit, row, uiCol + 1);
     ++colInGroup;
@@ -570,9 +657,15 @@ void AddOtherParamEditor(QGridLayout* layout, QMap<QString, QLineEdit*>& editors
 
 }
 
-PreciseMeasureEditDialog::PreciseMeasureEditDialog(ContralUnit* pContralUnit, QWidget* parent)
+PreciseMeasureEditDialog::PreciseMeasureEditDialog(
+    ContralUnit* pContralUnit,
+    QWidget* parent,
+    bool positionTeachOnly,
+    std::function<void()> openCameraPreviewCallback)
     : QDialog(parent)
     , m_pContralUnit(pContralUnit)
+    , m_bPositionTeachOnly(positionTeachOnly)
+    , m_openCameraPreviewCallback(std::move(openCameraPreviewCallback))
 {
     BuildUi();
     LoadRobotList();
@@ -581,10 +674,11 @@ PreciseMeasureEditDialog::PreciseMeasureEditDialog(ContralUnit* pContralUnit, QW
 
 void PreciseMeasureEditDialog::BuildUi()
 {
-    setWindowTitle("测量焊接参数");
+    const QString dialogTitle = m_bPositionTeachOnly ? QStringLiteral("扫描位置示教") : QStringLiteral("测量焊接参数");
+    setWindowTitle(dialogTitle);
     setObjectName("PreciseMeasureEditDialog");
     setWindowFlags(windowFlags() | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint);
-    setMinimumSize(720, 520);
+    setMinimumSize(m_bPositionTeachOnly ? 1180 : 720, m_bPositionTeachOnly ? 620 : 520);
     setStyleSheet(QString(
         "QDialog#PreciseMeasureEditDialog { background: #111820; color: #ECF3F4; }"
         "QWidget#PreciseMeasurePage { background: #111820; color: #ECF3F4; }"
@@ -594,6 +688,7 @@ void PreciseMeasureEditDialog::BuildUi()
         "QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 6px; color: #9ED8DB; }"
         "QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 8px 14px; }"
         "QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
+        "QPushButton:disabled { background: #16232D; color: #6D7F88; border-color: #263845; }"
         "QPushButton#OtherParamSectionHeader { background: #0B1117; color: #9EEBF0; border: 1px solid #2D5262; border-radius: 0px; padding: 8px 12px; font-weight: bold; text-align: left; }"
         "QPushButton#OtherParamSectionHeader:hover { background: #1A3543; border-color: #72D4DD; }"
         "QPushButton#ParamPageTab { background: #0B1117; color: #BFE8EC; border: 1px solid #2D5262; border-radius: 0px; padding: 8px 26px; font-weight: bold; }"
@@ -604,6 +699,13 @@ void PreciseMeasureEditDialog::BuildUi()
         "QWidget#OtherParamSection { background: #111820; }"
         "QWidget#OtherParamSectionBody { background: #0D151D; border: 1px solid #223D4C; border-top: 0px; border-radius: 0px; }"
         "QLineEdit { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 7px; padding: 4px 6px; }"
+        "QLineEdit:disabled { background: #0A1016; color: #6D7F88; border-color: #263845; }"
+        "QCheckBox { color: #BFE8EC; spacing: 8px; }"
+        "QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #5C7A8B; background: #0B1117; border-radius: 2px; }"
+        "QCheckBox::indicator:checked { background: #1E8AA0; border-color: #72D4DD; }"
+        "QDoubleSpinBox { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 7px; padding: 4px 6px; min-height: 24px; }"
+        "QGroupBox:disabled { border-color: #263845; color: #6D7F88; }"
+        "QGroupBox:disabled::title { color: #6D7F88; }"
         "QScrollArea#PrecisePageScroll { background: #111820; border: none; }"
         "QScrollArea#PrecisePageScroll > QWidget > QWidget { background: #111820; }"
         "QScrollBar:vertical { background: #111820; width: 12px; margin: 0; }"
@@ -634,13 +736,24 @@ void PreciseMeasureEditDialog::BuildUi()
 
     QWidget* pageWidget = new QWidget();
     pageWidget->setObjectName("PreciseMeasurePage");
-    pageWidget->setMinimumWidth(1600);
+    pageWidget->setMinimumWidth(m_bPositionTeachOnly ? 1360 : 1280);
     QVBoxLayout* rootLayout = new QVBoxLayout(pageWidget);
     rootLayout->setContentsMargins(22, 18, 22, 18);
     pageScrollArea->setWidget(pageWidget);
 
     QPushButton* reloadBtn = new QPushButton("重新读取");
     QPushButton* saveBtn = new QPushButton("保存参数");
+    QPushButton* cameraPreviewBtn = nullptr;
+    if (m_bPositionTeachOnly)
+    {
+        cameraPreviewBtn = new QPushButton("坡口相机预览");
+        cameraPreviewBtn->setMinimumWidth(150);
+        cameraPreviewBtn->setEnabled(static_cast<bool>(m_openCameraPreviewCallback));
+        if (!m_openCameraPreviewCallback)
+        {
+            cameraPreviewBtn->setToolTip("当前入口没有连接坡口相机预览。");
+        }
+    }
     reloadBtn->setMinimumWidth(120);
     saveBtn->setMinimumWidth(120);
 
@@ -648,7 +761,7 @@ void PreciseMeasureEditDialog::BuildUi()
     headerLayout->setSpacing(12);
     QVBoxLayout* headerLeftLayout = new QVBoxLayout();
     headerLeftLayout->setSpacing(10);
-    QLabel* titleLabel = new QLabel("测量焊接参数");
+    QLabel* titleLabel = new QLabel(dialogTitle);
     titleLabel->setStyleSheet("font-size: 22px; font-weight: bold; color: #F7FCFC;");
     headerLeftLayout->addWidget(titleLabel);
     QHBoxLayout* robotLayout = new QHBoxLayout();
@@ -672,19 +785,33 @@ void PreciseMeasureEditDialog::BuildUi()
     m_pGroupNameEdit->setMinimumWidth(150);
     m_pGroupNameEdit->setMaximumWidth(220);
     groupLayout->addWidget(m_pGroupNameEdit);
-    QPushButton* addGroupBtn = new QPushButton("新建");
-    QPushButton* copyGroupBtn = new QPushButton("复制");
-    QPushButton* deleteGroupBtn = new QPushButton("删除");
-    addGroupBtn->setMinimumWidth(88);
-    copyGroupBtn->setMinimumWidth(88);
-    deleteGroupBtn->setMinimumWidth(88);
-    groupLayout->addWidget(addGroupBtn);
-    groupLayout->addWidget(copyGroupBtn);
-    groupLayout->addWidget(deleteGroupBtn);
+    QPushButton* addGroupBtn = nullptr;
+    QPushButton* copyGroupBtn = nullptr;
+    QPushButton* deleteGroupBtn = nullptr;
+    QPushButton* teachPositionBtn = nullptr;
+    if (!m_bPositionTeachOnly)
+    {
+        addGroupBtn = new QPushButton("新建");
+        copyGroupBtn = new QPushButton("复制");
+        deleteGroupBtn = new QPushButton("删除");
+        teachPositionBtn = new QPushButton("扫描位置示教");
+        addGroupBtn->setMinimumWidth(88);
+        copyGroupBtn->setMinimumWidth(88);
+        deleteGroupBtn->setMinimumWidth(88);
+        teachPositionBtn->setMinimumWidth(126);
+        groupLayout->addWidget(addGroupBtn);
+        groupLayout->addWidget(copyGroupBtn);
+        groupLayout->addWidget(deleteGroupBtn);
+        groupLayout->addWidget(teachPositionBtn);
+    }
     groupLayout->addStretch(1);
     headerLeftLayout->addLayout(groupLayout);
     headerLayout->addLayout(headerLeftLayout);
     headerLayout->addStretch(1);
+    if (cameraPreviewBtn != nullptr)
+    {
+        headerLayout->addWidget(cameraPreviewBtn, 0, Qt::AlignTop);
+    }
     headerLayout->addWidget(reloadBtn, 0, Qt::AlignTop);
     headerLayout->addWidget(saveBtn, 0, Qt::AlignTop);
     headerLayout->addSpacing(142);
@@ -694,7 +821,7 @@ void PreciseMeasureEditDialog::BuildUi()
     m_pContentSplitter->setChildrenCollapsible(false);
     rootLayout->addWidget(m_pContentSplitter, 1);
 
-    m_pPulsePanel = new QWidget();
+    m_pPulsePanel = new QWidget(pageWidget);
     m_pPulsePanel->setObjectName("PrecisePulsePanel");
     m_pPulseGroupsLayout = new QGridLayout(m_pPulsePanel);
     m_pPulseGroupsLayout->setContentsMargins(0, 0, 0, 0);
@@ -704,8 +831,13 @@ void PreciseMeasureEditDialog::BuildUi()
         << CreateCoorsGroup("扫描起点（直角）", "StartPos", "示教起点位置", &PreciseMeasureEditDialog::TeachStartPos, &PreciseMeasureEditDialog::SaveManualStartPos)
         << CreateCoorsGroup("扫描终点（直角）", "EndPos", "示教终点位置", &PreciseMeasureEditDialog::TeachEndPos, &PreciseMeasureEditDialog::SaveManualEndPos)
         << CreatePulseGroup("收枪安全位置（脉冲）", "EndSafePulse0", "示教收枪安全位置", &PreciseMeasureEditDialog::TeachEndSafePulse, &PreciseMeasureEditDialog::SaveManualEndSafePulse);
+    if (m_bPositionTeachOnly)
+    {
+        m_pScanSafeParamPanel = CreateScanSafeParamPanel();
+        m_pulseGroupWidgets << m_pScanSafeParamPanel;
+    }
 
-    m_pOtherPanel = new QWidget();
+    m_pOtherPanel = new QWidget(pageWidget);
     m_pOtherPanel->setObjectName("PreciseOtherPanel");
     QVBoxLayout* otherPanelLayout = new QVBoxLayout(m_pOtherPanel);
     otherPanelLayout->setContentsMargins(0, 0, 0, 0);
@@ -752,10 +884,18 @@ void PreciseMeasureEditDialog::BuildUi()
     otherPanelLayout->addWidget(otherGroup, 0, Qt::AlignTop);
     otherPanelLayout->addStretch(1);
 
-    m_pContentSplitter->addWidget(m_pPulsePanel);
-    m_pContentSplitter->addWidget(m_pOtherPanel);
-    m_pContentSplitter->setStretchFactor(0, 3);
-    m_pContentSplitter->setStretchFactor(1, 2);
+    if (m_bPositionTeachOnly)
+    {
+        m_pContentSplitter->addWidget(m_pPulsePanel);
+        m_pOtherPanel->hide();
+        m_pContentSplitter->setStretchFactor(0, 1);
+    }
+    else
+    {
+        m_pContentSplitter->addWidget(m_pOtherPanel);
+        m_pPulsePanel->hide();
+        m_pContentSplitter->setStretchFactor(0, 1);
+    }
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
@@ -766,16 +906,39 @@ void PreciseMeasureEditDialog::BuildUi()
 
     connect(m_pRobotCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &PreciseMeasureEditDialog::OnRobotChanged);
     connect(m_pGroupCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &PreciseMeasureEditDialog::OnParamGroupChanged);
-    connect(addGroupBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::AddZeroParamGroup);
-    connect(copyGroupBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::CopyCurrentParamGroup);
-    connect(deleteGroupBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::DeleteCurrentParamGroup);
+    if (addGroupBtn != nullptr)
+    {
+        connect(addGroupBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::AddZeroParamGroup);
+    }
+    if (copyGroupBtn != nullptr)
+    {
+        connect(copyGroupBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::CopyCurrentParamGroup);
+    }
+    if (deleteGroupBtn != nullptr)
+    {
+        connect(deleteGroupBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::DeleteCurrentParamGroup);
+    }
+    if (teachPositionBtn != nullptr)
+    {
+        connect(teachPositionBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::OpenPositionTeachDialog);
+    }
+    if (cameraPreviewBtn != nullptr)
+    {
+        connect(cameraPreviewBtn, &QPushButton::clicked, this, [this]()
+            {
+                if (m_openCameraPreviewCallback)
+                {
+                    m_openCameraPreviewCallback();
+                }
+            });
+    }
     connect(m_pScanParamTabBtn, &QPushButton::clicked, this, [this]() { SwitchOtherParamPage(true); });
     connect(m_pWeldParamTabBtn, &QPushButton::clicked, this, [this]() { SwitchOtherParamPage(false); });
     connect(reloadBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::ReloadCurrentParam);
     connect(saveBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::SaveAllParamEdits);
     UpdateAdaptiveLayout();
     ApplyUnifiedWindowChrome(this);
-    ResizeWindowForAvailableGeometry(this, QSize(980, 680), 0.84, 0.78);
+    ResizeWindowForAvailableGeometry(this, m_bPositionTeachOnly ? QSize(1420, 760) : QSize(980, 680), 0.90, 0.82);
 }
 
 void PreciseMeasureEditDialog::resizeEvent(QResizeEvent* event)
@@ -1036,7 +1199,7 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
         }
         if (weldLines.isEmpty())
         {
-            weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "CornerArcRadiusMm=2" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
+            weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "StepOverlapRel=20" << "WeldDirection=1" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
         }
 
         output << QString("[%1]").arg(RobotDataHelper::MeasureWeldScanSectionName(newIndex));
@@ -1117,6 +1280,29 @@ void PreciseMeasureEditDialog::TeachEndSafePulse()
     AppendLog("已读取当前机器人脉冲到收枪安全位置，点击“保存参数”后写入文件。");
 }
 
+void PreciseMeasureEditDialog::OpenPositionTeachDialog()
+{
+    PreciseMeasureEditDialog* dialog = new PreciseMeasureEditDialog(
+        m_pContralUnit,
+        this,
+        true,
+        m_openCameraPreviewCallback);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+
+    if (m_pRobotCombo != nullptr && dialog->m_pRobotCombo != nullptr)
+    {
+        dialog->m_pRobotCombo->setCurrentIndex(m_pRobotCombo->currentIndex());
+    }
+    if (m_pGroupCombo != nullptr && dialog->m_pGroupCombo != nullptr)
+    {
+        dialog->m_pGroupCombo->setCurrentIndex(m_pGroupCombo->currentIndex());
+    }
+
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
 void PreciseMeasureEditDialog::ReloadCurrentParam()
 {
     LoadCurrentParam();
@@ -1130,7 +1316,7 @@ void PreciseMeasureEditDialog::closeEvent(QCloseEvent* event)
         return;
     }
 
-    if (ConfirmCloseWithUnsavedChanges(this, "测量焊接参数", [this]() { return SaveAllParamEdits(); }))
+    if (ConfirmCloseWithUnsavedChanges(this, windowTitle(), [this]() { return SaveAllParamEdits(); }))
     {
         event->accept();
     }
@@ -1147,38 +1333,48 @@ bool PreciseMeasureEditDialog::SaveAllParamEdits()
         return false;
     }
 
-    T_ANGLE_PULSE startSafePulse;
-    T_ROBOT_COORS startPos;
-    T_ROBOT_COORS endPos;
-    T_ANGLE_PULSE endSafePulse;
     QString error;
-    if (!GetPulseFromEditors("StartSafePulse0", startSafePulse, error)
-        || !GetCoorsFromEditors("StartPos", startPos, error)
-        || !GetCoorsFromEditors("EndPos", endPos, error)
-        || !GetPulseFromEditors("EndSafePulse0", endSafePulse, error))
+    if (m_bPositionTeachOnly)
     {
-        QMessageBox::warning(this, "保存参数", error);
-        AppendLog("保存失败：" + error);
-        return false;
-    }
+        T_ANGLE_PULSE startSafePulse;
+        T_ROBOT_COORS startPos;
+        T_ROBOT_COORS endPos;
+        T_ANGLE_PULSE endSafePulse;
+        if (!GetPulseFromEditors("StartSafePulse0", startSafePulse, error)
+            || !GetCoorsFromEditors("StartPos", startPos, error)
+            || !GetCoorsFromEditors("EndPos", endPos, error)
+            || !GetPulseFromEditors("EndSafePulse0", endSafePulse, error))
+        {
+            QMessageBox::warning(this, "保存参数", error);
+            AppendLog("保存失败：" + error);
+            return false;
+        }
 
-    if (!WritePulse("StartSafePulse0", startSafePulse, error)
-        || !WriteParamValue(CurrentSectionName(&error), "StartSafePulseNum", PulseListCountValue(startSafePulse), error)
-        || !WriteCoors("StartPos", startPos, error)
-        || !WriteCoors("EndPos", endPos, error)
-        || !WriteParamValue(CurrentSectionName(&error), "EndSafePulseNum", PulseListCountValue(endSafePulse), error)
-        || !WritePulse("EndSafePulse0", endSafePulse, error))
-    {
-        QMessageBox::warning(this, "保存参数", error);
-        AppendLog("保存失败：" + error);
-        return false;
-    }
+        if (!WritePulse("StartSafePulse0", startSafePulse, error)
+            || !WriteParamValue(CurrentSectionName(&error), "StartSafePulseNum", PulseListCountValue(startSafePulse), error)
+            || !WriteCoors("StartPos", startPos, error)
+            || !WriteCoors("EndPos", endPos, error)
+            || !WriteParamValue(CurrentSectionName(&error), "EndSafePulseNum", PulseListCountValue(endSafePulse), error)
+            || !WritePulse("EndSafePulse0", endSafePulse, error))
+        {
+            QMessageBox::warning(this, "保存参数", error);
+            AppendLog("保存失败：" + error);
+            return false;
+        }
 
-    if (m_hasTaughtStartPulse && !WritePulse("StartPulse", m_taughtStartPulse, error))
-    {
-        QMessageBox::warning(this, "保存参数", error);
-        AppendLog("扫描起点关节脉冲保存失败：" + error);
-        return false;
+        if (m_hasTaughtStartPulse && !WritePulse("StartPulse", m_taughtStartPulse, error))
+        {
+            QMessageBox::warning(this, "保存参数", error);
+            AppendLog("扫描起点关节脉冲保存失败：" + error);
+            return false;
+        }
+
+        if (!SaveScanSafeParams(error))
+        {
+            QMessageBox::warning(this, "保存参数", error);
+            AppendLog("扫描安全推算参数保存失败：" + error);
+            return false;
+        }
     }
 
     if (!SaveGroupMetadata(error))
@@ -1188,27 +1384,47 @@ bool PreciseMeasureEditDialog::SaveAllParamEdits()
         return false;
     }
 
-    for (auto it = m_otherParamEditors.cbegin(); it != m_otherParamEditors.cend(); ++it)
+    if (!m_bPositionTeachOnly)
     {
-        QLineEdit* edit = it.value();
-        if (edit == nullptr)
+        for (auto it = m_otherParamEditors.cbegin(); it != m_otherParamEditors.cend(); ++it)
         {
-            continue;
-        }
+            QLineEdit* edit = it.value();
+            if (edit == nullptr)
+            {
+                continue;
+            }
 
-        const QString sectionName = edit->property("paramSection").toString();
-        const QString paramKey = edit->property("paramKey").toString();
-        if (!WriteParamValue(sectionName, paramKey, ValueForWriteWithInlineComment(edit), error))
+            const QString sectionName = edit->property("paramSection").toString();
+            const QString paramKey = edit->property("paramKey").toString();
+            if (!WriteParamValue(sectionName, paramKey, ValueForWriteWithInlineComment(edit), error))
+            {
+                QMessageBox::warning(this, "保存参数", error);
+                AppendLog("其它参数保存失败：" + error);
+                return false;
+            }
+        }
+        for (auto it = m_otherParamComboEditors.cbegin(); it != m_otherParamComboEditors.cend(); ++it)
         {
-            QMessageBox::warning(this, "保存参数", error);
-            AppendLog("其它参数保存失败：" + error);
-            return false;
+            QComboBox* combo = it.value();
+            if (combo == nullptr)
+            {
+                continue;
+            }
+
+            const QString sectionName = combo->property("paramSection").toString();
+            const QString paramKey = combo->property("paramKey").toString();
+            if (!WriteParamValue(sectionName, paramKey, ValueForWriteWithInlineComment(combo), error))
+            {
+                QMessageBox::warning(this, "保存参数", error);
+                AppendLog("其它参数保存失败：" + error);
+                return false;
+            }
         }
     }
 
     MarkCleanSnapshot();
-    AppendLog("测量焊接参数已统一保存。");
-    QMessageBox::information(this, "保存参数", "测量焊接参数保存完成。");
+    AppendLog(m_bPositionTeachOnly ? "扫描位置示教参数已保存。" : "测量焊接参数已统一保存。");
+    QMessageBox::information(this, "保存参数", m_bPositionTeachOnly ? "扫描位置示教参数保存完成。" : "测量焊接参数保存完成。");
     return true;
 }
 
@@ -1216,6 +1432,11 @@ void PreciseMeasureEditDialog::SaveManualStartSafePulse()
 {
     if (m_bLoading)
     {
+        return;
+    }
+    if (m_pUseComputedScanSafeCheck != nullptr && m_pUseComputedScanSafeCheck->isChecked())
+    {
+        AppendLog("当前使用推算扫描安全位，下枪安全位置示教已禁用。");
         return;
     }
 
@@ -1252,6 +1473,7 @@ void PreciseMeasureEditDialog::SaveManualStartPos()
         return;
     }
     MarkCleanSnapshot();
+    UpdateScanSafePreview();
     AppendLog("起点手动修改已保存。");
 }
 
@@ -1270,6 +1492,7 @@ void PreciseMeasureEditDialog::SaveManualEndPos()
         return;
     }
     MarkCleanSnapshot();
+    UpdateScanSafePreview();
     AppendLog("终点手动修改已保存。");
 }
 
@@ -1277,6 +1500,11 @@ void PreciseMeasureEditDialog::SaveManualEndSafePulse()
 {
     if (m_bLoading)
     {
+        return;
+    }
+    if (m_pUseComputedScanSafeCheck != nullptr && m_pUseComputedScanSafeCheck->isChecked())
+    {
+        AppendLog("当前使用推算扫描安全位，收枪安全位置示教已禁用。");
         return;
     }
 
@@ -1443,7 +1671,14 @@ bool PreciseMeasureEditDialog::LoadCurrentParam()
         m_hasTaughtStartPulse = false;
         AppendLog("未读取到扫描起点关节脉冲，重新示教起点后会自动补写。");
     }
-    LoadOtherParams();
+    if (!m_bPositionTeachOnly)
+    {
+        LoadOtherParams();
+    }
+    else
+    {
+        LoadScanSafeParams();
+    }
     if (!hasStartPos)
     {
         AppendLog("未读取到扫描起点直角参数，请重新示教并保存。" + startPosError);
@@ -1635,6 +1870,10 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
                 {
                     const QString key = line.left(pos).trimmed();
                     const QString value = line.mid(pos + 1).trimmed();
+                    if (IsObsoletePreciseParamKey(key))
+                    {
+                        continue;
+                    }
                     if (skipDedicatedKeys && IsDedicatedPulseKey(key))
                     {
                         currentGroupLayout = nullptr;
@@ -1650,7 +1889,7 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
                         currentGroupLayout = createCollapsibleGroup(groupTitle, categoryTitle);
                     }
 
-                    AddOtherParamEditor(currentGroupLayout, m_otherParamEditors, row, colInGroup, targetSection, key, value);
+                    AddOtherParamEditor(currentGroupLayout, m_otherParamEditors, m_otherParamComboEditors, row, colInGroup, targetSection, key, value);
                     hasOtherParam = true;
                 }
             }
@@ -1670,6 +1909,7 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
         AddOtherParamEditor(
             ensureGroup(QStringLiteral("相机时间参数"), QStringLiteral("扫描参数")),
             m_otherParamEditors,
+            m_otherParamComboEditors,
             row,
             colInGroup,
             section,
@@ -1683,6 +1923,7 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
         AddOtherParamEditor(
             ensureGroup(QStringLiteral("相机时间参数"), QStringLiteral("扫描参数")),
             m_otherParamEditors,
+            m_otherParamComboEditors,
             row,
             colInGroup,
             section,
@@ -1696,13 +1937,249 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
         AppendLog(QString("当前分组没有其它参数：%1").arg(section));
     }
 
+    for (QComboBox* combo : m_otherParamComboEditors)
+    {
+        if (combo != nullptr)
+        {
+            connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, combo](int)
+                {
+                    SaveOtherParamComboEdit(combo);
+                });
+        }
+    }
+
     UpdateOtherParamPageVisibility();
     m_bLoading = false;
     return true;
 }
 
+QWidget* PreciseMeasureEditDialog::CreateScanSafeParamPanel()
+{
+    QGroupBox* groupBox = new QGroupBox("扫描安全位推算参数");
+    groupBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    QGridLayout* layout = new QGridLayout(groupBox);
+    layout->setContentsMargins(36, 28, 36, 18);
+    layout->setHorizontalSpacing(14);
+    layout->setVerticalSpacing(10);
+
+    QLabel* hintLabel = new QLabel("只影响扫描段：勾选后由扫描起点/终点直角位姿按枪方向偏移生成安全位；未勾选时使用下枪/收枪安全位置的示教脉冲。");
+    hintLabel->setWordWrap(true);
+    layout->addWidget(hintLabel, 0, 0, 1, 6);
+
+    m_pUseComputedScanSafeCheck = new QCheckBox("使用起点/终点直角位姿推算扫描安全位");
+    layout->addWidget(m_pUseComputedScanSafeCheck, 1, 0, 1, 6);
+
+    auto makeSpin = [](double minValue, double maxValue, const QString& suffix) -> QDoubleSpinBox*
+        {
+            QDoubleSpinBox* spin = new QDoubleSpinBox();
+            spin->setRange(minValue, maxValue);
+            spin->setDecimals(3);
+            spin->setSingleStep(1.0);
+            spin->setSuffix(suffix);
+            spin->setAlignment(Qt::AlignRight);
+            spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+            spin->setMinimumWidth(132);
+            spin->setMaximumWidth(170);
+            spin->setProperty("touchKeyboardLayout", QStringLiteral("numeric"));
+            spin->setInputMethodHints(Qt::ImhFormattedNumbersOnly);
+            return spin;
+        };
+
+    m_pScanSafeOffsetSpin = makeSpin(1.0, 1000.0, " mm");
+    m_pScanSafeGunAngleSpin = makeSpin(-89.0, 89.0, " deg");
+    m_pScanSafeXDirectionCombo = new QComboBox();
+    m_pScanSafeXDirectionCombo->addItem("X- 方向", -1);
+    m_pScanSafeXDirectionCombo->addItem("X+ 方向", 1);
+    m_pScanSafeXDirectionCombo->setMinimumWidth(132);
+    m_pScanSafeXDirectionCombo->setMaximumWidth(170);
+    m_pScanSafeLiftSpin = makeSpin(0.0, 1000.0, " mm");
+    m_pScanSafeFlipWarnSpin = makeSpin(1.0, 360.0, " deg");
+
+    auto addRowItem = [layout](int row, int col, const QString& labelText, QWidget* editor)
+        {
+            QLabel* label = new QLabel(labelText);
+            layout->addWidget(label, row, col);
+            layout->addWidget(editor, row, col + 1);
+        };
+
+    addRowItem(2, 0, "安全偏移距离：", m_pScanSafeOffsetSpin);
+    addRowItem(2, 2, "枪倾角：", m_pScanSafeGunAngleSpin);
+    addRowItem(2, 4, "X 偏移方向：", m_pScanSafeXDirectionCombo);
+    addRowItem(3, 0, "姿态切换抬高：", m_pScanSafeLiftSpin);
+    addRowItem(3, 2, "姿态翻转提醒阈值：", m_pScanSafeFlipWarnSpin);
+
+    m_pScanSafePreviewLabel = new QLabel();
+    m_pScanSafePreviewLabel->setWordWrap(true);
+    m_pScanSafePreviewLabel->setStyleSheet("color: #9EEBF0;");
+    layout->addWidget(m_pScanSafePreviewLabel, 4, 0, 1, 6);
+
+    m_pScanSafePathLabel = new QLabel();
+    m_pScanSafePathLabel->setWordWrap(true);
+    layout->addWidget(m_pScanSafePathLabel, 5, 0, 1, 6);
+
+    connect(m_pUseComputedScanSafeCheck, &QCheckBox::toggled, this, [this]()
+        {
+            UpdateComputedScanSafeUiState();
+            UpdateScanSafePreview();
+        });
+    connect(m_pScanSafeOffsetSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { UpdateScanSafePreview(); });
+    connect(m_pScanSafeGunAngleSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { UpdateScanSafePreview(); });
+    connect(m_pScanSafeXDirectionCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { UpdateScanSafePreview(); });
+    connect(m_pScanSafeLiftSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { UpdateScanSafePreview(); });
+    connect(m_pScanSafeFlipWarnSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { UpdateScanSafePreview(); });
+
+    for (int i = 0; i < 6; ++i)
+    {
+        layout->setColumnStretch(i, (i % 2) == 0 ? 0 : 1);
+    }
+    return groupBox;
+}
+
+bool PreciseMeasureEditDialog::LoadScanSafeParams()
+{
+    if (!m_bPositionTeachOnly || m_pUseComputedScanSafeCheck == nullptr)
+    {
+        return true;
+    }
+
+    QString error;
+    const QString path = CurrentParamFilePath();
+    const QString section = CurrentSectionName(&error);
+    if (path.isEmpty() || section.isEmpty())
+    {
+        AppendLog("读取扫描安全推算参数失败：" + error);
+        return false;
+    }
+
+    int useComputed = 1;
+    double offset = 150.0;
+    double gunAngle = 30.0;
+    int xDirection = -1;
+    double liftHeight = 150.0;
+    double flipWarn = 90.0;
+
+    COPini ini;
+    if (ini.SetFileName(path.toLocal8Bit().constData()))
+    {
+        ini.SetSectionName(section.toStdString());
+        ini.ReadString(false, "UseComputedScanSafe", &useComputed);
+        ini.ReadString(false, "ScanSafeOffsetDistanceMm", &offset);
+        ini.ReadString(false, "ScanSafeGunAngleDeg", &gunAngle);
+        ini.ReadString(false, "ScanSafeXDirection", &xDirection);
+        ini.ReadString(false, "ScanSafeLiftHeightMm", &liftHeight);
+        ini.ReadString(false, "ScanSafeFlipWarnThresholdDeg", &flipWarn);
+    }
+    else
+    {
+        AppendLog("读取扫描安全推算参数失败：打开参数文件失败：" + path);
+        return false;
+    }
+
+    QSignalBlocker blockUse(m_pUseComputedScanSafeCheck);
+    QSignalBlocker blockOffset(m_pScanSafeOffsetSpin);
+    QSignalBlocker blockAngle(m_pScanSafeGunAngleSpin);
+    QSignalBlocker blockDirection(m_pScanSafeXDirectionCombo);
+    QSignalBlocker blockLift(m_pScanSafeLiftSpin);
+    QSignalBlocker blockWarn(m_pScanSafeFlipWarnSpin);
+    m_pUseComputedScanSafeCheck->setChecked(useComputed != 0);
+    m_pScanSafeOffsetSpin->setValue(qBound(1.0, offset, 1000.0));
+    m_pScanSafeGunAngleSpin->setValue(qBound(-89.0, gunAngle, 89.0));
+    m_pScanSafeXDirectionCombo->setCurrentIndex(xDirection >= 0 ? 1 : 0);
+    m_pScanSafeLiftSpin->setValue(qBound(0.0, liftHeight, 1000.0));
+    m_pScanSafeFlipWarnSpin->setValue(qBound(1.0, flipWarn, 360.0));
+
+    if (m_pScanSafePathLabel != nullptr)
+    {
+        m_pScanSafePathLabel->setText(QString("配置文件：%1\n当前位置类型：%2 [%3]")
+            .arg(QDir::toNativeSeparators(path), CurrentGroupName(), section));
+    }
+
+    UpdateComputedScanSafeUiState();
+    UpdateScanSafePreview();
+    return true;
+}
+
+bool PreciseMeasureEditDialog::SaveScanSafeParams(QString& error) const
+{
+    if (!m_bPositionTeachOnly || m_pUseComputedScanSafeCheck == nullptr)
+    {
+        return true;
+    }
+
+    const QString section = CurrentSectionName(&error);
+    return WriteParamValue(section, "UseComputedScanSafe", m_pUseComputedScanSafeCheck->isChecked() ? "1" : "0", error)
+        && WriteParamValue(section, "ScanSafeOffsetDistanceMm", QString::number(m_pScanSafeOffsetSpin->value(), 'f', 6), error)
+        && WriteParamValue(section, "ScanSafeGunAngleDeg", QString::number(m_pScanSafeGunAngleSpin->value(), 'f', 6), error)
+        && WriteParamValue(section, "ScanSafeXDirection", QString::number(m_pScanSafeXDirectionCombo->currentData().toInt()), error)
+        && WriteParamValue(section, "ScanSafeLiftHeightMm", QString::number(m_pScanSafeLiftSpin->value(), 'f', 6), error)
+        && WriteParamValue(section, "ScanSafeFlipWarnThresholdDeg", QString::number(m_pScanSafeFlipWarnSpin->value(), 'f', 6), error);
+}
+
+void PreciseMeasureEditDialog::UpdateScanSafePreview()
+{
+    if (m_pScanSafePreviewLabel == nullptr
+        || m_pScanSafeOffsetSpin == nullptr
+        || m_pScanSafeGunAngleSpin == nullptr
+        || m_pScanSafeXDirectionCombo == nullptr)
+    {
+        return;
+    }
+
+    T_ROBOT_COORS startPos;
+    T_ROBOT_COORS endPos;
+    QString error;
+    const bool hasStart = GetCoorsFromEditors("StartPos", startPos, error);
+    const bool hasEnd = GetCoorsFromEditors("EndPos", endPos, error);
+    const double distance = m_pScanSafeOffsetSpin->value();
+    constexpr double kPi = 3.14159265358979323846;
+    const double angleRad = m_pScanSafeGunAngleSpin->value() * kPi / 180.0;
+    const double xSign = m_pScanSafeXDirectionCombo->currentData().toInt() >= 0 ? 1.0 : -1.0;
+    const double dx = xSign * distance * std::sin(angleRad);
+    const double dz = distance * std::cos(angleRad);
+
+    if (m_pUseComputedScanSafeCheck != nullptr && !m_pUseComputedScanSafeCheck->isChecked())
+    {
+        m_pScanSafePreviewLabel->setText("当前使用示教的下枪/收枪安全位置；扫描安全位推算参数会保存，但流程暂不使用。");
+        return;
+    }
+    if (!hasStart || !hasEnd)
+    {
+        m_pScanSafePreviewLabel->setText("当前使用推算扫描安全位；请先读取或示教扫描起点、扫描终点后查看预估位置。");
+        return;
+    }
+
+    m_pScanSafePreviewLabel->setText(QString("当前计算：X偏移=%1 mm，Z抬高=%2 mm。起点安全位≈ X=%3, Y=%4, Z=%5；终点安全位≈ X=%6, Y=%7, Z=%8")
+        .arg(dx, 0, 'f', 3)
+        .arg(dz, 0, 'f', 3)
+        .arg(startPos.dX + dx, 0, 'f', 3)
+        .arg(startPos.dY, 0, 'f', 3)
+        .arg(startPos.dZ + dz, 0, 'f', 3)
+        .arg(endPos.dX + dx, 0, 'f', 3)
+        .arg(endPos.dY, 0, 'f', 3)
+        .arg(endPos.dZ + dz, 0, 'f', 3));
+}
+
+void PreciseMeasureEditDialog::UpdateComputedScanSafeUiState()
+{
+    const bool useComputed = m_pUseComputedScanSafeCheck != nullptr && m_pUseComputedScanSafeCheck->isChecked();
+    if (m_pStartSafePulseGroup != nullptr)
+    {
+        m_pStartSafePulseGroup->setEnabled(!useComputed);
+        m_pStartSafePulseGroup->setToolTip(useComputed ? "当前使用起点直角位姿推算扫描下枪安全位，不使用此示教脉冲。" : QString());
+    }
+    if (m_pEndSafePulseGroup != nullptr)
+    {
+        m_pEndSafePulseGroup->setEnabled(!useComputed);
+        m_pEndSafePulseGroup->setToolTip(useComputed ? "当前使用终点直角位姿推算扫描收枪安全位，不使用此示教脉冲。" : QString());
+    }
+}
+
 bool PreciseMeasureEditDialog::WriteParamValue(const QString& sectionName, const QString& key, const QString& value, QString& error) const
 {
+    if (IsObsoletePreciseParamKey(key))
+    {
+        return true;
+    }
     if (CurrentRobotName().isEmpty() || sectionName.isEmpty() || key.isEmpty())
     {
         error = "未选择机器人或参数项为空。";
@@ -1778,7 +2255,7 @@ bool PreciseMeasureEditDialog::CreateParamGroup(bool copyCurrent, QString& error
     }
     if (weldLines.isEmpty())
     {
-        weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "CornerArcRadiusMm=2" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
+        weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "StepOverlapRel=20" << "WeldDirection=1" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
     }
 
     if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "GroupCount", QString::number(newIndex + 1), &error)
@@ -1808,6 +2285,14 @@ QGroupBox* PreciseMeasureEditDialog::CreatePulseGroup(const QString& title, cons
     Q_UNUSED(saveSlot);
     const QStringList axes = { "nS", "nL", "nU", "nR", "nB", "nT", "lBX", "lBY", "lBZ" };
     QGroupBox* groupBox = new QGroupBox(title);
+    if (groupName == "StartSafePulse0")
+    {
+        m_pStartSafePulseGroup = groupBox;
+    }
+    else if (groupName == "EndSafePulse0")
+    {
+        m_pEndSafePulseGroup = groupBox;
+    }
     groupBox->setFixedHeight(248);
     groupBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     QGridLayout* layout = new QGridLayout(groupBox);
@@ -1825,9 +2310,10 @@ QGroupBox* PreciseMeasureEditDialog::CreatePulseGroup(const QString& title, cons
         layout->addWidget(edit, i / 3, (i % 3) * 2 + 1);
     }
     QPushButton* teachBtn = new QPushButton(teachText);
+    teachBtn->setFixedWidth(220);
     teachBtn->setMinimumHeight(34);
     teachBtn->setMaximumHeight(40);
-    layout->addWidget(teachBtn, 3, 0, 1, 6);
+    layout->addWidget(teachBtn, 3, 0, 1, 6, Qt::AlignLeft);
     connect(teachBtn, &QPushButton::clicked, this, teachSlot);
     return groupBox;
 }
@@ -1850,13 +2336,18 @@ QGroupBox* PreciseMeasureEditDialog::CreateCoorsGroup(const QString& title, cons
         edit->setValidator(CreateDoubleValidator(edit));
         MarkNumericEdit(edit);
         m_editors.insert(AxisKey(groupName, axes[i]), edit);
+        if (m_bPositionTeachOnly && (groupName == "StartPos" || groupName == "EndPos"))
+        {
+            connect(edit, &QLineEdit::textChanged, this, &PreciseMeasureEditDialog::UpdateScanSafePreview);
+        }
         layout->addWidget(label, i / 3, (i % 3) * 2);
         layout->addWidget(edit, i / 3, (i % 3) * 2 + 1);
     }
     QPushButton* teachBtn = new QPushButton(teachText);
+    teachBtn->setFixedWidth(220);
     teachBtn->setMinimumHeight(34);
     teachBtn->setMaximumHeight(40);
-    layout->addWidget(teachBtn, 3, 0, 1, 6);
+    layout->addWidget(teachBtn, 3, 0, 1, 6, Qt::AlignLeft);
     connect(teachBtn, &QPushButton::clicked, this, teachSlot);
     return groupBox;
 }
@@ -1983,11 +2474,43 @@ void PreciseMeasureEditDialog::SetEditorsBlocked(bool blocked)
             edit->blockSignals(blocked);
         }
     }
+    for (QComboBox* combo : m_otherParamComboEditors)
+    {
+        if (combo != nullptr)
+        {
+            combo->blockSignals(blocked);
+        }
+    }
+    if (m_pUseComputedScanSafeCheck != nullptr)
+    {
+        m_pUseComputedScanSafeCheck->blockSignals(blocked);
+    }
+    if (m_pScanSafeOffsetSpin != nullptr)
+    {
+        m_pScanSafeOffsetSpin->blockSignals(blocked);
+    }
+    if (m_pScanSafeGunAngleSpin != nullptr)
+    {
+        m_pScanSafeGunAngleSpin->blockSignals(blocked);
+    }
+    if (m_pScanSafeXDirectionCombo != nullptr)
+    {
+        m_pScanSafeXDirectionCombo->blockSignals(blocked);
+    }
+    if (m_pScanSafeLiftSpin != nullptr)
+    {
+        m_pScanSafeLiftSpin->blockSignals(blocked);
+    }
+    if (m_pScanSafeFlipWarnSpin != nullptr)
+    {
+        m_pScanSafeFlipWarnSpin->blockSignals(blocked);
+    }
 }
 
 void PreciseMeasureEditDialog::ClearOtherParamEditors()
 {
     m_otherParamEditors.clear();
+    m_otherParamComboEditors.clear();
     m_otherParamSectionWidgets.clear();
     if (m_pOtherParamLayout == nullptr)
     {
@@ -2080,7 +2603,11 @@ void PreciseMeasureEditDialog::UpdateAdaptiveLayout()
 
 void PreciseMeasureEditDialog::RebuildPulseGroupLayout(bool wide)
 {
-    if (m_pPulseGroupsLayout == nullptr || m_bWideAdaptiveLayout == wide)
+    if (m_pPulseGroupsLayout == nullptr)
+    {
+        return;
+    }
+    if (m_pPulseGroupsLayout->count() > 0 && m_bWideAdaptiveLayout == wide)
     {
         return;
     }
@@ -2093,6 +2620,11 @@ void PreciseMeasureEditDialog::RebuildPulseGroupLayout(bool wide)
     for (int i = 0; i < m_pulseGroupWidgets.size(); ++i)
     {
         QWidget* widget = m_pulseGroupWidgets[i];
+        if (wide && widget == m_pScanSafeParamPanel)
+        {
+            m_pPulseGroupsLayout->addWidget(widget, (i + 1) / 2, 0, 1, 2, Qt::AlignTop);
+            continue;
+        }
         if (wide)
         {
             m_pPulseGroupsLayout->addWidget(widget, i / 2, i % 2, Qt::AlignTop);
@@ -2105,7 +2637,7 @@ void PreciseMeasureEditDialog::RebuildPulseGroupLayout(bool wide)
 
     m_pPulseGroupsLayout->setColumnStretch(0, 1);
     m_pPulseGroupsLayout->setColumnStretch(1, wide ? 1 : 0);
-    m_pPulseGroupsLayout->setRowStretch(wide ? 2 : m_pulseGroupWidgets.size(), 1);
+    m_pPulseGroupsLayout->setRowStretch(wide ? 3 : m_pulseGroupWidgets.size(), 1);
     m_bWideAdaptiveLayout = wide;
 }
 
@@ -2135,6 +2667,26 @@ void PreciseMeasureEditDialog::SaveOtherParamEdit()
     AppendLog(QString("其它参数已保存：%1=%2").arg(PreciseParamDisplayName(key), value));
 }
 
+void PreciseMeasureEditDialog::SaveOtherParamComboEdit(QComboBox* combo)
+{
+    if (m_bLoading || combo == nullptr)
+    {
+        return;
+    }
+
+    QString error;
+    const QString sectionName = combo->property("paramSection").toString();
+    const QString key = combo->property("paramKey").toString();
+    const QString value = ValueForWriteWithInlineComment(combo);
+    if (!WriteParamValue(sectionName, key, value, error))
+    {
+        AppendLog("其它参数保存失败：" + error);
+        return;
+    }
+    MarkCleanSnapshot();
+    AppendLog(QString("其它参数已保存：%1=%2").arg(PreciseParamDisplayName(key), combo->currentText()));
+}
+
 bool PreciseMeasureEditDialog::HasUnsavedChanges() const
 {
     return BuildSnapshot() != m_cleanSnapshot;
@@ -2153,6 +2705,19 @@ QString PreciseMeasureEditDialog::BuildSnapshot() const
     for (auto it = m_otherParamEditors.cbegin(); it != m_otherParamEditors.cend(); ++it)
     {
         fields << it.key() << (it.value() != nullptr ? it.value()->text().trimmed() : QString());
+    }
+    for (auto it = m_otherParamComboEditors.cbegin(); it != m_otherParamComboEditors.cend(); ++it)
+    {
+        fields << it.key() << (it.value() != nullptr ? it.value()->currentData().toString() : QString());
+    }
+    if (m_pUseComputedScanSafeCheck != nullptr)
+    {
+        fields << "ScanSafe.UseComputed" << (m_pUseComputedScanSafeCheck->isChecked() ? "1" : "0");
+        fields << "ScanSafe.Offset" << QString::number(m_pScanSafeOffsetSpin != nullptr ? m_pScanSafeOffsetSpin->value() : 0.0, 'f', 6);
+        fields << "ScanSafe.GunAngle" << QString::number(m_pScanSafeGunAngleSpin != nullptr ? m_pScanSafeGunAngleSpin->value() : 0.0, 'f', 6);
+        fields << "ScanSafe.XDirection" << QString::number(m_pScanSafeXDirectionCombo != nullptr ? m_pScanSafeXDirectionCombo->currentData().toInt() : -1);
+        fields << "ScanSafe.LiftHeight" << QString::number(m_pScanSafeLiftSpin != nullptr ? m_pScanSafeLiftSpin->value() : 0.0, 'f', 6);
+        fields << "ScanSafe.FlipWarn" << QString::number(m_pScanSafeFlipWarnSpin != nullptr ? m_pScanSafeFlipWarnSpin->value() : 0.0, 'f', 6);
     }
     return fields.join('\n');
 }

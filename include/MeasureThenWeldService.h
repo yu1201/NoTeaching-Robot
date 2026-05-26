@@ -42,6 +42,17 @@ public:
         const QString& outputPath,
         QString& summary,
         QString& error) const;
+    bool GenerateStepWeldProgramFiles(
+        const QString& robotName,
+        const QString& poseFilePath,
+        const QString& outputDir,
+        bool actualWeld,
+        double weldSpeedMmPerMin,
+        QString& programName,
+        QString& srpPath,
+        QString& srdPath,
+        QString& summary,
+        QString& error) const;
     bool DownlinkWeldPoseFile(
         RobotDriverAdaptor* pRobotDriver,
         const QString& poseFilePath,

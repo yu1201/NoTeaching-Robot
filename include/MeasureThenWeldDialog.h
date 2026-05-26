@@ -12,6 +12,7 @@
 class MeasureThenWeldService;
 class CameraFrameCache;
 class QCheckBox;
+class QComboBox;
 class QPushButton;
 class QPlainTextEdit;
 class RobotDriverAdaptor;
@@ -39,6 +40,10 @@ struct T_PRECISE_MEASURE_PARAM
     double dWeldSpeedMmPerMin = 400.0;
     double dDryRunSpeedMmPerMin = 1000.0;
     double dWeldSafeMoveSpeedMmPerMin = 1000.0;
+    // STEP连续运动过渡比例，对应生成SRD文件中的OVERLAPREL变量。
+    double dStepOverlapRel = 20.0;
+    // 焊接方向：1 从姿态文件起点焊到终点，-1 从终点焊回起点。
+    int nWeldDirection = 1;
     // 焊接轨迹下枪/收枪安全位相对首尾焊点的回退距离，对应 MeasureWeldParam.ini 的 GunDownBackSafeDis。
     double dGunDownBackSafeDis = 70.0;
     double dWeldRzGainDeg = 0.0;
@@ -67,10 +72,11 @@ class MeasureThenWeldDialog : public QDialog
     Q_OBJECT
 
 public:
-    using StartCameraFunc = std::function<bool(QString&)>;
+    using StartCameraFunc = std::function<bool(int, QString&)>;
     using StopCameraFunc = std::function<void()>;
+    using CameraCacheFunc = std::function<CameraFrameCache*(int)>;
 
-    MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraFrameCache* cameraCache, QWidget* parent = nullptr);
+    MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraCacheFunc cameraCacheForUnit, QWidget* parent = nullptr);
 
 signals:
     void FlowStepChanged(const QString& text);
@@ -79,6 +85,17 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
+    void LoadRobotList();
+    void LoadParamGroups();
+    void LoadWeldProcessList();
+    void OnRobotChanged(int index);
+    void OnParamGroupChanged(int index);
+    void OnWeldProcessChanged(int index);
+    QString CurrentRobotName() const;
+    int CurrentParamGroupIndex() const;
+    bool SaveCurrentParamGroupSelection(QString& error) const;
+    bool SaveCurrentWeldProcessSelection(QString& error) const;
+    CameraFrameCache* ResolveCameraCacheForUnit(int unitIndex);
     RobotDriverAdaptor* GetRobotDriver();
 
     // 读取 Data/<RobotName>/MeasureWeldParam.ini 中当前启用的测量焊接参数组。
@@ -107,7 +124,6 @@ private:
     void RunPresetParamFlow();
     void RunSkipScanWeldFlow();
     void RunLineScanProcess();
-    void OpenScanSafeParamDialog();
     void RefreshWeldModeFromParam();
     void SaveWeldModeToParam(bool doActualWeld);
     bool IsActualWeldModeChecked() const;
@@ -121,14 +137,18 @@ private:
     MeasureThenWeldService* m_pService = nullptr;
     StartCameraFunc m_startCamera;
     StopCameraFunc m_stopCamera;
+    CameraCacheFunc m_cameraCacheForUnit;
     CameraFrameCache* m_pCameraCache = nullptr;
 
+    QComboBox* m_pRobotCombo = nullptr;
+    QComboBox* m_pParamGroupCombo = nullptr;
+    QComboBox* m_pWeldProcessCombo = nullptr;
     QPushButton* m_pPresetParamBtn = nullptr;
     QPushButton* m_pSkipScanWeldBtn = nullptr;
     QPushButton* m_pLineScanProcessBtn = nullptr;
-    QPushButton* m_pScanSafeParamBtn = nullptr;
     QCheckBox* m_pActualWeldCheck = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
 
     bool m_bRunning = false;
+    bool m_bLoadingSelectors = false;
 };
