@@ -140,6 +140,7 @@ public:
 	bool SetPosVar(int nIndex, JointsPos eRobotCoors, int scoper = ENGINEEVAR);
 
 	int GetPosVar(long lPvarIndex, double array[6], int config[7] = { 0 }, int MoveType = POSVAR) override;
+	bool GetHandEyeMatrixVariable(const char* variableName, double rotation[9], double translation[3], std::string* error = nullptr) override;
 
 	// 埃斯顿机器人专用: 速度变量读写
 	bool SetSpeed(const char* name, double* speed, int scord = ENGINEEVAR); //char设置单个速度

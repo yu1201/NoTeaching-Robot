@@ -1,6 +1,8 @@
 #include "HandEyeMatrixDialog.h"
 
 #include "HandEyeMatrixConfig.h"
+#include "RobotDataHelper.h"
+#include "RobotDriverAdaptor.h"
 #include "WindowStyleHelper.h"
 
 #include <QCloseEvent>
@@ -40,9 +42,15 @@ void ApplyNumericEdit(QLineEdit* edit)
 }
 
 HandEyeMatrixDialog::HandEyeMatrixDialog(const QString& robotName, const QString& cameraSection, QWidget* parent)
+    : HandEyeMatrixDialog(nullptr, robotName, cameraSection, parent)
+{
+}
+
+HandEyeMatrixDialog::HandEyeMatrixDialog(ContralUnit* pContralUnit, const QString& robotName, const QString& cameraSection, QWidget* parent)
     : QDialog(parent)
     , m_robotName(robotName)
     , m_cameraSection(cameraSection)
+    , m_pContralUnit(pContralUnit)
 {
     setWindowTitle(QString("%1 %2 手眼矩阵参数").arg(robotName, cameraSection));
     ApplyUnifiedWindowChrome(this);
@@ -106,9 +114,11 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(const QString& robotName, const QString
 
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     buttonLayout->addStretch(1);
+    QPushButton* readEyeBtn = new QPushButton("读取机器人 eye");
     QPushButton* reloadBtn = new QPushButton("重新读取");
     QPushButton* saveBtn = new QPushButton("保存参数");
     QPushButton* closeBtn = new QPushButton("关闭");
+    buttonLayout->addWidget(readEyeBtn);
     buttonLayout->addWidget(reloadBtn);
     buttonLayout->addWidget(saveBtn);
     buttonLayout->addWidget(closeBtn);
@@ -120,6 +130,7 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(const QString& robotName, const QString
     m_pLogText->setMinimumHeight(130);
     rootLayout->addWidget(m_pLogText, 1);
 
+    connect(readEyeBtn, &QPushButton::clicked, this, [this]() { ReadRobotEyeVariable(); });
     connect(reloadBtn, &QPushButton::clicked, this, [this]() { LoadConfig(); });
     connect(saveBtn, &QPushButton::clicked, this, [this]() { SaveConfig(); });
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::close);
@@ -174,6 +185,48 @@ bool HandEyeMatrixDialog::LoadConfig()
     return true;
 }
 
+bool HandEyeMatrixDialog::ReadRobotEyeVariable()
+{
+    QString error;
+    RobotDriverAdaptor* driver = CurrentDriver(&error);
+    if (driver == nullptr)
+    {
+        QMessageBox::warning(this, "读取机器人 eye", error);
+        AppendLog("读取机器人 eye 失败：" + error);
+        return false;
+    }
+
+    double rotation[9] = {};
+    double translation[3] = {};
+    std::string detail;
+    if (!driver->GetHandEyeMatrixVariable("eye", rotation, translation, &detail))
+    {
+        QString message = QString::fromStdString(detail.empty() ? driver->GetLastRobotError() : detail);
+        if (message.trimmed().isEmpty())
+        {
+            message = "读取机器人全局变量 eye 失败。";
+        }
+        QMessageBox::warning(this, "读取机器人 eye", message);
+        AppendLog("读取机器人 eye 失败：" + message);
+        return false;
+    }
+
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int col = 0; col < 3; ++col)
+        {
+            m_rotationEdits[row * 3 + col]->setText(FormatDoubleValue(rotation[row * 3 + col]));
+        }
+    }
+    for (int index = 0; index < 3; ++index)
+    {
+        m_translationEdits[index]->setText(FormatDoubleValue(translation[index]));
+    }
+
+    AppendLog("已读取机器人全局变量 eye，并填入手眼矩阵。保存后才会写入参数文件。");
+    return true;
+}
+
 bool HandEyeMatrixDialog::SaveConfig()
 {
     HandEyeMatrixConfig config;
@@ -219,6 +272,38 @@ bool HandEyeMatrixDialog::SaveConfig()
     QMessageBox::information(this, "手眼矩阵参数", "保存完成。");
     MarkCleanSnapshot();
     return true;
+}
+
+RobotDriverAdaptor* HandEyeMatrixDialog::CurrentDriver(QString* error) const
+{
+    if (m_pContralUnit == nullptr)
+    {
+        if (error != nullptr)
+        {
+            *error = "当前窗口未绑定机器人控制单元，不能读取机器人变量。";
+        }
+        return nullptr;
+    }
+
+    const QVector<RobotDataHelper::RobotInfo> robots = RobotDataHelper::LoadRobotList(m_pContralUnit);
+    for (const RobotDataHelper::RobotInfo& info : robots)
+    {
+        if (info.robotName == m_robotName)
+        {
+            RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, info.unitIndex);
+            if (driver != nullptr)
+            {
+                return driver;
+            }
+            break;
+        }
+    }
+
+    if (error != nullptr)
+    {
+        *error = QString("未找到机器人 %1 的驱动，请先确认控制单元已经创建并连接。").arg(m_robotName);
+    }
+    return nullptr;
 }
 
 bool HandEyeMatrixDialog::HasUnsavedChanges() const

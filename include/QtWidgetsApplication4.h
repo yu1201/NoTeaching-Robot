@@ -15,7 +15,8 @@
 
 #include <limits>
 
-class TcpSensorClientWorker;
+class ClientUDPFormSensorWorker;
+class ScanCameraTcpClientWorker;
 class CameraFrameCache;
 class CameraParamDialog;
 class FANUCRobotCtrl;

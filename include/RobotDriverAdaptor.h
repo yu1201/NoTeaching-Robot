@@ -86,6 +86,8 @@ public:
     virtual bool SetIntVar(const char* name, int value, int score = 2);
     virtual bool SetRealVar(int nIndex, double value, const char* cStrPreFix = "REAL", int score = 1);
     virtual int GetPosVar(long lPvarIndex, double array[6], int config[7] = { 0 }, int MoveType = POSVAR);
+    // 从机器人变量中读取手眼矩阵。rotation 为行优先 3x3，translation 为 mm 单位平移。
+    virtual bool GetHandEyeMatrixVariable(const char* variableName, double rotation[9], double translation[3], std::string* error = nullptr);
     virtual bool MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVL", int isconfig = 1, int config[7] = { 0 });
     virtual bool MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVJ");
     virtual bool MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType = PULSEVAR, std::string JobName = "MOVJ", int config[7] = { 0 });

@@ -22,7 +22,8 @@
 #include "WeldProcessDialog.h"
 #include "WeldSeamCompDialog.h"
 #include "../portable/LaserFramePoint3DFilter/LaserFramePoint3DFilter.h"
-#include "groove/tcpsensorclientworker.h"
+#include "groove/clientudpformsensorworker.h"
+#include "groove/scancameratcpclientworker.h"
 #include "groove/framebuffer.h"
 #include <QApplication>
 #include <QByteArray>
@@ -3812,11 +3813,13 @@ namespace
 
 struct QtWidgetsApplication4::CameraRuntime
 {
-	TcpSensorClientWorker* worker = nullptr;
+	ScanCameraTcpClientWorker* tcpWorker = nullptr;
+	ClientUDPFormSensorWorker* udpWorker = nullptr;
 	QThread* thread = nullptr;
 	CameraFrameCache* cache = nullptr;
 	QString cameraIP;
 	int cameraPort = 0;
+	QString receiveMode;
 	bool running = false;
 	qint64 datagramCount = 0;
 	qint64 filteredDatagramCount = 0;
@@ -5712,13 +5715,7 @@ QString QtWidgetsApplication4::CameraReceiveModeConfigPath() const
 void QtWidgetsApplication4::LoadCameraReceiveMode()
 {
 	QSettings settings(CameraReceiveModeConfigPath(), QSettings::IniFormat);
-	const bool savedSharedUdpMode = settings.value("Camera/UseSharedReceiver", false).toBool();
-	m_bUseSharedScanCameraReceiver = false;
-	if (savedSharedUdpMode)
-	{
-		settings.setValue("Camera/UseSharedReceiver", false);
-		settings.sync();
-	}
+	m_bUseSharedScanCameraReceiver = settings.value("Camera/UseSharedReceiver", false).toBool();
 	RefreshCameraReceiveModeButtonUi();
 }
 
@@ -5737,10 +5734,12 @@ void QtWidgetsApplication4::RefreshCameraReceiveModeButtonUi()
 	}
 
 	QSignalBlocker blocker(m_pManagementCameraReceiveModeBtn);
-	m_pManagementCameraReceiveModeBtn->setChecked(false);
-	m_pManagementCameraReceiveModeBtn->setEnabled(false);
-	m_pManagementCameraReceiveModeBtn->setText("相机接收：TCP独立");
-	m_pManagementCameraReceiveModeBtn->setToolTip("新版TCP相机客户端按相机IP独立连接，旧UDP共享端口模式不再使用。");
+	m_pManagementCameraReceiveModeBtn->setEnabled(true);
+	m_pManagementCameraReceiveModeBtn->setChecked(m_bUseSharedScanCameraReceiver);
+	m_pManagementCameraReceiveModeBtn->setText(m_bUseSharedScanCameraReceiver
+		? "相机接收：UDP共享"
+		: "相机接收：TCP独立");
+	m_pManagementCameraReceiveModeBtn->setToolTip("关闭为TCP独立连接；打开为旧UDP共享端口接收，并按相机IP分发到对应机器人缓存。");
 }
 
 void QtWidgetsApplication4::RefreshTouchKeyboardModeUi()
@@ -5758,8 +5757,6 @@ void QtWidgetsApplication4::RefreshTouchKeyboardModeUi()
 
 void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 {
-	// TCP客户端无法复用旧UDP共享端口/IP分发模式，界面开关统一落到独立连接。
-	enabled = false;
 	if (m_bUseSharedScanCameraReceiver == enabled)
 	{
 		RefreshCameraReceiveModeButtonUi();
@@ -5785,7 +5782,8 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 		EnsureScanCameraRunningForUnit(unitIndex, cameraIP, false);
 		m_grooveCameraDisplayTimer->start(33);
 	}
-	m_sGrooveCameraStatusText = "相机接收模式保持为：TCP独立连接。";
+	m_sGrooveCameraStatusText = QString("相机接收模式已切换为：%1。")
+		.arg(m_bUseSharedScanCameraReceiver ? "UDP共享接收" : "TCP独立连接");
 }
 
 void QtWidgetsApplication4::SetAuthRegisterMode(bool registerMode)
@@ -7998,6 +7996,7 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 bool QtWidgetsApplication4::LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort) const
 {
 	constexpr int kDefaultTcpSensorPort = 50006;
+	constexpr int kDefaultUdpSensorPort = 50004;
 	std::string robotName = "RobotA";
 	const T_CONTRAL_UNIT* selectedUnit = nullptr;
 	if (m_pContralUnit != nullptr)
@@ -8040,8 +8039,17 @@ bool QtWidgetsApplication4::LoadGrooveCameraEndpointForUnit(int unitIndex, QStri
 	}
 
 	cameraIP = cameraParam.deviceAddress.trimmed();
-	// DevicePort 仍保留旧UDP端口配置；新版坡口相机TCP预览固定连接 PointCloundTcpServer。
-	cameraPort = kDefaultTcpSensorPort;
+	if (m_bUseSharedScanCameraReceiver)
+	{
+		bool okPort = false;
+		const int configuredPort = cameraParam.devicePort.trimmed().toInt(&okPort);
+		cameraPort = okPort && configuredPort > 0 ? configuredPort : kDefaultUdpSensorPort;
+	}
+	else
+	{
+		// TCP 模式连接 PointCloundTcpServer，端口固定为新版相机服务端口。
+		cameraPort = kDefaultTcpSensorPort;
+	}
 	return true;
 }
 
@@ -8065,6 +8073,109 @@ void QtWidgetsApplication4::InitializeScanCameraRuntimes()
 
 	m_scanCameraUnitByIP.clear();
 
+	if (m_bUseSharedScanCameraReceiver)
+	{
+		QHash<int, QHash<QString, CameraFrameCache*>> dispatchTargetsByPort;
+		for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
+		{
+			CameraRuntime* runtime = m_scanCameraRuntimes.value(unitInfo.nUnitNo, nullptr);
+			if (runtime == nullptr)
+			{
+				runtime = new CameraRuntime();
+				runtime->cache = new CameraFrameCache();
+				m_liveScanCameraRuntimes.insert(runtime);
+				m_scanCameraRuntimes.insert(unitInfo.nUnitNo, runtime);
+			}
+
+			QString cameraIP;
+			int cameraPort = 0;
+			if (!LoadGrooveCameraEndpointForUnit(unitInfo.nUnitNo, cameraIP, cameraPort))
+			{
+				runtime->cameraStatus = "未配置扫描相机地址。";
+				runtime->running = false;
+				continue;
+			}
+
+			runtime->cameraIP = cameraIP;
+			runtime->cameraPort = cameraPort;
+			runtime->receiveMode = "UDP共享接收";
+			runtime->running = true;
+			m_scanCameraUnitByIP.insert(cameraIP, unitInfo.nUnitNo);
+			dispatchTargetsByPort[cameraPort].insert(cameraIP, runtime->cache);
+		}
+
+		for (auto it = dispatchTargetsByPort.constBegin(); it != dispatchTargetsByPort.constEnd(); ++it)
+		{
+			const int port = it.key();
+			if (m_scanCameraReceiversByPort.contains(port))
+			{
+				continue;
+			}
+
+			CameraRuntime* receiverRuntime = new CameraRuntime();
+			receiverRuntime->udpWorker = new ClientUDPFormSensorWorker(nullptr);
+			receiverRuntime->thread = new QThread(this);
+			receiverRuntime->cameraPort = port;
+			receiverRuntime->receiveMode = "UDP共享接收";
+			receiverRuntime->running = true;
+			m_liveScanCameraRuntimes.insert(receiverRuntime);
+			receiverRuntime->udpWorker->setDispatchTargets(it.value());
+			connect(receiverRuntime->udpWorker, &ClientUDPFormSensorWorker::diagnosticChanged, this,
+				[this, receiverRuntime](
+					qint64 datagramCount,
+					qint64 filteredDatagramCount,
+					qint64 decodedFrameCount,
+					qint64 decodeFailedCount,
+					qint64 appendedFrameCount,
+					const QString& statusText)
+				{
+					if (receiverRuntime == nullptr || !m_liveScanCameraRuntimes.contains(receiverRuntime))
+					{
+						return;
+					}
+					receiverRuntime->datagramCount = datagramCount;
+					receiverRuntime->filteredDatagramCount = filteredDatagramCount;
+					receiverRuntime->decodedFrameCount = decodedFrameCount;
+					receiverRuntime->decodeFailedCount = decodeFailedCount;
+					receiverRuntime->appendedFrameCount = appendedFrameCount;
+					receiverRuntime->cameraStatus = statusText;
+				});
+			connect(receiverRuntime->udpWorker, &ClientUDPFormSensorWorker::targetDiagnosticChanged, this,
+				[this](
+					const QString& targetIP,
+					qint64 datagramCount,
+					qint64 filteredDatagramCount,
+					qint64 decodedFrameCount,
+					qint64 decodeFailedCount,
+					qint64 appendedFrameCount,
+					const QString& statusText)
+				{
+					const int unitIndex = m_scanCameraUnitByIP.value(targetIP, -1);
+					CameraRuntime* runtime = m_scanCameraRuntimes.value(unitIndex, nullptr);
+					if (runtime == nullptr)
+					{
+						return;
+					}
+					runtime->datagramCount = datagramCount;
+					runtime->filteredDatagramCount = filteredDatagramCount;
+					runtime->decodedFrameCount = decodedFrameCount;
+					runtime->decodeFailedCount = decodeFailedCount;
+					runtime->appendedFrameCount = appendedFrameCount;
+					runtime->cameraStatus = statusText;
+				});
+			connect(receiverRuntime->thread, &QThread::finished, receiverRuntime->udpWorker, &QObject::deleteLater);
+			receiverRuntime->udpWorker->moveToThread(receiverRuntime->thread);
+			receiverRuntime->thread->start();
+			m_scanCameraReceiversByPort.insert(port, receiverRuntime);
+			QMetaObject::invokeMethod(
+				receiverRuntime->udpWorker,
+				"startReceiveDemux",
+				Qt::BlockingQueuedConnection,
+				Q_ARG(int, port));
+		}
+		return;
+	}
+
 	for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
 	{
 		if (m_scanCameraRuntimes.contains(unitInfo.nUnitNo))
@@ -8074,10 +8185,11 @@ void QtWidgetsApplication4::InitializeScanCameraRuntimes()
 
 		CameraRuntime* runtime = new CameraRuntime();
 		runtime->cache = new CameraFrameCache();
-		runtime->worker = new TcpSensorClientWorker(runtime->cache);
+		runtime->tcpWorker = new ScanCameraTcpClientWorker(runtime->cache);
 		runtime->thread = new QThread(this);
+		runtime->receiveMode = "TCP独立连接";
 		m_liveScanCameraRuntimes.insert(runtime);
-		connect(runtime->worker, &TcpSensorClientWorker::diagnosticChanged, this,
+		connect(runtime->tcpWorker, &ScanCameraTcpClientWorker::diagnosticChanged, this,
 			[this, runtime](
 				qint64 datagramCount,
 				qint64 filteredDatagramCount,
@@ -8097,11 +8209,10 @@ void QtWidgetsApplication4::InitializeScanCameraRuntimes()
 				runtime->appendedFrameCount = appendedFrameCount;
 				runtime->cameraStatus = statusText;
 			});
-		connect(runtime->thread, &QThread::finished, runtime->worker, &QObject::deleteLater);
-		runtime->worker->moveToThread(runtime->thread);
+		connect(runtime->thread, &QThread::finished, runtime->tcpWorker, &QObject::deleteLater);
+		runtime->tcpWorker->moveToThread(runtime->thread);
 		runtime->thread->start();
 		m_scanCameraRuntimes.insert(unitInfo.nUnitNo, runtime);
-
 		QString cameraIP;
 		EnsureScanCameraRunningForUnit(unitInfo.nUnitNo, cameraIP, false);
 	}
@@ -8121,15 +8232,25 @@ void QtWidgetsApplication4::StopScanCameraRuntimes()
 			return;
 		}
 		m_liveScanCameraRuntimes.remove(runtime);
-		if (runtime->worker != nullptr)
+		if (runtime->tcpWorker != nullptr)
 		{
-			QObject::disconnect(runtime->worker, nullptr, this, nullptr);
+			QObject::disconnect(runtime->tcpWorker, nullptr, this, nullptr);
 		}
-		if (runtime->worker != nullptr
+		if (runtime->udpWorker != nullptr)
+		{
+			QObject::disconnect(runtime->udpWorker, nullptr, this, nullptr);
+		}
+		if (runtime->tcpWorker != nullptr
 			&& runtime->thread != nullptr
 			&& runtime->thread->isRunning())
 		{
-			QMetaObject::invokeMethod(runtime->worker, "stopClient", Qt::BlockingQueuedConnection);
+			QMetaObject::invokeMethod(runtime->tcpWorker, "stopClient", Qt::BlockingQueuedConnection);
+		}
+		if (runtime->udpWorker != nullptr
+			&& runtime->thread != nullptr
+			&& runtime->thread->isRunning())
+		{
+			QMetaObject::invokeMethod(runtime->udpWorker, "stopReceive", Qt::BlockingQueuedConnection);
 		}
 		if (runtime->thread != nullptr)
 		{
@@ -8165,14 +8286,38 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 
 	CameraRuntime* runtime = m_scanCameraRuntimes.value(unitIndex, nullptr);
 
+	if (m_bUseSharedScanCameraReceiver)
+	{
+		if (runtime == nullptr || !m_scanCameraReceiversByPort.contains(cameraPort))
+		{
+			StopScanCameraRuntimes();
+			InitializeScanCameraRuntimes();
+			runtime = m_scanCameraRuntimes.value(unitIndex, nullptr);
+		}
+		if (runtime == nullptr || runtime->cache == nullptr)
+		{
+			return false;
+		}
+		if (clearCache)
+		{
+			runtime->cache->Clear();
+		}
+		runtime->cameraIP = cameraIP;
+		runtime->cameraPort = cameraPort;
+		runtime->receiveMode = "UDP共享接收";
+		runtime->running = true;
+		return true;
+	}
+
 	if (runtime == nullptr)
 	{
 		runtime = new CameraRuntime();
 		runtime->cache = new CameraFrameCache();
-		runtime->worker = new TcpSensorClientWorker(runtime->cache);
+		runtime->tcpWorker = new ScanCameraTcpClientWorker(runtime->cache);
 		runtime->thread = new QThread(this);
+		runtime->receiveMode = "TCP独立连接";
 		m_liveScanCameraRuntimes.insert(runtime);
-		connect(runtime->worker, &TcpSensorClientWorker::diagnosticChanged, this,
+		connect(runtime->tcpWorker, &ScanCameraTcpClientWorker::diagnosticChanged, this,
 			[this, runtime](
 				qint64 datagramCount,
 				qint64 filteredDatagramCount,
@@ -8192,10 +8337,14 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 				runtime->appendedFrameCount = appendedFrameCount;
 				runtime->cameraStatus = statusText;
 			});
-		connect(runtime->thread, &QThread::finished, runtime->worker, &QObject::deleteLater);
-		runtime->worker->moveToThread(runtime->thread);
+		connect(runtime->thread, &QThread::finished, runtime->tcpWorker, &QObject::deleteLater);
+		runtime->tcpWorker->moveToThread(runtime->thread);
 		runtime->thread->start();
 		m_scanCameraRuntimes.insert(unitIndex, runtime);
+	}
+	if (runtime->tcpWorker == nullptr)
+	{
+		return false;
 	}
 	if (runtime->cache != nullptr && clearCache)
 	{
@@ -8208,13 +8357,14 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 	if (needRestart)
 	{
 		QMetaObject::invokeMethod(
-			runtime->worker,
+			runtime->tcpWorker,
 			"startClient",
 			Qt::BlockingQueuedConnection,
 			Q_ARG(QString, cameraIP),
 			Q_ARG(int, cameraPort));
 		runtime->cameraIP = cameraIP;
 		runtime->cameraPort = cameraPort;
+		runtime->receiveMode = "TCP独立连接";
 		runtime->running = true;
 	}
 	return true;
@@ -8345,14 +8495,20 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 			return;
 		}
 
-		const int cameraPort = m_scanCameraRuntimes.value(unitIndex, nullptr) != nullptr
-			? m_scanCameraRuntimes.value(unitIndex)->cameraPort
+		const CameraRuntime* runtime = m_scanCameraRuntimes.value(unitIndex, nullptr);
+		const int cameraPort = runtime != nullptr
+			? runtime->cameraPort
 			: 0;
-		m_sGrooveCameraStatusText = QString("正在预览 Robot%1 扫描相机：%2\nTCP端口：%3\n接收模式：%4")
+		const QString receiveMode = runtime != nullptr && !runtime->receiveMode.isEmpty()
+			? runtime->receiveMode
+			: (m_bUseSharedScanCameraReceiver ? "UDP共享接收" : "TCP独立连接");
+		const QString portName = m_bUseSharedScanCameraReceiver ? "UDP端口" : "TCP端口";
+		m_sGrooveCameraStatusText = QString("正在预览 Robot%1 扫描相机：%2\n%3：%4\n接收模式：%5")
 			.arg(unitIndex)
 			.arg(cameraIP)
-			.arg(cameraPort > 0 ? cameraPort : 50006)
-			.arg("TCP独立连接");
+			.arg(portName)
+			.arg(cameraPort > 0 ? cameraPort : (m_bUseSharedScanCameraReceiver ? 50004 : 50006))
+			.arg(receiveMode);
 		OpenGroovePointCloudDialog();
 		if (m_pGroovePointCloudDialog != nullptr)
 		{
@@ -8412,17 +8568,22 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 	}
 	if (cameraPort <= 0)
 	{
-		cameraPort = 50006;
+		cameraPort = m_bUseSharedScanCameraReceiver ? 50004 : 50006;
 	}
+	const QString receiveMode = runtime != nullptr && !runtime->receiveMode.isEmpty()
+		? runtime->receiveMode
+		: (m_bUseSharedScanCameraReceiver ? "UDP共享接收" : "TCP独立连接");
+	const QString portName = m_bUseSharedScanCameraReceiver ? "UDP端口" : "TCP端口";
+	const QString receiveCountName = m_bUseSharedScanCameraReceiver ? "UDP接收次数" : "TCP接收次数";
 
 	QStringList diagnosticLines;
 	diagnosticLines
 		<< QString("当前机器人: Robot%1").arg(unitIndex)
-		<< QString("接收模式: TCP独立连接")
+		<< QString("接收模式: %1").arg(receiveMode)
 		<< QString("当前相机IP: %1").arg(cameraIP)
-		<< QString("TCP端口: %1").arg(cameraPort)
+		<< QString("%1: %2").arg(portName).arg(cameraPort)
 		<< QString("相机线程状态: %1").arg(runtime != nullptr && !runtime->cameraStatus.isEmpty() ? runtime->cameraStatus : "未收到线程状态")
-		<< QString("TCP接收次数: %1").arg(runtime != nullptr ? runtime->datagramCount : 0)
+		<< QString("%1: %2").arg(receiveCountName).arg(runtime != nullptr ? runtime->datagramCount : 0)
 		<< QString("丢弃/跳过次数: %1").arg(runtime != nullptr ? runtime->filteredDatagramCount : 0)
 		<< QString("解码成功帧: %1").arg(runtime != nullptr ? runtime->decodedFrameCount : 0)
 		<< QString("解码失败帧: %1").arg(runtime != nullptr ? runtime->decodeFailedCount : 0)
