@@ -1,7 +1,10 @@
 #include "STEPRobotDriver.h"
 
+#include "RobotPoseTransform.h"
+
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <cmath>
@@ -9,6 +12,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <vector>
 
 namespace
 {
@@ -150,6 +154,205 @@ namespace
 	std::string StepBuildRemoteProjectDir(const std::string& projectName)
 	{
 		return "/UserPrograms/" + StepNormalizeProjectName(projectName) + ".sr";
+	}
+
+	std::string StepToLower(std::string text)
+	{
+		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::tolower(ch));
+		});
+		return text;
+	}
+
+	std::string StepInternetLastErrorText()
+	{
+		DWORD errorCode = GetLastError();
+		DWORD responseCode = errorCode;
+		char response[512] = {};
+		DWORD responseSize = static_cast<DWORD>(sizeof(response));
+		if (InternetGetLastResponseInfoA(&responseCode, response, &responseSize) && response[0] != '\0')
+		{
+			return GetStr("WinINet错误=%lu，FTP响应=%s", responseCode, response);
+		}
+		return GetStr("WinINet错误=%lu", errorCode);
+	}
+
+	bool StepDownloadFtpTextFile(
+		const std::string& host,
+		int port,
+		const std::string& user,
+		const std::string& password,
+		const std::string& remotePath,
+		std::string& content,
+		std::string* errorText)
+	{
+		content.clear();
+		if (host.empty())
+		{
+			if (errorText != nullptr)
+			{
+				*errorText = "FTP地址为空。";
+			}
+			return false;
+		}
+
+		HINTERNET internet = InternetOpenA("QtWidgetsApplication4_STEP_Eye", INTERNET_OPEN_TYPE_DIRECT, nullptr, nullptr, 0);
+		if (internet == nullptr)
+		{
+			if (errorText != nullptr)
+			{
+				*errorText = "FTP初始化失败：" + StepInternetLastErrorText();
+			}
+			return false;
+		}
+
+		HINTERNET ftp = InternetConnectA(
+			internet,
+			host.c_str(),
+			static_cast<INTERNET_PORT>(port > 0 ? port : 21),
+			user.empty() ? nullptr : user.c_str(),
+			password.empty() ? nullptr : password.c_str(),
+			INTERNET_SERVICE_FTP,
+			INTERNET_FLAG_PASSIVE,
+			0);
+		if (ftp == nullptr)
+		{
+			const std::string detail = StepInternetLastErrorText();
+			InternetCloseHandle(internet);
+			if (errorText != nullptr)
+			{
+				*errorText = GetStr("FTP连接失败：%s:%d，%s", host.c_str(), port > 0 ? port : 21, detail.c_str());
+			}
+			return false;
+		}
+
+		HINTERNET file = FtpOpenFileA(ftp, remotePath.c_str(), GENERIC_READ, FTP_TRANSFER_TYPE_ASCII | INTERNET_FLAG_RELOAD, 0);
+		if (file == nullptr)
+		{
+			const std::string detail = StepInternetLastErrorText();
+			InternetCloseHandle(ftp);
+			InternetCloseHandle(internet);
+			if (errorText != nullptr)
+			{
+				*errorText = GetStr("FTP打开文件失败：%s，%s", remotePath.c_str(), detail.c_str());
+			}
+			return false;
+		}
+
+		char buffer[4096] = {};
+		DWORD bytesRead = 0;
+		while (InternetReadFile(file, buffer, sizeof(buffer), &bytesRead))
+		{
+			if (bytesRead == 0)
+			{
+				break;
+			}
+			content.append(buffer, buffer + bytesRead);
+		}
+		if (bytesRead != 0)
+		{
+			if (errorText != nullptr)
+			{
+				*errorText = "FTP读取文件失败：" + StepInternetLastErrorText();
+			}
+			InternetCloseHandle(file);
+			InternetCloseHandle(ftp);
+			InternetCloseHandle(internet);
+			return false;
+		}
+
+		InternetCloseHandle(file);
+		InternetCloseHandle(ftp);
+		InternetCloseHandle(internet);
+		return true;
+	}
+
+	bool StepParseHandEyeSrd(
+		const std::string& content,
+		const std::string& variableName,
+		double rotation[9],
+		double translation[3],
+		std::string* errorText)
+	{
+		const std::string loweredContent = StepToLower(content);
+		const std::string loweredName = StepToLower(variableName);
+		size_t searchPos = 0;
+		while ((searchPos = loweredContent.find("handeye", searchPos)) != std::string::npos)
+		{
+			size_t nameStart = searchPos + 7;
+			while (nameStart < loweredContent.size() && std::isspace(static_cast<unsigned char>(loweredContent[nameStart])))
+			{
+				++nameStart;
+			}
+
+			size_t nameEnd = nameStart;
+			while (nameEnd < loweredContent.size()
+				&& !std::isspace(static_cast<unsigned char>(loweredContent[nameEnd]))
+				&& loweredContent[nameEnd] != ':'
+				&& loweredContent[nameEnd] != '=')
+			{
+				++nameEnd;
+			}
+
+			if (loweredContent.substr(nameStart, nameEnd - nameStart) != loweredName)
+			{
+				searchPos = nameEnd;
+				continue;
+			}
+
+			const size_t openBrace = loweredContent.find('{', nameEnd);
+			const size_t closeBrace = openBrace == std::string::npos ? std::string::npos : loweredContent.find('}', openBrace);
+			if (openBrace == std::string::npos || closeBrace == std::string::npos)
+			{
+				break;
+			}
+
+			std::string valuesText = content.substr(openBrace + 1, closeBrace - openBrace - 1);
+			for (char& ch : valuesText)
+			{
+				if (ch == ',')
+				{
+					ch = ' ';
+				}
+			}
+
+			std::istringstream stream(valuesText);
+			std::vector<double> values;
+			double value = 0.0;
+			while (stream >> value)
+			{
+				values.push_back(value);
+			}
+
+			if (values.size() < 12)
+			{
+				if (errorText != nullptr)
+				{
+					*errorText = GetStr("HANDEYE %s 数据数量不足：需要12个，实际%zu个。", variableName.c_str(), values.size());
+				}
+				return false;
+			}
+
+			// STEP 示教器的 HANDEYE 文件按列保存 3x3 旋转矩阵；界面配置按行显示 R00..R22。
+			for (int row = 0; row < 3; ++row)
+			{
+				for (int col = 0; col < 3; ++col)
+				{
+					rotation[row * 3 + col] = values[static_cast<size_t>(col * 3 + row)];
+				}
+			}
+			for (int index = 0; index < 3; ++index)
+			{
+				translation[index] = values[static_cast<size_t>(9 + index)];
+			}
+			return true;
+		}
+
+		if (errorText != nullptr)
+		{
+			*errorText = GetStr("未在全局变量文件中找到 HANDEYE %s。", variableName.c_str());
+		}
+		return false;
 	}
 
 	std::string StepCString(const char* text, size_t capacity)
@@ -1812,6 +2015,136 @@ int STEPRobotCtrl::GetPosVar(long lPvarIndex, double array[6], int config[7], in
 		array[i] = value.m_CartPos.cart[i];
 	}
 	return 0;
+}
+
+bool STEPRobotCtrl::GetHandEyeMatrixVariable(const char* variableName, double rotation[9], double translation[3], std::string* error)
+{
+	if (variableName == nullptr || variableName[0] == '\0')
+	{
+		const std::string message = "STEP读取手眼矩阵失败：变量名为空。";
+		SetLastRobotError(message);
+		if (error != nullptr)
+		{
+			*error = message;
+		}
+		return false;
+	}
+	if (rotation == nullptr || translation == nullptr)
+	{
+		const std::string message = "STEP读取手眼矩阵失败：输出缓存为空。";
+		SetLastRobotError(message);
+		if (error != nullptr)
+		{
+			*error = message;
+		}
+		return false;
+	}
+	const std::string projectName = "_global";
+	const std::string programName = "_project";
+	const std::string globalProjectDataPath = "/UserPrograms/_global.sr/_project.srd";
+	const std::string ftpHost = !m_sFTPIP.empty() ? m_sFTPIP : m_sSocketIP;
+	std::string ftpContent;
+	std::string ftpDownloadError;
+	std::string ftpParseError;
+	if (StepDownloadFtpTextFile(ftpHost, m_nFTPPort, m_sFTPUser, m_sFTPPassWord, globalProjectDataPath, ftpContent, &ftpDownloadError))
+	{
+		if (StepParseHandEyeSrd(ftpContent, variableName, rotation, translation, &ftpParseError))
+		{
+			ClearLastRobotError();
+			if (m_pRobotLog != nullptr)
+			{
+				m_pRobotLog->write(
+					LogColor::SUCCESS,
+					"STEP已通过FTP读取全局手眼变量：%s/%s Var=%s",
+					projectName.c_str(),
+					programName.c_str(),
+					variableName);
+			}
+			return true;
+		}
+	}
+
+	const auto fillFromCart = [rotation, translation](const double cart[6]) {
+		T_ROBOT_COORS pose;
+		pose.dX = cart[0];
+		pose.dY = cart[1];
+		pose.dZ = cart[2];
+		pose.dRX = cart[3];
+		pose.dRY = cart[4];
+		pose.dRZ = cart[5];
+		const Eigen::Matrix3d matrix = RobotPoseTransform::RotationFromPose(pose, ROBOT_TYPE_STEP);
+		for (int row = 0; row < 3; ++row)
+		{
+			for (int col = 0; col < 3; ++col)
+			{
+				rotation[row * 3 + col] = matrix(row, col);
+			}
+		}
+		translation[0] = pose.dX;
+		translation[1] = pose.dY;
+		translation[2] = pose.dZ;
+	};
+
+	int lastRobotCartRet = 0;
+	int lastCartRet = 0;
+	if (m_pSTEPRobotClient != nullptr && IsConnected())
+	{
+		std::vector<std::string> names;
+		names.push_back(variableName);
+		std::string upperName = variableName;
+		std::transform(upperName.begin(), upperName.end(), upperName.begin(), [](unsigned char ch) {
+			return static_cast<char>(std::toupper(ch));
+		});
+		if (upperName != names.front())
+		{
+			names.push_back(upperName);
+		}
+
+		for (const std::string& name : names)
+		{
+			RobotCartPos robotCart = {};
+			lastRobotCartRet = m_pSTEPRobotClient->VariableRobotCartposReadCmd(projectName, programName, name, robotCart);
+			if (lastRobotCartRet == 0)
+			{
+				fillFromCart(robotCart.cart);
+				ClearLastRobotError();
+				return true;
+			}
+
+			CARTPOS cart = {};
+			lastCartRet = m_pSTEPRobotClient->VariableCartposReadCmd(projectName, programName, name, cart);
+			if (lastCartRet == 0)
+			{
+				fillFromCart(cart.m_CartPos.cart);
+				ClearLastRobotError();
+				return true;
+			}
+		}
+	}
+	else
+	{
+		ftpParseError += ftpParseError.empty() ? "" : "；";
+		ftpParseError += "SDK兜底未执行：机器人SDK客户端未连接。";
+	}
+
+	const std::string message = GetStr(
+		"STEP读取全局手眼变量失败：SDK未提供HANDEYE专用读取接口；已尝试FTP %s。FTP下载错误=%s，FTP解析错误=%s，Project=%s Program=%s Var=%s，RobotCartPos错误=%s(%d)，CARTPOS错误=%s(%d)。",
+		globalProjectDataPath.c_str(),
+		ftpDownloadError.empty() ? "无" : ftpDownloadError.c_str(),
+		ftpParseError.empty() ? "无" : ftpParseError.c_str(),
+		projectName.c_str(),
+		programName.c_str(),
+		variableName,
+		GetErrorText(lastRobotCartRet),
+		lastRobotCartRet,
+		GetErrorText(lastCartRet),
+		lastCartRet);
+	SetLastRobotError(message);
+	if (error != nullptr)
+	{
+		*error = message;
+	}
+	return false;
 }
 
 bool STEPRobotCtrl::SetSpeed(const char* name, double* speed, int scord)

@@ -13,9 +13,18 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.05.26.1959`
+- 当前源码版本：`v2026.05.27.1711`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.05.26.1959.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.05.27.1711.exe`，不用自己编译源码。
+
+## 2026-05-27 更新
+
+- 坡口相机 TCP 接收改为外部 `ScanCameraTcpClientWorker` 封装，第三方 `tcpsensorclientworker` 源码恢复为独立保留，后续替换源码时不影响主程序接入
+- 管理界面恢复“TCP 独立 / UDP 共享”接收模式切换，UDP 共享端口按相机 IP 分发到各机器人缓存，并修正单包多帧/分帧解析，减少扫描点云稀疏问题
+- FPS 检测工具新增 UDP 50004 模式和双击入口，现场测试约 `48 fps`，窗口仍保留平均帧数和样例帧数据
+- 手眼矩阵参数界面新增“读取机器人 eye”，STEP 机器人优先从全局变量文件/SDK 读取手眼矩阵并填入矩阵参数
+- 手眼标定界面增加滚动区域，低分辨率平板上控件不再被裁掉；扫描日志补充缓存新增帧数和估算 FPS
+- 构建验证：`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.05.27.1711.exe`
 
 ## 2026-05-26 更新
 

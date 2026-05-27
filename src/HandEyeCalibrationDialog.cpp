@@ -31,6 +31,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QStringList>
 #include <QTabBar>
 #include <QTabWidget>
@@ -731,6 +732,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     , m_pCameraCache(cameraCache)
 {
     setWindowTitle(QString("%1 %2 手眼标定").arg(robotName, cameraSection));
+    MarkDirectMouseInputWindow(this);
     ApplyUnifiedWindowChrome(this);
     ResizeWindowForAvailableGeometry(this, QSize(1680, 720), 0.96, 0.78);
     setStyleSheet(
@@ -743,9 +745,29 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
         "QDoubleSpinBox { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 8px; padding: 6px 8px; min-width: 150px; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
         "QScrollArea { border: none; }"
+        "#HandEyeCalibrationScrollContent { background: #111820; }"
         "QLabel { color: #BACBD1; }");
 
-    QVBoxLayout* rootLayout = new QVBoxLayout(this);
+    QVBoxLayout* windowLayout = new QVBoxLayout(this);
+    windowLayout->setContentsMargins(0, 0, 0, 0);
+    windowLayout->setSpacing(0);
+
+    QScrollArea* scrollArea = new QScrollArea(this);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+    QWidget* scrollContent = new QWidget(scrollArea);
+    scrollContent->setObjectName("HandEyeCalibrationScrollContent");
+    scrollContent->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+
+    QVBoxLayout* rootLayout = new QVBoxLayout(scrollContent);
+    rootLayout->setContentsMargins(12, 12, 12, 12);
+    rootLayout->setSpacing(8);
+
+    scrollArea->setWidget(scrollContent);
+    windowLayout->addWidget(scrollArea, 1);
 
     QLabel* titleLabel = new QLabel(QString("手眼标定 - %1 / %2").arg(robotName, cameraSection));
     titleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #F7FCFC;");
@@ -2487,7 +2509,7 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
 
 void HandEyeCalibrationDialog::OpenMatrixDialog()
 {
-    HandEyeMatrixDialog dialog(m_robotName, m_cameraSection, this);
+    HandEyeMatrixDialog dialog(m_pContralUnit, m_robotName, m_cameraSection, this);
     dialog.exec();
     UpdatePathLabels();
 }

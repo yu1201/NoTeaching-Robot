@@ -4136,15 +4136,25 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
 
     if (appendLog)
     {
+        const std::uint64_t cacheFrameSpan =
+            scanEndCameraSequence >= scanStartCameraSequence
+            ? scanEndCameraSequence - scanStartCameraSequence
+            : 0;
+        const double cacheEffectiveFps =
+            scanMotionElapsedMs > 0
+            ? static_cast<double>(cacheFrameSpan) * 1000.0 / static_cast<double>(scanMotionElapsedMs)
+            : 0.0;
         appendLog(QString("扫描完成，相机点=%1，机器人采样=%2，已匹配相机点=%3，保存目录=%4")
             .arg(static_cast<int>(cameraSamples.size()))
             .arg(static_cast<int>(robotSamples.size()))
             .arg(static_cast<int>(matchedCameraSamples.size()))
             .arg(resultDir));
-        appendLog(QString("扫描期间已处理相机帧=%1，缓存序号范围=(%2, %3]")
+        appendLog(QString("扫描期间已处理相机帧=%1，缓存序号范围=(%2, %3]，缓存新增=%4，估算缓存FPS=%5")
             .arg(static_cast<int>(cameraSamples.size() + invalidCameraTimestampCount + cameraBeforeRobotTimeBaseCount))
             .arg(scanStartCameraSequence)
-            .arg(scanEndCameraSequence));
+            .arg(scanEndCameraSequence)
+            .arg(static_cast<qulonglong>(cacheFrameSpan))
+            .arg(cacheEffectiveFps, 0, 'f', 2));
         if (hasCameraToRobotTimeOffset)
         {
             appendLog(QString("相机时间轴映射到机器人采样时间轴：首帧相机timestamp=%1 us，对齐机器人时间=%2 us，映射偏移=%3 us，额外补偿=%4 ms。")

@@ -1,6 +1,8 @@
 param(
     [string]$HostAddress = "",
     [int]$Port = 50006,
+    [ValidateSet("Tcp", "Udp")]
+    [string]$Protocol = "Tcp",
     [double]$Seconds = 10.0,
     [string]$Robot = "",
     [string]$CameraSection = "",
@@ -8,6 +10,7 @@ param(
     [int]$ConnectTimeoutMs = 3000,
     [int]$ReadTimeoutMs = 2000,
     [switch]$UseConfiguredDevicePort,
+    [switch]$Udp,
     [switch]$ShowWindow,
     [switch]$NoAutoStart
 )
@@ -19,6 +22,13 @@ $MagicNumber = [Convert]::ToUInt32("ABCDEF12", 16)
 $QtNullLength = [Convert]::ToUInt32("FFFFFFFF", 16)
 $HeaderSize = 24
 $MaxPacketSize = 32 * 1024 * 1024
+
+if ($Udp) {
+    $Protocol = "Udp"
+}
+if ($Protocol -eq "Udp" -and $Port -eq 50006 -and -not $PSBoundParameters.ContainsKey("Port")) {
+    $Port = 50004
+}
 
 function Get-ProjectRoot {
     param([string]$Root)
@@ -407,11 +417,11 @@ function Format-ProbeReport {
 
     $sample = $Result.SampleFrame
     $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add(("Target: {0}:{1}" -f $Result.HostAddress, $Result.Port))
+    $lines.Add(("Target: {0} {1}:{2}" -f $Result.Protocol, $Result.HostAddress, $Result.Port))
     $lines.Add(("Config: Robot={0}, Camera={1}, iniPort={2}" -f $Result.Robot, $Result.CameraSection, $Result.ConfiguredDevicePort))
     $lines.Add(("Sample: {0:N3}s, frames={1}, average={2:N2} fps, data={3:N2} Mbps" -f $Result.ElapsedSeconds, $Result.FrameCount, $Result.Fps, $Result.DataMbps))
     $lines.Add(("Frame timestamps: first={0}, last={1}" -f $Result.FirstTimestamp, $Result.LastTimestamp))
-    $lines.Add(("Parser: filtered_bytes={0}, decode_failed={1}" -f $Result.FilteredBytes, $Result.DecodeFailed))
+    $lines.Add(("Parser: datagrams={0}, filtered_datagrams={1}, filtered_bytes={2}, decode_failed={3}" -f $Result.DatagramCount, $Result.FilteredDatagrams, $Result.FilteredBytes, $Result.DecodeFailed))
     $lines.Add("")
     $lines.Add("Sample frame:")
     if ($null -eq $sample) {
@@ -442,10 +452,52 @@ function Format-ProbeReport {
     return ($lines -join [Environment]::NewLine)
 }
 
+function Resolve-IPv4Address {
+    param([string]$HostText)
+
+    $address = $null
+    if ([System.Net.IPAddress]::TryParse($HostText, [ref]$address)) {
+        if ($address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+            return $address
+        }
+    }
+
+    $addresses = [System.Net.Dns]::GetHostAddresses($HostText)
+    foreach ($item in $addresses) {
+        if ($item.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+            return $item
+        }
+    }
+    throw ("Cannot resolve IPv4 address: {0}" -f $HostText)
+}
+
+function Test-IPv4AddressEqual {
+    param(
+        [System.Net.IPAddress]$Left,
+        [System.Net.IPAddress]$Right
+    )
+
+    if ($null -eq $Left -or $null -eq $Right) {
+        return $false
+    }
+    $leftBytes = $Left.GetAddressBytes()
+    $rightBytes = $Right.GetAddressBytes()
+    if ($leftBytes.Length -ne $rightBytes.Length) {
+        return $false
+    }
+    for ($i = 0; $i -lt $leftBytes.Length; $i++) {
+        if ($leftBytes[$i] -ne $rightBytes[$i]) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Invoke-CameraFpsProbe {
     param(
         [string]$TargetHost,
         [int]$TargetPort,
+        [string]$ProtocolName,
         [double]$DurationSeconds,
         [string]$RobotName,
         [string]$SectionName,
@@ -466,6 +518,163 @@ function Invoke-CameraFpsProbe {
     }
     if ($DurationSeconds -le 0) {
         throw "-Seconds must be positive."
+    }
+
+    $protocolValue = $ProtocolName
+    if ([string]::IsNullOrWhiteSpace($protocolValue)) {
+        $protocolValue = "Tcp"
+    }
+    $protocolValue = (Get-Culture).TextInfo.ToTitleCase($protocolValue.ToLowerInvariant())
+
+    if ($protocolValue -eq "Udp") {
+        $remoteAddress = Resolve-IPv4Address -HostText $TargetHost
+        $remoteEndpoint = [System.Net.IPEndPoint]::new($remoteAddress, $endpoint.TargetPort)
+        $udp = [System.Net.Sockets.UdpClient]::new()
+        $udp.Client.ExclusiveAddressUse = $false
+        $udp.Client.SetSocketOption([System.Net.Sockets.SocketOptionLevel]::Socket, [System.Net.Sockets.SocketOptionName]::ReuseAddress, $true)
+        $udp.Client.ReceiveBufferSize = 32 * 1024 * 1024
+        $udp.Client.ReceiveTimeout = $ReadTimeout
+        $udp.Client.Bind([System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, $endpoint.TargetPort))
+
+        $buffer = [System.Collections.Generic.List[byte]]::new()
+        $heartbeat = [System.Text.Encoding]::ASCII.GetBytes("HEARTBEAT")
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $sampleStart = $null
+        $deadline = $null
+        $nextHeartbeatMs = 0
+        $frameCount = 0
+        $byteCount = 0
+        $datagramCount = 0
+        $filteredDatagrams = 0
+        $decodeFailed = 0
+        $filteredBytes = 0
+        $firstTimestamp = $null
+        $lastTimestamp = $null
+        $sampleFrame = $null
+
+        try {
+            while ($true) {
+                if ($null -ne $deadline -and $sw.Elapsed.TotalSeconds -ge $deadline) {
+                    break
+                }
+                if ($null -eq $sampleStart -and $sw.Elapsed.TotalMilliseconds -ge $ConnectTimeout) {
+                    break
+                }
+                if ($sw.Elapsed.TotalMilliseconds -ge $nextHeartbeatMs) {
+                    [void]$udp.Send($heartbeat, $heartbeat.Length, $remoteEndpoint)
+                    $nextHeartbeatMs = $sw.Elapsed.TotalMilliseconds + 300
+                }
+
+                $sender = [System.Net.IPEndPoint]::new([System.Net.IPAddress]::Any, 0)
+                try {
+                    $datagram = $udp.Receive([ref]$sender)
+                }
+                catch [System.Net.Sockets.SocketException] {
+                    if ($null -ne $deadline -and $sw.Elapsed.TotalSeconds -ge $deadline) {
+                        break
+                    }
+                    continue
+                }
+                $datagramCount++
+                if (-not (Test-IPv4AddressEqual -Left $sender.Address -Right $remoteAddress)) {
+                    $filteredDatagrams++
+                    continue
+                }
+
+                Add-Bytes -Buffer $buffer -Bytes $datagram -Count $datagram.Length
+
+                while ($true) {
+                    $framePos = Find-FrameHeader -Buffer $buffer
+                    if ($framePos -lt 0) {
+                        break
+                    }
+                    if ($framePos -gt 0) {
+                        $buffer.RemoveRange(0, $framePos)
+                        $filteredBytes += $framePos
+                    }
+                    if ($buffer.Count -lt $HeaderSize) {
+                        break
+                    }
+
+                    $totalSize = Read-UInt32BE -Buffer $buffer -Offset 8
+                    if ($totalSize -lt $HeaderSize -or $totalSize -gt $MaxPacketSize) {
+                        $buffer.RemoveAt(0)
+                        $filteredBytes++
+                        continue
+                    }
+
+                    $frameSize = Resolve-FrameSize -Buffer $buffer -HeaderTotalSize $totalSize
+                    if ($frameSize -lt $HeaderSize -or $frameSize -gt ($MaxPacketSize + 4)) {
+                        $buffer.RemoveAt(0)
+                        $filteredBytes++
+                        continue
+                    }
+                    if ($buffer.Count -lt $frameSize) {
+                        break
+                    }
+
+                    $timestamp = Read-Int64BE -Buffer $buffer -Offset 12
+                    $now = $sw.Elapsed.TotalSeconds
+                    if ($null -eq $sampleStart) {
+                        $sampleStart = $now
+                        $deadline = $sampleStart + $DurationSeconds
+                        $firstTimestamp = $timestamp
+                    }
+
+                    if ($now -le $deadline) {
+                        $frameCount++
+                        $byteCount += $frameSize
+                        $lastTimestamp = $timestamp
+                        if ($null -eq $sampleFrame) {
+                            $frameBytes = Copy-FrameBytes -Buffer $buffer -Count $frameSize
+                            $sampleFrame = Decode-PointCloudFrameSummary -FrameBytes $frameBytes -FrameIndex $frameCount
+                            if ($sampleFrame.DecodeNote -ne "ok") {
+                                $decodeFailed++
+                            }
+                        }
+                    }
+
+                    $buffer.RemoveRange(0, $frameSize)
+
+                    if ($null -ne $deadline -and $now -ge $deadline) {
+                        break
+                    }
+                }
+            }
+        }
+        finally {
+            $udp.Close()
+        }
+
+        if ($null -eq $sampleStart) {
+            throw ("UDP bound to local port {0} but no complete frame was decoded from {1}." -f $endpoint.TargetPort, $TargetHost)
+        }
+
+        $elapsed = [Math]::Max(0.001, [Math]::Min($DurationSeconds, ($sw.Elapsed.TotalSeconds - $sampleStart)))
+        $fps = $frameCount / $elapsed
+        $mbps = ($byteCount * 8.0 / 1000000.0) / $elapsed
+
+        return [pscustomobject]@{
+            Protocol = $protocolValue
+            HostAddress = $TargetHost
+            Port = $endpoint.TargetPort
+            Robot = $endpoint.Robot
+            CameraSection = $endpoint.CameraSection
+            CameraIni = $endpoint.CameraIni
+            ConfiguredDevicePort = $endpoint.ConfiguredDevicePort
+            ElapsedSeconds = $elapsed
+            FrameCount = $frameCount
+            Fps = $fps
+            DataMbps = $mbps
+            Bytes = $byteCount
+            FirstTimestamp = $firstTimestamp
+            LastTimestamp = $lastTimestamp
+            FilteredBytes = $filteredBytes
+            DecodeFailed = $decodeFailed
+            DatagramCount = $datagramCount
+            FilteredDatagrams = $filteredDatagrams
+            SampleFrame = $sampleFrame
+        }
     }
 
     $client = [System.Net.Sockets.TcpClient]::new()
@@ -582,6 +791,7 @@ function Invoke-CameraFpsProbe {
     $mbps = ($byteCount * 8.0 / 1000000.0) / $elapsed
 
     return [pscustomobject]@{
+        Protocol = $protocolValue
         HostAddress = $TargetHost
         Port = $endpoint.TargetPort
         Robot = $endpoint.Robot
@@ -597,6 +807,8 @@ function Invoke-CameraFpsProbe {
         LastTimestamp = $lastTimestamp
         FilteredBytes = $filteredBytes
         DecodeFailed = $decodeFailed
+        DatagramCount = $null
+        FilteredDatagrams = $null
         SampleFrame = $sampleFrame
     }
 }
@@ -608,7 +820,7 @@ function Show-CameraFpsProbeWindow {
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Camera FPS Probe"
     $form.StartPosition = "CenterScreen"
-    $form.Size = New-Object System.Drawing.Size(920, 700)
+    $form.Size = New-Object System.Drawing.Size(980, 700)
 
     $font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
     $monoFont = New-Object System.Drawing.Font("Consolas", 9)
@@ -655,11 +867,35 @@ function Show-CameraFpsProbeWindow {
     $secondsBox.Text = $Seconds.ToString("0.###")
     $topPanel.Controls.Add($secondsBox)
 
+    $labelProtocol = New-Object System.Windows.Forms.Label
+    $labelProtocol.Text = "Mode"
+    $labelProtocol.Location = New-Object System.Drawing.Point(456, 17)
+    $labelProtocol.Size = New-Object System.Drawing.Size(42, 24)
+    $topPanel.Controls.Add($labelProtocol)
+
+    $protocolBox = New-Object System.Windows.Forms.ComboBox
+    $protocolBox.DropDownStyle = "DropDownList"
+    [void]$protocolBox.Items.Add("Tcp")
+    [void]$protocolBox.Items.Add("Udp")
+    $protocolBox.Location = New-Object System.Drawing.Point(502, 14)
+    $protocolBox.Size = New-Object System.Drawing.Size(76, 24)
+    $protocolBox.SelectedItem = $Protocol
+    $topPanel.Controls.Add($protocolBox)
+
     $startButton = New-Object System.Windows.Forms.Button
     $startButton.Text = "Start"
-    $startButton.Location = New-Object System.Drawing.Point(456, 12)
+    $startButton.Location = New-Object System.Drawing.Point(596, 12)
     $startButton.Size = New-Object System.Drawing.Size(92, 30)
     $topPanel.Controls.Add($startButton)
+
+    $protocolBox.Add_SelectedIndexChanged({
+        if ($protocolBox.SelectedItem -eq "Udp" -and $portBox.Text.Trim() -eq "50006") {
+            $portBox.Text = "50004"
+        }
+        elseif ($protocolBox.SelectedItem -eq "Tcp" -and $portBox.Text.Trim() -eq "50004") {
+            $portBox.Text = "50006"
+        }
+    })
 
     $statusLabel = New-Object System.Windows.Forms.Label
     $statusLabel.Text = "Ready"
@@ -702,6 +938,7 @@ function Show-CameraFpsProbeWindow {
             $result = Invoke-CameraFpsProbe `
                 -TargetHost $hostBox.Text.Trim() `
                 -TargetPort $targetPort `
+                -ProtocolName $protocolBox.SelectedItem.ToString() `
                 -DurationSeconds $duration `
                 -RobotName $Robot `
                 -SectionName $CameraSection `
@@ -754,6 +991,7 @@ if ($ShowWindow) {
 $result = Invoke-CameraFpsProbe `
     -TargetHost $HostAddress `
     -TargetPort $Port `
+    -ProtocolName $Protocol `
     -DurationSeconds $Seconds `
     -RobotName $Robot `
     -SectionName $CameraSection `
@@ -762,12 +1000,12 @@ $result = Invoke-CameraFpsProbe `
     -ReadTimeout $ReadTimeoutMs `
     -UseIniPort ([bool]$UseConfiguredDevicePort)
 
-Write-Host ("camera_fps_probe target={0}:{1} seconds={2:N3}" -f $result.HostAddress, $result.Port, $Seconds)
+Write-Host ("camera_fps_probe protocol={0} target={1}:{2} seconds={3:N3}" -f $result.Protocol, $result.HostAddress, $result.Port, $Seconds)
 Write-Host ("config robot={0} section={1} iniPort={2} ini={3}" -f $result.Robot, $result.CameraSection, $result.ConfiguredDevicePort, $result.CameraIni)
 if (-not $UseConfiguredDevicePort -and $result.ConfiguredDevicePort -gt 0 -and $result.ConfiguredDevicePort -ne $result.Port) {
-    Write-Host ("note using fixed TCP point-cloud port {0}; CameraParam DevicePort is {1}" -f $result.Port, $result.ConfiguredDevicePort)
+    Write-Host ("note using fixed {0} point-cloud port {1}; CameraParam DevicePort is {2}" -f $result.Protocol, $result.Port, $result.ConfiguredDevicePort)
 }
 Write-Host ("result frames={0} elapsed_s={1:N3} fps={2:N2} data_mbps={3:N2} bytes={4}" -f $result.FrameCount, $result.ElapsedSeconds, $result.Fps, $result.DataMbps, $result.Bytes)
-Write-Host ("timestamps first={0} last={1} filtered_bytes={2} decode_failed={3}" -f $result.FirstTimestamp, $result.LastTimestamp, $result.FilteredBytes, $result.DecodeFailed)
+Write-Host ("timestamps first={0} last={1} datagrams={2} filtered_datagrams={3} filtered_bytes={4} decode_failed={5}" -f $result.FirstTimestamp, $result.LastTimestamp, $result.DatagramCount, $result.FilteredDatagrams, $result.FilteredBytes, $result.DecodeFailed)
 Write-Host ""
 Write-Host (Format-ProbeReport -Result $result)

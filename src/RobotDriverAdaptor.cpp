@@ -895,6 +895,20 @@ int RobotDriverAdaptor::GetPosVar(long lPvarIndex, double array[6], int config[7
     return -1;
 }
 
+bool RobotDriverAdaptor::GetHandEyeMatrixVariable(const char* variableName, double rotation[9], double translation[3], std::string* error)
+{
+    (void)variableName;
+    (void)rotation;
+    (void)translation;
+    const std::string message = "当前机器人驱动不支持读取手眼矩阵变量。";
+    SetLastRobotError(message);
+    if (error != nullptr)
+    {
+        *error = message;
+    }
+    return false;
+}
+
 bool RobotDriverAdaptor::MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName, int isconfig, int config[7])
 {
     (void)tRobotJointCoord;

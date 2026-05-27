@@ -157,13 +157,16 @@
     <ClCompile Include="src\groove\pointcloundresultframe.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\groove\clientudpformsensorworker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\groove\scancameratcpclientworker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\SkDataClass.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\SkFunction.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\groove\tcpsensorclientworker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -281,7 +284,10 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <QtMoc Include="include\groove\tcpsensorclientworker.h">
+    <QtMoc Include="include\groove\clientudpformsensorworker.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="include\groove\scancameratcpclientworker.h">
       <Filter>Header Files</Filter>
     </QtMoc>
   </ItemGroup>

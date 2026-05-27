@@ -270,7 +270,7 @@ void CameraParamDialog::OpenCameraBasicParamDialog()
 
 void CameraParamDialog::OpenHandEyeDialog()
 {
-    HandEyeMatrixDialog dialog(CurrentRobotName(), CurrentCameraSection(), this);
+    HandEyeMatrixDialog dialog(m_pContralUnit, CurrentRobotName(), CurrentCameraSection(), this);
     dialog.exec();
     if (dialog.SavedThisSession())
     {

@@ -3,6 +3,8 @@
 #include <QDataStream>
 #include <QIODevice>
 #include <QVariant>
+#include <QtEndian>
+#include <cstring>
 #include "CameraFrameCache.h"
 #include "groove/pointcloundresultframe.h"
 #include "groove/framebuffer.h"
@@ -10,6 +12,7 @@
 namespace
 {
 constexpr quint16 kDefaultUdpPort = 50004;
+constexpr int kMaxFramePacketSize = 16 * 1024 * 1024;
 
 bool IsExpectedSender(const QHostAddress& senderAddress, const QString& expectedIP)
 {
@@ -50,6 +53,107 @@ quint16 NormalizeUdpPort(int serverPort)
         return kDefaultUdpPort;
     }
     return static_cast<quint16>(serverPort);
+}
+
+quint32 ReadBigEndianUInt32(const QByteArray& buffer, int offset)
+{
+    quint32 value = 0;
+    if (offset < 0 || offset + static_cast<int>(sizeof(value)) > buffer.size())
+    {
+        return 0;
+    }
+    std::memcpy(&value, buffer.constData() + offset, sizeof(value));
+    return qFromBigEndian(value);
+}
+
+int ResolveFrameByteCount(const QByteArray& buffer, quint32 headerTotalSize)
+{
+    const int headerSize = static_cast<int>(PointCloundResultFrame::HEADER_SIZE);
+    if (buffer.size() < headerSize + static_cast<int>(sizeof(quint32)))
+    {
+        return static_cast<int>(headerTotalSize);
+    }
+
+    const quint32 bodySize = ReadBigEndianUInt32(buffer, headerSize);
+    if (bodySize > static_cast<quint32>(kMaxFramePacketSize))
+    {
+        return static_cast<int>(headerTotalSize);
+    }
+
+    const quint64 legacyTotalSize =
+        static_cast<quint64>(PointCloundResultFrame::HEADER_SIZE)
+        + static_cast<quint64>(bodySize)
+        + sizeof(quint32);
+    const quint64 qDataStreamPacketSize =
+        static_cast<quint64>(PointCloundResultFrame::HEADER_SIZE)
+        + sizeof(quint32)
+        + static_cast<quint64>(bodySize)
+        + sizeof(quint32);
+    if (headerTotalSize == legacyTotalSize || headerTotalSize == qDataStreamPacketSize)
+    {
+        return static_cast<int>(qDataStreamPacketSize);
+    }
+    return static_cast<int>(headerTotalSize);
+}
+
+bool TryTakeCompleteFrame(QByteArray& receiveBuffer, qint32& expectedSize, QByteArray& frameBytes)
+{
+    frameBytes.clear();
+    const int headerSize = static_cast<int>(PointCloundResultFrame::HEADER_SIZE);
+
+    while (receiveBuffer.size() >= headerSize)
+    {
+        const int headerIndex = PointCloundResultFrame::findFrameHeader(receiveBuffer);
+        if (headerIndex < 0)
+        {
+            const int keepBytes = headerSize > 1 ? headerSize - 1 : 0;
+            if (receiveBuffer.size() > keepBytes)
+            {
+                receiveBuffer.remove(0, receiveBuffer.size() - keepBytes);
+            }
+            expectedSize = 0;
+            return false;
+        }
+        if (headerIndex > 0)
+        {
+            receiveBuffer.remove(0, headerIndex);
+        }
+        if (receiveBuffer.size() < headerSize)
+        {
+            expectedSize = 0;
+            return false;
+        }
+
+        const quint32 headerTotalSize = ReadBigEndianUInt32(receiveBuffer, 8);
+        if (headerTotalSize < PointCloundResultFrame::HEADER_SIZE + sizeof(quint32)
+            || headerTotalSize > static_cast<quint32>(kMaxFramePacketSize))
+        {
+            receiveBuffer.remove(0, 1);
+            expectedSize = 0;
+            continue;
+        }
+
+        const int frameSize = ResolveFrameByteCount(receiveBuffer, headerTotalSize);
+        expectedSize = static_cast<qint32>(frameSize);
+        if (frameSize <= 0 || frameSize > kMaxFramePacketSize)
+        {
+            receiveBuffer.remove(0, 1);
+            expectedSize = 0;
+            continue;
+        }
+        if (receiveBuffer.size() < frameSize)
+        {
+            return false;
+        }
+
+        frameBytes = receiveBuffer.left(frameSize);
+        receiveBuffer.remove(0, frameSize);
+        expectedSize = 0;
+        return true;
+    }
+
+    expectedSize = 0;
+    return false;
 }
 
 udpDataShow BuildUdpFrame(const PointCloundResultFrame& frame)
@@ -418,51 +522,57 @@ void ClientUDPFormSensorWorker::processDemuxDatagram(
         return;
     }
 
-    if (target.expectedSize <= 0)
+    QByteArray frameBytes;
+    bool decodedAnyFrame = false;
+    while (TryTakeCompleteFrame(target.receiveBuffer, target.expectedSize, frameBytes))
     {
-        while (target.receiveBuffer.size() >= static_cast<int>(PointCloundResultFrame::HEADER_SIZE))
+        decodedAnyFrame = true;
+        PointCloundResultFrame frame;
+        const bool ok = frame.fromByteArray(frameBytes);
+        if (ok)
         {
-            QDataStream s(target.receiveBuffer);
-            s.setByteOrder(QDataStream::BigEndian);
-
-            quint32 magic = 0;
-            quint32 hdrSz = 0;
-            quint32 totalSz = 0;
-            s >> magic >> hdrSz >> totalSz;
-
-            if (magic == PointCloundResultFrame::MAGIC_NUMBER
-                && hdrSz == PointCloundResultFrame::HEADER_SIZE)
+            ++target.decodedFrameCount;
+            if (!target.loggedFirstDecodedFrame)
             {
-                if (totalSz < PointCloundResultFrame::HEADER_SIZE || totalSz > MAX_FRAME_PACKET_SIZE)
-                {
-                    qWarning().noquote() << QString("[CameraUDP] demux invalid frame size target=%1 size=%2")
-                        .arg(targetIt.key())
-                        .arg(totalSz);
-                    target.receiveBuffer.remove(0, 1);
-                    continue;
-                }
-                target.expectedSize = static_cast<qint32>(totalSz);
-                break;
+                target.loggedFirstDecodedFrame = true;
+                qInfo().noquote() << QString("[CameraUDP] demux first decoded frame target=%1 localPort=%2 timestamp=%3 fps=%4 points=%5")
+                    .arg(targetIt.key())
+                    .arg(m_serverPort)
+                    .arg(frame.timestamp)
+                    .arg(frame.calcFrameRate)
+                    .arg(frame.dataPoints3D.size());
             }
 
-            target.receiveBuffer.remove(0, 1);
+            if (target.frameCache != nullptr)
+            {
+                const udpDataShow udpFrame = BuildUdpFrame(frame);
+                target.frameCache->AppendFrame(udpFrame);
+                ++target.appendedFrameCount;
+                if (!target.loggedFirstAppendedFrame)
+                {
+                    target.loggedFirstAppendedFrame = true;
+                    qInfo().noquote() << QString("[CameraUDP] demux first frame appended target=%1 localPort=%2 timestamp=%3")
+                        .arg(targetIt.key())
+                        .arg(m_serverPort)
+                        .arg(udpFrame.timestamp);
+                }
+            }
         }
-
-        if (target.expectedSize <= 0)
+        else
         {
-            emit targetDiagnosticChanged(
-                targetIt.key(),
-                target.datagramCount,
-                target.filteredDatagramCount,
-                target.decodedFrameCount,
-                target.decodeFailedCount,
-                target.appendedFrameCount,
-                QString("共享接收中：等待完整帧头 %1").arg(targetIt.key()));
-            return;
+            ++target.decodeFailedCount;
+            if (!target.loggedFirstDecodeFailure)
+            {
+                target.loggedFirstDecodeFailure = true;
+                qWarning().noquote() << QString("[CameraUDP] demux frame decode failed target=%1 localPort=%2 frameBytes=%3")
+                    .arg(targetIt.key())
+                    .arg(m_serverPort)
+                    .arg(frameBytes.size());
+            }
         }
     }
 
-    if (target.receiveBuffer.size() < target.expectedSize)
+    if (!decodedAnyFrame)
     {
         emit targetDiagnosticChanged(
             targetIt.key(),
@@ -474,54 +584,6 @@ void ClientUDPFormSensorWorker::processDemuxDatagram(
             QString("共享接收中：等待完整帧 %1").arg(targetIt.key()));
         return;
     }
-
-    PointCloundResultFrame frame;
-    const bool ok = frame.fromByteArray(target.receiveBuffer);
-    if (ok)
-    {
-        ++target.decodedFrameCount;
-        if (!target.loggedFirstDecodedFrame)
-        {
-            target.loggedFirstDecodedFrame = true;
-            qInfo().noquote() << QString("[CameraUDP] demux first decoded frame target=%1 localPort=%2 timestamp=%3 fps=%4 points=%5")
-                .arg(targetIt.key())
-                .arg(m_serverPort)
-                .arg(frame.timestamp)
-                .arg(frame.calcFrameRate)
-                .arg(frame.dataPoints3D.size());
-        }
-
-        if (target.frameCache != nullptr)
-        {
-            const udpDataShow udpFrame = BuildUdpFrame(frame);
-            target.frameCache->AppendFrame(udpFrame);
-            ++target.appendedFrameCount;
-            if (!target.loggedFirstAppendedFrame)
-            {
-                target.loggedFirstAppendedFrame = true;
-                qInfo().noquote() << QString("[CameraUDP] demux first frame appended target=%1 localPort=%2 timestamp=%3")
-                    .arg(targetIt.key())
-                    .arg(m_serverPort)
-                    .arg(udpFrame.timestamp);
-            }
-        }
-    }
-    else
-    {
-        ++target.decodeFailedCount;
-        if (!target.loggedFirstDecodeFailure)
-        {
-            target.loggedFirstDecodeFailure = true;
-            qWarning().noquote() << QString("[CameraUDP] demux frame decode failed target=%1 localPort=%2 bufferBytes=%3 expectedBytes=%4")
-                .arg(targetIt.key())
-                .arg(m_serverPort)
-                .arg(target.receiveBuffer.size())
-                .arg(target.expectedSize);
-        }
-    }
-
-    target.receiveBuffer.clear();
-    target.expectedSize = 0;
     emit targetDiagnosticChanged(
         targetIt.key(),
         target.datagramCount,
@@ -595,92 +657,57 @@ void ClientUDPFormSensorWorker::readPendingDatagrams()
             continue;
         }
 
-        if (m_expectedSize <= 0)
+        QByteArray frameBytes;
+        while (TryTakeCompleteFrame(m_receiveBuffer, m_expectedSize, frameBytes))
         {
-            while (m_receiveBuffer.size() >= (int)PointCloundResultFrame::HEADER_SIZE)
+            PointCloundResultFrame frame;
+            const bool ok = frame.fromByteArray(frameBytes);
+
+            if (ok)
             {
-                QDataStream s(m_receiveBuffer);
-                s.setByteOrder(QDataStream::BigEndian);
-
-                quint32 magic, hdrSz, totalSz;
-                s >> magic >> hdrSz >> totalSz;
-
-                if (magic == PointCloundResultFrame::MAGIC_NUMBER &&
-                    hdrSz == PointCloundResultFrame::HEADER_SIZE)
+                ++m_decodedFrameCount;
+                if (!m_loggedFirstDecodedFrame)
                 {
-                    if (totalSz < PointCloundResultFrame::HEADER_SIZE || totalSz > MAX_FRAME_PACKET_SIZE)
-                    {
-                        qWarning() << "Invalid UDP frame size:" << totalSz;
-                        m_receiveBuffer.remove(0, 1);
-                        continue;
-                    }
-                    m_expectedSize = totalSz;
-                    break;
-                }
-
-                m_receiveBuffer.remove(0, 1);
-            }
-
-            if (m_expectedSize <= 0)
-            {
-                continue;
-            }
-        }
-
-        if (m_receiveBuffer.size() < m_expectedSize)
-            continue;
-
-        PointCloundResultFrame frame;
-        bool ok = frame.fromByteArray(m_receiveBuffer);
-
-        if (ok)
-        {
-            ++m_decodedFrameCount;
-            if (!m_loggedFirstDecodedFrame)
-            {
-                m_loggedFirstDecodedFrame = true;
-                qInfo().noquote() << QString("[CameraUDP] first decoded frame target=%1 localPort=%2 timestamp=%3 fps=%4 points=%5 targetPoint=(%6,%7,%8)")
-                    .arg(m_serverIP)
-                    .arg(m_serverPort)
-                    .arg(frame.timestamp)
-                    .arg(frame.calcFrameRate)
-                    .arg(frame.dataPoints3D.size())
-                    .arg(frame.resultPoints3D.x, 0, 'f', 3)
-                    .arg(frame.resultPoints3D.y, 0, 'f', 3)
-                    .arg(frame.resultPoints3D.z, 0, 'f', 3);
-            }
-            udpDataShow udpFrame = BuildUdpFrame(frame);
-
-            if (m_frameCache != nullptr)
-            {
-                m_frameCache->AppendFrame(udpFrame);
-                ++m_appendedFrameCount;
-                if (!m_loggedFirstAppendedFrame)
-                {
-                    m_loggedFirstAppendedFrame = true;
-                    qInfo().noquote() << QString("[CameraUDP] first frame appended target=%1 localPort=%2 timestamp=%3")
+                    m_loggedFirstDecodedFrame = true;
+                    qInfo().noquote() << QString("[CameraUDP] first decoded frame target=%1 localPort=%2 timestamp=%3 fps=%4 points=%5 targetPoint=(%6,%7,%8)")
                         .arg(m_serverIP)
                         .arg(m_serverPort)
-                        .arg(udpFrame.timestamp);
+                        .arg(frame.timestamp)
+                        .arg(frame.calcFrameRate)
+                        .arg(frame.dataPoints3D.size())
+                        .arg(frame.resultPoints3D.x, 0, 'f', 3)
+                        .arg(frame.resultPoints3D.y, 0, 'f', 3)
+                        .arg(frame.resultPoints3D.z, 0, 'f', 3);
+                }
+                const udpDataShow udpFrame = BuildUdpFrame(frame);
+
+                if (m_frameCache != nullptr)
+                {
+                    m_frameCache->AppendFrame(udpFrame);
+                    ++m_appendedFrameCount;
+                    if (!m_loggedFirstAppendedFrame)
+                    {
+                        m_loggedFirstAppendedFrame = true;
+                        qInfo().noquote() << QString("[CameraUDP] first frame appended target=%1 localPort=%2 timestamp=%3")
+                            .arg(m_serverIP)
+                            .arg(m_serverPort)
+                            .arg(udpFrame.timestamp);
+                    }
+                }
+            }
+            else
+            {
+                ++m_decodeFailedCount;
+                if (!m_loggedFirstDecodeFailure)
+                {
+                    m_loggedFirstDecodeFailure = true;
+                    qWarning().noquote() << QString("[CameraUDP] frame decode failed target=%1 localPort=%2 frameBytes=%3")
+                        .arg(m_serverIP)
+                        .arg(m_serverPort)
+                        .arg(frameBytes.size());
                 }
             }
         }
-        else
-        {
-            ++m_decodeFailedCount;
-            if (!m_loggedFirstDecodeFailure)
-            {
-                m_loggedFirstDecodeFailure = true;
-                qWarning().noquote() << QString("[CameraUDP] frame decode failed target=%1 localPort=%2 bufferBytes=%3 expectedBytes=%4")
-                    .arg(m_serverIP)
-                    .arg(m_serverPort)
-                    .arg(m_receiveBuffer.size())
-                    .arg(m_expectedSize);
-            }
-        }
-
-        m_receiveBuffer.clear();
-        m_expectedSize = 0;
     }
 
     emit diagnosticChanged(
