@@ -13,8 +13,11 @@ class MeasureThenWeldService;
 class CameraFrameCache;
 class QCheckBox;
 class QComboBox;
+class QLabel;
+class QProgressBar;
 class QPushButton;
 class QPlainTextEdit;
+class QTimer;
 class RobotDriverAdaptor;
 
 struct T_PRECISE_MEASURE_PARAM
@@ -47,6 +50,9 @@ struct T_PRECISE_MEASURE_PARAM
     // 焊接轨迹下枪/收枪安全位相对首尾焊点的回退距离，对应 MeasureWeldParam.ini 的 GunDownBackSafeDis。
     double dGunDownBackSafeDis = 70.0;
     double dWeldRzGainDeg = 0.0;
+    // 爬坡/下坡段按波峰波谷趋势生成姿态时，RZ 相对测量参考 RZ 的夹紧范围。
+    double dSlopeRzMinDeg = -20.0;
+    double dSlopeRzMaxDeg = 20.0;
 
     // 预设流程动作点：下枪安全姿态 -> 扫描起点 -> 扫描终点 -> 收枪安全姿态。
     // 安全姿态保留脉冲点，扫描起终点改为直角坐标点。
@@ -88,13 +94,17 @@ private:
     void LoadRobotList();
     void LoadParamGroups();
     void LoadWeldProcessList();
+    void LoadCompGroupLists();
     void OnRobotChanged(int index);
     void OnParamGroupChanged(int index);
     void OnWeldProcessChanged(int index);
     QString CurrentRobotName() const;
     int CurrentParamGroupIndex() const;
+    int CurrentPoseCompGroupIndex() const;
+    int CurrentSeamCompGroupIndex() const;
     bool SaveCurrentParamGroupSelection(QString& error) const;
     bool SaveCurrentWeldProcessSelection(QString& error) const;
+    bool SaveCurrentCompGroupSelections(QString& error) const;
     CameraFrameCache* ResolveCameraCacheForUnit(int unitIndex);
     RobotDriverAdaptor* GetRobotDriver();
 
@@ -130,6 +140,11 @@ private:
     void AppendLog(const QString& text);
     void SetFlowStep(const QString& text);
     void SetRunning(bool running);
+    void ResetProgress(const QString& text);
+    void SetProgress(int value, const QString& text);
+    void SetProgressBusy(int baseValue, const QString& text);
+    void FinishProgress(bool ok, const QString& text);
+    void UpdateProgressAnimation();
 
 private:
     ContralUnit* m_pContralUnit = nullptr;
@@ -143,12 +158,20 @@ private:
     QComboBox* m_pRobotCombo = nullptr;
     QComboBox* m_pParamGroupCombo = nullptr;
     QComboBox* m_pWeldProcessCombo = nullptr;
+    QComboBox* m_pPoseCompGroupCombo = nullptr;
+    QComboBox* m_pSeamCompGroupCombo = nullptr;
     QPushButton* m_pPresetParamBtn = nullptr;
     QPushButton* m_pSkipScanWeldBtn = nullptr;
     QPushButton* m_pLineScanProcessBtn = nullptr;
     QCheckBox* m_pActualWeldCheck = nullptr;
+    QLabel* m_pProgressLabel = nullptr;
+    QProgressBar* m_pProgressBar = nullptr;
+    QTimer* m_pProgressAnimationTimer = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
 
     bool m_bRunning = false;
     bool m_bLoadingSelectors = false;
+    bool m_bProgressBusy = false;
+    int m_nProgressValue = 0;
+    QString m_sProgressText;
 };

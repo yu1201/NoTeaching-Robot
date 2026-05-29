@@ -5,6 +5,7 @@
 #include "RobotLog.h"
 #include "RobotMessage.h"
 #include <string>
+#include <vector>
 #include <windows.h>
 #include <wininet.h>
 
@@ -14,6 +15,15 @@
 
 // 链接WinINet库（避免手动配置链接器）
 #pragma comment(lib, "Wininet.lib")
+
+struct FtpRemoteFileInfo
+{
+    std::string name;
+    std::string path;
+    bool isDirectory = false;
+    unsigned long long size = 0;
+    std::string modifiedTime;
+};
 
 class FtpClient {
 public:
@@ -32,8 +42,9 @@ public:
 
     // 核心FTP操作（真实实现）
     bool uploadFile(const std::string& localFilePath, const std::string& remoteFilePath, bool deleteBeforeUpload = true);
+    bool listFiles(const std::string& remoteDir, std::vector<FtpRemoteFileInfo>& files);
     bool downloadFile(const std::string& remoteFilePath, const std::string& localFilePath);
-    bool deleteFile(const std::string& remoteFilePath);
+    bool deleteFile(const std::string& remoteFilePath, bool askConfirm = true);
 
     // 析构函数：释放FTP连接
     ~FtpClient();

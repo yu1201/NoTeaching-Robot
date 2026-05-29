@@ -3,6 +3,9 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
 
 namespace
 {
@@ -10,6 +13,59 @@ namespace
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start).count();
+    }
+
+    std::string NormalizeRemoteDir(std::string remoteDir)
+    {
+        std::replace(remoteDir.begin(), remoteDir.end(), '\\', '/');
+        while (remoteDir.size() > 1 && remoteDir.back() == '/')
+        {
+            remoteDir.pop_back();
+        }
+        if (remoteDir == "/")
+        {
+            return "";
+        }
+        return remoteDir;
+    }
+
+    std::string BuildRemoteListPattern(const std::string& remoteDir)
+    {
+        const std::string normalizedDir = NormalizeRemoteDir(remoteDir);
+        return normalizedDir.empty() ? "*" : normalizedDir + "/*";
+    }
+
+    std::string JoinRemotePath(const std::string& remoteDir, const std::string& name)
+    {
+        const std::string normalizedDir = NormalizeRemoteDir(remoteDir);
+        return normalizedDir.empty() ? name : normalizedDir + "/" + name;
+    }
+
+    unsigned long long FileSizeFromFindData(const WIN32_FIND_DATAA& data)
+    {
+        return (static_cast<unsigned long long>(data.nFileSizeHigh) << 32)
+            | static_cast<unsigned long long>(data.nFileSizeLow);
+    }
+
+    std::string FormatFileTimeText(const FILETIME& fileTime)
+    {
+        FILETIME localFileTime{};
+        SYSTEMTIME systemTime{};
+        if (!FileTimeToLocalFileTime(&fileTime, &localFileTime)
+            || !FileTimeToSystemTime(&localFileTime, &systemTime))
+        {
+            return "";
+        }
+
+        char buffer[32] = {};
+        std::snprintf(buffer, sizeof(buffer), "%04u-%02u-%02u %02u:%02u:%02u",
+            static_cast<unsigned>(systemTime.wYear),
+            static_cast<unsigned>(systemTime.wMonth),
+            static_cast<unsigned>(systemTime.wDay),
+            static_cast<unsigned>(systemTime.wHour),
+            static_cast<unsigned>(systemTime.wMinute),
+            static_cast<unsigned>(systemTime.wSecond));
+        return buffer;
     }
 }
 
@@ -267,6 +323,104 @@ bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& 
     }
 }
 
+bool FtpClient::listFiles(const std::string& remoteDir, std::vector<FtpRemoteFileInfo>& files)
+{
+    files.clear();
+    const auto totalStart = std::chrono::steady_clock::now();
+    if (m_log != nullptr)
+    {
+        m_log->write(LogColor::DEFAULT, "开始读取FTP目录 | 远程目录：%s", remoteDir.c_str());
+    }
+
+    if (!connectFtpServer())
+    {
+        return false;
+    }
+
+    WIN32_FIND_DATAA findData{};
+    const std::string searchPattern = BuildRemoteListPattern(remoteDir);
+    HINTERNET findHandle = FtpFindFirstFileA(
+        m_hFtpSession,
+        searchPattern.c_str(),
+        &findData,
+        INTERNET_FLAG_RELOAD,
+        0);
+
+    if (findHandle == nullptr)
+    {
+        const DWORD errorCode = GetLastError();
+        if (errorCode == ERROR_NO_MORE_FILES
+            || errorCode == ERROR_FILE_NOT_FOUND
+            || errorCode == ERROR_PATH_NOT_FOUND)
+        {
+            if (m_log != nullptr)
+            {
+                m_log->write(LogColor::WARNING, "FTP目录为空 | 远程目录：%s", remoteDir.c_str());
+            }
+            closeFtpSession();
+            return true;
+        }
+
+        std::string errMsg = "读取FTP目录失败 | 目录：" + remoteDir + " | " + getFtpErrorMsg();
+        if (m_log != nullptr)
+        {
+            m_log->write(LogColor::ERR, errMsg.c_str());
+        }
+        showErrorMessage("FTP错误", "%s", errMsg.c_str());
+        closeFtpSession();
+        return false;
+    }
+
+    DWORD nextError = ERROR_SUCCESS;
+    do
+    {
+        const std::string name = findData.cFileName;
+        if (name.empty() || name == "." || name == "..")
+        {
+            continue;
+        }
+
+        FtpRemoteFileInfo info;
+        info.name = name;
+        info.path = JoinRemotePath(remoteDir, name);
+        info.isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        info.size = FileSizeFromFindData(findData);
+        info.modifiedTime = FormatFileTimeText(findData.ftLastWriteTime);
+        files.push_back(info);
+    } while (InternetFindNextFileA(findHandle, &findData));
+
+    nextError = GetLastError();
+    InternetCloseHandle(findHandle);
+    if (nextError != ERROR_NO_MORE_FILES)
+    {
+        std::string errMsg = "读取FTP目录中断 | 目录：" + remoteDir + " | " + getFtpErrorMsg();
+        if (m_log != nullptr)
+        {
+            m_log->write(LogColor::ERR, errMsg.c_str());
+        }
+        showErrorMessage("FTP错误", "%s", errMsg.c_str());
+        closeFtpSession();
+        return false;
+    }
+
+    std::sort(files.begin(), files.end(), [](const FtpRemoteFileInfo& left, const FtpRemoteFileInfo& right)
+        {
+            if (left.isDirectory != right.isDirectory)
+            {
+                return left.isDirectory && !right.isDirectory;
+            }
+            return _stricmp(left.name.c_str(), right.name.c_str()) < 0;
+        });
+
+    if (m_log != nullptr)
+    {
+        m_log->write(LogColor::SUCCESS, "FTP目录读取完成 | 远程目录：%s | 文件数：%d | 耗时：%lldms",
+            remoteDir.c_str(), static_cast<int>(files.size()), ElapsedMs(totalStart));
+    }
+    closeFtpSession();
+    return true;
+}
+
 // 真实文件下载逻辑
 bool FtpClient::downloadFile(const std::string& remoteFilePath, const std::string& localFilePath) {
     // 1. 日志记录下载开始
@@ -321,12 +475,14 @@ bool FtpClient::downloadFile(const std::string& remoteFilePath, const std::strin
 }
 
 // 真实文件删除逻辑
-bool FtpClient::deleteFile(const std::string& remoteFilePath) {
+bool FtpClient::deleteFile(const std::string& remoteFilePath, bool askConfirm) {
     // 1. 弹窗确认是否删除
-    bool confirm = showConfirmMessage("FTP确认", "是否删除FTP服务器文件：%s？", remoteFilePath.c_str());
-    if (!confirm) {
-        m_log->write(LogColor::WARNING, "用户取消删除FTP文件：%s", remoteFilePath.c_str());
-        return false;
+    if (askConfirm) {
+        bool confirm = showConfirmMessage("FTP确认", "是否删除FTP服务器文件：%s？", remoteFilePath.c_str());
+        if (!confirm) {
+            m_log->write(LogColor::WARNING, "用户取消删除FTP文件：%s", remoteFilePath.c_str());
+            return false;
+        }
     }
 
     // 2. 检查并建立FTP连接

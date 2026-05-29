@@ -4,6 +4,7 @@
 #define NOMINMAX
 #endif
 
+#include "ConfigDatabase.h"
 #include "OPini.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
@@ -87,8 +88,8 @@ QString LocalPath(const QString& path)
 
 std::string LocalString(const QString& text)
 {
-    const QByteArray bytes = text.toLocal8Bit();
-    return std::string(bytes.constData());
+    const QByteArray bytes = text.toUtf8();
+    return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
 }
 
 double NormalizeAngleDeg(double angle)
@@ -395,7 +396,7 @@ PoseLibrary LoadPoseLibrary(const QString& path)
 {
     PoseLibrary library;
     int poseCompCount = kDefaultSegmentCount;
-    if (!QFileInfo::exists(path))
+    if (!ConfigDatabase::HasIniFile(path))
     {
         library.poseSlots.resize(poseCompCount);
         InitializeDefaultPoseSlots(library.poseSlots);
@@ -414,7 +415,7 @@ PoseLibrary LoadPoseLibrary(const QString& path)
     for (int index = 0; index < library.poseSlots.size(); ++index)
     {
         PoseLibrarySlot& slot = library.poseSlots[index];
-        ini.SetSectionName(QString("WeldPoseComp%1").arg(index).toStdString());
+        ini.SetSectionName(LocalString(QString("WeldPoseComp%1").arg(index)));
 
         std::string text;
         if (ini.ReadString(false, "Name", text) > 0)
@@ -439,8 +440,6 @@ PoseLibrary LoadPoseLibrary(const QString& path)
 
 bool SavePoseLibrary(const QString& path, const PoseLibrary& library, QString& error)
 {
-    QDir().mkpath(QFileInfo(path).absolutePath());
-
     COPini ini;
     ini.SetFileName(false, LocalString(path));
     ini.SetSectionName("ALLWeldPoseComp");
@@ -454,9 +453,9 @@ bool SavePoseLibrary(const QString& path, const PoseLibrary& library, QString& e
     for (int index = 0; index < library.poseSlots.size(); ++index)
     {
         const PoseLibrarySlot& slot = library.poseSlots[index];
-        ini.SetSectionName(QString("WeldPoseComp%1").arg(index).toStdString());
+        ini.SetSectionName(LocalString(QString("WeldPoseComp%1").arg(index)));
         if (!ini.WriteString("Name", LocalString(slot.name))
-            || !ini.WriteString("SegmentKind", slot.segmentKind.toStdString())
+            || !ini.WriteString("SegmentKind", LocalString(slot.segmentKind))
             || !ini.WriteString("Rx", slot.rx, 6)
             || !ini.WriteString("Ry", slot.ry, 6)
             || !ini.WriteString("Rz", NormalizeAngleDeg(slot.rz), 6)
@@ -594,12 +593,10 @@ bool WriteSeamAverageMetadata(
     const WeldPoseAverageUpdater::UpdateResult& result,
     QString& error)
 {
-    QDir().mkpath(QFileInfo(path).absolutePath());
-
     COPini ini;
     ini.SetFileName(false, LocalString(path));
     ini.SetSectionName("WeldSeamPoseAverage");
-    if (!ini.WriteString("LastUpdateTime", QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss").toStdString())
+    if (!ini.WriteString("LastUpdateTime", LocalString(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")))
         || !ini.WriteString("SourcePoseFile", LocalString(result.inputPoseFilePath))
         || !ini.WriteString("PoseCompParamPath", LocalString(result.poseCompParamPath))
         || !ini.WriteString("GroupCount", static_cast<int>(result.groups.size()))
@@ -612,9 +609,9 @@ bool WriteSeamAverageMetadata(
     for (int index = 0; index < result.groups.size(); ++index)
     {
         const WeldPoseAverageUpdater::GroupReport& group = result.groups[index];
-        ini.SetSectionName(QString("WeldSeamPoseAverage%1").arg(index).toStdString());
+        ini.SetSectionName(LocalString(QString("WeldSeamPoseAverage%1").arg(index)));
         if (!ini.WriteString("Name", LocalString(group.displayName))
-            || !ini.WriteString("SegmentKind", group.segmentKind.toStdString())
+            || !ini.WriteString("SegmentKind", LocalString(group.segmentKind))
             || !ini.WriteString("PoseCompIndex", group.poseCompIndex)
             || !ini.WriteString("SampleCount", group.sourceCount)
             || !ini.WriteString("UsedSampleCount", group.usedCount)

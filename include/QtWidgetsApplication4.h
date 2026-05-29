@@ -84,6 +84,7 @@ private slots:
     void UpdateGrooveCameraData();
     void OpenGroovePointCloudDialog();
     void StartGrooveCameraPreview();
+    void OpenPointCloudViewerDialog();
 
 private:
     void ShowDashboardPage();
@@ -132,6 +133,8 @@ private:
     void RegisterAccount();
     void OpenAccountManagementDialog();
     void OpenControlUnitManagementDialog();
+    void OpenFtpJobManagementDialog();
+    void OpenConfigDatabaseViewerDialog();
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
     void ApplyDebugLogVisibility(QWidget* page);
@@ -163,6 +166,7 @@ private:
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
     bool RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
     void RunLaserClassifyDirForCli(const QString& dirPath) const;
+    void RunRebuildMeasureWeldFilesForCli(const QStringList& arguments, const QString& laserDirPath) const;
     void RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const;
     void RunGenerateStepWeldProgramForCli(
         const QString& inputPath,
@@ -190,6 +194,8 @@ private:
     QWidget* m_pManagementHomePage;
     QWidget* m_pAccountManagementPage;
     QWidget* m_pControlUnitManagementPage;
+    QWidget* m_pFtpJobManagementPage;
+    QWidget* m_pConfigDatabaseViewerPage;
     QComboBox* m_pRobotSelectorCombo;
     QLabel* m_pRobotSelectorLabel;
     int m_nCurrentRobotUnitIndex;
@@ -199,6 +205,7 @@ private:
     int m_nRobotJogPageUnitIndex;
     QPlainTextEdit* m_pRobotLogText;
     QWidget* m_pGroovePointCloudDialog;
+    QWidget* m_pPointCloudViewerDialog;
     QPushButton* m_pCurrentUserButton;
     QLabel* m_pManagementUserLabel;
     QLabel* m_pPermissionHintLabel;

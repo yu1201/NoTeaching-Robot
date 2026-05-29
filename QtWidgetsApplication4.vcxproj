@@ -38,12 +38,12 @@
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
     <QtInstall>qt6.7</QtInstall>
-    <QtModules>core;gui;widgets;network</QtModules>
+    <QtModules>core;gui;widgets;network;sql</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall>qt6.7</QtInstall>
-    <QtModules>core;gui;widgets;network</QtModules>
+    <QtModules>core;gui;widgets;network;sql</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
@@ -69,10 +69,10 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Link>
       <AdditionalLibraryDirectories>C:\Program Files\orocos_kdl\lib;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\lib;E:\OpenCV4.6.0\build\x64\vc15\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>orocos-kdld.lib;Robot-SDKd.lib;Qt6Networkd.lib;opencv_world460d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>orocos-kdld.lib;Robot-SDKd.lib;Qt6Networkd.lib;Qt6Sqld.lib;opencv_world460d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <DisableSpecificWarnings>4828</DisableSpecificWarnings>
@@ -104,17 +104,18 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <AdditionalLibraryDirectories>C:\Program Files\orocos_kdl\lib;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\lib;E:\OpenCV4.6.0\build\x64\vc15\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>orocos-kdl.lib;Robot-SDK.lib;Qt6Network.lib;opencv_world460.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>orocos-kdl.lib;Robot-SDK.lib;Qt6Network.lib;Qt6Sql.lib;opencv_world460.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\ConfigDatabase.cpp" />
     <ClCompile Include="src\ContralUnit.cpp" />
     <ClCompile Include="src\CameraFrameCache.cpp" />
     <ClCompile Include="src\CameraBasicParamDialog.cpp" />
@@ -169,6 +170,7 @@
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\ConfigDatabase.h" />
     <ClInclude Include="include\Const.h" />
     <ClInclude Include="include\CameraFrameCache.h" />
     <ClInclude Include="include\CameraBasicParamDialog.h" />

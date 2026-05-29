@@ -1,5 +1,6 @@
 #include "LaserWeldFilterDialog.h"
 
+#include "ConfigDatabase.h"
 #include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
 
@@ -19,7 +20,6 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QSettings>
 #include <QSpinBox>
 #include <QTextDocument>
 #include <QVBoxLayout>
@@ -240,44 +240,65 @@ void LaserWeldFilterDialog::ApplyStyle()
 
 void LaserWeldFilterDialog::LoadSettings()
 {
-    QSettings settings(LaserFilterSettingsPath(), QSettings::IniFormat);
-    m_pInputPathEdit->setText(settings.value("Path/Input").toString());
-    m_pOutputPathEdit->setText(settings.value("Path/Output").toString());
-    m_pAxisCombo->setCurrentIndex(settings.value("Param/Axis", 0).toInt());
-    m_pFitModeCombo->setCurrentIndex(settings.value("Param/FitMode", 0).toInt());
-    m_pZThresholdSpin->setValue(settings.value("Param/ZThreshold", -230.0).toDouble());
-    m_pZJumpThresholdSpin->setValue(settings.value("Param/ZJumpThreshold", 5.0).toDouble());
-    m_pZContinuityThresholdSpin->setValue(settings.value("Param/ZContinuityThreshold", 3.0).toDouble());
-    m_pSegmentBreakDistanceSpin->setValue(settings.value("Param/SegmentBreakDistance", 12.0).toDouble());
-    m_pKeepLongestSegmentCheck->setChecked(settings.value("Param/KeepLongestSegmentOnly", true).toBool());
-    m_pStepSpin->setValue(settings.value("Param/Step", 2.0).toDouble());
-    m_pWindowSpin->setValue(settings.value("Param/SearchWindow", 8.0).toDouble());
-    m_pLineFitTrimSpin->setValue(settings.value("Param/LineFitTrimCount", 0).toInt());
-    m_pPiecewiseToleranceSpin->setValue(settings.value("Param/PiecewiseFitTolerance", 2.0).toDouble());
-    m_pPiecewiseMinSegmentSpin->setValue(settings.value("Param/PiecewiseMinSegmentPoints", 4).toInt());
-    m_pMinPointSpin->setValue(settings.value("Param/MinPointCount", 3).toInt());
-    m_pSmoothRadiusSpin->setValue(settings.value("Param/SmoothRadius", 2).toInt());
+    const QString configPath = LaserFilterSettingsPath();
+    const auto read = [&configPath](const QString& key, const QString& defaultValue = QString())
+        {
+            QString value;
+            return ConfigDatabase::ReadSetting(configPath, key, &value) ? value : defaultValue;
+        };
+    const auto readBool = [&read](const QString& key, bool defaultValue)
+        {
+            const QString value = read(key);
+            if (value.isEmpty())
+            {
+                return defaultValue;
+            }
+            const QString normalized = value.trimmed().toLower();
+            return normalized == "1" || normalized == "true" || normalized == "yes";
+        };
+
+    m_pInputPathEdit->setText(read("Path/Input"));
+    m_pOutputPathEdit->setText(read("Path/Output"));
+    m_pAxisCombo->setCurrentIndex(read("Param/Axis", "0").toInt());
+    m_pFitModeCombo->setCurrentIndex(read("Param/FitMode", "0").toInt());
+    m_pZThresholdSpin->setValue(read("Param/ZThreshold", "-230.0").toDouble());
+    m_pZJumpThresholdSpin->setValue(read("Param/ZJumpThreshold", "5.0").toDouble());
+    m_pZContinuityThresholdSpin->setValue(read("Param/ZContinuityThreshold", "3.0").toDouble());
+    m_pSegmentBreakDistanceSpin->setValue(read("Param/SegmentBreakDistance", "12.0").toDouble());
+    m_pKeepLongestSegmentCheck->setChecked(readBool("Param/KeepLongestSegmentOnly", true));
+    m_pStepSpin->setValue(read("Param/Step", "2.0").toDouble());
+    m_pWindowSpin->setValue(read("Param/SearchWindow", "8.0").toDouble());
+    m_pLineFitTrimSpin->setValue(read("Param/LineFitTrimCount", "0").toInt());
+    m_pPiecewiseToleranceSpin->setValue(read("Param/PiecewiseFitTolerance", "2.0").toDouble());
+    m_pPiecewiseMinSegmentSpin->setValue(read("Param/PiecewiseMinSegmentPoints", "4").toInt());
+    m_pMinPointSpin->setValue(read("Param/MinPointCount", "3").toInt());
+    m_pSmoothRadiusSpin->setValue(read("Param/SmoothRadius", "2").toInt());
 }
 
 void LaserWeldFilterDialog::SaveSettings() const
 {
-    QSettings settings(LaserFilterSettingsPath(), QSettings::IniFormat);
-    settings.setValue("Path/Input", m_pInputPathEdit->text().trimmed());
-    settings.setValue("Path/Output", m_pOutputPathEdit->text().trimmed());
-    settings.setValue("Param/Axis", m_pAxisCombo->currentIndex());
-    settings.setValue("Param/FitMode", m_pFitModeCombo->currentIndex());
-    settings.setValue("Param/ZThreshold", m_pZThresholdSpin->value());
-    settings.setValue("Param/ZJumpThreshold", m_pZJumpThresholdSpin->value());
-    settings.setValue("Param/ZContinuityThreshold", m_pZContinuityThresholdSpin->value());
-    settings.setValue("Param/SegmentBreakDistance", m_pSegmentBreakDistanceSpin->value());
-    settings.setValue("Param/KeepLongestSegmentOnly", m_pKeepLongestSegmentCheck->isChecked());
-    settings.setValue("Param/Step", m_pStepSpin->value());
-    settings.setValue("Param/SearchWindow", m_pWindowSpin->value());
-    settings.setValue("Param/LineFitTrimCount", m_pLineFitTrimSpin->value());
-    settings.setValue("Param/PiecewiseFitTolerance", m_pPiecewiseToleranceSpin->value());
-    settings.setValue("Param/PiecewiseMinSegmentPoints", m_pPiecewiseMinSegmentSpin->value());
-    settings.setValue("Param/MinPointCount", m_pMinPointSpin->value());
-    settings.setValue("Param/SmoothRadius", m_pSmoothRadiusSpin->value());
+    const QString configPath = LaserFilterSettingsPath();
+    const auto write = [&configPath](const QString& key, const QString& value)
+        {
+            ConfigDatabase::WriteSetting(configPath, key, value);
+        };
+
+    write("Path/Input", m_pInputPathEdit->text().trimmed());
+    write("Path/Output", m_pOutputPathEdit->text().trimmed());
+    write("Param/Axis", QString::number(m_pAxisCombo->currentIndex()));
+    write("Param/FitMode", QString::number(m_pFitModeCombo->currentIndex()));
+    write("Param/ZThreshold", QString::number(m_pZThresholdSpin->value(), 'f', 6));
+    write("Param/ZJumpThreshold", QString::number(m_pZJumpThresholdSpin->value(), 'f', 6));
+    write("Param/ZContinuityThreshold", QString::number(m_pZContinuityThresholdSpin->value(), 'f', 6));
+    write("Param/SegmentBreakDistance", QString::number(m_pSegmentBreakDistanceSpin->value(), 'f', 6));
+    write("Param/KeepLongestSegmentOnly", m_pKeepLongestSegmentCheck->isChecked() ? "1" : "0");
+    write("Param/Step", QString::number(m_pStepSpin->value(), 'f', 6));
+    write("Param/SearchWindow", QString::number(m_pWindowSpin->value(), 'f', 6));
+    write("Param/LineFitTrimCount", QString::number(m_pLineFitTrimSpin->value()));
+    write("Param/PiecewiseFitTolerance", QString::number(m_pPiecewiseToleranceSpin->value(), 'f', 6));
+    write("Param/PiecewiseMinSegmentPoints", QString::number(m_pPiecewiseMinSegmentSpin->value()));
+    write("Param/MinPointCount", QString::number(m_pMinPointSpin->value()));
+    write("Param/SmoothRadius", QString::number(m_pSmoothRadiusSpin->value()));
 }
 
 void LaserWeldFilterDialog::BrowseInputFile()

@@ -51,7 +51,14 @@ namespace
 
 	constexpr const char* kStepDynamicJobProjectName = "PCRobot";
 	constexpr const char* kStepProjectVariableProgramName = "_project";
-	constexpr const char* kStepActualWeldFlagName = "ntactualweld";
+	constexpr const char* kStepArcOnDataName = "arcon0";
+	constexpr const char* kStepArcDataName = "arc0";
+	constexpr const char* kStepTransitionArcDataName = "arctrans0";
+	constexpr const char* kStepArcOffDataName = "arcoff0";
+	constexpr const char* kStepArcStartIntName = "int0";
+	constexpr const char* kStepArcRetryDataName = "retry0";
+	constexpr const char* kStepArcRealName = "real0";
+	constexpr const char* kStepWeaveDataName = "wd0";
 
 	double StepClampPositiveDouble(double value, double defaultValue)
 	{
@@ -440,7 +447,8 @@ namespace
 
 	void StepAppendFileComment(std::ostringstream& oss, const char* text)
 	{
-		oss << "// " << text << "\n";
+		(void)oss;
+		(void)text;
 	}
 
 	void StepAppendFileComment(std::ostringstream& oss, const std::string& text)
@@ -448,11 +456,14 @@ namespace
 		StepAppendFileComment(oss, text.c_str());
 	}
 
-	void StepAppendActualWeldGuardedCommand(std::ostringstream& oss, const char* command)
+	void StepAppendCommand(std::ostringstream& oss, const char* command)
 	{
-		oss << "IF(" << kStepActualWeldFlagName << "==1)THEN" << "\n";
 		oss << command << "\n";
-		oss << "END_IF" << "\n";
+	}
+
+	void StepAppendCommand(std::ostringstream& oss, const std::string& command)
+	{
+		StepAppendCommand(oss, command.c_str());
 	}
 
 	bool StepNearlyEqual(double left, double right)
@@ -587,6 +598,46 @@ namespace
 		return std::isfinite(info.tSpeed.dSpeed) && info.tSpeed.dSpeed > 0.0 ? info.tSpeed.dSpeed : 0.0;
 	}
 
+	std::string StepFormatCompactNumber(double value)
+	{
+		const double safeValue = StepFiniteOrDefault(value, 0.0);
+		const double rounded = std::round(safeValue);
+		if (std::fabs(safeValue - rounded) < 0.000001)
+		{
+			return std::to_string(static_cast<long long>(rounded));
+		}
+
+		std::ostringstream oss;
+		oss << std::fixed << std::setprecision(6) << safeValue;
+		std::string text = oss.str();
+		while (text.size() > 1 && text.back() == '0')
+		{
+			text.pop_back();
+		}
+		if (!text.empty() && text.back() == '.')
+		{
+			text.pop_back();
+		}
+		return text;
+	}
+
+	unsigned StepWaitTimeMs(double waitTimeSeconds)
+	{
+		const double safeValue = StepFiniteOrDefault(waitTimeSeconds, 0.0);
+		if (safeValue <= 0.0)
+		{
+			return 0U;
+		}
+		return static_cast<unsigned>(std::max(0.0, std::round(safeValue * 1000.0)));
+	}
+
+	std::string StepFormatPaddedWaitTimeMs(double waitTimeSeconds)
+	{
+		std::ostringstream oss;
+		oss << std::setw(6) << std::setfill('0') << StepWaitTimeMs(waitTimeSeconds);
+		return oss.str();
+	}
+
 	std::string StepBuildArcDataLine(
 		const char* name,
 		double current,
@@ -594,12 +645,10 @@ namespace
 		double speedMmPerMin)
 	{
 		std::ostringstream oss;
-		oss << std::fixed << std::setprecision(6);
 		oss << "ARCDATA " << name << " := {  "
-			<< StepFiniteOrDefault(voltage, 0.0) << ", "
-			<< StepFiniteOrDefault(current, 0.0) << ", "
-			<< StepFiniteOrDefault(speedMmPerMin, 0.0) << ", "
-			<< "0.0, NULL, FALSE, FALSE, 100, 250, 250, 30.00, 15.00, 0, 0, 0,0.0 }" << "\n";
+			<< StepFormatCompactNumber(current) << ", "
+			<< StepFormatCompactNumber(voltage) << ", "
+			<< StepFormatCompactNumber(speedMmPerMin) << ",0.000000 }" << "\n";
 		return oss.str();
 	}
 
@@ -657,16 +706,22 @@ namespace
 			const T_ROBOT_MOVE_INFO* normalProcessInfo = StepFirstNormalWeldProcessInfo(moveInfos);
 			if (processInfo != nullptr && normalProcessInfo != nullptr)
 			{
-				StepAppendFileComment(oss, "实际焊接开关：1执行ARCON/ARCSET/ARCOFF，0空跑跳过焊接指令");
-				oss << "INT " << kStepActualWeldFlagName << " := " << (actualWeld ? 1 : 0) << "\n";
+				StepAppendFileComment(oss, actualWeld
+					? "实际焊接：SRP直接生成ARCON/ARCSET/ARCOFF，不再使用IF判断"
+					: "空跑模式：SRP不生成ARCON/ARCSET/ARCOFF焊接指令");
 				StepAppendFileComment(oss, "焊接数据：起弧参数");
-				oss << "ARCONDATA ntarcon0 := {  0, "
-					<< StepFiniteOrDefault(processInfo->dArcStartCurrent, 0.0) << ", "
-					<< StepFiniteOrDefault(processInfo->dArcStartVoltage, 0.0) << ", "
-					<< static_cast<unsigned>(std::max(0.0, StepFiniteOrDefault(processInfo->dArcStartWaitTime, 0.0))) << ", 0, 0,NULL }" << "\n";
+				oss << "ARCONDATA " << kStepArcOnDataName << " := {  0, "
+					<< StepFormatCompactNumber(processInfo->dArcStartCurrent) << ", "
+					<< StepFormatCompactNumber(processInfo->dArcStartVoltage) << ", "
+					<< StepFormatPaddedWaitTimeMs(processInfo->dArcStartWaitTime) << ", 0,0 }" << "\n";
+				oss << "ARCOFFDATA " << kStepArcOffDataName << " := {  0, 0, "
+					<< StepFormatCompactNumber(processInfo->dArcEndCurrent) << ", "
+					<< StepFormatCompactNumber(processInfo->dArcEndVoltage) << ","
+					<< StepWaitTimeMs(processInfo->dArcEndWaitTime) << " }" << "\n";
+				oss << "INT " << kStepArcStartIntName << " := 0" << "\n";
 				StepAppendFileComment(oss, "正常焊接参数：电流/电压/速度");
 				oss << StepBuildArcDataLine(
-					"ntarc0",
+					kStepArcDataName,
 					normalProcessInfo->dWeldCurrent,
 					normalProcessInfo->dWeldVoltage,
 					StepWeldDataSpeed(*normalProcessInfo));
@@ -682,42 +737,42 @@ namespace
 					{
 						StepAppendFileComment(oss, "拐点过渡参数：电流/电压/速度");
 						oss << StepBuildArcDataLine(
-							"ntarctrans0",
+							kStepTransitionArcDataName,
 							transitionIt->dWeldCurrent,
 							transitionIt->dWeldVoltage,
 							StepWeldDataSpeed(*transitionIt));
 					}
 				}
 
-				StepAppendFileComment(oss, "焊接辅助数据：重试/实数/停弧/摆焊/跟踪");
-				oss << "INT ntint0 := 0" << "\n";
-				oss << "ARCRETRYDATA ntretry0 := {  1000, 0, 1000, 50, 0, 0, FALSE, 20, 50,5 }" << "\n";
-				oss << "REAL ntreal0 := 0.0" << "\n";
-				oss << "ARCOFFDATA ntarcoff0 := {  0, 0, "
-					<< StepFiniteOrDefault(processInfo->dArcEndCurrent, 0.0) << ", "
-					<< StepFiniteOrDefault(processInfo->dArcEndVoltage, 0.0) << ", "
-					<< static_cast<unsigned>(std::max(0.0, StepFiniteOrDefault(processInfo->dArcEndWaitTime, 0.0))) << ",NULL }" << "\n";
-				oss << "WEAVEDATA ntwd0 := {  eTCPWeave, eSinFreq, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, FALSE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,0.0 }" << "\n";
-				oss << "TRACKDATA nttd0 := {  3, 100, 100, 100, eSample, 0.0, 2, 1, 3.0, 100, eDistance, 200, 2, 0, 1, 600, 0, 0, 0, 0, 0, 0, 0, 0, 1, 600, 0, 0, 0, 0, 0, 0,0 }" << "\n";
+				StepAppendFileComment(oss, "焊接辅助数据：重试/实数/摆焊");
+				oss << "ARCRETRYDATA " << kStepArcRetryDataName << " := {  1000, 0, 1000, 50, 0, 0, FALSE, 20, 50,5 }" << "\n";
+				oss << "REAL " << kStepArcRealName << " := 0.0" << "\n";
+				oss << "WEAVEDATA " << kStepWeaveDataName << " := {  eTCPWeave, eSinFreq, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, FALSE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,0.0 }" << "\n";
 			}
 		}
 
 		return oss.str();
 	}
 
-	std::string StepBuildSrpContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+	std::string StepBuildSrpContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, bool actualWeld)
 	{
 		std::ostringstream oss;
 		const StepVariablePlan variablePlan = StepBuildVariablePlan(moveInfos);
 		const std::string sharedOverlapName = StepBuildOverlapName(0);
 		const bool hasWeldProcess = StepHasWeldProcess(moveInfos);
-		if (hasWeldProcess)
+		const bool emitWeldCommands = hasWeldProcess && actualWeld;
+		if (emitWeldCommands)
 		{
-			StepAppendFileComment(oss, "实际焊接开关变量：" + std::string(kStepActualWeldFlagName) + "，1执行焊接指令，0空跑跳过");
 			StepAppendFileComment(oss, "焊接开始：使用起弧参数起弧");
-			StepAppendActualWeldGuardedCommand(oss, "ARCON(ntarcon0,ntarc0,ntint0,ntretry0,ntreal0);");
+			StepAppendCommand(oss, std::string("ARCON(")
+				+ kStepArcOnDataName + "," + kStepArcDataName + "," + kStepArcStartIntName + ","
+				+ kStepArcRetryDataName + "," + kStepArcRealName + ");");
 			StepAppendFileComment(oss, "切换正常焊接参数");
-			StepAppendActualWeldGuardedCommand(oss, "ARCSET(ntarc0,START,ntreal0);");
+			StepAppendCommand(oss, std::string("ARCSET(") + kStepArcDataName + ");");
+		}
+		else if (hasWeldProcess)
+		{
+			StepAppendFileComment(oss, "空跑模式：不生成ARCON/ARCSET/ARCOFF焊接指令");
 		}
 
 		bool usingTransitionWeldParams = false;
@@ -734,23 +789,23 @@ namespace
 			if (hasWeldProcess && info.bWeldProcessEnabled)
 			{
 				const bool needTransition = info.bUseTransitionWeldParams;
-				if (needTransition)
+				if (emitWeldCommands && needTransition)
 				{
 					if (!usingTransitionWeldParams)
 					{
 						// 进入拐点过渡段时切一次过渡电流电压，段内连续点沿用该工艺。
 						StepAppendFileComment(oss, "进入拐点过渡参数");
-						StepAppendActualWeldGuardedCommand(oss, "ARCSET(ntarctrans0,START,ntreal0);");
+						StepAppendCommand(oss, std::string("ARCSET(") + kStepTransitionArcDataName + ");");
 					}
 				}
-				else if (usingTransitionWeldParams)
+				else if (emitWeldCommands && usingTransitionWeldParams)
 				{
 					// 离开拐点过渡段时恢复正常焊接电流电压。
 					StepAppendFileComment(oss, "退出拐点过渡参数，恢复正常焊接参数");
-					StepAppendActualWeldGuardedCommand(oss, "ARCSET(ntarc0,START,ntreal0);");
+					StepAppendCommand(oss, std::string("ARCSET(") + kStepArcDataName + ");");
 				}
 				usingTransitionWeldParams = needTransition;
-				oss << "WLin(" << targetName << "," << dynName << "," << sharedOverlapName << ",eVAR,ntwd0,nttd0,tool1,WORLD);" << "\n";
+				oss << "WLin(" << targetName << "," << dynName << "," << sharedOverlapName << ",eVAR," << kStepWeaveDataName << ",NULL,tool1,WORLD);" << "\n";
 			}
 			else if (info.nMoveType == MOVL)
 			{
@@ -762,10 +817,10 @@ namespace
 			}
 		}
 
-		if (hasWeldProcess)
+		if (emitWeldCommands)
 		{
 			StepAppendFileComment(oss, "焊接结束：使用停弧参数停弧");
-			StepAppendActualWeldGuardedCommand(oss, "ARCOFF(ntarcoff0);");
+			StepAppendCommand(oss, std::string("ARCOFF(") + kStepArcOffDataName + ");");
 		}
 
 		return oss.str();
@@ -781,18 +836,45 @@ namespace
 
 		std::string normalized;
 		normalized.reserve(content.size());
+		std::string line;
+		const auto appendCleanLine = [&normalized, &line]() {
+			const size_t commentPos = line.find("//");
+			if (commentPos != std::string::npos)
+			{
+				line.erase(commentPos);
+			}
+			while (!line.empty() && (line.back() == ' ' || line.back() == '\t'))
+			{
+				line.pop_back();
+			}
+			if (line.find_first_not_of(" \t") != std::string::npos)
+			{
+				normalized.append(line);
+				normalized.push_back('\n');
+			}
+			line.clear();
+		};
 		for (size_t i = 0; i < content.size(); ++i)
 		{
 			if (content[i] == '\r')
 			{
 				if (i + 1 < content.size() && content[i + 1] == '\n')
 				{
-					continue;
+					++i;
 				}
-				normalized.push_back('\n');
+				appendCleanLine();
 				continue;
 			}
-			normalized.push_back(content[i]);
+			if (content[i] == '\n')
+			{
+				appendCleanLine();
+				continue;
+			}
+			line.push_back(content[i]);
+		}
+		if (!line.empty())
+		{
+			appendCleanLine();
 		}
 
 		out.write(normalized.data(), static_cast<std::streamsize>(normalized.size()));
@@ -914,7 +996,7 @@ bool STEPRobotCtrl::WriteContiMoveAnyFiles(
 		return false;
 	}
 
-	const std::string srpContent = StepBuildSrpContent(vtRobotMoveInfo);
+	const std::string srpContent = StepBuildSrpContent(vtRobotMoveInfo, actualWeld);
 	const std::string srdContent = StepBuildSrdContent(vtRobotMoveInfo, axisUnit, actualWeld);
 	const std::string srpPathText = srpPath.string();
 	const std::string srdPathText = srdPath.string();
@@ -1419,7 +1501,7 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 		return -2;
 	}
 
-	const std::string sSrpContent = StepBuildSrpContent(vtRobotMoveInfo);
+	const std::string sSrpContent = StepBuildSrpContent(vtRobotMoveInfo, true);
 	const std::string sSrdContent = StepBuildSrdContent(vtRobotMoveInfo, m_tAxisUnit, true);
 
 	if (!StepWriteTextFile(sLocalProgramFile, sSrpContent))

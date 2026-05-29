@@ -1,6 +1,7 @@
 #include "QtWidgetsApplication4.h"
 #include <QMessageBox>  // 弹窗头文件，测试用
 #include "CameraFrameCache.h"
+#include "ConfigDatabase.h"
 #include "FTPClient.h"
 #include "FANUCRobotDriver.h"
 #include "CameraBasicParamDialog.h"
@@ -35,6 +36,7 @@
 #include <QDirIterator>
 #include <QDoubleValidator>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGuiApplication>
@@ -46,11 +48,13 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
+#include <QLinearGradient>
 #include <QLineEdit>
 #include <QLineF>
 #include <QIntValidator>
 #include <QAction>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QFrame>
 #include <QFontMetrics>
 #include <QMetaObject>
@@ -77,13 +81,18 @@
 #include <QStandardItemModel>
 #include <QScreen>
 #include <QSet>
-#include <QSettings>
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
 #include <QThread>
 #include <QTimer>
 #include <QToolBar>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextStream>
+#include <QTime>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QStringConverter>
@@ -94,6 +103,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <thread>
 #include <utility>
 #ifdef Q_OS_WIN
@@ -123,7 +133,7 @@ namespace
 
 	std::string ToIniBytesGlobal(const QString& text)
 	{
-		return text.toLocal8Bit().toStdString();
+		return text.toUtf8().toStdString();
 	}
 
 	void ConfigureUtf8TextStream(QTextStream& stream)
@@ -1017,6 +1027,48 @@ namespace
 		return RobotDataHelper::BuildProjectPath("Data/Accounts.ini");
 	}
 
+	QString ConfigValue(const QString& filePath, const QString& key, const QString& defaultValue = QString())
+	{
+		QString value;
+		return ConfigDatabase::ReadSetting(filePath, key, &value) ? value : defaultValue;
+	}
+
+	bool ConfigBoolValue(const QString& filePath, const QString& key, bool defaultValue = false)
+	{
+		const QString value = ConfigValue(filePath, key);
+		if (value.isEmpty())
+		{
+			return defaultValue;
+		}
+		const QString normalized = value.trimmed().toLower();
+		return normalized == "1" || normalized == "true" || normalized == "yes";
+	}
+
+	void WriteConfigValue(const QString& filePath, const QString& key, const QString& value)
+	{
+		ConfigDatabase::WriteSetting(filePath, key, value);
+	}
+
+	void WriteConfigValue(const QString& filePath, const QString& key, bool value)
+	{
+		ConfigDatabase::WriteSetting(filePath, key, value ? "1" : "0");
+	}
+
+	QStringList ConfigListValue(const QString& filePath, const QString& key)
+	{
+		return ConfigValue(filePath, key).split('\n', Qt::SkipEmptyParts);
+	}
+
+	void WriteConfigListValue(const QString& filePath, const QString& key, const QStringList& values)
+	{
+		ConfigDatabase::WriteSetting(filePath, key, values.join('\n'));
+	}
+
+	QString AccountUserKey(const QString& userName, const QString& key)
+	{
+		return QString("Users/%1/%2").arg(userName, key);
+	}
+
 	QString HashAccountPassword(const QString& userName, const QString& password)
 	{
 		return QString::fromLatin1(
@@ -1230,24 +1282,20 @@ namespace
 				return;
 			}
 
-			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
-			settings.beginGroup("Users");
-			const QStringList users = settings.childGroups();
+			const QString accountPath = AccountManagementConfigPath();
+			const QStringList users = ConfigDatabase::ListIniGroups(accountPath, "Users");
 			m_accountTable->setRowCount(0);
 			int row = 0;
 			for (const QString& user : users)
 			{
-				settings.beginGroup(user);
-				const QString role = settings.value("Role", kRoleOperator).toString();
-				const QString createdAt = settings.value("CreatedAt").toString();
-				settings.endGroup();
+				const QString role = ConfigValue(accountPath, AccountUserKey(user, "Role"), kRoleOperator);
+				const QString createdAt = ConfigValue(accountPath, AccountUserKey(user, "CreatedAt"));
 				m_accountTable->insertRow(row);
 				m_accountTable->setItem(row, 0, new QTableWidgetItem(user));
 				m_accountTable->setItem(row, 1, new QTableWidgetItem(DisplayRoleNameForAccount(role)));
 				m_accountTable->setItem(row, 2, new QTableWidgetItem(createdAt));
 				++row;
 			}
-			settings.endGroup();
 			if (row > 0)
 			{
 				m_accountTable->selectRow(0);
@@ -1262,12 +1310,7 @@ namespace
 			{
 				return;
 			}
-			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
-			settings.beginGroup("Users");
-			settings.beginGroup(user);
-			const QString role = settings.value("Role", kRoleOperator).toString();
-			settings.endGroup();
-			settings.endGroup();
+			const QString role = ConfigValue(AccountManagementConfigPath(), AccountUserKey(user, "Role"), kRoleOperator);
 			const int roleIndex = m_editRoleCombo->findData(role);
 			if (roleIndex >= 0)
 			{
@@ -1296,24 +1339,19 @@ namespace
 				return false;
 			}
 
-			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
-			settings.beginGroup("Users");
-			if (settings.childGroups().contains(userName))
+			const QString accountPath = AccountManagementConfigPath();
+			if (ConfigDatabase::ListIniGroups(accountPath, "Users").contains(userName))
 			{
-				settings.endGroup();
 				QMessageBox::warning(this, "新增账号", "账号已存在。");
 				return false;
 			}
-			settings.beginGroup(userName);
-			settings.setValue("PasswordHash", HashAccountPassword(userName, password));
-			settings.setValue("Role", role);
-			settings.setValue("CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate));
-			settings.endGroup();
-			settings.endGroup();
-			settings.sync();
-			if (settings.status() != QSettings::NoError)
+			const bool writeOk =
+				ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "PasswordHash"), HashAccountPassword(userName, password)) &&
+				ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "Role"), role) &&
+				ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "CreatedAt"), QDateTime::currentDateTime().toString(Qt::ISODate));
+			if (!writeOk)
 			{
-				QMessageBox::warning(this, "新增账号", "写入账号文件失败。");
+				QMessageBox::warning(this, "新增账号", "写入账号配置库失败。");
 				return false;
 			}
 
@@ -1332,35 +1370,27 @@ namespace
 				return false;
 			}
 
-			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
-			settings.beginGroup("Users");
-			if (!settings.childGroups().contains(userName))
+			const QString accountPath = AccountManagementConfigPath();
+			if (!ConfigDatabase::ListIniGroups(accountPath, "Users").contains(userName))
 			{
-				settings.endGroup();
 				QMessageBox::warning(this, "保存修改", "账号不存在。");
 				return false;
 			}
-			settings.beginGroup(userName);
-			settings.setValue("Role", m_editRoleCombo->currentData().toString());
+			bool writeOk = ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "Role"), m_editRoleCombo->currentData().toString());
 			const QString newPassword = m_editPassEdit->text();
 			if (!newPassword.isEmpty())
 			{
 				if (newPassword.size() < 8)
 				{
-					settings.endGroup();
-					settings.endGroup();
 					QMessageBox::warning(this, "保存修改", "新密码至少需要 8 个字符。");
 					return false;
 				}
-				settings.setValue("PasswordHash", HashAccountPassword(userName, newPassword));
+				writeOk = writeOk && ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "PasswordHash"), HashAccountPassword(userName, newPassword));
 			}
-			settings.setValue("UpdatedAt", QDateTime::currentDateTime().toString(Qt::ISODate));
-			settings.endGroup();
-			settings.endGroup();
-			settings.sync();
-			if (settings.status() != QSettings::NoError)
+			writeOk = writeOk && ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "UpdatedAt"), QDateTime::currentDateTime().toString(Qt::ISODate));
+			if (!writeOk)
 			{
-				QMessageBox::warning(this, "保存修改", "保存账号失败。");
+				QMessageBox::warning(this, "保存修改", "保存账号配置库失败。");
 				return false;
 			}
 			m_editPassEdit->clear();
@@ -1382,12 +1412,7 @@ namespace
 				return false;
 			}
 
-			QSettings settings(AccountManagementConfigPath(), QSettings::IniFormat);
-			settings.beginGroup("Users");
-			settings.remove(userName);
-			settings.endGroup();
-			settings.sync();
-			if (settings.status() != QSettings::NoError)
+			if (!ConfigDatabase::RemoveIniGroup(AccountManagementConfigPath(), QString("Users/%1").arg(userName)))
 			{
 				QMessageBox::warning(this, "删除账号", "删除账号失败。");
 				return false;
@@ -1496,8 +1521,9 @@ namespace
 			QHBoxLayout* listButtons = new QHBoxLayout();
 			QPushButton* newBtn = new QPushButton("新建", listGroup);
 			QPushButton* copyBtn = new QPushButton("复制选中", listGroup);
+			QPushButton* deleteBtn = new QPushButton("删除单元", listGroup);
 			QPushButton* refreshBtn = new QPushButton("刷新", listGroup);
-			for (QPushButton* button : { newBtn, copyBtn, refreshBtn })
+			for (QPushButton* button : { newBtn, copyBtn, deleteBtn, refreshBtn })
 			{
 				button->setFixedWidth(120);
 				listButtons->addWidget(button);
@@ -1602,6 +1628,7 @@ namespace
 			connect(m_unitTable, &QTableWidget::itemSelectionChanged, this, [this]() { SyncEditorFromSelection(); });
 			connect(newBtn, &QPushButton::clicked, this, [this]() { PrepareNewUnit(false); });
 			connect(copyBtn, &QPushButton::clicked, this, [this]() { PrepareNewUnit(true); });
+			connect(deleteBtn, &QPushButton::clicked, this, [this]() { DeleteSelectedUnit(); });
 			connect(refreshBtn, &QPushButton::clicked, this, [this]() { LoadUnits(true); });
 			connect(saveBtn, &QPushButton::clicked, this, [this]() { SaveCurrent(false); });
 			connect(saveReloadBtn, &QPushButton::clicked, this, [this]() { SaveCurrent(true); });
@@ -1667,7 +1694,7 @@ namespace
 
 		static std::string ToIniBytes(const QString& text)
 		{
-			return text.toLocal8Bit().toStdString();
+			return text.toUtf8().toStdString();
 		}
 
 		static QString ReadIniString(COPini& ini, const QString& key, const QString& fallback = QString())
@@ -1778,35 +1805,6 @@ namespace
 				units.push_back(unit);
 			}
 
-			QDir dataDir(RobotDataHelper::BuildProjectPath("Data"));
-			const QFileInfoList robotDirs = dataDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
-			for (const QFileInfo& dirInfo : robotDirs)
-			{
-				const QString unitName = dirInfo.fileName();
-				if (!QFileInfo::exists(dirInfo.filePath() + "/RobotPara.ini"))
-				{
-					continue;
-				}
-				const QString key = unitName.toLower();
-				if (unitRowByName.contains(key))
-				{
-					UnitConfig& unit = units[unitRowByName.value(key)];
-					LoadRobotPara(unit);
-					continue;
-				}
-
-				UnitConfig unit;
-				unit.unitNo = -1;
-				unit.unitName = unitName;
-				unit.chineseName = unitName;
-				LoadRobotPara(unit);
-				if (!unit.customName.isEmpty() && unit.chineseName == unitName)
-				{
-					unit.chineseName = unit.customName;
-				}
-				unitRowByName.insert(key, units.size());
-				units.push_back(unit);
-			}
 			return units;
 		}
 
@@ -2060,6 +2058,70 @@ namespace
 				FillEditor(m_units.at(m_editingRow), true);
 			}
 			AppendLog(copySelected ? "已创建复制控制单元，并刷新到列表。" : "已创建新控制单元，并刷新到列表。");
+		}
+
+		bool DeleteSelectedUnit()
+		{
+			if (m_unitTable == nullptr || m_unitTable->currentRow() < 0)
+			{
+				QMessageBox::warning(this, "删除控制单元", "请先选择一个控制单元。");
+				return false;
+			}
+
+			QTableWidgetItem* indexItem = m_unitTable->item(m_unitTable->currentRow(), 0);
+			const int unitRow = indexItem != nullptr ? indexItem->data(Qt::UserRole).toInt() : -1;
+			if (unitRow < 0 || unitRow >= m_units.size())
+			{
+				QMessageBox::warning(this, "删除控制单元", "当前选择的控制单元无效，请刷新后重试。");
+				return false;
+			}
+
+			const UnitConfig unit = m_units.at(unitRow);
+			const QString displayName = unit.chineseName.isEmpty() ? unit.unitName : unit.chineseName;
+			const QString confirmText = QString(
+				"确定删除控制单元 %1（%2）吗？\n\n"
+				"这会从控制单元列表移除，并删除配置库里 Data/%2 下的机器人、相机、手眼和工艺配置记录。\n"
+				"删除后如需让主界面立即生效，请点击“只重载”。")
+				.arg(displayName, unit.unitName);
+			if (QMessageBox::question(this, "删除控制单元", confirmText,
+				QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+			{
+				return false;
+			}
+
+			QList<UnitConfig> nextUnits = m_units;
+			nextUnits.removeAt(unitRow);
+			NormalizeRuntimeUnitNumbers(nextUnits);
+
+			QString error;
+			if (!WriteControlInfo(nextUnits, error))
+			{
+				QMessageBox::warning(this, "删除控制单元", error);
+				return false;
+			}
+
+			const QString unitConfigPrefix = RobotDataHelper::BuildProjectPath(QString("Data/%1").arg(unit.unitName));
+			if (!ConfigDatabase::RemoveConfigPathPrefix(unitConfigPrefix))
+			{
+				QMessageBox::warning(this, "删除控制单元",
+					QString("删除 %1 的配置记录失败，请检查配置库：%2")
+					.arg(unit.unitName, ConfigDatabase::DatabasePath()));
+				return false;
+			}
+
+			m_units = nextUnits;
+			RefreshTable();
+			if (!m_units.isEmpty())
+			{
+				m_unitTable->selectRow(std::min(unitRow, static_cast<int>(m_units.size()) - 1));
+			}
+			else
+			{
+				m_editingRow = -1;
+				FillEditor(UnitConfig(), false);
+			}
+			AppendLog(QString("已删除控制单元 %1，并清理 Data/%1 下的配置记录。").arg(unit.unitName));
+			return true;
 		}
 
 		bool RunNewUnitWizard(UnitConfig& unit, bool copySelected)
@@ -2764,7 +2826,8 @@ namespace
 		{
 			const QString preferredName = robotType == ROBOT_TYPE_STEP ? "RobotB" : "RobotA";
 			const QString preferredPath = RobotParaPath(preferredName);
-			if (preferredName.compare(targetUnitName, Qt::CaseInsensitive) != 0 && QFileInfo::exists(preferredPath))
+			if (preferredName.compare(targetUnitName, Qt::CaseInsensitive) != 0
+				&& ConfigDatabase::HasIniFile(ToIniBytes(preferredPath)))
 			{
 				return preferredPath;
 			}
@@ -2772,7 +2835,7 @@ namespace
 			{
 				if (unit.unitName.compare(targetUnitName, Qt::CaseInsensitive) != 0
 					&& unit.robotType == robotType
-					&& QFileInfo::exists(RobotParaPath(unit.unitName)))
+					&& ConfigDatabase::HasIniFile(ToIniBytes(RobotParaPath(unit.unitName))))
 				{
 					return RobotParaPath(unit.unitName);
 				}
@@ -2783,24 +2846,20 @@ namespace
 		bool EnsureRobotParaFile(const UnitConfig& unit, bool isNew, QString& error) const
 		{
 			const QString targetPath = RobotParaPath(unit.unitName);
-			QDir().mkpath(QFileInfo(targetPath).absolutePath());
-			if (QFileInfo::exists(targetPath))
+			if (!ConfigDatabase::IsAvailable())
+			{
+				error = QString("配置库不存在或结构无效，请先运行迁移工具：%1").arg(ConfigDatabase::DatabasePath());
+				return false;
+			}
+			if (ConfigDatabase::HasIniFile(ToIniBytes(targetPath)))
 			{
 				return true;
 			}
 			const QString templatePath = TemplateRobotParaPath(unit.robotType, unit.unitName);
-			if (!templatePath.isEmpty() && QFile::copy(templatePath, targetPath))
+			if (!templatePath.isEmpty() && ConfigDatabase::CopyIniFile(templatePath, targetPath, false))
 			{
 				return true;
 			}
-			QFile file(targetPath);
-			if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-			{
-				error = QString("创建机器人参数文件失败：%1").arg(QDir::toNativeSeparators(targetPath));
-				return false;
-			}
-			QTextStream out(&file);
-			out << "[BaseParam]\n\n[Tool]\n\n[Kinematics]\n\n[ExternalAxle]\n\n[ExternalAxleFuncation]\n";
 			return true;
 		}
 
@@ -2817,15 +2876,12 @@ namespace
 			}
 
 			const QString templateDirPath = WorkpieceTemplatePath(unit.workpieceType);
-			QDir templateDir(templateDirPath);
-			if (!templateDir.exists())
+			if (!ConfigDatabase::IsAvailable())
 			{
-				error = QString("未找到工件默认参数模板：%1").arg(QDir::toNativeSeparators(templateDirPath));
+				error = QString("配置库不存在或结构无效，请先运行迁移工具：%1").arg(ConfigDatabase::DatabasePath());
 				return false;
 			}
 
-			const QString targetDirPath = RobotDataHelper::BuildProjectPath(QString("Data/%1").arg(unit.unitName));
-			QDir().mkpath(targetDirPath);
 			const QStringList templateFiles = {
 				"CameraParam.ini",
 				"HandEyeCalibration_CAMERA1.ini",
@@ -2839,18 +2895,28 @@ namespace
 			};
 			for (const QString& fileName : templateFiles)
 			{
-				const QString sourcePath = templateDir.filePath(fileName);
-				if (!QFileInfo::exists(sourcePath))
+				const QString sourcePath = QDir(templateDirPath).filePath(fileName);
+				const QString targetPath = RobotDataHelper::BuildProjectPath(QString("Data/%1/%2").arg(unit.unitName, fileName));
+				const bool isTextFile = fileName.endsWith(".txt", Qt::CaseInsensitive);
+				const bool sourceExists = isTextFile
+					? ConfigDatabase::HasTextFile(ToIniBytes(sourcePath))
+					: ConfigDatabase::HasIniFile(ToIniBytes(sourcePath));
+				if (!sourceExists)
 				{
 					error = QString("工件模板缺少参数文件：%1").arg(QDir::toNativeSeparators(sourcePath));
 					return false;
 				}
-				const QString targetPath = QDir(targetDirPath).filePath(fileName);
-				if (QFileInfo::exists(targetPath))
+				const bool targetExists = isTextFile
+					? ConfigDatabase::HasTextFile(ToIniBytes(targetPath))
+					: ConfigDatabase::HasIniFile(ToIniBytes(targetPath));
+				if (targetExists)
 				{
 					continue;
 				}
-				if (!QFile::copy(sourcePath, targetPath))
+				const bool copied = isTextFile
+					? ConfigDatabase::CopyTextFile(sourcePath, targetPath, false)
+					: ConfigDatabase::CopyIniFile(sourcePath, targetPath, false);
+				if (!copied)
 				{
 					error = QString("复制工件模板失败：%1 -> %2")
 						.arg(QDir::toNativeSeparators(sourcePath), QDir::toNativeSeparators(targetPath));
@@ -2944,6 +3010,1033 @@ namespace
 		QLineEdit* m_stepProjectEdit = nullptr;
 		QFormLayout* m_editorForm = nullptr;
 		QString m_lastEditorSocketIpForFtp;
+		QPlainTextEdit* m_logText = nullptr;
+	};
+
+	class FtpJobManagementDialog final : public QDialog
+	{
+	public:
+		explicit FtpJobManagementDialog(ContralUnit* pContralUnit, int currentUnitIndex, QWidget* parent = nullptr)
+			: QDialog(parent)
+			, m_pContralUnit(pContralUnit)
+			, m_initialUnitIndex(currentUnitIndex)
+		{
+			setWindowTitle("FTP Job 文件管理");
+			ApplyUnifiedWindowChrome(this);
+			ResizeWindowForAvailableGeometry(this, QSize(1180, 760), 0.90, 0.82);
+			setStyleSheet(
+				"QDialog { background: #111820; color: #ECF3F4; }"
+				"QGroupBox { border: 1px solid #2E4656; border-radius: 12px; margin-top: 16px; padding-top: 12px; }"
+				"QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color: #9ED8DB; }"
+				"QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 9px 12px; }"
+				"QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
+				"QPushButton:pressed { background: #18303B; }"
+				"QPushButton:disabled { background: #18242D; color: #607580; border-color: #263844; }"
+				"QLineEdit, QPlainTextEdit, QTableWidget { background: #081018; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 8px; padding: 6px 8px; }"
+				"QTableWidget::item:selected { background: #8BE8F2; color: #071018; }"
+				"QTableWidget::item:selected:!active { background: #6FCFDC; color: #071018; }"
+				"QLineEdit[readOnly=\"true\"] { color: #91A7AE; background: #0A121A; }"
+				"QComboBox { background: #000000; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 0px; padding: 6px 34px 6px 8px; }"
+				"QComboBox::drop-down { border-left: 1px solid #2C4653; border-radius: 0px; width: 28px; background: #000000; }"
+				"QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
+				"QComboBox QAbstractItemView { background: #000000; color: #ECF3F4; selection-background-color: #2D5465; border: 1px solid #2C4653; border-radius: 0px; outline: 0px; }"
+				"QHeaderView::section { background: #13202A; color: #BFE8EC; border: 0px; padding: 6px; }");
+
+			QVBoxLayout* rootLayout = new QVBoxLayout(this);
+			rootLayout->setContentsMargins(18, 16, 18, 18);
+			rootLayout->setSpacing(12);
+
+			QLabel* titleLabel = new QLabel("FTP Job 文件管理", this);
+			titleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #F7FCFC;");
+			titleLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+			titleLabel->setMaximumHeight(44);
+			rootLayout->addWidget(titleLabel);
+
+			QGroupBox* connectionGroup = new QGroupBox("控制单元与 FTP 参数", this);
+			QGridLayout* connectionLayout = new QGridLayout(connectionGroup);
+			connectionLayout->setHorizontalSpacing(10);
+			connectionLayout->setVerticalSpacing(8);
+
+			m_unitCombo = new QComboBox(connectionGroup);
+			m_hostEdit = new QLineEdit(connectionGroup);
+			m_portEdit = new QLineEdit(connectionGroup);
+			m_userEdit = new QLineEdit(connectionGroup);
+			m_passwordEdit = new QLineEdit(connectionGroup);
+			m_remoteDirEdit = new QLineEdit(connectionGroup);
+			m_localDirEdit = new QLineEdit(connectionGroup);
+			m_passwordEdit->setEchoMode(QLineEdit::Password);
+			m_portEdit->setValidator(new QIntValidator(1, 65535, m_portEdit));
+			m_hostEdit->setMinimumWidth(160);
+			m_remoteDirEdit->setMinimumWidth(260);
+			m_localDirEdit->setMinimumWidth(300);
+
+			m_chooseLocalDirBtn = new QPushButton("选择本地目录", connectionGroup);
+			m_reloadUnitsBtn = new QPushButton("重读控制单元", connectionGroup);
+
+			connectionLayout->addWidget(new QLabel("控制单元", connectionGroup), 0, 0);
+			connectionLayout->addWidget(m_unitCombo, 0, 1);
+			connectionLayout->addWidget(new QLabel("FTP IP", connectionGroup), 0, 2);
+			connectionLayout->addWidget(m_hostEdit, 0, 3);
+			connectionLayout->addWidget(new QLabel("端口", connectionGroup), 0, 4);
+			connectionLayout->addWidget(m_portEdit, 0, 5);
+			connectionLayout->addWidget(m_reloadUnitsBtn, 0, 6);
+			connectionLayout->addWidget(new QLabel("用户名", connectionGroup), 1, 0);
+			connectionLayout->addWidget(m_userEdit, 1, 1);
+			connectionLayout->addWidget(new QLabel("密码", connectionGroup), 1, 2);
+			connectionLayout->addWidget(m_passwordEdit, 1, 3);
+			connectionLayout->addWidget(new QLabel("服务器目录", connectionGroup), 1, 4);
+			connectionLayout->addWidget(m_remoteDirEdit, 1, 5, 1, 2);
+			connectionLayout->addWidget(new QLabel("本地目录", connectionGroup), 2, 0);
+			connectionLayout->addWidget(m_localDirEdit, 2, 1, 1, 5);
+			connectionLayout->addWidget(m_chooseLocalDirBtn, 2, 6);
+			connectionLayout->setColumnStretch(5, 1);
+			rootLayout->addWidget(connectionGroup);
+
+			QSplitter* splitter = new QSplitter(Qt::Horizontal, this);
+			splitter->setChildrenCollapsible(false);
+			rootLayout->addWidget(splitter, 1);
+
+			QGroupBox* localGroup = new QGroupBox("本地 Job 文件", splitter);
+			QVBoxLayout* localLayout = new QVBoxLayout(localGroup);
+			QHBoxLayout* localButtons = new QHBoxLayout();
+			m_refreshLocalBtn = new QPushButton("刷新本地", localGroup);
+			m_pickUploadFilesBtn = new QPushButton("选择文件上传", localGroup);
+			m_uploadSelectedBtn = new QPushButton("上传选中", localGroup);
+			m_deleteLocalBtn = new QPushButton("删除本地选中", localGroup);
+			for (QPushButton* button : { m_refreshLocalBtn, m_pickUploadFilesBtn, m_uploadSelectedBtn, m_deleteLocalBtn })
+			{
+				button->setFixedWidth(118);
+				localButtons->addWidget(button);
+			}
+			localButtons->addStretch(1);
+			localLayout->addLayout(localButtons);
+
+			m_localTable = new QTableWidget(localGroup);
+			m_localTable->setColumnCount(4);
+			m_localTable->setHorizontalHeaderLabels(QStringList() << "文件名" << "大小" << "修改时间" << "路径");
+			m_localTable->horizontalHeader()->setStretchLastSection(true);
+			m_localTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+			m_localTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
+			m_localTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+			m_localTable->verticalHeader()->setVisible(false);
+			localLayout->addWidget(m_localTable, 1);
+
+			QGroupBox* remoteGroup = new QGroupBox("服务器 Job 文件", splitter);
+			QVBoxLayout* remoteLayout = new QVBoxLayout(remoteGroup);
+			QHBoxLayout* remoteButtons = new QHBoxLayout();
+			m_refreshRemoteBtn = new QPushButton("刷新服务器", remoteGroup);
+			m_remoteParentBtn = new QPushButton("服务器上一级", remoteGroup);
+			m_downloadSelectedBtn = new QPushButton("下载选中", remoteGroup);
+			m_deleteRemoteBtn = new QPushButton("删除服务器选中", remoteGroup);
+			for (QPushButton* button : { m_refreshRemoteBtn, m_remoteParentBtn, m_downloadSelectedBtn, m_deleteRemoteBtn })
+			{
+				button->setFixedWidth(128);
+				remoteButtons->addWidget(button);
+			}
+			remoteButtons->addStretch(1);
+			remoteLayout->addLayout(remoteButtons);
+
+			m_remoteTable = new QTableWidget(remoteGroup);
+			m_remoteTable->setColumnCount(5);
+			m_remoteTable->setHorizontalHeaderLabels(QStringList() << "名称" << "类型" << "大小" << "修改时间" << "路径");
+			m_remoteTable->horizontalHeader()->setStretchLastSection(true);
+			m_remoteTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+			m_remoteTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
+			m_remoteTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+			m_remoteTable->verticalHeader()->setVisible(false);
+			remoteLayout->addWidget(m_remoteTable, 1);
+
+			splitter->setStretchFactor(0, 1);
+			splitter->setStretchFactor(1, 1);
+
+			QHBoxLayout* bottomLayout = new QHBoxLayout();
+			m_statusLabel = new QLabel("就绪", this);
+			m_statusLabel->setStyleSheet("QLabel { color: #9ED8DB; }");
+			m_closeBtn = new QPushButton("关闭", this);
+			m_closeBtn->setFixedWidth(96);
+			bottomLayout->addWidget(m_statusLabel, 1);
+			bottomLayout->addWidget(m_closeBtn);
+			rootLayout->addLayout(bottomLayout);
+
+			m_logText = new QPlainTextEdit(this);
+			m_logText->setReadOnly(true);
+			m_logText->setMaximumHeight(110);
+			rootLayout->addWidget(m_logText);
+
+			connect(m_unitCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) { ApplyUnitSelection(index); });
+			connect(m_reloadUnitsBtn, &QPushButton::clicked, this, [this]() { LoadUnits(true); });
+			connect(m_chooseLocalDirBtn, &QPushButton::clicked, this, [this]() { ChooseLocalDir(); });
+			connect(m_refreshLocalBtn, &QPushButton::clicked, this, [this]() { RefreshLocalFiles(); });
+			connect(m_refreshRemoteBtn, &QPushButton::clicked, this, [this]() { RefreshRemoteFiles(); });
+			connect(m_remoteParentBtn, &QPushButton::clicked, this, [this]() { GoRemoteParent(); });
+			connect(m_pickUploadFilesBtn, &QPushButton::clicked, this, [this]() { PickFilesAndUpload(); });
+			connect(m_uploadSelectedBtn, &QPushButton::clicked, this, [this]() { UploadSelectedLocalFiles(); });
+			connect(m_downloadSelectedBtn, &QPushButton::clicked, this, [this]() { DownloadSelectedRemoteFiles(); });
+			connect(m_deleteLocalBtn, &QPushButton::clicked, this, [this]() { DeleteSelectedLocalFiles(); });
+			connect(m_deleteRemoteBtn, &QPushButton::clicked, this, [this]() { DeleteSelectedRemoteFiles(); });
+			connect(m_closeBtn, &QPushButton::clicked, this, &QDialog::close);
+			connect(m_remoteTable, &QTableWidget::cellDoubleClicked, this, [this](int row, int)
+				{
+					const bool isDirectory = m_remoteTable->item(row, 0) != nullptr
+						&& m_remoteTable->item(row, 0)->data(Qt::UserRole + 1).toBool();
+					if (!isDirectory)
+					{
+						return;
+					}
+					const QString remotePath = m_remoteTable->item(row, 0)->data(Qt::UserRole).toString();
+					m_remoteDirEdit->setText(NormalizeRemotePath(remotePath));
+					RefreshRemoteFiles();
+				});
+
+			LoadUnits(false);
+		}
+
+	private:
+		struct UnitConfig
+		{
+			int unitIndex = -1;
+			QString unitName;
+			QString chineseName;
+			QString customName;
+			int robotType = ROBOT_TYPE_FANUC;
+			QString ftpIP;
+			int ftpPort = 21;
+			QString ftpUser;
+			QString ftpPassword;
+			QString stepProjectName;
+		};
+
+		struct FtpConnection
+		{
+			QString host;
+			int port = 21;
+			QString user;
+			QString password;
+		};
+
+		static QString ControlInfoPath()
+		{
+			return RobotDataHelper::BuildProjectPath("Data/ContralUnitInfo.ini");
+		}
+
+		static QString RobotParaPath(const QString& unitName)
+		{
+			return RobotDataHelper::BuildProjectPath(QString("Data/%1/RobotPara.ini").arg(unitName));
+		}
+
+		static std::string ToIniBytes(const QString& text)
+		{
+			return text.toUtf8().toStdString();
+		}
+
+		static std::string ToLocalStd(const QString& text)
+		{
+			const QByteArray bytes = QDir::toNativeSeparators(text).toLocal8Bit();
+			return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+		}
+
+		static std::string ToFtpStd(const QString& text)
+		{
+			const QByteArray bytes = NormalizeRemotePath(text).toLocal8Bit();
+			return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+		}
+
+		static QString ReadIniString(COPini& ini, const QString& key, const QString& fallback = QString())
+		{
+			std::string rawValue;
+			if (ini.ReadString(false, ToIniBytes(key), rawValue) > 0)
+			{
+				return DecodeConfigText(rawValue);
+			}
+			return fallback;
+		}
+
+		static int ReadIniInt(COPini& ini, const QString& key, int fallback = 0)
+		{
+			int value = fallback;
+			if (ini.ReadString(false, ToIniBytes(key), &value) > 0)
+			{
+				return value;
+			}
+			return fallback;
+		}
+
+		static QString NormalizeRemotePath(QString path)
+		{
+			path = path.trimmed();
+			path.replace('\\', '/');
+			if (path.isEmpty())
+			{
+				path = "/";
+			}
+			if (!path.startsWith('/'))
+			{
+				path.prepend('/');
+			}
+			while (path.contains("//"))
+			{
+				path.replace("//", "/");
+			}
+			while (path.size() > 1 && path.endsWith('/'))
+			{
+				path.chop(1);
+			}
+			return path;
+		}
+
+		static QString JoinRemotePath(const QString& remoteDir, const QString& name)
+		{
+			const QString dir = NormalizeRemotePath(remoteDir);
+			const QString cleanName = QString(name).replace('\\', '/').section('/', -1, -1);
+			if (dir == "/")
+			{
+				return "/" + cleanName;
+			}
+			return dir + "/" + cleanName;
+		}
+
+		static QString RemoteParentDir(const QString& remoteDir)
+		{
+			const QString path = NormalizeRemotePath(remoteDir);
+			if (path == "/")
+			{
+				return "/";
+			}
+			const int slash = path.lastIndexOf('/');
+			if (slash <= 0)
+			{
+				return "/";
+			}
+			return path.left(slash);
+		}
+
+		static QStringList JobNameFilters()
+		{
+			return QStringList()
+				<< "*.srp" << "*.srd" << "*.sr"
+				<< "*.ls" << "*.tp" << "*.kl" << "*.pc" << "*.var" << "*.vr" << "*.dt" << "*.job";
+		}
+
+		static bool IsJobFileName(const QString& fileName)
+		{
+			const QString suffix = QFileInfo(fileName).suffix().toLower();
+			return QStringList({ "srp", "srd", "sr", "ls", "tp", "kl", "pc", "var", "vr", "dt", "job" }).contains(suffix);
+		}
+
+		static QString FormatBytes(quint64 bytes)
+		{
+			const double value = static_cast<double>(bytes);
+			if (bytes >= 1024ULL * 1024ULL)
+			{
+				return QString::number(value / 1024.0 / 1024.0, 'f', 2) + " MB";
+			}
+			if (bytes >= 1024ULL)
+			{
+				return QString::number(value / 1024.0, 'f', 1) + " KB";
+			}
+			return QString::number(bytes) + " B";
+		}
+
+		void LoadUnits(bool keepSelection)
+		{
+			const QString previousUnitName = CurrentUnit().unitName;
+			m_units.clear();
+			m_unitCombo->clear();
+
+			QString error;
+			COPini ini;
+			if (!ini.SetFileName(ToIniBytes(ControlInfoPath())))
+			{
+				error = "打开控制单元配置失败：" + ControlInfoPath();
+			}
+			else
+			{
+				ini.SetSectionName("UnitNum");
+				const int unitCount = ReadIniInt(ini, "UnitNum", 0);
+				for (int index = 0; index < unitCount; ++index)
+				{
+					UnitConfig unit;
+					unit.unitIndex = index;
+					const QString key = QString("Unit%1").arg(index);
+					ini.SetSectionName("UnitName");
+					unit.unitName = ReadIniString(ini, key);
+					ini.SetSectionName("ChineseName");
+					unit.chineseName = ReadIniString(ini, key);
+					LoadRobotPara(unit);
+					m_units.push_back(unit);
+				}
+			}
+
+			for (int index = 0; index < m_units.size(); ++index)
+			{
+				const UnitConfig& unit = m_units.at(index);
+				QString displayName = unit.chineseName.trimmed();
+				if (displayName.isEmpty())
+				{
+					displayName = unit.customName.trimmed();
+				}
+				if (displayName.isEmpty())
+				{
+					displayName = unit.unitName.trimmed();
+				}
+				if (!unit.unitName.trimmed().isEmpty() && displayName.compare(unit.unitName, Qt::CaseInsensitive) != 0)
+				{
+					displayName += QString(" (%1)").arg(unit.unitName);
+				}
+				m_unitCombo->addItem(displayName, index);
+			}
+
+			if (!error.isEmpty())
+			{
+				QMessageBox::warning(this, "FTP Job 文件管理", error);
+				AppendLog(error);
+			}
+
+			int selectedComboIndex = -1;
+			if (keepSelection && !previousUnitName.isEmpty())
+			{
+				for (int comboIndex = 0; comboIndex < m_unitCombo->count(); ++comboIndex)
+				{
+					const int unitListIndex = m_unitCombo->itemData(comboIndex).toInt();
+					if (unitListIndex >= 0
+						&& unitListIndex < m_units.size()
+						&& m_units.at(unitListIndex).unitName.compare(previousUnitName, Qt::CaseInsensitive) == 0)
+					{
+						selectedComboIndex = comboIndex;
+						break;
+					}
+				}
+			}
+			if (selectedComboIndex < 0 && m_initialUnitIndex >= 0)
+			{
+				for (int comboIndex = 0; comboIndex < m_unitCombo->count(); ++comboIndex)
+				{
+					const int unitListIndex = m_unitCombo->itemData(comboIndex).toInt();
+					if (unitListIndex >= 0 && unitListIndex < m_units.size() && m_units.at(unitListIndex).unitIndex == m_initialUnitIndex)
+					{
+						selectedComboIndex = comboIndex;
+						break;
+					}
+				}
+			}
+			if (selectedComboIndex < 0 && m_unitCombo->count() > 0)
+			{
+				selectedComboIndex = 0;
+			}
+
+			if (selectedComboIndex >= 0)
+			{
+				m_unitCombo->setCurrentIndex(selectedComboIndex);
+				ApplyUnitSelection(selectedComboIndex);
+			}
+			else
+			{
+				ApplyUnitSelection(-1);
+			}
+			AppendLog(QString("已读取控制单元：%1 个。").arg(m_units.size()));
+		}
+
+		void LoadRobotPara(UnitConfig& unit) const
+		{
+			if (unit.unitName.trimmed().isEmpty())
+			{
+				return;
+			}
+
+			COPini robotIni;
+			if (!robotIni.SetFileName(ToIniBytes(RobotParaPath(unit.unitName))))
+			{
+				return;
+			}
+
+			robotIni.SetSectionName("BaseParam");
+			unit.customName = ReadIniString(robotIni, "CustomName");
+			unit.robotType = ReadIniInt(robotIni, "RobotType", unit.robotType);
+			unit.ftpIP = ReadIniString(robotIni, "FTPIP");
+			unit.ftpPort = ReadIniInt(robotIni, "FTPPort", 21);
+			unit.ftpUser = ReadIniString(robotIni, "FTPUser");
+			unit.ftpPassword = ReadIniString(robotIni, "FTPPassWord");
+			unit.stepProjectName = ReadIniString(robotIni, "StepProjectName");
+			if (unit.stepProjectName.trimmed().isEmpty())
+			{
+				unit.stepProjectName = ReadIniString(robotIni, "ProjectName");
+			}
+		}
+
+		UnitConfig CurrentUnit() const
+		{
+			if (m_unitCombo == nullptr)
+			{
+				return UnitConfig();
+			}
+			const int unitListIndex = m_unitCombo->currentData().toInt();
+			if (unitListIndex < 0 || unitListIndex >= m_units.size())
+			{
+				return UnitConfig();
+			}
+			return m_units.at(unitListIndex);
+		}
+
+		QString DefaultRemoteDir(const UnitConfig& unit) const
+		{
+			if (unit.robotType == ROBOT_TYPE_STEP)
+			{
+				QString projectName = unit.stepProjectName.trimmed();
+				if (projectName.isEmpty())
+				{
+					projectName = "PCRobot";
+				}
+				if (!projectName.endsWith(".sr", Qt::CaseInsensitive))
+				{
+					projectName += ".sr";
+				}
+				return NormalizeRemotePath("/UserPrograms/" + projectName);
+			}
+			return "/md";
+		}
+
+		QString DefaultLocalDir(const UnitConfig& unit) const
+		{
+			return RobotDataHelper::BuildProjectPath(unit.robotType == ROBOT_TYPE_STEP ? "Job/STEP" : "Job/FANUC");
+		}
+
+		void ApplyUnitSelection(int)
+		{
+			const UnitConfig unit = CurrentUnit();
+			m_hostEdit->setText(unit.ftpIP);
+			m_portEdit->setText(QString::number(unit.ftpPort > 0 ? unit.ftpPort : 21));
+			m_userEdit->setText(unit.ftpUser);
+			m_passwordEdit->setText(unit.ftpPassword);
+			m_remoteDirEdit->setText(DefaultRemoteDir(unit));
+			m_localDirEdit->setText(DefaultLocalDir(unit));
+			RefreshLocalFiles();
+			FillRemoteTable(std::vector<FtpRemoteFileInfo>());
+			if (!unit.unitName.isEmpty())
+			{
+				AppendLog(QString("当前控制单元：%1，服务器目录：%2。").arg(unit.unitName, m_remoteDirEdit->text()));
+			}
+		}
+
+		FtpConnection CurrentConnection(QString* error = nullptr) const
+		{
+			FtpConnection connection;
+			connection.host = m_hostEdit->text().trimmed();
+			connection.port = m_portEdit->text().toInt();
+			connection.user = m_userEdit->text().trimmed();
+			connection.password = m_passwordEdit->text();
+			if (connection.host.isEmpty())
+			{
+				if (error != nullptr)
+				{
+					*error = "FTP IP 不能为空。";
+				}
+			}
+			if (connection.port <= 0)
+			{
+				connection.port = 21;
+			}
+			if (connection.user.isEmpty())
+			{
+				connection.user = "anonymous";
+			}
+			return connection;
+		}
+
+		void RefreshLocalFiles()
+		{
+			const QString localDir = QDir::fromNativeSeparators(m_localDirEdit->text().trimmed());
+			if (localDir.isEmpty())
+			{
+				m_localTable->setRowCount(0);
+				return;
+			}
+			QDir dir(localDir);
+			if (!dir.exists())
+			{
+				dir.mkpath(".");
+			}
+
+			const QFileInfoList files = dir.entryInfoList(JobNameFilters(), QDir::Files, QDir::Name | QDir::IgnoreCase);
+			m_localTable->setSortingEnabled(false);
+			m_localTable->setRowCount(files.size());
+			for (int row = 0; row < files.size(); ++row)
+			{
+				const QFileInfo& info = files.at(row);
+				QTableWidgetItem* nameItem = new QTableWidgetItem(info.fileName());
+				nameItem->setData(Qt::UserRole, info.absoluteFilePath());
+				m_localTable->setItem(row, 0, nameItem);
+				m_localTable->setItem(row, 1, new QTableWidgetItem(FormatBytes(static_cast<quint64>(info.size()))));
+				m_localTable->setItem(row, 2, new QTableWidgetItem(info.lastModified().toString("yyyy-MM-dd HH:mm:ss")));
+				m_localTable->setItem(row, 3, new QTableWidgetItem(QDir::toNativeSeparators(info.absoluteFilePath())));
+			}
+			m_localTable->setSortingEnabled(true);
+			m_localTable->resizeColumnsToContents();
+			m_localTable->horizontalHeader()->setStretchLastSection(true);
+			m_statusLabel->setText(QString("本地文件：%1 个").arg(files.size()));
+		}
+
+		void FillRemoteTable(const std::vector<FtpRemoteFileInfo>& entries)
+		{
+			m_remoteTable->setSortingEnabled(false);
+			m_remoteTable->setRowCount(0);
+			int row = 0;
+			for (const FtpRemoteFileInfo& entry : entries)
+			{
+				const QString name = DecodeRobotMessageText(entry.name);
+				if (!entry.isDirectory && !IsJobFileName(name))
+				{
+					continue;
+				}
+				m_remoteTable->insertRow(row);
+				const QString path = DecodeRobotMessageText(entry.path);
+				QTableWidgetItem* nameItem = new QTableWidgetItem(entry.isDirectory ? QString("[%1]").arg(name) : name);
+				nameItem->setData(Qt::UserRole, path);
+				nameItem->setData(Qt::UserRole + 1, entry.isDirectory);
+				m_remoteTable->setItem(row, 0, nameItem);
+				m_remoteTable->setItem(row, 1, new QTableWidgetItem(entry.isDirectory ? "目录" : "文件"));
+				m_remoteTable->setItem(row, 2, new QTableWidgetItem(entry.isDirectory ? QString() : FormatBytes(static_cast<quint64>(entry.size))));
+				m_remoteTable->setItem(row, 3, new QTableWidgetItem(DecodeRobotMessageText(entry.modifiedTime)));
+				m_remoteTable->setItem(row, 4, new QTableWidgetItem(path));
+				++row;
+			}
+			m_remoteTable->setSortingEnabled(true);
+			m_remoteTable->resizeColumnsToContents();
+			m_remoteTable->horizontalHeader()->setStretchLastSection(true);
+			m_statusLabel->setText(QString("服务器文件：%1 个").arg(row));
+		}
+
+		QList<int> SelectedRows(QTableWidget* table) const
+		{
+			QList<int> rows;
+			if (table == nullptr || table->selectionModel() == nullptr)
+			{
+				return rows;
+			}
+			const QModelIndexList selectedRows = table->selectionModel()->selectedRows();
+			for (const QModelIndex& index : selectedRows)
+			{
+				if (!rows.contains(index.row()))
+				{
+					rows.push_back(index.row());
+				}
+			}
+			std::sort(rows.begin(), rows.end());
+			return rows;
+		}
+
+		QStringList SelectedLocalFilePaths() const
+		{
+			QStringList paths;
+			const QList<int> rows = SelectedRows(m_localTable);
+			for (int row : rows)
+			{
+				QTableWidgetItem* item = m_localTable->item(row, 0);
+				if (item != nullptr)
+				{
+					paths << item->data(Qt::UserRole).toString();
+				}
+			}
+			return paths;
+		}
+
+		QList<QPair<QString, QString>> SelectedRemoteFiles() const
+		{
+			QList<QPair<QString, QString>> files;
+			const QList<int> rows = SelectedRows(m_remoteTable);
+			for (int row : rows)
+			{
+				QTableWidgetItem* item = m_remoteTable->item(row, 0);
+				if (item == nullptr || item->data(Qt::UserRole + 1).toBool())
+				{
+					continue;
+				}
+				files.push_back(qMakePair(item->data(Qt::UserRole).toString(), item->text()));
+			}
+			return files;
+		}
+
+		void SetBusy(bool busy, const QString& text = QString())
+		{
+			m_busy = busy;
+			for (QWidget* widget : {
+				static_cast<QWidget*>(m_unitCombo),
+				static_cast<QWidget*>(m_hostEdit),
+				static_cast<QWidget*>(m_portEdit),
+				static_cast<QWidget*>(m_userEdit),
+				static_cast<QWidget*>(m_passwordEdit),
+				static_cast<QWidget*>(m_remoteDirEdit),
+				static_cast<QWidget*>(m_localDirEdit),
+				static_cast<QWidget*>(m_chooseLocalDirBtn),
+				static_cast<QWidget*>(m_reloadUnitsBtn),
+				static_cast<QWidget*>(m_refreshLocalBtn),
+				static_cast<QWidget*>(m_refreshRemoteBtn),
+				static_cast<QWidget*>(m_remoteParentBtn),
+				static_cast<QWidget*>(m_pickUploadFilesBtn),
+				static_cast<QWidget*>(m_uploadSelectedBtn),
+				static_cast<QWidget*>(m_downloadSelectedBtn),
+				static_cast<QWidget*>(m_deleteLocalBtn),
+				static_cast<QWidget*>(m_deleteRemoteBtn),
+				static_cast<QWidget*>(m_localTable),
+				static_cast<QWidget*>(m_remoteTable) })
+			{
+				if (widget != nullptr)
+				{
+					widget->setEnabled(!busy);
+				}
+			}
+			if (m_closeBtn != nullptr)
+			{
+				m_closeBtn->setEnabled(true);
+			}
+			if (m_statusLabel != nullptr)
+			{
+				m_statusLabel->setText(text.isEmpty() ? (busy ? "正在执行 FTP 操作..." : "就绪") : text);
+			}
+		}
+
+		void AppendLog(const QString& text)
+		{
+			if (m_logText != nullptr)
+			{
+				m_logText->appendPlainText(QString("[%1] %2")
+					.arg(QDateTime::currentDateTime().toString("HH:mm:ss.zzz"), text));
+			}
+		}
+
+		void RunFtpTask(
+			const QString& title,
+			const std::function<bool(FtpClient&, QString*)>& work,
+			const std::function<void()>& onSuccess = std::function<void()>())
+		{
+			if (m_busy)
+			{
+				return;
+			}
+			QString connectionError;
+			const FtpConnection connection = CurrentConnection(&connectionError);
+			if (!connectionError.isEmpty())
+			{
+				QMessageBox::warning(this, title, connectionError);
+				return;
+			}
+
+			const QString logPath = RobotDataHelper::BuildProjectPath("Log/FtpJobManagement.log");
+			QDir().mkpath(QFileInfo(logPath).absolutePath());
+			SetBusy(true, title + "...");
+			AppendLog(title + "开始。");
+
+			QPointer<FtpJobManagementDialog> dialog(this);
+			QThread* taskThread = QThread::create([dialog, connection, title, work, onSuccess, logPath]() mutable
+				{
+					bool ok = false;
+					QString error;
+					try
+					{
+						RobotLog log(ToLocalStd(logPath), false);
+						FtpClient ftp(
+							&log,
+							ToLocalStd(connection.host),
+							connection.port,
+							ToLocalStd(connection.user),
+							ToLocalStd(connection.password));
+						ok = work(ftp, &error);
+					}
+					catch (const std::exception& e)
+					{
+						error = DecodeRobotMessageText(e.what());
+					}
+					catch (...)
+					{
+						error = "FTP 操作发生未知异常。";
+					}
+
+					if (dialog == nullptr)
+					{
+						return;
+					}
+					QMetaObject::invokeMethod(dialog.data(), [dialog, title, ok, error, onSuccess]() mutable
+						{
+							if (dialog == nullptr)
+							{
+								return;
+							}
+							dialog->SetBusy(false);
+							if (ok)
+							{
+								dialog->AppendLog(title + "完成。");
+								if (onSuccess)
+								{
+									onSuccess();
+								}
+							}
+							else
+							{
+								const QString message = error.isEmpty() ? title + "失败。" : error;
+								dialog->AppendLog(title + "失败：" + message);
+								QMessageBox::warning(dialog.data(), title, message);
+							}
+						}, Qt::QueuedConnection);
+				});
+			connect(taskThread, &QThread::finished, taskThread, &QObject::deleteLater);
+			taskThread->start();
+		}
+
+		void RefreshRemoteFiles()
+		{
+			const QString remoteDir = NormalizeRemotePath(m_remoteDirEdit->text());
+			m_remoteDirEdit->setText(remoteDir);
+			auto entries = std::make_shared<std::vector<FtpRemoteFileInfo>>();
+			RunFtpTask(
+				"刷新服务器目录",
+				[remoteDir, entries](FtpClient& ftp, QString* error) -> bool
+				{
+					if (error != nullptr)
+					{
+						error->clear();
+					}
+					return ftp.listFiles(ToFtpStd(remoteDir), *entries);
+				},
+				[this, entries]()
+				{
+					FillRemoteTable(*entries);
+				});
+		}
+
+		void ChooseLocalDir()
+		{
+			const QString selectedDir = QFileDialog::getExistingDirectory(
+				this,
+				"选择本地 Job 目录",
+				m_localDirEdit->text().trimmed().isEmpty() ? RobotDataHelper::BuildProjectPath("Job") : m_localDirEdit->text());
+			if (selectedDir.isEmpty())
+			{
+				return;
+			}
+			m_localDirEdit->setText(QDir::toNativeSeparators(selectedDir));
+			RefreshLocalFiles();
+		}
+
+		void GoRemoteParent()
+		{
+			m_remoteDirEdit->setText(RemoteParentDir(m_remoteDirEdit->text()));
+			RefreshRemoteFiles();
+		}
+
+		void PickFilesAndUpload()
+		{
+			const QStringList files = QFileDialog::getOpenFileNames(
+				this,
+				"选择要上传的 Job 文件",
+				m_localDirEdit->text(),
+				"Job files (*.srp *.srd *.sr *.ls *.tp *.kl *.pc *.var *.vr *.dt *.job);;All files (*.*)");
+			if (files.isEmpty())
+			{
+				return;
+			}
+			UploadFiles(files);
+		}
+
+		void UploadSelectedLocalFiles()
+		{
+			const QStringList files = SelectedLocalFilePaths();
+			if (files.isEmpty())
+			{
+				QMessageBox::information(this, "上传选中", "请先选择要上传的本地文件。");
+				return;
+			}
+			UploadFiles(files);
+		}
+
+		void UploadFiles(const QStringList& localFiles)
+		{
+			const QString remoteDir = NormalizeRemotePath(m_remoteDirEdit->text());
+			QList<QPair<QString, QString>> transfers;
+			for (const QString& localFile : localFiles)
+			{
+				const QFileInfo info(localFile);
+				if (!info.exists() || !info.isFile())
+				{
+					continue;
+				}
+				transfers.push_back(qMakePair(info.absoluteFilePath(), JoinRemotePath(remoteDir, info.fileName())));
+			}
+			if (transfers.isEmpty())
+			{
+				QMessageBox::warning(this, "上传文件", "没有可上传的文件。");
+				return;
+			}
+
+			RunFtpTask(
+				QString("上传 %1 个文件").arg(transfers.size()),
+				[transfers](FtpClient& ftp, QString* error) -> bool
+				{
+					for (const QPair<QString, QString>& transfer : transfers)
+					{
+						if (!ftp.uploadFile(ToLocalStd(transfer.first), ToFtpStd(transfer.second), true))
+						{
+							if (error != nullptr)
+							{
+								*error = QString("上传失败：%1").arg(transfer.first);
+							}
+							return false;
+						}
+					}
+					return true;
+				},
+				[this]()
+				{
+					RefreshLocalFiles();
+					RefreshRemoteFiles();
+				});
+		}
+
+		void DownloadSelectedRemoteFiles()
+		{
+			const QList<QPair<QString, QString>> files = SelectedRemoteFiles();
+			if (files.isEmpty())
+			{
+				QMessageBox::information(this, "下载选中", "请先选择服务器文件，目录不会被直接下载。");
+				return;
+			}
+
+			const QString localDir = QDir::fromNativeSeparators(m_localDirEdit->text().trimmed());
+			if (localDir.isEmpty())
+			{
+				QMessageBox::warning(this, "下载选中", "本地目录不能为空。");
+				return;
+			}
+			QDir().mkpath(localDir);
+
+			QList<QPair<QString, QString>> transfers;
+			for (const QPair<QString, QString>& file : files)
+			{
+				transfers.push_back(qMakePair(file.first, QDir(localDir).absoluteFilePath(file.second)));
+			}
+
+			RunFtpTask(
+				QString("下载 %1 个文件").arg(transfers.size()),
+				[transfers](FtpClient& ftp, QString* error) -> bool
+				{
+					for (const QPair<QString, QString>& transfer : transfers)
+					{
+						if (!ftp.downloadFile(ToFtpStd(transfer.first), ToLocalStd(transfer.second)))
+						{
+							if (error != nullptr)
+							{
+								*error = QString("下载失败：%1").arg(transfer.first);
+							}
+							return false;
+						}
+					}
+					return true;
+				},
+				[this]()
+				{
+					RefreshLocalFiles();
+				});
+		}
+
+		void DeleteSelectedLocalFiles()
+		{
+			const QStringList files = SelectedLocalFilePaths();
+			if (files.isEmpty())
+			{
+				QMessageBox::information(this, "删除本地文件", "请先选择要删除的本地文件。");
+				return;
+			}
+			if (QMessageBox::question(
+				this,
+				"删除本地文件",
+				QString("确定删除选中的 %1 个本地文件吗？").arg(files.size()),
+				QMessageBox::Yes | QMessageBox::No,
+				QMessageBox::No) != QMessageBox::Yes)
+			{
+				return;
+			}
+
+			int removed = 0;
+			for (const QString& file : files)
+			{
+				if (QFile::remove(file))
+				{
+					++removed;
+					AppendLog("已删除本地文件：" + QDir::toNativeSeparators(file));
+				}
+				else
+				{
+					AppendLog("删除本地文件失败：" + QDir::toNativeSeparators(file));
+				}
+			}
+			RefreshLocalFiles();
+			m_statusLabel->setText(QString("已删除本地文件：%1/%2").arg(removed).arg(files.size()));
+		}
+
+		void DeleteSelectedRemoteFiles()
+		{
+			const QList<QPair<QString, QString>> files = SelectedRemoteFiles();
+			if (files.isEmpty())
+			{
+				QMessageBox::information(this, "删除服务器文件", "请先选择服务器文件，目录不会被直接删除。");
+				return;
+			}
+			if (QMessageBox::question(
+				this,
+				"删除服务器文件",
+				QString("确定删除服务器上的 %1 个文件吗？").arg(files.size()),
+				QMessageBox::Yes | QMessageBox::No,
+				QMessageBox::No) != QMessageBox::Yes)
+			{
+				return;
+			}
+
+			RunFtpTask(
+				QString("删除服务器 %1 个文件").arg(files.size()),
+				[files](FtpClient& ftp, QString* error) -> bool
+				{
+					for (const QPair<QString, QString>& file : files)
+					{
+						if (!ftp.deleteFile(ToFtpStd(file.first), false))
+						{
+							if (error != nullptr)
+							{
+								*error = QString("删除失败：%1").arg(file.first);
+							}
+							return false;
+						}
+					}
+					return true;
+				},
+				[this]()
+				{
+					RefreshRemoteFiles();
+				});
+		}
+
+		ContralUnit* m_pContralUnit = nullptr;
+		int m_initialUnitIndex = -1;
+		bool m_busy = false;
+		QList<UnitConfig> m_units;
+		QComboBox* m_unitCombo = nullptr;
+		QLineEdit* m_hostEdit = nullptr;
+		QLineEdit* m_portEdit = nullptr;
+		QLineEdit* m_userEdit = nullptr;
+		QLineEdit* m_passwordEdit = nullptr;
+		QLineEdit* m_remoteDirEdit = nullptr;
+		QLineEdit* m_localDirEdit = nullptr;
+		QPushButton* m_chooseLocalDirBtn = nullptr;
+		QPushButton* m_reloadUnitsBtn = nullptr;
+		QPushButton* m_refreshLocalBtn = nullptr;
+		QPushButton* m_refreshRemoteBtn = nullptr;
+		QPushButton* m_remoteParentBtn = nullptr;
+		QPushButton* m_pickUploadFilesBtn = nullptr;
+		QPushButton* m_uploadSelectedBtn = nullptr;
+		QPushButton* m_downloadSelectedBtn = nullptr;
+		QPushButton* m_deleteLocalBtn = nullptr;
+		QPushButton* m_deleteRemoteBtn = nullptr;
+		QPushButton* m_closeBtn = nullptr;
+		QTableWidget* m_localTable = nullptr;
+		QTableWidget* m_remoteTable = nullptr;
+		QLabel* m_statusLabel = nullptr;
 		QPlainTextEdit* m_logText = nullptr;
 	};
 
@@ -3809,6 +4902,1565 @@ namespace
 		GroovePointCloudView::ViewState m_rawViewState;
 		GroovePointCloudView::ViewState m_filteredViewState;
 	};
+
+	struct PointCloudVec3
+	{
+		double x = 0.0;
+		double y = 0.0;
+		double z = 0.0;
+	};
+
+	static PointCloudVec3 operator+(const PointCloudVec3& a, const PointCloudVec3& b)
+	{
+		return { a.x + b.x, a.y + b.y, a.z + b.z };
+	}
+
+	static PointCloudVec3 operator-(const PointCloudVec3& a, const PointCloudVec3& b)
+	{
+		return { a.x - b.x, a.y - b.y, a.z - b.z };
+	}
+
+	static PointCloudVec3 operator*(const PointCloudVec3& point, double scale)
+	{
+		return { point.x * scale, point.y * scale, point.z * scale };
+	}
+
+	static double DotPoint3D(const PointCloudVec3& a, const PointCloudVec3& b)
+	{
+		return a.x * b.x + a.y * b.y + a.z * b.z;
+	}
+
+	static double LengthPoint3D(const PointCloudVec3& point)
+	{
+		return std::sqrt(std::max(0.0, DotPoint3D(point, point)));
+	}
+
+	static PointCloudVec3 NormalizePoint3D(const PointCloudVec3& point)
+	{
+		const double length = LengthPoint3D(point);
+		if (length <= 1.0e-9)
+		{
+			return { 0.0, 0.0, 0.0 };
+		}
+		return point * (1.0 / length);
+	}
+
+	static PointCloudVec3 CrossPoint3D(const PointCloudVec3& a, const PointCloudVec3& b)
+	{
+		return {
+			a.y * b.z - a.z * b.y,
+			a.z * b.x - a.x * b.z,
+			a.x * b.y - a.y * b.x
+		};
+	}
+
+	static PointCloudVec3 RotatePoint3D(const PointCloudVec3& value, PointCloudVec3 axis, double radians)
+	{
+		axis = NormalizePoint3D(axis);
+		if (LengthPoint3D(axis) <= 1.0e-9)
+		{
+			return value;
+		}
+		const double c = std::cos(radians);
+		const double s = std::sin(radians);
+		return value * c + CrossPoint3D(axis, value) * s + axis * (DotPoint3D(axis, value) * (1.0 - c));
+	}
+
+	static QStringList SplitPointCloudLine(const QString& text)
+	{
+		QString normalized = text.trimmed();
+		normalized.replace(',', ' ');
+		return normalized.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+	}
+
+	static bool ParseFiniteDouble(const QString& text, double& value)
+	{
+		bool ok = false;
+		value = text.toDouble(&ok);
+		return ok && std::isfinite(value);
+	}
+
+	struct LoadedPointCloudFile
+	{
+		QVector<PointCloudVec3> points;
+		QString error;
+		int skippedLineCount = 0;
+	};
+
+	static LoadedPointCloudFile LoadPointCloudFile3D(const QString& filePath)
+	{
+		LoadedPointCloudFile result;
+		QFile file(filePath);
+		if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+		{
+			result.error = QString("打开失败：%1").arg(file.errorString());
+			return result;
+		}
+
+		QTextStream stream(&file);
+		ConfigureUtf8TextStream(stream);
+		int xIndex = -1;
+		int yIndex = -1;
+		int zIndex = -1;
+		bool hasHeader = false;
+		int lineNumber = 0;
+		while (!stream.atEnd())
+		{
+			QString line = stream.readLine().trimmed();
+			++lineNumber;
+			if (line.isEmpty())
+			{
+				continue;
+			}
+
+			if (line.startsWith('#'))
+			{
+				const QStringList commentTokens = SplitPointCloudLine(line.mid(1));
+				for (int index = 0; index < commentTokens.size(); ++index)
+				{
+					const QString token = commentTokens.at(index).trimmed().toLower();
+					if (token == "x")
+					{
+						xIndex = index;
+					}
+					else if (token == "y")
+					{
+						yIndex = index;
+					}
+					else if (token == "z")
+					{
+						zIndex = index;
+					}
+				}
+				hasHeader = xIndex >= 0 && yIndex >= 0 && zIndex >= 0;
+				continue;
+			}
+
+			const QStringList tokens = SplitPointCloudLine(line);
+			if (tokens.isEmpty())
+			{
+				continue;
+			}
+
+			if (!hasHeader)
+			{
+				bool firstValueOk = false;
+				tokens.first().toDouble(&firstValueOk);
+				if (!firstValueOk)
+				{
+					for (int index = 0; index < tokens.size(); ++index)
+					{
+						const QString token = tokens.at(index).trimmed().toLower();
+						if (token == "x")
+						{
+							xIndex = index;
+						}
+						else if (token == "y")
+						{
+							yIndex = index;
+						}
+						else if (token == "z")
+						{
+							zIndex = index;
+						}
+					}
+					hasHeader = xIndex >= 0 && yIndex >= 0 && zIndex >= 0;
+					continue;
+				}
+			}
+
+			int xi = xIndex;
+			int yi = yIndex;
+			int zi = zIndex;
+			if (!hasHeader)
+			{
+				if (tokens.size() >= 4)
+				{
+					xi = 1;
+					yi = 2;
+					zi = 3;
+				}
+				else if (tokens.size() >= 3)
+				{
+					xi = 0;
+					yi = 1;
+					zi = 2;
+				}
+			}
+			if (xi < 0 || yi < 0 || zi < 0 || xi >= tokens.size() || yi >= tokens.size() || zi >= tokens.size())
+			{
+				++result.skippedLineCount;
+				continue;
+			}
+
+			PointCloudVec3 point;
+			if (!ParseFiniteDouble(tokens.at(xi), point.x)
+				|| !ParseFiniteDouble(tokens.at(yi), point.y)
+				|| !ParseFiniteDouble(tokens.at(zi), point.z))
+			{
+				++result.skippedLineCount;
+				continue;
+			}
+			result.points.push_back(point);
+		}
+
+		if (result.points.isEmpty())
+		{
+			result.error = QString("未读取到有效 x/y/z 点，跳过行数：%1").arg(result.skippedLineCount);
+		}
+		return result;
+	}
+
+	class PointCloud3DView final : public QWidget
+	{
+	public:
+		struct Layer
+		{
+			QString name;
+			QString path;
+			QVector<PointCloudVec3> points;
+			QColor color;
+			bool visible = true;
+			bool rainbow = false;
+			bool connectLines = false;
+		};
+
+		explicit PointCloud3DView(QWidget* parent = nullptr)
+			: QWidget(parent)
+		{
+			setMinimumSize(720, 520);
+			setMouseTracking(true);
+			setFocusPolicy(Qt::StrongFocus);
+			SetTopView(false);
+		}
+
+		void SetLayers(const QVector<Layer>& layers)
+		{
+			m_layers = layers;
+			FitToLayers();
+			update();
+		}
+
+		void SetLayerVisible(int index, bool visible)
+		{
+			if (index < 0 || index >= m_layers.size())
+			{
+				return;
+			}
+			m_layers[index].visible = visible;
+			update();
+		}
+
+		void ResetView()
+		{
+			m_zoom = 1.0;
+			m_pan = QPointF();
+			FitToLayers(false);
+			update();
+		}
+
+		void SetTopView(bool updateNow = true)
+		{
+			m_right = { 1.0, 0.0, 0.0 };
+			m_up = { 0.0, 1.0, 0.0 };
+			m_forward = { 0.0, 0.0, 1.0 };
+			if (updateNow)
+			{
+				update();
+			}
+		}
+
+		void SetFrontView()
+		{
+			m_right = { 1.0, 0.0, 0.0 };
+			m_up = { 0.0, 0.0, 1.0 };
+			m_forward = { 0.0, -1.0, 0.0 };
+			update();
+		}
+
+		void SetCameraLikeView()
+		{
+			m_right = NormalizePoint3D({ 0.86, 0.48, 0.0 });
+			m_up = NormalizePoint3D({ -0.18, 0.32, 0.93 });
+			m_forward = NormalizePoint3D(CrossPoint3D(m_right, m_up));
+			update();
+		}
+
+	protected:
+		void paintEvent(QPaintEvent* event) override
+		{
+			Q_UNUSED(event);
+
+			QPainter painter(this);
+			painter.setRenderHint(QPainter::Antialiasing, false);
+			QLinearGradient background(rect().topLeft(), rect().bottomLeft());
+			background.setColorAt(0.0, QColor(12, 97, 130));
+			background.setColorAt(0.62, QColor(5, 47, 64));
+			background.setColorAt(1.0, QColor(0, 0, 0));
+			painter.fillRect(rect(), background);
+
+			DrawGrid(painter);
+			DrawLayers(painter);
+			DrawCrosshair(painter);
+			DrawScaleBar(painter);
+			DrawAxes(painter);
+			DrawOverlayText(painter);
+		}
+
+		void wheelEvent(QWheelEvent* event) override
+		{
+			const int delta = event->angleDelta().y();
+			if (delta == 0)
+			{
+				QWidget::wheelEvent(event);
+				return;
+			}
+			const double factor = delta > 0 ? 1.18 : (1.0 / 1.18);
+			m_zoom = std::clamp(m_zoom * factor, 0.05, 120.0);
+			event->accept();
+			update();
+		}
+
+		void mousePressEvent(QMouseEvent* event) override
+		{
+			m_lastMousePos = event->position();
+			if (event->button() == Qt::LeftButton)
+			{
+				m_rotating = true;
+				setCursor(Qt::ClosedHandCursor);
+				event->accept();
+				return;
+			}
+			if (event->button() == Qt::MiddleButton || event->button() == Qt::RightButton)
+			{
+				m_panning = true;
+				setCursor(Qt::SizeAllCursor);
+				event->accept();
+				return;
+			}
+			QWidget::mousePressEvent(event);
+		}
+
+		void mouseMoveEvent(QMouseEvent* event) override
+		{
+			const QPointF delta = event->position() - m_lastMousePos;
+			m_lastMousePos = event->position();
+			if (m_rotating)
+			{
+				const double yaw = delta.x() * 0.008;
+				const double pitch = delta.y() * 0.008;
+				m_right = RotatePoint3D(m_right, m_up, yaw);
+				m_forward = RotatePoint3D(m_forward, m_up, yaw);
+				m_up = RotatePoint3D(m_up, m_right, pitch);
+				m_forward = RotatePoint3D(m_forward, m_right, pitch);
+				NormalizeBasis();
+				event->accept();
+				update();
+				return;
+			}
+			if (m_panning)
+			{
+				const double scale = EffectiveScale();
+				m_pan += QPointF(delta.x() / scale, -delta.y() / scale);
+				event->accept();
+				update();
+				return;
+			}
+			QWidget::mouseMoveEvent(event);
+		}
+
+		void mouseReleaseEvent(QMouseEvent* event) override
+		{
+			if (event->button() == Qt::LeftButton && m_rotating)
+			{
+				m_rotating = false;
+				unsetCursor();
+				event->accept();
+				return;
+			}
+			if ((event->button() == Qt::MiddleButton || event->button() == Qt::RightButton) && m_panning)
+			{
+				m_panning = false;
+				unsetCursor();
+				event->accept();
+				return;
+			}
+			QWidget::mouseReleaseEvent(event);
+		}
+
+		void mouseDoubleClickEvent(QMouseEvent* event) override
+		{
+			if (event->button() == Qt::LeftButton)
+			{
+				ResetView();
+				event->accept();
+				return;
+			}
+			QWidget::mouseDoubleClickEvent(event);
+		}
+
+	private:
+		void NormalizeBasis()
+		{
+			m_right = NormalizePoint3D(m_right);
+			m_up = NormalizePoint3D(m_up - m_right * DotPoint3D(m_up, m_right));
+			m_forward = NormalizePoint3D(CrossPoint3D(m_right, m_up));
+		}
+
+		void FitToLayers(bool resetZoomAndPan = true)
+		{
+			bool hasBounds = false;
+			PointCloudVec3 minPoint;
+			PointCloudVec3 maxPoint;
+			for (const Layer& layer : m_layers)
+			{
+				for (const PointCloudVec3& point : layer.points)
+				{
+					if (!hasBounds)
+					{
+						minPoint = maxPoint = point;
+						hasBounds = true;
+					}
+					else
+					{
+						minPoint.x = std::min(minPoint.x, point.x);
+						minPoint.y = std::min(minPoint.y, point.y);
+						minPoint.z = std::min(minPoint.z, point.z);
+						maxPoint.x = std::max(maxPoint.x, point.x);
+						maxPoint.y = std::max(maxPoint.y, point.y);
+						maxPoint.z = std::max(maxPoint.z, point.z);
+					}
+				}
+			}
+
+			if (!hasBounds)
+			{
+				m_center = { 0.0, 0.0, 0.0 };
+				m_baseSpan = 200.0;
+			}
+			else
+			{
+				m_center = (minPoint + maxPoint) * 0.5;
+				const PointCloudVec3 span = maxPoint - minPoint;
+				m_baseSpan = std::max({ std::abs(span.x), std::abs(span.y), std::abs(span.z), 10.0 });
+			}
+			if (resetZoomAndPan)
+			{
+				m_zoom = 1.0;
+				m_pan = QPointF();
+			}
+		}
+
+		double EffectiveScale() const
+		{
+			const double screenSpan = std::max(1, std::min(width(), height()) - 80);
+			return screenSpan / std::max(1.0, m_baseSpan) * 0.92 * m_zoom;
+		}
+
+		QPointF ProjectPoint(const PointCloudVec3& point) const
+		{
+			const PointCloudVec3 relative = point - m_center;
+			const double scale = EffectiveScale();
+			const double sx = DotPoint3D(relative, m_right) + m_pan.x();
+			const double sy = DotPoint3D(relative, m_up) + m_pan.y();
+			return QPointF(width() * 0.5 + sx * scale, height() * 0.5 - sy * scale);
+		}
+
+		void DrawGrid(QPainter& painter) const
+		{
+			QPen gridPen(QColor(255, 255, 255, 85));
+			gridPen.setStyle(Qt::DotLine);
+			gridPen.setWidthF(1.0);
+			painter.setPen(gridPen);
+			const int step = std::max(80, std::min(width(), height()) / 4);
+			for (int x = width() / 2 % step; x < width(); x += step)
+			{
+				painter.drawLine(x, 0, x, height());
+			}
+			for (int y = height() / 2 % step; y < height(); y += step)
+			{
+				painter.drawLine(0, y, width(), y);
+			}
+
+			QPen axisPen(QColor(255, 255, 255, 145));
+			axisPen.setWidthF(1.0);
+			painter.setPen(axisPen);
+			painter.drawLine(width() / 2, 0, width() / 2, height());
+			painter.drawLine(0, height() / 2, width(), height() / 2);
+		}
+
+		static QColor LayerPointColor(const Layer& layer, int pointIndex, int pointCount)
+		{
+			if (!layer.rainbow || pointCount <= 1)
+			{
+				return layer.color;
+			}
+			const double hue = std::clamp(static_cast<double>(pointIndex) / static_cast<double>(pointCount - 1) * 0.72, 0.0, 0.72);
+			return QColor::fromHsvF(hue, 1.0, 1.0);
+		}
+
+		void DrawLayers(QPainter& painter) const
+		{
+			for (const Layer& layer : m_layers)
+			{
+				if (!layer.visible || layer.points.isEmpty())
+				{
+					continue;
+				}
+				const int pointCount = layer.points.size();
+				const int drawStep = std::max(1, pointCount / 90000);
+				if (layer.connectLines && pointCount > 1)
+				{
+					QPen linePen(layer.color);
+					linePen.setWidthF(1.2);
+					linePen.setCosmetic(true);
+					painter.setPen(linePen);
+					QPointF previous = ProjectPoint(layer.points.at(0));
+					for (int index = drawStep; index < pointCount; index += drawStep)
+					{
+						const QPointF current = ProjectPoint(layer.points.at(index));
+						painter.drawLine(previous, current);
+						previous = current;
+					}
+				}
+
+				QPen pointPen(layer.color);
+				pointPen.setWidthF(layer.connectLines ? 2.4 : 2.0);
+				pointPen.setCosmetic(true);
+				painter.setPen(pointPen);
+				for (int index = 0; index < pointCount; index += drawStep)
+				{
+					if (layer.rainbow)
+					{
+						pointPen.setColor(LayerPointColor(layer, index, pointCount));
+						painter.setPen(pointPen);
+					}
+					painter.drawPoint(ProjectPoint(layer.points.at(index)));
+				}
+			}
+		}
+
+		void DrawCrosshair(QPainter& painter) const
+		{
+			QPen pen(QColor(255, 255, 255, 180));
+			pen.setWidthF(1.0);
+			painter.setPen(pen);
+			const QPointF center(width() * 0.5, height() * 0.5);
+			painter.drawLine(center + QPointF(-8, 0), center + QPointF(8, 0));
+			painter.drawLine(center + QPointF(0, -8), center + QPointF(0, 8));
+		}
+
+		void DrawScaleBar(QPainter& painter) const
+		{
+			const double scale = EffectiveScale();
+			if (scale <= 1.0e-9)
+			{
+				return;
+			}
+			const double desiredPixel = std::max(120.0, width() * 0.18);
+			const double rawWorldLength = desiredPixel / scale;
+			const double magnitude = std::pow(10.0, std::floor(std::log10(std::max(1.0, rawWorldLength))));
+			double worldLength = magnitude;
+			if (rawWorldLength / magnitude >= 5.0)
+			{
+				worldLength = 5.0 * magnitude;
+			}
+			else if (rawWorldLength / magnitude >= 2.0)
+			{
+				worldLength = 2.0 * magnitude;
+			}
+			const double pixelLength = worldLength * scale;
+			const QPointF start(width() - pixelLength - 70.0, height() - 34.0);
+			const QPointF end(width() - 70.0, height() - 34.0);
+			QPen pen(QColor(245, 245, 245));
+			pen.setWidthF(1.5);
+			painter.setPen(pen);
+			painter.drawLine(start, end);
+			painter.drawLine(start + QPointF(0, -4), start + QPointF(0, 4));
+			painter.drawLine(end + QPointF(0, -4), end + QPointF(0, 4));
+			QFont font = painter.font();
+			font.setPointSize(10);
+			font.setBold(true);
+			painter.setFont(font);
+			painter.drawText(QRectF(start.x(), start.y() + 4, pixelLength, 24), Qt::AlignCenter, QString::number(worldLength, 'f', worldLength >= 10.0 ? 0 : 1));
+		}
+
+		void DrawAxes(QPainter& painter) const
+		{
+			const QPointF origin(width() - 58.0, height() - 52.0);
+			const double axisLength = 34.0;
+			auto drawAxis = [&](const PointCloudVec3& axis, const QColor& color, const QString& label)
+			{
+				const QPointF direction(DotPoint3D(axis, m_right), -DotPoint3D(axis, m_up));
+				const double length = std::max(1.0, std::sqrt(direction.x() * direction.x() + direction.y() * direction.y()));
+				const QPointF normalized(direction.x() / length, direction.y() / length);
+				QPen pen(color);
+				pen.setWidthF(2.0);
+				painter.setPen(pen);
+				const QPointF end = origin + normalized * axisLength;
+				painter.drawLine(origin, end);
+				QFont font = painter.font();
+				font.setPointSize(10);
+				font.setBold(true);
+				painter.setFont(font);
+				painter.drawText(end + normalized * 7.0, label);
+			};
+			drawAxis({ 1.0, 0.0, 0.0 }, QColor(255, 40, 40), "X");
+			drawAxis({ 0.0, 1.0, 0.0 }, QColor(40, 255, 40), "Y");
+			drawAxis({ 0.0, 0.0, 1.0 }, QColor(0, 180, 255), "Z");
+		}
+
+		void DrawOverlayText(QPainter& painter) const
+		{
+			int visibleLayerCount = 0;
+			int pointCount = 0;
+			for (const Layer& layer : m_layers)
+			{
+				if (layer.visible)
+				{
+					++visibleLayerCount;
+					pointCount += layer.points.size();
+				}
+			}
+			QFont font = painter.font();
+			font.setPointSize(10);
+			painter.setFont(font);
+			painter.setPen(QColor(235, 245, 246));
+			painter.drawText(QRectF(12, 10, width() - 24, 22), Qt::AlignLeft | Qt::AlignVCenter,
+				QString("图层：%1  点数：%2  左键旋转 / 右键或中键平移 / 滚轮缩放 / 双击复位")
+				.arg(visibleLayerCount)
+				.arg(pointCount));
+		}
+
+		QVector<Layer> m_layers;
+		PointCloudVec3 m_center;
+		double m_baseSpan = 200.0;
+		double m_zoom = 1.0;
+		QPointF m_pan;
+		PointCloudVec3 m_right = { 1.0, 0.0, 0.0 };
+		PointCloudVec3 m_up = { 0.0, 1.0, 0.0 };
+		PointCloudVec3 m_forward = { 0.0, 0.0, 1.0 };
+		QPointF m_lastMousePos;
+		bool m_rotating = false;
+		bool m_panning = false;
+	};
+
+	static QString FindLatestLaserPointDirectory(const QString& robotName)
+	{
+		const QString resultRoot = RobotDataHelper::BuildProjectPath(QString("Result/%1").arg(robotName.trimmed().isEmpty() ? "RobotC" : robotName));
+		QDir rootDir(resultRoot);
+		if (!rootDir.exists())
+		{
+			return QString();
+		}
+
+		const QStringList expectedFiles = {
+			"PreciseLaserPoint.txt",
+			"PreciseLaserPoint_Classified.txt",
+			"PreciseLaserPoint_WeldPose_2mm_SeamComp.txt"
+		};
+		const QFileInfoList resultDirs = rootDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+		for (const QFileInfo& resultDirInfo : resultDirs)
+		{
+			const QString laserDirPath = QDir(resultDirInfo.absoluteFilePath()).filePath("LaserPoint");
+			QDir laserDir(laserDirPath);
+			if (!laserDir.exists())
+			{
+				continue;
+			}
+			for (const QString& fileName : expectedFiles)
+			{
+				if (QFileInfo::exists(laserDir.filePath(fileName)))
+				{
+					return QDir::toNativeSeparators(laserDirPath);
+				}
+			}
+		}
+		return QString();
+	}
+
+	class PointCloudViewerDialog final : public QDialog
+	{
+	public:
+		explicit PointCloudViewerDialog(const QString& robotName, QWidget* parent = nullptr)
+			: QDialog(parent)
+			, m_robotName(robotName.trimmed().isEmpty() ? "RobotC" : robotName.trimmed())
+		{
+			setWindowTitle("点云查看");
+			setAttribute(Qt::WA_DeleteOnClose, true);
+			setModal(false);
+			ApplyUnifiedWindowChrome(this);
+			ResizeWindowForAvailableGeometry(this, QSize(1480, 900), 0.92, 0.86);
+			BuildUi();
+
+			const QString latestDir = FindLatestLaserPointDirectory(m_robotName);
+			if (!latestDir.isEmpty())
+			{
+				m_dirEdit->setText(latestDir);
+			}
+			else
+			{
+				m_dirEdit->setText(RobotDataHelper::BuildProjectPath(QString("Result/%1").arg(m_robotName)));
+			}
+			LoadCurrentDirectory();
+		}
+
+	private:
+		void BuildUi()
+		{
+			setStyleSheet(
+				"QDialog, QWidget { background: #101820; color: #ECF3F4; }"
+				"QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 8px; padding: 8px 14px; font-size: 14px; }"
+				"QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
+				"QLineEdit, QPlainTextEdit, QTreeWidget { background: #071017; color: #DDF5F7; border: 1px solid #2C4653; border-radius: 4px; padding: 6px; }"
+				"QHeaderView::section { background: #142633; color: #BEE8EA; border: none; padding: 5px; }"
+				"QTreeWidget::item:selected { background: #2D6071; color: #FFFFFF; }"
+				"QSplitter::handle { background: #1D3340; }");
+
+			QVBoxLayout* mainLayout = new QVBoxLayout(this);
+			mainLayout->setContentsMargins(10, 10, 10, 10);
+			mainLayout->setSpacing(8);
+
+			QHBoxLayout* toolbarLayout = new QHBoxLayout();
+			toolbarLayout->setSpacing(8);
+			QLabel* pathLabel = new QLabel("目录：", this);
+			m_dirEdit = new QLineEdit(this);
+			m_dirEdit->setReadOnly(true);
+			QPushButton* chooseButton = new QPushButton("选择目录", this);
+			QPushButton* reloadButton = new QPushButton("重新读取", this);
+			QPushButton* cameraViewButton = new QPushButton("相机视角", this);
+			QPushButton* topViewButton = new QPushButton("俯视", this);
+			QPushButton* frontViewButton = new QPushButton("正视", this);
+			QPushButton* resetViewButton = new QPushButton("重置视图", this);
+			toolbarLayout->addWidget(pathLabel);
+			toolbarLayout->addWidget(m_dirEdit, 1);
+			toolbarLayout->addWidget(chooseButton);
+			toolbarLayout->addWidget(reloadButton);
+			toolbarLayout->addSpacing(10);
+			toolbarLayout->addWidget(cameraViewButton);
+			toolbarLayout->addWidget(topViewButton);
+			toolbarLayout->addWidget(frontViewButton);
+			toolbarLayout->addWidget(resetViewButton);
+			mainLayout->addLayout(toolbarLayout);
+
+			QSplitter* centerSplitter = new QSplitter(Qt::Horizontal, this);
+			centerSplitter->setChildrenCollapsible(false);
+			QWidget* leftPanel = new QWidget(centerSplitter);
+			QVBoxLayout* leftLayout = new QVBoxLayout(leftPanel);
+			leftLayout->setContentsMargins(0, 0, 0, 0);
+			leftLayout->setSpacing(8);
+			QLabel* treeLabel = new QLabel("DB Tree", leftPanel);
+			treeLabel->setStyleSheet("QLabel { color: #BFE8EC; font-weight: bold; }");
+			m_tree = new QTreeWidget(leftPanel);
+			m_tree->setHeaderLabels({ "图层" });
+			m_tree->setRootIsDecorated(true);
+			m_tree->setMinimumWidth(320);
+			m_tree->setAlternatingRowColors(false);
+			QLabel* propLabel = new QLabel("Properties", leftPanel);
+			propLabel->setStyleSheet("QLabel { color: #BFE8EC; font-weight: bold; }");
+			m_propertiesText = new QPlainTextEdit(leftPanel);
+			m_propertiesText->setReadOnly(true);
+			m_propertiesText->setMaximumBlockCount(200);
+			leftLayout->addWidget(treeLabel);
+			leftLayout->addWidget(m_tree, 2);
+			leftLayout->addWidget(propLabel);
+			leftLayout->addWidget(m_propertiesText, 1);
+			centerSplitter->addWidget(leftPanel);
+
+			m_view = new PointCloud3DView(centerSplitter);
+			centerSplitter->addWidget(m_view);
+			centerSplitter->setStretchFactor(0, 0);
+			centerSplitter->setStretchFactor(1, 1);
+			centerSplitter->setSizes({ 360, 1100 });
+			mainLayout->addWidget(centerSplitter, 1);
+
+			QLabel* consoleLabel = new QLabel("Console", this);
+			consoleLabel->setStyleSheet("QLabel { color: #BFE8EC; font-weight: bold; }");
+			m_consoleText = new QPlainTextEdit(this);
+			m_consoleText->setReadOnly(true);
+			m_consoleText->setMaximumHeight(110);
+			m_consoleText->setMaximumBlockCount(300);
+			mainLayout->addWidget(consoleLabel);
+			mainLayout->addWidget(m_consoleText);
+
+			connect(chooseButton, &QPushButton::clicked, this, [this]()
+				{
+					const QString selectedDir = QFileDialog::getExistingDirectory(this, "选择点云目录", m_dirEdit->text());
+					if (!selectedDir.isEmpty())
+					{
+						m_dirEdit->setText(QDir::toNativeSeparators(selectedDir));
+						LoadCurrentDirectory();
+					}
+				});
+			connect(reloadButton, &QPushButton::clicked, this, [this]() { LoadCurrentDirectory(); });
+			connect(cameraViewButton, &QPushButton::clicked, this, [this]()
+				{
+					if (m_view != nullptr)
+					{
+						m_view->SetCameraLikeView();
+					}
+				});
+			connect(topViewButton, &QPushButton::clicked, this, [this]()
+				{
+					if (m_view != nullptr)
+					{
+						m_view->SetTopView();
+					}
+				});
+			connect(frontViewButton, &QPushButton::clicked, this, [this]()
+				{
+					if (m_view != nullptr)
+					{
+						m_view->SetFrontView();
+					}
+				});
+			connect(resetViewButton, &QPushButton::clicked, this, [this]()
+				{
+					if (m_view != nullptr)
+					{
+						m_view->ResetView();
+					}
+				});
+			connect(m_tree, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column)
+				{
+					Q_UNUSED(column);
+					if (m_updatingTree || item == nullptr || m_view == nullptr)
+					{
+						return;
+					}
+					const int layerIndex = item->data(0, Qt::UserRole).toInt();
+					m_view->SetLayerVisible(layerIndex, item->checkState(0) == Qt::Checked);
+					RefreshProperties(layerIndex);
+				});
+			connect(m_tree, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* current, QTreeWidgetItem*)
+				{
+					if (current == nullptr)
+					{
+						return;
+					}
+					RefreshProperties(current->data(0, Qt::UserRole).toInt());
+				});
+		}
+
+		void LoadCurrentDirectory()
+		{
+			const QString dirPath = m_dirEdit != nullptr ? m_dirEdit->text().trimmed() : QString();
+			QDir dir(dirPath);
+			AppendLog(QString("读取点云目录：%1").arg(dirPath));
+			if (!dir.exists())
+			{
+				AppendLog("目录不存在。");
+				SetLayers({});
+				return;
+			}
+
+			struct FileSpec
+			{
+				QString fileName;
+				QString displayName;
+				QColor color;
+				bool rainbow = false;
+				bool connectLines = false;
+			};
+
+			const QVector<FileSpec> specs = {
+				{ "PreciseLaserPoint.txt", "原始精确点云", QColor(220, 235, 240), false, false },
+				{ "PreciseLaserPoint_Classified.txt", "分类点云", QColor(0, 255, 80), true, true },
+				{ "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt", "焊接姿态点云", QColor(255, 230, 90), true, true }
+			};
+
+			QVector<PointCloud3DView::Layer> layers;
+			for (const FileSpec& spec : specs)
+			{
+				const QString filePath = dir.filePath(spec.fileName);
+				if (!QFileInfo::exists(filePath))
+				{
+					AppendLog(QString("未找到：%1").arg(spec.fileName));
+					continue;
+				}
+				const LoadedPointCloudFile loaded = LoadPointCloudFile3D(filePath);
+				if (!loaded.error.isEmpty())
+				{
+					AppendLog(QString("读取失败：%1，%2").arg(spec.fileName, loaded.error));
+					continue;
+				}
+
+				PointCloud3DView::Layer layer;
+				layer.name = spec.displayName;
+				layer.path = QDir::toNativeSeparators(filePath);
+				layer.points = loaded.points;
+				layer.color = spec.color;
+				layer.rainbow = spec.rainbow;
+				layer.connectLines = spec.connectLines;
+				layers.push_back(layer);
+				AppendLog(QString("已加载：%1，点数：%2，跳过行：%3")
+					.arg(spec.fileName)
+					.arg(loaded.points.size())
+					.arg(loaded.skippedLineCount));
+			}
+			SetLayers(layers);
+		}
+
+		void SetLayers(const QVector<PointCloud3DView::Layer>& layers)
+		{
+			m_layers = layers;
+			if (m_view != nullptr)
+			{
+				m_view->SetLayers(m_layers);
+			}
+			RefreshTree();
+			RefreshProperties(m_layers.isEmpty() ? -1 : 0);
+		}
+
+		void RefreshTree()
+		{
+			if (m_tree == nullptr)
+			{
+				return;
+			}
+			m_updatingTree = true;
+			m_tree->clear();
+			for (int index = 0; index < m_layers.size(); ++index)
+			{
+				const PointCloud3DView::Layer& layer = m_layers.at(index);
+				QTreeWidgetItem* fileItem = new QTreeWidgetItem(m_tree);
+				fileItem->setText(0, QString("%1 (%2)").arg(layer.name).arg(QFileInfo(layer.path).fileName()));
+				fileItem->setData(0, Qt::UserRole, index);
+				fileItem->setFlags(fileItem->flags() | Qt::ItemIsUserCheckable);
+				fileItem->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
+				QTreeWidgetItem* childItem = new QTreeWidgetItem(fileItem);
+				childItem->setText(0, QString("%1 - Cloud").arg(layer.name));
+				childItem->setData(0, Qt::UserRole, index);
+				childItem->setFlags(childItem->flags() | Qt::ItemIsUserCheckable);
+				childItem->setCheckState(0, layer.visible ? Qt::Checked : Qt::Unchecked);
+				fileItem->setExpanded(true);
+			}
+			m_tree->expandAll();
+			if (m_tree->topLevelItemCount() > 0)
+			{
+				m_tree->setCurrentItem(m_tree->topLevelItem(0));
+			}
+			m_updatingTree = false;
+		}
+
+		void RefreshProperties(int layerIndex)
+		{
+			if (m_propertiesText == nullptr)
+			{
+				return;
+			}
+			if (layerIndex < 0 || layerIndex >= m_layers.size())
+			{
+				m_propertiesText->setPlainText("未选择点云图层。");
+				return;
+			}
+			const PointCloud3DView::Layer& layer = m_layers.at(layerIndex);
+			m_propertiesText->setPlainText(QString(
+				"名称：%1\n"
+				"文件：%2\n"
+				"点数：%3\n"
+				"显示：%4\n"
+				"连线：%5\n"
+				"颜色：%6")
+				.arg(layer.name)
+				.arg(layer.path)
+				.arg(layer.points.size())
+				.arg(layer.visible ? "是" : "否")
+				.arg(layer.connectLines ? "是" : "否")
+				.arg(layer.rainbow ? "按顺序渐变" : "固定颜色"));
+		}
+
+		void AppendLog(const QString& text)
+		{
+			if (m_consoleText == nullptr)
+			{
+				return;
+			}
+			m_consoleText->appendPlainText(QString("[%1] %2")
+				.arg(QTime::currentTime().toString("HH:mm:ss"))
+				.arg(text));
+			m_consoleText->verticalScrollBar()->setValue(m_consoleText->verticalScrollBar()->maximum());
+		}
+
+		QString m_robotName;
+		QLineEdit* m_dirEdit = nullptr;
+		QTreeWidget* m_tree = nullptr;
+		QPlainTextEdit* m_propertiesText = nullptr;
+		QPlainTextEdit* m_consoleText = nullptr;
+		PointCloud3DView* m_view = nullptr;
+		QVector<PointCloud3DView::Layer> m_layers;
+		bool m_updatingTree = false;
+	};
+
+	class ConfigDatabaseViewerDialog final : public QDialog
+	{
+	public:
+		explicit ConfigDatabaseViewerDialog(QWidget* parent = nullptr)
+			: QDialog(parent)
+			, m_connectionName(QString("ConfigDatabaseViewer_%1").arg(reinterpret_cast<quintptr>(this)))
+		{
+			setWindowTitle("配置数据库查看");
+			ApplyUnifiedWindowChrome(this);
+			ResizeWindowForAvailableGeometry(this, QSize(1200, 760), 0.88, 0.82);
+			setStyleSheet(
+				"QDialog { background: #111820; color: #ECF3F4; }"
+				"QLabel { color: #C7DEE2; }"
+				"QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 8px 14px; }"
+				"QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
+				"QPushButton:pressed { background: #18303B; }"
+				"QLineEdit, QPlainTextEdit, QTableWidget { background: #081018; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 8px; padding: 6px 8px; }"
+				"QTableWidget::item:selected { background: #8BE8F2; color: #071018; }"
+				"QTableWidget::item:selected:!active { background: #6FCFDC; color: #071018; }"
+				"QComboBox { background: #000000; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 0px; padding: 6px 34px 6px 8px; }"
+				"QComboBox::drop-down { border-left: 1px solid #2C4653; border-radius: 0px; width: 28px; background: #000000; }"
+				"QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
+				"QComboBox QAbstractItemView { background: #000000; color: #ECF3F4; selection-background-color: #2D5465; border: 1px solid #2C4653; border-radius: 0px; outline: 0px; }"
+				"QHeaderView::section { background: #13202A; color: #BFE8EC; border: 0px; padding: 6px; }");
+
+			QVBoxLayout* rootLayout = new QVBoxLayout(this);
+			rootLayout->setContentsMargins(18, 16, 18, 18);
+			rootLayout->setSpacing(10);
+
+			QLabel* titleLabel = new QLabel("配置数据库查看", this);
+			titleLabel->setStyleSheet("font-size: 24px; font-weight: bold; color: #F7FCFC;");
+			rootLayout->addWidget(titleLabel);
+
+			QHBoxLayout* pathLayout = new QHBoxLayout();
+			QLabel* pathTitleLabel = new QLabel("数据库：", this);
+			m_pathLabel = new QLabel(QDir::toNativeSeparators(ConfigDatabase::DatabasePath()), this);
+			m_pathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+			m_pathLabel->setStyleSheet("QLabel { color: #9ED8DB; }");
+			pathLayout->addWidget(pathTitleLabel);
+			pathLayout->addWidget(m_pathLabel, 1);
+			rootLayout->addLayout(pathLayout);
+
+			QHBoxLayout* toolLayout = new QHBoxLayout();
+			m_viewCombo = new QComboBox(this);
+			m_viewCombo->addItem("配置键值", "ini");
+			m_viewCombo->addItem("文本文件", "text");
+			m_viewCombo->addItem("数据库信息", "meta");
+			m_viewCombo->setFixedWidth(170);
+			m_filterEdit = new QLineEdit(this);
+			m_filterEdit->setPlaceholderText("按类别、机器人、文件、名称、键名或内容过滤");
+			QPushButton* refreshBtn = new QPushButton("刷新", this);
+			QPushButton* copyBtn = new QPushButton("复制选中行", this);
+			QPushButton* closeBtn = new QPushButton("关闭", this);
+			refreshBtn->setFixedWidth(110);
+			copyBtn->setFixedWidth(140);
+			closeBtn->setFixedWidth(110);
+			toolLayout->addWidget(new QLabel("查看：", this));
+			toolLayout->addWidget(m_viewCombo);
+			toolLayout->addWidget(m_filterEdit, 1);
+			toolLayout->addWidget(refreshBtn);
+			toolLayout->addWidget(copyBtn);
+			toolLayout->addWidget(closeBtn);
+			rootLayout->addLayout(toolLayout);
+
+			QSplitter* splitter = new QSplitter(Qt::Vertical, this);
+			splitter->setChildrenCollapsible(false);
+			m_table = new QTableWidget(splitter);
+			m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+			m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+			m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+			m_table->setAlternatingRowColors(false);
+			m_table->verticalHeader()->setVisible(false);
+			m_table->horizontalHeader()->setStretchLastSection(true);
+			m_detailText = new QPlainTextEdit(splitter);
+			m_detailText->setReadOnly(true);
+			m_detailText->document()->setMaximumBlockCount(2000);
+			m_detailText->setPlaceholderText("选择一行后显示完整内容。");
+			splitter->addWidget(m_table);
+			splitter->addWidget(m_detailText);
+			splitter->setStretchFactor(0, 4);
+			splitter->setStretchFactor(1, 1);
+			rootLayout->addWidget(splitter, 1);
+
+			m_statusLabel = new QLabel(this);
+			m_statusLabel->setStyleSheet("QLabel { color: #9ED8DB; }");
+			rootLayout->addWidget(m_statusLabel);
+
+			connect(m_viewCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() { Reload(); });
+			connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { ApplyFilter(); });
+			connect(refreshBtn, &QPushButton::clicked, this, [this]() { Reload(); });
+			connect(copyBtn, &QPushButton::clicked, this, [this]() { CopySelectedRows(); });
+			connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
+			connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() { UpdateDetailText(); });
+
+			Reload();
+		}
+
+		~ConfigDatabaseViewerDialog() override
+		{
+			if (QSqlDatabase::contains(m_connectionName))
+			{
+				{
+					QSqlDatabase db = QSqlDatabase::database(m_connectionName, false);
+					if (db.isValid())
+					{
+						db.close();
+					}
+				}
+				QSqlDatabase::removeDatabase(m_connectionName);
+			}
+		}
+
+	private:
+		static std::string ToUtf8Std(const QString& text)
+		{
+			const QByteArray bytes = text.toUtf8();
+			return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+		}
+
+		static QString FromUtf8Std(const std::string& text)
+		{
+			return QString::fromUtf8(text.data(), static_cast<int>(text.size()));
+		}
+
+		static QString PreviewText(QString text, int maxChars = 500)
+		{
+			text.replace("\r\n", "\n");
+			text.replace('\r', '\n');
+			const bool truncated = text.size() > maxChars;
+			text = text.left(maxChars);
+			text.replace('\n', "  ");
+			if (truncated)
+			{
+				text += " ...";
+			}
+			return text;
+		}
+
+		struct DisplayPathParts
+		{
+			QString category;
+			QString robot;
+			QString file;
+		};
+
+		struct DisplayKeyParts
+		{
+			QString group;
+			QString name;
+			QString key;
+		};
+
+		static QString CleanDisplayToken(QString text)
+		{
+			text = text.trimmed();
+			text.replace('\\', '/');
+			text.replace('_', ' ');
+			text.replace(QRegularExpression("\\s+"), " ");
+			return text;
+		}
+
+		static QString DisplayCategory(QString rootName, bool hasRobot)
+		{
+			if (rootName.compare("Data", Qt::CaseInsensitive) == 0)
+			{
+				return hasRobot ? "机器人数据" : "全局数据";
+			}
+			if (rootName.compare("Result", Qt::CaseInsensitive) == 0)
+			{
+				return "结果数据";
+			}
+			return CleanDisplayToken(rootName);
+		}
+
+		static DisplayPathParts BuildDisplayPathParts(const QString& filePath)
+		{
+			QString normalized = filePath;
+			normalized.replace('\\', '/');
+			const QStringList parts = normalized.split('/', Qt::SkipEmptyParts);
+
+			DisplayPathParts display;
+			const auto robotIt = std::find_if(parts.cbegin(), parts.cend(), [](const QString& part)
+				{
+					return part.startsWith("Robot", Qt::CaseInsensitive);
+				});
+			const bool hasRobot = robotIt != parts.cend();
+			display.category = !parts.isEmpty() ? DisplayCategory(parts.first(), hasRobot) : "配置数据";
+			display.robot = hasRobot ? CleanDisplayToken(*robotIt) : "";
+
+			QFileInfo fileInfo(normalized);
+			display.file = CleanDisplayToken(fileInfo.completeBaseName());
+			if (display.file.isEmpty() && !parts.isEmpty())
+			{
+				display.file = CleanDisplayToken(parts.last());
+			}
+			return display;
+		}
+
+		static DisplayKeyParts BuildDisplayKeyParts(const QString& section, const QString& key)
+		{
+			QString normalizedSection = section;
+			normalizedSection.replace('\\', '/');
+			const QStringList sectionParts = normalizedSection.split('/', Qt::SkipEmptyParts);
+
+			DisplayKeyParts display;
+			display.group = !sectionParts.isEmpty() ? CleanDisplayToken(sectionParts.first()) : "默认";
+			if (sectionParts.size() > 1)
+			{
+				display.name = CleanDisplayToken(sectionParts.mid(1).join(" / "));
+			}
+
+			QString normalizedKey = key;
+			normalizedKey.replace('\\', '/');
+			const QStringList keyParts = normalizedKey.split('/', Qt::SkipEmptyParts);
+			if (keyParts.size() > 1)
+			{
+				if (display.name.isEmpty())
+				{
+					display.name = CleanDisplayToken(keyParts.mid(0, keyParts.size() - 1).join(" / "));
+				}
+				else
+				{
+					display.name += " / " + CleanDisplayToken(keyParts.mid(0, keyParts.size() - 1).join(" / "));
+				}
+				display.key = CleanDisplayToken(keyParts.last());
+			}
+			else
+			{
+				display.key = CleanDisplayToken(key);
+				const QRegularExpression numericSuffixPattern("^(.+)_([0-9]+)$");
+				const QRegularExpressionMatch match = numericSuffixPattern.match(key);
+				if (match.hasMatch())
+				{
+					if (display.name.isEmpty())
+					{
+						display.name = CleanDisplayToken(match.captured(1));
+					}
+					display.key = CleanDisplayToken(match.captured(2));
+				}
+			}
+
+			return display;
+		}
+
+		bool OpenDatabase(QString* error)
+		{
+			if (!QFileInfo::exists(ConfigDatabase::DatabasePath()))
+			{
+				if (error != nullptr)
+				{
+					*error = "数据库文件不存在：" + QDir::toNativeSeparators(ConfigDatabase::DatabasePath());
+				}
+				return false;
+			}
+
+			if (!ConfigDatabase::IsAvailable())
+			{
+				if (error != nullptr)
+				{
+					*error = "数据库结构无效，请先用迁移工具重新生成："
+						+ QDir::toNativeSeparators(ConfigDatabase::DatabasePath());
+				}
+				return false;
+			}
+
+			if (!QSqlDatabase::contains(m_connectionName))
+			{
+				QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", m_connectionName);
+				db.setDatabaseName(ConfigDatabase::DatabasePath());
+				db.setConnectOptions("QSQLITE_OPEN_READONLY");
+			}
+
+			QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+			if (!db.isOpen() && !db.open())
+			{
+				if (error != nullptr)
+				{
+					*error = "打开数据库失败：" + db.lastError().text();
+				}
+				return false;
+			}
+
+			QSqlQuery pragma(db);
+			pragma.exec("PRAGMA busy_timeout=2000");
+			return true;
+		}
+
+		void SetHeaders(const QStringList& headers)
+		{
+			m_table->clear();
+			m_table->setColumnCount(headers.size());
+			m_table->setHorizontalHeaderLabels(headers);
+			m_table->setRowCount(0);
+		}
+
+		void AddRow(const QStringList& cells, const QString& detail)
+		{
+			const int row = m_table->rowCount();
+			m_table->insertRow(row);
+			for (int column = 0; column < cells.size(); ++column)
+			{
+				QTableWidgetItem* item = new QTableWidgetItem(cells.at(column));
+				item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+				if (column == 0)
+				{
+					item->setData(Qt::UserRole, detail);
+				}
+				m_table->setItem(row, column, item);
+			}
+		}
+
+		void Reload()
+		{
+			QString error;
+			if (!OpenDatabase(&error))
+			{
+				SetHeaders({ "错误" });
+				AddRow({ error }, error);
+				m_statusLabel->setText(error);
+				return;
+			}
+
+			const QString mode = m_viewCombo != nullptr ? m_viewCombo->currentData().toString() : "ini";
+			if (mode == "text")
+			{
+				LoadTextFiles();
+			}
+			else if (mode == "meta")
+			{
+				LoadMeta();
+			}
+			else
+			{
+				LoadIniValues();
+			}
+			ApplyFilter();
+			UpdateDetailText();
+		}
+
+		void LoadIniValues()
+		{
+			SetHeaders({ "类别", "机器人", "文件", "分组", "名称", "键名", "值", "加密", "更新时间" });
+			QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+			QSqlQuery query(db);
+			query.prepare(
+				"SELECT category, robot_name, file_name, group_name, item_name, key_name, "
+				"source_path, source_section, source_key, encrypted, updated_at "
+				"FROM ini_values "
+				"ORDER BY category COLLATE NOCASE, robot_name COLLATE NOCASE, file_name COLLATE NOCASE, "
+				"group_name COLLATE NOCASE, item_name COLLATE NOCASE, key_name COLLATE NOCASE");
+			if (!query.exec())
+			{
+				const QString error = "读取配置键值失败：" + query.lastError().text();
+				AddRow({ error, "", "", "", "", "", "", "", "" }, error);
+				m_statusLabel->setText(error);
+				return;
+			}
+
+			int rowCount = 0;
+			while (query.next())
+			{
+				const QString category = query.value(0).toString();
+				const QString robotName = query.value(1).toString();
+				const QString fileName = query.value(2).toString();
+				const QString groupName = query.value(3).toString();
+				const QString itemName = query.value(4).toString();
+				const QString keyName = query.value(5).toString();
+				const QString sourcePath = query.value(6).toString();
+				const QString sourceSection = query.value(7).toString();
+				const QString sourceKey = query.value(8).toString();
+				const bool encrypted = query.value(9).toInt() != 0;
+				const QString updatedAt = query.value(10).toString();
+				std::string rawValue;
+				QString value = "<读取失败>";
+				if (ConfigDatabase::ReadIniValue(ToUtf8Std(sourcePath), ToUtf8Std(sourceSection), ToUtf8Std(sourceKey), &rawValue))
+				{
+					value = FromUtf8Std(rawValue);
+				}
+				const QString detail = QString(
+					"类别：%1\n机器人：%2\n文件：%3\n分组：%4\n名称：%5\n键名：%6\n加密：%7\n更新时间：%8\n\n值：\n%9")
+					.arg(category, robotName, fileName, groupName, itemName, keyName,
+						QString(encrypted ? "是" : "否"), updatedAt, value);
+				AddRow({ category, robotName, fileName, groupName, itemName, keyName,
+					PreviewText(value), encrypted ? "是" : "否", updatedAt }, detail);
+				++rowCount;
+			}
+			FinishTable(QString("配置键值：%1 条。").arg(rowCount));
+		}
+
+		void LoadTextFiles()
+		{
+			SetHeaders({ "类别", "机器人", "文件", "内容预览", "加密", "更新时间" });
+			QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+			QSqlQuery query(db);
+			query.prepare(
+				"SELECT category, robot_name, file_name, source_path, encrypted, updated_at "
+				"FROM text_files ORDER BY category COLLATE NOCASE, robot_name COLLATE NOCASE, file_name COLLATE NOCASE");
+			if (!query.exec())
+			{
+				const QString error = "读取文本文件失败：" + query.lastError().text();
+				AddRow({ error, "", "", "", "", "" }, error);
+				m_statusLabel->setText(error);
+				return;
+			}
+
+			int rowCount = 0;
+			while (query.next())
+			{
+				const QString category = query.value(0).toString();
+				const QString robotName = query.value(1).toString();
+				const QString fileName = query.value(2).toString();
+				const QString sourcePath = query.value(3).toString();
+				const bool encrypted = query.value(4).toInt() != 0;
+				const QString updatedAt = query.value(5).toString();
+				std::string rawContent;
+				QString content = "<读取失败>";
+				if (ConfigDatabase::ReadTextFile(ToUtf8Std(sourcePath), &rawContent))
+				{
+					content = FromUtf8Std(rawContent);
+				}
+				const QString detail = QString("类别：%1\n机器人：%2\n文件：%3\n加密：%4\n更新时间：%5\n\n内容：\n%6")
+					.arg(category, robotName, fileName, QString(encrypted ? "是" : "否"), updatedAt, content);
+				AddRow({ category, robotName, fileName, PreviewText(content), encrypted ? "是" : "否", updatedAt }, detail);
+				++rowCount;
+			}
+			FinishTable(QString("文本文件：%1 个。").arg(rowCount));
+		}
+
+		void LoadMeta()
+		{
+			SetHeaders({ "键", "值" });
+			QSqlDatabase db = QSqlDatabase::database(m_connectionName);
+			QSqlQuery query(db);
+			query.prepare("SELECT key, value FROM meta ORDER BY key COLLATE NOCASE");
+			if (!query.exec())
+			{
+				const QString error = "读取数据库信息失败：" + query.lastError().text();
+				AddRow({ error, "" }, error);
+				m_statusLabel->setText(error);
+				return;
+			}
+
+			int rowCount = 0;
+			while (query.next())
+			{
+				const QString key = query.value(0).toString();
+				const QString value = query.value(1).toString();
+				AddRow({ key, value }, QString("键：%1\n值：%2").arg(key, value));
+				++rowCount;
+			}
+			FinishTable(QString("数据库信息：%1 条。").arg(rowCount));
+		}
+
+		void FinishTable(const QString& status)
+		{
+			m_table->resizeColumnsToContents();
+			m_table->horizontalHeader()->setStretchLastSection(true);
+			if (m_table->rowCount() > 0)
+			{
+				m_table->selectRow(0);
+			}
+			m_statusLabel->setText(status);
+		}
+
+		void ApplyFilter()
+		{
+			if (m_table == nullptr || m_filterEdit == nullptr)
+			{
+				return;
+			}
+			const QString filter = m_filterEdit->text().trimmed();
+			int visibleCount = 0;
+			for (int row = 0; row < m_table->rowCount(); ++row)
+			{
+				bool match = filter.isEmpty();
+				for (int column = 0; !match && column < m_table->columnCount(); ++column)
+				{
+					QTableWidgetItem* item = m_table->item(row, column);
+					if (item == nullptr)
+					{
+						continue;
+					}
+					if (item->text().contains(filter, Qt::CaseInsensitive)
+						|| item->data(Qt::UserRole).toString().contains(filter, Qt::CaseInsensitive))
+					{
+						match = true;
+					}
+				}
+				m_table->setRowHidden(row, !match);
+				if (match)
+				{
+					++visibleCount;
+				}
+			}
+			if (!filter.isEmpty())
+			{
+				m_statusLabel->setText(QString("过滤后显示：%1 / %2。").arg(visibleCount).arg(m_table->rowCount()));
+			}
+		}
+
+		void UpdateDetailText()
+		{
+			if (m_table == nullptr || m_detailText == nullptr)
+			{
+				return;
+			}
+			const int row = m_table->currentRow();
+			if (row < 0)
+			{
+				m_detailText->clear();
+				return;
+			}
+			QTableWidgetItem* item = m_table->item(row, 0);
+			m_detailText->setPlainText(item != nullptr ? item->data(Qt::UserRole).toString() : QString());
+		}
+
+		void CopySelectedRows()
+		{
+			if (m_table == nullptr)
+			{
+				return;
+			}
+			QSet<int> selectedRows;
+			for (const QTableWidgetSelectionRange& range : m_table->selectedRanges())
+			{
+				for (int row = range.topRow(); row <= range.bottomRow(); ++row)
+				{
+					if (!m_table->isRowHidden(row))
+					{
+						selectedRows.insert(row);
+					}
+				}
+			}
+			if (selectedRows.isEmpty() && m_table->currentRow() >= 0)
+			{
+				selectedRows.insert(m_table->currentRow());
+			}
+
+			QList<int> rows = selectedRows.values();
+			std::sort(rows.begin(), rows.end());
+			QStringList lines;
+			QStringList headers;
+			for (int column = 0; column < m_table->columnCount(); ++column)
+			{
+				headers << m_table->horizontalHeaderItem(column)->text();
+			}
+			lines << headers.join('\t');
+			for (int row : rows)
+			{
+				QStringList cells;
+				for (int column = 0; column < m_table->columnCount(); ++column)
+				{
+					QTableWidgetItem* item = m_table->item(row, column);
+					cells << (item != nullptr ? item->text() : QString());
+				}
+				lines << cells.join('\t');
+			}
+			QApplication::clipboard()->setText(lines.join('\n'));
+			m_statusLabel->setText(QString("已复制 %1 行。").arg(rows.size()));
+		}
+
+		QString m_connectionName;
+		QComboBox* m_viewCombo = nullptr;
+		QLineEdit* m_filterEdit = nullptr;
+		QTableWidget* m_table = nullptr;
+		QPlainTextEdit* m_detailText = nullptr;
+		QLabel* m_statusLabel = nullptr;
+		QLabel* m_pathLabel = nullptr;
+	};
 }
 
 struct QtWidgetsApplication4::CameraRuntime
@@ -3842,6 +6494,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pManagementHomePage(nullptr)
 	, m_pAccountManagementPage(nullptr)
 	, m_pControlUnitManagementPage(nullptr)
+	, m_pFtpJobManagementPage(nullptr)
+	, m_pConfigDatabaseViewerPage(nullptr)
 	, m_pRobotSelectorCombo(nullptr)
 	, m_pRobotSelectorLabel(nullptr)
 	, m_nCurrentRobotUnitIndex(-1)
@@ -3851,6 +6505,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_nRobotJogPageUnitIndex(-1)
 	, m_pRobotLogText(nullptr)
 	, m_pGroovePointCloudDialog(nullptr)
+	, m_pPointCloudViewerDialog(nullptr)
 	, m_pCurrentUserButton(nullptr)
 	, m_pManagementUserLabel(nullptr)
 	, m_pPermissionHintLabel(nullptr)
@@ -4329,6 +6984,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pDashboardClearAlarmBtn = makeToolButton("清除报警", toolGroup);
 	m_pDashboardModeBtn = makeToolButton("STEP 模式", toolGroup);
 	QPushButton* quickReadTool1Btn = makeToolButton("读取Tool1", toolGroup);
+	QPushButton* quickPointCloudBtn = makeToolButton("点云查看", toolGroup);
 	m_pDashboardDebugLogBtn = makeToolButton("显示调试日志", toolGroup);
 	quickPreviewBtn->setCheckable(true);
 	m_pDashboardDebugLogBtn->setCheckable(true);
@@ -4339,10 +6995,11 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	toolLayout->addWidget(m_pDashboardClearAlarmBtn, 1, 1);
 	toolLayout->addWidget(m_pDashboardModeBtn, 2, 0);
 	toolLayout->addWidget(quickReadTool1Btn, 2, 1);
-	toolLayout->addWidget(m_pDashboardDebugLogBtn, 3, 0, 1, 2);
+	toolLayout->addWidget(quickPointCloudBtn, 3, 0, 1, 2);
+	toolLayout->addWidget(m_pDashboardDebugLogBtn, 4, 0, 1, 2);
 	toolLayout->setColumnStretch(0, 1);
 	toolLayout->setColumnStretch(1, 1);
-	toolLayout->setRowStretch(4, 1);
+	toolLayout->setRowStretch(5, 1);
 	dashboardActionLayout->addWidget(toolGroup, 0);
 	dashboardLayout->addLayout(dashboardActionLayout, 0);
 
@@ -4410,14 +7067,16 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addManagementAction(managementHomeMenu, "返回主页", [this]() { ShowDashboardPage(); });
 	addManagementAction(managementHomeMenu, "关闭管理界面", [this]() { if (m_pManagementPage != nullptr) { m_pManagementPage->hide(); } });
 	addManagementAction(managementRobotMenu, "控制单元管理", [this]() { OpenControlUnitManagementDialog(); });
+	addManagementAction(managementRobotMenu, "FTP Job 文件", [this]() { OpenFtpJobManagementDialog(); });
 	m_pAccountManagementAction = addManagementAction(managementAccountMenu, "账号管理", [this]() { OpenAccountManagementDialog(); });
 	m_pAccountManagementAction->setEnabled(false);
 	addManagementAction(managementProcessMenu, "工艺参数", [this, openInManagement]() { openInManagement([this]() { OpenWeldProcessDialog(); }); });
+	addManagementAction(managementProcessMenu, "焊道补偿", [this, openInManagement]() { openInManagement([this]() { OpenWeldSeamCompDialog(); }); });
 	addManagementAction(managementProcessMenu, "测量焊接参数", [this, openInManagement]() { openInManagement([this]() { OpenPreciseMeasureEditDialog(); }); });
 	addManagementAction(managementCameraMenu, "相机参数", [this, openInManagement]() { openInManagement([this]() { OpenCameraParamDialog(); }); });
-	addManagementAction(managementCameraMenu, "焊道补偿", [this, openInManagement]() { openInManagement([this]() { OpenWeldSeamCompDialog(); }); });
 	addManagementAction(managementDebugMenu, "点动控制", [this, openInManagement]() { openInManagement([this]() { OpenRobotJogDialog(); }); });
 	addManagementAction(managementDebugMenu, "功能测试", [this, openInManagement]() { openInManagement([this]() { OpenFunctionTestDialog(); }); });
+	addManagementAction(managementDebugMenu, "配置数据库查看", [this]() { OpenConfigDatabaseViewerDialog(); });
 
 	m_pManagementStack = new QStackedWidget(m_pManagementPage);
 	m_pManagementStack->setContentsMargins(0, 0, 0, 0);
@@ -4606,6 +7265,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	}
 	connect(cameraPreviewAction, &QAction::toggled, ui.GrooveCameraTestBtn, &QPushButton::setChecked);
 	connect(ui.GrooveCameraTestBtn, &QPushButton::toggled, cameraPreviewAction, &QAction::setChecked);
+	addCommandAction(cameraMenu, "点云查看", [this]() { OpenPointCloudViewerDialog(); });
 	addToolbarSeparator();
 	addCommandAction(weldMenu, "工艺参数", [this]() { OpenWeldProcessDialog(); });
 	addCommandAction(weldMenu, "焊道补偿", [this]() { OpenWeldSeamCompDialog(); });
@@ -4715,6 +7375,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pDashboardModeBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotSwitchStepMode);
 	connect(quickReadTool1Btn, &QPushButton::clicked, this, &QtWidgetsApplication4::ReadTool1ToGunTool);
 	connect(quickMeasureBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenMeasureThenWeldDialog);
+	connect(quickPointCloudBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenPointCloudViewerDialog);
 	connect(quickTeachPositionBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenPositionTeachDialog);
 	connect(quickPositionBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::FanucGetCurrentPosTest);
 	connect(quickJogBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenRobotJogDialog);
@@ -4947,7 +7608,9 @@ bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 			|| watched == m_pCameraParamPage
 			|| watched == m_pRobotJogPage
 			|| watched == m_pAccountManagementPage
-			|| watched == m_pControlUnitManagementPage)
+			|| watched == m_pControlUnitManagementPage
+			|| watched == m_pFtpJobManagementPage
+			|| watched == m_pConfigDatabaseViewerPage)
 		{
 			QWidget* page = qobject_cast<QWidget*>(watched);
 			const bool inManagementStack = page != nullptr
@@ -5599,11 +8262,7 @@ QString QtWidgetsApplication4::LoginStateConfigPath() const
 void QtWidgetsApplication4::EnsureDefaultAdminAccount()
 {
 	const QString accountPath = AccountConfigPath();
-	QSettings settings(accountPath, QSettings::IniFormat);
-	settings.beginGroup("Users");
-	const bool hasAccount = !settings.childGroups().isEmpty();
-	settings.endGroup();
-	if (hasAccount)
+	if (!ConfigDatabase::ListIniGroups(accountPath, "Users").isEmpty())
 	{
 		return;
 	}
@@ -5714,16 +8373,13 @@ QString QtWidgetsApplication4::CameraReceiveModeConfigPath() const
 
 void QtWidgetsApplication4::LoadCameraReceiveMode()
 {
-	QSettings settings(CameraReceiveModeConfigPath(), QSettings::IniFormat);
-	m_bUseSharedScanCameraReceiver = settings.value("Camera/UseSharedReceiver", false).toBool();
+	m_bUseSharedScanCameraReceiver = ConfigBoolValue(CameraReceiveModeConfigPath(), "Camera/UseSharedReceiver", false);
 	RefreshCameraReceiveModeButtonUi();
 }
 
 void QtWidgetsApplication4::SaveCameraReceiveMode() const
 {
-	QSettings settings(CameraReceiveModeConfigPath(), QSettings::IniFormat);
-	settings.setValue("Camera/UseSharedReceiver", m_bUseSharedScanCameraReceiver);
-	settings.sync();
+	WriteConfigValue(CameraReceiveModeConfigPath(), "Camera/UseSharedReceiver", m_bUseSharedScanCameraReceiver);
 }
 
 void QtWidgetsApplication4::RefreshCameraReceiveModeButtonUi()
@@ -5852,11 +8508,11 @@ void QtWidgetsApplication4::LoadLoginState()
 		return;
 	}
 
-	QSettings settings(LoginStateConfigPath(), QSettings::IniFormat);
-	const QString userName = settings.value("UserName").toString();
-	const bool rememberPassword = settings.value("RememberPassword", false).toBool();
-	const bool autoLogin = settings.value("AutoLogin", false).toBool();
-	const QByteArray passwordBytes = QByteArray::fromBase64(settings.value("PasswordBase64").toByteArray());
+	const QString loginPath = LoginStateConfigPath();
+	const QString userName = ConfigValue(loginPath, "UserName");
+	const bool rememberPassword = ConfigBoolValue(loginPath, "RememberPassword", false);
+	const bool autoLogin = ConfigBoolValue(loginPath, "AutoLogin", false);
+	const QByteArray passwordBytes = QByteArray::fromBase64(ConfigValue(loginPath, "PasswordBase64").toUtf8());
 	const QString password = QString::fromUtf8(passwordBytes);
 
 	RefreshLoginNameHistory();
@@ -5873,9 +8529,10 @@ void QtWidgetsApplication4::LoadLoginState()
 	}
 	if (rememberPassword)
 	{
-		const QString savedPassword = settings.value(QString("SavedPasswords/%1").arg(userName)).toByteArray().isEmpty()
+		const QString savedPasswordBase64 = ConfigValue(loginPath, QString("SavedPasswords/%1").arg(userName));
+		const QString savedPassword = savedPasswordBase64.isEmpty()
 			? password
-			: QString::fromUtf8(QByteArray::fromBase64(settings.value(QString("SavedPasswords/%1").arg(userName)).toByteArray()));
+			: QString::fromUtf8(QByteArray::fromBase64(savedPasswordBase64.toUtf8()));
 		m_pLoginPasswordEdit->setText(savedPassword);
 	}
 	m_pRememberPasswordCheck->setChecked(rememberPassword);
@@ -5890,9 +8547,9 @@ void QtWidgetsApplication4::SaveLoginState() const
 		return;
 	}
 
-	QSettings settings(LoginStateConfigPath(), QSettings::IniFormat);
+	const QString loginPath = LoginStateConfigPath();
 	const QString userName = m_pLoginNameEdit->text().trimmed();
-	QStringList history = settings.value("AccountHistory").toStringList();
+	QStringList history = ConfigListValue(loginPath, "AccountHistory");
 	history.removeAll(userName);
 	if (!userName.isEmpty())
 	{
@@ -5902,22 +8559,22 @@ void QtWidgetsApplication4::SaveLoginState() const
 	{
 		history.removeLast();
 	}
-	settings.setValue("AccountHistory", history);
-	settings.setValue("UserName", userName);
-	settings.setValue("RememberPassword", m_pRememberPasswordCheck->isChecked());
-	settings.setValue("AutoLogin", m_pRememberPasswordCheck->isChecked() && m_pAutoLoginCheck->isChecked());
+	WriteConfigListValue(loginPath, "AccountHistory", history);
+	WriteConfigValue(loginPath, "UserName", userName);
+	WriteConfigValue(loginPath, "RememberPassword", m_pRememberPasswordCheck->isChecked());
+	WriteConfigValue(loginPath, "AutoLogin", m_pRememberPasswordCheck->isChecked() && m_pAutoLoginCheck->isChecked());
 	if (m_pRememberPasswordCheck->isChecked())
 	{
-		settings.setValue("PasswordBase64", m_pLoginPasswordEdit->text().toUtf8().toBase64());
-		settings.setValue(QString("SavedPasswords/%1").arg(userName), m_pLoginPasswordEdit->text().toUtf8().toBase64());
+		const QString passwordBase64 = QString::fromLatin1(m_pLoginPasswordEdit->text().toUtf8().toBase64());
+		WriteConfigValue(loginPath, "PasswordBase64", passwordBase64);
+		WriteConfigValue(loginPath, QString("SavedPasswords/%1").arg(userName), passwordBase64);
 	}
 	else
 	{
-		settings.remove("PasswordBase64");
-		settings.remove("AutoLogin");
-		settings.remove(QString("SavedPasswords/%1").arg(userName));
+		ConfigDatabase::RemoveSetting(loginPath, "PasswordBase64");
+		ConfigDatabase::RemoveSetting(loginPath, "AutoLogin");
+		ConfigDatabase::RemoveSetting(loginPath, QString("SavedPasswords/%1").arg(userName));
 	}
-	settings.sync();
 }
 
 void QtWidgetsApplication4::RefreshLoginNameHistory()
@@ -5928,9 +8585,9 @@ void QtWidgetsApplication4::RefreshLoginNameHistory()
 	}
 
 	const QString currentName = m_pLoginNameCombo->currentText();
-	QSettings settings(LoginStateConfigPath(), QSettings::IniFormat);
-	QStringList history = settings.value("AccountHistory").toStringList();
-	const QString lastUser = settings.value("UserName").toString().trimmed();
+	const QString loginPath = LoginStateConfigPath();
+	QStringList history = ConfigListValue(loginPath, "AccountHistory");
+	const QString lastUser = ConfigValue(loginPath, "UserName").trimmed();
 	if (!lastUser.isEmpty() && !history.contains(lastUser))
 	{
 		history.prepend(lastUser);
@@ -5956,23 +8613,23 @@ void QtWidgetsApplication4::FillSavedPasswordForUser(const QString& userName)
 		return;
 	}
 
-	QSettings settings(LoginStateConfigPath(), QSettings::IniFormat);
-	const QByteArray savedBytes = settings.value(QString("SavedPasswords/%1").arg(normalizedUser)).toByteArray();
-	if (!savedBytes.isEmpty())
+	const QString loginPath = LoginStateConfigPath();
+	const QString savedBase64 = ConfigValue(loginPath, QString("SavedPasswords/%1").arg(normalizedUser));
+	if (!savedBase64.isEmpty())
 	{
-		m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(savedBytes)));
+		m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(savedBase64.toUtf8())));
 		m_pRememberPasswordCheck->setChecked(true);
 		m_pAutoLoginCheck->setEnabled(true);
 		return;
 	}
 
-	if (settings.value("UserName").toString().trimmed() == normalizedUser
-		&& settings.value("RememberPassword", false).toBool())
+	if (ConfigValue(loginPath, "UserName").trimmed() == normalizedUser
+		&& ConfigBoolValue(loginPath, "RememberPassword", false))
 	{
-		const QByteArray legacyBytes = settings.value("PasswordBase64").toByteArray();
-		if (!legacyBytes.isEmpty())
+		const QString legacyBase64 = ConfigValue(loginPath, "PasswordBase64");
+		if (!legacyBase64.isEmpty())
 		{
-			m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(legacyBytes)));
+			m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(legacyBase64.toUtf8())));
 			m_pRememberPasswordCheck->setChecked(true);
 			m_pAutoLoginCheck->setEnabled(true);
 			return;
@@ -6038,20 +8695,15 @@ bool QtWidgetsApplication4::VerifyAccount(const QString& userName, const QString
 		return false;
 	}
 
-	QSettings settings(AccountConfigPath(), QSettings::IniFormat);
-	settings.beginGroup("Users");
-	if (!settings.childGroups().contains(normalizedUser))
+	const QString accountPath = AccountConfigPath();
+	if (!ConfigDatabase::ListIniGroups(accountPath, "Users").contains(normalizedUser))
 	{
-		settings.endGroup();
 		error = "账号不存在。";
 		return false;
 	}
 
-	settings.beginGroup(normalizedUser);
-	const QString expectedHash = settings.value("PasswordHash").toString();
-	role = settings.value("Role", kRoleOperator).toString();
-	settings.endGroup();
-	settings.endGroup();
+	const QString expectedHash = ConfigValue(accountPath, AccountUserKey(normalizedUser, "PasswordHash"));
+	role = ConfigValue(accountPath, AccountUserKey(normalizedUser, "Role"), kRoleOperator);
 
 	const QString actualHash = QString::fromLatin1(
 		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
@@ -6091,36 +8743,21 @@ bool QtWidgetsApplication4::SaveAccount(const QString& userName, const QString& 
 	}
 
 	const QString accountPath = AccountConfigPath();
-	const QFileInfo accountInfo(accountPath);
-	QDir dir;
-	if (!dir.mkpath(accountInfo.absolutePath()))
+	if (ConfigDatabase::ListIniGroups(accountPath, "Users").contains(normalizedUser))
 	{
-		error = "创建账号目录失败：" + QDir::toNativeSeparators(accountInfo.absolutePath());
-		return false;
-	}
-
-	QSettings settings(accountPath, QSettings::IniFormat);
-	settings.beginGroup("Users");
-	if (settings.childGroups().contains(normalizedUser))
-	{
-		settings.endGroup();
 		error = "账号已存在。";
 		return false;
 	}
 
-	settings.beginGroup(normalizedUser);
 	const QString hash = QString::fromLatin1(
 		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
-	settings.setValue("PasswordHash", hash);
-	settings.setValue("Role", role);
-	settings.setValue("CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate));
-	settings.endGroup();
-	settings.endGroup();
-	settings.sync();
-
-	if (settings.status() != QSettings::NoError)
+	const bool writeOk =
+		ConfigDatabase::WriteSetting(accountPath, AccountUserKey(normalizedUser, "PasswordHash"), hash) &&
+		ConfigDatabase::WriteSetting(accountPath, AccountUserKey(normalizedUser, "Role"), role) &&
+		ConfigDatabase::WriteSetting(accountPath, AccountUserKey(normalizedUser, "CreatedAt"), QDateTime::currentDateTime().toString(Qt::ISODate));
+	if (!writeOk)
 	{
-		error = "写入账号文件失败：" + accountPath;
+		error = "写入账号配置库失败：" + accountPath;
 		return false;
 	}
 	return true;
@@ -6266,7 +8903,10 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 
 	if (m_pManagementStack == nullptr)
 	{
+		DelayedLoadingGuard loading(this, "正在打开账号管理", 1000);
 		AccountManagementDialog dialog(this);
+		loading.Pulse();
+		loading.Finish();
 		dialog.exec();
 		return;
 	}
@@ -6278,9 +8918,13 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 		m_pAccountManagementPage = nullptr;
 	}
 
+	DelayedLoadingGuard loading(this, "正在打开账号管理", 1000);
 	m_pAccountManagementPage = new AccountManagementDialog(m_pManagementStack);
+	loading.Pulse();
 	PrepareEmbeddedPage(m_pAccountManagementPage, m_pManagementStack);
+	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pAccountManagementPage);
+	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenControlUnitManagementDialog()
@@ -6323,11 +8967,14 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 
 	auto openCameraBasicParam = [this](const QString& robotName, const QString& cameraSection) -> bool
 		{
+			DelayedLoadingGuard loading(this, "正在打开相机基础参数", 1000);
 			CameraBasicParamDialog dialog(
 				robotName,
 				cameraSection,
 				[this]() { RefreshRobotOperationAvailability(); },
 				this);
+			loading.Pulse();
+			loading.Finish();
 			dialog.exec();
 			return dialog.SavedThisSession();
 		};
@@ -6347,6 +8994,7 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 				{
 				};
 
+			DelayedLoadingGuard loading(this, "正在打开手眼标定", 1000);
 			HandEyeCalibrationDialog dialog(
 				m_pContralUnit,
 				robotName,
@@ -6355,6 +9003,8 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 				stopCamera,
 				unitIndex >= 0 ? ScanCameraCacheForUnit(unitIndex) : nullptr,
 				this);
+			loading.Pulse();
+			loading.Finish();
 			dialog.exec();
 			if (!dialog.MatrixComputedThisSession())
 			{
@@ -6373,7 +9023,10 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 
 	if (m_pManagementStack == nullptr)
 	{
+		DelayedLoadingGuard loading(this, "正在打开控制单元管理", 1000);
 		ControlUnitManagementDialog dialog(reloadControlUnits, openCameraBasicParam, openHandEyeCalibration, this);
+		loading.Pulse();
+		loading.Finish();
 		dialog.exec();
 		return;
 	}
@@ -6385,9 +9038,82 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 		m_pControlUnitManagementPage = nullptr;
 	}
 
+	DelayedLoadingGuard loading(this, "正在打开控制单元管理", 1000);
 	m_pControlUnitManagementPage = new ControlUnitManagementDialog(reloadControlUnits, openCameraBasicParam, openHandEyeCalibration, m_pManagementStack);
+	loading.Pulse();
 	PrepareEmbeddedPage(m_pControlUnitManagementPage, m_pManagementStack);
+	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pControlUnitManagementPage);
+	loading.Finish();
+}
+
+void QtWidgetsApplication4::OpenFtpJobManagementDialog()
+{
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		QMessageBox::information(this, "FTP Job 文件", "FTP Job 文件管理需要工程师或管理员权限。");
+		return;
+	}
+
+	const int currentUnitIndex = CurrentRobotUnitIndex();
+	if (m_pManagementStack == nullptr)
+	{
+		DelayedLoadingGuard loading(this, "正在打开 FTP Job 文件管理", 1000);
+		FtpJobManagementDialog dialog(m_pContralUnit, currentUnitIndex, this);
+		loading.Pulse();
+		loading.Finish();
+		dialog.exec();
+		return;
+	}
+
+	if (m_pFtpJobManagementPage != nullptr)
+	{
+		m_pManagementStack->removeWidget(m_pFtpJobManagementPage);
+		m_pFtpJobManagementPage->deleteLater();
+		m_pFtpJobManagementPage = nullptr;
+	}
+
+	DelayedLoadingGuard loading(this, "正在打开 FTP Job 文件管理", 1000);
+	m_pFtpJobManagementPage = new FtpJobManagementDialog(m_pContralUnit, currentUnitIndex, m_pManagementStack);
+	loading.Pulse();
+	PrepareEmbeddedPage(m_pFtpJobManagementPage, m_pManagementStack);
+	loading.Pulse();
+	ShowManagementEmbeddedPage(m_pFtpJobManagementPage);
+	loading.Finish();
+}
+
+void QtWidgetsApplication4::OpenConfigDatabaseViewerDialog()
+{
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
+	{
+		QMessageBox::information(this, "配置数据库查看", "配置数据库查看仅管理员可用。");
+		return;
+	}
+
+	if (m_pManagementStack == nullptr)
+	{
+		DelayedLoadingGuard loading(this, "正在打开配置数据库查看", 1000);
+		ConfigDatabaseViewerDialog dialog(this);
+		loading.Pulse();
+		loading.Finish();
+		dialog.exec();
+		return;
+	}
+
+	if (m_pConfigDatabaseViewerPage != nullptr)
+	{
+		m_pManagementStack->removeWidget(m_pConfigDatabaseViewerPage);
+		m_pConfigDatabaseViewerPage->deleteLater();
+		m_pConfigDatabaseViewerPage = nullptr;
+	}
+
+	DelayedLoadingGuard loading(this, "正在打开配置数据库查看", 1000);
+	m_pConfigDatabaseViewerPage = new ConfigDatabaseViewerDialog(m_pManagementStack);
+	loading.Pulse();
+	PrepareEmbeddedPage(m_pConfigDatabaseViewerPage, m_pManagementStack);
+	loading.Pulse();
+	ShowManagementEmbeddedPage(m_pConfigDatabaseViewerPage);
+	loading.Finish();
 }
 
 void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page)
@@ -6664,6 +9390,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		"--measure-then-weld-scan-only-repeat",
 		"--laser-classify",
 		"--laser-classify-dir",
+		"--rebuild-measure-weld-files",
 		"--apply-weld-seam-comp",
 		"--generate-step-weld-program",
 		"--update-weld-pose-average"
@@ -6700,11 +9427,12 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --laser-classify <FILE>           对激光点云做去噪/拟合/起终点拐点分类\n";
 		out << "  --laser-classify-dir <DIR>        批量处理目录下所有 PreciseLaserPoint.txt\n";
 		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
+		out << "  --rebuild-measure-weld-files <DIR> 从 LaserPoint 目录重建 PreservePath、焊接姿态和补偿文件，参数机器人同--robot\n";
 		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用 WeldSeamCompParam.ini 补偿\n";
 		out << "  --apply-weld-seam-comp-output <FILE> 指定补偿结果输出文件，默认另存 _SeamComp\n";
 		out << "  --generate-step-weld-program <FILE> 根据焊接姿态文件生成 STEP Weld_时间.srp/.srd，默认按实际焊接生成ARCON/ARCOFF\n";
 		out << "  --generate-step-weld-program-output-dir <DIR> 指定 STEP 焊接程序输出目录，默认 Job\\STEP\n";
-		out << "  --generate-step-weld-program-dry-run 按空跑轨迹生成 STEP 文件，实际焊接变量置0并跳过焊接指令\n";
+		out << "  --generate-step-weld-program-dry-run 按空跑轨迹生成 STEP 文件，不生成ARCON/ARCSET/ARCOFF焊接指令\n";
 		out << "  --generate-step-weld-speed <mm/min> 覆盖本次 STEP 文件轨迹速度，不修改ini\n";
 		out << "  --update-weld-pose-average <FILE_OR_DIR> 离线统计四类焊道平均姿态并更新补偿姿态库\n";
 		out << "  --quit-after <ms>                 指定毫秒后退出程序\n";
@@ -6788,6 +9516,12 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	if (laserClassifyDirIndex >= 0 && laserClassifyDirIndex + 1 < arguments.size())
 	{
 		RunLaserClassifyDirForCli(arguments[laserClassifyDirIndex + 1]);
+	}
+
+	const int rebuildMeasureWeldIndex = arguments.indexOf("--rebuild-measure-weld-files");
+	if (rebuildMeasureWeldIndex >= 0 && rebuildMeasureWeldIndex + 1 < arguments.size())
+	{
+		RunRebuildMeasureWeldFilesForCli(arguments, arguments[rebuildMeasureWeldIndex + 1]);
 	}
 
 	const int weldSeamCompIndex = arguments.indexOf("--apply-weld-seam-comp");
@@ -7699,6 +10433,80 @@ void QtWidgetsApplication4::RunLaserClassifyDirForCli(const QString& dirPath) co
 	}
 }
 
+void QtWidgetsApplication4::RunRebuildMeasureWeldFilesForCli(
+	const QStringList& arguments,
+	const QString& laserDirPath) const
+{
+	QString normalizedDirPath = QDir::fromNativeSeparators(laserDirPath.trimmed());
+	if (normalizedDirPath.isEmpty())
+	{
+		LogCommandLineMessage("CLI 先测后焊重建失败：LaserPoint目录为空。");
+		return;
+	}
+
+	QDir laserDir(normalizedDirPath);
+	if (!laserDir.isAbsolute())
+	{
+		laserDir = QDir(QDir::current().filePath(normalizedDirPath));
+	}
+	if (!laserDir.exists())
+	{
+		LogCommandLineMessage(QString("CLI 先测后焊重建失败：未找到目录 %1")
+			.arg(QDir::toNativeSeparators(laserDir.absolutePath())));
+		return;
+	}
+
+	QString robotLabel;
+	RobotDriverAdaptor* pRobotDriver = GetRobotDriverForCli(arguments, &robotLabel, nullptr);
+	if (pRobotDriver == nullptr)
+	{
+		LogCommandLineMessage("CLI 先测后焊重建失败：未找到可用机器人，请通过 --robot 指定。");
+		return;
+	}
+
+	MeasureThenWeldService service;
+	T_PRECISE_MEASURE_PARAM param;
+	QString error;
+	if (!service.LoadPresetParam(pRobotDriver, param, error))
+	{
+		LogCommandLineMessage("CLI 先测后焊重建失败：读取预设参数失败：" + error);
+		return;
+	}
+
+	auto appendLog = [this](const QString& text)
+		{
+			LogCommandLineMessage("CLI 先测后焊重建：" + text);
+		};
+	auto setFlowStep = [this](const QString& text)
+		{
+			LogCommandLineMessage("CLI 流程节点：" + text);
+		};
+
+	QString preservePath;
+	QString weldPosePath;
+	QString seamCompPath;
+	QString summary;
+	if (!service.RebuildWeldFilesFromLaserDir(
+		param,
+		laserDir.absolutePath(),
+		preservePath,
+		weldPosePath,
+		seamCompPath,
+		summary,
+		error,
+		appendLog,
+		setFlowStep))
+	{
+		LogCommandLineMessage("CLI 先测后焊重建失败：" + error);
+		return;
+	}
+
+	LogCommandLineMessage(QString("CLI 先测后焊重建完成：机器人=%1，目录=%2")
+		.arg(robotLabel)
+		.arg(QDir::toNativeSeparators(laserDir.absolutePath())));
+	LogCommandLineMessage("CLI 先测后焊重建摘要：" + summary);
+}
+
 void QtWidgetsApplication4::RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const
 {
 	QString normalizedInputPath = QDir::fromNativeSeparators(inputPath.trimmed());
@@ -8456,6 +11264,23 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 	m_pGroovePointCloudDialog->activateWindow();
 }
 
+void QtWidgetsApplication4::OpenPointCloudViewerDialog()
+{
+	if (m_pPointCloudViewerDialog == nullptr)
+	{
+		PointCloudViewerDialog* dialog = new PointCloudViewerDialog(CurrentRobotName(), this);
+		m_pPointCloudViewerDialog = dialog;
+		connect(dialog, &QObject::destroyed, this, [this]()
+			{
+				m_pPointCloudViewerDialog = nullptr;
+			});
+	}
+
+	m_pPointCloudViewerDialog->show();
+	m_pPointCloudViewerDialog->raise();
+	m_pPointCloudViewerDialog->activateWindow();
+}
+
 void QtWidgetsApplication4::StartGrooveCameraPreview()
 {
 	if (ui.GrooveCameraTestBtn != nullptr)
@@ -8829,9 +11654,12 @@ void QtWidgetsApplication4::OpenWeldProcessDialog()
 	}
 	if (m_pWeldProcessPage == nullptr)
 	{
+		DelayedLoadingGuard loading(this, "正在打开工艺参数", 1000);
 		m_pWeldProcessPage = new WeldProcessDialog(*currentUnit, targetStack);
+		loading.Pulse();
 		m_nWeldProcessPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pWeldProcessPage, targetStack);
+		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pWeldProcessPage);
 }
@@ -8851,9 +11679,12 @@ void QtWidgetsApplication4::OpenFunctionTestDialog()
 	}
 	if (m_pFunctionTestPage == nullptr)
 	{
+		DelayedLoadingGuard loading(this, "正在打开功能测试", 1000);
 		m_pFunctionTestPage = new FunctionTestDialog(m_pContralUnit, currentUnitIndex, ScanCameraCacheForUnit(currentUnitIndex), targetStack);
+		loading.Pulse();
 		m_nFunctionTestPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pFunctionTestPage, targetStack);
+		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pFunctionTestPage);
 }
@@ -8920,6 +11751,7 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		return;
 	}
 
+	DelayedLoadingGuard loading(this, "正在打开先测后焊", 1000);
 	MeasureThenWeldDialog* page = new MeasureThenWeldDialog(
 		m_pContralUnit,
 		currentUnitIndex,
@@ -8927,6 +11759,7 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		stopCamera,
 		cameraCacheForUnit,
 		this);
+	loading.Pulse();
 	page->setWindowModality(Qt::NonModal);
 	m_measureThenWeldPages.insert(currentUnitIndex, page);
 	m_pMeasureThenWeldPage = page;
@@ -8951,11 +11784,13 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 			{
 				ui.FanucMonitorText->setPlainText(m_sMeasureThenWeldStatus);
 			}
-		});
+	});
 	ApplyDebugLogVisibility(page);
+	loading.Pulse();
 	page->show();
 	page->raise();
 	page->activateWindow();
+	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
@@ -8967,28 +11802,34 @@ void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
 	if (m_pPreciseMeasureEditPage == nullptr)
 	{
+		DelayedLoadingGuard loading(this, "正在打开测量焊接参数", 1000);
 		m_pPreciseMeasureEditPage = new PreciseMeasureEditDialog(
 			m_pContralUnit,
 			targetStack,
 			false,
 			[this]() { StartGrooveCameraPreview(); });
+		loading.Pulse();
 		PrepareEmbeddedPage(m_pPreciseMeasureEditPage, targetStack);
+		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pPreciseMeasureEditPage);
 }
 
 void QtWidgetsApplication4::OpenPositionTeachDialog()
 {
+	DelayedLoadingGuard loading(this, "正在打开扫描位置示教", 1000);
 	PreciseMeasureEditDialog* dialog = new PreciseMeasureEditDialog(
 		m_pContralUnit,
 		this,
 		true,
 		[this]() { StartGrooveCameraPreview(); });
+	loading.Pulse();
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
 	ApplyDebugLogVisibility(dialog);
 	dialog->show();
 	dialog->raise();
 	dialog->activateWindow();
+	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenWeldSeamCompDialog()
@@ -9000,8 +11841,11 @@ void QtWidgetsApplication4::OpenWeldSeamCompDialog()
 	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
 	if (m_pWeldSeamCompPage == nullptr)
 	{
+		DelayedLoadingGuard loading(this, "正在打开焊道补偿", 1000);
 		m_pWeldSeamCompPage = new WeldSeamCompDialog(m_pContralUnit, targetStack);
+		loading.Pulse();
 		PrepareEmbeddedPage(m_pWeldSeamCompPage, targetStack);
+		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pWeldSeamCompPage);
 }
@@ -9051,6 +11895,7 @@ void QtWidgetsApplication4::OpenCameraParamDialog()
 	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
 	if (m_pCameraParamPage == nullptr)
 	{
+		DelayedLoadingGuard loading(this, "正在打开相机参数", 1000);
 		m_pCameraParamPage = new CameraParamDialog(
 			m_pContralUnit,
 			robotName,
@@ -9059,8 +11904,10 @@ void QtWidgetsApplication4::OpenCameraParamDialog()
 			ScanCameraCacheForUnit(currentUnitIndex),
 			[this]() { RefreshRobotOperationAvailability(); },
 			targetStack);
+		loading.Pulse();
 		m_sCameraParamPageRobotName = robotName;
 		PrepareEmbeddedPage(m_pCameraParamPage, targetStack);
+		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pCameraParamPage);
 }
@@ -9317,12 +12164,12 @@ void QtWidgetsApplication4::ReadTool1ToGunTool()
 
 	const std::string iniPath = DATA_PATH + unitInfo->sUnitName + ROBOT_PARA_INI;
 	const QString iniPathText = QDir::toNativeSeparators(DecodeRobotMessageText(iniPath));
-	if (!QFileInfo::exists(iniPathText))
+	if (!ConfigDatabase::HasIniFile(iniPath))
 	{
 		QMessageBox::warning(
 			this,
 			"读取Tool1",
-			QString("机器人参数文件不存在，无法写入 GunTool：\n%1").arg(iniPathText));
+			QString("配置库中未找到机器人参数，无法写入 GunTool：\n%1").arg(iniPathText));
 		return;
 	}
 
@@ -9700,7 +12547,9 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 		return;
 	}
 
+	DelayedLoadingGuard loading(this, "正在打开点动控制", 1000);
 	RobotJogDialog* page = new RobotJogDialog(pRobotDriver, this);
+	loading.Pulse();
 	page->setWindowModality(Qt::NonModal);
 	m_robotJogPages.insert(currentUnitIndex, page);
 	m_pRobotJogPage = page;
@@ -9717,9 +12566,11 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 				m_pRobotJogPage = nullptr;
 				m_nRobotJogPageUnitIndex = -1;
 			}
-		});
+	});
 	ApplyDebugLogVisibility(page);
+	loading.Pulse();
 	page->show();
 	page->raise();
 	page->activateWindow();
+	loading.Finish();
 }

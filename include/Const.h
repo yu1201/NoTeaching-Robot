@@ -358,6 +358,7 @@ typedef struct
 	int nCornerArcTransitionSpeedEnable; // 拐点圆弧过渡速度启用
 	int nCornerArcTransitionCurrentEnable; // 拐点圆弧过渡电流启用
 	int nCornerArcTransitionVoltageEnable; // 拐点圆弧过渡电压启用
+	int nCornerArcTransitionApplyScope; // 拐点过渡参数作用范围：0圆弧，1过渡，2圆弧+过渡
 
 	T_WeaveDate tWeaveParam; // 摆动参数(埃斯顿摆动需要动态写入使用)
 }T_WELD_PARA;

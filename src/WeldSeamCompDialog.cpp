@@ -1,5 +1,6 @@
 #include "WeldSeamCompDialog.h"
 
+#include "ConfigDatabase.h"
 #include "OPini.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
@@ -9,18 +10,21 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDoubleValidator>
-#include <QFileInfo>
+#include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QStringList>
 #include <QTextDocument>
 #include <QVBoxLayout>
@@ -31,6 +35,21 @@
 namespace
 {
 constexpr int EDITOR_FIELD_MAX_WIDTH = 240;
+constexpr int COMP_SEGMENT_COUNT = 4;
+constexpr int POSE_COMP_MATCH_BY_POSE = 0;
+constexpr int POSE_COMP_MATCH_BY_SEGMENT_CODE = 1;
+constexpr char POSE_COMP_MATCH_MODE_KEY[] = "PoseCompMatchMode";
+constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
+constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
+constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
+constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
+
+int NormalizePoseCompMatchMode(int mode)
+{
+    return mode == POSE_COMP_MATCH_BY_SEGMENT_CODE
+        ? POSE_COMP_MATCH_BY_SEGMENT_CODE
+        : POSE_COMP_MATCH_BY_POSE;
+}
 
 QVector<WeldSeamCompDialog::CompType> BuildDefaultPoseTypes()
 {
@@ -45,10 +64,10 @@ QVector<WeldSeamCompDialog::CompType> BuildDefaultPoseTypes()
 QVector<WeldSeamCompDialog::SeamCompRow> BuildDefaultSeamRows()
 {
     return {
-        { "WeldSeamComp0", "波纹板", "CorrugatedPlate", 0.0, 0.0, 0.0 },
-        { "WeldSeamComp1", "焊道类型1", "SeamType1", 0.0, 0.0, 0.0 },
-        { "WeldSeamComp2", "焊道类型2", "SeamType2", 0.0, 0.0, 0.0 },
-        { "WeldSeamComp3", "焊道类型3", "SeamType3", 0.0, 0.0, 0.0 }
+        { "WeldSeamComp0", "低平台", "low_platform", 0.0, 0.0, 0.0 },
+        { "WeldSeamComp1", "上升边", "rising_edge", 0.0, 0.0, 0.0 },
+        { "WeldSeamComp2", "高平台", "high_platform", 0.0, 0.0, 0.0 },
+        { "WeldSeamComp3", "下降边", "falling_edge", 0.0, 0.0, 0.0 }
     };
 }
 
@@ -77,21 +96,9 @@ bool ReadIniDouble(COPini& ini, const std::string& key, double& value)
     return ini.ReadString(false, key, &value) > 0;
 }
 
-int FindCompTypeIndex(const QVector<WeldSeamCompDialog::CompType>& compTypes, const QString& segmentKind)
-{
-    for (int index = 0; index < compTypes.size(); ++index)
-    {
-        if (compTypes[index].segmentKind.compare(segmentKind, Qt::CaseInsensitive) == 0)
-        {
-            return index;
-        }
-    }
-    return -1;
-}
-
 std::string LocalString(const QString& text)
 {
-    const QByteArray bytes = text.toLocal8Bit();
+    const QByteArray bytes = text.toUtf8();
     return std::string(bytes.constData());
 }
 }
@@ -146,11 +153,11 @@ void WeldSeamCompDialog::BuildUi()
         + UnifiedComboBoxStyleSheet());
 
     QVBoxLayout* rootLayout = new QVBoxLayout(this);
-    rootLayout->setContentsMargins(22, 18, 22, 18);
-    rootLayout->setSpacing(12);
+    rootLayout->setContentsMargins(18, 14, 18, 14);
+    rootLayout->setSpacing(8);
 
     QLabel* titleLabel = new QLabel("补偿参数");
-    titleLabel->setStyleSheet("font-size: 22px; font-weight: bold; color: #F7FCFC;");
+    titleLabel->setStyleSheet("font-size: 20px; font-weight: bold; color: #F7FCFC;");
     rootLayout->addWidget(titleLabel);
 
     QHBoxLayout* topLayout = new QHBoxLayout();
@@ -174,38 +181,96 @@ void WeldSeamCompDialog::BuildUi()
     topLayout->addStretch(1);
     rootLayout->addLayout(topLayout);
 
-    QGroupBox* editorGroup = new QGroupBox("补偿编辑");
-    QGridLayout* editorLayout = new QGridLayout(editorGroup);
-    editorLayout->setHorizontalSpacing(12);
-    editorLayout->setVerticalSpacing(10);
+    QHBoxLayout* contentLayout = new QHBoxLayout();
+    contentLayout->setSpacing(10);
 
-    editorLayout->addWidget(new QLabel("补偿类型："), 0, 0);
+    QWidget* groupPanel = new QWidget();
+    groupPanel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Maximum);
+    groupPanel->setMaximumHeight(360);
+    QVBoxLayout* groupPanelLayout = new QVBoxLayout(groupPanel);
+    groupPanelLayout->setContentsMargins(0, 0, 0, 0);
+    groupPanelLayout->setSpacing(6);
+    QLabel* groupPanelTitle = new QLabel("补偿组");
+    groupPanelTitle->setStyleSheet("font-weight: bold; color: #9ED8DB;");
+    groupPanelLayout->addWidget(groupPanelTitle);
+    m_pGroupList = new QListWidget();
+    m_pGroupList->setMinimumWidth(170);
+    m_pGroupList->setMaximumWidth(210);
+    m_pGroupList->setMinimumHeight(190);
+    m_pGroupList->setStyleSheet(
+        "QListWidget { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 8px; padding: 4px; }"
+        "QListWidget::item { padding: 6px 6px; border-radius: 5px; }"
+        "QListWidget::item:selected { background: #2F6F7A; color: #F7FCFC; }"
+        "QListWidget::item:hover { background: #233645; }");
+    groupPanelLayout->addWidget(m_pGroupList, 1);
+
+    QHBoxLayout* groupActionLayout = new QHBoxLayout();
+    groupActionLayout->setContentsMargins(0, 0, 0, 0);
+    groupActionLayout->setSpacing(6);
+    m_pNewGroupBtn = new QPushButton("新建");
+    m_pRenameGroupBtn = new QPushButton("重命名");
+    m_pDeleteGroupBtn = new QPushButton("删除");
+    m_pNewGroupBtn->setMinimumWidth(60);
+    m_pRenameGroupBtn->setMinimumWidth(74);
+    m_pDeleteGroupBtn->setMinimumWidth(60);
+    groupActionLayout->addWidget(m_pNewGroupBtn);
+    groupActionLayout->addWidget(m_pRenameGroupBtn);
+    groupActionLayout->addWidget(m_pDeleteGroupBtn);
+    groupPanelLayout->addLayout(groupActionLayout);
+    contentLayout->addWidget(groupPanel, 0, Qt::AlignTop);
+
+    QGroupBox* editorGroup = new QGroupBox("补偿编辑");
+    editorGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    editorGroup->setMaximumHeight(360);
+    QGridLayout* editorLayout = new QGridLayout(editorGroup);
+    editorLayout->setHorizontalSpacing(8);
+    editorLayout->setVerticalSpacing(6);
+    editorLayout->setAlignment(Qt::AlignTop);
+    editorLayout->setColumnStretch(0, 0);
+    editorLayout->setColumnStretch(1, 0);
+    editorLayout->setColumnStretch(2, 0);
+    editorLayout->setColumnStretch(5, 1);
+    editorLayout->setRowStretch(7, 1);
+
+    m_pPoseMatchModeLabel = new QLabel("姿态匹配：");
+    editorLayout->addWidget(m_pPoseMatchModeLabel, 0, 0);
+    m_pPoseMatchModeCombo = new QComboBox();
+    m_pPoseMatchModeCombo->addItem("按姿态匹配", POSE_COMP_MATCH_BY_POSE);
+    m_pPoseMatchModeCombo->addItem("按四类段属性", POSE_COMP_MATCH_BY_SEGMENT_CODE);
+    m_pPoseMatchModeCombo->setMinimumWidth(150);
+    m_pPoseMatchModeCombo->setMaximumWidth(EDITOR_FIELD_MAX_WIDTH);
+    editorLayout->addWidget(m_pPoseMatchModeCombo, 0, 1, 1, 2, Qt::AlignLeft);
+
+    editorLayout->addWidget(new QLabel("段类型："), 1, 0);
     m_pTypeCombo = new QComboBox();
     m_pTypeCombo->setMinimumWidth(240);
     m_pTypeCombo->setMaximumWidth(EDITOR_FIELD_MAX_WIDTH);
-    editorLayout->addWidget(m_pTypeCombo, 0, 1, 1, 3);
+    editorLayout->addWidget(m_pTypeCombo, 1, 1, 1, 2, Qt::AlignLeft);
 
     m_pHintLabel = new QLabel();
     m_pHintLabel->setWordWrap(true);
-    editorLayout->addWidget(m_pHintLabel, 1, 0, 1, 4);
+    editorLayout->addWidget(m_pHintLabel, 2, 0, 1, 6);
 
+    QDoubleValidator* validator = new QDoubleValidator(-100000.0, 100000.0, 6, this);
+    validator->setNotation(QDoubleValidator::StandardNotation);
     m_pPoseDisplayWidget = new QWidget();
+    m_pPoseDisplayWidget->setMaximumWidth(760);
     QGridLayout* poseLayout = new QGridLayout(m_pPoseDisplayWidget);
     poseLayout->setContentsMargins(0, 0, 0, 0);
+    poseLayout->setHorizontalSpacing(8);
     const char* poseLabels[3] = { "姿态RX：", "姿态RY：", "姿态RZ：" };
     for (int index = 0; index < 3; ++index)
     {
         poseLayout->addWidget(new QLabel(QString::fromUtf8(poseLabels[index])), 0, index * 2);
         m_pPoseValues[index] = new QLineEdit();
-        m_pPoseValues[index]->setReadOnly(true);
+        m_pPoseValues[index]->setValidator(validator);
         m_pPoseValues[index]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         m_pPoseValues[index]->setMinimumWidth(90);
+        m_pPoseValues[index]->setMaximumWidth(150);
         poseLayout->addWidget(m_pPoseValues[index], 0, index * 2 + 1);
     }
-    editorLayout->addWidget(m_pPoseDisplayWidget, 2, 0, 1, 4);
+    editorLayout->addWidget(m_pPoseDisplayWidget, 3, 0, 1, 6, Qt::AlignLeft);
 
-    QDoubleValidator* validator = new QDoubleValidator(-100000.0, 100000.0, 6, this);
-    validator->setNotation(QDoubleValidator::StandardNotation);
     for (int index = 0; index < 3; ++index)
     {
         m_pEditLabels[index] = new QLabel();
@@ -214,10 +279,11 @@ void WeldSeamCompDialog::BuildUi()
         m_pEditValues[index]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         m_pEditValues[index]->setMinimumWidth(130);
         m_pEditValues[index]->setMaximumWidth(150);
-        editorLayout->addWidget(m_pEditLabels[index], 3 + index, 0);
-        editorLayout->addWidget(m_pEditValues[index], 3 + index, 1, 1, 3);
+        editorLayout->addWidget(m_pEditLabels[index], 4 + index, 0);
+        editorLayout->addWidget(m_pEditValues[index], 4 + index, 1, 1, 5, Qt::AlignLeft);
     }
-    rootLayout->addWidget(editorGroup);
+    contentLayout->addWidget(editorGroup, 1, Qt::AlignTop);
+    rootLayout->addLayout(contentLayout);
 
     m_pPathLabel = new QLabel();
     m_pPathLabel->setWordWrap(true);
@@ -251,6 +317,28 @@ void WeldSeamCompDialog::BuildUi()
         {
             SetMode(id == 0 ? CompMode::Pose : CompMode::Seam);
         });
+    connect(m_pGroupList, &QListWidget::currentRowChanged, this, [this](int index)
+        {
+            if (m_bLoading)
+            {
+                return;
+            }
+            QString error;
+            StoreEditorValues(false, error);
+            m_currentGroupIndex = std::max(0, index);
+            if (m_mode == CompMode::Pose)
+            {
+                m_currentPoseGroupIndex = m_currentGroupIndex;
+                m_poseCompMatchMode = CurrentPoseGroupMatchMode();
+            }
+            else
+            {
+                m_currentSeamGroupIndex = m_currentGroupIndex;
+            }
+            m_currentTypeIndex = 0;
+            RefreshTypeCombo();
+            RefreshEditor();
+        });
     connect(m_pTypeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index)
         {
             if (m_bLoading)
@@ -262,9 +350,24 @@ void WeldSeamCompDialog::BuildUi()
             m_currentTypeIndex = std::max(0, index);
             RefreshEditor();
         });
+    connect(m_pPoseMatchModeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index)
+        {
+            if (m_bLoading || m_pPoseMatchModeCombo == nullptr)
+            {
+                return;
+            }
+            QString error;
+            StoreEditorValues(false, error);
+            SetCurrentPoseGroupMatchMode(m_pPoseMatchModeCombo->itemData(index).toInt());
+            RefreshEditor();
+        });
+    connect(m_pNewGroupBtn, &QPushButton::clicked, this, &WeldSeamCompDialog::AddCurrentGroup);
+    connect(m_pRenameGroupBtn, &QPushButton::clicked, this, &WeldSeamCompDialog::RenameCurrentGroup);
+    connect(m_pDeleteGroupBtn, &QPushButton::clicked, this, &WeldSeamCompDialog::DeleteCurrentGroup);
     connect(m_pReloadBtn, &QPushButton::clicked, this, [this]() { LoadCurrentParam(); });
     connect(m_pSaveBtn, &QPushButton::clicked, this, [this]() { SaveCurrentParam(); });
 
+    RefreshGroupCombo();
     RefreshTypeCombo();
     RefreshEditor();
 
@@ -310,24 +413,128 @@ QString WeldSeamCompDialog::CurrentSeamParamPath() const
     return robotName.isEmpty() ? QString() : WeldSeamCompParamPath(robotName);
 }
 
-QString WeldSeamCompDialog::CurrentParamPath() const
-{
-    return m_mode == CompMode::Pose ? CurrentPoseParamPath() : CurrentSeamParamPath();
-}
-
 int WeldSeamCompDialog::CurrentTypeIndex() const
 {
-    const int rowCount = CurrentRowCount();
-    if (rowCount <= 0)
+    if (CurrentGroupCount() <= 0)
     {
         return -1;
     }
-    return std::clamp(m_currentTypeIndex, 0, rowCount - 1);
+    return std::clamp(m_currentTypeIndex, 0, COMP_SEGMENT_COUNT - 1);
 }
 
 int WeldSeamCompDialog::CurrentRowCount() const
 {
-    return m_mode == CompMode::Pose ? m_poseRows.size() : m_seamRows.size();
+    return CurrentGroupCount() > 0 ? COMP_SEGMENT_COUNT : 0;
+}
+
+int WeldSeamCompDialog::CurrentGroupCount() const
+{
+    return m_mode == CompMode::Pose ? m_poseGroupNames.size() : m_seamGroupNames.size();
+}
+
+int WeldSeamCompDialog::CurrentFlatRowIndex() const
+{
+    const int groupCount = CurrentGroupCount();
+    if (groupCount <= 0)
+    {
+        return -1;
+    }
+    const int groupIndex = std::clamp(m_currentGroupIndex, 0, groupCount - 1);
+    const int segmentIndex = CurrentTypeIndex();
+    if (segmentIndex < 0)
+    {
+        return -1;
+    }
+    return groupIndex * COMP_SEGMENT_COUNT + segmentIndex;
+}
+
+QString WeldSeamCompDialog::ModeGroupName() const
+{
+    return m_mode == CompMode::Pose ? "姿态补偿组" : "焊道补偿组";
+}
+
+QString WeldSeamCompDialog::DefaultGroupName(int index) const
+{
+    return QString("%1%2").arg(m_mode == CompMode::Pose ? "姿态补偿组" : "焊道补偿组").arg(std::max(0, index) + 1);
+}
+
+QString WeldSeamCompDialog::DefaultPoseRowName(int index) const
+{
+    if (index >= 0 && index < m_poseTypes.size())
+    {
+        return m_poseTypes[index].displayName;
+    }
+    return QString("姿态补偿%1").arg(std::max(0, index) + 1);
+}
+
+QString WeldSeamCompDialog::DefaultPoseSegmentKind(int index) const
+{
+    if (index >= 0 && index < m_poseTypes.size())
+    {
+        return m_poseTypes[index].segmentKind;
+    }
+    return QString("PoseGroup%1").arg(std::max(0, index));
+}
+
+WeldSeamCompDialog::PoseCompRow WeldSeamCompDialog::MakeDefaultPoseRow(int groupIndex, int segmentIndex) const
+{
+    const int flatIndex = std::max(0, groupIndex) * COMP_SEGMENT_COUNT + std::clamp(segmentIndex, 0, COMP_SEGMENT_COUNT - 1);
+    PoseCompRow row;
+    row.sectionName = QString("WeldPoseComp%1").arg(flatIndex);
+    row.name = DefaultPoseRowName(segmentIndex);
+    row.segmentKind = DefaultPoseSegmentKind(segmentIndex);
+    return row;
+}
+
+WeldSeamCompDialog::SeamCompRow WeldSeamCompDialog::MakeDefaultSeamRow(int groupIndex, int segmentIndex) const
+{
+    const QVector<SeamCompRow> defaultRows = BuildDefaultSeamRows();
+    const int safeSegmentIndex = std::clamp(segmentIndex, 0, COMP_SEGMENT_COUNT - 1);
+    SeamCompRow row = safeSegmentIndex < defaultRows.size()
+        ? defaultRows[safeSegmentIndex]
+        : SeamCompRow();
+    row.sectionName = QString("WeldSeamComp%1").arg(std::max(0, groupIndex) * COMP_SEGMENT_COUNT + safeSegmentIndex);
+    if (row.name.isEmpty())
+    {
+        row.name = QString("焊道补偿%1").arg(safeSegmentIndex + 1);
+    }
+    if (row.segmentKind.isEmpty())
+    {
+        row.segmentKind = DefaultPoseSegmentKind(safeSegmentIndex);
+    }
+    return row;
+}
+
+int WeldSeamCompDialog::CurrentPoseGroupMatchMode() const
+{
+    const int groupCount = static_cast<int>(m_poseGroupMatchModes.size());
+    if (groupCount <= 0)
+    {
+        return NormalizePoseCompMatchMode(m_poseCompMatchMode);
+    }
+    const int groupIndex = std::clamp(m_currentPoseGroupIndex, 0, groupCount - 1);
+    return NormalizePoseCompMatchMode(m_poseGroupMatchModes[groupIndex]);
+}
+
+void WeldSeamCompDialog::SetCurrentPoseGroupMatchMode(int mode)
+{
+    const int normalizedMode = NormalizePoseCompMatchMode(mode);
+    m_poseCompMatchMode = normalizedMode;
+    const int groupCount = static_cast<int>(m_poseGroupNames.size());
+    if (groupCount <= 0)
+    {
+        return;
+    }
+    if (m_poseGroupMatchModes.size() < groupCount)
+    {
+        m_poseGroupMatchModes.resize(groupCount);
+        for (int index = 0; index < m_poseGroupMatchModes.size(); ++index)
+        {
+            m_poseGroupMatchModes[index] = NormalizePoseCompMatchMode(m_poseGroupMatchModes[index]);
+        }
+    }
+    const int groupIndex = std::clamp(m_currentPoseGroupIndex, 0, groupCount - 1);
+    m_poseGroupMatchModes[groupIndex] = normalizedMode;
 }
 
 void WeldSeamCompDialog::LoadCurrentParam()
@@ -343,31 +550,37 @@ void WeldSeamCompDialog::LoadCurrentParam()
     m_bLoading = true;
     LoadPoseParam(posePath);
     LoadSeamParam(seamPath);
+    RefreshGroupCombo();
     RefreshTypeCombo();
     m_bLoading = false;
     RefreshEditor();
 
-    AppendLog(QString("已读取补偿参数：姿态槽=%1，焊道槽=%2。")
+    AppendLog(QString("已读取补偿参数：姿态组=%1（%2条），焊道组=%3（%4条）。")
+        .arg(m_poseGroupNames.size())
         .arg(m_poseRows.size())
+        .arg(m_seamGroupNames.size())
         .arg(m_seamRows.size()));
     MarkCleanSnapshot();
 }
 
 void WeldSeamCompDialog::LoadPoseParam(const QString& path)
 {
+    m_poseCompMatchMode = POSE_COMP_MATCH_BY_POSE;
+    m_poseMatchMaxErrorDeg = 5.0;
+    m_poseGroupNames.clear();
+    m_poseGroupMatchModes.clear();
     m_poseRows.clear();
-    m_poseRows.reserve(m_poseTypes.size());
-    for (int index = 0; index < m_poseTypes.size(); ++index)
-    {
-        PoseCompRow row;
-        row.sectionName = QString("WeldPoseComp%1").arg(index);
-        row.name = m_poseTypes[index].displayName;
-        row.segmentKind = m_poseTypes[index].segmentKind;
-        m_poseRows.push_back(row);
-    }
 
-    if (path.isEmpty() || !QFileInfo::exists(path))
+    if (path.isEmpty() || !ConfigDatabase::HasIniFile(path))
     {
+        m_poseGroupNames.push_back("姿态补偿组1");
+        m_poseGroupMatchModes.push_back(POSE_COMP_MATCH_BY_POSE);
+        m_poseRows.reserve(COMP_SEGMENT_COUNT);
+        for (int index = 0; index < COMP_SEGMENT_COUNT; ++index)
+        {
+            m_poseRows.push_back(MakeDefaultPoseRow(0, index));
+        }
+        m_currentPoseGroupIndex = 0;
         AppendLog("姿态补偿参数不存在，使用默认槽位：" + QDir::toNativeSeparators(path));
         return;
     }
@@ -376,101 +589,156 @@ void WeldSeamCompDialog::LoadPoseParam(const QString& path)
     ini.SetFileName(LocalString(path));
     ini.SetSectionName("ALLWeldPoseComp");
     ReadIniDouble(ini, "PoseMatchMaxErrorDeg", m_poseMatchMaxErrorDeg);
+    int matchMode = m_poseCompMatchMode;
+    if (ini.ReadString(false, POSE_COMP_MATCH_MODE_KEY, &matchMode) > 0)
+    {
+        m_poseCompMatchMode = NormalizePoseCompMatchMode(matchMode);
+    }
 
-    int count = m_poseRows.size();
+    int activeGroupIndex = 0;
+    ini.ReadString(false, POSE_ACTIVE_GROUP_INDEX_KEY, &activeGroupIndex);
+    int count = COMP_SEGMENT_COUNT;
     ini.ReadString(false, "PoseCompCount", &count);
     count = std::max(0, count);
+    int groupCount = 0;
+    const bool hasGroupCount = ini.ReadString(false, POSE_GROUP_COUNT_KEY, &groupCount) > 0;
+    groupCount = hasGroupCount
+        ? std::max(0, groupCount)
+        : (count <= 0 ? 0 : (count + COMP_SEGMENT_COUNT - 1) / COMP_SEGMENT_COUNT);
+    const int expectedCount = groupCount * COMP_SEGMENT_COUNT;
+    m_poseGroupNames.reserve(groupCount);
+    m_poseRows.reserve(expectedCount);
 
-    for (int sectionIndex = 0; sectionIndex < count; ++sectionIndex)
+    for (int groupIndex = 0; groupIndex < groupCount; ++groupIndex)
     {
-        PoseCompRow row;
-        const int defaultIndex = sectionIndex < m_poseTypes.size() ? sectionIndex : 0;
-        row.sectionName = QString("WeldPoseComp%1").arg(sectionIndex);
-        row.name = sectionIndex < m_poseTypes.size()
-            ? m_poseTypes[sectionIndex].displayName
-            : QString("姿态补偿%1").arg(sectionIndex);
-        row.segmentKind = sectionIndex < m_poseTypes.size()
-            ? m_poseTypes[sectionIndex].segmentKind
-            : QString();
-
-        std::string text;
-        ini.SetSectionName(row.sectionName.toStdString());
-        if (ini.ReadString(false, "Name", text) > 0)
+        QString groupName = QString("姿态补偿组%1").arg(groupIndex + 1);
+        std::string groupNameText;
+        ini.SetSectionName(LocalString(QString("WeldPoseCompGroup%1").arg(groupIndex)));
+        if (ini.ReadString(false, "Name", groupNameText) > 0)
         {
-            row.name = DecodeRobotMessageText(text);
+            groupName = DecodeRobotMessageText(groupNameText);
         }
-        if (ini.ReadString(false, "SegmentKind", text) > 0)
+        int groupMatchMode = m_poseCompMatchMode;
+        if (ini.ReadString(false, POSE_COMP_MATCH_MODE_KEY, &groupMatchMode) <= 0)
         {
-            row.segmentKind = DecodeRobotMessageText(text);
+            groupMatchMode = m_poseCompMatchMode;
         }
-        if (row.segmentKind.isEmpty() && defaultIndex < m_poseTypes.size())
-        {
-            row.segmentKind = m_poseTypes[defaultIndex].segmentKind;
-        }
+        m_poseGroupNames.push_back(groupName);
+        m_poseGroupMatchModes.push_back(NormalizePoseCompMatchMode(groupMatchMode));
 
-        ReadIniDouble(ini, "Rx", row.poseRx);
-        ReadIniDouble(ini, "Ry", row.poseRy);
-        ReadIniDouble(ini, "Rz", row.poseRz);
-        ReadIniDouble(ini, "CompX", row.compX);
-        ReadIniDouble(ini, "CompY", row.compY);
-        ReadIniDouble(ini, "CompZ", row.compZ);
-
-        const int targetIndex = FindCompTypeIndex(m_poseTypes, row.segmentKind);
-        if (targetIndex >= 0 && targetIndex < m_poseRows.size())
+        for (int segmentIndex = 0; segmentIndex < COMP_SEGMENT_COUNT; ++segmentIndex)
         {
-            row.sectionName = QString("WeldPoseComp%1").arg(targetIndex);
-            row.name = m_poseTypes[targetIndex].displayName;
-            row.segmentKind = m_poseTypes[targetIndex].segmentKind;
-            m_poseRows[targetIndex] = row;
+            const int flatIndex = groupIndex * COMP_SEGMENT_COUNT + segmentIndex;
+            PoseCompRow row = MakeDefaultPoseRow(groupIndex, segmentIndex);
+
+            std::string text;
+            ini.SetSectionName(LocalString(QString("WeldPoseComp%1").arg(flatIndex)));
+            if (ini.ReadString(false, "Name", text) > 0)
+            {
+                row.name = DecodeRobotMessageText(text);
+            }
+            if (ini.ReadString(false, "SegmentKind", text) > 0)
+            {
+                row.segmentKind = DecodeRobotMessageText(text);
+            }
+            if (row.segmentKind.isEmpty())
+            {
+                row.segmentKind = DefaultPoseSegmentKind(segmentIndex);
+            }
+
+            ReadIniDouble(ini, "Rx", row.poseRx);
+            ReadIniDouble(ini, "Ry", row.poseRy);
+            ReadIniDouble(ini, "Rz", row.poseRz);
+            ReadIniDouble(ini, "CompX", row.compX);
+            ReadIniDouble(ini, "CompY", row.compY);
+            ReadIniDouble(ini, "CompZ", row.compZ);
+
+            m_poseRows.push_back(row);
         }
     }
+    m_currentPoseGroupIndex = groupCount > 0 ? std::clamp(activeGroupIndex, 0, groupCount - 1) : 0;
+    if (m_mode == CompMode::Pose)
+    {
+        m_currentGroupIndex = m_currentPoseGroupIndex;
+    }
+    m_poseCompMatchMode = CurrentPoseGroupMatchMode();
 }
 
 void WeldSeamCompDialog::LoadSeamParam(const QString& path)
 {
-    m_seamRows = BuildDefaultSeamRows();
+    m_seamGroupNames.clear();
+    m_seamRows.clear();
 
-    if (path.isEmpty() || !QFileInfo::exists(path))
+    if (path.isEmpty() || !ConfigDatabase::HasIniFile(path))
     {
+        m_seamGroupNames.push_back("焊道补偿组1");
+        m_seamRows.reserve(COMP_SEGMENT_COUNT);
+        for (int index = 0; index < COMP_SEGMENT_COUNT; ++index)
+        {
+            m_seamRows.push_back(MakeDefaultSeamRow(0, index));
+        }
+        m_currentSeamGroupIndex = 0;
         AppendLog("焊道补偿参数不存在，使用默认槽位：" + QDir::toNativeSeparators(path));
         return;
     }
 
-    m_seamRows.clear();
     COPini ini;
     ini.SetFileName(LocalString(path));
-    int count = static_cast<int>(BuildDefaultSeamRows().size());
     ini.SetSectionName("ALLWeldSeamComp");
+    int activeGroupIndex = 0;
+    ini.ReadString(false, SEAM_ACTIVE_GROUP_INDEX_KEY, &activeGroupIndex);
+    int count = COMP_SEGMENT_COUNT;
     ini.ReadString(false, "SeamCompCount", &count);
     count = std::max(0, count);
+    int groupCount = 0;
+    const bool hasGroupCount = ini.ReadString(false, SEAM_GROUP_COUNT_KEY, &groupCount) > 0;
+    groupCount = hasGroupCount
+        ? std::max(0, groupCount)
+        : (count <= 0 ? 0 : (count + COMP_SEGMENT_COUNT - 1) / COMP_SEGMENT_COUNT);
+    m_seamGroupNames.reserve(groupCount);
+    m_seamRows.reserve(groupCount * COMP_SEGMENT_COUNT);
 
-    for (int sectionIndex = 0; sectionIndex < count; ++sectionIndex)
+    for (int groupIndex = 0; groupIndex < groupCount; ++groupIndex)
     {
-        SeamCompRow row;
-        row.sectionName = QString("WeldSeamComp%1").arg(sectionIndex);
-        row.name = QString("焊道类型%1").arg(sectionIndex);
-        row.segmentKind = QString("SeamType%1").arg(sectionIndex);
-
-        std::string text;
-        ini.SetSectionName(row.sectionName.toStdString());
-        if (ini.ReadString(false, "Name", text) > 0)
+        QString groupName = QString("焊道补偿组%1").arg(groupIndex + 1);
+        std::string groupNameText;
+        ini.SetSectionName(LocalString(QString("WeldSeamCompGroup%1").arg(groupIndex)));
+        if (ini.ReadString(false, "Name", groupNameText) > 0)
         {
-            row.name = DecodeRobotMessageText(text);
+            groupName = DecodeRobotMessageText(groupNameText);
         }
-        if (ini.ReadString(false, "SegmentKind", text) > 0)
-        {
-            row.segmentKind = DecodeRobotMessageText(text);
-        }
+        m_seamGroupNames.push_back(groupName);
 
-        ReadIniDouble(ini, "WeldZComp", row.weldZComp);
-        ReadIniDouble(ini, "WeldGunDirComp", row.weldGunDirComp);
-        ReadIniDouble(ini, "WeldSeamDirComp", row.weldSeamDirComp);
-        m_seamRows.push_back(row);
+        for (int segmentIndex = 0; segmentIndex < COMP_SEGMENT_COUNT; ++segmentIndex)
+        {
+            const int flatIndex = groupIndex * COMP_SEGMENT_COUNT + segmentIndex;
+            SeamCompRow row = MakeDefaultSeamRow(groupIndex, segmentIndex);
+
+            std::string text;
+            ini.SetSectionName(LocalString(QString("WeldSeamComp%1").arg(flatIndex)));
+            if (ini.ReadString(false, "Name", text) > 0)
+            {
+                row.name = DecodeRobotMessageText(text);
+            }
+            if (ini.ReadString(false, "SegmentKind", text) > 0)
+            {
+                row.segmentKind = DecodeRobotMessageText(text);
+            }
+            if (row.segmentKind.isEmpty())
+            {
+                row.segmentKind = DefaultPoseSegmentKind(segmentIndex);
+            }
+
+            ReadIniDouble(ini, "WeldZComp", row.weldZComp);
+            ReadIniDouble(ini, "WeldGunDirComp", row.weldGunDirComp);
+            ReadIniDouble(ini, "WeldSeamDirComp", row.weldSeamDirComp);
+            m_seamRows.push_back(row);
+        }
     }
-
-    if (m_seamRows.isEmpty())
+    m_currentSeamGroupIndex = groupCount > 0 ? std::clamp(activeGroupIndex, 0, groupCount - 1) : 0;
+    if (m_mode == CompMode::Seam)
     {
-        m_seamRows = BuildDefaultSeamRows();
+        m_currentGroupIndex = m_currentSeamGroupIndex;
     }
 }
 
@@ -484,7 +752,17 @@ void WeldSeamCompDialog::SetMode(CompMode mode)
 
     QString error;
     StoreEditorValues(false, error);
+    if (m_mode == CompMode::Pose)
+    {
+        m_currentPoseGroupIndex = m_currentGroupIndex;
+    }
+    else
+    {
+        m_currentSeamGroupIndex = m_currentGroupIndex;
+    }
     m_mode = mode;
+    m_currentGroupIndex = m_mode == CompMode::Pose ? m_currentPoseGroupIndex : m_currentSeamGroupIndex;
+    m_currentTypeIndex = 0;
     if (m_pPoseModeBtn != nullptr)
     {
         m_pPoseModeBtn->setChecked(m_mode == CompMode::Pose);
@@ -493,8 +771,46 @@ void WeldSeamCompDialog::SetMode(CompMode mode)
     {
         m_pSeamModeBtn->setChecked(m_mode == CompMode::Seam);
     }
+    RefreshGroupCombo();
     RefreshTypeCombo();
     RefreshEditor();
+}
+
+void WeldSeamCompDialog::RefreshGroupCombo()
+{
+    if (m_pGroupList == nullptr)
+    {
+        return;
+    }
+
+    const QSignalBlocker blocker(m_pGroupList);
+    const QVector<QString>& groupNames = m_mode == CompMode::Pose ? m_poseGroupNames : m_seamGroupNames;
+    const int groupCount = static_cast<int>(groupNames.size());
+    const int previousIndex = groupCount <= 0 ? -1 : std::clamp(m_currentGroupIndex, 0, groupCount - 1);
+    m_pGroupList->clear();
+    for (int index = 0; index < groupNames.size(); ++index)
+    {
+        m_pGroupList->addItem(groupNames[index]);
+    }
+
+    if (m_pGroupList->count() > 0)
+    {
+        m_currentGroupIndex = std::clamp(previousIndex, 0, m_pGroupList->count() - 1);
+        if (m_mode == CompMode::Pose)
+        {
+            m_currentPoseGroupIndex = m_currentGroupIndex;
+            m_poseCompMatchMode = CurrentPoseGroupMatchMode();
+        }
+        else
+        {
+            m_currentSeamGroupIndex = m_currentGroupIndex;
+        }
+        m_pGroupList->setCurrentRow(m_currentGroupIndex);
+    }
+    else
+    {
+        m_currentGroupIndex = -1;
+    }
 }
 
 void WeldSeamCompDialog::RefreshTypeCombo()
@@ -508,22 +824,31 @@ void WeldSeamCompDialog::RefreshTypeCombo()
     const int rowCount = CurrentRowCount();
     const int previousIndex = rowCount > 0 ? std::clamp(m_currentTypeIndex, 0, rowCount - 1) : -1;
     m_pTypeCombo->clear();
-    if (m_mode == CompMode::Pose)
+    const int groupIndex = CurrentGroupCount() > 0 ? std::clamp(m_currentGroupIndex, 0, CurrentGroupCount() - 1) : -1;
+    for (int segmentIndex = 0; segmentIndex < rowCount; ++segmentIndex)
     {
-        for (const PoseCompRow& row : m_poseRows)
+        const int flatIndex = groupIndex * COMP_SEGMENT_COUNT + segmentIndex;
+        QString name;
+        QString segmentKind;
+        if (m_mode == CompMode::Pose && flatIndex >= 0 && flatIndex < m_poseRows.size())
         {
-            m_pTypeCombo->addItem(row.name, row.segmentKind);
+            name = m_poseRows[flatIndex].name;
+            segmentKind = m_poseRows[flatIndex].segmentKind;
         }
-    }
-    else
-    {
-        for (const SeamCompRow& row : m_seamRows)
+        else if (m_mode == CompMode::Seam && flatIndex >= 0 && flatIndex < m_seamRows.size())
         {
-            const QString displayName = row.segmentKind.isEmpty()
-                ? row.name
-                : QString("%1 (%2)").arg(row.name, row.segmentKind);
-            m_pTypeCombo->addItem(displayName, row.segmentKind);
+            name = m_seamRows[flatIndex].name;
+            segmentKind = m_seamRows[flatIndex].segmentKind;
         }
+        if (name.isEmpty())
+        {
+            name = m_mode == CompMode::Pose ? DefaultPoseRowName(segmentIndex) : MakeDefaultSeamRow(groupIndex, segmentIndex).name;
+        }
+        if (segmentKind.isEmpty())
+        {
+            segmentKind = DefaultPoseSegmentKind(segmentIndex);
+        }
+        m_pTypeCombo->addItem(QString("%1 (%2)").arg(name, segmentKind), segmentKind);
     }
 
     if (m_pTypeCombo->count() > 0)
@@ -546,6 +871,18 @@ void WeldSeamCompDialog::RefreshEditor()
     {
         m_pPoseDisplayWidget->setVisible(m_mode == CompMode::Pose);
     }
+    if (m_pPoseMatchModeLabel != nullptr)
+    {
+        m_pPoseMatchModeLabel->setVisible(m_mode == CompMode::Pose);
+    }
+    if (m_pPoseMatchModeCombo != nullptr)
+    {
+        const QSignalBlocker blocker(m_pPoseMatchModeCombo);
+        m_pPoseMatchModeCombo->setVisible(m_mode == CompMode::Pose);
+        const int mode = CurrentPoseGroupMatchMode();
+        const int modeIndex = std::max(0, m_pPoseMatchModeCombo->findData(mode));
+        m_pPoseMatchModeCombo->setCurrentIndex(modeIndex);
+    }
 
     if (m_pPathLabel != nullptr)
     {
@@ -556,16 +893,71 @@ void WeldSeamCompDialog::RefreshEditor()
 
     if (m_pHintLabel != nullptr)
     {
-        m_pHintLabel->setText(m_mode == CompMode::Pose
-            ? QString("姿态补偿：按当前点姿态匹配下方姿态值，匹配成功后将 X/Y/Z 补偿按当前姿态旋转到世界坐标后叠加。")
-            : QString("焊道补偿：Z 为世界 Z 向；枪反向为垂直 Z 轴和焊道方向的侧向；焊道方向为沿点序切线方向。"));
+        if (m_mode == CompMode::Pose)
+        {
+            m_pHintLabel->setText(CurrentPoseGroupMatchMode() == POSE_COMP_MATCH_BY_SEGMENT_CODE
+                ? QString("姿态补偿：按四类段属性直接匹配低平台、上升边、高平台、下降边，用于特殊件；补偿仍按当前点姿态旋转到世界坐标后叠加。")
+                : QString("姿态补偿：按当前点姿态匹配下方姿态值，匹配成功后将 X/Y/Z 补偿按当前姿态旋转到世界坐标后叠加。"));
+        }
+        else
+        {
+            m_pHintLabel->setText("焊道补偿：Z 为世界 Z 向；枪反向为垂直 Z 轴和焊道方向的侧向；焊道方向为沿点序切线方向。");
+        }
+    }
+
+    const bool hasRow = index >= 0;
+    const bool hasRobot = !CurrentRobotName().isEmpty();
+    if (m_pGroupList != nullptr)
+    {
+        m_pGroupList->setEnabled(hasRobot);
+    }
+    if (m_pTypeCombo != nullptr)
+    {
+        m_pTypeCombo->setEnabled(hasRow);
+    }
+    if (m_pNewGroupBtn != nullptr)
+    {
+        m_pNewGroupBtn->setEnabled(hasRobot);
+    }
+    if (m_pRenameGroupBtn != nullptr)
+    {
+        m_pRenameGroupBtn->setEnabled(hasRobot && hasRow);
+    }
+    if (m_pDeleteGroupBtn != nullptr)
+    {
+        m_pDeleteGroupBtn->setEnabled(hasRobot && hasRow);
+    }
+    for (int valueIndex = 0; valueIndex < 3; ++valueIndex)
+    {
+        if (m_pEditValues[valueIndex] != nullptr)
+        {
+            m_pEditValues[valueIndex]->setEnabled(hasRow);
+        }
+        if (m_pPoseValues[valueIndex] != nullptr)
+        {
+            m_pPoseValues[valueIndex]->setEnabled(hasRow && m_mode == CompMode::Pose);
+        }
+    }
+
+    if (!hasRow)
+    {
+        if (m_pEditLabels[0] != nullptr) m_pEditLabels[0]->setText(m_mode == CompMode::Pose ? "X补偿(mm)：" : "Z向补偿(mm)：");
+        if (m_pEditLabels[1] != nullptr) m_pEditLabels[1]->setText(m_mode == CompMode::Pose ? "Y补偿(mm)：" : "枪反向补偿(mm)：");
+        if (m_pEditLabels[2] != nullptr) m_pEditLabels[2]->setText(m_mode == CompMode::Pose ? "Z补偿(mm)：" : "焊道方向补偿(mm)：");
+        for (int valueIndex = 0; valueIndex < 3; ++valueIndex)
+        {
+            if (m_pEditValues[valueIndex] != nullptr) m_pEditValues[valueIndex]->clear();
+            if (m_pPoseValues[valueIndex] != nullptr) m_pPoseValues[valueIndex]->clear();
+        }
+        return;
     }
 
     if (m_mode == CompMode::Pose)
     {
-        if (index >= 0 && index < m_poseRows.size())
+        const int flatIndex = CurrentFlatRowIndex();
+        if (flatIndex >= 0 && flatIndex < m_poseRows.size())
         {
-            const PoseCompRow& row = m_poseRows[index];
+            const PoseCompRow& row = m_poseRows[flatIndex];
             if (m_pPoseValues[0] != nullptr) m_pPoseValues[0]->setText(FormatNumber(row.poseRx));
             if (m_pPoseValues[1] != nullptr) m_pPoseValues[1]->setText(FormatNumber(row.poseRy));
             if (m_pPoseValues[2] != nullptr) m_pPoseValues[2]->setText(FormatNumber(row.poseRz));
@@ -579,9 +971,10 @@ void WeldSeamCompDialog::RefreshEditor()
     }
     else
     {
-        if (index >= 0 && index < m_seamRows.size())
+        const int flatIndex = CurrentFlatRowIndex();
+        if (flatIndex >= 0 && flatIndex < m_seamRows.size())
         {
-            const SeamCompRow& row = m_seamRows[index];
+            const SeamCompRow& row = m_seamRows[flatIndex];
             if (m_pEditLabels[0] != nullptr) m_pEditLabels[0]->setText("Z向补偿(mm)：");
             if (m_pEditLabels[1] != nullptr) m_pEditLabels[1]->setText("枪反向补偿(mm)：");
             if (m_pEditLabels[2] != nullptr) m_pEditLabels[2]->setText("焊道方向补偿(mm)：");
@@ -595,7 +988,8 @@ void WeldSeamCompDialog::RefreshEditor()
 bool WeldSeamCompDialog::StoreEditorValues(bool validate, QString& error)
 {
     const int index = CurrentTypeIndex();
-    if (index < 0)
+    const int flatIndex = CurrentFlatRowIndex();
+    if (index < 0 || flatIndex < 0)
     {
         return true;
     }
@@ -622,26 +1016,302 @@ bool WeldSeamCompDialog::StoreEditorValues(bool validate, QString& error)
 
     if (m_mode == CompMode::Pose)
     {
-        if (index >= m_poseRows.size())
+        if (flatIndex >= m_poseRows.size())
         {
             return true;
         }
-        m_poseRows[index].compX = values[0];
-        m_poseRows[index].compY = values[1];
-        m_poseRows[index].compZ = values[2];
+        double poseValues[3] = {
+            m_poseRows[flatIndex].poseRx,
+            m_poseRows[flatIndex].poseRy,
+            m_poseRows[flatIndex].poseRz
+        };
+        const char* poseNames[3] = { "姿态RX", "姿态RY", "姿态RZ" };
+        for (int valueIndex = 0; valueIndex < 3; ++valueIndex)
+        {
+            if (m_pPoseValues[valueIndex] == nullptr)
+            {
+                continue;
+            }
+            bool ok = false;
+            poseValues[valueIndex] = m_pPoseValues[valueIndex]->text().trimmed().toDouble(&ok);
+            if (!ok || !std::isfinite(poseValues[valueIndex]))
+            {
+                if (validate)
+                {
+                    error = QString("%1 不是有效数字。").arg(QString::fromUtf8(poseNames[valueIndex]));
+                    return false;
+                }
+                return true;
+            }
+        }
+        m_poseRows[flatIndex].poseRx = poseValues[0];
+        m_poseRows[flatIndex].poseRy = poseValues[1];
+        m_poseRows[flatIndex].poseRz = poseValues[2];
+        m_poseRows[flatIndex].compX = values[0];
+        m_poseRows[flatIndex].compY = values[1];
+        m_poseRows[flatIndex].compZ = values[2];
     }
     else
     {
-        if (index >= m_seamRows.size())
+        if (flatIndex >= m_seamRows.size())
         {
             return true;
         }
-        m_seamRows[index].weldZComp = values[0];
-        m_seamRows[index].weldGunDirComp = values[1];
-        m_seamRows[index].weldSeamDirComp = values[2];
+        m_seamRows[flatIndex].weldZComp = values[0];
+        m_seamRows[flatIndex].weldGunDirComp = values[1];
+        m_seamRows[flatIndex].weldSeamDirComp = values[2];
     }
 
     return true;
+}
+
+bool WeldSeamCompDialog::EditGroupName(QString& name, const QString& title)
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    dialog.setStyleSheet(styleSheet());
+
+    QFormLayout* formLayout = new QFormLayout(&dialog);
+    formLayout->setContentsMargins(18, 16, 18, 16);
+    formLayout->setSpacing(10);
+
+    QLineEdit* nameEdit = new QLineEdit(name, &dialog);
+    nameEdit->setMinimumWidth(260);
+    formLayout->addRow("组名称：", nameEdit);
+
+    QLabel* hintLabel = new QLabel("每个补偿组固定包含低平台、上升边、高平台、下降边四条数据。", &dialog);
+    hintLabel->setWordWrap(true);
+    formLayout->addRow(hintLabel);
+
+    QDialogButtonBox* buttonBox = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    if (QPushButton* okButton = buttonBox->button(QDialogButtonBox::Ok))
+    {
+        okButton->setText("确定");
+    }
+    if (QPushButton* cancelButton = buttonBox->button(QDialogButtonBox::Cancel))
+    {
+        cancelButton->setText("取消");
+    }
+    formLayout->addRow(buttonBox);
+
+    connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    while (dialog.exec() == QDialog::Accepted)
+    {
+        const QString nextName = nameEdit->text().trimmed();
+        if (nextName.isEmpty())
+        {
+            QMessageBox::warning(&dialog, title, "组名称不能为空。");
+            continue;
+        }
+
+        name = nextName;
+        return true;
+    }
+
+    return false;
+}
+
+void WeldSeamCompDialog::AddCurrentGroup()
+{
+    QString error;
+    if (!StoreEditorValues(true, error))
+    {
+        QMessageBox::warning(this, "新建补偿组", error);
+        return;
+    }
+
+    const int newGroupIndex = CurrentGroupCount();
+    QString name = DefaultGroupName(newGroupIndex);
+
+    if (!EditGroupName(name, QString("新建%1").arg(ModeGroupName())))
+    {
+        return;
+    }
+
+    if (m_mode == CompMode::Pose)
+    {
+        const int sourceMatchMode = CurrentPoseGroupMatchMode();
+        m_poseGroupNames.push_back(name);
+        m_poseGroupMatchModes.push_back(sourceMatchMode);
+        const int sourceGroupIndex = CurrentGroupCount() > 1 ? std::clamp(m_currentGroupIndex, 0, CurrentGroupCount() - 2) : -1;
+        for (int segmentIndex = 0; segmentIndex < COMP_SEGMENT_COUNT; ++segmentIndex)
+        {
+            PoseCompRow row = MakeDefaultPoseRow(newGroupIndex, segmentIndex);
+            const int sourceFlatIndex = sourceGroupIndex >= 0 ? sourceGroupIndex * COMP_SEGMENT_COUNT + segmentIndex : -1;
+            if (sourceFlatIndex >= 0 && sourceFlatIndex < m_poseRows.size())
+            {
+                row.poseRx = m_poseRows[sourceFlatIndex].poseRx;
+                row.poseRy = m_poseRows[sourceFlatIndex].poseRy;
+                row.poseRz = m_poseRows[sourceFlatIndex].poseRz;
+            }
+            m_poseRows.push_back(row);
+        }
+        m_currentPoseGroupIndex = newGroupIndex;
+    }
+    else
+    {
+        m_seamGroupNames.push_back(name);
+        for (int segmentIndex = 0; segmentIndex < COMP_SEGMENT_COUNT; ++segmentIndex)
+        {
+            m_seamRows.push_back(MakeDefaultSeamRow(newGroupIndex, segmentIndex));
+        }
+        m_currentSeamGroupIndex = newGroupIndex;
+    }
+
+    m_currentGroupIndex = newGroupIndex;
+    m_currentTypeIndex = 0;
+    RefreshGroupCombo();
+    RefreshTypeCombo();
+    RefreshEditor();
+    AppendLog(QString("已新建%1：%2，包含四条段类型数据。").arg(ModeGroupName(), name));
+}
+
+void WeldSeamCompDialog::RenameCurrentGroup()
+{
+    QString error;
+    if (!StoreEditorValues(true, error))
+    {
+        QMessageBox::warning(this, "重命名补偿组", error);
+        return;
+    }
+
+    const int index = CurrentGroupCount() > 0 ? std::clamp(m_currentGroupIndex, 0, CurrentGroupCount() - 1) : -1;
+    if (index < 0)
+    {
+        return;
+    }
+
+    QString name;
+    if (m_mode == CompMode::Pose)
+    {
+        if (index >= m_poseGroupNames.size())
+        {
+            return;
+        }
+        name = m_poseGroupNames[index];
+    }
+    else
+    {
+        if (index >= m_seamGroupNames.size())
+        {
+            return;
+        }
+        name = m_seamGroupNames[index];
+    }
+
+    if (!EditGroupName(name, QString("重命名%1").arg(ModeGroupName())))
+    {
+        return;
+    }
+
+    if (m_mode == CompMode::Pose)
+    {
+        m_poseGroupNames[index] = name;
+    }
+    else
+    {
+        m_seamGroupNames[index] = name;
+    }
+
+    m_currentGroupIndex = index;
+    if (m_mode == CompMode::Pose)
+    {
+        m_currentPoseGroupIndex = index;
+    }
+    else
+    {
+        m_currentSeamGroupIndex = index;
+    }
+    RefreshGroupCombo();
+    RefreshTypeCombo();
+    RefreshEditor();
+    AppendLog(QString("已重命名%1：%2。").arg(ModeGroupName(), name));
+}
+
+void WeldSeamCompDialog::DeleteCurrentGroup()
+{
+    QString error;
+    if (!StoreEditorValues(true, error))
+    {
+        QMessageBox::warning(this, "删除补偿组", error);
+        return;
+    }
+
+    const int index = CurrentGroupCount() > 0 ? std::clamp(m_currentGroupIndex, 0, CurrentGroupCount() - 1) : -1;
+    if (index < 0)
+    {
+        return;
+    }
+
+    QString name;
+    if (m_mode == CompMode::Pose)
+    {
+        if (index >= m_poseGroupNames.size())
+        {
+            return;
+        }
+        name = m_poseGroupNames[index];
+    }
+    else
+    {
+        if (index >= m_seamGroupNames.size())
+        {
+            return;
+        }
+        name = m_seamGroupNames[index];
+    }
+
+    const QString message = QString("确定删除%1“%2”吗？这会同时删除低平台、上升边、高平台、下降边四条数据。")
+        .arg(ModeGroupName(), name);
+    if (QMessageBox::question(this, "删除补偿组", message, QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    if (m_mode == CompMode::Pose)
+    {
+        m_poseGroupNames.removeAt(index);
+        if (index < m_poseGroupMatchModes.size())
+        {
+            m_poseGroupMatchModes.removeAt(index);
+        }
+        const int start = index * COMP_SEGMENT_COUNT;
+        for (int segmentIndex = 0; segmentIndex < COMP_SEGMENT_COUNT && start < m_poseRows.size(); ++segmentIndex)
+        {
+            m_poseRows.removeAt(start);
+        }
+        for (int rowIndex = 0; rowIndex < m_poseRows.size(); ++rowIndex)
+        {
+            m_poseRows[rowIndex].sectionName = QString("WeldPoseComp%1").arg(rowIndex);
+        }
+        const int nextCount = m_poseGroupNames.size();
+        m_currentPoseGroupIndex = nextCount > 0 ? std::min(index, nextCount - 1) : 0;
+        m_currentGroupIndex = m_currentPoseGroupIndex;
+    }
+    else
+    {
+        m_seamGroupNames.removeAt(index);
+        const int start = index * COMP_SEGMENT_COUNT;
+        for (int segmentIndex = 0; segmentIndex < COMP_SEGMENT_COUNT && start < m_seamRows.size(); ++segmentIndex)
+        {
+            m_seamRows.removeAt(start);
+        }
+        for (int rowIndex = 0; rowIndex < m_seamRows.size(); ++rowIndex)
+        {
+            m_seamRows[rowIndex].sectionName = QString("WeldSeamComp%1").arg(rowIndex);
+        }
+        const int nextCount = m_seamGroupNames.size();
+        m_currentSeamGroupIndex = nextCount > 0 ? std::min(index, nextCount - 1) : 0;
+        m_currentGroupIndex = m_currentSeamGroupIndex;
+    }
+
+    m_currentTypeIndex = CurrentGroupCount() > 0 ? 0 : -1;
+    RefreshGroupCombo();
+    RefreshTypeCombo();
+    RefreshEditor();
+    AppendLog(QString("已删除%1：%2。").arg(ModeGroupName(), name));
 }
 
 bool WeldSeamCompDialog::SaveCurrentParam()
@@ -654,11 +1324,13 @@ bool WeldSeamCompDialog::SaveCurrentParam()
         return false;
     }
 
-    const QString path = CurrentParamPath();
-    const bool ok = m_mode == CompMode::Pose
-        ? SavePoseParam(path, error)
-        : SaveSeamParam(path, error);
-    if (!ok)
+    if (!SavePoseParam(CurrentPoseParamPath(), error))
+    {
+        QMessageBox::warning(this, "保存补偿参数", error);
+        AppendLog("保存失败：" + error);
+        return false;
+    }
+    if (!SaveSeamParam(CurrentSeamParamPath(), error))
     {
         QMessageBox::warning(this, "保存补偿参数", error);
         AppendLog("保存失败：" + error);
@@ -666,7 +1338,7 @@ bool WeldSeamCompDialog::SaveCurrentParam()
     }
 
     MarkCleanSnapshot();
-    AppendLog(QString("%1已保存。").arg(m_mode == CompMode::Pose ? "姿态补偿参数" : "焊道补偿参数"));
+    AppendLog("姿态补偿参数和焊道补偿参数已保存。");
     QMessageBox::information(this, "保存补偿参数", "补偿参数保存完成。");
     return true;
 }
@@ -682,19 +1354,45 @@ bool WeldSeamCompDialog::SavePoseParam(const QString& path, QString& error) cons
     COPini ini;
     ini.SetFileName(LocalString(path));
     ini.SetSectionName("ALLWeldPoseComp");
+    const int poseGroupCount = static_cast<int>(m_poseGroupNames.size());
+    const int activeGroupIndex = poseGroupCount <= 0
+        ? 0
+        : std::clamp(m_currentPoseGroupIndex, 0, poseGroupCount - 1);
+    const int activeMatchMode = poseGroupCount <= 0 || activeGroupIndex >= m_poseGroupMatchModes.size()
+        ? NormalizePoseCompMatchMode(m_poseCompMatchMode)
+        : NormalizePoseCompMatchMode(m_poseGroupMatchModes[activeGroupIndex]);
     if (!ini.WriteString("PoseCompCount", static_cast<int>(m_poseRows.size()))
+        || !ini.WriteString(POSE_GROUP_COUNT_KEY, static_cast<int>(m_poseGroupNames.size()))
+        || !ini.WriteString(POSE_ACTIVE_GROUP_INDEX_KEY, activeGroupIndex)
+        || !ini.WriteString(POSE_COMP_MATCH_MODE_KEY, activeMatchMode)
         || !ini.WriteString("PoseMatchMaxErrorDeg", m_poseMatchMaxErrorDeg, 6))
     {
         error = "写入姿态补偿总配置失败：" + path;
         return false;
     }
 
+    for (int groupIndex = 0; groupIndex < m_poseGroupNames.size(); ++groupIndex)
+    {
+        ini.SetSectionName(LocalString(QString("WeldPoseCompGroup%1").arg(groupIndex)));
+        const int groupMatchMode = groupIndex < m_poseGroupMatchModes.size()
+            ? NormalizePoseCompMatchMode(m_poseGroupMatchModes[groupIndex])
+            : activeMatchMode;
+        if (!ini.WriteString("Name", LocalString(m_poseGroupNames[groupIndex]))
+            || !ini.WriteString(POSE_COMP_MATCH_MODE_KEY, groupMatchMode))
+        {
+            error = QString("写入姿态补偿组失败：WeldPoseCompGroup%1").arg(groupIndex);
+            return false;
+        }
+    }
+
     for (int index = 0; index < m_poseRows.size(); ++index)
     {
         const PoseCompRow& row = m_poseRows[index];
-        ini.SetSectionName(QString("WeldPoseComp%1").arg(index).toStdString());
-        if (!ini.WriteString("Name", LocalString(row.name))
-            || !ini.WriteString("SegmentKind", row.segmentKind.toStdString())
+        ini.SetSectionName(LocalString(QString("WeldPoseComp%1").arg(index)));
+        if (!ini.WriteString("GroupIndex", index / COMP_SEGMENT_COUNT)
+            || !ini.WriteString("GroupName", LocalString(index / COMP_SEGMENT_COUNT < m_poseGroupNames.size() ? m_poseGroupNames[index / COMP_SEGMENT_COUNT] : QString()))
+            || !ini.WriteString("Name", LocalString(row.name))
+            || !ini.WriteString("SegmentKind", LocalString(row.segmentKind))
             || !ini.WriteString("Rx", row.poseRx, 6)
             || !ini.WriteString("Ry", row.poseRy, 6)
             || !ini.WriteString("Rz", row.poseRz, 6)
@@ -720,18 +1418,36 @@ bool WeldSeamCompDialog::SaveSeamParam(const QString& path, QString& error) cons
     COPini ini;
     ini.SetFileName(LocalString(path));
     ini.SetSectionName("ALLWeldSeamComp");
-    if (!ini.WriteString("SeamCompCount", static_cast<int>(m_seamRows.size())))
+    const int seamGroupCount = static_cast<int>(m_seamGroupNames.size());
+    const int activeGroupIndex = seamGroupCount <= 0
+        ? 0
+        : std::clamp(m_currentSeamGroupIndex, 0, seamGroupCount - 1);
+    if (!ini.WriteString("SeamCompCount", static_cast<int>(m_seamRows.size()))
+        || !ini.WriteString(SEAM_GROUP_COUNT_KEY, static_cast<int>(m_seamGroupNames.size()))
+        || !ini.WriteString(SEAM_ACTIVE_GROUP_INDEX_KEY, activeGroupIndex))
     {
         error = "写入焊道补偿总配置失败：" + path;
         return false;
     }
 
+    for (int groupIndex = 0; groupIndex < m_seamGroupNames.size(); ++groupIndex)
+    {
+        ini.SetSectionName(LocalString(QString("WeldSeamCompGroup%1").arg(groupIndex)));
+        if (!ini.WriteString("Name", LocalString(m_seamGroupNames[groupIndex])))
+        {
+            error = QString("写入焊道补偿组失败：WeldSeamCompGroup%1").arg(groupIndex);
+            return false;
+        }
+    }
+
     for (int index = 0; index < m_seamRows.size(); ++index)
     {
         const SeamCompRow& row = m_seamRows[index];
-        ini.SetSectionName(QString("WeldSeamComp%1").arg(index).toStdString());
-        if (!ini.WriteString("Name", LocalString(row.name))
-            || !ini.WriteString("SegmentKind", row.segmentKind.toStdString())
+        ini.SetSectionName(LocalString(QString("WeldSeamComp%1").arg(index)));
+        if (!ini.WriteString("GroupIndex", index / COMP_SEGMENT_COUNT)
+            || !ini.WriteString("GroupName", LocalString(index / COMP_SEGMENT_COUNT < m_seamGroupNames.size() ? m_seamGroupNames[index / COMP_SEGMENT_COUNT] : QString()))
+            || !ini.WriteString("Name", LocalString(row.name))
+            || !ini.WriteString("SegmentKind", LocalString(row.segmentKind))
             || !ini.WriteString("WeldZComp", row.weldZComp, 6)
             || !ini.WriteString("WeldGunDirComp", row.weldGunDirComp, 6)
             || !ini.WriteString("WeldSeamDirComp", row.weldSeamDirComp, 6))
@@ -752,8 +1468,19 @@ QString WeldSeamCompDialog::BuildSnapshot() const
 {
     QStringList fields;
     fields << CurrentRobotName()
-           << QString::number(m_poseMatchMaxErrorDeg, 'f', 6);
+           << QString::number(NormalizePoseCompMatchMode(m_poseCompMatchMode))
+           << QString::number(m_poseMatchMaxErrorDeg, 'f', 6)
+           << QString::number(m_currentPoseGroupIndex)
+           << QString::number(m_currentSeamGroupIndex);
 
+    for (int index = 0; index < m_poseGroupNames.size(); ++index)
+    {
+        fields << "poseGroup"
+               << m_poseGroupNames[index]
+               << QString::number(index < m_poseGroupMatchModes.size()
+                   ? NormalizePoseCompMatchMode(m_poseGroupMatchModes[index])
+                   : NormalizePoseCompMatchMode(m_poseCompMatchMode));
+    }
     for (const PoseCompRow& row : m_poseRows)
     {
         fields << row.sectionName << row.name << row.segmentKind
@@ -763,6 +1490,10 @@ QString WeldSeamCompDialog::BuildSnapshot() const
                << QString::number(row.compX, 'f', 6)
                << QString::number(row.compY, 'f', 6)
                << QString::number(row.compZ, 'f', 6);
+    }
+    for (const QString& groupName : m_seamGroupNames)
+    {
+        fields << "seamGroup" << groupName;
     }
     for (const SeamCompRow& row : m_seamRows)
     {

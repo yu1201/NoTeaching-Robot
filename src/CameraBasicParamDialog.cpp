@@ -157,7 +157,7 @@ namespace
 {
     std::string ToIniBytes(const QString& text)
     {
-        return text.toLocal8Bit().toStdString();
+        return text.toUtf8().toStdString();
     }
 
     bool WriteRobotSetupReadyFlag(const QString& robotName, const QString& key, QString* error = nullptr)

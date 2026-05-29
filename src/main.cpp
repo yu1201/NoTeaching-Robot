@@ -65,7 +65,7 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName("NoTeaching-Robot");
-    app.setApplicationVersion("2026.05.27.1711");
+    app.setApplicationVersion("2026.05.30.0330");
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();

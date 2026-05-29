@@ -1,5 +1,6 @@
 #include "RobotDataHelper.h"
 
+#include "ConfigDatabase.h"
 #include "ContralUnit.h"
 #include "OPini.h"
 #include "RobotDriverAdaptor.h"
@@ -10,7 +11,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
-#include <QSet>
 #include <QStringList>
 #include <QStringConverter>
 #include <QTextStream>
@@ -82,74 +82,10 @@ QString DecodeConfigTextForRobotData(const std::string& text)
     return QString::fromLocal8Bit(bytes.constData(), bytes.size());
 }
 
-QString ReadTextFileSmart(const QString& path)
+std::string EncodeIniTextForRobotData(const QString& text)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-    {
-        return QString();
-    }
-    const QByteArray bytes = file.readAll();
-    QString text = QString::fromUtf8(bytes);
-    if (text.contains(QChar(0xfffd)))
-    {
-        text = QString::fromLocal8Bit(bytes);
-    }
-    text.replace("\r\n", "\n");
-    text.replace('\r', '\n');
-    return text;
-}
-
-QStringList ExtractIniSectionLines(const QString& content, const QString& sectionName)
-{
-    QStringList result;
-    bool inSection = false;
-    const QStringList lines = content.split('\n');
-    for (const QString& line : lines)
-    {
-        const QString trimmed = line.trimmed();
-        if (trimmed.startsWith('[') && trimmed.endsWith(']'))
-        {
-            const QString currentSection = trimmed.mid(1, trimmed.size() - 2).trimmed();
-            if (inSection && currentSection.compare(sectionName, Qt::CaseInsensitive) != 0)
-            {
-                break;
-            }
-            inSection = currentSection.compare(sectionName, Qt::CaseInsensitive) == 0;
-            continue;
-        }
-        if (inSection)
-        {
-            result << line;
-        }
-    }
-    while (!result.isEmpty() && result.last().trimmed().isEmpty())
-    {
-        result.removeLast();
-    }
-    return result;
-}
-
-QStringList ZeroIniSectionValues(const QStringList& lines)
-{
-    QStringList result;
-    for (const QString& line : lines)
-    {
-        const QString trimmed = line.trimmed();
-        if (trimmed.isEmpty() || trimmed.startsWith('#') || trimmed.startsWith(';'))
-        {
-            result << line;
-            continue;
-        }
-        const int equalPos = line.indexOf('=');
-        if (equalPos <= 0)
-        {
-            result << line;
-            continue;
-        }
-        result << QString("%1=0").arg(line.left(equalPos).trimmed());
-    }
-    return result;
+    const QByteArray bytes = text.toUtf8();
+    return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
 }
 
 QStringList DefaultScanParamLines()
@@ -260,129 +196,80 @@ QStringList DefaultWeldParamLines()
         << "CornerTransitionLeadDis=0 ;拐点过渡距离(mm)"
         << "WeldStartSkipDis=0 ;起点跳过距离(mm)"
         << "WeldEndSkipDis=0 ;终点跳过距离(mm)"
-        << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)";
+        << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)"
+        << "SlopeRzMinDeg=-20 ;爬坡/下坡段RZ负向夹紧(deg)"
+        << "SlopeRzMaxDeg=20 ;爬坡/下坡段RZ正向夹紧(deg)";
 }
 
-QStringList DefaultWeldRuntimeParamLines(const QSet<QString>& existingKeys)
+std::string ToUtf8StdString(const QString& text)
 {
-    QStringList lines;
-    QStringList runtimeLines;
-    if (!existingKeys.contains("WeldEnable"))
-    {
-        runtimeLines << "WeldEnable=1 ;1焊接，0空跑";
-    }
-    if (!existingKeys.contains("WeldSpeedMmPerMin"))
-    {
-        runtimeLines << "WeldSpeedMmPerMin=400 ;焊接速度(mm/min)";
-    }
-    if (!existingKeys.contains("DryRunSpeedMmPerMin"))
-    {
-        runtimeLines << "DryRunSpeedMmPerMin=1000 ;空跑速度(mm/min)";
-    }
-    if (!existingKeys.contains("WeldSafeMoveSpeedMmPerMin"))
-    {
-        runtimeLines << "WeldSafeMoveSpeedMmPerMin=1000 ;下枪/收枪安全位移动速度(mm/min)";
-    }
-    if (!existingKeys.contains("StepOverlapRel"))
-    {
-        runtimeLines << "StepOverlapRel=20 ;STEP连续过渡比例(OVERLAPREL)";
-    }
-    if (!existingKeys.contains("WeldDirection"))
-    {
-        runtimeLines << "WeldDirection=1 ;焊接方向：1起点到终点，-1终点到起点";
-    }
-    if (!runtimeLines.isEmpty())
-    {
-        lines << "#焊接执行" << runtimeLines;
-    }
-    QStringList poseLines;
-    if (!existingKeys.contains("WeldRzGainDeg"))
-    {
-        poseLines << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)";
-    }
-    if (!poseLines.isEmpty())
-    {
-        if (!lines.isEmpty())
-        {
-            lines << "";
-        }
-        lines << "#焊接姿态" << poseLines;
-    }
-    return lines;
+    const QByteArray bytes = text.toUtf8();
+    return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
 }
 
-void AppendMissingWeldRuntimeParams(QStringList& output, const QSet<QString>& keys, bool& changed)
+QString DefaultIniLineKey(const QString& line)
 {
-    const QStringList missingLines = DefaultWeldRuntimeParamLines(keys);
-    if (missingLines.isEmpty())
+    const int equalPos = line.indexOf('=');
+    if (equalPos <= 0)
     {
-        return;
+        return QString();
     }
-
-    if (!output.isEmpty() && !output.last().trimmed().isEmpty())
-    {
-        output << "";
-    }
-    output << missingLines;
-    changed = true;
+    return line.left(equalPos).trimmed();
 }
 
-bool EnsureWeldRuntimeParamsInFile(const QString& filePath, QString* error)
+QString DefaultIniLineValue(const QString& line)
 {
-    const QString content = ReadTextFileSmart(filePath);
-    if (content.isEmpty())
+    const int equalPos = line.indexOf('=');
+    if (equalPos < 0)
+    {
+        return QString();
+    }
+
+    QString value = line.mid(equalPos + 1).trimmed();
+    const int commentPos = value.indexOf(';');
+    if (commentPos >= 0)
+    {
+        value = value.left(commentPos).trimmed();
+    }
+    return value;
+}
+
+bool WriteDefaultLineIfMissing(COPini& ini, const QString& line)
+{
+    const QString trimmed = line.trimmed();
+    if (trimmed.isEmpty() || trimmed.startsWith('#') || trimmed.startsWith(';'))
     {
         return true;
     }
 
-    QStringList output;
-    const QStringList lines = content.split('\n');
-    bool inWeldSection = false;
-    bool changed = false;
-    QSet<QString> keys;
+    const QString key = DefaultIniLineKey(line);
+    if (key.isEmpty())
+    {
+        return true;
+    }
 
+    const std::string keyText = ToUtf8StdString(key);
+    if (ini.CheckExists(keyText))
+    {
+        return true;
+    }
+
+    return ini.WriteString(keyText, ToUtf8StdString(DefaultIniLineValue(line)));
+}
+
+bool EnsureDefaultLinesInSection(COPini& ini, const QString& sectionName, const QStringList& lines)
+{
+    ini.SetSectionName(ToUtf8StdString(sectionName));
     for (const QString& line : lines)
     {
-        const QString trimmed = line.trimmed();
-        if (trimmed.startsWith('[') && trimmed.endsWith(']'))
+        if (!WriteDefaultLineIfMissing(ini, line))
         {
-            if (inWeldSection)
-            {
-                AppendMissingWeldRuntimeParams(output, keys, changed);
-            }
-            const QString sectionName = trimmed.mid(1, trimmed.size() - 2).trimmed();
-            inWeldSection = sectionName.startsWith("MeasureGroup", Qt::CaseInsensitive)
-                && sectionName.endsWith(".Weld", Qt::CaseInsensitive);
-            keys.clear();
+            return false;
         }
-
-        if (inWeldSection)
-        {
-            const int equalPos = line.indexOf('=');
-            if (equalPos > 0)
-            {
-                keys.insert(line.left(equalPos).trimmed());
-            }
-        }
-        output << line;
     }
-
-    if (inWeldSection)
-    {
-        AppendMissingWeldRuntimeParams(output, keys, changed);
-    }
-
-    while (!output.isEmpty() && output.last().trimmed().isEmpty())
-    {
-        output.removeLast();
-    }
-
-    if (!changed)
-    {
-        return true;
-    }
-    return RobotDataHelper::SaveTextFileLines(filePath, output, error);
+    return true;
 }
+
 }
 
 // ===== 工程路径 =====
@@ -613,7 +500,7 @@ QVector<RobotDataHelper::CameraInfo> RobotDataHelper::LoadCameraList(const QStri
     int selectedIndex = 0;
 
     COPini ini;
-    if (ini.SetFileName(CameraParamPath(robotName).toStdString()))
+    if (ini.SetFileName(ToUtf8StdString(CameraParamPath(robotName))))
     {
         int cameraNum = 0;
         int measureCameraNo = 0;
@@ -628,7 +515,7 @@ QVector<RobotDataHelper::CameraInfo> RobotDataHelper::LoadCameraList(const QStri
         for (int index = 0; index < cameraNum; ++index)
         {
             const QString sectionName = QString("CAMERA%1").arg(index);
-            ini.SetSectionName(sectionName.toStdString());
+            ini.SetSectionName(ToUtf8StdString(sectionName));
 
             std::string cameraName;
             const int readResult = ini.ReadString(false, "CameraName", cameraName);
@@ -636,7 +523,7 @@ QVector<RobotDataHelper::CameraInfo> RobotDataHelper::LoadCameraList(const QStri
             CameraInfo info;
             info.sectionName = sectionName;
             info.displayName = readResult > 0 && !cameraName.empty()
-                ? QString("%1 (%2)").arg(QString::fromStdString(cameraName), sectionName)
+                ? QString("%1 (%2)").arg(DecodeConfigTextForRobotData(cameraName), sectionName)
                 : sectionName;
             cameras.push_back(info);
         }
@@ -670,7 +557,7 @@ QVector<RobotDataHelper::CameraInfo> RobotDataHelper::LoadCameraList(const QStri
 QString RobotDataHelper::MeasureCameraSection(const QString& robotName)
 {
     COPini ini;
-    if (!ini.SetFileName(CameraParamPath(robotName).toStdString()))
+    if (!ini.SetFileName(ToUtf8StdString(CameraParamPath(robotName))))
     {
         return "CAMERA0";
     }
@@ -685,7 +572,7 @@ bool RobotDataHelper::LoadCameraParam(const QString& robotName, const QString& c
 {
     const QString iniPath = CameraParamPath(robotName);
     COPini ini;
-    if (!ini.SetFileName(iniPath.toStdString()))
+    if (!ini.SetFileName(ToUtf8StdString(iniPath)))
     {
         if (error != nullptr)
         {
@@ -696,7 +583,7 @@ bool RobotDataHelper::LoadCameraParam(const QString& robotName, const QString& c
 
     param = CameraParamData();
     param.sectionName = cameraSection.isEmpty() ? "CAMERA0" : cameraSection;
-    ini.SetSectionName(param.sectionName.toStdString());
+    ini.SetSectionName(ToUtf8StdString(param.sectionName));
 
     std::string textValue;
     double numberValue = 0.0;
@@ -704,7 +591,7 @@ bool RobotDataHelper::LoadCameraParam(const QString& robotName, const QString& c
 
     if (ini.ReadString(false, "DeviceAddress", textValue) > 0)
     {
-        param.deviceAddress = QString::fromStdString(textValue);
+        param.deviceAddress = DecodeConfigTextForRobotData(textValue);
     }
     if (ini.ReadString(false, "DevicePort", &intValue) > 0)
     {
@@ -729,7 +616,7 @@ bool RobotDataHelper::SaveCameraParam(const QString& robotName, const CameraPara
 {
     const QString iniPath = CameraParamPath(robotName);
     COPini ini;
-    if (!ini.SetFileName(iniPath.toStdString()))
+    if (!ini.SetFileName(ToUtf8StdString(iniPath)))
     {
         if (error != nullptr)
         {
@@ -758,9 +645,9 @@ bool RobotDataHelper::SaveCameraParam(const QString& robotName, const CameraPara
         return false;
     }
 
-    ini.SetSectionName(sectionName.toStdString());
+    ini.SetSectionName(ToUtf8StdString(sectionName));
     const bool saveOk =
-        ini.WriteString("DeviceAddress", deviceAddress.toStdString()) &&
+        ini.WriteString("DeviceAddress", ToUtf8StdString(deviceAddress)) &&
         ini.WriteString("DevicePort", devicePort) &&
         ini.WriteString("ExposureTime", exposureTime, 6) &&
         ini.WriteString("GainLevel", gainLevel, 6) &&
@@ -793,49 +680,59 @@ QString RobotDataHelper::MeasureWeldWeldSectionName(int groupIndex)
 bool RobotDataHelper::EnsureMeasureWeldParamFile(const QString& robotName, QString* error)
 {
     const QString newPath = MeasureWeldParamPath(robotName);
-    if (QFileInfo::exists(newPath))
-    {
-        return EnsureWeldRuntimeParamsInFile(newPath, error);
-    }
-
-    int groupCount = 1;
-    int useGroupNo = 0;
-
-    QStringList output;
-    output << "[MeasureWeldGroups]";
-    output << QString("GroupCount=%1").arg(groupCount);
-    output << QString("UseGroupNo=%1").arg(useGroupNo);
-    for (int index = 0; index < groupCount; ++index)
-    {
-        output << QString("Group%1Name=参数组%2").arg(index).arg(index + 1);
-    }
-    output << "";
-
-    for (int index = 0; index < groupCount; ++index)
-    {
-        output << QString("[%1]").arg(MeasureWeldScanSectionName(index));
-        output << DefaultScanParamLines();
-        output << "";
-        output << QString("[%1]").arg(MeasureWeldWeldSectionName(index));
-        output << DefaultWeldParamLines();
-        output << "";
-    }
-
-    QDir().mkpath(QFileInfo(newPath).absolutePath());
-    QFile file(newPath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    if (!ConfigDatabase::IsAvailable())
     {
         if (error != nullptr)
         {
-            *error = QString("创建测量焊接参数文件失败：%1").arg(newPath);
+            *error = QString("配置库不存在或结构无效，请先运行迁移工具：%1").arg(ConfigDatabase::DatabasePath());
         }
         return false;
     }
-    QTextStream stream(&file);
-    stream.setEncoding(QStringConverter::Utf8);
-    stream << output.join("\n") << "\n";
-    file.close();
-    return EnsureWeldRuntimeParamsInFile(newPath, error);
+
+    COPini ini;
+    if (!ini.SetFileName(false, ToUtf8StdString(newPath)))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("打开配置库测量焊接参数失败：%1").arg(newPath);
+        }
+        return false;
+    }
+
+    ini.SetSectionName("MeasureWeldGroups");
+    if (!ini.CheckExists("GroupCount"))
+    {
+        ini.WriteString("GroupCount", 1);
+    }
+    if (!ini.CheckExists("UseGroupNo"))
+    {
+        ini.WriteString("UseGroupNo", 0);
+    }
+
+    int groupCount = 1;
+    ini.ReadString(false, "GroupCount", &groupCount);
+    groupCount = std::max(1, groupCount);
+
+    for (int index = 0; index < groupCount; ++index)
+    {
+        const QString groupNameKey = QString("Group%1Name").arg(index);
+        if (!ini.CheckExists(ToUtf8StdString(groupNameKey)))
+        {
+            ini.WriteString(ToUtf8StdString(groupNameKey), ToUtf8StdString(QString("参数组%1").arg(index + 1)));
+        }
+
+        if (!EnsureDefaultLinesInSection(ini, MeasureWeldScanSectionName(index), DefaultScanParamLines())
+            || !EnsureDefaultLinesInSection(ini, MeasureWeldWeldSectionName(index), DefaultWeldParamLines()))
+        {
+            if (error != nullptr)
+            {
+                *error = QString("写入配置库测量焊接默认参数失败：%1").arg(newPath);
+            }
+            return false;
+        }
+    }
+
+    return true;
 }
 
 int RobotDataHelper::MeasureWeldCurrentGroupIndex(const QString& robotName, QString* error)
@@ -846,7 +743,7 @@ int RobotDataHelper::MeasureWeldCurrentGroupIndex(const QString& robotName, QStr
     }
     COPini ini;
     const QString path = MeasureWeldParamPath(robotName);
-    if (!ini.SetFileName(path.toLocal8Bit().constData()))
+    if (!ini.SetFileName(path.toUtf8().constData()))
     {
         if (error != nullptr)
         {
@@ -875,7 +772,7 @@ QString RobotDataHelper::MeasureWeldCurrentWeldSectionName(const QString& robotN
 bool RobotDataHelper::ReadPulse(const QString& filePath, const QString& sectionName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error)
 {
     COPini ini;
-    if (!ini.SetFileName(filePath.toLocal8Bit().constData()))
+    if (!ini.SetFileName(filePath.toUtf8().constData()))
     {
         if (error != nullptr)
         {
@@ -883,12 +780,12 @@ bool RobotDataHelper::ReadPulse(const QString& filePath, const QString& sectionN
         }
         return false;
     }
-    ini.SetSectionName(sectionName.toStdString());
+    ini.SetSectionName(ToUtf8StdString(sectionName));
 
     auto readValue = [&ini, &prefix, error](const QString& suffix, long& value) -> bool
         {
             const QString fullKey = prefix + "." + suffix;
-            const int ok = ini.ReadString(fullKey.toStdString(), &value);
+            const int ok = ini.ReadString(ToUtf8StdString(fullKey), &value);
             if (ok <= 0)
             {
                 if (error != nullptr)
@@ -920,7 +817,7 @@ bool RobotDataHelper::ReadPulse(const QString& filePath, const QString& sectionN
 bool RobotDataHelper::WritePulse(const QString& filePath, const QString& sectionName, const QString& prefix, const T_ANGLE_PULSE& pulse, QString* error)
 {
     COPini ini;
-    if (!ini.SetFileName(filePath.toLocal8Bit().constData()))
+    if (!ini.SetFileName(filePath.toUtf8().constData()))
     {
         if (error != nullptr)
         {
@@ -928,12 +825,12 @@ bool RobotDataHelper::WritePulse(const QString& filePath, const QString& section
         }
         return false;
     }
-    ini.SetSectionName(sectionName.toStdString());
+    ini.SetSectionName(ToUtf8StdString(sectionName));
 
     auto writeValue = [&ini, &prefix, error](const QString& suffix, long value) -> bool
         {
             const QString fullKey = prefix + "." + suffix;
-            if (!ini.WriteString(fullKey.toStdString(), value))
+            if (!ini.WriteString(ToUtf8StdString(fullKey), value))
             {
                 if (error != nullptr)
                 {
@@ -964,7 +861,7 @@ bool RobotDataHelper::WritePulse(const QString& filePath, const QString& section
 bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionName, const QString& prefix, T_ROBOT_COORS& coors, QString* error)
 {
     COPini ini;
-    if (!ini.SetFileName(filePath.toLocal8Bit().constData()))
+    if (!ini.SetFileName(filePath.toUtf8().constData()))
     {
         if (error != nullptr)
         {
@@ -972,7 +869,7 @@ bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionN
         }
         return false;
     }
-    ini.SetSectionName(sectionName.toStdString());
+    ini.SetSectionName(ToUtf8StdString(sectionName));
 
     coors = T_ROBOT_COORS();
     QStringList missingKeys;
@@ -980,7 +877,7 @@ bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionN
     auto readRequired = [&ini, &prefix, &missingKeys](const QString& suffix, double& value)
         {
             const QString key = prefix + "." + suffix;
-            if (ini.ReadString(false, key.toStdString(), &value) <= 0)
+            if (ini.ReadString(false, ToUtf8StdString(key), &value) <= 0)
             {
                 missingKeys << key;
             }
@@ -988,7 +885,7 @@ bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionN
     auto readOptional = [&ini, &prefix](const QString& suffix, double& value)
         {
             const QString key = prefix + "." + suffix;
-            ini.ReadString(false, key.toStdString(), &value);
+            ini.ReadString(false, ToUtf8StdString(key), &value);
         };
 
     readRequired("X", coors.dX);
@@ -1016,7 +913,7 @@ bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionN
 bool RobotDataHelper::WriteCoors(const QString& filePath, const QString& sectionName, const QString& prefix, const T_ROBOT_COORS& coors, QString* error)
 {
     COPini ini;
-    if (!ini.SetFileName(filePath.toLocal8Bit().constData()))
+    if (!ini.SetFileName(filePath.toUtf8().constData()))
     {
         if (error != nullptr)
         {
@@ -1024,9 +921,9 @@ bool RobotDataHelper::WriteCoors(const QString& filePath, const QString& section
         }
         return false;
     }
-    ini.SetSectionName(sectionName.toStdString());
+    ini.SetSectionName(ToUtf8StdString(sectionName));
 
-    if (!ini.WriteString((prefix + ".").toStdString(), "", coors))
+    if (!ini.WriteString(ToUtf8StdString(prefix + "."), "", coors))
     {
         if (error != nullptr)
         {
@@ -1040,7 +937,7 @@ bool RobotDataHelper::WriteCoors(const QString& filePath, const QString& section
 bool RobotDataHelper::WriteParamValue(const QString& filePath, const QString& sectionName, const QString& key, const QString& value, QString* error)
 {
     COPini ini;
-    if (!ini.SetFileName(filePath.toLocal8Bit().constData()))
+    if (!ini.SetFileName(filePath.toUtf8().constData()))
     {
         if (error != nullptr)
         {
@@ -1048,8 +945,8 @@ bool RobotDataHelper::WriteParamValue(const QString& filePath, const QString& se
         }
         return false;
     }
-    ini.SetSectionName(sectionName.toStdString());
-    if (!ini.WriteString(key.toStdString(), value.toStdString()))
+    ini.SetSectionName(EncodeIniTextForRobotData(sectionName));
+    if (!ini.WriteString(EncodeIniTextForRobotData(key), EncodeIniTextForRobotData(value)))
     {
         if (error != nullptr)
         {

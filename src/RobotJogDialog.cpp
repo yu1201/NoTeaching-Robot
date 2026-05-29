@@ -1,5 +1,6 @@
 #include "RobotJogDialog.h"
 
+#include "ConfigDatabase.h"
 #include "FANUCRobotDriver.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
@@ -14,7 +15,6 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPointer>
-#include <QSettings>
 #include <QValidator>
 #include <QVBoxLayout>
 
@@ -372,9 +372,15 @@ void RobotJogDialog::AddAxisRow(QGridLayout* layout, int row, const QString& axi
 
 void RobotJogDialog::LoadSpeedSettings()
 {
-	QSettings settings(JogSettingsPath(), QSettings::IniFormat);
-	const double cartSpeed = settings.value("Speed/Cartesian", 60.0).toDouble();
-	const double jointSpeed = settings.value("Speed/Joint", 1.0).toDouble();
+	const QString settingsPath = JogSettingsPath();
+	QString cartSpeedText;
+	QString jointSpeedText;
+	const double cartSpeed = ConfigDatabase::ReadSetting(settingsPath, "Speed/Cartesian", &cartSpeedText)
+		? cartSpeedText.toDouble()
+		: 60.0;
+	const double jointSpeed = ConfigDatabase::ReadSetting(settingsPath, "Speed/Joint", &jointSpeedText)
+		? jointSpeedText.toDouble()
+		: 1.0;
 	if (m_cartesianSpeedEdit != nullptr)
 	{
 		m_cartesianSpeedEdit->setText(QString::number(std::clamp(cartSpeed, 0.01, 9999.0), 'f', 3));
@@ -387,9 +393,9 @@ void RobotJogDialog::LoadSpeedSettings()
 
 void RobotJogDialog::SaveSpeedSettings() const
 {
-	QSettings settings(JogSettingsPath(), QSettings::IniFormat);
-	settings.setValue("Speed/Cartesian", CartesianSpeed());
-	settings.setValue("Speed/Joint", JointSpeed());
+	const QString settingsPath = JogSettingsPath();
+	ConfigDatabase::WriteSetting(settingsPath, "Speed/Cartesian", QString::number(CartesianSpeed(), 'f', 6));
+	ConfigDatabase::WriteSetting(settingsPath, "Speed/Joint", QString::number(JointSpeed(), 'f', 6));
 }
 
 void RobotJogDialog::ShowMessageOnUiThread(QMessageBox::Icon icon, const QString& title, const QString& text)

@@ -1,6 +1,6 @@
 # CLI 命令说明书
 
-更新时间：2026-05-26
+更新时间：2026-05-30
 
 适用程序：`QtWidgetsApplication4.exe` / `NoTeaching-Robot`
 
@@ -223,13 +223,31 @@ QtWidgetsApplication4.exe --no-show --apply-weld-seam-comp "Result\RobotB\202605
 QtWidgetsApplication4.exe --no-show --apply-weld-seam-comp "D:\pose.txt" --apply-weld-seam-comp-output "D:\pose_SeamComp.txt"
 ```
 
-### 7.3 生成 STEP 焊接程序
+### 7.3 重建先测后焊文件
+
+| 命令 | 参数 | 说明 |
+| --- | --- | --- |
+| `--rebuild-measure-weld-files` | `<DIR>` | 从已有 `LaserPoint` 目录重建 `PreciseLaserPoint_PreservePath_2mm.txt`、`PreciseLaserPoint_WeldPose_2mm.txt` 和补偿文件。 |
+
+说明：
+
+- 目录通常是一次结果下的 `LaserPoint` 文件夹。
+- 机器人和参数读取仍按 `--robot` / 当前机器人选择。
+- 适合跳过重新扫描，只对已有点云重新生成姿态和补偿结果。
+
+示例：
+
+```powershell
+QtWidgetsApplication4.exe --no-show --robot RobotC --rebuild-measure-weld-files "Result\RobotC\20260528_020\LaserPoint"
+```
+
+### 7.4 生成 STEP 焊接程序
 
 | 命令 | 参数 | 说明 |
 | --- | --- | --- |
 | `--generate-step-weld-program` | `<FILE>` | 根据焊接姿态文件生成 STEP `Weld_时间.srp/.srd`。默认生成实际焊接程序，包含 `ARCON/ARCOFF`。 |
 | `--generate-step-weld-program-output-dir` | `<DIR>` | 指定 STEP 焊接程序输出目录，默认 `Job\STEP`。 |
-| `--generate-step-weld-program-dry-run` | 无 | 按空跑轨迹生成 STEP 文件，实际焊接变量置 0，运行时跳过 `ARCON/ARCSET/ARCOFF`。 |
+| `--generate-step-weld-program-dry-run` | 无 | 按空跑轨迹生成 STEP 文件，不生成 `ARCON/ARCSET/ARCOFF` 焊接指令。 |
 | `--generate-step-weld-speed` | `<mm/min>` | 覆盖本次 STEP 文件轨迹速度，不修改 ini。 |
 
 说明：
@@ -245,7 +263,7 @@ QtWidgetsApplication4.exe --no-show --generate-step-weld-program "D:\pose_SeamCo
 QtWidgetsApplication4.exe --no-show --generate-step-weld-program "D:\pose_SeamComp.txt" --generate-step-weld-program-dry-run
 ```
 
-### 7.4 更新焊道平均姿态库
+### 7.5 更新焊道平均姿态库
 
 | 命令 | 参数 | 说明 |
 | --- | --- | --- |

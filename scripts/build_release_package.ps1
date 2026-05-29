@@ -152,7 +152,9 @@ catch {
 if ($trackedDataFiles.Count -gt 0) {
     $packagePrefix = ($packageDir -replace '\\', '/') + '/'
     $trackedDataFiles | Where-Object {
-        $_ -and ($_ -notmatch '副本')
+        $_ -and
+        ($_ -notmatch '副本') -and
+        ($_ -notmatch '(^|/)Data/ConfigStore\.db($|[-.])')
     } | ForEach-Object {
         $gitPath = $_ -replace '\\', '/'
         & git -C $repoRoot checkout-index --force --prefix=$packagePrefix -- $gitPath
@@ -166,6 +168,12 @@ else {
     Copy-DirectoryContent -SourceDir $dataSourceDir -TargetDir $dataTargetDir
 }
 
+# Do not ship the per-device runtime database. Each site keeps or migrates its
+# own ConfigStore.db locally, otherwise updates can overwrite process names.
+Get-ChildItem -LiteralPath $dataTargetDir -Filter "ConfigStore.db*" -File -ErrorAction SilentlyContinue | ForEach-Object {
+    Remove-Item -LiteralPath $_.FullName -Force
+}
+
 Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "icons") -TargetDir (Join-Path $packageDir "icons")
 
 $diagnosticToolsSourceDir = Join-Path $repoRoot "tools"
@@ -173,7 +181,7 @@ $diagnosticToolsTargetDir = Join-Path $packageDir "tools"
 if (Test-Path -LiteralPath $diagnosticToolsSourceDir) {
     New-Item -ItemType Directory -Path $diagnosticToolsTargetDir -Force | Out-Null
     Get-ChildItem -LiteralPath $diagnosticToolsSourceDir -File | Where-Object {
-        $_.Extension.ToLowerInvariant() -in @(".ps1", ".cmd", ".bat", ".txt", ".md")
+        $_.Extension.ToLowerInvariant() -in @(".ps1", ".cmd", ".bat", ".py", ".txt", ".md")
     } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $diagnosticToolsTargetDir $_.Name) -Force
     }

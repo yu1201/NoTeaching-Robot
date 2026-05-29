@@ -26,12 +26,14 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPointer>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QStringList>
 #include <QTextDocument>
 #include <QTextStream>
 #include <QThread>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -43,6 +45,17 @@ constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
 constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
 constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
 constexpr auto WELD_POSE_SEAM_COMP_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
+constexpr int COMP_SEGMENT_COUNT = 4;
+constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
+constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
+constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
+constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
+
+std::string ToUtf8StdString(const QString& text)
+{
+    const QByteArray bytes = text.toUtf8();
+    return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+}
 
 double SafeSpeed(double value, double fallback)
 {
@@ -96,6 +109,116 @@ int CountWeldProcessLayers(const std::vector<T_WELD_PARA>& weldList, const QStri
     }
     return std::max(1, layerCount);
 }
+
+QString BuildPoseCompParamPath(const QString& robotName)
+{
+    return RobotDataHelper::BuildProjectPath(QString("Data/%1/WeldPoseCompParam.ini").arg(robotName));
+}
+
+QString BuildSeamCompParamPath(const QString& robotName)
+{
+    return RobotDataHelper::BuildProjectPath(QString("Data/%1/WeldSeamCompParam.ini").arg(robotName));
+}
+
+void LoadCompGroupCombo(
+    QComboBox* combo,
+    const QString& path,
+    const QString& allSection,
+    const QString& rowCountKey,
+    const QString& groupCountKey,
+    const QString& activeGroupIndexKey,
+    const QString& groupSectionPrefix,
+    const QString& defaultNamePrefix)
+{
+    if (combo == nullptr)
+    {
+        return;
+    }
+
+    const QSignalBlocker blocker(combo);
+    combo->clear();
+
+    int activeIndex = 0;
+    int groupCount = 1;
+    const bool hasFile = QFileInfo::exists(path);
+    if (hasFile)
+    {
+        COPini ini;
+        if (ini.SetFileName(ToUtf8StdString(path)))
+        {
+            ini.SetSectionName(ToUtf8StdString(allSection));
+            ini.ReadString(false, ToUtf8StdString(activeGroupIndexKey), &activeIndex);
+            int configuredGroupCount = 0;
+            if (ini.ReadString(false, ToUtf8StdString(groupCountKey), &configuredGroupCount) > 0)
+            {
+                groupCount = std::max(1, configuredGroupCount);
+            }
+            else
+            {
+                int rowCount = COMP_SEGMENT_COUNT;
+                ini.ReadString(false, ToUtf8StdString(rowCountKey), &rowCount);
+                groupCount = std::max(1, (std::max(0, rowCount) + COMP_SEGMENT_COUNT - 1) / COMP_SEGMENT_COUNT);
+            }
+
+            activeIndex = std::clamp(activeIndex, 0, groupCount - 1);
+            for (int index = 0; index < groupCount; ++index)
+            {
+                QString groupName = QString("%1%2").arg(defaultNamePrefix).arg(index + 1);
+                std::string encodedName;
+                ini.SetSectionName(ToUtf8StdString(QString("%1%2").arg(groupSectionPrefix).arg(index)));
+                if (ini.ReadString(false, "Name", encodedName) > 0)
+                {
+                    const QString decodedName = DecodeRobotMessageText(encodedName).trimmed();
+                    if (!decodedName.isEmpty())
+                    {
+                        groupName = decodedName;
+                    }
+                }
+                combo->addItem(QString("%1 / Group%2").arg(groupName).arg(index), index);
+            }
+        }
+    }
+
+    if (combo->count() <= 0)
+    {
+        combo->addItem(QString("%1%2 / Group0").arg(defaultNamePrefix).arg(1), 0);
+        activeIndex = 0;
+    }
+    combo->setCurrentIndex(std::clamp(activeIndex, 0, combo->count() - 1));
+    combo->setEnabled(combo->count() > 0);
+}
+
+bool SaveActiveCompGroupIndex(
+    const QString& path,
+    const QString& allSection,
+    const QString& activeGroupIndexKey,
+    int activeIndex,
+    QString& error)
+{
+    if (path.isEmpty())
+    {
+        error = "补偿参数路径为空。";
+        return false;
+    }
+    if (!QFileInfo::exists(path) && activeIndex <= 0)
+    {
+        return true;
+    }
+
+    COPini ini;
+    if (!ini.SetFileName(false, ToUtf8StdString(path)))
+    {
+        error = "打开补偿参数失败：" + path;
+        return false;
+    }
+    ini.SetSectionName(ToUtf8StdString(allSection));
+    if (!ini.WriteString(ToUtf8StdString(activeGroupIndexKey), std::max(0, activeIndex)))
+    {
+        error = QString("写入补偿组选择失败：%1").arg(path);
+        return false;
+    }
+    return true;
+}
 }
 
 MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraCacheFunc cameraCacheForUnit, QWidget* parent)
@@ -126,6 +249,8 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
         "QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
         "QComboBox QAbstractItemView { background: #081018; color: #F5FAFA; selection-background-color: #2D7D8C; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
+        "QProgressBar { background: #081018; color: #F5FAFA; border: 1px solid #2C4653; border-radius: 8px; text-align: center; min-height: 18px; }"
+        "QProgressBar::chunk { background: #2D8DA0; border-radius: 7px; }"
         "QLabel { color: #BACBD1; }");
 
     QVBoxLayout* rootLayout = new QVBoxLayout(this);
@@ -155,6 +280,16 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     m_pWeldProcessCombo = new QComboBox();
     m_pWeldProcessCombo->setMinimumWidth(360);
     selectorLayout->addWidget(m_pWeldProcessCombo, 1, 1, 1, 3);
+    selectorLayout->addWidget(new QLabel("姿态补偿组："), 2, 0);
+    m_pPoseCompGroupCombo = new QComboBox();
+    m_pPoseCompGroupCombo->setMinimumWidth(210);
+    m_pPoseCompGroupCombo->setMaximumWidth(320);
+    selectorLayout->addWidget(m_pPoseCompGroupCombo, 2, 1);
+    selectorLayout->addWidget(new QLabel("焊道补偿组："), 2, 2);
+    m_pSeamCompGroupCombo = new QComboBox();
+    m_pSeamCompGroupCombo->setMinimumWidth(210);
+    m_pSeamCompGroupCombo->setMaximumWidth(320);
+    selectorLayout->addWidget(m_pSeamCompGroupCombo, 2, 3);
     selectorLayout->setColumnStretch(4, 1);
     rootLayout->addLayout(selectorLayout);
 
@@ -182,6 +317,23 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     buttonLayout->addWidget(m_pSkipScanWeldBtn, 1, 0, 1, 2);
     rootLayout->addLayout(buttonLayout);
 
+    QVBoxLayout* progressLayout = new QVBoxLayout();
+    progressLayout->setSpacing(6);
+    m_pProgressLabel = new QLabel("等待操作");
+    m_pProgressLabel->setStyleSheet("color: #9ED8DB; font-weight: 600;");
+    m_pProgressBar = new QProgressBar();
+    m_pProgressBar->setRange(0, 100);
+    m_pProgressBar->setValue(0);
+    progressLayout->addWidget(m_pProgressLabel);
+    progressLayout->addWidget(m_pProgressBar);
+    rootLayout->addLayout(progressLayout);
+    m_pProgressLabel->hide();
+    m_pProgressBar->hide();
+
+    m_pProgressAnimationTimer = new QTimer(this);
+    m_pProgressAnimationTimer->setInterval(300);
+    connect(m_pProgressAnimationTimer, &QTimer::timeout, this, &MeasureThenWeldDialog::UpdateProgressAnimation);
+
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
     m_pLogText->document()->setMaximumBlockCount(1600);
@@ -195,6 +347,34 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     connect(m_pRobotCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnRobotChanged);
     connect(m_pParamGroupCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnParamGroupChanged);
     connect(m_pWeldProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnWeldProcessChanged);
+    connect(m_pPoseCompGroupCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
+        {
+            if (m_bLoadingSelectors || m_bRunning)
+            {
+                return;
+            }
+            QString error;
+            if (!SaveCurrentCompGroupSelections(error))
+            {
+                AppendLog("切换姿态补偿组失败：" + error);
+                return;
+            }
+            AppendLog(QString("当前姿态补偿组已切换为：%1").arg(m_pPoseCompGroupCombo != nullptr ? m_pPoseCompGroupCombo->currentText() : QString()));
+        });
+    connect(m_pSeamCompGroupCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
+        {
+            if (m_bLoadingSelectors || m_bRunning)
+            {
+                return;
+            }
+            QString error;
+            if (!SaveCurrentCompGroupSelections(error))
+            {
+                AppendLog("切换焊道补偿组失败：" + error);
+                return;
+            }
+            AppendLog(QString("当前焊道补偿组已切换为：%1").arg(m_pSeamCompGroupCombo != nullptr ? m_pSeamCompGroupCombo->currentText() : QString()));
+        });
     LoadRobotList();
 }
 
@@ -245,6 +425,7 @@ void MeasureThenWeldDialog::LoadRobotList()
     m_bLoadingSelectors = false;
     LoadParamGroups();
     LoadWeldProcessList();
+    LoadCompGroupLists();
     RefreshWeldModeFromParam();
 }
 
@@ -366,6 +547,31 @@ void MeasureThenWeldDialog::LoadWeldProcessList()
     m_bLoadingSelectors = false;
 }
 
+void MeasureThenWeldDialog::LoadCompGroupLists()
+{
+    const QString robotName = CurrentRobotName();
+    m_bLoadingSelectors = true;
+    LoadCompGroupCombo(
+        m_pPoseCompGroupCombo,
+        BuildPoseCompParamPath(robotName),
+        "ALLWeldPoseComp",
+        "PoseCompCount",
+        POSE_GROUP_COUNT_KEY,
+        POSE_ACTIVE_GROUP_INDEX_KEY,
+        "WeldPoseCompGroup",
+        "姿态补偿组");
+    LoadCompGroupCombo(
+        m_pSeamCompGroupCombo,
+        BuildSeamCompParamPath(robotName),
+        "ALLWeldSeamComp",
+        "SeamCompCount",
+        SEAM_GROUP_COUNT_KEY,
+        SEAM_ACTIVE_GROUP_INDEX_KEY,
+        "WeldSeamCompGroup",
+        "焊道补偿组");
+    m_bLoadingSelectors = false;
+}
+
 void MeasureThenWeldDialog::OnRobotChanged(int index)
 {
     Q_UNUSED(index);
@@ -378,6 +584,7 @@ void MeasureThenWeldDialog::OnRobotChanged(int index)
     m_pCameraCache = ResolveCameraCacheForUnit(m_unitIndex);
     LoadParamGroups();
     LoadWeldProcessList();
+    LoadCompGroupLists();
     RefreshWeldModeFromParam();
     AppendLog(QString("当前机器人已切换为：%1").arg(m_pRobotCombo->currentText()));
 }
@@ -445,6 +652,24 @@ int MeasureThenWeldDialog::CurrentParamGroupIndex() const
     return 0;
 }
 
+int MeasureThenWeldDialog::CurrentPoseCompGroupIndex() const
+{
+    if (m_pPoseCompGroupCombo != nullptr && m_pPoseCompGroupCombo->currentIndex() >= 0)
+    {
+        return std::max(0, m_pPoseCompGroupCombo->currentData().toInt());
+    }
+    return 0;
+}
+
+int MeasureThenWeldDialog::CurrentSeamCompGroupIndex() const
+{
+    if (m_pSeamCompGroupCombo != nullptr && m_pSeamCompGroupCombo->currentIndex() >= 0)
+    {
+        return std::max(0, m_pSeamCompGroupCombo->currentData().toInt());
+    }
+    return 0;
+}
+
 bool MeasureThenWeldDialog::SaveCurrentParamGroupSelection(QString& error) const
 {
     const QString robotName = CurrentRobotName();
@@ -496,6 +721,37 @@ bool MeasureThenWeldDialog::SaveCurrentWeldProcessSelection(QString& error) cons
     return true;
 }
 
+bool MeasureThenWeldDialog::SaveCurrentCompGroupSelections(QString& error) const
+{
+    const QString robotName = CurrentRobotName();
+    if (robotName.isEmpty())
+    {
+        error = "未选择机器人。";
+        return false;
+    }
+
+    if (!SaveActiveCompGroupIndex(
+        BuildPoseCompParamPath(robotName),
+        "ALLWeldPoseComp",
+        POSE_ACTIVE_GROUP_INDEX_KEY,
+        CurrentPoseCompGroupIndex(),
+        error))
+    {
+        return false;
+    }
+
+    if (!SaveActiveCompGroupIndex(
+        BuildSeamCompParamPath(robotName),
+        "ALLWeldSeamComp",
+        SEAM_ACTIVE_GROUP_INDEX_KEY,
+        CurrentSeamCompGroupIndex(),
+        error))
+    {
+        return false;
+    }
+    return true;
+}
+
 CameraFrameCache* MeasureThenWeldDialog::ResolveCameraCacheForUnit(int unitIndex)
 {
     if (m_cameraCacheForUnit)
@@ -535,6 +791,10 @@ bool MeasureThenWeldDialog::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_
         return false;
     }
     if (m_pWeldProcessCombo != nullptr && m_pWeldProcessCombo->isEnabled() && !SaveCurrentWeldProcessSelection(error))
+    {
+        return false;
+    }
+    if (!SaveCurrentCompGroupSelections(error))
     {
         return false;
     }
@@ -617,7 +877,22 @@ bool MeasureThenWeldDialog::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver,
         param,
         savedPath,
         [this](const QString& text) { AppendLog(text); },
-        [this](const QString& text) { SetFlowStep(text); },
+        [this](const QString& text)
+        {
+            SetFlowStep(text);
+            if (text.contains("扫描运动中"))
+            {
+                SetProgressBusy(40, text);
+            }
+            else if (text.contains("扫描完成"))
+            {
+                SetProgressBusy(62, text);
+            }
+            else if (text.contains("重新计算") || text.contains("特征分析") || text.contains("焊接姿态"))
+            {
+                SetProgressBusy(68, text);
+            }
+        },
         m_pCameraCache);
 }
 
@@ -719,6 +994,8 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
     const int unitIndexForRun = m_unitIndex;
     m_pCameraCache = ResolveCameraCacheForUnit(unitIndexForRun);
     SetRunning(true);
+    ResetProgress("读取预设参数完成，准备启动相机");
+    SetProgress(5, "读取预设参数完成");
     SetFlowStep("读取预设参数完成，准备启动相机");
     AppendLog(QString("已读取参数：%1，位置类型=%2 [%3]")
         .arg(QString::fromStdString(param.sIniFilePath))
@@ -740,6 +1017,10 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
             QString savedPath;
             QString executeSummary;
 
+            if (self != nullptr)
+            {
+                self->SetProgressBusy(8, "正在启动扫描相机");
+            }
             QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok, unitIndexForRun]()
                 {
                     // 相机 UDP 线程由主界面统一管理，这里通过回调启动。
@@ -762,6 +1043,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         if (self != nullptr)
                         {
                             self->SetFlowStep(QString("相机接收已启动：%1，准备扫描下枪安全位置").arg(cameraIP));
+                            self->SetProgress(12, "相机接收已启动");
                             self->AppendLog(QString("相机接收已启动：%1").arg(cameraIP));
                         }
                     }, Qt::QueuedConnection);
@@ -770,6 +1052,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 if (ok)
                 {
                     self->SetFlowStep("准备移动到扫描下枪安全位置");
+                    self->SetProgressBusy(18, "移动到扫描下枪安全位置");
                     // 1. 扫描前按起点位姿和配置推算安全位置，避免直接切入扫描起点。
                     ok = self != nullptr && self->MoveScanStartSafeAndWait(pRobotDriver, param, SafeSpeed(param.dRunSpeed, 1.0));
                 }
@@ -780,6 +1063,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 if (ok)
                 {
                     self->SetFlowStep("准备移动到扫描起点");
+                    self->SetProgressBusy(28, "移动到扫描起点");
                     // 2. 到扫描起点使用直线运动，保持扫描段的空间姿态连续。
                     ok = self != nullptr && self->MoveCoorsAndWait(pRobotDriver, param.tStartPos, SafeSpeed(param.dRunSpeed, 1.0), "扫描起点");
                 }
@@ -790,6 +1074,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 if (ok)
                 {
                     self->SetFlowStep("准备扫描终点并采集相机点");
+                    self->SetProgressBusy(40, "扫描运动中，正在采集点云");
                     // 3. 从扫描起点运动到扫描终点，同时按 10ms 周期读取相机点。
                     ok = self != nullptr && self->ScanMoveAndCollect(pRobotDriver, param, savedPath);
                 }
@@ -800,6 +1085,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                 if (ok)
                 {
                     self->SetFlowStep("准备移动到扫描收枪安全位置");
+                    self->SetProgressBusy(72, "移动到扫描收枪安全位置");
                     // 4. 扫描结束后按终点位姿和同一配置推算安全位置。
                     ok = self != nullptr && self->MoveScanEndSafeAndWait(pRobotDriver, param, SafeSpeed(param.dRunSpeed, 1.0));
                 }
@@ -834,6 +1120,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                     if (self != nullptr)
                     {
                         self->SetFlowStep("准备执行焊接轨迹");
+                        self->SetProgressBusy(84, "执行焊接轨迹");
                         self->AppendLog(QString("开始执行焊接轨迹：%1").arg(savedPath));
                     }
 
@@ -898,6 +1185,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         self->m_stopCamera();
                     }
                     self->SetFlowStep(ok ? "流程完成" : "流程失败，请查看流程日志");
+                    self->FinishProgress(ok, ok ? QStringLiteral("流程完成") : QStringLiteral("流程失败，请查看流程日志"));
                     self->AppendLog(ok ? "流程完成。" : "流程失败。");
                     self->SetRunning(false);
                     if (ok)
@@ -962,18 +1250,22 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
     const QString seamCompPath = QDir(laserDir).filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
 
     SetRunning(true);
+    ResetProgress("已选择历史结果，准备重新计算");
+    SetProgress(8, "已选择历史结果");
     SetFlowStep("已选择历史结果，准备重新计算三份焊接文件");
     AppendLog(QString("跳过扫描模式：结果目录=%1").arg(selectedDir));
     AppendLog(QString("LaserPoint目录=%1").arg(laserDir));
     AppendLog(QString("PreservePath文件将输出到=%1").arg(preservePath));
     AppendLog(QString("姿态文件=%1").arg(poseFilePath));
     AppendLog(QString("补偿后文件将输出到=%1").arg(seamCompPath));
-    AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min，RZ增益=%5 deg")
+    AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min，RZ增益=%5 deg，爬坡RZ夹紧=[%6, %7] deg")
         .arg(param.bDoActualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑"))
         .arg(param.dWeldSpeedMmPerMin, 0, 'f', 3)
         .arg(param.dDryRunSpeedMmPerMin, 0, 'f', 3)
         .arg(param.dWeldSafeMoveSpeedMmPerMin, 0, 'f', 3)
-        .arg(param.dWeldRzGainDeg, 0, 'f', 3));
+        .arg(param.dWeldRzGainDeg, 0, 'f', 3)
+        .arg(param.dSlopeRzMinDeg, 0, 'f', 3)
+        .arg(param.dSlopeRzMaxDeg, 0, 'f', 3));
 
     QPointer<MeasureThenWeldDialog> self(this);
     std::thread([self,
@@ -1012,6 +1304,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                 if (self != nullptr)
                 {
                     self->SetFlowStep("正在从历史LaserPoint重新计算三份焊接文件");
+                    self->SetProgressBusy(28, "正在从历史LaserPoint重新计算焊接文件");
                 }
                 ok = self != nullptr
                     && self->m_pService != nullptr
@@ -1062,6 +1355,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                 if (self != nullptr)
                 {
                     self->SetFlowStep("准备执行跳过扫描后的焊接轨迹");
+                    self->SetProgressBusy(74, "执行焊接轨迹");
                     self->AppendLog(QString("开始执行焊接轨迹：%1").arg(seamCompPath));
                 }
 
@@ -1124,6 +1418,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                         return;
                     }
                     self->SetFlowStep(ok ? "流程完成" : "流程失败，请查看流程日志");
+                    self->FinishProgress(ok, ok ? QStringLiteral("跳过扫描焊接完成") : QStringLiteral("跳过扫描焊接失败"));
                     self->AppendLog(ok ? "跳过扫描焊接流程完成。" : "跳过扫描焊接流程失败。");
                     self->SetRunning(false);
                     if (ok)
@@ -1255,6 +1550,172 @@ void MeasureThenWeldDialog::SetFlowStep(const QString& text)
     emit FlowStepChanged(QString("先测后焊流程进行中，目前：%1").arg(text));
 }
 
+void MeasureThenWeldDialog::ResetProgress(const QString& text)
+{
+    if (QThread::currentThread() != thread())
+    {
+        QPointer<MeasureThenWeldDialog> self(this);
+        QMetaObject::invokeMethod(qApp, [self, text]()
+            {
+                if (self != nullptr)
+                {
+                    self->ResetProgress(text);
+                }
+            }, Qt::QueuedConnection);
+        return;
+    }
+
+    m_bProgressBusy = false;
+    m_nProgressValue = 0;
+    m_sProgressText = text.trimmed().isEmpty() ? QStringLiteral("准备开始") : text.trimmed();
+    if (m_pProgressAnimationTimer != nullptr)
+    {
+        m_pProgressAnimationTimer->stop();
+    }
+    if (m_pProgressLabel != nullptr)
+    {
+        m_pProgressLabel->setText(m_sProgressText);
+        m_pProgressLabel->show();
+    }
+    if (m_pProgressBar != nullptr)
+    {
+        m_pProgressBar->setRange(0, 100);
+        m_pProgressBar->setValue(0);
+        m_pProgressBar->show();
+    }
+}
+
+void MeasureThenWeldDialog::SetProgress(int value, const QString& text)
+{
+    if (QThread::currentThread() != thread())
+    {
+        QPointer<MeasureThenWeldDialog> self(this);
+        QMetaObject::invokeMethod(qApp, [self, value, text]()
+            {
+                if (self != nullptr)
+                {
+                    self->SetProgress(value, text);
+                }
+            }, Qt::QueuedConnection);
+        return;
+    }
+
+    m_bProgressBusy = false;
+    m_nProgressValue = std::clamp(value, 0, 100);
+    m_sProgressText = text.trimmed();
+    if (m_pProgressAnimationTimer != nullptr)
+    {
+        m_pProgressAnimationTimer->stop();
+    }
+    if (m_pProgressLabel != nullptr)
+    {
+        m_pProgressLabel->setText(m_sProgressText.isEmpty() ? QStringLiteral("处理中") : m_sProgressText);
+        m_pProgressLabel->show();
+    }
+    if (m_pProgressBar != nullptr)
+    {
+        m_pProgressBar->setRange(0, 100);
+        m_pProgressBar->setValue(m_nProgressValue);
+        m_pProgressBar->show();
+    }
+}
+
+void MeasureThenWeldDialog::SetProgressBusy(int baseValue, const QString& text)
+{
+    if (QThread::currentThread() != thread())
+    {
+        QPointer<MeasureThenWeldDialog> self(this);
+        QMetaObject::invokeMethod(qApp, [self, baseValue, text]()
+            {
+                if (self != nullptr)
+                {
+                    self->SetProgressBusy(baseValue, text);
+                }
+            }, Qt::QueuedConnection);
+        return;
+    }
+
+    m_bProgressBusy = true;
+    m_nProgressValue = (std::max)(m_nProgressValue, std::clamp(baseValue, 0, 96));
+    m_sProgressText = text.trimmed().isEmpty() ? QStringLiteral("处理中") : text.trimmed();
+    if (m_pProgressLabel != nullptr)
+    {
+        m_pProgressLabel->setText(m_sProgressText);
+        m_pProgressLabel->show();
+    }
+    if (m_pProgressBar != nullptr)
+    {
+        m_pProgressBar->setRange(0, 100);
+        m_pProgressBar->setValue(m_nProgressValue);
+        m_pProgressBar->show();
+    }
+    if (m_pProgressAnimationTimer != nullptr && !m_pProgressAnimationTimer->isActive())
+    {
+        m_pProgressAnimationTimer->start();
+    }
+}
+
+void MeasureThenWeldDialog::FinishProgress(bool ok, const QString& text)
+{
+    if (QThread::currentThread() != thread())
+    {
+        QPointer<MeasureThenWeldDialog> self(this);
+        QMetaObject::invokeMethod(qApp, [self, ok, text]()
+            {
+                if (self != nullptr)
+                {
+                    self->FinishProgress(ok, text);
+                }
+            }, Qt::QueuedConnection);
+        return;
+    }
+
+    m_bProgressBusy = false;
+    m_nProgressValue = ok ? 100 : (std::max)(m_nProgressValue, 1);
+    m_sProgressText = text.trimmed().isEmpty()
+        ? (ok ? QStringLiteral("流程完成") : QStringLiteral("流程失败"))
+        : text.trimmed();
+    if (m_pProgressAnimationTimer != nullptr)
+    {
+        m_pProgressAnimationTimer->stop();
+    }
+    if (m_pProgressLabel != nullptr)
+    {
+        m_pProgressLabel->setText(m_sProgressText);
+        m_pProgressLabel->show();
+    }
+    if (m_pProgressBar != nullptr)
+    {
+        m_pProgressBar->setRange(0, 100);
+        m_pProgressBar->setValue(m_nProgressValue);
+        m_pProgressBar->show();
+    }
+}
+
+void MeasureThenWeldDialog::UpdateProgressAnimation()
+{
+    if (!m_bProgressBusy)
+    {
+        if (m_pProgressAnimationTimer != nullptr)
+        {
+            m_pProgressAnimationTimer->stop();
+        }
+        return;
+    }
+
+    m_nProgressValue = (std::min)(95, m_nProgressValue + 1);
+    static int dotTick = 0;
+    dotTick = (dotTick + 1) % 4;
+    if (m_pProgressLabel != nullptr)
+    {
+        m_pProgressLabel->setText(QString("%1%2").arg(m_sProgressText, QString(dotTick, QLatin1Char('.'))));
+    }
+    if (m_pProgressBar != nullptr)
+    {
+        m_pProgressBar->setValue(m_nProgressValue);
+    }
+}
+
 void MeasureThenWeldDialog::SetRunning(bool running)
 {
     m_bRunning = running;
@@ -1276,5 +1737,13 @@ void MeasureThenWeldDialog::SetRunning(bool running)
     if (m_pWeldProcessCombo != nullptr)
     {
         m_pWeldProcessCombo->setEnabled(!running && m_pWeldProcessCombo->count() > 0 && m_pWeldProcessCombo->currentData().toInt() >= 0);
+    }
+    if (m_pPoseCompGroupCombo != nullptr)
+    {
+        m_pPoseCompGroupCombo->setEnabled(!running && m_pPoseCompGroupCombo->count() > 0);
+    }
+    if (m_pSeamCompGroupCombo != nullptr)
+    {
+        m_pSeamCompGroupCombo->setEnabled(!running && m_pSeamCompGroupCombo->count() > 0);
     }
 }
