@@ -1,5 +1,6 @@
 #include "TouchKeyboardManager.h"
 
+#include "ConfigDatabase.h"
 #include "RobotDataHelper.h"
 
 #include <QAbstractSpinBox>
@@ -20,7 +21,6 @@
 #include <QPointer>
 #include <QProcess>
 #include <QScreen>
-#include <QSettings>
 #include <QStringList>
 #include <QToolButton>
 #include <QTextEdit>
@@ -665,14 +665,17 @@ void TouchKeyboardManager::Install(QObject* target)
 
 void TouchKeyboardManager::LoadSettings()
 {
-    QSettings settings(ConfigPath(), QSettings::IniFormat);
-    m_mode = ModeFromStorageString(settings.value(QStringLiteral("General/Mode"), QStringLiteral("Auto")).toString());
+    QString storedMode;
+    if (!ConfigDatabase::ReadSetting(ConfigPath(), QStringLiteral("General/Mode"), &storedMode))
+    {
+        storedMode = QStringLiteral("Auto");
+    }
+    m_mode = ModeFromStorageString(storedMode);
 }
 
 void TouchKeyboardManager::SaveSettings() const
 {
-    QSettings settings(ConfigPath(), QSettings::IniFormat);
-    settings.setValue(QStringLiteral("General/Mode"), ModeToStorageString(m_mode));
+    ConfigDatabase::WriteSetting(ConfigPath(), QStringLiteral("General/Mode"), ModeToStorageString(m_mode));
 }
 
 void TouchKeyboardManager::SetMode(Mode mode)

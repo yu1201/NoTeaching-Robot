@@ -1,6 +1,7 @@
 #include "WindowStyleHelper.h"
 
 #include <algorithm>
+#include <memory>
 
 #include <QApplication>
 #include <QAbstractButton>
@@ -9,6 +10,7 @@
 #include <QBoxLayout>
 #include <QDialog>
 #include <QEvent>
+#include <QEventLoop>
 #include <QFormLayout>
 #include <QFont>
 #include <QFontDatabase>
@@ -17,10 +19,14 @@
 #include <QGridLayout>
 #include <QIcon>
 #include <QComboBox>
+#include <QElapsedTimer>
 #include <QLineEdit>
 #include <QLayout>
+#include <QLabel>
 #include <QMainWindow>
 #include <QMessageBox>
+#include <QPointer>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -29,6 +35,7 @@
 #include <QString>
 #include <QTimer>
 #include <QVariant>
+#include <QVBoxLayout>
 #include <QWidget>
 #include <QWindow>
 
@@ -46,7 +53,172 @@ const char kAdaptiveScrollCheckPendingProperty[] = "_adaptive_scroll_check_pendi
 const char kDirectMouseInputWindowProperty[] = "_direct_mouse_input_window";
 
 void EnsureAdaptiveScrollSupport(QWidget* widget);
+QRect ResolveAvailableGeometry(QWidget* widget);
 
+void CenterWindowOnOwner(QWidget* window, QWidget* owner)
+{
+    if (window == nullptr)
+    {
+        return;
+    }
+
+    QRect baseRect;
+    if (owner != nullptr)
+    {
+        baseRect = owner->frameGeometry();
+    }
+    if (!baseRect.isValid())
+    {
+        baseRect = ResolveAvailableGeometry(owner != nullptr ? owner : window);
+    }
+    if (!baseRect.isValid())
+    {
+        return;
+    }
+
+    const QSize size = window->sizeHint().expandedTo(window->minimumSize());
+    const int x = baseRect.left() + (baseRect.width() - size.width()) / 2;
+    const int y = baseRect.top() + (baseRect.height() - size.height()) / 2;
+    window->resize(size);
+    window->move(x, y);
+}
+
+}
+
+class DelayedLoadingGuardPrivate final : public QObject
+{
+public:
+    DelayedLoadingGuardPrivate(QWidget* ownerWidget, const QString& initialText, int delay)
+        : QObject(ownerWidget != nullptr ? static_cast<QObject*>(ownerWidget) : static_cast<QObject*>(qApp))
+        , owner(ownerWidget)
+        , text(initialText)
+        , delayMs((std::max)(0, delay))
+    {
+        elapsed.start();
+        delayTimer.setSingleShot(true);
+        delayTimer.setInterval(delayMs);
+        connect(&delayTimer, &QTimer::timeout, this, [this]() { ShowIfNeeded(true); });
+        delayTimer.start();
+    }
+
+    ~DelayedLoadingGuardPrivate() override
+    {
+        Finish();
+    }
+
+    void SetText(const QString& newText)
+    {
+        text = newText;
+        if (label != nullptr)
+        {
+            label->setText(BuildAnimatedText());
+        }
+    }
+
+    void Pulse()
+    {
+        ShowIfNeeded(false);
+        if (dialog != nullptr && dialog->isVisible() && qApp != nullptr)
+        {
+            qApp->processEvents(QEventLoop::ExcludeUserInputEvents, 30);
+        }
+    }
+
+    void Finish()
+    {
+        finished = true;
+        delayTimer.stop();
+        animationTimer.stop();
+        if (dialog != nullptr)
+        {
+            dialog->close();
+            dialog->deleteLater();
+            dialog = nullptr;
+        }
+    }
+
+private:
+    QString BuildAnimatedText() const
+    {
+        const QString base = text.trimmed().isEmpty() ? QStringLiteral("正在加载界面") : text.trimmed();
+        return QString("%1%2").arg(base, QString((animationTick % 4), QLatin1Char('.')));
+    }
+
+    void ShowIfNeeded(bool fromTimer)
+    {
+        if (finished || dialog != nullptr)
+        {
+            return;
+        }
+        if (!fromTimer && elapsed.elapsed() < delayMs)
+        {
+            return;
+        }
+        CreateLoadingDialog();
+    }
+
+    void CreateLoadingDialog()
+    {
+        QWidget* ownerWidget = owner.data();
+        QDialog* loading = new QDialog(ownerWidget);
+        loading->setWindowTitle(QStringLiteral("加载中"));
+        loading->setWindowModality(Qt::ApplicationModal);
+        loading->setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        loading->setAttribute(Qt::WA_DeleteOnClose, false);
+        loading->setStyleSheet(
+            "QDialog { background: #111820; color: #ECF3F4; border: 1px solid #3C6173; border-radius: 10px; }"
+            "QLabel { color: #F4FAFA; font-size: 16px; font-weight: 600; }"
+            "QProgressBar { background: #081018; border: 1px solid #2C4653; border-radius: 8px; min-height: 16px; }"
+            "QProgressBar::chunk { background: #2D8DA0; border-radius: 7px; }");
+
+        QVBoxLayout* layout = new QVBoxLayout(loading);
+        layout->setContentsMargins(26, 22, 26, 22);
+        layout->setSpacing(14);
+        label = new QLabel(BuildAnimatedText(), loading);
+        label->setAlignment(Qt::AlignCenter);
+        QProgressBar* progress = new QProgressBar(loading);
+        progress->setRange(0, 0);
+        progress->setTextVisible(false);
+        progress->setMinimumWidth(260);
+        layout->addWidget(label);
+        layout->addWidget(progress);
+
+        dialog = loading;
+        CenterWindowOnOwner(loading, ownerWidget);
+        loading->show();
+        loading->raise();
+        loading->activateWindow();
+
+        animationTimer.setInterval(300);
+        connect(&animationTimer, &QTimer::timeout, this, [this]()
+            {
+                ++animationTick;
+                if (label != nullptr)
+                {
+                    label->setText(BuildAnimatedText());
+                }
+            });
+        animationTimer.start();
+        if (qApp != nullptr)
+        {
+            qApp->processEvents(QEventLoop::ExcludeUserInputEvents, 30);
+        }
+    }
+
+    QPointer<QWidget> owner;
+    QPointer<QDialog> dialog;
+    QPointer<QLabel> label;
+    QTimer delayTimer;
+    QTimer animationTimer;
+    QElapsedTimer elapsed;
+    QString text;
+    int delayMs = 1000;
+    int animationTick = 0;
+    bool finished = false;
+};
+
+namespace
+{
 QRect ResolveAvailableGeometry(QWidget* widget)
 {
     if (widget == nullptr)
@@ -857,6 +1029,37 @@ private:
     {
     }
 };
+}
+
+DelayedLoadingGuard::DelayedLoadingGuard(QWidget* owner, const QString& text, int delayMs)
+    : d(std::make_unique<DelayedLoadingGuardPrivate>(owner, text, delayMs))
+{
+}
+
+DelayedLoadingGuard::~DelayedLoadingGuard() = default;
+
+void DelayedLoadingGuard::SetText(const QString& text)
+{
+    if (d)
+    {
+        d->SetText(text);
+    }
+}
+
+void DelayedLoadingGuard::Pulse()
+{
+    if (d)
+    {
+        d->Pulse();
+    }
+}
+
+void DelayedLoadingGuard::Finish()
+{
+    if (d)
+    {
+        d->Finish();
+    }
 }
 
 void ApplyUnifiedWindowChrome(QWidget* widget)

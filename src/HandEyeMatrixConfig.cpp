@@ -1,11 +1,11 @@
 #include "HandEyeMatrixConfig.h"
 
+#include "ConfigDatabase.h"
 #include "OPini.h"
 #include "RobotPoseTransform.h"
 
 #include <QCoreApplication>
 #include <QDir>
-#include <QFile>
 #include <QFileInfo>
 #include <QTextStream>
 
@@ -14,6 +14,12 @@
 
 namespace
 {
+std::string ToUtf8StdString(const QString& text)
+{
+    const QByteArray bytes = text.toUtf8();
+    return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+}
+
 QString FindProjectRootPathForHandEye()
 {
     QDir dir(QCoreApplication::applicationDirPath());
@@ -137,7 +143,7 @@ bool WriteIntValue(COPini& ini, const char* key, int value)
 int ReadRobotTypeForHandEye(const QString& robotName)
 {
     COPini ini;
-    const std::string robotParaPath = DATA_PATH + robotName.toStdString() + "\\RobotPara.ini";
+    const std::string robotParaPath = DATA_PATH + ToUtf8StdString(robotName) + "\\RobotPara.ini";
     if (!ini.SetFileName(robotParaPath))
     {
         return ROBOT_TYPE_FANUC;
@@ -155,7 +161,7 @@ int ReadRobotTypeForHandEye(const QString& robotName)
 QString GetMeasureCameraSectionName(const QString& robotName)
 {
     COPini cameraIni;
-    const std::string cameraParamPath = DATA_PATH + robotName.toStdString() + "\\CameraParam.ini";
+    const std::string cameraParamPath = DATA_PATH + ToUtf8StdString(robotName) + "\\CameraParam.ini";
     if (!cameraIni.SetFileName(cameraParamPath))
     {
         return "CAMERA0";
@@ -207,36 +213,51 @@ bool EnsureHandEyeMatrixIni(const QString& robotName, const QString& cameraSecti
         *filePathOut = filePath;
     }
 
-    const QFileInfo fileInfo(filePath);
-    const QString parentDir = fileInfo.dir().absolutePath();
-    if (!QDir().mkpath(parentDir))
+    if (!ConfigDatabase::IsAvailable())
     {
         if (error != nullptr)
         {
-            *error = QString("创建手眼矩阵目录失败：%1").arg(parentDir);
+            *error = QString("配置库不存在或结构无效，请先运行迁移工具：%1").arg(ConfigDatabase::DatabasePath());
         }
         return false;
     }
 
-    if (fileInfo.exists())
+    const std::string path = ToUtf8StdString(filePath);
+    if (ConfigDatabase::HasIniFile(path))
     {
         return true;
     }
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+    COPini ini;
+    if (!ini.SetFileName(false, path))
     {
         if (error != nullptr)
         {
-            *error = QString("创建手眼矩阵参数文件失败：%1").arg(filePath);
+            *error = QString("初始化手眼矩阵参数失败：%1").arg(filePath);
         }
         return false;
     }
 
     HandEyeMatrixConfig defaultConfig = GetDefaultHandEyeMatrixConfig();
     defaultConfig.robotType = ReadRobotTypeForHandEye(robotName);
-    QTextStream stream(&file);
-    stream << BuildHandEyeIniTemplate(robotName, cameraSection, defaultConfig);
+    ini.SetSectionName("Base");
+    ini.WriteString("Version", 1);
+    ini.WriteString("RobotName", ToUtf8StdString(robotName));
+    ini.WriteString("CameraSection", ToUtf8StdString(cameraSection));
+    ini.WriteString("RobotType", RobotPoseTransform::NormalizeRobotType(defaultConfig.robotType));
+
+    ini.SetSectionName("HandEyeMatrix");
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int col = 0; col < 3; ++col)
+        {
+            ini.WriteString(ToUtf8StdString(QString("R%1%2").arg(row).arg(col)), defaultConfig.rotation(row, col), 12);
+        }
+    }
+    for (int index = 0; index < 3; ++index)
+    {
+        ini.WriteString(ToUtf8StdString(QString("T%1").arg(index)), defaultConfig.translation(index), 12);
+    }
     return true;
 }
 
@@ -253,7 +274,7 @@ bool LoadHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
     }
 
     COPini ini;
-    if (!ini.SetFileName(filePath.toStdString()))
+    if (!ini.SetFileName(ToUtf8StdString(filePath)))
     {
         if (error != nullptr)
         {
@@ -266,7 +287,7 @@ bool LoadHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
 
     auto readValue = [&ini, error, filePath](const QString& key, double& value) -> bool
     {
-        if (ini.ReadString(false, key.toStdString(), &value) <= 0)
+        if (ini.ReadString(false, ToUtf8StdString(key), &value) <= 0)
         {
             if (error != nullptr)
             {
@@ -310,7 +331,7 @@ bool SaveHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
     }
 
     COPini ini;
-    if (!ini.SetFileName(filePath.toStdString()))
+    if (!ini.SetFileName(ToUtf8StdString(filePath)))
     {
         if (error != nullptr)
         {
@@ -321,14 +342,14 @@ bool SaveHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
 
     ini.SetSectionName("Base");
     ini.WriteString("Version", 1);
-    ini.WriteString("RobotName", robotName.toStdString());
-    ini.WriteString("CameraSection", cameraSection.toStdString());
+    ini.WriteString("RobotName", ToUtf8StdString(robotName));
+    ini.WriteString("CameraSection", ToUtf8StdString(cameraSection));
     ini.WriteString("RobotType", RobotPoseTransform::NormalizeRobotType(config.robotType));
     ini.SetSectionName("HandEyeMatrix");
 
     auto writeValue = [&ini, error, filePath](const QString& key, double value) -> bool
     {
-        if (!ini.WriteString(key.toStdString(), value, 12))
+        if (!ini.WriteString(ToUtf8StdString(key), value, 12))
         {
             if (error != nullptr)
             {
@@ -367,34 +388,66 @@ bool EnsureHandEyeCalibrationIni(const QString& robotName, const QString& camera
         *filePathOut = filePath;
     }
 
-    const QFileInfo fileInfo(filePath);
-    const QString parentDir = fileInfo.dir().absolutePath();
-    if (!QDir().mkpath(parentDir))
+    if (!ConfigDatabase::IsAvailable())
     {
         if (error != nullptr)
         {
-            *error = QString("创建手眼标定目录失败：%1").arg(parentDir);
+            *error = QString("配置库不存在或结构无效，请先运行迁移工具：%1").arg(ConfigDatabase::DatabasePath());
         }
         return false;
     }
 
-    if (fileInfo.exists())
+    const std::string path = ToUtf8StdString(filePath);
+    if (ConfigDatabase::HasIniFile(path))
     {
         return true;
     }
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+    COPini ini;
+    if (!ini.SetFileName(false, path))
     {
         if (error != nullptr)
         {
-            *error = QString("创建手眼标定文件失败：%1").arg(filePath);
+            *error = QString("初始化手眼标定参数失败：%1").arg(filePath);
         }
         return false;
     }
 
-    QTextStream stream(&file);
-    stream << BuildHandEyeCalibrationIniTemplate(robotName, cameraSection, GetDefaultHandEyeCalibrationConfig());
+    const HandEyeCalibrationConfig defaultConfig = GetDefaultHandEyeCalibrationConfig();
+    ini.SetSectionName("Base");
+    ini.WriteString("Version", 1);
+    ini.WriteString("RobotName", ToUtf8StdString(robotName));
+    ini.WriteString("CameraSection", ToUtf8StdString(cameraSection));
+
+    ini.SetSectionName("TcpPoint");
+    WriteDoubleValue(ini, "X", defaultConfig.tcpPoint.dX);
+    WriteDoubleValue(ini, "Y", defaultConfig.tcpPoint.dY);
+    WriteDoubleValue(ini, "Z", defaultConfig.tcpPoint.dZ);
+    WriteDoubleValue(ini, "RX", defaultConfig.tcpPoint.dRX);
+    WriteDoubleValue(ini, "RY", defaultConfig.tcpPoint.dRY);
+    WriteDoubleValue(ini, "RZ", defaultConfig.tcpPoint.dRZ);
+    WriteDoubleValue(ini, "BX", defaultConfig.tcpPoint.dBX);
+    WriteDoubleValue(ini, "BY", defaultConfig.tcpPoint.dBY);
+    WriteDoubleValue(ini, "BZ", defaultConfig.tcpPoint.dBZ);
+
+    for (int index = 0; index < defaultConfig.samples.size(); ++index)
+    {
+        const HandEyeCalibrationSample& sample = defaultConfig.samples[index];
+        ini.SetSectionName(ToUtf8StdString(QString("Sample%1").arg(index + 1)));
+        WriteIntValue(ini, "Valid", sample.valid ? 1 : 0);
+        WriteDoubleValue(ini, "RobotX", sample.robotPose.dX);
+        WriteDoubleValue(ini, "RobotY", sample.robotPose.dY);
+        WriteDoubleValue(ini, "RobotZ", sample.robotPose.dZ);
+        WriteDoubleValue(ini, "RobotRX", sample.robotPose.dRX);
+        WriteDoubleValue(ini, "RobotRY", sample.robotPose.dRY);
+        WriteDoubleValue(ini, "RobotRZ", sample.robotPose.dRZ);
+        WriteDoubleValue(ini, "RobotBX", sample.robotPose.dBX);
+        WriteDoubleValue(ini, "RobotBY", sample.robotPose.dBY);
+        WriteDoubleValue(ini, "RobotBZ", sample.robotPose.dBZ);
+        WriteDoubleValue(ini, "CameraX", sample.cameraPoint.x());
+        WriteDoubleValue(ini, "CameraY", sample.cameraPoint.y());
+        WriteDoubleValue(ini, "CameraZ", sample.cameraPoint.z());
+    }
     return true;
 }
 
@@ -413,7 +466,7 @@ bool LoadHandEyeCalibrationConfig(const QString& robotName, const QString& camer
     config = GetDefaultHandEyeCalibrationConfig();
 
     COPini ini;
-    if (!ini.SetFileName(filePath.toStdString()))
+    if (!ini.SetFileName(ToUtf8StdString(filePath)))
     {
         if (error != nullptr)
         {
@@ -436,7 +489,7 @@ bool LoadHandEyeCalibrationConfig(const QString& robotName, const QString& camer
     for (int index = 0; index < config.samples.size(); ++index)
     {
         HandEyeCalibrationSample& sample = config.samples[index];
-        ini.SetSectionName(QString("Sample%1").arg(index + 1).toStdString());
+        ini.SetSectionName(ToUtf8StdString(QString("Sample%1").arg(index + 1)));
 
         int valid = 0;
         ReadIntValue(ini, "Valid", valid);
@@ -477,7 +530,7 @@ bool SaveHandEyeCalibrationConfig(const QString& robotName, const QString& camer
     }
 
     COPini ini;
-    if (!ini.SetFileName(filePath.toStdString()))
+    if (!ini.SetFileName(ToUtf8StdString(filePath)))
     {
         if (error != nullptr)
         {
@@ -488,8 +541,8 @@ bool SaveHandEyeCalibrationConfig(const QString& robotName, const QString& camer
 
     ini.SetSectionName("Base");
     ini.WriteString("Version", 1);
-    ini.WriteString("RobotName", robotName.toStdString());
-    ini.WriteString("CameraSection", cameraSection.toStdString());
+    ini.WriteString("RobotName", ToUtf8StdString(robotName));
+    ini.WriteString("CameraSection", ToUtf8StdString(cameraSection));
 
     ini.SetSectionName("TcpPoint");
     if (!(WriteDoubleValue(ini, "X", config.tcpPoint.dX)
@@ -513,7 +566,7 @@ bool SaveHandEyeCalibrationConfig(const QString& robotName, const QString& camer
     for (int index = 0; index < sampleCount; ++index)
     {
         const HandEyeCalibrationSample& sample = config.samples[index];
-        ini.SetSectionName(QString("Sample%1").arg(index + 1).toStdString());
+        ini.SetSectionName(ToUtf8StdString(QString("Sample%1").arg(index + 1)));
         if (!(WriteIntValue(ini, "Valid", sample.valid ? 1 : 0)
             && WriteDoubleValue(ini, "RobotX", sample.robotPose.dX)
             && WriteDoubleValue(ini, "RobotY", sample.robotPose.dY)

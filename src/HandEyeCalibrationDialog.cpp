@@ -2509,7 +2509,10 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
 
 void HandEyeCalibrationDialog::OpenMatrixDialog()
 {
+    DelayedLoadingGuard loading(this, "正在打开手眼矩阵参数", 1000);
     HandEyeMatrixDialog dialog(m_pContralUnit, m_robotName, m_cameraSection, this);
+    loading.Pulse();
+    loading.Finish();
     dialog.exec();
     UpdatePathLabels();
 }

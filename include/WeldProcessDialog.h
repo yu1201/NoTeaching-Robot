@@ -15,6 +15,7 @@ QT_END_NAMESPACE
 class QDoubleSpinBox;
 class QCloseEvent;
 class QCheckBox;
+class QComboBox;
 class QFormLayout;
 class QGridLayout;
 class QLineEdit;
@@ -143,6 +144,7 @@ private:
     QCheckBox* m_cornerTransitionSpeedEnableCheck = nullptr;
     QCheckBox* m_cornerTransitionCurrentEnableCheck = nullptr;
     QCheckBox* m_cornerTransitionVoltageEnableCheck = nullptr;
+    QComboBox* m_cornerTransitionScopeCombo = nullptr;
 
     QSpinBox* m_weaveTypeSpin = nullptr;
     QDoubleSpinBox* m_freqSpin = nullptr;

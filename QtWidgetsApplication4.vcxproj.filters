@@ -47,6 +47,9 @@
     <ClCompile Include="src\QtWidgetsApplication4.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\ConfigDatabase.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\CameraFrameCache.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -172,6 +175,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Const.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ConfigDatabase.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\CameraFrameCache.h">

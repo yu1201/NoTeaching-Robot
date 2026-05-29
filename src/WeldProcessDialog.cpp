@@ -8,6 +8,7 @@
 #include <QAbstractItemView>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -525,6 +526,14 @@ void WeldProcessDialog::BuildEditorUi()
 
     auto* cornerPage = new QWidget(specialGroup);
     auto* cornerLayout = CreateTwoColumnForm(cornerPage);
+    m_cornerTransitionScopeCombo = new QComboBox(cornerPage);
+    m_cornerTransitionScopeCombo->addItem("圆弧");
+    m_cornerTransitionScopeCombo->addItem("过渡");
+    m_cornerTransitionScopeCombo->addItem("圆弧+过渡");
+    m_cornerTransitionScopeCombo->setFixedWidth(kSingleFieldWidth);
+    m_cornerTransitionScopeCombo->setFixedHeight(kSpinFieldHeight);
+    m_cornerTransitionScopeCombo->setCurrentIndex(2);
+    AddTwoColumnField(cornerLayout, "作用范围", m_cornerTransitionScopeCombo);
     m_cornerTransitionRadiusSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "圆弧过渡半径", &m_cornerTransitionRadiusEnableCheck, "mm");
     m_cornerTransitionRadiusSpin->setMinimum(2.0);
     m_cornerTransitionSpeedSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "过渡速度", &m_cornerTransitionSpeedEnableCheck, "mm/min");
@@ -666,6 +675,10 @@ void WeldProcessDialog::ApplyDialogStyle()
         "QLabel#sectionTitle{font-size:16px;font-weight:600;color:#9ED8DB;}"
         "QLabel{color:#BACBD1;}"
         "QLineEdit,QListWidget{background:#0B1117;color:#F5FAFA;border:1px solid #385366;border-radius:8px;padding:4px 8px;selection-background-color:#2D5465;selection-color:#F5FAFA;}"
+        "QComboBox{background:#000000;color:#F5FAFA;border:1px solid #385366;border-radius:0px;padding:0px 8px;selection-background-color:#2D5465;selection-color:#F5FAFA;min-height:26px;}"
+        "QComboBox::drop-down{subcontrol-origin:border;subcontrol-position:top right;width:24px;border-left:1px solid #385366;background:#000000;}"
+        "QComboBox::down-arrow{image:url(:/QtWidgetsApplication4/icons/chevron-down.svg);width:12px;height:8px;}"
+        "QComboBox QAbstractItemView{background:#0B1117;color:#F5FAFA;border:1px solid #385366;selection-background-color:#2D5465;selection-color:#F5FAFA;}"
         "QFrame#spinFieldFrame{background:#000000;border:1px solid #385366;border-radius:0px;}"
         "QSpinBox,QDoubleSpinBox{background:transparent;color:#F5FAFA;border:none;border-radius:0px;padding:0px 8px;selection-background-color:#2D5465;selection-color:#F5FAFA;min-height:26px;}"
         "QSpinBox QLineEdit,QDoubleSpinBox QLineEdit{background:transparent;border:none;border-radius:0px;padding:0px;color:#F5FAFA;}"
@@ -868,9 +881,7 @@ void WeldProcessDialog::LoadToUi(int preferredGroupRow, int preferredBeadRow)
 
     PopulateWeldList(preferredGroupRow);
     PopulateBeadList(preferredBeadRow);
-    ui->statusLabel->setText(QString("读取完成: %1 / %2")
-        .arg(DecodeRobotMessageText(m_file.GetWeaveIniFilePath()))
-        .arg(DecodeRobotMessageText(m_file.GetWeldIniFilePath())));
+    ui->statusLabel->setText(QStringLiteral("读取完成: 已从配置数据库读取摆动参数和焊接工艺。"));
     m_isLoading = false;
     MarkCleanSnapshot();
 }
@@ -1113,6 +1124,10 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     SetChecked(m_cornerTransitionSpeedEnableCheck, weld.nCornerArcTransitionSpeedEnable);
     SetChecked(m_cornerTransitionCurrentEnableCheck, weld.nCornerArcTransitionCurrentEnable);
     SetChecked(m_cornerTransitionVoltageEnableCheck, weld.nCornerArcTransitionVoltageEnable);
+    if (m_cornerTransitionScopeCombo != nullptr)
+    {
+        m_cornerTransitionScopeCombo->setCurrentIndex(qBound(0, weld.nCornerArcTransitionApplyScope, 2));
+    }
 
     const auto& weaveList = m_file.GetWeaveTypeList();
     if (weld.nWeaveTypeNo >= 0 && weld.nWeaveTypeNo < static_cast<int>(weaveList.size()))
@@ -1215,8 +1230,8 @@ bool WeldProcessDialog::CollectWeaveFromUi(T_WeaveDate& out) const
 
 bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
 {
-    out.strWorkPeace = m_workPeaceEdit->text().trimmed().toLocal8Bit().constData();
-    out.strWeldType = m_weldTypeEdit->text().trimmed().toLocal8Bit().constData();
+    out.strWorkPeace = m_workPeaceEdit->text().trimmed().toUtf8().constData();
+    out.strWeldType = m_weldTypeEdit->text().trimmed().toUtf8().constData();
     out.dWeldAngleSize = m_weldAngleSizeSpin->value();
     out.nLayerNo = m_beadListWidget != nullptr ? (m_beadListWidget->currentRow() + 1) : 1;
     out.dStartArcCurrent = m_startArcCurrentSpin->value();
@@ -1254,6 +1269,9 @@ bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
     out.nCornerArcTransitionSpeedEnable = IsChecked(m_cornerTransitionSpeedEnableCheck) ? 1 : 0;
     out.nCornerArcTransitionCurrentEnable = IsChecked(m_cornerTransitionCurrentEnableCheck) ? 1 : 0;
     out.nCornerArcTransitionVoltageEnable = IsChecked(m_cornerTransitionVoltageEnableCheck) ? 1 : 0;
+    out.nCornerArcTransitionApplyScope = m_cornerTransitionScopeCombo != nullptr
+        ? qBound(0, m_cornerTransitionScopeCombo->currentIndex(), 2)
+        : 2;
     if (out.nCornerArcTransitionCurrentEnable != out.nCornerArcTransitionVoltageEnable)
     {
         QMessageBox::warning(
@@ -1357,6 +1375,11 @@ void WeldProcessDialog::AddWeldGroup()
     {
         item = m_file.GetWeldParaList()[currentIndex];
     }
+    else
+    {
+        item.nCornerArcTransitionApplyScope = 2;
+    }
+    item.nCornerArcTransitionApplyScope = qBound(0, item.nCornerArcTransitionApplyScope, 2);
 
     const int newGroupNo = GroupCount() + 1;
     item.strWorkPeace = GetStr("新工艺%d", newGroupNo);
@@ -1485,6 +1508,7 @@ QString WeldProcessDialog::BuildSnapshot() const
            << QString::number(IsChecked(m_cornerTransitionSpeedEnableCheck) ? 1 : 0)
            << QString::number(IsChecked(m_cornerTransitionCurrentEnableCheck) ? 1 : 0)
            << QString::number(IsChecked(m_cornerTransitionVoltageEnableCheck) ? 1 : 0)
+           << QString::number(m_cornerTransitionScopeCombo != nullptr ? m_cornerTransitionScopeCombo->currentIndex() : 2)
            << QString::number(m_weaveTypeSpin != nullptr ? m_weaveTypeSpin->value() : 0)
            << QString::number(m_freqSpin != nullptr ? m_freqSpin->value() : 0.0, 'f', 6)
            << QString::number(m_ampLeftSpin != nullptr ? m_ampLeftSpin->value() : 0.0, 'f', 6)

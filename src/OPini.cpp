@@ -1,10 +1,126 @@
 #include "OPini.h"
 
+#include "ConfigDatabase.h"
+
+#include <cstring>
+#include <vector>
 
 #ifdef _DEBUG
 #undef THIS_FILE
 static char THIS_FILE[] = __FILE__;
 #endif
+
+namespace
+{
+std::wstring DecodeUtf8OrAcpToWide(const std::string& text)
+{
+    if (text.empty())
+    {
+        return std::wstring();
+    }
+
+    const auto decode = [&text](UINT codePage, DWORD flags) -> std::wstring
+        {
+            const int wideLength = MultiByteToWideChar(
+                codePage,
+                flags,
+                text.data(),
+                static_cast<int>(text.size()),
+                nullptr,
+                0);
+            if (wideLength <= 0)
+            {
+                return std::wstring();
+            }
+            std::wstring wideText(static_cast<size_t>(wideLength), L'\0');
+            MultiByteToWideChar(
+                codePage,
+                flags,
+                text.data(),
+                static_cast<int>(text.size()),
+                wideText.data(),
+                wideLength);
+            return wideText;
+        };
+
+    std::wstring wideText = decode(CP_UTF8, MB_ERR_INVALID_CHARS);
+    if (!wideText.empty())
+    {
+        return wideText;
+    }
+    return decode(CP_ACP, 0);
+}
+
+std::string EncodeWideToUtf8(const wchar_t* text, int textLength)
+{
+    if (text == nullptr || textLength <= 0)
+    {
+        return std::string();
+    }
+
+    const int byteLength = WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        text,
+        textLength,
+        nullptr,
+        0,
+        nullptr,
+        nullptr);
+    if (byteLength <= 0)
+    {
+        return std::string();
+    }
+    std::string utf8Text(static_cast<size_t>(byteLength), '\0');
+    WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        text,
+        textLength,
+        utf8Text.data(),
+        byteLength,
+        nullptr,
+        nullptr);
+    return utf8Text;
+}
+
+unsigned int ReadPrivateProfileStringUtf8(
+    const std::string& sectionName,
+    const std::string& key,
+    char* value,
+    unsigned int valueSize,
+    const std::string& fileName)
+{
+    if (value == nullptr || valueSize == 0)
+    {
+        return 0;
+    }
+    value[0] = '\0';
+
+    std::string storedValue;
+    if (!ConfigDatabase::ReadIniValue(fileName, sectionName, key, &storedValue))
+    {
+        return 0;
+    }
+
+    strncpy_s(value, valueSize, storedValue.c_str(), _TRUNCATE);
+    return static_cast<unsigned int>(strlen(value));
+}
+
+bool WritePrivateProfileStringUtf8(
+    const std::string& sectionName,
+    const std::string& key,
+    const std::string& value,
+    const std::string& fileName)
+{
+    return ConfigDatabase::WriteIniValue(fileName, sectionName, key, value);
+}
+
+bool FileExistsUtf8OrAcp(const std::string& fileName)
+{
+    return ConfigDatabase::HasIniFile(fileName);
+}
+}
 
 COPini::COPini()
     : m_pIniLog("Log/RobotRunLog.txt", true)
@@ -41,22 +157,21 @@ int COPini::DWORDToInt(unsigned int dwValue, const std::string& context)
 bool COPini::CheckExists(std::string fileName, std::string sectionName, std::string key)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(sectionName.c_str(), key.c_str(), NULL, ch, 255, fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(sectionName, key, ch, sizeof(ch), fileName);
     return (dwNum != 0);
 }
 
 bool COPini::CheckExists(std::string key)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     return (dwNum != 0);
 }
 
 // ReadString返回值改为int，调用转换函数处理溢出
 int COPini::ReadString(std::string fileName, std::string sectionName, std::string key, char value[])
 {
-    unsigned int dwResult = static_cast<unsigned int>(::GetPrivateProfileStringA(
-        sectionName.c_str(), key.c_str(), NULL, value, 255, fileName.c_str()));
+    unsigned int dwResult = ReadPrivateProfileStringUtf8(sectionName, key, value, 255, fileName);
     // 转换并检测溢出，上下文描述便于定位问题
     return DWORDToInt(dwResult, "ReadString(fileName, sectionName, key, value[])");
 }
@@ -65,7 +180,7 @@ int COPini::ReadString(std::string key, bool* value, bool bCheck)
 {
     char ch[255] = { 0 };
     int nValue;
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     // 转换并检测溢出
     int nReturnValue = DWORDToInt(dwNum, "ReadString(key, bool*)");
 
@@ -81,7 +196,7 @@ int COPini::ReadString(std::string key, bool* value, bool bCheck)
 int COPini::ReadString(std::string key, unsigned long* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(key, unsigned long*)");
 
     if (nReturnValue > 0)
@@ -95,7 +210,7 @@ int COPini::ReadString(std::string key, unsigned long* value)
 int COPini::ReadString(std::string key, long long* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(key, long long*)");
 
     if (nReturnValue > 0)
@@ -213,7 +328,7 @@ int COPini::ReadString(std::string key1, std::string key2, T_ROBOT_COORS& tCoord
 int COPini::ReadString(bool bCheck, std::string key, long* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(bCheck, key, long*)");
 
     if (nReturnValue > 0)
@@ -241,74 +356,13 @@ void COPini::CheckRead(std::string key, int nReturnValue, bool bCheck)
 
 void COPini::CheckFileEncodeType(std::string fileName)
 {
-    unsigned char headBuf[3] = { 0 };
-    TextCodeType type = TextUnkonw;
-
-    FILE* file = nullptr;
-    errno_t err = fopen_s(&file, fileName.c_str(), "rb+");
-    if (err != 0 || file == NULL)
-    {
-        std::string str = "Error: " + fileName + " file open failed!";
-        m_pIniLog.write(LogColor::ERR, str.c_str());
-        return;
-    }
-
-    fseek(file, 0, SEEK_SET);
-    fread(headBuf, 1, 3, file);
-
-    if (headBuf[0] == 0xEF && headBuf[1] == 0xBB && headBuf[2] == 0xBF)
-    {
-        type = TextUTF8;
-        fseek(file, 0L, SEEK_END);
-        long len = ftell(file);
-        unsigned char* Buf = new unsigned char[len];
-        fseek(file, 0L, SEEK_SET);
-        int nNo = 0;
-        for (int i = 0; i < len; i++)
-        {
-            fread(&(Buf[i]), 1, 1, file);
-            if (Buf[i] == '\n')
-            {
-                nNo++;
-            }
-        }
-        fclose(file);
-
-        // 原代码：file = fopen(fileName.c_str(), "wb+");
-        FILE* newFile = nullptr;
-        errno_t err = fopen_s(&newFile, fileName.c_str(), "wb+");
-        if (err == 0 && newFile != NULL)
-        {
-            fwrite(&(Buf[3]), 1, len - nNo - 3, newFile);
-            fclose(newFile);
-        }
-
-        delete[] Buf;
-    }
-    else if (headBuf[0] == 0xFF && headBuf[1] == 0xFE)
-    {
-        type = TextUNICODE;
-        std::string str = "Error: " + fileName + " format error!";
-        m_pIniLog.write(LogColor::ERR, str.c_str());
-        fclose(file);
-    }
-    else if (headBuf[0] == 0xFE && headBuf[1] == 0xFF)
-    {
-        type = TextUNICODE_BIG;
-        std::string str = "Error: " + fileName + " format error!";
-        m_pIniLog.write(LogColor::ERR, str.c_str());
-        fclose(file);
-    }
-    else
-    {
-        type = TextANSI;
-        fclose(file);
-    }
+    (void)fileName;
+    // 配置已统一放入 ConfigStore.db，主程序不再探测或改写旧 ini 文件编码。
 }
 
 bool COPini::WriteString(std::string fileName, std::string sectionName, std::string key, std::string value)
 {
-    return ::WritePrivateProfileStringA(sectionName.c_str(), key.c_str(), value.c_str(), fileName.c_str()) != 0;
+    return WritePrivateProfileStringUtf8(sectionName, key, value, fileName);
 }
 
 bool COPini::WriteString(std::string key, bool value)
@@ -318,7 +372,7 @@ bool COPini::WriteString(std::string key, bool value)
     char buf[32];
     sprintf_s(buf, sizeof(buf), "%ld", nValue);
     str = buf;
-    return ::WritePrivateProfileStringA(m_sectionName.c_str(), key.c_str(), str.c_str(), m_fileName.c_str()) != 0;
+    return WritePrivateProfileStringUtf8(m_sectionName, key, str, m_fileName);
 }
 
 bool COPini::WriteString(std::string key, long value)
@@ -327,7 +381,7 @@ bool COPini::WriteString(std::string key, long value)
     char buf[32];
     sprintf_s(buf, sizeof(buf), "%ld", value);
     str = buf;
-    return ::WritePrivateProfileStringA(m_sectionName.c_str(), key.c_str(), str.c_str(), m_fileName.c_str()) != 0;
+    return WritePrivateProfileStringUtf8(m_sectionName, key, str, m_fileName);
 }
 
 bool COPini::WriteString(std::string key1, std::string key2, T_ANGLE_PULSE tPulse, T_ANGLE_PULSE tIsRead)
@@ -450,8 +504,7 @@ bool COPini::SetSectionName(std::string sectionName)
 
 int COPini::ReadString(std::string key, char value[])
 {
-    unsigned int dwNum = static_cast<unsigned int>(::GetPrivateProfileStringA(
-        m_sectionName.c_str(), key.c_str(), NULL, value, 255, m_fileName.c_str()));
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, value, 255, m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(key, char[])");
     CheckRead(key, nReturnValue);
     return nReturnValue;
@@ -459,13 +512,13 @@ int COPini::ReadString(std::string key, char value[])
 
 bool COPini::WriteString(std::string key, std::string value)
 {
-    return ::WritePrivateProfileStringA(m_sectionName.c_str(), key.c_str(), value.c_str(), m_fileName.c_str()) != 0;
+    return WritePrivateProfileStringUtf8(m_sectionName, key, value, m_fileName);
 }
 
 int COPini::ReadString(std::string key, double* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(key, double*)");
 
     if (nReturnValue > 0)
@@ -479,7 +532,7 @@ int COPini::ReadString(std::string key, double* value)
 int COPini::ReadString(std::string key, float* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(key, float*)");
 
     if (nReturnValue > 0)
@@ -498,13 +551,13 @@ bool COPini::WriteString(std::string key, double value, unsigned int unDecimalDi
     char buf[256];
     sprintf_s(buf, sizeof(buf), format, value);
     str = buf;
-    return ::WritePrivateProfileStringA(m_sectionName.c_str(), key.c_str(), str.c_str(), m_fileName.c_str()) != 0;
+    return WritePrivateProfileStringUtf8(m_sectionName, key, str, m_fileName);
 }
 
 int COPini::ReadString(std::string key, int* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(key, int*)");
 
     if (nReturnValue > 0)
@@ -518,7 +571,7 @@ int COPini::ReadString(std::string key, int* value)
 int COPini::ReadString(std::string key, long* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(key, long*)");
 
     if (nReturnValue > 0)
@@ -532,7 +585,7 @@ int COPini::ReadString(std::string key, long* value)
 int COPini::ReadString(std::string key, std::string& value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(key, std::string&)");
 
     if (nReturnValue > 0)
@@ -549,14 +602,14 @@ bool COPini::WriteString(std::string key, int value)
     char buf[32];
     sprintf_s(buf, sizeof(buf), "%ld", value);
     str = buf;
-    return ::WritePrivateProfileStringA(m_sectionName.c_str(), key.c_str(), str.c_str(), m_fileName.c_str()) != 0;
+    return WritePrivateProfileStringUtf8(m_sectionName, key, str, m_fileName);
 }
 
 int COPini::ReadString(bool bCheck, std::string key, bool* value)
 {
     char ch[255] = { 0 };
     int nValue;
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(bCheck, key, bool*)");
 
     if (nReturnValue > 0)
@@ -571,7 +624,7 @@ int COPini::ReadString(bool bCheck, std::string key, bool* value)
 int COPini::ReadString(bool bCheck, std::string key, std::string& value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(bCheck, key, std::string&)");
 
     if (nReturnValue > 0)
@@ -585,7 +638,7 @@ int COPini::ReadString(bool bCheck, std::string key, std::string& value)
 int COPini::ReadString(bool bCheck, std::string key, std::string* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(bCheck, key, std::string*)");
 
     if (nReturnValue > 0)
@@ -599,7 +652,7 @@ int COPini::ReadString(bool bCheck, std::string key, std::string* value)
 int COPini::ReadString(bool bCheck, std::string key, double* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(bCheck, key, double*)");
 
     if (nReturnValue > 0)
@@ -613,7 +666,7 @@ int COPini::ReadString(bool bCheck, std::string key, double* value)
 int COPini::ReadString(bool bCheck, std::string key, int* value)
 {
     char ch[255] = { 0 };
-    unsigned int dwNum = GetPrivateProfileStringA(m_sectionName.c_str(), key.c_str(), NULL, ch, 255, m_fileName.c_str());
+    unsigned int dwNum = ReadPrivateProfileStringUtf8(m_sectionName, key, ch, sizeof(ch), m_fileName);
     int nReturnValue = DWORDToInt(dwNum, "ReadString(bCheck, key, int*)");
 
     if (nReturnValue > 0)
@@ -686,17 +739,19 @@ int COPini::ReadAddString(std::string key, double* value, double init_value)
 
 bool COPini::CheckFileExists(const std::string& fileName)
 {
-    WIN32_FIND_DATAA findData;
-    HANDLE hFind = FindFirstFileA(fileName.c_str(), &findData);
-    bool exists = (hFind != INVALID_HANDLE_VALUE);
-    if (exists) FindClose(hFind);
-    return exists;
+    return FileExistsUtf8OrAcp(fileName);
 }
 
 bool COPini::CheckAndCreateDir(const std::string& dirPath)
 {
+    const std::wstring wideDirPath = DecodeUtf8OrAcpToWide(dirPath);
+    if (wideDirPath.empty())
+    {
+        return false;
+    }
+
     // 1. 检查文件夹是否存在（Windows API：GetFileAttributes）
-    DWORD attr = GetFileAttributesA(dirPath.c_str());
+    DWORD attr = GetFileAttributesW(wideDirPath.c_str());
     if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
     {
         m_pIniLog.write(LogColor::SUCCESS, "文件夹已存在：%s", dirPath.c_str());
@@ -704,7 +759,7 @@ bool COPini::CheckAndCreateDir(const std::string& dirPath)
     }
 
     // 2. 不存在则创建文件夹（Windows API：CreateDirectory）
-    BOOL ret = CreateDirectoryA(dirPath.c_str(), NULL);
+    BOOL ret = CreateDirectoryW(wideDirPath.c_str(), NULL);
     if (ret)
     {
         m_pIniLog.write(LogColor::SUCCESS, "文件夹创建成功：%s", dirPath.c_str());

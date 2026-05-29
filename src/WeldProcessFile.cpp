@@ -1,5 +1,6 @@
 #include "WeldProcessFile.h"
 
+#include "ConfigDatabase.h"
 #include "RobotLog.h"
 #include "RobotMessage.h"
 
@@ -10,7 +11,6 @@
 #include <cstdarg>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -27,7 +27,7 @@ namespace fs = std::filesystem;
 constexpr char kDelimiter = '\t';
 constexpr int kWeaveFieldCount = 14;
 constexpr int kWeldBaseFieldCount = 30;
-constexpr int kWeldFieldCount = 47;
+constexpr int kWeldFieldCount = 48;
 }
 
 WeldProcessFile::WeldProcessFile(const T_CONTRAL_UNIT& tContralUnitInfo)
@@ -86,9 +86,9 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
     m_sWeldIniFilePath = BuildWeldIniPath(tContralUnitInfo.sUnitName);
     EnsureGlobalStorage(tContralUnitInfo.nUnitNo);
 
-    if (!fs::exists(m_sWeaveIniFilePath) || !fs::exists(m_sWeldIniFilePath))
+    if (!ConfigDatabase::HasTextFile(m_sWeaveIniFilePath) || !ConfigDatabase::HasTextFile(m_sWeldIniFilePath))
     {
-        m_sLastError = GetStr("未找到工艺 txt 文件：%s / %s",
+        m_sLastError = GetStr("配置库中未找到工艺数据：%s / %s",
             m_sWeaveIniFilePath.c_str(),
             m_sWeldIniFilePath.c_str());
         LogError("%s", m_sLastError.c_str());
@@ -420,12 +420,13 @@ std::string WeldProcessFile::BuildWeldIniPath(const std::string& unitName) const
 
 bool WeldProcessFile::LoadWeaveTxt()
 {
-    std::ifstream in(m_sWeaveIniFilePath);
-    if (!in)
+    std::string content;
+    if (!ConfigDatabase::ReadTextFile(m_sWeaveIniFilePath, &content))
     {
-        m_sLastError = "打开摆动 txt 文件失败。";
+        m_sLastError = "从配置库读取摆动数据失败。";
         return false;
     }
+    std::istringstream in(content);
 
     m_vtWeaveTypeList.clear();
     m_nUseWeaveTypeNo = 0;
@@ -480,12 +481,13 @@ bool WeldProcessFile::LoadWeaveTxt()
 
 bool WeldProcessFile::LoadWeldTxt()
 {
-    std::ifstream in(m_sWeldIniFilePath);
-    if (!in)
+    std::string content;
+    if (!ConfigDatabase::ReadTextFile(m_sWeldIniFilePath, &content))
     {
-        m_sLastError = "打开焊接工艺 txt 文件失败。";
+        m_sLastError = "从配置库读取焊接工艺数据失败。";
         return false;
     }
+    std::istringstream in(content);
 
     m_vtWeldParaList.clear();
     m_nUseWeldParaNo = 0;
@@ -536,36 +538,34 @@ bool WeldProcessFile::LoadWeldTxt()
 
 bool WeldProcessFile::SaveWeaveTxt() const
 {
-    std::ofstream out(m_sWeaveIniFilePath, std::ios::trunc);
-    if (!out)
-    {
-        const_cast<WeldProcessFile*>(this)->m_sLastError = "写入摆动 txt 文件失败。";
-        return false;
-    }
-
+    std::ostringstream out;
     out << "# WeaveDate.txt\n";
     out << "USE" << kDelimiter << m_nUseWeaveTypeNo << "\n";
     for (const auto& item : m_vtWeaveTypeList)
     {
         out << JoinLine(BuildWeaveFields(item), kDelimiter) << "\n";
     }
+    if (!ConfigDatabase::WriteTextFile(m_sWeaveIniFilePath, out.str()))
+    {
+        const_cast<WeldProcessFile*>(this)->m_sLastError = "写入配置库摆动数据失败。";
+        return false;
+    }
     return true;
 }
 
 bool WeldProcessFile::SaveWeldTxt() const
 {
-    std::ofstream out(m_sWeldIniFilePath, std::ios::trunc);
-    if (!out)
-    {
-        const_cast<WeldProcessFile*>(this)->m_sLastError = "写入焊接工艺 txt 文件失败。";
-        return false;
-    }
-
+    std::ostringstream out;
     out << "# WeldPara.txt\n";
     out << "USE" << kDelimiter << m_nUseWeldParaNo << "\n";
     for (const auto& item : m_vtWeldParaList)
     {
         out << JoinLine(BuildWeldFields(item), kDelimiter) << "\n";
+    }
+    if (!ConfigDatabase::WriteTextFile(m_sWeldIniFilePath, out.str()))
+    {
+        const_cast<WeldProcessFile*>(this)->m_sLastError = "写入配置库焊接工艺数据失败。";
+        return false;
     }
     return true;
 }
@@ -808,7 +808,8 @@ bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WE
         && parseOptionalInt(43, tWeldPara.nCornerArcTransitionRadiusEnable, 0)
         && parseOptionalInt(44, tWeldPara.nCornerArcTransitionSpeedEnable, 0)
         && parseOptionalInt(45, tWeldPara.nCornerArcTransitionCurrentEnable, 0)
-        && parseOptionalInt(46, tWeldPara.nCornerArcTransitionVoltageEnable, 0);
+        && parseOptionalInt(46, tWeldPara.nCornerArcTransitionVoltageEnable, 0)
+        && parseOptionalInt(47, tWeldPara.nCornerArcTransitionApplyScope, 2);
 }
 
 std::vector<std::string> WeldProcessFile::BuildWeaveFields(const T_WeaveDate& tWeaveDate) const
@@ -880,7 +881,8 @@ std::vector<std::string> WeldProcessFile::BuildWeldFields(const T_WELD_PARA& tWe
         std::to_string(tWeldPara.nCornerArcTransitionRadiusEnable),
         std::to_string(tWeldPara.nCornerArcTransitionSpeedEnable),
         std::to_string(tWeldPara.nCornerArcTransitionCurrentEnable),
-        std::to_string(tWeldPara.nCornerArcTransitionVoltageEnable)
+        std::to_string(tWeldPara.nCornerArcTransitionVoltageEnable),
+        std::to_string(tWeldPara.nCornerArcTransitionApplyScope)
     };
 }
 

@@ -1,5 +1,6 @@
 #include "PreciseMeasureEditDialog.h"
 
+#include "ConfigDatabase.h"
 #include "FANUCRobotDriver.h"
 #include "OPini.h"
 #include "RobotDataHelper.h"
@@ -14,7 +15,6 @@
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QDoubleValidator>
-#include <QFile>
 #include <QFileInfo>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -43,6 +43,12 @@
 #include <cmath>
 #include <limits>
 #include <utility>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 namespace
 {
@@ -202,6 +208,24 @@ QStringList MinimalScanSectionLinesForPrecise()
     return lines;
 }
 
+QStringList MinimalWeldSectionLinesForPrecise()
+{
+    QStringList lines;
+    lines
+        << "WeldSafeMoveSpeedMmPerMin=1000"
+        << "StepOverlapRel=20"
+        << "WeldDirection=1"
+        << "NormalWeldRx=0"
+        << "NormalWeldRy=0"
+        << "CornerTransitionLeadDis=0"
+        << "WeldStartSkipDis=0"
+        << "WeldEndSkipDis=0"
+        << "WeldRzGainDeg=0"
+        << "SlopeRzMinDeg=-20"
+        << "SlopeRzMaxDeg=20";
+    return lines;
+}
+
 constexpr auto CAMERA_READ_FPS_KEY = "CameraReadFps";
 constexpr auto CAMERA_TIME_OFFSET_MS_KEY = "CameraTimeOffsetMs";
 constexpr double DEFAULT_CAMERA_READ_FPS = 100.0;
@@ -252,22 +276,87 @@ QString ValueForWriteWithInlineComment(QLineEdit* edit)
     return value + " " + inlineComment;
 }
 
-QString ReadTextFileSmartForPrecise(const QString& path)
+QString DecodeIniTextForPrecise(const std::string& text);
+
+std::string ToUtf8StdStringForPrecise(const QString& text)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    const QByteArray bytes = text.toUtf8();
+    return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+}
+
+QString DecodeIniTextForPrecise(const std::string& text)
+{
+    if (text.empty())
     {
         return QString();
     }
-    const QByteArray bytes = file.readAll();
-    QString text = QString::fromUtf8(bytes);
-    if (text.contains(QChar(0xfffd)))
+
+    const QByteArray bytes(text.data(), static_cast<int>(text.size()));
+#ifdef Q_OS_WIN
+    const auto decodeWindowsCodePage = [&bytes](UINT codePage, DWORD flags) -> QString
+        {
+            const int wideLength = MultiByteToWideChar(
+                codePage,
+                flags,
+                bytes.constData(),
+                bytes.size(),
+                nullptr,
+                0);
+            if (wideLength <= 0)
+            {
+                return QString();
+            }
+            std::wstring wideText(static_cast<size_t>(wideLength), L'\0');
+            MultiByteToWideChar(
+                codePage,
+                flags,
+                bytes.constData(),
+                bytes.size(),
+                wideText.data(),
+                wideLength);
+            return QString::fromWCharArray(wideText.data(), wideLength);
+        };
+
+    const QString decodedUtf8 = decodeWindowsCodePage(CP_UTF8, MB_ERR_INVALID_CHARS);
+    if (!decodedUtf8.isNull() && !decodedUtf8.contains(QChar(0xfffd)))
     {
-        text = QString::fromLocal8Bit(bytes);
+        return decodedUtf8;
     }
-    text.replace("\r\n", "\n");
-    text.replace('\r', '\n');
-    return text;
+    const QString decodedGbk = decodeWindowsCodePage(936, 0);
+    if (!decodedGbk.isNull())
+    {
+        return decodedGbk;
+    }
+#endif
+    QString decoded = QString::fromUtf8(bytes);
+    if (!decoded.contains(QChar(0xfffd)))
+    {
+        return decoded;
+    }
+    return QString::fromLocal8Bit(bytes.constData(), bytes.size());
+}
+
+QByteArray EncodeUtf16LeForPrecise(const QString& text, bool includeBom)
+{
+    QByteArray bytes;
+    bytes.reserve((includeBom ? 2 : 0) + text.size() * 2);
+    if (includeBom)
+    {
+        bytes.append(char(0xFF));
+        bytes.append(char(0xFE));
+    }
+    for (const QChar ch : text)
+    {
+        const ushort codeUnit = ch.unicode();
+        bytes.append(static_cast<char>(codeUnit & 0xFF));
+        bytes.append(static_cast<char>((codeUnit >> 8) & 0xFF));
+    }
+    return bytes;
+}
+
+QByteArray EncodeIniTextForPrecise(const QString& text)
+{
+    return EncodeUtf16LeForPrecise(text, true);
 }
 
 bool IsObsoletePreciseParamKey(const QString& key)
@@ -339,6 +428,93 @@ QStringList ZeroSectionValuesForPrecise(const QStringList& lines)
         result << QString("%1=0").arg(line.left(equalPos).trimmed());
     }
     return result;
+}
+
+QMap<QString, QString> SectionMapFromLinesForPrecise(const QStringList& lines)
+{
+    QMap<QString, QString> values;
+    for (const QString& line : lines)
+    {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || trimmed.startsWith('#') || trimmed.startsWith(';'))
+        {
+            continue;
+        }
+        const int equalPos = line.indexOf('=');
+        if (equalPos <= 0)
+        {
+            continue;
+        }
+        const QString key = line.left(equalPos).trimmed();
+        if (key.isEmpty() || IsObsoletePreciseParamKey(key))
+        {
+            continue;
+        }
+        values.insert(key, line.mid(equalPos + 1).trimmed());
+    }
+    return values;
+}
+
+QMap<QString, QString> ZeroSectionValuesForPrecise(const QMap<QString, QString>& values)
+{
+    QMap<QString, QString> result;
+    for (auto it = values.constBegin(); it != values.constEnd(); ++it)
+    {
+        if (!IsObsoletePreciseParamKey(it.key()))
+        {
+            result.insert(it.key(), "0");
+        }
+    }
+    return result;
+}
+
+QMap<QString, QString> ReadSectionMapForPrecise(
+    const QString& path,
+    const QString& sectionName,
+    const QStringList& fallbackLines)
+{
+    QMap<QString, QString> values = ConfigDatabase::ReadIniSection(path, sectionName);
+    if (values.isEmpty())
+    {
+        values = SectionMapFromLinesForPrecise(fallbackLines);
+    }
+    for (auto it = values.begin(); it != values.end(); )
+    {
+        if (IsObsoletePreciseParamKey(it.key()))
+        {
+            it = values.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    return values;
+}
+
+bool WriteSectionMapForPrecise(
+    const QString& path,
+    const QString& sectionName,
+    const QMap<QString, QString>& values,
+    QString& error)
+{
+    if (!ConfigDatabase::RemoveIniSection(path, sectionName))
+    {
+        error = QString("清理参数组失败：%1 [%2]").arg(path, sectionName);
+        return false;
+    }
+    for (auto it = values.constBegin(); it != values.constEnd(); ++it)
+    {
+        if (IsObsoletePreciseParamKey(it.key()))
+        {
+            continue;
+        }
+        if (!RobotDataHelper::WriteParamValue(path, sectionName, it.key(), it.value(), &error))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 QString PreciseParamDisplayName(const QString& key)
@@ -414,6 +590,8 @@ QString PreciseParamDisplayName(const QString& key)
         { "WeldStartSkipDis", "起点跳过距离" },
         { "WeldEndSkipDis", "终点跳过距离" },
         { "WeldRzGainDeg", "焊接RZ增益" },
+        { "SlopeRzMinDeg", "爬坡RZ负向夹紧" },
+        { "SlopeRzMaxDeg", "爬坡RZ正向夹紧" },
         { "StandWeldRx", "立焊RX" },
         { "StandWeldRy", "立焊RY" },
         { "TransitionsRx", "过渡RX" },
@@ -523,7 +701,8 @@ QString WeldParamGroupTitleForKey(const QString& key)
     static const QSet<QString> poseKeys = {
         "FlatMeasureRx", "FlatMeasureRy", "FlatWeldRx", "FlatWeldRy", "NormalWeldRx",
         "NormalWeldRy", "CornerTransitionLeadDis", "WeldStartSkipDis",
-        "WeldEndSkipDis", "WeldRzGainDeg", "StandWeldRx", "StandWeldRy", "TransitionsRx",
+        "WeldEndSkipDis", "WeldRzGainDeg", "SlopeRzMinDeg", "SlopeRzMaxDeg",
+        "StandWeldRx", "StandWeldRy", "TransitionsRx",
         "TransitionsRy", "StandWeldScanFreeRx", "StandWeldScanFreeRy", "StandWeldScanDis",
         "StandWeldScanOffsetRz", "WeldNorAngleInHome", "EndpointSearchDis",
         "StartSearchOffeset_RZ", "EndSearchOffeset_RZ", "GunDownBackSafeDis",
@@ -1020,7 +1199,7 @@ void PreciseMeasureEditDialog::LoadParamGroups()
 
     COPini ini;
     const QString path = CurrentParamFilePath();
-    if (!ini.SetFileName(path.toLocal8Bit().constData()))
+    if (!ini.SetFileName(path.toUtf8().constData()))
     {
         AppendLog("读取参数组失败：打开参数文件失败：" + path);
         m_bLoading = false;
@@ -1029,7 +1208,7 @@ void PreciseMeasureEditDialog::LoadParamGroups()
 
     int groupCount = 1;
     int useNo = 0;
-    ini.SetSectionName(GroupMetaSectionName().toStdString());
+    ini.SetSectionName(ToUtf8StdStringForPrecise(GroupMetaSectionName()));
     ini.ReadString(false, "GroupCount", &groupCount);
     ini.ReadString(false, "UseGroupNo", &useNo);
     groupCount = std::max(1, groupCount);
@@ -1037,10 +1216,10 @@ void PreciseMeasureEditDialog::LoadParamGroups()
     for (int index = 0; index < groupCount; ++index)
     {
         std::string groupName;
-        ini.ReadString(false, QString("Group%1Name").arg(index).toStdString(), groupName);
+        ini.ReadString(false, ToUtf8StdStringForPrecise(QString("Group%1Name").arg(index)), groupName);
         const QString displayName = groupName.empty()
             ? QString("参数组%1").arg(index + 1)
-            : QString::fromStdString(groupName);
+            : DecodeIniTextForPrecise(groupName);
         m_pGroupCombo->addItem(QString("%1 / Group%2").arg(displayName).arg(index), index);
     }
     m_pGroupCombo->setCurrentIndex(useNo);
@@ -1117,7 +1296,7 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
 
     const QString path = CurrentParamFilePath();
     COPini ini;
-    if (!ini.SetFileName(path.toLocal8Bit().constData()))
+    if (!ini.SetFileName(path.toUtf8().constData()))
     {
         error = "打开参数文件失败：" + path;
         QMessageBox::warning(this, "删除参数组", error);
@@ -1126,7 +1305,7 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
     }
 
     int groupCount = 1;
-    ini.SetSectionName(GroupMetaSectionName().toStdString());
+    ini.SetSectionName(ToUtf8StdStringForPrecise(GroupMetaSectionName()));
     ini.ReadString(false, "GroupCount", &groupCount);
     groupCount = std::max(1, groupCount);
     if (groupCount <= 1)
@@ -1148,26 +1327,24 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
         return;
     }
 
-    const QString content = ReadTextFileSmartForPrecise(path);
     QStringList groupNames;
     QList<bool> groupNameWasDefault;
     for (int index = 0; index < groupCount; ++index)
     {
         std::string rawName;
-        ini.ReadString(false, QString("Group%1Name").arg(index).toStdString(), rawName);
+        ini.ReadString(false, ToUtf8StdStringForPrecise(QString("Group%1Name").arg(index)), rawName);
         const QString defaultName = QString("参数组%1").arg(index + 1);
-        const QString name = rawName.empty() ? defaultName : QString::fromStdString(rawName);
+        const QString name = rawName.empty() ? defaultName : QString::fromUtf8(rawName.data(), static_cast<int>(rawName.size()));
         groupNames << name;
         groupNameWasDefault << (rawName.empty() || name == defaultName);
     }
 
     const int newGroupCount = groupCount - 1;
     const int newUseIndex = std::clamp(deleteIndex > 0 ? deleteIndex - 1 : 0, 0, newGroupCount - 1);
-    QStringList output;
-    output << "[MeasureWeldGroups]";
-    output << QString("GroupCount=%1").arg(newGroupCount);
-    output << QString("UseGroupNo=%1").arg(newUseIndex);
 
+    QList<QMap<QString, QString>> keptScanSections;
+    QList<QMap<QString, QString>> keptWeldSections;
+    QStringList keptGroupNames;
     int newIndex = 0;
     for (int oldIndex = 0; oldIndex < groupCount; ++oldIndex)
     {
@@ -1175,52 +1352,47 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
         {
             continue;
         }
+
         const QString newName = groupNameWasDefault.value(oldIndex, true)
             ? QString("参数组%1").arg(newIndex + 1)
             : groupNames.value(oldIndex, QString("参数组%1").arg(newIndex + 1));
-        output << QString("Group%1Name=%2").arg(newIndex).arg(newName);
-        ++newIndex;
-    }
-    output << "";
-
-    newIndex = 0;
-    for (int oldIndex = 0; oldIndex < groupCount; ++oldIndex)
-    {
-        if (oldIndex == deleteIndex)
-        {
-            continue;
-        }
-
-        QStringList scanLines = ExtractSectionLinesForPrecise(content, RobotDataHelper::MeasureWeldScanSectionName(oldIndex));
-        QStringList weldLines = ExtractSectionLinesForPrecise(content, RobotDataHelper::MeasureWeldWeldSectionName(oldIndex));
-        if (scanLines.isEmpty())
-        {
-            scanLines = MinimalScanSectionLinesForPrecise();
-        }
-        if (weldLines.isEmpty())
-        {
-            weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "StepOverlapRel=20" << "WeldDirection=1" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
-        }
-
-        output << QString("[%1]").arg(RobotDataHelper::MeasureWeldScanSectionName(newIndex));
-        output << scanLines;
-        output << "";
-        output << QString("[%1]").arg(RobotDataHelper::MeasureWeldWeldSectionName(newIndex));
-        output << weldLines;
-        output << "";
+        keptGroupNames << newName;
+        keptScanSections << ReadSectionMapForPrecise(path, RobotDataHelper::MeasureWeldScanSectionName(oldIndex), MinimalScanSectionLinesForPrecise());
+        keptWeldSections << ReadSectionMapForPrecise(path, RobotDataHelper::MeasureWeldWeldSectionName(oldIndex), MinimalWeldSectionLinesForPrecise());
         ++newIndex;
     }
 
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    if (!ConfigDatabase::RemoveIniSection(path, GroupMetaSectionName()))
     {
-        error = "写入参数文件失败：" + path;
+        error = "清理参数组索引失败：" + path;
         QMessageBox::warning(this, "删除参数组", error);
         AppendLog("删除参数组失败：" + error);
         return;
     }
-    file.write(output.join("\n").toUtf8());
-    file.close();
+    for (int oldIndex = 0; oldIndex < groupCount; ++oldIndex)
+    {
+        ConfigDatabase::RemoveIniSection(path, RobotDataHelper::MeasureWeldScanSectionName(oldIndex));
+        ConfigDatabase::RemoveIniSection(path, RobotDataHelper::MeasureWeldWeldSectionName(oldIndex));
+    }
+
+    if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "GroupCount", QString::number(newGroupCount), &error)
+        || !RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "UseGroupNo", QString::number(newUseIndex), &error))
+    {
+        QMessageBox::warning(this, "删除参数组", error);
+        AppendLog("删除参数组失败：" + error);
+        return;
+    }
+    for (int index = 0; index < newGroupCount; ++index)
+    {
+        if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), QString("Group%1Name").arg(index), keptGroupNames.value(index), &error)
+            || !WriteSectionMapForPrecise(path, RobotDataHelper::MeasureWeldScanSectionName(index), keptScanSections.value(index), error)
+            || !WriteSectionMapForPrecise(path, RobotDataHelper::MeasureWeldWeldSectionName(index), keptWeldSections.value(index), error))
+        {
+            QMessageBox::warning(this, "删除参数组", error);
+            AppendLog("删除参数组失败：" + error);
+            return;
+        }
+    }
 
     LoadParamGroups();
     AppendLog(QString("已删除参数组：%1。").arg(groupName));
@@ -1282,11 +1454,13 @@ void PreciseMeasureEditDialog::TeachEndSafePulse()
 
 void PreciseMeasureEditDialog::OpenPositionTeachDialog()
 {
+    DelayedLoadingGuard loading(this, "正在打开扫描位置示教", 1000);
     PreciseMeasureEditDialog* dialog = new PreciseMeasureEditDialog(
         m_pContralUnit,
         this,
         true,
         m_openCameraPreviewCallback);
+    loading.Pulse();
     dialog->setAttribute(Qt::WA_DeleteOnClose);
 
     if (m_pRobotCombo != nullptr && dialog->m_pRobotCombo != nullptr)
@@ -1301,6 +1475,7 @@ void PreciseMeasureEditDialog::OpenPositionTeachDialog()
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
+    loading.Finish();
 }
 
 void PreciseMeasureEditDialog::ReloadCurrentParam()
@@ -1613,14 +1788,14 @@ QString PreciseMeasureEditDialog::CurrentGroupName() const
     {
         COPini ini;
         const QString path = CurrentParamFilePath();
-        if (ini.SetFileName(path.toLocal8Bit().constData()))
+        if (ini.SetFileName(path.toUtf8().constData()))
         {
-            ini.SetSectionName(GroupMetaSectionName().toStdString());
+            ini.SetSectionName(ToUtf8StdStringForPrecise(GroupMetaSectionName()));
             std::string groupName;
-            ini.ReadString(false, QString("Group%1Name").arg(groupIndex).toStdString(), groupName);
+            ini.ReadString(false, ToUtf8StdStringForPrecise(QString("Group%1Name").arg(groupIndex)), groupName);
             if (!groupName.empty())
             {
-                return QString::fromStdString(groupName);
+                return DecodeIniTextForPrecise(groupName);
             }
         }
     }
@@ -1749,13 +1924,6 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
         return false;
     }
 
-    QString content = ReadTextFileSmartForPrecise(path);
-    if (content.isEmpty())
-    {
-        AppendLog("读取其它参数失败：打开参数文件失败：" + path);
-        return false;
-    }
-
     m_bLoading = true;
     ClearOtherParamEditors();
 
@@ -1829,67 +1997,40 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
         };
     auto loadSectionParams = [&](const QString& targetSection, const QString& categoryTitle, bool skipDedicatedKeys)
         {
-            bool inSection = false;
             const bool weldSection = categoryTitle == QStringLiteral("焊接参数");
             currentGroupLayout = nullptr;
             currentGroupTitle.clear();
             row = 0;
             colInGroup = 0;
-            const QStringList lines = content.split('\n');
-            for (const QString& line : lines)
+            const QMap<QString, QString> values = ConfigDatabase::ReadIniSection(path, targetSection);
+            QStringList groupOrder;
+            QMap<QString, QList<QPair<QString, QString>>> groupedValues;
+            for (auto it = values.constBegin(); it != values.constEnd(); ++it)
             {
-                const QString trimmed = line.trimmed();
-                if (trimmed.startsWith('[') && trimmed.endsWith(']'))
+                const QString key = it.key().trimmed();
+                if (key.isEmpty() || IsObsoletePreciseParamKey(key))
                 {
-                    const QString currentSection = trimmed.mid(1, trimmed.size() - 2).trimmed();
-                    if (inSection && currentSection.compare(targetSection, Qt::CaseInsensitive) != 0)
-                    {
-                        break;
-                    }
-                    inSection = currentSection.compare(targetSection, Qt::CaseInsensitive) == 0;
-                    currentGroupLayout = nullptr;
-                    currentGroupTitle.clear();
-                    colInGroup = 0;
                     continue;
                 }
-
-                if (!inSection || trimmed.isEmpty())
+                if (skipDedicatedKeys && IsDedicatedPulseKey(key))
                 {
                     continue;
                 }
 
-                if (trimmed.startsWith('#'))
+                const QString groupTitle = OtherParamGroupTitleForKey(key, weldSection);
+                if (!groupOrder.contains(groupTitle))
                 {
-                    // 参数文件会随现场 Data 保留，历史文件注释可能是 UTF-8/GBK/乱码混杂。
-                    // 界面分组标题固定按 key 归类，注释只保留在文件里，不参与显示。
-                    continue;
+                    groupOrder << groupTitle;
                 }
+                groupedValues[groupTitle].append(qMakePair(key, it.value()));
+            }
 
-                const int pos = line.indexOf('=');
-                if (pos > 0)
+            for (const QString& groupTitle : groupOrder)
+            {
+                currentGroupLayout = createCollapsibleGroup(groupTitle, categoryTitle);
+                for (const auto& item : groupedValues.value(groupTitle))
                 {
-                    const QString key = line.left(pos).trimmed();
-                    const QString value = line.mid(pos + 1).trimmed();
-                    if (IsObsoletePreciseParamKey(key))
-                    {
-                        continue;
-                    }
-                    if (skipDedicatedKeys && IsDedicatedPulseKey(key))
-                    {
-                        currentGroupLayout = nullptr;
-                        currentGroupTitle.clear();
-                        row = 0;
-                        colInGroup = 0;
-                        continue;
-                    }
-
-                    const QString groupTitle = OtherParamGroupTitleForKey(key, weldSection);
-                    if (currentGroupLayout == nullptr || currentGroupTitle != groupTitle)
-                    {
-                        currentGroupLayout = createCollapsibleGroup(groupTitle, categoryTitle);
-                    }
-
-                    AddOtherParamEditor(currentGroupLayout, m_otherParamEditors, m_otherParamComboEditors, row, colInGroup, targetSection, key, value);
+                    AddOtherParamEditor(currentGroupLayout, m_otherParamEditors, m_otherParamComboEditors, row, colInGroup, targetSection, item.first, item.second);
                     hasOtherParam = true;
                 }
             }
@@ -2059,9 +2200,9 @@ bool PreciseMeasureEditDialog::LoadScanSafeParams()
     double flipWarn = 90.0;
 
     COPini ini;
-    if (ini.SetFileName(path.toLocal8Bit().constData()))
+    if (ini.SetFileName(path.toUtf8().constData()))
     {
-        ini.SetSectionName(section.toStdString());
+        ini.SetSectionName(ToUtf8StdStringForPrecise(section));
         ini.ReadString(false, "UseComputedScanSafe", &useComputed);
         ini.ReadString(false, "ScanSafeOffsetDistanceMm", &offset);
         ini.ReadString(false, "ScanSafeGunAngleDeg", &gunAngle);
@@ -2229,33 +2370,24 @@ bool PreciseMeasureEditDialog::CreateParamGroup(bool copyCurrent, QString& error
     }
 
     const QString path = CurrentParamFilePath();
-    const QString content = ReadTextFileSmartForPrecise(path);
     COPini ini;
-    if (!ini.SetFileName(path.toLocal8Bit().constData()))
+    if (!ini.SetFileName(path.toUtf8().constData()))
     {
         error = "打开参数文件失败：" + path;
         return false;
     }
     int groupCount = 1;
-    ini.SetSectionName(GroupMetaSectionName().toStdString());
+    ini.SetSectionName(ToUtf8StdStringForPrecise(GroupMetaSectionName()));
     ini.ReadString(false, "GroupCount", &groupCount);
     groupCount = std::max(1, groupCount);
     const int newIndex = groupCount;
     const int sourceIndex = CurrentGroupIndex();
-    QStringList scanLines = ExtractSectionLinesForPrecise(content, RobotDataHelper::MeasureWeldScanSectionName(sourceIndex));
-    QStringList weldLines = ExtractSectionLinesForPrecise(content, RobotDataHelper::MeasureWeldWeldSectionName(sourceIndex));
+    QMap<QString, QString> scanValues = ReadSectionMapForPrecise(path, RobotDataHelper::MeasureWeldScanSectionName(sourceIndex), MinimalScanSectionLinesForPrecise());
+    QMap<QString, QString> weldValues = ReadSectionMapForPrecise(path, RobotDataHelper::MeasureWeldWeldSectionName(sourceIndex), MinimalWeldSectionLinesForPrecise());
     if (!copyCurrent)
     {
-        scanLines = ZeroSectionValuesForPrecise(scanLines);
-        weldLines = ZeroSectionValuesForPrecise(weldLines);
-    }
-    if (scanLines.isEmpty())
-    {
-        scanLines = MinimalScanSectionLinesForPrecise();
-    }
-    if (weldLines.isEmpty())
-    {
-        weldLines << "WeldSafeMoveSpeedMmPerMin=1000" << "StepOverlapRel=20" << "WeldDirection=1" << "NormalWeldRx=0" << "NormalWeldRy=0" << "CornerTransitionLeadDis=0" << "WeldStartSkipDis=0" << "WeldEndSkipDis=0" << "WeldRzGainDeg=0";
+        scanValues = ZeroSectionValuesForPrecise(scanValues);
+        weldValues = ZeroSectionValuesForPrecise(weldValues);
     }
 
     if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "GroupCount", QString::number(newIndex + 1), &error)
@@ -2265,17 +2397,11 @@ bool PreciseMeasureEditDialog::CreateParamGroup(bool copyCurrent, QString& error
         return false;
     }
 
-    QFile file(path);
-    if (!file.open(QIODevice::Append | QIODevice::Text))
+    if (!WriteSectionMapForPrecise(path, RobotDataHelper::MeasureWeldScanSectionName(newIndex), scanValues, error)
+        || !WriteSectionMapForPrecise(path, RobotDataHelper::MeasureWeldWeldSectionName(newIndex), weldValues, error))
     {
-        error = "追加参数组失败：" + path;
         return false;
     }
-    QTextStream stream(&file);
-    stream << "\n[" << RobotDataHelper::MeasureWeldScanSectionName(newIndex) << "]\n";
-    stream << scanLines.join("\n") << "\n";
-    stream << "\n[" << RobotDataHelper::MeasureWeldWeldSectionName(newIndex) << "]\n";
-    stream << weldLines.join("\n") << "\n";
     LoadParamGroups();
     return true;
 }
