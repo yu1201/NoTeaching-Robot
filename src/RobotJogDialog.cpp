@@ -12,9 +12,13 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QLabel>
+#include <QLayout>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPointer>
+#include <QScrollArea>
+#include <QSizePolicy>
 #include <QValidator>
 #include <QVBoxLayout>
 
@@ -178,9 +182,8 @@ RobotJogDialog::RobotJogDialog(RobotDriverAdaptor* robotDriver, QWidget* parent)
 	, m_streamJointSpeed(1.0)
 {
 	setWindowTitle("机器人点动控制");
-	MarkDirectMouseInputWindow(this);
 	ApplyUnifiedWindowChrome(this);
-	setMinimumSize(860, 600);
+	setMinimumSize(720, 500);
 	ResizeWindowForAvailableGeometry(this, QSize(1120, 680), 0.86, 0.78);
 	BuildUi();
 	ApplyStyle();
@@ -300,9 +303,23 @@ void RobotJogDialog::BuildUi()
 
 	root->addWidget(title);
 	root->addWidget(subtitle);
-	root->addWidget(m_stateLabel);
-	root->addLayout(speedLayout);
-	root->addLayout(axisCards, 1);
+
+	QScrollArea* jogScrollArea = new QScrollArea(this);
+	jogScrollArea->setObjectName("AdaptiveWindowScrollArea");
+	ConfigureResponsiveScrollArea(jogScrollArea);
+
+	QWidget* jogContent = new QWidget(jogScrollArea);
+	jogContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+	QVBoxLayout* jogContentLayout = new QVBoxLayout(jogContent);
+	jogContentLayout->setContentsMargins(0, 0, 8, 0);
+	jogContentLayout->setSpacing(14);
+	jogContentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+	jogContentLayout->addWidget(m_stateLabel);
+	jogContentLayout->addLayout(speedLayout);
+	jogContentLayout->addLayout(axisCards, 1);
+	jogContentLayout->addStretch(1);
+	jogScrollArea->setWidget(jogContent);
+	root->addWidget(jogScrollArea, 1);
 }
 
 void RobotJogDialog::ApplyStyle()

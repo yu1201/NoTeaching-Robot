@@ -14,11 +14,13 @@
 #include <QIntValidator>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QList>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSizePolicy>
 #include <QStringList>
 #include <QTextDocument>
@@ -65,8 +67,8 @@ public:
                 layout->addWidget(dotLabel);
             }
         }
-        setFixedWidth(228);
-        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        setMinimumWidth(228);
+        setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
     }
 
     QString text() const
@@ -238,6 +240,17 @@ CameraBasicParamDialog::CameraBasicParamDialog(
     hintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
     rootLayout->addWidget(hintLabel);
 
+    QScrollArea* paramScrollArea = new QScrollArea(this);
+    paramScrollArea->setObjectName("AdaptiveWindowScrollArea");
+    ConfigureResponsiveScrollArea(paramScrollArea);
+
+    QWidget* paramContent = new QWidget(paramScrollArea);
+    paramContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    QVBoxLayout* paramContentLayout = new QVBoxLayout(paramContent);
+    paramContentLayout->setContentsMargins(0, 0, 8, 0);
+    paramContentLayout->setSpacing(10);
+    paramContentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+
     QGroupBox* cameraGroup = new QGroupBox("基础参数", this);
     QGridLayout* cameraLayout = new QGridLayout(cameraGroup);
     cameraLayout->setHorizontalSpacing(14);
@@ -257,7 +270,7 @@ CameraBasicParamDialog::CameraBasicParamDialog(
 
     cameraLayout->addWidget(new QLabel("端口", this), 2, 2);
     m_pDevicePortEdit = new QLineEdit(this);
-    m_pDevicePortEdit->setFixedWidth(150);
+    m_pDevicePortEdit->setMinimumWidth(150);
     m_pDevicePortEdit->setAlignment(Qt::AlignRight);
     m_pDevicePortEdit->setValidator(new QIntValidator(1, 65535, m_pDevicePortEdit));
     MarkNumericEdit(m_pDevicePortEdit);
@@ -265,7 +278,7 @@ CameraBasicParamDialog::CameraBasicParamDialog(
 
     cameraLayout->addWidget(new QLabel("曝光", this), 3, 0);
     m_pExposureTimeEdit = new QLineEdit(this);
-    m_pExposureTimeEdit->setFixedWidth(260);
+    m_pExposureTimeEdit->setMinimumWidth(260);
     m_pExposureTimeEdit->setAlignment(Qt::AlignRight);
     m_pExposureTimeEdit->setValidator(CreatePositiveDoubleValidator(m_pExposureTimeEdit));
     MarkNumericEdit(m_pExposureTimeEdit);
@@ -273,7 +286,7 @@ CameraBasicParamDialog::CameraBasicParamDialog(
 
     cameraLayout->addWidget(new QLabel("增益", this), 3, 2);
     m_pGainLevelEdit = new QLineEdit(this);
-    m_pGainLevelEdit->setFixedWidth(150);
+    m_pGainLevelEdit->setMinimumWidth(150);
     m_pGainLevelEdit->setAlignment(Qt::AlignRight);
     m_pGainLevelEdit->setValidator(CreatePositiveDoubleValidator(m_pGainLevelEdit));
     MarkNumericEdit(m_pGainLevelEdit);
@@ -281,7 +294,7 @@ CameraBasicParamDialog::CameraBasicParamDialog(
 
     cameraLayout->addWidget(new QLabel("相机类型", this), 4, 0);
     m_pCameraTypeEdit = new QLineEdit(this);
-    m_pCameraTypeEdit->setFixedWidth(260);
+    m_pCameraTypeEdit->setMinimumWidth(260);
     m_pCameraTypeEdit->setAlignment(Qt::AlignRight);
     m_pCameraTypeEdit->setValidator(new QIntValidator(0, 9999, m_pCameraTypeEdit));
     MarkNumericEdit(m_pCameraTypeEdit);
@@ -296,7 +309,10 @@ CameraBasicParamDialog::CameraBasicParamDialog(
     buttonLayout->addWidget(reloadBtn);
     buttonLayout->addWidget(saveBtn);
     cameraLayout->addLayout(buttonLayout, 5, 0, 1, 4);
-    rootLayout->addWidget(cameraGroup);
+    paramContentLayout->addWidget(cameraGroup);
+    paramContentLayout->addStretch(1);
+    paramScrollArea->setWidget(paramContent);
+    rootLayout->addWidget(paramScrollArea, 1);
 
     m_pLogText = new QPlainTextEdit(this);
     m_pLogText->setReadOnly(true);

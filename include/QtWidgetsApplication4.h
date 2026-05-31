@@ -21,6 +21,8 @@ class CameraFrameCache;
 class CameraParamDialog;
 class FANUCRobotCtrl;
 class FunctionTestDialog;
+class LaserWeldFilterDialog;
+class QAction;
 class QCheckBox;
 class MeasureThenWeldDialog;
 class PreciseMeasureEditDialog;
@@ -39,7 +41,6 @@ class RobotJogDialog;
 class TouchKeyboardManager;
 class WeldProcessDialog;
 class WeldSeamCompDialog;
-class QAction;
 
 class QtWidgetsApplication4 : public QMainWindow
 {
@@ -83,6 +84,7 @@ private slots:
     void GrooveCameraTest(bool checked);
     void UpdateGrooveCameraData();
     void OpenGroovePointCloudDialog();
+    void CloseGrooveCameraPreviewWindow();
     void StartGrooveCameraPreview();
     void OpenPointCloudViewerDialog();
 
@@ -134,6 +136,7 @@ private:
     void OpenAccountManagementDialog();
     void OpenControlUnitManagementDialog();
     void OpenFtpJobManagementDialog();
+    void OpenPrecisePointCloudProcessingPage();
     void OpenConfigDatabaseViewerDialog();
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
@@ -167,8 +170,9 @@ private:
     bool RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
     void RunLaserClassifyDirForCli(const QString& dirPath) const;
     void RunRebuildMeasureWeldFilesForCli(const QStringList& arguments, const QString& laserDirPath) const;
-    void RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const;
+    void RunWeldSeamCompForCli(const QStringList& arguments, const QString& inputPath, const QString& outputPath) const;
     void RunGenerateStepWeldProgramForCli(
+        const QStringList& arguments,
         const QString& inputPath,
         const QString& outputDir,
         bool actualWeld,
@@ -196,6 +200,7 @@ private:
     QWidget* m_pControlUnitManagementPage;
     QWidget* m_pFtpJobManagementPage;
     QWidget* m_pConfigDatabaseViewerPage;
+    LaserWeldFilterDialog* m_pPrecisePointCloudProcessingPage;
     QComboBox* m_pRobotSelectorCombo;
     QLabel* m_pRobotSelectorLabel;
     int m_nCurrentRobotUnitIndex;
@@ -203,12 +208,14 @@ private:
     int m_nFunctionTestPageUnitIndex;
     int m_nMeasureThenWeldPageUnitIndex;
     int m_nRobotJogPageUnitIndex;
+    int m_nFtpJobManagementPageUnitIndex;
     QPlainTextEdit* m_pRobotLogText;
     QWidget* m_pGroovePointCloudDialog;
     QWidget* m_pPointCloudViewerDialog;
     QPushButton* m_pCurrentUserButton;
     QLabel* m_pManagementUserLabel;
     QLabel* m_pPermissionHintLabel;
+    QAction* m_pAccountManagementAction;
     QPushButton* m_pManagementCameraReceiveModeBtn;
     QComboBox* m_pTouchKeyboardModeCombo;
     QLabel* m_pAuthTitleLabel;
@@ -229,7 +236,6 @@ private:
     QPushButton* m_pDashboardClearAlarmBtn;
     QPushButton* m_pDashboardModeBtn;
     QPushButton* m_pDashboardDebugLogBtn;
-    QAction* m_pAccountManagementAction = nullptr;
     QList<QPointer<QWidget>> m_robotOperationWidgets;
     QList<QPointer<QWidget>> m_cameraParamDependentWidgets;
     QList<QPointer<QWidget>> m_handEyeDependentWidgets;

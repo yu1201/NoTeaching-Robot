@@ -23,11 +23,14 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QSizePolicy>
 #include <QSignalBlocker>
 #include <QStringList>
 #include <QTextDocument>
@@ -232,7 +235,6 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     , m_pCameraCache(nullptr)
 {
     setWindowTitle("先测后焊");
-    MarkDirectMouseInputWindow(this);
     ApplyUnifiedWindowChrome(this);
     ResizeWindowForAvailableGeometry(this, QSize(760, 500), 0.72, 0.66);
     setStyleSheet(
@@ -263,18 +265,27 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     hintLabel->setWordWrap(true);
     rootLayout->addWidget(hintLabel);
 
+    QScrollArea* flowScrollArea = new QScrollArea(this);
+    flowScrollArea->setObjectName("AdaptiveWindowScrollArea");
+    ConfigureResponsiveScrollArea(flowScrollArea);
+
+    QWidget* flowContent = new QWidget(flowScrollArea);
+    flowContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    QVBoxLayout* flowLayout = new QVBoxLayout(flowContent);
+    flowLayout->setContentsMargins(0, 0, 8, 0);
+    flowLayout->setSpacing(12);
+    flowLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+
     QGridLayout* selectorLayout = new QGridLayout();
     selectorLayout->setHorizontalSpacing(14);
     selectorLayout->setVerticalSpacing(8);
     selectorLayout->addWidget(new QLabel("机器人："), 0, 0);
     m_pRobotCombo = new QComboBox();
     m_pRobotCombo->setMinimumWidth(220);
-    m_pRobotCombo->setMaximumWidth(340);
     selectorLayout->addWidget(m_pRobotCombo, 0, 1);
     selectorLayout->addWidget(new QLabel("位置类型："), 0, 2);
     m_pParamGroupCombo = new QComboBox();
     m_pParamGroupCombo->setMinimumWidth(210);
-    m_pParamGroupCombo->setMaximumWidth(320);
     selectorLayout->addWidget(m_pParamGroupCombo, 0, 3);
     selectorLayout->addWidget(new QLabel("焊接工艺："), 1, 0);
     m_pWeldProcessCombo = new QComboBox();
@@ -283,15 +294,13 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     selectorLayout->addWidget(new QLabel("姿态补偿组："), 2, 0);
     m_pPoseCompGroupCombo = new QComboBox();
     m_pPoseCompGroupCombo->setMinimumWidth(210);
-    m_pPoseCompGroupCombo->setMaximumWidth(320);
     selectorLayout->addWidget(m_pPoseCompGroupCombo, 2, 1);
     selectorLayout->addWidget(new QLabel("焊道补偿组："), 2, 2);
     m_pSeamCompGroupCombo = new QComboBox();
     m_pSeamCompGroupCombo->setMinimumWidth(210);
-    m_pSeamCompGroupCombo->setMaximumWidth(320);
     selectorLayout->addWidget(m_pSeamCompGroupCombo, 2, 3);
     selectorLayout->setColumnStretch(4, 1);
-    rootLayout->addLayout(selectorLayout);
+    flowLayout->addLayout(selectorLayout);
 
     QHBoxLayout* modeLayout = new QHBoxLayout();
     QLabel* modeLabel = new QLabel("运行模式：");
@@ -303,7 +312,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     modeLayout->addWidget(m_pActualWeldCheck);
     modeLayout->addWidget(modeHintLabel);
     modeLayout->addStretch();
-    rootLayout->addLayout(modeLayout);
+    flowLayout->addLayout(modeLayout);
 
     QGridLayout* buttonLayout = new QGridLayout();
     m_pPresetParamBtn = new QPushButton("预设参数");
@@ -315,7 +324,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     buttonLayout->addWidget(m_pPresetParamBtn, 0, 0);
     buttonLayout->addWidget(m_pLineScanProcessBtn, 0, 1);
     buttonLayout->addWidget(m_pSkipScanWeldBtn, 1, 0, 1, 2);
-    rootLayout->addLayout(buttonLayout);
+    flowLayout->addLayout(buttonLayout);
 
     QVBoxLayout* progressLayout = new QVBoxLayout();
     progressLayout->setSpacing(6);
@@ -326,9 +335,12 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     m_pProgressBar->setValue(0);
     progressLayout->addWidget(m_pProgressLabel);
     progressLayout->addWidget(m_pProgressBar);
-    rootLayout->addLayout(progressLayout);
+    flowLayout->addLayout(progressLayout);
     m_pProgressLabel->hide();
     m_pProgressBar->hide();
+    flowLayout->addStretch(1);
+    flowScrollArea->setWidget(flowContent);
+    rootLayout->addWidget(flowScrollArea, 1);
 
     m_pProgressAnimationTimer = new QTimer(this);
     m_pProgressAnimationTimer->setInterval(300);
@@ -338,7 +350,9 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     m_pLogText->setReadOnly(true);
     m_pLogText->document()->setMaximumBlockCount(1600);
     m_pLogText->setPlainText("流程日志：等待操作...");
-    rootLayout->addWidget(m_pLogText, 1);
+    m_pLogText->setMinimumHeight(150);
+    m_pLogText->setMaximumHeight(240);
+    rootLayout->addWidget(m_pLogText);
 
     connect(m_pPresetParamBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunPresetParamFlow);
     connect(m_pSkipScanWeldBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunSkipScanWeldFlow);
@@ -1258,11 +1272,12 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
     AppendLog(QString("PreservePath文件将输出到=%1").arg(preservePath));
     AppendLog(QString("姿态文件=%1").arg(poseFilePath));
     AppendLog(QString("补偿后文件将输出到=%1").arg(seamCompPath));
-    AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min，RZ增益=%5 deg，爬坡RZ夹紧=[%6, %7] deg")
+    AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min，示教姿态=%5，RZ增益=%6 deg，爬坡RZ夹紧=[%7, %8] deg")
         .arg(param.bDoActualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑"))
         .arg(param.dWeldSpeedMmPerMin, 0, 'f', 3)
         .arg(param.dDryRunSpeedMmPerMin, 0, 'f', 3)
         .arg(param.dWeldSafeMoveSpeedMmPerMin, 0, 'f', 3)
+        .arg(param.bUseTaughtWeldPose ? QStringLiteral("启用") : QStringLiteral("未启用"))
         .arg(param.dWeldRzGainDeg, 0, 'f', 3)
         .arg(param.dSlopeRzMinDeg, 0, 'f', 3)
         .arg(param.dSlopeRzMaxDeg, 0, 'f', 3));
@@ -1435,9 +1450,12 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
 
 void MeasureThenWeldDialog::RunLineScanProcess()
 {
-    SetFlowStep("线扫处理功能暂未实现");
-    AppendLog("线扫处理功能暂未实现。");
-    QMessageBox::information(this, "线扫处理", "线扫处理暂时为空函数，后续接入点云处理算法。");
+    SetFlowStep("大线扫粗定位功能暂未接入");
+    AppendLog("线扫处理是整体大范围扫描获取多个焊道粗定位，当前精测点云库不接到这里。");
+    QMessageBox::information(
+        this,
+        "线扫处理",
+        "线扫处理用于整体大范围扫描和多个焊道粗定位。\n当前新增的点云库已接入预设参数后的局部精测量流程。");
 }
 
 void MeasureThenWeldDialog::RefreshWeldModeFromParam()

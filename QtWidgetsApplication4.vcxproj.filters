@@ -121,6 +121,12 @@
     <ClCompile Include="src\MeasureWelding.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\PointCloudExtractionProcessor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\PointCloudProcessingConfig.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\PreciseMeasureEditDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -232,6 +238,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\OPini.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\PointCloudExtractionProcessor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\PointCloudProcessingConfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\PreciseMeasureEditDialog.h">

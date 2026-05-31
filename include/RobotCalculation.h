@@ -96,6 +96,7 @@ public:
         Eigen::Vector3d point = Eigen::Vector3d::Zero();
         LowerWeldPointType type = LowerWeldPointType::Normal;
         QString source;
+        QString segmentKindAfter;
     };
 
     struct LowerWeldClassificationResult

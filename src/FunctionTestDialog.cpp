@@ -2,7 +2,6 @@
 
 #include "CameraFrameCache.h"
 #include "FANUCRobotDriver.h"
-#include "LaserWeldFilterDialog.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
@@ -21,11 +20,14 @@
 #include <QGroupBox>
 #include <QInputDialog>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPointer>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QSizePolicy>
 #include <QStringConverter>
 #include <QStringList>
 #include <QTextDocument>
@@ -1179,17 +1181,31 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
         "QPlainTextEdit { background: #0B1117; color: #BFE7EA; border: 1px solid #2E4656; border-radius: 10px; padding: 8px; }"
         "QLabel { color: #B8C7CC; }");
 
-    QVBoxLayout* rootLayout = new QVBoxLayout(this);
+    QVBoxLayout* outerLayout = new QVBoxLayout(this);
+    outerLayout->setContentsMargins(12, 12, 12, 12);
+    outerLayout->setSpacing(10);
 
     QLabel* titleLabel = new QLabel("机器人功能测试区");
     titleLabel->setStyleSheet("font-size: 20px; font-weight: bold; color: #F4FAFA;");
-    rootLayout->addWidget(titleLabel);
+    outerLayout->addWidget(titleLabel);
 
     QLabel* hintLabel = new QLabel("这里集中放置设置速度、读取位置、检查运行、往返运动、零位运动等测试功能；FANUC 专用按钮会在非 FANUC 驱动下禁用。");
-    rootLayout->addWidget(hintLabel);
+    hintLabel->setWordWrap(true);
+    outerLayout->addWidget(hintLabel);
+
+    QScrollArea* commandScrollArea = new QScrollArea(this);
+    commandScrollArea->setObjectName("AdaptiveWindowScrollArea");
+    ConfigureResponsiveScrollArea(commandScrollArea);
+
+    QWidget* commandContent = new QWidget(commandScrollArea);
+    commandContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    QVBoxLayout* commandLayout = new QVBoxLayout(commandContent);
+    commandLayout->setContentsMargins(0, 0, 8, 0);
+    commandLayout->setSpacing(10);
+    commandLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
 
     QGridLayout* groupLayout = new QGridLayout();
-    rootLayout->addLayout(groupLayout);
+    commandLayout->addLayout(groupLayout);
 
     QGroupBox* basicGroup = new QGroupBox("基础通讯/状态");
     QGridLayout* basicLayout = new QGridLayout(basicGroup);
@@ -1240,7 +1256,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
 
     QGroupBox* offlineGroup = new QGroupBox("离线数据处理");
     QGridLayout* offlineLayout = new QGridLayout(offlineGroup);
-    QPushButton* filterLaserBtn = CreateTestButton("焊道滤波测试");
+    QPushButton* filterLaserBtn = CreateTestButton("精测点云处理");
     QPushButton* currentFrameFilterBtn = CreateTestButton("当前帧点云滤波");
     offlineLayout->addWidget(filterLaserBtn, 0, 0);
     offlineLayout->addWidget(currentFrameFilterBtn, 1, 0);
@@ -1253,12 +1269,17 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     kinematicsLayout->addWidget(saveKinematicsSampleBtn, 0, 0);
     kinematicsLayout->addWidget(fitDhBtn, 1, 0);
     groupLayout->addWidget(kinematicsGroup, 1, 0);
+    commandLayout->addStretch(1);
+    commandScrollArea->setWidget(commandContent);
+    outerLayout->addWidget(commandScrollArea, 1);
 
     m_pLogText = new QPlainTextEdit();
     m_pLogText->setReadOnly(true);
     m_pLogText->document()->setMaximumBlockCount(1200);
     m_pLogText->setPlainText("功能测试日志：等待操作...");
-    rootLayout->addWidget(m_pLogText, 1);
+    m_pLogText->setMinimumHeight(130);
+    m_pLogText->setMaximumHeight(220);
+    outerLayout->addWidget(m_pLogText);
 
     connect(setSpeedBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucSetTpSpeedTest);
     connect(getPosBtn, &QPushButton::clicked, this, &FunctionTestDialog::FanucGetCurrentPosTest);
@@ -2440,7 +2461,7 @@ void FunctionTestDialog::ExportCurrentCameraFramePointFilterTest()
 
 void FunctionTestDialog::OpenLaserWeldFilterTest()
 {
-    AppendLog("打开焊道滤波测试工具...");
-    LaserWeldFilterDialog dialog(this);
-    dialog.exec();
+    const QString message = "精测点云处理已移到管理页面的“工艺”菜单，请从管理页面打开。";
+    AppendLog(message);
+    QMessageBox::information(this, "精测点云处理", message);
 }

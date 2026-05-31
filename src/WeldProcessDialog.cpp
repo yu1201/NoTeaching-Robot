@@ -6,6 +6,7 @@
 #include <QAbstractSpinBox>
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
+#include <QBoxLayout>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -20,9 +21,11 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QListWidgetItem>
+#include <QLayout>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSizePolicy>
 #include <QStackedWidget>
 #include <QSpinBox>
@@ -34,7 +37,7 @@ namespace
 {
 constexpr double kDoubleMin = -999999.0;
 constexpr double kDoubleMax = 999999.0;
-constexpr int kGridFieldWidth = 112;
+constexpr int kGridFieldWidth = 136;
 constexpr int kSingleFieldWidth = 164;
 constexpr int kSpinFieldHeight = 32;
 
@@ -130,10 +133,10 @@ QGridLayout* CreateTwoColumnForm(QWidget* parent)
 {
     auto* layout = new QGridLayout(parent);
     layout->setContentsMargins(12, 8, 12, 12);
-    layout->setHorizontalSpacing(6);
+    layout->setHorizontalSpacing(10);
     layout->setVerticalSpacing(8);
-    layout->setColumnMinimumWidth(0, 82);
-    layout->setColumnMinimumWidth(2, 82);
+    layout->setColumnMinimumWidth(0, 92);
+    layout->setColumnMinimumWidth(2, 92);
     layout->setColumnStretch(0, 0);
     layout->setColumnStretch(1, 1);
     layout->setColumnStretch(2, 0);
@@ -155,7 +158,7 @@ void AddTwoColumnField(QGridLayout* layout, const QString& labelText, QWidget* f
 
     QLabel* label = new QLabel(labelText, layout->parentWidget());
     label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    label->setMinimumWidth(82);
+    label->setMinimumWidth(92);
     label->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
     layout->addWidget(label, row, col);
     layout->addWidget(field, row, col + 1);
@@ -170,9 +173,25 @@ int UnitLabelWidth(const QString& unit)
     }
     if (trimmed == "mm/min")
     {
-        return 58;
+        return 72;
     }
     return 36;
+}
+
+void LockMinimumContentSize(QWidget* widget)
+{
+    if (widget == nullptr)
+    {
+        return;
+    }
+
+    if (QLayout* layout = widget->layout())
+    {
+        layout->setSizeConstraint(QLayout::SetMinimumSize);
+    }
+
+    const QSize hint = widget->minimumSizeHint().expandedTo(widget->sizeHint());
+    widget->setMinimumSize(hint);
 }
 
 QLabel* CreateUnitLabel(QWidget* parent, const QString& unit)
@@ -196,10 +215,11 @@ QWidget* WrapFieldWithUnit(QWidget* parent, QWidget* field, const QString& unit)
     auto* layout = new QHBoxLayout(host);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(5);
-    layout->addWidget(field);
+    layout->addWidget(field, 1);
     layout->addWidget(CreateUnitLabel(host, unit));
     layout->addStretch(1);
     host->setMinimumWidth(kGridFieldWidth + UnitLabelWidth(unit) + 5);
+    host->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
     return host;
 }
 
@@ -212,8 +232,9 @@ void PrepareFlatSpinBox(QAbstractSpinBox* spin, int width)
 
     spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     spin->setFrame(false);
-    spin->setFixedWidth(width > 2 ? width - 2 : width);
+    spin->setMinimumWidth(width > 2 ? width - 2 : width);
     spin->setFixedHeight(kSpinFieldHeight > 2 ? kSpinFieldHeight - 2 : kSpinFieldHeight);
+    spin->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
     if (QLineEdit* editor = spin->findChild<QLineEdit*>())
     {
         editor->setFrame(false);
@@ -224,14 +245,16 @@ QFrame* WrapSpinFieldFrame(QWidget* parent, QAbstractSpinBox* spin, int width)
 {
     auto* frame = new QFrame(parent);
     frame->setObjectName("spinFieldFrame");
-    frame->setFixedSize(width, kSpinFieldHeight);
+    frame->setMinimumSize(width, kSpinFieldHeight);
+    frame->setFixedHeight(kSpinFieldHeight);
+    frame->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
 
     PrepareFlatSpinBox(spin, width);
 
     auto* layout = new QHBoxLayout(frame);
     layout->setContentsMargins(1, 1, 1, 1);
     layout->setSpacing(0);
-    layout->addWidget(spin);
+    layout->addWidget(spin, 1);
     return frame;
 }
 
@@ -275,6 +298,11 @@ WeldProcessDialog::WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* pa
     ui->setupUi(this);
     ApplyUnifiedWindowChrome(this);
     setWindowFlags(windowFlags() | Qt::WindowMaximizeButtonHint | Qt::WindowMinimizeButtonHint);
+    ui->contentWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    if (QBoxLayout* dialogLayout = qobject_cast<QBoxLayout*>(layout()))
+    {
+        dialogLayout->setStretchFactor(ui->contentWidget, 1);
+    }
     BuildEditorUi();
     ApplyDialogStyle();
 
@@ -401,11 +429,13 @@ void WeldProcessDialog::BuildEditorUi()
     splitterLayout->addWidget(leftPanel, 1);
 
     auto* editorRoot = new QWidget(ui->contentWidget);
+    editorRoot->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     auto* editorLayout = new QVBoxLayout(editorRoot);
     editorLayout->setContentsMargins(0, 0, 0, 0);
     editorLayout->setSpacing(0);
 
     auto* tabHostContainer = new QWidget(editorRoot);
+    tabHostContainer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     auto* tabHostLayout = new QVBoxLayout(tabHostContainer);
     tabHostLayout->setContentsMargins(6, 0, 6, 8);
     tabHostLayout->setSpacing(0);
@@ -430,6 +460,7 @@ void WeldProcessDialog::BuildEditorUi()
 
     auto* editorFrame = new QFrame(editorRoot);
     editorFrame->setObjectName("tabHostPanel");
+    editorFrame->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     auto* editorFrameLayout = new QVBoxLayout(editorFrame);
     editorFrameLayout->setContentsMargins(8, 8, 8, 8);
     editorFrameLayout->setSpacing(0);
@@ -447,7 +478,7 @@ void WeldProcessDialog::BuildEditorUi()
     m_standWeldDirSpin = AddSingleIntField(basicLayout, "立焊方向", 0, 1);
     m_weldMethodSpin = AddSingleIntField(basicLayout, "焊接方法", 0, 999);
     m_weaveTypeNoSpin = AddSingleIntField(basicLayout, "关联摆动号", 0, 9999);
-    basicGroup->setMinimumWidth(380);
+    basicGroup->setMinimumWidth(420);
 
     auto* startGroup = new QGroupBox("引弧参数", editorRoot);
     auto* startLayout = new QFormLayout(startGroup);
@@ -459,7 +490,7 @@ void WeldProcessDialog::BuildEditorUi()
     m_startArcCurrentSpin = AddSingleDoubleFieldWithUnit(startLayout, "引弧电流", "A");
     m_startArcVoltageSpin = AddSingleDoubleFieldWithUnit(startLayout, "引弧电压", "V");
     m_startWaitTimeSpin = AddSingleDoubleFieldWithUnit(startLayout, "引弧时间", "s");
-    startGroup->setMinimumWidth(300);
+    startGroup->setMinimumWidth(340);
 
     auto* stopGroup = new QGroupBox("收弧参数", editorRoot);
     auto* stopLayout = new QFormLayout(stopGroup);
@@ -471,7 +502,7 @@ void WeldProcessDialog::BuildEditorUi()
     m_stopArcCurrentSpin = AddSingleDoubleFieldWithUnit(stopLayout, "收弧电流", "A");
     m_stopArcVoltageSpin = AddSingleDoubleFieldWithUnit(stopLayout, "收弧电压", "V");
     m_stopWaitTimeSpin = AddSingleDoubleFieldWithUnit(stopLayout, "收弧时间", "s");
-    stopGroup->setMinimumWidth(300);
+    stopGroup->setMinimumWidth(340);
 
     auto* weldGroup = new QGroupBox("焊接与运动参数", editorRoot);
     auto* weldLayout = CreateTwoColumnForm(weldGroup);
@@ -483,7 +514,7 @@ void WeldProcessDialog::BuildEditorUi()
     m_wrapConditionNoSpin = AddIntField(weldLayout, "摆动条件号", 0, 9999);
     m_weldAngleSpin = AddDoubleFieldWithUnit(weldLayout, "焊接角度", "deg");
     m_weldDipAngleSpin = AddDoubleFieldWithUnit(weldLayout, "焊接倾角", "deg");
-    weldGroup->setMinimumWidth(460);
+    weldGroup->setMinimumWidth(720);
 
     auto* specialGroup = new QFrame(editorRoot);
     specialGroup->setObjectName("inlineTabHost");
@@ -530,8 +561,9 @@ void WeldProcessDialog::BuildEditorUi()
     m_cornerTransitionScopeCombo->addItem("圆弧");
     m_cornerTransitionScopeCombo->addItem("过渡");
     m_cornerTransitionScopeCombo->addItem("圆弧+过渡");
-    m_cornerTransitionScopeCombo->setFixedWidth(kSingleFieldWidth);
+    m_cornerTransitionScopeCombo->setMinimumWidth(kSingleFieldWidth);
     m_cornerTransitionScopeCombo->setFixedHeight(kSpinFieldHeight);
+    m_cornerTransitionScopeCombo->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
     m_cornerTransitionScopeCombo->setCurrentIndex(2);
     AddTwoColumnField(cornerLayout, "作用范围", m_cornerTransitionScopeCombo);
     m_cornerTransitionRadiusSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "圆弧过渡半径", &m_cornerTransitionRadiusEnableCheck, "mm");
@@ -551,7 +583,7 @@ void WeldProcessDialog::BuildEditorUi()
     specialPanelLayout->setSpacing(0);
     specialPanelLayout->addWidget(m_specialParamStack);
     specialLayout->addWidget(specialPanel);
-    specialGroup->setMinimumWidth(520);
+    specialGroup->setMinimumWidth(720);
 
     auto* weaveGroup = new QGroupBox("摆动参数", editorRoot);
     auto* weaveLayout = CreateTwoColumnForm(weaveGroup);
@@ -569,7 +601,7 @@ void WeldProcessDialog::BuildEditorUi()
     m_delayTypeRightSpin = AddIntField(weaveLayout, "右延时类型", 0, 999);
     m_rotAngleLeftSpin = AddDoubleFieldWithUnit(weaveLayout, "左摆角", "deg");
     m_rotAngleRightSpin = AddDoubleFieldWithUnit(weaveLayout, "右摆角", "deg");
-    weaveGroup->setMinimumWidth(500);
+    weaveGroup->setMinimumWidth(720);
 
     auto* topRow = new QHBoxLayout();
     topRow->setSpacing(10);
@@ -594,7 +626,14 @@ void WeldProcessDialog::BuildEditorUi()
     normalLayout->addLayout(topRow);
     normalLayout->addLayout(bottomRow);
     normalLayout->addStretch();
-    normalPageOuterLayout->addWidget(normalPanel);
+    normalPageOuterLayout->addWidget(normalPanel, 1);
+    LockMinimumContentSize(basicGroup);
+    LockMinimumContentSize(startGroup);
+    LockMinimumContentSize(stopGroup);
+    LockMinimumContentSize(weldGroup);
+    LockMinimumContentSize(specialGroup);
+    LockMinimumContentSize(normalPanel);
+    LockMinimumContentSize(normalPage);
 
     auto* weavePage = new QWidget(editorRoot);
     auto* weavePageOuterLayout = new QVBoxLayout(weavePage);
@@ -607,15 +646,25 @@ void WeldProcessDialog::BuildEditorUi()
     weavePageLayout->setSpacing(12);
     weavePageLayout->addWidget(weaveGroup);
     weavePageLayout->addStretch();
-    weavePageOuterLayout->addWidget(weavePanel);
+    weavePageOuterLayout->addWidget(weavePanel, 1);
+    LockMinimumContentSize(weaveGroup);
+    LockMinimumContentSize(weavePanel);
+    LockMinimumContentSize(weavePage);
 
     m_editorStack = new QStackedWidget(editorRoot);
     m_editorStack->addWidget(normalPage);
     m_editorStack->addWidget(weavePage);
-    editorFrameLayout->addWidget(m_editorStack);
-    tabHostLayout->addWidget(editorFrame);
-    editorLayout->addWidget(tabHostContainer);
-    editorLayout->addStretch();
+    m_editorStack->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    LockMinimumContentSize(m_editorStack);
+
+    auto* editorScrollArea = new QScrollArea(editorFrame);
+    editorScrollArea->setObjectName("weldProcessEditorScroll");
+    editorScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    editorScrollArea->setWidget(m_editorStack);
+    ConfigureResponsiveScrollArea(editorScrollArea);
+    editorFrameLayout->addWidget(editorScrollArea, 1);
+    tabHostLayout->addWidget(editorFrame, 1);
+    editorLayout->addWidget(tabHostContainer, 1);
 
     splitterLayout->addWidget(editorRoot, 3);
 
@@ -754,8 +803,9 @@ void WeldProcessDialog::ApplyDialogStyle()
 QLineEdit* WeldProcessDialog::AddTextField(QGridLayout* layout, const QString& label)
 {
     auto* edit = new QLineEdit(this);
-    edit->setFixedWidth(kGridFieldWidth);
+    edit->setMinimumWidth(kGridFieldWidth);
     edit->setFixedHeight(28);
+    edit->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
     AddTwoColumnField(layout, label, edit);
     return edit;
 }
@@ -797,13 +847,14 @@ QDoubleSpinBox* WeldProcessDialog::AddEnabledDoubleFieldWithUnit(QGridLayout* la
     fieldLayout->setContentsMargins(0, 0, 0, 0);
     fieldLayout->setSpacing(5);
     fieldLayout->addWidget(check);
-    fieldLayout->addWidget(spinFrame);
+    fieldLayout->addWidget(spinFrame, 1);
     if (!unit.trimmed().isEmpty())
     {
         fieldLayout->addWidget(CreateUnitLabel(fieldHost, unit));
     }
     fieldLayout->addStretch(1);
     fieldHost->setMinimumWidth(50 + kGridFieldWidth + UnitLabelWidth(unit) + 10);
+    fieldHost->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
 
     if (enableCheck != nullptr)
     {
@@ -829,8 +880,9 @@ QSpinBox* WeldProcessDialog::AddIntFieldWithUnit(QGridLayout* layout, const QStr
 QLineEdit* WeldProcessDialog::AddSingleTextField(QFormLayout* layout, const QString& label)
 {
     auto* edit = new QLineEdit(this);
-    edit->setFixedWidth(kSingleFieldWidth);
+    edit->setMinimumWidth(kSingleFieldWidth);
     edit->setFixedHeight(28);
+    edit->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
     layout->addRow(label, edit);
     return edit;
 }

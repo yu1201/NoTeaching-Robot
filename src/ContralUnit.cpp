@@ -91,10 +91,6 @@ bool ContralUnit::InitContralUnit()
             bRtn = false;
         }
 
-        // 创建目录
-        std::string path = DATA_PATH + info.sUnitName;
-        opini.CheckAndCreateDir(path);
-
         // 机器人驱动
         if (info.sContralUnitType == "R")
         {

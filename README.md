@@ -13,9 +13,19 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.05.30.0330`
+- 当前源码版本：`v2026.06.01.0146`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.05.30.0330.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.01.0146.exe`，不用自己编译源码。
+
+## 2026-06-01 更新
+
+- 精测点云处理接入外部 `PointCloudExtration` SDK，主程序只做应用层封装，不修改 SDK 源码；管理界面支持在点云算法和旧特征点算法之间切换
+- 新算法流程拆分输出 SDK 点云提取结果、SDK 拟合结果和最终下游读取的 `PreciseLaserPoint_Classified.txt`，便于逐级核对点云焊道、拟合和属性补全
+- 先测后焊姿态生成接入示教焊接姿态：启用后 RX/RY 使用示教值，平台 RZ 使用示教 RZ，坡道 RZ 按平台差值补偿并处理角度环绕
+- 测量焊接参数新增“焊接姿态示教”分区，示教 RX/RY/RZ 与旧 `NormalWeldRx`、`NormalWeldRy`、`WeldRzGainDeg` 参数统一在同一界面维护
+- 管理页、工艺页、补偿页、测量焊接页和精测点云页统一滚动区与控件宽度策略，移除多余工具栏，菜单栏保留直角样式，低分辨率下不再压缩编辑框
+- 更新旧文件/旧数据库迁移工具：导入或升级时自动补齐新增测量焊接、补偿组和精测点云参数，已有旧值不会被覆盖
+- 构建验证：`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.06.01.0146.exe`
 
 ## 2026-05-30 更新
 

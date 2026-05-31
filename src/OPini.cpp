@@ -3,7 +3,6 @@
 #include "ConfigDatabase.h"
 
 #include <cstring>
-#include <vector>
 
 #ifdef _DEBUG
 #undef THIS_FILE
@@ -12,78 +11,6 @@ static char THIS_FILE[] = __FILE__;
 
 namespace
 {
-std::wstring DecodeUtf8OrAcpToWide(const std::string& text)
-{
-    if (text.empty())
-    {
-        return std::wstring();
-    }
-
-    const auto decode = [&text](UINT codePage, DWORD flags) -> std::wstring
-        {
-            const int wideLength = MultiByteToWideChar(
-                codePage,
-                flags,
-                text.data(),
-                static_cast<int>(text.size()),
-                nullptr,
-                0);
-            if (wideLength <= 0)
-            {
-                return std::wstring();
-            }
-            std::wstring wideText(static_cast<size_t>(wideLength), L'\0');
-            MultiByteToWideChar(
-                codePage,
-                flags,
-                text.data(),
-                static_cast<int>(text.size()),
-                wideText.data(),
-                wideLength);
-            return wideText;
-        };
-
-    std::wstring wideText = decode(CP_UTF8, MB_ERR_INVALID_CHARS);
-    if (!wideText.empty())
-    {
-        return wideText;
-    }
-    return decode(CP_ACP, 0);
-}
-
-std::string EncodeWideToUtf8(const wchar_t* text, int textLength)
-{
-    if (text == nullptr || textLength <= 0)
-    {
-        return std::string();
-    }
-
-    const int byteLength = WideCharToMultiByte(
-        CP_UTF8,
-        0,
-        text,
-        textLength,
-        nullptr,
-        0,
-        nullptr,
-        nullptr);
-    if (byteLength <= 0)
-    {
-        return std::string();
-    }
-    std::string utf8Text(static_cast<size_t>(byteLength), '\0');
-    WideCharToMultiByte(
-        CP_UTF8,
-        0,
-        text,
-        textLength,
-        utf8Text.data(),
-        byteLength,
-        nullptr,
-        nullptr);
-    return utf8Text;
-}
-
 unsigned int ReadPrivateProfileStringUtf8(
     const std::string& sectionName,
     const std::string& key,
@@ -740,35 +667,4 @@ int COPini::ReadAddString(std::string key, double* value, double init_value)
 bool COPini::CheckFileExists(const std::string& fileName)
 {
     return FileExistsUtf8OrAcp(fileName);
-}
-
-bool COPini::CheckAndCreateDir(const std::string& dirPath)
-{
-    const std::wstring wideDirPath = DecodeUtf8OrAcpToWide(dirPath);
-    if (wideDirPath.empty())
-    {
-        return false;
-    }
-
-    // 1. 检查文件夹是否存在（Windows API：GetFileAttributes）
-    DWORD attr = GetFileAttributesW(wideDirPath.c_str());
-    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
-    {
-        m_pIniLog.write(LogColor::SUCCESS, "文件夹已存在：%s", dirPath.c_str());
-        return true;
-    }
-
-    // 2. 不存在则创建文件夹（Windows API：CreateDirectory）
-    BOOL ret = CreateDirectoryW(wideDirPath.c_str(), NULL);
-    if (ret)
-    {
-        m_pIniLog.write(LogColor::SUCCESS, "文件夹创建成功：%s", dirPath.c_str());
-        return true;
-    }
-    else
-    {
-        DWORD err = GetLastError();
-        m_pIniLog.write(LogColor::ERR, "文件夹创建失败：%s（错误码：%d）", dirPath.c_str(), err);
-        return false;
-    }
 }

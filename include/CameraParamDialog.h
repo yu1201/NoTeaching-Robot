@@ -34,6 +34,7 @@ private:
     void OpenCameraBasicParamDialog();
     void OpenHandEyeDialog();
     void OpenHandEyeCalibrationDialog();
+    void PauseExternalPreview();
     QString CurrentRobotName() const;
     QString CurrentCameraSection() const;
     void AppendLog(const QString& text);

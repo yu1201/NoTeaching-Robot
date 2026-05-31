@@ -18,11 +18,13 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStringList>
@@ -138,7 +140,7 @@ void WeldSeamCompDialog::BuildUi()
     setWindowTitle("补偿参数");
     setObjectName("WeldSeamCompDialog");
     setWindowFlags(windowFlags() | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint);
-    setMinimumSize(620, 520);
+    setMinimumSize(560, 460);
     setStyleSheet(QString(
         "QDialog#WeldSeamCompDialog { background: #111820; color: #ECF3F4; }"
         "QGroupBox { border: 1px solid #2E4656; border-radius: 12px; margin-top: 18px; padding: 14px; font-weight: bold; color: #9ED8DB; }"
@@ -181,6 +183,17 @@ void WeldSeamCompDialog::BuildUi()
     topLayout->addStretch(1);
     rootLayout->addLayout(topLayout);
 
+    QScrollArea* editorScrollArea = new QScrollArea(this);
+    editorScrollArea->setObjectName("AdaptiveWindowScrollArea");
+    ConfigureResponsiveScrollArea(editorScrollArea);
+
+    QWidget* editorContent = new QWidget(editorScrollArea);
+    editorContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    QVBoxLayout* editorContentLayout = new QVBoxLayout(editorContent);
+    editorContentLayout->setContentsMargins(0, 0, 8, 0);
+    editorContentLayout->setSpacing(8);
+    editorContentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+
     QHBoxLayout* contentLayout = new QHBoxLayout();
     contentLayout->setSpacing(10);
 
@@ -195,7 +208,6 @@ void WeldSeamCompDialog::BuildUi()
     groupPanelLayout->addWidget(groupPanelTitle);
     m_pGroupList = new QListWidget();
     m_pGroupList->setMinimumWidth(170);
-    m_pGroupList->setMaximumWidth(210);
     m_pGroupList->setMinimumHeight(190);
     m_pGroupList->setStyleSheet(
         "QListWidget { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 8px; padding: 4px; }"
@@ -238,13 +250,11 @@ void WeldSeamCompDialog::BuildUi()
     m_pPoseMatchModeCombo->addItem("按姿态匹配", POSE_COMP_MATCH_BY_POSE);
     m_pPoseMatchModeCombo->addItem("按四类段属性", POSE_COMP_MATCH_BY_SEGMENT_CODE);
     m_pPoseMatchModeCombo->setMinimumWidth(150);
-    m_pPoseMatchModeCombo->setMaximumWidth(EDITOR_FIELD_MAX_WIDTH);
     editorLayout->addWidget(m_pPoseMatchModeCombo, 0, 1, 1, 2, Qt::AlignLeft);
 
     editorLayout->addWidget(new QLabel("段类型："), 1, 0);
     m_pTypeCombo = new QComboBox();
     m_pTypeCombo->setMinimumWidth(240);
-    m_pTypeCombo->setMaximumWidth(EDITOR_FIELD_MAX_WIDTH);
     editorLayout->addWidget(m_pTypeCombo, 1, 1, 1, 2, Qt::AlignLeft);
 
     m_pHintLabel = new QLabel();
@@ -254,7 +264,6 @@ void WeldSeamCompDialog::BuildUi()
     QDoubleValidator* validator = new QDoubleValidator(-100000.0, 100000.0, 6, this);
     validator->setNotation(QDoubleValidator::StandardNotation);
     m_pPoseDisplayWidget = new QWidget();
-    m_pPoseDisplayWidget->setMaximumWidth(760);
     QGridLayout* poseLayout = new QGridLayout(m_pPoseDisplayWidget);
     poseLayout->setContentsMargins(0, 0, 0, 0);
     poseLayout->setHorizontalSpacing(8);
@@ -266,7 +275,6 @@ void WeldSeamCompDialog::BuildUi()
         m_pPoseValues[index]->setValidator(validator);
         m_pPoseValues[index]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         m_pPoseValues[index]->setMinimumWidth(90);
-        m_pPoseValues[index]->setMaximumWidth(150);
         poseLayout->addWidget(m_pPoseValues[index], 0, index * 2 + 1);
     }
     editorLayout->addWidget(m_pPoseDisplayWidget, 3, 0, 1, 6, Qt::AlignLeft);
@@ -278,16 +286,18 @@ void WeldSeamCompDialog::BuildUi()
         m_pEditValues[index]->setValidator(validator);
         m_pEditValues[index]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         m_pEditValues[index]->setMinimumWidth(130);
-        m_pEditValues[index]->setMaximumWidth(150);
         editorLayout->addWidget(m_pEditLabels[index], 4 + index, 0);
         editorLayout->addWidget(m_pEditValues[index], 4 + index, 1, 1, 5, Qt::AlignLeft);
     }
     contentLayout->addWidget(editorGroup, 1, Qt::AlignTop);
-    rootLayout->addLayout(contentLayout);
+    editorContentLayout->addLayout(contentLayout);
 
     m_pPathLabel = new QLabel();
     m_pPathLabel->setWordWrap(true);
-    rootLayout->addWidget(m_pPathLabel);
+    editorContentLayout->addWidget(m_pPathLabel);
+    editorContentLayout->addStretch(1);
+    editorScrollArea->setWidget(editorContent);
+    rootLayout->addWidget(editorScrollArea, 1);
 
     QHBoxLayout* actionLayout = new QHBoxLayout();
     actionLayout->addStretch(1);
