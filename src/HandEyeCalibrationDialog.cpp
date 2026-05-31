@@ -732,7 +732,6 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     , m_pCameraCache(cameraCache)
 {
     setWindowTitle(QString("%1 %2 手眼标定").arg(robotName, cameraSection));
-    MarkDirectMouseInputWindow(this);
     ApplyUnifiedWindowChrome(this);
     ResizeWindowForAvailableGeometry(this, QSize(1680, 720), 0.96, 0.78);
     setStyleSheet(
@@ -753,14 +752,13 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     windowLayout->setSpacing(0);
 
     QScrollArea* scrollArea = new QScrollArea(this);
-    scrollArea->setWidgetResizable(true);
-    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scrollArea->setObjectName("AdaptiveWindowScrollArea");
+    ConfigureResponsiveScrollArea(scrollArea);
     scrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
     QWidget* scrollContent = new QWidget(scrollArea);
     scrollContent->setObjectName("HandEyeCalibrationScrollContent");
-    scrollContent->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    scrollContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
 
     QVBoxLayout* rootLayout = new QVBoxLayout(scrollContent);
     rootLayout->setContentsMargins(12, 12, 12, 12);

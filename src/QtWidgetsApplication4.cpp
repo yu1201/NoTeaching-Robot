@@ -8,6 +8,7 @@
 #include "CameraParamDialog.h"
 #include "FunctionTestDialog.h"
 #include "HandEyeCalibrationDialog.h"
+#include "LaserWeldFilterDialog.h"
 #include "MeasureThenWeldDialog.h"
 #include "MeasureThenWeldService.h"
 #include "OPini.h"
@@ -31,10 +32,12 @@
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QCryptographicHash>
+#include <QDebug>
 #include <QDialog>
 #include <QDir>
 #include <QDirIterator>
 #include <QDoubleValidator>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -86,7 +89,6 @@
 #include <QSqlQuery>
 #include <QThread>
 #include <QTimer>
-#include <QToolBar>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextStream>
@@ -191,7 +193,7 @@ namespace
 					layout->addWidget(dotLabel);
 				}
 			}
-			setFixedWidth(228);
+			setMinimumWidth(228);
 			setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 		}
 
@@ -471,27 +473,24 @@ namespace
 		}
 	}
 
-	void CenterWindowOnScreen(QWidget* window)
+	class PageOpenTrace final
 	{
-		if (window == nullptr)
+	public:
+		explicit PageOpenTrace(QString pageName)
+			: name(std::move(pageName))
 		{
-			return;
+			timer.start();
 		}
 
-		QScreen* screen = QGuiApplication::screenAt(window->frameGeometry().center());
-		if (screen == nullptr)
+		~PageOpenTrace()
 		{
-			screen = QGuiApplication::primaryScreen();
-		}
-		if (screen == nullptr)
-		{
-			return;
+			qInfo().noquote() << QString("[PageOpen] %1 %2 ms").arg(name).arg(timer.elapsed());
 		}
 
-		QRect frame = window->frameGeometry();
-		frame.moveCenter(screen->availableGeometry().center());
-		window->move(frame.topLeft());
-	}
+	private:
+		QString name;
+		QElapsedTimer timer;
+	};
 
 	void ShowMaximizedWithUnifiedChrome(QWidget* window)
 	{
@@ -500,10 +499,17 @@ namespace
 			return;
 		}
 
+		ApplyResponsivePageDefaults(window);
 		window->showMaximized();
 		RefreshUnifiedWindowTitleBar(window);
-		QTimer::singleShot(0, window, [window]() { RefreshUnifiedWindowTitleBar(window); });
-		QTimer::singleShot(120, window, [window]() { RefreshUnifiedWindowTitleBar(window); });
+		QTimer::singleShot(0, window, [window]() {
+			ApplyResponsivePageDefaults(window);
+			RefreshUnifiedWindowTitleBar(window);
+		});
+		QTimer::singleShot(120, window, [window]() {
+			ApplyResponsivePageDefaults(window);
+			RefreshUnifiedWindowTitleBar(window);
+		});
 	}
 
 	QPushButton* EmbeddedBackButton(QWidget* page)
@@ -583,7 +589,7 @@ namespace
 		return trimmed;
 	}
 
-	QString InferRobotNameFromResultPath(const QString& inputFilePath)
+	QString InferRobotNameFromResultPath(const QString& inputFilePath, const QString& fallbackRobotName = QStringLiteral("RobotA"))
 	{
 		const QString normalizedPath = QDir::fromNativeSeparators(
 			QFileInfo(inputFilePath).absoluteFilePath());
@@ -600,7 +606,7 @@ namespace
 				break;
 			}
 		}
-		return "RobotA";
+		return fallbackRobotName;
 	}
 
 	FANUCRobotCtrl* GetFirstFanucDriver(ContralUnit* contralUnit, QWidget* parent)
@@ -1118,15 +1124,11 @@ namespace
 			outerLayout->setSpacing(0);
 			QScrollArea* pageScrollArea = new QScrollArea(this);
 			pageScrollArea->setObjectName("AdaptiveWindowScrollArea");
-			pageScrollArea->setWidgetResizable(true);
-			pageScrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-			pageScrollArea->setFrameShape(QFrame::NoFrame);
-			pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-			pageScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+			ConfigureResponsiveScrollArea(pageScrollArea);
 			outerLayout->addWidget(pageScrollArea);
 
 			QWidget* pageWidget = new QWidget(pageScrollArea);
-			pageWidget->setMinimumWidth(960);
+			pageWidget->setMinimumWidth(760);
 			QVBoxLayout* rootLayout = new QVBoxLayout(pageWidget);
 			rootLayout->setContentsMargins(12, 10, 12, 12);
 			rootLayout->setSpacing(8);
@@ -1154,9 +1156,9 @@ namespace
 			m_createRoleCombo->addItem("操作员", kRoleOperator);
 			m_createRoleCombo->addItem("工程师", kRoleEngineer);
 			m_createRoleCombo->addItem("管理员", kRoleAdmin);
-			m_createUserEdit->setFixedWidth(260);
-			m_createPassEdit->setFixedWidth(260);
-			m_createRoleCombo->setFixedWidth(180);
+			m_createUserEdit->setMinimumWidth(260);
+			m_createPassEdit->setMinimumWidth(260);
+			m_createRoleCombo->setMinimumWidth(180);
 			createForm->addRow("账号", m_createUserEdit);
 			createForm->addRow("密码", m_createPassEdit);
 			createForm->addRow("权限", m_createRoleCombo);
@@ -1195,8 +1197,8 @@ namespace
 			m_editPassEdit = new QLineEdit(editGroup);
 			m_editPassEdit->setEchoMode(QLineEdit::Password);
 			m_editPassEdit->setPlaceholderText("留空表示不修改密码");
-			m_editRoleCombo->setFixedWidth(180);
-			m_editPassEdit->setFixedWidth(260);
+			m_editRoleCombo->setMinimumWidth(180);
+			m_editPassEdit->setMinimumWidth(260);
 			editForm->addRow("权限", m_editRoleCombo);
 			editForm->addRow("新密码", m_editPassEdit);
 			editLayout->addLayout(editForm);
@@ -1472,15 +1474,11 @@ namespace
 			outerLayout->setSpacing(0);
 			QScrollArea* pageScrollArea = new QScrollArea(this);
 			pageScrollArea->setObjectName("AdaptiveWindowScrollArea");
-			pageScrollArea->setWidgetResizable(true);
-			pageScrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-			pageScrollArea->setFrameShape(QFrame::NoFrame);
-			pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-			pageScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+			ConfigureResponsiveScrollArea(pageScrollArea);
 			outerLayout->addWidget(pageScrollArea);
 
 			QWidget* pageWidget = new QWidget(pageScrollArea);
-			pageWidget->setMinimumWidth(1080);
+			pageWidget->setMinimumWidth(860);
 			QVBoxLayout* rootLayout = new QVBoxLayout(pageWidget);
 			rootLayout->setContentsMargins(18, 16, 18, 18);
 			rootLayout->setSpacing(12);
@@ -1562,15 +1560,15 @@ namespace
 			m_ftpPasswordEdit = new QLineEdit(editGroup);
 			m_stepProjectEdit = new QLineEdit(editGroup);
 
-			m_socketIpEdit->setFixedWidth(228);
-			m_ftpIpEdit->setFixedWidth(228);
+			m_socketIpEdit->setMinimumWidth(228);
+			m_ftpIpEdit->setMinimumWidth(228);
 			for (QLineEdit* edit : { m_unitNameEdit, m_chineseNameEdit, m_customNameEdit, m_ftpUserEdit, m_ftpPasswordEdit, m_stepProjectEdit })
 			{
-				edit->setFixedWidth(260);
+				edit->setMinimumWidth(260);
 			}
 			for (QLineEdit* edit : { m_unitTypeEdit, m_socketPortEdit, m_monitorPortEdit, m_ftpPortEdit })
 			{
-				edit->setFixedWidth(120);
+				edit->setMinimumWidth(120);
 				edit->setAlignment(Qt::AlignRight);
 				MarkNumericEditGlobal(edit);
 			}
@@ -1578,8 +1576,8 @@ namespace
 			m_socketPortEdit->setValidator(new QIntValidator(0, 65535, m_socketPortEdit));
 			m_monitorPortEdit->setValidator(new QIntValidator(0, 65535, m_monitorPortEdit));
 			m_ftpPortEdit->setValidator(new QIntValidator(0, 65535, m_ftpPortEdit));
-			m_robotTypeCombo->setFixedWidth(160);
-			m_workpieceTypeCombo->setFixedWidth(160);
+			m_robotTypeCombo->setMinimumWidth(160);
+			m_workpieceTypeCombo->setMinimumWidth(160);
 
 			form->addRow("内部名", m_unitNameEdit);
 			form->addRow("中文名", m_chineseNameEdit);
@@ -2172,10 +2170,10 @@ namespace
 			workpieceCombo->addItem("波纹板", kWorkpieceCorrugatedPlate);
 			for (QLineEdit* edit : { unitNameEdit, chineseNameEdit, customNameEdit })
 			{
-				edit->setFixedWidth(300);
+				edit->setMinimumWidth(300);
 			}
-			robotTypeCombo->setFixedWidth(180);
-			workpieceCombo->setFixedWidth(180);
+			robotTypeCombo->setMinimumWidth(180);
+			workpieceCombo->setMinimumWidth(180);
 			unitNameEdit->setText(unit.unitName);
 			chineseNameEdit->setText(unit.chineseName);
 			customNameEdit->setText(unit.customName);
@@ -2204,10 +2202,10 @@ namespace
 			socketPortEdit->setText(unit.socketPort > 0 ? QString::number(unit.socketPort) : QString());
 			monitorPortEdit->setText(unit.monitorPort > 0 ? QString::number(unit.monitorPort) : QString());
 			unitTypeEdit->setText(QString::number(unit.unitType));
-    socketIpEdit->setFixedWidth(228);
+    socketIpEdit->setMinimumWidth(228);
 			for (QLineEdit* edit : { socketPortEdit, monitorPortEdit, unitTypeEdit })
 			{
-				edit->setFixedWidth(140);
+				edit->setMinimumWidth(140);
 				edit->setAlignment(Qt::AlignRight);
 				MarkNumericEditGlobal(edit);
 			}
@@ -2236,12 +2234,12 @@ namespace
 			ftpUserEdit->setText(unit.ftpUser);
 			ftpPasswordEdit->setText(unit.ftpPassword);
 			stepProjectEdit->setText(unit.stepProjectName);
-    ftpIpEdit->setFixedWidth(228);
+    ftpIpEdit->setMinimumWidth(228);
 			for (QLineEdit* edit : { ftpUserEdit, ftpPasswordEdit, stepProjectEdit })
 			{
-				edit->setFixedWidth(300);
+				edit->setMinimumWidth(300);
 			}
-			ftpPortEdit->setFixedWidth(140);
+			ftpPortEdit->setMinimumWidth(140);
 			ftpPortEdit->setAlignment(Qt::AlignRight);
 			ftpPortEdit->setValidator(new QIntValidator(0, 65535, ftpPortEdit));
 			MarkNumericEditGlobal(ftpPortEdit);
@@ -5939,7 +5937,7 @@ namespace
 			m_viewCombo->addItem("配置键值", "ini");
 			m_viewCombo->addItem("文本文件", "text");
 			m_viewCombo->addItem("数据库信息", "meta");
-			m_viewCombo->setFixedWidth(170);
+			m_viewCombo->setMinimumWidth(170);
 			m_filterEdit = new QLineEdit(this);
 			m_filterEdit->setPlaceholderText("按类别、机器人、文件、名称、键名或内容过滤");
 			QPushButton* refreshBtn = new QPushButton("刷新", this);
@@ -6496,6 +6494,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pControlUnitManagementPage(nullptr)
 	, m_pFtpJobManagementPage(nullptr)
 	, m_pConfigDatabaseViewerPage(nullptr)
+	, m_pPrecisePointCloudProcessingPage(nullptr)
 	, m_pRobotSelectorCombo(nullptr)
 	, m_pRobotSelectorLabel(nullptr)
 	, m_nCurrentRobotUnitIndex(-1)
@@ -6503,12 +6502,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_nFunctionTestPageUnitIndex(-1)
 	, m_nMeasureThenWeldPageUnitIndex(-1)
 	, m_nRobotJogPageUnitIndex(-1)
+	, m_nFtpJobManagementPageUnitIndex(-1)
 	, m_pRobotLogText(nullptr)
 	, m_pGroovePointCloudDialog(nullptr)
 	, m_pPointCloudViewerDialog(nullptr)
 	, m_pCurrentUserButton(nullptr)
 	, m_pManagementUserLabel(nullptr)
 	, m_pPermissionHintLabel(nullptr)
+	, m_pAccountManagementAction(nullptr)
 	, m_pManagementCameraReceiveModeBtn(nullptr)
 	, m_pTouchKeyboardModeCombo(nullptr)
 	, m_pAuthTitleLabel(nullptr)
@@ -6529,7 +6530,6 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pDashboardClearAlarmBtn(nullptr)
 	, m_pDashboardModeBtn(nullptr)
 	, m_pDashboardDebugLogBtn(nullptr)
-	, m_pAccountManagementAction(nullptr)
 	, m_pCameraParamBtn(nullptr)
 	, m_pWeldSeamCompBtn(nullptr)
 	, m_pWeldProcessPage(nullptr)
@@ -6587,7 +6587,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		ui.statusBar->hide();
 	}
 	setWindowTitle(QString("%1 v%2").arg(QCoreApplication::applicationName(), BuildAppVersionText()));
-	setMinimumSize(920, 700);
+	setMinimumSize(640, 480);
 	setStyleSheet(
 		"QMainWindow, QWidget { background: #111820; color: #ECF3F4; }"
 		"QGroupBox { border: 1px solid #2E4656; border-radius: 14px; margin-top: 18px; padding: 16px; font-weight: bold; color: #9ED8DB; }"
@@ -7014,38 +7014,25 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"QPushButton { background: #233645; color: #F5FAFA; border: 1px solid #3C6173; border-radius: 10px; padding: 10px 14px; }"
 		"QPushButton:hover { background: #2D5465; border-color: #72D4DD; }"
 		"QPushButton:pressed { background: #18303B; }"
+		"QPushButton:checked { background: #2F6F7A; border-color: #8EE7EC; }"
 		"QLineEdit, QPlainTextEdit { background: #081018; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 8px; padding: 6px 8px; }"
 		"QComboBox { background: #000000; color: #ECF3F4; border: 1px solid #2C4653; border-radius: 0px; padding: 6px 34px 6px 8px; }"
 		"QComboBox::drop-down { border-left: 1px solid #2C4653; border-radius: 0px; width: 28px; background: #000000; }"
 		"QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
 		"QComboBox QAbstractItemView { background: #000000; color: #ECF3F4; selection-background-color: #2D5465; border: 1px solid #2C4653; border-radius: 0px; outline: 0px; }"
-		"QMenuBar { background: #0B1117; color: #ECF3F4; border-bottom: 1px solid #223743; }"
-		"QMenuBar::item:selected { background: #244554; }"
-		"QMenu { background: #101923; color: #ECF3F4; border: 1px solid #2C4653; }"
-		"QMenu::item:selected { background: #2B5363; }");
+		"QMenuBar#ManagementMenuBar { background: #0B1117; color: #ECF3F4; border: 1px solid #223743; border-radius: 0px; padding: 3px 6px; }"
+		"QMenuBar#ManagementMenuBar::item { spacing: 4px; padding: 7px 14px; border-radius: 0px; background: transparent; }"
+		"QMenuBar#ManagementMenuBar::item:selected { background: #1C3543; color: #FFFFFF; }"
+		"QMenuBar#ManagementMenuBar::item:pressed { background: #244A58; }"
+		"QMenu { background: #0D161E; color: #ECF3F4; border: 1px solid #2C4653; padding: 5px; }"
+		"QMenu::item { padding: 8px 32px 8px 18px; min-width: 132px; }"
+		"QMenu::item:selected { background: #244A58; color: #FFFFFF; }"
+		"QMenu::item:disabled { color: #617884; }"
+		"QMenu::separator { height: 1px; background: #263E4A; margin: 5px 8px; }");
 	QVBoxLayout* managementLayout = new QVBoxLayout(m_pManagementPage);
-	managementLayout->setContentsMargins(18, 14, 18, 18);
-	managementLayout->setSpacing(12);
+	managementLayout->setContentsMargins(18, 12, 18, 18);
+	managementLayout->setSpacing(10);
 
-	QMenuBar* managementMenuBar = new QMenuBar(m_pManagementPage);
-	managementLayout->setMenuBar(managementMenuBar);
-
-	auto addManagementAction = [this](QMenu* menu, const QString& text, const std::function<void()>& handler) -> QAction*
-		{
-			QAction* action = new QAction(text, m_pManagementPage);
-			if (menu != nullptr)
-			{
-				menu->addAction(action);
-			}
-			connect(action, &QAction::triggered, this, [handler]()
-				{
-					if (handler)
-					{
-						handler();
-					}
-				});
-			return action;
-		};
 	auto openInManagement = [this](const std::function<void()>& handler)
 		{
 			const bool previous = m_bOpenEmbeddedInManagement;
@@ -7057,26 +7044,59 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 			m_bOpenEmbeddedInManagement = previous;
 		};
 
+	QMenuBar* managementMenuBar = new QMenuBar(m_pManagementPage);
+	managementMenuBar->setObjectName("ManagementMenuBar");
+	managementLayout->setMenuBar(managementMenuBar);
+
+	auto createManagementAction = [this](const QString& text, const std::function<void()>& handler) -> QAction*
+		{
+			QAction* action = new QAction(text, m_pManagementPage);
+			connect(action, &QAction::triggered, this, [handler]()
+				{
+					if (handler)
+					{
+						handler();
+					}
+				});
+			return action;
+		};
+	auto addMenuAction = [](QMenu* menu, QAction* action) -> QAction*
+		{
+			if (menu != nullptr && action != nullptr)
+			{
+				menu->addAction(action);
+			}
+			return action;
+		};
+
 	QMenu* managementHomeMenu = managementMenuBar->addMenu("主页");
 	QMenu* managementRobotMenu = managementMenuBar->addMenu("机器人");
-	QMenu* managementAccountMenu = managementMenuBar->addMenu("账号");
 	QMenu* managementProcessMenu = managementMenuBar->addMenu("工艺");
 	QMenu* managementCameraMenu = managementMenuBar->addMenu("相机");
 	QMenu* managementDebugMenu = managementMenuBar->addMenu("调试");
+	QMenu* managementAccountMenu = managementMenuBar->addMenu("账号");
 
-	addManagementAction(managementHomeMenu, "返回主页", [this]() { ShowDashboardPage(); });
-	addManagementAction(managementHomeMenu, "关闭管理界面", [this]() { if (m_pManagementPage != nullptr) { m_pManagementPage->hide(); } });
-	addManagementAction(managementRobotMenu, "控制单元管理", [this]() { OpenControlUnitManagementDialog(); });
-	addManagementAction(managementRobotMenu, "FTP Job 文件", [this]() { OpenFtpJobManagementDialog(); });
-	m_pAccountManagementAction = addManagementAction(managementAccountMenu, "账号管理", [this]() { OpenAccountManagementDialog(); });
+	addMenuAction(managementHomeMenu, createManagementAction("管理首页", [this]() { ShowManagementHomePage(); }));
+	addMenuAction(managementHomeMenu, createManagementAction("返回主界面", [this]() { ShowDashboardPage(); }));
+	managementHomeMenu->addSeparator();
+	addMenuAction(managementHomeMenu, createManagementAction("关闭管理界面", [this]() { if (m_pManagementPage != nullptr) { m_pManagementPage->hide(); } }));
+
+	addMenuAction(managementRobotMenu, createManagementAction("控制单元管理", [this]() { OpenControlUnitManagementDialog(); }));
+	addMenuAction(managementRobotMenu, createManagementAction("FTP Job 文件", [this]() { OpenFtpJobManagementDialog(); }));
+
+	addMenuAction(managementProcessMenu, createManagementAction("工艺参数", [this, openInManagement]() { openInManagement([this]() { OpenWeldProcessDialog(); }); }));
+	addMenuAction(managementProcessMenu, createManagementAction("焊道补偿", [this, openInManagement]() { openInManagement([this]() { OpenWeldSeamCompDialog(); }); }));
+	addMenuAction(managementProcessMenu, createManagementAction("精测点云处理", [this]() { OpenPrecisePointCloudProcessingPage(); }));
+	addMenuAction(managementProcessMenu, createManagementAction("测量焊接参数", [this, openInManagement]() { openInManagement([this]() { OpenPreciseMeasureEditDialog(); }); }));
+
+	addMenuAction(managementCameraMenu, createManagementAction("相机参数", [this, openInManagement]() { openInManagement([this]() { OpenCameraParamDialog(); }); }));
+
+	addMenuAction(managementDebugMenu, createManagementAction("点动控制", [this, openInManagement]() { openInManagement([this]() { OpenRobotJogDialog(); }); }));
+	addMenuAction(managementDebugMenu, createManagementAction("功能测试", [this, openInManagement]() { openInManagement([this]() { OpenFunctionTestDialog(); }); }));
+	addMenuAction(managementDebugMenu, createManagementAction("配置数据库查看", [this]() { OpenConfigDatabaseViewerDialog(); }));
+
+	m_pAccountManagementAction = addMenuAction(managementAccountMenu, createManagementAction("账号管理", [this]() { OpenAccountManagementDialog(); }));
 	m_pAccountManagementAction->setEnabled(false);
-	addManagementAction(managementProcessMenu, "工艺参数", [this, openInManagement]() { openInManagement([this]() { OpenWeldProcessDialog(); }); });
-	addManagementAction(managementProcessMenu, "焊道补偿", [this, openInManagement]() { openInManagement([this]() { OpenWeldSeamCompDialog(); }); });
-	addManagementAction(managementProcessMenu, "测量焊接参数", [this, openInManagement]() { openInManagement([this]() { OpenPreciseMeasureEditDialog(); }); });
-	addManagementAction(managementCameraMenu, "相机参数", [this, openInManagement]() { openInManagement([this]() { OpenCameraParamDialog(); }); });
-	addManagementAction(managementDebugMenu, "点动控制", [this, openInManagement]() { openInManagement([this]() { OpenRobotJogDialog(); }); });
-	addManagementAction(managementDebugMenu, "功能测试", [this, openInManagement]() { openInManagement([this]() { OpenFunctionTestDialog(); }); });
-	addManagementAction(managementDebugMenu, "配置数据库查看", [this]() { OpenConfigDatabaseViewerDialog(); });
 
 	m_pManagementStack = new QStackedWidget(m_pManagementPage);
 	m_pManagementStack->setContentsMargins(0, 0, 0, 0);
@@ -7114,7 +7134,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	managementTitleLayout->addWidget(m_pManagementUserLabel);
 	managementHomeLayout->addLayout(managementTitleLayout);
 
-	m_pPermissionHintLabel = new QLabel("管理功能请从上方菜单栏进入，下面只保留账号和状态信息。", m_pManagementHomePage);
+	m_pPermissionHintLabel = new QLabel("管理功能请从顶部菜单栏进入，常用状态和全局开关保留在本页。", m_pManagementHomePage);
 	m_pPermissionHintLabel->setWordWrap(true);
 	m_pPermissionHintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
 	managementHomeLayout->addWidget(m_pPermissionHintLabel);
@@ -7122,14 +7142,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QGroupBox* managementInfoGroup = new QGroupBox("管理说明", m_pManagementHomePage);
 	QVBoxLayout* managementInfoLayout = new QVBoxLayout(managementInfoGroup);
 	QLabel* managementInfoLabel = new QLabel(
-		"管理页面仅保留菜单栏入口，不再放大按钮。只有工程师或管理员可以进入管理页面；其中“账号管理”仅管理员可用。",
+		"管理页面使用顶部菜单栏组织功能，只有工程师或管理员可以进入管理页面；其中“账号管理”仅管理员可用。",
 		managementInfoGroup);
 	managementInfoLabel->setWordWrap(true);
 	managementInfoLayout->addWidget(managementInfoLabel);
 	QPlainTextEdit* managementLogText = new QPlainTextEdit(managementInfoGroup);
 	managementLogText->setReadOnly(true);
 	managementLogText->document()->setMaximumBlockCount(120);
-	managementLogText->setPlainText("管理页面提示：请从菜单栏打开工艺、标定、补偿、点动和功能测试。");
+	managementLogText->setPlainText("管理页面提示：请从顶部菜单栏打开机器人、工艺、相机、调试和账号功能。");
 	managementInfoLayout->addWidget(managementLogText, 1);
 	managementHomeLayout->addWidget(managementInfoGroup, 1);
 
@@ -7269,6 +7289,15 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addToolbarSeparator();
 	addCommandAction(weldMenu, "工艺参数", [this]() { OpenWeldProcessDialog(); });
 	addCommandAction(weldMenu, "焊道补偿", [this]() { OpenWeldSeamCompDialog(); });
+	addCommandAction(weldMenu, "精测点云处理", [this]() {
+		if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+		{
+			ShowManagementPage();
+			return;
+		}
+		ShowManagementPage();
+		OpenPrecisePointCloudProcessingPage();
+	});
 	addToolbarSeparator();
 	addCommandAction(debugMenu, "功能测试", [this]() { OpenFunctionTestDialog(); });
 	if (debugMenu != nullptr)
@@ -7610,7 +7639,8 @@ bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 			|| watched == m_pAccountManagementPage
 			|| watched == m_pControlUnitManagementPage
 			|| watched == m_pFtpJobManagementPage
-			|| watched == m_pConfigDatabaseViewerPage)
+			|| watched == m_pConfigDatabaseViewerPage
+			|| watched == m_pPrecisePointCloudProcessingPage)
 		{
 			QWidget* page = qobject_cast<QWidget*>(watched);
 			const bool inManagementStack = page != nullptr
@@ -7655,14 +7685,14 @@ void QtWidgetsApplication4::resizeEvent(QResizeEvent* event)
 
 void QtWidgetsApplication4::ShowDashboardPage()
 {
+	CloseGrooveCameraPreviewWindow();
 	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-	setMinimumSize(1280, 700);
+	setMinimumSize(720, 500);
 	if (isMaximized() || isFullScreen())
 	{
 		showNormal();
 	}
-	resize(minimumSize());
-	CenterWindowOnScreen(this);
+	ResizeWindowForAvailableGeometry(this, QSize(1280, 700), 0.96, 0.90);
 
 	if (m_pMainStack != nullptr && m_pDashboardPage != nullptr)
 	{
@@ -7732,7 +7762,7 @@ void QtWidgetsApplication4::ShowManagementPage()
 	if (m_pManagementPage != nullptr)
 	{
 		m_pManagementPage->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-		m_pManagementPage->setMinimumSize(920, 700);
+		m_pManagementPage->setMinimumSize(720, 500);
 		RefreshAccountUi();
 		ShowManagementHomePage();
 		ShowMaximizedWithUnifiedChrome(m_pManagementPage);
@@ -7743,6 +7773,7 @@ void QtWidgetsApplication4::ShowManagementPage()
 
 void QtWidgetsApplication4::ShowManagementHomePage()
 {
+	CloseGrooveCameraPreviewWindow();
 	if (m_pManagementStack != nullptr && m_pManagementHomePage != nullptr)
 	{
 		m_pManagementStack->setCurrentWidget(m_pManagementHomePage);
@@ -8669,13 +8700,12 @@ void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 	}
 
 	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
-	setMinimumSize(920, 700);
+	setMinimumSize(620, 480);
 	if (isMaximized() || isFullScreen())
 	{
 		showNormal();
 	}
-	resize(minimumSize());
-	CenterWindowOnScreen(this);
+	ResizeWindowForAvailableGeometry(this, QSize(920, 700), 0.88, 0.88);
 
 	m_sAuthHintOverride = promptMessage.trimmed();
 	SetAuthRegisterMode(false);
@@ -8895,6 +8925,7 @@ void QtWidgetsApplication4::RegisterAccount()
 
 void QtWidgetsApplication4::OpenAccountManagementDialog()
 {
+	PageOpenTrace trace("账号管理");
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
 	{
 		QMessageBox::information(this, "账号管理", "账号管理仅管理员可用。");
@@ -8903,6 +8934,7 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 
 	if (m_pManagementStack == nullptr)
 	{
+		CloseGrooveCameraPreviewWindow();
 		DelayedLoadingGuard loading(this, "正在打开账号管理", 1000);
 		AccountManagementDialog dialog(this);
 		loading.Pulse();
@@ -8913,9 +8945,8 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 
 	if (m_pAccountManagementPage != nullptr)
 	{
-		m_pManagementStack->removeWidget(m_pAccountManagementPage);
-		m_pAccountManagementPage->deleteLater();
-		m_pAccountManagementPage = nullptr;
+		ShowManagementEmbeddedPage(m_pAccountManagementPage);
+		return;
 	}
 
 	DelayedLoadingGuard loading(this, "正在打开账号管理", 1000);
@@ -8929,6 +8960,7 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 
 void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 {
+	PageOpenTrace trace("控制单元管理");
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "控制单元管理", "控制单元管理需要工程师或管理员权限。");
@@ -8967,6 +8999,7 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 
 	auto openCameraBasicParam = [this](const QString& robotName, const QString& cameraSection) -> bool
 		{
+			CloseGrooveCameraPreviewWindow();
 			DelayedLoadingGuard loading(this, "正在打开相机基础参数", 1000);
 			CameraBasicParamDialog dialog(
 				robotName,
@@ -8990,10 +9023,12 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 					}
 					return EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true);
 				};
-			auto stopCamera = []()
+			auto stopCamera = [this]()
 				{
+					CloseGrooveCameraPreviewWindow();
 				};
 
+			CloseGrooveCameraPreviewWindow();
 			DelayedLoadingGuard loading(this, "正在打开手眼标定", 1000);
 			HandEyeCalibrationDialog dialog(
 				m_pContralUnit,
@@ -9023,6 +9058,7 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 
 	if (m_pManagementStack == nullptr)
 	{
+		CloseGrooveCameraPreviewWindow();
 		DelayedLoadingGuard loading(this, "正在打开控制单元管理", 1000);
 		ControlUnitManagementDialog dialog(reloadControlUnits, openCameraBasicParam, openHandEyeCalibration, this);
 		loading.Pulse();
@@ -9033,9 +9069,8 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 
 	if (m_pControlUnitManagementPage != nullptr)
 	{
-		m_pManagementStack->removeWidget(m_pControlUnitManagementPage);
-		m_pControlUnitManagementPage->deleteLater();
-		m_pControlUnitManagementPage = nullptr;
+		ShowManagementEmbeddedPage(m_pControlUnitManagementPage);
+		return;
 	}
 
 	DelayedLoadingGuard loading(this, "正在打开控制单元管理", 1000);
@@ -9049,6 +9084,7 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 
 void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 {
+	PageOpenTrace trace("FTP Job 文件");
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "FTP Job 文件", "FTP Job 文件管理需要工程师或管理员权限。");
@@ -9058,6 +9094,7 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 	const int currentUnitIndex = CurrentRobotUnitIndex();
 	if (m_pManagementStack == nullptr)
 	{
+		CloseGrooveCameraPreviewWindow();
 		DelayedLoadingGuard loading(this, "正在打开 FTP Job 文件管理", 1000);
 		FtpJobManagementDialog dialog(m_pContralUnit, currentUnitIndex, this);
 		loading.Pulse();
@@ -9066,15 +9103,22 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 		return;
 	}
 
-	if (m_pFtpJobManagementPage != nullptr)
+	if (m_pFtpJobManagementPage != nullptr && m_nFtpJobManagementPageUnitIndex != currentUnitIndex)
 	{
 		m_pManagementStack->removeWidget(m_pFtpJobManagementPage);
 		m_pFtpJobManagementPage->deleteLater();
 		m_pFtpJobManagementPage = nullptr;
+		m_nFtpJobManagementPageUnitIndex = -1;
+	}
+	if (m_pFtpJobManagementPage != nullptr)
+	{
+		ShowManagementEmbeddedPage(m_pFtpJobManagementPage);
+		return;
 	}
 
 	DelayedLoadingGuard loading(this, "正在打开 FTP Job 文件管理", 1000);
 	m_pFtpJobManagementPage = new FtpJobManagementDialog(m_pContralUnit, currentUnitIndex, m_pManagementStack);
+	m_nFtpJobManagementPageUnitIndex = currentUnitIndex;
 	loading.Pulse();
 	PrepareEmbeddedPage(m_pFtpJobManagementPage, m_pManagementStack);
 	loading.Pulse();
@@ -9082,8 +9126,39 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 	loading.Finish();
 }
 
+void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
+{
+	PageOpenTrace trace("精测点云处理");
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		QMessageBox::information(this, "精测点云处理", "精测点云处理需要工程师或管理员权限。");
+		return;
+	}
+
+	if (m_pManagementStack == nullptr)
+	{
+		QMessageBox::warning(this, "精测点云处理", "管理页面尚未初始化，无法嵌入精测点云处理页面。");
+		return;
+	}
+
+	if (m_pPrecisePointCloudProcessingPage != nullptr)
+	{
+		ShowManagementEmbeddedPage(m_pPrecisePointCloudProcessingPage);
+		return;
+	}
+
+	DelayedLoadingGuard loading(this, "正在打开精测点云处理", 1000);
+	m_pPrecisePointCloudProcessingPage = new LaserWeldFilterDialog(m_pManagementStack);
+	loading.Pulse();
+	PrepareEmbeddedPage(m_pPrecisePointCloudProcessingPage, m_pManagementStack);
+	loading.Pulse();
+	ShowManagementEmbeddedPage(m_pPrecisePointCloudProcessingPage);
+	loading.Finish();
+}
+
 void QtWidgetsApplication4::OpenConfigDatabaseViewerDialog()
 {
+	PageOpenTrace trace("配置数据库查看");
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
 	{
 		QMessageBox::information(this, "配置数据库查看", "配置数据库查看仅管理员可用。");
@@ -9092,6 +9167,7 @@ void QtWidgetsApplication4::OpenConfigDatabaseViewerDialog()
 
 	if (m_pManagementStack == nullptr)
 	{
+		CloseGrooveCameraPreviewWindow();
 		DelayedLoadingGuard loading(this, "正在打开配置数据库查看", 1000);
 		ConfigDatabaseViewerDialog dialog(this);
 		loading.Pulse();
@@ -9102,9 +9178,8 @@ void QtWidgetsApplication4::OpenConfigDatabaseViewerDialog()
 
 	if (m_pConfigDatabaseViewerPage != nullptr)
 	{
-		m_pManagementStack->removeWidget(m_pConfigDatabaseViewerPage);
-		m_pConfigDatabaseViewerPage->deleteLater();
-		m_pConfigDatabaseViewerPage = nullptr;
+		ShowManagementEmbeddedPage(m_pConfigDatabaseViewerPage);
+		return;
 	}
 
 	DelayedLoadingGuard loading(this, "正在打开配置数据库查看", 1000);
@@ -9205,12 +9280,13 @@ void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page, QStackedWidget* t
 		{
 			continue;
 		}
-		scrollArea->setWidgetResizable(true);
-		scrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-		scrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+		ConfigureResponsiveScrollArea(scrollArea);
 		if (QWidget* scrollWidget = scrollArea->widget())
 		{
-			scrollWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+			if (QLayout* scrollLayout = scrollWidget->layout())
+			{
+				scrollLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+			}
 		}
 	}
 
@@ -9219,10 +9295,9 @@ void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page, QStackedWidget* t
 	{
 		targetStack->addWidget(page);
 	}
-	ApplyCompactControlWidths(page);
-	ApplyAdaptiveScrollSupport(page);
+	ApplyResponsivePageDefaults(page);
 	ApplyDebugLogVisibility(page);
-	QTimer::singleShot(80, page, [page]() { ApplyCompactControlWidths(page); });
+	QTimer::singleShot(80, page, [page]() { ApplyResponsivePageDefaults(page); });
 	QPointer<QWidget> pagePtr(page);
 	QTimer::singleShot(80, this, [this, pagePtr]() { ApplyDebugLogVisibility(pagePtr); });
 }
@@ -9232,6 +9307,10 @@ void QtWidgetsApplication4::ShowEmbeddedPage(QWidget* page)
 	if (page == nullptr || m_pMainStack == nullptr)
 	{
 		return;
+	}
+	if (m_pMainStack->currentWidget() != page)
+	{
+		CloseGrooveCameraPreviewWindow();
 	}
 
 	auto refreshPageGeometry = [this, page]()
@@ -9272,6 +9351,10 @@ void QtWidgetsApplication4::ShowManagementEmbeddedPage(QWidget* page)
 	if (page == nullptr || m_pManagementStack == nullptr)
 	{
 		return;
+	}
+	if (m_pManagementStack->currentWidget() != page)
+	{
+		CloseGrooveCameraPreviewWindow();
 	}
 
 	auto refreshPageGeometry = [this, page]()
@@ -9534,7 +9617,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		{
 			outputPath = arguments[weldSeamCompOutputIndex + 1];
 		}
-		RunWeldSeamCompForCli(inputPath, outputPath);
+		RunWeldSeamCompForCli(arguments, inputPath, outputPath);
 	}
 
 	const int generateStepWeldIndex = arguments.indexOf("--generate-step-weld-program");
@@ -9562,7 +9645,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		}
 
 		const bool actualWeld = !arguments.contains("--generate-step-weld-program-dry-run");
-		RunGenerateStepWeldProgramForCli(inputPath, outputDir, actualWeld, weldSpeedMmPerMin);
+		RunGenerateStepWeldProgramForCli(arguments, inputPath, outputDir, actualWeld, weldSpeedMmPerMin);
 	}
 
 	const int updateWeldPoseAverageIndex = arguments.indexOf("--update-weld-pose-average");
@@ -10507,7 +10590,10 @@ void QtWidgetsApplication4::RunRebuildMeasureWeldFilesForCli(
 	LogCommandLineMessage("CLI 先测后焊重建摘要：" + summary);
 }
 
-void QtWidgetsApplication4::RunWeldSeamCompForCli(const QString& inputPath, const QString& outputPath) const
+void QtWidgetsApplication4::RunWeldSeamCompForCli(
+	const QStringList& arguments,
+	const QString& inputPath,
+	const QString& outputPath) const
 {
 	QString normalizedInputPath = QDir::fromNativeSeparators(inputPath.trimmed());
 	if (normalizedInputPath.isEmpty())
@@ -10548,7 +10634,22 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(const QString& inputPath, cons
 		return;
 	}
 
-	const QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath());
+	QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath(), QString());
+	if (robotName.isEmpty())
+	{
+		QString robotLabel;
+		if (RobotDriverAdaptor* driver = GetRobotDriverForCli(arguments, &robotLabel))
+		{
+			robotName = DecodeConfigText(driver->m_sRobotName).trimmed();
+			LogCommandLineMessage(QString("CLI 焊道补偿：输入路径未包含 Result/机器人目录，使用 --robot 解析目标：%1")
+				.arg(robotLabel));
+		}
+	}
+	if (robotName.isEmpty())
+	{
+		robotName = QStringLiteral("RobotA");
+	}
+
 	MeasureThenWeldService service;
 	QString summary;
 	QString error;
@@ -10571,6 +10672,7 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(const QString& inputPath, cons
 }
 
 void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
+	const QStringList& arguments,
 	const QString& inputPath,
 	const QString& outputDir,
 	bool actualWeld,
@@ -10595,7 +10697,22 @@ void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 		return;
 	}
 
-	const QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath());
+	QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath(), QString());
+	if (robotName.isEmpty())
+	{
+		QString robotLabel;
+		if (RobotDriverAdaptor* driver = GetRobotDriverForCli(arguments, &robotLabel))
+		{
+			robotName = DecodeConfigText(driver->m_sRobotName).trimmed();
+			LogCommandLineMessage(QString("CLI STEP焊接程序：输入路径未包含 Result/机器人目录，使用 --robot 解析目标：%1")
+				.arg(robotLabel));
+		}
+	}
+	if (robotName.isEmpty())
+	{
+		robotName = QStringLiteral("RobotA");
+	}
+
 	MeasureThenWeldService service;
 	QString programName;
 	QString srpPath;
@@ -11264,6 +11381,25 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 	m_pGroovePointCloudDialog->activateWindow();
 }
 
+void QtWidgetsApplication4::CloseGrooveCameraPreviewWindow()
+{
+	if (ui.GrooveCameraTestBtn != nullptr && ui.GrooveCameraTestBtn->isChecked())
+	{
+		ui.GrooveCameraTestBtn->setChecked(false);
+	}
+	else if (m_grooveCameraDisplayTimer != nullptr)
+	{
+		m_grooveCameraDisplayTimer->stop();
+	}
+
+	m_sGrooveCameraStatusText = "已暂停坡口相机预览。";
+	if (m_pGroovePointCloudDialog != nullptr)
+	{
+		QPointer<QWidget> previewDialog(m_pGroovePointCloudDialog);
+		previewDialog->close();
+	}
+}
+
 void QtWidgetsApplication4::OpenPointCloudViewerDialog()
 {
 	if (m_pPointCloudViewerDialog == nullptr)
@@ -11634,6 +11770,7 @@ void QtWidgetsApplication4::RobotRunTest()
 
 void QtWidgetsApplication4::OpenWeldProcessDialog()
 {
+	PageOpenTrace trace("工艺参数");
 	if (!RequirePermission(kRoleEngineer, "工艺参数"))
 	{
 		return;
@@ -11666,6 +11803,7 @@ void QtWidgetsApplication4::OpenWeldProcessDialog()
 
 void QtWidgetsApplication4::OpenFunctionTestDialog()
 {
+	PageOpenTrace trace("功能测试");
 	if (!RequirePermission(kRoleEngineer, "功能测试"))
 	{
 		return;
@@ -11691,6 +11829,7 @@ void QtWidgetsApplication4::OpenFunctionTestDialog()
 
 void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 {
+	PageOpenTrace trace("先测后焊");
 	const int currentUnitIndex = CurrentRobotUnitIndex();
 	if (!IsRobotUnitDriverReady(currentUnitIndex))
 	{
@@ -11724,8 +11863,9 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 			return true;
 		};
 
-	auto stopCamera = []()
+	auto stopCamera = [this]()
 		{
+			CloseGrooveCameraPreviewWindow();
 		};
 
 	auto cameraCacheForUnit = [this](int unitIndex) -> CameraFrameCache*
@@ -11795,6 +11935,7 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 
 void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 {
+	PageOpenTrace trace("测量焊接参数");
 	if (!RequirePermission(kRoleEngineer, "测量焊接参数"))
 	{
 		return;
@@ -11817,6 +11958,7 @@ void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 
 void QtWidgetsApplication4::OpenPositionTeachDialog()
 {
+	PageOpenTrace trace("扫描位置示教");
 	DelayedLoadingGuard loading(this, "正在打开扫描位置示教", 1000);
 	PreciseMeasureEditDialog* dialog = new PreciseMeasureEditDialog(
 		m_pContralUnit,
@@ -11834,6 +11976,7 @@ void QtWidgetsApplication4::OpenPositionTeachDialog()
 
 void QtWidgetsApplication4::OpenWeldSeamCompDialog()
 {
+	PageOpenTrace trace("焊道补偿");
 	if (!RequirePermission(kRoleEngineer, "焊道补偿"))
 	{
 		return;
@@ -11852,6 +11995,7 @@ void QtWidgetsApplication4::OpenWeldSeamCompDialog()
 
 void QtWidgetsApplication4::OpenCameraParamDialog()
 {
+	PageOpenTrace trace("相机参数");
 	if (!RequirePermission(kRoleEngineer, "相机参数/手眼标定"))
 	{
 		return;
@@ -11863,8 +12007,9 @@ void QtWidgetsApplication4::OpenCameraParamDialog()
 			return EnsureScanCameraRunningForUnit(currentUnitIndex, cameraIP, true);
 		};
 
-	auto stopCamera = []()
+	auto stopCamera = [this]()
 		{
+			CloseGrooveCameraPreviewWindow();
 		};
 
 	QString robotName = "RobotA";
@@ -12525,6 +12670,7 @@ void QtWidgetsApplication4::FanucMoveZeroTest()
 
 void QtWidgetsApplication4::OpenRobotJogDialog()
 {
+	PageOpenTrace trace("点动控制");
 	if (!RequirePermission(kRoleEngineer, "点动控制"))
 	{
 		return;

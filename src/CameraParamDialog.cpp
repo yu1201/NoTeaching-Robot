@@ -11,7 +11,6 @@
 #include <QComboBox>
 #include <QDir>
 #include <QFileInfo>
-#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -93,15 +92,11 @@ CameraParamDialog::CameraParamDialog(
     outerLayout->setSpacing(0);
     QScrollArea* pageScrollArea = new QScrollArea(this);
     pageScrollArea->setObjectName("AdaptiveWindowScrollArea");
-    pageScrollArea->setWidgetResizable(true);
-    pageScrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    pageScrollArea->setFrameShape(QFrame::NoFrame);
-    pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    pageScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    ConfigureResponsiveScrollArea(pageScrollArea);
     outerLayout->addWidget(pageScrollArea);
 
     QWidget* pageWidget = new QWidget(pageScrollArea);
-    pageWidget->setMinimumWidth(1020);
+    pageWidget->setMinimumWidth(760);
     QVBoxLayout* rootLayout = new QVBoxLayout(pageWidget);
     rootLayout->setContentsMargins(18, 16, 18, 18);
     rootLayout->setSpacing(12);
@@ -255,6 +250,7 @@ void CameraParamDialog::UpdateCurrentCameraInfo()
 
 void CameraParamDialog::OpenCameraBasicParamDialog()
 {
+    PauseExternalPreview();
     DelayedLoadingGuard loading(this, "正在打开相机基础参数", 1000);
     CameraBasicParamDialog dialog(
         CurrentRobotName(),
@@ -273,6 +269,7 @@ void CameraParamDialog::OpenCameraBasicParamDialog()
 
 void CameraParamDialog::OpenHandEyeDialog()
 {
+    PauseExternalPreview();
     DelayedLoadingGuard loading(this, "正在打开手眼矩阵参数", 1000);
     HandEyeMatrixDialog dialog(m_pContralUnit, CurrentRobotName(), CurrentCameraSection(), this);
     loading.Pulse();
@@ -299,6 +296,7 @@ void CameraParamDialog::OpenHandEyeDialog()
 
 void CameraParamDialog::OpenHandEyeCalibrationDialog()
 {
+    PauseExternalPreview();
     DelayedLoadingGuard loading(this, "正在打开手眼标定", 1000);
     HandEyeCalibrationDialog dialog(
         m_pContralUnit,
@@ -328,6 +326,14 @@ void CameraParamDialog::OpenHandEyeCalibrationDialog()
         }
     }
     UpdateCurrentCameraInfo();
+}
+
+void CameraParamDialog::PauseExternalPreview()
+{
+    if (m_stopCamera)
+    {
+        m_stopCamera();
+    }
 }
 
 QString CameraParamDialog::CurrentRobotName() const

@@ -11,10 +11,13 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QSizePolicy>
 #include <QStringList>
 #include <QTextDocument>
 #include <QVBoxLayout>
@@ -79,6 +82,17 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(ContralUnit* pContralUnit, const QStrin
     m_pPathLabel->setWordWrap(true);
     rootLayout->addWidget(m_pPathLabel);
 
+    QScrollArea* matrixScrollArea = new QScrollArea(this);
+    matrixScrollArea->setObjectName("AdaptiveWindowScrollArea");
+    ConfigureResponsiveScrollArea(matrixScrollArea);
+
+    QWidget* matrixContent = new QWidget(matrixScrollArea);
+    matrixContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    QVBoxLayout* matrixLayout = new QVBoxLayout(matrixContent);
+    matrixLayout->setContentsMargins(0, 0, 8, 0);
+    matrixLayout->setSpacing(10);
+    matrixLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+
     QGroupBox* rotationGroup = new QGroupBox("旋转矩阵 R_opt");
     QGridLayout* rotationLayout = new QGridLayout(rotationGroup);
     rotationLayout->setHorizontalSpacing(10);
@@ -95,7 +109,7 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(ContralUnit* pContralUnit, const QStrin
             m_rotationEdits.push_back(edit);
         }
     }
-    rootLayout->addWidget(rotationGroup);
+    matrixLayout->addWidget(rotationGroup);
 
     QGroupBox* translationGroup = new QGroupBox("平移向量 t_opt (mm)");
     QGridLayout* translationLayout = new QGridLayout(translationGroup);
@@ -110,7 +124,10 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(ContralUnit* pContralUnit, const QStrin
         translationLayout->addWidget(edit, 0, index * 2 + 1);
         m_translationEdits.push_back(edit);
     }
-    rootLayout->addWidget(translationGroup);
+    matrixLayout->addWidget(translationGroup);
+    matrixLayout->addStretch(1);
+    matrixScrollArea->setWidget(matrixContent);
+    rootLayout->addWidget(matrixScrollArea, 1);
 
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     buttonLayout->addStretch(1);
@@ -128,7 +145,8 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(ContralUnit* pContralUnit, const QStrin
     m_pLogText->setReadOnly(true);
     m_pLogText->document()->setMaximumBlockCount(800);
     m_pLogText->setMinimumHeight(130);
-    rootLayout->addWidget(m_pLogText, 1);
+    m_pLogText->setMaximumHeight(220);
+    rootLayout->addWidget(m_pLogText);
 
     connect(readEyeBtn, &QPushButton::clicked, this, [this]() { ReadRobotEyeVariable(); });
     connect(reloadBtn, &QPushButton::clicked, this, [this]() { LoadConfig(); });

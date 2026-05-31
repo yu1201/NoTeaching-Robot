@@ -1,0 +1,32 @@
+#pragma once
+
+#include <QString>
+
+class PointCloudProcessingConfig
+{
+public:
+    enum class Mode
+    {
+        LegacyLaserPath = 0,
+        ExternalCorrugatedSheet = 1
+    };
+
+    struct Settings
+    {
+        Mode mode = Mode::LegacyLaserPath;
+        QString libraryDir;
+        QString configPath;
+        double zTruncationValue = 6.0;
+        double resampleStepMm = 2.0;
+        bool fallbackToLegacy = true;
+    };
+
+    static QString SettingsFilePath();
+    static QString DefaultLibraryDir();
+    static QString DefaultConfigPath();
+    static Settings Load();
+    static bool Save(const Settings& settings, QString* error = nullptr);
+    static QString ModeDisplayName(Mode mode);
+    static QString ModeConfigValue(Mode mode);
+    static Mode ModeFromConfigValue(const QString& value);
+};

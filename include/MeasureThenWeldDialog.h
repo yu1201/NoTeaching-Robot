@@ -50,6 +50,11 @@ struct T_PRECISE_MEASURE_PARAM
     // 焊接轨迹下枪/收枪安全位相对首尾焊点的回退距离，对应 MeasureWeldParam.ini 的 GunDownBackSafeDis。
     double dGunDownBackSafeDis = 70.0;
     double dWeldRzGainDeg = 0.0;
+    // 焊接平台标准姿态示教：启用后 RX/RY 使用示教值，RZ 以平台示教值为基准修正坡道姿态。
+    bool bUseTaughtWeldPose = false;
+    double dTaughtWeldPoseRxDeg = 0.0;
+    double dTaughtWeldPoseRyDeg = 0.0;
+    double dTaughtWeldPoseRzDeg = 0.0;
     // 爬坡/下坡段按波峰波谷趋势生成姿态时，RZ 相对测量参考 RZ 的夹紧范围。
     double dSlopeRzMinDeg = -20.0;
     double dSlopeRzMaxDeg = 20.0;
@@ -72,7 +77,7 @@ struct T_PRECISE_MEASURE_PARAM
     double dScanSafeFlipWarnThresholdDeg = 90.0;
 };
 
-// 先测后焊入口界面：当前实现“预设参数线扫采集”，线扫处理按钮先保留空函数。
+// 先测后焊入口界面：预设参数负责局部精测采集和自动处理；线扫处理保留给整体大范围粗定位。
 class MeasureThenWeldDialog : public QDialog
 {
     Q_OBJECT
@@ -130,7 +135,7 @@ private:
     bool ConfirmContinue(const QString& actionName);
     bool ShowCheckpointDialog(const QString& title, const QString& detail);
 
-    // 预设参数流程入口和线扫处理占位入口。
+    // 预设参数流程入口和整体大线扫粗定位占位入口。
     void RunPresetParamFlow();
     void RunSkipScanWeldFlow();
     void RunLineScanProcess();

@@ -81,7 +81,6 @@ public:
     void CheckFileEncodeType(std::string fileName);
 
     bool CheckFileExists(const std::string& fileName);
-    bool CheckAndCreateDir(const std::string& dirPath);
     RobotLog m_pIniLog;
 };
 

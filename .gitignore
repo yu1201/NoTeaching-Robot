@@ -33,6 +33,8 @@ qrc_*.cpp
 *.pc
 *.tp
 *.var
+!SDK/PointCloudExtration/
+!SDK/PointCloudExtration/**
 
 # Local outputs
 Log/

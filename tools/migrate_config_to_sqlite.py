@@ -50,6 +50,117 @@ DEFAULT_CAMERA_NAMES = {
     "CAMERA3": "线扫相机2",
 }
 
+COMP_SEGMENT_COUNT = 4
+POSE_COMP_MATCH_BY_POSE = "0"
+POSE_SEGMENT_TYPES = (
+    ("姿态0 / 低平台", "low_platform"),
+    ("姿态1 / 上升边", "rising_edge"),
+    ("姿态2 / 高平台", "high_platform"),
+    ("姿态3 / 下降边", "falling_edge"),
+)
+SEAM_SEGMENT_TYPES = (
+    ("低平台", "low_platform"),
+    ("上升边", "rising_edge"),
+    ("高平台", "high_platform"),
+    ("下降边", "falling_edge"),
+)
+
+MEASURE_WELD_SCAN_DEFAULTS = (
+    ("YMaxCar", "0"),
+    ("YMinCar", "0"),
+    ("YMaxRobot", "0"),
+    ("YMinRobot", "0"),
+    ("XMax", "0"),
+    ("XMin", "0"),
+    ("ZMax", "0"),
+    ("ZMin", "0"),
+    ("ScanSpeed", "0"),
+    ("RunSpeed", "0"),
+    ("CameraReadFps", "0"),
+    ("CameraTimeOffsetMs", "0"),
+    ("dAcc", "0"),
+    ("dDec", "0"),
+    ("UseComputedScanSafe", "0"),
+    ("ScanSafeOffsetDistanceMm", "0"),
+    ("ScanSafeGunAngleDeg", "0"),
+    ("ScanSafeXDirection", "0"),
+    ("ScanSafeLiftHeightMm", "0"),
+    ("ScanSafeFlipWarnThresholdDeg", "0"),
+    ("StartSafePulseNum", "0"),
+    ("StartSafePulse0.nS", "0"),
+    ("StartSafePulse0.nL", "0"),
+    ("StartSafePulse0.nU", "0"),
+    ("StartSafePulse0.nR", "0"),
+    ("StartSafePulse0.nB", "0"),
+    ("StartSafePulse0.nT", "0"),
+    ("StartSafePulse0.lBX", "0"),
+    ("StartSafePulse0.lBY", "0"),
+    ("StartSafePulse0.lBZ", "0"),
+    ("StartPulse.nS", "0"),
+    ("StartPulse.nL", "0"),
+    ("StartPulse.nU", "0"),
+    ("StartPulse.nR", "0"),
+    ("StartPulse.nB", "0"),
+    ("StartPulse.nT", "0"),
+    ("StartPulse.lBX", "0"),
+    ("StartPulse.lBY", "0"),
+    ("StartPulse.lBZ", "0"),
+    ("StartPos.X", "0"),
+    ("StartPos.Y", "0"),
+    ("StartPos.Z", "0"),
+    ("StartPos.RX", "0"),
+    ("StartPos.RY", "0"),
+    ("StartPos.RZ", "0"),
+    ("StartPos.BX", "0"),
+    ("StartPos.BY", "0"),
+    ("StartPos.BZ", "0"),
+    ("EndPos.X", "0"),
+    ("EndPos.Y", "0"),
+    ("EndPos.Z", "0"),
+    ("EndPos.RX", "0"),
+    ("EndPos.RY", "0"),
+    ("EndPos.RZ", "0"),
+    ("EndPos.BX", "0"),
+    ("EndPos.BY", "0"),
+    ("EndPos.BZ", "0"),
+    ("EndSafePulseNum", "0"),
+    ("EndSafePulse0.nS", "0"),
+    ("EndSafePulse0.nL", "0"),
+    ("EndSafePulse0.nU", "0"),
+    ("EndSafePulse0.nR", "0"),
+    ("EndSafePulse0.nB", "0"),
+    ("EndSafePulse0.nT", "0"),
+    ("EndSafePulse0.lBX", "0"),
+    ("EndSafePulse0.lBY", "0"),
+    ("EndSafePulse0.lBZ", "0"),
+)
+
+MEASURE_WELD_WELD_DEFAULTS = (
+    ("WeldEnable", "1"),
+    ("WeldSpeedMmPerMin", "400"),
+    ("DryRunSpeedMmPerMin", "1000"),
+    ("WeldSafeMoveSpeedMmPerMin", "1000"),
+    ("StepOverlapRel", "20"),
+    ("WeldDirection", "1"),
+    ("WorldCoorDir", "0"),
+    ("RobotInstallDir", "0"),
+    ("GunAngle", "0"),
+    ("GunLaserAngle", "0"),
+    ("GunCameraAngle", "0"),
+    ("NormalWeldRx", "0"),
+    ("NormalWeldRy", "0"),
+    ("UseTaughtWeldPose", "0"),
+    ("TaughtWeldPoseRX", "0"),
+    ("TaughtWeldPoseRY", "0"),
+    ("TaughtWeldPoseRZ", "0"),
+    ("CornerTransitionLeadDis", "0"),
+    ("WeldStartSkipDis", "0"),
+    ("WeldEndSkipDis", "0"),
+    ("WeldRzGainDeg", "0"),
+    ("SlopeRzMinDeg", "-20"),
+    ("SlopeRzMaxDeg", "20"),
+)
+
 
 def decode_file(path: Path, forced_encoding: str | None = None) -> tuple[str, str]:
     data = path.read_bytes()
@@ -386,6 +497,40 @@ def protect_text(text: str) -> str:
     return f"enc:v1:{nonce_b64}:{data_b64}"
 
 
+def padded_base64(text: str) -> bytes:
+    encoded = text.encode("ascii")
+    pad = len(encoded) % 4
+    if pad:
+        encoded += b"=" * (4 - pad)
+    return encoded
+
+
+def unprotect_text(stored: str) -> str | None:
+    parts = stored.split(":")
+    if len(parts) != 4 or parts[0] != "enc" or parts[1] != "v1":
+        return None
+    try:
+        nonce = base64.b64decode(padded_base64(parts[2]))
+        data = bytearray(base64.b64decode(padded_base64(parts[3])))
+    except Exception:
+        return None
+    if len(nonce) != 16:
+        return None
+    stream = key_stream(nonce, len(data))
+    for index, byte in enumerate(stream):
+        data[index] ^= byte
+    try:
+        return bytes(data).decode("utf-8")
+    except UnicodeDecodeError:
+        return bytes(data).decode("utf-8", errors="replace")
+
+
+def decode_stored_text(stored: str, encrypted: int | str | None) -> str | None:
+    if encrypted not in (None, 0, "0", False) or stored.startswith("enc:v1:"):
+        return unprotect_text(stored)
+    return stored
+
+
 def stored_text(text: str, encrypt: bool) -> tuple[str, int]:
     if not encrypt:
         return text, 0
@@ -545,17 +690,255 @@ def refresh_current_schema_identities(conn: sqlite3.Connection) -> tuple[int, in
     return ini_updates, text_updates
 
 
-def migrate_existing_database_to_v2(db_path: Path, encrypt_new_values: bool) -> bool:
+def insert_ini_value(
+    conn: sqlite3.Connection,
+    source_path: str,
+    section: str,
+    key: str,
+    value: str,
+    encrypt: bool,
+    overwrite: bool = False,
+) -> bool:
+    identity = build_ini_identity(source_path, section, key)
+    text, encrypted = stored_text(str(value), encrypt)
+    command = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
+    cursor = conn.execute(
+        f"""
+        {command} INTO ini_values
+            (category, robot_name, file_name, group_name, item_name, key_name,
+             source_path, source_section, source_key, value_text, encrypted, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (
+            identity["category"],
+            identity["robot_name"],
+            identity["file_name"],
+            identity["group_name"],
+            identity["item_name"],
+            identity["key_name"],
+            identity["source_path"],
+            identity["source_section"],
+            identity["source_key"],
+            text,
+            encrypted,
+        ),
+    )
+    return cursor.rowcount > 0
+
+
+def read_ini_value(conn: sqlite3.Connection, source_path: str, section: str, key: str) -> str | None:
+    row = conn.execute(
+        """
+        SELECT value_text, encrypted FROM ini_values
+        WHERE source_path=? AND source_section=? AND source_key=?
+        """,
+        (
+            normalize_source_path_for_db(source_path),
+            normalize_section(section),
+            normalize_source_key(key),
+        ),
+    ).fetchone()
+    if row is None:
+        return None
+    return decode_stored_text(row[0], row[1])
+
+
+def parse_int(value: str | None, fallback: int) -> int:
+    if value is None:
+        return fallback
+    try:
+        return int(float(value.strip()))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def discover_robot_names(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
+    names: set[str] = set()
+    if data_dir.exists():
+        for child in data_dir.iterdir():
+            if child.is_dir() and child.name.lower().startswith("robot"):
+                names.add(child.name)
+
+    for (source_path,) in conn.execute("SELECT DISTINCT source_path FROM ini_values"):
+        parts = [part for part in normalize_source_path_for_db(source_path or "").split("/") if part]
+        if len(parts) >= 2 and parts[0].lower() == "data" and parts[1].lower().startswith("robot"):
+            names.add(parts[1])
+
+    unit_count = parse_int(read_ini_value(conn, "Data/ContralUnitInfo.ini", "UnitNum", "UnitNum"), 0)
+    for index in range(max(0, unit_count)):
+        value = read_ini_value(conn, "Data/ContralUnitInfo.ini", "UnitName", f"Unit{index}")
+        if value and value.strip():
+            names.add(value.strip())
+
+    for _key, stored, encrypted in conn.execute(
+        """
+        SELECT source_key, value_text, encrypted
+        FROM ini_values
+        WHERE source_path='Data/ContralUnitInfo.ini' AND source_section='UnitName'
+        """
+    ):
+        decoded = decode_stored_text(stored, encrypted)
+        if decoded and decoded.strip():
+            names.add(decoded.strip())
+
+    return sorted(names, key=str.lower)
+
+
+def ensure_measure_weld_defaults(
+    conn: sqlite3.Connection,
+    robot_names: list[str],
+    encrypt: bool,
+) -> int:
+    inserted = 0
+    for robot_name in robot_names:
+        source_path = f"Data/{robot_name}/MeasureWeldParam.ini"
+        inserted += int(insert_ini_value(conn, source_path, "MeasureWeldGroups", "GroupCount", "1", encrypt))
+        inserted += int(insert_ini_value(conn, source_path, "MeasureWeldGroups", "UseGroupNo", "0", encrypt))
+        group_count = parse_int(read_ini_value(conn, source_path, "MeasureWeldGroups", "GroupCount"), 1)
+        group_count = max(1, group_count)
+        for group_index in range(group_count):
+            inserted += int(insert_ini_value(
+                conn,
+                source_path,
+                "MeasureWeldGroups",
+                f"Group{group_index}Name",
+                f"参数组{group_index + 1}",
+                encrypt,
+            ))
+            scan_section = f"MeasureGroup{group_index}.Scan"
+            weld_section = f"MeasureGroup{group_index}.Weld"
+            for key, value in MEASURE_WELD_SCAN_DEFAULTS:
+                inserted += int(insert_ini_value(conn, source_path, scan_section, key, value, encrypt))
+            for key, value in MEASURE_WELD_WELD_DEFAULTS:
+                inserted += int(insert_ini_value(conn, source_path, weld_section, key, value, encrypt))
+    return inserted
+
+
+def ensure_point_cloud_defaults(conn: sqlite3.Connection, data_dir: Path, encrypt: bool) -> int:
+    project_root = data_dir.resolve().parent
+    library_dir = project_root / "SDK" / "PointCloudExtration"
+    config_path = library_dir / "config" / "CorrugatedSheetPointCloudEctration.ini"
+    defaults = (
+        ("General", "ProcessingMode", "LegacyLaserPath"),
+        ("External", "LibraryDir", str(library_dir)),
+        ("External", "ConfigPath", str(config_path)),
+        ("External", "ZTruncationValue", "6.0"),
+        ("External", "ResampleStepMm", "2.0"),
+        ("External", "FallbackToLegacy", "1"),
+    )
+    inserted = 0
+    for section, key, value in defaults:
+        inserted += int(insert_ini_value(conn, "Data/PointCloudProcessing.ini", section, key, value, encrypt))
+    return inserted
+
+
+def ensure_pose_comp_defaults(
+    conn: sqlite3.Connection,
+    robot_names: list[str],
+    encrypt: bool,
+) -> int:
+    inserted = 0
+    for robot_name in robot_names:
+        source_path = f"Data/{robot_name}/WeldPoseCompParam.ini"
+        count = parse_int(read_ini_value(conn, source_path, "ALLWeldPoseComp", "PoseCompCount"), COMP_SEGMENT_COUNT)
+        group_count = parse_int(read_ini_value(conn, source_path, "ALLWeldPoseComp", "PoseCompGroupCount"), 0)
+        if group_count <= 0:
+            group_count = max(1, (max(0, count) + COMP_SEGMENT_COUNT - 1) // COMP_SEGMENT_COUNT)
+        expected_count = max(COMP_SEGMENT_COUNT, group_count * COMP_SEGMENT_COUNT)
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldPoseComp", "PoseCompCount", str(expected_count), encrypt))
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldPoseComp", "PoseCompGroupCount", str(group_count), encrypt))
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldPoseComp", "ActivePoseCompGroupIndex", "0", encrypt))
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldPoseComp", "PoseCompMatchMode", POSE_COMP_MATCH_BY_POSE, encrypt))
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldPoseComp", "PoseMatchMaxErrorDeg", "5.0", encrypt))
+
+        for group_index in range(group_count):
+            group_section = f"WeldPoseCompGroup{group_index}"
+            group_name = f"姿态补偿组{group_index + 1}"
+            inserted += int(insert_ini_value(conn, source_path, group_section, "Name", group_name, encrypt))
+            inserted += int(insert_ini_value(conn, source_path, group_section, "PoseCompMatchMode", POSE_COMP_MATCH_BY_POSE, encrypt))
+            for segment_index, (name, segment_kind) in enumerate(POSE_SEGMENT_TYPES):
+                flat_index = group_index * COMP_SEGMENT_COUNT + segment_index
+                section = f"WeldPoseComp{flat_index}"
+                defaults = (
+                    ("GroupIndex", str(group_index)),
+                    ("GroupName", group_name),
+                    ("Name", name),
+                    ("SegmentKind", segment_kind),
+                    ("Rx", "0.000000"),
+                    ("Ry", "0.000000"),
+                    ("Rz", "0.000000"),
+                    ("CompX", "0.000000"),
+                    ("CompY", "0.000000"),
+                    ("CompZ", "0.000000"),
+                )
+                for key, value in defaults:
+                    inserted += int(insert_ini_value(conn, source_path, section, key, value, encrypt))
+    return inserted
+
+
+def ensure_seam_comp_defaults(
+    conn: sqlite3.Connection,
+    robot_names: list[str],
+    encrypt: bool,
+) -> int:
+    inserted = 0
+    for robot_name in robot_names:
+        source_path = f"Data/{robot_name}/WeldSeamCompParam.ini"
+        count = parse_int(read_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompCount"), COMP_SEGMENT_COUNT)
+        group_count = parse_int(read_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompGroupCount"), 0)
+        if group_count <= 0:
+            group_count = max(1, (max(0, count) + COMP_SEGMENT_COUNT - 1) // COMP_SEGMENT_COUNT)
+        expected_count = max(COMP_SEGMENT_COUNT, group_count * COMP_SEGMENT_COUNT)
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompCount", str(expected_count), encrypt))
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompGroupCount", str(group_count), encrypt))
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldSeamComp", "ActiveSeamCompGroupIndex", "0", encrypt))
+
+        for group_index in range(group_count):
+            group_section = f"WeldSeamCompGroup{group_index}"
+            group_name = f"焊道补偿组{group_index + 1}"
+            inserted += int(insert_ini_value(conn, source_path, group_section, "Name", group_name, encrypt))
+            for segment_index, (name, segment_kind) in enumerate(SEAM_SEGMENT_TYPES):
+                flat_index = group_index * COMP_SEGMENT_COUNT + segment_index
+                section = f"WeldSeamComp{flat_index}"
+                defaults = (
+                    ("GroupIndex", str(group_index)),
+                    ("GroupName", group_name),
+                    ("Name", name),
+                    ("SegmentKind", segment_kind),
+                    ("WeldZComp", "0.000000"),
+                    ("WeldGunDirComp", "0.000000"),
+                    ("WeldSeamDirComp", "0.000000"),
+                )
+                for key, value in defaults:
+                    inserted += int(insert_ini_value(conn, source_path, section, key, value, encrypt))
+    return inserted
+
+
+def ensure_runtime_defaults(conn: sqlite3.Connection, data_dir: Path, encrypt: bool) -> tuple[int, dict[str, int]]:
+    robot_names = discover_robot_names(conn, data_dir)
+    details = {
+        "measure_weld": ensure_measure_weld_defaults(conn, robot_names, encrypt),
+        "point_cloud": ensure_point_cloud_defaults(conn, data_dir, encrypt),
+        "pose_comp": ensure_pose_comp_defaults(conn, robot_names, encrypt),
+        "seam_comp": ensure_seam_comp_defaults(conn, robot_names, encrypt),
+    }
+    return sum(details.values()), details
+
+
+def migrate_existing_database_to_v2(db_path: Path, data_dir: Path, encrypt_new_values: bool) -> bool:
     if not db_path.exists():
         return False
 
     with sqlite3.connect(db_path) as conn:
         if has_current_schema(conn):
+            create_current_tables(conn)
             ini_updates, text_updates = refresh_current_schema_identities(conn)
+            default_count, default_details = ensure_runtime_defaults(conn, data_dir, encrypt_new_values)
             set_schema_meta(conn, encrypt_new_values)
             conn.commit()
             print(f"Database already uses schema v{SCHEMA_VERSION}: {db_path}")
             print(f"Refreshed display fields: INI values={ini_updates}, text files={text_updates}")
+            print(f"Runtime defaults added: {default_count} ({default_details})")
             return True
         if not has_legacy_schema(conn):
             return False
@@ -623,6 +1006,7 @@ def migrate_existing_database_to_v2(db_path: Path, encrypt_new_values: bool) -> 
 
             conn.execute(f"DROP TABLE {legacy_ini}")
             conn.execute(f"DROP TABLE {legacy_text}")
+            default_count, default_details = ensure_runtime_defaults(conn, data_dir, encrypt_new_values)
             set_schema_meta(conn, encrypt_new_values)
             conn.commit()
         except Exception:
@@ -631,6 +1015,7 @@ def migrate_existing_database_to_v2(db_path: Path, encrypt_new_values: bool) -> 
 
     print(f"Upgraded existing database to schema v{SCHEMA_VERSION}: {db_path}")
     print(f"Backed up old database: {backup}")
+    print(f"Runtime defaults added: {default_count} ({default_details})")
     return True
 
 
@@ -649,7 +1034,7 @@ def migrate(
 
     if db_path.exists():
         if not overwrite:
-            if migrate_existing_database_to_v2(db_path, encrypt):
+            if migrate_existing_database_to_v2(db_path, data_dir, encrypt):
                 return
             raise SystemExit(f"Database already exists, pass --overwrite: {db_path}")
         backup = db_path.with_suffix(db_path.suffix + ".bak")
@@ -725,11 +1110,13 @@ def migrate(
             )
             text_count += 1
 
+        default_count, default_details = ensure_runtime_defaults(conn, data_dir, encrypt)
         conn.commit()
 
     print(f"Created: {db_path}")
     print(f"INI files: {ini_count}, values: {value_count}")
     print(f"Text files: {text_count}")
+    print(f"Runtime defaults added: {default_count} ({default_details})")
     print(f"Encrypted: {'yes' if encrypt else 'no'}")
     if default_replacements:
         print("Mojibake values replaced with defaults:")

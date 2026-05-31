@@ -176,6 +176,10 @@ Get-ChildItem -LiteralPath $dataTargetDir -Filter "ConfigStore.db*" -File -Error
 
 Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "icons") -TargetDir (Join-Path $packageDir "icons")
 
+$pointCloudExtractionSourceDir = Join-Path $repoRoot "SDK\PointCloudExtration"
+$pointCloudExtractionTargetDir = Join-Path $packageDir "SDK\PointCloudExtration"
+Copy-DirectoryContent -SourceDir $pointCloudExtractionSourceDir -TargetDir $pointCloudExtractionTargetDir
+
 $diagnosticToolsSourceDir = Join-Path $repoRoot "tools"
 $diagnosticToolsTargetDir = Join-Path $packageDir "tools"
 if (Test-Path -LiteralPath $diagnosticToolsSourceDir) {

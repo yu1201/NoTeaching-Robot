@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 
+class QScrollArea;
 class QWidget;
 
 class DelayedLoadingGuardPrivate;
@@ -34,11 +35,14 @@ void ApplyUnifiedWindowChrome(QWidget* widget);
 // 设置应用默认中文字体 fallback，避免下拉框、菜单和标题在缺少默认中文字库的设备上乱码。
 void ConfigureApplicationFontFallback();
 
-// 给窗口或嵌入页加一层按需显示的横/纵滚动区；内容没有超出时滚动条保持隐藏。
-void ApplyAdaptiveScrollSupport(QWidget* widget);
+// 统一配置显式滚动区：透明背景、按需滚动条、内容随视口伸缩。
+void ConfigureResponsiveScrollArea(QScrollArea* scrollArea);
 
-// 点动、流程执行等实时操作窗口需要直接接收鼠标事件，不套通用外层滚动区。
-void MarkDirectMouseInputWindow(QWidget* widget);
+// 统一页面适配默认项：显式滚动区、紧凑控件宽度、数字输入框编辑框化。
+void ApplyResponsivePageDefaults(QWidget* widget);
+
+// 数字输入框默认只保留编辑框，去掉上下调节按钮，减少小屏显示挤压。
+void ApplyEditorOnlySpinBoxes(QWidget* widget);
 
 // 窗口显示或最大化后，补刷新 Windows 原生标题栏颜色。
 void RefreshUnifiedWindowTitleBar(QWidget* widget);

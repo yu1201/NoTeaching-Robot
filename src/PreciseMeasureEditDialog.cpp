@@ -74,13 +74,41 @@ QString AxisKey(const QString& group, const QString& axis)
     return group + "." + axis;
 }
 
-QLineEdit* CreateValueEdit(int minWidth = 76, int maxWidth = 110)
+constexpr int kShortValueEditMaxWidth = 118;
+constexpr int kOtherParamLabelWidth = 126;
+constexpr int kOtherParamEditorMinWidth = 150;
+constexpr int kOtherParamEditorMaxWidth = 260;
+constexpr auto USE_TAUGHT_WELD_POSE_KEY = "UseTaughtWeldPose";
+constexpr auto TAUGHT_WELD_POSE_RX_KEY = "TaughtWeldPoseRX";
+constexpr auto TAUGHT_WELD_POSE_RY_KEY = "TaughtWeldPoseRY";
+constexpr auto TAUGHT_WELD_POSE_RZ_KEY = "TaughtWeldPoseRZ";
+constexpr auto NORMAL_WELD_RX_KEY = "NormalWeldRx";
+constexpr auto NORMAL_WELD_RY_KEY = "NormalWeldRy";
+constexpr auto WELD_RZ_GAIN_KEY = "WeldRzGainDeg";
+
+QLineEdit* CreateValueEdit(int minWidth = 76, int maxWidth = kShortValueEditMaxWidth)
 {
     QLineEdit* edit = new QLineEdit();
     edit->setMinimumWidth(minWidth);
     edit->setMaximumWidth(maxWidth);
     edit->setAlignment(Qt::AlignRight);
     return edit;
+}
+
+QWidget* CreateUnitEditorForPrecise(QWidget* editor, const QString& unitText)
+{
+    QWidget* container = new QWidget();
+    QHBoxLayout* layout = new QHBoxLayout(container);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+    layout->addWidget(editor, 1);
+
+    QLabel* unitLabel = new QLabel(unitText);
+    unitLabel->setObjectName("UnitLabel");
+    unitLabel->setMinimumWidth(unitText.compare("deg", Qt::CaseInsensitive) == 0 ? 34 : 28);
+    unitLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    layout->addWidget(unitLabel);
+    return container;
 }
 
 void MarkNumericEdit(QLineEdit* edit)
@@ -217,6 +245,10 @@ QStringList MinimalWeldSectionLinesForPrecise()
         << "WeldDirection=1"
         << "NormalWeldRx=0"
         << "NormalWeldRy=0"
+        << "UseTaughtWeldPose=0"
+        << "TaughtWeldPoseRX=0"
+        << "TaughtWeldPoseRY=0"
+        << "TaughtWeldPoseRZ=0"
         << "CornerTransitionLeadDis=0"
         << "WeldStartSkipDis=0"
         << "WeldEndSkipDis=0"
@@ -362,6 +394,18 @@ QByteArray EncodeIniTextForPrecise(const QString& text)
 bool IsObsoletePreciseParamKey(const QString& key)
 {
     return key.trimmed().compare("CornerArcRadiusMm", Qt::CaseInsensitive) == 0;
+}
+
+bool IsDedicatedWeldPoseTeachKey(const QString& key)
+{
+    const QString normalized = key.trimmed();
+    return normalized.compare(USE_TAUGHT_WELD_POSE_KEY, Qt::CaseInsensitive) == 0
+        || normalized.compare(TAUGHT_WELD_POSE_RX_KEY, Qt::CaseInsensitive) == 0
+        || normalized.compare(TAUGHT_WELD_POSE_RY_KEY, Qt::CaseInsensitive) == 0
+        || normalized.compare(TAUGHT_WELD_POSE_RZ_KEY, Qt::CaseInsensitive) == 0
+        || normalized.compare(NORMAL_WELD_RX_KEY, Qt::CaseInsensitive) == 0
+        || normalized.compare(NORMAL_WELD_RY_KEY, Qt::CaseInsensitive) == 0
+        || normalized.compare(WELD_RZ_GAIN_KEY, Qt::CaseInsensitive) == 0;
 }
 
 bool IsWeldDirectionParamKey(const QString& key)
@@ -586,6 +630,10 @@ QString PreciseParamDisplayName(const QString& key)
         { "FlatWeldRy", "平焊焊接RY" },
         { "NormalWeldRx", "平焊RX" },
         { "NormalWeldRy", "平焊RY" },
+        { USE_TAUGHT_WELD_POSE_KEY, "启用示教焊接姿态" },
+        { TAUGHT_WELD_POSE_RX_KEY, "示教焊接RX" },
+        { TAUGHT_WELD_POSE_RY_KEY, "示教焊接RY" },
+        { TAUGHT_WELD_POSE_RZ_KEY, "示教焊接RZ" },
         { "CornerTransitionLeadDis", "拐点过渡距离" },
         { "WeldStartSkipDis", "起点跳过距离" },
         { "WeldEndSkipDis", "终点跳过距离" },
@@ -781,6 +829,9 @@ void AddOtherParamEditor(
     const QString displayValue = DisplayValueFromRawIniValue(value, &inlineComment);
     QLabel* label = new QLabel(PreciseParamDisplayName(key));
     label->setToolTip(key);
+    label->setMinimumWidth(kOtherParamLabelWidth);
+    label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    label->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
     const int uiCol = colInGroup * 2;
 
     if (IsWeldDirectionParamKey(key))
@@ -795,11 +846,12 @@ void AddOtherParamEditor(
         combo->setProperty("paramSection", sectionName);
         combo->setProperty("paramKey", key);
         combo->setProperty("inlineComment", inlineComment);
-        combo->setMinimumWidth(130);
-        combo->setMaximumWidth(190);
+        combo->setMinimumWidth(kOtherParamEditorMinWidth);
+        combo->setMaximumWidth(kOtherParamEditorMaxWidth);
+        combo->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         comboEditors.insert(editorId, combo);
         layout->addWidget(label, row, uiCol);
-        layout->addWidget(combo, row, uiCol + 1);
+        layout->addWidget(combo, row, uiCol + 1, Qt::AlignLeft);
         ++colInGroup;
         if (colInGroup >= 2)
         {
@@ -814,8 +866,9 @@ void AddOtherParamEditor(
     edit->setProperty("paramSection", sectionName);
     edit->setProperty("paramKey", key);
     edit->setProperty("inlineComment", inlineComment);
-    edit->setMinimumWidth(90);
-    edit->setMaximumWidth(130);
+    edit->setMinimumWidth(kOtherParamEditorMinWidth);
+    edit->setMaximumWidth(kOtherParamEditorMaxWidth);
+    edit->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     edit->setAlignment(Qt::AlignRight);
     if (LooksNumericValue(displayValue))
     {
@@ -825,7 +878,7 @@ void AddOtherParamEditor(
     editors.insert(editorId, edit);
 
     layout->addWidget(label, row, uiCol);
-    layout->addWidget(edit, row, uiCol + 1);
+    layout->addWidget(edit, row, uiCol + 1, Qt::AlignLeft);
     ++colInGroup;
     if (colInGroup >= 2)
     {
@@ -899,18 +952,15 @@ void PreciseMeasureEditDialog::BuildUi()
         "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
         "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
-        "QLabel { color: #BACBD1; }")
+        "QLabel { color: #BACBD1; }"
+        "QLabel#UnitLabel { color: #8FA7B0; padding-left: 2px; }")
         + UnifiedComboBoxStyleSheet());
 
     QVBoxLayout* outerLayout = new QVBoxLayout(this);
     outerLayout->setContentsMargins(0, 0, 0, 0);
     QScrollArea* pageScrollArea = new QScrollArea();
     pageScrollArea->setObjectName("PrecisePageScroll");
-    pageScrollArea->setWidgetResizable(true);
-    pageScrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-    pageScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
-    pageScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    pageScrollArea->setFrameShape(QFrame::NoFrame);
+    ConfigureResponsiveScrollArea(pageScrollArea);
     outerLayout->addWidget(pageScrollArea);
 
     QWidget* pageWidget = new QWidget();
@@ -947,7 +997,6 @@ void PreciseMeasureEditDialog::BuildUi()
     robotLayout->addWidget(new QLabel("读取机器人："));
     m_pRobotCombo = new QComboBox();
     m_pRobotCombo->setMinimumWidth(220);
-    m_pRobotCombo->setMaximumWidth(320);
     m_pRobotCombo->setFixedHeight(28);
     robotLayout->addWidget(m_pRobotCombo);
     headerLeftLayout->addLayout(robotLayout);
@@ -955,14 +1004,12 @@ void PreciseMeasureEditDialog::BuildUi()
     groupLayout->addWidget(new QLabel("位置类型："));
     m_pGroupCombo = new QComboBox();
     m_pGroupCombo->setMinimumWidth(180);
-    m_pGroupCombo->setMaximumWidth(260);
     m_pGroupCombo->setFixedHeight(28);
     groupLayout->addWidget(m_pGroupCombo);
     groupLayout->addWidget(new QLabel("中文名："));
     m_pGroupNameEdit = new QLineEdit();
     m_pGroupNameEdit->setPlaceholderText("参数组名称");
     m_pGroupNameEdit->setMinimumWidth(150);
-    m_pGroupNameEdit->setMaximumWidth(220);
     groupLayout->addWidget(m_pGroupNameEdit);
     QPushButton* addGroupBtn = nullptr;
     QPushButton* copyGroupBtn = nullptr;
@@ -1012,6 +1059,8 @@ void PreciseMeasureEditDialog::BuildUi()
         << CreatePulseGroup("收枪安全位置（脉冲）", "EndSafePulse0", "示教收枪安全位置", &PreciseMeasureEditDialog::TeachEndSafePulse, &PreciseMeasureEditDialog::SaveManualEndSafePulse);
     if (m_bPositionTeachOnly)
     {
+        m_pWeldPoseTeachPanel = CreateWeldPoseTeachPanel();
+        m_pulseGroupWidgets << m_pWeldPoseTeachPanel;
         m_pScanSafeParamPanel = CreateScanSafeParamPanel();
         m_pulseGroupWidgets << m_pScanSafeParamPanel;
     }
@@ -1020,6 +1069,11 @@ void PreciseMeasureEditDialog::BuildUi()
     m_pOtherPanel->setObjectName("PreciseOtherPanel");
     QVBoxLayout* otherPanelLayout = new QVBoxLayout(m_pOtherPanel);
     otherPanelLayout->setContentsMargins(0, 0, 0, 0);
+    if (!m_bPositionTeachOnly)
+    {
+        m_pWeldPoseTeachPanel = CreateWeldPoseTeachPanel();
+        otherPanelLayout->addWidget(m_pWeldPoseTeachPanel, 0, Qt::AlignTop);
+    }
     QWidget* otherGroup = new QWidget();
     otherGroup->setObjectName("ParamTabbedFrame");
     otherGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
@@ -1552,6 +1606,13 @@ bool PreciseMeasureEditDialog::SaveAllParamEdits()
         }
     }
 
+    if (!SaveWeldPoseTeachParams(error))
+    {
+        QMessageBox::warning(this, "保存参数", error);
+        AppendLog("焊接姿态示教参数保存失败：" + error);
+        return false;
+    }
+
     if (!SaveGroupMetadata(error))
     {
         QMessageBox::warning(this, "保存参数", error);
@@ -1854,6 +1915,7 @@ bool PreciseMeasureEditDialog::LoadCurrentParam()
     {
         LoadScanSafeParams();
     }
+    LoadWeldPoseTeachParams();
     if (!hasStartPos)
     {
         AppendLog("未读取到扫描起点直角参数，请重新示教并保存。" + startPosError);
@@ -1965,9 +2027,15 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
             bodyWidget->setVisible(false);
             QGridLayout* bodyLayout = new QGridLayout(bodyWidget);
             bodyLayout->setContentsMargins(10, 10, 10, 10);
-            bodyLayout->setHorizontalSpacing(8);
+            bodyLayout->setHorizontalSpacing(12);
             bodyLayout->setVerticalSpacing(8);
-            bodyLayout->setColumnStretch(1, 1);
+            bodyLayout->setColumnMinimumWidth(0, kOtherParamLabelWidth);
+            bodyLayout->setColumnMinimumWidth(1, kOtherParamEditorMaxWidth);
+            bodyLayout->setColumnMinimumWidth(2, kOtherParamLabelWidth);
+            bodyLayout->setColumnMinimumWidth(3, kOtherParamEditorMaxWidth);
+            bodyLayout->setColumnStretch(0, 0);
+            bodyLayout->setColumnStretch(1, 0);
+            bodyLayout->setColumnStretch(2, 0);
             bodyLayout->setColumnStretch(3, 1);
             sectionLayout->addWidget(bodyWidget);
 
@@ -1980,7 +2048,6 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
             refreshHeader(false);
 
             m_pOtherParamLayout->addWidget(sectionWidget, outerRow, 0, 1, 4);
-            m_pOtherParamLayout->setColumnStretch(0, 1);
             sectionWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             m_otherParamSectionWidgets << sectionWidget;
             ++outerRow;
@@ -2013,6 +2080,10 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
                     continue;
                 }
                 if (skipDedicatedKeys && IsDedicatedPulseKey(key))
+                {
+                    continue;
+                }
+                if (weldSection && IsDedicatedWeldPoseTeachKey(key))
                 {
                     continue;
                 }
@@ -2110,44 +2181,41 @@ QWidget* PreciseMeasureEditDialog::CreateScanSafeParamPanel()
     m_pUseComputedScanSafeCheck = new QCheckBox("使用起点/终点直角位姿推算扫描安全位");
     layout->addWidget(m_pUseComputedScanSafeCheck, 1, 0, 1, 6);
 
-    auto makeSpin = [](double minValue, double maxValue, const QString& suffix) -> QDoubleSpinBox*
+    auto makeSpin = [](double minValue, double maxValue) -> QDoubleSpinBox*
         {
             QDoubleSpinBox* spin = new QDoubleSpinBox();
             spin->setRange(minValue, maxValue);
             spin->setDecimals(3);
             spin->setSingleStep(1.0);
-            spin->setSuffix(suffix);
             spin->setAlignment(Qt::AlignRight);
             spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
             spin->setMinimumWidth(132);
-            spin->setMaximumWidth(170);
             spin->setProperty("touchKeyboardLayout", QStringLiteral("numeric"));
             spin->setInputMethodHints(Qt::ImhFormattedNumbersOnly);
             return spin;
         };
 
-    m_pScanSafeOffsetSpin = makeSpin(1.0, 1000.0, " mm");
-    m_pScanSafeGunAngleSpin = makeSpin(-89.0, 89.0, " deg");
+    m_pScanSafeOffsetSpin = makeSpin(1.0, 1000.0);
+    m_pScanSafeGunAngleSpin = makeSpin(-89.0, 89.0);
     m_pScanSafeXDirectionCombo = new QComboBox();
     m_pScanSafeXDirectionCombo->addItem("X- 方向", -1);
     m_pScanSafeXDirectionCombo->addItem("X+ 方向", 1);
     m_pScanSafeXDirectionCombo->setMinimumWidth(132);
-    m_pScanSafeXDirectionCombo->setMaximumWidth(170);
-    m_pScanSafeLiftSpin = makeSpin(0.0, 1000.0, " mm");
-    m_pScanSafeFlipWarnSpin = makeSpin(1.0, 360.0, " deg");
+    m_pScanSafeLiftSpin = makeSpin(0.0, 1000.0);
+    m_pScanSafeFlipWarnSpin = makeSpin(1.0, 360.0);
 
-    auto addRowItem = [layout](int row, int col, const QString& labelText, QWidget* editor)
+    auto addRowItem = [layout](int row, int col, const QString& labelText, QWidget* editor, const QString& unitText = QString())
         {
             QLabel* label = new QLabel(labelText);
             layout->addWidget(label, row, col);
-            layout->addWidget(editor, row, col + 1);
+            layout->addWidget(unitText.isEmpty() ? editor : CreateUnitEditorForPrecise(editor, unitText), row, col + 1);
         };
 
-    addRowItem(2, 0, "安全偏移距离：", m_pScanSafeOffsetSpin);
-    addRowItem(2, 2, "枪倾角：", m_pScanSafeGunAngleSpin);
+    addRowItem(2, 0, "安全偏移距离：", m_pScanSafeOffsetSpin, "mm");
+    addRowItem(2, 2, "枪倾角：", m_pScanSafeGunAngleSpin, "deg");
     addRowItem(2, 4, "X 偏移方向：", m_pScanSafeXDirectionCombo);
-    addRowItem(3, 0, "姿态切换抬高：", m_pScanSafeLiftSpin);
-    addRowItem(3, 2, "姿态翻转提醒阈值：", m_pScanSafeFlipWarnSpin);
+    addRowItem(3, 0, "姿态切换抬高：", m_pScanSafeLiftSpin, "mm");
+    addRowItem(3, 2, "姿态翻转提醒阈值：", m_pScanSafeFlipWarnSpin, "deg");
 
     m_pScanSafePreviewLabel = new QLabel();
     m_pScanSafePreviewLabel->setWordWrap(true);
@@ -2254,6 +2322,249 @@ bool PreciseMeasureEditDialog::SaveScanSafeParams(QString& error) const
         && WriteParamValue(section, "ScanSafeXDirection", QString::number(m_pScanSafeXDirectionCombo->currentData().toInt()), error)
         && WriteParamValue(section, "ScanSafeLiftHeightMm", QString::number(m_pScanSafeLiftSpin->value(), 'f', 6), error)
         && WriteParamValue(section, "ScanSafeFlipWarnThresholdDeg", QString::number(m_pScanSafeFlipWarnSpin->value(), 'f', 6), error);
+}
+
+QWidget* PreciseMeasureEditDialog::CreateWeldPoseTeachPanel()
+{
+    QGroupBox* groupBox = new QGroupBox("焊接姿态示教");
+    groupBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    QGridLayout* layout = new QGridLayout(groupBox);
+    layout->setContentsMargins(36, 28, 36, 18);
+    layout->setHorizontalSpacing(14);
+    layout->setVerticalSpacing(10);
+
+    m_pWeldPoseHintLabel = new QLabel();
+    m_pWeldPoseHintLabel->setWordWrap(true);
+    layout->addWidget(m_pWeldPoseHintLabel, 0, 0, 1, 8);
+
+    m_pUseTaughtWeldPoseCheck = new QCheckBox("启用示教焊接姿态");
+    layout->addWidget(m_pUseTaughtWeldPoseCheck, 1, 0, 1, 8);
+
+    auto makeEdit = []() -> QLineEdit*
+        {
+            QLineEdit* edit = CreateValueEdit(112, 150);
+            edit->setValidator(CreateDoubleValidator(edit));
+            MarkNumericEdit(edit);
+            return edit;
+        };
+
+    m_pWeldPoseRxEdit = makeEdit();
+    m_pWeldPoseRyEdit = makeEdit();
+    m_pWeldPoseRzEdit = makeEdit();
+
+    auto addPoseItem = [layout](int col, const QString& labelText, QWidget* editor)
+        {
+            QLabel* label = new QLabel(labelText);
+            layout->addWidget(label, 2, col);
+            layout->addWidget(CreateUnitEditorForPrecise(editor, "deg"), 2, col + 1);
+        };
+
+    addPoseItem(0, "RX：", m_pWeldPoseRxEdit);
+    addPoseItem(2, "RY：", m_pWeldPoseRyEdit);
+    addPoseItem(4, "RZ：", m_pWeldPoseRzEdit);
+
+    QPushButton* teachBtn = new QPushButton("示教当前位置为焊接平台标准姿态");
+    teachBtn->setMinimumHeight(36);
+    teachBtn->setMinimumWidth(280);
+    layout->addWidget(teachBtn, 2, 6, 1, 2, Qt::AlignLeft);
+
+    connect(m_pUseTaughtWeldPoseCheck, &QCheckBox::toggled, this, [this](bool checked)
+        {
+            if (!m_bLoading)
+            {
+                CacheCurrentWeldPoseEditorValues(!checked);
+                ShowWeldPoseEditorValuesForMode(checked);
+            }
+            UpdateWeldPoseTeachUiState();
+        });
+    connect(teachBtn, &QPushButton::clicked, this, &PreciseMeasureEditDialog::TeachCurrentWeldPlatformPose);
+
+    for (int i = 0; i < 8; ++i)
+    {
+        layout->setColumnStretch(i, (i % 2) == 0 ? 0 : 1);
+    }
+    UpdateWeldPoseTeachUiState();
+    return groupBox;
+}
+
+void PreciseMeasureEditDialog::CacheCurrentWeldPoseEditorValues(bool currentModeIsTaught)
+{
+    auto readValue = [](QLineEdit* edit, double fallback) -> double
+        {
+            if (edit == nullptr)
+            {
+                return fallback;
+            }
+            bool ok = false;
+            const double value = edit->text().trimmed().toDouble(&ok);
+            return ok && std::isfinite(value) ? value : fallback;
+        };
+
+    if (currentModeIsTaught)
+    {
+        m_taughtWeldPoseRxDeg = readValue(m_pWeldPoseRxEdit, m_taughtWeldPoseRxDeg);
+        m_taughtWeldPoseRyDeg = readValue(m_pWeldPoseRyEdit, m_taughtWeldPoseRyDeg);
+        m_taughtWeldPoseRzDeg = readValue(m_pWeldPoseRzEdit, m_taughtWeldPoseRzDeg);
+    }
+    else
+    {
+        m_normalWeldRxDeg = readValue(m_pWeldPoseRxEdit, m_normalWeldRxDeg);
+        m_normalWeldRyDeg = readValue(m_pWeldPoseRyEdit, m_normalWeldRyDeg);
+        m_weldRzGainDeg = readValue(m_pWeldPoseRzEdit, m_weldRzGainDeg);
+    }
+}
+
+void PreciseMeasureEditDialog::ShowWeldPoseEditorValuesForMode(bool useTaught)
+{
+    const double rx = useTaught ? m_taughtWeldPoseRxDeg : m_normalWeldRxDeg;
+    const double ry = useTaught ? m_taughtWeldPoseRyDeg : m_normalWeldRyDeg;
+    const double rz = useTaught ? m_taughtWeldPoseRzDeg : m_weldRzGainDeg;
+    if (m_pWeldPoseRxEdit != nullptr)
+    {
+        m_pWeldPoseRxEdit->setText(QString::number(rx, 'f', 6));
+    }
+    if (m_pWeldPoseRyEdit != nullptr)
+    {
+        m_pWeldPoseRyEdit->setText(QString::number(ry, 'f', 6));
+    }
+    if (m_pWeldPoseRzEdit != nullptr)
+    {
+        m_pWeldPoseRzEdit->setText(QString::number(rz, 'f', 6));
+    }
+}
+
+void PreciseMeasureEditDialog::UpdateWeldPoseTeachUiState()
+{
+    if (m_pWeldPoseHintLabel == nullptr || m_pUseTaughtWeldPoseCheck == nullptr)
+    {
+        return;
+    }
+
+    if (m_pUseTaughtWeldPoseCheck->isChecked())
+    {
+        m_pWeldPoseHintLabel->setText(
+            "启用后：先测后焊生成焊道姿态时 RX/RY 直接使用示教值；平台 RZ 使用示教 RZ，坡道 RZ 按“计算RZ - (计算平台RZ - 示教RZ)”修正。");
+    }
+    else
+    {
+        m_pWeldPoseHintLabel->setText(
+            "未启用时：下面 RX/RY/RZ 分别编辑旧焊接姿态参数 NormalWeldRx、NormalWeldRy、WeldRzGainDeg，流程继续按原逻辑生成姿态。");
+    }
+}
+
+bool PreciseMeasureEditDialog::LoadWeldPoseTeachParams()
+{
+    if (m_pUseTaughtWeldPoseCheck == nullptr)
+    {
+        return true;
+    }
+
+    QString error;
+    const QString path = CurrentParamFilePath();
+    const QString section = CurrentWeldSectionName(&error);
+    if (path.isEmpty() || section.isEmpty())
+    {
+        AppendLog("读取焊接姿态示教参数失败：" + error);
+        return false;
+    }
+
+    int useTaught = 0;
+    m_normalWeldRxDeg = 0.0;
+    m_normalWeldRyDeg = 0.0;
+    m_weldRzGainDeg = 0.0;
+    m_taughtWeldPoseRxDeg = m_normalWeldRxDeg;
+    m_taughtWeldPoseRyDeg = m_normalWeldRyDeg;
+    m_taughtWeldPoseRzDeg = 0.0;
+
+    COPini ini;
+    if (ini.SetFileName(path.toUtf8().constData()))
+    {
+        ini.SetSectionName(ToUtf8StdStringForPrecise(section));
+        ini.ReadString(false, USE_TAUGHT_WELD_POSE_KEY, &useTaught);
+        ini.ReadString(false, NORMAL_WELD_RX_KEY, &m_normalWeldRxDeg);
+        ini.ReadString(false, NORMAL_WELD_RY_KEY, &m_normalWeldRyDeg);
+        ini.ReadString(false, WELD_RZ_GAIN_KEY, &m_weldRzGainDeg);
+        m_taughtWeldPoseRxDeg = m_normalWeldRxDeg;
+        m_taughtWeldPoseRyDeg = m_normalWeldRyDeg;
+        ini.ReadString(false, TAUGHT_WELD_POSE_RX_KEY, &m_taughtWeldPoseRxDeg);
+        ini.ReadString(false, TAUGHT_WELD_POSE_RY_KEY, &m_taughtWeldPoseRyDeg);
+        ini.ReadString(false, TAUGHT_WELD_POSE_RZ_KEY, &m_taughtWeldPoseRzDeg);
+    }
+    else
+    {
+        AppendLog("读取焊接姿态示教参数失败：打开参数文件失败：" + path);
+        return false;
+    }
+
+    auto sanitize = [](double value) -> double
+        {
+            return std::isfinite(value) ? value : 0.0;
+        };
+    m_normalWeldRxDeg = sanitize(m_normalWeldRxDeg);
+    m_normalWeldRyDeg = sanitize(m_normalWeldRyDeg);
+    m_weldRzGainDeg = sanitize(m_weldRzGainDeg);
+    m_taughtWeldPoseRxDeg = sanitize(m_taughtWeldPoseRxDeg);
+    m_taughtWeldPoseRyDeg = sanitize(m_taughtWeldPoseRyDeg);
+    m_taughtWeldPoseRzDeg = sanitize(m_taughtWeldPoseRzDeg);
+
+    QSignalBlocker blockUse(m_pUseTaughtWeldPoseCheck);
+    m_pUseTaughtWeldPoseCheck->setChecked(useTaught != 0);
+    ShowWeldPoseEditorValuesForMode(useTaught != 0);
+    UpdateWeldPoseTeachUiState();
+    return true;
+}
+
+bool PreciseMeasureEditDialog::SaveWeldPoseTeachParams(QString& error)
+{
+    if (m_pUseTaughtWeldPoseCheck == nullptr)
+    {
+        return true;
+    }
+
+    const bool useTaught = m_pUseTaughtWeldPoseCheck->isChecked();
+    CacheCurrentWeldPoseEditorValues(useTaught);
+
+    const QString section = CurrentWeldSectionName(&error);
+    if (section.isEmpty())
+    {
+        return false;
+    }
+
+    return WriteParamValue(section, USE_TAUGHT_WELD_POSE_KEY, useTaught ? "1" : "0", error)
+        && WriteParamValue(section, NORMAL_WELD_RX_KEY, QString::number(m_normalWeldRxDeg, 'f', 6), error)
+        && WriteParamValue(section, NORMAL_WELD_RY_KEY, QString::number(m_normalWeldRyDeg, 'f', 6), error)
+        && WriteParamValue(section, WELD_RZ_GAIN_KEY, QString::number(m_weldRzGainDeg, 'f', 6), error)
+        && WriteParamValue(section, TAUGHT_WELD_POSE_RX_KEY, QString::number(m_taughtWeldPoseRxDeg, 'f', 6), error)
+        && WriteParamValue(section, TAUGHT_WELD_POSE_RY_KEY, QString::number(m_taughtWeldPoseRyDeg, 'f', 6), error)
+        && WriteParamValue(section, TAUGHT_WELD_POSE_RZ_KEY, QString::number(m_taughtWeldPoseRzDeg, 'f', 6), error);
+}
+
+void PreciseMeasureEditDialog::TeachCurrentWeldPlatformPose()
+{
+    RobotDriverAdaptor* driver = GetSelectedRobotDriver();
+    if (driver == nullptr)
+    {
+        return;
+    }
+
+    const bool wasUsingTaught = m_pUseTaughtWeldPoseCheck != nullptr && m_pUseTaughtWeldPoseCheck->isChecked();
+    CacheCurrentWeldPoseEditorValues(wasUsingTaught);
+    const T_ROBOT_COORS coors = driver->GetCurrentPos();
+    m_taughtWeldPoseRxDeg = coors.dRX;
+    m_taughtWeldPoseRyDeg = coors.dRY;
+    m_taughtWeldPoseRzDeg = coors.dRZ;
+
+    if (m_pUseTaughtWeldPoseCheck != nullptr)
+    {
+        QSignalBlocker blockUse(m_pUseTaughtWeldPoseCheck);
+        m_pUseTaughtWeldPoseCheck->setChecked(true);
+    }
+    ShowWeldPoseEditorValuesForMode(true);
+    UpdateWeldPoseTeachUiState();
+    AppendLog(QString("已读取当前机器人姿态为焊接平台标准姿态：RX=%1, RY=%2, RZ=%3，点击“保存参数”后写入文件。")
+        .arg(m_taughtWeldPoseRxDeg, 0, 'f', 6)
+        .arg(m_taughtWeldPoseRyDeg, 0, 'f', 6)
+        .arg(m_taughtWeldPoseRzDeg, 0, 'f', 6));
 }
 
 void PreciseMeasureEditDialog::UpdateScanSafePreview()
@@ -2702,7 +3013,8 @@ void PreciseMeasureEditDialog::UpdateAdaptiveLayout()
         const int rightWidth = qBound(620, totalWidth / 3, 700);
         if (m_pOtherPanel != nullptr)
         {
-            m_pOtherPanel->setFixedWidth(rightWidth);
+            m_pOtherPanel->setMinimumWidth(rightWidth);
+            m_pOtherPanel->setMaximumWidth(QWIDGETSIZE_MAX);
         }
         if (m_pPulsePanel != nullptr)
         {
@@ -2844,6 +3156,13 @@ QString PreciseMeasureEditDialog::BuildSnapshot() const
         fields << "ScanSafe.XDirection" << QString::number(m_pScanSafeXDirectionCombo != nullptr ? m_pScanSafeXDirectionCombo->currentData().toInt() : -1);
         fields << "ScanSafe.LiftHeight" << QString::number(m_pScanSafeLiftSpin != nullptr ? m_pScanSafeLiftSpin->value() : 0.0, 'f', 6);
         fields << "ScanSafe.FlipWarn" << QString::number(m_pScanSafeFlipWarnSpin != nullptr ? m_pScanSafeFlipWarnSpin->value() : 0.0, 'f', 6);
+    }
+    if (m_pUseTaughtWeldPoseCheck != nullptr)
+    {
+        fields << "WeldPose.UseTaught" << (m_pUseTaughtWeldPoseCheck->isChecked() ? "1" : "0");
+        fields << "WeldPose.RX" << (m_pWeldPoseRxEdit != nullptr ? m_pWeldPoseRxEdit->text().trimmed() : QString());
+        fields << "WeldPose.RY" << (m_pWeldPoseRyEdit != nullptr ? m_pWeldPoseRyEdit->text().trimmed() : QString());
+        fields << "WeldPose.RZ" << (m_pWeldPoseRzEdit != nullptr ? m_pWeldPoseRzEdit->text().trimmed() : QString());
     }
     return fields.join('\n');
 }
