@@ -135,8 +135,8 @@ QGridLayout* CreateTwoColumnForm(QWidget* parent)
     layout->setContentsMargins(12, 8, 12, 12);
     layout->setHorizontalSpacing(10);
     layout->setVerticalSpacing(8);
-    layout->setColumnMinimumWidth(0, 92);
-    layout->setColumnMinimumWidth(2, 92);
+    layout->setColumnMinimumWidth(0, 150);
+    layout->setColumnMinimumWidth(2, 150);
     layout->setColumnStretch(0, 0);
     layout->setColumnStretch(1, 1);
     layout->setColumnStretch(2, 0);
@@ -158,7 +158,7 @@ void AddTwoColumnField(QGridLayout* layout, const QString& labelText, QWidget* f
 
     QLabel* label = new QLabel(labelText, layout->parentWidget());
     label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    label->setMinimumWidth(92);
+    label->setMinimumWidth(150);
     label->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
     layout->addWidget(label, row, col);
     layout->addWidget(field, row, col + 1);
@@ -287,6 +287,25 @@ void SetChecked(QCheckBox* check, int value)
     {
         check->setChecked(value != 0);
     }
+}
+
+void SetComboByData(QComboBox* combo, int value)
+{
+    if (combo == nullptr)
+    {
+        return;
+    }
+    const int index = combo->findData(value);
+    combo->setCurrentIndex(index >= 0 ? index : 0);
+}
+
+int ComboData(const QComboBox* combo, int fallback = 0)
+{
+    if (combo == nullptr || combo->currentIndex() < 0)
+    {
+        return fallback;
+    }
+    return combo->currentData().toInt();
 }
 }
 
@@ -445,16 +464,16 @@ void WeldProcessDialog::BuildEditorUi()
     switchRow->setSpacing(0);
     m_normalPageButton = new QPushButton("常规工艺参数", editorRoot);
     m_weavePageButton = new QPushButton("摆动参数", editorRoot);
-    m_normalPageButton->setObjectName("tabStripButton");
-    m_weavePageButton->setObjectName("tabStripButton");
-    m_normalPageButton->setCheckable(true);
-    m_weavePageButton->setCheckable(true);
-    m_normalPageButton->setChecked(true);
-    m_normalPageButton->setMinimumHeight(42);
-    m_weavePageButton->setMinimumHeight(42);
+    m_trackPageButton = new QPushButton("跟踪参数", editorRoot);
     switchRow->addWidget(CreateTabConnectorLine(tabHostContainer, 18), 0, Qt::AlignBottom);
-    switchRow->addWidget(m_normalPageButton);
-    switchRow->addWidget(m_weavePageButton);
+    for (QPushButton* button : { m_normalPageButton, m_weavePageButton, m_trackPageButton })
+    {
+        button->setObjectName("tabStripButton");
+        button->setCheckable(true);
+        button->setMinimumHeight(42);
+        switchRow->addWidget(button);
+    }
+    m_normalPageButton->setChecked(true);
     switchRow->addWidget(CreateTabConnectorLine(tabHostContainer), 1, Qt::AlignBottom);
     tabHostLayout->addLayout(switchRow);
 
@@ -585,23 +604,83 @@ void WeldProcessDialog::BuildEditorUi()
     specialLayout->addWidget(specialPanel);
     specialGroup->setMinimumWidth(720);
 
+    auto addComboField = [this](QGridLayout* layout, const QString& label)
+        {
+            auto* combo = new QComboBox(this);
+            combo->setMinimumWidth(kGridFieldWidth);
+            combo->setFixedHeight(kSpinFieldHeight);
+            combo->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
+            AddTwoColumnField(layout, label, combo);
+            return combo;
+        };
+
     auto* weaveGroup = new QGroupBox("摆动参数", editorRoot);
     auto* weaveLayout = CreateTwoColumnForm(weaveGroup);
-    m_weaveTypeSpin = AddIntField(weaveLayout, "摆动类型", 0, 9999);
-    m_freqSpin = AddDoubleFieldWithUnit(weaveLayout, "频率", "Hz");
-    m_ampLeftSpin = AddDoubleFieldWithUnit(weaveLayout, "左摆幅", "mm");
-    m_ampRightSpin = AddDoubleFieldWithUnit(weaveLayout, "右摆幅", "mm");
-    m_stopTimeLeftSpin = AddIntFieldWithUnit(weaveLayout, "左停留", "ms", 0, 999999);
-    m_stopTimeCenterSpin = AddIntFieldWithUnit(weaveLayout, "中停留", "ms", 0, 999999);
-    m_stopTimeRightSpin = AddIntFieldWithUnit(weaveLayout, "右停留", "ms", 0, 999999);
-    m_rotAngleXSpin = AddDoubleFieldWithUnit(weaveLayout, "X旋转角", "deg");
-    m_rotAngleZSpin = AddDoubleFieldWithUnit(weaveLayout, "Z旋转角", "deg");
-    m_delayTypeLeftSpin = AddIntField(weaveLayout, "左延时类型", 0, 999);
-    m_delayTypeCenterSpin = AddIntField(weaveLayout, "中延时类型", 0, 999);
-    m_delayTypeRightSpin = AddIntField(weaveLayout, "右延时类型", 0, 999);
-    m_rotAngleLeftSpin = AddDoubleFieldWithUnit(weaveLayout, "左摆角", "deg");
-    m_rotAngleRightSpin = AddDoubleFieldWithUnit(weaveLayout, "右摆角", "deg");
+    m_weaveTypeCombo = addComboField(weaveLayout, "摆弧类型");
+    m_weaveTypeCombo->addItem("eTCPWeave", 0);
+    m_weaveTypeCombo->addItem("eWristWeave", 1);
+    m_weaveTypeCombo->addItem("e45JointWeave", 2);
+    m_weaveShapeCombo = addComboField(weaveLayout, "摆弧形状");
+    m_weaveShapeCombo->addItem("eNoWeave", 0);
+    m_weaveShapeCombo->addItem("eSin", 5);
+    m_weaveShapeCombo->addItem("eSinFreq", 6);
+    m_weaveShapeCombo->addItem("eSpiral", 7);
+    m_weaveShapeCombo->addItem("eObliqueTriangle", 8);
+    m_weaveShapeCombo->addItem("eSpaceTriangle", 9);
+    m_weaveShapeCombo->addItem("eLTriangle", 10);
+    m_weaveShapeCombo->addItem("eBackForward", 11);
+    m_weaveShapeCombo->addItem("eConstPoint", 12);
+    m_weaveShapeCombo->addItem("eSpiralFreq", 13);
+    m_weaveShapeCombo->addItem("eObliqueTriangleFreq", 14);
+    m_weaveShapeCombo->addItem("eSpaceTriangleFreq", 15);
+    m_weaveShapeCombo->addItem("eLTriangleFreq", 16);
+    m_weaveShapeCombo->addItem("eBackForwordFreq", 17);
+    m_weaveShapeCombo->addItem("eHalfSin", 18);
+    m_weaveFrequencySpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧频率", "hz");
+    m_weaveAmplitudeSpin = AddDoubleFieldWithUnit(weaveLayout, "摆动幅值", "mm");
+    m_swingDirectionSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧倾斜角", "°");
+    m_weavePlaneAngleSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧平面倾斜角", "°");
+    m_spaceAngleSpin = AddDoubleFieldWithUnit(weaveLayout, "空间摆弧夹角", "°");
+    m_pauseTime1Spin = AddIntFieldWithUnit(weaveLayout, "1/4处停留时间", "ms", 0, 999999);
+    m_pauseTime2Spin = AddIntFieldWithUnit(weaveLayout, "2/4处停留时间", "ms", 0, 999999);
+    m_pauseTime3Spin = AddIntFieldWithUnit(weaveLayout, "3/4处停留时间", "ms", 0, 999999);
+    m_pauseTime4Spin = AddIntFieldWithUnit(weaveLayout, "4/4处停留时间", "ms", 0, 999999);
+    m_pauseContinueCombo = addComboField(weaveLayout, "摆弧停留连续");
+    m_pauseContinueCombo->addItem("FALSE", 0);
+    m_pauseContinueCombo->addItem("TRUE", 1);
+    m_endLengthSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧结束长度", "mm");
+    m_endWidthSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧结束宽度", "mm");
+    m_centerHeightSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧中心高度", "mm");
     weaveGroup->setMinimumWidth(720);
+
+    auto* trackGroup = new QGroupBox("跟踪参数", editorRoot);
+    auto* trackLayout = CreateTwoColumnForm(trackGroup);
+    m_lateralBeginCycleSpin = AddIntField(trackLayout, "横向纠偏开始周期", 0, 999999);
+    m_lateralGainSpin = AddDoubleField(trackLayout, "横向比例增益", 3);
+    m_leftAreaCoefficientSpin = AddDoubleField(trackLayout, "横向左边面积系数", 3);
+    m_rightAreaCoefficientSpin = AddDoubleField(trackLayout, "横向右边面积系数", 3);
+    m_verticalModeCombo = addComboField(trackLayout, "纵向模式标志位");
+    m_verticalModeCombo->addItem("eConst", 0);
+    m_verticalModeCombo->addItem("eSample", 1);
+    m_verticalReferenceCurrentSpin = AddDoubleFieldWithUnit(trackLayout, "纵向纠偏基准电流", "A", 3);
+    m_verticalBeginCycleSpin = AddIntField(trackLayout, "纵向取样开始周期", 1, 999999);
+    m_verticalSustainCycleSpin = AddIntField(trackLayout, "纵向取样持续周期", 1, 999999);
+    m_verticalCycleLengthSpin = AddDoubleFieldWithUnit(trackLayout, "纵向周期长度", "mm", 3);
+    m_verticalGainSpin = AddDoubleField(trackLayout, "纵向比例增益", 3);
+    m_trackIntervalModeCombo = addComboField(trackLayout, "纠偏间隔类型");
+    m_trackIntervalModeCombo->addItem("eDistance", 0);
+    m_trackIntervalModeCombo->addItem("eTime", 1);
+    m_timeIntervalSpin = AddIntFieldWithUnit(trackLayout, "时间间隔", "ms", 100, 500);
+    m_distanceIntervalSpin = AddIntFieldWithUnit(trackLayout, "距离间隔", "mm", 1, 30);
+    m_lateralMinCompSpin = AddDoubleFieldWithUnit(trackLayout, "横向最小补偿（单周期）", "mm", 3);
+    m_lateralMaxCompSpin = AddDoubleFieldWithUnit(trackLayout, "横向最大补偿（单周期）", "mm", 3);
+    m_lateralTotalMaxCompSpin = AddDoubleFieldWithUnit(trackLayout, "横向最大补偿（总）", "mm", 3);
+    m_lateralAsymmetrySpin = AddDoubleField(trackLayout, "横向不对称调整系数", 3);
+    m_verticalMinCompSpin = AddDoubleFieldWithUnit(trackLayout, "纵向最小补偿（单周期）", "mm", 3);
+    m_verticalMaxCompSpin = AddDoubleFieldWithUnit(trackLayout, "纵向最大补偿（单周期）", "mm", 3);
+    m_verticalTotalMaxCompSpin = AddDoubleFieldWithUnit(trackLayout, "纵向最大补偿（总）", "mm", 3);
+    m_verticalAsymmetrySpin = AddDoubleField(trackLayout, "纵向不对称调整系数", 3);
+    trackGroup->setMinimumWidth(900);
 
     auto* topRow = new QHBoxLayout();
     topRow->setSpacing(10);
@@ -651,9 +730,26 @@ void WeldProcessDialog::BuildEditorUi()
     LockMinimumContentSize(weavePanel);
     LockMinimumContentSize(weavePage);
 
+    auto* trackPage = new QWidget(editorRoot);
+    auto* trackPageOuterLayout = new QVBoxLayout(trackPage);
+    trackPageOuterLayout->setContentsMargins(0, 0, 0, 0);
+    trackPageOuterLayout->setSpacing(0);
+    auto* trackPanel = new QFrame(trackPage);
+    trackPanel->setObjectName("editorPagePanel");
+    auto* trackPageLayout = new QHBoxLayout(trackPanel);
+    trackPageLayout->setContentsMargins(16, 16, 16, 16);
+    trackPageLayout->setSpacing(12);
+    trackPageLayout->addWidget(trackGroup);
+    trackPageLayout->addStretch();
+    trackPageOuterLayout->addWidget(trackPanel, 1);
+    LockMinimumContentSize(trackGroup);
+    LockMinimumContentSize(trackPanel);
+    LockMinimumContentSize(trackPage);
+
     m_editorStack = new QStackedWidget(editorRoot);
     m_editorStack->addWidget(normalPage);
     m_editorStack->addWidget(weavePage);
+    m_editorStack->addWidget(trackPage);
     m_editorStack->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
     LockMinimumContentSize(m_editorStack);
 
@@ -672,13 +768,22 @@ void WeldProcessDialog::BuildEditorUi()
         {
             m_normalPageButton->setChecked(true);
             m_weavePageButton->setChecked(false);
+            m_trackPageButton->setChecked(false);
             m_editorStack->setCurrentIndex(0);
         });
     connect(m_weavePageButton, &QPushButton::clicked, this, [this]()
         {
             m_normalPageButton->setChecked(false);
             m_weavePageButton->setChecked(true);
+            m_trackPageButton->setChecked(false);
             m_editorStack->setCurrentIndex(1);
+        });
+    connect(m_trackPageButton, &QPushButton::clicked, this, [this]()
+        {
+            m_normalPageButton->setChecked(false);
+            m_weavePageButton->setChecked(false);
+            m_trackPageButton->setChecked(true);
+            m_editorStack->setCurrentIndex(2);
         });
     connect(m_wrapParamButton, &QPushButton::clicked, this, [this]()
         {
@@ -920,9 +1025,21 @@ void WeldProcessDialog::LoadToUi(int preferredGroupRow, int preferredBeadRow)
     if (!m_file.Init())
     {
         const QString err = DecodeRobotMessageText(m_file.GetLastError());
-        ui->statusLabel->setText("读取失败: " + err);
+        ui->useWeldSpin->setMinimumWidth(84);
+        ui->useWeaveSpin->setMinimumWidth(84);
+        ui->useWeldSpin->setRange(1, 1);
+        ui->useWeaveSpin->setRange(0, 0);
+        if (m_weldListWidget != nullptr)
+        {
+            m_weldListWidget->clear();
+        }
+        if (m_beadListWidget != nullptr)
+        {
+            m_beadListWidget->clear();
+        }
+        ui->statusLabel->setText("读取失败: " + err + " 请点击“+”重新创建工艺内容。");
         m_isLoading = false;
-        ShowError(err);
+        MarkCleanSnapshot();
         return;
     }
 
@@ -1185,21 +1302,45 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     if (weld.nWeaveTypeNo >= 0 && weld.nWeaveTypeNo < static_cast<int>(weaveList.size()))
     {
         const auto& weave = weaveList[weld.nWeaveTypeNo];
-        m_weaveTypeSpin->setValue(weave.Type);
-        m_freqSpin->setValue(weave.Freq);
-        m_ampLeftSpin->setValue(weave.Amp_L);
-        m_ampRightSpin->setValue(weave.Amp_R);
-        m_stopTimeLeftSpin->setValue(weave.StopTime_L);
-        m_stopTimeCenterSpin->setValue(weave.StopTime_C);
-        m_stopTimeRightSpin->setValue(weave.StopTime_R);
-        m_rotAngleXSpin->setValue(weave.RotAngle_X);
-        m_rotAngleZSpin->setValue(weave.RotAngle_Z);
-        m_delayTypeLeftSpin->setValue(weave.DelayType_L);
-        m_delayTypeCenterSpin->setValue(weave.DelayType_C);
-        m_delayTypeRightSpin->setValue(weave.DelayType_R);
-        m_rotAngleLeftSpin->setValue(weave.RotAngle_L);
-        m_rotAngleRightSpin->setValue(weave.RotAngle_R);
+        SetComboByData(m_weaveTypeCombo, weave.nWeaveType);
+        SetComboByData(m_weaveShapeCombo, weave.nWeaveShape);
+        m_weaveFrequencySpin->setValue(weave.dWeaveFrequencyHz);
+        m_weaveAmplitudeSpin->setValue(weave.dWeaveAmplitudeMm);
+        m_swingDirectionSpin->setValue(weave.dSwingDirectionDeg);
+        m_weavePlaneAngleSpin->setValue(weave.dWeavePlaneAngleDeg);
+        m_spaceAngleSpin->setValue(weave.dSpaceAngleDeg);
+        m_pauseTime1Spin->setValue(weave.nPauseTime1Ms);
+        m_pauseTime2Spin->setValue(weave.nPauseTime2Ms);
+        m_pauseTime3Spin->setValue(weave.nPauseTime3Ms);
+        m_pauseTime4Spin->setValue(weave.nPauseTime4Ms);
+        SetComboByData(m_pauseContinueCombo, weave.nPauseContinue);
+        m_endLengthSpin->setValue(weave.dEndLengthMm);
+        m_endWidthSpin->setValue(weave.dEndWidthMm);
+        m_centerHeightSpin->setValue(weave.dCenterHeightMm);
     }
+
+    const T_TrackData& track = weld.tTrackParam;
+    m_lateralBeginCycleSpin->setValue(track.nLateralBeginCycle);
+    m_lateralGainSpin->setValue(track.dLateralGain);
+    m_leftAreaCoefficientSpin->setValue(track.dLeftAreaCoefficient);
+    m_rightAreaCoefficientSpin->setValue(track.dRightAreaCoefficient);
+    SetComboByData(m_verticalModeCombo, track.nVerticalModeFlag);
+    m_verticalReferenceCurrentSpin->setValue(track.dVerticalReferenceCurrent);
+    m_verticalBeginCycleSpin->setValue(track.nVerticalBeginCycle);
+    m_verticalSustainCycleSpin->setValue(track.nVerticalSustainCycle);
+    m_verticalCycleLengthSpin->setValue(track.dVerticalCycleLength);
+    m_verticalGainSpin->setValue(track.dVerticalGain);
+    SetComboByData(m_trackIntervalModeCombo, track.nTimeOrDistanceMode);
+    m_timeIntervalSpin->setValue(track.nTimeIntervalMs);
+    m_distanceIntervalSpin->setValue(track.nDistanceIntervalMm);
+    m_lateralMinCompSpin->setValue(track.dLateralMinCompPerCycle);
+    m_lateralMaxCompSpin->setValue(track.dLateralMaxCompPerCycle);
+    m_lateralTotalMaxCompSpin->setValue(track.dLateralMaxCompTotal);
+    m_lateralAsymmetrySpin->setValue(track.dLateralAsymmetryCoefficient);
+    m_verticalMinCompSpin->setValue(track.dVerticalMinCompPerCycle);
+    m_verticalMaxCompSpin->setValue(track.dVerticalMaxCompPerCycle);
+    m_verticalTotalMaxCompSpin->setValue(track.dVerticalMaxCompTotal);
+    m_verticalAsymmetrySpin->setValue(track.dVerticalAsymmetryCoefficient);
     m_isLoading = false;
 }
 
@@ -1263,20 +1404,21 @@ bool WeldProcessDialog::SaveData()
 
 bool WeldProcessDialog::CollectWeaveFromUi(T_WeaveDate& out) const
 {
-    out.Type = m_weaveTypeSpin->value();
-    out.Freq = m_freqSpin->value();
-    out.Amp_L = m_ampLeftSpin->value();
-    out.Amp_R = m_ampRightSpin->value();
-    out.StopTime_L = m_stopTimeLeftSpin->value();
-    out.StopTime_C = m_stopTimeCenterSpin->value();
-    out.StopTime_R = m_stopTimeRightSpin->value();
-    out.RotAngle_X = m_rotAngleXSpin->value();
-    out.RotAngle_Z = m_rotAngleZSpin->value();
-    out.DelayType_L = m_delayTypeLeftSpin->value();
-    out.DelayType_C = m_delayTypeCenterSpin->value();
-    out.DelayType_R = m_delayTypeRightSpin->value();
-    out.RotAngle_L = m_rotAngleLeftSpin->value();
-    out.RotAngle_R = m_rotAngleRightSpin->value();
+    out.nWeaveType = ComboData(m_weaveTypeCombo, 0);
+    out.nWeaveShape = ComboData(m_weaveShapeCombo, 6);
+    out.dWeaveFrequencyHz = m_weaveFrequencySpin->value();
+    out.dWeaveAmplitudeMm = m_weaveAmplitudeSpin->value();
+    out.dSwingDirectionDeg = m_swingDirectionSpin->value();
+    out.dWeavePlaneAngleDeg = m_weavePlaneAngleSpin->value();
+    out.dSpaceAngleDeg = m_spaceAngleSpin->value();
+    out.nPauseTime1Ms = m_pauseTime1Spin->value();
+    out.nPauseTime2Ms = m_pauseTime2Spin->value();
+    out.nPauseTime3Ms = m_pauseTime3Spin->value();
+    out.nPauseTime4Ms = m_pauseTime4Spin->value();
+    out.nPauseContinue = ComboData(m_pauseContinueCombo, 0);
+    out.dEndLengthMm = m_endLengthSpin->value();
+    out.dEndWidthMm = m_endWidthSpin->value();
+    out.dCenterHeightMm = m_centerHeightSpin->value();
     return true;
 }
 
@@ -1341,6 +1483,27 @@ bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
     out.nWeaveTypeNo = m_weaveTypeNoSpin->value();
     out.nWeldMethod = m_weldMethodSpin->value();
     out.tWeaveParam = {};
+    out.tTrackParam.nLateralBeginCycle = m_lateralBeginCycleSpin->value();
+    out.tTrackParam.dLateralGain = m_lateralGainSpin->value();
+    out.tTrackParam.dLeftAreaCoefficient = m_leftAreaCoefficientSpin->value();
+    out.tTrackParam.dRightAreaCoefficient = m_rightAreaCoefficientSpin->value();
+    out.tTrackParam.nVerticalModeFlag = ComboData(m_verticalModeCombo, 1);
+    out.tTrackParam.dVerticalReferenceCurrent = m_verticalReferenceCurrentSpin->value();
+    out.tTrackParam.nVerticalBeginCycle = m_verticalBeginCycleSpin->value();
+    out.tTrackParam.nVerticalSustainCycle = m_verticalSustainCycleSpin->value();
+    out.tTrackParam.dVerticalCycleLength = m_verticalCycleLengthSpin->value();
+    out.tTrackParam.dVerticalGain = m_verticalGainSpin->value();
+    out.tTrackParam.nTimeOrDistanceMode = ComboData(m_trackIntervalModeCombo, 0);
+    out.tTrackParam.nTimeIntervalMs = m_timeIntervalSpin->value();
+    out.tTrackParam.nDistanceIntervalMm = m_distanceIntervalSpin->value();
+    out.tTrackParam.dLateralMinCompPerCycle = m_lateralMinCompSpin->value();
+    out.tTrackParam.dLateralMaxCompPerCycle = m_lateralMaxCompSpin->value();
+    out.tTrackParam.dLateralMaxCompTotal = m_lateralTotalMaxCompSpin->value();
+    out.tTrackParam.dLateralAsymmetryCoefficient = m_lateralAsymmetrySpin->value();
+    out.tTrackParam.dVerticalMinCompPerCycle = m_verticalMinCompSpin->value();
+    out.tTrackParam.dVerticalMaxCompPerCycle = m_verticalMaxCompSpin->value();
+    out.tTrackParam.dVerticalMaxCompTotal = m_verticalTotalMaxCompSpin->value();
+    out.tTrackParam.dVerticalAsymmetryCoefficient = m_verticalAsymmetrySpin->value();
     return true;
 }
 
@@ -1561,20 +1724,42 @@ QString WeldProcessDialog::BuildSnapshot() const
            << QString::number(IsChecked(m_cornerTransitionCurrentEnableCheck) ? 1 : 0)
            << QString::number(IsChecked(m_cornerTransitionVoltageEnableCheck) ? 1 : 0)
            << QString::number(m_cornerTransitionScopeCombo != nullptr ? m_cornerTransitionScopeCombo->currentIndex() : 2)
-           << QString::number(m_weaveTypeSpin != nullptr ? m_weaveTypeSpin->value() : 0)
-           << QString::number(m_freqSpin != nullptr ? m_freqSpin->value() : 0.0, 'f', 6)
-           << QString::number(m_ampLeftSpin != nullptr ? m_ampLeftSpin->value() : 0.0, 'f', 6)
-           << QString::number(m_ampRightSpin != nullptr ? m_ampRightSpin->value() : 0.0, 'f', 6)
-           << QString::number(m_stopTimeLeftSpin != nullptr ? m_stopTimeLeftSpin->value() : 0)
-           << QString::number(m_stopTimeCenterSpin != nullptr ? m_stopTimeCenterSpin->value() : 0)
-           << QString::number(m_stopTimeRightSpin != nullptr ? m_stopTimeRightSpin->value() : 0)
-           << QString::number(m_rotAngleXSpin != nullptr ? m_rotAngleXSpin->value() : 0.0, 'f', 6)
-           << QString::number(m_rotAngleZSpin != nullptr ? m_rotAngleZSpin->value() : 0.0, 'f', 6)
-           << QString::number(m_delayTypeLeftSpin != nullptr ? m_delayTypeLeftSpin->value() : 0)
-           << QString::number(m_delayTypeCenterSpin != nullptr ? m_delayTypeCenterSpin->value() : 0)
-           << QString::number(m_delayTypeRightSpin != nullptr ? m_delayTypeRightSpin->value() : 0)
-           << QString::number(m_rotAngleLeftSpin != nullptr ? m_rotAngleLeftSpin->value() : 0.0, 'f', 6)
-           << QString::number(m_rotAngleRightSpin != nullptr ? m_rotAngleRightSpin->value() : 0.0, 'f', 6);
+           << QString::number(ComboData(m_weaveTypeCombo, 0))
+           << QString::number(ComboData(m_weaveShapeCombo, 6))
+           << QString::number(m_weaveFrequencySpin != nullptr ? m_weaveFrequencySpin->value() : 0.0, 'f', 6)
+           << QString::number(m_weaveAmplitudeSpin != nullptr ? m_weaveAmplitudeSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_swingDirectionSpin != nullptr ? m_swingDirectionSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_weavePlaneAngleSpin != nullptr ? m_weavePlaneAngleSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_spaceAngleSpin != nullptr ? m_spaceAngleSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_pauseTime1Spin != nullptr ? m_pauseTime1Spin->value() : 0)
+           << QString::number(m_pauseTime2Spin != nullptr ? m_pauseTime2Spin->value() : 0)
+           << QString::number(m_pauseTime3Spin != nullptr ? m_pauseTime3Spin->value() : 0)
+           << QString::number(m_pauseTime4Spin != nullptr ? m_pauseTime4Spin->value() : 0)
+           << QString::number(ComboData(m_pauseContinueCombo, 0))
+           << QString::number(m_endLengthSpin != nullptr ? m_endLengthSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_endWidthSpin != nullptr ? m_endWidthSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_centerHeightSpin != nullptr ? m_centerHeightSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_lateralBeginCycleSpin != nullptr ? m_lateralBeginCycleSpin->value() : 0)
+           << QString::number(m_lateralGainSpin != nullptr ? m_lateralGainSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_leftAreaCoefficientSpin != nullptr ? m_leftAreaCoefficientSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_rightAreaCoefficientSpin != nullptr ? m_rightAreaCoefficientSpin->value() : 0.0, 'f', 6)
+           << QString::number(ComboData(m_verticalModeCombo, 1))
+           << QString::number(m_verticalReferenceCurrentSpin != nullptr ? m_verticalReferenceCurrentSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_verticalBeginCycleSpin != nullptr ? m_verticalBeginCycleSpin->value() : 0)
+           << QString::number(m_verticalSustainCycleSpin != nullptr ? m_verticalSustainCycleSpin->value() : 0)
+           << QString::number(m_verticalCycleLengthSpin != nullptr ? m_verticalCycleLengthSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_verticalGainSpin != nullptr ? m_verticalGainSpin->value() : 0.0, 'f', 6)
+           << QString::number(ComboData(m_trackIntervalModeCombo, 0))
+           << QString::number(m_timeIntervalSpin != nullptr ? m_timeIntervalSpin->value() : 0)
+           << QString::number(m_distanceIntervalSpin != nullptr ? m_distanceIntervalSpin->value() : 0)
+           << QString::number(m_lateralMinCompSpin != nullptr ? m_lateralMinCompSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_lateralMaxCompSpin != nullptr ? m_lateralMaxCompSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_lateralTotalMaxCompSpin != nullptr ? m_lateralTotalMaxCompSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_lateralAsymmetrySpin != nullptr ? m_lateralAsymmetrySpin->value() : 0.0, 'f', 6)
+           << QString::number(m_verticalMinCompSpin != nullptr ? m_verticalMinCompSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_verticalMaxCompSpin != nullptr ? m_verticalMaxCompSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_verticalTotalMaxCompSpin != nullptr ? m_verticalTotalMaxCompSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_verticalAsymmetrySpin != nullptr ? m_verticalAsymmetrySpin->value() : 0.0, 'f', 6);
     return fields.join('\n');
 }
 

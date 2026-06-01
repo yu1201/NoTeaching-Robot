@@ -1,5 +1,6 @@
 #include "MeasureThenWeldDialog.h"
 
+#include "ConfigDatabase.h"
 #include "FANUCRobotDriver.h"
 #include "HandEyeMatrixConfig.h"
 #include "MeasureThenWeldService.h"
@@ -45,6 +46,7 @@
 namespace
 {
 constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
+constexpr auto WORKPIECE_CLOUD_FILE_NAME = "PreciseLaserPoint_WorkpieceCloud.txt";
 constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
 constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
 constexpr auto WELD_POSE_SEAM_COMP_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
@@ -65,6 +67,19 @@ double SafeSpeed(double value, double fallback)
     return value > 0.0 ? value : fallback;
 }
 
+bool HasSkipScanRebuildInput(const QDir& dir)
+{
+    return QFileInfo::exists(dir.filePath(RAW_LASER_FILE_NAME))
+        || QFileInfo::exists(dir.filePath(PRESERVE_PATH_FILE_NAME))
+        || QFileInfo::exists(dir.filePath(WORKPIECE_CLOUD_FILE_NAME));
+}
+
+bool HasSkipScanExecutableHistory(const QDir& dir)
+{
+    return QFileInfo::exists(dir.filePath(WELD_POSE_SEAM_COMP_FILE_NAME))
+        || QFileInfo::exists(dir.filePath(WELD_POSE_FILE_NAME));
+}
+
 QString ResolveLaserPointDirFromSelection(const QString& selectedDir)
 {
     const QFileInfo selectedInfo(selectedDir);
@@ -74,18 +89,14 @@ QString ResolveLaserPointDirFromSelection(const QString& selectedDir)
     }
 
     const QDir dir(selectedInfo.absoluteFilePath());
-    if (QFileInfo::exists(dir.filePath(RAW_LASER_FILE_NAME))
-        || QFileInfo::exists(dir.filePath(PRESERVE_PATH_FILE_NAME))
-        || QFileInfo::exists(dir.filePath(WELD_POSE_FILE_NAME)))
+    if (HasSkipScanRebuildInput(dir) || HasSkipScanExecutableHistory(dir))
     {
         return dir.absolutePath();
     }
 
     const QString laserDir = dir.filePath("LaserPoint");
     const QDir nestedLaserDir(laserDir);
-    if (QFileInfo::exists(nestedLaserDir.filePath(RAW_LASER_FILE_NAME))
-        || QFileInfo::exists(nestedLaserDir.filePath(PRESERVE_PATH_FILE_NAME))
-        || QFileInfo::exists(nestedLaserDir.filePath(WELD_POSE_FILE_NAME)))
+    if (HasSkipScanRebuildInput(nestedLaserDir) || HasSkipScanExecutableHistory(nestedLaserDir))
     {
         return nestedLaserDir.absolutePath();
     }
@@ -143,8 +154,8 @@ void LoadCompGroupCombo(
 
     int activeIndex = 0;
     int groupCount = 1;
-    const bool hasFile = QFileInfo::exists(path);
-    if (hasFile)
+    const bool hasConfig = ConfigDatabase::HasIniFile(path);
+    if (hasConfig)
     {
         COPini ini;
         if (ini.SetFileName(ToUtf8StdString(path)))
@@ -203,7 +214,7 @@ bool SaveActiveCompGroupIndex(
         error = "补偿参数路径为空。";
         return false;
     }
-    if (!QFileInfo::exists(path) && activeIndex <= 0)
+    if (!ConfigDatabase::HasIniFile(path) && activeIndex <= 0)
     {
         return true;
     }
@@ -392,6 +403,20 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     LoadRobotList();
 }
 
+bool MeasureThenWeldDialog::IsRunning() const
+{
+    return m_bRunning;
+}
+
+void MeasureThenWeldDialog::ReloadSelectors()
+{
+    if (m_bRunning)
+    {
+        return;
+    }
+    LoadRobotList();
+}
+
 void MeasureThenWeldDialog::closeEvent(QCloseEvent* event)
 {
     if (m_bRunning)
@@ -514,6 +539,12 @@ void MeasureThenWeldDialog::LoadWeldProcessList()
     }
 
     WeldProcessFile processFile(*m_pContralUnit, m_unitIndex);
+    if (!processFile.Init())
+    {
+        m_pWeldProcessCombo->addItem("请先在工艺界面重新创建工艺", -1);
+        m_bLoadingSelectors = false;
+        return;
+    }
     const std::vector<T_WELD_PARA>& weldList = processFile.GetWeldParaList();
     QString selectedKey;
     if (!weldList.empty())
@@ -723,6 +754,15 @@ bool MeasureThenWeldDialog::SaveCurrentWeldProcessSelection(QString& error) cons
     }
 
     WeldProcessFile processFile(*m_pContralUnit, m_unitIndex);
+    if (!processFile.Init())
+    {
+        error = DecodeRobotMessageText(processFile.GetLastError());
+        if (error.isEmpty())
+        {
+            error = "读取焊接工艺失败，请先在工艺界面重新创建工艺。";
+        }
+        return false;
+    }
     if (!processFile.UpdateUseWeldParaNo(weldProcessIndex))
     {
         error = DecodeRobotMessageText(processFile.GetLastError());
@@ -1255,13 +1295,30 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
         QMessageBox::warning(
             this,
             "跳过扫描焊接",
-            QString("在所选目录中未找到原始激光点或历史姿态文件。\n请选择结果目录本身，或其下的 LaserPoint 目录。"));
+            QString("在所选目录中未找到原始激光点、PreservePath、局部完整点云、历史姿态文件或历史补偿文件。\n请选择结果目录本身，或其下的 LaserPoint 目录。"));
         return;
     }
 
     const QString preservePath = QDir(laserDir).filePath(PRESERVE_PATH_FILE_NAME);
     const QString poseFilePath = QDir(laserDir).filePath(WELD_POSE_FILE_NAME);
     const QString seamCompPath = QDir(laserDir).filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
+    const bool canRebuildFromLaser = HasSkipScanRebuildInput(QDir(laserDir));
+    const bool hasExistingPoseFile = QFileInfo::exists(poseFilePath);
+    const bool hasExistingSeamCompFile = QFileInfo::exists(seamCompPath);
+
+    if (!canRebuildFromLaser && !hasExistingPoseFile && !hasExistingSeamCompFile)
+    {
+        QMessageBox::warning(
+            this,
+            "跳过扫描焊接",
+            QString("所选目录缺少可重建或可执行的历史文件。\n需要至少包含 %1、%2、%3、%4 或 %5。")
+                .arg(RAW_LASER_FILE_NAME)
+                .arg(PRESERVE_PATH_FILE_NAME)
+                .arg(WORKPIECE_CLOUD_FILE_NAME)
+                .arg(WELD_POSE_FILE_NAME)
+                .arg(WELD_POSE_SEAM_COMP_FILE_NAME));
+        return;
+    }
 
     SetRunning(true);
     ResetProgress("已选择历史结果，准备重新计算");
@@ -1290,7 +1347,10 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                  laserDir,
                  preservePath = QString(preservePath),
                  poseFilePath = QString(poseFilePath),
-                 seamCompPath = QString(seamCompPath)]() mutable
+                 seamCompPath = QString(seamCompPath),
+                 canRebuildFromLaser,
+                 hasExistingPoseFile,
+                 hasExistingSeamCompFile]() mutable
         {
             bool ok = true;
             QString message;
@@ -1314,7 +1374,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                         .arg(seamCompPath));
             }
 
-            if (ok)
+            if (ok && canRebuildFromLaser)
             {
                 if (self != nullptr)
                 {
@@ -1346,6 +1406,49 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                     {
                         self->AppendLog(QString("跳过扫描重建文件失败：%1").arg(processError));
                     }
+                }
+            }
+            else if (ok && hasExistingSeamCompFile)
+            {
+                rebuildSummary = QString("未找到原始激光点/PreservePath/局部完整点云，跳过重建，直接使用已有补偿文件：%1")
+                    .arg(seamCompPath);
+                if (self != nullptr)
+                {
+                    self->SetFlowStep("使用已有历史补偿文件，准备执行焊接轨迹");
+                    self->SetProgress(48, "使用已有补偿文件");
+                    self->AppendLog(rebuildSummary);
+                }
+            }
+            else if (ok && hasExistingPoseFile)
+            {
+                if (self != nullptr)
+                {
+                    self->SetFlowStep("正在从历史姿态文件重新生成焊道补偿文件");
+                    self->SetProgressBusy(42, "正在生成焊道补偿文件");
+                    self->AppendLog(QString("未找到原始激光点/PreservePath/局部完整点云，改用历史姿态文件重新生成补偿：%1").arg(poseFilePath));
+                }
+
+                QString seamCompSummary;
+                ok = self != nullptr
+                    && self->m_pService != nullptr
+                    && self->m_pService->ApplyWeldSeamCompToPoseFile(
+                        QString::fromStdString(param.sRobotName),
+                        poseFilePath,
+                        seamCompPath,
+                        seamCompSummary,
+                        processError);
+                if (ok)
+                {
+                    rebuildSummary = QString("历史姿态文件补偿完成：Pose=%1；SeamComp=%2；%3")
+                        .arg(poseFilePath, seamCompPath, seamCompSummary);
+                    if (self != nullptr)
+                    {
+                        self->AppendLog(rebuildSummary);
+                    }
+                }
+                else if (self != nullptr)
+                {
+                    self->AppendLog(QString("历史姿态文件补偿失败：%1").arg(processError));
                 }
             }
 

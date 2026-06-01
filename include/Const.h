@@ -259,6 +259,62 @@ struct T_ROBOT_MOVE_SPEED
 	}
 };
 
+struct T_WeaveDate
+{
+	int nWeaveType = 0; // eTCPWeave
+	int nWeaveShape = 6; // eSinFreq
+	double dWeaveFrequencyHz = 2.0;
+	double dWeaveAmplitudeMm = 1.5;
+	double dSwingDirectionDeg = 0.0;
+	double dWeavePlaneAngleDeg = 0.0;
+	double dSpaceAngleDeg = 0.0;
+	int nPauseTime1Ms = 0;
+	int nPauseTime2Ms = 0;
+	int nPauseTime3Ms = 0;
+	int nPauseTime4Ms = 0;
+	int nPauseContinue = 0;
+	double dEndLengthMm = 0.0;
+	double dEndWidthMm = 0.0;
+	double dCenterHeightMm = 0.0;
+};
+
+struct T_TrackData
+{
+	int nLateralBeginCycle = 3;
+	double dLateralGain = 100.0;
+	double dLeftAreaCoefficient = 100.0;
+	double dRightAreaCoefficient = 100.0;
+	int nVerticalModeFlag = 1; // eSample
+	double dVerticalReferenceCurrent = 0.0;
+	int nVerticalBeginCycle = 2;
+	int nVerticalSustainCycle = 1;
+	double dVerticalCycleLength = 3.0;
+	double dVerticalGain = 10.0;
+	int nTimeOrDistanceMode = 0; // eDistance
+	int nTimeIntervalMs = 200;
+	int nDistanceIntervalMm = 2;
+	double dLateralMinCompPerCycle = 0.0;
+	double dLateralMaxCompPerCycle = 1.0;
+	double dLateralMaxCompTotal = 600.0;
+	double dLateralAsymmetryCoefficient = 0.0;
+	double dLateralReserved6 = 0.0;
+	double dLateralReserved5 = 0.0;
+	double dLateralReserved4 = 0.0;
+	double dLateralReserved3 = 0.0;
+	double dLateralReserved2 = 0.0;
+	double dLateralReserved1 = 0.0;
+	double dVerticalMinCompPerCycle = 0.0;
+	double dVerticalMaxCompPerCycle = 1.0;
+	double dVerticalMaxCompTotal = 600.0;
+	double dVerticalAsymmetryCoefficient = 0.0;
+	double dVerticalReserved6 = 0.0;
+	double dVerticalReserved5 = 0.0;
+	double dVerticalReserved4 = 0.0;
+	double dVerticalReserved3 = 0.0;
+	double dVerticalReserved2 = 0.0;
+	double dVerticalReserved1 = 0.0;
+};
+
 struct T_ROBOT_MOVE_INFO
 {
 	T_ROBOT_COORS tCoord;	//坐标
@@ -283,25 +339,11 @@ struct T_ROBOT_MOVE_INFO
 	double dArcEndCurrent = 0.0;
 	double dArcEndVoltage = 0.0;
 	double dArcEndWaitTime = 0.0;
+	bool bHasWeaveParam = false;
+	T_WeaveDate tWeaveParam;
+	bool bHasTrackParam = false;
+	T_TrackData tTrackParam;
 };
-
-typedef struct
-{
-	int Type;
-	double Freq;
-	double Amp_L;
-	double Amp_R;
-	int StopTime_L;
-	int StopTime_C;
-	int StopTime_R;
-	double RotAngle_X;
-	double RotAngle_Z;
-	int DelayType_L;
-	int DelayType_C;
-	int DelayType_R;
-	double RotAngle_L;
-	double RotAngle_R;
-}T_WeaveDate;
 
 typedef struct
 {
@@ -361,6 +403,7 @@ typedef struct
 	int nCornerArcTransitionApplyScope; // 拐点过渡参数作用范围：0圆弧，1过渡，2圆弧+过渡
 
 	T_WeaveDate tWeaveParam; // 摆动参数(埃斯顿摆动需要动态写入使用)
+	T_TrackData tTrackParam; // 跟踪参数，对应STEP TRACKDATA。
 }T_WELD_PARA;
 
 // 线扫参数中的起点/终点脉冲姿态信息

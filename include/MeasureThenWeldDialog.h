@@ -88,6 +88,8 @@ public:
     using CameraCacheFunc = std::function<CameraFrameCache*(int)>;
 
     MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraCacheFunc cameraCacheForUnit, QWidget* parent = nullptr);
+    bool IsRunning() const;
+    void ReloadSelectors();
 
 signals:
     void FlowStepChanged(const QString& text);

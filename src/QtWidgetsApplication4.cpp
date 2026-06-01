@@ -29,6 +29,7 @@
 #include "groove/framebuffer.h"
 #include <QApplication>
 #include <QByteArray>
+#include <QCloseEvent>
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -2091,19 +2092,19 @@ namespace
 			nextUnits.removeAt(unitRow);
 			NormalizeRuntimeUnitNumbers(nextUnits);
 
-			QString error;
-			if (!WriteControlInfo(nextUnits, error))
-			{
-				QMessageBox::warning(this, "删除控制单元", error);
-				return false;
-			}
-
-			const QString unitConfigPrefix = RobotDataHelper::BuildProjectPath(QString("Data/%1").arg(unit.unitName));
+			const QString unitConfigPrefix = QString("Data/%1").arg(unit.unitName.trimmed());
 			if (!ConfigDatabase::RemoveConfigPathPrefix(unitConfigPrefix))
 			{
 				QMessageBox::warning(this, "删除控制单元",
 					QString("删除 %1 的配置记录失败，请检查配置库：%2")
 					.arg(unit.unitName, ConfigDatabase::DatabasePath()));
+				return false;
+			}
+
+			QString error;
+			if (!WriteControlInfo(nextUnits, error))
+			{
+				QMessageBox::warning(this, "删除控制单元", error);
 				return false;
 			}
 
@@ -2777,10 +2778,27 @@ namespace
 
 		bool WriteControlInfo(const QList<UnitConfig>& units, QString& error) const
 		{
-			COPini ini;
-			if (!ini.SetFileName(false, ToIniBytes(ControlInfoPath())))
+			const QString controlInfoPath = ControlInfoPath();
+			const QStringList unitSections = {
+				"UnitName",
+				"ChineseName",
+				"ContralType",
+				"UnitType"
+			};
+			for (const QString& sectionName : unitSections)
 			{
-				error = "打开控制单元配置失败：" + ControlInfoPath();
+				if (!ConfigDatabase::RemoveIniSection(controlInfoPath, sectionName))
+				{
+					error = QString("清理控制单元旧列表失败：%1 [%2]")
+						.arg(controlInfoPath, sectionName);
+					return false;
+				}
+			}
+
+			COPini ini;
+			if (!ini.SetFileName(false, ToIniBytes(controlInfoPath)))
+			{
+				error = "打开控制单元配置失败：" + controlInfoPath;
 				return false;
 			}
 			ini.SetSectionName("UnitNum");
@@ -2806,7 +2824,7 @@ namespace
 			}
 			if (!ok)
 			{
-				error = "写入控制单元配置失败：" + ControlInfoPath();
+				error = "写入控制单元配置失败：" + controlInfoPath;
 			}
 			return ok;
 		}
@@ -7618,6 +7636,40 @@ QtWidgetsApplication4::~QtWidgetsApplication4()
 	m_pContralUnit = nullptr;
 }
 
+bool QtWidgetsApplication4::HasRunningMeasureThenWeldFlow() const
+{
+	const QList<QPointer<MeasureThenWeldDialog>> pages = m_measureThenWeldPages.values();
+	for (const QPointer<MeasureThenWeldDialog>& guardedPage : pages)
+	{
+		if (const MeasureThenWeldDialog* page = guardedPage.data())
+		{
+			if (page->IsRunning())
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
+{
+	if (HasRunningMeasureThenWeldFlow())
+	{
+		QMessageBox::information(
+			this,
+			"先测后焊",
+			"先测后焊流程正在运行，请等待流程结束后再关闭程序。");
+		if (event != nullptr)
+		{
+			event->ignore();
+		}
+		return;
+	}
+
+	QMainWindow::closeEvent(event);
+}
+
 bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 {
 	if (event != nullptr && event->type() == QEvent::Resize)
@@ -11883,6 +11935,7 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 	QPointer<MeasureThenWeldDialog> existingPage = m_measureThenWeldPages.value(currentUnitIndex);
 	if (existingPage != nullptr)
 	{
+		existingPage->ReloadSelectors();
 		existingPage->show();
 		existingPage->raise();
 		existingPage->activateWindow();

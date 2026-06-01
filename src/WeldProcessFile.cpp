@@ -25,20 +25,25 @@ RobotLog& WeldProcessLogger()
 
 namespace fs = std::filesystem;
 constexpr char kDelimiter = '\t';
-constexpr int kWeaveFieldCount = 14;
-constexpr int kWeldBaseFieldCount = 30;
-constexpr int kWeldFieldCount = 48;
+constexpr int kWeaveFieldCount = 15;
+constexpr int kWeldCoreFieldCount = 48;
+constexpr int kWeldTrackFieldCount = 33;
+constexpr int kWeldFieldCount = kWeldCoreFieldCount + kWeldTrackFieldCount;
 }
 
 WeldProcessFile::WeldProcessFile(const T_CONTRAL_UNIT& tContralUnitInfo)
     : m_tContralUnitInfo(tContralUnitInfo)
 {
-    Init();
 }
 
 WeldProcessFile::WeldProcessFile(const ContralUnit& contralUnit, int nUnitIndex)
 {
-    LoadFromControlUnit(contralUnit, nUnitIndex);
+    if (nUnitIndex < 0 || nUnitIndex >= static_cast<int>(contralUnit.m_vtContralUnitInfo.size()))
+    {
+        m_sLastError = "控制单元索引越界，无法读取工艺文件。";
+        return;
+    }
+    m_tContralUnitInfo = contralUnit.m_vtContralUnitInfo[nUnitIndex];
 }
 
 WeldProcessFile::~WeldProcessFile()
@@ -56,7 +61,6 @@ bool WeldProcessFile::LoadFromControlUnit(const ContralUnit& contralUnit, int nU
     {
         m_sLastError = "控制单元索引越界，无法读取工艺文件。";
         LogError("%s", m_sLastError.c_str());
-        ShowError(m_sLastError);
         return false;
     }
 
@@ -78,7 +82,6 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
     {
         m_sLastError = "控制单元名称为空，无法定位工艺文件。";
         LogError("%s", m_sLastError.c_str());
-        ShowError(m_sLastError);
         return false;
     }
 
@@ -92,26 +95,22 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
             m_sWeaveIniFilePath.c_str(),
             m_sWeldIniFilePath.c_str());
         LogError("%s", m_sLastError.c_str());
-        ShowError(m_sLastError);
         return false;
     }
 
     if (!LoadWeaveTxt())
     {
         LogError("%s", m_sLastError.c_str());
-        ShowError(m_sLastError);
         return false;
     }
     if (!LoadWeldTxt())
     {
         LogError("%s", m_sLastError.c_str());
-        ShowError(m_sLastError);
         return false;
     }
     if (!BindWeldToWeave())
     {
         LogError("%s", m_sLastError.c_str());
-        ShowError(m_sLastError);
         return false;
     }
 
@@ -266,7 +265,27 @@ bool WeldProcessFile::UpdateWeldPara(int nParaNo, const T_WELD_PARA& tWeldPara)
 
 bool WeldProcessFile::AddWeldPara(const T_WELD_PARA& tWeldPara, int& newIndex)
 {
-    m_vtWeldParaList.push_back(tWeldPara);
+    if (m_vtWeaveTypeList.empty())
+    {
+        m_vtWeaveTypeList.push_back(T_WeaveDate {});
+        m_nAllWeaveTypeNum = 1;
+        m_nUseWeaveTypeNo = 0;
+        if (!SaveWeaveTxt())
+        {
+            LogError("%s", m_sLastError.c_str());
+            ShowError(m_sLastError);
+            return false;
+        }
+    }
+
+    T_WELD_PARA item = tWeldPara;
+    if (item.nWeaveTypeNo < 0 || item.nWeaveTypeNo >= static_cast<int>(m_vtWeaveTypeList.size()))
+    {
+        item.nWeaveTypeNo = 0;
+    }
+    item.tWeaveParam = m_vtWeaveTypeList[item.nWeaveTypeNo];
+    m_vtWeldParaList.push_back(item);
+    m_nAllWeldParaNum = static_cast<int>(m_vtWeldParaList.size());
     m_nUseWeldParaNo = static_cast<int>(m_vtWeldParaList.size()) - 1;
     newIndex = m_nUseWeldParaNo;
     if (!SaveWeldTxt())
@@ -458,16 +477,14 @@ bool WeldProcessFile::LoadWeaveTxt()
         T_WeaveDate weave {};
         if (!ParseWeaveLine(fields, weave))
         {
-            m_sLastError = "摆动 txt 数据行格式错误。";
+            if (m_sLastError.empty())
+            {
+                m_sLastError = "摆动 txt 数据行格式错误。";
+            }
             return false;
         }
         m_vtWeaveTypeList.push_back(weave);
     }
-
-    std::sort(m_vtWeaveTypeList.begin(), m_vtWeaveTypeList.end(), [](const T_WeaveDate& a, const T_WeaveDate& b)
-        {
-            return a.Type < b.Type;
-        });
 
     m_nAllWeaveTypeNum = static_cast<int>(m_vtWeaveTypeList.size());
     if (m_nAllWeaveTypeNum <= 0)
@@ -519,7 +536,10 @@ bool WeldProcessFile::LoadWeldTxt()
         T_WELD_PARA weld {};
         if (!ParseWeldLine(fields, weld))
         {
-            m_sLastError = "焊接工艺 txt 数据行格式错误。";
+            if (m_sLastError.empty())
+            {
+                m_sLastError = "焊接工艺 txt 数据行格式错误。";
+            }
             return false;
         }
         m_vtWeldParaList.push_back(weld);
@@ -716,31 +736,34 @@ std::string WeldProcessFile::JoinLine(const std::vector<std::string>& fields, ch
 
 bool WeldProcessFile::ParseWeaveLine(const std::vector<std::string>& fields, T_WeaveDate& tWeaveDate) const
 {
-    if (static_cast<int>(fields.size()) != kWeaveFieldCount)
+    const int fieldCount = static_cast<int>(fields.size());
+    if (fieldCount != kWeaveFieldCount)
     {
+        const_cast<WeldProcessFile*>(this)->m_sLastError = "摆动参数格式已升级，请重新创建工艺内容。";
         return false;
     }
-    return TryParseInt(fields[0], tWeaveDate.Type)
-        && TryParseDouble(fields[1], tWeaveDate.Freq)
-        && TryParseDouble(fields[2], tWeaveDate.Amp_L)
-        && TryParseDouble(fields[3], tWeaveDate.Amp_R)
-        && TryParseInt(fields[4], tWeaveDate.StopTime_L)
-        && TryParseInt(fields[5], tWeaveDate.StopTime_C)
-        && TryParseInt(fields[6], tWeaveDate.StopTime_R)
-        && TryParseDouble(fields[7], tWeaveDate.RotAngle_X)
-        && TryParseDouble(fields[8], tWeaveDate.RotAngle_Z)
-        && TryParseInt(fields[9], tWeaveDate.DelayType_L)
-        && TryParseInt(fields[10], tWeaveDate.DelayType_C)
-        && TryParseInt(fields[11], tWeaveDate.DelayType_R)
-        && TryParseDouble(fields[12], tWeaveDate.RotAngle_L)
-        && TryParseDouble(fields[13], tWeaveDate.RotAngle_R);
+    return TryParseInt(fields[0], tWeaveDate.nWeaveType)
+        && TryParseInt(fields[1], tWeaveDate.nWeaveShape)
+        && TryParseDouble(fields[2], tWeaveDate.dWeaveFrequencyHz)
+        && TryParseDouble(fields[3], tWeaveDate.dWeaveAmplitudeMm)
+        && TryParseDouble(fields[4], tWeaveDate.dSwingDirectionDeg)
+        && TryParseDouble(fields[5], tWeaveDate.dWeavePlaneAngleDeg)
+        && TryParseDouble(fields[6], tWeaveDate.dSpaceAngleDeg)
+        && TryParseInt(fields[7], tWeaveDate.nPauseTime1Ms)
+        && TryParseInt(fields[8], tWeaveDate.nPauseTime2Ms)
+        && TryParseInt(fields[9], tWeaveDate.nPauseTime3Ms)
+        && TryParseInt(fields[10], tWeaveDate.nPauseTime4Ms)
+        && TryParseInt(fields[11], tWeaveDate.nPauseContinue)
+        && TryParseDouble(fields[12], tWeaveDate.dEndLengthMm)
+        && TryParseDouble(fields[13], tWeaveDate.dEndWidthMm)
+        && TryParseDouble(fields[14], tWeaveDate.dCenterHeightMm);
 }
 
 bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WELD_PARA& tWeldPara) const
 {
-    if (static_cast<int>(fields.size()) < kWeldBaseFieldCount
-        || static_cast<int>(fields.size()) > kWeldFieldCount)
+    if (static_cast<int>(fields.size()) != kWeldFieldCount)
     {
+        const_cast<WeldProcessFile*>(this)->m_sLastError = "焊接工艺参数格式已升级，请重新创建工艺内容。";
         return false;
     }
 
@@ -779,56 +802,77 @@ bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WE
         return false;
     }
 
-    const bool oldFormat = static_cast<int>(fields.size()) == kWeldBaseFieldCount;
-    const int defaultWrapEnable = oldFormat ? 1 : 0;
-    auto parseOptionalInt = [&](int index, int& target, int defaultValue)
-    {
-        target = defaultValue;
-        return index >= static_cast<int>(fields.size()) || TryParseInt(fields[index], target);
-    };
-    auto parseOptionalDouble = [&](int index, double& target, double defaultValue)
-    {
-        target = defaultValue;
-        return index >= static_cast<int>(fields.size()) || TryParseDouble(fields[index], target);
-    };
-
-    return parseOptionalInt(30, tWeldPara.nWrapCurrent1Enable, defaultWrapEnable)
-        && parseOptionalInt(31, tWeldPara.nWrapVoltage1Enable, defaultWrapEnable)
-        && parseOptionalInt(32, tWeldPara.nWrapWaitTime1Enable, defaultWrapEnable)
-        && parseOptionalInt(33, tWeldPara.nWrapCurrent2Enable, defaultWrapEnable)
-        && parseOptionalInt(34, tWeldPara.nWrapVoltage2Enable, defaultWrapEnable)
-        && parseOptionalInt(35, tWeldPara.nWrapWaitTime2Enable, defaultWrapEnable)
-        && parseOptionalInt(36, tWeldPara.nWrapCurrent3Enable, defaultWrapEnable)
-        && parseOptionalInt(37, tWeldPara.nWrapVoltage3Enable, defaultWrapEnable)
-        && parseOptionalInt(38, tWeldPara.nWrapWaitTime3Enable, defaultWrapEnable)
-        && parseOptionalDouble(39, tWeldPara.dCornerArcTransitionRadius, 0.0)
-        && parseOptionalDouble(40, tWeldPara.dCornerArcTransitionSpeed, 0.0)
-        && parseOptionalDouble(41, tWeldPara.dCornerArcTransitionCurrent, 0.0)
-        && parseOptionalDouble(42, tWeldPara.dCornerArcTransitionVoltage, 0.0)
-        && parseOptionalInt(43, tWeldPara.nCornerArcTransitionRadiusEnable, 0)
-        && parseOptionalInt(44, tWeldPara.nCornerArcTransitionSpeedEnable, 0)
-        && parseOptionalInt(45, tWeldPara.nCornerArcTransitionCurrentEnable, 0)
-        && parseOptionalInt(46, tWeldPara.nCornerArcTransitionVoltageEnable, 0)
-        && parseOptionalInt(47, tWeldPara.nCornerArcTransitionApplyScope, 2);
+    return TryParseInt(fields[30], tWeldPara.nWrapCurrent1Enable)
+        && TryParseInt(fields[31], tWeldPara.nWrapVoltage1Enable)
+        && TryParseInt(fields[32], tWeldPara.nWrapWaitTime1Enable)
+        && TryParseInt(fields[33], tWeldPara.nWrapCurrent2Enable)
+        && TryParseInt(fields[34], tWeldPara.nWrapVoltage2Enable)
+        && TryParseInt(fields[35], tWeldPara.nWrapWaitTime2Enable)
+        && TryParseInt(fields[36], tWeldPara.nWrapCurrent3Enable)
+        && TryParseInt(fields[37], tWeldPara.nWrapVoltage3Enable)
+        && TryParseInt(fields[38], tWeldPara.nWrapWaitTime3Enable)
+        && TryParseDouble(fields[39], tWeldPara.dCornerArcTransitionRadius)
+        && TryParseDouble(fields[40], tWeldPara.dCornerArcTransitionSpeed)
+        && TryParseDouble(fields[41], tWeldPara.dCornerArcTransitionCurrent)
+        && TryParseDouble(fields[42], tWeldPara.dCornerArcTransitionVoltage)
+        && TryParseInt(fields[43], tWeldPara.nCornerArcTransitionRadiusEnable)
+        && TryParseInt(fields[44], tWeldPara.nCornerArcTransitionSpeedEnable)
+        && TryParseInt(fields[45], tWeldPara.nCornerArcTransitionCurrentEnable)
+        && TryParseInt(fields[46], tWeldPara.nCornerArcTransitionVoltageEnable)
+        && TryParseInt(fields[47], tWeldPara.nCornerArcTransitionApplyScope)
+        && TryParseInt(fields[48], tWeldPara.tTrackParam.nLateralBeginCycle)
+        && TryParseDouble(fields[49], tWeldPara.tTrackParam.dLateralGain)
+        && TryParseDouble(fields[50], tWeldPara.tTrackParam.dLeftAreaCoefficient)
+        && TryParseDouble(fields[51], tWeldPara.tTrackParam.dRightAreaCoefficient)
+        && TryParseInt(fields[52], tWeldPara.tTrackParam.nVerticalModeFlag)
+        && TryParseDouble(fields[53], tWeldPara.tTrackParam.dVerticalReferenceCurrent)
+        && TryParseInt(fields[54], tWeldPara.tTrackParam.nVerticalBeginCycle)
+        && TryParseInt(fields[55], tWeldPara.tTrackParam.nVerticalSustainCycle)
+        && TryParseDouble(fields[56], tWeldPara.tTrackParam.dVerticalCycleLength)
+        && TryParseDouble(fields[57], tWeldPara.tTrackParam.dVerticalGain)
+        && TryParseInt(fields[58], tWeldPara.tTrackParam.nTimeOrDistanceMode)
+        && TryParseInt(fields[59], tWeldPara.tTrackParam.nTimeIntervalMs)
+        && TryParseInt(fields[60], tWeldPara.tTrackParam.nDistanceIntervalMm)
+        && TryParseDouble(fields[61], tWeldPara.tTrackParam.dLateralMinCompPerCycle)
+        && TryParseDouble(fields[62], tWeldPara.tTrackParam.dLateralMaxCompPerCycle)
+        && TryParseDouble(fields[63], tWeldPara.tTrackParam.dLateralMaxCompTotal)
+        && TryParseDouble(fields[64], tWeldPara.tTrackParam.dLateralAsymmetryCoefficient)
+        && TryParseDouble(fields[65], tWeldPara.tTrackParam.dLateralReserved6)
+        && TryParseDouble(fields[66], tWeldPara.tTrackParam.dLateralReserved5)
+        && TryParseDouble(fields[67], tWeldPara.tTrackParam.dLateralReserved4)
+        && TryParseDouble(fields[68], tWeldPara.tTrackParam.dLateralReserved3)
+        && TryParseDouble(fields[69], tWeldPara.tTrackParam.dLateralReserved2)
+        && TryParseDouble(fields[70], tWeldPara.tTrackParam.dLateralReserved1)
+        && TryParseDouble(fields[71], tWeldPara.tTrackParam.dVerticalMinCompPerCycle)
+        && TryParseDouble(fields[72], tWeldPara.tTrackParam.dVerticalMaxCompPerCycle)
+        && TryParseDouble(fields[73], tWeldPara.tTrackParam.dVerticalMaxCompTotal)
+        && TryParseDouble(fields[74], tWeldPara.tTrackParam.dVerticalAsymmetryCoefficient)
+        && TryParseDouble(fields[75], tWeldPara.tTrackParam.dVerticalReserved6)
+        && TryParseDouble(fields[76], tWeldPara.tTrackParam.dVerticalReserved5)
+        && TryParseDouble(fields[77], tWeldPara.tTrackParam.dVerticalReserved4)
+        && TryParseDouble(fields[78], tWeldPara.tTrackParam.dVerticalReserved3)
+        && TryParseDouble(fields[79], tWeldPara.tTrackParam.dVerticalReserved2)
+        && TryParseDouble(fields[80], tWeldPara.tTrackParam.dVerticalReserved1);
 }
 
 std::vector<std::string> WeldProcessFile::BuildWeaveFields(const T_WeaveDate& tWeaveDate) const
 {
     return {
-        std::to_string(tWeaveDate.Type),
-        ToText(tWeaveDate.Freq),
-        ToText(tWeaveDate.Amp_L),
-        ToText(tWeaveDate.Amp_R),
-        std::to_string(tWeaveDate.StopTime_L),
-        std::to_string(tWeaveDate.StopTime_C),
-        std::to_string(tWeaveDate.StopTime_R),
-        ToText(tWeaveDate.RotAngle_X),
-        ToText(tWeaveDate.RotAngle_Z),
-        std::to_string(tWeaveDate.DelayType_L),
-        std::to_string(tWeaveDate.DelayType_C),
-        std::to_string(tWeaveDate.DelayType_R),
-        ToText(tWeaveDate.RotAngle_L),
-        ToText(tWeaveDate.RotAngle_R)
+        std::to_string(tWeaveDate.nWeaveType),
+        std::to_string(tWeaveDate.nWeaveShape),
+        ToText(tWeaveDate.dWeaveFrequencyHz),
+        ToText(tWeaveDate.dWeaveAmplitudeMm),
+        ToText(tWeaveDate.dSwingDirectionDeg),
+        ToText(tWeaveDate.dWeavePlaneAngleDeg),
+        ToText(tWeaveDate.dSpaceAngleDeg),
+        std::to_string(tWeaveDate.nPauseTime1Ms),
+        std::to_string(tWeaveDate.nPauseTime2Ms),
+        std::to_string(tWeaveDate.nPauseTime3Ms),
+        std::to_string(tWeaveDate.nPauseTime4Ms),
+        std::to_string(tWeaveDate.nPauseContinue),
+        ToText(tWeaveDate.dEndLengthMm),
+        ToText(tWeaveDate.dEndWidthMm),
+        ToText(tWeaveDate.dCenterHeightMm)
     };
 }
 
@@ -882,7 +926,40 @@ std::vector<std::string> WeldProcessFile::BuildWeldFields(const T_WELD_PARA& tWe
         std::to_string(tWeldPara.nCornerArcTransitionSpeedEnable),
         std::to_string(tWeldPara.nCornerArcTransitionCurrentEnable),
         std::to_string(tWeldPara.nCornerArcTransitionVoltageEnable),
-        std::to_string(tWeldPara.nCornerArcTransitionApplyScope)
+        std::to_string(tWeldPara.nCornerArcTransitionApplyScope),
+        std::to_string(tWeldPara.tTrackParam.nLateralBeginCycle),
+        ToText(tWeldPara.tTrackParam.dLateralGain),
+        ToText(tWeldPara.tTrackParam.dLeftAreaCoefficient),
+        ToText(tWeldPara.tTrackParam.dRightAreaCoefficient),
+        std::to_string(tWeldPara.tTrackParam.nVerticalModeFlag),
+        ToText(tWeldPara.tTrackParam.dVerticalReferenceCurrent),
+        std::to_string(tWeldPara.tTrackParam.nVerticalBeginCycle),
+        std::to_string(tWeldPara.tTrackParam.nVerticalSustainCycle),
+        ToText(tWeldPara.tTrackParam.dVerticalCycleLength),
+        ToText(tWeldPara.tTrackParam.dVerticalGain),
+        std::to_string(tWeldPara.tTrackParam.nTimeOrDistanceMode),
+        std::to_string(tWeldPara.tTrackParam.nTimeIntervalMs),
+        std::to_string(tWeldPara.tTrackParam.nDistanceIntervalMm),
+        ToText(tWeldPara.tTrackParam.dLateralMinCompPerCycle),
+        ToText(tWeldPara.tTrackParam.dLateralMaxCompPerCycle),
+        ToText(tWeldPara.tTrackParam.dLateralMaxCompTotal),
+        ToText(tWeldPara.tTrackParam.dLateralAsymmetryCoefficient),
+        ToText(tWeldPara.tTrackParam.dLateralReserved6),
+        ToText(tWeldPara.tTrackParam.dLateralReserved5),
+        ToText(tWeldPara.tTrackParam.dLateralReserved4),
+        ToText(tWeldPara.tTrackParam.dLateralReserved3),
+        ToText(tWeldPara.tTrackParam.dLateralReserved2),
+        ToText(tWeldPara.tTrackParam.dLateralReserved1),
+        ToText(tWeldPara.tTrackParam.dVerticalMinCompPerCycle),
+        ToText(tWeldPara.tTrackParam.dVerticalMaxCompPerCycle),
+        ToText(tWeldPara.tTrackParam.dVerticalMaxCompTotal),
+        ToText(tWeldPara.tTrackParam.dVerticalAsymmetryCoefficient),
+        ToText(tWeldPara.tTrackParam.dVerticalReserved6),
+        ToText(tWeldPara.tTrackParam.dVerticalReserved5),
+        ToText(tWeldPara.tTrackParam.dVerticalReserved4),
+        ToText(tWeldPara.tTrackParam.dVerticalReserved3),
+        ToText(tWeldPara.tTrackParam.dVerticalReserved2),
+        ToText(tWeldPara.tTrackParam.dVerticalReserved1)
     };
 }
 
