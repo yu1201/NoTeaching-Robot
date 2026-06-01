@@ -276,7 +276,10 @@ void COPini::CheckRead(std::string key, int nReturnValue, bool bCheck)
     // 0=读取失败，-1=溢出
     if (nReturnValue == 0 || nReturnValue == -1)
     {
-        std::string str = "Error: " + m_fileName + " file " + m_sectionName + " section " + key + " read failed! Return value: " + std::to_string(nReturnValue);
+        std::string str = "Error: config database path " + m_fileName
+            + " section " + m_sectionName
+            + " key " + key
+            + " read failed! Return value: " + std::to_string(nReturnValue);
         m_pIniLog.write(LogColor::ERR, str.c_str());
     }
 }
@@ -400,7 +403,7 @@ bool COPini::SetFileName(std::string fileName)
     m_fileName = fileName;
     if (!CheckFileExists(fileName))
     {
-        std::string str = "Error: " + fileName + " file does not exist!";
+        std::string str = "Error: config database path not found: " + fileName;
         m_pIniLog.write(LogColor::WARNING, str.c_str());
     }
     CheckFileEncodeType(m_fileName);
@@ -416,7 +419,7 @@ bool COPini::SetFileName(bool bCheck, std::string fileName)
     }
     if (!CheckFileExists(fileName))
     {
-        std::string str = "Error: " + fileName + " file does not exist!";
+        std::string str = "Error: config database path not found: " + fileName;
         m_pIniLog.write(LogColor::WARNING, str.c_str());
     }
     CheckFileEncodeType(m_fileName);

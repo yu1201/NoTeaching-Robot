@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 namespace
@@ -59,6 +60,7 @@ namespace
 	constexpr const char* kStepArcRetryDataName = "retry0";
 	constexpr const char* kStepArcRealName = "real0";
 	constexpr const char* kStepWeaveDataName = "wd0";
+	constexpr const char* kStepTrackDataName = "td0";
 
 	double StepClampPositiveDouble(double value, double defaultValue)
 	{
@@ -589,13 +591,13 @@ namespace
 		return std::isfinite(value) ? value : fallback;
 	}
 
-	double StepWeldDataSpeed(const T_ROBOT_MOVE_INFO& info)
+	double StepWeldDataSpeedMmPerSec(const T_ROBOT_MOVE_INFO& info)
 	{
 		if (std::isfinite(info.dWeldSpeedMmPerMin) && info.dWeldSpeedMmPerMin > 0.0)
 		{
-			return info.dWeldSpeedMmPerMin;
+			return StepLinearSpeedMmPerSecFromConfig(info.dWeldSpeedMmPerMin, 0.0);
 		}
-		return std::isfinite(info.tSpeed.dSpeed) && info.tSpeed.dSpeed > 0.0 ? info.tSpeed.dSpeed : 0.0;
+		return StepLinearSpeedMmPerSecFromConfig(info.tSpeed.dSpeed, 0.0);
 	}
 
 	std::string StepFormatCompactNumber(double value)
@@ -642,13 +644,133 @@ namespace
 		const char* name,
 		double current,
 		double voltage,
-		double speedMmPerMin)
+		double speedMmPerSec)
 	{
 		std::ostringstream oss;
 		oss << "ARCDATA " << name << " := {  "
 			<< StepFormatCompactNumber(current) << ", "
 			<< StepFormatCompactNumber(voltage) << ", "
-			<< StepFormatCompactNumber(speedMmPerMin) << ",0.000000 }" << "\n";
+			<< StepFormatCompactNumber(speedMmPerSec) << ",0.000000 }" << "\n";
+		return oss.str();
+	}
+
+	std::string StepEnumOrNumber(int value, const std::vector<std::pair<int, const char*>>& names)
+	{
+		for (const auto& item : names)
+		{
+			if (item.first == value)
+			{
+				return item.second;
+			}
+		}
+		return std::to_string(value);
+	}
+
+	std::string StepWeaveTypeText(int value)
+	{
+		return StepEnumOrNumber(value, {
+			{0, "eTCPWeave"},
+			{1, "eWristWeave"},
+			{2, "e45JointWeave"}
+		});
+	}
+
+	std::string StepWeaveShapeText(int value)
+	{
+		return StepEnumOrNumber(value, {
+			{0, "eNoWeave"},
+			{5, "eSin"},
+			{6, "eSinFreq"},
+			{7, "eSpiral"},
+			{8, "eObliqueTriangle"},
+			{9, "eSpaceTriangle"},
+			{10, "eLTriangle"},
+			{11, "eBackForward"},
+			{12, "eConstPoint"},
+			{13, "eSpiralFreq"},
+			{14, "eObliqueTriangleFreq"},
+			{15, "eSpaceTriangleFreq"},
+			{16, "eLTriangleFreq"},
+			{17, "eBackForwordFreq"},
+			{18, "eHalfSin"}
+		});
+	}
+
+	std::string StepVerticalModeText(int value)
+	{
+		return StepEnumOrNumber(value, {
+			{0, "eConst"},
+			{1, "eSample"}
+		});
+	}
+
+	std::string StepTrackIntervalModeText(int value)
+	{
+		return StepEnumOrNumber(value, {
+			{0, "eDistance"},
+			{1, "eTime"}
+		});
+	}
+
+	std::string StepBuildWeaveDataLine(const char* name, const T_WeaveDate& weave)
+	{
+		std::ostringstream oss;
+		oss << "WEAVEDATA " << name << " := {  "
+			<< StepWeaveTypeText(weave.nWeaveType) << ", "
+			<< StepWeaveShapeText(weave.nWeaveShape) << ", "
+			<< StepFormatCompactNumber(weave.dWeaveFrequencyHz) << ", "
+			<< StepFormatCompactNumber(weave.dWeaveAmplitudeMm) << ", "
+			<< StepFormatCompactNumber(weave.dSwingDirectionDeg) << ", "
+			<< StepFormatCompactNumber(weave.dWeavePlaneAngleDeg) << ", "
+			<< StepFormatCompactNumber(weave.dSpaceAngleDeg) << ", "
+			<< weave.nPauseTime1Ms << ", "
+			<< weave.nPauseTime2Ms << ", "
+			<< weave.nPauseTime3Ms << ", "
+			<< weave.nPauseTime4Ms << ", "
+			<< (weave.nPauseContinue != 0 ? "TRUE" : "FALSE") << ", "
+			<< StepFormatCompactNumber(weave.dEndLengthMm) << ", "
+			<< StepFormatCompactNumber(weave.dEndWidthMm) << ","
+			<< StepFormatCompactNumber(weave.dCenterHeightMm) << " }" << "\n";
+		return oss.str();
+	}
+
+	std::string StepBuildTrackDataLine(const char* name, const T_TrackData& track)
+	{
+		std::ostringstream oss;
+		oss << "TRACKDATA " << name << " := {  "
+			<< track.nLateralBeginCycle << ", "
+			<< StepFormatCompactNumber(track.dLateralGain) << ", "
+			<< StepFormatCompactNumber(track.dLeftAreaCoefficient) << ", "
+			<< StepFormatCompactNumber(track.dRightAreaCoefficient) << ", "
+			<< StepVerticalModeText(track.nVerticalModeFlag) << ", "
+			<< StepFormatCompactNumber(track.dVerticalReferenceCurrent) << ", "
+			<< track.nVerticalBeginCycle << ", "
+			<< track.nVerticalSustainCycle << ", "
+			<< StepFormatCompactNumber(track.dVerticalCycleLength) << ", "
+			<< StepFormatCompactNumber(track.dVerticalGain) << ", "
+			<< StepTrackIntervalModeText(track.nTimeOrDistanceMode) << ", "
+			<< track.nTimeIntervalMs << ", "
+			<< track.nDistanceIntervalMm << ", "
+			<< StepFormatCompactNumber(track.dLateralMinCompPerCycle) << ", "
+			<< StepFormatCompactNumber(track.dLateralMaxCompPerCycle) << ", "
+			<< StepFormatCompactNumber(track.dLateralMaxCompTotal) << ", "
+			<< StepFormatCompactNumber(track.dLateralAsymmetryCoefficient) << ", "
+			<< StepFormatCompactNumber(track.dLateralReserved6) << ", "
+			<< StepFormatCompactNumber(track.dLateralReserved5) << ", "
+			<< StepFormatCompactNumber(track.dLateralReserved4) << ", "
+			<< StepFormatCompactNumber(track.dLateralReserved3) << ", "
+			<< StepFormatCompactNumber(track.dLateralReserved2) << ", "
+			<< StepFormatCompactNumber(track.dLateralReserved1) << ", "
+			<< StepFormatCompactNumber(track.dVerticalMinCompPerCycle) << ", "
+			<< StepFormatCompactNumber(track.dVerticalMaxCompPerCycle) << ", "
+			<< StepFormatCompactNumber(track.dVerticalMaxCompTotal) << ", "
+			<< StepFormatCompactNumber(track.dVerticalAsymmetryCoefficient) << ", "
+			<< StepFormatCompactNumber(track.dVerticalReserved6) << ", "
+			<< StepFormatCompactNumber(track.dVerticalReserved5) << ", "
+			<< StepFormatCompactNumber(track.dVerticalReserved4) << ", "
+			<< StepFormatCompactNumber(track.dVerticalReserved3) << ", "
+			<< StepFormatCompactNumber(track.dVerticalReserved2) << ","
+			<< StepFormatCompactNumber(track.dVerticalReserved1) << " }" << "\n";
 		return oss.str();
 	}
 
@@ -724,7 +846,7 @@ namespace
 					kStepArcDataName,
 					normalProcessInfo->dWeldCurrent,
 					normalProcessInfo->dWeldVoltage,
-					StepWeldDataSpeed(*normalProcessInfo));
+					StepWeldDataSpeedMmPerSec(*normalProcessInfo));
 
 				if (StepHasTransitionWeldProcess(moveInfos))
 				{
@@ -740,14 +862,23 @@ namespace
 							kStepTransitionArcDataName,
 							transitionIt->dWeldCurrent,
 							transitionIt->dWeldVoltage,
-							StepWeldDataSpeed(*transitionIt));
+							StepWeldDataSpeedMmPerSec(*transitionIt));
 					}
 				}
 
-				StepAppendFileComment(oss, "焊接辅助数据：重试/实数/摆焊");
+				StepAppendFileComment(oss, "焊接辅助数据：重试/实数");
 				oss << "ARCRETRYDATA " << kStepArcRetryDataName << " := {  1000, 0, 1000, 50, 0, 0, FALSE, 20, 50,5 }" << "\n";
 				oss << "REAL " << kStepArcRealName << " := 0.0" << "\n";
-				oss << "WEAVEDATA " << kStepWeaveDataName << " := {  eTCPWeave, eSinFreq, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, FALSE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,0.0 }" << "\n";
+				if (processInfo->bHasWeaveParam)
+				{
+					StepAppendFileComment(oss, "摆动参数：WEAVEDATA");
+					oss << StepBuildWeaveDataLine(kStepWeaveDataName, processInfo->tWeaveParam);
+				}
+				if (processInfo->bHasTrackParam)
+				{
+					StepAppendFileComment(oss, "跟踪参数：TRACKDATA");
+					oss << StepBuildTrackDataLine(kStepTrackDataName, processInfo->tTrackParam);
+				}
 			}
 		}
 
@@ -805,7 +936,10 @@ namespace
 					StepAppendCommand(oss, std::string("ARCSET(") + kStepArcDataName + ");");
 				}
 				usingTransitionWeldParams = needTransition;
-				oss << "WLin(" << targetName << "," << dynName << "," << sharedOverlapName << ",eVAR," << kStepWeaveDataName << ",NULL,tool1,WORLD);" << "\n";
+				const char* weaveName = info.bHasWeaveParam ? kStepWeaveDataName : "NULL";
+				const char* trackName = info.bHasTrackParam ? kStepTrackDataName : "NULL";
+				oss << "WLin(" << targetName << "," << dynName << "," << sharedOverlapName << ",eVAR,"
+					<< weaveName << "," << trackName << ",tool1,WORLD);" << "\n";
 			}
 			else if (info.nMoveType == MOVL)
 			{
@@ -1052,7 +1186,18 @@ STEPRobotCtrl::STEPRobotCtrl(std::string strUnitName, RobotLog* pLog)
 
 STEPRobotCtrl::~STEPRobotCtrl()
 {
+	CloseSocket();
 	StopStateMonitor();
+	if (m_pSTEPRobotClient != nullptr)
+	{
+		delete m_pSTEPRobotClient;
+		m_pSTEPRobotClient = nullptr;
+	}
+	if (m_hMutex != nullptr)
+	{
+		CloseHandle(m_hMutex);
+		m_hMutex = nullptr;
+	}
 }
 
 bool STEPRobotCtrl::InitRobotDriver(std::string strUnitName)
@@ -1109,6 +1254,12 @@ bool STEPRobotCtrl::InitSocket(const char* ip, u_short Port, bool ifRecord)
 bool STEPRobotCtrl::CloseSocket()
 {
 	int nRet = 0;
+	const bool wasConnected = m_bSocketConnected;
+	m_bSocketConnected = false;
+	if (m_pSTEPRobotClient == nullptr)
+	{
+		return true;
+	}
 	if (!m_bLocalDebugMark)
 	{
 		nRet = m_pSTEPRobotClient->close();
@@ -1117,8 +1268,7 @@ bool STEPRobotCtrl::CloseSocket()
 			return false;
 		}
 	}
-	m_bSocketConnected = false;
-	return true;
+	return wasConnected || nRet == 0;
 }
 
 bool STEPRobotCtrl::IsConnected()

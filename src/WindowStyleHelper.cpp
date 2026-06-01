@@ -87,6 +87,10 @@ public:
         , text(initialText)
         , delayMs((std::max)(0, delay))
     {
+        if (qApp != nullptr)
+        {
+            qApp->installEventFilter(this);
+        }
         elapsed.start();
         delayTimer.setSingleShot(true);
         delayTimer.setInterval(delayMs);
@@ -96,6 +100,10 @@ public:
 
     ~DelayedLoadingGuardPrivate() override
     {
+        if (qApp != nullptr)
+        {
+            qApp->removeEventFilter(this);
+        }
         Finish();
     }
 
@@ -124,10 +132,29 @@ public:
         animationTimer.stop();
         if (dialog != nullptr)
         {
-            dialog->close();
+            dialog->hide();
             dialog->deleteLater();
             dialog = nullptr;
+            label = nullptr;
         }
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (!finished
+            && event != nullptr
+            && (event->type() == QEvent::Show
+                || event->type() == QEvent::ShowToParent
+                || event->type() == QEvent::WindowActivate))
+        {
+            QWidget* widget = qobject_cast<QWidget*>(watched);
+            if (IsForeignBlockingDialog(widget))
+            {
+                Finish();
+            }
+        }
+        return QObject::eventFilter(watched, event);
     }
 
 private:
@@ -135,6 +162,37 @@ private:
     {
         const QString base = text.trimmed().isEmpty() ? QStringLiteral("正在加载界面") : text.trimmed();
         return QString("%1%2").arg(base, QString((animationTick % 4), QLatin1Char('.')));
+    }
+
+    bool IsForeignBlockingDialog(QWidget* widget) const
+    {
+        if (widget == nullptr || widget == dialog.data())
+        {
+            return false;
+        }
+        if (qobject_cast<QMessageBox*>(widget) != nullptr)
+        {
+            return true;
+        }
+        const QDialog* modalDialog = qobject_cast<QDialog*>(widget);
+        return modalDialog != nullptr && modalDialog->isModal();
+    }
+
+    bool HasForeignBlockingDialog() const
+    {
+        if (qApp == nullptr)
+        {
+            return false;
+        }
+        const QWidgetList widgets = QApplication::topLevelWidgets();
+        for (QWidget* widget : widgets)
+        {
+            if (widget != nullptr && widget->isVisible() && IsForeignBlockingDialog(widget))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     void ShowIfNeeded(bool fromTimer)
@@ -145,6 +203,11 @@ private:
         }
         if (!fromTimer && elapsed.elapsed() < delayMs)
         {
+            return;
+        }
+        if (HasForeignBlockingDialog())
+        {
+            Finish();
             return;
         }
         CreateLoadingDialog();

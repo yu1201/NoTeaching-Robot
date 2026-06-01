@@ -13,9 +13,18 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.06.01.0146`
+- 当前源码版本：`v2026.06.01.1912`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.01.0146.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.01.1912.exe`，不用自己编译源码。
+
+## 2026-06-01 晚间更新
+
+- 工艺参数新增 STEP 摆动参数和跟踪参数，工艺界面补齐“跟踪参数”页，并按示教器调整摆动/跟踪字段名称和单位
+- STEP 程序生成同步写入 `WEAVEDATA wd0`、`TRACKDATA td0`，`WLin` 指令改为携带 `wd0/td0`，已用 RobotC 的 `20260601_004` 数据生成并上传校验
+- 工艺文件格式升级为新格式，旧 `WeldPara.txt` / `WeaveDate.txt` 不再兼容；读取失败时提示重新创建工艺内容，同时允许进入工艺界面新建
+- 管理页延迟进度条逻辑统一修正，打开页面遇到错误弹窗时会自动收起加载框，避免进度条卡住
+- 修复新建控制单元、工艺、焊接参数组和补偿参数组后先测后焊界面下拉未刷新的问题；修复带后缀控制单元删除时报错的问题
+- 构建验证：`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.06.01.1912.exe`
 
 ## 2026-06-01 更新
 

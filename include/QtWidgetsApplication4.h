@@ -24,6 +24,7 @@ class FunctionTestDialog;
 class LaserWeldFilterDialog;
 class QAction;
 class QCheckBox;
+class QCloseEvent;
 class MeasureThenWeldDialog;
 class PreciseMeasureEditDialog;
 class QComboBox;
@@ -53,6 +54,7 @@ public:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
 
 private slots:
@@ -178,6 +180,7 @@ private:
         bool actualWeld,
         double weldSpeedMmPerMin) const;
     void RunUpdateWeldPoseAverageForCli(const QString& inputPath) const;
+    bool HasRunningMeasureThenWeldFlow() const;
     bool RunMeasureThenWeldScanOnlyRepeatForCli(
         RobotDriverAdaptor* pRobotDriver,
         int unitIndex,

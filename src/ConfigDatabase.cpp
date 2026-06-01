@@ -680,6 +680,10 @@ QString ConfigDatabase::NormalizeFilePath(const QString& fileName)
     QString path = fileName.trimmed();
     path.replace('\\', '/');
     path = QDir::cleanPath(path);
+    while (path.startsWith("./"))
+    {
+        path.remove(0, 2);
+    }
 
     const QString lower = path.toLower();
     const int dataPos = lower.indexOf("/data/");
