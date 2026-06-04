@@ -307,6 +307,24 @@ int ComboData(const QComboBox* combo, int fallback = 0)
     }
     return combo->currentData().toInt();
 }
+
+void PopulateArcModeCombo(QComboBox* combo)
+{
+    if (combo == nullptr)
+    {
+        return;
+    }
+
+    combo->clear();
+    combo->addItem("0 直流一元", 0);
+    combo->addItem("1 脉冲一元", 1);
+    combo->addItem("2 JOB模式", 2);
+    combo->addItem("3 近控模式", 3);
+    combo->addItem("4 分别", 4);
+    combo->addItem("5 CC/CV", 5);
+    combo->addItem("6 TIG", 6);
+    combo->addItem("7 CMT", 7);
+}
 }
 
 WeldProcessDialog::WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* parent)
@@ -329,10 +347,6 @@ WeldProcessDialog::WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* pa
     connect(ui->saveBtn, &QPushButton::clicked, this, &WeldProcessDialog::SaveData);
     connect(ui->closeBtn, &QPushButton::clicked, this, &QDialog::close);
     connect(m_weldListWidget, &QListWidget::currentRowChanged, this, &WeldProcessDialog::OnWeldSelectionChanged);
-    ui->useWeldSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    ui->useWeaveSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    ui->useWeldSpin->setReadOnly(true);
-    ui->useWeaveSpin->setReadOnly(true);
     m_weldListWidget->setSortingEnabled(false);
 
     LoadToUi();
@@ -493,10 +507,12 @@ void WeldProcessDialog::BuildEditorUi()
     basicLayout->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     m_workPeaceEdit = AddSingleTextField(basicLayout, "工件名称");
     m_weldTypeEdit = AddSingleTextField(basicLayout, "焊接类型");
+    m_arcModeCombo = AddSingleComboField(basicLayout, "焊接模式");
+    PopulateArcModeCombo(m_arcModeCombo);
+    SetComboByData(m_arcModeCombo, 4);
     m_weldAngleSizeSpin = AddSingleDoubleFieldWithUnit(basicLayout, "焊脚尺寸", "mm");
-    m_standWeldDirSpin = AddSingleIntField(basicLayout, "立焊方向", 0, 1);
-    m_weldMethodSpin = AddSingleIntField(basicLayout, "焊接方法", 0, 999);
-    m_weaveTypeNoSpin = AddSingleIntField(basicLayout, "关联摆动号", 0, 9999);
+    m_weaveEnableCheck = AddSingleSwitchField(basicLayout, "是否启用摆动");
+    m_trackEnableCheck = AddSingleSwitchField(basicLayout, "是否启用跟踪");
     basicGroup->setMinimumWidth(420);
 
     auto* startGroup = new QGroupBox("引弧参数", editorRoot);
@@ -530,9 +546,18 @@ void WeldProcessDialog::BuildEditorUi()
     m_weldVelocitySpin = AddDoubleFieldWithUnit(weldLayout, "焊接速度", "mm/min");
     m_crosswiseOffsetSpin = AddDoubleFieldWithUnit(weldLayout, "横向补偿", "mm");
     m_verticalOffsetSpin = AddDoubleFieldWithUnit(weldLayout, "竖向补偿", "mm");
-    m_wrapConditionNoSpin = AddIntField(weldLayout, "摆动条件号", 0, 9999);
     m_weldAngleSpin = AddDoubleFieldWithUnit(weldLayout, "焊接角度", "deg");
     m_weldDipAngleSpin = AddDoubleFieldWithUnit(weldLayout, "焊接倾角", "deg");
+    for (QWidget* readonlyWeldField : { static_cast<QWidget*>(m_crosswiseOffsetSpin),
+        static_cast<QWidget*>(m_verticalOffsetSpin),
+        static_cast<QWidget*>(m_weldAngleSpin),
+        static_cast<QWidget*>(m_weldDipAngleSpin) })
+    {
+        if (readonlyWeldField != nullptr)
+        {
+            readonlyWeldField->setEnabled(false);
+        }
+    }
     weldGroup->setMinimumWidth(720);
 
     auto* specialGroup = new QFrame(editorRoot);
@@ -615,6 +640,7 @@ void WeldProcessDialog::BuildEditorUi()
         };
 
     auto* weaveGroup = new QGroupBox("摆动参数", editorRoot);
+    m_weaveParamGroup = weaveGroup;
     auto* weaveLayout = CreateTwoColumnForm(weaveGroup);
     m_weaveTypeCombo = addComboField(weaveLayout, "摆弧类型");
     m_weaveTypeCombo->addItem("eTCPWeave", 0);
@@ -654,6 +680,7 @@ void WeldProcessDialog::BuildEditorUi()
     weaveGroup->setMinimumWidth(720);
 
     auto* trackGroup = new QGroupBox("跟踪参数", editorRoot);
+    m_trackParamGroup = trackGroup;
     auto* trackLayout = CreateTwoColumnForm(trackGroup);
     m_lateralBeginCycleSpin = AddIntField(trackLayout, "横向纠偏开始周期", 0, 999999);
     m_lateralGainSpin = AddDoubleField(trackLayout, "横向比例增益", 3);
@@ -801,6 +828,8 @@ void WeldProcessDialog::BuildEditorUi()
     connect(m_removeBeadButton, &QPushButton::clicked, this, &WeldProcessDialog::RemoveBead);
     connect(m_addWeldButton, &QPushButton::clicked, this, &WeldProcessDialog::AddWeldGroup);
     connect(m_removeWeldButton, &QPushButton::clicked, this, &WeldProcessDialog::RemoveWeldGroup);
+    connect(m_weaveEnableCheck, &QCheckBox::toggled, this, &WeldProcessDialog::UpdateFeaturePageEnabled);
+    connect(m_trackEnableCheck, &QCheckBox::toggled, this, &WeldProcessDialog::UpdateFeaturePageEnabled);
     connect(m_beadListWidget, &QListWidget::currentRowChanged, this, &WeldProcessDialog::OnBeadSelectionChanged);
     connect(m_weldListWidget->model(), &QAbstractItemModel::rowsMoved, this, [this]()
         {
@@ -809,6 +838,7 @@ void WeldProcessDialog::BuildEditorUi()
                 OnWeldGroupsReordered();
             }
         });
+    UpdateFeaturePageEnabled();
 }
 
 void WeldProcessDialog::ApplyDialogStyle()
@@ -861,6 +891,10 @@ void WeldProcessDialog::ApplyDialogStyle()
         "QCheckBox::indicator{width:16px;height:16px;border:1px solid #3C6173;background:#0B1117;border-radius:3px;}"
         "QCheckBox::indicator:checked{background:#2D8F7D;border-color:#7BD8B3;}"
         "QCheckBox::indicator:hover{border-color:#72D4DD;}"
+        "QCheckBox#switchCheckBox{spacing:8px;font-weight:600;color:#9ED8DB;}"
+        "QCheckBox#switchCheckBox::indicator{width:42px;height:22px;border-radius:11px;background:#263742;border:1px solid #3C6173;}"
+        "QCheckBox#switchCheckBox::indicator:checked{background:#2D8F7D;border-color:#7BD8B3;}"
+        "QCheckBox#switchCheckBox::indicator:disabled{background:#080C10;border-color:#253947;}"
         "QPushButton{background:#233645;color:#F5FAFA;border:1px solid #3C6173;border-radius:10px;padding:7px 14px;}"
         "QPushButton:hover{background:#2D5465;border-color:#72D4DD;}"
         "QPushButton:pressed{background:#18303B;}"
@@ -1019,16 +1053,46 @@ QSpinBox* WeldProcessDialog::AddSingleIntFieldWithUnit(QFormLayout* layout, cons
     return spin;
 }
 
+QComboBox* WeldProcessDialog::AddSingleComboField(QFormLayout* layout, const QString& label)
+{
+    auto* combo = new QComboBox(this);
+    combo->setMinimumWidth(kSingleFieldWidth);
+    combo->setFixedHeight(kSpinFieldHeight);
+    combo->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
+    layout->addRow(label, combo);
+    return combo;
+}
+
+QCheckBox* WeldProcessDialog::AddSingleSwitchField(QFormLayout* layout, const QString& label)
+{
+    auto* check = new QCheckBox("启用", this);
+    check->setObjectName("switchCheckBox");
+    check->setChecked(true);
+    check->setFixedHeight(kSpinFieldHeight);
+    check->setMinimumWidth(kSingleFieldWidth);
+    check->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
+    layout->addRow(label, check);
+    return check;
+}
+
+void WeldProcessDialog::UpdateFeaturePageEnabled()
+{
+    if (m_weaveParamGroup != nullptr)
+    {
+        m_weaveParamGroup->setEnabled(IsChecked(m_weaveEnableCheck));
+    }
+    if (m_trackParamGroup != nullptr)
+    {
+        m_trackParamGroup->setEnabled(IsChecked(m_trackEnableCheck));
+    }
+}
+
 void WeldProcessDialog::LoadToUi(int preferredGroupRow, int preferredBeadRow)
 {
     m_isLoading = true;
     if (!m_file.Init())
     {
         const QString err = DecodeRobotMessageText(m_file.GetLastError());
-        ui->useWeldSpin->setMinimumWidth(84);
-        ui->useWeaveSpin->setMinimumWidth(84);
-        ui->useWeldSpin->setRange(1, 1);
-        ui->useWeaveSpin->setRange(0, 0);
         if (m_weldListWidget != nullptr)
         {
             m_weldListWidget->clear();
@@ -1042,11 +1106,6 @@ void WeldProcessDialog::LoadToUi(int preferredGroupRow, int preferredBeadRow)
         MarkCleanSnapshot();
         return;
     }
-
-    ui->useWeldSpin->setMinimumWidth(84);
-    ui->useWeaveSpin->setMinimumWidth(84);
-    ui->useWeldSpin->setRange(1, qMax(1, GroupCount()));
-    ui->useWeaveSpin->setRange(0, qMax(0, m_file.GetAllWeaveTypeNum() - 1));
 
     PopulateWeldList(preferredGroupRow);
     PopulateBeadList(preferredBeadRow);
@@ -1228,26 +1287,13 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
 
     m_isLoading = true;
     const auto& weld = weldList[row];
-    const auto indices = GetGroupIndices(m_weldListWidget != nullptr ? m_weldListWidget->currentRow() : -1);
-    int groupDisplayIndex = 1;
-    for (int i = 0; i < static_cast<int>(indices.size()); ++i)
-    {
-        if (indices[i] == row)
-        {
-            groupDisplayIndex = qMax(1, (m_weldListWidget != nullptr ? m_weldListWidget->currentRow() : 0) + 1);
-            break;
-        }
-    }
-    ui->useWeldSpin->setValue(groupDisplayIndex);
-    ui->useWeaveSpin->setValue(weld.nWeaveTypeNo);
 
     m_workPeaceEdit->setText(DecodeRobotMessageText(weld.strWorkPeace));
     m_weldTypeEdit->setText(DecodeRobotMessageText(weld.strWeldType));
+    SetComboByData(m_arcModeCombo, weld.nArcMode);
     m_weldAngleSizeSpin->setValue(weld.dWeldAngleSize);
-    m_standWeldDirSpin->setValue(weld.nStandWeldDir);
-    m_weldMethodSpin->setValue(weld.nWeldMethod);
-    m_weaveTypeNoSpin->setRange(0, qMax(0, m_file.GetAllWeaveTypeNum() - 1));
-    m_weaveTypeNoSpin->setValue(weld.nWeaveTypeNo);
+    SetChecked(m_weaveEnableCheck, weld.nWeaveEnable);
+    SetChecked(m_trackEnableCheck, weld.nTrackEnable);
 
     m_startArcCurrentSpin->setValue(weld.dStartArcCurrent);
     m_startArcVoltageSpin->setValue(weld.dStartArcVoltage);
@@ -1258,7 +1304,6 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     m_weldVelocitySpin->setValue(weld.WeldVelocity);
     m_crosswiseOffsetSpin->setValue(weld.CrosswiseOffset);
     m_verticalOffsetSpin->setValue(weld.verticalOffset);
-    m_wrapConditionNoSpin->setValue(weld.nWrapConditionNo);
     m_weldAngleSpin->setValue(weld.dWeldAngle);
     m_weldDipAngleSpin->setValue(weld.dWeldDipAngle);
 
@@ -1341,35 +1386,12 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     m_verticalMaxCompSpin->setValue(track.dVerticalMaxCompPerCycle);
     m_verticalTotalMaxCompSpin->setValue(track.dVerticalMaxCompTotal);
     m_verticalAsymmetrySpin->setValue(track.dVerticalAsymmetryCoefficient);
+    UpdateFeaturePageEnabled();
     m_isLoading = false;
 }
 
 bool WeldProcessDialog::SaveData()
 {
-    if (!m_file.Init())
-    {
-        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
-        return false;
-    }
-
-    const int currentRow = CurrentWeldIndex();
-    if (currentRow < 0 || currentRow >= static_cast<int>(m_file.GetWeldParaList().size()))
-    {
-        ShowError("请先选择工艺和焊道。");
-        return false;
-    }
-
-    if (!m_file.UpdateUseWeaveTypeNo(ui->useWeaveSpin->value()))
-    {
-        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
-        return false;
-    }
-    if (!m_file.UpdateUseWeldParaNo(currentRow))
-    {
-        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
-        return false;
-    }
-
     T_WELD_PARA weldItem;
     if (!CollectWeldFromUi(weldItem))
     {
@@ -1383,6 +1405,34 @@ bool WeldProcessDialog::SaveData()
         ShowError("当前摆动参数存在非法值。");
         return false;
     }
+
+    int currentRow = CurrentWeldIndex();
+    if (currentRow < 0 || currentRow >= static_cast<int>(m_file.GetWeldParaList().size()))
+    {
+        if (!m_file.GetWeldParaList().empty())
+        {
+            ShowError("请先选择工艺和焊道。");
+            return false;
+        }
+
+        if (!m_file.PrepareForRecreate())
+        {
+            ShowError(DecodeRobotMessageText(m_file.GetLastError()));
+            return false;
+        }
+        weldItem.nLayerNo = 1;
+        weldItem.nWeaveTypeNo = 0;
+
+        int newIndex = -1;
+        if (!m_file.AddWeldPara(weldItem, newIndex))
+        {
+            ShowError(DecodeRobotMessageText(m_file.GetLastError()));
+            return false;
+        }
+        currentRow = newIndex;
+    }
+
+    weldItem.nWeaveTypeNo = qBound(0, weldItem.nWeaveTypeNo, qMax(0, m_file.GetAllWeaveTypeNum() - 1));
 
     if (!m_file.UpdateWeldPara(currentRow, weldItem))
     {
@@ -1424,8 +1474,10 @@ bool WeldProcessDialog::CollectWeaveFromUi(T_WeaveDate& out) const
 
 bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
 {
+    out = {};
     out.strWorkPeace = m_workPeaceEdit->text().trimmed().toUtf8().constData();
     out.strWeldType = m_weldTypeEdit->text().trimmed().toUtf8().constData();
+    out.nArcMode = qBound(0, ComboData(m_arcModeCombo, 4), 7);
     out.dWeldAngleSize = m_weldAngleSizeSpin->value();
     out.nLayerNo = m_beadListWidget != nullptr ? (m_beadListWidget->currentRow() + 1) : 1;
     out.dStartArcCurrent = m_startArcCurrentSpin->value();
@@ -1476,12 +1528,14 @@ bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
     }
     out.CrosswiseOffset = m_crosswiseOffsetSpin->value();
     out.verticalOffset = m_verticalOffsetSpin->value();
-    out.nWrapConditionNo = m_wrapConditionNoSpin->value();
+    out.nWrapConditionNo = 0;
     out.dWeldAngle = m_weldAngleSpin->value();
     out.dWeldDipAngle = m_weldDipAngleSpin->value();
-    out.nStandWeldDir = m_standWeldDirSpin->value();
-    out.nWeaveTypeNo = m_weaveTypeNoSpin->value();
-    out.nWeldMethod = m_weldMethodSpin->value();
+    out.nStandWeldDir = 0;
+    out.nWeaveTypeNo = 0;
+    out.nWeldMethod = 0;
+    out.nWeaveEnable = IsChecked(m_weaveEnableCheck) ? 1 : 0;
+    out.nTrackEnable = IsChecked(m_trackEnableCheck) ? 1 : 0;
     out.tWeaveParam = {};
     out.tTrackParam.nLateralBeginCycle = m_lateralBeginCycleSpin->value();
     out.tTrackParam.dLateralGain = m_lateralGainSpin->value();
@@ -1513,7 +1567,6 @@ void WeldProcessDialog::OnWeldSelectionChanged(int row)
     {
         return;
     }
-    ui->useWeldSpin->setValue(qMax(1, row + 1));
     PopulateBeadList(0);
 }
 
@@ -1593,6 +1646,12 @@ void WeldProcessDialog::AddWeldGroup()
     else
     {
         item.nCornerArcTransitionApplyScope = 2;
+        item.nArcMode = 4;
+        if (!m_file.PrepareForRecreate())
+        {
+            ShowError(DecodeRobotMessageText(m_file.GetLastError()));
+            return;
+        }
     }
     item.nCornerArcTransitionApplyScope = qBound(0, item.nCornerArcTransitionApplyScope, 2);
 
@@ -1679,10 +1738,10 @@ QString WeldProcessDialog::BuildSnapshot() const
            << QString::number(m_beadListWidget != nullptr ? m_beadListWidget->currentRow() : -1)
            << (m_workPeaceEdit != nullptr ? m_workPeaceEdit->text().trimmed() : QString())
            << (m_weldTypeEdit != nullptr ? m_weldTypeEdit->text().trimmed() : QString())
+           << QString::number(ComboData(m_arcModeCombo, 4))
            << QString::number(m_weldAngleSizeSpin != nullptr ? m_weldAngleSizeSpin->value() : 0.0, 'f', 6)
-           << QString::number(m_standWeldDirSpin != nullptr ? m_standWeldDirSpin->value() : 0)
-           << QString::number(m_weldMethodSpin != nullptr ? m_weldMethodSpin->value() : 0)
-           << QString::number(m_weaveTypeNoSpin != nullptr ? m_weaveTypeNoSpin->value() : 0)
+           << QString::number(IsChecked(m_weaveEnableCheck) ? 1 : 0)
+           << QString::number(IsChecked(m_trackEnableCheck) ? 1 : 0)
            << QString::number(m_startArcCurrentSpin != nullptr ? m_startArcCurrentSpin->value() : 0.0, 'f', 6)
            << QString::number(m_startArcVoltageSpin != nullptr ? m_startArcVoltageSpin->value() : 0.0, 'f', 6)
            << QString::number(m_startWaitTimeSpin != nullptr ? m_startWaitTimeSpin->value() : 0.0, 'f', 6)
@@ -1691,7 +1750,6 @@ QString WeldProcessDialog::BuildSnapshot() const
            << QString::number(m_weldVelocitySpin != nullptr ? m_weldVelocitySpin->value() : 0.0, 'f', 6)
            << QString::number(m_crosswiseOffsetSpin != nullptr ? m_crosswiseOffsetSpin->value() : 0.0, 'f', 6)
            << QString::number(m_verticalOffsetSpin != nullptr ? m_verticalOffsetSpin->value() : 0.0, 'f', 6)
-           << QString::number(m_wrapConditionNoSpin != nullptr ? m_wrapConditionNoSpin->value() : 0)
            << QString::number(m_weldAngleSpin != nullptr ? m_weldAngleSpin->value() : 0.0, 'f', 6)
            << QString::number(m_weldDipAngleSpin != nullptr ? m_weldDipAngleSpin->value() : 0.0, 'f', 6)
            << QString::number(m_stopArcCurrentSpin != nullptr ? m_stopArcCurrentSpin->value() : 0.0, 'f', 6)

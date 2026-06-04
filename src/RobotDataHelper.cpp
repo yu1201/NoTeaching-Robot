@@ -181,6 +181,7 @@ QStringList DefaultWeldParamLines()
         << "DryRunSpeedMmPerMin=1000 ;空跑速度(mm/min)"
         << "WeldSafeMoveSpeedMmPerMin=1000 ;下枪/收枪安全位移动速度(mm/min)"
         << "StepOverlapRel=20 ;STEP连续过渡比例(OVERLAPREL)"
+        << "FinalWeldTrajectoryStepMm=4 ;最终焊接轨迹抽样间距(mm)，只影响生成/下发轨迹点"
         << "WeldDirection=1 ;焊接方向：1起点到终点，-1终点到起点"
         << ""
         << "#坐标和枪角"

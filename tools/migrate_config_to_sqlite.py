@@ -141,6 +141,7 @@ MEASURE_WELD_WELD_DEFAULTS = (
     ("DryRunSpeedMmPerMin", "1000"),
     ("WeldSafeMoveSpeedMmPerMin", "1000"),
     ("StepOverlapRel", "20"),
+    ("FinalWeldTrajectoryStepMm", "4"),
     ("WeldDirection", "1"),
     ("WorldCoorDir", "0"),
     ("RobotInstallDir", "0"),

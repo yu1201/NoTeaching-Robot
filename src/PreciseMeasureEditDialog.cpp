@@ -242,6 +242,7 @@ QStringList MinimalWeldSectionLinesForPrecise()
     lines
         << "WeldSafeMoveSpeedMmPerMin=1000"
         << "StepOverlapRel=20"
+        << "FinalWeldTrajectoryStepMm=4"
         << "WeldDirection=1"
         << "NormalWeldRx=0"
         << "NormalWeldRy=0"
@@ -616,6 +617,7 @@ QString PreciseParamDisplayName(const QString& key)
         { "DryRunSpeedMmPerMin", "空跑速度" },
         { "WeldSafeMoveSpeedMmPerMin", "安全位速度" },
         { "StepOverlapRel", "STEP过渡比例" },
+        { "FinalWeldTrajectoryStepMm", "最终轨迹点间距" },
         { "WorldCoorDir", "世界Z方向" },
         { "RobotInstallDir", "机器人安装方向" },
         { "GunAngle", "焊枪角度" },
@@ -740,7 +742,7 @@ QString WeldParamGroupTitleForKey(const QString& key)
     const QString normalized = key.trimmed();
     static const QSet<QString> executeKeys = {
         "WeldEnable", "WeldSpeedMmPerMin", "DryRunSpeedMmPerMin", "WeldSafeMoveSpeedMmPerMin",
-        "StepOverlapRel", "WeldDirection"
+        "StepOverlapRel", "FinalWeldTrajectoryStepMm", "WeldDirection"
     };
     static const QSet<QString> coordinateKeys = {
         "WorldCoorDir", "RobotInstallDir", "GunAngle", "GunLaserAngle", "GunCameraAngle",

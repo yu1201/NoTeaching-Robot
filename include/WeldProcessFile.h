@@ -18,6 +18,7 @@ public:
     ~WeldProcessFile();
 
     bool Init();
+    bool PrepareForRecreate();
     bool LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo);
     bool LoadFromControlUnit(const ContralUnit& contralUnit, int nUnitIndex = 0);
 

@@ -18,6 +18,7 @@ class QCheckBox;
 class QComboBox;
 class QFormLayout;
 class QGridLayout;
+class QGroupBox;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
@@ -71,6 +72,9 @@ private:
     QDoubleSpinBox* AddSingleDoubleFieldWithUnit(QFormLayout* layout, const QString& label, const QString& unit, int decimals = 3);
     QSpinBox* AddSingleIntField(QFormLayout* layout, const QString& label, int minimum = -999999, int maximum = 999999);
     QSpinBox* AddSingleIntFieldWithUnit(QFormLayout* layout, const QString& label, const QString& unit, int minimum = -999999, int maximum = 999999);
+    QComboBox* AddSingleComboField(QFormLayout* layout, const QString& label);
+    QCheckBox* AddSingleSwitchField(QFormLayout* layout, const QString& label);
+    void UpdateFeaturePageEnabled();
     bool HasUnsavedChanges() const;
     QString BuildSnapshot() const;
     void MarkCleanSnapshot();
@@ -96,10 +100,10 @@ private:
 
     QLineEdit* m_workPeaceEdit = nullptr;
     QLineEdit* m_weldTypeEdit = nullptr;
+    QComboBox* m_arcModeCombo = nullptr;
     QDoubleSpinBox* m_weldAngleSizeSpin = nullptr;
-    QSpinBox* m_standWeldDirSpin = nullptr;
-    QSpinBox* m_weldMethodSpin = nullptr;
-    QSpinBox* m_weaveTypeNoSpin = nullptr;
+    QCheckBox* m_weaveEnableCheck = nullptr;
+    QCheckBox* m_trackEnableCheck = nullptr;
 
     QDoubleSpinBox* m_startArcCurrentSpin = nullptr;
     QDoubleSpinBox* m_startArcVoltageSpin = nullptr;
@@ -110,7 +114,6 @@ private:
     QDoubleSpinBox* m_weldVelocitySpin = nullptr;
     QDoubleSpinBox* m_crosswiseOffsetSpin = nullptr;
     QDoubleSpinBox* m_verticalOffsetSpin = nullptr;
-    QSpinBox* m_wrapConditionNoSpin = nullptr;
     QDoubleSpinBox* m_weldAngleSpin = nullptr;
     QDoubleSpinBox* m_weldDipAngleSpin = nullptr;
 
@@ -162,6 +165,7 @@ private:
     QDoubleSpinBox* m_endLengthSpin = nullptr;
     QDoubleSpinBox* m_endWidthSpin = nullptr;
     QDoubleSpinBox* m_centerHeightSpin = nullptr;
+    QGroupBox* m_weaveParamGroup = nullptr;
 
     QSpinBox* m_lateralBeginCycleSpin = nullptr;
     QDoubleSpinBox* m_lateralGainSpin = nullptr;
@@ -184,5 +188,6 @@ private:
     QDoubleSpinBox* m_verticalMaxCompSpin = nullptr;
     QDoubleSpinBox* m_verticalTotalMaxCompSpin = nullptr;
     QDoubleSpinBox* m_verticalAsymmetrySpin = nullptr;
+    QGroupBox* m_trackParamGroup = nullptr;
     QString m_cleanSnapshot;
 };

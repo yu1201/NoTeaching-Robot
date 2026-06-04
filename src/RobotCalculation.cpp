@@ -687,6 +687,18 @@ double GeometryMedianScalar(QVector<double> values)
     return (values[middle - 1] + values[middle]) * 0.5;
 }
 
+double GeometryPercentileScalar(QVector<double> values, double percentile)
+{
+    if (values.isEmpty())
+    {
+        return 0.0;
+    }
+    std::sort(values.begin(), values.end());
+    const double clampedPercentile = std::max(0.0, std::min(1.0, percentile));
+    const int index = static_cast<int>(std::round(clampedPercentile * (values.size() - 1)));
+    return values[std::max(0, std::min(static_cast<int>(values.size()) - 1, index))];
+}
+
 double GeometryMedianSmoothHInRange(
     const QVector<GeometryProjectedPoint>& projected,
     int begin,
@@ -772,6 +784,218 @@ double GeometryMadSmoothNInRange(
     }
     return GeometryMedianScalar(deviations);
 }
+
+double WorkpieceProjectionStationValue(
+    const Eigen::Vector3d& point,
+    RobotCalculation::SampleAxis axis)
+{
+    return axis == RobotCalculation::SampleAxis::AxisX ? point.x() : point.y();
+}
+
+double WorkpieceProjectionTransverseValue(
+    const Eigen::Vector3d& point,
+    RobotCalculation::SampleAxis axis)
+{
+    return axis == RobotCalculation::SampleAxis::AxisX ? point.y() : point.x();
+}
+
+struct WorkpieceBottomPlane
+{
+    double xSlope = 0.0;
+    double ySlope = 0.0;
+    double offset = 0.0;
+    bool valid = false;
+
+    double zAt(const Eigen::Vector3d& point) const
+    {
+        return xSlope * point.x() + ySlope * point.y() + offset;
+    }
+};
+
+WorkpieceBottomPlane FitWorkpieceBottomPlaneLeastSquares(
+    const QVector<Eigen::Vector3d>& points)
+{
+    WorkpieceBottomPlane plane;
+    if (points.size() < 3)
+    {
+        return plane;
+    }
+
+    Eigen::Matrix3d normal = Eigen::Matrix3d::Zero();
+    Eigen::Vector3d rhs = Eigen::Vector3d::Zero();
+    for (const Eigen::Vector3d& point : points)
+    {
+        const Eigen::Vector3d row(point.x(), point.y(), 1.0);
+        normal += row * row.transpose();
+        rhs += row * point.z();
+    }
+
+    const Eigen::Vector3d solution = normal.ldlt().solve(rhs);
+    if (!solution.allFinite())
+    {
+        return plane;
+    }
+
+    plane.xSlope = solution.x();
+    plane.ySlope = solution.y();
+    plane.offset = solution.z();
+    plane.valid = true;
+    return plane;
+}
+
+WorkpieceBottomPlane FitWorkpieceBottomPlaneRobust(
+    QVector<Eigen::Vector3d> points,
+    int* usedPointCount,
+    double* residualThreshold)
+{
+    if (usedPointCount != nullptr)
+    {
+        *usedPointCount = points.size();
+    }
+    if (residualThreshold != nullptr)
+    {
+        *residualThreshold = 0.0;
+    }
+
+    WorkpieceBottomPlane plane;
+    for (int pass = 0; pass < 4; ++pass)
+    {
+        plane = FitWorkpieceBottomPlaneLeastSquares(points);
+        if (!plane.valid || points.size() < 8)
+        {
+            break;
+        }
+
+        QVector<double> residuals;
+        residuals.reserve(points.size());
+        for (const Eigen::Vector3d& point : points)
+        {
+            residuals.push_back(std::abs(point.z() - plane.zAt(point)));
+        }
+
+        const double medianResidual = GeometryMedianScalar(residuals);
+        QVector<double> deviations;
+        deviations.reserve(residuals.size());
+        for (double residual : residuals)
+        {
+            deviations.push_back(std::abs(residual - medianResidual));
+        }
+        const double madResidual = GeometryMedianScalar(deviations);
+        const double threshold = std::max(1.0, std::min(8.0, medianResidual + madResidual * 4.0 + 0.5));
+        if (residualThreshold != nullptr)
+        {
+            *residualThreshold = threshold;
+        }
+
+        QVector<Eigen::Vector3d> filtered;
+        filtered.reserve(points.size());
+        for (int index = 0; index < points.size(); ++index)
+        {
+            if (residuals[index] <= threshold)
+            {
+                filtered.push_back(points[index]);
+            }
+        }
+
+        if (filtered.size() == points.size() || filtered.size() < 3)
+        {
+            break;
+        }
+        points = filtered;
+        if (usedPointCount != nullptr)
+        {
+            *usedPointCount = points.size();
+        }
+    }
+
+    return plane;
+}
+
+QVector<Eigen::Vector3d> DownsampleWorkpieceProjectionCandidates(
+    const QVector<Eigen::Vector3d>& candidates,
+    int maxCount)
+{
+    if (maxCount <= 0 || candidates.size() <= maxCount)
+    {
+        return candidates;
+    }
+
+    QVector<Eigen::Vector3d> sampled;
+    sampled.reserve(maxCount);
+    const int stride = std::max(1, static_cast<int>(std::ceil(
+        static_cast<double>(candidates.size()) / static_cast<double>(maxCount))));
+    for (int index = 0; index < candidates.size() && sampled.size() < maxCount; index += stride)
+    {
+        sampled.push_back(candidates[index]);
+    }
+    return sampled;
+}
+
+QVector<Eigen::Vector3d> SelectMiddleWorkpieceProjectionLayerCandidates(
+    const QVector<Eigen::Vector3d>& candidates,
+    int maxCount)
+{
+    if (candidates.size() < 16)
+    {
+        return DownsampleWorkpieceProjectionCandidates(candidates, maxCount);
+    }
+
+    QVector<double> zValues;
+    zValues.reserve(candidates.size());
+    for (const Eigen::Vector3d& point : candidates)
+    {
+        zValues.push_back(point.z());
+    }
+    std::sort(zValues.begin(), zValues.end());
+
+    const int lastIndex = zValues.size() - 1;
+    const int lowIndex = candidates.size() >= 100
+        ? std::clamp(static_cast<int>(std::floor(lastIndex * 0.35)), 0, lastIndex)
+        : 0;
+    const int highIndex = std::clamp(static_cast<int>(std::floor(lastIndex * 0.50)), lowIndex, lastIndex);
+    const double lowerZ = zValues[lowIndex];
+    const double upperZ = zValues[highIndex];
+
+    QVector<Eigen::Vector3d> selected;
+    selected.reserve(std::min(candidates.size(), maxCount > 0 ? maxCount : candidates.size()));
+    for (const Eigen::Vector3d& point : candidates)
+    {
+        if (point.z() >= lowerZ - 0.2 && point.z() <= upperZ + 0.2)
+        {
+            selected.push_back(point);
+        }
+    }
+
+    if (selected.size() < 8)
+    {
+        const int fallbackLowIndex = std::clamp(
+            static_cast<int>(std::floor(lastIndex * 0.30)),
+            0,
+            lastIndex);
+        const int fallbackHighIndex = std::clamp(
+            static_cast<int>(std::floor(lastIndex * 0.55)),
+            fallbackLowIndex,
+            lastIndex);
+        selected.clear();
+        const double fallbackLowerZ = zValues[fallbackLowIndex];
+        const double fallbackUpperZ = zValues[fallbackHighIndex];
+        for (const Eigen::Vector3d& point : candidates)
+        {
+            if (point.z() >= fallbackLowerZ - 0.2 && point.z() <= fallbackUpperZ + 0.2)
+            {
+                selected.push_back(point);
+            }
+        }
+    }
+
+    return DownsampleWorkpieceProjectionCandidates(selected, maxCount);
+}
+
+struct WorkpieceProjectionSeedCandidates
+{
+    RobotCalculation::IndexedPoint3D seed;
+    QVector<Eigen::Vector3d> candidates;
+};
 
 double GeometryLocalNormalValue(
     const QVector<GeometryProjectedPoint>& projected,
@@ -1456,6 +1680,434 @@ GeometryFittedLine2D FitGeometryRobustSegmentLine(
     return robustLine;
 }
 
+struct GeometryMedianProfilePoint
+{
+    double s = 0.0;
+    double smoothH = 0.0;
+    double smoothN = 0.0;
+    int projectedIndex = 0;
+};
+
+Eigen::Vector2d GeometryProfileProjection2D(const GeometryMedianProfilePoint& point)
+{
+    return Eigen::Vector2d(point.s, point.smoothH);
+}
+
+QVector<GeometryMedianProfilePoint> BuildGeometryMedianFitProfile(
+    const QVector<GeometryProjectedPoint>& projected,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    QVector<GeometryMedianProfilePoint> profile;
+    if (projected.isEmpty())
+    {
+        return profile;
+    }
+
+    QVector<int> sortedIndexes;
+    sortedIndexes.reserve(projected.size());
+    for (int index = 0; index < projected.size(); ++index)
+    {
+        sortedIndexes.push_back(index);
+    }
+    std::sort(sortedIndexes.begin(), sortedIndexes.end(),
+        [&projected](int left, int right)
+        {
+            return projected[left].s < projected[right].s;
+        });
+
+    const double binWidth = std::max(0.5, std::min(1.0, params.sampleStep * 0.5));
+    for (int cursor = 0; cursor < sortedIndexes.size();)
+    {
+        const int begin = cursor;
+        const double binStart = projected[sortedIndexes[cursor]].s;
+        while (cursor < sortedIndexes.size()
+            && projected[sortedIndexes[cursor]].s <= binStart + binWidth)
+        {
+            ++cursor;
+        }
+
+        QVector<double> stationValues;
+        QVector<double> sideValues;
+        QVector<double> normalValues;
+        stationValues.reserve(cursor - begin);
+        sideValues.reserve(cursor - begin);
+        normalValues.reserve(cursor - begin);
+        for (int item = begin; item < cursor; ++item)
+        {
+            const GeometryProjectedPoint& point = projected[sortedIndexes[item]];
+            stationValues.push_back(point.s);
+            sideValues.push_back(point.smoothH);
+            normalValues.push_back(point.smoothN);
+        }
+
+        GeometryMedianProfilePoint profilePoint;
+        profilePoint.s = GeometryMedianScalar(stationValues);
+        profilePoint.smoothH = GeometryMedianScalar(sideValues);
+        profilePoint.smoothN = GeometryMedianScalar(normalValues);
+
+        int bestIndex = sortedIndexes[begin];
+        double bestScore = std::numeric_limits<double>::infinity();
+        for (int item = begin; item < cursor; ++item)
+        {
+            const int projectedIndex = sortedIndexes[item];
+            const double score =
+                std::abs(projected[projectedIndex].s - profilePoint.s)
+                + std::abs(projected[projectedIndex].smoothH - profilePoint.smoothH);
+            if (score < bestScore)
+            {
+                bestScore = score;
+                bestIndex = projectedIndex;
+            }
+        }
+        profilePoint.projectedIndex = bestIndex;
+        profile.push_back(profilePoint);
+    }
+
+    return profile;
+}
+
+GeometryFittedLine2D FitGeometryProfileLine(
+    const QVector<GeometryMedianProfilePoint>& profile,
+    int firstIndex,
+    int lastIndex)
+{
+    GeometryFittedLine2D line;
+    if (profile.isEmpty())
+    {
+        return line;
+    }
+
+    const int begin = std::max(0, std::min(firstIndex, lastIndex));
+    const int end = std::min(static_cast<int>(profile.size()) - 1, std::max(firstIndex, lastIndex));
+    const int pointCount = end - begin + 1;
+    if (pointCount < 2)
+    {
+        return line;
+    }
+
+    Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
+    for (int index = begin; index <= end; ++index)
+    {
+        centroid += GeometryProfileProjection2D(profile[index]);
+    }
+    centroid /= static_cast<double>(pointCount);
+
+    Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero();
+    for (int index = begin; index <= end; ++index)
+    {
+        const Eigen::Vector2d delta = GeometryProfileProjection2D(profile[index]) - centroid;
+        covariance += delta * delta.transpose();
+    }
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(covariance);
+    if (solver.info() == Eigen::Success)
+    {
+        line.direction = solver.eigenvectors().col(1);
+    }
+    else
+    {
+        line.direction = GeometryProfileProjection2D(profile[end]) - GeometryProfileProjection2D(profile[begin]);
+    }
+
+    if (line.direction.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        return line;
+    }
+    line.direction.normalize();
+
+    const Eigen::Vector2d segmentDirection =
+        GeometryProfileProjection2D(profile[end]) - GeometryProfileProjection2D(profile[begin]);
+    if (line.direction.dot(segmentDirection) < 0.0)
+    {
+        line.direction = -line.direction;
+    }
+
+    line.point = centroid;
+    line.valid = true;
+    return line;
+}
+
+void CollectRobustSegmentedGeometryProfileKeys(
+    const QVector<GeometryMedianProfilePoint>& profile,
+    int first,
+    int last,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QVector<char>& keep)
+{
+    const int pointCount = last - first + 1;
+    const int minSegmentPointCount = std::max(8, params.piecewiseMinSegmentPoints);
+    const double minSegmentLengthMm = std::max(18.0, params.sampleStep * 9.0);
+    if (pointCount < minSegmentPointCount * 2)
+    {
+        return;
+    }
+    if (std::abs(profile[last].s - profile[first].s) < minSegmentLengthMm * 2.0)
+    {
+        return;
+    }
+
+    const GeometryFittedLine2D line = FitGeometryProfileLine(profile, first, last);
+    if (!line.valid)
+    {
+        return;
+    }
+
+    const int edgeGap = std::max(1, std::min(4, pointCount / 10));
+    QVector<double> residuals;
+    QVector<int> residualIndexes;
+    residuals.reserve(pointCount);
+    residualIndexes.reserve(pointCount);
+    double maxResidual = 0.0;
+    int maxResidualIndex = -1;
+    for (int index = first + edgeGap; index <= last - edgeGap; ++index)
+    {
+        const double residual = GeometryPointLineDistance2D(GeometryProfileProjection2D(profile[index]), line);
+        if (!std::isfinite(residual))
+        {
+            continue;
+        }
+        residuals.push_back(residual);
+        residualIndexes.push_back(index);
+        if (residual > maxResidual)
+        {
+            maxResidual = residual;
+            maxResidualIndex = index;
+        }
+    }
+
+    if (residuals.isEmpty() || maxResidualIndex <= first || maxResidualIndex >= last)
+    {
+        return;
+    }
+
+    const double robustDeviation = GeometryPercentileScalar(residuals, 0.85);
+    const double tolerance = std::max(1.5, params.piecewiseFitTolerance * 0.5);
+    if (robustDeviation <= tolerance || maxResidual <= tolerance * 1.2)
+    {
+        return;
+    }
+
+    if (maxResidualIndex - first + 1 < minSegmentPointCount
+        || last - maxResidualIndex + 1 < minSegmentPointCount
+        || std::abs(profile[maxResidualIndex].s - profile[first].s) < minSegmentLengthMm
+        || std::abs(profile[last].s - profile[maxResidualIndex].s) < minSegmentLengthMm)
+    {
+        return;
+    }
+
+    keep[maxResidualIndex] = 1;
+    CollectRobustSegmentedGeometryProfileKeys(profile, first, maxResidualIndex, params, keep);
+    CollectRobustSegmentedGeometryProfileKeys(profile, maxResidualIndex, last, params, keep);
+}
+
+QVector<int> BuildRobustSegmentedGeometryKeyIndexes(
+    const QVector<GeometryProjectedPoint>& projected,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    QVector<int> keyIndexes;
+    if (projected.size() < std::max(16, params.piecewiseMinSegmentPoints * 2))
+    {
+        return BuildGeometryKeyIndexes(projected, params);
+    }
+
+    const QVector<GeometryMedianProfilePoint> profile = BuildGeometryMedianFitProfile(projected, params);
+    if (profile.size() < std::max(8, params.piecewiseMinSegmentPoints * 2))
+    {
+        return BuildGeometryKeyIndexes(projected, params);
+    }
+
+    QVector<char> keep(profile.size(), 0);
+    keep[0] = 1;
+    keep[profile.size() - 1] = 1;
+    CollectRobustSegmentedGeometryProfileKeys(profile, 0, profile.size() - 1, params, keep);
+
+    keyIndexes.reserve(profile.size());
+    keyIndexes.push_back(0);
+    for (int profileIndex = 0; profileIndex < profile.size(); ++profileIndex)
+    {
+        if (keep[profileIndex])
+        {
+            keyIndexes.push_back(profile[profileIndex].projectedIndex);
+        }
+    }
+    keyIndexes.push_back(projected.size() - 1);
+    std::sort(keyIndexes.begin(), keyIndexes.end());
+    keyIndexes.erase(std::unique(keyIndexes.begin(), keyIndexes.end()), keyIndexes.end());
+
+    const double minSegmentLength = std::max(4.0, params.sampleStep * 2.0);
+    bool removed = true;
+    while (removed && keyIndexes.size() > 2)
+    {
+        removed = false;
+        for (int index = 1; index + 1 < keyIndexes.size(); ++index)
+        {
+            const Eigen::Vector3d& previous = projected[keyIndexes[index - 1]].point;
+            const Eigen::Vector3d& current = projected[keyIndexes[index]].point;
+            const Eigen::Vector3d& next = projected[keyIndexes[index + 1]].point;
+            if ((current - previous).norm() < minSegmentLength || (next - current).norm() < minSegmentLength)
+            {
+                keyIndexes.removeAt(index);
+                removed = true;
+                break;
+            }
+        }
+    }
+
+    if (keyIndexes.size() < 2)
+    {
+        return BuildGeometryKeyIndexes(projected, params);
+    }
+    return keyIndexes;
+}
+
+QVector<GeometryProjectedPoint> RemoveGeometrySlopeWaveOutliers(
+    const QVector<GeometryProjectedPoint>& projected,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    int* rejectedCount)
+{
+    if (rejectedCount != nullptr)
+    {
+        *rejectedCount = 0;
+    }
+    if (projected.size() < 24)
+    {
+        return projected;
+    }
+
+    const QVector<int> coarseKeys = BuildGeometryKeyIndexes(projected, params);
+    if (coarseKeys.size() < 2)
+    {
+        return projected;
+    }
+
+    QVector<char> keep(projected.size(), 1);
+    const double slopeMinAbsSlope = 0.35;
+    const double cornerGuardMm = std::max(6.0, params.sampleStep * 3.0);
+    const double minSlopeSegmentLengthMm = std::max(18.0, params.sampleStep * 9.0);
+    const double residualBaseMm = 0.8;
+    const double residualMadK = 3.0;
+    const int minCorePointCount = std::max(8, params.piecewiseMinSegmentPoints);
+
+    for (int segment = 0; segment + 1 < coarseKeys.size(); ++segment)
+    {
+        const int left = coarseKeys[segment];
+        const int right = coarseKeys[segment + 1];
+        if (right <= left)
+        {
+            continue;
+        }
+
+        const double ds = projected[right].s - projected[left].s;
+        if (std::abs(ds) < minSlopeSegmentLengthMm)
+        {
+            continue;
+        }
+
+        const double roughSlope = (projected[right].smoothH - projected[left].smoothH) / ds;
+        if (std::abs(roughSlope) < slopeMinAbsSlope)
+        {
+            continue;
+        }
+
+        const double minS = std::min(projected[left].s, projected[right].s) + cornerGuardMm;
+        const double maxS = std::max(projected[left].s, projected[right].s) - cornerGuardMm;
+        if (maxS <= minS)
+        {
+            continue;
+        }
+
+        int coreBegin = -1;
+        int coreEnd = -1;
+        QVector<int> coreIndexes;
+        coreIndexes.reserve(right - left + 1);
+        for (int index = left; index <= right; ++index)
+        {
+            if (projected[index].s < minS || projected[index].s > maxS)
+            {
+                continue;
+            }
+            if (coreBegin < 0)
+            {
+                coreBegin = index;
+            }
+            coreEnd = index;
+            coreIndexes.push_back(index);
+        }
+
+        if (coreIndexes.size() < minCorePointCount || coreBegin < 0 || coreEnd <= coreBegin)
+        {
+            continue;
+        }
+
+        const GeometryFittedLine2D line = FitGeometryRobustSegmentLine(projected, coreBegin, coreEnd);
+        if (!line.valid)
+        {
+            continue;
+        }
+
+        QVector<double> residuals;
+        residuals.reserve(coreIndexes.size());
+        for (int index : coreIndexes)
+        {
+            residuals.push_back(GeometryPointLineDistance2D(GeometrySmoothedProjection2D(projected[index]), line));
+        }
+        if (residuals.size() < minCorePointCount)
+        {
+            continue;
+        }
+
+        const double medianResidual = GeometryMedianScalar(residuals);
+        QVector<double> deviations;
+        deviations.reserve(residuals.size());
+        for (double residual : residuals)
+        {
+            deviations.push_back(std::abs(residual - medianResidual));
+        }
+        const double sigma = 1.4826 * GeometryMedianScalar(deviations);
+        const double threshold = std::max(residualBaseMm, residualMadK * sigma);
+
+        for (int index : coreIndexes)
+        {
+            const double residual =
+                GeometryPointLineDistance2D(GeometrySmoothedProjection2D(projected[index]), line);
+            if (residual > medianResidual + threshold)
+            {
+                keep[index] = 0;
+            }
+        }
+    }
+
+    int totalRejected = 0;
+    for (char item : keep)
+    {
+        if (!item)
+        {
+            ++totalRejected;
+        }
+    }
+    if (totalRejected <= 0 || projected.size() - totalRejected < 16)
+    {
+        return projected;
+    }
+
+    QVector<GeometryProjectedPoint> filtered;
+    filtered.reserve(projected.size() - totalRejected);
+    for (int index = 0; index < projected.size(); ++index)
+    {
+        if (keep[index])
+        {
+            filtered.push_back(projected[index]);
+        }
+    }
+    SmoothGeometryProjectedPoints(&filtered, params.smoothRadius);
+
+    if (rejectedCount != nullptr)
+    {
+        *rejectedCount = totalRejected;
+    }
+    return filtered;
+}
+
 QVector<GeometryFittedLine2D> BuildRobustGeometrySegmentLines(
     const QVector<GeometryProjectedPoint>& projected,
     const QVector<int>& keyIndexes)
@@ -1987,6 +2639,7 @@ QVector<int> RefineGeometryKeysBySegmentDeviation(
 
             double maxDistance = 0.0;
             int maxDistanceIndex = -1;
+            QVector<double> segmentDistances;
             for (int sampleIndex = begin + edgeGap; sampleIndex <= end - edgeGap; ++sampleIndex)
             {
                 if (useNormalGate
@@ -1999,6 +2652,7 @@ QVector<int> RefineGeometryKeysBySegmentDeviation(
                     GeometrySmoothedProjection2D(projected[sampleIndex]),
                     firstProjection,
                     secondProjection);
+                segmentDistances.push_back(distance);
                 if (distance > maxDistance)
                 {
                     maxDistance = distance;
@@ -2006,9 +2660,13 @@ QVector<int> RefineGeometryKeysBySegmentDeviation(
                 }
             }
 
+            const double triggerDistance =
+                params.geometryStrategy == RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry
+                    ? maxDistance
+                    : GeometryPercentileScalar(segmentDistances, 0.85);
             if (maxDistanceIndex > begin
                 && maxDistanceIndex < end
-                && maxDistance > maxSegmentDeviation)
+                && triggerDistance > maxSegmentDeviation)
             {
                 keyIndexes.insert(segmentIndex + 1, maxDistanceIndex);
                 inserted = true;
@@ -2119,6 +2777,117 @@ double GeometryCornerProminence(
     const double current = projected[keyIndexes[keyPosition]].smoothH;
     const double next = projected[keyIndexes[keyPosition + 1]].smoothH;
     return current - (previous + next) * 0.5;
+}
+
+double GeometryKeyDistance(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    int firstPosition,
+    int secondPosition)
+{
+    if (firstPosition < 0
+        || secondPosition < 0
+        || firstPosition >= keyIndexes.size()
+        || secondPosition >= keyIndexes.size())
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    return (projected[keyIndexes[secondPosition]].point - projected[keyIndexes[firstPosition]].point).norm();
+}
+
+QVector<int> PruneShortSameTypeGeometryRuns(
+    const QVector<GeometryProjectedPoint>& projected,
+    QVector<int> keyIndexes,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    if (projected.isEmpty() || keyIndexes.size() <= 4)
+    {
+        return keyIndexes;
+    }
+
+    const double shortSameTypeSpan = std::max(
+        24.0,
+        std::max(
+            params.sampleStep > 0.0 ? params.sampleStep * 12.0 : 24.0,
+            params.segmentBreakDistance > 0.0 ? params.segmentBreakDistance * 1.5 : 18.0));
+
+    bool removed = true;
+    while (removed && keyIndexes.size() > 4)
+    {
+        removed = false;
+        for (int runBegin = 1; runBegin + 2 < keyIndexes.size() - 1 && !removed;)
+        {
+            const RobotCalculation::LowerWeldPointType runType =
+                GeometryCornerType(projected, keyIndexes, runBegin);
+            if (runType == RobotCalculation::LowerWeldPointType::Start
+                || runType == RobotCalculation::LowerWeldPointType::End)
+            {
+                ++runBegin;
+                continue;
+            }
+
+            int runEnd = runBegin;
+            while (runEnd + 1 < keyIndexes.size() - 1
+                && GeometryCornerType(projected, keyIndexes, runEnd + 1) == runType)
+            {
+                ++runEnd;
+            }
+
+            if (runEnd - runBegin + 1 < 3)
+            {
+                runBegin = runEnd + 1;
+                continue;
+            }
+
+            for (int position = runBegin; position < runEnd; ++position)
+            {
+                const double span = GeometryKeyDistance(projected, keyIndexes, position, position + 1);
+                if (span >= shortSameTypeSpan)
+                {
+                    continue;
+                }
+
+                int removePosition = -1;
+                if (position == runBegin)
+                {
+                    const double nextSpan = GeometryKeyDistance(projected, keyIndexes, position + 1, position + 2);
+                    if (nextSpan >= shortSameTypeSpan)
+                    {
+                        removePosition = position;
+                    }
+                }
+                else if (position + 1 == runEnd)
+                {
+                    const double previousSpan = GeometryKeyDistance(projected, keyIndexes, position - 1, position);
+                    if (previousSpan >= shortSameTypeSpan)
+                    {
+                        removePosition = position + 1;
+                    }
+                }
+                else
+                {
+                    const double previousSpan = GeometryKeyDistance(projected, keyIndexes, position - 1, position);
+                    const double nextSpan = GeometryKeyDistance(projected, keyIndexes, position + 1, position + 2);
+                    removePosition = previousSpan >= nextSpan ? position + 1 : position;
+                }
+
+                if (removePosition > 0 && removePosition < keyIndexes.size() - 1)
+                {
+                    keyIndexes.removeAt(removePosition);
+                    removed = true;
+                    break;
+                }
+            }
+
+            if (!removed)
+            {
+                runBegin = runEnd + 1;
+            }
+        }
+    }
+
+    return keyIndexes;
 }
 
 QVector<int> MergeAdjacentGeometryCorners(
@@ -3785,6 +4554,203 @@ RobotCalculation::LowerWeldClassificationResult RobotCalculation::ClassifyLowerW
     return result;
 }
 
+RobotCalculation::LowerWeldFilterResult RobotCalculation::ProjectWorkpieceCloudToLowerWeldPath(
+    const QVector<IndexedPoint3D>& workpieceCloudInput,
+    const QVector<IndexedPoint3D>& seedPathInput,
+    const LowerWeldFilterParams& params)
+{
+    LowerWeldFilterResult result;
+    result.inputPointCount = workpieceCloudInput.size();
+    if (workpieceCloudInput.size() < 3)
+    {
+        result.error = QString("完整点云点数过少，仅 %1 个，无法拟合底板。")
+            .arg(workpieceCloudInput.size());
+        return result;
+    }
+    if (seedPathInput.size() < 2)
+    {
+        result.error = QString("种子焊道点数过少，仅 %1 个，无法保留立板波浪轮廓。")
+            .arg(seedPathInput.size());
+        return result;
+    }
+
+    QVector<int> sortedIndexes;
+    sortedIndexes.reserve(workpieceCloudInput.size());
+    for (int index = 0; index < workpieceCloudInput.size(); ++index)
+    {
+        if (IsFinitePoint(workpieceCloudInput[index].point))
+        {
+            sortedIndexes.push_back(index);
+        }
+    }
+    std::sort(sortedIndexes.begin(), sortedIndexes.end(), [&](int left, int right)
+    {
+        return WorkpieceProjectionStationValue(workpieceCloudInput[left].point, params.sampleAxis)
+            < WorkpieceProjectionStationValue(workpieceCloudInput[right].point, params.sampleAxis);
+    });
+
+    if (sortedIndexes.size() < 3)
+    {
+        result.error = "完整点云没有足够的有效点，无法拟合底板。";
+        return result;
+    }
+
+    const double sampleStep = params.sampleStep > 0.0 ? params.sampleStep : 2.0;
+    const double stationWindow = std::max(2.5, sampleStep * 1.5);
+    const double transverseWindow = std::max(10.0, params.searchWindow > 0.0 ? params.searchWindow * 1.5 : 12.0);
+    const double zBandBelow = std::max(14.0, params.zContinuityThreshold > 0.0 ? params.zContinuityThreshold * 4.0 : 14.0);
+    const double zBandAbove = std::max(12.0, params.zJumpThreshold > 0.0 ? params.zJumpThreshold * 2.5 : 12.0);
+    constexpr int kMaxCandidatePerSeed = 160;
+
+    auto lowerStationBound = [&](double value)
+    {
+        return std::lower_bound(sortedIndexes.begin(), sortedIndexes.end(), value, [&](int pointIndex, double station)
+        {
+            return WorkpieceProjectionStationValue(workpieceCloudInput[pointIndex].point, params.sampleAxis) < station;
+        });
+    };
+
+    QVector<WorkpieceProjectionSeedCandidates> seedCandidateSets;
+    seedCandidateSets.reserve(seedPathInput.size());
+    QVector<Eigen::Vector3d> bottomCandidates;
+    bottomCandidates.reserve(std::min(static_cast<int>(seedPathInput.size()) * kMaxCandidatePerSeed, 240000));
+    int visitedLocalPointCount = 0;
+    for (const IndexedPoint3D& seed : seedPathInput)
+    {
+        if (!IsFinitePoint(seed.point))
+        {
+            continue;
+        }
+
+        const double seedStation = WorkpieceProjectionStationValue(seed.point, params.sampleAxis);
+        const double seedTransverse = WorkpieceProjectionTransverseValue(seed.point, params.sampleAxis);
+        const auto begin = lowerStationBound(seedStation - stationWindow);
+        const auto end = lowerStationBound(seedStation + stationWindow);
+
+        QVector<Eigen::Vector3d> localCandidates;
+        localCandidates.reserve(kMaxCandidatePerSeed * 2);
+        for (auto it = begin; it != end; ++it)
+        {
+            const Eigen::Vector3d& point = workpieceCloudInput[*it].point;
+            if (std::abs(WorkpieceProjectionTransverseValue(point, params.sampleAxis) - seedTransverse) > transverseWindow)
+            {
+                continue;
+            }
+            if (point.z() < seed.point.z() - zBandBelow || point.z() > seed.point.z() + zBandAbove)
+            {
+                continue;
+            }
+            localCandidates.push_back(point);
+            ++visitedLocalPointCount;
+        }
+
+        WorkpieceProjectionSeedCandidates seedCandidates;
+        seedCandidates.seed = seed;
+        seedCandidates.candidates =
+            SelectMiddleWorkpieceProjectionLayerCandidates(localCandidates, kMaxCandidatePerSeed);
+        if (seedCandidates.candidates.isEmpty() && !localCandidates.isEmpty())
+        {
+            seedCandidates.candidates =
+                DownsampleWorkpieceProjectionCandidates(localCandidates, kMaxCandidatePerSeed);
+        }
+        bottomCandidates += seedCandidates.candidates;
+        seedCandidateSets.push_back(seedCandidates);
+    }
+
+    if (bottomCandidates.size() < 12)
+    {
+        result.error = QString("完整点云中未找到足够的底板候选点：候选=%1，访问局部点=%2。")
+            .arg(bottomCandidates.size())
+            .arg(visitedLocalPointCount);
+        return result;
+    }
+
+    QVector<double> projectedZValues;
+    QVector<bool> projectedZValid;
+    projectedZValues.reserve(seedCandidateSets.size());
+    projectedZValid.reserve(seedCandidateSets.size());
+    int profileValueCount = 0;
+    int fallbackValueCount = 0;
+    for (const WorkpieceProjectionSeedCandidates& seedCandidates : seedCandidateSets)
+    {
+        QVector<double> localZValues;
+        localZValues.reserve(seedCandidates.candidates.size());
+        for (const Eigen::Vector3d& point : seedCandidates.candidates)
+        {
+            localZValues.push_back(point.z());
+        }
+
+        if (!localZValues.isEmpty())
+        {
+            projectedZValues.push_back(GeometryMedianScalar(localZValues));
+            projectedZValid.push_back(true);
+            ++profileValueCount;
+        }
+        else
+        {
+            projectedZValues.push_back(seedCandidates.seed.point.z());
+            projectedZValid.push_back(false);
+            ++fallbackValueCount;
+        }
+    }
+
+    const int smoothRadius = std::clamp(params.smoothRadius, 1, 4);
+    QVector<double> smoothedProjectedZ = projectedZValues;
+    for (int index = 0; index < projectedZValues.size(); ++index)
+    {
+        QVector<double> values;
+        const int beginIndex = std::max(0, index - smoothRadius);
+        const int endIndex = std::min(static_cast<int>(projectedZValues.size()) - 1, index + smoothRadius);
+        values.reserve(endIndex - beginIndex + 1);
+        for (int nearbyIndex = beginIndex; nearbyIndex <= endIndex; ++nearbyIndex)
+        {
+            if (projectedZValid[nearbyIndex])
+            {
+                values.push_back(projectedZValues[nearbyIndex]);
+            }
+        }
+        if (!values.isEmpty())
+        {
+            smoothedProjectedZ[index] = GeometryMedianScalar(values);
+        }
+    }
+
+    result.points.reserve(seedCandidateSets.size());
+    for (int seedIndex = 0; seedIndex < seedCandidateSets.size(); ++seedIndex)
+    {
+        const IndexedPoint3D& seed = seedCandidateSets[seedIndex].seed;
+        if (!IsFinitePoint(seed.point))
+        {
+            continue;
+        }
+
+        LowerWeldFilterPoint point;
+        point.index = seed.index;
+        point.point = seed.point;
+        point.point.z() = smoothedProjectedZ[seedIndex];
+        point.source = projectedZValid[seedIndex]
+            ? "workpiece_middle_bottom_profile_projected"
+            : "workpiece_middle_bottom_seed_fallback";
+        result.points.push_back(point);
+    }
+
+    if (result.points.size() < std::max(2, params.minPointCount))
+    {
+        result.error = QString("底板投影后有效焊道点过少，仅 %1 个。").arg(result.points.size());
+        return result;
+    }
+
+    result.lowerPointCount = bottomCandidates.size();
+    result.zContinuityRejectedCount = visitedLocalPointCount - bottomCandidates.size();
+    result.segmentRejectedCount = visitedLocalPointCount;
+    result.fitSegmentCount = profileValueCount;
+    result.measuredCount = result.points.size();
+    result.interpolatedCount = profileValueCount;
+    result.extendedCount = fallbackValueCount;
+    result.ok = true;
+    return result;
+}
+
 RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPath(
     const QVector<IndexedPoint3D>& inputPoints,
     const LowerWeldFilterParams& params)
@@ -3878,6 +4844,12 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
     int projectedBranchRejectedCount = 0;
     projected = RemoveGeometryProjectedBranchOutliers(projected, params, &projectedBranchRejectedCount);
     denoiseRejectedCount += projectedBranchRejectedCount;
+    int slopeWaveRejectedCount = 0;
+    if (params.geometryStrategy == LowerWeldGeometryStrategy::SlopeWaveFiltered)
+    {
+        projected = RemoveGeometrySlopeWaveOutliers(projected, params, &slopeWaveRejectedCount);
+        denoiseRejectedCount += slopeWaveRejectedCount;
+    }
 
     result.filterResult.lowerPointCount = projected.size();
     result.filterResult.zContinuityRejectedCount = denoiseRejectedCount;
@@ -3888,10 +4860,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         return result;
     }
 
-    QVector<int> keyIndexes = PruneRedundantSameSideGeometryKeys(
-        projected,
-        BuildGeometryKeyIndexes(projected, params));
+    const QVector<int> initialKeyIndexes =
+        params.geometryStrategy == LowerWeldGeometryStrategy::RobustSegmentedKeys
+            ? BuildRobustSegmentedGeometryKeyIndexes(projected, params)
+            : BuildGeometryKeyIndexes(projected, params);
+    QVector<int> keyIndexes = PruneRedundantSameSideGeometryKeys(projected, initialKeyIndexes);
     keyIndexes = PruneGeometrySpikeDrivenKeys(projected, keyIndexes, params);
+    keyIndexes = PruneShortSameTypeGeometryRuns(projected, keyIndexes, params);
     keyIndexes = PruneNonMonotonicFittedGeometryKeys(
         projected,
         keyIndexes,
@@ -3907,6 +4882,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         axes.second,
         params);
     keyIndexes = PruneGeometrySpikeDrivenKeys(projected, keyIndexes, params);
+    keyIndexes = PruneShortSameTypeGeometryRuns(projected, keyIndexes, params);
     keyIndexes = PruneNonMonotonicFittedGeometryKeys(
         projected,
         keyIndexes,

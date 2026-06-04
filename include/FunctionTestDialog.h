@@ -3,6 +3,7 @@
 #include "ContralUnit.h"
 
 #include <QDialog>
+#include <QString>
 #include <QVector>
 
 class QPushButton;
@@ -17,6 +18,7 @@ class FunctionTestDialog : public QDialog
 {
 public:
     explicit FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex = 0, CameraFrameCache* cameraCache = nullptr, QWidget* parent = nullptr);
+    bool RunDashboardTool(const QString& actionId);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
