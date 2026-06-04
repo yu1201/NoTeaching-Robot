@@ -28,7 +28,14 @@ constexpr char kDelimiter = '\t';
 constexpr int kWeaveFieldCount = 15;
 constexpr int kWeldCoreFieldCount = 48;
 constexpr int kWeldTrackFieldCount = 33;
-constexpr int kWeldFieldCount = kWeldCoreFieldCount + kWeldTrackFieldCount;
+constexpr int kWeldSwitchFieldCount = 2;
+constexpr int kWeldArcModeFieldCount = 1;
+constexpr int kWeldFieldCount = kWeldCoreFieldCount + kWeldTrackFieldCount + kWeldSwitchFieldCount + kWeldArcModeFieldCount;
+
+int NormalizeArcMode(int mode)
+{
+    return mode >= 0 && mode <= 7 ? mode : 4;
+}
 }
 
 WeldProcessFile::WeldProcessFile(const T_CONTRAL_UNIT& tContralUnitInfo)
@@ -53,6 +60,29 @@ WeldProcessFile::~WeldProcessFile()
 bool WeldProcessFile::Init()
 {
     return LoadFromControlUnit(m_tContralUnitInfo);
+}
+
+bool WeldProcessFile::PrepareForRecreate()
+{
+    m_sLastError.clear();
+    m_nAllWeaveTypeNum = 0;
+    m_nUseWeaveTypeNo = 0;
+    m_nAllWeldParaNum = 0;
+    m_nUseWeldParaNo = 0;
+    m_vtWeaveTypeList.clear();
+    m_vtWeldParaList.clear();
+
+    if (m_tContralUnitInfo.sUnitName.empty())
+    {
+        m_sLastError = "控制单元名称为空，无法重新创建工艺内容。";
+        LogError("%s", m_sLastError.c_str());
+        return false;
+    }
+
+    m_sWeaveIniFilePath = BuildWeaveIniPath(m_tContralUnitInfo.sUnitName);
+    m_sWeldIniFilePath = BuildWeldIniPath(m_tContralUnitInfo.sUnitName);
+    EnsureGlobalStorage(m_tContralUnitInfo.nUnitNo);
+    return true;
 }
 
 bool WeldProcessFile::LoadFromControlUnit(const ContralUnit& contralUnit, int nUnitIndex)
@@ -252,7 +282,18 @@ bool WeldProcessFile::UpdateWeldPara(int nParaNo, const T_WELD_PARA& tWeldPara)
         return false;
     }
 
-    m_vtWeldParaList[nParaNo] = tWeldPara;
+    T_WELD_PARA item = tWeldPara;
+    item.nWeaveEnable = item.nWeaveEnable != 0 ? 1 : 0;
+    item.nTrackEnable = item.nTrackEnable != 0 ? 1 : 0;
+    item.nArcMode = NormalizeArcMode(item.nArcMode);
+    if (item.nWeaveTypeNo < 0 || item.nWeaveTypeNo >= static_cast<int>(m_vtWeaveTypeList.size()))
+    {
+        item.nWeaveTypeNo = 0;
+    }
+    item.tWeaveParam = item.nWeaveEnable != 0 && !m_vtWeaveTypeList.empty()
+        ? m_vtWeaveTypeList[item.nWeaveTypeNo]
+        : T_WeaveDate {};
+    m_vtWeldParaList[nParaNo] = item;
     NormalizeWeldOrderKeepGroupOrder();
     if (!SaveWeldTxt())
     {
@@ -265,6 +306,14 @@ bool WeldProcessFile::UpdateWeldPara(int nParaNo, const T_WELD_PARA& tWeldPara)
 
 bool WeldProcessFile::AddWeldPara(const T_WELD_PARA& tWeldPara, int& newIndex)
 {
+    if (m_sWeaveIniFilePath.empty() || m_sWeldIniFilePath.empty())
+    {
+        if (!PrepareForRecreate())
+        {
+            return false;
+        }
+    }
+
     if (m_vtWeaveTypeList.empty())
     {
         m_vtWeaveTypeList.push_back(T_WeaveDate {});
@@ -279,11 +328,14 @@ bool WeldProcessFile::AddWeldPara(const T_WELD_PARA& tWeldPara, int& newIndex)
     }
 
     T_WELD_PARA item = tWeldPara;
+    item.nWeaveEnable = item.nWeaveEnable != 0 ? 1 : 0;
+    item.nTrackEnable = item.nTrackEnable != 0 ? 1 : 0;
+    item.nArcMode = NormalizeArcMode(item.nArcMode);
     if (item.nWeaveTypeNo < 0 || item.nWeaveTypeNo >= static_cast<int>(m_vtWeaveTypeList.size()))
     {
         item.nWeaveTypeNo = 0;
     }
-    item.tWeaveParam = m_vtWeaveTypeList[item.nWeaveTypeNo];
+    item.tWeaveParam = item.nWeaveEnable != 0 ? m_vtWeaveTypeList[item.nWeaveTypeNo] : T_WeaveDate {};
     m_vtWeldParaList.push_back(item);
     m_nAllWeldParaNum = static_cast<int>(m_vtWeldParaList.size());
     m_nUseWeldParaNo = static_cast<int>(m_vtWeldParaList.size()) - 1;
@@ -697,6 +749,14 @@ bool WeldProcessFile::BindWeldToWeave()
 {
     for (auto& weldPara : m_vtWeldParaList)
     {
+        weldPara.nWeaveEnable = weldPara.nWeaveEnable != 0 ? 1 : 0;
+        weldPara.nTrackEnable = weldPara.nTrackEnable != 0 ? 1 : 0;
+        weldPara.nArcMode = NormalizeArcMode(weldPara.nArcMode);
+        if (weldPara.nWeaveEnable == 0)
+        {
+            weldPara.tWeaveParam = {};
+            continue;
+        }
         const int weaveIndex = weldPara.nWeaveTypeNo;
         if (weaveIndex < 0 || weaveIndex >= static_cast<int>(m_vtWeaveTypeList.size()))
         {
@@ -802,7 +862,7 @@ bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WE
         return false;
     }
 
-    return TryParseInt(fields[30], tWeldPara.nWrapCurrent1Enable)
+    const bool parsed = TryParseInt(fields[30], tWeldPara.nWrapCurrent1Enable)
         && TryParseInt(fields[31], tWeldPara.nWrapVoltage1Enable)
         && TryParseInt(fields[32], tWeldPara.nWrapWaitTime1Enable)
         && TryParseInt(fields[33], tWeldPara.nWrapCurrent2Enable)
@@ -852,7 +912,17 @@ bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WE
         && TryParseDouble(fields[77], tWeldPara.tTrackParam.dVerticalReserved4)
         && TryParseDouble(fields[78], tWeldPara.tTrackParam.dVerticalReserved3)
         && TryParseDouble(fields[79], tWeldPara.tTrackParam.dVerticalReserved2)
-        && TryParseDouble(fields[80], tWeldPara.tTrackParam.dVerticalReserved1);
+        && TryParseDouble(fields[80], tWeldPara.tTrackParam.dVerticalReserved1)
+        && TryParseInt(fields[81], tWeldPara.nWeaveEnable)
+        && TryParseInt(fields[82], tWeldPara.nTrackEnable)
+        && TryParseInt(fields[83], tWeldPara.nArcMode);
+    if (parsed)
+    {
+        tWeldPara.nWeaveEnable = tWeldPara.nWeaveEnable != 0 ? 1 : 0;
+        tWeldPara.nTrackEnable = tWeldPara.nTrackEnable != 0 ? 1 : 0;
+        tWeldPara.nArcMode = NormalizeArcMode(tWeldPara.nArcMode);
+    }
+    return parsed;
 }
 
 std::vector<std::string> WeldProcessFile::BuildWeaveFields(const T_WeaveDate& tWeaveDate) const
@@ -959,7 +1029,10 @@ std::vector<std::string> WeldProcessFile::BuildWeldFields(const T_WELD_PARA& tWe
         ToText(tWeldPara.tTrackParam.dVerticalReserved4),
         ToText(tWeldPara.tTrackParam.dVerticalReserved3),
         ToText(tWeldPara.tTrackParam.dVerticalReserved2),
-        ToText(tWeldPara.tTrackParam.dVerticalReserved1)
+        ToText(tWeldPara.tTrackParam.dVerticalReserved1),
+        std::to_string(tWeldPara.nWeaveEnable != 0 ? 1 : 0),
+        std::to_string(tWeldPara.nTrackEnable != 0 ? 1 : 0),
+        std::to_string(NormalizeArcMode(tWeldPara.nArcMode))
     };
 }
 

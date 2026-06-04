@@ -19,6 +19,7 @@ class ClientUDPFormSensorWorker;
 class ScanCameraTcpClientWorker;
 class CameraFrameCache;
 class CameraParamDialog;
+class SKJCameraControlClient;
 class FANUCRobotCtrl;
 class FunctionTestDialog;
 class LaserWeldFilterDialog;
@@ -104,6 +105,7 @@ private:
     void RefreshRobotSelectorUi();
     void RefreshRobotOperationAvailability();
     void RefreshDashboardConnectionState();
+    void RunFunctionTestDashboardTool(const QString& actionId);
     bool IsCurrentRobotConnected();
     void ToggleCurrentRobotConnection();
     int CurrentRobotUnitIndex() const;
@@ -239,7 +241,9 @@ private:
     QPushButton* m_pDashboardClearAlarmBtn;
     QPushButton* m_pDashboardModeBtn;
     QPushButton* m_pDashboardDebugLogBtn;
+    QWidget* m_pDashboardToolPanel;
     QList<QPointer<QWidget>> m_robotOperationWidgets;
+    QList<QPointer<QWidget>> m_fanucOnlyWidgets;
     QList<QPointer<QWidget>> m_cameraParamDependentWidgets;
     QList<QPointer<QWidget>> m_handEyeDependentWidgets;
     QPushButton* m_pCameraParamBtn;
@@ -258,6 +262,7 @@ private:
     QHash<int, CameraRuntime*> m_scanCameraReceiversByPort;
     QHash<QString, int> m_scanCameraUnitByIP;
     QSet<CameraRuntime*> m_liveScanCameraRuntimes;
+    SKJCameraControlClient* m_skjCameraControlClient;
     QHash<int, QPointer<MeasureThenWeldDialog>> m_measureThenWeldPages;
     QHash<int, QPointer<RobotJogDialog>> m_robotJogPages;
     bool m_bFanucMovlForward;

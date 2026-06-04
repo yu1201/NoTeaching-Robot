@@ -39,10 +39,19 @@ public:
         PiecewiseLineFit = 3
     };
 
+    enum class LowerWeldGeometryStrategy
+    {
+        LegacyGeometry = 0,
+        SlopeWaveFiltered = 1,
+        RobustSegmentedKeys = 2,
+        WorkpieceProjection = 3
+    };
+
     struct LowerWeldFilterParams
     {
         SampleAxis sampleAxis = SampleAxis::AxisY;
         LowerWeldFitMode fitMode = LowerWeldFitMode::PreservePath;
+        LowerWeldGeometryStrategy geometryStrategy = LowerWeldGeometryStrategy::LegacyGeometry;
         double zThreshold = -230.0;
         double zJumpThreshold = 5.0;
         double zContinuityThreshold = 3.0;
@@ -127,6 +136,10 @@ public:
     static LowerWeldClassificationResult ClassifyLowerWeldPoints(
         const LowerWeldFilterResult& filterResult,
         SampleAxis sampleAxis);
+    static LowerWeldFilterResult ProjectWorkpieceCloudToLowerWeldPath(
+        const QVector<IndexedPoint3D>& workpieceCloudInput,
+        const QVector<IndexedPoint3D>& seedPathInput,
+        const LowerWeldFilterParams& params);
     static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPath(
         const QVector<IndexedPoint3D>& inputPoints,
         const LowerWeldFilterParams& params);

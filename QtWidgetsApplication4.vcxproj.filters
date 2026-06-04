@@ -79,6 +79,9 @@
     <ClCompile Include="src\RobotLog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\SKJCameraControlClient.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\OPini.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -202,6 +205,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotLog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\SKJCameraControlClient.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\FANUCRobotDriver.h">

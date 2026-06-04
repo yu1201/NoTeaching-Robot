@@ -45,6 +45,7 @@ public:
     bool listFiles(const std::string& remoteDir, std::vector<FtpRemoteFileInfo>& files);
     bool downloadFile(const std::string& remoteFilePath, const std::string& localFilePath);
     bool deleteFile(const std::string& remoteFilePath, bool askConfirm = true);
+    void setMessageBoxesEnabled(bool enabled);
 
     // 析构函数：释放FTP连接
     ~FtpClient();
@@ -58,6 +59,7 @@ private:
     std::string m_ftpPwd;         // FTP密码
     HINTERNET m_hInternet;        // WinINet根句柄
     HINTERNET m_hFtpSession;      // FTP会话句柄
+    bool m_messageBoxesEnabled = true;
 
     // 内部辅助函数
     bool connectFtpServer();      // 真实FTP连接逻辑

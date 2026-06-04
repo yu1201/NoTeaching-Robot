@@ -1305,6 +1305,71 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     RefreshMotionButtonState();
 }
 
+bool FunctionTestDialog::RunDashboardTool(const QString& actionId)
+{
+    if (actionId == "setSpeed")
+    {
+        FanucSetTpSpeedTest();
+    }
+    else if (actionId == "getPulse")
+    {
+        FanucGetCurrentPulseTest();
+    }
+    else if (actionId == "checkDone")
+    {
+        FanucCheckDoneTest();
+    }
+    else if (actionId == "setGetInt")
+    {
+        FanucSetGetIntTest();
+    }
+    else if (actionId == "callJob")
+    {
+        FanucCallJobTest();
+    }
+    else if (actionId == "uploadLs")
+    {
+        FanucUploadLsTest();
+    }
+    else if (actionId == "curposDiagnostic")
+    {
+        FanucCurposDiagnosticTest();
+    }
+    else if (actionId == "timestampDiagnostic")
+    {
+        RobotCameraTimestampDiagnosticTest();
+    }
+    else if (actionId == "movlTest")
+    {
+        FanucMovlTest();
+    }
+    else if (actionId == "movjTest")
+    {
+        FanucMovjTest();
+    }
+    else if (actionId == "moveZero")
+    {
+        FanucMoveZeroTest();
+    }
+    else if (actionId == "captureKinematics")
+    {
+        FanucCaptureKinematicsSample();
+    }
+    else if (actionId == "fitDh")
+    {
+        FitDhParametersFromSamples();
+    }
+    else if (actionId == "currentFrameFilter")
+    {
+        ExportCurrentCameraFramePointFilterTest();
+    }
+    else
+    {
+        return false;
+    }
+    return true;
+}
+
 void FunctionTestDialog::closeEvent(QCloseEvent* event)
 {
     if (IsMotionBusy())

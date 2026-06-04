@@ -13,9 +13,19 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.06.01.1912`
+- 当前源码版本：`v2026.06.04.1832`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.01.1912.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.04.1832.exe`，不用自己编译源码。
+
+## 2026-06-04 更新
+
+- 先测后焊精测点处理新增旧版几何拟合、斜面波动滤波、鲁棒分段关键点和立板投影到底板方案切换，设置可保存并被先测后焊流程读取
+- 点云提取 SDK 更新后增加运行配置保护，配置日志目录不可用时自动转临时配置，减少 SDK 直接 abort 导致程序退出的问题
+- 最终焊接轨迹新增“最终轨迹点间距”参数，只在生成下发轨迹前抽样，并保存 `_FinalSampled.txt` 便于核对抽样后的点位
+- 工艺参数新增焊接模式下拉、摆动/跟踪启用开关；STEP 程序在 `ARCON` 前写入 `ARCMODE(...)`，关闭摆动或跟踪时生成 `NULL`
+- 现场工具区改为可拖动排序的工具面板，支持右键新增、删除和恢复默认顺序，拖动时不再卡死或丢失点击功能
+- FTP Job 文件批量删除改为一次确认和串行执行，避免连续弹窗导致界面卡死退出；相机页新增 SKJ 参数控制入口并随 Debug/Release 部署 `SKJCamera.dll`
+- 构建验证：`Debug x64`、`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.06.04.1832.exe`
 
 ## 2026-06-01 晚间更新
 

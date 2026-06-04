@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 
 #include <algorithm>
@@ -254,6 +255,115 @@ QString SourceNameForTrackPoint(PointCloudExtractionProcessor::TrackPointType ty
     }
 }
 
+QByteArray ConfigLineValue(const QByteArray& content, const QByteArray& key)
+{
+    const QList<QByteArray> lines = content.split('\n');
+    const QByteArray normalizedKey = key.trimmed().toLower();
+    for (QByteArray line : lines)
+    {
+        line = line.trimmed();
+        if (line.startsWith("//") || line.startsWith("#"))
+        {
+            continue;
+        }
+        const int equalIndex = line.indexOf('=');
+        if (equalIndex < 0)
+        {
+            continue;
+        }
+        const QByteArray lineKey = line.left(equalIndex).trimmed().toLower();
+        if (lineKey == normalizedKey)
+        {
+            return line.mid(equalIndex + 1).trimmed();
+        }
+    }
+    return QByteArray();
+}
+
+bool ConfigValueIsTrue(const QByteArray& content, const QByteArray& key)
+{
+    const QByteArray value = ConfigLineValue(content, key).toLower();
+    return value == "1" || value == "true" || value == "yes";
+}
+
+void ReplaceConfigValue(QByteArray* content, const QByteArray& key, const QByteArray& value)
+{
+    if (content == nullptr)
+    {
+        return;
+    }
+
+    QList<QByteArray> lines = content->split('\n');
+    const QByteArray normalizedKey = key.trimmed().toLower();
+    bool replaced = false;
+    for (QByteArray& line : lines)
+    {
+        const QByteArray trimmedLine = line.trimmed();
+        if (trimmedLine.startsWith("//") || trimmedLine.startsWith("#"))
+        {
+            continue;
+        }
+        const int equalIndex = line.indexOf('=');
+        if (equalIndex < 0)
+        {
+            continue;
+        }
+        const QByteArray lineKey = line.left(equalIndex).trimmed().toLower();
+        if (lineKey == normalizedKey)
+        {
+            line = key + " = " + value;
+            replaced = true;
+            break;
+        }
+    }
+
+    if (!replaced)
+    {
+        lines.push_back(key + " = " + value);
+    }
+    *content = lines.join('\n');
+}
+
+QString PrepareRuntimeExternalConfigPath(const QString& configPath)
+{
+    QFile file(configPath);
+    if (!file.open(QIODevice::ReadOnly))
+    {
+        return configPath;
+    }
+    QByteArray content = file.readAll();
+    file.close();
+
+    if (!ConfigValueIsTrue(content, "DEBUGLOG"))
+    {
+        return configPath;
+    }
+
+    const QString logPath = QString::fromLocal8Bit(ConfigLineValue(content, "LOGPATH")).trimmed();
+    if (!logPath.isEmpty() && QDir().mkpath(QDir::fromNativeSeparators(logPath)))
+    {
+        return configPath;
+    }
+
+    ReplaceConfigValue(&content, "DEBUGLOG", "false");
+
+    const QString runtimeDir = QDir::temp().filePath("QtWidgetsApplication4_PointCloudExtration");
+    if (!QDir().mkpath(runtimeDir))
+    {
+        return configPath;
+    }
+
+    const QString runtimeConfigPath = QDir(runtimeDir).filePath("CorrugatedSheetPointCloudEctration.runtime.ini");
+    QFile runtimeConfig(runtimeConfigPath);
+    if (!runtimeConfig.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        return configPath;
+    }
+    runtimeConfig.write(content);
+    runtimeConfig.close();
+    return runtimeConfigPath;
+}
+
 void CountClassifiedPoints(RobotCalculation::LowerWeldClassificationResult& result)
 {
     result.startCount = 0;
@@ -382,6 +492,13 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     if (!QFileInfo::exists(result.configPath))
     {
         result.error = "未找到新版精测点云配置：" + result.configPath;
+        return result;
+    }
+    result.configPath = QDir::toNativeSeparators(
+        QFileInfo(PrepareRuntimeExternalConfigPath(result.configPath)).absoluteFilePath());
+    if (!QFileInfo::exists(result.configPath))
+    {
+        result.error = "未找到新版精测点云运行配置：" + result.configPath;
         return result;
     }
 

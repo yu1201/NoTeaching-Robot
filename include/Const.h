@@ -339,13 +339,14 @@ struct T_ROBOT_MOVE_INFO
 	double dArcEndCurrent = 0.0;
 	double dArcEndVoltage = 0.0;
 	double dArcEndWaitTime = 0.0;
+	int nArcMode = 4; // STEP焊接模式：0直流一元，1脉冲一元，2JOB，3近控，4分别，5CC/CV，6TIG，7CMT
 	bool bHasWeaveParam = false;
 	T_WeaveDate tWeaveParam;
 	bool bHasTrackParam = false;
 	T_TrackData tTrackParam;
 };
 
-typedef struct
+struct T_WELD_PARA
 {
 	std::string strWorkPeace;
 	std::string strWeldType;
@@ -381,6 +382,9 @@ typedef struct
 
 	// CO2/混合气 实心/药芯 脉冲/直流 1.2/1.4 等不同组合
 	int nWeldMethod; // 焊接方法 1脉冲分别/0直流分别 （0立焊 1平焊）
+	int nWeaveEnable = 1; // 是否启用摆动参数
+	int nTrackEnable = 1; // 是否启用跟踪参数
+	int nArcMode = 4; // STEP焊接模式：0直流一元，1脉冲一元，2JOB，3近控，4分别，5CC/CV，6TIG，7CMT
 
 	int nWrapCurrent1Enable; // 包角段1电流启用
 	int nWrapVoltage1Enable; // 包角段1电压启用
@@ -404,7 +408,7 @@ typedef struct
 
 	T_WeaveDate tWeaveParam; // 摆动参数(埃斯顿摆动需要动态写入使用)
 	T_TrackData tTrackParam; // 跟踪参数，对应STEP TRACKDATA。
-}T_WELD_PARA;
+};
 
 // 线扫参数中的起点/终点脉冲姿态信息
 struct T_SCAN_WELDING_PARAM

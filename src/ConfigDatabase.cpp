@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QRandomGenerator>
 #include <QRegularExpression>
@@ -98,6 +99,12 @@ QSqlDatabase OpenDatabase()
     if (!QFileInfo::exists(dbPath))
     {
         return QSqlDatabase();
+    }
+    QFile dbFile(dbPath);
+    const QFileDevice::Permissions permissions = dbFile.permissions();
+    if ((permissions & QFileDevice::WriteOwner) == 0 || (permissions & QFileDevice::WriteUser) == 0)
+    {
+        dbFile.setPermissions(permissions | QFileDevice::WriteOwner | QFileDevice::WriteUser);
     }
 
     QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connectionName);

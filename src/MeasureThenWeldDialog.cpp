@@ -17,6 +17,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDoubleSpinBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -41,6 +42,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <thread>
 
 namespace
@@ -55,6 +57,7 @@ constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
 constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
 constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
 constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
+constexpr char FINAL_WELD_TRAJECTORY_STEP_KEY[] = "FinalWeldTrajectoryStepMm";
 
 std::string ToUtf8StdString(const QString& text)
 {
@@ -257,6 +260,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
         "QCheckBox { color: #BFE8EC; spacing: 8px; font-size: 15px; }"
         "QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #5C7A8B; background: #0B1117; }"
         "QCheckBox::indicator:checked { background: #1E8AA0; border-color: #72D4DD; }"
+        "QDoubleSpinBox { background: #05090D; color: #F5FAFA; border: 1px solid #36586A; padding: 4px 8px; min-height: 26px; }"
         "QComboBox { background: #05090D; color: #F5FAFA; border: 1px solid #36586A; padding: 4px 8px; min-height: 26px; }"
         "QComboBox::drop-down { width: 34px; border-left: 1px solid #36586A; background: #05090D; }"
         "QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
@@ -319,9 +323,23 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     m_pActualWeldCheck = new QCheckBox("实际焊接");
     m_pActualWeldCheck->setChecked(true);
     QLabel* modeHintLabel = new QLabel("取消勾选后只空跑轨迹，使用焊接参数里的空跑速度。");
+    QLabel* finalStepLabel = new QLabel("最终轨迹点间距：");
+    finalStepLabel->setStyleSheet("font-weight: bold; color: #9ED8DB;");
+    m_pFinalTrajectoryStepSpin = new QDoubleSpinBox();
+    m_pFinalTrajectoryStepSpin->setRange(0.5, 100.0);
+    m_pFinalTrajectoryStepSpin->setDecimals(3);
+    m_pFinalTrajectoryStepSpin->setSingleStep(1.0);
+    m_pFinalTrajectoryStepSpin->setValue(4.0);
+    m_pFinalTrajectoryStepSpin->setKeyboardTracking(false);
+    m_pFinalTrajectoryStepSpin->setMinimumWidth(110);
+    QLabel* finalStepUnitLabel = new QLabel("mm");
     modeLayout->addWidget(modeLabel);
     modeLayout->addWidget(m_pActualWeldCheck);
     modeLayout->addWidget(modeHintLabel);
+    modeLayout->addSpacing(24);
+    modeLayout->addWidget(finalStepLabel);
+    modeLayout->addWidget(m_pFinalTrajectoryStepSpin);
+    modeLayout->addWidget(finalStepUnitLabel);
     modeLayout->addStretch();
     flowLayout->addLayout(modeLayout);
 
@@ -369,6 +387,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     connect(m_pSkipScanWeldBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunSkipScanWeldFlow);
     connect(m_pLineScanProcessBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunLineScanProcess);
     connect(m_pActualWeldCheck, &QCheckBox::toggled, this, &MeasureThenWeldDialog::SaveWeldModeToParam);
+    connect(m_pFinalTrajectoryStepSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, &MeasureThenWeldDialog::SaveFinalTrajectoryStepToParam);
     connect(m_pRobotCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnRobotChanged);
     connect(m_pParamGroupCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnParamGroupChanged);
     connect(m_pWeldProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnWeldProcessChanged);
@@ -1563,7 +1582,7 @@ void MeasureThenWeldDialog::RunLineScanProcess()
 
 void MeasureThenWeldDialog::RefreshWeldModeFromParam()
 {
-    if (m_pActualWeldCheck == nullptr || m_pService == nullptr)
+    if ((m_pActualWeldCheck == nullptr && m_pFinalTrajectoryStepSpin == nullptr) || m_pService == nullptr)
     {
         return;
     }
@@ -1581,12 +1600,21 @@ void MeasureThenWeldDialog::RefreshWeldModeFromParam()
         return;
     }
 
-    const QSignalBlocker blocker(m_pActualWeldCheck);
-    m_pActualWeldCheck->setChecked(param.bDoActualWeld);
-    m_pActualWeldCheck->setToolTip(QString("勾选后按焊接速度运行：%1 mm/min\n取消勾选后按空跑速度运行：%2 mm/min\n下枪/收枪安全位置速度：%3 mm/min")
-        .arg(param.dWeldSpeedMmPerMin, 0, 'f', 3)
-        .arg(param.dDryRunSpeedMmPerMin, 0, 'f', 3)
-        .arg(param.dWeldSafeMoveSpeedMmPerMin, 0, 'f', 3));
+    if (m_pActualWeldCheck != nullptr)
+    {
+        const QSignalBlocker blocker(m_pActualWeldCheck);
+        m_pActualWeldCheck->setChecked(param.bDoActualWeld);
+        m_pActualWeldCheck->setToolTip(QString("勾选后按焊接速度运行：%1 mm/min\n取消勾选后按空跑速度运行：%2 mm/min\n下枪/收枪安全位置速度：%3 mm/min")
+            .arg(param.dWeldSpeedMmPerMin, 0, 'f', 3)
+            .arg(param.dDryRunSpeedMmPerMin, 0, 'f', 3)
+            .arg(param.dWeldSafeMoveSpeedMmPerMin, 0, 'f', 3));
+    }
+    if (m_pFinalTrajectoryStepSpin != nullptr)
+    {
+        const QSignalBlocker blocker(m_pFinalTrajectoryStepSpin);
+        m_pFinalTrajectoryStepSpin->setValue(param.dFinalWeldTrajectoryStepMm);
+        m_pFinalTrajectoryStepSpin->setToolTip("只在最终生成/下发焊接轨迹时抽样；不影响前面的精测点、拐点、姿态补偿和焊道补偿。");
+    }
 }
 
 void MeasureThenWeldDialog::SaveWeldModeToParam(bool doActualWeld)
@@ -1625,6 +1653,47 @@ void MeasureThenWeldDialog::SaveWeldModeToParam(bool doActualWeld)
     }
 
     AppendLog(QString("运行模式已切换为：%1").arg(doActualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑")));
+}
+
+void MeasureThenWeldDialog::SaveFinalTrajectoryStepToParam(double stepMm)
+{
+    if (m_bLoadingSelectors || m_bRunning || m_pService == nullptr)
+    {
+        return;
+    }
+
+    RobotDriverAdaptor* pRobotDriver = GetRobotDriver();
+    if (pRobotDriver == nullptr)
+    {
+        return;
+    }
+
+    T_PRECISE_MEASURE_PARAM param;
+    QString error;
+    if (!m_pService->LoadPresetParam(pRobotDriver, param, error))
+    {
+        AppendLog("保存最终轨迹点间距失败：" + error);
+        return;
+    }
+
+    const double normalizedStepMm = (std::isfinite(stepMm) && stepMm > 0.0)
+        ? std::clamp(stepMm, 0.5, 100.0)
+        : 4.0;
+    const QString paramPath = QString::fromStdString(param.sWeldParamFilePath.empty()
+        ? param.sIniFilePath
+        : param.sWeldParamFilePath);
+    if (!RobotDataHelper::WriteParamValue(
+        paramPath,
+        QString::fromStdString(param.sWeldSectionName),
+        FINAL_WELD_TRAJECTORY_STEP_KEY,
+        QString::number(normalizedStepMm, 'f', 3),
+        &error))
+    {
+        AppendLog("保存最终轨迹点间距失败：" + error);
+        return;
+    }
+
+    AppendLog(QString("最终轨迹点间距已保存：%1 mm").arg(normalizedStepMm, 0, 'f', 3));
 }
 
 bool MeasureThenWeldDialog::IsActualWeldModeChecked() const

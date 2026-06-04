@@ -13,6 +13,7 @@ class MeasureThenWeldService;
 class CameraFrameCache;
 class QCheckBox;
 class QComboBox;
+class QDoubleSpinBox;
 class QLabel;
 class QProgressBar;
 class QPushButton;
@@ -45,6 +46,8 @@ struct T_PRECISE_MEASURE_PARAM
     double dWeldSafeMoveSpeedMmPerMin = 1000.0;
     // STEP连续运动过渡比例，对应生成SRD文件中的OVERLAPREL变量。
     double dStepOverlapRel = 20.0;
+    // 最终下发/生成SRP时的焊接轨迹抽样间距，只作用于最后运动点，不影响前序拐点和姿态生成。
+    double dFinalWeldTrajectoryStepMm = 4.0;
     // 焊接方向：1 从姿态文件起点焊到终点，-1 从终点焊回起点。
     int nWeldDirection = 1;
     // 焊接轨迹下枪/收枪安全位相对首尾焊点的回退距离，对应 MeasureWeldParam.ini 的 GunDownBackSafeDis。
@@ -143,6 +146,7 @@ private:
     void RunLineScanProcess();
     void RefreshWeldModeFromParam();
     void SaveWeldModeToParam(bool doActualWeld);
+    void SaveFinalTrajectoryStepToParam(double stepMm);
     bool IsActualWeldModeChecked() const;
     void AppendLog(const QString& text);
     void SetFlowStep(const QString& text);
@@ -171,6 +175,7 @@ private:
     QPushButton* m_pSkipScanWeldBtn = nullptr;
     QPushButton* m_pLineScanProcessBtn = nullptr;
     QCheckBox* m_pActualWeldCheck = nullptr;
+    QDoubleSpinBox* m_pFinalTrajectoryStepSpin = nullptr;
     QLabel* m_pProgressLabel = nullptr;
     QProgressBar* m_pProgressBar = nullptr;
     QTimer* m_pProgressAnimationTimer = nullptr;

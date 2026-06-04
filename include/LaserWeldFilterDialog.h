@@ -23,7 +23,7 @@ private:
     void BuildUi();
     void ApplyStyle();
     void LoadSettings();
-    void SaveSettings() const;
+    bool SaveSettings(QString* error = nullptr) const;
     void BrowseInputFile();
     void BrowseOutputFile();
     void BrowseExternalLibraryDir();
@@ -34,6 +34,7 @@ private:
     void RunFilter();
     void AppendLog(const QString& text);
     PointCloudProcessingConfig::Mode CurrentProcessingMode() const;
+    PointCloudProcessingConfig::FeaturePointStrategy CurrentFeaturePointStrategy() const;
     QString CurrentProcessingModeText() const;
     double CurrentOutputStep() const;
     RobotCalculation::LowerWeldFilterParams CurrentParams() const;
@@ -64,6 +65,7 @@ private:
     QSpinBox* m_pCloudErodeValueSpin = nullptr;
     QLineEdit* m_pInputPathEdit = nullptr;
     QLineEdit* m_pOutputPathEdit = nullptr;
+    QComboBox* m_pFeaturePointStrategyCombo = nullptr;
     QComboBox* m_pAxisCombo = nullptr;
     QComboBox* m_pFitModeCombo = nullptr;
     QDoubleSpinBox* m_pZThresholdSpin = nullptr;

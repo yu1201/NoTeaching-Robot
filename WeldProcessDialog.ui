@@ -31,43 +31,6 @@
         </property>
        </widget>
       </item>
-      <item>
-       <layout class="QHBoxLayout" name="horizontalLayoutTop">
-        <item>
-         <widget class="QLabel" name="labelUseWeld">
-          <property name="text">
-           <string>当前使用工艺号</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QSpinBox" name="useWeldSpin"/>
-        </item>
-        <item>
-         <widget class="QLabel" name="labelUseWeave">
-          <property name="text">
-           <string>当前使用摆动号</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QSpinBox" name="useWeaveSpin"/>
-        </item>
-        <item>
-         <spacer name="horizontalSpacerTop">
-          <property name="orientation">
-           <enum>Qt::Horizontal</enum>
-          </property>
-          <property name="sizeHint" stdset="0">
-           <size>
-            <width>40</width>
-            <height>20</height>
-           </size>
-          </property>
-         </spacer>
-        </item>
-       </layout>
-      </item>
      </layout>
     </widget>
    </item>

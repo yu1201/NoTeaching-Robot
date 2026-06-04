@@ -150,6 +150,7 @@
     <ClCompile Include="src\WeldProcessDialog.cpp" />
     <ClCompile Include="src\OPini.cpp" />
     <ClCompile Include="src\RobotLog.cpp" />
+    <ClCompile Include="src\SKJCameraControlClient.cpp" />
     <ClCompile Include="src\RobotDriverAdaptor.cpp" />
     <ClCompile Include="src\RobotMessage.cpp" />
     <ClCompile Include="src\RobotJogDialog.cpp" />
@@ -200,6 +201,7 @@
     <ClInclude Include="include\RobotDataHelper.h" />
     <ClInclude Include="include\RobotDriverAdaptor.h" />
     <ClInclude Include="include\RobotLog.h" />
+    <ClInclude Include="include\SKJCameraControlClient.h" />
     <ClInclude Include="include\RobotMessage.h" />
     <ClInclude Include="include\RobotPoseTransform.h" />
     <ClInclude Include="include\RobotJogDialog.h" />
@@ -226,11 +228,13 @@
     <MakeDir Directories="$(TargetDir)translations" />
     <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460d.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\SKJCamera.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="AfterBuildRelease" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
     <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw &quot;$(TargetPath)&quot;" />
     <MakeDir Directories="$(TargetDir)translations" />
     <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\SKJCamera.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
 </Project>

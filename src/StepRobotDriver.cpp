@@ -96,6 +96,11 @@ namespace
 		return std::clamp(percent, 1.0, 100.0);
 	}
 
+	int StepNormalizeArcMode(int mode)
+	{
+		return mode >= 0 && mode <= 7 ? mode : 4;
+	}
+
 	struct StepDynamicValues
 	{
 		double segmentVel = 1.0;
@@ -894,6 +899,9 @@ namespace
 		const bool emitWeldCommands = hasWeldProcess && actualWeld;
 		if (emitWeldCommands)
 		{
+			const T_ROBOT_MOVE_INFO* processInfo = StepFirstWeldProcessInfo(moveInfos);
+			const int arcMode = processInfo != nullptr ? StepNormalizeArcMode(processInfo->nArcMode) : 4;
+			StepAppendCommand(oss, GetStr("ARCMODE(%d);", arcMode));
 			StepAppendFileComment(oss, "焊接开始：使用起弧参数起弧");
 			StepAppendCommand(oss, std::string("ARCON(")
 				+ kStepArcOnDataName + "," + kStepArcDataName + "," + kStepArcStartIntName + ","

@@ -75,6 +75,8 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
 {
     Settings settings;
     settings.mode = ModeFromConfigValue(ReadSetting("General/ProcessingMode", ModeConfigValue(settings.mode)));
+    settings.featurePointStrategy = FeaturePointStrategyFromConfigValue(
+        ReadSetting("FeaturePoint/Strategy", FeaturePointStrategyConfigValue(settings.featurePointStrategy)));
     settings.libraryDir = ReadSetting("External/LibraryDir", DefaultLibraryDir()).trimmed();
     settings.configPath = ReadSetting("External/ConfigPath", DefaultConfigPath()).trimmed();
     settings.zTruncationValue = ReadSetting("External/ZTruncationValue", "6.0").toDouble();
@@ -111,6 +113,7 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
 
     const bool ok =
         write("General/ProcessingMode", ModeConfigValue(settings.mode))
+        && write("FeaturePoint/Strategy", FeaturePointStrategyConfigValue(settings.featurePointStrategy))
         && write("External/LibraryDir", QDir::toNativeSeparators(settings.libraryDir))
         && write("External/ConfigPath", QDir::toNativeSeparators(settings.configPath))
         && write("External/ZTruncationValue", QString::number(settings.zTruncationValue, 'f', 6))
@@ -158,4 +161,67 @@ PointCloudProcessingConfig::Mode PointCloudProcessingConfig::ModeFromConfigValue
         return Mode::ExternalCorrugatedSheet;
     }
     return Mode::LegacyLaserPath;
+}
+
+QString PointCloudProcessingConfig::FeaturePointStrategyDisplayName(FeaturePointStrategy strategy)
+{
+    switch (strategy)
+    {
+    case FeaturePointStrategy::WorkpieceProjection:
+        return "方案三：立板投影到底板";
+    case FeaturePointStrategy::RobustSegmentedKeys:
+        return "方案二：鲁棒分段关键点";
+    case FeaturePointStrategy::SlopeWaveFiltered:
+        return "方案一：斜面波动滤波";
+    case FeaturePointStrategy::LegacyGeometry:
+    default:
+        return "旧版几何拟合";
+    }
+}
+
+QString PointCloudProcessingConfig::FeaturePointStrategyConfigValue(FeaturePointStrategy strategy)
+{
+    switch (strategy)
+    {
+    case FeaturePointStrategy::WorkpieceProjection:
+        return "WorkpieceProjection";
+    case FeaturePointStrategy::RobustSegmentedKeys:
+        return "RobustSegmentedKeys";
+    case FeaturePointStrategy::SlopeWaveFiltered:
+        return "SlopeWaveFiltered";
+    case FeaturePointStrategy::LegacyGeometry:
+    default:
+        return "LegacyGeometry";
+    }
+}
+
+PointCloudProcessingConfig::FeaturePointStrategy PointCloudProcessingConfig::FeaturePointStrategyFromConfigValue(
+    const QString& value)
+{
+    const QString normalized = value.trimmed().toLower();
+    if (normalized == "2"
+        || normalized == "robust"
+        || normalized == "robustsegmented"
+        || normalized == "robustsegmentedkeys"
+        || normalized == "scheme2")
+    {
+        return FeaturePointStrategy::RobustSegmentedKeys;
+    }
+    if (normalized == "3"
+        || normalized == "projection"
+        || normalized == "workpieceprojection"
+        || normalized == "verticalprojection"
+        || normalized == "scheme3")
+    {
+        return FeaturePointStrategy::WorkpieceProjection;
+    }
+    if (normalized == "1"
+        || normalized == "slope"
+        || normalized == "slopewave"
+        || normalized == "slopewavefiltered"
+        || normalized == "scheme1")
+    {
+        return FeaturePointStrategy::SlopeWaveFiltered;
+    }
+    return FeaturePointStrategy::LegacyGeometry;
 }

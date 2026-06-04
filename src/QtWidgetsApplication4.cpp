@@ -17,6 +17,7 @@
 #include "RobotDataHelper.h"
 #include "RobotJogDialog.h"
 #include "RobotMessage.h"
+#include "SKJCameraControlClient.h"
 #include "STEPRobotDriver.h"
 #include "TouchKeyboardManager.h"
 #include "WindowStyleHelper.h"
@@ -30,6 +31,7 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QCloseEvent>
+#include <QContextMenuEvent>
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -38,12 +40,14 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QDoubleValidator>
+#include <QDropEvent>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGuiApplication>
+#include <QAbstractItemView>
 #include <QInputDialog>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -55,6 +59,7 @@
 #include <QLinearGradient>
 #include <QLineEdit>
 #include <QLineF>
+#include <QEasingCurve>
 #include <QIntValidator>
 #include <QAction>
 #include <QCheckBox>
@@ -66,12 +71,16 @@
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QSlider>
+#include <QSpinBox>
 #include <QGraphicsDropShadowEffect>
 #include <QPointer>
 #include <QPixmap>
@@ -88,15 +97,18 @@
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QTabBar>
 #include <QThread>
 #include <QTimer>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextStream>
 #include <QTime>
+#include <QTouchEvent>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
+#include <QVariant>
 #include <QWheelEvent>
 #include <QStringConverter>
 #include <QStringList>
@@ -303,6 +315,672 @@ namespace
 				});
 		}
 	}
+
+	class DashboardToolButton final : public QPushButton
+	{
+	public:
+		DashboardToolButton(const QString& id, const QString& text, QWidget* parent = nullptr)
+			: QPushButton(text, parent)
+			, m_id(id)
+		{
+		}
+
+		const QString& toolId() const
+		{
+			return m_id;
+		}
+
+	private:
+		QString m_id;
+	};
+
+	class DashboardToolPanel final : public QWidget
+	{
+	public:
+		explicit DashboardToolPanel(const QString& configPath, QWidget* parent = nullptr)
+			: QWidget(parent)
+			, m_configPath(configPath)
+		{
+			setObjectName("DashboardToolPanel");
+			setContextMenuPolicy(Qt::DefaultContextMenu);
+			setMinimumHeight(220);
+			setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+			m_dragDelayTimer = new QTimer(this);
+			m_dragDelayTimer->setSingleShot(true);
+			connect(m_dragDelayTimer, &QTimer::timeout, this, [this]()
+				{
+					if (m_pressedButton != nullptr && !m_dragging)
+					{
+						BeginDrag(m_pressedButton, m_lastGlobalPos);
+					}
+				});
+		}
+
+		void RegisterTool(DashboardToolButton* button)
+		{
+			if (button == nullptr || button->toolId().trimmed().isEmpty())
+			{
+				return;
+			}
+			button->setParent(this);
+			button->installEventFilter(this);
+			button->setCursor(Qt::PointingHandCursor);
+			button->setProperty("dashboardToolListed", false);
+			button->setProperty("dashboardToolRuntimeVisible", true);
+			button->hide();
+
+			ToolEntry entry;
+			entry.id = button->toolId();
+			entry.text = button->text();
+			entry.button = button;
+			m_tools.insert(entry.id, entry);
+			button->hide();
+		}
+
+		void SetDefaultOrder(const QStringList& ids)
+		{
+			m_defaultOrder.clear();
+			for (const QString& id : ids)
+			{
+				if (m_tools.contains(id) && !m_defaultOrder.contains(id))
+				{
+					m_defaultOrder.push_back(id);
+				}
+			}
+			m_candidateOrder = m_defaultOrder;
+			LoadOrder();
+			RebuildLayout();
+		}
+
+		void SetCandidateOrder(const QStringList& ids)
+		{
+			m_candidateOrder = m_defaultOrder;
+			for (const QString& id : ids)
+			{
+				if (m_tools.contains(id) && !m_candidateOrder.contains(id))
+				{
+					m_candidateOrder.push_back(id);
+				}
+			}
+		}
+
+		void SetEditingEnabled(bool enabled, const QString& reason = QString())
+		{
+			m_editingEnabled = enabled;
+			m_editingDisabledReason = reason;
+			if (!m_editingEnabled)
+			{
+				CancelDrag();
+			}
+		}
+
+		void SetCurrentRobotScope(const QString& scope)
+		{
+			m_currentRobotScope = scope.trimmed().toLower();
+		}
+
+		void RefreshToolStates()
+		{
+			if (m_dragActive)
+			{
+				m_refreshPending = true;
+				return;
+			}
+			LayoutTools(false);
+		}
+
+	protected:
+		bool eventFilter(QObject* watched, QEvent* event) override
+		{
+			DashboardToolButton* button = dynamic_cast<DashboardToolButton*>(watched);
+			if (button == nullptr)
+			{
+				return QWidget::eventFilter(watched, event);
+			}
+
+			if (event->type() == QEvent::MouseButtonPress)
+			{
+				QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+				if (mouseEvent->button() == Qt::RightButton)
+				{
+					ShowToolContextMenu(button->toolId(), mouseEvent->globalPosition().toPoint());
+					return true;
+				}
+				if (mouseEvent->button() == Qt::LeftButton && button->isEnabled())
+				{
+					if (m_editingEnabled)
+					{
+						m_pressedButton = button;
+						m_pressGlobalPos = mouseEvent->globalPosition().toPoint();
+						m_lastGlobalPos = m_pressGlobalPos;
+						m_dragOffset = button->mapFromGlobal(m_pressGlobalPos);
+						m_dragDelayTimer->start(kDragDelayMs);
+					}
+				}
+			}
+			else if (event->type() == QEvent::MouseMove)
+			{
+				QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+				m_lastGlobalPos = mouseEvent->globalPosition().toPoint();
+				if (m_dragging)
+				{
+					if (!m_editingEnabled)
+					{
+						CancelDrag();
+						return true;
+					}
+					MoveDraggedButton(m_lastGlobalPos);
+					ReorderDraggedTool(TargetVisibleIndex(mapFromGlobal(m_lastGlobalPos)));
+					return true;
+				}
+				if (m_editingEnabled
+					&& m_pressedButton == button
+					&& (m_lastGlobalPos - m_pressGlobalPos).manhattanLength() >= QApplication::startDragDistance())
+				{
+					m_dragDelayTimer->stop();
+					BeginDrag(button, m_lastGlobalPos);
+					return true;
+				}
+			}
+			else if (event->type() == QEvent::MouseButtonRelease)
+			{
+				QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+				m_dragDelayTimer->stop();
+				if (m_dragging)
+				{
+					FinishDrag(mouseEvent->globalPosition().toPoint());
+					return true;
+				}
+				m_pressedButton = nullptr;
+			}
+
+			return QWidget::eventFilter(watched, event);
+		}
+
+		void contextMenuEvent(QContextMenuEvent* event) override
+		{
+			if (event == nullptr)
+			{
+				QWidget::contextMenuEvent(event);
+				return;
+			}
+			if (QWidget* child = childAt(event->pos()))
+			{
+				if (DashboardToolButton* button = dynamic_cast<DashboardToolButton*>(child))
+				{
+					ShowToolContextMenu(button->toolId(), event->globalPos());
+					event->accept();
+					return;
+				}
+			}
+			ShowBlankContextMenu(event->globalPos());
+			event->accept();
+		}
+
+		void resizeEvent(QResizeEvent* event) override
+		{
+			QWidget::resizeEvent(event);
+			LayoutTools(false);
+		}
+
+	private:
+		static constexpr int kColumnCount = 2;
+		static constexpr int kToolHeight = 46;
+		static constexpr int kSpacing = 10;
+		static constexpr int kAnimationMs = 130;
+		static constexpr int kDragDelayMs = 220;
+
+		struct ToolEntry
+		{
+			QString id;
+			QString text;
+			DashboardToolButton* button = nullptr;
+		};
+
+		void LoadOrder()
+		{
+			QSettings settings(m_configPath, QSettings::IniFormat);
+			const bool hasSavedOrder = settings.contains("Tools/Order");
+			const QStringList savedOrder = settings.value("Tools/Order").toStringList();
+			m_order = hasSavedOrder ? FilterKnownIds(savedOrder) : m_defaultOrder;
+		}
+
+		void SaveOrder() const
+		{
+			QDir().mkpath(QFileInfo(m_configPath).absolutePath());
+			QSettings settings(m_configPath, QSettings::IniFormat);
+			settings.setValue("Tools/Order", m_order);
+			settings.sync();
+		}
+
+		QStringList FilterKnownIds(const QStringList& ids) const
+		{
+			QStringList filtered;
+			for (const QString& id : ids)
+			{
+				if (m_tools.contains(id) && !filtered.contains(id))
+				{
+					filtered.push_back(id);
+				}
+			}
+			return filtered;
+		}
+
+		bool IsRuntimeVisible(const QString& id) const
+		{
+			const ToolEntry entry = m_tools.value(id);
+			if (entry.button == nullptr)
+			{
+				return false;
+			}
+			const QVariant runtimeVisible = entry.button->property("dashboardToolRuntimeVisible");
+			return !runtimeVisible.isValid() || runtimeVisible.toBool();
+		}
+
+		bool IsCompatibleWithCurrentRobot(const QString& id) const
+		{
+			const ToolEntry entry = m_tools.value(id);
+			if (entry.button == nullptr)
+			{
+				return false;
+			}
+			const QString requiredScope = entry.button->property("dashboardToolRequiredRobotScope").toString().trimmed().toLower();
+			if (requiredScope.isEmpty() || requiredScope == "all")
+			{
+				return true;
+			}
+			return !m_currentRobotScope.isEmpty() && requiredScope == m_currentRobotScope;
+		}
+
+		QStringList MissingToolIds() const
+		{
+			QStringList missing;
+			for (const QString& id : m_candidateOrder)
+			{
+				if (!m_order.contains(id) && IsRuntimeVisible(id) && IsCompatibleWithCurrentRobot(id))
+				{
+					missing.push_back(id);
+				}
+			}
+			return missing;
+		}
+
+		QStringList VisibleToolOrder() const
+		{
+			QStringList visibleOrder;
+			const QStringList filteredOrder = FilterKnownIds(m_order);
+			for (const QString& id : filteredOrder)
+			{
+				if (IsRuntimeVisible(id))
+				{
+					visibleOrder.push_back(id);
+				}
+			}
+			return visibleOrder;
+		}
+
+		void RebuildLayout()
+		{
+			LayoutTools(false);
+		}
+
+		void ShowToolContextMenu(const QString& id, const QPoint& globalPos)
+		{
+			QMenu menu(this);
+			if (!m_editingEnabled)
+			{
+				AddEditingDisabledAction(menu);
+				menu.exec(globalPos);
+				return;
+			}
+			QAction* deleteAction = menu.addAction("从常用工具删除");
+			menu.addSeparator();
+			QMenu* addMenu = menu.addMenu("添加模块");
+			AddMissingToolsToMenu(*addMenu);
+			menu.addSeparator();
+			QAction* restoreAction = menu.addAction("恢复默认工具");
+
+			QAction* selectedAction = menu.exec(globalPos);
+			if (selectedAction == deleteAction)
+			{
+				RemoveTool(id);
+			}
+			else if (selectedAction == restoreAction)
+			{
+				RestoreDefaults();
+			}
+		}
+
+		void ShowBlankContextMenu(const QPoint& globalPos)
+		{
+			QMenu menu(this);
+			if (!m_editingEnabled)
+			{
+				AddEditingDisabledAction(menu);
+				menu.exec(globalPos);
+				return;
+			}
+			QMenu* addMenu = menu.addMenu("添加模块");
+			AddMissingToolsToMenu(*addMenu);
+			menu.addSeparator();
+			QAction* restoreAction = menu.addAction("恢复默认工具");
+
+			QAction* selectedAction = menu.exec(globalPos);
+			if (selectedAction == restoreAction)
+			{
+				RestoreDefaults();
+			}
+		}
+
+		void AddEditingDisabledAction(QMenu& menu)
+		{
+			const QString text = m_editingDisabledReason.isEmpty()
+				? "当前没有可用控制单元，不能修改模块。"
+				: m_editingDisabledReason;
+			QAction* disabledAction = menu.addAction(text);
+			disabledAction->setEnabled(false);
+		}
+
+		void AddMissingToolsToMenu(QMenu& menu)
+		{
+			const QStringList missingIds = MissingToolIds();
+			if (missingIds.isEmpty())
+			{
+				QAction* emptyAction = menu.addAction("没有可添加工具");
+				emptyAction->setEnabled(false);
+				return;
+			}
+			for (const QString& id : missingIds)
+			{
+				const ToolEntry entry = m_tools.value(id);
+				QAction* action = menu.addAction(QString("添加%1").arg(entry.text));
+				connect(action, &QAction::triggered, this, [this, id]()
+					{
+						AddTool(id);
+					});
+			}
+		}
+
+		void AddTool(const QString& id)
+		{
+			if (!m_editingEnabled || !m_tools.contains(id) || m_order.contains(id) || !IsCompatibleWithCurrentRobot(id))
+			{
+				return;
+			}
+			m_order.push_back(id);
+			SaveOrder();
+			LayoutTools(true);
+		}
+
+		void RemoveTool(const QString& id)
+		{
+			if (!m_editingEnabled)
+			{
+				return;
+			}
+			m_order.removeAll(id);
+			SaveOrder();
+			LayoutTools(true);
+		}
+
+		void RestoreDefaults()
+		{
+			if (!m_editingEnabled)
+			{
+				return;
+			}
+			m_order = m_defaultOrder;
+			SaveOrder();
+			LayoutTools(true);
+		}
+
+		void BeginDrag(DashboardToolButton* button, const QPoint& globalPos)
+		{
+			if (!m_editingEnabled || button == nullptr || !button->isEnabled() || !IsRuntimeVisible(button->toolId()))
+			{
+				return;
+			}
+			m_dragActive = true;
+			m_dragging = true;
+			m_dragButton = button;
+			m_dragId = button->toolId();
+			m_dragOffset = button->mapFromGlobal(globalPos);
+			m_dragStartOrder = m_order;
+			button->setDown(false);
+			button->setCursor(Qt::ClosedHandCursor);
+			button->raise();
+			StopButtonAnimation(button);
+			MoveDraggedButton(globalPos);
+		}
+
+		void CancelDrag()
+		{
+			if (m_dragDelayTimer != nullptr)
+			{
+				m_dragDelayTimer->stop();
+			}
+			DashboardToolButton* button = m_dragButton;
+			m_dragging = false;
+			m_dragActive = false;
+			m_pressedButton = nullptr;
+			m_dragButton = nullptr;
+			m_dragId.clear();
+			if (button != nullptr)
+			{
+				button->setCursor(Qt::PointingHandCursor);
+			}
+			LayoutTools(false);
+		}
+
+		void FinishDrag(const QPoint& globalPos)
+		{
+			MoveDraggedButton(globalPos);
+			DashboardToolButton* button = m_dragButton;
+			m_dragging = false;
+			m_dragActive = false;
+			m_dragButton = nullptr;
+			m_pressedButton = nullptr;
+			m_dragId.clear();
+			if (button != nullptr)
+			{
+				button->setCursor(Qt::PointingHandCursor);
+			}
+			SaveOrder();
+			LayoutTools(true);
+			if (m_refreshPending)
+			{
+				m_refreshPending = false;
+				LayoutTools(false);
+			}
+		}
+
+		void MoveDraggedButton(const QPoint& globalPos)
+		{
+			if (m_dragButton == nullptr)
+			{
+				return;
+			}
+			m_dragButton->move(mapFromGlobal(globalPos) - m_dragOffset);
+			m_dragButton->raise();
+		}
+
+		int ToolWidth() const
+		{
+			const QRect area = contentsRect();
+			return qMax(118, (area.width() - kSpacing) / kColumnCount);
+		}
+
+		QRect ToolRectForVisibleIndex(int index) const
+		{
+			const QRect area = contentsRect();
+			const int width = ToolWidth();
+			const int row = index / kColumnCount;
+			const int column = index % kColumnCount;
+			return QRect(
+				area.left() + column * (width + kSpacing),
+				area.top() + row * (kToolHeight + kSpacing),
+				width,
+				kToolHeight);
+		}
+
+		int TargetVisibleIndex(const QPoint& panelPos) const
+		{
+			const int visibleCount = VisibleToolOrder().size();
+			if (visibleCount <= 0)
+			{
+				return -1;
+			}
+			const QRect area = contentsRect();
+			const int width = ToolWidth();
+			const int x = qMax(0, panelPos.x() - area.left());
+			const int y = qMax(0, panelPos.y() - area.top());
+			const int column = qBound(0, x / qMax(1, width + kSpacing), kColumnCount - 1);
+			const int row = y / qMax(1, kToolHeight + kSpacing);
+			return qBound(0, row * kColumnCount + column, visibleCount - 1);
+		}
+
+		void ReorderDraggedTool(int targetIndex)
+		{
+			if (targetIndex < 0 || m_dragId.isEmpty())
+			{
+				return;
+			}
+			QStringList visibleOrder = VisibleToolOrder();
+			const int currentIndex = visibleOrder.indexOf(m_dragId);
+			if (currentIndex < 0 || currentIndex == targetIndex)
+			{
+				return;
+			}
+			visibleOrder.move(currentIndex, targetIndex);
+			ApplyVisibleOrder(visibleOrder);
+			LayoutTools(true);
+		}
+
+		void ApplyVisibleOrder(const QStringList& visibleOrder)
+		{
+			QStringList merged;
+			int visibleIndex = 0;
+			const QStringList previousOrder = FilterKnownIds(m_order);
+			for (const QString& id : previousOrder)
+			{
+				if (IsRuntimeVisible(id))
+				{
+					if (visibleIndex < visibleOrder.size() && !merged.contains(visibleOrder[visibleIndex]))
+					{
+						merged.push_back(visibleOrder[visibleIndex]);
+					}
+					++visibleIndex;
+				}
+				else if (m_tools.contains(id) && !merged.contains(id))
+				{
+					merged.push_back(id);
+				}
+			}
+			while (visibleIndex < visibleOrder.size())
+			{
+				if (!merged.contains(visibleOrder[visibleIndex]))
+				{
+					merged.push_back(visibleOrder[visibleIndex]);
+				}
+				++visibleIndex;
+			}
+			m_order = merged;
+		}
+
+		void LayoutTools(bool animate)
+		{
+			const QStringList filteredOrder = FilterKnownIds(m_order);
+			const QStringList visibleOrder = VisibleToolOrder();
+			int visibleIndex = 0;
+			for (const QString& id : filteredOrder)
+			{
+				ToolEntry& entry = m_tools[id];
+				if (entry.button == nullptr)
+				{
+					continue;
+				}
+				const bool visible = IsRuntimeVisible(id);
+				entry.button->setProperty("dashboardToolListed", visible);
+				entry.button->setVisible(visible);
+				if (!visible)
+				{
+					StopButtonAnimation(entry.button);
+					continue;
+				}
+				const QRect targetRect = ToolRectForVisibleIndex(visibleIndex);
+				++visibleIndex;
+				if (m_dragging && entry.button == m_dragButton)
+				{
+					continue;
+				}
+				MoveButtonTo(entry.button, targetRect, animate);
+			}
+			m_order = filteredOrder;
+			const int rows = qMax(1, (visibleOrder.size() + kColumnCount - 1) / kColumnCount);
+			setMinimumHeight(qMax(220, rows * kToolHeight + qMax(0, rows - 1) * kSpacing));
+		}
+
+		void MoveButtonTo(DashboardToolButton* button, const QRect& targetRect, bool animate)
+		{
+			if (button == nullptr)
+			{
+				return;
+			}
+			if (!animate || !button->isVisible() || button->geometry().isNull())
+			{
+				StopButtonAnimation(button);
+				button->setGeometry(targetRect);
+				return;
+			}
+			if (button->geometry() == targetRect)
+			{
+				return;
+			}
+			StopButtonAnimation(button);
+			QPropertyAnimation* animation = new QPropertyAnimation(button, "geometry", button);
+			animation->setObjectName("dashboardToolGeometryAnimation");
+			animation->setDuration(kAnimationMs);
+			animation->setEasingCurve(QEasingCurve::OutCubic);
+			animation->setStartValue(button->geometry());
+			animation->setEndValue(targetRect);
+			animation->start(QAbstractAnimation::DeleteWhenStopped);
+		}
+
+		void StopButtonAnimation(DashboardToolButton* button)
+		{
+			if (button == nullptr)
+			{
+				return;
+			}
+			const QList<QPropertyAnimation*> animations = button->findChildren<QPropertyAnimation*>("dashboardToolGeometryAnimation");
+			for (QPropertyAnimation* animation : animations)
+			{
+				animation->stop();
+				animation->deleteLater();
+			}
+		}
+
+		QString m_configPath;
+		QHash<QString, ToolEntry> m_tools;
+		QStringList m_defaultOrder;
+		QStringList m_candidateOrder;
+		QStringList m_order;
+		QString m_currentRobotScope;
+		QString m_editingDisabledReason;
+		bool m_editingEnabled = false;
+		bool m_dragActive = false;
+		bool m_dragging = false;
+		bool m_refreshPending = false;
+		QTimer* m_dragDelayTimer = nullptr;
+		DashboardToolButton* m_pressedButton = nullptr;
+		DashboardToolButton* m_dragButton = nullptr;
+		QString m_dragId;
+		QStringList m_dragStartOrder;
+		QPoint m_pressGlobalPos;
+		QPoint m_lastGlobalPos;
+		QPoint m_dragOffset;
+	};
 
 	void SetFormRowVisible(QFormLayout* form, QWidget* fieldWidget, bool visible)
 	{
@@ -3755,6 +4433,7 @@ namespace
 							connection.port,
 							ToLocalStd(connection.user),
 							ToLocalStd(connection.password));
+						ftp.setMessageBoxesEnabled(false);
 						ok = work(ftp, &error);
 					}
 					catch (const std::exception& e)
@@ -4005,26 +4684,48 @@ namespace
 				return;
 			}
 
+			auto deletedCount = std::make_shared<int>(0);
+			auto failedFiles = std::make_shared<QStringList>();
 			RunFtpTask(
 				QString("删除服务器 %1 个文件").arg(files.size()),
-				[files](FtpClient& ftp, QString* error) -> bool
+				[files, deletedCount, failedFiles](FtpClient& ftp, QString* error) -> bool
 				{
+					if (error != nullptr)
+					{
+						error->clear();
+					}
 					for (const QPair<QString, QString>& file : files)
 					{
-						if (!ftp.deleteFile(ToFtpStd(file.first), false))
+						if (ftp.deleteFile(ToFtpStd(file.first), false))
 						{
-							if (error != nullptr)
-							{
-								*error = QString("删除失败：%1").arg(file.first);
-							}
-							return false;
+							++(*deletedCount);
+						}
+						else
+						{
+							failedFiles->append(file.first);
 						}
 					}
 					return true;
 				},
-				[this]()
+				[this, files, deletedCount, failedFiles]()
 				{
 					RefreshRemoteFiles();
+					const int failedCount = failedFiles->size();
+					const QString summary = QString("服务器文件删除完成：成功 %1 个，失败 %2 个。")
+						.arg(*deletedCount)
+						.arg(failedCount);
+					m_statusLabel->setText(summary);
+					AppendLog(summary);
+					if (failedCount > 0)
+					{
+						const QString detail = failedFiles->mid(0, 10).join(QStringLiteral("\n"));
+						const QString more = failedCount > 10 ? QString("\n... 另有 %1 个失败文件").arg(failedCount - 10) : QString();
+						QMessageBox::warning(this, "删除服务器文件", summary + "\n\n" + detail + more);
+					}
+					else
+					{
+						QMessageBox::information(this, "删除服务器文件", QString("已删除服务器上的 %1 个文件。").arg(files.size()));
+					}
 				});
 		}
 
@@ -4625,8 +5326,19 @@ namespace
 	class GroovePointCloudDialog final : public QDialog
 	{
 	public:
-		explicit GroovePointCloudDialog(QWidget* parent = nullptr)
+		using RefreshCameraParamsFunc = std::function<bool(SKJCameraParameterValues&, QString*)>;
+		using SetCameraParamFunc = std::function<bool(SKJCameraControlClient::Parameter, int, QString*)>;
+		using SetCameraSwitchFunc = std::function<bool(bool, QString*)>;
+
+		explicit GroovePointCloudDialog(
+			RefreshCameraParamsFunc refreshCameraParams,
+			SetCameraParamFunc setCameraParam,
+			SetCameraSwitchFunc setLaserEnabled,
+			QWidget* parent = nullptr)
 			: QDialog(parent)
+			, m_refreshCameraParams(std::move(refreshCameraParams))
+			, m_setCameraParam(std::move(setCameraParam))
+			, m_setLaserEnabled(std::move(setLaserEnabled))
 		{
 			setWindowTitle("坡口相机点云预览");
 			setModal(false);
@@ -4638,22 +5350,135 @@ namespace
 			mainLayout->setSpacing(ScalePixels(10));
 
 			QHBoxLayout* toolbarLayout = new QHBoxLayout();
-			toolbarLayout->addStretch(1);
-			m_rawButton = new QPushButton("滤波前", this);
-			m_filteredButton = new QPushButton("滤波后", this);
-			for (QPushButton* button : { m_rawButton, m_filteredButton })
-			{
-				button->setCheckable(true);
-				button->setMinimumSize(ScalePixels(150), ScalePixels(44));
-				toolbarLayout->addWidget(button);
-			}
-			m_trendLineButton = new QPushButton("三段线", this);
-			m_trendLineButton->setCheckable(true);
-			m_trendLineButton->setMinimumSize(ScalePixels(120), ScalePixels(44));
-			toolbarLayout->addSpacing(ScalePixels(12));
-			toolbarLayout->addWidget(m_trendLineButton);
+			toolbarLayout->setContentsMargins(0, 0, 0, 0);
+			m_previewModeTabs = new QTabBar(this);
+			m_previewModeTabs->setObjectName("GroovePreviewModeTabs");
+			m_previewModeTabs->setDrawBase(false);
+			m_previewModeTabs->setExpanding(false);
+			m_previewModeTabs->addTab("滤波前");
+			m_previewModeTabs->addTab("滤波后");
+			m_previewModeTabs->setStyleSheet(
+				"QTabBar::tab {"
+				"background:#182832;"
+				"color:#DDFBFF;"
+				"border:1px solid #35596D;"
+				"border-bottom-color:#2A4352;"
+				"padding:7px 22px;"
+				"min-width:72px;"
+				"font-size:15px;"
+				"}"
+				"QTabBar::tab:first {"
+				"border-top-left-radius:6px;"
+				"}"
+				"QTabBar::tab:last {"
+				"border-top-right-radius:6px;"
+				"}"
+				"QTabBar::tab:selected {"
+				"background:#246A58;"
+				"border-color:#7DE8C0;"
+				"color:#FFFFFF;"
+				"}"
+				"QTabBar::tab:hover:!selected {"
+				"background:#213949;"
+				"border-color:#5F9BB2;"
+				"}");
+			toolbarLayout->addWidget(m_previewModeTabs, 0, Qt::AlignLeft);
+			m_trendLineToggleButton = new QPushButton("三段线", this);
+			m_trendLineToggleButton->setCheckable(true);
+			m_trendLineToggleButton->setCursor(Qt::PointingHandCursor);
+			m_trendLineToggleButton->setMinimumHeight(ScalePixels(34));
+			m_trendLineToggleButton->setStyleSheet(
+				"QPushButton {"
+				"background:#182832;"
+				"color:#DDFBFF;"
+				"border:1px solid #35596D;"
+				"border-radius:6px;"
+				"padding:6px 18px;"
+				"font-size:15px;"
+				"}"
+				"QPushButton:hover {"
+				"background:#213949;"
+				"border-color:#5F9BB2;"
+				"}"
+				"QPushButton:checked {"
+				"background:#246A58;"
+				"border-color:#7DE8C0;"
+				"color:#FFFFFF;"
+				"}");
+			toolbarLayout->addSpacing(ScalePixels(8));
+			toolbarLayout->addWidget(m_trendLineToggleButton, 0, Qt::AlignLeft);
 			toolbarLayout->addStretch(1);
 			mainLayout->addLayout(toolbarLayout);
+
+			QGroupBox* cameraControlGroup = new QGroupBox("相机参数", this);
+			QGridLayout* cameraControlLayout = new QGridLayout(cameraControlGroup);
+			cameraControlLayout->setContentsMargins(ScalePixels(12), ScalePixels(10), ScalePixels(12), ScalePixels(10));
+			cameraControlLayout->setHorizontalSpacing(ScalePixels(10));
+			cameraControlLayout->setVerticalSpacing(ScalePixels(8));
+			AddCameraParameterRow(
+				cameraControlLayout,
+				0,
+				m_exposureControl,
+				"曝光",
+				SKJCameraControlClient::Parameter::Exposure,
+				25,
+				5000,
+				25);
+			AddCameraParameterRow(
+				cameraControlLayout,
+				1,
+				m_gainControl,
+				"增益",
+				SKJCameraControlClient::Parameter::Gain,
+				0,
+				100,
+				1);
+			AddCameraParameterRow(
+				cameraControlLayout,
+				2,
+				m_binarizeControl,
+				"二值化",
+				SKJCameraControlClient::Parameter::Binarize,
+				0,
+				255,
+				1);
+			QLabel* laserLabel = new QLabel("激光", this);
+			m_laserToggleButton = new QPushButton("打开激光", this);
+			m_laserToggleButton->setObjectName("CameraLaserToggleButton");
+			m_laserToggleButton->setCheckable(true);
+			m_laserToggleButton->setCursor(Qt::PointingHandCursor);
+			m_laserToggleButton->setMinimumSize(ScalePixels(138), ScalePixels(46));
+			m_laserToggleButton->setStyleSheet(
+				"QPushButton#CameraLaserToggleButton {"
+				"background:#18313F;"
+				"color:#DDFBFF;"
+				"border:1px solid #4C7890;"
+				"border-radius:18px;"
+				"font-size:16px;"
+				"font-weight:600;"
+				"padding:6px 18px;"
+				"}"
+				"QPushButton#CameraLaserToggleButton:hover {"
+				"background:#21475A;"
+				"border-color:#7FD7E7;"
+				"}"
+				"QPushButton#CameraLaserToggleButton:checked {"
+				"background:#236A54;"
+				"border-color:#8EF2C4;"
+				"color:#FFFFFF;"
+				"}"
+				"QPushButton#CameraLaserToggleButton:pressed {"
+				"background:#123242;"
+				"}");
+			cameraControlLayout->addWidget(laserLabel, 3, 0);
+			cameraControlLayout->addWidget(m_laserToggleButton, 3, 1);
+			m_refreshParamsButton = new QPushButton("刷新参数", this);
+			m_refreshParamsButton->setMinimumHeight(ScalePixels(32));
+			m_cameraControlStatusLabel = new QLabel("参数控制未连接", this);
+			m_cameraControlStatusLabel->setWordWrap(true);
+			cameraControlLayout->addWidget(m_refreshParamsButton, 4, 0);
+			cameraControlLayout->addWidget(m_cameraControlStatusLabel, 4, 1, 1, 2);
+			cameraControlGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
 
 			m_view = new GroovePointCloudView(this);
 			const int plotSide = ScalePixels(ComputePlotSide(parent));
@@ -4663,31 +5488,45 @@ namespace
 			m_infoText = new QPlainTextEdit(this);
 			m_infoText->setReadOnly(true);
 			m_infoText->setLineWrapMode(QPlainTextEdit::WidgetWidth);
-			m_infoText->setMinimumWidth(ScalePixels(340));
-			m_infoText->setMaximumWidth(ScalePixels(430));
-			m_infoText->setMinimumHeight(std::min(plotSide, ScalePixels(520)));
+			m_infoText->setMinimumWidth(ScalePixels(480));
+			m_infoText->setMaximumWidth(ScalePixels(560));
+			m_infoText->setMinimumHeight(ScalePixels(360));
+			m_infoText->setMaximumHeight(ScalePixels(430));
+			m_infoText->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 			m_infoText->setPlainText("坡口相机数据：等待测试...");
+
+			QWidget* rightPanel = new QWidget(this);
+			rightPanel->setMinimumWidth(ScalePixels(480));
+			rightPanel->setMaximumWidth(ScalePixels(560));
+			QVBoxLayout* rightPanelLayout = new QVBoxLayout(rightPanel);
+			rightPanelLayout->setContentsMargins(0, 0, 0, 0);
+			rightPanelLayout->setSpacing(ScalePixels(10));
+			rightPanelLayout->addWidget(m_infoText, 0);
+			rightPanelLayout->addWidget(cameraControlGroup, 1);
 
 			QHBoxLayout* contentLayout = new QHBoxLayout();
 			contentLayout->setSpacing(ScalePixels(12));
 			contentLayout->addWidget(m_view, 1, Qt::AlignCenter);
-			contentLayout->addWidget(m_infoText, 0);
+			contentLayout->addWidget(rightPanel, 0);
 			mainLayout->addLayout(contentLayout, 1);
 
-			connect(m_rawButton, &QPushButton::clicked, this, [this]()
+			connect(m_previewModeTabs, &QTabBar::currentChanged, this, [this](int index)
 				{
-					SetFilteredMode(false);
+					SetPreviewModeTab(index);
 				});
-			connect(m_filteredButton, &QPushButton::clicked, this, [this]()
+			connect(m_trendLineToggleButton, &QPushButton::clicked, this, [this](bool checked)
 				{
-					SetFilteredMode(true);
+					SetTrendLineOverlay(checked);
 				});
-			connect(m_trendLineButton, &QPushButton::clicked, this, [this]()
+			connect(m_refreshParamsButton, &QPushButton::clicked, this, [this]()
 				{
-					m_showTrendLines = (m_trendLineButton != nullptr && m_trendLineButton->isChecked());
-					RefreshView(false, true);
+					RefreshCameraControlParams();
 				});
-			SetFilteredMode(false);
+			connect(m_laserToggleButton, &QPushButton::clicked, this, [this](bool checked)
+				{
+					ApplyLaserEnabled(checked);
+				});
+			SetPreviewModeTab(0);
 			adjustSize();
 			setMinimumSize(sizeHint());
 			resize(sizeHint());
@@ -4725,11 +5564,205 @@ namespace
 			}
 		}
 
+		void RefreshCameraControlParams()
+		{
+			if (!m_refreshCameraParams)
+			{
+				UpdateCameraControlStatus("未配置相机参数控制。", false);
+				return;
+			}
+
+			SKJCameraParameterValues values;
+			QString error;
+			if (!m_refreshCameraParams(values, &error))
+			{
+				UpdateCameraControlStatus(error, false);
+				return;
+			}
+
+			m_loadingCameraParams = true;
+			SetCameraControlValue(m_exposureControl, values.exposure);
+			SetCameraControlValue(m_gainControl, values.gain);
+			SetCameraControlValue(m_binarizeControl, values.binarize);
+			m_loadingCameraParams = false;
+			UpdateCameraControlStatus(
+				QString("已同步：曝光=%1，增益=%2，二值化=%3")
+					.arg(values.exposure)
+					.arg(values.gain)
+					.arg(values.binarize),
+				true);
+		}
+
 	private:
+		struct CameraParameterControl
+		{
+			SKJCameraControlClient::Parameter parameter = SKJCameraControlClient::Parameter::Exposure;
+			QString name;
+			QSlider* slider = nullptr;
+			QSpinBox* spin = nullptr;
+		};
+
 		static int ScalePixels(int value)
 		{
 			constexpr double kPreviewUiScale = 0.8;
 			return std::max(1, static_cast<int>(std::round(value * kPreviewUiScale)));
+		}
+
+		void AddCameraParameterRow(
+			QGridLayout* layout,
+			int row,
+			CameraParameterControl& control,
+			const QString& name,
+			SKJCameraControlClient::Parameter parameter,
+			int minimum,
+			int maximum,
+			int singleStep)
+		{
+			control.parameter = parameter;
+			control.name = name;
+
+			QLabel* label = new QLabel(name, this);
+			control.slider = new QSlider(Qt::Horizontal, this);
+			control.slider->setRange(minimum, maximum);
+			control.slider->setSingleStep(std::max(1, singleStep));
+			control.slider->setPageStep(std::max(1, singleStep * 10));
+			control.slider->setMinimumWidth(ScalePixels(190));
+
+			control.spin = new QSpinBox(this);
+			control.spin->setRange(minimum, maximum);
+			control.spin->setSingleStep(std::max(1, singleStep));
+			control.spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+			control.spin->setKeyboardTracking(false);
+			control.spin->setAlignment(Qt::AlignCenter);
+			control.spin->setFixedWidth(ScalePixels(86));
+			control.spin->setStyleSheet(
+				"QSpinBox {"
+				"background:#071119;"
+				"color:#DDFBFF;"
+				"border:1px solid #315168;"
+				"border-radius:4px;"
+				"padding:3px 6px;"
+				"selection-background-color:#256A7A;"
+				"}"
+				"QSpinBox:focus {"
+				"border-color:#7FD7E7;"
+				"}");
+
+			layout->addWidget(label, row, 0);
+			layout->addWidget(control.slider, row, 1);
+			layout->addWidget(control.spin, row, 2);
+
+			CameraParameterControl* controlPtr = &control;
+			connect(control.slider, &QSlider::valueChanged, this, [controlPtr](int value)
+				{
+					if (controlPtr != nullptr && controlPtr->spin != nullptr)
+					{
+						const QSignalBlocker blocker(controlPtr->spin);
+						controlPtr->spin->setValue(value);
+					}
+				});
+			connect(control.slider, &QSlider::sliderReleased, this, [this, controlPtr]()
+				{
+					if (controlPtr != nullptr && controlPtr->slider != nullptr)
+					{
+						ApplyCameraParameter(*controlPtr, controlPtr->slider->value());
+					}
+				});
+			connect(control.spin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this, controlPtr](int value)
+				{
+					if (controlPtr != nullptr && controlPtr->slider != nullptr)
+					{
+						const QSignalBlocker blocker(controlPtr->slider);
+						controlPtr->slider->setValue(value);
+					}
+					if (controlPtr != nullptr)
+					{
+						ApplyCameraParameter(*controlPtr, value);
+					}
+				});
+		}
+
+		void SetCameraControlValue(CameraParameterControl& control, int value)
+		{
+			if (control.slider == nullptr || control.spin == nullptr)
+			{
+				return;
+			}
+			value = std::clamp(value, control.spin->minimum(), control.spin->maximum());
+			const QSignalBlocker spinBlocker(control.spin);
+			const QSignalBlocker sliderBlocker(control.slider);
+			control.spin->setValue(value);
+			control.slider->setValue(value);
+		}
+
+		void ApplyCameraParameter(const CameraParameterControl& control, int value)
+		{
+			if (m_loadingCameraParams)
+			{
+				return;
+			}
+			if (!m_setCameraParam)
+			{
+				UpdateCameraControlStatus("未配置相机参数控制。", false);
+				return;
+			}
+
+			QString error;
+			if (!m_setCameraParam(control.parameter, value, &error))
+			{
+				UpdateCameraControlStatus(error, false);
+				return;
+			}
+			UpdateCameraControlStatus(QString("已设置%1=%2").arg(control.name).arg(value), true);
+		}
+
+		void ApplyLaserEnabled(bool enabled)
+		{
+			if (!m_setLaserEnabled)
+			{
+				RollbackLaserButton(!enabled);
+				UpdateCameraControlStatus("未配置相机激光控制。", false);
+				return;
+			}
+
+			QString error;
+			if (!m_setLaserEnabled(enabled, &error))
+			{
+				RollbackLaserButton(!enabled);
+				UpdateCameraControlStatus(error, false);
+				return;
+			}
+			UpdateLaserButtonText(enabled);
+			UpdateCameraControlStatus(enabled ? "已打开激光。" : "已关闭激光。", true);
+		}
+
+		void RollbackLaserButton(bool enabled)
+		{
+			if (m_laserToggleButton == nullptr)
+			{
+				return;
+			}
+			const QSignalBlocker blocker(m_laserToggleButton);
+			m_laserToggleButton->setChecked(enabled);
+			UpdateLaserButtonText(enabled);
+		}
+
+		void UpdateLaserButtonText(bool enabled)
+		{
+			if (m_laserToggleButton != nullptr)
+			{
+				m_laserToggleButton->setText(enabled ? "关闭激光" : "打开激光");
+			}
+		}
+
+		void UpdateCameraControlStatus(const QString& text, bool ok)
+		{
+			if (m_cameraControlStatusLabel == nullptr)
+			{
+				return;
+			}
+			m_cameraControlStatusLabel->setText(text.trimmed().isEmpty() ? QStringLiteral("参数控制状态未知") : text);
+			m_cameraControlStatusLabel->setStyleSheet(ok ? "color:#4ADE80;" : "color:#F87171;");
 		}
 
 		static int ComputePlotSide(QWidget* parent)
@@ -4763,6 +5796,44 @@ namespace
 			m_infoText->moveCursor(QTextCursor::Start);
 		}
 
+		void SetPreviewModeTab(int index)
+		{
+			if (m_previewModeTabs != nullptr && m_previewModeTabs->currentIndex() != index)
+			{
+				const QSignalBlocker blocker(m_previewModeTabs);
+				m_previewModeTabs->setCurrentIndex(index);
+			}
+
+			const bool showFiltered = (index == 1);
+			if (!showFiltered)
+			{
+				SetTrendLineButtonChecked(false);
+				m_showTrendLines = false;
+			}
+			SetFilteredMode(showFiltered);
+		}
+
+		void SetTrendLineOverlay(bool enabled)
+		{
+			if (enabled && m_previewModeTabs != nullptr && m_previewModeTabs->currentIndex() == 0)
+			{
+				m_previewModeTabs->setCurrentIndex(1);
+			}
+			SetTrendLineButtonChecked(enabled);
+			m_showTrendLines = enabled;
+			RefreshView(false, true);
+		}
+
+		void SetTrendLineButtonChecked(bool enabled)
+		{
+			if (m_trendLineToggleButton == nullptr)
+			{
+				return;
+			}
+			const QSignalBlocker blocker(m_trendLineToggleButton);
+			m_trendLineToggleButton->setChecked(enabled);
+		}
+
 		void SetFilteredMode(bool showFiltered)
 		{
 			if (m_showFiltered != showFiltered)
@@ -4770,14 +5841,6 @@ namespace
 				SaveCurrentViewState();
 			}
 			m_showFiltered = showFiltered;
-			if (m_rawButton != nullptr)
-			{
-				m_rawButton->setChecked(!m_showFiltered);
-			}
-			if (m_filteredButton != nullptr)
-			{
-				m_filteredButton->setChecked(m_showFiltered);
-			}
 			RefreshView(true, false);
 		}
 
@@ -4892,9 +5955,11 @@ namespace
 				return;
 			}
 			const udpDataShow& frame = showCachedFiltered ? m_filteredFrame : m_rawFrame;
-			const QString modeText = m_showFiltered
-				? (showCachedFiltered ? "滤波后" : "滤波后计算中")
-				: "滤波前";
+			const QString modeText = m_showTrendLines
+				? (showCachedFiltered ? "三段线" : "三段线计算中")
+				: (m_showFiltered
+					? (showCachedFiltered ? "滤波后" : "滤波后计算中")
+					: "滤波前");
 			m_view->SetShowTrendLines(m_showTrendLines && showCachedFiltered);
 			m_view->SetFrame(frame, QString("%1  %2").arg(m_statusText, modeText), CurrentModeViewState());
 			SaveCurrentViewState();
@@ -4902,12 +5967,21 @@ namespace
 
 		GroovePointCloudView* m_view = nullptr;
 		QPlainTextEdit* m_infoText = nullptr;
-		QPushButton* m_rawButton = nullptr;
-		QPushButton* m_filteredButton = nullptr;
-		QPushButton* m_trendLineButton = nullptr;
+		QTabBar* m_previewModeTabs = nullptr;
+		QPushButton* m_trendLineToggleButton = nullptr;
+		QPushButton* m_refreshParamsButton = nullptr;
+		QPushButton* m_laserToggleButton = nullptr;
+		QLabel* m_cameraControlStatusLabel = nullptr;
+		CameraParameterControl m_exposureControl;
+		CameraParameterControl m_gainControl;
+		CameraParameterControl m_binarizeControl;
+		RefreshCameraParamsFunc m_refreshCameraParams;
+		SetCameraParamFunc m_setCameraParam;
+		SetCameraSwitchFunc m_setLaserEnabled;
 		udpDataShow m_rawFrame;
 		udpDataShow m_filteredFrame;
 		QString m_statusText;
+		bool m_loadingCameraParams = false;
 		bool m_hasFrame = false;
 		bool m_showFiltered = false;
 		bool m_showTrendLines = false;
@@ -5147,12 +6221,14 @@ namespace
 			setMinimumSize(720, 520);
 			setMouseTracking(true);
 			setFocusPolicy(Qt::StrongFocus);
+			setAttribute(Qt::WA_AcceptTouchEvents, true);
 			SetTopView(false);
 		}
 
 		void SetLayers(const QVector<Layer>& layers)
 		{
 			m_layers = layers;
+			ClearSelectedRotationCenter(false);
 			FitToLayers();
 			update();
 		}
@@ -5164,6 +6240,10 @@ namespace
 				return;
 			}
 			m_layers[index].visible = visible;
+			if (!visible && m_selectedLayerIndex == index)
+			{
+				ClearSelectedRotationCenter(false);
+			}
 			update();
 		}
 
@@ -5171,6 +6251,7 @@ namespace
 		{
 			m_zoom = 1.0;
 			m_pan = QPointF();
+			ClearSelectedRotationCenter(false);
 			FitToLayers(false);
 			update();
 		}
@@ -5203,6 +6284,24 @@ namespace
 		}
 
 	protected:
+		bool event(QEvent* event) override
+		{
+			if (event != nullptr)
+			{
+				switch (event->type())
+				{
+				case QEvent::TouchBegin:
+				case QEvent::TouchUpdate:
+				case QEvent::TouchEnd:
+				case QEvent::TouchCancel:
+					return HandleTouchEvent(static_cast<QTouchEvent*>(event));
+				default:
+					break;
+				}
+			}
+			return QWidget::event(event);
+		}
+
 		void paintEvent(QPaintEvent* event) override
 		{
 			Q_UNUSED(event);
@@ -5217,6 +6316,7 @@ namespace
 
 			DrawGrid(painter);
 			DrawLayers(painter);
+			DrawSelectedRotationCenter(painter);
 			DrawCrosshair(painter);
 			DrawScaleBar(painter);
 			DrawAxes(painter);
@@ -5240,6 +6340,8 @@ namespace
 		void mousePressEvent(QMouseEvent* event) override
 		{
 			m_lastMousePos = event->position();
+			m_pressMousePos = event->position();
+			m_leftDragActive = false;
 			if (event->button() == Qt::LeftButton)
 			{
 				m_rotating = true;
@@ -5263,6 +6365,16 @@ namespace
 			m_lastMousePos = event->position();
 			if (m_rotating)
 			{
+				if (!m_leftDragActive)
+				{
+					const QPointF totalDelta = event->position() - m_pressMousePos;
+					if (std::hypot(totalDelta.x(), totalDelta.y()) < QApplication::startDragDistance())
+					{
+						event->accept();
+						return;
+					}
+					m_leftDragActive = true;
+				}
 				const double yaw = delta.x() * 0.008;
 				const double pitch = delta.y() * 0.008;
 				m_right = RotatePoint3D(m_right, m_up, yaw);
@@ -5289,8 +6401,14 @@ namespace
 		{
 			if (event->button() == Qt::LeftButton && m_rotating)
 			{
+				const bool wasDrag = m_leftDragActive;
 				m_rotating = false;
+				m_leftDragActive = false;
 				unsetCursor();
+				if (!wasDrag)
+				{
+					SelectRotationCenterAt(event->position(), 14.0);
+				}
 				event->accept();
 				return;
 			}
@@ -5321,6 +6439,31 @@ namespace
 			m_right = NormalizePoint3D(m_right);
 			m_up = NormalizePoint3D(m_up - m_right * DotPoint3D(m_up, m_right));
 			m_forward = NormalizePoint3D(CrossPoint3D(m_right, m_up));
+		}
+
+		PointCloudVec3 RotationCenter() const
+		{
+			return HasSelectedRotationCenter() ? m_selectedRotationCenter : m_center;
+		}
+
+		bool HasSelectedRotationCenter() const
+		{
+			return m_selectedLayerIndex >= 0
+				&& m_selectedLayerIndex < m_layers.size()
+				&& m_selectedPointIndex >= 0
+				&& m_selectedPointIndex < m_layers.at(m_selectedLayerIndex).points.size()
+				&& m_layers.at(m_selectedLayerIndex).visible;
+		}
+
+		void ClearSelectedRotationCenter(bool updateNow = true)
+		{
+			m_selectedLayerIndex = -1;
+			m_selectedPointIndex = -1;
+			m_selectedRotationCenter = {};
+			if (updateNow)
+			{
+				update();
+			}
 		}
 
 		void FitToLayers(bool resetZoomAndPan = true)
@@ -5375,11 +6518,75 @@ namespace
 
 		QPointF ProjectPoint(const PointCloudVec3& point) const
 		{
-			const PointCloudVec3 relative = point - m_center;
+			const PointCloudVec3 relative = point - RotationCenter();
 			const double scale = EffectiveScale();
 			const double sx = DotPoint3D(relative, m_right) + m_pan.x();
 			const double sy = DotPoint3D(relative, m_up) + m_pan.y();
 			return QPointF(width() * 0.5 + sx * scale, height() * 0.5 - sy * scale);
+		}
+
+		void KeepPointAtScreenPosition(const PointCloudVec3& point, const QPointF& targetScreenPos)
+		{
+			const double scale = EffectiveScale();
+			if (scale <= 1.0e-9)
+			{
+				return;
+			}
+			const QPointF currentScreenPos = ProjectPoint(point);
+			const QPointF screenDelta = targetScreenPos - currentScreenPos;
+			m_pan += QPointF(screenDelta.x() / scale, -screenDelta.y() / scale);
+		}
+
+		bool FindNearestVisiblePoint(
+			const QPointF& screenPos,
+			double maxDistance,
+			int& layerIndex,
+			int& pointIndex,
+			PointCloudVec3& point) const
+		{
+			double bestDistance2 = maxDistance * maxDistance;
+			bool found = false;
+			for (int candidateLayerIndex = 0; candidateLayerIndex < m_layers.size(); ++candidateLayerIndex)
+			{
+				const Layer& layer = m_layers.at(candidateLayerIndex);
+				if (!layer.visible || layer.points.isEmpty())
+				{
+					continue;
+				}
+				for (int candidatePointIndex = 0; candidatePointIndex < layer.points.size(); ++candidatePointIndex)
+				{
+					const QPointF projected = ProjectPoint(layer.points.at(candidatePointIndex));
+					const double dx = projected.x() - screenPos.x();
+					const double dy = projected.y() - screenPos.y();
+					const double distance2 = dx * dx + dy * dy;
+					if (distance2 <= bestDistance2)
+					{
+						bestDistance2 = distance2;
+						layerIndex = candidateLayerIndex;
+						pointIndex = candidatePointIndex;
+						point = layer.points.at(candidatePointIndex);
+						found = true;
+					}
+				}
+			}
+			return found;
+		}
+
+		void SelectRotationCenterAt(const QPointF& screenPos, double maxDistance)
+		{
+			int layerIndex = -1;
+			int pointIndex = -1;
+			PointCloudVec3 point;
+			if (!FindNearestVisiblePoint(screenPos, maxDistance, layerIndex, pointIndex, point))
+			{
+				return;
+			}
+			const QPointF oldScreenPos = ProjectPoint(point);
+			m_selectedLayerIndex = layerIndex;
+			m_selectedPointIndex = pointIndex;
+			m_selectedRotationCenter = point;
+			KeepPointAtScreenPosition(point, oldScreenPos);
+			update();
 		}
 
 		void DrawGrid(QPainter& painter) const
@@ -5454,6 +6661,30 @@ namespace
 					painter.drawPoint(ProjectPoint(layer.points.at(index)));
 				}
 			}
+		}
+
+		void DrawSelectedRotationCenter(QPainter& painter) const
+		{
+			if (!HasSelectedRotationCenter())
+			{
+				return;
+			}
+			const QPointF screenPos = ProjectPoint(m_selectedRotationCenter);
+			painter.save();
+			painter.setRenderHint(QPainter::Antialiasing, true);
+			QPen haloPen(QColor(255, 255, 255, 230));
+			haloPen.setWidthF(2.0);
+			haloPen.setCosmetic(true);
+			painter.setPen(haloPen);
+			painter.setBrush(QColor(255, 90, 75, 210));
+			painter.drawEllipse(screenPos, 7.0, 7.0);
+			QPen crossPen(QColor(255, 255, 255, 245));
+			crossPen.setWidthF(1.2);
+			crossPen.setCosmetic(true);
+			painter.setPen(crossPen);
+			painter.drawLine(screenPos + QPointF(-11.0, 0.0), screenPos + QPointF(11.0, 0.0));
+			painter.drawLine(screenPos + QPointF(0.0, -11.0), screenPos + QPointF(0.0, 11.0));
+			painter.restore();
 		}
 
 		void DrawCrosshair(QPainter& painter) const
@@ -5543,13 +6774,217 @@ namespace
 			painter.setFont(font);
 			painter.setPen(QColor(235, 245, 246));
 			painter.drawText(QRectF(12, 10, width() - 24, 22), Qt::AlignLeft | Qt::AlignVCenter,
-				QString("图层：%1  点数：%2  左键旋转 / 右键或中键平移 / 滚轮缩放 / 双击复位")
+				QString("图层：%1  点数：%2  单击点设旋转中心 / 左键或单指旋转 / 双指平移缩放 / 双击复位")
 				.arg(visibleLayerCount)
 				.arg(pointCount));
+			if (HasSelectedRotationCenter())
+			{
+				const QString layerName = m_layers.at(m_selectedLayerIndex).name;
+				painter.drawText(QRectF(12, 32, width() - 24, 22), Qt::AlignLeft | Qt::AlignVCenter,
+					QString("旋转中心：%1 #%2  X=%3  Y=%4  Z=%5")
+					.arg(layerName)
+					.arg(m_selectedPointIndex + 1)
+					.arg(m_selectedRotationCenter.x, 0, 'f', 2)
+					.arg(m_selectedRotationCenter.y, 0, 'f', 2)
+					.arg(m_selectedRotationCenter.z, 0, 'f', 2));
+			}
+		}
+
+		QVector<QPointF> ActiveTouchPositions(const QTouchEvent* event) const
+		{
+			QVector<QPointF> positions;
+			if (event == nullptr)
+			{
+				return positions;
+			}
+			for (const QEventPoint& point : event->points())
+			{
+				if (point.state() != QEventPoint::State::Released)
+				{
+					positions.push_back(point.position());
+				}
+			}
+			return positions;
+		}
+
+		static QPointF TouchCenter(const QPointF& first, const QPointF& second)
+		{
+			return QPointF((first.x() + second.x()) * 0.5, (first.y() + second.y()) * 0.5);
+		}
+
+		static double TouchDistance(const QPointF& first, const QPointF& second)
+		{
+			return std::hypot(first.x() - second.x(), first.y() - second.y());
+		}
+
+		void BeginSingleTouch(const QPointF& pos, bool allowTapSelection = true)
+		{
+			m_touchMode = TouchMode::Single;
+			m_touchStartPos = pos;
+			m_lastTouchPos = pos;
+			m_touchSingleDragActive = false;
+			m_allowTouchTapSelection = allowTapSelection;
+		}
+
+		void BeginTwoFingerTouch(const QPointF& first, const QPointF& second)
+		{
+			m_touchMode = TouchMode::TwoFinger;
+			m_lastTouchCenter = TouchCenter(first, second);
+			m_lastTouchDistance = TouchDistance(first, second);
+			m_touchSingleDragActive = false;
+			m_allowTouchTapSelection = false;
+		}
+
+		void ResetTouchState()
+		{
+			m_touchMode = TouchMode::None;
+			m_touchSingleDragActive = false;
+			m_allowTouchTapSelection = false;
+			m_lastTouchDistance = 0.0;
+		}
+
+		void RotateByScreenDelta(const QPointF& delta)
+		{
+			const double yaw = delta.x() * 0.008;
+			const double pitch = delta.y() * 0.008;
+			m_right = RotatePoint3D(m_right, m_up, yaw);
+			m_forward = RotatePoint3D(m_forward, m_up, yaw);
+			m_up = RotatePoint3D(m_up, m_right, pitch);
+			m_forward = RotatePoint3D(m_forward, m_right, pitch);
+			NormalizeBasis();
+		}
+
+		void PanAndZoomFromTouch(const QPointF& currentCenter, double currentDistance)
+		{
+			const double oldScale = EffectiveScale();
+			if (oldScale <= 1.0e-9)
+			{
+				return;
+			}
+			const double oldViewX = (m_lastTouchCenter.x() - width() * 0.5) / oldScale - m_pan.x();
+			const double oldViewY = -(m_lastTouchCenter.y() - height() * 0.5) / oldScale - m_pan.y();
+			if (m_lastTouchDistance > 1.0 && currentDistance > 1.0)
+			{
+				const double factor = std::clamp(currentDistance / m_lastTouchDistance, 0.35, 2.85);
+				m_zoom = std::clamp(m_zoom * factor, 0.05, 120.0);
+			}
+			const double newScale = EffectiveScale();
+			if (newScale <= 1.0e-9)
+			{
+				return;
+			}
+			m_pan.setX((currentCenter.x() - width() * 0.5) / newScale - oldViewX);
+			m_pan.setY(-(currentCenter.y() - height() * 0.5) / newScale - oldViewY);
+			m_lastTouchCenter = currentCenter;
+			m_lastTouchDistance = currentDistance;
+		}
+
+		bool HandleTouchEvent(QTouchEvent* event)
+		{
+			if (event == nullptr)
+			{
+				return false;
+			}
+			const QVector<QPointF> positions = ActiveTouchPositions(event);
+			if (event->type() == QEvent::TouchBegin)
+			{
+				m_rotating = false;
+				m_panning = false;
+				m_leftDragActive = false;
+				unsetCursor();
+				if (positions.size() >= 2)
+				{
+					BeginTwoFingerTouch(positions.at(0), positions.at(1));
+				}
+				else if (positions.size() == 1)
+				{
+					BeginSingleTouch(positions.first());
+				}
+				event->accept();
+				return true;
+			}
+
+			if (event->type() == QEvent::TouchCancel)
+			{
+				ResetTouchState();
+				event->accept();
+				return true;
+			}
+
+			if (event->type() == QEvent::TouchUpdate)
+			{
+				if (positions.size() >= 2)
+				{
+					if (m_touchMode != TouchMode::TwoFinger)
+					{
+						BeginTwoFingerTouch(positions.at(0), positions.at(1));
+					}
+					else
+					{
+						PanAndZoomFromTouch(TouchCenter(positions.at(0), positions.at(1)), TouchDistance(positions.at(0), positions.at(1)));
+						update();
+					}
+					event->accept();
+					return true;
+				}
+				if (positions.size() == 1)
+				{
+					const QPointF pos = positions.first();
+					if (m_touchMode != TouchMode::Single)
+					{
+						BeginSingleTouch(pos, m_touchMode != TouchMode::TwoFinger);
+					}
+					else
+					{
+						if (!m_touchSingleDragActive)
+						{
+							const QPointF totalDelta = pos - m_touchStartPos;
+							if (std::hypot(totalDelta.x(), totalDelta.y()) < QApplication::startDragDistance())
+							{
+								m_lastTouchPos = pos;
+								event->accept();
+								return true;
+							}
+							m_touchSingleDragActive = true;
+						}
+						RotateByScreenDelta(pos - m_lastTouchPos);
+						m_lastTouchPos = pos;
+						update();
+					}
+					event->accept();
+					return true;
+				}
+			}
+
+			if (event->type() == QEvent::TouchEnd)
+			{
+				if (m_touchMode == TouchMode::Single && m_allowTouchTapSelection && !m_touchSingleDragActive)
+				{
+					SelectRotationCenterAt(m_lastTouchPos, 18.0);
+				}
+				if (positions.size() >= 2)
+				{
+					BeginTwoFingerTouch(positions.at(0), positions.at(1));
+				}
+				else if (positions.size() == 1)
+				{
+					BeginSingleTouch(positions.first(), false);
+				}
+				else
+				{
+					ResetTouchState();
+				}
+				event->accept();
+				return true;
+			}
+
+			event->accept();
+			return true;
 		}
 
 		QVector<Layer> m_layers;
 		PointCloudVec3 m_center;
+		PointCloudVec3 m_selectedRotationCenter;
 		double m_baseSpan = 200.0;
 		double m_zoom = 1.0;
 		QPointF m_pan;
@@ -5557,8 +6992,25 @@ namespace
 		PointCloudVec3 m_up = { 0.0, 1.0, 0.0 };
 		PointCloudVec3 m_forward = { 0.0, 0.0, 1.0 };
 		QPointF m_lastMousePos;
+		QPointF m_pressMousePos;
 		bool m_rotating = false;
 		bool m_panning = false;
+		bool m_leftDragActive = false;
+		int m_selectedLayerIndex = -1;
+		int m_selectedPointIndex = -1;
+		enum class TouchMode
+		{
+			None,
+			Single,
+			TwoFinger
+		};
+		TouchMode m_touchMode = TouchMode::None;
+		QPointF m_touchStartPos;
+		QPointF m_lastTouchPos;
+		QPointF m_lastTouchCenter;
+		double m_lastTouchDistance = 0.0;
+		bool m_touchSingleDragActive = false;
+		bool m_allowTouchTapSelection = false;
 	};
 
 	static QString FindLatestLaserPointDirectory(const QString& robotName)
@@ -6548,6 +8000,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pDashboardClearAlarmBtn(nullptr)
 	, m_pDashboardModeBtn(nullptr)
 	, m_pDashboardDebugLogBtn(nullptr)
+	, m_pDashboardToolPanel(nullptr)
 	, m_pCameraParamBtn(nullptr)
 	, m_pWeldSeamCompBtn(nullptr)
 	, m_pWeldProcessPage(nullptr)
@@ -6558,6 +8011,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pCameraParamPage(nullptr)
 	, m_pRobotJogPage(nullptr)
 	, m_pTouchKeyboardManager(nullptr)
+	, m_skjCameraControlClient(nullptr)
 	, m_bFanucMovlForward(true)
 	, m_bFanucMovlRunning(false)
 	, m_bFanucMovjRunning(false)
@@ -6963,9 +8417,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 			return button;
 		};
 
-	auto makeToolButton = [](const QString& text, QWidget* parent) -> QPushButton*
+	auto makeToolButton = [](const QString& id, const QString& text, QWidget* parent) -> DashboardToolButton*
 		{
-			QPushButton* button = new QPushButton(text, parent);
+			DashboardToolButton* button = new DashboardToolButton(id, text, parent);
 			button->setMinimumHeight(38);
 			button->setMinimumWidth(118);
 			button->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -6994,30 +8448,90 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QGroupBox* toolGroup = new QGroupBox("现场小工具", m_pDashboardPage);
 	toolGroup->setMinimumWidth(330);
 	toolGroup->setMaximumWidth(390);
-	QGridLayout* toolLayout = new QGridLayout(toolGroup);
+	QVBoxLayout* toolLayout = new QVBoxLayout(toolGroup);
 	toolLayout->setSpacing(10);
-	m_pDashboardConnectBtn = makeToolButton("连接服务", toolGroup);
-	QPushButton* quickPositionBtn = makeToolButton("读取当前位置", toolGroup);
-	QPushButton* quickPreviewBtn = makeToolButton("坡口相机预览", toolGroup);
-	m_pDashboardClearAlarmBtn = makeToolButton("清除报警", toolGroup);
-	m_pDashboardModeBtn = makeToolButton("STEP 模式", toolGroup);
-	QPushButton* quickReadTool1Btn = makeToolButton("读取Tool1", toolGroup);
-	QPushButton* quickPointCloudBtn = makeToolButton("点云查看", toolGroup);
-	m_pDashboardDebugLogBtn = makeToolButton("显示调试日志", toolGroup);
+	DashboardToolPanel* dashboardToolPanel = new DashboardToolPanel(
+		RobotDataHelper::BuildProjectPath("Data/DashboardTools.ini"),
+		toolGroup);
+	m_pDashboardToolPanel = dashboardToolPanel;
+	toolLayout->addWidget(dashboardToolPanel, 1);
+	m_pDashboardConnectBtn = makeToolButton("connect", "连接服务", dashboardToolPanel);
+	QPushButton* quickPositionBtn = makeToolButton("currentPosition", "读取当前位置", dashboardToolPanel);
+	QPushButton* quickPreviewBtn = makeToolButton("groovePreview", "坡口相机预览", dashboardToolPanel);
+	m_pDashboardClearAlarmBtn = makeToolButton("clearAlarm", "清除报警", dashboardToolPanel);
+	m_pDashboardModeBtn = makeToolButton("stepMode", "STEP 模式", dashboardToolPanel);
+	QPushButton* quickReadTool1Btn = makeToolButton("readTool1", "读取Tool1", dashboardToolPanel);
+	QPushButton* quickPointCloudBtn = makeToolButton("pointCloudViewer", "点云查看", dashboardToolPanel);
+	m_pDashboardDebugLogBtn = makeToolButton("debugLog", "显示调试日志", dashboardToolPanel);
+	const QList<QPair<QString, QString>> functionToolSpecs = {
+		{ "setSpeed", "设置速度" },
+		{ "getPulse", "读取关节脉冲" },
+		{ "checkDone", "检查运行完成" },
+		{ "setGetInt", "写读INT寄存器" },
+		{ "callJob", "调用任务" },
+		{ "uploadLs", "发送FANUC LS" },
+		{ "curposDiagnostic", "FANUC CURPOS诊断" },
+		{ "timestampDiagnostic", "机器人+相机时间戳" },
+		{ "movlTest", "MOVL往返测试" },
+		{ "movjTest", "MOVJ J2/J3 +5deg" },
+		{ "moveZero", "运动到零位" },
+		{ "captureKinematics", "保存关节+直角" },
+		{ "fitDh", "拟合DH参数" },
+		{ "currentFrameFilter", "当前帧点云滤波" }
+	};
+	QHash<QString, QPushButton*> functionToolButtons;
+	for (const QPair<QString, QString>& spec : functionToolSpecs)
+	{
+		const QString toolId = QString("function.%1").arg(spec.first);
+		functionToolButtons.insert(spec.first, makeToolButton(toolId, spec.second, dashboardToolPanel));
+	}
+	for (const QString& fanucOnlyId : { QString("uploadLs"), QString("curposDiagnostic") })
+	{
+		if (QPushButton* button = functionToolButtons.value(fanucOnlyId, nullptr))
+		{
+			button->setProperty("dashboardToolRequiredRobotScope", "fanuc");
+		}
+	}
 	quickPreviewBtn->setCheckable(true);
 	m_pDashboardDebugLogBtn->setCheckable(true);
+	dashboardToolPanel->RegisterTool(static_cast<DashboardToolButton*>(m_pDashboardConnectBtn));
+	dashboardToolPanel->RegisterTool(static_cast<DashboardToolButton*>(quickPositionBtn));
+	dashboardToolPanel->RegisterTool(static_cast<DashboardToolButton*>(quickPreviewBtn));
+	dashboardToolPanel->RegisterTool(static_cast<DashboardToolButton*>(m_pDashboardClearAlarmBtn));
+	dashboardToolPanel->RegisterTool(static_cast<DashboardToolButton*>(m_pDashboardModeBtn));
+	dashboardToolPanel->RegisterTool(static_cast<DashboardToolButton*>(quickReadTool1Btn));
+	dashboardToolPanel->RegisterTool(static_cast<DashboardToolButton*>(quickPointCloudBtn));
+	dashboardToolPanel->RegisterTool(static_cast<DashboardToolButton*>(m_pDashboardDebugLogBtn));
+	for (QPushButton* button : functionToolButtons)
+	{
+		dashboardToolPanel->RegisterTool(static_cast<DashboardToolButton*>(button));
+	}
+	dashboardToolPanel->SetDefaultOrder({
+		"connect",
+		"currentPosition",
+		"groovePreview",
+		"clearAlarm",
+		"stepMode",
+		"readTool1",
+		"pointCloudViewer",
+		"debugLog"
+		});
+	QStringList dashboardToolCandidates = {
+		"connect",
+		"currentPosition",
+		"groovePreview",
+		"clearAlarm",
+		"stepMode",
+		"readTool1",
+		"pointCloudViewer",
+		"debugLog"
+	};
+	for (const QPair<QString, QString>& spec : functionToolSpecs)
+	{
+		dashboardToolCandidates.push_back(QString("function.%1").arg(spec.first));
+	}
+	dashboardToolPanel->SetCandidateOrder(dashboardToolCandidates);
 	m_pDashboardDebugLogBtn->hide();
-	toolLayout->addWidget(m_pDashboardConnectBtn, 0, 0);
-	toolLayout->addWidget(quickPositionBtn, 0, 1);
-	toolLayout->addWidget(quickPreviewBtn, 1, 0);
-	toolLayout->addWidget(m_pDashboardClearAlarmBtn, 1, 1);
-	toolLayout->addWidget(m_pDashboardModeBtn, 2, 0);
-	toolLayout->addWidget(quickReadTool1Btn, 2, 1);
-	toolLayout->addWidget(quickPointCloudBtn, 3, 0, 1, 2);
-	toolLayout->addWidget(m_pDashboardDebugLogBtn, 4, 0, 1, 2);
-	toolLayout->setColumnStretch(0, 1);
-	toolLayout->setColumnStretch(1, 1);
-	toolLayout->setRowStretch(5, 1);
 	dashboardActionLayout->addWidget(toolGroup, 0);
 	dashboardLayout->addLayout(dashboardActionLayout, 0);
 
@@ -7225,6 +8739,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		m_pWeldSeamCompBtn,
 		m_pCameraParamBtn
 	};
+	for (QPushButton* button : functionToolButtons)
+	{
+		m_robotOperationWidgets.push_back(button);
+	}
+	m_fanucOnlyWidgets = {
+		functionToolButtons.value("uploadLs"),
+		functionToolButtons.value("curposDiagnostic")
+	};
 	m_cameraParamDependentWidgets = {
 		quickMeasureBtn,
 		quickPreviewBtn,
@@ -7420,6 +8942,16 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pDashboardConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ToggleCurrentRobotConnection);
 	connect(m_pDashboardClearAlarmBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotClearAlarmTest);
 	connect(m_pDashboardModeBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotSwitchStepMode);
+	for (const QPair<QString, QString>& spec : functionToolSpecs)
+	{
+		if (QPushButton* button = functionToolButtons.value(spec.first, nullptr))
+		{
+			connect(button, &QPushButton::clicked, this, [this, actionId = spec.first]()
+				{
+					RunFunctionTestDashboardTool(actionId);
+				});
+		}
+	}
 	connect(quickReadTool1Btn, &QPushButton::clicked, this, &QtWidgetsApplication4::ReadTool1ToGunTool);
 	connect(quickMeasureBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenMeasureThenWeldDialog);
 	connect(quickPointCloudBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::OpenPointCloudViewerDialog);
@@ -7631,6 +9163,8 @@ QtWidgetsApplication4::~QtWidgetsApplication4()
 	{
 		m_robotLogDisplayTimer->stop();
 	}
+	delete m_skjCameraControlClient;
+	m_skjCameraControlClient = nullptr;
 	StopScanCameraRuntimes();
 	delete m_pContralUnit;
 	m_pContralUnit = nullptr;
@@ -8013,6 +9547,20 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
 {
     QString issueText;
     const bool hasReadyDriver = IsRobotUnitDriverReady(CurrentRobotUnitIndex(), &issueText);
+	RobotDriverAdaptor* currentDriver = nullptr;
+	if (const T_CONTRAL_UNIT* unitInfo = CurrentContralUnit())
+	{
+		currentDriver = static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
+	}
+	const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(currentDriver) != nullptr;
+	const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(currentDriver) != nullptr;
+	if (DashboardToolPanel* panel = dynamic_cast<DashboardToolPanel*>(m_pDashboardToolPanel))
+	{
+		panel->SetCurrentRobotScope(isFanucDriver ? "fanuc" : (isStepDriver ? "step" : QString()));
+		panel->SetEditingEnabled(hasReadyDriver, hasReadyDriver
+			? QString()
+			: "当前没有可用控制单元，不能修改模块。");
+	}
 	const QString robotName = CurrentRobotName();
 	const RobotSetupStatus setupStatus = robotName.isEmpty()
 		? RobotSetupStatus()
@@ -8052,6 +9600,11 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
 			{
 				enabled = false;
 				disableReasons << "手眼标定尚未完成，请先进入“相机参数 -> 手眼标定”计算并保存矩阵。";
+			}
+			if (enabled && containsWidget(m_fanucOnlyWidgets, widget.data()) && !isFanucDriver)
+			{
+				enabled = false;
+				disableReasons << "该测试依赖 FANUC 驱动，当前机器人不是 FANUC。";
 			}
             widget->setEnabled(enabled);
             widget->setToolTip(enabled ? QString() : disableReasons.join('\n'));
@@ -8107,10 +9660,47 @@ void QtWidgetsApplication4::RefreshDashboardConnectionState()
 	}
 	if (m_pDashboardModeBtn != nullptr)
 	{
-		m_pDashboardModeBtn->setVisible(isStepDriver);
+		m_pDashboardModeBtn->setProperty("dashboardToolRuntimeVisible", isStepDriver);
+		m_pDashboardModeBtn->hide();
 		m_pDashboardModeBtn->setToolTip(isStepDriver
 			? "切换新时达机器人模式。"
 			: "FANUC 不显示新时达模式切换。");
+	}
+	if (DashboardToolPanel* panel = dynamic_cast<DashboardToolPanel*>(m_pDashboardToolPanel))
+	{
+		panel->RefreshToolStates();
+	}
+}
+
+void QtWidgetsApplication4::RunFunctionTestDashboardTool(const QString& actionId)
+{
+	if (!RequirePermission(kRoleEngineer, "机器人功能测试"))
+	{
+		return;
+	}
+	const int currentUnitIndex = CurrentRobotUnitIndex();
+	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
+	if (targetStack == nullptr)
+	{
+		targetStack = m_pMainStack;
+	}
+	if (m_pFunctionTestPage != nullptr && m_nFunctionTestPageUnitIndex != currentUnitIndex)
+	{
+		delete m_pFunctionTestPage;
+		m_pFunctionTestPage = nullptr;
+	}
+	if (m_pFunctionTestPage == nullptr)
+	{
+		DelayedLoadingGuard loading(this, "正在准备机器人功能测试", 1000);
+		m_pFunctionTestPage = new FunctionTestDialog(m_pContralUnit, currentUnitIndex, ScanCameraCacheForUnit(currentUnitIndex), targetStack);
+		loading.Pulse();
+		m_nFunctionTestPageUnitIndex = currentUnitIndex;
+		PrepareEmbeddedPage(m_pFunctionTestPage, targetStack);
+		loading.Pulse();
+	}
+	if (m_pFunctionTestPage != nullptr && !m_pFunctionTestPage->RunDashboardTool(actionId))
+	{
+		QMessageBox::warning(this, "机器人功能测试", "未找到对应的功能测试项。");
 	}
 }
 
@@ -8388,10 +9978,15 @@ void QtWidgetsApplication4::RefreshDebugLogButtonUi()
 	if (m_pDashboardDebugLogBtn != nullptr)
 	{
 		QSignalBlocker blocker(m_pDashboardDebugLogBtn);
-		m_pDashboardDebugLogBtn->setVisible(isAdmin);
+		m_pDashboardDebugLogBtn->setProperty("dashboardToolRuntimeVisible", isAdmin);
+		m_pDashboardDebugLogBtn->hide();
 		m_pDashboardDebugLogBtn->setEnabled(isAdmin);
 		m_pDashboardDebugLogBtn->setChecked(isAdmin && m_bDebugLogMode);
 		m_pDashboardDebugLogBtn->setText(m_bDebugLogMode ? "隐藏调试日志" : "显示调试日志");
+	}
+	if (DashboardToolPanel* panel = dynamic_cast<DashboardToolPanel*>(m_pDashboardToolPanel))
+	{
+		panel->RefreshToolStates();
 	}
 
 	if (m_pMainStack != nullptr)
@@ -11415,7 +13010,71 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 {
 	if (m_pGroovePointCloudDialog == nullptr)
 	{
-		GroovePointCloudDialog* dialog = new GroovePointCloudDialog(this);
+		constexpr int kSkjCameraControlPort = 50006;
+		auto ensureControlTarget = [this, kSkjCameraControlPort](QString* error) -> bool
+		{
+			const int unitIndex = CurrentRobotUnitIndex();
+			QString cameraIP;
+			int ignoredReceivePort = 0;
+			if (!LoadGrooveCameraEndpointForUnit(unitIndex, cameraIP, ignoredReceivePort)
+				|| cameraIP.trimmed().isEmpty())
+			{
+				if (error != nullptr)
+				{
+					*error = "未读取到当前机器人扫描相机的 DeviceAddress。";
+				}
+				return false;
+			}
+			if (m_skjCameraControlClient == nullptr)
+			{
+				m_skjCameraControlClient = new SKJCameraControlClient();
+			}
+			return m_skjCameraControlClient->EnsureConnected(cameraIP, kSkjCameraControlPort, error);
+		};
+		auto refreshCameraParams = [this, ensureControlTarget](SKJCameraParameterValues& values, QString* error) -> bool
+		{
+			if (!ensureControlTarget(error) || m_skjCameraControlClient == nullptr)
+			{
+				return false;
+			}
+			return m_skjCameraControlClient->ReadParameters(values, error);
+		};
+		auto setCameraParam = [this, ensureControlTarget](SKJCameraControlClient::Parameter parameter, int value, QString* error) -> bool
+		{
+			if (!ensureControlTarget(error) || m_skjCameraControlClient == nullptr)
+			{
+				return false;
+			}
+			return m_skjCameraControlClient->SetParameter(parameter, value, error);
+		};
+		auto setLaserEnabled = [this, ensureControlTarget](bool enabled, QString* error) -> bool
+		{
+			if (m_skjCameraControlClient != nullptr)
+			{
+				m_skjCameraControlClient->Disconnect();
+			}
+
+			bool ok = false;
+			if (!ensureControlTarget(error) || m_skjCameraControlClient == nullptr)
+			{
+				ok = false;
+			}
+			else
+			{
+				ok = m_skjCameraControlClient->SetLaserEnabled(enabled, error);
+			}
+
+			if (m_skjCameraControlClient != nullptr)
+			{
+				m_skjCameraControlClient->Disconnect();
+			}
+			return ok;
+		};
+		GroovePointCloudDialog* dialog = new GroovePointCloudDialog(
+			refreshCameraParams,
+			setCameraParam,
+			setLaserEnabled,
+			this);
 		m_pGroovePointCloudDialog = dialog;
 		connect(dialog, &QObject::destroyed, this, [this]()
 			{
@@ -11528,6 +13187,7 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(
 				"正在等待相机帧...",
 				m_sGrooveCameraStatusText);
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->RefreshCameraControlParams();
 		}
 		if (m_grooveCameraDisplayTimer != nullptr)
 		{
