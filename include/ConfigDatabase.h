@@ -41,7 +41,25 @@ public:
     static QMap<QString, QString> ReadIniSection(const QString& fileName, const QString& sectionName);
     static bool RemoveIniSection(const QString& fileName, const QString& sectionName);
 
-    static bool ReadSetting(const QString& fileName, const QString& keyName, QString* value);
-    static bool WriteSetting(const QString& fileName, const QString& keyName, const QString& value);
-    static bool RemoveSetting(const QString& fileName, const QString& keyName);
+    static bool ReadScopedSetting(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName,
+        const QString& keyName,
+        QString* value);
+    static bool WriteScopedSetting(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName,
+        const QString& keyName,
+        const QString& value,
+        const QString& valueType = QStringLiteral("string"),
+        bool sensitive = false);
+    static bool RemoveScopedSetting(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName,
+        const QString& keyName);
+    static QStringList ListScopedSettingIds(const QString& scopeType, const QString& moduleName = QString());
+    static bool RemoveScopedSettings(const QString& scopeType, const QString& scopeId, const QString& moduleName = QString());
 };

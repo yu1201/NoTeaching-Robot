@@ -22,7 +22,7 @@ public:
     bool ReadRobotScanRange(const RobotDriverAdaptor* pRobotDriver);
     // 指定读取某个分组，例如 Table1 / Table2
     bool ReadRobotScanRange(const RobotDriverAdaptor* pRobotDriver, const std::string& sectionName);
-    // 直接指定 ini 路径和分组，方便独立测试
+    // 直接指定线扫参数逻辑键和分组，方便独立测试
     bool ReadRobotScanRange(const std::string& iniFilePath, const std::string& sectionName = "Table1");
 
     const T_SCAN_WELDING_PARAM& GetScanWeldingParam() const;

@@ -29,6 +29,7 @@ public:
 	bool CloseSocket() override;
 	bool IsConnected() override;
 	std::string GetRobotStatusText() override;
+	std::string GetStateMonitorSourceText() const override;
 	bool InitRobotDriver(std::string strUnitName) override;
 
 	// 主动状态读取：通过控制socket实时请求机器人数据，会占用S4控制通道。

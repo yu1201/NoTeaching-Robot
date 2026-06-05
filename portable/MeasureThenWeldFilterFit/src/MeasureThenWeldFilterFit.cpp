@@ -1,6 +1,7 @@
 #include "MeasureThenWeldFilterFit.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <iomanip>
@@ -982,6 +983,42 @@ struct Line2D
     bool valid = false;
 };
 
+struct ScalarLine
+{
+    double centerS = 0.0;
+    double centerValue = 0.0;
+    double slope = 0.0;
+    bool valid = false;
+
+    double ValueAt(double station) const
+    {
+        return centerValue + slope * (station - centerS);
+    }
+};
+
+double Cross2D(double ax, double ay, double bx, double by)
+{
+    return ax * by - ay * bx;
+}
+
+double Dot2D(double ax, double ay, double bx, double by)
+{
+    return ax * bx + ay * by;
+}
+
+double NormalizeLineDirection(Line2D& line)
+{
+    const double length = std::hypot(line.dirS, line.dirH);
+    if (length <= kEpsilon || !std::isfinite(length))
+    {
+        line.valid = false;
+        return 0.0;
+    }
+    line.dirS /= length;
+    line.dirH /= length;
+    return length;
+}
+
 Line2D FitLine2D(const std::vector<ProjectedPoint>& points, int begin, int end)
 {
     Line2D line;
@@ -1007,22 +1044,353 @@ Line2D FitLine2D(const std::vector<ProjectedPoint>& points, int begin, int end)
     line.hy = fit.first * centerS + fit.second;
     line.dirS = 1.0;
     line.dirH = fit.first;
-    const double length = std::sqrt(line.dirS * line.dirS + line.dirH * line.dirH);
-    line.dirS /= length;
-    line.dirH /= length;
+    if (NormalizeLineDirection(line) <= kEpsilon)
+    {
+        return Line2D();
+    }
     line.valid = true;
     return line;
 }
 
-double DistanceToLine2D(const ProjectedPoint& point, const Line2D& line)
+Line2D OrientLineDirection(Line2D line, const Line2D& directionHint)
+{
+    if (line.valid && directionHint.valid
+        && Dot2D(line.dirS, line.dirH, directionHint.dirS, directionHint.dirH) < 0.0)
+    {
+        line.dirS = -line.dirS;
+        line.dirH = -line.dirH;
+    }
+    return line;
+}
+
+double LineDirectionAngle(const Line2D& first, const Line2D& second)
+{
+    if (!first.valid || !second.valid)
+    {
+        return 0.0;
+    }
+    const double dot = std::clamp(std::abs(Dot2D(first.dirS, first.dirH, second.dirS, second.dirH)), 0.0, 1.0);
+    return std::acos(dot);
+}
+
+double PointLineDistance2D(double s, double h, const Line2D& line)
 {
     if (!line.valid)
     {
         return 0.0;
     }
-    const double dx = point.s - line.sx;
-    const double dy = point.smoothH - line.hy;
+    const double dx = s - line.sx;
+    const double dy = h - line.hy;
     return std::abs(dx * line.dirH - dy * line.dirS);
+}
+
+double DistanceToLine2D(const ProjectedPoint& point, const Line2D& line)
+{
+    return PointLineDistance2D(point.s, point.smoothH, line);
+}
+
+Line2D FitIndexedLine2D(
+    const std::vector<ProjectedPoint>& points,
+    const std::vector<int>& indexes,
+    const Line2D& directionHint)
+{
+    Line2D line;
+    std::vector<double> ss;
+    std::vector<double> hs;
+    ss.reserve(indexes.size());
+    hs.reserve(indexes.size());
+    for (int index : indexes)
+    {
+        if (index >= 0 && index < static_cast<int>(points.size()))
+        {
+            ss.push_back(points[static_cast<std::size_t>(index)].s);
+            hs.push_back(points[static_cast<std::size_t>(index)].smoothH);
+        }
+    }
+    if (ss.size() < 2)
+    {
+        return line;
+    }
+
+    const std::pair<double, double> fit = LinearFit1D(ss, hs);
+    const double centerS = Median(ss);
+    line.sx = centerS;
+    line.hy = fit.first * centerS + fit.second;
+    line.dirS = 1.0;
+    line.dirH = fit.first;
+    if (NormalizeLineDirection(line) <= kEpsilon)
+    {
+        return Line2D();
+    }
+    line.valid = true;
+    return OrientLineDirection(line, directionHint);
+}
+
+Line2D FitRobustLine2D(const std::vector<ProjectedPoint>& points, int begin, int end)
+{
+    begin = std::max(0, std::min(begin, end));
+    end = std::min(static_cast<int>(points.size()) - 1, std::max(begin, end));
+    Line2D line = FitLine2D(points, begin, end);
+    if (!line.valid || end - begin + 1 < 8)
+    {
+        return line;
+    }
+
+    std::vector<double> residuals;
+    residuals.reserve(static_cast<std::size_t>(end - begin + 1));
+    for (int index = begin; index <= end; ++index)
+    {
+        residuals.push_back(DistanceToLine2D(points[static_cast<std::size_t>(index)], line));
+    }
+    const double medianResidual = Median(residuals);
+    std::vector<double> deviations;
+    deviations.reserve(residuals.size());
+    for (double residual : residuals)
+    {
+        deviations.push_back(std::abs(residual - medianResidual));
+    }
+    const double residualLimit = medianResidual + std::max(0.8, Median(deviations) * 3.5);
+
+    std::vector<int> accepted;
+    accepted.reserve(residuals.size());
+    for (int index = begin; index <= end; ++index)
+    {
+        if (DistanceToLine2D(points[static_cast<std::size_t>(index)], line) <= residualLimit)
+        {
+            accepted.push_back(index);
+        }
+    }
+    if (accepted.size() >= std::max<std::size_t>(4, static_cast<std::size_t>(end - begin + 1) / 2))
+    {
+        const Line2D refinedLine = FitIndexedLine2D(points, accepted, line);
+        if (refinedLine.valid)
+        {
+            line = refinedLine;
+        }
+    }
+    return line;
+}
+
+Line2D FitSlopeConsistentSegmentCoreLine(
+    const std::vector<ProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex)
+{
+    if (projected.empty())
+    {
+        return Line2D();
+    }
+
+    const int begin = std::max(0, std::min(firstIndex, lastIndex));
+    const int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    const Line2D fallbackLine = FitRobustLine2D(projected, begin, end);
+    const int pointCount = end - begin + 1;
+    if (pointCount < 8)
+    {
+        return fallbackLine;
+    }
+
+    Line2D segmentHint;
+    segmentHint.sx = projected[static_cast<std::size_t>(begin)].s;
+    segmentHint.hy = projected[static_cast<std::size_t>(begin)].smoothH;
+    segmentHint.dirS = projected[static_cast<std::size_t>(end)].s - projected[static_cast<std::size_t>(begin)].s;
+    segmentHint.dirH = projected[static_cast<std::size_t>(end)].smoothH - projected[static_cast<std::size_t>(begin)].smoothH;
+    if (NormalizeLineDirection(segmentHint) <= kEpsilon)
+    {
+        segmentHint = fallbackLine;
+    }
+    else
+    {
+        segmentHint.valid = true;
+    }
+    if (!segmentHint.valid)
+    {
+        return fallbackLine;
+    }
+
+    struct SlopeWindow
+    {
+        Line2D line;
+        double weight = 1.0;
+        int begin = 0;
+        int end = 0;
+    };
+
+    std::vector<SlopeWindow> windows;
+    const int windowPoints = std::max(5, std::min(24, std::max(5, pointCount / 5)));
+    const int stepPoints = std::max(2, windowPoints / 2);
+    for (int windowBegin = begin; windowBegin <= end - 3; windowBegin += stepPoints)
+    {
+        const int windowEnd = std::min(end, windowBegin + windowPoints - 1);
+        if (windowEnd - windowBegin + 1 < 4)
+        {
+            continue;
+        }
+
+        Line2D windowLine = FitLine2D(projected, windowBegin, windowEnd);
+        if (!windowLine.valid)
+        {
+            continue;
+        }
+
+        SlopeWindow window;
+        window.line = OrientLineDirection(windowLine, segmentHint);
+        window.weight = std::max(1.0,
+            std::abs(projected[static_cast<std::size_t>(windowEnd)].s - projected[static_cast<std::size_t>(windowBegin)].s));
+        window.begin = windowBegin;
+        window.end = windowEnd;
+        windows.push_back(window);
+    }
+    if (windows.size() < 2)
+    {
+        return fallbackLine;
+    }
+
+    constexpr double kPi = 3.14159265358979323846;
+    const double angleLimit = 14.0 * kPi / 180.0;
+    int bestWindowIndex = -1;
+    double bestWeight = -1.0;
+    for (int candidateIndex = 0; candidateIndex < static_cast<int>(windows.size()); ++candidateIndex)
+    {
+        double clusterWeight = 0.0;
+        for (const SlopeWindow& window : windows)
+        {
+            if (LineDirectionAngle(window.line, windows[static_cast<std::size_t>(candidateIndex)].line) <= angleLimit)
+            {
+                clusterWeight += window.weight;
+            }
+        }
+        if (clusterWeight > bestWeight)
+        {
+            bestWeight = clusterWeight;
+            bestWindowIndex = candidateIndex;
+        }
+    }
+    if (bestWindowIndex < 0)
+    {
+        return fallbackLine;
+    }
+
+    const double totalSpan = std::abs(projected[static_cast<std::size_t>(end)].s - projected[static_cast<std::size_t>(begin)].s);
+    const double cornerGuard = std::max(3.0, std::min(12.0, totalSpan * 0.10));
+    const bool enableCornerGuard = totalSpan >= cornerGuard * 4.0;
+    std::vector<char> accepted(static_cast<std::size_t>(pointCount), 0);
+    const Line2D& dominantLine = windows[static_cast<std::size_t>(bestWindowIndex)].line;
+    for (const SlopeWindow& window : windows)
+    {
+        if (LineDirectionAngle(window.line, dominantLine) > angleLimit)
+        {
+            continue;
+        }
+        for (int index = window.begin; index <= window.end; ++index)
+        {
+            if (enableCornerGuard
+                && (std::abs(projected[static_cast<std::size_t>(index)].s - projected[static_cast<std::size_t>(begin)].s) < cornerGuard
+                    || std::abs(projected[static_cast<std::size_t>(index)].s - projected[static_cast<std::size_t>(end)].s) < cornerGuard))
+            {
+                continue;
+            }
+            accepted[static_cast<std::size_t>(index - begin)] = 1;
+        }
+    }
+
+    std::vector<int> acceptedIndexes;
+    acceptedIndexes.reserve(static_cast<std::size_t>(pointCount));
+    for (int index = begin; index <= end; ++index)
+    {
+        if (accepted[static_cast<std::size_t>(index - begin)])
+        {
+            acceptedIndexes.push_back(index);
+        }
+    }
+
+    const int minAcceptedCount = std::max(5, std::min(16, pointCount / 3));
+    const double minAcceptedSpan = std::max(8.0, std::min(28.0, totalSpan * 0.30));
+    const double acceptedSpan = acceptedIndexes.size() >= 2
+        ? std::abs(projected[static_cast<std::size_t>(acceptedIndexes.back())].s
+            - projected[static_cast<std::size_t>(acceptedIndexes.front())].s)
+        : 0.0;
+    if (static_cast<int>(acceptedIndexes.size()) < minAcceptedCount || acceptedSpan < minAcceptedSpan)
+    {
+        return fallbackLine;
+    }
+
+    const Line2D coreLine = FitIndexedLine2D(projected, acceptedIndexes, segmentHint);
+    return coreLine.valid ? coreLine : fallbackLine;
+}
+
+Line2D FitLocalSegmentLineWithSpan(
+    const std::vector<ProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex,
+    bool useLastSide,
+    double localSpan,
+    bool useSlopeConsistentCore)
+{
+    if (projected.empty())
+    {
+        return Line2D();
+    }
+
+    int begin = std::max(0, std::min(firstIndex, lastIndex));
+    int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    if (end <= begin + 2)
+    {
+        return FitLine2D(projected, begin, end);
+    }
+
+    const double totalSpan = std::abs(projected[static_cast<std::size_t>(end)].s - projected[static_cast<std::size_t>(begin)].s);
+    const double clampedLocalSpan = std::max(8.0, std::min(80.0, localSpan));
+    if (totalSpan > clampedLocalSpan)
+    {
+        if (useLastSide)
+        {
+            while (begin + 4 < end
+                && std::abs(projected[static_cast<std::size_t>(end)].s - projected[static_cast<std::size_t>(begin)].s)
+                    > clampedLocalSpan)
+            {
+                ++begin;
+            }
+        }
+        else
+        {
+            while (begin + 4 < end
+                && std::abs(projected[static_cast<std::size_t>(end)].s - projected[static_cast<std::size_t>(begin)].s)
+                    > clampedLocalSpan)
+            {
+                --end;
+            }
+        }
+    }
+
+    const Line2D fallbackLine = FitRobustLine2D(projected, begin, end);
+    if (!useSlopeConsistentCore)
+    {
+        return fallbackLine;
+    }
+    return FitSlopeConsistentSegmentCoreLine(projected, begin, end);
+}
+
+std::vector<Line2D> BuildGeometrySegmentLines(
+    const std::vector<ProjectedPoint>& projected,
+    const std::vector<int>& keyIndexes,
+    bool useSlopeConsistentCore)
+{
+    std::vector<Line2D> segmentLines;
+    if (keyIndexes.size() < 2)
+    {
+        return segmentLines;
+    }
+    segmentLines.reserve(keyIndexes.size() - 1);
+    for (int index = 0; index + 1 < static_cast<int>(keyIndexes.size()); ++index)
+    {
+        const int begin = keyIndexes[static_cast<std::size_t>(index)];
+        const int end = keyIndexes[static_cast<std::size_t>(index + 1)];
+        segmentLines.push_back(useSlopeConsistentCore
+            ? FitSlopeConsistentSegmentCoreLine(projected, begin, end)
+            : FitRobustLine2D(projected, begin, end));
+    }
+    return segmentLines;
 }
 
 std::vector<ProjectedPoint> RemoveSlopeWaveOutliers(
@@ -1288,25 +1656,335 @@ bool IntersectLines(const Line2D& first, const Line2D& second, double* outS, dou
     return std::isfinite(*outS) && std::isfinite(*outH);
 }
 
-double LocalMedianNormal(const std::vector<ProjectedPoint>& projected, int keyIndex, double station)
+double ProjectionDistance(double firstS, double firstH, double secondS, double secondH)
 {
-    const int radius = 8;
-    const int begin = std::max(0, keyIndex - radius);
-    const int end = std::min(static_cast<int>(projected.size()) - 1, keyIndex + radius);
+    return std::hypot(firstS - secondS, firstH - secondH);
+}
+
+double NearestProjectionDistance(
+    const std::vector<ProjectedPoint>& projected,
+    double s,
+    double h,
+    int begin,
+    int end)
+{
+    if (projected.empty())
+    {
+        return std::numeric_limits<double>::infinity();
+    }
+    begin = std::max(0, std::min(begin, end));
+    end = std::min(static_cast<int>(projected.size()) - 1, std::max(begin, end));
+    double best = std::numeric_limits<double>::infinity();
+    for (int index = begin; index <= end; ++index)
+    {
+        const ProjectedPoint& point = projected[static_cast<std::size_t>(index)];
+        best = std::min(best, ProjectionDistance(point.s, point.smoothH, s, h));
+    }
+    return best;
+}
+
+bool LocalMainBand(
+    const std::vector<ProjectedPoint>& projected,
+    double station,
+    double stationRadius,
+    double baseThreshold,
+    double* outMedianH,
+    double* outThreshold)
+{
     std::vector<double> values;
+    for (const ProjectedPoint& point : projected)
+    {
+        if (std::abs(point.s - station) <= stationRadius)
+        {
+            values.push_back(point.smoothH);
+        }
+    }
+    if (values.size() < 8)
+    {
+        return false;
+    }
+
+    const double medianH = Median(values);
+    std::vector<double> deviations;
+    deviations.reserve(values.size());
+    for (double value : values)
+    {
+        deviations.push_back(std::abs(value - medianH));
+    }
+    const double threshold = std::max(baseThreshold, std::min(8.0, Median(deviations) * 4.0 + 0.8));
+    int support = 0;
+    for (double value : values)
+    {
+        if (std::abs(value - medianH) <= threshold)
+        {
+            ++support;
+        }
+    }
+    if (support * 2 < static_cast<int>(values.size()))
+    {
+        return false;
+    }
+
+    if (outMedianH != nullptr)
+    {
+        *outMedianH = medianH;
+    }
+    if (outThreshold != nullptr)
+    {
+        *outThreshold = threshold;
+    }
+    return true;
+}
+
+bool IsCornerProjectionUsable(
+    const std::vector<ProjectedPoint>& projected,
+    const std::vector<int>& keyIndexes,
+    int keyPosition,
+    double candidateS,
+    double candidateH,
+    double referenceS,
+    double referenceH)
+{
+    if (keyPosition <= 0 || keyPosition + 1 >= static_cast<int>(keyIndexes.size()))
+    {
+        return true;
+    }
+    if (!std::isfinite(candidateS) || !std::isfinite(candidateH))
+    {
+        return false;
+    }
+
+    const double previousS = projected[static_cast<std::size_t>(keyIndexes[static_cast<std::size_t>(keyPosition - 1)])].s;
+    const double nextS = projected[static_cast<std::size_t>(keyIndexes[static_cast<std::size_t>(keyPosition + 1)])].s;
+    const double minS = std::min(previousS, nextS);
+    const double maxS = std::max(previousS, nextS);
+    const double span = std::max(1.0, maxS - minS);
+    const double margin = std::max(5.0, std::min(14.0, span * 0.12));
+    if (candidateS < minS - margin || candidateS > maxS + margin)
+    {
+        return false;
+    }
+
+    const double maxCornerShift = std::max(5.0, std::min(18.0, span * 0.14));
+    if (ProjectionDistance(candidateS, candidateH, referenceS, referenceH) > maxCornerShift)
+    {
+        return false;
+    }
+
+    const int begin = keyIndexes[static_cast<std::size_t>(keyPosition - 1)];
+    const int end = keyIndexes[static_cast<std::size_t>(keyPosition + 1)];
+    const double maxCloudDistance = std::max(2.5, std::min(6.0, span * 0.05));
+    if (NearestProjectionDistance(projected, candidateS, candidateH, begin, end) > maxCloudDistance)
+    {
+        return false;
+    }
+
+    double mainBandH = 0.0;
+    double mainBandThreshold = 0.0;
+    const double stationRadius = std::max(6.0, std::min(36.0, span * 0.08));
+    const double baseThreshold = std::max(1.6, std::min(5.5, span * 0.015 + 0.8));
+    if (LocalMainBand(projected, candidateS, stationRadius, baseThreshold, &mainBandH, &mainBandThreshold))
+    {
+        const double mainBandDelta = std::abs(candidateH - mainBandH);
+        if (mainBandDelta >= mainBandThreshold * 1.35
+            && mainBandDelta >= baseThreshold * 1.6)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+double LocalNormalValue(
+    const std::vector<ProjectedPoint>& projected,
+    int fallbackIndex,
+    double station,
+    double stationRadius,
+    double baseThreshold)
+{
+    if (projected.empty())
+    {
+        return 0.0;
+    }
+
+    const int clampedFallback = std::max(0, std::min(fallbackIndex, static_cast<int>(projected.size()) - 1));
+    double mainBandH = 0.0;
+    double mainBandThreshold = 0.0;
+    const bool hasMainBand =
+        LocalMainBand(projected, station, stationRadius, baseThreshold, &mainBandH, &mainBandThreshold);
+
+    std::vector<double> values;
+    values.reserve(32);
+    for (const ProjectedPoint& point : projected)
+    {
+        if (std::abs(point.s - station) > stationRadius)
+        {
+            continue;
+        }
+        if (hasMainBand && std::abs(point.smoothH - mainBandH) > mainBandThreshold * 1.35)
+        {
+            continue;
+        }
+        values.push_back(point.smoothN);
+    }
+    if (values.size() >= 4)
+    {
+        return Median(values);
+    }
+
+    const int indexRadius = 8;
+    const int begin = std::max(0, clampedFallback - indexRadius);
+    const int end = std::min(static_cast<int>(projected.size()) - 1, clampedFallback + indexRadius);
+    values.clear();
     values.reserve(static_cast<std::size_t>(end - begin + 1));
     for (int index = begin; index <= end; ++index)
     {
-        if (std::abs(projected[static_cast<std::size_t>(index)].s - station) <= 36.0)
+        values.push_back(projected[static_cast<std::size_t>(index)].smoothN);
+    }
+    return values.empty() ? projected[static_cast<std::size_t>(clampedFallback)].smoothN : Median(values);
+}
+
+ScalarLine FitSegmentNormalLine(const std::vector<ProjectedPoint>& projected, int firstIndex, int lastIndex)
+{
+    ScalarLine line;
+    if (projected.empty())
+    {
+        return line;
+    }
+
+    const int begin = std::max(0, std::min(firstIndex, lastIndex));
+    const int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    const int pointCount = end - begin + 1;
+    if (pointCount < 2)
+    {
+        return line;
+    }
+
+    const int trim = pointCount >= 12 ? std::min(pointCount / 6, 8) : 0;
+    const int fitBegin = begin + trim;
+    const int fitEnd = end - trim;
+    const int fitCount = fitEnd - fitBegin + 1;
+    if (fitCount < 2)
+    {
+        return line;
+    }
+
+    std::vector<double> normalValues;
+    normalValues.reserve(static_cast<std::size_t>(fitCount));
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        normalValues.push_back(projected[static_cast<std::size_t>(index)].smoothN);
+    }
+
+    const double normalMedian = Median(normalValues);
+    std::vector<double> deviations;
+    deviations.reserve(normalValues.size());
+    for (double value : normalValues)
+    {
+        deviations.push_back(std::abs(value - normalMedian));
+    }
+    const double normalLimit = std::max(1.2, std::min(8.0, Median(deviations) * 4.0 + 0.8));
+
+    int normalBandSupport = 0;
+    for (int index = fitBegin; index <= fitEnd; ++index)
+    {
+        if (std::abs(projected[static_cast<std::size_t>(index)].smoothN - normalMedian) <= normalLimit)
         {
-            values.push_back(projected[static_cast<std::size_t>(index)].smoothN);
+            ++normalBandSupport;
         }
     }
-    if (values.empty())
+    const bool useNormalBand = normalBandSupport >= std::max(4, fitCount * 2 / 3);
+
+    std::vector<int> acceptedIndexes;
+    acceptedIndexes.reserve(static_cast<std::size_t>(fitCount));
+    for (int index = fitBegin; index <= fitEnd; ++index)
     {
-        return projected[static_cast<std::size_t>(keyIndex)].smoothN;
+        if (!useNormalBand
+            || std::abs(projected[static_cast<std::size_t>(index)].smoothN - normalMedian) <= normalLimit)
+        {
+            acceptedIndexes.push_back(index);
+        }
     }
-    return Median(values);
+
+    if (acceptedIndexes.size() < 2)
+    {
+        line.centerS = projected[static_cast<std::size_t>((fitBegin + fitEnd) / 2)].s;
+        line.centerValue = normalMedian;
+        line.valid = true;
+        return line;
+    }
+
+    double meanS = 0.0;
+    double meanN = 0.0;
+    for (int index : acceptedIndexes)
+    {
+        meanS += projected[static_cast<std::size_t>(index)].s;
+        meanN += projected[static_cast<std::size_t>(index)].smoothN;
+    }
+    meanS /= static_cast<double>(acceptedIndexes.size());
+    meanN /= static_cast<double>(acceptedIndexes.size());
+
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (int index : acceptedIndexes)
+    {
+        const double deltaS = projected[static_cast<std::size_t>(index)].s - meanS;
+        numerator += deltaS * (projected[static_cast<std::size_t>(index)].smoothN - meanN);
+        denominator += deltaS * deltaS;
+    }
+
+    line.centerS = meanS;
+    line.centerValue = meanN;
+    line.slope = denominator > 1e-9 ? numerator / denominator : 0.0;
+    line.valid = true;
+    return line;
+}
+
+ScalarLine FitLocalSegmentNormalLineWithSpan(
+    const std::vector<ProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex,
+    bool useLastSide,
+    double localSpan)
+{
+    if (projected.empty())
+    {
+        return ScalarLine();
+    }
+
+    int begin = std::max(0, std::min(firstIndex, lastIndex));
+    int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    if (end <= begin + 2)
+    {
+        return FitSegmentNormalLine(projected, begin, end);
+    }
+
+    const double totalSpan = std::abs(projected[static_cast<std::size_t>(end)].s - projected[static_cast<std::size_t>(begin)].s);
+    const double clampedLocalSpan = std::max(8.0, std::min(80.0, localSpan));
+    if (totalSpan > clampedLocalSpan)
+    {
+        if (useLastSide)
+        {
+            while (begin + 4 < end
+                && std::abs(projected[static_cast<std::size_t>(end)].s - projected[static_cast<std::size_t>(begin)].s)
+                    > clampedLocalSpan)
+            {
+                ++begin;
+            }
+        }
+        else
+        {
+            while (begin + 4 < end
+                && std::abs(projected[static_cast<std::size_t>(end)].s - projected[static_cast<std::size_t>(begin)].s)
+                    > clampedLocalSpan)
+            {
+                --end;
+            }
+        }
+    }
+
+    return FitSegmentNormalLine(projected, begin, end);
 }
 
 Point3D PointFromProjection(const Axes& axes, double s, double h, double n)
@@ -1317,10 +1995,13 @@ Point3D PointFromProjection(const Axes& axes, double s, double h, double n)
 std::vector<Point3D> BuildFittedKeyPoints(
     const std::vector<ProjectedPoint>& projected,
     const std::vector<int>& keyIndexes,
-    const Axes& axes)
+    const Axes& axes,
+    bool useSlopeConsistentCornerFit)
 {
     std::vector<Point3D> keyPoints;
     keyPoints.reserve(keyIndexes.size());
+    const std::vector<Line2D> segmentLines =
+        BuildGeometrySegmentLines(projected, keyIndexes, useSlopeConsistentCornerFit);
     for (int position = 0; position < static_cast<int>(keyIndexes.size()); ++position)
     {
         const int keyIndex = keyIndexes[static_cast<std::size_t>(position)];
@@ -1329,24 +2010,142 @@ std::vector<Point3D> BuildFittedKeyPoints(
         double n = projected[static_cast<std::size_t>(keyIndex)].smoothN;
         if (position > 0 && position + 1 < static_cast<int>(keyIndexes.size()))
         {
-            const Line2D left = FitLine2D(projected, keyIndexes[static_cast<std::size_t>(position - 1)], keyIndex);
-            const Line2D right = FitLine2D(projected, keyIndex, keyIndexes[static_cast<std::size_t>(position + 1)]);
-            double fittedS = s;
-            double fittedH = h;
-            if (IntersectLines(left, right, &fittedS, &fittedH))
+            const double previousS = projected[static_cast<std::size_t>(keyIndexes[static_cast<std::size_t>(position - 1)])].s;
+            const double nextS = projected[static_cast<std::size_t>(keyIndexes[static_cast<std::size_t>(position + 1)])].s;
+            const double span = std::max(1.0, std::abs(nextS - previousS));
+            bool hasBestIntersection = false;
+            double bestScore = std::numeric_limits<double>::infinity();
+            double bestS = s;
+            double bestH = h;
+            auto considerIntersection = [&](double candidateS, double candidateH, double shiftWeight)
             {
-                const double previousS = projected[static_cast<std::size_t>(keyIndexes[static_cast<std::size_t>(position - 1)])].s;
-                const double nextS = projected[static_cast<std::size_t>(keyIndexes[static_cast<std::size_t>(position + 1)])].s;
-                const double span = std::max(1.0, std::abs(nextS - previousS));
-                const double margin = std::max(5.0, std::min(18.0, span * 0.14));
-                if (fittedS >= std::min(previousS, nextS) - margin
-                    && fittedS <= std::max(previousS, nextS) + margin)
+                if (!IsCornerProjectionUsable(projected, keyIndexes, position, candidateS, candidateH, s, h))
                 {
-                    s = fittedS;
-                    h = fittedH;
+                    return;
+                }
+
+                const double cloudDistance = NearestProjectionDistance(
+                    projected,
+                    candidateS,
+                    candidateH,
+                    keyIndexes[static_cast<std::size_t>(position - 1)],
+                    keyIndexes[static_cast<std::size_t>(position + 1)]);
+                const double score = cloudDistance + ProjectionDistance(candidateS, candidateH, s, h) * shiftWeight;
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    bestS = candidateS;
+                    bestH = candidateH;
+                    hasBestIntersection = true;
+                }
+            };
+
+            if (position - 1 < static_cast<int>(segmentLines.size()) && position < static_cast<int>(segmentLines.size()))
+            {
+                double intersectionS = s;
+                double intersectionH = h;
+                if (IntersectLines(
+                    segmentLines[static_cast<std::size_t>(position - 1)],
+                    segmentLines[static_cast<std::size_t>(position)],
+                    &intersectionS,
+                    &intersectionH))
+                {
+                    considerIntersection(intersectionS, intersectionH, 0.22);
                 }
             }
-            n = LocalMedianNormal(projected, keyIndex, s);
+
+            const std::array<double, 5> candidateSpans = {
+                std::max(10.0, span * 0.18),
+                std::max(14.0, span * 0.28),
+                std::max(20.0, span * 0.40),
+                std::max(28.0, span * 0.55),
+                std::max(36.0, std::min(80.0, span * 0.70))
+            };
+
+            if (!useSlopeConsistentCornerFit)
+            {
+                for (double localSpan : candidateSpans)
+                {
+                    const Line2D leftLine = FitLocalSegmentLineWithSpan(
+                        projected,
+                        keyIndexes[static_cast<std::size_t>(position - 1)],
+                        keyIndex,
+                        true,
+                        localSpan,
+                        false);
+                    const Line2D rightLine = FitLocalSegmentLineWithSpan(
+                        projected,
+                        keyIndex,
+                        keyIndexes[static_cast<std::size_t>(position + 1)],
+                        false,
+                        localSpan,
+                        false);
+                    double intersectionS = s;
+                    double intersectionH = h;
+                    if (IntersectLines(leftLine, rightLine, &intersectionS, &intersectionH))
+                    {
+                        considerIntersection(intersectionS, intersectionH, 0.15);
+                    }
+                }
+            }
+
+            if (hasBestIntersection)
+            {
+                s = bestS;
+                h = bestH;
+            }
+
+            const double stationRadius = std::max(6.0, std::min(36.0, span * 0.08));
+            const double baseThreshold = std::max(1.6, std::min(5.5, span * 0.015 + 0.8));
+            const double localNormalValue = LocalNormalValue(projected, keyIndex, s, stationRadius, baseThreshold);
+            std::vector<double> normalCandidates;
+            normalCandidates.reserve(12);
+            for (double localSpan : candidateSpans)
+            {
+                const ScalarLine leftNormalLine = FitLocalSegmentNormalLineWithSpan(
+                    projected,
+                    keyIndexes[static_cast<std::size_t>(position - 1)],
+                    keyIndex,
+                    true,
+                    localSpan);
+                const ScalarLine rightNormalLine = FitLocalSegmentNormalLineWithSpan(
+                    projected,
+                    keyIndex,
+                    keyIndexes[static_cast<std::size_t>(position + 1)],
+                    false,
+                    localSpan);
+                if (leftNormalLine.valid)
+                {
+                    const double value = leftNormalLine.ValueAt(s);
+                    if (std::isfinite(value))
+                    {
+                        normalCandidates.push_back(value);
+                    }
+                }
+                if (rightNormalLine.valid)
+                {
+                    const double value = rightNormalLine.ValueAt(s);
+                    if (std::isfinite(value))
+                    {
+                        normalCandidates.push_back(value);
+                    }
+                }
+            }
+
+            if (normalCandidates.size() >= 2)
+            {
+                const double segmentNormalMedian = Median(normalCandidates);
+                const double localDelta = std::abs(localNormalValue - segmentNormalMedian);
+                if (localDelta <= std::max(1.8, baseThreshold * 1.5))
+                {
+                    normalCandidates.push_back(localNormalValue);
+                }
+                n = Median(normalCandidates);
+            }
+            else
+            {
+                n = localNormalValue;
+            }
         }
         keyPoints.push_back(PointFromProjection(axes, s, h, n));
     }
@@ -1898,7 +2697,8 @@ AnalysisResult AnalyzeMeasureThenWeldPath(const std::vector<IndexedPoint3D>& inp
         return result;
     }
 
-    const std::vector<Point3D> fittedKeyPoints = BuildFittedKeyPoints(projected, keyIndexes, axes);
+    const std::vector<Point3D> fittedKeyPoints =
+        BuildFittedKeyPoints(projected, keyIndexes, axes, params.useSlopeConsistentCornerFit);
     if (fittedKeyPoints.size() != keyIndexes.size())
     {
         result.error = "could not fit corner key points.";

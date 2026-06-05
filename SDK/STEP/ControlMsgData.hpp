@@ -11,282 +11,282 @@ namespace STEPROBOTSDK {
         eCyclicKey = 51,
         eCyclicCommand = 100,
         eCyclicStatus = 101,
-        eHMIFileSendTo = 103,  // HMIå‘é€æ–‡ä»¶ç»™éå®æ—¶
-        eHMIFileReceive = 104, // HMIæ¥æ”¶éå®æ—¶å‘é€çš„æ–‡ä»¶
-        eFunctionNumSeq = 105, // HMIæ¥æ”¶åŠŸèƒ½ç 
+        eHMIFileSendTo = 103,  // HMI·¢ËÍÎÄ¼ş¸ø·ÇÊµÊ±
+        eHMIFileReceive = 104, // HMI½ÓÊÕ·ÇÊµÊ±·¢ËÍµÄÎÄ¼ş
+        eFunctionNumSeq = 105, // HMI½ÓÊÕ¹¦ÄÜÂë
         eHMILanguageChange = 107,
-        eHMIType = 108, // æ¨¡å¼åˆ‡æ¢ï¼Œ0è¡¨ç¤ºç¤ºæ•™å™¨æ§åˆ¶ï¼Œ1è¡¨ç¤ºæ§åˆ¶æŸœæ§åˆ¶
+        eHMIType = 108, // Ä£Ê½ÇĞ»»£¬0±íÊ¾Ê¾½ÌÆ÷¿ØÖÆ£¬1±íÊ¾¿ØÖÆ¹ñ¿ØÖÆ
         eGetVersionInfo = 110,
-        eDirectoryStructureQuery, // è¯·æ±‚æ§åˆ¶å™¨æŒ‡å®šæ–‡ä»¶å¤¹ä¸‹çš„ç›®å½•ç»“æ„
-        eBackupToController,      // æŠŠå½“å‰æ•°æ®æ•´ä½“å¤‡ä»½åˆ°æ§åˆ¶å™¨
-        eBackupToUDisk,           // æŠŠå½“å‰æ•°æ®æ•´ä½“å¤‡ä»½åˆ°Uç›˜
-        eRecoveryFromController,  // æ¢å¤æŒ‡å®šæ§åˆ¶å™¨ä¸­çš„å‹ç¼©æ–‡ä»¶
-        eRecoveryFromUDisk,       // æ¢å¤æŒ‡å®šUç›˜ä¸­çš„å‹ç¼©æ–‡ä»¶
+        eDirectoryStructureQuery, // ÇëÇó¿ØÖÆÆ÷Ö¸¶¨ÎÄ¼ş¼ĞÏÂµÄÄ¿Â¼½á¹¹
+        eBackupToController,      // °Ñµ±Ç°Êı¾İÕûÌå±¸·İµ½¿ØÖÆÆ÷
+        eBackupToUDisk,           // °Ñµ±Ç°Êı¾İÕûÌå±¸·İµ½UÅÌ
+        eRecoveryFromController,  // »Ö¸´Ö¸¶¨¿ØÖÆÆ÷ÖĞµÄÑ¹ËõÎÄ¼ş
+        eRecoveryFromUDisk,       // »Ö¸´Ö¸¶¨UÅÌÖĞµÄÑ¹ËõÎÄ¼ş
         eFileConversionFromDos = 116, // change file format from windows to linux
-        eArcDataVarNameUpdate = 118,  // ç„Šæ¥ç›‘è§†ç•Œé¢æ›´æ–°arcdataå˜é‡
+        eArcDataVarNameUpdate = 118,  // º¸½Ó¼àÊÓ½çÃæ¸üĞÂarcdata±äÁ¿
 
-        eEnableTimeClear = 119,       // ç³»ç»Ÿä¸Šä½¿èƒ½æ—¶é—´æ¸…é›¶
-        eJogConfigSet = 120,          // ç‚¹åŠ¨åæ ‡ç³»é…ç½®
-        eDateTimeSet = 121,           // æ—¶é—´è®¾ç½®
-        eCommonCmdConfig = 122,       // å¸¸ç”¨å‘½ä»¤è®¾ç½®
-        eSpeedIncrementSet = 123,     // é€Ÿåº¦å¢é‡è®¾ç½®
-        eSpeedGearSet = 124,          // é€Ÿåº¦æ¡£ä½è®¾ç½®
-        eButtonFuncSet = 125,         // æŒ‰é”®åŠŸèƒ½è®¾ç½®
-        eSystemTimeClear = 126,       // ç³»ç»Ÿå¼€æœºæ—¶é—´æ¸…é›¶
-        eLogoutTimeSet = 127,         // è‡ªåŠ¨æ³¨é”€ç™»å½•æ—¶é—´
-        eRobotRunningTimeClear = 128, // ç¨‹åºè¿è¡Œæ—¶é—´æ¸…é›¶
+        eEnableTimeClear = 119,       // ÏµÍ³ÉÏÊ¹ÄÜÊ±¼äÇåÁã
+        eJogConfigSet = 120,          // µã¶¯×ø±êÏµÅäÖÃ
+        eDateTimeSet = 121,           // Ê±¼äÉèÖÃ
+        eCommonCmdConfig = 122,       // ³£ÓÃÃüÁîÉèÖÃ
+        eSpeedIncrementSet = 123,     // ËÙ¶ÈÔöÁ¿ÉèÖÃ
+        eSpeedGearSet = 124,          // ËÙ¶ÈµµÎ»ÉèÖÃ
+        eButtonFuncSet = 125,         // °´¼ü¹¦ÄÜÉèÖÃ
+        eSystemTimeClear = 126,       // ÏµÍ³¿ª»úÊ±¼äÇåÁã
+        eLogoutTimeSet = 127,         // ×Ô¶¯×¢ÏúµÇÂ¼Ê±¼ä
+        eRobotRunningTimeClear = 128, // ³ÌĞòÔËĞĞÊ±¼äÇåÁã
 
         eDirectoryRebuilding = 130,
-        eProgramFileImportZip = 131, // ç”¨æˆ·ç¨‹åºå¯¼å…¥æ§åˆ¶å™¨
-        eProgramFileExportZip = 132, // ç”¨æˆ·ç¨‹åºå¯¼å‡ºæ§åˆ¶å™¨
-        eConfigFileImportZip = 133,  // é…ç½®æ–‡ä»¶å¯¼å…¥æ§åˆ¶å™¨
-        eConfigFileExportZip = 134,  // é…ç½®æ–‡ä»¶å¯¼å‡ºæ§åˆ¶å™¨
+        eProgramFileImportZip = 131, // ÓÃ»§³ÌĞòµ¼Èë¿ØÖÆÆ÷
+        eProgramFileExportZip = 132, // ÓÃ»§³ÌĞòµ¼³ö¿ØÖÆÆ÷
+        eConfigFileImportZip = 133,  // ÅäÖÃÎÄ¼şµ¼Èë¿ØÖÆÆ÷
+        eConfigFileExportZip = 134,  // ÅäÖÃÎÄ¼şµ¼³ö¿ØÖÆÆ÷
         eHardwareInfoRequest = 135,
         eSoftwareTimeSet = 140,
         eSoftwareTimeRequest,
         eSoftwareTimePwdSet,
         eSoftwareTimePwdRequest,
-        eHMIOfflineSet = 144,                // è„±æœºå‘½ä»¤
-        eBackUpForceRecoveryFromCtrl = 145,  // ä»æ§åˆ¶å™¨å¼ºåˆ¶æ¢å¤
-        eBackUpForceRecoveryFromUdisk = 146, // ä»Uç›˜å¼ºåˆ¶æ¢å¤
-        eRelocation = 147,                   // ç§»æœºå‘½ä»¤
+        eHMIOfflineSet = 144,                // ÍÑ»úÃüÁî
+        eBackUpForceRecoveryFromCtrl = 145,  // ´Ó¿ØÖÆÆ÷Ç¿ÖÆ»Ö¸´
+        eBackUpForceRecoveryFromUdisk = 146, // ´ÓUÅÌÇ¿ÖÆ»Ö¸´
+        eRelocation = 147,                   // ÒÆ»úÃüÁî
         eAuxAxisSystemSave = 151,
         eAuxAxisConfigSave,
         eSoftInit = 153,
         eSoftAxisSetting,
         eSoftCartSetting,
-        ePowerOffSetting = 156, // æ–­ç”µè®¾ç½®
+        ePowerOffSetting = 156, // ¶ÏµçÉèÖÃ
         eIPSet = 160,
         eIPGet,
         eFunctionInfoGet =
-            162, // è·å–å‡½æ•°ä¿¡æ¯æ±‡æ€» å¦‚â€œproject.sr,INT userAdd,INT a,AXISPOS
-                // b;project.sr,INT userAdd,INT a,AXISPOS b...â€
-        eIsVarUsed = 163, // æŸ¥è¯¢æŒ‡å®šå˜é‡æ˜¯å¦è¢«ä½¿ç”¨
+            162, // »ñÈ¡º¯ÊıĞÅÏ¢»ã×Ü Èç¡°project.sr,INT userAdd,INT a,AXISPOS
+                // b;project.sr,INT userAdd,INT a,AXISPOS b...¡±
+        eIsVarUsed = 163, // ²éÑ¯Ö¸¶¨±äÁ¿ÊÇ·ñ±»Ê¹ÓÃ
         eCalibrationOpen = 165,
         eAuxAxisSync = 166,
         eSingularProtect = 167,
         eCmdDefaultConLParaSave = 168,
         eControllerStatusRequest = 171,
         eExtendTrialTime =
-            175, // å»¶é•¿è¯•ç”¨æœŸæ—¶é—´---æ•°æ®éƒ¨åˆ†æ˜¯æ–‡ä»¶é‡Œçš„å¯†æ–‡ã€‚éå®æ—¶çš„åé¦ˆå¯èƒ½æ˜¯okï¼Œæˆ–è€…errã€‚
+            175, // ÑÓ³¤ÊÔÓÃÆÚÊ±¼ä---Êı¾İ²¿·ÖÊÇÎÄ¼şÀïµÄÃÜÎÄ¡£·ÇÊµÊ±µÄ·´À¡¿ÉÄÜÊÇok£¬»òÕßerr¡£
 
-        /*  SDKæ–°å¢  */
+        /*  SDKĞÂÔö  */
         eRequestRobotInfo = 200,
         eRequestElecBoxInfo = 201,
-        eVarRead = 202, // å•ä¸ªå˜é‡è·å–
-        eProcessVarModify = 203, // æ–°å¢è¿‡ç¨‹å˜é‡ä¿®æ”¹ï¼Œ20230717 æ–°å¢
-        eDHParamSet = 204,       // DHå‚æ•°è®¾ç½® æ–°å¢ï¼Œ20230726ï¼Œéæ ‡ç‰ˆæœ¬
+        eVarRead = 202, // µ¥¸ö±äÁ¿»ñÈ¡
+        eProcessVarModify = 203, // ĞÂÔö¹ı³Ì±äÁ¿ĞŞ¸Ä£¬20230717 ĞÂÔö
+        eDHParamSet = 204,       // DH²ÎÊıÉèÖÃ ĞÂÔö£¬20230726£¬·Ç±ê°æ±¾
 
-        //æ–°å¢è¿åŠ¨æŒ‡ä»¤å‘½ä»¤ 20231115
-        eSDKSimulateLoad = 205,  // SDKæ¨¡æ‹ŸåŠ è½½ç¨‹åº
-        eSDKSimulateKill = 206,  // SDKæ¨¡æ‹Ÿå¸è½½ç¨‹åº
-        eSDKInstructSend = 207,  // SDKè¯­å¥å‘é€
+        //ĞÂÔöÔË¶¯Ö¸ÁîÃüÁî 20231115
+        eSDKSimulateLoad = 205,  // SDKÄ£Äâ¼ÓÔØ³ÌĞò
+        eSDKSimulateKill = 206,  // SDKÄ£ÄâĞ¶ÔØ³ÌĞò
+        eSDKInstructSend = 207,  // SDKÓï¾ä·¢ËÍ
 
-        // æ–°å¢ç„Šæœºå½“å‰ç”µæµç”µå‹å€¼è·å–ã€‚20231211
+        // ĞÂÔöº¸»úµ±Ç°µçÁ÷µçÑ¹Öµ»ñÈ¡¡£20231211
         eSDKGetWeldingInfo = 208,
 
-        //æ–°å¢é™„åŠ è½´è½¬æ¢æ¥å£ï¼Œ20231221
+        //ĞÂÔö¸½¼ÓÖá×ª»»½Ó¿Ú£¬20231221
         eSDKGetRailInfo = 209,
 
-        //æ–°å¢æ­£é€†è§£è½¬æ¢æ¥å£ï¼Œ20240228
+        //ĞÂÔöÕıÄæ½â×ª»»½Ó¿Ú£¬20240228
         eSDKGetKinematics = 210,
         eSDKGetInvKinematics = 211,
-        //æ–°å¢åæ ‡è½¬æ¢æ¥å£ï¼Œ20251013
+        //ĞÂÔö×ø±ê×ª»»½Ó¿Ú£¬20251013
         eSDKRefConvert = 213,
 
-        // 1000å¼€å§‹æ˜¯å‘½ä»¤
-        eSingleAlarmConfirm = 1000,       // å•ä¸ªé”™è¯¯æŠ¥è­¦ä¿¡æ¯ç¡®è®¤
-        eSingleAlarmConfirmWithParameter, // å¸¦å‚æ•°çš„é”™è¯¯æŠ¥è­¦ä¿¡æ¯
-        eAllAlarmConfirm,                 // ç¡®è®¤æ‰€æœ‰æŠ¥è­¦ä¿¡æ¯
-        eAlarmFileTranfer,                // æ—¥å¿—æ–‡ä»¶ä¼ è¾“
-        eReferenceSystemSet,              // å‚è€ƒåæ ‡ç³»è®¾ç½®
-        eToolSet,                         // å·¥å…·è®¾ç½®
-        eOverrideSet,                     // overrideè®¾ç½®
-        eJogRefSystemSet,                 // ç‚¹åŠ¨åæ ‡ç³»è®¾ç½®å‘½ä»¤
-        eToolAlignReady,                  // å·¥å…·æ‰‹å¯¹é½å‡†å¤‡å‘½ä»¤
-        eToolAlignExit,                   // å·¥å…·æ‰‹å¯¹é½é€€å‡ºå‘½ä»¤
-        eAnalogInputSimulation,           // æ¨¡æ‹Ÿè¾“å…¥ä»¿çœŸå‘½ä»¤
-        eAnalogInputSimulationRemoval,    // æ¨¡æ‹Ÿè¾“å…¥å»é™¤ä»¿çœŸå‘½ä»¤
-        eAnalogOutputEnforce,             // æ¨¡æ‹Ÿè¾“å‡ºå¼ºåˆ¶å‘½ä»¤
-        eAnalogOutputEnforceRemoval,      // æ¨¡æ‹Ÿè¾“å‡ºå»é™¤å¼ºåˆ¶å‘½ä»¤
-        eDigitalInputSimulation,          // æ•°å­—è¾“å…¥ä»¿çœŸå‘½ä»¤
-        eDigitalInputSimulationRemoval,   // æ•°å­—è¾“å…¥å»é™¤ä»¿çœŸå‘½ä»¤
-        eDigitalOutputEnforce,            // æ•°å­—è¾“å‡ºå¼ºåˆ¶å‘½ä»¤
-        eDigitalOutputEnforceRemoval,     // æ•°å­—è¾“å‡ºå»é™¤å¼ºåˆ¶å‘½ä»¤
-        eControlAuthority,                // æ§åˆ¶æƒé™å‘½ä»¤
-        eWriteAuthority,                  // å†™æƒé™å‘½ä»¤
-        eControllerTimeSet,               // æ§åˆ¶å™¨æ—¶é—´è®¾ç½®å‘½ä»¤
-        eUserLogin,                       // ç”¨æˆ·ç™»å½•å‘½ä»¤
-        eUserExit,                        // ç”¨æˆ·é€€å‡ºå‘½ä»¤
-        eUserNew,                         // ç”¨æˆ·æ–°å»ºå‘½ä»¤
-        eUserDelete,                      // ç”¨æˆ·åˆ é™¤å‘½ä»¤
-        eUserModify,                      // ç”¨æˆ·ä¿®æ”¹å‘½ä»¤
-        eRestart,                         // é‡å¯å‘½ä»¤
-        eGenerateSystemReport,            // ç”Ÿæˆç³»ç»ŸæŠ¥å‘Šå‘½ä»¤
-        eVariableNew,                     // å˜é‡æ–°å»ºå‘½ä»¤
-        eVariableModify,                  // å˜é‡ä¿®æ”¹å‘½ä»¤
-        eVariableMove,                    // å˜é‡ç§»åŠ¨å‘½ä»¤
-        eVariableRename,                  // å˜é‡é‡å‘½åå‘½ä»¤
-        eVariableDelete,                  // å˜é‡åˆ é™¤å‘½ä»¤
-        eJogToPositionOpen,               // jogToPositionæ‰“å¼€å‘½ä»¤ 1033
-        eJogToPositionExit,               // jogToPositionå…³é—­å‘½ä»¤
-        eRefresh,                         // å·¥ç¨‹ç•Œé¢åˆ·æ–°å‘½ä»¤
-        eProjectClose,                    // å…³é—­å‘½ä»¤
-        eProjectNew,                      // å·¥ç¨‹æ–°å»ºå‘½ä»¤
-        eProjectRename,                   // å·¥ç¨‹é‡å‘½åå‘½ä»¤
-        eProjectDelete,                   // å·¥ç¨‹åˆ é™¤å‘½ä»¤
-        eProgramLoad,                     // ç¨‹åºè½½å…¥å‘½ä»¤ 1040
-        eProgramKill,                     // ç¨‹åºå…³é—­å‘½ä»¤
-        eProgramNew,                      // ç¨‹åºæ–°å»ºå‘½ä»¤
-        eProgramDelete,                   // ç¨‹åºåˆ é™¤å‘½ä»¤
-        eProgramRename,                   // ç¨‹åºé‡å‘½åå‘½ä»¤
-        eProgramModify,      // ç¨‹åºä¿®æ”¹å‘½ä»¤ï¼ˆå¼•å‘æ–‡ä»¶ä¼ è¾“ï¼‰
-        eProgramSaveAndLoad, // ç¨‹åºä¿®æ”¹å¹¶load
-        eProgramCopy,        // ç¨‹åºå¤åˆ¶
-        eProjectCopy,        // ç¨‹åºç²˜è´´
-        eSetpc,              // setpcå‘½ä»¤
-        eProgramStop,        // ç¨‹åºåœæ­¢å‘½ä»¤
-        eEnableMotor,        // ä½¿èƒ½å‘½ä»¤
-        eProgramRunMode,     // ç¨‹åºè¿è¡Œæ¨¡å¼
-        eEnableRobot,        // 2013.3.29 å¯åŠ¨æœºå™¨äºº
-        eDisableRobot,       // 2013.3.29 å…³é—­æœºå™¨äºº
-        eVariableUpdates,    // ä¸´æ—¶å˜é‡æ›´æ–°ï¼ˆæ§åˆ¶å™¨å‘é€ç»™HMIï¼‰
+        // 1000¿ªÊ¼ÊÇÃüÁî
+        eSingleAlarmConfirm = 1000,       // µ¥¸ö´íÎó±¨¾¯ĞÅÏ¢È·ÈÏ
+        eSingleAlarmConfirmWithParameter, // ´ø²ÎÊıµÄ´íÎó±¨¾¯ĞÅÏ¢
+        eAllAlarmConfirm,                 // È·ÈÏËùÓĞ±¨¾¯ĞÅÏ¢
+        eAlarmFileTranfer,                // ÈÕÖ¾ÎÄ¼ş´«Êä
+        eReferenceSystemSet,              // ²Î¿¼×ø±êÏµÉèÖÃ
+        eToolSet,                         // ¹¤¾ßÉèÖÃ
+        eOverrideSet,                     // overrideÉèÖÃ
+        eJogRefSystemSet,                 // µã¶¯×ø±êÏµÉèÖÃÃüÁî
+        eToolAlignReady,                  // ¹¤¾ßÊÖ¶ÔÆë×¼±¸ÃüÁî
+        eToolAlignExit,                   // ¹¤¾ßÊÖ¶ÔÆëÍË³öÃüÁî
+        eAnalogInputSimulation,           // Ä£ÄâÊäÈë·ÂÕæÃüÁî
+        eAnalogInputSimulationRemoval,    // Ä£ÄâÊäÈëÈ¥³ı·ÂÕæÃüÁî
+        eAnalogOutputEnforce,             // Ä£ÄâÊä³öÇ¿ÖÆÃüÁî
+        eAnalogOutputEnforceRemoval,      // Ä£ÄâÊä³öÈ¥³ıÇ¿ÖÆÃüÁî
+        eDigitalInputSimulation,          // Êı×ÖÊäÈë·ÂÕæÃüÁî
+        eDigitalInputSimulationRemoval,   // Êı×ÖÊäÈëÈ¥³ı·ÂÕæÃüÁî
+        eDigitalOutputEnforce,            // Êı×ÖÊä³öÇ¿ÖÆÃüÁî
+        eDigitalOutputEnforceRemoval,     // Êı×ÖÊä³öÈ¥³ıÇ¿ÖÆÃüÁî
+        eControlAuthority,                // ¿ØÖÆÈ¨ÏŞÃüÁî
+        eWriteAuthority,                  // Ğ´È¨ÏŞÃüÁî
+        eControllerTimeSet,               // ¿ØÖÆÆ÷Ê±¼äÉèÖÃÃüÁî
+        eUserLogin,                       // ÓÃ»§µÇÂ¼ÃüÁî
+        eUserExit,                        // ÓÃ»§ÍË³öÃüÁî
+        eUserNew,                         // ÓÃ»§ĞÂ½¨ÃüÁî
+        eUserDelete,                      // ÓÃ»§É¾³ıÃüÁî
+        eUserModify,                      // ÓÃ»§ĞŞ¸ÄÃüÁî
+        eRestart,                         // ÖØÆôÃüÁî
+        eGenerateSystemReport,            // Éú³ÉÏµÍ³±¨¸æÃüÁî
+        eVariableNew,                     // ±äÁ¿ĞÂ½¨ÃüÁî
+        eVariableModify,                  // ±äÁ¿ĞŞ¸ÄÃüÁî
+        eVariableMove,                    // ±äÁ¿ÒÆ¶¯ÃüÁî
+        eVariableRename,                  // ±äÁ¿ÖØÃüÃûÃüÁî
+        eVariableDelete,                  // ±äÁ¿É¾³ıÃüÁî
+        eJogToPositionOpen,               // jogToPosition´ò¿ªÃüÁî 1033
+        eJogToPositionExit,               // jogToPosition¹Ø±ÕÃüÁî
+        eRefresh,                         // ¹¤³Ì½çÃæË¢ĞÂÃüÁî
+        eProjectClose,                    // ¹Ø±ÕÃüÁî
+        eProjectNew,                      // ¹¤³ÌĞÂ½¨ÃüÁî
+        eProjectRename,                   // ¹¤³ÌÖØÃüÃûÃüÁî
+        eProjectDelete,                   // ¹¤³ÌÉ¾³ıÃüÁî
+        eProgramLoad,                     // ³ÌĞòÔØÈëÃüÁî 1040
+        eProgramKill,                     // ³ÌĞò¹Ø±ÕÃüÁî
+        eProgramNew,                      // ³ÌĞòĞÂ½¨ÃüÁî
+        eProgramDelete,                   // ³ÌĞòÉ¾³ıÃüÁî
+        eProgramRename,                   // ³ÌĞòÖØÃüÃûÃüÁî
+        eProgramModify,      // ³ÌĞòĞŞ¸ÄÃüÁî£¨Òı·¢ÎÄ¼ş´«Êä£©
+        eProgramSaveAndLoad, // ³ÌĞòĞŞ¸Ä²¢load
+        eProgramCopy,        // ³ÌĞò¸´ÖÆ
+        eProjectCopy,        // ³ÌĞòÕ³Ìù
+        eSetpc,              // setpcÃüÁî
+        eProgramStop,        // ³ÌĞòÍ£Ö¹ÃüÁî
+        eEnableMotor,        // Ê¹ÄÜÃüÁî
+        eProgramRunMode,     // ³ÌĞòÔËĞĞÄ£Ê½
+        eEnableRobot,        // 2013.3.29 Æô¶¯»úÆ÷ÈË
+        eDisableRobot,       // 2013.3.29 ¹Ø±Õ»úÆ÷ÈË
+        eVariableUpdates,    // ÁÙÊ±±äÁ¿¸üĞÂ£¨¿ØÖÆÆ÷·¢ËÍ¸øHMI£©
         eMessageTransfer,
         eMessageRefresh,
         eDigitalOutput = 1065,
         eDigitalOutputGroup,
         eBackwardModeEnable = 1200,
-        eIndForceOn = 1202,        // ç•Œé¢å¼€å¯ç‹¬ç«‹è½´
-        eIndForceOff = 1203,       // ç•Œé¢å…³é—­ç‹¬ç«‹è½´
-        eMultiLayerVarNew = 1500,  // å¤šå±‚å¤šé“å˜é‡æ–°å»º
-        eMultiLayerVarDelete,      // å¤šå±‚å¤šé“å˜é‡åˆ é™¤
-        eMultiLayerVarUpdate,      // å¤šå±‚å¤šé“å˜é‡æ›´æ–°
-        eAxisSpaceSetting = 1600,  // HMIå‘é€å…³èŠ‚å·¥ä½œç©ºé—´è®¾ç½®å‘½ä»¤
-        eCartSpaceSetting = 1601,  // HMIå‘é€ç¬›å¡å°”å·¥ä½œç©ºé—´è®¾ç½®å‘½ä»¤
-        eCartSpaceActivate = 1602, // å·¥ä½œç©ºé—´æ˜¯å¦è¢«ç›‘è§†ç•Œé¢æ¿€æ´»
-        eAxisSpaceActivate = 1603, // å·¥ä½œç©ºé—´æ˜¯å¦è¢«ç›‘è§†ç•Œé¢æ¿€æ´»
-        eWorkSpaceInit = 1604,     // å·¥ä½œç©ºé—´æ•°æ®è¯·æ±‚å‘½ä»¤
-        eWorkSpaceOpr = 1605,      // OverrideæŒ‰é’®æ“ä½œå‘½ä»¤
-        eAutoRunStatusSet = 1610, // 0æ ‡ç¤ºæœªå¯ç”¨ä¸€é”®å¯åŠ¨ï¼Œ1è¡¨ç¤ºå¯ç”¨ä¸€é”®å¯åŠ¨
+        eIndForceOn = 1202,        // ½çÃæ¿ªÆô¶ÀÁ¢Öá
+        eIndForceOff = 1203,       // ½çÃæ¹Ø±Õ¶ÀÁ¢Öá
+        eMultiLayerVarNew = 1500,  // ¶à²ã¶àµÀ±äÁ¿ĞÂ½¨
+        eMultiLayerVarDelete,      // ¶à²ã¶àµÀ±äÁ¿É¾³ı
+        eMultiLayerVarUpdate,      // ¶à²ã¶àµÀ±äÁ¿¸üĞÂ
+        eAxisSpaceSetting = 1600,  // HMI·¢ËÍ¹Ø½Ú¹¤×÷¿Õ¼äÉèÖÃÃüÁî
+        eCartSpaceSetting = 1601,  // HMI·¢ËÍµÑ¿¨¶û¹¤×÷¿Õ¼äÉèÖÃÃüÁî
+        eCartSpaceActivate = 1602, // ¹¤×÷¿Õ¼äÊÇ·ñ±»¼àÊÓ½çÃæ¼¤»î
+        eAxisSpaceActivate = 1603, // ¹¤×÷¿Õ¼äÊÇ·ñ±»¼àÊÓ½çÃæ¼¤»î
+        eWorkSpaceInit = 1604,     // ¹¤×÷¿Õ¼äÊı¾İÇëÇóÃüÁî
+        eWorkSpaceOpr = 1605,      // Override°´Å¥²Ù×÷ÃüÁî
+        eAutoRunStatusSet = 1610, // 0±êÊ¾Î´ÆôÓÃÒ»¼üÆô¶¯£¬1±íÊ¾ÆôÓÃÒ»¼üÆô¶¯
         eAutoRunStatusRequest,
 
-        //2000å¼€å§‹ä¸ºæ–°å¢è¿åŠ¨å‘½ä»¤ï¼Œ20231115æ–°å¢
-        eProgPTP = 2001,        //SDKæ¨¡æ‹Ÿç‚¹åˆ°ç‚¹è¿åŠ¨è¯­å¥
-        eProgLin = 2002,        //SDKæ¨¡æ‹Ÿç›´çº¿è¿è¡Œè¯­å¥
-        eProgCirc = 2003,       //SDKæ¨¡æ‹Ÿåœ†å¼§è¿è¡Œè¯­å¥
-        eSDKDyn = 2009,         //SDKæ¨¡æ‹Ÿè®¾ç½®Dynè¯­å¥
+        //2000¿ªÊ¼ÎªĞÂÔöÔË¶¯ÃüÁî£¬20231115ĞÂÔö
+        eProgPTP = 2001,        //SDKÄ£Äâµãµ½µãÔË¶¯Óï¾ä
+        eProgLin = 2002,        //SDKÄ£ÄâÖ±ÏßÔËĞĞÓï¾ä
+        eProgCirc = 2003,       //SDKÄ£ÄâÔ²»¡ÔËĞĞÓï¾ä
+        eSDKDyn = 2009,         //SDKÄ£ÄâÉèÖÃDynÓï¾ä
 
-        eProgOvl = 2011,          //SDKæ¨¡æ‹Ÿè®¾ç½®åœ†æ»‘è¯­å¥
+        eProgOvl = 2011,          //SDKÄ£ÄâÉèÖÃÔ²»¬Óï¾ä
 
-        eProgRefsys = 2013,     //è®¾ç½®ç”¨æˆ·åæ ‡
-        eProgTool = 2014,     //è®¾ç½®å·¥å…·åæ ‡
+        eProgRefsys = 2013,     //ÉèÖÃÓÃ»§×ø±ê
+        eProgTool = 2014,     //ÉèÖÃ¹¤¾ß×ø±ê
 
-        eProgSetDO = 2019,       //SDKæ¨¡æ‹Ÿè®¾ç½®DOè¯­å¥ 
-        eProgSetAO = 2020,        //SDKæ¨¡æ‹Ÿè®¾ç½®AOè¯­å¥
+        eProgSetDO = 2019,       //SDKÄ£ÄâÉèÖÃDOÓï¾ä 
+        eProgSetAO = 2020,        //SDKÄ£ÄâÉèÖÃAOÓï¾ä
 
-        eProgEOF = 2024,      // SDKæ¨¡æ‹ŸEOFè¯­å¥
-        eProgWaitTime = 2025, // SDKæ¨¡æ‹Ÿè®¾ç½®ç­‰å¾…æ—¶é—´è¯­å¥
+        eProgEOF = 2024,      // SDKÄ£ÄâEOFÓï¾ä
+        eProgWaitTime = 2025, // SDKÄ£ÄâÉèÖÃµÈ´ıÊ±¼äÓï¾ä
         
-        eProgSetGDO = 2031,                // SDKæ¨¡æ‹Ÿè®¾ç½®GDOè¯­å¥
+        eProgSetGDO = 2031,                // SDKÄ£ÄâÉèÖÃGDOÓï¾ä
                                            
-        eProgDOPulse = 2037,               // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgDOSetSyncTime = 2038,         // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgDOSetSyncPath = 2039,         // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgDOPulseSyncTime = 2040,       // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgDOPulseSyncPath = 2041,       // SDKæ¨¡æ‹Ÿè¯­å¥
+        eProgDOPulse = 2037,               // SDKÄ£ÄâÓï¾ä
+        eProgDOSetSyncTime = 2038,         // SDKÄ£ÄâÓï¾ä
+        eProgDOSetSyncPath = 2039,         // SDKÄ£ÄâÓï¾ä
+        eProgDOPulseSyncTime = 2040,       // SDKÄ£ÄâÓï¾ä
+        eProgDOPulseSyncPath = 2041,       // SDKÄ£ÄâÓï¾ä
                                            
-        eProgDIWaitSyncTime = 2048,        // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgDIWaitSyncPath = 2049,        // SDKæ¨¡æ‹Ÿè¯­å¥
+        eProgDIWaitSyncTime = 2048,        // SDKÄ£ÄâÓï¾ä
+        eProgDIWaitSyncPath = 2049,        // SDKÄ£ÄâÓï¾ä
                                            
-        eProgGDIWaitSyncTime = 2052,       // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgGDIWaitSyncPath = 2053,       // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgDIWaitSimple = 2054,          // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgGDIWaitSimple = 2055,         // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgAOSetSyncPath = 2056,         // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgAOSetSyncTime = 2057,         // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgGDOSetSyncPath = 2058,        // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgGDOSetSyncTime = 2059,        // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgAIWaitSyncPath = 2060,        // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgAIWaitSyncTime = 2061,        // SDKæ¨¡æ‹Ÿè¯­å¥
+        eProgGDIWaitSyncTime = 2052,       // SDKÄ£ÄâÓï¾ä
+        eProgGDIWaitSyncPath = 2053,       // SDKÄ£ÄâÓï¾ä
+        eProgDIWaitSimple = 2054,          // SDKÄ£ÄâÓï¾ä
+        eProgGDIWaitSimple = 2055,         // SDKÄ£ÄâÓï¾ä
+        eProgAOSetSyncPath = 2056,         // SDKÄ£ÄâÓï¾ä
+        eProgAOSetSyncTime = 2057,         // SDKÄ£ÄâÓï¾ä
+        eProgGDOSetSyncPath = 2058,        // SDKÄ£ÄâÓï¾ä
+        eProgGDOSetSyncTime = 2059,        // SDKÄ£ÄâÓï¾ä
+        eProgAIWaitSyncPath = 2060,        // SDKÄ£ÄâÓï¾ä
+        eProgAIWaitSyncTime = 2061,        // SDKÄ£ÄâÓï¾ä
                                            
-        eProgAIWait = 2066,                // SDKæ¨¡æ‹Ÿè¯­å¥
+        eProgAIWait = 2066,                // SDKÄ£ÄâÓï¾ä
                                            
-        eProgCartSpaceActivate = 2601,     // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgAxisSpaceActivate = 2602,     // SDKæ¨¡æ‹Ÿè¯­å¥
+        eProgCartSpaceActivate = 2601,     // SDKÄ£ÄâÓï¾ä
+        eProgAxisSpaceActivate = 2602,     // SDKÄ£ÄâÓï¾ä
 
-        eWeldMode = 3000,      // ç„Šæ¥æ¨¡å¼å‘½ä»¤
+        eWeldMode = 3000,      // º¸½ÓÄ£Ê½ÃüÁî
 
-        eArcProgCorrectOff = 3008,         // SDKæ¨¡æ‹Ÿè¯­å¥
+        eArcProgCorrectOff = 3008,         // SDKÄ£ÄâÓï¾ä
 
-        //æ–°å¢ç„Šæ¥è¿åŠ¨å‘½ä»¤ï¼Œ20231115æ–°å¢
-        eArcProgArcOn = 3012,     //SDKæ¨¡æ‹Ÿèµ·å¼§è¯­å¥
-        eArcProgArcOff = 3013,    //SDKæ¨¡æ‹Ÿç­å¼§è¯­å¥
-        eArcProgArcSet = 3014,    //SDKæ¨¡æ‹Ÿç„Šæ¥å‚æ•°è®¾ç½®è¯­å¥
-        eArcProgWLin = 3015,      //SDKæ¨¡æ‹ŸWLinè¯­å¥
-        eArcProgWCirc = 3016,     //SDKæ¨¡æ‹ŸWCircè¯­å¥
+        //ĞÂÔöº¸½ÓÔË¶¯ÃüÁî£¬20231115ĞÂÔö
+        eArcProgArcOn = 3012,     //SDKÄ£ÄâÆğ»¡Óï¾ä
+        eArcProgArcOff = 3013,    //SDKÄ£ÄâÃğ»¡Óï¾ä
+        eArcProgArcSet = 3014,    //SDKÄ£Äâº¸½Ó²ÎÊıÉèÖÃÓï¾ä
+        eArcProgWLin = 3015,      //SDKÄ£ÄâWLinÓï¾ä
+        eArcProgWCirc = 3016,     //SDKÄ£ÄâWCircÓï¾ä
 
-        //æ–°å¢ç„Šæ¥è¿åŠ¨å‘½ä»¤ï¼Œ2024.7.10æ–°å¢
+        //ĞÂÔöº¸½ÓÔË¶¯ÃüÁî£¬2024.7.10ĞÂÔö
         eArcProgArcMode = 3018,//3018
-        eArcProgArcJob = 3019,              // SDKæ¨¡æ‹Ÿè¯­å¥
+        eArcProgArcJob = 3019,              // SDKÄ£ÄâÓï¾ä
 
-        eArcIUFeedBack = 3026, // ç„Šæ¥ç›‘è§†ç•Œé¢æ›´æ–°ç„Šæ¥å®é™…å€¼
-        eArcProgWLinSeg = 3027, // SDKæ¨¡æ‹ŸWLinSegè¯­å¥
-        eArcProgWireSet = 3032,             // SDKæ¨¡æ‹Ÿè¯­å¥
+        eArcIUFeedBack = 3026, // º¸½Ó¼àÊÓ½çÃæ¸üĞÂº¸½ÓÊµ¼ÊÖµ
+        eArcProgWLinSeg = 3027, // SDKÄ£ÄâWLinSegÓï¾ä
+        eArcProgWireSet = 3032,             // SDKÄ£ÄâÓï¾ä
                                             
-        eArcProgWLinRel = 3037, // SDKæ¨¡æ‹ŸWLinRelè¯­å¥
-        eArcProgArcConfig = 3038,           // SDKæ¨¡æ‹Ÿè¯­å¥
+        eArcProgWLinRel = 3037, // SDKÄ£ÄâWLinRelÓï¾ä
+        eArcProgArcConfig = 3038,           // SDKÄ£ÄâÓï¾ä
 
-        eBendSimu = 3100,      // è®¾ç½®ä»¿çœŸæ¨¡å¼
-        eBendRefDis = 3107,    // ç¤ºæ•™ç”µå­å°ºçš„é›¶ä½
+        eBendSimu = 3100,      // ÉèÖÃ·ÂÕæÄ£Ê½
+        eBendRefDis = 3107,    // Ê¾½Ìµç×Ó³ßµÄÁãÎ»
         eMessageLine = 3200,   //
 
-        ePalletizingParameter = 3300, // è¯»å–ç å›åˆå§‹åŒ–å‚æ•°ï¼šå­˜å‚¨çš„äº§å“ã€æ¨¡æ¿åç§°
-        // äº§å“XMLæ–‡ä»¶å¤„ç†
-        ePalletizingProductCreate, // äº§å“æ•°æ®æ–°å»º
-        ePalletizingProductModify, // äº§å“æ•°æ®ä¿®æ”¹
-        ePalletizingProductDelete, // äº§å“æ•°æ®åˆ é™¤
-        ePalletizingProductRename, // äº§å“æ•°æ®é‡å‘½å
-        // æ¨¡æ¿XMLæ–‡ä»¶å¤„ç†
-        ePalletizingTemplateCreate, // æ¨¡æ¿æ•°æ®æ–°å»º
-        ePalletizingTemplateModify, // æ¨¡æ¿æ•°æ®ä¿®æ”¹
-        ePalletizingTemplateDelete, // æ¨¡æ¿æ•°æ®åˆ é™¤
-        ePalletizingTemplateRename, // æ¨¡æ¿æ•°æ®é‡å‘½å
-        // æ‰˜ç›˜XMLæ–‡ä»¶å¤„ç†
-        ePalletizingStationCreate, // æ‰˜ç›˜æ•°æ®æ–°å»º
-        ePalletizingStationModify, // æ‰˜ç›˜æ•°æ®ä¿®æ”¹
-        ePalletizingStationDelete, // æ‰˜ç›˜æ•°æ®åˆ é™¤
-        ePalletizingStationRename, // æ‰˜ç›˜æ•°æ®é‡å‘½å
-        // æ ‡å‡†å¹³é¢XMLæ–‡ä»¶å¤„ç†
-        ePalletizingStandardPlaneCreate, // å¹³é¢æ•°æ®æ–°å»º
-        ePalletizingStandardPlaneModify, // å¹³é¢æ•°æ®ä¿®æ”¹
-        ePalletizingStandardPlaneDelete, // å¹³é¢æ•°æ®åˆ é™¤
-        ePalletizingStandardPlaneRename, // å¹³é¢æ•°æ®é‡å‘½å
-        // è‡ªå®šä¹‰å¹³é¢XMLæ–‡ä»¶å¤„ç†
-        ePalletizingCustomPlaneCreate, // å¹³é¢æ•°æ®æ–°å»º
-        ePalletizingCustomPlaneModify, // å¹³é¢æ•°æ®ä¿®æ”¹
-        ePalletizingCustomPlaneDelete, // å¹³é¢æ•°æ®åˆ é™¤
-        ePalletizingCustomPlaneRename, // å¹³é¢æ•°æ®é‡å‘½å
-        // åŸºæœ¬å›å †XMLæ–‡ä»¶å¤„ç†
-        ePalletizingBasicStkCreate, // å›å †æ•°æ®æ–°å»º
-        ePalletizingBasicStkModify, // å›å †æ•°æ®ä¿®æ”¹
-        ePalletizingBasicStkDelete, // å›å †æ•°æ®åˆ é™¤
-        ePalletizingBasicStkRename, // å›å †æ•°æ®é‡å‘½å
-        // é«˜çº§å›å †XMLæ–‡ä»¶å¤„ç†
-        ePalletizingSeniorStkCreate, // å›å †æ•°æ®æ–°å»º
-        ePalletizingSeniorStkModify, // å›å †æ•°æ®ä¿®æ”¹
-        ePalletizingSeniorStkDelete, // å›å †æ•°æ®åˆ é™¤
-        ePalletizingSeniorStkRename, // å›å †æ•°æ®é‡å‘½å
+        ePalletizingParameter = 3300, // ¶ÁÈ¡Âë¶â³õÊ¼»¯²ÎÊı£º´æ´¢µÄ²úÆ·¡¢Ä£°åÃû³Æ
+        // ²úÆ·XMLÎÄ¼ş´¦Àí
+        ePalletizingProductCreate, // ²úÆ·Êı¾İĞÂ½¨
+        ePalletizingProductModify, // ²úÆ·Êı¾İĞŞ¸Ä
+        ePalletizingProductDelete, // ²úÆ·Êı¾İÉ¾³ı
+        ePalletizingProductRename, // ²úÆ·Êı¾İÖØÃüÃû
+        // Ä£°åXMLÎÄ¼ş´¦Àí
+        ePalletizingTemplateCreate, // Ä£°åÊı¾İĞÂ½¨
+        ePalletizingTemplateModify, // Ä£°åÊı¾İĞŞ¸Ä
+        ePalletizingTemplateDelete, // Ä£°åÊı¾İÉ¾³ı
+        ePalletizingTemplateRename, // Ä£°åÊı¾İÖØÃüÃû
+        // ÍĞÅÌXMLÎÄ¼ş´¦Àí
+        ePalletizingStationCreate, // ÍĞÅÌÊı¾İĞÂ½¨
+        ePalletizingStationModify, // ÍĞÅÌÊı¾İĞŞ¸Ä
+        ePalletizingStationDelete, // ÍĞÅÌÊı¾İÉ¾³ı
+        ePalletizingStationRename, // ÍĞÅÌÊı¾İÖØÃüÃû
+        // ±ê×¼Æ½ÃæXMLÎÄ¼ş´¦Àí
+        ePalletizingStandardPlaneCreate, // Æ½ÃæÊı¾İĞÂ½¨
+        ePalletizingStandardPlaneModify, // Æ½ÃæÊı¾İĞŞ¸Ä
+        ePalletizingStandardPlaneDelete, // Æ½ÃæÊı¾İÉ¾³ı
+        ePalletizingStandardPlaneRename, // Æ½ÃæÊı¾İÖØÃüÃû
+        // ×Ô¶¨ÒåÆ½ÃæXMLÎÄ¼ş´¦Àí
+        ePalletizingCustomPlaneCreate, // Æ½ÃæÊı¾İĞÂ½¨
+        ePalletizingCustomPlaneModify, // Æ½ÃæÊı¾İĞŞ¸Ä
+        ePalletizingCustomPlaneDelete, // Æ½ÃæÊı¾İÉ¾³ı
+        ePalletizingCustomPlaneRename, // Æ½ÃæÊı¾İÖØÃüÃû
+        // »ù±¾¶â¶ÑXMLÎÄ¼ş´¦Àí
+        ePalletizingBasicStkCreate, // ¶â¶ÑÊı¾İĞÂ½¨
+        ePalletizingBasicStkModify, // ¶â¶ÑÊı¾İĞŞ¸Ä
+        ePalletizingBasicStkDelete, // ¶â¶ÑÊı¾İÉ¾³ı
+        ePalletizingBasicStkRename, // ¶â¶ÑÊı¾İÖØÃüÃû
+        // ¸ß¼¶¶â¶ÑXMLÎÄ¼ş´¦Àí
+        ePalletizingSeniorStkCreate, // ¶â¶ÑÊı¾İĞÂ½¨
+        ePalletizingSeniorStkModify, // ¶â¶ÑÊı¾İĞŞ¸Ä
+        ePalletizingSeniorStkDelete, // ¶â¶ÑÊı¾İÉ¾³ı
+        ePalletizingSeniorStkRename, // ¶â¶ÑÊı¾İÖØÃüÃû
 
-        eProgPalletizingEntryPoint,   // ç å›è¿›å…¥ç‚¹
-        eProgPalletizingStatusRead,   // ç å›çŠ¶æ€è¯»å–
-        eProgPalletizingStatusUpdate, // ç å›çŠ¶æ€æ›´æ–°
-        eProgPalletizingStatusSet,    // ç å›çŠ¶æ€è®¾ç½®
-        eProgPalletizingUpdateProduct, // æ›´æ–°ç å›äº§å“         æ­¤æ®µå‘½ä»¤æ²¡æœ‰ä½¿ç”¨
-        ePalletizingModify,            // ç›‘è§†ç å›æ•°æ®ä¿®æ”¹
-        ePalletNumberUpdate,           // ç å›æ€»æ•°æ”¹å˜
-        ePalletizingUpdate,            // å•ä¸ªç å›å˜é‡æ”¹å˜
-        ePalletizingACK,               // ç å›å‘½ä»¤å›å¤    æ­¤å‘½ä»¤æ²¡æœ‰ä½¿ç”¨
-        ePalletizingTest,              // ç å›æµ‹è¯•æŒ‡ä»¤
+        eProgPalletizingEntryPoint,   // Âë¶â½øÈëµã
+        eProgPalletizingStatusRead,   // Âë¶â×´Ì¬¶ÁÈ¡
+        eProgPalletizingStatusUpdate, // Âë¶â×´Ì¬¸üĞÂ
+        eProgPalletizingStatusSet,    // Âë¶â×´Ì¬ÉèÖÃ
+        eProgPalletizingUpdateProduct, // ¸üĞÂÂë¶â²úÆ·         ´Ë¶ÎÃüÁîÃ»ÓĞÊ¹ÓÃ
+        ePalletizingModify,            // ¼àÊÓÂë¶âÊı¾İĞŞ¸Ä
+        ePalletNumberUpdate,           // Âë¶â×ÜÊı¸Ä±ä
+        ePalletizingUpdate,            // µ¥¸öÂë¶â±äÁ¿¸Ä±ä
+        ePalletizingACK,               // Âë¶âÃüÁî»Ø¸´    ´ËÃüÁîÃ»ÓĞÊ¹ÓÃ
+        ePalletizingTest,              // Âë¶â²âÊÔÖ¸Áî
         ePalletizingProgGenerate = 3341,
         ePalletizingProgDelete,
         ePalletizingProgListCheck,
@@ -295,11 +295,11 @@ namespace STEPROBOTSDK {
         ePalletPointUpdate = 3349,
         ePalletAxis4ConfigModify = 3400,
 
-        eHMIDisconnect = 3817, // æœªè¢«ä½¿ç”¨
-        ePalletTest = 4000,    // ç å›æµ‹è¯•å‘½ä»¤
-        eCameraData = 4200,    // æ¿€å…‰ç¤ºæ•™
-        eLaserOpen,            // æ¿€å…‰æ‰“å¼€å…³é—­
-        eLaserInit = 4212,     // æ¿€å…‰åˆå§‹åŒ–
+        eHMIDisconnect = 3817, // Î´±»Ê¹ÓÃ
+        ePalletTest = 4000,    // Âë¶â²âÊÔÃüÁî
+        eCameraData = 4200,    // ¼¤¹âÊ¾½Ì
+        eLaserOpen,            // ¼¤¹â´ò¿ª¹Ø±Õ
+        eLaserInit = 4212,     // ¼¤¹â³õÊ¼»¯
         eHmiRequestStdPlank = 4300,
         eHmiSendStdPlank,
         eHmiSendMeasurePlank,
@@ -311,33 +311,33 @@ namespace STEPROBOTSDK {
         eHomeDataSet,
         eHomeDataBackup,
         eOffsetAngleHome = 5007,
-        eIOModuleSet = 5100,           // IOæ¨¡å—è®¾ç½®
-        eIOConfigSet = 5101,           // IOå˜é‡è®¾ç½®
-        eIOSystemSignalSet = 5102,     // IOç³»ç»Ÿä¿¡å·è®¾ç½®
-        eIOWeldSignalSet = 5103,       // IOç„Šæ¥ä¿¡å·è®¾ç½®
-        eIOWeldSignalSetEx = 5104,     // IOæ¨¡æ‹Ÿä¿¡å·è®¾ç½®
-        eIOModuleRequest = 5105,       // IOæ¨¡å—è¯·æ±‚
-        eIOConfigRequest = 5106,       // IOå˜é‡è¯·æ±‚
-        eIOSystemSignalRequst = 5107,  // IOç³»ç»Ÿä¿¡å·è¯·æ±‚
-        eIOWeldSignalRequest = 5108,   // IOç„Šæ¥ä¿¡å·è¯·æ±‚
-        eIOWeldSignalRequestEx = 5109, // IOç„Šæ¥æ¨¡æ‹Ÿä¿¡å·è¯·æ±‚
-        eIOBendSignalSet = 5110,       // IOæŠ˜å¼¯ä¿¡å·è®¾ç½®
-        eIOCartSpaceSet = 5111,        // IOç¬›å¡å°”ç©ºé—´è®¾ç½®
-        eIOAxisSpaceSet = 5112,        // IOå…³èŠ‚ç©ºé—´è®¾ç½®
-        eIOBendSignalRequest = 5113,   // IOæŠ˜å¼¯ä¿¡å·è¯·æ±‚
-        eIOCartSpaceRequest = 5114,    // IOç¬›å¡å°”ä¿¡å·è¯·æ±‚
-        eIOAxisSpaceRequest = 5115,    // IOå…³èŠ‚ç©ºé—´ä¿¡å·è¯·æ±‚
+        eIOModuleSet = 5100,           // IOÄ£¿éÉèÖÃ
+        eIOConfigSet = 5101,           // IO±äÁ¿ÉèÖÃ
+        eIOSystemSignalSet = 5102,     // IOÏµÍ³ĞÅºÅÉèÖÃ
+        eIOWeldSignalSet = 5103,       // IOº¸½ÓĞÅºÅÉèÖÃ
+        eIOWeldSignalSetEx = 5104,     // IOÄ£ÄâĞÅºÅÉèÖÃ
+        eIOModuleRequest = 5105,       // IOÄ£¿éÇëÇó
+        eIOConfigRequest = 5106,       // IO±äÁ¿ÇëÇó
+        eIOSystemSignalRequst = 5107,  // IOÏµÍ³ĞÅºÅÇëÇó
+        eIOWeldSignalRequest = 5108,   // IOº¸½ÓĞÅºÅÇëÇó
+        eIOWeldSignalRequestEx = 5109, // IOº¸½ÓÄ£ÄâĞÅºÅÇëÇó
+        eIOBendSignalSet = 5110,       // IOÕÛÍäĞÅºÅÉèÖÃ
+        eIOCartSpaceSet = 5111,        // IOµÑ¿¨¶û¿Õ¼äÉèÖÃ
+        eIOAxisSpaceSet = 5112,        // IO¹Ø½Ú¿Õ¼äÉèÖÃ
+        eIOBendSignalRequest = 5113,   // IOÕÛÍäĞÅºÅÇëÇó
+        eIOCartSpaceRequest = 5114,    // IOµÑ¿¨¶ûĞÅºÅÇëÇó
+        eIOAxisSpaceRequest = 5115,    // IO¹Ø½Ú¿Õ¼äĞÅºÅÇëÇó
         eIOPortStatusRequest = 5116,
-        ePLaserDataRequest = 5117, // ç‚¹æ¿€å…‰é…ç½®è¯·æ±‚
-        ePLaserDataSet = 5118,     // ç‚¹æ¿€å…‰é…ç½®è®¾ç½®
+        ePLaserDataRequest = 5117, // µã¼¤¹âÅäÖÃÇëÇó
+        ePLaserDataSet = 5118,     // µã¼¤¹âÅäÖÃÉèÖÃ
 
-        eIOGProgSignalRequst = 5120, // å¼€æœºHMIè¯·æ±‚ç»„ç¨‹åºé…ç½®å‘½ä»¤
-        eIOGProgSignalSet = 5121,    // ç»„ç¨‹åºé…ç½®è®¾ç½®å‘½ä»¤
+        eIOGProgSignalRequst = 5120, // ¿ª»úHMIÇëÇó×é³ÌĞòÅäÖÃÃüÁî
+        eIOGProgSignalSet = 5121,    // ×é³ÌĞòÅäÖÃÉèÖÃÃüÁî
 
-        eProgramAppointmentSingleSet = 5300, // ä¿¡å·å’Œç¨‹åºå…³è”åŒ¹é…ï¼Œæ¶‚èƒ¶éæ ‡
+        eProgramAppointmentSingleSet = 5300, // ĞÅºÅºÍ³ÌĞò¹ØÁªÆ¥Åä£¬Í¿½º·Ç±ê
         eProgramAppointmentSingleRequst = 5301,
         eProgramAppointmentState = 5302,
-        eProgramAppointmentSetting = 5303, // é¢„çº¦åŠŸèƒ½è®¾ç½®ï¼Œæ¶‚èƒ¶éæ ‡
+        eProgramAppointmentSetting = 5303, // Ô¤Ô¼¹¦ÄÜÉèÖÃ£¬Í¿½º·Ç±ê
         eAppointmentSettingRequst = 5304,
         eProgramAppointmentSetCount = 5306,
         eProgramAppointmentCountUpdate = 5307,
@@ -347,34 +347,34 @@ namespace STEPROBOTSDK {
         eDefaultSpeedSet = 5500,
         eSetAxisVirtual = 5510,
 
-        eBelowMoldRequest = 5600,      // HMIè¯·æ±‚ä¸‹æ¨¡æ•°æ®
-        eBelowMoldSet,                 // HMIè®¾ç½®ä¸‹æ¨¡æ•°æ®
-        eBenderRefRequest,             // HMIè¯·æ±‚æŠ˜å¼¯åæ ‡ç³»æ•°æ®
-        eBenderRefSet,                 // HMIè®¾ç½®æŠ˜å¼¯åæ ‡ç³»æ•°æ®
-        eBenderIORequest,              // HMIè¯·æ±‚æŠ˜å¼¯IOæ•°æ®
-        eBenderIOSet,                  // HMIè®¾ç½®æŠ˜å¼¯IOæ•°æ®
-        eBenderTuningRequest,          // HMIè¯·æ±‚æŠ˜å¼¯æ ¡æ­£æ•°æ®
-        eBenderTuningSet,              // HMIè®¾ç½®æŠ˜å¼¯æ ¡æ­£æ•°æ®
-        eBenderGetMaterialRequest,     // HMIè¯·æ±‚æŠ˜å¼¯å–æ–™æ•°æ®
-        eBenderGetMaterialSet,         // HMIè®¾ç½®æŠ˜å¼¯å–æ–™æ•°æ®
-        eBenderPutMaterialRequest,     // HMIè¯·æ±‚æŠ˜å¼¯æ”¾æ–™æ•°æ®
-        eBenderPutMaterialSet,         // HMIè®¾ç½®æŠ˜å¼¯æ”¾æ–™æ•°æ®
-        eBenderMessageRequest,         // HMIè¯·æ±‚æŠ˜å¼¯ä¿¡æ¯æ•°æ®
-        eBenderMessageRefresh,         // HMIè¯·æ±‚åˆ·æ–°æŠ˜å¼¯ä¿¡æ¯æ•°æ®
-        eBenderMessageClear,           // HMIè¯·æ±‚æ¸…é™¤æŠ˜å¼¯ä¿¡æ¯
-        eBenderTest,                   // HMIè¯·æ±‚æµ‹è¯•æŠ˜å¼¯æœºä¿¡å·
-        eBenderGetRefresh,             // HMIè¯·æ±‚æµ‹è¯•æŠ˜å¼¯æœºä¿¡å·
-        eBenderPutRefresh,             // HMIè¯·æ±‚æµ‹è¯•æŠ˜å¼¯æœºä¿¡å·
-        eBenderGetReset = 5618,        // HMIè¯·æ±‚æµ‹è¯•æŠ˜å¼¯æœºä¿¡å·
-        eBenderPutReset,               // HMIè¯·æ±‚æµ‹è¯•æŠ˜å¼¯æœºä¿¡å·
-        eBenderIPSet,                  // æŠ˜å¼¯æœºIPåœ°å€ä¿å­˜
-        eBenderIPConnect,              // æŠ˜å¼¯æœºtcpé€šè®¯è¿æ¥
-        eBenderIPClose,                // æŠ˜å¼¯æœºtcpé€šè®¯å…³é—­
-        eBenderMouldDataSync,          // ä¸‹æ¨¡å‚æ•°è¯·æ±‚
-        eBenderIPRequest,              // è¯·æ±‚IPä¿¡æ¯
-        eBenderProgNameAndIndexUpdate, // æ›´æ–°æŠ˜å¼¯æœºç¨‹åº
+        eBelowMoldRequest = 5600,      // HMIÇëÇóÏÂÄ£Êı¾İ
+        eBelowMoldSet,                 // HMIÉèÖÃÏÂÄ£Êı¾İ
+        eBenderRefRequest,             // HMIÇëÇóÕÛÍä×ø±êÏµÊı¾İ
+        eBenderRefSet,                 // HMIÉèÖÃÕÛÍä×ø±êÏµÊı¾İ
+        eBenderIORequest,              // HMIÇëÇóÕÛÍäIOÊı¾İ
+        eBenderIOSet,                  // HMIÉèÖÃÕÛÍäIOÊı¾İ
+        eBenderTuningRequest,          // HMIÇëÇóÕÛÍäĞ£ÕıÊı¾İ
+        eBenderTuningSet,              // HMIÉèÖÃÕÛÍäĞ£ÕıÊı¾İ
+        eBenderGetMaterialRequest,     // HMIÇëÇóÕÛÍäÈ¡ÁÏÊı¾İ
+        eBenderGetMaterialSet,         // HMIÉèÖÃÕÛÍäÈ¡ÁÏÊı¾İ
+        eBenderPutMaterialRequest,     // HMIÇëÇóÕÛÍä·ÅÁÏÊı¾İ
+        eBenderPutMaterialSet,         // HMIÉèÖÃÕÛÍä·ÅÁÏÊı¾İ
+        eBenderMessageRequest,         // HMIÇëÇóÕÛÍäĞÅÏ¢Êı¾İ
+        eBenderMessageRefresh,         // HMIÇëÇóË¢ĞÂÕÛÍäĞÅÏ¢Êı¾İ
+        eBenderMessageClear,           // HMIÇëÇóÇå³ıÕÛÍäĞÅÏ¢
+        eBenderTest,                   // HMIÇëÇó²âÊÔÕÛÍä»úĞÅºÅ
+        eBenderGetRefresh,             // HMIÇëÇó²âÊÔÕÛÍä»úĞÅºÅ
+        eBenderPutRefresh,             // HMIÇëÇó²âÊÔÕÛÍä»úĞÅºÅ
+        eBenderGetReset = 5618,        // HMIÇëÇó²âÊÔÕÛÍä»úĞÅºÅ
+        eBenderPutReset,               // HMIÇëÇó²âÊÔÕÛÍä»úĞÅºÅ
+        eBenderIPSet,                  // ÕÛÍä»úIPµØÖ·±£´æ
+        eBenderIPConnect,              // ÕÛÍä»útcpÍ¨Ñ¶Á¬½Ó
+        eBenderIPClose,                // ÕÛÍä»útcpÍ¨Ñ¶¹Ø±Õ
+        eBenderMouldDataSync,          // ÏÂÄ£²ÎÊıÇëÇó
+        eBenderIPRequest,              // ÇëÇóIPĞÅÏ¢
+        eBenderProgNameAndIndexUpdate, // ¸üĞÂÕÛÍä»ú³ÌĞò
 
-        // è§†è§‰å’ŒSocket
+        // ÊÓ¾õºÍSocket
         //    eOpenCamera = 5700,
         //    eTakePhoto,
         //    eGetPos,
@@ -382,10 +382,10 @@ namespace STEPROBOTSDK {
         //    eCloseCamera,
         //    eSend,
         //    eRecv,
-        eProtocolNew = 5707, // æ–°å»ºåè®®
-        eProtocolCopy,       // å¤åˆ¶åè®®
-        eProtocolRename,     // é‡å‘½ååè®®
-        eProtocolDelete,     // é‡å‘½ååè®®
+        eProtocolNew = 5707, // ĞÂ½¨Ğ­Òé
+        eProtocolCopy,       // ¸´ÖÆĞ­Òé
+        eProtocolRename,     // ÖØÃüÃûĞ­Òé
+        eProtocolDelete,     // ÖØÃüÃûĞ­Òé
         eProtocolRequest,
         eSocketNumUpdata,
         eSocketStatusUpdata,
@@ -399,8 +399,8 @@ namespace STEPROBOTSDK {
         eSocketReadInt,
         eSocketReceiveString,
 
-        eServoDataRequest = 5725, // ä¸Šä¼ 
-        eServoDataSet,            // ä¸‹è½½
+        eServoDataRequest = 5725, // ÉÏ´«
+        eServoDataSet,            // ÏÂÔØ
         eEncoderStudy,
         eEncoderStudyResult,
         ePIDStudyTest,
@@ -408,102 +408,102 @@ namespace STEPROBOTSDK {
         ePIDStudyResult,
         eServoStudyCancel,
 
-        eConveyorRequest = 5750,   // æµæ°´çº¿è·Ÿè¸ªæ•°æ®è¯·æ±‚
-        eConveyorSet,              // æµæ°´çº¿è·Ÿè¸ªæ•°æ®è®¾ç½®
-        eConveyorEncoderRequest,   // ç¼–ç å™¨è·Ÿè¸ªæ•°æ®è¯·æ±‚
-        eConveyorStatusRequest,    // æµæ°´çº¿çŠ¶æ€æ•°æ®è¯·æ±‚
-        eConveyorActive,           // æµæ°´çº¿æ¿€æ´»
-        eConveyorGo,               // è¿åŠ¨åˆ°ç¬¬ä¸€ä¸ªå¯è¢«è·Ÿè¸ªç‰©å“ä½ç½®
-        eConveyorResetWaitObjects, // æ¸…ç©ºå¾…è·Ÿè¸ªé˜Ÿåˆ—
-        eConveyorResetStatistics,  // æ¸…ç©ºç»Ÿè®¡ä¿¡æ¯
-        eConveyorRefRequset,       // åæ ‡ç³»æ•°æ®è¯·æ±‚å‘½ä»¤
+        eConveyorRequest = 5750,   // Á÷Ë®Ïß¸ú×ÙÊı¾İÇëÇó
+        eConveyorSet,              // Á÷Ë®Ïß¸ú×ÙÊı¾İÉèÖÃ
+        eConveyorEncoderRequest,   // ±àÂëÆ÷¸ú×ÙÊı¾İÇëÇó
+        eConveyorStatusRequest,    // Á÷Ë®Ïß×´Ì¬Êı¾İÇëÇó
+        eConveyorActive,           // Á÷Ë®Ïß¼¤»î
+        eConveyorGo,               // ÔË¶¯µ½µÚÒ»¸ö¿É±»¸ú×ÙÎïÆ·Î»ÖÃ
+        eConveyorResetWaitObjects, // Çå¿Õ´ı¸ú×Ù¶ÓÁĞ
+        eConveyorResetStatistics,  // Çå¿ÕÍ³¼ÆĞÅÏ¢
+        eConveyorRefRequset,       // ×ø±êÏµÊı¾İÇëÇóÃüÁî
 
-        // åŠ¨åŠ›å­¦
-        eStallTypeSet = 5800,   // å®‰è£…æ–¹å¼ä¿å­˜
-        eDynModelBasicSet,      // åŸºæœ¬å‚æ•°è®¾å®š
-        eDynModelMechanicalSet, // åŠ¨åŠ›å­¦æ¨¡å‹è®¾å®š
-        eIdentifyTry,           // è¾¨è¯†è¯•è¿è¡Œ
-        eIdentifyTryComplate, // è¾¨è¯†è¯•è¿è¡Œå®Œæˆï¼Œå®Œæˆä¿¡å·æ˜¯éå®æ—¶å‘è¿‡æ¥çš„
-        eIdentifyFull,        // è¾¨è¯†å®Œæ•´æ¨¡å‹
-        eIdentifyFullComplate,             // è¾¨è¯†å®Œæ•´æ¨¡å‹å®Œæˆ
-        eIdentifyFriction,                 // è¾¨è¯†æ‘©æ“¦åŠ›
-        eIdentifyFrictionComplate,         // è¾¨è¯†æ‘©æ“¦åŠ›å®Œæˆ
-        eIdentifyFullSave,                 // ä¿å­˜å®Œæ•´æ¨¡å‹  5809
-        eDynModelSetThreshold,             // æœºæ¢°å‚æ•°æ‘©æ“¦åŠ›é˜ˆå€¼ä¿å­˜
-        eIdentifyFrictionSave,             // ä¿å­˜æ‘©æ“¦åŠ›æ•°æ®
-        eIdentifyHighSpeedPayLoad,         // é«˜é€Ÿè¾¨è¯†è´Ÿè½½   5812
-        eIdentifyLowSpeedPayLoad,          // ä½é€Ÿè´Ÿè½½è¾¨è¯†  5813
-        eIdentifyHighSpeedPayLoadComplate, // é«˜é€Ÿè¾¨è¯†è´Ÿè½½å®Œæˆ
-        eIdentifyLowSpeedPayLoadComplate,  // ä½é€Ÿè´Ÿè½½è¾¨è¯†å®Œæˆ
-        eBodyLoadSet,                      // æœ¬ä½“è´Ÿè½½è®¾ç½®  5816
-        eFeedforwardSet,                   // å‰é¦ˆè¡¥å¿
-        eCollisionDetectionSet,            // ç¢°æ’æ£€æµ‹è®¾ç½®
-        eDirectTeachSet,                   // æ‹–åŠ¨ç¤ºæ•™è®¾ç½®
-        eMonitorCurrent,                   // å¼€å§‹ç›‘è§†ç”µæµ
-        eMonitorStop,                      // åœæ­¢ç›‘è§†ç”µæµ
+        // ¶¯Á¦Ñ§
+        eStallTypeSet = 5800,   // °²×°·½Ê½±£´æ
+        eDynModelBasicSet,      // »ù±¾²ÎÊıÉè¶¨
+        eDynModelMechanicalSet, // ¶¯Á¦Ñ§Ä£ĞÍÉè¶¨
+        eIdentifyTry,           // ±æÊ¶ÊÔÔËĞĞ
+        eIdentifyTryComplate, // ±æÊ¶ÊÔÔËĞĞÍê³É£¬Íê³ÉĞÅºÅÊÇ·ÇÊµÊ±·¢¹ıÀ´µÄ
+        eIdentifyFull,        // ±æÊ¶ÍêÕûÄ£ĞÍ
+        eIdentifyFullComplate,             // ±æÊ¶ÍêÕûÄ£ĞÍÍê³É
+        eIdentifyFriction,                 // ±æÊ¶Ä¦²ÁÁ¦
+        eIdentifyFrictionComplate,         // ±æÊ¶Ä¦²ÁÁ¦Íê³É
+        eIdentifyFullSave,                 // ±£´æÍêÕûÄ£ĞÍ  5809
+        eDynModelSetThreshold,             // »úĞµ²ÎÊıÄ¦²ÁÁ¦ãĞÖµ±£´æ
+        eIdentifyFrictionSave,             // ±£´æÄ¦²ÁÁ¦Êı¾İ
+        eIdentifyHighSpeedPayLoad,         // ¸ßËÙ±æÊ¶¸ºÔØ   5812
+        eIdentifyLowSpeedPayLoad,          // µÍËÙ¸ºÔØ±æÊ¶  5813
+        eIdentifyHighSpeedPayLoadComplate, // ¸ßËÙ±æÊ¶¸ºÔØÍê³É
+        eIdentifyLowSpeedPayLoadComplate,  // µÍËÙ¸ºÔØ±æÊ¶Íê³É
+        eBodyLoadSet,                      // ±¾Ìå¸ºÔØÉèÖÃ  5816
+        eFeedforwardSet,                   // Ç°À¡²¹³¥
+        eCollisionDetectionSet,            // Åö×²¼ì²âÉèÖÃ
+        eDirectTeachSet,                   // ÍÏ¶¯Ê¾½ÌÉèÖÃ
+        eMonitorCurrent,                   // ¿ªÊ¼¼àÊÓµçÁ÷
+        eMonitorStop,                      // Í£Ö¹¼àÊÓµçÁ÷
         eDragTeach,
-        eIdentifyCalculateSet,     // è´Ÿè½½è¾¨è¯†æ‰‹åŠ¨è¾¨è¯†è®¾ç½®
-        eIdentifyLowSpeedComplete, // ä½é€Ÿè¾¨è¯†å®Œæˆ
-        eIdentifyFailed,           // è¾¨è¯†å¤±è´¥
-        eIdentifyCancel,           // è¾¨è¯†å–æ¶ˆ
-        eVibrationDamp,            // æŒ¯åŠ¨æŠ‘åˆ¶
-        eMidPointUpdate,           // å¯¹ç§°ç‚¹æ›´æ–°ã€‚æ•°æ®éƒ¨åˆ†æ˜¯12ä¸ªdoubleã€‚
-        eIdentifyNopayLoad = 5829, // ç©ºè½½è¾¨è¯†
+        eIdentifyCalculateSet,     // ¸ºÔØ±æÊ¶ÊÖ¶¯±æÊ¶ÉèÖÃ
+        eIdentifyLowSpeedComplete, // µÍËÙ±æÊ¶Íê³É
+        eIdentifyFailed,           // ±æÊ¶Ê§°Ü
+        eIdentifyCancel,           // ±æÊ¶È¡Ïû
+        eVibrationDamp,            // Õñ¶¯ÒÖÖÆ
+        eMidPointUpdate,           // ¶Ô³Æµã¸üĞÂ¡£Êı¾İ²¿·ÖÊÇ12¸ödouble¡£
+        eIdentifyNopayLoad = 5829, // ¿ÕÔØ±æÊ¶
 
-        eSamplingStart = 5900, // é‡‡é›†å¼€å§‹
-        eSamplingStop,         // é‡‡é›†åœæ­¢
-        eSamplingDataRecv,     // é‡‡é›†æ•°æ®ä¼ è¾“
+        eSamplingStart = 5900, // ²É¼¯¿ªÊ¼
+        eSamplingStop,         // ²É¼¯Í£Ö¹
+        eSamplingDataRecv,     // ²É¼¯Êı¾İ´«Êä
 
-        eExternalVarMonitor = 5910, // ç›‘è§†å¤–éƒ¨å˜é‡
-        eExternalVarReceive = 5911, // æ¥æ”¶å¤–éƒ¨å˜é‡
-        eExternalVarModify = 5912,  // ä¿®æ”¹å¤–éƒ¨å˜é‡
+        eExternalVarMonitor = 5910, // ¼àÊÓÍâ²¿±äÁ¿
+        eExternalVarReceive = 5911, // ½ÓÊÕÍâ²¿±äÁ¿
+        eExternalVarModify = 5912,  // ĞŞ¸ÄÍâ²¿±äÁ¿
 
-        eAnyBusStatus = 7102,        // AnybusçŠ¶æ€
-        eAnyBusConfigRequest = 7103, // Anybusé…ç½®è¯·æ±‚
-        eAnyBusConfigSet,            // Anybusé…ç½®è®¾ç½®
+        eAnyBusStatus = 7102,        // Anybus×´Ì¬
+        eAnyBusConfigRequest = 7103, // AnybusÅäÖÃÇëÇó
+        eAnyBusConfigSet,            // AnybusÅäÖÃÉèÖÃ
 
-        eProgCORR_Tool = 7110,        // SDKæ¨¡æ‹Ÿè¯­å¥
-        eProgCORR_Ref = 7111,         // SDKæ¨¡æ‹Ÿè¯­å¥
+        eProgCORR_Tool = 7110,        // SDKÄ£ÄâÓï¾ä
+        eProgCORR_Ref = 7111,         // SDKÄ£ÄâÓï¾ä
 
     } COMMUNICATIONCOMMAND;
 
-    /* æœ€å¤§å…³èŠ‚æ•° */
+    /* ×î´ó¹Ø½ÚÊı */
     #define MAX_JOINT_NUM 6
 
-    /* æœ€å¤§è¾…åŠ©è½´æ•° */
+    /* ×î´ó¸¨ÖúÖáÊı */
     #define MAX_AUX_NUM 6
 
-    /* å¼€æ ¹å·å†…æ˜¯è´Ÿæ•° */
+    /* ¿ª¸ùºÅÄÚÊÇ¸ºÊı */
     #define PM_SQRT_ERR -5
 
     #define SQRT_FUZZ (-0.000001)
 
-    #define sq(x) ((x) * (x)) // å¹³æ–¹
+    #define sq(x) ((x) * (x)) // Æ½·½
 
     #define PAI 3.1415926
 
-    /* SDKæœ€å¤§è¯­å¥æ•° 20231122 */
+    /* SDK×î´óÓï¾äÊı 20231122 */
     #define MAX_PRO_NUM 10
     #define MAX_SIZE_CHAR 1500
 
-    /* ä¸‰ç»´çŸ©é˜µ Matrix3 */
+    /* ÈıÎ¬¾ØÕó Matrix3 */
     typedef double Matrix3[3][3];
-    /* ä¸‰ç»´å‘é‡ Vector3 */
+    /* ÈıÎ¬ÏòÁ¿ Vector3 */
     typedef double Vector3[3];
-    /* 3*3æ—‹è½¬çŸ©é˜µ Rotation */
+    /* 3*3Ğı×ª¾ØÕó Rotation */
     typedef Matrix3 Rotation;
 
-    /* å…³èŠ‚ä½ç½® JointsPos */
+    /* ¹Ø½ÚÎ»ÖÃ JointsPos */
     typedef double JointsPos[MAX_JOINT_NUM];
-    /* é™„åŠ è½´å…³èŠ‚ä½ç½® AuxPos */
+    /* ¸½¼ÓÖá¹Ø½ÚÎ»ÖÃ AuxPos */
     typedef double AuxPos[MAX_AUX_NUM];
 
     typedef struct {
         #ifdef _WIN32
-            unsigned long int m_DI[64]; //  DIO_NUM é™¤ä»¥ 32 = 64
+            unsigned long int m_DI[64]; //  DIO_NUM ³ıÒÔ 32 = 64
             unsigned long int m_DIMask[64];
         #else
-            unsigned int m_DI[64]; //  DIO_NUM é™¤ä»¥ 32 = 64
+            unsigned int m_DI[64]; //  DIO_NUM ³ıÒÔ 32 = 64
             unsigned int m_DIMask[64];
         #endif
     } RobotDI;
@@ -537,28 +537,28 @@ namespace STEPROBOTSDK {
 
     typedef enum { eInfo, eWarning, eError } MESSAGETYPE;
 
-    /* ä¸€èˆ¬åŠ¨æ€å‚æ•° */
+    /* Ò»°ã¶¯Ì¬²ÎÊı */
     typedef struct
     {
-      double m_Vel;   // é€Ÿåº¦
-      double m_Acc;   // åŠ é€Ÿåº¦
-      double m_Dec;   // å‡é€Ÿåº¦
-      double m_Jerk;  // åŠ åŠ é€Ÿåº¦
-      double m_Tjolt; // æ—¶é—´
+      double m_Vel;   // ËÙ¶È
+      double m_Acc;   // ¼ÓËÙ¶È
+      double m_Dec;   // ¼õËÙ¶È
+      double m_Jerk;  // ¼Ó¼ÓËÙ¶È
+      double m_Tjolt; // Ê±¼ä
     } SubDynamic;
-    /* è¿åŠ¨åŠ¨æ€çŠ¶æ€ DynamicState */
+    /* ÔË¶¯¶¯Ì¬×´Ì¬ DynamicState */
     typedef SubDynamic DynamicState;
 
-    /* ç¬›å¡å°”è¿åŠ¨åŠ¨æ€ CartDynState */
+    /* µÑ¿¨¶ûÔË¶¯¶¯Ì¬ CartDynState */
     typedef DynamicState CartDynState;
 
-    typedef DynamicState JointDynState[MAX_JOINT_NUM];  //æ¯ä¸ªå…³èŠ‚éƒ½æœ‰åŠ¨æ€å‚æ•°
+    typedef DynamicState JointDynState[MAX_JOINT_NUM];  //Ã¿¸ö¹Ø½Ú¶¼ÓĞ¶¯Ì¬²ÎÊı
 
-    // 2013.4.22 å¸¦å…³èŠ‚ç™¾åˆ†æ¯”çš„å®Œæ•´åŠ¨æ€
+    // 2013.4.22 ´ø¹Ø½Ú°Ù·Ö±ÈµÄÍêÕû¶¯Ì¬
     typedef struct {
-      SubDynamic m_SegmentDynamic;   // è·¯å¾„åŠ¨æ€
-      SubDynamic m_OriDynamic;     // TCPå§¿æ€åŠ¨æ€
-      SubDynamic m_JointPercent;     // å…³èŠ‚åŠ¨æ€
+      SubDynamic m_SegmentDynamic;   // Â·¾¶¶¯Ì¬
+      SubDynamic m_OriDynamic;     // TCP×ËÌ¬¶¯Ì¬
+      SubDynamic m_JointPercent;     // ¹Ø½Ú¶¯Ì¬
     } SDynamicPercent;
 
 
@@ -572,21 +572,21 @@ namespace STEPROBOTSDK {
     } MessageData;
 
     typedef enum {
-      eManual,           // æ‰‹åŠ¨æ¨¡å¼
-      eManualHigh,       // é«˜é€Ÿæ‰‹åŠ¨æ¨¡å¼
-      eAutomatic,        // è‡ªåŠ¨æ¨¡å¼
-      eAutomaticExternal // å¤–éƒ¨è‡ªåŠ¨ï¼Œç”¨äºæœ‰ä¸Šå±‚æ§åˆ¶ç³»ç»Ÿçš„æƒ…å†µ
+      eManual,           // ÊÖ¶¯Ä£Ê½
+      eManualHigh,       // ¸ßËÙÊÖ¶¯Ä£Ê½
+      eAutomatic,        // ×Ô¶¯Ä£Ê½
+      eAutomaticExternal // Íâ²¿×Ô¶¯£¬ÓÃÓÚÓĞÉÏ²ã¿ØÖÆÏµÍ³µÄÇé¿ö
     } OPERATIONMODE;
 
-    /* ç‚¹åŠ¨åæ ‡ç³»ç±»å‹*/
+    /* µã¶¯×ø±êÏµÀàĞÍ*/
     typedef enum {
-      eJoints, // å…³èŠ‚åæ ‡ç³»
-      eWorld,  // ä¸–ç•Œåæ ‡ç³»
-      eBase,   // åŸºåæ ‡ç³»
-      eTool,   // å·¥å…·åæ ‡ç³»
-      eCustom, // å·¥ä½œå°åæ ‡ç³»/å·¥ä»¶åæ ‡ç³»/ç”¨æˆ·åæ ‡ç³»
+      eJoints, // ¹Ø½Ú×ø±êÏµ
+      eWorld,  // ÊÀ½ç×ø±êÏµ
+      eBase,   // »ù×ø±êÏµ
+      eTool,   // ¹¤¾ß×ø±êÏµ
+      eCustom, // ¹¤×÷Ì¨×ø±êÏµ/¹¤¼ş×ø±êÏµ/ÓÃ»§×ø±êÏµ
       eGo,
-      eTTS // ç„Šç‚¬ç‚¹åŠ¨åæ ‡ç³»ï¼Œæ— æ³•åœ¨è¯¥åæ ‡ç³»ä¸‹è¿›è¡Œå§¿æ€ç‚¹åŠ¨
+      eTTS // º¸¾æµã¶¯×ø±êÏµ£¬ÎŞ·¨ÔÚ¸Ã×ø±êÏµÏÂ½øĞĞ×ËÌ¬µã¶¯
     } REFSYS;
 
     typedef enum {
@@ -606,86 +606,86 @@ namespace STEPROBOTSDK {
 
     } HomoMatrix;
 
-    /* é™„åŠ è½´ç³»ç»Ÿç±»å‹ */
+    /* ¸½¼ÓÖáÏµÍ³ÀàĞÍ */
     typedef enum {
       // eNull = 0,
-      eERegular = 1, // ä¸å˜çš„ç±»å‹
-      eEAsys,        // å˜ä½æœºç³»ç»Ÿ
+      eERegular = 1, // ²»±äµÄÀàĞÍ
+      eEAsys,        // ±äÎ»»úÏµÍ³
       eEBsys,
       eECsys,
       eEDsys,
       eEEsys,
       eEFsys,
-      eERsys // å¯¼è½¨ç±»ç³»ç»Ÿ
+      eERsys // µ¼¹ìÀàÏµÍ³
     } AUXSYSTYPE;
 
-    /* ä½å§¿çŸ©é˜µ	CartFrame */
+    /* Î»×Ë¾ØÕó	CartFrame */
     typedef HomoMatrix CartFrame;
 
     typedef struct {
-      // Vector3 m_V_c;     // åæ ‡ç³»é€Ÿåº¦
-      // Vector3 m_A_c;     // åæ ‡ç³»åŠ é€Ÿåº¦
-      Vector3 m_Posit;      // è·Ÿè¸ªåæ ‡ç³»çš„ä½ç½®
-      double m_synvel;      // åæ ‡ç³»è·Ÿè¸ªé€Ÿåº¦
-      double m_synprogress; // åæ ‡ç³»è·Ÿè¸ªè·¯ç¨‹é‡
-      double remainpath;    // åæ ‡ç³»è·Ÿè¸ªå‰©ä½™è·¯ç¨‹
+      // Vector3 m_V_c;     // ×ø±êÏµËÙ¶È
+      // Vector3 m_A_c;     // ×ø±êÏµ¼ÓËÙ¶È
+      Vector3 m_Posit;      // ¸ú×Ù×ø±êÏµµÄÎ»ÖÃ
+      double m_synvel;      // ×ø±êÏµ¸ú×ÙËÙ¶È
+      double m_synprogress; // ×ø±êÏµ¸ú×ÙÂ·³ÌÁ¿
+      double remainpath;    // ×ø±êÏµ¸ú×ÙÊ£ÓàÂ·³Ì
     } Track_Refsys;
 
-    /* åæ ‡ç³»æ›´æ–°ç±»å‹ */
+    /* ×ø±êÏµ¸üĞÂÀàĞÍ */
     typedef enum
 
-    { eUpdateNot = 1, // åæ ‡ç³»ä¸æ›´æ–°ï¼Œç”¨åœ¨é™åæ ‡ç³»ä¸Š
-      eUpdateLink,    // é€šè¿‡link æ›´æ–°ï¼Œç”¨åœ¨å˜ä½æœºåæ ‡ç³»ä¸Š
-      eUpdateSMemSimu, // é€šè¿‡å…±äº«å†…å­˜ä»¿çœŸæ›´æ–°ï¼Œå¯èƒ½åœ¨è°ƒè¯•ä¸­å¯ç”¨åˆ°
-      eUpdateSMemIntern, // é€šè¿‡å†…éƒ¨å…±äº«å†…å­˜æ›´æ–°ï¼Œæš‚æ—¶æœªç”¨åˆ°
-      eUpdateSMemExtern // é€šè¿‡å¤–éƒ¨å…±äº«å†…å­˜æ›´æ–°ï¼Œç”¨åœ¨RefsysVaråæ ‡ç³»è·Ÿè¸ªä¸Šã€‚
+    { eUpdateNot = 1, // ×ø±êÏµ²»¸üĞÂ£¬ÓÃÔÚ¾²×ø±êÏµÉÏ
+      eUpdateLink,    // Í¨¹ılink ¸üĞÂ£¬ÓÃÔÚ±äÎ»»ú×ø±êÏµÉÏ
+      eUpdateSMemSimu, // Í¨¹ı¹²ÏíÄÚ´æ·ÂÕæ¸üĞÂ£¬¿ÉÄÜÔÚµ÷ÊÔÖĞ¿ÉÓÃµ½
+      eUpdateSMemIntern, // Í¨¹ıÄÚ²¿¹²ÏíÄÚ´æ¸üĞÂ£¬ÔİÊ±Î´ÓÃµ½
+      eUpdateSMemExtern // Í¨¹ıÍâ²¿¹²ÏíÄÚ´æ¸üĞÂ£¬ÓÃÔÚRefsysVar×ø±êÏµ¸ú×ÙÉÏ¡£
     } UPDATETYPE;
 
-    /* å‚è€ƒåæ ‡ç³» */
-    typedef struct // åŠ¨åæ ‡ç³» é™åæ ‡ç³»
+    /* ²Î¿¼×ø±êÏµ */
+    typedef struct // ¶¯×ø±êÏµ ¾²×ø±êÏµ
     {
-      char m_Name[32]; // åæ ‡ç³»åç§°
+      char m_Name[32]; // ×ø±êÏµÃû³Æ
 
-      AUXSYSTYPE m_AuxType;     // é™„åŠ è½´ç³»ç»Ÿç±»å‹
+      AUXSYSTYPE m_AuxType;     // ¸½¼ÓÖáÏµÍ³ÀàĞÍ
       CartFrame m_FrameCurrent; // To World
 
-      int m_TrackInited; // è·Ÿè¸ªåæ ‡ç³»æ˜¯å¦åˆå§‹åŒ–å®Œæˆ
-      CartFrame m_BaseRef; // åŠ¨åæ ‡ç³»å‚è€ƒçš„é™åæ ‡ç³»ï¼Œå…¶å€¼ä¸ºç›¸å¯¹worldçš„é½æ¬¡çŸ©é˜µ
-      CartFrame m_Frame; // ç«¯å£æ›´æ–°  ç›¸å¯¹ BaseRef çš„å½“å‰åæ ‡ç³»å€¼ã€‚
+      int m_TrackInited; // ¸ú×Ù×ø±êÏµÊÇ·ñ³õÊ¼»¯Íê³É
+      CartFrame m_BaseRef; // ¶¯×ø±êÏµ²Î¿¼µÄ¾²×ø±êÏµ£¬ÆäÖµÎªÏà¶ÔworldµÄÆë´Î¾ØÕó
+      CartFrame m_Frame; // ¶Ë¿Ú¸üĞÂ  Ïà¶Ô BaseRef µÄµ±Ç°×ø±êÏµÖµ¡£
       CartFrame frame_tmp;
 
-      int m_SynAcc; // åŒæ­¥åŠ é€Ÿä¸­,è¿™ä¸ªé‡è¦åœ¨å¼€å§‹çš„æ—¶å€™è®¾ç½®ä¸º1
-      CartFrame m_FrameI;      // åˆå§‹çš„Frameå€¼
-      CartFrame m_FramePre;    // ä¿å­˜ä¸Šä¸€æ—¶åˆ»çš„m_frame
-      Track_Refsys m_TrackRef; // è·Ÿè¸ªåæ ‡ç³»çš„ä¿¡æ¯
-      UPDATETYPE m_UpdType; // æ›´æ–°ç±»å‹TMcuUpdateTyp;  // tracking update type,
+      int m_SynAcc; // Í¬²½¼ÓËÙÖĞ,Õâ¸öÁ¿ÒªÔÚ¿ªÊ¼µÄÊ±ºòÉèÖÃÎª1
+      CartFrame m_FrameI;      // ³õÊ¼µÄFrameÖµ
+      CartFrame m_FramePre;    // ±£´æÉÏÒ»Ê±¿ÌµÄm_frame
+      Track_Refsys m_TrackRef; // ¸ú×Ù×ø±êÏµµÄĞÅÏ¢
+      UPDATETYPE m_UpdType; // ¸üĞÂÀàĞÍTMcuUpdateTyp;  // tracking update type,
                             // normal: McuUpdateSMemIntern
       // cyy
-      // DynamicCoordinateTrack m_dynamic_coordinate;  //åŠ¨æ€åæ ‡ç³»è·Ÿè¸ªç›¸å…³æ•°æ®
+      // DynamicCoordinateTrack m_dynamic_coordinate;  //¶¯Ì¬×ø±êÏµ¸ú×ÙÏà¹ØÊı¾İ
       // Track m_Track;
       // cyy
-      int m_IsHolding; // æ˜¯å¦æ˜¯æ³•å…°åæ ‡ç³»
+      int m_IsHolding; // ÊÇ·ñÊÇ·¨À¼×ø±êÏµ
     } RefsysElement;
 
     typedef enum {
-      eJoint = 1,   // å…³èŠ‚ä½ç½®
-      ePosCart,     // cart ä½ç½®
-      ePosComplete, // æœ‰joint å’Œ cart éƒ¨åˆ†éƒ½æœ‰æ•ˆ
-      ePosMix // æ··åˆå‹  éƒ¨åˆ†ä¸ºå…³èŠ‚,éƒ¨åˆ†ä¸ºjoint ä¸»è¦ç”¨åœ¨å››å…³èŠ‚å½“ä¸­ã€‚
-              // ePosJC   ,      // joint å’Œ cart ä¸€è‡´æœ‰æ•ˆ
-              // ePosJM   ,      // joint å’Œ Mix ä¸€è‡´æœ‰æ•ˆ
-              // å…¶ä»–ç±»å‹ï¼Ÿ
+      eJoint = 1,   // ¹Ø½ÚÎ»ÖÃ
+      ePosCart,     // cart Î»ÖÃ
+      ePosComplete, // ÓĞjoint ºÍ cart ²¿·Ö¶¼ÓĞĞ§
+      ePosMix // »ìºÏĞÍ  ²¿·ÖÎª¹Ø½Ú,²¿·ÖÎªjoint Ö÷ÒªÓÃÔÚËÄ¹Ø½Úµ±ÖĞ¡£
+              // ePosJC   ,      // joint ºÍ cart Ò»ÖÂÓĞĞ§
+              // ePosJM   ,      // joint ºÍ Mix Ò»ÖÂÓĞĞ§
+              // ÆäËûÀàĞÍ£¿
     } POSTYPE;
 
-    /* å®Œæ•´çš„ä½ç½®è¡¨ç¤ºï¼šåŒ…æ‹¬å…³èŠ‚å’Œç¬›å¡å°”çš„ä½ç½® PosFull */
+    /* ÍêÕûµÄÎ»ÖÃ±íÊ¾£º°üÀ¨¹Ø½ÚºÍµÑ¿¨¶ûµÄÎ»ÖÃ PosFull */
     typedef struct {
-      HomoMatrix m_Cart;   // ç¬›å¡å°”ä½ç½®
-      JointsPos m_Joint;   // å…³èŠ‚ä½ç½®
-      AuxPos m_AuxJoint;   // é™„åŠ è½´ä½ç½®
-      unsigned int m_mode; // å…³èŠ‚æ¨¡å¼
-      //RefsysElement *m_ref; // å‚è€ƒåæ ‡ç³»ï¼šå†…éƒ¨å¤„ç†æ—¶ï¼Œè¿›è¡Œå…³èŠ‚åˆ°Matrixçš„è½¬æ¢
+      HomoMatrix m_Cart;   // µÑ¿¨¶ûÎ»ÖÃ
+      JointsPos m_Joint;   // ¹Ø½ÚÎ»ÖÃ
+      AuxPos m_AuxJoint;   // ¸½¼ÓÖáÎ»ÖÃ
+      unsigned int m_mode; // ¹Ø½ÚÄ£Ê½
+      //RefsysElement *m_ref; // ²Î¿¼×ø±êÏµ£ºÄÚ²¿´¦ÀíÊ±£¬½øĞĞ¹Ø½Úµ½MatrixµÄ×ª»»
       unsigned int m_ref;
-      POSTYPE m_postype; // posfulä¿å­˜çš„ç±»å‹
+      POSTYPE m_postype; // posful±£´æµÄÀàĞÍ
     } PosFull;
 
     typedef struct {
@@ -718,33 +718,33 @@ namespace STEPROBOTSDK {
       int m_MotorEnable;
       REFSYS m_JogRefSys; //
       double m_Override;
-      PROGRAMSTATE m_ProgramState; // æœºå™¨äººçŠ¶æ€
-      PROGRAMMODE m_ProgramMode;   // ç¨‹åºè¿è¡ŒçŠ¶æ€
+      PROGRAMSTATE m_ProgramState; // »úÆ÷ÈË×´Ì¬
+      PROGRAMMODE m_ProgramMode;   // ³ÌĞòÔËĞĞ×´Ì¬
       int m_CurrentLine;           //
       PosFull m_ActPos;            //
       RobotAI m_RobotAI;
       RobotAO m_RobotAO;
-      unsigned int m_RobotRunningTime; // è¿è¡Œæ—¶é—´
-      int m_LifeTime;                  // å¼€æœºæ—¶é—´
-      //æ–°å¢ï¼Œå°†åŸæœ¬çš„ä¸–ç•Œåæ ‡åˆ†ç±»ï¼Œä¸–ç•Œã€åŸºã€ç”¨æˆ·
+      unsigned int m_RobotRunningTime; // ÔËĞĞÊ±¼ä
+      int m_LifeTime;                  // ¿ª»úÊ±¼ä
+      //ĞÂÔö£¬½«Ô­±¾µÄÊÀ½ç×ø±ê·ÖÀà£¬ÊÀ½ç¡¢»ù¡¢ÓÃ»§
       CoordinateSystem Cartpos_World;
       CoordinateSystem Cartpos_Robotbase;
       CoordinateSystem Cartpos_UserRef;
-      //æ–°å¢ç„Šæ¥æ¨¡å¼çŠ¶æ€
+      //ĞÂÔöº¸½ÓÄ£Ê½×´Ì¬
       ARCWELDINGMODE m_weldState;
-      //æ–°å¢å…³èŠ‚åŠ¨æ€ä¿¡æ¯
+      //ĞÂÔö¹Ø½Ú¶¯Ì¬ĞÅÏ¢
       JointDynState m_JointDynState;
       int m_LoadProgRunTime;
       int m_TotalRunTime;
-      int m_AuxAxisSyncOpen;//åŒæ­¥è½´ ç¬¬8ä½ä¸ºå®æ—¶åŠ è½½æ ‡å¿—
+      int m_AuxAxisSyncOpen;//Í¬²½Öá µÚ8Î»ÎªÊµÊ±¼ÓÔØ±êÖ¾
     };
 
     typedef struct {
-      JointsPos m_Joint; // å…³èŠ‚ä½ç½®
-      AuxPos m_AuxJoint; // é™„åŠ è½´ä½ç½®
+      JointsPos m_Joint; // ¹Ø½ÚÎ»ÖÃ
+      AuxPos m_AuxJoint; // ¸½¼ÓÖáÎ»ÖÃ
     } AXISPOS;
 
-    /* ç¬›å¡å°”ä½ç½® CartPos */
+    /* µÑ¿¨¶ûÎ»ÖÃ CartPos */
     typedef struct {
       double cart[6];
       unsigned int m_Mode;
@@ -756,13 +756,13 @@ namespace STEPROBOTSDK {
     } CARTPOS;
 
     typedef struct {
-      char m_Name[32];     /* æœºå™¨äººåç§° */
-      char m_RobotSNo[32]; /* æœºå™¨äººåºåˆ—å· */
+      char m_Name[32];     /* »úÆ÷ÈËÃû³Æ */
+      char m_RobotSNo[32]; /* »úÆ÷ÈËĞòÁĞºÅ */
     } RobotInfoStruct;
 
     typedef struct {
-      char m_ElecBoxName[32]; /* æ§åˆ¶ç®±å‹å· */
-      char m_ElecBoxSNo[32];  /* æ§åˆ¶ç®±åºåˆ—å· */
+      char m_ElecBoxName[32]; /* ¿ØÖÆÏäĞÍºÅ */
+      char m_ElecBoxSNo[32];  /* ¿ØÖÆÏäĞòÁĞºÅ */
     } ElecBoxInfoStruct;
 
     typedef enum {
@@ -785,11 +785,11 @@ namespace STEPROBOTSDK {
       NEGATIVE5,
       NEGATIVE6,
       ND2,
-      WIREOUT,//é€ä¸
-      WIREBACK,//æŠ½ä¸
-      WIREGAS,//é€æ°”
+      WIREOUT,//ËÍË¿
+      WIREBACK,//³éË¿
+      WIREGAS,//ËÍÆø
       STOP,       // 23
-      MSTOP = 100 // 100,ç‚¹åŠ¨åœæ­¢
+      MSTOP = 100 // 100,µã¶¯Í£Ö¹
 
     } MODEKEY;
     typedef struct {
@@ -802,10 +802,10 @@ namespace STEPROBOTSDK {
       unsigned int m_Mode;
     } CartPos;
 
-    /* å›ºå®šè§’ */
+    /* ¹Ì¶¨½Ç */
     typedef Vector3 Rpy;
 
-    /*æ–°å¢å·¥å…·åæ ‡å’Œç”¨æˆ·åæ ‡*/
+    /*ĞÂÔö¹¤¾ß×ø±êºÍÓÃ»§×ø±ê*/
     typedef struct {
       bool Fixed;
       double X;
@@ -827,24 +827,24 @@ namespace STEPROBOTSDK {
 
     } CartRefSys;
 
-     // DHå‚æ•°è®¾ç½® æ–°å¢ï¼Œ20230726ï¼Œéæ ‡ç‰ˆæœ¬
-    // å®šä¹‰å…³èŠ‚ç±»å‹
+     // DH²ÎÊıÉèÖÃ ĞÂÔö£¬20230726£¬·Ç±ê°æ±¾
+    // ¶¨Òå¹Ø½ÚÀàĞÍ
     typedef enum {
-      eLinear = 1, // ç§»åŠ¨å…³èŠ‚
-      eRotary      // è½¬åŠ¨å…³èŠ‚
+      eLinear = 1, // ÒÆ¶¯¹Ø½Ú
+      eRotary      // ×ª¶¯¹Ø½Ú
     } JOINTTYPE;
 
-    // å®šä¹‰DHå‚æ•°
+    // ¶¨ÒåDH²ÎÊı
     typedef struct {
-      JOINTTYPE m_JointType; // å…³èŠ‚ç±»å‹
-      double m_Alpha;        // è¿æ†è½¬è§’
-      double m_A;            // è¿æ†ä¸¤ç«¯å…³èŠ‚è½´çš„å…¬å‚çº¿é•¿åº¦
-      double m_D;     // è¿æ†åè·ï¼ˆç›¸é‚»è¿æ†å…¬å…±è½´çº¿æ–¹å‘çš„è·ç¦»ï¼‰
-      double m_Theta; // å…³èŠ‚è§’
+      JOINTTYPE m_JointType; // ¹Ø½ÚÀàĞÍ
+      double m_Alpha;        // Á¬¸Ë×ª½Ç
+      double m_A;            // Á¬¸ËÁ½¶Ë¹Ø½ÚÖáµÄ¹«´¹Ïß³¤¶È
+      double m_D;     // Á¬¸ËÆ«¾à£¨ÏàÁÚÁ¬¸Ë¹«¹²ÖáÏß·½ÏòµÄ¾àÀë£©
+      double m_Theta; // ¹Ø½Ú½Ç
     } RobotDHParam;
-    //RobotDHParam cmdDHParam[MAX_JOINT_NUM + 1]; // DHå‚æ•°
+    //RobotDHParam cmdDHParam[MAX_JOINT_NUM + 1]; // DH²ÎÊı
 
-    //ç»å¯¹ä½ç½®ç‚¹åŠ¨ç»“æ„ä½“å¢åŠ ï¼Œ20231103
+    //¾ø¶ÔÎ»ÖÃµã¶¯½á¹¹ÌåÔö¼Ó£¬20231103
     typedef enum {
       eAxisPos = 1,
       eCartPos,
@@ -857,7 +857,7 @@ namespace STEPROBOTSDK {
       //eRobotCartPosExt,
       //eAuxAxisPosExt,
       //eArcMultiPos,
-      //eCartPosEE // 2014.10.29 æ–°å¢å¤–éƒ¨æ‰©å±•ç‚¹ç±»å‹
+      //eCartPosEE // 2014.10.29 ĞÂÔöÍâ²¿À©Õ¹µãÀàĞÍ
     } HMIPOSTYPE;
 
     typedef enum {
@@ -867,12 +867,12 @@ namespace STEPROBOTSDK {
 
     typedef struct {
       CartPos m_CartPos; // xyzabc+mode
-      AuxPos m_AuxPos;   // é™„åŠ è½´ä¿¡æ¯
-      JointsPos m_Joint; // å…³èŠ‚éƒ¨åˆ†
-      POSTYPE m_postyp;  // ä½ç½®ç±»å‹
+      AuxPos m_AuxPos;   // ¸½¼ÓÖáĞÅÏ¢
+      JointsPos m_Joint; // ¹Ø½Ú²¿·Ö
+      POSTYPE m_postyp;  // Î»ÖÃÀàĞÍ
     } RcPos;
 
-    // ç”¨æˆ·ç¨‹åºä½ç½®æ•°æ®
+    // ÓÃ»§³ÌĞòÎ»ÖÃÊı¾İ
     typedef struct {
       HMIPOSTYPE m_PosType;
       int m_Port;
@@ -884,11 +884,11 @@ namespace STEPROBOTSDK {
       char m_RefName[32];
     } ToolRefName;
 
-    //æ–°å¢SDKæ¨¡æ‹Ÿè¿åŠ¨å‘½ä»¤ä¸­ä½¿ç”¨æ•°æ®ç±»å‹ 20231115
-    //åœ†æ»‘
+    //ĞÂÔöSDKÄ£ÄâÔË¶¯ÃüÁîÖĞÊ¹ÓÃÊı¾İÀàĞÍ 20231115
+    //Ô²»¬
     typedef enum {
-      eOVLABS = 1, // ç»å¯¹å€¼ç»™å®š
-      eOVLREL      // ç™¾åˆ†æ¯”ç»™å®š
+      eOVLABS = 1, // ¾ø¶ÔÖµ¸ø¶¨
+      eOVLREL      // °Ù·Ö±È¸ø¶¨
     } OVERLAPTYPE;
 
     typedef struct {
@@ -896,261 +896,261 @@ namespace STEPROBOTSDK {
       double m_Zone_ori;
       double m_Zone_leax;
       double m_Zone_reax;
-      double m_Percent;     // %ç™¾åˆ†æ¯”
-      OVERLAPTYPE m_OveTyp; // åœ†æ»‘ç»™å®šæ–¹å¼
+      double m_Percent;     // %°Ù·Ö±È
+      OVERLAPTYPE m_OveTyp; // Ô²»¬¸ø¶¨·½Ê½
     } SOverlap;
 
-    //SDKä¸“ç”¨åœ†æ»‘ç»“æ„ä½“
+    //SDK×¨ÓÃÔ²»¬½á¹¹Ìå
     typedef struct {
       double m_tcp_distance;
-      double m_Percent;     // %ç™¾åˆ†æ¯”
-      OVERLAPTYPE m_OveTyp; // åœ†æ»‘ç»™å®šæ–¹å¼
+      double m_Percent;     // %°Ù·Ö±È
+      OVERLAPTYPE m_OveTyp; // Ô²»¬¸ø¶¨·½Ê½
     } SDKOverlap;
 
-    //å§¿æ€å‚æ•°
+    //×ËÌ¬²ÎÊı
     typedef enum {
       eOriNULL = 0,
-      eVar = 1, // æ ¹æ®ç¤ºæ•™çš„å§¿æ€ä¿¡æ¯è¿›è¡Œå››å…ƒæ•°å§¿æ€æ’è¡¥
-      eConst,   // å§‹ç»ˆä¿æŒèµ·å§‹ä½ç½®çš„å§¿æ€
-      eCircle,  // ä¸åœ†å¹³é¢çš„æ³•ç›¸ä¿æŒå›ºå®šå§¿æ€è¿›è¡Œåœ†çš„æ’è¡¥
-      eWrist,   // è…•å…³èŠ‚
-      eCirPass  // è¿‡åœ†å¼§ä¸­é—´ç‚¹å§¿æ€
+      eVar = 1, // ¸ù¾İÊ¾½ÌµÄ×ËÌ¬ĞÅÏ¢½øĞĞËÄÔªÊı×ËÌ¬²å²¹
+      eConst,   // Ê¼ÖÕ±£³ÖÆğÊ¼Î»ÖÃµÄ×ËÌ¬
+      eCircle,  // ÓëÔ²Æ½ÃæµÄ·¨Ïà±£³Ö¹Ì¶¨×ËÌ¬½øĞĞÔ²µÄ²å²¹
+      eWrist,   // Íó¹Ø½Ú
+      eCirPass  // ¹ıÔ²»¡ÖĞ¼äµã×ËÌ¬
     } ORITYPE;
 
-    //PTPç»“æ„ä½“
+    //PTP½á¹¹Ìå
     typedef struct {
       HMIPos m_EndPos;
-      int m_Dyn; // åªå¯ä»¥è®¾ç½®ä½ç½®é€Ÿåº¦ï¼Œå…¶ä»–å‚æ•°åˆ©ç”¨Dynè¯­å¥è®¾ç½®;NULLå¯ä»¥è®¾ç½®-1
-      SOverlap m_Ovl; // NULLå‚æ•°å€¼éƒ½ä¸º-1ï¼Œç±»å‹æšä¸¾ä¸º0
+      int m_Dyn; // Ö»¿ÉÒÔÉèÖÃÎ»ÖÃËÙ¶È£¬ÆäËû²ÎÊıÀûÓÃDynÓï¾äÉèÖÃ;NULL¿ÉÒÔÉèÖÃ-1
+      SOverlap m_Ovl; // NULL²ÎÊıÖµ¶¼Îª-1£¬ÀàĞÍÃ¶¾ÙÎª0
       char m_ToolName[32];
       char m_RefName[32];
     } SDKInstructPTP;
 
-    //Linç»“æ„ä½“
+    //Lin½á¹¹Ìå
     typedef struct {
       HMIPos m_EndPos;
-      int m_Dyn; // åªå¯ä»¥è®¾ç½®ä½ç½®é€Ÿåº¦ï¼Œå…¶ä»–å‚æ•°åˆ©ç”¨Dynè¯­å¥è®¾ç½®;NULLå¯ä»¥è®¾ç½®-1
-      SOverlap m_Ovl; // NULLå‚æ•°å€¼éƒ½ä¸º-1ï¼Œç±»å‹æšä¸¾ä¸º0
+      int m_Dyn; // Ö»¿ÉÒÔÉèÖÃÎ»ÖÃËÙ¶È£¬ÆäËû²ÎÊıÀûÓÃDynÓï¾äÉèÖÃ;NULL¿ÉÒÔÉèÖÃ-1
+      SOverlap m_Ovl; // NULL²ÎÊıÖµ¶¼Îª-1£¬ÀàĞÍÃ¶¾ÙÎª0
       ORITYPE m_Ori;
       char m_ToolName[32];
       char m_RefName[32];
     } SDKInstructLin;
 
-    //Circç»“æ„ä½“
+    //Circ½á¹¹Ìå
     typedef struct {
-      HMIPos m_StartPos;      // èµ·ç‚¹ï¼Œä¸Šä¸€è¡Œè¿åŠ¨æŒ‡ä»¤çš„ç›®æ ‡ç‚¹
-      char m_StartTool[32];   // ä¸Šä¸€è¡Œè¿åŠ¨æŒ‡ä»¤çš„å·¥å…·
-      char m_StartRefSys[32]; // ä¸Šä¸€è¡Œè¿åŠ¨æŒ‡ä»¤çš„åæ ‡ç³»
+      HMIPos m_StartPos;      // Æğµã£¬ÉÏÒ»ĞĞÔË¶¯Ö¸ÁîµÄÄ¿±êµã
+      char m_StartTool[32];   // ÉÏÒ»ĞĞÔË¶¯Ö¸ÁîµÄ¹¤¾ß
+      char m_StartRefSys[32]; // ÉÏÒ»ĞĞÔË¶¯Ö¸ÁîµÄ×ø±êÏµ
       HMIPos m_EndPos;
       HMIPos m_HelpPos;
-      int m_Dyn; // åªå¯ä»¥è®¾ç½®ä½ç½®é€Ÿåº¦ï¼Œå…¶ä»–å‚æ•°åˆ©ç”¨Dynè¯­å¥è®¾ç½®
-      SOverlap m_Ovl; // NULLå‚æ•°å€¼éƒ½ä¸º-1ï¼Œç±»å‹æšä¸¾ä¸º0
+      int m_Dyn; // Ö»¿ÉÒÔÉèÖÃÎ»ÖÃËÙ¶È£¬ÆäËû²ÎÊıÀûÓÃDynÓï¾äÉèÖÃ
+      SOverlap m_Ovl; // NULL²ÎÊıÖµ¶¼Îª-1£¬ÀàĞÍÃ¶¾ÙÎª0
       ORITYPE m_Ori;
       char m_ToolName[32];
       char m_RefName[32];
       double m_Angle;
     } SDKInstructCirc;
 
-    //Dynç»“æ„ä½“
+    //Dyn½á¹¹Ìå
     typedef struct {
-      SDynamicPercent m_DynPerc; // ä¸‰ä¸ªæ—¶é—´é»˜è®¤å€¼ä¸º-1
+      SDynamicPercent m_DynPerc; // Èı¸öÊ±¼äÄ¬ÈÏÖµÎª-1
     } SDKInstructDyn;
 
-    //Waittimeç»“æ„ä½“
+    //Waittime½á¹¹Ìå
     typedef struct {
       int m_WaitTime;
     } SDKInstructWaitTime;
 
-    //Arconç»“æ„ä½“
+    //Arcon½á¹¹Ìå
     typedef struct {
-      int m_ScratchArcFlag;        // æ“¦çº¿èµ·å¼§æ ‡å¿—ï¼Œ1æ˜¯å¯ç”¨æˆ–xï¼Œ2æ˜¯Y
-      double m_ScratchMaxDistance; // æ“¦çº¿è·ç¦»
-      double m_ScratchStepLength;  // æ“¦çº¿æ­¥é•¿ï¼Œæ¯æ¬¡ç§»åŠ¨è·ç¦»
-      double m_ReturnSpeed;        // æ“¦çº¿è¿”å›é€Ÿåº¦
+      int m_ScratchArcFlag;        // ²ÁÏßÆğ»¡±êÖ¾£¬1ÊÇÆôÓÃ»òx£¬2ÊÇY
+      double m_ScratchMaxDistance; // ²ÁÏß¾àÀë
+      double m_ScratchStepLength;  // ²ÁÏß²½³¤£¬Ã¿´ÎÒÆ¶¯¾àÀë
+      double m_ReturnSpeed;        // ²ÁÏß·µ»ØËÙ¶È
 
-      int m_ScratchSegType; // 1æ˜¯Linï¼Œ2æ˜¯Circï¼ŒCircAngle
-      HMIPos m_EndPos;      // æ“¦çº¿æ–¹å‘ä¸Šæœ«ç«¯ç‚¹
+      int m_ScratchSegType; // 1ÊÇLin£¬2ÊÇCirc£¬CircAngle
+      HMIPos m_EndPos;      // ²ÁÏß·½ÏòÉÏÄ©¶Ëµã
       HMIPos m_HelpPos;
-      char m_ToolName[32];      // å·¥å…·
-      char m_RefSysName[32];   // åæ ‡ç³»
+      char m_ToolName[32];      // ¹¤¾ß
+      char m_RefSysName[32];   // ×ø±êÏµ
     } ScratchSDKArcData;
     typedef struct {
-      int m_Valid;                     // æ˜¯å¦æœ‰å†èµ·å¼§
-      int m_DetectTime;                // èµ·å¼§å¤±è´¥æ£€æµ‹æ—¶é—´
-      int m_RetryTimes;                // èµ·å¼§å¤±è´¥åï¼Œé‡è¯•çš„æ¬¡æ•°
-      int m_RetractTime;               // ç„Šä¸å›æŠ½æ—¶é—´
-      int m_RetractWaitTime;           // å›æŠ½ç­‰å¾…æ—¶é—´
-      double m_CurrentInc;             // å†èµ·å¼§ç”µæµå¢é‡
-      double m_VoltageInc;             // å†èµ·å¼§ç”µå‹å¢é‡
-      ScratchSDKArcData m_ScratchArcData; // æ“¦çº¿èµ·å¼§è®¾ç½®å‚æ•°
+      int m_Valid;                     // ÊÇ·ñÓĞÔÙÆğ»¡
+      int m_DetectTime;                // Æğ»¡Ê§°Ü¼ì²âÊ±¼ä
+      int m_RetryTimes;                // Æğ»¡Ê§°Üºó£¬ÖØÊÔµÄ´ÎÊı
+      int m_RetractTime;               // º¸Ë¿»Ø³éÊ±¼ä
+      int m_RetractWaitTime;           // »Ø³éµÈ´ıÊ±¼ä
+      double m_CurrentInc;             // ÔÙÆğ»¡µçÁ÷ÔöÁ¿
+      double m_VoltageInc;             // ÔÙÆğ»¡µçÑ¹ÔöÁ¿
+      ScratchSDKArcData m_ScratchArcData; // ²ÁÏßÆğ»¡ÉèÖÃ²ÎÊı
     } SDKArcRetryData;
     typedef struct {
-      int m_PreflowTime;     // é¢„é€æ°”æ—¶é—´
-      int m_PreArcingTime;   // é¢„èµ·å¼§æ—¶é—´
-      int m_PreWireFeedTime; // é¢„é€ä¸æ—¶é—´
-      double m_ArcOnCurrent; // èµ·å¼§ç”µæµ
-      double m_ArcOnVoltage; // èµ·å¼§ç”µå‹
-      int m_ArcOnWaitTime;   // ç­‰å¾…ç„Šæœºèµ·å¼§æˆåŠŸçš„æ—¶é—´//èµ·å¼§æ—¶é—´
+      int m_PreflowTime;     // Ô¤ËÍÆøÊ±¼ä
+      int m_PreArcingTime;   // Ô¤Æğ»¡Ê±¼ä
+      int m_PreWireFeedTime; // Ô¤ËÍË¿Ê±¼ä
+      double m_ArcOnCurrent; // Æğ»¡µçÁ÷
+      double m_ArcOnVoltage; // Æğ»¡µçÑ¹
+      int m_ArcOnWaitTime;   // µÈ´ıº¸»úÆğ»¡³É¹¦µÄÊ±¼ä//Æğ»¡Ê±¼ä
 
-      //æ–°å¢2025.04.07
-      int m_ArcMode;               //ç„Šæ¥æ¨¡å¼
-      int m_ArcArgonFlag;          //æ°©å¼§ç„Šæ ‡å¿—
-      int m_WeaveSyncFlag;         //æ‘†å¼§åŒæ­¥è¾“å‡ºç”µæµé€ä¸æ ‡å¿—
-      int m_ArcWeldCurrentBase;    //ç„Šæ¥ç”µæµåŸºå€¼
-      int m_ArcDutyCycle;          //å ç©ºæ¯”
-      int m_ArcFrequency;          //è„‰å†²é¢‘ç‡
-      double m_ArcWireSpeed;       //å³°å€¼é€ä¸é€Ÿåº¦
-      double m_ArcWireSpeedBase;   //åŸºå€¼é€ä¸é€Ÿåº¦
-      int m_ArcRampTime;           //ç¼“å‡æ—¶é—´
-      int m_ArcDescentTime;        //ç¼“é™æ—¶é—´
-	  //æ–°å¢2025.05.16
-      int m_ArcOnDelayWireTime;    //å»¶è¿Ÿé€ä¸æ—¶é—´
-      double m_ArcWireRetractLength;//ç„Šä¸å›é€€è·ç¦»
+      //ĞÂÔö2025.04.07
+      int m_ArcMode;               //º¸½ÓÄ£Ê½
+      int m_ArcArgonFlag;          //ë²»¡º¸±êÖ¾
+      int m_WeaveSyncFlag;         //°Ú»¡Í¬²½Êä³öµçÁ÷ËÍË¿±êÖ¾
+      int m_ArcWeldCurrentBase;    //º¸½ÓµçÁ÷»ùÖµ
+      int m_ArcDutyCycle;          //Õ¼¿Õ±È
+      int m_ArcFrequency;          //Âö³åÆµÂÊ
+      double m_ArcWireSpeed;       //·åÖµËÍË¿ËÙ¶È
+      double m_ArcWireSpeedBase;   //»ùÖµËÍË¿ËÙ¶È
+      int m_ArcRampTime;           //»ºÉıÊ±¼ä
+      int m_ArcDescentTime;        //»º½µÊ±¼ä
+	  //ĞÂÔö2025.05.16
+      int m_ArcOnDelayWireTime;    //ÑÓ³ÙËÍË¿Ê±¼ä
+      double m_ArcWireRetractLength;//º¸Ë¿»ØÍË¾àÀë
 
-      int m_DecayTime;         // æ¸å˜æ—¶é—´
-      double m_ArcSetCurrent;  // ç„Šæ¥ç”µæµ
-      double m_ArcSetVoltage;  // ç„Šæ¥ç”µå‹
-      double m_ArcSetSpeed;    // æœºå™¨äººç„Šæ¥é€Ÿåº¦ 2016.5.25
-      double m_ArcSetEndSpeed; // æœºå™¨äººç„Šæ¥ç»“æŸé€Ÿåº¦2021.9.23
+      int m_DecayTime;         // ½¥±äÊ±¼ä
+      double m_ArcSetCurrent;  // º¸½ÓµçÁ÷
+      double m_ArcSetVoltage;  // º¸½ÓµçÑ¹
+      double m_ArcSetSpeed;    // »úÆ÷ÈËº¸½ÓËÙ¶È 2016.5.25
+      double m_ArcSetEndSpeed; // »úÆ÷ÈËº¸½Ó½áÊøËÙ¶È2021.9.23
 
-      SDKArcRetryData m_ArcRetryData; // å†èµ·å¼§å‚æ•°
-      double m_BackDistance;      //èµ·å¼§å›é€€è·ç¦» //æ–°å¢2024.7.8
+      SDKArcRetryData m_ArcRetryData; // ÔÙÆğ»¡²ÎÊı
+      double m_BackDistance;      //Æğ»¡»ØÍË¾àÀë //ĞÂÔö2024.7.8
 
     } SDKInstructArcOn;
 
-    //å°†ArcOnç»“æ„ä½“åˆ†ç»„ç»™æ¥å£ä½¿ç”¨ï¼ŒæŒ‰ç…§ç¤ºæ•™å™¨è§„åˆ™
-    //èµ·å¼§å˜é‡
+    //½«ArcOn½á¹¹Ìå·Ö×é¸ø½Ó¿ÚÊ¹ÓÃ£¬°´ÕÕÊ¾½ÌÆ÷¹æÔò
+    //Æğ»¡±äÁ¿
     typedef struct {
-      int m_PreflowTime;     // é¢„é€æ°”æ—¶é—´
-      int m_PreArcingTime;   // é¢„èµ·å¼§æ—¶é—´
-      int m_PreWireFeedTime; // é¢„é€ä¸æ—¶é—´
-      double m_ArcOnCurrent; // èµ·å¼§ç”µæµ
-      double m_ArcOnVoltage; // èµ·å¼§ç”µå‹
-      int m_ArcOnWaitTime;   // ç­‰å¾…ç„Šæœºèµ·å¼§æˆåŠŸçš„æ—¶é—´//èµ·å¼§æ—¶é—´
+      int m_PreflowTime;     // Ô¤ËÍÆøÊ±¼ä
+      int m_PreArcingTime;   // Ô¤Æğ»¡Ê±¼ä
+      int m_PreWireFeedTime; // Ô¤ËÍË¿Ê±¼ä
+      double m_ArcOnCurrent; // Æğ»¡µçÁ÷
+      double m_ArcOnVoltage; // Æğ»¡µçÑ¹
+      int m_ArcOnWaitTime;   // µÈ´ıº¸»úÆğ»¡³É¹¦µÄÊ±¼ä//Æğ»¡Ê±¼ä
     } SDKArcOnVauleStruct;
-    //ç„Šæ¥å˜é‡
+    //º¸½Ó±äÁ¿
     typedef struct {
-      double m_ArcSetCurrent;  // ç„Šæ¥ç”µæµ
-      double m_ArcSetVoltage;  // ç„Šæ¥ç”µå‹
-      double m_ArcSetSpeed;    // æœºå™¨äººç„Šæ¥é€Ÿåº¦ 2016.5.25
-      double m_ArcSetEndSpeed; // æœºå™¨äººç„Šæ¥ç»“æŸé€Ÿåº¦2021.9.23
+      double m_ArcSetCurrent;  // º¸½ÓµçÁ÷
+      double m_ArcSetVoltage;  // º¸½ÓµçÑ¹
+      double m_ArcSetSpeed;    // »úÆ÷ÈËº¸½ÓËÙ¶È 2016.5.25
+      double m_ArcSetEndSpeed; // »úÆ÷ÈËº¸½Ó½áÊøËÙ¶È2021.9.23
 
-      //æ–°å¢2025.04.07
-      int m_ArcMode;               //ç„Šæ¥æ¨¡å¼
-      int m_ArcArgonFlag;          //æ°©å¼§ç„Šæ ‡å¿—
-      int m_WeaveSyncFlag;         //æ‘†å¼§åŒæ­¥è¾“å‡ºç”µæµé€ä¸æ ‡å¿—
-      int m_ArcWeldCurrentBase;    //ç„Šæ¥ç”µæµåŸºå€¼
-      int m_ArcDutyCycle;          //å ç©ºæ¯”
-      int m_ArcFrequency;          //è„‰å†²é¢‘ç‡
-      double m_ArcWireSpeed;       //å³°å€¼é€ä¸é€Ÿåº¦
-      double m_ArcWireSpeedBase;   //åŸºå€¼é€ä¸é€Ÿåº¦
-      int m_ArcRampTime;           //ç¼“å‡æ—¶é—´
-      int m_ArcDescentTime;        //ç¼“é™æ—¶é—´
-	  //æ–°å¢2025.05.16
-      int m_ArcOnDelayWireTime;    //å»¶è¿Ÿé€ä¸æ—¶é—´
-      double m_ArcWireRetractLength;//ç„Šä¸å›é€€è·ç¦»
+      //ĞÂÔö2025.04.07
+      int m_ArcMode;               //º¸½ÓÄ£Ê½
+      int m_ArcArgonFlag;          //ë²»¡º¸±êÖ¾
+      int m_WeaveSyncFlag;         //°Ú»¡Í¬²½Êä³öµçÁ÷ËÍË¿±êÖ¾
+      int m_ArcWeldCurrentBase;    //º¸½ÓµçÁ÷»ùÖµ
+      int m_ArcDutyCycle;          //Õ¼¿Õ±È
+      int m_ArcFrequency;          //Âö³åÆµÂÊ
+      double m_ArcWireSpeed;       //·åÖµËÍË¿ËÙ¶È
+      double m_ArcWireSpeedBase;   //»ùÖµËÍË¿ËÙ¶È
+      int m_ArcRampTime;           //»ºÉıÊ±¼ä
+      int m_ArcDescentTime;        //»º½µÊ±¼ä
+	  //ĞÂÔö2025.05.16
+      int m_ArcOnDelayWireTime;    //ÑÓ³ÙËÍË¿Ê±¼ä
+      double m_ArcWireRetractLength;//º¸Ë¿»ØÍË¾àÀë
     } SDKArcSetVauleStruct;
 
-    //Arcoffç»“æ„ä½“
+    //Arcoff½á¹¹Ìå
     typedef struct {
-      int m_BurnbackTime;        // å›çƒ§æ—¶é—´
-      int m_PostflowTime;        // æ»åé€æ°”æ—¶é—´
-      double m_ArcOffCurrent;    // æ”¶å¼§ç”µæµ
-      double m_ArcOffVoltage;    // æ”¶å¼§ç”µå‹
-      int m_ArcOffWaitTime;      // ç­‰å¾…ç„Šæœºæ¯å¼§æˆåŠŸçš„æ—¶é—´
-      int m_DecayTime;           // æ¸å˜æ—¶é—´
-      int m_StickCheckDelayTime; // é»˜è®¤ç²˜ä¸æ£€æµ‹å»¶è¿Ÿæ—¶é—´ï¼Œå•ä½ç§’
-      //æ–°å¢2025.04.07
-      int m_ArcMode;               //ç„Šæ¥æ¨¡å¼
+      int m_BurnbackTime;        // »ØÉÕÊ±¼ä
+      int m_PostflowTime;        // ÖÍºóËÍÆøÊ±¼ä
+      double m_ArcOffCurrent;    // ÊÕ»¡µçÁ÷
+      double m_ArcOffVoltage;    // ÊÕ»¡µçÑ¹
+      int m_ArcOffWaitTime;      // µÈ´ıº¸»úÏ¢»¡³É¹¦µÄÊ±¼ä
+      int m_DecayTime;           // ½¥±äÊ±¼ä
+      int m_StickCheckDelayTime; // Ä¬ÈÏÕ³Ë¿¼ì²âÑÓ³ÙÊ±¼ä£¬µ¥Î»Ãë
+      //ĞÂÔö2025.04.07
+      int m_ArcMode;               //º¸½ÓÄ£Ê½
     } SDKInstructArcOff;
-    // Arcsetç»“æ„ä½“
+    // Arcset½á¹¹Ìå
     typedef struct {
-      double m_WeldCurrent; // ç„Šæ¥ç”µæµ
-      double m_WeldVoltage; // ç„Šæ¥ç”µå‹
-      double m_WeldSpeed;   // æœºå™¨äººç„Šæ¥é€Ÿåº¦
-      double m_EndSpeed;    // æœºå™¨äººç„Šæ¥ç»“æŸé€Ÿåº¦2021.9.23
-      int m_StartEnd;       // 2015.11.6 æ¸å˜ï¼ŒSTART:0;END:1;NULL:-1
-      double m_Length;      // 2015.11.6 æ¸å˜
-      //æ–°å¢2025.04.07
-      int m_ArcMode;               //ç„Šæ¥æ¨¡å¼
-      int m_ArcArgonFlag;          //æ°©å¼§ç„Šæ ‡å¿—
-      int m_WeaveSyncFlag;         //æ‘†å¼§åŒæ­¥è¾“å‡ºç”µæµé€ä¸æ ‡å¿—
-      int m_ArcWeldCurrentBase;    //ç„Šæ¥ç”µæµåŸºå€¼
-      int m_ArcDutyCycle;          //å ç©ºæ¯”
-      int m_ArcFrequency;          //è„‰å†²é¢‘ç‡
-      double m_ArcWireSpeed;       //å³°å€¼é€ä¸é€Ÿåº¦
-      double m_ArcWireSpeedBase;   //åŸºå€¼é€ä¸é€Ÿåº¦
-      int m_ArcRampTime;           //ç¼“å‡æ—¶é—´
-      int m_ArcDescentTime;        //ç¼“é™æ—¶é—´
-	  //æ–°å¢2025.05.16
-      int m_ArcOnDelayWireTime;    //å»¶è¿Ÿé€ä¸æ—¶é—´
-      double m_ArcWireRetractLength;//ç„Šä¸å›é€€è·ç¦»
+      double m_WeldCurrent; // º¸½ÓµçÁ÷
+      double m_WeldVoltage; // º¸½ÓµçÑ¹
+      double m_WeldSpeed;   // »úÆ÷ÈËº¸½ÓËÙ¶È
+      double m_EndSpeed;    // »úÆ÷ÈËº¸½Ó½áÊøËÙ¶È2021.9.23
+      int m_StartEnd;       // 2015.11.6 ½¥±ä£¬START:0;END:1;NULL:-1
+      double m_Length;      // 2015.11.6 ½¥±ä
+      //ĞÂÔö2025.04.07
+      int m_ArcMode;               //º¸½ÓÄ£Ê½
+      int m_ArcArgonFlag;          //ë²»¡º¸±êÖ¾
+      int m_WeaveSyncFlag;         //°Ú»¡Í¬²½Êä³öµçÁ÷ËÍË¿±êÖ¾
+      int m_ArcWeldCurrentBase;    //º¸½ÓµçÁ÷»ùÖµ
+      int m_ArcDutyCycle;          //Õ¼¿Õ±È
+      int m_ArcFrequency;          //Âö³åÆµÂÊ
+      double m_ArcWireSpeed;       //·åÖµËÍË¿ËÙ¶È
+      double m_ArcWireSpeedBase;   //»ùÖµËÍË¿ËÙ¶È
+      int m_ArcRampTime;           //»ºÉıÊ±¼ä
+      int m_ArcDescentTime;        //»º½µÊ±¼ä
+	  //ĞÂÔö2025.05.16
+      int m_ArcOnDelayWireTime;    //ÑÓ³ÙËÍË¿Ê±¼ä
+      double m_ArcWireRetractLength;//º¸Ë¿»ØÍË¾àÀë
 
     } SDKInstructArcSet;
 
     //WLin
     typedef enum {
-      eTCPWeave = 0,     // 6,åŸeGeometricWeaveï¼Œæ›´æ”¹åå­—
-      eWristWeave,         // 56å…³èŠ‚å‚ä¸çš„æ‘†åŠ¨   // å–æ¶ˆ 2015.11.10
-      e45JointWeave,      // 456å…³èŠ‚å‚ä¸çš„æ‘†åŠ¨  // å–æ¶ˆ 2015.11.10
-      //e123JointWeave,      // 123å…³èŠ‚å‚ä¸çš„æ‘†åŠ¨  // å–æ¶ˆ 2015.11.10
+      eTCPWeave = 0,     // 6,Ô­eGeometricWeave£¬¸ü¸ÄÃû×Ö
+      eWristWeave,         // 56¹Ø½Ú²ÎÓëµÄ°Ú¶¯   // È¡Ïû 2015.11.10
+      e45JointWeave,      // 456¹Ø½Ú²ÎÓëµÄ°Ú¶¯  // È¡Ïû 2015.11.10
+      //e123JointWeave,      // 123¹Ø½Ú²ÎÓëµÄ°Ú¶¯  // È¡Ïû 2015.11.10
     } WeaveType;
     typedef enum {
       eNoWeave = 0,     //
-      //eTriangle,        // qi yongï¼›ç¤ºæ•™å™¨ä¸Šæ— è¯¥ç±»å‹20240316
+      //eTriangle,        // qi yong£»Ê¾½ÌÆ÷ÉÏÎŞ¸ÃÀàĞÍ20240316
       //eDoubleTriangle,  //
       //eTrapezoid,       //
       //eDoubleTrapezoid, //
       eSin = 5,             //
       eSinFreq,
-      eSpiral,         //æ–°å¢
-      eObliqueTriangle,  // æ–œæ¤­åœ†æ‘†
-      eSpaceTriangle, //æ–°å¢
-      eLTriangle,        //æ–°å¢
+      eSpiral,         //ĞÂÔö
+      eObliqueTriangle,  // Ğ±ÍÖÔ²°Ú
+      eSpaceTriangle, //ĞÂÔö
+      eLTriangle,        //ĞÂÔö
       eBackForward,
-      eConstPoint,  //20220701æ–°å¢
-      eSpiralFreq,               // ç»™å®šé¢‘ç‡çš„èºæ—‹çº¿æ‘†    2024.03.14
-      eObliqueTriangleFreq,      // ç»™å®šé¢‘ç‡çš„æ–œä¸‰è§’æ‘†    2024.03.14
-      eSpaceTriangleFreq,        // ç»™å®šé¢‘ç‡çš„ç©ºé—´ä¸‰è§’æ‘†  2024.03.14
-      eLTriangleFreq,            // ç»™å®šé¢‘ç‡çš„ç©ºé—´Lå‹æ‘†   2024.03.14
-      eBackForwordFreq,          // ç»™å®šé¢‘ç‡çš„å‰åæ‘†      2024.03.14
-      eHalfSin,                  // æ¶‚æ•·ç”¨åŠè¾¹sinæ‘†       2025.06.23
+      eConstPoint,  //20220701ĞÂÔö
+      eSpiralFreq,               // ¸ø¶¨ÆµÂÊµÄÂİĞıÏß°Ú    2024.03.14
+      eObliqueTriangleFreq,      // ¸ø¶¨ÆµÂÊµÄĞ±Èı½Ç°Ú    2024.03.14
+      eSpaceTriangleFreq,        // ¸ø¶¨ÆµÂÊµÄ¿Õ¼äÈı½Ç°Ú  2024.03.14
+      eLTriangleFreq,            // ¸ø¶¨ÆµÂÊµÄ¿Õ¼äLĞÍ°Ú   2024.03.14
+      eBackForwordFreq,          // ¸ø¶¨ÆµÂÊµÄÇ°ºó°Ú      2024.03.14
+      eHalfSin,                  // Í¿·óÓÃ°ë±ßsin°Ú       2025.06.23
     } WeaveShape;
     typedef struct {
-      int m_WeaveNULL; //ç¤ºæ•™å™¨ç»™çš„æ‘†å¼§å˜é‡æ˜¯å¦ä¸ºNULLï¼Œ1ä¸ºNULL
-      WeaveType m_WeaveType;   // æ‘†åŠ¨ç±»å‹ï¼šå¹³é¢æ‘†ï¼Œå…³èŠ‚æ‘†ç­‰
-      WeaveShape m_WeaveShape; // æ‘†åŠ¨å½¢çŠ¶ï¼šæ— æ‘†åŠ¨ï¼Œä¸‰è§’æ‘†ç­‰
-      double m_WeaveLength;    // æ‘†åŠ¨é•¿åº¦
-      double m_WeaveAmplitude; // æ‘†åŠ¨å¹…å€¼
-      double m_Weavehigh;      // å¹³é¢æ‘†åŠ¨çš„é«˜åº¦
-      int m_QPauseTime;        // æ‘†å¼§1/4å¤„åœç•™æ—¶é—´ï¼Œéœ€ç•Œé¢ä¼ å…¥
-      int m_ThreeQPauseTime;   // æ‘†å¼§3/4å¤„åœç•™æ—¶é—´ï¼Œéœ€ç•Œé¢ä¼ å…¥
-      double m_SwingDirection; // æ–°å¢ï¼Œæ‘†å¼§å€¾æ–œè§’ï¼ˆå¯¹sinæ‘†æ— æ•ˆï¼‰
-      double m_WeaveAngle;     // æ–°å¢ï¼Œæ‘†å¼§å¹³é¢å€¾æ–œè§’
-      double m_SpaceAngle; // æ–°å¢ï¼Œç©ºé—´æ‘†å¼§å¤¹è§’ï¼ˆå¯¹Lå‹æ‘†å’Œç©ºé—´ä¸‰è§’æ‘†æœ‰æ•ˆï¼‰
-      int m_PauseTime_1; // æ–°å¢ï¼Œ1/4å¤„åœç•™æ—¶é—´
-      int m_PauseTime_2; // æ–°å¢ï¼Œ2/4å¤„åœç•™æ—¶é—´
-      int m_PauseTime_3; // æ–°å¢ï¼Œ3/4å¤„åœç•™æ—¶é—´
-      int m_PauseTime_4; // æ–°å¢ï¼Œ4/4å¤„åœç•™æ—¶é—´
-      int m_PauseContinue; ////æ–°å¢ï¼Œ2021.9.23ï¼Œæ‘†å¼§è¿ç»­ï¼Œ0-å®Œå…¨åœæ­¢ï¼Œ1-ç§»åŠ¨æ¨¡å¼
-      double m_EndLength;  // æ–°å¢ï¼Œç»“æŸé•¿åº¦ï¼ˆsinæ‘†æœ‰æ•ˆï¼‰
-      double m_EndWidth;   // æ–°å¢ï¼Œç»“æŸé•¿åº¦ï¼ˆsinæ‘†æœ‰æ•ˆï¼‰
-      double m_CenterHigh; // æ–°å¢ï¼Œç»“æŸé•¿åº¦ï¼ˆsinæ‘†æœ‰æ•ˆï¼‰
-      //2025.04.24 æ–°å¢
-      double m_StartWeaveAmplitude;//æ–°å¢ï¼Œèµ·å§‹æ‘†å¼§å¹…å€¼ï¼Œ2025.04.24
-      double m_AStrLength;//æ–°å¢ï¼Œèµ·å§‹æ‘†å¼§æ¸å˜é•¿åº¦ï¼Œé»˜è®¤å€¼ç»™0ï¼Œ
-      double m_AEndLength;//æ–°å¢ï¼Œç»“æŸæ‘†å¼§æ¸å˜é•¿åº¦ï¼Œé»˜è®¤å€¼ç»™0ï¼Œ
-      double m_RightAmplitude; // æ–°å¢ï¼Œå³ä¾§æ‘†å¼§å®½åº¦ï¼Œ2025.07.02
+      int m_WeaveNULL; //Ê¾½ÌÆ÷¸øµÄ°Ú»¡±äÁ¿ÊÇ·ñÎªNULL£¬1ÎªNULL
+      WeaveType m_WeaveType;   // °Ú¶¯ÀàĞÍ£ºÆ½Ãæ°Ú£¬¹Ø½Ú°ÚµÈ
+      WeaveShape m_WeaveShape; // °Ú¶¯ĞÎ×´£ºÎŞ°Ú¶¯£¬Èı½Ç°ÚµÈ
+      double m_WeaveLength;    // °Ú¶¯³¤¶È
+      double m_WeaveAmplitude; // °Ú¶¯·ùÖµ
+      double m_Weavehigh;      // Æ½Ãæ°Ú¶¯µÄ¸ß¶È
+      int m_QPauseTime;        // °Ú»¡1/4´¦Í£ÁôÊ±¼ä£¬Ğè½çÃæ´«Èë
+      int m_ThreeQPauseTime;   // °Ú»¡3/4´¦Í£ÁôÊ±¼ä£¬Ğè½çÃæ´«Èë
+      double m_SwingDirection; // ĞÂÔö£¬°Ú»¡ÇãĞ±½Ç£¨¶Ôsin°ÚÎŞĞ§£©
+      double m_WeaveAngle;     // ĞÂÔö£¬°Ú»¡Æ½ÃæÇãĞ±½Ç
+      double m_SpaceAngle; // ĞÂÔö£¬¿Õ¼ä°Ú»¡¼Ğ½Ç£¨¶ÔLĞÍ°ÚºÍ¿Õ¼äÈı½Ç°ÚÓĞĞ§£©
+      int m_PauseTime_1; // ĞÂÔö£¬1/4´¦Í£ÁôÊ±¼ä
+      int m_PauseTime_2; // ĞÂÔö£¬2/4´¦Í£ÁôÊ±¼ä
+      int m_PauseTime_3; // ĞÂÔö£¬3/4´¦Í£ÁôÊ±¼ä
+      int m_PauseTime_4; // ĞÂÔö£¬4/4´¦Í£ÁôÊ±¼ä
+      int m_PauseContinue; ////ĞÂÔö£¬2021.9.23£¬°Ú»¡Á¬Ğø£¬0-ÍêÈ«Í£Ö¹£¬1-ÒÆ¶¯Ä£Ê½
+      double m_EndLength;  // ĞÂÔö£¬½áÊø³¤¶È£¨sin°ÚÓĞĞ§£©
+      double m_EndWidth;   // ĞÂÔö£¬½áÊø³¤¶È£¨sin°ÚÓĞĞ§£©
+      double m_CenterHigh; // ĞÂÔö£¬½áÊø³¤¶È£¨sin°ÚÓĞĞ§£©
+      //2025.04.24 ĞÂÔö
+      double m_StartWeaveAmplitude;//ĞÂÔö£¬ÆğÊ¼°Ú»¡·ùÖµ£¬2025.04.24
+      double m_AStrLength;//ĞÂÔö£¬ÆğÊ¼°Ú»¡½¥±ä³¤¶È£¬Ä¬ÈÏÖµ¸ø0£¬
+      double m_AEndLength;//ĞÂÔö£¬½áÊø°Ú»¡½¥±ä³¤¶È£¬Ä¬ÈÏÖµ¸ø0£¬
+      double m_RightAmplitude; // ĞÂÔö£¬ÓÒ²à°Ú»¡¿í¶È£¬2025.07.02
     } WeaveParam;//WEAVEDATA
 
-    // ç”µå¼§è·Ÿè¸ªæ–°å¢å‚æ•°20240311
+    // µç»¡¸ú×ÙĞÂÔö²ÎÊı20240311
     typedef struct
     {
-        //æ¨ªå‘
-        double m_L_MinComp;     //æ¨ªå‘æœ€å°è¡¥å¿ï¼ˆå•å‘¨æœŸï¼‰
-        double m_L_MaxComp;     //æ¨ªå‘æœ€å¤§è¡¥å¿ï¼ˆå•å‘¨æœŸï¼‰
-        double m_L_TotalMaxComp;//æ¨ªå‘æœ€å¤§è¡¥å¿ï¼ˆæ€»ï¼‰
-        double m_L_RightComp;   //æ¨ªå‘ä¸å¯¹ç§°è°ƒæ•´ç³»æ•°
+        //ºáÏò
+        double m_L_MinComp;     //ºáÏò×îĞ¡²¹³¥£¨µ¥ÖÜÆÚ£©
+        double m_L_MaxComp;     //ºáÏò×î´ó²¹³¥£¨µ¥ÖÜÆÚ£©
+        double m_L_TotalMaxComp;//ºáÏò×î´ó²¹³¥£¨×Ü£©
+        double m_L_RightComp;   //ºáÏò²»¶Ô³Æµ÷ÕûÏµÊı
         double m_L_Comp6;
         double m_L_Comp5;
         double m_L_Comp4;
@@ -1158,12 +1158,12 @@ namespace STEPROBOTSDK {
         double m_L_Comp2;
         double m_L_Comp1;
 
-        //çºµå‘
-        double m_V_MinComp;     //çºµå‘æœ€å°è¡¥å¿ï¼ˆå•å‘¨æœŸï¼‰
-        double m_V_MaxComp;     //çºµå‘æœ€å¤§è¡¥å¿ï¼ˆå•å‘¨æœŸï¼‰
-        double m_V_TotalMaxComp;//çºµå‘æœ€å¤§è¡¥å¿ï¼ˆæ€»ï¼‰
-        double m_V_TopComp;     //çºµå‘ä¸å¯¹ç§°è°ƒæ•´ç³»æ•°
-        double m_V_Comp6;       //æ˜¯å¦ä¿æŒè·Ÿè¸ª
+        //×İÏò
+        double m_V_MinComp;     //×İÏò×îĞ¡²¹³¥£¨µ¥ÖÜÆÚ£©
+        double m_V_MaxComp;     //×İÏò×î´ó²¹³¥£¨µ¥ÖÜÆÚ£©
+        double m_V_TotalMaxComp;//×İÏò×î´ó²¹³¥£¨×Ü£©
+        double m_V_TopComp;     //×İÏò²»¶Ô³Æµ÷ÕûÏµÊı
+        double m_V_Comp6;       //ÊÇ·ñ±£³Ö¸ú×Ù
         double m_V_Comp5;
         double m_V_Comp4;
         double m_V_Comp3;
@@ -1175,32 +1175,32 @@ namespace STEPROBOTSDK {
 
     typedef struct {
       int m_TrackNULL;
-      int m_flag;               // æ˜¯å¦åšç”µå¼§è·Ÿè¸ª
-      double Kpl;               // æ¨ªå‘æ¯”ä¾‹å¢ç›Š  ä¸æ˜¯æ¯”ä¾‹å¢ç›Šç™¾åˆ†æ¯”
+      int m_flag;               // ÊÇ·ñ×öµç»¡¸ú×Ù
+      double Kpl;               // ºáÏò±ÈÀıÔöÒæ  ²»ÊÇ±ÈÀıÔöÒæ°Ù·Ö±È
       double m_LeftCoefficient; // add 2016.2.17;
       double m_RightCoefficient;
-      double Kpv;              // çºµå‘æ¯”ä¾‹å¢ç›Š  ä¸æ˜¯æ¯”ä¾‹å¢ç›Šç™¾åˆ†æ¯”
-      double Iref;             // ç”µæµå‚è€ƒå€¼
-      int carry;               // æ˜¯å¦åŠ åˆ°ä¸‹ä¸€ä¸ªå‘¨æœŸä¸­
+      double Kpv;              // ×İÏò±ÈÀıÔöÒæ  ²»ÊÇ±ÈÀıÔöÒæ°Ù·Ö±È
+      double Iref;             // µçÁ÷²Î¿¼Öµ
+      int carry;               // ÊÇ·ñ¼Óµ½ÏÂÒ»¸öÖÜÆÚÖĞ
                                /*
-                                       int m_Flag;            // æ˜¯å¦åšç”µå¼§è·Ÿè¸ª----ä¿ç•™
-                                       double m_Iref;			// ç”µæµå‚è€ƒå€¼  ---å¼ƒç”¨
-                                       int m_Carry;              // æ˜¯å¦åŠ åˆ°ä¸‹ä¸€ä¸ªå‘¨æœŸä¸­---ä¿ç•™ */
-                               // æ–°å¢
-      int m_LateralBeginCycle; // æ¨ªå‘çº åå¼€å§‹å‘¨æœŸï¼ˆ>=3ï¼‰
-      // double m_Kpl;				// æ¨ªå‘æ¯”ä¾‹å¢ç›Š
-      // ä¸æ˜¯æ¯”ä¾‹å¢ç›Šç™¾åˆ†æ¯”----ä¿ç•™
-      int m_VerticalModeFlag; // ä¸º0åˆ™æ˜¯å¸¸æ•°æ¨¡å¼,ä¸º1æ˜¯åé¦ˆæ¨¡å¼//CONST,SAMPLE
-      double m_Iref_Vertical;     // çºµå‘çº ååŸºå‡†ç”µæµï¼ˆå¸¸æ•°æ¨¡å¼ï¼‰
-      int m_VerticalBeginCycle;   // çºµå‘å–æ ·å¼€å§‹å‘¨æœŸ1~999
-      int m_VerticalSustainCycle; // çºµå‘å–æ ·æŒç»­å‘¨æœŸ1~999
-      double m_VerticalLength;    // çºµå‘å‘¨æœŸé•¿åº¦
-      // double m_Kpv;				// çºµå‘æ¯”ä¾‹å¢ç›Š
-      // ä¸æ˜¯æ¯”ä¾‹å¢ç›Šç™¾åˆ†æ¯”---ä¿ç•™
+                                       int m_Flag;            // ÊÇ·ñ×öµç»¡¸ú×Ù----±£Áô
+                                       double m_Iref;			// µçÁ÷²Î¿¼Öµ  ---ÆúÓÃ
+                                       int m_Carry;              // ÊÇ·ñ¼Óµ½ÏÂÒ»¸öÖÜÆÚÖĞ---±£Áô */
+                               // ĞÂÔö
+      int m_LateralBeginCycle; // ºáÏò¾ÀÆ«¿ªÊ¼ÖÜÆÚ£¨>=3£©
+      // double m_Kpl;				// ºáÏò±ÈÀıÔöÒæ
+      // ²»ÊÇ±ÈÀıÔöÒæ°Ù·Ö±È----±£Áô
+      int m_VerticalModeFlag; // Îª0ÔòÊÇ³£ÊıÄ£Ê½,Îª1ÊÇ·´À¡Ä£Ê½//CONST,SAMPLE
+      double m_Iref_Vertical;     // ×İÏò¾ÀÆ«»ù×¼µçÁ÷£¨³£ÊıÄ£Ê½£©
+      int m_VerticalBeginCycle;   // ×İÏòÈ¡Ñù¿ªÊ¼ÖÜÆÚ1~999
+      int m_VerticalSustainCycle; // ×İÏòÈ¡Ñù³ÖĞøÖÜÆÚ1~999
+      double m_VerticalLength;    // ×İÏòÖÜÆÚ³¤¶È
+      // double m_Kpv;				// ×İÏò±ÈÀıÔöÒæ
+      // ²»ÊÇ±ÈÀıÔöÒæ°Ù·Ö±È---±£Áô
 
       int m_TypeofTimeOrDist;      // 1 == time,0 == distance
-      unsigned int m_TimeInterval; // 100-500msï¼Œé»˜è®¤200ms
-      unsigned int m_DistInterval; // è·ç¦» 1-30mm,é»˜è®¤ï¼š2mm
+      unsigned int m_TimeInterval; // 100-500ms£¬Ä¬ÈÏ200ms
+      unsigned int m_DistInterval; // ¾àÀë 1-30mm,Ä¬ÈÏ£º2mm
 
       double m_YBias; // only for lasertrack,20162.25
       double m_ZBias;
@@ -1211,35 +1211,35 @@ namespace STEPROBOTSDK {
 
     typedef struct {
       HMIPos m_EndPos;
-      int m_Dyn; // åªå¯ä»¥è®¾ç½®ä½ç½®é€Ÿåº¦ï¼Œå…¶ä»–å‚æ•°åˆ©ç”¨Dynè¯­å¥è®¾ç½®;NULLå¯ä»¥è®¾ç½®-1
-      SOverlap m_Ovl; // NULLå‚æ•°å€¼éƒ½ä¸º-1ï¼Œç±»å‹æšä¸¾ä¸º0
+      int m_Dyn; // Ö»¿ÉÒÔÉèÖÃÎ»ÖÃËÙ¶È£¬ÆäËû²ÎÊıÀûÓÃDynÓï¾äÉèÖÃ;NULL¿ÉÒÔÉèÖÃ-1
+      SOverlap m_Ovl; // NULL²ÎÊıÖµ¶¼Îª-1£¬ÀàĞÍÃ¶¾ÙÎª0
       ORITYPE m_Ori;
-      WeaveParam m_Weave;          // æ‘†å¼§å‚æ•°
-      SeamTrackParam m_SeamTrack;  // ç”µå¼§è·Ÿè¸ª
-      //SDKInstructArcOn m_ArcOnSet; // èµ·å¼§å’Œç„Šæ¥å‚æ•° 2016.5.25  2024.7.1ä½œåºŸ
+      WeaveParam m_Weave;          // °Ú»¡²ÎÊı
+      SeamTrackParam m_SeamTrack;  // µç»¡¸ú×Ù
+      //SDKInstructArcOn m_ArcOnSet; // Æğ»¡ºÍº¸½Ó²ÎÊı 2016.5.25  2024.7.1×÷·Ï
       char m_ToolName[32];
       char m_RefName[32];
     } SDKInstructWLin;
 
     //WCirc
     typedef struct {
-      HMIPos m_StartPos;      // èµ·ç‚¹ 2023.08.15
-      char m_StartTool[32];   /// å·¥å…·
-      char m_StartRefSys[32]; /// åæ ‡ç³»
+      HMIPos m_StartPos;      // Æğµã 2023.08.15
+      char m_StartTool[32];   /// ¹¤¾ß
+      char m_StartRefSys[32]; /// ×ø±êÏµ
       HMIPos m_EndPos;
       HMIPos m_HelpPos;
-      int m_Dyn; // åªå¯ä»¥è®¾ç½®ä½ç½®é€Ÿåº¦ï¼Œå…¶ä»–å‚æ•°åˆ©ç”¨Dynè¯­å¥è®¾ç½®;NULLå¯ä»¥è®¾ç½®-1
-      SOverlap m_Ovl; // NULLå‚æ•°å€¼éƒ½ä¸º-1ï¼Œç±»å‹æšä¸¾ä¸º0
+      int m_Dyn; // Ö»¿ÉÒÔÉèÖÃÎ»ÖÃËÙ¶È£¬ÆäËû²ÎÊıÀûÓÃDynÓï¾äÉèÖÃ;NULL¿ÉÒÔÉèÖÃ-1
+      SOverlap m_Ovl; // NULL²ÎÊıÖµ¶¼Îª-1£¬ÀàĞÍÃ¶¾ÙÎª0
       ORITYPE m_Ori;
-      WeaveParam m_Weave;          // æ‘†å¼§å‚æ•°
-      SeamTrackParam m_SeamTrack;  // ç”µå¼§è·Ÿè¸ª
-      //SDKInstructArcOn m_ArcOnSet; // èµ·å¼§å’Œç„Šæ¥å‚æ•° 2016.5.25   2024.7.1ä½œåºŸ
+      WeaveParam m_Weave;          // °Ú»¡²ÎÊı
+      SeamTrackParam m_SeamTrack;  // µç»¡¸ú×Ù
+      //SDKInstructArcOn m_ArcOnSet; // Æğ»¡ºÍº¸½Ó²ÎÊı 2016.5.25   2024.7.1×÷·Ï
       char m_ToolName[32];
       char m_RefName[32];
       double m_Angle;
     } SDKInstructWCirc;
 
-    //ARCMODEï¼Œ2024.7.11æ–°å¢
+    //ARCMODE£¬2024.7.11ĞÂÔö
     typedef struct
     {
         int m_Mode;
@@ -1247,7 +1247,7 @@ namespace STEPROBOTSDK {
 
 
     typedef struct {
-      COMMUNICATIONCOMMAND cmd; // å‘½ä»¤
+      COMMUNICATIONCOMMAND cmd; // ÃüÁî
       char buffer[MAX_SIZE_CHAR];
     } SDKProgramBuffer;
 
@@ -1259,7 +1259,7 @@ namespace STEPROBOTSDK {
       double m_RealVoltage;
     } WeldingParamFeedBack;
 
-    //æ–°å¢å¯¼è½¨è½¬æ¢è¾“å…¥20231221
+    //ĞÂÔöµ¼¹ì×ª»»ÊäÈë20231221
     typedef struct
     {
         CartPos m_CartPos;
@@ -1267,7 +1267,7 @@ namespace STEPROBOTSDK {
     }SDKInstructRailInfo;
 
 
-    //æ–°å¢å¯¼è½¨è½¬æ¢è¾“å‡º20231221
+    //ĞÂÔöµ¼¹ì×ª»»Êä³ö20231221
     typedef struct
     {
         unsigned int mode;
@@ -1275,7 +1275,7 @@ namespace STEPROBOTSDK {
     }RailInfo;
 
 
-    //æ–°å¢è¿åŠ¨å­¦æ­£é€†è§£ç»“æ„ä½“20240229
+    //ĞÂÔöÔË¶¯Ñ§ÕıÄæ½â½á¹¹Ìå20240229
     typedef struct
     {
         double m_X;
@@ -1289,7 +1289,7 @@ namespace STEPROBOTSDK {
     typedef struct
     {
         CartSys xyzabc;
-        unsigned int modetmp;         // æ¨¡å¼ï¼Œ0æˆ–4
+        unsigned int modetmp;         // Ä£Ê½£¬0»ò4
         AuxPos m_AuxPos;
         char m_ToolName[32];
         char m_RefName[32];
@@ -1298,19 +1298,19 @@ namespace STEPROBOTSDK {
     typedef struct
     {
         CartSys xyzabc;
-        unsigned int modetmp;         // æ¨¡å¼ï¼Œ0æˆ–4
+        unsigned int modetmp;         // Ä£Ê½£¬0»ò4
     }KinematicsInfo;
 
     typedef struct
     {
-        JointsPos joint; // å…³èŠ‚éƒ¨åˆ†
+        JointsPos joint; // ¹Ø½Ú²¿·Ö
         char m_ToolName[32];
         char m_RefName[32];
     }SDKInstructKinematics;
 
 
-    //20240304æ·»åŠ ç„Šæ¥ç›¸å…³å˜é‡
-    //å·¥å…·ç±»å‹
+    //20240304Ìí¼Óº¸½ÓÏà¹Ø±äÁ¿
+    //¹¤¾ßÀàĞÍ
     typedef enum
     {
         eInternTool,
@@ -1320,15 +1320,15 @@ namespace STEPROBOTSDK {
     typedef struct
     {
         int m_Indepent;// 0 = No,1 = yes
-        int m_LineNum;                                //è¡Œå·
-        char m_ToolName[32];                //å·¥å…·åç§°
-        EXTERNTOOLTYPE m_ToolType;       //å†…éƒ¨å·¥å…·è¿˜æ˜¯å¤–éƒ¨å·¥å…·
-        HomoMatrix m_Tool;                    //å·¥å…·è½¬æ¢çŸ©é˜µ
-        int m_Port;                                        //å¤–éƒ¨å·¥å…·ç«¯å£å·
-        int m_id;                                        //è¯­å¥çš„åºå·
+        int m_LineNum;                                //ĞĞºÅ
+        char m_ToolName[32];                //¹¤¾ßÃû³Æ
+        EXTERNTOOLTYPE m_ToolType;       //ÄÚ²¿¹¤¾ß»¹ÊÇÍâ²¿¹¤¾ß
+        HomoMatrix m_Tool;                    //¹¤¾ß×ª»»¾ØÕó
+        int m_Port;                                        //Íâ²¿¹¤¾ß¶Ë¿ÚºÅ
+        int m_id;                                        //Óï¾äµÄĞòºÅ
     }CmdTool;
 
-    //åæ ‡ç³»ç±»å‹å®šä¹‰
+    //×ø±êÏµÀàĞÍ¶¨Òå
     typedef enum
     {
         eRefTypeJoints = 1,
@@ -1344,90 +1344,90 @@ namespace STEPROBOTSDK {
     }REFSYSTYPE;
     typedef struct
     {
-        int m_LineNum;             //è¡Œå·
-        char m_RefSysName[32];    //åæ ‡ç³»åç§°
-        REFSYSTYPE m_RefSysType;  //åæ ‡ç³»ç±»å‹
-        CartFrame m_BaseRef;      //åæ ‡ç³»çš„å‚è€ƒåæ ‡ç³»å€¼ç›¸å¯¹äºworld
-        CartFrame m_RefSys;       //åæ ‡ç³»ç›¸å¯¹äºå‚è€ƒåæ ‡ç³»çš„å€¼
-        double m_FollowDistance;  //åæ ‡ç³»è·Ÿè¸ªè·ç¦»
-        int m_FollowMode;         //åæ ‡ç³»è·Ÿè¸ªæ¨¡å¼
-        double m_ExitTime;        //åæ ‡ç³»é€€å‡ºè·Ÿè¸ªæ—¶é—´
-        int m_Port;               //å¯å˜åæ ‡ç³»çš„ç´¢å¼•
-        int m_id;                 //è¯­å¥çš„åºå·
-        double m_TrackAct;        //æ–°å¢:è·Ÿè¸ªåŠ é€Ÿåº¦ï¼Œé»˜è®¤å€¼1008ï¼Œæµæ°´çº¿å¢åŠ æ¨¡å¼4ï¼Œså‹é€Ÿåº¦è·Ÿè¸ª:2025.04.25
+        int m_LineNum;             //ĞĞºÅ
+        char m_RefSysName[32];    //×ø±êÏµÃû³Æ
+        REFSYSTYPE m_RefSysType;  //×ø±êÏµÀàĞÍ
+        CartFrame m_BaseRef;      //×ø±êÏµµÄ²Î¿¼×ø±êÏµÖµÏà¶ÔÓÚworld
+        CartFrame m_RefSys;       //×ø±êÏµÏà¶ÔÓÚ²Î¿¼×ø±êÏµµÄÖµ
+        double m_FollowDistance;  //×ø±êÏµ¸ú×Ù¾àÀë
+        int m_FollowMode;         //×ø±êÏµ¸ú×ÙÄ£Ê½
+        double m_ExitTime;        //×ø±êÏµÍË³ö¸ú×ÙÊ±¼ä
+        int m_Port;               //¿É±ä×ø±êÏµµÄË÷Òı
+        int m_id;                 //Óï¾äµÄĞòºÅ
+        double m_TrackAct;        //ĞÂÔö:¸ú×Ù¼ÓËÙ¶È£¬Ä¬ÈÏÖµ1008£¬Á÷Ë®ÏßÔö¼ÓÄ£Ê½4£¬sĞÍËÙ¶È¸ú×Ù:2025.04.25
     }CmdRefSys;
 
     typedef struct
     {
-        int m_ScratchArcFlag;  //æ“¦çº¿èµ·å¼§æ ‡å¿—ï¼Œ1æ˜¯å¯ç”¨æˆ–Xï¼Œ2æ˜¯Y
-        double m_ScratchMaxDistance;  //æ“¦çº¿è·ç¦»
-        double m_ScratchStepLength;   //æ“¦çº¿æ­¥é•¿ï¼Œæ¯æ¬¡ç§»åŠ¨è·ç¦»
-        double m_ReturnSpeed;  //æ“¦çº¿è¿”å›é€Ÿåº¦
+        int m_ScratchArcFlag;  //²ÁÏßÆğ»¡±êÖ¾£¬1ÊÇÆôÓÃ»òX£¬2ÊÇY
+        double m_ScratchMaxDistance;  //²ÁÏß¾àÀë
+        double m_ScratchStepLength;   //²ÁÏß²½³¤£¬Ã¿´ÎÒÆ¶¯¾àÀë
+        double m_ReturnSpeed;  //²ÁÏß·µ»ØËÙ¶È
 
-        int m_ScratchSegType;  //1æ˜¯Linï¼Œ2æ˜¯Circï¼ŒCircAngle
-        HMIPos m_EndPos;  //æ“¦çº¿æ–¹å‘ä¸Šæœ«ç«¯ç‚¹
+        int m_ScratchSegType;  //1ÊÇLin£¬2ÊÇCirc£¬CircAngle
+        HMIPos m_EndPos;  //²ÁÏß·½ÏòÉÏÄ©¶Ëµã
         HMIPos m_HelpPos;
-        CmdTool m_Tool;             //å·¥å…·
-        CmdRefSys m_RefSys;         //åæ ‡ç³»
+        CmdTool m_Tool;             //¹¤¾ß
+        CmdRefSys m_RefSys;         //×ø±êÏµ
 
     }ScratchArcData;
 
     typedef struct
     {
-        int m_Valid;        // æ˜¯å¦æœ‰å†èµ·å¼§
-        int m_DetectTime;   // èµ·å¼§å¤±è´¥æ£€æµ‹æ—¶é—´
-        int m_RetryTimes;   // èµ·å¼§å¤±è´¥åï¼Œé‡è¯•çš„æ¬¡æ•°
-        int m_RetractTime;  // ç„Šä¸å›æŠ½æ—¶é—´
-        int m_RetractWaitTime;  // å›æŠ½ç­‰å¾…æ—¶é—´
-        double m_CurrentInc;    // å†èµ·å¼§ç”µæµå¢é‡
-        double m_VoltageInc;    // å†èµ·å¼§ç”µå‹å¢é‡
-        ScratchArcData m_ScratchArcData;  //æ“¦çº¿èµ·å¼§è®¾ç½®å‚æ•°
+        int m_Valid;        // ÊÇ·ñÓĞÔÙÆğ»¡
+        int m_DetectTime;   // Æğ»¡Ê§°Ü¼ì²âÊ±¼ä
+        int m_RetryTimes;   // Æğ»¡Ê§°Üºó£¬ÖØÊÔµÄ´ÎÊı
+        int m_RetractTime;  // º¸Ë¿»Ø³éÊ±¼ä
+        int m_RetractWaitTime;  // »Ø³éµÈ´ıÊ±¼ä
+        double m_CurrentInc;    // ÔÙÆğ»¡µçÁ÷ÔöÁ¿
+        double m_VoltageInc;    // ÔÙÆğ»¡µçÑ¹ÔöÁ¿
+        ScratchArcData m_ScratchArcData;  //²ÁÏßÆğ»¡ÉèÖÃ²ÎÊı
     }HMIArcRetryData;  // 2016.5.25
 
     typedef struct
     {
-        int m_DetectTime;   // èµ·å¼§å¤±è´¥æ£€æµ‹æ—¶é—´
-        int m_RetryTimes;   // èµ·å¼§å¤±è´¥åï¼Œé‡è¯•çš„æ¬¡æ•°
-        int m_RetractTime;  // ç„Šä¸å›æŠ½æ—¶é—´
-        int m_RetractWaitTime;  // å›æŠ½ç­‰å¾…æ—¶é—´
-        double m_CurrentInc;    // å†èµ·å¼§ç”µæµå¢é‡
-        double m_VoltageInc;    // å†èµ·å¼§ç”µå‹å¢é‡
+        int m_DetectTime;   // Æğ»¡Ê§°Ü¼ì²âÊ±¼ä
+        int m_RetryTimes;   // Æğ»¡Ê§°Üºó£¬ÖØÊÔµÄ´ÎÊı
+        int m_RetractTime;  // º¸Ë¿»Ø³éÊ±¼ä
+        int m_RetractWaitTime;  // »Ø³éµÈ´ıÊ±¼ä
+        double m_CurrentInc;    // ÔÙÆğ»¡µçÁ÷ÔöÁ¿
+        double m_VoltageInc;    // ÔÙÆğ»¡µçÑ¹ÔöÁ¿
 
-        //int m_ScratchArcFlag;  //æ“¦çº¿èµ·å¼§æ ‡å¿—ï¼Œ1æ˜¯å¯ç”¨
-        char m_ScratchArcFlag[32];//ç¤ºæ•™å™¨æ¥æ”¶éœ€è¦ä¸ºå­—ç¬¦å‹ï¼Œä¸Šé¢ç¦ç”¨
-        double m_ScratchMaxDistance;  //æ“¦çº¿è·ç¦»
-        double m_ScratchStepLength;   //æ“¦çº¿æ­¥é•¿ï¼Œæ¯æ¬¡ç§»åŠ¨è·ç¦»
-        double m_ReturnSpeed;  //æ“¦çº¿è¿”å›é€Ÿåº¦
+        //int m_ScratchArcFlag;  //²ÁÏßÆğ»¡±êÖ¾£¬1ÊÇÆôÓÃ
+        char m_ScratchArcFlag[32];//Ê¾½ÌÆ÷½ÓÊÕĞèÒªÎª×Ö·ûĞÍ£¬ÉÏÃæ½ûÓÃ
+        double m_ScratchMaxDistance;  //²ÁÏß¾àÀë
+        double m_ScratchStepLength;   //²ÁÏß²½³¤£¬Ã¿´ÎÒÆ¶¯¾àÀë
+        double m_ReturnSpeed;  //²ÁÏß·µ»ØËÙ¶È
 
-    }ArcRetryData;  // 20240304ï¼Œæ ¹æ®ç¤ºæ•™å™¨æ˜¾ç¤ºæ–°å¢
+    }ArcRetryData;  // 20240304£¬¸ù¾İÊ¾½ÌÆ÷ÏÔÊ¾ĞÂÔö
 
-    //é—´æ–­ç„Šå˜é‡seg
+    //¼ä¶Ïº¸±äÁ¿seg
     typedef struct
     {
-        double m_StartArcOnCurrent;//å¼€å§‹èµ·å¼§ç”µæµ
-        double m_StartArcOnVoltage;//å¼€å§‹èµ·å¼§ç”µå‹
-        int m_DecaySeg;//æ¸å˜æ®µæ•°
-        int m_PreflowTime;//é¢„é€æ°”æ—¶é—´
-        double m_ArcOnCurrent;		// èµ·å¼§ç”µæµ
-        double m_ArcOnVoltage;		// èµ·å¼§ç”µå‹
-        int m_ArcOnWaitTime;		// ç­‰å¾…ç„Šæœºèµ·å¼§æˆåŠŸçš„æ—¶é—´
-        int m_ArcOnDecayTime;              //èµ·å¼§æ¸å˜æ—¶é—´
+        double m_StartArcOnCurrent;//¿ªÊ¼Æğ»¡µçÁ÷
+        double m_StartArcOnVoltage;//¿ªÊ¼Æğ»¡µçÑ¹
+        int m_DecaySeg;//½¥±ä¶ÎÊı
+        int m_PreflowTime;//Ô¤ËÍÆøÊ±¼ä
+        double m_ArcOnCurrent;		// Æğ»¡µçÁ÷
+        double m_ArcOnVoltage;		// Æğ»¡µçÑ¹
+        int m_ArcOnWaitTime;		// µÈ´ıº¸»úÆğ»¡³É¹¦µÄÊ±¼ä
+        int m_ArcOnDecayTime;              //Æğ»¡½¥±äÊ±¼ä
         //
-        //int m_Valid;        // æ˜¯å¦æœ‰å†èµ·å¼§
-        int m_FailDetectTime;   // èµ·å¼§å¤±è´¥æ£€æµ‹æ—¶é—´
-        int m_RetryTimes;   // èµ·å¼§å¤±è´¥åï¼Œé‡è¯•çš„æ¬¡æ•°
-        int m_RetractTime;  // ç„Šä¸å›æŠ½æ—¶é—´
-        int m_RetractWaitTime;  // å›æŠ½ç­‰å¾…æ—¶é—´
-        double m_CurrentInc;    // å†èµ·å¼§ç”µæµå¢é‡
-        double m_VoltageInc;    // å†èµ·å¼§ç”µå‹å¢é‡
+        //int m_Valid;        // ÊÇ·ñÓĞÔÙÆğ»¡
+        int m_FailDetectTime;   // Æğ»¡Ê§°Ü¼ì²âÊ±¼ä
+        int m_RetryTimes;   // Æğ»¡Ê§°Üºó£¬ÖØÊÔµÄ´ÎÊı
+        int m_RetractTime;  // º¸Ë¿»Ø³éÊ±¼ä
+        int m_RetractWaitTime;  // »Ø³éµÈ´ıÊ±¼ä
+        double m_CurrentInc;    // ÔÙÆğ»¡µçÁ÷ÔöÁ¿
+        double m_VoltageInc;    // ÔÙÆğ»¡µçÑ¹ÔöÁ¿
         //
-        int m_BurnbackTime;          // å›çƒ§æ—¶é—´
-        int m_PostflowTime;          // æ»åé€æ°”æ—¶é—´
-        double m_ArcOffCurrent;      // æ”¶å¼§ç”µæµ
-        double m_ArcOffVoltage;      // æ”¶å¼§ç”µå‹
-        int m_ArcOffWaitTime;	// ç­‰å¾…ç„Šæœºæ¯å¼§æˆåŠŸçš„æ—¶é—´
-        int m_ArcOffDecayTime;        //æ¸å˜æ—¶é—´
-        int m_StickCheckDelayTime; //ç²˜ä¸æ£€æµ‹å»¶æ—¶æ—¶é—´
+        int m_BurnbackTime;          // »ØÉÕÊ±¼ä
+        int m_PostflowTime;          // ÖÍºóËÍÆøÊ±¼ä
+        double m_ArcOffCurrent;      // ÊÕ»¡µçÁ÷
+        double m_ArcOffVoltage;      // ÊÕ»¡µçÑ¹
+        int m_ArcOffWaitTime;	// µÈ´ıº¸»úÏ¢»¡³É¹¦µÄÊ±¼ä
+        int m_ArcOffDecayTime;        //½¥±äÊ±¼ä
+        int m_StickCheckDelayTime; //Õ³Ë¿¼ì²âÑÓÊ±Ê±¼ä
     }ArcSegData;
 
     typedef double ArcConfigData[14];
@@ -1441,26 +1441,26 @@ namespace STEPROBOTSDK {
         /*float m_weaveAngel;
         unsigned int m_pauseTime_L;
         unsigned int m_pauseTime_R;*/
-        double m_SwingDirection; //æ–°å¢ï¼Œæ‘†å¼§å€¾æ–œè§’ï¼ˆå¯¹sinæ‘†æ— æ•ˆï¼‰
-        double m_WeaveAngle; //æ–°å¢ï¼Œæ‘†å¼§å¹³é¢å€¾æ–œè§’
-        double m_SpaceAngle;//æ–°å¢ï¼Œç©ºé—´æ‘†å¼§å¤¹è§’ï¼ˆå¯¹Lå‹æ‘†å’Œç©ºé—´ä¸‰è§’æ‘†æœ‰æ•ˆï¼‰
-        unsigned int m_PauseTime_1;//æ–°å¢ï¼Œ1/4å¤„åœç•™æ—¶é—´
-        unsigned int m_PauseTime_2;//æ–°å¢ï¼Œ2/4å¤„åœç•™æ—¶é—´
-        unsigned int m_PauseTime_3;//æ–°å¢ï¼Œ3/4å¤„åœç•™æ—¶é—´
-        unsigned int m_PauseTime_4;//æ–°å¢ï¼Œ4/4å¤„åœç•™æ—¶é—´
-        int m_PauseContinue;    //åœç•™è¿ç»­ //add 2021.9.23
-        double m_EndLength;     //ç»“æŸé•¿åº¦
-        double m_EndWidth;      //ç»“æŸå®½åº¦
-        double m_CenterHigh;    //ä¸­å¿ƒé«˜åº¦
-        //2025.04.24 æ–°å¢
-        double m_StartWeaveAmplitude;//æ–°å¢ï¼Œèµ·å§‹æ‘†å¼§å¹…å€¼ï¼Œ2025.04.24
-        double m_AStrLength;//æ–°å¢ï¼Œèµ·å§‹æ‘†å¼§æ¸å˜é•¿åº¦ï¼Œé»˜è®¤å€¼ç»™0ï¼Œ
-        double m_AEndLength;//æ–°å¢ï¼Œç»“æŸæ‘†å¼§æ¸å˜é•¿åº¦ï¼Œé»˜è®¤å€¼ç»™0ï¼Œ
-        double m_RightAmplitude; // æ–°å¢ï¼Œå³ä¾§æ‘†å¼§å®½åº¦ï¼Œ2025.07.02
+        double m_SwingDirection; //ĞÂÔö£¬°Ú»¡ÇãĞ±½Ç£¨¶Ôsin°ÚÎŞĞ§£©
+        double m_WeaveAngle; //ĞÂÔö£¬°Ú»¡Æ½ÃæÇãĞ±½Ç
+        double m_SpaceAngle;//ĞÂÔö£¬¿Õ¼ä°Ú»¡¼Ğ½Ç£¨¶ÔLĞÍ°ÚºÍ¿Õ¼äÈı½Ç°ÚÓĞĞ§£©
+        unsigned int m_PauseTime_1;//ĞÂÔö£¬1/4´¦Í£ÁôÊ±¼ä
+        unsigned int m_PauseTime_2;//ĞÂÔö£¬2/4´¦Í£ÁôÊ±¼ä
+        unsigned int m_PauseTime_3;//ĞÂÔö£¬3/4´¦Í£ÁôÊ±¼ä
+        unsigned int m_PauseTime_4;//ĞÂÔö£¬4/4´¦Í£ÁôÊ±¼ä
+        int m_PauseContinue;    //Í£ÁôÁ¬Ğø //add 2021.9.23
+        double m_EndLength;     //½áÊø³¤¶È
+        double m_EndWidth;      //½áÊø¿í¶È
+        double m_CenterHigh;    //ÖĞĞÄ¸ß¶È
+        //2025.04.24 ĞÂÔö
+        double m_StartWeaveAmplitude;//ĞÂÔö£¬ÆğÊ¼°Ú»¡·ùÖµ£¬2025.04.24
+        double m_AStrLength;//ĞÂÔö£¬ÆğÊ¼°Ú»¡½¥±ä³¤¶È£¬Ä¬ÈÏÖµ¸ø0£¬
+        double m_AEndLength;//ĞÂÔö£¬½áÊø°Ú»¡½¥±ä³¤¶È£¬Ä¬ÈÏÖµ¸ø0£¬
+        double m_RightAmplitude; // ĞÂÔö£¬ÓÒ²à°Ú»¡¿í¶È£¬2025.07.02
     }WeaveData;
 
 
-    //CD,å¯»ä½
+    //CD,Ñ°Î»
     typedef enum
     {
         eCD_X_Positive = 1,//to X+ direction
@@ -1480,7 +1480,7 @@ namespace STEPROBOTSDK {
         char m_RefName[32];
     }CDData;
 
-    //æ–°å¢2024.7.2
+    //ĞÂÔö2024.7.2
     typedef enum
     {
         e1D_CR = 1,
@@ -1493,7 +1493,7 @@ namespace STEPROBOTSDK {
         e3D3R_CR = 10
     } CORRECTTYPE;
 
-    //CDSæ–°å¢2024.7.3
+    //CDSĞÂÔö2024.7.3
     typedef struct
     {
         CORRECTTYPE m_Dimension;
@@ -1505,7 +1505,7 @@ namespace STEPROBOTSDK {
         CDData m_CD[7];
     } ArcCDSData;
 
-    //PATï¼Œæ¥è§¦å¯»ä½
+    //PAT£¬½Ó´¥Ñ°Î»
     typedef enum
     {
         eSingleTouch,
@@ -1522,94 +1522,94 @@ namespace STEPROBOTSDK {
         unsigned int m_ReturnSpeed;
         double m_ReturnDistance;//2024.7.12
     }PAT;
-    //TRACKDATAï¼Œè·Ÿè¸ªå˜é‡
+    //TRACKDATA£¬¸ú×Ù±äÁ¿
     typedef struct
     {
         /*float m_horizontalGain;    // Kpl
         float m_verticalGain; // Kpv
         float m_iref;//
         bool m_carryon;      //*/
-        int m_LateralBeginCycle;	//æ¨ªå‘çº åå¼€å§‹å‘¨æœŸï¼ˆ>=3ï¼‰
-        double Kpl;				// æ¨ªå‘æ¯”ä¾‹å¢ç›Š  ä¸æ˜¯æ¯”ä¾‹å¢ç›Šç™¾åˆ†æ¯”----ä¿ç•™
+        int m_LateralBeginCycle;	//ºáÏò¾ÀÆ«¿ªÊ¼ÖÜÆÚ£¨>=3£©
+        double Kpl;				// ºáÏò±ÈÀıÔöÒæ  ²»ÊÇ±ÈÀıÔöÒæ°Ù·Ö±È----±£Áô
         double m_LeftCoefficient;//add 2016.2.17;zuo bian mian ji xi shu
         double m_RightCoefficient;
-        int m_VerticalModeFlag; //ä¸º0åˆ™æ˜¯å¸¸æ•°æ¨¡å¼,ä¸º1æ˜¯åé¦ˆæ¨¡å¼
-        double m_Iref_Vertical;		//çºµå‘çº ååŸºå‡†ç”µæµï¼ˆå¸¸æ•°æ¨¡å¼ï¼‰
-        int m_VerticalBeginCycle;	//çºµå‘å–æ ·å¼€å§‹å‘¨æœŸ1~999
-        int m_VerticalSustainCycle;	//çºµå‘å–æ ·æŒç»­å‘¨æœŸ1~999
-        double m_VerticalLength;		//çºµå‘å‘¨æœŸé•¿åº¦
-        double Kpv;				// çºµå‘æ¯”ä¾‹å¢ç›Š  ä¸æ˜¯æ¯”ä¾‹å¢ç›Šç™¾åˆ†æ¯”---ä¿ç•™
+        int m_VerticalModeFlag; //Îª0ÔòÊÇ³£ÊıÄ£Ê½,Îª1ÊÇ·´À¡Ä£Ê½
+        double m_Iref_Vertical;		//×İÏò¾ÀÆ«»ù×¼µçÁ÷£¨³£ÊıÄ£Ê½£©
+        int m_VerticalBeginCycle;	//×İÏòÈ¡Ñù¿ªÊ¼ÖÜÆÚ1~999
+        int m_VerticalSustainCycle;	//×İÏòÈ¡Ñù³ÖĞøÖÜÆÚ1~999
+        double m_VerticalLength;		//×İÏòÖÜÆÚ³¤¶È
+        double Kpv;				// ×İÏò±ÈÀıÔöÒæ  ²»ÊÇ±ÈÀıÔöÒæ°Ù·Ö±È---±£Áô
 
         int m_TypeofTimeOrDist;//1 == time,0 == distance
-        unsigned int m_TimeInterval;//100-500msï¼Œé»˜è®¤200ms
-        unsigned int m_DistInterval;//è·ç¦» 1-30mm,é»˜è®¤ï¼š2mm
+        unsigned int m_TimeInterval;//100-500ms£¬Ä¬ÈÏ200ms
+        unsigned int m_DistInterval;//¾àÀë 1-30mm,Ä¬ÈÏ£º2mm
 
         double m_YBias;//only for lasertrack,20162.25
         double m_ZBias;
 
-        //2024.7.8æ–°å¢
-        double L_MinComp;//æ¨ªå‘æœ€å°è¡¥å¿
-        double L_MaxComp;//æ¨ªå‘æœ€å¤§è¡¥å¿
-        double L_TotalMaxComp;//æ¨ªå‘æœ€å¤§è¡¥å¿æ€»
-        double L_RightComp;//æ¨ªå‘ä¸å¯¹ç§°è°ƒæ•´ç³»æ•°
+        //2024.7.8ĞÂÔö
+        double L_MinComp;//ºáÏò×îĞ¡²¹³¥
+        double L_MaxComp;//ºáÏò×î´ó²¹³¥
+        double L_TotalMaxComp;//ºáÏò×î´ó²¹³¥×Ü
+        double L_RightComp;//ºáÏò²»¶Ô³Æµ÷ÕûÏµÊı
         double Temp_L[6];
-        double V_MinComp;//æ¨ªå‘æœ€å°è¡¥å¿
-        double V_MaxComp;//æ¨ªå‘æœ€å¤§è¡¥å¿
-        double V_TotalMaxComp;//æ¨ªå‘æœ€å¤§è¡¥å¿æ€»
-        double V_TopComp;//æ¨ªå‘ä¸å¯¹ç§°è°ƒæ•´ç³»æ•°
+        double V_MinComp;//ºáÏò×îĞ¡²¹³¥
+        double V_MaxComp;//ºáÏò×î´ó²¹³¥
+        double V_TotalMaxComp;//ºáÏò×î´ó²¹³¥×Ü
+        double V_TopComp;//ºáÏò²»¶Ô³Æµ÷ÕûÏµÊı
         double Temp_V[6];
 
     }TrackData;
 
     typedef struct
     {
-        double m_EndSpeed;				//æœ€å¤§é€Ÿåº¦
-        double m_EndCurrent;			//æœ€å¤§ç”µæµ
-        double m_YBias;                 //Yæ–¹å‘åç½®è·ç¦»
-        double m_ZBias;                 //Zæ–¹å‘åç½®è·ç¦»
-        double m_MaxWidth;		        //æœ€å¤§å¡å£å®½åº¦
-        char m_AdapLength[32];          //å®½åº¦è‡ªé€‚åº”å¼€å…³
-        double m_StandardWidth;         //æ ‡å‡†å¡å£å®½åº¦ 20240708
-        double m_WidthRatio;            //å®½åº¦æ¯”ä¾‹
-    }LaserTrackData;//æ ¹æ®ç¤ºæ•™å™¨æ˜¾ç¤ºæ–°å¢20240305
+        double m_EndSpeed;				//×î´óËÙ¶È
+        double m_EndCurrent;			//×î´óµçÁ÷
+        double m_YBias;                 //Y·½ÏòÆ«ÖÃ¾àÀë
+        double m_ZBias;                 //Z·½ÏòÆ«ÖÃ¾àÀë
+        double m_MaxWidth;		        //×î´óÆÂ¿Ú¿í¶È
+        char m_AdapLength[32];          //¿í¶È×ÔÊÊÓ¦¿ª¹Ø
+        double m_StandardWidth;         //±ê×¼ÆÂ¿Ú¿í¶È 20240708
+        double m_WidthRatio;            //¿í¶È±ÈÀı
+    }LaserTrackData;//¸ù¾İÊ¾½ÌÆ÷ÏÔÊ¾ĞÂÔö20240305
 
     //plaserfilter
     typedef enum
     {
         eNoFilter,
-        eMedianFilter,              //ä¸­å€¼æ»¤æ³¢ï¼ˆé»˜è®¤ï¼‰
-        eMeanFilter,                //å‡å€¼æ»¤æ³¢
-        eGaussFilter                //é«˜æ–¯æ»¤æ³¢
+        eMedianFilter,              //ÖĞÖµÂË²¨£¨Ä¬ÈÏ£©
+        eMeanFilter,                //¾ùÖµÂË²¨
+        eGaussFilter                //¸ßË¹ÂË²¨
     }FilterType;
 
-    //ç‚¹æ¿€å…‰æ»¤æ³¢æ–¹å¼ï¼ˆè¿”å›ç‚¹çš„ç±»å‹ï¼‰
+    //µã¼¤¹âÂË²¨·½Ê½£¨·µ»ØµãµÄÀàĞÍ£©
     typedef enum
     {
-        eMax,                 //ç¬¬ä¸€å¤„æå¤§å€¼
-        eMin,                 //ç¬¬ä¸€å¤„æå°å€¼
-        eUpLeft,              //ç¬¬ä¸€å¤„ä¸Šå‡æ²¿å·¦ä¾§
-        eUpRight,             //ç¬¬ä¸€å¤„ä¸Šå‡æ²¿å³ä¾§
-        eDownLeft,            //ç¬¬ä¸€å¤„ä¸‹é™æ²¿å·¦ä¾§
-        eDownRight,           //ç¬¬ä¸€å¤„ä¸‹é™æ²¿å³ä¾§
+        eMax,                 //µÚÒ»´¦¼«´óÖµ
+        eMin,                 //µÚÒ»´¦¼«Ğ¡Öµ
+        eUpLeft,              //µÚÒ»´¦ÉÏÉıÑØ×ó²à
+        eUpRight,             //µÚÒ»´¦ÉÏÉıÑØÓÒ²à
+        eDownLeft,            //µÚÒ»´¦ÏÂ½µÑØ×ó²à
+        eDownRight,           //µÚÒ»´¦ÏÂ½µÑØÓÒ²à
     }PointType;
 
-    //ç‚¹æ¿€å…‰æ»¤æ³¢å‚æ•°
+    //µã¼¤¹âÂË²¨²ÎÊı
     typedef struct
     {
-        FilterType m_FilterType;                                //æ»¤æ³¢å™¨ç±»å‹
-        PointType m_PointType;                                  //ç›®æ ‡ç‚¹ç±»å‹
-        int m_FilterParam;                                      //æ»¤æ³¢å™¨å‚æ•°
-        int m_FilterLength;             //åŸWidthï¼Œ20240316     //æ»¤æ³¢é•¿åº¦
-        double m_Featurethreshold;                              //ç‰¹å¾ç‚¹é˜ˆå€¼
+        FilterType m_FilterType;                                //ÂË²¨Æ÷ÀàĞÍ
+        PointType m_PointType;                                  //Ä¿±êµãÀàĞÍ
+        int m_FilterParam;                                      //ÂË²¨Æ÷²ÎÊı
+        int m_FilterLength;             //Ô­Width£¬20240316     //ÂË²¨³¤¶È
+        double m_Featurethreshold;                              //ÌØÕ÷µããĞÖµ
     } PLaserFilter;
 
     //laserarcondata
     typedef struct
     {
-        int m_PreFlowTime;   //é¢„é€æ°”æ—¶é—´
-        int m_PreWireTime;   //é¢„é€ä¸æ—¶é—´
-        int m_DelayLightTime;//å»¶è¿Ÿå¼€å…‰æ—¶é—´
-        double m_WireSpeed;     //é€ä¸é€Ÿåº¦
+        int m_PreFlowTime;   //Ô¤ËÍÆøÊ±¼ä
+        int m_PreWireTime;   //Ô¤ËÍË¿Ê±¼ä
+        int m_DelayLightTime;//ÑÓ³Ù¿ª¹âÊ±¼ä
+        double m_WireSpeed;     //ËÍË¿ËÙ¶È
         double m_Temp4;
         double m_Temp3;
         double m_Temp2;
@@ -1617,10 +1617,10 @@ namespace STEPROBOTSDK {
     } LaserArcOnData;
     typedef struct
     {
-        double m_LaserPower;    //æ¿€å…‰åŠŸç‡
-        int m_PWM;              //å ç©ºæ¯”
-        int m_Frequency;        //é¢‘ç‡
-        double m_WireSpeed;     //é€ä¸é€Ÿåº¦
+        double m_LaserPower;    //¼¤¹â¹¦ÂÊ
+        int m_PWM;              //Õ¼¿Õ±È
+        int m_Frequency;        //ÆµÂÊ
+        double m_WireSpeed;     //ËÍË¿ËÙ¶È
         double m_Temp4;
         double m_Temp3;
         double m_Temp2;
@@ -1635,11 +1635,11 @@ namespace STEPROBOTSDK {
 
     typedef struct
     {
-        int m_DelayFlowTime;        //æ»åé€æ°”æ—¶é—´
-        int m_PreCloseWireTime;     //æå‰å…³ä¸æ—¶é—´
-        int m_WireRetractTime;      //é€€ä¸æ—¶é—´
-        int m_WireReFeedTime;       //é€€ä¸å†è¿›æ—¶é—´
-        double m_WireSpeed;         //é€ä¸é€Ÿåº¦
+        int m_DelayFlowTime;        //ÖÍºóËÍÆøÊ±¼ä
+        int m_PreCloseWireTime;     //ÌáÇ°¹ØË¿Ê±¼ä
+        int m_WireRetractTime;      //ÍËË¿Ê±¼ä
+        int m_WireReFeedTime;       //ÍËË¿ÔÙ½øÊ±¼ä
+        double m_WireSpeed;         //ËÍË¿ËÙ¶È
         double m_Temp5;
         double m_Temp4;
         double m_Temp3;
@@ -1647,47 +1647,47 @@ namespace STEPROBOTSDK {
         double m_Temp1;
     }LaserArcOffData;
 
-    //ArcOnDataï¼Œèµ·å¼§å˜é‡
+    //ArcOnData£¬Æğ»¡±äÁ¿
     typedef struct
     {
-        unsigned int m_preFlowtime;//é¢„é€æ°”æ—¶é—´
-        float m_arconCurrent;     //èµ·å¼§ç”µæµ
-        float m_arconVoltage;    //èµ·å¼§ç”µå‹
-        unsigned int m_arconTime;  //èµ·å¼§æ—¶é—´
-        unsigned int m_BeforeArcOn;//add 2021.1.27ï¼Œé¢„èµ·å¼§æ—¶é—´
-        unsigned int m_BeforeWireOut;//add 2021.1.27ï¼Œé¢„é€ä¸æ—¶é—´
+        unsigned int m_preFlowtime;//Ô¤ËÍÆøÊ±¼ä
+        float m_arconCurrent;     //Æğ»¡µçÁ÷
+        float m_arconVoltage;    //Æğ»¡µçÑ¹
+        unsigned int m_arconTime;  //Æğ»¡Ê±¼ä
+        unsigned int m_BeforeArcOn;//add 2021.1.27£¬Ô¤Æğ»¡Ê±¼ä
+        unsigned int m_BeforeWireOut;//add 2021.1.27£¬Ô¤ËÍË¿Ê±¼ä
     }ArcOnData;
-    //ArcOffDataï¼Œæ”¶å¼§å˜é‡
+    //ArcOffData£¬ÊÕ»¡±äÁ¿
     typedef struct
     {
-        unsigned int m_burnBacktime;//å›çƒ§æ—¶é—´
-        unsigned int m_postFlowtime;//æ»åé€æ°”æ—¶é—´
-        float m_arcoffCurrent;//æ”¶å¼§ç”µæµ
-        float m_arcoffVoltage;//æ”¶å¼§ç”µå‹
-        unsigned int m_arcoffTime;//æ”¶å¼§æ—¶é—´
-		int m_ArcMode;//ç„Šæ¥æ¨¡å¼ 20250407
+        unsigned int m_burnBacktime;//»ØÉÕÊ±¼ä
+        unsigned int m_postFlowtime;//ÖÍºóËÍÆøÊ±¼ä
+        float m_arcoffCurrent;//ÊÕ»¡µçÁ÷
+        float m_arcoffVoltage;//ÊÕ»¡µçÑ¹
+        unsigned int m_arcoffTime;//ÊÕ»¡Ê±¼ä
+		int m_ArcMode;//º¸½ÓÄ£Ê½ 20250407
     }ArcOffData;
     //ArcData
     typedef struct
     {
-        float m_weldVoltage;//ç„Šæ¥ç”µå‹
-        float m_weldCurrent;//ç„Šæ¥ç”µæµ
-        float m_weldSpeed;//add 2015.4.2ï¼Œç„Šæ¥é€Ÿåº¦
-        double m_endSpeed;//add 2021.9.23ï¼Œç„Šæ¥ç»“æŸé€Ÿåº¦
-        //æ–°å¢2025.04.07
-        int m_ArcMode;               //ç„Šæ¥æ¨¡å¼
-        int m_ArcArgonFlag;          //æ°©å¼§ç„Šæ ‡å¿—
-        int m_WeaveSyncFlag;         //æ‘†å¼§åŒæ­¥è¾“å‡ºç”µæµé€ä¸æ ‡å¿—
-        int m_ArcWeldCurrentBase;    //ç„Šæ¥ç”µæµåŸºå€¼
-        int m_ArcDutyCycle;          //å ç©ºæ¯”
-        int m_ArcFrequency;          //è„‰å†²é¢‘ç‡
-        double m_ArcWireSpeed;       //å³°å€¼é€ä¸é€Ÿåº¦
-        double m_ArcWireSpeedBase;   //åŸºå€¼é€ä¸é€Ÿåº¦
-        int m_ArcRampTime;           //ç¼“å‡æ—¶é—´
-        int m_ArcDescentTime;        //ç¼“é™æ—¶é—´
-        //æ–°å¢2025.05.16
-        int m_ArcOnDelayWireTime;    //å»¶è¿Ÿé€ä¸æ—¶é—´
-        double m_ArcWireRetractLength;//ç„Šä¸å›é€€è·ç¦»
+        float m_weldVoltage;//º¸½ÓµçÑ¹
+        float m_weldCurrent;//º¸½ÓµçÁ÷
+        float m_weldSpeed;//add 2015.4.2£¬º¸½ÓËÙ¶È
+        double m_endSpeed;//add 2021.9.23£¬º¸½Ó½áÊøËÙ¶È
+        //ĞÂÔö2025.04.07
+        int m_ArcMode;               //º¸½ÓÄ£Ê½
+        int m_ArcArgonFlag;          //ë²»¡º¸±êÖ¾
+        int m_WeaveSyncFlag;         //°Ú»¡Í¬²½Êä³öµçÁ÷ËÍË¿±êÖ¾
+        int m_ArcWeldCurrentBase;    //º¸½ÓµçÁ÷»ùÖµ
+        int m_ArcDutyCycle;          //Õ¼¿Õ±È
+        int m_ArcFrequency;          //Âö³åÆµÂÊ
+        double m_ArcWireSpeed;       //·åÖµËÍË¿ËÙ¶È
+        double m_ArcWireSpeedBase;   //»ùÖµËÍË¿ËÙ¶È
+        int m_ArcRampTime;           //»ºÉıÊ±¼ä
+        int m_ArcDescentTime;        //»º½µÊ±¼ä
+        //ĞÂÔö2025.05.16
+        int m_ArcOnDelayWireTime;    //ÑÓ³ÙËÍË¿Ê±¼ä
+        double m_ArcWireRetractLength;//º¸Ë¿»ØÍË¾àÀë
     }ArcData;
 
     typedef struct
@@ -1723,39 +1723,39 @@ namespace STEPROBOTSDK {
         double m_Zone_reax;
     }OverlapABS;
 
-    //åŠ é€Ÿåº¦ç±»å‹
+    //¼ÓËÙ¶ÈÀàĞÍ
     typedef enum
     {
-        eTran,		   // Tå‹åŠ é€Ÿåº¦
-        eSShape,       // Så‹é€Ÿåº¦
-        eSine,         // Sinå‹é€Ÿåº¦
-        eSShape_new    // æ–°çš„7æ®µså‹é€Ÿåº¦è§„åˆ’
+        eTran,		   // TĞÍ¼ÓËÙ¶È
+        eSShape,       // SĞÍËÙ¶È
+        eSine,         // SinĞÍËÙ¶È
+        eSShape_new    // ĞÂµÄ7¶ÎsĞÍËÙ¶È¹æ»®
     } RampType;
 
     typedef struct
     {
-        char			m_PalName[48];	// ç å›å˜é‡åç§°
-        unsigned int 	m_LayerNum;		// å±‚å·
-        unsigned int	m_PartNum;		// ä»¶å·
+        char			m_PalName[48];	// Âë¶â±äÁ¿Ãû³Æ
+        unsigned int 	m_LayerNum;		// ²ãºÅ
+        unsigned int	m_PartNum;		// ¼şºÅ
         CartPos	 		m_CartPos;   	// xyzabc+mode
         AuxPos 			m_AuxPos;     	// joint
     }PalletPosition;
 
     typedef struct
     {
-        double m_BendAngle;           //æŠ˜å¼¯è§’åº¦
-        double m_BendVel;             //æŠ˜å¼¯é€Ÿåº¦
-        double m_BendAccTime;         //æŠ˜å¼¯åŠ é€Ÿåº¦
-        double m_BendDelayTime;       //æŠ˜å¼¯å»¶è¿Ÿæ—¶é—´
-        double m_BendThickness;       //æ¿åš
+        double m_BendAngle;           //ÕÛÍä½Ç¶È
+        double m_BendVel;             //ÕÛÍäËÙ¶È
+        double m_BendAccTime;         //ÕÛÍä¼ÓËÙ¶È
+        double m_BendDelayTime;       //ÕÛÍäÑÓ³ÙÊ±¼ä
+        double m_BendThickness;       //°åºñ
     }BendTargetData;
 
     typedef struct
     {
-        double m_SynDistance;      //åŒæ­¥è·ç¦»
-        double m_SynVel;           //åŒæ­¥é€Ÿåº¦
-        double m_SynAccTime;       //åŒæ­¥åŠ é€Ÿæ—¶é—´
-        double m_SynDelayTime;     //åŒæ­¥å»¶è¿Ÿæ—¶é—´
+        double m_SynDistance;      //Í¬²½¾àÀë
+        double m_SynVel;           //Í¬²½ËÙ¶È
+        double m_SynAccTime;       //Í¬²½¼ÓËÙÊ±¼ä
+        double m_SynDelayTime;     //Í¬²½ÑÓ³ÙÊ±¼ä
     }BendSynTargetData;
     typedef enum
     {
@@ -1766,25 +1766,25 @@ namespace STEPROBOTSDK {
 
     typedef struct
     {
-        PolishType m_PolishShape;  //æ‰“ç£¨ç±»å‹ï¼Œæšä¸¾ç±»å‹eCircle, eEllipse, eSin
-        unsigned int m_PolishNumber;  //æ‰“ç£¨ä¸ªæ•°ï¼Œ>=1
-        double m_Radius;  //åœ†åŠå¾„
-        double m_SemimajorAxle;  //æ¤­åœ†é•¿åŠè½´
-        double m_SemiminorAxle;  //æ¤­åœ†çŸ­åŠè½´
-        double m_Angle;  //æ¤­åœ†å€¾æ–œè§’ 0-180
-        double m_Amplitude;  //sinå¹…å€¼
-        double m_PressAmount;  //æ‰“ç£¨ä¸‹å‹é‡ é»˜è®¤0
+        PolishType m_PolishShape;  //´òÄ¥ÀàĞÍ£¬Ã¶¾ÙÀàĞÍeCircle, eEllipse, eSin
+        unsigned int m_PolishNumber;  //´òÄ¥¸öÊı£¬>=1
+        double m_Radius;  //Ô²°ë¾¶
+        double m_SemimajorAxle;  //ÍÖÔ²³¤°ëÖá
+        double m_SemiminorAxle;  //ÍÖÔ²¶Ì°ëÖá
+        double m_Angle;  //ÍÖÔ²ÇãĞ±½Ç 0-180
+        double m_Amplitude;  //sin·ùÖµ
+        double m_PressAmount;  //´òÄ¥ÏÂÑ¹Á¿ Ä¬ÈÏ0
     }PolishData;
 
     typedef struct
     {
-        //è´¨é‡ Weight
+        //ÖÊÁ¿ Weight
         double Weight;
-        //è´¨å¿ƒ x y z
+        //ÖÊĞÄ x y z
         double x;
         double y;
         double z;
-        //è½¬åŠ¨æƒ¯é‡
+        //×ª¶¯¹ßÁ¿
         double ixx;
         double iyy;
         double izz;
@@ -1793,28 +1793,28 @@ namespace STEPROBOTSDK {
         double iyz;
     }PayloadData;
 
-    //è¯­å¥æ§åˆ¶å¢åŠ ï¼Œè¡¥å……æ–°å¢è¯­å¥ç»“æ„ä½“
+    //Óï¾ä¿ØÖÆÔö¼Ó£¬²¹³äĞÂÔöÓï¾ä½á¹¹Ìå
     typedef struct
     {
-        int m_DOPort;     //ç«¯å£å·
-        bool m_DOValue;   //å€¼
+        int m_DOPort;     //¶Ë¿ÚºÅ
+        bool m_DOValue;   //Öµ
     }SDKInstructDOSet;
 
     typedef struct
     {
-        int m_DOPort;           //ç«¯å£å·
-        bool m_DOValue;         //å€¼
-        int m_StartEnd;         //æ–¹å‘,0ä¸ºstartï¼Œ1ä¸ºend
-        double m_Distance;      //è·ç¦»
-        int m_MemberType;       //è½´/XYZï¼Œ0ä¸ºnullï¼Œ1~6ä¸ºA1~A6
+        int m_DOPort;           //¶Ë¿ÚºÅ
+        bool m_DOValue;         //Öµ
+        int m_StartEnd;         //·½Ïò,0Îªstart£¬1Îªend
+        double m_Distance;      //¾àÀë
+        int m_MemberType;       //Öá/XYZ£¬0Îªnull£¬1~6ÎªA1~A6
     }SDKInstructDOSetSyncPath;
 
     typedef struct
     {
-        int m_DOPort;           //ç«¯å£å·
-        bool m_DOValue;         //å€¼
-        int m_StartEnd;         //æ–¹å‘,0ä¸ºstartï¼Œ1ä¸ºend
-        int m_Time;             //æ—¶é—´
+        int m_DOPort;           //¶Ë¿ÚºÅ
+        bool m_DOValue;         //Öµ
+        int m_StartEnd;         //·½Ïò,0Îªstart£¬1Îªend
+        int m_Time;             //Ê±¼ä
     }SDKInstructDOSetSyncTime;
 
     typedef struct
@@ -1993,7 +1993,7 @@ namespace STEPROBOTSDK {
     typedef struct
     {
         double m_ArcConfig[14];
-    }SDKInstructArcConfig;//æœªä½¿ç”¨ï¼Œç”¨çš„ ArcConfigData
+    }SDKInstructArcConfig;//Î´Ê¹ÓÃ£¬ÓÃµÄ ArcConfigData
 
 
     typedef struct
@@ -2011,18 +2011,18 @@ namespace STEPROBOTSDK {
     typedef struct
     {
         CartPos m_CartDist;        // xyzabc+mode        
-        JointsPos m_JointDist;     // å…³èŠ‚éƒ¨åˆ†
-        AuxPos m_AuxPosDist;       // é™„åŠ è½´ä¿¡æ¯
-        DISTANCETYPE m_DistTyp;    // ä½ç½®ç±»å‹
+        JointsPos m_JointDist;     // ¹Ø½Ú²¿·Ö
+        AuxPos m_AuxPosDist;       // ¸½¼ÓÖáĞÅÏ¢
+        DISTANCETYPE m_DistTyp;    // Î»ÖÃÀàĞÍ
     }RcDistance;
     typedef struct
     {
         RcDistance m_RcDistance;
-        int m_Dyn;//åªå¯ä»¥è®¾ç½®ä½ç½®é€Ÿåº¦ï¼Œå…¶ä»–å‚æ•°åˆ©ç”¨Dynè¯­å¥è®¾ç½®;NULLå¯ä»¥è®¾ç½®-1
-        SOverlap m_Ovl;//NULLå‚æ•°å€¼éƒ½ä¸º-1ï¼Œç±»å‹æšä¸¾ä¸º0
+        int m_Dyn;//Ö»¿ÉÒÔÉèÖÃÎ»ÖÃËÙ¶È£¬ÆäËû²ÎÊıÀûÓÃDynÓï¾äÉèÖÃ;NULL¿ÉÒÔÉèÖÃ-1
+        SOverlap m_Ovl;//NULL²ÎÊıÖµ¶¼Îª-1£¬ÀàĞÍÃ¶¾ÙÎª0
         ORITYPE m_Ori;
-        WeaveParam m_Weave;                        // æ‘†å¼§å‚æ•°
-        SeamTrackParam m_SeamTrack;        // ç”µå¼§è·Ÿè¸ª
+        WeaveParam m_Weave;                        // °Ú»¡²ÎÊı
+        SeamTrackParam m_SeamTrack;        // µç»¡¸ú×Ù
         char m_ToolName[32];
         char m_RefName[32];
     }SDKInstructWLinRel;
@@ -2032,20 +2032,20 @@ namespace STEPROBOTSDK {
         float m_weldCurrent;
         float m_weldSpeed;//add 2015.4.2
         double m_endSpeed;//add 2021.9.23
-        //æ–°å¢2025.05.16
-        int m_ArcMode;               //ç„Šæ¥æ¨¡å¼
-        int m_ArcArgonFlag;          //æ°©å¼§ç„Šæ ‡å¿—
-        int m_WeaveSyncFlag;         //æ‘†å¼§åŒæ­¥è¾“å‡ºç”µæµé€ä¸æ ‡å¿—
-        int m_ArcWeldCurrentBase;    //ç„Šæ¥ç”µæµåŸºå€¼
-        int m_ArcDutyCycle;          //å ç©ºæ¯”
-        int m_ArcFrequency;          //è„‰å†²é¢‘ç‡
-        double m_ArcWireSpeed;       //å³°å€¼é€ä¸é€Ÿåº¦
-        double m_ArcWireSpeedBase;   //åŸºå€¼é€ä¸é€Ÿåº¦
-        int m_ArcRampTime;           //ç¼“å‡æ—¶é—´
-        int m_ArcDescentTime;        //ç¼“é™æ—¶é—´
-        int m_ArcOnDelayWireTime;    //å»¶è¿Ÿé€ä¸æ—¶é—´
-        double m_ArcWireRetractLength;//ç„Šä¸å›é€€è·ç¦»
-    }ARCDATA;//ä¸ArcDataåŒæ­¥ï¼Œå¼ƒç”¨ã€‚2025.05.16
+        //ĞÂÔö2025.05.16
+        int m_ArcMode;               //º¸½ÓÄ£Ê½
+        int m_ArcArgonFlag;          //ë²»¡º¸±êÖ¾
+        int m_WeaveSyncFlag;         //°Ú»¡Í¬²½Êä³öµçÁ÷ËÍË¿±êÖ¾
+        int m_ArcWeldCurrentBase;    //º¸½ÓµçÁ÷»ùÖµ
+        int m_ArcDutyCycle;          //Õ¼¿Õ±È
+        int m_ArcFrequency;          //Âö³åÆµÂÊ
+        double m_ArcWireSpeed;       //·åÖµËÍË¿ËÙ¶È
+        double m_ArcWireSpeedBase;   //»ùÖµËÍË¿ËÙ¶È
+        int m_ArcRampTime;           //»ºÉıÊ±¼ä
+        int m_ArcDescentTime;        //»º½µÊ±¼ä
+        int m_ArcOnDelayWireTime;    //ÑÓ³ÙËÍË¿Ê±¼ä
+        double m_ArcWireRetractLength;//º¸Ë¿»ØÍË¾àÀë
+    }ARCDATA;//ÓëArcDataÍ¬²½£¬ÆúÓÃ¡£2025.05.16
     typedef struct
     {
         HMIPos m_StartPos;
@@ -2056,7 +2056,7 @@ namespace STEPROBOTSDK {
         double m_SegLength;
         ArcSegData m_ArcSegmentData;
         ArcData m_ArcData;
-        int m_Dyn;//åªå¯ä»¥è®¾ç½®ä½ç½®é€Ÿåº¦ï¼Œå…¶ä»–å‚æ•°åˆ©ç”¨Dynè¯­å¥è®¾ç½®;NULLå¯ä»¥è®¾ç½®-1
+        int m_Dyn;//Ö»¿ÉÒÔÉèÖÃÎ»ÖÃËÙ¶È£¬ÆäËû²ÎÊıÀûÓÃDynÓï¾äÉèÖÃ;NULL¿ÉÒÔÉèÖÃ-1
         ORITYPE m_Ori;
         char m_ToolName[32];
         char m_RefName[32];
@@ -2069,7 +2069,7 @@ namespace STEPROBOTSDK {
         double m_SegLength;
         ArcSegData m_ArcSegmentData;
         ArcData m_ArcData;
-        int m_Dyn;//åªå¯ä»¥è®¾ç½®ä½ç½®é€Ÿåº¦ï¼Œå…¶ä»–å‚æ•°åˆ©ç”¨Dynè¯­å¥è®¾ç½®;NULLå¯ä»¥è®¾ç½®-1
+        int m_Dyn;//Ö»¿ÉÒÔÉèÖÃÎ»ÖÃËÙ¶È£¬ÆäËû²ÎÊıÀûÓÃDynÓï¾äÉèÖÃ;NULL¿ÉÒÔÉèÖÃ-1
         ORITYPE m_Ori;
         char m_ToolName[32];
         char m_RefName[32];
@@ -2082,17 +2082,17 @@ namespace STEPROBOTSDK {
         double m_SegLength;
         ArcSegData m_ArcSegmentData;
         ArcData m_ArcData;
-        int m_Dyn;//åªå¯ä»¥è®¾ç½®ä½ç½®é€Ÿåº¦ï¼Œå…¶ä»–å‚æ•°åˆ©ç”¨Dynè¯­å¥è®¾ç½®;NULLå¯ä»¥è®¾ç½®-1
+        int m_Dyn;//Ö»¿ÉÒÔÉèÖÃÎ»ÖÃËÙ¶È£¬ÆäËû²ÎÊıÀûÓÃDynÓï¾äÉèÖÃ;NULL¿ÉÒÔÉèÖÃ-1
         ORITYPE m_Ori;
         char m_ToolName[32];
         char m_RefName[32];
     }SDKInstructWLinSeg2;
 
-    //æ–°å¢2025.10.13 åæ ‡è½¬æ¢ç»“æ„ä½“
+    //ĞÂÔö2025.10.13 ×ø±ê×ª»»½á¹¹Ìå
     typedef struct 
     {
         HMIPos m_Pos;
-        char m_RefSysName_Res[32];           // æºåæ ‡ç³»åç§°
-        char m_RefSysName_Des[32];           // ç›®æ ‡åæ ‡ç³»åç§°
+        char m_RefSysName_Res[32];           // Ô´×ø±êÏµÃû³Æ
+        char m_RefSysName_Des[32];           // Ä¿±ê×ø±êÏµÃû³Æ
     }SDKInstructRefConvert;
-}//ä¸å¯ä»¥å°‘ï¼Œä¸€å®šè¦åœ¨è¿™ä¸ªå‘½åç©ºé—´å†…
+}//²»¿ÉÒÔÉÙ£¬Ò»¶¨ÒªÔÚÕâ¸öÃüÃû¿Õ¼äÄÚ

@@ -80,6 +80,7 @@ private:
     QSpinBox* m_pPiecewiseMinSegmentSpin = nullptr;
     QSpinBox* m_pMinPointSpin = nullptr;
     QSpinBox* m_pSmoothRadiusSpin = nullptr;
+    QCheckBox* m_pSlopeConsistentCornerFitCheck = nullptr;
     QPushButton* m_pRunButton = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
 };

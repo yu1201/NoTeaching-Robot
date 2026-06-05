@@ -1,10 +1,10 @@
 #define MyAppName "NoTeaching-Robot"
 #define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.06.04.1832"
+  #define MyAppVersion "2026.06.06.0106"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "NoTeaching-Robot-Setup-v2026.06.04.1832"
+  #define MyOutputBaseFilename "NoTeaching-Robot-Setup-v2026.06.06.0106"
 #endif
 #define MyAppPublisher "yu1201"
 #define MyAppExeName "QtWidgetsApplication4.exe"
@@ -40,21 +40,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "{app}\Log"
 Name: "{app}\Result"
 Name: "{app}\Temp"
-
-[InstallDelete]
-; 模版允许随安装包更新，避免旧模版残留；现场机器人参数不在这里删除。
-Type: filesandordirs; Name: "{app}\Data\WorkpieceTemplates"
+Name: "{app}\Data"
 
 [Files]
-; 程序文件正常覆盖，但 Data 目录单独处理，避免升级时覆盖现场保存的机器人参数。
+; 程序文件正常覆盖，Data 目录由现场运行数据拥有，安装包不覆盖也不删除。
 Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Data\*"
 ; 旧 INI/TXT 参数迁移工具，现场机器无需安装 Python。
 Source: "..\dist\tools\ConfigMigrate.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
-; 工件默认模版可以覆盖，供新建控制单元复制最新默认值。
-Source: "{#MySourceDir}\Data\WorkpieceTemplates\*"; DestDir: "{app}\Data\WorkpieceTemplates"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
-; 除模版外，Data 只补齐不存在的文件：新增文件会安装，已有机器人/账号/参数文件不会被覆盖。
-Source: "{#MySourceDir}\Data\*"; DestDir: "{app}\Data"; Flags: ignoreversion recursesubdirs createallsubdirs onlyifdoesntexist; Excludes: "WorkpieceTemplates\*,ConfigStore.db,ConfigStore.db.*"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

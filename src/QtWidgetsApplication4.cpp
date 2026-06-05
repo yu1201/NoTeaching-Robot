@@ -10,8 +10,10 @@
 #include "HandEyeCalibrationDialog.h"
 #include "LaserWeldFilterDialog.h"
 #include "MeasureThenWeldDialog.h"
+#include "MeasureThenWeldRuntimeConfig.h"
 #include "MeasureThenWeldService.h"
 #include "OPini.h"
+#include "PointCloudProcessingConfig.h"
 #include "PreciseMeasureEditDialog.h"
 #include "RobotCalculation.h"
 #include "RobotDataHelper.h"
@@ -76,7 +78,6 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
-#include <QSettings>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSlider>
@@ -337,9 +338,8 @@ namespace
 	class DashboardToolPanel final : public QWidget
 	{
 	public:
-		explicit DashboardToolPanel(const QString& configPath, QWidget* parent = nullptr)
+		explicit DashboardToolPanel(QWidget* parent = nullptr)
 			: QWidget(parent)
-			, m_configPath(configPath)
 		{
 			setObjectName("DashboardToolPanel");
 			setContextMenuPolicy(Qt::DefaultContextMenu);
@@ -540,18 +540,26 @@ namespace
 
 		void LoadOrder()
 		{
-			QSettings settings(m_configPath, QSettings::IniFormat);
-			const bool hasSavedOrder = settings.contains("Tools/Order");
-			const QStringList savedOrder = settings.value("Tools/Order").toStringList();
+			QString savedOrderText;
+			const bool hasSavedOrder = ConfigDatabase::ReadScopedSetting(
+				QStringLiteral("global"),
+				QString(),
+				QStringLiteral("DashboardTools"),
+				QStringLiteral("Order"),
+				&savedOrderText);
+			const QStringList savedOrder = savedOrderText.split('\n', Qt::SkipEmptyParts);
 			m_order = hasSavedOrder ? FilterKnownIds(savedOrder) : m_defaultOrder;
 		}
 
 		void SaveOrder() const
 		{
-			QDir().mkpath(QFileInfo(m_configPath).absolutePath());
-			QSettings settings(m_configPath, QSettings::IniFormat);
-			settings.setValue("Tools/Order", m_order);
-			settings.sync();
+			ConfigDatabase::WriteScopedSetting(
+				QStringLiteral("global"),
+				QString(),
+				QStringLiteral("DashboardTools"),
+				QStringLiteral("Order"),
+				m_order.join('\n'),
+				QStringLiteral("list"));
 		}
 
 		QStringList FilterKnownIds(const QStringList& ids) const
@@ -961,7 +969,6 @@ namespace
 			}
 		}
 
-		QString m_configPath;
 		QHash<QString, ToolEntry> m_tools;
 		QStringList m_defaultOrder;
 		QStringList m_candidateOrder;
@@ -1011,7 +1018,7 @@ namespace
 		{
 			if (error != nullptr)
 			{
-				*error = QString("打开机器人参数文件失败：%1").arg(path);
+				*error = QString("打开机器人参数数据失败：%1").arg(path);
 			}
 			return false;
 		}
@@ -1620,6 +1627,7 @@ namespace
 		RobotCalculation::SampleAxis sampleAxis)
 	{
 		RobotCalculation::LowerWeldFilterParams params;
+		const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
 		params.sampleAxis = sampleAxis;
 		params.fitMode = RobotCalculation::LowerWeldFitMode::PreservePath;
 		params.zThreshold = -230.0;
@@ -1634,6 +1642,8 @@ namespace
 		params.piecewiseMinSegmentPoints = 10;
 		params.minPointCount = 4;
 		params.smoothRadius = 3;
+		params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
+		params.enableCornerCompensation = false;
 		return params;
 	}
 
@@ -1682,6 +1692,26 @@ namespace
 		return info.dir().filePath(info.completeBaseName() + "_Classified_Geometry.txt");
 	}
 
+	QString BuildCornerCompClassifiedOutputPath(const QString& classifiedOutputPath)
+	{
+		const QFileInfo info(classifiedOutputPath);
+		QString baseName = info.completeBaseName();
+		if (baseName.contains("_Classified_Geometry"))
+		{
+			baseName.replace("_Classified_Geometry", "_CornerComp_Classified_Geometry");
+		}
+		else if (baseName.contains("_Classified"))
+		{
+			baseName.replace("_Classified", "_CornerComp_Classified");
+		}
+		else
+		{
+			baseName += "_CornerComp_Classified";
+		}
+		const QString suffix = info.suffix().isEmpty() ? QStringLiteral("txt") : info.suffix();
+		return info.dir().filePath(baseName + "." + suffix);
+	}
+
 	QString BuildNoiseOutputPath(const QString& outputPath)
 	{
 		const QFileInfo info(outputPath);
@@ -1707,20 +1737,15 @@ namespace
 		return info.dir().filePath(baseName + ".txt");
 	}
 
-	QString AccountManagementConfigPath()
-	{
-		return RobotDataHelper::BuildProjectPath("Data/Accounts.ini");
-	}
-
-	QString ConfigValue(const QString& filePath, const QString& key, const QString& defaultValue = QString())
+	QString AppConfigValue(const QString& group, const QString& key, const QString& defaultValue = QString())
 	{
 		QString value;
-		return ConfigDatabase::ReadSetting(filePath, key, &value) ? value : defaultValue;
+		return ConfigDatabase::ReadScopedSetting(QStringLiteral("global"), QString(), group, key, &value) ? value : defaultValue;
 	}
 
-	bool ConfigBoolValue(const QString& filePath, const QString& key, bool defaultValue = false)
+	bool AppConfigBoolValue(const QString& group, const QString& key, bool defaultValue = false)
 	{
-		const QString value = ConfigValue(filePath, key);
+		const QString value = AppConfigValue(group, key);
 		if (value.isEmpty())
 		{
 			return defaultValue;
@@ -1729,29 +1754,54 @@ namespace
 		return normalized == "1" || normalized == "true" || normalized == "yes";
 	}
 
-	void WriteConfigValue(const QString& filePath, const QString& key, const QString& value)
+	void WriteAppConfigValue(const QString& group, const QString& key, const QString& value)
 	{
-		ConfigDatabase::WriteSetting(filePath, key, value);
+		ConfigDatabase::WriteScopedSetting(QStringLiteral("global"), QString(), group, key, value);
 	}
 
-	void WriteConfigValue(const QString& filePath, const QString& key, bool value)
+	void WriteAppConfigValue(const QString& group, const QString& key, bool value)
 	{
-		ConfigDatabase::WriteSetting(filePath, key, value ? "1" : "0");
+		ConfigDatabase::WriteScopedSetting(QStringLiteral("global"), QString(), group, key, value ? "1" : "0", QStringLiteral("bool"));
 	}
 
-	QStringList ConfigListValue(const QString& filePath, const QString& key)
+	QStringList AppConfigListValue(const QString& group, const QString& key)
 	{
-		return ConfigValue(filePath, key).split('\n', Qt::SkipEmptyParts);
+		return AppConfigValue(group, key).split('\n', Qt::SkipEmptyParts);
 	}
 
-	void WriteConfigListValue(const QString& filePath, const QString& key, const QStringList& values)
+	void WriteAppConfigListValue(const QString& group, const QString& key, const QStringList& values)
 	{
-		ConfigDatabase::WriteSetting(filePath, key, values.join('\n'));
+		ConfigDatabase::WriteScopedSetting(QStringLiteral("global"), QString(), group, key, values.join('\n'), QStringLiteral("list"));
 	}
 
-	QString AccountUserKey(const QString& userName, const QString& key)
+	QString AccountProfileModule()
 	{
-		return QString("Users/%1/%2").arg(userName, key);
+		return QStringLiteral("Profile");
+	}
+
+	QString AccountUserId(const QString& userName)
+	{
+		return userName.trimmed();
+	}
+
+	QStringList AccountUserNames()
+	{
+		return ConfigDatabase::ListScopedSettingIds(QStringLiteral("account"), AccountProfileModule());
+	}
+
+	QString LoginStateGroup()
+	{
+		return QStringLiteral("LoginState");
+	}
+
+	QString SavedPasswordsGroup()
+	{
+		return QStringLiteral("LoginState/SavedPasswords");
+	}
+
+	QString CameraReceiveModeGroup()
+	{
+		return QStringLiteral("Camera/ReceiveMode");
 	}
 
 	QString HashAccountPassword(const QString& userName, const QString& password)
@@ -1963,14 +2013,18 @@ namespace
 				return;
 			}
 
-			const QString accountPath = AccountManagementConfigPath();
-			const QStringList users = ConfigDatabase::ListIniGroups(accountPath, "Users");
+			const QStringList users = AccountUserNames();
 			m_accountTable->setRowCount(0);
 			int row = 0;
 			for (const QString& user : users)
 			{
-				const QString role = ConfigValue(accountPath, AccountUserKey(user, "Role"), kRoleOperator);
-				const QString createdAt = ConfigValue(accountPath, AccountUserKey(user, "CreatedAt"));
+				QString role;
+				QString createdAt;
+				if (!ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(user), AccountProfileModule(), "Role", &role))
+				{
+					role = kRoleOperator;
+				}
+				ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(user), AccountProfileModule(), "CreatedAt", &createdAt);
 				m_accountTable->insertRow(row);
 				m_accountTable->setItem(row, 0, new QTableWidgetItem(user));
 				m_accountTable->setItem(row, 1, new QTableWidgetItem(DisplayRoleNameForAccount(role)));
@@ -1991,7 +2045,11 @@ namespace
 			{
 				return;
 			}
-			const QString role = ConfigValue(AccountManagementConfigPath(), AccountUserKey(user, "Role"), kRoleOperator);
+			QString role;
+			if (!ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(user), AccountProfileModule(), "Role", &role))
+			{
+				role = kRoleOperator;
+			}
 			const int roleIndex = m_editRoleCombo->findData(role);
 			if (roleIndex >= 0)
 			{
@@ -2020,16 +2078,15 @@ namespace
 				return false;
 			}
 
-			const QString accountPath = AccountManagementConfigPath();
-			if (ConfigDatabase::ListIniGroups(accountPath, "Users").contains(userName))
+			if (AccountUserNames().contains(userName))
 			{
 				QMessageBox::warning(this, "新增账号", "账号已存在。");
 				return false;
 			}
 			const bool writeOk =
-				ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "PasswordHash"), HashAccountPassword(userName, password)) &&
-				ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "Role"), role) &&
-				ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "CreatedAt"), QDateTime::currentDateTime().toString(Qt::ISODate));
+				ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "PasswordHash", HashAccountPassword(userName, password), QStringLiteral("string"), true) &&
+				ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "Role", role) &&
+				ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate), QStringLiteral("datetime"));
 			if (!writeOk)
 			{
 				QMessageBox::warning(this, "新增账号", "写入账号配置库失败。");
@@ -2051,13 +2108,12 @@ namespace
 				return false;
 			}
 
-			const QString accountPath = AccountManagementConfigPath();
-			if (!ConfigDatabase::ListIniGroups(accountPath, "Users").contains(userName))
+			if (!AccountUserNames().contains(userName))
 			{
 				QMessageBox::warning(this, "保存修改", "账号不存在。");
 				return false;
 			}
-			bool writeOk = ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "Role"), m_editRoleCombo->currentData().toString());
+			bool writeOk = ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "Role", m_editRoleCombo->currentData().toString());
 			const QString newPassword = m_editPassEdit->text();
 			if (!newPassword.isEmpty())
 			{
@@ -2066,9 +2122,9 @@ namespace
 					QMessageBox::warning(this, "保存修改", "新密码至少需要 8 个字符。");
 					return false;
 				}
-				writeOk = writeOk && ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "PasswordHash"), HashAccountPassword(userName, newPassword));
+				writeOk = writeOk && ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "PasswordHash", HashAccountPassword(userName, newPassword), QStringLiteral("string"), true);
 			}
-			writeOk = writeOk && ConfigDatabase::WriteSetting(accountPath, AccountUserKey(userName, "UpdatedAt"), QDateTime::currentDateTime().toString(Qt::ISODate));
+			writeOk = writeOk && ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "UpdatedAt", QDateTime::currentDateTime().toString(Qt::ISODate), QStringLiteral("datetime"));
 			if (!writeOk)
 			{
 				QMessageBox::warning(this, "保存修改", "保存账号配置库失败。");
@@ -2093,7 +2149,7 @@ namespace
 				return false;
 			}
 
-			if (!ConfigDatabase::RemoveIniGroup(AccountManagementConfigPath(), QString("Users/%1").arg(userName)))
+			if (!ConfigDatabase::RemoveScopedSettings(QStringLiteral("account"), AccountUserId(userName)))
 			{
 				QMessageBox::warning(this, "删除账号", "删除账号失败。");
 				return false;
@@ -2170,7 +2226,7 @@ namespace
 			rootLayout->addWidget(titleLabel);
 
 			QLabel* hintLabel = new QLabel(
-				"这里维护 ContralUnitInfo.ini 的控制单元列表，以及每个机器人 RobotPara.ini 里的 IP、端口和 FTP 参数。保存后建议重新加载控制单元，正在运行流程时不要重载。",
+				"这里维护配置库中的控制单元列表，以及每个机器人单元的 IP、端口和 FTP 参数。保存后建议重新加载控制单元，正在运行流程时不要重载。",
 				pageWidget);
 			hintLabel->setWordWrap(true);
 			hintLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
@@ -3597,8 +3653,7 @@ namespace
 					: ConfigDatabase::HasIniFile(ToIniBytes(sourcePath));
 				if (!sourceExists)
 				{
-					error = QString("工件模板缺少参数文件：%1").arg(QDir::toNativeSeparators(sourcePath));
-					return false;
+					continue;
 				}
 				const bool targetExists = isTextFile
 					? ConfigDatabase::HasTextFile(ToIniBytes(targetPath))
@@ -3634,7 +3689,7 @@ namespace
 			const QString path = RobotParaPath(unit.unitName);
 			if (!ini.SetFileName(false, ToIniBytes(path)))
 			{
-				error = "打开机器人参数文件失败：" + path;
+				error = "打开机器人参数数据失败：" + path;
 				return false;
 			}
 			ini.SetSectionName("BaseParam");
@@ -3663,7 +3718,7 @@ namespace
 			ok = ok && WriteIniInt(ini, "HandEyeReady", unit.handEyeReady ? 1 : 0);
 			if (!ok)
 			{
-				error = "写入机器人参数文件失败：" + path;
+				error = "写入机器人参数数据失败：" + path;
 			}
 			return ok;
 		}
@@ -7025,6 +7080,7 @@ namespace
 		const QStringList expectedFiles = {
 			"PreciseLaserPoint.txt",
 			"PreciseLaserPoint_Classified.txt",
+			"PreciseLaserPoint_CornerComp_Classified.txt",
 			"PreciseLaserPoint_WeldPose_2mm_SeamComp.txt"
 		};
 		const QFileInfoList resultDirs = rootDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
@@ -7234,6 +7290,7 @@ namespace
 			const QVector<FileSpec> specs = {
 				{ "PreciseLaserPoint.txt", "原始精确点云", QColor(220, 235, 240), false, false },
 				{ "PreciseLaserPoint_Classified.txt", "分类点云", QColor(0, 255, 80), true, true },
+				{ "PreciseLaserPoint_CornerComp_Classified.txt", "拐点补偿分类点云", QColor(255, 170, 0), true, true },
 				{ "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt", "焊接姿态点云", QColor(255, 230, 90), true, true }
 			};
 
@@ -7404,12 +7461,19 @@ namespace
 
 			QHBoxLayout* toolLayout = new QHBoxLayout();
 			m_viewCombo = new QComboBox(this);
-			m_viewCombo->addItem("配置键值", "ini");
-			m_viewCombo->addItem("文本文件", "text");
+			m_viewCombo->addItem("参数键值", "settings");
 			m_viewCombo->addItem("数据库信息", "meta");
 			m_viewCombo->setMinimumWidth(170);
+			m_categoryCombo = new QComboBox(this);
+			m_categoryCombo->addItem("全部分类", "");
+			m_categoryCombo->addItem("全局", "全局");
+			m_categoryCombo->addItem("控制单元", "控制单元");
+			m_categoryCombo->addItem("工件模板", "工件模板");
+			m_categoryCombo->addItem("账号", "账号");
+			m_categoryCombo->addItem("结果", "结果");
+			m_categoryCombo->setMinimumWidth(130);
 			m_filterEdit = new QLineEdit(this);
-			m_filterEdit->setPlaceholderText("按类别、机器人、文件、名称、键名或内容过滤");
+			m_filterEdit->setPlaceholderText("按控制单元、功能参数、分组、键名或内容过滤");
 			QPushButton* refreshBtn = new QPushButton("刷新", this);
 			QPushButton* copyBtn = new QPushButton("复制选中行", this);
 			QPushButton* closeBtn = new QPushButton("关闭", this);
@@ -7418,6 +7482,8 @@ namespace
 			closeBtn->setFixedWidth(110);
 			toolLayout->addWidget(new QLabel("查看：", this));
 			toolLayout->addWidget(m_viewCombo);
+			toolLayout->addWidget(new QLabel("分类：", this));
+			toolLayout->addWidget(m_categoryCombo);
 			toolLayout->addWidget(m_filterEdit, 1);
 			toolLayout->addWidget(refreshBtn);
 			toolLayout->addWidget(copyBtn);
@@ -7448,6 +7514,7 @@ namespace
 			rootLayout->addWidget(m_statusLabel);
 
 			connect(m_viewCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() { Reload(); });
+			connect(m_categoryCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]() { ApplyFilter(); });
 			connect(m_filterEdit, &QLineEdit::textChanged, this, [this]() { ApplyFilter(); });
 			connect(refreshBtn, &QPushButton::clicked, this, [this]() { Reload(); });
 			connect(copyBtn, &QPushButton::clicked, this, [this]() { CopySelectedRows(); });
@@ -7516,9 +7583,109 @@ namespace
 		{
 			text = text.trimmed();
 			text.replace('\\', '/');
+			text.replace('.', " / ");
 			text.replace('_', ' ');
 			text.replace(QRegularExpression("\\s+"), " ");
 			return text;
+		}
+
+		static QString ModuleFirstPart(const QString& module)
+		{
+			const QStringList parts = module.split('/', Qt::SkipEmptyParts);
+			return parts.isEmpty() ? QString() : parts.first();
+		}
+
+		static QString ModuleRemainder(const QString& module)
+		{
+			const QStringList parts = module.split('/', Qt::SkipEmptyParts);
+			return parts.size() <= 1 ? QString() : parts.mid(1).join(" / ");
+		}
+
+		static bool IsControlUnitRegistry(const QString& scopeType, const QString& module)
+		{
+			return scopeType.compare("global", Qt::CaseInsensitive) == 0
+				&& ModuleFirstPart(module).compare("ControlUnits", Qt::CaseInsensitive) == 0;
+		}
+
+		static QString DisplaySettingCategory(const QString& scopeType, const QString& module)
+		{
+			if (IsControlUnitRegistry(scopeType, module))
+			{
+				return "控制单元";
+			}
+			if (scopeType.compare("global", Qt::CaseInsensitive) == 0)
+			{
+				return "全局";
+			}
+			if (scopeType.compare("robot", Qt::CaseInsensitive) == 0)
+			{
+				return "控制单元";
+			}
+			if (scopeType.compare("workpiece_template", Qt::CaseInsensitive) == 0)
+			{
+				return "工件模板";
+			}
+			if (scopeType.compare("account", Qt::CaseInsensitive) == 0)
+			{
+				return "账号";
+			}
+			if (scopeType.compare("result", Qt::CaseInsensitive) == 0)
+			{
+				return "结果";
+			}
+			return CleanDisplayToken(scopeType);
+		}
+
+		static QString DisplaySettingObject(const QString& scopeType, const QString& scopeId, const QString& module)
+		{
+			if (IsControlUnitRegistry(scopeType, module))
+			{
+				const QString remainder = ModuleRemainder(module);
+				return remainder.isEmpty() ? "控制单元列表" : CleanDisplayToken(remainder);
+			}
+			if (scopeType.compare("global", Qt::CaseInsensitive) == 0)
+			{
+				return "全局";
+			}
+			return scopeId.trimmed().isEmpty() ? "-" : CleanDisplayToken(scopeId);
+		}
+
+		static QString DisplayFunctionalModule(const QString& scopeType, const QString& module)
+		{
+			if (IsControlUnitRegistry(scopeType, module))
+			{
+				return "控制单元列表";
+			}
+
+			const QString first = ModuleFirstPart(module);
+			if (first.compare("RobotPara", Qt::CaseInsensitive) == 0) return "机器人参数";
+			if (first.compare("CameraParam", Qt::CaseInsensitive) == 0) return "相机参数";
+			if (first.compare("HandEyeMatrix", Qt::CaseInsensitive) == 0) return "手眼矩阵";
+			if (first.compare("HandEyeCalibration", Qt::CaseInsensitive) == 0) return "手眼标定";
+			if (first.compare("LineScanParam", Qt::CaseInsensitive) == 0) return "线扫参数";
+			if (first.compare("LineCoarseScanParam", Qt::CaseInsensitive) == 0) return "线扫粗定位参数";
+			if (first.compare("MeasureWeldParam", Qt::CaseInsensitive) == 0) return "测量焊接参数";
+			if (first.compare("WeldPoseCompParam", Qt::CaseInsensitive) == 0) return "姿态补偿参数";
+			if (first.compare("WeldSeamCompParam", Qt::CaseInsensitive) == 0) return "焊道补偿参数";
+			if (first.compare("WeldProcess", Qt::CaseInsensitive) == 0) return "焊接工艺参数";
+			if (first.compare("DashboardTools", Qt::CaseInsensitive) == 0) return "管理页工具";
+			if (first.compare("PointCloudProcessing", Qt::CaseInsensitive) == 0) return "精测点云处理";
+			if (first.compare("MeasureThenWeld", Qt::CaseInsensitive) == 0) return "先测后焊";
+			if (first.compare("TouchKeyboard", Qt::CaseInsensitive) == 0) return "触摸键盘";
+			if (first.compare("RobotJog", Qt::CaseInsensitive) == 0) return "机器人点动";
+			if (first.compare("Auth", Qt::CaseInsensitive) == 0) return "账号权限";
+			if (first.compare("Camera", Qt::CaseInsensitive) == 0) return "相机状态";
+			return first.isEmpty() ? "未分类参数" : CleanDisplayToken(first);
+		}
+
+		static QString DisplayParameterGroup(const QString& scopeType, const QString& module)
+		{
+			if (IsControlUnitRegistry(scopeType, module))
+			{
+				return "基础";
+			}
+			const QString remainder = ModuleRemainder(module);
+			return remainder.isEmpty() ? "基础" : CleanDisplayToken(remainder);
 		}
 
 		static QString DisplayCategory(QString rootName, bool hasRobot)
@@ -7682,37 +7849,42 @@ namespace
 				return;
 			}
 
-			const QString mode = m_viewCombo != nullptr ? m_viewCombo->currentData().toString() : "ini";
-			if (mode == "text")
+			const QString mode = m_viewCombo != nullptr ? m_viewCombo->currentData().toString() : "settings";
+			if (mode == "meta")
 			{
-				LoadTextFiles();
-			}
-			else if (mode == "meta")
-			{
+				if (m_categoryCombo != nullptr)
+				{
+					m_categoryCombo->setEnabled(false);
+				}
 				LoadMeta();
 			}
 			else
 			{
-				LoadIniValues();
+				if (m_categoryCombo != nullptr)
+				{
+					m_categoryCombo->setEnabled(true);
+				}
+				LoadSettings();
 			}
 			ApplyFilter();
 			UpdateDetailText();
 		}
 
-		void LoadIniValues()
+		void LoadSettings()
 		{
-			SetHeaders({ "类别", "机器人", "文件", "分组", "名称", "键名", "值", "加密", "更新时间" });
+			SetHeaders({ "分类", "控制单元/对象", "功能参数", "参数分组", "参数名", "值", "类型", "敏感", "加密", "更新时间" });
 			QSqlDatabase db = QSqlDatabase::database(m_connectionName);
 			QSqlQuery query(db);
 			query.prepare(
-				"SELECT category, robot_name, file_name, group_name, item_name, key_name, "
-				"source_path, source_section, source_key, encrypted, updated_at "
-				"FROM ini_values "
-				"ORDER BY category COLLATE NOCASE, robot_name COLLATE NOCASE, file_name COLLATE NOCASE, "
-				"group_name COLLATE NOCASE, item_name COLLATE NOCASE, key_name COLLATE NOCASE");
+				"SELECT scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at "
+				"FROM settings "
+				"ORDER BY CASE scope_type "
+				"WHEN 'global' THEN 0 WHEN 'robot' THEN 1 WHEN 'workpiece_template' THEN 2 "
+				"WHEN 'account' THEN 3 WHEN 'result' THEN 4 ELSE 9 END, "
+				"scope_id COLLATE NOCASE, module COLLATE NOCASE, key_name COLLATE NOCASE");
 			if (!query.exec())
 			{
-				const QString error = "读取配置键值失败：" + query.lastError().text();
+				const QString error = "读取参数键值失败：" + query.lastError().text();
 				AddRow({ error, "", "", "", "", "", "", "", "" }, error);
 				m_statusLabel->setText(error);
 				return;
@@ -7721,71 +7893,36 @@ namespace
 			int rowCount = 0;
 			while (query.next())
 			{
-				const QString category = query.value(0).toString();
-				const QString robotName = query.value(1).toString();
-				const QString fileName = query.value(2).toString();
-				const QString groupName = query.value(3).toString();
-				const QString itemName = query.value(4).toString();
-				const QString keyName = query.value(5).toString();
-				const QString sourcePath = query.value(6).toString();
-				const QString sourceSection = query.value(7).toString();
-				const QString sourceKey = query.value(8).toString();
-				const bool encrypted = query.value(9).toInt() != 0;
-				const QString updatedAt = query.value(10).toString();
-				std::string rawValue;
-				QString value = "<读取失败>";
-				if (ConfigDatabase::ReadIniValue(ToUtf8Std(sourcePath), ToUtf8Std(sourceSection), ToUtf8Std(sourceKey), &rawValue))
-				{
-					value = FromUtf8Std(rawValue);
-				}
+				const QString scopeType = query.value(0).toString();
+				const QString scopeId = query.value(1).toString();
+				const QString module = query.value(2).toString();
+				const QString keyName = query.value(3).toString();
+				const QString category = DisplaySettingCategory(scopeType, module);
+				const QString objectName = DisplaySettingObject(scopeType, scopeId, module);
+				const QString functionName = DisplayFunctionalModule(scopeType, module);
+				const QString groupName = DisplayParameterGroup(scopeType, module);
+				const QString displayKey = CleanDisplayToken(keyName);
+				const bool sensitive = query.value(6).toInt() != 0;
+				const bool encrypted = query.value(7).toInt() != 0;
+				const QString updatedAt = query.value(8).toString();
+				const QString value = encrypted ? QStringLiteral("<已加密>") : query.value(4).toString();
+				const QString valueType = query.value(5).toString();
 				const QString detail = QString(
-					"类别：%1\n机器人：%2\n文件：%3\n分组：%4\n名称：%5\n键名：%6\n加密：%7\n更新时间：%8\n\n值：\n%9")
-					.arg(category, robotName, fileName, groupName, itemName, keyName,
-						QString(encrypted ? "是" : "否"), updatedAt, value);
-				AddRow({ category, robotName, fileName, groupName, itemName, keyName,
-					PreviewText(value), encrypted ? "是" : "否", updatedAt }, detail);
+					"分类：%1\n控制单元/对象：%2\n功能参数：%3\n参数分组：%4\n参数名：%5\n\n"
+					"原始作用域：%6\n原始对象：%7\n原始模块：%8\n原始键名：%9\n类型：%10\n敏感：%11\n加密：%12\n更新时间：%13\n\n值：\n%14")
+					.arg(category, objectName, functionName, groupName, displayKey,
+						scopeType, scopeId, module, keyName, valueType,
+						QString(sensitive ? "是" : "否"), QString(encrypted ? "是" : "否"), updatedAt, value);
+				AddRow({ category, objectName, functionName, groupName, displayKey, PreviewText(value), valueType,
+					sensitive ? "是" : "否", encrypted ? "是" : "否", updatedAt }, detail);
 				++rowCount;
 			}
-			FinishTable(QString("配置键值：%1 条。").arg(rowCount));
+			FinishTable(QString("参数键值：%1 条。").arg(rowCount));
 		}
 
 		void LoadTextFiles()
 		{
-			SetHeaders({ "类别", "机器人", "文件", "内容预览", "加密", "更新时间" });
-			QSqlDatabase db = QSqlDatabase::database(m_connectionName);
-			QSqlQuery query(db);
-			query.prepare(
-				"SELECT category, robot_name, file_name, source_path, encrypted, updated_at "
-				"FROM text_files ORDER BY category COLLATE NOCASE, robot_name COLLATE NOCASE, file_name COLLATE NOCASE");
-			if (!query.exec())
-			{
-				const QString error = "读取文本文件失败：" + query.lastError().text();
-				AddRow({ error, "", "", "", "", "" }, error);
-				m_statusLabel->setText(error);
-				return;
-			}
-
-			int rowCount = 0;
-			while (query.next())
-			{
-				const QString category = query.value(0).toString();
-				const QString robotName = query.value(1).toString();
-				const QString fileName = query.value(2).toString();
-				const QString sourcePath = query.value(3).toString();
-				const bool encrypted = query.value(4).toInt() != 0;
-				const QString updatedAt = query.value(5).toString();
-				std::string rawContent;
-				QString content = "<读取失败>";
-				if (ConfigDatabase::ReadTextFile(ToUtf8Std(sourcePath), &rawContent))
-				{
-					content = FromUtf8Std(rawContent);
-				}
-				const QString detail = QString("类别：%1\n机器人：%2\n文件：%3\n加密：%4\n更新时间：%5\n\n内容：\n%6")
-					.arg(category, robotName, fileName, QString(encrypted ? "是" : "否"), updatedAt, content);
-				AddRow({ category, robotName, fileName, PreviewText(content), encrypted ? "是" : "否", updatedAt }, detail);
-				++rowCount;
-			}
-			FinishTable(QString("文本文件：%1 个。").arg(rowCount));
+			LoadSettings();
 		}
 
 		void LoadMeta()
@@ -7831,9 +7968,24 @@ namespace
 				return;
 			}
 			const QString filter = m_filterEdit->text().trimmed();
+			const bool hasCategoryColumn = m_table->columnCount() > 0
+				&& m_table->horizontalHeaderItem(0) != nullptr
+				&& m_table->horizontalHeaderItem(0)->text() == "分类";
+			const QString categoryFilter = (hasCategoryColumn && m_categoryCombo != nullptr)
+				? m_categoryCombo->currentData().toString()
+				: QString();
 			int visibleCount = 0;
 			for (int row = 0; row < m_table->rowCount(); ++row)
 			{
+				if (!categoryFilter.isEmpty() && m_table->columnCount() > 0)
+				{
+					QTableWidgetItem* categoryItem = m_table->item(row, 0);
+					if (categoryItem == nullptr || categoryItem->text() != categoryFilter)
+					{
+						m_table->setRowHidden(row, true);
+						continue;
+					}
+				}
 				bool match = filter.isEmpty();
 				for (int column = 0; !match && column < m_table->columnCount(); ++column)
 				{
@@ -7854,7 +8006,7 @@ namespace
 					++visibleCount;
 				}
 			}
-			if (!filter.isEmpty())
+			if (!filter.isEmpty() || !categoryFilter.isEmpty())
 			{
 				m_statusLabel->setText(QString("过滤后显示：%1 / %2。").arg(visibleCount).arg(m_table->rowCount()));
 			}
@@ -7923,6 +8075,7 @@ namespace
 
 		QString m_connectionName;
 		QComboBox* m_viewCombo = nullptr;
+		QComboBox* m_categoryCombo = nullptr;
 		QLineEdit* m_filterEdit = nullptr;
 		QTableWidget* m_table = nullptr;
 		QPlainTextEdit* m_detailText = nullptr;
@@ -7981,6 +8134,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pPermissionHintLabel(nullptr)
 	, m_pAccountManagementAction(nullptr)
 	, m_pManagementCameraReceiveModeBtn(nullptr)
+	, m_pScanTimestampSourceCombo(nullptr)
+	, m_pStepSdkInterfaceModeCombo(nullptr)
 	, m_pTouchKeyboardModeCombo(nullptr)
 	, m_pAuthTitleLabel(nullptr)
 	, m_pAuthHintLabel(nullptr)
@@ -8450,9 +8605,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	toolGroup->setMaximumWidth(390);
 	QVBoxLayout* toolLayout = new QVBoxLayout(toolGroup);
 	toolLayout->setSpacing(10);
-	DashboardToolPanel* dashboardToolPanel = new DashboardToolPanel(
-		RobotDataHelper::BuildProjectPath("Data/DashboardTools.ini"),
-		toolGroup);
+	DashboardToolPanel* dashboardToolPanel = new DashboardToolPanel(toolGroup);
 	m_pDashboardToolPanel = dashboardToolPanel;
 	toolLayout->addWidget(dashboardToolPanel, 1);
 	m_pDashboardConnectBtn = makeToolButton("connect", "连接服务", dashboardToolPanel);
@@ -8648,6 +8801,28 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pManagementCameraReceiveModeBtn->setMinimumHeight(34);
 	m_pManagementCameraReceiveModeBtn->setMinimumWidth(150);
 	m_pManagementCameraReceiveModeBtn->setStyleSheet("QPushButton { padding: 6px 14px; font-size: 14px; border-radius: 10px; }");
+	QLabel* scanTimestampLabel = new QLabel("扫描时间轴：", m_pManagementHomePage);
+	scanTimestampLabel->setStyleSheet("QLabel { color: #9ED8DB; padding-left: 8px; }");
+	m_pScanTimestampSourceCombo = new QComboBox(m_pManagementHomePage);
+	m_pScanTimestampSourceCombo->addItem(
+		MeasureThenWeldRuntimeConfig::DisplayName(MeasureThenWeldRuntimeConfig::ScanTimestampSource::Robot),
+		MeasureThenWeldRuntimeConfig::ToStorageString(MeasureThenWeldRuntimeConfig::ScanTimestampSource::Robot));
+	m_pScanTimestampSourceCombo->addItem(
+		MeasureThenWeldRuntimeConfig::DisplayName(MeasureThenWeldRuntimeConfig::ScanTimestampSource::Pc),
+		MeasureThenWeldRuntimeConfig::ToStorageString(MeasureThenWeldRuntimeConfig::ScanTimestampSource::Pc));
+	m_pScanTimestampSourceCombo->setFixedSize(150, 34);
+	m_pScanTimestampSourceCombo->setToolTip("先测后焊扫描匹配用的机器人位姿时间轴：机器人时间戳使用robot_ms；PC接收时间使用pc_recv_ms。");
+	QLabel* stepSdkInterfaceLabel = new QLabel("STEP接口：", m_pManagementHomePage);
+	stepSdkInterfaceLabel->setStyleSheet("QLabel { color: #9ED8DB; padding-left: 8px; }");
+	m_pStepSdkInterfaceModeCombo = new QComboBox(m_pManagementHomePage);
+	m_pStepSdkInterfaceModeCombo->addItem(
+		MeasureThenWeldRuntimeConfig::DisplayName(MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Timestamp),
+		MeasureThenWeldRuntimeConfig::ToStorageString(MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Timestamp));
+	m_pStepSdkInterfaceModeCombo->addItem(
+		MeasureThenWeldRuntimeConfig::DisplayName(MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Legacy),
+		MeasureThenWeldRuntimeConfig::ToStorageString(MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Legacy));
+	m_pStepSdkInterfaceModeCombo->setFixedSize(150, 34);
+	m_pStepSdkInterfaceModeCombo->setToolTip("新版使用STEP SDK getTimestamp()读取robot_ms；旧版绕开时间戳接口，使用getCartPosWorld()/getAxisPos()/getProgramState()并以PC接收时间兜底。");
 	QLabel* touchKeyboardLabel = new QLabel("虚拟键盘：", m_pManagementHomePage);
 	touchKeyboardLabel->setStyleSheet("QLabel { color: #9ED8DB; padding-left: 8px; }");
 	m_pTouchKeyboardModeCombo = new QComboBox(m_pManagementHomePage);
@@ -8661,6 +8836,10 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	managementTitleLayout->addWidget(managementTitleLabel);
 	managementTitleLayout->addStretch(1);
 	managementTitleLayout->addWidget(m_pManagementCameraReceiveModeBtn);
+	managementTitleLayout->addWidget(scanTimestampLabel);
+	managementTitleLayout->addWidget(m_pScanTimestampSourceCombo);
+	managementTitleLayout->addWidget(stepSdkInterfaceLabel);
+	managementTitleLayout->addWidget(m_pStepSdkInterfaceModeCombo);
 	managementTitleLayout->addWidget(touchKeyboardLabel);
 	managementTitleLayout->addWidget(m_pTouchKeyboardModeCombo);
 	managementTitleLayout->addWidget(m_pManagementUserLabel);
@@ -8688,6 +8867,26 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pManagementCameraReceiveModeBtn, &QPushButton::toggled, this, [this](bool checked)
 		{
 			SetSharedScanCameraReceiverMode(checked);
+		});
+	connect(m_pScanTimestampSourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
+		{
+			if (m_pScanTimestampSourceCombo == nullptr || index < 0)
+			{
+				return;
+			}
+
+			MeasureThenWeldRuntimeConfig::SaveScanTimestampSource(
+				MeasureThenWeldRuntimeConfig::FromStorageString(m_pScanTimestampSourceCombo->itemData(index).toString()));
+		});
+	connect(m_pStepSdkInterfaceModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
+		{
+			if (m_pStepSdkInterfaceModeCombo == nullptr || index < 0)
+			{
+				return;
+			}
+
+			MeasureThenWeldRuntimeConfig::SaveStepSdkInterfaceMode(
+				MeasureThenWeldRuntimeConfig::StepSdkInterfaceModeFromStorageString(m_pStepSdkInterfaceModeCombo->itemData(index).toString()));
 		});
 	connect(m_pTouchKeyboardModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
 		{
@@ -9010,6 +9209,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	EnsureDefaultAdminAccount();
 	RefreshAccountUi();
 	LoadCameraReceiveMode();
+	RefreshScanTimestampSourceUi();
+	RefreshStepSdkInterfaceModeUi();
 	RefreshTouchKeyboardModeUi();
 	LoadLoginState();
 	ShowAuthPage();
@@ -9058,12 +9259,15 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 				done = snapshot.done;
 			}
 			const QString stateText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知/异常(%1)").arg(done));
+			const QString sourceText = QString::fromStdString(pRobotDriver->GetStateMonitorSourceText());
 			QString monitorText = QString(
 				"状态: %1\n"
-				"robot_ms=%2  pc_recv_ms=%3  cache=%4/200\n"
-				"位置: X=%5  Y=%6  Z=%7  W=%8  P=%9  R=%10\n"
-				"脉冲: S=%11  L=%12  U=%13  R=%14  B=%15  T=%16  EX1=%17  EX2=%18  EX3=%19")
+				"接口: %2\n"
+				"robot_ms=%3  pc_recv_ms=%4  cache=%5/200\n"
+				"位置: X=%6  Y=%7  Z=%8  W=%9  P=%10  R=%11\n"
+				"脉冲: S=%12  L=%13  U=%14  R=%15  B=%16  T=%17  EX1=%18  EX2=%19  EX3=%20")
 				.arg(stateText)
+				.arg(sourceText)
 				.arg(robotMs)
 				.arg(pcRecvMs)
 				.arg(hasSnapshot ? pRobotDriver->StateMonitorCachedCount() : 0)
@@ -9874,11 +10078,6 @@ void QtWidgetsApplication4::RefreshRobotSelectorUi()
     m_pRobotSelectorCombo->setEnabled(readyCount > 1 || m_pRobotSelectorCombo->count() > readyCount);
 }
 
-QString QtWidgetsApplication4::AccountConfigPath() const
-{
-	return RobotDataHelper::BuildProjectPath("Data/Accounts.ini");
-}
-
 QString QtWidgetsApplication4::RoleDisplayName(const QString& role) const
 {
 	if (role == kRoleAdmin)
@@ -9927,15 +10126,9 @@ bool QtWidgetsApplication4::RequirePermission(const QString& minimumRole, const 
 	return false;
 }
 
-QString QtWidgetsApplication4::LoginStateConfigPath() const
-{
-	return RobotDataHelper::BuildProjectPath("Data/LoginState.ini");
-}
-
 void QtWidgetsApplication4::EnsureDefaultAdminAccount()
 {
-	const QString accountPath = AccountConfigPath();
-	if (!ConfigDatabase::ListIniGroups(accountPath, "Users").isEmpty())
+	if (!AccountUserNames().isEmpty())
 	{
 		return;
 	}
@@ -10044,20 +10237,15 @@ void QtWidgetsApplication4::ApplyDebugLogVisibility(QWidget* page)
 	}
 }
 
-QString QtWidgetsApplication4::CameraReceiveModeConfigPath() const
-{
-	return RobotDataHelper::BuildProjectPath("Data/CameraReceiveMode.ini");
-}
-
 void QtWidgetsApplication4::LoadCameraReceiveMode()
 {
-	m_bUseSharedScanCameraReceiver = ConfigBoolValue(CameraReceiveModeConfigPath(), "Camera/UseSharedReceiver", false);
+	m_bUseSharedScanCameraReceiver = AppConfigBoolValue(CameraReceiveModeGroup(), "UseSharedReceiver", false);
 	RefreshCameraReceiveModeButtonUi();
 }
 
 void QtWidgetsApplication4::SaveCameraReceiveMode() const
 {
-	WriteConfigValue(CameraReceiveModeConfigPath(), "Camera/UseSharedReceiver", m_bUseSharedScanCameraReceiver);
+	WriteAppConfigValue(CameraReceiveModeGroup(), "UseSharedReceiver", m_bUseSharedScanCameraReceiver);
 }
 
 void QtWidgetsApplication4::RefreshCameraReceiveModeButtonUi()
@@ -10074,6 +10262,34 @@ void QtWidgetsApplication4::RefreshCameraReceiveModeButtonUi()
 		? "相机接收：UDP共享"
 		: "相机接收：TCP独立");
 	m_pManagementCameraReceiveModeBtn->setToolTip("关闭为TCP独立连接；打开为旧UDP共享端口接收，并按相机IP分发到对应机器人缓存。");
+}
+
+void QtWidgetsApplication4::RefreshScanTimestampSourceUi()
+{
+	if (m_pScanTimestampSourceCombo == nullptr)
+	{
+		return;
+	}
+
+	const QString storageValue = MeasureThenWeldRuntimeConfig::ToStorageString(
+		MeasureThenWeldRuntimeConfig::LoadScanTimestampSource());
+	const int index = m_pScanTimestampSourceCombo->findData(storageValue);
+	QSignalBlocker blocker(m_pScanTimestampSourceCombo);
+	m_pScanTimestampSourceCombo->setCurrentIndex(index >= 0 ? index : 0);
+}
+
+void QtWidgetsApplication4::RefreshStepSdkInterfaceModeUi()
+{
+	if (m_pStepSdkInterfaceModeCombo == nullptr)
+	{
+		return;
+	}
+
+	const QString storageValue = MeasureThenWeldRuntimeConfig::ToStorageString(
+		MeasureThenWeldRuntimeConfig::LoadStepSdkInterfaceMode());
+	const int index = m_pStepSdkInterfaceModeCombo->findData(storageValue);
+	QSignalBlocker blocker(m_pStepSdkInterfaceModeCombo);
+	m_pStepSdkInterfaceModeCombo->setCurrentIndex(index >= 0 ? index : 0);
 }
 
 void QtWidgetsApplication4::RefreshTouchKeyboardModeUi()
@@ -10186,11 +10402,10 @@ void QtWidgetsApplication4::LoadLoginState()
 		return;
 	}
 
-	const QString loginPath = LoginStateConfigPath();
-	const QString userName = ConfigValue(loginPath, "UserName");
-	const bool rememberPassword = ConfigBoolValue(loginPath, "RememberPassword", false);
-	const bool autoLogin = ConfigBoolValue(loginPath, "AutoLogin", false);
-	const QByteArray passwordBytes = QByteArray::fromBase64(ConfigValue(loginPath, "PasswordBase64").toUtf8());
+	const QString userName = AppConfigValue(LoginStateGroup(), "UserName");
+	const bool rememberPassword = AppConfigBoolValue(LoginStateGroup(), "RememberPassword", false);
+	const bool autoLogin = AppConfigBoolValue(LoginStateGroup(), "AutoLogin", false);
+	const QByteArray passwordBytes = QByteArray::fromBase64(AppConfigValue(LoginStateGroup(), "PasswordBase64").toUtf8());
 	const QString password = QString::fromUtf8(passwordBytes);
 
 	RefreshLoginNameHistory();
@@ -10207,7 +10422,7 @@ void QtWidgetsApplication4::LoadLoginState()
 	}
 	if (rememberPassword)
 	{
-		const QString savedPasswordBase64 = ConfigValue(loginPath, QString("SavedPasswords/%1").arg(userName));
+		const QString savedPasswordBase64 = AppConfigValue(SavedPasswordsGroup(), userName);
 		const QString savedPassword = savedPasswordBase64.isEmpty()
 			? password
 			: QString::fromUtf8(QByteArray::fromBase64(savedPasswordBase64.toUtf8()));
@@ -10225,9 +10440,8 @@ void QtWidgetsApplication4::SaveLoginState() const
 		return;
 	}
 
-	const QString loginPath = LoginStateConfigPath();
 	const QString userName = m_pLoginNameEdit->text().trimmed();
-	QStringList history = ConfigListValue(loginPath, "AccountHistory");
+	QStringList history = AppConfigListValue(LoginStateGroup(), "AccountHistory");
 	history.removeAll(userName);
 	if (!userName.isEmpty())
 	{
@@ -10237,21 +10451,21 @@ void QtWidgetsApplication4::SaveLoginState() const
 	{
 		history.removeLast();
 	}
-	WriteConfigListValue(loginPath, "AccountHistory", history);
-	WriteConfigValue(loginPath, "UserName", userName);
-	WriteConfigValue(loginPath, "RememberPassword", m_pRememberPasswordCheck->isChecked());
-	WriteConfigValue(loginPath, "AutoLogin", m_pRememberPasswordCheck->isChecked() && m_pAutoLoginCheck->isChecked());
+	WriteAppConfigListValue(LoginStateGroup(), "AccountHistory", history);
+	WriteAppConfigValue(LoginStateGroup(), "UserName", userName);
+	WriteAppConfigValue(LoginStateGroup(), "RememberPassword", m_pRememberPasswordCheck->isChecked());
+	WriteAppConfigValue(LoginStateGroup(), "AutoLogin", m_pRememberPasswordCheck->isChecked() && m_pAutoLoginCheck->isChecked());
 	if (m_pRememberPasswordCheck->isChecked())
 	{
 		const QString passwordBase64 = QString::fromLatin1(m_pLoginPasswordEdit->text().toUtf8().toBase64());
-		WriteConfigValue(loginPath, "PasswordBase64", passwordBase64);
-		WriteConfigValue(loginPath, QString("SavedPasswords/%1").arg(userName), passwordBase64);
+		WriteAppConfigValue(LoginStateGroup(), "PasswordBase64", passwordBase64);
+		WriteAppConfigValue(SavedPasswordsGroup(), userName, passwordBase64);
 	}
 	else
 	{
-		ConfigDatabase::RemoveSetting(loginPath, "PasswordBase64");
-		ConfigDatabase::RemoveSetting(loginPath, "AutoLogin");
-		ConfigDatabase::RemoveSetting(loginPath, QString("SavedPasswords/%1").arg(userName));
+		ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), LoginStateGroup(), "PasswordBase64");
+		ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), LoginStateGroup(), "AutoLogin");
+		ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), SavedPasswordsGroup(), userName);
 	}
 }
 
@@ -10263,9 +10477,8 @@ void QtWidgetsApplication4::RefreshLoginNameHistory()
 	}
 
 	const QString currentName = m_pLoginNameCombo->currentText();
-	const QString loginPath = LoginStateConfigPath();
-	QStringList history = ConfigListValue(loginPath, "AccountHistory");
-	const QString lastUser = ConfigValue(loginPath, "UserName").trimmed();
+	QStringList history = AppConfigListValue(LoginStateGroup(), "AccountHistory");
+	const QString lastUser = AppConfigValue(LoginStateGroup(), "UserName").trimmed();
 	if (!lastUser.isEmpty() && !history.contains(lastUser))
 	{
 		history.prepend(lastUser);
@@ -10291,8 +10504,7 @@ void QtWidgetsApplication4::FillSavedPasswordForUser(const QString& userName)
 		return;
 	}
 
-	const QString loginPath = LoginStateConfigPath();
-	const QString savedBase64 = ConfigValue(loginPath, QString("SavedPasswords/%1").arg(normalizedUser));
+	const QString savedBase64 = AppConfigValue(SavedPasswordsGroup(), normalizedUser);
 	if (!savedBase64.isEmpty())
 	{
 		m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(savedBase64.toUtf8())));
@@ -10301,10 +10513,10 @@ void QtWidgetsApplication4::FillSavedPasswordForUser(const QString& userName)
 		return;
 	}
 
-	if (ConfigValue(loginPath, "UserName").trimmed() == normalizedUser
-		&& ConfigBoolValue(loginPath, "RememberPassword", false))
+	if (AppConfigValue(LoginStateGroup(), "UserName").trimmed() == normalizedUser
+		&& AppConfigBoolValue(LoginStateGroup(), "RememberPassword", false))
 	{
-		const QString legacyBase64 = ConfigValue(loginPath, "PasswordBase64");
+		const QString legacyBase64 = AppConfigValue(LoginStateGroup(), "PasswordBase64");
 		if (!legacyBase64.isEmpty())
 		{
 			m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(legacyBase64.toUtf8())));
@@ -10372,15 +10584,18 @@ bool QtWidgetsApplication4::VerifyAccount(const QString& userName, const QString
 		return false;
 	}
 
-	const QString accountPath = AccountConfigPath();
-	if (!ConfigDatabase::ListIniGroups(accountPath, "Users").contains(normalizedUser))
+	if (!AccountUserNames().contains(normalizedUser))
 	{
 		error = "账号不存在。";
 		return false;
 	}
 
-	const QString expectedHash = ConfigValue(accountPath, AccountUserKey(normalizedUser, "PasswordHash"));
-	role = ConfigValue(accountPath, AccountUserKey(normalizedUser, "Role"), kRoleOperator);
+	QString expectedHash;
+	ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "PasswordHash", &expectedHash);
+	if (!ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "Role", &role))
+	{
+		role = kRoleOperator;
+	}
 
 	const QString actualHash = QString::fromLatin1(
 		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
@@ -10419,8 +10634,7 @@ bool QtWidgetsApplication4::SaveAccount(const QString& userName, const QString& 
 		return false;
 	}
 
-	const QString accountPath = AccountConfigPath();
-	if (ConfigDatabase::ListIniGroups(accountPath, "Users").contains(normalizedUser))
+	if (AccountUserNames().contains(normalizedUser))
 	{
 		error = "账号已存在。";
 		return false;
@@ -10429,12 +10643,12 @@ bool QtWidgetsApplication4::SaveAccount(const QString& userName, const QString& 
 	const QString hash = QString::fromLatin1(
 		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
 	const bool writeOk =
-		ConfigDatabase::WriteSetting(accountPath, AccountUserKey(normalizedUser, "PasswordHash"), hash) &&
-		ConfigDatabase::WriteSetting(accountPath, AccountUserKey(normalizedUser, "Role"), role) &&
-		ConfigDatabase::WriteSetting(accountPath, AccountUserKey(normalizedUser, "CreatedAt"), QDateTime::currentDateTime().toString(Qt::ISODate));
+		ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "PasswordHash", hash, QStringLiteral("string"), true) &&
+		ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "Role", role) &&
+		ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate), QStringLiteral("datetime"));
 	if (!writeOk)
 	{
-		error = "写入账号配置库失败：" + accountPath;
+		error = "写入账号配置库失败。";
 		return false;
 	}
 	return true;
@@ -11152,18 +11366,18 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --fanuc-raw <CMD>                 发送一条原始 FANUC 服务命令\n";
 		out << "  --fanuc-call <PROGRAM>            调用机器人程序\n";
 		out << "  --measure-then-weld-scan-only-repeat <N> 自动执行先测后焊扫描流程N次，仅到收枪安全位置，不执行焊接，目标机器人同--robot\n";
-		out << "  --measure-then-weld-scan-speed <mm/min> 覆盖本次CLI先测后焊扫描速度，不修改ini\n";
-		out << "  --measure-then-weld-camera-offset-ms <ms> 覆盖本次CLI相机时间补偿，不修改ini\n";
+		out << "  --measure-then-weld-scan-speed <mm/min> 覆盖本次CLI先测后焊扫描速度，不修改配置库\n";
+		out << "  --measure-then-weld-camera-offset-ms <ms> 覆盖本次CLI相机时间补偿，不修改配置库\n";
 		out << "  --laser-classify <FILE>           对激光点云做去噪/拟合/起终点拐点分类\n";
 		out << "  --laser-classify-dir <DIR>        批量处理目录下所有 PreciseLaserPoint.txt\n";
 		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
 		out << "  --rebuild-measure-weld-files <DIR> 从 LaserPoint 目录重建 PreservePath、焊接姿态和补偿文件，参数机器人同--robot\n";
-		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用 WeldSeamCompParam.ini 补偿\n";
+		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用配置库中的焊道补偿\n";
 		out << "  --apply-weld-seam-comp-output <FILE> 指定补偿结果输出文件，默认另存 _SeamComp\n";
 		out << "  --generate-step-weld-program <FILE> 根据焊接姿态文件生成 STEP Weld_时间.srp/.srd，默认按实际焊接生成ARCON/ARCOFF\n";
 		out << "  --generate-step-weld-program-output-dir <DIR> 指定 STEP 焊接程序输出目录，默认 Job\\STEP\n";
 		out << "  --generate-step-weld-program-dry-run 按空跑轨迹生成 STEP 文件，不生成ARCON/ARCSET/ARCOFF焊接指令\n";
-		out << "  --generate-step-weld-speed <mm/min> 覆盖本次 STEP 文件轨迹速度，不修改ini\n";
+		out << "  --generate-step-weld-speed <mm/min> 覆盖本次 STEP 文件轨迹速度，不修改配置库\n";
 		out << "  --update-weld-pose-average <FILE_OR_DIR> 离线统计四类焊道平均姿态并更新补偿姿态库\n";
 		out << "  --quit-after <ms>                 指定毫秒后退出程序\n";
 		out.flush();
@@ -12004,6 +12218,8 @@ bool QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 		: QFileInfo(QDir::current().filePath(normalizedOutputPath)).absoluteFilePath();
 	const QString noiseOutputPath = BuildNoiseOutputPath(classifiedOutputPath);
 	const QString keyPointsOutputPath = BuildKeyPointsOutputPath(classifiedOutputPath);
+	const QString cornerCompClassifiedOutputPath = BuildCornerCompClassifiedOutputPath(classifiedOutputPath);
+	const QString cornerCompKeyPointsOutputPath = BuildKeyPointsOutputPath(cornerCompClassifiedOutputPath);
 
 	QSet<int> validIndexes;
 	validIndexes.reserve(originalFitResult.points.size());
@@ -12085,6 +12301,59 @@ bool QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 		LogCommandLineMessage("CLI 激光点云分类失败，保存杂点文件失败：" + error);
 		return false;
 	}
+	const bool hasCornerCompensatedResult =
+		analysisResult.cornerCompensatedClassificationResult.ok
+		&& !analysisResult.cornerCompensatedClassificationResult.points.isEmpty();
+	if (hasCornerCompensatedResult)
+	{
+		QStringList cornerCompLines;
+		cornerCompLines << "# index x y z type_code type_name source";
+		cornerCompLines << "# 1=start 2=end 3=inner_corner 4=outer_corner 5=normal 6=noise";
+		for (const RobotCalculation::LowerWeldClassifiedPoint& point
+			: analysisResult.cornerCompensatedClassificationResult.points)
+		{
+			cornerCompLines << QString("%1 %2 %3 %4 %5 %6 %7")
+				.arg(point.index)
+				.arg(point.point.x(), 0, 'f', 6)
+				.arg(point.point.y(), 0, 'f', 6)
+				.arg(point.point.z(), 0, 'f', 6)
+				.arg(RobotCalculation::LowerWeldPointTypeCode(point.type))
+				.arg(RobotCalculation::LowerWeldPointTypeName(point.type))
+				.arg(point.source.isEmpty() ? "-" : point.source);
+		}
+
+		QStringList cornerCompKeyPointLines;
+		cornerCompKeyPointLines << "# source_index x y z type_code type_name source";
+		cornerCompKeyPointLines << "# 1=start 2=end 3=inner_corner 4=outer_corner";
+		for (const RobotCalculation::LowerWeldClassifiedPoint& point : analysisResult.cornerCompensatedKeyPoints)
+		{
+			if (point.type == RobotCalculation::LowerWeldPointType::Normal
+				|| point.type == RobotCalculation::LowerWeldPointType::Noise)
+			{
+				continue;
+			}
+
+			cornerCompKeyPointLines << QString("%1 %2 %3 %4 %5 %6 %7")
+				.arg(point.index)
+				.arg(point.point.x(), 0, 'f', 6)
+				.arg(point.point.y(), 0, 'f', 6)
+				.arg(point.point.z(), 0, 'f', 6)
+				.arg(RobotCalculation::LowerWeldPointTypeCode(point.type))
+				.arg(RobotCalculation::LowerWeldPointTypeName(point.type))
+				.arg(point.source.isEmpty() ? "-" : point.source);
+		}
+
+		if (!RobotDataHelper::SaveTextFileLines(cornerCompClassifiedOutputPath, cornerCompLines, &error))
+		{
+			LogCommandLineMessage("CLI 激光点云分类失败，保存拐点补偿分类文件失败：" + error);
+			return false;
+		}
+		if (!RobotDataHelper::SaveTextFileLines(cornerCompKeyPointsOutputPath, cornerCompKeyPointLines, &error))
+		{
+			LogCommandLineMessage("CLI 激光点云分类失败，保存拐点补偿拐点文件失败：" + error);
+			return false;
+		}
+	}
 
 	LogCommandLineMessage(QString("CLI 激光点云分类完成（起终点/拐点特征）：输入=%1，主轴=%2，分类点=%3，杂点=%4")
 		.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath()))
@@ -12103,6 +12372,13 @@ bool QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 		.arg(QDir::toNativeSeparators(keyPointsOutputPath)));
 	LogCommandLineMessage(QString("CLI 杂点文件：%1")
 		.arg(QDir::toNativeSeparators(noiseOutputPath)));
+	if (hasCornerCompensatedResult)
+	{
+		LogCommandLineMessage(QString("CLI 拐点补偿分类文件：%1")
+			.arg(QDir::toNativeSeparators(cornerCompClassifiedOutputPath)));
+		LogCommandLineMessage(QString("CLI 拐点补偿起终点/拐点文件：%1")
+			.arg(QDir::toNativeSeparators(cornerCompKeyPointsOutputPath)));
+	}
 	return true;
 }
 

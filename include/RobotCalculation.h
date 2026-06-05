@@ -49,6 +49,14 @@ public:
 
     struct LowerWeldFilterParams
     {
+        struct CornerCompensation
+        {
+            double innerToOuterMm = 0.0;
+            double innerToInnerMm = 0.0;
+            double outerToOuterMm = 0.0;
+            double outerToInnerMm = 0.0;
+        };
+
         SampleAxis sampleAxis = SampleAxis::AxisY;
         LowerWeldFitMode fitMode = LowerWeldFitMode::PreservePath;
         LowerWeldGeometryStrategy geometryStrategy = LowerWeldGeometryStrategy::LegacyGeometry;
@@ -64,6 +72,10 @@ public:
         int piecewiseMinSegmentPoints = 4;
         int minPointCount = 3;
         int smoothRadius = 2;
+        bool useSlopeConsistentCornerFit = false;
+        bool enableCornerCompensation = false;
+        CornerCompensation risingCornerCompensation;
+        CornerCompensation fallingCornerCompensation;
     };
 
     struct LowerWeldFilterPoint
@@ -128,6 +140,8 @@ public:
         LowerWeldFilterResult filterResult;
         LowerWeldClassificationResult classificationResult;
         QVector<LowerWeldClassifiedPoint> keyPoints;
+        LowerWeldClassificationResult cornerCompensatedClassificationResult;
+        QVector<LowerWeldClassifiedPoint> cornerCompensatedKeyPoints;
     };
 
     static T_ROBOT_COORS InterpolateRobotPose(const std::vector<TimestampedRobotPose>& robotSamples, qint64 targetTimestampUs);
@@ -149,6 +163,10 @@ public:
     static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPathGeometry(
         const QVector<IndexedPoint3D>& inputPoints,
         const LowerWeldFilterParams& params);
+    static LowerWeldClassificationResult BuildCornerCompensatedLowerWeldClassification(
+        const QVector<LowerWeldClassifiedPoint>& keyPoints,
+        const LowerWeldFilterParams& params,
+        QVector<LowerWeldClassifiedPoint>* compensatedKeyPoints = nullptr);
     static int LowerWeldPointTypeCode(LowerWeldPointType type);
     static QString LowerWeldPointTypeName(LowerWeldPointType type);
     static QString RobotPoseCsv(qint64 timestampUs, const T_ROBOT_COORS& pose);

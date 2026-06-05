@@ -678,6 +678,11 @@ RobotCalculation::MeasureThenWeldAnalysisResult PointCloudExtractionProcessor::B
 
     result.classificationResult.ok = true;
     CountClassifiedPoints(result.classificationResult);
+    result.cornerCompensatedClassificationResult =
+        RobotCalculation::BuildCornerCompensatedLowerWeldClassification(
+            result.keyPoints,
+            params,
+            &result.cornerCompensatedKeyPoints);
 
     if (result.classificationResult.startCount <= 0 || result.classificationResult.endCount <= 0)
     {

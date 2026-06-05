@@ -752,7 +752,7 @@ int RobotDataHelper::MeasureWeldCurrentGroupIndex(const QString& robotName, QStr
     {
         if (error != nullptr)
         {
-            *error = "打开测量焊接参数文件失败：" + path;
+            *error = "打开测量焊接参数数据失败：" + path;
         }
         return 0;
     }
@@ -781,7 +781,7 @@ bool RobotDataHelper::ReadPulse(const QString& filePath, const QString& sectionN
     {
         if (error != nullptr)
         {
-            *error = "打开参数文件失败：" + filePath;
+            *error = "打开参数数据失败：" + filePath;
         }
         return false;
     }
@@ -814,7 +814,7 @@ bool RobotDataHelper::ReadPulse(const QString& filePath, const QString& sectionN
 
     if (!ok && error != nullptr)
     {
-        *error += QString("，文件=%1，分组=%2").arg(filePath, sectionName);
+        *error += QString("，参数=%1，分组=%2").arg(filePath, sectionName);
     }
     return ok;
 }
@@ -826,7 +826,7 @@ bool RobotDataHelper::WritePulse(const QString& filePath, const QString& section
     {
         if (error != nullptr)
         {
-            *error = "打开参数文件失败：" + filePath;
+            *error = "打开参数数据失败：" + filePath;
         }
         return false;
     }
@@ -858,7 +858,7 @@ bool RobotDataHelper::WritePulse(const QString& filePath, const QString& section
 
     if (!ok && error != nullptr)
     {
-        *error += QString("，文件=%1，分组=%2").arg(filePath, sectionName);
+        *error += QString("，参数=%1，分组=%2").arg(filePath, sectionName);
     }
     return ok;
 }
@@ -870,7 +870,7 @@ bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionN
     {
         if (error != nullptr)
         {
-            *error = "打开参数文件失败：" + filePath;
+            *error = "打开参数数据失败：" + filePath;
         }
         return false;
     }
@@ -907,7 +907,7 @@ bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionN
     {
         if (error != nullptr)
         {
-            *error = QString("读取失败：%1，缺少 %2，文件=%3，分组=%4")
+            *error = QString("读取失败：%1，缺少 %2，参数=%3，分组=%4")
                 .arg(prefix, missingKeys.join(", "), filePath, sectionName);
         }
         return false;
@@ -922,7 +922,7 @@ bool RobotDataHelper::WriteCoors(const QString& filePath, const QString& section
     {
         if (error != nullptr)
         {
-            *error = "打开参数文件失败：" + filePath;
+            *error = "打开参数数据失败：" + filePath;
         }
         return false;
     }
@@ -932,7 +932,7 @@ bool RobotDataHelper::WriteCoors(const QString& filePath, const QString& section
     {
         if (error != nullptr)
         {
-            *error = QString("写入失败：%1，文件=%2，分组=%3").arg(prefix, filePath, sectionName);
+            *error = QString("写入失败：%1，参数=%2，分组=%3").arg(prefix, filePath, sectionName);
         }
         return false;
     }
@@ -946,7 +946,7 @@ bool RobotDataHelper::WriteParamValue(const QString& filePath, const QString& se
     {
         if (error != nullptr)
         {
-            *error = "打开参数文件失败：" + filePath;
+            *error = "打开参数数据失败：" + filePath;
         }
         return false;
     }
@@ -955,7 +955,7 @@ bool RobotDataHelper::WriteParamValue(const QString& filePath, const QString& se
     {
         if (error != nullptr)
         {
-            *error = QString("写入失败：%1，文件=%2，分组=%3").arg(key, filePath, sectionName);
+            *error = QString("写入失败：%1，参数=%2，分组=%3").arg(key, filePath, sectionName);
         }
         return false;
     }

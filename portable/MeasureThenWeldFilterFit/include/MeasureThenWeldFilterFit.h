@@ -77,6 +77,12 @@ struct FilterFitParams
     int piecewiseMinSegmentPoints = 10;
     int minPointCount = 4;
     int smoothRadius = 3;
+
+    // When true, corner intersections are fitted from the straight core of each
+    // neighbouring segment. This mirrors the main program's "直线拟合排除圆弧段"
+    // option and helps avoid round/transition samples pulling a straight segment
+    // intersection away from the visible line.
+    bool useSlopeConsistentCornerFit = false;
 };
 
 struct FilterPoint

@@ -9,6 +9,8 @@
 
 namespace
 {
+void CountLowerWeldClassifiedPoints(RobotCalculation::LowerWeldClassificationResult& result);
+
 double SampleAxisValue(const Eigen::Vector3d& point, RobotCalculation::SampleAxis axis)
 {
     return axis == RobotCalculation::SampleAxis::AxisX ? point.x() : point.y();
@@ -33,14 +35,245 @@ void AppendExpandedGroovePoint(
     int& nextIndex,
     const Eigen::Vector3d& point,
     RobotCalculation::LowerWeldPointType type,
-    const QString& source)
+    const QString& source,
+    const QString& segmentKindAfter = QString())
 {
     RobotCalculation::LowerWeldClassifiedPoint classifiedPoint;
     classifiedPoint.index = nextIndex++;
     classifiedPoint.point = point;
     classifiedPoint.type = type;
     classifiedPoint.source = source;
+    classifiedPoint.segmentKindAfter = segmentKindAfter;
     points.push_back(classifiedPoint);
+}
+
+bool HasCornerCompensation(const RobotCalculation::LowerWeldFilterParams& params)
+{
+    if (!params.enableCornerCompensation)
+    {
+        return false;
+    }
+
+    const auto hasValue = [](const RobotCalculation::LowerWeldFilterParams::CornerCompensation& comp)
+        {
+            return std::abs(comp.innerToOuterMm) > 1e-9
+                || std::abs(comp.innerToInnerMm) > 1e-9
+                || std::abs(comp.outerToOuterMm) > 1e-9
+                || std::abs(comp.outerToInnerMm) > 1e-9;
+        };
+    return hasValue(params.risingCornerCompensation)
+        || hasValue(params.fallingCornerCompensation);
+}
+
+double ProfileAxisValue(const Eigen::Vector3d& point, RobotCalculation::SampleAxis axis)
+{
+    return axis == RobotCalculation::SampleAxis::AxisY ? point.x() : point.y();
+}
+
+QString SegmentKindFromKeyGeometry(
+    const Eigen::Vector3d& begin,
+    const Eigen::Vector3d& end,
+    RobotCalculation::SampleAxis axis,
+    double lowHighMidpoint,
+    double profileRange)
+{
+    const double dPath = SampleAxisValue(end, axis) - SampleAxisValue(begin, axis);
+    const double dProfile = ProfileAxisValue(end, axis) - ProfileAxisValue(begin, axis);
+    const double slopeThresholdMm = std::max(1.0, profileRange * 0.12);
+    const double slopeRatioThreshold = 0.25;
+    const bool isSlope =
+        std::abs(dProfile) >= slopeThresholdMm
+        && std::abs(dProfile) >= std::abs(dPath) * slopeRatioThreshold;
+    if (isSlope)
+    {
+        return dProfile >= 0.0 ? "rising_edge" : "falling_edge";
+    }
+
+    const double middleProfile = (ProfileAxisValue(begin, axis) + ProfileAxisValue(end, axis)) * 0.5;
+    return middleProfile <= lowHighMidpoint ? "low_platform" : "high_platform";
+}
+
+QVector<QString> AssignSegmentKindsFromKeyPoints(
+    const QVector<RobotCalculation::LowerWeldClassifiedPoint>& keyPoints,
+    RobotCalculation::SampleAxis axis)
+{
+    QVector<QString> segmentKinds;
+    if (keyPoints.size() < 2)
+    {
+        return segmentKinds;
+    }
+
+    segmentKinds.reserve(keyPoints.size() - 1);
+    bool hasAllStoredKinds = true;
+    for (int index = 0; index + 1 < keyPoints.size(); ++index)
+    {
+        const QString kind = keyPoints[index].segmentKindAfter.trimmed();
+        if (kind.isEmpty())
+        {
+            hasAllStoredKinds = false;
+            break;
+        }
+        segmentKinds.push_back(kind);
+    }
+    if (hasAllStoredKinds)
+    {
+        return segmentKinds;
+    }
+
+    double minProfile = std::numeric_limits<double>::max();
+    double maxProfile = std::numeric_limits<double>::lowest();
+    for (const RobotCalculation::LowerWeldClassifiedPoint& point : keyPoints)
+    {
+        const double profile = ProfileAxisValue(point.point, axis);
+        minProfile = std::min(minProfile, profile);
+        maxProfile = std::max(maxProfile, profile);
+    }
+
+    segmentKinds.clear();
+    if (!std::isfinite(minProfile) || !std::isfinite(maxProfile))
+    {
+        segmentKinds.fill("low_platform", keyPoints.size() - 1);
+        return segmentKinds;
+    }
+
+    const double profileRange = std::max(0.0, maxProfile - minProfile);
+    const double lowHighMidpoint = (minProfile + maxProfile) * 0.5;
+    for (int index = 0; index + 1 < keyPoints.size(); ++index)
+    {
+        segmentKinds.push_back(SegmentKindFromKeyGeometry(
+            keyPoints[index].point,
+            keyPoints[index + 1].point,
+            axis,
+            lowHighMidpoint,
+            profileRange));
+    }
+    return segmentKinds;
+}
+
+bool IsRisingSegmentKind(const QString& kind)
+{
+    return kind.compare("rising_edge", Qt::CaseInsensitive) == 0;
+}
+
+bool IsFallingSegmentKind(const QString& kind)
+{
+    return kind.compare("falling_edge", Qt::CaseInsensitive) == 0;
+}
+
+const RobotCalculation::LowerWeldFilterParams::CornerCompensation* CornerCompensationForSlopeKind(
+    const QString& slopeKind,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    if (IsRisingSegmentKind(slopeKind))
+    {
+        return &params.risingCornerCompensation;
+    }
+    if (IsFallingSegmentKind(slopeKind))
+    {
+        return &params.fallingCornerCompensation;
+    }
+    return nullptr;
+}
+
+double CornerCompensationMm(
+    RobotCalculation::LowerWeldPointType pointType,
+    RobotCalculation::LowerWeldPointType otherPointType,
+    const QString& slopeKind,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    const RobotCalculation::LowerWeldFilterParams::CornerCompensation* comp =
+        CornerCompensationForSlopeKind(slopeKind, params);
+    if (comp == nullptr)
+    {
+        return 0.0;
+    }
+
+    if (pointType == RobotCalculation::LowerWeldPointType::InnerCorner)
+    {
+        if (otherPointType == RobotCalculation::LowerWeldPointType::OuterCorner)
+        {
+            return comp->innerToOuterMm;
+        }
+        if (otherPointType == RobotCalculation::LowerWeldPointType::InnerCorner)
+        {
+            return comp->innerToInnerMm;
+        }
+    }
+    else if (pointType == RobotCalculation::LowerWeldPointType::OuterCorner)
+    {
+        if (otherPointType == RobotCalculation::LowerWeldPointType::OuterCorner)
+        {
+            return comp->outerToOuterMm;
+        }
+        if (otherPointType == RobotCalculation::LowerWeldPointType::InnerCorner)
+        {
+            return comp->outerToInnerMm;
+        }
+    }
+    return 0.0;
+}
+
+RobotCalculation::LowerWeldClassificationResult BuildExpandedClassificationFromKeyPoints(
+    const QVector<RobotCalculation::LowerWeldClassifiedPoint>& keyPoints,
+    double sampleStep,
+    const QString& normalSource)
+{
+    RobotCalculation::LowerWeldClassificationResult result;
+    if (keyPoints.size() < 2)
+    {
+        result.error = "拐点数量不足，无法生成 2mm 焊道点。";
+        return result;
+    }
+    if (sampleStep <= 0.0)
+    {
+        result.error = "采样步长必须大于 0。";
+        return result;
+    }
+
+    result.points.reserve(keyPoints.size() * 8);
+    int nextIndex = 1;
+    for (int index = 0; index < keyPoints.size(); ++index)
+    {
+        const RobotCalculation::LowerWeldClassifiedPoint& current = keyPoints[index];
+        const QString segmentKindAfter = index + 1 < keyPoints.size()
+            ? current.segmentKindAfter
+            : QString();
+        AppendExpandedGroovePoint(
+            result.points,
+            nextIndex,
+            current.point,
+            current.type,
+            current.source,
+            segmentKindAfter);
+
+        if (index + 1 >= keyPoints.size())
+        {
+            continue;
+        }
+
+        const Eigen::Vector3d delta = keyPoints[index + 1].point - current.point;
+        const double segmentLength = delta.norm();
+        if (segmentLength <= std::numeric_limits<double>::epsilon())
+        {
+            continue;
+        }
+
+        for (double distance = sampleStep; distance < segmentLength - 1e-9; distance += sampleStep)
+        {
+            const double ratio = distance / segmentLength;
+            AppendExpandedGroovePoint(
+                result.points,
+                nextIndex,
+                current.point + delta * ratio,
+                RobotCalculation::LowerWeldPointType::Normal,
+                normalSource,
+                segmentKindAfter);
+        }
+    }
+
+    result.ok = true;
+    CountLowerWeldClassifiedPoints(result);
+    return result;
 }
 
 struct GeometryProjectedPoint
@@ -2108,6 +2341,128 @@ QVector<GeometryProjectedPoint> RemoveGeometrySlopeWaveOutliers(
     return filtered;
 }
 
+GeometryFittedLine2D FitGeometryIndexedLine(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& indexes,
+    const Eigen::Vector2d& directionHint)
+{
+    GeometryFittedLine2D line;
+    if (projected.isEmpty() || indexes.size() < 2)
+    {
+        return line;
+    }
+
+    auto fitIndexes = [&](const QVector<int>& fitIndexes) -> GeometryFittedLine2D
+    {
+        GeometryFittedLine2D fitted;
+        if (fitIndexes.size() < 2)
+        {
+            return fitted;
+        }
+
+        Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
+        for (int index : fitIndexes)
+        {
+            centroid += GeometrySmoothedProjection2D(projected[index]);
+        }
+        centroid /= static_cast<double>(fitIndexes.size());
+
+        Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero();
+        for (int index : fitIndexes)
+        {
+            const Eigen::Vector2d delta = GeometrySmoothedProjection2D(projected[index]) - centroid;
+            covariance += delta * delta.transpose();
+        }
+
+        Eigen::Vector2d direction = directionHint;
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(covariance);
+        if (solver.info() == Eigen::Success)
+        {
+            direction = solver.eigenvectors().col(1);
+        }
+        if (direction.squaredNorm() <= std::numeric_limits<double>::epsilon())
+        {
+            direction = GeometrySmoothedProjection2D(projected[fitIndexes.last()])
+                - GeometrySmoothedProjection2D(projected[fitIndexes.first()]);
+        }
+        if (direction.squaredNorm() <= std::numeric_limits<double>::epsilon())
+        {
+            return fitted;
+        }
+        if (directionHint.squaredNorm() > std::numeric_limits<double>::epsilon())
+        {
+            direction = OrientGeometryDirection(direction, directionHint);
+        }
+        else
+        {
+            direction.normalize();
+        }
+
+        fitted.point = centroid;
+        fitted.direction = direction.normalized();
+        fitted.valid = true;
+        return fitted;
+    };
+
+    QVector<int> validIndexes;
+    validIndexes.reserve(indexes.size());
+    for (int index : indexes)
+    {
+        if (index >= 0 && index < projected.size())
+        {
+            validIndexes.push_back(index);
+        }
+    }
+    if (validIndexes.size() < 2)
+    {
+        return line;
+    }
+
+    line = fitIndexes(validIndexes);
+    if (!line.valid || validIndexes.size() < 8)
+    {
+        return line;
+    }
+
+    QVector<double> residuals;
+    residuals.reserve(validIndexes.size());
+    for (int index : validIndexes)
+    {
+        residuals.push_back(GeometryPointLineDistance2D(GeometrySmoothedProjection2D(projected[index]), line));
+    }
+    const double medianResidual = GeometryMedianScalar(residuals);
+    QVector<double> deviations;
+    deviations.reserve(residuals.size());
+    for (double residual : residuals)
+    {
+        deviations.push_back(std::abs(residual - medianResidual));
+    }
+    const double madResidual = GeometryMedianScalar(deviations);
+    const double residualLimit = medianResidual + std::max(0.8, madResidual * 3.5);
+
+    QVector<int> acceptedIndexes;
+    acceptedIndexes.reserve(validIndexes.size());
+    for (int index : validIndexes)
+    {
+        const double residual =
+            GeometryPointLineDistance2D(GeometrySmoothedProjection2D(projected[index]), line);
+        if (residual <= residualLimit)
+        {
+            acceptedIndexes.push_back(index);
+        }
+    }
+    if (acceptedIndexes.size() >= std::max(4, static_cast<int>(validIndexes.size()) / 2))
+    {
+        const GeometryFittedLine2D refinedLine = fitIndexes(acceptedIndexes);
+        if (refinedLine.valid)
+        {
+            line = refinedLine;
+        }
+    }
+
+    return line;
+}
+
 QVector<GeometryFittedLine2D> BuildRobustGeometrySegmentLines(
     const QVector<GeometryProjectedPoint>& projected,
     const QVector<int>& keyIndexes)
@@ -2126,12 +2481,179 @@ QVector<GeometryFittedLine2D> BuildRobustGeometrySegmentLines(
     return segmentLines;
 }
 
+GeometryFittedLine2D FitGeometrySlopeConsistentSegmentCoreLine(
+    const QVector<GeometryProjectedPoint>& projected,
+    int firstIndex,
+    int lastIndex)
+{
+    if (projected.isEmpty())
+    {
+        return GeometryFittedLine2D();
+    }
+
+    const int begin = std::max(0, std::min(firstIndex, lastIndex));
+    const int end = std::min(static_cast<int>(projected.size()) - 1, std::max(firstIndex, lastIndex));
+    const GeometryFittedLine2D fallbackLine = FitGeometryRobustSegmentLine(projected, begin, end);
+    const int pointCount = end - begin + 1;
+    if (pointCount < 8)
+    {
+        return fallbackLine;
+    }
+
+    Eigen::Vector2d segmentDirection =
+        GeometrySmoothedProjection2D(projected[end]) - GeometrySmoothedProjection2D(projected[begin]);
+    if (segmentDirection.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        segmentDirection = fallbackLine.direction;
+    }
+    if (segmentDirection.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        return fallbackLine;
+    }
+    segmentDirection.normalize();
+
+    struct SlopeWindow
+    {
+        Eigen::Vector2d direction = Eigen::Vector2d::Zero();
+        double weight = 1.0;
+        int begin = 0;
+        int end = 0;
+    };
+
+    QVector<SlopeWindow> windows;
+    const int windowPoints = std::max(5, std::min(24, std::max(5, pointCount / 5)));
+    const int stepPoints = std::max(2, windowPoints / 2);
+    for (int windowBegin = begin; windowBegin <= end - 3; windowBegin += stepPoints)
+    {
+        const int windowEnd = std::min(end, windowBegin + windowPoints - 1);
+        if (windowEnd - windowBegin + 1 < 4)
+        {
+            continue;
+        }
+
+        const GeometryFittedLine2D windowLine = FitGeometrySegmentLine(projected, windowBegin, windowEnd);
+        if (!windowLine.valid)
+        {
+            continue;
+        }
+
+        SlopeWindow window;
+        window.direction = OrientGeometryDirection(windowLine.direction, segmentDirection);
+        window.weight = std::max(1.0, std::abs(projected[windowEnd].s - projected[windowBegin].s));
+        window.begin = windowBegin;
+        window.end = windowEnd;
+        windows.push_back(window);
+    }
+    if (windows.size() < 2)
+    {
+        return fallbackLine;
+    }
+
+    const double kPi = 3.14159265358979323846;
+    const double angleLimit = 14.0 * kPi / 180.0;
+    int bestWindowIndex = -1;
+    double bestWeight = -1.0;
+    for (int candidateIndex = 0; candidateIndex < windows.size(); ++candidateIndex)
+    {
+        double clusterWeight = 0.0;
+        for (const SlopeWindow& window : windows)
+        {
+            if (GeometryLineDirectionAngle(window.direction, windows[candidateIndex].direction) <= angleLimit)
+            {
+                clusterWeight += window.weight;
+            }
+        }
+        if (clusterWeight > bestWeight)
+        {
+            bestWeight = clusterWeight;
+            bestWindowIndex = candidateIndex;
+        }
+    }
+    if (bestWindowIndex < 0)
+    {
+        return fallbackLine;
+    }
+
+    const double totalSpan = std::abs(projected[end].s - projected[begin].s);
+    const double cornerGuard = std::max(3.0, std::min(12.0, totalSpan * 0.10));
+    const bool enableCornerGuard = totalSpan >= cornerGuard * 4.0;
+    QVector<char> accepted(pointCount, 0);
+    for (const SlopeWindow& window : windows)
+    {
+        if (GeometryLineDirectionAngle(window.direction, windows[bestWindowIndex].direction) > angleLimit)
+        {
+            continue;
+        }
+        for (int index = window.begin; index <= window.end; ++index)
+        {
+            if (enableCornerGuard
+                && (std::abs(projected[index].s - projected[begin].s) < cornerGuard
+                    || std::abs(projected[index].s - projected[end].s) < cornerGuard))
+            {
+                continue;
+            }
+            accepted[index - begin] = 1;
+        }
+    }
+
+    QVector<int> acceptedIndexes;
+    acceptedIndexes.reserve(pointCount);
+    for (int index = begin; index <= end; ++index)
+    {
+        if (accepted[index - begin])
+        {
+            acceptedIndexes.push_back(index);
+        }
+    }
+
+    const int minAcceptedCount = std::max(5, std::min(16, pointCount / 3));
+    const double minAcceptedSpan = std::max(8.0, std::min(28.0, totalSpan * 0.30));
+    const double acceptedSpan = acceptedIndexes.size() >= 2
+        ? std::abs(projected[acceptedIndexes.last()].s - projected[acceptedIndexes.first()].s)
+        : 0.0;
+    if (acceptedIndexes.size() < minAcceptedCount || acceptedSpan < minAcceptedSpan)
+    {
+        return fallbackLine;
+    }
+
+    const GeometryFittedLine2D coreLine = FitGeometryIndexedLine(projected, acceptedIndexes, segmentDirection);
+    return coreLine.valid ? coreLine : fallbackLine;
+}
+
+QVector<GeometryFittedLine2D> BuildGeometrySegmentLines(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    bool useSlopeConsistentCore)
+{
+    if (!useSlopeConsistentCore)
+    {
+        return BuildRobustGeometrySegmentLines(projected, keyIndexes);
+    }
+
+    QVector<GeometryFittedLine2D> segmentLines;
+    if (keyIndexes.size() < 2)
+    {
+        return segmentLines;
+    }
+
+    segmentLines.reserve(keyIndexes.size() - 1);
+    for (int index = 0; index + 1 < keyIndexes.size(); ++index)
+    {
+        segmentLines.push_back(FitGeometrySlopeConsistentSegmentCoreLine(
+            projected,
+            keyIndexes[index],
+            keyIndexes[index + 1]));
+    }
+    return segmentLines;
+}
+
 GeometryFittedLine2D FitGeometryLocalSegmentLineWithSpan(
     const QVector<GeometryProjectedPoint>& projected,
     int firstIndex,
     int lastIndex,
     bool useLastSide,
-    double localSpan)
+    double localSpan,
+    bool useSlopeConsistentCore)
 {
     if (projected.isEmpty())
     {
@@ -2165,7 +2687,149 @@ GeometryFittedLine2D FitGeometryLocalSegmentLineWithSpan(
         }
     }
 
-    return FitGeometryRobustSegmentLine(projected, begin, end);
+    const GeometryFittedLine2D fallbackLine = FitGeometryRobustSegmentLine(projected, begin, end);
+    if (!useSlopeConsistentCore)
+    {
+        return fallbackLine;
+    }
+
+    const int pointCount = end - begin + 1;
+    if (pointCount < 8)
+    {
+        return fallbackLine;
+    }
+
+    Eigen::Vector2d segmentDirection =
+        GeometrySmoothedProjection2D(projected[end]) - GeometrySmoothedProjection2D(projected[begin]);
+    if (segmentDirection.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        segmentDirection = fallbackLine.direction;
+    }
+    if (segmentDirection.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        return fallbackLine;
+    }
+    segmentDirection.normalize();
+
+    struct SlopeWindow
+    {
+        Eigen::Vector2d direction = Eigen::Vector2d::Zero();
+        double weight = 1.0;
+        int begin = 0;
+        int end = 0;
+    };
+
+    QVector<SlopeWindow> windows;
+    const int windowPoints = std::max(5, std::min(18, std::max(5, pointCount / 4)));
+    const int stepPoints = std::max(2, windowPoints / 2);
+    for (int windowBegin = begin; windowBegin <= end - 3; windowBegin += stepPoints)
+    {
+        const int windowEnd = std::min(end, windowBegin + windowPoints - 1);
+        if (windowEnd - windowBegin + 1 < 4)
+        {
+            continue;
+        }
+
+        const GeometryFittedLine2D windowLine = FitGeometrySegmentLine(projected, windowBegin, windowEnd);
+        if (!windowLine.valid)
+        {
+            continue;
+        }
+
+        SlopeWindow window;
+        window.direction = OrientGeometryDirection(windowLine.direction, segmentDirection);
+        window.weight = std::max(1.0, std::abs(projected[windowEnd].s - projected[windowBegin].s));
+        window.begin = windowBegin;
+        window.end = windowEnd;
+        windows.push_back(window);
+    }
+    if (windows.size() < 2)
+    {
+        return fallbackLine;
+    }
+
+    const double kPi = 3.14159265358979323846;
+    const double angleLimit = 14.0 * kPi / 180.0;
+    int bestWindowIndex = -1;
+    double bestWeight = -1.0;
+    for (int candidateIndex = 0; candidateIndex < windows.size(); ++candidateIndex)
+    {
+        double clusterWeight = 0.0;
+        for (const SlopeWindow& window : windows)
+        {
+            if (GeometryLineDirectionAngle(window.direction, windows[candidateIndex].direction) <= angleLimit)
+            {
+                clusterWeight += window.weight;
+            }
+        }
+        if (clusterWeight > bestWeight)
+        {
+            bestWeight = clusterWeight;
+            bestWindowIndex = candidateIndex;
+        }
+    }
+    if (bestWindowIndex < 0)
+    {
+        return fallbackLine;
+    }
+
+    auto buildAcceptedIndexes = [&](bool useCornerGuard) -> QVector<int>
+    {
+        QVector<char> accepted(pointCount, 0);
+        const double cornerS = useLastSide ? projected[end].s : projected[begin].s;
+        const double cornerGuard = std::max(3.0, std::min(10.0, totalSpan * 0.12));
+        const bool enableCornerGuard = useCornerGuard && totalSpan >= cornerGuard * 3.0;
+        for (const SlopeWindow& window : windows)
+        {
+            if (GeometryLineDirectionAngle(window.direction, windows[bestWindowIndex].direction) > angleLimit)
+            {
+                continue;
+            }
+            for (int index = window.begin; index <= window.end; ++index)
+            {
+                if (enableCornerGuard && std::abs(projected[index].s - cornerS) < cornerGuard)
+                {
+                    continue;
+                }
+                accepted[index - begin] = 1;
+            }
+        }
+
+        QVector<int> indexes;
+        indexes.reserve(pointCount);
+        for (int index = begin; index <= end; ++index)
+        {
+            if (accepted[index - begin])
+            {
+                indexes.push_back(index);
+            }
+        }
+        return indexes;
+    };
+
+    QVector<int> acceptedIndexes = buildAcceptedIndexes(true);
+    const int minAcceptedCount = std::max(5, std::min(12, pointCount / 3));
+    const double minAcceptedSpan = std::max(6.0, std::min(18.0, totalSpan * 0.25));
+    auto acceptedSpan = [&](const QVector<int>& indexes) -> double
+    {
+        if (indexes.size() < 2)
+        {
+            return 0.0;
+        }
+        return std::abs(projected[indexes.last()].s - projected[indexes.first()].s);
+    };
+    if (acceptedIndexes.size() < minAcceptedCount || acceptedSpan(acceptedIndexes) < minAcceptedSpan)
+    {
+        acceptedIndexes = buildAcceptedIndexes(false);
+    }
+    if (acceptedIndexes.size() < minAcceptedCount || acceptedSpan(acceptedIndexes) < minAcceptedSpan)
+    {
+        return fallbackLine;
+    }
+
+    const GeometryFittedLine2D slopeConsistentLine =
+        FitGeometryIndexedLine(projected, acceptedIndexes, segmentDirection);
+    return slopeConsistentLine.valid ? slopeConsistentLine : fallbackLine;
 }
 
 GeometryFittedScalarLine FitGeometrySegmentNormalLine(
@@ -2329,7 +2993,8 @@ GeometryFittedLine2D FitGeometryLocalSegmentLine(
         firstIndex,
         lastIndex,
         useLastSide,
-        std::max(20.0, std::min(80.0, totalSpan * 0.6)));
+        std::max(20.0, std::min(80.0, totalSpan * 0.6)),
+        false);
 }
 
 bool IntersectGeometryLines(
@@ -2425,7 +3090,8 @@ QVector<Eigen::Vector3d> BuildFittedGeometryKeyPoints(
     const Eigen::Vector3d& center,
     const Eigen::Vector3d& mainAxis,
     const Eigen::Vector3d& sideAxis,
-    const Eigen::Vector3d& normalAxis)
+    const Eigen::Vector3d& normalAxis,
+    bool useSlopeConsistentCornerFit)
 {
     QVector<Eigen::Vector3d> keyPoints;
     keyPoints.reserve(keyIndexes.size());
@@ -2434,7 +3100,8 @@ QVector<Eigen::Vector3d> BuildFittedGeometryKeyPoints(
         return keyPoints;
     }
 
-    const QVector<GeometryFittedLine2D> segmentLines = BuildRobustGeometrySegmentLines(projected, keyIndexes);
+    const QVector<GeometryFittedLine2D> segmentLines =
+        BuildGeometrySegmentLines(projected, keyIndexes, useSlopeConsistentCornerFit);
 
     for (int index = 0; index < keyIndexes.size(); ++index)
     {
@@ -2491,24 +3158,29 @@ QVector<Eigen::Vector3d> BuildFittedGeometryKeyPoints(
                 std::max(36.0, std::min(80.0, span * 0.70))
             };
 
-            for (double localSpan : candidateSpans)
+            if (!useSlopeConsistentCornerFit)
             {
-                const GeometryFittedLine2D leftLine = FitGeometryLocalSegmentLineWithSpan(
-                    projected,
-                    keyIndexes[index - 1],
-                    keyIndex,
-                    true,
-                    localSpan);
-                const GeometryFittedLine2D rightLine = FitGeometryLocalSegmentLineWithSpan(
-                    projected,
-                    keyIndex,
-                    keyIndexes[index + 1],
-                    false,
-                    localSpan);
-                Eigen::Vector2d intersection = projection;
-                if (IntersectGeometryLines(leftLine, rightLine, &intersection))
+                for (double localSpan : candidateSpans)
                 {
-                    considerIntersection(intersection, 0.15);
+                    const GeometryFittedLine2D leftLine = FitGeometryLocalSegmentLineWithSpan(
+                        projected,
+                        keyIndexes[index - 1],
+                        keyIndex,
+                        true,
+                        localSpan,
+                        false);
+                    const GeometryFittedLine2D rightLine = FitGeometryLocalSegmentLineWithSpan(
+                        projected,
+                        keyIndex,
+                        keyIndexes[index + 1],
+                        false,
+                        localSpan,
+                        false);
+                    Eigen::Vector2d intersection = projection;
+                    if (IntersectGeometryLines(leftLine, rightLine, &intersection))
+                    {
+                        considerIntersection(intersection, 0.15);
+                    }
                 }
             }
 
@@ -2689,7 +3361,8 @@ QVector<int> PruneNonMonotonicFittedGeometryKeys(
     const Eigen::Vector3d& center,
     const Eigen::Vector3d& mainAxis,
     const Eigen::Vector3d& sideAxis,
-    const Eigen::Vector3d& normalAxis)
+    const Eigen::Vector3d& normalAxis,
+    bool useSlopeConsistentCornerFit)
 {
     if (keyIndexes.size() <= 3)
     {
@@ -2706,7 +3379,8 @@ QVector<int> PruneNonMonotonicFittedGeometryKeys(
             center,
             mainAxis,
             sideAxis,
-            normalAxis);
+            normalAxis,
+            useSlopeConsistentCornerFit);
         if (fittedKeyPoints.size() != keyIndexes.size())
         {
             return keyIndexes;
@@ -4774,6 +5448,115 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
     return result;
 }
 
+RobotCalculation::LowerWeldClassificationResult RobotCalculation::BuildCornerCompensatedLowerWeldClassification(
+    const QVector<LowerWeldClassifiedPoint>& keyPoints,
+    const LowerWeldFilterParams& params,
+    QVector<LowerWeldClassifiedPoint>* compensatedKeyPoints)
+{
+    if (compensatedKeyPoints != nullptr)
+    {
+        compensatedKeyPoints->clear();
+    }
+
+    LowerWeldClassificationResult emptyResult;
+    if (!HasCornerCompensation(params))
+    {
+        return emptyResult;
+    }
+    if (keyPoints.size() < 2)
+    {
+        emptyResult.error = "拐点数量不足，无法进行拐点补偿。";
+        return emptyResult;
+    }
+
+    QVector<LowerWeldClassifiedPoint> adjustedKeyPoints = keyPoints;
+    QVector<QString> segmentKinds = AssignSegmentKindsFromKeyPoints(keyPoints, params.sampleAxis);
+    if (segmentKinds.size() != keyPoints.size() - 1)
+    {
+        emptyResult.error = "拐点段属性不足，无法进行拐点补偿。";
+        return emptyResult;
+    }
+
+    for (int index = 0; index < adjustedKeyPoints.size(); ++index)
+    {
+        if (index < segmentKinds.size())
+        {
+            adjustedKeyPoints[index].segmentKindAfter = segmentKinds[index];
+        }
+
+        const LowerWeldPointType pointType = adjustedKeyPoints[index].type;
+        if (pointType != LowerWeldPointType::InnerCorner
+            && pointType != LowerWeldPointType::OuterCorner)
+        {
+            continue;
+        }
+
+        QString nearbySlopeSegmentKind;
+        if (index < segmentKinds.size()
+            && (IsRisingSegmentKind(segmentKinds[index]) || IsFallingSegmentKind(segmentKinds[index])))
+        {
+            nearbySlopeSegmentKind = segmentKinds[index];
+        }
+        else if (index > 0
+            && (IsRisingSegmentKind(segmentKinds[index - 1]) || IsFallingSegmentKind(segmentKinds[index - 1])))
+        {
+            nearbySlopeSegmentKind = segmentKinds[index - 1];
+        }
+
+        if (nearbySlopeSegmentKind.isEmpty())
+        {
+            continue;
+        }
+
+        Eigen::Vector3d offset = Eigen::Vector3d::Zero();
+        const auto appendAdjacentCompensation = [&](int otherIndex, int segmentIndex)
+            {
+                if (otherIndex < 0 || otherIndex >= keyPoints.size()
+                    || segmentIndex < 0 || segmentIndex >= segmentKinds.size())
+                {
+                    return;
+                }
+
+                const QString effectiveSlopeKind =
+                    IsRisingSegmentKind(segmentKinds[segmentIndex]) || IsFallingSegmentKind(segmentKinds[segmentIndex])
+                        ? segmentKinds[segmentIndex]
+                        : nearbySlopeSegmentKind;
+                const double compensationMm = CornerCompensationMm(
+                    pointType,
+                    keyPoints[otherIndex].type,
+                    effectiveSlopeKind,
+                    params);
+                if (std::abs(compensationMm) <= 1e-9)
+                {
+                    return;
+                }
+
+                const Eigen::Vector3d direction = keyPoints[otherIndex].point - keyPoints[index].point;
+                const double length = direction.norm();
+                if (length <= std::numeric_limits<double>::epsilon())
+                {
+                    return;
+                }
+
+                offset += direction.normalized() * compensationMm;
+            };
+
+        appendAdjacentCompensation(index - 1, index - 1);
+        appendAdjacentCompensation(index + 1, index);
+        adjustedKeyPoints[index].point += offset;
+    }
+
+    if (compensatedKeyPoints != nullptr)
+    {
+        *compensatedKeyPoints = adjustedKeyPoints;
+    }
+
+    return BuildExpandedClassificationFromKeyPoints(
+        adjustedKeyPoints,
+        params.sampleStep > 0.0 ? params.sampleStep : 2.0,
+        "geometry_2mm_corner_comp");
+}
+
 RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathGeometry(
     const QVector<IndexedPoint3D>& inputPoints,
     const LowerWeldFilterParams& params)
@@ -4873,7 +5656,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         center,
         axes.first,
         axes.second,
-        normalAxis);
+        normalAxis,
+        params.useSlopeConsistentCornerFit);
     keyIndexes = RefineGeometryKeysBySegmentDeviation(
         projected,
         keyIndexes,
@@ -4889,7 +5673,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         center,
         axes.first,
         axes.second,
-        normalAxis);
+        normalAxis,
+        params.useSlopeConsistentCornerFit);
     if (keyIndexes.size() < 2)
     {
         result.error = "几何特征提取失败，未找到可用的起点/终点。";
@@ -4901,7 +5686,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         center,
         axes.first,
         axes.second,
-        normalAxis);
+        normalAxis,
+        params.useSlopeConsistentCornerFit);
     if (fittedKeyPoints.size() != keyIndexes.size())
     {
         result.error = "几何特征拟合失败，无法生成拟合交点。";
@@ -4928,13 +5714,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
     const double expandStepMm = params.sampleStep > 0.0 ? params.sampleStep : 2.0;
     result.keyPoints.clear();
     result.keyPoints.reserve(keyIndexes.size());
-    result.classificationResult.points.clear();
-    result.classificationResult.points.reserve(keyIndexes.size() * 8);
-    result.classificationResult.ok = true;
-    result.classificationResult.error.clear();
 
-    int nextIndex = 1;
-    int interpolatedCount = 0;
     for (int index = 0; index < keyIndexes.size(); ++index)
     {
         const Eigen::Vector3d currentPoint = fittedKeyPoints[index];
@@ -4953,43 +5733,32 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         keyPoint.type = pointType;
         keyPoint.source = source;
         result.keyPoints.push_back(keyPoint);
-
-        AppendExpandedGroovePoint(
-            result.classificationResult.points,
-            nextIndex,
-            currentPoint,
-            pointType,
-            source);
-
-        if (index + 1 >= keyIndexes.size())
-        {
-            continue;
-        }
-
-        const Eigen::Vector3d nextPoint = fittedKeyPoints[index + 1];
-        const Eigen::Vector3d delta = nextPoint - currentPoint;
-        const double segmentLength = delta.norm();
-        if (segmentLength <= std::numeric_limits<double>::epsilon())
-        {
-            continue;
-        }
-
-        for (double distance = expandStepMm; distance < segmentLength - 1e-9; distance += expandStepMm)
-        {
-            const double ratio = distance / segmentLength;
-            AppendExpandedGroovePoint(
-                result.classificationResult.points,
-                nextIndex,
-                currentPoint + delta * ratio,
-                LowerWeldPointType::Normal,
-                "geometry_2mm");
-            ++interpolatedCount;
-        }
     }
 
-    result.filterResult.interpolatedCount = interpolatedCount;
+    const QVector<QString> segmentKinds = AssignSegmentKindsFromKeyPoints(result.keyPoints, params.sampleAxis);
+    for (int index = 0; index < result.keyPoints.size() && index < segmentKinds.size(); ++index)
+    {
+        result.keyPoints[index].segmentKindAfter = segmentKinds[index];
+    }
+
+    result.classificationResult = BuildExpandedClassificationFromKeyPoints(
+        result.keyPoints,
+        expandStepMm,
+        "geometry_2mm");
+    if (!result.classificationResult.ok)
+    {
+        result.error = result.classificationResult.error;
+        return result;
+    }
+
+    result.cornerCompensatedClassificationResult =
+        BuildCornerCompensatedLowerWeldClassification(
+            result.keyPoints,
+            params,
+            &result.cornerCompensatedKeyPoints);
+
+    result.filterResult.interpolatedCount = result.classificationResult.normalCount;
     result.filterResult.extendedCount = result.classificationResult.points.size();
-    CountLowerWeldClassifiedPoints(result.classificationResult);
 
     result.ok = true;
     return result;

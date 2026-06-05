@@ -214,7 +214,7 @@ bool SaveActiveCompGroupIndex(
 {
     if (path.isEmpty())
     {
-        error = "补偿参数路径为空。";
+        error = "补偿参数配置库不可用。";
         return false;
     }
     if (!ConfigDatabase::HasIniFile(path) && activeIndex <= 0)
@@ -225,13 +225,13 @@ bool SaveActiveCompGroupIndex(
     COPini ini;
     if (!ini.SetFileName(false, ToUtf8StdString(path)))
     {
-        error = "打开补偿参数失败：" + path;
+        error = "打开补偿参数失败。";
         return false;
     }
     ini.SetSectionName(ToUtf8StdString(allSection));
     if (!ini.WriteString(ToUtf8StdString(activeGroupIndexKey), std::max(0, activeIndex)))
     {
-        error = QString("写入补偿组选择失败：%1").arg(path);
+        error = QStringLiteral("写入补偿组选择失败。");
         return false;
     }
     return true;
@@ -276,7 +276,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     titleLabel->setStyleSheet("font-size: 22px; font-weight: bold; color: #F7FCFC;");
     rootLayout->addWidget(titleLabel);
 
-    QLabel* hintLabel = new QLabel("预设参数：读取 MeasureWeldParam.ini 当前参数组，并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点，并在扫描后自动执行 PreservePath 拟合、焊道分类、焊接姿态生成和焊道补偿。也可以跳过扫描，直接选历史结果文件夹焊接。");
+    QLabel* hintLabel = new QLabel("预设参数：读取配置库中的当前测量焊接参数组，并执行安全姿态、扫描起点、扫描终点、收枪姿态；扫描段采集相机三维点，并在扫描后自动执行 PreservePath 拟合、焊道分类、焊接姿态生成和焊道补偿。也可以跳过扫描，直接选历史结果文件夹焊接。");
     hintLabel->setWordWrap(true);
     rootLayout->addWidget(hintLabel);
 
@@ -513,7 +513,7 @@ void MeasureThenWeldDialog::LoadParamGroups()
     const QString path = RobotDataHelper::MeasureWeldParamPath(robotName);
     if (!ini.SetFileName(path.toLocal8Bit().constData()))
     {
-        AppendLog("读取位置类型失败：打开参数文件失败：" + path);
+        AppendLog("读取位置类型失败：打开参数数据失败：" + path);
         m_bLoadingSelectors = false;
         return;
     }

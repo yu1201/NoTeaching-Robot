@@ -1,6 +1,6 @@
 #pragma once
-
-// ä¿è¯æ­¤æ–‡ä»¶çš„ä»£ç åªè¢«ç¼–è¯‘ä¸€æ¬¡
+//SDK-V2.4.1-20250302_0520
+// ±£Ö¤´ËÎÄ¼şµÄ´úÂëÖ»±»±àÒëÒ»´Î
 #ifndef EasyTcpClient_hpp_
 #define EasyTcpClient_hpp_
 #ifdef _WIN32
@@ -9,7 +9,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <WinSock2.h>
 #include <windows.h>
-#pragma comment(lib, "ws2_32.lib") // windows socket2 32çš„libåº“
+#pragma comment(lib, "ws2_32.lib") // windows socket2 32µÄlib¿â
 #else
 #include <arpa/inet.h>
 #include <string.h>
@@ -39,22 +39,22 @@ public:
   EasyTcpClient();
   virtual ~EasyTcpClient();
 
-  // åˆå§‹åŒ–socket
+  // ³õÊ¼»¯socket
   int initSocket();
 
-  // è¿æ¥æœåŠ¡å™¨
+  // Á¬½Ó·şÎñÆ÷
   int ConnectServer(char *ip, unsigned short port);
 
-  // æ£€æŸ¥è¿è¡ŒçŠ¶æ€
+  // ¼ì²éÔËĞĞ×´Ì¬
   int isRun();
 
-  // æ£€æŸ¥è¿è¡ŒçŠ¶æ€ run return 0
+  // ¼ì²éÔËĞĞ×´Ì¬ run return 0
   int runStatus();
 
-  // å…³é—­socket
+  // ¹Ø±Õsocket
   void closeSocket();
 
-  // æŸ¥è¯¢selectç½‘ç»œæ¶ˆæ¯
+  // ²éÑ¯selectÍøÂçÏûÏ¢
   bool onRun();
 
   /* Common send / recv function */
@@ -62,10 +62,10 @@ public:
   int recvData(char *data, int size);
 
 private:
-  // æ¥æ”¶æ•°æ®  å¤„ç†ç²˜åŒ…ã€æ‹†åˆ†åŒ…
+  // ½ÓÊÕÊı¾İ  ´¦ÀíÕ³°ü¡¢²ğ·Ö°ü
   int RecvData();
 
-  bool isConnected = false;//è¿æ¥çŠ¶æ€æ ‡å¿—
+  bool isConnected = false;//Á¬½Ó×´Ì¬±êÖ¾
 	#ifdef _WIN32
 	  SOCKET _sock;
 	  SYSTEMTIME st = { 0 };

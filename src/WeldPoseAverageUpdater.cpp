@@ -602,7 +602,7 @@ bool WriteSeamAverageMetadata(
         || !ini.WriteString("GroupCount", static_cast<int>(result.groups.size()))
         || !ini.WriteString("AnyOutlierFiltered", result.anyOutlierFiltered))
     {
-        error = "写入 WeldSeamCompParam.ini 姿态均值摘要失败：" + LocalPath(path);
+        error = "写入焊道补偿参数姿态均值摘要失败：" + LocalPath(path);
         return false;
     }
 
@@ -623,7 +623,7 @@ bool WriteSeamAverageMetadata(
             || !ini.WriteString("WrotePoseToSlot", group.wrotePoseToSlot)
             || !ini.WriteString("MatchedDistanceDeg", group.matchedDistanceDeg, 6))
         {
-            error = QString("写入 WeldSeamCompParam.ini 姿态均值分组 %1 失败：%2")
+            error = QString("写入焊道补偿参数姿态均值分组 %1 失败：%2")
                 .arg(index)
                 .arg(LocalPath(path));
             return false;

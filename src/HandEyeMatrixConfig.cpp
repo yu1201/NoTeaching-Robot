@@ -278,7 +278,7 @@ bool LoadHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
     {
         if (error != nullptr)
         {
-            *error = QString("打开手眼矩阵参数文件失败：%1").arg(filePath);
+            *error = QString("打开手眼矩阵参数数据失败：%1").arg(filePath);
         }
         return false;
     }
@@ -291,7 +291,7 @@ bool LoadHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
         {
             if (error != nullptr)
             {
-                *error = QString("读取手眼矩阵参数失败：%1，文件=%2").arg(key, filePath);
+                *error = QString("读取手眼矩阵参数失败：%1，参数=%2").arg(key, filePath);
             }
             return false;
         }
@@ -335,7 +335,7 @@ bool SaveHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
     {
         if (error != nullptr)
         {
-            *error = QString("打开手眼矩阵参数文件失败：%1").arg(filePath);
+            *error = QString("打开手眼矩阵参数数据失败：%1").arg(filePath);
         }
         return false;
     }

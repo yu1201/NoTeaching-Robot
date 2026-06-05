@@ -25,7 +25,6 @@ public:
     void SetMode(Mode mode);
     Mode CurrentMode() const;
 
-    static QString ConfigPath();
     static QString ModeToStorageString(Mode mode);
     static QString ModeDisplayName(Mode mode);
     static Mode ModeFromStorageString(const QString& value);

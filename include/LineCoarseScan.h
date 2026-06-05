@@ -7,7 +7,7 @@
 
 class COPini;
 
-// 根据控制单元名称读取 LineCoarseScanParam.ini，并将参数写入类内缓存
+// 根据控制单元名称读取线扫粗定位参数，并将参数写入类内缓存
 class LineCoarseScan
 {
 public:
@@ -33,7 +33,7 @@ public:
 
 private:
     void EnsureGlobalStorage(int nUnitNo);
-    // 生成参数文件路径：Data/<控制单元名>/LineCoarseScanParam.ini
+    // 生成参数数据逻辑键
     std::string BuildIniFilePath(const std::string& unitName) const;
     // 读取料台总数 [CurUseTableNo]/ALLTableNum
     bool ReadAllTableNum(COPini& iniReader, int& nTableNum);

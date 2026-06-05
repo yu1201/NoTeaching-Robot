@@ -116,13 +116,11 @@ private:
     int FindFirstReadyRobotUnitIndex() const;
     RobotDriverAdaptor* GetCurrentRobotDriver(QWidget* parent);
     FANUCRobotCtrl* GetCurrentFanucDriver(QWidget* parent);
-    QString AccountConfigPath() const;
     QString RoleDisplayName(const QString& role) const;
     int RoleLevel(const QString& role) const;
     bool RequirePermission(const QString& minimumRole, const QString& actionName);
     void EnsureDefaultAdminAccount();
     void RefreshAccountUi();
-    QString LoginStateConfigPath() const;
     void LoadLoginState();
     void SaveLoginState() const;
     void RefreshLoginNameHistory();
@@ -145,11 +143,12 @@ private:
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
     void ApplyDebugLogVisibility(QWidget* page);
-    QString CameraReceiveModeConfigPath() const;
     void LoadCameraReceiveMode();
     void SaveCameraReceiveMode() const;
     void RefreshCameraReceiveModeButtonUi();
     void SetSharedScanCameraReceiverMode(bool enabled);
+    void RefreshScanTimestampSourceUi();
+    void RefreshStepSdkInterfaceModeUi();
     void RefreshTouchKeyboardModeUi();
     bool LoadGrooveCameraIP(QString& cameraIP) const;
     bool LoadGrooveCameraIPForUnit(int unitIndex, QString& cameraIP) const;
@@ -222,6 +221,8 @@ private:
     QLabel* m_pPermissionHintLabel;
     QAction* m_pAccountManagementAction;
     QPushButton* m_pManagementCameraReceiveModeBtn;
+    QComboBox* m_pScanTimestampSourceCombo;
+    QComboBox* m_pStepSdkInterfaceModeCombo;
     QComboBox* m_pTouchKeyboardModeCombo;
     QLabel* m_pAuthTitleLabel;
     QLabel* m_pAuthHintLabel;

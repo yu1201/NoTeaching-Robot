@@ -5,43 +5,43 @@
 
 #include <QDir>
 #include <QFileInfo>
-#include <QSettings>
 
 namespace
 {
-constexpr auto SETTINGS_RELATIVE_PATH = "Data/PointCloudProcessing.ini";
+constexpr auto SETTINGS_GROUP = "PointCloudProcessing";
 
 QString ReadSetting(const QString& key, const QString& defaultValue = QString())
 {
     QString value;
-    if (ConfigDatabase::ReadSetting(PointCloudProcessingConfig::SettingsFilePath(), key, &value))
+    if (ConfigDatabase::ReadScopedSetting(QStringLiteral("global"), QString(), SETTINGS_GROUP, key, &value))
     {
         return value;
     }
-
-    QSettings settings(PointCloudProcessingConfig::SettingsFilePath(), QSettings::IniFormat);
-    return settings.value(key, defaultValue).toString();
+    return defaultValue;
 }
 
 bool WriteSetting(const QString& key, const QString& value, QString* error)
 {
-    const bool databaseOk = ConfigDatabase::WriteSetting(PointCloudProcessingConfig::SettingsFilePath(), key, value);
-
-    QSettings settings(PointCloudProcessingConfig::SettingsFilePath(), QSettings::IniFormat);
-    settings.setValue(key, value);
-    settings.sync();
-    const bool fileOk = settings.status() == QSettings::NoError;
-    if (databaseOk || fileOk)
+    if (ConfigDatabase::WriteScopedSetting(QStringLiteral("global"), QString(), SETTINGS_GROUP, key, value))
     {
         return true;
     }
 
     if (error != nullptr)
     {
-        *error = QString("写入点云处理配置失败：%1 / %2")
-            .arg(PointCloudProcessingConfig::SettingsFilePath(), key);
+        *error = QString("写入点云处理配置失败：%1").arg(key);
     }
     return false;
+}
+
+bool ReadBoolSetting(const QString& key, bool defaultValue)
+{
+    const QString value = ReadSetting(key, defaultValue ? "1" : "0").trimmed().toLower();
+    if (value.isEmpty())
+    {
+        return defaultValue;
+    }
+    return value == "1" || value == "true" || value == "yes";
 }
 
 QString ExistingProjectFilePath(const QString& relativePath)
@@ -53,11 +53,6 @@ QString ExistingProjectFilePath(const QString& relativePath)
     }
     return RobotDataHelper::BuildProjectPath(relativePath);
 }
-}
-
-QString PointCloudProcessingConfig::SettingsFilePath()
-{
-    return RobotDataHelper::BuildProjectPath(SETTINGS_RELATIVE_PATH);
 }
 
 QString PointCloudProcessingConfig::DefaultLibraryDir()
@@ -81,12 +76,8 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.configPath = ReadSetting("External/ConfigPath", DefaultConfigPath()).trimmed();
     settings.zTruncationValue = ReadSetting("External/ZTruncationValue", "6.0").toDouble();
     settings.resampleStepMm = ReadSetting("External/ResampleStepMm", "2.0").toDouble();
-
-    const QString fallbackText = ReadSetting("External/FallbackToLegacy", "1").trimmed().toLower();
-    settings.fallbackToLegacy = fallbackText.isEmpty()
-        || fallbackText == "1"
-        || fallbackText == "true"
-        || fallbackText == "yes";
+    settings.slopeConsistentCornerFit = ReadBoolSetting("FeaturePoint/SlopeConsistentCornerFit", false);
+    settings.fallbackToLegacy = ReadBoolSetting("External/FallbackToLegacy", true);
 
     if (settings.libraryDir.isEmpty())
     {
@@ -118,6 +109,7 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("External/ConfigPath", QDir::toNativeSeparators(settings.configPath))
         && write("External/ZTruncationValue", QString::number(settings.zTruncationValue, 'f', 6))
         && write("External/ResampleStepMm", QString::number(settings.resampleStepMm, 'f', 6))
+        && write("FeaturePoint/SlopeConsistentCornerFit", settings.slopeConsistentCornerFit ? "1" : "0")
         && write("External/FallbackToLegacy", settings.fallbackToLegacy ? "1" : "0");
     if (!ok && error != nullptr)
     {

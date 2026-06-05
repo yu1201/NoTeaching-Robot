@@ -170,7 +170,7 @@ namespace
         {
             if (error != nullptr)
             {
-                *error = QString("打开机器人参数文件失败：%1").arg(path);
+                *error = QString("打开机器人参数数据失败：%1").arg(path);
             }
             return false;
         }
@@ -325,7 +325,7 @@ CameraBasicParamDialog::CameraBasicParamDialog(
     connect(saveBtn, &QPushButton::clicked, this, [this]() { SaveCameraParam(); });
 
     m_pCameraSectionLabel->setText(QString("当前机器人：%1    当前分组：%2").arg(m_robotName, m_cameraSection));
-    m_pCameraPathLabel->setText(QString("相机参数文件：%1").arg(RobotDataHelper::CameraParamPath(m_robotName)));
+    m_pCameraPathLabel->setText(QString("相机参数数据：%1").arg(RobotDataHelper::CameraParamPath(m_robotName)));
     LoadCameraParam();
 }
 
@@ -363,7 +363,7 @@ bool CameraBasicParamDialog::LoadCameraParam()
     m_pGainLevelEdit->setText(param.gainLevel);
     m_pCameraTypeEdit->setText(param.cameraType);
     m_pCameraSectionLabel->setText(QString("当前机器人：%1    当前分组：%2").arg(m_robotName, param.sectionName));
-    AppendLog(QString("已读取相机参数：%1 [%2]").arg(RobotDataHelper::CameraParamPath(m_robotName), param.sectionName));
+    AppendLog(QString("已读取相机参数数据：%1 [%2]").arg(RobotDataHelper::CameraParamPath(m_robotName), param.sectionName));
     MarkCleanSnapshot();
     return true;
 }
@@ -392,7 +392,7 @@ bool CameraBasicParamDialog::SaveCameraParam()
         return false;
     }
 
-    AppendLog(QString("相机参数已保存：%1 [%2]").arg(RobotDataHelper::CameraParamPath(m_robotName), param.sectionName));
+    AppendLog(QString("相机参数数据已保存：%1 [%2]").arg(RobotDataHelper::CameraParamPath(m_robotName), param.sectionName));
     QString setupError;
     if (WriteRobotSetupReadyFlag(m_robotName, "CameraParamReady", &setupError))
     {

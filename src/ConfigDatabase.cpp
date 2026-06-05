@@ -6,42 +6,33 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRandomGenerator>
-#include <QRegularExpression>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QThread>
-#include <QVariant>
 #include <algorithm>
 #include <cstring>
 
 namespace
 {
-constexpr char kSchemaVersion[] = "2";
+constexpr char kSchemaVersion[] = "4";
 constexpr char kSecret[] = "NoTeachingRobotConfigStoreV1";
 
-struct ConfigFileIdentity
+struct ScopedSettingIdentity
 {
-    QString category;
-    QString robotName;
-    QString fileName;
-    QString sourcePath;
-};
-
-struct ConfigIniIdentity
-{
-    ConfigFileIdentity file;
-    QString groupName;
-    QString itemName;
+    bool valid = false;
+    QString scopeType;
+    QString scopeId;
+    QString module;
     QString keyName;
-    QString sourceSection;
-    QString sourceKey;
+    QString valueType = QStringLiteral("string");
+    bool sensitive = false;
 };
 
 QString NormalizeSection(const QString& sectionName);
 QString NormalizeSourceKey(const QString& keyName);
-ConfigFileIdentity BuildFileIdentity(const QString& fileName);
-ConfigIniIdentity BuildIniIdentity(const QString& fileName, const QString& sectionName, const QString& keyName);
+ScopedSettingIdentity BuildScopedFileIdentity(const QString& fileName, const QString& keyName = QString());
+ScopedSettingIdentity BuildScopedIniIdentity(const QString& fileName, const QString& sectionName, const QString& keyName);
 bool EnsureCurrentSchema(QSqlDatabase& db);
 
 QString ConnectionName()
@@ -59,14 +50,24 @@ QString FindProjectRoot()
     }
     bases << QDir::currentPath();
 
+    QString firstDataRoot;
     for (const QString& base : bases)
     {
         QDir dir(base);
         for (int depth = 0; depth < 8; ++depth)
         {
-            if (QFileInfo::exists(dir.filePath("Data")))
+            const QString dataPath = dir.filePath("Data");
+            const QFileInfo dataInfo(dataPath);
+            if (dataInfo.exists() && dataInfo.isDir())
             {
-                return dir.absolutePath();
+                if (firstDataRoot.isEmpty())
+                {
+                    firstDataRoot = dir.absolutePath();
+                }
+                if (QFileInfo::exists(QDir(dataPath).filePath("ConfigStore.db")))
+                {
+                    return dir.absolutePath();
+                }
             }
             if (!dir.cdUp())
             {
@@ -75,6 +76,10 @@ QString FindProjectRoot()
         }
     }
 
+    if (!firstDataRoot.isEmpty())
+    {
+        return firstDataRoot;
+    }
     return QDir::currentPath();
 }
 
@@ -96,15 +101,20 @@ QSqlDatabase OpenDatabase()
     }
 
     const QString dbPath = ConfigDatabase::DatabasePath();
-    if (!QFileInfo::exists(dbPath))
+    const QFileInfo dbInfo(dbPath);
+    QDir dbDir = dbInfo.dir();
+    if (!dbDir.exists() && !dbDir.mkpath(QStringLiteral(".")))
     {
         return QSqlDatabase();
     }
-    QFile dbFile(dbPath);
-    const QFileDevice::Permissions permissions = dbFile.permissions();
-    if ((permissions & QFileDevice::WriteOwner) == 0 || (permissions & QFileDevice::WriteUser) == 0)
+    if (dbInfo.exists())
     {
-        dbFile.setPermissions(permissions | QFileDevice::WriteOwner | QFileDevice::WriteUser);
+        QFile dbFile(dbPath);
+        const QFileDevice::Permissions permissions = dbFile.permissions();
+        if ((permissions & QFileDevice::WriteOwner) == 0 || (permissions & QFileDevice::WriteUser) == 0)
+        {
+            dbFile.setPermissions(permissions | QFileDevice::WriteOwner | QFileDevice::WriteUser);
+        }
     }
 
     QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
@@ -201,8 +211,9 @@ bool UnprotectText(const QString& storedText, QString* plainText)
             return text;
         };
 
-    const QByteArray nonce = QByteArray::fromBase64(paddedBase64(parts.at(2).toLatin1()));
-    QByteArray bytes = QByteArray::fromBase64(paddedBase64(parts.at(3).toLatin1()));
+    constexpr auto base64Options = QByteArray::Base64Encoding | QByteArray::IgnoreBase64DecodingErrors;
+    const QByteArray nonce = QByteArray::fromBase64(paddedBase64(parts.at(2).toLatin1()), base64Options);
+    QByteArray bytes = QByteArray::fromBase64(paddedBase64(parts.at(3).toLatin1()), base64Options);
     if (nonce.size() != 16)
     {
         return false;
@@ -290,127 +301,199 @@ QString NormalizeSourceKey(const QString& keyName)
     return cleaned;
 }
 
-QString CleanDbName(QString text)
+QString NormalizeScopeId(const QString& scopeId)
 {
-    text = text.trimmed();
-    text.replace('\\', '/');
-    text.replace('_', ' ');
-    text.replace(QRegularExpression(QStringLiteral("\\s+")), QStringLiteral(" "));
-    return text.trimmed();
+    const QString cleaned = scopeId.trimmed();
+    return cleaned.isNull() ? QString::fromLatin1("") : cleaned;
 }
 
-QString BaseFileNameForDb(const QString& sourcePath)
+bool IsSensitiveSettingKey(const QString& keyName)
 {
-    QString name = QFileInfo(sourcePath).completeBaseName();
-    if (name.isEmpty())
+    const QString lower = keyName.toLower();
+    return lower.contains(QStringLiteral("password"))
+        || lower.contains(QStringLiteral("passwd"))
+        || lower.contains(QStringLiteral("pass"))
+        || lower.contains(QStringLiteral("token"))
+        || lower.contains(QStringLiteral("secret"));
+}
+
+QString ModuleBaseFromStoredFileName(const QString& storedFileName)
+{
+    const QString baseName = QFileInfo(storedFileName).completeBaseName().trimmed();
+    if (baseName.compare(QStringLiteral("ContralUnitInfo"), Qt::CaseInsensitive) == 0)
     {
-        name = QFileInfo(sourcePath).fileName();
+        return QStringLiteral("ControlUnits");
     }
-    return CleanDbName(name);
+    if (baseName.compare(QStringLiteral("RobotPara"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("RobotPara");
+    }
+    if (baseName.compare(QStringLiteral("CameraParam"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("CameraParam");
+    }
+    if (baseName.startsWith(QStringLiteral("HandEyeMatrix_"), Qt::CaseInsensitive))
+    {
+        return QStringLiteral("HandEyeMatrix/%1").arg(baseName.mid(QStringLiteral("HandEyeMatrix_").size()));
+    }
+    if (baseName.compare(QStringLiteral("HandEyeMatrix"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("HandEyeMatrix");
+    }
+    if (baseName.startsWith(QStringLiteral("HandEyeCalibration_"), Qt::CaseInsensitive))
+    {
+        return QStringLiteral("HandEyeCalibration/%1").arg(baseName.mid(QStringLiteral("HandEyeCalibration_").size()));
+    }
+    if (baseName.compare(QStringLiteral("LineScanParam"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("LineScanParam");
+    }
+    if (baseName.compare(QStringLiteral("LineCoarseScanParam"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("LineCoarseScanParam");
+    }
+    if (baseName.compare(QStringLiteral("MeasureWeldParam"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("MeasureWeldParam");
+    }
+    if (baseName.compare(QStringLiteral("WeldPoseCompParam"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("WeldPoseCompParam");
+    }
+    if (baseName.compare(QStringLiteral("WeldSeamCompParam"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("WeldSeamCompParam");
+    }
+    if (baseName.compare(QStringLiteral("WeaveDate"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("WeldProcess/WeaveData");
+    }
+    if (baseName.compare(QStringLiteral("WeldPara"), Qt::CaseInsensitive) == 0)
+    {
+        return QStringLiteral("WeldProcess/WeldParameters");
+    }
+    return NormalizeSection(baseName.isEmpty() ? QFileInfo(storedFileName).fileName() : baseName);
 }
 
-ConfigFileIdentity BuildFileIdentity(const QString& fileName)
+ScopedSettingIdentity BuildScopedFileIdentity(const QString& fileName, const QString& keyName)
 {
-    ConfigFileIdentity identity;
-    identity.sourcePath = ConfigDatabase::NormalizeFilePath(fileName);
+    ScopedSettingIdentity identity;
+    const QString normalizedPath = ConfigDatabase::NormalizeFilePath(fileName);
+    const QStringList parts = normalizedPath.split('/', Qt::SkipEmptyParts);
 
-    const QStringList parts = identity.sourcePath.split('/', Qt::SkipEmptyParts);
+    identity.scopeType = QStringLiteral("global");
+    identity.scopeId.clear();
+
+    QString storedFileName = QFileInfo(normalizedPath).fileName();
     if (!parts.isEmpty() && parts.first().compare(QStringLiteral("Data"), Qt::CaseInsensitive) == 0)
     {
-        identity.category = QStringLiteral("数据配置");
-        if (parts.size() >= 3 && parts.at(1).startsWith(QStringLiteral("Robot"), Qt::CaseInsensitive))
+        if (parts.size() >= 4 && parts.at(1).compare(QStringLiteral("WorkpieceTemplates"), Qt::CaseInsensitive) == 0)
         {
-            identity.robotName = CleanDbName(parts.at(1));
+            identity.scopeType = QStringLiteral("workpiece_template");
+            identity.scopeId = parts.at(2).trimmed();
+            storedFileName = parts.mid(3).join('/');
+        }
+        else if (parts.size() >= 3)
+        {
+            identity.scopeType = QStringLiteral("robot");
+            identity.scopeId = parts.at(1).trimmed();
+            storedFileName = parts.mid(2).join('/');
+        }
+        else if (parts.size() >= 2)
+        {
+            storedFileName = parts.mid(1).join('/');
         }
     }
     else if (!parts.isEmpty() && parts.first().compare(QStringLiteral("Result"), Qt::CaseInsensitive) == 0)
     {
-        identity.category = QStringLiteral("结果数据");
-        if (parts.size() >= 3 && parts.at(1).startsWith(QStringLiteral("Robot"), Qt::CaseInsensitive))
+        identity.scopeType = QStringLiteral("result");
+        if (parts.size() >= 3)
         {
-            identity.robotName = CleanDbName(parts.at(1));
-        }
-    }
-    else
-    {
-        identity.category = QStringLiteral("配置数据");
-    }
-
-    if (identity.robotName.isEmpty())
-    {
-        identity.robotName = QStringLiteral("全局");
-    }
-    identity.fileName = BaseFileNameForDb(identity.sourcePath);
-    if (identity.fileName.isEmpty())
-    {
-        identity.fileName = QStringLiteral("未命名");
-    }
-    return identity;
-}
-
-void SplitKeyName(const QString& sourceKey, QString* itemName, QString* keyName)
-{
-    QString localItem;
-    QString localKey = sourceKey;
-    const QStringList pathParts = sourceKey.split('/', Qt::SkipEmptyParts);
-    if (pathParts.size() > 1)
-    {
-        QStringList itemParts = pathParts;
-        localKey = itemParts.takeLast();
-        localItem = itemParts.join(QStringLiteral(" / "));
-    }
-    else
-    {
-        const int underscore = sourceKey.lastIndexOf('_');
-        if (underscore > 0 && underscore + 1 < sourceKey.size())
-        {
-            localItem = sourceKey.left(underscore);
-            localKey = sourceKey.mid(underscore + 1);
+            identity.scopeId = parts.at(1).trimmed();
+            storedFileName = parts.mid(2).join('/');
         }
     }
 
-    if (itemName != nullptr)
-    {
-        *itemName = CleanDbName(localItem);
-    }
-    if (keyName != nullptr)
-    {
-        *keyName = CleanDbName(localKey);
-    }
+    identity.module = NormalizeSection(ModuleBaseFromStoredFileName(storedFileName));
+    identity.keyName = NormalizeSourceKey(keyName.isEmpty() ? QStringLiteral("Content") : keyName);
+    identity.valueType = QStringLiteral("text");
+    identity.sensitive = IsSensitiveSettingKey(identity.keyName);
+    identity.valid = !identity.scopeType.trimmed().isEmpty()
+        && !identity.module.trimmed().isEmpty()
+        && !identity.keyName.trimmed().isEmpty();
+    return identity;
 }
 
-ConfigIniIdentity BuildIniIdentity(const QString& fileName, const QString& sectionName, const QString& keyName)
+ScopedSettingIdentity BuildScopedIniIdentity(const QString& fileName, const QString& sectionName, const QString& keyName)
 {
-    ConfigIniIdentity identity;
-    identity.file = BuildFileIdentity(fileName);
-    identity.sourceSection = NormalizeSection(sectionName);
-    identity.sourceKey = NormalizeSourceKey(keyName);
-
-    const QStringList sectionParts = identity.sourceSection.split('/', Qt::SkipEmptyParts);
-    identity.groupName = sectionParts.isEmpty() ? QStringLiteral("默认") : CleanDbName(sectionParts.first());
-    QString sectionItem;
-    if (sectionParts.size() > 1)
+    ScopedSettingIdentity identity = BuildScopedFileIdentity(fileName, keyName);
+    const QString section = NormalizeSection(sectionName);
+    if (!section.isEmpty())
     {
-        sectionItem = sectionParts.mid(1).join(QStringLiteral(" / "));
+        identity.module = NormalizeSection(identity.module + QStringLiteral("/") + section);
     }
-
-    QString keyItem;
-    SplitKeyName(identity.sourceKey, &keyItem, &identity.keyName);
-    QStringList itemParts;
-    if (!sectionItem.trimmed().isEmpty())
-    {
-        itemParts << sectionItem;
-    }
-    if (!keyItem.trimmed().isEmpty())
-    {
-        itemParts << keyItem;
-    }
-    identity.itemName = CleanDbName(itemParts.join(QStringLiteral(" / ")));
-    if (identity.keyName.isEmpty())
-    {
-        identity.keyName = QStringLiteral("值");
-    }
+    identity.valueType = QStringLiteral("string");
+    identity.sensitive = identity.sensitive || IsSensitiveSettingKey(section) || IsSensitiveSettingKey(keyName);
+    identity.valid = identity.valid && !identity.module.isEmpty();
     return identity;
+}
+
+bool ReadScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& identity, QString* value)
+{
+    if (!identity.valid || value == nullptr)
+    {
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare("SELECT value_text, encrypted FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
+    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(NormalizeSection(identity.module));
+    query.addBindValue(NormalizeSourceKey(identity.keyName));
+    if (!query.exec())
+    {
+        return false;
+    }
+    if (!query.next())
+    {
+        return false;
+    }
+    const QString storedText = query.value(0).toString();
+    const int encrypted = query.value(1).toInt();
+    return DecodeStoredText(storedText, encrypted, value);
+}
+
+bool WriteScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& identity, const QString& value)
+{
+    if (!identity.valid)
+    {
+        return false;
+    }
+
+    int encrypted = 0;
+    const QString storedText = identity.sensitive
+        ? ProtectText(value)
+        : StoredTextForWrite(db, value, &encrypted);
+    if (identity.sensitive)
+    {
+        encrypted = 1;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(
+        "INSERT OR REPLACE INTO settings("
+        "scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))");
+    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(NormalizeSection(identity.module));
+    query.addBindValue(NormalizeSourceKey(identity.keyName));
+    query.addBindValue(storedText);
+    query.addBindValue(identity.valueType.trimmed().isEmpty() ? QStringLiteral("string") : identity.valueType.trimmed().toLower());
+    query.addBindValue(identity.sensitive ? 1 : 0);
+    query.addBindValue(encrypted);
+    return query.exec();
 }
 
 QStringList TableColumns(QSqlDatabase& db, const QString& tableName)
@@ -450,35 +533,20 @@ bool CreateCurrentTables(QSqlDatabase& db)
         "key TEXT PRIMARY KEY,"
         "value TEXT NOT NULL)"))
         && ExecSql(db, QStringLiteral(
-            "CREATE TABLE IF NOT EXISTS ini_values ("
-            "category TEXT NOT NULL DEFAULT '',"
-            "robot_name TEXT NOT NULL DEFAULT '',"
-            "file_name TEXT NOT NULL DEFAULT '',"
-            "group_name TEXT NOT NULL DEFAULT '',"
-            "item_name TEXT NOT NULL DEFAULT '',"
-            "key_name TEXT NOT NULL DEFAULT '',"
-            "source_path TEXT NOT NULL,"
-            "source_section TEXT NOT NULL,"
-            "source_key TEXT NOT NULL,"
+            "CREATE TABLE IF NOT EXISTS settings ("
+            "scope_type TEXT NOT NULL,"
+            "scope_id TEXT NOT NULL DEFAULT '',"
+            "module TEXT NOT NULL,"
+            "key_name TEXT NOT NULL,"
             "value_text TEXT NOT NULL,"
+            "value_type TEXT NOT NULL DEFAULT 'string',"
+            "sensitive INTEGER NOT NULL DEFAULT 0,"
             "encrypted INTEGER NOT NULL DEFAULT 0,"
             "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
-            "PRIMARY KEY(source_path, source_section, source_key))"))
+            "PRIMARY KEY(scope_type, scope_id, module, key_name))"))
         && ExecSql(db, QStringLiteral(
-            "CREATE INDEX IF NOT EXISTS idx_ini_values_display "
-            "ON ini_values(category, robot_name, file_name, group_name, item_name, key_name)"))
-        && ExecSql(db, QStringLiteral(
-            "CREATE TABLE IF NOT EXISTS text_files ("
-            "category TEXT NOT NULL DEFAULT '',"
-            "robot_name TEXT NOT NULL DEFAULT '',"
-            "file_name TEXT NOT NULL DEFAULT '',"
-            "source_path TEXT PRIMARY KEY,"
-            "content_text TEXT NOT NULL,"
-            "encrypted INTEGER NOT NULL DEFAULT 0,"
-            "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
-        && ExecSql(db, QStringLiteral(
-            "CREATE INDEX IF NOT EXISTS idx_text_files_display "
-            "ON text_files(category, robot_name, file_name)"));
+            "CREATE INDEX IF NOT EXISTS idx_settings_scope "
+            "ON settings(scope_type, scope_id, module)"));
 }
 
 bool SetSchemaVersion(QSqlDatabase& db)
@@ -496,138 +564,17 @@ bool SetSchemaVersion(QSqlDatabase& db)
     return encryptQuery.exec();
 }
 
-QString UniqueLegacyTableName(QSqlDatabase& db, const QString& baseName)
+bool HasCurrentSettingsColumns(QSqlDatabase& db)
 {
-    QString name = baseName + QStringLiteral("_legacy");
-    int suffix = 1;
-    while (TableExists(db, name))
-    {
-        name = QStringLiteral("%1_legacy_%2").arg(baseName).arg(suffix++);
-    }
-    return name;
-}
-
-bool MigrateLegacySchema(QSqlDatabase& db)
-{
-    if (!TableExists(db, QStringLiteral("ini_values")) || !TableExists(db, QStringLiteral("text_files")))
-    {
-        return false;
-    }
-
-    const QString legacyIni = UniqueLegacyTableName(db, QStringLiteral("ini_values"));
-    const QString legacyText = UniqueLegacyTableName(db, QStringLiteral("text_files"));
-    if (!db.transaction())
-    {
-        return false;
-    }
-
-    bool ok = ExecSql(db, QStringLiteral("ALTER TABLE ini_values RENAME TO %1").arg(legacyIni))
-        && ExecSql(db, QStringLiteral("ALTER TABLE text_files RENAME TO %1").arg(legacyText))
-        && CreateCurrentTables(db);
-    if (!ok)
-    {
-        db.rollback();
-        return false;
-    }
-
-    QSqlQuery legacyIniQuery(db);
-    if (!legacyIniQuery.exec(QStringLiteral(
-        "SELECT file_path, section_name, key_name, value_text, encrypted, updated_at FROM %1")
-        .arg(legacyIni)))
-    {
-        db.rollback();
-        return false;
-    }
-
-    QSqlQuery insertIni(db);
-    insertIni.prepare(
-        "INSERT OR REPLACE INTO ini_values("
-        "category, robot_name, file_name, group_name, item_name, key_name, "
-        "source_path, source_section, source_key, value_text, encrypted, updated_at) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-
-    while (legacyIniQuery.next())
-    {
-        const ConfigIniIdentity identity = BuildIniIdentity(
-            legacyIniQuery.value(0).toString(),
-            legacyIniQuery.value(1).toString(),
-            legacyIniQuery.value(2).toString());
-        insertIni.addBindValue(identity.file.category);
-        insertIni.addBindValue(identity.file.robotName);
-        insertIni.addBindValue(identity.file.fileName);
-        insertIni.addBindValue(identity.groupName);
-        insertIni.addBindValue(identity.itemName);
-        insertIni.addBindValue(identity.keyName);
-        insertIni.addBindValue(identity.file.sourcePath);
-        insertIni.addBindValue(identity.sourceSection);
-        insertIni.addBindValue(identity.sourceKey);
-        insertIni.addBindValue(legacyIniQuery.value(3));
-        insertIni.addBindValue(legacyIniQuery.value(4));
-        insertIni.addBindValue(legacyIniQuery.value(5));
-        if (!insertIni.exec())
-        {
-            db.rollback();
-            return false;
-        }
-    }
-
-    QSqlQuery legacyTextQuery(db);
-    if (!legacyTextQuery.exec(QStringLiteral(
-        "SELECT file_path, content_text, encrypted, updated_at FROM %1")
-        .arg(legacyText)))
-    {
-        db.rollback();
-        return false;
-    }
-
-    QSqlQuery insertText(db);
-    insertText.prepare(
-        "INSERT OR REPLACE INTO text_files("
-        "category, robot_name, file_name, source_path, content_text, encrypted, updated_at) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?)");
-
-    while (legacyTextQuery.next())
-    {
-        const ConfigFileIdentity identity = BuildFileIdentity(legacyTextQuery.value(0).toString());
-        insertText.addBindValue(identity.category);
-        insertText.addBindValue(identity.robotName);
-        insertText.addBindValue(identity.fileName);
-        insertText.addBindValue(identity.sourcePath);
-        insertText.addBindValue(legacyTextQuery.value(1));
-        insertText.addBindValue(legacyTextQuery.value(2));
-        insertText.addBindValue(legacyTextQuery.value(3));
-        if (!insertText.exec())
-        {
-            db.rollback();
-            return false;
-        }
-    }
-
-    ok = ExecSql(db, QStringLiteral("DROP TABLE %1").arg(legacyIni))
-        && ExecSql(db, QStringLiteral("DROP TABLE %1").arg(legacyText))
-        && SetSchemaVersion(db);
-    if (!ok)
-    {
-        db.rollback();
-        return false;
-    }
-    return db.commit();
-}
-
-bool HasCurrentIniColumns(QSqlDatabase& db)
-{
-    const QStringList columns = TableColumns(db, QStringLiteral("ini_values"));
+    const QStringList columns = TableColumns(db, QStringLiteral("settings"));
     const QStringList required = {
-        QStringLiteral("category"),
-        QStringLiteral("robot_name"),
-        QStringLiteral("file_name"),
-        QStringLiteral("group_name"),
-        QStringLiteral("item_name"),
+        QStringLiteral("scope_type"),
+        QStringLiteral("scope_id"),
+        QStringLiteral("module"),
         QStringLiteral("key_name"),
-        QStringLiteral("source_path"),
-        QStringLiteral("source_section"),
-        QStringLiteral("source_key"),
         QStringLiteral("value_text"),
+        QStringLiteral("value_type"),
+        QStringLiteral("sensitive"),
         QStringLiteral("encrypted"),
         QStringLiteral("updated_at")
     };
@@ -637,36 +584,11 @@ bool HasCurrentIniColumns(QSqlDatabase& db)
         });
 }
 
-bool HasLegacyIniColumns(QSqlDatabase& db)
-{
-    const QStringList columns = TableColumns(db, QStringLiteral("ini_values"));
-    return columns.contains(QStringLiteral("file_path"))
-        && columns.contains(QStringLiteral("section_name"))
-        && columns.contains(QStringLiteral("key_name"))
-        && columns.contains(QStringLiteral("value_text"));
-}
-
 bool EnsureCurrentSchema(QSqlDatabase& db)
 {
-    if (!TableExists(db, QStringLiteral("meta")))
-    {
-        return false;
-    }
-
-    QSqlQuery metaQuery(db);
-    metaQuery.prepare("SELECT value FROM meta WHERE key='schema_version'");
-    const QString version = (metaQuery.exec() && metaQuery.next()) ? metaQuery.value(0).toString() : QString();
-    if (version == QString::fromLatin1(kSchemaVersion) && HasCurrentIniColumns(db))
-    {
-        return CreateCurrentTables(db) && SetSchemaVersion(db);
-    }
-
-    if (HasLegacyIniColumns(db))
-    {
-        return MigrateLegacySchema(db);
-    }
-
-    return false;
+    return CreateCurrentTables(db)
+        && HasCurrentSettingsColumns(db)
+        && SetSchemaVersion(db);
 }
 
 QStringList UniqueSorted(QStringList values)
@@ -751,9 +673,20 @@ bool ConfigDatabase::HasIniFile(const std::string& fileName)
         return false;
     }
 
+    const ScopedSettingIdentity identity = BuildScopedFileIdentity(FromUtf8StdString(NormalizeFilePath(fileName)));
+    if (!identity.valid)
+    {
+        return false;
+    }
+    const QString modulePrefix = NormalizeSection(identity.module) + QStringLiteral("/");
+
     QSqlQuery query(db);
-    query.prepare("SELECT 1 FROM ini_values WHERE source_path=? LIMIT 1");
-    query.addBindValue(FromUtf8StdString(NormalizeFilePath(fileName)));
+    query.prepare("SELECT 1 FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?) LIMIT 1");
+    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(NormalizeSection(identity.module));
+    query.addBindValue(modulePrefix.size());
+    query.addBindValue(modulePrefix);
     return query.exec() && query.next();
 }
 
@@ -780,26 +713,21 @@ bool ConfigDatabase::ReadIniValue(
         return false;
     }
 
-    QSqlQuery query(db);
-    const ConfigIniIdentity identity = BuildIniIdentity(
+    const ScopedSettingIdentity scopedIdentity = BuildScopedIniIdentity(
         FromUtf8StdString(NormalizeFilePath(fileName)),
         DecodeMaybeLocal(sectionName),
         DecodeMaybeLocal(keyName));
-    query.prepare("SELECT value_text, encrypted FROM ini_values WHERE source_path=? AND source_section=? AND source_key=?");
-    query.addBindValue(identity.file.sourcePath);
-    query.addBindValue(identity.sourceSection);
-    query.addBindValue(identity.sourceKey);
-    if (!query.exec() || !query.next())
+    if (!scopedIdentity.valid)
+    {
+        return false;
+    }
+    QString scopedValue;
+    if (!ReadScopedSettingValue(db, scopedIdentity, &scopedValue))
     {
         return false;
     }
 
-    QString plainText;
-    if (!DecodeStoredText(query.value(0).toString(), query.value(1).toInt(), &plainText))
-    {
-        return false;
-    }
-    const QByteArray bytes = plainText.toUtf8();
+    const QByteArray bytes = scopedValue.toUtf8();
     *value = std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
     return true;
 }
@@ -816,30 +744,11 @@ bool ConfigDatabase::WriteIniValue(
         return false;
     }
 
-    int encrypted = 0;
-    const QString storedText = StoredTextForWrite(db, DecodeMaybeLocal(value), &encrypted);
-
-    const ConfigIniIdentity identity = BuildIniIdentity(
+    const ScopedSettingIdentity scopedIdentity = BuildScopedIniIdentity(
         FromUtf8StdString(NormalizeFilePath(fileName)),
         DecodeMaybeLocal(sectionName),
         DecodeMaybeLocal(keyName));
-    QSqlQuery query(db);
-    query.prepare("INSERT OR REPLACE INTO ini_values("
-        "category, robot_name, file_name, group_name, item_name, key_name, "
-        "source_path, source_section, source_key, value_text, encrypted, updated_at) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))");
-    query.addBindValue(identity.file.category);
-    query.addBindValue(identity.file.robotName);
-    query.addBindValue(identity.file.fileName);
-    query.addBindValue(identity.groupName);
-    query.addBindValue(identity.itemName);
-    query.addBindValue(identity.keyName);
-    query.addBindValue(identity.file.sourcePath);
-    query.addBindValue(identity.sourceSection);
-    query.addBindValue(identity.sourceKey);
-    query.addBindValue(storedText);
-    query.addBindValue(encrypted);
-    return query.exec();
+    return WriteScopedSettingValue(db, scopedIdentity, DecodeMaybeLocal(value));
 }
 
 bool ConfigDatabase::HasTextFile(const std::string& fileName)
@@ -850,10 +759,9 @@ bool ConfigDatabase::HasTextFile(const std::string& fileName)
         return false;
     }
 
-    QSqlQuery query(db);
-    query.prepare("SELECT 1 FROM text_files WHERE source_path=? LIMIT 1");
-    query.addBindValue(FromUtf8StdString(NormalizeFilePath(fileName)));
-    return query.exec() && query.next();
+    const ScopedSettingIdentity identity = BuildScopedFileIdentity(FromUtf8StdString(NormalizeFilePath(fileName)));
+    QString value;
+    return ReadScopedSettingValue(db, identity, &value);
 }
 
 bool ConfigDatabase::HasTextFile(const QString& fileName)
@@ -875,20 +783,13 @@ bool ConfigDatabase::ReadTextFile(const std::string& fileName, std::string* cont
         return false;
     }
 
-    QSqlQuery query(db);
-    query.prepare("SELECT content_text, encrypted FROM text_files WHERE source_path=?");
-    query.addBindValue(FromUtf8StdString(NormalizeFilePath(fileName)));
-    if (!query.exec() || !query.next())
+    const ScopedSettingIdentity identity = BuildScopedFileIdentity(FromUtf8StdString(NormalizeFilePath(fileName)));
+    QString scopedValue;
+    if (!ReadScopedSettingValue(db, identity, &scopedValue))
     {
         return false;
     }
-
-    QString plainText;
-    if (!DecodeStoredText(query.value(0).toString(), query.value(1).toInt(), &plainText))
-    {
-        return false;
-    }
-    const QByteArray bytes = plainText.toUtf8();
+    const QByteArray bytes = scopedValue.toUtf8();
     *content = std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
     return true;
 }
@@ -901,57 +802,23 @@ bool ConfigDatabase::WriteTextFile(const std::string& fileName, const std::strin
         return false;
     }
 
-    int encrypted = 0;
-    const QString storedText = StoredTextForWrite(db, DecodeMaybeLocal(content), &encrypted);
-
-    const ConfigFileIdentity identity = BuildFileIdentity(FromUtf8StdString(NormalizeFilePath(fileName)));
-    QSqlQuery query(db);
-    query.prepare("INSERT OR REPLACE INTO text_files("
-        "category, robot_name, file_name, source_path, content_text, encrypted, updated_at) "
-        "VALUES(?, ?, ?, ?, ?, ?, datetime('now'))");
-    query.addBindValue(identity.category);
-    query.addBindValue(identity.robotName);
-    query.addBindValue(identity.fileName);
-    query.addBindValue(identity.sourcePath);
-    query.addBindValue(storedText);
-    query.addBindValue(encrypted);
-    return query.exec();
+    ScopedSettingIdentity identity = BuildScopedFileIdentity(FromUtf8StdString(NormalizeFilePath(fileName)));
+    identity.valueType = QStringLiteral("text");
+    return WriteScopedSettingValue(db, identity, DecodeMaybeLocal(content));
 }
 
 bool ConfigDatabase::CopyTextFile(const QString& sourceFileName, const QString& targetFileName, bool overwriteExisting)
 {
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
+    std::string content;
+    if (!ReadTextFile(sourceFileName.toUtf8().constData(), &content))
     {
         return false;
     }
-
-    if (!HasTextFile(sourceFileName))
+    if (!overwriteExisting && HasTextFile(targetFileName))
     {
-        return false;
+        return true;
     }
-
-    QSqlQuery sourceQuery(db);
-    sourceQuery.prepare("SELECT content_text, encrypted FROM text_files WHERE source_path=?");
-    sourceQuery.addBindValue(NormalizeFilePath(sourceFileName));
-    if (!sourceQuery.exec() || !sourceQuery.next())
-    {
-        return false;
-    }
-
-    const ConfigFileIdentity target = BuildFileIdentity(targetFileName);
-    QSqlQuery query(db);
-    query.prepare(QStringLiteral("INSERT OR %1 INTO text_files("
-        "category, robot_name, file_name, source_path, content_text, encrypted, updated_at) "
-        "VALUES(?, ?, ?, ?, ?, ?, datetime('now'))")
-        .arg(overwriteExisting ? QStringLiteral("REPLACE") : QStringLiteral("IGNORE")));
-    query.addBindValue(target.category);
-    query.addBindValue(target.robotName);
-    query.addBindValue(target.fileName);
-    query.addBindValue(target.sourcePath);
-    query.addBindValue(sourceQuery.value(0));
-    query.addBindValue(sourceQuery.value(1));
-    return query.exec();
+    return WriteTextFile(targetFileName.toUtf8().constData(), content);
 }
 
 bool ConfigDatabase::RemoveConfigPathPrefix(const QString& sourcePathPrefix)
@@ -973,32 +840,69 @@ bool ConfigDatabase::RemoveConfigPathPrefix(const QString& sourcePathPrefix)
         return false;
     }
 
-    const QString childPrefix = normalized + QStringLiteral("/");
     if (!db.transaction())
     {
         return false;
     }
 
-    QSqlQuery iniQuery(db);
-    iniQuery.prepare("DELETE FROM ini_values WHERE source_path=? OR substr(source_path, 1, ?)=?");
-    iniQuery.addBindValue(normalized);
-    iniQuery.addBindValue(childPrefix.size());
-    iniQuery.addBindValue(childPrefix);
-    if (!iniQuery.exec())
+    const QStringList prefixParts = normalized.split('/', Qt::SkipEmptyParts);
+    QString deleteScopeType;
+    QString deleteScopeId;
+    if (prefixParts.size() == 2
+        && prefixParts.at(0).compare(QStringLiteral("Data"), Qt::CaseInsensitive) == 0)
     {
-        db.rollback();
-        return false;
+        deleteScopeType = QStringLiteral("robot");
+        deleteScopeId = prefixParts.at(1);
+    }
+    else if (prefixParts.size() == 3
+        && prefixParts.at(0).compare(QStringLiteral("Data"), Qt::CaseInsensitive) == 0
+        && prefixParts.at(1).compare(QStringLiteral("WorkpieceTemplates"), Qt::CaseInsensitive) == 0)
+    {
+        deleteScopeType = QStringLiteral("workpiece_template");
+        deleteScopeId = prefixParts.at(2);
     }
 
-    QSqlQuery textQuery(db);
-    textQuery.prepare("DELETE FROM text_files WHERE source_path=? OR substr(source_path, 1, ?)=?");
-    textQuery.addBindValue(normalized);
-    textQuery.addBindValue(childPrefix.size());
-    textQuery.addBindValue(childPrefix);
-    if (!textQuery.exec())
+    if (!deleteScopeType.isEmpty())
     {
-        db.rollback();
-        return false;
+        QSqlQuery scopedDelete(db);
+        scopedDelete.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=?");
+        scopedDelete.addBindValue(NormalizeSection(deleteScopeType).toLower());
+        scopedDelete.addBindValue(NormalizeScopeId(deleteScopeId));
+        if (!scopedDelete.exec())
+        {
+            db.rollback();
+            return false;
+        }
+    }
+    else
+    {
+        const ScopedSettingIdentity prefixIdentity = BuildScopedFileIdentity(normalized);
+        if (prefixIdentity.valid)
+        {
+            QSqlQuery scopedDelete(db);
+            if (normalized.endsWith(QStringLiteral(".ini"), Qt::CaseInsensitive)
+                || normalized.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive))
+            {
+                const QString modulePrefix = NormalizeSection(prefixIdentity.module) + QStringLiteral("/");
+                scopedDelete.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
+                scopedDelete.addBindValue(NormalizeSection(prefixIdentity.scopeType).toLower());
+                scopedDelete.addBindValue(NormalizeScopeId(prefixIdentity.scopeId));
+                scopedDelete.addBindValue(NormalizeSection(prefixIdentity.module));
+                scopedDelete.addBindValue(modulePrefix.size());
+                scopedDelete.addBindValue(modulePrefix);
+            }
+            else
+            {
+                scopedDelete.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=?");
+                scopedDelete.addBindValue(NormalizeSection(prefixIdentity.scopeType).toLower());
+                scopedDelete.addBindValue(NormalizeScopeId(prefixIdentity.scopeId));
+            }
+            if (!scopedDelete.exec())
+            {
+                db.rollback();
+                return false;
+            }
+        }
     }
 
     return db.commit();
@@ -1012,13 +916,24 @@ QStringList ConfigDatabase::ListIniGroups(const QString& fileName, const QString
         return QStringList();
     }
 
+    const ScopedSettingIdentity identity = BuildScopedFileIdentity(fileName);
+    if (!identity.valid)
+    {
+        return QStringList();
+    }
+    const QString baseModule = NormalizeSection(identity.module);
+    const QString basePrefix = baseModule + QStringLiteral("/");
     const QString normalizedParent = NormalizeSection(parentGroup);
     const QString prefix = normalizedParent.isEmpty() ? QString() : normalizedParent + "/";
     QStringList groups;
 
     QSqlQuery query(db);
-    query.prepare("SELECT DISTINCT source_section FROM ini_values WHERE source_path=?");
-    query.addBindValue(NormalizeFilePath(fileName));
+    query.prepare("SELECT DISTINCT module FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
+    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(baseModule);
+    query.addBindValue(basePrefix.size());
+    query.addBindValue(basePrefix);
     if (!query.exec())
     {
         return QStringList();
@@ -1026,7 +941,8 @@ QStringList ConfigDatabase::ListIniGroups(const QString& fileName, const QString
 
     while (query.next())
     {
-        const QString section = NormalizeSection(query.value(0).toString());
+        const QString module = NormalizeSection(query.value(0).toString());
+        const QString section = module == baseModule ? QString() : module.mid(basePrefix.size());
         if (!section.startsWith(prefix))
         {
             continue;
@@ -1049,19 +965,36 @@ QStringList ConfigDatabase::ListIniSections(const QString& fileName)
         return QStringList();
     }
 
+    const ScopedSettingIdentity identity = BuildScopedFileIdentity(fileName);
+    if (!identity.valid)
+    {
+        return QStringList();
+    }
+    const QString baseModule = NormalizeSection(identity.module);
+    const QString basePrefix = baseModule + QStringLiteral("/");
+
     QStringList sections;
     QSqlQuery query(db);
-    query.prepare("SELECT DISTINCT source_section FROM ini_values WHERE source_path=? ORDER BY source_section COLLATE NOCASE");
-    query.addBindValue(NormalizeFilePath(fileName));
+    query.prepare("SELECT DISTINCT module FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?) ORDER BY module COLLATE NOCASE");
+    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(baseModule);
+    query.addBindValue(basePrefix.size());
+    query.addBindValue(basePrefix);
     if (!query.exec())
     {
         return QStringList();
     }
     while (query.next())
     {
-        sections << query.value(0).toString();
+        const QString module = NormalizeSection(query.value(0).toString());
+        const QString section = module == baseModule ? QString() : module.mid(basePrefix.size());
+        if (!section.isEmpty())
+        {
+            sections << section;
+        }
     }
-    return sections;
+    return UniqueSorted(sections);
 }
 
 bool ConfigDatabase::CopyIniFile(const QString& sourceFileName, const QString& targetFileName, bool overwriteExisting)
@@ -1072,7 +1005,9 @@ bool ConfigDatabase::CopyIniFile(const QString& sourceFileName, const QString& t
         return false;
     }
 
-    if (!HasIniFile(sourceFileName))
+    const ScopedSettingIdentity source = BuildScopedFileIdentity(sourceFileName);
+    const ScopedSettingIdentity target = BuildScopedFileIdentity(targetFileName);
+    if (!source.valid || !target.valid || !HasIniFile(sourceFileName))
     {
         return false;
     }
@@ -1080,8 +1015,13 @@ bool ConfigDatabase::CopyIniFile(const QString& sourceFileName, const QString& t
     if (overwriteExisting)
     {
         QSqlQuery deleteQuery(db);
-        deleteQuery.prepare("DELETE FROM ini_values WHERE source_path=?");
-        deleteQuery.addBindValue(NormalizeFilePath(targetFileName));
+        const QString targetPrefix = NormalizeSection(target.module) + QStringLiteral("/");
+        deleteQuery.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
+        deleteQuery.addBindValue(NormalizeSection(target.scopeType).toLower());
+        deleteQuery.addBindValue(NormalizeScopeId(target.scopeId));
+        deleteQuery.addBindValue(NormalizeSection(target.module));
+        deleteQuery.addBindValue(targetPrefix.size());
+        deleteQuery.addBindValue(targetPrefix);
         if (!deleteQuery.exec())
         {
             return false;
@@ -1089,36 +1029,41 @@ bool ConfigDatabase::CopyIniFile(const QString& sourceFileName, const QString& t
     }
 
     QSqlQuery sourceQuery(db);
-    sourceQuery.prepare("SELECT source_section, source_key, value_text, encrypted FROM ini_values WHERE source_path=?");
-    sourceQuery.addBindValue(NormalizeFilePath(sourceFileName));
+    const QString sourceModule = NormalizeSection(source.module);
+    const QString sourcePrefix = sourceModule + QStringLiteral("/");
+    sourceQuery.prepare(
+        "SELECT module, key_name, value_text, value_type, sensitive, encrypted, updated_at "
+        "FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
+    sourceQuery.addBindValue(NormalizeSection(source.scopeType).toLower());
+    sourceQuery.addBindValue(NormalizeScopeId(source.scopeId));
+    sourceQuery.addBindValue(sourceModule);
+    sourceQuery.addBindValue(sourcePrefix.size());
+    sourceQuery.addBindValue(sourcePrefix);
     if (!sourceQuery.exec())
     {
         return false;
     }
 
     QSqlQuery insertQuery(db);
-    insertQuery.prepare(QStringLiteral("INSERT OR %1 INTO ini_values("
-        "category, robot_name, file_name, group_name, item_name, key_name, "
-        "source_path, source_section, source_key, value_text, encrypted, updated_at) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))")
+    insertQuery.prepare(QStringLiteral("INSERT OR %1 INTO settings("
+        "scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .arg(overwriteExisting ? QStringLiteral("REPLACE") : QStringLiteral("IGNORE")));
     while (sourceQuery.next())
     {
-        const ConfigIniIdentity identity = BuildIniIdentity(
-            targetFileName,
-            sourceQuery.value(0).toString(),
-            sourceQuery.value(1).toString());
-        insertQuery.addBindValue(identity.file.category);
-        insertQuery.addBindValue(identity.file.robotName);
-        insertQuery.addBindValue(identity.file.fileName);
-        insertQuery.addBindValue(identity.groupName);
-        insertQuery.addBindValue(identity.itemName);
-        insertQuery.addBindValue(identity.keyName);
-        insertQuery.addBindValue(identity.file.sourcePath);
-        insertQuery.addBindValue(identity.sourceSection);
-        insertQuery.addBindValue(identity.sourceKey);
+        const QString sourceModuleValue = NormalizeSection(sourceQuery.value(0).toString());
+        const QString suffix = sourceModuleValue == sourceModule
+            ? QString()
+            : sourceModuleValue.mid(sourceModule.size());
+        insertQuery.addBindValue(NormalizeSection(target.scopeType).toLower());
+        insertQuery.addBindValue(NormalizeScopeId(target.scopeId));
+        insertQuery.addBindValue(NormalizeSection(target.module + suffix));
+        insertQuery.addBindValue(NormalizeSourceKey(sourceQuery.value(1).toString()));
         insertQuery.addBindValue(sourceQuery.value(2));
         insertQuery.addBindValue(sourceQuery.value(3));
+        insertQuery.addBindValue(sourceQuery.value(4));
+        insertQuery.addBindValue(sourceQuery.value(5));
+        insertQuery.addBindValue(sourceQuery.value(6));
         if (!insertQuery.exec())
         {
             return false;
@@ -1135,12 +1080,21 @@ bool ConfigDatabase::RemoveIniGroup(const QString& fileName, const QString& grou
         return false;
     }
 
+    const ScopedSettingIdentity identity = BuildScopedFileIdentity(fileName);
+    if (!identity.valid)
+    {
+        return false;
+    }
     const QString normalizedGroup = NormalizeSection(groupName);
+    const QString module = NormalizeSection(identity.module + QStringLiteral("/") + normalizedGroup);
+    const QString modulePrefix = module + QStringLiteral("/");
     QSqlQuery query(db);
-    query.prepare("DELETE FROM ini_values WHERE source_path=? AND (source_section=? OR source_section LIKE ?)");
-    query.addBindValue(NormalizeFilePath(fileName));
-    query.addBindValue(normalizedGroup);
-    query.addBindValue(normalizedGroup + "/%");
+    query.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
+    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(module);
+    query.addBindValue(modulePrefix.size());
+    query.addBindValue(modulePrefix);
     return query.exec();
 }
 
@@ -1153,10 +1107,17 @@ QMap<QString, QString> ConfigDatabase::ReadIniSection(const QString& fileName, c
         return values;
     }
 
+    const ScopedSettingIdentity identity = BuildScopedIniIdentity(fileName, sectionName, QStringLiteral("dummy"));
+    if (!identity.valid)
+    {
+        return values;
+    }
+
     QSqlQuery query(db);
-    query.prepare("SELECT source_key, value_text, encrypted FROM ini_values WHERE source_path=? AND source_section=? ORDER BY source_key COLLATE NOCASE");
-    query.addBindValue(NormalizeFilePath(fileName));
-    query.addBindValue(NormalizeSection(sectionName));
+    query.prepare("SELECT key_name, value_text, encrypted FROM settings WHERE scope_type=? AND scope_id=? AND module=? ORDER BY key_name COLLATE NOCASE");
+    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(NormalizeSection(identity.module));
     if (!query.exec())
     {
         return values;
@@ -1182,44 +1143,66 @@ bool ConfigDatabase::RemoveIniSection(const QString& fileName, const QString& se
         return false;
     }
 
+    const ScopedSettingIdentity identity = BuildScopedIniIdentity(fileName, sectionName, QStringLiteral("dummy"));
+    if (!identity.valid)
+    {
+        return false;
+    }
+
     QSqlQuery query(db);
-    query.prepare("DELETE FROM ini_values WHERE source_path=? AND source_section=?");
-    query.addBindValue(NormalizeFilePath(fileName));
-    query.addBindValue(NormalizeSection(sectionName));
+    query.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND module=?");
+    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(NormalizeSection(identity.module));
     return query.exec();
 }
 
-bool ConfigDatabase::ReadSetting(const QString& fileName, const QString& keyName, QString* value)
+bool ConfigDatabase::ReadScopedSetting(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QString& keyName,
+    QString* value)
 {
     if (value == nullptr)
     {
         return false;
     }
-    const int slash = keyName.lastIndexOf('/');
-    const QString section = slash >= 0 ? keyName.left(slash) : QStringLiteral("Settings");
-    const QString key = slash >= 0 ? keyName.mid(slash + 1) : keyName;
-    std::string raw;
-    if (!ReadIniValue(fileName.toUtf8().constData(), section.toUtf8().constData(), key.toUtf8().constData(), &raw))
+
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
     {
         return false;
     }
-    *value = DecodeMaybeLocal(raw);
-    return true;
+
+    QSqlQuery query(db);
+    query.prepare("SELECT value_text, encrypted FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
+    query.addBindValue(NormalizeSection(scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(scopeId));
+    query.addBindValue(NormalizeSection(moduleName));
+    query.addBindValue(NormalizeSourceKey(keyName));
+    if (!query.exec())
+    {
+        return false;
+    }
+    if (!query.next())
+    {
+        return false;
+    }
+
+    const QString storedText = query.value(0).toString();
+    const int encrypted = query.value(1).toInt();
+    return DecodeStoredText(storedText, encrypted, value);
 }
 
-bool ConfigDatabase::WriteSetting(const QString& fileName, const QString& keyName, const QString& value)
-{
-    const int slash = keyName.lastIndexOf('/');
-    const QString section = slash >= 0 ? keyName.left(slash) : QStringLiteral("Settings");
-    const QString key = slash >= 0 ? keyName.mid(slash + 1) : keyName;
-    return WriteIniValue(
-        fileName.toUtf8().constData(),
-        section.toUtf8().constData(),
-        key.toUtf8().constData(),
-        value.toUtf8().constData());
-}
-
-bool ConfigDatabase::RemoveSetting(const QString& fileName, const QString& keyName)
+bool ConfigDatabase::WriteScopedSetting(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QString& keyName,
+    const QString& value,
+    const QString& valueType,
+    bool sensitive)
 {
     QSqlDatabase db = OpenDatabase();
     if (!db.isValid() || !db.isOpen())
@@ -1227,13 +1210,105 @@ bool ConfigDatabase::RemoveSetting(const QString& fileName, const QString& keyNa
         return false;
     }
 
-    const int slash = keyName.lastIndexOf('/');
-    const QString section = slash >= 0 ? keyName.left(slash) : QStringLiteral("Settings");
-    const QString key = slash >= 0 ? keyName.mid(slash + 1) : keyName;
+    int encrypted = 0;
+    const QString storedText = sensitive
+        ? ProtectText(value)
+        : StoredTextForWrite(db, value, &encrypted);
+    if (sensitive)
+    {
+        encrypted = 1;
+    }
     QSqlQuery query(db);
-    query.prepare("DELETE FROM ini_values WHERE source_path=? AND source_section=? AND source_key=?");
-    query.addBindValue(NormalizeFilePath(fileName));
-    query.addBindValue(NormalizeSection(section));
-    query.addBindValue(NormalizeSourceKey(key));
+    query.prepare(
+        "INSERT OR REPLACE INTO settings("
+        "scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))");
+    query.addBindValue(NormalizeSection(scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(scopeId));
+    query.addBindValue(NormalizeSection(moduleName));
+    query.addBindValue(NormalizeSourceKey(keyName));
+    query.addBindValue(storedText);
+    query.addBindValue(valueType.trimmed().isEmpty() ? QStringLiteral("string") : valueType.trimmed().toLower());
+    query.addBindValue(sensitive ? 1 : 0);
+    query.addBindValue(encrypted);
+    return query.exec();
+}
+
+bool ConfigDatabase::RemoveScopedSetting(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QString& keyName)
+{
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
+    query.addBindValue(NormalizeSection(scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(scopeId));
+    query.addBindValue(NormalizeSection(moduleName));
+    query.addBindValue(NormalizeSourceKey(keyName));
+    return query.exec();
+}
+
+QStringList ConfigDatabase::ListScopedSettingIds(const QString& scopeType, const QString& moduleName)
+{
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        return QStringList();
+    }
+
+    QSqlQuery query(db);
+    if (moduleName.trimmed().isEmpty())
+    {
+        query.prepare("SELECT DISTINCT scope_id FROM settings WHERE scope_type=? ORDER BY scope_id COLLATE NOCASE");
+        query.addBindValue(NormalizeSection(scopeType).toLower());
+    }
+    else
+    {
+        query.prepare("SELECT DISTINCT scope_id FROM settings WHERE scope_type=? AND module=? ORDER BY scope_id COLLATE NOCASE");
+        query.addBindValue(NormalizeSection(scopeType).toLower());
+        query.addBindValue(NormalizeSection(moduleName));
+    }
+    if (!query.exec())
+    {
+        return QStringList();
+    }
+
+    QStringList ids;
+    while (query.next())
+    {
+        ids << query.value(0).toString();
+    }
+    return UniqueSorted(ids);
+}
+
+bool ConfigDatabase::RemoveScopedSettings(const QString& scopeType, const QString& scopeId, const QString& moduleName)
+{
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        return false;
+    }
+
+    QSqlQuery query(db);
+    if (moduleName.trimmed().isEmpty())
+    {
+        query.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=?");
+        query.addBindValue(NormalizeSection(scopeType).toLower());
+        query.addBindValue(NormalizeScopeId(scopeId));
+    }
+    else
+    {
+        query.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND module=?");
+        query.addBindValue(NormalizeSection(scopeType).toLower());
+        query.addBindValue(NormalizeScopeId(scopeId));
+        query.addBindValue(NormalizeSection(moduleName));
+    }
     return query.exec();
 }

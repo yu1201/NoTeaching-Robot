@@ -1,7 +1,6 @@
 #include "TouchKeyboardManager.h"
 
 #include "ConfigDatabase.h"
-#include "RobotDataHelper.h"
 
 #include <QAbstractSpinBox>
 #include <QApplication>
@@ -666,7 +665,7 @@ void TouchKeyboardManager::Install(QObject* target)
 void TouchKeyboardManager::LoadSettings()
 {
     QString storedMode;
-    if (!ConfigDatabase::ReadSetting(ConfigPath(), QStringLiteral("General/Mode"), &storedMode))
+    if (!ConfigDatabase::ReadScopedSetting(QStringLiteral("global"), QString(), QStringLiteral("TouchKeyboard"), QStringLiteral("Mode"), &storedMode))
     {
         storedMode = QStringLiteral("Auto");
     }
@@ -675,7 +674,7 @@ void TouchKeyboardManager::LoadSettings()
 
 void TouchKeyboardManager::SaveSettings() const
 {
-    ConfigDatabase::WriteSetting(ConfigPath(), QStringLiteral("General/Mode"), ModeToStorageString(m_mode));
+    ConfigDatabase::WriteScopedSetting(QStringLiteral("global"), QString(), QStringLiteral("TouchKeyboard"), QStringLiteral("Mode"), ModeToStorageString(m_mode));
 }
 
 void TouchKeyboardManager::SetMode(Mode mode)
@@ -692,11 +691,6 @@ void TouchKeyboardManager::SetMode(Mode mode)
 TouchKeyboardManager::Mode TouchKeyboardManager::CurrentMode() const
 {
     return m_mode;
-}
-
-QString TouchKeyboardManager::ConfigPath()
-{
-    return RobotDataHelper::BuildProjectPath(QStringLiteral("Data/TouchKeyboard.ini"));
 }
 
 QString TouchKeyboardManager::ModeToStorageString(Mode mode)

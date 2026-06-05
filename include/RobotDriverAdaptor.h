@@ -48,6 +48,7 @@ public:
     void SetLastRobotError(const std::string& error);
     std::string GetLastRobotError() const;
     virtual std::string GetRobotStatusText();
+    virtual std::string GetStateMonitorSourceText() const;
     virtual double GetCurrentPos(int nAxisNo);
     virtual T_ROBOT_COORS GetCurrentPos();
     virtual double GetCurrentPulse(int nAxisNo);
@@ -146,7 +147,7 @@ public:
     std::string m_sFTPPassWord;
     int m_nSocketPort;
 	int m_nRobotType;									//关节臂类型（按工作种类划分）
-    int m_nExternalAxleType;                           // 外部轴类型，来自 RobotPara.ini [ExternalAxle]
+    int m_nExternalAxleType;                           // 外部轴类型，来自配置库 [ExternalAxle]
     int m_nRobotAxisCount;                             // 机器人轴数，默认 6，外部轴启用后累加
 	E_ROBOT_BRAND m_eRobotBrand;						//机器人品牌
 	//----------------------------------------KDL运动学部分------------------------------------//

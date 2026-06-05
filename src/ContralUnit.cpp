@@ -102,7 +102,7 @@ bool ContralUnit::InitContralUnit()
             int nRobotType = 0;
             if (!robotIni.SetFileName(robotIniPath))
             {
-                ContralUnitLog->write(LogColor::ERR, "读取机器人参数文件失败：%s", robotIniPath.c_str());
+                ContralUnitLog->write(LogColor::ERR, "读取机器人参数数据失败：%s", robotIniPath.c_str());
                 bRtn = false;
             }
             else

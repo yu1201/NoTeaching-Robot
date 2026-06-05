@@ -414,8 +414,8 @@ struct T_WELD_PARA
 struct T_SCAN_WELDING_PARAM
 {
 	std::string sRobotName;      // 机器人名称，从 RobotDriverAdaptor 中获取
-	std::string sSectionName;    // ini 分组名，例如 Table1
-	std::string sIniFilePath;    // DATA/<RobotName>/LineScanParam.ini
+	std::string sSectionName;    // 参数分组名，例如 Table1
+	std::string sIniFilePath;    // 线扫参数逻辑键
 
 	T_ANGLE_PULSE tStartPulse;   // 机器人扫描起点脉冲姿态
 	T_ANGLE_PULSE tEndPulse;     // 机器人扫描终点脉冲姿态
@@ -423,7 +423,7 @@ struct T_SCAN_WELDING_PARAM
 	bool bValid = false;
 };
 
-// 单个料台的线扫粗定位参数，对应 ini 中一个 [TableN] 分组
+// 单个料台的线扫粗定位参数，对应一个 [TableN] 分组
 struct T_COARSE_SCAN_PARAM
 {
 	int nTableNo = -1;

@@ -1288,7 +1288,7 @@ bool HandEyeCalibrationDialog::EnsureCameraReady(const QString& sceneName, Eigen
     {
         if (error != nullptr)
         {
-            *error = "自动打开相机失败，请检查 CameraParam.ini 中的设备地址。";
+            *error = "自动打开相机失败，请检查配置库中的设备地址。";
         }
         return false;
     }
@@ -1338,7 +1338,7 @@ bool HandEyeCalibrationDialog::EnsureCameraStarted(const QString& sceneName, QSt
     {
         if (error != nullptr)
         {
-            *error = "自动打开相机失败，请检查 CameraParam.ini 中的设备地址。";
+            *error = "自动打开相机失败，请检查配置库中的设备地址。";
         }
         return false;
     }

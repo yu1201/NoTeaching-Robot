@@ -234,6 +234,9 @@
     <ClInclude Include="include\LaserWeldFilterDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\MeasureThenWeldService.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -265,6 +268,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\STEPRobotDriver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\StepSdkBuildConfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotMessage.h">

@@ -7,7 +7,6 @@
 #include "WindowStyleHelper.h"
 
 #include <QApplication>
-#include <QCoreApplication>
 #include <QDoubleValidator>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -95,10 +94,7 @@ namespace
 		}
 	}
 
-	QString JogSettingsPath()
-	{
-		return QCoreApplication::applicationDirPath() + "/RobotJogDialog.ini";
-	}
+	constexpr auto JOG_SETTINGS_MODULE = "RobotJog";
 
 	double CartesianCommandSpeed(RobotDriverAdaptor* driver, double speedMmPerMin)
 	{
@@ -389,13 +385,14 @@ void RobotJogDialog::AddAxisRow(QGridLayout* layout, int row, const QString& axi
 
 void RobotJogDialog::LoadSpeedSettings()
 {
-	const QString settingsPath = JogSettingsPath();
 	QString cartSpeedText;
 	QString jointSpeedText;
-	const double cartSpeed = ConfigDatabase::ReadSetting(settingsPath, "Speed/Cartesian", &cartSpeedText)
+	const double cartSpeed = ConfigDatabase::ReadScopedSetting(
+		QStringLiteral("global"), QString(), JOG_SETTINGS_MODULE, "Speed/Cartesian", &cartSpeedText)
 		? cartSpeedText.toDouble()
 		: 60.0;
-	const double jointSpeed = ConfigDatabase::ReadSetting(settingsPath, "Speed/Joint", &jointSpeedText)
+	const double jointSpeed = ConfigDatabase::ReadScopedSetting(
+		QStringLiteral("global"), QString(), JOG_SETTINGS_MODULE, "Speed/Joint", &jointSpeedText)
 		? jointSpeedText.toDouble()
 		: 1.0;
 	if (m_cartesianSpeedEdit != nullptr)
@@ -410,9 +407,20 @@ void RobotJogDialog::LoadSpeedSettings()
 
 void RobotJogDialog::SaveSpeedSettings() const
 {
-	const QString settingsPath = JogSettingsPath();
-	ConfigDatabase::WriteSetting(settingsPath, "Speed/Cartesian", QString::number(CartesianSpeed(), 'f', 6));
-	ConfigDatabase::WriteSetting(settingsPath, "Speed/Joint", QString::number(JointSpeed(), 'f', 6));
+	ConfigDatabase::WriteScopedSetting(
+		QStringLiteral("global"),
+		QString(),
+		JOG_SETTINGS_MODULE,
+		"Speed/Cartesian",
+		QString::number(CartesianSpeed(), 'f', 6),
+		QStringLiteral("number"));
+	ConfigDatabase::WriteScopedSetting(
+		QStringLiteral("global"),
+		QString(),
+		JOG_SETTINGS_MODULE,
+		"Speed/Joint",
+		QString::number(JointSpeed(), 'f', 6),
+		QStringLiteral("number"));
 }
 
 void RobotJogDialog::ShowMessageOnUiThread(QMessageBox::Icon icon, const QString& title, const QString& text)
@@ -806,13 +814,15 @@ void RobotJogDialog::RefreshStateText()
 		done = snapshot.done;
 	}
 	const QString doneText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知(%1)").arg(done));
+	const QString sourceText = QString::fromStdString(m_robotDriver->GetStateMonitorSourceText());
 	UpdateMotionButtonState();
 
 	m_stateLabel->setText(QString(
-		"状态: %1    robot_ms=%2    pc_recv_ms=%3\n"
-		"直角: X=%4  Y=%5  Z=%6  RX=%7  RY=%8  RZ=%9\n"
-		"关节: J1=%10  J2=%11  J3=%12  J4=%13  J5=%14  J6=%15")
+		"状态: %1    接口: %2    robot_ms=%3    pc_recv_ms=%4\n"
+		"直角: X=%5  Y=%6  Z=%7  RX=%8  RY=%9  RZ=%10\n"
+		"关节: J1=%11  J2=%12  J3=%13  J4=%14  J5=%15  J6=%16")
 		.arg(doneText)
+		.arg(sourceText)
 		.arg(robotMs)
 		.arg(pcRecvMs)
 		.arg(pos.dX, 0, 'f', 3)
