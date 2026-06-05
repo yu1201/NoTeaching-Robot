@@ -1,6 +1,8 @@
 #include "STEPRobotDriver.h"
 
+#include "MeasureThenWeldRuntimeConfig.h"
 #include "RobotPoseTransform.h"
+#include "StepSdkBuildConfig.h"
 
 #include <algorithm>
 #include <chrono>
@@ -61,6 +63,46 @@ namespace
 	constexpr const char* kStepArcRealName = "real0";
 	constexpr const char* kStepWeaveDataName = "wd0";
 	constexpr const char* kStepTrackDataName = "td0";
+
+	long long StepRobotSteadyNowMs()
+	{
+		return std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+	}
+
+	void StepFillPcPassiveTimestamp(long long* pRobotMs, long long* pPcRecvMs, long long pcMs)
+	{
+		if (pRobotMs != nullptr)
+		{
+			*pRobotMs = pcMs;
+		}
+		if (pPcRecvMs != nullptr)
+		{
+			*pPcRecvMs = pcMs;
+		}
+	}
+
+	bool StepUseTimestampSdkInterface()
+	{
+#if STEP_SDK_HAS_TIMESTAMP
+		return MeasureThenWeldRuntimeConfig::LoadStepSdkInterfaceMode()
+			== MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Timestamp;
+#else
+		return false;
+#endif
+	}
+
+	T_ROBOT_COORS StepRobotCartPosToCoors(const STEPROBOTSDK::RobotCartPos& cartPos)
+	{
+		T_ROBOT_COORS coors = T_ROBOT_COORS();
+		coors.dX = cartPos.cart[0];
+		coors.dY = cartPos.cart[1];
+		coors.dZ = cartPos.cart[2];
+		coors.dRX = cartPos.cart[3];
+		coors.dRY = cartPos.cart[4];
+		coors.dRZ = cartPos.cart[5];
+		return coors;
+	}
 
 	double StepClampPositiveDouble(double value, double defaultValue)
 	{
@@ -1301,6 +1343,7 @@ std::string STEPRobotCtrl::GetRobotStatusText()
 	}
 
 	const int connectStatus = m_bLocalDebugMark ? 1 : m_pSTEPRobotClient->ConnectStatus();
+	const std::string sdkVersion = m_pSTEPRobotClient->SDKVersion();
 	const int programState = static_cast<int>(m_pSTEPRobotClient->getProgramState());
 	const int motorState = m_pSTEPRobotClient->getMotorEnableState();
 	const STEPROBOTSDK::MessageData message = m_pSTEPRobotClient->getMessageData();
@@ -1310,6 +1353,8 @@ std::string STEPRobotCtrl::GetRobotStatusText()
 	std::ostringstream oss;
 	oss << "STEP状态：本地连接=" << (m_bSocketConnected ? "已连接" : "未连接")
 		<< "，SDK连接码=" << connectStatus
+		<< "，SDK版本=" << (sdkVersion.empty() ? "未知" : sdkVersion)
+		<< "，接口=" << (StepUseTimestampSdkInterface() ? "新版时间戳" : "旧版兼容")
 		<< "，程序=" << StepProgramStateText(programState) << "(" << programState << ")"
 		<< "，使能=" << (motorState == 1 ? "上使能" : "未使能") << "(" << motorState << ")"
 		<< "，消息类型=" << StepMessageTypeText(message.m_MessageType)
@@ -1325,31 +1370,89 @@ std::string STEPRobotCtrl::GetRobotStatusText()
 	return oss.str();
 }
 
+std::string STEPRobotCtrl::GetStateMonitorSourceText() const
+{
+#if STEP_SDK_HAS_TIMESTAMP
+	return StepUseTimestampSdkInterface()
+		? "STEP SDK新版getTimestamp()(位姿+robot_ms)，脉冲=getAxisPos，完成状态=getProgramState"
+		: "STEP SDK旧版接口getCartPosWorld/getAxisPos/getProgramState，时间轴=PC接收时间";
+#else
+	return "STEP SDK旧版库构建getCartPosWorld/getAxisPos/getProgramState，时间轴=PC接收时间";
+#endif
+}
+
 double STEPRobotCtrl::GetCurrentPos(int nAxisNo) 
 {
+	if (m_pSTEPRobotClient == nullptr || nAxisNo < 0 || nAxisNo >= 6)
+	{
+		return 0.0;
+	}
+
 	RobotCartPos cartposworld = m_pSTEPRobotClient->getCartPosWorld();
 
 	double dPos = cartposworld.cart[nAxisNo]; //坐标
 	return dPos;
 }
 
-T_ROBOT_COORS STEPRobotCtrl::GetCurrentPos() 
+T_ROBOT_COORS STEPRobotCtrl::GetCurrentPos()
 {
-	T_ROBOT_COORS stCoors = T_ROBOT_COORS(); // 初始化所有值为0
+	if (m_pSTEPRobotClient == nullptr)
+	{
+		return T_ROBOT_COORS();
+	}
 
-	// 直接调用封装好的GetCurrentPos(int)函数，依次获取6个轴的坐标
-	stCoors.dX = GetCurrentPos(0);
-	stCoors.dY = GetCurrentPos(1);
-	stCoors.dZ = GetCurrentPos(2);
-	stCoors.dRX = GetCurrentPos(3);
-	stCoors.dRY = GetCurrentPos(4);
-	stCoors.dRZ = GetCurrentPos(5);
-
-	return stCoors;
+	RobotCartPos cartposworld = m_pSTEPRobotClient->getCartPosWorld();
+	return StepRobotCartPosToCoors(cartposworld);
 }
 
-double STEPRobotCtrl::GetCurrentPulse(int nAxisNo) 
+T_ROBOT_COORS STEPRobotCtrl::GetCurrentPosPassive(long long* pRobotMs, long long* pPcRecvMs)
 {
+	if (m_pSTEPRobotClient == nullptr)
+	{
+		const long long pcMs = StepRobotSteadyNowMs();
+		StepFillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
+		return T_ROBOT_COORS();
+	}
+
+	if (m_bLocalDebugMark || !m_bSocketConnected || !StepUseTimestampSdkInterface())
+	{
+		T_ROBOT_COORS pose = GetCurrentPos();
+		const long long pcMs = StepRobotSteadyNowMs();
+		StepFillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
+		return pose;
+	}
+
+#if STEP_SDK_HAS_TIMESTAMP
+	const TimestampAddCartpos timestampedPos = m_pSTEPRobotClient->getTimestamp();
+	const long long pcRecvMs = StepRobotSteadyNowMs();
+	const unsigned long long robotTimestampMs = static_cast<unsigned long long>(timestampedPos.m_TimeStamp_ms);
+	const long long robotMs = robotTimestampMs > 0
+		? static_cast<long long>(robotTimestampMs)
+		: pcRecvMs;
+
+	if (pRobotMs != nullptr)
+	{
+		*pRobotMs = robotMs;
+	}
+	if (pPcRecvMs != nullptr)
+	{
+		*pPcRecvMs = pcRecvMs;
+	}
+	return StepRobotCartPosToCoors(timestampedPos.m_CartPos.m_CartPos);
+#else
+	const long long pcMs = StepRobotSteadyNowMs();
+	StepFillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
+	return GetCurrentPos();
+#endif
+}
+
+double STEPRobotCtrl::GetCurrentPulse(int nAxisNo)
+{
+	if (m_pSTEPRobotClient == nullptr || nAxisNo < 0 || nAxisNo >= 9)
+	{
+		return 0.0;
+	}
+
 	AXISPOS currentaxispos = m_pSTEPRobotClient->getAxisPos(); //获取当前笛卡尔位置
 	double dPulse = 0;
 	if (nAxisNo >= 0 && nAxisNo < 6)
@@ -1383,6 +1486,14 @@ T_ANGLE_PULSE STEPRobotCtrl::GetCurrentPulse()
 	return tPulse;
 }
 
+T_ANGLE_PULSE STEPRobotCtrl::GetCurrentPulsePassive(long long* pRobotMs, long long* pPcRecvMs)
+{
+	const long long pcMs = StepRobotSteadyNowMs();
+	T_ANGLE_PULSE pulse = GetCurrentPulse();
+	StepFillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
+	return pulse;
+}
+
 int STEPRobotCtrl::CheckDone()
 {
 	if (m_pSTEPRobotClient == nullptr)
@@ -1394,6 +1505,15 @@ int STEPRobotCtrl::CheckDone()
 	int nRet = m_pSTEPRobotClient->getProgramState();   //0	运行，1 暂停，2 停止，3 未知
 	return nRet;
 }
+
+int STEPRobotCtrl::CheckDonePassive(long long* pRobotMs, long long* pPcRecvMs)
+{
+	const long long pcMs = StepRobotSteadyNowMs();
+	const int done = CheckDone();
+	StepFillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
+	return done;
+}
+
 int STEPRobotCtrl::CheckRobotDone(int nDelayTime)
 {
 	if (nDelayTime <= 0)

@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-// 使用 txt 行记录读写工艺参数。
+// 使用固定行格式读写配置库中的工艺参数。
 // 每行按固定字段顺序保存；读取后按“工件名 + 焊脚尺寸 + 层号”排序，
 // 让同名、同焊脚尺寸、不同层号的记录排在一起。
 class WeldProcessFile

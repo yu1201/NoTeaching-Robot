@@ -7,8 +7,10 @@
 #include <QVector>
 
 class QButtonGroup;
+class QCheckBox;
 class QComboBox;
 class QCloseEvent;
+class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -45,6 +47,10 @@ public:
         double compX = 0.0;
         double compY = 0.0;
         double compZ = 0.0;
+        double innerToOuterCornerComp = 0.0;
+        double innerToInnerCornerComp = 0.0;
+        double outerToOuterCornerComp = 0.0;
+        double outerToInnerCornerComp = 0.0;
     };
 
     struct SeamCompRow
@@ -63,10 +69,13 @@ private:
     void LoadRobotList();
     void LoadCurrentParam();
     void LoadPoseParam(const QString& path);
+    void LoadPoseCornerCompensationFromDatabase(const QString& robotName);
     void LoadSeamParam(const QString& path);
     bool SaveCurrentParam();
     bool SavePoseParam(const QString& path, QString& error) const;
+    bool SavePoseCornerCompensationToDatabase(const QString& robotName, QString& error) const;
     bool SaveSeamParam(const QString& path, QString& error) const;
+    void RefreshCornerCompensationEditor();
     void SetMode(CompMode mode);
     void RefreshGroupCombo();
     void RefreshTypeCombo();
@@ -115,12 +124,16 @@ private:
     QLabel* m_pEditLabels[3] = { nullptr, nullptr, nullptr };
     QLineEdit* m_pEditValues[3] = { nullptr, nullptr, nullptr };
     QLineEdit* m_pPoseValues[3] = { nullptr, nullptr, nullptr };
+    QWidget* m_pCornerCompensationWidget = nullptr;
+    QCheckBox* m_pCornerCompensationCheck = nullptr;
+    QDoubleSpinBox* m_pCornerCompensationValues[4] = { nullptr, nullptr, nullptr, nullptr };
     QPlainTextEdit* m_pLogText = nullptr;
     QPushButton* m_pReloadBtn = nullptr;
     QPushButton* m_pSaveBtn = nullptr;
     QVector<CompType> m_poseTypes;
     QVector<QString> m_poseGroupNames;
     QVector<int> m_poseGroupMatchModes;
+    QVector<bool> m_poseGroupCornerCompEnabled;
     QVector<QString> m_seamGroupNames;
     QVector<PoseCompRow> m_poseRows;
     QVector<SeamCompRow> m_seamRows;

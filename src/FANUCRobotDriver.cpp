@@ -1328,6 +1328,11 @@ T_ROBOT_COORS FANUCRobotCtrl::GetCurrentPosPassive(long long* pRobotMs, long lon
 	return m_tMonitorPos;
 }
 
+std::string FANUCRobotCtrl::GetStateMonitorSourceText() const
+{
+	return "FANUC S5监控缓存(MON robot_ms)，不占用S4控制通道";
+}
+
 // 主动读取单轴脉冲，内部会请求完整关节值后按轴当量换算。
 double FANUCRobotCtrl::GetCurrentPulse(int nAxisNo)
 {

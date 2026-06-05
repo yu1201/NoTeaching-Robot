@@ -20,8 +20,19 @@ from pathlib import Path
 
 
 SECRET = b"NoTeachingRobotConfigStoreV1"
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "4"
 TEXT_FILE_NAMES = {"WeaveDate.txt", "WeldPara.txt"}
+SETTINGS_REQUIRED_COLUMNS = {
+    "scope_type",
+    "scope_id",
+    "module",
+    "key_name",
+    "value_text",
+    "value_type",
+    "sensitive",
+    "encrypted",
+    "updated_at",
+}
 MOJIBAKE_MARKERS = (
     "\ufffd",
     "锟斤拷",
@@ -477,6 +488,92 @@ def build_ini_identity(source_path: str, section: str, key: str) -> dict[str, st
     return file_identity
 
 
+def is_sensitive_setting_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(marker in lowered for marker in ("password", "passwd", "pass", "token", "secret"))
+
+
+def module_base_from_stored_file_name(stored_file_name: str) -> str:
+    file_name = stored_file_name.replace("\\", "/").rsplit("/", 1)[-1]
+    base_name = file_name.rsplit(".", 1)[0].strip() if "." in file_name else file_name.strip()
+    lowered = base_name.lower()
+    if lowered == "contralunitinfo":
+        return "ControlUnits"
+    if lowered == "robotpara":
+        return "RobotPara"
+    if lowered == "cameraparam":
+        return "CameraParam"
+    if lowered.startswith("handeyematrix_"):
+        return f"HandEyeMatrix/{base_name[len('HandEyeMatrix_'):]}"
+    if lowered == "handeyematrix":
+        return "HandEyeMatrix"
+    if lowered.startswith("handeyecalibration_"):
+        return f"HandEyeCalibration/{base_name[len('HandEyeCalibration_'):]}"
+    if lowered == "linescanparam":
+        return "LineScanParam"
+    if lowered == "linecoarsescanparam":
+        return "LineCoarseScanParam"
+    if lowered == "measureweldparam":
+        return "MeasureWeldParam"
+    if lowered == "weldposecompparam":
+        return "WeldPoseCompParam"
+    if lowered == "weldseamcompparam":
+        return "WeldSeamCompParam"
+    if lowered == "weavedate":
+        return "WeldProcess/WeaveData"
+    if lowered == "weldpara":
+        return "WeldProcess/WeldParameters"
+    return normalize_section(base_name or file_name)
+
+
+def build_scoped_file_identity(source_path: str, key_name: str = "") -> dict[str, object]:
+    normalized = normalize_source_path_for_db(source_path)
+    parts = [part for part in normalized.split("/") if part]
+    scope_type = "global"
+    scope_id = ""
+    stored_file_name = normalized.rsplit("/", 1)[-1] if normalized else ""
+
+    if parts and parts[0].lower() == "data":
+        if len(parts) >= 4 and parts[1].lower() == "workpiecetemplates":
+            scope_type = "workpiece_template"
+            scope_id = parts[2].strip()
+            stored_file_name = "/".join(parts[3:])
+        elif len(parts) >= 3:
+            scope_type = "robot"
+            scope_id = parts[1].strip()
+            stored_file_name = "/".join(parts[2:])
+        elif len(parts) >= 2:
+            stored_file_name = "/".join(parts[1:])
+    elif parts and parts[0].lower() == "result":
+        scope_type = "result"
+        if len(parts) >= 3:
+            scope_id = parts[1].strip()
+            stored_file_name = "/".join(parts[2:])
+
+    key = normalize_source_key(key_name or "Content")
+    module = normalize_section(module_base_from_stored_file_name(stored_file_name))
+    return {
+        "valid": bool(scope_type.strip() and module.strip() and key.strip()),
+        "scope_type": normalize_section(scope_type).lower(),
+        "scope_id": scope_id.strip(),
+        "module": module,
+        "key_name": key,
+        "value_type": "text",
+        "sensitive": is_sensitive_setting_key(key),
+    }
+
+
+def build_scoped_ini_identity(source_path: str, section: str, key: str) -> dict[str, object]:
+    identity = build_scoped_file_identity(source_path, key)
+    normalized_section = normalize_section(section)
+    if normalized_section:
+        identity["module"] = normalize_section(f"{identity['module']}/{normalized_section}")
+    identity["value_type"] = "string"
+    identity["sensitive"] = bool(identity["sensitive"]) or is_sensitive_setting_key(normalized_section) or is_sensitive_setting_key(key)
+    identity["valid"] = bool(identity["valid"] and str(identity["module"]).strip())
+    return identity
+
+
 def key_stream(nonce: bytes, size: int) -> bytes:
     output = bytearray()
     counter = 0
@@ -545,34 +642,20 @@ def create_current_tables(conn: sqlite3.Connection) -> None:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS ini_values (
-            category TEXT NOT NULL DEFAULT '',
-            robot_name TEXT NOT NULL DEFAULT '',
-            file_name TEXT NOT NULL DEFAULT '',
-            group_name TEXT NOT NULL DEFAULT '',
-            item_name TEXT NOT NULL DEFAULT '',
-            key_name TEXT NOT NULL DEFAULT '',
-            source_path TEXT NOT NULL,
-            source_section TEXT NOT NULL,
-            source_key TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS settings (
+            scope_type TEXT NOT NULL,
+            scope_id TEXT NOT NULL DEFAULT '',
+            module TEXT NOT NULL,
+            key_name TEXT NOT NULL,
             value_text TEXT NOT NULL,
+            value_type TEXT NOT NULL DEFAULT 'string',
+            sensitive INTEGER NOT NULL DEFAULT 0,
             encrypted INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY(source_path, source_section, source_key)
+            PRIMARY KEY(scope_type, scope_id, module, key_name)
         );
-        CREATE INDEX IF NOT EXISTS idx_ini_values_display
-            ON ini_values(category, robot_name, file_name, group_name, item_name, key_name);
-        CREATE TABLE IF NOT EXISTS text_files (
-            category TEXT NOT NULL DEFAULT '',
-            robot_name TEXT NOT NULL DEFAULT '',
-            file_name TEXT NOT NULL DEFAULT '',
-            source_path TEXT PRIMARY KEY,
-            content_text TEXT NOT NULL,
-            encrypted INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_text_files_display
-            ON text_files(category, robot_name, file_name);
+        CREATE INDEX IF NOT EXISTS idx_settings_scope
+            ON settings(scope_type, scope_id, module);
         """
     )
 
@@ -602,93 +685,108 @@ def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 
 
 def has_current_schema(conn: sqlite3.Connection) -> bool:
-    required = {
-        "category",
-        "robot_name",
-        "file_name",
-        "group_name",
-        "item_name",
-        "key_name",
-        "source_path",
-        "source_section",
-        "source_key",
-        "value_text",
-        "encrypted",
-        "updated_at",
-    }
-    return table_exists(conn, "ini_values") and required.issubset(table_columns(conn, "ini_values"))
+    return table_exists(conn, "settings") and SETTINGS_REQUIRED_COLUMNS.issubset(table_columns(conn, "settings"))
 
 
 def has_legacy_schema(conn: sqlite3.Connection) -> bool:
     required = {"file_path", "section_name", "key_name", "value_text"}
-    return (
-        table_exists(conn, "ini_values")
-        and table_exists(conn, "text_files")
-        and required.issubset(table_columns(conn, "ini_values"))
-    )
+    return table_exists(conn, "ini_values") and required.issubset(table_columns(conn, "ini_values"))
 
 
-def unique_table_name(conn: sqlite3.Connection, base_name: str) -> str:
-    name = f"{base_name}_legacy"
-    suffix = 1
-    while table_exists(conn, name):
-        name = f"{base_name}_legacy_{suffix}"
-        suffix += 1
-    return name
+def has_legacy_display_schema(conn: sqlite3.Connection) -> bool:
+    required = {"source_path", "source_section", "source_key", "value_text"}
+    return table_exists(conn, "ini_values") and required.issubset(table_columns(conn, "ini_values"))
 
 
-def refresh_current_schema_identities(conn: sqlite3.Connection) -> tuple[int, int]:
-    ini_rows = conn.execute(
-        "SELECT rowid, source_path, source_section, source_key FROM ini_values"
-    ).fetchall()
-    ini_updates = 0
-    for rowid, source_path, section, key in ini_rows:
-        identity = build_ini_identity(source_path or "", section or "", key or "")
-        conn.execute(
-            """
-            UPDATE ini_values
-            SET category=?, robot_name=?, file_name=?, group_name=?, item_name=?,
-                key_name=?, source_path=?, source_section=?, source_key=?
-            WHERE rowid=?
-            """,
-            (
-                identity["category"],
-                identity["robot_name"],
-                identity["file_name"],
-                identity["group_name"],
-                identity["item_name"],
-                identity["key_name"],
-                identity["source_path"],
-                identity["source_section"],
-                identity["source_key"],
-                rowid,
-            ),
-        )
-        ini_updates += 1
+def has_legacy_text_schema(conn: sqlite3.Connection) -> bool:
+    if not table_exists(conn, "text_files"):
+        return False
+    columns = table_columns(conn, "text_files")
+    return "content_text" in columns and ("source_path" in columns or "file_path" in columns)
 
-    text_rows = conn.execute(
-        "SELECT rowid, source_path FROM text_files"
-    ).fetchall()
-    text_updates = 0
-    for rowid, source_path in text_rows:
-        identity = build_file_identity(source_path or "")
-        conn.execute(
-            """
-            UPDATE text_files
-            SET category=?, robot_name=?, file_name=?, source_path=?
-            WHERE rowid=?
-            """,
-            (
-                identity["category"],
-                identity["robot_name"],
-                identity["file_name"],
-                identity["source_path"],
-                rowid,
-            ),
-        )
-        text_updates += 1
 
-    return ini_updates, text_updates
+def has_app_settings_schema(conn: sqlite3.Connection) -> bool:
+    required = {"group_name", "key_name", "value_text"}
+    return table_exists(conn, "app_settings") and required.issubset(table_columns(conn, "app_settings"))
+
+
+def has_any_legacy_config_table(conn: sqlite3.Connection) -> bool:
+    return has_legacy_schema(conn) or has_legacy_display_schema(conn) or has_legacy_text_schema(conn) or has_app_settings_schema(conn)
+
+
+def drop_legacy_config_tables(conn: sqlite3.Connection) -> None:
+    for table_name in ("ini_values", "text_files", "app_settings"):
+        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+
+def migrate_legacy_tables_to_settings(conn: sqlite3.Connection, encrypt: bool, overwrite: bool = False) -> tuple[int, int, int]:
+    ini_count = 0
+    text_count = 0
+    app_setting_count = 0
+
+    if table_exists(conn, "ini_values"):
+        columns = table_columns(conn, "ini_values")
+        encrypted_expr = "encrypted" if "encrypted" in columns else "0"
+        if {"source_path", "source_section", "source_key", "value_text"}.issubset(columns):
+            query = f"SELECT source_path, source_section, source_key, value_text, {encrypted_expr} FROM ini_values"
+        elif {"file_path", "section_name", "key_name", "value_text"}.issubset(columns):
+            query = f"SELECT file_path, section_name, key_name, value_text, {encrypted_expr} FROM ini_values"
+        else:
+            query = ""
+        if query:
+            for source_path, section, key, value, encrypted in conn.execute(query).fetchall():
+                plain = decode_stored_text(str(value), encrypted)
+                if plain is None:
+                    plain = str(value)
+                ini_count += int(insert_ini_value(
+                    conn,
+                    str(source_path or ""),
+                    str(section or ""),
+                    str(key or ""),
+                    plain,
+                    encrypt,
+                    overwrite=overwrite,
+                ))
+
+    if has_legacy_text_schema(conn):
+        columns = table_columns(conn, "text_files")
+        path_column = "source_path" if "source_path" in columns else "file_path"
+        encrypted_expr = "encrypted" if "encrypted" in columns else "0"
+        for source_path, content, encrypted in conn.execute(
+            f"SELECT {path_column}, content_text, {encrypted_expr} FROM text_files"
+        ).fetchall():
+            plain = decode_stored_text(str(content), encrypted)
+            if plain is None:
+                plain = str(content)
+            text_count += int(insert_text_file(
+                conn,
+                str(source_path or ""),
+                plain,
+                encrypt,
+                overwrite=overwrite,
+            ))
+
+    if has_app_settings_schema(conn):
+        columns = table_columns(conn, "app_settings")
+        encrypted_expr = "encrypted" if "encrypted" in columns else "0"
+        for module, key, value, encrypted in conn.execute(
+            f"SELECT group_name, key_name, value_text, {encrypted_expr} FROM app_settings"
+        ).fetchall():
+            plain = decode_stored_text(str(value), encrypted)
+            if plain is None:
+                plain = str(value)
+            app_setting_count += int(insert_scoped_setting(
+                conn,
+                "global",
+                "",
+                str(module or ""),
+                str(key or ""),
+                plain,
+                encrypt,
+                overwrite=overwrite,
+            ))
+
+    return ini_count, text_count, app_setting_count
 
 
 def insert_ini_value(
@@ -700,27 +798,97 @@ def insert_ini_value(
     encrypt: bool,
     overwrite: bool = False,
 ) -> bool:
-    identity = build_ini_identity(source_path, section, key)
-    text, encrypted = stored_text(str(value), encrypt)
+    identity = build_scoped_ini_identity(source_path, section, key)
+    if not identity["valid"]:
+        return False
+    should_encrypt = encrypt or bool(identity["sensitive"])
+    text, encrypted = stored_text(str(value), should_encrypt)
     command = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
     cursor = conn.execute(
         f"""
-        {command} INTO ini_values
-            (category, robot_name, file_name, group_name, item_name, key_name,
-             source_path, source_section, source_key, value_text, encrypted, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        {command} INTO settings
+            (scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         """,
         (
-            identity["category"],
-            identity["robot_name"],
-            identity["file_name"],
-            identity["group_name"],
-            identity["item_name"],
+            identity["scope_type"],
+            identity["scope_id"],
+            identity["module"],
             identity["key_name"],
-            identity["source_path"],
-            identity["source_section"],
-            identity["source_key"],
             text,
+            identity["value_type"],
+            1 if identity["sensitive"] else 0,
+            encrypted,
+        ),
+    )
+    return cursor.rowcount > 0
+
+
+def insert_text_file(
+    conn: sqlite3.Connection,
+    source_path: str,
+    content: str,
+    encrypt: bool,
+    overwrite: bool = False,
+) -> bool:
+    identity = build_scoped_file_identity(source_path)
+    if not identity["valid"]:
+        return False
+    should_encrypt = encrypt or bool(identity["sensitive"])
+    text, encrypted = stored_text(str(content), should_encrypt)
+    command = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
+    cursor = conn.execute(
+        f"""
+        {command} INTO settings
+            (scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (
+            identity["scope_type"],
+            identity["scope_id"],
+            identity["module"],
+            identity["key_name"],
+            text,
+            identity["value_type"],
+            1 if identity["sensitive"] else 0,
+            encrypted,
+        ),
+    )
+    return cursor.rowcount > 0
+
+
+def insert_scoped_setting(
+    conn: sqlite3.Connection,
+    scope_type: str,
+    scope_id: str,
+    module: str,
+    key: str,
+    value: str,
+    encrypt: bool,
+    value_type: str = "string",
+    overwrite: bool = False,
+) -> bool:
+    normalized_key = normalize_source_key(key)
+    normalized_module = normalize_section(module)
+    if not scope_type.strip() or not normalized_module or not normalized_key:
+        return False
+    sensitive = is_sensitive_setting_key(normalized_module) or is_sensitive_setting_key(normalized_key)
+    text, encrypted = stored_text(str(value), encrypt or sensitive)
+    command = "INSERT OR REPLACE" if overwrite else "INSERT OR IGNORE"
+    cursor = conn.execute(
+        f"""
+        {command} INTO settings
+            (scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (
+            normalize_section(scope_type).lower(),
+            scope_id.strip(),
+            normalized_module,
+            normalized_key,
+            text,
+            value_type.strip().lower() or "string",
+            1 if sensitive else 0,
             encrypted,
         ),
     )
@@ -728,15 +896,19 @@ def insert_ini_value(
 
 
 def read_ini_value(conn: sqlite3.Connection, source_path: str, section: str, key: str) -> str | None:
+    identity = build_scoped_ini_identity(source_path, section, key)
+    if not identity["valid"]:
+        return None
     row = conn.execute(
         """
-        SELECT value_text, encrypted FROM ini_values
-        WHERE source_path=? AND source_section=? AND source_key=?
+        SELECT value_text, encrypted FROM settings
+        WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?
         """,
         (
-            normalize_source_path_for_db(source_path),
-            normalize_section(section),
-            normalize_source_key(key),
+            identity["scope_type"],
+            identity["scope_id"],
+            identity["module"],
+            identity["key_name"],
         ),
     ).fetchone()
     if row is None:
@@ -760,10 +932,10 @@ def discover_robot_names(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
             if child.is_dir() and child.name.lower().startswith("robot"):
                 names.add(child.name)
 
-    for (source_path,) in conn.execute("SELECT DISTINCT source_path FROM ini_values"):
-        parts = [part for part in normalize_source_path_for_db(source_path or "").split("/") if part]
-        if len(parts) >= 2 and parts[0].lower() == "data" and parts[1].lower().startswith("robot"):
-            names.add(parts[1])
+    if has_current_schema(conn):
+        for (scope_id,) in conn.execute("SELECT DISTINCT scope_id FROM settings WHERE scope_type='robot' AND scope_id<>''"):
+            if scope_id:
+                names.add(str(scope_id))
 
     unit_count = parse_int(read_ini_value(conn, "Data/ContralUnitInfo.ini", "UnitNum", "UnitNum"), 0)
     for index in range(max(0, unit_count)):
@@ -771,16 +943,17 @@ def discover_robot_names(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
         if value and value.strip():
             names.add(value.strip())
 
-    for _key, stored, encrypted in conn.execute(
-        """
-        SELECT source_key, value_text, encrypted
-        FROM ini_values
-        WHERE source_path='Data/ContralUnitInfo.ini' AND source_section='UnitName'
-        """
-    ):
-        decoded = decode_stored_text(stored, encrypted)
-        if decoded and decoded.strip():
-            names.add(decoded.strip())
+    if has_current_schema(conn):
+        for _key, stored, encrypted in conn.execute(
+            """
+            SELECT key_name, value_text, encrypted
+            FROM settings
+            WHERE scope_type='global' AND scope_id='' AND module='ControlUnits/UnitName'
+            """
+        ):
+            decoded = decode_stored_text(stored, encrypted)
+            if decoded and decoded.strip():
+                names.add(decoded.strip())
 
     return sorted(names, key=str.lower)
 
@@ -926,88 +1099,26 @@ def ensure_runtime_defaults(conn: sqlite3.Connection, data_dir: Path, encrypt: b
     return sum(details.values()), details
 
 
-def migrate_existing_database_to_v2(db_path: Path, data_dir: Path, encrypt_new_values: bool) -> bool:
+def migrate_existing_database_to_v4(db_path: Path, data_dir: Path, encrypt_new_values: bool) -> bool:
     if not db_path.exists():
         return False
 
     with sqlite3.connect(db_path) as conn:
-        if has_current_schema(conn):
-            create_current_tables(conn)
-            ini_updates, text_updates = refresh_current_schema_identities(conn)
-            default_count, default_details = ensure_runtime_defaults(conn, data_dir, encrypt_new_values)
-            set_schema_meta(conn, encrypt_new_values)
-            conn.commit()
-            print(f"Database already uses schema v{SCHEMA_VERSION}: {db_path}")
-            print(f"Refreshed display fields: INI values={ini_updates}, text files={text_updates}")
-            print(f"Runtime defaults added: {default_count} ({default_details})")
-            return True
-        if not has_legacy_schema(conn):
+        needs_migration = has_current_schema(conn) or has_any_legacy_config_table(conn)
+        if not needs_migration:
             return False
 
     timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup = db_path.with_suffix(db_path.suffix + f".bak_v1_{timestamp}")
+    backup = db_path.with_suffix(db_path.suffix + f".bak_v{SCHEMA_VERSION}_{timestamp}")
     shutil.copy2(db_path, backup)
 
     with sqlite3.connect(db_path) as conn:
-        legacy_ini = unique_table_name(conn, "ini_values")
-        legacy_text = unique_table_name(conn, "text_files")
         try:
             conn.execute("BEGIN")
-            conn.execute(f"ALTER TABLE ini_values RENAME TO {legacy_ini}")
-            conn.execute(f"ALTER TABLE text_files RENAME TO {legacy_text}")
             create_current_tables(conn)
-
-            for file_path, section, key, value, encrypted, updated_at in conn.execute(
-                f"SELECT file_path, section_name, key_name, value_text, encrypted, updated_at FROM {legacy_ini}"
-            ):
-                identity = build_ini_identity(file_path, section, key)
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO ini_values
-                        (category, robot_name, file_name, group_name, item_name, key_name,
-                         source_path, source_section, source_key, value_text, encrypted, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        identity["category"],
-                        identity["robot_name"],
-                        identity["file_name"],
-                        identity["group_name"],
-                        identity["item_name"],
-                        identity["key_name"],
-                        identity["source_path"],
-                        identity["source_section"],
-                        identity["source_key"],
-                        value,
-                        encrypted,
-                        updated_at,
-                    ),
-                )
-
-            for file_path, content, encrypted, updated_at in conn.execute(
-                f"SELECT file_path, content_text, encrypted, updated_at FROM {legacy_text}"
-            ):
-                identity = build_file_identity(file_path)
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO text_files(
-                        category, robot_name, file_name, source_path, content_text, encrypted, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        identity["category"],
-                        identity["robot_name"],
-                        identity["file_name"],
-                        identity["source_path"],
-                        content,
-                        encrypted,
-                        updated_at,
-                    ),
-                )
-
-            conn.execute(f"DROP TABLE {legacy_ini}")
-            conn.execute(f"DROP TABLE {legacy_text}")
+            legacy_counts = migrate_legacy_tables_to_settings(conn, encrypt_new_values)
             default_count, default_details = ensure_runtime_defaults(conn, data_dir, encrypt_new_values)
+            drop_legacy_config_tables(conn)
             set_schema_meta(conn, encrypt_new_values)
             conn.commit()
         except Exception:
@@ -1016,6 +1127,7 @@ def migrate_existing_database_to_v2(db_path: Path, data_dir: Path, encrypt_new_v
 
     print(f"Upgraded existing database to schema v{SCHEMA_VERSION}: {db_path}")
     print(f"Backed up old database: {backup}")
+    print(f"Legacy rows migrated: INI={legacy_counts[0]}, text={legacy_counts[1]}, app_settings={legacy_counts[2]}")
     print(f"Runtime defaults added: {default_count} ({default_details})")
     return True
 
@@ -1035,7 +1147,7 @@ def migrate(
 
     if db_path.exists():
         if not overwrite:
-            if migrate_existing_database_to_v2(db_path, data_dir, encrypt):
+            if migrate_existing_database_to_v4(db_path, data_dir, encrypt):
                 return
             raise SystemExit(f"Database already exists, pass --overwrite: {db_path}")
         backup = db_path.with_suffix(db_path.suffix + ".bak")
@@ -1061,57 +1173,19 @@ def migrate(
                                         for section, key, old_value, new_value in replacements)
             check_ini_rows(path, rows, encoding, allow_mojibake)
             for section, key, value in rows:
-                identity = build_ini_identity(file_path, section, key)
-                text, encrypted = stored_text(value, encrypt)
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO ini_values
-                        (category, robot_name, file_name, group_name, item_name, key_name,
-                         source_path, source_section, source_key, value_text, encrypted, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                    """,
-                    (
-                        identity["category"],
-                        identity["robot_name"],
-                        identity["file_name"],
-                        identity["group_name"],
-                        identity["item_name"],
-                        identity["key_name"],
-                        identity["source_path"],
-                        identity["source_section"],
-                        identity["source_key"],
-                        text,
-                        encrypted,
-                    ),
-                )
-                value_count += 1
+                value_count += int(insert_ini_value(conn, file_path, section, key, value, encrypt, overwrite=True))
             ini_count += 1
 
         for path in sorted(data_dir.rglob("*.txt")):
             if path.name not in TEXT_FILE_NAMES:
                 continue
             file_path = normalize_data_path(path, data_dir)
-            identity = build_file_identity(file_path)
             content = normalize_text(sanitize_legacy_text_file(path, forced_encoding, allow_mojibake))
-            text, encrypted = stored_text(content, encrypt)
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO text_files(
-                    category, robot_name, file_name, source_path, content_text, encrypted, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-                """,
-                (
-                    identity["category"],
-                    identity["robot_name"],
-                    identity["file_name"],
-                    identity["source_path"],
-                    text,
-                    encrypted,
-                ),
-            )
-            text_count += 1
+            text_count += int(insert_text_file(conn, file_path, content, encrypt, overwrite=True))
 
         default_count, default_details = ensure_runtime_defaults(conn, data_dir, encrypt)
+        drop_legacy_config_tables(conn)
+        set_schema_meta(conn, encrypt)
         conn.commit()
 
     print(f"Created: {db_path}")

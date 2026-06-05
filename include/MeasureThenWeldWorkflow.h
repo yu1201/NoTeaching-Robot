@@ -25,7 +25,7 @@ enum class E_MEASURE_THEN_WELD_STAGE
 // 单次先测后焊任务的运行参数。
 struct T_MEASURE_THEN_WELD_CONTEXT
 {
-    std::string sScanSectionName = "Table1"; // LineScanParam.ini 中的料台分组
+    std::string sScanSectionName = "Table1"; // 线扫参数中的料台分组
     int nWeldTrackNo = 1;                    // 焊缝/轨迹编号，后续可用于算法或工艺筛选
     bool bDryRun = false;                    // true 时只跑流程和日志，不下发实际焊接运动
 };

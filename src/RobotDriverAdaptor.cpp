@@ -613,6 +613,11 @@ std::string RobotDriverAdaptor::GetRobotStatusText()
     return GetLastRobotError();
 }
 
+std::string RobotDriverAdaptor::GetStateMonitorSourceText() const
+{
+    return "主动状态接口(GetCurrentPos/GetCurrentPulse/CheckDone)，时间轴=PC steady ms";
+}
+
 double RobotDriverAdaptor::GetCurrentPos(int nAxisNo)
 {
     return 0;

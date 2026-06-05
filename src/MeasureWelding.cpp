@@ -7,7 +7,6 @@
 
 #include <cstdarg>
 #include <cstdio>
-#include <filesystem>
 #include <vector>
 
 namespace
@@ -18,7 +17,6 @@ RobotLog& MeasureWeldingLogger()
     return logger;
 }
 
-namespace fs = std::filesystem;
 }
 
 MeasureWelding::MeasureWelding()
@@ -77,15 +75,7 @@ bool MeasureWelding::ReadRobotScanRange(const std::string& iniFilePath, const st
 
     if (iniFilePath.empty())
     {
-        m_sLastError = "未找到 LineScanParam.ini 文件。";
-        LogError("%s", m_sLastError.c_str());
-        showErrorMessage("焊缝测量", "%s", m_sLastError.c_str());
-        return false;
-    }
-
-    if (!fs::exists(fs::path(iniFilePath)))
-    {
-        m_sLastError = "LineScanParam.ini 文件不存在: " + iniFilePath;
+        m_sLastError = "未找到线扫参数。";
         LogError("%s", m_sLastError.c_str());
         showErrorMessage("焊缝测量", "%s", m_sLastError.c_str());
         return false;
@@ -94,7 +84,7 @@ bool MeasureWelding::ReadRobotScanRange(const std::string& iniFilePath, const st
     COPini iniReader;
     iniReader.SetFileName(iniFilePath);
 
-    LogInfo("开始读取线扫参数文件: %s, Section: %s", iniFilePath.c_str(), sectionName.c_str());
+    LogInfo("开始读取线扫参数: %s, Section: %s", iniFilePath.c_str(), sectionName.c_str());
 
     // 读取 [Table1] 这类分组中的起点/终点脉冲姿态
     const bool bStartOk = ReadStartPulse(iniReader, sectionName, m_tScanWeldingParam.tStartPulse);
@@ -144,14 +134,7 @@ std::string MeasureWelding::ResolveRobotIniFilePath(const std::string& robotName
         return "";
     }
 
-    // 按约定路径 DATA/<机器人名>/LineScanParam.ini 定位线扫参数文件
-    const fs::path iniFilePath = fs::current_path() / "DATA" / robotName / "LineScanParam.ini";
-    if (fs::exists(iniFilePath))
-    {
-        return iniFilePath.string();
-    }
-
-    return "";
+    return "Data/" + robotName + "/LineScanParam.ini";
 }
 
 bool MeasureWelding::ReadStartPulse(COPini& iniReader, const std::string& sectionName, T_ANGLE_PULSE& tStartPulse) const

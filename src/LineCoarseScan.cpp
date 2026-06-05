@@ -6,7 +6,6 @@
 
 #include <cstdarg>
 #include <cstdio>
-#include <filesystem>
 #include <vector>
 
 namespace
@@ -16,8 +15,6 @@ RobotLog& LineCoarseScanLogger()
     static RobotLog logger(".//Log//LineCoarseScan.txt");
     return logger;
 }
-
-namespace fs = std::filesystem;
 
 void ShowLineCoarseScanError(const std::string& message)
 {
@@ -49,7 +46,7 @@ bool LineCoarseScan::LoadParamByControlUnit(const ContralUnit& contralUnit, int 
 {
     if (nUnitIndex < 0 || nUnitIndex >= static_cast<int>(contralUnit.m_vtContralUnitInfo.size()))
     {
-        m_sLastError = "控制单元索引越界，无法读取 LineCoarseScanParam.ini。";
+        m_sLastError = "控制单元索引越界，无法读取线扫粗定位参数。";
         LogError("%s", m_sLastError.c_str());
         ShowLineCoarseScanError(m_sLastError);
         return false;
@@ -67,7 +64,7 @@ bool LineCoarseScan::LoadParamByControlUnit(const T_CONTRAL_UNIT& tContralUnitIn
 
     if (tContralUnitInfo.sUnitName.empty())
     {
-        m_sLastError = "控制单元名称为空，无法定位 LineCoarseScanParam.ini。";
+        m_sLastError = "控制单元名称为空，无法定位线扫粗定位参数。";
         LogError("%s", m_sLastError.c_str());
         ShowLineCoarseScanError(m_sLastError);
         return false;
@@ -76,7 +73,7 @@ bool LineCoarseScan::LoadParamByControlUnit(const T_CONTRAL_UNIT& tContralUnitIn
     m_sIniFilePath = BuildIniFilePath(tContralUnitInfo.sUnitName);
     if (m_sIniFilePath.empty())
     {
-        m_sLastError = "未找到 LineCoarseScanParam.ini 文件。";
+        m_sLastError = "未找到线扫粗定位参数。";
         LogError("%s", m_sLastError.c_str());
         ShowLineCoarseScanError(m_sLastError);
         return false;
@@ -114,7 +111,7 @@ bool LineCoarseScan::LoadParamByControlUnit(const T_CONTRAL_UNIT& tContralUnitIn
     {
         if (m_sLastError.empty())
         {
-            m_sLastError = "读取 LineCoarseScanParam.ini 参数失败。";
+            m_sLastError = "读取线扫粗定位参数失败。";
         }
         LogError("%s", m_sLastError.c_str());
         ShowLineCoarseScanError(m_sLastError);
@@ -178,7 +175,7 @@ bool LineCoarseScan::UpdateTableParam(int nTableNo, const T_COARSE_SCAN_PARAM& t
 {
     if (m_sIniFilePath.empty())
     {
-        m_sLastError = "参数文件路径为空，无法修改 Table 参数。";
+        m_sLastError = "参数数据定位为空，无法修改 Table 参数。";
         LogError("%s", m_sLastError.c_str());
         ShowLineCoarseScanError(m_sLastError);
         return false;
@@ -326,7 +323,7 @@ bool LineCoarseScan::UpdateCurUseTableNo(int nTableNo)
 {
     if (m_sIniFilePath.empty())
     {
-        m_sLastError = "参数文件路径为空，无法修改 CurUseTableNo。";
+        m_sLastError = "参数数据定位为空，无法修改 CurUseTableNo。";
         LogError("%s", m_sLastError.c_str());
         ShowLineCoarseScanError(m_sLastError);
         return false;
@@ -371,13 +368,7 @@ void LineCoarseScan::EnsureGlobalStorage(int nUnitNo)
 
 std::string LineCoarseScan::BuildIniFilePath(const std::string& unitName) const
 {
-    const fs::path iniPath = fs::current_path() / "Data" / unitName / "LineCoarseScanParam.ini";
-    if (fs::exists(iniPath))
-    {
-        return iniPath.string();
-    }
-
-    return "";
+    return "Data/" + unitName + "/LineCoarseScanParam.ini";
 }
 
 bool LineCoarseScan::ReadAllTableNum(COPini& iniReader, int& nTableNum)

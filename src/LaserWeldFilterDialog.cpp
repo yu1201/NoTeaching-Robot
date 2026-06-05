@@ -8,7 +8,6 @@
 
 #include <QCheckBox>
 #include <QComboBox>
-#include <QCoreApplication>
 #include <QByteArray>
 #include <QByteArrayList>
 #include <QDir>
@@ -58,10 +57,7 @@ struct PlainIniValueUpdate
     QString value;
 };
 
-QString LaserFilterSettingsPath()
-{
-    return QCoreApplication::applicationDirPath() + "/LaserWeldFilterDialog.ini";
-}
+constexpr auto LASER_FILTER_SETTINGS_MODULE = "LaserWeldFilterDialog";
 
 QString BuildSuggestedOutputPath(const QString& inputPath, double step)
 {
@@ -762,6 +758,9 @@ void LaserWeldFilterDialog::BuildUi()
     m_pSmoothRadiusSpin->setRange(0, 20);
     m_pSmoothRadiusSpin->setValue(2);
 
+    m_pSlopeConsistentCornerFitCheck = new QCheckBox("直线拟合排除圆弧段");
+    m_pSlopeConsistentCornerFitCheck->setToolTip("启用后，平台线和坡度线只使用局部斜率一致的直线段拟合，再求交生成拐点。");
+
     paramLayout->addWidget(new QLabel("采样主轴"), 0, 0);
     paramLayout->addWidget(m_pAxisCombo, 0, 1);
     paramLayout->addWidget(new QLabel("输出模式"), 0, 2);
@@ -791,6 +790,7 @@ void LaserWeldFilterDialog::BuildUi()
     paramLayout->addWidget(m_pKeepLongestSegmentCheck, 6, 2, 1, 2);
     paramLayout->addWidget(new QLabel("特征点拟合方案"), 7, 0);
     paramLayout->addWidget(m_pFeaturePointStrategyCombo, 7, 1, 1, 3);
+    paramLayout->addWidget(m_pSlopeConsistentCornerFitCheck, 8, 1, 1, 3);
     paramLayout->setColumnStretch(1, 1);
     paramLayout->setColumnStretch(3, 1);
     featurePointLayout->addWidget(paramGroup);
@@ -843,6 +843,7 @@ void LaserWeldFilterDialog::BuildUi()
     connect(m_pStepSpin, &QDoubleSpinBox::valueChanged, this, [this](double) { UpdateSuggestedOutputPath(); });
     connect(m_pExternalResampleStepSpin, &QDoubleSpinBox::valueChanged, this, [this](double) { UpdateSuggestedOutputPath(); });
     connect(m_pFeaturePointStrategyCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { SaveSettings(); });
+    connect(m_pSlopeConsistentCornerFitCheck, &QCheckBox::toggled, this, [this](bool) { SaveSettings(); });
     connect(m_pExternalConfigPathEdit, &QLineEdit::editingFinished, this, &LaserWeldFilterDialog::LoadExternalAlgorithmConfig);
     connect(m_pProcessingModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
         {
@@ -932,12 +933,22 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pExternalZTruncationSpin->setValue(processingSettings.zTruncationValue);
     m_pExternalResampleStepSpin->setValue(processingSettings.resampleStepMm);
     m_pExternalFallbackCheck->setChecked(processingSettings.fallbackToLegacy);
-
-    const QString configPath = LaserFilterSettingsPath();
-    const auto read = [&configPath](const QString& key, const QString& defaultValue = QString())
+    if (m_pSlopeConsistentCornerFitCheck != nullptr)
+    {
+        const QSignalBlocker blocker(m_pSlopeConsistentCornerFitCheck);
+        m_pSlopeConsistentCornerFitCheck->setChecked(processingSettings.slopeConsistentCornerFit);
+    }
+    const auto read = [](const QString& key, const QString& defaultValue = QString())
         {
             QString value;
-            return ConfigDatabase::ReadSetting(configPath, key, &value) ? value : defaultValue;
+            return ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"),
+                QString(),
+                LASER_FILTER_SETTINGS_MODULE,
+                key,
+                &value)
+                ? value
+                : defaultValue;
         };
     const auto readBool = [&read](const QString& key, bool defaultValue)
         {
@@ -972,7 +983,7 @@ void LaserWeldFilterDialog::LoadSettings()
 
 bool LaserWeldFilterDialog::SaveSettings(QString* error) const
 {
-    PointCloudProcessingConfig::Settings processingSettings;
+    PointCloudProcessingConfig::Settings processingSettings = PointCloudProcessingConfig::Load();
     processingSettings.mode = CurrentProcessingMode();
     processingSettings.featurePointStrategy = CurrentFeaturePointStrategy();
     processingSettings.libraryDir = m_pExternalLibraryDirEdit->text().trimmed();
@@ -980,6 +991,8 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.zTruncationValue = m_pExternalZTruncationSpin->value();
     processingSettings.resampleStepMm = m_pExternalResampleStepSpin->value();
     processingSettings.fallbackToLegacy = m_pExternalFallbackCheck->isChecked();
+    processingSettings.slopeConsistentCornerFit =
+        m_pSlopeConsistentCornerFitCheck != nullptr && m_pSlopeConsistentCornerFitCheck->isChecked();
     QString localError;
     if (!PointCloudProcessingConfig::Save(processingSettings, &localError))
     {
@@ -1002,30 +1015,35 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
         }
     }
 
-    const QString configPath = LaserFilterSettingsPath();
     bool ok = true;
-    const auto write = [&configPath](const QString& key, const QString& value)
+    const auto write = [](const QString& key, const QString& value, const QString& valueType = QStringLiteral("string"))
         {
-            return ConfigDatabase::WriteSetting(configPath, key, value);
+            return ConfigDatabase::WriteScopedSetting(
+                QStringLiteral("global"),
+                QString(),
+                LASER_FILTER_SETTINGS_MODULE,
+                key,
+                value,
+                valueType);
         };
 
     ok = write("Path/Input", m_pInputPathEdit->text().trimmed()) && ok;
     ok = write("Path/Output", m_pOutputPathEdit->text().trimmed()) && ok;
-    ok = write("Cloud/Axis", QString::number(m_pCloudAxisCombo->currentIndex())) && ok;
-    ok = write("Param/Axis", QString::number(m_pAxisCombo->currentIndex())) && ok;
-    ok = write("Param/FitMode", QString::number(m_pFitModeCombo->currentIndex())) && ok;
-    ok = write("Param/ZThreshold", QString::number(m_pZThresholdSpin->value(), 'f', 6)) && ok;
-    ok = write("Param/ZJumpThreshold", QString::number(m_pZJumpThresholdSpin->value(), 'f', 6)) && ok;
-    ok = write("Param/ZContinuityThreshold", QString::number(m_pZContinuityThresholdSpin->value(), 'f', 6)) && ok;
-    ok = write("Param/SegmentBreakDistance", QString::number(m_pSegmentBreakDistanceSpin->value(), 'f', 6)) && ok;
-    ok = write("Param/KeepLongestSegmentOnly", m_pKeepLongestSegmentCheck->isChecked() ? "1" : "0") && ok;
-    ok = write("Param/Step", QString::number(m_pStepSpin->value(), 'f', 6)) && ok;
-    ok = write("Param/SearchWindow", QString::number(m_pWindowSpin->value(), 'f', 6)) && ok;
-    ok = write("Param/LineFitTrimCount", QString::number(m_pLineFitTrimSpin->value())) && ok;
-    ok = write("Param/PiecewiseFitTolerance", QString::number(m_pPiecewiseToleranceSpin->value(), 'f', 6)) && ok;
-    ok = write("Param/PiecewiseMinSegmentPoints", QString::number(m_pPiecewiseMinSegmentSpin->value())) && ok;
-    ok = write("Param/MinPointCount", QString::number(m_pMinPointSpin->value())) && ok;
-    ok = write("Param/SmoothRadius", QString::number(m_pSmoothRadiusSpin->value())) && ok;
+    ok = write("Cloud/Axis", QString::number(m_pCloudAxisCombo->currentIndex()), QStringLiteral("number")) && ok;
+    ok = write("Param/Axis", QString::number(m_pAxisCombo->currentIndex()), QStringLiteral("number")) && ok;
+    ok = write("Param/FitMode", QString::number(m_pFitModeCombo->currentIndex()), QStringLiteral("number")) && ok;
+    ok = write("Param/ZThreshold", QString::number(m_pZThresholdSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
+    ok = write("Param/ZJumpThreshold", QString::number(m_pZJumpThresholdSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
+    ok = write("Param/ZContinuityThreshold", QString::number(m_pZContinuityThresholdSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
+    ok = write("Param/SegmentBreakDistance", QString::number(m_pSegmentBreakDistanceSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
+    ok = write("Param/KeepLongestSegmentOnly", m_pKeepLongestSegmentCheck->isChecked() ? "1" : "0", QStringLiteral("bool")) && ok;
+    ok = write("Param/Step", QString::number(m_pStepSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
+    ok = write("Param/SearchWindow", QString::number(m_pWindowSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
+    ok = write("Param/LineFitTrimCount", QString::number(m_pLineFitTrimSpin->value()), QStringLiteral("number")) && ok;
+    ok = write("Param/PiecewiseFitTolerance", QString::number(m_pPiecewiseToleranceSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
+    ok = write("Param/PiecewiseMinSegmentPoints", QString::number(m_pPiecewiseMinSegmentSpin->value()), QStringLiteral("number")) && ok;
+    ok = write("Param/MinPointCount", QString::number(m_pMinPointSpin->value()), QStringLiteral("number")) && ok;
+    ok = write("Param/SmoothRadius", QString::number(m_pSmoothRadiusSpin->value()), QStringLiteral("number")) && ok;
     if (!ok)
     {
         if (error != nullptr)
@@ -1420,5 +1438,8 @@ RobotCalculation::LowerWeldFilterParams LaserWeldFilterDialog::CurrentParams() c
     params.piecewiseMinSegmentPoints = m_pPiecewiseMinSegmentSpin->value();
     params.minPointCount = m_pMinPointSpin->value();
     params.smoothRadius = m_pSmoothRadiusSpin->value();
+    params.useSlopeConsistentCornerFit =
+        m_pSlopeConsistentCornerFitCheck != nullptr && m_pSlopeConsistentCornerFitCheck->isChecked();
+    params.enableCornerCompensation = false;
     return params;
 }

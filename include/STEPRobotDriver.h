@@ -49,16 +49,20 @@ public:
 	bool CloseSocket() override;
 	bool IsConnected() override;
 	std::string GetRobotStatusText() override;
+	std::string GetStateMonitorSourceText() const override;
 	bool InitRobotDriver(std::string strUnitName) override;
 
 
 	double GetCurrentPos(int nAxisNo) override;
 	T_ROBOT_COORS GetCurrentPos() override;
+	T_ROBOT_COORS GetCurrentPosPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
 	double GetCurrentPulse(int nAxisNo) override;
 	T_ANGLE_PULSE GetCurrentPulse() override;
+	T_ANGLE_PULSE GetCurrentPulsePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
 
 
 	int CheckDone() override;
+	int CheckDonePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
 	int CheckRobotDone(int nDelayTime = 200) override;
 
 	bool CallJob(std::string sJobName) override;

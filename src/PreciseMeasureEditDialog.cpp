@@ -1104,7 +1104,7 @@ void PreciseMeasureEditDialog::BuildUi()
     otherContentLayout->setContentsMargins(26, 18, 26, 22);
     otherContentLayout->setSpacing(12);
 
-    QLabel* otherHint = new QLabel("扫描参数和焊接参数按当前选中的位置类型保存；修改后点击“保存参数”统一写回参数文件。");
+    QLabel* otherHint = new QLabel("扫描参数和焊接参数按当前选中的位置类型保存；修改后点击“保存参数”统一写回配置库。");
     otherContentLayout->addWidget(otherHint);
 
     QWidget* otherWidget = new QWidget();
@@ -1257,7 +1257,7 @@ void PreciseMeasureEditDialog::LoadParamGroups()
     const QString path = CurrentParamFilePath();
     if (!ini.SetFileName(path.toUtf8().constData()))
     {
-        AppendLog("读取参数组失败：打开参数文件失败：" + path);
+        AppendLog("读取参数组失败：打开参数数据失败：" + path);
         m_bLoading = false;
         return;
     }
@@ -1354,7 +1354,7 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
     COPini ini;
     if (!ini.SetFileName(path.toUtf8().constData()))
     {
-        error = "打开参数文件失败：" + path;
+        error = "打开参数数据失败：" + path;
         QMessageBox::warning(this, "删除参数组", error);
         AppendLog("删除参数组失败：" + error);
         return;
@@ -2282,7 +2282,7 @@ bool PreciseMeasureEditDialog::LoadScanSafeParams()
     }
     else
     {
-        AppendLog("读取扫描安全推算参数失败：打开参数文件失败：" + path);
+        AppendLog("读取扫描安全推算参数失败：打开参数数据失败：" + path);
         return false;
     }
 
@@ -2494,7 +2494,7 @@ bool PreciseMeasureEditDialog::LoadWeldPoseTeachParams()
     }
     else
     {
-        AppendLog("读取焊接姿态示教参数失败：打开参数文件失败：" + path);
+        AppendLog("读取焊接姿态示教参数失败：打开参数数据失败：" + path);
         return false;
     }
 
@@ -2686,7 +2686,7 @@ bool PreciseMeasureEditDialog::CreateParamGroup(bool copyCurrent, QString& error
     COPini ini;
     if (!ini.SetFileName(path.toUtf8().constData()))
     {
-        error = "打开参数文件失败：" + path;
+        error = "打开参数数据失败：" + path;
         return false;
     }
     int groupCount = 1;

@@ -4,6 +4,7 @@
 #include "ConfigDatabase.h"
 #include "FANUCRobotDriver.h"
 #include "HandEyeMatrixConfig.h"
+#include "MeasureThenWeldRuntimeConfig.h"
 #include "OPini.h"
 #include "PointCloudExtractionProcessor.h"
 #include "PointCloudProcessingConfig.h"
@@ -54,6 +55,8 @@ constexpr auto WORKPIECE_EXTRACTED_LASER_FILE_NAME = "PreciseLaserPoint_Workpiec
 constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
 constexpr auto KEY_POINTS_FILE_NAME = "PreciseLaserPoint_KeyPoints.txt";
 constexpr auto CLASSIFIED_FILE_NAME = "PreciseLaserPoint_Classified.txt";
+constexpr auto CORNER_COMP_KEY_POINTS_FILE_NAME = "PreciseLaserPoint_CornerComp_KeyPoints.txt";
+constexpr auto CORNER_COMP_CLASSIFIED_FILE_NAME = "PreciseLaserPoint_CornerComp_Classified.txt";
 constexpr auto CLASSIFIED_NOISE_FILE_NAME = "PreciseLaserPoint_Classified_Noise.txt";
 constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
 constexpr auto WELD_POSE_SEAM_COMP_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
@@ -70,6 +73,11 @@ constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
 constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
 constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
 constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
+constexpr char CORNER_COMP_ENABLED_KEY[] = "Enabled";
+constexpr char INNER_TO_OUTER_CORNER_COMP_KEY[] = "InnerToOuter";
+constexpr char INNER_TO_INNER_CORNER_COMP_KEY[] = "InnerToInner";
+constexpr char OUTER_TO_OUTER_CORNER_COMP_KEY[] = "OuterToOuter";
+constexpr char OUTER_TO_INNER_CORNER_COMP_KEY[] = "OuterToInner";
 constexpr double DEFAULT_FINAL_WELD_TRAJECTORY_SAMPLE_STEP_MM = 4.0;
 
 double NormalizeFinalWeldTrajectorySampleStepMm(double value)
@@ -427,6 +435,115 @@ QString GeometryStrategyName(RobotCalculation::LowerWeldGeometryStrategy strateg
     }
 }
 
+QString PoseCornerGroupModule(int groupIndex)
+{
+    return QStringLiteral("WeldPoseCompParam/CornerCompensation/Group%1").arg(groupIndex);
+}
+
+QString PoseCornerSlotModule(int flatIndex)
+{
+    return QStringLiteral("WeldPoseCompParam/CornerCompensation/Slot%1").arg(flatIndex);
+}
+
+bool ReadRobotScopedSetting(const QString& robotName, const QString& module, const QString& key, QString* value)
+{
+    if (robotName.trimmed().isEmpty())
+    {
+        return false;
+    }
+    return ConfigDatabase::ReadScopedSetting(QStringLiteral("robot"), robotName.trimmed(), module, key, value);
+}
+
+int ReadRobotScopedInt(const QString& robotName, const QString& module, const QString& key, int defaultValue)
+{
+    QString value;
+    if (!ReadRobotScopedSetting(robotName, module, key, &value))
+    {
+        return defaultValue;
+    }
+    bool ok = false;
+    const int parsed = value.trimmed().toInt(&ok);
+    return ok ? parsed : defaultValue;
+}
+
+bool ReadRobotScopedBool(const QString& robotName, const QString& module, const QString& key, bool defaultValue)
+{
+    QString value;
+    if (!ReadRobotScopedSetting(robotName, module, key, &value))
+    {
+        return defaultValue;
+    }
+    const QString normalized = value.trimmed().toLower();
+    return normalized == QStringLiteral("1")
+        || normalized == QStringLiteral("true")
+        || normalized == QStringLiteral("yes");
+}
+
+double ReadRobotScopedDouble(const QString& robotName, const QString& module, const QString& key, double defaultValue)
+{
+    QString value;
+    if (!ReadRobotScopedSetting(robotName, module, key, &value))
+    {
+        return defaultValue;
+    }
+    bool ok = false;
+    const double parsed = value.trimmed().toDouble(&ok);
+    return ok ? parsed : defaultValue;
+}
+
+RobotCalculation::LowerWeldFilterParams::CornerCompensation ReadCornerCompensationSlot(
+    const QString& robotName,
+    int flatIndex)
+{
+    RobotCalculation::LowerWeldFilterParams::CornerCompensation comp;
+    const QString module = PoseCornerSlotModule(flatIndex);
+    comp.innerToOuterMm = ReadRobotScopedDouble(robotName, module, INNER_TO_OUTER_CORNER_COMP_KEY, 0.0);
+    comp.innerToInnerMm = ReadRobotScopedDouble(robotName, module, INNER_TO_INNER_CORNER_COMP_KEY, 0.0);
+    comp.outerToOuterMm = ReadRobotScopedDouble(robotName, module, OUTER_TO_OUTER_CORNER_COMP_KEY, 0.0);
+    comp.outerToInnerMm = ReadRobotScopedDouble(robotName, module, OUTER_TO_INNER_CORNER_COMP_KEY, 0.0);
+    return comp;
+}
+
+bool HasCornerCompensationValue(const RobotCalculation::LowerWeldFilterParams::CornerCompensation& comp)
+{
+    return std::abs(comp.innerToOuterMm) > 1e-9
+        || std::abs(comp.innerToInnerMm) > 1e-9
+        || std::abs(comp.outerToOuterMm) > 1e-9
+        || std::abs(comp.outerToInnerMm) > 1e-9;
+}
+
+void LoadActivePoseCornerCompensation(
+    const QString& robotName,
+    RobotCalculation::LowerWeldFilterParams& params)
+{
+    const QString allModule = QStringLiteral("WeldPoseCompParam/ALLWeldPoseComp");
+    int activeGroupIndex = ReadRobotScopedInt(robotName, allModule, POSE_ACTIVE_GROUP_INDEX_KEY, 0);
+    const int groupCount = ReadRobotScopedInt(robotName, allModule, POSE_GROUP_COUNT_KEY, activeGroupIndex + 1);
+    if (groupCount > 0)
+    {
+        activeGroupIndex = std::clamp(activeGroupIndex, 0, groupCount - 1);
+    }
+    else
+    {
+        activeGroupIndex = 0;
+    }
+
+    if (!ReadRobotScopedBool(robotName, PoseCornerGroupModule(activeGroupIndex), CORNER_COMP_ENABLED_KEY, false))
+    {
+        params.enableCornerCompensation = false;
+        params.risingCornerCompensation = {};
+        params.fallingCornerCompensation = {};
+        return;
+    }
+
+    const int offset = activeGroupIndex * COMP_SEGMENT_COUNT;
+    params.risingCornerCompensation = ReadCornerCompensationSlot(robotName, offset + 1);
+    params.fallingCornerCompensation = ReadCornerCompensationSlot(robotName, offset + 3);
+    params.enableCornerCompensation =
+        HasCornerCompensationValue(params.risingCornerCompensation)
+        || HasCornerCompensationValue(params.fallingCornerCompensation);
+}
+
 RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PRECISE_MEASURE_PARAM& param)
 {
     RobotCalculation::LowerWeldFilterParams params;
@@ -461,6 +578,8 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
     params.piecewiseMinSegmentPoints = 10;
     params.minPointCount = 4;
     params.smoothRadius = 3;
+    params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
+    LoadActivePoseCornerCompensation(QString::fromStdString(param.sRobotName), params);
     return params;
 }
 
@@ -5841,14 +5960,14 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     if (!RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &ensureError))
     {
         error = ensureError.isEmpty()
-            ? QString("创建或打开测量焊接参数文件失败：%1").arg(RobotDataHelper::MeasureWeldParamPath(robotName))
+            ? QString("创建或打开测量焊接参数数据失败：%1").arg(RobotDataHelper::MeasureWeldParamPath(robotName))
             : ensureError;
         return false;
     }
     const QString iniPath = RobotDataHelper::MeasureWeldParamPath(robotName);
     if (!ConfigDatabase::HasIniFile(iniPath))
     {
-        error = ensureError.isEmpty() ? QString("未找到参数文件：%1").arg(iniPath) : ensureError;
+        error = ensureError.isEmpty() ? QString("未找到测量焊接参数数据：%1").arg(iniPath) : ensureError;
         return false;
     }
 
@@ -5857,7 +5976,7 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     COPini ini;
     if (!ini.SetFileName(param.sIniFilePath))
     {
-        error = QString("打开参数文件失败：%1").arg(iniPath);
+        error = QString("打开测量焊接参数数据失败：%1").arg(iniPath);
         return false;
     }
 
@@ -5891,7 +6010,7 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     {
         if (!weldIni.SetFileName(ToUtf8StdString(weldParamPath)))
         {
-            error = QString("打开焊接参数文件失败：%1").arg(weldParamPath);
+            error = QString("打开焊接参数数据失败：%1").arg(weldParamPath);
             return false;
         }
         pWeldIni = &weldIni;
@@ -6339,6 +6458,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         static_cast<qint64>(std::llround(1000.0 / configuredCameraReadFps)));
     const double actualCameraReadFps = 1000.0 / static_cast<double>(cameraReadIntervalMs);
     const qint64 cameraTimeOffsetUs = static_cast<qint64>(std::llround(param.dCameraTimeOffsetMs * 1000.0));
+    const MeasureThenWeldRuntimeConfig::ScanTimestampSource scanTimestampSource =
+        MeasureThenWeldRuntimeConfig::LoadScanTimestampSource();
+    const bool useRobotTimestampForScan =
+        scanTimestampSource != MeasureThenWeldRuntimeConfig::ScanTimestampSource::Pc;
+    const QString scanTimestampSourceName = MeasureThenWeldRuntimeConfig::DisplayName(scanTimestampSource);
+    const QString scanTimestampFieldName = MeasureThenWeldRuntimeConfig::FieldName(scanTimestampSource);
     if (setFlowStep)
     {
         setFlowStep("扫描运动中，正在采集相机点、机器人位置和激光点");
@@ -6480,21 +6605,30 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         &robotSamplesCv,
         pRobotDriver,
         &lastRobotMonitorMs,
-        &passiveRobotSamplingActive]()
+        &passiveRobotSamplingActive,
+        useRobotTimestampForScan]()
         {
             RobotCalculation::TimestampedRobotPose sample;
             RobotDriverAdaptor::StateSnapshot snapshot;
             if (pRobotDriver->LatestStateSnapshot(snapshot) && snapshot.valid)
             {
-                if (passiveRobotSamplingActive && snapshot.robotMs == lastRobotMonitorMs)
+                const long long selectedTimestampMs = useRobotTimestampForScan
+                    ? snapshot.robotMs
+                    : snapshot.pcRecvMs;
+                if (selectedTimestampMs > 0
+                    && passiveRobotSamplingActive
+                    && selectedTimestampMs == lastRobotMonitorMs)
                 {
                     return false;
                 }
 
-                sample.pose = snapshot.pose;
-                sample.timestampUs = static_cast<qint64>(snapshot.robotMs) * 1000;
-                lastRobotMonitorMs = snapshot.robotMs;
-                passiveRobotSamplingActive = true;
+                if (selectedTimestampMs > 0)
+                {
+                    sample.pose = snapshot.pose;
+                    sample.timestampUs = static_cast<qint64>(selectedTimestampMs) * 1000;
+                    lastRobotMonitorMs = selectedTimestampMs;
+                    passiveRobotSamplingActive = true;
+                }
             }
             if (sample.timestampUs <= 0)
             {
@@ -6695,10 +6829,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
 
     if (appendLog)
     {
-        appendLog(QString("开始扫描运动：相机帧由当前机器人专属缓存读取，配置相机读取帧率=%1 fps（约 %2 ms/帧，用于时间间隔统计），机器人位姿约 %3 ms 采样；机器人位姿使用被动时间轴（FANUC=机器人端robot_ms，STEP/其他=PC steady ms），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %4 ms。点云转换使用 %5 个后台处理线程。配置扫描速度= %6 mm/min，下发速度= %7 %8")
+        appendLog(QString("开始扫描运动：相机帧由当前机器人专属缓存读取，配置相机读取帧率=%1 fps（约 %2 ms/帧，用于时间间隔统计），机器人位姿约 %3 ms 采样；扫描匹配时间轴=%4（%5），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %6 ms。点云转换使用 %7 个后台处理线程。配置扫描速度= %8 mm/min，下发速度= %9 %10")
             .arg(actualCameraReadFps, 0, 'f', 2)
             .arg(cameraReadIntervalMs)
             .arg(ROBOT_SAMPLE_INTERVAL_MS)
+            .arg(scanTimestampSourceName)
+            .arg(scanTimestampFieldName)
             .arg(param.dCameraTimeOffsetMs, 0, 'f', 3)
             .arg(processingWorkerCount)
             .arg(param.dScanSpeed, 0, 'f', 3)
@@ -6911,6 +7047,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     const QString preservePathFitPath = QDir(laserDir).filePath(PRESERVE_PATH_FILE_NAME);
     const QString keyPointsPath = QDir(laserDir).filePath(KEY_POINTS_FILE_NAME);
     const QString classifiedPath = QDir(laserDir).filePath(CLASSIFIED_FILE_NAME);
+    const QString cornerCompKeyPointsPath = QDir(laserDir).filePath(CORNER_COMP_KEY_POINTS_FILE_NAME);
+    const QString cornerCompClassifiedPath = QDir(laserDir).filePath(CORNER_COMP_CLASSIFIED_FILE_NAME);
     const QString classifiedNoisePath = QDir(laserDir).filePath(CLASSIFIED_NOISE_FILE_NAME);
     const QString weldPosePath = QDir(laserDir).filePath(WELD_POSE_FILE_NAME);
     const QString weldPoseSeamCompPath = QDir(laserDir).filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
@@ -7353,6 +7491,39 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         return true;
     }
 
+    const bool useCornerCompensatedClassification =
+        originalAnalysis.cornerCompensatedClassificationResult.ok
+        && !originalAnalysis.cornerCompensatedClassificationResult.points.isEmpty();
+    if (useCornerCompensatedClassification)
+    {
+        if (!SaveTextLines(
+                cornerCompClassifiedPath,
+                BuildClassifiedOutputLines(originalAnalysis.cornerCompensatedClassificationResult),
+                error))
+        {
+            if (appendLog)
+            {
+                appendLog(QString("保存拐点补偿后焊道分类结果失败：%1").arg(error));
+            }
+            return true;
+        }
+        if (!SaveTextLines(cornerCompKeyPointsPath, BuildKeyPointOutputLines(originalAnalysis.cornerCompensatedKeyPoints), error))
+        {
+            if (appendLog)
+            {
+                appendLog(QString("保存拐点补偿后起终点/拐点结果失败：%1").arg(error));
+            }
+            return true;
+        }
+    }
+    else if (originalFitParams.enableCornerCompensation && appendLog)
+    {
+        appendLog(QString("拐点补偿未生成：%1").arg(
+            originalAnalysis.cornerCompensatedClassificationResult.error.isEmpty()
+                ? QStringLiteral("未找到可补偿的上坡/下坡拐点或补偿值为 0。")
+                : originalAnalysis.cornerCompensatedClassificationResult.error));
+    }
+
     if (appendLog)
     {
         int startCount = 0;
@@ -7393,6 +7564,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             .arg(classifiedPath));
         appendLog(QString("起终点/拐点文件：%1").arg(keyPointsPath));
         appendLog(QString("焊道杂点文件：%1").arg(classifiedNoisePath));
+        if (useCornerCompensatedClassification)
+        {
+            appendLog(QString("拐点补偿后分类文件：%1").arg(cornerCompClassifiedPath));
+            appendLog(QString("拐点补偿后起终点/拐点文件：%1").arg(cornerCompKeyPointsPath));
+            appendLog("焊接姿态将使用拐点补偿后分类点生成。");
+        }
         appendLog(QString("先测后焊特征分析摘要：输入=%1，下层候选=%2，输出=%3，剔除Z突变=%4，剔除Z连续异常=%5，连续段剔除=%6")
             .arg(originalAnalysis.filterResult.inputPointCount)
             .arg(originalAnalysis.filterResult.lowerPointCount)
@@ -7435,8 +7612,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         setFlowStep("焊道分类完成，正在生成分段焊接姿态");
     }
 
+    const RobotCalculation::LowerWeldClassificationResult& classificationForWeldPose =
+        useCornerCompensatedClassification
+            ? originalAnalysis.cornerCompensatedClassificationResult
+            : originalAnalysis.classificationResult;
     const std::vector<QString> weldPoseLines =
-        BuildSegmentPoseOutputLines(originalAnalysis.classificationResult, param, weldPosePreset, appendLog);
+        BuildSegmentPoseOutputLines(classificationForWeldPose, param, weldPosePreset, appendLog);
     if (!weldPoseLines.empty())
     {
         if (!SaveTextLines(weldPosePath, weldPoseLines, error))
@@ -7515,6 +7696,8 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     const QString sdkSeamFittedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_FITTED_FILE_NAME);
     const QString keyPointsPath = dir.filePath(KEY_POINTS_FILE_NAME);
     const QString classifiedPath = dir.filePath(CLASSIFIED_FILE_NAME);
+    const QString cornerCompKeyPointsPath = dir.filePath(CORNER_COMP_KEY_POINTS_FILE_NAME);
+    const QString cornerCompClassifiedPath = dir.filePath(CORNER_COMP_CLASSIFIED_FILE_NAME);
     const QString classifiedNoisePath = dir.filePath(CLASSIFIED_NOISE_FILE_NAME);
     const QString matchDebugPath = dir.filePath(MATCH_DEBUG_FILE_NAME);
     weldPosePath = dir.filePath(WELD_POSE_FILE_NAME);
@@ -7688,6 +7871,30 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     {
         return false;
     }
+    const bool useCornerCompensatedClassification =
+        originalAnalysis.cornerCompensatedClassificationResult.ok
+        && !originalAnalysis.cornerCompensatedClassificationResult.points.isEmpty();
+    if (useCornerCompensatedClassification)
+    {
+        if (!SaveTextLines(
+                cornerCompClassifiedPath,
+                BuildClassifiedOutputLines(originalAnalysis.cornerCompensatedClassificationResult),
+                error))
+        {
+            return false;
+        }
+        if (!SaveTextLines(cornerCompKeyPointsPath, BuildKeyPointOutputLines(originalAnalysis.cornerCompensatedKeyPoints), error))
+        {
+            return false;
+        }
+    }
+    else if (originalFitParams.enableCornerCompensation && appendLog)
+    {
+        appendLog(QString("拐点补偿未生成：%1").arg(
+            originalAnalysis.cornerCompensatedClassificationResult.error.isEmpty()
+                ? QStringLiteral("未找到可补偿的上坡/下坡拐点或补偿值为 0。")
+                : originalAnalysis.cornerCompensatedClassificationResult.error));
+    }
 
     QString measurementPoseError;
     const MeasurementPoseReference measurementPoseReference =
@@ -7719,6 +7926,12 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         appendLog(QString("焊道分类文件：%1").arg(classifiedPath));
         appendLog(QString("起终点/拐点文件：%1").arg(keyPointsPath));
         appendLog(QString("焊道杂点文件：%1").arg(classifiedNoisePath));
+        if (useCornerCompensatedClassification)
+        {
+            appendLog(QString("拐点补偿后分类文件：%1").arg(cornerCompClassifiedPath));
+            appendLog(QString("拐点补偿后起终点/拐点文件：%1").arg(cornerCompKeyPointsPath));
+            appendLog("焊接姿态将使用拐点补偿后分类点生成。");
+        }
         appendLog(QString("焊接姿态参数：模式=%1, RX=%2, RY=%3, 示教RZ=%4 deg, RZ增益=%5 deg, 爬坡RZ夹紧=[%6, %7] deg, 拐点前过渡=%8 mm, 起点跳过=%9 mm, 终点跳过=%10 mm")
             .arg(weldPosePreset.useTaughtWeldPose ? QStringLiteral("示教平台姿态") : QStringLiteral("原始固定姿态"))
             .arg(weldPosePreset.useTaughtWeldPose ? weldPosePreset.taughtWeldPoseRx : weldPosePreset.rx, 0, 'f', 3)
@@ -7736,8 +7949,12 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     {
         setFlowStep("特征分析完成，正在生成焊接姿态");
     }
+    const RobotCalculation::LowerWeldClassificationResult& classificationForWeldPose =
+        useCornerCompensatedClassification
+            ? originalAnalysis.cornerCompensatedClassificationResult
+            : originalAnalysis.classificationResult;
     const std::vector<QString> weldPoseLines =
-        BuildSegmentPoseOutputLines(originalAnalysis.classificationResult, param, weldPosePreset, appendLog);
+        BuildSegmentPoseOutputLines(classificationForWeldPose, param, weldPosePreset, appendLog);
     if (weldPoseLines.empty())
     {
         error = "焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。";

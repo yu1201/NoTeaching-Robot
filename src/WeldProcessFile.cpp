@@ -10,7 +10,6 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
-#include <filesystem>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -23,7 +22,6 @@ RobotLog& WeldProcessLogger()
     return logger;
 }
 
-namespace fs = std::filesystem;
 constexpr char kDelimiter = '\t';
 constexpr int kWeaveFieldCount = 15;
 constexpr int kWeldCoreFieldCount = 48;
@@ -144,7 +142,7 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
         return false;
     }
 
-    LogInfo("工艺 txt 读取成功，控制单元: %s, 摆动类型数: %d, 工艺数: %d",
+    LogInfo("工艺数据读取成功，控制单元: %s, 摆动类型数: %d, 工艺数: %d",
         tContralUnitInfo.sUnitName.c_str(), m_nAllWeaveTypeNum, m_nAllWeldParaNum);
     return true;
 }
@@ -481,12 +479,12 @@ void WeldProcessFile::EnsureGlobalStorage(int nUnitNo)
 
 std::string WeldProcessFile::BuildWeaveIniPath(const std::string& unitName) const
 {
-    return (fs::current_path() / "Data" / unitName / "WeaveDate.txt").string();
+    return "Data/" + unitName + "/WeaveDate.txt";
 }
 
 std::string WeldProcessFile::BuildWeldIniPath(const std::string& unitName) const
 {
-    return (fs::current_path() / "Data" / unitName / "WeldPara.txt").string();
+    return "Data/" + unitName + "/WeldPara.txt";
 }
 
 bool WeldProcessFile::LoadWeaveTxt()
@@ -520,7 +518,7 @@ bool WeldProcessFile::LoadWeaveTxt()
         {
             if (fields.size() < 2 || !TryParseInt(fields[1], m_nUseWeaveTypeNo))
             {
-                m_sLastError = "读取摆动 txt 的 USE 行失败。";
+                m_sLastError = "读取摆动数据 USE 行失败。";
                 return false;
             }
             continue;
@@ -531,7 +529,7 @@ bool WeldProcessFile::LoadWeaveTxt()
         {
             if (m_sLastError.empty())
             {
-                m_sLastError = "摆动 txt 数据行格式错误。";
+                m_sLastError = "摆动数据行格式错误。";
             }
             return false;
         }
@@ -541,7 +539,7 @@ bool WeldProcessFile::LoadWeaveTxt()
     m_nAllWeaveTypeNum = static_cast<int>(m_vtWeaveTypeList.size());
     if (m_nAllWeaveTypeNum <= 0)
     {
-        m_sLastError = "摆动 txt 中没有有效数据。";
+        m_sLastError = "摆动数据中没有有效数据。";
         return false;
     }
     m_nUseWeaveTypeNo = qBound(0, m_nUseWeaveTypeNo, m_nAllWeaveTypeNum - 1);
@@ -579,7 +577,7 @@ bool WeldProcessFile::LoadWeldTxt()
         {
             if (fields.size() < 2 || !TryParseInt(fields[1], m_nUseWeldParaNo))
             {
-                m_sLastError = "读取焊接工艺 txt 的 USE 行失败。";
+                m_sLastError = "读取焊接工艺数据 USE 行失败。";
                 return false;
             }
             continue;
@@ -590,7 +588,7 @@ bool WeldProcessFile::LoadWeldTxt()
         {
             if (m_sLastError.empty())
             {
-                m_sLastError = "焊接工艺 txt 数据行格式错误。";
+                m_sLastError = "焊接工艺数据行格式错误。";
             }
             return false;
         }
@@ -601,7 +599,7 @@ bool WeldProcessFile::LoadWeldTxt()
     m_nAllWeldParaNum = static_cast<int>(m_vtWeldParaList.size());
     if (m_nAllWeldParaNum <= 0)
     {
-        m_sLastError = "焊接工艺 txt 中没有有效数据。";
+        m_sLastError = "焊接工艺数据中没有有效数据。";
         return false;
     }
     m_nUseWeldParaNo = qBound(0, m_nUseWeldParaNo, m_nAllWeldParaNum - 1);
@@ -611,7 +609,7 @@ bool WeldProcessFile::LoadWeldTxt()
 bool WeldProcessFile::SaveWeaveTxt() const
 {
     std::ostringstream out;
-    out << "# WeaveDate.txt\n";
+    out << "# WeaveData\n";
     out << "USE" << kDelimiter << m_nUseWeaveTypeNo << "\n";
     for (const auto& item : m_vtWeaveTypeList)
     {
@@ -628,7 +626,7 @@ bool WeldProcessFile::SaveWeaveTxt() const
 bool WeldProcessFile::SaveWeldTxt() const
 {
     std::ostringstream out;
-    out << "# WeldPara.txt\n";
+    out << "# WeldParameters\n";
     out << "USE" << kDelimiter << m_nUseWeldParaNo << "\n";
     for (const auto& item : m_vtWeldParaList)
     {

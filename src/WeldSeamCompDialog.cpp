@@ -7,11 +7,13 @@
 #include "WindowStyleHelper.h"
 
 #include <QButtonGroup>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QDoubleValidator>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -45,6 +47,11 @@ constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
 constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
 constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
 constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
+constexpr char CORNER_COMP_ENABLED_KEY[] = "Enabled";
+constexpr char INNER_TO_OUTER_CORNER_COMP_KEY[] = "InnerToOuter";
+constexpr char INNER_TO_INNER_CORNER_COMP_KEY[] = "InnerToInner";
+constexpr char OUTER_TO_OUTER_CORNER_COMP_KEY[] = "OuterToOuter";
+constexpr char OUTER_TO_INNER_CORNER_COMP_KEY[] = "OuterToInner";
 
 int NormalizePoseCompMatchMode(int mode)
 {
@@ -83,9 +90,80 @@ QString WeldSeamCompParamPath(const QString& robotName)
     return RobotDataHelper::BuildProjectPath(QString("Data/%1/WeldSeamCompParam.ini").arg(robotName));
 }
 
-QString NativePathText(const QString& title, const QString& path)
+QString DatabaseText(const QString& title)
 {
-    return QString("%1：%2").arg(title, QDir::toNativeSeparators(path));
+    return QString("%1：%2").arg(title, QDir::toNativeSeparators(ConfigDatabase::DatabasePath()));
+}
+
+QString PoseCornerGroupModule(int groupIndex)
+{
+    return QStringLiteral("WeldPoseCompParam/CornerCompensation/Group%1").arg(groupIndex);
+}
+
+QString PoseCornerSlotModule(int flatIndex)
+{
+    return QStringLiteral("WeldPoseCompParam/CornerCompensation/Slot%1").arg(flatIndex);
+}
+
+bool ReadRobotSetting(const QString& robotName, const QString& module, const QString& key, QString* value)
+{
+    if (robotName.trimmed().isEmpty())
+    {
+        return false;
+    }
+    return ConfigDatabase::ReadScopedSetting(QStringLiteral("robot"), robotName.trimmed(), module, key, value);
+}
+
+bool WriteRobotSetting(
+    const QString& robotName,
+    const QString& module,
+    const QString& key,
+    const QString& value,
+    const QString& valueType,
+    QString* error)
+{
+    if (robotName.trimmed().isEmpty())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("机器人名称为空，无法写入配置数据库。");
+        }
+        return false;
+    }
+    if (ConfigDatabase::WriteScopedSetting(QStringLiteral("robot"), robotName.trimmed(), module, key, value, valueType))
+    {
+        return true;
+    }
+    if (error != nullptr)
+    {
+        *error = QStringLiteral("写入配置数据库失败：%1 / %2").arg(module, key);
+    }
+    return false;
+}
+
+bool ReadRobotBool(const QString& robotName, const QString& module, const QString& key, bool defaultValue)
+{
+    QString value;
+    if (!ReadRobotSetting(robotName, module, key, &value))
+    {
+        return defaultValue;
+    }
+    const QString normalized = value.trimmed().toLower();
+    return normalized == QStringLiteral("1")
+        || normalized == QStringLiteral("true")
+        || normalized == QStringLiteral("yes");
+}
+
+double ReadRobotDouble(const QString& robotName, const QString& module, const QString& key, double defaultValue)
+{
+    QString value;
+    if (!ReadRobotSetting(robotName, module, key, &value))
+    {
+        return defaultValue;
+    }
+    bool ok = false;
+    const double parsed = value.trimmed().toDouble(&ok);
+    return ok ? parsed : defaultValue;
 }
 
 QString FormatNumber(double value)
@@ -102,6 +180,24 @@ std::string LocalString(const QString& text)
 {
     const QByteArray bytes = text.toUtf8();
     return std::string(bytes.constData());
+}
+
+QDoubleSpinBox* CreateCornerCompensationSpin(QWidget* parent)
+{
+    QDoubleSpinBox* spin = new QDoubleSpinBox(parent);
+    spin->setRange(-200.0, 200.0);
+    spin->setDecimals(3);
+    spin->setSingleStep(0.5);
+    spin->setSuffix(" mm");
+    spin->setMinimumWidth(150);
+    spin->setValue(0.0);
+    return spin;
+}
+
+bool IsCornerCompensationSegmentKind(const QString& segmentKind)
+{
+    return segmentKind.compare("rising_edge", Qt::CaseInsensitive) == 0
+        || segmentKind.compare("falling_edge", Qt::CaseInsensitive) == 0;
 }
 }
 
@@ -150,6 +246,9 @@ void WeldSeamCompDialog::BuildUi()
         "QPushButton:checked { background: #2F6F7A; border-color: #8EE7EC; }"
         "QLineEdit { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 7px; padding: 4px 6px; }"
         "QLineEdit[readOnly=\"true\"] { color: #A7C9CF; background: #101923; }"
+        "QAbstractSpinBox { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 7px; padding: 4px 6px; }"
+        "QAbstractSpinBox:disabled { color: #6E8590; background: #101923; }"
+        "QCheckBox { color: #D8E8EA; spacing: 8px; }"
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
         "QLabel { color: #BACBD1; }")
         + UnifiedComboBoxStyleSheet());
@@ -233,7 +332,7 @@ void WeldSeamCompDialog::BuildUi()
 
     QGroupBox* editorGroup = new QGroupBox("补偿编辑");
     editorGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
-    editorGroup->setMaximumHeight(360);
+    editorGroup->setMaximumHeight(460);
     QGridLayout* editorLayout = new QGridLayout(editorGroup);
     editorLayout->setHorizontalSpacing(8);
     editorLayout->setVerticalSpacing(6);
@@ -242,7 +341,7 @@ void WeldSeamCompDialog::BuildUi()
     editorLayout->setColumnStretch(1, 0);
     editorLayout->setColumnStretch(2, 0);
     editorLayout->setColumnStretch(5, 1);
-    editorLayout->setRowStretch(7, 1);
+    editorLayout->setRowStretch(9, 1);
 
     m_pPoseMatchModeLabel = new QLabel("姿态匹配：");
     editorLayout->addWidget(m_pPoseMatchModeLabel, 0, 0);
@@ -289,6 +388,29 @@ void WeldSeamCompDialog::BuildUi()
         editorLayout->addWidget(m_pEditLabels[index], 4 + index, 0);
         editorLayout->addWidget(m_pEditValues[index], 4 + index, 1, 1, 5, Qt::AlignLeft);
     }
+
+    m_pCornerCompensationCheck = new QCheckBox("启用本组拐点补偿并生成补偿后 2mm 点");
+    m_pCornerCompensationCheck->setToolTip("启用后，上升边和下降边的拐点补偿值会随当前姿态补偿组保存。");
+    editorLayout->addWidget(m_pCornerCompensationCheck, 7, 0, 1, 6);
+
+    m_pCornerCompensationWidget = new QWidget(editorGroup);
+    QGridLayout* cornerCompLayout = new QGridLayout(m_pCornerCompensationWidget);
+    cornerCompLayout->setContentsMargins(0, 0, 0, 0);
+    cornerCompLayout->setHorizontalSpacing(8);
+    cornerCompLayout->setVerticalSpacing(6);
+    const char* cornerLabels[4] = {
+        "inner intoout(mm)：",
+        "inner intoin(mm)：",
+        "outer outtoout(mm)：",
+        "outer outtoin(mm)："
+    };
+    for (int index = 0; index < 4; ++index)
+    {
+        cornerCompLayout->addWidget(new QLabel(QString::fromUtf8(cornerLabels[index])), index / 2, (index % 2) * 2);
+        m_pCornerCompensationValues[index] = CreateCornerCompensationSpin(m_pCornerCompensationWidget);
+        cornerCompLayout->addWidget(m_pCornerCompensationValues[index], index / 2, (index % 2) * 2 + 1);
+    }
+    editorLayout->addWidget(m_pCornerCompensationWidget, 8, 0, 1, 6);
     contentLayout->addWidget(editorGroup, 1, Qt::AlignTop);
     editorContentLayout->addLayout(contentLayout);
 
@@ -376,6 +498,10 @@ void WeldSeamCompDialog::BuildUi()
     connect(m_pDeleteGroupBtn, &QPushButton::clicked, this, &WeldSeamCompDialog::DeleteCurrentGroup);
     connect(m_pReloadBtn, &QPushButton::clicked, this, [this]() { LoadCurrentParam(); });
     connect(m_pSaveBtn, &QPushButton::clicked, this, [this]() { SaveCurrentParam(); });
+    connect(m_pCornerCompensationCheck, &QCheckBox::toggled, this, [this](bool)
+        {
+            RefreshCornerCompensationEditor();
+        });
 
     RefreshGroupCombo();
     RefreshTypeCombo();
@@ -573,25 +699,57 @@ void WeldSeamCompDialog::LoadCurrentParam()
     MarkCleanSnapshot();
 }
 
+void WeldSeamCompDialog::RefreshCornerCompensationEditor()
+{
+    const int flatIndex = CurrentFlatRowIndex();
+    const bool poseMode = m_mode == CompMode::Pose;
+    const bool hasGroup = m_currentGroupIndex >= 0 && m_currentGroupIndex < m_poseGroupCornerCompEnabled.size();
+    const bool groupEnabled = hasGroup && m_poseGroupCornerCompEnabled[m_currentGroupIndex];
+    const bool hasCornerRow = poseMode
+        && flatIndex >= 0
+        && flatIndex < m_poseRows.size()
+        && IsCornerCompensationSegmentKind(m_poseRows[flatIndex].segmentKind);
+
+    if (m_pCornerCompensationCheck != nullptr)
+    {
+        m_pCornerCompensationCheck->setVisible(poseMode);
+        m_pCornerCompensationCheck->setEnabled(poseMode && hasGroup);
+    }
+    if (m_pCornerCompensationWidget != nullptr)
+    {
+        m_pCornerCompensationWidget->setVisible(hasCornerRow);
+    }
+    for (QDoubleSpinBox* spin : m_pCornerCompensationValues)
+    {
+        if (spin != nullptr)
+        {
+            spin->setEnabled(hasCornerRow && groupEnabled);
+        }
+    }
+}
+
 void WeldSeamCompDialog::LoadPoseParam(const QString& path)
 {
     m_poseCompMatchMode = POSE_COMP_MATCH_BY_POSE;
     m_poseMatchMaxErrorDeg = 5.0;
     m_poseGroupNames.clear();
     m_poseGroupMatchModes.clear();
+    m_poseGroupCornerCompEnabled.clear();
     m_poseRows.clear();
 
     if (path.isEmpty() || !ConfigDatabase::HasIniFile(path))
     {
         m_poseGroupNames.push_back("姿态补偿组1");
         m_poseGroupMatchModes.push_back(POSE_COMP_MATCH_BY_POSE);
+        m_poseGroupCornerCompEnabled.push_back(false);
         m_poseRows.reserve(COMP_SEGMENT_COUNT);
         for (int index = 0; index < COMP_SEGMENT_COUNT; ++index)
         {
             m_poseRows.push_back(MakeDefaultPoseRow(0, index));
         }
         m_currentPoseGroupIndex = 0;
-        AppendLog("姿态补偿参数不存在，使用默认槽位：" + QDir::toNativeSeparators(path));
+        LoadPoseCornerCompensationFromDatabase(CurrentRobotName());
+        AppendLog("姿态补偿参数不存在，使用默认槽位。");
         return;
     }
 
@@ -635,6 +793,7 @@ void WeldSeamCompDialog::LoadPoseParam(const QString& path)
         }
         m_poseGroupNames.push_back(groupName);
         m_poseGroupMatchModes.push_back(NormalizePoseCompMatchMode(groupMatchMode));
+        m_poseGroupCornerCompEnabled.push_back(false);
 
         for (int segmentIndex = 0; segmentIndex < COMP_SEGMENT_COUNT; ++segmentIndex)
         {
@@ -667,11 +826,72 @@ void WeldSeamCompDialog::LoadPoseParam(const QString& path)
         }
     }
     m_currentPoseGroupIndex = groupCount > 0 ? std::clamp(activeGroupIndex, 0, groupCount - 1) : 0;
+    if (m_poseGroupCornerCompEnabled.size() < groupCount)
+    {
+        m_poseGroupCornerCompEnabled.resize(groupCount);
+    }
+    if (m_poseGroupCornerCompEnabled.size() > groupCount)
+    {
+        m_poseGroupCornerCompEnabled.resize(groupCount);
+    }
+    LoadPoseCornerCompensationFromDatabase(CurrentRobotName());
     if (m_mode == CompMode::Pose)
     {
         m_currentGroupIndex = m_currentPoseGroupIndex;
     }
     m_poseCompMatchMode = CurrentPoseGroupMatchMode();
+}
+
+void WeldSeamCompDialog::LoadPoseCornerCompensationFromDatabase(const QString& robotName)
+{
+    if (robotName.trimmed().isEmpty())
+    {
+        return;
+    }
+
+    for (int groupIndex = 0; groupIndex < m_poseGroupCornerCompEnabled.size(); ++groupIndex)
+    {
+        m_poseGroupCornerCompEnabled[groupIndex] = ReadRobotBool(
+            robotName,
+            PoseCornerGroupModule(groupIndex),
+            CORNER_COMP_ENABLED_KEY,
+            false);
+    }
+
+    for (int flatIndex = 0; flatIndex < m_poseRows.size(); ++flatIndex)
+    {
+        PoseCompRow& row = m_poseRows[flatIndex];
+        if (!IsCornerCompensationSegmentKind(row.segmentKind))
+        {
+            row.innerToOuterCornerComp = 0.0;
+            row.innerToInnerCornerComp = 0.0;
+            row.outerToOuterCornerComp = 0.0;
+            row.outerToInnerCornerComp = 0.0;
+            continue;
+        }
+
+        const QString module = PoseCornerSlotModule(flatIndex);
+        row.innerToOuterCornerComp = ReadRobotDouble(
+            robotName,
+            module,
+            INNER_TO_OUTER_CORNER_COMP_KEY,
+            row.innerToOuterCornerComp);
+        row.innerToInnerCornerComp = ReadRobotDouble(
+            robotName,
+            module,
+            INNER_TO_INNER_CORNER_COMP_KEY,
+            row.innerToInnerCornerComp);
+        row.outerToOuterCornerComp = ReadRobotDouble(
+            robotName,
+            module,
+            OUTER_TO_OUTER_CORNER_COMP_KEY,
+            row.outerToOuterCornerComp);
+        row.outerToInnerCornerComp = ReadRobotDouble(
+            robotName,
+            module,
+            OUTER_TO_INNER_CORNER_COMP_KEY,
+            row.outerToInnerCornerComp);
+    }
 }
 
 void WeldSeamCompDialog::LoadSeamParam(const QString& path)
@@ -688,7 +908,7 @@ void WeldSeamCompDialog::LoadSeamParam(const QString& path)
             m_seamRows.push_back(MakeDefaultSeamRow(0, index));
         }
         m_currentSeamGroupIndex = 0;
-        AppendLog("焊道补偿参数不存在，使用默认槽位：" + QDir::toNativeSeparators(path));
+        AppendLog("焊道补偿参数不存在，使用默认槽位。");
         return;
     }
 
@@ -893,12 +1113,20 @@ void WeldSeamCompDialog::RefreshEditor()
         const int modeIndex = std::max(0, m_pPoseMatchModeCombo->findData(mode));
         m_pPoseMatchModeCombo->setCurrentIndex(modeIndex);
     }
+    if (m_pCornerCompensationCheck != nullptr)
+    {
+        const QSignalBlocker blocker(m_pCornerCompensationCheck);
+        const bool hasPoseGroup = m_mode == CompMode::Pose
+            && m_currentGroupIndex >= 0
+            && m_currentGroupIndex < m_poseGroupCornerCompEnabled.size();
+        m_pCornerCompensationCheck->setChecked(hasPoseGroup && m_poseGroupCornerCompEnabled[m_currentGroupIndex]);
+    }
 
     if (m_pPathLabel != nullptr)
     {
         m_pPathLabel->setText(m_mode == CompMode::Pose
-            ? NativePathText("姿态补偿配置", CurrentPoseParamPath())
-            : NativePathText("焊道补偿配置", CurrentSeamParamPath()));
+            ? DatabaseText("姿态补偿配置库")
+            : DatabaseText("焊道补偿配置库"));
     }
 
     if (m_pHintLabel != nullptr)
@@ -959,6 +1187,15 @@ void WeldSeamCompDialog::RefreshEditor()
             if (m_pEditValues[valueIndex] != nullptr) m_pEditValues[valueIndex]->clear();
             if (m_pPoseValues[valueIndex] != nullptr) m_pPoseValues[valueIndex]->clear();
         }
+        for (QDoubleSpinBox* spin : m_pCornerCompensationValues)
+        {
+            if (spin != nullptr)
+            {
+                const QSignalBlocker blocker(spin);
+                spin->setValue(0.0);
+            }
+        }
+        RefreshCornerCompensationEditor();
         return;
     }
 
@@ -977,6 +1214,26 @@ void WeldSeamCompDialog::RefreshEditor()
             if (m_pEditValues[0] != nullptr) m_pEditValues[0]->setText(FormatNumber(row.compX));
             if (m_pEditValues[1] != nullptr) m_pEditValues[1]->setText(FormatNumber(row.compY));
             if (m_pEditValues[2] != nullptr) m_pEditValues[2]->setText(FormatNumber(row.compZ));
+            if (m_pCornerCompensationValues[0] != nullptr)
+            {
+                const QSignalBlocker blocker(m_pCornerCompensationValues[0]);
+                m_pCornerCompensationValues[0]->setValue(row.innerToOuterCornerComp);
+            }
+            if (m_pCornerCompensationValues[1] != nullptr)
+            {
+                const QSignalBlocker blocker(m_pCornerCompensationValues[1]);
+                m_pCornerCompensationValues[1]->setValue(row.innerToInnerCornerComp);
+            }
+            if (m_pCornerCompensationValues[2] != nullptr)
+            {
+                const QSignalBlocker blocker(m_pCornerCompensationValues[2]);
+                m_pCornerCompensationValues[2]->setValue(row.outerToOuterCornerComp);
+            }
+            if (m_pCornerCompensationValues[3] != nullptr)
+            {
+                const QSignalBlocker blocker(m_pCornerCompensationValues[3]);
+                m_pCornerCompensationValues[3]->setValue(row.outerToInnerCornerComp);
+            }
         }
     }
     else
@@ -993,6 +1250,7 @@ void WeldSeamCompDialog::RefreshEditor()
             if (m_pEditValues[2] != nullptr) m_pEditValues[2]->setText(FormatNumber(row.weldSeamDirComp));
         }
     }
+    RefreshCornerCompensationEditor();
 }
 
 bool WeldSeamCompDialog::StoreEditorValues(bool validate, QString& error)
@@ -1026,6 +1284,11 @@ bool WeldSeamCompDialog::StoreEditorValues(bool validate, QString& error)
 
     if (m_mode == CompMode::Pose)
     {
+        if (m_currentGroupIndex >= 0 && m_currentGroupIndex < m_poseGroupCornerCompEnabled.size())
+        {
+            m_poseGroupCornerCompEnabled[m_currentGroupIndex] =
+                m_pCornerCompensationCheck != nullptr && m_pCornerCompensationCheck->isChecked();
+        }
         if (flatIndex >= m_poseRows.size())
         {
             return true;
@@ -1060,6 +1323,25 @@ bool WeldSeamCompDialog::StoreEditorValues(bool validate, QString& error)
         m_poseRows[flatIndex].compX = values[0];
         m_poseRows[flatIndex].compY = values[1];
         m_poseRows[flatIndex].compZ = values[2];
+        if (IsCornerCompensationSegmentKind(m_poseRows[flatIndex].segmentKind))
+        {
+            if (m_pCornerCompensationValues[0] != nullptr)
+            {
+                m_poseRows[flatIndex].innerToOuterCornerComp = m_pCornerCompensationValues[0]->value();
+            }
+            if (m_pCornerCompensationValues[1] != nullptr)
+            {
+                m_poseRows[flatIndex].innerToInnerCornerComp = m_pCornerCompensationValues[1]->value();
+            }
+            if (m_pCornerCompensationValues[2] != nullptr)
+            {
+                m_poseRows[flatIndex].outerToOuterCornerComp = m_pCornerCompensationValues[2]->value();
+            }
+            if (m_pCornerCompensationValues[3] != nullptr)
+            {
+                m_poseRows[flatIndex].outerToInnerCornerComp = m_pCornerCompensationValues[3]->value();
+            }
+        }
     }
     else
     {
@@ -1146,6 +1428,11 @@ void WeldSeamCompDialog::AddCurrentGroup()
         m_poseGroupNames.push_back(name);
         m_poseGroupMatchModes.push_back(sourceMatchMode);
         const int sourceGroupIndex = CurrentGroupCount() > 1 ? std::clamp(m_currentGroupIndex, 0, CurrentGroupCount() - 2) : -1;
+        const bool sourceCornerCompEnabled =
+            sourceGroupIndex >= 0 && sourceGroupIndex < m_poseGroupCornerCompEnabled.size()
+                ? m_poseGroupCornerCompEnabled[sourceGroupIndex]
+                : false;
+        m_poseGroupCornerCompEnabled.push_back(sourceCornerCompEnabled);
         for (int segmentIndex = 0; segmentIndex < COMP_SEGMENT_COUNT; ++segmentIndex)
         {
             PoseCompRow row = MakeDefaultPoseRow(newGroupIndex, segmentIndex);
@@ -1155,6 +1442,10 @@ void WeldSeamCompDialog::AddCurrentGroup()
                 row.poseRx = m_poseRows[sourceFlatIndex].poseRx;
                 row.poseRy = m_poseRows[sourceFlatIndex].poseRy;
                 row.poseRz = m_poseRows[sourceFlatIndex].poseRz;
+                row.innerToOuterCornerComp = m_poseRows[sourceFlatIndex].innerToOuterCornerComp;
+                row.innerToInnerCornerComp = m_poseRows[sourceFlatIndex].innerToInnerCornerComp;
+                row.outerToOuterCornerComp = m_poseRows[sourceFlatIndex].outerToOuterCornerComp;
+                row.outerToInnerCornerComp = m_poseRows[sourceFlatIndex].outerToInnerCornerComp;
             }
             m_poseRows.push_back(row);
         }
@@ -1287,6 +1578,10 @@ void WeldSeamCompDialog::DeleteCurrentGroup()
         {
             m_poseGroupMatchModes.removeAt(index);
         }
+        if (index < m_poseGroupCornerCompEnabled.size())
+        {
+            m_poseGroupCornerCompEnabled.removeAt(index);
+        }
         const int start = index * COMP_SEGMENT_COUNT;
         for (int segmentIndex = 0; segmentIndex < COMP_SEGMENT_COUNT && start < m_poseRows.size(); ++segmentIndex)
         {
@@ -1346,7 +1641,12 @@ bool WeldSeamCompDialog::SaveCurrentParam()
         AppendLog("保存失败：" + error);
         return false;
     }
-
+    if (!SavePoseCornerCompensationToDatabase(CurrentRobotName(), error))
+    {
+        QMessageBox::warning(this, "保存补偿参数", error);
+        AppendLog("保存失败：" + error);
+        return false;
+    }
     MarkCleanSnapshot();
     AppendLog("姿态补偿参数和焊道补偿参数已保存。");
     QMessageBox::information(this, "保存补偿参数", "补偿参数保存完成。");
@@ -1357,7 +1657,7 @@ bool WeldSeamCompDialog::SavePoseParam(const QString& path, QString& error) cons
 {
     if (path.isEmpty())
     {
-        error = "姿态补偿参数路径为空。";
+        error = "姿态补偿配置库不可用。";
         return false;
     }
 
@@ -1377,7 +1677,7 @@ bool WeldSeamCompDialog::SavePoseParam(const QString& path, QString& error) cons
         || !ini.WriteString(POSE_COMP_MATCH_MODE_KEY, activeMatchMode)
         || !ini.WriteString("PoseMatchMaxErrorDeg", m_poseMatchMaxErrorDeg, 6))
     {
-        error = "写入姿态补偿总配置失败：" + path;
+        error = "写入姿态补偿总配置失败。";
         return false;
     }
 
@@ -1417,11 +1717,61 @@ bool WeldSeamCompDialog::SavePoseParam(const QString& path, QString& error) cons
     return true;
 }
 
+bool WeldSeamCompDialog::SavePoseCornerCompensationToDatabase(const QString& robotName, QString& error) const
+{
+    for (int groupIndex = 0; groupIndex < m_poseGroupNames.size(); ++groupIndex)
+    {
+        const bool enabled =
+            groupIndex >= 0 && groupIndex < m_poseGroupCornerCompEnabled.size()
+                ? m_poseGroupCornerCompEnabled[groupIndex]
+                : false;
+        if (!WriteRobotSetting(
+            robotName,
+            PoseCornerGroupModule(groupIndex),
+            CORNER_COMP_ENABLED_KEY,
+            enabled ? QStringLiteral("1") : QStringLiteral("0"),
+            QStringLiteral("bool"),
+            &error))
+        {
+            return false;
+        }
+    }
+
+    for (int flatIndex = 0; flatIndex < m_poseRows.size(); ++flatIndex)
+    {
+        const PoseCompRow& row = m_poseRows[flatIndex];
+        if (!IsCornerCompensationSegmentKind(row.segmentKind))
+        {
+            continue;
+        }
+
+        const QString module = PoseCornerSlotModule(flatIndex);
+        const auto writeDouble = [&](const QString& key, double value)
+        {
+            return WriteRobotSetting(
+                robotName,
+                module,
+                key,
+                QString::number(value, 'f', 6),
+                QStringLiteral("double"),
+                &error);
+        };
+        if (!writeDouble(INNER_TO_OUTER_CORNER_COMP_KEY, row.innerToOuterCornerComp)
+            || !writeDouble(INNER_TO_INNER_CORNER_COMP_KEY, row.innerToInnerCornerComp)
+            || !writeDouble(OUTER_TO_OUTER_CORNER_COMP_KEY, row.outerToOuterCornerComp)
+            || !writeDouble(OUTER_TO_INNER_CORNER_COMP_KEY, row.outerToInnerCornerComp))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool WeldSeamCompDialog::SaveSeamParam(const QString& path, QString& error) const
 {
     if (path.isEmpty())
     {
-        error = "焊道补偿参数路径为空。";
+        error = "焊道补偿配置库不可用。";
         return false;
     }
 
@@ -1436,7 +1786,7 @@ bool WeldSeamCompDialog::SaveSeamParam(const QString& path, QString& error) cons
         || !ini.WriteString(SEAM_GROUP_COUNT_KEY, static_cast<int>(m_seamGroupNames.size()))
         || !ini.WriteString(SEAM_ACTIVE_GROUP_INDEX_KEY, activeGroupIndex))
     {
-        error = "写入焊道补偿总配置失败：" + path;
+        error = "写入焊道补偿总配置失败。";
         return false;
     }
 
@@ -1489,7 +1839,9 @@ QString WeldSeamCompDialog::BuildSnapshot() const
                << m_poseGroupNames[index]
                << QString::number(index < m_poseGroupMatchModes.size()
                    ? NormalizePoseCompMatchMode(m_poseGroupMatchModes[index])
-                   : NormalizePoseCompMatchMode(m_poseCompMatchMode));
+                   : NormalizePoseCompMatchMode(m_poseCompMatchMode))
+               << QString::number(index < m_poseGroupCornerCompEnabled.size()
+                   && m_poseGroupCornerCompEnabled[index] ? 1 : 0);
     }
     for (const PoseCompRow& row : m_poseRows)
     {
@@ -1499,7 +1851,11 @@ QString WeldSeamCompDialog::BuildSnapshot() const
                << QString::number(row.poseRz, 'f', 6)
                << QString::number(row.compX, 'f', 6)
                << QString::number(row.compY, 'f', 6)
-               << QString::number(row.compZ, 'f', 6);
+               << QString::number(row.compZ, 'f', 6)
+               << QString::number(row.innerToOuterCornerComp, 'f', 6)
+               << QString::number(row.innerToInnerCornerComp, 'f', 6)
+               << QString::number(row.outerToOuterCornerComp, 'f', 6)
+               << QString::number(row.outerToInnerCornerComp, 'f', 6);
     }
     for (const QString& groupName : m_seamGroupNames)
     {

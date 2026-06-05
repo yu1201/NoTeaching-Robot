@@ -22,6 +22,24 @@
    - `classificationResult.points`：起点、终点、内拐点、外拐点和 2mm 普通焊道点；
    - `keyPoints`：只包含起点、终点和拐点。
 
+## 特征点拟合方案
+
+`FilterFitParams::geometryStrategy` 对应主程序“精测点云处理 / 特征点算法”里的方案切换：
+
+- `LegacyGeometry`：旧版几何拟合，保留原 Douglas-Peucker 关键点和相邻段交点逻辑。
+- `SlopeWaveFiltered`：方案一，先排除斜面中部波动点，再用旧版关键点逻辑。
+- `RobustSegmentedKeys`：方案二，用中值 profile 做鲁棒分段关键点，降低局部波动误判拐点的概率。
+- `WorkpieceProjection`：方案三/四类“立板投影到底板”预处理，先用 `ProjectWorkpieceCloudToLowerWeldPath()` 把完整工件点云投到底板焊道，再进入特征点分析。
+
+`FilterFitParams::useSlopeConsistentCornerFit` 对应主程序里的“直线拟合排除圆弧段”开关。开启后，拐点交点不再直接用整段点拟合直线，而是：
+
+1. 在相邻段内滑动窗口拟合局部方向；
+2. 选出斜率方向一致、权重最大的直线核心窗口；
+3. 排除靠近拐角的圆弧/过渡点后重拟合直线；
+4. 两侧核心直线求交，并用局部点云距离和主带高度检查保护交点。
+
+这个开关适合“直线段很明显，但圆弧/过渡点把交点拉偏”的现场数据；默认关闭，避免改变旧现场的结果。
+
 ## 拐点生成
 
 `AnalyzeMeasureThenWeldPath()` 内部包含拐点生成逻辑：
@@ -47,6 +65,7 @@ std::vector<mtw_filter_fit::IndexedPoint3D> laserPoints = LoadYourPoints();
 auto params = mtw_filter_fit::MeasureThenWeldDefaultParams(
     mtw_filter_fit::SampleAxis::AxisY,
     mtw_filter_fit::GeometryStrategy::LegacyGeometry);
+// params.useSlopeConsistentCornerFit = true; // 需要排除圆弧/过渡段时再打开
 
 mtw_filter_fit::AnalysisResult result =
     mtw_filter_fit::AnalyzeMeasureThenWeldPath(laserPoints, params);

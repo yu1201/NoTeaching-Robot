@@ -60,6 +60,8 @@ int main(int argc, char** argv)
         mtw_filter_fit::MeasureThenWeldDefaultParams(
             mtw_filter_fit::SampleAxis::AxisY,
             mtw_filter_fit::GeometryStrategy::LegacyGeometry);
+    // 主程序里的“直线拟合排除圆弧段”开关。需要避免圆弧/过渡点拉偏直线交点时打开：
+    // params.useSlopeConsistentCornerFit = true;
 
     // 这里对应先测后焊的 PreservePath + 拐点生成：
     // 先做局部去噪和几何关键点拟合，再把起点/拐点/终点按 2 mm 展开成焊接路径。

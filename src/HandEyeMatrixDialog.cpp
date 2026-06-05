@@ -78,7 +78,7 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(ContralUnit* pContralUnit, const QStrin
     hintLabel->setWordWrap(true);
     rootLayout->addWidget(hintLabel);
 
-    m_pPathLabel = new QLabel("参数文件：");
+    m_pPathLabel = new QLabel("参数数据：");
     m_pPathLabel->setWordWrap(true);
     rootLayout->addWidget(m_pPathLabel);
 
@@ -186,7 +186,7 @@ bool HandEyeMatrixDialog::LoadConfig()
         return false;
     }
 
-    m_pPathLabel->setText(QString("参数文件：%1").arg(filePath));
+    m_pPathLabel->setText(QString("参数数据：%1").arg(filePath));
     for (int row = 0; row < 3; ++row)
     {
         for (int col = 0; col < 3; ++col)
@@ -241,7 +241,7 @@ bool HandEyeMatrixDialog::ReadRobotEyeVariable()
         m_translationEdits[index]->setText(FormatDoubleValue(translation[index]));
     }
 
-    AppendLog("已读取机器人全局变量 eye，并填入手眼矩阵。保存后才会写入参数文件。");
+    AppendLog("已读取机器人全局变量 eye，并填入手眼矩阵。保存后才会写入配置库。");
     return true;
 }
 
@@ -284,7 +284,7 @@ bool HandEyeMatrixDialog::SaveConfig()
         return false;
     }
 
-    m_pPathLabel->setText(QString("参数文件：%1").arg(filePath));
+    m_pPathLabel->setText(QString("参数数据：%1").arg(filePath));
     AppendLog("手眼矩阵参数已保存。");
     m_bSavedThisSession = true;
     QMessageBox::information(this, "手眼矩阵参数", "保存完成。");

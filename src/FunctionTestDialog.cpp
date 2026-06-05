@@ -1626,7 +1626,7 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
     int duplicateRobotReadCount = 0;
     int missingRobotTimestampCount = 0;
 
-    AppendLog(QString("机器人+相机时间戳检测开始：采集 %1 ms；FANUC 使用 robot_ms，STEP/其他使用 PC steady ms。")
+    AppendLog(QString("机器人+相机时间戳检测开始：采集 %1 ms；FANUC/STEP 使用 robot_ms，其他使用 PC steady ms。")
         .arg(kRobotCameraTimestampCheckDurationMs));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRobotCameraTimestampCheckDurationMs);
     while (std::chrono::steady_clock::now() < deadline)

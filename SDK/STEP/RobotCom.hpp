@@ -15,10 +15,6 @@
 constexpr bool IsDefaultBlocked = false;
 
 namespace STEPROBOTSDK{
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable: 4251)
-#endif
 class __declspec(dllexport) RobotComClient {
 public:
   RobotComClient();
@@ -57,8 +53,8 @@ public:
   PROGRAMMODE getProgramMode();
   int getCurrentLine();
 
-  //CARTPOS getCartPos();//ï¿½æ»»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½
-  //ï¿½ï¿½ï¿½ï¿½modeï¿½ï¿½20230427
+  //CARTPOS getCartPos();//Ìæ»»³ÉÒÔÏÂÈý¸ö£¬Õâ¸ö²»ÔÙÊ¹ÓÃ
+  //Ôö¼Ómode£¬20230427
   RobotCartPos getCartPosWorld();
   RobotCartPos getCartPosRobotBase();
   RobotCartPos getCartPosUserRef();
@@ -68,7 +64,7 @@ public:
   unsigned int getRobotRunningTime();
   int getLifeTime();
 
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½×´Ì¬ï¿½Ó¿Ú£ï¿½20231215
+  //ÐÂÔö»ñÈ¡º¸½Ó×´Ì¬½Ó¿Ú£¬20231215
   ARCWELDINGMODE getWeldingMode();
 
 #pragma endregion
@@ -115,16 +111,16 @@ public:
   int ToolSetCmd(std::string tool);
   /* 4.4.17 load program */
   int ProgramLoadCmd(std::string projectInfo,std::string programInfo, 
-      std::vector<int> &errorInfo, bool is_blocked = IsDefaultBlocked);//ï¿½ï¿½ï¿½Ì£ï¿½ï¿½ï¿½ï¿½ò£¬´ï¿½ï¿½ï¿½ï¿½Ðºï¿½
+      std::vector<int> &errorInfo, bool is_blocked = IsDefaultBlocked);//¹¤³Ì£¬³ÌÐò£¬´íÎóÐÐºÅ
   /* 4.4.18 kill program */
-  //TODOï¿½ï¿½ Add block mode
+  //TODO£º Add block mode
   int ProgramKillCmd(std::string projectInfo,std::string programInfo, 
-      bool is_blocked = IsDefaultBlocked);//ï¿½ï¿½ï¿½Ì£ï¿½ï¿½ï¿½ï¿½ï¿½
+      bool is_blocked = IsDefaultBlocked);//¹¤³Ì£¬³ÌÐò
 #pragma endregion
 
-#pragma region /* 4.4.19 modify variable */ //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½.sr\\ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½,ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½,ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½:={ï¿½ï¿½}
+#pragma region /* 4.4.19 modify variable */ //¹¤³ÌÃû.sr\\³ÌÐòÃû,±äÁ¿Ãû,±äÁ¿ÀàÐÍ ±äÁ¿Ãû:={¡­}
   //bool,int,real,string,axispos,cartpos,robotaxispos,robotcartpos
-  int VariableModifyCmd(std::string varInfo);//ï¿½ï¿½ï¿½ï¿½
+  int VariableModifyCmd(std::string varInfo);//»ù´¡
 
   int VariableBoolModifyCmd(std::string projectInfo, std::string programInfo,
      std::string variable, bool value);
@@ -145,12 +141,12 @@ public:
   int VariableDynamicModifyCmd(std::string projectInfo,std::string programInfo,
      std::string variable, SDynamicPercent value);
 
-  //ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸Ä¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½ï¿½ê£¬20230427
+  //ÐÂÔöÐÞ¸Ä¹¤¾ß×ø±êºÍÓÃ»§×ø±ê£¬20230427
   int VariableToolModifyCmd(std::string variable, Tool value);
   int VariableRefModifyCmd(std::string variable, CartRefSys value);
 #pragma endregion
 
-#pragma region //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø±ï¿½ï¿½ï¿½ï¿½Þ¸Ä£ï¿½20240304  
+#pragma region //ÐÂÔöº¸½ÓÏà¹Ø±äÁ¿ÐÞ¸Ä£¬20240304  
   //ARCONDATA,ARCOFFDATA,ARCDATA,ARCRETRYDATA,ARCSEGDATA,ARCCONFIGDATA,
   int VariableArcOnDataModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, ArcOnData value);
@@ -188,25 +184,25 @@ public:
   int VariableLaserArcOffDataModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, LaserArcOffData value);
 
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î»ï¿½Ã±ï¿½ï¿½ï¿½ï¿½Þ¸Ä£ï¿½20240307
+  //ÐÂÔö£¬²¹³äÎ»ÖÃ±äÁ¿ÐÞ¸Ä£¬20240307
   //AXISDIST,CARTDIST,AUXAXISPOS,PCARTPOS
   int VariableAxisDistModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, AxisDist value);
   int VariableCartDistModifyCmd(std::string projectInfo, std::string programInfo,
-      std::string variable, CartDist value);//modeÄ¬ï¿½ï¿½0
+      std::string variable, CartDist value);//modeÄ¬ÈÏ0
   int VariableAuxAxisPosModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, AuxAxisPos value);
   int VariablePCartPosModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, PalletPosition value);
-  //ï¿½ï¿½ï¿½Ó¶ï¿½Ì¬Ô²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸Ä£ï¿½20240307
+  //Ôö¼Ó¶¯Ì¬Ô²»¬±äÁ¿ÐÞ¸Ä£¬20240307
   //OVERLAPREL,OVERLAPBAS,RAMPTYPE
   int VariableOverlapRELModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, int value);//0~100
   int VariableOverlapABSModifyCmd(std::string projectInfo, std::string programInfo,
-      std::string variable, double value);//0~200 //Î´Ê¹ï¿½ï¿½OverlapABS
+      std::string variable, double value);//0~200 //Î´Ê¹ÓÃOverlapABS
   int VariableRampTypeModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, RampType value);
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½,ï¿½ï¿½Ä¥,ï¿½ï¿½ï¿½ï¿½Ñ§ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸Ä£ï¿½20240307
+  //Ôö¼ÓÕÛÍä,´òÄ¥,¶¯Á¦Ñ§±äÁ¿ÐÞ¸Ä£¬20240307
   //BENDDATA,BENDSYNDATA,POLISHDATA
   int VariableBendDataModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, BendTargetData value);
@@ -241,12 +237,12 @@ public:
     std::string variable, RobotCartPos &Value);
   int VariableDynamicReadCmd(std::string projectInfo, std::string programInfo,
     std::string variable, SDynamicPercent &Value);
-  // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½ï¿½ê£¬20230427
+  // ÐÂÔö»ñÈ¡¹¤¾ß×ø±êºÍÓÃ»§×ø±ê£¬20230427
   int VariableToolReadCmd(std::string variable, Tool &Value);
   int VariableRefReadCmd(std::string variable, CartRefSys &Value);
 #pragma endregion
   
-#pragma region //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø±ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½20240305
+#pragma region //ÐÂÔöº¸½ÓÏà¹Ø±äÁ¿»ñÈ¡£¬20240305
   //ARCONDATA,ARCOFFDATA,ARCDATA,ARCRETRYDATA,ARCSEGDATA,ARCCONFIGDATA,
   int VariableArcOnDataReadCmd(std::string projectInfo, std::string programInfo,
       std::string variable, ArcOnData&Value);
@@ -282,17 +278,17 @@ public:
   int VariableLaserArcOffDataReadCmd(std::string projectInfo, std::string programInfo,
       std::string variable, LaserArcOffData& Value);
 
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î»ï¿½Ã±ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½20240307
+  //ÐÂÔö£¬²¹³äÎ»ÖÃ±äÁ¿»ñÈ¡£¬20240307
 //AXISDIST,CARTDIST,AUXAXISPOS,PCARTPOS
   int VariableAxisDistReadCmd(std::string projectInfo, std::string programInfo,
       std::string variable, AxisDist& Value);
   int VariableCartDistReadCmd(std::string projectInfo, std::string programInfo,
-      std::string variable, CartDist& Value);//modeÄ¬ï¿½ï¿½0
+      std::string variable, CartDist& Value);//modeÄ¬ÈÏ0
   int VariableAuxAxisPosReadCmd(std::string projectInfo, std::string programInfo,
       std::string variable, AuxAxisPos& Value);
   int VariablePCartPosReadCmd(std::string projectInfo, std::string programInfo,
       std::string variable, PalletPosition& Value);
-  //ï¿½ï¿½ï¿½Ó¶ï¿½Ì¬Ô²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½20240307
+  //Ôö¼Ó¶¯Ì¬Ô²»¬±äÁ¿»ñÈ¡£¬20240307
   //OVERLAPREL,OVERLAPBAS,RAMPTYPE
   int VariableOverlapRELReadCmd(std::string projectInfo, std::string programInfo,
       std::string variable, int& Value);//0~100
@@ -300,7 +296,7 @@ public:
       std::string variable, double& Value);//0~200
   int VariableRampTypeReadCmd(std::string projectInfo, std::string programInfo,
       std::string variable, RampType& Value);
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½,ï¿½ï¿½Ä¥,ï¿½ï¿½ï¿½ï¿½Ñ§ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½20240307
+  //Ôö¼ÓÕÛÍä,´òÄ¥,¶¯Á¦Ñ§±äÁ¿»ñÈ¡£¬20240307
   //BENDDATA,BENDSYNDATA,POLISHDATA
   int VariableBendDataReadCmd(std::string projectInfo, std::string programInfo,
       std::string variable, BendTargetData& Value);
@@ -316,8 +312,8 @@ public:
 
 #pragma endregion
 
-#pragma region  // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ì±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸Ä£ï¿½20230717
-  int ProcessVariableModifyCmd(std::string varInfo); // ï¿½ï¿½ï¿½ï¿½
+#pragma region  // ÐÂÔö¹ý³Ì±äÁ¿ÔÚÏßÐÞ¸Ä£¬20230717
+  int ProcessVariableModifyCmd(std::string varInfo); // »ù´¡
 
   int ProcessVariableBoolModifyCmd(std::string projectInfo, std::string programInfo,
     std::string variable, bool value);
@@ -339,7 +335,7 @@ public:
     std::string variable, SDynamicPercent value);
 #pragma endregion
 
-#pragma region //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ø±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸Ä£ï¿½20240307 
+#pragma region //ÐÂÔöº¸½ÓÏà¹Ø±äÁ¿ÔÚÏßÐÞ¸Ä£¬20240307 
  //ARCONDATA,ARCOFFDATA,ARCDATA,ARCRETRYDATA,ARCSEGDATA,ARCCONFIGDATA,
   int ProcessVariableArcOnDataModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, ArcOnData value);
@@ -373,17 +369,17 @@ public:
   int ProcessVariableLaserArcOffDataModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, LaserArcOffData value);
 
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î»ï¿½Ã±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸Ä£ï¿½20240308
+  //ÐÂÔö£¬²¹³äÎ»ÖÃ±äÁ¿ÔÚÏßÐÞ¸Ä£¬20240308
 //AXISDIST,CARTDIST,AUXAXISPOS,PCARTPOS
   int ProcessVariableAxisDistModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, AxisDist value);
   int ProcessVariableCartDistModifyCmd(std::string projectInfo, std::string programInfo,
-      std::string variable, CartDist value);//modeÄ¬ï¿½ï¿½0
+      std::string variable, CartDist value);//modeÄ¬ÈÏ0
   int ProcessVariableAuxAxisPosModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, AuxAxisPos value);
   int ProcessVariablePCartPosModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, PalletPosition value);
-  //ï¿½ï¿½ï¿½Ó¶ï¿½Ì¬Ô²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸Ä£ï¿½20240308
+  //Ôö¼Ó¶¯Ì¬Ô²»¬±äÁ¿ÔÚÏßÐÞ¸Ä£¬20240308
   //OVERLAPREL,OVERLAPBAS,RAMPTYPE
   int ProcessVariableOverlapRELModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, int value);//0~100
@@ -391,7 +387,7 @@ public:
       std::string variable, double value);//0~200
   int ProcessVariableRampTypeModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, RampType value);
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½,ï¿½ï¿½Ä¥ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸Ä£ï¿½20240308
+  //Ôö¼ÓÕÛÍä,´òÄ¥±äÁ¿ÔÚÏßÐÞ¸Ä£¬20240308
   //BENDDATA,BENDSYNDATA,POLISHDATA
   int ProcessVariableBendDataModifyCmd(std::string projectInfo, std::string programInfo,
       std::string variable, BendTargetData value);
@@ -402,53 +398,53 @@ public:
 
 #pragma endregion
 
-  // ï¿½ï¿½ï¿½ï¿½Î»ï¿½Ãµã¶¯ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó£ï¿½20231103
+  // ¾ø¶ÔÎ»ÖÃµã¶¯¹¦ÄÜÔö¼Ó£¬20231103
   int JogToRobotAxisposCmd(JogPositionType type, JointsPos value,
       std::string toolname, std::string refname);
   int JogToRobotCartposCmd(JogPositionType type, CartPos value,
       std::string toolname, std::string refname);
   int JogToPositionExitCmd();
 
-#pragma region //SDKÄ£ï¿½ï¿½ï¿½Ë¶ï¿½ï¿½ï¿½ä£¬ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½20231115
-  int NumOfPro = 0;//SDKï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
-  int SDKSimulateProgramLoad(bool is_blocked = IsDefaultBlocked);//Ä£ï¿½ï¿½ï¿½ï¿½ï¿½
-  int SDKSimulateProgramKill(bool is_blocked = IsDefaultBlocked);//Ä£ï¿½ï¿½Ð¶ï¿½ï¿½
+#pragma region //SDKÄ£ÄâÔË¶¯Óï¾ä£¬ÐÂÔö£¬20231115
+  int NumOfPro = 0;//SDK·ÂÕæ³ÌÐòÊýÁ¿
+  int SDKSimulateProgramLoad(bool is_blocked = IsDefaultBlocked);//Ä£Äâ¼ÓÔØ
+  int SDKSimulateProgramKill(bool is_blocked = IsDefaultBlocked);//Ä£ÄâÐ¶ÔØ
   int SDKSimulatePTPProCmd(HMIPos endpos, int dyn,
       SDKOverlap ovl, std::string toolname,
-      std::string refname,int linenum = 1); // Ä£ï¿½ï¿½PTP
+      std::string refname,int linenum = 1); // Ä£ÄâPTP
   int SDKSimulateLinProCmd(HMIPos endpos, int dyn, SDKOverlap ovl, ORITYPE ori,
-      std::string toolname,std::string refname, int linenum = 1); // Ä£ï¿½ï¿½Lin
+      std::string toolname,std::string refname, int linenum = 1); // Ä£ÄâLin
   int SDKSimulateCircProCmd(HMIPos endpos, HMIPos helppos, int dyn,
       SDKOverlap ovl, ORITYPE ori,std::string toolname,
-      std::string refname, int linenum = 1); // Ä£ï¿½ï¿½Circ
-  int SDKSimulateDynProCmd(SDynamicPercent m_DynPerc, int linenum = 1); // Ä£ï¿½ï¿½DYN
-  int SDKSimulateWaitTimeProCmd(int waittime, int linenum = 1);         // Ä£ï¿½ï¿½WaitTime
+      std::string refname, int linenum = 1); // Ä£ÄâCirc
+  int SDKSimulateDynProCmd(SDynamicPercent m_DynPerc, int linenum = 1); // Ä£ÄâDYN
+  int SDKSimulateWaitTimeProCmd(int waittime, int linenum = 1);         // Ä£ÄâWaitTime
   int SDKSimulateArcOnProCmd(SDKArcOnVauleStruct arconvalue,
       SDKArcSetVauleStruct arcsetvalue, int decaytime,
-      SDKArcRetryData retrydata,double backdistance, int linenum = 1); // Ä£ï¿½ï¿½ArcOn
-  int SDKSimulateArcOffProCmd(SDKInstructArcOff arcoffdata, int linenum = 1); // Ä£ï¿½ï¿½ArcOff
-  int SDKSimulateArcSetProCmd(SDKInstructArcSet arcsetdata, int linenum = 1); // Ä£ï¿½ï¿½ArcSet
+      SDKArcRetryData retrydata,double backdistance, int linenum = 1); // Ä£ÄâArcOn
+  int SDKSimulateArcOffProCmd(SDKInstructArcOff arcoffdata, int linenum = 1); // Ä£ÄâArcOff
+  int SDKSimulateArcSetProCmd(SDKInstructArcSet arcsetdata, int linenum = 1); // Ä£ÄâArcSet
   int SDKSimulateAWLinProCmd(HMIPos endpos, int dyn,SDKOverlap ovl, ORITYPE ori, WeaveParam weave,
-      SeamTrackParam seamtrack,std::string toolname,std::string refname, int linenum = 1); // Ä£ï¿½ï¿½WLin
+      SeamTrackParam seamtrack,std::string toolname,std::string refname, int linenum = 1); // Ä£ÄâWLin
   int SDKSimulateAWCircProCmd(HMIPos endpos, HMIPos helppos, int dyn,
       SDKOverlap ovl, ORITYPE ori, WeaveParam weave,
       SeamTrackParam seamtrack, std::string toolname,
-      std::string refname, int linenum = 1); // Ä£ï¿½ï¿½WCirc
-  int SDKSimulateArcModeProCmd(SDKInstructArcMode mode, int linenum = 1); // Ä£ï¿½ï¿½Arcmode
-  int SDKSimulateEOFCmd(int linenum = 1);     // Ä£ï¿½ï¿½EOFï¿½ï¿½ï¿½
-  int SDKSimulateProgramSend(int &line_number);//Ä£ï¿½ï¿½ï¿½ï¿½ä·¢ï¿½ï¿½
+      std::string refname, int linenum = 1); // Ä£ÄâWCirc
+  int SDKSimulateArcModeProCmd(SDKInstructArcMode mode, int linenum = 1); // Ä£ÄâArcmode
+  int SDKSimulateEOFCmd(int linenum = 1);     // Ä£ÄâEOFÓï¾ä
+  int SDKSimulateProgramSend(int &line_number);//Ä£ÄâÓï¾ä·¢ËÍ
 
-  //ï¿½ï¿½ï¿½Óºï¿½ï¿½Ó¹ï¿½ï¿½ï¿½ï¿½Ðµï¿½ï¿½ï¿½ï¿½ WLineRel WLinSeg 20250328
-  int SDKSimulateWLinRelProCmd(SDKInstructWLinRel wlinrel, int linenum = 1); // Ä£ï¿½ï¿½WLinRel
-  int SDKSimulateWLinSeg1ProCmd(SDKInstructWLinSeg1 wlinseg1, int linenum = 1); // Ä£ï¿½ï¿½WLinSeg1
-  int SDKSimulateWLinSeg2ProCmd(SDKInstructWLinSeg2 wlinseg2, int linenum = 1); // Ä£ï¿½ï¿½WLinSeg2
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ã¹ï¿½ï¿½ß¡ï¿½ï¿½Ã»ï¿½ï¿½ï¿½ï¿½20231215
+  //Ôö¼Óº¸½Ó¹¦ÄÜÖÐµÄÓï¾ä WLineRel WLinSeg 20250328
+  int SDKSimulateWLinRelProCmd(SDKInstructWLinRel wlinrel, int linenum = 1); // Ä£ÄâWLinRel
+  int SDKSimulateWLinSeg1ProCmd(SDKInstructWLinSeg1 wlinseg1, int linenum = 1); // Ä£ÄâWLinSeg1
+  int SDKSimulateWLinSeg2ProCmd(SDKInstructWLinSeg2 wlinseg2, int linenum = 1); // Ä£ÄâWLinSeg2
+  //ÐÂÔöÉèÖÃ¹¤¾ß¡¢ÓÃ»§Óï¾ä20231215
   int SDKSimulateSetToolCmd(std::string toolname, int linenum = 1);
   int SDKSimulateSetRefSysCmd(std::string refname, int linenum = 1);
 
 #pragma endregion
 
-#pragma region //SDKÄ£ï¿½ï¿½ï¿½Ë¶ï¿½ï¿½ï¿½ä£¬ï¿½ï¿½ï¿½ä£¬20240726
+#pragma region //SDKÄ£ÄâÔË¶¯Óï¾ä£¬²¹³ä£¬20240726
 
   int SDKSimulateDOSetProCmd(SDKInstructDOSet dostruct, int linenum = 1);
   int SDKSimulateDOSetSyncPathProCmd(SDKInstructDOSetSyncPath dospstruct, int linenum = 1);
@@ -483,17 +479,17 @@ public:
 
 #pragma endregion
 
-  // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¹ï¿½ï¿½Ü¿ï¿½ï¿½Ø£ï¿½20231211
+  // ÐÂÔöº¸½Ó¹¦ÄÜ¿ª¹Ø£¬20231211
   int SetArcWeldingModeCmd(int value);
-  // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ¹ï¿½ï¿½20231211
+  // ÐÂÔö»ñÈ¡º¸»úµ±Ç°µçÁ÷µçÑ¹£¬20231211
   int GetWeldingInfoCmd(WeldingParamFeedBack &Value);
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Öµ×ªï¿½ï¿½ï¿½ï¿½20231221
+  //¸½¼ÓÖáÖµ×ª»»£¬20231221
   int SDKGetRailInfoCmd(SDKInstructRailInfo inpailinfo,RailInfo &outpailinfo,int &errorid);
 
-  //ï¿½ï¿½ï¿½ï¿½ï¿½Ë¶ï¿½Ñ§ï¿½ï¿½ï¿½ï¿½ï¿½Ó¿ï¿½20240228,ï¿½Ý²ï¿½ï¿½ï¿½ï¿½â¿ªï¿½ï¿½,20241217ï¿½ï¿½ï¿½â¿ªï¿½ï¿½
-  //ï¿½ï¿½ï¿½
+  //ÐÂÔöÔË¶¯Ñ§ÕýÄæ½â½Ó¿Ú20240228,ÔÝ²»¶ÔÍâ¿ª·Å,20241217¶ÔÍâ¿ª·Å
+  //Äæ½â
   int TransSDKGetInvKinematics(SDKInstructInvKinematics cartpos, JointsPos& jointpos);
-  //ï¿½ï¿½ï¿½ï¿½
+  //Õý½â
   int TransSDKGetKinematics(SDKInstructKinematics jointpos, KinematicsInfo& cartpos);
 
 
@@ -527,7 +523,7 @@ private:
   int CmdWithSendIntStructParam(COMMUNICATIONCOMMAND commCmd, int intParam,
       char *structParam, int length);
 
-  // ï¿½ï¿½ï¿½ï¿½Î»ï¿½Ãµã¶¯ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó£ï¿½20231103ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¿Ú£ï¿½ï¿½ï¿½ï¿½Ã¿ï¿½ï¿½ï¿½
+  // ¾ø¶ÔÎ»ÖÃµã¶¯¹¦ÄÜÔö¼Ó£¬20231103£¬»ù´¡½Ó¿Ú£¬²»ÓÃ¿ª·Å
   int JogToPositionCmd(JogPositionType type, HMIPos m_EndPos,ToolRefName toolrefname);
 
   /* background cycle thread function recv */
@@ -568,9 +564,9 @@ private:
 /* Simulate program 20231115 */
   SDKProgramBuffer SimStructBuffer[MAX_PRO_NUM];
 
-  int SDKSimulateProgramSendmiddle(int &line_number); // Ä£ï¿½ï¿½ï¿½ï¿½ä·¢ï¿½ï¿½ï¿½Ð¼ï¿½ï¿½ï¿½ï¿½
+  int SDKSimulateProgramSendmiddle(int &line_number); // Ä£ÄâÓï¾ä·¢ËÍÖÐ¼ä¹ý¶É
 
-  ////ï¿½ï¿½ï¿½ï¿½Ñ§ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸ï¿½ TOOLLOAD,PAYLOAD.20240313ï¿½Ý²ï¿½ï¿½ï¿½ï¿½Å£ï¿½Ê¹ï¿½Ã²ï¿½ï¿½ï¿½ï¿½ï¿½
+  ////¶¯Á¦Ñ§±äÁ¿ÔÚÏßÐÞ¸Ä TOOLLOAD,PAYLOAD.20240313ÔÝ²»¿ª·Å£¬Ê¹ÓÃ²»ºÏÀí
   //int ProcessVariableToolLoadModifyCmd(std::string projectInfo, std::string programInfo,
   //    std::string variable, PAYLOADDATA value);
   //int ProcessVariablePayLoadModifyCmd(std::string projectInfo, std::string programInfo,
@@ -579,7 +575,7 @@ private:
 
 
 
-  CARTPOS getCartPos();//ï¿½æ»»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê¹ï¿½ï¿½,2024.7.12ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ë½ï¿½ï¿½
+  CARTPOS getCartPos();//Ìæ»»³ÉÒÔÏÂÈý¸ö£¬Õâ¸ö²»ÔÙÊ¹ÓÃ,2024.7.12¸ü»»µ½Ë½ÓÐ
 
 
   class Impl;
@@ -587,9 +583,9 @@ private:
 
   int longRunningTask(bool delay);
   int executeWithTimeout(bool delay);
-  std::atomic<bool> stopRequested; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+  std::atomic<bool> stopRequested; // ÓÃÓÚÇëÇóÈ¡ÏûÈÎÎñ
 
-  //ï¿½ï¿½ï¿½Ú½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+  //ÓÃÓÚ½â¾ö»ñÈ¡Êý¾ÝÂÒÂëÎÊÌâ
   PlatformToSDKStruct buffers[2];
   std::atomic<int> active_buffer{0};
    //std::atomic<int> active_buffer = 0;
@@ -599,11 +595,8 @@ private:
   PlatformToSDKStruct& GetWriteStruct();
   void ExchangeActiveBuffer();
 
-  //ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½ï¿½Ó¿ï¿½20251013
+  //ÐÂÔö×ø±ê×ª»»½Ó¿Ú20251013
   int SDKRefConvertCMD(SDKInstructRefConvert m_OriPos, HMIPos& m_TransPos);
 
 };
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
 } // namespace STEPROBOTSDK

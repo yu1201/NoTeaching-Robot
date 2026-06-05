@@ -141,35 +141,9 @@ Get-ChildItem -LiteralPath $buildDir -Directory | ForEach-Object {
 $dataSourceDir = Join-Path $repoRoot "Data"
 $dataTargetDir = Join-Path $packageDir "Data"
 New-Item -ItemType Directory -Path $dataTargetDir -Force | Out-Null
-$trackedDataFiles = @()
-try {
-    $trackedDataFiles = & git -C $repoRoot -c core.quotePath=false ls-files -- Data 2>$null
-}
-catch {
-    $trackedDataFiles = @()
-}
-
-if ($trackedDataFiles.Count -gt 0) {
-    $packagePrefix = ($packageDir -replace '\\', '/') + '/'
-    $trackedDataFiles | Where-Object {
-        $_ -and
-        ($_ -notmatch '副本') -and
-        ($_ -notmatch '(^|/)Data/ConfigStore\.db($|[-.])')
-    } | ForEach-Object {
-        $gitPath = $_ -replace '\\', '/'
-        & git -C $repoRoot checkout-index --force --prefix=$packagePrefix -- $gitPath
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to copy tracked Data file from git index: $gitPath"
-        }
-    }
-}
-else {
-    Write-Warning "git tracked file list was unavailable. Falling back to copying Data recursively."
-    Copy-DirectoryContent -SourceDir $dataSourceDir -TargetDir $dataTargetDir
-}
-
-# Do not ship the per-device runtime database. Each site keeps or migrates its
-# own ConfigStore.db locally, otherwise updates can overwrite process names.
+# Data is runtime-owned. Do not ship field robots, templates, INI/TXT defaults,
+# or the per-device ConfigStore.db. A fresh install creates an empty database on
+# first run; an update must leave the existing Data directory untouched.
 Get-ChildItem -LiteralPath $dataTargetDir -Filter "ConfigStore.db*" -File -ErrorAction SilentlyContinue | ForEach-Object {
     Remove-Item -LiteralPath $_.FullName -Force
 }
@@ -180,6 +154,10 @@ $pointCloudExtractionSourceDir = Join-Path $repoRoot "SDK\PointCloudExtration"
 $pointCloudExtractionTargetDir = Join-Path $packageDir "SDK\PointCloudExtration"
 Copy-DirectoryContent -SourceDir $pointCloudExtractionSourceDir -TargetDir $pointCloudExtractionTargetDir
 
+$stepSdkVersionsSourceDir = Join-Path $repoRoot "SDK\STEP\versions"
+$stepSdkVersionsTargetDir = Join-Path $packageDir "SDK\STEP\versions"
+Copy-DirectoryContent -SourceDir $stepSdkVersionsSourceDir -TargetDir $stepSdkVersionsTargetDir
+
 $diagnosticToolsSourceDir = Join-Path $repoRoot "tools"
 $diagnosticToolsTargetDir = Join-Path $packageDir "tools"
 if (Test-Path -LiteralPath $diagnosticToolsSourceDir) {
@@ -188,6 +166,24 @@ if (Test-Path -LiteralPath $diagnosticToolsSourceDir) {
         $_.Extension.ToLowerInvariant() -in @(".ps1", ".cmd", ".bat", ".py", ".txt", ".md")
     } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $diagnosticToolsTargetDir $_.Name) -Force
+    }
+}
+
+$stepSdkSwitchScript = Join-Path $repoRoot "scripts\switch_step_sdk.ps1"
+if (Test-Path -LiteralPath $stepSdkSwitchScript) {
+    New-Item -ItemType Directory -Path $diagnosticToolsTargetDir -Force | Out-Null
+    Copy-Item -LiteralPath $stepSdkSwitchScript -Destination (Join-Path $diagnosticToolsTargetDir "switch_step_sdk.ps1") -Force
+}
+
+$installerToolsDir = Join-Path $repoRoot "dist\tools"
+New-Item -ItemType Directory -Path $installerToolsDir -Force | Out-Null
+foreach ($toolName in @("ConfigMigrate.exe", "ConfigMigrate_Run.cmd")) {
+    $toolSource = Join-Path $diagnosticToolsSourceDir $toolName
+    if (Test-Path -LiteralPath $toolSource) {
+        Copy-Item -LiteralPath $toolSource -Destination (Join-Path $installerToolsDir $toolName) -Force
+    }
+    else {
+        Write-Warning "Database migration installer tool was not found: $toolSource"
     }
 }
 
@@ -244,7 +240,8 @@ $notes = @(
     "4. The installer bundles the Microsoft Visual C++ 2015-2022 Redistributable x64 installer and can run it automatically.",
     "5. The package also bundles FANUC WinOLPC compile tools when they are available on the build PC.",
     "6. Please make sure your FANUC tool redistribution follows your license agreement.",
-    "7. If STEP functions are required on the target PC, vendor runtime components may still be needed."
+    "7. STEP SDK timestamp and legacy C++ libraries are bundled under SDK\\STEP\\versions for rebuilds.",
+    "8. Use tools\\switch_step_sdk.ps1 before rebuilding when a site must target the legacy STEP SDK."
 )
 $notes | Set-Content -LiteralPath $notesPath -Encoding UTF8
 

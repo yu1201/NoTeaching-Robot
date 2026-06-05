@@ -31,7 +31,7 @@ struct T_PRECISE_MEASURE_PARAM
     int nParamGroupIndex = 0;
     QString sParamGroupName = "参数组1";
 
-    // MeasureWeldParam.ini 当前参数组中的运行速度、扫描速度和相机读取/时间补偿参数。
+    // 配置库当前测量焊接参数组中的运行速度、扫描速度和相机读取/时间补偿参数。
     double dScanSpeed = 0.0;
     double dRunSpeed = 0.0;
     double dCameraReadFps = 100.0;
@@ -50,7 +50,7 @@ struct T_PRECISE_MEASURE_PARAM
     double dFinalWeldTrajectoryStepMm = 4.0;
     // 焊接方向：1 从姿态文件起点焊到终点，-1 从终点焊回起点。
     int nWeldDirection = 1;
-    // 焊接轨迹下枪/收枪安全位相对首尾焊点的回退距离，对应 MeasureWeldParam.ini 的 GunDownBackSafeDis。
+    // 焊接轨迹下枪/收枪安全位相对首尾焊点的回退距离，对应配置库中的 GunDownBackSafeDis。
     double dGunDownBackSafeDis = 70.0;
     double dWeldRzGainDeg = 0.0;
     // 焊接平台标准姿态示教：启用后 RX/RY 使用示教值，RZ 以平台示教值为基准修正坡道姿态。
@@ -118,7 +118,7 @@ private:
     CameraFrameCache* ResolveCameraCacheForUnit(int unitIndex);
     RobotDriverAdaptor* GetRobotDriver();
 
-    // 读取 Data/<RobotName>/MeasureWeldParam.ini 中当前启用的测量焊接参数组。
+    // 读取配置库中当前启用的测量焊接参数组。
     bool LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error);
     bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
     bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;

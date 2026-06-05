@@ -22,7 +22,7 @@ class QPushButton;
 class QSplitter;
 class RobotDriverAdaptor;
 
-// 测量焊接参数界面：选择机器人和参数组后读取/修改 MeasureWeldParam.ini。
+// 测量焊接参数界面：选择机器人和参数组后读取/修改配置库中的测量焊接参数。
 // 安全姿态保留脉冲点，扫描起终点改为直角坐标点。
 class PreciseMeasureEditDialog : public QDialog
 {

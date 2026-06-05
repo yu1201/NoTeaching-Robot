@@ -40,7 +40,7 @@ namespace
         {
             if (error != nullptr)
             {
-                *error = QString("打开机器人参数文件失败：%1").arg(path);
+                *error = QString("打开机器人参数数据失败：%1").arg(path);
             }
             return false;
         }
@@ -127,11 +127,11 @@ CameraParamDialog::CameraParamDialog(
     m_pCameraCombo = new QComboBox();
     robotLayout->addWidget(m_pCameraCombo, 1);
     baseLayout->addLayout(robotLayout);
-    m_pPathLabel = new QLabel("手眼参数文件：");
+    m_pPathLabel = new QLabel("手眼参数数据：");
     m_pPathLabel->setWordWrap(true);
     m_pPathLabel->setMaximumHeight(40);
     baseLayout->addWidget(m_pPathLabel);
-    m_pCameraPathLabel = new QLabel("相机参数文件：");
+    m_pCameraPathLabel = new QLabel("相机参数数据：");
     m_pCameraPathLabel->setWordWrap(true);
     m_pCameraPathLabel->setMaximumHeight(40);
     baseLayout->addWidget(m_pCameraPathLabel);
@@ -234,13 +234,13 @@ void CameraParamDialog::UpdateCurrentCameraInfo()
     QString filePath;
     if (!EnsureHandEyeMatrixIni(robotName, CurrentCameraSection(), &error, &filePath))
     {
-        m_pPathLabel->setText("手眼参数文件：创建失败");
-        AppendLog("手眼矩阵文件准备失败：" + error);
+        m_pPathLabel->setText("手眼参数数据：创建失败");
+        AppendLog("手眼矩阵参数准备失败：" + error);
         return;
     }
 
-    m_pPathLabel->setText(QString("手眼参数文件：%1").arg(filePath));
-    m_pCameraPathLabel->setText(QString("相机参数文件：%1").arg(RobotDataHelper::CameraParamPath(robotName)));
+    m_pPathLabel->setText(QString("手眼参数数据：%1").arg(filePath));
+    m_pCameraPathLabel->setText(QString("相机参数数据：%1").arg(RobotDataHelper::CameraParamPath(robotName)));
     if (m_pCameraSectionLabel != nullptr)
     {
         m_pCameraSectionLabel->setText(QString("当前分组：%1").arg(CurrentCameraSection()));

@@ -28,9 +28,9 @@ public:
         double zTruncationValue = 6.0;
         double resampleStepMm = 2.0;
         bool fallbackToLegacy = true;
+        bool slopeConsistentCornerFit = false;
     };
 
-    static QString SettingsFilePath();
     static QString DefaultLibraryDir();
     static QString DefaultConfigPath();
     static Settings Load();
