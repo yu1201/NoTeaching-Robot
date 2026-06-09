@@ -124,6 +124,9 @@
     <ClCompile Include="src\MeasureWelding.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\PointCloud3DView.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\PointCloudExtractionProcessor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -247,6 +250,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\OPini.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\PointCloud3DView.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\PointCloudExtractionProcessor.h">

@@ -64,7 +64,9 @@ constexpr auto WELD_SEGMENT_KIND_DEBUG_FILE_NAME = "PreciseLaserPointSegmentKind
 constexpr auto MATCH_DEBUG_FILE_NAME = "PreciseLaserPoint_MatchDebug.csv";
 constexpr auto SDK_POINT_CLOUD_OUTPUT_DIR_NAME = "SdkPointCloud";
 constexpr auto SDK_SEAM_EXTRACTED_FILE_NAME = "PreciseLaserPoint_SdkSeamExtracted.txt";
-constexpr auto SDK_SEAM_FITTED_FILE_NAME = "PreciseLaserPoint_SdkSeamFitted_2mm.txt";
+constexpr auto SDK_SEAM_EXTRACTED_2MM_FILE_NAME = "PreciseLaserPoint_SdkSeamExtracted_2mm.txt";
+constexpr auto SDK_BASE_WELD_FILE_NAME = "PreciseLaserPoint_SdkBaseWeld.txt";
+constexpr auto SDK_SCHEME_COMPARE_DIR_NAME = "SchemeCompare";
 constexpr int POSE_COMP_MATCH_BY_POSE = 0;
 constexpr int POSE_COMP_MATCH_BY_SEGMENT_CODE = 1;
 constexpr char POSE_COMP_MATCH_MODE_KEY[] = "PoseCompMatchMode";
@@ -579,12 +581,46 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
     params.minPointCount = 4;
     params.smoothRadius = 3;
     params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
+    params.exportFitDebugCloud = pointCloudSettings.exportFitDebugCloud;
+    params.validationCoverageEnabled = pointCloudSettings.validationCoverageEnabled;
+    params.validationMinFinitePointCount = pointCloudSettings.validationMinFinitePointCount;
+    params.validationMinProjectedSpanMm = pointCloudSettings.validationMinProjectedSpanMm;
+    params.validationContinuityEnabled = pointCloudSettings.validationContinuityEnabled;
+    params.validationMinStationCoverageRatio = pointCloudSettings.validationMinStationCoverageRatio;
+    params.validationMinLongestContinuousRatio = pointCloudSettings.validationMinLongestContinuousRatio;
+    params.validationDenoiseRatioEnabled = pointCloudSettings.validationDenoiseRatioEnabled;
+    params.validationMaxRejectedRatio = pointCloudSettings.validationMaxRejectedRatio;
+    params.validationResidualEnabled = pointCloudSettings.validationResidualEnabled;
+    params.validationMaxMedianResidualMm = pointCloudSettings.validationMaxMedianResidualMm;
+    params.validationMaxP95ResidualMm = pointCloudSettings.validationMaxP95ResidualMm;
+    params.validationResidualInlierThresholdMm = pointCloudSettings.validationResidualInlierThresholdMm;
+    params.validationMinResidualInlierRatio = pointCloudSettings.validationMinResidualInlierRatio;
+    params.validationKeyPointEnabled = pointCloudSettings.validationKeyPointEnabled;
+    params.validationMinKeyPointCount = pointCloudSettings.validationMinKeyPointCount;
+    params.validationMinCornerCount = pointCloudSettings.validationMinCornerCount;
+    params.validationMinSegmentLengthMm = pointCloudSettings.validationMinSegmentLengthMm;
+    params.validationOutputEnabled = pointCloudSettings.validationOutputEnabled;
+    params.validationMinOutputPointCount = pointCloudSettings.validationMinOutputPointCount;
+    params.validationMinOutputLengthRatio = pointCloudSettings.validationMinOutputLengthRatio;
     LoadActivePoseCornerCompensation(QString::fromStdString(param.sRobotName), params);
     return params;
 }
 
 Eigen::Vector3d BuildScanDirection(const T_PRECISE_MEASURE_PARAM& param)
 {
+    double overrideX = 0.0;
+    double overrideY = 0.0;
+    double overrideZ = 0.0;
+    if (PointCloudProcessingConfig::RuntimeScanDirectionOverride(&overrideX, &overrideY, &overrideZ))
+    {
+        Eigen::Vector3d overrideDirection(overrideX, overrideY, overrideZ);
+        if (overrideDirection.norm() <= std::numeric_limits<double>::epsilon())
+        {
+            return Eigen::Vector3d::UnitX();
+        }
+        return overrideDirection.normalized();
+    }
+
     Eigen::Vector3d direction(
         param.tEndPos.dX - param.tStartPos.dX,
         param.tEndPos.dY - param.tStartPos.dY,
@@ -599,12 +635,15 @@ Eigen::Vector3d BuildScanDirection(const T_PRECISE_MEASURE_PARAM& param)
 
 QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
     const QVector<RobotCalculation::LowerWeldFilterPoint>& points);
+QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
+    const QVector<PointCloudExtractionProcessor::TrackPoint>& points);
 
 RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud(
     const QVector<RobotCalculation::IndexedPoint3D>& legacyLaserInput,
     const QVector<RobotCalculation::IndexedPoint3D>& fullCloudInput,
     const T_PRECISE_MEASURE_PARAM& param,
     const RobotCalculation::LowerWeldFilterParams& fitParams,
+    const QString& sdkBaseWeldOutputPath,
     const MeasureThenWeldService::LogCallback& appendLog,
     bool* usedExternalLibrary = nullptr,
     PointCloudExtractionProcessor::ExtractionResult* externalExtraction = nullptr)
@@ -643,7 +682,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 PointCloudExtractionProcessor::ExtractCorrugatedSheet(
                     fullCloudInput,
                     settings,
-                    BuildScanDirection(param));
+                    BuildScanDirection(param),
+                    sdkBaseWeldOutputPath);
             if (extraction.ok)
             {
                 RobotCalculation::MeasureThenWeldAnalysisResult analysis =
@@ -660,12 +700,16 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                     }
                     if (appendLog)
                     {
-                        appendLog(QString("新版精测点云库处理完成：输入局部完整点云=%1，输出拟合轨迹点=%2，DLL=%3，配置=%4，Z截断=%5 mm。")
+                        appendLog(QString("新版精测点云库处理完成：输入局部完整点云=%1，输出基础焊道点=%2，DLL=%3，配置=%4，Z截断=%5 mm。")
                             .arg(extraction.inputPointCount)
                             .arg(extraction.points.size())
                             .arg(extraction.dllPath)
                             .arg(extraction.configPath)
                             .arg(settings.zTruncationValue, 0, 'f', 3));
+                        if (extraction.usedBaseWeldFile)
+                        {
+                            appendLog(QString("SDK基础焊道来自库输出文件：%1").arg(extraction.baseWeldPath));
+                        }
                     }
                     return analysis;
                 }
@@ -716,6 +760,21 @@ QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
     return indexedPoints;
 }
 
+QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
+    const QVector<PointCloudExtractionProcessor::TrackPoint>& points)
+{
+    QVector<RobotCalculation::IndexedPoint3D> indexedPoints;
+    indexedPoints.reserve(points.size());
+    for (const PointCloudExtractionProcessor::TrackPoint& point : points)
+    {
+        RobotCalculation::IndexedPoint3D indexedPoint;
+        indexedPoint.index = point.index;
+        indexedPoint.point = point.point;
+        indexedPoints.push_back(indexedPoint);
+    }
+    return indexedPoints;
+}
+
 std::vector<QString> BuildFilterOutputLines(const RobotCalculation::LowerWeldFilterResult& result)
 {
     std::vector<QString> lines;
@@ -724,6 +783,25 @@ std::vector<QString> BuildFilterOutputLines(const RobotCalculation::LowerWeldFil
     for (const RobotCalculation::LowerWeldFilterPoint& point : result.points)
     {
         lines.push_back(RobotCalculation::Vector3IndexedSpaceText(point.index, point.point, point.source));
+    }
+    return lines;
+}
+
+std::vector<QString> BuildIndexedPointOutputLines(
+    const QVector<RobotCalculation::IndexedPoint3D>& points,
+    const QString& source)
+{
+    std::vector<QString> lines;
+    lines.reserve(static_cast<size_t>(points.size()) + 1);
+    lines.push_back("index x y z source");
+    for (const RobotCalculation::IndexedPoint3D& point : points)
+    {
+        lines.push_back(QString("%1 %2 %3 %4 %5")
+            .arg(point.index)
+            .arg(point.point.x(), 0, 'f', 6)
+            .arg(point.point.y(), 0, 'f', 6)
+            .arg(point.point.z(), 0, 'f', 6)
+            .arg(source));
     }
     return lines;
 }
@@ -870,6 +948,173 @@ std::vector<QString> BuildNoiseOutputLines(
             .arg(point.point.z(), 0, 'f', 6));
     }
     return lines;
+}
+
+RobotCalculation::LowerWeldFilterParams BuildSchemeCompareFitParams(
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    RobotCalculation::LowerWeldFilterParams compareParams = params;
+    compareParams.validationCoverageEnabled = false;
+    compareParams.validationContinuityEnabled = false;
+    compareParams.validationDenoiseRatioEnabled = false;
+    compareParams.validationResidualEnabled = false;
+    compareParams.validationKeyPointEnabled = false;
+    compareParams.validationOutputEnabled = false;
+    return compareParams;
+}
+
+std::vector<QString> BuildSchemeCompareSummaryLines(
+    const QString& title,
+    const QString& inputDescription,
+    const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
+    const RobotCalculation::MeasureThenWeldAnalysisResult& analysis)
+{
+    std::vector<QString> lines;
+    lines.reserve(12);
+    lines.push_back(QString("方案=%1").arg(title));
+    lines.push_back(QString("输入=%1").arg(inputDescription));
+    lines.push_back(QString("输入点数=%1").arg(inputPoints.size()));
+    lines.push_back(QString("状态=%1").arg(analysis.ok ? "OK" : "FAIL"));
+    if (!analysis.ok)
+    {
+        lines.push_back(QString("错误=%1").arg(analysis.error));
+        return lines;
+    }
+    lines.push_back(QString("拟合输入点=%1").arg(analysis.filterResult.inputPointCount));
+    lines.push_back(QString("保留点=%1").arg(analysis.filterResult.points.size()));
+    lines.push_back(QString("关键点=%1").arg(analysis.keyPoints.size()));
+    lines.push_back(QString("2mm扩充点=%1").arg(analysis.classificationResult.points.size()));
+    lines.push_back(QString("起点=%1").arg(analysis.classificationResult.startCount));
+    lines.push_back(QString("终点=%1").arg(analysis.classificationResult.endCount));
+    lines.push_back(QString("内拐点=%1").arg(analysis.classificationResult.innerCornerCount));
+    lines.push_back(QString("外拐点=%1").arg(analysis.classificationResult.outerCornerCount));
+    return lines;
+}
+
+bool SaveSchemeAnalysisOutputs(
+    const MeasureThenWeldService& service,
+    const QString& compareDir,
+    const QString& prefix,
+    const QString& title,
+    const QString& inputDescription,
+    const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
+    const RobotCalculation::MeasureThenWeldAnalysisResult& analysis,
+    QString& error)
+{
+    const QDir dir(compareDir);
+    if (!service.SaveTextLines(
+            dir.filePath(QString("%1_InputPointCloud.txt").arg(prefix)),
+            BuildIndexedPointOutputLines(inputPoints, inputDescription),
+            error))
+    {
+        return false;
+    }
+    if (!service.SaveTextLines(
+            dir.filePath(QString("%1_Summary.txt").arg(prefix)),
+            BuildSchemeCompareSummaryLines(title, inputDescription, inputPoints, analysis),
+            error))
+    {
+        return false;
+    }
+    if (!analysis.ok)
+    {
+        return true;
+    }
+    return service.SaveTextLines(
+            dir.filePath(QString("%1_PreservePath.txt").arg(prefix)),
+            BuildFilterOutputLines(analysis.filterResult),
+            error)
+        && service.SaveTextLines(
+            dir.filePath(QString("%1_KeyPoints.txt").arg(prefix)),
+            BuildKeyPointOutputLines(analysis.keyPoints),
+            error)
+        && service.SaveTextLines(
+            dir.filePath(QString("%1_Classified_2mm.txt").arg(prefix)),
+            BuildClassifiedOutputLines(analysis.classificationResult),
+            error);
+}
+
+bool SaveSdkSchemeCompareOutputs(
+    const MeasureThenWeldService& service,
+    const QString& sdkPointCloudDir,
+    const QVector<RobotCalculation::IndexedPoint3D>& originalLaserInput,
+    const PointCloudExtractionProcessor::ExtractionResult& extraction,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QString& error,
+    const MeasureThenWeldService::LogCallback& appendLog)
+{
+    const QString compareDir = QDir(sdkPointCloudDir).filePath(SDK_SCHEME_COMPARE_DIR_NAME);
+    if (!QDir().mkpath(compareDir))
+    {
+        error = QString("创建SDK方案对比目录失败：%1").arg(compareDir);
+        return false;
+    }
+
+    const QDir dir(compareDir);
+    std::vector<QString> featureSummaryLines;
+    featureSummaryLines.reserve(5);
+    featureSummaryLines.push_back("方案=特征点方案");
+    featureSummaryLines.push_back("输入=sdk_feature_point");
+    featureSummaryLines.push_back(QString("关键点=%1").arg(extraction.rawPoints.size()));
+    featureSummaryLines.push_back(QString("2mm扩充点=%1").arg(extraction.keyPointExpandedPoints.size()));
+    if (!service.SaveTextLines(
+            dir.filePath("FeaturePoint_KeyPoints.txt"),
+            BuildSdkTrackOutputLines(extraction.rawPoints, "sdk_feature_point"),
+            error)
+        || !service.SaveTextLines(
+            dir.filePath("FeaturePoint_KeyPointExpanded_2mm.txt"),
+            BuildSdkTrackOutputLines(extraction.keyPointExpandedPoints, "sdk_feature_point_2mm"),
+            error)
+        || !service.SaveTextLines(
+            dir.filePath("FeaturePoint_Summary.txt"),
+            featureSummaryLines,
+            error))
+    {
+        return false;
+    }
+
+    const RobotCalculation::LowerWeldFilterParams compareParams =
+        BuildSchemeCompareFitParams(params);
+    const QVector<RobotCalculation::IndexedPoint3D> baseWeldInput = ToIndexedInput(extraction.points);
+    const RobotCalculation::MeasureThenWeldAnalysisResult baseWeldFitAnalysis =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(baseWeldInput, compareParams);
+    if (!SaveSchemeAnalysisOutputs(
+            service,
+            compareDir,
+            "BaseWeldPointCloudFit",
+            "点云+拟合方案",
+            "sdk_base_weld",
+            baseWeldInput,
+            baseWeldFitAnalysis,
+            error))
+    {
+        return false;
+    }
+
+    const RobotCalculation::MeasureThenWeldAnalysisResult originalPointCloudFitAnalysis =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(originalLaserInput, compareParams);
+    if (!SaveSchemeAnalysisOutputs(
+            service,
+            compareDir,
+            "OriginalPointCloudFit",
+            "点云拟合方案",
+            "original_laser_point",
+            originalLaserInput,
+            originalPointCloudFitAnalysis,
+            error))
+    {
+        return false;
+    }
+
+    if (appendLog)
+    {
+        appendLog(QString("SDK三方案对比输出目录：%1；特征点=%2，点云+拟合关键点=%3，点云拟合关键点=%4")
+            .arg(compareDir)
+            .arg(extraction.rawPoints.size())
+            .arg(baseWeldFitAnalysis.ok ? baseWeldFitAnalysis.keyPoints.size() : 0)
+            .arg(originalPointCloudFitAnalysis.ok ? originalPointCloudFitAnalysis.keyPoints.size() : 0));
+    }
+    return true;
 }
 
 QString FilterResultSummary(
@@ -4126,6 +4371,46 @@ WeldCornerArcApplyStats ApplyCornerArcTransitionToWeldPoseRecords(
     return stats;
 }
 
+// 独立调试预览(不参与主流程，不影响任何实际焊接文件)：在几何分析得到分类轨迹(拐点+2mm点)后，
+// 用与主流程相同的圆弧过渡算法(焊接工艺圆角半径 cornerArcRadiusMm)对拐角做圆弧过渡，仅生成一份
+// CloudCompare 点云：绿=圆弧过渡段、灰=直线段。叠加原始 PreciseLaserPoint.txt 即可核对生成的圆弧
+// 是否贴合原本焊道。注意：主流程真正的圆弧过渡仍在补偿之后(_SeamComp)，此处只为提前可视化核对。
+std::vector<QString> BuildArcTransitionPreviewCloudLines(
+    const RobotCalculation::LowerWeldClassificationResult& classification,
+    const WeldPosePreset& preset)
+{
+    QVector<WeldPoseFileRecord> records;
+    records.reserve(classification.points.size());
+    int weldIndex = 1;
+    for (const RobotCalculation::LowerWeldClassifiedPoint& point : classification.points)
+    {
+        WeldPoseFileRecord record;
+        record.weldIndex = weldIndex++;
+        record.rawIndex = point.index;
+        record.point = point.point;
+        record.pointType = RobotCalculation::LowerWeldPointTypeName(point.type);
+        record.segmentKind = point.segmentKindAfter;
+        records.push_back(record);
+    }
+
+    ApplyCornerArcTransitionToWeldPoseRecords(preset, records);
+
+    std::vector<QString> cloud;
+    cloud.push_back(QStringLiteral("// X Y Z R G B  绿=圆弧过渡段 灰=直线段 (叠加 PreciseLaserPoint.txt 对比焊道)"));
+    for (const WeldPoseFileRecord& record : records)
+    {
+        const bool isArc = record.pointType.contains(QStringLiteral("arc"))
+            || record.segmentKind.contains(QStringLiteral("_arc"));
+        const QString rgb = isArc ? QStringLiteral("0 255 0") : QStringLiteral("120 120 120");
+        cloud.push_back(QString("%1 %2 %3 %4")
+            .arg(record.point.x(), 0, 'f', 6)
+            .arg(record.point.y(), 0, 'f', 6)
+            .arg(record.point.z(), 0, 'f', 6)
+            .arg(rgb));
+    }
+    return cloud;
+}
+
 int DensifyWeldPoseRecordsByStep(
     QVector<WeldPoseFileRecord>& records,
     double maxStepMm)
@@ -5042,6 +5327,65 @@ WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
     return stats;
 }
 
+// 姿态补偿的「匹配槽位 + 工具系旋转后叠加」单一事实源：
+// 管线（BuildSegmentPoseOutputLines）与补偿预览（MeasureThenWeldService::RecomputeCompPreview）共用，
+// 确保界面显示的补偿后焊道与实际下发轨迹一致。
+Eigen::Vector3d ApplyPoseCompToPoint(
+    const std::vector<WeldPosePreset::PoseCompSlot>& poseCompSlots,
+    int poseCompMatchMode,
+    double poseMatchMaxErrorDeg,
+    int robotType,
+    const Eigen::Vector3d& point,
+    double rx,
+    double ry,
+    double rz,
+    const QString& segmentKind)
+{
+    int slotIndex = -1;
+    if (NormalizePoseCompMatchMode(poseCompMatchMode) == POSE_COMP_MATCH_BY_SEGMENT_CODE)
+    {
+        const int defaultIndex = DefaultPoseCompSlotIndex(segmentKind);
+        if (defaultIndex >= 0 && defaultIndex < static_cast<int>(poseCompSlots.size()))
+        {
+            slotIndex = defaultIndex;
+        }
+    }
+    else
+    {
+        double bestDistance = std::numeric_limits<double>::max();
+        for (int index = 0; index < static_cast<int>(poseCompSlots.size()); ++index)
+        {
+            const WeldPosePreset::PoseCompSlot& slot = poseCompSlots[index];
+            if (!slot.validReference)
+            {
+                continue;
+            }
+            const double distance = PoseDistanceDeg(rx, ry, rz, slot.poseRx, slot.poseRy, slot.poseRz);
+            if (distance > poseMatchMaxErrorDeg)
+            {
+                continue;
+            }
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                slotIndex = index;
+            }
+        }
+    }
+
+    if (slotIndex < 0)
+    {
+        return point;
+    }
+    const WeldPosePreset::PoseCompSlot& slot = poseCompSlots[slotIndex];
+    const Eigen::Vector3d poseCompLocal(slot.compX, slot.compY, slot.compZ);
+    if (poseCompLocal.norm() <= 1e-9)
+    {
+        return point;
+    }
+    return point + RobotPoseTransform::RotationFromAnglesDeg(rx, ry, rz, robotType) * poseCompLocal;
+}
+
 std::vector<QString> BuildSegmentPoseOutputLines(
     const RobotCalculation::LowerWeldClassificationResult& result,
     const T_PRECISE_MEASURE_PARAM& param,
@@ -5533,56 +5877,8 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         }
     }
 
-    auto findNearestPoseCompSlot = [&poseCompSlots, &preset](double rx, double ry, double rz) -> int
-    {
-        int bestIndex = -1;
-        double bestDistance = std::numeric_limits<double>::max();
-        for (int slotIndex = 0; slotIndex < static_cast<int>(poseCompSlots.size()); ++slotIndex)
-        {
-            const WeldPosePreset::PoseCompSlot& slot = poseCompSlots[slotIndex];
-            if (!slot.validReference)
-            {
-                continue;
-            }
-
-            const double distance = PoseDistanceDeg(
-                rx,
-                ry,
-                rz,
-                slot.poseRx,
-                slot.poseRy,
-                slot.poseRz);
-            if (distance > preset.poseMatchMaxErrorDeg)
-            {
-                continue;
-            }
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                bestIndex = slotIndex;
-            }
-        }
-        return bestIndex;
-    };
-
-    auto findPoseCompSlot = [&poseCompSlots, &preset, &findNearestPoseCompSlot](
-        double rx,
-        double ry,
-        double rz,
-        const QString& segmentKind) -> int
-    {
-        if (NormalizePoseCompMatchMode(preset.poseCompMatchMode) == POSE_COMP_MATCH_BY_SEGMENT_CODE)
-        {
-            const int slotIndex = DefaultPoseCompSlotIndex(segmentKind);
-            if (slotIndex >= 0 && slotIndex < static_cast<int>(poseCompSlots.size()))
-            {
-                return slotIndex;
-            }
-            return -1;
-        }
-
-        return findNearestPoseCompSlot(rx, ry, rz);
-    };
+    // 姿态补偿槽位匹配 + 工具系旋转应用已下沉为自由函数 ApplyPoseCompToPoint（见上方），
+    // 管线与补偿预览共用同一份数学。
 
     QVector<double> sampleDistances;
     sampleDistances.reserve(static_cast<int>((weldEndIndex - weldStartIndex + 1) * 2));
@@ -5775,17 +6071,16 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         double pointRx = outputPoseRx;
         double pointRy = outputPoseRy;
         Eigen::Vector3d point = sampledPoint;
-        const int poseCompSlotIndex = findPoseCompSlot(pointRx, pointRy, pointRz, segment.kind);
-        if (poseCompSlotIndex >= 0)
-        {
-            const WeldPosePreset::PoseCompSlot& slot = poseCompSlots[poseCompSlotIndex];
-            const Eigen::Vector3d poseCompLocal(slot.compX, slot.compY, slot.compZ);
-            if (poseCompLocal.norm() > 1e-9)
-            {
-                point += RobotPoseTransform::RotationFromAnglesDeg(pointRx, pointRy, pointRz, preset.robotType)
-                    * poseCompLocal;
-            }
-        }
+        point = ApplyPoseCompToPoint(
+            poseCompSlots,
+            preset.poseCompMatchMode,
+            preset.poseMatchMaxErrorDeg,
+            preset.robotType,
+            point,
+            pointRx,
+            pointRy,
+            pointRz,
+            segment.kind);
 
         WeldPoseFileRecord record;
         record.weldIndex = weldIndex++;
@@ -7043,7 +7338,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     const QString matchDebugPath = QDir(laserDir).filePath(MATCH_DEBUG_FILE_NAME);
     const QString sdkPointCloudDir = QDir(laserDir).filePath(SDK_POINT_CLOUD_OUTPUT_DIR_NAME);
     const QString sdkSeamExtractedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_FILE_NAME);
-    const QString sdkSeamFittedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_FITTED_FILE_NAME);
+    const QString sdkSeamExtracted2mmPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_2MM_FILE_NAME);
+    const QString sdkBaseWeldPath = QDir(sdkPointCloudDir).filePath(SDK_BASE_WELD_FILE_NAME);
     const QString preservePathFitPath = QDir(laserDir).filePath(PRESERVE_PATH_FILE_NAME);
     const QString keyPointsPath = QDir(laserDir).filePath(KEY_POINTS_FILE_NAME);
     const QString classifiedPath = QDir(laserDir).filePath(CLASSIFIED_FILE_NAME);
@@ -7323,7 +7619,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         appendLog(QString("相机-机器人-激光匹配明细文件：%1").arg(matchDebugPath));
     }
 
-    const RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);
+    RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);
+    if (originalFitParams.exportFitDebugCloud && !laserDir.isEmpty())
+    {
+        // 真机路径把拟合调试点云导出到本次结果的 LaserPoint 目录下（FitDebug 子目录）。
+        originalFitParams.fitDebugDir = laserDir;
+    }
     const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
     if (originalFitParams.geometryStrategy == RobotCalculation::LowerWeldGeometryStrategy::WorkpieceProjection)
     {
@@ -7395,17 +7696,19 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             workpieceCloudInput,
             param,
             originalFitParams,
+            sdkBaseWeldPath,
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
     if (!originalAnalysis.ok)
     {
+        error = QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error);
         if (appendLog)
         {
-            appendLog(QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error));
+            appendLog(error);
             appendLog("已保留原始激光点文件，可先按原始点云继续分析。");
         }
-        return true;
+        return false;
     }
 
     if (usedExternalLibrary)
@@ -7419,11 +7722,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             }
             return true;
         }
-        if (!SaveTextLines(sdkSeamFittedPath, BuildSdkTrackOutputLines(externalExtraction.points, "sdk_fitted_2mm"), error))
+        if (!SaveTextLines(
+                sdkSeamExtracted2mmPath,
+                BuildSdkTrackOutputLines(externalExtraction.keyPointExpandedPoints, "sdk_keypoint_2mm"),
+                error))
         {
             if (appendLog)
             {
-                appendLog(QString("保存SDK拟合焊道结果失败：%1").arg(error));
+                appendLog(QString("保存SDK提取焊道2mm采样结果失败：%1").arg(error));
             }
             return true;
         }
@@ -7432,9 +7738,25 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             appendLog(QString("SDK提取点云焊道文件：%1，点数=%2")
                 .arg(sdkSeamExtractedPath)
                 .arg(externalExtraction.rawPoints.size()));
-            appendLog(QString("SDK拟合焊道文件：%1，点数=%2")
-                .arg(sdkSeamFittedPath)
+            appendLog(QString("SDK提取点云焊道2mm采样文件：%1，点数=%2")
+                .arg(sdkSeamExtracted2mmPath)
+                .arg(externalExtraction.keyPointExpandedPoints.size()));
+            appendLog(QString("SDK基础焊道文件：%1，点数=%2")
+                .arg(externalExtraction.baseWeldPath.isEmpty() ? sdkBaseWeldPath : externalExtraction.baseWeldPath)
                 .arg(externalExtraction.points.size()));
+        }
+        QString schemeCompareError;
+        if (!SaveSdkSchemeCompareOutputs(
+                *this,
+                sdkPointCloudDir,
+                laserFitInput,
+                externalExtraction,
+                originalFitParams,
+                schemeCompareError,
+                appendLog)
+            && appendLog)
+        {
+            appendLog(QString("SDK三方案对比输出失败：%1").arg(schemeCompareError));
         }
     }
 
@@ -7471,6 +7793,23 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             appendLog(QString("保存焊道分类结果失败：%1").arg(error));
         }
         return true;
+    }
+
+    // 独立圆弧过渡预览(只输出、不参与主流程)：在分类点之后对拐角做圆弧过渡，导出 CloudCompare 点云，
+    // 叠加 PreciseLaserPoint.txt 即可核对生成的圆弧是否贴合原本焊道。受“导出调试点云”开关控制。
+    if (PointCloudProcessingConfig::Load().exportFitDebugCloud)
+    {
+        const QString arcPreviewPath =
+            QDir(laserDir).filePath(QStringLiteral("PreciseLaserPoint_ArcTransitionPreview.txt"));
+        QString arcPreviewError;
+        if (SaveTextLines(
+                arcPreviewPath,
+                BuildArcTransitionPreviewCloudLines(originalAnalysis.classificationResult, LoadWeldPosePreset(param)),
+                arcPreviewError)
+            && appendLog)
+        {
+            appendLog(QString("圆弧过渡预览点云(CloudCompare)：%1").arg(arcPreviewPath));
+        }
     }
 
     if (!SaveTextLines(keyPointsPath, BuildKeyPointOutputLines(originalAnalysis.keyPoints), error))
@@ -7693,7 +8032,8 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     const QString workpieceExtractedLaserPath = dir.filePath(WORKPIECE_EXTRACTED_LASER_FILE_NAME);
     const QString sdkPointCloudDir = dir.filePath(SDK_POINT_CLOUD_OUTPUT_DIR_NAME);
     const QString sdkSeamExtractedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_FILE_NAME);
-    const QString sdkSeamFittedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_FITTED_FILE_NAME);
+    const QString sdkSeamExtracted2mmPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_2MM_FILE_NAME);
+    const QString sdkBaseWeldPath = QDir(sdkPointCloudDir).filePath(SDK_BASE_WELD_FILE_NAME);
     const QString keyPointsPath = dir.filePath(KEY_POINTS_FILE_NAME);
     const QString classifiedPath = dir.filePath(CLASSIFIED_FILE_NAME);
     const QString cornerCompKeyPointsPath = dir.filePath(CORNER_COMP_KEY_POINTS_FILE_NAME);
@@ -7833,6 +8173,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             workpieceCloudInput,
             param,
             originalFitParams,
+            sdkBaseWeldPath,
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
@@ -7849,9 +8190,25 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         {
             return false;
         }
-        if (!SaveTextLines(sdkSeamFittedPath, BuildSdkTrackOutputLines(externalExtraction.points, "sdk_fitted_2mm"), error))
+        if (!SaveTextLines(
+                sdkSeamExtracted2mmPath,
+                BuildSdkTrackOutputLines(externalExtraction.keyPointExpandedPoints, "sdk_keypoint_2mm"),
+                error))
         {
             return false;
+        }
+        QString schemeCompareError;
+        if (!SaveSdkSchemeCompareOutputs(
+                *this,
+                sdkPointCloudDir,
+                laserFitInput,
+                externalExtraction,
+                originalFitParams,
+                schemeCompareError,
+                appendLog)
+            && appendLog)
+        {
+            appendLog(QString("SDK三方案对比输出失败：%1").arg(schemeCompareError));
         }
     }
 
@@ -7863,6 +8220,24 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     {
         return false;
     }
+
+    // 独立圆弧过渡预览(只输出、不参与主流程)：分类点之后对拐角做圆弧过渡，导出 CloudCompare 点云，
+    // 叠加 PreciseLaserPoint.txt 核对圆弧是否贴合焊道。受“导出调试点云”开关控制。
+    if (PointCloudProcessingConfig::Load().exportFitDebugCloud)
+    {
+        const QString arcPreviewPath = QDir(QFileInfo(classifiedPath).absolutePath())
+            .filePath(QStringLiteral("PreciseLaserPoint_ArcTransitionPreview.txt"));
+        QString arcPreviewError;
+        if (SaveTextLines(
+                arcPreviewPath,
+                BuildArcTransitionPreviewCloudLines(originalAnalysis.classificationResult, LoadWeldPosePreset(param)),
+                arcPreviewError)
+            && appendLog)
+        {
+            appendLog(QString("圆弧过渡预览点云(CloudCompare)：%1").arg(arcPreviewPath));
+        }
+    }
+
     if (!SaveTextLines(keyPointsPath, BuildKeyPointOutputLines(originalAnalysis.keyPoints), error))
     {
         return false;
@@ -7919,8 +8294,11 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             appendLog(QString("SDK提取点云焊道文件：%1，点数=%2")
                 .arg(sdkSeamExtractedPath)
                 .arg(externalExtraction.rawPoints.size()));
-            appendLog(QString("SDK拟合焊道文件：%1，点数=%2")
-                .arg(sdkSeamFittedPath)
+            appendLog(QString("SDK提取点云焊道2mm采样文件：%1，点数=%2")
+                .arg(sdkSeamExtracted2mmPath)
+                .arg(externalExtraction.keyPointExpandedPoints.size()));
+            appendLog(QString("SDK基础焊道文件：%1，点数=%2")
+                .arg(externalExtraction.baseWeldPath.isEmpty() ? sdkBaseWeldPath : externalExtraction.baseWeldPath)
                 .arg(externalExtraction.points.size()));
         }
         appendLog(QString("焊道分类文件：%1").arg(classifiedPath));
@@ -8868,4 +9246,315 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         .arg(RobotCoorsText(weldStartCoors))
         .arg(RobotCoorsText(endSafeCoors));
     return true;
+}
+
+// ===== 补偿前后焊道可视化预览实现 =====
+// 这些成员函数位于匿名命名空间之后，可直接复用其内的真实补偿数学
+// （ApplyWeldSeamCompToWeldPoseRecords / TryParseWeldPoseFileRecord /
+//  ResolveOverallHorizontalWeldDirection 等），保证预览与实际下发轨迹一致。
+
+bool MeasureThenWeldService::LoadCompPreviewBaseline(
+    CompPreviewKind kind,
+    const QString& laserDir,
+    QVector<CompPreviewPoint>& baseline,
+    QString& error) const
+{
+    baseline.clear();
+    QDir dir(laserDir);
+    if (!dir.exists())
+    {
+        error = QString("目录不存在：%1").arg(laserDir);
+        return false;
+    }
+
+    if (kind == CompPreviewKind::Corner)
+    {
+        // 拐点补偿的补偿前基准 = 关键点（start/end/inner/outer），用于按几何重算段类并整体补偿。
+        const QString keyPath = dir.filePath(KEY_POINTS_FILE_NAME);
+        QFile keyFile(keyPath);
+        if (!keyFile.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            error = QString("打开拐点文件失败：%1").arg(keyPath);
+            return false;
+        }
+        QTextStream keyStream(&keyFile);
+        keyStream.setEncoding(QStringConverter::Utf8);
+        while (!keyStream.atEnd())
+        {
+            const QString lineText = keyStream.readLine().trimmed();
+            if (lineText.isEmpty() || lineText.startsWith('#'))
+            {
+                continue;
+            }
+            const QStringList parts = lineText.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            if (parts.size() < 5)
+            {
+                continue;
+            }
+            bool xOk = false, yOk = false, zOk = false, codeOk = false;
+            const double x = parts[1].toDouble(&xOk);
+            const double y = parts[2].toDouble(&yOk);
+            const double z = parts[3].toDouble(&zOk);
+            const int code = parts[4].toInt(&codeOk);
+            if (!xOk || !yOk || !zOk || !codeOk)
+            {
+                continue;
+            }
+            CompPreviewPoint point;
+            point.x = x;
+            point.y = y;
+            point.z = z;
+            point.typeCode = code;
+            point.pointType = parts.size() > 5 ? parts[5] : QString();
+            baseline.push_back(point);
+        }
+        if (baseline.size() < 2)
+        {
+            error = QString("未从 %1 解析到足够拐点（至少2个）。").arg(KEY_POINTS_FILE_NAME);
+            return false;
+        }
+        return true;
+    }
+
+    // 焊道补偿/姿态补偿的补偿前基准 = 稠密 2mm 焊道姿态文件。
+    const QString path = dir.filePath(WELD_POSE_FILE_NAME);
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        error = QString("打开焊道文件失败：%1").arg(path);
+        return false;
+    }
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    while (!stream.atEnd())
+    {
+        const QString line = stream.readLine();
+        WeldPoseFileRecord record;
+        if (!TryParseWeldPoseFileRecord(line, record))
+        {
+            continue;
+        }
+        CompPreviewPoint point;
+        point.x = record.point.x();
+        point.y = record.point.y();
+        point.z = record.point.z();
+        point.rx = record.rx;
+        point.ry = record.ry;
+        point.rz = record.rz;
+        point.segmentKind = record.segmentKind;
+        point.pointType = record.pointType;
+        baseline.push_back(point);
+    }
+    if (baseline.isEmpty())
+    {
+        error = QString("未从 %1 解析到有效焊道点。").arg(WELD_POSE_FILE_NAME);
+        return false;
+    }
+    return true;
+}
+
+MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompPreview(
+    CompPreviewKind kind,
+    const QString& robotName,
+    const QVector<CompPreviewPoint>& baseline,
+    const CompPreviewEditValues& edits) const
+{
+    Q_UNUSED(robotName);
+    CompPreviewResult result;
+    if (baseline.isEmpty())
+    {
+        result.error = QStringLiteral("没有可用的基准焊道点。");
+        return result;
+    }
+    result.before = baseline;
+
+    if (kind == CompPreviewKind::Seam)
+    {
+        QVector<WeldPoseFileRecord> records;
+        records.reserve(baseline.size());
+        for (int index = 0; index < baseline.size(); ++index)
+        {
+            WeldPoseFileRecord record;
+            record.weldIndex = index + 1;
+            record.rawIndex = index;
+            record.point = Eigen::Vector3d(baseline[index].x, baseline[index].y, baseline[index].z);
+            record.segmentKind = baseline[index].segmentKind;
+            record.pointType = baseline[index].pointType;
+            records.push_back(record);
+        }
+
+        QVector<Eigen::Vector3d> basePoints;
+        basePoints.reserve(records.size());
+        for (const WeldPoseFileRecord& record : records)
+        {
+            basePoints.push_back(record.point);
+        }
+        const Eigen::Vector3d seamDir = ResolveOverallHorizontalWeldDirection(basePoints);
+        const Eigen::Vector3d gunDir = HorizontalUnitOrZero(Eigen::Vector3d::UnitZ().cross(seamDir));
+        result.seamAxis[0] = seamDir.x();
+        result.seamAxis[1] = seamDir.y();
+        result.seamAxis[2] = seamDir.z();
+        result.gunAxis[0] = gunDir.x();
+        result.gunAxis[1] = gunDir.y();
+        result.gunAxis[2] = gunDir.z();
+
+        // 用对话框当前编辑值构造 4 段焊道补偿槽（段类硬映射 0..3）。
+        WeldPosePreset preset;
+        preset.seamKind = QStringLiteral("CorrugatedPlate");
+        static const char* const kSegmentKinds[4] = { "low_platform", "rising_edge", "high_platform", "falling_edge" };
+        preset.seamCompSlots.clear();
+        for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
+        {
+            WeldPosePreset::SeamCompSlot slot;
+            slot.segmentKind = QString::fromLatin1(kSegmentKinds[slotIndex]);
+            slot.weldZComp = edits.weldZComp[slotIndex];
+            slot.weldGunDirComp = edits.weldGunDirComp[slotIndex];
+            slot.weldSeamDirComp = edits.weldSeamDirComp[slotIndex];
+            preset.seamCompSlots.push_back(slot);
+        }
+
+        // 复用管线真实的焊缝补偿平移（与 _SeamComp 下发文件同源）。
+        ApplyWeldSeamCompToWeldPoseRecords(preset, records);
+
+        result.after.reserve(records.size());
+        for (int index = 0; index < records.size(); ++index)
+        {
+            CompPreviewPoint point;
+            point.x = records[index].point.x();
+            point.y = records[index].point.y();
+            point.z = records[index].point.z();
+            point.segmentKind = records[index].segmentKind;
+            point.pointType = records[index].pointType;
+            result.after.push_back(point);
+        }
+        result.ok = true;
+        return result;
+    }
+
+    if (kind == CompPreviewKind::Pose)
+    {
+        // 用对话框当前编辑值构造 4 段姿态补偿槽（段类硬映射 0..3，validReference=true 以参与按姿态匹配）。
+        std::vector<WeldPosePreset::PoseCompSlot> poseCompSlots(4);
+        static const char* const kSegmentKinds[4] = { "low_platform", "rising_edge", "high_platform", "falling_edge" };
+        for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
+        {
+            poseCompSlots[slotIndex].segmentKind = QString::fromLatin1(kSegmentKinds[slotIndex]);
+            poseCompSlots[slotIndex].poseRx = edits.poseRx[slotIndex];
+            poseCompSlots[slotIndex].poseRy = edits.poseRy[slotIndex];
+            poseCompSlots[slotIndex].poseRz = edits.poseRz[slotIndex];
+            poseCompSlots[slotIndex].compX = edits.compX[slotIndex];
+            poseCompSlots[slotIndex].compY = edits.compY[slotIndex];
+            poseCompSlots[slotIndex].compZ = edits.compZ[slotIndex];
+            poseCompSlots[slotIndex].validReference = true;
+        }
+
+        QVector<Eigen::Vector3d> basePoints;
+        basePoints.reserve(baseline.size());
+        result.after.reserve(baseline.size());
+        for (const CompPreviewPoint& basePoint : baseline)
+        {
+            const Eigen::Vector3d before(basePoint.x, basePoint.y, basePoint.z);
+            basePoints.push_back(before);
+            // 复用管线下沉的姿态补偿（工具系 compX/Y/Z 按该点姿态旋到世界后叠加）。
+            const Eigen::Vector3d afterPoint = ApplyPoseCompToPoint(
+                poseCompSlots,
+                edits.poseMatchMode,
+                edits.poseMatchMaxErrorDeg,
+                edits.robotType,
+                before,
+                basePoint.rx,
+                basePoint.ry,
+                basePoint.rz,
+                basePoint.segmentKind);
+            CompPreviewPoint afterPreview;
+            afterPreview.x = afterPoint.x();
+            afterPreview.y = afterPoint.y();
+            afterPreview.z = afterPoint.z();
+            afterPreview.rx = basePoint.rx;
+            afterPreview.ry = basePoint.ry;
+            afterPreview.rz = basePoint.rz;
+            afterPreview.segmentKind = basePoint.segmentKind;
+            afterPreview.pointType = basePoint.pointType;
+            result.after.push_back(afterPreview);
+        }
+
+        const Eigen::Vector3d seamDir = ResolveOverallHorizontalWeldDirection(basePoints);
+        const Eigen::Vector3d gunDir = HorizontalUnitOrZero(Eigen::Vector3d::UnitZ().cross(seamDir));
+        result.seamAxis[0] = seamDir.x();
+        result.seamAxis[1] = seamDir.y();
+        result.seamAxis[2] = seamDir.z();
+        result.gunAxis[0] = gunDir.x();
+        result.gunAxis[1] = gunDir.y();
+        result.gunAxis[2] = gunDir.z();
+        result.ok = true;
+        return result;
+    }
+
+    // kind == CompPreviewKind::Corner：拐点补偿（复用公开的 RobotCalculation 拐点补偿，内部按几何重算段类）。
+    result.before = baseline;
+
+    const auto typeFromCode = [](int code) -> RobotCalculation::LowerWeldPointType
+    {
+        switch (code)
+        {
+        case 1: return RobotCalculation::LowerWeldPointType::Start;
+        case 2: return RobotCalculation::LowerWeldPointType::End;
+        case 3: return RobotCalculation::LowerWeldPointType::InnerCorner;
+        case 4: return RobotCalculation::LowerWeldPointType::OuterCorner;
+        case 6: return RobotCalculation::LowerWeldPointType::Noise;
+        default: return RobotCalculation::LowerWeldPointType::Normal;
+        }
+    };
+
+    QVector<RobotCalculation::LowerWeldClassifiedPoint> keyPoints;
+    keyPoints.reserve(baseline.size());
+    for (int index = 0; index < baseline.size(); ++index)
+    {
+        RobotCalculation::LowerWeldClassifiedPoint keyPoint;
+        keyPoint.index = index;
+        keyPoint.point = Eigen::Vector3d(baseline[index].x, baseline[index].y, baseline[index].z);
+        keyPoint.type = typeFromCode(baseline[index].typeCode);
+        keyPoints.push_back(keyPoint);
+    }
+
+    RobotCalculation::LowerWeldFilterParams params;
+    params.enableCornerCompensation = edits.cornerEnabled;
+    params.risingCornerCompensation.innerToOuterMm = edits.risingInnerToOuter;
+    params.risingCornerCompensation.innerToInnerMm = edits.risingInnerToInner;
+    params.risingCornerCompensation.outerToOuterMm = edits.risingOuterToOuter;
+    params.risingCornerCompensation.outerToInnerMm = edits.risingOuterToInner;
+    params.fallingCornerCompensation.innerToOuterMm = edits.fallingInnerToOuter;
+    params.fallingCornerCompensation.innerToInnerMm = edits.fallingInnerToInner;
+    params.fallingCornerCompensation.outerToOuterMm = edits.fallingOuterToOuter;
+    params.fallingCornerCompensation.outerToInnerMm = edits.fallingOuterToInner;
+
+    QVector<RobotCalculation::LowerWeldClassifiedPoint> compensatedKeyPoints;
+    RobotCalculation::BuildCornerCompensatedLowerWeldClassification(keyPoints, params, &compensatedKeyPoints);
+
+    if (compensatedKeyPoints.size() == keyPoints.size())
+    {
+        result.after.reserve(compensatedKeyPoints.size());
+        for (int index = 0; index < compensatedKeyPoints.size(); ++index)
+        {
+            CompPreviewPoint point;
+            point.x = compensatedKeyPoints[index].point.x();
+            point.y = compensatedKeyPoints[index].point.y();
+            point.z = compensatedKeyPoints[index].point.z();
+            point.typeCode = baseline[index].typeCode;
+            point.pointType = baseline[index].pointType;
+            result.after.push_back(point);
+        }
+        result.ok = true;
+    }
+    else
+    {
+        // 未启用拐点补偿或补偿值全为零 → 补偿后与补偿前一致。
+        result.after = baseline;
+        result.ok = true;
+        if (!edits.cornerEnabled)
+        {
+            result.error = QStringLiteral("未启用本组拐点补偿（勾选\"启用本组拐点补偿\"后可见效果）。");
+        }
+    }
+    return result;
 }

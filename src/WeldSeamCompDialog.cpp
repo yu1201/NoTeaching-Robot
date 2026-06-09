@@ -2,11 +2,20 @@
 
 #include "ConfigDatabase.h"
 #include "OPini.h"
+#include "PointCloud3DView.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
 #include "WindowStyleHelper.h"
 
 #include <QButtonGroup>
+#include <QColor>
+#include <QFile>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QSplitter>
+#include <QStringConverter>
+#include <QTextStream>
+#include <QTimer>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -419,7 +428,21 @@ void WeldSeamCompDialog::BuildUi()
     editorContentLayout->addWidget(m_pPathLabel);
     editorContentLayout->addStretch(1);
     editorScrollArea->setWidget(editorContent);
-    rootLayout->addWidget(editorScrollArea, 1);
+
+    m_pCompPreviewTimer = new QTimer(this);
+    m_pCompPreviewTimer->setSingleShot(true);
+    m_pCompPreviewTimer->setInterval(120);
+    connect(m_pCompPreviewTimer, &QTimer::timeout, this, [this]() { RecomputeCompPreview(); });
+
+    QSplitter* mainSplitter = new QSplitter(Qt::Horizontal, this);
+    mainSplitter->setObjectName("CompMainSplitter");
+    mainSplitter->setChildrenCollapsible(false);
+    mainSplitter->addWidget(editorScrollArea);
+    mainSplitter->addWidget(CreateCompPreviewPanel());
+    mainSplitter->setStretchFactor(0, 0);
+    mainSplitter->setStretchFactor(1, 1);
+    mainSplitter->setSizes({ 520, 880 });
+    rootLayout->addWidget(mainSplitter, 1);
 
     QHBoxLayout* actionLayout = new QHBoxLayout();
     actionLayout->addStretch(1);
@@ -501,14 +524,35 @@ void WeldSeamCompDialog::BuildUi()
     connect(m_pCornerCompensationCheck, &QCheckBox::toggled, this, [this](bool)
         {
             RefreshCornerCompensationEditor();
+            ScheduleCompPreview();
         });
+
+    // 编辑补偿值时实时重算补偿后焊道（textEdited 只在用户输入时触发，不受 setText 影响）。
+    for (int valueIndex = 0; valueIndex < 3; ++valueIndex)
+    {
+        if (m_pEditValues[valueIndex] != nullptr)
+        {
+            connect(m_pEditValues[valueIndex], &QLineEdit::textEdited, this, [this](const QString&) { ScheduleCompPreview(); });
+        }
+        if (m_pPoseValues[valueIndex] != nullptr)
+        {
+            connect(m_pPoseValues[valueIndex], &QLineEdit::textEdited, this, [this](const QString&) { ScheduleCompPreview(); });
+        }
+    }
+    for (int cornerIndex = 0; cornerIndex < 4; ++cornerIndex)
+    {
+        if (m_pCornerCompensationValues[cornerIndex] != nullptr)
+        {
+            connect(m_pCornerCompensationValues[cornerIndex], qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double) { ScheduleCompPreview(); });
+        }
+    }
 
     RefreshGroupCombo();
     RefreshTypeCombo();
     RefreshEditor();
 
     ApplyUnifiedWindowChrome(this);
-    ResizeWindowForAvailableGeometry(this, QSize(740, 560), 0.72, 0.72);
+    ResizeWindowForAvailableGeometry(this, QSize(1340, 780), 0.95, 0.9);
 }
 
 void WeldSeamCompDialog::LoadRobotList()
@@ -1196,6 +1240,7 @@ void WeldSeamCompDialog::RefreshEditor()
             }
         }
         RefreshCornerCompensationEditor();
+        ScheduleCompPreview();
         return;
     }
 
@@ -1251,6 +1296,7 @@ void WeldSeamCompDialog::RefreshEditor()
         }
     }
     RefreshCornerCompensationEditor();
+    ScheduleCompPreview();
 }
 
 bool WeldSeamCompDialog::StoreEditorValues(bool validate, QString& error)
@@ -1629,6 +1675,16 @@ bool WeldSeamCompDialog::SaveCurrentParam()
         return false;
     }
 
+    // 保存前把旧补偿参数（本次编辑前已持久化的值）+ 旧的补偿结果轨迹备份进所选预览目录，便于回溯对比。
+    if (!m_compPreviewDir.isEmpty())
+    {
+        const QString backupRoot = QDir(m_compPreviewDir).filePath(
+            "CompBackup/" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+        QString backupSummary;
+        BackupOldCompFiles(backupRoot, backupSummary);
+        AppendLog(QString("已备份旧补偿数据 → %1（%2）").arg(QDir::toNativeSeparators(backupRoot), backupSummary));
+    }
+
     if (!SavePoseParam(CurrentPoseParamPath(), error))
     {
         QMessageBox::warning(this, "保存补偿参数", error);
@@ -1882,4 +1938,367 @@ void WeldSeamCompDialog::AppendLog(const QString& text)
     {
         m_pLogText->appendPlainText(QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss.zzz")).arg(text));
     }
+}
+
+// ===================== 补偿前 / 补偿后 焊道可视化对比 =====================
+
+QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
+{
+    QGroupBox* panel = new QGroupBox("补偿前 / 补偿后 焊道对比");
+    QVBoxLayout* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(10, 16, 10, 10);
+    layout->setSpacing(8);
+
+    QHBoxLayout* toolbar = new QHBoxLayout();
+    toolbar->setSpacing(6);
+    QPushButton* chooseBtn = new QPushButton("选择目录");
+    m_pCompPreviewDirEdit = new QLineEdit();
+    m_pCompPreviewDirEdit->setReadOnly(true);
+    m_pCompPreviewDirEdit->setPlaceholderText("选择扫描结果 LaserPoint 目录…");
+    QPushButton* topBtn = new QPushButton("俯视");
+    QPushButton* frontBtn = new QPushButton("正视");
+    QPushButton* camBtn = new QPushButton("相机");
+    QPushButton* resetBtn = new QPushButton("重置");
+    for (QPushButton* button : { topBtn, frontBtn, camBtn, resetBtn })
+    {
+        button->setMinimumWidth(54);
+    }
+    toolbar->addWidget(chooseBtn);
+    toolbar->addWidget(m_pCompPreviewDirEdit, 1);
+    toolbar->addWidget(topBtn);
+    toolbar->addWidget(frontBtn);
+    toolbar->addWidget(camBtn);
+    toolbar->addWidget(resetBtn);
+    layout->addLayout(toolbar);
+
+    m_pCompPreviewView = new pcview::PointCloud3DView();
+    m_pCompPreviewView->setMinimumSize(420, 360);
+    layout->addWidget(m_pCompPreviewView, 1);
+
+    m_pCompPreviewInfoLabel = new QLabel("蓝=补偿前  橙=补偿后；选择目录后，调整补偿值即可实时对比补偿效果。");
+    m_pCompPreviewInfoLabel->setWordWrap(true);
+    m_pCompPreviewInfoLabel->setStyleSheet("color:#BFE8EC;");
+    layout->addWidget(m_pCompPreviewInfoLabel);
+
+    connect(chooseBtn, &QPushButton::clicked, this, [this]() { ChooseCompPreviewDirectory(); });
+    connect(topBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetTopView(); });
+    connect(frontBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetFrontView(); });
+    connect(camBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetCameraLikeView(); });
+    connect(resetBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->ResetView(); });
+
+    return panel;
+}
+
+void WeldSeamCompDialog::ChooseCompPreviewDirectory()
+{
+    QString start = m_compPreviewDir;
+    if (start.isEmpty())
+    {
+        start = RobotDataHelper::BuildProjectPath(QString("Result/%1").arg(CurrentRobotName()));
+    }
+    const QString dir = QFileDialog::getExistingDirectory(this, "选择扫描结果点云目录", start);
+    if (dir.isEmpty())
+    {
+        return;
+    }
+    m_compPreviewDir = QDir::toNativeSeparators(dir);
+    if (m_pCompPreviewDirEdit != nullptr)
+    {
+        m_pCompPreviewDirEdit->setText(m_compPreviewDir);
+    }
+    m_compPreviewBaseline.clear();
+    AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
+    RecomputeCompPreview();
+}
+
+void WeldSeamCompDialog::ScheduleCompPreview()
+{
+    if (m_bLoading)
+    {
+        return;
+    }
+    if (m_pCompPreviewTimer != nullptr)
+    {
+        m_pCompPreviewTimer->start();
+    }
+    else
+    {
+        RecomputeCompPreview();
+    }
+}
+
+int WeldSeamCompDialog::CurrentRobotType() const
+{
+    // 品牌旋转合成（FANUC=Rz·Ry·Rx / STEP 反序）影响姿态补偿方向，按真实机型取。
+    const QString robot = CurrentRobotName();
+    if (m_pContralUnit != nullptr)
+    {
+        for (const T_CONTRAL_UNIT& unit : m_pContralUnit->m_vtContralUnitInfo)
+        {
+            if (QString::fromStdString(unit.sUnitName) != robot || unit.pUnitDriver == nullptr)
+            {
+                continue;
+            }
+            RobotDriverAdaptor* driver = static_cast<RobotDriverAdaptor*>(unit.pUnitDriver);
+            if (dynamic_cast<STEPRobotCtrl*>(driver) != nullptr)
+            {
+                return ROBOT_TYPE_STEP;
+            }
+            if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
+            {
+                return ROBOT_TYPE_FANUC;
+            }
+        }
+    }
+    return ROBOT_TYPE_FANUC;
+}
+
+MeasureThenWeldService::CompPreviewKind WeldSeamCompDialog::CurrentCompPreviewKind() const
+{
+    if (m_mode == CompMode::Seam)
+    {
+        return MeasureThenWeldService::CompPreviewKind::Seam;
+    }
+    if (m_pCornerCompensationCheck != nullptr && m_pCornerCompensationCheck->isChecked())
+    {
+        return MeasureThenWeldService::CompPreviewKind::Corner;
+    }
+    return MeasureThenWeldService::CompPreviewKind::Pose;
+}
+
+MeasureThenWeldService::CompPreviewEditValues WeldSeamCompDialog::CollectCompPreviewEditValues() const
+{
+    MeasureThenWeldService::CompPreviewEditValues edits;
+    if (m_mode == CompMode::Seam)
+    {
+        const int base = m_currentSeamGroupIndex * COMP_SEGMENT_COUNT;
+        for (int seg = 0; seg < COMP_SEGMENT_COUNT; ++seg)
+        {
+            const int flat = base + seg;
+            if (flat < 0 || flat >= m_seamRows.size())
+            {
+                continue;
+            }
+            edits.weldZComp[seg] = m_seamRows[flat].weldZComp;
+            edits.weldGunDirComp[seg] = m_seamRows[flat].weldGunDirComp;
+            edits.weldSeamDirComp[seg] = m_seamRows[flat].weldSeamDirComp;
+        }
+    }
+    else
+    {
+        const int base = m_currentPoseGroupIndex * COMP_SEGMENT_COUNT;
+        for (int seg = 0; seg < COMP_SEGMENT_COUNT; ++seg)
+        {
+            const int flat = base + seg;
+            if (flat < 0 || flat >= m_poseRows.size())
+            {
+                continue;
+            }
+            edits.poseRx[seg] = m_poseRows[flat].poseRx;
+            edits.poseRy[seg] = m_poseRows[flat].poseRy;
+            edits.poseRz[seg] = m_poseRows[flat].poseRz;
+            edits.compX[seg] = m_poseRows[flat].compX;
+            edits.compY[seg] = m_poseRows[flat].compY;
+            edits.compZ[seg] = m_poseRows[flat].compZ;
+        }
+        edits.poseMatchMode = CurrentPoseGroupMatchMode();
+        edits.poseMatchMaxErrorDeg = m_poseMatchMaxErrorDeg;
+        edits.robotType = CurrentRobotType();
+        edits.cornerEnabled = (m_pCornerCompensationCheck != nullptr && m_pCornerCompensationCheck->isChecked());
+        const int risingFlat = base + 1;   // 上升边
+        const int fallingFlat = base + 3;  // 下降边
+        if (risingFlat >= 0 && risingFlat < m_poseRows.size())
+        {
+            edits.risingInnerToOuter = m_poseRows[risingFlat].innerToOuterCornerComp;
+            edits.risingInnerToInner = m_poseRows[risingFlat].innerToInnerCornerComp;
+            edits.risingOuterToOuter = m_poseRows[risingFlat].outerToOuterCornerComp;
+            edits.risingOuterToInner = m_poseRows[risingFlat].outerToInnerCornerComp;
+        }
+        if (fallingFlat >= 0 && fallingFlat < m_poseRows.size())
+        {
+            edits.fallingInnerToOuter = m_poseRows[fallingFlat].innerToOuterCornerComp;
+            edits.fallingInnerToInner = m_poseRows[fallingFlat].innerToInnerCornerComp;
+            edits.fallingOuterToOuter = m_poseRows[fallingFlat].outerToOuterCornerComp;
+            edits.fallingOuterToInner = m_poseRows[fallingFlat].outerToInnerCornerComp;
+        }
+    }
+    return edits;
+}
+
+void WeldSeamCompDialog::RecomputeCompPreview()
+{
+    if (m_pCompPreviewView == nullptr)
+    {
+        return;
+    }
+
+    if (m_compPreviewDir.isEmpty())
+    {
+        m_pCompPreviewView->SetLayers({});
+        m_pCompPreviewView->SetDirectionArrows({});
+        if (m_pCompPreviewInfoLabel != nullptr)
+        {
+            m_pCompPreviewInfoLabel->setText("未选择目录。点\"选择目录\"载入扫描结果焊道后即可对比补偿。");
+        }
+        return;
+    }
+
+    QString storeError;
+    StoreEditorValues(false, storeError);
+
+    const MeasureThenWeldService::CompPreviewKind kind = CurrentCompPreviewKind();
+    const bool usesKeyPoints = (kind == MeasureThenWeldService::CompPreviewKind::Corner);
+
+    if (m_compPreviewBaseline.isEmpty()
+        || m_compPreviewBaselineDir != m_compPreviewDir
+        || m_compPreviewBaselineUsesKeyPoints != usesKeyPoints)
+    {
+        QString loadError;
+        QVector<MeasureThenWeldService::CompPreviewPoint> baseline;
+        if (!m_compPreviewService.LoadCompPreviewBaseline(kind, m_compPreviewDir, baseline, loadError))
+        {
+            m_compPreviewBaseline.clear();
+            m_pCompPreviewView->SetLayers({});
+            m_pCompPreviewView->SetDirectionArrows({});
+            if (m_pCompPreviewInfoLabel != nullptr)
+            {
+                m_pCompPreviewInfoLabel->setText("读取失败：" + loadError);
+            }
+            return;
+        }
+        m_compPreviewBaseline = baseline;
+        m_compPreviewBaselineDir = m_compPreviewDir;
+        m_compPreviewBaselineUsesKeyPoints = usesKeyPoints;
+    }
+
+    const MeasureThenWeldService::CompPreviewEditValues edits = CollectCompPreviewEditValues();
+    const MeasureThenWeldService::CompPreviewResult result =
+        m_compPreviewService.RecomputeCompPreview(kind, CurrentRobotName(), m_compPreviewBaseline, edits);
+
+    auto toLayerPoints = [](const QVector<MeasureThenWeldService::CompPreviewPoint>& points)
+    {
+        QVector<pcview::PointCloudVec3> out;
+        out.reserve(points.size());
+        for (const MeasureThenWeldService::CompPreviewPoint& point : points)
+        {
+            out.push_back({ point.x, point.y, point.z });
+        }
+        return out;
+    };
+
+    QVector<pcview::PointCloud3DView::Layer> layers;
+    pcview::PointCloud3DView::Layer beforeLayer;
+    beforeLayer.name = "补偿前";
+    beforeLayer.color = QColor(120, 175, 215);
+    beforeLayer.connectLines = true;
+    beforeLayer.points = toLayerPoints(result.before);
+    layers.push_back(beforeLayer);
+
+    pcview::PointCloud3DView::Layer afterLayer;
+    afterLayer.name = "补偿后";
+    afterLayer.color = QColor(255, 150, 40);
+    afterLayer.connectLines = true;
+    afterLayer.points = toLayerPoints(result.after);
+    layers.push_back(afterLayer);
+
+    m_pCompPreviewView->SetLayers(layers);
+
+    // 方向箭头：在焊道质心处画 Z向 / 枪反向 / 焊道方向，标出正负影响方向（仅焊缝补偿）。
+    QVector<pcview::PointCloud3DView::DirectionArrow> arrows;
+    if (kind == MeasureThenWeldService::CompPreviewKind::Seam && !result.before.isEmpty())
+    {
+        double sumX = 0.0, sumY = 0.0, sumZ = 0.0;
+        double minX = 1e300, minY = 1e300, minZ = 1e300;
+        double maxX = -1e300, maxY = -1e300, maxZ = -1e300;
+        for (const MeasureThenWeldService::CompPreviewPoint& point : result.before)
+        {
+            sumX += point.x; sumY += point.y; sumZ += point.z;
+            minX = std::min(minX, point.x); maxX = std::max(maxX, point.x);
+            minY = std::min(minY, point.y); maxY = std::max(maxY, point.y);
+            minZ = std::min(minZ, point.z); maxZ = std::max(maxZ, point.z);
+        }
+        const double count = static_cast<double>(result.before.size());
+        const pcview::PointCloudVec3 centroid{ sumX / count, sumY / count, sumZ / count };
+        const double span = std::max({ maxX - minX, maxY - minY, maxZ - minZ, 10.0 });
+        const double arrowLen = std::clamp(span * 0.15, 8.0, 80.0);
+
+        const auto addArrow = [&](const pcview::PointCloudVec3& dir, const QString& label, const QColor& color)
+        {
+            pcview::PointCloud3DView::DirectionArrow arrow;
+            arrow.origin = centroid;
+            arrow.vector = { dir.x * arrowLen, dir.y * arrowLen, dir.z * arrowLen };
+            arrow.label = label;
+            arrow.color = color;
+            arrow.doubleHeaded = true;
+            arrows.push_back(arrow);
+        };
+        addArrow({ 0.0, 0.0, 1.0 }, "Z向+", QColor(90, 200, 255));
+        addArrow({ result.gunAxis[0], result.gunAxis[1], result.gunAxis[2] }, "枪反向+", QColor(255, 215, 64));
+        addArrow({ result.seamAxis[0], result.seamAxis[1], result.seamAxis[2] }, "焊道方向+", QColor(120, 255, 150));
+    }
+    m_pCompPreviewView->SetDirectionArrows(arrows);
+
+    if (m_pCompPreviewInfoLabel != nullptr)
+    {
+        QString info = QString("补偿前 %1 点 / 补偿后 %2 点").arg(result.before.size()).arg(result.after.size());
+        if (!result.ok && !result.error.isEmpty())
+        {
+            info += "（" + result.error + "）";
+        }
+        m_pCompPreviewInfoLabel->setText(info);
+    }
+}
+
+void WeldSeamCompDialog::BackupOldCompFiles(const QString& backupRoot, QString& summary) const
+{
+    summary.clear();
+    QDir().mkpath(backupRoot);
+    QStringList done;
+
+    // 1. 旧补偿参数快照（m_cleanSnapshot = 本次编辑前已持久化的姿态/焊道/拐点补偿参数）。
+    const QString snapPath = QDir(backupRoot).filePath("CompParamSnapshot_old.txt");
+    QFile snapFile(snapPath);
+    if (snapFile.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        QTextStream out(&snapFile);
+        out.setEncoding(QStringConverter::Utf8);
+        out << "# 机器人：" << CurrentRobotName() << "\n";
+        out << "# 备份时间：" << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
+        out << "# 内容：本次保存前已持久化的补偿参数（姿态/焊道/拐点）\n";
+        out << m_cleanSnapshot;
+        snapFile.close();
+        done << QStringLiteral("旧补偿参数快照");
+    }
+
+    // 2. 复制旧的补偿前/后结果轨迹文件。
+    if (!m_compPreviewDir.isEmpty())
+    {
+        const QStringList names = {
+            QStringLiteral("PreciseLaserPoint_WeldPose_2mm.txt"),
+            QStringLiteral("PreciseLaserPoint_WeldPose_2mm_SeamComp.txt"),
+            QStringLiteral("PreciseLaserPoint_Classified.txt"),
+            QStringLiteral("PreciseLaserPoint_CornerComp_Classified.txt"),
+            QStringLiteral("PreciseLaserPoint_KeyPoints.txt")
+        };
+        int copied = 0;
+        for (const QString& name : names)
+        {
+            const QString src = QDir(m_compPreviewDir).filePath(name);
+            if (QFileInfo::exists(src))
+            {
+                const QString dst = QDir(backupRoot).filePath(name);
+                QFile::remove(dst);
+                if (QFile::copy(src, dst))
+                {
+                    ++copied;
+                }
+            }
+        }
+        if (copied > 0)
+        {
+            done << QString("旧轨迹文件 %1 个").arg(copied);
+        }
+    }
+
+    summary = done.isEmpty() ? QStringLiteral("无可备份内容") : done.join(QStringLiteral("，"));
 }
