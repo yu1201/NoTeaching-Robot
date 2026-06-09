@@ -124,12 +124,24 @@ public:
         double fallingOuterToInner = 0.0;
     };
 
+    // 一根方向箭头（世界坐标），由 service 按补偿类型产出，对话框只负责渲染。
+    struct CompPreviewArrow
+    {
+        double origin[3] = { 0.0, 0.0, 0.0 };
+        double vector[3] = { 0.0, 0.0, 0.0 };  // 已含长度
+        QString label;
+        // 0=Z向蓝 1=枪反向黄 2=焊道方向绿 3=工具X红 4=工具Y绿 5=工具Z蓝 6=拐点位移橙
+        int colorId = 0;
+        bool doubleHeaded = true;
+    };
+
     struct CompPreviewResult
     {
         bool ok = false;
         QString error;
         QVector<CompPreviewPoint> before;   // 补偿前焊道
         QVector<CompPreviewPoint> after;    // 补偿后焊道（按当前编辑值实时算出）
+        QVector<CompPreviewArrow> arrows;   // 正负影响方向箭头（按补偿类型）
         double seamAxis[3] = { 0.0, 0.0, 0.0 };  // 焊道方向（世界单位向量）
         double gunAxis[3] = { 0.0, 0.0, 0.0 };   // 枪反向（垂直 Z 与焊道方向）
     };

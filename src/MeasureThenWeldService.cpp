@@ -5327,6 +5327,60 @@ WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
     return stats;
 }
 
+// 焊缝补偿平移之后的完整后处理（端点裁剪/自交裁剪/拐点恢复/加密/圆弧过渡/锐角裁剪/平滑/重编号）。
+// 管线 ApplyWeldSeamCompToPoseFile 与补偿预览共用，保证预览贴近实际下发轨迹（单一事实源）。
+struct SeamCompFinalizeStats
+{
+    WeldEndpointTrimStats endpointTrim;
+    WeldCornerRestoreStats cornerRestore;
+    WeldCornerArcApplyStats arc;
+    int densifiedPointCount = 0;
+    int postArcDensifiedPointCount = 0;
+    int finalDensifiedPointCount = 0;
+    int smoothedRemainingCornerCount = 0;
+    double densifyStepMm = 2.0;
+    bool emptyAfterEndpointTrim = false;
+    bool emptyAfterSelfIntersection = false;
+};
+
+SeamCompFinalizeStats FinalizeSeamCompedWeldPoseRecords(
+    const WeldPosePreset& preset,
+    const QVector<WeldPoseFileRecord>& recordsBeforeTrim,
+    QVector<WeldPoseFileRecord>& records,
+    WeldSeamCompApplyStats& compStats)
+{
+    SeamCompFinalizeStats stats;
+    constexpr double kSharpArcAngleRad = 8.0 * 3.14159265358979323846 / 180.0;
+
+    TrimWeldPoseRecordEndpoints(preset, records, stats.endpointTrim);
+    if (records.isEmpty())
+    {
+        stats.emptyAfterEndpointTrim = true;
+        return stats;
+    }
+    TrimWeldPathSelfIntersections(records, compStats);
+    if (records.isEmpty())
+    {
+        stats.emptyAfterSelfIntersection = true;
+        return stats;
+    }
+    stats.cornerRestore = RestoreTrimmedWeldCornersByLineIntersection(recordsBeforeTrim, records);
+    stats.densifyStepMm = std::min(2.0, EstimateWeldPoseStepMm(records));
+    stats.densifiedPointCount = DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    stats.arc = ApplyCornerArcTransitionToWeldPoseRecords(preset, records);
+    stats.postArcDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    TrimSharpWeldArcEntryPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
+    TrimSharpWeldArcExitPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
+    stats.smoothedRemainingCornerCount = SmoothRemainingUnroundedWeldCorners(records, stats.densifyStepMm);
+    stats.finalDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    TrimSharpWeldArcEntryPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
+    TrimSharpWeldArcExitPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
+    stats.smoothedRemainingCornerCount += SmoothRemainingUnroundedWeldCorners(records, stats.densifyStepMm);
+    stats.finalDensifiedPointCount += DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    RenumberWeldPoseRecords(records);
+    return stats;
+}
+
 // 姿态补偿的「匹配槽位 + 工具系旋转后叠加」单一事实源：
 // 管线（BuildSegmentPoseOutputLines）与补偿预览（MeasureThenWeldService::RecomputeCompPreview）共用，
 // 确保界面显示的补偿后焊道与实际下发轨迹一致。
@@ -8444,48 +8498,18 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
 
     WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
     const QVector<WeldPoseFileRecord> recordsBeforeTrim = records;
-    WeldEndpointTrimStats endpointTrimStats;
-    TrimWeldPoseRecordEndpoints(preset, records, endpointTrimStats);
-    if (records.isEmpty())
+    const SeamCompFinalizeStats finalizeStats =
+        FinalizeSeamCompedWeldPoseRecords(preset, recordsBeforeTrim, records, compStats);
+    if (finalizeStats.emptyAfterEndpointTrim)
     {
         error = "焊道补偿和起终点裁剪后没有有效焊接点。";
         return false;
     }
-    TrimWeldPathSelfIntersections(records, compStats);
-    if (records.isEmpty())
+    if (finalizeStats.emptyAfterSelfIntersection)
     {
         error = "焊道自交裁剪后没有有效焊接点。";
         return false;
     }
-    const WeldCornerRestoreStats cornerRestoreStats =
-        RestoreTrimmedWeldCornersByLineIntersection(recordsBeforeTrim, records);
-    const double densifyStepMm = std::min(2.0, EstimateWeldPoseStepMm(records));
-    const int densifiedPointCount = DensifyWeldPoseRecordsByStep(records, densifyStepMm);
-    const WeldCornerArcApplyStats arcStats = ApplyCornerArcTransitionToWeldPoseRecords(preset, records);
-    const int postArcDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, densifyStepMm);
-    TrimSharpWeldArcEntryPoints(
-        records,
-        8.0 * 3.14159265358979323846 / 180.0,
-        std::max(2.0, densifyStepMm * 2.5));
-    TrimSharpWeldArcExitPoints(
-        records,
-        8.0 * 3.14159265358979323846 / 180.0,
-        std::max(2.0, densifyStepMm * 2.5));
-    int smoothedRemainingCornerCount =
-        SmoothRemainingUnroundedWeldCorners(records, densifyStepMm);
-    int finalDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, densifyStepMm);
-    TrimSharpWeldArcEntryPoints(
-        records,
-        8.0 * 3.14159265358979323846 / 180.0,
-        std::max(2.0, densifyStepMm * 2.5));
-    TrimSharpWeldArcExitPoints(
-        records,
-        8.0 * 3.14159265358979323846 / 180.0,
-        std::max(2.0, densifyStepMm * 2.5));
-    smoothedRemainingCornerCount +=
-        SmoothRemainingUnroundedWeldCorners(records, densifyStepMm);
-    finalDensifiedPointCount += DensifyWeldPoseRecordsByStep(records, densifyStepMm);
-    RenumberWeldPoseRecords(records);
 
     QStringList outputLines;
     outputLines.reserve(records.size() + 1);
@@ -8516,22 +8540,22 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
         .arg(compStats.zAdjustedCount)
         .arg(compStats.gunDirAdjustedCount)
         .arg(compStats.seamDirAdjustedCount)
-        .arg(endpointTrimStats.removedStartCount)
-        .arg(endpointTrimStats.removedEndCount)
+        .arg(finalizeStats.endpointTrim.removedStartCount)
+        .arg(finalizeStats.endpointTrim.removedEndCount)
         .arg(compStats.selfIntersectionTrimCount)
         .arg(compStats.selfIntersectionRemovedPointCount)
-        .arg(cornerRestoreStats.adjustedCornerCount)
-        .arg(cornerRestoreStats.missingCornerCount)
-        .arg(cornerRestoreStats.restoredCornerCount)
-        .arg(cornerRestoreStats.skippedCornerCount)
-        .arg(smoothedRemainingCornerCount)
-        .arg(densifiedPointCount)
-        .arg(postArcDensifiedPointCount)
-        .arg(finalDensifiedPointCount)
-        .arg(densifyStepMm, 0, 'f', 3)
-        .arg(arcStats.roundedCornerCount)
-        .arg(arcStats.radiusMm, 0, 'f', 3)
-        .arg(arcStats.insertedPointCount())
+        .arg(finalizeStats.cornerRestore.adjustedCornerCount)
+        .arg(finalizeStats.cornerRestore.missingCornerCount)
+        .arg(finalizeStats.cornerRestore.restoredCornerCount)
+        .arg(finalizeStats.cornerRestore.skippedCornerCount)
+        .arg(finalizeStats.smoothedRemainingCornerCount)
+        .arg(finalizeStats.densifiedPointCount)
+        .arg(finalizeStats.postArcDensifiedPointCount)
+        .arg(finalizeStats.finalDensifiedPointCount)
+        .arg(finalizeStats.densifyStepMm, 0, 'f', 3)
+        .arg(finalizeStats.arc.roundedCornerCount)
+        .arg(finalizeStats.arc.radiusMm, 0, 'f', 3)
+        .arg(finalizeStats.arc.insertedPointCount())
         .arg(QDir::toNativeSeparators(segmentKindDebugPath))
         .arg(QDir::toNativeSeparators(preset.seamCompFilePath));
     return true;
@@ -9359,7 +9383,6 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
     const QVector<CompPreviewPoint>& baseline,
     const CompPreviewEditValues& edits) const
 {
-    Q_UNUSED(robotName);
     CompPreviewResult result;
     if (baseline.isEmpty())
     {
@@ -9367,6 +9390,47 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
         return result;
     }
     result.before = baseline;
+
+    struct ArrowBasis { double cx = 0.0, cy = 0.0, cz = 0.0, len = 10.0; };
+    const auto computeArrowBasis = [](const QVector<CompPreviewPoint>& points) -> ArrowBasis
+    {
+        ArrowBasis basis;
+        if (points.isEmpty())
+        {
+            return basis;
+        }
+        double minv[3] = { 1e300, 1e300, 1e300 };
+        double maxv[3] = { -1e300, -1e300, -1e300 };
+        double sum[3] = { 0.0, 0.0, 0.0 };
+        for (const CompPreviewPoint& point : points)
+        {
+            const double coord[3] = { point.x, point.y, point.z };
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                sum[axis] += coord[axis];
+                minv[axis] = std::min(minv[axis], coord[axis]);
+                maxv[axis] = std::max(maxv[axis], coord[axis]);
+            }
+        }
+        const double count = static_cast<double>(points.size());
+        basis.cx = sum[0] / count;
+        basis.cy = sum[1] / count;
+        basis.cz = sum[2] / count;
+        const double span = std::max({ maxv[0] - minv[0], maxv[1] - minv[1], maxv[2] - minv[2], 10.0 });
+        basis.len = std::clamp(span * 0.15, 8.0, 80.0);
+        return basis;
+    };
+    const auto addArrow = [&result](double ox, double oy, double oz, double vx, double vy, double vz,
+        const QString& label, int colorId, bool doubleHeaded)
+    {
+        CompPreviewArrow arrow;
+        arrow.origin[0] = ox; arrow.origin[1] = oy; arrow.origin[2] = oz;
+        arrow.vector[0] = vx; arrow.vector[1] = vy; arrow.vector[2] = vz;
+        arrow.label = label;
+        arrow.colorId = colorId;
+        arrow.doubleHeaded = doubleHeaded;
+        result.arrows.push_back(arrow);
+    };
 
     if (kind == CompPreviewKind::Seam)
     {
@@ -9399,22 +9463,26 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
         result.gunAxis[2] = gunDir.z();
 
         // 用对话框当前编辑值构造 4 段焊道补偿槽（段类硬映射 0..3）。
-        WeldPosePreset preset;
-        preset.seamKind = QStringLiteral("CorrugatedPlate");
+        // 载入真实焊接预设（含圆弧过渡/裁剪等下发参数），再用对话框当前焊缝补偿值覆盖补偿槽。
+        WeldPosePreset preset = LoadWeldPosePreset(BuildMeasureWeldParamShell(robotName));
         static const char* const kSegmentKinds[4] = { "low_platform", "rising_edge", "high_platform", "falling_edge" };
-        preset.seamCompSlots.clear();
+        preset.seamCompSlots.assign(4, WeldPosePreset::SeamCompSlot());
         for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
         {
-            WeldPosePreset::SeamCompSlot slot;
-            slot.segmentKind = QString::fromLatin1(kSegmentKinds[slotIndex]);
-            slot.weldZComp = edits.weldZComp[slotIndex];
-            slot.weldGunDirComp = edits.weldGunDirComp[slotIndex];
-            slot.weldSeamDirComp = edits.weldSeamDirComp[slotIndex];
-            preset.seamCompSlots.push_back(slot);
+            preset.seamCompSlots[slotIndex].segmentKind = QString::fromLatin1(kSegmentKinds[slotIndex]);
+            preset.seamCompSlots[slotIndex].weldZComp = edits.weldZComp[slotIndex];
+            preset.seamCompSlots[slotIndex].weldGunDirComp = edits.weldGunDirComp[slotIndex];
+            preset.seamCompSlots[slotIndex].weldSeamDirComp = edits.weldSeamDirComp[slotIndex];
         }
 
-        // 复用管线真实的焊缝补偿平移（与 _SeamComp 下发文件同源）。
-        ApplyWeldSeamCompToWeldPoseRecords(preset, records);
+        // 复用管线真实焊缝补偿平移 + 完整后处理（端点裁剪/自交/拐点恢复/圆弧过渡/加密），贴近 _SeamComp 下发文件。
+        WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
+        const QVector<WeldPoseFileRecord> recordsBeforeTrim = records;
+        FinalizeSeamCompedWeldPoseRecords(preset, recordsBeforeTrim, records, compStats);
+        if (records.isEmpty())
+        {
+            records = recordsBeforeTrim;  // 后处理裁空则回退显示纯补偿平移结果
+        }
 
         result.after.reserve(records.size());
         for (int index = 0; index < records.size(); ++index)
@@ -9427,6 +9495,12 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
             point.pointType = records[index].pointType;
             result.after.push_back(point);
         }
+
+        // 方向箭头：质心处 Z向 / 枪反向 / 焊道方向，标正负影响方向。
+        const ArrowBasis basis = computeArrowBasis(result.before);
+        addArrow(basis.cx, basis.cy, basis.cz, 0.0, 0.0, basis.len, QStringLiteral("Z向+"), 0, true);
+        addArrow(basis.cx, basis.cy, basis.cz, gunDir.x() * basis.len, gunDir.y() * basis.len, gunDir.z() * basis.len, QStringLiteral("枪反向+"), 1, true);
+        addArrow(basis.cx, basis.cy, basis.cz, seamDir.x() * basis.len, seamDir.y() * basis.len, seamDir.z() * basis.len, QStringLiteral("焊道方向+"), 2, true);
         result.ok = true;
         return result;
     }
@@ -9486,6 +9560,31 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
         result.gunAxis[0] = gunDir.x();
         result.gunAxis[1] = gunDir.y();
         result.gunAxis[2] = gunDir.z();
+
+        // 方向箭头：姿态补偿 compX/Y/Z 在工具系，按代表点姿态旋到世界，画 X/Y/Z 补偿正方向。
+        const ArrowBasis basis = computeArrowBasis(result.before);
+        int repIndex = 0;
+        double bestDistanceSq = std::numeric_limits<double>::max();
+        for (int index = 0; index < baseline.size(); ++index)
+        {
+            const double dx = baseline[index].x - basis.cx;
+            const double dy = baseline[index].y - basis.cy;
+            const double dz = baseline[index].z - basis.cz;
+            const double distanceSq = dx * dx + dy * dy + dz * dz;
+            if (distanceSq < bestDistanceSq)
+            {
+                bestDistanceSq = distanceSq;
+                repIndex = index;
+            }
+        }
+        const Eigen::Matrix3d rotation = RobotPoseTransform::RotationFromAnglesDeg(
+            baseline[repIndex].rx, baseline[repIndex].ry, baseline[repIndex].rz, edits.robotType);
+        const Eigen::Vector3d toolX = rotation.col(0) * basis.len;
+        const Eigen::Vector3d toolY = rotation.col(1) * basis.len;
+        const Eigen::Vector3d toolZ = rotation.col(2) * basis.len;
+        addArrow(basis.cx, basis.cy, basis.cz, toolX.x(), toolX.y(), toolX.z(), QStringLiteral("X补偿+"), 3, true);
+        addArrow(basis.cx, basis.cy, basis.cz, toolY.x(), toolY.y(), toolY.z(), QStringLiteral("Y补偿+"), 4, true);
+        addArrow(basis.cx, basis.cy, basis.cz, toolZ.x(), toolZ.y(), toolZ.z(), QStringLiteral("Z补偿+"), 5, true);
         result.ok = true;
         return result;
     }
@@ -9543,6 +9642,24 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
             point.typeCode = baseline[index].typeCode;
             point.pointType = baseline[index].pointType;
             result.after.push_back(point);
+        }
+
+        // 方向箭头：每个发生位移的拐点画其移动方向（小位移放大显示）。
+        const ArrowBasis basis = computeArrowBasis(result.before);
+        for (int index = 0; index < result.before.size() && index < result.after.size(); ++index)
+        {
+            const double dx = result.after[index].x - result.before[index].x;
+            const double dy = result.after[index].y - result.before[index].y;
+            const double dz = result.after[index].z - result.before[index].z;
+            const double moved = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (moved < 1e-6)
+            {
+                continue;
+            }
+            const double shown = std::clamp(moved * 4.0, basis.len * 0.4, basis.len * 1.5);
+            const double scale = shown / moved;
+            addArrow(result.before[index].x, result.before[index].y, result.before[index].z,
+                dx * scale, dy * scale, dz * scale, QStringLiteral("拐点位移"), 6, false);
         }
         result.ok = true;
     }

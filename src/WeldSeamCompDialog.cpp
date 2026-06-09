@@ -2203,38 +2203,27 @@ void WeldSeamCompDialog::RecomputeCompPreview()
 
     m_pCompPreviewView->SetLayers(layers);
 
-    // 方向箭头：在焊道质心处画 Z向 / 枪反向 / 焊道方向，标出正负影响方向（仅焊缝补偿）。
+    // 方向箭头：由 service 按补偿类型（焊缝/姿态/拐点）统一产出，这里只按 colorId 渲染。
     QVector<pcview::PointCloud3DView::DirectionArrow> arrows;
-    if (kind == MeasureThenWeldService::CompPreviewKind::Seam && !result.before.isEmpty())
+    arrows.reserve(result.arrows.size());
+    for (const MeasureThenWeldService::CompPreviewArrow& source : result.arrows)
     {
-        double sumX = 0.0, sumY = 0.0, sumZ = 0.0;
-        double minX = 1e300, minY = 1e300, minZ = 1e300;
-        double maxX = -1e300, maxY = -1e300, maxZ = -1e300;
-        for (const MeasureThenWeldService::CompPreviewPoint& point : result.before)
+        pcview::PointCloud3DView::DirectionArrow arrow;
+        arrow.origin = { source.origin[0], source.origin[1], source.origin[2] };
+        arrow.vector = { source.vector[0], source.vector[1], source.vector[2] };
+        arrow.label = source.label;
+        arrow.doubleHeaded = source.doubleHeaded;
+        switch (source.colorId)
         {
-            sumX += point.x; sumY += point.y; sumZ += point.z;
-            minX = std::min(minX, point.x); maxX = std::max(maxX, point.x);
-            minY = std::min(minY, point.y); maxY = std::max(maxY, point.y);
-            minZ = std::min(minZ, point.z); maxZ = std::max(maxZ, point.z);
+        case 1: arrow.color = QColor(255, 215, 64); break;   // 枪反向
+        case 2: arrow.color = QColor(120, 255, 150); break;  // 焊道方向
+        case 3: arrow.color = QColor(255, 90, 90); break;    // 工具X
+        case 4: arrow.color = QColor(90, 255, 90); break;    // 工具Y
+        case 5: arrow.color = QColor(90, 200, 255); break;   // 工具Z
+        case 6: arrow.color = QColor(255, 150, 40); break;   // 拐点位移
+        default: arrow.color = QColor(90, 200, 255); break;  // Z向
         }
-        const double count = static_cast<double>(result.before.size());
-        const pcview::PointCloudVec3 centroid{ sumX / count, sumY / count, sumZ / count };
-        const double span = std::max({ maxX - minX, maxY - minY, maxZ - minZ, 10.0 });
-        const double arrowLen = std::clamp(span * 0.15, 8.0, 80.0);
-
-        const auto addArrow = [&](const pcview::PointCloudVec3& dir, const QString& label, const QColor& color)
-        {
-            pcview::PointCloud3DView::DirectionArrow arrow;
-            arrow.origin = centroid;
-            arrow.vector = { dir.x * arrowLen, dir.y * arrowLen, dir.z * arrowLen };
-            arrow.label = label;
-            arrow.color = color;
-            arrow.doubleHeaded = true;
-            arrows.push_back(arrow);
-        };
-        addArrow({ 0.0, 0.0, 1.0 }, "Z向+", QColor(90, 200, 255));
-        addArrow({ result.gunAxis[0], result.gunAxis[1], result.gunAxis[2] }, "枪反向+", QColor(255, 215, 64));
-        addArrow({ result.seamAxis[0], result.seamAxis[1], result.seamAxis[2] }, "焊道方向+", QColor(120, 255, 150));
+        arrows.push_back(arrow);
     }
     m_pCompPreviewView->SetDirectionArrows(arrows);
 
