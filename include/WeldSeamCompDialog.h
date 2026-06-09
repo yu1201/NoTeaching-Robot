@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ContralUnit.h"
+#include "MeasureThenWeldService.h"
 
 #include <QDialog>
 #include <QString>
@@ -17,6 +18,10 @@ class QListWidget;
 class QPlainTextEdit;
 class QPushButton;
 class QWidget;
+class QTimer;
+class QSplitter;
+
+namespace pcview { class PointCloud3DView; }
 
 class WeldSeamCompDialog : public QDialog
 {
@@ -105,6 +110,16 @@ private:
     int CurrentRowCount() const;
     int CurrentTypeIndex() const;
 
+    // 补偿前 / 补偿后 焊道可视化对比
+    QWidget* CreateCompPreviewPanel();
+    void ChooseCompPreviewDirectory();
+    void ScheduleCompPreview();
+    void RecomputeCompPreview();
+    MeasureThenWeldService::CompPreviewKind CurrentCompPreviewKind() const;
+    MeasureThenWeldService::CompPreviewEditValues CollectCompPreviewEditValues() const;
+    void BackupOldCompFiles(const QString& backupRoot, QString& summary) const;
+    int CurrentRobotType() const;
+
 private:
     ContralUnit* m_pContralUnit = nullptr;
     QComboBox* m_pRobotCombo = nullptr;
@@ -146,4 +161,15 @@ private:
     int m_currentTypeIndex = 0;
     bool m_bLoading = false;
     QString m_cleanSnapshot;
+
+    // 补偿前 / 补偿后 焊道可视化对比
+    pcview::PointCloud3DView* m_pCompPreviewView = nullptr;
+    QLineEdit* m_pCompPreviewDirEdit = nullptr;
+    QLabel* m_pCompPreviewInfoLabel = nullptr;
+    QTimer* m_pCompPreviewTimer = nullptr;
+    MeasureThenWeldService m_compPreviewService;
+    QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewBaseline;
+    QString m_compPreviewDir;
+    QString m_compPreviewBaselineDir;
+    bool m_compPreviewBaselineUsesKeyPoints = false;
 };

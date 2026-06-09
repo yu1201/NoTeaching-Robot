@@ -140,6 +140,7 @@
     <ClCompile Include="src\MeasureThenWeldService.cpp" />
     <ClCompile Include="src\MeasureThenWeldWorkflow.cpp" />
     <ClCompile Include="src\MeasureWelding.cpp" />
+    <ClCompile Include="src\PointCloud3DView.cpp" />
     <ClCompile Include="src\PointCloudExtractionProcessor.cpp" />
     <ClCompile Include="src\PointCloudProcessingConfig.cpp" />
     <ClCompile Include="src\PreciseMeasureEditDialog.cpp" />
@@ -196,6 +197,7 @@
     <ClInclude Include="include\MeasureThenWeldWorkflow.h" />
     <ClInclude Include="include\MeasureWelding.h" />
     <ClInclude Include="include\OPini.h" />
+    <ClInclude Include="include\PointCloud3DView.h" />
     <ClInclude Include="include\PointCloudExtractionProcessor.h" />
     <ClInclude Include="include\PointCloudProcessingConfig.h" />
     <ClInclude Include="include\PreciseMeasureEditDialog.h" />
