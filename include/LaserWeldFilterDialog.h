@@ -40,6 +40,7 @@ private:
     QLineEdit* m_pExternalConfigPathEdit = nullptr;
     QDoubleSpinBox* m_pExternalZTruncationSpin = nullptr;
     QDoubleSpinBox* m_pExternalResampleStepSpin = nullptr;
+    QCheckBox* m_pSdkWeldedStartCheck = nullptr;
     QCheckBox* m_pCloudUprightCheck = nullptr;
     QDoubleSpinBox* m_pCloudPlateThicknessSpin = nullptr;
     QDoubleSpinBox* m_pCloudRemoveFloorZSpin = nullptr;

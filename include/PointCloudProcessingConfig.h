@@ -38,6 +38,8 @@ public:
         QString configPath;
         double zTruncationValue = 6.0;
         double resampleStepMm = 2.0;
+        // SDK 已焊起点截断：开启后 SDK 两种方法用库返回的已焊起点截掉焊道已焊部分（默认关闭）。
+        bool sdkUseWeldedStartTruncation = false;
         // 滤波拟合数值参数（管线真实消费；默认值即原管线硬编码值，保证升级后现场行为不变）。
         SampleAxisMode sampleAxisMode = SampleAxisMode::Auto;
         double cloudZThresholdMm = -230.0;
