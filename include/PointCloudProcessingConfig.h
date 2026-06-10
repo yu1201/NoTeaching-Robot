@@ -5,10 +5,13 @@
 class PointCloudProcessingConfig
 {
 public:
+    // 精测点云处理方法（四种）。旧值兼容：LegacyLaserPath=特征点+拟合，ExternalCorrugatedSheet=SDK全处理。
     enum class Mode
     {
-        LegacyLaserPath = 0,
-        ExternalCorrugatedSheet = 1
+        LegacyLaserPath = 0,         // ④特征点+拟合：相机目标轨迹点 → 滤波拟合
+        ExternalCorrugatedSheet = 1, // ①SDK点云算法全处理：完整点云 → DLL → 拐点直接用
+        SdkBaseWeldFit = 2,          // ②SDK点云算法+拟合：完整点云 → DLL 基础焊道 → 滤波拟合
+        CloudFit = 3                 // ③点云算法+拟合：完整点云 → 滤波拟合
     };
 
     enum class FeaturePointStrategy

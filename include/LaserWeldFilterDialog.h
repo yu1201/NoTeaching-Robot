@@ -8,6 +8,7 @@
 class QComboBox;
 class QDoubleSpinBox;
 class QCheckBox;
+class QGroupBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
@@ -24,20 +25,14 @@ private:
     void ApplyStyle();
     void LoadSettings();
     bool SaveSettings(QString* error = nullptr) const;
-    void BrowseInputFile();
-    void BrowseOutputFile();
     void BrowseExternalLibraryDir();
     void BrowseExternalConfigFile();
-    void UpdateSuggestedOutputPath();
     void LoadExternalAlgorithmConfig();
     void SaveExternalAlgorithmConfig(QString* error = nullptr) const;
-    void RunFilter();
+    void ApplyMethodEnableState();
     void AppendLog(const QString& text);
     PointCloudProcessingConfig::Mode CurrentProcessingMode() const;
     PointCloudProcessingConfig::FeaturePointStrategy CurrentFeaturePointStrategy() const;
-    QString CurrentProcessingModeText() const;
-    double CurrentOutputStep() const;
-    RobotCalculation::LowerWeldFilterParams CurrentParams() const;
 
 private:
     QComboBox* m_pProcessingModeCombo = nullptr;
@@ -65,8 +60,9 @@ private:
     QSpinBox* m_pCloudErodeValueSpin = nullptr;
     QDoubleSpinBox* m_pCloudLinesDisThresholdSpin = nullptr;
     QDoubleSpinBox* m_pCloudLineLengthSpin = nullptr;
-    QLineEdit* m_pInputPathEdit = nullptr;
-    QLineEdit* m_pOutputPathEdit = nullptr;
+    QGroupBox* m_pSdkParamGroup = nullptr;
+    QGroupBox* m_pSdkInnerGroup = nullptr;
+    QGroupBox* m_pCloudAlgoGroup = nullptr;
     QComboBox* m_pFeaturePointStrategyCombo = nullptr;
     QComboBox* m_pAxisCombo = nullptr;
     QComboBox* m_pFitModeCombo = nullptr;
@@ -104,6 +100,5 @@ private:
     QCheckBox* m_pValidationOutputCheck = nullptr;
     QSpinBox* m_pValidationMinOutputPointSpin = nullptr;
     QDoubleSpinBox* m_pValidationMinOutputLengthRatioSpin = nullptr;
-    QPushButton* m_pRunButton = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
 };

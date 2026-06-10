@@ -10382,7 +10382,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --laser-classify-dir <DIR>        批量处理目录下所有 PreciseLaserPoint.txt\n";
 		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
 		out << "  --rebuild-measure-weld-files <DIR> 从 LaserPoint 目录重建 PreservePath、焊接姿态和补偿文件，参数机器人同--robot\n";
-		out << "  --pointcloud-processing-mode <legacy|sdk> 仅本次CLI覆盖点云处理方式，不写入配置库\n";
+		out << "  --pointcloud-processing-mode <sdk|sdkfit|cloudfit|legacy> 仅本次CLI覆盖点云处理方式，不写入配置库\n";
 		out << "  --pointcloud-fallback-to-legacy <0|1> 仅本次CLI覆盖SDK失败时是否回退旧算法\n";
 		out << "  --pointcloud-scan-direction <X,Y,Z> 仅本次CLI覆盖点云SDK扫描方向，用于离线测试\n";
 		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用配置库中的焊道补偿\n";
@@ -10403,13 +10403,29 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	{
 		const QString normalizedMode = pointCloudModeOverride.toLower();
 		if (normalizedMode == "sdk"
+			|| normalizedMode == "sdkfull"
 			|| normalizedMode == "external"
 			|| normalizedMode == "externalcorrugatedsheet"
 			|| normalizedMode == "pointcloud")
 		{
 			PointCloudProcessingConfig::SetRuntimeModeOverride(
 				PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet);
-			LogCommandLineMessage("CLI 点云处理方式已临时覆盖为：点云算法。");
+			LogCommandLineMessage("CLI 点云处理方式已临时覆盖为：SDK点云算法全处理。");
+		}
+		else if (normalizedMode == "sdkfit"
+			|| normalizedMode == "sdkbaseweldfit"
+			|| normalizedMode == "sdkbaseweld")
+		{
+			PointCloudProcessingConfig::SetRuntimeModeOverride(
+				PointCloudProcessingConfig::Mode::SdkBaseWeldFit);
+			LogCommandLineMessage("CLI 点云处理方式已临时覆盖为：SDK点云算法+拟合。");
+		}
+		else if (normalizedMode == "cloudfit"
+			|| normalizedMode == "cloud")
+		{
+			PointCloudProcessingConfig::SetRuntimeModeOverride(
+				PointCloudProcessingConfig::Mode::CloudFit);
+			LogCommandLineMessage("CLI 点云处理方式已临时覆盖为：点云算法+拟合。");
 		}
 		else if (normalizedMode == "legacy"
 			|| normalizedMode == "old"
@@ -10419,11 +10435,11 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		{
 			PointCloudProcessingConfig::SetRuntimeModeOverride(
 				PointCloudProcessingConfig::Mode::LegacyLaserPath);
-			LogCommandLineMessage("CLI 点云处理方式已临时覆盖为：特征点算法。");
+			LogCommandLineMessage("CLI 点云处理方式已临时覆盖为：特征点+拟合。");
 		}
 		else
 		{
-			LogCommandLineMessage(QString("CLI 点云处理方式覆盖无效：%1，请使用 legacy 或 sdk。")
+			LogCommandLineMessage(QString("CLI 点云处理方式覆盖无效：%1，请使用 sdk/sdkfit/cloudfit/legacy。")
 				.arg(pointCloudModeOverride));
 		}
 	}
