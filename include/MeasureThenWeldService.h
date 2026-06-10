@@ -90,6 +90,11 @@ public:
         double rx = 0.0;       // 姿态补偿需要每点输出姿态做工具系旋转
         double ry = 0.0;
         double rz = 0.0;
+        double bx = 0.0;       // 基坐标/外部轴（焊缝后处理保真需原样保留）
+        double by = 0.0;
+        double bz = 0.0;
+        int weldIndex = 0;     // 原焊接点序（焊缝后处理保真用）
+        int rawIndex = 0;      // 原始 raw_index（拐点恢复按它匹配，必须保留以与下发一致）
         int typeCode = 5;      // 分类码 1=start 2=end 3=inner_corner 4=outer_corner 5=normal 6=noise（拐点补偿用）
         QString segmentKind;   // low_platform/rising_edge/high_platform/falling_edge（可能带 _transition/_arc）
         QString pointType;

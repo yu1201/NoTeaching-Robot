@@ -9365,6 +9365,11 @@ bool MeasureThenWeldService::LoadCompPreviewBaseline(
         point.rx = record.rx;
         point.ry = record.ry;
         point.rz = record.rz;
+        point.bx = record.bx;
+        point.by = record.by;
+        point.bz = record.bz;
+        point.weldIndex = record.weldIndex;
+        point.rawIndex = record.rawIndex;
         point.segmentKind = record.segmentKind;
         point.pointType = record.pointType;
         baseline.push_back(point);
@@ -9498,9 +9503,15 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
         for (int index = 0; index < baseline.size(); ++index)
         {
             WeldPoseFileRecord record;
-            record.weldIndex = index + 1;
-            record.rawIndex = index;
+            record.weldIndex = baseline[index].weldIndex;
+            record.rawIndex = baseline[index].rawIndex;
             record.point = Eigen::Vector3d(baseline[index].x, baseline[index].y, baseline[index].z);
+            record.rx = baseline[index].rx;
+            record.ry = baseline[index].ry;
+            record.rz = baseline[index].rz;
+            record.bx = baseline[index].bx;
+            record.by = baseline[index].by;
+            record.bz = baseline[index].bz;
             record.segmentKind = baseline[index].segmentKind;
             record.pointType = baseline[index].pointType;
             records.push_back(record);
