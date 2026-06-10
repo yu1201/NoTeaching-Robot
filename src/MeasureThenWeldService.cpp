@@ -686,118 +686,100 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
     {
         // ①SDK全处理：SDK 拐点(+2mm扩充)直接转结果，不经拟合、不生成基础焊道文件；
         // ②SDK+拟合：SDK 输出基础焊道（稠密），再喂滤波拟合提取特征点。
+        // 失败直接报错，不回退其他方法。
         const bool useBaseWeldFit = settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
         if (fullCloudInput.size() < 2)
         {
+            RobotCalculation::MeasureThenWeldAnalysisResult failed;
+            failed.error = QString("SDK点云算法输入点过少（%1），无法调用外部库。")
+                .arg(fullCloudInput.size());
             if (appendLog)
             {
-                appendLog(QString("SDK点云算法输入点过少（%1），无法调用外部库。")
-                    .arg(fullCloudInput.size()));
+                appendLog(failed.error);
             }
+            return failed;
         }
-        else
-        {
-            const PointCloudExtractionProcessor::ExtractionResult extraction =
-                PointCloudExtractionProcessor::ExtractCorrugatedSheet(
-                    fullCloudInput,
-                    settings,
-                    BuildScanDirection(param),
-                    useBaseWeldFit ? sdkBaseWeldOutputPath : QString());
-            if (extraction.ok)
-            {
-                RobotCalculation::MeasureThenWeldAnalysisResult analysis = useBaseWeldFit
-                    ? RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
-                        ToIndexedInput(extraction.points), fitParams)
-                    : PointCloudExtractionProcessor::BuildAnalysisResult(extraction, fitParams);
-                if (analysis.ok)
-                {
-                    if (usedExternalLibrary != nullptr)
-                    {
-                        *usedExternalLibrary = true;
-                    }
-                    if (externalExtraction != nullptr)
-                    {
-                        *externalExtraction = extraction;
-                    }
-                    if (appendLog)
-                    {
-                        appendLog(QString("SDK点云算法处理完成（%1）：输入局部完整点云=%2，SDK输出点=%3，DLL=%4，配置=%5，Z截断=%6 mm。")
-                            .arg(useBaseWeldFit ? "基础焊道+拟合" : "拐点直接使用")
-                            .arg(extraction.inputPointCount)
-                            .arg(extraction.points.size())
-                            .arg(extraction.dllPath)
-                            .arg(extraction.configPath)
-                            .arg(settings.zTruncationValue, 0, 'f', 3));
-                        if (extraction.usedBaseWeldFile)
-                        {
-                            appendLog(QString("SDK基础焊道来自库输出文件：%1").arg(extraction.baseWeldPath));
-                        }
-                    }
-                    return analysis;
-                }
-
-                if (appendLog)
-                {
-                    appendLog(QString("SDK点云算法结果%1失败：%2")
-                        .arg(useBaseWeldFit ? "拟合" : "转换")
-                        .arg(analysis.error));
-                }
-            }
-            else if (appendLog)
-            {
-                appendLog(QString("SDK点云算法处理失败：%1").arg(extraction.error));
-            }
-        }
-
-        if (!settings.fallbackToLegacy)
+        const PointCloudExtractionProcessor::ExtractionResult extraction =
+            PointCloudExtractionProcessor::ExtractCorrugatedSheet(
+                fullCloudInput,
+                settings,
+                BuildScanDirection(param),
+                useBaseWeldFit ? sdkBaseWeldOutputPath : QString());
+        if (!extraction.ok)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
-            failed.error = "SDK点云算法处理失败，且配置为不回退特征点处理。";
+            failed.error = QString("SDK点云算法处理失败：%1").arg(extraction.error);
+            if (appendLog)
+            {
+                appendLog(failed.error);
+            }
             return failed;
+        }
+        RobotCalculation::MeasureThenWeldAnalysisResult analysis = useBaseWeldFit
+            ? RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+                ToIndexedInput(extraction.points), fitParams)
+            : PointCloudExtractionProcessor::BuildAnalysisResult(extraction, fitParams);
+        if (!analysis.ok)
+        {
+            if (appendLog)
+            {
+                appendLog(QString("SDK点云算法结果%1失败：%2")
+                    .arg(useBaseWeldFit ? "拟合" : "转换")
+                    .arg(analysis.error));
+            }
+            return analysis;
+        }
+        if (usedExternalLibrary != nullptr)
+        {
+            *usedExternalLibrary = true;
+        }
+        if (externalExtraction != nullptr)
+        {
+            *externalExtraction = extraction;
         }
         if (appendLog)
         {
-            appendLog("已按配置回退到特征点+拟合处理。");
+            appendLog(QString("SDK点云算法处理完成（%1）：输入局部完整点云=%2，SDK输出点=%3，DLL=%4，配置=%5，Z截断=%6 mm。")
+                .arg(useBaseWeldFit ? "基础焊道+拟合" : "拐点直接使用")
+                .arg(extraction.inputPointCount)
+                .arg(extraction.points.size())
+                .arg(extraction.dllPath)
+                .arg(extraction.configPath)
+                .arg(settings.zTruncationValue, 0, 'f', 3));
+            if (extraction.usedBaseWeldFile)
+            {
+                appendLog(QString("SDK基础焊道来自库输出文件：%1").arg(extraction.baseWeldPath));
+            }
         }
+        return analysis;
     }
-    else if (settings.mode == PointCloudProcessingConfig::Mode::CloudFit)
+    if (settings.mode == PointCloudProcessingConfig::Mode::CloudFit)
     {
-        // ③点云+拟合：局部完整点云直接喂滤波拟合（不调 SDK）。
-        if (fullCloudInput.size() >= 2)
-        {
-            if (appendLog)
-            {
-                appendLog(QString("点云算法+拟合输入完整点云点数：%1。").arg(fullCloudInput.size()));
-            }
-            RobotCalculation::MeasureThenWeldAnalysisResult analysis =
-                RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(fullCloudInput, fitParams);
-            if (analysis.ok)
-            {
-                return analysis;
-            }
-            if (appendLog)
-            {
-                appendLog(QString("点云算法+拟合处理失败：%1").arg(analysis.error));
-            }
-        }
-        else if (appendLog)
-        {
-            appendLog(QString("点云算法+拟合输入点过少（%1）。").arg(fullCloudInput.size()));
-        }
-
-        if (!settings.fallbackToLegacy)
+        // ③点云+拟合：局部完整点云直接喂滤波拟合（不调 SDK）。失败直接报错，不回退。
+        if (fullCloudInput.size() < 2)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
-            failed.error = "点云算法+拟合处理失败，且配置为不回退特征点处理。";
+            failed.error = QString("点云算法+拟合输入点过少（%1）。").arg(fullCloudInput.size());
+            if (appendLog)
+            {
+                appendLog(failed.error);
+            }
             return failed;
         }
         if (appendLog)
         {
-            appendLog("已按配置回退到特征点+拟合处理。");
+            appendLog(QString("点云算法+拟合输入完整点云点数：%1。").arg(fullCloudInput.size()));
         }
+        RobotCalculation::MeasureThenWeldAnalysisResult analysis =
+            RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(fullCloudInput, fitParams);
+        if (!analysis.ok && appendLog)
+        {
+            appendLog(QString("点云算法+拟合处理失败：%1").arg(analysis.error));
+        }
+        return analysis;
     }
 
-    // ④特征点+拟合：相机目标轨迹点 → 滤波拟合（默认方法，也是各点云方法的回退终点）。
+    // ④特征点+拟合：相机目标轨迹点 → 滤波拟合。
     if (appendLog)
     {
         appendLog(QString("特征点+拟合输入轨迹点数：%1。")
@@ -8048,7 +8030,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         && !RobotDataHelper::LoadIndexedPoint3DFile(workpieceCloudPath, workpieceCloudInput, &workpieceLoadError)
         && appendLog)
     {
-        appendLog(QString("读取局部完整点云失败，将视配置回退旧版目标点处理：%1").arg(workpieceLoadError));
+        appendLog(QString("读取局部完整点云失败：%1（点云链方法将因输入不足报错）").arg(workpieceLoadError));
     }
 
     const RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);

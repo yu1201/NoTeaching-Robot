@@ -10356,7 +10356,6 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		"--laser-classify-dir",
 		"--rebuild-measure-weld-files",
 		"--pointcloud-processing-mode",
-		"--pointcloud-fallback-to-legacy",
 		"--pointcloud-scan-direction",
 		"--apply-weld-seam-comp",
 		"--generate-step-weld-program",
@@ -10396,7 +10395,6 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
 		out << "  --rebuild-measure-weld-files <DIR> 从 LaserPoint 目录重建 PreservePath、焊接姿态和补偿文件，参数机器人同--robot\n";
 		out << "  --pointcloud-processing-mode <sdk|sdkfit|cloudfit|legacy> 仅本次CLI覆盖点云处理方式，不写入配置库\n";
-		out << "  --pointcloud-fallback-to-legacy <0|1> 仅本次CLI覆盖SDK失败时是否回退旧算法\n";
 		out << "  --pointcloud-scan-direction <X,Y,Z> 仅本次CLI覆盖点云SDK扫描方向，用于离线测试\n";
 		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用配置库中的焊道补偿\n";
 		out << "  --apply-weld-seam-comp-output <FILE> 指定补偿结果输出文件，默认另存 _SeamComp\n";
@@ -10454,33 +10452,6 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		{
 			LogCommandLineMessage(QString("CLI 点云处理方式覆盖无效：%1，请使用 sdk/sdkfit/cloudfit/legacy。")
 				.arg(pointCloudModeOverride));
-		}
-	}
-
-	const QString pointCloudFallbackOverride = CliOptionValue(arguments, "--pointcloud-fallback-to-legacy").trimmed();
-	if (!pointCloudFallbackOverride.isEmpty())
-	{
-		const QString normalizedFallback = pointCloudFallbackOverride.toLower();
-		if (normalizedFallback == "1"
-			|| normalizedFallback == "true"
-			|| normalizedFallback == "yes"
-			|| normalizedFallback == "on")
-		{
-			PointCloudProcessingConfig::SetRuntimeFallbackToLegacyOverride(true);
-			LogCommandLineMessage("CLI SDK失败回退旧算法已临时覆盖为：开启。");
-		}
-		else if (normalizedFallback == "0"
-			|| normalizedFallback == "false"
-			|| normalizedFallback == "no"
-			|| normalizedFallback == "off")
-		{
-			PointCloudProcessingConfig::SetRuntimeFallbackToLegacyOverride(false);
-			LogCommandLineMessage("CLI SDK失败回退旧算法已临时覆盖为：关闭。");
-		}
-		else
-		{
-			LogCommandLineMessage(QString("CLI SDK失败回退覆盖无效：%1，请使用 0 或 1。")
-				.arg(pointCloudFallbackOverride));
 		}
 	}
 
