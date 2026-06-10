@@ -62,6 +62,8 @@ public:
     static int MeasureWeldCurrentGroupIndex(const QString& robotName, QString* error = nullptr);
     static QString MeasureWeldCurrentScanSectionName(const QString& robotName, QString* error = nullptr);
     static QString MeasureWeldCurrentWeldSectionName(const QString& robotName, QString* error = nullptr);
+    // 测量焊接参数页当前启用组的实际焊道点间距；工艺里还没存过该字段时作预填/回退值（默认 4mm）。
+    static double ReadActiveFinalWeldStepFallbackMm(const QString& robotName);
 
     // ===== 激光点文件 =====
     static bool LoadIndexedPoint3DFile(const QString& filePath, QVector<RobotCalculation::IndexedPoint3D>& points, QString* error = nullptr);

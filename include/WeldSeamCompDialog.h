@@ -73,6 +73,7 @@ public:
 
 private:
     void closeEvent(QCloseEvent* event) override;
+    void showEvent(QShowEvent* event) override;
     void BuildUi();
     void LoadRobotList();
     void LoadCurrentParam();
@@ -119,7 +120,6 @@ private:
     void LoadWeldProcessArea();
     void ApplySelectedProcessToEditors();
     bool SaveWeldProcessArea(QString& error);
-    double ReadMeasurePageFinalStepMm() const;
     void ChooseCompPreviewDirectory();
     void SetCompPreviewDirectory(const QString& dir);
     void AutoSelectLatestCompPreviewDirectory();
