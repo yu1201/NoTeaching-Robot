@@ -520,6 +520,8 @@ void LaserWeldFilterDialog::BuildUi()
     m_pExternalResampleStepSpin->setRange(0.1, 100.0);
     m_pExternalResampleStepSpin->setDecimals(3);
     m_pExternalResampleStepSpin->setSingleStep(0.5);
+    m_pSdkWeldedStartCheck = new QCheckBox("使用已焊起点截断焊道");
+    m_pSdkWeldedStartCheck->setToolTip("开启后，SDK 检测到工件上已焊段时返回新焊接的起点，\n焊道从该点截断只焊剩余部分；未检测到已焊段时不截断。\n仅 SDK 两种方法生效。");
     QPushButton* browseLibraryButton = new QPushButton("选择库目录");
     QPushButton* browseExternalConfigButton = new QPushButton("选择配置");
     processingLayout->setHorizontalSpacing(12);
@@ -528,12 +530,13 @@ void LaserWeldFilterDialog::BuildUi()
     processingLayout->addWidget(CreateUnitEditor(m_pExternalZTruncationSpin, "mm"), 0, 1);
     processingLayout->addWidget(new QLabel("输出步长"), 0, 2);
     processingLayout->addWidget(CreateUnitEditor(m_pExternalResampleStepSpin, "mm"), 0, 3);
-    processingLayout->addWidget(new QLabel("库目录"), 1, 0);
-    processingLayout->addWidget(m_pExternalLibraryDirEdit, 1, 1, 1, 3);
-    processingLayout->addWidget(browseLibraryButton, 1, 4);
-    processingLayout->addWidget(new QLabel("配置文件"), 2, 0);
-    processingLayout->addWidget(m_pExternalConfigPathEdit, 2, 1, 1, 3);
-    processingLayout->addWidget(browseExternalConfigButton, 2, 4);
+    processingLayout->addWidget(m_pSdkWeldedStartCheck, 1, 0, 1, 4);
+    processingLayout->addWidget(new QLabel("库目录"), 2, 0);
+    processingLayout->addWidget(m_pExternalLibraryDirEdit, 2, 1, 1, 3);
+    processingLayout->addWidget(browseLibraryButton, 2, 4);
+    processingLayout->addWidget(new QLabel("配置文件"), 3, 0);
+    processingLayout->addWidget(m_pExternalConfigPathEdit, 3, 1, 1, 3);
+    processingLayout->addWidget(browseExternalConfigButton, 3, 4);
     processingLayout->setColumnStretch(1, 1);
     processingLayout->setColumnStretch(3, 1);
     processingLayout->setColumnMinimumWidth(1, 320);
@@ -1102,6 +1105,11 @@ void LaserWeldFilterDialog::LoadSettings()
     SetPathEditText(m_pExternalConfigPathEdit, QDir::toNativeSeparators(processingSettings.configPath));
     m_pExternalZTruncationSpin->setValue(processingSettings.zTruncationValue);
     m_pExternalResampleStepSpin->setValue(processingSettings.resampleStepMm);
+    if (m_pSdkWeldedStartCheck != nullptr)
+    {
+        const QSignalBlocker blocker(m_pSdkWeldedStartCheck);
+        m_pSdkWeldedStartCheck->setChecked(processingSettings.sdkUseWeldedStartTruncation);
+    }
     if (m_pSlopeConsistentCornerFitCheck != nullptr)
     {
         const QSignalBlocker blocker(m_pSlopeConsistentCornerFitCheck);
@@ -1170,6 +1178,8 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.configPath = m_pExternalConfigPathEdit->text().trimmed();
     processingSettings.zTruncationValue = m_pExternalZTruncationSpin->value();
     processingSettings.resampleStepMm = m_pExternalResampleStepSpin->value();
+    processingSettings.sdkUseWeldedStartTruncation =
+        m_pSdkWeldedStartCheck != nullptr && m_pSdkWeldedStartCheck->isChecked();
     {
         const QVariant axisData = m_pAxisCombo->currentData();
         processingSettings.sampleAxisMode = axisData.isValid()

@@ -658,6 +658,50 @@ QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
     const QVector<PointCloudExtractionProcessor::TrackPoint>& points);
 std::vector<QString> BuildRawLaserOutputLines(const QVector<RobotCalculation::LowerWeldFilterPoint>& points);
 
+// SDK 已焊起点截断：保留轨迹上距已焊起点最近的点及其后段（点列顺序与焊接方向一致），
+// 截掉已焊部分；截断后首点重置为起点类型，保证下游起终点校验与分类语义成立。
+QVector<PointCloudExtractionProcessor::TrackPoint> TruncateTrackAtWeldedStart(
+    const QVector<PointCloudExtractionProcessor::TrackPoint>& points,
+    const Eigen::Vector3d& weldedStart,
+    int* removedCount)
+{
+    if (removedCount != nullptr)
+    {
+        *removedCount = 0;
+    }
+    if (points.size() < 2)
+    {
+        return points;
+    }
+    int nearestIndex = 0;
+    double bestDistance = std::numeric_limits<double>::max();
+    for (int index = 0; index < points.size(); ++index)
+    {
+        const double distance = (points[index].point - weldedStart).norm();
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            nearestIndex = index;
+        }
+    }
+    if (nearestIndex <= 0)
+    {
+        return points;
+    }
+    // 截断后至少保留两个点，否则视为截断无效，保留原轨迹。
+    if (points.size() - nearestIndex < 2)
+    {
+        return points;
+    }
+    QVector<PointCloudExtractionProcessor::TrackPoint> truncated = points.mid(nearestIndex);
+    truncated.first().type = PointCloudExtractionProcessor::TrackPointType::Start;
+    if (removedCount != nullptr)
+    {
+        *removedCount = nearestIndex;
+    }
+    return truncated;
+}
+
 bool WriteTextLinesToFile(const QString& path, const std::vector<QString>& lines, QString* error)
 {
     QFile file(path);
@@ -743,10 +787,41 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             }
             return failed;
         }
+        // 已焊起点截断（开关控制）：SDK 检测到已焊段时，截掉焊道已焊部分只焊剩余段。
+        PointCloudExtractionProcessor::ExtractionResult workingExtraction = extraction;
+        if (settings.sdkUseWeldedStartTruncation)
+        {
+            if (extraction.hasWeldedStartPoint)
+            {
+                int removedCount = 0;
+                workingExtraction.points =
+                    TruncateTrackAtWeldedStart(extraction.points, extraction.weldedStartPoint, &removedCount);
+                if (appendLog)
+                {
+                    if (removedCount > 0)
+                    {
+                        appendLog(QString("已焊起点截断：起点(%1, %2, %3)，截除 %4 点，保留 %5 点。")
+                            .arg(extraction.weldedStartPoint.x(), 0, 'f', 2)
+                            .arg(extraction.weldedStartPoint.y(), 0, 'f', 2)
+                            .arg(extraction.weldedStartPoint.z(), 0, 'f', 2)
+                            .arg(removedCount)
+                            .arg(workingExtraction.points.size()));
+                    }
+                    else
+                    {
+                        appendLog("已焊起点截断：起点位于焊道开头或截断后点数不足，焊道未截断。");
+                    }
+                }
+            }
+            else if (appendLog)
+            {
+                appendLog("已焊起点截断：SDK 未检测到已焊段，焊道不截断。");
+            }
+        }
         RobotCalculation::MeasureThenWeldAnalysisResult analysis = useBaseWeldFit
             ? RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
-                ToIndexedInput(extraction.points), fitParams)
-            : PointCloudExtractionProcessor::BuildAnalysisResult(extraction, fitParams);
+                ToIndexedInput(workingExtraction.points), fitParams)
+            : PointCloudExtractionProcessor::BuildAnalysisResult(workingExtraction, fitParams);
         if (!analysis.ok)
         {
             if (appendLog)

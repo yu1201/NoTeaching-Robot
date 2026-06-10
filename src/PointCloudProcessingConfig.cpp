@@ -105,6 +105,7 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.configPath = ReadSetting("External/ConfigPath", DefaultConfigPath()).trimmed();
     settings.zTruncationValue = ReadSetting("External/ZTruncationValue", "6.0").toDouble();
     settings.resampleStepMm = ReadSetting("External/ResampleStepMm", "2.0").toDouble();
+    settings.sdkUseWeldedStartTruncation = ReadBoolSetting("External/UseWeldedStartTruncation", false);
     settings.sampleAxisMode = SampleAxisModeFromConfigValue(
         ReadSetting("Fit/SampleAxis", SampleAxisModeConfigValue(settings.sampleAxisMode)));
     settings.cloudZThresholdMm = ReadDoubleSetting("CloudAlgo/ZThresholdMm", settings.cloudZThresholdMm);
@@ -259,6 +260,7 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("External/ConfigPath", QDir::toNativeSeparators(settings.configPath))
         && write("External/ZTruncationValue", QString::number(settings.zTruncationValue, 'f', 6))
         && write("External/ResampleStepMm", QString::number(settings.resampleStepMm, 'f', 6))
+        && write("External/UseWeldedStartTruncation", settings.sdkUseWeldedStartTruncation ? "1" : "0")
         && write("FeaturePoint/SlopeConsistentCornerFit", settings.slopeConsistentCornerFit ? "1" : "0")
         && write("FeaturePoint/ExportFitDebugCloud", settings.exportFitDebugCloud ? "1" : "0")
         && write("Fit/SampleAxis", SampleAxisModeConfigValue(settings.sampleAxisMode))
