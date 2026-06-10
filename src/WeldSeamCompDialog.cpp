@@ -16,6 +16,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QPainter>
+#include <QShowEvent>
 #include <QSplitter>
 #include <QStringConverter>
 #include <QTextStream>
@@ -312,6 +313,17 @@ void WeldSeamCompDialog::closeEvent(QCloseEvent* event)
     else
     {
         event->ignore();
+    }
+}
+
+void WeldSeamCompDialog::showEvent(QShowEvent* event)
+{
+    QDialog::showEvent(event);
+    // 工艺数据也可在工艺参数页修改；页面缓存复用，每次显示时重载工艺区域保持两边一致
+    //（只刷新工艺区域，不影响补偿参数主体的未保存编辑）。
+    if (m_pProcessCombo != nullptr)
+    {
+        LoadWeldProcessArea();
     }
 }
 
@@ -2208,7 +2220,7 @@ QWidget* WeldSeamCompDialog::CreateWeldProcessPanel()
 
     layout->addWidget(new QLabel("实际焊道点间距(mm)："), 2, 0, 1, 2);
     m_pFinalStepSpin = new QDoubleSpinBox();
-    m_pFinalStepSpin->setRange(0.5, 100.0);
+    m_pFinalStepSpin->setRange(2.0, 100.0);
     m_pFinalStepSpin->setDecimals(1);
     m_pFinalStepSpin->setSingleStep(0.5);
     m_pFinalStepSpin->setValue(4.0);
@@ -2355,7 +2367,7 @@ void WeldSeamCompDialog::ApplySelectedProcessToEditors()
             // 点间距属于工艺；老工艺还没存过值(<=0)时预填当前实际生效的值（测量页），保存即固化进工艺。
             m_pFinalStepSpin->setValue(item.dFinalWeldTrajectoryStepMm > 0.0
                 ? item.dFinalWeldTrajectoryStepMm
-                : ReadMeasurePageFinalStepMm());
+                : RobotDataHelper::ReadActiveFinalWeldStepFallbackMm(CurrentRobotName()));
         }
     }
     else
@@ -2374,30 +2386,6 @@ void WeldSeamCompDialog::ApplySelectedProcessToEditors()
             m_pFinalStepSpin->setValue(4.0);
         }
     }
-}
-
-double WeldSeamCompDialog::ReadMeasurePageFinalStepMm() const
-{
-    // 老工艺的回退预填值 = 测量焊接参数页当前启用组的点间距（与未迁移前的实际生效值一致）。
-    const QString robot = CurrentRobotName();
-    if (robot.isEmpty())
-    {
-        return 4.0;
-    }
-    COPini ini;
-    const QByteArray path = RobotDataHelper::MeasureWeldParamPath(robot).toUtf8();
-    if (!ini.SetFileName(std::string(path.constData(), static_cast<size_t>(path.size()))))
-    {
-        return 4.0;
-    }
-    int groupIndex = 0;
-    ini.SetSectionName("MeasureWeldGroups");
-    ini.ReadString(false, "UseGroupNo", &groupIndex);
-    const QByteArray section = RobotDataHelper::MeasureWeldWeldSectionName(std::max(0, groupIndex)).toUtf8();
-    ini.SetSectionName(std::string(section.constData(), static_cast<size_t>(section.size())));
-    double stepMm = 0.0;
-    ini.ReadString(false, "FinalWeldTrajectoryStepMm", &stepMm);
-    return (std::isfinite(stepMm) && stepMm > 0.0) ? std::clamp(stepMm, 0.5, 100.0) : 4.0;
 }
 
 bool WeldSeamCompDialog::SaveWeldProcessArea(QString& error)
