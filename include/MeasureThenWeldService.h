@@ -150,6 +150,8 @@ public:
     bool LoadCompPreviewBaseline(CompPreviewKind kind, const QString& laserDir, QVector<CompPreviewPoint>& baseline, QString& error) const;
     // 按当前编辑的补偿值，对基准焊道实时重算补偿后焊道（零复刻，复用管线真实补偿数学）。
     CompPreviewResult RecomputeCompPreview(CompPreviewKind kind, const QString& robotName, const QVector<CompPreviewPoint>& baseline, const CompPreviewEditValues& edits) const;
+    // 读取原始焊道（分类后几何 _Classified.txt）作为对照图层。
+    bool LoadCompPreviewOriginalTrack(const QString& laserDir, QVector<CompPreviewPoint>& points, QString& error) const;
 
 private:
     static double SafeSpeed(double value, double fallback);

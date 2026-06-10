@@ -302,12 +302,12 @@ void WeldSeamCompDialog::BuildUi()
     editorContentLayout->setSpacing(8);
     editorContentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
 
-    QHBoxLayout* contentLayout = new QHBoxLayout();
+    QVBoxLayout* contentLayout = new QVBoxLayout();
     contentLayout->setSpacing(10);
 
     QWidget* groupPanel = new QWidget();
-    groupPanel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Maximum);
-    groupPanel->setMaximumHeight(360);
+    groupPanel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    groupPanel->setMaximumHeight(210);
     QVBoxLayout* groupPanelLayout = new QVBoxLayout(groupPanel);
     groupPanelLayout->setContentsMargins(0, 0, 0, 0);
     groupPanelLayout->setSpacing(6);
@@ -316,7 +316,7 @@ void WeldSeamCompDialog::BuildUi()
     groupPanelLayout->addWidget(groupPanelTitle);
     m_pGroupList = new QListWidget();
     m_pGroupList->setMinimumWidth(170);
-    m_pGroupList->setMinimumHeight(190);
+    m_pGroupList->setMinimumHeight(120);
     m_pGroupList->setStyleSheet(
         "QListWidget { background: #0B1117; color: #F5FAFA; border: 1px solid #385366; border-radius: 8px; padding: 4px; }"
         "QListWidget::item { padding: 6px 6px; border-radius: 5px; }"
@@ -337,7 +337,7 @@ void WeldSeamCompDialog::BuildUi()
     groupActionLayout->addWidget(m_pRenameGroupBtn);
     groupActionLayout->addWidget(m_pDeleteGroupBtn);
     groupPanelLayout->addLayout(groupActionLayout);
-    contentLayout->addWidget(groupPanel, 0, Qt::AlignTop);
+    contentLayout->addWidget(groupPanel, 0);
 
     QGroupBox* editorGroup = new QGroupBox("补偿编辑");
     editorGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
@@ -420,7 +420,7 @@ void WeldSeamCompDialog::BuildUi()
         cornerCompLayout->addWidget(m_pCornerCompensationValues[index], index / 2, (index % 2) * 2 + 1);
     }
     editorLayout->addWidget(m_pCornerCompensationWidget, 8, 0, 1, 6);
-    contentLayout->addWidget(editorGroup, 1, Qt::AlignTop);
+    contentLayout->addWidget(editorGroup, 1);
     editorContentLayout->addLayout(contentLayout);
 
     m_pPathLabel = new QLabel();
@@ -1971,11 +1971,26 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     toolbar->addWidget(resetBtn);
     layout->addLayout(toolbar);
 
+    QHBoxLayout* layerToggleLayout = new QHBoxLayout();
+    layerToggleLayout->setSpacing(14);
+    m_pShowOriginalCheck = new QCheckBox("原始焊道");
+    m_pShowBeforeCheck = new QCheckBox("补偿前");
+    m_pShowAfterCheck = new QCheckBox("补偿后");
+    m_pShowOriginalCheck->setChecked(false);
+    m_pShowBeforeCheck->setChecked(true);
+    m_pShowAfterCheck->setChecked(true);
+    layerToggleLayout->addWidget(new QLabel("显示："));
+    layerToggleLayout->addWidget(m_pShowOriginalCheck);
+    layerToggleLayout->addWidget(m_pShowBeforeCheck);
+    layerToggleLayout->addWidget(m_pShowAfterCheck);
+    layerToggleLayout->addStretch(1);
+    layout->addLayout(layerToggleLayout);
+
     m_pCompPreviewView = new pcview::PointCloud3DView();
     m_pCompPreviewView->setMinimumSize(420, 360);
     layout->addWidget(m_pCompPreviewView, 1);
 
-    m_pCompPreviewInfoLabel = new QLabel("蓝=补偿前  橙=补偿后；选择目录后，调整补偿值即可实时对比补偿效果。");
+    m_pCompPreviewInfoLabel = new QLabel("灰=原始焊道  蓝=补偿前  橙=补偿后；可勾选显示哪些图层，调整补偿值即可实时对比。");
     m_pCompPreviewInfoLabel->setWordWrap(true);
     m_pCompPreviewInfoLabel->setStyleSheet("color:#BFE8EC;");
     layout->addWidget(m_pCompPreviewInfoLabel);
@@ -1985,6 +2000,10 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     connect(frontBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetFrontView(); });
     connect(camBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetCameraLikeView(); });
     connect(resetBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->ResetView(); });
+    for (QCheckBox* check : { m_pShowOriginalCheck, m_pShowBeforeCheck, m_pShowAfterCheck })
+    {
+        connect(check, &QCheckBox::toggled, this, [this](bool) { ApplyCompPreviewLayerVisibility(); });
+    }
 
     return panel;
 }
@@ -2007,6 +2026,13 @@ void WeldSeamCompDialog::ChooseCompPreviewDirectory()
         m_pCompPreviewDirEdit->setText(m_compPreviewDir);
     }
     m_compPreviewBaseline.clear();
+    m_compPreviewOriginal.clear();
+    QString originalError;
+    if (!m_compPreviewService.LoadCompPreviewOriginalTrack(m_compPreviewDir, m_compPreviewOriginal, originalError))
+    {
+        m_compPreviewOriginal.clear();
+        AppendLog("原始焊道：" + originalError);
+    }
     AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
     RecomputeCompPreview();
 }
@@ -2025,6 +2051,18 @@ void WeldSeamCompDialog::ScheduleCompPreview()
     {
         RecomputeCompPreview();
     }
+}
+
+void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
+{
+    if (m_pCompPreviewView == nullptr)
+    {
+        return;
+    }
+    // 图层顺序：0=原始焊道 1=补偿前 2=补偿后。
+    m_pCompPreviewView->SetLayerVisible(0, m_pShowOriginalCheck != nullptr && m_pShowOriginalCheck->isChecked());
+    m_pCompPreviewView->SetLayerVisible(1, m_pShowBeforeCheck == nullptr || m_pShowBeforeCheck->isChecked());
+    m_pCompPreviewView->SetLayerVisible(2, m_pShowAfterCheck == nullptr || m_pShowAfterCheck->isChecked());
 }
 
 int WeldSeamCompDialog::CurrentRobotType() const
@@ -2186,11 +2224,25 @@ void WeldSeamCompDialog::RecomputeCompPreview()
         return out;
     };
 
+    const bool showOriginal = m_pShowOriginalCheck != nullptr && m_pShowOriginalCheck->isChecked();
+    const bool showBefore = m_pShowBeforeCheck == nullptr || m_pShowBeforeCheck->isChecked();
+    const bool showAfter = m_pShowAfterCheck == nullptr || m_pShowAfterCheck->isChecked();
+
+    // 固定图层顺序：0=原始焊道 1=补偿前 2=补偿后（与 ApplyCompPreviewLayerVisibility 对应）。
     QVector<pcview::PointCloud3DView::Layer> layers;
+    pcview::PointCloud3DView::Layer originalLayer;
+    originalLayer.name = "原始焊道";
+    originalLayer.color = QColor(150, 160, 170);
+    originalLayer.connectLines = true;
+    originalLayer.visible = showOriginal;
+    originalLayer.points = toLayerPoints(m_compPreviewOriginal);
+    layers.push_back(originalLayer);
+
     pcview::PointCloud3DView::Layer beforeLayer;
     beforeLayer.name = "补偿前";
     beforeLayer.color = QColor(120, 175, 215);
     beforeLayer.connectLines = true;
+    beforeLayer.visible = showBefore;
     beforeLayer.points = toLayerPoints(result.before);
     layers.push_back(beforeLayer);
 
@@ -2198,6 +2250,7 @@ void WeldSeamCompDialog::RecomputeCompPreview()
     afterLayer.name = "补偿后";
     afterLayer.color = QColor(255, 150, 40);
     afterLayer.connectLines = true;
+    afterLayer.visible = showAfter;
     afterLayer.points = toLayerPoints(result.after);
     layers.push_back(afterLayer);
 

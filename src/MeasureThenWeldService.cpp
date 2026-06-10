@@ -9377,6 +9377,65 @@ bool MeasureThenWeldService::LoadCompPreviewBaseline(
     return true;
 }
 
+bool MeasureThenWeldService::LoadCompPreviewOriginalTrack(
+    const QString& laserDir,
+    QVector<CompPreviewPoint>& points,
+    QString& error) const
+{
+    points.clear();
+    QDir dir(laserDir);
+    if (!dir.exists())
+    {
+        error = QString("目录不存在：%1").arg(laserDir);
+        return false;
+    }
+    const QString path = dir.filePath(CLASSIFIED_FILE_NAME);
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        error = QString("打开原始焊道文件失败：%1").arg(path);
+        return false;
+    }
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    while (!stream.atEnd())
+    {
+        const QString lineText = stream.readLine().trimmed();
+        if (lineText.isEmpty() || lineText.startsWith('#'))
+        {
+            continue;
+        }
+        const QStringList parts = lineText.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (parts.size() < 4)
+        {
+            continue;
+        }
+        bool xOk = false, yOk = false, zOk = false;
+        const double x = parts[1].toDouble(&xOk);
+        const double y = parts[2].toDouble(&yOk);
+        const double z = parts[3].toDouble(&zOk);
+        if (!xOk || !yOk || !zOk)
+        {
+            continue;
+        }
+        CompPreviewPoint point;
+        point.x = x;
+        point.y = y;
+        point.z = z;
+        if (parts.size() > 4)
+        {
+            point.typeCode = parts[4].toInt();
+        }
+        points.push_back(point);
+    }
+    if (points.isEmpty())
+    {
+        error = QString("未从 %1 解析到原始焊道点。").arg(CLASSIFIED_FILE_NAME);
+        return false;
+    }
+    return true;
+}
+
 MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompPreview(
     CompPreviewKind kind,
     const QString& robotName,
