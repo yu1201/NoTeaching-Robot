@@ -1,6 +1,6 @@
 # CLI 命令说明书
 
-更新时间：2026-05-30
+更新时间：2026-06-10
 
 适用程序：`QtWidgetsApplication4.exe` / `NoTeaching-Robot`
 
@@ -228,12 +228,14 @@ QtWidgetsApplication4.exe --no-show --apply-weld-seam-comp "D:\pose.txt" --apply
 | 命令 | 参数 | 说明 |
 | --- | --- | --- |
 | `--rebuild-measure-weld-files` | `<DIR>` | 从已有 `LaserPoint` 目录重建 `PreciseLaserPoint_PreservePath_2mm.txt`、`PreciseLaserPoint_WeldPose_2mm.txt` 和补偿文件。 |
+| `--pointcloud-processing-mode` | `sdk` / `sdkfit` / `cloudfit` / `legacy` | 本次运行临时覆盖精测点云处理方法（依次对应 SDK点云算法全处理 / SDK点云算法+拟合 / 点云算法+拟合 / 特征点+拟合），不写入配置。 |
 
 说明：
 
 - 目录通常是一次结果下的 `LaserPoint` 文件夹。
 - 机器人和参数读取仍按 `--robot` / 当前机器人选择。
 - 适合跳过重新扫描，只对已有点云重新生成姿态和补偿结果。
+- 滤波拟合数值参数（Z阈值/段间跳变/步长等）与采样主轴读取精测点云处理界面保存的配置，与现场实际运行一致。
 
 示例：
 

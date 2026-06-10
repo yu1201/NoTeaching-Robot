@@ -1632,20 +1632,33 @@ namespace
 	{
 		RobotCalculation::LowerWeldFilterParams params;
 		const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
-		params.sampleAxis = sampleAxis;
+		// 与主管线一致：界面固定了主轴就遵从设置，Auto 才用调用方按点云推断的轴。
+		switch (pointCloudSettings.sampleAxisMode)
+		{
+		case PointCloudProcessingConfig::SampleAxisMode::AxisX:
+			params.sampleAxis = RobotCalculation::SampleAxis::AxisX;
+			break;
+		case PointCloudProcessingConfig::SampleAxisMode::AxisY:
+			params.sampleAxis = RobotCalculation::SampleAxis::AxisY;
+			break;
+		default:
+			params.sampleAxis = sampleAxis;
+			break;
+		}
 		params.fitMode = RobotCalculation::LowerWeldFitMode::PreservePath;
-		params.zThreshold = -230.0;
-		params.zJumpThreshold = 3.0;
-		params.zContinuityThreshold = 2.0;
-		params.segmentBreakDistance = 6.0;
-		params.keepLongestSegmentOnly = true;
-		params.sampleStep = 2.0;
-		params.searchWindow = 8.0;
-		params.lineFitTrimCount = 0;
-		params.piecewiseFitTolerance = 4.0;
-		params.piecewiseMinSegmentPoints = 10;
-		params.minPointCount = 4;
-		params.smoothRadius = 3;
+		// 与主管线 BuildOriginalTrackFitParams 一致：数值滤波参数读配置（默认=原硬编码值）。
+		params.zThreshold = pointCloudSettings.cloudZThresholdMm;
+		params.zJumpThreshold = pointCloudSettings.cloudZJumpThresholdMm;
+		params.zContinuityThreshold = pointCloudSettings.cloudZContinuityThresholdMm;
+		params.segmentBreakDistance = pointCloudSettings.cloudSegmentBreakDistanceMm;
+		params.keepLongestSegmentOnly = pointCloudSettings.cloudKeepLongestSegmentOnly;
+		params.sampleStep = pointCloudSettings.fitSampleStepMm;
+		params.searchWindow = pointCloudSettings.fitSearchWindowMm;
+		params.lineFitTrimCount = pointCloudSettings.fitLineFitTrimCount;
+		params.piecewiseFitTolerance = pointCloudSettings.fitPiecewiseToleranceMm;
+		params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
+		params.minPointCount = pointCloudSettings.fitMinPointCount;
+		params.smoothRadius = pointCloudSettings.fitSmoothRadius;
 		params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
 		params.exportFitDebugCloud = pointCloudSettings.exportFitDebugCloud;
 		params.validationCoverageEnabled = pointCloudSettings.validationCoverageEnabled;

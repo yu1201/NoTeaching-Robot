@@ -552,7 +552,19 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
 {
     RobotCalculation::LowerWeldFilterParams params;
     const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
-    params.sampleAxis = InferMeasureSampleAxis(param);
+    switch (pointCloudSettings.sampleAxisMode)
+    {
+    case PointCloudProcessingConfig::SampleAxisMode::AxisX:
+        params.sampleAxis = RobotCalculation::SampleAxis::AxisX;
+        break;
+    case PointCloudProcessingConfig::SampleAxisMode::AxisY:
+        params.sampleAxis = RobotCalculation::SampleAxis::AxisY;
+        break;
+    default:
+        params.sampleAxis = InferMeasureSampleAxis(param);
+        break;
+    }
+    // 拟合模式固定 PreservePath：整条管线（_PreservePath_2mm 及后续分类/姿态生成）都按此假设处理。
     params.fitMode = RobotCalculation::LowerWeldFitMode::PreservePath;
     if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection)
     {
@@ -570,18 +582,18 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
     {
         params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry;
     }
-    params.zThreshold = -230.0;
-    params.zJumpThreshold = 3.0;
-    params.zContinuityThreshold = 2.0;
-    params.segmentBreakDistance = 6.0;
-    params.keepLongestSegmentOnly = true;
-    params.sampleStep = 2.0;
-    params.searchWindow = 8.0;
-    params.lineFitTrimCount = 0;
-    params.piecewiseFitTolerance = 4.0;
-    params.piecewiseMinSegmentPoints = 10;
-    params.minPointCount = 4;
-    params.smoothRadius = 3;
+    params.zThreshold = pointCloudSettings.cloudZThresholdMm;
+    params.zJumpThreshold = pointCloudSettings.cloudZJumpThresholdMm;
+    params.zContinuityThreshold = pointCloudSettings.cloudZContinuityThresholdMm;
+    params.segmentBreakDistance = pointCloudSettings.cloudSegmentBreakDistanceMm;
+    params.keepLongestSegmentOnly = pointCloudSettings.cloudKeepLongestSegmentOnly;
+    params.sampleStep = pointCloudSettings.fitSampleStepMm;
+    params.searchWindow = pointCloudSettings.fitSearchWindowMm;
+    params.lineFitTrimCount = pointCloudSettings.fitLineFitTrimCount;
+    params.piecewiseFitTolerance = pointCloudSettings.fitPiecewiseToleranceMm;
+    params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
+    params.minPointCount = pointCloudSettings.fitMinPointCount;
+    params.smoothRadius = pointCloudSettings.fitSmoothRadius;
     params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
     params.exportFitDebugCloud = pointCloudSettings.exportFitDebugCloud;
     params.validationCoverageEnabled = pointCloudSettings.validationCoverageEnabled;

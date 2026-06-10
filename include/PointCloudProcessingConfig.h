@@ -22,6 +22,14 @@ public:
         WorkpieceProjection = 3
     };
 
+    // 滤波拟合的采样/段类判定主轴：默认按扫描起止点方向自动推断。
+    enum class SampleAxisMode
+    {
+        Auto = 0,
+        AxisX = 1,
+        AxisY = 2
+    };
+
     struct Settings
     {
         Mode mode = Mode::LegacyLaserPath;
@@ -31,6 +39,20 @@ public:
         double zTruncationValue = 6.0;
         double resampleStepMm = 2.0;
         bool fallbackToLegacy = true;
+        // 滤波拟合数值参数（管线真实消费；默认值即原管线硬编码值，保证升级后现场行为不变）。
+        SampleAxisMode sampleAxisMode = SampleAxisMode::Auto;
+        double cloudZThresholdMm = -230.0;
+        double cloudZJumpThresholdMm = 3.0;
+        double cloudZContinuityThresholdMm = 2.0;
+        double cloudSegmentBreakDistanceMm = 6.0;
+        bool cloudKeepLongestSegmentOnly = true;
+        double fitSampleStepMm = 2.0;
+        double fitSearchWindowMm = 8.0;
+        int fitLineFitTrimCount = 0;
+        double fitPiecewiseToleranceMm = 4.0;
+        int fitPiecewiseMinSegmentPoints = 10;
+        int fitMinPointCount = 4;
+        int fitSmoothRadius = 3;
         bool slopeConsistentCornerFit = false;
         // 调试：导出每段拟合点集与拟合直线为 CloudCompare 点云（默认开启，存数据库不写 ini）。
         bool exportFitDebugCloud = true;
@@ -73,4 +95,6 @@ public:
     static QString FeaturePointStrategyDisplayName(FeaturePointStrategy strategy);
     static QString FeaturePointStrategyConfigValue(FeaturePointStrategy strategy);
     static FeaturePointStrategy FeaturePointStrategyFromConfigValue(const QString& value);
+    static QString SampleAxisModeConfigValue(SampleAxisMode mode);
+    static SampleAxisMode SampleAxisModeFromConfigValue(const QString& value);
 };
