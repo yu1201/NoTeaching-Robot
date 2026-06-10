@@ -330,12 +330,13 @@ void WeldSeamCompDialog::BuildUi()
     m_pNewGroupBtn = new QPushButton("新建");
     m_pRenameGroupBtn = new QPushButton("重命名");
     m_pDeleteGroupBtn = new QPushButton("删除");
-    m_pNewGroupBtn->setMinimumWidth(60);
-    m_pRenameGroupBtn->setMinimumWidth(74);
-    m_pDeleteGroupBtn->setMinimumWidth(60);
+    m_pNewGroupBtn->setMinimumWidth(84);
+    m_pRenameGroupBtn->setMinimumWidth(96);
+    m_pDeleteGroupBtn->setMinimumWidth(84);
     groupActionLayout->addWidget(m_pNewGroupBtn);
     groupActionLayout->addWidget(m_pRenameGroupBtn);
     groupActionLayout->addWidget(m_pDeleteGroupBtn);
+    groupActionLayout->addStretch(1);
     groupPanelLayout->addLayout(groupActionLayout);
     contentLayout->addWidget(groupPanel, 0);
 
@@ -434,6 +435,7 @@ void WeldSeamCompDialog::BuildUi()
     m_pCompPreviewTimer->setInterval(120);
     connect(m_pCompPreviewTimer, &QTimer::timeout, this, [this]() { RecomputeCompPreview(); });
 
+    editorScrollArea->setMinimumWidth(560);
     QSplitter* mainSplitter = new QSplitter(Qt::Horizontal, this);
     mainSplitter->setObjectName("CompMainSplitter");
     mainSplitter->setChildrenCollapsible(false);
@@ -441,7 +443,7 @@ void WeldSeamCompDialog::BuildUi()
     mainSplitter->addWidget(CreateCompPreviewPanel());
     mainSplitter->setStretchFactor(0, 0);
     mainSplitter->setStretchFactor(1, 1);
-    mainSplitter->setSizes({ 520, 880 });
+    mainSplitter->setSizes({ 780, 1040 });
     rootLayout->addWidget(mainSplitter, 1);
 
     QHBoxLayout* actionLayout = new QHBoxLayout();
@@ -1991,7 +1993,7 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     layout->addLayout(layerToggleLayout);
 
     m_pCompPreviewView = new pcview::PointCloud3DView();
-    m_pCompPreviewView->setMinimumSize(420, 360);
+    m_pCompPreviewView->setMinimumSize(360, 360);
     layout->addWidget(m_pCompPreviewView, 1);
 
     m_pCompPreviewInfoLabel = new QLabel("灰=原始焊道  蓝=补偿前  橙=补偿后；可勾选显示哪些图层，调整补偿值即可实时对比。");
