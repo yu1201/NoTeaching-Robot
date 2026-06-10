@@ -7,14 +7,17 @@
 #include <unordered_map>
 #include <vector>
 
-// 使用固定行格式读写配置库中的工艺参数。
-// 每行按固定字段顺序保存；读取后按“工件名 + 焊脚尺寸 + 层号”排序，
-// 让同名、同焊脚尺寸、不同层号的记录排在一起。
+// 配置库中的工艺参数读写层。
+// 主数据为配置库多键格式（scope=robot，module=WeldProcess/Entry<i> 每字段一键），
+// 旧的 84/15 字段 TAB 文本块（逻辑键 Data/<unit>/WeldPara.txt、WeaveDate.txt）作为
+// 兼容镜像双写保留；读取时多键优先，仅有旧文本块时自动惰性迁移成多键。
+// 读取后按“工件名 + 焊脚尺寸 + 层号”排序，让同组记录排在一起。
 class WeldProcessFile
 {
 public:
     explicit WeldProcessFile(const T_CONTRAL_UNIT& tContralUnitInfo);
     explicit WeldProcessFile(const ContralUnit& contralUnit, int nUnitIndex = 0);
+    explicit WeldProcessFile(const std::string& unitName);
     ~WeldProcessFile();
 
     bool Init();
@@ -53,6 +56,11 @@ private:
     bool LoadWeldTxt();
     bool SaveWeaveTxt() const;
     bool SaveWeldTxt() const;
+    // 配置库多键格式（主数据）：每个工艺/摆动条目的每个字段一键。
+    bool TryLoadWeaveFromSettings();
+    bool TryLoadWeldFromSettings();
+    bool SaveWeaveToSettings() const;
+    bool SaveWeldToSettings() const;
     void EnsureDefaultLayerRows();
     void NormalizeWeldOrderKeepGroupOrder();
     bool BindWeldToWeave();

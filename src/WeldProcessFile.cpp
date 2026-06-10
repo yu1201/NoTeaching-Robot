@@ -34,6 +34,223 @@ int NormalizeArcMode(int mode)
 {
     return mode >= 0 && mode <= 7 ? mode : 4;
 }
+
+// ===== 配置库多键格式（主数据） =====
+// scope=robot, scopeId=单元名；module：WeldProcess(UseIndex/EntryCount) +
+// WeldProcess/Entry<i>（每字段一键）；摆动为 WeaveData(同构)。
+// 字段表用 visitor 一处定义、读写共用，避免读写不对称。
+constexpr char kScopeRobot[] = "robot";
+constexpr char kWeldModule[] = "WeldProcess";
+constexpr char kWeaveModule[] = "WeaveData";
+constexpr char kUseIndexKey[] = "UseIndex";
+constexpr char kEntryCountKey[] = "EntryCount";
+
+QString WeldEntryModule(int index)
+{
+    return QStringLiteral("WeldProcess/Entry%1").arg(index);
+}
+
+QString WeaveEntryModule(int index)
+{
+    return QStringLiteral("WeaveData/Entry%1").arg(index);
+}
+
+template <typename Visitor>
+void VisitWeaveFields(T_WeaveDate& item, Visitor&& visit)
+{
+    visit("WeaveType", item.nWeaveType);
+    visit("WeaveShape", item.nWeaveShape);
+    visit("WeaveFrequencyHz", item.dWeaveFrequencyHz);
+    visit("WeaveAmplitudeMm", item.dWeaveAmplitudeMm);
+    visit("SwingDirectionDeg", item.dSwingDirectionDeg);
+    visit("WeavePlaneAngleDeg", item.dWeavePlaneAngleDeg);
+    visit("SpaceAngleDeg", item.dSpaceAngleDeg);
+    visit("PauseTime1Ms", item.nPauseTime1Ms);
+    visit("PauseTime2Ms", item.nPauseTime2Ms);
+    visit("PauseTime3Ms", item.nPauseTime3Ms);
+    visit("PauseTime4Ms", item.nPauseTime4Ms);
+    visit("PauseContinue", item.nPauseContinue);
+    visit("EndLengthMm", item.dEndLengthMm);
+    visit("EndWidthMm", item.dEndWidthMm);
+    visit("CenterHeightMm", item.dCenterHeightMm);
+}
+
+template <typename Visitor>
+void VisitWeldParaFields(T_WELD_PARA& item, Visitor&& visit)
+{
+    visit("WorkPeace", item.strWorkPeace);
+    visit("WeldType", item.strWeldType);
+    visit("WeldAngleSize", item.dWeldAngleSize);
+    visit("LayerNo", item.nLayerNo);
+    visit("StartArcCurrent", item.dStartArcCurrent);
+    visit("StartArcVoltage", item.dStartArcVoltage);
+    visit("StartWaitTime", item.dStartWaitTime);
+    visit("TrackCurrent", item.dTrackCurrent);
+    visit("TrackVoltage", item.dTrackVoltage);
+    visit("WeldVelocity", item.WeldVelocity);
+    visit("StopArcCurrent", item.dStopArcCurrent);
+    visit("StopArcVoltage", item.dStopArcVoltage);
+    visit("StopWaitTime", item.dStopWaitTime);
+    visit("WrapCurrent1", item.dWrapCurrentt1);
+    visit("WrapVoltage1", item.dWrapVoltage1);
+    visit("WrapWaitTime1", item.dWrapWaitTime1);
+    visit("WrapCurrent2", item.dWrapCurrentt2);
+    visit("WrapVoltage2", item.dWrapVoltage2);
+    visit("WrapWaitTime2", item.dWrapWaitTime2);
+    visit("WrapCurrent3", item.dWrapCurrentt3);
+    visit("WrapVoltage3", item.dWrapVoltage3);
+    visit("WrapWaitTime3", item.dWrapWaitTime3);
+    visit("CrosswiseOffset", item.CrosswiseOffset);
+    visit("VerticalOffset", item.verticalOffset);
+    visit("WrapConditionNo", item.nWrapConditionNo);
+    visit("WeldAngle", item.dWeldAngle);
+    visit("WeldDipAngle", item.dWeldDipAngle);
+    visit("StandWeldDir", item.nStandWeldDir);
+    visit("WeaveTypeNo", item.nWeaveTypeNo);
+    visit("WeldMethod", item.nWeldMethod);
+    visit("WrapCurrent1Enable", item.nWrapCurrent1Enable);
+    visit("WrapVoltage1Enable", item.nWrapVoltage1Enable);
+    visit("WrapWaitTime1Enable", item.nWrapWaitTime1Enable);
+    visit("WrapCurrent2Enable", item.nWrapCurrent2Enable);
+    visit("WrapVoltage2Enable", item.nWrapVoltage2Enable);
+    visit("WrapWaitTime2Enable", item.nWrapWaitTime2Enable);
+    visit("WrapCurrent3Enable", item.nWrapCurrent3Enable);
+    visit("WrapVoltage3Enable", item.nWrapVoltage3Enable);
+    visit("WrapWaitTime3Enable", item.nWrapWaitTime3Enable);
+    visit("CornerArcTransitionRadius", item.dCornerArcTransitionRadius);
+    visit("CornerArcTransitionSpeed", item.dCornerArcTransitionSpeed);
+    visit("CornerArcTransitionCurrent", item.dCornerArcTransitionCurrent);
+    visit("CornerArcTransitionVoltage", item.dCornerArcTransitionVoltage);
+    visit("CornerArcTransitionRadiusEnable", item.nCornerArcTransitionRadiusEnable);
+    visit("CornerArcTransitionSpeedEnable", item.nCornerArcTransitionSpeedEnable);
+    visit("CornerArcTransitionCurrentEnable", item.nCornerArcTransitionCurrentEnable);
+    visit("CornerArcTransitionVoltageEnable", item.nCornerArcTransitionVoltageEnable);
+    visit("CornerArcTransitionApplyScope", item.nCornerArcTransitionApplyScope);
+    visit("Track.LateralBeginCycle", item.tTrackParam.nLateralBeginCycle);
+    visit("Track.LateralGain", item.tTrackParam.dLateralGain);
+    visit("Track.LeftAreaCoefficient", item.tTrackParam.dLeftAreaCoefficient);
+    visit("Track.RightAreaCoefficient", item.tTrackParam.dRightAreaCoefficient);
+    visit("Track.VerticalModeFlag", item.tTrackParam.nVerticalModeFlag);
+    visit("Track.VerticalReferenceCurrent", item.tTrackParam.dVerticalReferenceCurrent);
+    visit("Track.VerticalBeginCycle", item.tTrackParam.nVerticalBeginCycle);
+    visit("Track.VerticalSustainCycle", item.tTrackParam.nVerticalSustainCycle);
+    visit("Track.VerticalCycleLength", item.tTrackParam.dVerticalCycleLength);
+    visit("Track.VerticalGain", item.tTrackParam.dVerticalGain);
+    visit("Track.TimeOrDistanceMode", item.tTrackParam.nTimeOrDistanceMode);
+    visit("Track.TimeIntervalMs", item.tTrackParam.nTimeIntervalMs);
+    visit("Track.DistanceIntervalMm", item.tTrackParam.nDistanceIntervalMm);
+    visit("Track.LateralMinCompPerCycle", item.tTrackParam.dLateralMinCompPerCycle);
+    visit("Track.LateralMaxCompPerCycle", item.tTrackParam.dLateralMaxCompPerCycle);
+    visit("Track.LateralMaxCompTotal", item.tTrackParam.dLateralMaxCompTotal);
+    visit("Track.LateralAsymmetryCoefficient", item.tTrackParam.dLateralAsymmetryCoefficient);
+    visit("Track.LateralReserved6", item.tTrackParam.dLateralReserved6);
+    visit("Track.LateralReserved5", item.tTrackParam.dLateralReserved5);
+    visit("Track.LateralReserved4", item.tTrackParam.dLateralReserved4);
+    visit("Track.LateralReserved3", item.tTrackParam.dLateralReserved3);
+    visit("Track.LateralReserved2", item.tTrackParam.dLateralReserved2);
+    visit("Track.LateralReserved1", item.tTrackParam.dLateralReserved1);
+    visit("Track.VerticalMinCompPerCycle", item.tTrackParam.dVerticalMinCompPerCycle);
+    visit("Track.VerticalMaxCompPerCycle", item.tTrackParam.dVerticalMaxCompPerCycle);
+    visit("Track.VerticalMaxCompTotal", item.tTrackParam.dVerticalMaxCompTotal);
+    visit("Track.VerticalAsymmetryCoefficient", item.tTrackParam.dVerticalAsymmetryCoefficient);
+    visit("Track.VerticalReserved6", item.tTrackParam.dVerticalReserved6);
+    visit("Track.VerticalReserved5", item.tTrackParam.dVerticalReserved5);
+    visit("Track.VerticalReserved4", item.tTrackParam.dVerticalReserved4);
+    visit("Track.VerticalReserved3", item.tTrackParam.dVerticalReserved3);
+    visit("Track.VerticalReserved2", item.tTrackParam.dVerticalReserved2);
+    visit("Track.VerticalReserved1", item.tTrackParam.dVerticalReserved1);
+    visit("WeaveEnable", item.nWeaveEnable);
+    visit("TrackEnable", item.nTrackEnable);
+    visit("ArcMode", item.nArcMode);
+    // 多键格式独有字段（不进 84 字段文本镜像）：
+    visit("FinalWeldTrajectoryStepMm", item.dFinalWeldTrajectoryStepMm);
+}
+
+// 写 visitor：把字段写成 scoped setting（double 用 'g',17 全精度往返）。
+struct ScopedSettingsWriter
+{
+    QString scopeId;
+    QString module;
+    bool ok = true;
+
+    void operator()(const char* key, int& value)
+    {
+        Write(key, QString::number(value), QStringLiteral("int"));
+    }
+    void operator()(const char* key, double& value)
+    {
+        Write(key, QString::number(value, 'g', 17), QStringLiteral("double"));
+    }
+    void operator()(const char* key, std::string& value)
+    {
+        Write(key, QString::fromUtf8(value.c_str()), QStringLiteral("string"));
+    }
+    void Write(const char* key, const QString& value, const QString& type)
+    {
+        ok = ConfigDatabase::WriteScopedSetting(
+            QLatin1String(kScopeRobot), scopeId, module, QLatin1String(key), value, type) && ok;
+    }
+};
+
+// 读 visitor：缺键或解析失败时保留字段默认值（向后兼容新字段）。
+struct ScopedSettingsReader
+{
+    QString scopeId;
+    QString module;
+
+    void operator()(const char* key, int& value)
+    {
+        QString text;
+        if (ConfigDatabase::ReadScopedSetting(QLatin1String(kScopeRobot), scopeId, module, QLatin1String(key), &text))
+        {
+            bool parsed = false;
+            const int parsedValue = text.trimmed().toInt(&parsed);
+            if (parsed)
+            {
+                value = parsedValue;
+            }
+        }
+    }
+    void operator()(const char* key, double& value)
+    {
+        QString text;
+        if (ConfigDatabase::ReadScopedSetting(QLatin1String(kScopeRobot), scopeId, module, QLatin1String(key), &text))
+        {
+            bool parsed = false;
+            const double parsedValue = text.trimmed().toDouble(&parsed);
+            if (parsed)
+            {
+                value = parsedValue;
+            }
+        }
+    }
+    void operator()(const char* key, std::string& value)
+    {
+        QString text;
+        if (ConfigDatabase::ReadScopedSetting(QLatin1String(kScopeRobot), scopeId, module, QLatin1String(key), &text))
+        {
+            value = text.toUtf8().constData();
+        }
+    }
+};
+
+bool ReadScopedInt(const QString& scopeId, const char* module, const char* key, int& value)
+{
+    QString text;
+    if (!ConfigDatabase::ReadScopedSetting(
+        QLatin1String(kScopeRobot), scopeId, QLatin1String(module), QLatin1String(key), &text))
+    {
+        return false;
+    }
+    bool parsed = false;
+    const int parsedValue = text.trimmed().toInt(&parsed);
+    if (!parsed)
+    {
+        return false;
+    }
+    value = parsedValue;
+    return true;
+}
 }
 
 WeldProcessFile::WeldProcessFile(const T_CONTRAL_UNIT& tContralUnitInfo)
@@ -49,6 +266,12 @@ WeldProcessFile::WeldProcessFile(const ContralUnit& contralUnit, int nUnitIndex)
         return;
     }
     m_tContralUnitInfo = contralUnit.m_vtContralUnitInfo[nUnitIndex];
+}
+
+WeldProcessFile::WeldProcessFile(const std::string& unitName)
+{
+    // 仅按单元名定位工艺数据（供管线侧只有机器人名时复用本类，消除第二套解析器）。
+    m_tContralUnitInfo.sUnitName = unitName;
 }
 
 WeldProcessFile::~WeldProcessFile()
@@ -117,32 +340,57 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
     m_sWeldIniFilePath = BuildWeldIniPath(tContralUnitInfo.sUnitName);
     EnsureGlobalStorage(tContralUnitInfo.nUnitNo);
 
-    if (!ConfigDatabase::HasTextFile(m_sWeaveIniFilePath) || !ConfigDatabase::HasTextFile(m_sWeldIniFilePath))
+    // 多键格式（主数据）优先；仅有旧文本块时回退解析并惰性迁移成多键。
+    const bool loadedFromSettings = TryLoadWeaveFromSettings() && TryLoadWeldFromSettings();
+    if (!loadedFromSettings)
     {
-        m_sLastError = GetStr("配置库中未找到工艺数据：%s / %s",
-            m_sWeaveIniFilePath.c_str(),
-            m_sWeldIniFilePath.c_str());
-        LogError("%s", m_sLastError.c_str());
-        return false;
+        m_vtWeaveTypeList.clear();
+        m_vtWeldParaList.clear();
+        m_nAllWeaveTypeNum = 0;
+        m_nAllWeldParaNum = 0;
+        m_nUseWeaveTypeNo = 0;
+        m_nUseWeldParaNo = 0;
+
+        if (!ConfigDatabase::HasTextFile(m_sWeaveIniFilePath) || !ConfigDatabase::HasTextFile(m_sWeldIniFilePath))
+        {
+            m_sLastError = GetStr("配置库中未找到工艺数据：%s / %s",
+                m_sWeaveIniFilePath.c_str(),
+                m_sWeldIniFilePath.c_str());
+            LogError("%s", m_sLastError.c_str());
+            return false;
+        }
+
+        if (!LoadWeaveTxt())
+        {
+            LogError("%s", m_sLastError.c_str());
+            return false;
+        }
+        if (!LoadWeldTxt())
+        {
+            LogError("%s", m_sLastError.c_str());
+            return false;
+        }
+
+        // 惰性迁移：把旧文本块写成多键主数据（失败仅记日志，不影响本次读取）。
+        if (!SaveWeaveToSettings() || !SaveWeldToSettings())
+        {
+            LogError("工艺数据迁移多键格式失败（保持文本块读取）：%s", m_sLastError.c_str());
+        }
+        else
+        {
+            LogInfo("工艺数据已从文本块迁移为配置库多键格式，控制单元: %s",
+                tContralUnitInfo.sUnitName.c_str());
+        }
     }
 
-    if (!LoadWeaveTxt())
-    {
-        LogError("%s", m_sLastError.c_str());
-        return false;
-    }
-    if (!LoadWeldTxt())
-    {
-        LogError("%s", m_sLastError.c_str());
-        return false;
-    }
     if (!BindWeldToWeave())
     {
         LogError("%s", m_sLastError.c_str());
         return false;
     }
 
-    LogInfo("工艺数据读取成功，控制单元: %s, 摆动类型数: %d, 工艺数: %d",
+    LogInfo("工艺数据读取成功(%s)，控制单元: %s, 摆动类型数: %d, 工艺数: %d",
+        loadedFromSettings ? "多键" : "文本块",
         tContralUnitInfo.sUnitName.c_str(), m_nAllWeaveTypeNum, m_nAllWeldParaNum);
     return true;
 }
@@ -608,6 +856,12 @@ bool WeldProcessFile::LoadWeldTxt()
 
 bool WeldProcessFile::SaveWeaveTxt() const
 {
+    // 主数据：配置库多键；文本块仅作兼容镜像（模板复制/迁移工具仍按文件名访问）。
+    if (!SaveWeaveToSettings())
+    {
+        return false;
+    }
+
     std::ostringstream out;
     out << "# WeaveData\n";
     out << "USE" << kDelimiter << m_nUseWeaveTypeNo << "\n";
@@ -625,6 +879,12 @@ bool WeldProcessFile::SaveWeaveTxt() const
 
 bool WeldProcessFile::SaveWeldTxt() const
 {
+    // 主数据：配置库多键；文本块仅作兼容镜像（84 字段格式保持不变）。
+    if (!SaveWeldToSettings())
+    {
+        return false;
+    }
+
     std::ostringstream out;
     out << "# WeldParameters\n";
     out << "USE" << kDelimiter << m_nUseWeldParaNo << "\n";
@@ -741,6 +1001,147 @@ std::string WeldProcessFile::BuildGroupKey(const T_WELD_PARA& item) const
     out.precision(3);
     out << item.strWorkPeace << "|" << item.dWeldAngleSize;
     return out.str();
+}
+
+bool WeldProcessFile::TryLoadWeaveFromSettings()
+{
+    const QString scopeId = QString::fromUtf8(m_tContralUnitInfo.sUnitName.c_str()).trimmed();
+    if (scopeId.isEmpty())
+    {
+        return false;
+    }
+    int entryCount = 0;
+    if (!ReadScopedInt(scopeId, kWeaveModule, kEntryCountKey, entryCount) || entryCount <= 0)
+    {
+        return false;
+    }
+
+    m_vtWeaveTypeList.clear();
+    m_nUseWeaveTypeNo = 0;
+    ReadScopedInt(scopeId, kWeaveModule, kUseIndexKey, m_nUseWeaveTypeNo);
+
+    m_vtWeaveTypeList.reserve(static_cast<size_t>(entryCount));
+    for (int index = 0; index < entryCount; ++index)
+    {
+        T_WeaveDate item {};
+        ScopedSettingsReader reader { scopeId, WeaveEntryModule(index) };
+        VisitWeaveFields(item, reader);
+        m_vtWeaveTypeList.push_back(item);
+    }
+
+    m_nAllWeaveTypeNum = static_cast<int>(m_vtWeaveTypeList.size());
+    m_nUseWeaveTypeNo = qBound(0, m_nUseWeaveTypeNo, m_nAllWeaveTypeNum - 1);
+    return true;
+}
+
+bool WeldProcessFile::TryLoadWeldFromSettings()
+{
+    const QString scopeId = QString::fromUtf8(m_tContralUnitInfo.sUnitName.c_str()).trimmed();
+    if (scopeId.isEmpty())
+    {
+        return false;
+    }
+    int entryCount = 0;
+    if (!ReadScopedInt(scopeId, kWeldModule, kEntryCountKey, entryCount) || entryCount <= 0)
+    {
+        return false;
+    }
+
+    m_vtWeldParaList.clear();
+    m_nUseWeldParaNo = 0;
+    ReadScopedInt(scopeId, kWeldModule, kUseIndexKey, m_nUseWeldParaNo);
+
+    m_vtWeldParaList.reserve(static_cast<size_t>(entryCount));
+    for (int index = 0; index < entryCount; ++index)
+    {
+        T_WELD_PARA item {};
+        ScopedSettingsReader reader { scopeId, WeldEntryModule(index) };
+        VisitWeldParaFields(item, reader);
+        item.nWeaveEnable = item.nWeaveEnable != 0 ? 1 : 0;
+        item.nTrackEnable = item.nTrackEnable != 0 ? 1 : 0;
+        item.nArcMode = NormalizeArcMode(item.nArcMode);
+        m_vtWeldParaList.push_back(item);
+    }
+
+    NormalizeWeldOrderKeepGroupOrder();
+    m_nAllWeldParaNum = static_cast<int>(m_vtWeldParaList.size());
+    m_nUseWeldParaNo = qBound(0, m_nUseWeldParaNo, m_nAllWeldParaNum - 1);
+    return true;
+}
+
+bool WeldProcessFile::SaveWeaveToSettings() const
+{
+    const QString scopeId = QString::fromUtf8(m_tContralUnitInfo.sUnitName.c_str()).trimmed();
+    if (scopeId.isEmpty())
+    {
+        const_cast<WeldProcessFile*>(this)->m_sLastError = "控制单元名称为空，无法写入配置库摆动数据。";
+        return false;
+    }
+
+    // 缩减时清理多余条目模块（整模块删除）。
+    int previousCount = 0;
+    ReadScopedInt(scopeId, kWeaveModule, kEntryCountKey, previousCount);
+    const int count = static_cast<int>(m_vtWeaveTypeList.size());
+    for (int index = count; index < previousCount; ++index)
+    {
+        ConfigDatabase::RemoveScopedSettings(QLatin1String(kScopeRobot), scopeId, WeaveEntryModule(index));
+    }
+
+    bool ok = ConfigDatabase::WriteScopedSetting(
+        QLatin1String(kScopeRobot), scopeId, QLatin1String(kWeaveModule),
+        QLatin1String(kEntryCountKey), QString::number(count), QStringLiteral("int"));
+    ok = ConfigDatabase::WriteScopedSetting(
+        QLatin1String(kScopeRobot), scopeId, QLatin1String(kWeaveModule),
+        QLatin1String(kUseIndexKey), QString::number(m_nUseWeaveTypeNo), QStringLiteral("int")) && ok;
+    for (int index = 0; index < count; ++index)
+    {
+        T_WeaveDate item = m_vtWeaveTypeList[static_cast<size_t>(index)];
+        ScopedSettingsWriter writer { scopeId, WeaveEntryModule(index) };
+        VisitWeaveFields(item, writer);
+        ok = writer.ok && ok;
+    }
+    if (!ok)
+    {
+        const_cast<WeldProcessFile*>(this)->m_sLastError = "写入配置库摆动数据(多键)失败。";
+    }
+    return ok;
+}
+
+bool WeldProcessFile::SaveWeldToSettings() const
+{
+    const QString scopeId = QString::fromUtf8(m_tContralUnitInfo.sUnitName.c_str()).trimmed();
+    if (scopeId.isEmpty())
+    {
+        const_cast<WeldProcessFile*>(this)->m_sLastError = "控制单元名称为空，无法写入配置库焊接工艺数据。";
+        return false;
+    }
+
+    int previousCount = 0;
+    ReadScopedInt(scopeId, kWeldModule, kEntryCountKey, previousCount);
+    const int count = static_cast<int>(m_vtWeldParaList.size());
+    for (int index = count; index < previousCount; ++index)
+    {
+        ConfigDatabase::RemoveScopedSettings(QLatin1String(kScopeRobot), scopeId, WeldEntryModule(index));
+    }
+
+    bool ok = ConfigDatabase::WriteScopedSetting(
+        QLatin1String(kScopeRobot), scopeId, QLatin1String(kWeldModule),
+        QLatin1String(kEntryCountKey), QString::number(count), QStringLiteral("int"));
+    ok = ConfigDatabase::WriteScopedSetting(
+        QLatin1String(kScopeRobot), scopeId, QLatin1String(kWeldModule),
+        QLatin1String(kUseIndexKey), QString::number(m_nUseWeldParaNo), QStringLiteral("int")) && ok;
+    for (int index = 0; index < count; ++index)
+    {
+        T_WELD_PARA item = m_vtWeldParaList[static_cast<size_t>(index)];
+        ScopedSettingsWriter writer { scopeId, WeldEntryModule(index) };
+        VisitWeldParaFields(item, writer);
+        ok = writer.ok && ok;
+    }
+    if (!ok)
+    {
+        const_cast<WeldProcessFile*>(this)->m_sLastError = "写入配置库焊接工艺数据(多键)失败。";
+    }
+    return ok;
 }
 
 bool WeldProcessFile::BindWeldToWeave()

@@ -7,6 +7,8 @@
 #include <QString>
 #include <QVector>
 
+#include <vector>
+
 class QButtonGroup;
 class QCheckBox;
 class QComboBox;
@@ -113,6 +115,10 @@ private:
 
     // 补偿前 / 补偿后 焊道可视化对比
     QWidget* CreateCompPreviewPanel();
+    QWidget* CreateWeldProcessPanel();
+    void LoadWeldProcessArea();
+    void ApplySelectedProcessToEditors();
+    bool SaveWeldProcessArea(QString& error);
     void ChooseCompPreviewDirectory();
     void SetCompPreviewDirectory(const QString& dir);
     void AutoSelectLatestCompPreviewDirectory();
@@ -179,6 +185,17 @@ private:
     QVector<PoseCompRow> m_savedPoseRows;   // 加载/保存后的姿态补偿快照（姿态补偿阶段按 delta 计算）
     QString m_compPreviewDir;
     QString m_compPreviewBaselineDir;
-    // 五阶段图层开关：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡
-    QAbstractButton* m_pStageToggles[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
+    // 六阶段图层开关：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡 5=实际焊道
+    QAbstractButton* m_pStageToggles[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+
+    // 工艺区域（圆弧过渡 + 实际焊道点间距，编辑实时联动预览、保存落盘）
+    QComboBox* m_pProcessCombo = nullptr;
+    QCheckBox* m_pArcEnableCheck = nullptr;
+    QDoubleSpinBox* m_pArcRadiusSpin = nullptr;
+    QDoubleSpinBox* m_pFinalStepSpin = nullptr;
+    QLabel* m_pProcessHintLabel = nullptr;
+    std::vector<T_WELD_PARA> m_weldProcessList;
+    int m_weldProcessSelectedIndex = -1;
+    bool m_weldProcessLoaded = false;
+    bool m_bLoadingProcessArea = false;
 };
