@@ -658,11 +658,14 @@ QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
     const QVector<PointCloudExtractionProcessor::TrackPoint>& points);
 std::vector<QString> BuildRawLaserOutputLines(const QVector<RobotCalculation::LowerWeldFilterPoint>& points);
 
-// SDK 已焊起点截断：保留轨迹上距已焊起点最近的点及其后段（点列顺序与焊接方向一致），
-// 截掉已焊部分；截断后首点重置为起点类型，保证下游起终点校验与分类语义成立。
+// SDK 已焊起点截断：已焊段从上次焊接的起始端延伸，截掉的一侧由"焊接方向"决定——
+// 起点到终点焊（weldFromTrackStart=true）已焊段在轨迹头部，保留交界点及其后段并把首点重置为起点；
+// 终点到起点焊已焊段在轨迹尾部，保留头部到交界点的段并把尾点重置为终点。
+// 两种方向下执行（含方向反转）都恰好从已焊交界处开始接续焊接。
 QVector<PointCloudExtractionProcessor::TrackPoint> TruncateTrackAtWeldedStart(
     const QVector<PointCloudExtractionProcessor::TrackPoint>& points,
     const Eigen::Vector3d& weldedStart,
+    bool weldFromTrackStart,
     int* removedCount)
 {
     if (removedCount != nullptr)
@@ -684,20 +687,33 @@ QVector<PointCloudExtractionProcessor::TrackPoint> TruncateTrackAtWeldedStart(
             nearestIndex = index;
         }
     }
-    if (nearestIndex <= 0)
+
+    if (weldFromTrackStart)
+    {
+        // 截掉头部已焊段；截断后至少保留两个点，否则视为截断无效。
+        if (nearestIndex <= 0 || points.size() - nearestIndex < 2)
+        {
+            return points;
+        }
+        QVector<PointCloudExtractionProcessor::TrackPoint> truncated = points.mid(nearestIndex);
+        truncated.first().type = PointCloudExtractionProcessor::TrackPointType::Start;
+        if (removedCount != nullptr)
+        {
+            *removedCount = nearestIndex;
+        }
+        return truncated;
+    }
+
+    // 终点到起点焊：截掉尾部已焊段。
+    if (nearestIndex >= points.size() - 1 || nearestIndex < 1)
     {
         return points;
     }
-    // 截断后至少保留两个点，否则视为截断无效，保留原轨迹。
-    if (points.size() - nearestIndex < 2)
-    {
-        return points;
-    }
-    QVector<PointCloudExtractionProcessor::TrackPoint> truncated = points.mid(nearestIndex);
-    truncated.first().type = PointCloudExtractionProcessor::TrackPointType::Start;
+    QVector<PointCloudExtractionProcessor::TrackPoint> truncated = points.mid(0, nearestIndex + 1);
+    truncated.last().type = PointCloudExtractionProcessor::TrackPointType::End;
     if (removedCount != nullptr)
     {
-        *removedCount = nearestIndex;
+        *removedCount = points.size() - truncated.size();
     }
     return truncated;
 }
@@ -787,29 +803,31 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             }
             return failed;
         }
-        // 已焊起点截断（开关控制）：SDK 检测到已焊段时，截掉焊道已焊部分只焊剩余段。
+        // 已焊起点截断（开关控制）：SDK 检测到已焊段时，按焊接方向截掉焊道已焊部分只焊剩余段。
         PointCloudExtractionProcessor::ExtractionResult workingExtraction = extraction;
         if (settings.sdkUseWeldedStartTruncation)
         {
             if (extraction.hasWeldedStartPoint)
             {
+                const bool weldFromTrackStart = param.nWeldDirection >= 0;
                 int removedCount = 0;
-                workingExtraction.points =
-                    TruncateTrackAtWeldedStart(extraction.points, extraction.weldedStartPoint, &removedCount);
+                workingExtraction.points = TruncateTrackAtWeldedStart(
+                    extraction.points, extraction.weldedStartPoint, weldFromTrackStart, &removedCount);
                 if (appendLog)
                 {
                     if (removedCount > 0)
                     {
-                        appendLog(QString("已焊起点截断：起点(%1, %2, %3)，截除 %4 点，保留 %5 点。")
+                        appendLog(QString("已焊起点截断：交界点(%1, %2, %3)，焊接方向=%4，截除已焊侧 %5 点，保留 %6 点。")
                             .arg(extraction.weldedStartPoint.x(), 0, 'f', 2)
                             .arg(extraction.weldedStartPoint.y(), 0, 'f', 2)
                             .arg(extraction.weldedStartPoint.z(), 0, 'f', 2)
+                            .arg(weldFromTrackStart ? "起点到终点" : "终点到起点")
                             .arg(removedCount)
                             .arg(workingExtraction.points.size()));
                     }
                     else
                     {
-                        appendLog("已焊起点截断：起点位于焊道开头或截断后点数不足，焊道未截断。");
+                        appendLog("已焊起点截断：交界点位于焊道端部或截断后点数不足，焊道未截断。");
                     }
                 }
             }
