@@ -1294,13 +1294,7 @@ void PreciseMeasureEditDialog::OnParamGroupChanged(int index)
     {
         return;
     }
-    QString error;
-    RobotDataHelper::WriteParamValue(
-        CurrentParamFilePath(),
-        GroupMetaSectionName(),
-        "UseGroupNo",
-        QString::number(CurrentGroupIndex()),
-        &error);
+    // 切组只切换显示，不再自动写 UseGroupNo；点"保存参数"时统一写回（与其它界面一致）。
     if (m_pGroupNameEdit != nullptr)
     {
         m_pGroupNameEdit->setText(CurrentGroupName());
@@ -2151,16 +2145,8 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
         AppendLog(QString("当前分组没有其它参数：%1").arg(section));
     }
 
-    for (QComboBox* combo : m_otherParamComboEditors)
-    {
-        if (combo != nullptr)
-        {
-            connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, combo](int)
-                {
-                    SaveOtherParamComboEdit(combo);
-                });
-        }
-    }
+    // 下拉参数不再选中即写盘；点"保存参数"时统一写回（与其它界面一致），
+    // 未保存检测的快照已包含这些下拉框。
 
     UpdateOtherParamPageVisibility();
     m_bLoading = false;
