@@ -69,6 +69,7 @@ int main(int argc, char *argv[])
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();
+    InstallGlobalWheelGuard(app);
     SetWorkingDirectoryToProjectRoot();
     app.setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
 
