@@ -2126,6 +2126,7 @@ MeasureThenWeldService::CompPreviewEditValues WeldSeamCompDialog::CollectCompPre
             edits.weldZComp[seg] = m_seamRows[flat].weldZComp;
             edits.weldGunDirComp[seg] = m_seamRows[flat].weldGunDirComp;
             edits.weldSeamDirComp[seg] = m_seamRows[flat].weldSeamDirComp;
+            edits.seamSegmentKind[seg] = m_seamRows[flat].segmentKind;
         }
     }
     else
