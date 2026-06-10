@@ -9750,3 +9750,228 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
     }
     return result;
 }
+
+bool MeasureThenWeldService::LoadCompPreviewRawCloud(
+    const QString& laserDir,
+    QVector<CompPreviewPoint>& points,
+    QString& error) const
+{
+    points.clear();
+    QDir dir(laserDir);
+    if (!dir.exists())
+    {
+        error = QString("目录不存在：%1").arg(laserDir);
+        return false;
+    }
+    QVector<RobotCalculation::IndexedPoint3D> rawPoints;
+    if (!RobotDataHelper::LoadIndexedPoint3DFile(dir.filePath(RAW_LASER_FILE_NAME), rawPoints, &error))
+    {
+        return false;
+    }
+    points.reserve(rawPoints.size());
+    for (const RobotCalculation::IndexedPoint3D& raw : rawPoints)
+    {
+        CompPreviewPoint point;
+        point.x = raw.point.x();
+        point.y = raw.point.y();
+        point.z = raw.point.z();
+        points.push_back(point);
+    }
+    if (points.isEmpty())
+    {
+        error = QString("未从 %1 解析到原始点。").arg(RAW_LASER_FILE_NAME);
+        return false;
+    }
+    return true;
+}
+
+MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPreviewStages(
+    const QString& robotName,
+    const QVector<CompPreviewPoint>& baseline,
+    const CompPreviewEditValues& currentEdits,
+    const CompPreviewEditValues& savedEdits,
+    bool includePoseArrows) const
+{
+    CompPreviewStages stages;
+    if (baseline.isEmpty())
+    {
+        stages.error = QStringLiteral("没有可用的基准焊道点。");
+        return stages;
+    }
+
+    static const char* const kSegmentKinds[4] = { "low_platform", "rising_edge", "high_platform", "falling_edge" };
+    const auto buildPoseSlots = [&](const CompPreviewEditValues& edits)
+    {
+        // 注意：局部变量不能叫 slots（Qt 宏）。
+        std::vector<WeldPosePreset::PoseCompSlot> poseSlots(4);
+        for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
+        {
+            poseSlots[slotIndex].segmentKind = QString::fromLatin1(kSegmentKinds[slotIndex]);
+            poseSlots[slotIndex].poseRx = edits.poseRx[slotIndex];
+            poseSlots[slotIndex].poseRy = edits.poseRy[slotIndex];
+            poseSlots[slotIndex].poseRz = edits.poseRz[slotIndex];
+            poseSlots[slotIndex].compX = edits.compX[slotIndex];
+            poseSlots[slotIndex].compY = edits.compY[slotIndex];
+            poseSlots[slotIndex].compZ = edits.compZ[slotIndex];
+            poseSlots[slotIndex].validReference = true;
+        }
+        return poseSlots;
+    };
+    const std::vector<WeldPosePreset::PoseCompSlot> currentPoseSlots = buildPoseSlots(currentEdits);
+    const std::vector<WeldPosePreset::PoseCompSlot> savedPoseSlots = buildPoseSlots(savedEdits);
+
+    // 阶段「姿态补偿」：基准(_WeldPose_2mm)已烘焙扫描时保存的姿态补偿，
+    // 按 delta = 当前补偿位移 − 已保存补偿位移 叠加，当前=已保存时与文件一致；
+    // 位移纯加性，等价于用当前值重跑姿态生成。
+    QVector<WeldPoseFileRecord> records;
+    records.reserve(baseline.size());
+    for (const CompPreviewPoint& base : baseline)
+    {
+        WeldPoseFileRecord record;
+        record.weldIndex = base.weldIndex;
+        record.rawIndex = base.rawIndex;
+        record.point = Eigen::Vector3d(base.x, base.y, base.z);
+        record.rx = base.rx;
+        record.ry = base.ry;
+        record.rz = base.rz;
+        record.bx = base.bx;
+        record.by = base.by;
+        record.bz = base.bz;
+        record.segmentKind = base.segmentKind;
+        record.pointType = base.pointType;
+
+        const Eigen::Vector3d basePoint = record.point;
+        const Eigen::Vector3d withCurrent = ApplyPoseCompToPoint(
+            currentPoseSlots, currentEdits.poseMatchMode, currentEdits.poseMatchMaxErrorDeg,
+            currentEdits.robotType, basePoint, base.rx, base.ry, base.rz, base.segmentKind);
+        const Eigen::Vector3d withSaved = ApplyPoseCompToPoint(
+            savedPoseSlots, savedEdits.poseMatchMode, savedEdits.poseMatchMaxErrorDeg,
+            savedEdits.robotType, basePoint, base.rx, base.ry, base.rz, base.segmentKind);
+        record.point = basePoint + (withCurrent - basePoint) - (withSaved - basePoint);
+        records.push_back(record);
+    }
+
+    const auto snapshotRecords = [](const QVector<WeldPoseFileRecord>& sourceRecords)
+    {
+        QVector<CompPreviewPoint> out;
+        out.reserve(sourceRecords.size());
+        for (const WeldPoseFileRecord& record : sourceRecords)
+        {
+            CompPreviewPoint point;
+            point.x = record.point.x();
+            point.y = record.point.y();
+            point.z = record.point.z();
+            point.rx = record.rx;
+            point.ry = record.ry;
+            point.rz = record.rz;
+            point.bx = record.bx;
+            point.by = record.by;
+            point.bz = record.bz;
+            point.weldIndex = record.weldIndex;
+            point.rawIndex = record.rawIndex;
+            point.segmentKind = record.segmentKind;
+            point.pointType = record.pointType;
+            out.push_back(point);
+        }
+        return out;
+    };
+    stages.poseComp = snapshotRecords(records);
+
+    QVector<Eigen::Vector3d> basePoints;
+    basePoints.reserve(records.size());
+    for (const WeldPoseFileRecord& record : records)
+    {
+        basePoints.push_back(record.point);
+    }
+    const Eigen::Vector3d seamDir = ResolveOverallHorizontalWeldDirection(basePoints);
+    const Eigen::Vector3d gunDir = HorizontalUnitOrZero(Eigen::Vector3d::UnitZ().cross(seamDir));
+
+    // 阶段「焊道补偿」：真实预设 + 当前编辑槽位覆盖（槽位段类用配置真实值，匹配/回退与下发一致）。
+    WeldPosePreset preset = LoadWeldPosePreset(BuildMeasureWeldParamShell(robotName));
+    preset.seamCompSlots.assign(4, WeldPosePreset::SeamCompSlot());
+    for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
+    {
+        const QString segmentKind = currentEdits.seamSegmentKind[slotIndex].trimmed().isEmpty()
+            ? QString::fromLatin1(kSegmentKinds[slotIndex])
+            : currentEdits.seamSegmentKind[slotIndex];
+        preset.seamCompSlots[slotIndex].segmentKind = segmentKind;
+        preset.seamCompSlots[slotIndex].weldZComp = currentEdits.weldZComp[slotIndex];
+        preset.seamCompSlots[slotIndex].weldGunDirComp = currentEdits.weldGunDirComp[slotIndex];
+        preset.seamCompSlots[slotIndex].weldSeamDirComp = currentEdits.weldSeamDirComp[slotIndex];
+    }
+    WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
+    stages.seamComp = snapshotRecords(records);
+
+    // 阶段「圆弧过渡」：完整后处理（端点/自交裁剪、拐点恢复、加密、圆弧过渡、锐角裁剪、平滑、重编号）。
+    const QVector<WeldPoseFileRecord> recordsBeforeTrim = records;
+    FinalizeSeamCompedWeldPoseRecords(preset, recordsBeforeTrim, records, compStats);
+    if (records.isEmpty())
+    {
+        records = recordsBeforeTrim;  // 后处理裁空则回退显示纯补偿平移结果
+    }
+    stages.arc = snapshotRecords(records);
+
+    // 方向箭头：质心 + 自适应长度。
+    double sum[3] = { 0.0, 0.0, 0.0 };
+    double minv[3] = { 1e300, 1e300, 1e300 };
+    double maxv[3] = { -1e300, -1e300, -1e300 };
+    for (const CompPreviewPoint& point : stages.poseComp)
+    {
+        const double coord[3] = { point.x, point.y, point.z };
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            sum[axis] += coord[axis];
+            minv[axis] = std::min(minv[axis], coord[axis]);
+            maxv[axis] = std::max(maxv[axis], coord[axis]);
+        }
+    }
+    const double count = static_cast<double>(stages.poseComp.size());
+    const double cx = sum[0] / count;
+    const double cy = sum[1] / count;
+    const double cz = sum[2] / count;
+    const double span = std::max({ maxv[0] - minv[0], maxv[1] - minv[1], maxv[2] - minv[2], 10.0 });
+    const double arrowLen = std::clamp(span * 0.15, 8.0, 80.0);
+    const auto addArrow = [&stages](double ox, double oy, double oz, double vx, double vy, double vz,
+        const QString& label, int colorId)
+    {
+        CompPreviewArrow arrow;
+        arrow.origin[0] = ox; arrow.origin[1] = oy; arrow.origin[2] = oz;
+        arrow.vector[0] = vx; arrow.vector[1] = vy; arrow.vector[2] = vz;
+        arrow.label = label;
+        arrow.colorId = colorId;
+        arrow.doubleHeaded = true;
+        stages.arrows.push_back(arrow);
+    };
+    addArrow(cx, cy, cz, 0.0, 0.0, arrowLen, QStringLiteral("Z向+"), 0);
+    addArrow(cx, cy, cz, gunDir.x() * arrowLen, gunDir.y() * arrowLen, gunDir.z() * arrowLen, QStringLiteral("枪反向+"), 1);
+    addArrow(cx, cy, cz, seamDir.x() * arrowLen, seamDir.y() * arrowLen, seamDir.z() * arrowLen, QStringLiteral("焊道方向+"), 2);
+
+    if (includePoseArrows)
+    {
+        int repIndex = 0;
+        double bestDistanceSq = std::numeric_limits<double>::max();
+        for (int index = 0; index < baseline.size(); ++index)
+        {
+            const double dx = baseline[index].x - cx;
+            const double dy = baseline[index].y - cy;
+            const double dz = baseline[index].z - cz;
+            const double distanceSq = dx * dx + dy * dy + dz * dz;
+            if (distanceSq < bestDistanceSq)
+            {
+                bestDistanceSq = distanceSq;
+                repIndex = index;
+            }
+        }
+        const Eigen::Matrix3d rotation = RobotPoseTransform::RotationFromAnglesDeg(
+            baseline[repIndex].rx, baseline[repIndex].ry, baseline[repIndex].rz, currentEdits.robotType);
+        const Eigen::Vector3d toolX = rotation.col(0) * arrowLen;
+        const Eigen::Vector3d toolY = rotation.col(1) * arrowLen;
+        const Eigen::Vector3d toolZ = rotation.col(2) * arrowLen;
+        addArrow(cx, cy, cz, toolX.x(), toolX.y(), toolX.z(), QStringLiteral("X补偿+"), 3);
+        addArrow(cx, cy, cz, toolY.x(), toolY.y(), toolY.z(), QStringLiteral("Y补偿+"), 4);
+        addArrow(cx, cy, cz, toolZ.x(), toolZ.y(), toolZ.z(), QStringLiteral("Z补偿+"), 5);
+    }
+
+    stages.ok = true;
+    return stages;
+}

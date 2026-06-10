@@ -16,6 +16,7 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
+class QAbstractButton;
 class QPushButton;
 class QWidget;
 class QTimer;
@@ -116,8 +117,8 @@ private:
     void ScheduleCompPreview();
     void RecomputeCompPreview();
     void ApplyCompPreviewLayerVisibility();
-    MeasureThenWeldService::CompPreviewKind CurrentCompPreviewKind() const;
     MeasureThenWeldService::CompPreviewEditValues CollectCompPreviewEditValues() const;
+    MeasureThenWeldService::CompPreviewEditValues CollectSavedPoseCompEdits() const;
     void BackupOldCompFiles(const QString& backupRoot, QString& summary) const;
     int CurrentRobotType() const;
 
@@ -171,10 +172,10 @@ private:
     MeasureThenWeldService m_compPreviewService;
     QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewBaseline;
     QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewOriginal;
+    QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewRaw;
+    QVector<PoseCompRow> m_savedPoseRows;   // 加载/保存后的姿态补偿快照（姿态补偿阶段按 delta 计算）
     QString m_compPreviewDir;
     QString m_compPreviewBaselineDir;
-    bool m_compPreviewBaselineUsesKeyPoints = false;
-    QCheckBox* m_pShowOriginalCheck = nullptr;
-    QCheckBox* m_pShowBeforeCheck = nullptr;
-    QCheckBox* m_pShowAfterCheck = nullptr;
+    // 五阶段图层开关：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡
+    QAbstractButton* m_pStageToggles[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
 };
