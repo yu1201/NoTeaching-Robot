@@ -40,7 +40,6 @@ private:
     QLineEdit* m_pExternalConfigPathEdit = nullptr;
     QDoubleSpinBox* m_pExternalZTruncationSpin = nullptr;
     QDoubleSpinBox* m_pExternalResampleStepSpin = nullptr;
-    QCheckBox* m_pExternalFallbackCheck = nullptr;
     QCheckBox* m_pCloudUprightCheck = nullptr;
     QDoubleSpinBox* m_pCloudPlateThicknessSpin = nullptr;
     QDoubleSpinBox* m_pCloudRemoveFloorZSpin = nullptr;
@@ -60,7 +59,6 @@ private:
     QDoubleSpinBox* m_pCloudLineLengthSpin = nullptr;
     QGroupBox* m_pSdkParamGroup = nullptr;
     QGroupBox* m_pSdkInnerGroup = nullptr;
-    QGroupBox* m_pCloudAlgoGroup = nullptr;
     QComboBox* m_pFeaturePointStrategyCombo = nullptr;
     QComboBox* m_pAxisCombo = nullptr;
     QDoubleSpinBox* m_pZThresholdSpin = nullptr;

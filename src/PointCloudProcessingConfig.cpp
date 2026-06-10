@@ -15,8 +15,6 @@ constexpr auto SETTINGS_GROUP = "PointCloudProcessing";
 bool g_hasRuntimeModeOverride = false;
 PointCloudProcessingConfig::Mode g_runtimeModeOverride =
     PointCloudProcessingConfig::Mode::LegacyLaserPath;
-bool g_hasRuntimeFallbackOverride = false;
-bool g_runtimeFallbackOverride = true;
 bool g_hasRuntimeScanDirectionOverride = false;
 double g_runtimeScanDirectionX = 1.0;
 double g_runtimeScanDirectionY = 0.0;
@@ -123,7 +121,6 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.fitSmoothRadius = ReadIntSetting("Fit/SmoothRadius", settings.fitSmoothRadius);
     settings.slopeConsistentCornerFit = ReadBoolSetting("FeaturePoint/SlopeConsistentCornerFit", false);
     settings.exportFitDebugCloud = ReadBoolSetting("FeaturePoint/ExportFitDebugCloud", true);
-    settings.fallbackToLegacy = ReadBoolSetting("External/FallbackToLegacy", true);
     settings.validationCoverageEnabled = ReadBoolSetting("Validation/CoverageEnabled", settings.validationCoverageEnabled);
     settings.validationMinFinitePointCount = ReadIntSetting("Validation/MinFinitePointCount", settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = ReadDoubleSetting("Validation/MinProjectedSpanMm", settings.validationMinProjectedSpanMm);
@@ -147,10 +144,6 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     if (g_hasRuntimeModeOverride)
     {
         settings.mode = g_runtimeModeOverride;
-    }
-    if (g_hasRuntimeFallbackOverride)
-    {
-        settings.fallbackToLegacy = g_runtimeFallbackOverride;
     }
 
     if (settings.libraryDir.isEmpty())
@@ -247,7 +240,6 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("External/ResampleStepMm", QString::number(settings.resampleStepMm, 'f', 6))
         && write("FeaturePoint/SlopeConsistentCornerFit", settings.slopeConsistentCornerFit ? "1" : "0")
         && write("FeaturePoint/ExportFitDebugCloud", settings.exportFitDebugCloud ? "1" : "0")
-        && write("External/FallbackToLegacy", settings.fallbackToLegacy ? "1" : "0")
         && write("Fit/SampleAxis", SampleAxisModeConfigValue(settings.sampleAxisMode))
         && write("CloudAlgo/ZThresholdMm", QString::number(settings.cloudZThresholdMm, 'f', 6))
         && write("CloudAlgo/ZJumpThresholdMm", QString::number(settings.cloudZJumpThresholdMm, 'f', 6))
@@ -294,12 +286,6 @@ void PointCloudProcessingConfig::SetRuntimeModeOverride(Mode mode)
     g_hasRuntimeModeOverride = true;
 }
 
-void PointCloudProcessingConfig::SetRuntimeFallbackToLegacyOverride(bool fallbackToLegacy)
-{
-    g_runtimeFallbackOverride = fallbackToLegacy;
-    g_hasRuntimeFallbackOverride = true;
-}
-
 void PointCloudProcessingConfig::SetRuntimeScanDirectionOverride(double x, double y, double z)
 {
     g_runtimeScanDirectionX = x;
@@ -332,7 +318,6 @@ bool PointCloudProcessingConfig::RuntimeScanDirectionOverride(double* x, double*
 void PointCloudProcessingConfig::ClearRuntimeOverrides()
 {
     g_hasRuntimeModeOverride = false;
-    g_hasRuntimeFallbackOverride = false;
     g_hasRuntimeScanDirectionOverride = false;
 }
 

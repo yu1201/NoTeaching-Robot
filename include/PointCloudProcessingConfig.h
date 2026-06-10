@@ -38,7 +38,6 @@ public:
         QString configPath;
         double zTruncationValue = 6.0;
         double resampleStepMm = 2.0;
-        bool fallbackToLegacy = true;
         // 滤波拟合数值参数（管线真实消费；默认值即原管线硬编码值，保证升级后现场行为不变）。
         SampleAxisMode sampleAxisMode = SampleAxisMode::Auto;
         double cloudZThresholdMm = -230.0;
@@ -85,7 +84,6 @@ public:
     static Settings Load();
     static bool Save(const Settings& settings, QString* error = nullptr);
     static void SetRuntimeModeOverride(Mode mode);
-    static void SetRuntimeFallbackToLegacyOverride(bool fallbackToLegacy);
     static void SetRuntimeScanDirectionOverride(double x, double y, double z);
     static bool RuntimeScanDirectionOverride(double* x, double* y, double* z);
     static void ClearRuntimeOverrides();

@@ -506,50 +506,6 @@ void LaserWeldFilterDialog::BuildUi()
     validationLayout->setContentsMargins(10, 10, 10, 10);
     validationLayout->setSpacing(12);
 
-    // 点云算法参数（程序滤波链的去噪/分段预处理，②③④ 使用；①直接用 SDK 拐点不经过滤波链）
-    // 与 SDK 参数（仅①②）分组，不混放。
-    m_pCloudAlgoGroup = new QGroupBox("点云算法参数");
-    QGridLayout* cloudAlgoLayout = new QGridLayout(m_pCloudAlgoGroup);
-    cloudAlgoLayout->setHorizontalSpacing(12);
-    cloudAlgoLayout->setVerticalSpacing(10);
-    m_pZThresholdSpin = new QDoubleSpinBox();
-    m_pZThresholdSpin->setRange(-9999.0, 9999.0);
-    m_pZThresholdSpin->setDecimals(3);
-    m_pZThresholdSpin->setSingleStep(1.0);
-    m_pZThresholdSpin->setValue(-230.0);
-    m_pZJumpThresholdSpin = new QDoubleSpinBox();
-    m_pZJumpThresholdSpin->setRange(0.0, 9999.0);
-    m_pZJumpThresholdSpin->setDecimals(3);
-    m_pZJumpThresholdSpin->setSingleStep(0.5);
-    m_pZJumpThresholdSpin->setValue(3.0);
-    m_pZJumpThresholdSpin->setSpecialValueText("关闭");
-    m_pZContinuityThresholdSpin = new QDoubleSpinBox();
-    m_pZContinuityThresholdSpin->setRange(0.0, 9999.0);
-    m_pZContinuityThresholdSpin->setDecimals(3);
-    m_pZContinuityThresholdSpin->setSingleStep(0.5);
-    m_pZContinuityThresholdSpin->setValue(2.0);
-    m_pZContinuityThresholdSpin->setSpecialValueText("关闭");
-    m_pSegmentBreakDistanceSpin = new QDoubleSpinBox();
-    m_pSegmentBreakDistanceSpin->setRange(0.0, 9999.0);
-    m_pSegmentBreakDistanceSpin->setDecimals(3);
-    m_pSegmentBreakDistanceSpin->setSingleStep(1.0);
-    m_pSegmentBreakDistanceSpin->setValue(6.0);
-    m_pSegmentBreakDistanceSpin->setSpecialValueText("关闭");
-    m_pKeepLongestSegmentCheck = new QCheckBox("只保留最长连续段");
-    m_pKeepLongestSegmentCheck->setChecked(true);
-    cloudAlgoLayout->addWidget(new QLabel("下层 Z 阈值"), 0, 0);
-    cloudAlgoLayout->addWidget(CreateUnitEditor(m_pZThresholdSpin, "mm"), 0, 1);
-    cloudAlgoLayout->addWidget(new QLabel("Z突变阈值"), 0, 2);
-    cloudAlgoLayout->addWidget(CreateUnitEditor(m_pZJumpThresholdSpin, "mm"), 0, 3);
-    cloudAlgoLayout->addWidget(new QLabel("Z连续阈值"), 1, 0);
-    cloudAlgoLayout->addWidget(CreateUnitEditor(m_pZContinuityThresholdSpin, "mm"), 1, 1);
-    cloudAlgoLayout->addWidget(new QLabel("段间跳变阈值"), 1, 2);
-    cloudAlgoLayout->addWidget(CreateUnitEditor(m_pSegmentBreakDistanceSpin, "mm"), 1, 3);
-    cloudAlgoLayout->addWidget(m_pKeepLongestSegmentCheck, 2, 0, 1, 4);
-    cloudAlgoLayout->setColumnStretch(1, 1);
-    cloudAlgoLayout->setColumnStretch(3, 1);
-    pointCloudLayout->addWidget(m_pCloudAlgoGroup);
-
     m_pSdkParamGroup = new QGroupBox("SDK 点云参数");
     QGridLayout* processingLayout = new QGridLayout(m_pSdkParamGroup);
     m_pExternalLibraryDirEdit = new QLineEdit();
@@ -684,7 +640,6 @@ void LaserWeldFilterDialog::BuildUi()
         m_pProcessingModeCombo->addItem(
             PointCloudProcessingConfig::ModeDisplayName(method), static_cast<int>(method));
     }
-    m_pExternalFallbackCheck = new QCheckBox("点云方法失败时回退特征点+拟合");
     // 采样主轴对所有方法生效（①用于段类判定方向，②③④用于采样与段类），放方法组恒可用。
     m_pAxisCombo = new QComboBox();
     m_pAxisCombo->addItem("自动推断（按扫描方向）", static_cast<int>(PointCloudProcessingConfig::SampleAxisMode::Auto));
@@ -692,11 +647,10 @@ void LaserWeldFilterDialog::BuildUi()
     m_pAxisCombo->addItem("按 Y 方向采样/判段", static_cast<int>(PointCloudProcessingConfig::SampleAxisMode::AxisY));
     m_pAxisCombo->setToolTip("决定轨迹采样与平台/上坡/下坡段类判定的方向轴，对四种方法都生效；默认按扫描起止点方向自动推断。");
     QLabel* methodHintLabel = new QLabel(
-        "SDK全处理：SDK拐点直接使用；SDK+拟合：SDK基础焊道再拟合；点云+拟合：完整点云直接拟合；特征点+拟合：相机目标点轨迹拟合。");
+        "SDK全处理：SDK拐点直接使用；SDK+拟合：SDK基础焊道再拟合；点云+拟合：完整点云直接拟合；特征点+拟合：相机目标点轨迹拟合。处理失败直接报错，不回退其他方法。");
     methodHintLabel->setWordWrap(true);
     methodLayout->addWidget(new QLabel("当前方法"), 0, 0);
     methodLayout->addWidget(m_pProcessingModeCombo, 0, 1);
-    methodLayout->addWidget(m_pExternalFallbackCheck, 0, 2);
     methodLayout->addWidget(new QLabel("采样主轴"), 1, 0);
     methodLayout->addWidget(m_pAxisCombo, 1, 1);
     methodLayout->addWidget(methodHintLabel, 2, 0, 1, 3);
@@ -705,6 +659,37 @@ void LaserWeldFilterDialog::BuildUi()
 
     QGroupBox* paramGroup = new QGroupBox("滤波拟合参数");
     QGridLayout* paramLayout = new QGridLayout(paramGroup);
+    // 去噪/分段参数属于程序滤波链，对走滤波拟合的方法（②③④）统一生效。
+    m_pZThresholdSpin = new QDoubleSpinBox();
+    m_pZThresholdSpin->setRange(-9999.0, 9999.0);
+    m_pZThresholdSpin->setDecimals(3);
+    m_pZThresholdSpin->setSingleStep(1.0);
+    m_pZThresholdSpin->setValue(-230.0);
+
+    m_pZJumpThresholdSpin = new QDoubleSpinBox();
+    m_pZJumpThresholdSpin->setRange(0.0, 9999.0);
+    m_pZJumpThresholdSpin->setDecimals(3);
+    m_pZJumpThresholdSpin->setSingleStep(0.5);
+    m_pZJumpThresholdSpin->setValue(3.0);
+    m_pZJumpThresholdSpin->setSpecialValueText("关闭");
+
+    m_pZContinuityThresholdSpin = new QDoubleSpinBox();
+    m_pZContinuityThresholdSpin->setRange(0.0, 9999.0);
+    m_pZContinuityThresholdSpin->setDecimals(3);
+    m_pZContinuityThresholdSpin->setSingleStep(0.5);
+    m_pZContinuityThresholdSpin->setValue(2.0);
+    m_pZContinuityThresholdSpin->setSpecialValueText("关闭");
+
+    m_pSegmentBreakDistanceSpin = new QDoubleSpinBox();
+    m_pSegmentBreakDistanceSpin->setRange(0.0, 9999.0);
+    m_pSegmentBreakDistanceSpin->setDecimals(3);
+    m_pSegmentBreakDistanceSpin->setSingleStep(1.0);
+    m_pSegmentBreakDistanceSpin->setValue(6.0);
+    m_pSegmentBreakDistanceSpin->setSpecialValueText("关闭");
+
+    m_pKeepLongestSegmentCheck = new QCheckBox("只保留最长连续段");
+    m_pKeepLongestSegmentCheck->setChecked(true);
+
     m_pFeaturePointStrategyCombo = new QComboBox();
     m_pFeaturePointStrategyCombo->addItem(
         PointCloudProcessingConfig::FeaturePointStrategyDisplayName(
@@ -764,25 +749,34 @@ void LaserWeldFilterDialog::BuildUi()
     m_pExportFitDebugCloudCheck->setToolTip("启用后，每次拟合都把各段用到的点集、拟合直线和关键点导出到输出文件同目录的 FitDebug 子目录，可直接拖入 CloudCompare 核对每段拟合是否正确。");
     m_pExportFitDebugCloudCheck->setChecked(true);
 
-    // 滤波拟合方案置顶，方便切换；去噪/分段参数在点云参数页"点云算法参数"组，采样主轴在方法组。
+    // 滤波拟合方案置顶，方便切换；去噪/分段参数随后，再到拟合参数；采样主轴在方法组。
     paramLayout->addWidget(new QLabel("滤波拟合方案"), 0, 0);
     paramLayout->addWidget(m_pFeaturePointStrategyCombo, 0, 1, 1, 3);
-    paramLayout->addWidget(new QLabel("输出步长"), 1, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pStepSpin, "mm"), 1, 1);
-    paramLayout->addWidget(new QLabel("搜索窗口"), 1, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pWindowSpin, "mm"), 1, 3);
-    paramLayout->addWidget(new QLabel("拟合裁首尾点数"), 2, 0);
-    paramLayout->addWidget(m_pLineFitTrimSpin, 2, 1);
-    paramLayout->addWidget(new QLabel("分段拟合容差"), 2, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pPiecewiseToleranceSpin, "mm"), 2, 3);
-    paramLayout->addWidget(new QLabel("每段最少点数"), 3, 0);
-    paramLayout->addWidget(m_pPiecewiseMinSegmentSpin, 3, 1);
-    paramLayout->addWidget(new QLabel("最小点数"), 3, 2);
-    paramLayout->addWidget(m_pMinPointSpin, 3, 3);
-    paramLayout->addWidget(new QLabel("平滑半径"), 4, 0);
-    paramLayout->addWidget(m_pSmoothRadiusSpin, 4, 1);
-    paramLayout->addWidget(m_pSlopeConsistentCornerFitCheck, 4, 2, 1, 2);
-    paramLayout->addWidget(m_pExportFitDebugCloudCheck, 5, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("下层 Z 阈值"), 1, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pZThresholdSpin, "mm"), 1, 1);
+    paramLayout->addWidget(new QLabel("Z突变阈值"), 1, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pZJumpThresholdSpin, "mm"), 1, 3);
+    paramLayout->addWidget(new QLabel("Z连续阈值"), 2, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pZContinuityThresholdSpin, "mm"), 2, 1);
+    paramLayout->addWidget(new QLabel("段间跳变阈值"), 2, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pSegmentBreakDistanceSpin, "mm"), 2, 3);
+    paramLayout->addWidget(new QLabel("输出步长"), 3, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pStepSpin, "mm"), 3, 1);
+    paramLayout->addWidget(new QLabel("搜索窗口"), 3, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pWindowSpin, "mm"), 3, 3);
+    paramLayout->addWidget(new QLabel("拟合裁首尾点数"), 4, 0);
+    paramLayout->addWidget(m_pLineFitTrimSpin, 4, 1);
+    paramLayout->addWidget(new QLabel("分段拟合容差"), 4, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pPiecewiseToleranceSpin, "mm"), 4, 3);
+    paramLayout->addWidget(new QLabel("每段最少点数"), 5, 0);
+    paramLayout->addWidget(m_pPiecewiseMinSegmentSpin, 5, 1);
+    paramLayout->addWidget(new QLabel("最小点数"), 5, 2);
+    paramLayout->addWidget(m_pMinPointSpin, 5, 3);
+    paramLayout->addWidget(new QLabel("平滑半径"), 6, 0);
+    paramLayout->addWidget(m_pSmoothRadiusSpin, 6, 1);
+    paramLayout->addWidget(m_pKeepLongestSegmentCheck, 6, 2, 1, 2);
+    paramLayout->addWidget(m_pSlopeConsistentCornerFitCheck, 7, 1, 1, 3);
+    paramLayout->addWidget(m_pExportFitDebugCloudCheck, 8, 0, 1, 4);
     paramLayout->setColumnStretch(1, 1);
     paramLayout->setColumnStretch(3, 1);
     featurePointLayout->addWidget(paramGroup);
@@ -948,12 +942,6 @@ void LaserWeldFilterDialog::BuildUi()
             ApplyMethodEnableState();
             SaveSettings();
         });
-    connect(m_pExternalFallbackCheck, &QCheckBox::toggled, this, [this](bool)
-        {
-            // ①下回退开关决定滤波链参数是否生效（失败回退④），联动启用状态。
-            ApplyMethodEnableState();
-            SaveSettings();
-        });
     connect(m_pAxisCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { SaveSettings(); });
 
     ApplyResponsivePageDefaults(this);
@@ -964,12 +952,8 @@ void LaserWeldFilterDialog::ApplyMethodEnableState()
     const PointCloudProcessingConfig::Mode mode = CurrentProcessingMode();
     const bool usesSdk = mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
         || mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
-    // 回退特征点+拟合只对点云链方法 ①②③ 有意义。
-    const bool canFallback = mode != PointCloudProcessingConfig::Mode::LegacyLaserPath;
-    const bool fallbackOn = m_pExternalFallbackCheck != nullptr && m_pExternalFallbackCheck->isChecked();
-    // 程序滤波拟合链（去噪/分段/拟合）：②③④主路径使用；①主路径直接用 SDK 拐点，
-    // 但勾选回退后失败会落到④滤波链，此时这些参数同样决定结果，保持可调。
-    const bool usesFitChain = mode != PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet || fallbackOn;
+    // 程序滤波拟合链（去噪/分段/拟合）：②③④使用；①直接用 SDK 拐点，失败即报错不回退。
+    const bool usesFitChain = mode != PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet;
 
     if (m_pSdkParamGroup != nullptr)
     {
@@ -979,23 +963,16 @@ void LaserWeldFilterDialog::ApplyMethodEnableState()
     {
         m_pSdkInnerGroup->setEnabled(usesSdk);
     }
-    if (m_pCloudAlgoGroup != nullptr)
-    {
-        m_pCloudAlgoGroup->setEnabled(usesFitChain);
-    }
-    if (m_pExternalFallbackCheck != nullptr)
-    {
-        m_pExternalFallbackCheck->setEnabled(canFallback);
-    }
     if (m_pAlgorithmTabWidget != nullptr)
     {
-        // 点云参数页恒可用，按分组禁用；滤波拟合参数页只在走滤波链时可用；
-        // 有效性检测仅作用于程序滤波拟合链（②③④及①的回退路径），页保持可用。
-        m_pAlgorithmTabWidget->setTabEnabled(0, true);
+        // 点云参数页只放 SDK 参数（①②）；滤波拟合参数页与有效性检测
+        // 仅作用于程序滤波拟合链（②③④），①下禁用。
+        m_pAlgorithmTabWidget->setTabEnabled(0, usesSdk);
         m_pAlgorithmTabWidget->setTabEnabled(1, usesFitChain);
+        m_pAlgorithmTabWidget->setTabEnabled(2, usesFitChain);
         if (!m_pAlgorithmTabWidget->isTabEnabled(m_pAlgorithmTabWidget->currentIndex()))
         {
-            m_pAlgorithmTabWidget->setCurrentIndex(0);
+            m_pAlgorithmTabWidget->setCurrentIndex(usesSdk ? 0 : 1);
         }
     }
 }
@@ -1042,10 +1019,6 @@ void LaserWeldFilterDialog::LoadSettings()
     SetPathEditText(m_pExternalConfigPathEdit, QDir::toNativeSeparators(processingSettings.configPath));
     m_pExternalZTruncationSpin->setValue(processingSettings.zTruncationValue);
     m_pExternalResampleStepSpin->setValue(processingSettings.resampleStepMm);
-    {
-        const QSignalBlocker blocker(m_pExternalFallbackCheck);
-        m_pExternalFallbackCheck->setChecked(processingSettings.fallbackToLegacy);
-    }
     if (m_pSlopeConsistentCornerFitCheck != nullptr)
     {
         const QSignalBlocker blocker(m_pSlopeConsistentCornerFitCheck);
@@ -1093,7 +1066,6 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pPiecewiseMinSegmentSpin->setValue(processingSettings.fitPiecewiseMinSegmentPoints);
     m_pMinPointSpin->setValue(processingSettings.fitMinPointCount);
     m_pSmoothRadiusSpin->setValue(processingSettings.fitSmoothRadius);
-    // 放在 mode 与回退勾选都加载完之后：启用矩阵依赖两者。
     ApplyMethodEnableState();
     LoadExternalAlgorithmConfig();
 }
@@ -1107,7 +1079,6 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.configPath = m_pExternalConfigPathEdit->text().trimmed();
     processingSettings.zTruncationValue = m_pExternalZTruncationSpin->value();
     processingSettings.resampleStepMm = m_pExternalResampleStepSpin->value();
-    processingSettings.fallbackToLegacy = m_pExternalFallbackCheck->isChecked();
     {
         const QVariant axisData = m_pAxisCombo->currentData();
         processingSettings.sampleAxisMode = axisData.isValid()
