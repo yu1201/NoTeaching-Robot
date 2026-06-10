@@ -52,6 +52,15 @@ public:
         int fitPiecewiseMinSegmentPoints = 10;
         int fitMinPointCount = 4;
         int fitSmoothRadius = 3;
+        // 点云投影提取参数（方法③点云算法+拟合专用；0=按滤波参数自动派生，等同原硬编码行为）。
+        double projectionStationWindowMm = 0.0;
+        double projectionTransverseWindowMm = 0.0;
+        double projectionZBandBelowMm = 0.0;
+        double projectionZBandAboveMm = 0.0;
+        int projectionMaxCandidatePerSeed = 160;
+        double projectionLayerLowPercent = 35.0;
+        double projectionLayerHighPercent = 50.0;
+        int projectionSmoothRadius = 0;
         bool slopeConsistentCornerFit = false;
         // 调试：导出每段拟合点集与拟合直线为 CloudCompare 点云（默认开启，存数据库不写 ini）。
         bool exportFitDebugCloud = true;

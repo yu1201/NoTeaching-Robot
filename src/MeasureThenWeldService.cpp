@@ -591,6 +591,14 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
     params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
     params.minPointCount = pointCloudSettings.fitMinPointCount;
     params.smoothRadius = pointCloudSettings.fitSmoothRadius;
+    params.projectionStationWindowMm = pointCloudSettings.projectionStationWindowMm;
+    params.projectionTransverseWindowMm = pointCloudSettings.projectionTransverseWindowMm;
+    params.projectionZBandBelowMm = pointCloudSettings.projectionZBandBelowMm;
+    params.projectionZBandAboveMm = pointCloudSettings.projectionZBandAboveMm;
+    params.projectionMaxCandidatePerSeed = pointCloudSettings.projectionMaxCandidatePerSeed;
+    params.projectionLayerLowPercent = pointCloudSettings.projectionLayerLowPercent;
+    params.projectionLayerHighPercent = pointCloudSettings.projectionLayerHighPercent;
+    params.projectionSmoothRadius = pointCloudSettings.projectionSmoothRadius;
     params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
     params.exportFitDebugCloud = pointCloudSettings.exportFitDebugCloud;
     params.validationCoverageEnabled = pointCloudSettings.validationCoverageEnabled;

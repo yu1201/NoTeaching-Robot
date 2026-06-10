@@ -119,6 +119,14 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.fitPiecewiseMinSegmentPoints = ReadIntSetting("Fit/PiecewiseMinSegmentPoints", settings.fitPiecewiseMinSegmentPoints);
     settings.fitMinPointCount = ReadIntSetting("Fit/MinPointCount", settings.fitMinPointCount);
     settings.fitSmoothRadius = ReadIntSetting("Fit/SmoothRadius", settings.fitSmoothRadius);
+    settings.projectionStationWindowMm = ReadDoubleSetting("CloudProjection/StationWindowMm", settings.projectionStationWindowMm);
+    settings.projectionTransverseWindowMm = ReadDoubleSetting("CloudProjection/TransverseWindowMm", settings.projectionTransverseWindowMm);
+    settings.projectionZBandBelowMm = ReadDoubleSetting("CloudProjection/ZBandBelowMm", settings.projectionZBandBelowMm);
+    settings.projectionZBandAboveMm = ReadDoubleSetting("CloudProjection/ZBandAboveMm", settings.projectionZBandAboveMm);
+    settings.projectionMaxCandidatePerSeed = ReadIntSetting("CloudProjection/MaxCandidatePerSeed", settings.projectionMaxCandidatePerSeed);
+    settings.projectionLayerLowPercent = ReadDoubleSetting("CloudProjection/LayerLowPercent", settings.projectionLayerLowPercent);
+    settings.projectionLayerHighPercent = ReadDoubleSetting("CloudProjection/LayerHighPercent", settings.projectionLayerHighPercent);
+    settings.projectionSmoothRadius = ReadIntSetting("CloudProjection/SmoothRadius", settings.projectionSmoothRadius);
     settings.slopeConsistentCornerFit = ReadBoolSetting("FeaturePoint/SlopeConsistentCornerFit", false);
     settings.exportFitDebugCloud = ReadBoolSetting("FeaturePoint/ExportFitDebugCloud", true);
     settings.validationCoverageEnabled = ReadBoolSetting("Validation/CoverageEnabled", settings.validationCoverageEnabled);
@@ -206,6 +214,19 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.fitPiecewiseMinSegmentPoints = std::max(2, settings.fitPiecewiseMinSegmentPoints);
     settings.fitMinPointCount = std::max(2, settings.fitMinPointCount);
     settings.fitSmoothRadius = std::max(0, settings.fitSmoothRadius);
+    // 投影提取参数：负值视为 0（自动派生）；候选上限非正回退默认；层位分位夹到 [0,100] 且上界≥下界。
+    settings.projectionStationWindowMm = std::max(0.0, settings.projectionStationWindowMm);
+    settings.projectionTransverseWindowMm = std::max(0.0, settings.projectionTransverseWindowMm);
+    settings.projectionZBandBelowMm = std::max(0.0, settings.projectionZBandBelowMm);
+    settings.projectionZBandAboveMm = std::max(0.0, settings.projectionZBandAboveMm);
+    if (settings.projectionMaxCandidatePerSeed <= 0)
+    {
+        settings.projectionMaxCandidatePerSeed = 160;
+    }
+    settings.projectionLayerLowPercent = std::clamp(settings.projectionLayerLowPercent, 0.0, 100.0);
+    settings.projectionLayerHighPercent = std::clamp(
+        std::max(settings.projectionLayerHighPercent, settings.projectionLayerLowPercent), 0.0, 100.0);
+    settings.projectionSmoothRadius = std::max(0, settings.projectionSmoothRadius);
     settings.validationMinFinitePointCount = std::max(0, settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = std::max(0.0, settings.validationMinProjectedSpanMm);
     settings.validationMinStationCoverageRatio = std::clamp(settings.validationMinStationCoverageRatio, 0.0, 1.0);
@@ -253,6 +274,14 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("Fit/PiecewiseMinSegmentPoints", QString::number(settings.fitPiecewiseMinSegmentPoints))
         && write("Fit/MinPointCount", QString::number(settings.fitMinPointCount))
         && write("Fit/SmoothRadius", QString::number(settings.fitSmoothRadius))
+        && write("CloudProjection/StationWindowMm", QString::number(settings.projectionStationWindowMm, 'f', 6))
+        && write("CloudProjection/TransverseWindowMm", QString::number(settings.projectionTransverseWindowMm, 'f', 6))
+        && write("CloudProjection/ZBandBelowMm", QString::number(settings.projectionZBandBelowMm, 'f', 6))
+        && write("CloudProjection/ZBandAboveMm", QString::number(settings.projectionZBandAboveMm, 'f', 6))
+        && write("CloudProjection/MaxCandidatePerSeed", QString::number(settings.projectionMaxCandidatePerSeed))
+        && write("CloudProjection/LayerLowPercent", QString::number(settings.projectionLayerLowPercent, 'f', 6))
+        && write("CloudProjection/LayerHighPercent", QString::number(settings.projectionLayerHighPercent, 'f', 6))
+        && write("CloudProjection/SmoothRadius", QString::number(settings.projectionSmoothRadius))
         && write("Validation/CoverageEnabled", settings.validationCoverageEnabled ? "1" : "0")
         && write("Validation/MinFinitePointCount", QString::number(settings.validationMinFinitePointCount))
         && write("Validation/MinProjectedSpanMm", QString::number(settings.validationMinProjectedSpanMm, 'f', 6))
