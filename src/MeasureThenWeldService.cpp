@@ -9539,7 +9539,12 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
         preset.seamCompSlots.assign(4, WeldPosePreset::SeamCompSlot());
         for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
         {
-            preset.seamCompSlots[slotIndex].segmentKind = QString::fromLatin1(kSegmentKinds[slotIndex]);
+            // 用配置里真实的 segmentKind（可能是 CorrugatedPlate），为空才回退默认四段类；
+            // 配合保留的真实 preset.seamKind，使匹配/回退与下发 FindSeamCompSlotForRecord 完全一致。
+            const QString segmentKind = edits.seamSegmentKind[slotIndex].trimmed().isEmpty()
+                ? QString::fromLatin1(kSegmentKinds[slotIndex])
+                : edits.seamSegmentKind[slotIndex];
+            preset.seamCompSlots[slotIndex].segmentKind = segmentKind;
             preset.seamCompSlots[slotIndex].weldZComp = edits.weldZComp[slotIndex];
             preset.seamCompSlots[slotIndex].weldGunDirComp = edits.weldGunDirComp[slotIndex];
             preset.seamCompSlots[slotIndex].weldSeamDirComp = edits.weldSeamDirComp[slotIndex];

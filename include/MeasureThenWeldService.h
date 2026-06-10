@@ -103,10 +103,12 @@ public:
     // 对话框当前编辑的 4 段补偿值，段下标硬映射：0=低平台 1=上升边 2=高平台 3=下降边。
     struct CompPreviewEditValues
     {
-        // 焊道补偿(Seam)
+        // 焊道补偿(Seam)；seamSegmentKind 为各槽位真实段类（来自配置，可能是 CorrugatedPlate），
+        // 让预览的槽位匹配/回退与下发 FindSeamCompSlotForRecord 完全一致。
         double weldZComp[4] = { 0.0, 0.0, 0.0, 0.0 };
         double weldGunDirComp[4] = { 0.0, 0.0, 0.0, 0.0 };
         double weldSeamDirComp[4] = { 0.0, 0.0, 0.0, 0.0 };
+        QString seamSegmentKind[4];
         // 姿态补偿(Pose)
         double poseRx[4] = { 0.0, 0.0, 0.0, 0.0 };
         double poseRy[4] = { 0.0, 0.0, 0.0, 0.0 };
