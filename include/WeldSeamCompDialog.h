@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "ContralUnit.h"
 #include "MeasureThenWeldService.h"
@@ -122,6 +122,7 @@ private:
     bool SaveWeldProcessArea(QString& error);
     void ChooseCompPreviewDirectory();
     void SetCompPreviewDirectory(const QString& dir);
+    void RebuildCompPreviewBaseline();
     void AutoSelectLatestCompPreviewDirectory();
     void ScheduleCompPreview();
     void RecomputeCompPreview();
