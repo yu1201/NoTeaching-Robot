@@ -1067,7 +1067,18 @@ void LaserWeldFilterDialog::ApplyStyle()
         "QTabBar::tab { background: #0B1117; color: #B8C7CC; border: 1px solid #2E4656; padding: 8px 18px; min-width: 110px; }"
         "QTabBar::tab:selected { background: #214D5B; color: #FFFFFF; border-color: #65C7D0; }"
         "QTabBar::tab:hover { background: #18303B; color: #FFFFFF; }"
-        "QPlainTextEdit { background: #0B1117; color: #BFE7EA; border: 1px solid #2E4656; border-radius: 10px; padding: 8px; }")
+        "QPlainTextEdit { background: #0B1117; color: #BFE7EA; border: 1px solid #2E4656; border-radius: 10px; padding: 8px; }"
+        // 禁用态统一压暗：自定义 QSS 指定固定色后 Qt 默认的禁用变灰会被覆盖，必须显式给 :disabled 规则。
+        "QLineEdit:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled { background: #0D141A; color: #55656D; border-color: #1E2F3A; }"
+        "QComboBox:disabled { background: #0D141A; color: #55656D; border-color: #1E2F3A; }"
+        "QComboBox::drop-down:disabled { background: #0D141A; border-left-color: #1E2F3A; }"
+        "QPushButton:disabled { background: #15212B; color: #55656D; border-color: #1E2F3A; }"
+        "QCheckBox:disabled { color: #55656D; }"
+        "QLabel:disabled { color: #4A5860; }"
+        "QLabel#UnitLabel:disabled { color: #3E4B53; }"
+        "QGroupBox:disabled { border-color: #1E2F3A; }"
+        "QGroupBox::title:disabled { color: #4A5860; }"
+        "QTabBar::tab:disabled { background: #0A0F14; color: #44525A; }")
         + UnifiedComboBoxStyleSheet());
 }
 
