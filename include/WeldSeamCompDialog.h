@@ -115,6 +115,7 @@ private:
     void ChooseCompPreviewDirectory();
     void ScheduleCompPreview();
     void RecomputeCompPreview();
+    void ApplyCompPreviewLayerVisibility();
     MeasureThenWeldService::CompPreviewKind CurrentCompPreviewKind() const;
     MeasureThenWeldService::CompPreviewEditValues CollectCompPreviewEditValues() const;
     void BackupOldCompFiles(const QString& backupRoot, QString& summary) const;
@@ -169,7 +170,11 @@ private:
     QTimer* m_pCompPreviewTimer = nullptr;
     MeasureThenWeldService m_compPreviewService;
     QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewBaseline;
+    QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewOriginal;
     QString m_compPreviewDir;
     QString m_compPreviewBaselineDir;
     bool m_compPreviewBaselineUsesKeyPoints = false;
+    QCheckBox* m_pShowOriginalCheck = nullptr;
+    QCheckBox* m_pShowBeforeCheck = nullptr;
+    QCheckBox* m_pShowAfterCheck = nullptr;
 };
