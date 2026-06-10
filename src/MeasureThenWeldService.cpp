@@ -2910,39 +2910,78 @@ QVector<WeldPoseFileRecord> SampleFinalWeldTrajectoryRecords(
         return records;
     }
 
-    QVector<WeldPoseFileRecord> sampled;
-    sampled.reserve(records.size());
-    sampled.push_back(records.front());
-    auto appendSample = [&sampled](const WeldPoseFileRecord& record)
-    {
-        constexpr double kDuplicateDistanceMm = 1e-6;
-        if (!sampled.isEmpty()
-            && (sampled.back().point - record.point).norm() <= kDuplicateDistanceMm)
-        {
-            sampled.back() = record;
-            return;
-        }
-        sampled.push_back(record);
-    };
+    // 任意相邻输出点的沿线间距不得小于设定点间距：过密的点会干扰摆动动作。
+    // 拐点/圆弧/过渡区域的边界锚彼此相距常低于设定值，按"锚点优先于普通采样点、
+    // 锚点之间仍不足间距时丢弃后到者、终点最优先"的规则去密，圆弧段只留间距达标的关键点。
+    const double minGapMm = sampleStepMm;
 
-    double distanceSinceLastKeep = 0.0;
+    struct KeptPoint
+    {
+        int index = 0;
+        bool anchor = false;
+        double arcLengthMm = 0.0;
+    };
+    QVector<KeptPoint> kept;
+    kept.reserve(records.size());
+    kept.push_back({ 0, true, 0.0 });
+
+    double arcLengthMm = 0.0;
     for (int index = 1; index < records.size() - 1; ++index)
     {
         const double segmentLengthMm = (records[index].point - records[index - 1].point).norm();
         if (std::isfinite(segmentLengthMm) && segmentLengthMm > 1e-6)
         {
-            distanceSinceLastKeep += segmentLengthMm;
+            arcLengthMm += segmentLengthMm;
         }
 
-        if (IsFinalWeldTrajectoryAnchor(records, index)
-            || distanceSinceLastKeep >= sampleStepMm)
+        if (IsFinalWeldTrajectoryAnchor(records, index))
         {
-            appendSample(records[index]);
-            distanceSinceLastKeep = 0.0;
+            // 锚点优先：回溯挤掉与其间距不足的普通采样点。
+            while (kept.size() > 1
+                && !kept.back().anchor
+                && arcLengthMm - kept.back().arcLengthMm < minGapMm)
+            {
+                kept.pop_back();
+            }
+            if (arcLengthMm - kept.back().arcLengthMm >= minGapMm)
+            {
+                kept.push_back({ index, true, arcLengthMm });
+            }
+            // 与前一锚点仍不足间距时丢弃当前锚，保证输出不含过密点。
+        }
+        else if (arcLengthMm - kept.back().arcLengthMm >= minGapMm)
+        {
+            kept.push_back({ index, false, arcLengthMm });
         }
     }
 
-    appendSample(records.back());
+    // 终点必留且最优先：回溯挤掉与终点间距不足的点（首点除外）。
+    const double tailSegmentMm =
+        (records[records.size() - 1].point - records[records.size() - 2].point).norm();
+    if (std::isfinite(tailSegmentMm) && tailSegmentMm > 1e-6)
+    {
+        arcLengthMm += tailSegmentMm;
+    }
+    while (kept.size() > 1 && arcLengthMm - kept.back().arcLengthMm < minGapMm)
+    {
+        kept.pop_back();
+    }
+
+    QVector<WeldPoseFileRecord> sampled;
+    sampled.reserve(kept.size() + 1);
+    for (const KeptPoint& keep : kept)
+    {
+        sampled.push_back(records[keep.index]);
+    }
+    constexpr double kDuplicateDistanceMm = 1e-6;
+    if ((sampled.back().point - records.back().point).norm() <= kDuplicateDistanceMm)
+    {
+        sampled.back() = records.back();
+    }
+    else
+    {
+        sampled.push_back(records.back());
+    }
     for (int index = 0; index < sampled.size(); ++index)
     {
         sampled[index].weldIndex = index + 1;
