@@ -1979,6 +1979,10 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     m_pShowOriginalCheck->setChecked(false);
     m_pShowBeforeCheck->setChecked(true);
     m_pShowAfterCheck->setChecked(true);
+    // 颜色图例：复选框文字用各图层实际颜色显示（灰=原始焊道 / 蓝=补偿前 / 橙=补偿后），与 3D 视图配色一致。
+    m_pShowOriginalCheck->setStyleSheet("QCheckBox { color: #96A0AA; font-weight: bold; }");
+    m_pShowBeforeCheck->setStyleSheet("QCheckBox { color: #78AFD7; font-weight: bold; }");
+    m_pShowAfterCheck->setStyleSheet("QCheckBox { color: #FF9628; font-weight: bold; }");
     layerToggleLayout->addWidget(new QLabel("显示："));
     layerToggleLayout->addWidget(m_pShowOriginalCheck);
     layerToggleLayout->addWidget(m_pShowBeforeCheck);
