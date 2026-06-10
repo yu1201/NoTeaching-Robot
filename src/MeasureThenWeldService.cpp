@@ -668,13 +668,18 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             .arg(GeometryStrategyName(fitParams.geometryStrategy)));
     }
 
-    if (settings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet)
+    const bool sdkMode = settings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
+        || settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
+    if (sdkMode)
     {
+        // ①SDK全处理：SDK 拐点(+2mm扩充)直接转结果，不经拟合、不生成基础焊道文件；
+        // ②SDK+拟合：SDK 输出基础焊道（稠密），再喂滤波拟合提取特征点。
+        const bool useBaseWeldFit = settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
         if (fullCloudInput.size() < 2)
         {
             if (appendLog)
             {
-                appendLog(QString("新版精测点云库输入点过少（%1），无法调用外部库。")
+                appendLog(QString("SDK点云算法输入点过少（%1），无法调用外部库。")
                     .arg(fullCloudInput.size()));
             }
         }
@@ -685,11 +690,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                     fullCloudInput,
                     settings,
                     BuildScanDirection(param),
-                    sdkBaseWeldOutputPath);
+                    useBaseWeldFit ? sdkBaseWeldOutputPath : QString());
             if (extraction.ok)
             {
-                RobotCalculation::MeasureThenWeldAnalysisResult analysis =
-                    PointCloudExtractionProcessor::BuildAnalysisResult(extraction, fitParams);
+                RobotCalculation::MeasureThenWeldAnalysisResult analysis = useBaseWeldFit
+                    ? RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+                        ToIndexedInput(extraction.points), fitParams)
+                    : PointCloudExtractionProcessor::BuildAnalysisResult(extraction, fitParams);
                 if (analysis.ok)
                 {
                     if (usedExternalLibrary != nullptr)
@@ -702,7 +709,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                     }
                     if (appendLog)
                     {
-                        appendLog(QString("新版精测点云库处理完成：输入局部完整点云=%1，输出基础焊道点=%2，DLL=%3，配置=%4，Z截断=%5 mm。")
+                        appendLog(QString("SDK点云算法处理完成（%1）：输入局部完整点云=%2，SDK输出点=%3，DLL=%4，配置=%5，Z截断=%6 mm。")
+                            .arg(useBaseWeldFit ? "基础焊道+拟合" : "拐点直接使用")
                             .arg(extraction.inputPointCount)
                             .arg(extraction.points.size())
                             .arg(extraction.dllPath)
@@ -718,30 +726,69 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
 
                 if (appendLog)
                 {
-                    appendLog(QString("新版精测点云库结果转换失败：%1").arg(analysis.error));
+                    appendLog(QString("SDK点云算法结果%1失败：%2")
+                        .arg(useBaseWeldFit ? "拟合" : "转换")
+                        .arg(analysis.error));
                 }
             }
             else if (appendLog)
             {
-                appendLog(QString("新版精测点云库处理失败：%1").arg(extraction.error));
+                appendLog(QString("SDK点云算法处理失败：%1").arg(extraction.error));
             }
         }
 
         if (!settings.fallbackToLegacy)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
-            failed.error = "新版精测点云库处理失败，且配置为不回退旧版算法。";
+            failed.error = "SDK点云算法处理失败，且配置为不回退特征点处理。";
             return failed;
         }
         if (appendLog)
         {
-            appendLog("已按配置回退旧版轨迹点处理。");
+            appendLog("已按配置回退到特征点+拟合处理。");
+        }
+    }
+    else if (settings.mode == PointCloudProcessingConfig::Mode::CloudFit)
+    {
+        // ③点云+拟合：局部完整点云直接喂滤波拟合（不调 SDK）。
+        if (fullCloudInput.size() >= 2)
+        {
+            if (appendLog)
+            {
+                appendLog(QString("点云算法+拟合输入完整点云点数：%1。").arg(fullCloudInput.size()));
+            }
+            RobotCalculation::MeasureThenWeldAnalysisResult analysis =
+                RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(fullCloudInput, fitParams);
+            if (analysis.ok)
+            {
+                return analysis;
+            }
+            if (appendLog)
+            {
+                appendLog(QString("点云算法+拟合处理失败：%1").arg(analysis.error));
+            }
+        }
+        else if (appendLog)
+        {
+            appendLog(QString("点云算法+拟合输入点过少（%1）。").arg(fullCloudInput.size()));
+        }
+
+        if (!settings.fallbackToLegacy)
+        {
+            RobotCalculation::MeasureThenWeldAnalysisResult failed;
+            failed.error = "点云算法+拟合处理失败，且配置为不回退特征点处理。";
+            return failed;
+        }
+        if (appendLog)
+        {
+            appendLog("已按配置回退到特征点+拟合处理。");
         }
     }
 
+    // ④特征点+拟合：相机目标轨迹点 → 滤波拟合（默认方法，也是各点云方法的回退终点）。
     if (appendLog)
     {
-        appendLog(QString("旧流程输入轨迹点数：%1。")
+        appendLog(QString("特征点+拟合输入轨迹点数：%1。")
             .arg(legacyLaserInput.size()));
     }
     return RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(legacyLaserInput, fitParams);
@@ -7550,8 +7597,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         }
     }
 
+    // ①②③ 三种点云链方法都以完整点云为输入（仅④特征点+拟合依赖激光轨迹点）。
     const bool canUseExternalCloud =
-        pointCloudSettings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
+        pointCloudSettings.mode != PointCloudProcessingConfig::Mode::LegacyLaserPath
         && workpieceCloudInput.size() >= 2;
     if (laserFitInput.size() < 2 && !canUseExternalCloud)
     {
@@ -8028,8 +8076,9 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         }
     }
 
+    // ①②③ 三种点云链方法都以完整点云为输入（仅④特征点+拟合依赖激光轨迹点）。
     const bool canUseExternalCloud =
-        pointCloudSettings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
+        pointCloudSettings.mode != PointCloudProcessingConfig::Mode::LegacyLaserPath
         && workpieceCloudInput.size() >= 2;
     if (laserFitInput.size() < 2 && !canUseExternalCloud)
     {

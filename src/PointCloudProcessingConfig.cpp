@@ -285,10 +285,14 @@ QString PointCloudProcessingConfig::ModeDisplayName(Mode mode)
     switch (mode)
     {
     case Mode::ExternalCorrugatedSheet:
-        return "新版精测点云库";
+        return "SDK点云算法全处理";
+    case Mode::SdkBaseWeldFit:
+        return "SDK点云算法+拟合";
+    case Mode::CloudFit:
+        return "点云算法+拟合";
     case Mode::LegacyLaserPath:
     default:
-        return "旧版目标点处理";
+        return "特征点+拟合";
     }
 }
 
@@ -298,6 +302,10 @@ QString PointCloudProcessingConfig::ModeConfigValue(Mode mode)
     {
     case Mode::ExternalCorrugatedSheet:
         return "ExternalCorrugatedSheet";
+    case Mode::SdkBaseWeldFit:
+        return "SdkBaseWeldFit";
+    case Mode::CloudFit:
+        return "CloudFit";
     case Mode::LegacyLaserPath:
     default:
         return "LegacyLaserPath";
@@ -310,9 +318,23 @@ PointCloudProcessingConfig::Mode PointCloudProcessingConfig::ModeFromConfigValue
     if (normalized == "1"
         || normalized == "external"
         || normalized == "externalcorrugatedsheet"
-        || normalized == "new")
+        || normalized == "new"
+        || normalized == "sdkfull")
     {
         return Mode::ExternalCorrugatedSheet;
+    }
+    if (normalized == "2"
+        || normalized == "sdkbaseweldfit"
+        || normalized == "sdkfit"
+        || normalized == "sdkbaseweld")
+    {
+        return Mode::SdkBaseWeldFit;
+    }
+    if (normalized == "3"
+        || normalized == "cloudfit"
+        || normalized == "cloud")
+    {
+        return Mode::CloudFit;
     }
     return Mode::LegacyLaserPath;
 }
