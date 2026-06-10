@@ -59,6 +59,15 @@ private:
     QDoubleSpinBox* m_pCloudLineLengthSpin = nullptr;
     QGroupBox* m_pSdkParamGroup = nullptr;
     QGroupBox* m_pSdkInnerGroup = nullptr;
+    QGroupBox* m_pProjectionGroup = nullptr;
+    QDoubleSpinBox* m_pProjStationWindowSpin = nullptr;
+    QDoubleSpinBox* m_pProjTransverseWindowSpin = nullptr;
+    QDoubleSpinBox* m_pProjZBandBelowSpin = nullptr;
+    QDoubleSpinBox* m_pProjZBandAboveSpin = nullptr;
+    QDoubleSpinBox* m_pProjLayerLowSpin = nullptr;
+    QDoubleSpinBox* m_pProjLayerHighSpin = nullptr;
+    QSpinBox* m_pProjMaxCandidateSpin = nullptr;
+    QSpinBox* m_pProjSmoothRadiusSpin = nullptr;
     QComboBox* m_pFeaturePointStrategyCombo = nullptr;
     QComboBox* m_pAxisCombo = nullptr;
     QDoubleSpinBox* m_pZThresholdSpin = nullptr;

@@ -622,6 +622,75 @@ void LaserWeldFilterDialog::BuildUi()
     cloudInnerLayout->setColumnMinimumWidth(1, 300);
     cloudInnerLayout->setColumnMinimumWidth(3, 300);
     pointCloudLayout->addWidget(cloudInnerGroup);
+
+    // 点云投影提取参数：方法③（点云算法+拟合）的"完整点云→下层焊道轨迹"提取阶段专用。
+    // 数值 0（显示"自动"）表示按滤波拟合参数派生，与原内置行为一致。
+    m_pProjectionGroup = new QGroupBox("点云投影提取参数（点云算法+拟合）");
+    QGridLayout* projectionLayout = new QGridLayout(m_pProjectionGroup);
+    projectionLayout->setHorizontalSpacing(12);
+    projectionLayout->setVerticalSpacing(10);
+    m_pProjStationWindowSpin = new QDoubleSpinBox();
+    m_pProjStationWindowSpin->setRange(0.0, 9999.0);
+    m_pProjStationWindowSpin->setDecimals(3);
+    m_pProjStationWindowSpin->setSingleStep(0.5);
+    m_pProjStationWindowSpin->setSpecialValueText("自动");
+    m_pProjStationWindowSpin->setToolTip("沿焊缝方向取候选点的窗口半宽；自动=max(2.5, 输出步长×1.5)。");
+    m_pProjTransverseWindowSpin = new QDoubleSpinBox();
+    m_pProjTransverseWindowSpin->setRange(0.0, 9999.0);
+    m_pProjTransverseWindowSpin->setDecimals(3);
+    m_pProjTransverseWindowSpin->setSingleStep(1.0);
+    m_pProjTransverseWindowSpin->setSpecialValueText("自动");
+    m_pProjTransverseWindowSpin->setToolTip("垂直焊缝方向取候选点的窗口半宽；自动=max(10, 搜索窗口×1.5)。");
+    m_pProjZBandBelowSpin = new QDoubleSpinBox();
+    m_pProjZBandBelowSpin->setRange(0.0, 9999.0);
+    m_pProjZBandBelowSpin->setDecimals(3);
+    m_pProjZBandBelowSpin->setSingleStep(1.0);
+    m_pProjZBandBelowSpin->setSpecialValueText("自动");
+    m_pProjZBandBelowSpin->setToolTip("种子轨迹点下方纳入候选的高度范围；自动=max(14, Z连续阈值×4)。");
+    m_pProjZBandAboveSpin = new QDoubleSpinBox();
+    m_pProjZBandAboveSpin->setRange(0.0, 9999.0);
+    m_pProjZBandAboveSpin->setDecimals(3);
+    m_pProjZBandAboveSpin->setSingleStep(1.0);
+    m_pProjZBandAboveSpin->setSpecialValueText("自动");
+    m_pProjZBandAboveSpin->setToolTip("种子轨迹点上方纳入候选的高度范围；自动=max(12, Z突变阈值×2.5)。");
+    m_pProjLayerLowSpin = new QDoubleSpinBox();
+    m_pProjLayerLowSpin->setRange(0.0, 100.0);
+    m_pProjLayerLowSpin->setDecimals(1);
+    m_pProjLayerLowSpin->setSingleStep(5.0);
+    m_pProjLayerLowSpin->setSuffix("%");
+    m_pProjLayerLowSpin->setToolTip("候选点按 Z 排序后取作底板层的分位下界（默认 35%）。");
+    m_pProjLayerHighSpin = new QDoubleSpinBox();
+    m_pProjLayerHighSpin->setRange(0.0, 100.0);
+    m_pProjLayerHighSpin->setDecimals(1);
+    m_pProjLayerHighSpin->setSingleStep(5.0);
+    m_pProjLayerHighSpin->setSuffix("%");
+    m_pProjLayerHighSpin->setToolTip("候选点按 Z 排序后取作底板层的分位上界（默认 50%）。");
+    m_pProjMaxCandidateSpin = new QSpinBox();
+    m_pProjMaxCandidateSpin->setRange(1, 100000);
+    m_pProjMaxCandidateSpin->setToolTip("每个种子点最多保留的底板候选点数（默认 160）。");
+    m_pProjSmoothRadiusSpin = new QSpinBox();
+    m_pProjSmoothRadiusSpin->setRange(0, 999);
+    m_pProjSmoothRadiusSpin->setSpecialValueText("自动");
+    m_pProjSmoothRadiusSpin->setToolTip("投影轮廓 Z 的中值平滑半径；自动=滤波平滑半径夹到 1~4。");
+    projectionLayout->addWidget(new QLabel("站位窗口"), 0, 0);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjStationWindowSpin, "mm"), 0, 1);
+    projectionLayout->addWidget(new QLabel("横向窗口"), 0, 2);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjTransverseWindowSpin, "mm"), 0, 3);
+    projectionLayout->addWidget(new QLabel("种子下方Z带"), 1, 0);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjZBandBelowSpin, "mm"), 1, 1);
+    projectionLayout->addWidget(new QLabel("种子上方Z带"), 1, 2);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjZBandAboveSpin, "mm"), 1, 3);
+    projectionLayout->addWidget(new QLabel("底板层位下界"), 2, 0);
+    projectionLayout->addWidget(m_pProjLayerLowSpin, 2, 1);
+    projectionLayout->addWidget(new QLabel("底板层位上界"), 2, 2);
+    projectionLayout->addWidget(m_pProjLayerHighSpin, 2, 3);
+    projectionLayout->addWidget(new QLabel("每种子候选上限"), 3, 0);
+    projectionLayout->addWidget(m_pProjMaxCandidateSpin, 3, 1);
+    projectionLayout->addWidget(new QLabel("投影平滑半径"), 3, 2);
+    projectionLayout->addWidget(m_pProjSmoothRadiusSpin, 3, 3);
+    projectionLayout->setColumnStretch(1, 1);
+    projectionLayout->setColumnStretch(3, 1);
+    pointCloudLayout->addWidget(m_pProjectionGroup);
     pointCloudLayout->addStretch(1);
 
     QGroupBox* methodGroup = new QGroupBox("处理方法选择");
@@ -951,6 +1020,8 @@ void LaserWeldFilterDialog::ApplyMethodEnableState()
         || mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
     // 程序滤波拟合链（去噪/分段/拟合）：②③④使用；①直接用 SDK 拐点，失败即报错不回退。
     const bool usesFitChain = mode != PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet;
+    // 点云投影提取（完整点云→下层轨迹）仅方法③使用。
+    const bool usesProjection = mode == PointCloudProcessingConfig::Mode::CloudFit;
 
     if (m_pSdkParamGroup != nullptr)
     {
@@ -960,11 +1031,15 @@ void LaserWeldFilterDialog::ApplyMethodEnableState()
     {
         m_pSdkInnerGroup->setEnabled(usesSdk);
     }
+    if (m_pProjectionGroup != nullptr)
+    {
+        m_pProjectionGroup->setEnabled(usesProjection);
+    }
     if (m_pAlgorithmTabWidget != nullptr)
     {
-        // 点云参数页只放 SDK 参数（①②）；滤波拟合参数页与有效性检测
-        // 仅作用于程序滤波拟合链（②③④），①下禁用。
-        m_pAlgorithmTabWidget->setTabEnabled(0, usesSdk);
+        // 点云参数页：SDK 组（①②）+ 投影提取组（③），按组禁用；④整页禁用。
+        // 滤波拟合参数页与有效性检测仅作用于程序滤波拟合链（②③④），①下禁用。
+        m_pAlgorithmTabWidget->setTabEnabled(0, usesSdk || usesProjection);
         m_pAlgorithmTabWidget->setTabEnabled(1, usesFitChain);
         m_pAlgorithmTabWidget->setTabEnabled(2, usesFitChain);
         if (!m_pAlgorithmTabWidget->isTabEnabled(m_pAlgorithmTabWidget->currentIndex()))
@@ -1063,6 +1138,14 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pPiecewiseMinSegmentSpin->setValue(processingSettings.fitPiecewiseMinSegmentPoints);
     m_pMinPointSpin->setValue(processingSettings.fitMinPointCount);
     m_pSmoothRadiusSpin->setValue(processingSettings.fitSmoothRadius);
+    m_pProjStationWindowSpin->setValue(processingSettings.projectionStationWindowMm);
+    m_pProjTransverseWindowSpin->setValue(processingSettings.projectionTransverseWindowMm);
+    m_pProjZBandBelowSpin->setValue(processingSettings.projectionZBandBelowMm);
+    m_pProjZBandAboveSpin->setValue(processingSettings.projectionZBandAboveMm);
+    m_pProjLayerLowSpin->setValue(processingSettings.projectionLayerLowPercent);
+    m_pProjLayerHighSpin->setValue(processingSettings.projectionLayerHighPercent);
+    m_pProjMaxCandidateSpin->setValue(processingSettings.projectionMaxCandidatePerSeed);
+    m_pProjSmoothRadiusSpin->setValue(processingSettings.projectionSmoothRadius);
     ApplyMethodEnableState();
     LoadExternalAlgorithmConfig();
 }
@@ -1094,6 +1177,14 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.fitPiecewiseMinSegmentPoints = m_pPiecewiseMinSegmentSpin->value();
     processingSettings.fitMinPointCount = m_pMinPointSpin->value();
     processingSettings.fitSmoothRadius = m_pSmoothRadiusSpin->value();
+    processingSettings.projectionStationWindowMm = m_pProjStationWindowSpin->value();
+    processingSettings.projectionTransverseWindowMm = m_pProjTransverseWindowSpin->value();
+    processingSettings.projectionZBandBelowMm = m_pProjZBandBelowSpin->value();
+    processingSettings.projectionZBandAboveMm = m_pProjZBandAboveSpin->value();
+    processingSettings.projectionLayerLowPercent = m_pProjLayerLowSpin->value();
+    processingSettings.projectionLayerHighPercent = m_pProjLayerHighSpin->value();
+    processingSettings.projectionMaxCandidatePerSeed = m_pProjMaxCandidateSpin->value();
+    processingSettings.projectionSmoothRadius = m_pProjSmoothRadiusSpin->value();
     processingSettings.slopeConsistentCornerFit =
         m_pSlopeConsistentCornerFitCheck != nullptr && m_pSlopeConsistentCornerFitCheck->isChecked();
     processingSettings.exportFitDebugCloud =

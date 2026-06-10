@@ -5,7 +5,12 @@
 #include <cmath>
 #include <limits>
 
+#include <QDir>
+#include <QFile>
 #include <QPair>
+#include <QString>
+#include <QStringList>
+#include <QTextStream>
 
 namespace
 {
@@ -1166,7 +1171,9 @@ QVector<Eigen::Vector3d> DownsampleWorkpieceProjectionCandidates(
 
 QVector<Eigen::Vector3d> SelectMiddleWorkpieceProjectionLayerCandidates(
     const QVector<Eigen::Vector3d>& candidates,
-    int maxCount)
+    int maxCount,
+    double layerLowPercent,
+    double layerHighPercent)
 {
     if (candidates.size() < 16)
     {
@@ -1181,11 +1188,13 @@ QVector<Eigen::Vector3d> SelectMiddleWorkpieceProjectionLayerCandidates(
     }
     std::sort(zValues.begin(), zValues.end());
 
+    const double lowRatio = std::clamp(layerLowPercent, 0.0, 100.0) / 100.0;
+    const double highRatio = std::clamp(std::max(layerHighPercent, layerLowPercent), 0.0, 100.0) / 100.0;
     const int lastIndex = zValues.size() - 1;
     const int lowIndex = candidates.size() >= 100
-        ? std::clamp(static_cast<int>(std::floor(lastIndex * 0.35)), 0, lastIndex)
+        ? std::clamp(static_cast<int>(std::floor(lastIndex * lowRatio)), 0, lastIndex)
         : 0;
-    const int highIndex = std::clamp(static_cast<int>(std::floor(lastIndex * 0.50)), lowIndex, lastIndex);
+    const int highIndex = std::clamp(static_cast<int>(std::floor(lastIndex * highRatio)), lowIndex, lastIndex);
     const double lowerZ = zValues[lowIndex];
     const double upperZ = zValues[highIndex];
 
@@ -1201,12 +1210,13 @@ QVector<Eigen::Vector3d> SelectMiddleWorkpieceProjectionLayerCandidates(
 
     if (selected.size() < 8)
     {
+        // 选出过少时上下各放宽 5 个百分点重选。
         const int fallbackLowIndex = std::clamp(
-            static_cast<int>(std::floor(lastIndex * 0.30)),
+            static_cast<int>(std::floor(lastIndex * std::max(0.0, lowRatio - 0.05))),
             0,
             lastIndex);
         const int fallbackHighIndex = std::clamp(
-            static_cast<int>(std::floor(lastIndex * 0.55)),
+            static_cast<int>(std::floor(lastIndex * std::min(1.0, highRatio + 0.05))),
             fallbackLowIndex,
             lastIndex);
         selected.clear();
@@ -2575,8 +2585,10 @@ GeometryFittedLine2D FitGeometrySlopeConsistentSegmentCoreLine(
     }
 
     const double totalSpan = std::abs(projected[end].s - projected[begin].s);
-    const double cornerGuard = std::max(3.0, std::min(12.0, totalSpan * 0.10));
-    const bool enableCornerGuard = totalSpan >= cornerGuard * 4.0;
+    // 加大排圆弧力度：上限放宽到覆盖大圆弧拐角；启用门槛从 4× 降到 2×，凹槽底部短平台等短段也排两端
+    // 圆弧，不再整段把拐角圆弧吃进直线方向。若剔后核心点/跨度不足，下方 minAccepted 检查会回退兜底。
+    const double cornerGuard = std::max(4.0, std::min(24.0, totalSpan * 0.18));
+    const bool enableCornerGuard = totalSpan >= cornerGuard * 2.0;
     QVector<char> accepted(pointCount, 0);
     for (const SlopeWindow& window : windows)
     {
@@ -3024,7 +3036,8 @@ bool IsGeometryCornerProjectionUsable(
     const QVector<int>& keyIndexes,
     int keyPosition,
     const Eigen::Vector2d& candidate,
-    const Eigen::Vector2d& reference)
+    const Eigen::Vector2d& reference,
+    bool cornerApexMode = false)
 {
     if (keyPosition <= 0 || keyPosition + 1 >= keyIndexes.size())
     {
@@ -3046,38 +3059,47 @@ bool IsGeometryCornerProjectionUsable(
         return false;
     }
 
-    const double maxCornerShift = std::max(5.0, std::min(18.0, span * 0.14));
+    // 顶点模式(排圆弧开关开、求真实折弯顶点)放宽允许偏移：两直线延长交点离平滑种子本就更远。
+    const double maxCornerShift = cornerApexMode
+        ? std::max(12.0, std::min(50.0, span * 0.30))
+        : std::max(5.0, std::min(18.0, span * 0.14));
     if ((candidate - reference).norm() > maxCornerShift)
     {
         return false;
     }
 
-    const int begin = keyIndexes[keyPosition - 1];
-    const int end = keyIndexes[keyPosition + 1];
-    const double maxCloudDistance = std::max(2.5, std::min(6.0, span * 0.05));
-    if (NearestGeometryProjectionDistance(projected, candidate, begin, end) > maxCloudDistance)
+    // “离最近点云太远”与“偏离主带高度”这两道闸只在非顶点模式生效：凹槽/坡口的真实折弯顶点
+    // 本就离圆弧点云最远、且高度偏离平台主带，顶点模式下用它们会把正确交点误杀、再退回落在圆弧上的种子。
+    // 顶点模式改由 s 范围(margin) + 放宽后的 maxCornerShift 兜底，防止交点离谱跑飞。
+    if (!cornerApexMode)
     {
-        return false;
-    }
-
-    double mainBandH = 0.0;
-    double mainBandThreshold = 0.0;
-    const double stationRadius = std::max(6.0, std::min(36.0, span * 0.08));
-    const double baseThreshold = std::max(1.6, std::min(5.5, span * 0.015 + 0.8));
-    if (GeometryLocalMainBand(
-        projected,
-        candidate.x(),
-        stationRadius,
-        baseThreshold,
-        &mainBandH,
-        &mainBandThreshold,
-        nullptr))
-    {
-        const double mainBandDelta = std::abs(candidate.y() - mainBandH);
-        if (mainBandDelta >= mainBandThreshold * 1.35
-            && mainBandDelta >= baseThreshold * 1.6)
+        const int begin = keyIndexes[keyPosition - 1];
+        const int end = keyIndexes[keyPosition + 1];
+        const double maxCloudDistance = std::max(2.5, std::min(6.0, span * 0.05));
+        if (NearestGeometryProjectionDistance(projected, candidate, begin, end) > maxCloudDistance)
         {
             return false;
+        }
+
+        double mainBandH = 0.0;
+        double mainBandThreshold = 0.0;
+        const double stationRadius = std::max(6.0, std::min(36.0, span * 0.08));
+        const double baseThreshold = std::max(1.6, std::min(5.5, span * 0.015 + 0.8));
+        if (GeometryLocalMainBand(
+            projected,
+            candidate.x(),
+            stationRadius,
+            baseThreshold,
+            &mainBandH,
+            &mainBandThreshold,
+            nullptr))
+        {
+            const double mainBandDelta = std::abs(candidate.y() - mainBandH);
+            if (mainBandDelta >= mainBandThreshold * 1.35
+                && mainBandDelta >= baseThreshold * 1.6)
+            {
+                return false;
+            }
         }
     }
 
@@ -3122,7 +3144,7 @@ QVector<Eigen::Vector3d> BuildFittedGeometryKeyPoints(
             Eigen::Vector2d bestIntersection = projection;
             auto considerIntersection = [&](const Eigen::Vector2d& candidate, double shiftWeight)
             {
-                if (!IsGeometryCornerProjectionUsable(projected, keyIndexes, index, candidate, projection))
+                if (!IsGeometryCornerProjectionUsable(projected, keyIndexes, index, candidate, projection, useSlopeConsistentCornerFit))
                 {
                     return;
                 }
@@ -3562,6 +3584,436 @@ QVector<int> PruneShortSameTypeGeometryRuns(
     }
 
     return keyIndexes;
+}
+
+double GeometryPolylineLength(const QVector<Eigen::Vector3d>& points)
+{
+    double length = 0.0;
+    for (int index = 1; index < points.size(); ++index)
+    {
+        length += (points[index] - points[index - 1]).norm();
+    }
+    return length;
+}
+
+double GeometryProjectedSpan(const QVector<GeometryProjectedPoint>& projected, double* minStation = nullptr, double* maxStation = nullptr)
+{
+    if (projected.isEmpty())
+    {
+        if (minStation != nullptr)
+        {
+            *minStation = 0.0;
+        }
+        if (maxStation != nullptr)
+        {
+            *maxStation = 0.0;
+        }
+        return 0.0;
+    }
+
+    double minValue = projected.first().s;
+    double maxValue = projected.first().s;
+    for (const GeometryProjectedPoint& point : projected)
+    {
+        minValue = std::min(minValue, point.s);
+        maxValue = std::max(maxValue, point.s);
+    }
+    if (minStation != nullptr)
+    {
+        *minStation = minValue;
+    }
+    if (maxStation != nullptr)
+    {
+        *maxStation = maxValue;
+    }
+    return maxValue - minValue;
+}
+
+QString PercentText(double ratio)
+{
+    return QString("%1%").arg(ratio * 100.0, 0, 'f', 1);
+}
+
+QVector<Eigen::Vector2d> GeometryKeyProjections(
+    const QVector<Eigen::Vector3d>& keyPoints,
+    const Eigen::Vector3d& center,
+    const Eigen::Vector3d& mainAxis,
+    const Eigen::Vector3d& sideAxis)
+{
+    QVector<Eigen::Vector2d> projections;
+    projections.reserve(keyPoints.size());
+    for (const Eigen::Vector3d& point : keyPoints)
+    {
+        const Eigen::Vector3d delta = point - center;
+        projections.push_back(Eigen::Vector2d(delta.dot(mainAxis), delta.dot(sideAxis)));
+    }
+    return projections;
+}
+
+bool ValidateGeometryCoverage(
+    int finitePointCount,
+    double projectedSpan,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QString* error)
+{
+    if (!params.validationCoverageEnabled)
+    {
+        return true;
+    }
+
+    if (finitePointCount < params.validationMinFinitePointCount)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：有效点数过少，当前 %1 个，要求至少 %2 个。")
+                .arg(finitePointCount)
+                .arg(params.validationMinFinitePointCount);
+        }
+        return false;
+    }
+
+    if (projectedSpan < params.validationMinProjectedSpanMm)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：扫描主轴覆盖不足，当前 %1 mm，要求至少 %2 mm。")
+                .arg(projectedSpan, 0, 'f', 3)
+                .arg(params.validationMinProjectedSpanMm, 0, 'f', 3);
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool ValidateGeometryContinuity(
+    const QVector<GeometryProjectedPoint>& projected,
+    double minStation,
+    double maxStation,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QString* error)
+{
+    if (!params.validationContinuityEnabled || projected.isEmpty())
+    {
+        return true;
+    }
+
+    const double span = maxStation - minStation;
+    if (span <= std::numeric_limits<double>::epsilon())
+    {
+        return true;
+    }
+
+    const double binWidth = std::max(0.5, params.sampleStep > 0.0 ? params.sampleStep : 2.0);
+    const int binCount = std::max(1, static_cast<int>(std::floor(span / binWidth)) + 1);
+    QVector<char> occupied(binCount, 0);
+    for (const GeometryProjectedPoint& point : projected)
+    {
+        const int binIndex = std::max(0, std::min(binCount - 1, static_cast<int>(std::floor((point.s - minStation) / binWidth))));
+        occupied[binIndex] = 1;
+    }
+
+    int occupiedCount = 0;
+    int longestRun = 0;
+    int currentRun = 0;
+    for (char value : occupied)
+    {
+        if (value)
+        {
+            ++occupiedCount;
+            ++currentRun;
+            longestRun = std::max(longestRun, currentRun);
+        }
+        else
+        {
+            currentRun = 0;
+        }
+    }
+
+    const double coverageRatio = static_cast<double>(occupiedCount) / static_cast<double>(binCount);
+    if (coverageRatio < params.validationMinStationCoverageRatio)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：主轴采样覆盖率过低，当前 %1，要求至少 %2。")
+                .arg(PercentText(coverageRatio))
+                .arg(PercentText(params.validationMinStationCoverageRatio));
+        }
+        return false;
+    }
+
+    const double longestRatio = static_cast<double>(longestRun) / static_cast<double>(binCount);
+    if (longestRatio < params.validationMinLongestContinuousRatio)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：最长连续采样段过短，当前 %1，要求至少 %2。")
+                .arg(PercentText(longestRatio))
+                .arg(PercentText(params.validationMinLongestContinuousRatio));
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool ValidateGeometryRejectedRatio(
+    int finitePointCount,
+    int rejectedCount,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QString* error)
+{
+    if (!params.validationDenoiseRatioEnabled || finitePointCount <= 0)
+    {
+        return true;
+    }
+
+    const double rejectedRatio = static_cast<double>(std::max(0, rejectedCount)) / static_cast<double>(finitePointCount);
+    if (rejectedRatio > params.validationMaxRejectedRatio)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：滤波剔除比例过高，当前 %1，允许最大 %2。")
+                .arg(PercentText(rejectedRatio))
+                .arg(PercentText(params.validationMaxRejectedRatio));
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool ValidateGeometryKeyPoints(
+    const QVector<RobotCalculation::LowerWeldClassifiedPoint>& keyPoints,
+    const QVector<Eigen::Vector2d>& keyProjections,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QString* error)
+{
+    if (!params.validationKeyPointEnabled)
+    {
+        return true;
+    }
+
+    if (keyPoints.size() < params.validationMinKeyPointCount)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：起终点/拐点数量不足，当前 %1 个，要求至少 %2 个。")
+                .arg(keyPoints.size())
+                .arg(params.validationMinKeyPointCount);
+        }
+        return false;
+    }
+
+    int cornerCount = 0;
+    for (const RobotCalculation::LowerWeldClassifiedPoint& point : keyPoints)
+    {
+        if (point.type == RobotCalculation::LowerWeldPointType::InnerCorner
+            || point.type == RobotCalculation::LowerWeldPointType::OuterCorner)
+        {
+            ++cornerCount;
+        }
+    }
+    if (cornerCount < params.validationMinCornerCount)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：拐点数量不足，当前 %1 个，要求至少 %2 个。")
+                .arg(cornerCount)
+                .arg(params.validationMinCornerCount);
+        }
+        return false;
+    }
+
+    for (int index = 1; index < keyPoints.size(); ++index)
+    {
+        const double segmentLength = (keyPoints[index].point - keyPoints[index - 1].point).norm();
+        if (segmentLength < params.validationMinSegmentLengthMm)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("点云有效性检测失败：第 %1 段关键点距离过短，当前 %2 mm，要求至少 %3 mm。")
+                    .arg(index)
+                    .arg(segmentLength, 0, 'f', 3)
+                    .arg(params.validationMinSegmentLengthMm, 0, 'f', 3);
+            }
+            return false;
+        }
+    }
+
+    for (int index = 1; index < keyProjections.size(); ++index)
+    {
+        if (keyProjections[index].x() <= keyProjections[index - 1].x() + 1e-6)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("点云有效性检测失败：拟合关键点主轴顺序不单调，第 %1 个关键点未前进。")
+                    .arg(index + 1);
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ValidateGeometryResidual(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<Eigen::Vector2d>& keyProjections,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QString* error)
+{
+    if (!params.validationResidualEnabled || projected.isEmpty() || keyProjections.size() < 2)
+    {
+        return true;
+    }
+
+    QVector<double> residuals;
+    residuals.reserve(projected.size());
+    int inlierCount = 0;
+    for (const GeometryProjectedPoint& point : projected)
+    {
+        double minDistance = std::numeric_limits<double>::infinity();
+        const Eigen::Vector2d projection = GeometrySmoothedProjection2D(point);
+        for (int segment = 0; segment + 1 < keyProjections.size(); ++segment)
+        {
+            minDistance = std::min(
+                minDistance,
+                GeometryPointToSegmentDistance2D(
+                    projection,
+                    keyProjections[segment],
+                    keyProjections[segment + 1]));
+        }
+        if (!std::isfinite(minDistance))
+        {
+            continue;
+        }
+        residuals.push_back(minDistance);
+        if (params.validationResidualInlierThresholdMm <= 0.0
+            || minDistance <= params.validationResidualInlierThresholdMm)
+        {
+            ++inlierCount;
+        }
+    }
+
+    if (residuals.isEmpty())
+    {
+        if (error != nullptr)
+        {
+            *error = "点云有效性检测失败：无法计算拟合残差。";
+        }
+        return false;
+    }
+
+    const double medianResidual = GeometryMedianScalar(residuals);
+    if (params.validationMaxMedianResidualMm > 0.0
+        && medianResidual > params.validationMaxMedianResidualMm)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：拟合中位残差过大，当前 %1 mm，允许最大 %2 mm。")
+                .arg(medianResidual, 0, 'f', 3)
+                .arg(params.validationMaxMedianResidualMm, 0, 'f', 3);
+        }
+        return false;
+    }
+
+    const double p95Residual = GeometryPercentileScalar(residuals, 0.95);
+    if (params.validationMaxP95ResidualMm > 0.0
+        && p95Residual > params.validationMaxP95ResidualMm)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：拟合 P95 残差过大，当前 %1 mm，允许最大 %2 mm。")
+                .arg(p95Residual, 0, 'f', 3)
+                .arg(params.validationMaxP95ResidualMm, 0, 'f', 3);
+        }
+        return false;
+    }
+
+    const double inlierRatio = static_cast<double>(inlierCount) / static_cast<double>(residuals.size());
+    if (inlierRatio < params.validationMinResidualInlierRatio)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：拟合内点比例过低，当前 %1，要求至少 %2，内点阈值 %3 mm。")
+                .arg(PercentText(inlierRatio))
+                .arg(PercentText(params.validationMinResidualInlierRatio))
+                .arg(params.validationResidualInlierThresholdMm, 0, 'f', 3);
+        }
+        return false;
+    }
+
+    return true;
+}
+
+bool ValidateGeometryOutput(
+    const RobotCalculation::LowerWeldClassificationResult& classification,
+    const QVector<Eigen::Vector3d>& fittedKeyPoints,
+    double projectedSpan,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QString* error)
+{
+    if (!params.validationOutputEnabled)
+    {
+        return true;
+    }
+
+    if (classification.points.size() < params.validationMinOutputPointCount)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：输出焊道点过少，当前 %1 个，要求至少 %2 个。")
+                .arg(classification.points.size())
+                .arg(params.validationMinOutputPointCount);
+        }
+        return false;
+    }
+
+    const double outputLength = GeometryPolylineLength(fittedKeyPoints);
+    if (projectedSpan > std::numeric_limits<double>::epsilon()
+        && params.validationMinOutputLengthRatio > 0.0)
+    {
+        const double lengthRatio = outputLength / projectedSpan;
+        if (lengthRatio < params.validationMinOutputLengthRatio)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("点云有效性检测失败：输出焊道长度与输入覆盖不匹配，当前比例 %1，要求至少 %2。")
+                    .arg(PercentText(lengthRatio))
+                    .arg(PercentText(params.validationMinOutputLengthRatio));
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool ValidateGeometryAnalysisResult(
+    int finitePointCount,
+    int rejectedCount,
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<Eigen::Vector3d>& fittedKeyPoints,
+    const Eigen::Vector3d& center,
+    const Eigen::Vector3d& mainAxis,
+    const Eigen::Vector3d& sideAxis,
+    const RobotCalculation::MeasureThenWeldAnalysisResult& result,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QString* error)
+{
+    double minStation = 0.0;
+    double maxStation = 0.0;
+    const double projectedSpan = GeometryProjectedSpan(projected, &minStation, &maxStation);
+    const QVector<Eigen::Vector2d> keyProjections =
+        GeometryKeyProjections(fittedKeyPoints, center, mainAxis, sideAxis);
+
+    return ValidateGeometryCoverage(finitePointCount, projectedSpan, params, error)
+        && ValidateGeometryContinuity(projected, minStation, maxStation, params, error)
+        && ValidateGeometryRejectedRatio(finitePointCount, rejectedCount, params, error)
+        && ValidateGeometryKeyPoints(result.keyPoints, keyProjections, params, error)
+        && ValidateGeometryResidual(projected, keyProjections, params, error)
+        && ValidateGeometryOutput(result.classificationResult, fittedKeyPoints, projectedSpan, params, error);
 }
 
 QVector<int> MergeAdjacentGeometryCorners(
@@ -5269,12 +5721,23 @@ RobotCalculation::LowerWeldFilterResult RobotCalculation::ProjectWorkpieceCloudT
         return result;
     }
 
+    // 各窗口优先用显式投影参数；0 表示按滤波参数自动派生（原硬编码行为）。
     const double sampleStep = params.sampleStep > 0.0 ? params.sampleStep : 2.0;
-    const double stationWindow = std::max(2.5, sampleStep * 1.5);
-    const double transverseWindow = std::max(10.0, params.searchWindow > 0.0 ? params.searchWindow * 1.5 : 12.0);
-    const double zBandBelow = std::max(14.0, params.zContinuityThreshold > 0.0 ? params.zContinuityThreshold * 4.0 : 14.0);
-    const double zBandAbove = std::max(12.0, params.zJumpThreshold > 0.0 ? params.zJumpThreshold * 2.5 : 12.0);
-    constexpr int kMaxCandidatePerSeed = 160;
+    const double stationWindow = params.projectionStationWindowMm > 0.0
+        ? params.projectionStationWindowMm
+        : std::max(2.5, sampleStep * 1.5);
+    const double transverseWindow = params.projectionTransverseWindowMm > 0.0
+        ? params.projectionTransverseWindowMm
+        : std::max(10.0, params.searchWindow > 0.0 ? params.searchWindow * 1.5 : 12.0);
+    const double zBandBelow = params.projectionZBandBelowMm > 0.0
+        ? params.projectionZBandBelowMm
+        : std::max(14.0, params.zContinuityThreshold > 0.0 ? params.zContinuityThreshold * 4.0 : 14.0);
+    const double zBandAbove = params.projectionZBandAboveMm > 0.0
+        ? params.projectionZBandAboveMm
+        : std::max(12.0, params.zJumpThreshold > 0.0 ? params.zJumpThreshold * 2.5 : 12.0);
+    const int kMaxCandidatePerSeed = params.projectionMaxCandidatePerSeed > 0
+        ? params.projectionMaxCandidatePerSeed
+        : 160;
 
     auto lowerStationBound = [&](double value)
     {
@@ -5320,8 +5783,11 @@ RobotCalculation::LowerWeldFilterResult RobotCalculation::ProjectWorkpieceCloudT
 
         WorkpieceProjectionSeedCandidates seedCandidates;
         seedCandidates.seed = seed;
-        seedCandidates.candidates =
-            SelectMiddleWorkpieceProjectionLayerCandidates(localCandidates, kMaxCandidatePerSeed);
+        seedCandidates.candidates = SelectMiddleWorkpieceProjectionLayerCandidates(
+            localCandidates,
+            kMaxCandidatePerSeed,
+            params.projectionLayerLowPercent,
+            params.projectionLayerHighPercent);
         if (seedCandidates.candidates.isEmpty() && !localCandidates.isEmpty())
         {
             seedCandidates.candidates =
@@ -5368,7 +5834,9 @@ RobotCalculation::LowerWeldFilterResult RobotCalculation::ProjectWorkpieceCloudT
         }
     }
 
-    const int smoothRadius = std::clamp(params.smoothRadius, 1, 4);
+    const int smoothRadius = params.projectionSmoothRadius > 0
+        ? params.projectionSmoothRadius
+        : std::clamp(params.smoothRadius, 1, 4);
     QVector<double> smoothedProjectedZ = projectedZValues;
     for (int index = 0; index < projectedZValues.size(); ++index)
     {
@@ -5557,6 +6025,194 @@ RobotCalculation::LowerWeldClassificationResult RobotCalculation::BuildCornerCom
         "geometry_2mm_corner_comp");
 }
 
+namespace
+{
+// 调试导出：把每段直线拟合“用到的点集”和“拟合出的直线”写成 CloudCompare 友好的 ASCII 点云，
+// 用来直观核对分段几何拟合是否正确。生成到 <outputDir>/FitDebug/：
+//   fit_all_points.txt   所有段的输入点，按段号上色(R G B)，附 dist_to_fit(到本段拟合直线的垂距)、smoothN 两个标量；
+//   fit_all_lines.txt    每段拟合直线沿 s 密集采样并还原回 3D 的点，与点集同段同色；
+//   fit_keypoints.txt    起点/终点/拐点（红色，附类型码）；
+//   segments/seg_XX_*    每段单独的输入点集与拟合直线（两种组织方式都给）；
+//   fit_axes.txt         本次拟合使用的局部坐标系(质心 center + 三轴 main/side/normal)。
+// 列以空格分隔，表头用 // 开头(CloudCompare 导入时会自动当注释跳过)。outputDir 为空时不导出。
+void ExportGeometryFitDebugClouds(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    const QVector<Eigen::Vector3d>& fittedKeyPoints,
+    const Eigen::Vector3d& center,
+    const Eigen::Vector3d& mainAxis,
+    const Eigen::Vector3d& sideAxis,
+    const Eigen::Vector3d& normalAxis,
+    bool useSlopeConsistentCornerFit,
+    const QString& outputDir)
+{
+    if (outputDir.isEmpty() || keyIndexes.size() < 2 || projected.isEmpty())
+    {
+        return;
+    }
+
+    const QString debugRoot = QDir(outputDir).filePath(QStringLiteral("FitDebug"));
+    const QString segmentDir = QDir(debugRoot).filePath(QStringLiteral("segments"));
+    QDir().mkpath(debugRoot);
+    QDir().mkpath(segmentDir);
+
+    const auto writeCloud = [](const QString& path, const QStringList& lines)
+    {
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+        {
+            return;
+        }
+        QTextStream stream(&file);
+        for (const QString& line : lines)
+        {
+            stream << line << '\n';
+        }
+    };
+
+    const auto formatPoint = [](const Eigen::Vector3d& p, int r, int g, int b, const QString& extra)
+    {
+        QString row = QString("%1 %2 %3 %4 %5 %6")
+            .arg(p.x(), 0, 'f', 6)
+            .arg(p.y(), 0, 'f', 6)
+            .arg(p.z(), 0, 'f', 6)
+            .arg(r)
+            .arg(g)
+            .arg(b);
+        if (!extra.isEmpty())
+        {
+            row += QLatin1Char(' ');
+            row += extra;
+        }
+        return row;
+    };
+
+    static const int kPalette[12][3] = {
+        {230, 25, 75}, {60, 180, 75}, {255, 200, 20}, {0, 130, 200},
+        {245, 130, 48}, {145, 30, 180}, {70, 200, 240}, {240, 50, 230},
+        {170, 220, 40}, {250, 150, 190}, {0, 160, 160}, {200, 170, 255}
+    };
+
+    const QVector<GeometryFittedLine2D> segmentLines =
+        BuildGeometrySegmentLines(projected, keyIndexes, useSlopeConsistentCornerFit);
+
+    QStringList allPointLines;
+    allPointLines << QStringLiteral("// X Y Z R G B segment dist_to_fit smoothN");
+    QStringList allLineLines;
+    allLineLines << QStringLiteral("// X Y Z R G B segment");
+
+    const int segmentCount = keyIndexes.size() - 1;
+    for (int seg = 0; seg < segmentCount; ++seg)
+    {
+        const int begin = std::min(keyIndexes[seg], keyIndexes[seg + 1]);
+        const int end = std::max(keyIndexes[seg], keyIndexes[seg + 1]);
+        if (begin < 0 || end >= projected.size() || end < begin)
+        {
+            continue;
+        }
+        const int r = kPalette[seg % 12][0];
+        const int g = kPalette[seg % 12][1];
+        const int b = kPalette[seg % 12][2];
+
+        const GeometryFittedLine2D line =
+            seg < segmentLines.size() ? segmentLines[seg] : GeometryFittedLine2D();
+        const GeometryFittedScalarLine normalLine =
+            FitGeometrySegmentNormalLine(projected, begin, end);
+        const double fallbackNormal = projected[(begin + end) / 2].smoothN;
+
+        QStringList segPointLines;
+        segPointLines << QStringLiteral("// X Y Z R G B dist_to_fit smoothN");
+        QStringList segLineLines;
+        segLineLines << QStringLiteral("// X Y Z R G B");
+
+        // 1) 该段拟合“用到的点集”——附每点到本段拟合直线的垂距 dist_to_fit，
+        //    在 CloudCompare 里按这个标量上色即可看出哪些点贴合、哪些被当作离群点甩开。
+        for (int i = begin; i <= end; ++i)
+        {
+            double dist = 0.0;
+            if (line.valid)
+            {
+                const Eigen::Vector2d v =
+                    Eigen::Vector2d(projected[i].s, projected[i].smoothH) - line.point;
+                dist = std::abs(Cross2D(v, line.direction));
+            }
+            const QString extraAll = QString("%1 %2 %3")
+                .arg(seg)
+                .arg(dist, 0, 'f', 6)
+                .arg(projected[i].smoothN, 0, 'f', 6);
+            const QString extraSeg = QString("%1 %2")
+                .arg(dist, 0, 'f', 6)
+                .arg(projected[i].smoothN, 0, 'f', 6);
+            allPointLines << formatPoint(projected[i].point, r, g, b, extraAll);
+            segPointLines << formatPoint(projected[i].point, r, g, b, extraSeg);
+        }
+
+        // 2) 该段拟合出的直线：在 (s, smoothH) 平面沿 s 密集采样，再用 normalLine 估高度 n，
+        //    最后 GeometryPointFromProjection 还原回 3D，便于和点集叠加比对。
+        if (line.valid)
+        {
+            const double sLo = std::min(projected[begin].s, projected[end].s);
+            const double sHi = std::max(projected[begin].s, projected[end].s);
+            const double step = 0.5;
+            const bool nonVertical = std::abs(line.direction.x()) > 1e-6;
+            for (double s = sLo; s <= sHi + 1e-9; s += step)
+            {
+                Eigen::Vector2d sh;
+                if (nonVertical)
+                {
+                    const double t = (s - line.point.x()) / line.direction.x();
+                    sh = line.point + t * line.direction;
+                }
+                else
+                {
+                    sh = Eigen::Vector2d(s, line.point.y());
+                }
+                const double nv = normalLine.valid ? normalLine.valueAt(sh.x()) : fallbackNormal;
+                const Eigen::Vector3d p3 =
+                    GeometryPointFromProjection(center, mainAxis, sideAxis, normalAxis, sh, nv);
+                allLineLines << formatPoint(p3, r, g, b, QString::number(seg));
+                segLineLines << formatPoint(p3, r, g, b, QString());
+            }
+        }
+
+        const QString tag = QString("%1").arg(seg, 2, 10, QLatin1Char('0'));
+        writeCloud(QDir(segmentDir).filePath(QStringLiteral("seg_%1_points.txt").arg(tag)), segPointLines);
+        writeCloud(QDir(segmentDir).filePath(QStringLiteral("seg_%1_line.txt").arg(tag)), segLineLines);
+    }
+
+    // 3) 关键点（起点/终点/拐点）
+    QStringList keyPointLines;
+    keyPointLines << QStringLiteral("// X Y Z R G B key_type(1=start 2=end 3=inner_corner 4=outer_corner)");
+    for (int k = 0; k < fittedKeyPoints.size() && k < keyIndexes.size(); ++k)
+    {
+        const RobotCalculation::LowerWeldPointType type =
+            GeometryCornerType(projected, keyIndexes, k);
+        keyPointLines << formatPoint(fittedKeyPoints[k], 255, 0, 0, QString::number(static_cast<int>(type)));
+    }
+
+    // 4) 本次拟合使用的局部坐标系，便于理解/复现 (s,h,n) 投影
+    QStringList axisLines;
+    axisLines << QStringLiteral("// role X Y Z");
+    const auto axisRow = [](const QString& role, const Eigen::Vector3d& v)
+    {
+        return QString("%1 %2 %3 %4")
+            .arg(role)
+            .arg(v.x(), 0, 'f', 6)
+            .arg(v.y(), 0, 'f', 6)
+            .arg(v.z(), 0, 'f', 6);
+    };
+    axisLines << axisRow(QStringLiteral("center"), center);
+    axisLines << axisRow(QStringLiteral("mainAxis_s"), mainAxis);
+    axisLines << axisRow(QStringLiteral("sideAxis_h"), sideAxis);
+    axisLines << axisRow(QStringLiteral("normalAxis_n"), normalAxis);
+
+    writeCloud(QDir(debugRoot).filePath(QStringLiteral("fit_all_points.txt")), allPointLines);
+    writeCloud(QDir(debugRoot).filePath(QStringLiteral("fit_all_lines.txt")), allLineLines);
+    writeCloud(QDir(debugRoot).filePath(QStringLiteral("fit_keypoints.txt")), keyPointLines);
+    writeCloud(QDir(debugRoot).filePath(QStringLiteral("fit_axes.txt")), axisLines);
+}
+}  // namespace
+
 RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathGeometry(
     const QVector<IndexedPoint3D>& inputPoints,
     const LowerWeldFilterParams& params)
@@ -5694,6 +6350,20 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         return result;
     }
 
+    if (params.exportFitDebugCloud)
+    {
+        ExportGeometryFitDebugClouds(
+            projected,
+            keyIndexes,
+            fittedKeyPoints,
+            center,
+            axes.first,
+            axes.second,
+            normalAxis,
+            params.useSlopeConsistentCornerFit,
+            params.fitDebugDir);
+    }
+
     result.filterResult.points.reserve(projected.size());
     for (const GeometryProjectedPoint& point : projected)
     {
@@ -5748,6 +6418,23 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
     if (!result.classificationResult.ok)
     {
         result.error = result.classificationResult.error;
+        return result;
+    }
+
+    QString validationError;
+    if (!ValidateGeometryAnalysisResult(
+            validPoints.size(),
+            denoiseRejectedCount,
+            projected,
+            fittedKeyPoints,
+            center,
+            axes.first,
+            axes.second,
+            result,
+            params,
+            &validationError))
+    {
+        result.error = validationError;
         return result;
     }
 
