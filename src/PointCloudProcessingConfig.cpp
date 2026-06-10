@@ -107,6 +107,20 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.configPath = ReadSetting("External/ConfigPath", DefaultConfigPath()).trimmed();
     settings.zTruncationValue = ReadSetting("External/ZTruncationValue", "6.0").toDouble();
     settings.resampleStepMm = ReadSetting("External/ResampleStepMm", "2.0").toDouble();
+    settings.sampleAxisMode = SampleAxisModeFromConfigValue(
+        ReadSetting("Fit/SampleAxis", SampleAxisModeConfigValue(settings.sampleAxisMode)));
+    settings.cloudZThresholdMm = ReadDoubleSetting("CloudAlgo/ZThresholdMm", settings.cloudZThresholdMm);
+    settings.cloudZJumpThresholdMm = ReadDoubleSetting("CloudAlgo/ZJumpThresholdMm", settings.cloudZJumpThresholdMm);
+    settings.cloudZContinuityThresholdMm = ReadDoubleSetting("CloudAlgo/ZContinuityThresholdMm", settings.cloudZContinuityThresholdMm);
+    settings.cloudSegmentBreakDistanceMm = ReadDoubleSetting("CloudAlgo/SegmentBreakDistanceMm", settings.cloudSegmentBreakDistanceMm);
+    settings.cloudKeepLongestSegmentOnly = ReadBoolSetting("CloudAlgo/KeepLongestSegmentOnly", settings.cloudKeepLongestSegmentOnly);
+    settings.fitSampleStepMm = ReadDoubleSetting("Fit/SampleStepMm", settings.fitSampleStepMm);
+    settings.fitSearchWindowMm = ReadDoubleSetting("Fit/SearchWindowMm", settings.fitSearchWindowMm);
+    settings.fitLineFitTrimCount = ReadIntSetting("Fit/LineFitTrimCount", settings.fitLineFitTrimCount);
+    settings.fitPiecewiseToleranceMm = ReadDoubleSetting("Fit/PiecewiseToleranceMm", settings.fitPiecewiseToleranceMm);
+    settings.fitPiecewiseMinSegmentPoints = ReadIntSetting("Fit/PiecewiseMinSegmentPoints", settings.fitPiecewiseMinSegmentPoints);
+    settings.fitMinPointCount = ReadIntSetting("Fit/MinPointCount", settings.fitMinPointCount);
+    settings.fitSmoothRadius = ReadIntSetting("Fit/SmoothRadius", settings.fitSmoothRadius);
     settings.slopeConsistentCornerFit = ReadBoolSetting("FeaturePoint/SlopeConsistentCornerFit", false);
     settings.exportFitDebugCloud = ReadBoolSetting("FeaturePoint/ExportFitDebugCloud", true);
     settings.fallbackToLegacy = ReadBoolSetting("External/FallbackToLegacy", true);
@@ -170,6 +184,35 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     {
         settings.resampleStepMm = 2.0;
     }
+    // 数值滤波参数钳制：负值回退到原管线硬编码默认；0 在阈值类参数上表示"关闭"，保留。
+    if (settings.cloudZJumpThresholdMm < 0.0)
+    {
+        settings.cloudZJumpThresholdMm = 3.0;
+    }
+    if (settings.cloudZContinuityThresholdMm < 0.0)
+    {
+        settings.cloudZContinuityThresholdMm = 2.0;
+    }
+    if (settings.cloudSegmentBreakDistanceMm < 0.0)
+    {
+        settings.cloudSegmentBreakDistanceMm = 6.0;
+    }
+    if (settings.fitSampleStepMm <= 0.0)
+    {
+        settings.fitSampleStepMm = 2.0;
+    }
+    if (settings.fitSearchWindowMm < 0.0)
+    {
+        settings.fitSearchWindowMm = 8.0;
+    }
+    settings.fitLineFitTrimCount = std::max(0, settings.fitLineFitTrimCount);
+    if (settings.fitPiecewiseToleranceMm <= 0.0)
+    {
+        settings.fitPiecewiseToleranceMm = 4.0;
+    }
+    settings.fitPiecewiseMinSegmentPoints = std::max(2, settings.fitPiecewiseMinSegmentPoints);
+    settings.fitMinPointCount = std::max(2, settings.fitMinPointCount);
+    settings.fitSmoothRadius = std::max(0, settings.fitSmoothRadius);
     settings.validationMinFinitePointCount = std::max(0, settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = std::max(0.0, settings.validationMinProjectedSpanMm);
     settings.validationMinStationCoverageRatio = std::clamp(settings.validationMinStationCoverageRatio, 0.0, 1.0);
@@ -205,6 +248,19 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("FeaturePoint/SlopeConsistentCornerFit", settings.slopeConsistentCornerFit ? "1" : "0")
         && write("FeaturePoint/ExportFitDebugCloud", settings.exportFitDebugCloud ? "1" : "0")
         && write("External/FallbackToLegacy", settings.fallbackToLegacy ? "1" : "0")
+        && write("Fit/SampleAxis", SampleAxisModeConfigValue(settings.sampleAxisMode))
+        && write("CloudAlgo/ZThresholdMm", QString::number(settings.cloudZThresholdMm, 'f', 6))
+        && write("CloudAlgo/ZJumpThresholdMm", QString::number(settings.cloudZJumpThresholdMm, 'f', 6))
+        && write("CloudAlgo/ZContinuityThresholdMm", QString::number(settings.cloudZContinuityThresholdMm, 'f', 6))
+        && write("CloudAlgo/SegmentBreakDistanceMm", QString::number(settings.cloudSegmentBreakDistanceMm, 'f', 6))
+        && write("CloudAlgo/KeepLongestSegmentOnly", settings.cloudKeepLongestSegmentOnly ? "1" : "0")
+        && write("Fit/SampleStepMm", QString::number(settings.fitSampleStepMm, 'f', 6))
+        && write("Fit/SearchWindowMm", QString::number(settings.fitSearchWindowMm, 'f', 6))
+        && write("Fit/LineFitTrimCount", QString::number(settings.fitLineFitTrimCount))
+        && write("Fit/PiecewiseToleranceMm", QString::number(settings.fitPiecewiseToleranceMm, 'f', 6))
+        && write("Fit/PiecewiseMinSegmentPoints", QString::number(settings.fitPiecewiseMinSegmentPoints))
+        && write("Fit/MinPointCount", QString::number(settings.fitMinPointCount))
+        && write("Fit/SmoothRadius", QString::number(settings.fitSmoothRadius))
         && write("Validation/CoverageEnabled", settings.validationCoverageEnabled ? "1" : "0")
         && write("Validation/MinFinitePointCount", QString::number(settings.validationMinFinitePointCount))
         && write("Validation/MinProjectedSpanMm", QString::number(settings.validationMinProjectedSpanMm, 'f', 6))
@@ -369,6 +425,34 @@ QString PointCloudProcessingConfig::FeaturePointStrategyConfigValue(FeaturePoint
     default:
         return "LegacyGeometry";
     }
+}
+
+QString PointCloudProcessingConfig::SampleAxisModeConfigValue(SampleAxisMode mode)
+{
+    switch (mode)
+    {
+    case SampleAxisMode::AxisX:
+        return "x";
+    case SampleAxisMode::AxisY:
+        return "y";
+    case SampleAxisMode::Auto:
+    default:
+        return "auto";
+    }
+}
+
+PointCloudProcessingConfig::SampleAxisMode PointCloudProcessingConfig::SampleAxisModeFromConfigValue(const QString& value)
+{
+    const QString normalized = value.trimmed().toLower();
+    if (normalized == "x" || normalized == "axisx" || normalized == "1")
+    {
+        return SampleAxisMode::AxisX;
+    }
+    if (normalized == "y" || normalized == "axisy" || normalized == "2")
+    {
+        return SampleAxisMode::AxisY;
+    }
+    return SampleAxisMode::Auto;
 }
 
 PointCloudProcessingConfig::FeaturePointStrategy PointCloudProcessingConfig::FeaturePointStrategyFromConfigValue(

@@ -1,7 +1,6 @@
 #pragma once
 
 #include "PointCloudProcessingConfig.h"
-#include "RobotCalculation.h"
 
 #include <QDialog>
 
@@ -42,7 +41,6 @@ private:
     QDoubleSpinBox* m_pExternalZTruncationSpin = nullptr;
     QDoubleSpinBox* m_pExternalResampleStepSpin = nullptr;
     QCheckBox* m_pExternalFallbackCheck = nullptr;
-    QComboBox* m_pCloudAxisCombo = nullptr;
     QCheckBox* m_pCloudUprightCheck = nullptr;
     QDoubleSpinBox* m_pCloudPlateThicknessSpin = nullptr;
     QDoubleSpinBox* m_pCloudRemoveFloorZSpin = nullptr;
@@ -65,7 +63,6 @@ private:
     QGroupBox* m_pCloudAlgoGroup = nullptr;
     QComboBox* m_pFeaturePointStrategyCombo = nullptr;
     QComboBox* m_pAxisCombo = nullptr;
-    QComboBox* m_pFitModeCombo = nullptr;
     QDoubleSpinBox* m_pZThresholdSpin = nullptr;
     QDoubleSpinBox* m_pZJumpThresholdSpin = nullptr;
     QDoubleSpinBox* m_pZContinuityThresholdSpin = nullptr;
