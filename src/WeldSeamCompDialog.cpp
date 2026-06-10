@@ -2208,10 +2208,10 @@ QWidget* WeldSeamCompDialog::CreateWeldProcessPanel()
 
     layout->addWidget(new QLabel("实际焊道点间距(mm)："), 2, 0, 1, 2);
     m_pFinalStepSpin = new QDoubleSpinBox();
-    m_pFinalStepSpin->setRange(0.0, 100.0);
+    m_pFinalStepSpin->setRange(0.5, 100.0);
     m_pFinalStepSpin->setDecimals(1);
     m_pFinalStepSpin->setSingleStep(0.5);
-    m_pFinalStepSpin->setSpecialValueText("未设置(跟随测量页)");
+    m_pFinalStepSpin->setValue(4.0);
     layout->addWidget(m_pFinalStepSpin, 2, 2, 1, 2);
 
     m_pProcessHintLabel = new QLabel();
@@ -2352,7 +2352,10 @@ void WeldSeamCompDialog::ApplySelectedProcessToEditors()
         }
         if (m_pFinalStepSpin != nullptr)
         {
-            m_pFinalStepSpin->setValue(item.dFinalWeldTrajectoryStepMm);
+            // 点间距属于工艺；老工艺还没存过值(<=0)时预填当前实际生效的值（测量页），保存即固化进工艺。
+            m_pFinalStepSpin->setValue(item.dFinalWeldTrajectoryStepMm > 0.0
+                ? item.dFinalWeldTrajectoryStepMm
+                : ReadMeasurePageFinalStepMm());
         }
     }
     else
@@ -2368,9 +2371,33 @@ void WeldSeamCompDialog::ApplySelectedProcessToEditors()
         }
         if (m_pFinalStepSpin != nullptr)
         {
-            m_pFinalStepSpin->setValue(0.0);
+            m_pFinalStepSpin->setValue(4.0);
         }
     }
+}
+
+double WeldSeamCompDialog::ReadMeasurePageFinalStepMm() const
+{
+    // 老工艺的回退预填值 = 测量焊接参数页当前启用组的点间距（与未迁移前的实际生效值一致）。
+    const QString robot = CurrentRobotName();
+    if (robot.isEmpty())
+    {
+        return 4.0;
+    }
+    COPini ini;
+    const QByteArray path = RobotDataHelper::MeasureWeldParamPath(robot).toUtf8();
+    if (!ini.SetFileName(std::string(path.constData(), static_cast<size_t>(path.size()))))
+    {
+        return 4.0;
+    }
+    int groupIndex = 0;
+    ini.SetSectionName("MeasureWeldGroups");
+    ini.ReadString(false, "UseGroupNo", &groupIndex);
+    const QByteArray section = RobotDataHelper::MeasureWeldWeldSectionName(std::max(0, groupIndex)).toUtf8();
+    ini.SetSectionName(std::string(section.constData(), static_cast<size_t>(section.size())));
+    double stepMm = 0.0;
+    ini.ReadString(false, "FinalWeldTrajectoryStepMm", &stepMm);
+    return (std::isfinite(stepMm) && stepMm > 0.0) ? std::clamp(stepMm, 0.5, 100.0) : 4.0;
 }
 
 bool WeldSeamCompDialog::SaveWeldProcessArea(QString& error)
@@ -2419,12 +2446,10 @@ bool WeldSeamCompDialog::SaveWeldProcessArea(QString& error)
         error = "保存工艺选用项失败：" + DecodeRobotMessageText(processFile.GetLastError());
         return false;
     }
-    AppendLog(QString("工艺已保存：圆弧%1 半径%2mm，点间距%3。")
+    AppendLog(QString("工艺已保存：圆弧%1 半径%2mm，点间距%3mm。")
         .arg(item.nCornerArcTransitionRadiusEnable != 0 ? "启用" : "关闭")
         .arg(item.dCornerArcTransitionRadius, 0, 'f', 1)
-        .arg(item.dFinalWeldTrajectoryStepMm > 0.0
-            ? QString::number(item.dFinalWeldTrajectoryStepMm, 'f', 1) + "mm"
-            : QString("未设置(跟随测量页)")));
+        .arg(item.dFinalWeldTrajectoryStepMm, 0, 'f', 1));
     LoadWeldProcessArea();  // 保存可能触发重排，重新加载
     return true;
 }
