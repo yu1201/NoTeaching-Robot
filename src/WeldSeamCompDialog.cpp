@@ -290,6 +290,7 @@ WeldSeamCompDialog::WeldSeamCompDialog(ContralUnit* pContralUnit, QWidget* paren
     BuildUi();
     LoadRobotList();
     LoadCurrentParam();
+    AutoSelectLatestCompPreviewDirectory();
 }
 
 void WeldSeamCompDialog::closeEvent(QCloseEvent* event)
@@ -540,6 +541,7 @@ void WeldSeamCompDialog::BuildUi()
             if (!m_bLoading)
             {
                 LoadCurrentParam();
+                AutoSelectLatestCompPreviewDirectory();
             }
         });
     connect(m_pModeGroup, qOverload<int>(&QButtonGroup::idClicked), this, [this](int id)
@@ -2114,6 +2116,11 @@ void WeldSeamCompDialog::ChooseCompPreviewDirectory()
     {
         return;
     }
+    SetCompPreviewDirectory(dir);
+}
+
+void WeldSeamCompDialog::SetCompPreviewDirectory(const QString& dir)
+{
     m_compPreviewDir = QDir::toNativeSeparators(dir);
     if (m_pCompPreviewDirEdit != nullptr)
     {
@@ -2136,6 +2143,32 @@ void WeldSeamCompDialog::ChooseCompPreviewDirectory()
     }
     AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
     RecomputeCompPreview();
+}
+
+void WeldSeamCompDialog::AutoSelectLatestCompPreviewDirectory()
+{
+    // 打开界面/切换机器人时默认载入该机器人最新一次扫描的数据。
+    const QString robot = CurrentRobotName();
+    if (robot.isEmpty())
+    {
+        return;
+    }
+    QDir resultDir(RobotDataHelper::BuildProjectPath(QString("Result/%1").arg(robot)));
+    if (!resultDir.exists())
+    {
+        return;
+    }
+    // 结果目录名为 yyyyMMdd_NNN，名称倒序即时间倒序。
+    const QStringList entries = resultDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name | QDir::Reversed);
+    for (const QString& entry : entries)
+    {
+        const QString laserDir = resultDir.filePath(entry + "/LaserPoint");
+        if (QFileInfo::exists(QDir(laserDir).filePath("PreciseLaserPoint_WeldPose_2mm.txt")))
+        {
+            SetCompPreviewDirectory(laserDir);
+            return;
+        }
+    }
 }
 
 void WeldSeamCompDialog::ScheduleCompPreview()
@@ -2166,6 +2199,36 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
         m_pCompPreviewView->SetLayerVisible(stageIndex,
             m_pStageToggles[stageIndex] != nullptr && m_pStageToggles[stageIndex]->isChecked());
     }
+
+    // 方向箭头跟随对应图层开关：焊缝三轴(colorId 0-2)随"焊道补偿"，工具系轴(colorId 3-5)随"姿态补偿"。
+    const bool showPoseArrows = m_pStageToggles[2] != nullptr && m_pStageToggles[2]->isChecked();
+    const bool showSeamArrows = m_pStageToggles[3] != nullptr && m_pStageToggles[3]->isChecked();
+    QVector<pcview::PointCloud3DView::DirectionArrow> arrows;
+    arrows.reserve(m_compPreviewArrows.size());
+    for (const MeasureThenWeldService::CompPreviewArrow& source : m_compPreviewArrows)
+    {
+        const bool isPoseArrow = source.colorId >= 3 && source.colorId <= 5;
+        if (isPoseArrow ? !showPoseArrows : !showSeamArrows)
+        {
+            continue;
+        }
+        pcview::PointCloud3DView::DirectionArrow arrow;
+        arrow.origin = { source.origin[0], source.origin[1], source.origin[2] };
+        arrow.vector = { source.vector[0], source.vector[1], source.vector[2] };
+        arrow.label = source.label;
+        arrow.doubleHeaded = source.doubleHeaded;
+        switch (source.colorId)
+        {
+        case 1: arrow.color = QColor(255, 215, 64); break;   // 枪反向
+        case 2: arrow.color = QColor(120, 255, 150); break;  // 焊道方向
+        case 3: arrow.color = QColor(255, 90, 90); break;    // 工具X
+        case 4: arrow.color = QColor(90, 255, 90); break;    // 工具Y
+        case 5: arrow.color = QColor(90, 200, 255); break;   // 工具Z
+        default: arrow.color = QColor(90, 200, 255); break;  // Z向
+        }
+        arrows.push_back(arrow);
+    }
+    m_pCompPreviewView->SetDirectionArrows(arrows);
 }
 
 int WeldSeamCompDialog::CurrentRobotType() const
@@ -2269,6 +2332,7 @@ void WeldSeamCompDialog::RecomputeCompPreview()
 
     if (m_compPreviewDir.isEmpty())
     {
+        m_compPreviewArrows.clear();
         m_pCompPreviewView->SetLayers({});
         m_pCompPreviewView->SetDirectionArrows({});
         if (m_pCompPreviewInfoLabel != nullptr)
@@ -2289,6 +2353,7 @@ void WeldSeamCompDialog::RecomputeCompPreview()
             MeasureThenWeldService::CompPreviewKind::Seam, m_compPreviewDir, baseline, loadError))
         {
             m_compPreviewBaseline.clear();
+            m_compPreviewArrows.clear();
             m_pCompPreviewView->SetLayers({});
             m_pCompPreviewView->SetDirectionArrows({});
             if (m_pCompPreviewInfoLabel != nullptr)
@@ -2305,7 +2370,7 @@ void WeldSeamCompDialog::RecomputeCompPreview()
     const MeasureThenWeldService::CompPreviewEditValues currentEdits = CollectCompPreviewEditValues();
     const MeasureThenWeldService::CompPreviewEditValues savedEdits = CollectSavedPoseCompEdits();
     const MeasureThenWeldService::CompPreviewStages stages = m_compPreviewService.ComputeCompPreviewStages(
-        CurrentRobotName(), m_compPreviewBaseline, currentEdits, savedEdits, m_mode == CompMode::Pose);
+        CurrentRobotName(), m_compPreviewBaseline, currentEdits, savedEdits, true);
 
     auto toLayerPoints = [](const QVector<MeasureThenWeldService::CompPreviewPoint>& points)
     {
@@ -2345,29 +2410,9 @@ void WeldSeamCompDialog::RecomputeCompPreview()
 
     m_pCompPreviewView->SetLayers(layers);
 
-    // 方向箭头：由 service 统一产出，这里只按 colorId 渲染。
-    QVector<pcview::PointCloud3DView::DirectionArrow> arrows;
-    arrows.reserve(stages.arrows.size());
-    for (const MeasureThenWeldService::CompPreviewArrow& source : stages.arrows)
-    {
-        pcview::PointCloud3DView::DirectionArrow arrow;
-        arrow.origin = { source.origin[0], source.origin[1], source.origin[2] };
-        arrow.vector = { source.vector[0], source.vector[1], source.vector[2] };
-        arrow.label = source.label;
-        arrow.doubleHeaded = source.doubleHeaded;
-        switch (source.colorId)
-        {
-        case 1: arrow.color = QColor(255, 215, 64); break;   // 枪反向
-        case 2: arrow.color = QColor(120, 255, 150); break;  // 焊道方向
-        case 3: arrow.color = QColor(255, 90, 90); break;    // 工具X
-        case 4: arrow.color = QColor(90, 255, 90); break;    // 工具Y
-        case 5: arrow.color = QColor(90, 200, 255); break;   // 工具Z
-        case 6: arrow.color = QColor(255, 150, 40); break;   // 拐点位移
-        default: arrow.color = QColor(90, 200, 255); break;  // Z向
-        }
-        arrows.push_back(arrow);
-    }
-    m_pCompPreviewView->SetDirectionArrows(arrows);
+    // 方向箭头：缓存全量，按图层开关过滤显示（焊道补偿开→焊缝三轴；姿态补偿开→工具系轴）。
+    m_compPreviewArrows = stages.arrows;
+    ApplyCompPreviewLayerVisibility();
 
     if (m_pCompPreviewInfoLabel != nullptr)
     {
