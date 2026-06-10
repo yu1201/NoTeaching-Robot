@@ -119,6 +119,7 @@ private:
     void LoadWeldProcessArea();
     void ApplySelectedProcessToEditors();
     bool SaveWeldProcessArea(QString& error);
+    double ReadMeasurePageFinalStepMm() const;
     void ChooseCompPreviewDirectory();
     void SetCompPreviewDirectory(const QString& dir);
     void AutoSelectLatestCompPreviewDirectory();
