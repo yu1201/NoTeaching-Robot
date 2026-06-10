@@ -2670,12 +2670,14 @@ void WeldSeamCompDialog::RecomputeCompPreview()
         const char* name,
         const QColor& color,
         const QVector<MeasureThenWeldService::CompPreviewPoint>& points,
-        bool connectLines)
+        bool connectLines,
+        double pointSize = 0.0)
     {
         pcview::PointCloud3DView::Layer layer;
         layer.name = QString::fromUtf8(name);
         layer.color = color;
         layer.connectLines = connectLines;
+        layer.pointSize = pointSize;
         layer.visible = m_pStageToggles[stageIndex] != nullptr && m_pStageToggles[stageIndex]->isChecked();
         layer.points = toLayerPoints(points);
         return layer;
@@ -2687,7 +2689,8 @@ void WeldSeamCompDialog::RecomputeCompPreview()
     layers.push_back(makeLayer(2, "姿态补偿", QColor(87, 182, 255), stages.poseComp, true));
     layers.push_back(makeLayer(3, "焊道补偿", QColor(255, 197, 61), stages.seamComp, true));
     layers.push_back(makeLayer(4, "圆弧过渡", QColor(255, 122, 69), stages.arc, true));
-    layers.push_back(makeLayer(5, "实际焊道", QColor(255, 92, 160), stages.actual, true));
+    // 实际焊道只画点不连线、点放大，方便直接看出抽样点间距。
+    layers.push_back(makeLayer(5, "实际焊道", QColor(255, 92, 160), stages.actual, false, 6.0));
 
     m_pCompPreviewView->SetLayers(layers);
 
