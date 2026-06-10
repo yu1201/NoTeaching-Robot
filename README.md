@@ -13,9 +13,9 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.06.10.2331`
+- 当前源码版本：`v2026.06.11.0005`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.10.2331.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.11.0005.exe`，不用自己编译源码。
 
 ## 2026-06-10 更新
 
@@ -24,7 +24,7 @@
 - 滤波拟合数值参数（Z阈值/Z突变/Z连续/段间跳变/步长/窗口/容差/平滑等）从管线硬编码接入界面配置真正生效，默认值与原硬编码一致；采样主轴支持自动推断（按扫描方向）/固定X/固定Y，主界面与 CLI 离线重建行为一致
 - 点云投影提取参数开放独立可调：站位/横向窗口、种子上下方 Z 带、底板层位分位、每种子候选上限、投影平滑半径（0=自动按滤波参数派生）；处理界面参数按 SDK / 投影提取 / 滤波拟合归组，并按方法联动禁用且显式置灰
 - 补偿界面新增"按当前方法重算"：切换处理方法后对所选数据目录按当前方法重建基准焊道并自动重载六阶段预览，补偿基于当前方法的基准焊道调整
-- 构建验证：`Debug x64`、`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.06.10.2331.exe`（101,221,788 bytes，SHA256 `F51EB5D74EC2AD0CBFC3F89DEB87D8725B866480BC87031405827ADFECD99372`），包内 `BUILD_VERSION.txt` 与应用版本一致，包内 SDK dll 与厂商 20260609 更新包字节一致
+- 构建验证：`Debug x64`、`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.06.11.0005.exe`（101,236,234 bytes，SHA256 `A5BF7F524D118E6F96878767BDF7C2E8CA160683F280590C9705BC4E2DF54CCB`），包内 `BUILD_VERSION.txt` 与应用版本一致，包内 SDK dll 与厂商 20260609 更新包字节一致
 
 ## 2026-06-06 更新
 
