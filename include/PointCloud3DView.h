@@ -112,6 +112,7 @@ namespace pcview
             bool visible = true;
             bool rainbow = false;
             bool connectLines = false;
+            double pointSize = 0.0;  // 点宽(px)，0=自动（连线 2.4 / 不连线 2.0）
         };
 
         // 世界空间方向箭头，用于标注补偿正负影响方向。origin/vector 单位与点云一致（mm）。
@@ -564,7 +565,9 @@ namespace pcview
                 }
 
                 QPen pointPen(layer.color);
-                pointPen.setWidthF(layer.connectLines ? 2.4 : 2.0);
+                pointPen.setWidthF(layer.pointSize > 0.0
+                    ? layer.pointSize
+                    : (layer.connectLines ? 2.4 : 2.0));
                 pointPen.setCosmetic(true);
                 painter.setPen(pointPen);
                 for (int index = 0; index < pointCount; index += drawStep)
