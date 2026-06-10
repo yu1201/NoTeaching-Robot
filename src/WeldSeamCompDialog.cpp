@@ -5,6 +5,7 @@
 #include "PointCloud3DView.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
+#include "WeldProcessFile.h"
 #include "WindowStyleHelper.h"
 
 #include <QAbstractButton>
@@ -290,6 +291,7 @@ WeldSeamCompDialog::WeldSeamCompDialog(ContralUnit* pContralUnit, QWidget* paren
     BuildUi();
     LoadRobotList();
     LoadCurrentParam();
+    LoadWeldProcessArea();
     AutoSelectLatestCompPreviewDirectory();
 }
 
@@ -495,6 +497,7 @@ void WeldSeamCompDialog::BuildUi()
     }
     editorLayout->addWidget(m_pCornerCompensationWidget, 8, 0, 1, 6);
     contentLayout->addWidget(editorGroup, 1);
+    contentLayout->addWidget(CreateWeldProcessPanel(), 0);
     editorContentLayout->addLayout(contentLayout);
 
     m_pPathLabel = new QLabel();
@@ -541,6 +544,7 @@ void WeldSeamCompDialog::BuildUi()
             if (!m_bLoading)
             {
                 LoadCurrentParam();
+                LoadWeldProcessArea();
                 AutoSelectLatestCompPreviewDirectory();
             }
         });
@@ -1779,6 +1783,12 @@ bool WeldSeamCompDialog::SaveCurrentParam()
         AppendLog("保存失败：" + error);
         return false;
     }
+    if (!SaveWeldProcessArea(error))
+    {
+        QMessageBox::warning(this, "保存补偿参数", error);
+        AppendLog("保存失败：" + error);
+        return false;
+    }
     MarkCleanSnapshot();
     AppendLog("姿态补偿参数和焊道补偿参数已保存。");
     QMessageBox::information(this, "保存补偿参数", "补偿参数保存完成。");
@@ -2060,14 +2070,15 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
         QColor color;
         bool defaultOn;
     };
-    const StageSpec stageSpecs[5] = {
+    const StageSpec stageSpecs[6] = {
         { "原始数据", QColor(110, 123, 135), false },
         { "原始焊道", QColor(200, 210, 220), false },
         { "姿态补偿", QColor(87, 182, 255), true },
         { "焊道补偿", QColor(255, 197, 61), false },
-        { "圆弧过渡", QColor(255, 122, 69), true }
+        { "圆弧过渡", QColor(255, 122, 69), false },
+        { "实际焊道", QColor(255, 92, 160), true }
     };
-    for (int stageIndex = 0; stageIndex < 5; ++stageIndex)
+    for (int stageIndex = 0; stageIndex < 6; ++stageIndex)
     {
         ToggleSwitch* toggle = new ToggleSwitch(stageSpecs[stageIndex].color);
         toggle->setChecked(stageSpecs[stageIndex].defaultOn);
@@ -2076,7 +2087,7 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
             .arg(stageSpecs[stageIndex].color.name()));
         layerToggleLayout->addWidget(toggle);
         layerToggleLayout->addWidget(nameLabel);
-        if (stageIndex < 4)
+        if (stageIndex < 5)
         {
             layerToggleLayout->addSpacing(8);
         }
@@ -2171,6 +2182,253 @@ void WeldSeamCompDialog::AutoSelectLatestCompPreviewDirectory()
     }
 }
 
+// ===================== 工艺区域（圆弧过渡 / 实际焊道点间距） =====================
+
+QWidget* WeldSeamCompDialog::CreateWeldProcessPanel()
+{
+    QGroupBox* panel = new QGroupBox("工艺（圆弧过渡 / 实际焊道点间距）");
+    QGridLayout* layout = new QGridLayout(panel);
+    layout->setHorizontalSpacing(8);
+    layout->setVerticalSpacing(6);
+
+    layout->addWidget(new QLabel("工艺组："), 0, 0);
+    m_pProcessCombo = new QComboBox();
+    m_pProcessCombo->setMinimumWidth(260);
+    layout->addWidget(m_pProcessCombo, 0, 1, 1, 3);
+
+    m_pArcEnableCheck = new QCheckBox("启用圆弧过渡");
+    layout->addWidget(m_pArcEnableCheck, 1, 0, 1, 2);
+    layout->addWidget(new QLabel("圆弧半径(mm)："), 1, 2);
+    m_pArcRadiusSpin = new QDoubleSpinBox();
+    m_pArcRadiusSpin->setRange(2.0, 200.0);
+    m_pArcRadiusSpin->setDecimals(1);
+    m_pArcRadiusSpin->setSingleStep(0.5);
+    m_pArcRadiusSpin->setValue(2.0);
+    layout->addWidget(m_pArcRadiusSpin, 1, 3);
+
+    layout->addWidget(new QLabel("实际焊道点间距(mm)："), 2, 0, 1, 2);
+    m_pFinalStepSpin = new QDoubleSpinBox();
+    m_pFinalStepSpin->setRange(0.0, 100.0);
+    m_pFinalStepSpin->setDecimals(1);
+    m_pFinalStepSpin->setSingleStep(0.5);
+    m_pFinalStepSpin->setSpecialValueText("未设置(跟随测量页)");
+    layout->addWidget(m_pFinalStepSpin, 2, 2, 1, 2);
+
+    m_pProcessHintLabel = new QLabel();
+    m_pProcessHintLabel->setWordWrap(true);
+    m_pProcessHintLabel->setStyleSheet("color:#8FB6BC;");
+    layout->addWidget(m_pProcessHintLabel, 3, 0, 1, 4);
+
+    connect(m_pProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index)
+        {
+            if (m_bLoadingProcessArea || m_pProcessCombo == nullptr)
+            {
+                return;
+            }
+            m_weldProcessSelectedIndex = m_pProcessCombo->itemData(index).toInt();
+            ApplySelectedProcessToEditors();
+            ScheduleCompPreview();
+        });
+    connect(m_pArcEnableCheck, &QCheckBox::toggled, this, [this](bool on)
+        {
+            if (m_pArcRadiusSpin != nullptr)
+            {
+                m_pArcRadiusSpin->setEnabled(on && m_weldProcessLoaded);
+            }
+            if (!m_bLoadingProcessArea)
+            {
+                ScheduleCompPreview();
+            }
+        });
+    connect(m_pArcRadiusSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double)
+        {
+            if (!m_bLoadingProcessArea)
+            {
+                ScheduleCompPreview();
+            }
+        });
+    connect(m_pFinalStepSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double)
+        {
+            if (!m_bLoadingProcessArea)
+            {
+                ScheduleCompPreview();
+            }
+        });
+
+    return panel;
+}
+
+void WeldSeamCompDialog::LoadWeldProcessArea()
+{
+    m_bLoadingProcessArea = true;
+    m_weldProcessLoaded = false;
+    m_weldProcessList.clear();
+    m_weldProcessSelectedIndex = -1;
+    if (m_pProcessCombo != nullptr)
+    {
+        m_pProcessCombo->clear();
+    }
+
+    const QString robot = CurrentRobotName();
+    if (robot.isEmpty())
+    {
+        if (m_pProcessHintLabel != nullptr)
+        {
+            m_pProcessHintLabel->setText("未选择机器人，工艺不可用。");
+        }
+    }
+    else
+    {
+        WeldProcessFile processFile(std::string(robot.toUtf8().constData()));
+        if (!processFile.Init())
+        {
+            if (m_pProcessHintLabel != nullptr)
+            {
+                m_pProcessHintLabel->setText("读取工艺失败：" + DecodeRobotMessageText(processFile.GetLastError()));
+            }
+        }
+        else
+        {
+            m_weldProcessList = processFile.GetWeldParaList();
+            const int useIndex = processFile.GetUseWeldParaNo();
+            for (int index = 0; index < static_cast<int>(m_weldProcessList.size()); ++index)
+            {
+                const T_WELD_PARA& item = m_weldProcessList[static_cast<size_t>(index)];
+                const QString name = QString("%1 | 焊脚%2 | 焊道%3")
+                    .arg(DecodeRobotMessageText(item.strWorkPeace))
+                    .arg(item.dWeldAngleSize, 0, 'f', 1)
+                    .arg(item.nLayerNo);
+                m_pProcessCombo->addItem(name, index);
+            }
+            m_weldProcessSelectedIndex =
+                std::clamp(useIndex, 0, static_cast<int>(m_weldProcessList.size()) - 1);
+            m_pProcessCombo->setCurrentIndex(m_weldProcessSelectedIndex);
+            m_weldProcessLoaded = !m_weldProcessList.empty();
+            if (m_pProcessHintLabel != nullptr)
+            {
+                m_pProcessHintLabel->setText(
+                    "圆弧过渡与点间距实时联动右侧预览；点\"保存\"写回工艺并选用该工艺组。");
+            }
+        }
+    }
+
+    if (m_pProcessCombo != nullptr)
+    {
+        m_pProcessCombo->setEnabled(m_weldProcessLoaded);
+    }
+    if (m_pArcEnableCheck != nullptr)
+    {
+        m_pArcEnableCheck->setEnabled(m_weldProcessLoaded);
+    }
+    if (m_pFinalStepSpin != nullptr)
+    {
+        m_pFinalStepSpin->setEnabled(m_weldProcessLoaded);
+    }
+    ApplySelectedProcessToEditors();
+    m_bLoadingProcessArea = false;
+    ScheduleCompPreview();
+}
+
+void WeldSeamCompDialog::ApplySelectedProcessToEditors()
+{
+    const bool valid = m_weldProcessLoaded
+        && m_weldProcessSelectedIndex >= 0
+        && m_weldProcessSelectedIndex < static_cast<int>(m_weldProcessList.size());
+
+    const QSignalBlocker blockCheck(m_pArcEnableCheck);
+    const QSignalBlocker blockRadius(m_pArcRadiusSpin);
+    const QSignalBlocker blockStep(m_pFinalStepSpin);
+    if (valid)
+    {
+        const T_WELD_PARA& item = m_weldProcessList[static_cast<size_t>(m_weldProcessSelectedIndex)];
+        if (m_pArcEnableCheck != nullptr)
+        {
+            m_pArcEnableCheck->setChecked(item.nCornerArcTransitionRadiusEnable != 0);
+        }
+        if (m_pArcRadiusSpin != nullptr)
+        {
+            m_pArcRadiusSpin->setValue(item.dCornerArcTransitionRadius);
+            m_pArcRadiusSpin->setEnabled(item.nCornerArcTransitionRadiusEnable != 0);
+        }
+        if (m_pFinalStepSpin != nullptr)
+        {
+            m_pFinalStepSpin->setValue(item.dFinalWeldTrajectoryStepMm);
+        }
+    }
+    else
+    {
+        if (m_pArcEnableCheck != nullptr)
+        {
+            m_pArcEnableCheck->setChecked(false);
+        }
+        if (m_pArcRadiusSpin != nullptr)
+        {
+            m_pArcRadiusSpin->setValue(2.0);
+            m_pArcRadiusSpin->setEnabled(false);
+        }
+        if (m_pFinalStepSpin != nullptr)
+        {
+            m_pFinalStepSpin->setValue(0.0);
+        }
+    }
+}
+
+bool WeldSeamCompDialog::SaveWeldProcessArea(QString& error)
+{
+    if (!m_weldProcessLoaded
+        || m_weldProcessSelectedIndex < 0
+        || m_weldProcessSelectedIndex >= static_cast<int>(m_weldProcessList.size()))
+    {
+        return true;  // 工艺区域不可用时不参与保存
+    }
+
+    const QString robot = CurrentRobotName();
+    WeldProcessFile processFile(std::string(robot.toUtf8().constData()));
+    if (!processFile.Init())
+    {
+        error = "保存工艺失败：" + DecodeRobotMessageText(processFile.GetLastError());
+        return false;
+    }
+    const std::vector<T_WELD_PARA>& list = processFile.GetWeldParaList();
+    if (m_weldProcessSelectedIndex >= static_cast<int>(list.size()))
+    {
+        error = "工艺条目已变化，请重新打开补偿界面后再保存。";
+        return false;
+    }
+
+    // 整条拷贝改字段，保证其余字段原样写回。
+    T_WELD_PARA item = list[static_cast<size_t>(m_weldProcessSelectedIndex)];
+    item.nCornerArcTransitionRadiusEnable =
+        (m_pArcEnableCheck != nullptr && m_pArcEnableCheck->isChecked()) ? 1 : 0;
+    if (m_pArcRadiusSpin != nullptr)
+    {
+        item.dCornerArcTransitionRadius = m_pArcRadiusSpin->value();
+    }
+    if (m_pFinalStepSpin != nullptr)
+    {
+        item.dFinalWeldTrajectoryStepMm = m_pFinalStepSpin->value();
+    }
+
+    if (!processFile.UpdateWeldPara(m_weldProcessSelectedIndex, item))
+    {
+        error = "保存工艺失败：" + DecodeRobotMessageText(processFile.GetLastError());
+        return false;
+    }
+    if (!processFile.UpdateUseWeldParaNo(m_weldProcessSelectedIndex))
+    {
+        error = "保存工艺选用项失败：" + DecodeRobotMessageText(processFile.GetLastError());
+        return false;
+    }
+    AppendLog(QString("工艺已保存：圆弧%1 半径%2mm，点间距%3。")
+        .arg(item.nCornerArcTransitionRadiusEnable != 0 ? "启用" : "关闭")
+        .arg(item.dCornerArcTransitionRadius, 0, 'f', 1)
+        .arg(item.dFinalWeldTrajectoryStepMm > 0.0
+            ? QString::number(item.dFinalWeldTrajectoryStepMm, 'f', 1) + "mm"
+            : QString("未设置(跟随测量页)")));
+    LoadWeldProcessArea();  // 保存可能触发重排，重新加载
+    return true;
+}
+
 void WeldSeamCompDialog::ScheduleCompPreview()
 {
     if (m_bLoading)
@@ -2193,8 +2451,8 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
     {
         return;
     }
-    // 图层顺序：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡。
-    for (int stageIndex = 0; stageIndex < 5; ++stageIndex)
+    // 图层顺序：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡 5=实际焊道。
+    for (int stageIndex = 0; stageIndex < 6; ++stageIndex)
     {
         m_pCompPreviewView->SetLayerVisible(stageIndex,
             m_pStageToggles[stageIndex] != nullptr && m_pStageToggles[stageIndex]->isChecked());
@@ -2293,6 +2551,15 @@ MeasureThenWeldService::CompPreviewEditValues WeldSeamCompDialog::CollectCompPre
         edits.weldGunDirComp[seg] = m_seamRows[flat].weldGunDirComp;
         edits.weldSeamDirComp[seg] = m_seamRows[flat].weldSeamDirComp;
         edits.seamSegmentKind[seg] = m_seamRows[flat].segmentKind;
+    }
+
+    // 工艺区域试调（圆弧过渡 + 实际焊道点间距）：编辑值实时覆盖预览，不落盘。
+    if (m_weldProcessLoaded && m_pArcEnableCheck != nullptr && m_pArcRadiusSpin != nullptr && m_pFinalStepSpin != nullptr)
+    {
+        edits.processOverrideValid = true;
+        edits.arcEnabled = m_pArcEnableCheck->isChecked();
+        edits.arcRadiusMm = m_pArcRadiusSpin->value();
+        edits.processFinalStepMm = m_pFinalStepSpin->value();
     }
     return edits;
 }
@@ -2407,6 +2674,7 @@ void WeldSeamCompDialog::RecomputeCompPreview()
     layers.push_back(makeLayer(2, "姿态补偿", QColor(87, 182, 255), stages.poseComp, true));
     layers.push_back(makeLayer(3, "焊道补偿", QColor(255, 197, 61), stages.seamComp, true));
     layers.push_back(makeLayer(4, "圆弧过渡", QColor(255, 122, 69), stages.arc, true));
+    layers.push_back(makeLayer(5, "实际焊道", QColor(255, 92, 160), stages.actual, true));
 
     m_pCompPreviewView->SetLayers(layers);
 
@@ -2416,12 +2684,13 @@ void WeldSeamCompDialog::RecomputeCompPreview()
 
     if (m_pCompPreviewInfoLabel != nullptr)
     {
-        QString info = QString("原始 %1 / 焊道 %2 / 姿态补偿 %3 / 焊道补偿 %4 / 圆弧过渡 %5 点")
+        QString info = QString("原始 %1 / 焊道 %2 / 姿态补偿 %3 / 焊道补偿 %4 / 圆弧过渡 %5 / 实际焊道 %6 点")
             .arg(m_compPreviewRaw.size())
             .arg(m_compPreviewOriginal.size())
             .arg(stages.poseComp.size())
             .arg(stages.seamComp.size())
-            .arg(stages.arc.size());
+            .arg(stages.arc.size())
+            .arg(stages.actual.size());
         if (!stages.ok && !stages.error.isEmpty())
         {
             info += "（" + stages.error + "）";

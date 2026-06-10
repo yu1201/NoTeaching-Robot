@@ -119,6 +119,11 @@ public:
         int poseMatchMode = 0;            // 0=按姿态匹配 1=按段属性
         double poseMatchMaxErrorDeg = 5.0;// 按姿态匹配时的最大角度误差
         int robotType = ROBOT_TYPE_FANUC; // 品牌旋转合成（FANUC=Rz·Ry·Rx / STEP 反序）
+        // 工艺区域试调覆盖（仅预览联动，不落盘）：圆弧过渡与实际焊道点间距
+        bool processOverrideValid = false;  // true=用下面三个值覆盖真实工艺
+        bool arcEnabled = false;
+        double arcRadiusMm = 0.0;
+        double processFinalStepMm = 0.0;    // 0=未设→回退测量参数页的值
         // 拐点补偿(Corner)
         bool cornerEnabled = false;
         double risingInnerToOuter = 0.0;
@@ -172,7 +177,8 @@ public:
         QString error;
         QVector<CompPreviewPoint> poseComp;   // 姿态补偿后（基准 + 姿态补偿增量）
         QVector<CompPreviewPoint> seamComp;   // 焊道补偿后（纯补偿平移）
-        QVector<CompPreviewPoint> arc;        // 圆弧过渡后（完整后处理 = 下发执行轨迹）
+        QVector<CompPreviewPoint> arc;        // 圆弧过渡后（完整后处理，2mm 稠密执行文件）
+        QVector<CompPreviewPoint> actual;     // 实际焊道（按点间距最终抽样 = 机器人逐点执行的轨迹）
         QVector<CompPreviewArrow> arrows;     // 正负方向箭头
     };
     CompPreviewStages ComputeCompPreviewStages(

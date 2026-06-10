@@ -12,6 +12,7 @@
 #include "RobotMessage.h"
 #include "RobotPoseTransform.h"
 #include "STEPRobotDriver.h"
+#include "WeldProcessFile.h"
 #include "groove/framebuffer.h"
 
 #include <QDateTime>
@@ -211,6 +212,7 @@ struct WeldPosePreset
     int poseCompMatchMode = POSE_COMP_MATCH_BY_POSE;
     double cornerTransitionLeadDistance = 10.0;
     double cornerArcRadiusMm = 0.0;
+    double finalWeldStepFromProcessMm = 0.0;  // 工艺里的实际焊道点间距(>0 优先于测量参数页的值)
     double weldStartSkipDistance = 10.0;
     double weldEndSkipDistance = 10.0;
     double weldRzGainDeg = 0.0;
@@ -1870,51 +1872,29 @@ bool TryLoadActiveWeldProcessParam(const QString& robotName, T_WELD_PARA& weldPa
         return false;
     }
 
-    const QString weldFilePath = RobotDataHelper::BuildProjectPath(
-        QString("Data/%1/WeldPara.txt").arg(robotName.trimmed()));
-    const QString weaveFilePath = RobotDataHelper::BuildProjectPath(
-        QString("Data/%1/WeaveDate.txt").arg(robotName.trimmed()));
-    QVector<QStringList> weldRows;
-    int useIndex = 0;
-    QString readError;
-    if (!ReadProcessRows(weldFilePath, weldRows, useIndex, readError))
+    // 复用 WeldProcessFile（多键主数据优先 + 文本块回退 + BindWeldToWeave 摆动绑定），
+    // 与工艺页同一份读取逻辑，不再维护第二套文本解析器。
+    WeldProcessFile processFile(ToUtf8StdString(robotName.trimmed()));
+    if (!processFile.Init())
     {
         if (error != nullptr)
         {
-            *error = readError;
+            *error = QString::fromUtf8(processFile.GetLastError().c_str());
         }
         return false;
     }
 
-    if (!TryParseWeldProcessRow(weldRows[useIndex], weldPara))
+    const T_WELD_PARA* activePara = processFile.GetUseWeldPara();
+    if (activePara == nullptr)
     {
         if (error != nullptr)
         {
-            *error = "焊接工艺参数格式已升级，请重新创建工艺内容。";
+            *error = QString("工艺数据没有有效条目：%1").arg(robotName.trimmed());
         }
         return false;
     }
 
-    if (weldPara.nWeaveEnable != 0)
-    {
-        QVector<QStringList> weaveRows;
-        int useWeaveIndex = 0;
-        if (!ReadProcessRows(weaveFilePath, weaveRows, useWeaveIndex, readError)
-            || weldPara.nWeaveTypeNo < 0
-            || weldPara.nWeaveTypeNo >= weaveRows.size()
-            || !TryParseWeaveProcessRow(weaveRows[weldPara.nWeaveTypeNo], weldPara.tWeaveParam))
-        {
-            if (error != nullptr)
-            {
-                *error = "摆动参数格式已升级，请重新创建工艺内容。";
-            }
-            return false;
-        }
-    }
-    else
-    {
-        weldPara.tWeaveParam = {};
-    }
+    weldPara = *activePara;  // 含 BindWeldToWeave 已灌入的 tWeaveParam
     return true;
 }
 
@@ -2011,6 +1991,13 @@ void ApplyActiveWeldProcessToPreset(const T_PRECISE_MEASURE_PARAM& param, WeldPo
         preset.transitionCurrentVoltageEnabled = true;
         preset.transitionCurrent = weldPara.dCornerArcTransitionCurrent;
         preset.transitionVoltage = weldPara.dCornerArcTransitionVoltage;
+    }
+
+    // 工艺里的实际焊道点间距（>0 时优先于测量参数页的 FinalWeldTrajectoryStepMm）。
+    if (std::isfinite(weldPara.dFinalWeldTrajectoryStepMm)
+        && weldPara.dFinalWeldTrajectoryStepMm > 0.0)
+    {
+        preset.finalWeldStepFromProcessMm = weldPara.dFinalWeldTrajectoryStepMm;
     }
 }
 
@@ -3174,8 +3161,14 @@ bool BuildWeldPoseMoveInfos(
     QVector<WeldPoseFileRecord>* executionRecordsOut = nullptr)
 {
     moveInfos.clear();
+    // 工艺里设置了点间距(>0)时优先用工艺的，否则用测量参数页传入值。
+    double effectiveSampleStepMm = finalTrajectorySampleStepMm;
+    if (preset != nullptr && preset->finalWeldStepFromProcessMm > 0.0)
+    {
+        effectiveSampleStepMm = preset->finalWeldStepFromProcessMm;
+    }
     const QVector<WeldPoseFileRecord> executionRecords =
-        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(finalTrajectorySampleStepMm));
+        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(effectiveSampleStepMm));
     if (executionRecordsOut != nullptr)
     {
         *executionRecordsOut = executionRecords;
@@ -9889,7 +9882,16 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
     const Eigen::Vector3d gunDir = HorizontalUnitOrZero(Eigen::Vector3d::UnitZ().cross(seamDir));
 
     // 阶段「焊道补偿」：真实预设 + 当前编辑槽位覆盖（槽位段类用配置真实值，匹配/回退与下发一致）。
-    WeldPosePreset preset = LoadWeldPosePreset(BuildMeasureWeldParamShell(robotName));
+    const T_PRECISE_MEASURE_PARAM measureParam = BuildMeasureWeldParamShell(robotName);
+    WeldPosePreset preset = LoadWeldPosePreset(measureParam);
+    // 工艺区域试调覆盖（仅预览联动，不落盘）：圆弧过渡启用/半径 + 实际焊道点间距。
+    if (currentEdits.processOverrideValid)
+    {
+        preset.cornerArcRadiusMm = (currentEdits.arcEnabled && currentEdits.arcRadiusMm > 0.0)
+            ? std::max(2.0, currentEdits.arcRadiusMm)
+            : 0.0;
+        preset.finalWeldStepFromProcessMm = currentEdits.processFinalStepMm;
+    }
     preset.seamCompSlots.assign(4, WeldPosePreset::SeamCompSlot());
     for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
     {
@@ -9912,6 +9914,15 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
         records = recordsBeforeTrim;  // 后处理裁空则回退显示纯补偿平移结果
     }
     stages.arc = snapshotRecords(records);
+
+    // 阶段「实际焊道」：按点间距最终抽样（首尾+拐点必留，沿弧长≥间距取点），
+    // 复用下发管线同一个抽样函数 = 机器人逐点执行的轨迹。
+    const double actualStepMm = preset.finalWeldStepFromProcessMm > 0.0
+        ? preset.finalWeldStepFromProcessMm
+        : measureParam.dFinalWeldTrajectoryStepMm;
+    const QVector<WeldPoseFileRecord> actualRecords =
+        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(actualStepMm));
+    stages.actual = snapshotRecords(actualRecords);
 
     // 方向箭头：质心 + 自适应长度。
     double sum[3] = { 0.0, 0.0, 0.0 };
