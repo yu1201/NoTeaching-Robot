@@ -647,7 +647,7 @@ void LaserWeldFilterDialog::BuildUi()
     m_pAxisCombo->addItem("按 Y 方向采样/判段", static_cast<int>(PointCloudProcessingConfig::SampleAxisMode::AxisY));
     m_pAxisCombo->setToolTip("决定轨迹采样与平台/上坡/下坡段类判定的方向轴，对四种方法都生效；默认按扫描起止点方向自动推断。");
     QLabel* methodHintLabel = new QLabel(
-        "SDK全处理：SDK拐点直接使用；SDK+拟合：SDK基础焊道再拟合；点云+拟合：完整点云直接拟合；特征点+拟合：相机目标点轨迹拟合。处理失败直接报错，不回退其他方法。");
+        "SDK全处理：SDK拐点直接使用；SDK+拟合：SDK基础焊道再拟合；点云+拟合：完整点云投影提取下层轨迹再拟合；特征点+拟合：相机目标点轨迹拟合。处理失败直接报错，不回退其他方法。");
     methodHintLabel->setWordWrap(true);
     methodLayout->addWidget(new QLabel("当前方法"), 0, 0);
     methodLayout->addWidget(m_pProcessingModeCombo, 0, 1);
@@ -703,10 +703,7 @@ void LaserWeldFilterDialog::BuildUi()
         PointCloudProcessingConfig::FeaturePointStrategyDisplayName(
             PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys),
         static_cast<int>(PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys));
-    m_pFeaturePointStrategyCombo->addItem(
-        PointCloudProcessingConfig::FeaturePointStrategyDisplayName(
-            PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection),
-        static_cast<int>(PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection));
+    // 方案三（立板投影到底板）已并入方法③"点云算法+拟合"做前置提取，不再单独作为拟合方案。
 
     m_pStepSpin = new QDoubleSpinBox();
     m_pStepSpin->setRange(0.1, 9999.0);

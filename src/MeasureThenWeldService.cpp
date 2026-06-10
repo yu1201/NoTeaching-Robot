@@ -566,11 +566,8 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
     }
     // 拟合模式固定 PreservePath：整条管线（_PreservePath_2mm 及后续分类/姿态生成）都按此假设处理。
     params.fitMode = RobotCalculation::LowerWeldFitMode::PreservePath;
-    if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection)
-    {
-        params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::WorkpieceProjection;
-    }
-    else if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys)
+    // 方案三（立板投影）已并入方法③做前置提取，不再作为拟合方案映射；旧配置值按旧版几何处理。
+    if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys)
     {
         params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::RobustSegmentedKeys;
     }
@@ -651,6 +648,28 @@ QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
     const QVector<RobotCalculation::LowerWeldFilterPoint>& points);
 QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
     const QVector<PointCloudExtractionProcessor::TrackPoint>& points);
+std::vector<QString> BuildRawLaserOutputLines(const QVector<RobotCalculation::LowerWeldFilterPoint>& points);
+
+bool WriteTextLinesToFile(const QString& path, const std::vector<QString>& lines, QString* error)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("无法写入文件：%1（%2）").arg(path, file.errorString());
+        }
+        return false;
+    }
+    QTextStream stream(&file);
+    for (const QString& line : lines)
+    {
+        stream << line << '\n';
+    }
+    stream.flush();
+    file.close();
+    return true;
+}
 
 RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud(
     const QVector<RobotCalculation::IndexedPoint3D>& legacyLaserInput,
@@ -658,6 +677,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
     const T_PRECISE_MEASURE_PARAM& param,
     const RobotCalculation::LowerWeldFilterParams& fitParams,
     const QString& sdkBaseWeldOutputPath,
+    const QString& projectedTrackOutputPath,
     const MeasureThenWeldService::LogCallback& appendLog,
     bool* usedExternalLibrary = nullptr,
     PointCloudExtractionProcessor::ExtractionResult* externalExtraction = nullptr)
@@ -755,23 +775,61 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
     }
     if (settings.mode == PointCloudProcessingConfig::Mode::CloudFit)
     {
-        // ③点云+拟合：局部完整点云直接喂滤波拟合（不调 SDK）。失败直接报错，不回退。
-        if (fullCloudInput.size() < 2)
+        // ③点云算法+拟合：立板投影提取（完整点云 + 相机轨迹种子 → 下层轨迹）→ 滤波拟合。
+        // 几何链按单条轨迹设计，面状完整点云必须先经投影提取压成轨迹。失败直接报错，不回退。
+        if (fullCloudInput.size() < 3)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
-            failed.error = QString("点云算法+拟合输入点过少（%1）。").arg(fullCloudInput.size());
+            failed.error = QString("点云算法+拟合输入完整点云点数过少（%1）。").arg(fullCloudInput.size());
             if (appendLog)
             {
                 appendLog(failed.error);
             }
             return failed;
         }
+        if (legacyLaserInput.size() < 2)
+        {
+            RobotCalculation::MeasureThenWeldAnalysisResult failed;
+            failed.error = QString("点云算法+拟合缺少相机轨迹种子点（%1），无法定位底板候选。")
+                .arg(legacyLaserInput.size());
+            if (appendLog)
+            {
+                appendLog(failed.error);
+            }
+            return failed;
+        }
+        const RobotCalculation::LowerWeldFilterResult projectedPath =
+            RobotCalculation::ProjectWorkpieceCloudToLowerWeldPath(fullCloudInput, legacyLaserInput, fitParams);
+        if (!projectedPath.ok)
+        {
+            RobotCalculation::MeasureThenWeldAnalysisResult failed;
+            failed.error = QString("点云投影提取失败：%1").arg(projectedPath.error);
+            if (appendLog)
+            {
+                appendLog(failed.error);
+            }
+            return failed;
+        }
+        if (!projectedTrackOutputPath.isEmpty())
+        {
+            QString saveError;
+            if (!WriteTextLinesToFile(projectedTrackOutputPath, BuildRawLaserOutputLines(projectedPath.points), &saveError)
+                && appendLog)
+            {
+                appendLog(QString("点云投影轨迹写入失败（不影响处理）：%1").arg(saveError));
+            }
+        }
         if (appendLog)
         {
-            appendLog(QString("点云算法+拟合输入完整点云点数：%1。").arg(fullCloudInput.size()));
+            appendLog(QString("点云投影提取完成：完整点云=%1，种子点=%2，底板候选点=%3，投影轨迹点=%4。")
+                .arg(fullCloudInput.size())
+                .arg(legacyLaserInput.size())
+                .arg(projectedPath.lowerPointCount)
+                .arg(projectedPath.points.size()));
         }
         RobotCalculation::MeasureThenWeldAnalysisResult analysis =
-            RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(fullCloudInput, fitParams);
+            RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+                ToIndexedInput(projectedPath.points), fitParams);
         if (!analysis.ok && appendLog)
         {
             appendLog(QString("点云算法+拟合处理失败：%1").arg(analysis.error));
@@ -7556,42 +7614,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         originalFitParams.fitDebugDir = laserDir;
     }
     const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
-    if (originalFitParams.geometryStrategy == RobotCalculation::LowerWeldGeometryStrategy::WorkpieceProjection)
-    {
-        const QString workpieceExtractedLaserPath = QDir(laserDir).filePath(WORKPIECE_EXTRACTED_LASER_FILE_NAME);
-        const RobotCalculation::LowerWeldFilterResult projectedPath =
-            RobotCalculation::ProjectWorkpieceCloudToLowerWeldPath(workpieceCloudInput, laserFitInput, originalFitParams);
-        if (!projectedPath.ok)
-        {
-            error = projectedPath.error;
-            if (appendLog)
-            {
-                appendLog(QString("立板投影到底板失败：%1").arg(projectedPath.error));
-            }
-            return false;
-        }
-
-        laserFitInput = ToIndexedInput(projectedPath.points);
-        if (!SaveTextLines(workpieceExtractedLaserPath, BuildRawLaserOutputLines(projectedPath.points), error))
-        {
-            if (appendLog)
-            {
-                appendLog(QString("立板投影到底板成功，但写入投影轨迹文件失败：%1").arg(error));
-            }
-            return false;
-        }
-        if (appendLog)
-        {
-            appendLog(QString("已生成立板投影到底板轨迹：种子轨迹点=%1，完整点云=%2，底板候选点=%3，投影点=%4，文件=%5")
-                .arg(laserLines.size() > 0 ? static_cast<int>(laserLines.size()) - 1 : laserFitInput.size())
-                .arg(workpieceCloudInput.size())
-                .arg(projectedPath.lowerPointCount)
-                .arg(laserFitInput.size())
-                .arg(workpieceExtractedLaserPath));
-        }
-    }
-
-    // ①②③ 三种点云链方法都以完整点云为输入（仅④特征点+拟合依赖激光轨迹点）。
+    // ①②③ 三种点云链方法都以完整点云为输入（③另需相机轨迹点做投影种子，④只用激光轨迹点）。
     const bool canUseExternalCloud =
         pointCloudSettings.mode != PointCloudProcessingConfig::Mode::LegacyLaserPath
         && workpieceCloudInput.size() >= 2;
@@ -7628,6 +7651,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             param,
             originalFitParams,
             sdkBaseWeldPath,
+            QDir(laserDir).filePath(WORKPIECE_EXTRACTED_LASER_FILE_NAME),
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
@@ -7975,27 +7999,10 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     seamCompPath = dir.filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
 
     const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
-    const bool needsWorkpieceProjection =
-        pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection;
     QString sourceLaserPath = dir.filePath(RAW_LASER_FILE_NAME);
     if (!QFileInfo::exists(sourceLaserPath))
     {
-        if (needsWorkpieceProjection && QFileInfo::exists(workpieceExtractedLaserPath))
-        {
-            sourceLaserPath = workpieceExtractedLaserPath;
-            if (appendLog)
-            {
-                appendLog(QString("未找到原始激光点文件 %1，临时使用已有立板投影轨迹：%2")
-                    .arg(RAW_LASER_FILE_NAME, workpieceExtractedLaserPath));
-            }
-        }
-        else if (needsWorkpieceProjection)
-        {
-            error = QString("未找到原始激光点文件：%1。立板投影到底板需要原始焊道作为种子轨迹。")
-                .arg(dir.filePath(RAW_LASER_FILE_NAME));
-            return false;
-        }
-        else if (QFileInfo::exists(workpieceCloudPath))
+        if (QFileInfo::exists(workpieceCloudPath))
         {
             sourceLaserPath = workpieceCloudPath;
             if (appendLog)
@@ -8034,43 +8041,8 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     }
 
     const RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);
-    if (originalFitParams.geometryStrategy == RobotCalculation::LowerWeldGeometryStrategy::WorkpieceProjection
-        && sourceLaserPath != workpieceExtractedLaserPath)
-    {
-        const RobotCalculation::LowerWeldFilterResult projectedPath =
-            RobotCalculation::ProjectWorkpieceCloudToLowerWeldPath(workpieceCloudInput, laserFitInput, originalFitParams);
-        if (!projectedPath.ok)
-        {
-            error = projectedPath.error;
-            if (appendLog)
-            {
-                appendLog(QString("立板投影到底板失败：%1").arg(projectedPath.error));
-            }
-            return false;
-        }
 
-        laserFitInput = ToIndexedInput(projectedPath.points);
-        sourceLaserPath = workpieceExtractedLaserPath;
-        if (!SaveTextLines(sourceLaserPath, BuildRawLaserOutputLines(projectedPath.points), error))
-        {
-            if (appendLog)
-            {
-                appendLog(QString("立板投影到底板成功，但写入投影轨迹文件失败：%1").arg(error));
-            }
-            return false;
-        }
-        if (appendLog)
-        {
-            appendLog(QString("已生成立板投影到底板轨迹：种子轨迹点=%1，完整点云=%2，底板候选点=%3，投影点=%4，文件=%5")
-                .arg(projectedPath.measuredCount)
-                .arg(workpieceCloudInput.size())
-                .arg(projectedPath.lowerPointCount)
-                .arg(laserFitInput.size())
-                .arg(sourceLaserPath));
-        }
-    }
-
-    // ①②③ 三种点云链方法都以完整点云为输入（仅④特征点+拟合依赖激光轨迹点）。
+    // ①②③ 三种点云链方法都以完整点云为输入（③另需相机轨迹点做投影种子，④只用激光轨迹点）。
     const bool canUseExternalCloud =
         pointCloudSettings.mode != PointCloudProcessingConfig::Mode::LegacyLaserPath
         && workpieceCloudInput.size() >= 2;
@@ -8106,6 +8078,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             param,
             originalFitParams,
             sdkBaseWeldPath,
+            workpieceExtractedLaserPath,
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
