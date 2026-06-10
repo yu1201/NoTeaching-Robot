@@ -3,6 +3,7 @@
 #include "ConfigDatabase.h"
 #include "OPini.h"
 #include "PointCloud3DView.h"
+#include "PointCloudProcessingConfig.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
 #include "WeldProcessFile.h"
@@ -38,6 +39,7 @@
 #include <QLayout>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QApplication>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -2052,6 +2054,8 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     QHBoxLayout* toolbar = new QHBoxLayout();
     toolbar->setSpacing(6);
     QPushButton* chooseBtn = new QPushButton("选择目录");
+    QPushButton* rebuildBtn = new QPushButton("按当前方法重算");
+    rebuildBtn->setToolTip("按精测点云处理界面当前选定的方法，对该目录重新计算基准焊道\n（覆盖 _Classified/_WeldPose_2mm/_SeamComp 等处理结果文件），\n切换处理方法后先重算再调补偿。");
     m_pCompPreviewDirEdit = new QLineEdit();
     m_pCompPreviewDirEdit->setReadOnly(true);
     m_pCompPreviewDirEdit->setPlaceholderText("选择扫描结果 LaserPoint 目录…");
@@ -2064,6 +2068,7 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
         button->setMinimumWidth(54);
     }
     toolbar->addWidget(chooseBtn);
+    toolbar->addWidget(rebuildBtn);
     toolbar->addWidget(m_pCompPreviewDirEdit, 1);
     toolbar->addWidget(topBtn);
     toolbar->addWidget(frontBtn);
@@ -2119,6 +2124,7 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     layout->addWidget(m_pCompPreviewInfoLabel);
 
     connect(chooseBtn, &QPushButton::clicked, this, [this]() { ChooseCompPreviewDirectory(); });
+    connect(rebuildBtn, &QPushButton::clicked, this, [this]() { RebuildCompPreviewBaseline(); });
     connect(topBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetTopView(); });
     connect(frontBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetFrontView(); });
     connect(camBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetCameraLikeView(); });
@@ -2166,6 +2172,84 @@ void WeldSeamCompDialog::SetCompPreviewDirectory(const QString& dir)
     }
     AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
     RecomputeCompPreview();
+}
+
+void WeldSeamCompDialog::RebuildCompPreviewBaseline()
+{
+    if (m_compPreviewDir.isEmpty())
+    {
+        QMessageBox::information(this, "重算基准焊道", "请先选择扫描结果目录。");
+        return;
+    }
+
+    // 不需要机器人在线：重建只读配置和已存点云文件，但需要驱动对象提供机器人名与参数上下文。
+    RobotDriverAdaptor* driver = nullptr;
+    const QString robot = CurrentRobotName();
+    if (m_pContralUnit != nullptr)
+    {
+        for (const T_CONTRAL_UNIT& unit : m_pContralUnit->m_vtContralUnitInfo)
+        {
+            if (QString::fromStdString(unit.sUnitName) == robot && unit.pUnitDriver != nullptr)
+            {
+                driver = static_cast<RobotDriverAdaptor*>(unit.pUnitDriver);
+                break;
+            }
+        }
+    }
+    if (driver == nullptr)
+    {
+        QMessageBox::warning(this, "重算基准焊道", QString("未找到机器人 %1 的驱动，无法读取测量参数。").arg(robot));
+        return;
+    }
+
+    const QString methodName = PointCloudProcessingConfig::ModeDisplayName(PointCloudProcessingConfig::Load().mode);
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this,
+        "重算基准焊道",
+        QString("将按当前处理方法「%1」重新计算该目录的基准焊道，\n并覆盖目录内现有的处理结果文件（分类点、焊接姿态、补偿文件等）。\n\n%2\n\n是否继续？")
+            .arg(methodName, m_compPreviewDir),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    T_PRECISE_MEASURE_PARAM param;
+    QString error;
+    if (!m_compPreviewService.LoadPresetParam(driver, param, error))
+    {
+        AppendLog("重算基准：读取测量参数失败：" + error);
+        QMessageBox::warning(this, "重算基准焊道", "读取测量参数失败：" + error);
+        return;
+    }
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QString preservePath;
+    QString weldPosePath;
+    QString seamCompPath;
+    QString summary;
+    const bool ok = m_compPreviewService.RebuildWeldFilesFromLaserDir(
+        param,
+        m_compPreviewDir,
+        preservePath,
+        weldPosePath,
+        seamCompPath,
+        summary,
+        error,
+        [this](const QString& text) { AppendLog("重算基准：" + text); });
+    QApplication::restoreOverrideCursor();
+
+    if (!ok)
+    {
+        AppendLog("重算基准失败：" + error);
+        QMessageBox::warning(this, "重算基准焊道", "重算失败：" + error);
+        return;
+    }
+
+    AppendLog(QString("已按「%1」重算基准焊道。%2").arg(methodName, summary));
+    // 重新加载六阶段预览（基准/原始焊道/原始数据全部刷新）。
+    SetCompPreviewDirectory(m_compPreviewDir);
 }
 
 void WeldSeamCompDialog::AutoSelectLatestCompPreviewDirectory()
