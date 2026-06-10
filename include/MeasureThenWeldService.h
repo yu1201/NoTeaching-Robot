@@ -159,6 +159,28 @@ public:
     CompPreviewResult RecomputeCompPreview(CompPreviewKind kind, const QString& robotName, const QVector<CompPreviewPoint>& baseline, const CompPreviewEditValues& edits) const;
     // 读取原始焊道（分类后几何 _Classified.txt）作为对照图层。
     bool LoadCompPreviewOriginalTrack(const QString& laserDir, QVector<CompPreviewPoint>& points, QString& error) const;
+    // 读取原始扫描点云（PreciseLaserPoint.txt）作为对照图层。
+    bool LoadCompPreviewRawCloud(const QString& laserDir, QVector<CompPreviewPoint>& points, QString& error) const;
+
+    // ===== 五阶段流水线预览：原始数据→原始焊道→姿态补偿→焊道补偿→圆弧过渡 =====
+    // 基准 = _WeldPose_2mm.txt（已烘焙扫描时保存的姿态补偿）。
+    // 姿态补偿阶段按 delta 计算（当前值−已保存值），当前=已保存时与文件一致；
+    // 焊道补偿与圆弧过渡逐级链式计算，复用管线真实数学，与下发 _SeamComp 一致。
+    struct CompPreviewStages
+    {
+        bool ok = false;
+        QString error;
+        QVector<CompPreviewPoint> poseComp;   // 姿态补偿后（基准 + 姿态补偿增量）
+        QVector<CompPreviewPoint> seamComp;   // 焊道补偿后（纯补偿平移）
+        QVector<CompPreviewPoint> arc;        // 圆弧过渡后（完整后处理 = 下发执行轨迹）
+        QVector<CompPreviewArrow> arrows;     // 正负方向箭头
+    };
+    CompPreviewStages ComputeCompPreviewStages(
+        const QString& robotName,
+        const QVector<CompPreviewPoint>& baseline,
+        const CompPreviewEditValues& currentEdits,
+        const CompPreviewEditValues& savedEdits,
+        bool includePoseArrows) const;
 
 private:
     static double SafeSpeed(double value, double fallback);

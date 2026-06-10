@@ -7,15 +7,19 @@
 #include "RobotMessage.h"
 #include "WindowStyleHelper.h"
 
+#include <QAbstractButton>
 #include <QButtonGroup>
 #include <QColor>
+#include <QEasingCurve>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QPainter>
 #include <QSplitter>
 #include <QStringConverter>
 #include <QTextStream>
 #include <QTimer>
+#include <QVariantAnimation>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -208,6 +212,74 @@ bool IsCornerCompensationSegmentKind(const QString& segmentKind)
     return segmentKind.compare("rising_edge", Qt::CaseInsensitive) == 0
         || segmentKind.compare("falling_edge", Qt::CaseInsensitive) == 0;
 }
+
+// 现代滑动式开关（iOS 风格）：自绘 QAbstractButton + QVariantAnimation 滑块动画，
+// 无需 Q_OBJECT/moc；accent 为开启时的轨道颜色（与对应图层颜色一致，兼作图例）。
+class ToggleSwitch final : public QAbstractButton
+{
+public:
+    explicit ToggleSwitch(const QColor& accent, QWidget* parent = nullptr)
+        : QAbstractButton(parent)
+        , m_accent(accent)
+    {
+        setCheckable(true);
+        setCursor(Qt::PointingHandCursor);
+        setFixedSize(44, 24);
+        m_anim = new QVariantAnimation(this);
+        m_anim->setDuration(140);
+        m_anim->setEasingCurve(QEasingCurve::InOutCubic);
+        connect(m_anim, &QVariantAnimation::valueChanged, this, [this](const QVariant& value)
+            {
+                m_knobPos = value.toDouble();
+                update();
+            });
+        connect(this, &QAbstractButton::toggled, this, [this](bool on)
+            {
+                if (!isVisible())
+                {
+                    m_knobPos = on ? 1.0 : 0.0;
+                    update();
+                    return;
+                }
+                m_anim->stop();
+                m_anim->setStartValue(m_knobPos);
+                m_anim->setEndValue(on ? 1.0 : 0.0);
+                m_anim->start();
+            });
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        const QColor offColor(52, 68, 80);
+        const auto lerp = [this, &offColor](int channelOff, int channelOn)
+            {
+                return channelOff + static_cast<int>((channelOn - channelOff) * m_knobPos);
+            };
+        const QColor trackColor(
+            lerp(offColor.red(), m_accent.red()),
+            lerp(offColor.green(), m_accent.green()),
+            lerp(offColor.blue(), m_accent.blue()));
+
+        const QRectF track(0.5, 1.5, 43.0, 21.0);
+        painter.setPen(QPen(QColor(20, 30, 38), 1.0));
+        painter.setBrush(trackColor);
+        painter.drawRoundedRect(track, 10.5, 10.5);
+
+        const double knobX = 3.0 + m_knobPos * (44.0 - 18.0 - 6.0);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(244, 250, 250));
+        painter.drawEllipse(QRectF(knobX, 3.0, 18.0, 18.0));
+    }
+
+private:
+    QColor m_accent;
+    double m_knobPos = 0.0;
+    QVariantAnimation* m_anim = nullptr;
+};
 }
 
 WeldSeamCompDialog::WeldSeamCompDialog(ContralUnit* pContralUnit, QWidget* parent)
@@ -1932,6 +2004,8 @@ QString WeldSeamCompDialog::BuildSnapshot() const
 void WeldSeamCompDialog::MarkCleanSnapshot()
 {
     m_cleanSnapshot = BuildSnapshot();
+    // 姿态补偿"已保存值"快照：流水线预览的姿态补偿阶段按 当前−已保存 的 delta 计算。
+    m_savedPoseRows = m_poseRows;
 }
 
 void WeldSeamCompDialog::AppendLog(const QString& text)
@@ -1973,22 +2047,40 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     toolbar->addWidget(resetBtn);
     layout->addLayout(toolbar);
 
+    // 五阶段流水线图层开关（滑动式），开关颜色=图层颜色兼作图例：
+    // 原始数据→原始焊道→姿态补偿→焊道补偿→圆弧过渡，逐级连续计算。
     QHBoxLayout* layerToggleLayout = new QHBoxLayout();
-    layerToggleLayout->setSpacing(14);
-    m_pShowOriginalCheck = new QCheckBox("原始焊道");
-    m_pShowBeforeCheck = new QCheckBox("补偿前");
-    m_pShowAfterCheck = new QCheckBox("补偿后");
-    m_pShowOriginalCheck->setChecked(false);
-    m_pShowBeforeCheck->setChecked(true);
-    m_pShowAfterCheck->setChecked(true);
-    // 颜色图例：复选框文字用各图层实际颜色显示（灰=原始焊道 / 蓝=补偿前 / 橙=补偿后），与 3D 视图配色一致。
-    m_pShowOriginalCheck->setStyleSheet("QCheckBox { color: #96A0AA; font-weight: bold; }");
-    m_pShowBeforeCheck->setStyleSheet("QCheckBox { color: #78AFD7; font-weight: bold; }");
-    m_pShowAfterCheck->setStyleSheet("QCheckBox { color: #FF9628; font-weight: bold; }");
+    layerToggleLayout->setSpacing(8);
     layerToggleLayout->addWidget(new QLabel("显示："));
-    layerToggleLayout->addWidget(m_pShowOriginalCheck);
-    layerToggleLayout->addWidget(m_pShowBeforeCheck);
-    layerToggleLayout->addWidget(m_pShowAfterCheck);
+    struct StageSpec
+    {
+        const char* name;
+        QColor color;
+        bool defaultOn;
+    };
+    const StageSpec stageSpecs[5] = {
+        { "原始数据", QColor(110, 123, 135), false },
+        { "原始焊道", QColor(200, 210, 220), false },
+        { "姿态补偿", QColor(87, 182, 255), true },
+        { "焊道补偿", QColor(255, 197, 61), false },
+        { "圆弧过渡", QColor(255, 122, 69), true }
+    };
+    for (int stageIndex = 0; stageIndex < 5; ++stageIndex)
+    {
+        ToggleSwitch* toggle = new ToggleSwitch(stageSpecs[stageIndex].color);
+        toggle->setChecked(stageSpecs[stageIndex].defaultOn);
+        QLabel* nameLabel = new QLabel(QString::fromUtf8(stageSpecs[stageIndex].name));
+        nameLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }")
+            .arg(stageSpecs[stageIndex].color.name()));
+        layerToggleLayout->addWidget(toggle);
+        layerToggleLayout->addWidget(nameLabel);
+        if (stageIndex < 4)
+        {
+            layerToggleLayout->addSpacing(8);
+        }
+        m_pStageToggles[stageIndex] = toggle;
+        connect(toggle, &QAbstractButton::toggled, this, [this](bool) { ApplyCompPreviewLayerVisibility(); });
+    }
     layerToggleLayout->addStretch(1);
     layout->addLayout(layerToggleLayout);
 
@@ -1996,7 +2088,7 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     m_pCompPreviewView->setMinimumSize(360, 360);
     layout->addWidget(m_pCompPreviewView, 1);
 
-    m_pCompPreviewInfoLabel = new QLabel("灰=原始焊道  蓝=补偿前  橙=补偿后；可勾选显示哪些图层，调整补偿值即可实时对比。");
+    m_pCompPreviewInfoLabel = new QLabel("选择目录后，用开关切换各阶段曲线（颜色即图例）；调整补偿值实时联动重算。");
     m_pCompPreviewInfoLabel->setWordWrap(true);
     m_pCompPreviewInfoLabel->setStyleSheet("color:#BFE8EC;");
     layout->addWidget(m_pCompPreviewInfoLabel);
@@ -2006,10 +2098,6 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     connect(frontBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetFrontView(); });
     connect(camBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetCameraLikeView(); });
     connect(resetBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->ResetView(); });
-    for (QCheckBox* check : { m_pShowOriginalCheck, m_pShowBeforeCheck, m_pShowAfterCheck })
-    {
-        connect(check, &QCheckBox::toggled, this, [this](bool) { ApplyCompPreviewLayerVisibility(); });
-    }
 
     return panel;
 }
@@ -2033,11 +2121,18 @@ void WeldSeamCompDialog::ChooseCompPreviewDirectory()
     }
     m_compPreviewBaseline.clear();
     m_compPreviewOriginal.clear();
+    m_compPreviewRaw.clear();
     QString originalError;
     if (!m_compPreviewService.LoadCompPreviewOriginalTrack(m_compPreviewDir, m_compPreviewOriginal, originalError))
     {
         m_compPreviewOriginal.clear();
         AppendLog("原始焊道：" + originalError);
+    }
+    QString rawError;
+    if (!m_compPreviewService.LoadCompPreviewRawCloud(m_compPreviewDir, m_compPreviewRaw, rawError))
+    {
+        m_compPreviewRaw.clear();
+        AppendLog("原始数据：" + rawError);
     }
     AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
     RecomputeCompPreview();
@@ -2065,10 +2160,12 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
     {
         return;
     }
-    // 图层顺序：0=原始焊道 1=补偿前 2=补偿后。
-    m_pCompPreviewView->SetLayerVisible(0, m_pShowOriginalCheck != nullptr && m_pShowOriginalCheck->isChecked());
-    m_pCompPreviewView->SetLayerVisible(1, m_pShowBeforeCheck == nullptr || m_pShowBeforeCheck->isChecked());
-    m_pCompPreviewView->SetLayerVisible(2, m_pShowAfterCheck == nullptr || m_pShowAfterCheck->isChecked());
+    // 图层顺序：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡。
+    for (int stageIndex = 0; stageIndex < 5; ++stageIndex)
+    {
+        m_pCompPreviewView->SetLayerVisible(stageIndex,
+            m_pStageToggles[stageIndex] != nullptr && m_pStageToggles[stageIndex]->isChecked());
+    }
 }
 
 int WeldSeamCompDialog::CurrentRobotType() const
@@ -2097,76 +2194,69 @@ int WeldSeamCompDialog::CurrentRobotType() const
     return ROBOT_TYPE_FANUC;
 }
 
-MeasureThenWeldService::CompPreviewKind WeldSeamCompDialog::CurrentCompPreviewKind() const
-{
-    if (m_mode == CompMode::Seam)
-    {
-        return MeasureThenWeldService::CompPreviewKind::Seam;
-    }
-    if (m_pCornerCompensationCheck != nullptr && m_pCornerCompensationCheck->isChecked())
-    {
-        return MeasureThenWeldService::CompPreviewKind::Corner;
-    }
-    return MeasureThenWeldService::CompPreviewKind::Pose;
-}
-
 MeasureThenWeldService::CompPreviewEditValues WeldSeamCompDialog::CollectCompPreviewEditValues() const
 {
     MeasureThenWeldService::CompPreviewEditValues edits;
-    if (m_mode == CompMode::Seam)
+
+    // 五阶段流水线同时需要姿态补偿与焊缝补偿：分别取当前选中的姿态组与焊道组。
+    const int poseBase = m_currentPoseGroupIndex * COMP_SEGMENT_COUNT;
+    for (int seg = 0; seg < COMP_SEGMENT_COUNT; ++seg)
     {
-        const int base = m_currentSeamGroupIndex * COMP_SEGMENT_COUNT;
-        for (int seg = 0; seg < COMP_SEGMENT_COUNT; ++seg)
+        const int flat = poseBase + seg;
+        if (flat < 0 || flat >= m_poseRows.size())
         {
-            const int flat = base + seg;
-            if (flat < 0 || flat >= m_seamRows.size())
-            {
-                continue;
-            }
-            edits.weldZComp[seg] = m_seamRows[flat].weldZComp;
-            edits.weldGunDirComp[seg] = m_seamRows[flat].weldGunDirComp;
-            edits.weldSeamDirComp[seg] = m_seamRows[flat].weldSeamDirComp;
-            edits.seamSegmentKind[seg] = m_seamRows[flat].segmentKind;
+            continue;
         }
+        edits.poseRx[seg] = m_poseRows[flat].poseRx;
+        edits.poseRy[seg] = m_poseRows[flat].poseRy;
+        edits.poseRz[seg] = m_poseRows[flat].poseRz;
+        edits.compX[seg] = m_poseRows[flat].compX;
+        edits.compY[seg] = m_poseRows[flat].compY;
+        edits.compZ[seg] = m_poseRows[flat].compZ;
     }
-    else
+    edits.poseMatchMode = CurrentPoseGroupMatchMode();
+    edits.poseMatchMaxErrorDeg = m_poseMatchMaxErrorDeg;
+    edits.robotType = CurrentRobotType();
+
+    const int seamBase = m_currentSeamGroupIndex * COMP_SEGMENT_COUNT;
+    for (int seg = 0; seg < COMP_SEGMENT_COUNT; ++seg)
     {
-        const int base = m_currentPoseGroupIndex * COMP_SEGMENT_COUNT;
-        for (int seg = 0; seg < COMP_SEGMENT_COUNT; ++seg)
+        const int flat = seamBase + seg;
+        if (flat < 0 || flat >= m_seamRows.size())
         {
-            const int flat = base + seg;
-            if (flat < 0 || flat >= m_poseRows.size())
-            {
-                continue;
-            }
-            edits.poseRx[seg] = m_poseRows[flat].poseRx;
-            edits.poseRy[seg] = m_poseRows[flat].poseRy;
-            edits.poseRz[seg] = m_poseRows[flat].poseRz;
-            edits.compX[seg] = m_poseRows[flat].compX;
-            edits.compY[seg] = m_poseRows[flat].compY;
-            edits.compZ[seg] = m_poseRows[flat].compZ;
+            continue;
         }
-        edits.poseMatchMode = CurrentPoseGroupMatchMode();
-        edits.poseMatchMaxErrorDeg = m_poseMatchMaxErrorDeg;
-        edits.robotType = CurrentRobotType();
-        edits.cornerEnabled = (m_pCornerCompensationCheck != nullptr && m_pCornerCompensationCheck->isChecked());
-        const int risingFlat = base + 1;   // 上升边
-        const int fallingFlat = base + 3;  // 下降边
-        if (risingFlat >= 0 && risingFlat < m_poseRows.size())
-        {
-            edits.risingInnerToOuter = m_poseRows[risingFlat].innerToOuterCornerComp;
-            edits.risingInnerToInner = m_poseRows[risingFlat].innerToInnerCornerComp;
-            edits.risingOuterToOuter = m_poseRows[risingFlat].outerToOuterCornerComp;
-            edits.risingOuterToInner = m_poseRows[risingFlat].outerToInnerCornerComp;
-        }
-        if (fallingFlat >= 0 && fallingFlat < m_poseRows.size())
-        {
-            edits.fallingInnerToOuter = m_poseRows[fallingFlat].innerToOuterCornerComp;
-            edits.fallingInnerToInner = m_poseRows[fallingFlat].innerToInnerCornerComp;
-            edits.fallingOuterToOuter = m_poseRows[fallingFlat].outerToOuterCornerComp;
-            edits.fallingOuterToInner = m_poseRows[fallingFlat].outerToInnerCornerComp;
-        }
+        edits.weldZComp[seg] = m_seamRows[flat].weldZComp;
+        edits.weldGunDirComp[seg] = m_seamRows[flat].weldGunDirComp;
+        edits.weldSeamDirComp[seg] = m_seamRows[flat].weldSeamDirComp;
+        edits.seamSegmentKind[seg] = m_seamRows[flat].segmentKind;
     }
+    return edits;
+}
+
+MeasureThenWeldService::CompPreviewEditValues WeldSeamCompDialog::CollectSavedPoseCompEdits() const
+{
+    // 已保存（加载/保存时快照）的姿态补偿值：姿态补偿阶段按 当前−已保存 的 delta 叠加，
+    // 因为基准 _WeldPose_2mm 已烘焙已保存的姿态补偿。
+    MeasureThenWeldService::CompPreviewEditValues edits;
+    const int poseBase = m_currentPoseGroupIndex * COMP_SEGMENT_COUNT;
+    for (int seg = 0; seg < COMP_SEGMENT_COUNT; ++seg)
+    {
+        const int flat = poseBase + seg;
+        if (flat < 0 || flat >= m_savedPoseRows.size())
+        {
+            continue;
+        }
+        edits.poseRx[seg] = m_savedPoseRows[flat].poseRx;
+        edits.poseRy[seg] = m_savedPoseRows[flat].poseRy;
+        edits.poseRz[seg] = m_savedPoseRows[flat].poseRz;
+        edits.compX[seg] = m_savedPoseRows[flat].compX;
+        edits.compY[seg] = m_savedPoseRows[flat].compY;
+        edits.compZ[seg] = m_savedPoseRows[flat].compZ;
+    }
+    edits.poseMatchMode = CurrentPoseGroupMatchMode();
+    edits.poseMatchMaxErrorDeg = m_poseMatchMaxErrorDeg;
+    edits.robotType = CurrentRobotType();
     return edits;
 }
 
@@ -2191,16 +2281,12 @@ void WeldSeamCompDialog::RecomputeCompPreview()
     QString storeError;
     StoreEditorValues(false, storeError);
 
-    const MeasureThenWeldService::CompPreviewKind kind = CurrentCompPreviewKind();
-    const bool usesKeyPoints = (kind == MeasureThenWeldService::CompPreviewKind::Corner);
-
-    if (m_compPreviewBaseline.isEmpty()
-        || m_compPreviewBaselineDir != m_compPreviewDir
-        || m_compPreviewBaselineUsesKeyPoints != usesKeyPoints)
+    if (m_compPreviewBaseline.isEmpty() || m_compPreviewBaselineDir != m_compPreviewDir)
     {
         QString loadError;
         QVector<MeasureThenWeldService::CompPreviewPoint> baseline;
-        if (!m_compPreviewService.LoadCompPreviewBaseline(kind, m_compPreviewDir, baseline, loadError))
+        if (!m_compPreviewService.LoadCompPreviewBaseline(
+            MeasureThenWeldService::CompPreviewKind::Seam, m_compPreviewDir, baseline, loadError))
         {
             m_compPreviewBaseline.clear();
             m_pCompPreviewView->SetLayers({});
@@ -2213,12 +2299,13 @@ void WeldSeamCompDialog::RecomputeCompPreview()
         }
         m_compPreviewBaseline = baseline;
         m_compPreviewBaselineDir = m_compPreviewDir;
-        m_compPreviewBaselineUsesKeyPoints = usesKeyPoints;
     }
 
-    const MeasureThenWeldService::CompPreviewEditValues edits = CollectCompPreviewEditValues();
-    const MeasureThenWeldService::CompPreviewResult result =
-        m_compPreviewService.RecomputeCompPreview(kind, CurrentRobotName(), m_compPreviewBaseline, edits);
+    // 五阶段流水线：基准(_WeldPose_2mm) → 姿态补偿(delta) → 焊道补偿 → 圆弧过渡，逐级连续计算。
+    const MeasureThenWeldService::CompPreviewEditValues currentEdits = CollectCompPreviewEditValues();
+    const MeasureThenWeldService::CompPreviewEditValues savedEdits = CollectSavedPoseCompEdits();
+    const MeasureThenWeldService::CompPreviewStages stages = m_compPreviewService.ComputeCompPreviewStages(
+        CurrentRobotName(), m_compPreviewBaseline, currentEdits, savedEdits, m_mode == CompMode::Pose);
 
     auto toLayerPoints = [](const QVector<MeasureThenWeldService::CompPreviewPoint>& points)
     {
@@ -2231,42 +2318,37 @@ void WeldSeamCompDialog::RecomputeCompPreview()
         return out;
     };
 
-    const bool showOriginal = m_pShowOriginalCheck != nullptr && m_pShowOriginalCheck->isChecked();
-    const bool showBefore = m_pShowBeforeCheck == nullptr || m_pShowBeforeCheck->isChecked();
-    const bool showAfter = m_pShowAfterCheck == nullptr || m_pShowAfterCheck->isChecked();
+    // 固定图层顺序：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡
+    //（与 m_pStageToggles / ApplyCompPreviewLayerVisibility 对应，颜色与开关图例一致）。
+    const auto makeLayer = [this, &toLayerPoints](
+        int stageIndex,
+        const char* name,
+        const QColor& color,
+        const QVector<MeasureThenWeldService::CompPreviewPoint>& points,
+        bool connectLines)
+    {
+        pcview::PointCloud3DView::Layer layer;
+        layer.name = QString::fromUtf8(name);
+        layer.color = color;
+        layer.connectLines = connectLines;
+        layer.visible = m_pStageToggles[stageIndex] != nullptr && m_pStageToggles[stageIndex]->isChecked();
+        layer.points = toLayerPoints(points);
+        return layer;
+    };
 
-    // 固定图层顺序：0=原始焊道 1=补偿前 2=补偿后（与 ApplyCompPreviewLayerVisibility 对应）。
     QVector<pcview::PointCloud3DView::Layer> layers;
-    pcview::PointCloud3DView::Layer originalLayer;
-    originalLayer.name = "原始焊道";
-    originalLayer.color = QColor(150, 160, 170);
-    originalLayer.connectLines = true;
-    originalLayer.visible = showOriginal;
-    originalLayer.points = toLayerPoints(m_compPreviewOriginal);
-    layers.push_back(originalLayer);
-
-    pcview::PointCloud3DView::Layer beforeLayer;
-    beforeLayer.name = "补偿前";
-    beforeLayer.color = QColor(120, 175, 215);
-    beforeLayer.connectLines = true;
-    beforeLayer.visible = showBefore;
-    beforeLayer.points = toLayerPoints(result.before);
-    layers.push_back(beforeLayer);
-
-    pcview::PointCloud3DView::Layer afterLayer;
-    afterLayer.name = "补偿后";
-    afterLayer.color = QColor(255, 150, 40);
-    afterLayer.connectLines = true;
-    afterLayer.visible = showAfter;
-    afterLayer.points = toLayerPoints(result.after);
-    layers.push_back(afterLayer);
+    layers.push_back(makeLayer(0, "原始数据", QColor(110, 123, 135), m_compPreviewRaw, false));
+    layers.push_back(makeLayer(1, "原始焊道", QColor(200, 210, 220), m_compPreviewOriginal, true));
+    layers.push_back(makeLayer(2, "姿态补偿", QColor(87, 182, 255), stages.poseComp, true));
+    layers.push_back(makeLayer(3, "焊道补偿", QColor(255, 197, 61), stages.seamComp, true));
+    layers.push_back(makeLayer(4, "圆弧过渡", QColor(255, 122, 69), stages.arc, true));
 
     m_pCompPreviewView->SetLayers(layers);
 
-    // 方向箭头：由 service 按补偿类型（焊缝/姿态/拐点）统一产出，这里只按 colorId 渲染。
+    // 方向箭头：由 service 统一产出，这里只按 colorId 渲染。
     QVector<pcview::PointCloud3DView::DirectionArrow> arrows;
-    arrows.reserve(result.arrows.size());
-    for (const MeasureThenWeldService::CompPreviewArrow& source : result.arrows)
+    arrows.reserve(stages.arrows.size());
+    for (const MeasureThenWeldService::CompPreviewArrow& source : stages.arrows)
     {
         pcview::PointCloud3DView::DirectionArrow arrow;
         arrow.origin = { source.origin[0], source.origin[1], source.origin[2] };
@@ -2289,10 +2371,15 @@ void WeldSeamCompDialog::RecomputeCompPreview()
 
     if (m_pCompPreviewInfoLabel != nullptr)
     {
-        QString info = QString("补偿前 %1 点 / 补偿后 %2 点").arg(result.before.size()).arg(result.after.size());
-        if (!result.ok && !result.error.isEmpty())
+        QString info = QString("原始 %1 / 焊道 %2 / 姿态补偿 %3 / 焊道补偿 %4 / 圆弧过渡 %5 点")
+            .arg(m_compPreviewRaw.size())
+            .arg(m_compPreviewOriginal.size())
+            .arg(stages.poseComp.size())
+            .arg(stages.seamComp.size())
+            .arg(stages.arc.size());
+        if (!stages.ok && !stages.error.isEmpty())
         {
-            info += "（" + result.error + "）";
+            info += "（" + stages.error + "）";
         }
         m_pCompPreviewInfoLabel->setText(info);
     }
