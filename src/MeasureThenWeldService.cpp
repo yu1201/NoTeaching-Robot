@@ -5398,7 +5398,9 @@ Eigen::Vector3d ApplyPoseCompToPoint(
     int slotIndex = -1;
     if (NormalizePoseCompMatchMode(poseCompMatchMode) == POSE_COMP_MATCH_BY_SEGMENT_CODE)
     {
-        const int defaultIndex = DefaultPoseCompSlotIndex(segmentKind);
+        // 剥掉 _transition/_arc 后缀再匹配：管线内传入的 segment.kind 本就无后缀（无影响），
+        // 预览从 _WeldPose_2mm 文件读回的段类带后缀，不剥会漏补偿过渡点、轨迹出现弯折。
+        const int defaultIndex = DefaultPoseCompSlotIndex(NormalizeSeamCompSegmentKind(segmentKind));
         if (defaultIndex >= 0 && defaultIndex < static_cast<int>(poseCompSlots.size()))
         {
             slotIndex = defaultIndex;

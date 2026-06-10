@@ -114,6 +114,8 @@ private:
     // 补偿前 / 补偿后 焊道可视化对比
     QWidget* CreateCompPreviewPanel();
     void ChooseCompPreviewDirectory();
+    void SetCompPreviewDirectory(const QString& dir);
+    void AutoSelectLatestCompPreviewDirectory();
     void ScheduleCompPreview();
     void RecomputeCompPreview();
     void ApplyCompPreviewLayerVisibility();
@@ -173,6 +175,7 @@ private:
     QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewBaseline;
     QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewOriginal;
     QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewRaw;
+    QVector<MeasureThenWeldService::CompPreviewArrow> m_compPreviewArrows;  // 全量箭头缓存，按开关过滤显示
     QVector<PoseCompRow> m_savedPoseRows;   // 加载/保存后的姿态补偿快照（姿态补偿阶段按 delta 计算）
     QString m_compPreviewDir;
     QString m_compPreviewBaselineDir;
