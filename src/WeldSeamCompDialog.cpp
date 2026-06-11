@@ -2167,10 +2167,18 @@ void WeldSeamCompDialog::SetCompPreviewDirectory(const QString& dir)
         AppendLog("原始焊道：" + originalError);
     }
     QString rawError;
-    if (!m_compPreviewService.LoadCompPreviewRawCloud(m_compPreviewDir, m_compPreviewRaw, rawError))
+    QString rawSourceDescription;
+    if (!m_compPreviewService.LoadCompPreviewRawCloud(m_compPreviewDir, m_compPreviewRaw, rawError, &rawSourceDescription))
     {
         m_compPreviewRaw.clear();
         AppendLog("原始数据：" + rawError);
+    }
+    else
+    {
+        // 原始数据随当前方法取真实输入：①完整点云（抽样）/②SDK基础焊道/③④相机目标点轨迹。
+        AppendLog(QString("原始数据：%1 点（%2）")
+            .arg(m_compPreviewRaw.size())
+            .arg(rawSourceDescription));
     }
     AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
     RecomputeCompPreview();
