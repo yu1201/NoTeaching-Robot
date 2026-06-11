@@ -5,7 +5,6 @@
 #include "PointCloud3DView.h"
 #include "PointCloudProcessingConfig.h"
 #include "RobotDataHelper.h"
-#include "WorkpieceMeshViewerDialog.h"
 #include "RobotMessage.h"
 #include "WeldProcessFile.h"
 #include "WindowStyleHelper.h"
@@ -2056,8 +2055,6 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     toolbar->setSpacing(6);
     QPushButton* chooseBtn = new QPushButton("选择目录");
     QPushButton* rebuildBtn = new QPushButton("按当前方法重算");
-    QPushButton* meshBtn = new QPushButton("工件模型");
-    meshBtn->setToolTip("查看该目录的工件三维模型（首次自动从完整点云生成模型缓存，之后秒开）。");
     rebuildBtn->setToolTip("按精测点云处理界面当前选定的方法，对该目录重新计算基准焊道\n（覆盖 _Classified/_WeldPose_2mm/_SeamComp 等处理结果文件），\n切换处理方法后先重算再调补偿。");
     m_pCompPreviewDirEdit = new QLineEdit();
     m_pCompPreviewDirEdit->setReadOnly(true);
@@ -2072,7 +2069,6 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
     }
     toolbar->addWidget(chooseBtn);
     toolbar->addWidget(rebuildBtn);
-    toolbar->addWidget(meshBtn);
     toolbar->addWidget(m_pCompPreviewDirEdit, 1);
     toolbar->addWidget(topBtn);
     toolbar->addWidget(frontBtn);
@@ -2129,7 +2125,6 @@ QWidget* WeldSeamCompDialog::CreateCompPreviewPanel()
 
     connect(chooseBtn, &QPushButton::clicked, this, [this]() { ChooseCompPreviewDirectory(); });
     connect(rebuildBtn, &QPushButton::clicked, this, [this]() { RebuildCompPreviewBaseline(); });
-    connect(meshBtn, &QPushButton::clicked, this, [this]() { OpenWorkpieceMeshViewer(); });
     connect(topBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetTopView(); });
     connect(frontBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetFrontView(); });
     connect(camBtn, &QPushButton::clicked, this, [this]() { if (m_pCompPreviewView != nullptr) m_pCompPreviewView->SetCameraLikeView(); });
@@ -2237,24 +2232,6 @@ void WeldSeamCompDialog::RefreshCompPreviewScanLine()
         m_compPreviewScanEndXY = QPointF(scanEnd.dX, scanEnd.dY);
         m_compPreviewScanLineValid = true;
     }
-}
-
-void WeldSeamCompDialog::OpenWorkpieceMeshViewer()
-{
-    if (m_compPreviewDir.isEmpty())
-    {
-        QMessageBox::information(this, "工件模型", "请先选择扫描结果目录。");
-        return;
-    }
-    if (m_pMeshViewer == nullptr)
-    {
-        m_pMeshViewer = new WorkpieceMeshViewerDialog(this);
-    }
-    m_pMeshViewer->show();
-    m_pMeshViewer->raise();
-    m_pMeshViewer->activateWindow();
-    // 异步加载：缓存有效秒开；首次生成走后台线程+进度条，不阻塞界面。
-    m_pMeshViewer->StartLoad(m_compPreviewDir);
 }
 
 void WeldSeamCompDialog::RebuildCompPreviewBaseline()
