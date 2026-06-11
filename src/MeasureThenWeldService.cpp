@@ -7254,6 +7254,27 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     appendRobotPose();
     int motionState = 0;
     bool motionStarted = false;
+    // 扫描完成超时按扫描距离/配置速度动态估计（固定 120s 在慢速测量长焊缝时不够用）：
+    // 预计时间×2 + 30s，夹在 [120s, 1800s]，与焊接执行的完成超时算法一致。
+    const double scanDistanceMm = std::hypot(
+        param.tEndPos.dX - param.tStartPos.dX,
+        param.tEndPos.dY - param.tStartPos.dY,
+        param.tEndPos.dZ - param.tStartPos.dZ);
+    const double scanSpeedMmPerSec = param.dScanSpeed > 1e-6 ? param.dScanSpeed / 60.0 : 0.0;
+    const double estimatedScanMs = scanSpeedMmPerSec > 1e-6
+        ? (scanDistanceMm / scanSpeedMmPerSec) * 1000.0
+        : 0.0;
+    const int scanFinishTimeoutMs = static_cast<int>(std::clamp(
+        estimatedScanMs * 2.0 + 30000.0,
+        120000.0,
+        1800000.0));
+    if (appendLog)
+    {
+        appendLog(QString("扫描距离≈%1 mm，预计扫描≈%2 s，完成超时=%3 s。")
+            .arg(scanDistanceMm, 0, 'f', 1)
+            .arg(estimatedScanMs / 1000.0, 0, 'f', 1)
+            .arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0));
+    }
     const qint64 motionStartMs = SteadyNowMs();
     qint64 lastRobotPollMs = motionStartMs - ROBOT_SAMPLE_INTERVAL_MS;
     while (true)
@@ -7330,17 +7351,22 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
 				finishCameraProcessingWorkers();
 				return false;
             }
-			if (motionStarted && elapsedMs > 120000)
+			if (motionStarted && elapsedMs > scanFinishTimeoutMs)
 			{
 				if (appendLog)
 				{
 					if (pFanucDriver != nullptr)
 					{
-						appendLog(QString("扫描运动等待完成超时：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
+						appendLog(QString("扫描运动等待完成超时（%1 s）：R[%2]=%3")
+							.arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0)
+							.arg(FANUC_MOTION_STATE_REG)
+							.arg(motionState));
 					}
 					else
 					{
-						appendLog(QString("扫描运动等待完成超时：CheckDone=%1").arg(motionState));
+						appendLog(QString("扫描运动等待完成超时（%1 s）：CheckDone=%2")
+							.arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0)
+							.arg(motionState));
 					}
 				}
                 finishCameraProcessingWorkers();
