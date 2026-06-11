@@ -487,9 +487,10 @@ void WorkpieceMeshViewerDialog::StartLoad(const QString& laserDir)
     m_pProgress->show();
 
     auto cancelFlag = std::make_shared<std::atomic_bool>(false);
+    // UniqueConnection 不支持 lambda 槽（Debug 下断言），复用进度框时先断开旧连接再接新取消标志。
+    disconnect(m_pProgress, &QProgressDialog::canceled, nullptr, nullptr);
     connect(m_pProgress, &QProgressDialog::canceled, this,
-        [cancelFlag]() { cancelFlag->store(true); },
-        Qt::UniqueConnection);
+        [cancelFlag]() { cancelFlag->store(true); });
 
     std::thread([this, laserDir, cloudPath, cancelFlag]()
         {
