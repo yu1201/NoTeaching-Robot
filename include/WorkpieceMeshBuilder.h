@@ -34,6 +34,19 @@ public:
     // 工件网格模型缓存文件名（LaserPoint 目录下，二进制 PLY，可直接拖入 CloudCompare）。
     static QString MeshCacheFileName();
     static QString MeshCachePath(const QString& laserDir);
+
+    // 框选裁剪后的点云文件名（index x y z 文本，与 _WorkpieceCloud.txt 同格式）。
+    // 存在时建模/编辑优先用它，原始点云保持不动——"恢复原始"删除此文件即可回退。
+    static QString EditedCloudFileName();
+    static QString EditedCloudPath(const QString& laserDir);
+    // 建模/编辑的点云来源：裁剪文件存在用裁剪文件，否则用原始 _WorkpieceCloud.txt。
+    static QString ResolveCloudSourcePath(const QString& laserDir);
+
+    // 点云写出（index x y z 文本，先写临时文件再原子替换）。
+    static bool SaveCloudPointsTxt(
+        const QString& filePath,
+        const QVector<RobotCalculation::IndexedPoint3D>& points,
+        QString& error);
     // 缓存是否存在且为当前网格化算法版本生成（旧版本缓存视为无效，需重建）。
     static bool IsMeshCacheValid(const QString& filePath);
 
