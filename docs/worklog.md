@@ -26,9 +26,16 @@
   - 框选编辑（选中-删除两段式）：进入编辑后台加载完整点云（进度条+可取消）；左键拖矩形选中（亮红、多框累加、穿透全部深度，与 CloudCompare segment 一致），Delete/"删除所选"删除（撤销栈 20 步），Esc 清空选择，Ctrl+左键旋转；"重新生成"用剩余点后台重建网格覆写缓存，并把裁剪点云原子写出 `PreciseLaserPoint_WorkpieceCloud_Edited.txt`——此后建模与编辑均优先用裁剪文件（原始 `_WorkpieceCloud.txt` 永不改动），"恢复原始"删裁剪文件+缓存从原始重建
   - 性能（按 CloudCompare 路线 + 业界调研验证）：橡皮筋 QRubberBand 覆盖层（拖动零点云重绘，并消除 QPainter 混合渲染的状态污染）；选中投影判定按硬件线程数分块并行+矩阵乘手动展开+float 坐标缓存（340 万点约数十 ms→约 10ms 级）；选中标记独立 1 float/点小缓冲、容量够时原地 write；regen 启动即退出编辑模式冻结交互防数据分叉，进度框移除不可用的取消按钮
 
+- STEP SDK 升级全量审计与修复（12 代理逐项核查）
+  - 确认安全：驱动调用的 35 个接口两版签名（含默认参数）逐字一致；OPERATIONMODE/PROGRAMSTATE/PROGRAMMODE/MESSAGETYPE/MODEKEY 等枚举无值重排（驱动全部字面值比较点无受害）；RobotCartPos/AXISPOS/MessageData 等位姿消息结构逐字段一致；运动下发链路（.srp/.srd + ProgramLoadCmd/ProgramRunModeCmd/SetModeCmd 序列）无隐性旧行为依赖；EasyTcpClient.hpp 经 lib 内嵌源文件校验和证实与 2.4.2 严格配套（新版焊接指令结构有重排与 int→double，本工程不调用，无影响）
+  - 修复（审计确认）：状态时间轴会话锁定——连接后首个 getTimestamp 样本决定走机器人时间戳或 PC 接收时间，会话内不再切换，锁定机器人轴后偶发 0 值沿用上一有效时间戳（原实现逐次回退 PC 时钟，两种纪元可混进同一扫描序列破坏时间插值）；控制器未提供时间戳时机器人日志记告警（每连接一次）；StepUseTimestampSdkInterface 进程级缓存（原监控线程每 50ms 查一次 SQLite），管理界面切换接口模式时主动失效
+  - 切换流程缺陷修复：switch_step_sdk.ps1 拷贝列表补 EasyTcpClient.hpp，两个 versions 归档目录补齐对应版本（legacy=2.4.1 原版包内文件、timestamp=lib 校验和匹配的激活文件）
+  - 现场确认项：控制器固件需与 2.4.2 配套（位置显示正常即证明）；联机检查 robot_ms 与 pc_recv_ms 是否明显不同（恒相等=控制器未填时间戳走了 PC 回退，日志有提示）
+
 - 版本与发布
-  - 应用版本更新为 `v2026.06.11.1634`（替代 v2026.06.11.1405）
-  - 构建验证与安装包信息见本日发版条目补充
+  - 应用版本更新为 `v2026.06.11.1711`（替代 v2026.06.11.1634，并入 SDK 升级审计修复）
+  - `Debug x64` 与 `Release x64` 编译通过；两段式打包通过（build_installer.ps1 显式 -AppVersion），生成 `NoTeaching-Robot-Setup-v2026.06.11.1711.exe`
+  - 安装包大小 `101,608,458` bytes，SHA256 `140B29B05CB9D15EA6C03BB5305386496C9F756A83D4B926948675C0655ABAAC`；包内 `BUILD_VERSION.txt` 与应用版本一致（BuiltAt 2026-06-11 17:13:40）
 
 ## 2026-06-10
 
