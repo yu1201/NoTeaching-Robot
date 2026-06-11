@@ -2155,7 +2155,8 @@ void WeldSeamCompDialog::SetCompPreviewDirectory(const QString& dir)
     {
         m_pCompPreviewDirEdit->setText(m_compPreviewDir);
     }
-    // 焊接方向由工艺区域维护（ApplySelectedProcessToEditors：工艺值优先、测量页旧值回退），此处不再读取。
+    // 焊接方向由工艺区域维护（ApplySelectedProcessToEditors：工艺值优先、测量页旧值回退）。
+    RefreshCompPreviewScanLine();
     m_compPreviewBaseline.clear();
     m_compPreviewOriginal.clear();
     m_compPreviewRaw.clear();
@@ -2173,6 +2174,32 @@ void WeldSeamCompDialog::SetCompPreviewDirectory(const QString& dir)
     }
     AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
     RecomputeCompPreview();
+}
+
+void WeldSeamCompDialog::RefreshCompPreviewScanLine()
+{
+    // 读取当前机器人当前启用组的扫描起止点（XY），用于把焊接方向箭头放在扫描位置那一侧。
+    m_compPreviewScanLineValid = false;
+    const QString robot = CurrentRobotName();
+    if (robot.isEmpty())
+    {
+        return;
+    }
+    const QString iniPath = RobotDataHelper::MeasureWeldParamPath(robot);
+    const QString section = RobotDataHelper::MeasureWeldCurrentScanSectionName(robot);
+    if (section.isEmpty())
+    {
+        return;
+    }
+    T_ROBOT_COORS scanStart;
+    T_ROBOT_COORS scanEnd;
+    if (RobotDataHelper::ReadCoors(iniPath, section, "StartPos", scanStart, nullptr)
+        && RobotDataHelper::ReadCoors(iniPath, section, "EndPos", scanEnd, nullptr))
+    {
+        m_compPreviewScanStartXY = QPointF(scanStart.dX, scanStart.dY);
+        m_compPreviewScanEndXY = QPointF(scanEnd.dX, scanEnd.dY);
+        m_compPreviewScanLineValid = true;
+    }
 }
 
 void WeldSeamCompDialog::RebuildCompPreviewBaseline()
@@ -2647,29 +2674,39 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
                 dir = -dir;  // 终点到起点焊：执行方向与轨迹点序相反
             }
             const double trackLength = std::hypot(tail.x - head.x, tail.y - head.y);
-
-            // 侧偏方向：焊枪轴向量（指向工件）的反向 XY 分量 = 枪/相机所在侧；
-            // 枪接近垂直（XY 分量过小）时回退到前进方向的左法向。
-            Eigen::Vector2d gunSide = Eigen::Vector2d::Zero();
-            for (const MeasureThenWeldService::CompPreviewPoint& point : m_compPreviewBaseline)
-            {
-                gunSide += Eigen::Vector2d(-point.bx, -point.by);
-            }
-            gunSide -= dir * gunSide.dot(dir);  // 去掉沿焊道分量，只留侧向
-            if (gunSide.norm() < 1e-6)
-            {
-                gunSide = Eigen::Vector2d(-dir.y(), dir.x());
-            }
-            gunSide.normalize();
-
             const MeasureThenWeldService::CompPreviewPoint& mid =
                 m_compPreviewBaseline[m_compPreviewBaseline.size() / 2];
+
+            // 侧偏方向按扫描位置取：箭头放在扫描时机器人轨迹所在的一侧（焊道中点指向
+            // 扫描线中点的 XY 分量），与焊接方向无关——起点到终点/终点到起点都在同一边。
+            Eigen::Vector2d side = Eigen::Vector2d::Zero();
+            if (m_compPreviewScanLineValid)
+            {
+                const Eigen::Vector2d scanMid(
+                    (m_compPreviewScanStartXY.x() + m_compPreviewScanEndXY.x()) * 0.5,
+                    (m_compPreviewScanStartXY.y() + m_compPreviewScanEndXY.y()) * 0.5);
+                side = scanMid - Eigen::Vector2d(mid.x, mid.y);
+                side -= dir * side.dot(dir);  // 去掉沿焊道分量，只留侧向
+            }
+            if (side.norm() < 1e-6)
+            {
+                // 读不到扫描位置时回退：焊枪轴反向的 XY 侧向分量，再不行用固定左法向。
+                Eigen::Vector2d gunSide = Eigen::Vector2d::Zero();
+                for (const MeasureThenWeldService::CompPreviewPoint& point : m_compPreviewBaseline)
+                {
+                    gunSide += Eigen::Vector2d(-point.bx, -point.by);
+                }
+                gunSide -= dir * gunSide.dot(dir);
+                side = gunSide.norm() > 1e-6 ? gunSide : Eigen::Vector2d(-dir.y(), dir.x());
+            }
+            side.normalize();
+
             const double sideOffset = std::clamp(trackLength * 0.10, 20.0, 60.0);
             const double arrowLength = std::clamp(trackLength * 0.15, 30.0, 80.0);
 
             pcview::PointCloud3DView::DirectionArrow weldDirArrow;
-            weldDirArrow.origin = { mid.x + gunSide.x() * sideOffset,
-                                    mid.y + gunSide.y() * sideOffset,
+            weldDirArrow.origin = { mid.x + side.x() * sideOffset,
+                                    mid.y + side.y() * sideOffset,
                                     mid.z };
             weldDirArrow.vector = { dir.x() * arrowLength, dir.y() * arrowLength, 0.0 };
             weldDirArrow.label = QString("焊接方向（%1）")
