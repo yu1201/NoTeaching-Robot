@@ -2250,16 +2250,11 @@ void WeldSeamCompDialog::OpenWorkpieceMeshViewer()
     {
         m_pMeshViewer = new WorkpieceMeshViewerDialog(this);
     }
-    QString error;
-    if (!m_pMeshViewer->LoadFromLaserDir(m_compPreviewDir, error))
-    {
-        AppendLog("工件模型：" + error);
-        QMessageBox::warning(this, "工件模型", error);
-        return;
-    }
     m_pMeshViewer->show();
     m_pMeshViewer->raise();
     m_pMeshViewer->activateWindow();
+    // 异步加载：缓存有效秒开；首次生成走后台线程+进度条，不阻塞界面。
+    m_pMeshViewer->StartLoad(m_compPreviewDir);
 }
 
 void WeldSeamCompDialog::RebuildCompPreviewBaseline()
