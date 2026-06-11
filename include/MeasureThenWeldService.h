@@ -164,8 +164,13 @@ public:
     CompPreviewResult RecomputeCompPreview(CompPreviewKind kind, const QString& robotName, const QVector<CompPreviewPoint>& baseline, const CompPreviewEditValues& edits) const;
     // 读取原始焊道（分类后几何 _Classified.txt）作为对照图层。
     bool LoadCompPreviewOriginalTrack(const QString& laserDir, QVector<CompPreviewPoint>& points, QString& error) const;
-    // 读取原始扫描点云（PreciseLaserPoint.txt）作为对照图层。
-    bool LoadCompPreviewRawCloud(const QString& laserDir, QVector<CompPreviewPoint>& points, QString& error) const;
+    // 读取"原始数据"对照图层，按当前处理方法取真实处理输入：
+    // ①完整点云（抽样）/ ②SDK基础焊道 / ③④相机目标点轨迹（PreciseLaserPoint.txt）。
+    bool LoadCompPreviewRawCloud(
+        const QString& laserDir,
+        QVector<CompPreviewPoint>& points,
+        QString& error,
+        QString* sourceDescription = nullptr) const;
 
     // ===== 五阶段流水线预览：原始数据→原始焊道→姿态补偿→焊道补偿→圆弧过渡 =====
     // 基准 = _WeldPose_2mm.txt（已烘焙扫描时保存的姿态补偿）。

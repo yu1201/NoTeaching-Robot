@@ -9739,18 +9739,124 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
     return result;
 }
 
+namespace
+{
+// 流式抽样加载点文件（index x y z 格式）：按文件大小估算行数定抽样步长，
+// 解析点数不超过 maxPoints。用于补偿预览显示完整点云（154MB 级，全量加载会卡死界面）。
+bool LoadSampledPointFile(
+    const QString& filePath,
+    int maxPoints,
+    QVector<MeasureThenWeldService::CompPreviewPoint>& points,
+    QString& error)
+{
+    points.clear();
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        error = QString("打开点文件失败：%1").arg(filePath);
+        return false;
+    }
+    // 估算每行约 45 字节，定隔行抽样步长；估偏只影响显示点数，不影响正确性。
+    const qint64 estimatedLines = std::max<qint64>(1, file.size() / 45);
+    const int stride = static_cast<int>(std::max<qint64>(1, estimatedLines / std::max(1, maxPoints)));
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    qint64 lineIndex = 0;
+    while (!stream.atEnd())
+    {
+        const QString line = stream.readLine();
+        if ((lineIndex++ % stride) != 0)
+        {
+            continue;
+        }
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty())
+        {
+            continue;
+        }
+        const QStringList parts = trimmed.contains(',')
+            ? trimmed.split(',', Qt::SkipEmptyParts)
+            : trimmed.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (parts.size() < 4)
+        {
+            continue;
+        }
+        bool xOk = false;
+        bool yOk = false;
+        bool zOk = false;
+        const double x = parts[1].trimmed().toDouble(&xOk);
+        const double y = parts[2].trimmed().toDouble(&yOk);
+        const double z = parts[3].trimmed().toDouble(&zOk);
+        if (!xOk || !yOk || !zOk
+            || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+        {
+            continue;
+        }
+        MeasureThenWeldService::CompPreviewPoint point;
+        point.x = x;
+        point.y = y;
+        point.z = z;
+        points.push_back(point);
+    }
+    return !points.isEmpty();
+}
+}
+
 bool MeasureThenWeldService::LoadCompPreviewRawCloud(
     const QString& laserDir,
     QVector<CompPreviewPoint>& points,
-    QString& error) const
+    QString& error,
+    QString* sourceDescription) const
 {
     points.clear();
+    if (sourceDescription != nullptr)
+    {
+        sourceDescription->clear();
+    }
     QDir dir(laserDir);
     if (!dir.exists())
     {
         error = QString("目录不存在：%1").arg(laserDir);
         return false;
     }
+
+    // 原始数据按当前处理方法取真实处理输入：
+    // ①SDK全处理直接吃完整点云 → 显示局部完整点云（抽样）；
+    // ②SDK+拟合的拟合输入是 SDK 基础焊道 → 显示 SdkPointCloud 下的基础焊道文件；
+    // ③点云+拟合 与 ④特征点+拟合 → 显示相机目标点轨迹；对应文件缺失时回退轨迹点。
+    const PointCloudProcessingConfig::Settings settings = PointCloudProcessingConfig::Load();
+    if (settings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet)
+    {
+        const QString cloudPath = dir.filePath(WORKPIECE_CLOUD_FILE_NAME);
+        QString cloudError;
+        constexpr int kMaxPreviewCloudPoints = 60000;
+        if (QFileInfo::exists(cloudPath)
+            && LoadSampledPointFile(cloudPath, kMaxPreviewCloudPoints, points, cloudError))
+        {
+            if (sourceDescription != nullptr)
+            {
+                *sourceDescription = QStringLiteral("完整点云抽样显示");
+            }
+            return true;
+        }
+    }
+    else if (settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit)
+    {
+        const QString baseWeldPath =
+            QDir(dir.filePath(SDK_POINT_CLOUD_OUTPUT_DIR_NAME)).filePath(SDK_BASE_WELD_FILE_NAME);
+        QString baseWeldError;
+        if (QFileInfo::exists(baseWeldPath)
+            && LoadSampledPointFile(baseWeldPath, std::numeric_limits<int>::max(), points, baseWeldError))
+        {
+            if (sourceDescription != nullptr)
+            {
+                *sourceDescription = QStringLiteral("SDK基础焊道");
+            }
+            return true;
+        }
+    }
+
     QVector<RobotCalculation::IndexedPoint3D> rawPoints;
     if (!RobotDataHelper::LoadIndexedPoint3DFile(dir.filePath(RAW_LASER_FILE_NAME), rawPoints, &error))
     {
@@ -9769,6 +9875,10 @@ bool MeasureThenWeldService::LoadCompPreviewRawCloud(
     {
         error = QString("未从 %1 解析到原始点。").arg(RAW_LASER_FILE_NAME);
         return false;
+    }
+    if (sourceDescription != nullptr)
+    {
+        *sourceDescription = QStringLiteral("相机目标点轨迹");
     }
     return true;
 }
