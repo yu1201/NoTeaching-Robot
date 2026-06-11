@@ -377,6 +377,17 @@ QString PrepareRuntimeExternalConfigPath(
         }
     }
 
+    // 20260609 版 DLL 要求 LOGPATH 必须有值（空值直接弹 "Para_name LOGPATH not found"），
+    // 配置里留空时向运行时副本注入项目 Log 目录下的默认输出目录（工作目录启动时已设到项目根）。
+    if (QString::fromLocal8Bit(ConfigLineValue(content, "LOGPATH")).trimmed().isEmpty())
+    {
+        const QString fallbackLogPath = QDir::toNativeSeparators(
+            QDir::current().absoluteFilePath(QStringLiteral("Log/PointCloudExtration")));
+        QDir().mkpath(QDir::fromNativeSeparators(fallbackLogPath));
+        ReplaceConfigValue(&content, "LOGPATH", fallbackLogPath.toLocal8Bit());
+        changed = true;
+    }
+
     const QString normalizedBaseWeldPath = baseWeldOutputPath.trimmed();
     if (!normalizedBaseWeldPath.isEmpty())
     {
