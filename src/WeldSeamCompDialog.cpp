@@ -2155,6 +2155,20 @@ void WeldSeamCompDialog::SetCompPreviewDirectory(const QString& dir)
     {
         m_pCompPreviewDirEdit->setText(m_compPreviewDir);
     }
+    // 载入目录时同步读取焊接方向（测量焊接参数），用于预览中的焊接方向箭头。
+    {
+        const QString robot = CurrentRobotName();
+        int direction = 1;
+        if (!robot.isEmpty())
+        {
+            COPini ini;
+            if (ini.SetFileName(RobotDataHelper::MeasureWeldParamPath(robot).toStdString()))
+            {
+                ini.ReadString(false, "WeldDirection", &direction);
+            }
+        }
+        m_compPreviewWeldDirection = direction < 0 ? -1 : 1;
+    }
     m_compPreviewBaseline.clear();
     m_compPreviewOriginal.clear();
     m_compPreviewRaw.clear();
@@ -2583,6 +2597,63 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
         }
         arrows.push_back(arrow);
     }
+
+    // 焊接方向箭头：任一焊道阶段打开时显示，在 XY 平面内沿实际焊接前进方向，
+    // 放在焊道中段旁、焊枪（相机）所在的一侧。
+    bool anyTrackVisible = false;
+    for (int stageIndex = 1; stageIndex < 6; ++stageIndex)
+    {
+        if (m_pStageToggles[stageIndex] != nullptr && m_pStageToggles[stageIndex]->isChecked())
+        {
+            anyTrackVisible = true;
+            break;
+        }
+    }
+    if (anyTrackVisible && m_compPreviewBaseline.size() >= 2)
+    {
+        const MeasureThenWeldService::CompPreviewPoint& head = m_compPreviewBaseline.first();
+        const MeasureThenWeldService::CompPreviewPoint& tail = m_compPreviewBaseline.last();
+        Eigen::Vector2d dir(tail.x - head.x, tail.y - head.y);
+        if (dir.norm() > 1e-6)
+        {
+            dir.normalize();
+            if (m_compPreviewWeldDirection < 0)
+            {
+                dir = -dir;  // 终点到起点焊：执行方向与轨迹点序相反
+            }
+            const double trackLength = std::hypot(tail.x - head.x, tail.y - head.y);
+
+            // 侧偏方向：焊枪轴向量（指向工件）的反向 XY 分量 = 枪/相机所在侧；
+            // 枪接近垂直（XY 分量过小）时回退到前进方向的左法向。
+            Eigen::Vector2d gunSide = Eigen::Vector2d::Zero();
+            for (const MeasureThenWeldService::CompPreviewPoint& point : m_compPreviewBaseline)
+            {
+                gunSide += Eigen::Vector2d(-point.bx, -point.by);
+            }
+            gunSide -= dir * gunSide.dot(dir);  // 去掉沿焊道分量，只留侧向
+            if (gunSide.norm() < 1e-6)
+            {
+                gunSide = Eigen::Vector2d(-dir.y(), dir.x());
+            }
+            gunSide.normalize();
+
+            const MeasureThenWeldService::CompPreviewPoint& mid =
+                m_compPreviewBaseline[m_compPreviewBaseline.size() / 2];
+            const double sideOffset = std::clamp(trackLength * 0.10, 20.0, 60.0);
+            const double arrowLength = std::clamp(trackLength * 0.15, 30.0, 80.0);
+
+            pcview::PointCloud3DView::DirectionArrow weldDirArrow;
+            weldDirArrow.origin = { mid.x + gunSide.x() * sideOffset,
+                                    mid.y + gunSide.y() * sideOffset,
+                                    mid.z };
+            weldDirArrow.vector = { dir.x() * arrowLength, dir.y() * arrowLength, 0.0 };
+            weldDirArrow.label = QString("焊接方向（%1）")
+                .arg(m_compPreviewWeldDirection < 0 ? "终点到起点" : "起点到终点");
+            weldDirArrow.color = QColor(255, 255, 255);
+            arrows.push_back(weldDirArrow);
+        }
+    }
+
     m_pCompPreviewView->SetDirectionArrows(arrows);
 }
 
