@@ -31,7 +31,7 @@ if (-not (Test-Path -LiteralPath $sourceDir)) {
     throw "STEP SDK source directory was not found: $sourceDir"
 }
 
-foreach ($fileName in @("Robot-SDK.lib", "Robot-SDKd.lib", "RobotCom.hpp", "ControlMsgData.hpp")) {
+foreach ($fileName in @("Robot-SDK.lib", "Robot-SDKd.lib", "RobotCom.hpp", "ControlMsgData.hpp", "EasyTcpClient.hpp")) {
     $sourcePath = Join-Path $sourceDir $fileName
     if (-not (Test-Path -LiteralPath $sourcePath)) {
         throw "STEP SDK source file was not found: $sourcePath"
