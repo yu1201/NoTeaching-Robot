@@ -1,4 +1,5 @@
 #pragma once
+//SDK-V2.4.1-20250302_0520
 #include <vector>
 #include <chrono>
 #include "ControlMsgData.hpp"
@@ -13,6 +14,9 @@
 #include <memory>  // ???????????? std::unique_ptr
 #include <atomic>  // ???????????? std::atomic
 constexpr bool IsDefaultBlocked = false;
+//20260407
+// 定义最大长度常量
+constexpr int MAX_DATA_LEN = 100;
 
 namespace STEPROBOTSDK{
 class __declspec(dllexport) RobotComClient {
@@ -67,6 +71,7 @@ public:
   //新增获取焊接状态接口，20231215
   ARCWELDINGMODE getWeldingMode();
 
+
 #pragma endregion
 
   /**************  RDK - FUNCTION  ******************/
@@ -84,6 +89,11 @@ public:
   int OverrideSetCmd(double ori);
   /* 4.4.5 set mode (jog robot) */
   int SetModeCmd (MODEKEY mode,bool is_blocked = IsDefaultBlocked);
+  //设置附加轴标志位和点动接口，20260306
+  void SetModeCmdExJogFlag(bool nd2);
+  bool GetModeCmdExJogFlag();//附加轴点动标志位
+  int SetModeCmdJog(MODEKEY mode);
+  //
   /* 4.4.6 set current operation mode */
   int ProgramRunModeCmd(int mode);
   /* 4.4.7 enable motor on */
@@ -477,6 +487,16 @@ public:
   int SDKSimulateArcJobProCmd(int arcjog, int linenum = 1);
   int SDKSimulateWireSetProCmd(SDKInstructWireSet wireset, int linenum = 1);
 
+  //补充焊接语句，20260319（对应的版本还没出，这个非标版本先增加）
+  int SDKSimulateArcProgWeldJobOnProCmd(int weldjob, int linenum = 1);
+  int SDKSimulateArcProgWeldJobOffProCmd(int linenum = 1);
+  int SDKSimulateArcProgWeaveJobOnProCmd(int weavejob, int trackjob ,int linenum = 1);
+  int SDKSimulateArcProgWeaveJobOffProCmd(int linenum = 1);
+  int SDKSimulateArcProgMultiJobOnProCmd(int job, int currentLayer, int linenum = 1);
+  int SDKSimulateArcProgMultiJobOffProCmd(int linenum = 1);
+
+
+
 #pragma endregion
 
   // 新增焊接功能开关，20231211
@@ -492,9 +512,77 @@ public:
   //正解
   int TransSDKGetKinematics(SDKInstructKinematics jointpos, KinematicsInfo& cartpos);
 
+  //20260325新增
+  //获取全部工具名和用户名
+  int SDKGetTheToolName(std::string& alltoolname);
+  int SDKGetTheRefName(std::string& allrefname);
+
+  //20260305新增
+  //新增，工具坐标系标定和用户坐标系标定
+  int SDKGetRefBy3Points(CartSys p1, CartSys p2, CartSys p3, GetRefBy3PointsMethod isorigin, GetRefBy3PointsDirection direction, CartRefSys& ref);
+
+  //如果z取反，flag为-1， 否则为1
+  int SDKGetToolBy5Points(CartPos p1, CartPos p2, CartPos p3, CartPos p4, CartPos p5, int flag, Tool& tool);
+
+  //20260312 新增SDKGetJointMode
+  int SDKGetJointMode(JointsPos ap0, unsigned int &mode);
+
+  //20260407，新增数组变量修改
+  int VariableBoolArrayModifyCmd(std::string projectInfo, std::string programInfo,std::string variable, const std::vector<bool>& data_list);
+  int ProcessVariableBoolArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<bool>& data_list);
+  int VariableIntArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<int>& data_list);
+  int ProcessVariableIntArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<int>& data_list);
+  int VariableRealArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<double>& data_list);
+  int ProcessVariableRealArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<double>& data_list);
+  int VariableStringArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<std::string>& data_list);
+  int ProcessVariableStringArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<std::string>& data_list);
+  int VariableAxisposArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<AXISPOS>& data_list);
+  int ProcessVariableAxisposArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<AXISPOS>& data_list);
+  int VariableCartposArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<CARTPOS>& data_list);
+  int ProcessVariableCartposArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<CARTPOS>& data_list);
+  int VariableRobotAxisposArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<JointsPosArray>& data_list);
+  int ProcessVariableRobotAxisposArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<JointsPosArray>& data_list);
+  int VariableRobotCartposArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<RobotCartPos>& data_list);
+  int ProcessVariableRobotCartposArrayModifyCmd(std::string projectInfo, std::string programInfo, std::string variable, const std::vector<RobotCartPos>& data_list);
 
 
+  //20260410 补充子程序加载语句
+  int SDKProgramloadCmd(std::string projectname, std::string programname);
 
+  //新增激光焊接口，20260520
+  int CamIniCmd(int mode);//初始化激光
+  int CamOnCmd();//打开激光
+  int CamOffCmd();//关闭激光
+  int GetLaserPosCmd(std::string resultname, LaserPosSearchResult& Value);//获取Search_LaserPos和Get_LaserPos语句的执行结果
+  int GetLaserCDCmd(std::string resultname, LaserCDSearchResult& Value);//获取Get_LaserCD语句的执行结果
+
+  //新增激光焊语句,20260520
+  int SDKSimulateCamINIProCmd(SDKInstructCamIni camini, int linenum = 1);
+  int SDKSimulateCamOnProCmd(SDKInstructCamOn camon, int linenum = 1);
+  int SDKSimulateCamOffProCmd(int linenum = 1);
+  int SDKSimulateSearch_LaserPosProCmd(SDKInstructSearch_LaserPos searchlaserpos, int linenum = 1);
+  int SDKSimulateGet_LaserPosProCmd(SDKInstructGet_LaserPos getlaserpos, int linenum = 1);
+  int SDKSimulateWLin_LaserPosProCmd(SDKInstructWLin_Laser wlinlaser, int linenum = 1);
+  int SDKSimulateWCirc_LaserPosProCmd(SDKInstructWCirc_Laser wcirclaser, int linenum = 1);
+  int SDKSimulateGet_LaserCDPosProCmd(SDKInstructGet_LaserCD gatlaserCD, int linenum = 1);
+  int SDKSimulateLaserTrackAlgorithmPosProCmd(SDKInstructLaserTrackAlgorithm value, int linenum = 1);
+  //新增激光切割接口，20260520
+  int SDKSimulateLaserCutOnPosProCmd(SDKInstructLaserCutOn value, int linenum = 1);
+  int SDKSimulateLaserCutSetPosProCmd(SDKInstructLaserCutSet value, int linenum = 1);
+  int SDKSimulateLaserCutOffProCmd(int linenum = 1);
+  int SDKSimulateLaserCutLinPosProCmd(SDKInstructLaserCutLin value, int linenum = 1);
+  int SDKSimulateLaserLaserCutCircProCmd(SDKInstructLaserCutCirc value, int linenum = 1);
+
+  //新增文件刷新接口，20260520
+  int RereadXmlCmd(XmlFileType filetype);
+  // 不同的枚举对应不同的文件
+  // 目前只有WeldJobFile对应/ArcInfo/WelderJob.xml
+  // AppointmentFile对应/ConfigureFiles/Appointment.xml
+  // IOFile对应/ConfigureFiles/IO.xml
+
+
+  //获取时间戳,20260603
+  TimestampAddCartpos getTimestamp();
 
 private:
   /* File transfer */
@@ -597,6 +685,10 @@ private:
 
   //新增坐标转换接口20251013
   int SDKRefConvertCMD(SDKInstructRefConvert m_OriPos, HMIPos& m_TransPos);
+
+  //增加附加轴的点动控制标志位，20260306
+  int nd2 = 0;
+
 
 };
 } // namespace STEPROBOTSDK
