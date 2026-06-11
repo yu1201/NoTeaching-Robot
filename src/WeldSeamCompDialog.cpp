@@ -2155,20 +2155,7 @@ void WeldSeamCompDialog::SetCompPreviewDirectory(const QString& dir)
     {
         m_pCompPreviewDirEdit->setText(m_compPreviewDir);
     }
-    // 载入目录时同步读取焊接方向（测量焊接参数），用于预览中的焊接方向箭头。
-    {
-        const QString robot = CurrentRobotName();
-        int direction = 1;
-        if (!robot.isEmpty())
-        {
-            COPini ini;
-            if (ini.SetFileName(RobotDataHelper::MeasureWeldParamPath(robot).toStdString()))
-            {
-                ini.ReadString(false, "WeldDirection", &direction);
-            }
-        }
-        m_compPreviewWeldDirection = direction < 0 ? -1 : 1;
-    }
+    // 焊接方向由工艺区域维护（ApplySelectedProcessToEditors：工艺值优先、测量页旧值回退），此处不再读取。
     m_compPreviewBaseline.clear();
     m_compPreviewOriginal.clear();
     m_compPreviewRaw.clear();
@@ -2296,7 +2283,7 @@ void WeldSeamCompDialog::AutoSelectLatestCompPreviewDirectory()
 
 QWidget* WeldSeamCompDialog::CreateWeldProcessPanel()
 {
-    QGroupBox* panel = new QGroupBox("工艺（圆弧过渡 / 实际焊道点间距）");
+    QGroupBox* panel = new QGroupBox("工艺（圆弧过渡 / 点间距 / 焊接方向）");
     QGridLayout* layout = new QGridLayout(panel);
     layout->setHorizontalSpacing(8);
     layout->setVerticalSpacing(6);
@@ -2324,10 +2311,16 @@ QWidget* WeldSeamCompDialog::CreateWeldProcessPanel()
     m_pFinalStepSpin->setValue(4.0);
     layout->addWidget(m_pFinalStepSpin, 2, 2, 1, 2);
 
+    layout->addWidget(new QLabel("焊接方向："), 3, 0, 1, 2);
+    m_pWeldDirectionCombo = new QComboBox();
+    m_pWeldDirectionCombo->addItem("起点到终点", 1);
+    m_pWeldDirectionCombo->addItem("终点到起点", -1);
+    layout->addWidget(m_pWeldDirectionCombo, 3, 2, 1, 2);
+
     m_pProcessHintLabel = new QLabel();
     m_pProcessHintLabel->setWordWrap(true);
     m_pProcessHintLabel->setStyleSheet("color:#8FB6BC;");
-    layout->addWidget(m_pProcessHintLabel, 3, 0, 1, 4);
+    layout->addWidget(m_pProcessHintLabel, 4, 0, 1, 4);
 
     connect(m_pProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index)
         {
@@ -2362,6 +2355,16 @@ QWidget* WeldSeamCompDialog::CreateWeldProcessPanel()
             if (!m_bLoadingProcessArea)
             {
                 ScheduleCompPreview();
+            }
+        });
+    connect(m_pWeldDirectionCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
+        {
+            // 焊接方向不参与补偿几何计算，只驱动预览中的方向箭头即时刷新。
+            m_compPreviewWeldDirection =
+                m_pWeldDirectionCombo->currentData().toInt() < 0 ? -1 : 1;
+            if (!m_bLoadingProcessArea)
+            {
+                ApplyCompPreviewLayerVisibility();
             }
         });
 
@@ -2434,6 +2437,10 @@ void WeldSeamCompDialog::LoadWeldProcessArea()
     {
         m_pFinalStepSpin->setEnabled(m_weldProcessLoaded);
     }
+    if (m_pWeldDirectionCombo != nullptr)
+    {
+        m_pWeldDirectionCombo->setEnabled(m_weldProcessLoaded);
+    }
     ApplySelectedProcessToEditors();
     m_bLoadingProcessArea = false;
     ScheduleCompPreview();
@@ -2448,6 +2455,7 @@ void WeldSeamCompDialog::ApplySelectedProcessToEditors()
     const QSignalBlocker blockCheck(m_pArcEnableCheck);
     const QSignalBlocker blockRadius(m_pArcRadiusSpin);
     const QSignalBlocker blockStep(m_pFinalStepSpin);
+    const QSignalBlocker blockDirection(m_pWeldDirectionCombo);
     if (valid)
     {
         const T_WELD_PARA& item = m_weldProcessList[static_cast<size_t>(m_weldProcessSelectedIndex)];
@@ -2467,6 +2475,10 @@ void WeldSeamCompDialog::ApplySelectedProcessToEditors()
                 ? item.dFinalWeldTrajectoryStepMm
                 : RobotDataHelper::ReadActiveFinalWeldStepFallbackMm(CurrentRobotName()));
         }
+        // 焊接方向属于工艺；老工艺还没存过(0)时预填测量页旧值，保存即固化进工艺。
+        m_compPreviewWeldDirection = item.nWeldDirection != 0
+            ? (item.nWeldDirection < 0 ? -1 : 1)
+            : RobotDataHelper::ReadActiveWeldDirectionFallback(CurrentRobotName());
     }
     else
     {
@@ -2483,7 +2495,15 @@ void WeldSeamCompDialog::ApplySelectedProcessToEditors()
         {
             m_pFinalStepSpin->setValue(4.0);
         }
+        m_compPreviewWeldDirection = 1;
     }
+    if (m_pWeldDirectionCombo != nullptr)
+    {
+        const int comboIndex = m_pWeldDirectionCombo->findData(m_compPreviewWeldDirection);
+        m_pWeldDirectionCombo->setCurrentIndex(comboIndex >= 0 ? comboIndex : 0);
+    }
+    // 方向变化即时反映到预览箭头。
+    ApplyCompPreviewLayerVisibility();
 }
 
 bool WeldSeamCompDialog::SaveWeldProcessArea(QString& error)
@@ -2521,6 +2541,10 @@ bool WeldSeamCompDialog::SaveWeldProcessArea(QString& error)
     {
         item.dFinalWeldTrajectoryStepMm = m_pFinalStepSpin->value();
     }
+    if (m_pWeldDirectionCombo != nullptr)
+    {
+        item.nWeldDirection = m_pWeldDirectionCombo->currentData().toInt() < 0 ? -1 : 1;
+    }
 
     if (!processFile.UpdateWeldPara(m_weldProcessSelectedIndex, item))
     {
@@ -2532,10 +2556,11 @@ bool WeldSeamCompDialog::SaveWeldProcessArea(QString& error)
         error = "保存工艺选用项失败：" + DecodeRobotMessageText(processFile.GetLastError());
         return false;
     }
-    AppendLog(QString("工艺已保存：圆弧%1 半径%2mm，点间距%3mm。")
+    AppendLog(QString("工艺已保存：圆弧%1 半径%2mm，点间距%3mm，焊接方向%4。")
         .arg(item.nCornerArcTransitionRadiusEnable != 0 ? "启用" : "关闭")
         .arg(item.dCornerArcTransitionRadius, 0, 'f', 1)
-        .arg(item.dFinalWeldTrajectoryStepMm, 0, 'f', 1));
+        .arg(item.dFinalWeldTrajectoryStepMm, 0, 'f', 1)
+        .arg(item.nWeldDirection < 0 ? "终点到起点" : "起点到终点"));
     LoadWeldProcessArea();  // 保存可能触发重排，重新加载
     return true;
 }

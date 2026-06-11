@@ -6457,6 +6457,16 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     param.dStepOverlapRel = std::max(0.0, param.dStepOverlapRel);
     param.dFinalWeldTrajectoryStepMm = NormalizeFinalWeldTrajectorySampleStepMm(param.dFinalWeldTrajectoryStepMm);
     param.nWeldDirection = param.nWeldDirection < 0 ? -1 : 1;
+    // 焊接方向已迁入工艺参数：当前工艺设置过（非0）时优先于测量参数页旧值，
+    // 此处统一覆盖，下游（执行反转/已焊起点截断/预览箭头）全部跟随。
+    {
+        T_WELD_PARA activeWeld = {};
+        if (TryLoadActiveWeldProcessParam(robotName, activeWeld, nullptr)
+            && activeWeld.nWeldDirection != 0)
+        {
+            param.nWeldDirection = activeWeld.nWeldDirection < 0 ? -1 : 1;
+        }
+    }
     if (!std::isfinite(param.dGunDownBackSafeDis) || param.dGunDownBackSafeDis <= 0.0)
     {
         param.dGunDownBackSafeDis = WELD_SAFE_OFFSET_DISTANCE_MM;

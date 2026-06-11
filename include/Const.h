@@ -410,6 +410,10 @@ struct T_WELD_PARA
 	// 仅存于配置库多键格式，不进 84 字段文本镜像。
 	double dFinalWeldTrajectoryStepMm = 0.0;
 
+	// 焊接方向：1=起点到终点，-1=终点到起点，0=未设置（回退测量焊接参数的 WeldDirection）。
+	// 仅存于配置库多键格式，不进 84 字段文本镜像。
+	int nWeldDirection = 0;
+
 	T_WeaveDate tWeaveParam; // 摆动参数(埃斯顿摆动需要动态写入使用)
 	T_TrackData tTrackParam; // 跟踪参数，对应STEP TRACKDATA。
 };
