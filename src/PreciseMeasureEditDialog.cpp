@@ -397,6 +397,13 @@ bool IsObsoletePreciseParamKey(const QString& key)
     return key.trimmed().compare("CornerArcRadiusMm", Qt::CaseInsensitive) == 0;
 }
 
+bool IsMigratedToWeldProcessKey(const QString& key)
+{
+    // 已迁入工艺参数的键：测量页不再显示编辑，但保留 ini 旧值作为工艺未设置时的回退，
+    // 不能进 IsObsoletePreciseParamKey（那会在保存时把旧值清掉）。
+    return key.trimmed().compare("WeldDirection", Qt::CaseInsensitive) == 0;
+}
+
 bool IsDedicatedWeldPoseTeachKey(const QString& key)
 {
     const QString normalized = key.trimmed();
@@ -2071,7 +2078,7 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
             for (auto it = values.constBegin(); it != values.constEnd(); ++it)
             {
                 const QString key = it.key().trimmed();
-                if (key.isEmpty() || IsObsoletePreciseParamKey(key))
+                if (key.isEmpty() || IsObsoletePreciseParamKey(key) || IsMigratedToWeldProcessKey(key))
                 {
                     continue;
                 }

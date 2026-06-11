@@ -192,11 +192,12 @@ private:
     // 六阶段图层开关：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡 5=实际焊道
     QAbstractButton* m_pStageToggles[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
 
-    // 工艺区域（圆弧过渡 + 实际焊道点间距，编辑实时联动预览、保存落盘）
+    // 工艺区域（圆弧过渡 + 实际焊道点间距 + 焊接方向，编辑实时联动预览、保存落盘）
     QComboBox* m_pProcessCombo = nullptr;
     QCheckBox* m_pArcEnableCheck = nullptr;
     QDoubleSpinBox* m_pArcRadiusSpin = nullptr;
     QDoubleSpinBox* m_pFinalStepSpin = nullptr;
+    QComboBox* m_pWeldDirectionCombo = nullptr;
     QLabel* m_pProcessHintLabel = nullptr;
     std::vector<T_WELD_PARA> m_weldProcessList;
     int m_weldProcessSelectedIndex = -1;

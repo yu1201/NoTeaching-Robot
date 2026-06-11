@@ -164,6 +164,7 @@ void VisitWeldParaFields(T_WELD_PARA& item, Visitor&& visit)
     visit("ArcMode", item.nArcMode);
     // 多键格式独有字段（不进 84 字段文本镜像）：
     visit("FinalWeldTrajectoryStepMm", item.dFinalWeldTrajectoryStepMm);
+    visit("WeldDirection", item.nWeldDirection);
 }
 
 // 写 visitor：把字段写成 scoped setting（double 用 'g',17 全精度往返）。

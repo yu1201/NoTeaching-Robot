@@ -794,6 +794,23 @@ double RobotDataHelper::ReadActiveFinalWeldStepFallbackMm(const QString& robotNa
         : kDefaultStepMm;
 }
 
+int RobotDataHelper::ReadActiveWeldDirectionFallback(const QString& robotName)
+{
+    // 测量焊接参数里的旧 WeldDirection 值：工艺未设置焊接方向时的回退（默认起点到终点）。
+    // 读法与先测后焊 LoadPresetParam 一致，保证回退值与管线生效值相同。
+    int direction = 1;
+    if (robotName.trimmed().isEmpty())
+    {
+        return 1;
+    }
+    COPini ini;
+    if (ini.SetFileName(MeasureWeldParamPath(robotName).toUtf8().constData()))
+    {
+        ini.ReadString(false, "WeldDirection", &direction);
+    }
+    return direction < 0 ? -1 : 1;
+}
+
 // ===== 底层 ini 读写 =====
 
 bool RobotDataHelper::ReadPulse(const QString& filePath, const QString& sectionName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error)
