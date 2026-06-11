@@ -774,7 +774,7 @@ void EnsureWorkpieceMeshCacheFromCloud(
         return;
     }
     const QString cachePath = WorkpieceMeshBuilder::MeshCachePath(laserDir);
-    if (QFileInfo::exists(cachePath))
+    if (WorkpieceMeshBuilder::IsMeshCacheValid(cachePath))
     {
         return;
     }

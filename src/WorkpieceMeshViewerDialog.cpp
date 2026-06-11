@@ -4,7 +4,14 @@
 
 #include <QApplication>
 #include <QDir>
+#include <QFileDialog>
 #include <QFileInfo>
+#include <QMessageBox>
+#include <QProgressDialog>
+
+#include <atomic>
+#include <memory>
+#include <thread>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMatrix4x4>
@@ -105,6 +112,7 @@ protected:
             "layout(location=0) in vec3 inPos;\n"
             "layout(location=1) in vec3 inNormal;\n"
             "uniform mat4 uMvp;\n"
+            "uniform int uColorAxis;\n"  // 伪彩轴=包围盒跨度最小的轴（表面偏移方向，姿态无关）
             "uniform float uZMin;\n"
             "uniform float uZRange;\n"
             "out vec3 vNormal;\n"
@@ -112,7 +120,7 @@ protected:
             "void main(){\n"
             "  gl_Position = uMvp * vec4(inPos, 1.0);\n"
             "  vNormal = inNormal;\n"
-            "  vHeight = clamp((inPos.z - uZMin) / uZRange, 0.0, 1.0);\n"
+            "  vHeight = clamp((inPos[uColorAxis] - uZMin) / uZRange, 0.0, 1.0);\n"
             "  gl_PointSize = 2.0;\n"
             "}\n");
         m_pProgram->addShaderFromSourceCode(QOpenGLShader::Fragment,
@@ -135,7 +143,7 @@ protected:
             "}\n"
             "void main(){\n"
             "  vec3 base = turbo(vHeight);\n"
-            "  float diff = max(dot(normalize(vNormal), normalize(uLightDir)), 0.0);\n"
+            "  float diff = abs(dot(normalize(vNormal), normalize(uLightDir)));\n"  // 双面光照（绕序/朝向无关）
             "  float k = mix(1.0, 0.30 + 0.70 * diff, uUseLight);\n"
             "  fragColor = vec4(base * k, 1.0);\n"
             "}\n");
@@ -173,6 +181,7 @@ protected:
 
         m_pProgram->bind();
         m_pProgram->setUniformValue("uMvp", projection * view);
+        m_pProgram->setUniformValue("uColorAxis", m_colorAxis);
         m_pProgram->setUniformValue("uZMin", m_zMin);
         m_pProgram->setUniformValue("uZRange", std::max(m_zMax - m_zMin, 1e-3f));
         m_pProgram->setUniformValue("uLightDir", QVector3D(-0.4f, -0.3f, 1.0f));
@@ -248,8 +257,19 @@ private:
         const Eigen::Vector3f center = (minBound + maxBound) * 0.5f;
         m_center = QVector3D(center.x(), center.y(), center.z());
         m_boundRadius = std::max(1.0f, (maxBound - minBound).norm() * 0.5f);
-        m_zMin = minBound.z();
-        m_zMax = maxBound.z();
+        // 伪彩轴 = 包围盒跨度最小的轴（表面偏移方向），工件摆放姿态无关。
+        const Eigen::Vector3f span = maxBound - minBound;
+        m_colorAxis = 0;
+        if (span.y() <= span.x() && span.y() <= span.z())
+        {
+            m_colorAxis = 1;
+        }
+        else if (span.z() <= span.x() && span.z() <= span.y())
+        {
+            m_colorAxis = 2;
+        }
+        m_zMin = minBound[m_colorAxis];
+        m_zMax = maxBound[m_colorAxis];
     }
 
     void UploadMesh()
@@ -301,6 +321,7 @@ private:
 
     QVector3D m_center;
     float m_boundRadius = 100.0f;
+    int m_colorAxis = 2;
     float m_zMin = 0.0f;
     float m_zMax = 1.0f;
     float m_yawDeg = -35.0f;
@@ -334,7 +355,9 @@ void WorkpieceMeshViewerDialog::BuildUi()
     QPushButton* heightBtn = new QPushButton("高度图");
     QPushButton* topBtn = new QPushButton("俯视");
     QPushButton* resetBtn = new QPushButton("重置");
-    for (QPushButton* button : { solidBtn, pointBtn, heightBtn, topBtn, resetBtn })
+    QPushButton* exportStlBtn = new QPushButton("导出 STL");
+    exportStlBtn->setToolTip("导出二进制 STL 网格（SolidWorks/UG 等 CAD 软件可直接导入）。");
+    for (QPushButton* button : { solidBtn, pointBtn, heightBtn, topBtn, resetBtn, exportStlBtn })
     {
         button->setMinimumWidth(72);
         toolbar->addWidget(button);
@@ -379,6 +402,35 @@ void WorkpieceMeshViewerDialog::BuildUi()
             m_pViewStack->setCurrentIndex(0);
             m_pGlWidget->ResetView();
         });
+    connect(exportStlBtn, &QPushButton::clicked, this, [this]()
+        {
+            if (!m_mesh.IsValid())
+            {
+                QMessageBox::information(this, "导出 STL", "尚未加载工件模型。");
+                return;
+            }
+            const QString defaultPath = m_laserDir.isEmpty()
+                ? QStringLiteral("WorkpieceMesh.stl")
+                : QDir(m_laserDir).filePath("PreciseLaserPoint_WorkpieceMesh.stl");
+            const QString path = QFileDialog::getSaveFileName(
+                this, "导出 STL", defaultPath, "STL 网格 (*.stl)");
+            if (path.isEmpty())
+            {
+                return;
+            }
+            QString error;
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            const bool ok = WorkpieceMeshBuilder::SaveMeshStl(path, m_mesh, error);
+            QApplication::restoreOverrideCursor();
+            if (!ok)
+            {
+                QMessageBox::warning(this, "导出 STL", error);
+                return;
+            }
+            m_pInfoLabel->setText(QString("已导出 STL：%1（三角形 %2）")
+                .arg(QDir::toNativeSeparators(path))
+                .arg(m_mesh.indices.size() / 3));
+        });
 }
 
 void WorkpieceMeshViewerDialog::ApplyStyle()
@@ -391,41 +443,125 @@ void WorkpieceMeshViewerDialog::ApplyStyle()
         "QScrollArea { border: 1px solid #2E4656; border-radius: 8px; background: #0B1117; }"));
 }
 
-bool WorkpieceMeshViewerDialog::LoadFromLaserDir(const QString& laserDir, QString& error)
+void WorkpieceMeshViewerDialog::StartLoad(const QString& laserDir)
 {
+    if (m_bBuilding)
+    {
+        return;  // 正在后台生成，避免重入
+    }
     m_laserDir = laserDir;
     m_heightMapCache = QImage();
+    setWindowTitle(QString("工件模型 - %1").arg(QFileInfo(laserDir).dir().dirName()));
 
     const QString cachePath = WorkpieceMeshBuilder::MeshCachePath(laserDir);
-    if (!QFileInfo::exists(cachePath))
+    if (WorkpieceMeshBuilder::IsMeshCacheValid(cachePath))
     {
-        // 首次：从完整点云生成一次模型缓存（之后直接秒开）。
-        QApplication::setOverrideCursor(Qt::WaitCursor);
-        const QString cloudPath = QDir(laserDir).filePath("PreciseLaserPoint_WorkpieceCloud.txt");
-        const bool built = WorkpieceMeshBuilder::EnsureMeshCache(laserDir, cloudPath, error);
-        QApplication::restoreOverrideCursor();
-        if (!built)
-        {
-            return false;
-        }
+        FinishLoadFromCache();  // 二进制缓存亚秒级，同步加载
+        return;
     }
 
+    const QString cloudPath = QDir(laserDir).filePath("PreciseLaserPoint_WorkpieceCloud.txt");
+    if (!QFileInfo::exists(cloudPath))
+    {
+        m_pInfoLabel->setText(QString("缺少完整点云文件，无法生成工件模型：%1")
+            .arg(QDir::toNativeSeparators(cloudPath)));
+        return;
+    }
+
+    // 首次/旧版本缓存：后台线程生成（解析 150MB 级文本最耗时），进度条 + 可取消，不阻塞界面。
+    m_bBuilding = true;
+    m_pInfoLabel->setText("正在后台生成工件模型缓存…");
+    if (m_pProgress == nullptr)
+    {
+        m_pProgress = new QProgressDialog(this);
+        m_pProgress->setWindowTitle("生成工件模型");
+        m_pProgress->setWindowModality(Qt::WindowModal);
+        m_pProgress->setCancelButtonText("取消");
+        m_pProgress->setRange(0, 100);
+        m_pProgress->setMinimumDuration(0);
+        m_pProgress->setAutoClose(false);
+        m_pProgress->setAutoReset(false);
+    }
+    m_pProgress->setLabelText("正在生成工件模型（首次需要解析完整点云）…");
+    m_pProgress->setValue(0);
+    m_pProgress->show();
+
+    auto cancelFlag = std::make_shared<std::atomic_bool>(false);
+    connect(m_pProgress, &QProgressDialog::canceled, this,
+        [cancelFlag]() { cancelFlag->store(true); },
+        Qt::UniqueConnection);
+
+    std::thread([this, laserDir, cloudPath, cancelFlag]()
+        {
+            // 进度回调在后台线程触发，更新 UI 一律排队投递；this 销毁后排队调用自动丢弃。
+            const WorkpieceMeshBuilder::ProgressCallback progressCb =
+                [this, cancelFlag](int percent, const QString& stage) -> bool
+                {
+                    if (cancelFlag->load())
+                    {
+                        return false;
+                    }
+                    QMetaObject::invokeMethod(this, [this, percent, stage]()
+                        {
+                            if (m_pProgress != nullptr)
+                            {
+                                m_pProgress->setValue(percent);
+                                m_pProgress->setLabelText(QString("正在生成工件模型：%1…").arg(stage));
+                            }
+                        }, Qt::QueuedConnection);
+                    return true;
+                };
+            QString buildError;
+            const bool ok = WorkpieceMeshBuilder::EnsureMeshCache(laserDir, cloudPath, buildError, progressCb);
+            QMetaObject::invokeMethod(this, [this, ok, buildError]()
+                {
+                    OnBuildFinished(ok, buildError);
+                }, Qt::QueuedConnection);
+        }).detach();
+}
+
+void WorkpieceMeshViewerDialog::OnBuildFinished(bool ok, const QString& error)
+{
+    m_bBuilding = false;
+    if (m_pProgress != nullptr)
+    {
+        m_pProgress->hide();
+    }
+    if (!ok)
+    {
+        if (error == QStringLiteral("已取消"))
+        {
+            m_pInfoLabel->setText("已取消生成工件模型。");
+        }
+        else
+        {
+            m_pInfoLabel->setText("生成工件模型失败：" + error);
+            QMessageBox::warning(this, "工件模型", error);
+        }
+        return;
+    }
+    FinishLoadFromCache();
+}
+
+void WorkpieceMeshViewerDialog::FinishLoadFromCache()
+{
+    const QString cachePath = WorkpieceMeshBuilder::MeshCachePath(m_laserDir);
+    QString error;
     QApplication::setOverrideCursor(Qt::WaitCursor);
     const bool loaded = WorkpieceMeshBuilder::LoadMeshPly(cachePath, m_mesh, error);
     QApplication::restoreOverrideCursor();
     if (!loaded)
     {
-        return false;
+        m_pInfoLabel->setText("加载模型缓存失败：" + error);
+        QMessageBox::warning(this, "工件模型", error);
+        return;
     }
-
     m_pGlWidget->SetMesh(m_mesh);
     m_pViewStack->setCurrentIndex(0);
     m_pInfoLabel->setText(QString("模型缓存：%1（顶点 %2 / 三角形 %3）— 左键旋转 / 右键平移 / 滚轮缩放 / 双击复位")
         .arg(QDir::toNativeSeparators(cachePath))
         .arg(m_mesh.vertices.size())
         .arg(m_mesh.indices.size() / 3));
-    setWindowTitle(QString("工件模型 - %1").arg(QFileInfo(laserDir).dir().dirName()));
-    return true;
 }
 
 void WorkpieceMeshViewerDialog::ShowHeightMap()

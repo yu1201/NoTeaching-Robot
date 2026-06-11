@@ -12,12 +12,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <vector>
 
 namespace
 {
 constexpr auto WORKPIECE_MESH_FILE_NAME = "PreciseLaserPoint_WorkpieceMesh.ply";
+// 网格化算法版本：写入 PLY 注释头；EnsureMeshCache 据此让旧算法生成的缓存自动失效重建。
+constexpr auto WORKPIECE_MESH_CACHE_TAG = "NoTeaching-Robot workpiece mesh cache v2";
 constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
 
 bool IsFiniteVec(const Eigen::Vector3f& v)
@@ -36,11 +40,11 @@ double MedianOf(std::vector<double>& values)
     return values[mid];
 }
 
-// 帧（扫描线）切分：帧内沿横向轴单调推进，新帧从横向起点重新开始。
-// 以整体包围盒的短轴为横向轴；横向标量相对帧内已推进方向回退超过阈值即认为换帧。
+// 帧（扫描线）切分：帧内相邻点距很小（亚毫米级），帧间跳变是从一条线尾部跳到
+// 下一条线头部的大距离。用 3D 相邻点距突变切帧——与帧内坐标折返（波纹起伏、
+// 竖立板）完全无关，对任意工件摆放姿态都成立。
 QVector<QPair<int, int>> SplitScanFrames(
-    const QVector<RobotCalculation::IndexedPoint3D>& points,
-    int* transverseAxis)
+    const QVector<RobotCalculation::IndexedPoint3D>& points)
 {
     QVector<QPair<int, int>> frames;
     if (points.size() < 4)
@@ -48,53 +52,31 @@ QVector<QPair<int, int>> SplitScanFrames(
         return frames;
     }
 
-    Eigen::Vector3d minBound = points.first().point;
-    Eigen::Vector3d maxBound = points.first().point;
-    for (const auto& p : points)
-    {
-        minBound = minBound.cwiseMin(p.point);
-        maxBound = maxBound.cwiseMax(p.point);
-    }
-    const Eigen::Vector3d span = maxBound - minBound;
-    // 横向轴 = XY 中跨度较小的一维（焊缝沿长轴推进，扫描线沿短轴展开）。
-    const int axis = span.x() <= span.y() ? 0 : 1;
-    if (transverseAxis != nullptr)
-    {
-        *transverseAxis = axis;
-    }
-
-    // 帧内相邻点横向步距中位数，用于回退阈值。
+    // 相邻点距中位数（帧内典型点距）。
     std::vector<double> steps;
-    steps.reserve(1024);
-    for (int i = 1; i < std::min<int>(points.size(), 5000); ++i)
+    steps.reserve(8192);
+    const int sampleLimit = std::min<int>(points.size(), 20000);
+    for (int i = 1; i < sampleLimit; ++i)
     {
-        const double d = std::abs(points[i].point[axis] - points[i - 1].point[axis]);
+        const double d = (points[i].point - points[i - 1].point).norm();
         if (d > 1e-9)
         {
             steps.push_back(d);
         }
     }
     const double stepMedian = std::max(1e-3, MedianOf(steps));
-    const double backJump = stepMedian * 20.0;  // 回退超过 20 倍点距 = 换帧
+    const double frameJump = stepMedian * 15.0;  // 相邻点距超过 15 倍中位点距 = 换帧
 
     int frameStart = 0;
-    double direction = 0.0;  // 帧内推进方向（符号），首两点确定
     for (int i = 1; i < points.size(); ++i)
     {
-        const double delta = points[i].point[axis] - points[i - 1].point[axis];
-        if (direction == 0.0 && std::abs(delta) > 1e-9)
-        {
-            direction = delta > 0.0 ? 1.0 : -1.0;
-        }
-        // 逆向大幅回退 → 新帧
-        if (direction != 0.0 && delta * direction < -backJump)
+        if ((points[i].point - points[i - 1].point).norm() > frameJump)
         {
             if (i - frameStart >= 3)
             {
                 frames.push_back({ frameStart, i });
             }
             frameStart = i;
-            direction = 0.0;
         }
     }
     if (points.size() - frameStart >= 3)
@@ -115,6 +97,16 @@ QString WorkpieceMeshBuilder::MeshCachePath(const QString& laserDir)
     return QDir(laserDir).filePath(MeshCacheFileName());
 }
 
+bool WorkpieceMeshBuilder::IsMeshCacheValid(const QString& filePath)
+{
+    QFile cacheFile(filePath);
+    if (!cacheFile.open(QIODevice::ReadOnly))
+    {
+        return false;
+    }
+    return cacheFile.read(256).contains(WORKPIECE_MESH_CACHE_TAG);
+}
+
 bool WorkpieceMeshBuilder::BuildFromScanlineCloud(
     const QVector<RobotCalculation::IndexedPoint3D>& cloudPoints,
     Mesh& mesh,
@@ -128,33 +120,19 @@ bool WorkpieceMeshBuilder::BuildFromScanlineCloud(
         return false;
     }
 
-    int axis = 0;
-    const QVector<QPair<int, int>> frames = SplitScanFrames(cloudPoints, &axis);
+    const QVector<QPair<int, int>> frames = SplitScanFrames(cloudPoints);
     if (frames.size() < 3)
     {
         error = QString("扫描线分帧失败（仅 %1 帧），点云可能无序。").arg(frames.size());
         return false;
     }
 
-    // 横向范围与目标列数：列数取各帧点数中位（保细节），按目标三角规模行列联合抽稀。
-    double tMin = std::numeric_limits<double>::max();
-    double tMax = std::numeric_limits<double>::lowest();
+    // 列数取各帧点数中位（保细节），按目标三角规模行列联合抽稀。
     std::vector<double> frameSizes;
     frameSizes.reserve(frames.size());
     for (const auto& f : frames)
     {
         frameSizes.push_back(double(f.second - f.first));
-        for (int i = f.first; i < f.second; ++i)
-        {
-            const double t = cloudPoints[i].point[axis];
-            tMin = std::min(tMin, t);
-            tMax = std::max(tMax, t);
-        }
-    }
-    if (tMax - tMin < 1e-6)
-    {
-        error = "横向跨度为零，无法网格化。";
-        return false;
     }
     int columns = static_cast<int>(std::clamp(MedianOf(frameSizes), 16.0, 4096.0));
     int rows = frames.size();
@@ -170,67 +148,100 @@ bool WorkpieceMeshBuilder::BuildFromScanlineCloud(
         }
     }
 
-    // 帧抽稀映射 + 每帧按横向参数重采样到固定列（线性插值；缺口超过阈值的列填 NaN）。
+    // 帧内典型点距（弧长域），用于缺口判定。
     std::vector<double> gapSamples;
     gapSamples.reserve(4096);
     {
         const auto& f0 = frames[frames.size() / 2];
         for (int i = f0.first + 1; i < f0.second; ++i)
         {
-            gapSamples.push_back(std::abs(cloudPoints[i].point[axis] - cloudPoints[i - 1].point[axis]));
+            gapSamples.push_back((cloudPoints[i].point - cloudPoints[i - 1].point).norm());
         }
     }
-    const double columnWidth = (tMax - tMin) / std::max(1, columns - 1);
     const double gapMedian = std::max(MedianOf(gapSamples), 1e-3);
-    const double bridgeLimit = std::max(gapMedian, columnWidth) * 4.0;  // 缺口超过 4 倍点距不桥接
 
+    // 每帧按"归一化弧长"重采样到固定列：不依赖任何坐标轴的单调性，
+    // 波纹折返、竖立摆放都不影响；蛇形扫描按与上一帧首点的距离统一方向。
     QVector<Eigen::Vector3f> grid(static_cast<qsizetype>(rows) * columns,
         Eigen::Vector3f(kNaN, kNaN, kNaN));
+    Eigen::Vector3d previousFrameHead = Eigen::Vector3d::Zero();
+    bool hasPreviousHead = false;
+    double columnArcWidth = gapMedian;  // 估算列对应的弧长宽度（动态更新）
     for (int r = 0; r < rows; ++r)
     {
         const auto& frame = frames[static_cast<int>(
             double(r) * (frames.size() - 1) / std::max(1, rows - 1))];
-        // 帧内点按横向参数排序后插值（蛇形扫描方向交替也被归一）。
-        std::vector<std::pair<double, Eigen::Vector3d>> line;
-        line.reserve(frame.second - frame.first);
+        const int count = frame.second - frame.first;
+        std::vector<Eigen::Vector3d> line;
+        line.reserve(count);
         for (int i = frame.first; i < frame.second; ++i)
         {
-            line.push_back({ cloudPoints[i].point[axis], cloudPoints[i].point });
+            line.push_back(cloudPoints[i].point);
         }
-        std::sort(line.begin(), line.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
+        // 蛇形扫描统一方向：让每帧首点靠近上一帧首点。
+        if (hasPreviousHead)
+        {
+            const double headDist = (line.front() - previousFrameHead).norm();
+            const double tailDist = (line.back() - previousFrameHead).norm();
+            if (tailDist < headDist)
+            {
+                std::reverse(line.begin(), line.end());
+            }
+        }
+        previousFrameHead = line.front();
+        hasPreviousHead = true;
+
+        // 累计弧长参数。
+        std::vector<double> arc(line.size(), 0.0);
+        for (size_t i = 1; i < line.size(); ++i)
+        {
+            arc[i] = arc[i - 1] + (line[i] - line[i - 1]).norm();
+        }
+        const double totalArc = arc.back();
+        if (totalArc < 1e-6)
+        {
+            continue;
+        }
+        columnArcWidth = totalArc / std::max(1, columns - 1);
+        const double bridgeLimit = std::max(gapMedian, columnArcWidth) * 4.0;  // 缺口超 4 倍点距不桥接
 
         size_t cursor = 0;
         for (int c = 0; c < columns; ++c)
         {
-            const double t = tMin + columnWidth * c;
-            while (cursor + 1 < line.size() && line[cursor + 1].first < t)
+            const double t = totalArc * c / std::max(1, columns - 1);
+            while (cursor + 1 < arc.size() && arc[cursor + 1] < t)
             {
                 ++cursor;
             }
-            if (cursor + 1 >= line.size())
+            if (cursor + 1 >= arc.size())
             {
                 break;
             }
-            const auto& a = line[cursor];
-            const auto& b = line[cursor + 1];
-            if (t < a.first - bridgeLimit || t > b.first + bridgeLimit
-                || (b.first - a.first) > bridgeLimit)
+            const double segment = arc[cursor + 1] - arc[cursor];
+            if (segment > bridgeLimit)
             {
-                continue;  // 该列落在数据缺口里，保持 NaN
+                continue;  // 该列落在帧内数据缺口里，保持 NaN
             }
-            const double w = (b.first - a.first) > 1e-12
-                ? std::clamp((t - a.first) / (b.first - a.first), 0.0, 1.0)
+            const double w = segment > 1e-12
+                ? std::clamp((t - arc[cursor]) / segment, 0.0, 1.0)
                 : 0.0;
-            const Eigen::Vector3d p = a.second * (1.0 - w) + b.second * w;
+            const Eigen::Vector3d p = line[cursor] * (1.0 - w) + line[cursor + 1] * w;
             grid[static_cast<qsizetype>(r) * columns + c] = p.cast<float>();
         }
     }
 
     // 2×2 单元三角化：NaN 跳过 + 最大边长阈值（防止把遮挡缺口/帧间断裂糊死）。
+    // 阈值兼顾帧间行距（行抽稀后变大）与列宽。
+    double frameAdvance = gapMedian;
+    if (frames.size() >= 2)
+    {
+        const auto& fa = frames[frames.size() / 2 - 1];
+        const auto& fb = frames[frames.size() / 2];
+        frameAdvance = (cloudPoints[fb.first].point - cloudPoints[fa.first].point).norm()
+            * std::max(1.0, double(frames.size()) / rows);
+    }
     const float maxEdge = static_cast<float>(
-        std::max(columnWidth, (tMax - tMin) / columns) * 8.0
-        + 8.0);
+        std::max(columnArcWidth, frameAdvance) * 8.0 + 8.0);
     const float maxEdgeSq = maxEdge * maxEdge;
     auto vertexAt = [&grid, columns](int r, int c) -> const Eigen::Vector3f&
         {
@@ -289,9 +300,9 @@ bool WorkpieceMeshBuilder::BuildFromScanlineCloud(
         return false;
     }
 
-    // 顶点法线 = 邻接面法线累加归一；统一让平均法线朝 +Z（朝上看工件）。
+    // 顶点法线 = 邻接面法线累加归一。绕序由网格参数化天然一致；朝向不强行统一
+    //（工件摆放姿态任意），显示端用双面光照，CloudCompare 默认也双面渲染。
     mesh.normals = QVector<Eigen::Vector3f>(mesh.vertices.size(), Eigen::Vector3f::Zero());
-    double sumZ = 0.0;
     for (qsizetype i = 0; i + 2 < mesh.indices.size(); i += 3)
     {
         const Eigen::Vector3f& a = mesh.vertices[mesh.indices[i]];
@@ -301,19 +312,6 @@ bool WorkpieceMeshBuilder::BuildFromScanlineCloud(
         mesh.normals[mesh.indices[i]] += n;
         mesh.normals[mesh.indices[i + 1]] += n;
         mesh.normals[mesh.indices[i + 2]] += n;
-        sumZ += n.z();
-    }
-    if (sumZ < 0.0)
-    {
-        // 平均朝下：统一翻转绕序与法线。
-        for (qsizetype i = 0; i + 2 < mesh.indices.size(); i += 3)
-        {
-            std::swap(mesh.indices[i + 1], mesh.indices[i + 2]);
-        }
-        for (auto& n : mesh.normals)
-        {
-            n = -n;
-        }
     }
     for (auto& n : mesh.normals)
     {
@@ -340,7 +338,7 @@ bool WorkpieceMeshBuilder::SaveMeshPly(const QString& filePath, const Mesh& mesh
     const QByteArray header = QStringLiteral(
         "ply\n"
         "format binary_little_endian 1.0\n"
-        "comment NoTeaching-Robot workpiece mesh cache\n"
+        "comment %3\n"
         "element vertex %1\n"
         "property float x\nproperty float y\nproperty float z\n"
         "property float nx\nproperty float ny\nproperty float nz\n"
@@ -349,6 +347,7 @@ bool WorkpieceMeshBuilder::SaveMeshPly(const QString& filePath, const Mesh& mesh
         "end_header\n")
         .arg(mesh.vertices.size())
         .arg(faceCount)
+        .arg(QString::fromLatin1(WORKPIECE_MESH_CACHE_TAG))
         .toLatin1();
     file.write(header);
 
@@ -461,13 +460,135 @@ bool WorkpieceMeshBuilder::LoadMeshPly(const QString& filePath, Mesh& mesh, QStr
     return mesh.IsValid();
 }
 
+bool WorkpieceMeshBuilder::SaveMeshStl(const QString& filePath, const Mesh& mesh, QString& error)
+{
+    if (!mesh.IsValid())
+    {
+        error = "网格为空，未导出 STL。";
+        return false;
+    }
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        error = QString("写入 STL 文件失败：%1").arg(filePath);
+        return false;
+    }
+
+    // 二进制 STL：80 字节头 + uint32 三角数 + 每三角形 [面法线3f + 顶点9f + 2字节属性]。
+    char header[80] = { 0 };
+    std::snprintf(header, sizeof(header), "NoTeaching-Robot workpiece mesh");
+    file.write(header, sizeof(header));
+    const quint32 triangleCount = static_cast<quint32>(mesh.indices.size() / 3);
+    file.write(reinterpret_cast<const char*>(&triangleCount), sizeof(triangleCount));
+
+    QByteArray block;
+    block.resize(qsizetype(triangleCount) * 50);
+    char* out = block.data();
+    for (qsizetype i = 0; i + 2 < mesh.indices.size(); i += 3)
+    {
+        const Eigen::Vector3f& a = mesh.vertices[mesh.indices[i]];
+        const Eigen::Vector3f& b = mesh.vertices[mesh.indices[i + 1]];
+        const Eigen::Vector3f& c = mesh.vertices[mesh.indices[i + 2]];
+        Eigen::Vector3f n = (b - a).cross(c - a);
+        const float len = n.norm();
+        n = len > 1e-12f ? Eigen::Vector3f(n / len) : Eigen::Vector3f(0.f, 0.f, 1.f);
+        const float values[12] = {
+            n.x(), n.y(), n.z(),
+            a.x(), a.y(), a.z(),
+            b.x(), b.y(), b.z(),
+            c.x(), c.y(), c.z() };
+        std::memcpy(out, values, sizeof(values));
+        out += sizeof(values);
+        out[0] = 0;
+        out[1] = 0;
+        out += 2;
+    }
+    file.write(block);
+    file.close();
+    return true;
+}
+
+bool WorkpieceMeshBuilder::LoadCloudPointsWithProgress(
+    const QString& cloudFilePath,
+    QVector<RobotCalculation::IndexedPoint3D>& points,
+    QString& error,
+    const ProgressCallback& progress)
+{
+    points.clear();
+    QFile file(cloudFilePath);
+    if (!file.open(QIODevice::ReadOnly))
+    {
+        error = QString("打开点云文件失败：%1").arg(cloudFilePath);
+        return false;
+    }
+    const qint64 totalBytes = std::max<qint64>(1, file.size());
+    points.reserve(static_cast<qsizetype>(std::min<qint64>(totalBytes / 40, 8000000)));
+
+    qint64 lineCounter = 0;
+    while (!file.atEnd())
+    {
+        const QByteArray line = file.readLine();
+        // 每 ~1.6 万行报一次进度并检查取消（约每 0.7MB 一次，开销可忽略）。
+        if ((++lineCounter & 0x3FFF) == 0 && progress)
+        {
+            const int percent = static_cast<int>(file.pos() * 100 / totalBytes);
+            if (!progress(percent, QStringLiteral("读取完整点云")))
+            {
+                error = QStringLiteral("已取消");
+                return false;
+            }
+        }
+        // 手写解析 "index x y z"（空格分隔）：表头/非数字行 strtoll 解析失败自动跳过。
+        const char* cursor = line.constData();
+        char* next = nullptr;
+        const long long index = std::strtoll(cursor, &next, 10);
+        if (next == cursor)
+        {
+            continue;
+        }
+        cursor = next;
+        const double x = std::strtod(cursor, &next);
+        if (next == cursor)
+        {
+            continue;
+        }
+        cursor = next;
+        const double y = std::strtod(cursor, &next);
+        if (next == cursor)
+        {
+            continue;
+        }
+        cursor = next;
+        const double z = std::strtod(cursor, &next);
+        if (next == cursor)
+        {
+            continue;
+        }
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+        {
+            continue;
+        }
+        RobotCalculation::IndexedPoint3D point;
+        point.index = static_cast<int>(index);
+        point.point = Eigen::Vector3d(x, y, z);
+        points.push_back(point);
+    }
+    if (points.size() < 16)
+    {
+        error = QString("点云文件有效点过少（%1）：%2").arg(points.size()).arg(cloudFilePath);
+        return false;
+    }
+    return true;
+}
+
 bool WorkpieceMeshBuilder::EnsureMeshCache(
     const QString& laserDir,
     const QString& cloudFilePath,
-    QString& error)
+    QString& error,
+    const ProgressCallback& progress)
 {
     const QString cachePath = MeshCachePath(laserDir);
-    if (QFileInfo::exists(cachePath))
+    if (IsMeshCacheValid(cachePath))
     {
         return true;
     }
@@ -476,9 +597,23 @@ bool WorkpieceMeshBuilder::EnsureMeshCache(
         error = QString("缺少完整点云文件：%1").arg(cloudFilePath);
         return false;
     }
+
+    // 0~80%：读取点云（最耗时的阶段，按字节进度换算）。
+    const ProgressCallback readProgress = progress
+        ? [&progress](int percent, const QString& stage)
+            {
+                return progress(percent * 80 / 100, stage);
+            }
+        : ProgressCallback();
     QVector<RobotCalculation::IndexedPoint3D> cloudPoints;
-    if (!RobotDataHelper::LoadIndexedPoint3DFile(cloudFilePath, cloudPoints, &error))
+    if (!LoadCloudPointsWithProgress(cloudFilePath, cloudPoints, error, readProgress))
     {
+        return false;
+    }
+
+    if (progress && !progress(82, QStringLiteral("扫描线网格化")))
+    {
+        error = QStringLiteral("已取消");
         return false;
     }
     Mesh mesh;
@@ -486,7 +621,21 @@ bool WorkpieceMeshBuilder::EnsureMeshCache(
     {
         return false;
     }
-    return SaveMeshPly(cachePath, mesh, error);
+
+    if (progress && !progress(95, QStringLiteral("写出模型缓存")))
+    {
+        error = QStringLiteral("已取消");
+        return false;
+    }
+    if (!SaveMeshPly(cachePath, mesh, error))
+    {
+        return false;
+    }
+    if (progress)
+    {
+        progress(100, QStringLiteral("完成"));
+    }
+    return true;
 }
 
 QImage WorkpieceMeshBuilder::RenderHeightMap(const Mesh& mesh, int maxImageWidth)
@@ -502,34 +651,48 @@ QImage WorkpieceMeshBuilder::RenderHeightMap(const Mesh& mesh, int maxImageWidth
         minBound = minBound.cwiseMin(v);
         maxBound = maxBound.cwiseMax(v);
     }
-    const float spanX = std::max(1e-3f, maxBound.x() - minBound.x());
-    const float spanY = std::max(1e-3f, maxBound.y() - minBound.y());
+    // 工件摆放姿态任意：高度轴 = 包围盒跨度最小的轴（表面偏移方向），
+    // 展开面 = 另两轴（竖立波纹板即 板面两轴 展开、水平轴当"高度"）。
+    const Eigen::Vector3f span3 = maxBound - minBound;
+    int heightAxis = 0;
+    if (span3.y() <= span3.x() && span3.y() <= span3.z())
+    {
+        heightAxis = 1;
+    }
+    else if (span3.z() <= span3.x() && span3.z() <= span3.y())
+    {
+        heightAxis = 2;
+    }
+    const int axisU = heightAxis == 0 ? 1 : 0;
+    const int axisV = heightAxis == 2 ? 1 : 2;
+    const float spanU = std::max(1e-3f, span3[axisU]);
+    const float spanV = std::max(1e-3f, span3[axisV]);
 
     int width = maxImageWidth;
-    int height = static_cast<int>(width * (spanY / spanX));
+    int height = static_cast<int>(width * (spanV / spanU));
     if (height > maxImageWidth * 4)
     {
         height = maxImageWidth * 4;
-        width = std::max(64, static_cast<int>(height * (spanX / spanY)));
+        width = std::max(64, static_cast<int>(height * (spanU / spanV)));
     }
     height = std::clamp(height, 64, 8192);
 
     cv::Mat heightField(height, width, CV_32FC1, cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
     for (const auto& v : mesh.vertices)
     {
-        const int px = std::clamp(static_cast<int>((v.x() - minBound.x()) / spanX * (width - 1)), 0, width - 1);
-        const int py = std::clamp(static_cast<int>((v.y() - minBound.y()) / spanY * (height - 1)), 0, height - 1);
-        float& cell = heightField.at<float>(height - 1 - py, px);  // Y 向上
-        if (std::isnan(cell) || v.z() > cell)
+        const int px = std::clamp(static_cast<int>((v[axisU] - minBound[axisU]) / spanU * (width - 1)), 0, width - 1);
+        const int py = std::clamp(static_cast<int>((v[axisV] - minBound[axisV]) / spanV * (height - 1)), 0, height - 1);
+        float& cell = heightField.at<float>(height - 1 - py, px);
+        if (std::isnan(cell) || v[heightAxis] > cell)
         {
-            cell = v.z();  // 同格取最高（俯视可见面）
+            cell = v[heightAxis];  // 同格取偏移最大（观察方向可见面）
         }
     }
 
     // 小孔填补（近邻扩散一次）后做梯度光照。
     cv::Mat mask = heightField != heightField;  // NaN mask
     cv::Mat filled = heightField.clone();
-    cv::patchNaNs(filled, minBound.z());
+    cv::patchNaNs(filled, minBound[heightAxis]);
     cv::Mat blurred;
     cv::blur(filled, blurred, cv::Size(3, 3));
     filled.setTo(0, mask);
