@@ -13,9 +13,9 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.06.11.1357`
+- 当前源码版本：`v2026.06.11.1405`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.11.1357.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.11.1405.exe`，不用自己编译源码。
 
 ## 2026-06-10 更新
 
@@ -28,7 +28,7 @@
 - 扫描运动完成超时由固定 120s 改为按扫描距离/配置速度动态估计，修复慢速测量长焊缝误报超时
 - 四种方法处理成功时各自落盘独立基础焊道文件（`_SdkClass`/`_SdkBase`/`_PointBase`/`_PointLaser`），文件存在即表示已按该方法完成焊道生成；补偿预览"原始数据"显示当前方法的基础焊道，载入目录检测到缺失且有原始输入时自动重算
 - 工件点云逆向建模：有序扫描线条带网格化生成模型缓存 `_WorkpieceMesh.ply`（一次生成秒开，可拖入 CloudCompare），新增 OpenGL 工件模型查看器（实体面/点云/高度图三模式，支持导出 STL 给 CAD 软件），补偿界面"工件模型"按钮打开；网格化适配任意工件摆放姿态，首次生成走后台线程+进度条不阻塞界面
-- 构建验证：`Debug x64`、`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.06.11.1357.exe`（101,582,568 bytes，SHA256 `229AE15147CBC07CA003745DAF5F42B5EF48C06463AAD17C1CF83154D534D872`），包内 `BUILD_VERSION.txt` 与应用版本一致、Qt6OpenGL/Qt6OpenGLWidgets 已随包部署、SDK dll 与厂商 20260609 更新包字节一致
+- 构建验证：`Debug x64`、`Release x64` 和 Inno Setup 打包通过，生成版本化安装包 `NoTeaching-Robot-Setup-v2026.06.11.1405.exe`（101,577,219 bytes，SHA256 `F24963BAF01E8C2350117EA8C77935C8CD0A0B2E7841E7F5D40D341040B8B7C0`），包内 `BUILD_VERSION.txt` 与应用版本一致、Qt6OpenGL/Qt6OpenGLWidgets 已随包部署、SDK dll 与厂商 20260609 更新包字节一致
 
 ## 2026-06-06 更新
 
