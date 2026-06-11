@@ -122,6 +122,7 @@ private:
     bool SaveWeldProcessArea(QString& error);
     void ChooseCompPreviewDirectory();
     void SetCompPreviewDirectory(const QString& dir);
+    void RefreshCompPreviewScanLine();
     void RebuildCompPreviewBaseline();
     void AutoSelectLatestCompPreviewDirectory();
     void ScheduleCompPreview();
@@ -187,8 +188,12 @@ private:
     QVector<PoseCompRow> m_savedPoseRows;   // 加载/保存后的姿态补偿快照（姿态补偿阶段按 delta 计算）
     QString m_compPreviewDir;
     QString m_compPreviewBaselineDir;
-    // 焊接方向（测量焊接参数 WeldDirection，1=起点到终点 / -1=终点到起点），用于预览方向箭头。
+    // 焊接方向（工艺值优先、测量页旧值回退，1=起点到终点 / -1=终点到起点），用于预览方向箭头。
     int m_compPreviewWeldDirection = 1;
+    // 扫描轨迹起止点 XY（当前启用组），方向箭头放在扫描位置那一侧（与焊接方向无关）。
+    bool m_compPreviewScanLineValid = false;
+    QPointF m_compPreviewScanStartXY;
+    QPointF m_compPreviewScanEndXY;
     // 六阶段图层开关：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡 5=实际焊道
     QAbstractButton* m_pStageToggles[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
 
