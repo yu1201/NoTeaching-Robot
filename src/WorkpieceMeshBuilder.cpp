@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -21,10 +22,15 @@ namespace
 {
 constexpr auto WORKPIECE_MESH_FILE_NAME = "PreciseLaserPoint_WorkpieceMesh.ply";
 // 网格化算法版本：写入 PLY 注释头；EnsureMeshCache 据此让旧算法生成的缓存自动失效重建。
-constexpr auto WORKPIECE_MESH_CACHE_TAG = "NoTeaching-Robot workpiece mesh cache v3";
+constexpr auto WORKPIECE_MESH_CACHE_TAG = "NoTeaching-Robot workpiece mesh cache v7";
 constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
 
 bool IsFiniteVec(const Eigen::Vector3f& v)
+{
+    return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
+}
+
+bool IsFiniteVec(const Eigen::Vector3d& v)
 {
     return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
 }
@@ -40,51 +46,6 @@ double MedianOf(std::vector<double>& values)
     return values[mid];
 }
 
-// 帧（扫描线）切分：帧内相邻点距很小（亚毫米级），帧间跳变是从一条线尾部跳到
-// 下一条线头部的大距离。用 3D 相邻点距突变切帧——与帧内坐标折返（波纹起伏、
-// 竖立板）完全无关，对任意工件摆放姿态都成立。
-QVector<QPair<int, int>> SplitScanFrames(
-    const QVector<RobotCalculation::IndexedPoint3D>& points)
-{
-    QVector<QPair<int, int>> frames;
-    if (points.size() < 4)
-    {
-        return frames;
-    }
-
-    // 相邻点距中位数（帧内典型点距）。
-    std::vector<double> steps;
-    steps.reserve(8192);
-    const int sampleLimit = std::min<int>(points.size(), 20000);
-    for (int i = 1; i < sampleLimit; ++i)
-    {
-        const double d = (points[i].point - points[i - 1].point).norm();
-        if (d > 1e-9)
-        {
-            steps.push_back(d);
-        }
-    }
-    const double stepMedian = std::max(1e-3, MedianOf(steps));
-    const double frameJump = stepMedian * 15.0;  // 相邻点距超过 15 倍中位点距 = 换帧
-
-    int frameStart = 0;
-    for (int i = 1; i < points.size(); ++i)
-    {
-        if ((points[i].point - points[i - 1].point).norm() > frameJump)
-        {
-            if (i - frameStart >= 3)
-            {
-                frames.push_back({ frameStart, i });
-            }
-            frameStart = i;
-        }
-    }
-    if (points.size() - frameStart >= 3)
-    {
-        frames.push_back({ frameStart, points.size() });
-    }
-    return frames;
-}
 }
 
 QString WorkpieceMeshBuilder::MeshCacheFileName()
@@ -95,6 +56,73 @@ QString WorkpieceMeshBuilder::MeshCacheFileName()
 QString WorkpieceMeshBuilder::MeshCachePath(const QString& laserDir)
 {
     return QDir(laserDir).filePath(MeshCacheFileName());
+}
+
+QString WorkpieceMeshBuilder::EditedCloudFileName()
+{
+    return QStringLiteral("PreciseLaserPoint_WorkpieceCloud_Edited.txt");
+}
+
+QString WorkpieceMeshBuilder::EditedCloudPath(const QString& laserDir)
+{
+    return QDir(laserDir).filePath(EditedCloudFileName());
+}
+
+QString WorkpieceMeshBuilder::ResolveCloudSourcePath(const QString& laserDir)
+{
+    const QString edited = EditedCloudPath(laserDir);
+    if (QFileInfo::exists(edited))
+    {
+        return edited;
+    }
+    return QDir(laserDir).filePath(QStringLiteral("PreciseLaserPoint_WorkpieceCloud.txt"));
+}
+
+bool WorkpieceMeshBuilder::SaveCloudPointsTxt(
+    const QString& filePath,
+    const QVector<RobotCalculation::IndexedPoint3D>& points,
+    QString& error)
+{
+    const QString tempPath = filePath + QStringLiteral(".tmp");
+    QFile file(tempPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    {
+        error = QString("写入点云文件失败：%1").arg(tempPath);
+        return false;
+    }
+    // snprintf 批量拼缓冲直写（340 万行级，QTextStream 逐行格式化慢一个量级）。
+    QByteArray buffer;
+    constexpr int kFlushSize = 1 << 22;
+    buffer.reserve(kFlushSize + 128);
+    char line[128];
+    for (const auto& p : points)
+    {
+        const int len = std::snprintf(line, sizeof(line), "%d %.6f %.6f %.6f\n",
+            p.index, p.point.x(), p.point.y(), p.point.z());
+        buffer.append(line, len);
+        if (buffer.size() >= kFlushSize)
+        {
+            file.write(buffer);
+            buffer.clear();
+        }
+    }
+    file.write(buffer);
+    if (file.error() != QFileDevice::NoError)
+    {
+        file.close();
+        QFile::remove(tempPath);
+        error = QString("写入点云文件失败：%1").arg(tempPath);
+        return false;
+    }
+    file.close();
+    QFile::remove(filePath);
+    if (!QFile::rename(tempPath, filePath))
+    {
+        QFile::remove(tempPath);
+        error = QString("替换点云文件失败：%1").arg(filePath);
+        return false;
+    }
+    return true;
 }
 
 bool WorkpieceMeshBuilder::IsMeshCacheValid(const QString& filePath)
@@ -120,150 +148,271 @@ bool WorkpieceMeshBuilder::BuildFromScanlineCloud(
         return false;
     }
 
-    const QVector<QPair<int, int>> frames = SplitScanFrames(cloudPoints);
-    if (frames.size() < 3)
+    // 单帧滤波会把每帧激光线保留成 2~3 条主直线段（多段折线），任何"每帧一条线"的
+    // 条带化假设都不成立。改用与扫描结构完全解耦的方案：PCA 求板面主平面，全部点
+    // 投影到主平面规则栅格（格内中位数聚合，抗离群噪声簇），再做规则网格三角化——
+    // 与帧结构、段数、点序、摆放姿态全部无关，连续性由点云密度天然保证。
+
+    // 1) 抽样 PCA：质心 + 主平面两轴（u,v）+ 法向（n，最小特征值方向）。
+    const int pcaStride = std::max(1, int(cloudPoints.size() / 200000));
+    Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+    qint64 pcaCount = 0;
+    // 离线重建路径读回的 _WorkpieceCloud.txt 可能含 "nan"/"inf" 行（上游变换异常时
+    // 程序原样落盘，QString::toDouble 解析成功），非有限点进投格 int 转换与 std::sort
+    // 是未定义行为——全部坐标循环一律跳过非有限点。
+    for (int i = 0; i < cloudPoints.size(); i += pcaStride)
     {
-        error = QString("扫描线分帧失败（仅 %1 帧），点云可能无序。").arg(frames.size());
+        if (!IsFiniteVec(cloudPoints[i].point))
+        {
+            continue;
+        }
+        centroid += cloudPoints[i].point;
+        ++pcaCount;
+    }
+    if (pcaCount == 0)
+    {
+        error = "点云不含有效（有限值）坐标，无法网格化。";
         return false;
     }
-
-    // 列数取各帧点数中位（保细节），按目标三角规模行列联合抽稀。
-    std::vector<double> frameSizes;
-    frameSizes.reserve(frames.size());
-    for (const auto& f : frames)
+    centroid /= double(pcaCount);
+    Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+    for (int i = 0; i < cloudPoints.size(); i += pcaStride)
     {
-        frameSizes.push_back(double(f.second - f.first));
-    }
-    int columns = static_cast<int>(std::clamp(MedianOf(frameSizes), 16.0, 4096.0));
-    int rows = frames.size();
-    if (targetMaxTriangles > 0)
-    {
-        // 三角数 ≈ 2*(rows-1)*(columns-1)，超目标时行列等比抽稀。
-        const double tri = 2.0 * (rows - 1) * (columns - 1);
-        if (tri > targetMaxTriangles)
+        if (!IsFiniteVec(cloudPoints[i].point))
         {
-            const double scale = std::sqrt(targetMaxTriangles / tri);
-            rows = std::max(3, static_cast<int>(rows * scale));
-            columns = std::max(16, static_cast<int>(columns * scale));
+            continue;
         }
+        const Eigen::Vector3d d = cloudPoints[i].point - centroid;
+        covariance += d * d.transpose();
     }
-
-    // 帧内典型点距，用于缺口判定。
-    std::vector<double> gapSamples;
-    gapSamples.reserve(4096);
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigenSolver(covariance);
+    if (eigenSolver.info() != Eigen::Success)
     {
-        const auto& f0 = frames[frames.size() / 2];
-        for (int i = f0.first + 1; i < f0.second; ++i)
+        error = "点云主平面求解失败。";
+        return false;
+    }
+    // 特征值升序：列0=法向（最小展布），列1/列2=主平面两轴。
+    const Eigen::Vector3d normalAxis = eigenSolver.eigenvectors().col(0);
+    const Eigen::Vector3d axisU = eigenSolver.eigenvectors().col(2);
+    const Eigen::Vector3d axisV = eigenSolver.eigenvectors().col(1);
+
+    // 2) 全点投影到 (u,v,h)，求范围与典型点距。
+    double uMin = std::numeric_limits<double>::max();
+    double uMax = std::numeric_limits<double>::lowest();
+    double vMin = uMin;
+    double vMax = uMax;
+    for (const auto& p : cloudPoints)
+    {
+        if (!IsFiniteVec(p.point))
         {
-            gapSamples.push_back((cloudPoints[i].point - cloudPoints[i - 1].point).norm());
+            continue;
+        }
+        const Eigen::Vector3d d = p.point - centroid;
+        const double u = d.dot(axisU);
+        const double v = d.dot(axisV);
+        uMin = std::min(uMin, u);
+        uMax = std::max(uMax, u);
+        vMin = std::min(vMin, v);
+        vMax = std::max(vMax, v);
+    }
+    const double spanU = uMax - uMin;
+    const double spanV = vMax - vMin;
+    if (spanU < 1e-3 || spanV < 1e-3)
+    {
+        error = "点云主平面跨度退化，无法网格化。";
+        return false;
+    }
+    std::vector<double> gapSamples;
+    gapSamples.reserve(8192);
+    for (int i = 1; i < std::min<int>(cloudPoints.size(), 20000); ++i)
+    {
+        const double d = (cloudPoints[i].point - cloudPoints[i - 1].point).norm();
+        if (d > 1e-9)
+        {
+            gapSamples.push_back(d);
         }
     }
     const double gapMedian = std::max(MedianOf(gapSamples), 1e-3);
 
-    // 列对齐必须按"空间位置"而不是线内序号/弧长百分比——每帧激光线的起点和长度随
-    // 波纹/视场边缘漂移，按百分比对齐会让相邻行同列错位（表面呈斜向拉丝）。
-    // 取所有帧弦向（帧首→帧尾）的统一平均作为横向轴，全帧点在该轴上的投影做全局栅格：
-    // 相邻行同列 = 同一物理横向位置；蛇形扫描方向差异也被弦向符号统一吸收。
-    Eigen::Vector3d chordDir = Eigen::Vector3d::Zero();
-    for (const auto& frame : frames)
-    {
-        Eigen::Vector3d chord = cloudPoints[frame.second - 1].point - cloudPoints[frame.first].point;
-        const double len = chord.norm();
-        if (len < 1e-6)
-        {
-            continue;
-        }
-        chord /= len;
-        if (chord.dot(chordDir) < 0.0)
-        {
-            chord = -chord;
-        }
-        chordDir += chord;
-    }
-    if (chordDir.norm() < 1e-9)
-    {
-        error = "扫描线弦方向退化，无法确定横向轴。";
-        return false;
-    }
-    chordDir.normalize();
+    // 3) 栅格尺寸：按目标三角规模定格宽，且不小于典型点距（避免大量空格穿孔）。
+    const double cellTarget = std::max(1.0, double(std::max(targetMaxTriangles, 20000)) / 2.0);
+    double cellSize = std::sqrt(spanU * spanV / cellTarget);
+    cellSize = std::max(cellSize, gapMedian * 1.2);
+    const int columns = std::clamp(int(spanU / cellSize) + 1, 16, 8192);
+    const int rows = std::clamp(int(spanV / cellSize) + 1, 16, 8192);
+    const double stepU = spanU / std::max(1, columns - 1);
+    const double stepV = spanV / std::max(1, rows - 1);
 
-    double tMin = std::numeric_limits<double>::max();
-    double tMax = std::numeric_limits<double>::lowest();
-    for (const auto& frame : frames)
+    // 4) 格内高度聚合：最大簇中位数（抗离群噪声簇与跨面混样）。先收集每格样本（短数组）。
+    QVector<float> heightField(static_cast<qsizetype>(rows) * columns, kNaN);
     {
-        for (int i = frame.first; i < frame.second; ++i)
+        std::vector<std::vector<float>> cellSamples(static_cast<size_t>(rows) * columns);
+        for (const auto& p : cloudPoints)
         {
-            const double t = cloudPoints[i].point.dot(chordDir);
-            tMin = std::min(tMin, t);
-            tMax = std::max(tMax, t);
-        }
-    }
-    if (tMax - tMin < 1e-6)
-    {
-        error = "横向跨度为零，无法网格化。";
-        return false;
-    }
-    const double columnWidth = (tMax - tMin) / std::max(1, columns - 1);
-    const double bridgeLimit = std::max(gapMedian, columnWidth) * 4.0;  // 缺口超 4 倍点距不桥接
-
-    QVector<Eigen::Vector3f> grid(static_cast<qsizetype>(rows) * columns,
-        Eigen::Vector3f(kNaN, kNaN, kNaN));
-    std::vector<std::pair<double, Eigen::Vector3d>> line;
-    for (int r = 0; r < rows; ++r)
-    {
-        const auto& frame = frames[static_cast<int>(
-            double(r) * (frames.size() - 1) / std::max(1, rows - 1))];
-        line.clear();
-        line.reserve(frame.second - frame.first);
-        for (int i = frame.first; i < frame.second; ++i)
-        {
-            line.push_back({ cloudPoints[i].point.dot(chordDir), cloudPoints[i].point });
-        }
-        // 弦向投影对波纹截面近似单调，排序兜底局部噪声折返。
-        std::sort(line.begin(), line.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-
-        size_t cursor = 0;
-        for (int c = 0; c < columns; ++c)
-        {
-            const double t = tMin + columnWidth * c;
-            while (cursor + 1 < line.size() && line[cursor + 1].first < t)
-            {
-                ++cursor;
-            }
-            if (cursor + 1 >= line.size())
-            {
-                break;
-            }
-            const auto& a = line[cursor];
-            const auto& b = line[cursor + 1];
-            // 列落在帧覆盖范围外或落在帧内 3D 缺口里 → 保持 NaN（不桥接遮挡/缺失）。
-            if (t < a.first - bridgeLimit || t > b.first + bridgeLimit
-                || (b.second - a.second).norm() > bridgeLimit)
+            if (!IsFiniteVec(p.point))
             {
                 continue;
             }
-            const double segment = b.first - a.first;
-            const double w = segment > 1e-12
-                ? std::clamp((t - a.first) / segment, 0.0, 1.0)
-                : 0.0;
-            const Eigen::Vector3d p = a.second * (1.0 - w) + b.second * w;
+            const Eigen::Vector3d d = p.point - centroid;
+            const int c = std::clamp(int((d.dot(axisU) - uMin) / stepU + 0.5), 0, columns - 1);
+            const int r = std::clamp(int((d.dot(axisV) - vMin) / stepV + 0.5), 0, rows - 1);
+            cellSamples[static_cast<size_t>(r) * columns + c].push_back(float(d.dot(normalAxis)));
+        }
+        for (size_t i = 0; i < cellSamples.size(); ++i)
+        {
+            auto& samples = cellSamples[i];
+            if (samples.empty())
+            {
+                continue;
+            }
+            // 按高度排序后以间隙切簇，只取点数最多的簇的中位数：跨立面过渡格
+            // （平台点+立面点混在一格）与悬空噪声簇被分到小簇排除，避免聚合值
+            // 在两个面之间摆动拉出竖直细丝；纯立面格内高度连续无大间隙，整簇
+            // 保留为墙面。
+            std::sort(samples.begin(), samples.end());
+            constexpr float kClusterGap = 3.0f;
+            size_t bestBegin = 0;
+            size_t bestCount = 0;
+            size_t runBegin = 0;
+            for (size_t j = 1; j <= samples.size(); ++j)
+            {
+                if (j == samples.size() || samples[j] - samples[j - 1] > kClusterGap)
+                {
+                    const size_t runCount = j - runBegin;
+                    if (runCount > bestCount)
+                    {
+                        bestBegin = runBegin;
+                        bestCount = runCount;
+                    }
+                    runBegin = j;
+                }
+            }
+            heightField[static_cast<qsizetype>(i)] = samples[bestBegin + bestCount / 2];
+        }
+    }
+
+    // 4.5) 后处理：a) 小孔填补——扫描线间隔大于格宽时部分格子采不到点形成虚线状孔洞，
+    // 对"有 ≥3 个有效邻居"的空格取邻居中值填补（最多两轮，大面积无数据区不会被糊死）；
+    // b) 3×3 中值滤波——去掉立面窄条等处格间跳动形成的毛刺。
+    auto cellAt = [&heightField, columns, rows](int r, int c) -> float
+        {
+            if (r < 0 || r >= rows || c < 0 || c >= columns)
+            {
+                return kNaN;
+            }
+            return heightField[static_cast<qsizetype>(r) * columns + c];
+        };
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        QVector<float> filled = heightField;
+        int filledCount = 0;
+        for (int r = 0; r < rows; ++r)
+        {
+            for (int c = 0; c < columns; ++c)
+            {
+                if (!std::isnan(cellAt(r, c)))
+                {
+                    continue;
+                }
+                // 仅填"被数据包夹"的内部孔格：横向或纵向两侧 2 格内均有有效数据。
+                // 扫描间隔形成的细孔两侧必有数据；自由立边外侧的空格只有单侧有
+                // 数据，不满足包夹——避免填补向边界外扩、在立边顶长出悬空裙边。
+                auto hasValidToward = [&cellAt, r, c](int dr, int dc)
+                    {
+                        return !std::isnan(cellAt(r + dr, c + dc))
+                            || !std::isnan(cellAt(r + 2 * dr, c + 2 * dc));
+                    };
+                const bool spanned = (hasValidToward(0, -1) && hasValidToward(0, 1))
+                    || (hasValidToward(-1, 0) && hasValidToward(1, 0));
+                if (!spanned)
+                {
+                    continue;
+                }
+                float neighbors[8];
+                int neighborCount = 0;
+                for (int dr = -1; dr <= 1; ++dr)
+                {
+                    for (int dc = -1; dc <= 1; ++dc)
+                    {
+                        if (dr == 0 && dc == 0)
+                        {
+                            continue;
+                        }
+                        const float h = cellAt(r + dr, c + dc);
+                        if (!std::isnan(h))
+                        {
+                            neighbors[neighborCount++] = h;
+                        }
+                    }
+                }
+                if (neighborCount >= 3)
+                {
+                    std::nth_element(neighbors, neighbors + neighborCount / 2, neighbors + neighborCount);
+                    filled[static_cast<qsizetype>(r) * columns + c] = neighbors[neighborCount / 2];
+                    ++filledCount;
+                }
+            }
+        }
+        heightField = filled;
+        if (filledCount == 0)
+        {
+            break;
+        }
+    }
+    for (int smoothPass = 0; smoothPass < 2; ++smoothPass)
+    {
+        QVector<float> smoothed = heightField;
+        for (int r = 0; r < rows; ++r)
+        {
+            for (int c = 0; c < columns; ++c)
+            {
+                if (std::isnan(cellAt(r, c)))
+                {
+                    continue;
+                }
+                float window[9];
+                int windowCount = 0;
+                for (int dr = -1; dr <= 1; ++dr)
+                {
+                    for (int dc = -1; dc <= 1; ++dc)
+                    {
+                        const float h = cellAt(r + dr, c + dc);
+                        if (!std::isnan(h))
+                        {
+                            window[windowCount++] = h;
+                        }
+                    }
+                }
+                std::nth_element(window, window + windowCount / 2, window + windowCount);
+                smoothed[static_cast<qsizetype>(r) * columns + c] = window[windowCount / 2];
+            }
+        }
+        heightField = smoothed;
+    }
+
+    // 5) 网格顶点 = 质心 + u·axisU + v·axisV + h·normalAxis。
+    QVector<Eigen::Vector3f> grid(static_cast<qsizetype>(rows) * columns,
+        Eigen::Vector3f(kNaN, kNaN, kNaN));
+    for (int r = 0; r < rows; ++r)
+    {
+        for (int c = 0; c < columns; ++c)
+        {
+            const float h = heightField[static_cast<qsizetype>(r) * columns + c];
+            if (std::isnan(h))
+            {
+                continue;
+            }
+            const Eigen::Vector3d p = centroid
+                + axisU * (uMin + stepU * c)
+                + axisV * (vMin + stepV * r)
+                + normalAxis * double(h);
             grid[static_cast<qsizetype>(r) * columns + c] = p.cast<float>();
         }
     }
 
-    // 2×2 单元三角化：NaN 跳过 + 最大边长阈值（防止把遮挡缺口/帧间断裂糊死）。
-    // 阈值兼顾帧间行距（行抽稀后变大）与列宽。
-    double frameAdvance = gapMedian;
-    if (frames.size() >= 2)
-    {
-        const auto& fa = frames[frames.size() / 2 - 1];
-        const auto& fb = frames[frames.size() / 2];
-        frameAdvance = (cloudPoints[fb.first].point - cloudPoints[fa.first].point).norm()
-            * std::max(1.0, double(frames.size()) / rows);
-    }
-    const float maxEdge = static_cast<float>(
-        std::max(columnWidth, frameAdvance) * 8.0 + 8.0);
+    // 2×2 单元三角化：NaN 跳过 + 最大边长阈值（防止把遮挡缺口糊死；
+    // 立面/折弯处相邻格高度差大但属真实表面，阈值给足跨立面的余量）。
+    const float maxEdge = static_cast<float>(std::max(stepU, stepV) * 6.0 + 25.0);
     const float maxEdgeSq = maxEdge * maxEdge;
     auto vertexAt = [&grid, columns](int r, int c) -> const Eigen::Vector3f&
         {
@@ -350,10 +499,13 @@ bool WorkpieceMeshBuilder::SaveMeshPly(const QString& filePath, const Mesh& mesh
         error = "网格为空，未写出模型文件。";
         return false;
     }
-    QFile file(filePath);
+    // 先写临时文件再原子替换：直接 Truncate 覆写时若进程中途终止，截断文件的
+    // header（含缓存标记）已落盘会被 IsMeshCacheValid 误判有效，加载报数据不完整。
+    const QString tempPath = filePath + QStringLiteral(".tmp");
+    QFile file(tempPath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
     {
-        error = QString("写入模型文件失败：%1").arg(filePath);
+        error = QString("写入模型文件失败：%1").arg(tempPath);
         return false;
     }
     const qsizetype faceCount = mesh.indices.size() / 3;
@@ -396,7 +548,21 @@ bool WorkpieceMeshBuilder::SaveMeshPly(const QString& filePath, const Mesh& mesh
         fp += sizeof(idx);
     }
     file.write(faceBlock);
+    if (file.error() != QFileDevice::NoError)
+    {
+        file.close();
+        QFile::remove(tempPath);
+        error = QString("写入模型文件失败：%1").arg(tempPath);
+        return false;
+    }
     file.close();
+    QFile::remove(filePath);
+    if (!QFile::rename(tempPath, filePath))
+    {
+        QFile::remove(tempPath);
+        error = QString("替换模型文件失败：%1").arg(filePath);
+        return false;
+    }
     return true;
 }
 
