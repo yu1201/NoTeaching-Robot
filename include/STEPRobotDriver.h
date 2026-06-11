@@ -6,6 +6,8 @@
 #include "RobotMessage.h"
 #include "RobotDriverAdaptor.h"
 
+#include <atomic>
+
 #ifndef __STEP_ROBOT_CTRL
 #define __STEP_ROBOT_CTRL
 
@@ -187,5 +189,15 @@ public:
 	std::string m_sStepProjectName;
 	RobotComClient* m_pSTEPRobotClient;
 
+	// 管理界面切换"STEP接口"模式后调用：作废进程级缓存，下次状态读取重新读库。
+	static void InvalidateStepSdkInterfaceModeCache();
+
+private:
+	// 状态时间轴会话锁定：0=未锁定 1=机器人时间戳 2=PC 接收时间。
+	// 机器人毫秒与 PC steady_clock 纪元完全不同，同一连接会话内一经锁定不再
+	// 切换，防止 getTimestamp 偶发 0 值把两种纪元混进同一扫描序列破坏时间插值。
+	std::atomic<int> m_nTimestampAxisLatch{ 0 };
+	std::atomic<long long> m_lastValidRobotMs{ 0 };
+	std::atomic<bool> m_bTimestampFallbackLogged{ false };
 };
 #endif

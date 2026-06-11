@@ -7917,6 +7917,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 			MeasureThenWeldRuntimeConfig::SaveStepSdkInterfaceMode(
 				MeasureThenWeldRuntimeConfig::StepSdkInterfaceModeFromStorageString(m_pStepSdkInterfaceModeCombo->itemData(index).toString()));
+			STEPRobotCtrl::InvalidateStepSdkInterfaceModeCache();  // 驱动侧进程级缓存立即失效
 		});
 	connect(m_pTouchKeyboardModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
 		{
