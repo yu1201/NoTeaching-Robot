@@ -9,6 +9,7 @@
 #include "FunctionTestDialog.h"
 #include "HandEyeCalibrationDialog.h"
 #include "LaserWeldFilterDialog.h"
+#include "WorkpieceMeshViewerDialog.h"
 #include "MeasureThenWeldDialog.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "MeasureThenWeldService.h"
@@ -7806,6 +7807,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 	addMenuAction(managementDebugMenu, createManagementAction("点动控制", [this, openInManagement]() { openInManagement([this]() { OpenRobotJogDialog(); }); }));
 	addMenuAction(managementDebugMenu, createManagementAction("功能测试", [this, openInManagement]() { openInManagement([this]() { OpenFunctionTestDialog(); }); }));
+	addMenuAction(managementDebugMenu, createManagementAction("工件模型", [this]() { OpenWorkpieceMeshPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("配置数据库查看", [this]() { OpenConfigDatabaseViewerDialog(); }));
 
 	m_pAccountManagementAction = addMenuAction(managementAccountMenu, createManagementAction("账号管理", [this]() { OpenAccountManagementDialog(); }));
@@ -10042,6 +10044,36 @@ void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 	PrepareEmbeddedPage(m_pPrecisePointCloudProcessingPage, m_pManagementStack);
 	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pPrecisePointCloudProcessingPage);
+	loading.Finish();
+}
+
+void QtWidgetsApplication4::OpenWorkpieceMeshPage()
+{
+	PageOpenTrace trace("工件模型");
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		QMessageBox::information(this, "工件模型", "工件模型查看需要工程师或管理员权限。");
+		return;
+	}
+
+	if (m_pManagementStack == nullptr)
+	{
+		QMessageBox::warning(this, "工件模型", "管理页面尚未初始化，无法嵌入工件模型页面。");
+		return;
+	}
+
+	if (m_pWorkpieceMeshPage != nullptr)
+	{
+		ShowManagementEmbeddedPage(m_pWorkpieceMeshPage);
+		return;
+	}
+
+	DelayedLoadingGuard loading(this, "正在打开工件模型", 1000);
+	m_pWorkpieceMeshPage = new WorkpieceMeshViewerDialog(m_pManagementStack);
+	loading.Pulse();
+	PrepareEmbeddedPage(m_pWorkpieceMeshPage, m_pManagementStack);
+	loading.Pulse();
+	ShowManagementEmbeddedPage(m_pWorkpieceMeshPage);
 	loading.Finish();
 }
 

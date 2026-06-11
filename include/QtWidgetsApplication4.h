@@ -23,6 +23,7 @@ class SKJCameraControlClient;
 class FANUCRobotCtrl;
 class FunctionTestDialog;
 class LaserWeldFilterDialog;
+class WorkpieceMeshViewerDialog;
 class QAction;
 class QCheckBox;
 class QCloseEvent;
@@ -139,6 +140,7 @@ private:
     void OpenControlUnitManagementDialog();
     void OpenFtpJobManagementDialog();
     void OpenPrecisePointCloudProcessingPage();
+    void OpenWorkpieceMeshPage();
     void OpenConfigDatabaseViewerDialog();
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
@@ -172,7 +174,7 @@ private:
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
     bool RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
     void RunLaserClassifyDirForCli(const QString& dirPath) const;
-    void RunRebuildMeasureWeldFilesForCli(const QStringList& arguments, const QString& laserDirPath) const;
+    bool RunRebuildMeasureWeldFilesForCli(const QStringList& arguments, const QString& laserDirPath) const;
     void RunWeldSeamCompForCli(const QStringList& arguments, const QString& inputPath, const QString& outputPath) const;
     void RunGenerateStepWeldProgramForCli(
         const QStringList& arguments,
@@ -205,6 +207,7 @@ private:
     QWidget* m_pFtpJobManagementPage;
     QWidget* m_pConfigDatabaseViewerPage;
     LaserWeldFilterDialog* m_pPrecisePointCloudProcessingPage;
+    WorkpieceMeshViewerDialog* m_pWorkpieceMeshPage = nullptr;
     QComboBox* m_pRobotSelectorCombo;
     QLabel* m_pRobotSelectorLabel;
     int m_nCurrentRobotUnitIndex;
