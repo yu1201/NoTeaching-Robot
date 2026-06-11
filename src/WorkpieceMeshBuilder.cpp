@@ -21,7 +21,7 @@ namespace
 {
 constexpr auto WORKPIECE_MESH_FILE_NAME = "PreciseLaserPoint_WorkpieceMesh.ply";
 // 网格化算法版本：写入 PLY 注释头；EnsureMeshCache 据此让旧算法生成的缓存自动失效重建。
-constexpr auto WORKPIECE_MESH_CACHE_TAG = "NoTeaching-Robot workpiece mesh cache v2";
+constexpr auto WORKPIECE_MESH_CACHE_TAG = "NoTeaching-Robot workpiece mesh cache v3";
 constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
 
 bool IsFiniteVec(const Eigen::Vector3f& v)
@@ -148,7 +148,7 @@ bool WorkpieceMeshBuilder::BuildFromScanlineCloud(
         }
     }
 
-    // 帧内典型点距（弧长域），用于缺口判定。
+    // 帧内典型点距，用于缺口判定。
     std::vector<double> gapSamples;
     gapSamples.reserve(4096);
     {
@@ -160,72 +160,94 @@ bool WorkpieceMeshBuilder::BuildFromScanlineCloud(
     }
     const double gapMedian = std::max(MedianOf(gapSamples), 1e-3);
 
-    // 每帧按"归一化弧长"重采样到固定列：不依赖任何坐标轴的单调性，
-    // 波纹折返、竖立摆放都不影响；蛇形扫描按与上一帧首点的距离统一方向。
+    // 列对齐必须按"空间位置"而不是线内序号/弧长百分比——每帧激光线的起点和长度随
+    // 波纹/视场边缘漂移，按百分比对齐会让相邻行同列错位（表面呈斜向拉丝）。
+    // 取所有帧弦向（帧首→帧尾）的统一平均作为横向轴，全帧点在该轴上的投影做全局栅格：
+    // 相邻行同列 = 同一物理横向位置；蛇形扫描方向差异也被弦向符号统一吸收。
+    Eigen::Vector3d chordDir = Eigen::Vector3d::Zero();
+    for (const auto& frame : frames)
+    {
+        Eigen::Vector3d chord = cloudPoints[frame.second - 1].point - cloudPoints[frame.first].point;
+        const double len = chord.norm();
+        if (len < 1e-6)
+        {
+            continue;
+        }
+        chord /= len;
+        if (chord.dot(chordDir) < 0.0)
+        {
+            chord = -chord;
+        }
+        chordDir += chord;
+    }
+    if (chordDir.norm() < 1e-9)
+    {
+        error = "扫描线弦方向退化，无法确定横向轴。";
+        return false;
+    }
+    chordDir.normalize();
+
+    double tMin = std::numeric_limits<double>::max();
+    double tMax = std::numeric_limits<double>::lowest();
+    for (const auto& frame : frames)
+    {
+        for (int i = frame.first; i < frame.second; ++i)
+        {
+            const double t = cloudPoints[i].point.dot(chordDir);
+            tMin = std::min(tMin, t);
+            tMax = std::max(tMax, t);
+        }
+    }
+    if (tMax - tMin < 1e-6)
+    {
+        error = "横向跨度为零，无法网格化。";
+        return false;
+    }
+    const double columnWidth = (tMax - tMin) / std::max(1, columns - 1);
+    const double bridgeLimit = std::max(gapMedian, columnWidth) * 4.0;  // 缺口超 4 倍点距不桥接
+
     QVector<Eigen::Vector3f> grid(static_cast<qsizetype>(rows) * columns,
         Eigen::Vector3f(kNaN, kNaN, kNaN));
-    Eigen::Vector3d previousFrameHead = Eigen::Vector3d::Zero();
-    bool hasPreviousHead = false;
-    double columnArcWidth = gapMedian;  // 估算列对应的弧长宽度（动态更新）
+    std::vector<std::pair<double, Eigen::Vector3d>> line;
     for (int r = 0; r < rows; ++r)
     {
         const auto& frame = frames[static_cast<int>(
             double(r) * (frames.size() - 1) / std::max(1, rows - 1))];
-        const int count = frame.second - frame.first;
-        std::vector<Eigen::Vector3d> line;
-        line.reserve(count);
+        line.clear();
+        line.reserve(frame.second - frame.first);
         for (int i = frame.first; i < frame.second; ++i)
         {
-            line.push_back(cloudPoints[i].point);
+            line.push_back({ cloudPoints[i].point.dot(chordDir), cloudPoints[i].point });
         }
-        // 蛇形扫描统一方向：让每帧首点靠近上一帧首点。
-        if (hasPreviousHead)
-        {
-            const double headDist = (line.front() - previousFrameHead).norm();
-            const double tailDist = (line.back() - previousFrameHead).norm();
-            if (tailDist < headDist)
-            {
-                std::reverse(line.begin(), line.end());
-            }
-        }
-        previousFrameHead = line.front();
-        hasPreviousHead = true;
-
-        // 累计弧长参数。
-        std::vector<double> arc(line.size(), 0.0);
-        for (size_t i = 1; i < line.size(); ++i)
-        {
-            arc[i] = arc[i - 1] + (line[i] - line[i - 1]).norm();
-        }
-        const double totalArc = arc.back();
-        if (totalArc < 1e-6)
-        {
-            continue;
-        }
-        columnArcWidth = totalArc / std::max(1, columns - 1);
-        const double bridgeLimit = std::max(gapMedian, columnArcWidth) * 4.0;  // 缺口超 4 倍点距不桥接
+        // 弦向投影对波纹截面近似单调，排序兜底局部噪声折返。
+        std::sort(line.begin(), line.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
 
         size_t cursor = 0;
         for (int c = 0; c < columns; ++c)
         {
-            const double t = totalArc * c / std::max(1, columns - 1);
-            while (cursor + 1 < arc.size() && arc[cursor + 1] < t)
+            const double t = tMin + columnWidth * c;
+            while (cursor + 1 < line.size() && line[cursor + 1].first < t)
             {
                 ++cursor;
             }
-            if (cursor + 1 >= arc.size())
+            if (cursor + 1 >= line.size())
             {
                 break;
             }
-            const double segment = arc[cursor + 1] - arc[cursor];
-            if (segment > bridgeLimit)
+            const auto& a = line[cursor];
+            const auto& b = line[cursor + 1];
+            // 列落在帧覆盖范围外或落在帧内 3D 缺口里 → 保持 NaN（不桥接遮挡/缺失）。
+            if (t < a.first - bridgeLimit || t > b.first + bridgeLimit
+                || (b.second - a.second).norm() > bridgeLimit)
             {
-                continue;  // 该列落在帧内数据缺口里，保持 NaN
+                continue;
             }
+            const double segment = b.first - a.first;
             const double w = segment > 1e-12
-                ? std::clamp((t - arc[cursor]) / segment, 0.0, 1.0)
+                ? std::clamp((t - a.first) / segment, 0.0, 1.0)
                 : 0.0;
-            const Eigen::Vector3d p = line[cursor] * (1.0 - w) + line[cursor + 1] * w;
+            const Eigen::Vector3d p = a.second * (1.0 - w) + b.second * w;
             grid[static_cast<qsizetype>(r) * columns + c] = p.cast<float>();
         }
     }
@@ -241,7 +263,7 @@ bool WorkpieceMeshBuilder::BuildFromScanlineCloud(
             * std::max(1.0, double(frames.size()) / rows);
     }
     const float maxEdge = static_cast<float>(
-        std::max(columnArcWidth, frameAdvance) * 8.0 + 8.0);
+        std::max(columnWidth, frameAdvance) * 8.0 + 8.0);
     const float maxEdgeSq = maxEdge * maxEdge;
     auto vertexAt = [&grid, columns](int r, int c) -> const Eigen::Vector3f&
         {
