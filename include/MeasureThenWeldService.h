@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MeasureThenWeldDialog.h"
+#include "PointCloudProcessingConfig.h"
 #include "RobotCalculation.h"
 
 #include <functional>
@@ -164,8 +165,10 @@ public:
     CompPreviewResult RecomputeCompPreview(CompPreviewKind kind, const QString& robotName, const QVector<CompPreviewPoint>& baseline, const CompPreviewEditValues& edits) const;
     // 读取原始焊道（分类后几何 _Classified.txt）作为对照图层。
     bool LoadCompPreviewOriginalTrack(const QString& laserDir, QVector<CompPreviewPoint>& points, QString& error) const;
-    // 读取"原始数据"对照图层，按当前处理方法取真实处理输入：
-    // ①完整点云（抽样）/ ②SDK基础焊道 / ③④相机目标点轨迹（PreciseLaserPoint.txt）。
+    // 四种处理方法各自的基础焊道文件名（处理成功时落盘到 LaserPoint 目录；
+    // 文件存在即表示该目录已按该方法完成焊道生成）。
+    static QString MethodBaseTrackFileName(PointCloudProcessingConfig::Mode mode);
+    // 读取"原始数据"对照图层：当前方法的基础焊道文件；未生成时回退相机目标点轨迹。
     bool LoadCompPreviewRawCloud(
         const QString& laserDir,
         QVector<CompPreviewPoint>& points,

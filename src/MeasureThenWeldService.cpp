@@ -52,7 +52,6 @@ constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_WAIT_MS = 500;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_POLL_MS = 10;
 constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
 constexpr auto WORKPIECE_CLOUD_FILE_NAME = "PreciseLaserPoint_WorkpieceCloud.txt";
-constexpr auto WORKPIECE_EXTRACTED_LASER_FILE_NAME = "PreciseLaserPoint_WorkpieceExtracted.txt";
 constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
 constexpr auto KEY_POINTS_FILE_NAME = "PreciseLaserPoint_KeyPoints.txt";
 constexpr auto CLASSIFIED_FILE_NAME = "PreciseLaserPoint_Classified.txt";
@@ -63,6 +62,12 @@ constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
 constexpr auto WELD_POSE_SEAM_COMP_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
 constexpr auto WELD_SEGMENT_KIND_DEBUG_FILE_NAME = "PreciseLaserPointSegmentKind.txt";
 constexpr auto MATCH_DEBUG_FILE_NAME = "PreciseLaserPoint_MatchDebug.csv";
+// 四种处理方法各自的基础焊道文件：处理成功时落盘，文件存在即表示该目录已按该方法完成焊道生成。
+constexpr auto METHOD_TRACK_SDK_CLASS_FILE_NAME = "PreciseLaserPoint_SdkClass.txt";   // ①SDK拐点扩充焊道
+constexpr auto METHOD_TRACK_SDK_BASE_FILE_NAME = "PreciseLaserPoint_SdkBase.txt";     // ②SDK基础焊道
+constexpr auto METHOD_TRACK_POINT_BASE_FILE_NAME = "PreciseLaserPoint_PointBase.txt"; // ③点云投影提取焊道
+constexpr auto METHOD_TRACK_POINT_LASER_FILE_NAME = "PreciseLaserPoint_PointLaser.txt"; // ④相机目标点焊道
+
 constexpr auto SDK_POINT_CLOUD_OUTPUT_DIR_NAME = "SdkPointCloud";
 constexpr auto SDK_SEAM_EXTRACTED_FILE_NAME = "PreciseLaserPoint_SdkSeamExtracted.txt";
 constexpr auto SDK_SEAM_EXTRACTED_2MM_FILE_NAME = "PreciseLaserPoint_SdkSeamExtracted_2mm.txt";
@@ -718,6 +723,23 @@ QVector<PointCloudExtractionProcessor::TrackPoint> TruncateTrackAtWeldedStart(
     return truncated;
 }
 
+// 方法基础焊道行格式与 PreciseLaserPoint 系列一致：index x y z。
+template <typename Container>
+std::vector<QString> BuildMethodTrackLines(const Container& points)
+{
+    std::vector<QString> lines;
+    lines.reserve(static_cast<size_t>(points.size()));
+    for (const auto& point : points)
+    {
+        lines.push_back(QString("%1 %2 %3 %4")
+            .arg(point.index)
+            .arg(point.point.x(), 0, 'f', 6)
+            .arg(point.point.y(), 0, 'f', 6)
+            .arg(point.point.z(), 0, 'f', 6));
+    }
+    return lines;
+}
+
 bool WriteTextLinesToFile(const QString& path, const std::vector<QString>& lines, QString* error)
 {
     QFile file(path);
@@ -739,13 +761,32 @@ bool WriteTextLinesToFile(const QString& path, const std::vector<QString>& lines
     return true;
 }
 
+// 处理成功时把"该方法的基础焊道"落盘到 LaserPoint 目录（文件存在=该方法已完成焊道生成）。
+void SaveMethodBaseTrackFile(
+    const QString& laserDir,
+    PointCloudProcessingConfig::Mode mode,
+    const std::vector<QString>& lines,
+    const MeasureThenWeldService::LogCallback& appendLog)
+{
+    if (laserDir.trimmed().isEmpty() || lines.empty())
+    {
+        return;
+    }
+    const QString path = QDir(laserDir).filePath(MeasureThenWeldService::MethodBaseTrackFileName(mode));
+    QString saveError;
+    if (!WriteTextLinesToFile(path, lines, &saveError) && appendLog)
+    {
+        appendLog(QString("方法基础焊道写入失败（不影响处理）：%1").arg(saveError));
+    }
+}
+
 RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud(
     const QVector<RobotCalculation::IndexedPoint3D>& legacyLaserInput,
     const QVector<RobotCalculation::IndexedPoint3D>& fullCloudInput,
     const T_PRECISE_MEASURE_PARAM& param,
     const RobotCalculation::LowerWeldFilterParams& fitParams,
     const QString& sdkBaseWeldOutputPath,
-    const QString& projectedTrackOutputPath,
+    const QString& methodTrackOutputDir,
     const MeasureThenWeldService::LogCallback& appendLog,
     bool* usedExternalLibrary = nullptr,
     PointCloudExtractionProcessor::ExtractionResult* externalExtraction = nullptr)
@@ -872,6 +913,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 appendLog(QString("SDK基础焊道来自库输出文件：%1").arg(extraction.baseWeldPath));
             }
         }
+        SaveMethodBaseTrackFile(
+            methodTrackOutputDir, settings.mode, BuildMethodTrackLines(workingExtraction.points), appendLog);
         return analysis;
     }
     if (settings.mode == PointCloudProcessingConfig::Mode::CloudFit)
@@ -911,15 +954,6 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             }
             return failed;
         }
-        if (!projectedTrackOutputPath.isEmpty())
-        {
-            QString saveError;
-            if (!WriteTextLinesToFile(projectedTrackOutputPath, BuildRawLaserOutputLines(projectedPath.points), &saveError)
-                && appendLog)
-            {
-                appendLog(QString("点云投影轨迹写入失败（不影响处理）：%1").arg(saveError));
-            }
-        }
         if (appendLog)
         {
             appendLog(QString("点云投影提取完成：完整点云=%1，种子点=%2，底板候选点=%3，投影轨迹点=%4。")
@@ -931,10 +965,19 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         RobotCalculation::MeasureThenWeldAnalysisResult analysis =
             RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
                 ToIndexedInput(projectedPath.points), fitParams);
-        if (!analysis.ok && appendLog)
+        if (!analysis.ok)
         {
-            appendLog(QString("点云算法+拟合处理失败：%1").arg(analysis.error));
+            if (appendLog)
+            {
+                appendLog(QString("点云算法+拟合处理失败：%1").arg(analysis.error));
+            }
+            return analysis;
         }
+        SaveMethodBaseTrackFile(
+            methodTrackOutputDir,
+            PointCloudProcessingConfig::Mode::CloudFit,
+            BuildMethodTrackLines(projectedPath.points),
+            appendLog);
         return analysis;
     }
 
@@ -944,7 +987,17 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         appendLog(QString("特征点+拟合输入轨迹点数：%1。")
             .arg(legacyLaserInput.size()));
     }
-    return RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(legacyLaserInput, fitParams);
+    RobotCalculation::MeasureThenWeldAnalysisResult legacyAnalysis =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(legacyLaserInput, fitParams);
+    if (legacyAnalysis.ok)
+    {
+        SaveMethodBaseTrackFile(
+            methodTrackOutputDir,
+            PointCloudProcessingConfig::Mode::LegacyLaserPath,
+            BuildMethodTrackLines(legacyLaserInput),
+            appendLog);
+    }
+    return legacyAnalysis;
 }
 
 QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
@@ -7788,7 +7841,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             param,
             originalFitParams,
             sdkBaseWeldPath,
-            QDir(laserDir).filePath(WORKPIECE_EXTRACTED_LASER_FILE_NAME),
+            laserDir,
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
@@ -8121,7 +8174,6 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
 
     preservePath = dir.filePath(PRESERVE_PATH_FILE_NAME);
     const QString workpieceCloudPath = dir.filePath(WORKPIECE_CLOUD_FILE_NAME);
-    const QString workpieceExtractedLaserPath = dir.filePath(WORKPIECE_EXTRACTED_LASER_FILE_NAME);
     const QString sdkPointCloudDir = dir.filePath(SDK_POINT_CLOUD_OUTPUT_DIR_NAME);
     const QString sdkSeamExtractedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_FILE_NAME);
     const QString sdkSeamExtracted2mmPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_2MM_FILE_NAME);
@@ -8215,7 +8267,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             param,
             originalFitParams,
             sdkBaseWeldPath,
-            workpieceExtractedLaserPath,
+            laserDir,
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
@@ -9803,6 +9855,22 @@ bool LoadSampledPointFile(
 }
 }
 
+QString MeasureThenWeldService::MethodBaseTrackFileName(PointCloudProcessingConfig::Mode mode)
+{
+    switch (mode)
+    {
+    case PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet:
+        return QString::fromLatin1(METHOD_TRACK_SDK_CLASS_FILE_NAME);
+    case PointCloudProcessingConfig::Mode::SdkBaseWeldFit:
+        return QString::fromLatin1(METHOD_TRACK_SDK_BASE_FILE_NAME);
+    case PointCloudProcessingConfig::Mode::CloudFit:
+        return QString::fromLatin1(METHOD_TRACK_POINT_BASE_FILE_NAME);
+    case PointCloudProcessingConfig::Mode::LegacyLaserPath:
+    default:
+        return QString::fromLatin1(METHOD_TRACK_POINT_LASER_FILE_NAME);
+    }
+}
+
 bool MeasureThenWeldService::LoadCompPreviewRawCloud(
     const QString& laserDir,
     QVector<CompPreviewPoint>& points,
@@ -9821,40 +9889,22 @@ bool MeasureThenWeldService::LoadCompPreviewRawCloud(
         return false;
     }
 
-    // 原始数据按当前处理方法取真实处理输入：
-    // ①SDK全处理直接吃完整点云 → 显示局部完整点云（抽样）；
-    // ②SDK+拟合的拟合输入是 SDK 基础焊道 → 显示 SdkPointCloud 下的基础焊道文件；
-    // ③点云+拟合 与 ④特征点+拟合 → 显示相机目标点轨迹；对应文件缺失时回退轨迹点。
+    // "原始数据"显示当前方法自己的基础焊道文件（处理成功时落盘）；
+    // 未生成（该目录还没按当前方法处理过）时回退相机目标点轨迹。
     const PointCloudProcessingConfig::Settings settings = PointCloudProcessingConfig::Load();
-    if (settings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet)
+    const QString methodFileName = MethodBaseTrackFileName(settings.mode);
+    const QString methodFilePath = dir.filePath(methodFileName);
+    QString methodError;
+    if (QFileInfo::exists(methodFilePath)
+        && LoadSampledPointFile(methodFilePath, std::numeric_limits<int>::max(), points, methodError))
     {
-        const QString cloudPath = dir.filePath(WORKPIECE_CLOUD_FILE_NAME);
-        QString cloudError;
-        constexpr int kMaxPreviewCloudPoints = 60000;
-        if (QFileInfo::exists(cloudPath)
-            && LoadSampledPointFile(cloudPath, kMaxPreviewCloudPoints, points, cloudError))
+        if (sourceDescription != nullptr)
         {
-            if (sourceDescription != nullptr)
-            {
-                *sourceDescription = QStringLiteral("完整点云抽样显示");
-            }
-            return true;
+            *sourceDescription = QString("%1（%2）")
+                .arg(PointCloudProcessingConfig::ModeDisplayName(settings.mode))
+                .arg(methodFileName);
         }
-    }
-    else if (settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit)
-    {
-        const QString baseWeldPath =
-            QDir(dir.filePath(SDK_POINT_CLOUD_OUTPUT_DIR_NAME)).filePath(SDK_BASE_WELD_FILE_NAME);
-        QString baseWeldError;
-        if (QFileInfo::exists(baseWeldPath)
-            && LoadSampledPointFile(baseWeldPath, std::numeric_limits<int>::max(), points, baseWeldError))
-        {
-            if (sourceDescription != nullptr)
-            {
-                *sourceDescription = QStringLiteral("SDK基础焊道");
-            }
-            return true;
-        }
+        return true;
     }
 
     QVector<RobotCalculation::IndexedPoint3D> rawPoints;
@@ -9878,7 +9928,7 @@ bool MeasureThenWeldService::LoadCompPreviewRawCloud(
     }
     if (sourceDescription != nullptr)
     {
-        *sourceDescription = QStringLiteral("相机目标点轨迹");
+        *sourceDescription = QStringLiteral("相机目标点轨迹（该方法基础焊道未生成）");
     }
     return true;
 }
