@@ -125,6 +125,7 @@ private:
     void RefreshCompPreviewScanLine();
     void RebuildCompPreviewBaseline();
     bool ExecuteCompPreviewRebuild(bool showErrorBox);
+    void OpenWorkpieceMeshViewer();
     void AutoSelectLatestCompPreviewDirectory();
     void ScheduleCompPreview();
     void RecomputeCompPreview();
@@ -197,6 +198,7 @@ private:
     QPointF m_compPreviewScanEndXY;
     // 防止"载入目录→缺方法文件→自动重算→重新载入"递归。
     bool m_bAutoRebuildingCompPreview = false;
+    class WorkpieceMeshViewerDialog* m_pMeshViewer = nullptr;
     // 六阶段图层开关：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡 5=实际焊道
     QAbstractButton* m_pStageToggles[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
 

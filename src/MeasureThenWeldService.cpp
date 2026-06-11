@@ -8,6 +8,7 @@
 #include "OPini.h"
 #include "PointCloudExtractionProcessor.h"
 #include "PointCloudProcessingConfig.h"
+#include "WorkpieceMeshBuilder.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
 #include "RobotPoseTransform.h"
@@ -759,6 +760,42 @@ bool WriteTextLinesToFile(const QString& path, const std::vector<QString>& lines
     stream.flush();
     file.close();
     return true;
+}
+
+// 工件模型缓存：处理成功后用内存中的完整点云直接生成（免二次解析 150MB 文本），
+// 缓存已存在则跳过；之后查看器/CloudCompare 直接秒开。失败不影响焊接流程。
+void EnsureWorkpieceMeshCacheFromCloud(
+    const QString& laserDir,
+    const QVector<RobotCalculation::IndexedPoint3D>& cloudPoints,
+    const MeasureThenWeldService::LogCallback& appendLog)
+{
+    if (laserDir.trimmed().isEmpty() || cloudPoints.size() < 16)
+    {
+        return;
+    }
+    const QString cachePath = WorkpieceMeshBuilder::MeshCachePath(laserDir);
+    if (QFileInfo::exists(cachePath))
+    {
+        return;
+    }
+    QString meshError;
+    WorkpieceMeshBuilder::Mesh mesh;
+    if (!WorkpieceMeshBuilder::BuildFromScanlineCloud(cloudPoints, mesh, meshError)
+        || !WorkpieceMeshBuilder::SaveMeshPly(cachePath, mesh, meshError))
+    {
+        if (appendLog)
+        {
+            appendLog(QString("工件模型缓存生成失败（不影响流程）：%1").arg(meshError));
+        }
+        return;
+    }
+    if (appendLog)
+    {
+        appendLog(QString("已生成工件模型缓存：%1（顶点 %2 / 三角形 %3）")
+            .arg(cachePath)
+            .arg(mesh.vertices.size())
+            .arg(mesh.indices.size() / 3));
+    }
 }
 
 // 处理成功时把"该方法的基础焊道"落盘到 LaserPoint 目录（文件存在=该方法已完成焊道生成）。
@@ -7845,6 +7882,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
+    EnsureWorkpieceMeshCacheFromCloud(laserDir, workpieceCloudInput, appendLog);
     if (!originalAnalysis.ok)
     {
         error = QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error);
@@ -8271,6 +8309,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
+    EnsureWorkpieceMeshCacheFromCloud(laserDir, workpieceCloudInput, appendLog);
     if (!originalAnalysis.ok)
     {
         error = QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error);
