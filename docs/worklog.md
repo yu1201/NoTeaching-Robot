@@ -39,6 +39,13 @@
   - 保留项（审计确认有真实消费，勿删）：piecewiseFitTolerance/piecewiseMinSegmentPoints/searchWindow、AnalyzeMeasureThenWeldLowerWeldPathDirect 转发壳、portable/ 两模块（README 注明的有意副本）
   - 验证：Debug/Release 编译 0 错误；清扫前后用 `--laser-classify-dir Result\Test` 对 17 用例 41 个输出文件逐字节对比**全部一致**（纯删除零行为变化；基线取自 bug 修复之后）
 
+- 仓库瘦身（git 历史重写，克隆体积 1.05GB → 89MB）
+  - 根因：`.gitignore` 曾强制纳入 `dist/installer/` 安装包，全历史累计 14 个安装包 blob 共 1044MB，占可达对象的 83%
+  - 处理：删除强制纳入规则（`dist/` 整目录忽略，安装包经 GitHub Release 分发）；`git rm --cached` 7 个在跟踪安装包；`git filter-repo --invert-paths --path dist/installer` 重写全历史（3 分支 + 17 标签），镜像备份后强推覆盖远程
+  - 结果：`.git` 1.4GB→90MB；新增忽略 `tmp/ analysis_output/ dev_backups/ portable/*/build/`；`CLAUDE.md` 纳入版本管理并同步 git 约定（安装包不进 git、提交只署名 yu1201）
+  - 磁盘清理：旧安装包 3107MB→155MB（保留已发布的 v2026.06.12.1146），根目录历史构建日志/obj 约 110MB 清除；重写前镜像备份存于 `../_backups/repo_before_filterrepo.git`
+  - 注意：历史 SHA 全变，其它机器的旧克隆需重新 clone；GitHub Release 附件不受影响
+
 - 版本与发布
   - 应用版本更新为 `v2026.06.12.1146`
   - `Debug x64` 与 `Release x64` 编译通过；两段式打包通过（build_installer.ps1 -AppVersion），生成 `NoTeaching-Robot-Setup-v2026.06.12.1146.exe`
