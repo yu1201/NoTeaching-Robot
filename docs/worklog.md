@@ -53,6 +53,12 @@
   - 验证：Debug/Release 零错误；Result/Test 17 用例 41 输出文件与基线逐字节一致
   - 待办（批3 后续，按计划分步）：SaveTextLines 四份收敛、GBK 解码四胞胎合一、分类输出行 8 处统一（需先定 raw/raw_noise 取舍）、groove 帧协议层合并（需现场验证）、CLI 块拆独立 cpp（约 2000 行）、管理页内联类外迁（约 6000 行）、WeldPoseGeneration 拆分（约 3950 行，配离线重建逐字节回归）
 
+- 版本与发布（第二批）
+  - 应用版本更新为 `v2026.06.12.1630`（并入：两处缺陷修复、安装包瘦身 154.5→56.7MB、死代码清扫、参数名册唯一来源、SRS 升级包改为不随包分发）
+  - `Debug x64` 与 `Release x64` 编译通过；两段式打包通过，生成 `NoTeaching-Robot-Setup-v2026.06.12.1630.exe`
+  - 安装包大小 `59,479,416` bytes，SHA256 `C2BE556045953D6F2B5314C820635024EDA61C901ED8E172AB8A6614E91AA444`；包内 `BUILD_VERSION.txt` 一致（BuiltAt 2026-06-12 16:32:55）
+  - 重要变化：本版起安装包**不含** SRS 机器人系统升级包（v1146 曾随包），现场需要时从仓库 `SDK/STEP/versions/` 归档单独分发
+
 - 版本与发布
   - 应用版本更新为 `v2026.06.12.1146`
   - `Debug x64` 与 `Release x64` 编译通过；两段式打包通过（build_installer.ps1 -AppVersion），生成 `NoTeaching-Robot-Setup-v2026.06.12.1146.exe`
