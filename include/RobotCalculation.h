@@ -72,8 +72,41 @@ public:
         int piecewiseMinSegmentPoints = 4;
         int minPointCount = 3;
         int smoothRadius = 2;
+        // 点云投影提取（完整点云→下层焊道轨迹）参数；0 表示自动按滤波参数派生（原硬编码行为）。
+        double projectionStationWindowMm = 0.0;     // 站位窗口：0=max(2.5, 采样步长*1.5)
+        double projectionTransverseWindowMm = 0.0;  // 横向窗口：0=max(10, 搜索窗口*1.5)
+        double projectionZBandBelowMm = 0.0;        // 种子下方Z带：0=max(14, Z连续阈值*4)
+        double projectionZBandAboveMm = 0.0;        // 种子上方Z带：0=max(12, Z突变阈值*2.5)
+        int projectionMaxCandidatePerSeed = 160;    // 每种子底板候选上限
+        double projectionLayerLowPercent = 35.0;    // 底板层位Z分位下界（%）
+        double projectionLayerHighPercent = 50.0;   // 底板层位Z分位上界（%）
+        int projectionSmoothRadius = 0;             // 投影轮廓平滑半径：0=按滤波平滑半径夹到[1,4]
         bool useSlopeConsistentCornerFit = false;
+        // 调试：把每段拟合用到的点集与拟合直线导出成 CloudCompare 友好的点云，
+        // 用来核对分段直线拟合是否正确。fitDebugDir 为空时不导出。
+        bool exportFitDebugCloud = false;
+        QString fitDebugDir;
         bool enableCornerCompensation = false;
+        bool validationCoverageEnabled = true;
+        int validationMinFinitePointCount = 300;
+        double validationMinProjectedSpanMm = 180.0;
+        bool validationContinuityEnabled = true;
+        double validationMinStationCoverageRatio = 0.55;
+        double validationMinLongestContinuousRatio = 0.60;
+        bool validationDenoiseRatioEnabled = true;
+        double validationMaxRejectedRatio = 0.40;
+        bool validationResidualEnabled = true;
+        double validationMaxMedianResidualMm = 3.0;
+        double validationMaxP95ResidualMm = 8.0;
+        double validationResidualInlierThresholdMm = 6.0;
+        double validationMinResidualInlierRatio = 0.75;
+        bool validationKeyPointEnabled = true;
+        int validationMinKeyPointCount = 6;
+        int validationMinCornerCount = 4;
+        double validationMinSegmentLengthMm = 15.0;
+        bool validationOutputEnabled = true;
+        int validationMinOutputPointCount = 80;
+        double validationMinOutputLengthRatio = 0.70;
         CornerCompensation risingCornerCompensation;
         CornerCompensation fallingCornerCompensation;
     };

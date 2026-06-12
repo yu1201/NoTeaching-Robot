@@ -4,6 +4,8 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <numeric>
@@ -2648,6 +2650,156 @@ FilterResult FilterLowerWeldPath(const std::vector<IndexedPoint3D>& inputPoints,
     return result;
 }
 
+// 调试导出：把每段直线拟合“用到的点集”和“拟合出的直线”写成 CloudCompare 友好的 ASCII 点云，
+// 与主工程 RobotCalculation::ExportGeometryFitDebugClouds 等价（只是用标准库实现，不依赖 Qt/Eigen）。
+// 生成到 outputDir/：fit_all_points.txt(点集，附 dist_to_fit 标量)、fit_all_lines.txt(拟合直线采样)、
+// fit_keypoints.txt(起点/终点/拐点)、fit_axes.txt(局部坐标系)、segments/seg_XX_*(每段单独文件)。
+void ExportFitDebugClouds(
+    const std::vector<ProjectedPoint>& projected,
+    const std::vector<int>& keyIndexes,
+    const std::vector<Point3D>& fittedKeyPoints,
+    const Axes& axes,
+    bool useSlopeConsistentCornerFit,
+    const std::string& outputDir)
+{
+    if (outputDir.empty() || keyIndexes.size() < 2 || projected.empty())
+    {
+        return;
+    }
+
+    namespace fs = std::filesystem;
+    const fs::path root(outputDir);
+    const fs::path segDir = root / "segments";
+    std::error_code ec;
+    fs::create_directories(segDir, ec);
+
+    const auto fmt = [](double v)
+    {
+        std::ostringstream os;
+        os << std::fixed << std::setprecision(6) << v;
+        return os.str();
+    };
+    const auto pointRow = [&fmt](const Point3D& p, int r, int g, int b, const std::string& extra)
+    {
+        std::string row = fmt(p.x) + " " + fmt(p.y) + " " + fmt(p.z) + " "
+            + std::to_string(r) + " " + std::to_string(g) + " " + std::to_string(b);
+        if (!extra.empty())
+        {
+            row += " ";
+            row += extra;
+        }
+        return row;
+    };
+    const auto writeCloud = [](const fs::path& path, const std::vector<std::string>& lines)
+    {
+        std::ofstream out(path);
+        if (!out)
+        {
+            return;
+        }
+        for (const std::string& line : lines)
+        {
+            out << line << '\n';
+        }
+    };
+
+    static const int palette[12][3] = {
+        {230, 25, 75}, {60, 180, 75}, {255, 200, 20}, {0, 130, 200},
+        {245, 130, 48}, {145, 30, 180}, {70, 200, 240}, {240, 50, 230},
+        {170, 220, 40}, {250, 150, 190}, {0, 160, 160}, {200, 170, 255}
+    };
+
+    const std::vector<Line2D> segmentLines =
+        BuildGeometrySegmentLines(projected, keyIndexes, useSlopeConsistentCornerFit);
+
+    std::vector<std::string> allPointLines{ "// X Y Z R G B segment dist_to_fit smoothN" };
+    std::vector<std::string> allLineLines{ "// X Y Z R G B segment" };
+
+    const int segmentCount = static_cast<int>(keyIndexes.size()) - 1;
+    for (int seg = 0; seg < segmentCount; ++seg)
+    {
+        const int begin = std::min(keyIndexes[static_cast<std::size_t>(seg)], keyIndexes[static_cast<std::size_t>(seg + 1)]);
+        const int end = std::max(keyIndexes[static_cast<std::size_t>(seg)], keyIndexes[static_cast<std::size_t>(seg + 1)]);
+        if (begin < 0 || end >= static_cast<int>(projected.size()) || end < begin)
+        {
+            continue;
+        }
+        const int r = palette[seg % 12][0];
+        const int g = palette[seg % 12][1];
+        const int b = palette[seg % 12][2];
+
+        const Line2D line =
+            seg < static_cast<int>(segmentLines.size()) ? segmentLines[static_cast<std::size_t>(seg)] : Line2D();
+        const ScalarLine normalLine = FitSegmentNormalLine(projected, begin, end);
+        const double fallbackNormal = projected[static_cast<std::size_t>((begin + end) / 2)].smoothN;
+        const double dirLen = std::hypot(line.dirS, line.dirH);
+
+        std::vector<std::string> segPointLines{ "// X Y Z R G B dist_to_fit smoothN" };
+        std::vector<std::string> segLineLines{ "// X Y Z R G B" };
+
+        // 1) 该段拟合用到的点集，附每点到本段拟合直线的垂距 dist_to_fit。
+        for (int i = begin; i <= end; ++i)
+        {
+            const ProjectedPoint& pp = projected[static_cast<std::size_t>(i)];
+            double dist = 0.0;
+            if (line.valid && dirLen > kEpsilon)
+            {
+                const double vs = pp.s - line.sx;
+                const double vh = pp.smoothH - line.hy;
+                dist = std::abs(Cross2D(vs, vh, line.dirS, line.dirH)) / dirLen;
+            }
+            allPointLines.push_back(pointRow(pp.point, r, g, b, std::to_string(seg) + " " + fmt(dist) + " " + fmt(pp.smoothN)));
+            segPointLines.push_back(pointRow(pp.point, r, g, b, fmt(dist) + " " + fmt(pp.smoothN)));
+        }
+
+        // 2) 该段拟合出的直线，沿 s 密集采样后还原回 3D。
+        if (line.valid && dirLen > kEpsilon)
+        {
+            const double sLo = std::min(projected[static_cast<std::size_t>(begin)].s, projected[static_cast<std::size_t>(end)].s);
+            const double sHi = std::max(projected[static_cast<std::size_t>(begin)].s, projected[static_cast<std::size_t>(end)].s);
+            const double step = 0.5;
+            const bool nonVertical = std::abs(line.dirS) > 1e-6;
+            for (double s = sLo; s <= sHi + 1e-9; s += step)
+            {
+                const double h = nonVertical ? (line.hy + (s - line.sx) / line.dirS * line.dirH) : line.hy;
+                const double nv = normalLine.valid ? normalLine.ValueAt(s) : fallbackNormal;
+                const Point3D p3 = PointFromProjection(axes, s, h, nv);
+                allLineLines.push_back(pointRow(p3, r, g, b, std::to_string(seg)));
+                segLineLines.push_back(pointRow(p3, r, g, b, std::string()));
+            }
+        }
+
+        std::ostringstream tag;
+        tag << std::setw(2) << std::setfill('0') << seg;
+        writeCloud(segDir / ("seg_" + tag.str() + "_points.txt"), segPointLines);
+        writeCloud(segDir / ("seg_" + tag.str() + "_line.txt"), segLineLines);
+    }
+
+    // 3) 关键点（起点/终点/拐点）
+    std::vector<std::string> keyPointLines{ "// X Y Z R G B key_type(1=start 2=end 3=inner_corner 4=outer_corner)" };
+    for (std::size_t k = 0; k < fittedKeyPoints.size() && k < keyIndexes.size(); ++k)
+    {
+        const WeldPointType type = GeometryCornerType(projected, keyIndexes, static_cast<int>(k));
+        keyPointLines.push_back(pointRow(fittedKeyPoints[k], 255, 0, 0, std::to_string(WeldPointTypeCode(type))));
+    }
+
+    // 4) 本次拟合使用的局部坐标系
+    std::vector<std::string> axisLines{ "// role X Y Z" };
+    const auto axisRow = [&fmt](const std::string& role, const Point3D& v)
+    {
+        return role + " " + fmt(v.x) + " " + fmt(v.y) + " " + fmt(v.z);
+    };
+    axisLines.push_back(axisRow("center", axes.center));
+    axisLines.push_back(axisRow("mainAxis_s", axes.main));
+    axisLines.push_back(axisRow("sideAxis_h", axes.side));
+    axisLines.push_back(axisRow("normalAxis_n", axes.normal));
+
+    writeCloud(root / "fit_all_points.txt", allPointLines);
+    writeCloud(root / "fit_all_lines.txt", allLineLines);
+    writeCloud(root / "fit_keypoints.txt", keyPointLines);
+    writeCloud(root / "fit_axes.txt", axisLines);
+}
+
 AnalysisResult AnalyzeMeasureThenWeldPath(const std::vector<IndexedPoint3D>& inputPoints, const FilterFitParams& params)
 {
     AnalysisResult result;
@@ -2703,6 +2855,13 @@ AnalysisResult AnalyzeMeasureThenWeldPath(const std::vector<IndexedPoint3D>& inp
     {
         result.error = "could not fit corner key points.";
         return result;
+    }
+
+    if (params.exportFitDebugCloud && !params.fitDebugDir.empty())
+    {
+        ExportFitDebugClouds(
+            projected, keyIndexes, fittedKeyPoints, axes,
+            params.useSlopeConsistentCornerFit, params.fitDebugDir);
     }
 
     result.filterResult.points.reserve(projected.size());

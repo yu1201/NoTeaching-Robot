@@ -1,5 +1,6 @@
 #include "WeldProcessDialog.h"
 #include "ui_WeldProcessDialog.h"
+#include "RobotDataHelper.h"
 #include "RobotMessage.h"
 #include "WindowStyleHelper.h"
 
@@ -9,6 +10,7 @@
 #include <QBoxLayout>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QShowEvent>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -331,6 +333,7 @@ WeldProcessDialog::WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* pa
     : QDialog(parent)
     , ui(new Ui::WeldProcessDialog())
     , m_file(unitInfo)
+    , m_unitName(QString::fromUtf8(unitInfo.sUnitName.c_str()))
 {
     ui->setupUi(this);
     ApplyUnifiedWindowChrome(this);
@@ -355,6 +358,17 @@ WeldProcessDialog::WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* pa
 WeldProcessDialog::~WeldProcessDialog()
 {
     delete ui;
+}
+
+void WeldProcessDialog::showEvent(QShowEvent* event)
+{
+    QDialog::showEvent(event);
+    // 工艺数据也可在补偿界面修改（圆弧过渡/点间距/选用项）；页面缓存复用，
+    // 每次显示时无未保存编辑则重载，保证两个界面看到同一份数据。
+    if (!HasUnsavedChanges())
+    {
+        LoadToUi();
+    }
 }
 
 void WeldProcessDialog::closeEvent(QCloseEvent* event)
@@ -615,6 +629,16 @@ void WeldProcessDialog::BuildEditorUi()
     m_cornerTransitionSpeedSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "过渡速度", &m_cornerTransitionSpeedEnableCheck, "mm/min");
     m_cornerTransitionCurrentSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "过渡电流", &m_cornerTransitionCurrentEnableCheck, "A");
     m_cornerTransitionVoltageSpin = AddEnabledDoubleFieldWithUnit(cornerLayout, "过渡电压", &m_cornerTransitionVoltageEnableCheck, "V");
+    m_finalWeldStepSpin = AddDoubleFieldWithUnit(cornerLayout, "实际焊道点间距", "mm");
+    m_finalWeldStepSpin->setRange(2.0, 100.0);
+    m_finalWeldStepSpin->setValue(4.0);
+    m_weldDirectionCombo = new QComboBox(cornerPage);
+    m_weldDirectionCombo->addItem("起点到终点", 1);
+    m_weldDirectionCombo->addItem("终点到起点", -1);
+    m_weldDirectionCombo->setMinimumWidth(kSingleFieldWidth);
+    m_weldDirectionCombo->setFixedHeight(kSpinFieldHeight);
+    m_weldDirectionCombo->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::Fixed);
+    AddTwoColumnField(cornerLayout, "焊接方向", m_weldDirectionCombo);
 
     m_specialParamStack = new QStackedWidget(specialGroup);
     m_specialParamStack->addWidget(wrapPage);
@@ -1342,6 +1366,22 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     {
         m_cornerTransitionScopeCombo->setCurrentIndex(qBound(0, weld.nCornerArcTransitionApplyScope, 2));
     }
+    if (m_finalWeldStepSpin != nullptr)
+    {
+        // 老工艺还没存过点间距(<=0)时预填当前实际生效值（测量页），保存即固化进工艺。
+        m_finalWeldStepSpin->setValue(weld.dFinalWeldTrajectoryStepMm > 0.0
+            ? weld.dFinalWeldTrajectoryStepMm
+            : RobotDataHelper::ReadActiveFinalWeldStepFallbackMm(m_unitName));
+    }
+    if (m_weldDirectionCombo != nullptr)
+    {
+        // 老工艺还没存过焊接方向(0)时预填当前实际生效值（测量页），保存即固化进工艺。
+        const int direction = weld.nWeldDirection != 0
+            ? (weld.nWeldDirection < 0 ? -1 : 1)
+            : RobotDataHelper::ReadActiveWeldDirectionFallback(m_unitName);
+        const int comboIndex = m_weldDirectionCombo->findData(direction);
+        m_weldDirectionCombo->setCurrentIndex(comboIndex >= 0 ? comboIndex : 0);
+    }
 
     const auto& weaveList = m_file.GetWeaveTypeList();
     if (weld.nWeaveTypeNo >= 0 && weld.nWeaveTypeNo < static_cast<int>(weaveList.size()))
@@ -1518,6 +1558,10 @@ bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
     out.nCornerArcTransitionApplyScope = m_cornerTransitionScopeCombo != nullptr
         ? qBound(0, m_cornerTransitionScopeCombo->currentIndex(), 2)
         : 2;
+    out.dFinalWeldTrajectoryStepMm = m_finalWeldStepSpin != nullptr ? m_finalWeldStepSpin->value() : 0.0;
+    out.nWeldDirection = m_weldDirectionCombo != nullptr
+        ? (m_weldDirectionCombo->currentData().toInt() < 0 ? -1 : 1)
+        : 0;
     if (out.nCornerArcTransitionCurrentEnable != out.nCornerArcTransitionVoltageEnable)
     {
         QMessageBox::warning(
@@ -1782,6 +1826,8 @@ QString WeldProcessDialog::BuildSnapshot() const
            << QString::number(IsChecked(m_cornerTransitionCurrentEnableCheck) ? 1 : 0)
            << QString::number(IsChecked(m_cornerTransitionVoltageEnableCheck) ? 1 : 0)
            << QString::number(m_cornerTransitionScopeCombo != nullptr ? m_cornerTransitionScopeCombo->currentIndex() : 2)
+           << QString::number(m_finalWeldStepSpin != nullptr ? m_finalWeldStepSpin->value() : 0.0, 'f', 6)
+           << QString::number(m_weldDirectionCombo != nullptr ? m_weldDirectionCombo->currentData().toInt() : 0)
            << QString::number(ComboData(m_weaveTypeCombo, 0))
            << QString::number(ComboData(m_weaveShapeCombo, 6))
            << QString::number(m_weaveFrequencySpin != nullptr ? m_weaveFrequencySpin->value() : 0.0, 'f', 6)

@@ -43,7 +43,7 @@ typedef struct WeldingLine
 
 
 //定义提取波纹板点云中轨迹点信息结构体的函数
-__declspec(dllexport) TrackPointsPosition* CorrugatedSheetPointCloudExtration(Point_3D* Input_pointcloud, int Input_pointsNumber, int* TrackPointsNumber, double Z_Truncation_Value, Point_3D ScanDirection, const char* config_path);
+__declspec(dllexport) TrackPointsPosition* CorrugatedSheetPointCloudExtration(Point_3D* Input_pointcloud, int Input_pointsNumber, int* TrackPointsNumber, Point_3D& terminal, double Z_Truncation_Value, Point_3D ScanDirection, const char* config_path);
 
 
 // 定义释放三维点的函数

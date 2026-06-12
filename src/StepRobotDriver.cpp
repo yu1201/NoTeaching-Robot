@@ -82,11 +82,22 @@ namespace
 		}
 	}
 
+	// 接口模式进程级缓存：-1=未加载 0=旧接口 1=时间戳接口。状态监控线程 50ms
+	// 周期调用本函数，逐次读配置库会引入每秒 20 次 SQLite 查询与采样抖动；
+	// 管理界面切换模式时经 InvalidateStepSdkInterfaceModeCache 作废重读。
+	std::atomic<int> g_stepSdkInterfaceModeCache{ -1 };
+
 	bool StepUseTimestampSdkInterface()
 	{
 #if STEP_SDK_HAS_TIMESTAMP
-		return MeasureThenWeldRuntimeConfig::LoadStepSdkInterfaceMode()
-			== MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Timestamp;
+		int cached = g_stepSdkInterfaceModeCache.load();
+		if (cached < 0)
+		{
+			cached = (MeasureThenWeldRuntimeConfig::LoadStepSdkInterfaceMode()
+				== MeasureThenWeldRuntimeConfig::StepSdkInterfaceMode::Timestamp) ? 1 : 0;
+			g_stepSdkInterfaceModeCache.store(cached);
+		}
+		return cached == 1;
 #else
 		return false;
 #endif
@@ -1298,7 +1309,16 @@ bool STEPRobotCtrl::InitSocket(const char* ip, u_short Port, bool ifRecord)
 		}
 	}
 	m_bSocketConnected = true;
+	// 新连接会话：时间轴锁定重置，由首个状态样本重新决定。
+	m_nTimestampAxisLatch.store(0);
+	m_lastValidRobotMs.store(0);
+	m_bTimestampFallbackLogged.store(false);
 	return true;
+}
+
+void STEPRobotCtrl::InvalidateStepSdkInterfaceModeCache()
+{
+	g_stepSdkInterfaceModeCache.store(-1);
 }
 
 bool STEPRobotCtrl::CloseSocket()
@@ -1426,9 +1446,39 @@ T_ROBOT_COORS STEPRobotCtrl::GetCurrentPosPassive(long long* pRobotMs, long long
 	const TimestampAddCartpos timestampedPos = m_pSTEPRobotClient->getTimestamp();
 	const long long pcRecvMs = StepRobotSteadyNowMs();
 	const unsigned long long robotTimestampMs = static_cast<unsigned long long>(timestampedPos.m_TimeStamp_ms);
-	const long long robotMs = robotTimestampMs > 0
-		? static_cast<long long>(robotTimestampMs)
-		: pcRecvMs;
+
+	// 时间轴会话锁定：首个样本决定本次连接走机器人时间戳还是 PC 接收时间，
+	// 之后不再切换——两种纪元完全不同，混进同一扫描序列会破坏时间插值。
+	int axisLatch = m_nTimestampAxisLatch.load();
+	if (axisLatch == 0)
+	{
+		axisLatch = robotTimestampMs > 0 ? 1 : 2;
+		m_nTimestampAxisLatch.store(axisLatch);
+		if (axisLatch == 2 && !m_bTimestampFallbackLogged.exchange(true) && m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"STEP 控制器未提供时间戳（getTimestamp 返回 0），本次连接状态时间轴回退 PC 接收时间。");
+		}
+	}
+	long long robotMs;
+	if (axisLatch == 1)
+	{
+		if (robotTimestampMs > 0)
+		{
+			robotMs = static_cast<long long>(robotTimestampMs);
+			m_lastValidRobotMs.store(robotMs);
+		}
+		else
+		{
+			// 已锁定机器人时间轴时偶发 0 值：沿用上一有效时间戳（时间冻结一帧），
+			// 不回退 PC 纪元。
+			robotMs = m_lastValidRobotMs.load();
+		}
+	}
+	else
+	{
+		robotMs = pcRecvMs;
+	}
 
 	if (pRobotMs != nullptr)
 	{

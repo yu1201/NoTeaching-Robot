@@ -1,10 +1,13 @@
-#pragma once
+﻿#pragma once
 
 #include "ContralUnit.h"
+#include "MeasureThenWeldService.h"
 
 #include <QDialog>
 #include <QString>
 #include <QVector>
+
+#include <vector>
 
 class QButtonGroup;
 class QCheckBox;
@@ -15,8 +18,13 @@ class QLabel;
 class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
+class QAbstractButton;
 class QPushButton;
 class QWidget;
+class QTimer;
+class QSplitter;
+
+namespace pcview { class PointCloud3DView; }
 
 class WeldSeamCompDialog : public QDialog
 {
@@ -65,6 +73,7 @@ public:
 
 private:
     void closeEvent(QCloseEvent* event) override;
+    void showEvent(QShowEvent* event) override;
     void BuildUi();
     void LoadRobotList();
     void LoadCurrentParam();
@@ -104,6 +113,26 @@ private:
     QString CurrentSeamParamPath() const;
     int CurrentRowCount() const;
     int CurrentTypeIndex() const;
+
+    // 补偿前 / 补偿后 焊道可视化对比
+    QWidget* CreateCompPreviewPanel();
+    QWidget* CreateWeldProcessPanel();
+    void LoadWeldProcessArea();
+    void ApplySelectedProcessToEditors();
+    bool SaveWeldProcessArea(QString& error);
+    void ChooseCompPreviewDirectory();
+    void SetCompPreviewDirectory(const QString& dir);
+    void RefreshCompPreviewScanLine();
+    void RebuildCompPreviewBaseline();
+    bool ExecuteCompPreviewRebuild(bool showErrorBox);
+    void AutoSelectLatestCompPreviewDirectory();
+    void ScheduleCompPreview();
+    void RecomputeCompPreview();
+    void ApplyCompPreviewLayerVisibility();
+    MeasureThenWeldService::CompPreviewEditValues CollectCompPreviewEditValues() const;
+    MeasureThenWeldService::CompPreviewEditValues CollectSavedPoseCompEdits() const;
+    void BackupOldCompFiles(const QString& backupRoot, QString& summary) const;
+    int CurrentRobotType() const;
 
 private:
     ContralUnit* m_pContralUnit = nullptr;
@@ -146,4 +175,40 @@ private:
     int m_currentTypeIndex = 0;
     bool m_bLoading = false;
     QString m_cleanSnapshot;
+
+    // 补偿前 / 补偿后 焊道可视化对比
+    pcview::PointCloud3DView* m_pCompPreviewView = nullptr;
+    QLineEdit* m_pCompPreviewDirEdit = nullptr;
+    QLabel* m_pCompPreviewInfoLabel = nullptr;
+    QTimer* m_pCompPreviewTimer = nullptr;
+    MeasureThenWeldService m_compPreviewService;
+    QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewBaseline;
+    QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewOriginal;
+    QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewRaw;
+    QVector<MeasureThenWeldService::CompPreviewArrow> m_compPreviewArrows;  // 全量箭头缓存，按开关过滤显示
+    QVector<PoseCompRow> m_savedPoseRows;   // 加载/保存后的姿态补偿快照（姿态补偿阶段按 delta 计算）
+    QString m_compPreviewDir;
+    QString m_compPreviewBaselineDir;
+    // 焊接方向（工艺值优先、测量页旧值回退，1=起点到终点 / -1=终点到起点），用于预览方向箭头。
+    int m_compPreviewWeldDirection = 1;
+    // 扫描轨迹起止点 XY（当前启用组），方向箭头放在扫描位置那一侧（与焊接方向无关）。
+    bool m_compPreviewScanLineValid = false;
+    QPointF m_compPreviewScanStartXY;
+    QPointF m_compPreviewScanEndXY;
+    // 防止"载入目录→缺方法文件→自动重算→重新载入"递归。
+    bool m_bAutoRebuildingCompPreview = false;
+    // 六阶段图层开关：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡 5=实际焊道
+    QAbstractButton* m_pStageToggles[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+
+    // 工艺区域（圆弧过渡 + 实际焊道点间距 + 焊接方向，编辑实时联动预览、保存落盘）
+    QComboBox* m_pProcessCombo = nullptr;
+    QCheckBox* m_pArcEnableCheck = nullptr;
+    QDoubleSpinBox* m_pArcRadiusSpin = nullptr;
+    QDoubleSpinBox* m_pFinalStepSpin = nullptr;
+    QComboBox* m_pWeldDirectionCombo = nullptr;
+    QLabel* m_pProcessHintLabel = nullptr;
+    std::vector<T_WELD_PARA> m_weldProcessList;
+    int m_weldProcessSelectedIndex = -1;
+    bool m_weldProcessLoaded = false;
+    bool m_bLoadingProcessArea = false;
 };

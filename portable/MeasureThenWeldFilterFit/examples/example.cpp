@@ -63,6 +63,11 @@ int main(int argc, char** argv)
     // 主程序里的“直线拟合排除圆弧段”开关。需要避免圆弧/过渡点拉偏直线交点时打开：
     // params.useSlopeConsistentCornerFit = true;
 
+    const std::string prefix = argv[2];
+    // 导出每段拟合“用到的点集”和“拟合出的直线”到 <prefix>_FitDebug 目录，便于拖入 CloudCompare 核对拟合。
+    params.exportFitDebugCloud = true;
+    params.fitDebugDir = prefix + "_FitDebug";
+
     // 这里对应先测后焊的 PreservePath + 拐点生成：
     // 先做局部去噪和几何关键点拟合，再把起点/拐点/终点按 2 mm 展开成焊接路径。
     const mtw_filter_fit::AnalysisResult analysis =
@@ -73,7 +78,6 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    const std::string prefix = argv[2];
     SaveLines(prefix + "_PreservePath_2mm.txt",
         mtw_filter_fit::BuildFilterOutputLines(analysis.filterResult));
     SaveLines(prefix + "_Classified.txt",

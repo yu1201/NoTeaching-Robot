@@ -1,13 +1,13 @@
 #pragma once
 
 #include "PointCloudProcessingConfig.h"
-#include "RobotCalculation.h"
 
 #include <QDialog>
 
 class QComboBox;
 class QDoubleSpinBox;
 class QCheckBox;
+class QGroupBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
@@ -24,20 +24,14 @@ private:
     void ApplyStyle();
     void LoadSettings();
     bool SaveSettings(QString* error = nullptr) const;
-    void BrowseInputFile();
-    void BrowseOutputFile();
     void BrowseExternalLibraryDir();
     void BrowseExternalConfigFile();
-    void UpdateSuggestedOutputPath();
     void LoadExternalAlgorithmConfig();
     void SaveExternalAlgorithmConfig(QString* error = nullptr) const;
-    void RunFilter();
+    void ApplyMethodEnableState();
     void AppendLog(const QString& text);
     PointCloudProcessingConfig::Mode CurrentProcessingMode() const;
     PointCloudProcessingConfig::FeaturePointStrategy CurrentFeaturePointStrategy() const;
-    QString CurrentProcessingModeText() const;
-    double CurrentOutputStep() const;
-    RobotCalculation::LowerWeldFilterParams CurrentParams() const;
 
 private:
     QComboBox* m_pProcessingModeCombo = nullptr;
@@ -46,8 +40,7 @@ private:
     QLineEdit* m_pExternalConfigPathEdit = nullptr;
     QDoubleSpinBox* m_pExternalZTruncationSpin = nullptr;
     QDoubleSpinBox* m_pExternalResampleStepSpin = nullptr;
-    QCheckBox* m_pExternalFallbackCheck = nullptr;
-    QComboBox* m_pCloudAxisCombo = nullptr;
+    QCheckBox* m_pSdkWeldedStartCheck = nullptr;
     QCheckBox* m_pCloudUprightCheck = nullptr;
     QDoubleSpinBox* m_pCloudPlateThicknessSpin = nullptr;
     QDoubleSpinBox* m_pCloudRemoveFloorZSpin = nullptr;
@@ -63,11 +56,21 @@ private:
     QSpinBox* m_pCloudDiscreteValueSpin = nullptr;
     QSpinBox* m_pCloudDilateValueSpin = nullptr;
     QSpinBox* m_pCloudErodeValueSpin = nullptr;
-    QLineEdit* m_pInputPathEdit = nullptr;
-    QLineEdit* m_pOutputPathEdit = nullptr;
+    QDoubleSpinBox* m_pCloudLinesDisThresholdSpin = nullptr;
+    QDoubleSpinBox* m_pCloudLineLengthSpin = nullptr;
+    QGroupBox* m_pSdkParamGroup = nullptr;
+    QGroupBox* m_pSdkInnerGroup = nullptr;
+    QGroupBox* m_pProjectionGroup = nullptr;
+    QDoubleSpinBox* m_pProjStationWindowSpin = nullptr;
+    QDoubleSpinBox* m_pProjTransverseWindowSpin = nullptr;
+    QDoubleSpinBox* m_pProjZBandBelowSpin = nullptr;
+    QDoubleSpinBox* m_pProjZBandAboveSpin = nullptr;
+    QDoubleSpinBox* m_pProjLayerLowSpin = nullptr;
+    QDoubleSpinBox* m_pProjLayerHighSpin = nullptr;
+    QSpinBox* m_pProjMaxCandidateSpin = nullptr;
+    QSpinBox* m_pProjSmoothRadiusSpin = nullptr;
     QComboBox* m_pFeaturePointStrategyCombo = nullptr;
     QComboBox* m_pAxisCombo = nullptr;
-    QComboBox* m_pFitModeCombo = nullptr;
     QDoubleSpinBox* m_pZThresholdSpin = nullptr;
     QDoubleSpinBox* m_pZJumpThresholdSpin = nullptr;
     QDoubleSpinBox* m_pZContinuityThresholdSpin = nullptr;
@@ -81,6 +84,26 @@ private:
     QSpinBox* m_pMinPointSpin = nullptr;
     QSpinBox* m_pSmoothRadiusSpin = nullptr;
     QCheckBox* m_pSlopeConsistentCornerFitCheck = nullptr;
-    QPushButton* m_pRunButton = nullptr;
+    QCheckBox* m_pExportFitDebugCloudCheck = nullptr;
+    QCheckBox* m_pValidationCoverageCheck = nullptr;
+    QSpinBox* m_pValidationMinFinitePointSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMinProjectedSpanSpin = nullptr;
+    QCheckBox* m_pValidationContinuityCheck = nullptr;
+    QDoubleSpinBox* m_pValidationMinStationCoverageSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMinLongestContinuousSpin = nullptr;
+    QCheckBox* m_pValidationDenoiseRatioCheck = nullptr;
+    QDoubleSpinBox* m_pValidationMaxRejectedRatioSpin = nullptr;
+    QCheckBox* m_pValidationResidualCheck = nullptr;
+    QDoubleSpinBox* m_pValidationMaxMedianResidualSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMaxP95ResidualSpin = nullptr;
+    QDoubleSpinBox* m_pValidationResidualInlierThresholdSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMinResidualInlierRatioSpin = nullptr;
+    QCheckBox* m_pValidationKeyPointCheck = nullptr;
+    QSpinBox* m_pValidationMinKeyPointSpin = nullptr;
+    QSpinBox* m_pValidationMinCornerSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMinSegmentLengthSpin = nullptr;
+    QCheckBox* m_pValidationOutputCheck = nullptr;
+    QSpinBox* m_pValidationMinOutputPointSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMinOutputLengthRatioSpin = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
 };

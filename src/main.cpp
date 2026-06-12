@@ -65,10 +65,11 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName("NoTeaching-Robot");
-    app.setApplicationVersion("2026.06.06.0106");
+    app.setApplicationVersion("2026.06.11.1711");
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();
+    InstallGlobalWheelGuard(app);
     SetWorkingDirectoryToProjectRoot();
     app.setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
 

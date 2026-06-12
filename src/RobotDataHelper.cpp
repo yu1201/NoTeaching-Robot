@@ -15,6 +15,7 @@
 #include <QStringConverter>
 #include <QTextStream>
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -770,6 +771,44 @@ QString RobotDataHelper::MeasureWeldCurrentScanSectionName(const QString& robotN
 QString RobotDataHelper::MeasureWeldCurrentWeldSectionName(const QString& robotName, QString* error)
 {
     return MeasureWeldWeldSectionName(MeasureWeldCurrentGroupIndex(robotName, error));
+}
+
+double RobotDataHelper::ReadActiveFinalWeldStepFallbackMm(const QString& robotName)
+{
+    constexpr double kDefaultStepMm = 4.0;
+    if (robotName.trimmed().isEmpty())
+    {
+        return kDefaultStepMm;
+    }
+    const QString section = MeasureWeldCurrentWeldSectionName(robotName);
+    if (section.isEmpty())
+    {
+        return kDefaultStepMm;
+    }
+    const QMap<QString, QString> values =
+        ConfigDatabase::ReadIniSection(MeasureWeldParamPath(robotName), section);
+    bool parsed = false;
+    const double stepMm = values.value(QStringLiteral("FinalWeldTrajectoryStepMm")).toDouble(&parsed);
+    return (parsed && std::isfinite(stepMm) && stepMm > 0.0)
+        ? std::clamp(stepMm, 2.0, 100.0)
+        : kDefaultStepMm;
+}
+
+int RobotDataHelper::ReadActiveWeldDirectionFallback(const QString& robotName)
+{
+    // 测量焊接参数里的旧 WeldDirection 值：工艺未设置焊接方向时的回退（默认起点到终点）。
+    // 读法与先测后焊 LoadPresetParam 一致，保证回退值与管线生效值相同。
+    int direction = 1;
+    if (robotName.trimmed().isEmpty())
+    {
+        return 1;
+    }
+    COPini ini;
+    if (ini.SetFileName(MeasureWeldParamPath(robotName).toUtf8().constData()))
+    {
+        ini.ReadString(false, "WeldDirection", &direction);
+    }
+    return direction < 0 ? -1 : 1;
 }
 
 // ===== 底层 ini 读写 =====

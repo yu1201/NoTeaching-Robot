@@ -33,6 +33,9 @@ public:
     explicit WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* parent = nullptr);
     ~WeldProcessDialog();
 
+protected:
+    void showEvent(QShowEvent* event) override;
+
 private slots:
     void ReloadData();
     bool SaveData();
@@ -149,6 +152,9 @@ private:
     QCheckBox* m_cornerTransitionCurrentEnableCheck = nullptr;
     QCheckBox* m_cornerTransitionVoltageEnableCheck = nullptr;
     QComboBox* m_cornerTransitionScopeCombo = nullptr;
+    QDoubleSpinBox* m_finalWeldStepSpin = nullptr;  // 实际焊道点间距(mm)
+    QComboBox* m_weldDirectionCombo = nullptr;      // 焊接方向(1=起点到终点/-1=终点到起点)
+    QString m_unitName;
 
     QComboBox* m_weaveTypeCombo = nullptr;
     QComboBox* m_weaveShapeCombo = nullptr;

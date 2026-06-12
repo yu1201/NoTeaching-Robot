@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 
+class QApplication;
 class QScrollArea;
 class QWidget;
 
@@ -43,6 +44,10 @@ void ApplyResponsivePageDefaults(QWidget* widget);
 
 // 数字输入框默认只保留编辑框，去掉上下调节按钮，减少小屏显示挤压。
 void ApplyEditorOnlySpinBoxes(QWidget* widget);
+
+// 全局禁用数字框/下拉框的鼠标滚轮改值：滚动页面时悬停在编辑框上会误改参数。
+// main 里安装一次全程序生效；下拉框弹出列表内的滚动不受影响。
+void InstallGlobalWheelGuard(QApplication& app);
 
 // 窗口显示或最大化后，补刷新 Windows 原生标题栏颜色。
 void RefreshUnifiedWindowTitleBar(QWidget* widget);

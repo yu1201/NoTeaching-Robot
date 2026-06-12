@@ -1,9 +1,6 @@
 #include "LaserWeldFilterDialog.h"
 
-#include "ConfigDatabase.h"
-#include "PointCloudExtractionProcessor.h"
 #include "PointCloudProcessingConfig.h"
-#include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
 
 #include <QCheckBox>
@@ -57,21 +54,7 @@ struct PlainIniValueUpdate
     QString value;
 };
 
-constexpr auto LASER_FILTER_SETTINGS_MODULE = "LaserWeldFilterDialog";
 
-QString BuildSuggestedOutputPath(const QString& inputPath, double step)
-{
-    if (inputPath.trimmed().isEmpty())
-    {
-        return QString();
-    }
-
-    const QFileInfo info(inputPath);
-    const QString baseName = info.completeBaseName();
-    const QString suffix = info.suffix().isEmpty() ? "txt" : info.suffix();
-    const QString stepText = QString::number(step, 'f', step == std::floor(step) ? 0 : 1);
-    return info.dir().filePath(QString("%1_Filtered_%2mm.%3").arg(baseName, stepText, suffix));
-}
 
 #ifdef Q_OS_WIN
 QString DecodeWindowsCodePage(const QByteArray& bytes, UINT codePage, DWORD flags, bool* ok = nullptr)
@@ -482,7 +465,6 @@ LaserWeldFilterDialog::LaserWeldFilterDialog(QWidget* parent)
     BuildUi();
     ApplyStyle();
     LoadSettings();
-    UpdateSuggestedOutputPath();
     connect(this, &QDialog::finished, this, [this](int) { SaveSettings(); });
 }
 
@@ -494,7 +476,7 @@ void LaserWeldFilterDialog::BuildUi()
 
     QLabel* titleLabel = new QLabel("精测点云处理");
     titleLabel->setObjectName("TitleLabel");
-    QLabel* hintLabel = new QLabel("管理预设参数扫描后的局部精测点云处理方式；旧版使用目标轨迹点，新版使用局部完整点云并调用外部精测库。");
+    QLabel* hintLabel = new QLabel("管理预设参数扫描后的局部精测处理方式：四种方法分别使用 SDK 拐点、SDK 基础焊道、完整点云或相机特征点轨迹。");
     hintLabel->setObjectName("HintLabel");
     outerLayout->addWidget(titleLabel);
     outerLayout->addWidget(hintLabel);
@@ -519,9 +501,13 @@ void LaserWeldFilterDialog::BuildUi()
     QVBoxLayout* featurePointLayout = new QVBoxLayout(featurePointTab);
     featurePointLayout->setContentsMargins(10, 10, 10, 10);
     featurePointLayout->setSpacing(12);
+    QWidget* validationTab = new QWidget(m_pAlgorithmTabWidget);
+    QVBoxLayout* validationLayout = new QVBoxLayout(validationTab);
+    validationLayout->setContentsMargins(10, 10, 10, 10);
+    validationLayout->setSpacing(12);
 
-    QGroupBox* processingGroup = new QGroupBox("点云算法调用参数");
-    QGridLayout* processingLayout = new QGridLayout(processingGroup);
+    m_pSdkParamGroup = new QGroupBox("SDK 点云参数");
+    QGridLayout* processingLayout = new QGridLayout(m_pSdkParamGroup);
     m_pExternalLibraryDirEdit = new QLineEdit();
     m_pExternalConfigPathEdit = new QLineEdit();
     PrepareWidePathEdit(m_pExternalLibraryDirEdit);
@@ -534,21 +520,17 @@ void LaserWeldFilterDialog::BuildUi()
     m_pExternalResampleStepSpin->setRange(0.1, 100.0);
     m_pExternalResampleStepSpin->setDecimals(3);
     m_pExternalResampleStepSpin->setSingleStep(0.5);
-    m_pExternalFallbackCheck = new QCheckBox("新版失败时回退旧版");
-    m_pCloudAxisCombo = new QComboBox();
-    m_pCloudAxisCombo->addItem("按 Y 方向判断平台/上坡/下坡", static_cast<int>(RobotCalculation::SampleAxis::AxisY));
-    m_pCloudAxisCombo->addItem("按 X 方向判断平台/上坡/下坡", static_cast<int>(RobotCalculation::SampleAxis::AxisX));
+    m_pSdkWeldedStartCheck = new QCheckBox("使用已焊起点截断焊道");
+    m_pSdkWeldedStartCheck->setToolTip("开启后，SDK 检测到工件上已焊段时返回新焊接的起点，\n焊道从该点截断只焊剩余部分；未检测到已焊段时不截断。\n仅 SDK 两种方法生效。");
     QPushButton* browseLibraryButton = new QPushButton("选择库目录");
     QPushButton* browseExternalConfigButton = new QPushButton("选择配置");
     processingLayout->setHorizontalSpacing(12);
     processingLayout->setVerticalSpacing(10);
-    processingLayout->addWidget(new QLabel("属性主轴"), 0, 0);
-    processingLayout->addWidget(m_pCloudAxisCombo, 0, 1);
-    processingLayout->addWidget(m_pExternalFallbackCheck, 0, 2, 1, 3);
-    processingLayout->addWidget(new QLabel("Z截断值"), 1, 0);
-    processingLayout->addWidget(CreateUnitEditor(m_pExternalZTruncationSpin, "mm"), 1, 1);
-    processingLayout->addWidget(new QLabel("输出步长"), 1, 2);
-    processingLayout->addWidget(CreateUnitEditor(m_pExternalResampleStepSpin, "mm"), 1, 3);
+    processingLayout->addWidget(new QLabel("Z截断值"), 0, 0);
+    processingLayout->addWidget(CreateUnitEditor(m_pExternalZTruncationSpin, "mm"), 0, 1);
+    processingLayout->addWidget(new QLabel("输出步长"), 0, 2);
+    processingLayout->addWidget(CreateUnitEditor(m_pExternalResampleStepSpin, "mm"), 0, 3);
+    processingLayout->addWidget(m_pSdkWeldedStartCheck, 1, 0, 1, 4);
     processingLayout->addWidget(new QLabel("库目录"), 2, 0);
     processingLayout->addWidget(m_pExternalLibraryDirEdit, 2, 1, 1, 3);
     processingLayout->addWidget(browseLibraryButton, 2, 4);
@@ -559,9 +541,10 @@ void LaserWeldFilterDialog::BuildUi()
     processingLayout->setColumnStretch(3, 1);
     processingLayout->setColumnMinimumWidth(1, 320);
     processingLayout->setColumnMinimumWidth(3, 320);
-    pointCloudLayout->addWidget(processingGroup);
+    pointCloudLayout->addWidget(m_pSdkParamGroup);
 
-    QGroupBox* cloudInnerGroup = new QGroupBox("点云算法内部参数");
+    m_pSdkInnerGroup = new QGroupBox("SDK 算法内部参数");
+    QGroupBox* cloudInnerGroup = m_pSdkInnerGroup;
     QGridLayout* cloudInnerLayout = new QGridLayout(cloudInnerGroup);
     cloudInnerLayout->setHorizontalSpacing(12);
     cloudInnerLayout->setVerticalSpacing(10);
@@ -599,6 +582,12 @@ void LaserWeldFilterDialog::BuildUi()
     m_pCloudDilateValueSpin->setRange(0, 9999);
     m_pCloudErodeValueSpin = new QSpinBox();
     m_pCloudErodeValueSpin->setRange(0, 9999);
+    m_pCloudLinesDisThresholdSpin = new QDoubleSpinBox();
+    m_pCloudLinesDisThresholdSpin->setRange(0.0, 99999.0);
+    m_pCloudLinesDisThresholdSpin->setDecimals(3);
+    m_pCloudLineLengthSpin = new QDoubleSpinBox();
+    m_pCloudLineLengthSpin->setRange(0.0, 9999.0);
+    m_pCloudLineLengthSpin->setDecimals(3);
 
     cloudInnerLayout->addWidget(m_pCloudUprightCheck, 0, 0, 1, 2);
     cloudInnerLayout->addWidget(new QLabel("半板厚"), 0, 2);
@@ -627,11 +616,84 @@ void LaserWeldFilterDialog::BuildUi()
     cloudInnerLayout->addWidget(m_pCloudDilateValueSpin, 7, 1);
     cloudInnerLayout->addWidget(new QLabel("腐蚀核"), 7, 2);
     cloudInnerLayout->addWidget(m_pCloudErodeValueSpin, 7, 3);
+    cloudInnerLayout->addWidget(new QLabel("直线断头距离"), 8, 0);
+    cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudLinesDisThresholdSpin, "mm"), 8, 1);
+    cloudInnerLayout->addWidget(new QLabel("直线最小长度"), 8, 2);
+    cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudLineLengthSpin, "mm"), 8, 3);
     cloudInnerLayout->setColumnStretch(1, 1);
     cloudInnerLayout->setColumnStretch(3, 1);
     cloudInnerLayout->setColumnMinimumWidth(1, 300);
     cloudInnerLayout->setColumnMinimumWidth(3, 300);
     pointCloudLayout->addWidget(cloudInnerGroup);
+
+    // 点云投影提取参数：方法③（点云算法+拟合）的"完整点云→下层焊道轨迹"提取阶段专用。
+    // 数值 0（显示"自动"）表示按滤波拟合参数派生，与原内置行为一致。
+    m_pProjectionGroup = new QGroupBox("点云投影提取参数（点云算法+拟合）");
+    QGridLayout* projectionLayout = new QGridLayout(m_pProjectionGroup);
+    projectionLayout->setHorizontalSpacing(12);
+    projectionLayout->setVerticalSpacing(10);
+    m_pProjStationWindowSpin = new QDoubleSpinBox();
+    m_pProjStationWindowSpin->setRange(0.0, 9999.0);
+    m_pProjStationWindowSpin->setDecimals(3);
+    m_pProjStationWindowSpin->setSingleStep(0.5);
+    m_pProjStationWindowSpin->setSpecialValueText("自动");
+    m_pProjStationWindowSpin->setToolTip("沿焊缝方向取候选点的窗口半宽；自动=max(2.5, 输出步长×1.5)。");
+    m_pProjTransverseWindowSpin = new QDoubleSpinBox();
+    m_pProjTransverseWindowSpin->setRange(0.0, 9999.0);
+    m_pProjTransverseWindowSpin->setDecimals(3);
+    m_pProjTransverseWindowSpin->setSingleStep(1.0);
+    m_pProjTransverseWindowSpin->setSpecialValueText("自动");
+    m_pProjTransverseWindowSpin->setToolTip("垂直焊缝方向取候选点的窗口半宽；自动=max(10, 搜索窗口×1.5)。");
+    m_pProjZBandBelowSpin = new QDoubleSpinBox();
+    m_pProjZBandBelowSpin->setRange(0.0, 9999.0);
+    m_pProjZBandBelowSpin->setDecimals(3);
+    m_pProjZBandBelowSpin->setSingleStep(1.0);
+    m_pProjZBandBelowSpin->setSpecialValueText("自动");
+    m_pProjZBandBelowSpin->setToolTip("种子轨迹点下方纳入候选的高度范围；自动=max(14, Z连续阈值×4)。");
+    m_pProjZBandAboveSpin = new QDoubleSpinBox();
+    m_pProjZBandAboveSpin->setRange(0.0, 9999.0);
+    m_pProjZBandAboveSpin->setDecimals(3);
+    m_pProjZBandAboveSpin->setSingleStep(1.0);
+    m_pProjZBandAboveSpin->setSpecialValueText("自动");
+    m_pProjZBandAboveSpin->setToolTip("种子轨迹点上方纳入候选的高度范围；自动=max(12, Z突变阈值×2.5)。");
+    m_pProjLayerLowSpin = new QDoubleSpinBox();
+    m_pProjLayerLowSpin->setRange(0.0, 100.0);
+    m_pProjLayerLowSpin->setDecimals(1);
+    m_pProjLayerLowSpin->setSingleStep(5.0);
+    m_pProjLayerLowSpin->setSuffix("%");
+    m_pProjLayerLowSpin->setToolTip("候选点按 Z 排序后取作底板层的分位下界（默认 35%）。");
+    m_pProjLayerHighSpin = new QDoubleSpinBox();
+    m_pProjLayerHighSpin->setRange(0.0, 100.0);
+    m_pProjLayerHighSpin->setDecimals(1);
+    m_pProjLayerHighSpin->setSingleStep(5.0);
+    m_pProjLayerHighSpin->setSuffix("%");
+    m_pProjLayerHighSpin->setToolTip("候选点按 Z 排序后取作底板层的分位上界（默认 50%）。");
+    m_pProjMaxCandidateSpin = new QSpinBox();
+    m_pProjMaxCandidateSpin->setRange(1, 100000);
+    m_pProjMaxCandidateSpin->setToolTip("每个种子点最多保留的底板候选点数（默认 160）。");
+    m_pProjSmoothRadiusSpin = new QSpinBox();
+    m_pProjSmoothRadiusSpin->setRange(0, 999);
+    m_pProjSmoothRadiusSpin->setSpecialValueText("自动");
+    m_pProjSmoothRadiusSpin->setToolTip("投影轮廓 Z 的中值平滑半径；自动=滤波平滑半径夹到 1~4。");
+    projectionLayout->addWidget(new QLabel("站位窗口"), 0, 0);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjStationWindowSpin, "mm"), 0, 1);
+    projectionLayout->addWidget(new QLabel("横向窗口"), 0, 2);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjTransverseWindowSpin, "mm"), 0, 3);
+    projectionLayout->addWidget(new QLabel("种子下方Z带"), 1, 0);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjZBandBelowSpin, "mm"), 1, 1);
+    projectionLayout->addWidget(new QLabel("种子上方Z带"), 1, 2);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjZBandAboveSpin, "mm"), 1, 3);
+    projectionLayout->addWidget(new QLabel("底板层位下界"), 2, 0);
+    projectionLayout->addWidget(m_pProjLayerLowSpin, 2, 1);
+    projectionLayout->addWidget(new QLabel("底板层位上界"), 2, 2);
+    projectionLayout->addWidget(m_pProjLayerHighSpin, 2, 3);
+    projectionLayout->addWidget(new QLabel("每种子候选上限"), 3, 0);
+    projectionLayout->addWidget(m_pProjMaxCandidateSpin, 3, 1);
+    projectionLayout->addWidget(new QLabel("投影平滑半径"), 3, 2);
+    projectionLayout->addWidget(m_pProjSmoothRadiusSpin, 3, 3);
+    projectionLayout->setColumnStretch(1, 1);
+    projectionLayout->setColumnStretch(3, 1);
+    pointCloudLayout->addWidget(m_pProjectionGroup);
     pointCloudLayout->addStretch(1);
 
     QGroupBox* methodGroup = new QGroupBox("处理方法选择");
@@ -639,42 +701,66 @@ void LaserWeldFilterDialog::BuildUi()
     methodLayout->setHorizontalSpacing(12);
     methodLayout->setVerticalSpacing(8);
     m_pProcessingModeCombo = new QComboBox();
-    m_pProcessingModeCombo->addItem("点云算法", static_cast<int>(PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet));
-    m_pProcessingModeCombo->addItem("特征点算法", static_cast<int>(PointCloudProcessingConfig::Mode::LegacyLaserPath));
-    QLabel* methodHintLabel = new QLabel("点云算法调用完整局部点云和外部 DLL；特征点算法使用旧版目标点/特征点处理。");
+    const PointCloudProcessingConfig::Mode kMethodOrder[4] = {
+        PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet,
+        PointCloudProcessingConfig::Mode::SdkBaseWeldFit,
+        PointCloudProcessingConfig::Mode::CloudFit,
+        PointCloudProcessingConfig::Mode::LegacyLaserPath
+    };
+    for (PointCloudProcessingConfig::Mode method : kMethodOrder)
+    {
+        m_pProcessingModeCombo->addItem(
+            PointCloudProcessingConfig::ModeDisplayName(method), static_cast<int>(method));
+    }
+    // 采样主轴对所有方法生效（①用于段类判定方向，②③④用于采样与段类），放方法组恒可用。
+    m_pAxisCombo = new QComboBox();
+    m_pAxisCombo->addItem("自动推断（按扫描方向）", static_cast<int>(PointCloudProcessingConfig::SampleAxisMode::Auto));
+    m_pAxisCombo->addItem("按 X 方向采样/判段", static_cast<int>(PointCloudProcessingConfig::SampleAxisMode::AxisX));
+    m_pAxisCombo->addItem("按 Y 方向采样/判段", static_cast<int>(PointCloudProcessingConfig::SampleAxisMode::AxisY));
+    m_pAxisCombo->setToolTip("决定轨迹采样与平台/上坡/下坡段类判定的方向轴，对四种方法都生效；默认按扫描起止点方向自动推断。");
+    QLabel* methodHintLabel = new QLabel(
+        "SDK全处理：SDK拐点直接使用；SDK+拟合：SDK基础焊道再拟合；点云+拟合：完整点云投影提取下层轨迹再拟合；特征点+拟合：相机目标点轨迹拟合。处理失败直接报错，不回退其他方法。");
     methodHintLabel->setWordWrap(true);
     methodLayout->addWidget(new QLabel("当前方法"), 0, 0);
     methodLayout->addWidget(m_pProcessingModeCombo, 0, 1);
-    methodLayout->addWidget(methodHintLabel, 0, 2);
+    methodLayout->addWidget(new QLabel("采样主轴"), 1, 0);
+    methodLayout->addWidget(m_pAxisCombo, 1, 1);
+    methodLayout->addWidget(methodHintLabel, 2, 0, 1, 3);
     methodLayout->setColumnStretch(2, 1);
     rootLayout->addWidget(methodGroup);
 
-    QGroupBox* fileGroup = new QGroupBox("单文件测试");
-    QGridLayout* fileLayout = new QGridLayout(fileGroup);
-    m_pInputPathEdit = new QLineEdit();
-    m_pOutputPathEdit = new QLineEdit();
-    QPushButton* browseInputButton = new QPushButton("选择输入文件");
-    QPushButton* browseOutputButton = new QPushButton("选择输出文件");
-    fileLayout->addWidget(new QLabel("输入局部点云"), 0, 0);
-    fileLayout->addWidget(m_pInputPathEdit, 0, 1);
-    fileLayout->addWidget(browseInputButton, 0, 2);
-    fileLayout->addWidget(new QLabel("输出轨迹文件"), 1, 0);
-    fileLayout->addWidget(m_pOutputPathEdit, 1, 1);
-    fileLayout->addWidget(browseOutputButton, 1, 2);
-    fileLayout->setColumnStretch(1, 1);
-    rootLayout->addWidget(fileGroup);
-
-    QGroupBox* paramGroup = new QGroupBox("特征点算法参数");
+    QGroupBox* paramGroup = new QGroupBox("滤波拟合参数");
     QGridLayout* paramLayout = new QGridLayout(paramGroup);
-    m_pAxisCombo = new QComboBox();
-    m_pAxisCombo->addItem("按 Y 方向每隔固定距离采样", static_cast<int>(RobotCalculation::SampleAxis::AxisY));
-    m_pAxisCombo->addItem("按 X 方向每隔固定距离采样", static_cast<int>(RobotCalculation::SampleAxis::AxisX));
+    // 去噪/分段参数属于程序滤波链，对走滤波拟合的方法（②③④）统一生效。
+    m_pZThresholdSpin = new QDoubleSpinBox();
+    m_pZThresholdSpin->setRange(-9999.0, 9999.0);
+    m_pZThresholdSpin->setDecimals(3);
+    m_pZThresholdSpin->setSingleStep(1.0);
+    m_pZThresholdSpin->setValue(-230.0);
 
-    m_pFitModeCombo = new QComboBox();
-    m_pFitModeCombo->addItem("保持原始轨迹", static_cast<int>(RobotCalculation::LowerWeldFitMode::PreservePath));
-    m_pFitModeCombo->addItem("直线拟合输出", static_cast<int>(RobotCalculation::LowerWeldFitMode::LineFit));
-    m_pFitModeCombo->addItem("梯形分段拟合输出", static_cast<int>(RobotCalculation::LowerWeldFitMode::TrapezoidFit));
-    m_pFitModeCombo->addItem("多段分段直线拟合", static_cast<int>(RobotCalculation::LowerWeldFitMode::PiecewiseLineFit));
+    m_pZJumpThresholdSpin = new QDoubleSpinBox();
+    m_pZJumpThresholdSpin->setRange(0.0, 9999.0);
+    m_pZJumpThresholdSpin->setDecimals(3);
+    m_pZJumpThresholdSpin->setSingleStep(0.5);
+    m_pZJumpThresholdSpin->setValue(3.0);
+    m_pZJumpThresholdSpin->setSpecialValueText("关闭");
+
+    m_pZContinuityThresholdSpin = new QDoubleSpinBox();
+    m_pZContinuityThresholdSpin->setRange(0.0, 9999.0);
+    m_pZContinuityThresholdSpin->setDecimals(3);
+    m_pZContinuityThresholdSpin->setSingleStep(0.5);
+    m_pZContinuityThresholdSpin->setValue(2.0);
+    m_pZContinuityThresholdSpin->setSpecialValueText("关闭");
+
+    m_pSegmentBreakDistanceSpin = new QDoubleSpinBox();
+    m_pSegmentBreakDistanceSpin->setRange(0.0, 9999.0);
+    m_pSegmentBreakDistanceSpin->setDecimals(3);
+    m_pSegmentBreakDistanceSpin->setSingleStep(1.0);
+    m_pSegmentBreakDistanceSpin->setValue(6.0);
+    m_pSegmentBreakDistanceSpin->setSpecialValueText("关闭");
+
+    m_pKeepLongestSegmentCheck = new QCheckBox("只保留最长连续段");
+    m_pKeepLongestSegmentCheck->setChecked(true);
 
     m_pFeaturePointStrategyCombo = new QComboBox();
     m_pFeaturePointStrategyCombo->addItem(
@@ -689,49 +775,16 @@ void LaserWeldFilterDialog::BuildUi()
         PointCloudProcessingConfig::FeaturePointStrategyDisplayName(
             PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys),
         static_cast<int>(PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys));
-    m_pFeaturePointStrategyCombo->addItem(
-        PointCloudProcessingConfig::FeaturePointStrategyDisplayName(
-            PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection),
-        static_cast<int>(PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection));
-
-    m_pZThresholdSpin = new QDoubleSpinBox();
-    m_pZThresholdSpin->setRange(-9999.0, 9999.0);
-    m_pZThresholdSpin->setDecimals(3);
-    m_pZThresholdSpin->setSingleStep(1.0);
-    m_pZThresholdSpin->setValue(-230.0);
-
-    m_pZJumpThresholdSpin = new QDoubleSpinBox();
-    m_pZJumpThresholdSpin->setRange(0.0, 9999.0);
-    m_pZJumpThresholdSpin->setDecimals(3);
-    m_pZJumpThresholdSpin->setSingleStep(0.5);
-    m_pZJumpThresholdSpin->setValue(5.0);
-    m_pZJumpThresholdSpin->setSpecialValueText("关闭");
-
-    m_pZContinuityThresholdSpin = new QDoubleSpinBox();
-    m_pZContinuityThresholdSpin->setRange(0.0, 9999.0);
-    m_pZContinuityThresholdSpin->setDecimals(3);
-    m_pZContinuityThresholdSpin->setSingleStep(0.5);
-    m_pZContinuityThresholdSpin->setValue(3.0);
-    m_pZContinuityThresholdSpin->setSpecialValueText("关闭");
-
-    m_pSegmentBreakDistanceSpin = new QDoubleSpinBox();
-    m_pSegmentBreakDistanceSpin->setRange(0.0, 9999.0);
-    m_pSegmentBreakDistanceSpin->setDecimals(3);
-    m_pSegmentBreakDistanceSpin->setSingleStep(1.0);
-    m_pSegmentBreakDistanceSpin->setValue(12.0);
-    m_pSegmentBreakDistanceSpin->setSpecialValueText("关闭");
-
-    m_pKeepLongestSegmentCheck = new QCheckBox("只保留最长连续段");
-    m_pKeepLongestSegmentCheck->setChecked(true);
+    // 方案三（立板投影到底板）已并入方法③"点云算法+拟合"做前置提取，不再单独作为拟合方案。
 
     m_pStepSpin = new QDoubleSpinBox();
-    m_pStepSpin->setRange(0.1, 100.0);
+    m_pStepSpin->setRange(0.1, 9999.0);
     m_pStepSpin->setDecimals(3);
     m_pStepSpin->setSingleStep(0.5);
     m_pStepSpin->setValue(2.0);
 
     m_pWindowSpin = new QDoubleSpinBox();
-    m_pWindowSpin->setRange(0.0, 100.0);
+    m_pWindowSpin->setRange(0.0, 9999.0);
     m_pWindowSpin->setDecimals(3);
     m_pWindowSpin->setSingleStep(0.5);
     m_pWindowSpin->setValue(8.0);
@@ -744,59 +797,173 @@ void LaserWeldFilterDialog::BuildUi()
     m_pPiecewiseToleranceSpin->setRange(0.1, 9999.0);
     m_pPiecewiseToleranceSpin->setDecimals(3);
     m_pPiecewiseToleranceSpin->setSingleStep(0.5);
-    m_pPiecewiseToleranceSpin->setValue(2.0);
+    m_pPiecewiseToleranceSpin->setValue(4.0);
 
     m_pPiecewiseMinSegmentSpin = new QSpinBox();
     m_pPiecewiseMinSegmentSpin->setRange(2, 9999);
-    m_pPiecewiseMinSegmentSpin->setValue(4);
+    m_pPiecewiseMinSegmentSpin->setValue(10);
 
     m_pMinPointSpin = new QSpinBox();
-    m_pMinPointSpin->setRange(1, 999);
-    m_pMinPointSpin->setValue(3);
+    m_pMinPointSpin->setRange(2, 9999);
+    m_pMinPointSpin->setValue(4);
 
     m_pSmoothRadiusSpin = new QSpinBox();
-    m_pSmoothRadiusSpin->setRange(0, 20);
-    m_pSmoothRadiusSpin->setValue(2);
+    m_pSmoothRadiusSpin->setRange(0, 999);
+    m_pSmoothRadiusSpin->setValue(3);
 
     m_pSlopeConsistentCornerFitCheck = new QCheckBox("直线拟合排除圆弧段");
     m_pSlopeConsistentCornerFitCheck->setToolTip("启用后，平台线和坡度线只使用局部斜率一致的直线段拟合，再求交生成拐点。");
 
-    paramLayout->addWidget(new QLabel("采样主轴"), 0, 0);
-    paramLayout->addWidget(m_pAxisCombo, 0, 1);
-    paramLayout->addWidget(new QLabel("输出模式"), 0, 2);
-    paramLayout->addWidget(m_pFitModeCombo, 0, 3);
+    m_pExportFitDebugCloudCheck = new QCheckBox("导出拟合调试点云(CloudCompare)");
+    m_pExportFitDebugCloudCheck->setToolTip("启用后，每次拟合都把各段用到的点集、拟合直线和关键点导出到输出文件同目录的 FitDebug 子目录，可直接拖入 CloudCompare 核对每段拟合是否正确。");
+    m_pExportFitDebugCloudCheck->setChecked(true);
+
+    // 滤波拟合方案置顶，方便切换；去噪/分段参数随后，再到拟合参数；采样主轴在方法组。
+    paramLayout->addWidget(new QLabel("滤波拟合方案"), 0, 0);
+    paramLayout->addWidget(m_pFeaturePointStrategyCombo, 0, 1, 1, 3);
     paramLayout->addWidget(new QLabel("下层 Z 阈值"), 1, 0);
     paramLayout->addWidget(CreateUnitEditor(m_pZThresholdSpin, "mm"), 1, 1);
     paramLayout->addWidget(new QLabel("Z突变阈值"), 1, 2);
     paramLayout->addWidget(CreateUnitEditor(m_pZJumpThresholdSpin, "mm"), 1, 3);
     paramLayout->addWidget(new QLabel("Z连续阈值"), 2, 0);
     paramLayout->addWidget(CreateUnitEditor(m_pZContinuityThresholdSpin, "mm"), 2, 1);
-    paramLayout->addWidget(new QLabel("输出步长"), 2, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pStepSpin, "mm"), 2, 3);
-    paramLayout->addWidget(new QLabel("搜索窗口"), 3, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pWindowSpin, "mm"), 3, 1);
-    paramLayout->addWidget(new QLabel("拟合裁首尾点数"), 3, 2);
-    paramLayout->addWidget(m_pLineFitTrimSpin, 3, 3);
-    paramLayout->addWidget(new QLabel("分段拟合容差"), 4, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pPiecewiseToleranceSpin, "mm"), 4, 1);
-    paramLayout->addWidget(new QLabel("每段最少点数"), 4, 2);
-    paramLayout->addWidget(m_pPiecewiseMinSegmentSpin, 4, 3);
-    paramLayout->addWidget(new QLabel("最小点数"), 5, 0);
-    paramLayout->addWidget(m_pMinPointSpin, 5, 1);
-    paramLayout->addWidget(new QLabel("平滑半径"), 5, 2);
-    paramLayout->addWidget(m_pSmoothRadiusSpin, 5, 3);
-    paramLayout->addWidget(new QLabel("段间跳变阈值"), 6, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pSegmentBreakDistanceSpin, "mm"), 6, 1);
+    paramLayout->addWidget(new QLabel("段间跳变阈值"), 2, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pSegmentBreakDistanceSpin, "mm"), 2, 3);
+    paramLayout->addWidget(new QLabel("输出步长"), 3, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pStepSpin, "mm"), 3, 1);
+    paramLayout->addWidget(new QLabel("搜索窗口"), 3, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pWindowSpin, "mm"), 3, 3);
+    paramLayout->addWidget(new QLabel("拟合裁首尾点数"), 4, 0);
+    paramLayout->addWidget(m_pLineFitTrimSpin, 4, 1);
+    paramLayout->addWidget(new QLabel("分段拟合容差"), 4, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pPiecewiseToleranceSpin, "mm"), 4, 3);
+    paramLayout->addWidget(new QLabel("每段最少点数"), 5, 0);
+    paramLayout->addWidget(m_pPiecewiseMinSegmentSpin, 5, 1);
+    paramLayout->addWidget(new QLabel("最小点数"), 5, 2);
+    paramLayout->addWidget(m_pMinPointSpin, 5, 3);
+    paramLayout->addWidget(new QLabel("平滑半径"), 6, 0);
+    paramLayout->addWidget(m_pSmoothRadiusSpin, 6, 1);
     paramLayout->addWidget(m_pKeepLongestSegmentCheck, 6, 2, 1, 2);
-    paramLayout->addWidget(new QLabel("特征点拟合方案"), 7, 0);
-    paramLayout->addWidget(m_pFeaturePointStrategyCombo, 7, 1, 1, 3);
-    paramLayout->addWidget(m_pSlopeConsistentCornerFitCheck, 8, 1, 1, 3);
+    paramLayout->addWidget(m_pSlopeConsistentCornerFitCheck, 7, 1, 1, 3);
+    paramLayout->addWidget(m_pExportFitDebugCloudCheck, 8, 0, 1, 4);
     paramLayout->setColumnStretch(1, 1);
     paramLayout->setColumnStretch(3, 1);
     featurePointLayout->addWidget(paramGroup);
     featurePointLayout->addStretch(1);
-    m_pAlgorithmTabWidget->addTab(pointCloudTab, "点云算法");
-    m_pAlgorithmTabWidget->addTab(featurePointTab, "特征点算法");
+
+    QGroupBox* validationGroup = new QGroupBox("点云有效性检测");
+    QGridLayout* validationLayoutGrid = new QGridLayout(validationGroup);
+    validationLayoutGrid->setHorizontalSpacing(12);
+    validationLayoutGrid->setVerticalSpacing(10);
+
+    m_pValidationCoverageCheck = new QCheckBox("启用采集覆盖检测");
+    m_pValidationMinFinitePointSpin = new QSpinBox();
+    m_pValidationMinFinitePointSpin->setRange(0, 10000000);
+    m_pValidationMinProjectedSpanSpin = new QDoubleSpinBox();
+    m_pValidationMinProjectedSpanSpin->setRange(0.0, 999999.0);
+    m_pValidationMinProjectedSpanSpin->setDecimals(3);
+    m_pValidationMinProjectedSpanSpin->setSingleStep(10.0);
+
+    m_pValidationContinuityCheck = new QCheckBox("启用连续性检测");
+    m_pValidationMinStationCoverageSpin = new QDoubleSpinBox();
+    m_pValidationMinStationCoverageSpin->setRange(0.0, 100.0);
+    m_pValidationMinStationCoverageSpin->setDecimals(1);
+    m_pValidationMinStationCoverageSpin->setSingleStep(5.0);
+    m_pValidationMinStationCoverageSpin->setSuffix("%");
+    m_pValidationMinLongestContinuousSpin = new QDoubleSpinBox();
+    m_pValidationMinLongestContinuousSpin->setRange(0.0, 100.0);
+    m_pValidationMinLongestContinuousSpin->setDecimals(1);
+    m_pValidationMinLongestContinuousSpin->setSingleStep(5.0);
+    m_pValidationMinLongestContinuousSpin->setSuffix("%");
+
+    m_pValidationDenoiseRatioCheck = new QCheckBox("启用剔除比例检测");
+    m_pValidationMaxRejectedRatioSpin = new QDoubleSpinBox();
+    m_pValidationMaxRejectedRatioSpin->setRange(0.0, 100.0);
+    m_pValidationMaxRejectedRatioSpin->setDecimals(1);
+    m_pValidationMaxRejectedRatioSpin->setSingleStep(5.0);
+    m_pValidationMaxRejectedRatioSpin->setSuffix("%");
+
+    m_pValidationResidualCheck = new QCheckBox("启用拟合残差检测");
+    m_pValidationMaxMedianResidualSpin = new QDoubleSpinBox();
+    m_pValidationMaxMedianResidualSpin->setRange(0.0, 9999.0);
+    m_pValidationMaxMedianResidualSpin->setDecimals(3);
+    m_pValidationMaxP95ResidualSpin = new QDoubleSpinBox();
+    m_pValidationMaxP95ResidualSpin->setRange(0.0, 9999.0);
+    m_pValidationMaxP95ResidualSpin->setDecimals(3);
+    m_pValidationResidualInlierThresholdSpin = new QDoubleSpinBox();
+    m_pValidationResidualInlierThresholdSpin->setRange(0.0, 9999.0);
+    m_pValidationResidualInlierThresholdSpin->setDecimals(3);
+    m_pValidationMinResidualInlierRatioSpin = new QDoubleSpinBox();
+    m_pValidationMinResidualInlierRatioSpin->setRange(0.0, 100.0);
+    m_pValidationMinResidualInlierRatioSpin->setDecimals(1);
+    m_pValidationMinResidualInlierRatioSpin->setSingleStep(5.0);
+    m_pValidationMinResidualInlierRatioSpin->setSuffix("%");
+
+    m_pValidationKeyPointCheck = new QCheckBox("启用起终点/拐点检测");
+    m_pValidationMinKeyPointSpin = new QSpinBox();
+    m_pValidationMinKeyPointSpin->setRange(0, 9999);
+    m_pValidationMinCornerSpin = new QSpinBox();
+    m_pValidationMinCornerSpin->setRange(0, 9999);
+    m_pValidationMinSegmentLengthSpin = new QDoubleSpinBox();
+    m_pValidationMinSegmentLengthSpin->setRange(0.0, 9999.0);
+    m_pValidationMinSegmentLengthSpin->setDecimals(3);
+
+    m_pValidationOutputCheck = new QCheckBox("启用输出结果检测");
+    m_pValidationMinOutputPointSpin = new QSpinBox();
+    m_pValidationMinOutputPointSpin->setRange(0, 10000000);
+    m_pValidationMinOutputLengthRatioSpin = new QDoubleSpinBox();
+    m_pValidationMinOutputLengthRatioSpin->setRange(0.0, 1000.0);
+    m_pValidationMinOutputLengthRatioSpin->setDecimals(1);
+    m_pValidationMinOutputLengthRatioSpin->setSingleStep(5.0);
+    m_pValidationMinOutputLengthRatioSpin->setSuffix("%");
+
+    validationLayoutGrid->addWidget(m_pValidationCoverageCheck, 0, 0, 1, 2);
+    validationLayoutGrid->addWidget(new QLabel("最少有效点"), 0, 2);
+    validationLayoutGrid->addWidget(m_pValidationMinFinitePointSpin, 0, 3);
+    validationLayoutGrid->addWidget(new QLabel("最小主轴跨度"), 1, 0);
+    validationLayoutGrid->addWidget(CreateUnitEditor(m_pValidationMinProjectedSpanSpin, "mm"), 1, 1);
+
+    validationLayoutGrid->addWidget(m_pValidationContinuityCheck, 2, 0, 1, 2);
+    validationLayoutGrid->addWidget(new QLabel("最小采样覆盖率"), 2, 2);
+    validationLayoutGrid->addWidget(m_pValidationMinStationCoverageSpin, 2, 3);
+    validationLayoutGrid->addWidget(new QLabel("最长连续段比例"), 3, 0);
+    validationLayoutGrid->addWidget(m_pValidationMinLongestContinuousSpin, 3, 1);
+
+    validationLayoutGrid->addWidget(m_pValidationDenoiseRatioCheck, 4, 0, 1, 2);
+    validationLayoutGrid->addWidget(new QLabel("最大剔除比例"), 4, 2);
+    validationLayoutGrid->addWidget(m_pValidationMaxRejectedRatioSpin, 4, 3);
+
+    validationLayoutGrid->addWidget(m_pValidationResidualCheck, 5, 0, 1, 2);
+    validationLayoutGrid->addWidget(new QLabel("中位残差上限"), 5, 2);
+    validationLayoutGrid->addWidget(CreateUnitEditor(m_pValidationMaxMedianResidualSpin, "mm"), 5, 3);
+    validationLayoutGrid->addWidget(new QLabel("P95残差上限"), 6, 0);
+    validationLayoutGrid->addWidget(CreateUnitEditor(m_pValidationMaxP95ResidualSpin, "mm"), 6, 1);
+    validationLayoutGrid->addWidget(new QLabel("内点残差阈值"), 6, 2);
+    validationLayoutGrid->addWidget(CreateUnitEditor(m_pValidationResidualInlierThresholdSpin, "mm"), 6, 3);
+    validationLayoutGrid->addWidget(new QLabel("最小内点比例"), 7, 0);
+    validationLayoutGrid->addWidget(m_pValidationMinResidualInlierRatioSpin, 7, 1);
+
+    validationLayoutGrid->addWidget(m_pValidationKeyPointCheck, 8, 0, 1, 2);
+    validationLayoutGrid->addWidget(new QLabel("最少关键点"), 8, 2);
+    validationLayoutGrid->addWidget(m_pValidationMinKeyPointSpin, 8, 3);
+    validationLayoutGrid->addWidget(new QLabel("最少拐点"), 9, 0);
+    validationLayoutGrid->addWidget(m_pValidationMinCornerSpin, 9, 1);
+    validationLayoutGrid->addWidget(new QLabel("最短关键段"), 9, 2);
+    validationLayoutGrid->addWidget(CreateUnitEditor(m_pValidationMinSegmentLengthSpin, "mm"), 9, 3);
+
+    validationLayoutGrid->addWidget(m_pValidationOutputCheck, 10, 0, 1, 2);
+    validationLayoutGrid->addWidget(new QLabel("最少输出点"), 10, 2);
+    validationLayoutGrid->addWidget(m_pValidationMinOutputPointSpin, 10, 3);
+    validationLayoutGrid->addWidget(new QLabel("输出长度/输入跨度"), 11, 0);
+    validationLayoutGrid->addWidget(m_pValidationMinOutputLengthRatioSpin, 11, 1);
+    validationLayoutGrid->setColumnStretch(1, 1);
+    validationLayoutGrid->setColumnStretch(3, 1);
+    validationLayout->addWidget(validationGroup);
+    validationLayout->addStretch(1);
+
+    m_pAlgorithmTabWidget->addTab(pointCloudTab, "点云参数");
+    m_pAlgorithmTabWidget->addTab(featurePointTab, "滤波拟合参数");
+    m_pAlgorithmTabWidget->addTab(validationTab, "有效性检测");
     rootLayout->addWidget(m_pAlgorithmTabWidget);
     rootLayout->addStretch(1);
 
@@ -807,10 +974,7 @@ void LaserWeldFilterDialog::BuildUi()
     actionLayout->addStretch(1);
     QPushButton* saveSettingsButton = new QPushButton("保存设置");
     saveSettingsButton->setMinimumSize(150, 42);
-    m_pRunButton = new QPushButton("开始处理");
-    m_pRunButton->setMinimumSize(180, 42);
     actionLayout->addWidget(saveSettingsButton);
-    actionLayout->addWidget(m_pRunButton);
     outerLayout->addLayout(actionLayout);
 
     m_pLogText = new QPlainTextEdit();
@@ -818,11 +982,9 @@ void LaserWeldFilterDialog::BuildUi()
     m_pLogText->document()->setMaximumBlockCount(1200);
     m_pLogText->setMinimumHeight(110);
     m_pLogText->setMaximumHeight(170);
-    m_pLogText->setPlainText("处理日志：等待选择文件...");
+    m_pLogText->setPlainText("日志：等待保存设置...");
     outerLayout->addWidget(m_pLogText);
 
-    connect(browseInputButton, &QPushButton::clicked, this, &LaserWeldFilterDialog::BrowseInputFile);
-    connect(browseOutputButton, &QPushButton::clicked, this, &LaserWeldFilterDialog::BrowseOutputFile);
     connect(browseLibraryButton, &QPushButton::clicked, this, &LaserWeldFilterDialog::BrowseExternalLibraryDir);
     connect(browseExternalConfigButton, &QPushButton::clicked, this, &LaserWeldFilterDialog::BrowseExternalConfigFile);
     connect(saveSettingsButton, &QPushButton::clicked, this, [this]()
@@ -839,49 +1001,55 @@ void LaserWeldFilterDialog::BuildUi()
             AppendLog(message);
             QMessageBox::information(this, "精测点云处理", message);
         });
-    connect(m_pRunButton, &QPushButton::clicked, this, &LaserWeldFilterDialog::RunFilter);
-    connect(m_pStepSpin, &QDoubleSpinBox::valueChanged, this, [this](double) { UpdateSuggestedOutputPath(); });
-    connect(m_pExternalResampleStepSpin, &QDoubleSpinBox::valueChanged, this, [this](double) { UpdateSuggestedOutputPath(); });
     connect(m_pFeaturePointStrategyCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { SaveSettings(); });
     connect(m_pSlopeConsistentCornerFitCheck, &QCheckBox::toggled, this, [this](bool) { SaveSettings(); });
+    connect(m_pExportFitDebugCloudCheck, &QCheckBox::toggled, this, [this](bool) { SaveSettings(); });
     connect(m_pExternalConfigPathEdit, &QLineEdit::editingFinished, this, &LaserWeldFilterDialog::LoadExternalAlgorithmConfig);
     connect(m_pProcessingModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
         {
-            if (m_pProcessingModeCombo == nullptr || m_pAlgorithmTabWidget == nullptr)
-            {
-                return;
-            }
-            const PointCloudProcessingConfig::Mode mode =
-                static_cast<PointCloudProcessingConfig::Mode>(m_pProcessingModeCombo->currentData().toInt());
-            const int tabIndex = mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet ? 0 : 1;
-            if (m_pAlgorithmTabWidget->currentIndex() != tabIndex)
-            {
-                const QSignalBlocker blocker(m_pAlgorithmTabWidget);
-                m_pAlgorithmTabWidget->setCurrentIndex(tabIndex);
-            }
-            UpdateSuggestedOutputPath();
+            // 切换处理方法：按四方法启用矩阵联动禁用不相关参数，并保存。
+            ApplyMethodEnableState();
             SaveSettings();
         });
-    connect(m_pAlgorithmTabWidget, &QTabWidget::currentChanged, this, [this](int)
-        {
-            if (m_pProcessingModeCombo != nullptr)
-            {
-                const PointCloudProcessingConfig::Mode mode =
-                    m_pAlgorithmTabWidget != nullptr && m_pAlgorithmTabWidget->currentIndex() == 0
-                    ? PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
-                    : PointCloudProcessingConfig::Mode::LegacyLaserPath;
-                const int modeIndex = m_pProcessingModeCombo->findData(static_cast<int>(mode));
-                if (modeIndex >= 0 && m_pProcessingModeCombo->currentIndex() != modeIndex)
-                {
-                    const QSignalBlocker blocker(m_pProcessingModeCombo);
-                    m_pProcessingModeCombo->setCurrentIndex(modeIndex);
-                }
-            }
-            UpdateSuggestedOutputPath();
-            SaveSettings();
-        });
+    connect(m_pAxisCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { SaveSettings(); });
 
     ApplyResponsivePageDefaults(this);
+}
+
+void LaserWeldFilterDialog::ApplyMethodEnableState()
+{
+    const PointCloudProcessingConfig::Mode mode = CurrentProcessingMode();
+    const bool usesSdk = mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
+        || mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
+    // 程序滤波拟合链（去噪/分段/拟合）：②③④使用；①直接用 SDK 拐点，失败即报错不回退。
+    const bool usesFitChain = mode != PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet;
+    // 点云投影提取（完整点云→下层轨迹）仅方法③使用。
+    const bool usesProjection = mode == PointCloudProcessingConfig::Mode::CloudFit;
+
+    if (m_pSdkParamGroup != nullptr)
+    {
+        m_pSdkParamGroup->setEnabled(usesSdk);
+    }
+    if (m_pSdkInnerGroup != nullptr)
+    {
+        m_pSdkInnerGroup->setEnabled(usesSdk);
+    }
+    if (m_pProjectionGroup != nullptr)
+    {
+        m_pProjectionGroup->setEnabled(usesProjection);
+    }
+    if (m_pAlgorithmTabWidget != nullptr)
+    {
+        // 点云参数页：SDK 组（①②）+ 投影提取组（③），按组禁用；④整页禁用。
+        // 滤波拟合参数页与有效性检测仅作用于程序滤波拟合链（②③④），①下禁用。
+        m_pAlgorithmTabWidget->setTabEnabled(0, usesSdk || usesProjection);
+        m_pAlgorithmTabWidget->setTabEnabled(1, usesFitChain);
+        m_pAlgorithmTabWidget->setTabEnabled(2, usesFitChain);
+        if (!m_pAlgorithmTabWidget->isTabEnabled(m_pAlgorithmTabWidget->currentIndex()))
+        {
+            m_pAlgorithmTabWidget->setCurrentIndex(usesSdk ? 0 : 1);
+        }
+    }
 }
 
 void LaserWeldFilterDialog::ApplyStyle()
@@ -902,7 +1070,18 @@ void LaserWeldFilterDialog::ApplyStyle()
         "QTabBar::tab { background: #0B1117; color: #B8C7CC; border: 1px solid #2E4656; padding: 8px 18px; min-width: 110px; }"
         "QTabBar::tab:selected { background: #214D5B; color: #FFFFFF; border-color: #65C7D0; }"
         "QTabBar::tab:hover { background: #18303B; color: #FFFFFF; }"
-        "QPlainTextEdit { background: #0B1117; color: #BFE7EA; border: 1px solid #2E4656; border-radius: 10px; padding: 8px; }")
+        "QPlainTextEdit { background: #0B1117; color: #BFE7EA; border: 1px solid #2E4656; border-radius: 10px; padding: 8px; }"
+        // 禁用态统一压暗：自定义 QSS 指定固定色后 Qt 默认的禁用变灰会被覆盖，必须显式给 :disabled 规则。
+        "QLineEdit:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled { background: #0D141A; color: #55656D; border-color: #1E2F3A; }"
+        "QComboBox:disabled { background: #0D141A; color: #55656D; border-color: #1E2F3A; }"
+        "QComboBox::drop-down:disabled { background: #0D141A; border-left-color: #1E2F3A; }"
+        "QPushButton:disabled { background: #15212B; color: #55656D; border-color: #1E2F3A; }"
+        "QCheckBox:disabled { color: #55656D; }"
+        "QLabel:disabled { color: #4A5860; }"
+        "QLabel#UnitLabel:disabled { color: #3E4B53; }"
+        "QGroupBox:disabled { border-color: #1E2F3A; }"
+        "QGroupBox::title:disabled { color: #4A5860; }"
+        "QTabBar::tab:disabled { background: #0A0F14; color: #44525A; }")
         + UnifiedComboBoxStyleSheet());
 }
 
@@ -915,12 +1094,6 @@ void LaserWeldFilterDialog::LoadSettings()
         const int processingModeIndex = m_pProcessingModeCombo->findData(static_cast<int>(processingSettings.mode));
         m_pProcessingModeCombo->setCurrentIndex(processingModeIndex >= 0 ? processingModeIndex : 0);
     }
-    if (m_pAlgorithmTabWidget != nullptr)
-    {
-        const QSignalBlocker blocker(m_pAlgorithmTabWidget);
-        m_pAlgorithmTabWidget->setCurrentIndex(
-            processingSettings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet ? 0 : 1);
-    }
     if (m_pFeaturePointStrategyCombo != nullptr)
     {
         const QSignalBlocker blocker(m_pFeaturePointStrategyCombo);
@@ -932,52 +1105,67 @@ void LaserWeldFilterDialog::LoadSettings()
     SetPathEditText(m_pExternalConfigPathEdit, QDir::toNativeSeparators(processingSettings.configPath));
     m_pExternalZTruncationSpin->setValue(processingSettings.zTruncationValue);
     m_pExternalResampleStepSpin->setValue(processingSettings.resampleStepMm);
-    m_pExternalFallbackCheck->setChecked(processingSettings.fallbackToLegacy);
+    if (m_pSdkWeldedStartCheck != nullptr)
+    {
+        const QSignalBlocker blocker(m_pSdkWeldedStartCheck);
+        m_pSdkWeldedStartCheck->setChecked(processingSettings.sdkUseWeldedStartTruncation);
+    }
     if (m_pSlopeConsistentCornerFitCheck != nullptr)
     {
         const QSignalBlocker blocker(m_pSlopeConsistentCornerFitCheck);
         m_pSlopeConsistentCornerFitCheck->setChecked(processingSettings.slopeConsistentCornerFit);
     }
-    const auto read = [](const QString& key, const QString& defaultValue = QString())
-        {
-            QString value;
-            return ConfigDatabase::ReadScopedSetting(
-                QStringLiteral("global"),
-                QString(),
-                LASER_FILTER_SETTINGS_MODULE,
-                key,
-                &value)
-                ? value
-                : defaultValue;
-        };
-    const auto readBool = [&read](const QString& key, bool defaultValue)
-        {
-            const QString value = read(key);
-            if (value.isEmpty())
-            {
-                return defaultValue;
-            }
-            const QString normalized = value.trimmed().toLower();
-            return normalized == "1" || normalized == "true" || normalized == "yes";
-        };
-
-    m_pInputPathEdit->setText(read("Path/Input"));
-    m_pOutputPathEdit->setText(read("Path/Output"));
-    m_pCloudAxisCombo->setCurrentIndex(read("Cloud/Axis", "0").toInt());
-    m_pAxisCombo->setCurrentIndex(read("Param/Axis", "0").toInt());
-    m_pFitModeCombo->setCurrentIndex(read("Param/FitMode", "0").toInt());
-    m_pZThresholdSpin->setValue(read("Param/ZThreshold", "-230.0").toDouble());
-    m_pZJumpThresholdSpin->setValue(read("Param/ZJumpThreshold", "5.0").toDouble());
-    m_pZContinuityThresholdSpin->setValue(read("Param/ZContinuityThreshold", "3.0").toDouble());
-    m_pSegmentBreakDistanceSpin->setValue(read("Param/SegmentBreakDistance", "12.0").toDouble());
-    m_pKeepLongestSegmentCheck->setChecked(readBool("Param/KeepLongestSegmentOnly", true));
-    m_pStepSpin->setValue(read("Param/Step", "2.0").toDouble());
-    m_pWindowSpin->setValue(read("Param/SearchWindow", "8.0").toDouble());
-    m_pLineFitTrimSpin->setValue(read("Param/LineFitTrimCount", "0").toInt());
-    m_pPiecewiseToleranceSpin->setValue(read("Param/PiecewiseFitTolerance", "2.0").toDouble());
-    m_pPiecewiseMinSegmentSpin->setValue(read("Param/PiecewiseMinSegmentPoints", "4").toInt());
-    m_pMinPointSpin->setValue(read("Param/MinPointCount", "3").toInt());
-    m_pSmoothRadiusSpin->setValue(read("Param/SmoothRadius", "2").toInt());
+    if (m_pExportFitDebugCloudCheck != nullptr)
+    {
+        const QSignalBlocker blocker(m_pExportFitDebugCloudCheck);
+        m_pExportFitDebugCloudCheck->setChecked(processingSettings.exportFitDebugCloud);
+    }
+    m_pValidationCoverageCheck->setChecked(processingSettings.validationCoverageEnabled);
+    m_pValidationMinFinitePointSpin->setValue(processingSettings.validationMinFinitePointCount);
+    m_pValidationMinProjectedSpanSpin->setValue(processingSettings.validationMinProjectedSpanMm);
+    m_pValidationContinuityCheck->setChecked(processingSettings.validationContinuityEnabled);
+    m_pValidationMinStationCoverageSpin->setValue(processingSettings.validationMinStationCoverageRatio * 100.0);
+    m_pValidationMinLongestContinuousSpin->setValue(processingSettings.validationMinLongestContinuousRatio * 100.0);
+    m_pValidationDenoiseRatioCheck->setChecked(processingSettings.validationDenoiseRatioEnabled);
+    m_pValidationMaxRejectedRatioSpin->setValue(processingSettings.validationMaxRejectedRatio * 100.0);
+    m_pValidationResidualCheck->setChecked(processingSettings.validationResidualEnabled);
+    m_pValidationMaxMedianResidualSpin->setValue(processingSettings.validationMaxMedianResidualMm);
+    m_pValidationMaxP95ResidualSpin->setValue(processingSettings.validationMaxP95ResidualMm);
+    m_pValidationResidualInlierThresholdSpin->setValue(processingSettings.validationResidualInlierThresholdMm);
+    m_pValidationMinResidualInlierRatioSpin->setValue(processingSettings.validationMinResidualInlierRatio * 100.0);
+    m_pValidationKeyPointCheck->setChecked(processingSettings.validationKeyPointEnabled);
+    m_pValidationMinKeyPointSpin->setValue(processingSettings.validationMinKeyPointCount);
+    m_pValidationMinCornerSpin->setValue(processingSettings.validationMinCornerCount);
+    m_pValidationMinSegmentLengthSpin->setValue(processingSettings.validationMinSegmentLengthMm);
+    m_pValidationOutputCheck->setChecked(processingSettings.validationOutputEnabled);
+    m_pValidationMinOutputPointSpin->setValue(processingSettings.validationMinOutputPointCount);
+    m_pValidationMinOutputLengthRatioSpin->setValue(processingSettings.validationMinOutputLengthRatio * 100.0);
+    {
+        const QSignalBlocker blocker(m_pAxisCombo);
+        const int axisIndex = m_pAxisCombo->findData(static_cast<int>(processingSettings.sampleAxisMode));
+        m_pAxisCombo->setCurrentIndex(axisIndex >= 0 ? axisIndex : 0);
+    }
+    m_pZThresholdSpin->setValue(processingSettings.cloudZThresholdMm);
+    m_pZJumpThresholdSpin->setValue(processingSettings.cloudZJumpThresholdMm);
+    m_pZContinuityThresholdSpin->setValue(processingSettings.cloudZContinuityThresholdMm);
+    m_pSegmentBreakDistanceSpin->setValue(processingSettings.cloudSegmentBreakDistanceMm);
+    m_pKeepLongestSegmentCheck->setChecked(processingSettings.cloudKeepLongestSegmentOnly);
+    m_pStepSpin->setValue(processingSettings.fitSampleStepMm);
+    m_pWindowSpin->setValue(processingSettings.fitSearchWindowMm);
+    m_pLineFitTrimSpin->setValue(processingSettings.fitLineFitTrimCount);
+    m_pPiecewiseToleranceSpin->setValue(processingSettings.fitPiecewiseToleranceMm);
+    m_pPiecewiseMinSegmentSpin->setValue(processingSettings.fitPiecewiseMinSegmentPoints);
+    m_pMinPointSpin->setValue(processingSettings.fitMinPointCount);
+    m_pSmoothRadiusSpin->setValue(processingSettings.fitSmoothRadius);
+    m_pProjStationWindowSpin->setValue(processingSettings.projectionStationWindowMm);
+    m_pProjTransverseWindowSpin->setValue(processingSettings.projectionTransverseWindowMm);
+    m_pProjZBandBelowSpin->setValue(processingSettings.projectionZBandBelowMm);
+    m_pProjZBandAboveSpin->setValue(processingSettings.projectionZBandAboveMm);
+    m_pProjLayerLowSpin->setValue(processingSettings.projectionLayerLowPercent);
+    m_pProjLayerHighSpin->setValue(processingSettings.projectionLayerHighPercent);
+    m_pProjMaxCandidateSpin->setValue(processingSettings.projectionMaxCandidatePerSeed);
+    m_pProjSmoothRadiusSpin->setValue(processingSettings.projectionSmoothRadius);
+    ApplyMethodEnableState();
     LoadExternalAlgorithmConfig();
 }
 
@@ -990,9 +1178,58 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.configPath = m_pExternalConfigPathEdit->text().trimmed();
     processingSettings.zTruncationValue = m_pExternalZTruncationSpin->value();
     processingSettings.resampleStepMm = m_pExternalResampleStepSpin->value();
-    processingSettings.fallbackToLegacy = m_pExternalFallbackCheck->isChecked();
+    processingSettings.sdkUseWeldedStartTruncation =
+        m_pSdkWeldedStartCheck != nullptr && m_pSdkWeldedStartCheck->isChecked();
+    {
+        const QVariant axisData = m_pAxisCombo->currentData();
+        processingSettings.sampleAxisMode = axisData.isValid()
+            ? static_cast<PointCloudProcessingConfig::SampleAxisMode>(axisData.toInt())
+            : PointCloudProcessingConfig::SampleAxisMode::Auto;
+    }
+    processingSettings.cloudZThresholdMm = m_pZThresholdSpin->value();
+    processingSettings.cloudZJumpThresholdMm = m_pZJumpThresholdSpin->value();
+    processingSettings.cloudZContinuityThresholdMm = m_pZContinuityThresholdSpin->value();
+    processingSettings.cloudSegmentBreakDistanceMm = m_pSegmentBreakDistanceSpin->value();
+    processingSettings.cloudKeepLongestSegmentOnly = m_pKeepLongestSegmentCheck->isChecked();
+    processingSettings.fitSampleStepMm = m_pStepSpin->value();
+    processingSettings.fitSearchWindowMm = m_pWindowSpin->value();
+    processingSettings.fitLineFitTrimCount = m_pLineFitTrimSpin->value();
+    processingSettings.fitPiecewiseToleranceMm = m_pPiecewiseToleranceSpin->value();
+    processingSettings.fitPiecewiseMinSegmentPoints = m_pPiecewiseMinSegmentSpin->value();
+    processingSettings.fitMinPointCount = m_pMinPointSpin->value();
+    processingSettings.fitSmoothRadius = m_pSmoothRadiusSpin->value();
+    processingSettings.projectionStationWindowMm = m_pProjStationWindowSpin->value();
+    processingSettings.projectionTransverseWindowMm = m_pProjTransverseWindowSpin->value();
+    processingSettings.projectionZBandBelowMm = m_pProjZBandBelowSpin->value();
+    processingSettings.projectionZBandAboveMm = m_pProjZBandAboveSpin->value();
+    processingSettings.projectionLayerLowPercent = m_pProjLayerLowSpin->value();
+    processingSettings.projectionLayerHighPercent = m_pProjLayerHighSpin->value();
+    processingSettings.projectionMaxCandidatePerSeed = m_pProjMaxCandidateSpin->value();
+    processingSettings.projectionSmoothRadius = m_pProjSmoothRadiusSpin->value();
     processingSettings.slopeConsistentCornerFit =
         m_pSlopeConsistentCornerFitCheck != nullptr && m_pSlopeConsistentCornerFitCheck->isChecked();
+    processingSettings.exportFitDebugCloud =
+        m_pExportFitDebugCloudCheck == nullptr || m_pExportFitDebugCloudCheck->isChecked();
+    processingSettings.validationCoverageEnabled = m_pValidationCoverageCheck->isChecked();
+    processingSettings.validationMinFinitePointCount = m_pValidationMinFinitePointSpin->value();
+    processingSettings.validationMinProjectedSpanMm = m_pValidationMinProjectedSpanSpin->value();
+    processingSettings.validationContinuityEnabled = m_pValidationContinuityCheck->isChecked();
+    processingSettings.validationMinStationCoverageRatio = m_pValidationMinStationCoverageSpin->value() / 100.0;
+    processingSettings.validationMinLongestContinuousRatio = m_pValidationMinLongestContinuousSpin->value() / 100.0;
+    processingSettings.validationDenoiseRatioEnabled = m_pValidationDenoiseRatioCheck->isChecked();
+    processingSettings.validationMaxRejectedRatio = m_pValidationMaxRejectedRatioSpin->value() / 100.0;
+    processingSettings.validationResidualEnabled = m_pValidationResidualCheck->isChecked();
+    processingSettings.validationMaxMedianResidualMm = m_pValidationMaxMedianResidualSpin->value();
+    processingSettings.validationMaxP95ResidualMm = m_pValidationMaxP95ResidualSpin->value();
+    processingSettings.validationResidualInlierThresholdMm = m_pValidationResidualInlierThresholdSpin->value();
+    processingSettings.validationMinResidualInlierRatio = m_pValidationMinResidualInlierRatioSpin->value() / 100.0;
+    processingSettings.validationKeyPointEnabled = m_pValidationKeyPointCheck->isChecked();
+    processingSettings.validationMinKeyPointCount = m_pValidationMinKeyPointSpin->value();
+    processingSettings.validationMinCornerCount = m_pValidationMinCornerSpin->value();
+    processingSettings.validationMinSegmentLengthMm = m_pValidationMinSegmentLengthSpin->value();
+    processingSettings.validationOutputEnabled = m_pValidationOutputCheck->isChecked();
+    processingSettings.validationMinOutputPointCount = m_pValidationMinOutputPointSpin->value();
+    processingSettings.validationMinOutputLengthRatio = m_pValidationMinOutputLengthRatioSpin->value() / 100.0;
     QString localError;
     if (!PointCloudProcessingConfig::Save(processingSettings, &localError))
     {
@@ -1002,7 +1239,8 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
         }
         return false;
     }
-    if (processingSettings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet)
+    if (processingSettings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
+        || processingSettings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit)
     {
         SaveExternalAlgorithmConfig(&localError);
         if (!localError.isEmpty())
@@ -1015,43 +1253,6 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
         }
     }
 
-    bool ok = true;
-    const auto write = [](const QString& key, const QString& value, const QString& valueType = QStringLiteral("string"))
-        {
-            return ConfigDatabase::WriteScopedSetting(
-                QStringLiteral("global"),
-                QString(),
-                LASER_FILTER_SETTINGS_MODULE,
-                key,
-                value,
-                valueType);
-        };
-
-    ok = write("Path/Input", m_pInputPathEdit->text().trimmed()) && ok;
-    ok = write("Path/Output", m_pOutputPathEdit->text().trimmed()) && ok;
-    ok = write("Cloud/Axis", QString::number(m_pCloudAxisCombo->currentIndex()), QStringLiteral("number")) && ok;
-    ok = write("Param/Axis", QString::number(m_pAxisCombo->currentIndex()), QStringLiteral("number")) && ok;
-    ok = write("Param/FitMode", QString::number(m_pFitModeCombo->currentIndex()), QStringLiteral("number")) && ok;
-    ok = write("Param/ZThreshold", QString::number(m_pZThresholdSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
-    ok = write("Param/ZJumpThreshold", QString::number(m_pZJumpThresholdSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
-    ok = write("Param/ZContinuityThreshold", QString::number(m_pZContinuityThresholdSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
-    ok = write("Param/SegmentBreakDistance", QString::number(m_pSegmentBreakDistanceSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
-    ok = write("Param/KeepLongestSegmentOnly", m_pKeepLongestSegmentCheck->isChecked() ? "1" : "0", QStringLiteral("bool")) && ok;
-    ok = write("Param/Step", QString::number(m_pStepSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
-    ok = write("Param/SearchWindow", QString::number(m_pWindowSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
-    ok = write("Param/LineFitTrimCount", QString::number(m_pLineFitTrimSpin->value()), QStringLiteral("number")) && ok;
-    ok = write("Param/PiecewiseFitTolerance", QString::number(m_pPiecewiseToleranceSpin->value(), 'f', 6), QStringLiteral("number")) && ok;
-    ok = write("Param/PiecewiseMinSegmentPoints", QString::number(m_pPiecewiseMinSegmentSpin->value()), QStringLiteral("number")) && ok;
-    ok = write("Param/MinPointCount", QString::number(m_pMinPointSpin->value()), QStringLiteral("number")) && ok;
-    ok = write("Param/SmoothRadius", QString::number(m_pSmoothRadiusSpin->value()), QStringLiteral("number")) && ok;
-    if (!ok)
-    {
-        if (error != nullptr)
-        {
-            *error = "写入精测点云处理测试参数失败。";
-        }
-        return false;
-    }
     return true;
 }
 
@@ -1080,6 +1281,8 @@ void LaserWeldFilterDialog::LoadExternalAlgorithmConfig()
     m_pCloudDiscreteValueSpin->setValue(ReadPlainIniIntValue(configPath, "Discrete_Value", 4));
     m_pCloudDilateValueSpin->setValue(ReadPlainIniIntValue(configPath, "Dilate_Value", 13));
     m_pCloudErodeValueSpin->setValue(ReadPlainIniIntValue(configPath, "Erode_Value", 9));
+    m_pCloudLinesDisThresholdSpin->setValue(ReadPlainIniValue(configPath, "Lines_Dis_Threshold", "500").toDouble());
+    m_pCloudLineLengthSpin->setValue(ReadPlainIniValue(configPath, "Line_Length", "70").toDouble());
 }
 
 void LaserWeldFilterDialog::SaveExternalAlgorithmConfig(QString* error) const
@@ -1107,7 +1310,9 @@ void LaserWeldFilterDialog::SaveExternalAlgorithmConfig(QString* error) const
         { "if_Cluster", BoolIniText(m_pCloudClusterCheck->isChecked()) },
         { "Discrete_Value", QString::number(m_pCloudDiscreteValueSpin->value()) },
         { "Dilate_Value", QString::number(m_pCloudDilateValueSpin->value()) },
-        { "Erode_Value", QString::number(m_pCloudErodeValueSpin->value()) }
+        { "Erode_Value", QString::number(m_pCloudErodeValueSpin->value()) },
+        { "Lines_Dis_Threshold", FormatPlainIniNumberLikeCurrent(configPath, "Lines_Dis_Threshold", m_pCloudLinesDisThresholdSpin->value()) },
+        { "Line_Length", FormatPlainIniNumberLikeCurrent(configPath, "Line_Length", m_pCloudLineLengthSpin->value()) }
     };
     WritePlainIniValues(configPath, updates, error);
 }
@@ -1151,224 +1356,6 @@ void LaserWeldFilterDialog::BrowseExternalConfigFile()
     SaveSettings();
 }
 
-void LaserWeldFilterDialog::BrowseInputFile()
-{
-    const QString path = QFileDialog::getOpenFileName(
-        this,
-        "选择激光点文件",
-        m_pInputPathEdit->text().trimmed(),
-        "点文件 (*.txt *.csv);;所有文件 (*.*)");
-    if (path.isEmpty())
-    {
-        return;
-    }
-
-    m_pInputPathEdit->setText(QDir::toNativeSeparators(path));
-    m_pOutputPathEdit->setText(QDir::toNativeSeparators(BuildSuggestedOutputPath(path, CurrentOutputStep())));
-    SaveSettings();
-}
-
-void LaserWeldFilterDialog::BrowseOutputFile()
-{
-    const QString suggestedPath = m_pOutputPathEdit->text().trimmed().isEmpty()
-        ? BuildSuggestedOutputPath(m_pInputPathEdit->text().trimmed(), CurrentOutputStep())
-        : m_pOutputPathEdit->text().trimmed();
-    const QString path = QFileDialog::getSaveFileName(
-        this,
-        "选择输出结果文件",
-        suggestedPath,
-        "文本文件 (*.txt);;CSV文件 (*.csv);;所有文件 (*.*)");
-    if (path.isEmpty())
-    {
-        return;
-    }
-
-    m_pOutputPathEdit->setText(QDir::toNativeSeparators(path));
-    SaveSettings();
-}
-
-void LaserWeldFilterDialog::UpdateSuggestedOutputPath()
-{
-    if (m_pInputPathEdit == nullptr || m_pOutputPathEdit == nullptr)
-    {
-        return;
-    }
-
-    if (!m_pOutputPathEdit->text().trimmed().isEmpty())
-    {
-        return;
-    }
-
-    const QString suggested = BuildSuggestedOutputPath(m_pInputPathEdit->text().trimmed(), CurrentOutputStep());
-    if (!suggested.isEmpty())
-    {
-        m_pOutputPathEdit->setText(QDir::toNativeSeparators(suggested));
-    }
-}
-
-void LaserWeldFilterDialog::RunFilter()
-{
-    const QString inputPath = m_pInputPathEdit->text().trimmed();
-    if (inputPath.isEmpty())
-    {
-        QMessageBox::warning(this, "精测点云处理", "请先选择输入点文件。");
-        return;
-    }
-
-    QString outputPath = m_pOutputPathEdit->text().trimmed();
-    if (outputPath.isEmpty())
-    {
-        outputPath = BuildSuggestedOutputPath(inputPath, CurrentOutputStep());
-        m_pOutputPathEdit->setText(QDir::toNativeSeparators(outputPath));
-    }
-
-    QVector<RobotCalculation::IndexedPoint3D> inputPoints;
-    QString error;
-    if (!RobotDataHelper::LoadIndexedPoint3DFile(inputPath, inputPoints, &error))
-    {
-        AppendLog(error);
-        QMessageBox::warning(this, "精测点云处理", error);
-        return;
-    }
-
-    SaveSettings();
-
-    const PointCloudProcessingConfig::Mode processingMode = CurrentProcessingMode();
-    RobotCalculation::LowerWeldFilterResult result;
-    QString processingSummary;
-    if (processingMode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet)
-    {
-        PointCloudProcessingConfig::Settings processingSettings = PointCloudProcessingConfig::Load();
-        processingSettings.mode = processingMode;
-        processingSettings.libraryDir = m_pExternalLibraryDirEdit->text().trimmed();
-        processingSettings.configPath = m_pExternalConfigPathEdit->text().trimmed();
-        processingSettings.zTruncationValue = m_pExternalZTruncationSpin->value();
-        processingSettings.resampleStepMm = m_pExternalResampleStepSpin->value();
-        processingSettings.fallbackToLegacy = m_pExternalFallbackCheck->isChecked();
-
-        const PointCloudExtractionProcessor::ExtractionResult extraction =
-            PointCloudExtractionProcessor::ExtractCorrugatedSheet(
-                inputPoints,
-                processingSettings,
-                Eigen::Vector3d::UnitX());
-        if (!extraction.ok)
-        {
-            AppendLog(extraction.error);
-            QMessageBox::warning(this, "精测点云处理", extraction.error);
-            return;
-        }
-
-        const RobotCalculation::MeasureThenWeldAnalysisResult analysis =
-            PointCloudExtractionProcessor::BuildAnalysisResult(extraction, CurrentParams());
-        if (!analysis.ok)
-        {
-            AppendLog(analysis.error);
-            QMessageBox::warning(this, "精测点云处理", analysis.error);
-            return;
-        }
-
-        result = analysis.filterResult;
-        processingSummary = QString("点云算法：DLL=%1\n配置=%2\nZ截断=%3 mm\n重采样步长=%4 mm")
-            .arg(extraction.dllPath)
-            .arg(extraction.configPath)
-            .arg(processingSettings.zTruncationValue, 0, 'f', 3)
-            .arg(processingSettings.resampleStepMm, 0, 'f', 3);
-    }
-    else
-    {
-        if (CurrentFeaturePointStrategy() == PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection)
-        {
-            RobotCalculation::LowerWeldFilterParams seedParams = CurrentParams();
-            seedParams.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::SlopeWaveFiltered;
-            const RobotCalculation::MeasureThenWeldAnalysisResult seedAnalysis =
-                RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(inputPoints, seedParams);
-            if (!seedAnalysis.ok)
-            {
-                AppendLog(seedAnalysis.error);
-                QMessageBox::warning(this, "精测点云处理", seedAnalysis.error);
-                return;
-            }
-
-            QVector<RobotCalculation::IndexedPoint3D> seedPoints;
-            seedPoints.reserve(seedAnalysis.filterResult.points.size());
-            for (const RobotCalculation::LowerWeldFilterPoint& point : seedAnalysis.filterResult.points)
-            {
-                RobotCalculation::IndexedPoint3D seedPoint;
-                seedPoint.index = point.index;
-                seedPoint.point = point.point;
-                seedPoints.push_back(seedPoint);
-            }
-
-            result = RobotCalculation::ProjectWorkpieceCloudToLowerWeldPath(inputPoints, seedPoints, CurrentParams());
-            if (!result.ok)
-            {
-                AppendLog(result.error);
-                QMessageBox::warning(this, "精测点云处理", result.error);
-                return;
-            }
-        }
-        else
-        {
-            const RobotCalculation::MeasureThenWeldAnalysisResult analysis =
-                RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(inputPoints, CurrentParams());
-            if (!analysis.ok)
-            {
-                AppendLog(analysis.error);
-                QMessageBox::warning(this, "精测点云处理", analysis.error);
-                return;
-            }
-            result = analysis.filterResult;
-        }
-        processingSummary = QString("特征点算法：%1")
-            .arg(PointCloudProcessingConfig::FeaturePointStrategyDisplayName(CurrentFeaturePointStrategy()));
-    }
-
-    if (!result.ok)
-    {
-        AppendLog(result.error);
-        QMessageBox::warning(this, "精测点云处理", result.error);
-        return;
-    }
-
-    QStringList lines;
-    lines << "index x y z source";
-    for (const RobotCalculation::LowerWeldFilterPoint& point : result.points)
-    {
-        lines << RobotCalculation::Vector3IndexedSpaceText(point.index, point.point, point.source);
-    }
-
-    if (!RobotDataHelper::SaveTextFileLines(outputPath, lines, &error))
-    {
-        AppendLog(error);
-        QMessageBox::warning(this, "精测点云处理", error);
-        return;
-    }
-
-    const QString summary = QString(
-        "处理完成：\n处理方式=%1\n%2\n输出模式=%3\n拟合裁首尾点数=%4\n拟合段数=%5\n输入点=%6\n下层候选点=%7\n剔除Z突变=%8\n剔除Z连续异常=%9\n按连续段剔除=%10\n输出点=%11\n直接测量=%12\n插值=%13\n外推=%14\n输出文件=%15")
-        .arg(CurrentProcessingModeText())
-        .arg(processingSummary)
-        .arg(processingMode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
-            ? QString("新库输出轨迹")
-            : PointCloudProcessingConfig::FeaturePointStrategyDisplayName(CurrentFeaturePointStrategy()))
-        .arg(processingMode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
-            ? 0
-            : m_pLineFitTrimSpin->value())
-        .arg(result.fitSegmentCount)
-        .arg(result.inputPointCount)
-        .arg(result.lowerPointCount)
-        .arg(result.zJumpRejectedCount)
-        .arg(result.zContinuityRejectedCount)
-        .arg(result.segmentRejectedCount)
-        .arg(result.points.size())
-        .arg(result.measuredCount)
-        .arg(result.interpolatedCount)
-        .arg(result.extendedCount)
-        .arg(QDir::toNativeSeparators(outputPath));
-    AppendLog(summary);
-    QMessageBox::information(this, "精测点云处理", summary);
-}
-
 void LaserWeldFilterDialog::AppendLog(const QString& text)
 {
     if (m_pLogText == nullptr)
@@ -1397,49 +1384,3 @@ PointCloudProcessingConfig::FeaturePointStrategy LaserWeldFilterDialog::CurrentF
     return PointCloudProcessingConfig::FeaturePointStrategy::LegacyGeometry;
 }
 
-QString LaserWeldFilterDialog::CurrentProcessingModeText() const
-{
-    return CurrentProcessingMode() == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
-        ? "点云算法"
-        : "特征点算法";
-}
-
-double LaserWeldFilterDialog::CurrentOutputStep() const
-{
-    return CurrentProcessingMode() == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
-        ? (m_pExternalResampleStepSpin != nullptr ? m_pExternalResampleStepSpin->value() : 2.0)
-        : (m_pStepSpin != nullptr ? m_pStepSpin->value() : 2.0);
-}
-
-RobotCalculation::LowerWeldFilterParams LaserWeldFilterDialog::CurrentParams() const
-{
-    RobotCalculation::LowerWeldFilterParams params;
-    params.sampleAxis = CurrentProcessingMode() == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
-        ? static_cast<RobotCalculation::SampleAxis>(m_pCloudAxisCombo->currentData().toInt())
-        : static_cast<RobotCalculation::SampleAxis>(m_pAxisCombo->currentData().toInt());
-    params.fitMode = static_cast<RobotCalculation::LowerWeldFitMode>(m_pFitModeCombo->currentData().toInt());
-    params.geometryStrategy =
-        CurrentFeaturePointStrategy() == PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection
-            ? RobotCalculation::LowerWeldGeometryStrategy::WorkpieceProjection
-            : (CurrentFeaturePointStrategy() == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys
-                ? RobotCalculation::LowerWeldGeometryStrategy::RobustSegmentedKeys
-                : (CurrentFeaturePointStrategy() == PointCloudProcessingConfig::FeaturePointStrategy::SlopeWaveFiltered
-                    ? RobotCalculation::LowerWeldGeometryStrategy::SlopeWaveFiltered
-                    : RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry));
-    params.zThreshold = m_pZThresholdSpin->value();
-    params.zJumpThreshold = m_pZJumpThresholdSpin->value();
-    params.zContinuityThreshold = m_pZContinuityThresholdSpin->value();
-    params.segmentBreakDistance = m_pSegmentBreakDistanceSpin->value();
-    params.keepLongestSegmentOnly = m_pKeepLongestSegmentCheck->isChecked();
-    params.sampleStep = m_pStepSpin->value();
-    params.searchWindow = m_pWindowSpin->value();
-    params.lineFitTrimCount = m_pLineFitTrimSpin->value();
-    params.piecewiseFitTolerance = m_pPiecewiseToleranceSpin->value();
-    params.piecewiseMinSegmentPoints = m_pPiecewiseMinSegmentSpin->value();
-    params.minPointCount = m_pMinPointSpin->value();
-    params.smoothRadius = m_pSmoothRadiusSpin->value();
-    params.useSlopeConsistentCornerFit =
-        m_pSlopeConsistentCornerFitCheck != nullptr && m_pSlopeConsistentCornerFitCheck->isChecked();
-    params.enableCornerCompensation = false;
-    return params;
-}

@@ -38,12 +38,12 @@
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
     <QtInstall>qt6.7</QtInstall>
-    <QtModules>core;gui;widgets;network;sql</QtModules>
+    <QtModules>core;gui;widgets;network;sql;opengl;openglwidgets</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall>qt6.7</QtInstall>
-    <QtModules>core;gui;widgets;network;sql</QtModules>
+    <QtModules>core;gui;widgets;network;sql;opengl;openglwidgets</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
@@ -69,10 +69,10 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Link>
       <AdditionalLibraryDirectories>C:\Program Files\orocos_kdl\lib;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\lib;E:\OpenCV4.6.0\build\x64\vc15\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>orocos-kdld.lib;Robot-SDKd.lib;Qt6Networkd.lib;Qt6Sqld.lib;opencv_world460d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>orocos-kdld.lib;Robot-SDKd.lib;Qt6Networkd.lib;Qt6Sqld.lib;Qt6OpenGLd.lib;Qt6OpenGLWidgetsd.lib;opengl32.lib;opencv_world460d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <DisableSpecificWarnings>4828</DisableSpecificWarnings>
@@ -105,13 +105,13 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <AdditionalLibraryDirectories>C:\Program Files\orocos_kdl\lib;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\lib;E:\OpenCV4.6.0\build\x64\vc15\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>orocos-kdl.lib;Robot-SDK.lib;Qt6Network.lib;Qt6Sql.lib;opencv_world460.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>orocos-kdl.lib;Robot-SDK.lib;Qt6Network.lib;Qt6Sql.lib;Qt6OpenGL.lib;Qt6OpenGLWidgets.lib;opengl32.lib;opencv_world460.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -140,8 +140,11 @@
     <ClCompile Include="src\MeasureThenWeldService.cpp" />
     <ClCompile Include="src\MeasureThenWeldWorkflow.cpp" />
     <ClCompile Include="src\MeasureWelding.cpp" />
+    <ClCompile Include="src\PointCloud3DView.cpp" />
     <ClCompile Include="src\PointCloudExtractionProcessor.cpp" />
     <ClCompile Include="src\PointCloudProcessingConfig.cpp" />
+    <ClCompile Include="src\WorkpieceMeshBuilder.cpp" />
+    <ClCompile Include="src\WorkpieceMeshViewerDialog.cpp" />
     <ClCompile Include="src\PreciseMeasureEditDialog.cpp" />
     <ClCompile Include="src\RobotCalculation.cpp" />
     <ClCompile Include="src\RobotDataHelper.cpp" />
@@ -193,9 +196,12 @@
     <ClInclude Include="include\LineCoarseScan.h" />
     <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h" />
     <ClInclude Include="include\MeasureThenWeldService.h" />
+    <ClInclude Include="include\WorkpieceMeshBuilder.h" />
+    <ClInclude Include="include\WorkpieceMeshViewerDialog.h" />
     <ClInclude Include="include\MeasureThenWeldWorkflow.h" />
     <ClInclude Include="include\MeasureWelding.h" />
     <ClInclude Include="include\OPini.h" />
+    <ClInclude Include="include\PointCloud3DView.h" />
     <ClInclude Include="include\PointCloudExtractionProcessor.h" />
     <ClInclude Include="include\PointCloudProcessingConfig.h" />
     <ClInclude Include="include\PreciseMeasureEditDialog.h" />

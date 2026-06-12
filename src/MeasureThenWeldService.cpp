@@ -8,10 +8,12 @@
 #include "OPini.h"
 #include "PointCloudExtractionProcessor.h"
 #include "PointCloudProcessingConfig.h"
+#include "WorkpieceMeshBuilder.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
 #include "RobotPoseTransform.h"
 #include "STEPRobotDriver.h"
+#include "WeldProcessFile.h"
 #include "groove/framebuffer.h"
 
 #include <QDateTime>
@@ -51,7 +53,6 @@ constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_WAIT_MS = 500;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_POLL_MS = 10;
 constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
 constexpr auto WORKPIECE_CLOUD_FILE_NAME = "PreciseLaserPoint_WorkpieceCloud.txt";
-constexpr auto WORKPIECE_EXTRACTED_LASER_FILE_NAME = "PreciseLaserPoint_WorkpieceExtracted.txt";
 constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
 constexpr auto KEY_POINTS_FILE_NAME = "PreciseLaserPoint_KeyPoints.txt";
 constexpr auto CLASSIFIED_FILE_NAME = "PreciseLaserPoint_Classified.txt";
@@ -62,9 +63,17 @@ constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
 constexpr auto WELD_POSE_SEAM_COMP_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
 constexpr auto WELD_SEGMENT_KIND_DEBUG_FILE_NAME = "PreciseLaserPointSegmentKind.txt";
 constexpr auto MATCH_DEBUG_FILE_NAME = "PreciseLaserPoint_MatchDebug.csv";
+// 四种处理方法各自的基础焊道文件：处理成功时落盘，文件存在即表示该目录已按该方法完成焊道生成。
+constexpr auto METHOD_TRACK_SDK_CLASS_FILE_NAME = "PreciseLaserPoint_SdkClass.txt";   // ①SDK拐点扩充焊道
+constexpr auto METHOD_TRACK_SDK_BASE_FILE_NAME = "PreciseLaserPoint_SdkBase.txt";     // ②SDK基础焊道
+constexpr auto METHOD_TRACK_POINT_BASE_FILE_NAME = "PreciseLaserPoint_PointBase.txt"; // ③点云投影提取焊道
+constexpr auto METHOD_TRACK_POINT_LASER_FILE_NAME = "PreciseLaserPoint_PointLaser.txt"; // ④相机目标点焊道
+
 constexpr auto SDK_POINT_CLOUD_OUTPUT_DIR_NAME = "SdkPointCloud";
 constexpr auto SDK_SEAM_EXTRACTED_FILE_NAME = "PreciseLaserPoint_SdkSeamExtracted.txt";
-constexpr auto SDK_SEAM_FITTED_FILE_NAME = "PreciseLaserPoint_SdkSeamFitted_2mm.txt";
+constexpr auto SDK_SEAM_EXTRACTED_2MM_FILE_NAME = "PreciseLaserPoint_SdkSeamExtracted_2mm.txt";
+constexpr auto SDK_BASE_WELD_FILE_NAME = "PreciseLaserPoint_SdkBaseWeld.txt";
+constexpr auto SDK_SCHEME_COMPARE_DIR_NAME = "SchemeCompare";
 constexpr int POSE_COMP_MATCH_BY_POSE = 0;
 constexpr int POSE_COMP_MATCH_BY_SEGMENT_CODE = 1;
 constexpr char POSE_COMP_MATCH_MODE_KEY[] = "PoseCompMatchMode";
@@ -209,6 +218,7 @@ struct WeldPosePreset
     int poseCompMatchMode = POSE_COMP_MATCH_BY_POSE;
     double cornerTransitionLeadDistance = 10.0;
     double cornerArcRadiusMm = 0.0;
+    double finalWeldStepFromProcessMm = 0.0;  // 工艺里的实际焊道点间距(>0 优先于测量参数页的值)
     double weldStartSkipDistance = 10.0;
     double weldEndSkipDistance = 10.0;
     double weldRzGainDeg = 0.0;
@@ -548,13 +558,22 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
 {
     RobotCalculation::LowerWeldFilterParams params;
     const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
-    params.sampleAxis = InferMeasureSampleAxis(param);
-    params.fitMode = RobotCalculation::LowerWeldFitMode::PreservePath;
-    if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection)
+    switch (pointCloudSettings.sampleAxisMode)
     {
-        params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::WorkpieceProjection;
+    case PointCloudProcessingConfig::SampleAxisMode::AxisX:
+        params.sampleAxis = RobotCalculation::SampleAxis::AxisX;
+        break;
+    case PointCloudProcessingConfig::SampleAxisMode::AxisY:
+        params.sampleAxis = RobotCalculation::SampleAxis::AxisY;
+        break;
+    default:
+        params.sampleAxis = InferMeasureSampleAxis(param);
+        break;
     }
-    else if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys)
+    // 拟合模式固定 PreservePath：整条管线（_PreservePath_2mm 及后续分类/姿态生成）都按此假设处理。
+    params.fitMode = RobotCalculation::LowerWeldFitMode::PreservePath;
+    // 方案三（立板投影）已并入方法③做前置提取，不再作为拟合方案映射；旧配置值按旧版几何处理。
+    if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys)
     {
         params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::RobustSegmentedKeys;
     }
@@ -566,25 +585,67 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
     {
         params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry;
     }
-    params.zThreshold = -230.0;
-    params.zJumpThreshold = 3.0;
-    params.zContinuityThreshold = 2.0;
-    params.segmentBreakDistance = 6.0;
-    params.keepLongestSegmentOnly = true;
-    params.sampleStep = 2.0;
-    params.searchWindow = 8.0;
-    params.lineFitTrimCount = 0;
-    params.piecewiseFitTolerance = 4.0;
-    params.piecewiseMinSegmentPoints = 10;
-    params.minPointCount = 4;
-    params.smoothRadius = 3;
+    params.zThreshold = pointCloudSettings.cloudZThresholdMm;
+    params.zJumpThreshold = pointCloudSettings.cloudZJumpThresholdMm;
+    params.zContinuityThreshold = pointCloudSettings.cloudZContinuityThresholdMm;
+    params.segmentBreakDistance = pointCloudSettings.cloudSegmentBreakDistanceMm;
+    params.keepLongestSegmentOnly = pointCloudSettings.cloudKeepLongestSegmentOnly;
+    params.sampleStep = pointCloudSettings.fitSampleStepMm;
+    params.searchWindow = pointCloudSettings.fitSearchWindowMm;
+    params.lineFitTrimCount = pointCloudSettings.fitLineFitTrimCount;
+    params.piecewiseFitTolerance = pointCloudSettings.fitPiecewiseToleranceMm;
+    params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
+    params.minPointCount = pointCloudSettings.fitMinPointCount;
+    params.smoothRadius = pointCloudSettings.fitSmoothRadius;
+    params.projectionStationWindowMm = pointCloudSettings.projectionStationWindowMm;
+    params.projectionTransverseWindowMm = pointCloudSettings.projectionTransverseWindowMm;
+    params.projectionZBandBelowMm = pointCloudSettings.projectionZBandBelowMm;
+    params.projectionZBandAboveMm = pointCloudSettings.projectionZBandAboveMm;
+    params.projectionMaxCandidatePerSeed = pointCloudSettings.projectionMaxCandidatePerSeed;
+    params.projectionLayerLowPercent = pointCloudSettings.projectionLayerLowPercent;
+    params.projectionLayerHighPercent = pointCloudSettings.projectionLayerHighPercent;
+    params.projectionSmoothRadius = pointCloudSettings.projectionSmoothRadius;
     params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
+    params.exportFitDebugCloud = pointCloudSettings.exportFitDebugCloud;
+    params.validationCoverageEnabled = pointCloudSettings.validationCoverageEnabled;
+    params.validationMinFinitePointCount = pointCloudSettings.validationMinFinitePointCount;
+    params.validationMinProjectedSpanMm = pointCloudSettings.validationMinProjectedSpanMm;
+    params.validationContinuityEnabled = pointCloudSettings.validationContinuityEnabled;
+    params.validationMinStationCoverageRatio = pointCloudSettings.validationMinStationCoverageRatio;
+    params.validationMinLongestContinuousRatio = pointCloudSettings.validationMinLongestContinuousRatio;
+    params.validationDenoiseRatioEnabled = pointCloudSettings.validationDenoiseRatioEnabled;
+    params.validationMaxRejectedRatio = pointCloudSettings.validationMaxRejectedRatio;
+    params.validationResidualEnabled = pointCloudSettings.validationResidualEnabled;
+    params.validationMaxMedianResidualMm = pointCloudSettings.validationMaxMedianResidualMm;
+    params.validationMaxP95ResidualMm = pointCloudSettings.validationMaxP95ResidualMm;
+    params.validationResidualInlierThresholdMm = pointCloudSettings.validationResidualInlierThresholdMm;
+    params.validationMinResidualInlierRatio = pointCloudSettings.validationMinResidualInlierRatio;
+    params.validationKeyPointEnabled = pointCloudSettings.validationKeyPointEnabled;
+    params.validationMinKeyPointCount = pointCloudSettings.validationMinKeyPointCount;
+    params.validationMinCornerCount = pointCloudSettings.validationMinCornerCount;
+    params.validationMinSegmentLengthMm = pointCloudSettings.validationMinSegmentLengthMm;
+    params.validationOutputEnabled = pointCloudSettings.validationOutputEnabled;
+    params.validationMinOutputPointCount = pointCloudSettings.validationMinOutputPointCount;
+    params.validationMinOutputLengthRatio = pointCloudSettings.validationMinOutputLengthRatio;
     LoadActivePoseCornerCompensation(QString::fromStdString(param.sRobotName), params);
     return params;
 }
 
 Eigen::Vector3d BuildScanDirection(const T_PRECISE_MEASURE_PARAM& param)
 {
+    double overrideX = 0.0;
+    double overrideY = 0.0;
+    double overrideZ = 0.0;
+    if (PointCloudProcessingConfig::RuntimeScanDirectionOverride(&overrideX, &overrideY, &overrideZ))
+    {
+        Eigen::Vector3d overrideDirection(overrideX, overrideY, overrideZ);
+        if (overrideDirection.norm() <= std::numeric_limits<double>::epsilon())
+        {
+            return Eigen::Vector3d::UnitX();
+        }
+        return overrideDirection.normalized();
+    }
+
     Eigen::Vector3d direction(
         param.tEndPos.dX - param.tStartPos.dX,
         param.tEndPos.dY - param.tStartPos.dY,
@@ -599,12 +660,170 @@ Eigen::Vector3d BuildScanDirection(const T_PRECISE_MEASURE_PARAM& param)
 
 QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
     const QVector<RobotCalculation::LowerWeldFilterPoint>& points);
+QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
+    const QVector<PointCloudExtractionProcessor::TrackPoint>& points);
+std::vector<QString> BuildRawLaserOutputLines(const QVector<RobotCalculation::LowerWeldFilterPoint>& points);
+
+// SDK 已焊起点截断：已焊段从上次焊接的起始端延伸，截掉的一侧由"焊接方向"决定——
+// 起点到终点焊（weldFromTrackStart=true）已焊段在轨迹头部，保留交界点及其后段并把首点重置为起点；
+// 终点到起点焊已焊段在轨迹尾部，保留头部到交界点的段并把尾点重置为终点。
+// 两种方向下执行（含方向反转）都恰好从已焊交界处开始接续焊接。
+QVector<PointCloudExtractionProcessor::TrackPoint> TruncateTrackAtWeldedStart(
+    const QVector<PointCloudExtractionProcessor::TrackPoint>& points,
+    const Eigen::Vector3d& weldedStart,
+    bool weldFromTrackStart,
+    int* removedCount)
+{
+    if (removedCount != nullptr)
+    {
+        *removedCount = 0;
+    }
+    if (points.size() < 2)
+    {
+        return points;
+    }
+    int nearestIndex = 0;
+    double bestDistance = std::numeric_limits<double>::max();
+    for (int index = 0; index < points.size(); ++index)
+    {
+        const double distance = (points[index].point - weldedStart).norm();
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            nearestIndex = index;
+        }
+    }
+
+    if (weldFromTrackStart)
+    {
+        // 截掉头部已焊段；截断后至少保留两个点，否则视为截断无效。
+        if (nearestIndex <= 0 || points.size() - nearestIndex < 2)
+        {
+            return points;
+        }
+        QVector<PointCloudExtractionProcessor::TrackPoint> truncated = points.mid(nearestIndex);
+        truncated.first().type = PointCloudExtractionProcessor::TrackPointType::Start;
+        if (removedCount != nullptr)
+        {
+            *removedCount = nearestIndex;
+        }
+        return truncated;
+    }
+
+    // 终点到起点焊：截掉尾部已焊段。
+    if (nearestIndex >= points.size() - 1 || nearestIndex < 1)
+    {
+        return points;
+    }
+    QVector<PointCloudExtractionProcessor::TrackPoint> truncated = points.mid(0, nearestIndex + 1);
+    truncated.last().type = PointCloudExtractionProcessor::TrackPointType::End;
+    if (removedCount != nullptr)
+    {
+        *removedCount = points.size() - truncated.size();
+    }
+    return truncated;
+}
+
+// 方法基础焊道行格式与 PreciseLaserPoint 系列一致：index x y z。
+template <typename Container>
+std::vector<QString> BuildMethodTrackLines(const Container& points)
+{
+    std::vector<QString> lines;
+    lines.reserve(static_cast<size_t>(points.size()));
+    for (const auto& point : points)
+    {
+        lines.push_back(QString("%1 %2 %3 %4")
+            .arg(point.index)
+            .arg(point.point.x(), 0, 'f', 6)
+            .arg(point.point.y(), 0, 'f', 6)
+            .arg(point.point.z(), 0, 'f', 6));
+    }
+    return lines;
+}
+
+bool WriteTextLinesToFile(const QString& path, const std::vector<QString>& lines, QString* error)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("无法写入文件：%1（%2）").arg(path, file.errorString());
+        }
+        return false;
+    }
+    QTextStream stream(&file);
+    for (const QString& line : lines)
+    {
+        stream << line << '\n';
+    }
+    stream.flush();
+    file.close();
+    return true;
+}
+
+// 工件模型缓存：处理成功后用内存中的完整点云直接生成（免二次解析 150MB 文本），
+// 缓存已存在则跳过；之后查看器/CloudCompare 直接秒开。失败不影响焊接流程。
+void EnsureWorkpieceMeshCacheFromCloud(
+    const QString& laserDir,
+    const QVector<RobotCalculation::IndexedPoint3D>& cloudPoints,
+    const MeasureThenWeldService::LogCallback& appendLog)
+{
+    if (laserDir.trimmed().isEmpty() || cloudPoints.size() < 16)
+    {
+        return;
+    }
+    const QString cachePath = WorkpieceMeshBuilder::MeshCachePath(laserDir);
+    if (WorkpieceMeshBuilder::IsMeshCacheValid(cachePath))
+    {
+        return;
+    }
+    QString meshError;
+    WorkpieceMeshBuilder::Mesh mesh;
+    if (!WorkpieceMeshBuilder::BuildFromScanlineCloud(cloudPoints, mesh, meshError)
+        || !WorkpieceMeshBuilder::SaveMeshPly(cachePath, mesh, meshError))
+    {
+        if (appendLog)
+        {
+            appendLog(QString("工件模型缓存生成失败（不影响流程）：%1").arg(meshError));
+        }
+        return;
+    }
+    if (appendLog)
+    {
+        appendLog(QString("已生成工件模型缓存：%1（顶点 %2 / 三角形 %3）")
+            .arg(cachePath)
+            .arg(mesh.vertices.size())
+            .arg(mesh.indices.size() / 3));
+    }
+}
+
+// 处理成功时把"该方法的基础焊道"落盘到 LaserPoint 目录（文件存在=该方法已完成焊道生成）。
+void SaveMethodBaseTrackFile(
+    const QString& laserDir,
+    PointCloudProcessingConfig::Mode mode,
+    const std::vector<QString>& lines,
+    const MeasureThenWeldService::LogCallback& appendLog)
+{
+    if (laserDir.trimmed().isEmpty() || lines.empty())
+    {
+        return;
+    }
+    const QString path = QDir(laserDir).filePath(MeasureThenWeldService::MethodBaseTrackFileName(mode));
+    QString saveError;
+    if (!WriteTextLinesToFile(path, lines, &saveError) && appendLog)
+    {
+        appendLog(QString("方法基础焊道写入失败（不影响处理）：%1").arg(saveError));
+    }
+}
 
 RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud(
     const QVector<RobotCalculation::IndexedPoint3D>& legacyLaserInput,
     const QVector<RobotCalculation::IndexedPoint3D>& fullCloudInput,
     const T_PRECISE_MEASURE_PARAM& param,
     const RobotCalculation::LowerWeldFilterParams& fitParams,
+    const QString& sdkBaseWeldOutputPath,
+    const QString& methodTrackOutputDir,
     const MeasureThenWeldService::LogCallback& appendLog,
     bool* usedExternalLibrary = nullptr,
     PointCloudExtractionProcessor::ExtractionResult* externalExtraction = nullptr)
@@ -627,78 +846,195 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             .arg(GeometryStrategyName(fitParams.geometryStrategy)));
     }
 
-    if (settings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet)
+    const bool sdkMode = settings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
+        || settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
+    if (sdkMode)
     {
+        // ①SDK全处理：SDK 拐点(+2mm扩充)直接转结果，不经拟合、不生成基础焊道文件；
+        // ②SDK+拟合：SDK 输出基础焊道（稠密），再喂滤波拟合提取特征点。
+        // 失败直接报错，不回退其他方法。
+        const bool useBaseWeldFit = settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
         if (fullCloudInput.size() < 2)
         {
+            RobotCalculation::MeasureThenWeldAnalysisResult failed;
+            failed.error = QString("SDK点云算法输入点过少（%1），无法调用外部库。")
+                .arg(fullCloudInput.size());
             if (appendLog)
             {
-                appendLog(QString("新版精测点云库输入点过少（%1），无法调用外部库。")
-                    .arg(fullCloudInput.size()));
+                appendLog(failed.error);
             }
+            return failed;
         }
-        else
+        const PointCloudExtractionProcessor::ExtractionResult extraction =
+            PointCloudExtractionProcessor::ExtractCorrugatedSheet(
+                fullCloudInput,
+                settings,
+                BuildScanDirection(param),
+                useBaseWeldFit ? sdkBaseWeldOutputPath : QString());
+        if (!extraction.ok)
         {
-            const PointCloudExtractionProcessor::ExtractionResult extraction =
-                PointCloudExtractionProcessor::ExtractCorrugatedSheet(
-                    fullCloudInput,
-                    settings,
-                    BuildScanDirection(param));
-            if (extraction.ok)
+            RobotCalculation::MeasureThenWeldAnalysisResult failed;
+            failed.error = QString("SDK点云算法处理失败：%1").arg(extraction.error);
+            if (appendLog)
             {
-                RobotCalculation::MeasureThenWeldAnalysisResult analysis =
-                    PointCloudExtractionProcessor::BuildAnalysisResult(extraction, fitParams);
-                if (analysis.ok)
-                {
-                    if (usedExternalLibrary != nullptr)
-                    {
-                        *usedExternalLibrary = true;
-                    }
-                    if (externalExtraction != nullptr)
-                    {
-                        *externalExtraction = extraction;
-                    }
-                    if (appendLog)
-                    {
-                        appendLog(QString("新版精测点云库处理完成：输入局部完整点云=%1，输出拟合轨迹点=%2，DLL=%3，配置=%4，Z截断=%5 mm。")
-                            .arg(extraction.inputPointCount)
-                            .arg(extraction.points.size())
-                            .arg(extraction.dllPath)
-                            .arg(extraction.configPath)
-                            .arg(settings.zTruncationValue, 0, 'f', 3));
-                    }
-                    return analysis;
-                }
-
+                appendLog(failed.error);
+            }
+            return failed;
+        }
+        // 已焊起点截断（开关控制）：SDK 检测到已焊段时，按焊接方向截掉焊道已焊部分只焊剩余段。
+        PointCloudExtractionProcessor::ExtractionResult workingExtraction = extraction;
+        if (settings.sdkUseWeldedStartTruncation)
+        {
+            if (extraction.hasWeldedStartPoint)
+            {
+                const bool weldFromTrackStart = param.nWeldDirection >= 0;
+                int removedCount = 0;
+                workingExtraction.points = TruncateTrackAtWeldedStart(
+                    extraction.points, extraction.weldedStartPoint, weldFromTrackStart, &removedCount);
                 if (appendLog)
                 {
-                    appendLog(QString("新版精测点云库结果转换失败：%1").arg(analysis.error));
+                    if (removedCount > 0)
+                    {
+                        appendLog(QString("已焊起点截断：交界点(%1, %2, %3)，焊接方向=%4，截除已焊侧 %5 点，保留 %6 点。")
+                            .arg(extraction.weldedStartPoint.x(), 0, 'f', 2)
+                            .arg(extraction.weldedStartPoint.y(), 0, 'f', 2)
+                            .arg(extraction.weldedStartPoint.z(), 0, 'f', 2)
+                            .arg(weldFromTrackStart ? "起点到终点" : "终点到起点")
+                            .arg(removedCount)
+                            .arg(workingExtraction.points.size()));
+                    }
+                    else
+                    {
+                        appendLog("已焊起点截断：交界点位于焊道端部或截断后点数不足，焊道未截断。");
+                    }
                 }
             }
             else if (appendLog)
             {
-                appendLog(QString("新版精测点云库处理失败：%1").arg(extraction.error));
+                appendLog("已焊起点截断：SDK 未检测到已焊段，焊道不截断。");
             }
         }
-
-        if (!settings.fallbackToLegacy)
+        RobotCalculation::MeasureThenWeldAnalysisResult analysis = useBaseWeldFit
+            ? RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+                ToIndexedInput(workingExtraction.points), fitParams)
+            : PointCloudExtractionProcessor::BuildAnalysisResult(workingExtraction, fitParams);
+        if (!analysis.ok)
+        {
+            if (appendLog)
+            {
+                appendLog(QString("SDK点云算法结果%1失败：%2")
+                    .arg(useBaseWeldFit ? "拟合" : "转换")
+                    .arg(analysis.error));
+            }
+            return analysis;
+        }
+        if (usedExternalLibrary != nullptr)
+        {
+            *usedExternalLibrary = true;
+        }
+        if (externalExtraction != nullptr)
+        {
+            *externalExtraction = extraction;
+        }
+        if (appendLog)
+        {
+            appendLog(QString("SDK点云算法处理完成（%1）：输入局部完整点云=%2，SDK输出点=%3，DLL=%4，配置=%5，Z截断=%6 mm。")
+                .arg(useBaseWeldFit ? "基础焊道+拟合" : "拐点直接使用")
+                .arg(extraction.inputPointCount)
+                .arg(extraction.points.size())
+                .arg(extraction.dllPath)
+                .arg(extraction.configPath)
+                .arg(settings.zTruncationValue, 0, 'f', 3));
+            if (extraction.usedBaseWeldFile)
+            {
+                appendLog(QString("SDK基础焊道来自库输出文件：%1").arg(extraction.baseWeldPath));
+            }
+        }
+        SaveMethodBaseTrackFile(
+            methodTrackOutputDir, settings.mode, BuildMethodTrackLines(workingExtraction.points), appendLog);
+        return analysis;
+    }
+    if (settings.mode == PointCloudProcessingConfig::Mode::CloudFit)
+    {
+        // ③点云算法+拟合：立板投影提取（完整点云 + 相机轨迹种子 → 下层轨迹）→ 滤波拟合。
+        // 几何链按单条轨迹设计，面状完整点云必须先经投影提取压成轨迹。失败直接报错，不回退。
+        if (fullCloudInput.size() < 3)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
-            failed.error = "新版精测点云库处理失败，且配置为不回退旧版算法。";
+            failed.error = QString("点云算法+拟合输入完整点云点数过少（%1）。").arg(fullCloudInput.size());
+            if (appendLog)
+            {
+                appendLog(failed.error);
+            }
+            return failed;
+        }
+        if (legacyLaserInput.size() < 2)
+        {
+            RobotCalculation::MeasureThenWeldAnalysisResult failed;
+            failed.error = QString("点云算法+拟合缺少相机轨迹种子点（%1），无法定位底板候选。")
+                .arg(legacyLaserInput.size());
+            if (appendLog)
+            {
+                appendLog(failed.error);
+            }
+            return failed;
+        }
+        const RobotCalculation::LowerWeldFilterResult projectedPath =
+            RobotCalculation::ProjectWorkpieceCloudToLowerWeldPath(fullCloudInput, legacyLaserInput, fitParams);
+        if (!projectedPath.ok)
+        {
+            RobotCalculation::MeasureThenWeldAnalysisResult failed;
+            failed.error = QString("点云投影提取失败：%1").arg(projectedPath.error);
+            if (appendLog)
+            {
+                appendLog(failed.error);
+            }
             return failed;
         }
         if (appendLog)
         {
-            appendLog("已按配置回退旧版轨迹点处理。");
+            appendLog(QString("点云投影提取完成：完整点云=%1，种子点=%2，底板候选点=%3，投影轨迹点=%4。")
+                .arg(fullCloudInput.size())
+                .arg(legacyLaserInput.size())
+                .arg(projectedPath.lowerPointCount)
+                .arg(projectedPath.points.size()));
         }
+        RobotCalculation::MeasureThenWeldAnalysisResult analysis =
+            RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+                ToIndexedInput(projectedPath.points), fitParams);
+        if (!analysis.ok)
+        {
+            if (appendLog)
+            {
+                appendLog(QString("点云算法+拟合处理失败：%1").arg(analysis.error));
+            }
+            return analysis;
+        }
+        SaveMethodBaseTrackFile(
+            methodTrackOutputDir,
+            PointCloudProcessingConfig::Mode::CloudFit,
+            BuildMethodTrackLines(projectedPath.points),
+            appendLog);
+        return analysis;
     }
 
+    // ④特征点+拟合：相机目标轨迹点 → 滤波拟合。
     if (appendLog)
     {
-        appendLog(QString("旧流程输入轨迹点数：%1。")
+        appendLog(QString("特征点+拟合输入轨迹点数：%1。")
             .arg(legacyLaserInput.size()));
     }
-    return RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(legacyLaserInput, fitParams);
+    RobotCalculation::MeasureThenWeldAnalysisResult legacyAnalysis =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(legacyLaserInput, fitParams);
+    if (legacyAnalysis.ok)
+    {
+        SaveMethodBaseTrackFile(
+            methodTrackOutputDir,
+            PointCloudProcessingConfig::Mode::LegacyLaserPath,
+            BuildMethodTrackLines(legacyLaserInput),
+            appendLog);
+    }
+    return legacyAnalysis;
 }
 
 QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
@@ -716,6 +1052,21 @@ QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
     return indexedPoints;
 }
 
+QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
+    const QVector<PointCloudExtractionProcessor::TrackPoint>& points)
+{
+    QVector<RobotCalculation::IndexedPoint3D> indexedPoints;
+    indexedPoints.reserve(points.size());
+    for (const PointCloudExtractionProcessor::TrackPoint& point : points)
+    {
+        RobotCalculation::IndexedPoint3D indexedPoint;
+        indexedPoint.index = point.index;
+        indexedPoint.point = point.point;
+        indexedPoints.push_back(indexedPoint);
+    }
+    return indexedPoints;
+}
+
 std::vector<QString> BuildFilterOutputLines(const RobotCalculation::LowerWeldFilterResult& result)
 {
     std::vector<QString> lines;
@@ -724,6 +1075,25 @@ std::vector<QString> BuildFilterOutputLines(const RobotCalculation::LowerWeldFil
     for (const RobotCalculation::LowerWeldFilterPoint& point : result.points)
     {
         lines.push_back(RobotCalculation::Vector3IndexedSpaceText(point.index, point.point, point.source));
+    }
+    return lines;
+}
+
+std::vector<QString> BuildIndexedPointOutputLines(
+    const QVector<RobotCalculation::IndexedPoint3D>& points,
+    const QString& source)
+{
+    std::vector<QString> lines;
+    lines.reserve(static_cast<size_t>(points.size()) + 1);
+    lines.push_back("index x y z source");
+    for (const RobotCalculation::IndexedPoint3D& point : points)
+    {
+        lines.push_back(QString("%1 %2 %3 %4 %5")
+            .arg(point.index)
+            .arg(point.point.x(), 0, 'f', 6)
+            .arg(point.point.y(), 0, 'f', 6)
+            .arg(point.point.z(), 0, 'f', 6)
+            .arg(source));
     }
     return lines;
 }
@@ -870,6 +1240,173 @@ std::vector<QString> BuildNoiseOutputLines(
             .arg(point.point.z(), 0, 'f', 6));
     }
     return lines;
+}
+
+RobotCalculation::LowerWeldFilterParams BuildSchemeCompareFitParams(
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    RobotCalculation::LowerWeldFilterParams compareParams = params;
+    compareParams.validationCoverageEnabled = false;
+    compareParams.validationContinuityEnabled = false;
+    compareParams.validationDenoiseRatioEnabled = false;
+    compareParams.validationResidualEnabled = false;
+    compareParams.validationKeyPointEnabled = false;
+    compareParams.validationOutputEnabled = false;
+    return compareParams;
+}
+
+std::vector<QString> BuildSchemeCompareSummaryLines(
+    const QString& title,
+    const QString& inputDescription,
+    const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
+    const RobotCalculation::MeasureThenWeldAnalysisResult& analysis)
+{
+    std::vector<QString> lines;
+    lines.reserve(12);
+    lines.push_back(QString("方案=%1").arg(title));
+    lines.push_back(QString("输入=%1").arg(inputDescription));
+    lines.push_back(QString("输入点数=%1").arg(inputPoints.size()));
+    lines.push_back(QString("状态=%1").arg(analysis.ok ? "OK" : "FAIL"));
+    if (!analysis.ok)
+    {
+        lines.push_back(QString("错误=%1").arg(analysis.error));
+        return lines;
+    }
+    lines.push_back(QString("拟合输入点=%1").arg(analysis.filterResult.inputPointCount));
+    lines.push_back(QString("保留点=%1").arg(analysis.filterResult.points.size()));
+    lines.push_back(QString("关键点=%1").arg(analysis.keyPoints.size()));
+    lines.push_back(QString("2mm扩充点=%1").arg(analysis.classificationResult.points.size()));
+    lines.push_back(QString("起点=%1").arg(analysis.classificationResult.startCount));
+    lines.push_back(QString("终点=%1").arg(analysis.classificationResult.endCount));
+    lines.push_back(QString("内拐点=%1").arg(analysis.classificationResult.innerCornerCount));
+    lines.push_back(QString("外拐点=%1").arg(analysis.classificationResult.outerCornerCount));
+    return lines;
+}
+
+bool SaveSchemeAnalysisOutputs(
+    const MeasureThenWeldService& service,
+    const QString& compareDir,
+    const QString& prefix,
+    const QString& title,
+    const QString& inputDescription,
+    const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
+    const RobotCalculation::MeasureThenWeldAnalysisResult& analysis,
+    QString& error)
+{
+    const QDir dir(compareDir);
+    if (!service.SaveTextLines(
+            dir.filePath(QString("%1_InputPointCloud.txt").arg(prefix)),
+            BuildIndexedPointOutputLines(inputPoints, inputDescription),
+            error))
+    {
+        return false;
+    }
+    if (!service.SaveTextLines(
+            dir.filePath(QString("%1_Summary.txt").arg(prefix)),
+            BuildSchemeCompareSummaryLines(title, inputDescription, inputPoints, analysis),
+            error))
+    {
+        return false;
+    }
+    if (!analysis.ok)
+    {
+        return true;
+    }
+    return service.SaveTextLines(
+            dir.filePath(QString("%1_PreservePath.txt").arg(prefix)),
+            BuildFilterOutputLines(analysis.filterResult),
+            error)
+        && service.SaveTextLines(
+            dir.filePath(QString("%1_KeyPoints.txt").arg(prefix)),
+            BuildKeyPointOutputLines(analysis.keyPoints),
+            error)
+        && service.SaveTextLines(
+            dir.filePath(QString("%1_Classified_2mm.txt").arg(prefix)),
+            BuildClassifiedOutputLines(analysis.classificationResult),
+            error);
+}
+
+bool SaveSdkSchemeCompareOutputs(
+    const MeasureThenWeldService& service,
+    const QString& sdkPointCloudDir,
+    const QVector<RobotCalculation::IndexedPoint3D>& originalLaserInput,
+    const PointCloudExtractionProcessor::ExtractionResult& extraction,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    QString& error,
+    const MeasureThenWeldService::LogCallback& appendLog)
+{
+    const QString compareDir = QDir(sdkPointCloudDir).filePath(SDK_SCHEME_COMPARE_DIR_NAME);
+    if (!QDir().mkpath(compareDir))
+    {
+        error = QString("创建SDK方案对比目录失败：%1").arg(compareDir);
+        return false;
+    }
+
+    const QDir dir(compareDir);
+    std::vector<QString> featureSummaryLines;
+    featureSummaryLines.reserve(5);
+    featureSummaryLines.push_back("方案=特征点方案");
+    featureSummaryLines.push_back("输入=sdk_feature_point");
+    featureSummaryLines.push_back(QString("关键点=%1").arg(extraction.rawPoints.size()));
+    featureSummaryLines.push_back(QString("2mm扩充点=%1").arg(extraction.keyPointExpandedPoints.size()));
+    if (!service.SaveTextLines(
+            dir.filePath("FeaturePoint_KeyPoints.txt"),
+            BuildSdkTrackOutputLines(extraction.rawPoints, "sdk_feature_point"),
+            error)
+        || !service.SaveTextLines(
+            dir.filePath("FeaturePoint_KeyPointExpanded_2mm.txt"),
+            BuildSdkTrackOutputLines(extraction.keyPointExpandedPoints, "sdk_feature_point_2mm"),
+            error)
+        || !service.SaveTextLines(
+            dir.filePath("FeaturePoint_Summary.txt"),
+            featureSummaryLines,
+            error))
+    {
+        return false;
+    }
+
+    const RobotCalculation::LowerWeldFilterParams compareParams =
+        BuildSchemeCompareFitParams(params);
+    const QVector<RobotCalculation::IndexedPoint3D> baseWeldInput = ToIndexedInput(extraction.points);
+    const RobotCalculation::MeasureThenWeldAnalysisResult baseWeldFitAnalysis =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(baseWeldInput, compareParams);
+    if (!SaveSchemeAnalysisOutputs(
+            service,
+            compareDir,
+            "BaseWeldPointCloudFit",
+            "点云+拟合方案",
+            "sdk_base_weld",
+            baseWeldInput,
+            baseWeldFitAnalysis,
+            error))
+    {
+        return false;
+    }
+
+    const RobotCalculation::MeasureThenWeldAnalysisResult originalPointCloudFitAnalysis =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(originalLaserInput, compareParams);
+    if (!SaveSchemeAnalysisOutputs(
+            service,
+            compareDir,
+            "OriginalPointCloudFit",
+            "点云拟合方案",
+            "original_laser_point",
+            originalLaserInput,
+            originalPointCloudFitAnalysis,
+            error))
+    {
+        return false;
+    }
+
+    if (appendLog)
+    {
+        appendLog(QString("SDK三方案对比输出目录：%1；特征点=%2，点云+拟合关键点=%3，点云拟合关键点=%4")
+            .arg(compareDir)
+            .arg(extraction.rawPoints.size())
+            .arg(baseWeldFitAnalysis.ok ? baseWeldFitAnalysis.keyPoints.size() : 0)
+            .arg(originalPointCloudFitAnalysis.ok ? originalPointCloudFitAnalysis.keyPoints.size() : 0));
+    }
+    return true;
 }
 
 QString FilterResultSummary(
@@ -1384,42 +1921,6 @@ void InitializeDefaultSeamCompSlots(std::vector<WeldPosePreset::SeamCompSlot>& s
     }
 }
 
-bool TryParseWeldProcessDouble(const QStringList& fields, int index, double& value)
-{
-    if (index < 0 || index >= fields.size())
-    {
-        return false;
-    }
-
-    bool ok = false;
-    const double parsed = fields[index].trimmed().toDouble(&ok);
-    if (!ok)
-    {
-        return false;
-    }
-
-    value = parsed;
-    return true;
-}
-
-bool TryParseWeldProcessInt(const QStringList& fields, int index, int& value)
-{
-    if (index < 0 || index >= fields.size())
-    {
-        return false;
-    }
-
-    bool ok = false;
-    const int parsed = fields[index].trimmed().toInt(&ok);
-    if (!ok)
-    {
-        return false;
-    }
-
-    value = parsed;
-    return true;
-}
-
 constexpr int kTransitionScopeArc = 0;
 constexpr int kTransitionScopeTransition = 1;
 constexpr int kTransitionScopeArcAndTransition = 2;
@@ -1451,169 +1952,6 @@ QString TransitionApplyScopeText(int scope)
     }
 }
 
-bool TryParseWeldProcessRow(const QStringList& fields, T_WELD_PARA& weldPara)
-{
-    constexpr int kWeldFieldCount = 84;
-    if (fields.size() != kWeldFieldCount)
-    {
-        return false;
-    }
-
-    weldPara = {};
-    weldPara.strWorkPeace = ToUtf8StdString(fields.value(0).trimmed());
-    weldPara.strWeldType = ToUtf8StdString(fields.value(1).trimmed());
-
-    bool ok = TryParseWeldProcessDouble(fields, 2, weldPara.dWeldAngleSize)
-        && TryParseWeldProcessInt(fields, 3, weldPara.nLayerNo)
-        && TryParseWeldProcessDouble(fields, 4, weldPara.dStartArcCurrent)
-        && TryParseWeldProcessDouble(fields, 5, weldPara.dStartArcVoltage)
-        && TryParseWeldProcessDouble(fields, 6, weldPara.dStartWaitTime)
-        && TryParseWeldProcessDouble(fields, 7, weldPara.dTrackCurrent)
-        && TryParseWeldProcessDouble(fields, 8, weldPara.dTrackVoltage)
-        && TryParseWeldProcessDouble(fields, 9, weldPara.WeldVelocity)
-        && TryParseWeldProcessDouble(fields, 10, weldPara.dStopArcCurrent)
-        && TryParseWeldProcessDouble(fields, 11, weldPara.dStopArcVoltage)
-        && TryParseWeldProcessDouble(fields, 12, weldPara.dStopWaitTime)
-        && TryParseWeldProcessInt(fields, 28, weldPara.nWeaveTypeNo);
-    if (!ok)
-    {
-        return false;
-    }
-
-    const bool parsed = TryParseWeldProcessDouble(fields, 39, weldPara.dCornerArcTransitionRadius)
-        && TryParseWeldProcessDouble(fields, 40, weldPara.dCornerArcTransitionSpeed)
-        && TryParseWeldProcessDouble(fields, 41, weldPara.dCornerArcTransitionCurrent)
-        && TryParseWeldProcessDouble(fields, 42, weldPara.dCornerArcTransitionVoltage)
-        && TryParseWeldProcessInt(fields, 43, weldPara.nCornerArcTransitionRadiusEnable)
-        && TryParseWeldProcessInt(fields, 44, weldPara.nCornerArcTransitionSpeedEnable)
-        && TryParseWeldProcessInt(fields, 45, weldPara.nCornerArcTransitionCurrentEnable)
-        && TryParseWeldProcessInt(fields, 46, weldPara.nCornerArcTransitionVoltageEnable)
-        && TryParseWeldProcessInt(fields, 47, weldPara.nCornerArcTransitionApplyScope)
-        && TryParseWeldProcessInt(fields, 48, weldPara.tTrackParam.nLateralBeginCycle)
-        && TryParseWeldProcessDouble(fields, 49, weldPara.tTrackParam.dLateralGain)
-        && TryParseWeldProcessDouble(fields, 50, weldPara.tTrackParam.dLeftAreaCoefficient)
-        && TryParseWeldProcessDouble(fields, 51, weldPara.tTrackParam.dRightAreaCoefficient)
-        && TryParseWeldProcessInt(fields, 52, weldPara.tTrackParam.nVerticalModeFlag)
-        && TryParseWeldProcessDouble(fields, 53, weldPara.tTrackParam.dVerticalReferenceCurrent)
-        && TryParseWeldProcessInt(fields, 54, weldPara.tTrackParam.nVerticalBeginCycle)
-        && TryParseWeldProcessInt(fields, 55, weldPara.tTrackParam.nVerticalSustainCycle)
-        && TryParseWeldProcessDouble(fields, 56, weldPara.tTrackParam.dVerticalCycleLength)
-        && TryParseWeldProcessDouble(fields, 57, weldPara.tTrackParam.dVerticalGain)
-        && TryParseWeldProcessInt(fields, 58, weldPara.tTrackParam.nTimeOrDistanceMode)
-        && TryParseWeldProcessInt(fields, 59, weldPara.tTrackParam.nTimeIntervalMs)
-        && TryParseWeldProcessInt(fields, 60, weldPara.tTrackParam.nDistanceIntervalMm)
-        && TryParseWeldProcessDouble(fields, 61, weldPara.tTrackParam.dLateralMinCompPerCycle)
-        && TryParseWeldProcessDouble(fields, 62, weldPara.tTrackParam.dLateralMaxCompPerCycle)
-        && TryParseWeldProcessDouble(fields, 63, weldPara.tTrackParam.dLateralMaxCompTotal)
-        && TryParseWeldProcessDouble(fields, 64, weldPara.tTrackParam.dLateralAsymmetryCoefficient)
-        && TryParseWeldProcessDouble(fields, 65, weldPara.tTrackParam.dLateralReserved6)
-        && TryParseWeldProcessDouble(fields, 66, weldPara.tTrackParam.dLateralReserved5)
-        && TryParseWeldProcessDouble(fields, 67, weldPara.tTrackParam.dLateralReserved4)
-        && TryParseWeldProcessDouble(fields, 68, weldPara.tTrackParam.dLateralReserved3)
-        && TryParseWeldProcessDouble(fields, 69, weldPara.tTrackParam.dLateralReserved2)
-        && TryParseWeldProcessDouble(fields, 70, weldPara.tTrackParam.dLateralReserved1)
-        && TryParseWeldProcessDouble(fields, 71, weldPara.tTrackParam.dVerticalMinCompPerCycle)
-        && TryParseWeldProcessDouble(fields, 72, weldPara.tTrackParam.dVerticalMaxCompPerCycle)
-        && TryParseWeldProcessDouble(fields, 73, weldPara.tTrackParam.dVerticalMaxCompTotal)
-        && TryParseWeldProcessDouble(fields, 74, weldPara.tTrackParam.dVerticalAsymmetryCoefficient)
-        && TryParseWeldProcessDouble(fields, 75, weldPara.tTrackParam.dVerticalReserved6)
-        && TryParseWeldProcessDouble(fields, 76, weldPara.tTrackParam.dVerticalReserved5)
-        && TryParseWeldProcessDouble(fields, 77, weldPara.tTrackParam.dVerticalReserved4)
-        && TryParseWeldProcessDouble(fields, 78, weldPara.tTrackParam.dVerticalReserved3)
-        && TryParseWeldProcessDouble(fields, 79, weldPara.tTrackParam.dVerticalReserved2)
-        && TryParseWeldProcessDouble(fields, 80, weldPara.tTrackParam.dVerticalReserved1)
-        && TryParseWeldProcessInt(fields, 81, weldPara.nWeaveEnable)
-        && TryParseWeldProcessInt(fields, 82, weldPara.nTrackEnable)
-        && TryParseWeldProcessInt(fields, 83, weldPara.nArcMode);
-    if (!parsed)
-    {
-        return false;
-    }
-    weldPara.nWeaveEnable = weldPara.nWeaveEnable != 0 ? 1 : 0;
-    weldPara.nTrackEnable = weldPara.nTrackEnable != 0 ? 1 : 0;
-    weldPara.nArcMode = NormalizeArcMode(weldPara.nArcMode);
-    return true;
-}
-
-bool TryParseWeaveProcessRow(const QStringList& fields, T_WeaveDate& weave)
-{
-    constexpr int kWeaveFieldCount = 15;
-    if (fields.size() != kWeaveFieldCount)
-    {
-        return false;
-    }
-    return TryParseWeldProcessInt(fields, 0, weave.nWeaveType)
-        && TryParseWeldProcessInt(fields, 1, weave.nWeaveShape)
-        && TryParseWeldProcessDouble(fields, 2, weave.dWeaveFrequencyHz)
-        && TryParseWeldProcessDouble(fields, 3, weave.dWeaveAmplitudeMm)
-        && TryParseWeldProcessDouble(fields, 4, weave.dSwingDirectionDeg)
-        && TryParseWeldProcessDouble(fields, 5, weave.dWeavePlaneAngleDeg)
-        && TryParseWeldProcessDouble(fields, 6, weave.dSpaceAngleDeg)
-        && TryParseWeldProcessInt(fields, 7, weave.nPauseTime1Ms)
-        && TryParseWeldProcessInt(fields, 8, weave.nPauseTime2Ms)
-        && TryParseWeldProcessInt(fields, 9, weave.nPauseTime3Ms)
-        && TryParseWeldProcessInt(fields, 10, weave.nPauseTime4Ms)
-        && TryParseWeldProcessInt(fields, 11, weave.nPauseContinue)
-        && TryParseWeldProcessDouble(fields, 12, weave.dEndLengthMm)
-        && TryParseWeldProcessDouble(fields, 13, weave.dEndWidthMm)
-        && TryParseWeldProcessDouble(fields, 14, weave.dCenterHeightMm);
-}
-
-bool ReadProcessRows(const QString& filePath, QVector<QStringList>& rows, int& useIndex, QString& error)
-{
-    std::string content;
-    if (!ConfigDatabase::ReadTextFile(filePath.toUtf8().constData(), &content))
-    {
-        error = QString("从配置库读取工艺文件失败：%1").arg(filePath);
-        return false;
-    }
-
-    useIndex = 0;
-    rows.clear();
-    QString text = QString::fromUtf8(content.data(), static_cast<int>(content.size()));
-    QTextStream in(&text);
-    while (!in.atEnd())
-    {
-        const QString rawLine = in.readLine();
-        const QString line = rawLine.trimmed();
-        if (line.isEmpty() || line.startsWith('#'))
-        {
-            continue;
-        }
-
-        const QStringList fields = rawLine.split('\t', Qt::KeepEmptyParts);
-        if (fields.isEmpty())
-        {
-            continue;
-        }
-
-        const QString tag = fields[0].trimmed();
-        if (tag.compare("USE", Qt::CaseInsensitive) == 0)
-        {
-            if (fields.size() >= 2)
-            {
-                bool ok = false;
-                const int parsed = fields[1].trimmed().toInt(&ok);
-                if (ok)
-                {
-                    useIndex = parsed;
-                }
-            }
-            continue;
-        }
-
-        rows.push_back(fields);
-    }
-
-    if (rows.isEmpty())
-    {
-        error = QString("工艺文件没有有效数据：%1").arg(filePath);
-        return false;
-    }
-    useIndex = qBound(0, useIndex, rows.size() - 1);
-    return true;
-}
-
 bool TryLoadActiveWeldProcessParam(const QString& robotName, T_WELD_PARA& weldPara, QString* error)
 {
     if (robotName.trimmed().isEmpty())
@@ -1625,51 +1963,29 @@ bool TryLoadActiveWeldProcessParam(const QString& robotName, T_WELD_PARA& weldPa
         return false;
     }
 
-    const QString weldFilePath = RobotDataHelper::BuildProjectPath(
-        QString("Data/%1/WeldPara.txt").arg(robotName.trimmed()));
-    const QString weaveFilePath = RobotDataHelper::BuildProjectPath(
-        QString("Data/%1/WeaveDate.txt").arg(robotName.trimmed()));
-    QVector<QStringList> weldRows;
-    int useIndex = 0;
-    QString readError;
-    if (!ReadProcessRows(weldFilePath, weldRows, useIndex, readError))
+    // 复用 WeldProcessFile（多键主数据优先 + 文本块回退 + BindWeldToWeave 摆动绑定），
+    // 与工艺页同一份读取逻辑，不再维护第二套文本解析器。
+    WeldProcessFile processFile(ToUtf8StdString(robotName.trimmed()));
+    if (!processFile.Init())
     {
         if (error != nullptr)
         {
-            *error = readError;
+            *error = QString::fromUtf8(processFile.GetLastError().c_str());
         }
         return false;
     }
 
-    if (!TryParseWeldProcessRow(weldRows[useIndex], weldPara))
+    const T_WELD_PARA* activePara = processFile.GetUseWeldPara();
+    if (activePara == nullptr)
     {
         if (error != nullptr)
         {
-            *error = "焊接工艺参数格式已升级，请重新创建工艺内容。";
+            *error = QString("工艺数据没有有效条目：%1").arg(robotName.trimmed());
         }
         return false;
     }
 
-    if (weldPara.nWeaveEnable != 0)
-    {
-        QVector<QStringList> weaveRows;
-        int useWeaveIndex = 0;
-        if (!ReadProcessRows(weaveFilePath, weaveRows, useWeaveIndex, readError)
-            || weldPara.nWeaveTypeNo < 0
-            || weldPara.nWeaveTypeNo >= weaveRows.size()
-            || !TryParseWeaveProcessRow(weaveRows[weldPara.nWeaveTypeNo], weldPara.tWeaveParam))
-        {
-            if (error != nullptr)
-            {
-                *error = "摆动参数格式已升级，请重新创建工艺内容。";
-            }
-            return false;
-        }
-    }
-    else
-    {
-        weldPara.tWeaveParam = {};
-    }
+    weldPara = *activePara;  // 含 BindWeldToWeave 已灌入的 tWeaveParam
     return true;
 }
 
@@ -1766,6 +2082,13 @@ void ApplyActiveWeldProcessToPreset(const T_PRECISE_MEASURE_PARAM& param, WeldPo
         preset.transitionCurrentVoltageEnabled = true;
         preset.transitionCurrent = weldPara.dCornerArcTransitionCurrent;
         preset.transitionVoltage = weldPara.dCornerArcTransitionVoltage;
+    }
+
+    // 工艺里的实际焊道点间距（>0 时优先于测量参数页的 FinalWeldTrajectoryStepMm）。
+    if (std::isfinite(weldPara.dFinalWeldTrajectoryStepMm)
+        && weldPara.dFinalWeldTrajectoryStepMm > 0.0)
+    {
+        preset.finalWeldStepFromProcessMm = weldPara.dFinalWeldTrajectoryStepMm;
     }
 }
 
@@ -2877,39 +3200,78 @@ QVector<WeldPoseFileRecord> SampleFinalWeldTrajectoryRecords(
         return records;
     }
 
-    QVector<WeldPoseFileRecord> sampled;
-    sampled.reserve(records.size());
-    sampled.push_back(records.front());
-    auto appendSample = [&sampled](const WeldPoseFileRecord& record)
-    {
-        constexpr double kDuplicateDistanceMm = 1e-6;
-        if (!sampled.isEmpty()
-            && (sampled.back().point - record.point).norm() <= kDuplicateDistanceMm)
-        {
-            sampled.back() = record;
-            return;
-        }
-        sampled.push_back(record);
-    };
+    // 任意相邻输出点的沿线间距不得小于设定点间距：过密的点会干扰摆动动作。
+    // 拐点/圆弧/过渡区域的边界锚彼此相距常低于设定值，按"锚点优先于普通采样点、
+    // 锚点之间仍不足间距时丢弃后到者、终点最优先"的规则去密，圆弧段只留间距达标的关键点。
+    const double minGapMm = sampleStepMm;
 
-    double distanceSinceLastKeep = 0.0;
+    struct KeptPoint
+    {
+        int index = 0;
+        bool anchor = false;
+        double arcLengthMm = 0.0;
+    };
+    QVector<KeptPoint> kept;
+    kept.reserve(records.size());
+    kept.push_back({ 0, true, 0.0 });
+
+    double arcLengthMm = 0.0;
     for (int index = 1; index < records.size() - 1; ++index)
     {
         const double segmentLengthMm = (records[index].point - records[index - 1].point).norm();
         if (std::isfinite(segmentLengthMm) && segmentLengthMm > 1e-6)
         {
-            distanceSinceLastKeep += segmentLengthMm;
+            arcLengthMm += segmentLengthMm;
         }
 
-        if (IsFinalWeldTrajectoryAnchor(records, index)
-            || distanceSinceLastKeep >= sampleStepMm)
+        if (IsFinalWeldTrajectoryAnchor(records, index))
         {
-            appendSample(records[index]);
-            distanceSinceLastKeep = 0.0;
+            // 锚点优先：回溯挤掉与其间距不足的普通采样点。
+            while (kept.size() > 1
+                && !kept.back().anchor
+                && arcLengthMm - kept.back().arcLengthMm < minGapMm)
+            {
+                kept.pop_back();
+            }
+            if (arcLengthMm - kept.back().arcLengthMm >= minGapMm)
+            {
+                kept.push_back({ index, true, arcLengthMm });
+            }
+            // 与前一锚点仍不足间距时丢弃当前锚，保证输出不含过密点。
+        }
+        else if (arcLengthMm - kept.back().arcLengthMm >= minGapMm)
+        {
+            kept.push_back({ index, false, arcLengthMm });
         }
     }
 
-    appendSample(records.back());
+    // 终点必留且最优先：回溯挤掉与终点间距不足的点（首点除外）。
+    const double tailSegmentMm =
+        (records[records.size() - 1].point - records[records.size() - 2].point).norm();
+    if (std::isfinite(tailSegmentMm) && tailSegmentMm > 1e-6)
+    {
+        arcLengthMm += tailSegmentMm;
+    }
+    while (kept.size() > 1 && arcLengthMm - kept.back().arcLengthMm < minGapMm)
+    {
+        kept.pop_back();
+    }
+
+    QVector<WeldPoseFileRecord> sampled;
+    sampled.reserve(kept.size() + 1);
+    for (const KeptPoint& keep : kept)
+    {
+        sampled.push_back(records[keep.index]);
+    }
+    constexpr double kDuplicateDistanceMm = 1e-6;
+    if ((sampled.back().point - records.back().point).norm() <= kDuplicateDistanceMm)
+    {
+        sampled.back() = records.back();
+    }
+    else
+    {
+        sampled.push_back(records.back());
+    }
     for (int index = 0; index < sampled.size(); ++index)
     {
         sampled[index].weldIndex = index + 1;
@@ -2929,8 +3291,14 @@ bool BuildWeldPoseMoveInfos(
     QVector<WeldPoseFileRecord>* executionRecordsOut = nullptr)
 {
     moveInfos.clear();
+    // 工艺里设置了点间距(>0)时优先用工艺的，否则用测量参数页传入值。
+    double effectiveSampleStepMm = finalTrajectorySampleStepMm;
+    if (preset != nullptr && preset->finalWeldStepFromProcessMm > 0.0)
+    {
+        effectiveSampleStepMm = preset->finalWeldStepFromProcessMm;
+    }
     const QVector<WeldPoseFileRecord> executionRecords =
-        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(finalTrajectorySampleStepMm));
+        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(effectiveSampleStepMm));
     if (executionRecordsOut != nullptr)
     {
         *executionRecordsOut = executionRecords;
@@ -4126,6 +4494,46 @@ WeldCornerArcApplyStats ApplyCornerArcTransitionToWeldPoseRecords(
     return stats;
 }
 
+// 独立调试预览(不参与主流程，不影响任何实际焊接文件)：在几何分析得到分类轨迹(拐点+2mm点)后，
+// 用与主流程相同的圆弧过渡算法(焊接工艺圆角半径 cornerArcRadiusMm)对拐角做圆弧过渡，仅生成一份
+// CloudCompare 点云：绿=圆弧过渡段、灰=直线段。叠加原始 PreciseLaserPoint.txt 即可核对生成的圆弧
+// 是否贴合原本焊道。注意：主流程真正的圆弧过渡仍在补偿之后(_SeamComp)，此处只为提前可视化核对。
+std::vector<QString> BuildArcTransitionPreviewCloudLines(
+    const RobotCalculation::LowerWeldClassificationResult& classification,
+    const WeldPosePreset& preset)
+{
+    QVector<WeldPoseFileRecord> records;
+    records.reserve(classification.points.size());
+    int weldIndex = 1;
+    for (const RobotCalculation::LowerWeldClassifiedPoint& point : classification.points)
+    {
+        WeldPoseFileRecord record;
+        record.weldIndex = weldIndex++;
+        record.rawIndex = point.index;
+        record.point = point.point;
+        record.pointType = RobotCalculation::LowerWeldPointTypeName(point.type);
+        record.segmentKind = point.segmentKindAfter;
+        records.push_back(record);
+    }
+
+    ApplyCornerArcTransitionToWeldPoseRecords(preset, records);
+
+    std::vector<QString> cloud;
+    cloud.push_back(QStringLiteral("// X Y Z R G B  绿=圆弧过渡段 灰=直线段 (叠加 PreciseLaserPoint.txt 对比焊道)"));
+    for (const WeldPoseFileRecord& record : records)
+    {
+        const bool isArc = record.pointType.contains(QStringLiteral("arc"))
+            || record.segmentKind.contains(QStringLiteral("_arc"));
+        const QString rgb = isArc ? QStringLiteral("0 255 0") : QStringLiteral("120 120 120");
+        cloud.push_back(QString("%1 %2 %3 %4")
+            .arg(record.point.x(), 0, 'f', 6)
+            .arg(record.point.y(), 0, 'f', 6)
+            .arg(record.point.z(), 0, 'f', 6)
+            .arg(rgb));
+    }
+    return cloud;
+}
+
 int DensifyWeldPoseRecordsByStep(
     QVector<WeldPoseFileRecord>& records,
     double maxStepMm)
@@ -5042,6 +5450,121 @@ WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
     return stats;
 }
 
+// 焊缝补偿平移之后的完整后处理（端点裁剪/自交裁剪/拐点恢复/加密/圆弧过渡/锐角裁剪/平滑/重编号）。
+// 管线 ApplyWeldSeamCompToPoseFile 与补偿预览共用，保证预览贴近实际下发轨迹（单一事实源）。
+struct SeamCompFinalizeStats
+{
+    WeldEndpointTrimStats endpointTrim;
+    WeldCornerRestoreStats cornerRestore;
+    WeldCornerArcApplyStats arc;
+    int densifiedPointCount = 0;
+    int postArcDensifiedPointCount = 0;
+    int finalDensifiedPointCount = 0;
+    int smoothedRemainingCornerCount = 0;
+    double densifyStepMm = 2.0;
+    bool emptyAfterEndpointTrim = false;
+    bool emptyAfterSelfIntersection = false;
+};
+
+SeamCompFinalizeStats FinalizeSeamCompedWeldPoseRecords(
+    const WeldPosePreset& preset,
+    const QVector<WeldPoseFileRecord>& recordsBeforeTrim,
+    QVector<WeldPoseFileRecord>& records,
+    WeldSeamCompApplyStats& compStats)
+{
+    SeamCompFinalizeStats stats;
+    constexpr double kSharpArcAngleRad = 8.0 * 3.14159265358979323846 / 180.0;
+
+    TrimWeldPoseRecordEndpoints(preset, records, stats.endpointTrim);
+    if (records.isEmpty())
+    {
+        stats.emptyAfterEndpointTrim = true;
+        return stats;
+    }
+    TrimWeldPathSelfIntersections(records, compStats);
+    if (records.isEmpty())
+    {
+        stats.emptyAfterSelfIntersection = true;
+        return stats;
+    }
+    stats.cornerRestore = RestoreTrimmedWeldCornersByLineIntersection(recordsBeforeTrim, records);
+    stats.densifyStepMm = std::min(2.0, EstimateWeldPoseStepMm(records));
+    stats.densifiedPointCount = DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    stats.arc = ApplyCornerArcTransitionToWeldPoseRecords(preset, records);
+    stats.postArcDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    TrimSharpWeldArcEntryPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
+    TrimSharpWeldArcExitPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
+    stats.smoothedRemainingCornerCount = SmoothRemainingUnroundedWeldCorners(records, stats.densifyStepMm);
+    stats.finalDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    TrimSharpWeldArcEntryPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
+    TrimSharpWeldArcExitPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
+    stats.smoothedRemainingCornerCount += SmoothRemainingUnroundedWeldCorners(records, stats.densifyStepMm);
+    stats.finalDensifiedPointCount += DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    RenumberWeldPoseRecords(records);
+    return stats;
+}
+
+// 姿态补偿的「匹配槽位 + 工具系旋转后叠加」单一事实源：
+// 管线（BuildSegmentPoseOutputLines）与补偿预览（MeasureThenWeldService::RecomputeCompPreview）共用，
+// 确保界面显示的补偿后焊道与实际下发轨迹一致。
+Eigen::Vector3d ApplyPoseCompToPoint(
+    const std::vector<WeldPosePreset::PoseCompSlot>& poseCompSlots,
+    int poseCompMatchMode,
+    double poseMatchMaxErrorDeg,
+    int robotType,
+    const Eigen::Vector3d& point,
+    double rx,
+    double ry,
+    double rz,
+    const QString& segmentKind)
+{
+    int slotIndex = -1;
+    if (NormalizePoseCompMatchMode(poseCompMatchMode) == POSE_COMP_MATCH_BY_SEGMENT_CODE)
+    {
+        // 剥掉 _transition/_arc 后缀再匹配：管线内传入的 segment.kind 本就无后缀（无影响），
+        // 预览从 _WeldPose_2mm 文件读回的段类带后缀，不剥会漏补偿过渡点、轨迹出现弯折。
+        const int defaultIndex = DefaultPoseCompSlotIndex(NormalizeSeamCompSegmentKind(segmentKind));
+        if (defaultIndex >= 0 && defaultIndex < static_cast<int>(poseCompSlots.size()))
+        {
+            slotIndex = defaultIndex;
+        }
+    }
+    else
+    {
+        double bestDistance = std::numeric_limits<double>::max();
+        for (int index = 0; index < static_cast<int>(poseCompSlots.size()); ++index)
+        {
+            const WeldPosePreset::PoseCompSlot& slot = poseCompSlots[index];
+            if (!slot.validReference)
+            {
+                continue;
+            }
+            const double distance = PoseDistanceDeg(rx, ry, rz, slot.poseRx, slot.poseRy, slot.poseRz);
+            if (distance > poseMatchMaxErrorDeg)
+            {
+                continue;
+            }
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                slotIndex = index;
+            }
+        }
+    }
+
+    if (slotIndex < 0)
+    {
+        return point;
+    }
+    const WeldPosePreset::PoseCompSlot& slot = poseCompSlots[slotIndex];
+    const Eigen::Vector3d poseCompLocal(slot.compX, slot.compY, slot.compZ);
+    if (poseCompLocal.norm() <= 1e-9)
+    {
+        return point;
+    }
+    return point + RobotPoseTransform::RotationFromAnglesDeg(rx, ry, rz, robotType) * poseCompLocal;
+}
+
 std::vector<QString> BuildSegmentPoseOutputLines(
     const RobotCalculation::LowerWeldClassificationResult& result,
     const T_PRECISE_MEASURE_PARAM& param,
@@ -5533,56 +6056,8 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         }
     }
 
-    auto findNearestPoseCompSlot = [&poseCompSlots, &preset](double rx, double ry, double rz) -> int
-    {
-        int bestIndex = -1;
-        double bestDistance = std::numeric_limits<double>::max();
-        for (int slotIndex = 0; slotIndex < static_cast<int>(poseCompSlots.size()); ++slotIndex)
-        {
-            const WeldPosePreset::PoseCompSlot& slot = poseCompSlots[slotIndex];
-            if (!slot.validReference)
-            {
-                continue;
-            }
-
-            const double distance = PoseDistanceDeg(
-                rx,
-                ry,
-                rz,
-                slot.poseRx,
-                slot.poseRy,
-                slot.poseRz);
-            if (distance > preset.poseMatchMaxErrorDeg)
-            {
-                continue;
-            }
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                bestIndex = slotIndex;
-            }
-        }
-        return bestIndex;
-    };
-
-    auto findPoseCompSlot = [&poseCompSlots, &preset, &findNearestPoseCompSlot](
-        double rx,
-        double ry,
-        double rz,
-        const QString& segmentKind) -> int
-    {
-        if (NormalizePoseCompMatchMode(preset.poseCompMatchMode) == POSE_COMP_MATCH_BY_SEGMENT_CODE)
-        {
-            const int slotIndex = DefaultPoseCompSlotIndex(segmentKind);
-            if (slotIndex >= 0 && slotIndex < static_cast<int>(poseCompSlots.size()))
-            {
-                return slotIndex;
-            }
-            return -1;
-        }
-
-        return findNearestPoseCompSlot(rx, ry, rz);
-    };
+    // 姿态补偿槽位匹配 + 工具系旋转应用已下沉为自由函数 ApplyPoseCompToPoint（见上方），
+    // 管线与补偿预览共用同一份数学。
 
     QVector<double> sampleDistances;
     sampleDistances.reserve(static_cast<int>((weldEndIndex - weldStartIndex + 1) * 2));
@@ -5775,17 +6250,16 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         double pointRx = outputPoseRx;
         double pointRy = outputPoseRy;
         Eigen::Vector3d point = sampledPoint;
-        const int poseCompSlotIndex = findPoseCompSlot(pointRx, pointRy, pointRz, segment.kind);
-        if (poseCompSlotIndex >= 0)
-        {
-            const WeldPosePreset::PoseCompSlot& slot = poseCompSlots[poseCompSlotIndex];
-            const Eigen::Vector3d poseCompLocal(slot.compX, slot.compY, slot.compZ);
-            if (poseCompLocal.norm() > 1e-9)
-            {
-                point += RobotPoseTransform::RotationFromAnglesDeg(pointRx, pointRy, pointRz, preset.robotType)
-                    * poseCompLocal;
-            }
-        }
+        point = ApplyPoseCompToPoint(
+            poseCompSlots,
+            preset.poseCompMatchMode,
+            preset.poseMatchMaxErrorDeg,
+            preset.robotType,
+            point,
+            pointRx,
+            pointRy,
+            pointRz,
+            segment.kind);
 
         WeldPoseFileRecord record;
         record.weldIndex = weldIndex++;
@@ -6073,6 +6547,16 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     param.dStepOverlapRel = std::max(0.0, param.dStepOverlapRel);
     param.dFinalWeldTrajectoryStepMm = NormalizeFinalWeldTrajectorySampleStepMm(param.dFinalWeldTrajectoryStepMm);
     param.nWeldDirection = param.nWeldDirection < 0 ? -1 : 1;
+    // 焊接方向已迁入工艺参数：当前工艺设置过（非0）时优先于测量参数页旧值，
+    // 此处统一覆盖，下游（执行反转/已焊起点截断/预览箭头）全部跟随。
+    {
+        T_WELD_PARA activeWeld = {};
+        if (TryLoadActiveWeldProcessParam(robotName, activeWeld, nullptr)
+            && activeWeld.nWeldDirection != 0)
+        {
+            param.nWeldDirection = activeWeld.nWeldDirection < 0 ? -1 : 1;
+        }
+    }
     if (!std::isfinite(param.dGunDownBackSafeDis) || param.dGunDownBackSafeDis <= 0.0)
     {
         param.dGunDownBackSafeDis = WELD_SAFE_OFFSET_DISTANCE_MM;
@@ -6860,6 +7344,27 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     appendRobotPose();
     int motionState = 0;
     bool motionStarted = false;
+    // 扫描完成超时按扫描距离/配置速度动态估计（固定 120s 在慢速测量长焊缝时不够用）：
+    // 预计时间×2 + 30s，夹在 [120s, 1800s]，与焊接执行的完成超时算法一致。
+    const double scanDistanceMm = std::hypot(
+        param.tEndPos.dX - param.tStartPos.dX,
+        param.tEndPos.dY - param.tStartPos.dY,
+        param.tEndPos.dZ - param.tStartPos.dZ);
+    const double scanSpeedMmPerSec = param.dScanSpeed > 1e-6 ? param.dScanSpeed / 60.0 : 0.0;
+    const double estimatedScanMs = scanSpeedMmPerSec > 1e-6
+        ? (scanDistanceMm / scanSpeedMmPerSec) * 1000.0
+        : 0.0;
+    const int scanFinishTimeoutMs = static_cast<int>(std::clamp(
+        estimatedScanMs * 2.0 + 30000.0,
+        120000.0,
+        1800000.0));
+    if (appendLog)
+    {
+        appendLog(QString("扫描距离≈%1 mm，预计扫描≈%2 s，完成超时=%3 s。")
+            .arg(scanDistanceMm, 0, 'f', 1)
+            .arg(estimatedScanMs / 1000.0, 0, 'f', 1)
+            .arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0));
+    }
     const qint64 motionStartMs = SteadyNowMs();
     qint64 lastRobotPollMs = motionStartMs - ROBOT_SAMPLE_INTERVAL_MS;
     while (true)
@@ -6936,17 +7441,22 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
 				finishCameraProcessingWorkers();
 				return false;
             }
-			if (motionStarted && elapsedMs > 120000)
+			if (motionStarted && elapsedMs > scanFinishTimeoutMs)
 			{
 				if (appendLog)
 				{
 					if (pFanucDriver != nullptr)
 					{
-						appendLog(QString("扫描运动等待完成超时：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
+						appendLog(QString("扫描运动等待完成超时（%1 s）：R[%2]=%3")
+							.arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0)
+							.arg(FANUC_MOTION_STATE_REG)
+							.arg(motionState));
 					}
 					else
 					{
-						appendLog(QString("扫描运动等待完成超时：CheckDone=%1").arg(motionState));
+						appendLog(QString("扫描运动等待完成超时（%1 s）：CheckDone=%2")
+							.arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0)
+							.arg(motionState));
 					}
 				}
                 finishCameraProcessingWorkers();
@@ -7043,7 +7553,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     const QString matchDebugPath = QDir(laserDir).filePath(MATCH_DEBUG_FILE_NAME);
     const QString sdkPointCloudDir = QDir(laserDir).filePath(SDK_POINT_CLOUD_OUTPUT_DIR_NAME);
     const QString sdkSeamExtractedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_FILE_NAME);
-    const QString sdkSeamFittedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_FITTED_FILE_NAME);
+    const QString sdkSeamExtracted2mmPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_2MM_FILE_NAME);
+    const QString sdkBaseWeldPath = QDir(sdkPointCloudDir).filePath(SDK_BASE_WELD_FILE_NAME);
     const QString preservePathFitPath = QDir(laserDir).filePath(PRESERVE_PATH_FILE_NAME);
     const QString keyPointsPath = QDir(laserDir).filePath(KEY_POINTS_FILE_NAME);
     const QString classifiedPath = QDir(laserDir).filePath(CLASSIFIED_FILE_NAME);
@@ -7323,45 +7834,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         appendLog(QString("相机-机器人-激光匹配明细文件：%1").arg(matchDebugPath));
     }
 
-    const RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);
-    const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
-    if (originalFitParams.geometryStrategy == RobotCalculation::LowerWeldGeometryStrategy::WorkpieceProjection)
+    RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);
+    if (originalFitParams.exportFitDebugCloud && !laserDir.isEmpty())
     {
-        const QString workpieceExtractedLaserPath = QDir(laserDir).filePath(WORKPIECE_EXTRACTED_LASER_FILE_NAME);
-        const RobotCalculation::LowerWeldFilterResult projectedPath =
-            RobotCalculation::ProjectWorkpieceCloudToLowerWeldPath(workpieceCloudInput, laserFitInput, originalFitParams);
-        if (!projectedPath.ok)
-        {
-            error = projectedPath.error;
-            if (appendLog)
-            {
-                appendLog(QString("立板投影到底板失败：%1").arg(projectedPath.error));
-            }
-            return false;
-        }
-
-        laserFitInput = ToIndexedInput(projectedPath.points);
-        if (!SaveTextLines(workpieceExtractedLaserPath, BuildRawLaserOutputLines(projectedPath.points), error))
-        {
-            if (appendLog)
-            {
-                appendLog(QString("立板投影到底板成功，但写入投影轨迹文件失败：%1").arg(error));
-            }
-            return false;
-        }
-        if (appendLog)
-        {
-            appendLog(QString("已生成立板投影到底板轨迹：种子轨迹点=%1，完整点云=%2，底板候选点=%3，投影点=%4，文件=%5")
-                .arg(laserLines.size() > 0 ? static_cast<int>(laserLines.size()) - 1 : laserFitInput.size())
-                .arg(workpieceCloudInput.size())
-                .arg(projectedPath.lowerPointCount)
-                .arg(laserFitInput.size())
-                .arg(workpieceExtractedLaserPath));
-        }
+        // 真机路径把拟合调试点云导出到本次结果的 LaserPoint 目录下（FitDebug 子目录）。
+        originalFitParams.fitDebugDir = laserDir;
     }
-
+    const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
+    // ①②③ 三种点云链方法都以完整点云为输入（③另需相机轨迹点做投影种子，④只用激光轨迹点）。
     const bool canUseExternalCloud =
-        pointCloudSettings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
+        pointCloudSettings.mode != PointCloudProcessingConfig::Mode::LegacyLaserPath
         && workpieceCloudInput.size() >= 2;
     if (laserFitInput.size() < 2 && !canUseExternalCloud)
     {
@@ -7395,17 +7877,21 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             workpieceCloudInput,
             param,
             originalFitParams,
+            sdkBaseWeldPath,
+            laserDir,
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
+    EnsureWorkpieceMeshCacheFromCloud(laserDir, workpieceCloudInput, appendLog);
     if (!originalAnalysis.ok)
     {
+        error = QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error);
         if (appendLog)
         {
-            appendLog(QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error));
+            appendLog(error);
             appendLog("已保留原始激光点文件，可先按原始点云继续分析。");
         }
-        return true;
+        return false;
     }
 
     if (usedExternalLibrary)
@@ -7419,11 +7905,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             }
             return true;
         }
-        if (!SaveTextLines(sdkSeamFittedPath, BuildSdkTrackOutputLines(externalExtraction.points, "sdk_fitted_2mm"), error))
+        if (!SaveTextLines(
+                sdkSeamExtracted2mmPath,
+                BuildSdkTrackOutputLines(externalExtraction.keyPointExpandedPoints, "sdk_keypoint_2mm"),
+                error))
         {
             if (appendLog)
             {
-                appendLog(QString("保存SDK拟合焊道结果失败：%1").arg(error));
+                appendLog(QString("保存SDK提取焊道2mm采样结果失败：%1").arg(error));
             }
             return true;
         }
@@ -7432,9 +7921,25 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             appendLog(QString("SDK提取点云焊道文件：%1，点数=%2")
                 .arg(sdkSeamExtractedPath)
                 .arg(externalExtraction.rawPoints.size()));
-            appendLog(QString("SDK拟合焊道文件：%1，点数=%2")
-                .arg(sdkSeamFittedPath)
+            appendLog(QString("SDK提取点云焊道2mm采样文件：%1，点数=%2")
+                .arg(sdkSeamExtracted2mmPath)
+                .arg(externalExtraction.keyPointExpandedPoints.size()));
+            appendLog(QString("SDK基础焊道文件：%1，点数=%2")
+                .arg(externalExtraction.baseWeldPath.isEmpty() ? sdkBaseWeldPath : externalExtraction.baseWeldPath)
                 .arg(externalExtraction.points.size()));
+        }
+        QString schemeCompareError;
+        if (!SaveSdkSchemeCompareOutputs(
+                *this,
+                sdkPointCloudDir,
+                laserFitInput,
+                externalExtraction,
+                originalFitParams,
+                schemeCompareError,
+                appendLog)
+            && appendLog)
+        {
+            appendLog(QString("SDK三方案对比输出失败：%1").arg(schemeCompareError));
         }
     }
 
@@ -7471,6 +7976,23 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             appendLog(QString("保存焊道分类结果失败：%1").arg(error));
         }
         return true;
+    }
+
+    // 独立圆弧过渡预览(只输出、不参与主流程)：在分类点之后对拐角做圆弧过渡，导出 CloudCompare 点云，
+    // 叠加 PreciseLaserPoint.txt 即可核对生成的圆弧是否贴合原本焊道。受“导出调试点云”开关控制。
+    if (PointCloudProcessingConfig::Load().exportFitDebugCloud)
+    {
+        const QString arcPreviewPath =
+            QDir(laserDir).filePath(QStringLiteral("PreciseLaserPoint_ArcTransitionPreview.txt"));
+        QString arcPreviewError;
+        if (SaveTextLines(
+                arcPreviewPath,
+                BuildArcTransitionPreviewCloudLines(originalAnalysis.classificationResult, LoadWeldPosePreset(param)),
+                arcPreviewError)
+            && appendLog)
+        {
+            appendLog(QString("圆弧过渡预览点云(CloudCompare)：%1").arg(arcPreviewPath));
+        }
     }
 
     if (!SaveTextLines(keyPointsPath, BuildKeyPointOutputLines(originalAnalysis.keyPoints), error))
@@ -7690,10 +8212,10 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
 
     preservePath = dir.filePath(PRESERVE_PATH_FILE_NAME);
     const QString workpieceCloudPath = dir.filePath(WORKPIECE_CLOUD_FILE_NAME);
-    const QString workpieceExtractedLaserPath = dir.filePath(WORKPIECE_EXTRACTED_LASER_FILE_NAME);
     const QString sdkPointCloudDir = dir.filePath(SDK_POINT_CLOUD_OUTPUT_DIR_NAME);
     const QString sdkSeamExtractedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_FILE_NAME);
-    const QString sdkSeamFittedPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_FITTED_FILE_NAME);
+    const QString sdkSeamExtracted2mmPath = QDir(sdkPointCloudDir).filePath(SDK_SEAM_EXTRACTED_2MM_FILE_NAME);
+    const QString sdkBaseWeldPath = QDir(sdkPointCloudDir).filePath(SDK_BASE_WELD_FILE_NAME);
     const QString keyPointsPath = dir.filePath(KEY_POINTS_FILE_NAME);
     const QString classifiedPath = dir.filePath(CLASSIFIED_FILE_NAME);
     const QString cornerCompKeyPointsPath = dir.filePath(CORNER_COMP_KEY_POINTS_FILE_NAME);
@@ -7704,27 +8226,10 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     seamCompPath = dir.filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
 
     const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
-    const bool needsWorkpieceProjection =
-        pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::WorkpieceProjection;
     QString sourceLaserPath = dir.filePath(RAW_LASER_FILE_NAME);
     if (!QFileInfo::exists(sourceLaserPath))
     {
-        if (needsWorkpieceProjection && QFileInfo::exists(workpieceExtractedLaserPath))
-        {
-            sourceLaserPath = workpieceExtractedLaserPath;
-            if (appendLog)
-            {
-                appendLog(QString("未找到原始激光点文件 %1，临时使用已有立板投影轨迹：%2")
-                    .arg(RAW_LASER_FILE_NAME, workpieceExtractedLaserPath));
-            }
-        }
-        else if (needsWorkpieceProjection)
-        {
-            error = QString("未找到原始激光点文件：%1。立板投影到底板需要原始焊道作为种子轨迹。")
-                .arg(dir.filePath(RAW_LASER_FILE_NAME));
-            return false;
-        }
-        else if (QFileInfo::exists(workpieceCloudPath))
+        if (QFileInfo::exists(workpieceCloudPath))
         {
             sourceLaserPath = workpieceCloudPath;
             if (appendLog)
@@ -7759,48 +8264,14 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         && !RobotDataHelper::LoadIndexedPoint3DFile(workpieceCloudPath, workpieceCloudInput, &workpieceLoadError)
         && appendLog)
     {
-        appendLog(QString("读取局部完整点云失败，将视配置回退旧版目标点处理：%1").arg(workpieceLoadError));
+        appendLog(QString("读取局部完整点云失败：%1（点云链方法将因输入不足报错）").arg(workpieceLoadError));
     }
 
     const RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);
-    if (originalFitParams.geometryStrategy == RobotCalculation::LowerWeldGeometryStrategy::WorkpieceProjection
-        && sourceLaserPath != workpieceExtractedLaserPath)
-    {
-        const RobotCalculation::LowerWeldFilterResult projectedPath =
-            RobotCalculation::ProjectWorkpieceCloudToLowerWeldPath(workpieceCloudInput, laserFitInput, originalFitParams);
-        if (!projectedPath.ok)
-        {
-            error = projectedPath.error;
-            if (appendLog)
-            {
-                appendLog(QString("立板投影到底板失败：%1").arg(projectedPath.error));
-            }
-            return false;
-        }
 
-        laserFitInput = ToIndexedInput(projectedPath.points);
-        sourceLaserPath = workpieceExtractedLaserPath;
-        if (!SaveTextLines(sourceLaserPath, BuildRawLaserOutputLines(projectedPath.points), error))
-        {
-            if (appendLog)
-            {
-                appendLog(QString("立板投影到底板成功，但写入投影轨迹文件失败：%1").arg(error));
-            }
-            return false;
-        }
-        if (appendLog)
-        {
-            appendLog(QString("已生成立板投影到底板轨迹：种子轨迹点=%1，完整点云=%2，底板候选点=%3，投影点=%4，文件=%5")
-                .arg(projectedPath.measuredCount)
-                .arg(workpieceCloudInput.size())
-                .arg(projectedPath.lowerPointCount)
-                .arg(laserFitInput.size())
-                .arg(sourceLaserPath));
-        }
-    }
-
+    // ①②③ 三种点云链方法都以完整点云为输入（③另需相机轨迹点做投影种子，④只用激光轨迹点）。
     const bool canUseExternalCloud =
-        pointCloudSettings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
+        pointCloudSettings.mode != PointCloudProcessingConfig::Mode::LegacyLaserPath
         && workpieceCloudInput.size() >= 2;
     if (laserFitInput.size() < 2 && !canUseExternalCloud)
     {
@@ -7833,9 +8304,12 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             workpieceCloudInput,
             param,
             originalFitParams,
+            sdkBaseWeldPath,
+            laserDir,
             appendLog,
             &usedExternalLibrary,
             &externalExtraction);
+    EnsureWorkpieceMeshCacheFromCloud(laserDir, workpieceCloudInput, appendLog);
     if (!originalAnalysis.ok)
     {
         error = QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error);
@@ -7849,9 +8323,25 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         {
             return false;
         }
-        if (!SaveTextLines(sdkSeamFittedPath, BuildSdkTrackOutputLines(externalExtraction.points, "sdk_fitted_2mm"), error))
+        if (!SaveTextLines(
+                sdkSeamExtracted2mmPath,
+                BuildSdkTrackOutputLines(externalExtraction.keyPointExpandedPoints, "sdk_keypoint_2mm"),
+                error))
         {
             return false;
+        }
+        QString schemeCompareError;
+        if (!SaveSdkSchemeCompareOutputs(
+                *this,
+                sdkPointCloudDir,
+                laserFitInput,
+                externalExtraction,
+                originalFitParams,
+                schemeCompareError,
+                appendLog)
+            && appendLog)
+        {
+            appendLog(QString("SDK三方案对比输出失败：%1").arg(schemeCompareError));
         }
     }
 
@@ -7863,6 +8353,24 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     {
         return false;
     }
+
+    // 独立圆弧过渡预览(只输出、不参与主流程)：分类点之后对拐角做圆弧过渡，导出 CloudCompare 点云，
+    // 叠加 PreciseLaserPoint.txt 核对圆弧是否贴合焊道。受“导出调试点云”开关控制。
+    if (PointCloudProcessingConfig::Load().exportFitDebugCloud)
+    {
+        const QString arcPreviewPath = QDir(QFileInfo(classifiedPath).absolutePath())
+            .filePath(QStringLiteral("PreciseLaserPoint_ArcTransitionPreview.txt"));
+        QString arcPreviewError;
+        if (SaveTextLines(
+                arcPreviewPath,
+                BuildArcTransitionPreviewCloudLines(originalAnalysis.classificationResult, LoadWeldPosePreset(param)),
+                arcPreviewError)
+            && appendLog)
+        {
+            appendLog(QString("圆弧过渡预览点云(CloudCompare)：%1").arg(arcPreviewPath));
+        }
+    }
+
     if (!SaveTextLines(keyPointsPath, BuildKeyPointOutputLines(originalAnalysis.keyPoints), error))
     {
         return false;
@@ -7919,8 +8427,11 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             appendLog(QString("SDK提取点云焊道文件：%1，点数=%2")
                 .arg(sdkSeamExtractedPath)
                 .arg(externalExtraction.rawPoints.size()));
-            appendLog(QString("SDK拟合焊道文件：%1，点数=%2")
-                .arg(sdkSeamFittedPath)
+            appendLog(QString("SDK提取点云焊道2mm采样文件：%1，点数=%2")
+                .arg(sdkSeamExtracted2mmPath)
+                .arg(externalExtraction.keyPointExpandedPoints.size()));
+            appendLog(QString("SDK基础焊道文件：%1，点数=%2")
+                .arg(externalExtraction.baseWeldPath.isEmpty() ? sdkBaseWeldPath : externalExtraction.baseWeldPath)
                 .arg(externalExtraction.points.size()));
         }
         appendLog(QString("焊道分类文件：%1").arg(classifiedPath));
@@ -8066,48 +8577,18 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
 
     WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
     const QVector<WeldPoseFileRecord> recordsBeforeTrim = records;
-    WeldEndpointTrimStats endpointTrimStats;
-    TrimWeldPoseRecordEndpoints(preset, records, endpointTrimStats);
-    if (records.isEmpty())
+    const SeamCompFinalizeStats finalizeStats =
+        FinalizeSeamCompedWeldPoseRecords(preset, recordsBeforeTrim, records, compStats);
+    if (finalizeStats.emptyAfterEndpointTrim)
     {
         error = "焊道补偿和起终点裁剪后没有有效焊接点。";
         return false;
     }
-    TrimWeldPathSelfIntersections(records, compStats);
-    if (records.isEmpty())
+    if (finalizeStats.emptyAfterSelfIntersection)
     {
         error = "焊道自交裁剪后没有有效焊接点。";
         return false;
     }
-    const WeldCornerRestoreStats cornerRestoreStats =
-        RestoreTrimmedWeldCornersByLineIntersection(recordsBeforeTrim, records);
-    const double densifyStepMm = std::min(2.0, EstimateWeldPoseStepMm(records));
-    const int densifiedPointCount = DensifyWeldPoseRecordsByStep(records, densifyStepMm);
-    const WeldCornerArcApplyStats arcStats = ApplyCornerArcTransitionToWeldPoseRecords(preset, records);
-    const int postArcDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, densifyStepMm);
-    TrimSharpWeldArcEntryPoints(
-        records,
-        8.0 * 3.14159265358979323846 / 180.0,
-        std::max(2.0, densifyStepMm * 2.5));
-    TrimSharpWeldArcExitPoints(
-        records,
-        8.0 * 3.14159265358979323846 / 180.0,
-        std::max(2.0, densifyStepMm * 2.5));
-    int smoothedRemainingCornerCount =
-        SmoothRemainingUnroundedWeldCorners(records, densifyStepMm);
-    int finalDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, densifyStepMm);
-    TrimSharpWeldArcEntryPoints(
-        records,
-        8.0 * 3.14159265358979323846 / 180.0,
-        std::max(2.0, densifyStepMm * 2.5));
-    TrimSharpWeldArcExitPoints(
-        records,
-        8.0 * 3.14159265358979323846 / 180.0,
-        std::max(2.0, densifyStepMm * 2.5));
-    smoothedRemainingCornerCount +=
-        SmoothRemainingUnroundedWeldCorners(records, densifyStepMm);
-    finalDensifiedPointCount += DensifyWeldPoseRecordsByStep(records, densifyStepMm);
-    RenumberWeldPoseRecords(records);
 
     QStringList outputLines;
     outputLines.reserve(records.size() + 1);
@@ -8138,22 +8619,22 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
         .arg(compStats.zAdjustedCount)
         .arg(compStats.gunDirAdjustedCount)
         .arg(compStats.seamDirAdjustedCount)
-        .arg(endpointTrimStats.removedStartCount)
-        .arg(endpointTrimStats.removedEndCount)
+        .arg(finalizeStats.endpointTrim.removedStartCount)
+        .arg(finalizeStats.endpointTrim.removedEndCount)
         .arg(compStats.selfIntersectionTrimCount)
         .arg(compStats.selfIntersectionRemovedPointCount)
-        .arg(cornerRestoreStats.adjustedCornerCount)
-        .arg(cornerRestoreStats.missingCornerCount)
-        .arg(cornerRestoreStats.restoredCornerCount)
-        .arg(cornerRestoreStats.skippedCornerCount)
-        .arg(smoothedRemainingCornerCount)
-        .arg(densifiedPointCount)
-        .arg(postArcDensifiedPointCount)
-        .arg(finalDensifiedPointCount)
-        .arg(densifyStepMm, 0, 'f', 3)
-        .arg(arcStats.roundedCornerCount)
-        .arg(arcStats.radiusMm, 0, 'f', 3)
-        .arg(arcStats.insertedPointCount())
+        .arg(finalizeStats.cornerRestore.adjustedCornerCount)
+        .arg(finalizeStats.cornerRestore.missingCornerCount)
+        .arg(finalizeStats.cornerRestore.restoredCornerCount)
+        .arg(finalizeStats.cornerRestore.skippedCornerCount)
+        .arg(finalizeStats.smoothedRemainingCornerCount)
+        .arg(finalizeStats.densifiedPointCount)
+        .arg(finalizeStats.postArcDensifiedPointCount)
+        .arg(finalizeStats.finalDensifiedPointCount)
+        .arg(finalizeStats.densifyStepMm, 0, 'f', 3)
+        .arg(finalizeStats.arc.roundedCornerCount)
+        .arg(finalizeStats.arc.radiusMm, 0, 'f', 3)
+        .arg(finalizeStats.arc.insertedPointCount())
         .arg(QDir::toNativeSeparators(segmentKindDebugPath))
         .arg(QDir::toNativeSeparators(preset.seamCompFilePath));
     return true;
@@ -8868,4 +9349,834 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         .arg(RobotCoorsText(weldStartCoors))
         .arg(RobotCoorsText(endSafeCoors));
     return true;
+}
+
+// ===== 补偿前后焊道可视化预览实现 =====
+// 这些成员函数位于匿名命名空间之后，可直接复用其内的真实补偿数学
+// （ApplyWeldSeamCompToWeldPoseRecords / TryParseWeldPoseFileRecord /
+//  ResolveOverallHorizontalWeldDirection 等），保证预览与实际下发轨迹一致。
+
+bool MeasureThenWeldService::LoadCompPreviewBaseline(
+    CompPreviewKind kind,
+    const QString& laserDir,
+    QVector<CompPreviewPoint>& baseline,
+    QString& error) const
+{
+    baseline.clear();
+    QDir dir(laserDir);
+    if (!dir.exists())
+    {
+        error = QString("目录不存在：%1").arg(laserDir);
+        return false;
+    }
+
+    if (kind == CompPreviewKind::Corner)
+    {
+        // 拐点补偿的补偿前基准 = 关键点（start/end/inner/outer），用于按几何重算段类并整体补偿。
+        const QString keyPath = dir.filePath(KEY_POINTS_FILE_NAME);
+        QFile keyFile(keyPath);
+        if (!keyFile.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            error = QString("打开拐点文件失败：%1").arg(keyPath);
+            return false;
+        }
+        QTextStream keyStream(&keyFile);
+        keyStream.setEncoding(QStringConverter::Utf8);
+        while (!keyStream.atEnd())
+        {
+            const QString lineText = keyStream.readLine().trimmed();
+            if (lineText.isEmpty() || lineText.startsWith('#'))
+            {
+                continue;
+            }
+            const QStringList parts = lineText.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            if (parts.size() < 5)
+            {
+                continue;
+            }
+            bool xOk = false, yOk = false, zOk = false, codeOk = false;
+            const double x = parts[1].toDouble(&xOk);
+            const double y = parts[2].toDouble(&yOk);
+            const double z = parts[3].toDouble(&zOk);
+            const int code = parts[4].toInt(&codeOk);
+            if (!xOk || !yOk || !zOk || !codeOk)
+            {
+                continue;
+            }
+            CompPreviewPoint point;
+            point.x = x;
+            point.y = y;
+            point.z = z;
+            point.typeCode = code;
+            point.pointType = parts.size() > 5 ? parts[5] : QString();
+            baseline.push_back(point);
+        }
+        if (baseline.size() < 2)
+        {
+            error = QString("未从 %1 解析到足够拐点（至少2个）。").arg(KEY_POINTS_FILE_NAME);
+            return false;
+        }
+        return true;
+    }
+
+    // 焊道补偿/姿态补偿的补偿前基准 = 稠密 2mm 焊道姿态文件。
+    const QString path = dir.filePath(WELD_POSE_FILE_NAME);
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        error = QString("打开焊道文件失败：%1").arg(path);
+        return false;
+    }
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    while (!stream.atEnd())
+    {
+        const QString line = stream.readLine();
+        WeldPoseFileRecord record;
+        if (!TryParseWeldPoseFileRecord(line, record))
+        {
+            continue;
+        }
+        CompPreviewPoint point;
+        point.x = record.point.x();
+        point.y = record.point.y();
+        point.z = record.point.z();
+        point.rx = record.rx;
+        point.ry = record.ry;
+        point.rz = record.rz;
+        point.bx = record.bx;
+        point.by = record.by;
+        point.bz = record.bz;
+        point.weldIndex = record.weldIndex;
+        point.rawIndex = record.rawIndex;
+        point.segmentKind = record.segmentKind;
+        point.pointType = record.pointType;
+        baseline.push_back(point);
+    }
+    if (baseline.isEmpty())
+    {
+        error = QString("未从 %1 解析到有效焊道点。").arg(WELD_POSE_FILE_NAME);
+        return false;
+    }
+    return true;
+}
+
+bool MeasureThenWeldService::LoadCompPreviewOriginalTrack(
+    const QString& laserDir,
+    QVector<CompPreviewPoint>& points,
+    QString& error) const
+{
+    points.clear();
+    QDir dir(laserDir);
+    if (!dir.exists())
+    {
+        error = QString("目录不存在：%1").arg(laserDir);
+        return false;
+    }
+    const QString path = dir.filePath(CLASSIFIED_FILE_NAME);
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        error = QString("打开原始焊道文件失败：%1").arg(path);
+        return false;
+    }
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    while (!stream.atEnd())
+    {
+        const QString lineText = stream.readLine().trimmed();
+        if (lineText.isEmpty() || lineText.startsWith('#'))
+        {
+            continue;
+        }
+        const QStringList parts = lineText.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (parts.size() < 4)
+        {
+            continue;
+        }
+        bool xOk = false, yOk = false, zOk = false;
+        const double x = parts[1].toDouble(&xOk);
+        const double y = parts[2].toDouble(&yOk);
+        const double z = parts[3].toDouble(&zOk);
+        if (!xOk || !yOk || !zOk)
+        {
+            continue;
+        }
+        CompPreviewPoint point;
+        point.x = x;
+        point.y = y;
+        point.z = z;
+        if (parts.size() > 4)
+        {
+            point.typeCode = parts[4].toInt();
+        }
+        points.push_back(point);
+    }
+    if (points.isEmpty())
+    {
+        error = QString("未从 %1 解析到原始焊道点。").arg(CLASSIFIED_FILE_NAME);
+        return false;
+    }
+    return true;
+}
+
+MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompPreview(
+    CompPreviewKind kind,
+    const QString& robotName,
+    const QVector<CompPreviewPoint>& baseline,
+    const CompPreviewEditValues& edits) const
+{
+    CompPreviewResult result;
+    if (baseline.isEmpty())
+    {
+        result.error = QStringLiteral("没有可用的基准焊道点。");
+        return result;
+    }
+    result.before = baseline;
+
+    struct ArrowBasis { double cx = 0.0, cy = 0.0, cz = 0.0, len = 10.0; };
+    const auto computeArrowBasis = [](const QVector<CompPreviewPoint>& points) -> ArrowBasis
+    {
+        ArrowBasis basis;
+        if (points.isEmpty())
+        {
+            return basis;
+        }
+        double minv[3] = { 1e300, 1e300, 1e300 };
+        double maxv[3] = { -1e300, -1e300, -1e300 };
+        double sum[3] = { 0.0, 0.0, 0.0 };
+        for (const CompPreviewPoint& point : points)
+        {
+            const double coord[3] = { point.x, point.y, point.z };
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                sum[axis] += coord[axis];
+                minv[axis] = std::min(minv[axis], coord[axis]);
+                maxv[axis] = std::max(maxv[axis], coord[axis]);
+            }
+        }
+        const double count = static_cast<double>(points.size());
+        basis.cx = sum[0] / count;
+        basis.cy = sum[1] / count;
+        basis.cz = sum[2] / count;
+        const double span = std::max({ maxv[0] - minv[0], maxv[1] - minv[1], maxv[2] - minv[2], 10.0 });
+        basis.len = std::clamp(span * 0.15, 8.0, 80.0);
+        return basis;
+    };
+    const auto addArrow = [&result](double ox, double oy, double oz, double vx, double vy, double vz,
+        const QString& label, int colorId, bool doubleHeaded)
+    {
+        CompPreviewArrow arrow;
+        arrow.origin[0] = ox; arrow.origin[1] = oy; arrow.origin[2] = oz;
+        arrow.vector[0] = vx; arrow.vector[1] = vy; arrow.vector[2] = vz;
+        arrow.label = label;
+        arrow.colorId = colorId;
+        arrow.doubleHeaded = doubleHeaded;
+        result.arrows.push_back(arrow);
+    };
+
+    if (kind == CompPreviewKind::Seam)
+    {
+        QVector<WeldPoseFileRecord> records;
+        records.reserve(baseline.size());
+        for (int index = 0; index < baseline.size(); ++index)
+        {
+            WeldPoseFileRecord record;
+            record.weldIndex = baseline[index].weldIndex;
+            record.rawIndex = baseline[index].rawIndex;
+            record.point = Eigen::Vector3d(baseline[index].x, baseline[index].y, baseline[index].z);
+            record.rx = baseline[index].rx;
+            record.ry = baseline[index].ry;
+            record.rz = baseline[index].rz;
+            record.bx = baseline[index].bx;
+            record.by = baseline[index].by;
+            record.bz = baseline[index].bz;
+            record.segmentKind = baseline[index].segmentKind;
+            record.pointType = baseline[index].pointType;
+            records.push_back(record);
+        }
+
+        QVector<Eigen::Vector3d> basePoints;
+        basePoints.reserve(records.size());
+        for (const WeldPoseFileRecord& record : records)
+        {
+            basePoints.push_back(record.point);
+        }
+        const Eigen::Vector3d seamDir = ResolveOverallHorizontalWeldDirection(basePoints);
+        const Eigen::Vector3d gunDir = HorizontalUnitOrZero(Eigen::Vector3d::UnitZ().cross(seamDir));
+        result.seamAxis[0] = seamDir.x();
+        result.seamAxis[1] = seamDir.y();
+        result.seamAxis[2] = seamDir.z();
+        result.gunAxis[0] = gunDir.x();
+        result.gunAxis[1] = gunDir.y();
+        result.gunAxis[2] = gunDir.z();
+
+        // 用对话框当前编辑值构造 4 段焊道补偿槽（段类硬映射 0..3）。
+        // 载入真实焊接预设（含圆弧过渡/裁剪等下发参数），再用对话框当前焊缝补偿值覆盖补偿槽。
+        WeldPosePreset preset = LoadWeldPosePreset(BuildMeasureWeldParamShell(robotName));
+        static const char* const kSegmentKinds[4] = { "low_platform", "rising_edge", "high_platform", "falling_edge" };
+        preset.seamCompSlots.assign(4, WeldPosePreset::SeamCompSlot());
+        for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
+        {
+            // 用配置里真实的 segmentKind（可能是 CorrugatedPlate），为空才回退默认四段类；
+            // 配合保留的真实 preset.seamKind，使匹配/回退与下发 FindSeamCompSlotForRecord 完全一致。
+            const QString segmentKind = edits.seamSegmentKind[slotIndex].trimmed().isEmpty()
+                ? QString::fromLatin1(kSegmentKinds[slotIndex])
+                : edits.seamSegmentKind[slotIndex];
+            preset.seamCompSlots[slotIndex].segmentKind = segmentKind;
+            preset.seamCompSlots[slotIndex].weldZComp = edits.weldZComp[slotIndex];
+            preset.seamCompSlots[slotIndex].weldGunDirComp = edits.weldGunDirComp[slotIndex];
+            preset.seamCompSlots[slotIndex].weldSeamDirComp = edits.weldSeamDirComp[slotIndex];
+        }
+
+        // 复用管线真实焊缝补偿平移 + 完整后处理（端点裁剪/自交/拐点恢复/圆弧过渡/加密），贴近 _SeamComp 下发文件。
+        WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
+        const QVector<WeldPoseFileRecord> recordsBeforeTrim = records;
+        FinalizeSeamCompedWeldPoseRecords(preset, recordsBeforeTrim, records, compStats);
+        if (records.isEmpty())
+        {
+            records = recordsBeforeTrim;  // 后处理裁空则回退显示纯补偿平移结果
+        }
+
+        result.after.reserve(records.size());
+        for (int index = 0; index < records.size(); ++index)
+        {
+            CompPreviewPoint point;
+            point.x = records[index].point.x();
+            point.y = records[index].point.y();
+            point.z = records[index].point.z();
+            point.segmentKind = records[index].segmentKind;
+            point.pointType = records[index].pointType;
+            result.after.push_back(point);
+        }
+
+        // 方向箭头：质心处 Z向 / 枪反向 / 焊道方向，标正负影响方向。
+        const ArrowBasis basis = computeArrowBasis(result.before);
+        addArrow(basis.cx, basis.cy, basis.cz, 0.0, 0.0, basis.len, QStringLiteral("Z向+"), 0, true);
+        addArrow(basis.cx, basis.cy, basis.cz, gunDir.x() * basis.len, gunDir.y() * basis.len, gunDir.z() * basis.len, QStringLiteral("枪反向+"), 1, true);
+        addArrow(basis.cx, basis.cy, basis.cz, seamDir.x() * basis.len, seamDir.y() * basis.len, seamDir.z() * basis.len, QStringLiteral("焊道方向+"), 2, true);
+        result.ok = true;
+        return result;
+    }
+
+    if (kind == CompPreviewKind::Pose)
+    {
+        // 用对话框当前编辑值构造 4 段姿态补偿槽（段类硬映射 0..3，validReference=true 以参与按姿态匹配）。
+        std::vector<WeldPosePreset::PoseCompSlot> poseCompSlots(4);
+        static const char* const kSegmentKinds[4] = { "low_platform", "rising_edge", "high_platform", "falling_edge" };
+        for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
+        {
+            poseCompSlots[slotIndex].segmentKind = QString::fromLatin1(kSegmentKinds[slotIndex]);
+            poseCompSlots[slotIndex].poseRx = edits.poseRx[slotIndex];
+            poseCompSlots[slotIndex].poseRy = edits.poseRy[slotIndex];
+            poseCompSlots[slotIndex].poseRz = edits.poseRz[slotIndex];
+            poseCompSlots[slotIndex].compX = edits.compX[slotIndex];
+            poseCompSlots[slotIndex].compY = edits.compY[slotIndex];
+            poseCompSlots[slotIndex].compZ = edits.compZ[slotIndex];
+            poseCompSlots[slotIndex].validReference = true;
+        }
+
+        QVector<Eigen::Vector3d> basePoints;
+        basePoints.reserve(baseline.size());
+        result.after.reserve(baseline.size());
+        for (const CompPreviewPoint& basePoint : baseline)
+        {
+            const Eigen::Vector3d before(basePoint.x, basePoint.y, basePoint.z);
+            basePoints.push_back(before);
+            // 复用管线下沉的姿态补偿（工具系 compX/Y/Z 按该点姿态旋到世界后叠加）。
+            const Eigen::Vector3d afterPoint = ApplyPoseCompToPoint(
+                poseCompSlots,
+                edits.poseMatchMode,
+                edits.poseMatchMaxErrorDeg,
+                edits.robotType,
+                before,
+                basePoint.rx,
+                basePoint.ry,
+                basePoint.rz,
+                basePoint.segmentKind);
+            CompPreviewPoint afterPreview;
+            afterPreview.x = afterPoint.x();
+            afterPreview.y = afterPoint.y();
+            afterPreview.z = afterPoint.z();
+            afterPreview.rx = basePoint.rx;
+            afterPreview.ry = basePoint.ry;
+            afterPreview.rz = basePoint.rz;
+            afterPreview.segmentKind = basePoint.segmentKind;
+            afterPreview.pointType = basePoint.pointType;
+            result.after.push_back(afterPreview);
+        }
+
+        const Eigen::Vector3d seamDir = ResolveOverallHorizontalWeldDirection(basePoints);
+        const Eigen::Vector3d gunDir = HorizontalUnitOrZero(Eigen::Vector3d::UnitZ().cross(seamDir));
+        result.seamAxis[0] = seamDir.x();
+        result.seamAxis[1] = seamDir.y();
+        result.seamAxis[2] = seamDir.z();
+        result.gunAxis[0] = gunDir.x();
+        result.gunAxis[1] = gunDir.y();
+        result.gunAxis[2] = gunDir.z();
+
+        // 方向箭头：姿态补偿 compX/Y/Z 在工具系，按代表点姿态旋到世界，画 X/Y/Z 补偿正方向。
+        const ArrowBasis basis = computeArrowBasis(result.before);
+        int repIndex = 0;
+        double bestDistanceSq = std::numeric_limits<double>::max();
+        for (int index = 0; index < baseline.size(); ++index)
+        {
+            const double dx = baseline[index].x - basis.cx;
+            const double dy = baseline[index].y - basis.cy;
+            const double dz = baseline[index].z - basis.cz;
+            const double distanceSq = dx * dx + dy * dy + dz * dz;
+            if (distanceSq < bestDistanceSq)
+            {
+                bestDistanceSq = distanceSq;
+                repIndex = index;
+            }
+        }
+        const Eigen::Matrix3d rotation = RobotPoseTransform::RotationFromAnglesDeg(
+            baseline[repIndex].rx, baseline[repIndex].ry, baseline[repIndex].rz, edits.robotType);
+        const Eigen::Vector3d toolX = rotation.col(0) * basis.len;
+        const Eigen::Vector3d toolY = rotation.col(1) * basis.len;
+        const Eigen::Vector3d toolZ = rotation.col(2) * basis.len;
+        addArrow(basis.cx, basis.cy, basis.cz, toolX.x(), toolX.y(), toolX.z(), QStringLiteral("X补偿+"), 3, true);
+        addArrow(basis.cx, basis.cy, basis.cz, toolY.x(), toolY.y(), toolY.z(), QStringLiteral("Y补偿+"), 4, true);
+        addArrow(basis.cx, basis.cy, basis.cz, toolZ.x(), toolZ.y(), toolZ.z(), QStringLiteral("Z补偿+"), 5, true);
+        result.ok = true;
+        return result;
+    }
+
+    // kind == CompPreviewKind::Corner：拐点补偿（复用公开的 RobotCalculation 拐点补偿，内部按几何重算段类）。
+    result.before = baseline;
+
+    const auto typeFromCode = [](int code) -> RobotCalculation::LowerWeldPointType
+    {
+        switch (code)
+        {
+        case 1: return RobotCalculation::LowerWeldPointType::Start;
+        case 2: return RobotCalculation::LowerWeldPointType::End;
+        case 3: return RobotCalculation::LowerWeldPointType::InnerCorner;
+        case 4: return RobotCalculation::LowerWeldPointType::OuterCorner;
+        case 6: return RobotCalculation::LowerWeldPointType::Noise;
+        default: return RobotCalculation::LowerWeldPointType::Normal;
+        }
+    };
+
+    QVector<RobotCalculation::LowerWeldClassifiedPoint> keyPoints;
+    keyPoints.reserve(baseline.size());
+    for (int index = 0; index < baseline.size(); ++index)
+    {
+        RobotCalculation::LowerWeldClassifiedPoint keyPoint;
+        keyPoint.index = index;
+        keyPoint.point = Eigen::Vector3d(baseline[index].x, baseline[index].y, baseline[index].z);
+        keyPoint.type = typeFromCode(baseline[index].typeCode);
+        keyPoints.push_back(keyPoint);
+    }
+
+    RobotCalculation::LowerWeldFilterParams params;
+    params.enableCornerCompensation = edits.cornerEnabled;
+    params.risingCornerCompensation.innerToOuterMm = edits.risingInnerToOuter;
+    params.risingCornerCompensation.innerToInnerMm = edits.risingInnerToInner;
+    params.risingCornerCompensation.outerToOuterMm = edits.risingOuterToOuter;
+    params.risingCornerCompensation.outerToInnerMm = edits.risingOuterToInner;
+    params.fallingCornerCompensation.innerToOuterMm = edits.fallingInnerToOuter;
+    params.fallingCornerCompensation.innerToInnerMm = edits.fallingInnerToInner;
+    params.fallingCornerCompensation.outerToOuterMm = edits.fallingOuterToOuter;
+    params.fallingCornerCompensation.outerToInnerMm = edits.fallingOuterToInner;
+
+    QVector<RobotCalculation::LowerWeldClassifiedPoint> compensatedKeyPoints;
+    RobotCalculation::BuildCornerCompensatedLowerWeldClassification(keyPoints, params, &compensatedKeyPoints);
+
+    if (compensatedKeyPoints.size() == keyPoints.size())
+    {
+        result.after.reserve(compensatedKeyPoints.size());
+        for (int index = 0; index < compensatedKeyPoints.size(); ++index)
+        {
+            CompPreviewPoint point;
+            point.x = compensatedKeyPoints[index].point.x();
+            point.y = compensatedKeyPoints[index].point.y();
+            point.z = compensatedKeyPoints[index].point.z();
+            point.typeCode = baseline[index].typeCode;
+            point.pointType = baseline[index].pointType;
+            result.after.push_back(point);
+        }
+
+        // 方向箭头：每个发生位移的拐点画其移动方向（小位移放大显示）。
+        const ArrowBasis basis = computeArrowBasis(result.before);
+        for (int index = 0; index < result.before.size() && index < result.after.size(); ++index)
+        {
+            const double dx = result.after[index].x - result.before[index].x;
+            const double dy = result.after[index].y - result.before[index].y;
+            const double dz = result.after[index].z - result.before[index].z;
+            const double moved = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (moved < 1e-6)
+            {
+                continue;
+            }
+            const double shown = std::clamp(moved * 4.0, basis.len * 0.4, basis.len * 1.5);
+            const double scale = shown / moved;
+            addArrow(result.before[index].x, result.before[index].y, result.before[index].z,
+                dx * scale, dy * scale, dz * scale, QStringLiteral("拐点位移"), 6, false);
+        }
+        result.ok = true;
+    }
+    else
+    {
+        // 未启用拐点补偿或补偿值全为零 → 补偿后与补偿前一致。
+        result.after = baseline;
+        result.ok = true;
+        if (!edits.cornerEnabled)
+        {
+            result.error = QStringLiteral("未启用本组拐点补偿（勾选\"启用本组拐点补偿\"后可见效果）。");
+        }
+    }
+    return result;
+}
+
+namespace
+{
+// 流式抽样加载点文件（index x y z 格式）：按文件大小估算行数定抽样步长，
+// 解析点数不超过 maxPoints。用于补偿预览显示完整点云（154MB 级，全量加载会卡死界面）。
+bool LoadSampledPointFile(
+    const QString& filePath,
+    int maxPoints,
+    QVector<MeasureThenWeldService::CompPreviewPoint>& points,
+    QString& error)
+{
+    points.clear();
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        error = QString("打开点文件失败：%1").arg(filePath);
+        return false;
+    }
+    // 估算每行约 45 字节，定隔行抽样步长；估偏只影响显示点数，不影响正确性。
+    const qint64 estimatedLines = std::max<qint64>(1, file.size() / 45);
+    const int stride = static_cast<int>(std::max<qint64>(1, estimatedLines / std::max(1, maxPoints)));
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    qint64 lineIndex = 0;
+    while (!stream.atEnd())
+    {
+        const QString line = stream.readLine();
+        if ((lineIndex++ % stride) != 0)
+        {
+            continue;
+        }
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty())
+        {
+            continue;
+        }
+        const QStringList parts = trimmed.contains(',')
+            ? trimmed.split(',', Qt::SkipEmptyParts)
+            : trimmed.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (parts.size() < 4)
+        {
+            continue;
+        }
+        bool xOk = false;
+        bool yOk = false;
+        bool zOk = false;
+        const double x = parts[1].trimmed().toDouble(&xOk);
+        const double y = parts[2].trimmed().toDouble(&yOk);
+        const double z = parts[3].trimmed().toDouble(&zOk);
+        if (!xOk || !yOk || !zOk
+            || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+        {
+            continue;
+        }
+        MeasureThenWeldService::CompPreviewPoint point;
+        point.x = x;
+        point.y = y;
+        point.z = z;
+        points.push_back(point);
+    }
+    return !points.isEmpty();
+}
+}
+
+QString MeasureThenWeldService::MethodBaseTrackFileName(PointCloudProcessingConfig::Mode mode)
+{
+    switch (mode)
+    {
+    case PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet:
+        return QString::fromLatin1(METHOD_TRACK_SDK_CLASS_FILE_NAME);
+    case PointCloudProcessingConfig::Mode::SdkBaseWeldFit:
+        return QString::fromLatin1(METHOD_TRACK_SDK_BASE_FILE_NAME);
+    case PointCloudProcessingConfig::Mode::CloudFit:
+        return QString::fromLatin1(METHOD_TRACK_POINT_BASE_FILE_NAME);
+    case PointCloudProcessingConfig::Mode::LegacyLaserPath:
+    default:
+        return QString::fromLatin1(METHOD_TRACK_POINT_LASER_FILE_NAME);
+    }
+}
+
+bool MeasureThenWeldService::LoadCompPreviewRawCloud(
+    const QString& laserDir,
+    QVector<CompPreviewPoint>& points,
+    QString& error,
+    QString* sourceDescription) const
+{
+    points.clear();
+    if (sourceDescription != nullptr)
+    {
+        sourceDescription->clear();
+    }
+    QDir dir(laserDir);
+    if (!dir.exists())
+    {
+        error = QString("目录不存在：%1").arg(laserDir);
+        return false;
+    }
+
+    // "原始数据"显示当前方法自己的基础焊道文件（处理成功时落盘）；
+    // 未生成（该目录还没按当前方法处理过）时回退相机目标点轨迹。
+    const PointCloudProcessingConfig::Settings settings = PointCloudProcessingConfig::Load();
+    const QString methodFileName = MethodBaseTrackFileName(settings.mode);
+    const QString methodFilePath = dir.filePath(methodFileName);
+    QString methodError;
+    if (QFileInfo::exists(methodFilePath)
+        && LoadSampledPointFile(methodFilePath, std::numeric_limits<int>::max(), points, methodError))
+    {
+        if (sourceDescription != nullptr)
+        {
+            *sourceDescription = QString("%1（%2）")
+                .arg(PointCloudProcessingConfig::ModeDisplayName(settings.mode))
+                .arg(methodFileName);
+        }
+        return true;
+    }
+
+    QVector<RobotCalculation::IndexedPoint3D> rawPoints;
+    if (!RobotDataHelper::LoadIndexedPoint3DFile(dir.filePath(RAW_LASER_FILE_NAME), rawPoints, &error))
+    {
+        return false;
+    }
+    points.reserve(rawPoints.size());
+    for (const RobotCalculation::IndexedPoint3D& raw : rawPoints)
+    {
+        CompPreviewPoint point;
+        point.x = raw.point.x();
+        point.y = raw.point.y();
+        point.z = raw.point.z();
+        points.push_back(point);
+    }
+    if (points.isEmpty())
+    {
+        error = QString("未从 %1 解析到原始点。").arg(RAW_LASER_FILE_NAME);
+        return false;
+    }
+    if (sourceDescription != nullptr)
+    {
+        *sourceDescription = QStringLiteral("相机目标点轨迹（该方法基础焊道未生成）");
+    }
+    return true;
+}
+
+MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPreviewStages(
+    const QString& robotName,
+    const QVector<CompPreviewPoint>& baseline,
+    const CompPreviewEditValues& currentEdits,
+    const CompPreviewEditValues& savedEdits,
+    bool includePoseArrows) const
+{
+    CompPreviewStages stages;
+    if (baseline.isEmpty())
+    {
+        stages.error = QStringLiteral("没有可用的基准焊道点。");
+        return stages;
+    }
+
+    static const char* const kSegmentKinds[4] = { "low_platform", "rising_edge", "high_platform", "falling_edge" };
+    const auto buildPoseSlots = [&](const CompPreviewEditValues& edits)
+    {
+        // 注意：局部变量不能叫 slots（Qt 宏）。
+        std::vector<WeldPosePreset::PoseCompSlot> poseSlots(4);
+        for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
+        {
+            poseSlots[slotIndex].segmentKind = QString::fromLatin1(kSegmentKinds[slotIndex]);
+            poseSlots[slotIndex].poseRx = edits.poseRx[slotIndex];
+            poseSlots[slotIndex].poseRy = edits.poseRy[slotIndex];
+            poseSlots[slotIndex].poseRz = edits.poseRz[slotIndex];
+            poseSlots[slotIndex].compX = edits.compX[slotIndex];
+            poseSlots[slotIndex].compY = edits.compY[slotIndex];
+            poseSlots[slotIndex].compZ = edits.compZ[slotIndex];
+            poseSlots[slotIndex].validReference = true;
+        }
+        return poseSlots;
+    };
+    const std::vector<WeldPosePreset::PoseCompSlot> currentPoseSlots = buildPoseSlots(currentEdits);
+    const std::vector<WeldPosePreset::PoseCompSlot> savedPoseSlots = buildPoseSlots(savedEdits);
+
+    // 阶段「姿态补偿」：基准(_WeldPose_2mm)已烘焙扫描时保存的姿态补偿，
+    // 按 delta = 当前补偿位移 − 已保存补偿位移 叠加，当前=已保存时与文件一致；
+    // 位移纯加性，等价于用当前值重跑姿态生成。
+    QVector<WeldPoseFileRecord> records;
+    records.reserve(baseline.size());
+    for (const CompPreviewPoint& base : baseline)
+    {
+        WeldPoseFileRecord record;
+        record.weldIndex = base.weldIndex;
+        record.rawIndex = base.rawIndex;
+        record.point = Eigen::Vector3d(base.x, base.y, base.z);
+        record.rx = base.rx;
+        record.ry = base.ry;
+        record.rz = base.rz;
+        record.bx = base.bx;
+        record.by = base.by;
+        record.bz = base.bz;
+        record.segmentKind = base.segmentKind;
+        record.pointType = base.pointType;
+
+        const Eigen::Vector3d basePoint = record.point;
+        const Eigen::Vector3d withCurrent = ApplyPoseCompToPoint(
+            currentPoseSlots, currentEdits.poseMatchMode, currentEdits.poseMatchMaxErrorDeg,
+            currentEdits.robotType, basePoint, base.rx, base.ry, base.rz, base.segmentKind);
+        const Eigen::Vector3d withSaved = ApplyPoseCompToPoint(
+            savedPoseSlots, savedEdits.poseMatchMode, savedEdits.poseMatchMaxErrorDeg,
+            savedEdits.robotType, basePoint, base.rx, base.ry, base.rz, base.segmentKind);
+        record.point = basePoint + (withCurrent - basePoint) - (withSaved - basePoint);
+        records.push_back(record);
+    }
+
+    const auto snapshotRecords = [](const QVector<WeldPoseFileRecord>& sourceRecords)
+    {
+        QVector<CompPreviewPoint> out;
+        out.reserve(sourceRecords.size());
+        for (const WeldPoseFileRecord& record : sourceRecords)
+        {
+            CompPreviewPoint point;
+            point.x = record.point.x();
+            point.y = record.point.y();
+            point.z = record.point.z();
+            point.rx = record.rx;
+            point.ry = record.ry;
+            point.rz = record.rz;
+            point.bx = record.bx;
+            point.by = record.by;
+            point.bz = record.bz;
+            point.weldIndex = record.weldIndex;
+            point.rawIndex = record.rawIndex;
+            point.segmentKind = record.segmentKind;
+            point.pointType = record.pointType;
+            out.push_back(point);
+        }
+        return out;
+    };
+    stages.poseComp = snapshotRecords(records);
+
+    QVector<Eigen::Vector3d> basePoints;
+    basePoints.reserve(records.size());
+    for (const WeldPoseFileRecord& record : records)
+    {
+        basePoints.push_back(record.point);
+    }
+    const Eigen::Vector3d seamDir = ResolveOverallHorizontalWeldDirection(basePoints);
+    const Eigen::Vector3d gunDir = HorizontalUnitOrZero(Eigen::Vector3d::UnitZ().cross(seamDir));
+
+    // 阶段「焊道补偿」：真实预设 + 当前编辑槽位覆盖（槽位段类用配置真实值，匹配/回退与下发一致）。
+    const T_PRECISE_MEASURE_PARAM measureParam = BuildMeasureWeldParamShell(robotName);
+    WeldPosePreset preset = LoadWeldPosePreset(measureParam);
+    // 工艺区域试调覆盖（仅预览联动，不落盘）：圆弧过渡启用/半径 + 实际焊道点间距。
+    if (currentEdits.processOverrideValid)
+    {
+        preset.cornerArcRadiusMm = (currentEdits.arcEnabled && currentEdits.arcRadiusMm > 0.0)
+            ? std::max(2.0, currentEdits.arcRadiusMm)
+            : 0.0;
+        preset.finalWeldStepFromProcessMm = currentEdits.processFinalStepMm;
+    }
+    preset.seamCompSlots.assign(4, WeldPosePreset::SeamCompSlot());
+    for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
+    {
+        const QString segmentKind = currentEdits.seamSegmentKind[slotIndex].trimmed().isEmpty()
+            ? QString::fromLatin1(kSegmentKinds[slotIndex])
+            : currentEdits.seamSegmentKind[slotIndex];
+        preset.seamCompSlots[slotIndex].segmentKind = segmentKind;
+        preset.seamCompSlots[slotIndex].weldZComp = currentEdits.weldZComp[slotIndex];
+        preset.seamCompSlots[slotIndex].weldGunDirComp = currentEdits.weldGunDirComp[slotIndex];
+        preset.seamCompSlots[slotIndex].weldSeamDirComp = currentEdits.weldSeamDirComp[slotIndex];
+    }
+    WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
+    stages.seamComp = snapshotRecords(records);
+
+    // 阶段「圆弧过渡」：完整后处理（端点/自交裁剪、拐点恢复、加密、圆弧过渡、锐角裁剪、平滑、重编号）。
+    const QVector<WeldPoseFileRecord> recordsBeforeTrim = records;
+    FinalizeSeamCompedWeldPoseRecords(preset, recordsBeforeTrim, records, compStats);
+    if (records.isEmpty())
+    {
+        records = recordsBeforeTrim;  // 后处理裁空则回退显示纯补偿平移结果
+    }
+    stages.arc = snapshotRecords(records);
+
+    // 阶段「实际焊道」：按点间距最终抽样（首尾+拐点必留，沿弧长≥间距取点），
+    // 复用下发管线同一个抽样函数 = 机器人逐点执行的轨迹。
+    const double actualStepMm = preset.finalWeldStepFromProcessMm > 0.0
+        ? preset.finalWeldStepFromProcessMm
+        : measureParam.dFinalWeldTrajectoryStepMm;
+    const QVector<WeldPoseFileRecord> actualRecords =
+        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(actualStepMm));
+    stages.actual = snapshotRecords(actualRecords);
+
+    // 方向箭头：质心 + 自适应长度。
+    double sum[3] = { 0.0, 0.0, 0.0 };
+    double minv[3] = { 1e300, 1e300, 1e300 };
+    double maxv[3] = { -1e300, -1e300, -1e300 };
+    for (const CompPreviewPoint& point : stages.poseComp)
+    {
+        const double coord[3] = { point.x, point.y, point.z };
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            sum[axis] += coord[axis];
+            minv[axis] = std::min(minv[axis], coord[axis]);
+            maxv[axis] = std::max(maxv[axis], coord[axis]);
+        }
+    }
+    const double count = static_cast<double>(stages.poseComp.size());
+    const double cx = sum[0] / count;
+    const double cy = sum[1] / count;
+    const double cz = sum[2] / count;
+    const double span = std::max({ maxv[0] - minv[0], maxv[1] - minv[1], maxv[2] - minv[2], 10.0 });
+    const double arrowLen = std::clamp(span * 0.15, 8.0, 80.0);
+    const auto addArrow = [&stages](double ox, double oy, double oz, double vx, double vy, double vz,
+        const QString& label, int colorId)
+    {
+        CompPreviewArrow arrow;
+        arrow.origin[0] = ox; arrow.origin[1] = oy; arrow.origin[2] = oz;
+        arrow.vector[0] = vx; arrow.vector[1] = vy; arrow.vector[2] = vz;
+        arrow.label = label;
+        arrow.colorId = colorId;
+        arrow.doubleHeaded = true;
+        stages.arrows.push_back(arrow);
+    };
+    addArrow(cx, cy, cz, 0.0, 0.0, arrowLen, QStringLiteral("Z向+"), 0);
+    addArrow(cx, cy, cz, gunDir.x() * arrowLen, gunDir.y() * arrowLen, gunDir.z() * arrowLen, QStringLiteral("枪反向+"), 1);
+    addArrow(cx, cy, cz, seamDir.x() * arrowLen, seamDir.y() * arrowLen, seamDir.z() * arrowLen, QStringLiteral("焊道方向+"), 2);
+
+    if (includePoseArrows)
+    {
+        int repIndex = 0;
+        double bestDistanceSq = std::numeric_limits<double>::max();
+        for (int index = 0; index < baseline.size(); ++index)
+        {
+            const double dx = baseline[index].x - cx;
+            const double dy = baseline[index].y - cy;
+            const double dz = baseline[index].z - cz;
+            const double distanceSq = dx * dx + dy * dy + dz * dz;
+            if (distanceSq < bestDistanceSq)
+            {
+                bestDistanceSq = distanceSq;
+                repIndex = index;
+            }
+        }
+        const Eigen::Matrix3d rotation = RobotPoseTransform::RotationFromAnglesDeg(
+            baseline[repIndex].rx, baseline[repIndex].ry, baseline[repIndex].rz, currentEdits.robotType);
+        const Eigen::Vector3d toolX = rotation.col(0) * arrowLen;
+        const Eigen::Vector3d toolY = rotation.col(1) * arrowLen;
+        const Eigen::Vector3d toolZ = rotation.col(2) * arrowLen;
+        addArrow(cx, cy, cz, toolX.x(), toolX.y(), toolX.z(), QStringLiteral("X补偿+"), 3);
+        addArrow(cx, cy, cz, toolY.x(), toolY.y(), toolY.z(), QStringLiteral("Y补偿+"), 4);
+        addArrow(cx, cy, cz, toolZ.x(), toolZ.y(), toolZ.z(), QStringLiteral("Z补偿+"), 5);
+    }
+
+    stages.ok = true;
+    return stages;
 }

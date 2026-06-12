@@ -1012,3 +1012,36 @@ void ResizeWindowForAvailableGeometry(
     const QRect frame = widget->frameGeometry();
     widget->move(ResolveCenteredPosition(available, frame));
 }
+
+namespace
+{
+// 应用级滚轮拦截：数字框/下拉框收到的滚轮事件直接吞掉，避免滚动页面时悬停误改参数。
+// 下拉框弹出的列表是独立控件，不受影响。
+class WheelEventGuard final : public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() == QEvent::Wheel)
+        {
+            QWidget* widget = qobject_cast<QWidget*>(watched);
+            if (widget != nullptr
+                && (qobject_cast<QAbstractSpinBox*>(widget) != nullptr
+                    || qobject_cast<QComboBox*>(widget) != nullptr))
+            {
+                event->ignore();
+                return true;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+}
+
+void InstallGlobalWheelGuard(QApplication& app)
+{
+    app.installEventFilter(new WheelEventGuard(&app));
+}

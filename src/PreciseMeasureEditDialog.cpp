@@ -397,6 +397,13 @@ bool IsObsoletePreciseParamKey(const QString& key)
     return key.trimmed().compare("CornerArcRadiusMm", Qt::CaseInsensitive) == 0;
 }
 
+bool IsMigratedToWeldProcessKey(const QString& key)
+{
+    // 已迁入工艺参数的键：测量页不再显示编辑，但保留 ini 旧值作为工艺未设置时的回退，
+    // 不能进 IsObsoletePreciseParamKey（那会在保存时把旧值清掉）。
+    return key.trimmed().compare("WeldDirection", Qt::CaseInsensitive) == 0;
+}
+
 bool IsDedicatedWeldPoseTeachKey(const QString& key)
 {
     const QString normalized = key.trimmed();
@@ -1294,13 +1301,7 @@ void PreciseMeasureEditDialog::OnParamGroupChanged(int index)
     {
         return;
     }
-    QString error;
-    RobotDataHelper::WriteParamValue(
-        CurrentParamFilePath(),
-        GroupMetaSectionName(),
-        "UseGroupNo",
-        QString::number(CurrentGroupIndex()),
-        &error);
+    // 切组只切换显示，不再自动写 UseGroupNo；点"保存参数"时统一写回（与其它界面一致）。
     if (m_pGroupNameEdit != nullptr)
     {
         m_pGroupNameEdit->setText(CurrentGroupName());
@@ -2077,7 +2078,7 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
             for (auto it = values.constBegin(); it != values.constEnd(); ++it)
             {
                 const QString key = it.key().trimmed();
-                if (key.isEmpty() || IsObsoletePreciseParamKey(key))
+                if (key.isEmpty() || IsObsoletePreciseParamKey(key) || IsMigratedToWeldProcessKey(key))
                 {
                     continue;
                 }
@@ -2151,16 +2152,8 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
         AppendLog(QString("当前分组没有其它参数：%1").arg(section));
     }
 
-    for (QComboBox* combo : m_otherParamComboEditors)
-    {
-        if (combo != nullptr)
-        {
-            connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, combo](int)
-                {
-                    SaveOtherParamComboEdit(combo);
-                });
-        }
-    }
+    // 下拉参数不再选中即写盘；点"保存参数"时统一写回（与其它界面一致），
+    // 未保存检测的快照已包含这些下拉框。
 
     UpdateOtherParamPageVisibility();
     m_bLoading = false;

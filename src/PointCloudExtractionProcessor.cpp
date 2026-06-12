@@ -4,6 +4,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
+#include <QTextStream>
 
 #include <algorithm>
 #include <cmath>
@@ -40,17 +42,19 @@ struct ExternalTrackPoint
 };
 
 #ifdef Q_OS_WIN
+// 20260609 版 SDK：新增 terminal 引用出参，返回已焊段端点（新焊接的起点），无已焊段时为零点。
 using ExtractFn = ExternalTrackPoint* (__cdecl*)(
     ExternalPoint3D*,
     int,
     int*,
+    ExternalPoint3D&,
     double,
     ExternalPoint3D,
     const char*);
 using ReleaseTrackPointsFn = void (__cdecl*)(ExternalTrackPoint**);
 
 constexpr char EXTRACT_EXPORT_NAME[] =
-    "?CorrugatedSheetPointCloudExtration@@YAPEAUTrackPointsPosition@@PEAUPoint_3D@@HPEAHNU2@PEBD@Z";
+    "?CorrugatedSheetPointCloudExtration@@YAPEAUTrackPointsPosition@@PEAUPoint_3D@@HPEAHAEAU2@NU2@PEBD@Z";
 constexpr char RELEASE_TRACK_POINTS_EXPORT_NAME[] =
     "?ReleaseTrackPoints@@YAXPEAPEAUTrackPointsPosition@@@Z";
 #endif
@@ -324,7 +328,31 @@ void ReplaceConfigValue(QByteArray* content, const QByteArray& key, const QByteA
     *content = lines.join('\n');
 }
 
-QString PrepareRuntimeExternalConfigPath(const QString& configPath)
+QByteArray ConfigNumberValue(double value)
+{
+    return QByteArray::number(value, 'f', 6);
+}
+
+QByteArray ConfigIntegerValue(double value)
+{
+    const int rounded = std::max(1, static_cast<int>(std::lround(value)));
+    return QByteArray::number(rounded);
+}
+
+QString RuntimeConfigPathForOutput(const QString& baseWeldOutputPath)
+{
+    if (!baseWeldOutputPath.trimmed().isEmpty())
+    {
+        return QFileInfo(baseWeldOutputPath).absoluteDir().filePath("CorrugatedSheetPointCloudEctration.runtime.ini");
+    }
+    return QDir::temp().filePath("QtWidgetsApplication4_PointCloudExtration/CorrugatedSheetPointCloudEctration.runtime.ini");
+}
+
+QString PrepareRuntimeExternalConfigPath(
+    const QString& configPath,
+    const QString& baseWeldOutputPath,
+    double baseWeldStepMm,
+    QString* error)
 {
     QFile file(configPath);
     if (!file.open(QIODevice::ReadOnly))
@@ -334,34 +362,221 @@ QString PrepareRuntimeExternalConfigPath(const QString& configPath)
     QByteArray content = file.readAll();
     file.close();
 
+    bool changed = false;
     if (!ConfigValueIsTrue(content, "DEBUGLOG"))
     {
-        return configPath;
+        changed = false;
+    }
+    else
+    {
+        const QString logPath = QString::fromLocal8Bit(ConfigLineValue(content, "LOGPATH")).trimmed();
+        if (logPath.isEmpty() || !QDir().mkpath(QDir::fromNativeSeparators(logPath)))
+        {
+            ReplaceConfigValue(&content, "DEBUGLOG", "false");
+            changed = true;
+        }
     }
 
-    const QString logPath = QString::fromLocal8Bit(ConfigLineValue(content, "LOGPATH")).trimmed();
-    if (!logPath.isEmpty() && QDir().mkpath(QDir::fromNativeSeparators(logPath)))
+    // 20260609 版 DLL 要求 LOGPATH 必须有值（空值直接弹 "Para_name LOGPATH not found"），
+    // 配置里留空时向运行时副本注入项目 Log 目录下的默认输出目录（工作目录启动时已设到项目根）。
+    if (QString::fromLocal8Bit(ConfigLineValue(content, "LOGPATH")).trimmed().isEmpty())
+    {
+        const QString fallbackLogPath = QDir::toNativeSeparators(
+            QDir::current().absoluteFilePath(QStringLiteral("Log/PointCloudExtration")));
+        QDir().mkpath(QDir::fromNativeSeparators(fallbackLogPath));
+        ReplaceConfigValue(&content, "LOGPATH", fallbackLogPath.toLocal8Bit());
+        changed = true;
+    }
+
+    const QString normalizedBaseWeldPath = baseWeldOutputPath.trimmed();
+    if (!normalizedBaseWeldPath.isEmpty())
+    {
+        const QFileInfo outputInfo(normalizedBaseWeldPath);
+        const QString outputDir = outputInfo.absolutePath();
+        if (!QDir().mkpath(outputDir))
+        {
+            if (error != nullptr)
+            {
+                *error = QString("创建SDK基础焊道输出目录失败：%1").arg(outputDir);
+            }
+            return QString();
+        }
+        ReplaceConfigValue(
+            &content,
+            "Save_File_Name",
+            QDir::toNativeSeparators(outputInfo.absoluteFilePath()).toLocal8Bit());
+        ReplaceConfigValue(
+            &content,
+            "Step",
+            ConfigIntegerValue(baseWeldStepMm > 0.0 ? baseWeldStepMm : 2.0));
+        changed = true;
+    }
+
+    if (!changed)
     {
         return configPath;
     }
 
-    ReplaceConfigValue(&content, "DEBUGLOG", "false");
-
-    const QString runtimeDir = QDir::temp().filePath("QtWidgetsApplication4_PointCloudExtration");
+    const QString runtimeConfigPath = RuntimeConfigPathForOutput(normalizedBaseWeldPath);
+    const QString runtimeDir = QFileInfo(runtimeConfigPath).absolutePath();
     if (!QDir().mkpath(runtimeDir))
     {
-        return configPath;
+        if (error != nullptr)
+        {
+            *error = QString("创建SDK运行配置目录失败：%1").arg(runtimeDir);
+        }
+        return QString();
     }
 
-    const QString runtimeConfigPath = QDir(runtimeDir).filePath("CorrugatedSheetPointCloudEctration.runtime.ini");
     QFile runtimeConfig(runtimeConfigPath);
     if (!runtimeConfig.open(QIODevice::WriteOnly | QIODevice::Truncate))
     {
-        return configPath;
+        if (error != nullptr)
+        {
+            *error = QString("写入SDK运行配置失败：%1").arg(runtimeConfigPath);
+        }
+        return QString();
     }
     runtimeConfig.write(content);
     runtimeConfig.close();
     return runtimeConfigPath;
+}
+
+PointCloudExtractionProcessor::TrackPointType SdkBaseWeldPointTypeFromText(const QString& text)
+{
+    const QString normalized = text.trimmed().toLower();
+    if (normalized == "start")
+    {
+        return PointCloudExtractionProcessor::TrackPointType::Start;
+    }
+    if (normalized == "end")
+    {
+        return PointCloudExtractionProcessor::TrackPointType::End;
+    }
+    return PointCloudExtractionProcessor::TrackPointType::Normal;
+}
+
+bool LoadSdkBaseWeldFile(
+    const QString& filePath,
+    QVector<PointCloudExtractionProcessor::TrackPoint>* points,
+    QString* error)
+{
+    if (points == nullptr)
+    {
+        return false;
+    }
+    points->clear();
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("读取SDK基础焊道文件失败：%1").arg(filePath);
+        }
+        return false;
+    }
+
+    QTextStream stream(&file);
+    int nextIndex = 1;
+    int lineNumber = 0;
+    while (!stream.atEnd())
+    {
+        ++lineNumber;
+        const QString line = stream.readLine().trimmed();
+        if (line.isEmpty() || line.startsWith('#') || line.startsWith("index", Qt::CaseInsensitive))
+        {
+            continue;
+        }
+
+        const QStringList fields = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (fields.size() < 4)
+        {
+            continue;
+        }
+
+        bool xOk = false;
+        bool yOk = false;
+        bool zOk = false;
+        bool firstFieldIsIndex = false;
+        fields.front().toInt(&firstFieldIsIndex);
+        const int coordinateOffset = firstFieldIsIndex && fields.size() >= 4 ? 1 : 0;
+        if (fields.size() < coordinateOffset + 3)
+        {
+            continue;
+        }
+        const double x = fields.value(coordinateOffset).toDouble(&xOk);
+        const double y = fields.value(coordinateOffset + 1).toDouble(&yOk);
+        const double z = fields.value(coordinateOffset + 2).toDouble(&zOk);
+        if (!xOk || !yOk || !zOk)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("SDK基础焊道文件第%1行坐标无效：%2").arg(lineNumber).arg(line);
+            }
+            points->clear();
+            return false;
+        }
+
+        PointCloudExtractionProcessor::TrackPoint point;
+        point.index = nextIndex++;
+        point.point = Eigen::Vector3d(x, y, z);
+        point.type = fields.size() > coordinateOffset + 3
+            ? SdkBaseWeldPointTypeFromText(fields.value(coordinateOffset + 3))
+            : PointCloudExtractionProcessor::TrackPointType::Normal;
+        points->push_back(point);
+    }
+
+    if (points->size() < 2)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("SDK基础焊道文件点数过少：%1，文件=%2").arg(points->size()).arg(filePath);
+        }
+        points->clear();
+        return false;
+    }
+
+    points->front().type = PointCloudExtractionProcessor::TrackPointType::Start;
+    points->back().type = PointCloudExtractionProcessor::TrackPointType::End;
+    return true;
+}
+
+void ApplyReturnedKeyPointTypes(
+    QVector<PointCloudExtractionProcessor::TrackPoint>* densePoints,
+    const QVector<PointCloudExtractionProcessor::TrackPoint>& keyPoints)
+{
+    if (densePoints == nullptr || densePoints->isEmpty())
+    {
+        return;
+    }
+
+    for (const PointCloudExtractionProcessor::TrackPoint& keyPoint : keyPoints)
+    {
+        if (keyPoint.type == PointCloudExtractionProcessor::TrackPointType::Normal)
+        {
+            continue;
+        }
+
+        int bestIndex = -1;
+        double bestDistanceSquared = std::numeric_limits<double>::max();
+        for (int index = 0; index < densePoints->size(); ++index)
+        {
+            const double distanceSquared = ((*densePoints)[index].point - keyPoint.point).squaredNorm();
+            if (distanceSquared < bestDistanceSquared)
+            {
+                bestDistanceSquared = distanceSquared;
+                bestIndex = index;
+            }
+        }
+        if (bestIndex >= 0)
+        {
+            (*densePoints)[bestIndex].type = keyPoint.type;
+        }
+    }
+
+    densePoints->front().type = PointCloudExtractionProcessor::TrackPointType::Start;
+    densePoints->back().type = PointCloudExtractionProcessor::TrackPointType::End;
 }
 
 void CountClassifiedPoints(RobotCalculation::LowerWeldClassificationResult& result)
@@ -460,7 +675,8 @@ QVector<PointCloudExtractionProcessor::TrackPoint> ResampleTrackPoints(
 PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::ExtractCorrugatedSheet(
     const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
     const PointCloudProcessingConfig::Settings& settings,
-    const Eigen::Vector3d& scanDirection)
+    const Eigen::Vector3d& scanDirection,
+    const QString& baseWeldOutputPath)
 {
     ExtractionResult result;
     result.inputPointCount = inputPoints.size();
@@ -483,6 +699,10 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     result.configPath = QDir::toNativeSeparators(settings.configPath.trimmed().isEmpty()
         ? PointCloudProcessingConfig::DefaultConfigPath()
         : settings.configPath.trimmed());
+    if (!baseWeldOutputPath.trimmed().isEmpty())
+    {
+        result.baseWeldPath = QDir::toNativeSeparators(QFileInfo(baseWeldOutputPath).absoluteFilePath());
+    }
 
     if (!QFileInfo::exists(result.dllPath))
     {
@@ -494,11 +714,28 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
         result.error = "未找到新版精测点云配置：" + result.configPath;
         return result;
     }
+    QString runtimeConfigError;
     result.configPath = QDir::toNativeSeparators(
-        QFileInfo(PrepareRuntimeExternalConfigPath(result.configPath)).absoluteFilePath());
+        QFileInfo(PrepareRuntimeExternalConfigPath(
+            result.configPath,
+            result.baseWeldPath,
+            settings.resampleStepMm,
+            &runtimeConfigError)).absoluteFilePath());
+    if (!runtimeConfigError.isEmpty())
+    {
+        result.error = runtimeConfigError;
+        return result;
+    }
     if (!QFileInfo::exists(result.configPath))
     {
         result.error = "未找到新版精测点云运行配置：" + result.configPath;
+        return result;
+    }
+    if (!result.baseWeldPath.isEmpty()
+        && QFileInfo::exists(result.baseWeldPath)
+        && !QFile::remove(result.baseWeldPath))
+    {
+        result.error = "清理旧SDK基础焊道文件失败：" + result.baseWeldPath;
         return result;
     }
 
@@ -559,10 +796,12 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
 
     int trackPointCount = 0;
     const QByteArray configPathBytes = result.configPath.toLocal8Bit();
+    ExternalPoint3D weldedTerminal{};
     ExternalTrackPoint* rawTrackPoints = extract(
         externalInput.data(),
         static_cast<int>(externalInput.size()),
         &trackPointCount,
+        weldedTerminal,
         settings.zTruncationValue,
         ToExternalPoint(safeScanDirection),
         configPathBytes.constData());
@@ -598,8 +837,33 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     releaseTrackPoints(&rawTrackPoints);
     releaseLibrary();
 
+    // 已焊起点：SDK 检测到工件上已焊段时返回新焊接的起点，零点/非有限值视为无已焊段。
+    const Eigen::Vector3d weldedStart = FromExternalPoint(weldedTerminal);
+    if (IsFinitePoint(weldedStart) && weldedStart.norm() > 1e-9)
+    {
+        result.hasWeldedStartPoint = true;
+        result.weldedStartPoint = weldedStart;
+    }
+
     result.rawPoints = rawPoints;
-    result.points = ResampleTrackPoints(rawPoints, settings.resampleStepMm);
+    result.keyPointExpandedPoints = ResampleTrackPoints(rawPoints, settings.resampleStepMm);
+    if (!result.baseWeldPath.isEmpty())
+    {
+        QString baseWeldError;
+        QVector<TrackPoint> baseWeldPoints;
+        if (!LoadSdkBaseWeldFile(result.baseWeldPath, &baseWeldPoints, &baseWeldError))
+        {
+            result.error = baseWeldError;
+            return result;
+        }
+        ApplyReturnedKeyPointTypes(&baseWeldPoints, rawPoints);
+        result.points = baseWeldPoints;
+        result.usedBaseWeldFile = true;
+    }
+    else
+    {
+        result.points = result.keyPointExpandedPoints;
+    }
     if (result.points.size() < 2)
     {
         result.error = QString("新版精测点云库输出点过少：%1").arg(result.points.size());

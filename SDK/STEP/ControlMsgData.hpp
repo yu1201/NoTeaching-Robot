@@ -1,4 +1,7 @@
-#pragma once
+#pragma once//SDK-V2.4.1-20250302_0520
+#include <array>
+#include <cstdint>  
+
 namespace STEPROBOTSDK {
     typedef enum {
         eOK = 1,
@@ -93,6 +96,27 @@ namespace STEPROBOTSDK {
         eSDKGetInvKinematics = 211,
         //新增坐标转换接口，20251013
         eSDKRefConvert = 213,
+        //获取所有工具名和用户名
+        eSDKGetTheToolName = 214,
+        eSDKGetTheRefName = 215,
+
+        //新增用户坐标标定接口，20260228
+        eSDKGetRefBy3Points = 216,
+
+        //新增计算模式接口，20260312
+        eSDKGetJointMode = 217,
+        //修改，子程序加载语句接口，20260410
+        eSDKProgramload = 218,
+
+        //新增激光焊接口，20260520
+        eSDKCamIni = 219,//初始化激光
+        eSDKCamOn = 220,//打开激光
+        eSDKCamOff = 221,//关闭激光
+        eSDKGetLaserPos = 222,//获取Search_LaserPos和Get_LaserPos语句的执行结果
+        eSDKGetLaserCD = 223,//获取Get_LaserCD语句的执行结果
+        eSDKRereadXml =224,
+
+
 
         // 1000开始是命令
         eSingleAlarmConfirm = 1000,       // 单个错误报警信息确认
@@ -236,6 +260,23 @@ namespace STEPROBOTSDK {
         eArcProgWLinRel = 3037, // SDK模拟WLinRel语句
         eArcProgArcConfig = 3038,           // SDK模拟语句
 
+        //20260520新增激光焊
+        eProgLaserCutOn = 3061,
+        eProgLaserCutSet,
+        eProgLaserCutOff,
+        eProgLaserCutLin,
+        eProgLaserCutCirc,
+
+
+        //20260319新增焊接语句
+        eArcProgWeldJobOn = 3086,
+        eArcProgWeldJobOff = 3087,
+        eArcProgWeaveJobOn = 3088,
+        eArcProgWeaveJobOff = 3089,
+        eArcProgMultiJobOn = 3090,
+        eArcProgMultiJobOff = 3091,
+
+
         eBendSimu = 3100,      // 设置仿真模式
         eBendRefDis = 3107,    // 示教电子尺的零位
         eMessageLine = 3200,   //
@@ -299,7 +340,19 @@ namespace STEPROBOTSDK {
         ePalletTest = 4000,    // 码垛测试命令
         eCameraData = 4200,    // 激光示教
         eLaserOpen,            // 激光打开关闭
+        //新增激光焊语句
+        eLaserProgIni = 4202,
+        eLaserProgOn = 4203,
+        eLaserProgOff,
+        eLaserProgSearchPos,
+
+        eLaserProgWLin = 4209,
+        eLaserProgWCirc,
+
         eLaserInit = 4212,     // 激光初始化
+
+        eLaserTrackAlgorithmChange = 4214,
+
         eHmiRequestStdPlank = 4300,
         eHmiSendStdPlank,
         eHmiSendMeasurePlank,
@@ -458,6 +511,12 @@ namespace STEPROBOTSDK {
         eExternalVarReceive = 5911, // 接收外部变量
         eExternalVarModify = 5912,  // 修改外部变量
 
+
+        
+        //新增激光焊语句命令
+        eProgGetLaserPos = 7029,
+        eProgGetLaserCD = 7030,
+
         eAnyBusStatus = 7102,        // Anybus状态
         eAnyBusConfigRequest = 7103, // Anybus配置请求
         eAnyBusConfigSet,            // Anybus配置设置
@@ -483,7 +542,7 @@ namespace STEPROBOTSDK {
     #define PAI 3.1415926
 
     /* SDK最大语句数 20231122 */
-    #define MAX_PRO_NUM 10
+    #define MAX_PRO_NUM 50
     #define MAX_SIZE_CHAR 1500
 
     /* 三维矩阵 Matrix3 */
@@ -497,6 +556,9 @@ namespace STEPROBOTSDK {
     typedef double JointsPos[MAX_JOINT_NUM];
     /* 附加轴关节位置 AuxPos */
     typedef double AuxPos[MAX_AUX_NUM];
+
+    // 在你的新代码里，专门定义一个 array 版本20260408
+    typedef std::array<double, MAX_JOINT_NUM> JointsPosArray;
 
     typedef struct {
         #ifdef _WIN32
@@ -720,7 +782,8 @@ namespace STEPROBOTSDK {
       double m_Override;
       PROGRAMSTATE m_ProgramState; // 机器人状态
       PROGRAMMODE m_ProgramMode;   // 程序运行状态
-      int m_CurrentLine;           //
+      int m_CurrentLine;           // 当前行
+      uint64_t m_TimeStamp_ms;
       PosFull m_ActPos;            //
       RobotAI m_RobotAI;
       RobotAO m_RobotAO;
@@ -984,39 +1047,42 @@ namespace STEPROBOTSDK {
       double m_VoltageInc;             // 再起弧电压增量
       ScratchSDKArcData m_ScratchArcData; // 擦线起弧设置参数
     } SDKArcRetryData;
-    typedef struct {
-      int m_PreflowTime;     // 预送气时间
-      int m_PreArcingTime;   // 预起弧时间
-      int m_PreWireFeedTime; // 预送丝时间
-      double m_ArcOnCurrent; // 起弧电流
-      double m_ArcOnVoltage; // 起弧电压
-      int m_ArcOnWaitTime;   // 等待焊机起弧成功的时间//起弧时间
 
-      //新增2025.04.07
-      int m_ArcMode;               //焊接模式
-      int m_ArcArgonFlag;          //氩弧焊标志
-      int m_WeaveSyncFlag;         //摆弧同步输出电流送丝标志
-      int m_ArcWeldCurrentBase;    //焊接电流基值
-      int m_ArcDutyCycle;          //占空比
-      int m_ArcFrequency;          //脉冲频率
-      double m_ArcWireSpeed;       //峰值送丝速度
-      double m_ArcWireSpeedBase;   //基值送丝速度
-      int m_ArcRampTime;           //缓升时间
-      int m_ArcDescentTime;        //缓降时间
-	  //新增2025.05.16
-      int m_ArcOnDelayWireTime;    //延迟送丝时间
-      double m_ArcWireRetractLength;//焊丝回退距离
+    //调整数据顺序，2025、12、4
+    typedef struct
+    {
+        int m_PreflowTime;          //预送气时间
+        int m_PreArcingTime;        //预起弧时间
+        int m_PreWireFeedTime;      //预送丝时间
+        double m_ArcOnCurrent;		// 起弧电流
+        double m_ArcOnVoltage;		// 起弧电压
+        int m_ArcOnWaitTime;		// 等待焊机起弧成功的时间//起弧时间
+        int m_ArcOnMode;              //焊接模式 //实际未赋值，2025.12.5
 
-      int m_DecayTime;         // 渐变时间
-      double m_ArcSetCurrent;  // 焊接电流
-      double m_ArcSetVoltage;  // 焊接电压
-      double m_ArcSetSpeed;    // 机器人焊接速度 2016.5.25
-      double m_ArcSetEndSpeed; // 机器人焊接结束速度2021.9.23
+        int m_DecayTime;              //渐变时间
 
-      SDKArcRetryData m_ArcRetryData; // 再起弧参数
-      double m_BackDistance;      //起弧回退距离 //新增2024.7.8
 
-    } SDKInstructArcOn;
+        double m_ArcSetCurrent;		// 焊接电流
+        double m_ArcSetVoltage;		// 焊接电压
+        double m_ArcSetSpeed;	    // 机器人焊接速度 2016.5.25
+        double m_ArcSetEndSpeed;    //机器人焊接结束速度2021.9.23
+        int m_ArcMode;              //焊接模式
+        int m_ArcArgonFlag;         // 氩弧焊标志
+        int m_WeaveSyncFlag;        //摆弧同步输出电流送丝标志
+        double m_ArcWeldCurrentBase;   // 焊接电流基值
+        int m_ArcDutyCycle;         // 占空比
+        int m_ArcFrequency;         // 脉冲频率
+        double m_ArcWireSpeed;      // 峰值送丝速度
+        double m_ArcWireSpeedBase;  // 基值送丝速度
+        int m_ArcRampTime;          // 缓升时间
+        int m_ArcDescentTime;       // 缓降时间
+
+        int m_ArcOnDelayWireTime;   // 延迟送丝时间
+        double m_ArcWireRetractLength;//焊丝回退距离
+
+        SDKArcRetryData m_ArcRetryData;    // 再起弧参数
+        double m_BackDistance;      //起弧回退距离
+    }SDKInstructArcOn;
 
     //将ArcOn结构体分组给接口使用，按照示教器规则
     //起弧变量
@@ -1039,7 +1105,7 @@ namespace STEPROBOTSDK {
       int m_ArcMode;               //焊接模式
       int m_ArcArgonFlag;          //氩弧焊标志
       int m_WeaveSyncFlag;         //摆弧同步输出电流送丝标志
-      int m_ArcWeldCurrentBase;    //焊接电流基值
+      double m_ArcWeldCurrentBase;    //焊接电流基值
       int m_ArcDutyCycle;          //占空比
       int m_ArcFrequency;          //脉冲频率
       double m_ArcWireSpeed;       //峰值送丝速度
@@ -1069,13 +1135,12 @@ namespace STEPROBOTSDK {
       double m_WeldVoltage; // 焊接电压
       double m_WeldSpeed;   // 机器人焊接速度
       double m_EndSpeed;    // 机器人焊接结束速度2021.9.23
-      int m_StartEnd;       // 2015.11.6 渐变，START:0;END:1;NULL:-1
-      double m_Length;      // 2015.11.6 渐变
+
       //新增2025.04.07
       int m_ArcMode;               //焊接模式
       int m_ArcArgonFlag;          //氩弧焊标志
       int m_WeaveSyncFlag;         //摆弧同步输出电流送丝标志
-      int m_ArcWeldCurrentBase;    //焊接电流基值
+      double m_ArcWeldCurrentBase;    //焊接电流基值//int改double 2025.12.5
       int m_ArcDutyCycle;          //占空比
       int m_ArcFrequency;          //脉冲频率
       double m_ArcWireSpeed;       //峰值送丝速度
@@ -1085,6 +1150,9 @@ namespace STEPROBOTSDK {
 	  //新增2025.05.16
       int m_ArcOnDelayWireTime;    //延迟送丝时间
       double m_ArcWireRetractLength;//焊丝回退距离
+      //修改位置到下面，2025.12.5
+      int m_StartEnd;       // 2015.11.6 渐变，START:0;END:1;NULL:-1
+      double m_Length;      // 2015.11.6 渐变
 
     } SDKInstructArcSet;
 
@@ -2095,4 +2163,285 @@ namespace STEPROBOTSDK {
         char m_RefSysName_Res[32];           // 源坐标系名称
         char m_RefSysName_Des[32];           // 目标坐标系名称
     }SDKInstructRefConvert;
+
+    typedef enum
+    {
+        WithoutOrigin = 0,
+        WithOrigin
+    }GetRefBy3PointsMethod;
+
+    typedef enum
+    {
+        X_Plus_Y_Plus = 0,
+        X_Plus_Z_Plus,
+        Y_Plus_Z_Plus
+    }GetRefBy3PointsDirection;
+
+    typedef struct
+    {
+        CartSys p1;
+        CartSys p2;
+        CartSys p3;
+        GetRefBy3PointsMethod method;
+        GetRefBy3PointsDirection direction;
+    }SDKInstructGetRefBy3Points;
+
+
+    //新增20260319
+    typedef struct {
+        int m_Job;
+    }SDKInstructWeldJobOn;
+
+    typedef struct {
+        int m_WeaveJob;
+        int m_TrackJob;
+    }SDKInstructWeaveJobOn;
+
+    typedef struct {
+        int m_Job;
+        int m_CurrentLayer;
+    }SDKInstructMultiJobOn;
+
+    //新增数组数据修改和获取
+    typedef enum
+    {
+        eBOOL,
+        eINT,
+        eUINT,
+        eLINT,
+        eULINT,
+        eREAL,
+        eLREAL,
+        eSTRING,
+        eAXISPOS,
+        eCARTPOS,
+        eAXISPOSEXT,
+        eCARTPOSEXT,
+        eROBOTAXISPOS,
+        eAUXAXISPOS,
+        eROBOTCARTPOS,
+        eROBOTAXISPOSEXT,
+        eAUXAXISPOSEXT,
+        eROBOTCARTPOSEXT,
+        eAXISDIST,
+        eCARTDIST,
+        eCARTREF,
+        eCARTREFEXT,
+        eCARTREFVAR,
+        eCARTREFEXSYS,
+        eTOOL,
+        eDYNAMIC,
+        eOVERLAPREL,
+        eOVERLAPABS,
+        eORITYPE,
+        eRAMPTYPE,
+        eDI_Old,
+        eDO_Old,
+        eAI_Old,
+        eAO_Old,
+        ePERCENT,
+        eBOOLEXT,
+        eDINTEXT,
+        eLREALEXT,
+        eDWORDEXT,
+        eCD,
+        ePAT,
+        ePAL,
+        eARCONDATA,
+        eARCOFFDATA,
+        eARCDATA,
+        eWEAVEDATA,
+        eTRACKDATA,
+        ePALLET,
+        ePOSOFFSET,
+        eBENDDATA,
+        eBENDSYNDATA,
+        eTOOLEXT,
+        eCARTPOSEE,
+        eHANDEYE,
+        eLASERTRACKDATA,
+        eARCRETRYDATA,
+        eARCSEGDATA,
+        ePOLISHDATA,
+        eCLOCK,
+        eINTNUM,
+        ePALLETPOS,
+        ePALLETDATA,
+        eVISIONDATA,
+        eARRAY,
+        eSOCKET,
+        ePLASERFILTER,
+        ePAYLOADDATA,
+        eTOOLLOADDATA,
+        eLINE,
+        ePLANE,
+        eVECTOR3,
+        eVECTOR6,
+        eMultiMoveMark,
+        eARCCONFIGDATA,
+        eLASERARCONDATA,
+        eLASERARCDATA,
+        eLASERARCOFFDATA,
+        eCDS,
+        eFRICTIONDATA,
+        eLASERCUTONDATA,
+        eLASERCUTDATA,
+        eFIXEDWEAVEDATA
+    }VariableType;
+
+    typedef struct
+    {
+        char m_progPath[512];
+    }SDKInstructProgLoad;
+
+    typedef struct
+    {
+        bool m_Finished;
+        RcPos m_Result;
+    }LaserPosSearchResult;
+
+    typedef struct
+    {
+        bool m_Finished;
+        CDData m_Result;
+    }LaserCDSearchResult;
+
+    typedef struct
+    {
+        int m_JobId; // 工艺号
+        double m_HandEye[12]; // 手眼标定变量
+    }SDKInstructCamIni;
+
+    typedef struct
+    {
+        int m_Record;	// 标志是否记录位置(0，不记录；1，记录)
+    }SDKInstructCamOn;
+
+    typedef struct
+    {
+        HMIPos m_EndPos; // 激光寻位的目标点
+        int m_Dyn; // 动态特性
+        SOverlap m_Ovl; // 圆滑数据
+        ORITYPE m_Ori; // 姿态参数
+        char m_ToolName[32]; // 工具名称
+        char m_RefName[32]; // 坐标系名称
+        double m_HandEye[12]; // 手眼标定变量
+        int m_SearchType;   //寻位方式： 0是NULL，1是 NTP表示NoPointToPoint方式，2是PTN
+        char m_ResultPos[32]; // 寻位结果对应的名称
+    }SDKInstructSearch_LaserPos;
+
+    typedef struct
+    {
+        double m_HandEye[12]; // 手眼标定变量
+        char m_RefName[32]; // 坐标系名称
+        char m_ResultPos[32]; // 寻位结果对应的名称
+    }SDKInstructGet_LaserPos;
+
+    typedef struct
+    {
+        HMIPos m_EndPos; // 直线焊缝的目标点
+        int m_Dyn; // 动态特性
+        SOverlap m_Ovl; // 圆滑数据
+        ORITYPE m_Ori; // 姿态参数
+        WeaveParam m_Weave; // 摆弧参数
+        SeamTrackParam m_SeamTrack; // genzong  参数
+        char m_ToolName[32]; // 工具名称
+        char m_RefName[32]; // 坐标系名称
+    }SDKInstructWLin_Laser;
+
+    typedef struct
+    {
+        HMIPos m_HelpPos; // 辅助点
+        HMIPos m_EndPos; // 目标点
+        int m_Dyn; // 动态特性
+        SOverlap m_Ovl; // 圆滑数据
+        ORITYPE m_Ori; // 姿态参数
+        WeaveParam m_Weave; // 摆弧参数
+        SeamTrackParam m_SeamTrack; // 跟踪参数
+        char m_ToolName[32]; // 工具名称
+        char m_RefName[32]; // 坐标系名称
+    }SDKInstructWCirc_Laser;
+
+    typedef struct
+    {
+        CDDirection m_Direction; // 激光寻位的焊缝方向
+        CDData m_CD; // 校正偏差变量
+        double m_HandEye[12]; // 手眼标定变量
+        char m_RefName[32]; // 坐标系名称
+        char m_ResultCD[32]; // 寻位结果对应的名称
+    }SDKInstructGet_LaserCD;
+
+    typedef struct
+    {
+        double m_LaserPower;//激光功率
+        int m_DutyCycle;    //占空比
+        int m_Frequency;    //频率
+        double m_WeldSpeed; //焊接速度,有效
+        double m_Temp3;
+        double m_Temp2;
+        double m_Temp1;
+    }LaserCutData;
+
+    typedef struct
+    {
+        LaserCutData m_LaserCutData;
+        double m_Temp3;
+        double m_Temp2;
+        double m_Temp1;
+    }LaserCutOnData;
+
+    typedef struct
+    {
+        int m_Algorithm; // 算法号
+    }SDKInstructLaserTrackAlgorithm;
+
+    typedef struct
+    {
+        int m_Type; // 起弧参数类型，0表示使用变量，1表示使用工艺号
+        LaserCutOnData m_LaserCutOnData; // 起弧变量参数
+        int m_LaserCutOnJob; // 起弧工艺号，范围1~10
+        int m_Job; // 渐变工艺号
+        int m_ArcOnWaitTime; //开光后等待时间
+    }SDKInstructLaserCutOn;
+
+    typedef struct
+    {
+        LaserCutData m_LaserCutData; // 切割参数变量
+    }SDKInstructLaserCutSet;
+
+    typedef struct
+    {
+        HMIPos m_EndPos; // 目标点
+        int m_Dyn; // 动态特性
+        SOverlap m_Ovl; // 圆滑数据
+        ORITYPE m_Ori; // 姿态参数
+        char m_ToolName[32]; // 工具名
+        char m_RefName[32]; // 坐标系名
+    }SDKInstructLaserCutLin;
+
+    typedef struct
+    {
+        HMIPos m_HelpPos; // 中间点
+        HMIPos m_EndPos; // 目标点
+        int m_Dyn; // 动态特性
+        SOverlap m_Ovl; // 圆滑数据
+        ORITYPE m_Ori; // 姿态参数
+        char m_ToolName[32]; // 工具名
+        char m_RefName[32]; // 坐标系名
+    }SDKInstructLaserCutCirc;
+
+    typedef enum
+    {
+        WeldJobFile = 0,
+        AppointmentFile = 1,
+        IOFile = 2,
+    }XmlFileType;
+
+
+    typedef struct
+    {
+        uint64_t m_TimeStamp_ms;
+        CARTPOS m_CartPos;
+    }TimestampAddCartpos;
+
 }//不可以少，一定要在这个命名空间内
