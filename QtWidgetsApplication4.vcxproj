@@ -81,7 +81,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
     <ClCompile>
-      <MultiProcessorCompilation>false</MultiProcessorCompilation>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
@@ -93,20 +93,21 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="Configuration">
     <ClCompile>
-      <MultiProcessorCompilation>false</MultiProcessorCompilation>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <DisableSpecificWarnings>4828</DisableSpecificWarnings>
-      <AdditionalOptions>/utf-8 /bigobj /Zm2000 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /bigobj /Zm2000 /Gw %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <AdditionalLibraryDirectories>C:\Program Files\orocos_kdl\lib;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\lib;E:\OpenCV4.6.0\build\x64\vc15\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>orocos-kdl.lib;Robot-SDK.lib;Qt6Network.lib;Qt6Sql.lib;Qt6OpenGL.lib;Qt6OpenGLWidgets.lib;opengl32.lib;opencv_world460.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
@@ -233,14 +234,14 @@
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
   <Target Name="AfterBuildDebug" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
-    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qwebp,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types tls,networkinformation,generic &quot;$(TargetPath)&quot;" />
     <MakeDir Directories="$(TargetDir)translations" />
     <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460d.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\SKJCamera.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="AfterBuildRelease" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
-    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qwebp,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types tls,networkinformation,generic &quot;$(TargetPath)&quot;" />
     <MakeDir Directories="$(TargetDir)translations" />
     <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />

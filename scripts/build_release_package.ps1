@@ -96,9 +96,40 @@ if (-not (Test-Path -LiteralPath $exePath)) {
 
 if ($windeployqtPath) {
     Write-Host "Running windeployqt on the Release executable..."
-    & $windeployqtPath --release --no-translations --no-opengl-sw $exePath
+    # Trim payload the app never loads: D3D/DXC shader compilers (pure Widgets + QOpenGLWidget,
+    # no Qt Quick/RHI), PDF plugin chain (no PDF feature), unused image formats (icons are svg/ico,
+    # png is built into Qt6Gui; keep qjpeg conservatively), unused SQL drivers (only QSQLITE),
+    # TLS backends (plain sockets only; FTP goes through WinINet) and TUIO touch plugin.
+    & $windeployqtPath --release --no-translations --no-opengl-sw `
+        --no-system-d3d-compiler --no-system-dxc-compiler `
+        --exclude-plugins qpdf,qtiff,qwebp,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer `
+        --skip-plugin-types tls,networkinformation,generic `
+        $exePath
     if ($LASTEXITCODE -ne 0) {
         throw "windeployqt failed with exit code $LASTEXITCODE."
+    }
+
+    # windeployqt only ever adds files. Remove previously deployed payload that the
+    # options above no longer produce, so stale files in x64\<Config> cannot leak
+    # back into the package (the same mechanism that once leaked vc_redist.x64.exe).
+    $staleDeployFiles = @(
+        "dxcompiler.dll", "dxil.dll", "D3Dcompiler_47.dll", "Qt6Pdf.dll",
+        "imageformats\qpdf.dll", "imageformats\qtiff.dll", "imageformats\qwebp.dll",
+        "imageformats\qtga.dll", "imageformats\qicns.dll", "imageformats\qwbmp.dll",
+        "imageformats\qgif.dll",
+        "sqldrivers\qsqlodbc.dll", "sqldrivers\qsqlpsql.dll", "sqldrivers\qsqlmimer.dll"
+    )
+    foreach ($staleRelative in $staleDeployFiles) {
+        $stalePath = Join-Path $buildDir $staleRelative
+        if (Test-Path -LiteralPath $stalePath) {
+            Remove-Item -LiteralPath $stalePath -Force
+        }
+    }
+    foreach ($staleDir in @("tls", "networkinformation", "generic")) {
+        $staleDirPath = Join-Path $buildDir $staleDir
+        if (Test-Path -LiteralPath $staleDirPath) {
+            Remove-Item -LiteralPath $staleDirPath -Recurse -Force
+        }
     }
 
     $qtRoot = Split-Path -Parent (Split-Path -Parent $windeployqtPath)
@@ -128,8 +159,13 @@ if (Test-Path -LiteralPath $packageDir) {
 New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
 
 $ignoredReleaseExtensions = @(".lib", ".exp", ".pdb", ".obj", ".iobj", ".ipdb", ".ilk")
+# The redistributable is downloaded into Prerequisites\ below (the only copy the
+# installer actually runs); a stray copy manually dropped into x64\Release once
+# leaked a duplicate 24 MB vc_redist into the package root.
+$ignoredReleaseFileNames = @("vc_redist.x64.exe", "vc_redist.x86.exe")
 Get-ChildItem -LiteralPath $buildDir -File | Where-Object {
-    $ignoredReleaseExtensions -notcontains $_.Extension.ToLowerInvariant()
+    $ignoredReleaseExtensions -notcontains $_.Extension.ToLowerInvariant() -and
+    $ignoredReleaseFileNames -notcontains $_.Name.ToLowerInvariant()
 } | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $packageDir $_.Name) -Force
 }
@@ -152,11 +188,48 @@ Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "icons") -TargetDir (Join-
 
 $pointCloudExtractionSourceDir = Join-Path $repoRoot "SDK\PointCloudExtration"
 $pointCloudExtractionTargetDir = Join-Path $packageDir "SDK\PointCloudExtration"
-Copy-DirectoryContent -SourceDir $pointCloudExtractionSourceDir -TargetDir $pointCloudExtractionTargetDir
+# Ship only the runtime dependency closure of PointCloudExtration.dll (verified with
+# dumpbin /DEPENDENTS, the DLL does not import LoadLibrary so the closure is complete).
+# The vendor directory also contains debug opencv *2413d.dll builds and DLLs outside
+# the closure (pcl_surface/pcl_visualization/opencv calib3d 等) — dead weight (~42 MB).
+# Do NOT touch the SDK source directory itself; filtering happens only at packaging.
+$pointCloudExtractionRuntimeFiles = @(
+    "PointCloudExtration.dll",
+    "OpenNI2.dll",
+    "opencv_core2413.dll", "opencv_highgui2413.dll", "opencv_imgproc2413.dll",
+    "pcl_common_release.dll", "pcl_features_release.dll", "pcl_filters_release.dll",
+    "pcl_io_release.dll", "pcl_io_ply_release.dll", "pcl_kdtree_release.dll",
+    "pcl_ml_release.dll", "pcl_octree_release.dll", "pcl_sample_consensus_release.dll",
+    "pcl_search_release.dll", "pcl_segmentation_release.dll"
+)
+New-Item -ItemType Directory -Path $pointCloudExtractionTargetDir -Force | Out-Null
+foreach ($runtimeFile in $pointCloudExtractionRuntimeFiles) {
+    $runtimeSource = Join-Path $pointCloudExtractionSourceDir $runtimeFile
+    if (Test-Path -LiteralPath $runtimeSource) {
+        Copy-Item -LiteralPath $runtimeSource -Destination (Join-Path $pointCloudExtractionTargetDir $runtimeFile) -Force
+    }
+    else {
+        Write-Warning "PointCloudExtration runtime file was not found: $runtimeSource"
+    }
+}
+# config\ holds the default algorithm INI the app reads to derive *.runtime.ini.
+Copy-DirectoryContent -SourceDir (Join-Path $pointCloudExtractionSourceDir "config") -TargetDir (Join-Path $pointCloudExtractionTargetDir "config")
 
 $stepSdkVersionsSourceDir = Join-Path $repoRoot "SDK\STEP\versions"
 $stepSdkVersionsTargetDir = Join-Path $packageDir "SDK\STEP\versions"
-Copy-DirectoryContent -SourceDir $stepSdkVersionsSourceDir -TargetDir $stepSdkVersionsTargetDir
+# The STEP SDK is statically linked into the exe (dumpbin shows no Robot-SDK.dll),
+# so the .lib/.hpp archives under versions\ are link-time material only and useless
+# on field machines (no sources, no compiler) — rebuilds happen from the repo.
+# Ship only the robot-system upgrade package (SRS_*.zip) so field engineers can
+# upgrade controllers to the level the timestamp build requires.
+if (Test-Path -LiteralPath $stepSdkVersionsSourceDir) {
+    Get-ChildItem -LiteralPath $stepSdkVersionsSourceDir -Recurse -File -Filter "SRS_*.zip" | ForEach-Object {
+        $relativePath = $_.FullName.Substring($stepSdkVersionsSourceDir.Length).TrimStart('\')
+        $upgradeTarget = Join-Path $stepSdkVersionsTargetDir $relativePath
+        New-Item -ItemType Directory -Path (Split-Path -Parent $upgradeTarget) -Force | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $upgradeTarget -Force
+    }
+}
 
 $diagnosticToolsSourceDir = Join-Path $repoRoot "tools"
 $diagnosticToolsTargetDir = Join-Path $packageDir "tools"
@@ -240,8 +313,8 @@ $notes = @(
     "4. The installer bundles the Microsoft Visual C++ 2015-2022 Redistributable x64 installer and can run it automatically.",
     "5. The package also bundles FANUC WinOLPC compile tools when they are available on the build PC.",
     "6. Please make sure your FANUC tool redistribution follows your license agreement.",
-    "7. STEP SDK timestamp and legacy C++ libraries are bundled under SDK\\STEP\\versions for rebuilds.",
-    "8. Use tools\\switch_step_sdk.ps1 before rebuilding when a site must target the legacy STEP SDK."
+    "7. SDK\\STEP\\versions ships only the robot-system upgrade package (SRS_*.zip) required by the timestamp build.",
+    "8. STEP SDK .lib archives are not shipped: the SDK is statically linked and rebuilds (incl. legacy switch via switch_step_sdk.ps1) are done from the source repository."
 )
 $notes | Set-Content -LiteralPath $notesPath -Encoding UTF8
 
