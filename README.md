@@ -13,9 +13,20 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.06.11.1711`
+- 当前源码版本：`v2026.06.12.1146`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.11.1711.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.12.1146.exe`，不用自己编译源码。
+
+## 2026-06-12 更新
+
+- **新增"导出拟合调试点云(CloudCompare)"开关**（精测点云处理 → 特征点算法参数，默认开启）：每次几何拟合自动把【每段拟合用到的点集（含到拟合直线垂距 `dist_to_fit` 标量）、每段拟合直线采样、起终点/拐点、局部坐标系】导出到结果同目录的 `FitDebug/` 子目录，直接拖入 CloudCompare 即可核对分段直线拟合是否正确；真机先测后焊流程、精测界面单文件测试、CLI（`--laser-classify[-dir]`、`--rebuild-measure-weld-files`）三条路径均生效
+- **拐点拟合优化**（随"直线拟合排除圆弧段"开关生效）：拐点取相邻两段直线延长线的真实交点——顶点模式放宽否决阈值，真实折弯顶点不再因"离圆弧点云远"被误杀回退；排圆弧裁剪上限 12→24mm 且短段（如凹槽底部短平台）也启用，段直线方向不再被拐角圆弧带偏
+- **新增独立圆弧过渡预览**：分类点生成后输出 `PreciseLaserPoint_ArcTransitionPreview.txt`（绿=按工艺圆角半径生成的圆弧过渡段、灰=直线段），叠加原始点云即可核对生成圆弧是否贴合实际焊道；仅预览输出，不参与、不影响实际焊接文件（真正的圆弧过渡仍在焊缝补偿之后执行）
+- 便携包 `MeasureThenWeldFilterFit` 同步 FitDebug 导出（example 输出 `<前缀>_FitDebug` 目录）
+- **配置说明**：
+  - 调试导出开关存 `ConfigStore.db`（键 `FeaturePoint/ExportFitDebugCloud`，默认开启，不写 ini）；现场不需要调试文件时在精测点云处理界面取消勾选即可
+  - 本构建为 STEP timestamp（2.4.2）构建：**控制器系统须升级到 `SRS_V1.8.1.20260302_0603T`**，升级包随库归档于 `SDK/STEP/versions/timestamp_2.4.2_20260302_0603/SRS_V1.8.1.20260302_0603T.ARM.zip`（57.6 MB）；未升级系统的 STEP 机器人请用 `switch_step_sdk.ps1 -Mode legacy` 切回旧库重编后使用
+- 构建验证：`Debug x64`、`Release x64` 和 Inno Setup 打包通过（验证信息见 worklog）
 
 ## 2026-06-11 更新
 

@@ -7,10 +7,29 @@
 
 ## 2026-06-12
 
+- 拟合调试点云导出（FitDebug，CloudCompare 核对用）
+  - 精测点云处理"特征点算法参数"区新增"导出拟合调试点云(CloudCompare)"复选框，默认开启；配置存 `ConfigStore.db` 键 `FeaturePoint/ExportFitDebugCloud`（不写 ini）
+  - 每次几何拟合导出到结果同目录 `FitDebug/`：`fit_all_points.txt`（每段输入点按段号上色，附到本段拟合直线垂距 `dist_to_fit` 与 `smoothN` 标量）、`fit_all_lines.txt`（每段拟合直线沿 s 采样还原 3D）、`fit_keypoints.txt`（起终点/拐点）、`fit_axes.txt`（质心+三轴局部坐标系）、`segments/seg_XX_*`（每段单独文件）
+  - 三条路径全部生效：真机先测后焊（导出到本次结果 LaserPoint 目录）、精测界面单文件测试（输出文件同目录）、CLI `--laser-classify[-dir]` / `--rebuild-measure-weld-files`（输入文件同目录）
+  - 便携包 `MeasureThenWeldFilterFit` 同步等价实现（标准库版），example 输出 `<前缀>_FitDebug`；已用 Result/Test 17 个用例批量验证
+- 拐点拟合优化（随"直线拟合排除圆弧段"开关生效）
+  - 背景：拐点打分以"到最近点云距离"为主导，真实折弯顶点恰悬在圆弧外侧而被罚分/否决，回退到落在圆弧上的平滑种子——大圆弧拐角被拉得近、小圆弧准，各拐角离焊道距离不一致
+  - 顶点模式：开关开启时 `IsGeometryCornerProjectionUsable` 跳过"到点云最近距离"与"主带高度"两道会误杀真顶点的否决，仅保留 s 范围与放宽后的最大偏移（span*0.30，12~50mm）兜底防跑飞
+  - 排圆弧加强：`cornerGuard` 上限 12→24mm（系数 0.10→0.18），启用门槛 4×→2× 让凹槽底部短平台等短段也裁两端圆弧，段直线方向不再被拐角圆弧带偏
+  - 验证：Result/Test 17 用例拐点数全部不变、无跑飞；拐点到焊道距离差异为各拐角圆弧矢高的几何必然（用户确认接受"两直线交点"定义）
+- 独立圆弧过渡预览（只输出、不参与主流程）
+  - 在分类点（`PreciseLaserPoint_Classified.txt`）生成后，用与主流程相同的 `ApplyCornerArcTransitionToWeldPoseRecords`（工艺圆角半径 `cornerArcRadiusMm`）对拐角做圆弧过渡，输出 `PreciseLaserPoint_ArcTransitionPreview.txt`（X Y Z R G B，绿=圆弧过渡段、灰=直线段）
+  - 叠加原始 `PreciseLaserPoint.txt` 即可核对工艺圆角是否贴合实际焊道；真正的圆弧过渡仍在焊缝补偿之后（`_SeamComp` 阶段）执行，预览不影响任何实际焊接文件；受同一调试导出开关控制
 - STEP 机器人系统升级包归档（timestamp SDK 配套）
   - timestamp 2.4.2 构建要求控制器系统升级到 `SRS_V1.8.1.20260302_0603T`（升级包版本号 `20260302_0603` 与 SDK 归档目录一致，即同一配套发布）
   - 升级包收入 `SDK/STEP/versions/timestamp_2.4.2_20260302_0603/SRS_V1.8.1.20260302_0603T.ARM.zip`（57.6 MB），与该目录下的 2.4.2 SDK 三件套同处一处，现场升级机器人系统时直接取用
   - 未升级系统的 STEP 机器人不能使用 timestamp 构建（状态报文错位），需 `switch_step_sdk.ps1 -Mode legacy` 切回旧库重编
+
+- 版本与发布
+  - 应用版本更新为 `v2026.06.12.1146`
+  - `Debug x64` 与 `Release x64` 编译通过；两段式打包通过（build_installer.ps1 -AppVersion），生成 `NoTeaching-Robot-Setup-v2026.06.12.1146.exe`
+  - 安装包大小 `161,979,023` bytes，SHA256 `C952A99D87527F61C0D4EC3D1DB8B341D202C111E8AEEA3709E5CAFD8F600A26`；包内 `BUILD_VERSION.txt` 与应用版本一致（BuiltAt 2026-06-12 11:52:47）
+  - 注意：安装包因携带 57.6 MB 机器人系统升级包而超出 GitHub 单文件 100 MiB 限制，本版起安装包不再提交进 `dist/installer/`，仅作为 GitHub Release 附件分发（README 下载入口不变）
 
 ## 2026-06-11
 
