@@ -42,11 +42,12 @@ qrc_*.cpp
 Log/
 Result/
 Temp/
-dist/*
-!dist/installer/
-dist/installer/*
-!dist/installer/NoTeaching-Robot-Setup.exe
-!dist/installer/NoTeaching-Robot-Setup-v*.exe
+# 安装包不再提交进 git（2026-06-12 决定）：体积超限且经 GitHub Release 分发；dist 整目录忽略。
+dist/
+tmp/
+analysis_output/
+dev_backups/
+portable/*/build/
 
 # Local manuals / archives / backups
 KAREL_Ver9_3.txt
