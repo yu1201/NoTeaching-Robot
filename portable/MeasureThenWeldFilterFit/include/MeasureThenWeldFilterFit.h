@@ -83,6 +83,12 @@ struct FilterFitParams
     // option and helps avoid round/transition samples pulling a straight segment
     // intersection away from the visible line.
     bool useSlopeConsistentCornerFit = false;
+
+    // 调试：把每段拟合“用到的点集”和“拟合出的直线”导出成 CloudCompare 友好的点云，
+    // 用来核对分段直线拟合是否正确。仅当 exportFitDebugCloud 为真且 fitDebugDir 非空时导出，
+    // 文件写到 fitDebugDir 目录（含 segments 子目录）。
+    bool exportFitDebugCloud = false;
+    std::string fitDebugDir;
 };
 
 struct FilterPoint
