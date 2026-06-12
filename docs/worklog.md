@@ -35,7 +35,7 @@
 
 - 代码大体检与死代码清扫（四路代理审计：死代码/重复/结构/仓库卫生，全部 grep/dumpbin 实证）
   - 顺带修复 2 个真实缺陷：① CLI `BuildCliOriginalTrackFitParams` 漏抄 featurePointStrategy→geometryStrategy 映射，`--laser-classify` 此前永远跑 LegacyGeometry、与真机流程不同源（已补齐映射）；② UDP 共享相机链路 `BuildUdpFrame` 拷贝时丢失 TCP 版的 (0,0,0)→NaN targetPoint 替换，0 值伪目标点会混入下游（已对齐 TCP 行为）
-  - 死代码清扫合计 **-10,614 行**：整文件删除 13 个（vendored 坡口库 SkFunction/SkDataClass 约 6300 行零外部消费者仍在编译、死类 LineCoarseScan/MeasureThenWeldWorkflow/MeasureWelding 1227 行、未参编孤儿 groove/tcpsensorclientworker 253 行），vcxproj/.filters 同步；手术删除 41 项（FilterLowerWeldPath 整条旧滤波链 1370 行——唯一调用者零调用、活代码全走 Direct→Geometry；FunctionTestDialog 自注 Deprecated 的滤波拷贝 352 行；FANUC 旧版 MoveByJob 两重载与 STEP 幽灵声明；约 25 个零调用散兵函数）；连带清理死数据流 LowerWeldFitMode 枚举、params.fitMode/lineFitTrimCount 字段、精测界面"拟合裁首尾点数"无效 spinbox 与 `Fit/LineFitTrimCount` 配置键
+  - 死代码清扫合计 **-10,614 行**：整文件删除 13 个（vendored 坡口库 SkFunction/SkDataClass 约 6300 行零外部消费者仍在编译、死类 LineCoarseScan/MeasureThenWeldWorkflow/MeasureWelding 1227 行、未参编孤儿 groove/tcpsensorclientworker 253 行），vcxproj/.filters 同步；**勘误：Sk\* 五文件随后按用户决定恢复**——它是相机厂商的坡口识别源码库（SkGrooveRecog），保留备用，已在 CLAUDE.md 标注勿删；手术删除 41 项（FilterLowerWeldPath 整条旧滤波链 1370 行——唯一调用者零调用、活代码全走 Direct→Geometry；FunctionTestDialog 自注 Deprecated 的滤波拷贝 352 行；FANUC 旧版 MoveByJob 两重载与 STEP 幽灵声明；约 25 个零调用散兵函数）；连带清理死数据流 LowerWeldFitMode 枚举、params.fitMode/lineFitTrimCount 字段、精测界面"拟合裁首尾点数"无效 spinbox 与 `Fit/LineFitTrimCount` 配置键
   - 保留项（审计确认有真实消费，勿删）：piecewiseFitTolerance/piecewiseMinSegmentPoints/searchWindow、AnalyzeMeasureThenWeldLowerWeldPathDirect 转发壳、portable/ 两模块（README 注明的有意副本）
   - 验证：Debug/Release 编译 0 错误；清扫前后用 `--laser-classify-dir Result\Test` 对 17 用例 41 个输出文件逐字节对比**全部一致**（纯删除零行为变化；基线取自 bug 修复之后）
 

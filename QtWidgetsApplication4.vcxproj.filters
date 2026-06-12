@@ -88,6 +88,12 @@
     <ClCompile Include="src\StepRobotDriver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\SkDataClass.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\SkFunction.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\ContralUnit.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -250,6 +256,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\STEPRobotDriver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\SkDataClass.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\SkFunction.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\SkGrooveRecog_global.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\StepSdkBuildConfig.h">

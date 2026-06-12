@@ -85,6 +85,7 @@ QtWidgetsApplication4.exe --no-show --fanuc-upload-services --skip-upload-wait  
 - **`Data/` 由现场拥有**：安装/升级**不覆盖、不删除** `Data/`（`installer/QtWidgetsApplication4.iss` 排除 `Data\*`，打包脚本剥离 `ConfigStore.db*`），首启自动建空 schema + admin/admin。
 - **版本号需多处同步**：`v2026.MM.DD[.HHMM]` 要在 `src/main.cpp`（`setApplicationVersion`）、`src/QtWidgetsApplication4.cpp`、`installer/*.iss`、`README.md` 同步更新，并追加 README/worklog 更新条目。
 - git：`.gitignore` 忽略所有 `*.exe/dll/lib` 但**强制纳入** `SDK/STEP/Robot-SDK[d].lib` 与整个 `SDK/PointCloudExtration/`；**安装包不进 git**（2026-06-12 起，经 GitHub Release 分发，`dist/` 整目录忽略）；`*.srp/*.srd` 经 `.gitattributes` 强制 LF。提交一律署名 `yu1201`，不加任何 Co-Authored-By 行。
+- **Sk\* 是有意保留的厂商库，勿删**：`SkFunction.cpp/SkDataClass.cpp/SkGrooveRecog_global.h`（SkGrooveRecog 坡口识别）是**相机厂商的源码库**，当前零调用但按用户决定保留备用（实时焊缝跟踪领域模型：坡口间隙/错边输出、跟踪状态机、RANSAC 拟合）。死代码审计时跳过它。
 
 ## 数据与产物路径
 

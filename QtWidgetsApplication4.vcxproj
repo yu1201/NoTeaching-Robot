@@ -158,6 +158,8 @@
     <ClCompile Include="src\RobotMessage.cpp" />
     <ClCompile Include="src\RobotJogDialog.cpp" />
     <ClCompile Include="src\StepRobotDriver.cpp" />
+    <ClCompile Include="src\SkDataClass.cpp" />
+    <ClCompile Include="src\SkFunction.cpp" />
     <ClCompile Include="src\TouchKeyboardManager.cpp" />
     <ClCompile Include="src\WindowStyleHelper.cpp" />
     <ClCompile Include="src\groove\framebuffer.cpp" />
@@ -208,6 +210,9 @@
     <ClInclude Include="include\RobotPoseTransform.h" />
     <ClInclude Include="include\RobotJogDialog.h" />
     <ClInclude Include="include\STEPRobotDriver.h" />
+    <ClInclude Include="include\SkDataClass.h" />
+    <ClInclude Include="include\SkFunction.h" />
+    <ClInclude Include="include\SkGrooveRecog_global.h" />
     <ClInclude Include="include\StepSdkBuildConfig.h" />
     <ClInclude Include="include\TouchKeyboardManager.h" />
     <ClInclude Include="include\WindowStyleHelper.h" />
