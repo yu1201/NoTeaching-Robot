@@ -128,6 +128,18 @@ index x y z source
 # 1=start 2=end 3=inner_corner 4=outer_corner
 ```
 
+## 拟合调试导出 (CloudCompare)
+
+把 `FilterFitParams::exportFitDebugCloud` 置 true 且设置 `fitDebugDir`（`example.cpp` 默认用 `<输出前缀>_FitDebug`），`AnalyzeMeasureThenWeldPath()` 会把每段直线拟合“用到的点集”和“拟合出的直线”导出成 CloudCompare 友好的 ASCII 点云，用来核对分段拟合是否正确。文件写到 `fitDebugDir/`：
+
+- `fit_all_points.txt`：所有段的输入点，按段号上色 `X Y Z R G B segment dist_to_fit smoothN`，其中 `dist_to_fit` 是该点到本段拟合直线的垂距（在 CloudCompare 里按这个标量上色即可看出哪些点贴合、哪些被当作离群点甩开）。
+- `fit_all_lines.txt`：每段拟合直线沿 s 密集采样并还原回 3D 的点，与点集同段同色 `X Y Z R G B segment`。
+- `fit_keypoints.txt`：起点/终点/拐点（红色）`X Y Z R G B key_type`。
+- `fit_axes.txt`：本次拟合的局部坐标系（质心 center 与 main/side/normal 三轴）。
+- `segments/seg_XX_points.txt`、`segments/seg_XX_line.txt`：每段单独的输入点集与拟合直线。
+
+CloudCompare 导入时把 `//` 开头的表头行当注释跳过，额外的 `segment`、`dist_to_fit` 等列会被识别为标量字段（scalar field）。主工程 `RobotCalculation` 侧有等价实现 `ExportGeometryFitDebugClouds()`，由“精测点云处理”界面的“导出拟合调试点云(CloudCompare)”开关控制（默认开启），导出到输出文件同目录的 `FitDebug/` 子目录。
+
 ## 构建
 
 ```powershell
