@@ -76,6 +76,7 @@
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <DisableSpecificWarnings>4828</DisableSpecificWarnings>
+      <PreprocessorDefinitions>NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>/utf-8 /bigobj /Zm2000 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -113,7 +114,7 @@
     </Link>
     <ClCompile>
       <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>

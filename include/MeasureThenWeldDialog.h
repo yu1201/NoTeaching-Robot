@@ -11,6 +11,8 @@
 
 class MeasureThenWeldService;
 class CameraFrameCache;
+class RobotDriverAdaptor;
+class COPini;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;

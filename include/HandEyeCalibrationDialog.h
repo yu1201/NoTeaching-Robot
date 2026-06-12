@@ -10,6 +10,8 @@
 #include <atomic>
 #include <functional>
 
+class RobotDriverAdaptor;
+class FANUCRobotCtrl;
 class QLabel;
 class QCloseEvent;
 class QDoubleSpinBox;

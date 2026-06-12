@@ -565,7 +565,7 @@ int RobotDriverAdaptor::CalculateRobotAxisCountByExternalAxleType(int externalAx
     return 6 + externalAxisCount;
 }
 
-bool RobotDriverAdaptor::InitSocket(const char* ip, u_short Port, bool ifRecord)
+bool RobotDriverAdaptor::InitSocket(const char* ip, unsigned short Port, bool ifRecord)
 {
     return false;
 }

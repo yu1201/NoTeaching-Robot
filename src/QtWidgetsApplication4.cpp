@@ -1608,79 +1608,10 @@ namespace
 	RobotCalculation::LowerWeldFilterParams BuildCliOriginalTrackFitParams(
 		RobotCalculation::SampleAxis sampleAxis)
 	{
-		RobotCalculation::LowerWeldFilterParams params;
-		const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
-		// 与主管线一致：界面固定了主轴就遵从设置，Auto 才用调用方按点云推断的轴。
-		switch (pointCloudSettings.sampleAxisMode)
-		{
-		case PointCloudProcessingConfig::SampleAxisMode::AxisX:
-			params.sampleAxis = RobotCalculation::SampleAxis::AxisX;
-			break;
-		case PointCloudProcessingConfig::SampleAxisMode::AxisY:
-			params.sampleAxis = RobotCalculation::SampleAxis::AxisY;
-			break;
-		default:
-			params.sampleAxis = sampleAxis;
-			break;
-		}
-		// 与主管线 BuildOriginalTrackFitParams 一致：特征点拟合方案映射到几何策略。
-		// 此前 CLI 漏抄该映射，导致 --laser-classify 永远跑 LegacyGeometry、与真机流程不同源。
-		if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys)
-		{
-			params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::RobustSegmentedKeys;
-		}
-		else if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::SlopeWaveFiltered)
-		{
-			params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::SlopeWaveFiltered;
-		}
-		else
-		{
-			params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry;
-		}
-		// 与主管线 BuildOriginalTrackFitParams 一致：数值滤波参数读配置（默认=原硬编码值）。
-		params.zThreshold = pointCloudSettings.cloudZThresholdMm;
-		params.zJumpThreshold = pointCloudSettings.cloudZJumpThresholdMm;
-		params.zContinuityThreshold = pointCloudSettings.cloudZContinuityThresholdMm;
-		params.segmentBreakDistance = pointCloudSettings.cloudSegmentBreakDistanceMm;
-		params.keepLongestSegmentOnly = pointCloudSettings.cloudKeepLongestSegmentOnly;
-		params.sampleStep = pointCloudSettings.fitSampleStepMm;
-		params.searchWindow = pointCloudSettings.fitSearchWindowMm;
-		params.piecewiseFitTolerance = pointCloudSettings.fitPiecewiseToleranceMm;
-		params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
-		params.minPointCount = pointCloudSettings.fitMinPointCount;
-		params.smoothRadius = pointCloudSettings.fitSmoothRadius;
-		params.projectionStationWindowMm = pointCloudSettings.projectionStationWindowMm;
-		params.projectionTransverseWindowMm = pointCloudSettings.projectionTransverseWindowMm;
-		params.projectionZBandBelowMm = pointCloudSettings.projectionZBandBelowMm;
-		params.projectionZBandAboveMm = pointCloudSettings.projectionZBandAboveMm;
-		params.projectionMaxCandidatePerSeed = pointCloudSettings.projectionMaxCandidatePerSeed;
-		params.projectionLayerLowPercent = pointCloudSettings.projectionLayerLowPercent;
-		params.projectionLayerHighPercent = pointCloudSettings.projectionLayerHighPercent;
-		params.projectionSmoothRadius = pointCloudSettings.projectionSmoothRadius;
-		params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
-		params.exportFitDebugCloud = pointCloudSettings.exportFitDebugCloud;
-		params.validationCoverageEnabled = pointCloudSettings.validationCoverageEnabled;
-		params.validationMinFinitePointCount = pointCloudSettings.validationMinFinitePointCount;
-		params.validationMinProjectedSpanMm = pointCloudSettings.validationMinProjectedSpanMm;
-		params.validationContinuityEnabled = pointCloudSettings.validationContinuityEnabled;
-		params.validationMinStationCoverageRatio = pointCloudSettings.validationMinStationCoverageRatio;
-		params.validationMinLongestContinuousRatio = pointCloudSettings.validationMinLongestContinuousRatio;
-		params.validationDenoiseRatioEnabled = pointCloudSettings.validationDenoiseRatioEnabled;
-		params.validationMaxRejectedRatio = pointCloudSettings.validationMaxRejectedRatio;
-		params.validationResidualEnabled = pointCloudSettings.validationResidualEnabled;
-		params.validationMaxMedianResidualMm = pointCloudSettings.validationMaxMedianResidualMm;
-		params.validationMaxP95ResidualMm = pointCloudSettings.validationMaxP95ResidualMm;
-		params.validationResidualInlierThresholdMm = pointCloudSettings.validationResidualInlierThresholdMm;
-		params.validationMinResidualInlierRatio = pointCloudSettings.validationMinResidualInlierRatio;
-		params.validationKeyPointEnabled = pointCloudSettings.validationKeyPointEnabled;
-		params.validationMinKeyPointCount = pointCloudSettings.validationMinKeyPointCount;
-		params.validationMinCornerCount = pointCloudSettings.validationMinCornerCount;
-		params.validationMinSegmentLengthMm = pointCloudSettings.validationMinSegmentLengthMm;
-		params.validationOutputEnabled = pointCloudSettings.validationOutputEnabled;
-		params.validationMinOutputPointCount = pointCloudSettings.validationMinOutputPointCount;
-		params.validationMinOutputLengthRatio = pointCloudSettings.validationMinOutputLengthRatio;
-		params.enableCornerCompensation = false;
-		return params;
+		// 与真机流程共用同一参数名册（MeasureThenWeldService::BuildTrackFitParamsFromSettings），
+		// 此前 CLI 手抄副本曾漂移漏掉 geometryStrategy 映射。CLI 不启用拐点补偿（保持默认 false）。
+		return MeasureThenWeldService::BuildTrackFitParamsFromSettings(
+			PointCloudProcessingConfig::Load(), sampleAxis);
 	}
 
 
@@ -10616,7 +10547,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			bool connected = scanDriver->IsConnected();
 			if (!connected)
 			{
-				connected = scanDriver->InitSocket(scanDriver->m_sSocketIP.c_str(), static_cast<u_short>(scanDriver->m_nSocketPort));
+				connected = scanDriver->InitSocket(scanDriver->m_sSocketIP.c_str(), static_cast<unsigned short>(scanDriver->m_nSocketPort));
 			}
 			LogCommandLineMessage(QString("CLI 先测后焊扫描机器人连接%1：%2，地址=%3:%4")
 				.arg(connected ? "成功" : "失败")
@@ -10683,7 +10614,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		bool socketReady = !needsSocket;
 		if (needsSocket && uploadOk)
 		{
-			socketReady = pFanucDriver->InitSocket(pFanucDriver->m_sSocketIP.c_str(), static_cast<u_short>(pFanucDriver->m_nSocketPort));
+			socketReady = pFanucDriver->InitSocket(pFanucDriver->m_sSocketIP.c_str(), static_cast<unsigned short>(pFanucDriver->m_nSocketPort));
 			LogCommandLineMessage(QString("CLI FANUC连接%1：%2:%3")
 				.arg(socketReady ? "成功" : "失败")
 				.arg(QString::fromStdString(pFanucDriver->m_sSocketIP))
@@ -10994,7 +10925,7 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 	bool connected = driver->IsConnected();
 	if (!connected)
 	{
-		connected = driver->InitSocket(driver->m_sSocketIP.c_str(), static_cast<u_short>(driver->m_nSocketPort));
+		connected = driver->InitSocket(driver->m_sSocketIP.c_str(), static_cast<unsigned short>(driver->m_nSocketPort));
 	}
 	LogCommandLineMessage(QString("CLI 机器人连接%1：%2，地址=%3:%4")
 		.arg(connected ? "成功" : "失败")
@@ -13151,7 +13082,7 @@ void QtWidgetsApplication4::FanucConnectTest()
 		return;
 	}
 
-	const bool ok = pRobotDriver->InitSocket(pRobotDriver->m_sSocketIP.c_str(), static_cast<u_short>(pRobotDriver->m_nSocketPort));
+	const bool ok = pRobotDriver->InitSocket(pRobotDriver->m_sSocketIP.c_str(), static_cast<unsigned short>(pRobotDriver->m_nSocketPort));
 	int ftpRet = -1;
 	if (ok)
 	{

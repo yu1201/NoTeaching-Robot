@@ -47,7 +47,7 @@ public:
 	~STEPRobotCtrl() override;
 public:
 
-	bool InitSocket(const char* ip, u_short Port, bool ifRecode = false) override;
+	bool InitSocket(const char* ip, unsigned short Port, bool ifRecode = false) override;
 	bool CloseSocket() override;
 	bool IsConnected() override;
 	std::string GetRobotStatusText() override;

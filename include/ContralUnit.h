@@ -1,8 +1,9 @@
 #pragma once
-#include "FANUCRobotDriver.h"
-#include "STEPRobotDriver.h"
-#include "RobotDriverAdaptor.h"
-#include "RobotLog.h"
+// 本头只需要 T_CONTRAL_UNIT(Const.h) 与 std::vector；两套机器人驱动头(连带 KDL/socket/FTP)
+// 此前在这里被灌进全部 14 个消费 TU，是仅次于 Const.h 的重编放大器——已下沉到 ContralUnit.cpp。
+#include "Const.h"
+
+#include <vector>
 
 
 class ContralUnit

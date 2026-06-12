@@ -5,6 +5,8 @@
 #include "PointCloud3DView.h"
 #include "PointCloudProcessingConfig.h"
 #include "RobotDataHelper.h"
+#include "FANUCRobotDriver.h"
+#include "STEPRobotDriver.h"
 #include "RobotMessage.h"
 #include "WeldProcessFile.h"
 #include "WindowStyleHelper.h"

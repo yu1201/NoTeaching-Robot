@@ -1294,7 +1294,7 @@ bool STEPRobotCtrl::InitRobotDriver(std::string strUnitName)
 	return true;
 }
 
-bool STEPRobotCtrl::InitSocket(const char* ip, u_short Port, bool ifRecord)
+bool STEPRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifRecord)
 {
 	ClearLastRobotError();
 	int nRet = 0;

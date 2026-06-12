@@ -39,7 +39,7 @@ public:
     bool RunKinematicsSelfTest(const T_ANGLE_PULSE& inputPulse, const T_ROBOT_COORS& toolCoors, T_ANGLE_PULSE* pBestResult = nullptr);
 
 
-    virtual bool InitSocket(const char* ip, u_short Port, bool ifRecode = false);
+    virtual bool InitSocket(const char* ip, unsigned short Port, bool ifRecode = false);
     virtual bool CloseSocket();
     virtual bool IsConnected();
     virtual bool cleanAlarm();

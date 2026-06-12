@@ -25,7 +25,7 @@ public:
 
 public:
 	// 初始化与控制连接：机器人侧S4作为TCP服务器，上位机作为客户端请求/应答。
-	bool InitSocket(const char* ip, u_short Port, bool ifRecode = false) override;
+	bool InitSocket(const char* ip, unsigned short Port, bool ifRecode = false) override;
 	bool CloseSocket() override;
 	bool IsConnected() override;
 	std::string GetRobotStatusText() override;

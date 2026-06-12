@@ -168,6 +168,11 @@ public:
     // 四种处理方法各自的基础焊道文件名（处理成功时落盘到 LaserPoint 目录；
     // 文件存在即表示该目录已按该方法完成焊道生成）。
     static QString MethodBaseTrackFileName(PointCloudProcessingConfig::Mode mode);
+    // 由精测点云配置构造几何拟合参数的唯一来源（真机流程与 CLI 共用，杜绝两处手抄漂移）。
+    // sampleAxisMode=Auto 时采用 fallbackSampleAxis；拐点补偿/调试目录等调用方差异由调用方追加。
+    static RobotCalculation::LowerWeldFilterParams BuildTrackFitParamsFromSettings(
+        const PointCloudProcessingConfig::Settings& settings,
+        RobotCalculation::SampleAxis fallbackSampleAxis);
     // 读取"原始数据"对照图层：当前方法的基础焊道文件；未生成时回退相机目标点轨迹。
     bool LoadCompPreviewRawCloud(
         const QString& laserDir,

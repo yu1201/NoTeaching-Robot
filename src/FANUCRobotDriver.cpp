@@ -59,7 +59,7 @@ namespace
 			setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout)) != SOCKET_ERROR;
 	}
 
-	bool FanucConnectSocket(SOCKET& sock, const std::string& ip, u_short port)
+	bool FanucConnectSocket(SOCKET& sock, const std::string& ip, unsigned short port)
 	{
 		sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 		if (sock == INVALID_SOCKET)
@@ -1014,7 +1014,7 @@ namespace
 		{
 			return true;
 		}
-		return ctrl->InitSocket(ctrl->m_sSocketIP.c_str(), static_cast<u_short>(ctrl->m_nSocketPort));
+		return ctrl->InitSocket(ctrl->m_sSocketIP.c_str(), static_cast<unsigned short>(ctrl->m_nSocketPort));
 	}
 
 	bool FanucRequest(FANUCRobotCtrl* ctrl, const std::string& command, std::string& response)
@@ -1160,11 +1160,11 @@ bool FANUCRobotCtrl::InitRobotDriver(std::string strUnitName)
 }
 
 // 建立S4控制socket连接，并通过HELLO确认机器人常驻服务可用。
-bool FANUCRobotCtrl::InitSocket(const char* ip, u_short Port, bool ifRecode)
+bool FANUCRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifRecode)
 {
 	(void)ifRecode;
 	const std::string socketIp = (ip != nullptr && ip[0] != '\0') ? ip : m_sSocketIP;
-	const u_short socketPort = Port > 0 ? Port : static_cast<u_short>(m_nSocketPort);
+	const unsigned short socketPort = Port > 0 ? Port : static_cast<unsigned short>(m_nSocketPort);
 
 	if (socketIp.empty() || socketPort == 0)
 	{
@@ -2335,7 +2335,7 @@ bool FANUCRobotCtrl::StartMonitor(int nPort)
 			while (m_bMonitorRunning)
 			{
 				SOCKET sock = FanucInvalidSocket();
-				if (!FanucConnectSocket(sock, m_sSocketIP, static_cast<u_short>(nPort)))
+				if (!FanucConnectSocket(sock, m_sSocketIP, static_cast<unsigned short>(nPort)))
 				{
 					{
 						std::lock_guard<std::mutex> lock(m_monitorMutex);

@@ -1,5 +1,9 @@
 #include "ContralUnit.h"
 #include "Const.h"
+#include "FANUCRobotDriver.h"
+#include "STEPRobotDriver.h"
+#include "RobotDriverAdaptor.h"
+#include "RobotLog.h"
 
 namespace
 {

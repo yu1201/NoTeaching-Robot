@@ -503,74 +503,10 @@ void LoadActivePoseCornerCompensation(
 
 RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PRECISE_MEASURE_PARAM& param)
 {
-    RobotCalculation::LowerWeldFilterParams params;
-    const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
-    switch (pointCloudSettings.sampleAxisMode)
-    {
-    case PointCloudProcessingConfig::SampleAxisMode::AxisX:
-        params.sampleAxis = RobotCalculation::SampleAxis::AxisX;
-        break;
-    case PointCloudProcessingConfig::SampleAxisMode::AxisY:
-        params.sampleAxis = RobotCalculation::SampleAxis::AxisY;
-        break;
-    default:
-        params.sampleAxis = InferMeasureSampleAxis(param);
-        break;
-    }
-    // 方案三（立板投影）已并入方法③做前置提取，不再作为拟合方案映射；旧配置值按旧版几何处理。
-    if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys)
-    {
-        params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::RobustSegmentedKeys;
-    }
-    else if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::SlopeWaveFiltered)
-    {
-        params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::SlopeWaveFiltered;
-    }
-    else
-    {
-        params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry;
-    }
-    params.zThreshold = pointCloudSettings.cloudZThresholdMm;
-    params.zJumpThreshold = pointCloudSettings.cloudZJumpThresholdMm;
-    params.zContinuityThreshold = pointCloudSettings.cloudZContinuityThresholdMm;
-    params.segmentBreakDistance = pointCloudSettings.cloudSegmentBreakDistanceMm;
-    params.keepLongestSegmentOnly = pointCloudSettings.cloudKeepLongestSegmentOnly;
-    params.sampleStep = pointCloudSettings.fitSampleStepMm;
-    params.searchWindow = pointCloudSettings.fitSearchWindowMm;
-    params.piecewiseFitTolerance = pointCloudSettings.fitPiecewiseToleranceMm;
-    params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
-    params.minPointCount = pointCloudSettings.fitMinPointCount;
-    params.smoothRadius = pointCloudSettings.fitSmoothRadius;
-    params.projectionStationWindowMm = pointCloudSettings.projectionStationWindowMm;
-    params.projectionTransverseWindowMm = pointCloudSettings.projectionTransverseWindowMm;
-    params.projectionZBandBelowMm = pointCloudSettings.projectionZBandBelowMm;
-    params.projectionZBandAboveMm = pointCloudSettings.projectionZBandAboveMm;
-    params.projectionMaxCandidatePerSeed = pointCloudSettings.projectionMaxCandidatePerSeed;
-    params.projectionLayerLowPercent = pointCloudSettings.projectionLayerLowPercent;
-    params.projectionLayerHighPercent = pointCloudSettings.projectionLayerHighPercent;
-    params.projectionSmoothRadius = pointCloudSettings.projectionSmoothRadius;
-    params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
-    params.exportFitDebugCloud = pointCloudSettings.exportFitDebugCloud;
-    params.validationCoverageEnabled = pointCloudSettings.validationCoverageEnabled;
-    params.validationMinFinitePointCount = pointCloudSettings.validationMinFinitePointCount;
-    params.validationMinProjectedSpanMm = pointCloudSettings.validationMinProjectedSpanMm;
-    params.validationContinuityEnabled = pointCloudSettings.validationContinuityEnabled;
-    params.validationMinStationCoverageRatio = pointCloudSettings.validationMinStationCoverageRatio;
-    params.validationMinLongestContinuousRatio = pointCloudSettings.validationMinLongestContinuousRatio;
-    params.validationDenoiseRatioEnabled = pointCloudSettings.validationDenoiseRatioEnabled;
-    params.validationMaxRejectedRatio = pointCloudSettings.validationMaxRejectedRatio;
-    params.validationResidualEnabled = pointCloudSettings.validationResidualEnabled;
-    params.validationMaxMedianResidualMm = pointCloudSettings.validationMaxMedianResidualMm;
-    params.validationMaxP95ResidualMm = pointCloudSettings.validationMaxP95ResidualMm;
-    params.validationResidualInlierThresholdMm = pointCloudSettings.validationResidualInlierThresholdMm;
-    params.validationMinResidualInlierRatio = pointCloudSettings.validationMinResidualInlierRatio;
-    params.validationKeyPointEnabled = pointCloudSettings.validationKeyPointEnabled;
-    params.validationMinKeyPointCount = pointCloudSettings.validationMinKeyPointCount;
-    params.validationMinCornerCount = pointCloudSettings.validationMinCornerCount;
-    params.validationMinSegmentLengthMm = pointCloudSettings.validationMinSegmentLengthMm;
-    params.validationOutputEnabled = pointCloudSettings.validationOutputEnabled;
-    params.validationMinOutputPointCount = pointCloudSettings.validationMinOutputPointCount;
-    params.validationMinOutputLengthRatio = pointCloudSettings.validationMinOutputLengthRatio;
+    // 参数名册唯一来源在 MeasureThenWeldService::BuildTrackFitParamsFromSettings（CLI 共用）。
+    RobotCalculation::LowerWeldFilterParams params = MeasureThenWeldService::BuildTrackFitParamsFromSettings(
+        PointCloudProcessingConfig::Load(),
+        InferMeasureSampleAxis(param));
     LoadActivePoseCornerCompensation(QString::fromStdString(param.sRobotName), params);
     return params;
 }
@@ -9784,6 +9720,80 @@ bool LoadSampledPointFile(
     }
     return !points.isEmpty();
 }
+}
+
+RobotCalculation::LowerWeldFilterParams MeasureThenWeldService::BuildTrackFitParamsFromSettings(
+    const PointCloudProcessingConfig::Settings& pointCloudSettings,
+    RobotCalculation::SampleAxis fallbackSampleAxis)
+{
+    RobotCalculation::LowerWeldFilterParams params;
+    switch (pointCloudSettings.sampleAxisMode)
+    {
+    case PointCloudProcessingConfig::SampleAxisMode::AxisX:
+        params.sampleAxis = RobotCalculation::SampleAxis::AxisX;
+        break;
+    case PointCloudProcessingConfig::SampleAxisMode::AxisY:
+        params.sampleAxis = RobotCalculation::SampleAxis::AxisY;
+        break;
+    default:
+        params.sampleAxis = fallbackSampleAxis;
+        break;
+    }
+    // 方案三（立板投影）已并入方法③做前置提取，不再作为拟合方案映射；旧配置值按旧版几何处理。
+    if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys)
+    {
+        params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::RobustSegmentedKeys;
+    }
+    else if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::SlopeWaveFiltered)
+    {
+        params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::SlopeWaveFiltered;
+    }
+    else
+    {
+        params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry;
+    }
+    params.zThreshold = pointCloudSettings.cloudZThresholdMm;
+    params.zJumpThreshold = pointCloudSettings.cloudZJumpThresholdMm;
+    params.zContinuityThreshold = pointCloudSettings.cloudZContinuityThresholdMm;
+    params.segmentBreakDistance = pointCloudSettings.cloudSegmentBreakDistanceMm;
+    params.keepLongestSegmentOnly = pointCloudSettings.cloudKeepLongestSegmentOnly;
+    params.sampleStep = pointCloudSettings.fitSampleStepMm;
+    params.searchWindow = pointCloudSettings.fitSearchWindowMm;
+    params.piecewiseFitTolerance = pointCloudSettings.fitPiecewiseToleranceMm;
+    params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
+    params.minPointCount = pointCloudSettings.fitMinPointCount;
+    params.smoothRadius = pointCloudSettings.fitSmoothRadius;
+    params.projectionStationWindowMm = pointCloudSettings.projectionStationWindowMm;
+    params.projectionTransverseWindowMm = pointCloudSettings.projectionTransverseWindowMm;
+    params.projectionZBandBelowMm = pointCloudSettings.projectionZBandBelowMm;
+    params.projectionZBandAboveMm = pointCloudSettings.projectionZBandAboveMm;
+    params.projectionMaxCandidatePerSeed = pointCloudSettings.projectionMaxCandidatePerSeed;
+    params.projectionLayerLowPercent = pointCloudSettings.projectionLayerLowPercent;
+    params.projectionLayerHighPercent = pointCloudSettings.projectionLayerHighPercent;
+    params.projectionSmoothRadius = pointCloudSettings.projectionSmoothRadius;
+    params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
+    params.exportFitDebugCloud = pointCloudSettings.exportFitDebugCloud;
+    params.validationCoverageEnabled = pointCloudSettings.validationCoverageEnabled;
+    params.validationMinFinitePointCount = pointCloudSettings.validationMinFinitePointCount;
+    params.validationMinProjectedSpanMm = pointCloudSettings.validationMinProjectedSpanMm;
+    params.validationContinuityEnabled = pointCloudSettings.validationContinuityEnabled;
+    params.validationMinStationCoverageRatio = pointCloudSettings.validationMinStationCoverageRatio;
+    params.validationMinLongestContinuousRatio = pointCloudSettings.validationMinLongestContinuousRatio;
+    params.validationDenoiseRatioEnabled = pointCloudSettings.validationDenoiseRatioEnabled;
+    params.validationMaxRejectedRatio = pointCloudSettings.validationMaxRejectedRatio;
+    params.validationResidualEnabled = pointCloudSettings.validationResidualEnabled;
+    params.validationMaxMedianResidualMm = pointCloudSettings.validationMaxMedianResidualMm;
+    params.validationMaxP95ResidualMm = pointCloudSettings.validationMaxP95ResidualMm;
+    params.validationResidualInlierThresholdMm = pointCloudSettings.validationResidualInlierThresholdMm;
+    params.validationMinResidualInlierRatio = pointCloudSettings.validationMinResidualInlierRatio;
+    params.validationKeyPointEnabled = pointCloudSettings.validationKeyPointEnabled;
+    params.validationMinKeyPointCount = pointCloudSettings.validationMinKeyPointCount;
+    params.validationMinCornerCount = pointCloudSettings.validationMinCornerCount;
+    params.validationMinSegmentLengthMm = pointCloudSettings.validationMinSegmentLengthMm;
+    params.validationOutputEnabled = pointCloudSettings.validationOutputEnabled;
+    params.validationMinOutputPointCount = pointCloudSettings.validationMinOutputPointCount;
+    params.validationMinOutputLengthRatio = pointCloudSettings.validationMinOutputLengthRatio;
+    return params;
 }
 
 QString MeasureThenWeldService::MethodBaseTrackFileName(PointCloudProcessingConfig::Mode mode)

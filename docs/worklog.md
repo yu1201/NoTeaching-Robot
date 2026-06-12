@@ -46,6 +46,13 @@
   - 磁盘清理：旧安装包 3107MB→155MB（保留已发布的 v2026.06.12.1146），根目录历史构建日志/obj 约 110MB 清除；重写前镜像备份存于 `../_backups/repo_before_filterrepo.git`
   - 注意：历史 SHA 全变，其它机器的旧克隆需重新 clone；GitHub Release 附件不受影响
 
+- 去重与结构整理（批3 第一阶段）
+  - 几何拟合参数名册收敛为唯一来源：新增 `MeasureThenWeldService::BuildTrackFitParamsFromSettings(settings, fallbackSampleAxis)`，真机 `BuildOriginalTrackFitParams`（追加拐点补偿）与 CLI `BuildCliOriginalTrackFitParams`（保持不启用拐点补偿）均改为委托——此前两处 42 行手抄已实际漂移过一次（CLI 漏 geometryStrategy 映射），今后新增参数只改一处
+  - `ContralUnit.h` include 下沉：22 行的头此前拖着两套驱动头（连带 KDL/socket/FTP）灌进 14 个 TU，现仅保留 `Const.h + <vector>`，驱动头下沉到 cpp；消费方破口以前向声明/直接 include 补齐（MeasureThenWeldDialog.h、HandEyeCalibrationDialog.h、WeldSeamCompDialog.cpp）
+  - 顺带根治三个老隐患：工程级 `NOMINMAX + WIN32_LEAN_AND_MEAN`（此前靠驱动头先于 windows.h 的脆弱包含顺序压住 min/max 宏与 winsock1/2 冲突，已核实无裸 max/min 宏用法）；`u_short`→`unsigned short`（15 处，等价 typedef，消除 winsock 隐性依赖）
+  - 验证：Debug/Release 零错误；Result/Test 17 用例 41 输出文件与基线逐字节一致
+  - 待办（批3 后续，按计划分步）：SaveTextLines 四份收敛、GBK 解码四胞胎合一、分类输出行 8 处统一（需先定 raw/raw_noise 取舍）、groove 帧协议层合并（需现场验证）、CLI 块拆独立 cpp（约 2000 行）、管理页内联类外迁（约 6000 行）、WeldPoseGeneration 拆分（约 3950 行，配离线重建逐字节回归）
+
 - 版本与发布
   - 应用版本更新为 `v2026.06.12.1146`
   - `Debug x64` 与 `Release x64` 编译通过；两段式打包通过（build_installer.ps1 -AppVersion），生成 `NoTeaching-Robot-Setup-v2026.06.12.1146.exe`
