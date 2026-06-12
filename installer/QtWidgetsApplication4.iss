@@ -33,17 +33,6 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Types]
-Name: "full"; Description: "完整安装（含 STEP 机器人系统升级包）"
-Name: "compact"; Description: "精简安装（不含 STEP 机器人系统升级包）"
-Name: "custom"; Description: "自定义安装"; Flags: iscustom
-
-[Components]
-Name: "main"; Description: "主程序与运行组件"; Types: full compact custom; Flags: fixed
-; timestamp 构建要求 STEP 控制器系统升级到 SRS_V1.8.1.20260302_0603T；默认随装方便现场升级，
-; 现场确认不需要升级机器人系统时可反选，安装包内约 57.6 MB。
-Name: "srsupgrade"; Description: "STEP 机器人系统升级包 (SRS_V1.8.1.20260302_0603T)"; Types: full custom
-
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
@@ -55,12 +44,11 @@ Name: "{app}\Data"
 
 [Files]
 ; 程序文件正常覆盖，Data 目录由现场运行数据拥有，安装包不覆盖也不删除。
-Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Data\*,SDK\STEP\versions\*"; Components: main
-; STEP 机器人系统升级包单列为可选组件（默认勾选）。
-Source: "{#MySourceDir}\SDK\STEP\versions\*"; DestDir: "{app}\SDK\STEP\versions"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist; Components: srsupgrade
+; SDK\STEP\versions（.lib 链接期产物与 SRS 机器人系统升级包）不随安装包分发，升级包按需另发现场。
+Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Data\*,SDK\STEP\versions\*"
 ; 旧 INI/TXT 参数迁移工具，现场机器无需安装 Python。
-Source: "..\dist\tools\ConfigMigrate.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist; Components: main
-Source: "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist; Components: main
+Source: "..\dist\tools\ConfigMigrate.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

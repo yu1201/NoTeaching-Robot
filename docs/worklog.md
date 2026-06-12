@@ -25,10 +25,10 @@
   - 升级包收入 `SDK/STEP/versions/timestamp_2.4.2_20260302_0603/SRS_V1.8.1.20260302_0603T.ARM.zip`（57.6 MB），与该目录下的 2.4.2 SDK 三件套同处一处，现场升级机器人系统时直接取用
   - 未升级系统的 STEP 机器人不能使用 timestamp 构建（状态报文错位），需 `switch_step_sdk.ps1 -Mode legacy` 切回旧库重编
 
-- 安装包体积优化（dist 330.5→205.4 MB，安装包 154.5→114.3 MB；四路代理审计 + dumpbin 依赖闭包实证，运行行为零变化）
+- 安装包体积优化（dist 330.5→147.8 MB，安装包 154.5→56.7 MB；四路代理审计 + dumpbin 依赖闭包实证，运行行为零变化）
   - 打包脚本（build_release_package.ps1）：顶层拷贝按文件名排除 `vc_redist*.exe`（一份 2026-03 遗留在 x64\Release 的 24.4 MB 旧版曾被全量拷贝混入包根，iss 实际只运行 Prerequisites\ 那份）；PointCloudExtration 改为按 dumpbin /DEPENDENTS 依赖闭包白名单拷贝（16 个 DLL + config\，剔除 6 个 debug 版 opencv 2413d 与闭包外 pcl_surface/visualization 等共约 42 MB，不动 SDK 源目录）；STEP versions 只随包携带 `SRS_*.zip`（Robot-SDK[d].lib 为链接期产物、exe 已静态链接，现场无编译器，4 个 lib 共 32 MB 运行期零作用）；windeployqt 之后清理本配置目录中按新参数不再产出的陈旧部署文件（windeployqt 只增不删）
   - Qt 部署裁剪（vcxproj 两处 AfterBuild + 打包脚本共三处 windeployqt 参数对齐）：`--no-system-d3d-compiler --no-system-dxc-compiler`（dxcompiler/dxil/D3Dcompiler 共 19 MB，纯 Widgets+QOpenGLWidget 不走 D3D RHI）；`--exclude-plugins qpdf,qtiff,qwebp,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer`（无 PDF 功能、图标全 svg/ico、仅用 QSQLITE；保守保留 qjpeg）；`--skip-plugin-types tls,networkinformation,generic`（明文 socket、FTP 走 WinINet）
-  - 安装器（QtWidgetsApplication4.iss）：新增完整/精简/自定义安装类型，SRS 机器人系统升级包独立为可选组件（默认勾选随装；现场不需要升级时反选可再省 57.6 MB）
+  - SRS 机器人系统升级包不随安装包分发（用户决定）：`SDK\STEP\versions` 整目录不进包（曾短暂做成 Inno 可选组件后撤销），升级包仅在源码仓库归档，按需另发现场；iss 主条目 Excludes 保留 versions 排除作双保险
   - 编译提速与诊断：`MultiProcessorCompilation` 两配置改 true（全量 Release 重建实测 1.3 分钟）；Release 改完整 LTCG（`UseLinkTimeCodeGeneration`）+ `/Gw`（exe 4.35→4.25 MB）；链接加 `/DEBUG` 生成 PDB 供现场崩溃 dump 符号化（PDB 被打包排除不进包）
   - 验证：Debug/Release 编译通过；裁剪项全部不在 dist、保留项齐全；用裁剪后 dist exe 跑 `--laser-classify` 全管线 EXIT 0、分类与 FitDebug 输出与裁剪前一致（14 关键点）；Inno 组件编译通过
   - 审计结论存档：运行速度无可感知优化空间（拟合热点为毫秒级、瓶颈在机器人物理运动与网络 I/O，PGO 评估不值得做）；明确不做的负优化：/O1、UPX、/arch:AVX2（现场平板无 AVX）、/fp:fast、关 /GL；下一档可选项：断开 opencv_world460.dll 链接可再省 61.4 MB（exe 仅导入 18 个符号、集中在两处 UI 消费点），本次未实施

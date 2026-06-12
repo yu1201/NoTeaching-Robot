@@ -215,21 +215,12 @@ foreach ($runtimeFile in $pointCloudExtractionRuntimeFiles) {
 # config\ holds the default algorithm INI the app reads to derive *.runtime.ini.
 Copy-DirectoryContent -SourceDir (Join-Path $pointCloudExtractionSourceDir "config") -TargetDir (Join-Path $pointCloudExtractionTargetDir "config")
 
-$stepSdkVersionsSourceDir = Join-Path $repoRoot "SDK\STEP\versions"
-$stepSdkVersionsTargetDir = Join-Path $packageDir "SDK\STEP\versions"
-# The STEP SDK is statically linked into the exe (dumpbin shows no Robot-SDK.dll),
-# so the .lib/.hpp archives under versions\ are link-time material only and useless
-# on field machines (no sources, no compiler) — rebuilds happen from the repo.
-# Ship only the robot-system upgrade package (SRS_*.zip) so field engineers can
-# upgrade controllers to the level the timestamp build requires.
-if (Test-Path -LiteralPath $stepSdkVersionsSourceDir) {
-    Get-ChildItem -LiteralPath $stepSdkVersionsSourceDir -Recurse -File -Filter "SRS_*.zip" | ForEach-Object {
-        $relativePath = $_.FullName.Substring($stepSdkVersionsSourceDir.Length).TrimStart('\')
-        $upgradeTarget = Join-Path $stepSdkVersionsTargetDir $relativePath
-        New-Item -ItemType Directory -Path (Split-Path -Parent $upgradeTarget) -Force | Out-Null
-        Copy-Item -LiteralPath $_.FullName -Destination $upgradeTarget -Force
-    }
-}
+# SDK\STEP\versions is intentionally NOT shipped at all:
+# - The STEP SDK is statically linked into the exe (dumpbin shows no Robot-SDK.dll),
+#   so the .lib/.hpp archives are link-time material, useless on field machines.
+# - The robot-system upgrade package (SRS_*.zip) stays archived in the source
+#   repository only (SDK\STEP\versions\timestamp_*\); per decision it is not
+#   bundled into the installer — distribute it to field sites separately.
 
 $diagnosticToolsSourceDir = Join-Path $repoRoot "tools"
 $diagnosticToolsTargetDir = Join-Path $packageDir "tools"
@@ -313,8 +304,9 @@ $notes = @(
     "4. The installer bundles the Microsoft Visual C++ 2015-2022 Redistributable x64 installer and can run it automatically.",
     "5. The package also bundles FANUC WinOLPC compile tools when they are available on the build PC.",
     "6. Please make sure your FANUC tool redistribution follows your license agreement.",
-    "7. SDK\\STEP\\versions ships only the robot-system upgrade package (SRS_*.zip) required by the timestamp build.",
-    "8. STEP SDK .lib archives are not shipped: the SDK is statically linked and rebuilds (incl. legacy switch via switch_step_sdk.ps1) are done from the source repository."
+    "7. SDK\\STEP\\versions is not shipped: STEP SDK .lib archives are link-time only (the SDK is statically linked),",
+    "   and the SRS robot-system upgrade package is archived in the source repository and distributed separately.",
+    "8. Rebuilds (incl. legacy SDK switch via switch_step_sdk.ps1) are done from the source repository."
 )
 $notes | Set-Content -LiteralPath $notesPath -Encoding UTF8
 
