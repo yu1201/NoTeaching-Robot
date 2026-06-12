@@ -3068,22 +3068,6 @@ bool FANUCRobotCtrl::SetPosVar(int nIndex, T_ANGLE_PULSE tRobotPulse, int scoper
 	return SetPosVar(nIndex, pos, PULSEVAR, 0, config, ENGINEEVAR, PULSEVAR);
 }
 
-//bool FANUCRobotCtrl::SetPosVar(int nIndex, AXISPOS eRobotCoors, int scoper)
-//{
-//	(void)nIndex;
-//	(void)eRobotCoors;
-//	(void)scoper;
-//	return false;
-//}
-//
-//bool FANUCRobotCtrl::SetPosVar(int nIndex, JointsPos eRobotCoors, int scoper)
-//{
-//	(void)nIndex;
-//	(void)eRobotCoors;
-//	(void)scoper;
-//	return false;
-//}
-
 // 读取位置寄存器；当前协议仅保留基础返回，后续可按现场需要补完整解析。
 int FANUCRobotCtrl::GetPosVar(long lPvarIndex, double array[6], int config[7], int MoveType)
 {
@@ -3240,38 +3224,6 @@ bool FANUCRobotCtrl::PosMove(int nAxisNo, double dDist, long lRobotSpd, int nCoo
 {
 	int config[7] = { 0 };
 	return PosMove(nAxisNo, dDist, lRobotSpd, nCoorType, nMovtype, config, nToolNo, lCoordFrm);
-}
-
-// 旧版按单轴距离调用任务接口；保留给既有上层代码。
-bool FANUCRobotCtrl::MoveByJob(int Axis, double Distence, int config[7], double speed, int ifAbsoluteM, int ifJoint)
-{
-	std::vector<std::string> parts =
-	{
-		std::to_string(Axis),
-		GetStr("%.6f", Distence),
-		GetStr("%.6f", speed),
-		std::to_string(ifAbsoluteM),
-		std::to_string(ifJoint),
-		FanucBuildConfigText(config)
-	};
-	std::string response;
-	return FanucRequest(this, "MOVE_BY_JOB_AXIS:" + FanucJoin(parts, ','), response) && FanucIsOkResponse(response);
-}
-
-// 旧版按数组位置调用任务接口；保留给既有上层代码。
-bool FANUCRobotCtrl::MoveByJob(double Distence[8], int config[7], double speed, int ifAbsolutM, int ifJoint)
-{
-	std::vector<std::string> parts =
-	{
-		GetStr("%.6f", Distence[0]), GetStr("%.6f", Distence[1]), GetStr("%.6f", Distence[2]), GetStr("%.6f", Distence[3]),
-		GetStr("%.6f", Distence[4]), GetStr("%.6f", Distence[5]), GetStr("%.6f", Distence[6]), GetStr("%.6f", Distence[7]),
-		GetStr("%.6f", speed),
-		std::to_string(ifAbsolutM),
-		std::to_string(ifJoint),
-		FanucBuildConfigText(config)
-	};
-	std::string response;
-	return FanucRequest(this, "MOVE_BY_JOB_POS:" + FanucJoin(parts, ','), response) && FanucIsOkResponse(response);
 }
 
 // 固定TP单点运动公共流程：设置目标PR/速度R，必要时上传固定TP，然后调用任务。

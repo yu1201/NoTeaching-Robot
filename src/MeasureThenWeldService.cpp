@@ -141,39 +141,6 @@ struct TimestampedCameraPoint
     QString error;
 };
 
-void ResolveCameraSamplesAgainstRobotTimeline(
-    const std::vector<TimestampedCameraPoint>& cameraSamples,
-    std::size_t& nextPendingCameraIndex,
-    const std::vector<RobotCalculation::TimestampedRobotPose>& robotSamples,
-    std::vector<TimestampedCameraPoint>& matchedCameraSamples,
-    int& droppedHeadCameraCount)
-{
-    if (robotSamples.empty())
-    {
-        return;
-    }
-
-    const qint64 earliestRobotTimestampUs = robotSamples.front().timestampUs;
-    const qint64 latestRobotTimestampUs = robotSamples.back().timestampUs;
-    while (nextPendingCameraIndex < cameraSamples.size())
-    {
-        const TimestampedCameraPoint& sample = cameraSamples[nextPendingCameraIndex];
-        if (sample.timestampUs < earliestRobotTimestampUs)
-        {
-            ++droppedHeadCameraCount;
-            ++nextPendingCameraIndex;
-            continue;
-        }
-
-        if (sample.timestampUs > latestRobotTimestampUs)
-        {
-            break;
-        }
-
-        matchedCameraSamples.push_back(sample);
-        ++nextPendingCameraIndex;
-    }
-}
 
 struct WeldPosePreset
 {
@@ -305,27 +272,7 @@ QString CsvEscape(const QString& value)
     return escaped;
 }
 
-QString Vector3CsvFields(const Eigen::Vector3d& point)
-{
-    return QString("%1,%2,%3")
-        .arg(point.x(), 0, 'f', 6)
-        .arg(point.y(), 0, 'f', 6)
-        .arg(point.z(), 0, 'f', 6);
-}
 
-QString RobotPoseCsvFields(const T_ROBOT_COORS& pose)
-{
-    return QString("%1,%2,%3,%4,%5,%6,%7,%8,%9")
-        .arg(pose.dX, 0, 'f', 6)
-        .arg(pose.dY, 0, 'f', 6)
-        .arg(pose.dZ, 0, 'f', 6)
-        .arg(pose.dRX, 0, 'f', 6)
-        .arg(pose.dRY, 0, 'f', 6)
-        .arg(pose.dRZ, 0, 'f', 6)
-        .arg(pose.dBX, 0, 'f', 6)
-        .arg(pose.dBY, 0, 'f', 6)
-        .arg(pose.dBZ, 0, 'f', 6);
-}
 
 struct RobotInterpolationWindow
 {
@@ -570,8 +517,6 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
         params.sampleAxis = InferMeasureSampleAxis(param);
         break;
     }
-    // 拟合模式固定 PreservePath：整条管线（_PreservePath_2mm 及后续分类/姿态生成）都按此假设处理。
-    params.fitMode = RobotCalculation::LowerWeldFitMode::PreservePath;
     // 方案三（立板投影）已并入方法③做前置提取，不再作为拟合方案映射；旧配置值按旧版几何处理。
     if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys)
     {
@@ -592,7 +537,6 @@ RobotCalculation::LowerWeldFilterParams BuildOriginalTrackFitParams(const T_PREC
     params.keepLongestSegmentOnly = pointCloudSettings.cloudKeepLongestSegmentOnly;
     params.sampleStep = pointCloudSettings.fitSampleStepMm;
     params.searchWindow = pointCloudSettings.fitSearchWindowMm;
-    params.lineFitTrimCount = pointCloudSettings.fitLineFitTrimCount;
     params.piecewiseFitTolerance = pointCloudSettings.fitPiecewiseToleranceMm;
     params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
     params.minPointCount = pointCloudSettings.fitMinPointCount;
@@ -1454,36 +1398,7 @@ double NormalizeAngleToFanucRange(double angleDeg)
     return angleDeg;
 }
 
-double NormalizeLineAxisDeviationFromReferenceAxis(double directionDeg, double referenceAxisDeg)
-{
-    double deviation = directionDeg - referenceAxisDeg;
-    while (deviation > 90.0)
-    {
-        deviation -= 180.0;
-    }
-    while (deviation <= -90.0)
-    {
-        deviation += 180.0;
-    }
-    return deviation;
-}
 
-double ProjectLineAxisDeviationToPoseRz(double axisDeviationDeg, double measureReferenceRyDeg)
-{
-    const double tiltFactor = std::abs(std::sin(measureReferenceRyDeg * M_PI / 180.0));
-    if (tiltFactor <= 1e-6)
-    {
-        return 0.0;
-    }
-
-    const double deviationRad = axisDeviationDeg * M_PI / 180.0;
-    if (std::abs(std::cos(deviationRad)) <= 1e-6)
-    {
-        return std::copysign(90.0, axisDeviationDeg);
-    }
-
-    return std::atan(std::tan(deviationRad) * tiltFactor) * 180.0 / M_PI;
-}
 
 double NormalizeRobotRzOutputRange(double angleDeg)
 {
@@ -2574,29 +2489,6 @@ bool AssignSegmentKindsByMeasurementGunDepth(
     return true;
 }
 
-QString BuildWeldPoseOutputLine(
-    int weldIndex,
-    int rawIndex,
-    const T_ROBOT_COORS& pose,
-    RobotCalculation::LowerWeldPointType pointType,
-    const QString& segmentKind,
-    bool inTransition)
-{
-    return QString("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13")
-        .arg(weldIndex)
-        .arg(rawIndex)
-        .arg(pose.dX, 0, 'f', 6)
-        .arg(pose.dY, 0, 'f', 6)
-        .arg(pose.dZ, 0, 'f', 6)
-        .arg(pose.dRX, 0, 'f', 6)
-        .arg(pose.dRY, 0, 'f', 6)
-        .arg(pose.dRZ, 0, 'f', 6)
-        .arg(pose.dBX, 0, 'f', 6)
-        .arg(pose.dBY, 0, 'f', 6)
-        .arg(pose.dBZ, 0, 'f', 6)
-        .arg(RobotCalculation::LowerWeldPointTypeName(pointType))
-        .arg(inTransition ? (segmentKind + "_transition") : segmentKind);
-}
 
 struct WeldPoseFileRecord
 {

@@ -78,7 +78,6 @@ private:
     QCheckBox* m_pKeepLongestSegmentCheck = nullptr;
     QDoubleSpinBox* m_pStepSpin = nullptr;
     QDoubleSpinBox* m_pWindowSpin = nullptr;
-    QSpinBox* m_pLineFitTrimSpin = nullptr;
     QDoubleSpinBox* m_pPiecewiseToleranceSpin = nullptr;
     QSpinBox* m_pPiecewiseMinSegmentSpin = nullptr;
     QSpinBox* m_pMinPointSpin = nullptr;

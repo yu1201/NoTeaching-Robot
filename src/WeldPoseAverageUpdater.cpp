@@ -740,12 +740,6 @@ void BuildReportLines(
 }
 }
 
-QString WeldPoseAverageUpdater::DefaultInputHint(const QString& robotName)
-{
-    const QString safeRobotName = robotName.trimmed().isEmpty() ? "RobotA" : robotName.trimmed();
-    const QString resultRoot = RobotDataHelper::BuildProjectPath(QString("Result/%1").arg(safeRobotName));
-    return QDir::toNativeSeparators(resultRoot);
-}
 
 bool WeldPoseAverageUpdater::UpdateFromInput(
     const QString& inputPathOrResultDir,

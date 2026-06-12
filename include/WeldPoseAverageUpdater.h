@@ -46,7 +46,6 @@ public:
         QStringList reportLines;
     };
 
-    static QString DefaultInputHint(const QString& robotName);
     static bool UpdateFromInput(
         const QString& inputPathOrResultDir,
         const QString& robotNameHint,

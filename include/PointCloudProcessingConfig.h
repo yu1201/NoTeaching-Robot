@@ -49,7 +49,6 @@ public:
         bool cloudKeepLongestSegmentOnly = true;
         double fitSampleStepMm = 2.0;
         double fitSearchWindowMm = 8.0;
-        int fitLineFitTrimCount = 0;
         double fitPiecewiseToleranceMm = 4.0;
         int fitPiecewiseMinSegmentPoints = 10;
         int fitMinPointCount = 4;

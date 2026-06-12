@@ -328,10 +328,6 @@ void ReplaceConfigValue(QByteArray* content, const QByteArray& key, const QByteA
     *content = lines.join('\n');
 }
 
-QByteArray ConfigNumberValue(double value)
-{
-    return QByteArray::number(value, 'f', 6);
-}
 
 QByteArray ConfigIntegerValue(double value)
 {

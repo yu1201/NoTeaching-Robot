@@ -5,6 +5,7 @@
 #include <QVariant>
 #include <QtEndian>
 #include <cstring>
+#include <limits>
 #include "CameraFrameCache.h"
 #include "groove/pointcloundresultframe.h"
 #include "groove/framebuffer.h"
@@ -173,8 +174,17 @@ udpDataShow BuildUdpFrame(const PointCloundResultFrame& frame)
         fitLineY.append(p.y);
     }
 
-    targetX << frame.resultPoints3D.y;
-    targetY << -frame.resultPoints3D.z;
+    // 与 TCP 接收链路(scancameratcpclientworker)一致：相机未识别到目标时输出 (0,0,0)，
+    // 按约定替换为 NaN，避免 0 值伪目标点混入下游。此前 UDP 共享模式拷贝时丢失了这一步。
+    cv::Point3d targetPoint = frame.resultPoints3D;
+    if (targetPoint == cv::Point3d(0, 0, 0))
+    {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        targetPoint = cv::Point3d(nan, nan, nan);
+    }
+
+    targetX << targetPoint.y;
+    targetY << -targetPoint.z;
 
     udpDataShow udpFrame;
     udpFrame.XData = pointCloundX;
@@ -184,7 +194,7 @@ udpDataShow BuildUdpFrame(const PointCloundResultFrame& frame)
     udpFrame.targetX = targetX;
     udpFrame.targetY = targetY;
     udpFrame.errorMessage = frame.errorMsg;
-    udpFrame.targetPoint = frame.resultPoints3D;
+    udpFrame.targetPoint = targetPoint;
     udpFrame.allResultPoint = frame.dataPoints3D;
     udpFrame.mFps = frame.calcFrameRate;
     udpFrame.timestamp = frame.timestamp;

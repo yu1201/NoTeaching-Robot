@@ -34,8 +34,6 @@ public:
     static bool CopyTextFile(const QString& sourceFileName, const QString& targetFileName, bool overwriteExisting = false);
     static bool RemoveConfigPathPrefix(const QString& sourcePathPrefix);
 
-    static QStringList ListIniGroups(const QString& fileName, const QString& parentGroup = QString());
-    static QStringList ListIniSections(const QString& fileName);
     static bool CopyIniFile(const QString& sourceFileName, const QString& targetFileName, bool overwriteExisting = false);
     static bool RemoveIniGroup(const QString& fileName, const QString& groupName);
     static QMap<QString, QString> ReadIniSection(const QString& fileName, const QString& sectionName);

@@ -68,18 +68,6 @@ bool IsTouchMouseEvent(const QMouseEvent* event)
 #endif
 }
 
-QString TabTipPath()
-{
-#ifdef Q_OS_WIN
-    const QString programFiles = qEnvironmentVariable("ProgramFiles", QStringLiteral("C:\\Program Files"));
-    const QString tabTip = programFiles + QStringLiteral("\\Common Files\\Microsoft Shared\\ink\\TabTip.exe");
-    if (QFileInfo::exists(tabTip))
-    {
-        return tabTip;
-    }
-#endif
-    return QStringLiteral("TabTip.exe");
-}
 
 class TouchKeyboardPanel final : public QWidget
 {

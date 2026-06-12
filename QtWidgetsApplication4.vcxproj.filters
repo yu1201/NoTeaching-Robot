@@ -106,9 +106,6 @@
     <ClCompile Include="src\HandEyeCalibrationDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\LineCoarseScan.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="src\LaserWeldFilterDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -116,12 +113,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\MeasureThenWeldService.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\MeasureThenWeldWorkflow.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\MeasureWelding.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\PointCloud3DView.cpp">
@@ -178,12 +169,6 @@
     <ClCompile Include="src\groove\scancameratcpclientworker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\SkDataClass.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\SkFunction.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Const.h">
@@ -225,9 +210,6 @@
     <ClInclude Include="include\HandEyeCalibrationDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\LineCoarseScan.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="include\HandEyeMatrixConfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -241,12 +223,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\MeasureThenWeldService.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="include\MeasureThenWeldWorkflow.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="include\MeasureWelding.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\OPini.h">
@@ -307,15 +283,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\groove\pointcloundresultframe.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="include\SkDataClass.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="include\SkFunction.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="include\SkGrooveRecog_global.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

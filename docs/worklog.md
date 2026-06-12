@@ -33,6 +33,12 @@
   - 验证：Debug/Release 编译通过；裁剪项全部不在 dist、保留项齐全；用裁剪后 dist exe 跑 `--laser-classify` 全管线 EXIT 0、分类与 FitDebug 输出与裁剪前一致（14 关键点）；Inno 组件编译通过
   - 审计结论存档：运行速度无可感知优化空间（拟合热点为毫秒级、瓶颈在机器人物理运动与网络 I/O，PGO 评估不值得做）；明确不做的负优化：/O1、UPX、/arch:AVX2（现场平板无 AVX）、/fp:fast、关 /GL；下一档可选项：断开 opencv_world460.dll 链接可再省 61.4 MB（exe 仅导入 18 个符号、集中在两处 UI 消费点），本次未实施
 
+- 代码大体检与死代码清扫（四路代理审计：死代码/重复/结构/仓库卫生，全部 grep/dumpbin 实证）
+  - 顺带修复 2 个真实缺陷：① CLI `BuildCliOriginalTrackFitParams` 漏抄 featurePointStrategy→geometryStrategy 映射，`--laser-classify` 此前永远跑 LegacyGeometry、与真机流程不同源（已补齐映射）；② UDP 共享相机链路 `BuildUdpFrame` 拷贝时丢失 TCP 版的 (0,0,0)→NaN targetPoint 替换，0 值伪目标点会混入下游（已对齐 TCP 行为）
+  - 死代码清扫合计 **-10,614 行**：整文件删除 13 个（vendored 坡口库 SkFunction/SkDataClass 约 6300 行零外部消费者仍在编译、死类 LineCoarseScan/MeasureThenWeldWorkflow/MeasureWelding 1227 行、未参编孤儿 groove/tcpsensorclientworker 253 行），vcxproj/.filters 同步；手术删除 41 项（FilterLowerWeldPath 整条旧滤波链 1370 行——唯一调用者零调用、活代码全走 Direct→Geometry；FunctionTestDialog 自注 Deprecated 的滤波拷贝 352 行；FANUC 旧版 MoveByJob 两重载与 STEP 幽灵声明；约 25 个零调用散兵函数）；连带清理死数据流 LowerWeldFitMode 枚举、params.fitMode/lineFitTrimCount 字段、精测界面"拟合裁首尾点数"无效 spinbox 与 `Fit/LineFitTrimCount` 配置键
+  - 保留项（审计确认有真实消费，勿删）：piecewiseFitTolerance/piecewiseMinSegmentPoints/searchWindow、AnalyzeMeasureThenWeldLowerWeldPathDirect 转发壳、portable/ 两模块（README 注明的有意副本）
+  - 验证：Debug/Release 编译 0 错误；清扫前后用 `--laser-classify-dir Result\Test` 对 17 用例 41 个输出文件逐字节对比**全部一致**（纯删除零行为变化；基线取自 bug 修复之后）
+
 - 版本与发布
   - 应用版本更新为 `v2026.06.12.1146`
   - `Debug x64` 与 `Release x64` 编译通过；两段式打包通过（build_installer.ps1 -AppVersion），生成 `NoTeaching-Robot-Setup-v2026.06.12.1146.exe`

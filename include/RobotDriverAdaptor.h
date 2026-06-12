@@ -118,17 +118,6 @@ protected:
 
 //----------------------------------------变量类--------------------------------------------//
 public:
-// 脉冲当量
-    //double m_dPulseEqS;
-    //double m_dPulseEqL;
-    //double m_dPulseEqU;
-    //double m_dPulseEqR;
-    //double m_dPulseEqB;
-    //double m_dPulseEqT;
-    //double m_dPulseEqEX;
-    //double m_dPulseEqEY;
-    //double m_dPulseEqEZ;
-
 	T_KINEMATICS m_tKinematics;
 	T_AXISUNIT m_tAxisUnit;
 	T_AXISLIMITANGLE m_tAxisLimitAngle;

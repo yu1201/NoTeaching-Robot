@@ -52,22 +52,6 @@
 
 namespace
 {
-QString ProjectRootPathForPreciseEdit()
-{
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth)
-    {
-        if (QFileInfo::exists(dir.filePath("QtWidgetsApplication4.sln")))
-        {
-            return QDir::toNativeSeparators(dir.absolutePath());
-        }
-        if (!dir.cdUp())
-        {
-            break;
-        }
-    }
-    return QDir::toNativeSeparators(QDir::currentPath());
-}
 
 QString AxisKey(const QString& group, const QString& axis)
 {
@@ -387,10 +371,6 @@ QByteArray EncodeUtf16LeForPrecise(const QString& text, bool includeBom)
     return bytes;
 }
 
-QByteArray EncodeIniTextForPrecise(const QString& text)
-{
-    return EncodeUtf16LeForPrecise(text, true);
-}
 
 bool IsObsoletePreciseParamKey(const QString& key)
 {
@@ -421,40 +401,6 @@ bool IsWeldDirectionParamKey(const QString& key)
     return key.trimmed().compare("WeldDirection", Qt::CaseInsensitive) == 0;
 }
 
-QStringList ExtractSectionLinesForPrecise(const QString& content, const QString& sectionName)
-{
-    QStringList result;
-    bool inSection = false;
-    const QStringList lines = content.split('\n');
-    for (const QString& line : lines)
-    {
-        const QString trimmed = line.trimmed();
-        if (trimmed.startsWith('[') && trimmed.endsWith(']'))
-        {
-            const QString currentSection = trimmed.mid(1, trimmed.size() - 2).trimmed();
-            if (inSection && currentSection.compare(sectionName, Qt::CaseInsensitive) != 0)
-            {
-                break;
-            }
-            inSection = currentSection.compare(sectionName, Qt::CaseInsensitive) == 0;
-            continue;
-        }
-        if (inSection)
-        {
-            const int equalPos = line.indexOf('=');
-            if (equalPos > 0 && IsObsoletePreciseParamKey(line.left(equalPos)))
-            {
-                continue;
-            }
-            result << line;
-        }
-    }
-    while (!result.isEmpty() && result.last().trimmed().isEmpty())
-    {
-        result.removeLast();
-    }
-    return result;
-}
 
 QStringList ZeroSectionValuesForPrecise(const QStringList& lines)
 {
@@ -786,16 +732,6 @@ QString OtherParamGroupTitleForKey(const QString& key, bool weldSection)
     return weldSection ? WeldParamGroupTitleForKey(key) : ScanParamGroupTitleForKey(key);
 }
 
-QString PreciseCommentText(const QString& line)
-{
-    QString text = line.trimmed();
-    while (text.startsWith('#'))
-    {
-        text.remove(0, 1);
-        text = text.trimmed();
-    }
-    return text;
-}
 
 QString ValueForWriteWithInlineComment(const QComboBox* combo)
 {

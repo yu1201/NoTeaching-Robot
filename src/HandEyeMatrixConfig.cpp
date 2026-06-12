@@ -37,78 +37,7 @@ QString FindProjectRootPathForHandEye()
     return QDir::toNativeSeparators(QDir::currentPath());
 }
 
-QString BuildHandEyeIniTemplate(const QString& robotName, const QString& cameraSection, const HandEyeMatrixConfig& config)
-{
-    QString text;
-    QTextStream stream(&text);
-    stream.setRealNumberNotation(QTextStream::FixedNotation);
-    stream.setRealNumberPrecision(12);
-    stream << "[Base]\n";
-    stream << "Version=1\n";
-    stream << "RobotName=" << robotName << "\n";
-    stream << "CameraSection=" << cameraSection << "\n";
-    stream << "RobotType=" << RobotPoseTransform::NormalizeRobotType(config.robotType) << "\n\n";
-    stream << "[HandEyeMatrix]\n";
-    stream << "# 手眼矩阵参数：机器人局部坐标 = R_opt * 相机坐标 + t_opt\n";
-    stream << "# 旋转矩阵\n";
-    for (int row = 0; row < 3; ++row)
-    {
-        for (int col = 0; col < 3; ++col)
-        {
-            stream << QString("R%1%2=").arg(row).arg(col) << config.rotation(row, col) << "\n";
-        }
-    }
-    stream << "\n# 平移向量（mm）\n";
-    stream << "T0=" << config.translation(0) << "\n";
-    stream << "T1=" << config.translation(1) << "\n";
-    stream << "T2=" << config.translation(2) << "\n";
-    return text;
-}
 
-QString BuildHandEyeCalibrationIniTemplate(const QString& robotName, const QString& cameraSection, const HandEyeCalibrationConfig& config)
-{
-    QString text;
-    QTextStream stream(&text);
-    stream.setRealNumberNotation(QTextStream::FixedNotation);
-    stream.setRealNumberPrecision(6);
-    stream << "[Base]\n";
-    stream << "Version=1\n";
-    stream << "RobotName=" << robotName << "\n";
-    stream << "CameraSection=" << cameraSection << "\n\n";
-
-    stream << "[TcpPoint]\n";
-    stream << "# 固定标定目标点，当前版本计算主要使用 XYZ\n";
-    stream << "X=" << config.tcpPoint.dX << "\n";
-    stream << "Y=" << config.tcpPoint.dY << "\n";
-    stream << "Z=" << config.tcpPoint.dZ << "\n";
-    stream << "RX=" << config.tcpPoint.dRX << "\n";
-    stream << "RY=" << config.tcpPoint.dRY << "\n";
-    stream << "RZ=" << config.tcpPoint.dRZ << "\n";
-    stream << "BX=" << config.tcpPoint.dBX << "\n";
-    stream << "BY=" << config.tcpPoint.dBY << "\n";
-    stream << "BZ=" << config.tcpPoint.dBZ << "\n\n";
-
-    for (int index = 0; index < config.samples.size(); ++index)
-    {
-        const HandEyeCalibrationSample& sample = config.samples[index];
-        stream << QString("[Sample%1]\n").arg(index + 1);
-        stream << "Valid=" << (sample.valid ? 1 : 0) << "\n";
-        stream << "RobotX=" << sample.robotPose.dX << "\n";
-        stream << "RobotY=" << sample.robotPose.dY << "\n";
-        stream << "RobotZ=" << sample.robotPose.dZ << "\n";
-        stream << "RobotRX=" << sample.robotPose.dRX << "\n";
-        stream << "RobotRY=" << sample.robotPose.dRY << "\n";
-        stream << "RobotRZ=" << sample.robotPose.dRZ << "\n";
-        stream << "RobotBX=" << sample.robotPose.dBX << "\n";
-        stream << "RobotBY=" << sample.robotPose.dBY << "\n";
-        stream << "RobotBZ=" << sample.robotPose.dBZ << "\n";
-        stream << "CameraX=" << sample.cameraPoint.x() << "\n";
-        stream << "CameraY=" << sample.cameraPoint.y() << "\n";
-        stream << "CameraZ=" << sample.cameraPoint.z() << "\n\n";
-    }
-
-    return text;
-}
 
 Eigen::Vector3d ToPositionVector(const T_ROBOT_COORS& pose)
 {

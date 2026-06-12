@@ -31,14 +31,6 @@ public:
         AxisX = 1
     };
 
-    enum class LowerWeldFitMode
-    {
-        PreservePath = 0,
-        LineFit = 1,
-        TrapezoidFit = 2,
-        PiecewiseLineFit = 3
-    };
-
     enum class LowerWeldGeometryStrategy
     {
         LegacyGeometry = 0,
@@ -58,7 +50,6 @@ public:
         };
 
         SampleAxis sampleAxis = SampleAxis::AxisY;
-        LowerWeldFitMode fitMode = LowerWeldFitMode::PreservePath;
         LowerWeldGeometryStrategy geometryStrategy = LowerWeldGeometryStrategy::LegacyGeometry;
         double zThreshold = -230.0;
         double zJumpThreshold = 5.0;
@@ -67,7 +58,6 @@ public:
         bool keepLongestSegmentOnly = true;
         double sampleStep = 2.0;
         double searchWindow = 8.0;
-        int lineFitTrimCount = 0;
         double piecewiseFitTolerance = 2.0;
         int piecewiseMinSegmentPoints = 4;
         int minPointCount = 3;
@@ -179,16 +169,9 @@ public:
 
     static T_ROBOT_COORS InterpolateRobotPose(const std::vector<TimestampedRobotPose>& robotSamples, qint64 targetTimestampUs);
     static Eigen::Vector3d CalcLaserPointInRobot(const T_ROBOT_COORS& robotPose, const Eigen::Vector3d& cameraPoint, const HandEyeMatrixConfig& calibration);
-    static LowerWeldFilterResult FilterLowerWeldPath(const QVector<IndexedPoint3D>& inputPoints, const LowerWeldFilterParams& params);
-    static LowerWeldClassificationResult ClassifyLowerWeldPoints(
-        const LowerWeldFilterResult& filterResult,
-        SampleAxis sampleAxis);
     static LowerWeldFilterResult ProjectWorkpieceCloudToLowerWeldPath(
         const QVector<IndexedPoint3D>& workpieceCloudInput,
         const QVector<IndexedPoint3D>& seedPathInput,
-        const LowerWeldFilterParams& params);
-    static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPath(
-        const QVector<IndexedPoint3D>& inputPoints,
         const LowerWeldFilterParams& params);
     static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPathDirect(
         const QVector<IndexedPoint3D>& inputPoints,

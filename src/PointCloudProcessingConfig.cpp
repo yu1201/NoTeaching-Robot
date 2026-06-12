@@ -115,7 +115,6 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.cloudKeepLongestSegmentOnly = ReadBoolSetting("CloudAlgo/KeepLongestSegmentOnly", settings.cloudKeepLongestSegmentOnly);
     settings.fitSampleStepMm = ReadDoubleSetting("Fit/SampleStepMm", settings.fitSampleStepMm);
     settings.fitSearchWindowMm = ReadDoubleSetting("Fit/SearchWindowMm", settings.fitSearchWindowMm);
-    settings.fitLineFitTrimCount = ReadIntSetting("Fit/LineFitTrimCount", settings.fitLineFitTrimCount);
     settings.fitPiecewiseToleranceMm = ReadDoubleSetting("Fit/PiecewiseToleranceMm", settings.fitPiecewiseToleranceMm);
     settings.fitPiecewiseMinSegmentPoints = ReadIntSetting("Fit/PiecewiseMinSegmentPoints", settings.fitPiecewiseMinSegmentPoints);
     settings.fitMinPointCount = ReadIntSetting("Fit/MinPointCount", settings.fitMinPointCount);
@@ -207,7 +206,6 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     {
         settings.fitSearchWindowMm = 8.0;
     }
-    settings.fitLineFitTrimCount = std::max(0, settings.fitLineFitTrimCount);
     if (settings.fitPiecewiseToleranceMm <= 0.0)
     {
         settings.fitPiecewiseToleranceMm = 4.0;
@@ -271,7 +269,6 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("CloudAlgo/KeepLongestSegmentOnly", settings.cloudKeepLongestSegmentOnly ? "1" : "0")
         && write("Fit/SampleStepMm", QString::number(settings.fitSampleStepMm, 'f', 6))
         && write("Fit/SearchWindowMm", QString::number(settings.fitSearchWindowMm, 'f', 6))
-        && write("Fit/LineFitTrimCount", QString::number(settings.fitLineFitTrimCount))
         && write("Fit/PiecewiseToleranceMm", QString::number(settings.fitPiecewiseToleranceMm, 'f', 6))
         && write("Fit/PiecewiseMinSegmentPoints", QString::number(settings.fitPiecewiseMinSegmentPoints))
         && write("Fit/MinPointCount", QString::number(settings.fitMinPointCount))

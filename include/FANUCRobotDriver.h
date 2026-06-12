@@ -144,8 +144,6 @@ public:
 	bool AxisPulseMove(int nAxisNo, long lDist, long lRobotSpd, int nCoorType = POSVAR, int nMovtype = RELVAR, int nToolNo = 1, long lCoordFrm = 1);
 	bool PosMove(int nAxisNo, double dDist, long lRobotSpd, int nCoorType = POSVAR, int nMovtype = RELVAR, int config[7] = { 0 }, int nToolNo = 1, long lCoordFrm = 0);
 	bool PosMove(int nAxisNo, double dDist, long lRobotSpd, int nCoorType = POSVAR, int nMovtype = RELVAR, int nToolNo = 1, long lCoordFrm = 0);
-	bool MoveByJob(int Axis, double Distence, int config[7], double speed, int ifAbsoluteM, int ifJoint);
-	bool MoveByJob(double Distence[8], int config[7], double speed, int ifAbsolutM, int ifJoint);
 	bool MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType = PULSEVAR, std::string JobName = "MOVJ", int config[7] = { 0 });
 	bool MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVL", int isconfig = 1, int config[7] = { 0 });
 	bool MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVJ");

@@ -116,7 +116,6 @@ private:
     bool IsRobotUnitDriverReady(int unitIndex, QString* issueText = nullptr) const;
     int FindFirstReadyRobotUnitIndex() const;
     RobotDriverAdaptor* GetCurrentRobotDriver(QWidget* parent);
-    FANUCRobotCtrl* GetCurrentFanucDriver(QWidget* parent);
     QString RoleDisplayName(const QString& role) const;
     int RoleLevel(const QString& role) const;
     bool RequirePermission(const QString& minimumRole, const QString& actionName);

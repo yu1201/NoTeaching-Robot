@@ -172,8 +172,6 @@ public:
 	bool PosMove(int nAxisNo, double dDist, long lRobotSpd, int nCoorType = POSVAR, int nMovtype = RELVAR, int config[7] = { 0 }, int nToolNo = 1, long lCoordFrm = 0);
 	bool PosMove(int nAxisNo, double dDist, long lRobotSpd, int nCoorType = POSVAR, int nMovtype = RELVAR, int nToolNo = 1, long lCoordFrm = 0);
 	//基础移动函数
-	bool MoveByJob(int Axis, double Distence, int config[7], double speed, int ifAbsoluteM, int ifJoint);////默认 mode值Cf值为零 ifAbsoluteM 是否相对值，ifJoint 是否为直角坐标
-	bool MoveByJob(double Distence[8], int config[7], double speed, int ifAbsolutM, int ifJoint);
 
 	//通用移动函数	
 	bool MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType = PULSEVAR, std::string JobName = "MOVJ", int config[7] = { 0 }) override;

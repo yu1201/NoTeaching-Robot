@@ -136,11 +136,8 @@
     <ClCompile Include="src\HandEyeMatrixConfig.cpp" />
     <ClCompile Include="src\HandEyeMatrixDialog.cpp" />
     <ClCompile Include="src\LaserWeldFilterDialog.cpp" />
-    <ClCompile Include="src\LineCoarseScan.cpp" />
     <ClCompile Include="src\MeasureThenWeldDialog.cpp" />
     <ClCompile Include="src\MeasureThenWeldService.cpp" />
-    <ClCompile Include="src\MeasureThenWeldWorkflow.cpp" />
-    <ClCompile Include="src\MeasureWelding.cpp" />
     <ClCompile Include="src\PointCloud3DView.cpp" />
     <ClCompile Include="src\PointCloudExtractionProcessor.cpp" />
     <ClCompile Include="src\PointCloudProcessingConfig.cpp" />
@@ -160,8 +157,6 @@
     <ClCompile Include="src\RobotMessage.cpp" />
     <ClCompile Include="src\RobotJogDialog.cpp" />
     <ClCompile Include="src\StepRobotDriver.cpp" />
-    <ClCompile Include="src\SkDataClass.cpp" />
-    <ClCompile Include="src\SkFunction.cpp" />
     <ClCompile Include="src\TouchKeyboardManager.cpp" />
     <ClCompile Include="src\WindowStyleHelper.cpp" />
     <ClCompile Include="src\groove\framebuffer.cpp" />
@@ -194,13 +189,10 @@
     <ClInclude Include="include\HandEyeMatrixConfig.h" />
     <ClInclude Include="include\HandEyeMatrixDialog.h" />
     <ClInclude Include="include\LaserWeldFilterDialog.h" />
-    <ClInclude Include="include\LineCoarseScan.h" />
     <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h" />
     <ClInclude Include="include\MeasureThenWeldService.h" />
     <ClInclude Include="include\WorkpieceMeshBuilder.h" />
     <ClInclude Include="include\WorkpieceMeshViewerDialog.h" />
-    <ClInclude Include="include\MeasureThenWeldWorkflow.h" />
-    <ClInclude Include="include\MeasureWelding.h" />
     <ClInclude Include="include\OPini.h" />
     <ClInclude Include="include\PointCloud3DView.h" />
     <ClInclude Include="include\PointCloudExtractionProcessor.h" />
@@ -214,9 +206,6 @@
     <ClInclude Include="include\RobotMessage.h" />
     <ClInclude Include="include\RobotPoseTransform.h" />
     <ClInclude Include="include\RobotJogDialog.h" />
-    <ClInclude Include="include\SkDataClass.h" />
-    <ClInclude Include="include\SkFunction.h" />
-    <ClInclude Include="include\SkGrooveRecog_global.h" />
     <ClInclude Include="include\STEPRobotDriver.h" />
     <ClInclude Include="include\StepSdkBuildConfig.h" />
     <ClInclude Include="include\TouchKeyboardManager.h" />

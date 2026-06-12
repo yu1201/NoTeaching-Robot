@@ -1300,29 +1300,6 @@ namespace
 		return fallbackRobotName;
 	}
 
-	FANUCRobotCtrl* GetFirstFanucDriver(ContralUnit* contralUnit, QWidget* parent)
-	{
-		if (contralUnit == nullptr || contralUnit->m_vtContralUnitInfo.empty())
-		{
-			QMessageBox::warning(parent, "FANUC测试", "未找到可用的控制单元。");
-			return nullptr;
-		}
-
-		RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(contralUnit->m_vtContralUnitInfo[0].pUnitDriver);
-		if (pRobotDriverAdaptor == nullptr)
-		{
-			QMessageBox::warning(parent, "FANUC测试", "当前控制单元未创建驱动。");
-			return nullptr;
-		}
-
-		FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
-		if (pFanucDriver == nullptr)
-		{
-			QMessageBox::warning(parent, "FANUC测试", "当前控制单元不是 FANUC 驱动。");
-			return nullptr;
-		}
-		return pFanucDriver;
-	}
 
 	template <typename DialogType>
 	DialogType* PrepareTaskbarDialog(DialogType* dialog, QWidget* owner)
@@ -1646,7 +1623,20 @@ namespace
 			params.sampleAxis = sampleAxis;
 			break;
 		}
-		params.fitMode = RobotCalculation::LowerWeldFitMode::PreservePath;
+		// 与主管线 BuildOriginalTrackFitParams 一致：特征点拟合方案映射到几何策略。
+		// 此前 CLI 漏抄该映射，导致 --laser-classify 永远跑 LegacyGeometry、与真机流程不同源。
+		if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys)
+		{
+			params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::RobustSegmentedKeys;
+		}
+		else if (pointCloudSettings.featurePointStrategy == PointCloudProcessingConfig::FeaturePointStrategy::SlopeWaveFiltered)
+		{
+			params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::SlopeWaveFiltered;
+		}
+		else
+		{
+			params.geometryStrategy = RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry;
+		}
 		// 与主管线 BuildOriginalTrackFitParams 一致：数值滤波参数读配置（默认=原硬编码值）。
 		params.zThreshold = pointCloudSettings.cloudZThresholdMm;
 		params.zJumpThreshold = pointCloudSettings.cloudZJumpThresholdMm;
@@ -1655,7 +1645,6 @@ namespace
 		params.keepLongestSegmentOnly = pointCloudSettings.cloudKeepLongestSegmentOnly;
 		params.sampleStep = pointCloudSettings.fitSampleStepMm;
 		params.searchWindow = pointCloudSettings.fitSearchWindowMm;
-		params.lineFitTrimCount = pointCloudSettings.fitLineFitTrimCount;
 		params.piecewiseFitTolerance = pointCloudSettings.fitPiecewiseToleranceMm;
 		params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
 		params.minPointCount = pointCloudSettings.fitMinPointCount;
@@ -1694,38 +1683,7 @@ namespace
 		return params;
 	}
 
-	RobotCalculation::LowerWeldFilterParams BuildCliTrapezoidFitParams(
-		const RobotCalculation::LowerWeldFilterParams& originalFitParams)
-	{
-		RobotCalculation::LowerWeldFilterParams params = originalFitParams;
-		params.fitMode = RobotCalculation::LowerWeldFitMode::TrapezoidFit;
-		params.zThreshold = std::numeric_limits<double>::max();
-		params.zJumpThreshold = 0.0;
-		params.zContinuityThreshold = 0.0;
-		params.keepLongestSegmentOnly = false;
-		params.searchWindow = std::max(2.0, originalFitParams.sampleStep);
-		params.lineFitTrimCount = 0;
-		params.piecewiseFitTolerance = std::max(5.0, originalFitParams.piecewiseFitTolerance);
-		params.piecewiseMinSegmentPoints = std::max(12, originalFitParams.piecewiseMinSegmentPoints);
-		params.minPointCount = 2;
-		params.smoothRadius = 0;
-		return params;
-	}
 
-	QVector<RobotCalculation::IndexedPoint3D> ToIndexedInput(
-		const QVector<RobotCalculation::LowerWeldFilterPoint>& points)
-	{
-		QVector<RobotCalculation::IndexedPoint3D> indexedPoints;
-		indexedPoints.reserve(points.size());
-		for (const RobotCalculation::LowerWeldFilterPoint& point : points)
-		{
-			RobotCalculation::IndexedPoint3D indexedPoint;
-			indexedPoint.index = point.index;
-			indexedPoint.point = point.point;
-			indexedPoints.push_back(indexedPoint);
-		}
-		return indexedPoints;
-	}
 
 	QString BuildClassifiedOutputPath(const QString& inputPath)
 	{
@@ -8996,27 +8954,6 @@ RobotDriverAdaptor* QtWidgetsApplication4::GetCurrentRobotDriver(QWidget* parent
     return static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
 }
 
-FANUCRobotCtrl* QtWidgetsApplication4::GetCurrentFanucDriver(QWidget* parent)
-{
-    RobotDriverAdaptor* pRobotDriverAdaptor = GetCurrentRobotDriver(parent);
-    if (pRobotDriverAdaptor == nullptr)
-    {
-        return nullptr;
-    }
-
-    FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
-    if (fanucDriver == nullptr && parent != nullptr)
-    {
-        const QString robotName = DecodeConfigText(pRobotDriverAdaptor->m_sRobotName);
-        const QString displayName = DecodeConfigText(pRobotDriverAdaptor->m_sCustomName);
-        const QString robotLabel = displayName.isEmpty()
-            ? robotName
-            : QString("%1 (%2)").arg(displayName, robotName);
-        QMessageBox::warning(parent, "驱动类型不匹配",
-            QString("当前功能需要 FANUC 驱动。\n当前选择：%1，驱动已创建但不是 FANUC。").arg(robotLabel));
-    }
-    return fanucDriver;
-}
 
 void QtWidgetsApplication4::RefreshRobotSelectorUi()
 {

@@ -789,10 +789,6 @@ void LaserWeldFilterDialog::BuildUi()
     m_pWindowSpin->setSingleStep(0.5);
     m_pWindowSpin->setValue(8.0);
 
-    m_pLineFitTrimSpin = new QSpinBox();
-    m_pLineFitTrimSpin->setRange(0, 9999);
-    m_pLineFitTrimSpin->setValue(0);
-
     m_pPiecewiseToleranceSpin = new QDoubleSpinBox();
     m_pPiecewiseToleranceSpin->setRange(0.1, 9999.0);
     m_pPiecewiseToleranceSpin->setDecimals(3);
@@ -833,8 +829,6 @@ void LaserWeldFilterDialog::BuildUi()
     paramLayout->addWidget(CreateUnitEditor(m_pStepSpin, "mm"), 3, 1);
     paramLayout->addWidget(new QLabel("搜索窗口"), 3, 2);
     paramLayout->addWidget(CreateUnitEditor(m_pWindowSpin, "mm"), 3, 3);
-    paramLayout->addWidget(new QLabel("拟合裁首尾点数"), 4, 0);
-    paramLayout->addWidget(m_pLineFitTrimSpin, 4, 1);
     paramLayout->addWidget(new QLabel("分段拟合容差"), 4, 2);
     paramLayout->addWidget(CreateUnitEditor(m_pPiecewiseToleranceSpin, "mm"), 4, 3);
     paramLayout->addWidget(new QLabel("每段最少点数"), 5, 0);
@@ -1152,7 +1146,6 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pKeepLongestSegmentCheck->setChecked(processingSettings.cloudKeepLongestSegmentOnly);
     m_pStepSpin->setValue(processingSettings.fitSampleStepMm);
     m_pWindowSpin->setValue(processingSettings.fitSearchWindowMm);
-    m_pLineFitTrimSpin->setValue(processingSettings.fitLineFitTrimCount);
     m_pPiecewiseToleranceSpin->setValue(processingSettings.fitPiecewiseToleranceMm);
     m_pPiecewiseMinSegmentSpin->setValue(processingSettings.fitPiecewiseMinSegmentPoints);
     m_pMinPointSpin->setValue(processingSettings.fitMinPointCount);
@@ -1193,7 +1186,6 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.cloudKeepLongestSegmentOnly = m_pKeepLongestSegmentCheck->isChecked();
     processingSettings.fitSampleStepMm = m_pStepSpin->value();
     processingSettings.fitSearchWindowMm = m_pWindowSpin->value();
-    processingSettings.fitLineFitTrimCount = m_pLineFitTrimSpin->value();
     processingSettings.fitPiecewiseToleranceMm = m_pPiecewiseToleranceSpin->value();
     processingSettings.fitPiecewiseMinSegmentPoints = m_pPiecewiseMinSegmentSpin->value();
     processingSettings.fitMinPointCount = m_pMinPointSpin->value();

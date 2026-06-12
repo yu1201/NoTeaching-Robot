@@ -512,13 +512,6 @@ QStringList TableColumns(QSqlDatabase& db, const QString& tableName)
     return columns;
 }
 
-bool TableExists(QSqlDatabase& db, const QString& tableName)
-{
-    QSqlQuery query(db);
-    query.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1");
-    query.addBindValue(tableName);
-    return query.exec() && query.next();
-}
 
 bool ExecSql(QSqlDatabase& db, const QString& sql)
 {
@@ -908,94 +901,7 @@ bool ConfigDatabase::RemoveConfigPathPrefix(const QString& sourcePathPrefix)
     return db.commit();
 }
 
-QStringList ConfigDatabase::ListIniGroups(const QString& fileName, const QString& parentGroup)
-{
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return QStringList();
-    }
 
-    const ScopedSettingIdentity identity = BuildScopedFileIdentity(fileName);
-    if (!identity.valid)
-    {
-        return QStringList();
-    }
-    const QString baseModule = NormalizeSection(identity.module);
-    const QString basePrefix = baseModule + QStringLiteral("/");
-    const QString normalizedParent = NormalizeSection(parentGroup);
-    const QString prefix = normalizedParent.isEmpty() ? QString() : normalizedParent + "/";
-    QStringList groups;
-
-    QSqlQuery query(db);
-    query.prepare("SELECT DISTINCT module FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
-    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
-    query.addBindValue(NormalizeScopeId(identity.scopeId));
-    query.addBindValue(baseModule);
-    query.addBindValue(basePrefix.size());
-    query.addBindValue(basePrefix);
-    if (!query.exec())
-    {
-        return QStringList();
-    }
-
-    while (query.next())
-    {
-        const QString module = NormalizeSection(query.value(0).toString());
-        const QString section = module == baseModule ? QString() : module.mid(basePrefix.size());
-        if (!section.startsWith(prefix))
-        {
-            continue;
-        }
-        const QString remain = section.mid(prefix.size());
-        if (remain.isEmpty() || remain.contains('/'))
-        {
-            continue;
-        }
-        groups << remain;
-    }
-    return UniqueSorted(groups);
-}
-
-QStringList ConfigDatabase::ListIniSections(const QString& fileName)
-{
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return QStringList();
-    }
-
-    const ScopedSettingIdentity identity = BuildScopedFileIdentity(fileName);
-    if (!identity.valid)
-    {
-        return QStringList();
-    }
-    const QString baseModule = NormalizeSection(identity.module);
-    const QString basePrefix = baseModule + QStringLiteral("/");
-
-    QStringList sections;
-    QSqlQuery query(db);
-    query.prepare("SELECT DISTINCT module FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?) ORDER BY module COLLATE NOCASE");
-    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
-    query.addBindValue(NormalizeScopeId(identity.scopeId));
-    query.addBindValue(baseModule);
-    query.addBindValue(basePrefix.size());
-    query.addBindValue(basePrefix);
-    if (!query.exec())
-    {
-        return QStringList();
-    }
-    while (query.next())
-    {
-        const QString module = NormalizeSection(query.value(0).toString());
-        const QString section = module == baseModule ? QString() : module.mid(basePrefix.size());
-        if (!section.isEmpty())
-        {
-            sections << section;
-        }
-    }
-    return UniqueSorted(sections);
-}
 
 bool ConfigDatabase::CopyIniFile(const QString& sourceFileName, const QString& targetFileName, bool overwriteExisting)
 {
