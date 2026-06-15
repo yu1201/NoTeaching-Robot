@@ -687,14 +687,33 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
         return result;
     }
 
-    const QString libraryDir = settings.libraryDir.trimmed().isEmpty()
+    QString libraryDir = settings.libraryDir.trimmed().isEmpty()
         ? PointCloudProcessingConfig::DefaultLibraryDir()
         : settings.libraryDir.trimmed();
-    const QString dllPath = QDir(libraryDir).filePath("PointCloudExtration.dll");
+    QString dllPath = QDir(libraryDir).filePath("PointCloudExtration.dll");
+    // 配置目录可能是旧部署/别的盘符遗留（如配置库残留 B:\NoTeaching-Robot\...），在其下找不到 DLL 时
+    // 回退到工程内默认目录，避免换机器/换盘符后因数据库里的绝对路径报"未找到精测点云库"。
+    if (!QFileInfo::exists(dllPath))
+    {
+        const QString fallbackDll = QDir(PointCloudProcessingConfig::DefaultLibraryDir()).filePath("PointCloudExtration.dll");
+        if (QFileInfo::exists(fallbackDll))
+        {
+            dllPath = fallbackDll;
+        }
+    }
     result.dllPath = QDir::toNativeSeparators(QFileInfo(dllPath).absoluteFilePath());
-    result.configPath = QDir::toNativeSeparators(settings.configPath.trimmed().isEmpty()
+    QString configPath = settings.configPath.trimmed().isEmpty()
         ? PointCloudProcessingConfig::DefaultConfigPath()
-        : settings.configPath.trimmed());
+        : settings.configPath.trimmed();
+    if (!QFileInfo::exists(configPath))
+    {
+        const QString fallbackConfig = PointCloudProcessingConfig::DefaultConfigPath();
+        if (QFileInfo::exists(fallbackConfig))
+        {
+            configPath = fallbackConfig;
+        }
+    }
+    result.configPath = QDir::toNativeSeparators(configPath);
     if (!baseWeldOutputPath.trimmed().isEmpty())
     {
         result.baseWeldPath = QDir::toNativeSeparators(QFileInfo(baseWeldOutputPath).absoluteFilePath());

@@ -175,6 +175,9 @@
     <ClCompile Include="src\groove\scancameratcpclientworker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\groove\scancameraskjworker.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Const.h">
@@ -306,6 +309,9 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="include\groove\scancameratcpclientworker.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="include\groove\scancameraskjworker.h">
       <Filter>Header Files</Filter>
     </QtMoc>
   </ItemGroup>

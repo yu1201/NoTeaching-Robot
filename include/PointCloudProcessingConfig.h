@@ -65,6 +65,9 @@ public:
         bool slopeConsistentCornerFit = false;
         // 调试：导出每段拟合点集与拟合直线为 CloudCompare 点云（默认开启，存数据库不写 ini）。
         bool exportFitDebugCloud = true;
+        // 调试：导出完整点云逐帧文件(每点带帧号/相机原始坐标/机器人位姿/时间戳，647MB级)排查散点。
+        // 默认关闭——仅排查相机散点时手动勾选，否则每次扫描生成大文件会明显拖慢流程。
+        bool exportWorkpieceFrameDebug = false;
         bool validationCoverageEnabled = true;
         int validationMinFinitePointCount = 300;
         double validationMinProjectedSpanMm = 180.0;

@@ -4121,13 +4121,24 @@ T_ROBOT_COORS RobotCalculation::InterpolateRobotPose(const std::vector<Timestamp
             return a + (b - a) * ratio;
         };
 
+    // 姿态角(rx/ry/rz)按最近等价角插值：先把 b 相对 a 的差规范化到 (-180,180]，避免在 ±180 环绕处
+    // 朴素线性插值插出错误中间角（如 179 与 -179 物理相邻却线性插成 0）。不跨界时结果与 lerp 完全一致。
+    // 此前缺此处理：起/终点机器人姿态在 rx 抖动跨 ±180 的帧会把点云整体变换偏，在完整点云端部形成翘起散点。
+    auto lerpAngleDeg = [ratio](double a, double b)
+        {
+            double diff = b - a;
+            while (diff > 180.0) diff -= 360.0;
+            while (diff < -180.0) diff += 360.0;
+            return a + diff * ratio;
+        };
+
     return T_ROBOT_COORS(
         lerp(lower->pose.dX, upper->pose.dX),
         lerp(lower->pose.dY, upper->pose.dY),
         lerp(lower->pose.dZ, upper->pose.dZ),
-        lerp(lower->pose.dRX, upper->pose.dRX),
-        lerp(lower->pose.dRY, upper->pose.dRY),
-        lerp(lower->pose.dRZ, upper->pose.dRZ),
+        lerpAngleDeg(lower->pose.dRX, upper->pose.dRX),
+        lerpAngleDeg(lower->pose.dRY, upper->pose.dRY),
+        lerpAngleDeg(lower->pose.dRZ, upper->pose.dRZ),
         lerp(lower->pose.dBX, upper->pose.dBX),
         lerp(lower->pose.dBY, upper->pose.dBY),
         lerp(lower->pose.dBZ, upper->pose.dBZ));

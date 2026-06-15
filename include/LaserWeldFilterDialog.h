@@ -84,6 +84,7 @@ private:
     QSpinBox* m_pSmoothRadiusSpin = nullptr;
     QCheckBox* m_pSlopeConsistentCornerFitCheck = nullptr;
     QCheckBox* m_pExportFitDebugCloudCheck = nullptr;
+    QCheckBox* m_pExportWorkpieceFrameDebugCheck = nullptr;
     QCheckBox* m_pValidationCoverageCheck = nullptr;
     QSpinBox* m_pValidationMinFinitePointSpin = nullptr;
     QDoubleSpinBox* m_pValidationMinProjectedSpanSpin = nullptr;

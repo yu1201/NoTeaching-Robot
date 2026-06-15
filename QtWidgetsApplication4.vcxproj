@@ -133,6 +133,7 @@
     </ClCompile>
     <ClCompile Include="src\groove\clientudpformsensorworker.cpp" />
     <ClCompile Include="src\groove\scancameratcpclientworker.cpp" />
+    <ClCompile Include="src\groove\scancameraskjworker.cpp" />
     <ClCompile Include="src\HandEyeCalibrationDialog.cpp" />
     <ClCompile Include="src\HandEyeMatrixConfig.cpp" />
     <ClCompile Include="src\HandEyeMatrixDialog.cpp" />
@@ -186,6 +187,7 @@
     <ClInclude Include="include\FunctionTestDialog.h" />
     <QtMoc Include="include\groove\clientudpformsensorworker.h" />
     <QtMoc Include="include\groove\scancameratcpclientworker.h" />
+    <QtMoc Include="include\groove\scancameraskjworker.h" />
     <ClInclude Include="portable\LaserFramePoint3DFilter\LaserFramePoint3DFilter.h" />
     <ClInclude Include="include\FTPClient.h" />
     <ClInclude Include="include\HandEyeCalibrationDialog.h" />

@@ -129,6 +129,7 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.projectionSmoothRadius = ReadIntSetting("CloudProjection/SmoothRadius", settings.projectionSmoothRadius);
     settings.slopeConsistentCornerFit = ReadBoolSetting("FeaturePoint/SlopeConsistentCornerFit", false);
     settings.exportFitDebugCloud = ReadBoolSetting("FeaturePoint/ExportFitDebugCloud", true);
+    settings.exportWorkpieceFrameDebug = ReadBoolSetting("FeaturePoint/ExportWorkpieceFrameDebug", false);
     settings.validationCoverageEnabled = ReadBoolSetting("Validation/CoverageEnabled", settings.validationCoverageEnabled);
     settings.validationMinFinitePointCount = ReadIntSetting("Validation/MinFinitePointCount", settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = ReadDoubleSetting("Validation/MinProjectedSpanMm", settings.validationMinProjectedSpanMm);
@@ -261,6 +262,7 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("External/UseWeldedStartTruncation", settings.sdkUseWeldedStartTruncation ? "1" : "0")
         && write("FeaturePoint/SlopeConsistentCornerFit", settings.slopeConsistentCornerFit ? "1" : "0")
         && write("FeaturePoint/ExportFitDebugCloud", settings.exportFitDebugCloud ? "1" : "0")
+        && write("FeaturePoint/ExportWorkpieceFrameDebug", settings.exportWorkpieceFrameDebug ? "1" : "0")
         && write("Fit/SampleAxis", SampleAxisModeConfigValue(settings.sampleAxisMode))
         && write("CloudAlgo/ZThresholdMm", QString::number(settings.cloudZThresholdMm, 'f', 6))
         && write("CloudAlgo/ZJumpThresholdMm", QString::number(settings.cloudZJumpThresholdMm, 'f', 6))

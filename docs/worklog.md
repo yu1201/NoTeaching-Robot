@@ -1,9 +1,32 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-06-12`
+- 人工整理日期：`2026-06-15`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-06-15
+
+- 坡口相机数据协议升级适配（SKJF）
+  - 现象：相机固件升级后，坡口相机预览/扫描收不到点云。抓端口实测帧头变为 `53 4B 4A 46`（"SKJF"），旧接收按旧 magic `0xABCDEF12`(PointCloundResultFrame) 解析、永远找不到帧头（接收计数在涨、解码 0 帧）
+  - 厂商提供新版 SKJCamera SDK（句柄式 C ABI，`SKJCamera_GetLatestFrame` + `SKJFrame_*` 访问器，内部自管 TCP 连接/接收线程/SKJF 解析）；工程 `SDK/SKJCamera` 已是含数据接口的新版 DLL，且参数控制(SKJCameraControlClient)早已在用同一 DLL
+  - 新增 `ScanCameraSkjWorker`（QLibrary 动态加载，QTimer 10ms 轮询 GetLatestFrame → 转 udpDataShow → 填 CameraFrameCache），与旧 worker 接口同构（同 diagnosticChanged 信号）；CameraRuntime 的 TCP 独立模式改用它，旧 ScanCameraTcpClientWorker 保留不删。预览/扫描下游零改动
+  - 相机时间戳实测为微秒（两次会话首帧时间戳差 52,951,358 与墙钟 52.95s 一致；SDK 文档标称毫秒有误），直接填入与机器人微秒时间轴对齐——切勿 ×1000
+  - 验证：预览出点云、FPS 60、完整点云连续、参数控制正常
+- 机器人姿态插值 ±180 环绕修复（影响扫描精度的真实缺陷）
+  - 用完整点云逐帧调试数据（每点带机器人位姿+时间戳）定位：完整点云起/终点翘起散点的帧，rx 是乱值(27/-121/-89/-5…)，而正常帧 rx 恒为 180、ry/rz 与相机原始坐标都正常
+  - 根因：`RobotCalculation::InterpolateRobotPose` 对 rx/ry/rz 朴素线性插值，姿态角跨 ±180 抖动时把 179 与 -179 插成 0（错误中间角）→ 那几帧点云整体变换偏。起/终点姿态微调跨界触发，中间匀速段 rx 稳定不跨界故 0 散点
+  - 修复：rx/ry/rz 改最近等价角插值（差值规范化到 (-180,180] 再插），不跨界时与原结果完全一致；修正所有扫描在姿态跨界帧的位姿插值（完整点云、焊缝识别点、轨迹生成同受益）
+- 点云提取库路径回退兜底
+  - `PointCloudExtration.dll`/config 在配置目录（数据库可能残留旧部署绝对路径如 `B:\NoTeaching-Robot\...`）找不到时，自动回退工程内默认目录，避免换机器/换盘符报"未找到精测点云库"导致先测后焊特征分析失败
+- 完整点云逐帧调试导出（独立开关，默认关）
+  - 精测点云界面新增"导出完整点云逐帧文件(排查相机散点,大文件)"复选框，存 `ConfigStore.db` 键 `FeaturePoint/ExportWorkpieceFrameDebug`，默认 false
+  - 勾选后扫描导出 `PreciseLaserPoint_WorkpieceCloud_FrameDebug.txt`：每点 `X Y Z frame_index camera_x camera_y camera_z robot_x/y/z/rx/ry/rz camera_raw_ts_us mapped_ts_us`，CloudCompare 按 frame_index 标量着色定位散点帧、按各列逐帧判成因；与目标点/特征点(MatchDebug)流程独立
+  - 拼接用 snprintf 一次格式化（避免 430 万点 ×15 次 QString::arg 链）；默认关闭避免每次扫描生成数百MB大文件拖慢流程
+- 版本与发布
+  - 应用版本更新为 `v2026.06.15.1835`
+  - `Debug x64` 与 `Release x64` 编译通过；两段式打包通过，生成 `NoTeaching-Robot-Setup-v2026.06.15.1835.exe`
+  - 安装包大小 `59,468,829` bytes（56.7MB，FrameDebug 默认关、不影响包体），SHA256 `5A9EDA712A578A9C70DB6D161477DD512AB0B606F773691348460DD3EAC792B6`；包内 `BUILD_VERSION.txt` 一致（BuiltAt 2026-06-15 18:39:10）
 
 ## 2026-06-12
 

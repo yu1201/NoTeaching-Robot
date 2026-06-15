@@ -814,6 +814,10 @@ void LaserWeldFilterDialog::BuildUi()
     m_pExportFitDebugCloudCheck->setToolTip("启用后，每次拟合都把各段用到的点集、拟合直线和关键点导出到输出文件同目录的 FitDebug 子目录，可直接拖入 CloudCompare 核对每段拟合是否正确。");
     m_pExportFitDebugCloudCheck->setChecked(true);
 
+    m_pExportWorkpieceFrameDebugCheck = new QCheckBox("导出完整点云逐帧文件(排查相机散点,大文件)");
+    m_pExportWorkpieceFrameDebugCheck->setToolTip("仅排查相机点云散点时勾选：每次扫描把完整点云逐帧导出(每点带帧号/相机原始坐标/机器人位姿/时间戳)，文件可达数百MB、会明显拖慢流程。默认关闭，排查完请取消勾选。");
+    m_pExportWorkpieceFrameDebugCheck->setChecked(false);
+
     // 滤波拟合方案置顶，方便切换；去噪/分段参数随后，再到拟合参数；采样主轴在方法组。
     paramLayout->addWidget(new QLabel("滤波拟合方案"), 0, 0);
     paramLayout->addWidget(m_pFeaturePointStrategyCombo, 0, 1, 1, 3);
@@ -840,6 +844,7 @@ void LaserWeldFilterDialog::BuildUi()
     paramLayout->addWidget(m_pKeepLongestSegmentCheck, 6, 2, 1, 2);
     paramLayout->addWidget(m_pSlopeConsistentCornerFitCheck, 7, 1, 1, 3);
     paramLayout->addWidget(m_pExportFitDebugCloudCheck, 8, 0, 1, 4);
+    paramLayout->addWidget(m_pExportWorkpieceFrameDebugCheck, 9, 0, 1, 4);
     paramLayout->setColumnStretch(1, 1);
     paramLayout->setColumnStretch(3, 1);
     featurePointLayout->addWidget(paramGroup);
@@ -998,6 +1003,7 @@ void LaserWeldFilterDialog::BuildUi()
     connect(m_pFeaturePointStrategyCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { SaveSettings(); });
     connect(m_pSlopeConsistentCornerFitCheck, &QCheckBox::toggled, this, [this](bool) { SaveSettings(); });
     connect(m_pExportFitDebugCloudCheck, &QCheckBox::toggled, this, [this](bool) { SaveSettings(); });
+    connect(m_pExportWorkpieceFrameDebugCheck, &QCheckBox::toggled, this, [this](bool) { SaveSettings(); });
     connect(m_pExternalConfigPathEdit, &QLineEdit::editingFinished, this, &LaserWeldFilterDialog::LoadExternalAlgorithmConfig);
     connect(m_pProcessingModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
         {
@@ -1114,6 +1120,11 @@ void LaserWeldFilterDialog::LoadSettings()
         const QSignalBlocker blocker(m_pExportFitDebugCloudCheck);
         m_pExportFitDebugCloudCheck->setChecked(processingSettings.exportFitDebugCloud);
     }
+    if (m_pExportWorkpieceFrameDebugCheck != nullptr)
+    {
+        const QSignalBlocker blocker(m_pExportWorkpieceFrameDebugCheck);
+        m_pExportWorkpieceFrameDebugCheck->setChecked(processingSettings.exportWorkpieceFrameDebug);
+    }
     m_pValidationCoverageCheck->setChecked(processingSettings.validationCoverageEnabled);
     m_pValidationMinFinitePointSpin->setValue(processingSettings.validationMinFinitePointCount);
     m_pValidationMinProjectedSpanSpin->setValue(processingSettings.validationMinProjectedSpanMm);
@@ -1202,6 +1213,8 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
         m_pSlopeConsistentCornerFitCheck != nullptr && m_pSlopeConsistentCornerFitCheck->isChecked();
     processingSettings.exportFitDebugCloud =
         m_pExportFitDebugCloudCheck == nullptr || m_pExportFitDebugCloudCheck->isChecked();
+    processingSettings.exportWorkpieceFrameDebug =
+        m_pExportWorkpieceFrameDebugCheck != nullptr && m_pExportWorkpieceFrameDebugCheck->isChecked();
     processingSettings.validationCoverageEnabled = m_pValidationCoverageCheck->isChecked();
     processingSettings.validationMinFinitePointCount = m_pValidationMinFinitePointSpin->value();
     processingSettings.validationMinProjectedSpanMm = m_pValidationMinProjectedSpanSpin->value();

@@ -30,7 +30,7 @@
 #include "PointCloud3DView.h"
 #include "../portable/LaserFramePoint3DFilter/LaserFramePoint3DFilter.h"
 #include "groove/clientudpformsensorworker.h"
-#include "groove/scancameratcpclientworker.h"
+#include "groove/scancameraskjworker.h"
 #include "groove/framebuffer.h"
 #include <QApplication>
 #include <QByteArray>
@@ -7004,7 +7004,9 @@ namespace
 
 struct QtWidgetsApplication4::CameraRuntime
 {
-	ScanCameraTcpClientWorker* tcpWorker = nullptr;
+	// TCP 独立模式的数据接收 worker。相机升级到 "SKJF" 协议后改用厂商 SKJCamera SDK 接收
+	// （ScanCameraSkjWorker，历史变量名沿用 tcpWorker）；旧的自解析 ScanCameraTcpClientWorker 已不再使用。
+	ScanCameraSkjWorker* tcpWorker = nullptr;
 	ClientUDPFormSensorWorker* udpWorker = nullptr;
 	QThread* thread = nullptr;
 	CameraFrameCache* cache = nullptr;
@@ -12055,11 +12057,11 @@ void QtWidgetsApplication4::InitializeScanCameraRuntimes()
 
 		CameraRuntime* runtime = new CameraRuntime();
 		runtime->cache = new CameraFrameCache();
-		runtime->tcpWorker = new ScanCameraTcpClientWorker(runtime->cache);
+		runtime->tcpWorker = new ScanCameraSkjWorker(runtime->cache);
 		runtime->thread = new QThread(this);
 		runtime->receiveMode = "TCP独立连接";
 		m_liveScanCameraRuntimes.insert(runtime);
-		connect(runtime->tcpWorker, &ScanCameraTcpClientWorker::diagnosticChanged, this,
+		connect(runtime->tcpWorker, &ScanCameraSkjWorker::diagnosticChanged, this,
 			[this, runtime](
 				qint64 datagramCount,
 				qint64 filteredDatagramCount,
@@ -12183,11 +12185,11 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 	{
 		runtime = new CameraRuntime();
 		runtime->cache = new CameraFrameCache();
-		runtime->tcpWorker = new ScanCameraTcpClientWorker(runtime->cache);
+		runtime->tcpWorker = new ScanCameraSkjWorker(runtime->cache);
 		runtime->thread = new QThread(this);
 		runtime->receiveMode = "TCP独立连接";
 		m_liveScanCameraRuntimes.insert(runtime);
-		connect(runtime->tcpWorker, &ScanCameraTcpClientWorker::diagnosticChanged, this,
+		connect(runtime->tcpWorker, &ScanCameraSkjWorker::diagnosticChanged, this,
 			[this, runtime](
 				qint64 datagramCount,
 				qint64 filteredDatagramCount,

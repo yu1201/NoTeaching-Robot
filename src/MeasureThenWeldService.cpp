@@ -33,6 +33,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -295,6 +296,8 @@ struct QueuedScanCameraFrame
 struct ProcessedScanWorkpiecePoint
 {
     Eigen::Vector3d workpiecePoint = Eigen::Vector3d::Zero();
+    // 相机坐标系下的原始点（手眼变换前），仅供完整点云逐帧调试导出排查相机端散点用。
+    Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
 };
 
 struct ProcessedScanCameraSample
@@ -7102,6 +7105,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                             ProcessedScanWorkpiecePoint cloudPoint;
                             cloudPoint.workpiecePoint =
                                 RobotCalculation::CalcLaserPointInRobot(processed.robotPose, cameraLinePoint, calibration);
+                            cloudPoint.cameraPoint = cameraLinePoint;
                             processed.workpiecePoints.push_back(cloudPoint);
                         }
 
@@ -7410,6 +7414,17 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     workpieceCloudLines.push_back("index x y z");
     matchDebugLines.push_back("index,status,camera_raw_timestamp_us,camera_raw_delta_us,mapped_robot_timestamp_us,prev_robot_index,prev_robot_timestamp_us,next_robot_index,next_robot_timestamp_us,interp_ratio,camera_x,camera_y,camera_z,robot_x,robot_y,robot_z,robot_rx,robot_ry,robot_rz,robot_bx,robot_by,robot_bz,laser_x,laser_y,laser_z,error");
 
+    // 完整点云逐帧调试导出（独立开关，默认关闭——仅排查相机散点时勾选；与目标点/特征点流程无关）：
+    // 每点附 frame_index + 相机原始坐标 + 机器人位姿 + 时间戳，CloudCompare 按 frame_index 着色定位散点帧。
+    // 文件达 647MB 级，每次扫描生成会明显拖慢流程，故默认不生成。
+    const bool exportWorkpieceFrameDebug = PointCloudProcessingConfig::Load().exportWorkpieceFrameDebug;
+    std::vector<QString> workpieceFrameDebugLines;
+    if (exportWorkpieceFrameDebug)
+    {
+        workpieceFrameDebugLines.reserve(cameraSamples.size() * 16 + 1);
+        workpieceFrameDebugLines.push_back("X Y Z frame_index camera_x camera_y camera_z robot_x robot_y robot_z robot_rx robot_ry robot_rz camera_raw_ts_us mapped_ts_us");
+    }
+
     const qint64 cameraLineBuildStartMs = SteadyNowMs();
     for (const TimestampedCameraPoint& sample : cameraSamples)
     {
@@ -7468,6 +7483,24 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                     << QString::number(cloudPoint.workpiecePoint.y(), 'f', 6)
                     << QString::number(cloudPoint.workpiecePoint.z(), 'f', 6);
                 workpieceCloudLines.push_back(cloudFields.join(' '));
+
+                if (exportWorkpieceFrameDebug)
+                {
+                    // 逐帧排查列：变换后 XYZ + 帧号 + 相机原始坐标 + 该帧机器人位姿 + 相机/映射时间戳。
+                    // 据此可对每个翘起点判定成因：相机原始坐标正常但变换后偏=端部位姿/时间对齐；相机原始就偏=扫到焊缝外结构/反光。
+                    // 用 snprintf 一次格式化（避免 15 次 QString::arg 链对每行重复扫描，430 万点下性能差异巨大）。
+                    char frameDebugBuf[320];
+                    std::snprintf(frameDebugBuf, sizeof(frameDebugBuf),
+                        "%.6f %.6f %.6f %d %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %lld %lld",
+                        cloudPoint.workpiecePoint.x(), cloudPoint.workpiecePoint.y(), cloudPoint.workpiecePoint.z(),
+                        index,
+                        cloudPoint.cameraPoint.x(), cloudPoint.cameraPoint.y(), cloudPoint.cameraPoint.z(),
+                        processed.robotPose.dX, processed.robotPose.dY, processed.robotPose.dZ,
+                        processed.robotPose.dRX, processed.robotPose.dRY, processed.robotPose.dRZ,
+                        static_cast<long long>(processed.sample.rawTimestampUs),
+                        static_cast<long long>(processed.sample.timestampUs));
+                    workpieceFrameDebugLines.push_back(QString::fromLatin1(frameDebugBuf));
+                }
 
                 RobotCalculation::IndexedPoint3D cloudInputPoint;
                 cloudInputPoint.index = cloudIndex;
@@ -7568,6 +7601,25 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             appendLog(error);
         }
         return false;
+    }
+    // 完整点云逐帧调试文件（可选，失败不中断主流程）：供 CloudCompare 按 frame_index 着色排查散点。
+    if (exportWorkpieceFrameDebug && workpieceFrameDebugLines.size() > 1)
+    {
+        const QString workpieceFrameDebugPath =
+            QDir(laserDir).filePath("PreciseLaserPoint_WorkpieceCloud_FrameDebug.txt");
+        QString frameDebugError;
+        if (SaveTextLines(workpieceFrameDebugPath, workpieceFrameDebugLines, frameDebugError))
+        {
+            if (appendLog)
+            {
+                appendLog(QString("完整点云逐帧调试导出：%1（CloudCompare 按 frame_index 标量着色可定位起终点散点来自哪几帧）")
+                    .arg(workpieceFrameDebugPath));
+            }
+        }
+        else if (appendLog)
+        {
+            appendLog(QString("完整点云逐帧调试导出失败（不影响流程）：%1").arg(frameDebugError));
+        }
     }
     const qint64 saveAllElapsedMs =
         saveCameraElapsedMs
