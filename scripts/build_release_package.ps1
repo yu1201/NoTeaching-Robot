@@ -89,7 +89,7 @@ if (-not $SkipBuild) {
     }
 }
 
-$exePath = Join-Path $buildDir "QtWidgetsApplication4.exe"
+$exePath = Join-Path $buildDir "HK-Pathlynx-CORPLA.exe"
 if (-not (Test-Path -LiteralPath $exePath)) {
     throw "Release executable was not found: $exePath"
 }

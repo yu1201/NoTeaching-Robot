@@ -7,7 +7,7 @@
   #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.06.16.1411"
 #endif
 #define MyAppPublisher "海瞰智焊"
-#define MyAppExeName "QtWidgetsApplication4.exe"
+#define MyAppExeName "HK-Pathlynx-CORPLA.exe"
 #define MySourceDir "..\dist\QtWidgetsApplication4"
 
 [Setup]
