@@ -7437,8 +7437,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	dashboardHeaderLayout->setSpacing(8);
 	QHBoxLayout* titleLayout = new QHBoxLayout();
 	titleLayout->setSpacing(10);
-	QLabel* titleLabel = new QLabel(BrandingConfig::DashboardTitle(), m_pDashboardPage);
-	titleLabel->setStyleSheet("font-size: 26px; font-weight: bold; color: #F7FCFC; letter-spacing: 1px;");
+	// 主页不再重复显示大标题（与顶部窗口标题栏重复）；仅保留版本徽章作为轻量状态条。
 	QLabel* versionLabel = new QLabel(QString("v%1").arg(BuildAppVersionText()), m_pDashboardPage);
 	versionLabel->setStyleSheet(
 		"QLabel { background: #173041; color: #9ED8DB; border: 1px solid #3C6173; "
@@ -7468,7 +7467,6 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"QComboBox::drop-down { border-left: 1px solid #3C6173; border-radius: 0px; width: 30px; background: #000000; }"
 		"QComboBox::down-arrow { image: url(:/QtWidgetsApplication4/icons/chevron-down.svg); width: 12px; height: 8px; }"
 		"QComboBox QAbstractItemView { background: #000000; color: #ECF3F4; selection-background-color: #2D5465; border: 1px solid #3C6173; border-radius: 0px; outline: 0px; }");
-	titleLayout->addWidget(titleLabel);
 	titleLayout->addWidget(versionLabel, 0, Qt::AlignVCenter);
 	titleLayout->addStretch(1);
 	titleLayout->addWidget(m_pCurrentUserButton, 0, Qt::AlignVCenter);
