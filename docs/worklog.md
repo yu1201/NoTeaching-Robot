@@ -10,8 +10,12 @@
 - 日志系统统一与按天归档：10 类日志统一走 RobotLog，按天归档 Log/<yyyy-MM-dd>/；新增线程安全 writeLine（毫秒时间戳、不走 printf、跨天自动换目录、打开失败可恢复）。修复 CLI 日志混写进机器人A单元日志（独立 CliLog.txt）；查看器按天重定向 + fromUtf8 + 48KB 截断对齐行边界；RobotLog::write 的 printf % 加固（OPini/FTPClient 运行时串改 write("%s",...)）
 - 点云读写性能优化：完整点云写盘分块批量；LoadIndexedPoint3DFile 改 readLine/readAll + strtod 手扫，消除每行 QRegularExpression 编译（百万行级提速）；离线重建加读写速率日志
 - 先测后焊离线重建容错：激光特征点文件为空（如相机坡口识别全失败）时不再直接失败，点云链方法改用完整点云重建，与实时扫描 canUseExternalCloud 判定一致
-- 本地品牌覆盖（中性支持，git 默认呈现不变）：新增 BrandingConfig，工程内 branding/（.gitignore 排除）存在则用品牌名+图标，否则默认 NoTeaching-Robot + 原图标；管理页桌面图标底色开关，切换刷新窗口/任务栏 + 重写桌面快捷方式（COM）；打包脚本随安装包带 branding/；.rc/app.ico/.iss/.qrc 未改，exe 内嵌图标不变
-- 版本更新为 v2026.06.16.1411；Debug/Release 编译与 Inno 打包验证
+- 本地品牌覆盖（中性支持，git 默认呈现不变）：新增 BrandingConfig，工程内 branding/（.gitignore 排除）存在则用品牌名+图标，否则默认 NoTeaching-Robot + 原图标；管理页桌面图标底色开关，切换刷新窗口/任务栏；桌面/开始菜单快捷方式按品牌名重命名 + 换图标（COM IShellLink）；.rc/app.ico/.iss/.qrc 未改，exe 内嵌图标不变
+- 中性包不夹带 branding/：打包脚本仅在 branding/ 被 git 跟踪时才拷贝，故 main（中性）安装包不带品牌资源，品牌版改由独立分支提供
+- 主页标题精简：先把主页大标题改走 BrandingConfig::DashboardTitle 可定制，后直接移除（与顶部窗口标题栏重复）；主页第一行改为「版本徽章 + 当前用户 + 机器人选择器」轻量状态条，副标题与流程大按钮上移（DashboardTitle API 与 branding.ini 该键随之失去消费点，保留无害）
+- 行尾根治：新增 .gitattributes（* text=auto eol=lf + 二进制白名单 + SDK 整体排除），一次性 renormalize 全部自有源码为 LF，并设 core.autocrlf=false，根治 autocrlf 叠加历史混杂行尾导致的整文件 CRLF/LF 翻动；srp/srd 仍按机器人识别要求强制 LF，SDK 厂商库一字节未动
+- 品牌版隔离：全品牌 HK-Pathlynx-CORPLA / 海瞰智焊 走独立分支 hk-pathlynx-corpla（含 branding/、品牌 iss/vcxproj，exe 文件名 HK-Pathlynx-CORPLA.exe），安装包经该分支 GitHub Release 分发；品牌版按「每天最后统一更新」节奏同步，不逐次跟随 main
+- 版本 v2026.06.16.1411；main 中性版 Debug/Release 编译与 Inno 打包验证（去大标题、行尾根治后复验 Debug+Release 通过）；品牌版 Release 编译通过
 
 ## 2026-06-15
 
