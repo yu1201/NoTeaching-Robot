@@ -1,2 +1,26 @@
+# 统一所有文本文件行尾为 LF，消除历史 CRLF/LF 混杂导致的整文件 diff 与行尾污染。
+* text=auto eol=lf
+
+# 厂商 SDK 整体永不做行尾转换、保持仓库原样（CLAUDE.md：绝不改 SDK 源码）。
+# -text 让 git 既不归一、也挡住 core.autocrlf 在 checkout 时的污染；本次 commit
+# 另用 pathspec 把 SDK 排除在 renormalize 之外，确保 SDK blob 一字节不动。
+SDK/** -text
+
+# 二进制文件不做行尾转换。
+*.ico   binary
+*.png   binary
+*.jpg   binary
+*.qm    binary
+*.lib   binary
+*.dll   binary
+*.exe   binary
+*.bin   binary
+*.ply   binary
+*.7z    binary
+*.zip   binary
+*.docx  binary
+*.pdf   binary
+
+# 机器人轨迹文件强制 LF（既有规则）。
 *.srp text eol=lf
 *.srd text eol=lf
