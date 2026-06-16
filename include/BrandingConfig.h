@@ -19,6 +19,7 @@ public:
     static QString DisplayName();
     static QString SloganZh();
     static QString SloganEn();
+    static QString DashboardTitle();   // 主页大标题（默认 机器人控制与调试中心）
 
     // 窗口/任务栏图标：启用时按“底色开关”返回品牌有底色/无底色图标，否则返回默认资源图标。
     static QIcon WindowIcon();

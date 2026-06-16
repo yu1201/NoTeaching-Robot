@@ -7437,7 +7437,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	dashboardHeaderLayout->setSpacing(8);
 	QHBoxLayout* titleLayout = new QHBoxLayout();
 	titleLayout->setSpacing(10);
-	QLabel* titleLabel = new QLabel("机器人控制与调试中心", m_pDashboardPage);
+	QLabel* titleLabel = new QLabel(BrandingConfig::DashboardTitle(), m_pDashboardPage);
 	titleLabel->setStyleSheet("font-size: 26px; font-weight: bold; color: #F7FCFC; letter-spacing: 1px;");
 	QLabel* versionLabel = new QLabel(QString("v%1").arg(BuildAppVersionText()), m_pDashboardPage);
 	versionLabel->setStyleSheet(
