@@ -1,9 +1,17 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-06-15`
+- 人工整理日期：`2026-06-16`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-06-16
+
+- 日志系统统一与按天归档：10 类日志统一走 RobotLog，按天归档 Log/<yyyy-MM-dd>/；新增线程安全 writeLine（毫秒时间戳、不走 printf、跨天自动换目录、打开失败可恢复）。修复 CLI 日志混写进机器人A单元日志（独立 CliLog.txt）；查看器按天重定向 + fromUtf8 + 48KB 截断对齐行边界；RobotLog::write 的 printf % 加固（OPini/FTPClient 运行时串改 write("%s",...)）
+- 点云读写性能优化：完整点云写盘分块批量；LoadIndexedPoint3DFile 改 readLine/readAll + strtod 手扫，消除每行 QRegularExpression 编译（百万行级提速）；离线重建加读写速率日志
+- 先测后焊离线重建容错：激光特征点文件为空（如相机坡口识别全失败）时不再直接失败，点云链方法改用完整点云重建，与实时扫描 canUseExternalCloud 判定一致
+- 本地品牌覆盖（中性支持，git 默认呈现不变）：新增 BrandingConfig，工程内 branding/（.gitignore 排除）存在则用品牌名+图标，否则默认 NoTeaching-Robot + 原图标；管理页桌面图标底色开关，切换刷新窗口/任务栏 + 重写桌面快捷方式（COM）；打包脚本随安装包带 branding/；.rc/app.ico/.iss/.qrc 未改，exe 内嵌图标不变
+- 版本更新为 v2026.06.16.1411；Debug/Release 编译与 Inno 打包验证
 
 ## 2026-06-15
 
