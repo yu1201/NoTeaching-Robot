@@ -1,12 +1,12 @@
-﻿#define MyAppName "NoTeaching-Robot"
-#define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
+﻿#define MyAppName "HK-Pathlynx-CORPLA"
+#define MyAppGuid "F3E0296A-8AC8-4447-951A-013ADAE97E73"
 #ifndef MyAppVersion
   #define MyAppVersion "2026.06.16.1411"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "NoTeaching-Robot-Setup-v2026.06.16.1411"
+  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.06.16.1411"
 #endif
-#define MyAppPublisher "yu1201"
+#define MyAppPublisher "海瞰智焊"
 #define MyAppExeName "QtWidgetsApplication4.exe"
 #define MySourceDir "..\dist\QtWidgetsApplication4"
 
@@ -51,8 +51,8 @@ Source: "..\dist\tools\ConfigMigrate.exe"; DestDir: "{app}\tools"; Flags: ignore
 Source: "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\branding\app_nobg.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\branding\app_nobg.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\Prerequisites\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Flags: waituntilterminated runhidden; Check: VcRedistInstallerExists and VcRedistNeedsInstall
