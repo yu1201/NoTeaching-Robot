@@ -108,6 +108,11 @@ QString BrandingConfig::SloganEn()
     return IniValue(QStringLiteral("SloganEn"), QString());
 }
 
+QString BrandingConfig::DashboardTitle()
+{
+    return IniValue(QStringLiteral("DashboardTitle"), QStringLiteral("机器人控制与调试中心"));
+}
+
 QString BrandingConfig::DefaultWindowIconResource()
 {
     return kDefaultIconResource;
