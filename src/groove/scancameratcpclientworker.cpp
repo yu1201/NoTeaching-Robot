@@ -3,19 +3,15 @@
 #include <QDataStream>
 #include <QDateTime>
 #include <QDebug>
-#include <QDir>
-#include <QFile>
-#include <QIODevice>
 #include <QNetworkProxy>
-#include <QTextStream>
 #include <QTimer>
 #include <QtEndian>
 
 #include <cstring>
 #include <limits>
-#include <mutex>
 
 #include "CameraFrameCache.h"
+#include "RobotLog.h"
 #include "groove/framebuffer.h"
 #include "groove/pointcloundresultframe.h"
 
@@ -29,24 +25,9 @@ constexpr int kMaxReceiveBufferSize = 2 * kTcpMaxPacketSize;
 
 void WriteCameraTcpLog(const QString& text)
 {
-    static std::mutex logMutex;
-    std::lock_guard<std::mutex> lock(logMutex);
-
-    QDir dir(QDir::currentPath());
-    if (!dir.exists("Log"))
-    {
-        dir.mkpath("Log");
-    }
-
-    QFile file(dir.filePath("Log/CameraTcpClient.txt"));
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
-    {
-        return;
-    }
-
-    QTextStream stream(&file);
-    stream << '[' << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz") << "] "
-        << text << '\n';
+    // 统一走 RobotLog：按天归档 Log/<日期>/、自带写入锁、自动毫秒时间戳。
+    static RobotLog logger("Log/CameraTcpClient.txt", false);
+    logger.writeLine(text.toStdString());
 }
 
 udpDataShow BuildUdpFrame(const PointCloundResultFrame& frame)

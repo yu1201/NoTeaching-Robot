@@ -1,6 +1,7 @@
 #include "QtWidgetsApplication4.h"
 #include <QMessageBox>  // 弹窗头文件，测试用
 #include "CameraFrameCache.h"
+#include "BrandingConfig.h"
 #include "ConfigDatabase.h"
 #include "FTPClient.h"
 #include "FANUCRobotDriver.h"
@@ -7722,6 +7723,11 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pManagementCameraReceiveModeBtn->setMinimumHeight(34);
 	m_pManagementCameraReceiveModeBtn->setMinimumWidth(150);
 	m_pManagementCameraReceiveModeBtn->setStyleSheet("QPushButton { padding: 6px 14px; font-size: 14px; border-radius: 10px; }");
+	m_pManagementIconBgBtn = new QPushButton("桌面图标：无底色", m_pManagementHomePage);
+	m_pManagementIconBgBtn->setCheckable(true);
+	m_pManagementIconBgBtn->setMinimumHeight(34);
+	m_pManagementIconBgBtn->setMinimumWidth(150);
+	m_pManagementIconBgBtn->setStyleSheet("QPushButton { padding: 6px 14px; font-size: 14px; border-radius: 10px; }");
 	QLabel* scanTimestampLabel = new QLabel("扫描时间轴：", m_pManagementHomePage);
 	scanTimestampLabel->setStyleSheet("QLabel { color: #9ED8DB; padding-left: 8px; }");
 	m_pScanTimestampSourceCombo = new QComboBox(m_pManagementHomePage);
@@ -7757,6 +7763,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	managementTitleLayout->addWidget(managementTitleLabel);
 	managementTitleLayout->addStretch(1);
 	managementTitleLayout->addWidget(m_pManagementCameraReceiveModeBtn);
+	managementTitleLayout->addWidget(m_pManagementIconBgBtn);
 	managementTitleLayout->addWidget(scanTimestampLabel);
 	managementTitleLayout->addWidget(m_pScanTimestampSourceCombo);
 	managementTitleLayout->addWidget(stepSdkInterfaceLabel);
@@ -7788,6 +7795,10 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pManagementCameraReceiveModeBtn, &QPushButton::toggled, this, [this](bool checked)
 		{
 			SetSharedScanCameraReceiverMode(checked);
+		});
+	connect(m_pManagementIconBgBtn, &QPushButton::toggled, this, [this](bool checked)
+		{
+			SetDesktopIconWithBackground(checked);
 		});
 	connect(m_pScanTimestampSourceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index)
 		{
@@ -7979,7 +7990,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	const QList<QPair<QString, QString>> menuLogActions = {
 		{ "系统日志", "Log/Log.txt" },
 		{ "运行日志", "Log/RobotRunLog.txt" },
-		{ "机器人A日志", "Log/RobotALog.txt" },
+		{ "命令行日志", "Log/CliLog.txt" },
 		{ "控制单元日志", "Log/ContralUnit.txt" },
 		{ "焊接日志", "Log/WeldProcessFile.txt" }
 	};
@@ -8012,7 +8023,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	const QList<QPair<QString, QString>> logButtons = {
 		{ "系统", "Log/Log.txt" },
 		{ "运行", "Log/RobotRunLog.txt" },
-		{ "机器人A", "Log/RobotALog.txt" },
+		{ "命令行", "Log/CliLog.txt" },
 		{ "控制单元", "Log/ContralUnit.txt" },
 		{ "焊接", "Log/WeldProcessFile.txt" }
 	};
@@ -8134,6 +8145,11 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	RefreshScanTimestampSourceUi();
 	RefreshStepSdkInterfaceModeUi();
 	RefreshTouchKeyboardModeUi();
+	RefreshDesktopIconBgButtonUi();
+	if (BrandingConfig::IsActive())
+	{
+		BrandingConfig::ApplyDesktopShortcutIcons();  // 安装后首次启动即把桌面/开始菜单快捷方式图标刷成当前品牌图标
+	}
 	LoadLoginState();
 	ShowAuthPage();
 	TryAutoLogin();
@@ -8149,7 +8165,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 				LoadRobotLogFile(m_sCurrentRobotLogPath);
 			}
 		});
-	LoadRobotLogFile("Log/Log.txt", true);
+	LoadRobotLogFile("Log/RobotRunLog.txt", true);  // 默认展示运行日志（Log/Log.txt 无写入方，避免首屏空白）
 	m_robotLogDisplayTimer->start(1000);
 
 	QTimer* fanucMonitorTimer = new QTimer(this);
@@ -9163,6 +9179,53 @@ void QtWidgetsApplication4::RefreshCameraReceiveModeButtonUi()
 		? "相机接收：UDP共享"
 		: "相机接收：TCP独立");
 	m_pManagementCameraReceiveModeBtn->setToolTip("关闭为TCP独立连接；打开为旧UDP共享端口接收，并按相机IP分发到对应机器人缓存。");
+}
+
+void QtWidgetsApplication4::RefreshDesktopIconBgButtonUi()
+{
+	if (m_pManagementIconBgBtn == nullptr)
+	{
+		return;
+	}
+	const bool active = BrandingConfig::IsActive();
+	const bool withBg = BrandingConfig::IconWithBackground();
+	QSignalBlocker blocker(m_pManagementIconBgBtn);
+	m_pManagementIconBgBtn->setVisible(active);  // 仅放了本地品牌包时才显示该开关
+	m_pManagementIconBgBtn->setChecked(withBg);
+	m_pManagementIconBgBtn->setText(withBg ? "桌面图标：有底色" : "桌面图标：无底色");
+	m_pManagementIconBgBtn->setToolTip("切换窗口/任务栏/桌面快捷方式图标为有底色或无底色（仅本地品牌包 branding/ 生效）。");
+}
+
+void QtWidgetsApplication4::RefreshAllWindowIcons()
+{
+	const QIcon icon = BrandingConfig::WindowIcon();
+	qApp->setWindowIcon(icon);
+	const QList<QWidget*> tops = QApplication::topLevelWidgets();
+	for (QWidget* w : tops)
+	{
+		if (w == nullptr || !w->isWindow())
+		{
+			continue;
+		}
+		const Qt::WindowType type = w->windowType();
+		if (type == Qt::Window || type == Qt::Dialog)  // 跳过菜单/工具提示/下拉等瞬态顶层对象
+		{
+			w->setWindowIcon(icon);
+		}
+	}
+}
+
+void QtWidgetsApplication4::SetDesktopIconWithBackground(bool withBackground)
+{
+	if (BrandingConfig::IconWithBackground() == withBackground)
+	{
+		RefreshDesktopIconBgButtonUi();
+		return;
+	}
+	BrandingConfig::SetIconWithBackground(withBackground);
+	RefreshAllWindowIcons();                       // 窗口标题栏 + 任务栏即时刷新
+	BrandingConfig::ApplyDesktopShortcutIcons();   // 桌面/开始菜单快捷方式图标重写（找不到则跳过）
+	RefreshDesktopIconBgButtonUi();
 }
 
 void QtWidgetsApplication4::RefreshScanTimestampSourceUi()
@@ -10690,20 +10753,9 @@ void QtWidgetsApplication4::LogCommandLineMessage(const QString& message) const
 	ConfigureUtf8TextStream(out);
 	out << line << Qt::endl;
 
-	QString logPath = FindProjectFilePath("Log/RobotALog.txt");
-	if (logPath.isEmpty())
-	{
-		QDir().mkpath("Log");
-		logPath = QDir(QDir::currentPath()).filePath("Log/RobotALog.txt");
-	}
-
-	QFile file(logPath);
-	if (file.open(QIODevice::Append | QIODevice::Text))
-	{
-		QTextStream stream(&file);
-		ConfigureUtf8TextStream(stream);
-		stream << line << "\n";
-	}
+	// CLI 命令行日志独立成 CliLog.txt（历史上被误写进机器人A单元日志 RobotALog.txt），统一走 RobotLog 按天归档。
+	static RobotLog cliLogger("Log/CliLog.txt", false);
+	cliLogger.writeLine(message.toStdString());
 }
 
 void QtWidgetsApplication4::EnsureCommandLineConsole() const
@@ -12256,13 +12308,21 @@ void QtWidgetsApplication4::LoadRobotLogFile(const QString& relativePath, bool f
 		return;
 	}
 
-	const QString filePath = FindProjectFilePath(relativePath);
+	// 日志已按天归档到 Log/<yyyy-MM-dd>/，把平铺的 "Log/xxx.txt" 重定向到当天目录后再查找（每次调用重算日期，跨天自动跟随）。
+	QString resolvedRelative = relativePath;
+	if (relativePath.startsWith("Log/") && !relativePath.mid(4).contains('/'))
+	{
+		const QString logDay = QDateTime::currentDateTime().toString("yyyy-MM-dd");
+		resolvedRelative = QString("Log/%1/%2").arg(logDay, relativePath.mid(4));
+	}
+
+	const QString filePath = FindProjectFilePath(resolvedRelative);
 	if (filePath.isEmpty())
 	{
-		if (forceRefresh || m_sLastRobotLogFilePath != relativePath)
+		if (forceRefresh || m_sLastRobotLogFilePath != resolvedRelative)
 		{
-			m_pRobotLogText->setPlainText(QString("未找到日志文件：%1").arg(relativePath));
-			m_sLastRobotLogFilePath = relativePath;
+			m_pRobotLogText->setPlainText(QString("未找到日志文件：%1").arg(resolvedRelative));
+			m_sLastRobotLogFilePath = resolvedRelative;
 			m_lastRobotLogModified = QDateTime();
 			m_nLastRobotLogSize = -1;
 		}
@@ -12297,8 +12357,9 @@ void QtWidgetsApplication4::LoadRobotLogFile(const QString& relativePath, bool f
 	if (file.size() > maxBytes)
 	{
 		file.seek(file.size() - maxBytes);
+		file.readLine();  // 丢弃可能被截断的半行，避免从 UTF-8 多字节字符中间开始解码
 	}
-	const QString text = QString::fromLocal8Bit(file.readAll());
+	const QString text = QString::fromUtf8(file.readAll());  // 日志统一 UTF-8 写入，按 UTF-8 解码
 	m_pRobotLogText->setPlainText(QString("文件：%1\n\n%2").arg(filePath, text));
 	m_pRobotLogText->verticalScrollBar()->setValue(m_pRobotLogText->verticalScrollBar()->maximum());
 	m_sLastRobotLogFilePath = filePath;

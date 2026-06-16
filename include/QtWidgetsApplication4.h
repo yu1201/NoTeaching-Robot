@@ -148,6 +148,9 @@ private:
     void SaveCameraReceiveMode() const;
     void RefreshCameraReceiveModeButtonUi();
     void SetSharedScanCameraReceiverMode(bool enabled);
+    void RefreshDesktopIconBgButtonUi();
+    void SetDesktopIconWithBackground(bool withBackground);
+    void RefreshAllWindowIcons();
     void RefreshScanTimestampSourceUi();
     void RefreshStepSdkInterfaceModeUi();
     void RefreshTouchKeyboardModeUi();
@@ -223,6 +226,7 @@ private:
     QLabel* m_pPermissionHintLabel;
     QAction* m_pAccountManagementAction;
     QPushButton* m_pManagementCameraReceiveModeBtn;
+    QPushButton* m_pManagementIconBgBtn = nullptr;
     QComboBox* m_pScanTimestampSourceCombo;
     QComboBox* m_pStepSdkInterfaceModeCombo;
     QComboBox* m_pTouchKeyboardModeCombo;

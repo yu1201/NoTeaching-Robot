@@ -7,6 +7,7 @@
 #include "OPini.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotDataHelper.h"
+#include "RobotLog.h"
 #include "RobotMessage.h"
 #include "WeldProcessFile.h"
 #include "WindowStyleHelper.h"
@@ -1720,6 +1721,11 @@ void MeasureThenWeldDialog::AppendLog(const QString& text)
     {
         m_pLogText->appendPlainText(QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss.zzz")).arg(text));
     }
+
+    // 同步把界面扫描日志保存到文件（统一走 RobotLog：按天归档 Log/<日期>/、线程安全、自动毫秒时间戳），
+    // 便于扫描后离线分析耗时/写盘速率、排查焊缝文件未生成等问题。
+    static RobotLog fileLogger("Log/MeasureThenWeldLog.txt", false);
+    fileLogger.writeLine(text.toStdString());
 }
 
 void MeasureThenWeldDialog::SetFlowStep(const QString& text)

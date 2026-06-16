@@ -118,6 +118,7 @@
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\BrandingConfig.cpp" />
     <ClCompile Include="src\ConfigDatabase.cpp" />
     <ClCompile Include="src\ContralUnit.cpp" />
     <ClCompile Include="src\CameraFrameCache.cpp" />
@@ -177,6 +178,7 @@
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\BrandingConfig.h" />
     <ClInclude Include="include\ConfigDatabase.h" />
     <ClInclude Include="include\Const.h" />
     <ClInclude Include="include\CameraFrameCache.h" />

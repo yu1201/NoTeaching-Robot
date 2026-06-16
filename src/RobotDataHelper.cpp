@@ -16,6 +16,7 @@
 #include <QTextStream>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -328,7 +329,7 @@ bool RobotDataHelper::LoadIndexedPoint3DFile(const QString& filePath, QVector<Ro
     points.clear();
 
     QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    if (!file.open(QIODevice::ReadOnly))
     {
         if (error != nullptr)
         {
@@ -337,50 +338,59 @@ bool RobotDataHelper::LoadIndexedPoint3DFile(const QString& filePath, QVector<Ro
         return false;
     }
 
-    QTextStream stream(&file);
-    stream.setEncoding(QStringConverter::Utf8);
+    // 手写解析 "index x y z"（空格或逗号分隔、可能带引号），用 readLine→QByteArray + strtoll/strtod，
+    // 取代 QTextStream 逐行 UTF-8 解码 + 每行 QRegularExpression 编译 + QString 分配——百万行点云读取数量级提速。
+    const qint64 totalBytes = std::max<qint64>(1, file.size());
+    points.reserve(static_cast<qsizetype>(std::min<qint64>(totalBytes / 40, 8000000)));
 
-    int lineNumber = 0;
-    while (!stream.atEnd())
+    // 分隔符判定（含行尾 '\0'）：空白/逗号/引号/CR/LF。
+    auto isSep = [](char c) {
+        return c == ' ' || c == '\t' || c == ',' || c == '"' || c == '\r' || c == '\n' || c == '\0';
+    };
+    // 从 cursor 跳过分隔符后解析一个 double；解析不到返回 false。
+    // 注：strtod/strtoll 依赖 C 运行时 locale 的小数点为 '.'（本工程未调 setlocale，恒为 "C"；与 WorkpieceMeshBuilder 快路径前提一致）。
+    auto nextNumber = [](const char*& p, double* out) -> bool {
+        while (*p == ' ' || *p == '\t' || *p == ',' || *p == '"' || *p == '\r' || *p == '\n') ++p;
+        char* end = nullptr;
+        const double v = std::strtod(p, &end);
+        if (end == p) return false;
+        p = end;
+        *out = v;
+        return true;
+    };
+
+    while (!file.atEnd())
     {
-        QString line = stream.readLine().trimmed();
-        ++lineNumber;
-        if (line.isEmpty())
+        const QByteArray line = file.readLine();
+
+        const char* cursor = line.constData();
+        // 跳过外部导出文件首行可能带的 UTF-8 BOM（EF BB BF）；自产文件无 BOM。短路求值，越界安全（constData 以 '\0' 结尾）。
+        if (static_cast<unsigned char>(cursor[0]) == 0xEF
+            && static_cast<unsigned char>(cursor[1]) == 0xBB
+            && static_cast<unsigned char>(cursor[2]) == 0xBF)
         {
-            continue;
+            cursor += 3;
+        }
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == ',' || *cursor == '"' || *cursor == '\r' || *cursor == '\n') ++cursor;
+        if (*cursor == '\0')
+        {
+            continue;  // 空行/纯空白行
         }
 
-        line.remove('"');
-        const QStringList parts = line.contains(',')
-            ? line.split(',', Qt::SkipEmptyParts)
-            : line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        char* afterIndex = nullptr;
+        const long long rawIndex = std::strtoll(cursor, &afterIndex, 10);
+        // index 必须是整数且紧跟分隔符/行尾（"1.5" 这类非整数 index 视为坏行，避免字段错位）。
+        const bool indexOk = (afterIndex != cursor) && isSep(*afterIndex);
+        cursor = afterIndex;
 
-        if (parts.size() < 4)
+        double x = 0.0, y = 0.0, z = 0.0;
+        const bool ok = indexOk
+            && nextNumber(cursor, &x) && nextNumber(cursor, &y) && nextNumber(cursor, &z)
+            && std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+
+        if (!ok)
         {
-            continue;
-        }
-
-        bool indexOk = false;
-        bool xOk = false;
-        bool yOk = false;
-        bool zOk = false;
-        const qlonglong rawIndex = parts[0].trimmed().toLongLong(&indexOk);
-        const double x = parts[1].trimmed().toDouble(&xOk);
-        const double y = parts[2].trimmed().toDouble(&yOk);
-        const double z = parts[3].trimmed().toDouble(&zOk);
-
-        if (!(indexOk && xOk && yOk && zOk))
-        {
-            if (points.isEmpty())
-            {
-                continue;
-            }
-
-            if (error != nullptr)
-            {
-                *error = QString("解析点文件失败，第 %1 行格式无效: %2").arg(lineNumber).arg(line);
-            }
-            return false;
+            continue;  // 表头/残缺/非数字/非有限值行一律跳过（与 WorkpieceMeshBuilder 快路径一致，最终靠 points.isEmpty 兜底）
         }
 
         RobotCalculation::IndexedPoint3D point;

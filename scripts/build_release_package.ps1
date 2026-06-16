@@ -186,6 +186,10 @@ Get-ChildItem -LiteralPath $dataTargetDir -Filter "ConfigStore.db*" -File -Error
 
 Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "icons") -TargetDir (Join-Path $packageDir "icons")
 
+# 客户品牌覆盖包：本地 branding/（不在 git 内）随安装包分发，使安装后即呈现品牌名称/图标；
+# 不存在时 Copy-DirectoryContent 自动跳过，程序回落默认 NoTeaching-Robot + 原图标。
+Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "branding") -TargetDir (Join-Path $packageDir "branding")
+
 $pointCloudExtractionSourceDir = Join-Path $repoRoot "SDK\PointCloudExtration"
 $pointCloudExtractionTargetDir = Join-Path $packageDir "SDK\PointCloudExtration"
 # Ship only the runtime dependency closure of PointCloudExtration.dll (verified with

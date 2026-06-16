@@ -2466,9 +2466,10 @@ bool TryParseWeldPoseFileRecord(const QString& line, WeldPoseFileRecord& record)
 {
     QString normalizedLine = line;
     normalizedLine.remove('"');
+    static const QRegularExpression kWhitespaceRe("\\s+");  // 提为静态：避免每行重新编译正则
     const QStringList parts = normalizedLine.contains(',')
         ? normalizedLine.split(',', Qt::SkipEmptyParts)
-        : normalizedLine.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        : normalizedLine.split(kWhitespaceRe, Qt::SkipEmptyParts);
     if (parts.size() < 13)
     {
         return false;
@@ -7701,6 +7702,17 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             .arg(saveLaserElapsedMs)
             .arg(saveWorkpieceCloudElapsedMs)
             .arg(saveMatchDebugElapsedMs));
+        // 完整点云读写速率提示：明确这步是不是瓶颈、txt 写盘有多快（对比 SDK 计算 parallelProcessing 耗时）。
+        const double workpieceCloudMB = static_cast<double>(QFileInfo(workpieceCloudPath).size()) / (1024.0 * 1024.0);
+        const double workpieceWriteMBps = saveWorkpieceCloudElapsedMs > 0
+            ? workpieceCloudMB * 1000.0 / static_cast<double>(saveWorkpieceCloudElapsedMs)
+            : 0.0;
+        appendLog(QString("完整点云写盘：%1 个点 / %2 MB / %3 ms / %4 MB/s；SDK点云算法等处理墙钟=%5 ms（对比：处理>写盘则瓶颈在计算，反之在写txt）。")
+            .arg(workpieceCloudPointCount)
+            .arg(workpieceCloudMB, 0, 'f', 1)
+            .arg(saveWorkpieceCloudElapsedMs)
+            .arg(workpieceWriteMBps, 0, 'f', 1)
+            .arg(parallelProcessingElapsedMs));
         appendLog(QString("激光点序号断点统计：断点段数=%1，最大连续缺失帧数=%2，匹配前丢弃=%3，匹配后丢弃=%4，未知未匹配=%5")
             .arg(laserIndexGapCount)
             .arg(maxLaserIndexGap)
@@ -8132,19 +8144,46 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         }
     }
 
-    QVector<RobotCalculation::IndexedPoint3D> laserFitInput;
-    if (!RobotDataHelper::LoadIndexedPoint3DFile(sourceLaserPath, laserFitInput, &error))
+    auto logReadRate = [&appendLog](const QString& label, const QString& path, int pointCount, qint64 elapsedMs)
     {
-        return false;
+        if (!appendLog) return;
+        const double mb = static_cast<double>(QFileInfo(path).size()) / (1024.0 * 1024.0);
+        appendLog(QString("%1读取：%2 点 / %3 MB / %4 ms / %5 MB/s")
+            .arg(label)
+            .arg(pointCount)
+            .arg(mb, 0, 'f', 1)
+            .arg(elapsedMs)
+            .arg(elapsedMs > 0 ? mb * 1000.0 / static_cast<double>(elapsedMs) : 0.0, 0, 'f', 1));
+    };
+
+    QVector<RobotCalculation::IndexedPoint3D> laserFitInput;
+    {
+        const qint64 readStartMs = SteadyNowMs();
+        QString laserLoadError;
+        if (RobotDataHelper::LoadIndexedPoint3DFile(sourceLaserPath, laserFitInput, &laserLoadError))
+        {
+            logReadRate(QStringLiteral("原始激光点"), sourceLaserPath, laserFitInput.size(), SteadyNowMs() - readStartMs);
+        }
+        else if (appendLog)
+        {
+            // 激光特征点为空/缺失不直接失败：点云链方法(①②③)只需完整点云，能否继续由下方 canUseExternalCloud 统一判定（与实时扫描路径一致）。
+            appendLog(QString("原始激光点读取为空或失败：%1（点云链方法将改用完整点云）").arg(laserLoadError));
+        }
     }
 
     QVector<RobotCalculation::IndexedPoint3D> workpieceCloudInput;
     QString workpieceLoadError;
-    if (QFileInfo::exists(workpieceCloudPath)
-        && !RobotDataHelper::LoadIndexedPoint3DFile(workpieceCloudPath, workpieceCloudInput, &workpieceLoadError)
-        && appendLog)
+    if (QFileInfo::exists(workpieceCloudPath))
     {
-        appendLog(QString("读取局部完整点云失败：%1（点云链方法将因输入不足报错）").arg(workpieceLoadError));
+        const qint64 readStartMs = SteadyNowMs();
+        if (RobotDataHelper::LoadIndexedPoint3DFile(workpieceCloudPath, workpieceCloudInput, &workpieceLoadError))
+        {
+            logReadRate(QStringLiteral("完整点云"), workpieceCloudPath, workpieceCloudInput.size(), SteadyNowMs() - readStartMs);
+        }
+        else if (appendLog)
+        {
+            appendLog(QString("读取局部完整点云失败：%1（点云链方法将因输入不足报错）").arg(workpieceLoadError));
+        }
     }
 
     const RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);
@@ -8422,16 +8461,35 @@ bool MeasureThenWeldService::SaveTextLines(const QString& filePath, const std::v
     }
 
     QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+    if (!file.open(QIODevice::WriteOnly))
     {
         error = QString("保存数据文件失败：%1").arg(filePath);
         return false;
     }
 
-    QTextStream stream(&file);
+    // 分块批量写：逐行 QTextStream<< 对百万级行有可观的编码/格式化开销；改为攒到约 4MB 的
+    // QByteArray 再一次 write，写 185MB 级完整点云明显更快，内存峰值也受控（不一次性翻倍）。
+    constexpr int kFlushThreshold = 4 * 1024 * 1024;
+    QByteArray buffer;
+    buffer.reserve(kFlushThreshold + 256);
     for (const QString& line : lines)
     {
-        stream << line << "\n";
+        buffer += line.toUtf8();
+        buffer += '\n';
+        if (buffer.size() >= kFlushThreshold)
+        {
+            if (file.write(buffer) != buffer.size())
+            {
+                error = QString("写入数据文件失败：%1").arg(filePath);
+                return false;
+            }
+            buffer.clear();
+        }
+    }
+    if (!buffer.isEmpty() && file.write(buffer) != buffer.size())
+    {
+        error = QString("写入数据文件失败：%1").arg(filePath);
+        return false;
     }
     return true;
 }

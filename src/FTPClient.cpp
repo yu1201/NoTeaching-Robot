@@ -204,7 +204,7 @@ bool FtpClient::connectFtpServer() {
         m_hInternet = InternetOpenA("FTP_Client", INTERNET_OPEN_TYPE_DIRECT, nullptr, nullptr, 0);
         if (m_hInternet == nullptr) {
             std::string errMsg = "WinINet初始化失败：" + getFtpErrorMsg();
-            m_log->write(LogColor::ERR, errMsg.c_str());
+            m_log->write(LogColor::ERR, "%s", errMsg.c_str());
             if (m_messageBoxesEnabled) {
                 showErrorMessage("FTP错误", "%s", errMsg.c_str());
             }
@@ -225,7 +225,7 @@ bool FtpClient::connectFtpServer() {
             0);
         if (m_hFtpSession == nullptr) {
             std::string errMsg = "FTP服务器连接失败：" + m_ftpHost + ":" + std::to_string(m_ftpPort) + " | " + getFtpErrorMsg();
-            m_log->write(LogColor::ERR, errMsg.c_str());
+            m_log->write(LogColor::ERR, "%s", errMsg.c_str());
             if (m_messageBoxesEnabled) {
                 showErrorMessage("FTP错误", "%s", errMsg.c_str());
             }
@@ -239,7 +239,7 @@ bool FtpClient::connectFtpServer() {
     }
     catch (const std::exception& e) {
         std::string errMsg = "FTP连接异常：" + std::string(e.what());
-        m_log->write(LogColor::ERR, errMsg.c_str());
+        m_log->write(LogColor::ERR, "%s", errMsg.c_str());
         if (m_messageBoxesEnabled) {
             showErrorMessage("FTP异常", "%s", errMsg.c_str());
         }
@@ -270,7 +270,7 @@ bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& 
         if (!remoteParentDir.empty()) {
             if (!createRemoteDirRecursive(remoteParentDir)) {
                 std::string errMsg = "远程目录确认失败 | 目录：" + remoteParentDir + " | 文件：" + remoteFilePath;
-                m_log->write(LogColor::ERR, errMsg.c_str());
+                m_log->write(LogColor::ERR, "%s", errMsg.c_str());
                 if (m_messageBoxesEnabled) {
                     showErrorMessage("FTP错误", "%s", errMsg.c_str());
                 }
@@ -309,7 +309,7 @@ bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& 
         if (uploadOk) {
             // 上传成功：只写日志，不弹窗；FTP会话保留给后续文件复用。
             std::string successMsg = "文件上传成功 | 本地：" + localFilePath + " | 远程：" + remoteFilePath;
-            m_log->write(LogColor::SUCCESS, successMsg.c_str());
+            m_log->write(LogColor::SUCCESS, "%s", successMsg.c_str());
             m_log->write(LogColor::SUCCESS, "FTP上传完成 | PutFile=%lldms | Total=%lldms | 远程=%s",
                 putMs, ElapsedMs(totalStart), remoteFilePath.c_str());
             return true;
@@ -317,7 +317,7 @@ bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& 
         else {
             // 上传失败：日志+错误弹窗
             std::string errMsg = "文件上传失败 | 本地：" + localFilePath + " | 远程：" + remoteFilePath + " | " + getFtpErrorMsg();
-            m_log->write(LogColor::ERR, errMsg.c_str());
+            m_log->write(LogColor::ERR, "%s", errMsg.c_str());
             m_log->write(LogColor::ERR, "FTP上传失败耗时 | PutFile=%lldms | Total=%lldms | 远程=%s",
                 putMs, ElapsedMs(totalStart), remoteFilePath.c_str());
             if (m_messageBoxesEnabled) {
@@ -330,7 +330,7 @@ bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& 
     catch (const std::exception& e) {
         // 异常处理：日志+错误弹窗
         std::string errMsg = "文件上传异常：" + std::string(e.what()) + " | 本地：" + localFilePath;
-        m_log->write(LogColor::ERR, errMsg.c_str());
+        m_log->write(LogColor::ERR, "%s", errMsg.c_str());
         if (m_messageBoxesEnabled) {
             showErrorMessage("FTP异常", "%s", errMsg.c_str());
         }
@@ -380,7 +380,7 @@ bool FtpClient::listFiles(const std::string& remoteDir, std::vector<FtpRemoteFil
         std::string errMsg = "读取FTP目录失败 | 目录：" + remoteDir + " | " + getFtpErrorMsg();
         if (m_log != nullptr)
         {
-            m_log->write(LogColor::ERR, errMsg.c_str());
+            m_log->write(LogColor::ERR, "%s", errMsg.c_str());
         }
         if (m_messageBoxesEnabled) {
             showErrorMessage("FTP错误", "%s", errMsg.c_str());
@@ -414,7 +414,7 @@ bool FtpClient::listFiles(const std::string& remoteDir, std::vector<FtpRemoteFil
         std::string errMsg = "读取FTP目录中断 | 目录：" + remoteDir + " | " + getFtpErrorMsg();
         if (m_log != nullptr)
         {
-            m_log->write(LogColor::ERR, errMsg.c_str());
+            m_log->write(LogColor::ERR, "%s", errMsg.c_str());
         }
         if (m_messageBoxesEnabled) {
             showErrorMessage("FTP错误", "%s", errMsg.c_str());
@@ -470,7 +470,7 @@ bool FtpClient::downloadFile(const std::string& remoteFilePath, const std::strin
         if (downloadOk) {
             // 下载成功：日志+信息弹窗
             std::string successMsg = "文件下载成功 | 远程：" + remoteFilePath + " | 本地：" + localFilePath;
-            m_log->write(LogColor::SUCCESS, successMsg.c_str());
+            m_log->write(LogColor::SUCCESS, "%s", successMsg.c_str());
             if (m_messageBoxesEnabled) {
                 showInfoMessage("FTP成功", "%s", successMsg.c_str());
             }
@@ -480,7 +480,7 @@ bool FtpClient::downloadFile(const std::string& remoteFilePath, const std::strin
         else {
             // 下载失败：日志+错误弹窗
             std::string errMsg = "文件下载失败 | 远程：" + remoteFilePath + " | 本地：" + localFilePath + " | " + getFtpErrorMsg();
-            m_log->write(LogColor::ERR, errMsg.c_str());
+            m_log->write(LogColor::ERR, "%s", errMsg.c_str());
             if (m_messageBoxesEnabled) {
                 showErrorMessage("FTP错误", "%s", errMsg.c_str());
             }
@@ -491,7 +491,7 @@ bool FtpClient::downloadFile(const std::string& remoteFilePath, const std::strin
     catch (const std::exception& e) {
         // 异常处理：日志+错误弹窗
         std::string errMsg = "文件下载异常：" + std::string(e.what()) + " | 远程：" + remoteFilePath;
-        m_log->write(LogColor::ERR, errMsg.c_str());
+        m_log->write(LogColor::ERR, "%s", errMsg.c_str());
         if (m_messageBoxesEnabled) {
             showErrorMessage("FTP异常", "%s", errMsg.c_str());
         }
@@ -523,7 +523,7 @@ bool FtpClient::deleteFile(const std::string& remoteFilePath, bool askConfirm) {
         if (deleteOk) {
             // 删除成功：日志+信息弹窗
             std::string successMsg = "文件删除成功 | 远程：" + remoteFilePath;
-            m_log->write(LogColor::SUCCESS, successMsg.c_str());
+            m_log->write(LogColor::SUCCESS, "%s", successMsg.c_str());
             if (m_messageBoxesEnabled) {
                 showInfoMessage("FTP成功", "%s", successMsg.c_str());
             }
@@ -533,7 +533,7 @@ bool FtpClient::deleteFile(const std::string& remoteFilePath, bool askConfirm) {
         else {
             // 删除失败：日志+错误弹窗
             std::string errMsg = "文件删除失败 | 远程：" + remoteFilePath + " | " + getFtpErrorMsg();
-            m_log->write(LogColor::ERR, errMsg.c_str());
+            m_log->write(LogColor::ERR, "%s", errMsg.c_str());
             if (m_messageBoxesEnabled) {
                 showErrorMessage("FTP错误", "%s", errMsg.c_str());
             }
@@ -544,7 +544,7 @@ bool FtpClient::deleteFile(const std::string& remoteFilePath, bool askConfirm) {
     catch (const std::exception& e) {
         // 异常处理：日志+错误弹窗
         std::string errMsg = "文件删除异常：" + std::string(e.what()) + " | 远程：" + remoteFilePath;
-        m_log->write(LogColor::ERR, errMsg.c_str());
+        m_log->write(LogColor::ERR, "%s", errMsg.c_str());
         if (m_messageBoxesEnabled) {
             showErrorMessage("FTP异常", "%s", errMsg.c_str());
         }

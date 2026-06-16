@@ -73,7 +73,7 @@ int COPini::DWORDToInt(unsigned int dwValue, const std::string& context)
             << "File: " << m_fileName << ", "
             << "Section: " << m_sectionName;
         // 写入错误日志
-        m_pIniLog.write(LogColor::ERR, oss.str().c_str());
+        m_pIniLog.write(LogColor::ERR, "%s", oss.str().c_str());
         // 返回-1表示溢出（也可返回INT_MAX，根据业务需求调整）
         return -1;
     }
@@ -280,7 +280,7 @@ void COPini::CheckRead(std::string key, int nReturnValue, bool bCheck)
             + " section " + m_sectionName
             + " key " + key
             + " read failed! Return value: " + std::to_string(nReturnValue);
-        m_pIniLog.write(LogColor::ERR, str.c_str());
+        m_pIniLog.write(LogColor::ERR, "%s", str.c_str());
     }
 }
 
@@ -404,7 +404,7 @@ bool COPini::SetFileName(std::string fileName)
     if (!CheckFileExists(fileName))
     {
         std::string str = "Error: config database path not found: " + fileName;
-        m_pIniLog.write(LogColor::WARNING, str.c_str());
+        m_pIniLog.write(LogColor::WARNING, "%s", str.c_str());
     }
     CheckFileEncodeType(m_fileName);
     return true;
@@ -420,7 +420,7 @@ bool COPini::SetFileName(bool bCheck, std::string fileName)
     if (!CheckFileExists(fileName))
     {
         std::string str = "Error: config database path not found: " + fileName;
-        m_pIniLog.write(LogColor::WARNING, str.c_str());
+        m_pIniLog.write(LogColor::WARNING, "%s", str.c_str());
     }
     CheckFileEncodeType(m_fileName);
     return true;

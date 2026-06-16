@@ -24,7 +24,7 @@ QtWidgetsApplication4.exe --no-show --robot RobotB --robot-movel-relative "0,0,1
 
 - 程序启动后会解析 `app.arguments()`，有参数时会打开命令行控制台并执行 CLI 动作。
 - `--no-show` 会隐藏主窗口，适合自动化、批处理、现场脚本。
-- CLI 日志会输出到控制台，并追加到 `Log/RobotALog.txt`。
+- CLI 日志会输出到控制台，并按天归档追加到 `Log/<yyyy-MM-dd>/CliLog.txt`。
 - 多个命令可以组合使用；通用机器人运动和 FANUC `--fanuc-raw` / `--fanuc-call` 会按参数顺序执行。
 - 当前实现主要通过日志报告失败，进程退出码不作为可靠的成功/失败判断依据。
 

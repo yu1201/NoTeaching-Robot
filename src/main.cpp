@@ -1,5 +1,6 @@
 #include "QtWidgetsApplication4.h"
 #include "WindowStyleHelper.h"
+#include "BrandingConfig.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -64,17 +65,17 @@ void InstallChineseQtTranslations(QApplication& app)
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    app.setApplicationName("NoTeaching-Robot");
+    SetWorkingDirectoryToProjectRoot();  // 提前：使本地 branding/ 品牌覆盖可被定位（不依赖后续步骤）
+    app.setApplicationName(BrandingConfig::ApplicationName());
     app.setApplicationVersion("2026.06.15.1835");
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();
     InstallGlobalWheelGuard(app);
-    SetWorkingDirectoryToProjectRoot();
-    app.setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
+    app.setWindowIcon(BrandingConfig::WindowIcon());
 
     QtWidgetsApplication4 window;
-    window.setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
+    window.setWindowIcon(BrandingConfig::WindowIcon());
     const QStringList arguments = app.arguments();
     if (!arguments.contains("--no-show"))
     {

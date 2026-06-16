@@ -1,4 +1,5 @@
 #include "WindowStyleHelper.h"
+#include "BrandingConfig.h"
 
 #include <algorithm>
 #include <memory>
@@ -840,7 +841,7 @@ void ApplyUnifiedWindowChrome(QWidget* widget)
         ClampWindowToAvailableGeometry(widget);
     });
 
-    widget->setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
+    widget->setWindowIcon(BrandingConfig::WindowIcon());
     RefreshUnifiedWindowTitleBar(widget);
 }
 
@@ -906,7 +907,7 @@ void RefreshUnifiedWindowTitleBar(QWidget* widget)
         return;
     }
 
-    widget->setWindowIcon(QIcon(":/QtWidgetsApplication4/icons/minimal_robot_icon_blue_black.svg"));
+    widget->setWindowIcon(BrandingConfig::WindowIcon());
     ApplyWindowsTitleBarTheme(widget);
 }
 

@@ -1,19 +1,17 @@
 #include "groove/scancameraskjworker.h"
 
 #include "CameraFrameCache.h"
+#include "RobotLog.h"
 #include "groove/framebuffer.h"
 
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
-#include <QFile>
 #include <QFileInfo>
 #include <QLibrary>
-#include <QTextStream>
 #include <QTimer>
 
 #include <limits>
-#include <mutex>
 
 namespace
 {
@@ -43,23 +41,9 @@ struct SkjPoint2d
 
 void WriteCameraSkjLog(const QString& text)
 {
-    static std::mutex logMutex;
-    std::lock_guard<std::mutex> lock(logMutex);
-
-    QDir dir(QDir::currentPath());
-    if (!dir.exists("Log"))
-    {
-        dir.mkpath("Log");
-    }
-
-    QFile file(dir.filePath("Log/CameraSkjClient.txt"));
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
-    {
-        return;
-    }
-    QTextStream stream(&file);
-    stream << '[' << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz") << "] "
-        << text << '\n';
+    // 统一走 RobotLog：按天归档 Log/<日期>/、自带写入锁、自动毫秒时间戳。
+    static RobotLog logger("Log/CameraSkjClient.txt", false);
+    logger.writeLine(text.toStdString());
 }
 }
 

@@ -6,6 +6,7 @@
 #include "RobotCalculation.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
+#include "RobotLog.h"
 #include "RobotMessage.h"
 #include "RobotPoseTransform.h"
 #include "WindowStyleHelper.h"
@@ -2816,12 +2817,7 @@ void HandEyeCalibrationDialog::AppendLog(const QString& text)
         m_pLogText->appendPlainText(text);
     }
 
-    QDir().mkpath("Log");
-    QFile logFile("Log/HandEyeCalibrationLog.txt");
-    if (logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
-    {
-        QTextStream stream(&logFile);
-        stream << "[" << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz") << "] "
-               << text << '\n';
-    }
+    // 统一走 RobotLog：按天归档 Log/<日期>/、线程安全、自动毫秒时间戳。
+    static RobotLog fileLogger("Log/HandEyeCalibrationLog.txt", false);
+    fileLogger.writeLine(text.toStdString());
 }
