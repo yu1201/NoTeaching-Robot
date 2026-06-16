@@ -4,6 +4,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QSettings>
 #include <QStandardPaths>
@@ -163,30 +164,22 @@ int BrandingConfig::ApplyDesktopShortcutIcons()
     }
 
 #ifdef Q_OS_WIN
-    // 候选快捷方式位置（安装器用固定名 NoTeaching-Robot.lnk；桌面/公共桌面/开始菜单程序组都查一遍）
-    QStringList candidates;
+    const QString brand = ApplicationName();  // 品牌名（默认 NoTeaching-Robot 则不重命名，只改图标）
+
+    // 安装器固定建 NoTeaching-Robot.lnk；逐个目录查（用户/公共桌面、用户/公共开始菜单）
+    QStringList dirs;
     const QString userDesktop = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
     if (!userDesktop.isEmpty())
     {
-        candidates << QDir(userDesktop).filePath(kShortcutBaseName + QStringLiteral(".lnk"));
+        dirs << userDesktop;
     }
-    // 公共桌面 / 公共开始菜单程序组
     wchar_t pathBuf[MAX_PATH] = {0};
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_DESKTOPDIRECTORY, nullptr, 0, pathBuf)))
+    for (int csidl : {CSIDL_COMMON_DESKTOPDIRECTORY, CSIDL_COMMON_PROGRAMS, CSIDL_PROGRAMS})
     {
-        candidates << QDir(QString::fromWCharArray(pathBuf)).filePath(kShortcutBaseName + QStringLiteral(".lnk"));
-    }
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_PROGRAMS, nullptr, 0, pathBuf)))
-    {
-        const QString programs = QString::fromWCharArray(pathBuf);
-        candidates << QDir(programs).filePath(kShortcutBaseName + QStringLiteral("/") + kShortcutBaseName + QStringLiteral(".lnk"));
-        candidates << QDir(programs).filePath(kShortcutBaseName + QStringLiteral(".lnk"));
-    }
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PROGRAMS, nullptr, 0, pathBuf)))
-    {
-        const QString programs = QString::fromWCharArray(pathBuf);
-        candidates << QDir(programs).filePath(kShortcutBaseName + QStringLiteral("/") + kShortcutBaseName + QStringLiteral(".lnk"));
-        candidates << QDir(programs).filePath(kShortcutBaseName + QStringLiteral(".lnk"));
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, csidl, nullptr, 0, pathBuf)))
+        {
+            dirs << QString::fromWCharArray(pathBuf);
+        }
     }
 
     const HRESULT initHr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -196,21 +189,39 @@ int BrandingConfig::ApplyDesktopShortcutIcons()
 
     int changed = 0;
     const std::wstring iconW = QDir::toNativeSeparators(iconPath).toStdWString();
-    for (const QString& lnk : candidates)
+
+    // 一处快捷方式：把 NoTeaching-Robot.lnk 重命名为 <brand>.lnk（品牌不同且原名存在时），再改图标。幂等。
+    auto processLnk = [&](const QString& oldLnk, const QString& brandLnk)
     {
-        if (!QFileInfo::exists(lnk))
+        QString target = oldLnk;
+        if (brand != kShortcutBaseName && QFileInfo::exists(oldLnk))
         {
-            continue;
+            if (QFileInfo::exists(brandLnk))
+            {
+                QFile::remove(brandLnk);  // 重装场景：用新建的覆盖旧品牌快捷方式
+            }
+            if (QFile::rename(oldLnk, brandLnk))
+            {
+                target = brandLnk;
+            }
+        }
+        else if (QFileInfo::exists(brandLnk))
+        {
+            target = brandLnk;  // 之前已重命名过
+        }
+        if (target.isEmpty() || !QFileInfo::exists(target))
+        {
+            return;
         }
         IShellLinkW* link = nullptr;
         if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, reinterpret_cast<void**>(&link))) || link == nullptr)
         {
-            continue;
+            return;
         }
         IPersistFile* persist = nullptr;
         if (SUCCEEDED(link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&persist))) && persist != nullptr)
         {
-            const std::wstring lnkW = QDir::toNativeSeparators(lnk).toStdWString();
+            const std::wstring lnkW = QDir::toNativeSeparators(target).toStdWString();
             if (SUCCEEDED(persist->Load(lnkW.c_str(), STGM_READWRITE)))
             {
                 if (SUCCEEDED(link->SetIconLocation(iconW.c_str(), 0)))
@@ -224,6 +235,20 @@ int BrandingConfig::ApplyDesktopShortcutIcons()
             persist->Release();
         }
         link->Release();
+    };
+
+    const QString lnkOld = kShortcutBaseName + QStringLiteral(".lnk");
+    const QString lnkBrand = brand + QStringLiteral(".lnk");
+    for (const QString& d : dirs)
+    {
+        QDir dir(d);
+        processLnk(dir.filePath(lnkOld), dir.filePath(lnkBrand));
+        // 开始菜单若建了同名子文件夹（DisableProgramGroupPage=yes 时通常没有，保险处理）
+        const QDir sub(dir.filePath(kShortcutBaseName));
+        if (sub.exists())
+        {
+            processLnk(sub.filePath(lnkOld), sub.filePath(lnkBrand));
+        }
     }
 
     if (needUninit)
