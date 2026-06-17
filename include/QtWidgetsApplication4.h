@@ -24,6 +24,7 @@ class FANUCRobotCtrl;
 class FunctionTestDialog;
 class LaserWeldFilterDialog;
 class WorkpieceMeshViewerDialog;
+class ModelAlignmentDialog;
 class QAction;
 class QCheckBox;
 class QCloseEvent;
@@ -140,6 +141,7 @@ private:
     void OpenFtpJobManagementDialog();
     void OpenPrecisePointCloudProcessingPage();
     void OpenWorkpieceMeshPage();
+    void OpenModelAlignmentPage();
     void OpenConfigDatabaseViewerDialog();
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
@@ -210,6 +212,7 @@ private:
     QWidget* m_pConfigDatabaseViewerPage;
     LaserWeldFilterDialog* m_pPrecisePointCloudProcessingPage;
     WorkpieceMeshViewerDialog* m_pWorkpieceMeshPage = nullptr;
+    ModelAlignmentDialog* m_pModelAlignmentPage = nullptr;
     QComboBox* m_pRobotSelectorCombo;
     QLabel* m_pRobotSelectorLabel;
     int m_nCurrentRobotUnitIndex;

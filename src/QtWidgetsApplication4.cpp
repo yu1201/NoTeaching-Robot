@@ -11,6 +11,7 @@
 #include "HandEyeCalibrationDialog.h"
 #include "LaserWeldFilterDialog.h"
 #include "WorkpieceMeshViewerDialog.h"
+#include "ModelAlignmentDialog.h"
 #include "MeasureThenWeldDialog.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "MeasureThenWeldService.h"
@@ -7698,6 +7699,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addMenuAction(managementDebugMenu, createManagementAction("点动控制", [this, openInManagement]() { openInManagement([this]() { OpenRobotJogDialog(); }); }));
 	addMenuAction(managementDebugMenu, createManagementAction("功能测试", [this, openInManagement]() { openInManagement([this]() { OpenFunctionTestDialog(); }); }));
 	addMenuAction(managementDebugMenu, createManagementAction("工件模型", [this]() { OpenWorkpieceMeshPage(); }));
+	addMenuAction(managementDebugMenu, createManagementAction("模型配准", [this]() { OpenModelAlignmentPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("配置数据库查看", [this]() { OpenConfigDatabaseViewerDialog(); }));
 
 	m_pAccountManagementAction = addMenuAction(managementAccountMenu, createManagementAction("账号管理", [this]() { OpenAccountManagementDialog(); }));
@@ -9976,6 +9978,36 @@ void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 	PrepareEmbeddedPage(m_pPrecisePointCloudProcessingPage, m_pManagementStack);
 	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pPrecisePointCloudProcessingPage);
+	loading.Finish();
+}
+
+void QtWidgetsApplication4::OpenModelAlignmentPage()
+{
+	PageOpenTrace trace("模型配准");
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		QMessageBox::information(this, "模型配准", "模型配准 / 点云去噪需要工程师或管理员权限。");
+		return;
+	}
+
+	if (m_pManagementStack == nullptr)
+	{
+		QMessageBox::warning(this, "模型配准", "管理页面尚未初始化，无法嵌入模型配准页面。");
+		return;
+	}
+
+	if (m_pModelAlignmentPage != nullptr)
+	{
+		ShowManagementEmbeddedPage(m_pModelAlignmentPage);
+		return;
+	}
+
+	DelayedLoadingGuard loading(this, "正在打开模型配准", 1000);
+	m_pModelAlignmentPage = new ModelAlignmentDialog(m_pManagementStack);
+	loading.Pulse();
+	PrepareEmbeddedPage(m_pModelAlignmentPage, m_pManagementStack);
+	loading.Pulse();
+	ShowManagementEmbeddedPage(m_pModelAlignmentPage);
 	loading.Finish();
 }
 
