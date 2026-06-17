@@ -45,6 +45,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
@@ -122,6 +123,8 @@ public:
         m_editVertexBuffer.destroy();
         m_editFlagBuffer.destroy();
         m_editVao.destroy();
+        m_bgVertexBuffer.destroy();
+        m_bgVao.destroy();
         delete m_pProgram;
         doneCurrent();
     }
@@ -255,19 +258,20 @@ public:
         }
     }
 
-    // 统计离群删除（SOR）：把离群点追加到选中集（不删，复用 Delete 让用户确认）。
-    // k=邻居数，stdMul=标准差倍数；点的 k 近邻平均距离 > 全局均值 + stdMul·std 判离群。
-    // 返回本次新增选中数。纯 Eigen + 均匀网格哈希 + 多线程，无第三方依赖。
-    qsizetype SelectStatisticalOutliers(int k, double stdMul)
+    // ===== 去噪：纯计算(可后台跑) + 应用(UI线程) 分离 =====
+    // 把 SOR/连通域拆成 静态纯函数 Compute*Mask（只吃坐标快照、不碰任何成员、不触 GL/Qt，
+    // 可在后台线程安全执行）+ 成员 ApplySelectionMask（UI 线程把 mask 并入选区）。这样去噪
+    // 重计算不再阻塞界面（编排见对话框 RunDenoisePreviewAsync）。done 累计已处理点数供进度
+    // 条；cancel 命中即刻返回空 vector，调用方按「已取消」处理。
+
+    // 统计离群（SOR）纯计算：返回离群 mask（mask[i]=1 离群）。k=邻居数，stdMul=标准差倍数；
+    // 点的 k 近邻平均距离 > 全局均值 + stdMul·std 判离群。纯 Eigen + 均匀网格哈希 + 多线程。
+    static std::vector<uint8_t> ComputeStatisticalOutliersMask(
+        const float* pos, qsizetype n, int k, double stdMul,
+        std::atomic<qsizetype>* done, const std::atomic_bool* cancel)
     {
-        if (m_pEditCloud == nullptr || m_editFlags.size() != m_pEditCloud->size()
-            || m_editPositions.size() != m_pEditCloud->size() * 3)
-        {
-            return 0;
-        }
-        const qsizetype n = m_pEditCloud->size();
-        if (k < 1 || n < qsizetype(k) + 1) return 0;
-        const float* pos = m_editPositions.constData();
+        std::vector<uint8_t> mask;
+        if (pos == nullptr || n < 1 || k < 1 || n < qsizetype(k) + 1) return mask;
 
         Eigen::Vector3f lo(pos[0], pos[1], pos[2]);
         Eigen::Vector3f hi = lo;
@@ -278,12 +282,34 @@ public:
             hi = hi.cwiseMax(p);
         }
         const Eigen::Vector3f span = hi - lo;
-        double cell = double(span.norm()) / std::cbrt(double(n)) * 2.0;  // ≈2× 平均点间距
+        // 网格尺寸自适应——SOR 卡顿根因就在这里：旧版 span.norm()/cbrt(n) 按【3D 体】
+        // 均匀分布估点间距，但激光扫描的工件点云近似分布在【2D 表面】薄层上，cbrt 会把
+        // 格距高估约 n^(1/6) 倍（n=1e6 时≈10×、面对角线修正后实测≈28×），每格点数随之
+        // 爆到数百，邻域候选量翻几十倍 → O(n×候选) 从 ~O(n·k) 膨胀到 ~O(n·数百)。
+        // 改用「最大两维面密度」估格距，且目标每格点数随 k 放大，使绝大多数点在 r=1 邻域
+        // 就凑够 k 个邻居（候选≈9k 而非数千），把判据所需的距离计算量压回 O(n·k)。
+        double axis[3] = { double(span.x()), double(span.y()), double(span.z()) };
+        std::sort(axis, axis + 3);
+        const double area = axis[1] * axis[2];            // 次长×最长轴 ≈ 表面有效面积
+        const double perCell = std::max(4.0, double(k));  // 目标每格点数，随 k 放大
+        const double maxCoeff = std::max(double(span.maxCoeff()), 1e-6);
+        double cell = (area > 1e-12)
+            ? std::sqrt(area / double(n) * perCell)
+            : (double(span.norm()) / std::cbrt(double(n)) * 2.0);  // 退化(线状)回退旧式
+        cell = std::clamp(cell, maxCoeff / 4096.0, maxCoeff);      // 防 0 / 防过大
         if (cell < 1e-6) cell = 1.0;
-        const int nx = std::max(1, int(span.x() / cell) + 1);
-        const int ny = std::max(1, int(span.y() / cell) + 1);
-        const int nz = std::max(1, int(span.z() / cell) + 1);
-        if (static_cast<long long>(nx) * ny * nz > 16LL * 1024 * 1024) return 0;  // 防爆内存
+        int nx = std::max(1, int(span.x() / cell) + 1);
+        int ny = std::max(1, int(span.y() / cell) + 1);
+        int nz = std::max(1, int(span.z() / cell) + 1);
+        // 格数超上限时放大 cell 重算，而非旧版直接 return 0（那会让整次去噪无声失败、
+        // 用户只看到标红 0 个还以为没离群点）。
+        while (static_cast<long long>(nx) * ny * nz > 16LL * 1024 * 1024)
+        {
+            cell *= 2.0;
+            nx = std::max(1, int(span.x() / cell) + 1);
+            ny = std::max(1, int(span.y() / cell) + 1);
+            nz = std::max(1, int(span.z() / cell) + 1);
+        }
         std::vector<std::vector<int>> grid(static_cast<size_t>(static_cast<long long>(nx) * ny * nz));
         auto cellOf = [&](float px, float py, float pz, int& cx, int& cy, int& cz)
         {
@@ -297,6 +323,7 @@ public:
             cellOf(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2], cx, cy, cz);
             grid[static_cast<size_t>((cz * ny + cy) * nx + cx)].push_back(int(i));
         }
+        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return {};
 
         std::vector<float> meanDist(size_t(n), 0.0f);
         const int threads = std::clamp(int(std::thread::hardware_concurrency()), 1, 16);
@@ -313,6 +340,12 @@ public:
                 std::vector<float> d2;
                 for (qsizetype i = b; i < e; ++i)
                 {
+                    // 每 256 点查一次取消并节流上报进度（原子，避免百万级争用/invoke 风暴）。
+                    if ((i & 0xFF) == 0)
+                    {
+                        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return;
+                        if (done != nullptr) done->fetch_add(256, std::memory_order_relaxed);
+                    }
                     const float px = pos[i * 3], py = pos[i * 3 + 1], pz = pos[i * 3 + 2];
                     int cx, cy, cz;
                     cellOf(px, py, pz, cx, cy, cz);
@@ -336,13 +369,14 @@ public:
                     if (d2.empty()) { meanDist[size_t(i)] = 0.0f; continue; }
                     const int kk = int(std::min(qsizetype(k), qsizetype(d2.size())));
                     std::nth_element(d2.begin(), d2.begin() + kk, d2.end());
-                    double s = 0.0;
-                    for (int mIdx = 0; mIdx < kk; ++mIdx) s += std::sqrt(double(d2[size_t(mIdx)]));
-                    meanDist[size_t(i)] = float(s / kk);
+                    double sumd = 0.0;
+                    for (int mIdx = 0; mIdx < kk; ++mIdx) sumd += std::sqrt(double(d2[size_t(mIdx)]));
+                    meanDist[size_t(i)] = float(sumd / kk);
                 }
             });
         }
         for (auto& w : workers) w.join();
+        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return {};
 
         double sum = 0.0;
         for (float d : meanDist) sum += d;
@@ -352,33 +386,21 @@ public:
         const double sd = std::sqrt(var / double(n));
         const double thresh = mean + stdMul * sd;
 
-        qsizetype added = 0;
+        mask.assign(size_t(n), uint8_t(0));
         for (qsizetype i = 0; i < n; ++i)
-            if (meanDist[size_t(i)] > thresh && m_editFlags[i] < 0.5f)
-            {
-                m_editFlags[i] = 1.0f;
-                ++added;
-            }
-        m_selectedCount += added;
-        m_flagsDirty = true;
-        update();
-        if (m_onSelectionChanged) m_onSelectionChanged(m_selectedCount);
-        return added;
+            if (meanDist[size_t(i)] > thresh) mask[size_t(i)] = 1;
+        if (done != nullptr) done->store(n, std::memory_order_relaxed);
+        return mask;
     }
 
-    // 连通域去飞点：把「与主体不连通的小簇」标记为选中（不删，复用 Delete 确认）。
-    // voxel=体素边长（同体素或 26 邻体素内有点即视为连通）；minClusterPts=保留簇的最小点数，
-    // 小于此的连通簇判为飞点。返回本次新增选中数。纯 Eigen + 体素哈希并查集，无第三方依赖。
-    qsizetype SelectSmallClusters(double voxel, int minClusterPts)
+    // 连通域去飞点纯计算：返回飞点 mask（点所属 26 邻接连通簇点数 < minClusterPts 即标 1）。
+    // voxel=体素边长；纯 Eigen + 体素哈希并查集。进度按阶段离散上报（无自然点级进度）。
+    static std::vector<uint8_t> ComputeSmallClustersMask(
+        const float* pos, qsizetype n, double voxel, int minClusterPts,
+        std::atomic<qsizetype>* done, const std::atomic_bool* cancel)
     {
-        if (m_pEditCloud == nullptr || m_editFlags.size() != m_pEditCloud->size()
-            || m_editPositions.size() != m_pEditCloud->size() * 3)
-        {
-            return 0;
-        }
-        const qsizetype n = m_pEditCloud->size();
-        if (n < 1 || voxel <= 1e-6) return 0;
-        const float* pos = m_editPositions.constData();
+        std::vector<uint8_t> mask;
+        if (pos == nullptr || n < 1 || voxel <= 1e-6) return mask;
 
         Eigen::Vector3f lo(pos[0], pos[1], pos[2]);
         Eigen::Vector3f hi = lo;
@@ -392,7 +414,7 @@ public:
         const int nx = std::max(1, int(span.x() / voxel) + 1);
         const int ny = std::max(1, int(span.y() / voxel) + 1);
         const int nz = std::max(1, int(span.z() / voxel) + 1);
-        if (static_cast<long long>(nx) * ny * nz > 64LL * 1024 * 1024) return 0;
+        if (static_cast<long long>(nx) * ny * nz > 64LL * 1024 * 1024) return mask;
         auto voxelOf = [&](float x, float y, float z) -> long long
         {
             const int cx = std::clamp(int((x - lo.x()) / voxel), 0, nx - 1);
@@ -410,6 +432,8 @@ public:
             pointVoxel[size_t(i)] = v;
             ++voxelCount[v];
         }
+        if (done != nullptr) done->store(n / 5, std::memory_order_relaxed);
+        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return {};
 
         // 并查集（体素粒度）：26 邻接的非空体素合并。
         std::unordered_map<long long, long long> parent;
@@ -420,8 +444,11 @@ public:
             while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; }
             return a;
         };
+        qsizetype mergeStep = 0;
         for (const auto& kv : voxelCount)
         {
+            if (((++mergeStep) & 0x3FFF) == 0 && cancel != nullptr
+                && cancel->load(std::memory_order_relaxed)) return {};
             const long long v = kv.first;
             const int cz = int(v / (static_cast<long long>(nx) * ny));
             const long long rem = v % (static_cast<long long>(nx) * ny);
@@ -440,27 +467,68 @@ public:
                         if (ra != rb) parent[ra] = rb;
                     }
         }
+        if (done != nullptr) done->store(n * 3 / 5, std::memory_order_relaxed);
+        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return {};
 
         std::unordered_map<long long, int> clusterCount;  // 簇根 → 总点数
         clusterCount.reserve(voxelCount.size());
         for (const auto& kv : voxelCount) clusterCount[findRoot(kv.first)] += kv.second;
+        if (done != nullptr) done->store(n * 4 / 5, std::memory_order_relaxed);
 
-        qsizetype added = 0;
+        mask.assign(size_t(n), uint8_t(0));
         for (qsizetype i = 0; i < n; ++i)
-        {
-            if (m_editFlags[i] > 0.5f) continue;
             if (clusterCount[findRoot(pointVoxel[size_t(i)])] < minClusterPts)
+                mask[size_t(i)] = 1;
+        if (done != nullptr) done->store(n, std::memory_order_relaxed);
+        return mask;
+    }
+
+    // 把去噪 mask 并入当前选区（追加选中、不动已选）。计算期点云可能被改，故先校验长度
+    // 一致，不符直接丢弃（对话框已用 m_bEditBusy 闸门防并发，这里是兜底）。返回新增选中数。
+    qsizetype ApplySelectionMask(const std::vector<uint8_t>& mask)
+    {
+        if (m_pEditCloud == nullptr
+            || qsizetype(mask.size()) != m_pEditCloud->size()
+            || m_editFlags.size() != m_pEditCloud->size())
+        {
+            return 0;
+        }
+        qsizetype added = 0;
+        for (qsizetype i = 0; i < m_editFlags.size(); ++i)
+            if (mask[size_t(i)] != 0 && m_editFlags[i] < 0.5f)
             {
                 m_editFlags[i] = 1.0f;
                 ++added;
             }
+        if (added > 0)
+        {
+            m_selectedCount += added;
+            m_flagsDirty = true;
+            update();
+            if (m_onSelectionChanged) m_onSelectionChanged(m_selectedCount);
         }
-        m_selectedCount += added;
-        m_flagsDirty = true;
-        update();
-        if (m_onSelectionChanged) m_onSelectionChanged(m_selectedCount);
         return added;
     }
+
+    // 当前编辑点云坐标快照（float x y z 连续）——后台计算用，拷贝以隔离用户并发删点。
+    std::vector<float> EditPositionsSnapshot() const
+    {
+        std::vector<float> out;
+        if (m_pEditCloud == nullptr) return out;
+        out.resize(static_cast<size_t>(m_pEditCloud->size()) * 3);
+        for (qsizetype i = 0; i < m_pEditCloud->size(); ++i)
+        {
+            const Eigen::Vector3d& p = (*m_pEditCloud)[i].point;
+            out[static_cast<size_t>(i) * 3]     = float(p.x());
+            out[static_cast<size_t>(i) * 3 + 1] = float(p.y());
+            out[static_cast<size_t>(i) * 3 + 2] = float(p.z());
+        }
+        return out;
+    }
+    qsizetype EditPointCount() const { return m_pEditCloud != nullptr ? m_pEditCloud->size() : 0; }
+
+    // 计算期忙标志：置位时 Delete 快捷键等编辑入口早退，防与后台读快照/回写竞争。
+    void SetEditBusy(bool busy) { m_editBusy = busy; }
 
     void SetSolidMode(bool solid)
     {
@@ -486,6 +554,73 @@ public:
         m_panY = 0.0f;
         m_distance = m_boundRadius * 2.4f;
         update();
+    }
+
+    // ===== 分离图层（固定双层：活动层 + 背景只读层）=====
+    // 把当前选中点从活动编辑云移除并追加到 out（用于「分离到图层」）。返回移动点数。
+    // 与 DeleteSelectedEditPoints 同压缩逻辑，但点流向 out 而非撤销回调；不触发重绘
+    //（由调用方随后 ResetActiveCloud 统一重建）。
+    qsizetype MoveSelectedTo(QVector<RobotCalculation::IndexedPoint3D>& out)
+    {
+        if (m_pEditCloud == nullptr || m_selectedCount <= 0
+            || m_editFlags.size() != m_pEditCloud->size())
+        {
+            return 0;
+        }
+        QVector<RobotCalculation::IndexedPoint3D>& cloud = *m_pEditCloud;
+        qsizetype keep = 0;
+        qsizetype moved = 0;
+        for (qsizetype i = 0; i < cloud.size(); ++i)
+        {
+            if (m_editFlags[i] > 0.5f) { out.append(cloud[i]); ++moved; }
+            else cloud[keep++] = cloud[i];
+        }
+        cloud.resize(keep);
+        // 立即同步选区不变量（不等下一帧 UploadEditCloud），避免失配窗口里 Invert/Clear 误读陈旧 flag。
+        m_editFlags.resize(keep);
+        std::fill(m_editFlags.begin(), m_editFlags.end(), 0.0f);
+        m_selectedCount = 0;
+        m_editDirty = true;  // 全量重传（pos+flags 清零，选区一并清空）
+        return moved;
+    }
+
+    // 活动编辑云内容被整体替换（分离/合并/切层后）：强制重建 GPU 数据并复位框选/套索交互态。
+    void ResetActiveCloud()
+    {
+        m_editDirty = true;
+        m_rubberActive = false;
+        if (m_pRubberBand != nullptr) m_pRubberBand->hide();
+        m_lassoActive = false;
+        m_lassoPath.clear();
+        if (m_pLassoOverlay != nullptr) { m_pLassoOverlay->ClearPath(); m_pLassoOverlay->hide(); }
+        update();
+    }
+
+    // 设置背景只读层点集（分离出的另一图层）；传空集=隐藏背景层。
+    void SetBackgroundPoints(const QVector<RobotCalculation::IndexedPoint3D>& pts)
+    {
+        m_bgPositions.clear();
+        m_bgPositions.reserve(int(pts.size() * 3));
+        for (const RobotCalculation::IndexedPoint3D& p : pts)
+        {
+            m_bgPositions << float(p.point.x()) << float(p.point.y()) << float(p.point.z());
+        }
+        m_bgDirty = true;
+        update();
+    }
+
+    void UploadBackground()
+    {
+        m_bgDirty = false;
+        m_bgPointCount = 0;
+        if (m_bgPositions.isEmpty()) return;
+        m_bgVao.bind();
+        m_bgVertexBuffer.bind();
+        m_bgVertexBuffer.allocate(m_bgPositions.constData(), int(m_bgPositions.size() * sizeof(float)));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+        m_bgVao.release();
+        m_bgPointCount = int(m_bgPositions.size() / 3);
     }
 
 protected:
@@ -523,6 +658,7 @@ protected:
             "uniform vec3 uLightDir;\n"
             "uniform float uUseLight;\n"
             "uniform float uIsolateMode;\n"
+            "uniform float uBackgroundMode;\n"  // 1=背景只读层，输出暗灰
             "out vec4 fragColor;\n"
             "vec3 turbo(float t){\n"  // 高度伪彩（近似 turbo 渐变）
             "  vec3 a = vec3(0.190, 0.072, 0.232);\n"
@@ -536,6 +672,7 @@ protected:
             "  return mix(d, e, (t - 0.75) / 0.25);\n"
             "}\n"
             "void main(){\n"
+            "  if (uBackgroundMode > 0.5) { fragColor = vec4(0.34, 0.38, 0.45, 1.0); return; }\n"  // 背景层暗灰
             "  if (uIsolateMode > 0.5 && vSelected < 0.5) discard;\n"
             "  vec3 base = turbo(vHeight);\n"
             "  float diff = abs(dot(normalize(vNormal), normalize(uLightDir)));\n"  // 双面光照（绕序/朝向无关）
@@ -556,6 +693,9 @@ protected:
         m_editVertexBuffer.create();
         m_editFlagBuffer = QOpenGLBuffer(QOpenGLBuffer::VertexBuffer);
         m_editFlagBuffer.create();
+        m_bgVao.create();
+        m_bgVertexBuffer = QOpenGLBuffer(QOpenGLBuffer::VertexBuffer);
+        m_bgVertexBuffer.create();
         glEnable(GL_PROGRAM_POINT_SIZE);
     }
 
@@ -579,6 +719,10 @@ protected:
         {
             UploadEditFlags();
         }
+        if (m_bgDirty)
+        {
+            UploadBackground();
+        }
         if (m_pProgram == nullptr)
         {
             return;
@@ -591,6 +735,22 @@ protected:
         m_pProgram->setUniformValue("uZRange", std::max(m_zMax - m_zMin, 1e-3f));
         m_pProgram->setUniformValue("uLightDir", QVector3D(-0.4f, -0.3f, 1.0f));
         m_pProgram->setUniformValue("uIsolateMode", (m_pEditCloud != nullptr && m_isolateMode) ? 1.0f : 0.0f);
+        m_pProgram->setUniformValue("uBackgroundMode", 0.0f);
+
+        // 背景层（分离出的另一图层，只读、暗灰、不参与框选）：编辑模式下先画，垫在活动层之下。
+        if (m_pEditCloud != nullptr && m_bgPointCount > 0)
+        {
+            m_pProgram->setUniformValue("uBackgroundMode", 1.0f);
+            m_pProgram->setUniformValue("uIsolateMode", 0.0f);  // 背景不受隔离影响
+            m_pProgram->setUniformValue("uUseLight", 0.0f);     // 背景片元早返回不读，防御性显式设
+            glVertexAttrib3f(1, 0.0f, 0.0f, 1.0f);
+            glVertexAttrib1f(2, 0.0f);
+            m_bgVao.bind();
+            glDrawArrays(GL_POINTS, 0, m_bgPointCount);
+            m_bgVao.release();
+            m_pProgram->setUniformValue("uBackgroundMode", 0.0f);
+            m_pProgram->setUniformValue("uIsolateMode", m_isolateMode ? 1.0f : 0.0f);
+        }
 
         if (m_pEditCloud != nullptr)
         {
@@ -732,7 +892,7 @@ protected:
 
     void keyPressEvent(QKeyEvent* event) override
     {
-        if (m_pEditCloud != nullptr)
+        if (m_pEditCloud != nullptr && !m_editBusy)
         {
             if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)
             {
@@ -1148,6 +1308,12 @@ private:
     bool m_editDirty = false;
     bool m_flagsDirty = false;
     bool m_isolateMode = false;     // 隔离显示：仅渲染选中点
+    bool m_editBusy = false;        // 后台去噪计算期：Delete 等编辑入口早退
+    QOpenGLVertexArrayObject m_bgVao;      // 背景只读层（分离出的另一图层，暗灰、不可框选）
+    QOpenGLBuffer m_bgVertexBuffer;
+    QVector<float> m_bgPositions;          // 背景层坐标缓存（x y z 连续）
+    int m_bgPointCount = 0;
+    bool m_bgDirty = false;
     int m_editPointCount = 0;
     bool m_rubberActive = false;
     bool m_rubberSubtract = false;  // 本次框选是否为减选（Shift+拖框）
@@ -1190,6 +1356,10 @@ WorkpieceMeshViewerDialog::~WorkpieceMeshViewerDialog()
     // 取消），等计数归零后才继续析构——此前线程对 this 的排队调用仍然安全
     //（析构函数体执行期间 QObject 基类尚未析构）。
     m_destroyed->store(true);
+    if (m_activeDenoiseCancel)
+    {
+        m_activeDenoiseCancel->store(true);  // 让在飞的后台去噪尽快返回，缩短下面的忙等
+    }
     while (m_workerCount->load() > 0)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1270,6 +1440,24 @@ void WorkpieceMeshViewerDialog::BuildUi()
         connect(cleanMenu->addAction("连通域去飞点…"), &QAction::triggered, this, [this]() { ShowClusterPanel(); });
         m_pCleanBtn->setMenu(cleanMenu);
     }
+    m_pLayerBtn = new QToolButton();
+    m_pLayerBtn->setText("图层 ▾");
+    m_pLayerBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_pLayerBtn->setToolTip("分离图层：把选中点切到另一图层单独处理（如可疑区单独去噪），最后可合并；"
+        "隐藏另一图层=重建时丢弃这些点。");
+    m_pLayerBtn->setPopupMode(QToolButton::InstantPopup);
+    {
+        QMenu* layerMenu = new QMenu(m_pLayerBtn);
+        connect(layerMenu->addAction("分离选中到另一图层"), &QAction::triggered, this, [this]() { SeparateSelectedToSuspect(); });
+        connect(layerMenu->addAction("切换编辑图层"), &QAction::triggered, this, [this]() { SwitchActiveLayer(); });
+        connect(layerMenu->addAction("合并两图层"), &QAction::triggered, this, [this]() { MergeLayers(); });
+        layerMenu->addSeparator();
+        QAction* visAct = layerMenu->addAction("显示另一图层");
+        visAct->setCheckable(true);
+        visAct->setChecked(true);
+        connect(visAct, &QAction::toggled, this, [this](bool on) { SetSuspectLayerVisible(on); });
+        m_pLayerBtn->setMenu(layerMenu);
+    }
     m_pUndoBtn = new QPushButton("撤销");
     m_pRegenBtn = new QPushButton("重新生成");
     m_pRegenBtn->setObjectName("PrimaryButton");
@@ -1307,6 +1495,7 @@ void WorkpieceMeshViewerDialog::BuildUi()
     editBar->addWidget(m_pIsolateBtn);
     editBar->addWidget(makeSeparator());
     editBar->addWidget(m_pCleanBtn);
+    editBar->addWidget(m_pLayerBtn);
     editBar->addWidget(makeSeparator());
     editBar->addWidget(m_pUndoBtn);
     editBar->addStretch(1);
@@ -1324,6 +1513,7 @@ void WorkpieceMeshViewerDialog::BuildUi()
     m_pDeselectBtn->setEnabled(false);
     m_pIsolateBtn->setEnabled(false);
     m_pCleanBtn->setEnabled(false);
+    m_pLayerBtn->setEnabled(false);
     m_pUndoBtn->setEnabled(false);
     m_pRegenBtn->setEnabled(false);
     m_pRestoreBtn->setEnabled(false);
@@ -1497,8 +1687,7 @@ void WorkpieceMeshViewerDialog::StartLoad(const QString& laserDir)
     if (laserDir != m_laserDir)
     {
         // 换了结果目录：上一工件的编辑态全部作废。
-        m_editCloud.clear();
-        m_undoStack.clear();
+        ResetEditState();
         m_pEditBtn->setEnabled(false);
         m_pRestoreBtn->setEnabled(false);
     }
@@ -1644,6 +1833,103 @@ void WorkpieceMeshViewerDialog::EnsureProgressDialog()
     }
 }
 
+void WorkpieceMeshViewerDialog::RunDenoisePreviewAsync(const QString& title,
+    std::function<std::vector<std::uint8_t>(const float*, qsizetype,
+        std::atomic<qsizetype>*, const std::atomic_bool*)> computeFn)
+{
+    if (m_bBuilding || m_bEditBusy)
+    {
+        return;
+    }
+    const qsizetype n = m_pGlWidget->EditPointCount();
+    if (n <= 0)
+    {
+        m_pInfoLabel->setText("当前没有可处理的编辑点云。");
+        return;
+    }
+    m_pGlWidget->ClearSelection();  // 清掉上次预览的标红
+    auto snapshot = std::make_shared<std::vector<float>>(m_pGlWidget->EditPositionsSnapshot());
+    if (qsizetype(snapshot->size()) != n * 3)
+    {
+        return;
+    }
+
+    // 计算期闸门：禁所有编辑入口（含 GLWidget 的 Delete 快捷键），杜绝与后台读快照/回写竞争。
+    m_bEditBusy = true;
+    m_pGlWidget->SetEditBusy(true);
+    EnsureProgressDialog();
+    m_pProgress->setCancelButtonText("取消");
+    m_pProgress->setLabelText(title);
+    m_pProgress->setValue(0);
+
+    auto cancelFlag = std::make_shared<std::atomic_bool>(false);
+    m_activeDenoiseCancel = cancelFlag;  // 供析构触发取消，避免退出时忙等卡死 UI
+    if (m_progressCancelConn)
+    {
+        disconnect(m_progressCancelConn);
+    }
+    m_progressCancelConn = connect(m_pProgress, &QProgressDialog::canceled, this,
+        [cancelFlag]() { cancelFlag->store(true); });
+    m_pProgress->show();
+
+    auto destroyed = m_destroyed;
+    auto workerCount = m_workerCount;
+    workerCount->fetch_add(1);
+    std::thread([this, computeFn, snapshot, n, cancelFlag, destroyed, workerCount]()
+        {
+            auto done = std::make_shared<std::atomic<qsizetype>>(0);
+            auto finished = std::make_shared<std::atomic_bool>(false);
+            // 进度轮询子线程：周期读 done 投递进度条；计算内部多 worker 只累加 done、
+            // 不直接 invoke，避免百万级 invoke 风暴。
+            std::thread poller([this, done, finished, n, cancelFlag, destroyed]()
+                {
+                    while (!finished->load())
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+                        if (destroyed->load() || cancelFlag->load())
+                        {
+                            continue;
+                        }
+                        const int pct = int(std::min<qsizetype>(done->load(), n) * 100 / n);
+                        QMetaObject::invokeMethod(this, [this, pct]()
+                            {
+                                if (m_pProgress != nullptr) m_pProgress->setValue(pct);
+                            }, Qt::QueuedConnection);
+                    }
+                });
+            std::vector<std::uint8_t> mask = computeFn(snapshot->data(), n, done.get(), cancelFlag.get());
+            finished->store(true);
+            poller.join();
+            const bool canceled = cancelFlag->load();
+            auto maskPtr = std::make_shared<std::vector<std::uint8_t>>(std::move(mask));
+            if (!destroyed->load())
+            {
+                QMetaObject::invokeMethod(this, [this, maskPtr, canceled]()
+                    {
+                        OnDenoisePreviewFinished(*maskPtr, canceled);
+                    }, Qt::QueuedConnection);
+            }
+            workerCount->fetch_sub(1);
+        }).detach();
+}
+
+void WorkpieceMeshViewerDialog::OnDenoisePreviewFinished(const std::vector<std::uint8_t>& mask, bool canceled)
+{
+    m_bEditBusy = false;
+    m_pGlWidget->SetEditBusy(false);
+    if (m_pProgress != nullptr)
+    {
+        m_pProgress->hide();
+    }
+    if (canceled || mask.empty())
+    {
+        m_pInfoLabel->setText("已取消去噪计算。");
+        return;
+    }
+    const qsizetype added = m_pGlWidget->ApplySelectionMask(mask);
+    m_pInfoLabel->setText(QString("去噪预览：标记 %1 个点（红），已加入选区——确认后按 Delete 或'删除选中'。").arg(added));
+}
+
 void WorkpieceMeshViewerDialog::EnterEditMode()
 {
     if (m_bBuilding || m_bEditBusy)
@@ -1747,6 +2033,8 @@ void WorkpieceMeshViewerDialog::ShowEditCloud()
             OnEditPointsRemoved(removed);
         },
         [this](qsizetype) { UpdateEditInfo(); });
+    m_pGlWidget->SetBackgroundPoints(m_suspectVisible ? m_suspectCloud
+                                                      : QVector<RobotCalculation::IndexedPoint3D>());
     m_pGlWidget->setFocus();  // Delete/Esc 快捷键直达
     m_pEditBar->show();   // 显示编辑上下文条
     m_pDeleteSelBtn->setEnabled(true);
@@ -1755,6 +2043,7 @@ void WorkpieceMeshViewerDialog::ShowEditCloud()
     m_pDeselectBtn->setEnabled(true);
     m_pIsolateBtn->setEnabled(true);
     m_pCleanBtn->setEnabled(true);
+    m_pLayerBtn->setEnabled(true);
     m_pUndoBtn->setEnabled(!m_undoStack.isEmpty());
     m_pRegenBtn->setEnabled(true);
     UpdateEditInfo();
@@ -1774,6 +2063,7 @@ void WorkpieceMeshViewerDialog::ExitEditMode()
     m_pDeselectBtn->setEnabled(false);
     m_pIsolateBtn->setEnabled(false);
     m_pCleanBtn->setEnabled(false);
+    m_pLayerBtn->setEnabled(false);
     m_pUndoBtn->setEnabled(false);
     m_pRegenBtn->setEnabled(false);
     if (!m_meshInfoText.isEmpty())
@@ -1808,8 +2098,17 @@ void WorkpieceMeshViewerDialog::UndoRemove()
 
 void WorkpieceMeshViewerDialog::UpdateEditInfo()
 {
-    m_pInfoLabel->setText(QString(
-        "框选编辑：左键拖矩形选中（已选 %1 / 剩余 %2 点，可撤销 %3 步）→ Delete 删除，Esc 清选；"
+    QString layerInfo;
+    if (!m_suspectCloud.isEmpty() || m_editingSuspect)
+    {
+        layerInfo = QString("【当前 %1：%2点 / 另层：%3点%4】 ")
+            .arg(m_editingSuspect ? "可疑层" : "主层")
+            .arg(m_editCloud.size())
+            .arg(m_suspectCloud.size())
+            .arg(m_suspectVisible ? "" : "·已隐藏");
+    }
+    m_pInfoLabel->setText(layerInfo + QString(
+        "框选编辑：左键拖矩形/套索选中（已选 %1 / 剩余 %2 点，可撤销 %3 步）→ Delete 删除，Esc 清选；"
         "Ctrl+左键旋转 / 右键平移 / 滚轮缩放。删完后点'重新生成'重建模型。")
         .arg(m_pGlWidget->SelectedCount())
         .arg(m_editCloud.size())
@@ -1822,7 +2121,21 @@ void WorkpieceMeshViewerDialog::RegenerateFromEditedCloud()
     {
         return;
     }
-    if (m_editCloud.size() < 16)
+    // 多图层：重建合并【活动层 + 可见的另一图层】；隐藏的另一图层视为逻辑删除、不参与重建。
+    QVector<RobotCalculation::IndexedPoint3D> regenCloud = m_editCloud;
+    if (m_suspectVisible && !m_suspectCloud.isEmpty())
+    {
+        if (QMessageBox::question(this, "重新生成",
+                QString("当前分了 2 个图层，将合并【当前层 %1 点 + 另一图层 %2 点】共 %3 点重建模型，继续？")
+                    .arg(m_editCloud.size()).arg(m_suspectCloud.size())
+                    .arg(m_editCloud.size() + m_suspectCloud.size()))
+            != QMessageBox::Yes)
+        {
+            return;
+        }
+        regenCloud += m_suspectCloud;
+    }
+    if (regenCloud.size() < 16)
     {
         QMessageBox::warning(this, "重新生成", "剩余点数过少，无法生成网格。可先'撤销删除'或'恢复原始'。");
         return;
@@ -1847,7 +2160,7 @@ void WorkpieceMeshViewerDialog::RegenerateFromEditedCloud()
     auto destroyed = m_destroyed;
     auto workerCount = m_workerCount;
     workerCount->fetch_add(1);
-    std::thread([this, cachePath, editedCloudPath, cloud = m_editCloud, destroyed, workerCount]()
+    std::thread([this, cachePath, editedCloudPath, cloud = std::move(regenCloud), destroyed, workerCount]()
         {
             WorkpieceMeshBuilder::Mesh mesh;
             QString buildError;
@@ -1889,6 +2202,11 @@ void WorkpieceMeshViewerDialog::RegenerateFromEditedCloud()
                             .arg(cloudSaved ? QStringLiteral("，裁剪点云已保存")
                                             : QStringLiteral("，但裁剪点云保存失败：") + cloudSaveError);
                         m_pInfoLabel->setText(m_meshInfoText);
+                        // 重建已合并可见层 → 内存图层同步为单一层，避免「已合并却仍显示两层」。
+                        if (m_suspectVisible) m_editCloud += m_suspectCloud;
+                        m_suspectCloud.clear();
+                        m_editingSuspect = false;
+                        m_pGlWidget->SetBackgroundPoints(QVector<RobotCalculation::IndexedPoint3D>());
                     }, Qt::QueuedConnection);
             }
             workerCount->fetch_sub(1);
@@ -1918,12 +2236,84 @@ void WorkpieceMeshViewerDialog::RestoreOriginalModel()
         return;
     }
     m_pEditBtn->setChecked(false);
-    m_editCloud.clear();
-    m_undoStack.clear();
+    ResetEditState();
     m_pUndoBtn->setEnabled(false);
     QFile::remove(WorkpieceMeshBuilder::EditedCloudPath(m_laserDir));  // 裁剪点云一并作废
     QFile::remove(WorkpieceMeshBuilder::MeshCachePath(m_laserDir));
     StartLoad(m_laserDir);  // 缓存已删 → 走后台从原始点云重建
+}
+
+// ===== 分离图层（固定双层：活动层 m_editCloud + 另一层 m_suspectCloud）=====
+// 选中点切到另一图层单独处理（如可疑区单独去噪），最后可合并。GLWidget 裸指针始终指向
+// 固定成员 m_editCloud，切层用 swap 换内容（QVector 对象地址不变，指针不悬垂）。
+void WorkpieceMeshViewerDialog::SeparateSelectedToSuspect()
+{
+    if (m_bBuilding || m_bEditBusy) return;
+    const qsizetype moved = m_pGlWidget->MoveSelectedTo(m_suspectCloud);
+    if (moved <= 0)
+    {
+        m_pInfoLabel->setText("没有选中的点可分离——先框选/套索出要分离的区域。");
+        return;
+    }
+    m_pGlWidget->ResetActiveCloud();  // 活动层点数已变，重建 GPU 数据 + 复位交互态
+    m_pGlWidget->SetBackgroundPoints(m_suspectVisible ? m_suspectCloud
+                                                      : QVector<RobotCalculation::IndexedPoint3D>());
+    UpdateEditInfo();
+}
+
+void WorkpieceMeshViewerDialog::SwitchActiveLayer()
+{
+    if (m_bBuilding || m_bEditBusy) return;
+    if (m_suspectCloud.isEmpty() && !m_editingSuspect)
+    {
+        m_pInfoLabel->setText("还没有分离出另一图层，无法切换。");
+        return;
+    }
+    std::swap(m_editCloud, m_suspectCloud);   // QVector 对象地址不变，GLWidget 裸指针仍有效
+    m_editingSuspect = !m_editingSuspect;
+    m_undoStack.clear();   // 删除撤销栈属于旧活动层，swap 后失效
+    m_pUndoBtn->setEnabled(false);
+    m_pGlWidget->ResetActiveCloud();  // 重建 positions/flags/count + 复位交互态（选区清零）
+    m_pGlWidget->SetBackgroundPoints(m_suspectVisible ? m_suspectCloud
+                                                      : QVector<RobotCalculation::IndexedPoint3D>());
+    UpdateEditInfo();
+}
+
+void WorkpieceMeshViewerDialog::MergeLayers()
+{
+    if (m_bBuilding || m_bEditBusy) return;
+    if (m_suspectCloud.isEmpty())
+    {
+        m_pInfoLabel->setText("另一图层为空，无需合并。");
+        return;
+    }
+    m_editCloud += m_suspectCloud;
+    m_suspectCloud.clear();
+    m_editingSuspect = false;  // 合并后全在活动层=完整主层
+    m_pGlWidget->ResetActiveCloud();
+    m_pGlWidget->SetBackgroundPoints(QVector<RobotCalculation::IndexedPoint3D>());
+    UpdateEditInfo();
+}
+
+void WorkpieceMeshViewerDialog::SetSuspectLayerVisible(bool on)
+{
+    m_suspectVisible = on;
+    m_pGlWidget->SetBackgroundPoints(on ? m_suspectCloud
+                                        : QVector<RobotCalculation::IndexedPoint3D>());
+    UpdateEditInfo();
+}
+
+void WorkpieceMeshViewerDialog::ResetEditState()
+{
+    m_editCloud.clear();
+    m_suspectCloud.clear();
+    m_undoStack.clear();
+    m_editingSuspect = false;
+    m_suspectVisible = true;
+    if (m_pGlWidget != nullptr)
+    {
+        m_pGlWidget->SetBackgroundPoints(QVector<RobotCalculation::IndexedPoint3D>());
+    }
 }
 
 // SOR 统计离群：非模态小面板，调参→预览标红→确认删除。与「删除」解耦——
@@ -1969,9 +2359,13 @@ void WorkpieceMeshViewerDialog::ShowSorPanel()
 
     connect(previewBtn, &QPushButton::clicked, this, [this, kSpin, sdSpin]()
         {
-            m_pGlWidget->ClearSelection();
-            const qsizetype n = m_pGlWidget->SelectStatisticalOutliers(kSpin->value(), sdSpin->value());
-            m_pInfoLabel->setText(QString("SOR 预览：标记离群点 %1 个（红）。满意→删除选中；否则调参重试。").arg(n));
+            const int k = kSpin->value();
+            const double sd = sdSpin->value();
+            RunDenoisePreviewAsync(QString("SOR 统计离群计算中（k=%1）…").arg(k),
+                [k, sd](const float* pos, qsizetype n, std::atomic<qsizetype>* done, const std::atomic_bool* cancel)
+                {
+                    return WorkpieceMeshGLWidget::ComputeStatisticalOutliersMask(pos, n, k, sd, done, cancel);
+                });
         });
     connect(clearBtn, &QPushButton::clicked, this, [this]() { m_pGlWidget->ClearSelection(); });
     connect(applyBtn, &QPushButton::clicked, this, [this, dlg]()
@@ -2026,9 +2420,13 @@ void WorkpieceMeshViewerDialog::ShowClusterPanel()
 
     connect(previewBtn, &QPushButton::clicked, this, [this, voxSpin, minSpin]()
         {
-            m_pGlWidget->ClearSelection();
-            const qsizetype n = m_pGlWidget->SelectSmallClusters(voxSpin->value(), minSpin->value());
-            m_pInfoLabel->setText(QString("连通域预览：标记飞点 %1 个（红）。满意→删除选中；否则调参重试。").arg(n));
+            const double vox = voxSpin->value();
+            const int minPts = minSpin->value();
+            RunDenoisePreviewAsync(QString("连通域去飞点计算中（体素 %1mm）…").arg(vox),
+                [vox, minPts](const float* pos, qsizetype n, std::atomic<qsizetype>* done, const std::atomic_bool* cancel)
+                {
+                    return WorkpieceMeshGLWidget::ComputeSmallClustersMask(pos, n, vox, minPts, done, cancel);
+                });
         });
     connect(clearBtn, &QPushButton::clicked, this, [this]() { m_pGlWidget->ClearSelection(); });
     connect(applyBtn, &QPushButton::clicked, this, [this, dlg]()
