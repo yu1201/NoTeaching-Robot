@@ -11,6 +11,7 @@ class QLabel;
 class QLineEdit;
 class QProgressDialog;
 class QPushButton;
+class QToolButton;
 class QScrollArea;
 class QStackedWidget;
 class WorkpieceMeshGLWidget;
@@ -45,6 +46,8 @@ private:
     void RegenerateFromEditedCloud();
     void RestoreOriginalModel();
     void UpdateEditInfo();
+    void ShowSorPanel();        // SOR 统计离群参数面板（非模态，预览→删除）
+    void ShowClusterPanel();    // 连通域去飞点参数面板（非模态，预览→删除）
 
     WorkpieceMeshGLWidget* m_pGlWidget = nullptr;
     QStackedWidget* m_pViewStack = nullptr;
@@ -53,11 +56,17 @@ private:
     QLabel* m_pInfoLabel = nullptr;
     QProgressDialog* m_pProgress = nullptr;
     QLineEdit* m_pDirEdit = nullptr;
+    QWidget* m_pEditBar = nullptr;       // 第二行上下文条容器（编辑模式才显示）
     QPushButton* m_pSolidBtn = nullptr;
     QPushButton* m_pPointBtn = nullptr;
     QPushButton* m_pHeightBtn = nullptr;
     QPushButton* m_pEditBtn = nullptr;
     QPushButton* m_pDeleteSelBtn = nullptr;
+    QPushButton* m_pInvertBtn = nullptr;
+    QPushButton* m_pDeselectBtn = nullptr;
+    QPushButton* m_pIsolateBtn = nullptr;
+    QPushButton* m_pLassoBtn = nullptr;
+    QToolButton* m_pCleanBtn = nullptr;  // 「清理▾」下拉（SOR/连通域）
     QPushButton* m_pUndoBtn = nullptr;
     QPushButton* m_pRegenBtn = nullptr;
     QPushButton* m_pRestoreBtn = nullptr;

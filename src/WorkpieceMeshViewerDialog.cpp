@@ -6,8 +6,14 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QDoubleSpinBox>
 #include <QFileInfo>
+#include <QFormLayout>
+#include <QInputDialog>
+#include <QMenu>
 #include <QMessageBox>
+#include <QSpinBox>
+#include <QToolButton>
 #include <QProgressDialog>
 
 #include <atomic>
@@ -26,6 +32,9 @@
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
+#include <QPainter>
+#include <QPaintEvent>
+#include <QPolygon>
 #include <QPushButton>
 #include <QRubberBand>
 #include <QScrollArea>
@@ -36,7 +45,52 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 #include <vector>
+
+// 套索选区覆盖层：透明、鼠标穿透的子控件，只负责把当前套索路径画成红色虚线
+// 闭合多边形。与 QRubberBand 同思路——选区绘制走这层 2D overlay，绝不触发底层
+// 百万级点云的 GL 重绘（之前用 paintGL+QPainter 拖一下卡一下）。
+class LassoSelectionOverlay : public QWidget
+{
+public:
+    explicit LassoSelectionOverlay(QWidget* parent) : QWidget(parent)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);  // 鼠标事件穿透到 GL 控件
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        hide();
+    }
+    void SetPath(const QVector<QPoint>& pts)
+    {
+        m_pts = pts;
+        update();
+    }
+    void ClearPath()
+    {
+        m_pts.clear();
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        if (m_pts.size() < 2)
+        {
+            return;
+        }
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        QPen pen(QColor(255, 70, 70), 1.5);
+        pen.setStyle(Qt::DashLine);
+        p.setPen(pen);
+        p.setBrush(QColor(255, 70, 70, 40));  // 半透明红填充提示选区范围
+        p.drawPolygon(QPolygon(m_pts));
+    }
+
+private:
+    QVector<QPoint> m_pts;
+};
 
 // ===================== OpenGL 网格/点云视图 =====================
 //
@@ -56,6 +110,7 @@ public:
         setFormat(format);
         setMinimumSize(480, 360);
         setFocusPolicy(Qt::StrongFocus);
+        m_pLassoOverlay = new LassoSelectionOverlay(this);
     }
 
     ~WorkpieceMeshGLWidget() override
@@ -160,6 +215,253 @@ public:
         }
     }
 
+    // 反选：当前选区取反（红↔灰）。框多了先框「该保留的」再反选，或直接反选删外部。
+    void InvertSelection()
+    {
+        if (m_pEditCloud == nullptr || m_editFlags.isEmpty()) return;
+        qsizetype cnt = 0;
+        for (float& f : m_editFlags)
+        {
+            f = (f > 0.5f) ? 0.0f : 1.0f;
+            if (f > 0.5f) ++cnt;
+        }
+        m_selectedCount = cnt;
+        m_flagsDirty = true;
+        update();
+        if (m_onSelectionChanged) m_onSelectionChanged(m_selectedCount);
+    }
+
+    // 隔离显示：仅渲染选中（红）点、其余隐藏——精修时不被周围点遮挡；纯视图态、可逆。
+    void SetIsolateMode(bool on)
+    {
+        m_isolateMode = on;
+        update();
+    }
+
+    // 套索模式开关：开启后左键拖动画自由多边形，松开按 point-in-polygon 选中；
+    // 与矩形框选互斥（同一左键拖动二选一）。关闭时立即收起覆盖层与残留路径。
+    void SetLassoMode(bool on)
+    {
+        m_lassoMode = on;
+        if (!on)
+        {
+            m_lassoActive = false;
+            m_lassoPath.clear();
+            if (m_pLassoOverlay != nullptr)
+            {
+                m_pLassoOverlay->ClearPath();
+                m_pLassoOverlay->hide();
+            }
+        }
+    }
+
+    // 统计离群删除（SOR）：把离群点追加到选中集（不删，复用 Delete 让用户确认）。
+    // k=邻居数，stdMul=标准差倍数；点的 k 近邻平均距离 > 全局均值 + stdMul·std 判离群。
+    // 返回本次新增选中数。纯 Eigen + 均匀网格哈希 + 多线程，无第三方依赖。
+    qsizetype SelectStatisticalOutliers(int k, double stdMul)
+    {
+        if (m_pEditCloud == nullptr || m_editFlags.size() != m_pEditCloud->size()
+            || m_editPositions.size() != m_pEditCloud->size() * 3)
+        {
+            return 0;
+        }
+        const qsizetype n = m_pEditCloud->size();
+        if (k < 1 || n < qsizetype(k) + 1) return 0;
+        const float* pos = m_editPositions.constData();
+
+        Eigen::Vector3f lo(pos[0], pos[1], pos[2]);
+        Eigen::Vector3f hi = lo;
+        for (qsizetype i = 1; i < n; ++i)
+        {
+            const Eigen::Vector3f p(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+            lo = lo.cwiseMin(p);
+            hi = hi.cwiseMax(p);
+        }
+        const Eigen::Vector3f span = hi - lo;
+        double cell = double(span.norm()) / std::cbrt(double(n)) * 2.0;  // ≈2× 平均点间距
+        if (cell < 1e-6) cell = 1.0;
+        const int nx = std::max(1, int(span.x() / cell) + 1);
+        const int ny = std::max(1, int(span.y() / cell) + 1);
+        const int nz = std::max(1, int(span.z() / cell) + 1);
+        if (static_cast<long long>(nx) * ny * nz > 16LL * 1024 * 1024) return 0;  // 防爆内存
+        std::vector<std::vector<int>> grid(static_cast<size_t>(static_cast<long long>(nx) * ny * nz));
+        auto cellOf = [&](float px, float py, float pz, int& cx, int& cy, int& cz)
+        {
+            cx = std::clamp(int((px - lo.x()) / cell), 0, nx - 1);
+            cy = std::clamp(int((py - lo.y()) / cell), 0, ny - 1);
+            cz = std::clamp(int((pz - lo.z()) / cell), 0, nz - 1);
+        };
+        for (qsizetype i = 0; i < n; ++i)
+        {
+            int cx, cy, cz;
+            cellOf(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2], cx, cy, cz);
+            grid[static_cast<size_t>((cz * ny + cy) * nx + cx)].push_back(int(i));
+        }
+
+        std::vector<float> meanDist(size_t(n), 0.0f);
+        const int threads = std::clamp(int(std::thread::hardware_concurrency()), 1, 16);
+        const qsizetype chunk = (n + threads - 1) / threads;
+        const int maxRing = std::max(nx, std::max(ny, nz));
+        std::vector<std::thread> workers;
+        for (int t = 0; t < threads; ++t)
+        {
+            const qsizetype b = qsizetype(t) * chunk;
+            const qsizetype e = std::min(n, b + chunk);
+            if (b >= e) break;
+            workers.emplace_back([=, &grid, &meanDist]()
+            {
+                std::vector<float> d2;
+                for (qsizetype i = b; i < e; ++i)
+                {
+                    const float px = pos[i * 3], py = pos[i * 3 + 1], pz = pos[i * 3 + 2];
+                    int cx, cy, cz;
+                    cellOf(px, py, pz, cx, cy, cz);
+                    d2.clear();
+                    for (int r = 1; r <= maxRing; ++r)  // 邻域逐圈扩，直到候选够 k
+                    {
+                        d2.clear();
+                        for (int z = std::max(0, cz - r); z <= std::min(nz - 1, cz + r); ++z)
+                            for (int y = std::max(0, cy - r); y <= std::min(ny - 1, cy + r); ++y)
+                                for (int x = std::max(0, cx - r); x <= std::min(nx - 1, cx + r); ++x)
+                                    for (int j : grid[static_cast<size_t>((z * ny + y) * nx + x)])
+                                    {
+                                        if (qsizetype(j) == i) continue;
+                                        const float dx = pos[j * 3] - px;
+                                        const float dy = pos[j * 3 + 1] - py;
+                                        const float dz = pos[j * 3 + 2] - pz;
+                                        d2.push_back(dx * dx + dy * dy + dz * dz);
+                                    }
+                        if (qsizetype(d2.size()) >= qsizetype(k) || r >= maxRing) break;
+                    }
+                    if (d2.empty()) { meanDist[size_t(i)] = 0.0f; continue; }
+                    const int kk = int(std::min(qsizetype(k), qsizetype(d2.size())));
+                    std::nth_element(d2.begin(), d2.begin() + kk, d2.end());
+                    double s = 0.0;
+                    for (int mIdx = 0; mIdx < kk; ++mIdx) s += std::sqrt(double(d2[size_t(mIdx)]));
+                    meanDist[size_t(i)] = float(s / kk);
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
+
+        double sum = 0.0;
+        for (float d : meanDist) sum += d;
+        const double mean = sum / double(n);
+        double var = 0.0;
+        for (float d : meanDist) var += (d - mean) * (d - mean);
+        const double sd = std::sqrt(var / double(n));
+        const double thresh = mean + stdMul * sd;
+
+        qsizetype added = 0;
+        for (qsizetype i = 0; i < n; ++i)
+            if (meanDist[size_t(i)] > thresh && m_editFlags[i] < 0.5f)
+            {
+                m_editFlags[i] = 1.0f;
+                ++added;
+            }
+        m_selectedCount += added;
+        m_flagsDirty = true;
+        update();
+        if (m_onSelectionChanged) m_onSelectionChanged(m_selectedCount);
+        return added;
+    }
+
+    // 连通域去飞点：把「与主体不连通的小簇」标记为选中（不删，复用 Delete 确认）。
+    // voxel=体素边长（同体素或 26 邻体素内有点即视为连通）；minClusterPts=保留簇的最小点数，
+    // 小于此的连通簇判为飞点。返回本次新增选中数。纯 Eigen + 体素哈希并查集，无第三方依赖。
+    qsizetype SelectSmallClusters(double voxel, int minClusterPts)
+    {
+        if (m_pEditCloud == nullptr || m_editFlags.size() != m_pEditCloud->size()
+            || m_editPositions.size() != m_pEditCloud->size() * 3)
+        {
+            return 0;
+        }
+        const qsizetype n = m_pEditCloud->size();
+        if (n < 1 || voxel <= 1e-6) return 0;
+        const float* pos = m_editPositions.constData();
+
+        Eigen::Vector3f lo(pos[0], pos[1], pos[2]);
+        Eigen::Vector3f hi = lo;
+        for (qsizetype i = 1; i < n; ++i)
+        {
+            const Eigen::Vector3f p(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+            lo = lo.cwiseMin(p);
+            hi = hi.cwiseMax(p);
+        }
+        const Eigen::Vector3f span = hi - lo;
+        const int nx = std::max(1, int(span.x() / voxel) + 1);
+        const int ny = std::max(1, int(span.y() / voxel) + 1);
+        const int nz = std::max(1, int(span.z() / voxel) + 1);
+        if (static_cast<long long>(nx) * ny * nz > 64LL * 1024 * 1024) return 0;
+        auto voxelOf = [&](float x, float y, float z) -> long long
+        {
+            const int cx = std::clamp(int((x - lo.x()) / voxel), 0, nx - 1);
+            const int cy = std::clamp(int((y - lo.y()) / voxel), 0, ny - 1);
+            const int cz = std::clamp(int((z - lo.z()) / voxel), 0, nz - 1);
+            return (static_cast<long long>(cz) * ny + cy) * nx + cx;
+        };
+
+        std::unordered_map<long long, int> voxelCount;   // 体素 → 点数
+        std::vector<long long> pointVoxel(static_cast<size_t>(n));
+        voxelCount.reserve(size_t(n));
+        for (qsizetype i = 0; i < n; ++i)
+        {
+            const long long v = voxelOf(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+            pointVoxel[size_t(i)] = v;
+            ++voxelCount[v];
+        }
+
+        // 并查集（体素粒度）：26 邻接的非空体素合并。
+        std::unordered_map<long long, long long> parent;
+        parent.reserve(voxelCount.size());
+        for (const auto& kv : voxelCount) parent[kv.first] = kv.first;
+        auto findRoot = [&parent](long long a) -> long long
+        {
+            while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; }
+            return a;
+        };
+        for (const auto& kv : voxelCount)
+        {
+            const long long v = kv.first;
+            const int cz = int(v / (static_cast<long long>(nx) * ny));
+            const long long rem = v % (static_cast<long long>(nx) * ny);
+            const int cy = int(rem / nx);
+            const int cx = int(rem % nx);
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx)
+                    {
+                        if (dx == 0 && dy == 0 && dz == 0) continue;
+                        const int x = cx + dx, y = cy + dy, z = cz + dz;
+                        if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) continue;
+                        const long long nv = (static_cast<long long>(z) * ny + y) * nx + x;
+                        if (voxelCount.find(nv) == voxelCount.end()) continue;
+                        const long long ra = findRoot(v), rb = findRoot(nv);
+                        if (ra != rb) parent[ra] = rb;
+                    }
+        }
+
+        std::unordered_map<long long, int> clusterCount;  // 簇根 → 总点数
+        clusterCount.reserve(voxelCount.size());
+        for (const auto& kv : voxelCount) clusterCount[findRoot(kv.first)] += kv.second;
+
+        qsizetype added = 0;
+        for (qsizetype i = 0; i < n; ++i)
+        {
+            if (m_editFlags[i] > 0.5f) continue;
+            if (clusterCount[findRoot(pointVoxel[size_t(i)])] < minClusterPts)
+            {
+                m_editFlags[i] = 1.0f;
+                ++added;
+            }
+        }
+        m_selectedCount += added;
+        m_flagsDirty = true;
+        update();
+        if (m_onSelectionChanged) m_onSelectionChanged(m_selectedCount);
+        return added;
+    }
+
     void SetSolidMode(bool solid)
     {
         m_solidMode = solid;
@@ -220,6 +522,7 @@ protected:
             "in float vSelected;\n"
             "uniform vec3 uLightDir;\n"
             "uniform float uUseLight;\n"
+            "uniform float uIsolateMode;\n"
             "out vec4 fragColor;\n"
             "vec3 turbo(float t){\n"  // 高度伪彩（近似 turbo 渐变）
             "  vec3 a = vec3(0.190, 0.072, 0.232);\n"
@@ -233,6 +536,7 @@ protected:
             "  return mix(d, e, (t - 0.75) / 0.25);\n"
             "}\n"
             "void main(){\n"
+            "  if (uIsolateMode > 0.5 && vSelected < 0.5) discard;\n"
             "  vec3 base = turbo(vHeight);\n"
             "  float diff = abs(dot(normalize(vNormal), normalize(uLightDir)));\n"  // 双面光照（绕序/朝向无关）
             "  float k = mix(1.0, 0.30 + 0.70 * diff, uUseLight);\n"
@@ -286,6 +590,7 @@ protected:
         m_pProgram->setUniformValue("uZMin", m_zMin);
         m_pProgram->setUniformValue("uZRange", std::max(m_zMax - m_zMin, 1e-3f));
         m_pProgram->setUniformValue("uLightDir", QVector3D(-0.4f, -0.3f, 1.0f));
+        m_pProgram->setUniformValue("uIsolateMode", (m_pEditCloud != nullptr && m_isolateMode) ? 1.0f : 0.0f);
 
         if (m_pEditCloud != nullptr)
         {
@@ -325,14 +630,32 @@ protected:
         if (m_pEditCloud != nullptr && event->button() == Qt::LeftButton
             && !(event->modifiers() & Qt::ControlModifier))
         {
-            m_rubberActive = true;
-            m_rubberStart = event->position().toPoint();
-            if (m_pRubberBand == nullptr)
+            if (m_lassoMode)
             {
-                m_pRubberBand = new QRubberBand(QRubberBand::Rectangle, this);
+                m_lassoActive = true;
+                m_lassoSubtract = (event->modifiers() & Qt::ShiftModifier) != 0;  // Shift+套索=减选
+                m_lassoPath.clear();
+                m_lassoPath.append(event->position().toPoint());
+                if (m_pLassoOverlay != nullptr)
+                {
+                    m_pLassoOverlay->setGeometry(rect());  // 对齐当前控件尺寸
+                    m_pLassoOverlay->raise();
+                    m_pLassoOverlay->ClearPath();
+                    m_pLassoOverlay->show();
+                }
             }
-            m_pRubberBand->setGeometry(QRect(m_rubberStart, QSize()));
-            m_pRubberBand->show();
+            else
+            {
+                m_rubberActive = true;
+                m_rubberSubtract = (event->modifiers() & Qt::ShiftModifier) != 0;  // Shift+拖框=减选
+                m_rubberStart = event->position().toPoint();
+                if (m_pRubberBand == nullptr)
+                {
+                    m_pRubberBand = new QRubberBand(QRubberBand::Rectangle, this);
+                }
+                m_pRubberBand->setGeometry(QRect(m_rubberStart, QSize()));
+                m_pRubberBand->show();
+            }
         }
     }
 
@@ -340,6 +663,20 @@ protected:
     {
         const QPointF delta = event->position() - m_lastMousePos;
         m_lastMousePos = event->position();
+        if (m_lassoActive && (event->buttons() & Qt::LeftButton))
+        {
+            const QPoint p = event->position().toPoint();
+            // 抽稀：与上一采样点间距 ≥3px 才记录，避免路径点过密。
+            if (m_lassoPath.isEmpty() || (p - m_lassoPath.back()).manhattanLength() >= 3)
+            {
+                m_lassoPath.append(p);
+                if (m_pLassoOverlay != nullptr)
+                {
+                    m_pLassoOverlay->SetPath(m_lassoPath);
+                }
+            }
+            return;
+        }
         if (m_rubberActive && (event->buttons() & Qt::LeftButton))
         {
             m_pRubberBand->setGeometry(
@@ -363,6 +700,21 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent* event) override
     {
+        if (m_lassoActive && event->button() == Qt::LeftButton)
+        {
+            m_lassoActive = false;
+            if (m_pLassoOverlay != nullptr)
+            {
+                m_pLassoOverlay->ClearPath();
+                m_pLassoOverlay->hide();
+            }
+            if (m_lassoPath.size() >= 3)
+            {
+                SelectPointsInPolygon(m_lassoPath, m_lassoSubtract);
+            }
+            m_lassoPath.clear();
+            return;
+        }
         if (m_rubberActive && event->button() == Qt::LeftButton)
         {
             m_rubberActive = false;
@@ -373,7 +725,7 @@ protected:
             const QRect rect = QRect(m_rubberStart, event->position().toPoint()).normalized();
             if (rect.width() >= 4 && rect.height() >= 4)
             {
-                SelectPointsInRect(rect);
+                SelectPointsInRect(rect, m_rubberSubtract);
             }
         }
     }
@@ -487,7 +839,7 @@ private:
     // 多次框选累加；删除由 Delete/按钮显式触发。
     // 百万级点的投影判定按硬件线程数分块并行，矩阵乘手动展开（列主序），
     // 每线程只写自己区间的 flags，无锁。
-    void SelectPointsInRect(const QRect& rect)
+    void SelectPointsInRect(const QRect& rect, bool subtract)
     {
         if (m_pEditCloud == nullptr || m_pEditCloud->isEmpty()
             || m_editFlags.size() != m_pEditCloud->size()
@@ -524,7 +876,8 @@ private:
                     qsizetype localCount = 0;
                     for (qsizetype i = begin; i < end; ++i)
                     {
-                        if (flags[i] > 0.5f)
+                        // 加选只看未选点、减选只看已选点（其余状态不变，跳过）。
+                        if (subtract ? (flags[i] < 0.5f) : (flags[i] > 0.5f))
                         {
                             continue;
                         }
@@ -547,7 +900,7 @@ private:
                         {
                             continue;
                         }
-                        flags[i] = 1.0f;
+                        flags[i] = subtract ? 0.0f : 1.0f;
                         ++localCount;
                     }
                     chunkCounts[size_t(t)] = localCount;
@@ -566,7 +919,132 @@ private:
         {
             return;
         }
-        m_selectedCount += newlySelected;
+        m_selectedCount += subtract ? -newlySelected : newlySelected;
+        m_flagsDirty = true;
+        update();
+        if (m_onSelectionChanged)
+        {
+            m_onSelectionChanged(m_selectedCount);
+        }
+    }
+
+    // 套索/多边形选区：把每个点投影到屏幕，按奇偶射线法（PNPoly）判断是否落在
+    // 多边形内。投影、减选语义、多线程分块均同 SelectPointsInRect；先用多边形屏幕
+    // 包围盒做粗筛，落框内者再走 point-in-polygon 精判。
+    void SelectPointsInPolygon(const QVector<QPoint>& poly, bool subtract)
+    {
+        if (m_pEditCloud == nullptr || m_pEditCloud->isEmpty()
+            || m_editFlags.size() != m_pEditCloud->size()
+            || m_editPositions.size() != m_pEditCloud->size() * 3
+            || poly.size() < 3)
+        {
+            return;
+        }
+        // 多边形顶点拍平成 float 数组 + 屏幕包围盒（粗筛）。
+        const int pn = poly.size();
+        std::vector<float> px(static_cast<size_t>(pn));
+        std::vector<float> py(static_cast<size_t>(pn));
+        float bbMinX = float(poly[0].x());
+        float bbMaxX = bbMinX;
+        float bbMinY = float(poly[0].y());
+        float bbMaxY = bbMinY;
+        for (int i = 0; i < pn; ++i)
+        {
+            px[size_t(i)] = float(poly[i].x());
+            py[size_t(i)] = float(poly[i].y());
+            bbMinX = std::min(bbMinX, px[size_t(i)]);
+            bbMaxX = std::max(bbMaxX, px[size_t(i)]);
+            bbMinY = std::min(bbMinY, py[size_t(i)]);
+            bbMaxY = std::max(bbMaxY, py[size_t(i)]);
+        }
+        const QMatrix4x4 mvp = BuildMvpMatrix();
+        const float* m = mvp.constData();  // QMatrix4x4 内部列主序
+        const float w = float(width());
+        const float h = float(height());
+        const qsizetype total = m_pEditCloud->size();
+        const float* pos = m_editPositions.constData();
+        float* flags = m_editFlags.data();
+        const int threadCount = std::clamp(int(std::thread::hardware_concurrency()), 1, 16);
+        const qsizetype chunk = (total + threadCount - 1) / threadCount;
+        std::vector<qsizetype> chunkCounts(size_t(threadCount), 0);
+        std::vector<std::thread> workers;
+        workers.reserve(size_t(threadCount));
+        for (int t = 0; t < threadCount; ++t)
+        {
+            const qsizetype begin = qsizetype(t) * chunk;
+            const qsizetype end = std::min(total, begin + chunk);
+            if (begin >= end)
+            {
+                break;
+            }
+            workers.emplace_back([=, &chunkCounts]()
+                {
+                    qsizetype localCount = 0;
+                    for (qsizetype i = begin; i < end; ++i)
+                    {
+                        if (subtract ? (flags[i] < 0.5f) : (flags[i] > 0.5f))
+                        {
+                            continue;
+                        }
+                        const float x = pos[i * 3];
+                        const float y = pos[i * 3 + 1];
+                        const float z = pos[i * 3 + 2];
+                        const float cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+                        if (cw <= 1e-6f)
+                        {
+                            continue;
+                        }
+                        const float inv = 1.0f / cw;
+                        const float sx = ((m[0] * x + m[4] * y + m[8] * z + m[12]) * inv * 0.5f + 0.5f) * w;
+                        if (sx < bbMinX || sx > bbMaxX)
+                        {
+                            continue;
+                        }
+                        const float sy = (0.5f - (m[1] * x + m[5] * y + m[9] * z + m[13]) * inv * 0.5f) * h;
+                        if (sy < bbMinY || sy > bbMaxY)
+                        {
+                            continue;
+                        }
+                        // 奇偶射线法：自该点水平向右的射线与多边形各边交点数为奇 → 内部。
+                        bool inside = false;
+                        for (int a = 0, b = pn - 1; a < pn; b = a++)
+                        {
+                            const float yai = py[size_t(a)];
+                            const float ybi = py[size_t(b)];
+                            if ((yai > sy) != (ybi > sy))
+                            {
+                                const float xcross = px[size_t(a)]
+                                    + (sy - yai) / (ybi - yai) * (px[size_t(b)] - px[size_t(a)]);
+                                if (sx < xcross)
+                                {
+                                    inside = !inside;
+                                }
+                            }
+                        }
+                        if (!inside)
+                        {
+                            continue;
+                        }
+                        flags[i] = subtract ? 0.0f : 1.0f;
+                        ++localCount;
+                    }
+                    chunkCounts[size_t(t)] = localCount;
+                });
+        }
+        for (auto& worker : workers)
+        {
+            worker.join();
+        }
+        qsizetype newlySelected = 0;
+        for (const qsizetype c : chunkCounts)
+        {
+            newlySelected += c;
+        }
+        if (newlySelected == 0)
+        {
+            return;
+        }
+        m_selectedCount += subtract ? -newlySelected : newlySelected;
         m_flagsDirty = true;
         update();
         if (m_onSelectionChanged)
@@ -669,10 +1147,17 @@ private:
     qsizetype m_selectedCount = 0;
     bool m_editDirty = false;
     bool m_flagsDirty = false;
+    bool m_isolateMode = false;     // 隔离显示：仅渲染选中点
     int m_editPointCount = 0;
     bool m_rubberActive = false;
+    bool m_rubberSubtract = false;  // 本次框选是否为减选（Shift+拖框）
     QPoint m_rubberStart;
     QRubberBand* m_pRubberBand = nullptr;
+    bool m_lassoMode = false;        // 套索模式（与矩形框选互斥）
+    bool m_lassoActive = false;      // 正在拖套索
+    bool m_lassoSubtract = false;    // 本次套索为减选（Shift+套索）
+    QVector<QPoint> m_lassoPath;     // 套索屏幕路径（逻辑像素）
+    LassoSelectionOverlay* m_pLassoOverlay = nullptr;
 
     QVector3D m_center;
     float m_boundRadius = 100.0f;
@@ -764,6 +1249,27 @@ void WorkpieceMeshViewerDialog::BuildUi()
     m_pDeleteSelBtn = new QPushButton("删除所选");
     m_pDeleteSelBtn->setObjectName("DangerButton");
     m_pDeleteSelBtn->setToolTip("删除当前选中（亮红）的点，等同按 Delete 键。");
+    m_pLassoBtn = new QPushButton("套索选");
+    m_pLassoBtn->setCheckable(true);
+    m_pLassoBtn->setToolTip("套索选：开启后左键拖动画自由多边形圈选（适合不规则边界）；关闭则恢复矩形框选。Shift+拖动=从选区减去。");
+    m_pInvertBtn = new QPushButton("反选");
+    m_pInvertBtn->setToolTip("当前选区取反：框多了先框'该保留的'再反选，或反选后删外部。");
+    m_pDeselectBtn = new QPushButton("全不选");
+    m_pDeselectBtn->setToolTip("清空当前选区（等同 Esc）。");
+    m_pIsolateBtn = new QPushButton("隔离显示");
+    m_pIsolateBtn->setCheckable(true);
+    m_pIsolateBtn->setToolTip("只显示选中(红)点、隐藏其余，方便精修；再按取消。提示：Shift+拖框=从选区减去。");
+    m_pCleanBtn = new QToolButton();
+    m_pCleanBtn->setText("清理 ▾");
+    m_pCleanBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_pCleanBtn->setToolTip("自动去噪：SOR 统计离群 / 连通域去飞点——选中后按 Delete 确认删除。");
+    m_pCleanBtn->setPopupMode(QToolButton::InstantPopup);
+    {
+        QMenu* cleanMenu = new QMenu(m_pCleanBtn);
+        connect(cleanMenu->addAction("SOR 统计离群…"), &QAction::triggered, this, [this]() { ShowSorPanel(); });
+        connect(cleanMenu->addAction("连通域去飞点…"), &QAction::triggered, this, [this]() { ShowClusterPanel(); });
+        m_pCleanBtn->setMenu(cleanMenu);
+    }
     m_pUndoBtn = new QPushButton("撤销");
     m_pRegenBtn = new QPushButton("重新生成");
     m_pRegenBtn->setObjectName("PrimaryButton");
@@ -775,6 +1281,7 @@ void WorkpieceMeshViewerDialog::BuildUi()
     QPushButton* exportStlBtn = new QPushButton("导出 STL");
     exportStlBtn->setToolTip("导出二进制 STL 网格（SolidWorks/UG 等 CAD 软件可直接导入）。");
 
+    // 第一行（常驻）：视图模式 + 视角 + 进入编辑 + 导出。其余编辑工具进第二行上下文条。
     toolbar->addWidget(m_pSolidBtn);
     toolbar->addWidget(m_pPointBtn);
     toolbar->addWidget(m_pHeightBtn);
@@ -783,20 +1290,43 @@ void WorkpieceMeshViewerDialog::BuildUi()
     toolbar->addWidget(resetBtn);
     toolbar->addWidget(makeSeparator());
     toolbar->addWidget(m_pEditBtn);
-    toolbar->addWidget(m_pDeleteSelBtn);
-    toolbar->addWidget(m_pUndoBtn);
-    toolbar->addWidget(m_pRegenBtn);
-    toolbar->addWidget(m_pRestoreBtn);
-    toolbar->addWidget(makeSeparator());
-    toolbar->addWidget(exportStlBtn);
     toolbar->addStretch(1);
+    toolbar->addWidget(exportStlBtn);
+    rootLayout->addLayout(toolbar);
 
+    // 第二行（上下文条）：仅「框选编辑」激活时显示（仿 CloudCompare/Blender 模式专属工具条）。
+    // 左=选择/清理/撤销（常用、非破坏）；右=破坏性操作（红色、靠右物理隔离，防误触）。
+    m_pEditBar = new QWidget(this);
+    QHBoxLayout* editBar = new QHBoxLayout(m_pEditBar);
+    editBar->setContentsMargins(0, 0, 0, 0);
+    editBar->setSpacing(6);
+    editBar->addWidget(m_pLassoBtn);
+    editBar->addWidget(makeSeparator());
+    editBar->addWidget(m_pInvertBtn);
+    editBar->addWidget(m_pDeselectBtn);
+    editBar->addWidget(m_pIsolateBtn);
+    editBar->addWidget(makeSeparator());
+    editBar->addWidget(m_pCleanBtn);
+    editBar->addWidget(makeSeparator());
+    editBar->addWidget(m_pUndoBtn);
+    editBar->addStretch(1);
+    editBar->addWidget(m_pRegenBtn);
+    editBar->addWidget(m_pDeleteSelBtn);   // DangerButton 红
+    editBar->addWidget(m_pRestoreBtn);     // DangerButton 红
+    m_pEditBar->hide();  // 初始隐藏；进入编辑模式才显示
+    rootLayout->addWidget(m_pEditBar);
+
+    // 初始禁用编辑相关按钮（加载模型后启用「框选编辑」，进入编辑模式才启用其余）。
     m_pEditBtn->setEnabled(false);
     m_pDeleteSelBtn->setEnabled(false);
+    m_pLassoBtn->setEnabled(false);
+    m_pInvertBtn->setEnabled(false);
+    m_pDeselectBtn->setEnabled(false);
+    m_pIsolateBtn->setEnabled(false);
+    m_pCleanBtn->setEnabled(false);
     m_pUndoBtn->setEnabled(false);
     m_pRegenBtn->setEnabled(false);
     m_pRestoreBtn->setEnabled(false);
-    rootLayout->addLayout(toolbar);
 
     m_pViewStack = new QStackedWidget(this);
     m_pGlWidget = new WorkpieceMeshGLWidget(this);
@@ -855,6 +1385,10 @@ void WorkpieceMeshViewerDialog::BuildUi()
         {
             m_pGlWidget->DeleteSelectedEditPoints();
         });
+    connect(m_pLassoBtn, &QPushButton::toggled, this, [this](bool on) { m_pGlWidget->SetLassoMode(on); });
+    connect(m_pInvertBtn, &QPushButton::clicked, this, [this]() { m_pGlWidget->InvertSelection(); });
+    connect(m_pDeselectBtn, &QPushButton::clicked, this, [this]() { m_pGlWidget->ClearSelection(); });
+    connect(m_pIsolateBtn, &QPushButton::toggled, this, [this](bool on) { m_pGlWidget->SetIsolateMode(on); });
     connect(m_pUndoBtn, &QPushButton::clicked, this, [this]() { UndoRemove(); });
     connect(m_pRegenBtn, &QPushButton::clicked, this, [this]() { RegenerateFromEditedCloud(); });
     connect(m_pRestoreBtn, &QPushButton::clicked, this, [this]() { RestoreOriginalModel(); });
@@ -1214,7 +1748,13 @@ void WorkpieceMeshViewerDialog::ShowEditCloud()
         },
         [this](qsizetype) { UpdateEditInfo(); });
     m_pGlWidget->setFocus();  // Delete/Esc 快捷键直达
+    m_pEditBar->show();   // 显示编辑上下文条
     m_pDeleteSelBtn->setEnabled(true);
+    m_pLassoBtn->setEnabled(true);
+    m_pInvertBtn->setEnabled(true);
+    m_pDeselectBtn->setEnabled(true);
+    m_pIsolateBtn->setEnabled(true);
+    m_pCleanBtn->setEnabled(true);
     m_pUndoBtn->setEnabled(!m_undoStack.isEmpty());
     m_pRegenBtn->setEnabled(true);
     UpdateEditInfo();
@@ -1224,7 +1764,16 @@ void WorkpieceMeshViewerDialog::ExitEditMode()
 {
     // 保留 m_editCloud 与撤销栈——再次进入编辑可继续；切回网格显示。
     m_pGlWidget->SetEditCloud(nullptr);
+    m_pEditBar->hide();   // 隐藏编辑上下文条
+    m_pIsolateBtn->setChecked(false);   // 退出编辑重置隔离显示
+    m_pGlWidget->SetIsolateMode(false);
+    m_pLassoBtn->setChecked(false);     // 退出编辑重置套索模式
     m_pDeleteSelBtn->setEnabled(false);
+    m_pLassoBtn->setEnabled(false);
+    m_pInvertBtn->setEnabled(false);
+    m_pDeselectBtn->setEnabled(false);
+    m_pIsolateBtn->setEnabled(false);
+    m_pCleanBtn->setEnabled(false);
     m_pUndoBtn->setEnabled(false);
     m_pRegenBtn->setEnabled(false);
     if (!m_meshInfoText.isEmpty())
@@ -1375,6 +1924,120 @@ void WorkpieceMeshViewerDialog::RestoreOriginalModel()
     QFile::remove(WorkpieceMeshBuilder::EditedCloudPath(m_laserDir));  // 裁剪点云一并作废
     QFile::remove(WorkpieceMeshBuilder::MeshCachePath(m_laserDir));
     StartLoad(m_laserDir);  // 缓存已删 → 走后台从原始点云重建
+}
+
+// SOR 统计离群：非模态小面板，调参→预览标红→确认删除。与「删除」解耦——
+// 预览只改红旗选区，真正销毁点仍走 DeleteSelectedEditPoints（可撤销）。
+void WorkpieceMeshViewerDialog::ShowSorPanel()
+{
+    if (m_pGlWidget == nullptr) return;
+    QDialog* dlg = new QDialog(this);
+    dlg->setWindowTitle("SOR 统计离群去噪");
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setModal(false);
+
+    QVBoxLayout* root = new QVBoxLayout(dlg);
+    QLabel* hint = new QLabel(
+        "按每点到 k 个最近邻的平均距离统计：偏离全局均值超过设定倍数的点判为离群。\n"
+        "先「预览」标红，确认无误后「删除选中」（删除可撤销）。", dlg);
+    hint->setWordWrap(true);
+    root->addWidget(hint);
+
+    QFormLayout* form = new QFormLayout();
+    QSpinBox* kSpin = new QSpinBox(dlg);
+    kSpin->setRange(1, 200);
+    kSpin->setValue(6);
+    QDoubleSpinBox* sdSpin = new QDoubleSpinBox(dlg);
+    sdSpin->setRange(0.1, 10.0);
+    sdSpin->setSingleStep(0.1);
+    sdSpin->setDecimals(2);
+    sdSpin->setValue(1.0);
+    form->addRow("邻居数 k", kSpin);
+    form->addRow("标准差倍数（越小删越多）", sdSpin);
+    root->addLayout(form);
+
+    QHBoxLayout* btns = new QHBoxLayout();
+    QPushButton* previewBtn = new QPushButton("预览选中", dlg);
+    QPushButton* clearBtn = new QPushButton("清除选区", dlg);
+    QPushButton* applyBtn = new QPushButton("删除选中", dlg);
+    applyBtn->setObjectName("DangerButton");
+    btns->addWidget(previewBtn);
+    btns->addWidget(clearBtn);
+    btns->addStretch(1);
+    btns->addWidget(applyBtn);
+    root->addLayout(btns);
+
+    connect(previewBtn, &QPushButton::clicked, this, [this, kSpin, sdSpin]()
+        {
+            m_pGlWidget->ClearSelection();
+            const qsizetype n = m_pGlWidget->SelectStatisticalOutliers(kSpin->value(), sdSpin->value());
+            m_pInfoLabel->setText(QString("SOR 预览：标记离群点 %1 个（红）。满意→删除选中；否则调参重试。").arg(n));
+        });
+    connect(clearBtn, &QPushButton::clicked, this, [this]() { m_pGlWidget->ClearSelection(); });
+    connect(applyBtn, &QPushButton::clicked, this, [this, dlg]()
+        {
+            m_pGlWidget->DeleteSelectedEditPoints();
+            dlg->close();
+        });
+
+    dlg->show();
+}
+
+// 连通域去飞点：体素栅格 26 邻接聚类，点数少于阈值的孤立小簇判为悬空飞点。
+void WorkpieceMeshViewerDialog::ShowClusterPanel()
+{
+    if (m_pGlWidget == nullptr) return;
+    QDialog* dlg = new QDialog(this);
+    dlg->setWindowTitle("连通域去飞点");
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setModal(false);
+
+    QVBoxLayout* root = new QVBoxLayout(dlg);
+    QLabel* hint = new QLabel(
+        "按体素栅格做 26 邻接连通域聚类，把点数少于阈值的孤立小簇（悬空飞点）标红。\n"
+        "先「预览」标红，确认无误后「删除选中」（删除可撤销）。", dlg);
+    hint->setWordWrap(true);
+    root->addWidget(hint);
+
+    QFormLayout* form = new QFormLayout();
+    QDoubleSpinBox* voxSpin = new QDoubleSpinBox(dlg);
+    voxSpin->setRange(0.1, 50.0);
+    voxSpin->setSingleStep(0.5);
+    voxSpin->setDecimals(2);
+    voxSpin->setValue(3.0);
+    voxSpin->setSuffix(" mm");
+    QSpinBox* minSpin = new QSpinBox(dlg);
+    minSpin->setRange(1, 100000);
+    minSpin->setValue(30);
+    form->addRow("体素尺寸", voxSpin);
+    form->addRow("最小簇点数（小于此判为飞点）", minSpin);
+    root->addLayout(form);
+
+    QHBoxLayout* btns = new QHBoxLayout();
+    QPushButton* previewBtn = new QPushButton("预览选中", dlg);
+    QPushButton* clearBtn = new QPushButton("清除选区", dlg);
+    QPushButton* applyBtn = new QPushButton("删除选中", dlg);
+    applyBtn->setObjectName("DangerButton");
+    btns->addWidget(previewBtn);
+    btns->addWidget(clearBtn);
+    btns->addStretch(1);
+    btns->addWidget(applyBtn);
+    root->addLayout(btns);
+
+    connect(previewBtn, &QPushButton::clicked, this, [this, voxSpin, minSpin]()
+        {
+            m_pGlWidget->ClearSelection();
+            const qsizetype n = m_pGlWidget->SelectSmallClusters(voxSpin->value(), minSpin->value());
+            m_pInfoLabel->setText(QString("连通域预览：标记飞点 %1 个（红）。满意→删除选中；否则调参重试。").arg(n));
+        });
+    connect(clearBtn, &QPushButton::clicked, this, [this]() { m_pGlWidget->ClearSelection(); });
+    connect(applyBtn, &QPushButton::clicked, this, [this, dlg]()
+        {
+            m_pGlWidget->DeleteSelectedEditPoints();
+            dlg->close();
+        });
+
+    dlg->show();
 }
 
 void WorkpieceMeshViewerDialog::ShowHeightMap()
