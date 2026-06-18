@@ -375,30 +375,6 @@ QString SampleAxisName(RobotCalculation::SampleAxis axis)
     return axis == RobotCalculation::SampleAxis::AxisX ? "X" : "Y";
 }
 
-// 读 SDK 配置 ini 的 is_remove_noise 开关：决定程序滤波拟合是否跳过自身去噪/平滑
-//（缺失/读不到默认按已去噪，与 SDK 新版默认开 + runtime 兜底注入一致）。
-bool SdkRemoveNoiseEnabled(const QString& configPath)
-{
-    if (configPath.trimmed().isEmpty()) return true;
-    QFile file(configPath);
-    if (!file.open(QIODevice::ReadOnly)) return true;
-    const QByteArray content = file.readAll();
-    file.close();
-    for (const QByteArray& raw : content.split('\n'))
-    {
-        const QByteArray line = raw.trimmed();
-        if (line.startsWith("//") || line.startsWith("#")) continue;
-        const int eq = line.indexOf('=');
-        if (eq < 0) continue;
-        if (line.left(eq).trimmed().toLower() == "is_remove_noise")
-        {
-            const QByteArray value = line.mid(eq + 1).trimmed().toLower();
-            return value == "1" || value == "true" || value == "yes";
-        }
-    }
-    return true;  // 缺失默认按已去噪
-}
-
 QString GeometryStrategyName(RobotCalculation::LowerWeldGeometryStrategy strategy)
 {
     switch (strategy)
@@ -824,19 +800,14 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         RobotCalculation::MeasureThenWeldAnalysisResult analysis;
         if (useBaseWeldFit)
         {
-            // 根据 SDK 去噪开关 is_remove_noise 自动判断：SDK 已去噪则程序滤波拟合不再重复去噪/平滑
-            //（重复处理会削圆尖角、移位拐点，导致拐点标偏/漏检/焊道抄近路）；未去噪则保留程序去噪。
-            // 只改本次局部拷贝，不动 fitParams 本体——CompareSchemes 等其它路径不受影响。
+            // SDK 基础点云 + 滤波拟合流程固定走"干净输入"路径：输入是 SDK 重建的稠密有序焊道，
+            // 跳过程序自身的去噪/平滑（重复处理会削圆尖角、移位拐点），拐点检测用方位角法
+            //（避免 DP 在缓变/台阶拐角标偏、漏检、抄近路）。方位角参数(转角阈值/窗口/NMS/兜底)
+            // 随 fitParams 由配置开放，现场可调。只改本次局部拷贝，不动 fitParams 本体。
             RobotCalculation::LowerWeldFilterParams baseWeldParams = fitParams;
-            baseWeldParams.inputAlreadyDenoised = SdkRemoveNoiseEnabled(settings.configPath);
+            baseWeldParams.inputAlreadyDenoised = true;
             analysis = RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
                 ToIndexedInput(workingExtraction.points), baseWeldParams);
-            if (appendLog)
-            {
-                appendLog(QString("SDK去噪开关 is_remove_noise=%1，程序滤波拟合%2自身去噪/平滑。")
-                    .arg(baseWeldParams.inputAlreadyDenoised ? "开" : "关")
-                    .arg(baseWeldParams.inputAlreadyDenoised ? "跳过" : "保留"));
-            }
         }
         else
         {
@@ -9914,6 +9885,10 @@ RobotCalculation::LowerWeldFilterParams MeasureThenWeldService::BuildTrackFitPar
     params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
     params.minPointCount = pointCloudSettings.fitMinPointCount;
     params.smoothRadius = pointCloudSettings.fitSmoothRadius;
+    params.azimuthTurnThresholdDeg = pointCloudSettings.fitAzimuthTurnThresholdDeg;
+    params.azimuthHeadingWindow = pointCloudSettings.fitAzimuthHeadingWindow;
+    params.azimuthNmsSpanMm = pointCloudSettings.fitAzimuthNmsSpanMm;
+    params.azimuthStraightenResidualMm = pointCloudSettings.fitAzimuthStraightenResidualMm;
     params.projectionStationWindowMm = pointCloudSettings.projectionStationWindowMm;
     params.projectionTransverseWindowMm = pointCloudSettings.projectionTransverseWindowMm;
     params.projectionZBandBelowMm = pointCloudSettings.projectionZBandBelowMm;

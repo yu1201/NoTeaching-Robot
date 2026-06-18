@@ -83,6 +83,10 @@ private:
     QSpinBox* m_pPiecewiseMinSegmentSpin = nullptr;
     QSpinBox* m_pMinPointSpin = nullptr;
     QSpinBox* m_pSmoothRadiusSpin = nullptr;
+    QDoubleSpinBox* m_pAzimuthTurnThresholdSpin = nullptr;       // 拐点转角阈值(度)
+    QSpinBox* m_pAzimuthHeadingWindowSpin = nullptr;             // 拐点拟合窗口(点)
+    QDoubleSpinBox* m_pAzimuthNmsSpanSpin = nullptr;             // 拐点NMS弧长(mm)
+    QDoubleSpinBox* m_pAzimuthStraightenResidualSpin = nullptr;  // 直线化兜底残差(mm)
     QCheckBox* m_pSlopeConsistentCornerFitCheck = nullptr;
     QCheckBox* m_pExportFitDebugCloudCheck = nullptr;
     QCheckBox* m_pExportWorkpieceFrameDebugCheck = nullptr;
