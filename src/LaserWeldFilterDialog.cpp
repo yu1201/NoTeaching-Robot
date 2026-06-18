@@ -576,6 +576,8 @@ void LaserWeldFilterDialog::BuildUi()
     m_pCloudClusterToleranceSpin->setRange(0.0, 9999.0);
     m_pCloudClusterToleranceSpin->setDecimals(3);
     m_pCloudClusterCheck = new QCheckBox("启用聚类");
+    m_pCloudRemoveNoiseCheck = new QCheckBox("库内去噪");
+    m_pCloudRemoveNoiseCheck->setToolTip("SDK 内置去噪（is_remove_noise）：提取轨迹前先对点云做一遍去噪。20260617 版新增，默认开启。");
     m_pCloudDiscreteValueSpin = new QSpinBox();
     m_pCloudDiscreteValueSpin->setRange(0, 9999);
     m_pCloudDilateValueSpin = new QSpinBox();
@@ -620,6 +622,7 @@ void LaserWeldFilterDialog::BuildUi()
     cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudLinesDisThresholdSpin, "mm"), 8, 1);
     cloudInnerLayout->addWidget(new QLabel("直线最小长度"), 8, 2);
     cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudLineLengthSpin, "mm"), 8, 3);
+    cloudInnerLayout->addWidget(m_pCloudRemoveNoiseCheck, 9, 0, 1, 2);
     cloudInnerLayout->setColumnStretch(1, 1);
     cloudInnerLayout->setColumnStretch(3, 1);
     cloudInnerLayout->setColumnMinimumWidth(1, 300);
@@ -1283,6 +1286,7 @@ void LaserWeldFilterDialog::LoadExternalAlgorithmConfig()
     m_pCloudMergeLinesDistanceSpin->setValue(ReadPlainIniValue(configPath, "Merge_Lines_Dis_Threshold", "35").toDouble());
     m_pCloudClusterToleranceSpin->setValue(ReadPlainIniValue(configPath, "ClusterTolerance", "3.5").toDouble());
     m_pCloudClusterCheck->setChecked(PlainIniBoolValue(ReadPlainIniValue(configPath, "if_Cluster", "false"), false));
+    m_pCloudRemoveNoiseCheck->setChecked(PlainIniBoolValue(ReadPlainIniValue(configPath, "is_remove_noise", "true"), true));
     m_pCloudDiscreteValueSpin->setValue(ReadPlainIniIntValue(configPath, "Discrete_Value", 4));
     m_pCloudDilateValueSpin->setValue(ReadPlainIniIntValue(configPath, "Dilate_Value", 13));
     m_pCloudErodeValueSpin->setValue(ReadPlainIniIntValue(configPath, "Erode_Value", 9));
@@ -1313,6 +1317,7 @@ void LaserWeldFilterDialog::SaveExternalAlgorithmConfig(QString* error) const
         { "Merge_Lines_Dis_Threshold", FormatPlainIniNumberLikeCurrent(configPath, "Merge_Lines_Dis_Threshold", m_pCloudMergeLinesDistanceSpin->value()) },
         { "ClusterTolerance", FormatPlainIniNumberLikeCurrent(configPath, "ClusterTolerance", m_pCloudClusterToleranceSpin->value()) },
         { "if_Cluster", BoolIniText(m_pCloudClusterCheck->isChecked()) },
+        { "is_remove_noise", BoolIniText(m_pCloudRemoveNoiseCheck->isChecked()) },
         { "Discrete_Value", QString::number(m_pCloudDiscreteValueSpin->value()) },
         { "Dilate_Value", QString::number(m_pCloudDilateValueSpin->value()) },
         { "Erode_Value", QString::number(m_pCloudErodeValueSpin->value()) },

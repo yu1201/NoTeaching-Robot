@@ -53,6 +53,7 @@ private:
     QDoubleSpinBox* m_pCloudMergeLinesDistanceSpin = nullptr;
     QDoubleSpinBox* m_pCloudClusterToleranceSpin = nullptr;
     QCheckBox* m_pCloudClusterCheck = nullptr;
+    QCheckBox* m_pCloudRemoveNoiseCheck = nullptr;  // is_remove_noise：SDK 库内置去噪（20260617 版新增）
     QSpinBox* m_pCloudDiscreteValueSpin = nullptr;
     QSpinBox* m_pCloudDilateValueSpin = nullptr;
     QSpinBox* m_pCloudErodeValueSpin = nullptr;
