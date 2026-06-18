@@ -797,10 +797,22 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 appendLog("已焊起点截断：SDK 未检测到已焊段，焊道不截断。");
             }
         }
-        RobotCalculation::MeasureThenWeldAnalysisResult analysis = useBaseWeldFit
-            ? RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
-                ToIndexedInput(workingExtraction.points), fitParams)
-            : PointCloudExtractionProcessor::BuildAnalysisResult(workingExtraction, fitParams);
+        RobotCalculation::MeasureThenWeldAnalysisResult analysis;
+        if (useBaseWeldFit)
+        {
+            // SDK 基础点云 + 滤波拟合流程固定走"干净输入"路径：输入是 SDK 重建的稠密有序焊道，
+            // 跳过程序自身的去噪/平滑（重复处理会削圆尖角、移位拐点），拐点检测用方位角法
+            //（避免 DP 在缓变/台阶拐角标偏、漏检、抄近路）。方位角参数(转角阈值/窗口/NMS/兜底)
+            // 随 fitParams 由配置开放，现场可调。只改本次局部拷贝，不动 fitParams 本体。
+            RobotCalculation::LowerWeldFilterParams baseWeldParams = fitParams;
+            baseWeldParams.inputAlreadyDenoised = true;
+            analysis = RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+                ToIndexedInput(workingExtraction.points), baseWeldParams);
+        }
+        else
+        {
+            analysis = PointCloudExtractionProcessor::BuildAnalysisResult(workingExtraction, fitParams);
+        }
         if (!analysis.ok)
         {
             if (appendLog)
@@ -9873,6 +9885,10 @@ RobotCalculation::LowerWeldFilterParams MeasureThenWeldService::BuildTrackFitPar
     params.piecewiseMinSegmentPoints = pointCloudSettings.fitPiecewiseMinSegmentPoints;
     params.minPointCount = pointCloudSettings.fitMinPointCount;
     params.smoothRadius = pointCloudSettings.fitSmoothRadius;
+    params.azimuthTurnThresholdDeg = pointCloudSettings.fitAzimuthTurnThresholdDeg;
+    params.azimuthHeadingWindow = pointCloudSettings.fitAzimuthHeadingWindow;
+    params.azimuthNmsSpanMm = pointCloudSettings.fitAzimuthNmsSpanMm;
+    params.azimuthStraightenResidualMm = pointCloudSettings.fitAzimuthStraightenResidualMm;
     params.projectionStationWindowMm = pointCloudSettings.projectionStationWindowMm;
     params.projectionTransverseWindowMm = pointCloudSettings.projectionTransverseWindowMm;
     params.projectionZBandBelowMm = pointCloudSettings.projectionZBandBelowMm;

@@ -37,6 +37,8 @@ qrc_*.cpp
 !SDK/STEP/Robot-SDKd.lib
 !SDK/PointCloudExtration/
 !SDK/PointCloudExtration/**
+!SDK/BCPD/
+!SDK/BCPD/**
 
 # Local outputs
 Log/

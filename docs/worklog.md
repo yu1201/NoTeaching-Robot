@@ -1,17 +1,30 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-06-16`
+- 人工整理日期：`2026-06-18`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-06-18
+
+- 点云框选编辑增强（参考 CloudCompare/MeshLab/Blender）：双行上下文工具栏（进入编辑才显示编辑条，删除/恢复等危险操作红色右置）；新增套索选（自由多边形圈选 PNPoly + 透明 overlay 不触发 GL 重绘，Shift 减选）、反选/全不选/隔离显示（shader discard 仅渲染选中红点）；「清理▾」下拉的 SOR 统计离群 / 连通域去飞点配非模态参数面板（预览标红→确认删除，选择与删除解耦、删除可撤销）
+- SOR 去噪提速约百倍 + 后台化：网格 cell 估算从 span.norm()/cbrt(n) 体密度改为最大两维面密度（激光扫描工件点云近似 2D 表面，旧式高估格距约 28× 致每格点数爆炸→邻域候选膨胀），目标每格点数随 k 放大使多数点 r=1 命中；16M 格上限改放大 cell 重算而非静默 return 0。SOR/连通域改后台线程计算 + WindowModal 进度条可取消，不卡界面（算法拆静态 ComputeXxxMask 吃坐标快照 + UI 线程 ApplySelectionMask 校验 size，m_bEditBusy 闸门 + 析构触发取消防退出冻结）
+- 点云分离图层（固定双层）：「图层▾」分离选中 / 切换编辑图层 / 合并 / 显示另层，可把可疑区切到另一图层单独跑 SOR/连通域去噪不误伤主体、最后合并；GLWidget 裸指针恒指固定成员 m_editCloud、切层用 swap 换内容杜绝 QVector 重分配悬垂；第二组 VBO + shader uBackgroundMode 渲染暗灰只读背景层；重新生成合并可见层、隐藏层视为逻辑删除
+- 点云处理 SDK 更新（20260617）：替换 PointCloudExtration.dll（795KB）/.lib，导出接口逐字节未变（C++ 调用与按 mangled 名动态加载均无需改）；config 模板新增库内去噪开关 is_remove_noise（默认开），「新版点云库」SDK 参数界面加可调复选框；生成 runtime.ini 时检测缺失即兜底注入 is_remove_noise=true（与 LOGPATH 同模式），根治现场旧配置缺该键报 `Para_name is_remove_noise not found` 致先测后焊/离线重建中断
+- 先测后焊拐点错位/漏检/抄近路修复（SdkBaseWeldFit 方法，SDK基础点云+程序滤波拟合）：多智能体对抗诊断 + 实测确认根因在程序滤波拟合环节——对 SDK 已清洗的干净稠密焊道仍套用为带噪相机轨迹设计的「MAD去噪→7点平滑→Douglas-Peucker 取离弦最远点→prominence 判内外角」链；DP「离弦最远点」非真折角顶点，缓变/台阶段拐点系统性偏移（实测某外拐角标在 y=440、真折角在 460、偏 19.7mm），平滑削圆尖角致真折角漏检 → 焊道抄近路（侧偏 7.7mm）+ 多标伪拐角。先后排除「只跳去噪」「调 DP 容差」（实测两头不靠：调大漏检、调小多检波纹起伏伪拐角）。最终：SDK基础点云+滤波拟合流程固定走「跳去噪/平滑 + 方位角拐点检测」（s-h 投影面局部最小二乘拟合左右段方向→有符号转角→22°阈值候选→同区域保留转角最大 NMS + 段内偏离弦>6mm 直线化兜底），判方向转折角度而非离弦距离、天然区分真折角与波纹周期起伏；顶点仍由 BuildFittedGeometryKeyPoints 局部求交精修、内外角仍 GeometryCornerType 判定。方位角 4 参数（转角阈值/拟合窗口/NMS弧长/直线化残差）从硬编码改为 PointCloudProcessingConfig 配置项、映射进 fitParams，开放到「滤波拟合参数」界面可调。现场实测重建 RobotC/20260615_005：拐角由 16(含 -462/8.15 两伪拐角 + y=440 错位 19.7mm + 漏 460 真折角) 纠正为 14、逐个对齐 SDK 提取的真实拐角、y=460 真折角检出、伪拐角与抄近路消除（真机 C++ PCA 投影验证，非离线近似）
+- 版本 v2026.06.18.1808；main 中性版 Debug x64 / Release x64 多轮编译通过；本批 8 个提交已推送 main
 
 ## 2026-06-16
 
 - 日志系统统一与按天归档：10 类日志统一走 RobotLog，按天归档 Log/<yyyy-MM-dd>/；新增线程安全 writeLine（毫秒时间戳、不走 printf、跨天自动换目录、打开失败可恢复）。修复 CLI 日志混写进机器人A单元日志（独立 CliLog.txt）；查看器按天重定向 + fromUtf8 + 48KB 截断对齐行边界；RobotLog::write 的 printf % 加固（OPini/FTPClient 运行时串改 write("%s",...)）
 - 点云读写性能优化：完整点云写盘分块批量；LoadIndexedPoint3DFile 改 readLine/readAll + strtod 手扫，消除每行 QRegularExpression 编译（百万行级提速）；离线重建加读写速率日志
 - 先测后焊离线重建容错：激光特征点文件为空（如相机坡口识别全失败）时不再直接失败，点云链方法改用完整点云重建，与实时扫描 canUseExternalCloud 判定一致
-- 本地品牌覆盖（中性支持，git 默认呈现不变）：新增 BrandingConfig，工程内 branding/（.gitignore 排除）存在则用品牌名+图标，否则默认 NoTeaching-Robot + 原图标；管理页桌面图标底色开关，切换刷新窗口/任务栏 + 重写桌面快捷方式（COM）；打包脚本随安装包带 branding/；.rc/app.ico/.iss/.qrc 未改，exe 内嵌图标不变
-- 版本更新为 v2026.06.16.1411；Debug/Release 编译与 Inno 打包验证
+- 本地品牌覆盖（中性支持，git 默认呈现不变）：新增 BrandingConfig，工程内 branding/（.gitignore 排除）存在则用品牌名+图标，否则默认 NoTeaching-Robot + 原图标；管理页桌面图标底色开关，切换刷新窗口/任务栏；桌面/开始菜单快捷方式按品牌名重命名 + 换图标（COM IShellLink）；.rc/app.ico/.iss/.qrc 未改，exe 内嵌图标不变
+- 中性包不夹带 branding/：打包脚本仅在 branding/ 被 git 跟踪时才拷贝，故 main（中性）安装包不带品牌资源，品牌版改由独立分支提供
+- 主页标题精简：先把主页大标题改走 BrandingConfig::DashboardTitle 可定制，后直接移除（与顶部窗口标题栏重复）；主页第一行改为「版本徽章 + 当前用户 + 机器人选择器」轻量状态条，副标题与流程大按钮上移（DashboardTitle API 与 branding.ini 该键随之失去消费点，保留无害）
+- 行尾根治：新增 .gitattributes（* text=auto eol=lf + 二进制白名单 + SDK 整体排除），一次性 renormalize 全部自有源码为 LF，并设 core.autocrlf=false，根治 autocrlf 叠加历史混杂行尾导致的整文件 CRLF/LF 翻动；srp/srd 仍按机器人识别要求强制 LF，SDK 厂商库一字节未动
+- 品牌版隔离：全品牌 HK-Pathlynx-CORPLA / 海瞰智焊 走独立分支 hk-pathlynx-corpla（含 branding/、品牌 iss/vcxproj，exe 文件名 HK-Pathlynx-CORPLA.exe），安装包经该分支 GitHub Release 分发；品牌版按「每天最后统一更新」节奏同步，不逐次跟随 main
+- 版本 v2026.06.16.1411；main 中性版 Debug/Release 编译与 Inno 打包验证（去大标题、行尾根治后复验 Debug+Release 通过）；品牌版 Release 编译通过
 
 ## 2026-06-15
 

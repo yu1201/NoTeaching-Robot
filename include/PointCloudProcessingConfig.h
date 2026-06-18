@@ -53,6 +53,12 @@ public:
         int fitPiecewiseMinSegmentPoints = 10;
         int fitMinPointCount = 4;
         int fitSmoothRadius = 3;
+        // 方位角拐点检测参数（SDK基础点云+滤波拟合流程固定使用；判方向转折角度定拐点，
+        // 替代 DP「离弦最远点」——避免缓变/台阶拐角标偏、漏检真折角）。
+        double fitAzimuthTurnThresholdDeg = 22.0;    // 转角阈值(度)：区分真折角与波纹起伏的分界
+        int fitAzimuthHeadingWindow = 10;            // 左右两段方向的局部最小二乘拟合跨度(点)
+        double fitAzimuthNmsSpanMm = 12.0;           // 非极大值抑制弧长：同区域只保留转角最大的拐点
+        double fitAzimuthStraightenResidualMm = 6.0; // 直线化兜底残差：段内偏离弦超此值才补拐点
         // 点云投影提取参数（方法③点云算法+拟合专用；0=按滤波参数自动派生，等同原硬编码行为）。
         double projectionStationWindowMm = 0.0;
         double projectionTransverseWindowMm = 0.0;

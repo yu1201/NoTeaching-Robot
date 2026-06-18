@@ -146,6 +146,11 @@
     <ClCompile Include="src\PointCloud3DView.cpp" />
     <ClCompile Include="src\PointCloudExtractionProcessor.cpp" />
     <ClCompile Include="src\PointCloudProcessingConfig.cpp" />
+    <ClCompile Include="src\BcpdModelAligner.cpp" />
+    <ClCompile Include="src\ModelAlignmentConfig.cpp" />
+    <ClCompile Include="src\ModelAlignmentDialog.cpp" />
+    <ClCompile Include="src\ReferenceModelLibrary.cpp" />
+    <ClCompile Include="src\PointCloudModelDenoiser.cpp" />
     <ClCompile Include="src\WorkpieceMeshBuilder.cpp" />
     <ClCompile Include="src\WorkpieceMeshViewerDialog.cpp" />
     <ClCompile Include="src\PreciseMeasureEditDialog.cpp" />
@@ -200,6 +205,11 @@
     <ClInclude Include="include\LaserWeldFilterDialog.h" />
     <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h" />
     <ClInclude Include="include\MeasureThenWeldService.h" />
+    <ClInclude Include="include\BcpdModelAligner.h" />
+    <ClInclude Include="include\ModelAlignmentConfig.h" />
+    <ClInclude Include="include\ModelAlignmentDialog.h" />
+    <ClInclude Include="include\ReferenceModelLibrary.h" />
+    <ClInclude Include="include\PointCloudModelDenoiser.h" />
     <ClInclude Include="include\WorkpieceMeshBuilder.h" />
     <ClInclude Include="include\WorkpieceMeshViewerDialog.h" />
     <ClInclude Include="include\OPini.h" />

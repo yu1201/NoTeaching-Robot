@@ -119,6 +119,10 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.fitPiecewiseMinSegmentPoints = ReadIntSetting("Fit/PiecewiseMinSegmentPoints", settings.fitPiecewiseMinSegmentPoints);
     settings.fitMinPointCount = ReadIntSetting("Fit/MinPointCount", settings.fitMinPointCount);
     settings.fitSmoothRadius = ReadIntSetting("Fit/SmoothRadius", settings.fitSmoothRadius);
+    settings.fitAzimuthTurnThresholdDeg = ReadDoubleSetting("Fit/AzimuthTurnThresholdDeg", settings.fitAzimuthTurnThresholdDeg);
+    settings.fitAzimuthHeadingWindow = ReadIntSetting("Fit/AzimuthHeadingWindow", settings.fitAzimuthHeadingWindow);
+    settings.fitAzimuthNmsSpanMm = ReadDoubleSetting("Fit/AzimuthNmsSpanMm", settings.fitAzimuthNmsSpanMm);
+    settings.fitAzimuthStraightenResidualMm = ReadDoubleSetting("Fit/AzimuthStraightenResidualMm", settings.fitAzimuthStraightenResidualMm);
     settings.projectionStationWindowMm = ReadDoubleSetting("CloudProjection/StationWindowMm", settings.projectionStationWindowMm);
     settings.projectionTransverseWindowMm = ReadDoubleSetting("CloudProjection/TransverseWindowMm", settings.projectionTransverseWindowMm);
     settings.projectionZBandBelowMm = ReadDoubleSetting("CloudProjection/ZBandBelowMm", settings.projectionZBandBelowMm);
@@ -214,6 +218,10 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.fitPiecewiseMinSegmentPoints = std::max(2, settings.fitPiecewiseMinSegmentPoints);
     settings.fitMinPointCount = std::max(2, settings.fitMinPointCount);
     settings.fitSmoothRadius = std::max(0, settings.fitSmoothRadius);
+    settings.fitAzimuthTurnThresholdDeg = std::max(1.0, std::min(90.0, settings.fitAzimuthTurnThresholdDeg));
+    settings.fitAzimuthHeadingWindow = std::max(2, settings.fitAzimuthHeadingWindow);
+    settings.fitAzimuthNmsSpanMm = std::max(1.0, settings.fitAzimuthNmsSpanMm);
+    settings.fitAzimuthStraightenResidualMm = std::max(0.5, settings.fitAzimuthStraightenResidualMm);
     // 投影提取参数：负值视为 0（自动派生）；候选上限非正回退默认；层位分位夹到 [0,100] 且上界≥下界。
     settings.projectionStationWindowMm = std::max(0.0, settings.projectionStationWindowMm);
     settings.projectionTransverseWindowMm = std::max(0.0, settings.projectionTransverseWindowMm);
@@ -275,6 +283,10 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("Fit/PiecewiseMinSegmentPoints", QString::number(settings.fitPiecewiseMinSegmentPoints))
         && write("Fit/MinPointCount", QString::number(settings.fitMinPointCount))
         && write("Fit/SmoothRadius", QString::number(settings.fitSmoothRadius))
+        && write("Fit/AzimuthTurnThresholdDeg", QString::number(settings.fitAzimuthTurnThresholdDeg, 'f', 6))
+        && write("Fit/AzimuthHeadingWindow", QString::number(settings.fitAzimuthHeadingWindow))
+        && write("Fit/AzimuthNmsSpanMm", QString::number(settings.fitAzimuthNmsSpanMm, 'f', 6))
+        && write("Fit/AzimuthStraightenResidualMm", QString::number(settings.fitAzimuthStraightenResidualMm, 'f', 6))
         && write("CloudProjection/StationWindowMm", QString::number(settings.projectionStationWindowMm, 'f', 6))
         && write("CloudProjection/TransverseWindowMm", QString::number(settings.projectionTransverseWindowMm, 'f', 6))
         && write("CloudProjection/ZBandBelowMm", QString::number(settings.projectionZBandBelowMm, 'f', 6))

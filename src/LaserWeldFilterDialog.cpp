@@ -576,6 +576,8 @@ void LaserWeldFilterDialog::BuildUi()
     m_pCloudClusterToleranceSpin->setRange(0.0, 9999.0);
     m_pCloudClusterToleranceSpin->setDecimals(3);
     m_pCloudClusterCheck = new QCheckBox("启用聚类");
+    m_pCloudRemoveNoiseCheck = new QCheckBox("库内去噪");
+    m_pCloudRemoveNoiseCheck->setToolTip("SDK 内置去噪（is_remove_noise）：提取轨迹前先对点云做一遍去噪。20260617 版新增，默认开启。");
     m_pCloudDiscreteValueSpin = new QSpinBox();
     m_pCloudDiscreteValueSpin->setRange(0, 9999);
     m_pCloudDilateValueSpin = new QSpinBox();
@@ -620,6 +622,7 @@ void LaserWeldFilterDialog::BuildUi()
     cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudLinesDisThresholdSpin, "mm"), 8, 1);
     cloudInnerLayout->addWidget(new QLabel("直线最小长度"), 8, 2);
     cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudLineLengthSpin, "mm"), 8, 3);
+    cloudInnerLayout->addWidget(m_pCloudRemoveNoiseCheck, 9, 0, 1, 2);
     cloudInnerLayout->setColumnStretch(1, 1);
     cloudInnerLayout->setColumnStretch(3, 1);
     cloudInnerLayout->setColumnMinimumWidth(1, 300);
@@ -807,6 +810,29 @@ void LaserWeldFilterDialog::BuildUi()
     m_pSmoothRadiusSpin->setRange(0, 999);
     m_pSmoothRadiusSpin->setValue(3);
 
+    // 方位角拐点检测参数（SDK基础点云+滤波拟合流程固定使用：判方向转折角度定拐点，替代 DP）。
+    m_pAzimuthTurnThresholdSpin = new QDoubleSpinBox();
+    m_pAzimuthTurnThresholdSpin->setRange(1.0, 90.0);
+    m_pAzimuthTurnThresholdSpin->setDecimals(1);
+    m_pAzimuthTurnThresholdSpin->setSingleStep(1.0);
+    m_pAzimuthTurnThresholdSpin->setValue(22.0);
+    m_pAzimuthTurnThresholdSpin->setToolTip("拐点转角阈值：前后两段焊缝走向夹角超过此角度才算拐点。"
+        "调大→滤掉波纹表面起伏(但缓拐角可能漏)；调小→更灵敏(但起伏可能多检)。仅 SDK基础点云+拟合流程用。");
+    m_pAzimuthHeadingWindowSpin = new QSpinBox();
+    m_pAzimuthHeadingWindowSpin->setRange(2, 100);
+    m_pAzimuthHeadingWindowSpin->setValue(10);
+    m_pAzimuthHeadingWindowSpin->setToolTip("拐点拟合窗口：用每点前后各 N 点局部拟合方向求转角。越大越平滑(抗起伏)，越小越灵敏。");
+    m_pAzimuthNmsSpanSpin = new QDoubleSpinBox();
+    m_pAzimuthNmsSpanSpin->setRange(1.0, 200.0);
+    m_pAzimuthNmsSpanSpin->setDecimals(1);
+    m_pAzimuthNmsSpanSpin->setValue(12.0);
+    m_pAzimuthNmsSpanSpin->setToolTip("拐点非极大值抑制弧长：此距离内多个候选只保留转角最大的一个，避免一个折角被重复标。");
+    m_pAzimuthStraightenResidualSpin = new QDoubleSpinBox();
+    m_pAzimuthStraightenResidualSpin->setRange(0.5, 100.0);
+    m_pAzimuthStraightenResidualSpin->setDecimals(1);
+    m_pAzimuthStraightenResidualSpin->setValue(6.0);
+    m_pAzimuthStraightenResidualSpin->setToolTip("直线化兜底残差：相邻拐点间实际焊道偏离直线超此值则补拐点(防漏检小台阶抄近路)。须大于波纹起伏幅度。");
+
     m_pSlopeConsistentCornerFitCheck = new QCheckBox("直线拟合排除圆弧段");
     m_pSlopeConsistentCornerFitCheck->setToolTip("启用后，平台线和坡度线只使用局部斜率一致的直线段拟合，再求交生成拐点。");
 
@@ -845,6 +871,14 @@ void LaserWeldFilterDialog::BuildUi()
     paramLayout->addWidget(m_pSlopeConsistentCornerFitCheck, 7, 1, 1, 3);
     paramLayout->addWidget(m_pExportFitDebugCloudCheck, 8, 0, 1, 4);
     paramLayout->addWidget(m_pExportWorkpieceFrameDebugCheck, 9, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("拐点转角阈值"), 10, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthTurnThresholdSpin, "deg"), 10, 1);
+    paramLayout->addWidget(new QLabel("拐点NMS弧长"), 10, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthNmsSpanSpin, "mm"), 10, 3);
+    paramLayout->addWidget(new QLabel("拐点拟合窗口"), 11, 0);
+    paramLayout->addWidget(m_pAzimuthHeadingWindowSpin, 11, 1);
+    paramLayout->addWidget(new QLabel("直线化残差"), 11, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthStraightenResidualSpin, "mm"), 11, 3);
     paramLayout->setColumnStretch(1, 1);
     paramLayout->setColumnStretch(3, 1);
     featurePointLayout->addWidget(paramGroup);
@@ -1161,6 +1195,10 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pPiecewiseMinSegmentSpin->setValue(processingSettings.fitPiecewiseMinSegmentPoints);
     m_pMinPointSpin->setValue(processingSettings.fitMinPointCount);
     m_pSmoothRadiusSpin->setValue(processingSettings.fitSmoothRadius);
+    m_pAzimuthTurnThresholdSpin->setValue(processingSettings.fitAzimuthTurnThresholdDeg);
+    m_pAzimuthHeadingWindowSpin->setValue(processingSettings.fitAzimuthHeadingWindow);
+    m_pAzimuthNmsSpanSpin->setValue(processingSettings.fitAzimuthNmsSpanMm);
+    m_pAzimuthStraightenResidualSpin->setValue(processingSettings.fitAzimuthStraightenResidualMm);
     m_pProjStationWindowSpin->setValue(processingSettings.projectionStationWindowMm);
     m_pProjTransverseWindowSpin->setValue(processingSettings.projectionTransverseWindowMm);
     m_pProjZBandBelowSpin->setValue(processingSettings.projectionZBandBelowMm);
@@ -1201,6 +1239,10 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.fitPiecewiseMinSegmentPoints = m_pPiecewiseMinSegmentSpin->value();
     processingSettings.fitMinPointCount = m_pMinPointSpin->value();
     processingSettings.fitSmoothRadius = m_pSmoothRadiusSpin->value();
+    processingSettings.fitAzimuthTurnThresholdDeg = m_pAzimuthTurnThresholdSpin->value();
+    processingSettings.fitAzimuthHeadingWindow = m_pAzimuthHeadingWindowSpin->value();
+    processingSettings.fitAzimuthNmsSpanMm = m_pAzimuthNmsSpanSpin->value();
+    processingSettings.fitAzimuthStraightenResidualMm = m_pAzimuthStraightenResidualSpin->value();
     processingSettings.projectionStationWindowMm = m_pProjStationWindowSpin->value();
     processingSettings.projectionTransverseWindowMm = m_pProjTransverseWindowSpin->value();
     processingSettings.projectionZBandBelowMm = m_pProjZBandBelowSpin->value();
@@ -1283,6 +1325,7 @@ void LaserWeldFilterDialog::LoadExternalAlgorithmConfig()
     m_pCloudMergeLinesDistanceSpin->setValue(ReadPlainIniValue(configPath, "Merge_Lines_Dis_Threshold", "35").toDouble());
     m_pCloudClusterToleranceSpin->setValue(ReadPlainIniValue(configPath, "ClusterTolerance", "3.5").toDouble());
     m_pCloudClusterCheck->setChecked(PlainIniBoolValue(ReadPlainIniValue(configPath, "if_Cluster", "false"), false));
+    m_pCloudRemoveNoiseCheck->setChecked(PlainIniBoolValue(ReadPlainIniValue(configPath, "is_remove_noise", "true"), true));
     m_pCloudDiscreteValueSpin->setValue(ReadPlainIniIntValue(configPath, "Discrete_Value", 4));
     m_pCloudDilateValueSpin->setValue(ReadPlainIniIntValue(configPath, "Dilate_Value", 13));
     m_pCloudErodeValueSpin->setValue(ReadPlainIniIntValue(configPath, "Erode_Value", 9));
@@ -1313,6 +1356,7 @@ void LaserWeldFilterDialog::SaveExternalAlgorithmConfig(QString* error) const
         { "Merge_Lines_Dis_Threshold", FormatPlainIniNumberLikeCurrent(configPath, "Merge_Lines_Dis_Threshold", m_pCloudMergeLinesDistanceSpin->value()) },
         { "ClusterTolerance", FormatPlainIniNumberLikeCurrent(configPath, "ClusterTolerance", m_pCloudClusterToleranceSpin->value()) },
         { "if_Cluster", BoolIniText(m_pCloudClusterCheck->isChecked()) },
+        { "is_remove_noise", BoolIniText(m_pCloudRemoveNoiseCheck->isChecked()) },
         { "Discrete_Value", QString::number(m_pCloudDiscreteValueSpin->value()) },
         { "Dilate_Value", QString::number(m_pCloudDilateValueSpin->value()) },
         { "Erode_Value", QString::number(m_pCloudErodeValueSpin->value()) },

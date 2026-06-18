@@ -53,6 +53,7 @@ private:
     QDoubleSpinBox* m_pCloudMergeLinesDistanceSpin = nullptr;
     QDoubleSpinBox* m_pCloudClusterToleranceSpin = nullptr;
     QCheckBox* m_pCloudClusterCheck = nullptr;
+    QCheckBox* m_pCloudRemoveNoiseCheck = nullptr;  // is_remove_noise：SDK 库内置去噪（20260617 版新增）
     QSpinBox* m_pCloudDiscreteValueSpin = nullptr;
     QSpinBox* m_pCloudDilateValueSpin = nullptr;
     QSpinBox* m_pCloudErodeValueSpin = nullptr;
@@ -82,6 +83,10 @@ private:
     QSpinBox* m_pPiecewiseMinSegmentSpin = nullptr;
     QSpinBox* m_pMinPointSpin = nullptr;
     QSpinBox* m_pSmoothRadiusSpin = nullptr;
+    QDoubleSpinBox* m_pAzimuthTurnThresholdSpin = nullptr;       // 拐点转角阈值(度)
+    QSpinBox* m_pAzimuthHeadingWindowSpin = nullptr;             // 拐点拟合窗口(点)
+    QDoubleSpinBox* m_pAzimuthNmsSpanSpin = nullptr;             // 拐点NMS弧长(mm)
+    QDoubleSpinBox* m_pAzimuthStraightenResidualSpin = nullptr;  // 直线化兜底残差(mm)
     QCheckBox* m_pSlopeConsistentCornerFitCheck = nullptr;
     QCheckBox* m_pExportFitDebugCloudCheck = nullptr;
     QCheckBox* m_pExportWorkpieceFrameDebugCheck = nullptr;

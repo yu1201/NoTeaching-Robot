@@ -266,6 +266,19 @@ Get-ChildItem -LiteralPath $fanucSourceDir -File | Where-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $fanucTargetDir $_.Name) -Force
 }
 
+# Ship BCPD (self-contained bcpd.exe + MIT license) for the model-alignment / point-cloud
+# denoising feature. Runtime locates it at <root>\SDK\BCPD\bcpd.exe.
+$bcpdSourceDir = Join-Path $repoRoot "SDK\BCPD"
+$bcpdTargetDir = Join-Path $packageDir "SDK\BCPD"
+if (Test-Path -LiteralPath $bcpdSourceDir) {
+    New-Item -ItemType Directory -Path $bcpdTargetDir -Force | Out-Null
+    Get-ChildItem -LiteralPath $bcpdSourceDir -File | Where-Object {
+        $_.Extension.ToLowerInvariant() -in @(".exe", ".md", ".txt")
+    } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $bcpdTargetDir $_.Name) -Force
+    }
+}
+
 if (-not $SkipFanucCompilerTools) {
     $fanucCompilerSourceDir = Find-FirstExistingPath @(
         "C:\Program Files (x86)\FANUC\WinOLPC\bin",
