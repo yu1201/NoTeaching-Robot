@@ -62,9 +62,16 @@ public:
         int piecewiseMinSegmentPoints = 4;
         int minPointCount = 3;
         int smoothRadius = 2;
-        // 输入已去噪标志：SDK 的 is_remove_noise 已开启(基础焊道已是干净稠密点云)时由调用方置 true，
-        // 几何流程随之跳过自身的 MAD 去噪/分支去噪与投影平滑——对已清洗点重复处理会削圆尖角、移位拐点。
+        // 输入已去噪标志：SDK 的 is_remove_noise 已开启(基础焊道已是干净稠密点云)时由调用方置 true。
+        // 几何流程随之：①跳过自身的 MAD 去噪/分支去噪与投影平滑(重复处理会削圆尖角、移位拐点)；
+        // ②拐点检测改用方位角法(下列参数)——干净输入上 DP「离弦最远点」会把缓变/台阶拐点标偏、
+        // 漏检真折角，方位角法判方向转折角度，天然区分真折角与波纹起伏。
         bool inputAlreadyDenoised = false;
+        int azimuthHeadingWindow = 10;           // K：左右两段方向的局部最小二乘拟合跨度（点）
+        double azimuthTurnThresholdDeg = 22.0;   // 候选转角阈值（度）：滤掉波纹板侧向小起伏
+        double azimuthNmsSpanMm = 12.0;          // 非极大值抑制：同区域合并的主轴弧长
+        double azimuthStraightenResidualMm = 6.0;// 段内偏离弦超此值才补拐点（漏检兜底）。须大于
+                                                 // 波纹起伏幅度，否则把周期起伏误当漏检拐点过补
         // 点云投影提取（完整点云→下层焊道轨迹）参数；0 表示自动按滤波参数派生（原硬编码行为）。
         double projectionStationWindowMm = 0.0;     // 站位窗口：0=max(2.5, 采样步长*1.5)
         double projectionTransverseWindowMm = 0.0;  // 横向窗口：0=max(10, 搜索窗口*1.5)
