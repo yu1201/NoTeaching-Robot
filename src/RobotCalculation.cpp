@@ -414,6 +414,18 @@ void SmoothGeometryProjectedPoints(QVector<GeometryProjectedPoint>* projected, i
         return;
     }
 
+    if (smoothRadius <= 0)
+    {
+        // CleanInputAzimuth：输入已是 SDK 重建的干净稠密焊道，不做均值平滑
+        //（平滑会削圆尖角、把拐点向缓侧搬移半个窗口），smoothH/smoothN 直接取原值。
+        for (GeometryProjectedPoint& point : *projected)
+        {
+            point.smoothH = point.h;
+            point.smoothN = point.n;
+        }
+        return;
+    }
+
     const int radius = std::max(1, std::min(8, smoothRadius));
     const QVector<GeometryProjectedPoint> source = *projected;
     const int projectedCount = static_cast<int>(source.size());
@@ -3306,6 +3318,123 @@ QVector<int> PruneNonMonotonicFittedGeometryKeys(
     return keyIndexes;
 }
 
+// ===== CleanInputAzimuth：方位角拐点检测（仅 SDK 已清洗的稠密基础焊道用）=====
+// 在 (s, smoothH) 投影面上，对每点用前后各 K 点跨度的切向方位角之差求带符号转角；
+// 转角超阈的点经"同区域保留转角最大"NMS 后作为拐角。相比 Douglas-Peucker 取"离弦最远点"
+// （缓变/台阶段拐点偏一二十 mm、平滑后漏检真折角），方位角峰值天然落在真折角顶点上。
+QVector<int> BuildAzimuthCornerKeyIndexes(
+    const QVector<GeometryProjectedPoint>& projected,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    constexpr double kPi = 3.14159265358979323846;
+    QVector<int> keys;
+    const int n = static_cast<int>(projected.size());
+    if (n < 2)
+    {
+        if (n == 1) keys.push_back(0);
+        return keys;
+    }
+
+    const int k = std::max(2, params.azimuthHeadingWindow);
+    const double turnThreshold = std::max(1.0, params.azimuthTurnThresholdDeg) * kPi / 180.0;
+    const double nmsSpan = std::max(1.0, params.azimuthNmsSpanMm);
+    const int guard = k;
+
+    // 带符号转角：leftDir = P(i)-P(i-k)，rightDir = P(i+k)-P(i)，转角 = 两向量有符号夹角。
+    QVector<double> signedTurn(n, 0.0);
+    for (int i = guard; i < n - guard; ++i)
+    {
+        // 局部最小二乘拟合左右两段方向（比两点差分更抗波纹板侧向小起伏，减少弱拐角误检），
+        // 方向对齐到焊缝前进向（拟合方向符号任意，用端点差分参考向量定号）。
+        Eigen::Vector2d leftDir = FitGeometrySegmentLine(projected, i - k, i).direction;
+        Eigen::Vector2d rightDir = FitGeometrySegmentLine(projected, i, i + k).direction;
+        const Eigen::Vector2d leftRef =
+            GeometrySmoothedProjection2D(projected[i]) - GeometrySmoothedProjection2D(projected[i - k]);
+        const Eigen::Vector2d rightRef =
+            GeometrySmoothedProjection2D(projected[i + k]) - GeometrySmoothedProjection2D(projected[i]);
+        if (leftDir.squaredNorm() <= 1e-12 || rightDir.squaredNorm() <= 1e-12) continue;
+        if (leftDir.dot(leftRef) < 0.0) leftDir = -leftDir;
+        if (rightDir.dot(rightRef) < 0.0) rightDir = -rightDir;
+        leftDir.normalize();
+        rightDir.normalize();
+        signedTurn[i] = std::atan2(Cross2D(leftDir, rightDir), leftDir.dot(rightDir));
+    }
+
+    // 候选：转角超阈。
+    QVector<int> candidates;
+    for (int i = guard; i < n - guard; ++i)
+    {
+        if (std::abs(signedTurn[i]) >= turnThreshold) candidates.push_back(i);
+    }
+
+    // 非极大值抑制：按 |转角| 降序贪心选取，抑制主轴弧长距离 < nmsSpan 的其它候选
+    //（等价于"同一转角区域只保留转角最大的顶点"）。
+    std::sort(candidates.begin(), candidates.end(),
+        [&](int a, int b) { return std::abs(signedTurn[a]) > std::abs(signedTurn[b]); });
+    QVector<int> corners;
+    for (int idx : candidates)
+    {
+        bool suppressed = false;
+        for (int kept : corners)
+        {
+            if (std::abs(projected[idx].s - projected[kept].s) < nmsSpan) { suppressed = true; break; }
+        }
+        if (!suppressed) corners.push_back(idx);
+    }
+    std::sort(corners.begin(), corners.end());  // 回到沿焊缝的索引顺序
+
+    // 组装 起点 + 拐角(满足最短段距离) + 终点。
+    const double minSegMm = std::max(params.sampleStep * 2.0, 2.0);
+    keys.push_back(0);
+    for (int idx : corners)
+    {
+        if (idx <= 0 || idx >= n - 1) continue;
+        if (std::abs(projected[idx].s - projected[keys.last()].s) < minSegMm) continue;
+        keys.push_back(idx);
+    }
+    if (keys.last() != n - 1) keys.push_back(n - 1);
+    return keys;
+}
+
+// 直线化兜底：某相邻关键点段内实际点偏离两端弦超阈 → 该段藏着漏检拐点，插入离弦最远点，
+// 避免下游线性插值把折线连成直线(抄近路)。真直段残差远小于阈值，不触发。
+QVector<int> SplitNonStraightAzimuthSegments(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    QVector<int> keys = keyIndexes;
+    if (keys.size() < 2) return keys;
+    const double residualThreshold = std::max(0.5, params.azimuthStraightenResidualMm);
+    for (int iter = 0; iter < 8; ++iter)
+    {
+        QVector<int> next;
+        next.push_back(keys.first());
+        bool inserted = false;
+        for (int kp = 0; kp + 1 < keys.size(); ++kp)
+        {
+            const int a = keys[kp];
+            const int b = keys[kp + 1];
+            double maxDist = -1.0;
+            int maxIdx = -1;
+            for (int i = a + 1; i < b; ++i)
+            {
+                const double d = GeometryDistanceToSegment2D(projected, a, b, i);
+                if (d > maxDist) { maxDist = d; maxIdx = i; }
+            }
+            if (maxIdx > a && maxIdx < b && maxDist > residualThreshold)
+            {
+                next.push_back(maxIdx);
+                inserted = true;
+            }
+            next.push_back(b);
+        }
+        keys = next;
+        if (!inserted) break;
+    }
+    return keys;
+}
+
 RobotCalculation::LowerWeldPointType GeometryCornerType(
     const QVector<GeometryProjectedPoint>& projected,
     const QVector<int>& keyIndexes,
@@ -4710,9 +4839,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         }
     }
 
+    const bool azimuthClean =
+        params.geometryStrategy == LowerWeldGeometryStrategy::CleanInputAzimuth;
+
     int denoiseRejectedCount = 0;
-    const QVector<IndexedPoint3D> denoisedPoints =
-        RemoveGeometryLocalOutliers(validPoints, params, &denoiseRejectedCount);
+    const QVector<IndexedPoint3D> denoisedPoints = azimuthClean
+        ? validPoints  // 输入已是 SDK 清洗的干净焊道，跳过为带噪相机点设计的 MAD 局部去噪
+        : RemoveGeometryLocalOutliers(validPoints, params, &denoiseRejectedCount);
 
     if (denoisedPoints.size() < std::max(2, params.minPointCount))
     {
@@ -4748,10 +4881,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         axes.first,
         axes.second,
         normalAxis,
-        params.smoothRadius);
+        azimuthClean ? std::max(0, params.azimuthSmoothRadius) : params.smoothRadius);
     int projectedBranchRejectedCount = 0;
-    projected = RemoveGeometryProjectedBranchOutliers(projected, params, &projectedBranchRejectedCount);
-    denoiseRejectedCount += projectedBranchRejectedCount;
+    if (!azimuthClean)  // 干净焊道无激光分支岛，跳过分支离群剔除以免误伤拐角附近点
+    {
+        projected = RemoveGeometryProjectedBranchOutliers(projected, params, &projectedBranchRejectedCount);
+        denoiseRejectedCount += projectedBranchRejectedCount;
+    }
     int slopeWaveRejectedCount = 0;
     if (params.geometryStrategy == LowerWeldGeometryStrategy::SlopeWaveFiltered)
     {
@@ -4768,38 +4904,49 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         return result;
     }
 
-    const QVector<int> initialKeyIndexes =
-        params.geometryStrategy == LowerWeldGeometryStrategy::RobustSegmentedKeys
-            ? BuildRobustSegmentedGeometryKeyIndexes(projected, params)
-            : BuildGeometryKeyIndexes(projected, params);
-    QVector<int> keyIndexes = PruneRedundantSameSideGeometryKeys(projected, initialKeyIndexes);
-    keyIndexes = PruneGeometrySpikeDrivenKeys(projected, keyIndexes, params);
-    keyIndexes = PruneShortSameTypeGeometryRuns(projected, keyIndexes, params);
-    keyIndexes = PruneNonMonotonicFittedGeometryKeys(
-        projected,
-        keyIndexes,
-        center,
-        axes.first,
-        axes.second,
-        normalAxis,
-        params.useSlopeConsistentCornerFit);
-    keyIndexes = RefineGeometryKeysBySegmentDeviation(
-        projected,
-        keyIndexes,
-        center,
-        axes.first,
-        axes.second,
-        params);
-    keyIndexes = PruneGeometrySpikeDrivenKeys(projected, keyIndexes, params);
-    keyIndexes = PruneShortSameTypeGeometryRuns(projected, keyIndexes, params);
-    keyIndexes = PruneNonMonotonicFittedGeometryKeys(
-        projected,
-        keyIndexes,
-        center,
-        axes.first,
-        axes.second,
-        normalAxis,
-        params.useSlopeConsistentCornerFit);
+    QVector<int> keyIndexes;
+    if (azimuthClean)
+    {
+        // 方位角拐点检测 + 直线化兜底；顶点位置后续由 BuildFittedGeometryKeyPoints 局部求交精修，
+        // 内外角仍由 GeometryCornerType 判定。不走为带噪相机点设计的 DP+Prune+Refine 链。
+        keyIndexes = BuildAzimuthCornerKeyIndexes(projected, params);
+        keyIndexes = SplitNonStraightAzimuthSegments(projected, keyIndexes, params);
+    }
+    else
+    {
+        const QVector<int> initialKeyIndexes =
+            params.geometryStrategy == LowerWeldGeometryStrategy::RobustSegmentedKeys
+                ? BuildRobustSegmentedGeometryKeyIndexes(projected, params)
+                : BuildGeometryKeyIndexes(projected, params);
+        keyIndexes = PruneRedundantSameSideGeometryKeys(projected, initialKeyIndexes);
+        keyIndexes = PruneGeometrySpikeDrivenKeys(projected, keyIndexes, params);
+        keyIndexes = PruneShortSameTypeGeometryRuns(projected, keyIndexes, params);
+        keyIndexes = PruneNonMonotonicFittedGeometryKeys(
+            projected,
+            keyIndexes,
+            center,
+            axes.first,
+            axes.second,
+            normalAxis,
+            params.useSlopeConsistentCornerFit);
+        keyIndexes = RefineGeometryKeysBySegmentDeviation(
+            projected,
+            keyIndexes,
+            center,
+            axes.first,
+            axes.second,
+            params);
+        keyIndexes = PruneGeometrySpikeDrivenKeys(projected, keyIndexes, params);
+        keyIndexes = PruneShortSameTypeGeometryRuns(projected, keyIndexes, params);
+        keyIndexes = PruneNonMonotonicFittedGeometryKeys(
+            projected,
+            keyIndexes,
+            center,
+            axes.first,
+            axes.second,
+            normalAxis,
+            params.useSlopeConsistentCornerFit);
+    }
     if (keyIndexes.size() < 2)
     {
         result.error = "几何特征提取失败，未找到可用的起点/终点。";

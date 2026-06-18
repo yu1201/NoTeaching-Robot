@@ -388,6 +388,8 @@ QString GeometryStrategyName(RobotCalculation::LowerWeldGeometryStrategy strateg
     case RobotCalculation::LowerWeldGeometryStrategy::RobustSegmentedKeys:
         return PointCloudProcessingConfig::FeaturePointStrategyDisplayName(
             PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys);
+    case RobotCalculation::LowerWeldGeometryStrategy::CleanInputAzimuth:
+        return QStringLiteral("清洗输入·方位角拐点");
     case RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry:
     default:
         return PointCloudProcessingConfig::FeaturePointStrategyDisplayName(
@@ -797,10 +799,22 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 appendLog("已焊起点截断：SDK 未检测到已焊段，焊道不截断。");
             }
         }
-        RobotCalculation::MeasureThenWeldAnalysisResult analysis = useBaseWeldFit
-            ? RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
-                ToIndexedInput(workingExtraction.points), fitParams)
-            : PointCloudExtractionProcessor::BuildAnalysisResult(workingExtraction, fitParams);
+        RobotCalculation::MeasureThenWeldAnalysisResult analysis;
+        if (useBaseWeldFit)
+        {
+            // SDK 基础焊道已是干净稠密点云，改用 CleanInputAzimuth 策略（跳去噪/不平滑 +
+            // 方位角拐点检测），解决旧 DP 拟合在缓变/台阶拐角标偏、漏检、抄近路的问题。
+            // 只改本次局部拷贝，不动 fitParams 本体——CompareSchemes 等仍用原 LegacyGeometry。
+            RobotCalculation::LowerWeldFilterParams baseWeldParams = fitParams;
+            baseWeldParams.geometryStrategy =
+                RobotCalculation::LowerWeldGeometryStrategy::CleanInputAzimuth;
+            analysis = RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+                ToIndexedInput(workingExtraction.points), baseWeldParams);
+        }
+        else
+        {
+            analysis = PointCloudExtractionProcessor::BuildAnalysisResult(workingExtraction, fitParams);
+        }
         if (!analysis.ok)
         {
             if (appendLog)
