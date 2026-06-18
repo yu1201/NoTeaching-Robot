@@ -384,6 +384,15 @@ QString PrepareRuntimeExternalConfigPath(
         changed = true;
     }
 
+    // 20260617 版 DLL 强制要求 is_remove_noise 存在，缺失即报 "Para_name is_remove_noise not found"。
+    // 现场配置可能仍指向不含该键的旧 ini（用户自定义 config 路径或历史模板），这里兜底注入默认
+    // 开启；已显式配置过（界面写入 true/false）则 ConfigLineValue 非空、保留不覆盖。
+    if (ConfigLineValue(content, "is_remove_noise").isEmpty())
+    {
+        ReplaceConfigValue(&content, "is_remove_noise", "true");
+        changed = true;
+    }
+
     const QString normalizedBaseWeldPath = baseWeldOutputPath.trimmed();
     if (!normalizedBaseWeldPath.isEmpty())
     {
