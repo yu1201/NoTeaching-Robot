@@ -375,6 +375,30 @@ QString SampleAxisName(RobotCalculation::SampleAxis axis)
     return axis == RobotCalculation::SampleAxis::AxisX ? "X" : "Y";
 }
 
+// 读 SDK 配置 ini 的 is_remove_noise 开关：决定程序滤波拟合是否跳过自身去噪/平滑
+//（缺失/读不到默认按已去噪，与 SDK 新版默认开 + runtime 兜底注入一致）。
+bool SdkRemoveNoiseEnabled(const QString& configPath)
+{
+    if (configPath.trimmed().isEmpty()) return true;
+    QFile file(configPath);
+    if (!file.open(QIODevice::ReadOnly)) return true;
+    const QByteArray content = file.readAll();
+    file.close();
+    for (const QByteArray& raw : content.split('\n'))
+    {
+        const QByteArray line = raw.trimmed();
+        if (line.startsWith("//") || line.startsWith("#")) continue;
+        const int eq = line.indexOf('=');
+        if (eq < 0) continue;
+        if (line.left(eq).trimmed().toLower() == "is_remove_noise")
+        {
+            const QByteArray value = line.mid(eq + 1).trimmed().toLower();
+            return value == "1" || value == "true" || value == "yes";
+        }
+    }
+    return true;  // 缺失默认按已去噪
+}
+
 QString GeometryStrategyName(RobotCalculation::LowerWeldGeometryStrategy strategy)
 {
     switch (strategy)
@@ -388,8 +412,6 @@ QString GeometryStrategyName(RobotCalculation::LowerWeldGeometryStrategy strateg
     case RobotCalculation::LowerWeldGeometryStrategy::RobustSegmentedKeys:
         return PointCloudProcessingConfig::FeaturePointStrategyDisplayName(
             PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys);
-    case RobotCalculation::LowerWeldGeometryStrategy::CleanInputAzimuth:
-        return QStringLiteral("清洗输入·方位角拐点");
     case RobotCalculation::LowerWeldGeometryStrategy::LegacyGeometry:
     default:
         return PointCloudProcessingConfig::FeaturePointStrategyDisplayName(
@@ -802,14 +824,19 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         RobotCalculation::MeasureThenWeldAnalysisResult analysis;
         if (useBaseWeldFit)
         {
-            // SDK 基础焊道已是干净稠密点云，改用 CleanInputAzimuth 策略（跳去噪/不平滑 +
-            // 方位角拐点检测），解决旧 DP 拟合在缓变/台阶拐角标偏、漏检、抄近路的问题。
-            // 只改本次局部拷贝，不动 fitParams 本体——CompareSchemes 等仍用原 LegacyGeometry。
+            // 根据 SDK 去噪开关 is_remove_noise 自动判断：SDK 已去噪则程序滤波拟合不再重复去噪/平滑
+            //（重复处理会削圆尖角、移位拐点，导致拐点标偏/漏检/焊道抄近路）；未去噪则保留程序去噪。
+            // 只改本次局部拷贝，不动 fitParams 本体——CompareSchemes 等其它路径不受影响。
             RobotCalculation::LowerWeldFilterParams baseWeldParams = fitParams;
-            baseWeldParams.geometryStrategy =
-                RobotCalculation::LowerWeldGeometryStrategy::CleanInputAzimuth;
+            baseWeldParams.inputAlreadyDenoised = SdkRemoveNoiseEnabled(settings.configPath);
             analysis = RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
                 ToIndexedInput(workingExtraction.points), baseWeldParams);
+            if (appendLog)
+            {
+                appendLog(QString("SDK去噪开关 is_remove_noise=%1，程序滤波拟合%2自身去噪/平滑。")
+                    .arg(baseWeldParams.inputAlreadyDenoised ? "开" : "关")
+                    .arg(baseWeldParams.inputAlreadyDenoised ? "跳过" : "保留"));
+            }
         }
         else
         {

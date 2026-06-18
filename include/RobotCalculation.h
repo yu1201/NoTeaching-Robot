@@ -36,8 +36,7 @@ public:
         LegacyGeometry = 0,
         SlopeWaveFiltered = 1,
         RobustSegmentedKeys = 2,
-        WorkpieceProjection = 3,
-        CleanInputAzimuth = 4   // 输入已清洗(SDK基础焊道)：跳去噪/不平滑 + 方位角拐点检测
+        WorkpieceProjection = 3
     };
 
     struct LowerWeldFilterParams
@@ -63,15 +62,9 @@ public:
         int piecewiseMinSegmentPoints = 4;
         int minPointCount = 3;
         int smoothRadius = 2;
-        // CleanInputAzimuth 策略专用（输入已是 SDK 重建的干净稠密基础焊道）：
-        // 用前后各 K 点切向方位角之差求转角，超阈点经"同区域保留转角最大"NMS 作拐点，
-        // 替代 Douglas-Peucker"离弦最远点"——后者会把缓变/台阶段拐点标偏一二十 mm、漏检真折角。
-        int azimuthHeadingWindow = 10;           // K：左右两段方向的局部最小二乘拟合跨度（点）
-        double azimuthTurnThresholdDeg = 22.0;   // 候选转角阈值（度）：滤掉波纹板侧向小起伏
-        double azimuthNmsSpanMm = 12.0;          // 非极大值抑制：同区域合并的主轴弧长
-        double azimuthStraightenResidualMm = 6.0;// 段内偏离弦超此值才补拐点（漏检兜底）。须大于
-                                                 // 波纹板表面起伏幅度，否则把周期起伏误当漏检拐点过补
-        int azimuthSmoothRadius = 0;             // 该策略投影平滑半径：0=不平滑，直接用原始 h/n
+        // 输入已去噪标志：SDK 的 is_remove_noise 已开启(基础焊道已是干净稠密点云)时由调用方置 true，
+        // 几何流程随之跳过自身的 MAD 去噪/分支去噪与投影平滑——对已清洗点重复处理会削圆尖角、移位拐点。
+        bool inputAlreadyDenoised = false;
         // 点云投影提取（完整点云→下层焊道轨迹）参数；0 表示自动按滤波参数派生（原硬编码行为）。
         double projectionStationWindowMm = 0.0;     // 站位窗口：0=max(2.5, 采样步长*1.5)
         double projectionTransverseWindowMm = 0.0;  // 横向窗口：0=max(10, 搜索窗口*1.5)
