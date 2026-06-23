@@ -59,6 +59,12 @@ public:
         int fitAzimuthHeadingWindow = 10;            // 左右两段方向的局部最小二乘拟合跨度(点)
         double fitAzimuthNmsSpanMm = 12.0;           // 非极大值抑制弧长：同区域只保留转角最大的拐点
         double fitAzimuthStraightenResidualMm = 6.0; // 直线化兜底残差：段内偏离弦超此值才补拐点
+        // 板材搭接 X 错位台阶检测(默认关，仅几何拟合流程)：双侧平台最小二乘→两侧分别拟合+保留台阶
+        bool enableLapMisalignmentSplit = false;
+        double lapStepHeightThresholdMm = 1.0;   // 台阶高门(中心两线高度差)
+        double lapStepStationWindowMm = 10.0;    // 单侧拟合窗口长度(主轴 mm)
+        double lapStepSideFlatnessMm = 0.12;     // 平台残差 rms 上限(排波纹/噪声)
+        double lapStepPlatformSlopeMax = 0.10;   // 平台斜率门(排拐角斜边)
         // 点云投影提取参数（方法③点云算法+拟合专用；0=按滤波参数自动派生，等同原硬编码行为）。
         double projectionStationWindowMm = 0.0;
         double projectionTransverseWindowMm = 0.0;

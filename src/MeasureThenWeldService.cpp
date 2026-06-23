@@ -2454,11 +2454,12 @@ struct WeldPoseFileRecord
     double bz = 0.0;
     QString pointType;
     QString segmentKind;
+    bool isLapStep = false;  // 搭接错位台阶端点：下游圆角/平滑/抽样/补偿据此豁免，保住垂直 X 台阶
 };
 
 QString BuildWeldPoseFileRecordLine(const WeldPoseFileRecord& record)
 {
-    return QString("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13")
+    return QString("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14")
         .arg(record.weldIndex)
         .arg(record.rawIndex)
         .arg(record.point.x(), 0, 'f', 6)
@@ -2471,7 +2472,8 @@ QString BuildWeldPoseFileRecordLine(const WeldPoseFileRecord& record)
         .arg(record.by, 0, 'f', 6)
         .arg(record.bz, 0, 'f', 6)
         .arg(record.pointType)
-        .arg(record.segmentKind);
+        .arg(record.segmentKind)
+        .arg(record.isLapStep ? 1 : 0);
 }
 
 bool TryParseWeldPoseFileRecord(const QString& line, WeldPoseFileRecord& record)
@@ -2512,6 +2514,7 @@ bool TryParseWeldPoseFileRecord(const QString& line, WeldPoseFileRecord& record)
     record.bz = parts[10].trimmed().toDouble(&bzOk);
     record.pointType = parts[11].trimmed();
     record.segmentKind = parts[12].trimmed();
+    record.isLapStep = (parts.size() >= 14 && parts[13].trimmed().toInt() != 0);  // 旧文件无此列→false(向后兼容)
 
     if (!(weldIndexOk && rawIndexOk && xOk && yOk && zOk
         && rxOk && ryOk && rzOk && bxOk && byOk && bzOk))
@@ -3077,11 +3080,12 @@ QVector<WeldPoseFileRecord> SampleFinalWeldTrajectoryRecords(
             {
                 kept.pop_back();
             }
-            if (arcLengthMm - kept.back().arcLengthMm >= minGapMm)
+            // 搭接错位台阶两端点必须成对、原样保留：绕过最小间距闸门强制压入，否则台阶被抹成斜线斜穿。
+            if (records[index].isLapStep || arcLengthMm - kept.back().arcLengthMm >= minGapMm)
             {
                 kept.push_back({ index, true, arcLengthMm });
             }
-            // 与前一锚点仍不足间距时丢弃当前锚，保证输出不含过密点。
+            // 与前一锚点仍不足间距时丢弃当前锚，保证输出不含过密点（台阶端点除外）。
         }
         else if (arcLengthMm - kept.back().arcLengthMm >= minGapMm)
         {
@@ -3096,7 +3100,9 @@ QVector<WeldPoseFileRecord> SampleFinalWeldTrajectoryRecords(
     {
         arcLengthMm += tailSegmentMm;
     }
-    while (kept.size() > 1 && arcLengthMm - kept.back().arcLengthMm < minGapMm)
+    while (kept.size() > 1
+        && !records[kept.back().index].isLapStep   // 台阶端点不被终点必留逻辑吞掉
+        && arcLengthMm - kept.back().arcLengthMm < minGapMm)
     {
         kept.pop_back();
     }
@@ -3231,7 +3237,11 @@ bool BuildWeldPoseMoveInfos(
             useTransitionSpeed ? transitionLinearSpeed : linearSpeedMmPerSec,
             0.0,
             0.0);
-        moveInfo.dOverlapRel = preset != nullptr ? preset->stepOverlapRel : 20.0;
+        // 搭接错位台阶端点用精确转角(overlap=0)：否则连续运动 20% 转弯区会把台阶两个近 90°角混合圆化，
+        // 抵消上游保台阶的处理。台阶点精确定位，机器人精确走出垂直 X 台阶。
+        moveInfo.dOverlapRel = record.isLapStep
+            ? 0.0
+            : (preset != nullptr ? preset->stepOverlapRel : 20.0);
         moveInfo.nMoveDevice = 0;
         moveInfo.nTrackNo = 0;
         moveInfo.adBasePosVar[0] = record.bx;
@@ -3830,7 +3840,8 @@ WeldCornerCandidateInfo EvaluateWeldCornerCandidate(
         ? minMarkedCornerAngleRad
         : autoCornerAngleRad;
     info.isCandidate = info.theta >= minAngle
-        && info.theta <= maxCornerAngleRad;
+        && info.theta <= maxCornerAngleRad
+        && !corner.isLapStep;  // 搭接错位台阶端点：禁止圆角化，保住垂直 X 台阶
     return info;
 }
 
@@ -4466,7 +4477,8 @@ int SmoothRemainingUnroundedWeldCorners(
             !isMarkedCorner
             && records[index].pointType.compare(QStringLiteral("normal"), Qt::CaseInsensitive) == 0
             && hasNearbyTransitionKind(index, 2);
-        if (IsWeldPoseArcRecord(records[index])
+        if (records[index].isLapStep   // 搭接错位台阶端点：禁止平滑/桥接，保住垂直 X 台阶
+            || IsWeldPoseArcRecord(records[index])
             || (!isMarkedCorner && !isResidualTransitionCorner))
         {
             continue;
@@ -4601,6 +4613,10 @@ QVector<int> CollectSameKindLineWindowBefore(
         .toLower();
     for (int index = endIndex; index >= 0 && indices.size() < maxPointCount; --index)
     {
+        if (records[index].isLapStep)
+        {
+            continue;  // 台阶端点侧向跳变会污染平台直线拟合方向，排除出拟合窗口
+        }
         const QString kind = NormalizeSeamCompSegmentKind(records[index].segmentKind)
             .trimmed()
             .toLower();
@@ -4629,6 +4645,10 @@ QVector<int> CollectSameKindLineWindowAfter(
         .toLower();
     for (int index = beginIndex; index < records.size() && indices.size() < maxPointCount; ++index)
     {
+        if (records[index].isLapStep)
+        {
+            continue;  // 台阶端点侧向跳变会污染平台直线拟合方向，排除出拟合窗口
+        }
         const QString kind = NormalizeSeamCompSegmentKind(records[index].segmentKind)
             .trimmed()
             .toLower();
@@ -4889,6 +4909,7 @@ WeldCornerRestoreStats RestoreTrimmedWeldCornersByLineIntersection(
     for (const WeldPoseFileRecord& corner : recordsBeforeTrim)
     {
         if (!IsWeldCornerPointType(corner.pointType)
+            || corner.isLapStep   // 搭接错位台阶端点：两侧平行线求交无意义，跳过交点重建
             || corner.rawIndex < minRawIndex
             || corner.rawIndex > maxRawIndex)
         {
@@ -5248,6 +5269,14 @@ WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
     {
         recordSeamCompSlots[index] = FindSeamCompSlotForRecord(preset, records[index]);
     }
+    // 搭接错位台阶两点强制同槽(后者沿用前者)：使两点 weldZComp/水平补偿完全相同，X 台阶刚性保留不被斜切/加 Z 差。
+    for (int index = 1; index < records.size(); ++index)
+    {
+        if (records[index].isLapStep && records[index - 1].isLapStep)
+        {
+            recordSeamCompSlots[index] = recordSeamCompSlots[index - 1];
+        }
+    }
 
     for (int index = 0; index < records.size(); ++index)
     {
@@ -5484,7 +5513,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     }
 
     lines.reserve(static_cast<size_t>(result.points.size()) + 2);
-    lines.push_back("weld_index raw_index x y z rx ry rz bx by bz point_type segment_kind");
+    lines.push_back("weld_index raw_index x y z rx ry rz bx by bz point_type segment_kind is_lap_step");
 
     std::vector<int> keyPointPositions;
     std::vector<RobotCalculation::LowerWeldPointType> keyPointTypes;
@@ -5545,6 +5574,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
 
     std::vector<SegmentInfo> segments;
     double previousSegmentRz = preset.measureReferenceRz;
+    QString previousSegmentKind;
     for (size_t segmentIndex = 0; segmentIndex + 1 < keyPointPositions.size(); ++segmentIndex)
     {
         SegmentInfo segment;
@@ -5568,6 +5598,18 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             segment.kind = LowerWeldSegmentKindText(segment.beginType, segment.endMarkerType);
         }
 
+        // 搭接错位台阶段(两端均为 geometry_lap_step)：段方向≈侧向，不当独立焊段——继承上一段(平台)类型，
+        // 使其补偿槽/段类型归属于平台而非被误判为斜边。
+        const bool isLapStepSegment =
+            result.points[segment.begin].source == QStringLiteral("geometry_lap_step")
+            && result.points[segment.nextBegin].source == QStringLiteral("geometry_lap_step");
+        if (isLapStepSegment)
+        {
+            // 台阶段无条件落到平台 kind(首段即台阶时 previousSegmentKind 为空也兜底)，绝不留几何角/坡道类型。
+            segment.kind = previousSegmentKind.isEmpty()
+                ? QStringLiteral("low_platform") : previousSegmentKind;
+        }
+
         bool segmentValid = false;
         const double segmentDirectionDeg = ComputeDirectionAngleDeg(
             result.points[segment.begin].point,
@@ -5576,7 +5618,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         segment.directionDeg = segmentDirectionDeg;
         segment.directionValid = segmentValid;
         double segmentRz = previousSegmentRz;
-        if (segmentValid)
+        if (segmentValid && !isLapStepSegment)
         {
             double rejectedRz = 0.0;
             double normalReferenceDistance = 0.0;
@@ -5620,6 +5662,18 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             segment.baseRz = NormalizeRobotRzOutputRange(baseRz);
             segmentRz = NormalizeAngleNear(baseRz, previousSegmentRz);
         }
+        else if (isLapStepSegment)
+        {
+            // 台阶段：焊枪保持上一平台段姿态横移跨过错位，RZ 沿用 previousSegmentRz、不按焊道法向重算
+            // （台阶段方向≈侧向，按法向算会产生 ~90° 姿态突跳，危及焊枪/工件安全）。
+            segment.baseRz = NormalizeRobotRzOutputRange(previousSegmentRz);
+            segment.directionValid = false;
+            if (appendLog)
+            {
+                appendLog(QString("搭接错位台阶段：RZ 沿用上一段=%1 deg，不按焊道法向重算(避免姿态突跳)。")
+                    .arg(NormalizeRobotRzOutputRange(previousSegmentRz), 0, 'f', 3));
+            }
+        }
 
         segment.fixedRz = NormalizeRobotRzOutputRange(segmentRz);
         segment.distanceToEnd.resize(segment.end - segment.begin + 1);
@@ -5656,6 +5710,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
 
         segments.push_back(segment);
         previousSegmentRz = segmentRz;
+        previousSegmentKind = segment.kind;
     }
 
     if (segments.empty())
@@ -6021,6 +6076,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     records.reserve(sampleDistances.size());
 
     int weldIndex = 1;
+    QString pendingLapStepKind;  // 台阶第一点(A1)记下平台 kind，第二点(A2,属下一段)沿用，使两点补偿同槽
     for (double sampleDistance : sampleDistances)
     {
         if (sampleDistance < distanceFromStart[weldStartIndex] - 1e-9
@@ -6044,6 +6100,20 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         }
 
         const SegmentInfo& segment = segments[segmentIndex];
+        // 搭接错位台阶两点(A1/A2)补偿同槽：A1 记下台阶段平台 kind，A2(属下一段)沿用，
+        // 保证焊缝/姿态补偿对两点施加相同位移，X 台阶刚性保留不被斜切。
+        const bool pointIsLapStep = (sourceIndex >= 0 && sourceIndex < result.points.size()
+            && result.points[sourceIndex].source == QStringLiteral("geometry_lap_step"));
+        QString effectiveSegmentKind = segment.kind;
+        if (pointIsLapStep)
+        {
+            if (pendingLapStepKind.isEmpty()) { pendingLapStepKind = segment.kind; }
+            effectiveSegmentKind = pendingLapStepKind;
+        }
+        else
+        {
+            pendingLapStepKind.clear();
+        }
         const bool hasNextSegment = segmentIndex + 1 < static_cast<int>(segments.size());
         const double nextSegmentRz = hasNextSegment
             ? NormalizeAngleNear(segments[segmentIndex + 1].fixedRz, segment.fixedRz)
@@ -6103,7 +6173,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             pointRx,
             pointRy,
             pointRz,
-            segment.kind);
+            effectiveSegmentKind);
 
         WeldPoseFileRecord record;
         record.weldIndex = weldIndex++;
@@ -6116,7 +6186,8 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         record.by = param.tStartPos.dBY;
         record.bz = param.tStartPos.dBZ;
         record.pointType = RobotCalculation::LowerWeldPointTypeName(pointType);
-        record.segmentKind = inTransition ? (segment.kind + "_transition") : segment.kind;
+        record.segmentKind = inTransition ? (effectiveSegmentKind + "_transition") : effectiveSegmentKind;
+        record.isLapStep = pointIsLapStep;
         records.push_back(record);
     }
 
@@ -8542,7 +8613,7 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
 
     QStringList outputLines;
     outputLines.reserve(records.size() + 1);
-    outputLines << "weld_index raw_index x y z rx ry rz bx by bz point_type segment_kind";
+    outputLines << "weld_index raw_index x y z rx ry rz bx by bz point_type segment_kind is_lap_step";
     for (const WeldPoseFileRecord& record : records)
     {
         outputLines << BuildWeldPoseFileRecordLine(record);
@@ -9889,6 +9960,11 @@ RobotCalculation::LowerWeldFilterParams MeasureThenWeldService::BuildTrackFitPar
     params.azimuthHeadingWindow = pointCloudSettings.fitAzimuthHeadingWindow;
     params.azimuthNmsSpanMm = pointCloudSettings.fitAzimuthNmsSpanMm;
     params.azimuthStraightenResidualMm = pointCloudSettings.fitAzimuthStraightenResidualMm;
+    params.enableLapMisalignmentSplit = pointCloudSettings.enableLapMisalignmentSplit;
+    params.lapStepHeightThresholdMm = pointCloudSettings.lapStepHeightThresholdMm;
+    params.lapStepStationWindowMm = pointCloudSettings.lapStepStationWindowMm;
+    params.lapStepSideFlatnessMm = pointCloudSettings.lapStepSideFlatnessMm;
+    params.lapStepPlatformSlopeMax = pointCloudSettings.lapStepPlatformSlopeMax;
     params.projectionStationWindowMm = pointCloudSettings.projectionStationWindowMm;
     params.projectionTransverseWindowMm = pointCloudSettings.projectionTransverseWindowMm;
     params.projectionZBandBelowMm = pointCloudSettings.projectionZBandBelowMm;

@@ -2987,6 +2987,89 @@ bool IsGeometryCornerProjectionUsable(
     return true;
 }
 
+// 直线在指定主轴 s 处的侧向高度 h（GeometryFittedLine2D 为点+方向式；近垂直线退化取点 y）。
+double GeometryLineHeightAtStation(const GeometryFittedLine2D& line, double station)
+{
+    if (std::abs(line.direction.x()) < 1e-9) return line.point.y();
+    const double t = (station - line.point.x()) / line.direction.x();
+    return line.point.y() + t * line.direction.y();
+}
+
+// 检测焊缝中心线上的板材搭接 X 错位台阶（双侧平台最小二乘判据，多判据对抗验证后选定，零误检）：
+// 候选过渡中心 s0=(s[i]+s[i+1])/2，两侧各留 gap 后取长 W 的窗口对 h=k*s+b 做最小二乘。
+// 判错位需同时满足：两侧斜率 |kL|,|kR|<kmax（近零斜率平台——这是与拐角斜边 |k|≈0.35 的核心区别，
+// 裕度高一个量级），两侧残差 rms<rmax（平整，排波纹/噪声），中心处两线高度差 |hR-hL|>jump（台阶高）。
+// 沿主轴 NMS 把过渡区多候选与过冲毛刺塌缩为单点。一律用原始 h（不用 smoothH：均值平滑会把 ~2mm
+// 窄跨度台阶展宽削平，削弱可检幅度导致漏检）。返回每个错位「过渡右侧第一点」的 projected 下标(升序)。
+QVector<int> DetectLapMisalignmentBoundaries(
+    const QVector<GeometryProjectedPoint>& projected,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    QVector<int> result;
+    const int n = static_cast<int>(projected.size());
+    if (n < 12) return result;
+
+    const double jump = std::max(0.3, params.lapStepHeightThresholdMm);   // 台阶高门(中心两线高度差)
+    const double W = std::max(2.0, params.lapStepStationWindowMm);         // 单侧拟合窗口长度(主轴 mm)
+    const double rmax = std::max(0.02, params.lapStepSideFlatnessMm);      // 平台残差 rms 门(排波纹/噪声)
+    const double kmax = std::max(0.02, params.lapStepPlatformSlopeMax);    // 平台斜率门(排拐角斜边)
+    const double gap = 1.5;            // 过渡保护带：拟合窗避开过渡区，不吃进台阶上升段
+    const double nmsSep = 4.0;         // 沿主轴 NMS 抑制半径
+    const int minSidePts = 4;          // 每侧最少有效点，不足则跳过该候选
+
+    // 对索引列表 idxs 上的 h=k*s+b 做最小二乘，输出斜率 k、截距 b、残差 rms。
+    auto fitLine = [&](const QVector<int>& idxs, double& k, double& b, double& rms) -> bool {
+        const int m = idxs.size();
+        if (m < 2) return false;
+        double Ss = 0.0, Sh = 0.0, Sss = 0.0, Ssh = 0.0;
+        for (int j : idxs) { const double s = projected[j].s, h = projected[j].h; Ss += s; Sh += h; Sss += s*s; Ssh += s*h; }
+        const double den = m * Sss - Ss * Ss;
+        if (std::abs(den) < 1e-9) { k = 0.0; b = Sh / m; }   // 近垂直退化：按常数处理
+        else { k = (m * Ssh - Ss * Sh) / den; b = (Sh - k * Ss) / m; }
+        double e2 = 0.0;
+        for (int j : idxs) { const double d = projected[j].h - (k * projected[j].s + b); e2 += d*d; }
+        rms = std::sqrt(e2 / m);
+        return true;
+    };
+
+    struct Cand { int idx; double s0; double step; };
+    QVector<Cand> cands;
+    for (int i = 0; i + 1 < n; ++i)
+    {
+        const double s0 = 0.5 * (projected[i].s + projected[i + 1].s);   // 候选过渡中心(相邻两点之间)
+        QVector<int> L, R;                                               // 按 |s-s0| 选两侧窗口点(不依赖方向/等距)
+        for (int j = 0; j < n; ++j)
+        {
+            const double d = projected[j].s - s0;
+            if (d <= -gap && d >= -(gap + W)) L.push_back(j);
+            else if (d >= gap && d <= (gap + W)) R.push_back(j);
+        }
+        if (L.size() < minSidePts || R.size() < minSidePts) continue;
+        double kL, bL, rL, kR, bR, rR;
+        if (!fitLine(L, kL, bL, rL) || !fitLine(R, kR, bR, rR)) continue;
+        if (std::abs(kL) > kmax || std::abs(kR) > kmax) continue;        // 两侧必须近零斜率平台(排拐角斜边)
+        if (rL > rmax || rR > rmax) continue;                            // 两侧必须平整(排波纹/噪声)
+        const double step = std::abs((kR * s0 + bR) - (kL * s0 + bL));   // 中心处两拟合线高度差=台阶高
+        if (step < jump) continue;                                       // 台阶高门
+        cands.push_back({ i + 1, s0, step });                            // 报过渡右侧第一点
+    }
+    if (cands.isEmpty()) return result;
+
+    // 沿主轴 NMS：|Δs0|<nmsSep 视为同簇，保留 step 最大者(吸收过渡多候选 + 过冲毛刺，单台阶只出 1 个中心)。
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.step > b.step; });
+    QVector<Cand> kept;
+    for (const Cand& c : cands)
+    {
+        bool suppressed = false;
+        for (const Cand& k : kept)
+            if (std::abs(k.s0 - c.s0) < nmsSep) { suppressed = true; break; }
+        if (!suppressed) kept.push_back(c);
+    }
+    for (const Cand& c : kept) result.push_back(c.idx);
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
 QVector<Eigen::Vector3d> BuildFittedGeometryKeyPoints(
     const QVector<GeometryProjectedPoint>& projected,
     const QVector<int>& keyIndexes,
@@ -2994,7 +3077,8 @@ QVector<Eigen::Vector3d> BuildFittedGeometryKeyPoints(
     const Eigen::Vector3d& mainAxis,
     const Eigen::Vector3d& sideAxis,
     const Eigen::Vector3d& normalAxis,
-    bool useSlopeConsistentCornerFit)
+    bool useSlopeConsistentCornerFit,
+    const QVector<char>& isLapStepKey)
 {
     QVector<Eigen::Vector3d> keyPoints;
     keyPoints.reserve(keyIndexes.size());
@@ -3017,6 +3101,20 @@ QVector<Eigen::Vector3d> BuildFittedGeometryKeyPoints(
             : projected[keyIndex].smoothN;
         if (index > 0 && index + 1 < keyIndexes.size())
         {
+            // 搭接错位台阶端点：两侧线平行错开、求交无意义，直接取本侧段直线在本点 s 的值，
+            // 形成干净 X 台阶。台阶对的左点(右邻也是台阶点)用左段线(板1)、右点用右段线(板2)。
+            if (index < isLapStepKey.size() && isLapStepKey[index] != 0)
+            {
+                const double stepS = GeometrySmoothedProjection2D(projected[keyIndex]).x();
+                const bool isLeftOfPair = (index + 1 < isLapStepKey.size() && isLapStepKey[index + 1] != 0);
+                const int lineIdx = isLeftOfPair ? (index - 1) : index;
+                const Eigen::Vector2d sideProj = (lineIdx >= 0 && lineIdx < segmentLines.size())
+                    ? Eigen::Vector2d(stepS, GeometryLineHeightAtStation(segmentLines[lineIdx], stepS))
+                    : GeometrySmoothedProjection2D(projected[keyIndex]);
+                keyPoints.push_back(GeometryPointFromProjection(
+                    center, mainAxis, sideAxis, normalAxis, sideProj, projected[keyIndex].smoothN));
+                continue;
+            }
             const double previousS = projected[keyIndexes[index - 1]].s;
             const double nextS = projected[keyIndexes[index + 1]].s;
             const double span = std::max(1.0, std::abs(nextS - previousS));
@@ -3283,7 +3381,8 @@ QVector<int> PruneNonMonotonicFittedGeometryKeys(
             mainAxis,
             sideAxis,
             normalAxis,
-            useSlopeConsistentCornerFit);
+            useSlopeConsistentCornerFit,
+            QVector<char>());
         if (fittedKeyPoints.size() != keyIndexes.size())
         {
             return keyIndexes;
@@ -4942,6 +5041,34 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
             normalAxis,
             params.useSlopeConsistentCornerFit);
     }
+    // 板材搭接错位检测：错位点作硬段边界注入 keyIndexes(在所有 prune/refine 之后注入，避免被清洗)，
+    // 使搭接两侧点云各自独立拟合；isLapStepKey 标记台阶端点，供 BuildFittedGeometryKeyPoints 取本侧线端点。
+    QVector<char> isLapStepKey(keyIndexes.size(), 0);
+    if (params.enableLapMisalignmentSplit)
+    {
+        const QVector<int> lapCenters = DetectLapMisalignmentBoundaries(projected, params);
+        QVector<int> stepValues;
+        QVector<int> merged = keyIndexes;
+        for (int ci : lapCenters)
+        {
+            if (ci - 1 > 0 && ci < static_cast<int>(projected.size()) - 1)
+            {
+                merged.push_back(ci - 1);  // 台阶左点(板1侧端)
+                merged.push_back(ci);      // 台阶右点(板2侧端)
+                stepValues.push_back(ci - 1);
+                stepValues.push_back(ci);
+            }
+        }
+        if (!stepValues.isEmpty())
+        {
+            std::sort(merged.begin(), merged.end());
+            merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+            keyIndexes = merged;
+            isLapStepKey = QVector<char>(keyIndexes.size(), 0);
+            for (int k = 0; k < keyIndexes.size(); ++k)
+                if (stepValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
+        }
+    }
     if (keyIndexes.size() < 2)
     {
         result.error = "几何特征提取失败，未找到可用的起点/终点。";
@@ -4954,7 +5081,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         axes.first,
         axes.second,
         normalAxis,
-        params.useSlopeConsistentCornerFit);
+        params.useSlopeConsistentCornerFit,
+        isLapStepKey);
     if (fittedKeyPoints.size() != keyIndexes.size())
     {
         result.error = "几何特征拟合失败，无法生成拟合交点。";
@@ -4999,20 +5127,38 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
     for (int index = 0; index < keyIndexes.size(); ++index)
     {
         const Eigen::Vector3d currentPoint = fittedKeyPoints[index];
-        const LowerWeldPointType pointType = GeometryCornerType(projected, keyIndexes, index);
-        const QString source = pointType == LowerWeldPointType::Start
-            ? "geometry_start"
-            : (pointType == LowerWeldPointType::End
-                ? "geometry_end"
-                : (pointType == LowerWeldPointType::InnerCorner
-                    ? "geometry_inner"
-                    : "geometry_outer"));
+        const bool isStepKey = (index < isLapStepKey.size() && isLapStepKey[index] != 0);
+        LowerWeldPointType pointType;
+        if (isStepKey)
+        {
+            // 搭接台阶端点：按本点 smoothH 相对配对台阶点的高低定内/外角(高=Inner 低=Outer，与 prominence 一致)。
+            const bool isLeftOfPair = (index + 1 < isLapStepKey.size() && isLapStepKey[index + 1] != 0);
+            const int pairIdx = isLeftOfPair ? index + 1 : index - 1;
+            const double myH = projected[keyIndexes[index]].smoothH;
+            const double pairH = (pairIdx >= 0 && pairIdx < keyIndexes.size())
+                ? projected[keyIndexes[pairIdx]].smoothH : myH;
+            pointType = (myH >= pairH) ? LowerWeldPointType::InnerCorner : LowerWeldPointType::OuterCorner;
+        }
+        else
+        {
+            pointType = GeometryCornerType(projected, keyIndexes, index);
+        }
+        const QString source = isStepKey
+            ? "geometry_lap_step"
+            : (pointType == LowerWeldPointType::Start
+                ? "geometry_start"
+                : (pointType == LowerWeldPointType::End
+                    ? "geometry_end"
+                    : (pointType == LowerWeldPointType::InnerCorner
+                        ? "geometry_inner"
+                        : "geometry_outer")));
 
         LowerWeldClassifiedPoint keyPoint;
         keyPoint.index = projected[keyIndexes[index]].inputIndex;
         keyPoint.point = currentPoint;
         keyPoint.type = pointType;
         keyPoint.source = source;
+        keyPoint.isLapStepBoundary = isStepKey;
         result.keyPoints.push_back(keyPoint);
     }
 

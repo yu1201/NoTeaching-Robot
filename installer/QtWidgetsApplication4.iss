@@ -1,10 +1,10 @@
 ﻿#define MyAppName "HK-Pathlynx-CORPLA"
 #define MyAppGuid "F3E0296A-8AC8-4447-951A-013ADAE97E73"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.06.18.1808"
+  #define MyAppVersion "2026.06.23.1854"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.06.18.1808"
+  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.06.23.1854"
 #endif
 #define MyAppPublisher "海瞰智焊"
 #define MyAppExeName "HK-Pathlynx-CORPLA.exe"

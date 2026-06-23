@@ -833,6 +833,22 @@ void LaserWeldFilterDialog::BuildUi()
     m_pAzimuthStraightenResidualSpin->setValue(6.0);
     m_pAzimuthStraightenResidualSpin->setToolTip("直线化兜底残差：相邻拐点间实际焊道偏离直线超此值则补拐点(防漏检小台阶抄近路)。须大于波纹起伏幅度。");
 
+    // 板材搭接 X 错位台阶检测(默认关，仅几何拟合流程)：双侧平台最小二乘判据。
+    m_pLapSplitCheck = new QCheckBox("启用搭接错位检测(两侧分拟合·保台阶)");
+    m_pLapSplitCheck->setToolTip("检测焊缝中心线上两块板材拼接处的侧向(X)错位台阶 → 错位两侧点云分别拟合、错位处保留 X 台阶不做过渡。判据：两侧近零斜率平台 + 中间窄跨突跳。仅几何拟合流程，默认关。");
+    m_pLapStepHeightSpin = new QDoubleSpinBox();
+    m_pLapStepHeightSpin->setRange(0.3, 50.0); m_pLapStepHeightSpin->setDecimals(2); m_pLapStepHeightSpin->setValue(1.0);
+    m_pLapStepHeightSpin->setToolTip("台阶高门：候选中心处两侧平台拟合线的高度差大于此值才算错位。调大只认明显错位，调小更灵敏(抗噪余量缩小)。");
+    m_pLapStepStationSpin = new QDoubleSpinBox();
+    m_pLapStepStationSpin->setRange(2.0, 50.0); m_pLapStepStationSpin->setDecimals(1); m_pLapStepStationSpin->setValue(10.0);
+    m_pLapStepStationSpin->setToolTip("单侧拟合窗口长度(主轴mm)：候选两侧各取此长度做平台直线拟合，越长斜率/残差估计越稳。");
+    m_pLapStepFlatnessSpin = new QDoubleSpinBox();
+    m_pLapStepFlatnessSpin->setRange(0.02, 10.0); m_pLapStepFlatnessSpin->setDecimals(2); m_pLapStepFlatnessSpin->setValue(0.12);
+    m_pLapStepFlatnessSpin->setToolTip("平台残差上限：两侧拟合残差rms超此值=波纹/噪声/斜坡，不当平台(防误检)。");
+    m_pLapStepSlopeSpin = new QDoubleSpinBox();
+    m_pLapStepSlopeSpin->setRange(0.02, 2.0); m_pLapStepSlopeSpin->setDecimals(2); m_pLapStepSlopeSpin->setValue(0.10);
+    m_pLapStepSlopeSpin->setToolTip("平台斜率上限(侧向mm/主轴mm)：两侧拟合斜率超此值=拐角斜边而非平台，排除拐角误判。拐角斜率约0.35，平台约0.05。");
+
     m_pSlopeConsistentCornerFitCheck = new QCheckBox("直线拟合排除圆弧段");
     m_pSlopeConsistentCornerFitCheck->setToolTip("启用后，平台线和坡度线只使用局部斜率一致的直线段拟合，再求交生成拐点。");
 
@@ -879,6 +895,15 @@ void LaserWeldFilterDialog::BuildUi()
     paramLayout->addWidget(m_pAzimuthHeadingWindowSpin, 11, 1);
     paramLayout->addWidget(new QLabel("直线化残差"), 11, 2);
     paramLayout->addWidget(CreateUnitEditor(m_pAzimuthStraightenResidualSpin, "mm"), 11, 3);
+    paramLayout->addWidget(m_pLapSplitCheck, 12, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("错位台阶高门"), 13, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepHeightSpin, "mm"), 13, 1);
+    paramLayout->addWidget(new QLabel("拟合窗口长度"), 13, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepStationSpin, "mm"), 13, 3);
+    paramLayout->addWidget(new QLabel("平台残差上限"), 14, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepFlatnessSpin, "mm"), 14, 1);
+    paramLayout->addWidget(new QLabel("平台斜率上限"), 14, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepSlopeSpin, "mm/mm"), 14, 3);
     paramLayout->setColumnStretch(1, 1);
     paramLayout->setColumnStretch(3, 1);
     featurePointLayout->addWidget(paramGroup);
@@ -1199,6 +1224,11 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pAzimuthHeadingWindowSpin->setValue(processingSettings.fitAzimuthHeadingWindow);
     m_pAzimuthNmsSpanSpin->setValue(processingSettings.fitAzimuthNmsSpanMm);
     m_pAzimuthStraightenResidualSpin->setValue(processingSettings.fitAzimuthStraightenResidualMm);
+    m_pLapSplitCheck->setChecked(processingSettings.enableLapMisalignmentSplit);
+    m_pLapStepHeightSpin->setValue(processingSettings.lapStepHeightThresholdMm);
+    m_pLapStepStationSpin->setValue(processingSettings.lapStepStationWindowMm);
+    m_pLapStepFlatnessSpin->setValue(processingSettings.lapStepSideFlatnessMm);
+    m_pLapStepSlopeSpin->setValue(processingSettings.lapStepPlatformSlopeMax);
     m_pProjStationWindowSpin->setValue(processingSettings.projectionStationWindowMm);
     m_pProjTransverseWindowSpin->setValue(processingSettings.projectionTransverseWindowMm);
     m_pProjZBandBelowSpin->setValue(processingSettings.projectionZBandBelowMm);
@@ -1243,6 +1273,11 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.fitAzimuthHeadingWindow = m_pAzimuthHeadingWindowSpin->value();
     processingSettings.fitAzimuthNmsSpanMm = m_pAzimuthNmsSpanSpin->value();
     processingSettings.fitAzimuthStraightenResidualMm = m_pAzimuthStraightenResidualSpin->value();
+    processingSettings.enableLapMisalignmentSplit = m_pLapSplitCheck->isChecked();
+    processingSettings.lapStepHeightThresholdMm = m_pLapStepHeightSpin->value();
+    processingSettings.lapStepStationWindowMm = m_pLapStepStationSpin->value();
+    processingSettings.lapStepSideFlatnessMm = m_pLapStepFlatnessSpin->value();
+    processingSettings.lapStepPlatformSlopeMax = m_pLapStepSlopeSpin->value();
     processingSettings.projectionStationWindowMm = m_pProjStationWindowSpin->value();
     processingSettings.projectionTransverseWindowMm = m_pProjTransverseWindowSpin->value();
     processingSettings.projectionZBandBelowMm = m_pProjZBandBelowSpin->value();

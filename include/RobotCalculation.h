@@ -72,6 +72,14 @@ public:
         double azimuthNmsSpanMm = 12.0;          // 非极大值抑制：同区域合并的主轴弧长
         double azimuthStraightenResidualMm = 6.0;// 段内偏离弦超此值才补拐点（漏检兜底）。须大于
                                                  // 波纹起伏幅度，否则把周期起伏误当漏检拐点过补
+        // 板材搭接 X 错位台阶检测（默认关，仅几何拟合流程）：双侧平台最小二乘判据——候选两侧各取窗口
+        // 对侧向 h 做直线拟合，要求两侧斜率近 0（平台，区别于拐角斜边）+ 残差小（排波纹噪声）+ 中心两线
+        // 高度差>阈值（台阶高）→ 错位点作硬段边界，两侧点云分别拟合，错位处保留 X 台阶（不做过渡）。
+        bool enableLapMisalignmentSplit = false;
+        double lapStepHeightThresholdMm = 1.0;   // 台阶高门：中心处两侧拟合线高度差小于此不算错位
+        double lapStepStationWindowMm = 10.0;    // 单侧拟合窗口长度(主轴 mm)：越长平台斜率/残差估计越稳
+        double lapStepSideFlatnessMm = 0.12;     // 平台残差 rms 上限：两侧拟合残差超此=波纹/噪声，非平台
+        double lapStepPlatformSlopeMax = 0.10;   // 平台斜率门(mm侧向/mm主轴)：两侧斜率超此=拐角斜边，非平台
         // 点云投影提取（完整点云→下层焊道轨迹）参数；0 表示自动按滤波参数派生（原硬编码行为）。
         double projectionStationWindowMm = 0.0;     // 站位窗口：0=max(2.5, 采样步长*1.5)
         double projectionTransverseWindowMm = 0.0;  // 横向窗口：0=max(10, 搜索窗口*1.5)
@@ -151,6 +159,7 @@ public:
         LowerWeldPointType type = LowerWeldPointType::Normal;
         QString source;
         QString segmentKindAfter;
+        bool isLapStepBoundary = false;  // 搭接错位台阶的两个端点（不参与求交、不当斜边/拐角补偿）
     };
 
     struct LowerWeldClassificationResult
