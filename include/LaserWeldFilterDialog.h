@@ -87,6 +87,11 @@ private:
     QSpinBox* m_pAzimuthHeadingWindowSpin = nullptr;             // 拐点拟合窗口(点)
     QDoubleSpinBox* m_pAzimuthNmsSpanSpin = nullptr;             // 拐点NMS弧长(mm)
     QDoubleSpinBox* m_pAzimuthStraightenResidualSpin = nullptr;  // 直线化兜底残差(mm)
+    QCheckBox* m_pLapSplitCheck = nullptr;                       // 启用搭接错位检测
+    QDoubleSpinBox* m_pLapStepHeightSpin = nullptr;             // 错位阶跃阈值(mm)
+    QDoubleSpinBox* m_pLapStepStationSpin = nullptr;            // 错位主轴窗口(mm)
+    QDoubleSpinBox* m_pLapStepFlatnessSpin = nullptr;          // 平台残差上限(mm)
+    QDoubleSpinBox* m_pLapStepSlopeSpin = nullptr;            // 平台斜率上限(mm/mm)
     QCheckBox* m_pSlopeConsistentCornerFitCheck = nullptr;
     QCheckBox* m_pExportFitDebugCloudCheck = nullptr;
     QCheckBox* m_pExportWorkpieceFrameDebugCheck = nullptr;
