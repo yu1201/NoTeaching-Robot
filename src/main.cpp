@@ -1,6 +1,7 @@
 #include "QtWidgetsApplication4.h"
 #include "WindowStyleHelper.h"
 #include "BrandingConfig.h"
+#include "PointCloudExtractionProcessor.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -67,12 +68,23 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     SetWorkingDirectoryToProjectRoot();  // 提前：使本地 branding/ 品牌覆盖可被定位（不依赖后续步骤）
     app.setApplicationName(BrandingConfig::ApplicationName());
-    app.setApplicationVersion("2026.06.23.1854");
+    app.setApplicationVersion("2026.06.24.1305");
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();
     InstallGlobalWheelGuard(app);
     app.setWindowIcon(BrandingConfig::WindowIcon());
+
+    // SDK 点云提取子进程模式：隔离 SDK DLL(pcl_kdtree 多线程)崩溃。在构造主窗口/连接机器人之前拦截，
+    // 只调 SDK 提取后即退；子进程崩溃不会拖垮主程序(由 ExtractCorrugatedSheetIsolated 检测处理)。
+    {
+        const QStringList earlyArgs = app.arguments();
+        const int workerIdx = earlyArgs.indexOf(QStringLiteral("--pointcloud-extract-worker"));
+        if (workerIdx >= 0)
+        {
+            return PointCloudExtractionProcessor::RunExtractWorker(earlyArgs.mid(workerIdx + 1));
+        }
+    }
 
     QtWidgetsApplication4 window;
     window.setWindowIcon(BrandingConfig::WindowIcon());

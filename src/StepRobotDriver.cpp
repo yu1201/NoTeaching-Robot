@@ -602,6 +602,19 @@ namespace
 		return 20.0;
 	}
 
+	// STEP srp Lin/WLin 第4参(姿态/位形)：0=NULL 1=可变(eVAR) 2=恒定(eCONST) 3=腕关节(eWRIST)。来自基础工艺参数。
+	const char* StepPostureName(int postureType)
+	{
+		switch (postureType)
+		{
+		case 0: return "NULL";
+		case 2: return "eCONST";
+		case 3: return "eWRIST";
+		case 1:
+		default: return "eVAR";
+		}
+	}
+
 	bool StepHasWeldProcess(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
 	{
 		return std::any_of(moveInfos.begin(), moveInfos.end(),
@@ -999,12 +1012,14 @@ namespace
 				usingTransitionWeldParams = needTransition;
 				const char* weaveName = info.bHasWeaveParam ? kStepWeaveDataName : "NULL";
 				const char* trackName = info.bHasTrackParam ? kStepTrackDataName : "NULL";
-				oss << "WLin(" << targetName << "," << dynName << "," << sharedOverlapName << ",eVAR,"
+				// 焊接动态特性(DYNAMIC)按现场要求暂置 NULL：不由程序指定，用机器人默认动态；需要时改回 dynName。
+				oss << "WLin(" << targetName << ",NULL," << sharedOverlapName << "," << StepPostureName(info.nPostureType) << ","
 					<< weaveName << "," << trackName << ",tool1,WORLD);" << "\n";
 			}
 			else if (info.nMoveType == MOVL)
 			{
-				oss << "Lin(" << targetName << "," << dynName << "," << sharedOverlapName << ",NULL,tool1,WORLD);" << "\n";
+				oss << "Lin(" << targetName << "," << dynName << "," << sharedOverlapName << ","
+					<< StepPostureName(info.nPostureType) << ",tool1,WORLD);" << "\n";
 			}
 			else
 			{

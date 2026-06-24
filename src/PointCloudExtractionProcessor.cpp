@@ -1,11 +1,15 @@
 #include "PointCloudExtractionProcessor.h"
 
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
 #include <QRegularExpression>
+#include <QStringList>
 #include <QTextStream>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <cmath>
@@ -57,6 +61,33 @@ constexpr char EXTRACT_EXPORT_NAME[] =
     "?CorrugatedSheetPointCloudExtration@@YAPEAUTrackPointsPosition@@PEAUPoint_3D@@HPEAHAEAU2@NU2@PEBD@Z";
 constexpr char RELEASE_TRACK_POINTS_EXPORT_NAME[] =
     "?ReleaseTrackPoints@@YAXPEAPEAUTrackPointsPosition@@@Z";
+
+// SDK DLL（含 PCL kdtree 等第三方库）在异常输入/参数下可能发生段错误(0xC0000005)而拖垮整个上位机进程
+// （现场实测：Z 截断改 -410 后 SDK 返回点→构建 KdTree→pcl_kdtree_release.dll 崩溃）。用 SEH 包裹其调用，
+// DLL 内部崩溃时拦截为可报告错误，进程不挂。__try/__except 不能与需要栈展开的 C++ RAII 对象共存于同一
+// 函数(C2712)，故单列此无 RAII 局部对象的薄封装。
+static ExternalTrackPoint* CallSdkExtractGuarded(
+    ExtractFn extract,
+    ExternalPoint3D* input,
+    int inputCount,
+    int* trackCount,
+    ExternalPoint3D& terminal,
+    double zTrunc,
+    ExternalPoint3D scanDir,
+    const char* configPath,
+    bool* crashed)
+{
+    *crashed = false;
+    __try
+    {
+        return extract(input, inputCount, trackCount, terminal, zTrunc, scanDir, configPath);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        *crashed = true;
+        return nullptr;
+    }
+}
 #endif
 
 bool IsFinitePoint(const Eigen::Vector3d& point)
@@ -821,14 +852,25 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     int trackPointCount = 0;
     const QByteArray configPathBytes = result.configPath.toLocal8Bit();
     ExternalPoint3D weldedTerminal{};
-    ExternalTrackPoint* rawTrackPoints = extract(
+    bool sdkCrashed = false;
+    ExternalTrackPoint* rawTrackPoints = CallSdkExtractGuarded(
+        extract,
         externalInput.data(),
         static_cast<int>(externalInput.size()),
         &trackPointCount,
         weldedTerminal,
         settings.zTruncationValue,
         ToExternalPoint(safeScanDirection),
-        configPathBytes.constData());
+        configPathBytes.constData(),
+        &sdkCrashed);
+    if (sdkCrashed)
+    {
+        result.error = QString("新版精测点云库内部崩溃(异常 0xC0000005，出错模块 pcl_kdtree)，已拦截避免主程序崩溃。"
+            "常见诱因：Z 截断值=%1 不当导致截断后点集为空/退化，或输入点云含异常坐标(NaN/Inf)。请检查 Z 截断值与点云。")
+            .arg(settings.zTruncationValue, 0, 'f', 1);
+        releaseLibrary();
+        return result;
+    }
 
     if (rawTrackPoints == nullptr || trackPointCount <= 0)
     {
@@ -980,4 +1022,236 @@ RobotCalculation::MeasureThenWeldAnalysisResult PointCloudExtractionProcessor::B
 
     result.ok = true;
     return result;
+}
+
+namespace
+{
+// ====== 进程隔离：点云/结果文件序列化(坐标用 'g',12 保 double 精度) ======
+bool WriteWorkerCloudFile(const QString& path, const QVector<RobotCalculation::IndexedPoint3D>& pts)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        return false;
+    }
+    QTextStream out(&f);
+    out << pts.size() << '\n';
+    for (const RobotCalculation::IndexedPoint3D& p : pts)
+    {
+        out << QString::number(p.point.x(), 'g', 12) << ' '
+            << QString::number(p.point.y(), 'g', 12) << ' '
+            << QString::number(p.point.z(), 'g', 12) << '\n';
+    }
+    return true;
+}
+
+QVector<RobotCalculation::IndexedPoint3D> ReadWorkerCloudFile(const QString& path)
+{
+    QVector<RobotCalculation::IndexedPoint3D> pts;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        return pts;
+    }
+    QTextStream in(&f);
+    bool first = true;
+    int idx = 0;
+    while (!in.atEnd())
+    {
+        const QString line = in.readLine();
+        if (first)
+        {
+            pts.reserve(line.trimmed().toInt());
+            first = false;
+            continue;
+        }
+        const QStringList t = line.split(' ', Qt::SkipEmptyParts);
+        if (t.size() < 3)
+        {
+            continue;
+        }
+        RobotCalculation::IndexedPoint3D p;
+        p.index = idx++;
+        p.point = Eigen::Vector3d(t[0].toDouble(), t[1].toDouble(), t[2].toDouble());
+        pts.push_back(p);
+    }
+    return pts;
+}
+
+void WriteWorkerTrackArray(QTextStream& out, const QVector<PointCloudExtractionProcessor::TrackPoint>& a)
+{
+    out << a.size() << '\n';
+    for (const PointCloudExtractionProcessor::TrackPoint& p : a)
+    {
+        out << QString::number(p.point.x(), 'g', 12) << ' '
+            << QString::number(p.point.y(), 'g', 12) << ' '
+            << QString::number(p.point.z(), 'g', 12) << ' '
+            << static_cast<int>(p.type) << '\n';
+    }
+}
+
+QVector<PointCloudExtractionProcessor::TrackPoint> ReadWorkerTrackArray(QTextStream& in)
+{
+    QVector<PointCloudExtractionProcessor::TrackPoint> a;
+    const int n = in.readLine().trimmed().toInt();
+    a.reserve(n);
+    for (int i = 0; i < n; ++i)
+    {
+        const QStringList t = in.readLine().split(' ', Qt::SkipEmptyParts);
+        if (t.size() < 4)
+        {
+            continue;
+        }
+        PointCloudExtractionProcessor::TrackPoint p;
+        p.index = i;
+        p.point = Eigen::Vector3d(t[0].toDouble(), t[1].toDouble(), t[2].toDouble());
+        p.type = static_cast<PointCloudExtractionProcessor::TrackPointType>(t[3].toInt());
+        a.push_back(p);
+    }
+    return a;
+}
+
+bool WriteWorkerResultFile(const QString& path, const PointCloudExtractionProcessor::ExtractionResult& r)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        return false;
+    }
+    QTextStream out(&f);
+    out << (r.ok ? 1 : 0) << ' ' << r.inputPointCount << ' '
+        << (r.usedBaseWeldFile ? 1 : 0) << ' ' << (r.hasWeldedStartPoint ? 1 : 0) << ' '
+        << QString::number(r.weldedStartPoint.x(), 'g', 12) << ' '
+        << QString::number(r.weldedStartPoint.y(), 'g', 12) << ' '
+        << QString::number(r.weldedStartPoint.z(), 'g', 12) << '\n';
+    out << QString(r.error).replace('\n', QLatin1Char(' ')) << '\n';  // error 压成单行
+    out << r.dllPath << '\n';
+    out << r.configPath << '\n';
+    out << r.baseWeldPath << '\n';
+    WriteWorkerTrackArray(out, r.points);
+    WriteWorkerTrackArray(out, r.rawPoints);
+    WriteWorkerTrackArray(out, r.keyPointExpandedPoints);
+    return true;
+}
+
+PointCloudExtractionProcessor::ExtractionResult ReadWorkerResultFile(const QString& path, bool* fileOk)
+{
+    PointCloudExtractionProcessor::ExtractionResult r;
+    *fileOk = false;
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        return r;
+    }
+    QTextStream in(&f);
+    const QStringList head = in.readLine().split(' ', Qt::SkipEmptyParts);
+    if (head.size() < 7)
+    {
+        return r;
+    }
+    r.ok = head[0].toInt() != 0;
+    r.inputPointCount = head[1].toInt();
+    r.usedBaseWeldFile = head[2].toInt() != 0;
+    r.hasWeldedStartPoint = head[3].toInt() != 0;
+    r.weldedStartPoint = Eigen::Vector3d(head[4].toDouble(), head[5].toDouble(), head[6].toDouble());
+    r.error = in.readLine();
+    r.dllPath = in.readLine();
+    r.configPath = in.readLine();
+    r.baseWeldPath = in.readLine();
+    r.points = ReadWorkerTrackArray(in);
+    r.rawPoints = ReadWorkerTrackArray(in);
+    r.keyPointExpandedPoints = ReadWorkerTrackArray(in);
+    *fileOk = true;
+    return r;
+}
+}  // namespace
+
+PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::ExtractCorrugatedSheetIsolated(
+    const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
+    const PointCloudProcessingConfig::Settings& settings,
+    const Eigen::Vector3d& scanDirection,
+    const QString& baseWeldOutputPath)
+{
+    ExtractionResult result;
+    result.inputPointCount = inputPoints.size();
+
+    const QString workDir = QDir::temp().filePath(QStringLiteral("QtWidgetsApplication4_sdkworker"));
+    QDir().mkpath(workDir);
+    const QString cloudFile = QDir(workDir).filePath(QStringLiteral("input_cloud.txt"));
+    const QString resultFile = QDir(workDir).filePath(QStringLiteral("extract_result.txt"));
+    QFile::remove(resultFile);
+
+    if (!WriteWorkerCloudFile(cloudFile, inputPoints))
+    {
+        result.error = "无法写入 SDK 子进程输入点云临时文件：" + cloudFile;
+        return result;
+    }
+
+    QStringList args;
+    args << QStringLiteral("--pointcloud-extract-worker")
+         << cloudFile
+         << QString::number(scanDirection.x(), 'g', 12)
+         << QString::number(scanDirection.y(), 'g', 12)
+         << QString::number(scanDirection.z(), 'g', 12)
+         << (baseWeldOutputPath.isEmpty() ? QStringLiteral("-") : baseWeldOutputPath)
+         << resultFile;
+
+    QProcess proc;
+    proc.setProgram(QCoreApplication::applicationFilePath());
+    proc.setArguments(args);
+    proc.start();
+    if (!proc.waitForStarted(15000))
+    {
+        result.error = "无法启动 SDK 点云子进程（进程隔离）。";
+        return result;
+    }
+    if (!proc.waitForFinished(300000))  // SDK 多线程提取通常数秒，给 5 分钟上限防卡死
+    {
+        proc.kill();
+        proc.waitForFinished(3000);
+        result.error = "SDK 点云子进程超时未返回（已终止，主程序未受影响）。请检查点云规模或 SDK 配置。";
+        return result;
+    }
+    if (proc.exitStatus() == QProcess::CrashExit)
+    {
+        result.error = QString("SDK 点云库子进程崩溃，已被进程隔离拦截、主程序未受影响。"
+            "崩溃模块通常为 pcl_kdtree(SDK 内部多线程)，常见诱因：Z 截断值=%1 导致点集为空/退化，或点云含异常坐标。"
+            "请调整 Z 截断值/点云，或改用『特征点+拟合』。").arg(settings.zTruncationValue, 0, 'f', 1);
+        return result;
+    }
+    if (proc.exitCode() != 0)
+    {
+        result.error = QString("SDK 点云子进程异常退出(退出码=%1)，主程序未受影响。").arg(proc.exitCode());
+        return result;
+    }
+    bool fileOk = false;
+    const ExtractionResult parsed = ReadWorkerResultFile(resultFile, &fileOk);
+    if (!fileOk)
+    {
+        result.error = "SDK 子进程已结束但结果文件无法解析。";
+        return result;
+    }
+    return parsed;
+}
+
+int PointCloudExtractionProcessor::RunExtractWorker(const QStringList& workerArgs)
+{
+    if (workerArgs.size() < 6)
+    {
+        return 2;
+    }
+    const QString cloudFile = workerArgs[0];
+    const Eigen::Vector3d scanDir(
+        workerArgs[1].toDouble(), workerArgs[2].toDouble(), workerArgs[3].toDouble());
+    const QString baseWeldOut = (workerArgs[4] == QStringLiteral("-")) ? QString() : workerArgs[4];
+    const QString resultFile = workerArgs[5];
+
+    const QVector<RobotCalculation::IndexedPoint3D> inputPoints = ReadWorkerCloudFile(cloudFile);
+    const PointCloudProcessingConfig::Settings settings = PointCloudProcessingConfig::Load();
+
+    // 真正的 SDK 调用：若 SDK(pcl_kdtree 多线程)在此段错误，本子进程崩溃退出，主进程的
+    // ExtractCorrugatedSheetIsolated 会识别为 CrashExit 并报错，主程序(GUI/机器人)不受影响。
+    const ExtractionResult r = ExtractCorrugatedSheet(inputPoints, settings, scanDir, baseWeldOut);
+    WriteWorkerResultFile(resultFile, r);
+    return 0;
 }

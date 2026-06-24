@@ -197,6 +197,7 @@ struct WeldPosePreset
     double slopeRzMinDeg = -20.0;
     double slopeRzMaxDeg = 20.0;
     double stepOverlapRel = 20.0;
+    int weldPostureType = 1; // 焊接姿态/位形(0NULL/1可变/2恒定/3腕关节)，来自基础工艺参数
     int weldDirection = 1;
     bool weldProcessLoaded = false;
     QString weldProcessLoadError;
@@ -748,8 +749,9 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             }
             return failed;
         }
+        // 进程隔离调用 SDK：SDK(pcl_kdtree 多线程)崩溃时拦截为可报告错误、主程序不挂(防崩护栏)。
         const PointCloudExtractionProcessor::ExtractionResult extraction =
-            PointCloudExtractionProcessor::ExtractCorrugatedSheet(
+            PointCloudExtractionProcessor::ExtractCorrugatedSheetIsolated(
                 fullCloudInput,
                 settings,
                 BuildScanDirection(param),
@@ -1921,6 +1923,14 @@ void ApplyActiveWeldProcessToPreset(const T_PRECISE_MEASURE_PARAM& param, WeldPo
     preset.weaveParam = weldPara.tWeaveParam;
     preset.trackParam = weldPara.tTrackParam;
     preset.transitionApplyScope = NormalizeTransitionApplyScope(weldPara.nCornerArcTransitionApplyScope);
+    // 焊接姿态/位形 + 圆滑(过渡比例) 来自基础工艺参数；本函数在测量参数段之后调用，故圆滑覆盖测量参数页的默认。
+    preset.weldPostureType = (weldPara.nWeldPostureType >= 0 && weldPara.nWeldPostureType <= 3)
+        ? weldPara.nWeldPostureType
+        : 1;
+    if (std::isfinite(weldPara.dWeldOverlapRel) && weldPara.dWeldOverlapRel >= 0.0)
+    {
+        preset.stepOverlapRel = weldPara.dWeldOverlapRel;
+    }
 
     if (weldPara.nCornerArcTransitionRadiusEnable != 0
         && std::isfinite(weldPara.dCornerArcTransitionRadius))
@@ -3242,6 +3252,7 @@ bool BuildWeldPoseMoveInfos(
         moveInfo.dOverlapRel = record.isLapStep
             ? 0.0
             : (preset != nullptr ? preset->stepOverlapRel : 20.0);
+        moveInfo.nPostureType = preset != nullptr ? preset->weldPostureType : 1;  // 焊接姿态/位形(srp第4参)
         moveInfo.nMoveDevice = 0;
         moveInfo.nTrackNo = 0;
         moveInfo.adBasePosVar[0] = record.bx;
@@ -8152,6 +8163,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             appendLog(QString("焊道补偿文件：%1").arg(weldPoseSeamCompPath));
             appendLog(QString("焊道补偿摘要：%1").arg(seamCompSummary));
         }
+        // 焊道补偿生成后立即同步生成 STEP job(srp/srd)到焊道同目录，便于提取查看，不必等下枪执行才保存。
+        {
+            QString jobName, jobSrp, jobSrd, jobSum, jobErr;
+            if (GenerateStepWeldProgramFiles(QString::fromStdString(param.sRobotName), weldPoseSeamCompPath,
+                    QFileInfo(weldPoseSeamCompPath).absolutePath(), true, 0.0, jobName, jobSrp, jobSrd, jobSum, jobErr))
+            {
+                if (appendLog) { appendLog(QString("STEP焊接程序(job)已同步生成：srp=%1，srd=%2").arg(jobSrp, jobSrd)); }
+            }
+            else if (appendLog) { appendLog(QString("STEP焊接程序(job)同步生成失败(不影响焊道)：%1").arg(jobErr)); }
+        }
         savedPath = weldPoseSeamCompPath;
     }
     else if (appendLog)
@@ -8501,6 +8522,16 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         appendLog(QString("焊接姿态文件：%1").arg(weldPosePath));
         appendLog(QString("焊道补偿文件：%1").arg(seamCompPath));
         appendLog(QString("焊道补偿摘要：%1").arg(seamCompSummary));
+    }
+    // 焊道补偿生成后立即同步生成 STEP job(srp/srd)到焊道同目录，便于提取查看，不必等下枪执行才保存。
+    {
+        QString jobName, jobSrp, jobSrd, jobSum, jobErr;
+        if (GenerateStepWeldProgramFiles(QString::fromStdString(param.sRobotName), seamCompPath,
+                QFileInfo(seamCompPath).absolutePath(), true, 0.0, jobName, jobSrp, jobSrd, jobSum, jobErr))
+        {
+            if (appendLog) { appendLog(QString("STEP焊接程序(job)已同步生成：srp=%1，srd=%2").arg(jobSrp, jobSrd)); }
+        }
+        else if (appendLog) { appendLog(QString("STEP焊接程序(job)同步生成失败(不影响焊道)：%1").arg(jobErr)); }
     }
     return true;
 }

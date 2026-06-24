@@ -527,6 +527,14 @@ void WeldProcessDialog::BuildEditorUi()
     m_weldAngleSizeSpin = AddSingleDoubleFieldWithUnit(basicLayout, "焊脚尺寸", "mm");
     m_weaveEnableCheck = AddSingleSwitchField(basicLayout, "是否启用摆动");
     m_trackEnableCheck = AddSingleSwitchField(basicLayout, "是否启用跟踪");
+    m_weldPostureCombo = AddSingleComboField(basicLayout, "焊接姿态");
+    m_weldPostureCombo->addItem("NULL(不指定)", 0);
+    m_weldPostureCombo->addItem("可变", 1);
+    m_weldPostureCombo->addItem("恒定", 2);
+    m_weldPostureCombo->addItem("腕关节", 3);
+    SetComboByData(m_weldPostureCombo, 1);
+    m_weldOverlapSpin = AddSingleDoubleFieldWithUnit(basicLayout, "圆滑(过渡比例)", "%");
+    if (m_weldOverlapSpin != nullptr) { m_weldOverlapSpin->setRange(0.0, 200.0); m_weldOverlapSpin->setValue(20.0); }
     basicGroup->setMinimumWidth(420);
 
     auto* startGroup = new QGroupBox("引弧参数", editorRoot);
@@ -1354,6 +1362,8 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     SetChecked(m_wrapVoltage3EnableCheck, weld.nWrapVoltage3Enable);
     SetChecked(m_wrapWaitTime3EnableCheck, weld.nWrapWaitTime3Enable);
 
+    SetComboByData(m_weldPostureCombo, weld.nWeldPostureType);
+    if (m_weldOverlapSpin != nullptr) { m_weldOverlapSpin->setValue(weld.dWeldOverlapRel); }
     m_cornerTransitionRadiusSpin->setValue(weld.dCornerArcTransitionRadius);
     m_cornerTransitionSpeedSpin->setValue(weld.dCornerArcTransitionSpeed);
     m_cornerTransitionCurrentSpin->setValue(weld.dCornerArcTransitionCurrent);
@@ -1558,6 +1568,8 @@ bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
     out.nCornerArcTransitionApplyScope = m_cornerTransitionScopeCombo != nullptr
         ? qBound(0, m_cornerTransitionScopeCombo->currentIndex(), 2)
         : 2;
+    out.nWeldPostureType = qBound(0, ComboData(m_weldPostureCombo, 1), 3);
+    out.dWeldOverlapRel = m_weldOverlapSpin != nullptr ? m_weldOverlapSpin->value() : 20.0;
     out.dFinalWeldTrajectoryStepMm = m_finalWeldStepSpin != nullptr ? m_finalWeldStepSpin->value() : 0.0;
     out.nWeldDirection = m_weldDirectionCombo != nullptr
         ? (m_weldDirectionCombo->currentData().toInt() < 0 ? -1 : 1)
@@ -1691,6 +1703,8 @@ void WeldProcessDialog::AddWeldGroup()
     {
         item.nCornerArcTransitionApplyScope = 2;
         item.nArcMode = 4;
+        item.nWeldPostureType = 1;
+        item.dWeldOverlapRel = 20.0;
         if (!m_file.PrepareForRecreate())
         {
             ShowError(DecodeRobotMessageText(m_file.GetLastError()));

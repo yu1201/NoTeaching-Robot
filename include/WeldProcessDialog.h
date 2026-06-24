@@ -104,6 +104,8 @@ private:
     QLineEdit* m_workPeaceEdit = nullptr;
     QLineEdit* m_weldTypeEdit = nullptr;
     QComboBox* m_arcModeCombo = nullptr;
+    QComboBox* m_weldPostureCombo = nullptr;
+    QDoubleSpinBox* m_weldOverlapSpin = nullptr;
     QDoubleSpinBox* m_weldAngleSizeSpin = nullptr;
     QCheckBox* m_weaveEnableCheck = nullptr;
     QCheckBox* m_trackEnableCheck = nullptr;
