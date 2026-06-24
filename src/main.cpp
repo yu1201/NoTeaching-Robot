@@ -2,6 +2,7 @@
 #include "WindowStyleHelper.h"
 #include "BrandingConfig.h"
 #include "PointCloudExtractionProcessor.h"
+#include "RobotDriverAdaptor.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -68,7 +69,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     SetWorkingDirectoryToProjectRoot();  // 提前：使本地 branding/ 品牌覆盖可被定位（不依赖后续步骤）
     app.setApplicationName(BrandingConfig::ApplicationName());
-    app.setApplicationVersion("2026.06.24.1305");
+    app.setApplicationVersion("2026.06.24.2359");
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();
@@ -84,6 +85,14 @@ int main(int argc, char *argv[])
         {
             return PointCloudExtractionProcessor::RunExtractWorker(earlyArgs.mid(workerIdx + 1));
         }
+    }
+
+    // GUI 模式(非 --no-show)：机器人驱动构造不再同步连接，连接改由后台状态监控线程发起，
+    // 避免机器人/相机连不上时拖慢主窗口显示(每台不可达 STEP 约 5s OS connect 超时)。
+    // CLI(--no-show)保持构造内同步连接，确保 CLI 命令执行时机器人已连上。须在构造窗口前设置。
+    if (!app.arguments().contains(QStringLiteral("--no-show")))
+    {
+        RobotDriverAdaptor::s_connectDriversAtConstruct = false;
     }
 
     QtWidgetsApplication4 window;

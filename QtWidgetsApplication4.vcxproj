@@ -153,6 +153,7 @@
     <ClCompile Include="src\PointCloudModelDenoiser.cpp" />
     <ClCompile Include="src\WorkpieceMeshBuilder.cpp" />
     <ClCompile Include="src\WorkpieceMeshViewerDialog.cpp" />
+    <ClCompile Include="src\VirtualWeldTestDialog.cpp" />
     <ClCompile Include="src\PreciseMeasureEditDialog.cpp" />
     <ClCompile Include="src\RobotCalculation.cpp" />
     <ClCompile Include="src\RobotDataHelper.cpp" />
@@ -180,6 +181,7 @@
     <QtMoc Include="include\QtWidgetsApplication4.h" />
     <QtMoc Include="include\MeasureThenWeldDialog.h" />
     <QtMoc Include="include\WeldProcessDialog.h" />
+    <QtMoc Include="include\VirtualWeldTestDialog.h" />
     <ClCompile Include="src\Const.cpp" />
     <ClCompile Include="src\QtWidgetsApplication4.cpp" />
     <ClCompile Include="src\main.cpp" />

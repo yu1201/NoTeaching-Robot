@@ -148,7 +148,6 @@ private:
     void RunLineScanProcess();
     void RefreshWeldModeFromParam();
     void SaveWeldModeToParam(bool doActualWeld);
-    void SaveFinalTrajectoryStepToParam(double stepMm);
     bool IsActualWeldModeChecked() const;
     void AppendLog(const QString& text);
     void SetFlowStep(const QString& text);
@@ -177,7 +176,6 @@ private:
     QPushButton* m_pSkipScanWeldBtn = nullptr;
     QPushButton* m_pLineScanProcessBtn = nullptr;
     QCheckBox* m_pActualWeldCheck = nullptr;
-    QDoubleSpinBox* m_pFinalTrajectoryStepSpin = nullptr;
     QLabel* m_pProgressLabel = nullptr;
     QProgressBar* m_pProgressBar = nullptr;
     QTimer* m_pProgressAnimationTimer = nullptr;

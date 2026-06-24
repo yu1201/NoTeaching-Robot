@@ -464,6 +464,12 @@ namespace
 		return GetStr("ntcp%u", static_cast<unsigned>(index));
 	}
 
+	// pointwise 摆动停留：每个停留点一个 INT 等待变量(ms)，srp 的 WaitTime 与 srd 的 INT 定义共用此名
+	std::string StepBuildWaitIntName(size_t index)
+	{
+		return GetStr("nwait%u", static_cast<unsigned>(index));
+	}
+
 	std::string StepBuildAxisPosName(size_t index)
 	{
 		return GetStr("ntap%u", static_cast<unsigned>(index));
@@ -880,6 +886,12 @@ namespace
 					<< info.adBasePosVar[0] << ", " << info.adBasePosVar[1] << ", " << info.adBasePosVar[2]
 					<< ", 0.0, 0.0, 0.0,0 }" << "\n";
 			}
+
+			// pointwise 摆动停留点：生成 INT 等待变量(ms)，供 srp 的 WaitTime 语句引用
+			if (info.nDwellMs > 0)
+			{
+				oss << "INT " << StepBuildWaitIntName(i) << " := " << info.nDwellMs << "\n";
+			}
 		}
 
 		StepAppendFileComment(oss, "速度数据：共享DYNAMIC变量");
@@ -1012,8 +1024,9 @@ namespace
 				usingTransitionWeldParams = needTransition;
 				const char* weaveName = info.bHasWeaveParam ? kStepWeaveDataName : "NULL";
 				const char* trackName = info.bHasTrackParam ? kStepTrackDataName : "NULL";
-				// 焊接动态特性(DYNAMIC)按现场要求暂置 NULL：不由程序指定，用机器人默认动态；需要时改回 dynName。
-				oss << "WLin(" << targetName << ",NULL," << sharedOverlapName << "," << StepPostureName(info.nPostureType) << ","
+				// 焊接动态特性(DYNAMIC)：nDynamicMode!=0 用程序速度 dynName(ntdyn0)，否则 NULL(机器人默认动态)。
+				const std::string weldDynamicArg = (info.nDynamicMode != 0) ? dynName : std::string("NULL");
+				oss << "WLin(" << targetName << "," << weldDynamicArg << "," << sharedOverlapName << "," << StepPostureName(info.nPostureType) << ","
 					<< weaveName << "," << trackName << ",tool1,WORLD);" << "\n";
 			}
 			else if (info.nMoveType == MOVL)
@@ -1024,6 +1037,12 @@ namespace
 			else
 			{
 				oss << "PTP(" << targetName << "," << dynName << "," << sharedOverlapName << ",tool1,WORLD);" << "\n";
+			}
+
+			// pointwise 摆动相位点停留：该点运动后插 WaitTime 完全停 nDwellMs 毫秒(INT 变量定义在 .srd)
+			if (info.nDwellMs > 0)
+			{
+				oss << "WaitTime(" << StepBuildWaitIntName(i) << ",TRUE);" << "\n";
 			}
 		}
 
@@ -1187,6 +1206,18 @@ bool STEPRobotCtrl::WriteContiMoveAnyFiles(
 		return false;
 	}
 
+	// pointwise 自定义摆动：把中心线点位沿弧长展开成密集摆动点(非 pointwise 原样返回)
+	std::string weaveError;
+	std::vector<T_ROBOT_MOVE_INFO> weaveMoveInfo =
+		RobotDriverAdaptor::ExpandMoveInfosByPointwiseWeave(vtRobotMoveInfo, &weaveError);
+	if (!weaveError.empty())
+	{
+		if (errorText != nullptr) { *errorText = weaveError; }
+		return false;
+	}
+	// 摆动后 TCP 路径变长，按 k 补偿速度维持沿焊缝行进速度(未摆动时原样返回)
+	weaveMoveInfo = RobotDriverAdaptor::ApplyWeaveSpeedCompensation(vtRobotMoveInfo, weaveMoveInfo);
+
 	const std::string safeProgramName = StepSanitizeProgramName(programName);
 	const std::string targetDir = localDir.empty() ? ".\\Job\\STEP" : localDir;
 	const std::filesystem::path dirPath(targetDir);
@@ -1206,8 +1237,8 @@ bool STEPRobotCtrl::WriteContiMoveAnyFiles(
 		return false;
 	}
 
-	const std::string srpContent = StepBuildSrpContent(vtRobotMoveInfo, actualWeld);
-	const std::string srdContent = StepBuildSrdContent(vtRobotMoveInfo, axisUnit, actualWeld);
+	const std::string srpContent = StepBuildSrpContent(weaveMoveInfo, actualWeld);
+	const std::string srdContent = StepBuildSrdContent(weaveMoveInfo, axisUnit, actualWeld);
 	const std::string srpPathText = srpPath.string();
 	const std::string srdPathText = srdPath.string();
 
@@ -1262,8 +1293,10 @@ STEPRobotCtrl::STEPRobotCtrl(std::string strUnitName, RobotLog* pLog)
 
 STEPRobotCtrl::~STEPRobotCtrl()
 {
-	CloseSocket();
+	// 先停监控线程(join，等其可能正在进行的后台首连返回)再 CloseSocket，
+	// 否则 worker 的 InitSocket 可能与析构的 CloseSocket 并发操作 m_pSTEPRobotClient。
 	StopStateMonitor();
+	CloseSocket();
 	if (m_pSTEPRobotClient != nullptr)
 	{
 		delete m_pSTEPRobotClient;
@@ -1305,8 +1338,23 @@ bool STEPRobotCtrl::InitRobotDriver(std::string strUnitName)
 	cIni.ReadString("GunTool_d", "", m_tTools.tGunTool, T_ROBOT_COORS(1, 1, 1, 1, 1, 1, -1, -1, -1));
 	cIni.ReadString("CameraTool_d", "", m_tTools.tCameraTool, T_ROBOT_COORS(1, 1, 1, 1, 1, 1, -1, -1, -1));
 
-	InitSocket(m_sSocketIP.c_str(), m_nSocketPort);
+	// GUI 启动(s_connectDriversAtConstruct=false)：构造不在此同步连接，改由状态监控线程后台首连，
+	// 避免机器人离线时这里挂满 OS connect 超时(~5s/台)拖慢主窗口显示。CLI(--no-show)保持同步连接，
+	// 确保 CLI 命令执行时已连上(零行为回归)。两种情况监控线程的 EnsureConnectionForMonitor 都会兜底。
+	if (s_connectDriversAtConstruct.load())
+	{
+		InitSocket(m_sSocketIP.c_str(), m_nSocketPort);
+	}
 	return true;
+}
+
+void STEPRobotCtrl::EnsureConnectionForMonitor()
+{
+	// 后台状态监控线程的首次连接：仅当尚未连接时尝试一次(幂等)。阻塞/超时落在监控线程，不碰 UI。
+	if (!IsConnected())
+	{
+		InitSocket(m_sSocketIP.c_str(), m_nSocketPort);
+	}
 }
 
 bool STEPRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifRecord)
@@ -1823,6 +1871,24 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 		return -1;
 	}
 
+	// pointwise 自定义摆动：把中心线点位沿弧长展开成密集摆动点(非 pointwise 原样返回)
+	std::string weaveError;
+	std::vector<T_ROBOT_MOVE_INFO> weaveMoveInfo =
+		RobotDriverAdaptor::ExpandMoveInfosByPointwiseWeave(vtRobotMoveInfo, &weaveError);
+	if (!weaveError.empty())
+	{
+		SetLastRobotError(weaveError);
+		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny pointwise 摆动失败：%s", weaveError.c_str());
+		return -1;
+	}
+	// 摆动后 TCP 路径变长，按 k 补偿速度维持沿焊缝行进速度(未摆动时原样返回)
+	std::string weaveSpeedInfo;
+	weaveMoveInfo = RobotDriverAdaptor::ApplyWeaveSpeedCompensation(vtRobotMoveInfo, weaveMoveInfo, 0.0, &weaveSpeedInfo);
+	if (!weaveSpeedInfo.empty())
+	{
+		m_pRobotLog->write(LogColor::DEFAULT, "STEP %s", weaveSpeedInfo.c_str());
+	}
+
 	const std::string sProjectName = StepNormalizeProjectName(kStepDynamicJobProjectName);
 
 	const std::string sProgramName = StepSanitizeProgramName(programName);
@@ -1844,8 +1910,8 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 		return -2;
 	}
 
-	const std::string sSrpContent = StepBuildSrpContent(vtRobotMoveInfo, true);
-	const std::string sSrdContent = StepBuildSrdContent(vtRobotMoveInfo, m_tAxisUnit, true);
+	const std::string sSrpContent = StepBuildSrpContent(weaveMoveInfo, true);
+	const std::string sSrdContent = StepBuildSrdContent(weaveMoveInfo, m_tAxisUnit, true);
 
 	if (!StepWriteTextFile(sLocalProgramFile, sSrpContent))
 	{

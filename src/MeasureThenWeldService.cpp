@@ -187,6 +187,7 @@ struct WeldPosePreset
     double cornerTransitionLeadDistance = 10.0;
     double cornerArcRadiusMm = 0.0;
     double finalWeldStepFromProcessMm = 0.0;  // 工艺里的实际焊道点间距(>0 优先于测量参数页的值)
+    bool keepAnchorsOnly = false;             // 精简轨迹：最终抽样只保留特殊点(起终/拐点/段边界/圆弧边界/搭接)，丢弃中间普通点
     double weldStartSkipDistance = 10.0;
     double weldEndSkipDistance = 10.0;
     double weldRzGainDeg = 0.0;
@@ -198,6 +199,7 @@ struct WeldPosePreset
     double slopeRzMaxDeg = 20.0;
     double stepOverlapRel = 20.0;
     int weldPostureType = 1; // 焊接姿态/位形(0NULL/1可变/2恒定/3腕关节)，来自基础工艺参数
+    int weldDynamicMode = 0; // 动态特性(WLin DYNAMIC)：0=NULL(机器人默认) 非0=ntdyn0(程序速度)，复用工艺 nWeldMethod
     int weldDirection = 1;
     bool weldProcessLoaded = false;
     QString weldProcessLoadError;
@@ -220,6 +222,7 @@ struct WeldPosePreset
     double transitionCurrent = 0.0;
     double transitionVoltage = 0.0;
     bool weaveEnabled = true;
+    bool weaveAppPointwise = false;  // true=上位机自建pointwise摆动(来自工艺 nWrapConditionNo!=0)
     bool trackEnabled = true;
     T_WeaveDate weaveParam;
     T_TrackData trackParam;
@@ -1919,6 +1922,8 @@ void ApplyActiveWeldProcessToPreset(const T_PRECISE_MEASURE_PARAM& param, WeldPo
     preset.stopArcWaitTime = weldPara.dStopWaitTime;
     preset.arcMode = NormalizeArcMode(weldPara.nArcMode);
     preset.weaveEnabled = weldPara.nWeaveEnable != 0;
+    preset.weaveAppPointwise = weldPara.nWrapConditionNo != 0;  // 摆动来源开关：nWrapConditionNo!=0=上位机自建pointwise
+    preset.weldDynamicMode = weldPara.nWeldMethod;  // 动态特性：复用 nWeldMethod 死字段，0=WLin用NULL 非0=用ntdyn0(程序速度)
     preset.trackEnabled = weldPara.nTrackEnable != 0;
     preset.weaveParam = weldPara.tWeaveParam;
     preset.trackParam = weldPara.tTrackParam;
@@ -2162,6 +2167,9 @@ load_pose_comp:
             int seamCompCount = static_cast<int>(preset.seamCompSlots.size());
             seamIni.SetSectionName("ALLWeldSeamComp");
             seamIni.ReadString(false, "SeamCompCount", &seamCompCount);
+            int simplifyKeepAnchorsOnly = preset.keepAnchorsOnly ? 1 : 0;
+            seamIni.ReadString(false, "SimplifyKeepAnchorsOnly", &simplifyKeepAnchorsOnly);
+            preset.keepAnchorsOnly = (simplifyKeepAnchorsOnly != 0);
             int seamGroupCount = 0;
             const bool hasSeamGroups = seamIni.ReadString(false, SEAM_GROUP_COUNT_KEY, &seamGroupCount) > 0;
             int activeSeamGroupIndex = 0;
@@ -2982,85 +2990,76 @@ T_ROBOT_COORS BuildWeldPoseCoors(const WeldPoseFileRecord& record)
         record.bz);
 }
 
-QString FinalWeldTrajectoryRecordTag(const WeldPoseFileRecord& record)
-{
-    return (record.pointType + "|" + record.segmentKind).trimmed().toLower();
-}
-
-QString FinalWeldTrajectorySegmentKey(const WeldPoseFileRecord& record)
-{
-    QString key = NormalizeSeamCompSegmentKind(record.segmentKind).trimmed().toLower();
-    if (key.isEmpty())
-    {
-        key = record.segmentKind.trimmed().toLower();
-    }
-    return key;
-}
-
-bool IsFinalWeldTrajectoryAnchor(
-    const QVector<WeldPoseFileRecord>& records,
-    int index)
-{
-    if (index <= 0 || index >= records.size() - 1)
-    {
-        return true;
-    }
-
-    const QString pointType = records[index].pointType.trimmed().toLower();
-    if (pointType == "start"
-        || pointType == "end"
-        || (pointType.contains("corner") && !pointType.contains("_arc")))
-    {
-        return true;
-    }
-
-    const QString previousSegment = FinalWeldTrajectorySegmentKey(records[index - 1]);
-    const QString currentSegment = FinalWeldTrajectorySegmentKey(records[index]);
-    const QString nextSegment = FinalWeldTrajectorySegmentKey(records[index + 1]);
-    if (currentSegment.compare(previousSegment, Qt::CaseInsensitive) != 0
-        || currentSegment.compare(nextSegment, Qt::CaseInsensitive) != 0)
-    {
-        return true;
-    }
-
-    const QString previousTag = FinalWeldTrajectoryRecordTag(records[index - 1]);
-    const QString currentTag = FinalWeldTrajectoryRecordTag(records[index]);
-    const QString nextTag = FinalWeldTrajectoryRecordTag(records[index + 1]);
-    const auto executionModeTag = [](const QString& tag) -> QString
-    {
-        const bool arc = tag.contains("_arc") || tag.contains(QStringLiteral("圆弧"));
-        const bool transition = tag.contains("transition") || tag.contains(QStringLiteral("过渡"));
-        if (arc)
-        {
-            return "arc";
-        }
-        if (transition)
-        {
-            return "transition";
-        }
-        return "normal";
-    };
-
-    const QString previousMode = executionModeTag(previousTag);
-    const QString currentMode = executionModeTag(currentTag);
-    const QString nextMode = executionModeTag(nextTag);
-    return currentMode.compare(previousMode, Qt::CaseInsensitive) != 0
-        || currentMode.compare(nextMode, Qt::CaseInsensitive) != 0;
-}
-
 QVector<WeldPoseFileRecord> SampleFinalWeldTrajectoryRecords(
     const QVector<WeldPoseFileRecord>& records,
-    double sampleStepMm)
+    double sampleStepMm,
+    bool keepAnchorsOnly = false)
 {
     if (records.size() <= 2 || !std::isfinite(sampleStepMm) || sampleStepMm <= 0.0)
     {
         return records;
     }
 
-    // 任意相邻输出点的沿线间距不得小于设定点间距：过密的点会干扰摆动动作。
-    // 拐点/圆弧/过渡区域的边界锚彼此相距常低于设定值，按"锚点优先于普通采样点、
-    // 锚点之间仍不足间距时丢弃后到者、终点最优先"的规则去密，圆弧段只留间距达标的关键点。
+    // 实际焊道抽样(精简与非精简共用拐角/搭接收敛，只差普通点是否保留)：
+    //   · 拐角"跟随圆弧过渡"：圆弧化拐角(corner 点簇含 _arc)保留簇内全部点 = 机器人走圆弧的实际路径；
+    //     尖角(corner 点簇无 _arc)收敛为 1 个干净关键节点(取簇中点)，其余冗余点丢弃；
+    //   · 搭接台阶簇只保留台阶横向(X)突变前后两点；拐角代表/圆弧路径/搭接两点均强制保留(绕过间距闸门)；
+    //   · 普通点：非精简按设定点间距去密保留；精简(keepAnchorsOnly)则全部丢弃，只留上述特殊点。
     const double minGapMm = sampleStepMm;
+    const int pointCount = records.size();
+
+    auto isCornerType = [&records](int i) {
+        return records[i].pointType.trimmed().toLower().contains(QStringLiteral("corner"));
+    };
+
+    // 拐角点簇预处理：forceKeep=强制保留(拐角代表/圆弧路径)，dropPoint=尖角簇内冗余点(整段抽样都不保留)。
+    QVector<char> forceKeep(pointCount, 0);
+    QVector<char> dropPoint(pointCount, 0);
+    for (int i = 0; i < pointCount; )
+    {
+        if (!isCornerType(i)) { ++i; continue; }
+        int j = i;
+        bool clusterHasArc = false;
+        while (j < pointCount && isCornerType(j))
+        {
+            if (records[j].pointType.trimmed().toLower().contains(QStringLiteral("_arc")))
+            {
+                clusterHasArc = true;
+            }
+            ++j;
+        }
+        if (clusterHasArc)
+        {
+            for (int k = i; k < j; ++k) { forceKeep[k] = 1; }            // 圆弧路径：簇内全保留
+        }
+        else
+        {
+            const int mid = i + (j - i) / 2;                             // 尖角：收敛为簇中点
+            for (int k = i; k < j; ++k) { if (k == mid) { forceKeep[k] = 1; } else { dropPoint[k] = 1; } }
+        }
+        i = j;
+    }
+
+    // 搭接台阶簇预处理(覆盖拐角标记)：搭接错位是垂直焊缝(X)方向的横移台阶，关键节点是台阶两端的角点。
+    // 因此搭接簇内只保留 X 最小端 与 X 最大端(=横移台阶前后的两个关键角点)，其余加密/过渡/近重复点全部丢弃，
+    // 既保住台阶 X 突变和两端关键节点，又不堆集。
+    for (int i = 0; i < pointCount; )
+    {
+        if (!records[i].isLapStep) { ++i; continue; }
+        int j = i;
+        while (j < pointCount && records[j].isLapStep) { ++j; }
+        for (int k = i; k < j; ++k) { dropPoint[k] = 1; forceKeep[k] = 0; }   // 簇内先全丢
+        int loIdx = i;
+        int hiIdx = i;
+        for (int k = i + 1; k < j; ++k)
+        {
+            if (records[k].point.x() < records[loIdx].point.x()) { loIdx = k; }
+            if (records[k].point.x() > records[hiIdx].point.x()) { hiIdx = k; }
+        }
+        dropPoint[loIdx] = 0; forceKeep[loIdx] = 1;   // X 最小端(横移台阶一侧关键角)
+        dropPoint[hiIdx] = 0; forceKeep[hiIdx] = 1;   // X 最大端(横移台阶另一侧关键角)
+        i = j;
+    }
 
     struct KeptPoint
     {
@@ -3069,11 +3068,11 @@ QVector<WeldPoseFileRecord> SampleFinalWeldTrajectoryRecords(
         double arcLengthMm = 0.0;
     };
     QVector<KeptPoint> kept;
-    kept.reserve(records.size());
+    kept.reserve(pointCount);
     kept.push_back({ 0, true, 0.0 });
 
     double arcLengthMm = 0.0;
-    for (int index = 1; index < records.size() - 1; ++index)
+    for (int index = 1; index < pointCount - 1; ++index)
     {
         const double segmentLengthMm = (records[index].point - records[index - 1].point).norm();
         if (std::isfinite(segmentLengthMm) && segmentLengthMm > 1e-6)
@@ -3081,37 +3080,38 @@ QVector<WeldPoseFileRecord> SampleFinalWeldTrajectoryRecords(
             arcLengthMm += segmentLengthMm;
         }
 
-        if (IsFinalWeldTrajectoryAnchor(records, index))
+        if (dropPoint[index])
         {
-            // 锚点优先：回溯挤掉与其间距不足的普通采样点。
+            continue;   // 尖角簇内冗余点：丢弃，使拐角只留 1 个干净关键节点
+        }
+
+        if (forceKeep[index])
+        {
+            // 强制保留(拐角代表/圆弧路径/搭接台阶前后两点)：回溯挤掉与其过近的普通采样点，再无条件压入。
             while (kept.size() > 1
                 && !kept.back().anchor
                 && arcLengthMm - kept.back().arcLengthMm < minGapMm)
             {
                 kept.pop_back();
             }
-            // 搭接错位台阶两端点必须成对、原样保留：绕过最小间距闸门强制压入，否则台阶被抹成斜线斜穿。
-            if (records[index].isLapStep || arcLengthMm - kept.back().arcLengthMm >= minGapMm)
-            {
-                kept.push_back({ index, true, arcLengthMm });
-            }
-            // 与前一锚点仍不足间距时丢弃当前锚，保证输出不含过密点（台阶端点除外）。
+            kept.push_back({ index, true, arcLengthMm });
         }
-        else if (arcLengthMm - kept.back().arcLengthMm >= minGapMm)
+        else if (!keepAnchorsOnly && arcLengthMm - kept.back().arcLengthMm >= minGapMm)
         {
+            // 普通采样点：精简模式不保留(只留特殊点)，非精简按点间距去密保留。
             kept.push_back({ index, false, arcLengthMm });
         }
     }
 
-    // 终点必留且最优先：回溯挤掉与终点间距不足的点（首点除外）。
+    // 终点必留且最优先：回溯挤掉与终点间距不足的普通采样点（首点与强制保留点不被吞）。
     const double tailSegmentMm =
-        (records[records.size() - 1].point - records[records.size() - 2].point).norm();
+        (records[pointCount - 1].point - records[pointCount - 2].point).norm();
     if (std::isfinite(tailSegmentMm) && tailSegmentMm > 1e-6)
     {
         arcLengthMm += tailSegmentMm;
     }
     while (kept.size() > 1
-        && !records[kept.back().index].isLapStep   // 台阶端点不被终点必留逻辑吞掉
+        && !kept.back().anchor   // 强制保留点(拐角/圆弧/搭接)不被终点必留逻辑吞掉
         && arcLengthMm - kept.back().arcLengthMm < minGapMm)
     {
         kept.pop_back();
@@ -3158,7 +3158,8 @@ bool BuildWeldPoseMoveInfos(
         effectiveSampleStepMm = preset->finalWeldStepFromProcessMm;
     }
     const QVector<WeldPoseFileRecord> executionRecords =
-        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(effectiveSampleStepMm));
+        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(effectiveSampleStepMm),
+            preset != nullptr && preset->keepAnchorsOnly);
     if (executionRecordsOut != nullptr)
     {
         *executionRecordsOut = executionRecords;
@@ -3253,6 +3254,7 @@ bool BuildWeldPoseMoveInfos(
             ? 0.0
             : (preset != nullptr ? preset->stepOverlapRel : 20.0);
         moveInfo.nPostureType = preset != nullptr ? preset->weldPostureType : 1;  // 焊接姿态/位形(srp第4参)
+        moveInfo.nDynamicMode = preset != nullptr ? preset->weldDynamicMode : 0;  // 动态特性(WLin第2参DYNAMIC)
         moveInfo.nMoveDevice = 0;
         moveInfo.nTrackNo = 0;
         moveInfo.adBasePosVar[0] = record.bx;
@@ -3279,6 +3281,7 @@ bool BuildWeldPoseMoveInfos(
             moveInfo.dArcEndWaitTime = preset->stopArcWaitTime;
             moveInfo.nArcMode = preset->arcMode;
             moveInfo.bHasWeaveParam = preset->weaveEnabled;
+            moveInfo.bAppPointwiseWeave = preset->weaveAppPointwise;
             if (moveInfo.bHasWeaveParam)
             {
                 moveInfo.tWeaveParam = preset->weaveParam;
@@ -4433,7 +4436,10 @@ int DensifyWeldPoseRecordsByStep(
             const double ratio = static_cast<double>(segmentIndex)
                 / static_cast<double>(segmentCount);
             WeldPoseFileRecord fillRecord = InterpolateWeldPoseRecord(prev, next, ratio);
-            fillRecord.pointType = next.pointType;
+            // 2mm 加密的填充点一律标 normal：不继承端点(尤其 corner/_arc)的类型，否则单点拐角会被沿线
+            // 染成一串假 corner，下游把直线段中部误当拐角顶点。段类 segmentKind 仍保留以维持段/弧归属。
+            fillRecord.pointType =
+                RobotCalculation::LowerWeldPointTypeName(RobotCalculation::LowerWeldPointType::Normal);
             fillRecord.segmentKind = next.segmentKind;
             AppendWeldPoseRecordIfNotDuplicate(denseRecords, fillRecord);
             ++insertedPointCount;
@@ -8702,7 +8708,9 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     QString& srpPath,
     QString& srdPath,
     QString& summary,
-    QString& error) const
+    QString& error,
+    double overrideFinalStepMm,
+    bool allowPointwiseWeave) const
 {
     programName.clear();
     srpPath.clear();
@@ -8729,7 +8737,19 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     }
 
     T_PRECISE_MEASURE_PARAM param = BuildMeasureWeldParamShell(robotName);
-    const WeldPosePreset preset = LoadWeldPosePreset(param);
+    WeldPosePreset preset = LoadWeldPosePreset(param);
+    if (!allowPointwiseWeave && preset.weaveEnabled && preset.weaveAppPointwise)
+    {
+        error = QStringLiteral("pointwise 自定义摆动暂未开放用于先测后焊流程，请用「虚拟焊接测试」验证");
+        return false;
+    }
+    if (std::isfinite(overrideFinalStepMm) && overrideFinalStepMm > 0.0)
+    {
+        // 虚拟焊道测试：用户指定的点间距覆盖工艺/测量参数，作为机器人最终逐点执行间距。
+        const double normalizedStep = NormalizeFinalWeldTrajectorySampleStepMm(overrideFinalStepMm);
+        param.dFinalWeldTrajectoryStepMm = normalizedStep;
+        preset.finalWeldStepFromProcessMm = normalizedStep;
+    }
     ApplyWeldDirectionToExecutionRecords(preset, records);
     const double effectiveWeldSpeedMmPerMin =
         (std::isfinite(weldSpeedMmPerMin) && weldSpeedMmPerMin > 0.0)
@@ -8851,6 +8871,133 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     return true;
 }
 
+bool MeasureThenWeldService::GenerateVirtualStraightWeldFiles(
+    const QString& robotName,
+    const T_ROBOT_COORS& startCoors,
+    double lengthMm,
+    double pointStepMm,
+    int directionSign,
+    bool actualWeld,
+    QString& outputDir,
+    QString& weldPosePath,
+    QString& srpPath,
+    QString& srdPath,
+    QString& programName,
+    QString& summary,
+    QString& error,
+    const LogCallback& appendLog) const
+{
+    weldPosePath.clear();
+    srpPath.clear();
+    srdPath.clear();
+    programName.clear();
+    summary.clear();
+    error.clear();
+
+    const QString normalizedRobotName = robotName.trimmed().isEmpty()
+        ? QStringLiteral("RobotA")
+        : robotName.trimmed();
+
+    const double absLength = std::abs(lengthMm);
+    if (!std::isfinite(absLength) || absLength < 1.0)
+    {
+        error = "虚拟焊道长度无效（需 >= 1mm）。";
+        return false;
+    }
+    const double normalizedStep = NormalizeFinalWeldTrajectorySampleStepMm(pointStepMm);
+    const int sign = (directionSign < 0) ? -1 : 1;
+
+    // 干净直线：保持机器人当前焊枪姿态，沿 ±Y 等距造点；不走点云拟合/姿态补偿/焊缝补偿/起终裁剪/拐点处理。
+    // 内部按细间距(<=2mm)造稠密点，最终由 GenerateStepWeldProgramFiles 按用户点间距抽样成机器人逐点执行轨迹。
+    const double internalStep = std::max(0.5, std::min(2.0, normalizedStep));
+    const int segCount = std::max(1, static_cast<int>(std::ceil(absLength / internalStep)));
+
+    QVector<WeldPoseFileRecord> records;
+    records.reserve(segCount + 1);
+    for (int i = 0; i <= segCount; ++i)
+    {
+        const double t = static_cast<double>(i) / static_cast<double>(segCount);
+        WeldPoseFileRecord r;
+        r.weldIndex = i + 1;
+        r.rawIndex = i;
+        r.point = Eigen::Vector3d(
+            startCoors.dX,
+            startCoors.dY + sign * absLength * t,
+            startCoors.dZ);
+        r.rx = startCoors.dRX;
+        r.ry = startCoors.dRY;
+        r.rz = startCoors.dRZ;
+        r.bx = startCoors.dBX;
+        r.by = startCoors.dBY;
+        r.bz = startCoors.dBZ;
+        r.pointType = (i == 0)
+            ? QStringLiteral("start")
+            : ((i == segCount) ? QStringLiteral("end") : QStringLiteral("normal"));
+        r.segmentKind = QStringLiteral("low_platform");  // 单段直线占位段类（不参与补偿，仅满足文件格式）
+        r.isLapStep = false;
+        records.push_back(r);
+    }
+
+    // 解析输出目录（默认 Result/<robot>/VirtualWeld_<时间>）。
+    QString resolvedDir = outputDir.trimmed();
+    if (resolvedDir.isEmpty())
+    {
+        const QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
+        resolvedDir = RobotDataHelper::BuildProjectPath(
+            QString("Result/%1/VirtualWeld_%2").arg(normalizedRobotName, stamp));
+    }
+    {
+        QDir dir(resolvedDir);
+        if (!dir.exists() && !dir.mkpath("."))
+        {
+            error = QString("无法创建输出目录：%1").arg(QDir::toNativeSeparators(resolvedDir));
+            return false;
+        }
+    }
+    outputDir = QDir::toNativeSeparators(resolvedDir);
+    weldPosePath = QDir(resolvedDir).filePath(WELD_POSE_FILE_NAME);
+
+    // 写干净直线 pose 文件（带与正式文件一致的表头），既供查看也作下发执行文件。
+    std::vector<QString> lines;
+    lines.reserve(records.size() + 1);
+    lines.push_back("weld_index raw_index x y z rx ry rz bx by bz point_type segment_kind is_lap_step");
+    for (const WeldPoseFileRecord& r : records)
+    {
+        lines.push_back(BuildWeldPoseFileRecordLine(r));
+    }
+    if (!SaveTextLines(weldPosePath, lines, error))
+    {
+        return false;
+    }
+
+    if (appendLog)
+    {
+        appendLog(QString("虚拟焊道(干净直线)：起点=%1，方向=%2Y，长度=%3 mm，点间距=%4 mm，造点=%5（保持当前焊枪姿态，不叠加补偿）")
+            .arg(RobotCoorsText(startCoors))
+            .arg(sign > 0 ? "+" : "-")
+            .arg(absLength, 0, 'f', 3)
+            .arg(normalizedStep, 0, 'f', 3)
+            .arg(records.size()));
+    }
+
+    // 直接生成 STEP 焊接程序 srp/srd：actualWeld=true 含 ARC/WEAVEDATA 摆动；摆动/速度/姿态/位形读保存工艺；
+    // 点间距用用户值覆盖；方向由 GenerateStepWeldProgramFiles 内部默认 weldDirection=1 保证前向，与下发执行一致。
+    QString jobSummary;
+    if (!GenerateStepWeldProgramFiles(normalizedRobotName, weldPosePath, resolvedDir, actualWeld, 0.0,
+            programName, srpPath, srdPath, jobSummary, error, normalizedStep, /*allowPointwiseWeave=*/true))
+    {
+        return false;
+    }
+
+    summary = QString("虚拟焊道已生成(干净直线，不含补偿)：长度=%1 mm，点间距=%2 mm，模式=%3；执行/查看文件=%4；%5")
+        .arg(absLength, 0, 'f', 3)
+        .arg(normalizedStep, 0, 'f', 3)
+        .arg(actualWeld ? QStringLiteral("实焊(含摆动)") : QStringLiteral("空跑"))
+        .arg(QDir::toNativeSeparators(weldPosePath))
+        .arg(jobSummary);
+    return true;
+}
+
 bool MeasureThenWeldService::DownlinkWeldPoseFile(
     RobotDriverAdaptor* pRobotDriver,
     const QString& poseFilePath,
@@ -8965,7 +9112,9 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     T_ROBOT_COORS* pEndSafeCoors,
     const LogCallback& appendLog,
     const StepCallback& setFlowStep,
-    const CheckpointCallback& checkpoint) const
+    const CheckpointCallback& checkpoint,
+    double overrideFinalStepMm,
+    bool allowPointwiseWeave) const
 {
     summary.clear();
     error.clear();
@@ -8982,7 +9131,21 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         return false;
     }
 
-    const WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
+    WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
+    if (!allowPointwiseWeave && weldPosePreset.weaveEnabled && weldPosePreset.weaveAppPointwise)
+    {
+        error = QStringLiteral("pointwise 自定义摆动暂未开放用于先测后焊流程，请用「虚拟焊接测试」验证");
+        return false;
+    }
+    const double effectiveFinalStepMm =
+        (std::isfinite(overrideFinalStepMm) && overrideFinalStepMm > 0.0)
+        ? NormalizeFinalWeldTrajectorySampleStepMm(overrideFinalStepMm)
+        : param.dFinalWeldTrajectoryStepMm;
+    if (std::isfinite(overrideFinalStepMm) && overrideFinalStepMm > 0.0)
+    {
+        // 虚拟焊道测试：用户点间距覆盖工艺，作为机器人最终逐点执行间距。
+        weldPosePreset.finalWeldStepFromProcessMm = effectiveFinalStepMm;
+    }
     ApplyWeldDirectionToExecutionRecords(weldPosePreset, records);
     T_ROBOT_COORS startSafeCoors;
     if (!TryBuildWeldSafeCoors(records, 0, param.dGunDownBackSafeDis, weldPosePreset.robotType, startSafeCoors, error))
@@ -9033,7 +9196,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         moveInfos,
         error,
         &weldPosePreset,
-        param.dFinalWeldTrajectoryStepMm,
+        effectiveFinalStepMm,
         transitionCommandSpeed,
         param.bDoActualWeld,
         &sampledRecords))
@@ -9067,7 +9230,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             .arg(weldCommandSpeed, 0, 'f', 3)
             .arg(weldCommandSpeedUnit));
         appendLog(QString("最终焊接轨迹点间距：%1 mm，仅在生成/下发运动点时抽样")
-            .arg(param.dFinalWeldTrajectoryStepMm, 0, 'f', 3));
+            .arg(effectiveFinalStepMm, 0, 'f', 3));
         appendLog(sampledSaved
             ? QString("最终抽样轨迹文件：%1").arg(sampledPosePath)
             : QString("最终抽样轨迹文件保存失败：%1").arg(sampledSaveError));
@@ -9503,6 +9666,7 @@ bool MeasureThenWeldService::LoadCompPreviewBaseline(
         point.rawIndex = record.rawIndex;
         point.segmentKind = record.segmentKind;
         point.pointType = record.pointType;
+        point.isLapStep = record.isLapStep;
         baseline.push_back(point);
     }
     if (baseline.isEmpty())
@@ -9991,6 +10155,7 @@ RobotCalculation::LowerWeldFilterParams MeasureThenWeldService::BuildTrackFitPar
     params.azimuthHeadingWindow = pointCloudSettings.fitAzimuthHeadingWindow;
     params.azimuthNmsSpanMm = pointCloudSettings.fitAzimuthNmsSpanMm;
     params.azimuthStraightenResidualMm = pointCloudSettings.fitAzimuthStraightenResidualMm;
+    params.azimuthRefineFloorMm = pointCloudSettings.fitAzimuthRefineFloorMm;
     params.enableLapMisalignmentSplit = pointCloudSettings.enableLapMisalignmentSplit;
     params.lapStepHeightThresholdMm = pointCloudSettings.lapStepHeightThresholdMm;
     params.lapStepStationWindowMm = pointCloudSettings.lapStepStationWindowMm;
@@ -10161,6 +10326,7 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
         record.bz = base.bz;
         record.segmentKind = base.segmentKind;
         record.pointType = base.pointType;
+        record.isLapStep = base.isLapStep;
 
         const Eigen::Vector3d basePoint = record.point;
         const Eigen::Vector3d withCurrent = ApplyPoseCompToPoint(
@@ -10193,6 +10359,7 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
             point.rawIndex = record.rawIndex;
             point.segmentKind = record.segmentKind;
             point.pointType = record.pointType;
+            point.isLapStep = record.isLapStep;
             out.push_back(point);
         }
         return out;
@@ -10248,7 +10415,8 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
         ? preset.finalWeldStepFromProcessMm
         : measureParam.dFinalWeldTrajectoryStepMm;
     const QVector<WeldPoseFileRecord> actualRecords =
-        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(actualStepMm));
+        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(actualStepMm),
+            currentEdits.keepAnchorsOnly);
     stages.actual = snapshotRecords(actualRecords);
 
     // 方向箭头：质心 + 自适应长度。

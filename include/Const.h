@@ -259,6 +259,21 @@ struct T_ROBOT_MOVE_SPEED
 	}
 };
 
+// pointwise 摆动波形（值对齐工艺界面 m_weaveShapeCombo / SDK WeaveShape）。
+// 注：是否走 pointwise(上位机自建)由工艺 nWrapConditionNo 开关决定(独立于 nWeaveType)，nWeaveType 保持原生 0/1/2。
+// 第一版实现：eSin/eSinFreq=正弦，eObliqueTriangle/eSpaceTriangle=三角，eLTriangle=L摆，eBackForward=纵向往复。
+enum class EWeaveShape : int
+{
+	eNoWeave = 0,
+	eSin = 5, eSinFreq = 6, eSpiral = 7,
+	eObliqueTriangle = 8, eSpaceTriangle = 9,
+	eLTriangle = 10, eBackForward = 11,
+	eConstPoint = 12, eSpiralFreq = 13,
+	eObliqueTriangleFreq = 14, eSpaceTriangleFreq = 15,
+	eLTriangleFreq = 16, eBackForwordFreq = 17,
+	eHalfSin = 18,
+};
+
 struct T_WeaveDate
 {
 	int nWeaveType = 0; // eTCPWeave
@@ -324,6 +339,8 @@ struct T_ROBOT_MOVE_INFO
 	T_ROBOT_MOVE_SPEED tSpeed;	//移动速度
 	double dOverlapRel = 20.0; // STEP连续运动过渡比例，对应SRD里的OVERLAPREL。
 	int nPostureType = 0; // STEP姿态/位形(srp Lin/WLin第4参)：0=NULL(默认,保持原非焊接Lin行为) 1=eVAR 2=eCONST 3=eWRIST
+	int nDynamicMode = 0; // 动态特性(WLin第2参DYNAMIC)：0=NULL(机器人默认动态) 非0=ntdyn0(程序指定速度)
+	int nDwellMs = 0;     // pointwise摆动相位点停留(ms)：>0时该点运动后srp插WaitTime完全停、srd建INT变量；原生摆动不用
 	int nMoveDevice = -1;
 	int nTrackNo = -1;
 	double adBasePosVar[3]; //外部轴坐标(MP_USR_VAR_INFO中最多支持8轴)
@@ -342,6 +359,7 @@ struct T_ROBOT_MOVE_INFO
 	double dArcEndWaitTime = 0.0;
 	int nArcMode = 4; // STEP焊接模式：0直流一元，1脉冲一元，2JOB，3近控，4分别，5CC/CV，6TIG，7CMT
 	bool bHasWeaveParam = false;
+	bool bAppPointwiseWeave = false; // true=上位机自建pointwise摆动(来源开关，来自工艺nWrapConditionNo)；与nWeaveType(原生运动学方式)正交
 	T_WeaveDate tWeaveParam;
 	bool bHasTrackParam = false;
 	T_TrackData tTrackParam;

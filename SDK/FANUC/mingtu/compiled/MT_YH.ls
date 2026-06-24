@@ -1,0 +1,32 @@
+/PROG  MT_YH
+/ATTR
+OWNER		= MNEDITOR;
+COMMENT		= "Mingtu user frame";
+PROG_SIZE	= 0;
+CREATE		= DATE 26-06-24  TIME 00:00:00;
+MODIFIED	= DATE 26-06-24  TIME 00:00:00;
+FILE_NAME	= ;
+VERSION		= 0;
+LINE_COUNT	= 9;
+MEMORY_SIZE	= 0;
+PROTECT		= READ_WRITE;
+TCD:  STACK_SIZE	= 0,
+      TASK_PRIORITY	= 50,
+      TIME_SLICE	= 0,
+      BUSY_LAMP_OFF	= 0,
+      ABORT_REQUEST	= 0,
+      PAUSE_REQUEST	= 0;
+DEFAULT_GROUP	= *,*,*,*,*;
+CONTROL_CODE	= 00000000 00000000;
+/MN
+   1:  R[61]=AR[1] ;
+   2:  R[62]=AR[2] ;
+   3:  R[63]=AR[3] ;
+   4:  R[64]=AR[4] ;
+   5:  R[65]=AR[5] ;
+   6:  R[66]=AR[6] ;
+   7:  R[67]=AR[7] ;
+   8:  CALL MT_YH_K ;
+   9:  END ;
+/POS
+/END

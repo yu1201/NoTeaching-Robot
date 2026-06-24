@@ -59,6 +59,8 @@ public:
         int fitAzimuthHeadingWindow = 10;            // 左右两段方向的局部最小二乘拟合跨度(点)
         double fitAzimuthNmsSpanMm = 12.0;           // 非极大值抑制弧长：同区域只保留转角最大的拐点
         double fitAzimuthStraightenResidualMm = 6.0; // 直线化兜底残差：段内偏离弦超此值才补拐点
+        double fitAzimuthRefineFloorMm = 0.5;        // 起终点先验自适应细化地板(mm)：粗拟合后对"一致
+                                                     // 弓向一侧"的段补漏检拐点(端区用此地板/中段×3)；<=0 关闭
         // 板材搭接 X 错位台阶检测(默认关，仅几何拟合流程)：双侧平台最小二乘→两侧分别拟合+保留台阶
         bool enableLapMisalignmentSplit = false;
         double lapStepHeightThresholdMm = 1.0;   // 台阶高门(中心两线高度差)

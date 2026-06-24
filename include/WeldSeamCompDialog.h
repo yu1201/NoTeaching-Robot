@@ -206,9 +206,11 @@ private:
     QDoubleSpinBox* m_pArcRadiusSpin = nullptr;
     QDoubleSpinBox* m_pFinalStepSpin = nullptr;
     QComboBox* m_pWeldDirectionCombo = nullptr;
+    QCheckBox* m_pSimplifyTrajectoryCheck = nullptr;  // 精简轨迹(只保留特殊点)开关
     QLabel* m_pProcessHintLabel = nullptr;
     std::vector<T_WELD_PARA> m_weldProcessList;
     int m_weldProcessSelectedIndex = -1;
     bool m_weldProcessLoaded = false;
     bool m_bLoadingProcessArea = false;
+    bool m_simplifyTrajectoryEnabled = false;  // 精简轨迹标志(存 WeldSeamCompParam/ALLWeldSeamComp，落盘+预览联动+真实焊接生效)
 };

@@ -123,6 +123,7 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.fitAzimuthHeadingWindow = ReadIntSetting("Fit/AzimuthHeadingWindow", settings.fitAzimuthHeadingWindow);
     settings.fitAzimuthNmsSpanMm = ReadDoubleSetting("Fit/AzimuthNmsSpanMm", settings.fitAzimuthNmsSpanMm);
     settings.fitAzimuthStraightenResidualMm = ReadDoubleSetting("Fit/AzimuthStraightenResidualMm", settings.fitAzimuthStraightenResidualMm);
+    settings.fitAzimuthRefineFloorMm = ReadDoubleSetting("Fit/AzimuthRefineFloorMm", settings.fitAzimuthRefineFloorMm);
     settings.enableLapMisalignmentSplit = ReadBoolSetting("Fit/EnableLapMisalignmentSplit", settings.enableLapMisalignmentSplit);
     settings.lapStepHeightThresholdMm = ReadDoubleSetting("Fit/LapStepHeightThresholdMm", settings.lapStepHeightThresholdMm);
     settings.lapStepStationWindowMm = ReadDoubleSetting("Fit/LapStepStationWindowMm", settings.lapStepStationWindowMm);
@@ -227,6 +228,7 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.fitAzimuthHeadingWindow = std::max(2, settings.fitAzimuthHeadingWindow);
     settings.fitAzimuthNmsSpanMm = std::max(1.0, settings.fitAzimuthNmsSpanMm);
     settings.fitAzimuthStraightenResidualMm = std::max(0.5, settings.fitAzimuthStraightenResidualMm);
+    settings.fitAzimuthRefineFloorMm = std::max(0.0, settings.fitAzimuthRefineFloorMm);  // <=0 表示关闭细化
     settings.lapStepHeightThresholdMm = std::max(0.3, settings.lapStepHeightThresholdMm);
     settings.lapStepStationWindowMm = std::max(2.0, settings.lapStepStationWindowMm);
     settings.lapStepSideFlatnessMm = std::max(0.02, settings.lapStepSideFlatnessMm);
@@ -296,6 +298,7 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("Fit/AzimuthHeadingWindow", QString::number(settings.fitAzimuthHeadingWindow))
         && write("Fit/AzimuthNmsSpanMm", QString::number(settings.fitAzimuthNmsSpanMm, 'f', 6))
         && write("Fit/AzimuthStraightenResidualMm", QString::number(settings.fitAzimuthStraightenResidualMm, 'f', 6))
+        && write("Fit/AzimuthRefineFloorMm", QString::number(settings.fitAzimuthRefineFloorMm, 'f', 6))
         && write("Fit/EnableLapMisalignmentSplit", settings.enableLapMisalignmentSplit ? "1" : "0")
         && write("Fit/LapStepHeightThresholdMm", QString::number(settings.lapStepHeightThresholdMm, 'f', 6))
         && write("Fit/LapStepStationWindowMm", QString::number(settings.lapStepStationWindowMm, 'f', 6))

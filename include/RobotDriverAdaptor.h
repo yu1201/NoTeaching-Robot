@@ -42,6 +42,12 @@ public:
     virtual bool InitSocket(const char* ip, unsigned short Port, bool ifRecode = false);
     virtual bool CloseSocket();
     virtual bool IsConnected();
+    // 后台状态监控线程的"首次连接"钩子：默认空(FANUC 惰性连接无需)；STEP 重写为发起一次连接。
+    // 配合 s_connectDriversAtConstruct：GUI 模式构造不连，改由监控线程在后台连，避免连不上拖慢主窗口显示。
+    virtual void EnsureConnectionForMonitor() {}
+    // 驱动构造时是否同步连接机器人：默认 true(旧行为/CLI 用，保证命令执行时已连)；GUI 启动
+    // (main 检测到非 --no-show)置 false → 构造不连、监控线程后台连，主窗口立即可见。
+    static std::atomic<bool> s_connectDriversAtConstruct;
     virtual bool cleanAlarm();
     virtual bool ServoOn();
     void ClearLastRobotError();
@@ -74,6 +80,21 @@ public:
     std::uint64_t StateMonitorMark() const;
     int StateMonitorCachedCount() const;
     virtual int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo);
+    // 通用(品牌无关)：把已优化的中心线点位序列(只直线直连)，按 T_WeaveDate
+    // (nWeaveType==kWeaveTypeAppPointwise) 沿弧长展开成密集摆动点(正弦/三角/L摆/纵向往复)。
+    // 非 pointwise 或点数<2 时原样返回。输出点已关 bHasWeaveParam、dOverlapRel=0(精确过点)。
+    // error!=nullptr 时，速度/频率无效等失败原因写入 *error 并返回空。
+    static std::vector<T_ROBOT_MOVE_INFO> ExpandMoveInfosByPointwiseWeave(
+        const std::vector<T_ROBOT_MOVE_INFO>& centerline, std::string* error = nullptr);
+    // 摆动速度补偿：摆动后 TCP 路径变长，按全局 k=Σ摆动点距/Σ中心线点距 把每点运动速度字段
+    // (dWeldSpeedMmPerMin 给 STEP/ARCDATA、tSpeed.dSpeed 给 FANUC)乘 k，维持沿焊缝行进速度。
+    // maxLinearSpeedMmPerSec>0 时限幅(防超机器人/焊机上限)；info!=nullptr 输出 k 与限幅告警。
+    // 未摆动(k≈1)或无法算 k 时原样返回。
+    static std::vector<T_ROBOT_MOVE_INFO> ApplyWeaveSpeedCompensation(
+        const std::vector<T_ROBOT_MOVE_INFO>& centerline,
+        const std::vector<T_ROBOT_MOVE_INFO>& weaveMoveInfo,
+        double maxLinearSpeedMmPerSec = 0.0,
+        std::string* info = nullptr);
     virtual int CheckDone();
     virtual int CheckRobotDone(int nDelayTime = 200);
     virtual bool CallJob(std::string sJobName);

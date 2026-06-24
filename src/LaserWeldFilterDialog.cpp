@@ -832,6 +832,13 @@ void LaserWeldFilterDialog::BuildUi()
     m_pAzimuthStraightenResidualSpin->setDecimals(1);
     m_pAzimuthStraightenResidualSpin->setValue(6.0);
     m_pAzimuthStraightenResidualSpin->setToolTip("直线化兜底残差：相邻拐点间实际焊道偏离直线超此值则补拐点(防漏检小台阶抄近路)。须大于波纹起伏幅度。");
+    m_pAzimuthRefineFloorSpin = new QDoubleSpinBox();
+    m_pAzimuthRefineFloorSpin->setRange(0.0, 50.0);
+    m_pAzimuthRefineFloorSpin->setDecimals(1);
+    m_pAzimuthRefineFloorSpin->setSingleStep(0.1);
+    m_pAzimuthRefineFloorSpin->setValue(0.5);
+    m_pAzimuthRefineFloorSpin->setToolTip("端区细化地板：直线化残差用大阈值粗拟合后，再对\"一致弓向一侧\"的段补回漏检拐点"
+        "(单侧弓出占比高才补，挡随机噪声)；首尾端区用此地板、中段自动×3。0=关闭。专治起终点附近缓弓拐点被抄近路。");
 
     // 板材搭接 X 错位台阶检测(默认关，仅几何拟合流程)：双侧平台最小二乘判据。
     m_pLapSplitCheck = new QCheckBox("启用搭接错位检测(两侧分拟合·保台阶)");
@@ -895,15 +902,17 @@ void LaserWeldFilterDialog::BuildUi()
     paramLayout->addWidget(m_pAzimuthHeadingWindowSpin, 11, 1);
     paramLayout->addWidget(new QLabel("直线化残差"), 11, 2);
     paramLayout->addWidget(CreateUnitEditor(m_pAzimuthStraightenResidualSpin, "mm"), 11, 3);
-    paramLayout->addWidget(m_pLapSplitCheck, 12, 0, 1, 4);
-    paramLayout->addWidget(new QLabel("错位台阶高门"), 13, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepHeightSpin, "mm"), 13, 1);
-    paramLayout->addWidget(new QLabel("拟合窗口长度"), 13, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepStationSpin, "mm"), 13, 3);
-    paramLayout->addWidget(new QLabel("平台残差上限"), 14, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepFlatnessSpin, "mm"), 14, 1);
-    paramLayout->addWidget(new QLabel("平台斜率上限"), 14, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepSlopeSpin, "mm/mm"), 14, 3);
+    paramLayout->addWidget(new QLabel("端区细化地板"), 12, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthRefineFloorSpin, "mm"), 12, 1);
+    paramLayout->addWidget(m_pLapSplitCheck, 13, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("错位台阶高门"), 14, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepHeightSpin, "mm"), 14, 1);
+    paramLayout->addWidget(new QLabel("拟合窗口长度"), 14, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepStationSpin, "mm"), 14, 3);
+    paramLayout->addWidget(new QLabel("平台残差上限"), 15, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepFlatnessSpin, "mm"), 15, 1);
+    paramLayout->addWidget(new QLabel("平台斜率上限"), 15, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepSlopeSpin, "mm/mm"), 15, 3);
     paramLayout->setColumnStretch(1, 1);
     paramLayout->setColumnStretch(3, 1);
     featurePointLayout->addWidget(paramGroup);
@@ -1224,6 +1233,7 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pAzimuthHeadingWindowSpin->setValue(processingSettings.fitAzimuthHeadingWindow);
     m_pAzimuthNmsSpanSpin->setValue(processingSettings.fitAzimuthNmsSpanMm);
     m_pAzimuthStraightenResidualSpin->setValue(processingSettings.fitAzimuthStraightenResidualMm);
+    m_pAzimuthRefineFloorSpin->setValue(processingSettings.fitAzimuthRefineFloorMm);
     m_pLapSplitCheck->setChecked(processingSettings.enableLapMisalignmentSplit);
     m_pLapStepHeightSpin->setValue(processingSettings.lapStepHeightThresholdMm);
     m_pLapStepStationSpin->setValue(processingSettings.lapStepStationWindowMm);
@@ -1273,6 +1283,7 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.fitAzimuthHeadingWindow = m_pAzimuthHeadingWindowSpin->value();
     processingSettings.fitAzimuthNmsSpanMm = m_pAzimuthNmsSpanSpin->value();
     processingSettings.fitAzimuthStraightenResidualMm = m_pAzimuthStraightenResidualSpin->value();
+    processingSettings.fitAzimuthRefineFloorMm = m_pAzimuthRefineFloorSpin->value();
     processingSettings.enableLapMisalignmentSplit = m_pLapSplitCheck->isChecked();
     processingSettings.lapStepHeightThresholdMm = m_pLapStepHeightSpin->value();
     processingSettings.lapStepStationWindowMm = m_pLapStepStationSpin->value();
