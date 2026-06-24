@@ -1,9 +1,17 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-06-23`
+- 人工整理日期：`2026-06-24`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-06-24
+
+- SDK 点云库崩溃进程隔离（防崩，根因实测确认）：现场用 Windows 事件日志定位崩溃模块=`pcl_kdtree_release.dll`、异常码 0xC0000005；根因是把 Z 截断值改成 -410(让 SDK 截断后点集为空)后，SDK(PointCloudExtration 依赖的 PCL KdTree)对空点云 `setInputCloud` 不检查直接建树而段错误——而 SDK 是 `Thread_Number=24` 多线程，崩在工作线程，同进程的 SEH/任何用户态 handler 都无法安全恢复(撤销了一版降线程的规避做法)。最终方案=**进程隔离**：在 `main()` 构造主窗口前拦截 `--pointcloud-extract-worker` 子进程模式(只调 SDK 提取、不连机器人、调完即退)，主进程 `ExtractCorrugatedSheetIsolated` 经临时文件传点云/收结果、用 QProcess 跑子进程，子进程崩溃(CrashExit/非0退出码)时报可读错误、主程序(GUI/机器人)不挂。本地用 worker 直接喂这批点云重现 0xC0000005(PCL `empty input cloud`)、确认隔离边界生效。每次 SDK 提取多一次点云文件中转(~2-3s)换稳定性。不改 SDK 源码
+- 焊接姿态/圆滑参数下放到「基础工艺参数」：定位姿态参数=STEP srp `Lin/WLin` 第 4 参(原硬编码 WLin=eVAR/Lin=NULL)、圆滑=`OVERLAPREL`(原由测量参数 dStepOverlapRel 提供)。「工艺参数→基础工艺参数」界面新增「焊接姿态」下拉(NULL/可变/恒定/腕关节→srp 写 NULL/eVAR/eCONST/eWRIST，恒定/腕关节为推测待现场验证)与「圆滑(过渡比例)%」；T_WELD_PARA 加 nWeldPostureType+dWeldOverlapRel，工艺文件字段 84→86 **向后兼容**(ParseWeldLine 接受 84 或 86、旧文件新字段用默认 可变/20，BuildWeldFields 始终输出 86，下次保存自动补全)，照 cornerArc 模板贯穿 Const.h/WeldProcessFile/WeldProcessDialog/MeasureThenWeldService/StepRobotDriver；ApplyActiveWeldProcessToPreset 在测量参数段之后调用故工艺圆滑覆盖测量默认；T_ROBOT_MOVE_INFO.nPostureType 默认 0(NULL)保持非焊接点原行为
+- 焊接动态特性(DYNAMIC)暂置 NULL：按现场要求实焊 `WLin` 第 2 参由 `dynName(ntdyn0)` 改为 `NULL`，不由程序指定动态、用机器人默认；空跑 Lin/PTP 仍保留 dynName(需要时一行恢复)
+- 焊道补偿后同步生成 STEP job：先测后焊(扫描)与跳过扫描重建两个流程，在 `ApplyWeldSeamCompToPoseFile` 生成 `_SeamComp` 后立即调 `GenerateStepWeldProgramFiles`(复用 `--generate-step-weld-program` 同一套)把实焊 srp/srd 生成到焊道同目录(Result/<robot>/<case>/LaserPoint/Weld_时间戳.srp/.srd)，便于提取查看，不必等下枪执行；失败只记日志不阻断焊道
+- 版本 v2026.06.24.1305；提交前撤销了 SDK 头(CRLF 行尾误翻)与 Job/STEP srd(运行产物)的非预期改动；main 中性版 Debug/Release 编译 + Inno 打包通过，品牌版 hk-pathlynx-corpla 同步 + 编译 + 打包 + GitHub Release
 
 ## 2026-06-23
 

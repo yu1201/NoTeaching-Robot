@@ -13,9 +13,17 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.06.23.1854`
+- 当前源码版本：`v2026.06.24.1305`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.23.1854.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.06.24.1305.exe`，不用自己编译源码。
+
+## 2026-06-24 更新（v2026.06.24.1305）
+
+- SDK 点云库崩溃进程隔离（防崩）：现场把 Z 截断改成会让点集为空的值时，SDK(PointCloudExtration→pcl_kdtree)对空点云建 KdTree 会段错误(0xC0000005)拖垮整个上位机、反复闪退重启。改为把 SDK 调用放到**子进程**执行，子进程崩溃时主进程检测到并报可读错误、GUI/机器人不受影响。本地已重现空点云崩溃并验证隔离生效
+- 焊接姿态/圆滑参数放入基础工艺参数：「工艺参数→基础工艺参数」新增「焊接姿态」(NULL/可变/恒定/腕关节，对应 srp Lin/WLin 第 4 参 NULL/eVAR/eCONST/eWRIST)与「圆滑(过渡比例)」(srp OVERLAPREL)；工艺文件 84→86 字段**向后兼容**(旧 84 文件照常读取、新字段用默认，保存自动补全到 86)。注：恒定/腕关节 srp 写法为推测，现场验证再调
+- 焊接动态特性(DYNAMIC)暂置 NULL：实焊 WLin 第 2 参不再由程序指定动态、用机器人默认动态
+- 焊道补偿生成后同步生成 STEP job：先测后焊 / 跳过扫描重建在生成焊道补偿文件后，立即把 srp/srd 同步生成一份到焊道同目录，便于提取查看，不必等下枪执行
+- 构建验证：`Debug x64` 与 `Release x64` 编译通过；安装包 `NoTeaching-Robot-Setup-v2026.06.24.1305.exe`
 
 ## 2026-06-23 更新（v2026.06.23.1854）
 

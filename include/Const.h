@@ -323,6 +323,7 @@ struct T_ROBOT_MOVE_INFO
 	int nPosType = POSVAR;	//目标变量类型：POSVAR 使用 CARTPOS，PULSEVAR 使用 AXISPOS
 	T_ROBOT_MOVE_SPEED tSpeed;	//移动速度
 	double dOverlapRel = 20.0; // STEP连续运动过渡比例，对应SRD里的OVERLAPREL。
+	int nPostureType = 0; // STEP姿态/位形(srp Lin/WLin第4参)：0=NULL(默认,保持原非焊接Lin行为) 1=eVAR 2=eCONST 3=eWRIST
 	int nMoveDevice = -1;
 	int nTrackNo = -1;
 	double adBasePosVar[3]; //外部轴坐标(MP_USR_VAR_INFO中最多支持8轴)
@@ -385,6 +386,8 @@ struct T_WELD_PARA
 	int nWeaveEnable = 1; // 是否启用摆动参数
 	int nTrackEnable = 1; // 是否启用跟踪参数
 	int nArcMode = 4; // STEP焊接模式：0直流一元，1脉冲一元，2JOB，3近控，4分别，5CC/CV，6TIG，7CMT
+	int nWeldPostureType = 1; // 焊接姿态/位形：0=NULL 1=可变(eVAR) 2=恒定(eCONST) 3=腕关节(eWRIST)
+	double dWeldOverlapRel = 20.0; // 圆滑：STEP连续过渡比例(OVERLAPREL,%)，来自基础工艺参数
 
 	int nWrapCurrent1Enable; // 包角段1电流启用
 	int nWrapVoltage1Enable; // 包角段1电压启用

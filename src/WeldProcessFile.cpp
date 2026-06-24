@@ -28,7 +28,9 @@ constexpr int kWeldCoreFieldCount = 48;
 constexpr int kWeldTrackFieldCount = 33;
 constexpr int kWeldSwitchFieldCount = 2;
 constexpr int kWeldArcModeFieldCount = 1;
-constexpr int kWeldFieldCount = kWeldCoreFieldCount + kWeldTrackFieldCount + kWeldSwitchFieldCount + kWeldArcModeFieldCount;
+constexpr int kWeldLegacyFieldCount = kWeldCoreFieldCount + kWeldTrackFieldCount + kWeldSwitchFieldCount + kWeldArcModeFieldCount; // 84：旧工艺文件
+constexpr int kWeldExtraFieldCount = 2; // 末尾扩展：姿态 + 圆滑(读时兼容84缺省默认，存时补全到86)
+constexpr int kWeldFieldCount = kWeldLegacyFieldCount + kWeldExtraFieldCount; // 86：当前完整
 
 int NormalizeArcMode(int mode)
 {
@@ -126,6 +128,8 @@ void VisitWeldParaFields(T_WELD_PARA& item, Visitor&& visit)
     visit("CornerArcTransitionCurrentEnable", item.nCornerArcTransitionCurrentEnable);
     visit("CornerArcTransitionVoltageEnable", item.nCornerArcTransitionVoltageEnable);
     visit("CornerArcTransitionApplyScope", item.nCornerArcTransitionApplyScope);
+    visit("WeldPostureType", item.nWeldPostureType);
+    visit("WeldOverlapRel", item.dWeldOverlapRel);
     visit("Track.LateralBeginCycle", item.tTrackParam.nLateralBeginCycle);
     visit("Track.LateralGain", item.tTrackParam.dLateralGain);
     visit("Track.LeftAreaCoefficient", item.tTrackParam.dLeftAreaCoefficient);
@@ -1221,7 +1225,9 @@ bool WeldProcessFile::ParseWeaveLine(const std::vector<std::string>& fields, T_W
 
 bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WELD_PARA& tWeldPara) const
 {
-    if (static_cast<int>(fields.size()) != kWeldFieldCount)
+    const int fieldCount = static_cast<int>(fields.size());
+    // 兼容旧 84 字段与新 86 字段(末尾姿态+圆滑)。旧文件读取时新字段用默认，下次保存补全到 86。
+    if (fieldCount != kWeldFieldCount && fieldCount != kWeldLegacyFieldCount)
     {
         const_cast<WeldProcessFile*>(this)->m_sLastError = "焊接工艺参数格式已升级，请重新创建工艺内容。";
         return false;
@@ -1321,6 +1327,22 @@ bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WE
         tWeldPara.nWeaveEnable = tWeldPara.nWeaveEnable != 0 ? 1 : 0;
         tWeldPara.nTrackEnable = tWeldPara.nTrackEnable != 0 ? 1 : 0;
         tWeldPara.nArcMode = NormalizeArcMode(tWeldPara.nArcMode);
+        // 扩展字段(86)：姿态 + 圆滑。旧 84 字段缺省→默认(可变/20)，下次保存自动补全。
+        tWeldPara.nWeldPostureType = 1;
+        tWeldPara.dWeldOverlapRel = 20.0;
+        if (fieldCount >= kWeldFieldCount)
+        {
+            int posture = 1;
+            double overlap = 20.0;
+            if (TryParseInt(fields[84], posture) && posture >= 0 && posture <= 3)
+            {
+                tWeldPara.nWeldPostureType = posture;
+            }
+            if (TryParseDouble(fields[85], overlap) && overlap >= 0.0)
+            {
+                tWeldPara.dWeldOverlapRel = overlap;
+            }
+        }
     }
     return parsed;
 }
@@ -1432,7 +1454,9 @@ std::vector<std::string> WeldProcessFile::BuildWeldFields(const T_WELD_PARA& tWe
         ToText(tWeldPara.tTrackParam.dVerticalReserved1),
         std::to_string(tWeldPara.nWeaveEnable != 0 ? 1 : 0),
         std::to_string(tWeldPara.nTrackEnable != 0 ? 1 : 0),
-        std::to_string(NormalizeArcMode(tWeldPara.nArcMode))
+        std::to_string(NormalizeArcMode(tWeldPara.nArcMode)),
+        std::to_string(tWeldPara.nWeldPostureType),
+        ToText(tWeldPara.dWeldOverlapRel)
     };
 }
 

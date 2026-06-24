@@ -48,6 +48,19 @@ public:
         const Eigen::Vector3d& scanDirection,
         const QString& baseWeldOutputPath = QString());
 
+    // 进程隔离版：把上面的 SDK 调用放到子进程执行。SDK(PointCloudExtration→pcl_kdtree)在多线程下
+    // 可能段错误(0xC0000005)拖垮整个上位机；子进程崩溃时本函数检测到崩溃退出、返回可报告错误，
+    // 主进程(GUI/机器人)不受影响。逻辑等价 ExtractCorrugatedSheet，仅多一层进程边界。
+    static ExtractionResult ExtractCorrugatedSheetIsolated(
+        const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
+        const PointCloudProcessingConfig::Settings& settings,
+        const Eigen::Vector3d& scanDirection,
+        const QString& baseWeldOutputPath = QString());
+
+    // 子进程入口：由 main() 在构造主窗口前拦截 --pointcloud-extract-worker 调用。
+    // workerArgs = [inputCloudFile, scanX, scanY, scanZ, baseWeldOutputPath, resultFile]。
+    static int RunExtractWorker(const QStringList& workerArgs);
+
     static RobotCalculation::MeasureThenWeldAnalysisResult BuildAnalysisResult(
         const ExtractionResult& extraction,
         const RobotCalculation::LowerWeldFilterParams& params);
