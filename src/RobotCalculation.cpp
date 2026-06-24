@@ -3529,6 +3529,93 @@ QVector<int> SplitNonStraightAzimuthSegments(
     return keys;
 }
 
+// 起终点先验自适应细化：在 SplitNonStraightAzimuthSegments 粗拟合之后，对仍偏直的段做按需细化。
+// 仅当段内点「一致弓向弦的同一侧」（单侧占比 >= kOneSidedMin，借此区分真弓弯与左右乱跳的随机噪声）
+// 且离弦峰值超过位置相关地板时，才补该段离弦最远点为拐点。地板按主轴弧长位置加权：首尾各 kEndFrac
+// 端区用低地板(azimuthRefineFloorMm)，中段用高地板(×kMidMultiple)——体现「漏检拐点多出现在引入/收尾
+// 段」的现场先验，避免中段把周期起伏过补成拐点。azimuthRefineFloorMm<=0 时关闭（保持粗拟合结果）。
+QVector<int> RefineAzimuthCornersByCoherentBow(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    QVector<int> keys = keyIndexes;
+    const double floorMm = params.azimuthRefineFloorMm;
+    if (floorMm <= 0.0 || keys.size() < 2 || projected.size() < 3)
+    {
+        return keys;
+    }
+    constexpr double kOneSidedMin = 0.80;  // 单侧弓出占比门：一致弓弯保留、随机噪声(≈0.5)剔除
+    constexpr double kMidMultiple = 3.0;   // 中段地板放大倍数（起终点先验）
+    constexpr double kEndFrac = 0.20;      // 首尾各 20% 弧长视为端区
+    const double minSegMm = std::max(params.sampleStep * 2.0, 2.0);
+    const double s0 = projected.first().s;
+    const double sN = projected.last().s;
+    const double span = std::abs(sN - s0);
+
+    for (int iter = 0; iter < 8; ++iter)
+    {
+        QVector<int> next;
+        next.push_back(keys.first());
+        bool inserted = false;
+        for (int kp = 0; kp + 1 < keys.size(); ++kp)
+        {
+            const int a = keys[kp];
+            const int b = keys[kp + 1];
+            const Eigen::Vector2d pa = GeometrySmoothedProjection2D(projected[a]);
+            const Eigen::Vector2d pb = GeometrySmoothedProjection2D(projected[b]);
+            const Eigen::Vector2d chord = pb - pa;
+            const double chordLen = chord.norm();
+            double maxDist = -1.0;
+            int maxIdx = -1;
+            int positiveSide = 0;
+            int totalSide = 0;
+            for (int i = a + 1; i < b; ++i)
+            {
+                const double dist = GeometryDistanceToSegment2D(projected, a, b, i);
+                if (dist > maxDist)
+                {
+                    maxDist = dist;
+                    maxIdx = i;
+                }
+                if (chordLen > 1e-9)
+                {
+                    // 点在弦的哪一侧：叉积符号；一致弓弯各点同号，随机噪声正负相抵
+                    const double sideSign = Cross2D(chord, GeometrySmoothedProjection2D(projected[i]) - pa);
+                    if (sideSign >= 0.0)
+                    {
+                        ++positiveSide;
+                    }
+                    ++totalSide;
+                }
+            }
+            if (totalSide > 0 && maxIdx > a && maxIdx < b)
+            {
+                const double oneSided =
+                    std::max(positiveSide, totalSide - positiveSide) / static_cast<double>(totalSide);
+                const double frac = span > 1e-9 ? std::abs(projected[maxIdx].s - s0) / span : 0.5;
+                const bool endZone = frac < kEndFrac || frac > 1.0 - kEndFrac;
+                const double floorHere = endZone ? floorMm : floorMm * kMidMultiple;
+                const bool farEnough =
+                    std::abs(projected[maxIdx].s - projected[a].s) >= minSegMm
+                    && std::abs(projected[b].s - projected[maxIdx].s) >= minSegMm;
+                if (maxDist > floorHere && oneSided >= kOneSidedMin && farEnough)
+                {
+                    next.push_back(maxIdx);
+                    inserted = true;
+                }
+            }
+            next.push_back(b);
+        }
+        keys = next;
+        if (!inserted)
+        {
+            break;
+        }
+    }
+    return keys;
+}
+
 RobotCalculation::LowerWeldPointType GeometryCornerType(
     const QVector<GeometryProjectedPoint>& projected,
     const QVector<int>& keyIndexes,
@@ -5005,6 +5092,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         // 顶点位置仍由 BuildFittedGeometryKeyPoints 局部求交精修，内外角仍由 GeometryCornerType 判定。
         keyIndexes = BuildAzimuthCornerKeyIndexes(projected, params);
         keyIndexes = SplitNonStraightAzimuthSegments(projected, keyIndexes, params);
+        // 起终点先验自适应细化：补回端区被直线化抹平的缓弓拐点（一致弓向门挡随机噪声）。
+        keyIndexes = RefineAzimuthCornersByCoherentBow(projected, keyIndexes, params);
     }
     else
     {

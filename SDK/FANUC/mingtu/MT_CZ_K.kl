@@ -1,0 +1,60 @@
+PROGRAM MT_CZ_K
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'MT_CZ perp foot of P3 onto line P1P2'
+%ENVIRONMENT sysdef
+%ENVIRONMENT REGOPE
+%ENVIRONMENT MOTN
+-- 垂足：求点 P3 到直线(P1,P2)的投影点。
+-- 入口寄存器(由 TP 外壳 MT_CZ.ls 从 AR[] 写入)：
+--   R[61]=P1 PR号  R[62]=P2 PR号  R[63]=P3 PR号
+--   R[64]=姿态点 PR号  R[65]=垂足结果 PR号  R[66]=标志 R号
+-- 结果点位置=垂足；姿态(wpr)与config=姿态点原样拷贝；R[标志]:1成功/0失败。
+VAR
+  i_p1, i_p2, i_p3, i_pose, i_res, i_flag : INTEGER
+  st : INTEGER
+  p1, p2, p3, pose, res : XYZWPR
+  ax, ay, az, t, denom : REAL
+
+ROUTINE RInt(idx : INTEGER) : INTEGER
+  VAR
+    b : BOOLEAN
+    iv : INTEGER
+    rv : REAL
+    s : INTEGER
+  BEGIN
+    GET_REG(idx, b, iv, rv, s)
+    RETURN(iv)
+  END RInt
+
+BEGIN
+  i_p1 = RInt(61)
+  i_p2 = RInt(62)
+  i_p3 = RInt(63)
+  i_pose = RInt(64)
+  i_res = RInt(65)
+  i_flag = RInt(66)
+
+  p1 = GET_POS_REG(i_p1, st)
+  p2 = GET_POS_REG(i_p2, st)
+  p3 = GET_POS_REG(i_p3, st)
+  pose = GET_POS_REG(i_pose, st)
+
+  ax = p2.x - p1.x
+  ay = p2.y - p1.y
+  az = p2.z - p1.z
+  denom = ax*ax + ay*ay + az*az
+  IF denom < 0.000001 THEN
+    SET_INT_REG(i_flag, 0, st)
+    RETURN
+  ENDIF
+  t = ((p3.x-p1.x)*ax + (p3.y-p1.y)*ay + (p3.z-p1.z)*az) / denom
+
+  res = pose
+  res.x = p1.x + t*ax
+  res.y = p1.y + t*ay
+  res.z = p1.z + t*az
+  SET_POS_REG(i_res, res, st)
+  SET_INT_REG(i_flag, 1, st)
+END MT_CZ_K

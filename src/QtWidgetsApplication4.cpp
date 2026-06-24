@@ -12,6 +12,7 @@
 #include "LaserWeldFilterDialog.h"
 #include "WorkpieceMeshViewerDialog.h"
 #include "ModelAlignmentDialog.h"
+#include "VirtualWeldTestDialog.h"
 #include "MeasureThenWeldDialog.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "MeasureThenWeldService.h"
@@ -7700,6 +7701,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addMenuAction(managementDebugMenu, createManagementAction("功能测试", [this, openInManagement]() { openInManagement([this]() { OpenFunctionTestDialog(); }); }));
 	addMenuAction(managementDebugMenu, createManagementAction("工件模型", [this]() { OpenWorkpieceMeshPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("模型配准", [this]() { OpenModelAlignmentPage(); }));
+	addMenuAction(managementDebugMenu, createManagementAction("虚拟焊道测试", [this]() { OpenVirtualWeldTestPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("配置数据库查看", [this]() { OpenConfigDatabaseViewerDialog(); }));
 
 	m_pAccountManagementAction = addMenuAction(managementAccountMenu, createManagementAction("账号管理", [this]() { OpenAccountManagementDialog(); }));
@@ -8247,6 +8249,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 			{
 				if (m_pRobotSelectorCombo != nullptr)
 				{
+					// 虚拟焊道测试运行中禁止切换机器人：运行线程持有旧单元驱动指针，切换会造成并发/状态混乱。
+					if (m_pVirtualWeldTestPage != nullptr && m_pVirtualWeldTestPage->IsRunning())
+					{
+						QMessageBox::information(this, "虚拟焊道测试",
+							"虚拟焊道测试流程正在运行，请等待流程结束后再切换机器人。");
+						RefreshRobotSelectorUi();
+						return;
+					}
 					const int unitIndex = m_pRobotSelectorCombo->currentData().toInt();
 					if (unitIndex >= 0)
 					{
@@ -8336,6 +8346,19 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 			this,
 			"先测后焊",
 			"先测后焊流程正在运行，请等待流程结束后再关闭程序。");
+		if (event != nullptr)
+		{
+			event->ignore();
+		}
+		return;
+	}
+
+	if (m_pVirtualWeldTestPage != nullptr && m_pVirtualWeldTestPage->IsRunning())
+	{
+		QMessageBox::information(
+			this,
+			"虚拟焊道测试",
+			"虚拟焊道测试流程正在运行，请等待流程结束后再关闭程序。");
 		if (event != nullptr)
 		{
 			event->ignore();
@@ -9794,6 +9817,14 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 
 	auto reloadControlUnits = [this]()
 		{
+			// 重载会销毁并重建机器人驱动；若有焊接/虚拟焊道流程正在后台线程驱动机器人，重载会造成悬垂指针/并发，必须先拦截。
+			if (HasRunningMeasureThenWeldFlow()
+				|| (m_pVirtualWeldTestPage != nullptr && m_pVirtualWeldTestPage->IsRunning()))
+			{
+				QMessageBox::information(this, "控制单元管理",
+					"焊接/虚拟焊道流程正在运行，请等待流程结束后再重新加载控制单元。");
+				return;
+			}
 			StopScanCameraRuntimes();
 			if (m_pContralUnit != nullptr)
 			{
@@ -10038,6 +10069,58 @@ void QtWidgetsApplication4::OpenWorkpieceMeshPage()
 	PrepareEmbeddedPage(m_pWorkpieceMeshPage, m_pManagementStack);
 	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pWorkpieceMeshPage);
+	loading.Finish();
+}
+
+void QtWidgetsApplication4::OpenVirtualWeldTestPage()
+{
+	PageOpenTrace trace("虚拟焊道测试");
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		QMessageBox::information(this, "虚拟焊道测试", "虚拟焊道测试需要工程师或管理员权限。");
+		return;
+	}
+
+	if (m_pManagementStack == nullptr)
+	{
+		QMessageBox::warning(this, "虚拟焊道测试", "管理页面尚未初始化，无法嵌入虚拟焊道测试页面。");
+		return;
+	}
+
+	const int currentUnitIndex = CurrentRobotUnitIndex();
+	// 运行中禁止因切换机器人而删除正在驱动机器人的页面（避免线程脱离页面继续驱动/并发下发）。
+	if (m_pVirtualWeldTestPage != nullptr
+		&& m_nVirtualWeldTestPageUnitIndex != currentUnitIndex
+		&& m_pVirtualWeldTestPage->IsRunning())
+	{
+		QMessageBox::information(this, "虚拟焊道测试",
+			"虚拟焊道测试流程正在运行，请等待流程结束后再切换机器人。");
+		ShowManagementEmbeddedPage(m_pVirtualWeldTestPage);
+		return;
+	}
+	if (m_pVirtualWeldTestPage != nullptr && m_nVirtualWeldTestPageUnitIndex != currentUnitIndex)
+	{
+		if (m_pManagementStack->indexOf(m_pVirtualWeldTestPage) >= 0)
+		{
+			m_pManagementStack->removeWidget(m_pVirtualWeldTestPage);
+		}
+		delete m_pVirtualWeldTestPage;
+		m_pVirtualWeldTestPage = nullptr;
+	}
+
+	if (m_pVirtualWeldTestPage != nullptr)
+	{
+		ShowManagementEmbeddedPage(m_pVirtualWeldTestPage);
+		return;
+	}
+
+	DelayedLoadingGuard loading(this, "正在打开虚拟焊道测试", 1000);
+	m_pVirtualWeldTestPage = new VirtualWeldTestDialog(m_pContralUnit, currentUnitIndex, m_pManagementStack);
+	m_nVirtualWeldTestPageUnitIndex = currentUnitIndex;
+	loading.Pulse();
+	PrepareEmbeddedPage(m_pVirtualWeldTestPage, m_pManagementStack);
+	loading.Pulse();
+	ShowManagementEmbeddedPage(m_pVirtualWeldTestPage);
 	loading.Finish();
 }
 
@@ -10363,7 +10446,8 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		"--pointcloud-scan-direction",
 		"--apply-weld-seam-comp",
 		"--generate-step-weld-program",
-		"--update-weld-pose-average"
+		"--update-weld-pose-average",
+		"--test-pointwise-weave"
 		});
 
 	if (arguments.contains("--help-cli"))
@@ -10405,6 +10489,7 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		out << "  --generate-step-weld-program <FILE> 根据焊接姿态文件生成 STEP Weld_时间.srp/.srd，默认按实际焊接生成ARCON/ARCOFF\n";
 		out << "  --generate-step-weld-program-output-dir <DIR> 指定 STEP 焊接程序输出目录，默认 Job\\STEP\n";
 		out << "  --generate-step-weld-program-dry-run 按空跑轨迹生成 STEP 文件，不生成ARCON/ARCSET/ARCOFF焊接指令\n";
+		out << "  --test-pointwise-weave [shape amp freq] 离线测试pointwise摆动：造直线中心线跑摆动算法，输出 WeaveTest_centerline/weave.txt（默认 5 3 2，不连机器人）\n";
 		out << "  --generate-step-weld-speed <mm/min> 覆盖本次 STEP 文件轨迹速度，不修改配置库\n";
 		out << "  --update-weld-pose-average <FILE_OR_DIR> 离线统计四类焊道平均姿态并更新补偿姿态库\n";
 		out << "  --quit-after <ms>                 指定毫秒后退出程序\n";
@@ -10618,6 +10703,76 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 
 		const bool actualWeld = !arguments.contains("--generate-step-weld-program-dry-run");
 		RunGenerateStepWeldProgramForCli(arguments, inputPath, outputDir, actualWeld, weldSpeedMmPerMin);
+	}
+
+	const int testPointwiseWeaveIndex = arguments.indexOf("--test-pointwise-weave");
+	if (testPointwiseWeaveIndex >= 0)
+	{
+		// 离线测试 pointwise 摆动：造一条直线中心线，跑真实摆动算法，输出点位 txt（不连机器人）
+		auto argDoubleAt = [&](int offset, double def) -> double {
+			const int idx = testPointwiseWeaveIndex + offset;
+			if (idx < arguments.size())
+			{
+				bool ok = false;
+				const double v = arguments[idx].toDouble(&ok);
+				if (ok) { return v; }
+			}
+			return def;
+		};
+		const int shape = static_cast<int>(argDoubleAt(1, 5.0));   // 默认 eSin=5
+		const double amplitude = argDoubleAt(2, 3.0);
+		const double freqHz = argDoubleAt(3, 2.0);
+		const double speedMmPerMin = 300.0;
+		const double lineLengthMm = 200.0;
+		const int nCenterPts = 6;
+
+		std::vector<T_ROBOT_MOVE_INFO> centerline;
+		for (int i = 0; i < nCenterPts; ++i)
+		{
+			T_ROBOT_MOVE_INFO p;
+			p.tCoord.dX = 1000.0;
+			p.tCoord.dY = lineLengthMm * i / (nCenterPts - 1);
+			p.tCoord.dZ = 200.0;
+			p.tCoord.dRX = -180.0; p.tCoord.dRY = 30.0; p.tCoord.dRZ = -90.0;
+			p.nMoveType = MOVL;
+			p.bWeldProcessEnabled = true;
+			p.bHasWeaveParam = true;
+			p.bAppPointwiseWeave = true;
+			p.dWeldSpeedMmPerMin = speedMmPerMin;
+			p.tWeaveParam.nWeaveShape = shape;
+			p.tWeaveParam.dWeaveAmplitudeMm = amplitude;
+			p.tWeaveParam.dWeaveFrequencyHz = freqHz;
+			centerline.push_back(p);
+		}
+
+		std::string weaveErr;
+		std::vector<T_ROBOT_MOVE_INFO> weave =
+			RobotDriverAdaptor::ExpandMoveInfosByPointwiseWeave(centerline, &weaveErr);
+		std::string speedInfo;
+		weave = RobotDriverAdaptor::ApplyWeaveSpeedCompensation(centerline, weave, 0.0, &speedInfo);
+
+		const auto writePts = [](const QString& path, const std::vector<T_ROBOT_MOVE_INFO>& pts) {
+			QFile f(path);
+			if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+			{
+				QTextStream ts(&f);
+				for (const auto& p : pts)
+				{
+					ts << p.tCoord.dX << " " << p.tCoord.dY << " " << p.tCoord.dZ << " "
+						<< p.tCoord.dRX << " " << p.tCoord.dRY << " " << p.tCoord.dRZ << "\n";
+				}
+			}
+		};
+		writePts("WeaveTest_centerline.txt", centerline);
+		writePts("WeaveTest_weave.txt", weave);
+
+		QString msg = QString("CLI pointwise 摆动测试：shape=%1 摆幅=%2mm 频率=%3Hz → 中心线 %4 点 / 摆动 %5 点。")
+			.arg(shape).arg(amplitude).arg(freqHz)
+			.arg(static_cast<int>(centerline.size())).arg(static_cast<int>(weave.size()));
+		if (!weaveErr.empty()) { msg += QString::fromStdString(" 错误:" + weaveErr); }
+		if (!speedInfo.empty()) { msg += " " + QString::fromStdString(speedInfo); }
+		msg += " 输出 WeaveTest_centerline.txt / WeaveTest_weave.txt";
+		LogCommandLineMessage(msg);
 	}
 
 	const int updateWeldPoseAverageIndex = arguments.indexOf("--update-weld-pose-average");
@@ -12168,7 +12323,7 @@ void QtWidgetsApplication4::InitializeScanCameraRuntimes()
 		runtime->thread->start();
 		m_scanCameraRuntimes.insert(unitInfo.nUnitNo, runtime);
 		QString cameraIP;
-		EnsureScanCameraRunningForUnit(unitInfo.nUnitNo, cameraIP, false);
+		EnsureScanCameraRunningForUnit(unitInfo.nUnitNo, cameraIP, false, false);  // 启动期异步连接，不阻塞主窗口
 	}
 }
 
@@ -12230,7 +12385,7 @@ void QtWidgetsApplication4::StopScanCameraRuntimes()
 	}
 }
 
-bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QString& cameraIP, bool clearCache)
+bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QString& cameraIP, bool clearCache, bool blockingConnect)
 {
 	int cameraPort = 0;
 	if (!LoadGrooveCameraEndpointForUnit(unitIndex, cameraIP, cameraPort))
@@ -12310,10 +12465,12 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 		|| runtime->cameraPort != cameraPort;
 	if (needRestart)
 	{
+		// 启动期 blockingConnect=false：异步发起，不让相机 3s 同步连接超时阻塞主窗口显示；
+		// 扫描前等场景仍用 BlockingQueuedConnection（注：阻塞只保证"已尝试连接"，不保证连上）。
 		QMetaObject::invokeMethod(
 			runtime->tcpWorker,
 			"startClient",
-			Qt::BlockingQueuedConnection,
+			blockingConnect ? Qt::BlockingQueuedConnection : Qt::QueuedConnection,
 			Q_ARG(QString, cameraIP),
 			Q_ARG(int, cameraPort));
 		runtime->cameraIP = cameraIP;
@@ -12895,7 +13052,7 @@ void QtWidgetsApplication4::OpenWeldProcessDialog()
 	if (m_pWeldProcessPage == nullptr)
 	{
 		DelayedLoadingGuard loading(this, "正在打开工艺参数", 1000);
-		m_pWeldProcessPage = new WeldProcessDialog(*currentUnit, targetStack);
+		m_pWeldProcessPage = new WeldProcessDialog(*currentUnit, m_pContralUnit, targetStack);
 		loading.Pulse();
 		m_nWeldProcessPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pWeldProcessPage, targetStack);

@@ -1,0 +1,84 @@
+PROGRAM MT_JD_K
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'MT_JD intersection of line P1P2 and line P3P4'
+%ENVIRONMENT sysdef
+%ENVIRONMENT REGOPE
+%ENVIRONMENT MOTN
+-- 交点：直线(P1,P2) 与 直线(P3,P4) 的交点。
+-- 3D 两线一般不真正相交，取"公垂线中点"(两线最近点的中点)。
+-- 入口寄存器(由 TP 外壳 MT_JD.ls 从 AR[] 写入)：
+--   R[61]=P1 R[62]=P2 R[63]=P3 R[64]=P4 (PR号)
+--   R[65]=姿态点 PR号  R[66]=交点结果 PR号  R[67]=标志 R号
+VAR
+  i_p1, i_p2, i_p3, i_p4, i_pose, i_res, i_flag : INTEGER
+  st : INTEGER
+  p1, p2, p3, p4, pose, res : XYZWPR
+  ux, uy, uz, vx, vy, vz, wx, wy, wz : REAL
+  a, b, c, d, e, denom, s, t : REAL
+  c1x, c1y, c1z, c2x, c2y, c2z : REAL
+
+ROUTINE RInt(idx : INTEGER) : INTEGER
+  VAR
+    bb : BOOLEAN
+    iv : INTEGER
+    rv : REAL
+    ss : INTEGER
+  BEGIN
+    GET_REG(idx, bb, iv, rv, ss)
+    RETURN(iv)
+  END RInt
+
+BEGIN
+  i_p1 = RInt(61)
+  i_p2 = RInt(62)
+  i_p3 = RInt(63)
+  i_p4 = RInt(64)
+  i_pose = RInt(65)
+  i_res = RInt(66)
+  i_flag = RInt(67)
+
+  p1 = GET_POS_REG(i_p1, st)
+  p2 = GET_POS_REG(i_p2, st)
+  p3 = GET_POS_REG(i_p3, st)
+  p4 = GET_POS_REG(i_p4, st)
+  pose = GET_POS_REG(i_pose, st)
+
+  ux = p2.x - p1.x
+  uy = p2.y - p1.y
+  uz = p2.z - p1.z
+  vx = p4.x - p3.x
+  vy = p4.y - p3.y
+  vz = p4.z - p3.z
+  wx = p1.x - p3.x
+  wy = p1.y - p3.y
+  wz = p1.z - p3.z
+
+  a = ux*ux + uy*uy + uz*uz
+  b = ux*vx + uy*vy + uz*vz
+  c = vx*vx + vy*vy + vz*vz
+  d = ux*wx + uy*wy + uz*wz
+  e = vx*wx + vy*wy + vz*wz
+  denom = a*c - b*b
+  IF ABS(denom) < 0.000001 THEN
+    SET_INT_REG(i_flag, 0, st)
+    RETURN
+  ENDIF
+  s = (b*e - c*d) / denom
+  t = (a*e - b*d) / denom
+
+  c1x = p1.x + s*ux
+  c1y = p1.y + s*uy
+  c1z = p1.z + s*uz
+  c2x = p3.x + t*vx
+  c2y = p3.y + t*vy
+  c2z = p3.z + t*vz
+
+  res = pose
+  res.x = (c1x + c2x) / 2.0
+  res.y = (c1y + c2y) / 2.0
+  res.z = (c1z + c2z) / 2.0
+  SET_POS_REG(i_res, res, st)
+  SET_INT_REG(i_flag, 1, st)
+END MT_JD_K

@@ -1,0 +1,75 @@
+PROGRAM MT_YC_K
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'MT_YC extension point along P1->P2 beyond P2'
+%ENVIRONMENT sysdef
+%ENVIRONMENT REGOPE
+%ENVIRONMENT MOTN
+-- 延长线：沿 P1->P2 方向，从 P2 再外延 dist 得到延长点。
+-- 入口寄存器(由 TP 外壳 MT_YC.ls 从 AR[] 写入)：
+--   R[61]=P1 PR号  R[62]=P2 PR号  R[63]=姿态点 PR号
+--   R[64]=距离(mm,可为实数)  R[65]=延长结果 PR号  R[66]=标志 R号
+-- 约定(待现场确认)：从 P2 沿 P1->P2 单位向量再走 dist。
+VAR
+  i_p1, i_p2, i_pose, i_res, i_flag : INTEGER
+  st : INTEGER
+  p1, p2, pose, res : XYZWPR
+  dist, dx, dy, dz, L : REAL
+
+ROUTINE RInt(idx : INTEGER) : INTEGER
+  VAR
+    b : BOOLEAN
+    iv : INTEGER
+    rv : REAL
+    s : INTEGER
+  BEGIN
+    GET_REG(idx, b, iv, rv, s)
+    RETURN(iv)
+  END RInt
+
+ROUTINE RReal(idx : INTEGER) : REAL
+  VAR
+    b : BOOLEAN
+    iv : INTEGER
+    rv : REAL
+    s : INTEGER
+  BEGIN
+    GET_REG(idx, b, iv, rv, s)
+    IF b THEN
+      RETURN(rv)
+    ENDIF
+    RETURN(iv)
+  END RReal
+
+BEGIN
+  i_p1 = RInt(61)
+  i_p2 = RInt(62)
+  i_pose = RInt(63)
+  dist = RReal(64)
+  i_res = RInt(65)
+  i_flag = RInt(66)
+
+  p1 = GET_POS_REG(i_p1, st)
+  p2 = GET_POS_REG(i_p2, st)
+  pose = GET_POS_REG(i_pose, st)
+
+  dx = p2.x - p1.x
+  dy = p2.y - p1.y
+  dz = p2.z - p1.z
+  L = SQRT(dx*dx + dy*dy + dz*dz)
+  IF L < 0.000001 THEN
+    SET_INT_REG(i_flag, 0, st)
+    RETURN
+  ENDIF
+  dx = dx / L
+  dy = dy / L
+  dz = dz / L
+
+  res = pose
+  res.x = p2.x + dist*dx
+  res.y = p2.y + dist*dy
+  res.z = p2.z + dist*dz
+  SET_POS_REG(i_res, res, st)
+  SET_INT_REG(i_flag, 1, st)
+END MT_YC_K

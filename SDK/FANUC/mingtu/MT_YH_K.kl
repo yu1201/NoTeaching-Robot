@@ -1,0 +1,102 @@
+PROGRAM MT_YH_K
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'MT_YH build user frame from points'
+%ENVIRONMENT sysdef
+%ENVIRONMENT REGOPE
+%ENVIRONMENT MOTN
+-- 用户坐标系：用寻位点建坐标系，结果(原点+姿态)写入 PR[96]。
+-- 默认约定(待现场用真值标定核对)：原点=P1, +X=unit(P2-P1),
+--   求法1/3: +Y 参考向量 = P1->P3 ; 求法2: +Y 参考向量 = P3->P4。
+--   ez=unit(ex x ref), ey=ez x ex。姿态按 FANUC R=Rz*Ry*Rx 反解 wpr。
+-- 入口寄存器(由 TP 外壳 MT_YH.ls 从 AR[] 写入)：
+--   R[61]=P1 R[62]=P2 R[63]=P3 R[64]=P4 (PR号)
+--   R[65]=求法(1/2/3)  R[66]=坐标系号  R[67]=标志 R号
+-- 应用：在调用宏后用  UFRAME[<坐标系号>]=PR[96]  (号为常数) 写入坐标系；
+--   直接写 $MNUFRAME 涉及写保护/刷新, 待控制器确认后再并入本程序。
+VAR
+  i_p1, i_p2, i_p3, i_p4, i_method, i_frame, i_flag : INTEGER
+  st : INTEGER
+  p1, p2, p3, p4, frm : XYZWPR
+  exx, exy, exz, eyx, eyy, eyz, ezx, ezy, ezz : REAL
+  refx, refy, refz, elen, sy : REAL
+
+ROUTINE RInt(idx : INTEGER) : INTEGER
+  VAR
+    bb : BOOLEAN
+    iv : INTEGER
+    rv : REAL
+    ss : INTEGER
+  BEGIN
+    GET_REG(idx, bb, iv, rv, ss)
+    RETURN(iv)
+  END RInt
+
+BEGIN
+  i_p1 = RInt(61)
+  i_p2 = RInt(62)
+  i_p3 = RInt(63)
+  i_p4 = RInt(64)
+  i_method = RInt(65)
+  i_frame = RInt(66)
+  i_flag = RInt(67)
+
+  p1 = GET_POS_REG(i_p1, st)
+  p2 = GET_POS_REG(i_p2, st)
+  p3 = GET_POS_REG(i_p3, st)
+  p4 = GET_POS_REG(i_p4, st)
+
+  exx = p2.x - p1.x
+  exy = p2.y - p1.y
+  exz = p2.z - p1.z
+  elen = SQRT(exx*exx + exy*exy + exz*exz)
+  IF elen < 0.000001 THEN
+    SET_INT_REG(i_flag, 0, st)
+    RETURN
+  ENDIF
+  exx = exx / elen
+  exy = exy / elen
+  exz = exz / elen
+
+  IF i_method = 2 THEN
+    refx = p4.x - p3.x
+    refy = p4.y - p3.y
+    refz = p4.z - p3.z
+  ELSE
+    refx = p3.x - p1.x
+    refy = p3.y - p1.y
+    refz = p3.z - p1.z
+  ENDIF
+
+  ezx = exy*refz - exz*refy
+  ezy = exz*refx - exx*refz
+  ezz = exx*refy - exy*refx
+  elen = SQRT(ezx*ezx + ezy*ezy + ezz*ezz)
+  IF elen < 0.000001 THEN
+    SET_INT_REG(i_flag, 0, st)
+    RETURN
+  ENDIF
+  ezx = ezx / elen
+  ezy = ezy / elen
+  ezz = ezz / elen
+  eyx = ezy*exz - ezz*exy
+  eyy = ezz*exx - ezx*exz
+  eyz = ezx*exy - ezy*exx
+
+  sy = SQRT(exx*exx + exy*exy)
+  frm = p1
+  IF sy > 0.000001 THEN
+    frm.w = ATAN2(eyz, ezz)
+    frm.p = ATAN2(-exz, sy)
+    frm.r = ATAN2(exy, exx)
+  ELSE
+    frm.w = ATAN2(-ezy, eyy)
+    frm.p = ATAN2(-exz, sy)
+    frm.r = 0
+  ENDIF
+
+  -- 原点取 P1.xyz(由 frm=p1 保留)，姿态为反解 wpr；写入 PR[96]
+  SET_POS_REG(96, frm, st)
+  SET_INT_REG(i_flag, 1, st)
+END MT_YH_K

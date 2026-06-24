@@ -50,6 +50,7 @@ public:
 	bool InitSocket(const char* ip, unsigned short Port, bool ifRecode = false) override;
 	bool CloseSocket() override;
 	bool IsConnected() override;
+	void EnsureConnectionForMonitor() override;  // 后台监控线程首连(GUI 路径构造不连，移到此处)
 	std::string GetRobotStatusText() override;
 	std::string GetStateMonitorSourceText() const override;
 	bool InitRobotDriver(std::string strUnitName) override;
@@ -183,7 +184,7 @@ public:
 
 	HANDLE m_hMutex;
 	bool m_bLocalDebugMark;
-	bool m_bSocketConnected;
+	std::atomic<bool> m_bSocketConnected;  // 原子：构造连接已移到后台监控线程，与 UI/CLI 读写并发
 	std::string m_sStepProjectName;
 	RobotComClient* m_pSTEPRobotClient;
 

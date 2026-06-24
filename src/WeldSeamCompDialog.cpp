@@ -1060,6 +1060,14 @@ void WeldSeamCompDialog::LoadSeamParam(const QString& path)
     int count = COMP_SEGMENT_COUNT;
     ini.ReadString(false, "SeamCompCount", &count);
     count = std::max(0, count);
+    int simplifyKeepAnchorsOnly = 0;
+    ini.ReadString(false, "SimplifyKeepAnchorsOnly", &simplifyKeepAnchorsOnly);
+    m_simplifyTrajectoryEnabled = (simplifyKeepAnchorsOnly != 0);
+    if (m_pSimplifyTrajectoryCheck != nullptr)
+    {
+        const QSignalBlocker simplifyBlocker(m_pSimplifyTrajectoryCheck);
+        m_pSimplifyTrajectoryCheck->setChecked(m_simplifyTrajectoryEnabled);
+    }
     int groupCount = 0;
     const bool hasGroupCount = ini.ReadString(false, SEAM_GROUP_COUNT_KEY, &groupCount) > 0;
     groupCount = hasGroupCount
@@ -1942,7 +1950,8 @@ bool WeldSeamCompDialog::SaveSeamParam(const QString& path, QString& error) cons
         : std::clamp(m_currentSeamGroupIndex, 0, seamGroupCount - 1);
     if (!ini.WriteString("SeamCompCount", static_cast<int>(m_seamRows.size()))
         || !ini.WriteString(SEAM_GROUP_COUNT_KEY, static_cast<int>(m_seamGroupNames.size()))
-        || !ini.WriteString(SEAM_ACTIVE_GROUP_INDEX_KEY, activeGroupIndex))
+        || !ini.WriteString(SEAM_ACTIVE_GROUP_INDEX_KEY, activeGroupIndex)
+        || !ini.WriteString("SimplifyKeepAnchorsOnly", m_simplifyTrajectoryEnabled ? 1 : 0))
     {
         error = "写入焊道补偿总配置失败。";
         return false;
@@ -1989,7 +1998,8 @@ QString WeldSeamCompDialog::BuildSnapshot() const
            << QString::number(NormalizePoseCompMatchMode(m_poseCompMatchMode))
            << QString::number(m_poseMatchMaxErrorDeg, 'f', 6)
            << QString::number(m_currentPoseGroupIndex)
-           << QString::number(m_currentSeamGroupIndex);
+           << QString::number(m_currentSeamGroupIndex)
+           << QString::number(m_simplifyTrajectoryEnabled ? 1 : 0);
 
     for (int index = 0; index < m_poseGroupNames.size(); ++index)
     {
@@ -2395,10 +2405,16 @@ QWidget* WeldSeamCompDialog::CreateWeldProcessPanel()
     m_pWeldDirectionCombo->addItem("终点到起点", -1);
     layout->addWidget(m_pWeldDirectionCombo, 3, 2, 1, 2);
 
+    m_pSimplifyTrajectoryCheck = new QCheckBox("精简轨迹（只保留特殊点：起终点/拐点/段边界/搭接点，丢弃中间普通点）");
+    m_pSimplifyTrajectoryCheck->setToolTip(
+        "开启后，最终下发抽样只保留起终点、拐点、段边界、圆弧过渡边界与搭接台阶点，去掉中间普通加密点，"
+        "机器人在相邻特殊点之间走直线插补。可在下方“实际焊道”预览看到效果；该开关随焊道补偿保存，影响真实焊接的最终轨迹抽样。");
+    layout->addWidget(m_pSimplifyTrajectoryCheck, 4, 0, 1, 4);
+
     m_pProcessHintLabel = new QLabel();
     m_pProcessHintLabel->setWordWrap(true);
     m_pProcessHintLabel->setStyleSheet("color:#8FB6BC;");
-    layout->addWidget(m_pProcessHintLabel, 4, 0, 1, 4);
+    layout->addWidget(m_pProcessHintLabel, 5, 0, 1, 4);
 
     connect(m_pProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index)
         {
@@ -2430,6 +2446,14 @@ QWidget* WeldSeamCompDialog::CreateWeldProcessPanel()
         });
     connect(m_pFinalStepSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this](double)
         {
+            if (!m_bLoadingProcessArea)
+            {
+                ScheduleCompPreview();
+            }
+        });
+    connect(m_pSimplifyTrajectoryCheck, &QCheckBox::toggled, this, [this](bool on)
+        {
+            m_simplifyTrajectoryEnabled = on;
             if (!m_bLoadingProcessArea)
             {
                 ScheduleCompPreview();
@@ -2842,6 +2866,7 @@ MeasureThenWeldService::CompPreviewEditValues WeldSeamCompDialog::CollectCompPre
         edits.arcRadiusMm = m_pArcRadiusSpin->value();
         edits.processFinalStepMm = m_pFinalStepSpin->value();
     }
+    edits.keepAnchorsOnly = m_simplifyTrajectoryEnabled;  // 精简轨迹联动预览"实际焊道"阶段
     return edits;
 }
 

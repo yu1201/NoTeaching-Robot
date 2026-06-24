@@ -1,5 +1,6 @@
 #include "WeldProcessDialog.h"
 #include "ui_WeldProcessDialog.h"
+#include "ContralUnit.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
 #include "WindowStyleHelper.h"
@@ -12,6 +13,9 @@
 #include <QCloseEvent>
 #include <QShowEvent>
 #include <QComboBox>
+#include <QStandardItemModel>
+#include <QBrush>
+#include <QColor>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -329,12 +333,13 @@ void PopulateArcModeCombo(QComboBox* combo)
 }
 }
 
-WeldProcessDialog::WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* parent)
+WeldProcessDialog::WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, ContralUnit* pContralUnit, QWidget* parent)
     : QDialog(parent)
     , ui(new Ui::WeldProcessDialog())
     , m_file(unitInfo)
     , m_unitName(QString::fromUtf8(unitInfo.sUnitName.c_str()))
 {
+    m_pContralUnit = pContralUnit;
     ui->setupUi(this);
     ApplyUnifiedWindowChrome(this);
     setWindowFlags(windowFlags() | Qt::WindowMaximizeButtonHint | Qt::WindowMinimizeButtonHint);
@@ -416,6 +421,23 @@ void WeldProcessDialog::BuildEditorUi()
     auto* leftLayout = new QVBoxLayout(leftPanel);
     leftLayout->setContentsMargins(12, 12, 12, 12);
     leftLayout->setSpacing(8);
+
+    auto* robotLabel = new QLabel("机器人", leftPanel);
+    robotLabel->setObjectName("sectionTitle");
+    leftLayout->addWidget(robotLabel);
+    m_robotCombo = new QComboBox(leftPanel);
+    if (m_pContralUnit != nullptr)
+    {
+        for (const T_CONTRAL_UNIT& unit : m_pContralUnit->m_vtContralUnitInfo)
+        {
+            const QString uname = QString::fromUtf8(unit.sUnitName.c_str());
+            m_robotCombo->addItem(uname, uname);
+        }
+        const int curIdx = m_robotCombo->findData(m_unitName);
+        if (curIdx >= 0) { m_robotCombo->setCurrentIndex(curIdx); }
+    }
+    leftLayout->addWidget(m_robotCombo);
+    connect(m_robotCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &WeldProcessDialog::OnRobotChanged);
 
     auto* listTitle = new QLabel("工艺列表", leftPanel);
     listTitle->setObjectName("sectionTitle");
@@ -527,12 +549,16 @@ void WeldProcessDialog::BuildEditorUi()
     m_weldAngleSizeSpin = AddSingleDoubleFieldWithUnit(basicLayout, "焊脚尺寸", "mm");
     m_weaveEnableCheck = AddSingleSwitchField(basicLayout, "是否启用摆动");
     m_trackEnableCheck = AddSingleSwitchField(basicLayout, "是否启用跟踪");
-    m_weldPostureCombo = AddSingleComboField(basicLayout, "焊接姿态");
+    m_weldPostureCombo = AddSingleComboField(basicLayout, "姿态参数");
     m_weldPostureCombo->addItem("NULL(不指定)", 0);
     m_weldPostureCombo->addItem("可变", 1);
     m_weldPostureCombo->addItem("恒定", 2);
     m_weldPostureCombo->addItem("腕关节", 3);
     SetComboByData(m_weldPostureCombo, 1);
+    m_dynamicModeCombo = AddSingleComboField(basicLayout, "动态特性");
+    m_dynamicModeCombo->addItem("NULL(机器人默认动态)", 0);
+    m_dynamicModeCombo->addItem("ntdyn0(程序速度)", 1);
+    SetComboByData(m_dynamicModeCombo, 0);
     m_weldOverlapSpin = AddSingleDoubleFieldWithUnit(basicLayout, "圆滑(过渡比例)", "%");
     if (m_weldOverlapSpin != nullptr) { m_weldOverlapSpin->setRange(0.0, 200.0); m_weldOverlapSpin->setValue(20.0); }
     basicGroup->setMinimumWidth(420);
@@ -678,6 +704,9 @@ void WeldProcessDialog::BuildEditorUi()
     m_weaveTypeCombo->addItem("eTCPWeave", 0);
     m_weaveTypeCombo->addItem("eWristWeave", 1);
     m_weaveTypeCombo->addItem("e45JointWeave", 2);
+    m_weaveImplCombo = addComboField(weaveLayout, "摆动实现");
+    m_weaveImplCombo->addItem("机器人原生", 0);
+    m_weaveImplCombo->addItem("上位机自建(pointwise)", 1);
     m_weaveShapeCombo = addComboField(weaveLayout, "摆弧形状");
     m_weaveShapeCombo->addItem("eNoWeave", 0);
     m_weaveShapeCombo->addItem("eSin", 5);
@@ -694,6 +723,8 @@ void WeldProcessDialog::BuildEditorUi()
     m_weaveShapeCombo->addItem("eLTriangleFreq", 16);
     m_weaveShapeCombo->addItem("eBackForwordFreq", 17);
     m_weaveShapeCombo->addItem("eHalfSin", 18);
+    connect(m_weaveImplCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { UpdateWeaveShapeAvailability(); });
+    UpdateWeaveShapeAvailability();  // 初始化：按当前摆动实现设置摆弧形状可用性
     m_weaveFrequencySpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧频率", "hz");
     m_weaveAmplitudeSpin = AddDoubleFieldWithUnit(weaveLayout, "摆动幅值", "mm");
     m_swingDirectionSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧倾斜角", "°");
@@ -709,6 +740,11 @@ void WeldProcessDialog::BuildEditorUi()
     m_endLengthSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧结束长度", "mm");
     m_endWidthSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧结束宽度", "mm");
     m_centerHeightSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧中心高度", "mm");
+    // 物理量不允许负值：摆幅/频率/结束长度/结束宽度下限设 0；摆弧倾斜角等角度类保留可正可负(±倒向)
+    m_weaveFrequencySpin->setMinimum(0.0);
+    m_weaveAmplitudeSpin->setMinimum(0.0);
+    m_endLengthSpin->setMinimum(0.0);
+    m_endWidthSpin->setMinimum(0.0);
     weaveGroup->setMinimumWidth(720);
 
     auto* trackGroup = new QGroupBox("跟踪参数", editorRoot);
@@ -957,6 +993,9 @@ void WeldProcessDialog::ApplyDialogStyle()
         "QPushButton#tabStripButton:disabled{background:#101820;color:#61727A;border-color:#263742;}"
         "QFrame#spinFieldFrame:disabled{background:#080C10;border-color:#253947;}"
         "QSpinBox:disabled,QDoubleSpinBox:disabled,QLineEdit:disabled{color:#61727A;background:#080C10;border-color:#253947;}"
+        "QComboBox:disabled{color:#61727A;background:#080C10;border-color:#253947;}"
+        "QComboBox::drop-down:disabled{background:#080C10;border-color:#253947;}"
+        "QComboBox QAbstractItemView::item:disabled{color:#55656E;background:#0B1117;}"
         "QCheckBox:disabled{color:#61727A;}"
         "QCheckBox::indicator:disabled{background:#080C10;border-color:#253947;}"
         "QPushButton#roundActionButton{border-radius:12px;padding:0;font-size:16px;font-weight:700;min-width:24px;max-width:24px;min-height:24px;max-height:24px;}"
@@ -1116,6 +1155,63 @@ void WeldProcessDialog::UpdateFeaturePageEnabled()
     if (m_trackParamGroup != nullptr)
     {
         m_trackParamGroup->setEnabled(IsChecked(m_trackEnableCheck));
+    }
+}
+
+void WeldProcessDialog::OnRobotChanged(int index)
+{
+    if (m_pContralUnit == nullptr || index < 0
+        || index >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        return;
+    }
+    const T_CONTRAL_UNIT& unit = m_pContralUnit->m_vtContralUnitInfo[index];
+    if (!m_file.LoadFromControlUnit(unit))
+    {
+        ShowError(DecodeRobotMessageText(m_file.GetLastError()));
+        return;
+    }
+    m_unitName = QString::fromUtf8(unit.sUnitName.c_str());
+    LoadToUi();  // 内部 m_file.Init() 用新机器人路径重载 + 刷新工艺列表/参数
+}
+
+void WeldProcessDialog::UpdateWeaveShapeAvailability()
+{
+    if (m_weaveImplCombo == nullptr || m_weaveShapeCombo == nullptr) { return; }
+    // 摆动实现=上位机自建(pointwise) 时，pointwise 仅支持 eSin(5)正弦 / eObliqueTriangle(8)三角 / eBackForward(11)纵向往复；
+    // eLTriangle(10)L摆为占位先置灰，其余原生波形 pointwise 不支持也置灰。机器人原生模式则全部可选。
+    const bool pointwise = (ComboData(m_weaveImplCombo, 0) != 0);
+    if (auto* model = qobject_cast<QStandardItemModel*>(m_weaveShapeCombo->model()))
+    {
+        for (int i = 0; i < m_weaveShapeCombo->count(); ++i)
+        {
+            const int shapeVal = m_weaveShapeCombo->itemData(i).toInt();
+            const bool enabled = !pointwise || (shapeVal == 5 || shapeVal == 8 || shapeVal == 11);
+            if (auto* item = model->item(i))
+            {
+                item->setEnabled(enabled);
+                // 深色主题下 disabled 项默认色与底色糊在一起，显式给禁用项明显暗灰、启用项亮白
+                item->setForeground(QBrush(QColor(enabled ? "#F5FAFA" : "#55656E")));
+            }
+        }
+    }
+
+    // pointwise 只用 摆弧形状/频率/幅值/摆弧倾斜角；其余摆动参数 pointwise 不读，整控件置灰(机器人原生模式恢复)
+    // pointwise 现在也用停留时间(nPauseTime1-4，srp WaitTime 实现)，故 1/4~4/4 停留时间不再置灰；
+    // 停留连续(nPauseContinue：0完全停/1移动模式)仍置灰——pointwise 的 sleep 只能完全停，给不了移动模式。
+    QWidget* const nativeOnlyWidgets[] = {
+        m_weaveTypeCombo, m_weavePlaneAngleSpin, m_spaceAngleSpin,
+        m_pauseContinueCombo, m_endLengthSpin, m_endWidthSpin, m_centerHeightSpin
+    };
+    for (QWidget* w : nativeOnlyWidgets)
+    {
+        if (w == nullptr) { continue; }
+        w->setEnabled(!pointwise);
+        // spinbox 外面包了 QFrame#spinFieldFrame，连父框一起 disable 背景才整体变暗
+        if (QWidget* parent = w->parentWidget())
+        {
+            if (parent->objectName() == "spinFieldFrame") { parent->setEnabled(!pointwise); }
+        }
     }
 }
 
@@ -1325,6 +1421,7 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     SetComboByData(m_arcModeCombo, weld.nArcMode);
     m_weldAngleSizeSpin->setValue(weld.dWeldAngleSize);
     SetChecked(m_weaveEnableCheck, weld.nWeaveEnable);
+    SetComboByData(m_weaveImplCombo, weld.nWrapConditionNo);  // 摆动实现回填(0=原生 1=pointwise)
     SetChecked(m_trackEnableCheck, weld.nTrackEnable);
 
     m_startArcCurrentSpin->setValue(weld.dStartArcCurrent);
@@ -1363,6 +1460,7 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     SetChecked(m_wrapWaitTime3EnableCheck, weld.nWrapWaitTime3Enable);
 
     SetComboByData(m_weldPostureCombo, weld.nWeldPostureType);
+    SetComboByData(m_dynamicModeCombo, weld.nWeldMethod);  // 动态特性回填(复用 nWeldMethod)
     if (m_weldOverlapSpin != nullptr) { m_weldOverlapSpin->setValue(weld.dWeldOverlapRel); }
     m_cornerTransitionRadiusSpin->setValue(weld.dCornerArcTransitionRadius);
     m_cornerTransitionSpeedSpin->setValue(weld.dCornerArcTransitionSpeed);
@@ -1584,12 +1682,12 @@ bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
     }
     out.CrosswiseOffset = m_crosswiseOffsetSpin->value();
     out.verticalOffset = m_verticalOffsetSpin->value();
-    out.nWrapConditionNo = 0;
+    out.nWrapConditionNo = ComboData(m_weaveImplCombo, 0);  // 摆动实现：0=机器人原生 1=上位机自建pointwise
     out.dWeldAngle = m_weldAngleSpin->value();
     out.dWeldDipAngle = m_weldDipAngleSpin->value();
     out.nStandWeldDir = 0;
     out.nWeaveTypeNo = 0;
-    out.nWeldMethod = 0;
+    out.nWeldMethod = ComboData(m_dynamicModeCombo, 0);  // 复用 nWeldMethod 存动态特性：0=NULL 1=ntdyn0
     out.nWeaveEnable = IsChecked(m_weaveEnableCheck) ? 1 : 0;
     out.nTrackEnable = IsChecked(m_trackEnableCheck) ? 1 : 0;
     out.tWeaveParam = {};

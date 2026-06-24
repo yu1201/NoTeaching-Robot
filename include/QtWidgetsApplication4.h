@@ -25,6 +25,7 @@ class FunctionTestDialog;
 class LaserWeldFilterDialog;
 class WorkpieceMeshViewerDialog;
 class ModelAlignmentDialog;
+class VirtualWeldTestDialog;
 class QAction;
 class QCheckBox;
 class QCloseEvent;
@@ -142,6 +143,7 @@ private:
     void OpenPrecisePointCloudProcessingPage();
     void OpenWorkpieceMeshPage();
     void OpenModelAlignmentPage();
+    void OpenVirtualWeldTestPage();
     void OpenConfigDatabaseViewerDialog();
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
@@ -161,7 +163,9 @@ private:
     bool LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort) const;
     void InitializeScanCameraRuntimes();
     void StopScanCameraRuntimes();
-    bool EnsureScanCameraRunningForUnit(int unitIndex, QString& cameraIP, bool clearCache);
+    // blockingConnect=false：相机连接异步发起(Qt::QueuedConnection)，不阻塞调用线程。
+    // 启动期(InitializeScanCameraRuntimes)用 false，避免相机连不上时 3s 同步超时拖延主窗口显示。
+    bool EnsureScanCameraRunningForUnit(int unitIndex, QString& cameraIP, bool clearCache, bool blockingConnect = true);
     CameraFrameCache* ScanCameraCacheForUnit(int unitIndex) const;
     void LoadRobotLogFile(const QString& relativePath, bool forceRefresh = false);
     void RunCommandLineActions(const QStringList& arguments);
@@ -213,6 +217,8 @@ private:
     LaserWeldFilterDialog* m_pPrecisePointCloudProcessingPage;
     WorkpieceMeshViewerDialog* m_pWorkpieceMeshPage = nullptr;
     ModelAlignmentDialog* m_pModelAlignmentPage = nullptr;
+    VirtualWeldTestDialog* m_pVirtualWeldTestPage = nullptr;
+    int m_nVirtualWeldTestPageUnitIndex = -1;
     QComboBox* m_pRobotSelectorCombo;
     QLabel* m_pRobotSelectorLabel;
     int m_nCurrentRobotUnitIndex;

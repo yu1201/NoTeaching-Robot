@@ -53,7 +53,29 @@ public:
         QString& srpPath,
         QString& srdPath,
         QString& summary,
-        QString& error) const;
+        QString& error,
+        double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
+        bool allowPointwiseWeave = false) const;  // pointwise 自定义摆动仅测试入口放行(true)，先测后焊默认拦截报错
+
+    // 调试用：从机器人当前位姿沿 ±Y 造一条干净的虚拟直线焊道，保持当前焊枪姿态，
+    // 不走点云拟合/姿态补偿/焊缝补偿/起终裁剪/拐点处理，直接生成 srp/srd（摆动/速度/姿态仍读保存的工艺）。
+    // 长度与点间距均可调；点间距=机器人最终逐点执行的轨迹间距（覆盖工艺值，便于测密集点摆动）。
+    // 产出的 weldPosePath 既是查看文件，也是下发执行文件（执行不再叠加补偿）。
+    bool GenerateVirtualStraightWeldFiles(
+        const QString& robotName,
+        const T_ROBOT_COORS& startCoors,
+        double lengthMm,
+        double pointStepMm,
+        int directionSign,        // +1 = 基坐标 +Y，-1 = -Y
+        bool actualWeld,
+        QString& outputDir,       // 入空则自动建 Result/<robot>/VirtualWeld_<时间>；返回解析后的目录
+        QString& weldPosePath,
+        QString& srpPath,
+        QString& srdPath,
+        QString& programName,
+        QString& summary,
+        QString& error,
+        const LogCallback& appendLog = LogCallback()) const;
     bool DownlinkWeldPoseFile(
         RobotDriverAdaptor* pRobotDriver,
         const QString& poseFilePath,
@@ -70,7 +92,9 @@ public:
         T_ROBOT_COORS* pEndSafeCoors = nullptr,
         const LogCallback& appendLog = LogCallback(),
         const StepCallback& setFlowStep = StepCallback(),
-        const CheckpointCallback& checkpoint = CheckpointCallback()) const;
+        const CheckpointCallback& checkpoint = CheckpointCallback(),
+        double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
+        bool allowPointwiseWeave = false) const;  // pointwise 自定义摆动仅测试入口放行(true)，先测后焊默认拦截报错
     bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
     bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
     bool ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;
@@ -99,6 +123,7 @@ public:
         int typeCode = 5;      // 分类码 1=start 2=end 3=inner_corner 4=outer_corner 5=normal 6=noise（拐点补偿用）
         QString segmentKind;   // low_platform/rising_edge/high_platform/falling_edge（可能带 _transition/_arc）
         QString pointType;
+        bool isLapStep = false;  // 搭接错位台阶端点：预览须带它，否则搭接横移被自交/锐角裁剪裁掉、搭接收敛不触发
     };
 
     // 对话框当前编辑的 4 段补偿值，段下标硬映射：0=低平台 1=上升边 2=高平台 3=下降边。
@@ -125,6 +150,7 @@ public:
         bool arcEnabled = false;
         double arcRadiusMm = 0.0;
         double processFinalStepMm = 0.0;    // 0=未设→回退测量参数页的值
+        bool keepAnchorsOnly = false;       // 精简轨迹：最终抽样只保留特殊点(起终/拐点/段边界/圆弧边界/搭接)，预览"实际焊道"阶段联动
         // 拐点补偿(Corner)
         bool cornerEnabled = false;
         double risingInnerToOuter = 0.0;

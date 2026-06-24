@@ -2,9 +2,43 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 namespace
 {
+    // ——— pointwise 摆动几何 helper（三维向量，仅用 T_ROBOT_COORS 的位置分量 dX/dY/dZ）———
+    struct WeaveVec3 { double x = 0.0, y = 0.0, z = 0.0; };
+    inline double WeaveDot(const WeaveVec3& a, const WeaveVec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+    inline double WeaveNorm(const WeaveVec3& v) { return std::sqrt(WeaveDot(v, v)); }
+    inline WeaveVec3 WeaveNormalize(const WeaveVec3& v)
+    {
+        const double n = WeaveNorm(v);
+        return n > 1e-9 ? WeaveVec3{ v.x / n, v.y / n, v.z / n } : WeaveVec3{ 0.0, 0.0, 0.0 };
+    }
+    inline WeaveVec3 WeaveCross(const WeaveVec3& a, const WeaveVec3& b)
+    {
+        return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+    }
+
+    // 一个周期内的横向系数[-1,1]
+    inline double WeaveLateralFactor(int shapeValue, double phi)
+    {
+        constexpr double kPi = 3.14159265358979323846;
+        switch (static_cast<EWeaveShape>(shapeValue))
+        {
+        case EWeaveShape::eBackForward:                 // 纵向往复：横向不动(摆动只沿切向)
+            return 0.0;
+        case EWeaveShape::eObliqueTriangle:             // 三角 / L摆：横向走三角波 (2/π)·asin(sin)
+        case EWeaveShape::eSpaceTriangle:
+        case EWeaveShape::eLTriangle:
+            return (2.0 / kPi) * std::asin(std::sin(phi));
+        case EWeaveShape::eSin:                          // 正弦
+        case EWeaveShape::eSinFreq:
+        default:
+            return std::sin(phi);
+        }
+    }
+
     long long RobotDriverSteadyMs()
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -39,6 +73,219 @@ RobotDriverAdaptor::RobotDriverAdaptor(std::string sRobotName,RobotLog* pRobotLo
     CreateFanucChain();
     m_pRobotLog->write(LogColor::SUCCESS, "RobotDriverAdaptor 初始化完成，机器人链创建成功");
 
+}
+
+std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ExpandMoveInfosByPointwiseWeave(
+    const std::vector<T_ROBOT_MOVE_INFO>& centerline, std::string* error)
+{
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr int    kPointsPerCycle = 16;   // 每周期采样点数(正弦12~16)，TODO 可做成可配
+    constexpr double kMinPitchMm = 1.0;      // 节距下限
+    const auto setError = [error](const std::string& msg) { if (error != nullptr) { *error = msg; } };
+
+    // 1) 找第一个 pointwise 摆动焊接点(锚点)；非 pointwise 原样返回(不报错)
+    const T_ROBOT_MOVE_INFO* anchor = nullptr;
+    for (const auto& mi : centerline)
+    {
+        if (mi.bWeldProcessEnabled && mi.bHasWeaveParam && mi.bAppPointwiseWeave)
+        {
+            anchor = &mi;
+            break;
+        }
+    }
+    if (anchor == nullptr)
+    {
+        return centerline;
+    }
+    if (centerline.size() < 2)
+    {
+        setError("pointwise 摆动失败：中心线点数不足(需>=2)");
+        return {};
+    }
+
+    const T_WeaveDate& weave = anchor->tWeaveParam;
+    const double amplitude = weave.dWeaveAmplitudeMm;   // 横向半摆幅 mm
+    const double freqHz = weave.dWeaveFrequencyHz;
+    const int    shape = weave.nWeaveShape;
+    const double longAmp = amplitude;                   // 纵向往复/L摆的纵向幅度复用摆幅 dWeaveAmplitudeMm（不借用语义不清的原生 dEndLengthMm）
+    // 摆弧倾斜角：横向摆动方向绕焊道切向旋转 swingDeg。0=水平摆；45=斜面摆(直角内角焊缝把摆动面摆到45°平分方向，与工件两面成等腰直角三角形)；90=竖直摆
+    const double swingRad = weave.dSwingDirectionDeg * kPi / 180.0;
+    const double swingCos = std::cos(swingRad);
+    const double swingSin = std::sin(swingRad);
+    // 摆动相位停留(srp WaitTime 完全停实现)：相位每跨过 k·π/2 设对应停留——1/4波峰→nPauseTime1，2/4中→2，3/4波谷→3，4/4中→4(ms)，0=不停
+    const int pauseTimesMs[4] = {
+        static_cast<int>(weave.nPauseTime1Ms), static_cast<int>(weave.nPauseTime2Ms),
+        static_cast<int>(weave.nPauseTime3Ms), static_cast<int>(weave.nPauseTime4Ms) };
+
+    // 2) 频率/速度无效直接报错(节距 λ=v/f 依赖焊接速度，不退化为"不摆")
+    if (freqHz <= 1e-6)
+    {
+        setError("pointwise 摆动失败：摆动频率无效(dWeaveFrequencyHz<=0)");
+        return {};
+    }
+    const double anchorVMmPerSec = anchor->dWeldSpeedMmPerMin / 60.0;
+    if (anchorVMmPerSec <= 1e-6)
+    {
+        setError("pointwise 摆动失败：焊接速度无效(dWeldSpeedMmPerMin<=0)，无法按 λ=v/f 算摆动节距");
+        return {};
+    }
+
+    const WeaveVec3 worldZ{ 0.0, 0.0, 1.0 };
+
+    std::vector<T_ROBOT_MOVE_INFO> out;
+    out.reserve(centerline.size() * kPointsPerCycle);
+
+    for (size_t i = 0; i + 1 < centerline.size(); ++i)
+    {
+        const T_ROBOT_MOVE_INFO& a = centerline[i];
+        const T_ROBOT_MOVE_INFO& b = centerline[i + 1];
+        const WeaveVec3 seg{ b.tCoord.dX - a.tCoord.dX, b.tCoord.dY - a.tCoord.dY, b.tCoord.dZ - a.tCoord.dZ };
+        const double segLen = WeaveNorm(seg);
+        if (segLen < 1e-6) { continue; }
+
+        const WeaveVec3 tangent = WeaveNormalize(seg);                  // 切向(前进)
+        WeaveVec3 lateral = WeaveNormalize(WeaveCross(worldZ, tangent));// 横向 N0 = worldZ × T (水平横向，品牌无关)
+        if (WeaveNorm(lateral) < 1e-6) { lateral = WeaveVec3{ 1.0, 0.0, 0.0 }; }  // 竖直段兜底
+        // 摆弧倾斜角：N0 绕切向 T 旋转 swingDeg。binormal B = T×N0(水平焊道时朝正上方)，N' = N0·cosθ + B·sinθ
+        if (swingSin > 1e-9 || swingSin < -1e-9)
+        {
+            const WeaveVec3 binormal = WeaveNormalize(WeaveCross(tangent, lateral));
+            lateral = WeaveVec3{
+                lateral.x * swingCos + binormal.x * swingSin,
+                lateral.y * swingCos + binormal.y * swingSin,
+                lateral.z * swingCos + binormal.z * swingSin };
+        }
+
+        // 节距 λ = v/f；本段速度优先，无效用锚点速度(已校验有效)
+        // TODO(S4)：速度补偿 k 在挂钩处统一处理；此处仅决定空间节距
+        const double segVMmPerSec = a.dWeldSpeedMmPerMin > 1e-6 ? a.dWeldSpeedMmPerMin / 60.0 : anchorVMmPerSec;
+        double pitchMm = segVMmPerSec / freqHz;
+        if (pitchMm < kMinPitchMm) { pitchMm = kMinPitchMm; }
+
+        const double dsMm = pitchMm / kPointsPerCycle;                  // 采样步长
+        const int nSteps = std::max(1, static_cast<int>(std::ceil(segLen / dsMm)));
+
+        int lastQuarter = 0;   // 段内已跨过的 1/4 相位计数(floor(phi/(π/2)))，用于在摆动相位点设停留
+        for (int s = 0; s < nSteps; ++s)
+        {
+            const double dist = static_cast<double>(s) * dsMm;
+            if (dist > segLen) { break; }
+            const double u = dist / segLen;                            // 段内插值参数 [0,1)
+            const double phi = 2.0 * kPi * dist / pitchMm;             // 相位(按弧长连续)
+
+            T_ROBOT_MOVE_INFO p = a;                                   // 复制全套工艺字段(电流/电压/速度/段类)
+            // 中心点：位置 + 姿态都从中心线插值(中心线点自带姿态)
+            p.tCoord.dX = a.tCoord.dX + (b.tCoord.dX - a.tCoord.dX) * u;
+            p.tCoord.dY = a.tCoord.dY + (b.tCoord.dY - a.tCoord.dY) * u;
+            p.tCoord.dZ = a.tCoord.dZ + (b.tCoord.dZ - a.tCoord.dZ) * u;
+            p.tCoord.dRX = a.tCoord.dRX + (b.tCoord.dRX - a.tCoord.dRX) * u;
+            p.tCoord.dRY = a.tCoord.dRY + (b.tCoord.dRY - a.tCoord.dRY) * u;
+            p.tCoord.dRZ = a.tCoord.dRZ + (b.tCoord.dRZ - a.tCoord.dRZ) * u;  // TODO: RZ 跨±180 需 NormalizeAngleNear
+
+            const double lat = amplitude * WeaveLateralFactor(shape, phi);
+            // 纵向分量(沿切向)。TODO：L摆精确形态待安川/新时达手册确认
+            double lon = 0.0;
+            if (static_cast<EWeaveShape>(shape) == EWeaveShape::eBackForward)
+            {
+                // 纵向往复(挑弧)：沿切向前后往返折线，横向不动 → 焊枪在焊缝线上前送/回退
+                lon = longAmp * (2.0 / kPi) * std::asin(std::sin(phi));
+            }
+            else if (static_cast<EWeaveShape>(shape) == EWeaveShape::eLTriangle && std::sin(phi) > 0.0)
+            {
+                lon = longAmp * std::sin(phi);          // L摆：横向到一侧时沿切向挑出一段(占位)
+            }
+
+            p.tCoord.dX += lateral.x * lat + tangent.x * lon;
+            p.tCoord.dY += lateral.y * lat + tangent.y * lon;
+            p.tCoord.dZ += lateral.z * lat + tangent.z * lon;
+
+            p.bHasWeaveParam = false;   // 关原生 WEAVEDATA：靠点位本身摆，不再由控制器二次摆动
+            // 圆滑(OVERLAPREL)沿用工艺填的值(p 从 a 复制已带)，不强制 0、不做限制。
+            // 注意：圆滑越大越会把密集摆动点之间磨成圆弧、削掉摆幅，100% 会直接抹平摆动，合适值由现场测试定。
+            // 摆动相位停留：相位每跨过一个 k·π/2(1/4波峰/2/4中/3/4波谷/4/4中)，在该点设停留时间(下游 srp 插 WaitTime 完全停)
+            const int curQuarter = static_cast<int>(phi / (kPi / 2.0));
+            if (curQuarter > lastQuarter)
+            {
+                const int dwellMs = pauseTimesMs[(curQuarter - 1) % 4];
+                if (dwellMs > 0) { p.nDwellMs = dwellMs; }
+                lastQuarter = curQuarter;
+            }
+            out.push_back(p);
+        }
+    }
+
+    // 末点：终点中心原样保留(收回中心线)，关 weave；圆滑沿用工艺值(last 从中心线末点复制已带)
+    T_ROBOT_MOVE_INFO last = centerline.back();
+    last.bHasWeaveParam = false;
+    out.push_back(last);
+
+    return out;
+}
+
+std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ApplyWeaveSpeedCompensation(
+    const std::vector<T_ROBOT_MOVE_INFO>& centerline,
+    const std::vector<T_ROBOT_MOVE_INFO>& weaveMoveInfo,
+    double maxLinearSpeedMmPerSec,
+    std::string* info)
+{
+    const auto setInfo = [info](const std::string& msg) { if (info != nullptr) { *info = msg; } };
+
+    // 两序列各算路径总长(只用位置分量 dX/dY/dZ)
+    const auto pathLength = [](const std::vector<T_ROBOT_MOVE_INFO>& pts) {
+        double sum = 0.0;
+        for (size_t i = 0; i + 1 < pts.size(); ++i)
+        {
+            const WeaveVec3 d{
+                pts[i + 1].tCoord.dX - pts[i].tCoord.dX,
+                pts[i + 1].tCoord.dY - pts[i].tCoord.dY,
+                pts[i + 1].tCoord.dZ - pts[i].tCoord.dZ };
+            sum += WeaveNorm(d);
+        }
+        return sum;
+    };
+
+    const double centerLen = pathLength(centerline);
+    const double weaveLen = pathLength(weaveMoveInfo);
+    if (centerLen < 1e-6 || weaveLen < 1e-6)
+    {
+        return weaveMoveInfo;  // 无法算 k，原样返回
+    }
+    const double k = weaveLen / centerLen;
+    if (k <= 1.0 + 1e-6)
+    {
+        return weaveMoveInfo;  // 未摆动(路径未变长)，无需补偿
+    }
+
+    // 限幅：保证最大点速度 × k 不超机器人/焊机上限(mm/s)
+    double appliedK = k;
+    if (maxLinearSpeedMmPerSec > 1e-6)
+    {
+        double maxBaseVMmPerSec = 0.0;
+        for (const auto& p : weaveMoveInfo)
+        {
+            maxBaseVMmPerSec = std::max(maxBaseVMmPerSec, p.tSpeed.dSpeed);
+            maxBaseVMmPerSec = std::max(maxBaseVMmPerSec, p.dWeldSpeedMmPerMin / 60.0);
+        }
+        if (maxBaseVMmPerSec > 1e-6 && maxBaseVMmPerSec * appliedK > maxLinearSpeedMmPerSec)
+        {
+            appliedK = maxLinearSpeedMmPerSec / maxBaseVMmPerSec;
+            setInfo("摆动速度补偿：k=" + std::to_string(k) + " 超速度上限，已限幅到 k=" + std::to_string(appliedK));
+        }
+    }
+    if (info != nullptr && info->empty())
+    {
+        setInfo("摆动速度补偿：k=" + std::to_string(appliedK)
+            + "（摆动路径 " + std::to_string(weaveLen) + "mm / 中心线 " + std::to_string(centerLen) + "mm）");
+    }
+
+    // 两个运动速度字段都乘 k：STEP 用 dWeldSpeedMmPerMin(进 ARCDATA)，FANUC 用 tSpeed.dSpeed
+    std::vector<T_ROBOT_MOVE_INFO> out = weaveMoveInfo;
+    for (auto& p : out)
+    {
+        p.dWeldSpeedMmPerMin *= appliedK;
+        p.tSpeed.dSpeed *= appliedK;
+    }
+    return out;
 }
 
 RobotDriverAdaptor::~RobotDriverAdaptor()
@@ -768,8 +1015,13 @@ void RobotDriverAdaptor::StoreStateSnapshot(const StateSnapshot& snapshot)
     }
 }
 
+std::atomic<bool> RobotDriverAdaptor::s_connectDriversAtConstruct{ true };
+
 void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
 {
+    // GUI 启动时驱动构造未连接(为避免阻塞主窗口)，在此后台线程发起首次连接(STEP 重写本钩子；
+    // FANUC/基类为空)。连接的阻塞/超时落在本线程，不影响 UI。CLI 已在构造内连上，此处幂等空过。
+    EnsureConnectionForMonitor();
     while (m_stateMonitorRunning.load())
     {
         const long long nowMs = RobotDriverSteadyMs();

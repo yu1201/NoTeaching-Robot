@@ -16,6 +16,7 @@ class QDoubleSpinBox;
 class QCloseEvent;
 class QCheckBox;
 class QComboBox;
+class ContralUnit;
 class QFormLayout;
 class QGridLayout;
 class QGroupBox;
@@ -30,7 +31,7 @@ class WeldProcessDialog : public QDialog
     Q_OBJECT
 
 public:
-    explicit WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, QWidget* parent = nullptr);
+    explicit WeldProcessDialog(const T_CONTRAL_UNIT& unitInfo, ContralUnit* pContralUnit, QWidget* parent = nullptr);
     ~WeldProcessDialog();
 
 protected:
@@ -41,6 +42,7 @@ private slots:
     bool SaveData();
     void OnWeldSelectionChanged(int row);
     void OnBeadSelectionChanged(int row);
+    void OnRobotChanged(int index);
     void OnWeldGroupsReordered();
     void AddWeldGroup();
     void RemoveWeldGroup();
@@ -52,6 +54,7 @@ private:
     void BuildEditorUi();
     void ApplyDialogStyle();
     void LoadToUi(int preferredGroupRow = -1, int preferredBeadRow = -1);
+    void UpdateWeaveShapeAvailability();   // 摆动实现=pointwise 时：摆弧形状只留正弦/三角/纵向往复可选，L摆及其它原生波形置灰
     void PopulateWeldList(int preferredGroupRow);
     void PopulateBeadList(int preferredBeadRow);
     void ApplySelectionToUi(int weldIndex);
@@ -105,6 +108,7 @@ private:
     QLineEdit* m_weldTypeEdit = nullptr;
     QComboBox* m_arcModeCombo = nullptr;
     QComboBox* m_weldPostureCombo = nullptr;
+    QComboBox* m_dynamicModeCombo = nullptr;   // 动态特性(WLin DYNAMIC)：0=NULL 1=ntdyn0，复用工艺 nWeldMethod 存储
     QDoubleSpinBox* m_weldOverlapSpin = nullptr;
     QDoubleSpinBox* m_weldAngleSizeSpin = nullptr;
     QCheckBox* m_weaveEnableCheck = nullptr;
@@ -158,7 +162,10 @@ private:
     QComboBox* m_weldDirectionCombo = nullptr;      // 焊接方向(1=起点到终点/-1=终点到起点)
     QString m_unitName;
 
+    ContralUnit* m_pContralUnit = nullptr;   // 机器人单元列表来源（工艺界面切换机器人用）
+    QComboBox* m_robotCombo = nullptr;        // 机器人选择下拉
     QComboBox* m_weaveTypeCombo = nullptr;
+    QComboBox* m_weaveImplCombo = nullptr;   // 摆动实现：0=机器人原生 1=上位机自建pointwise(存 T_WELD_PARA.nWrapConditionNo)
     QComboBox* m_weaveShapeCombo = nullptr;
     QDoubleSpinBox* m_weaveFrequencySpin = nullptr;
     QDoubleSpinBox* m_weaveAmplitudeSpin = nullptr;
