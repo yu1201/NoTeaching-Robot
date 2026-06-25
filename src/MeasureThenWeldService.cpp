@@ -8740,7 +8740,7 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     WeldPosePreset preset = LoadWeldPosePreset(param);
     if (!allowPointwiseWeave && preset.weaveEnabled && preset.weaveAppPointwise)
     {
-        error = QStringLiteral("pointwise 自定义摆动暂未开放用于先测后焊流程，请用「虚拟焊接测试」验证");
+        error = QStringLiteral("pointwise 自定义摆动已被禁用(allowPointwiseWeave=false)，无法生成轨迹");
         return false;
     }
     if (std::isfinite(overrideFinalStepMm) && overrideFinalStepMm > 0.0)
@@ -9134,7 +9134,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
     if (!allowPointwiseWeave && weldPosePreset.weaveEnabled && weldPosePreset.weaveAppPointwise)
     {
-        error = QStringLiteral("pointwise 自定义摆动暂未开放用于先测后焊流程，请用「虚拟焊接测试」验证");
+        error = QStringLiteral("pointwise 自定义摆动已被禁用(allowPointwiseWeave=false)，无法生成轨迹");
         return false;
     }
     const double effectiveFinalStepMm =
