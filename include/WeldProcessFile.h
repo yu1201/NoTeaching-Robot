@@ -63,6 +63,9 @@ private:
     bool SaveWeldToSettings() const;
     void EnsureDefaultLayerRows();
     void NormalizeWeldOrderKeepGroupOrder();
+    // 保证 m_vtWeaveTypeList 与 m_vtWeldParaList 一一平行：每个工艺自带一份独立摆动数据，
+    // nWeaveTypeNo 恒等于工艺下标。修复历史"所有工艺共享 WeaveData[0]、改一个工艺摆动其余跟着变"的缺陷。
+    void NormalizeWeaveTypeParallel();
     bool BindWeldToWeave();
     std::string BuildGroupKey(const T_WELD_PARA& item) const;
 

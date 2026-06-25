@@ -3529,25 +3529,26 @@ QVector<int> SplitNonStraightAzimuthSegments(
     return keys;
 }
 
-// 起终点先验自适应细化：在 SplitNonStraightAzimuthSegments 粗拟合之后，对仍偏直的段做按需细化。
-// 仅当段内点「一致弓向弦的同一侧」（单侧占比 >= kOneSidedMin，借此区分真弓弯与左右乱跳的随机噪声）
-// 且离弦峰值超过位置相关地板时，才补该段离弦最远点为拐点。地板按主轴弧长位置加权：首尾各 kEndFrac
-// 端区用低地板(azimuthRefineFloorMm)，中段用高地板(×kMidMultiple)——体现「漏检拐点多出现在引入/收尾
-// 段」的现场先验，避免中段把周期起伏过补成拐点。azimuthRefineFloorMm<=0 时关闭（保持粗拟合结果）。
-QVector<int> RefineAzimuthCornersByCoherentBow(
+// 起终点先验自适应细化(两条几何路径通用：方位角粗拟合后 / DP 拐点+prune 后均可调用)：对仍偏直的段
+// 做按需细化。仅当段内点「一致弓向弦的同一侧」（单侧占比 >= kOneSidedMin，借此区分真弓弯与左右乱跳的
+// 随机噪声）且离弦峰值超过位置相关地板时，才补该段离弦最远点为拐点。地板按主轴弧长位置加权：首尾各
+// kEndFrac 端区用低地板(azimuthRefineFloorMm)，中段用高地板(×kMidMultiple)——体现「漏检拐点多出现在
+// 引入/收尾段」的现场先验，避免中段把周期起伏过补成拐点。azimuthRefineFloorMm<=0 时关闭(保持原结果)。
+QVector<int> RefineCornersByCoherentBow(
     const QVector<GeometryProjectedPoint>& projected,
     const QVector<int>& keyIndexes,
     const RobotCalculation::LowerWeldFilterParams& params)
 {
     QVector<int> keys = keyIndexes;
     const double floorMm = params.azimuthRefineFloorMm;
-    if (floorMm <= 0.0 || keys.size() < 2 || projected.size() < 3)
+    if (!params.cornerRefineEnable || floorMm <= 0.0 || keys.size() < 2 || projected.size() < 3)
     {
-        return keys;
+        return keys;  // 开关关 / 地板<=0 / 点太少 → 不细化，保持原拐点
     }
-    constexpr double kOneSidedMin = 0.80;  // 单侧弓出占比门：一致弓弯保留、随机噪声(≈0.5)剔除
-    constexpr double kMidMultiple = 3.0;   // 中段地板放大倍数（起终点先验）
-    constexpr double kEndFrac = 0.20;      // 首尾各 20% 弧长视为端区
+    // 门限参数化(界面可调)：单侧弓出占比门、中段地板倍数、端区弧长占比；越界由配置层钳制兜底。
+    const double kOneSidedMin = std::min(1.0, std::max(0.5, params.cornerRefineOneSidedFrac));
+    const double kMidMultiple = std::max(1.0, params.cornerRefineMidMultiple);
+    const double kEndFrac = std::min(0.5, std::max(0.0, params.cornerRefineEndFrac));
     const double minSegMm = std::max(params.sampleStep * 2.0, 2.0);
     const double s0 = projected.first().s;
     const double sN = projected.last().s;
@@ -3614,6 +3615,137 @@ QVector<int> RefineAzimuthCornersByCoherentBow(
         }
     }
     return keys;
+}
+
+// 在稠密路径的一段区域内做「坡-平台-坡」三段直线拟合，返回两个折点(=平台两端角)的 projected 索引。
+// 自变量 s(主轴弧长)、因变量 smoothH(侧向)。位置由几何重算而非从拐点集挑选，故对源头多检/漏检免疫。
+QPair<int, int> FitPlatformTwoCorners(
+    const QVector<GeometryProjectedPoint>& projected,
+    double regLoS,
+    double regHiS,
+    int minSegPoints)
+{
+    const double lo = std::min(regLoS, regHiS);
+    const double hi = std::max(regLoS, regHiS);
+    QVector<int> reg;
+    for (int i = 0; i < projected.size(); ++i)
+    {
+        if (projected[i].s >= lo && projected[i].s <= hi) reg.push_back(i);
+    }
+    std::sort(reg.begin(), reg.end(), [&](int a, int b) { return projected[a].s < projected[b].s; });
+    const int m = reg.size();
+    const int mp = std::max(3, minSegPoints);
+    if (m < 3 * mp) return qMakePair(-1, -1);
+
+    std::vector<double> Sx(m + 1, 0.0), Sy(m + 1, 0.0), Sxx(m + 1, 0.0), Sxy(m + 1, 0.0), Syy(m + 1, 0.0);
+    for (int k = 0; k < m; ++k)
+    {
+        const double x = projected[reg[k]].s;
+        const double y = projected[reg[k]].smoothH;
+        Sx[k + 1] = Sx[k] + x;       Sy[k + 1] = Sy[k] + y;
+        Sxx[k + 1] = Sxx[k] + x * x; Sxy[k + 1] = Sxy[k] + x * y; Syy[k + 1] = Syy[k] + y * y;
+    }
+    auto res = [&](int i, int j) -> double {  // 点 [i,j] 的最小二乘直线拟合残差平方和(O(1))
+        const int c = j - i + 1;
+        if (c < 2) return 0.0;
+        const double sx = Sx[j + 1] - Sx[i], sy = Sy[j + 1] - Sy[i];
+        const double sxx = Sxx[j + 1] - Sxx[i], sxy = Sxy[j + 1] - Sxy[i], syy = Syy[j + 1] - Syy[i];
+        const double sxxc = sxx - sx * sx / c, sxyc = sxy - sx * sy / c, syyc = syy - sy * sy / c;
+        if (sxxc <= 1e-12) return syyc;
+        return std::max(0.0, syyc - sxyc * sxyc / sxxc);
+    };
+    double best = std::numeric_limits<double>::max();
+    int bb1 = -1, bb2 = -1;
+    for (int b1 = mp; b1 < m - 2 * mp; ++b1)
+    {
+        const double r1 = res(0, b1);
+        for (int b2 = b1 + mp; b2 < m - mp; ++b2)
+        {
+            const double tot = r1 + res(b1, b2) + res(b2, m - 1);
+            if (tot < best) { best = tot; bb1 = b1; bb2 = b2; }
+        }
+    }
+    if (bb1 < 0 || bb2 < 0) return qMakePair(-1, -1);
+    return qMakePair(reg[bb1], reg[bb2]);
+}
+
+// 拐点 inner/outer 结构约束(平台重算)：波纹角成对出现(谷=II、峰=OO，搭接台阶点豁免)。按类型游程把拐点
+// 归成平台(源头多检只把游程拉长、不改平台数与交替，故对多检稳)，每个平台在 [上一平台末角, 下一平台首角]
+// 区域用 FitPlatformTwoCorners 从稠密路径重算恰好 2 个边界角——多检(5→2/3→2)删对、缺点(1→2)补齐，一套
+// 覆盖。位置全由几何重算，绕开被过检污染的 prominence/间距。lap 角原样保留并按 s 归并。<=0/关 则不动。
+QVector<int> RefitCornersByPlatformPattern(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    const QVector<char>& isLapStepKey,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    const int m = keyIndexes.size();
+    if (!params.cornerPatternRefitEnable || m < 4 || projected.size() < 24)
+    {
+        return keyIndexes;
+    }
+    const double startS = projected[keyIndexes.first()].s;
+    const double endS = projected[keyIndexes.last()].s;
+
+    // 自然拐点(非端点、非 lap)的类型(+1 inner / -1 outer)与 s
+    struct NatCorner { int keyPos; int type; double s; };
+    QVector<NatCorner> nat;
+    for (int k = 1; k < m - 1; ++k)
+    {
+        if (k < isLapStepKey.size() && isLapStepKey[k]) continue;  // 搭接台阶点豁免
+        const double prom = projected[keyIndexes[k]].smoothH
+            - (projected[keyIndexes[k - 1]].smoothH + projected[keyIndexes[k + 1]].smoothH) * 0.5;
+        nat.push_back({ k, prom >= 0.0 ? 1 : -1, projected[keyIndexes[k]].s });
+    }
+    if (nat.size() < 2)
+    {
+        return keyIndexes;  // 自然拐点太少，不足以谈成对规律
+    }
+
+    // 按类型游程分平台
+    QVector<QPair<int, int>> runs;  // [i,j] into nat
+    for (int i = 0; i < nat.size(); )
+    {
+        int j = i;
+        while (j + 1 < nat.size() && nat[j + 1].type == nat[i].type) ++j;
+        runs.push_back(qMakePair(i, j));
+        i = j + 1;
+    }
+
+    QVector<int> refit;  // 重算后的自然拐点 projected 索引
+    for (int r = 0; r < runs.size(); ++r)
+    {
+        const int i = runs[r].first, j = runs[r].second;
+        const double regLoS = (r > 0) ? nat[runs[r - 1].second].s : startS;
+        const double regHiS = (r + 1 < runs.size()) ? nat[runs[r + 1].first].s : endS;
+        const QPair<int, int> two = FitPlatformTwoCorners(
+            projected, regLoS, regHiS, std::max(3, params.cornerPlatformMinSegPoints));
+        if (two.first >= 0 && two.second >= 0 && two.first != two.second)
+        {
+            refit.push_back(two.first);
+            refit.push_back(two.second);
+        }
+        else
+        {
+            for (int t = i; t <= j; ++t) refit.push_back(keyIndexes[nat[t].keyPos]);  // 拟合失败回退保留原角
+        }
+    }
+
+    // 重建：起点 + 重算自然角 + lap 角(原样) + 终点，按 s 升序去重
+    QVector<int> result;
+    result.push_back(keyIndexes.first());
+    result += refit;
+    for (int k = 1; k < m - 1; ++k)
+    {
+        if (k < isLapStepKey.size() && isLapStepKey[k]) result.push_back(keyIndexes[k]);
+    }
+    result.push_back(keyIndexes.last());
+    const bool ascending = endS >= startS;
+    std::sort(result.begin(), result.end(), [&](int a, int b) {
+        return ascending ? projected[a].s < projected[b].s : projected[a].s > projected[b].s;
+    });
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result.size() >= 2 ? result : keyIndexes;
 }
 
 RobotCalculation::LowerWeldPointType GeometryCornerType(
@@ -5092,8 +5224,6 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         // 顶点位置仍由 BuildFittedGeometryKeyPoints 局部求交精修，内外角仍由 GeometryCornerType 判定。
         keyIndexes = BuildAzimuthCornerKeyIndexes(projected, params);
         keyIndexes = SplitNonStraightAzimuthSegments(projected, keyIndexes, params);
-        // 起终点先验自适应细化：补回端区被直线化抹平的缓弓拐点（一致弓向门挡随机噪声）。
-        keyIndexes = RefineAzimuthCornersByCoherentBow(projected, keyIndexes, params);
     }
     else
     {
@@ -5130,6 +5260,10 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
             normalAxis,
             params.useSlopeConsistentCornerFit);
     }
+    // 起终点先验自适应细化(两条路径统一)：方位角分支(SdkBaseWeldFit)与 DP 分支(CloudFit/特征点)
+    // 都在此对仍偏直的段补回被直线化抹平的"相干弓"拐点——尤其端区引入/收尾段的缓弓(单侧弓向门挡随机
+    // 噪声；端区低地板/中段高地板)。修复 CloudFit 模式末端漏拐点(现场 RobotC/20260625_015)。
+    keyIndexes = RefineCornersByCoherentBow(projected, keyIndexes, params);
     // 板材搭接错位检测：错位点作硬段边界注入 keyIndexes(在所有 prune/refine 之后注入，避免被清洗)，
     // 使搭接两侧点云各自独立拟合；isLapStepKey 标记台阶端点，供 BuildFittedGeometryKeyPoints 取本侧线端点。
     QVector<char> isLapStepKey(keyIndexes.size(), 0);
@@ -5157,6 +5291,17 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
             for (int k = 0; k < keyIndexes.size(); ++k)
                 if (stepValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
         }
+    }
+    // 拐点 inner/outer 结构约束：按平台从稠密路径重算每平台 2 个边界角(修源头多检/漏检)。会改变
+    // keyIndexes 的个数/顺序，故先记下 lap 角的 projected 索引，重算后据此重建 isLapStepKey 与之对齐。
+    {
+        QVector<int> lapValues;
+        for (int k = 0; k < keyIndexes.size() && k < isLapStepKey.size(); ++k)
+            if (isLapStepKey[k]) lapValues.push_back(keyIndexes[k]);
+        keyIndexes = RefitCornersByPlatformPattern(projected, keyIndexes, isLapStepKey, params);
+        isLapStepKey = QVector<char>(keyIndexes.size(), 0);
+        for (int k = 0; k < keyIndexes.size(); ++k)
+            if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
     }
     if (keyIndexes.size() < 2)
     {

@@ -837,8 +837,41 @@ void LaserWeldFilterDialog::BuildUi()
     m_pAzimuthRefineFloorSpin->setDecimals(1);
     m_pAzimuthRefineFloorSpin->setSingleStep(0.1);
     m_pAzimuthRefineFloorSpin->setValue(0.5);
-    m_pAzimuthRefineFloorSpin->setToolTip("端区细化地板：直线化残差用大阈值粗拟合后，再对\"一致弓向一侧\"的段补回漏检拐点"
-        "(单侧弓出占比高才补，挡随机噪声)；首尾端区用此地板、中段自动×3。0=关闭。专治起终点附近缓弓拐点被抄近路。");
+    m_pAzimuthRefineFloorSpin->setToolTip("端区细化地板：粗拟合后再对\"一致弓向一侧\"的段补回漏检拐点(单侧弓出占比高才补，挡随机噪声)；"
+        "首尾端区用此地板、中段=此×中段倍数。专治起终点附近缓弓拐点被抄近路。两条几何路径(SDK拟合/点云拟合)通用。");
+    m_pCornerRefineEnableCheck = new QCheckBox("启用端区补拐点");
+    m_pCornerRefineEnableCheck->setChecked(true);
+    m_pCornerRefineEnableCheck->setToolTip("总开关：对粗拟合结果再做\"端区相干弓\"补拐点细化。关闭则完全保持原拐点。"
+        "对「SDK点云算法+拟合」与「点云算法+拟合」两种模式都生效。");
+    m_pCornerRefineOneSidedSpin = new QDoubleSpinBox();
+    m_pCornerRefineOneSidedSpin->setRange(50.0, 100.0);
+    m_pCornerRefineOneSidedSpin->setDecimals(0);
+    m_pCornerRefineOneSidedSpin->setSingleStep(5.0);
+    m_pCornerRefineOneSidedSpin->setValue(80.0);
+    m_pCornerRefineOneSidedSpin->setToolTip("单侧弓出门(%)：段内点偏向弦同一侧的占比≥此值才认定为真弓弯并补拐点。"
+        "越高越严(只补明显一致的弓、更挡随机噪声)；随机噪声段约 50%。");
+    m_pCornerRefineMidMultipleSpin = new QDoubleSpinBox();
+    m_pCornerRefineMidMultipleSpin->setRange(1.0, 20.0);
+    m_pCornerRefineMidMultipleSpin->setDecimals(1);
+    m_pCornerRefineMidMultipleSpin->setSingleStep(0.5);
+    m_pCornerRefineMidMultipleSpin->setValue(3.0);
+    m_pCornerRefineMidMultipleSpin->setToolTip("中段地板倍数：中段补拐点的地板=端区细化地板×此倍数。"
+        "体现\"漏检拐点多在引入/收尾段\"的先验——倍数越大中段越不易补(只补端区)，=1 则中段与端区同等灵敏。");
+    m_pCornerRefineEndFracSpin = new QDoubleSpinBox();
+    m_pCornerRefineEndFracSpin->setRange(0.0, 50.0);
+    m_pCornerRefineEndFracSpin->setDecimals(0);
+    m_pCornerRefineEndFracSpin->setSingleStep(5.0);
+    m_pCornerRefineEndFracSpin->setValue(20.0);
+    m_pCornerRefineEndFracSpin->setToolTip("端区占比(%)：焊缝首尾各此比例的弧长视为\"端区\"(用低地板、更易补拐点)，中间为中段(用高地板)。");
+    m_pCornerPatternRefitCheck = new QCheckBox("启用平台重算(拐点交错约束)");
+    m_pCornerPatternRefitCheck->setChecked(true);
+    m_pCornerPatternRefitCheck->setToolTip("按波纹角成对规律(谷=两内角/峰=两外角)把拐点归成平台，每个平台从稠密点云三段拟合"
+        "重算恰好 2 个边界角——自动修正源头\"多检\"(一个平台冒出多个同类角)与\"漏检\"(只检到一个)。搭接台阶点豁免。"
+        "默认开，取代上面的\"端区补拐点\"(后者按几何加点、端区易过补)。两种几何拟合模式(SDK拟合/点云拟合)都生效。");
+    m_pCornerPlatformMinSegSpin = new QSpinBox();
+    m_pCornerPlatformMinSegSpin->setRange(3, 50);
+    m_pCornerPlatformMinSegSpin->setValue(8);
+    m_pCornerPlatformMinSegSpin->setToolTip("平台重算三段拟合每段最少点数：越大越稳健(抗噪)，但很短的平台可能拟合不出而回退保留原角。一般 6~12。");
 
     // 板材搭接 X 错位台阶检测(默认关，仅几何拟合流程)：双侧平台最小二乘判据。
     m_pLapSplitCheck = new QCheckBox("启用搭接错位检测(两侧分拟合·保台阶)");
@@ -902,17 +935,27 @@ void LaserWeldFilterDialog::BuildUi()
     paramLayout->addWidget(m_pAzimuthHeadingWindowSpin, 11, 1);
     paramLayout->addWidget(new QLabel("直线化残差"), 11, 2);
     paramLayout->addWidget(CreateUnitEditor(m_pAzimuthStraightenResidualSpin, "mm"), 11, 3);
-    paramLayout->addWidget(new QLabel("端区细化地板"), 12, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthRefineFloorSpin, "mm"), 12, 1);
-    paramLayout->addWidget(m_pLapSplitCheck, 13, 0, 1, 4);
-    paramLayout->addWidget(new QLabel("错位台阶高门"), 14, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepHeightSpin, "mm"), 14, 1);
-    paramLayout->addWidget(new QLabel("拟合窗口长度"), 14, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepStationSpin, "mm"), 14, 3);
-    paramLayout->addWidget(new QLabel("平台残差上限"), 15, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepFlatnessSpin, "mm"), 15, 1);
-    paramLayout->addWidget(new QLabel("平台斜率上限"), 15, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepSlopeSpin, "mm/mm"), 15, 3);
+    paramLayout->addWidget(m_pCornerRefineEnableCheck, 12, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("端区细化地板"), 13, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthRefineFloorSpin, "mm"), 13, 1);
+    paramLayout->addWidget(new QLabel("单侧弓出门"), 13, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pCornerRefineOneSidedSpin, "%"), 13, 3);
+    paramLayout->addWidget(new QLabel("中段地板倍数"), 14, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pCornerRefineMidMultipleSpin, "x"), 14, 1);
+    paramLayout->addWidget(new QLabel("端区占比"), 14, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pCornerRefineEndFracSpin, "%"), 14, 3);
+    paramLayout->addWidget(m_pCornerPatternRefitCheck, 15, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("平台最小段点数"), 16, 0);
+    paramLayout->addWidget(m_pCornerPlatformMinSegSpin, 16, 1);
+    paramLayout->addWidget(m_pLapSplitCheck, 17, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("错位台阶高门"), 18, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepHeightSpin, "mm"), 18, 1);
+    paramLayout->addWidget(new QLabel("拟合窗口长度"), 18, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepStationSpin, "mm"), 18, 3);
+    paramLayout->addWidget(new QLabel("平台残差上限"), 19, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepFlatnessSpin, "mm"), 19, 1);
+    paramLayout->addWidget(new QLabel("平台斜率上限"), 19, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepSlopeSpin, "mm/mm"), 19, 3);
     paramLayout->setColumnStretch(1, 1);
     paramLayout->setColumnStretch(3, 1);
     featurePointLayout->addWidget(paramGroup);
@@ -1233,7 +1276,13 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pAzimuthHeadingWindowSpin->setValue(processingSettings.fitAzimuthHeadingWindow);
     m_pAzimuthNmsSpanSpin->setValue(processingSettings.fitAzimuthNmsSpanMm);
     m_pAzimuthStraightenResidualSpin->setValue(processingSettings.fitAzimuthStraightenResidualMm);
+    m_pCornerRefineEnableCheck->setChecked(processingSettings.fitCornerRefineEnable);
     m_pAzimuthRefineFloorSpin->setValue(processingSettings.fitAzimuthRefineFloorMm);
+    m_pCornerRefineOneSidedSpin->setValue(processingSettings.fitCornerRefineOneSidedPct);
+    m_pCornerRefineMidMultipleSpin->setValue(processingSettings.fitCornerRefineMidMultiple);
+    m_pCornerRefineEndFracSpin->setValue(processingSettings.fitCornerRefineEndFracPct);
+    m_pCornerPatternRefitCheck->setChecked(processingSettings.fitCornerPatternRefitEnable);
+    m_pCornerPlatformMinSegSpin->setValue(processingSettings.fitCornerPlatformMinSegPoints);
     m_pLapSplitCheck->setChecked(processingSettings.enableLapMisalignmentSplit);
     m_pLapStepHeightSpin->setValue(processingSettings.lapStepHeightThresholdMm);
     m_pLapStepStationSpin->setValue(processingSettings.lapStepStationWindowMm);
@@ -1283,7 +1332,13 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.fitAzimuthHeadingWindow = m_pAzimuthHeadingWindowSpin->value();
     processingSettings.fitAzimuthNmsSpanMm = m_pAzimuthNmsSpanSpin->value();
     processingSettings.fitAzimuthStraightenResidualMm = m_pAzimuthStraightenResidualSpin->value();
+    processingSettings.fitCornerRefineEnable = m_pCornerRefineEnableCheck->isChecked();
     processingSettings.fitAzimuthRefineFloorMm = m_pAzimuthRefineFloorSpin->value();
+    processingSettings.fitCornerRefineOneSidedPct = m_pCornerRefineOneSidedSpin->value();
+    processingSettings.fitCornerRefineMidMultiple = m_pCornerRefineMidMultipleSpin->value();
+    processingSettings.fitCornerRefineEndFracPct = m_pCornerRefineEndFracSpin->value();
+    processingSettings.fitCornerPatternRefitEnable = m_pCornerPatternRefitCheck->isChecked();
+    processingSettings.fitCornerPlatformMinSegPoints = m_pCornerPlatformMinSegSpin->value();
     processingSettings.enableLapMisalignmentSplit = m_pLapSplitCheck->isChecked();
     processingSettings.lapStepHeightThresholdMm = m_pLapStepHeightSpin->value();
     processingSettings.lapStepStationWindowMm = m_pLapStepStationSpin->value();

@@ -6110,6 +6110,38 @@ namespace
 			leftLayout->addWidget(m_tree, 2);
 			leftLayout->addWidget(propLabel);
 			leftLayout->addWidget(m_propertiesText, 1);
+
+			// 显示设置(对选中图层实时生效)：颜色类型 / 点大小 / 连线
+			QLabel* styleLabel = new QLabel("显示设置(选中图层)", leftPanel);
+			styleLabel->setStyleSheet("QLabel { color: #BFE8EC; font-weight: bold; }");
+			QWidget* styleBox = new QWidget(leftPanel);
+			QGridLayout* styleGrid = new QGridLayout(styleBox);
+			styleGrid->setContentsMargins(0, 0, 0, 0);
+			styleGrid->setHorizontalSpacing(8);
+			styleGrid->setVerticalSpacing(6);
+			m_colorModeCombo = new QComboBox(styleBox);
+			m_colorModeCombo->addItem("固定颜色");
+			m_colorModeCombo->addItem("按顺序渐变");
+			m_pointSizeSpin = new QDoubleSpinBox(styleBox);
+			m_pointSizeSpin->setRange(0.0, 8.0);
+			m_pointSizeSpin->setDecimals(1);
+			m_pointSizeSpin->setSingleStep(0.5);
+			m_pointSizeSpin->setSpecialValueText("自动");  // 0 → 自动(连线2.4/散点2.0)
+			m_pointSizeSpin->setToolTip("点大小(px)，0=自动");
+			m_connectLinesCheck = new QCheckBox("连线显示", styleBox);
+			styleGrid->addWidget(new QLabel("颜色类型", styleBox), 0, 0);
+			styleGrid->addWidget(m_colorModeCombo, 0, 1);
+			styleGrid->addWidget(new QLabel("点大小", styleBox), 1, 0);
+			styleGrid->addWidget(m_pointSizeSpin, 1, 1);
+			styleGrid->addWidget(m_connectLinesCheck, 2, 0, 1, 2);
+			leftLayout->addWidget(styleLabel);
+			leftLayout->addWidget(styleBox);
+			connect(m_colorModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+				[this](int) { ApplyStyleToSelectedLayer(); });
+			connect(m_connectLinesCheck, &QCheckBox::toggled, this,
+				[this](bool) { ApplyStyleToSelectedLayer(); });
+			connect(m_pointSizeSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+				[this](double) { ApplyStyleToSelectedLayer(); });
 			centerSplitter->addWidget(leftPanel);
 
 			m_view = new PointCloud3DView(centerSplitter);
@@ -6206,14 +6238,37 @@ namespace
 				QColor color;
 				bool rainbow = false;
 				bool connectLines = false;
+				double pointSize = 0.0;  // 0=自动
 			};
 
-			const QVector<FileSpec> specs = {
-				{ "PreciseLaserPoint.txt", "原始精确点云", QColor(220, 235, 240), false, false },
-				{ "PreciseLaserPoint_Classified.txt", "分类点云", QColor(0, 255, 80), true, true },
-				{ "PreciseLaserPoint_CornerComp_Classified.txt", "拐点补偿分类点云", QColor(255, 170, 0), true, true },
-				{ "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt", "焊接姿态点云", QColor(255, 230, 90), true, true }
-			};
+			// 各阶段点云默认外观；完整工件大点云默认白色、小点不连线。
+			const FileSpec kWorkpiece{ "PreciseLaserPoint_WorkpieceCloud.txt", "完整工件点云", QColor(255, 255, 255), false, false, 1.2 };
+			const FileSpec kRaw{ "PreciseLaserPoint.txt", "原始精确点云", QColor(200, 225, 235), false, false, 2.0 };
+			const FileSpec kSdkBase{ "PreciseLaserPoint_SdkBase.txt", "SDK基础焊道", QColor(255, 170, 0), false, true, 0.0 };
+			const FileSpec kPreserve{ "PreciseLaserPoint_PreservePath_2mm.txt", "保留路径(2mm)", QColor(0, 210, 210), false, true, 0.0 };
+			const FileSpec kClassified{ "PreciseLaserPoint_Classified.txt", "分类点云", QColor(0, 255, 80), true, true, 0.0 };
+			const FileSpec kWeldPose{ "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt", "焊接姿态点云", QColor(255, 230, 90), false, true, 0.0 };
+
+			// 按当前处理方法显示该方法用到的全部数据(直到焊接姿态)；目录里缺失的文件自动跳过。
+			const PointCloudProcessingConfig::Mode mode = PointCloudProcessingConfig::Load().mode;
+			QVector<FileSpec> specs;
+			switch (mode)
+			{
+			case PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet:  // SDK全处理：全点云→SDK直接出拐点
+				specs = { kWorkpiece, kClassified, kWeldPose };
+				break;
+			case PointCloudProcessingConfig::Mode::SdkBaseWeldFit:           // SDK+拟合：全点云→SDK基础焊道→拟合
+				specs = { kWorkpiece, kSdkBase, kClassified, kWeldPose };
+				break;
+			case PointCloudProcessingConfig::Mode::CloudFit:                 // 点云+拟合：全点云投影→保留路径→拟合
+				specs = { kWorkpiece, kRaw, kPreserve, kClassified, kWeldPose };
+				break;
+			case PointCloudProcessingConfig::Mode::LegacyLaserPath:          // 特征点+拟合：相机轨迹点→拟合
+			default:
+				specs = { kRaw, kClassified, kWeldPose };
+				break;
+			}
+			AppendLog(QString("处理方法：%1").arg(PointCloudProcessingConfig::ModeDisplayName(mode)));
 
 			QVector<PointCloud3DView::Layer> layers;
 			for (const FileSpec& spec : specs)
@@ -6238,6 +6293,7 @@ namespace
 				layer.color = spec.color;
 				layer.rainbow = spec.rainbow;
 				layer.connectLines = spec.connectLines;
+				layer.pointSize = spec.pointSize;
 				layers.push_back(layer);
 				AppendLog(QString("已加载：%1，点数：%2，跳过行：%3")
 					.arg(spec.fileName)
@@ -6289,7 +6345,7 @@ namespace
 			m_updatingTree = false;
 		}
 
-		void RefreshProperties(int layerIndex)
+		void UpdatePropertiesText(int layerIndex)
 		{
 			if (m_propertiesText == nullptr)
 			{
@@ -6316,6 +6372,53 @@ namespace
 				.arg(layer.rainbow ? "按顺序渐变" : "固定颜色"));
 		}
 
+		void RefreshProperties(int layerIndex)
+		{
+			m_selectedLayerIndex = layerIndex;
+			UpdatePropertiesText(layerIndex);
+			// 同步"显示设置"控件到选中图层(屏蔽信号避免回环)
+			const bool valid = (layerIndex >= 0 && layerIndex < m_layers.size());
+			m_updatingStyle = true;
+			if (m_colorModeCombo != nullptr)
+			{
+				m_colorModeCombo->setEnabled(valid);
+				if (valid) m_colorModeCombo->setCurrentIndex(m_layers.at(layerIndex).rainbow ? 1 : 0);
+			}
+			if (m_connectLinesCheck != nullptr)
+			{
+				m_connectLinesCheck->setEnabled(valid);
+				if (valid) m_connectLinesCheck->setChecked(m_layers.at(layerIndex).connectLines);
+			}
+			if (m_pointSizeSpin != nullptr)
+			{
+				m_pointSizeSpin->setEnabled(valid);
+				if (valid) m_pointSizeSpin->setValue(m_layers.at(layerIndex).pointSize);
+			}
+			m_updatingStyle = false;
+		}
+
+		// 把"显示设置"控件的值应用到当前选中图层并实时刷新(不重置相机)。
+		void ApplyStyleToSelectedLayer()
+		{
+			if (m_updatingStyle)
+			{
+				return;
+			}
+			const int idx = m_selectedLayerIndex;
+			if (idx < 0 || idx >= m_layers.size())
+			{
+				return;
+			}
+			m_layers[idx].rainbow = (m_colorModeCombo != nullptr && m_colorModeCombo->currentIndex() == 1);
+			m_layers[idx].connectLines = (m_connectLinesCheck != nullptr && m_connectLinesCheck->isChecked());
+			m_layers[idx].pointSize = (m_pointSizeSpin != nullptr) ? m_pointSizeSpin->value() : 0.0;
+			if (m_view != nullptr)
+			{
+				m_view->SetLayersPreserveView(m_layers);
+			}
+			UpdatePropertiesText(idx);
+		}
+
 		void AppendLog(const QString& text)
 		{
 			if (m_consoleText == nullptr)
@@ -6336,6 +6439,12 @@ namespace
 		PointCloud3DView* m_view = nullptr;
 		QVector<PointCloud3DView::Layer> m_layers;
 		bool m_updatingTree = false;
+		// 左下"显示设置"控件(对选中图层实时改样式)
+		QComboBox* m_colorModeCombo = nullptr;
+		QCheckBox* m_connectLinesCheck = nullptr;
+		QDoubleSpinBox* m_pointSizeSpin = nullptr;
+		int m_selectedLayerIndex = -1;
+		bool m_updatingStyle = false;
 	};
 
 	class ConfigDatabaseViewerDialog final : public QDialog
