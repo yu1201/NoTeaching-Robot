@@ -1,9 +1,14 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-06-24`
+- 人工整理日期：`2026-06-25`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-06-25
+
+- 上位机自建「点位摆动」(pointwise)开放给先测后焊生产流程：原先 pointwise 摆动只在「虚拟焊接测试」放行、先测后焊主流程遇到会报错拦截（防未真机验证就上线）。现确认开放——`GenerateStepWeldProgramFiles`/`ExecuteWeldPoseFileWithSafePos` 的 `allowPointwiseWeave` 默认值 false→true（`MeasureThenWeldService.h`），先测后焊执行入口（`ExecuteWeldPoseFileWithSafePos` 下枪执行）与焊道补偿后 job 同步生成走默认即放行 pointwise 真机下发；拦截块保留作钩子（传 false 可临时禁用，提示文案改中性）。虚拟测试/CLI 仍显式传 true 不变。提醒：真机首次跑 pointwise 需现场验证速度补偿后实际 TCP 速度、停留 WaitTime 在连续运动里的行为、摆弧倾斜角倒向（均原标「需现场验证」项），建议先小段试焊
+- 版本 v2026.06.25.0953；main 中性版 Release x64 编译通过；品牌版 hk-pathlynx-corpla 同步 merge + 编译 + 打包（本地安装包 `HK-Pathlynx-CORPLA-Setup-v2026.06.25.0953.exe`，按需未推送/未 GitHub Release）
 
 ## 2026-06-24
 

@@ -55,7 +55,7 @@ public:
         QString& summary,
         QString& error,
         double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
-        bool allowPointwiseWeave = false) const;  // pointwise 自定义摆动仅测试入口放行(true)，先测后焊默认拦截报错
+        bool allowPointwiseWeave = true) const;   // pointwise 自定义摆动默认放行(含先测后焊)；传 false 可禁用(保留钩子)
 
     // 调试用：从机器人当前位姿沿 ±Y 造一条干净的虚拟直线焊道，保持当前焊枪姿态，
     // 不走点云拟合/姿态补偿/焊缝补偿/起终裁剪/拐点处理，直接生成 srp/srd（摆动/速度/姿态仍读保存的工艺）。
@@ -94,7 +94,7 @@ public:
         const StepCallback& setFlowStep = StepCallback(),
         const CheckpointCallback& checkpoint = CheckpointCallback(),
         double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
-        bool allowPointwiseWeave = false) const;  // pointwise 自定义摆动仅测试入口放行(true)，先测后焊默认拦截报错
+        bool allowPointwiseWeave = true) const;   // pointwise 自定义摆动默认放行(含先测后焊)；传 false 可禁用(保留钩子)
     bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
     bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
     bool ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;
