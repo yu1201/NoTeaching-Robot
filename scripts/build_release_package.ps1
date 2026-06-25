@@ -260,6 +260,8 @@ foreach ($toolName in @("ConfigMigrate.exe", "ConfigMigrate_Run.cmd")) {
 $fanucSourceDir = Join-Path $repoRoot "SDK\FANUC"
 $fanucTargetDir = Join-Path $packageDir "SDK\FANUC"
 New-Item -ItemType Directory -Path $fanucTargetDir -Force | Out-Null
+# 只拷 SDK\FANUC 顶层的现场所需脚本(.kl/.ls/.pc/.tp 等)。任何子目录(如明图激光宏 mingtu / laser_macros 的源码与编译产物)
+# 都是开发交付件、不进现场安装包——故意用 -File(不递归)；勿改成 -Recurse，否则会把这些子目录带进包。
 Get-ChildItem -LiteralPath $fanucSourceDir -File | Where-Object {
     $_.Extension.ToLowerInvariant() -in @(".kl", ".ls", ".pc", ".tp", ".var", ".ini", ".txt")
 } | ForEach-Object {

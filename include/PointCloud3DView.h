@@ -143,6 +143,18 @@ namespace pcview
             update();
         }
 
+        // 仅更新图层外观(颜色/连线/点大小/可见)而不动相机视角与旋转中心——供属性面板实时调样式用。
+        void SetLayersPreserveView(const QVector<Layer>& layers)
+        {
+            const int prevCount = m_layers.size();
+            m_layers = layers;
+            if (m_layers.size() != prevCount)
+            {
+                ClearSelectedRotationCenter(false);  // 图层增删才重置选中点，纯改样式不动
+            }
+            update();
+        }
+
         void SetLayerVisible(int index, bool visible)
         {
             if (index < 0 || index >= m_layers.size())

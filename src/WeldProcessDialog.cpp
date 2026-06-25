@@ -1574,7 +1574,6 @@ bool WeldProcessDialog::SaveData()
             return false;
         }
         weldItem.nLayerNo = 1;
-        weldItem.nWeaveTypeNo = 0;
 
         int newIndex = -1;
         if (!m_file.AddWeldPara(weldItem, newIndex))
@@ -1585,14 +1584,16 @@ bool WeldProcessDialog::SaveData()
         currentRow = newIndex;
     }
 
-    weldItem.nWeaveTypeNo = qBound(0, weldItem.nWeaveTypeNo, qMax(0, m_file.GetAllWeaveTypeNum() - 1));
-
-    if (!m_file.UpdateWeldPara(currentRow, weldItem))
+    // 每工艺一份独立摆动：第 currentRow 个工艺恒用第 currentRow 份摆动数据（一一平行）。
+    weldItem.nWeaveTypeNo = currentRow;
+    // 先写摆动槽（此刻 currentRow 仍对应当前工艺），再写工艺；UpdateWeldPara 内部若按分组重排，
+    // 会带着摆动一起同步重排，保证改一个工艺的摆动不再波及其它工艺。
+    if (!m_file.UpdateWeaveType(currentRow, weaveItem))
     {
         ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return false;
     }
-    if (!m_file.UpdateWeaveType(weldItem.nWeaveTypeNo, weaveItem))
+    if (!m_file.UpdateWeldPara(currentRow, weldItem))
     {
         ShowError(DecodeRobotMessageText(m_file.GetLastError()));
         return false;
@@ -1691,7 +1692,7 @@ bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
     out.dWeldAngle = m_weldAngleSpin->value();
     out.dWeldDipAngle = m_weldDipAngleSpin->value();
     out.nStandWeldDir = (m_weavePointsCombo != nullptr) ? ComboData(m_weavePointsCombo, 16) : 16;  // 复用 nStandWeldDir 存 pointwise 每周期点数
-    out.nWeaveTypeNo = 0;
+    out.nWeaveTypeNo = 0;  // 占位：真实摆动索引由 SaveData 按当前工艺下标(currentRow)写入，保证每工艺一份独立摆动
     out.nWeldMethod = ComboData(m_dynamicModeCombo, 0);  // 复用 nWeldMethod 存动态特性：0=NULL 1=ntdyn0
     out.nWeaveEnable = IsChecked(m_weaveEnableCheck) ? 1 : 0;
     out.nTrackEnable = IsChecked(m_trackEnableCheck) ? 1 : 0;

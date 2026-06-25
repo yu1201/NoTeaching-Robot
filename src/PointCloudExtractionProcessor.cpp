@@ -424,6 +424,24 @@ QString PrepareRuntimeExternalConfigPath(
         changed = true;
     }
 
+    // 20260624 版 DLL 新增降采样/抬升参数 is_sample / sample_size / above_z，缺失同样可能报 "not found"。
+    // 兜底注入新模板默认值（现场旧 config 不含这些键时也能跑）；已显式配置过则 ConfigLineValue 非空、保留不覆盖。
+    if (ConfigLineValue(content, "is_sample").isEmpty())
+    {
+        ReplaceConfigValue(&content, "is_sample", "false");
+        changed = true;
+    }
+    if (ConfigLineValue(content, "sample_size").isEmpty())
+    {
+        ReplaceConfigValue(&content, "sample_size", "5");
+        changed = true;
+    }
+    if (ConfigLineValue(content, "above_z").isEmpty())
+    {
+        ReplaceConfigValue(&content, "above_z", "0.5");
+        changed = true;
+    }
+
     const QString normalizedBaseWeldPath = baseWeldOutputPath.trimmed();
     if (!normalizedBaseWeldPath.isEmpty())
     {

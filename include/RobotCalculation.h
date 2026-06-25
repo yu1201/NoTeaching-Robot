@@ -72,9 +72,17 @@ public:
         double azimuthNmsSpanMm = 12.0;          // 非极大值抑制：同区域合并的主轴弧长
         double azimuthStraightenResidualMm = 6.0;// 段内偏离弦超此值才补拐点（漏检兜底）。须大于
                                                  // 波纹起伏幅度，否则把周期起伏误当漏检拐点过补
-        double azimuthRefineFloorMm = 0.5;       // 起终点先验自适应细化地板(mm)：粗拟合后对"一致弓向
-                                                 // 一侧"的段补漏检拐点（端区用此地板、中段×3，区分真弓
-                                                 // 弯与随机噪声）。<=0 关闭。仅 SDK 基础焊道+拟合路径生效
+        // 端区补拐点(起终点先验自适应细化，RefineCornersByCoherentBow 用)。默认关——已被下方"平台重算"取代
+        // (补拐点按离弦几何加点、易在端区过补；平台重算按 II/OO 规律重算更稳)。需要纯几何补点时再开。
+        bool cornerRefineEnable = false;         // 总开关：默认关(平台重算取代)；开则在拐点检测后做端区补拐点
+        double azimuthRefineFloorMm = 0.5;       // 端区细化地板(mm)：端区段内一致弓向离弦峰值超此值才补拐点
+        double cornerRefineOneSidedFrac = 0.80;  // 单侧弓出占比门[0.5,1]：段内点同侧占比≥此才算真弓(挡随机噪声)
+        double cornerRefineMidMultiple = 3.0;    // 中段地板倍数(≥1)：中段地板=端区地板×此，体现漏点多在端区的先验
+        double cornerRefineEndFrac = 0.20;       // 端区弧长占比[0,0.5]：首尾各此比例视为端区(用低地板)
+        // 拐点 inner/outer 结构约束(平台重算，RefitCornersByPlatformPattern 用)：按 II/OO 成对规律把拐点归平台，
+        // 每平台从稠密路径三段拟合重算 2 个边界角，对源头多检(5→2)/漏检(1→2)免疫。搭接台阶点豁免。默认开。
+        bool cornerPatternRefitEnable = true;    // 总开关：默认开
+        int cornerPlatformMinSegPoints = 8;      // 三段拟合每段最少点数(≥3)：越大越稳但短平台可能拟合不出
         // 板材搭接 X 错位台阶检测（默认关，仅几何拟合流程）：双侧平台最小二乘判据——候选两侧各取窗口
         // 对侧向 h 做直线拟合，要求两侧斜率近 0（平台，区别于拐角斜边）+ 残差小（排波纹噪声）+ 中心两线
         // 高度差>阈值（台阶高）→ 错位点作硬段边界，两侧点云分别拟合，错位处保留 X 台阶（不做过渡）。

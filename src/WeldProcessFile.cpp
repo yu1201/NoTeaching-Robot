@@ -388,6 +388,10 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
         }
     }
 
+    // 迁移/校正：把历史"所有工艺共享 WeaveData[0]"的数据展开成每工艺一份独立摆动（幂等）。
+    // 两条加载路径末尾的 NormalizeWeldOrderKeepGroupOrder 已各调一次，这里再显式调一次以明确
+    // BindWeldToWeave 依赖"nWeaveTypeNo=工艺下标、摆动列表与工艺一一平行"这个不变量。
+    NormalizeWeaveTypeParallel();
     if (!BindWeldToWeave())
     {
         LogError("%s", m_sLastError.c_str());
@@ -545,8 +549,8 @@ bool WeldProcessFile::UpdateWeldPara(int nParaNo, const T_WELD_PARA& tWeldPara)
         ? m_vtWeaveTypeList[item.nWeaveTypeNo]
         : T_WeaveDate {};
     m_vtWeldParaList[nParaNo] = item;
-    NormalizeWeldOrderKeepGroupOrder();
-    if (!SaveWeldTxt())
+    NormalizeWeldOrderKeepGroupOrder();  // 内部含 NormalizeWeaveTypeParallel：摆动随工艺同步重排
+    if (!SaveWeaveTxt() || !SaveWeldTxt())  // 摆动列表也可能因重排变化，两个都要存
     {
         LogError("%s", m_sLastError.c_str());
         ShowError(m_sLastError);
@@ -565,33 +569,22 @@ bool WeldProcessFile::AddWeldPara(const T_WELD_PARA& tWeldPara, int& newIndex)
         }
     }
 
-    if (m_vtWeaveTypeList.empty())
-    {
-        m_vtWeaveTypeList.push_back(T_WeaveDate {});
-        m_nAllWeaveTypeNum = 1;
-        m_nUseWeaveTypeNo = 0;
-        if (!SaveWeaveTxt())
-        {
-            LogError("%s", m_sLastError.c_str());
-            ShowError(m_sLastError);
-            return false;
-        }
-    }
-
     T_WELD_PARA item = tWeldPara;
     item.nWeaveEnable = item.nWeaveEnable != 0 ? 1 : 0;
     item.nTrackEnable = item.nTrackEnable != 0 ? 1 : 0;
     item.nArcMode = NormalizeArcMode(item.nArcMode);
-    if (item.nWeaveTypeNo < 0 || item.nWeaveTypeNo >= static_cast<int>(m_vtWeaveTypeList.size()))
-    {
-        item.nWeaveTypeNo = 0;
-    }
+
+    // 每个新工艺自带一份独立摆动数据（不再共享 WeaveData[0]）：先压入一份默认摆动，
+    // 让新工艺指向它，随后 NormalizeWeaveTypeParallel 把 nWeaveTypeNo 重排成工艺下标、保持一一平行。
+    m_vtWeaveTypeList.push_back(T_WeaveDate {});
+    item.nWeaveTypeNo = static_cast<int>(m_vtWeaveTypeList.size()) - 1;
     item.tWeaveParam = item.nWeaveEnable != 0 ? m_vtWeaveTypeList[item.nWeaveTypeNo] : T_WeaveDate {};
     m_vtWeldParaList.push_back(item);
+    NormalizeWeaveTypeParallel();
     m_nAllWeldParaNum = static_cast<int>(m_vtWeldParaList.size());
     m_nUseWeldParaNo = static_cast<int>(m_vtWeldParaList.size()) - 1;
     newIndex = m_nUseWeldParaNo;
-    if (!SaveWeldTxt())
+    if (!SaveWeaveTxt() || !SaveWeldTxt())
     {
         LogError("%s", m_sLastError.c_str());
         ShowError(m_sLastError);
@@ -622,7 +615,7 @@ bool WeldProcessFile::RemoveWeldPara(int nParaNo)
         m_nUseWeldParaNo = qBound(0, m_nUseWeldParaNo, m_nAllWeldParaNum - 1);
     }
 
-    if (!SaveWeldTxt())
+    if (!SaveWeaveTxt() || !SaveWeldTxt())  // 删工艺已同步丢弃其摆动并重排，两个都要存
     {
         LogError("%s", m_sLastError.c_str());
         ShowError(m_sLastError);
@@ -718,7 +711,9 @@ bool WeldProcessFile::ReorderWeldGroups(const std::vector<std::string>& orderedG
         }
     }
 
-    if (!SaveWeldTxt())
+    // 分组重排后让摆动随工艺一起重排，保持每工艺一份独立摆动（一一平行）。
+    NormalizeWeaveTypeParallel();
+    if (!SaveWeaveTxt() || !SaveWeldTxt())
     {
         return false;
     }
@@ -939,6 +934,42 @@ void WeldProcessFile::EnsureDefaultLayerRows()
     }
 }
 
+void WeldProcessFile::NormalizeWeaveTypeParallel()
+{
+    // 不变量：每个工艺自带一份独立摆动数据，nWeaveTypeNo 恒等于工艺在列表中的下标，
+    // m_vtWeaveTypeList 与 m_vtWeldParaList 一一平行。历史数据里所有工艺都把 nWeaveTypeNo 记成 0、
+    // 共享同一份 WeaveData[0]，导致"改一个工艺的摆动其余工艺跟着变"。本函数按各工艺当前引用的那份
+    // 摆动复制出独立副本（初值相同，之后各自独立），并把 nWeaveTypeNo 重排成工艺下标。幂等：已平行
+    // 的数据再 normalize 结果不变；工艺增删/重排后调用即可保持平行（被删工艺那份摆动随之丢弃）。
+    const size_t weldCount = m_vtWeldParaList.size();
+    if (weldCount == 0)
+    {
+        if (m_vtWeaveTypeList.empty())
+        {
+            m_vtWeaveTypeList.push_back(T_WeaveDate {});  // 至少留一份模板供新建工艺取默认
+        }
+        m_nAllWeaveTypeNum = static_cast<int>(m_vtWeaveTypeList.size());
+        m_nUseWeaveTypeNo = qBound(0, m_nUseWeaveTypeNo, m_nAllWeaveTypeNum - 1);
+        return;
+    }
+
+    std::vector<T_WeaveDate> rebuilt;
+    rebuilt.reserve(weldCount);
+    for (size_t i = 0; i < weldCount; ++i)
+    {
+        const int ref = m_vtWeldParaList[i].nWeaveTypeNo;
+        const T_WeaveDate weave = (ref >= 0 && ref < static_cast<int>(m_vtWeaveTypeList.size()))
+            ? m_vtWeaveTypeList[ref]
+            : T_WeaveDate {};
+        rebuilt.push_back(weave);
+        m_vtWeldParaList[i].nWeaveTypeNo = static_cast<int>(i);
+        m_vtWeldParaList[i].tWeaveParam = m_vtWeldParaList[i].nWeaveEnable != 0 ? weave : T_WeaveDate {};
+    }
+    m_vtWeaveTypeList = std::move(rebuilt);
+    m_nAllWeaveTypeNum = static_cast<int>(m_vtWeaveTypeList.size());
+    m_nUseWeaveTypeNo = qBound(0, m_nUseWeldParaNo, m_nAllWeaveTypeNum - 1);
+}
+
 void WeldProcessFile::NormalizeWeldOrderKeepGroupOrder()
 {
     T_WELD_PARA selected {};
@@ -976,6 +1007,8 @@ void WeldProcessFile::NormalizeWeldOrderKeepGroupOrder()
         normalized.insert(normalized.end(), rows.begin(), rows.end());
     }
     m_vtWeldParaList = normalized;
+    // 工艺顺序定稿后，让摆动列表随工艺一起重排并保持每工艺一份独立（摆动跟着工艺走）。
+    NormalizeWeaveTypeParallel();
 
     m_nAllWeldParaNum = static_cast<int>(m_vtWeldParaList.size());
     if (!hasSelected)

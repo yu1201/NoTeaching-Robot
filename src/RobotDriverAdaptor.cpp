@@ -157,6 +157,9 @@ std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ExpandMoveInfosByPointwiseWea
     std::vector<T_ROBOT_MOVE_INFO> out;
     out.reserve(centerline.size() * kPointsPerCycle);
 
+    // 整条焊缝共用一个连续相位时钟：phiBase 累计到上一段末尾的相位，跨段不清零。
+    // 否则每段都从相位0重启，会在中心线锚点处出现"相位重置/波形回弹"(如 595 593 595 593 漏掉波峰 596)。
+    double phiBase = 0.0;
     for (size_t i = 0; i + 1 < centerline.size(); ++i)
     {
         const T_ROBOT_MOVE_INFO& a = centerline[i];
@@ -187,13 +190,13 @@ std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ExpandMoveInfosByPointwiseWea
         const double dsMm = pitchMm / kPointsPerCycle;                  // 采样步长
         const int nSteps = std::max(1, static_cast<int>(std::ceil(segLen / dsMm)));
 
-        int lastQuarter = 0;   // 段内已跨过的 1/4 相位计数(floor(phi/(π/2)))，用于在摆动相位点设停留
+        int lastQuarter = static_cast<int>(phiBase / (kPi / 2.0));   // 1/4 相位计数(跨段连续，承接 phiBase)，用于在摆动相位点设停留
         for (int s = 0; s < nSteps; ++s)
         {
             const double dist = static_cast<double>(s) * dsMm;
             if (dist > segLen) { break; }
             const double u = dist / segLen;                            // 段内插值参数 [0,1)
-            const double phi = 2.0 * kPi * dist / pitchMm;             // 相位(按弧长连续)
+            const double phi = phiBase + 2.0 * kPi * dist / pitchMm;  // 相位(全局连续：基相位 + 段内弧长相位)
 
             T_ROBOT_MOVE_INFO p = a;                                   // 复制全套工艺字段(电流/电压/速度/段类)
             // 中心点：位置 + 姿态都从中心线插值(中心线点自带姿态)
@@ -221,6 +224,18 @@ std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ExpandMoveInfosByPointwiseWea
             p.tCoord.dY += lateral.y * lat + tangent.y * lon;
             p.tCoord.dZ += lateral.z * lat + tangent.z * lon;
 
+            // 跨段共享锚点去重：段长恰为采样步长整数倍时，上一段末点与本段首点(s==0)位置重合，
+            // 跳过以免 srd 出现零位移重复点(下游会当成停顿)。仅 i>0 的段首可能重合。
+            if (s == 0 && i > 0 && !out.empty())
+            {
+                const auto& q = out.back().tCoord;
+                if (std::abs(q.dX - p.tCoord.dX) < 1e-6 && std::abs(q.dY - p.tCoord.dY) < 1e-6
+                    && std::abs(q.dZ - p.tCoord.dZ) < 1e-6)
+                {
+                    continue;
+                }
+            }
+
             p.bHasWeaveParam = false;   // 关原生 WEAVEDATA：靠点位本身摆，不再由控制器二次摆动
             // 圆滑(OVERLAPREL)沿用工艺填的值(p 从 a 复制已带)，不强制 0、不做限制。
             // 注意：圆滑越大越会把密集摆动点之间磨成圆弧、削掉摆幅，100% 会直接抹平摆动，合适值由现场测试定。
@@ -234,6 +249,8 @@ std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ExpandMoveInfosByPointwiseWea
             }
             out.push_back(p);
         }
+        // 段末把整段相位累加进基相位(用整段长 segLen，使下一段锚点相位严格接续)，实现跨段连续摆动
+        phiBase += 2.0 * kPi * segLen / pitchMm;
     }
 
     // 末点：终点中心原样保留(收回中心线)，关 weave；圆滑沿用工艺值(last 从中心线末点复制已带)

@@ -10158,7 +10158,13 @@ RobotCalculation::LowerWeldFilterParams MeasureThenWeldService::BuildTrackFitPar
     params.azimuthHeadingWindow = pointCloudSettings.fitAzimuthHeadingWindow;
     params.azimuthNmsSpanMm = pointCloudSettings.fitAzimuthNmsSpanMm;
     params.azimuthStraightenResidualMm = pointCloudSettings.fitAzimuthStraightenResidualMm;
+    params.cornerRefineEnable = pointCloudSettings.fitCornerRefineEnable;
     params.azimuthRefineFloorMm = pointCloudSettings.fitAzimuthRefineFloorMm;
+    params.cornerRefineOneSidedFrac = pointCloudSettings.fitCornerRefineOneSidedPct / 100.0;
+    params.cornerRefineMidMultiple = pointCloudSettings.fitCornerRefineMidMultiple;
+    params.cornerRefineEndFrac = pointCloudSettings.fitCornerRefineEndFracPct / 100.0;
+    params.cornerPatternRefitEnable = pointCloudSettings.fitCornerPatternRefitEnable;
+    params.cornerPlatformMinSegPoints = pointCloudSettings.fitCornerPlatformMinSegPoints;
     params.enableLapMisalignmentSplit = pointCloudSettings.enableLapMisalignmentSplit;
     params.lapStepHeightThresholdMm = pointCloudSettings.lapStepHeightThresholdMm;
     params.lapStepStationWindowMm = pointCloudSettings.lapStepStationWindowMm;

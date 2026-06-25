@@ -59,8 +59,15 @@ public:
         int fitAzimuthHeadingWindow = 10;            // 左右两段方向的局部最小二乘拟合跨度(点)
         double fitAzimuthNmsSpanMm = 12.0;           // 非极大值抑制弧长：同区域只保留转角最大的拐点
         double fitAzimuthStraightenResidualMm = 6.0; // 直线化兜底残差：段内偏离弦超此值才补拐点
-        double fitAzimuthRefineFloorMm = 0.5;        // 起终点先验自适应细化地板(mm)：粗拟合后对"一致
-                                                     // 弓向一侧"的段补漏检拐点(端区用此地板/中段×3)；<=0 关闭
+        // 端区补拐点(两条几何路径通用)：界面"端区补拐点"分组开关 + 4 个可调门限。默认关(已被平台重算取代)。
+        bool fitCornerRefineEnable = false;          // 总开关(默认关)
+        double fitAzimuthRefineFloorMm = 0.5;        // 端区细化地板(mm)：端区一致弓向离弦峰值超此才补拐点
+        double fitCornerRefineOneSidedPct = 80.0;    // 单侧弓出门(%)[50,100]：同侧占比≥此才算真弓(挡噪声)
+        double fitCornerRefineMidMultiple = 3.0;     // 中段地板倍数(≥1)：中段地板=端区地板×此
+        double fitCornerRefineEndFracPct = 20.0;     // 端区占比(%)[0,50]：首尾各此比例视为端区
+        // 拐点结构约束(平台重算)：界面"平台重算"开关+参数。按 II/OO 成对规律每平台重算 2 角，修源头多检/漏检。
+        bool fitCornerPatternRefitEnable = true;     // 总开关(默认开)
+        int fitCornerPlatformMinSegPoints = 8;       // 三段拟合每段最少点数(≥3)
         // 板材搭接 X 错位台阶检测(默认关，仅几何拟合流程)：双侧平台最小二乘→两侧分别拟合+保留台阶
         bool enableLapMisalignmentSplit = false;
         double lapStepHeightThresholdMm = 1.0;   // 台阶高门(中心两线高度差)
