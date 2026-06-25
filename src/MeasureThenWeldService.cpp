@@ -223,6 +223,7 @@ struct WeldPosePreset
     double transitionVoltage = 0.0;
     bool weaveEnabled = true;
     bool weaveAppPointwise = false;  // true=上位机自建pointwise摆动(来自工艺 nWrapConditionNo!=0)
+    int weavePointsPerCycle = 16;    // pointwise每周期采样点数(来自工艺 nStandWeldDir 复用死字段；0/无效在driver规范化为16)
     bool trackEnabled = true;
     T_WeaveDate weaveParam;
     T_TrackData trackParam;
@@ -1923,6 +1924,7 @@ void ApplyActiveWeldProcessToPreset(const T_PRECISE_MEASURE_PARAM& param, WeldPo
     preset.arcMode = NormalizeArcMode(weldPara.nArcMode);
     preset.weaveEnabled = weldPara.nWeaveEnable != 0;
     preset.weaveAppPointwise = weldPara.nWrapConditionNo != 0;  // 摆动来源开关：nWrapConditionNo!=0=上位机自建pointwise
+    preset.weavePointsPerCycle = weldPara.nStandWeldDir;  // pointwise每周期点数：复用死字段nStandWeldDir(0=旧工艺，driver端规范化为默认16)
     preset.weldDynamicMode = weldPara.nWeldMethod;  // 动态特性：复用 nWeldMethod 死字段，0=WLin用NULL 非0=用ntdyn0(程序速度)
     preset.trackEnabled = weldPara.nTrackEnable != 0;
     preset.weaveParam = weldPara.tWeaveParam;
@@ -3282,6 +3284,7 @@ bool BuildWeldPoseMoveInfos(
             moveInfo.nArcMode = preset->arcMode;
             moveInfo.bHasWeaveParam = preset->weaveEnabled;
             moveInfo.bAppPointwiseWeave = preset->weaveAppPointwise;
+            moveInfo.nWeavePointsPerCycle = preset->weavePointsPerCycle;
             if (moveInfo.bHasWeaveParam)
             {
                 moveInfo.tWeaveParam = preset->weaveParam;

@@ -8,7 +8,9 @@
 ## 2026-06-25
 
 - 上位机自建「点位摆动」(pointwise)开放给先测后焊生产流程：原先 pointwise 摆动只在「虚拟焊接测试」放行、先测后焊主流程遇到会报错拦截（防未真机验证就上线）。现确认开放——`GenerateStepWeldProgramFiles`/`ExecuteWeldPoseFileWithSafePos` 的 `allowPointwiseWeave` 默认值 false→true（`MeasureThenWeldService.h`），先测后焊执行入口（`ExecuteWeldPoseFileWithSafePos` 下枪执行）与焊道补偿后 job 同步生成走默认即放行 pointwise 真机下发；拦截块保留作钩子（传 false 可临时禁用，提示文案改中性）。虚拟测试/CLI 仍显式传 true 不变。提醒：真机首次跑 pointwise 需现场验证速度补偿后实际 TCP 速度、停留 WaitTime 在连续运动里的行为、摆弧倾斜角倒向（均原标「需现场验证」项），建议先小段试焊
-- 版本 v2026.06.25.0953；main 中性版 Release x64 编译通过；品牌版 hk-pathlynx-corpla 同步 merge + 编译 + 打包（本地安装包 `HK-Pathlynx-CORPLA-Setup-v2026.06.25.0953.exe`，按需未推送/未 GitHub Release）
+- pointwise 摆动姿态(RZ)跨 ±180 边界插值修复：现场反馈先测后焊生成的 Weld srd 里焊枪姿态在拐弯处出现"假翻转"波动(RZ 在一小段内从 -158° 连续扫到 +159° 穿过 0°)。根因=`ExpandMoveInfosByPointwiseWeave` 姿态插值原为朴素线性 `a+(b-a)*u`，当中心线相邻点 RZ 跨 ±180(如 -179° 与 +179° 实际只差 1~2° 但跨边界)，朴素插值走经 0 的 ~358° 长路径、焊枪假性转近一整圈。修复：加角度最近等价插值 helper `WeaveLerpAngleDeg`(差值先折到 [-180,180] 再线性插值、输出夹 [-180,180))，RX/RY/RZ 都改用它。虚拟焊接测试因造的是直线、RZ 恒定不跨界故没暴露。实测同 case：修复前 1538 点有 24 个穿 0，修复后 0 个穿 0
+- pointwise 每周期采样点数可配：原 `kPointsPerCycle=16` 硬编码改为工艺可调。摆动参数页加「每周期点数」下拉(4/8/12/16/24/32，机器人原生模式置灰，只 pointwise 用)，复用工艺死字段 `nStandWeldDir` 存储(每工艺独立)；driver 端 `NormalizeWeavePointsPerCycle` 规范化(取 4 的倍数以保证停留落 1/4·2/4·3/4·4/4 相位、最小 4、0/旧工艺回退 16)。实测严格线性：8→733 点 / 16→1464 / 24→2187 / 32→2916
+- 版本 v2026.06.25.1122；main 中性版 Release x64 编译通过；品牌版 hk-pathlynx-corpla 同步 merge + 编译 + 打包（本地安装包 `HK-Pathlynx-CORPLA-Setup-v2026.06.25.1122.exe`，按需未推送/未 GitHub Release）
 
 ## 2026-06-24
 

@@ -39,6 +39,28 @@ namespace
         }
     }
 
+    // 角度最近等价插值：先把 to 折到离 from 最近的等价角(差值落 [-180,180])再线性插值，输出夹到 [-180,180)(+180→-180)。
+    // 防 RZ 等姿态角跨 ±180 边界被朴素线性插值绕远路——如 -178→+178 实际只差 4°，朴素插值会走经 0 的 356° 长路径
+    // (焊枪在该段假性翻转近一圈)，这里改走经 ±180 的 4° 短路径。等价于 NormalizeAngleNear + NormalizeRobotRzOutputRange。
+    inline double WeaveLerpAngleDeg(double from, double to, double t)
+    {
+        double delta = to - from;
+        while (delta > 180.0) { delta -= 360.0; }
+        while (delta < -180.0) { delta += 360.0; }
+        double result = from + delta * t;
+        while (result >= 180.0) { result -= 360.0; }
+        while (result < -180.0) { result += 360.0; }
+        return result;
+    }
+
+    // pointwise 每周期采样点数规范化：取 4 的倍数(让停留落 1/4·2/4·3/4·4/4 相位)、最小4；0/无效(旧工艺无此字段)回退默认16
+    inline int NormalizeWeavePointsPerCycle(int n)
+    {
+        if (n < 4) { return 16; }
+        const int rounded = (n / 4) * 4;
+        return rounded < 4 ? 4 : rounded;
+    }
+
     long long RobotDriverSteadyMs()
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -79,7 +101,6 @@ std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ExpandMoveInfosByPointwiseWea
     const std::vector<T_ROBOT_MOVE_INFO>& centerline, std::string* error)
 {
     constexpr double kPi = 3.14159265358979323846;
-    constexpr int    kPointsPerCycle = 16;   // 每周期采样点数(正弦12~16)，TODO 可做成可配
     constexpr double kMinPitchMm = 1.0;      // 节距下限
     const auto setError = [error](const std::string& msg) { if (error != nullptr) { *error = msg; } };
 
@@ -104,6 +125,7 @@ std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ExpandMoveInfosByPointwiseWea
     }
 
     const T_WeaveDate& weave = anchor->tWeaveParam;
+    const int kPointsPerCycle = NormalizeWeavePointsPerCycle(anchor->nWeavePointsPerCycle);  // 每周期点数(工艺可配,4倍数,默认16)
     const double amplitude = weave.dWeaveAmplitudeMm;   // 横向半摆幅 mm
     const double freqHz = weave.dWeaveFrequencyHz;
     const int    shape = weave.nWeaveShape;
@@ -178,9 +200,9 @@ std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ExpandMoveInfosByPointwiseWea
             p.tCoord.dX = a.tCoord.dX + (b.tCoord.dX - a.tCoord.dX) * u;
             p.tCoord.dY = a.tCoord.dY + (b.tCoord.dY - a.tCoord.dY) * u;
             p.tCoord.dZ = a.tCoord.dZ + (b.tCoord.dZ - a.tCoord.dZ) * u;
-            p.tCoord.dRX = a.tCoord.dRX + (b.tCoord.dRX - a.tCoord.dRX) * u;
-            p.tCoord.dRY = a.tCoord.dRY + (b.tCoord.dRY - a.tCoord.dRY) * u;
-            p.tCoord.dRZ = a.tCoord.dRZ + (b.tCoord.dRZ - a.tCoord.dRZ) * u;  // TODO: RZ 跨±180 需 NormalizeAngleNear
+            p.tCoord.dRX = WeaveLerpAngleDeg(a.tCoord.dRX, b.tCoord.dRX, u);
+            p.tCoord.dRY = WeaveLerpAngleDeg(a.tCoord.dRY, b.tCoord.dRY, u);
+            p.tCoord.dRZ = WeaveLerpAngleDeg(a.tCoord.dRZ, b.tCoord.dRZ, u);  // 最近等价插值：防 RZ 跨±180 边界绕长路径(焊枪假翻转)
 
             const double lat = amplitude * WeaveLateralFactor(shape, phi);
             // 纵向分量(沿切向)。TODO：L摆精确形态待安川/新时达手册确认
