@@ -341,6 +341,7 @@ struct T_ROBOT_MOVE_INFO
 	int nPostureType = 0; // STEP姿态/位形(srp Lin/WLin第4参)：0=NULL(默认,保持原非焊接Lin行为) 1=eVAR 2=eCONST 3=eWRIST
 	int nDynamicMode = 0; // 动态特性(WLin第2参DYNAMIC)：0=NULL(机器人默认动态) 非0=ntdyn0(程序指定速度)
 	int nDwellMs = 0;     // pointwise摆动相位点停留(ms)：>0时该点运动后srp插WaitTime完全停、srd建INT变量；原生摆动不用
+	int nWeavePointsPerCycle = 16; // pointwise每周期采样点数(4的倍数,最小4,默认16)：来自工艺(复用死字段nStandWeldDir)
 	int nMoveDevice = -1;
 	int nTrackNo = -1;
 	double adBasePosVar[3]; //外部轴坐标(MP_USR_VAR_INFO中最多支持8轴)

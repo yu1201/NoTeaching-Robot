@@ -728,6 +728,8 @@ void WeldProcessDialog::BuildEditorUi()
     m_weaveFrequencySpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧频率", "hz");
     m_weaveAmplitudeSpin = AddDoubleFieldWithUnit(weaveLayout, "摆动幅值", "mm");
     m_swingDirectionSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧倾斜角", "°");
+    m_weavePointsCombo = addComboField(weaveLayout, "每周期点数");
+    for (int pts : {4, 8, 12, 16, 24, 32}) { m_weavePointsCombo->addItem(QString::number(pts), pts); }  // 4的倍数(保证停留落相位)，仅 pointwise 用
     m_weavePlaneAngleSpin = AddDoubleFieldWithUnit(weaveLayout, "摆弧平面倾斜角", "°");
     m_spaceAngleSpin = AddDoubleFieldWithUnit(weaveLayout, "空间摆弧夹角", "°");
     m_pauseTime1Spin = AddIntFieldWithUnit(weaveLayout, "1/4处停留时间", "ms", 0, 999999);
@@ -1213,6 +1215,8 @@ void WeldProcessDialog::UpdateWeaveShapeAvailability()
             if (parent->objectName() == "spinFieldFrame") { parent->setEnabled(!pointwise); }
         }
     }
+    // 每周期点数只 pointwise 用：pointwise 时启用、机器人原生时置灰(与上面 nativeOnly 相反)
+    if (m_weavePointsCombo != nullptr) { m_weavePointsCombo->setEnabled(pointwise); }
 }
 
 void WeldProcessDialog::LoadToUi(int preferredGroupRow, int preferredBeadRow)
@@ -1422,6 +1426,7 @@ void WeldProcessDialog::ApplySelectionToUi(int row)
     m_weldAngleSizeSpin->setValue(weld.dWeldAngleSize);
     SetChecked(m_weaveEnableCheck, weld.nWeaveEnable);
     SetComboByData(m_weaveImplCombo, weld.nWrapConditionNo);  // 摆动实现回填(0=原生 1=pointwise)
+    SetComboByData(m_weavePointsCombo, weld.nStandWeldDir >= 4 ? weld.nStandWeldDir : 16);  // 每周期点数回填(旧工艺<4回退16)
     SetChecked(m_trackEnableCheck, weld.nTrackEnable);
 
     m_startArcCurrentSpin->setValue(weld.dStartArcCurrent);
@@ -1685,7 +1690,7 @@ bool WeldProcessDialog::CollectWeldFromUi(T_WELD_PARA& out) const
     out.nWrapConditionNo = ComboData(m_weaveImplCombo, 0);  // 摆动实现：0=机器人原生 1=上位机自建pointwise
     out.dWeldAngle = m_weldAngleSpin->value();
     out.dWeldDipAngle = m_weldDipAngleSpin->value();
-    out.nStandWeldDir = 0;
+    out.nStandWeldDir = (m_weavePointsCombo != nullptr) ? ComboData(m_weavePointsCombo, 16) : 16;  // 复用 nStandWeldDir 存 pointwise 每周期点数
     out.nWeaveTypeNo = 0;
     out.nWeldMethod = ComboData(m_dynamicModeCombo, 0);  // 复用 nWeldMethod 存动态特性：0=NULL 1=ntdyn0
     out.nWeaveEnable = IsChecked(m_weaveEnableCheck) ? 1 : 0;

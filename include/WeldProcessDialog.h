@@ -167,6 +167,7 @@ private:
     QComboBox* m_weaveTypeCombo = nullptr;
     QComboBox* m_weaveImplCombo = nullptr;   // 摆动实现：0=机器人原生 1=上位机自建pointwise(存 T_WELD_PARA.nWrapConditionNo)
     QComboBox* m_weaveShapeCombo = nullptr;
+    QComboBox* m_weavePointsCombo = nullptr;  // pointwise每周期采样点数(4/8/12/16/24/32，存工艺 nStandWeldDir 复用死字段)
     QDoubleSpinBox* m_weaveFrequencySpin = nullptr;
     QDoubleSpinBox* m_weaveAmplitudeSpin = nullptr;
     QDoubleSpinBox* m_swingDirectionSpin = nullptr;
