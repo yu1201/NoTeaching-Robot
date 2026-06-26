@@ -54,6 +54,9 @@ private:
     QDoubleSpinBox* m_pCloudClusterToleranceSpin = nullptr;
     QCheckBox* m_pCloudClusterCheck = nullptr;
     QCheckBox* m_pCloudRemoveNoiseCheck = nullptr;  // is_remove_noise：SDK 库内置去噪（20260617 版新增）
+    QCheckBox* m_pCloudSampleCheck = nullptr;       // is_sample：SDK 库内降采样找平面（20260624 版新增，提速/降崩溃）
+    QDoubleSpinBox* m_pCloudSampleSizeSpin = nullptr; // sample_size：降采样体素大小
+    QDoubleSpinBox* m_pCloudAboveZSpin = nullptr;     // above_z：抬高值
     QSpinBox* m_pCloudDiscreteValueSpin = nullptr;
     QSpinBox* m_pCloudDilateValueSpin = nullptr;
     QSpinBox* m_pCloudErodeValueSpin = nullptr;

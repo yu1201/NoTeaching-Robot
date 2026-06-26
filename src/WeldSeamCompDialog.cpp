@@ -11,6 +11,14 @@
 #include "WeldProcessFile.h"
 #include "WindowStyleHelper.h"
 
+#include <QMetaObject>
+#include <QProgressDialog>
+
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <thread>
+
 #include <QAbstractButton>
 #include <QButtonGroup>
 #include <QColor>
@@ -297,7 +305,19 @@ WeldSeamCompDialog::WeldSeamCompDialog(ContralUnit* pContralUnit, QWidget* paren
     LoadRobotList();
     LoadCurrentParam();
     LoadWeldProcessArea();
-    AutoSelectLatestCompPreviewDirectory();
+    // 补偿预览数据(可能触发重算基准焊道 + 万点 Eigen 计算)不在构造里同步做：
+    // show 之后由事件循环触发后台载入（先显示界面、进度条反馈、不卡死）。
+    QMetaObject::invokeMethod(this, [this]() { AutoSelectLatestCompPreviewDirectory(); }, Qt::QueuedConnection);
+}
+
+WeldSeamCompDialog::~WeldSeamCompDialog()
+{
+    // 退出/析构时若后台载入线程仍在跑：置销毁标记让其尽快收尾（不再回投 UI），等计数归零再析构。
+    m_destroyed->store(true);
+    while (m_workerCount->load() > 0)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 void WeldSeamCompDialog::closeEvent(QCloseEvent* event)
@@ -2157,7 +2177,7 @@ void WeldSeamCompDialog::ChooseCompPreviewDirectory()
     {
         return;
     }
-    SetCompPreviewDirectory(dir);
+    OpenCompPreviewDirectoryAsync(dir, false);
 }
 
 void WeldSeamCompDialog::SetCompPreviewDirectory(const QString& dir)
@@ -2265,11 +2285,8 @@ void WeldSeamCompDialog::RebuildCompPreviewBaseline()
     {
         return;
     }
-    if (ExecuteCompPreviewRebuild(true))
-    {
-        // 重新加载六阶段预览（基准/原始焊道/原始数据全部刷新）。
-        SetCompPreviewDirectory(m_compPreviewDir);
-    }
+    // 强制重算 + 重新载入六阶段预览（基准/原始焊道/原始数据全部刷新），后台进行不阻塞 UI。
+    OpenCompPreviewDirectoryAsync(m_compPreviewDir, true);
 }
 
 bool WeldSeamCompDialog::ExecuteCompPreviewRebuild(bool showErrorBox)
@@ -2361,7 +2378,7 @@ void WeldSeamCompDialog::AutoSelectLatestCompPreviewDirectory()
         const QString laserDir = resultDir.filePath(entry + "/LaserPoint");
         if (QFileInfo::exists(QDir(laserDir).filePath("PreciseLaserPoint_WeldPose_2mm.txt")))
         {
-            SetCompPreviewDirectory(laserDir);
+            OpenCompPreviewDirectoryAsync(laserDir, false);
             return;
         }
     }
@@ -2669,7 +2686,7 @@ bool WeldSeamCompDialog::SaveWeldProcessArea(QString& error)
 
 void WeldSeamCompDialog::ScheduleCompPreview()
 {
-    if (m_bLoading)
+    if (m_bLoading || m_bPreviewLoading)
     {
         return;
     }
@@ -2902,6 +2919,10 @@ void WeldSeamCompDialog::RecomputeCompPreview()
     {
         return;
     }
+    if (m_bPreviewLoading)
+    {
+        return;  // 后台正在载入：避免与 worker 线程争用 m_compPreviewService。
+    }
 
     if (m_compPreviewDir.isEmpty())
     {
@@ -2944,6 +2965,16 @@ void WeldSeamCompDialog::RecomputeCompPreview()
     const MeasureThenWeldService::CompPreviewEditValues savedEdits = CollectSavedPoseCompEdits();
     const MeasureThenWeldService::CompPreviewStages stages = m_compPreviewService.ComputeCompPreviewStages(
         CurrentRobotName(), m_compPreviewBaseline, currentEdits, savedEdits, true);
+
+    ApplyComputedStages(stages);
+}
+
+void WeldSeamCompDialog::ApplyComputedStages(const MeasureThenWeldService::CompPreviewStages& stages)
+{
+    if (m_pCompPreviewView == nullptr)
+    {
+        return;
+    }
 
     auto toLayerPoints = [](const QVector<MeasureThenWeldService::CompPreviewPoint>& points)
     {
@@ -3006,6 +3037,225 @@ void WeldSeamCompDialog::RecomputeCompPreview()
         }
         m_pCompPreviewInfoLabel->setText(info);
     }
+}
+
+void WeldSeamCompDialog::EnsurePreviewProgress()
+{
+    if (m_pPreviewProgress == nullptr)
+    {
+        m_pPreviewProgress = new QProgressDialog(this);
+        m_pPreviewProgress->setWindowTitle("载入补偿预览");
+        m_pPreviewProgress->setWindowModality(Qt::WindowModal);
+        m_pPreviewProgress->setCancelButtonText("取消");
+        m_pPreviewProgress->setRange(0, 0);   // 重算/读取/计算无细分进度，用不确定(忙)模式
+        m_pPreviewProgress->setMinimumDuration(0);
+        m_pPreviewProgress->setAutoClose(false);
+        m_pPreviewProgress->setAutoReset(false);
+    }
+}
+
+void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool forceRebuild)
+{
+    if (m_pCompPreviewView == nullptr)
+    {
+        return;
+    }
+    if (m_bPreviewLoading)
+    {
+        return;  // 上一次载入未完成（进度框 WindowModal 通常已挡住重入）。
+    }
+
+    m_compPreviewDir = QDir::toNativeSeparators(dir);
+    if (m_pCompPreviewDirEdit != nullptr)
+    {
+        m_pCompPreviewDirEdit->setText(m_compPreviewDir);
+    }
+    RefreshCompPreviewScanLine();          // 轻量(读 INI)，留在 UI 线程
+    QString storeError;
+    StoreEditorValues(false, storeError);  // 把编辑框当前值写回行，供下方采集补偿编辑值
+
+    const QString laserDir = m_compPreviewDir;
+
+    // 是否需要重算基准焊道：强制，或当前方法的基础焊道文件缺失但目录里有可重算输入。
+    const PointCloudProcessingConfig::Mode mode = PointCloudProcessingConfig::Load().mode;
+    const QString methodFilePath = QDir(laserDir).filePath(MeasureThenWeldService::MethodBaseTrackFileName(mode));
+    const bool hasRebuildInput =
+        QFileInfo::exists(QDir(laserDir).filePath("PreciseLaserPoint.txt"))
+        || QFileInfo::exists(QDir(laserDir).filePath("PreciseLaserPoint_WorkpieceCloud.txt"));
+    bool needRebuild = (forceRebuild || !QFileInfo::exists(methodFilePath)) && hasRebuildInput;
+
+    // 重算需要驱动 + 测量参数：驱动/DB 访问留在 UI 线程，参数拷贝进后台线程。
+    T_PRECISE_MEASURE_PARAM rebuildParam;
+    if (needRebuild)
+    {
+        RobotDriverAdaptor* driver = nullptr;
+        const QString robot = CurrentRobotName();
+        if (m_pContralUnit != nullptr)
+        {
+            for (const T_CONTRAL_UNIT& unit : m_pContralUnit->m_vtContralUnitInfo)
+            {
+                if (QString::fromStdString(unit.sUnitName) == robot && unit.pUnitDriver != nullptr)
+                {
+                    driver = static_cast<RobotDriverAdaptor*>(unit.pUnitDriver);
+                    break;
+                }
+            }
+        }
+        QString paramError;
+        if (driver == nullptr || !m_compPreviewService.LoadPresetParam(driver, rebuildParam, paramError))
+        {
+            AppendLog(QString("自动重算跳过：读取测量参数失败（%1）。")
+                .arg(driver == nullptr ? QString("未找到机器人驱动") : paramError));
+            needRebuild = false;
+        }
+    }
+
+    // 编辑值/机器人名在 UI 线程采集后拷贝进后台线程（载入期间界面被进度框挡住，值稳定）。
+    const QString robotName = CurrentRobotName();
+    const MeasureThenWeldService::CompPreviewEditValues currentEdits = CollectCompPreviewEditValues();
+    const MeasureThenWeldService::CompPreviewEditValues savedEdits = CollectSavedPoseCompEdits();
+
+    m_bPreviewLoading = true;
+    if (m_pCompPreviewTimer != nullptr)
+    {
+        m_pCompPreviewTimer->stop();  // 停掉编辑去抖定时器，避免载入期间触发同步重算争用 service
+    }
+    EnsurePreviewProgress();
+    m_pPreviewProgress->setLabelText("正在载入补偿预览…");
+    auto cancelFlag = std::make_shared<std::atomic_bool>(false);
+    if (m_previewProgressCancelConn)
+    {
+        disconnect(m_previewProgressCancelConn);
+    }
+    m_previewProgressCancelConn = connect(m_pPreviewProgress, &QProgressDialog::canceled, this,
+        [cancelFlag]() { cancelFlag->store(true); });
+    m_pPreviewProgress->show();
+
+    auto destroyed = m_destroyed;
+    auto workerCount = m_workerCount;
+    workerCount->fetch_add(1);
+    std::thread([this, laserDir, robotName, currentEdits, savedEdits, needRebuild, rebuildParam, cancelFlag, destroyed, workerCount]()
+        {
+            CompPreviewLoadResult result;
+            const auto setStage = [this, cancelFlag, destroyed](const QString& text)
+            {
+                if (cancelFlag->load() || destroyed->load())
+                {
+                    return;
+                }
+                QMetaObject::invokeMethod(this, [this, text]()
+                    {
+                        if (m_pPreviewProgress != nullptr)
+                        {
+                            m_pPreviewProgress->setLabelText(text);
+                        }
+                    }, Qt::QueuedConnection);
+            };
+
+            if (needRebuild)
+            {
+                setStage("正在按当前方法重算基准焊道…");
+                QString preservePath;
+                QString weldPosePath;
+                QString seamCompPath;
+                QString summary;
+                QString rebuildError;
+                const bool ok = m_compPreviewService.RebuildWeldFilesFromLaserDir(
+                    rebuildParam, laserDir, preservePath, weldPosePath, seamCompPath, summary, rebuildError,
+                    [&result](const QString& text) { result.logs.append("重算基准：" + text); });
+                result.logs.append(ok ? ("已重算基准焊道。" + summary) : ("重算基准失败：" + rebuildError));
+            }
+
+            if (cancelFlag->load() || destroyed->load())
+            {
+                result.canceled = true;
+            }
+            else
+            {
+                setStage("正在读取焊道数据…");
+                QString originalError;
+                if (!m_compPreviewService.LoadCompPreviewOriginalTrack(laserDir, result.original, originalError))
+                {
+                    result.original.clear();
+                    result.logs.append("原始焊道：" + originalError);
+                }
+                QString rawError;
+                QString rawDesc;
+                if (!m_compPreviewService.LoadCompPreviewRawCloud(laserDir, result.raw, rawError, &rawDesc))
+                {
+                    result.raw.clear();
+                    result.logs.append("原始数据：" + rawError);
+                }
+                else
+                {
+                    result.logs.append(QString("原始数据：%1 点（%2）").arg(result.raw.size()).arg(rawDesc));
+                }
+
+                setStage("正在读取基准焊道…");
+                result.baselineOk = m_compPreviewService.LoadCompPreviewBaseline(
+                    MeasureThenWeldService::CompPreviewKind::Seam, laserDir, result.baseline, result.baselineError);
+
+                if (result.baselineOk && !cancelFlag->load() && !destroyed->load())
+                {
+                    setStage("正在计算补偿预览…");
+                    result.stages = m_compPreviewService.ComputeCompPreviewStages(
+                        robotName, result.baseline, currentEdits, savedEdits, true);
+                }
+                if (cancelFlag->load())
+                {
+                    result.canceled = true;
+                }
+            }
+
+            if (!destroyed->load())
+            {
+                QMetaObject::invokeMethod(this, [this, result]()
+                    {
+                        OnCompPreviewLoaded(result);
+                    }, Qt::QueuedConnection);
+            }
+            workerCount->fetch_sub(1);
+        }).detach();
+}
+
+void WeldSeamCompDialog::OnCompPreviewLoaded(const CompPreviewLoadResult& result)
+{
+    m_bPreviewLoading = false;
+    if (m_pPreviewProgress != nullptr)
+    {
+        m_pPreviewProgress->hide();
+    }
+    for (const QString& message : result.logs)
+    {
+        AppendLog(message);
+    }
+    if (result.canceled)
+    {
+        AppendLog("已取消载入补偿预览。");
+        return;
+    }
+
+    m_compPreviewOriginal = result.original;
+    m_compPreviewRaw = result.raw;
+
+    if (!result.baselineOk)
+    {
+        m_compPreviewBaseline.clear();
+        m_compPreviewArrows.clear();
+        m_pCompPreviewView->SetLayers({});
+        m_pCompPreviewView->SetDirectionArrows({});
+        if (m_pCompPreviewInfoLabel != nullptr)
+        {
+            m_pCompPreviewInfoLabel->setText("读取失败：" + result.baselineError);
+        }
+        AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
+        return;
+    }
+
+    m_compPreviewBaseline = result.baseline;
+    m_compPreviewBaselineDir = m_compPreviewDir;
+    ApplyComputedStages(result.stages);
+    AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
 }
 
 void WeldSeamCompDialog::BackupOldCompFiles(const QString& backupRoot, QString& summary) const

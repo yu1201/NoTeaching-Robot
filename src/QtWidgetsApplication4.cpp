@@ -40,6 +40,7 @@
 #include <QCloseEvent>
 #include <QContextMenuEvent>
 #include <QCoreApplication>
+#include <QEventLoop>
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDebug>
@@ -74,6 +75,7 @@
 #include <QFrame>
 #include <QFontMetrics>
 #include <QMetaObject>
+#include <QProgressDialog>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMouseEvent>
@@ -126,6 +128,8 @@
 #include <limits>
 #include <memory>
 #include <thread>
+#include <atomic>
+#include <chrono>
 #include <utility>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -6047,7 +6051,19 @@ namespace
 			{
 				m_dirEdit->setText(RobotDataHelper::BuildProjectPath(QString("Result/%1").arg(m_robotName)));
 			}
-			LoadCurrentDirectory();
+			// 不在构造里同步加载：show 之后由事件循环触发后台加载（先显示界面、再读点云、进度条反馈）。
+			QMetaObject::invokeMethod(this, [this]() { LoadCurrentDirectoryAsync(); }, Qt::QueuedConnection);
+		}
+
+		~PointCloudViewerDialog() override
+		{
+			// 关闭/退出时若后台读取线程仍在跑：置销毁标记让其尽快收尾（进度回调返回 false 取消），
+			// 等计数归零后再析构——期间排队的 invokeMethod 由 ~QObject 自动清除，安全。
+			m_destroyed->store(true);
+			while (m_workerCount->load() > 0)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
 		}
 
 	private:
@@ -6166,10 +6182,10 @@ namespace
 					if (!selectedDir.isEmpty())
 					{
 						m_dirEdit->setText(QDir::toNativeSeparators(selectedDir));
-						LoadCurrentDirectory();
+						LoadCurrentDirectoryAsync();
 					}
 				});
-			connect(reloadButton, &QPushButton::clicked, this, [this]() { LoadCurrentDirectory(); });
+			connect(reloadButton, &QPushButton::clicked, this, [this]() { LoadCurrentDirectoryAsync(); });
 			connect(cameraViewButton, &QPushButton::clicked, this, [this]()
 				{
 					if (m_view != nullptr)
@@ -6219,8 +6235,12 @@ namespace
 				});
 		}
 
-		void LoadCurrentDirectory()
+		void LoadCurrentDirectoryAsync()
 		{
+			if (m_loading)
+			{
+				return;  // 上一次加载未完成（WindowModal 进度框通常已挡住重入）。
+			}
 			const QString dirPath = m_dirEdit != nullptr ? m_dirEdit->text().trimmed() : QString();
 			QDir dir(dirPath);
 			AppendLog(QString("读取点云目录：%1").arg(dirPath));
@@ -6270,37 +6290,141 @@ namespace
 			}
 			AppendLog(QString("处理方法：%1").arg(PointCloudProcessingConfig::ModeDisplayName(mode)));
 
-			QVector<PointCloud3DView::Layer> layers;
-			for (const FileSpec& spec : specs)
+			// 重活搬到后台线程：逐文件读盘+解析（带进度回报/取消），完成后回 UI 线程 SetLayers。
+			m_loading = true;
+			EnsurePointCloudProgress();
+			m_pProgress->setLabelText("正在读取点云…");
+			m_pProgress->setValue(0);
+			auto cancelFlag = std::make_shared<std::atomic_bool>(false);
+			if (m_progressCancelConn)
 			{
-				const QString filePath = dir.filePath(spec.fileName);
-				if (!QFileInfo::exists(filePath))
-				{
-					AppendLog(QString("未找到：%1").arg(spec.fileName));
-					continue;
-				}
-				const LoadedPointCloudFile loaded = LoadPointCloudFile3D(filePath);
-				if (!loaded.error.isEmpty())
-				{
-					AppendLog(QString("读取失败：%1，%2").arg(spec.fileName, loaded.error));
-					continue;
-				}
+				disconnect(m_progressCancelConn);
+			}
+			m_progressCancelConn = connect(m_pProgress, &QProgressDialog::canceled, this,
+				[cancelFlag]() { cancelFlag->store(true); });
+			m_pProgress->show();
 
-				PointCloud3DView::Layer layer;
-				layer.name = spec.displayName;
-				layer.path = QDir::toNativeSeparators(filePath);
-				layer.points = loaded.points;
-				layer.color = spec.color;
-				layer.rainbow = spec.rainbow;
-				layer.connectLines = spec.connectLines;
-				layer.pointSize = spec.pointSize;
-				layers.push_back(layer);
-				AppendLog(QString("已加载：%1，点数：%2，跳过行：%3")
-					.arg(spec.fileName)
-					.arg(loaded.points.size())
-					.arg(loaded.skippedLineCount));
+			auto destroyed = m_destroyed;
+			auto workerCount = m_workerCount;
+			workerCount->fetch_add(1);
+			std::thread([this, dirPath, specs, cancelFlag, destroyed, workerCount]()
+				{
+					QDir dir(dirPath);
+					// 先统计存在文件的总字节，用于整体进度百分比（大点云文件占绝大部分）。
+					qint64 totalBytes = 0;
+					for (const FileSpec& spec : specs)
+					{
+						const QFileInfo info(dir.filePath(spec.fileName));
+						if (info.exists())
+						{
+							totalBytes += info.size();
+						}
+					}
+					const qint64 totalBytesSafe = std::max<qint64>(1, totalBytes);
+
+					QVector<PointCloud3DView::Layer> layers;
+					QStringList logs;
+					qint64 bytesBefore = 0;
+					bool canceled = false;
+					for (const FileSpec& spec : specs)
+					{
+						const QString filePath = QDir::toNativeSeparators(dir.filePath(spec.fileName));
+						const QFileInfo info(filePath);
+						if (!info.exists())
+						{
+							logs.append(QString("未找到：%1").arg(spec.fileName));
+							continue;
+						}
+						const qint64 fileBytes = std::max<qint64>(1, info.size());
+						const qint64 base = bytesBefore;
+						const pcview::PointCloudLoadProgress progressCb =
+							[this, cancelFlag, destroyed, base, fileBytes, totalBytesSafe, name = spec.displayName](int filePercent) -> bool
+							{
+								if (cancelFlag->load() || destroyed->load())
+								{
+									return false;
+								}
+								const qint64 done = std::min<qint64>(totalBytesSafe, base + qint64(filePercent) * fileBytes / 100);
+								const int overall = static_cast<int>(done * 100 / totalBytesSafe);
+								QMetaObject::invokeMethod(this, [this, overall, name]()
+									{
+										if (m_pProgress != nullptr)
+										{
+											m_pProgress->setValue(overall);
+											m_pProgress->setLabelText(QString("正在读取点云：%1…").arg(name));
+										}
+									}, Qt::QueuedConnection);
+								return true;
+							};
+						const LoadedPointCloudFile loaded = LoadPointCloudFile3D(filePath, progressCb);
+						if (loaded.canceled)
+						{
+							canceled = true;
+							break;
+						}
+						bytesBefore += info.size();
+						if (!loaded.error.isEmpty())
+						{
+							logs.append(QString("读取失败：%1，%2").arg(spec.fileName, loaded.error));
+							continue;
+						}
+						PointCloud3DView::Layer layer;
+						layer.name = spec.displayName;
+						layer.path = filePath;
+						layer.points = loaded.points;
+						layer.color = spec.color;
+						layer.rainbow = spec.rainbow;
+						layer.connectLines = spec.connectLines;
+						layer.pointSize = spec.pointSize;
+						layers.push_back(layer);
+						logs.append(QString("已加载：%1，点数：%2，跳过行：%3")
+							.arg(spec.fileName)
+							.arg(loaded.points.size())
+							.arg(loaded.skippedLineCount));
+					}
+					if (!destroyed->load())
+					{
+						QMetaObject::invokeMethod(this, [this, layers, logs, canceled]()
+							{
+								OnLayersLoaded(layers, logs, canceled);
+							}, Qt::QueuedConnection);
+					}
+					workerCount->fetch_sub(1);
+				}).detach();
+		}
+
+		void OnLayersLoaded(const QVector<PointCloud3DView::Layer>& layers, const QStringList& logs, bool canceled)
+		{
+			m_loading = false;
+			if (m_pProgress != nullptr)
+			{
+				m_pProgress->hide();
+			}
+			for (const QString& message : logs)
+			{
+				AppendLog(message);
+			}
+			if (canceled)
+			{
+				AppendLog("已取消读取。");
+				return;
 			}
 			SetLayers(layers);
+		}
+
+		void EnsurePointCloudProgress()
+		{
+			if (m_pProgress == nullptr)
+			{
+				m_pProgress = new QProgressDialog(this);
+				m_pProgress->setWindowTitle("读取点云");
+				m_pProgress->setWindowModality(Qt::WindowModal);
+				m_pProgress->setCancelButtonText("取消");
+				m_pProgress->setRange(0, 100);
+				m_pProgress->setMinimumDuration(0);
+				m_pProgress->setAutoClose(false);
+				m_pProgress->setAutoReset(false);
+			}
 		}
 
 		void SetLayers(const QVector<PointCloud3DView::Layer>& layers)
@@ -6445,6 +6569,13 @@ namespace
 		QDoubleSpinBox* m_pointSizeSpin = nullptr;
 		int m_selectedLayerIndex = -1;
 		bool m_updatingStyle = false;
+		// 后台异步读取点云：进度框 + 生命周期守卫（析构置 destroyed 并等待 worker 归零），
+		// 参照 WorkpieceMeshViewerDialog 样板，避免大点云在 UI 线程同步加载卡死。
+		QProgressDialog* m_pProgress = nullptr;
+		bool m_loading = false;
+		QMetaObject::Connection m_progressCancelConn;
+		std::shared_ptr<std::atomic_bool> m_destroyed = std::make_shared<std::atomic_bool>(false);
+		std::shared_ptr<std::atomic_int> m_workerCount = std::make_shared<std::atomic_int>(0);
 	};
 
 	class ConfigDatabaseViewerDialog final : public QDialog
@@ -6551,11 +6682,18 @@ namespace
 			connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
 			connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() { UpdateDetailText(); });
 
-			Reload();
+			// 先显示界面，配置加载延后到 show 之后：settings(可达9000+行)走后台查询+UI分块填充+进度条，不卡死。
+			QMetaObject::invokeMethod(this, [this]() { Reload(); }, Qt::QueuedConnection);
 		}
 
 		~ConfigDatabaseViewerDialog() override
 		{
+			// 后台查询线程仍在跑时：置销毁标记让其尽快收尾、等计数归零，再拆数据库连接。
+			m_destroyed->store(true);
+			while (m_workerCount->load() > 0)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
 			if (QSqlDatabase::contains(m_connectionName))
 			{
 				{
@@ -6870,6 +7008,10 @@ namespace
 
 		void Reload()
 		{
+			if (m_loading)
+			{
+				return;  // 后台加载进行中，避免重入
+			}
 			QString error;
 			if (!OpenDatabase(&error))
 			{
@@ -6887,72 +7029,182 @@ namespace
 					m_categoryCombo->setEnabled(false);
 				}
 				LoadMeta();
-			}
-			else
-			{
-				if (m_categoryCombo != nullptr)
-				{
-					m_categoryCombo->setEnabled(true);
-				}
-				LoadSettings();
-			}
-			ApplyFilter();
-			UpdateDetailText();
-		}
-
-		void LoadSettings()
-		{
-			SetHeaders({ "分类", "控制单元/对象", "功能参数", "参数分组", "参数名", "值", "类型", "敏感", "加密", "更新时间" });
-			QSqlDatabase db = QSqlDatabase::database(m_connectionName);
-			QSqlQuery query(db);
-			query.prepare(
-				"SELECT scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at "
-				"FROM settings "
-				"ORDER BY CASE scope_type "
-				"WHEN 'global' THEN 0 WHEN 'robot' THEN 1 WHEN 'workpiece_template' THEN 2 "
-				"WHEN 'account' THEN 3 WHEN 'result' THEN 4 ELSE 9 END, "
-				"scope_id COLLATE NOCASE, module COLLATE NOCASE, key_name COLLATE NOCASE");
-			if (!query.exec())
-			{
-				const QString error = "读取参数键值失败：" + query.lastError().text();
-				AddRow({ error, "", "", "", "", "", "", "", "" }, error);
-				m_statusLabel->setText(error);
+				ApplyFilter();
+				UpdateDetailText();
 				return;
 			}
-
-			int rowCount = 0;
-			while (query.next())
+			if (m_categoryCombo != nullptr)
 			{
-				const QString scopeType = query.value(0).toString();
-				const QString scopeId = query.value(1).toString();
-				const QString module = query.value(2).toString();
-				const QString keyName = query.value(3).toString();
-				const QString category = DisplaySettingCategory(scopeType, module);
-				const QString objectName = DisplaySettingObject(scopeType, scopeId, module);
-				const QString functionName = DisplayFunctionalModule(scopeType, module);
-				const QString groupName = DisplayParameterGroup(scopeType, module);
-				const QString displayKey = CleanDisplayToken(keyName);
-				const bool sensitive = query.value(6).toInt() != 0;
-				const bool encrypted = query.value(7).toInt() != 0;
-				const QString updatedAt = query.value(8).toString();
-				const QString value = encrypted ? QStringLiteral("<已加密>") : query.value(4).toString();
-				const QString valueType = query.value(5).toString();
-				const QString detail = QString(
-					"分类：%1\n控制单元/对象：%2\n功能参数：%3\n参数分组：%4\n参数名：%5\n\n"
-					"原始作用域：%6\n原始对象：%7\n原始模块：%8\n原始键名：%9\n类型：%10\n敏感：%11\n加密：%12\n更新时间：%13\n\n值：\n%14")
-					.arg(category, objectName, functionName, groupName, displayKey,
-						scopeType, scopeId, module, keyName, valueType,
-						QString(sensitive ? "是" : "否"), QString(encrypted ? "是" : "否"), updatedAt, value);
-				AddRow({ category, objectName, functionName, groupName, displayKey, PreviewText(value), valueType,
-					sensitive ? "是" : "否", encrypted ? "是" : "否", updatedAt }, detail);
-				++rowCount;
+				m_categoryCombo->setEnabled(true);
 			}
-			FinishTable(QString("参数键值：%1 条。").arg(rowCount));
+			// settings 表可达 9000+ 行：后台线程查询/提取，UI 分块填充 + 进度条；完成后在回调里 ApplyFilter/UpdateDetailText。
+			LoadSettingsAsync();
 		}
 
-		void LoadTextFiles()
+		struct ConfigRowData
 		{
-			LoadSettings();
+			QStringList cells;
+			QString detail;
+		};
+
+		void EnsureProgress()
+		{
+			if (m_pProgress == nullptr)
+			{
+				m_pProgress = new QProgressDialog(this);
+				m_pProgress->setWindowTitle("加载配置");
+				m_pProgress->setWindowModality(Qt::WindowModal);
+				m_pProgress->setCancelButton(nullptr);  // 加载有界、不提供取消
+				m_pProgress->setRange(0, 100);
+				m_pProgress->setMinimumDuration(0);
+				m_pProgress->setAutoClose(false);
+				m_pProgress->setAutoReset(false);
+			}
+		}
+
+		// settings 表可达 9000+ 行：后台线程(独立只读连接)查询并构造行数据，回 UI 线程分块填充表格 + 进度条。
+		void LoadSettingsAsync()
+		{
+			SetHeaders({ "分类", "控制单元/对象", "功能参数", "参数分组", "参数名", "值", "类型", "敏感", "加密", "更新时间" });
+			m_loading = true;
+			EnsureProgress();
+			m_pProgress->setLabelText("正在后台读取配置参数…");
+			m_pProgress->setValue(0);
+			m_pProgress->show();
+
+			// QSqlDatabase 有线程亲和性：后台线程用独立连接名，不复用 UI 线程的 m_connectionName。
+			const QString dbPath = ConfigDatabase::DatabasePath();
+			const QString workerConn = m_connectionName + "_worker";
+			auto destroyed = m_destroyed;
+			auto workerCount = m_workerCount;
+			workerCount->fetch_add(1);
+			std::thread([this, dbPath, workerConn, destroyed, workerCount]()
+				{
+					QVector<ConfigRowData> rows;
+					QString err;
+					{
+						QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", workerConn);
+						db.setDatabaseName(dbPath);
+						db.setConnectOptions("QSQLITE_OPEN_READONLY");
+						if (db.open())
+						{
+							QSqlQuery query(db);
+							query.prepare(
+								"SELECT scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at "
+								"FROM settings "
+								"ORDER BY CASE scope_type "
+								"WHEN 'global' THEN 0 WHEN 'robot' THEN 1 WHEN 'workpiece_template' THEN 2 "
+								"WHEN 'account' THEN 3 WHEN 'result' THEN 4 ELSE 9 END, "
+								"scope_id COLLATE NOCASE, module COLLATE NOCASE, key_name COLLATE NOCASE");
+							if (query.exec())
+							{
+								rows.reserve(4096);
+								while (query.next())
+								{
+									if (destroyed->load())
+									{
+										break;
+									}
+									const QString scopeType = query.value(0).toString();
+									const QString scopeId = query.value(1).toString();
+									const QString module = query.value(2).toString();
+									const QString keyName = query.value(3).toString();
+									const QString category = DisplaySettingCategory(scopeType, module);
+									const QString objectName = DisplaySettingObject(scopeType, scopeId, module);
+									const QString functionName = DisplayFunctionalModule(scopeType, module);
+									const QString groupName = DisplayParameterGroup(scopeType, module);
+									const QString displayKey = CleanDisplayToken(keyName);
+									const bool sensitive = query.value(6).toInt() != 0;
+									const bool encrypted = query.value(7).toInt() != 0;
+									const QString updatedAt = query.value(8).toString();
+									const QString value = encrypted ? QStringLiteral("<已加密>") : query.value(4).toString();
+									const QString valueType = query.value(5).toString();
+									const QString detail = QString(
+										"分类：%1\n控制单元/对象：%2\n功能参数：%3\n参数分组：%4\n参数名：%5\n\n"
+										"原始作用域：%6\n原始对象：%7\n原始模块：%8\n原始键名：%9\n类型：%10\n敏感：%11\n加密：%12\n更新时间：%13\n\n值：\n%14")
+										.arg(category, objectName, functionName, groupName, displayKey,
+											scopeType, scopeId, module, keyName, valueType,
+											QString(sensitive ? "是" : "否"), QString(encrypted ? "是" : "否"), updatedAt, value);
+									ConfigRowData rd;
+									rd.cells = QStringList{ category, objectName, functionName, groupName, displayKey,
+										PreviewText(value), valueType, sensitive ? "是" : "否", encrypted ? "是" : "否", updatedAt };
+									rd.detail = detail;
+									rows.push_back(rd);
+								}
+							}
+							else
+							{
+								err = query.lastError().text();
+							}
+							db.close();
+						}
+						else
+						{
+							err = db.lastError().text();
+						}
+					}
+					QSqlDatabase::removeDatabase(workerConn);
+					if (!destroyed->load())
+					{
+						QMetaObject::invokeMethod(this, [this, rows, err]()
+							{
+								OnSettingsRowsLoaded(rows, err);
+							}, Qt::QueuedConnection);
+					}
+					workerCount->fetch_sub(1);
+				}).detach();
+		}
+
+		void OnSettingsRowsLoaded(const QVector<ConfigRowData>& rows, const QString& error)
+		{
+			if (!error.isEmpty())
+			{
+				m_loading = false;
+				if (m_pProgress != nullptr)
+				{
+					m_pProgress->hide();
+				}
+				AddRow({ "读取参数键值失败：" + error, "", "", "", "", "", "", "", "", "" }, error);
+				m_statusLabel->setText("读取参数键值失败：" + error);
+				return;
+			}
+			// O(N) 填充：关排序/更新 + 预分配行数 + 按行索引 setItem（不用 insertRow，避免逐行重排的 O(N²)），分块刷进度。
+			const int total = rows.size();
+			m_table->setSortingEnabled(false);
+			m_table->setUpdatesEnabled(false);
+			m_table->setRowCount(total);
+			for (int row = 0; row < total; ++row)
+			{
+				const ConfigRowData& rd = rows.at(row);
+				for (int column = 0; column < rd.cells.size(); ++column)
+				{
+					QTableWidgetItem* item = new QTableWidgetItem(rd.cells.at(column));
+					item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+					if (column == 0)
+					{
+						item->setData(Qt::UserRole, rd.detail);
+					}
+					m_table->setItem(row, column, item);
+				}
+				if ((row & 0x3FF) == 0)
+				{
+					if (m_pProgress != nullptr)
+					{
+						m_pProgress->setValue(static_cast<int>(qint64(row) * 100 / qMax(1, total)));
+					}
+					QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+				}
+			}
+			m_table->setUpdatesEnabled(true);
+			if (m_pProgress != nullptr)
+			{
+				m_pProgress->setValue(100);
+				m_pProgress->hide();
+			}
+			m_loading = false;
+			FinishTable(QString("参数键值：%1 条。").arg(total));
+			ApplyFilter();
+			UpdateDetailText();
 		}
 
 		void LoadMeta()
@@ -7111,6 +7363,11 @@ namespace
 		QPlainTextEdit* m_detailText = nullptr;
 		QLabel* m_statusLabel = nullptr;
 		QLabel* m_pathLabel = nullptr;
+		// 后台异步加载 settings(9000+行) + 真实进度条；析构等 worker 归零守卫，杜绝悬垂 this/连接。
+		QProgressDialog* m_pProgress = nullptr;
+		bool m_loading = false;
+		std::shared_ptr<std::atomic_bool> m_destroyed = std::make_shared<std::atomic_bool>(false);
+		std::shared_ptr<std::atomic_int> m_workerCount = std::make_shared<std::atomic_int>(0);
 	};
 }
 
@@ -8965,12 +9222,9 @@ void QtWidgetsApplication4::RunFunctionTestDashboardTool(const QString& actionId
 	}
 	if (m_pFunctionTestPage == nullptr)
 	{
-		DelayedLoadingGuard loading(this, "正在准备机器人功能测试", 1000);
 		m_pFunctionTestPage = new FunctionTestDialog(m_pContralUnit, currentUnitIndex, ScanCameraCacheForUnit(currentUnitIndex), targetStack);
-		loading.Pulse();
 		m_nFunctionTestPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pFunctionTestPage, targetStack);
-		loading.Pulse();
 	}
 	if (m_pFunctionTestPage != nullptr && !m_pFunctionTestPage->RunDashboardTool(actionId))
 	{
@@ -9892,10 +10146,7 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 	if (m_pManagementStack == nullptr)
 	{
 		CloseGrooveCameraPreviewWindow();
-		DelayedLoadingGuard loading(this, "正在打开账号管理", 1000);
 		AccountManagementDialog dialog(this);
-		loading.Pulse();
-		loading.Finish();
 		dialog.exec();
 		return;
 	}
@@ -9906,13 +10157,9 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开账号管理", 1000);
 	m_pAccountManagementPage = new AccountManagementDialog(m_pManagementStack);
-	loading.Pulse();
 	PrepareEmbeddedPage(m_pAccountManagementPage, m_pManagementStack);
-	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pAccountManagementPage);
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenControlUnitManagementDialog()
@@ -9965,14 +10212,11 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 	auto openCameraBasicParam = [this](const QString& robotName, const QString& cameraSection) -> bool
 		{
 			CloseGrooveCameraPreviewWindow();
-			DelayedLoadingGuard loading(this, "正在打开相机基础参数", 1000);
 			CameraBasicParamDialog dialog(
 				robotName,
 				cameraSection,
 				[this]() { RefreshRobotOperationAvailability(); },
 				this);
-			loading.Pulse();
-			loading.Finish();
 			dialog.exec();
 			return dialog.SavedThisSession();
 		};
@@ -9994,7 +10238,6 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 				};
 
 			CloseGrooveCameraPreviewWindow();
-			DelayedLoadingGuard loading(this, "正在打开手眼标定", 1000);
 			HandEyeCalibrationDialog dialog(
 				m_pContralUnit,
 				robotName,
@@ -10003,8 +10246,6 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 				stopCamera,
 				unitIndex >= 0 ? ScanCameraCacheForUnit(unitIndex) : nullptr,
 				this);
-			loading.Pulse();
-			loading.Finish();
 			dialog.exec();
 			if (!dialog.MatrixComputedThisSession())
 			{
@@ -10024,10 +10265,7 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 	if (m_pManagementStack == nullptr)
 	{
 		CloseGrooveCameraPreviewWindow();
-		DelayedLoadingGuard loading(this, "正在打开控制单元管理", 1000);
 		ControlUnitManagementDialog dialog(reloadControlUnits, openCameraBasicParam, openHandEyeCalibration, this);
-		loading.Pulse();
-		loading.Finish();
 		dialog.exec();
 		return;
 	}
@@ -10038,13 +10276,9 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开控制单元管理", 1000);
 	m_pControlUnitManagementPage = new ControlUnitManagementDialog(reloadControlUnits, openCameraBasicParam, openHandEyeCalibration, m_pManagementStack);
-	loading.Pulse();
 	PrepareEmbeddedPage(m_pControlUnitManagementPage, m_pManagementStack);
-	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pControlUnitManagementPage);
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenFtpJobManagementDialog()
@@ -10060,10 +10294,7 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 	if (m_pManagementStack == nullptr)
 	{
 		CloseGrooveCameraPreviewWindow();
-		DelayedLoadingGuard loading(this, "正在打开 FTP Job 文件管理", 1000);
 		FtpJobManagementDialog dialog(m_pContralUnit, currentUnitIndex, this);
-		loading.Pulse();
-		loading.Finish();
 		dialog.exec();
 		return;
 	}
@@ -10081,14 +10312,10 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开 FTP Job 文件管理", 1000);
 	m_pFtpJobManagementPage = new FtpJobManagementDialog(m_pContralUnit, currentUnitIndex, m_pManagementStack);
 	m_nFtpJobManagementPageUnitIndex = currentUnitIndex;
-	loading.Pulse();
 	PrepareEmbeddedPage(m_pFtpJobManagementPage, m_pManagementStack);
-	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pFtpJobManagementPage);
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
@@ -10112,13 +10339,9 @@ void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开精测点云处理", 1000);
 	m_pPrecisePointCloudProcessingPage = new LaserWeldFilterDialog(m_pManagementStack);
-	loading.Pulse();
 	PrepareEmbeddedPage(m_pPrecisePointCloudProcessingPage, m_pManagementStack);
-	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pPrecisePointCloudProcessingPage);
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenModelAlignmentPage()
@@ -10142,13 +10365,9 @@ void QtWidgetsApplication4::OpenModelAlignmentPage()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开模型配准", 1000);
 	m_pModelAlignmentPage = new ModelAlignmentDialog(m_pManagementStack);
-	loading.Pulse();
 	PrepareEmbeddedPage(m_pModelAlignmentPage, m_pManagementStack);
-	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pModelAlignmentPage);
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenWorkpieceMeshPage()
@@ -10172,13 +10391,9 @@ void QtWidgetsApplication4::OpenWorkpieceMeshPage()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开工件模型", 1000);
 	m_pWorkpieceMeshPage = new WorkpieceMeshViewerDialog(m_pManagementStack);
-	loading.Pulse();
 	PrepareEmbeddedPage(m_pWorkpieceMeshPage, m_pManagementStack);
-	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pWorkpieceMeshPage);
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenVirtualWeldTestPage()
@@ -10223,14 +10438,10 @@ void QtWidgetsApplication4::OpenVirtualWeldTestPage()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开虚拟焊道测试", 1000);
 	m_pVirtualWeldTestPage = new VirtualWeldTestDialog(m_pContralUnit, currentUnitIndex, m_pManagementStack);
 	m_nVirtualWeldTestPageUnitIndex = currentUnitIndex;
-	loading.Pulse();
 	PrepareEmbeddedPage(m_pVirtualWeldTestPage, m_pManagementStack);
-	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pVirtualWeldTestPage);
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenConfigDatabaseViewerDialog()
@@ -10245,10 +10456,7 @@ void QtWidgetsApplication4::OpenConfigDatabaseViewerDialog()
 	if (m_pManagementStack == nullptr)
 	{
 		CloseGrooveCameraPreviewWindow();
-		DelayedLoadingGuard loading(this, "正在打开配置数据库查看", 1000);
 		ConfigDatabaseViewerDialog dialog(this);
-		loading.Pulse();
-		loading.Finish();
 		dialog.exec();
 		return;
 	}
@@ -10259,13 +10467,9 @@ void QtWidgetsApplication4::OpenConfigDatabaseViewerDialog()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开配置数据库查看", 1000);
 	m_pConfigDatabaseViewerPage = new ConfigDatabaseViewerDialog(m_pManagementStack);
-	loading.Pulse();
 	PrepareEmbeddedPage(m_pConfigDatabaseViewerPage, m_pManagementStack);
-	loading.Pulse();
 	ShowManagementEmbeddedPage(m_pConfigDatabaseViewerPage);
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::PrepareEmbeddedPage(QWidget* page)
@@ -13160,12 +13364,9 @@ void QtWidgetsApplication4::OpenWeldProcessDialog()
 	}
 	if (m_pWeldProcessPage == nullptr)
 	{
-		DelayedLoadingGuard loading(this, "正在打开工艺参数", 1000);
 		m_pWeldProcessPage = new WeldProcessDialog(*currentUnit, m_pContralUnit, targetStack);
-		loading.Pulse();
 		m_nWeldProcessPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pWeldProcessPage, targetStack);
-		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pWeldProcessPage);
 }
@@ -13186,12 +13387,9 @@ void QtWidgetsApplication4::OpenFunctionTestDialog()
 	}
 	if (m_pFunctionTestPage == nullptr)
 	{
-		DelayedLoadingGuard loading(this, "正在打开功能测试", 1000);
 		m_pFunctionTestPage = new FunctionTestDialog(m_pContralUnit, currentUnitIndex, ScanCameraCacheForUnit(currentUnitIndex), targetStack);
-		loading.Pulse();
 		m_nFunctionTestPageUnitIndex = currentUnitIndex;
 		PrepareEmbeddedPage(m_pFunctionTestPage, targetStack);
-		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pFunctionTestPage);
 }
@@ -13261,7 +13459,6 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开先测后焊", 1000);
 	MeasureThenWeldDialog* page = new MeasureThenWeldDialog(
 		m_pContralUnit,
 		currentUnitIndex,
@@ -13269,7 +13466,6 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		stopCamera,
 		cameraCacheForUnit,
 		this);
-	loading.Pulse();
 	page->setWindowModality(Qt::NonModal);
 	m_measureThenWeldPages.insert(currentUnitIndex, page);
 	m_pMeasureThenWeldPage = page;
@@ -13296,11 +13492,9 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 			}
 	});
 	ApplyDebugLogVisibility(page);
-	loading.Pulse();
 	page->show();
 	page->raise();
 	page->activateWindow();
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
@@ -13313,15 +13507,12 @@ void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
 	if (m_pPreciseMeasureEditPage == nullptr)
 	{
-		DelayedLoadingGuard loading(this, "正在打开测量焊接参数", 1000);
 		m_pPreciseMeasureEditPage = new PreciseMeasureEditDialog(
 			m_pContralUnit,
 			targetStack,
 			false,
 			[this]() { StartGrooveCameraPreview(); });
-		loading.Pulse();
 		PrepareEmbeddedPage(m_pPreciseMeasureEditPage, targetStack);
-		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pPreciseMeasureEditPage);
 }
@@ -13329,19 +13520,16 @@ void QtWidgetsApplication4::OpenPreciseMeasureEditDialog()
 void QtWidgetsApplication4::OpenPositionTeachDialog()
 {
 	PageOpenTrace trace("扫描位置示教");
-	DelayedLoadingGuard loading(this, "正在打开扫描位置示教", 1000);
 	PreciseMeasureEditDialog* dialog = new PreciseMeasureEditDialog(
 		m_pContralUnit,
 		this,
 		true,
 		[this]() { StartGrooveCameraPreview(); });
-	loading.Pulse();
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
 	ApplyDebugLogVisibility(dialog);
 	dialog->show();
 	dialog->raise();
 	dialog->activateWindow();
-	loading.Finish();
 }
 
 void QtWidgetsApplication4::OpenWeldSeamCompDialog()
@@ -13354,11 +13542,8 @@ void QtWidgetsApplication4::OpenWeldSeamCompDialog()
 	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
 	if (m_pWeldSeamCompPage == nullptr)
 	{
-		DelayedLoadingGuard loading(this, "正在打开焊道补偿", 1000);
 		m_pWeldSeamCompPage = new WeldSeamCompDialog(m_pContralUnit, targetStack);
-		loading.Pulse();
 		PrepareEmbeddedPage(m_pWeldSeamCompPage, targetStack);
-		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pWeldSeamCompPage);
 }
@@ -13410,7 +13595,6 @@ void QtWidgetsApplication4::OpenCameraParamDialog()
 	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
 	if (m_pCameraParamPage == nullptr)
 	{
-		DelayedLoadingGuard loading(this, "正在打开相机参数", 1000);
 		m_pCameraParamPage = new CameraParamDialog(
 			m_pContralUnit,
 			robotName,
@@ -13419,10 +13603,8 @@ void QtWidgetsApplication4::OpenCameraParamDialog()
 			ScanCameraCacheForUnit(currentUnitIndex),
 			[this]() { RefreshRobotOperationAvailability(); },
 			targetStack);
-		loading.Pulse();
 		m_sCameraParamPageRobotName = robotName;
 		PrepareEmbeddedPage(m_pCameraParamPage, targetStack);
-		loading.Pulse();
 	}
 	ShowCurrentEmbeddedPage(m_pCameraParamPage);
 }
@@ -14063,9 +14245,7 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 		return;
 	}
 
-	DelayedLoadingGuard loading(this, "正在打开点动控制", 1000);
 	RobotJogDialog* page = new RobotJogDialog(pRobotDriver, this);
-	loading.Pulse();
 	page->setWindowModality(Qt::NonModal);
 	m_robotJogPages.insert(currentUnitIndex, page);
 	m_pRobotJogPage = page;
@@ -14084,9 +14264,7 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 			}
 	});
 	ApplyDebugLogVisibility(page);
-	loading.Pulse();
 	page->show();
 	page->raise();
 	page->activateWindow();
-	loading.Finish();
 }

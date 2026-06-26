@@ -10,24 +10,6 @@ class QApplication;
 class QScrollArea;
 class QWidget;
 
-class DelayedLoadingGuardPrivate;
-
-// 打开子界面或读取配置时使用的延迟加载提示：超过 delayMs 还没结束才显示，
-// Finish 或析构后自动关闭，避免短操作闪一下加载框。
-class DelayedLoadingGuard
-{
-public:
-    explicit DelayedLoadingGuard(QWidget* owner, const QString& text, int delayMs = 1000);
-    ~DelayedLoadingGuard();
-
-    void SetText(const QString& text);
-    void Pulse();
-    void Finish();
-
-private:
-    std::unique_ptr<DelayedLoadingGuardPrivate> d;
-};
-
 // 统一所有顶层窗口的标题栏：应用图标、Windows 深色标题栏、标题栏背景色，
 // 并默认打开最小化/最大化/关闭按钮，支持各页面独立放大缩小。
 // 同时会按当前屏幕可用区域（已扣除任务栏）自动限制窗口尺寸。

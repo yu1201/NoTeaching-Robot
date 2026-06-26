@@ -1,9 +1,18 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-06-25`
+- 人工整理日期：`2026-06-26`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-06-26
+
+- 发布 v2026.06.26.1817：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过，生成 `dist/installer/NoTeaching-Robot-Setup-v2026.06.26.1817.exe`。本次发布合并今日(跨多对话分支)未提交批次：点云预览/焊道补偿界面异步化+进度条、点云解析器重写提速、SDK 库内降采样开关、删除 DelayedLoadingGuard 守卫机制。署名 yu1201；FANUC `SDK/FANUC/laser_macros/`(明图宏去品牌成 AIH_，另一条线)与软著文档/Job 散落产物未纳入本次提交。
+- 点云预览(`PointCloudViewerDialog`/`PointCloud3DView`)与焊道补偿预览(`WeldSeamCompDialog`)界面异步化(治 UI 卡死)：原先打开/切目录时在 UI 线程同步读上百万点点云、重算基准焊道+补偿，界面长时间「未响应」。改为先显示界面、`detached` 后台线程读盘解析+计算、按字节/分阶段进度条且可取消；补偿预览把「重算基准焊道→读焊道→`ComputeCompPreviewStages`」整段移后台、抽 `ApplyComputedStages` 与实时编辑预览共用；两者加 `m_destroyed`/`m_workerCount` 生命周期守卫(析构置位并等 worker 归零)。改动 `QtWidgetsApplication4.cpp`、`WeldSeamCompDialog.h/.cpp`、`PointCloud3DView.h/.cpp`、`MeasureThenWeldDialog.cpp`。`Debug`+`Release` 0 错误。
+- 点云文件解析重写提速 5~10x：整文件一次性读入内存 + 手写字节分词 + `std::from_chars`/`strtod`(locale 无关、零拷贝、严格)替代逐行 `QTextStream`+正则；带进度回调(每 16384 行回报+可取消)，可在后台线程调用。`PointCloud3DView.cpp`。
+- 新增 SDK「库内降采样」界面开关(is_sample/sample_size/above_z)：20260624 版库自带的 ini 采样找平面参数(采样开关/体素大小/抬升值)此前没接进界面(生成 runtime.ini 只「缺则补 false」、「SDK 算法内部参数」组独漏这三个)。按既有模式在 `LaserWeldFilterDialog` 加 3 个控件、随 `m_pSdkInnerGroup` 按模式整体启停、读写 SDK config ini，不碰 SDK 源码/模板。开启「库内降采样」可大幅降低 pcl_kdtree 压力、提速并显著减少崩溃；默认关闭(与厂商模板一致)，需现场实测精度无回退。改动 `LaserWeldFilterDialog.h/.cpp`。`Release x64` 0 错误。
+- 移除 `DelayedLoadingGuard` 延时加载守卫、统一「先开界面+后台异步」：清理 24 处调用点(`QtWidgetsApplication4.cpp`、`CameraParamDialog.cpp`、`HandEyeCalibrationDialog.cpp`、`PreciseMeasureEditDialog.cpp` 等)与 `WindowStyleHelper.h/.cpp` 中该类定义(约 -225 行)；配置库查看改后台只读连接查询+UI 分块填充(填充 O(N²)→O(N))；先测后焊 `LoadRobotList`、工艺组合框数据延后一拍加载，主入口秒开。`Debug`+`Release` 0 错误。
+- 现场诊断(本批，多为分析未改代码)：①现场「漏拐点」根因=处理方式是 `CloudFit`(几何/DP 检测)，而方位角补拐点(`azimuthStraightenResidual`/`RefineCornersByCoherentBow`)只在 `sdkfit` 路径生效；实测缺失拐点在末段 KP12→端点 Y≈661/X≈1198 处弓出 3.71mm 被直线化抹平(`WeldPose_2mm` 该段残差被压到 0)。建议切 `sdkfit` 或降残差阈值。②现场「程序运行中无法强制关闭、疑似库崩溃」用现场日志定性:点云 SDK 每轮正常完成(~42s/输出 1342 点)、非库崩溃；真因是 STEP 连续焊接轨迹启动后中途停在「暂停(1)」(无报警)→`CheckRobotDone=-1001` 失败→后续「等待程序停止」分钟级超时期间 `m_bRunning=true` 拦住关窗(MOVL 直线运动同轮全部成功，只连续运动暂停)。③进一步确认现场「卡死」可由 SDK 库内去噪 `is_remove_noise=true` 在现场点云上死循环触发(本机样例云上同输入三次输出逐字节一致/确定，仅 ~40s 不卡)——现场临时缓解=关「库内去噪」；并行排查另坐实一处真实卡死隐患(补偿预览 worker 5 分钟 `waitForFinished`+无 JobObject+析构自旋+closeEvent 漏检，已被本批补偿预览异步化改造部分缓解)。`is_remove_noise` 默认值与卡死硬化(超时缩短/JobObject)按用户要求暂不改。
 
 ## 2026-06-25
 

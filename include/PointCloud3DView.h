@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 namespace pcview
 {
@@ -95,10 +96,19 @@ namespace pcview
         QVector<PointCloudVec3> points;
         QString error;
         int skippedLineCount = 0;
+        bool canceled = false;
     };
 
+    // 进度回调：参数为 0..100 百分比，返回 false 表示请求取消（后台加载用）。可为空。
+    using PointCloudLoadProgress = std::function<bool(int)>;
+
     // 从空格/逗号分隔的 x/y/z 文本文件读取点云（带可选表头识别）。定义在 PointCloud3DView.cpp。
-    LoadedPointCloudFile LoadPointCloudFile3D(const QString& filePath);
+    // 整文件一次读入 + 手写字节分词 + strtod，避免逐行 QTextStream/正则；可在后台线程调用。
+    LoadedPointCloudFile LoadPointCloudFile3D(const QString& filePath, const PointCloudLoadProgress& progress);
+    inline LoadedPointCloudFile LoadPointCloudFile3D(const QString& filePath)
+    {
+        return LoadPointCloudFile3D(filePath, PointCloudLoadProgress());
+    }
 
     class PointCloud3DView final : public QWidget
     {

@@ -1447,13 +1447,11 @@ void PreciseMeasureEditDialog::TeachEndSafePulse()
 
 void PreciseMeasureEditDialog::OpenPositionTeachDialog()
 {
-    DelayedLoadingGuard loading(this, "正在打开扫描位置示教", 1000);
     PreciseMeasureEditDialog* dialog = new PreciseMeasureEditDialog(
         m_pContralUnit,
         this,
         true,
         m_openCameraPreviewCallback);
-    loading.Pulse();
     dialog->setAttribute(Qt::WA_DeleteOnClose);
 
     if (m_pRobotCombo != nullptr && dialog->m_pRobotCombo != nullptr)
@@ -1468,7 +1466,6 @@ void PreciseMeasureEditDialog::OpenPositionTeachDialog()
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
-    loading.Finish();
 }
 
 void PreciseMeasureEditDialog::ReloadCurrentParam()
