@@ -405,7 +405,8 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
             }
             AppendLog(QString("当前焊道补偿组已切换为：%1").arg(m_pSeamCompGroupCombo != nullptr ? m_pSeamCompGroupCombo->currentText() : QString()));
         });
-    LoadRobotList();
+    // 先显示界面，组合框数据(读配置库工艺/参数)延后一拍加载，主入口秒开、不在构造里阻塞。
+    QTimer::singleShot(0, this, [this]() { LoadRobotList(); });
 }
 
 bool MeasureThenWeldDialog::IsRunning() const

@@ -578,6 +578,22 @@ void LaserWeldFilterDialog::BuildUi()
     m_pCloudClusterCheck = new QCheckBox("启用聚类");
     m_pCloudRemoveNoiseCheck = new QCheckBox("库内去噪");
     m_pCloudRemoveNoiseCheck->setToolTip("SDK 内置去噪（is_remove_noise）：提取轨迹前先对点云做一遍去噪。20260617 版新增，默认开启。");
+    m_pCloudSampleCheck = new QCheckBox("库内降采样找平面");
+    m_pCloudSampleCheck->setToolTip("SDK 内置降采样（is_sample）：找平面前先对完整点云做体素降采样。\n"
+        "波纹板\"先测后焊\"约 244 万点时，DLL 用 pcl_kdtree 找平面是主要耗时(120~200s)与崩溃点(Z截断退化)；\n"
+        "开启后大幅降低 kdtree 压力——提速并显著减少崩溃。20260624 版新增，默认关闭。\n"
+        "注意：只作用于\"找平面\"阶段，不改变最终焊道点的输出分辨率；现场启用后请确认焊缝精度无回退。\n"
+        "仅 SDK 两种点云算法模式生效。");
+    m_pCloudSampleSizeSpin = new QDoubleSpinBox();
+    m_pCloudSampleSizeSpin->setRange(0.1, 100.0);
+    m_pCloudSampleSizeSpin->setDecimals(2);
+    m_pCloudSampleSizeSpin->setSingleStep(0.5);
+    m_pCloudSampleSizeSpin->setToolTip("降采样体素大小（sample_size）：越大点越稀、找平面越快越粗。厂商默认 5。仅\"库内降采样\"开启时生效。");
+    m_pCloudAboveZSpin = new QDoubleSpinBox();
+    m_pCloudAboveZSpin->setRange(-9999.0, 9999.0);
+    m_pCloudAboveZSpin->setDecimals(3);
+    m_pCloudAboveZSpin->setSingleStep(0.1);
+    m_pCloudAboveZSpin->setToolTip("抬高值（above_z）：SDK 20260624 版新增的平面抬升量，厂商默认 0.5。");
     m_pCloudDiscreteValueSpin = new QSpinBox();
     m_pCloudDiscreteValueSpin->setRange(0, 9999);
     m_pCloudDilateValueSpin = new QSpinBox();
@@ -623,6 +639,11 @@ void LaserWeldFilterDialog::BuildUi()
     cloudInnerLayout->addWidget(new QLabel("直线最小长度"), 8, 2);
     cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudLineLengthSpin, "mm"), 8, 3);
     cloudInnerLayout->addWidget(m_pCloudRemoveNoiseCheck, 9, 0, 1, 2);
+    cloudInnerLayout->addWidget(m_pCloudSampleCheck, 9, 2, 1, 2);
+    cloudInnerLayout->addWidget(new QLabel("降采样大小"), 10, 0);
+    cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudSampleSizeSpin, "mm"), 10, 1);
+    cloudInnerLayout->addWidget(new QLabel("平面抬高值"), 10, 2);
+    cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudAboveZSpin, "mm"), 10, 3);
     cloudInnerLayout->setColumnStretch(1, 1);
     cloudInnerLayout->setColumnStretch(3, 1);
     cloudInnerLayout->setColumnMinimumWidth(1, 300);
@@ -1427,6 +1448,9 @@ void LaserWeldFilterDialog::LoadExternalAlgorithmConfig()
     m_pCloudClusterToleranceSpin->setValue(ReadPlainIniValue(configPath, "ClusterTolerance", "3.5").toDouble());
     m_pCloudClusterCheck->setChecked(PlainIniBoolValue(ReadPlainIniValue(configPath, "if_Cluster", "false"), false));
     m_pCloudRemoveNoiseCheck->setChecked(PlainIniBoolValue(ReadPlainIniValue(configPath, "is_remove_noise", "true"), true));
+    m_pCloudSampleCheck->setChecked(PlainIniBoolValue(ReadPlainIniValue(configPath, "is_sample", "false"), false));
+    m_pCloudSampleSizeSpin->setValue(ReadPlainIniValue(configPath, "sample_size", "5").toDouble());
+    m_pCloudAboveZSpin->setValue(ReadPlainIniValue(configPath, "above_z", "0.5").toDouble());
     m_pCloudDiscreteValueSpin->setValue(ReadPlainIniIntValue(configPath, "Discrete_Value", 4));
     m_pCloudDilateValueSpin->setValue(ReadPlainIniIntValue(configPath, "Dilate_Value", 13));
     m_pCloudErodeValueSpin->setValue(ReadPlainIniIntValue(configPath, "Erode_Value", 9));
@@ -1458,6 +1482,9 @@ void LaserWeldFilterDialog::SaveExternalAlgorithmConfig(QString* error) const
         { "ClusterTolerance", FormatPlainIniNumberLikeCurrent(configPath, "ClusterTolerance", m_pCloudClusterToleranceSpin->value()) },
         { "if_Cluster", BoolIniText(m_pCloudClusterCheck->isChecked()) },
         { "is_remove_noise", BoolIniText(m_pCloudRemoveNoiseCheck->isChecked()) },
+        { "is_sample", BoolIniText(m_pCloudSampleCheck->isChecked()) },
+        { "sample_size", FormatPlainIniNumberLikeCurrent(configPath, "sample_size", m_pCloudSampleSizeSpin->value()) },
+        { "above_z", FormatPlainIniNumberLikeCurrent(configPath, "above_z", m_pCloudAboveZSpin->value()) },
         { "Discrete_Value", QString::number(m_pCloudDiscreteValueSpin->value()) },
         { "Dilate_Value", QString::number(m_pCloudDilateValueSpin->value()) },
         { "Erode_Value", QString::number(m_pCloudErodeValueSpin->value()) },

@@ -251,14 +251,11 @@ void CameraParamDialog::UpdateCurrentCameraInfo()
 void CameraParamDialog::OpenCameraBasicParamDialog()
 {
     PauseExternalPreview();
-    DelayedLoadingGuard loading(this, "正在打开相机基础参数", 1000);
     CameraBasicParamDialog dialog(
         CurrentRobotName(),
         CurrentCameraSection(),
         m_setupStatusChanged,
         this);
-    loading.Pulse();
-    loading.Finish();
     dialog.exec();
     if (dialog.SavedThisSession())
     {
@@ -270,10 +267,7 @@ void CameraParamDialog::OpenCameraBasicParamDialog()
 void CameraParamDialog::OpenHandEyeDialog()
 {
     PauseExternalPreview();
-    DelayedLoadingGuard loading(this, "正在打开手眼矩阵参数", 1000);
     HandEyeMatrixDialog dialog(m_pContralUnit, CurrentRobotName(), CurrentCameraSection(), this);
-    loading.Pulse();
-    loading.Finish();
     dialog.exec();
     if (dialog.SavedThisSession())
     {
@@ -297,7 +291,6 @@ void CameraParamDialog::OpenHandEyeDialog()
 void CameraParamDialog::OpenHandEyeCalibrationDialog()
 {
     PauseExternalPreview();
-    DelayedLoadingGuard loading(this, "正在打开手眼标定", 1000);
     HandEyeCalibrationDialog dialog(
         m_pContralUnit,
         CurrentRobotName(),
@@ -306,8 +299,6 @@ void CameraParamDialog::OpenHandEyeCalibrationDialog()
         m_stopCamera,
         m_pCameraCache,
         this);
-    loading.Pulse();
-    loading.Finish();
     dialog.exec();
     if (dialog.MatrixComputedThisSession())
     {

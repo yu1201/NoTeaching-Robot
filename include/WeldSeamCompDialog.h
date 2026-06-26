@@ -5,8 +5,11 @@
 
 #include <QDialog>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
+#include <atomic>
+#include <memory>
 #include <vector>
 
 class QButtonGroup;
@@ -23,6 +26,7 @@ class QPushButton;
 class QWidget;
 class QTimer;
 class QSplitter;
+class QProgressDialog;
 
 namespace pcview { class PointCloud3DView; }
 
@@ -30,6 +34,7 @@ class WeldSeamCompDialog : public QDialog
 {
 public:
     explicit WeldSeamCompDialog(ContralUnit* pContralUnit, QWidget* parent = nullptr);
+    ~WeldSeamCompDialog() override;
 
 public:
     enum class CompMode
@@ -128,6 +133,23 @@ private:
     void AutoSelectLatestCompPreviewDirectory();
     void ScheduleCompPreview();
     void RecomputeCompPreview();
+    // 由 stages 构建六阶段图层并刷新 3D 视图/箭头/信息（编辑实时预览与异步载入共用的"显示"部分）。
+    void ApplyComputedStages(const MeasureThenWeldService::CompPreviewStages& stages);
+    // 打开/切换目录时后台载入补偿预览：可选重算基准焊道 → 读焊道数据 → 算补偿，进度条+不阻塞 UI。
+    struct CompPreviewLoadResult
+    {
+        QVector<MeasureThenWeldService::CompPreviewPoint> original;
+        QVector<MeasureThenWeldService::CompPreviewPoint> raw;
+        QVector<MeasureThenWeldService::CompPreviewPoint> baseline;
+        MeasureThenWeldService::CompPreviewStages stages;
+        QStringList logs;
+        bool baselineOk = false;
+        QString baselineError;
+        bool canceled = false;
+    };
+    void OpenCompPreviewDirectoryAsync(const QString& dir, bool forceRebuild);
+    void OnCompPreviewLoaded(const CompPreviewLoadResult& result);
+    void EnsurePreviewProgress();
     void ApplyCompPreviewLayerVisibility();
     MeasureThenWeldService::CompPreviewEditValues CollectCompPreviewEditValues() const;
     MeasureThenWeldService::CompPreviewEditValues CollectSavedPoseCompEdits() const;
@@ -197,6 +219,13 @@ private:
     QPointF m_compPreviewScanEndXY;
     // 防止"载入目录→缺方法文件→自动重算→重新载入"递归。
     bool m_bAutoRebuildingCompPreview = false;
+    // 后台异步载入补偿预览：进度框 + 生命周期守卫（析构置 destroyed 并等待 worker 归零），
+    // 参照 WorkpieceMeshViewerDialog 样板，避免重算+万点计算在 UI 线程同步卡死。
+    QProgressDialog* m_pPreviewProgress = nullptr;
+    bool m_bPreviewLoading = false;
+    QMetaObject::Connection m_previewProgressCancelConn;
+    std::shared_ptr<std::atomic_bool> m_destroyed = std::make_shared<std::atomic_bool>(false);
+    std::shared_ptr<std::atomic_int> m_workerCount = std::make_shared<std::atomic_int>(0);
     // 六阶段图层开关：0=原始数据 1=原始焊道 2=姿态补偿 3=焊道补偿 4=圆弧过渡 5=实际焊道
     QAbstractButton* m_pStageToggles[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
 
