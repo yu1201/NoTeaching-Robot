@@ -33,10 +33,10 @@ struct T_PRECISE_MEASURE_PARAM
     int nParamGroupIndex = 0;
     QString sParamGroupName = "参数组1";
 
-    // 配置库当前测量焊接参数组中的运行速度、扫描速度和相机读取/时间补偿参数。
+    // 配置库当前测量焊接参数组中的运行速度、扫描速度和相机时间补偿参数。
+    // 注：相机读取帧率已迁出测量参数，改由相机参数(CameraParam.ini 的 CameraReadFps)维护。
     double dScanSpeed = 0.0;
     double dRunSpeed = 0.0;
-    double dCameraReadFps = 100.0;
     double dCameraTimeOffsetMs = 0.0;
     double dAcc = 0.0;
     double dDec = 0.0;

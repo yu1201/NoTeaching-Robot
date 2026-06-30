@@ -36,6 +36,7 @@ public:
         QString exposureTime;
         QString gainLevel;
         QString cameraType;
+        QString readFps;   // 相机读取帧率(fps)：驱动取帧轮询(间隔=1000/帧率)；空/无效则按默认 100
     };
 
     // ===== 工程路径 =====

@@ -135,10 +135,11 @@ bool ScanCameraSkjWorker::loadSdk(QString* error)
     return true;
 }
 
-void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort)
+void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, int pollIntervalMs)
 {
     m_serverIP = serverIP.trimmed();
     m_serverPort = serverPort;
+    m_pollIntervalMs = (pollIntervalMs > 0) ? pollIntervalMs : kPollIntervalMs;  // 无效则回退默认
     m_running = true;
     m_loggedFirstFrame = false;
     m_pollCount = 0;
@@ -189,8 +190,8 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort)
         m_pollTimer->setTimerType(Qt::PreciseTimer);
         connect(m_pollTimer, &QTimer::timeout, this, &ScanCameraSkjWorker::pollFrame);
     }
-    m_pollTimer->start(kPollIntervalMs);
-    emitDiagnostic(QString("SKJ SDK 已连接 %1:%2，开始取帧。").arg(m_serverIP).arg(m_serverPort));
+    m_pollTimer->start(m_pollIntervalMs);
+    emitDiagnostic(QString("SKJ SDK 已连接 %1:%2，开始取帧（轮询间隔 %3 ms）。").arg(m_serverIP).arg(m_serverPort).arg(m_pollIntervalMs));
 }
 
 void ScanCameraSkjWorker::pollFrame()
@@ -203,6 +204,13 @@ void ScanCameraSkjWorker::pollFrame()
     ++m_pollCount;
     void* frame = nullptr;
     const int ret = m_getLatestFrame(m_handle, &frame);
+
+    // 逐帧记录 SDK 取帧状态（含 0=取到、-106 无新帧、-107 重复、其它错误），供扫描结束后做
+    // 数据完整性判定（长时间无新帧→终止流程）和写入匹配明细文件。
+    if (m_frameCache != nullptr)
+    {
+        m_frameCache->RecordPollStatus(ret);
+    }
 
     if (ret == kSkjErrNoData || ret == kSkjErrDataDuplicate)
     {

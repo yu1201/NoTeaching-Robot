@@ -48,10 +48,11 @@ constexpr double FANUC_WELD_PATH_SPEED_MM_PER_MIN = 400.0;
 constexpr double DEFAULT_WELD_SAFE_MOVE_SPEED_MM_PER_MIN = 1000.0;
 constexpr double DEFAULT_DRY_RUN_SPEED_MM_PER_MIN = 1000.0;
 constexpr double WELD_SAFE_OFFSET_DISTANCE_MM = 70.0;
-constexpr double DEFAULT_CAMERA_READ_FPS = 100.0;
+constexpr int DEFAULT_CAMERA_READ_FPS = 100;  // 相机参数缺省/无效帧率时的回退值（≈10ms 轮询，与 worker 默认一致）
 constexpr qint64 ROBOT_SAMPLE_INTERVAL_MS = 50;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_WAIT_MS = 500;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_POLL_MS = 10;
+constexpr qint64 CAMERA_NO_FRAME_FAIL_GAP_US = 1000000;  // 扫描期间连续无新帧超过 1s 判数据不完整、终止流程
 constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
 constexpr auto WORKPIECE_CLOUD_FILE_NAME = "PreciseLaserPoint_WorkpieceCloud.txt";
 constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
@@ -6405,7 +6406,6 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     ini.SetSectionName(param.sSectionName);
     ini.ReadString(false, "ScanSpeed", &param.dScanSpeed);
     ini.ReadString(false, "RunSpeed", &param.dRunSpeed);
-    ini.ReadString(false, "CameraReadFps", &param.dCameraReadFps);
     ini.ReadString(false, "CameraTimeOffsetMs", &param.dCameraTimeOffsetMs);
     ini.ReadString(false, "dAcc", &param.dAcc);
     ini.ReadString(false, "dDec", &param.dDec);
@@ -6455,10 +6455,6 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     ini.ReadString(false, "ScanSafeLiftHeightMm", &param.dScanSafeLiftHeightMm);
     ini.ReadString(false, "ScanSafeFlipWarnThresholdDeg", &param.dScanSafeFlipWarnThresholdDeg);
 
-    if (!std::isfinite(param.dCameraReadFps) || param.dCameraReadFps <= 0.0)
-    {
-        param.dCameraReadFps = DEFAULT_CAMERA_READ_FPS;
-    }
     if (!std::isfinite(param.dCameraTimeOffsetMs))
     {
         param.dCameraTimeOffsetMs = 0.0;
@@ -6869,13 +6865,6 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver);
     const double scanCommandSpeed = LinearCommandSpeedForRobot(pRobotDriver, param.dScanSpeed, 1.0);
     const QString scanCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
-    const double configuredCameraReadFps = (std::isfinite(param.dCameraReadFps) && param.dCameraReadFps > 0.0)
-        ? param.dCameraReadFps
-        : DEFAULT_CAMERA_READ_FPS;
-    const qint64 cameraReadIntervalMs = std::max<qint64>(
-        1,
-        static_cast<qint64>(std::llround(1000.0 / configuredCameraReadFps)));
-    const double actualCameraReadFps = 1000.0 / static_cast<double>(cameraReadIntervalMs);
     const qint64 cameraTimeOffsetUs = static_cast<qint64>(std::llround(param.dCameraTimeOffsetMs * 1000.0));
     const MeasureThenWeldRuntimeConfig::ScanTimestampSource scanTimestampSource =
         MeasureThenWeldRuntimeConfig::LoadScanTimestampSource();
@@ -6903,6 +6892,22 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     {
         appendLog(QString("读取手眼矩阵参数失败，已回退默认值：%1 [%2]").arg(calibrationError, cameraSection));
     }
+
+    // 相机读取帧率已迁至相机参数(CameraParam.ini 的 CameraReadFps)；这里读出来仅用于相机时间戳
+    // 跳变告警阈值与日志显示——真正驱动取帧节奏的是相机 worker 的轮询定时器（按 1000/帧率 的间隔轮询）。
+    RobotDataHelper::CameraParamData cameraParamForScan;
+    int cameraReadFpsConfig = DEFAULT_CAMERA_READ_FPS;
+    if (RobotDataHelper::LoadCameraParam(QString::fromStdString(param.sRobotName), cameraSection, cameraParamForScan, nullptr))
+    {
+        bool okFps = false;
+        const int parsedFps = cameraParamForScan.readFps.trimmed().toInt(&okFps);
+        if (okFps && parsedFps > 0)
+        {
+            cameraReadFpsConfig = parsedFps;
+        }
+    }
+    const qint64 cameraReadIntervalMs = std::max<qint64>(1, static_cast<qint64>(std::llround(1000.0 / cameraReadFpsConfig)));
+    const double actualCameraReadFps = 1000.0 / static_cast<double>(cameraReadIntervalMs);
 
     frameCache->Clear();
 
@@ -7249,7 +7254,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
 
     if (appendLog)
     {
-        appendLog(QString("开始扫描运动：相机帧由当前机器人专属缓存读取，配置相机读取帧率=%1 fps（约 %2 ms/帧，用于时间间隔统计），机器人位姿约 %3 ms 采样；扫描匹配时间轴=%4（%5），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %6 ms。点云转换使用 %7 个后台处理线程。配置扫描速度= %8 mm/min，下发速度= %9 %10")
+        appendLog(QString("开始扫描运动：相机帧由当前机器人专属缓存读取，相机读取帧率=%1 Hz（约 %2 ms/帧，来自相机参数 CameraReadFps，用于时间间隔统计），机器人位姿约 %3 ms 采样；扫描匹配时间轴=%4（%5），相机帧timestamp会在首帧处映射到该时间轴，并叠加相机时间补偿 %6 ms。点云转换使用 %7 个后台处理线程。配置扫描速度= %8 mm/min，下发速度= %9 %10")
             .arg(actualCameraReadFps, 0, 'f', 2)
             .arg(cameraReadIntervalMs)
             .arg(ROBOT_SAMPLE_INTERVAL_MS)
@@ -7436,6 +7441,48 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     }
 
     const qint64 tailWaitElapsedMs = tailWaitTriggered ? (SteadyNowMs() - tailWaitStartMs) : 0;
+
+    // 扫描运动+尾部匹配结束这一刻，对相机 SDK 逐帧取帧状态做快照：此后进入点云处理，相机仍在空转，
+    // 必须在此处取，避免处理期的空轮询污染“无新帧间断”统计。除 OK(0) 外的状态稍后逐条写入匹配明细文件。
+    const std::vector<CameraFrameCache::PollStatus> pollStatusLog = frameCache->PollStatusSnapshot();
+    qint64 maxNoFrameGapUs = 0;       // 扫描期间相邻两帧之间最长的“无新帧”间断
+    int okPollCount = 0;              // 实际取到新帧的轮询次数
+    int sdkNoDataPollCount = 0;       // -106 无新帧
+    int sdkDuplicatePollCount = 0;    // -107 重复帧
+    int sdkErrorPollCount = 0;        // 其它取帧错误
+    {
+        qint64 lastFrameReceiveUs = -1;
+        for (const CameraFrameCache::PollStatus& poll : pollStatusLog)
+        {
+            if (poll.ret == 0)
+            {
+                if (lastFrameReceiveUs >= 0)
+                {
+                    maxNoFrameGapUs = std::max(maxNoFrameGapUs, poll.receiveTimestampUs - lastFrameReceiveUs);
+                }
+                lastFrameReceiveUs = poll.receiveTimestampUs;
+                ++okPollCount;
+            }
+            else if (poll.ret == -106)
+            {
+                ++sdkNoDataPollCount;
+            }
+            else if (poll.ret == -107)
+            {
+                ++sdkDuplicatePollCount;
+            }
+            else
+            {
+                ++sdkErrorPollCount;
+            }
+        }
+        // 末帧到扫描结束（快照时刻）的尾部无帧时长：捕获“扫描中途相机/SDK 卡死后再未恢复”。
+        if (lastFrameReceiveUs >= 0 && !pollStatusLog.empty())
+        {
+            maxNoFrameGapUs = std::max(maxNoFrameGapUs, pollStatusLog.back().receiveTimestampUs - lastFrameReceiveUs);
+        }
+    }
+
     const qint64 processingJoinStartMs = SteadyNowMs();
     finishCameraProcessingWorkers();
     const qint64 postMotionProcessingWaitMs = SteadyNowMs() - processingJoinStartMs;
@@ -7516,7 +7563,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     robotLines.push_back("index,x,y,z,rx,ry,rz,bx,by,bz");
     laserLines.push_back("index,x,y,z");
     workpieceCloudLines.push_back("index x y z");
-    matchDebugLines.push_back("index,status,camera_raw_timestamp_us,camera_raw_delta_us,mapped_robot_timestamp_us,prev_robot_index,prev_robot_timestamp_us,next_robot_index,next_robot_timestamp_us,interp_ratio,camera_x,camera_y,camera_z,robot_x,robot_y,robot_z,robot_rx,robot_ry,robot_rz,robot_bx,robot_by,robot_bz,laser_x,laser_y,laser_z,error");
+    matchDebugLines.push_back("index,status,camera_raw_timestamp_us,camera_raw_delta_us,mapped_robot_timestamp_us,prev_robot_index,prev_robot_timestamp_us,next_robot_index,next_robot_timestamp_us,interp_ratio,camera_x,camera_y,camera_z,robot_x,robot_y,robot_z,robot_rx,robot_ry,robot_rz,robot_bx,robot_by,robot_bz,laser_x,laser_y,laser_z,error,sdk_status,sdk_recv_timestamp_us");
 
     // 完整点云逐帧调试导出（独立开关，默认关闭——仅排查相机散点时勾选；与目标点/特征点流程无关）：
     // 每点附 frame_index + 相机原始坐标 + 机器人位姿 + 时间戳，CloudCompare 按 frame_index 着色定位散点帧。
@@ -7676,9 +7723,46 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             fields << "" << "" << "";
         }
         fields << CsvEscape(sample.error);
+        fields << "" << "";  // sdk_status / sdk_recv_timestamp_us：匹配行不涉及 SDK 取帧状态，留空
         matchDebugLines.push_back(fields.join(','));
     }
     const qint64 pointComputeElapsedMs = SteadyNowMs() - pointComputeStartMs;
+
+    // 把扫描期间所有非 OK 的 SDK 取帧状态作为独立明细行追加进同一个匹配明细文件：状态名写入
+    // 专属的 sdk_status 新列（不复用原 status 列），接收时刻写入 sdk_recv_timestamp_us 新列，
+    // 其余原有数据列（含 status）一律留空——“除 0 以外只保存状态和空数据”。
+    int sdkStatusRowIndex = 0;
+    for (const CameraFrameCache::PollStatus& poll : pollStatusLog)
+    {
+        if (poll.ret == 0)
+        {
+            continue;
+        }
+        QString sdkStatusName;
+        if (poll.ret == -106)
+        {
+            sdkStatusName = QStringLiteral("skj_no_data");
+        }
+        else if (poll.ret == -107)
+        {
+            sdkStatusName = QStringLiteral("skj_duplicate");
+        }
+        else
+        {
+            sdkStatusName = QStringLiteral("skj_error(%1)").arg(poll.ret);
+        }
+        QStringList sdkFields;
+        sdkFields.reserve(28);
+        sdkFields << QString("sdk_%1").arg(sdkStatusRowIndex++);  // index
+        for (int emptyCol = 0; emptyCol < 25; ++emptyCol)         // status..error 共 25 个原有列全部留空（含 status 列）
+        {
+            sdkFields << QString();
+        }
+        sdkFields << sdkStatusName;                               // sdk_status（专属新列）
+        sdkFields << QString::number(poll.receiveTimestampUs);    // sdk_recv_timestamp_us（专属新列）
+        matchDebugLines.push_back(sdkFields.join(','));
+    }
+
     const qint64 outputBuildElapsedMs = SteadyNowMs() - outputBuildStartMs;
 
     QString error;
@@ -7827,6 +7911,39 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         appendLog(QString("激光点文件：%1").arg(laserPath));
         appendLog(QString("局部完整点云文件：%1").arg(workpieceCloudPath));
         appendLog(QString("相机-机器人-激光匹配明细文件：%1").arg(matchDebugPath));
+    }
+
+    // 扫描期间 SDK 取帧状态汇总 + 数据完整性门禁：连续无新帧超过阈值（或全程无帧）则判本次扫描数据不完整，
+    // 报错并终止流程（不进入后续特征分析/焊接）。仅在 SKJ 取帧路径有逐帧状态记录时启用，避免误伤其它相机路径。
+    if (!pollStatusLog.empty())
+    {
+        if (appendLog)
+        {
+            appendLog(QString("SDK 取帧状态统计：取到新帧=%1，无新帧(-106)=%2，重复帧(-107)=%3，取帧错误=%4，最长无新帧间断=%5 ms。")
+                .arg(okPollCount)
+                .arg(sdkNoDataPollCount)
+                .arg(sdkDuplicatePollCount)
+                .arg(sdkErrorPollCount)
+                .arg(maxNoFrameGapUs / 1000));
+        }
+        if (okPollCount == 0)
+        {
+            if (appendLog)
+            {
+                appendLog("扫描期间相机全程未取到任何有效帧（SDK 无新帧/取帧失败），本次扫描数据无效，已终止流程。");
+            }
+            return false;
+        }
+        if (maxNoFrameGapUs > CAMERA_NO_FRAME_FAIL_GAP_US)
+        {
+            if (appendLog)
+            {
+                appendLog(QString("扫描期间相机连续 %1 ms 未取到新帧（最大间断，超过 %2 ms 阈值），本次扫描数据不完整，已终止流程。")
+                    .arg(maxNoFrameGapUs / 1000)
+                    .arg(CAMERA_NO_FRAME_FAIL_GAP_US / 1000));
+            }
+            return false;
+        }
     }
 
     RobotCalculation::LowerWeldFilterParams originalFitParams = BuildOriginalTrackFitParams(param);

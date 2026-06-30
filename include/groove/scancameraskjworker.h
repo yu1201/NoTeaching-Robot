@@ -20,7 +20,7 @@ public:
     ~ScanCameraSkjWorker() override;
 
 public slots:
-    void startClient(const QString& serverIP, int serverPort);
+    void startClient(const QString& serverIP, int serverPort, int pollIntervalMs = 10);
     void stopClient();
 
 signals:
@@ -50,6 +50,7 @@ private:
     QTimer* m_pollTimer = nullptr;
     QString m_serverIP;
     int m_serverPort = 0;
+    int m_pollIntervalMs = 10;  // 取帧轮询间隔(ms)，由相机参数 CameraReadFps 换算(1000/帧率)后经 startClient 传入
     bool m_running = false;
     bool m_loggedFirstFrame = false;
 

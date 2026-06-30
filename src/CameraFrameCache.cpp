@@ -30,12 +30,33 @@ void CameraFrameCache::Clear()
 {
     std::lock_guard<std::mutex> locker(m_mutex);
     std::deque<CachedFrame>().swap(m_frames);
+    std::vector<PollStatus>().swap(m_pollStatus);
     m_nextSequence = 0;
 }
 
 void CameraFrameCache::AppendFrame(const udpDataShow& frame)
 {
     StoreFrame(frame);
+}
+
+void CameraFrameCache::RecordPollStatus(int ret)
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    PollStatus status;
+    status.receiveTimestampUs = CameraFrameCacheSteadyNowUs();
+    status.ret = ret;
+    m_pollStatus.push_back(status);
+    if (m_pollStatus.size() > m_maxPollStatus)
+    {
+        // 极端兜底：理论上单次扫描达不到该量级；超限丢弃最旧的一半，避免空闲长跑时内存失控。
+        m_pollStatus.erase(m_pollStatus.begin(), m_pollStatus.begin() + static_cast<std::ptrdiff_t>(m_pollStatus.size() / 2));
+    }
+}
+
+std::vector<CameraFrameCache::PollStatus> CameraFrameCache::PollStatusSnapshot() const
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    return m_pollStatus;
 }
 
 std::uint64_t CameraFrameCache::Mark() const

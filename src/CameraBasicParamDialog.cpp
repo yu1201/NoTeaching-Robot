@@ -300,6 +300,15 @@ CameraBasicParamDialog::CameraBasicParamDialog(
     MarkNumericEdit(m_pCameraTypeEdit);
     cameraLayout->addWidget(m_pCameraTypeEdit, 4, 1);
 
+    cameraLayout->addWidget(new QLabel("相机读取帧率(fps)", this), 4, 2);
+    m_pReadFpsEdit = new QLineEdit(this);
+    m_pReadFpsEdit->setMinimumWidth(150);
+    m_pReadFpsEdit->setAlignment(Qt::AlignRight);
+    m_pReadFpsEdit->setValidator(new QIntValidator(1, 1000, m_pReadFpsEdit));
+    m_pReadFpsEdit->setToolTip("相机每秒取帧次数（驱动取帧轮询，轮询间隔=1000/帧率，默认 100fps≈10ms）。设得超过相机硬件帧率无意义，多余轮询只会拿到重复/无新帧。仅 TCP 独立连接模式生效，UDP 共享接收模式不使用本设置。修改后需重连相机（下次预览/扫描启动）才生效。");
+    MarkNumericEdit(m_pReadFpsEdit);
+    cameraLayout->addWidget(m_pReadFpsEdit, 4, 3);
+
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     buttonLayout->addStretch(1);
     QPushButton* reloadBtn = new QPushButton("重新读取相机参数", this);
@@ -362,6 +371,7 @@ bool CameraBasicParamDialog::LoadCameraParam()
     m_pExposureTimeEdit->setText(param.exposureTime);
     m_pGainLevelEdit->setText(param.gainLevel);
     m_pCameraTypeEdit->setText(param.cameraType);
+    m_pReadFpsEdit->setText(param.readFps);
     m_pCameraSectionLabel->setText(QString("当前机器人：%1    当前分组：%2").arg(m_robotName, param.sectionName));
     AppendLog(QString("已读取相机参数数据：%1 [%2]").arg(RobotDataHelper::CameraParamPath(m_robotName), param.sectionName));
     MarkCleanSnapshot();
@@ -377,6 +387,7 @@ bool CameraBasicParamDialog::SaveCameraParam()
     param.exposureTime = m_pExposureTimeEdit->text().trimmed();
     param.gainLevel = m_pGainLevelEdit->text().trimmed();
     param.cameraType = m_pCameraTypeEdit->text().trimmed();
+    param.readFps = m_pReadFpsEdit->text().trimmed();
 
     QString error;
     if (m_pDeviceAddressEdit == nullptr || !m_pDeviceAddressEdit->isComplete())
@@ -426,7 +437,8 @@ QString CameraBasicParamDialog::BuildSnapshot() const
         m_pDevicePortEdit != nullptr ? m_pDevicePortEdit->text().trimmed() : QString(),
         m_pExposureTimeEdit != nullptr ? m_pExposureTimeEdit->text().trimmed() : QString(),
         m_pGainLevelEdit != nullptr ? m_pGainLevelEdit->text().trimmed() : QString(),
-        m_pCameraTypeEdit != nullptr ? m_pCameraTypeEdit->text().trimmed() : QString()
+        m_pCameraTypeEdit != nullptr ? m_pCameraTypeEdit->text().trimmed() : QString(),
+        m_pReadFpsEdit != nullptr ? m_pReadFpsEdit->text().trimmed() : QString()
     }.join('\n');
 }
 

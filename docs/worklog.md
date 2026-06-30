@@ -1,9 +1,16 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-06-26`
+- 人工整理日期：`2026-06-30`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-06-30
+
+- 发布 v2026.06.30.1321：`Release x64` 编译通过(0 错误)；两段式打包通过，生成 `dist/installer/NoTeaching-Robot-Setup-v2026.06.30.1321.exe`。本次提交今日批次：相机取帧状态 CSV + 长时间无帧异常终止、相机读取帧率从测量参数迁至相机参数(`CameraParam.ini` 的 `CameraReadFps`，真正驱动取帧轮询)、调试功能结果打包压缩(zip)。署名 yu1201；其它会话未提交改动(`RobotCalculation`/`PointCloudProcessingConfig`/`LaserWeldFilterDialog`/portable `MeasureThenWeldFilterFit`、点云 SDK DLL)与软著文档/`Job` 散落产物未纳入本次提交(但安装包由当前工作区构建，二进制含上述改动)。
+- 相机取帧状态记录 + 无帧门禁：`ScanCameraSkjWorker::pollFrame` 每次轮询把 SDK 返回码记入 `CameraFrameCache` 的 poll 日志(与帧同一 steady 时钟)；`ScanMoveAndCollect` 在扫描运动+尾部匹配结束时快照，统计相邻取到帧之间的最长无帧间断(+末帧到结束的尾部间断)，>1s(或全程无帧)则写盘后报错 `return false` 终止流程。匹配明细 `PreciseLaserPoint_MatchDebug.csv` 末尾追加独立行记录所有非0取帧状态——新增 `sdk_status`/`sdk_recv_timestamp_us` 两列、不复用原 `status` 列。改动 `CameraFrameCache.h/.cpp`、`groove/scancameraskjworker.cpp`、`MeasureThenWeldService.cpp`。
+- 相机读取帧率迁移到相机参数：原「测量焊接参数→扫描参数」里的 `CameraReadFps` 实际不驱动取帧(轮询写死 `kPollIntervalMs=10ms`)、名不副实(对抗核查 CONFIRMED：全仓无任何 sleep/节流/SDK 帧率设置消费它)。删除该测量参数(UI/结构体/ini 读写/校验/CLI 日志/Python 迁移器模板全清，旧 ini 残留入 `IsObsoletePreciseParamKey` 保存时自动清除)；在「相机参数→测量相机基础参数」(`CameraBasicParamDialog`/`CameraParam.ini` 的 `CameraReadFps`)新增「相机读取帧率(fps)」，经 `LoadGrooveCameraEndpointForUnit` 换算成轮询间隔(round(1000/帧率))驱动 `ScanCameraSkjWorker` 定时器；`CameraRuntime` 加 `cameraPollIntervalMs` 并纳入 `needRestart`，改值在下次预览/扫描重连生效。默认 100fps(=10ms)保持原行为。改动 `RobotDataHelper.h/.cpp`、`CameraBasicParamDialog.h/.cpp`、`groove/scancameraskjworker.h/.cpp`、`QtWidgetsApplication4.h/.cpp`、`MeasureThenWeldDialog.h`、`PreciseMeasureEditDialog.cpp`、`MeasureThenWeldService.cpp`、`tools/migrate_config_to_sqlite.py`。
+- 调试功能「结果打包压缩」：新增 `ResultArchiveDialog`(Qt6 私有 `QZipWriter`，后台 `std::thread` + 进度条 + 取消)，按案例级勾选、按机器人/日期多选，把 `Result/` 打包成 zip，默认存 `Result/Archives/`、可自定义保存位置。改动新增 `ResultArchiveDialog.h/.cpp`，接入 `QtWidgetsApplication4.cpp/.h` 调试菜单与 `.vcxproj`(`QtMoc` 项)。
 
 ## 2026-06-26
 

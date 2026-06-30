@@ -87,7 +87,6 @@ MEASURE_WELD_SCAN_DEFAULTS = (
     ("ZMin", "0"),
     ("ScanSpeed", "0"),
     ("RunSpeed", "0"),
-    ("CameraReadFps", "0"),
     ("CameraTimeOffsetMs", "0"),
     ("dAcc", "0"),
     ("dDec", "0"),

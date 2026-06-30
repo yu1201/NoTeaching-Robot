@@ -243,9 +243,7 @@ QStringList MinimalWeldSectionLinesForPrecise()
     return lines;
 }
 
-constexpr auto CAMERA_READ_FPS_KEY = "CameraReadFps";
 constexpr auto CAMERA_TIME_OFFSET_MS_KEY = "CameraTimeOffsetMs";
-constexpr double DEFAULT_CAMERA_READ_FPS = 100.0;
 constexpr double DEFAULT_CAMERA_TIME_OFFSET_MS = -300.0;
 
 QString GroupMetaSectionName()
@@ -374,7 +372,10 @@ QByteArray EncodeUtf16LeForPrecise(const QString& text, bool includeBom)
 
 bool IsObsoletePreciseParamKey(const QString& key)
 {
-    return key.trimmed().compare("CornerArcRadiusMm", Qt::CaseInsensitive) == 0;
+    const QString normalized = key.trimmed();
+    // CameraReadFps 已迁出测量参数（改由相机参数 CameraReadFps 维护）：测量页不再显示，保存时顺带从旧 ini 清除。
+    return normalized.compare("CornerArcRadiusMm", Qt::CaseInsensitive) == 0
+        || normalized.compare("CameraReadFps", Qt::CaseInsensitive) == 0;
 }
 
 bool IsMigratedToWeldProcessKey(const QString& key)
@@ -559,7 +560,6 @@ QString PreciseParamDisplayName(const QString& key)
         { "ImgEnd_x", "图像结束X" },
         { "Scanlength", "扫描长度" },
         { "ScanDir", "扫描方向" },
-        { CAMERA_READ_FPS_KEY, "相机读取帧率" },
         { CAMERA_TIME_OFFSET_MS_KEY, "相机时间补偿(ms)" },
         { "ImgStartX", "图像起始X" },
         { "ImgEndX", "图像结束X" },
@@ -639,7 +639,7 @@ QString ScanParamGroupTitleForKey(const QString& key)
         "YMaxCar", "YMinCar", "YMaxRobot", "YMinRobot", "XMax", "XMin", "ZMax", "ZMin"
     };
     static const QSet<QString> speedKeys = {
-        "ScanSpeed", "RunSpeed", "CameraReadFps", "CameraTimeOffsetMs", "dAcc", "dDec",
+        "ScanSpeed", "RunSpeed", "CameraTimeOffsetMs", "dAcc", "dDec",
         "UseComputedScanSafe", "ScanSafeOffsetDistanceMm", "ScanSafeGunAngleDeg",
         "ScanSafeXDirection", "ScanSafeLiftHeightMm", "ScanSafeFlipWarnThresholdDeg"
     };
@@ -2046,24 +2046,9 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
     loadSectionParams(section, QStringLiteral("扫描参数"), true);
     loadSectionParams(weldSection, QStringLiteral("焊接参数"), false);
 
-    if (!m_otherParamEditors.contains(EditorId(section, CAMERA_READ_FPS_KEY))
-        || !m_otherParamEditors.contains(EditorId(section, CAMERA_TIME_OFFSET_MS_KEY)))
+    if (!m_otherParamEditors.contains(EditorId(section, CAMERA_TIME_OFFSET_MS_KEY)))
     {
         currentGroupLayout = createCollapsibleGroup(QStringLiteral("相机时间参数"), QStringLiteral("扫描参数"));
-    }
-
-    if (!m_otherParamEditors.contains(EditorId(section, CAMERA_READ_FPS_KEY)))
-    {
-        AddOtherParamEditor(
-            ensureGroup(QStringLiteral("相机时间参数"), QStringLiteral("扫描参数")),
-            m_otherParamEditors,
-            m_otherParamComboEditors,
-            row,
-            colInGroup,
-            section,
-            CAMERA_READ_FPS_KEY,
-            QString::number(DEFAULT_CAMERA_READ_FPS, 'f', 0));
-        hasOtherParam = true;
     }
 
     if (!m_otherParamEditors.contains(EditorId(section, CAMERA_TIME_OFFSET_MS_KEY)))

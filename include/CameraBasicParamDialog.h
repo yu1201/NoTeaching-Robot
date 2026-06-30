@@ -43,6 +43,7 @@ private:
     QLineEdit* m_pExposureTimeEdit = nullptr;
     QLineEdit* m_pGainLevelEdit = nullptr;
     QLineEdit* m_pCameraTypeEdit = nullptr;
+    QLineEdit* m_pReadFpsEdit = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
     QString m_cleanSnapshot;
     bool m_savedThisSession = false;
