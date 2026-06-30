@@ -910,6 +910,59 @@ void LaserWeldFilterDialog::BuildUi()
     m_pLapStepSlopeSpin->setRange(0.02, 2.0); m_pLapStepSlopeSpin->setDecimals(2); m_pLapStepSlopeSpin->setValue(0.10);
     m_pLapStepSlopeSpin->setToolTip("平台斜率上限(侧向mm/主轴mm)：两侧拟合斜率超此值=拐角斜边而非平台，排除拐角误判。拐角斜率约0.35，平台约0.05。");
 
+    // SDK 基础焊道拟合前预平滑(结构自适应双边去锯齿)：仅 SDK点云算法+拟合(SdkBaseWeldFit)模式生效。
+    m_pSdkBasePresmoothCheck = new QCheckBox("SdkBase 拟合前预平滑(去锯齿)");
+    m_pSdkBasePresmoothCheck->setToolTip("仅「SDK点云算法+拟合」模式：拟合第一步前，对 SDK 重建的基础焊道做\"结构自适应 1D 双边\"去锯齿。\n"
+        "按弧长参数化，值域核以\"邻点到局部切线的垂直偏移\"加权——直线段内的小锯齿被磨平，而搭接 X 台阶和真实拐角\n"
+        "(垂直偏移大)处权重趋零、不跨过去平均，从机制上【不会把搭接段/拐角圆滑掉】。默认关闭，现场按需开启并标定。");
+    m_pSdkBasePresmoothWindowSpin = new QDoubleSpinBox();
+    m_pSdkBasePresmoothWindowSpin->setRange(0.5, 30.0); m_pSdkBasePresmoothWindowSpin->setDecimals(1); m_pSdkBasePresmoothWindowSpin->setSingleStep(0.5); m_pSdkBasePresmoothWindowSpin->setValue(3.0);
+    m_pSdkBasePresmoothWindowSpin->setToolTip("预平滑空间窗 σs(沿弧长mm)：越大越平滑、去锯齿越狠，但须明显小于最短直线段长度，否则会跨过相邻拐角。一般 2~5mm。");
+    m_pSdkBasePresmoothEdgeSpin = new QDoubleSpinBox();
+    m_pSdkBasePresmoothEdgeSpin->setRange(0.05, 10.0); m_pSdkBasePresmoothEdgeSpin->setDecimals(2); m_pSdkBasePresmoothEdgeSpin->setSingleStep(0.1); m_pSdkBasePresmoothEdgeSpin->setValue(0.5);
+    m_pSdkBasePresmoothEdgeSpin->setToolTip("预平滑保边阈值 σr(mm)：点到局部切线的垂直偏移大于约此值的跳变(搭接台阶/折角)会被保留不平滑。\n须【大于锯齿峰峰幅度、且明显小于搭接台阶高度】。例：锯齿≈0.2mm、台阶≈1.8mm 时取 0.3~0.5mm。调大→去锯齿更狠但可能开始啃台阶；调小→更保守但去锯齿弱。");
+
+    // 基础焊道首尾段截断（②SDK+拟合 / ③点云+拟合 / ④特征点+拟合 三种拟合方案通用，非特化）。
+    m_pEdgeTruncateCheck = new QCheckBox("基础焊道首尾截断");
+    m_pEdgeTruncateCheck->setToolTip("对②SDK+拟合 / ③点云+拟合 / ④特征点+拟合 三种拟合方案都生效：拟合提取关键点【之前】，\n"
+        "按点列【扫描顺序】(开头=首点侧 / 结尾=末点侧，与焊接方向无关)沿弧长截掉开头/结尾指定 mm 的点，剔除扫描进/出端坏点。\n"
+        "与\"起点跳过/终点跳过\"(焊接段裁剪、晚于补偿)是不同层、互不影响。两端任一为 0 即该端不截；默认关。");
+    m_pTruncateHeadSpin = new QDoubleSpinBox();
+    m_pTruncateHeadSpin->setRange(0.0, 500.0); m_pTruncateHeadSpin->setDecimals(1); m_pTruncateHeadSpin->setSingleStep(1.0); m_pTruncateHeadSpin->setValue(0.0);
+    m_pTruncateHeadSpin->setToolTip("开头截断弧长(mm)：从点列【首点侧】沿弧长截掉这么长。0=不截。");
+    m_pTruncateTailSpin = new QDoubleSpinBox();
+    m_pTruncateTailSpin->setRange(0.0, 500.0); m_pTruncateTailSpin->setDecimals(1); m_pTruncateTailSpin->setSingleStep(1.0); m_pTruncateTailSpin->setValue(0.0);
+    m_pTruncateTailSpin->setToolTip("结尾截断弧长(mm)：从点列【末点侧】沿弧长截掉这么长。0=不截。");
+
+    // 端区周期一致性补拐点（②③④拟合方案通用）：用波纹周期+典型拐角角度补回起/终点段漏掉的拐点。
+    m_pEndPeriodRecoverCheck = new QCheckBox("端区周期补拐点");
+    m_pEndPeriodRecoverCheck->setToolTip("对②③④三种拟合方案都生效，治起点/终点段拐点漏检：\n"
+        "波纹板拐点近似【周期性】。先从中段可靠拐点算\"中位段长L=周期\"，再看端区(起点段/终点段)长度——\n"
+        "若 ≥ 阈值×L 说明里面漏了拐点，按周期反推漏点位置，并在该处实测【弯折角】确认(直段≈0°不会误补)。\n"
+        "长度定位 + 角度确认 双判据。搭接台阶两拐点会先合成一段再算周期。只补不删，默认关。");
+    m_pEndPeriodRatioSpin = new QDoubleSpinBox();
+    m_pEndPeriodRatioSpin->setRange(1.05, 3.0); m_pEndPeriodRatioSpin->setDecimals(2); m_pEndPeriodRatioSpin->setSingleStep(0.05); m_pEndPeriodRatioSpin->setValue(1.2);
+    m_pEndPeriodRatioSpin->setToolTip("判漏阈值：端段长 ÷ 周期L ≥ 此值才认为里面漏了拐点。1.3 表示端段比一个周期长 30% 以上就补。\n太小→收尾的部分周期段会被误判补点；太大→漏点补不回。一般 1.25~1.4。");
+    m_pEndPeriodMinBendSpin = new QDoubleSpinBox();
+    m_pEndPeriodMinBendSpin->setRange(1.0, 45.0); m_pEndPeriodMinBendSpin->setDecimals(1); m_pEndPeriodMinBendSpin->setSingleStep(1.0); m_pEndPeriodMinBendSpin->setValue(5.0);
+    m_pEndPeriodMinBendSpin->setToolTip("补点最小弯折角(度)：预测窗口内候选点的弯折角 ≥ max(此值, 0.5×典型拐角角) 才补。\n防止在直段误补。波纹真拐角弯折常 7~13°、噪声基线 2~3°，取 5° 较稳。");
+    m_pEndPeriodMergeSpin = new QDoubleSpinBox();
+    m_pEndPeriodMergeSpin->setRange(0.05, 0.9); m_pEndPeriodMergeSpin->setDecimals(2); m_pEndPeriodMergeSpin->setSingleStep(0.05); m_pEndPeriodMergeSpin->setValue(0.4);
+    m_pEndPeriodMergeSpin->setToolTip("删错阈值(相邻同类间距/周期)：相邻【同类】拐点间距 < 此×周期L 判定其中一个找错→删弯折角离典型更远的那个。\n波纹同类拐角(II/OO)间距≈一个周期，挨太近(如平台重算把两边界角凑到4mm)即误检。0.4 表示间距<40%周期就删。搭接台阶对豁免。");
+
+    // 按平台边界重定拐点（②③④拟合方案通用）：波纹拐点全在"平台↔坡"交界。检测平的段(平台)，把拐点归位到平台两端。
+    m_pPlatformSnapCheck = new QCheckBox("按平台边界重定拐点");
+    m_pPlatformSnapCheck->setToolTip("对②③④三种拟合方案都生效，治【拐点被放到平台正中间→平台塌成长坡消失】、端区漏平台边界角：\n"
+        "波纹板的拐点【全部位于\"平台↔坡\"交界】。本步沿焊道检测\"平的段(平台)\"，对每个平台保证两端各有一个边界拐点、\n"
+        "删掉卡在平台内部(放错位)的拐点。对【已经正确】的平台幂等不动，只纠正错的。搭接台阶与起终点不参与。\n"
+        "比\"端区周期补拐点\"更根本(直接按平台结构定角，统一治 缺/重/放错位 三种情况)。默认关。");
+    m_pPlatformSnapFlatSlopeSpin = new QDoubleSpinBox();
+    m_pPlatformSnapFlatSlopeSpin->setRange(0.03, 0.3); m_pPlatformSnapFlatSlopeSpin->setDecimals(2); m_pPlatformSnapFlatSlopeSpin->setSingleStep(0.01); m_pPlatformSnapFlatSlopeSpin->setValue(0.15);
+    m_pPlatformSnapFlatSlopeSpin->setToolTip("平台判定斜率上限：点的侧向局部斜率 |Δ横向/Δ主轴| < 此值判为【平台(平)】，≥此值判为【坡】。\n波纹平台斜率≈0.01~0.05、上/下坡≈0.35~0.4，取 0.15 居中可靠区分。");
+    m_pPlatformSnapMinFracSpin = new QDoubleSpinBox();
+    m_pPlatformSnapMinFracSpin->setRange(0.1, 0.8); m_pPlatformSnapMinFracSpin->setDecimals(2); m_pPlatformSnapMinFracSpin->setSingleStep(0.05); m_pPlatformSnapMinFracSpin->setValue(0.25);
+    m_pPlatformSnapMinFracSpin->setToolTip("平台最小长度(/周期)：平的段长 ≥ 此×周期L 才算真平台。更短的平的段视作噪声不参与。\n0.25 表示短于 25% 周期的平段忽略。太小→噪声误判平台；太大→真短平台被漏。");
+
     m_pSlopeConsistentCornerFitCheck = new QCheckBox("直线拟合排除圆弧段");
     m_pSlopeConsistentCornerFitCheck->setToolTip("启用后，平台线和坡度线只使用局部斜率一致的直线段拟合，再求交生成拐点。");
 
@@ -977,6 +1030,28 @@ void LaserWeldFilterDialog::BuildUi()
     paramLayout->addWidget(CreateUnitEditor(m_pLapStepFlatnessSpin, "mm"), 19, 1);
     paramLayout->addWidget(new QLabel("平台斜率上限"), 19, 2);
     paramLayout->addWidget(CreateUnitEditor(m_pLapStepSlopeSpin, "mm/mm"), 19, 3);
+    paramLayout->addWidget(m_pSdkBasePresmoothCheck, 20, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("预平滑窗口"), 21, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pSdkBasePresmoothWindowSpin, "mm"), 21, 1);
+    paramLayout->addWidget(new QLabel("预平滑保边阈值"), 21, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pSdkBasePresmoothEdgeSpin, "mm"), 21, 3);
+    paramLayout->addWidget(m_pEdgeTruncateCheck, 22, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("开头截断"), 23, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pTruncateHeadSpin, "mm"), 23, 1);
+    paramLayout->addWidget(new QLabel("结尾截断"), 23, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pTruncateTailSpin, "mm"), 23, 3);
+    paramLayout->addWidget(m_pEndPeriodRecoverCheck, 24, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("判漏阈值(段长/周期)"), 25, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodRatioSpin, "x"), 25, 1);
+    paramLayout->addWidget(new QLabel("补点最小弯折角"), 25, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodMinBendSpin, "deg"), 25, 3);
+    paramLayout->addWidget(new QLabel("删错间距(同类/周期)"), 26, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodMergeSpin, "x"), 26, 1);
+    paramLayout->addWidget(m_pPlatformSnapCheck, 27, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("平台判定斜率上限"), 28, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pPlatformSnapFlatSlopeSpin, ""), 28, 1);
+    paramLayout->addWidget(new QLabel("平台最小长度(/周期)"), 28, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pPlatformSnapMinFracSpin, "x"), 28, 3);
     paramLayout->setColumnStretch(1, 1);
     paramLayout->setColumnStretch(3, 1);
     featurePointLayout->addWidget(paramGroup);
@@ -1309,6 +1384,19 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pLapStepStationSpin->setValue(processingSettings.lapStepStationWindowMm);
     m_pLapStepFlatnessSpin->setValue(processingSettings.lapStepSideFlatnessMm);
     m_pLapStepSlopeSpin->setValue(processingSettings.lapStepPlatformSlopeMax);
+    m_pSdkBasePresmoothCheck->setChecked(processingSettings.sdkBasePresmoothEnable);
+    m_pSdkBasePresmoothWindowSpin->setValue(processingSettings.sdkBasePresmoothWindowMm);
+    m_pSdkBasePresmoothEdgeSpin->setValue(processingSettings.sdkBasePresmoothEdgeMm);
+    m_pEdgeTruncateCheck->setChecked(processingSettings.fitEdgeTruncateEnable);
+    m_pTruncateHeadSpin->setValue(processingSettings.fitTruncateHeadMm);
+    m_pTruncateTailSpin->setValue(processingSettings.fitTruncateTailMm);
+    m_pEndPeriodRecoverCheck->setChecked(processingSettings.fitEndPeriodRecoverEnable);
+    m_pEndPeriodRatioSpin->setValue(processingSettings.fitEndPeriodRatioThreshold);
+    m_pEndPeriodMinBendSpin->setValue(processingSettings.fitEndPeriodMinBendDeg);
+    m_pEndPeriodMergeSpin->setValue(processingSettings.fitEndPeriodMergeFrac);
+    m_pPlatformSnapCheck->setChecked(processingSettings.fitPlatformSnapEnable);
+    m_pPlatformSnapFlatSlopeSpin->setValue(processingSettings.fitPlatformSnapFlatSlope);
+    m_pPlatformSnapMinFracSpin->setValue(processingSettings.fitPlatformSnapMinFrac);
     m_pProjStationWindowSpin->setValue(processingSettings.projectionStationWindowMm);
     m_pProjTransverseWindowSpin->setValue(processingSettings.projectionTransverseWindowMm);
     m_pProjZBandBelowSpin->setValue(processingSettings.projectionZBandBelowMm);
@@ -1365,6 +1453,19 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.lapStepStationWindowMm = m_pLapStepStationSpin->value();
     processingSettings.lapStepSideFlatnessMm = m_pLapStepFlatnessSpin->value();
     processingSettings.lapStepPlatformSlopeMax = m_pLapStepSlopeSpin->value();
+    processingSettings.sdkBasePresmoothEnable = m_pSdkBasePresmoothCheck->isChecked();
+    processingSettings.sdkBasePresmoothWindowMm = m_pSdkBasePresmoothWindowSpin->value();
+    processingSettings.sdkBasePresmoothEdgeMm = m_pSdkBasePresmoothEdgeSpin->value();
+    processingSettings.fitEdgeTruncateEnable = m_pEdgeTruncateCheck->isChecked();
+    processingSettings.fitTruncateHeadMm = m_pTruncateHeadSpin->value();
+    processingSettings.fitTruncateTailMm = m_pTruncateTailSpin->value();
+    processingSettings.fitEndPeriodRecoverEnable = m_pEndPeriodRecoverCheck->isChecked();
+    processingSettings.fitEndPeriodRatioThreshold = m_pEndPeriodRatioSpin->value();
+    processingSettings.fitEndPeriodMinBendDeg = m_pEndPeriodMinBendSpin->value();
+    processingSettings.fitEndPeriodMergeFrac = m_pEndPeriodMergeSpin->value();
+    processingSettings.fitPlatformSnapEnable = m_pPlatformSnapCheck->isChecked();
+    processingSettings.fitPlatformSnapFlatSlope = m_pPlatformSnapFlatSlopeSpin->value();
+    processingSettings.fitPlatformSnapMinFrac = m_pPlatformSnapMinFracSpin->value();
     processingSettings.projectionStationWindowMm = m_pProjStationWindowSpin->value();
     processingSettings.projectionTransverseWindowMm = m_pProjTransverseWindowSpin->value();
     processingSettings.projectionZBandBelowMm = m_pProjZBandBelowSpin->value();

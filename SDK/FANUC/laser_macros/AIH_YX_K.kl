@@ -1,0 +1,174 @@
+PROGRAM AIH_YX_K
+%NOLOCKGROUP
+%NOPAUSE = ERROR + COMMAND + TPENABLE
+%NOABORT = ERROR + COMMAND
+%COMMENT = 'AIH_YX circle center 3pt/4pt fit'
+%ENVIRONMENT sysdef
+%ENVIRONMENT REGOPE
+%ENVIRONMENT MOTN
+-- 圆心：method=1 三点法(P1,P2,P3)；method=2 四点法(P1..P4 最小二乘圆)。
+-- 方法：拟合点所在平面 -> 投影到平面2D -> 代数圆拟合(Kasa) -> 回映3D。
+-- 入口寄存器(由 TP 外壳 AIH_YX.ls 从 AR[] 写入)：
+--   R[61]=P1 R[62]=P2 R[63]=P3 R[64]=P4 (PR号)
+--   R[65]=姿态点 PR号  R[66]=求法(1/2)  R[67]=圆心结果 PR号  R[68]=标志 R号
+VAR
+  i_p1, i_p2, i_p3, i_p4, i_pose, i_method, i_res, i_flag : INTEGER
+  st, np, k : INTEGER
+  pose, res, pr : XYZWPR
+  px, py, pz : ARRAY[4] OF REAL
+  cenx, ceny, cenz : REAL
+  ax, ay, az, qx, qy, qz, nx, ny, nz, nlen : REAL
+  exx, exy, exz, eyx, eyy, eyz, elen : REAL
+  uu, vv : REAL
+  Suu, Suv, Svv, Su, Sv, Sn, Suuu, Svvv, Suvv, Svuu : REAL
+  m11, m12, m13, m21, m22, m23, m31, m32, m33, r1, r2, r3 : REAL
+  detv, solD, solE, cu, cv : REAL
+
+ROUTINE RInt(idx : INTEGER) : INTEGER
+  VAR
+    bb : BOOLEAN
+    iv : INTEGER
+    rv : REAL
+    ss : INTEGER
+  BEGIN
+    GET_REG(idx, bb, iv, rv, ss)
+    RETURN(iv)
+  END RInt
+
+ROUTINE DET3(a11,a12,a13,a21,a22,a23,a31,a32,a33 : REAL) : REAL
+  BEGIN
+    RETURN(a11*(a22*a33-a23*a32) - a12*(a21*a33-a23*a31) + a13*(a21*a32-a22*a31))
+  END DET3
+
+BEGIN
+  i_p1 = RInt(61)
+  i_p2 = RInt(62)
+  i_p3 = RInt(63)
+  i_p4 = RInt(64)
+  i_pose = RInt(65)
+  i_method = RInt(66)
+  i_res = RInt(67)
+  i_flag = RInt(68)
+
+  pr = GET_POS_REG(i_p1, st)
+  px[1] = pr.x
+  py[1] = pr.y
+  pz[1] = pr.z
+  pr = GET_POS_REG(i_p2, st)
+  px[2] = pr.x
+  py[2] = pr.y
+  pz[2] = pr.z
+  pr = GET_POS_REG(i_p3, st)
+  px[3] = pr.x
+  py[3] = pr.y
+  pz[3] = pr.z
+  IF i_method = 1 THEN
+    np = 3
+  ELSE
+    np = 4
+    pr = GET_POS_REG(i_p4, st)
+    px[4] = pr.x
+    py[4] = pr.y
+    pz[4] = pr.z
+  ENDIF
+  pose = GET_POS_REG(i_pose, st)
+
+  cenx = 0
+  ceny = 0
+  cenz = 0
+  FOR k = 1 TO np DO
+    cenx = cenx + px[k]
+    ceny = ceny + py[k]
+    cenz = cenz + pz[k]
+  ENDFOR
+  cenx = cenx / np
+  ceny = ceny / np
+  cenz = cenz / np
+
+  ax = px[2] - px[1]
+  ay = py[2] - py[1]
+  az = pz[2] - pz[1]
+  qx = px[3] - px[1]
+  qy = py[3] - py[1]
+  qz = pz[3] - pz[1]
+  nx = ay*qz - az*qy
+  ny = az*qx - ax*qz
+  nz = ax*qy - ay*qx
+  nlen = SQRT(nx*nx + ny*ny + nz*nz)
+  IF nlen < 0.000001 THEN
+    SET_INT_REG(i_flag, 0, st)
+    RETURN
+  ENDIF
+  nx = nx / nlen
+  ny = ny / nlen
+  nz = nz / nlen
+
+  exx = px[1] - cenx
+  exy = py[1] - ceny
+  exz = pz[1] - cenz
+  elen = SQRT(exx*exx + exy*exy + exz*exz)
+  IF elen < 0.000001 THEN
+    SET_INT_REG(i_flag, 0, st)
+    RETURN
+  ENDIF
+  exx = exx / elen
+  exy = exy / elen
+  exz = exz / elen
+  eyx = ny*exz - nz*exy
+  eyy = nz*exx - nx*exz
+  eyz = nx*exy - ny*exx
+
+  Suu = 0
+  Suv = 0
+  Svv = 0
+  Su = 0
+  Sv = 0
+  Sn = 0
+  Suuu = 0
+  Svvv = 0
+  Suvv = 0
+  Svuu = 0
+  FOR k = 1 TO np DO
+    uu = (px[k]-cenx)*exx + (py[k]-ceny)*exy + (pz[k]-cenz)*exz
+    vv = (px[k]-cenx)*eyx + (py[k]-ceny)*eyy + (pz[k]-cenz)*eyz
+    Suu = Suu + uu*uu
+    Suv = Suv + uu*vv
+    Svv = Svv + vv*vv
+    Su = Su + uu
+    Sv = Sv + vv
+    Sn = Sn + 1
+    Suuu = Suuu + uu*uu*uu
+    Svvv = Svvv + vv*vv*vv
+    Suvv = Suvv + uu*vv*vv
+    Svuu = Svuu + vv*uu*uu
+  ENDFOR
+
+  m11 = Suu
+  m12 = Suv
+  m13 = Su
+  m21 = Suv
+  m22 = Svv
+  m23 = Sv
+  m31 = Su
+  m32 = Sv
+  m33 = Sn
+  r1 = -(Suuu + Suvv)
+  r2 = -(Svvv + Svuu)
+  r3 = -(Suu + Svv)
+  detv = DET3(m11,m12,m13, m21,m22,m23, m31,m32,m33)
+  IF ABS(detv) < 0.000001 THEN
+    SET_INT_REG(i_flag, 0, st)
+    RETURN
+  ENDIF
+  solD = DET3(r1,m12,m13, r2,m22,m23, r3,m32,m33) / detv
+  solE = DET3(m11,r1,m13, m21,r2,m23, m31,r3,m33) / detv
+  cu = -solD / 2.0
+  cv = -solE / 2.0
+
+  res = pose
+  res.x = cenx + cu*exx + cv*eyx
+  res.y = ceny + cu*exy + cv*eyy
+  res.z = cenz + cu*exz + cv*eyz
+  SET_POS_REG(i_res, res, st)
+  SET_INT_REG(i_flag, 1, st)
+END AIH_YX_K

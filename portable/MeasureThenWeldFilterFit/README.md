@@ -1,13 +1,22 @@
 # MeasureThenWeldFilterFit
 
-这是“先测后焊”流程里点云滤波、轨迹拟合和拐点生成的可移植版本。代码从当前工程的 `RobotCalculation`、`PointCloudExtractionProcessor` 和 `MeasureThenWeldService` 调用链整理而来，去掉了 Qt、Eigen 和主工程类型依赖，只保留 C++ 标准库。
+这是“先测后焊”流程里点云滤波、轨迹拟合和拐点生成的可移植版本。代码从当前工程的 `RobotCalculation`、`PointCloudExtractionProcessor` 和 `MeasureThenWeldService` 调用链整理而来，去掉了 Qt 和主工程类型依赖。
+
+> **2026-06 已同步主程序当前在用的波纹板拐点管线**（方位角拐点检测、相干弓补点、搭接错位检测、平台重算、端区周期补漏/删错、按平台边界重定拐点、基础焊道首尾截断）。详见 [CHANGELOG.md](CHANGELOG.md) 与下方「当前几何拐点管线」。
+>
+> **依赖**：本模块用 **Eigen3（header-only）** 做 (s, smoothH) 平面上的 2D 线性代数（直线 PCA / 方向夹角），这是唯一的第三方依赖，无需 Qt；其余只用 C++17 标准库。**Eigen 头文件已随附在 `third_party/eigen/` 下**——整个 `MeasureThenWeldFilterFit/` 目录拷到别处即可直接编译，无需另装 Eigen、无需联网、无需传 `-DEIGEN3_INCLUDE_DIR`。CMake 默认就用这份随附副本（也可显式传 `-DEIGEN3_INCLUDE_DIR` 或装系统 Eigen3 改用系统版）。
 
 ## 文件
 
 - `include/MeasureThenWeldFilterFit.h`：对外接口、参数、结果结构体。
-- `src/MeasureThenWeldFilterFit.cpp`：滤波、拟合、拐点生成实现，关键步骤已加注释。
+- `src/MeasureThenWeldFilterFit.cpp`：滤波、拟合、拐点生成实现，每个管线函数都有详细注释。
 - `examples/example.cpp`：读取 `index x y z` 文本，输出 PreservePath、分类点、拐点和噪点文件。
-- `CMakeLists.txt`：最小构建脚本。
+- `examples/regression_test.cpp`：自包含端到端回归测试（合成波纹 + 双边预平滑），注册为 ctest。
+- `TOPOLOGY.md`：函数调用拓扑（Mermaid 流程图 + ASCII 调用树 + 共享原语表）。
+- `docs/function_topology.svg`：函数拓扑渲染图（独立 SVG，自带样式白底，浏览器/查看器直接打开）。
+- `CHANGELOG.md`：算法同步与版本变更记录。
+- `third_party/eigen/`：随附的 Eigen3 头文件（唯一第三方依赖，header-only）。
+- `CMakeLists.txt`：最小构建脚本（默认用随附 Eigen，可一键 cmake/ctest）。
 
 ## 对应当前主流程
 
@@ -21,6 +30,55 @@
    - `filterResult.points`：PreservePath 轨迹点；
    - `classificationResult.points`：起点、终点、内拐点、外拐点和 2mm 普通焊道点；
    - `keyPoints`：只包含起点、终点和拐点。
+
+## 当前几何拐点管线（与主程序同步）
+
+`AnalyzeMeasureThenWeldPath()` 现在按主程序 `AnalyzeMeasureThenWeldLowerWeldPathGeometry()` 的顺序串起整条波纹板拐点管线：
+
+1. **有效点筛选**（去 NaN）。
+2. **基础焊道首尾截断**（`TrimLowerWeldPathByArcLength`，可选）：按点列数组序沿累积弧长截掉开头/结尾指定 mm 的点，剔除扫描进/出端坏点。**在去噪/拟合之前**执行。
+3. **去噪与投影**：
+   - `inputAlreadyDenoised=false`：MAD 局部去噪 + 分支离群剔除 + 投影平滑（旧行为）。
+   - `inputAlreadyDenoised=true`（SDK `is_remove_noise` 已开，基础焊道已干净）：**全部跳过**（重复处理会削圆尖角、移位拐点），投影不平滑。
+4. **关键点检测**（两条路径）：
+   - `inputAlreadyDenoised=true` → **方位角法** `BuildAzimuthCornerKeyIndexes`（局部最小二乘拟合左右方向、判方向转折角、NMS）+ `SplitNonStraightAzimuthSegments`（直线化兜底补漏检拐点）。比 Douglas-Peucker「离弦最远点」更能区分真折角与波纹起伏。
+   - 否则 → 旧 **Douglas-Peucker** `BuildGeometryKeyIndexes` + `PruneShortSameTypeRuns`。
+5. **相干弓补点** `RefineCornersByCoherentBow`（两路径通用；默认关，已被平台重算取代）。
+6. **搭接错位检测** `DetectLapMisalignmentBoundaries`（可选）：双侧平台最小二乘判据找 X 错位台阶，台阶端点作硬段边界注入 `keyIndexes` 并以 `isLapStepKey` 标记；台阶端点在拟合时直接取原始投影、保留干净 X 台阶。
+7. **平台重算** `RefitCornersByPlatformPattern`（默认开）：按 II/OO 类型游程把拐点归平台，每平台从稠密路径三段（坡-平台-坡）拟合重算恰好 2 个边界角——对源头多检（5→2/3→2）/漏检（1→2）一套覆盖。
+8. **端区周期补漏 + 删错**（可选，`enableEndPeriodCornerRecover`）：
+   - `RecoverEndRegionCornersByPeriod`：中段中位段长 L=周期；端段长 ≥ `ratio*L` 则按周期反推漏点位置、用弯折角确认补回（治起/终段盲区漏拐点）。
+   - `MergeTooCloseSameTypeCorners`：相邻**同类**拐点间距 ≪ 周期且**之间是坡**（假双拐点）才合并；**之间是平台（真平台）绝不删**，且删两侧都陡的“坡中”那个、保贴平台的边界角。
+9. **按平台边界重定拐点** `SnapCornersToPlatforms`（可选，`enablePlatformCornerSnap`）：检测平的段（平台），保证每平台两端各有边界角、删掉卡在平台正中间（放错位）的角。治“拐点放平台中间→平台塌成长坡消失”。对已正确平台幂等不动。
+10. **关键点求交拟合** `BuildFittedKeyPoints` → 分类 + 2mm 展开。
+
+### 新增参数（字段名与主程序 `LowerWeldFilterParams` 一一对应）
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `inputAlreadyDenoised` | false | 置 true → 跳过自身去噪/平滑、关键点改用方位角法（SdkBaseWeldFit 路径） |
+| `azimuthHeadingWindow` / `azimuthTurnThresholdDeg` / `azimuthNmsSpanMm` / `azimuthStraightenResidualMm` | 10 / 22° / 12mm / 6mm | 方位角拐点检测 |
+| `cornerRefineEnable` + `azimuthRefineFloorMm` / `cornerRefineOneSidedFrac` / `cornerRefineMidMultiple` / `cornerRefineEndFrac` | false | 相干弓补点（默认关） |
+| `cornerPatternRefitEnable` + `cornerPlatformMinSegPoints` | true / 8 | 平台重算（默认开） |
+| `enableLapMisalignmentSplit` + `lapStepHeightThresholdMm` / `lapStepStationWindowMm` / `lapStepSideFlatnessMm` / `lapStepPlatformSlopeMax` | false | 搭接错位检测 |
+| `enableEdgeTruncate` + `truncateHeadMm` / `truncateTailMm` | false / 0 / 0 | 首尾截断 |
+| `enableEndPeriodCornerRecover` + `endPeriodRatioThreshold` / `endPeriodMinBendDeg` / `endPeriodMergeFrac` | false / 1.2 / 5° / 0.4 | 端区周期补漏 + 删错 |
+| `enablePlatformCornerSnap` + `platformSnapFlatSlope` / `platformSnapMinFrac` | false / 0.15 / 0.25 | 按平台边界重定拐点 |
+
+### 复现主程序 SdkBaseWeldFit（SDK 点云+拟合）
+
+```cpp
+auto params = mtw_filter_fit::MeasureThenWeldDefaultParams(mtw_filter_fit::SampleAxis::AxisY);
+params.inputAlreadyDenoised      = true;   // SDK 已去噪 → 方位角法 + 跳过自身去噪
+params.cornerPatternRefitEnable  = true;   // 平台重算（默认已开）
+params.enableEndPeriodCornerRecover = true;
+params.enablePlatformCornerSnap  = true;   // 治“平台消失”
+// 如需截掉扫描进/出端坏点：
+// params.enableEdgeTruncate = true; params.truncateHeadMm = params.truncateTailMm = 10.0;
+auto result = mtw_filter_fit::AnalyzeMeasureThenWeldPath(sdkBasePoints, params);
+```
+
+> 在现场 `20260628_016` 基础焊道上，该配置与主程序输出一致：27 个关键点、末端两个平台正确恢复、内/外角严格交替（见 CHANGELOG）。
 
 ## 特征点拟合方案
 
@@ -143,15 +201,21 @@ CloudCompare 导入时把 `//` 开头的表头行当注释跳过，额外的 `se
 ## 构建
 
 ```powershell
+# Eigen 已随附在 third_party/eigen/，无需任何额外参数即可配置+构建：
 cmake -S portable/MeasureThenWeldFilterFit -B portable/MeasureThenWeldFilterFit/build
 cmake --build portable/MeasureThenWeldFilterFit/build --config Release
+ctest --test-dir portable/MeasureThenWeldFilterFit/build -C Release   # 跑自包含回归测试
+# 想改用系统/别处的 Eigen，再显式传： -DEIGEN3_INCLUDE_DIR=<含 Eigen 子目录的那一层>
 ```
 
-也可以直接把 `include/MeasureThenWeldFilterFit.h` 和 `src/MeasureThenWeldFilterFit.cpp` 拷到其它 C++17 工程里编译。
+也可以直接把 `include/`、`src/` 和 `third_party/eigen/` 三者拷到其它 C++17 工程里编译，只需让编译器能 `#include <Eigen/Dense>`（把 `third_party/eigen` 加进 include 路径即可，Eigen 是 header-only、无需链接）。
 
 ## 说明
 
 - 这个包不包含机器人姿态插值、手眼变换、焊接姿态补偿和 STEP/焊接执行，只包含点云轨迹处理。
-- `AnalyzeMeasureThenWeldPath()` 是当前先测后焊里 PreservePath 与拐点生成的主入口。
+- `AnalyzeMeasureThenWeldPath()` 是当前先测后焊里 PreservePath 与拐点生成的主入口，已串起完整波纹板拐点管线（见上）。`examples/example.cpp` 默认走 DP 路径；要走 SdkBase 方位角路径，按上面示例置 `inputAlreadyDenoised=true` 等开关。
 - `FilterLowerWeldPath()` 保留了旧的中值重采样滤波和直线/分段拟合模式，适合做调试或独立滤波测试。
 - 外部新版点云库的 Windows DLL 加载代码没有放进来；移植时建议让业务层加载 DLL，再把返回轨迹点传给 `BuildAnalysisFromExternalTrack()`。
+- **SdkBase 基础焊道双边预平滑去锯齿**已移植为独立函数 `BilateralPresmoothSdkBaseWeld()`——它是几何拟合之前对原始 SdkBase 点云的**可选预处理**（不在 `AnalyzeMeasureThenWeldPath` 管线内），由调用方在拟合前手动调用：`BilateralPresmoothSdkBaseWeld(pts, 3.0, 0.5); auto r = AnalyzeMeasureThenWeldPath(pts, params);`。结构自适应、保住搭接台阶/折角。
+- 搭接台阶端点在本包用原始投影近似（主程序用本侧段直线在台阶 s 处取值），默认关时不影响。
+- **回归测试**：`examples/regression_test.cpp`（CMake 目标 `MeasureThenWeldFilterFitRegression`，已注册为 ctest）自包含——合成波纹板跑全管线断言「II/OO 平台成对、主轴单调、无平台塌陷」，外加双边预平滑「去锯齿 + 保台阶」。运行：`ctest -C Release` 或直接跑该 exe。

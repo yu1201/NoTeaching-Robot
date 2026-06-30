@@ -78,6 +78,56 @@ struct FilterFitParams
     int minPointCount = 4;
     int smoothRadius = 3;
 
+    // ============================================================================
+    // 以下为「波纹板先测后焊」当前在用的几何拐点管线参数，字段名与主程序
+    // RobotCalculation::LowerWeldFilterParams 一一对应（见 CHANGELOG）。
+    // ============================================================================
+
+    // 输入已去噪标志：SDK 的 is_remove_noise 已开启(基础焊道已是干净稠密点云)时置 true。
+    // 置 true 时几何流程：①跳过自身 MAD 去噪/分支去噪与投影平滑(重复处理会削圆尖角、移位拐点)；
+    // ②拐点检测改用【方位角法】(下列 azimuth* 参数)而非 Douglas-Peucker。
+    bool inputAlreadyDenoised = false;
+
+    // 方位角拐点检测（inputAlreadyDenoised 路径）：左右各拟合局部方向，判方向转折角。
+    int azimuthHeadingWindow = 10;            // K：左右两段方向的局部最小二乘拟合跨度（点）
+    double azimuthTurnThresholdDeg = 22.0;    // 候选转角阈值（度）：滤掉波纹板侧向小起伏
+    double azimuthNmsSpanMm = 12.0;           // 非极大值抑制：同区域合并的主轴弧长
+    double azimuthStraightenResidualMm = 6.0; // 直线化兜底：段内偏离弦超此值才补漏检拐点
+
+    // 端区补拐点（相干弓，RefineCornersByCoherentBow）。默认关——已被「平台重算」取代。
+    bool cornerRefineEnable = false;
+    double azimuthRefineFloorMm = 0.5;        // 端区细化地板(mm)：一致弓向离弦峰值超此才补
+    double cornerRefineOneSidedFrac = 0.80;   // 单侧弓出占比门[0.5,1]：挡随机噪声
+    double cornerRefineMidMultiple = 3.0;     // 中段地板倍数(≥1)：漏点多在端区的先验
+    double cornerRefineEndFrac = 0.20;        // 端区弧长占比[0,0.5]：首尾各此比例用低地板
+
+    // 平台重算（II/OO 结构约束，RefitCornersByPlatformPattern）：每平台从稠密路径重算 2 个边界角。
+    bool cornerPatternRefitEnable = true;     // 默认开
+    int cornerPlatformMinSegPoints = 8;       // 三段拟合每段最少点数(≥3)
+
+    // 板材搭接 X 错位台阶检测（DetectLapMisalignmentBoundaries）。默认关。
+    bool enableLapMisalignmentSplit = false;
+    double lapStepHeightThresholdMm = 1.0;    // 台阶高门：中心处两侧拟合线高度差
+    double lapStepStationWindowMm = 10.0;     // 单侧拟合窗口长度(主轴 mm)
+    double lapStepSideFlatnessMm = 0.12;      // 平台残差 rms 上限(排波纹/噪声)
+    double lapStepPlatformSlopeMax = 0.10;    // 平台斜率门(排拐角斜边)
+
+    // 基础焊道首尾段截断（TrimLowerWeldPathByArcLength，拟合提取关键点之前执行）。默认关。
+    bool enableEdgeTruncate = false;
+    double truncateHeadMm = 0.0;              // 截掉点列开头(首点侧)弧长 mm
+    double truncateTailMm = 0.0;              // 截掉点列结尾(末点侧)弧长 mm
+
+    // 端区周期一致性补拐点 / 删错（RecoverEndRegionCornersByPeriod + MergeTooCloseSameTypeCorners）。默认关。
+    bool enableEndPeriodCornerRecover = false;
+    double endPeriodRatioThreshold = 1.2;     // 端段长/周期L ≥ 此值才判漏拐点
+    double endPeriodMinBendDeg = 5.0;         // 补点候选最小弯折角(度)
+    double endPeriodMergeFrac = 0.4;          // 删错:相邻同类拐点间距 < 此×周期L 判找错合并
+
+    // 按平台边界重定拐点（SnapCornersToPlatforms）。默认关。
+    bool enablePlatformCornerSnap = false;
+    double platformSnapFlatSlope = 0.15;      // 侧向局部斜率 < 此判为平台，≥此为坡
+    double platformSnapMinFrac = 0.25;        // 平台最小长度 = 此×周期L
+
     // When true, corner intersections are fitted from the straight core of each
     // neighbouring segment. This mirrors the main program's "直线拟合排除圆弧段"
     // option and helps avoid round/transition samples pulling a straight segment
@@ -167,6 +217,16 @@ FilterResult FilterLowerWeldPath(
 AnalysisResult AnalyzeMeasureThenWeldPath(
     const std::vector<IndexedPoint3D>& inputPoints,
     const FilterFitParams& params = MeasureThenWeldDefaultParams());
+
+// SDK 基础焊道(稠密有序点)拟合前的可选去锯齿预处理：「结构自适应 1D 双边」预平滑。
+// 沿弧长参数化，每点用 空间核(σs=windowMm) × 值域核 加权邻点平均，值域距离取「邻点到本点局部切线的
+// 垂直偏移」——直线段内垂直偏移≈0→磨掉锯齿；搭接 X 台阶/真实折角处垂直偏移大(>σr=edgeMm)→权重趋零→
+// 不跨过去平均，从机制上保住台阶与折角(不会把搭接段圆滑进去)。首末点不动。原地修改 points，返回被移动点数。
+// 对应主程序 MeasureThenWeldService::BilateralPresmoothSdkBaseWeld，仅 SdkBaseWeldFit 模式拟合前调用。
+int BilateralPresmoothSdkBaseWeld(
+    std::vector<IndexedPoint3D>& points,
+    double windowMm = 3.0,
+    double edgeMm = 0.5);
 
 // "立板投影到底板" pre-step. Feed the returned points into AnalyzeMeasureThenWeldPath.
 FilterResult ProjectWorkpieceCloudToLowerWeldPath(

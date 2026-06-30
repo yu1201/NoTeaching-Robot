@@ -706,6 +706,88 @@ void SaveMethodBaseTrackFile(
     }
 }
 
+// 对 SDK 基础焊道(稠密有序点)做"结构自适应 1D 双边"预平滑去锯齿（仅 SdkBaseWeldFit 模式拟合前调用）。
+// 沿弧长参数化；每点用 空间核(σs=windowMm) × 值域核 加权邻点平均，值域距离取"邻点到本点局部切线的
+// 垂直偏移"——直线段内垂直偏移≈0→正常平均磨掉锯齿；搭接X台阶/真实折角处垂直偏移大(>σr=edgeMm)→权重
+// 趋零→不跨过去平均，从机制上保住台阶与折角(不会把搭接段圆滑进去)。端点(起/终)不动。非迭代单次 O(N·窗)。
+// 返回被移动的点数(供日志)。
+int BilateralPresmoothSdkBaseWeld(
+    QVector<PointCloudExtractionProcessor::TrackPoint>& pts,
+    double windowMm,
+    double edgeMm)
+{
+    const int n = pts.size();
+    if (n < 5 || windowMm <= 1e-6 || edgeMm <= 1e-6)
+    {
+        return 0;
+    }
+
+    std::vector<double> arc(n, 0.0);
+    for (int i = 1; i < n; ++i)
+    {
+        arc[i] = arc[i - 1] + (pts[i].point - pts[i - 1].point).norm();
+    }
+
+    const int tanWin = 2;  // 局部切线用 ±tanWin 个点中心差分估，抗单点抖动
+    auto localTangent = [&](int i) -> Eigen::Vector3d
+    {
+        const int a = std::max(0, i - tanWin);
+        const int b = std::min(n - 1, i + tanWin);
+        Eigen::Vector3d t = pts[b].point - pts[a].point;
+        const double nrm = t.norm();
+        return nrm > 1e-9 ? Eigen::Vector3d(t / nrm) : Eigen::Vector3d(0.0, 1.0, 0.0);
+    };
+
+    const double sigmaS2x2 = 2.0 * windowMm * windowMm;
+    const double sigmaR2x2 = 2.0 * edgeMm * edgeMm;
+    const double halfSpan = 3.0 * windowMm;  // 高斯 3σ 截断
+
+    std::vector<Eigen::Vector3d> out(n);
+    int moved = 0;
+    for (int i = 0; i < n; ++i)
+    {
+        if (pts[i].type == PointCloudExtractionProcessor::TrackPointType::Start
+            || pts[i].type == PointCloudExtractionProcessor::TrackPointType::End)
+        {
+            out[i] = pts[i].point;
+            continue;
+        }
+        const Eigen::Vector3d ti = localTangent(i);
+        Eigen::Vector3d acc = pts[i].point;  // 中心点 ds=0,perp=0 → 权重 1
+        double wsum = 1.0;
+        for (int j = i - 1; j >= 0; --j)
+        {
+            const double ds = arc[i] - arc[j];
+            if (ds > halfSpan) break;
+            const Eigen::Vector3d d = pts[j].point - pts[i].point;
+            const double perp = (d - d.dot(ti) * ti).norm();
+            const double w = std::exp(-ds * ds / sigmaS2x2) * std::exp(-perp * perp / sigmaR2x2);
+            acc += w * pts[j].point;
+            wsum += w;
+        }
+        for (int j = i + 1; j < n; ++j)
+        {
+            const double ds = arc[j] - arc[i];
+            if (ds > halfSpan) break;
+            const Eigen::Vector3d d = pts[j].point - pts[i].point;
+            const double perp = (d - d.dot(ti) * ti).norm();
+            const double w = std::exp(-ds * ds / sigmaS2x2) * std::exp(-perp * perp / sigmaR2x2);
+            acc += w * pts[j].point;
+            wsum += w;
+        }
+        out[i] = (wsum > 1e-12) ? Eigen::Vector3d(acc / wsum) : pts[i].point;
+        if ((out[i] - pts[i].point).norm() > 1e-6)
+        {
+            ++moved;
+        }
+    }
+    for (int i = 0; i < n; ++i)
+    {
+        pts[i].point = out[i];
+    }
+    return moved;
+}
+
 RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud(
     const QVector<RobotCalculation::IndexedPoint3D>& legacyLaserInput,
     const QVector<RobotCalculation::IndexedPoint3D>& fullCloudInput,
@@ -733,6 +815,25 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             .arg(PointCloudProcessingConfig::ModeDisplayName(settings.mode)));
         appendLog(QString("特征点拟合方案：%1。")
             .arg(GeometryStrategyName(fitParams.geometryStrategy)));
+        if (fitParams.enableEdgeTruncate && (fitParams.truncateHeadMm > 0.0 || fitParams.truncateTailMm > 0.0))
+        {
+            appendLog(QString("基础焊道首尾截断已启用：开头%1mm / 结尾%2mm（按点列扫描顺序，与焊接方向无关；对②③④拟合方案生效）。")
+                .arg(fitParams.truncateHeadMm, 0, 'f', 1)
+                .arg(fitParams.truncateTailMm, 0, 'f', 1));
+        }
+        if (fitParams.enableEndPeriodCornerRecover)
+        {
+            appendLog(QString("端区周期补拐点已启用：端段长≥%1×周期判漏补、相邻同类间距<%2×周期判错删、最小确认弯折角%3°（波纹周期+典型拐角角度，补回端区漏点并删除挨太近的误检同类拐点；对②③④生效）。")
+                .arg(fitParams.endPeriodRatioThreshold, 0, 'f', 2)
+                .arg(fitParams.endPeriodMergeFrac, 0, 'f', 2)
+                .arg(fitParams.endPeriodMinBendDeg, 0, 'f', 1));
+        }
+        if (fitParams.enablePlatformCornerSnap)
+        {
+            appendLog(QString("按平台边界重定拐点已启用：侧向斜率<%1判为平台、平台最小长度=%2×周期（检测平的段，把拐点归位到平台两端、删平台内放错的角，治拐点放平台中间致平台消失；对正确平台幂等不动；对②③④生效）。")
+                .arg(fitParams.platformSnapFlatSlope, 0, 'f', 2)
+                .arg(fitParams.platformSnapMinFrac, 0, 'f', 2));
+        }
     }
 
     const bool sdkMode = settings.mode == PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet
@@ -813,6 +914,23 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             // 随 fitParams 由配置开放，现场可调。只改本次局部拷贝，不动 fitParams 本体。
             RobotCalculation::LowerWeldFilterParams baseWeldParams = fitParams;
             baseWeldParams.inputAlreadyDenoised = true;
+            // SDK 基础焊道预平滑(可选, 默认关)：SDK 重建焊道偶有锯齿，拟合第一步前先做结构自适应双边去锯齿；
+            // 靠"到局部切线垂直偏移"的值域核跨搭接X台阶/折角自动不平滑。仅本路径，不影响③点云+拟合/④特征点+拟合。
+            if (settings.sdkBasePresmoothEnable)
+            {
+                const int movedCount = BilateralPresmoothSdkBaseWeld(
+                    workingExtraction.points,
+                    settings.sdkBasePresmoothWindowMm,
+                    settings.sdkBasePresmoothEdgeMm);
+                if (appendLog)
+                {
+                    appendLog(QString("SDK基础焊道预平滑(结构自适应双边)：窗口=%1mm，保边阈值=%2mm，平滑点=%3/%4。")
+                        .arg(settings.sdkBasePresmoothWindowMm, 0, 'f', 2)
+                        .arg(settings.sdkBasePresmoothEdgeMm, 0, 'f', 2)
+                        .arg(movedCount)
+                        .arg(workingExtraction.points.size()));
+                }
+            }
             analysis = RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
                 ToIndexedInput(workingExtraction.points), baseWeldParams);
         }
@@ -10317,6 +10435,16 @@ RobotCalculation::LowerWeldFilterParams MeasureThenWeldService::BuildTrackFitPar
     params.validationOutputEnabled = pointCloudSettings.validationOutputEnabled;
     params.validationMinOutputPointCount = pointCloudSettings.validationMinOutputPointCount;
     params.validationMinOutputLengthRatio = pointCloudSettings.validationMinOutputLengthRatio;
+    params.enableEdgeTruncate = pointCloudSettings.fitEdgeTruncateEnable;
+    params.truncateHeadMm = pointCloudSettings.fitTruncateHeadMm;
+    params.truncateTailMm = pointCloudSettings.fitTruncateTailMm;
+    params.enableEndPeriodCornerRecover = pointCloudSettings.fitEndPeriodRecoverEnable;
+    params.endPeriodRatioThreshold = pointCloudSettings.fitEndPeriodRatioThreshold;
+    params.endPeriodMinBendDeg = pointCloudSettings.fitEndPeriodMinBendDeg;
+    params.endPeriodMergeFrac = pointCloudSettings.fitEndPeriodMergeFrac;
+    params.enablePlatformCornerSnap = pointCloudSettings.fitPlatformSnapEnable;
+    params.platformSnapFlatSlope = pointCloudSettings.fitPlatformSnapFlatSlope;
+    params.platformSnapMinFrac = pointCloudSettings.fitPlatformSnapMinFrac;
     return params;
 }
 

@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>激光传感器 FANUC 数学宏 安装与使用说明</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm; }
+  * { box-sizing: border-box; }
+  body{ font-family:"Microsoft YaHei","微软雅黑",sans-serif; color:#1f2937; font-size:11px; line-height:1.6; margin:0; }
+  h1{ font-size:23px; margin:0 0 2px; color:#111827; }
+  h2{ font-size:15px; margin:20px 0 8px; padding:6px 10px; background:#c0392b; color:#fff; border-radius:4px; }
+  h3{ font-size:13px; margin:14px 0 5px; color:#c0392b; border-bottom:1px solid #e5b3ad; padding-bottom:3px; }
+  .sub{ color:#6b7280; font-size:12px; }
+  .meta{ color:#6b7280; font-size:10.5px; margin-top:4px;}
+  table{ border-collapse:collapse; width:100%; margin:7px 0; font-size:10.5px; }
+  th,td{ border:1px solid #cbd5e1; padding:5px 7px; text-align:left; vertical-align:top; }
+  th{ background:#f1f5f9; }
+  code,kbd{ font-family:Consolas,"Courier New",monospace; background:#f3f4f6; padding:1px 4px; border-radius:3px; font-size:10.5px; }
+  pre{ font-family:Consolas,"Courier New",monospace; background:#0f172a; color:#e2e8f0; padding:9px 12px; border-radius:5px; font-size:10px; line-height:1.5; overflow:auto; white-space:pre; }
+  pre .c{ color:#94a3b8; }
+  .ok{ color:#15803d; font-weight:bold;}
+  .warn{ color:#b45309; }
+  .box{ border:1px solid #e5e7eb; border-left:4px solid #c0392b; background:#fafafa; padding:8px 12px; margin:8px 0; border-radius:0 4px 4px 0; }
+  .grid2{ display:flex; gap:14px; align-items:flex-start; }
+  .grid2 > div{ flex:1; }
+  .fig{ text-align:center; margin:6px 0; }
+  .figcap{ color:#6b7280; font-size:10px; text-align:center; margin-top:2px; }
+  .pb{ page-break-before: always; }
+  .macrocard{ border:1px solid #e5e7eb; border-radius:6px; padding:10px 12px; margin:10px 0; page-break-inside:avoid; }
+  .tag{ display:inline-block; background:#111827; color:#fff; font-size:10px; padding:1px 7px; border-radius:10px; margin-left:6px; vertical-align:middle;}
+  .hl{ background:#fef3c7; padding:0 3px;}
+  ol{ margin:5px 0 5px 18px;} ul{ margin:5px 0 5px 18px;}
+  header.cover{ border-bottom:3px solid #c0392b; padding-bottom:10px; margin-bottom:6px; }
+  .logo{ display:inline-block; width:0;height:0; border-left:11px solid transparent;border-right:11px solid transparent;border-bottom:19px solid #c0392b; vertical-align:middle; margin-right:8px;}
+</style>
+</head>
+<body>
+
+<header class="cover">
+  <h1><span class="logo"></span>激光传感器 · FANUC 数学宏</h1>
+  <div class="sub">安装与使用说明书</div>
+  <div class="meta">适用宏：AIH_CZ 垂足 / AIH_YC 延长线 / AIH_JD 交点 / AIH_YX 圆心 / AIH_YH 用户坐标系　|　控制器版本：V9.40-1　|　版本 v1.0　2026-06</div>
+</header>
+
+<h2>1. 概述</h2>
+<p>本套宏在 FANUC 示教器上对“激光寻位得到的点（存于 PR 寄存器）”做几何计算，输出结果点到指定 PR、成功标志到指定 R。每个宏 = <b>一个 TP 外壳</b>（把宏实参 AR[] 抄进 R[]）+ <b>一个 KAREL 内核</b>（真正算几何）。所有角度为度，长度为 mm；姿态遵循 FANUC <code>R = Rz·Ry·Rx</code>。</p>
+
+<h2>2. 交付物清单</h2>
+<p>位于 <code>SDK\FANUC\laser_macros\compiled\</code>：</p>
+<table>
+  <tr><th>文件</th><th>类型</th><th>说明</th></tr>
+  <tr><td><code>AIH_CZ_K.pc</code> <code>AIH_YC_K.pc</code> <code>AIH_JD_K.pc</code> <code>AIH_YX_K.pc</code> <code>AIH_YH_K.pc</code></td><td>KAREL 已编译</td><td>几何内核，必须装入（控制器不编 KAREL）</td></tr>
+  <tr><td><code>AIH_CZ.tp</code> <code>AIH_YC.tp</code> <code>AIH_JD.tp</code> <code>AIH_YX.tp</code> <code>AIH_YH.tp</code></td><td>TP 外壳已编译</td><td>把 AR[] 抄进 R[] 再 CALL 内核，直接装入</td></tr>
+  <tr><td><code>AIH_*.ls</code></td><td>TP 源码（备查）</td><td>改寄存器号、或想在示教器手打时看它</td></tr>
+</table>
+<div class="box">全部 10 个程序（5×.tp + 5×.pc）均用现场 WinOLPC（ktrans/maketp，V9.40-1，与上位机 <code>FanucCompileKlToPc/FanucCompileLsToTp</code> 同一套工具）编译通过，可直接装入。</div>
+
+<h2>3. 调用链路（先看懂这张图）</h2>
+<div class="fig">
+<svg width="620" height="150" viewBox="0 0 620 150" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#374151"/></marker></defs>
+  <g font-family="Microsoft YaHei" font-size="10.5">
+    <rect x="6" y="40" width="120" height="64" rx="6" fill="#fef2f2" stroke="#c0392b"/>
+    <text x="66" y="62" text-anchor="middle" font-weight="bold">操作员调用</text>
+    <text x="66" y="80" text-anchor="middle" font-family="Consolas">垂足(1,2,3,</text>
+    <text x="66" y="94" text-anchor="middle" font-family="Consolas">1,4,100)</text>
+
+    <rect x="160" y="48" width="96" height="48" rx="6" fill="#eff6ff" stroke="#2563eb"/>
+    <text x="208" y="68" text-anchor="middle" font-weight="bold">AR[1..n]</text>
+    <text x="208" y="84" text-anchor="middle">宏实参</text>
+
+    <rect x="290" y="40" width="116" height="64" rx="6" fill="#f8fafc" stroke="#64748b"/>
+    <text x="348" y="60" text-anchor="middle" font-weight="bold">TP 外壳 AIH_CZ</text>
+    <text x="348" y="78" text-anchor="middle" font-family="Consolas">R[61..]=AR[..]</text>
+    <text x="348" y="92" text-anchor="middle" font-family="Consolas">CALL AIH_CZ_K</text>
+
+    <rect x="440" y="40" width="116" height="64" rx="6" fill="#f0fdf4" stroke="#15803d"/>
+    <text x="498" y="60" text-anchor="middle" font-weight="bold">KAREL 内核</text>
+    <text x="498" y="76" text-anchor="middle">读 PR 算几何</text>
+    <text x="498" y="92" text-anchor="middle" font-family="Consolas">AIH_CZ_K</text>
+
+    <rect x="572" y="34" width="44" height="76" rx="6" fill="#fffbeb" stroke="#b45309"/>
+    <text x="594" y="62" text-anchor="middle">结果</text>
+    <text x="594" y="78" text-anchor="middle">PR +</text>
+    <text x="594" y="94" text-anchor="middle">标志R</text>
+
+    <line x1="126" y1="72" x2="158" y2="72" stroke="#374151" marker-end="url(#ar)"/>
+    <line x1="256" y1="72" x2="288" y2="72" stroke="#374151" marker-end="url(#ar)"/>
+    <line x1="406" y1="72" x2="438" y2="72" stroke="#374151" marker-end="url(#ar)"/>
+    <line x1="556" y1="72" x2="570" y2="72" stroke="#374151" marker-end="url(#ar)"/>
+  </g>
+</svg>
+</div>
+<p class="figcap">参数填的是“寄存器编号”，不是坐标值。例：<code>垂足(1,2,3,1,4,100)</code> = 用 PR[1..3] 三点、姿态用 PR[1]、垂足存 PR[4]、成功标志写 R[100]。</p>
+
+<h2 class="pb">4. 安装步骤</h2>
+<ol>
+  <li><b>拷文件</b>：U 盘把 <code>compiled\</code> 里 <b>5 个 .pc + 5 个 .tp</b> 拷入控制器。</li>
+  <li><b>装 KAREL 内核</b>：<code>MENU → FILE → 选 U 盘设备 → 选 AIH_*_K.pc → LOAD</code>。装完 SELECT 列表应见 <code>AIH_CZ_K … AIH_YH_K</code>。</li>
+  <li><b>装 TP 外壳</b>：<code>MENU → FILE → 选 AIH_*.tp → LOAD</code>。SELECT 列表应见 <code>AIH_CZ AIH_YC AIH_JD AIH_YX AIH_YH</code>。</li>
+  <li><b>注册成宏</b>（依传感器手册 1–3 页）：<code>MENU → SETUP → Macro</code>，新增 5 条，指令名填中文，程序选对应 TP 外壳：
+    <table>
+      <tr><th>指令名</th><td>垂足</td><td>延长线</td><td>交点</td><td>圆心</td><td>用户坐标系</td></tr>
+      <tr><th>程序</th><td>AIH_CZ</td><td>AIH_YC</td><td>AIH_JD</td><td>AIH_YX</td><td>AIH_YH</td></tr>
+    </table>
+    只注册这 5 个 TP 外壳；<code>AIH_*_K</code> 内核不注册，由外壳 CALL。
+  </li>
+  <li><b>先自检</b>（见第 6 节）再投产。</li>
+</ol>
+<div class="box"><b>两种调用方式等价：</b>宏指令方式 <code>垂足(1,2,3,1,4,100)</code>（从指令栏插入）；或通用兜底 <code>CALL AIH_CZ(1,2,3,1,4,100)</code>。参数都进 AR[]，外壳照常工作。</div>
+
+<h2 class="pb">5. 五个宏详解</h2>
+
+<div class="macrocard">
+  <h3>① 垂足 AIH_CZ <span class="tag">点到直线投影</span></h3>
+  <div class="grid2">
+    <div>
+      <div class="fig">
+      <svg width="260" height="170" viewBox="0 0 260 170" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei" font-size="11">
+        <line x1="40" y1="160" x2="170" y2="30" stroke="#111827" stroke-width="2"/>
+        <line x1="190" y1="150" x2="108" y2="92" stroke="#2563eb" stroke-width="1.4" stroke-dasharray="5 3"/>
+        <rect x="100" y="86" width="12" height="12" fill="none" stroke="#2563eb" stroke-width="1" transform="rotate(-50 108 92)"/>
+        <circle cx="40" cy="160" r="4" fill="#111827"/><text x="20" y="164">P1</text>
+        <circle cx="170" cy="30" r="4" fill="#111827"/><text x="176" y="30">P2</text>
+        <circle cx="190" cy="150" r="4" fill="#111827"/><text x="196" y="153">P3</text>
+        <circle cx="108" cy="92" r="5" fill="#c0392b"/><text x="60" y="86" fill="#c0392b">垂足</text>
+      </svg></div>
+      <div class="figcap">P3 向直线(P1,P2) 作垂线，垂足落在线上</div>
+    </div>
+    <div>
+      <p><b>功能</b>：求点 P3 到直线(P1,P2) 的垂直投影点。</p>
+      <p><b>调用</b>：<code>垂足(点1, 点2, 点3, 姿态点, 垂足PR, 标志R)</code></p>
+      <p><b>例</b>：<code>垂足(1,2,3,1,4,100)</code> → PR1,PR2,PR3 三点，姿态用 PR1，垂足存 PR4，标志 R100。</p>
+    </div>
+  </div>
+</div>
+
+<div class="macrocard">
+  <h3>② 延长线 AIH_YC <span class="tag">沿方向外延</span></h3>
+  <div class="grid2">
+    <div>
+      <div class="fig">
+      <svg width="260" height="170" viewBox="0 0 260 170" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei" font-size="11">
+        <defs><marker id="ar2" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#c0392b"/></marker></defs>
+        <line x1="40" y1="150" x2="130" y2="90" stroke="#111827" stroke-width="2"/>
+        <line x1="130" y1="90" x2="210" y2="36" stroke="#c0392b" stroke-width="2" stroke-dasharray="5 3" marker-end="url(#ar2)"/>
+        <circle cx="40" cy="150" r="4" fill="#111827"/><text x="20" y="154">P1</text>
+        <circle cx="130" cy="90" r="4" fill="#111827"/><text x="112" y="84">P2</text>
+        <circle cx="210" cy="36" r="5" fill="#c0392b"/><text x="150" y="48" fill="#c0392b">延长点</text>
+        <text x="160" y="86" fill="#c0392b" font-size="10">距离</text>
+      </svg></div>
+      <div class="figcap">沿 P1→P2 方向，从 P2 再外延一段“距离”</div>
+    </div>
+    <div>
+      <p><b>功能</b>：方向 = P1→P2，从 P2 沿该方向外延 <i>距离</i> 得到延长点。</p>
+      <p><b>调用</b>：<code>延长线(点1, 点2, 姿态点, 距离, 延长PR, 标志R)</code></p>
+      <p><b>例</b>：<code>延长线(1,2,1,80,3,100)</code> → 用 PR1→PR2 方向、姿态用 PR1、外延 80mm、延长点存 PR3、标志 R100。</p>
+    </div>
+  </div>
+</div>
+
+<div class="macrocard">
+  <h3>③ 交点 AIH_JD <span class="tag">两直线相交</span></h3>
+  <div class="grid2">
+    <div>
+      <div class="fig">
+      <svg width="260" height="170" viewBox="0 0 260 170" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei" font-size="11">
+        <line x1="70" y1="20" x2="70" y2="120" stroke="#111827" stroke-width="2"/>
+        <line x1="70" y1="120" x2="70" y2="150" stroke="#111827" stroke-width="1" stroke-dasharray="4 3"/>
+        <line x1="70" y1="150" x2="230" y2="150" stroke="#2563eb" stroke-width="2"/>
+        <line x1="70" y1="150" x2="120" y2="150" stroke="#2563eb" stroke-width="1" stroke-dasharray="4 3"/>
+        <circle cx="70" cy="40" r="4" fill="#111827"/><text x="44" y="44">P1</text>
+        <circle cx="70" cy="110" r="4" fill="#111827"/><text x="44" y="114">P2</text>
+        <circle cx="150" cy="150" r="4" fill="#2563eb"/><text x="140" y="168" fill="#2563eb">P3</text>
+        <circle cx="220" cy="150" r="4" fill="#2563eb"/><text x="210" y="168" fill="#2563eb">P4</text>
+        <circle cx="70" cy="150" r="5" fill="#c0392b"/><text x="6" y="146" fill="#c0392b">交点</text>
+      </svg></div>
+      <div class="figcap">直线(P1,P2) 与 直线(P3,P4) 的交点（可外延到角点）</div>
+    </div>
+    <div>
+      <p><b>功能</b>：求两条直线的交点；3D 一般取“公垂线中点”，点共面时即精确交点。</p>
+      <p><b>调用</b>：<code>交点(点1, 点2, 点3, 点4, 姿态点, 交点PR, 标志R)</code></p>
+      <p><b>例</b>：<code>交点(1,2,3,4,1,5,100)</code> → PR1,PR2 一线、PR3,PR4 一线、姿态用 PR1、交点存 PR5、标志 R100。</p>
+    </div>
+  </div>
+</div>
+
+<div class="macrocard">
+  <h3>④ 圆心 AIH_YX <span class="tag">三点/四点拟合圆</span></h3>
+  <div class="grid2">
+    <div>
+      <div class="fig">
+      <svg width="260" height="170" viewBox="0 0 260 170" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei" font-size="11">
+        <circle cx="130" cy="90" r="62" fill="none" stroke="#111827" stroke-width="2"/>
+        <circle cx="84" cy="48" r="4" fill="#111827"/><text x="60" y="44">P1</text>
+        <circle cx="192" cy="78" r="4" fill="#111827"/><text x="198" y="78">P2</text>
+        <circle cx="112" cy="150" r="4" fill="#111827"/><text x="92" y="166">P3</text>
+        <circle cx="130" cy="90" r="5" fill="#c0392b"/><text x="138" y="92" fill="#c0392b">圆心</text>
+        <line x1="130" y1="90" x2="84" y2="48" stroke="#9ca3af" stroke-width="1" stroke-dasharray="3 3"/>
+      </svg></div>
+      <div class="figcap">求法=1 用三点(P1,P2,P3)；求法=2 用四点最小二乘</div>
+    </div>
+    <div>
+      <p><b>功能</b>：拟合点所在平面后求圆心。求法=1 三点法，求法=2 四点最小二乘。</p>
+      <p><b>调用</b>：<code>圆心(点1, 点2, 点3, 点4, 姿态点, 求法, 圆心PR, 标志R)</code></p>
+      <p><b>例</b>：<code>圆心(1,2,3,4,1,1,5,100)</code> → 四点 PR1..4、姿态用 PR1、求法=1（三点）、圆心存 PR5、标志 R100。</p>
+    </div>
+  </div>
+</div>
+
+<div class="macrocard">
+  <h3>⑤ 用户坐标系 AIH_YH <span class="tag">建 UFRAME</span></h3>
+  <div class="grid2">
+    <div>
+      <div class="fig">
+      <svg width="260" height="170" viewBox="0 0 260 170" xmlns="http://www.w3.org/2000/svg" font-family="Microsoft YaHei" font-size="11">
+        <defs><marker id="arx" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#2563eb"/></marker></defs>
+        <line x1="60" y1="150" x2="225" y2="150" stroke="#2563eb" stroke-width="2" marker-end="url(#arx)"/>
+        <line x1="60" y1="150" x2="60" y2="25" stroke="#2563eb" stroke-width="2" marker-end="url(#arx)"/>
+        <text x="225" y="166" fill="#2563eb">X</text><text x="44" y="28" fill="#2563eb">Y</text>
+        <circle cx="60" cy="150" r="5" fill="#c0392b"/><text x="30" y="150" fill="#c0392b">原点P1</text>
+        <circle cx="150" cy="150" r="4" fill="#111827"/><text x="140" y="168">P2</text>
+        <circle cx="60" cy="80" r="4" fill="#111827"/><text x="22" y="82">P3</text>
+      </svg></div>
+      <div class="figcap">原点=P1；+X=P1→P2；+Y 参考=P1→P3（求法2 用 P3→P4）</div>
+    </div>
+    <div>
+      <p><b>功能</b>：用寻位点建用户坐标系。原点=P1，+X=单位(P2−P1)，+Y 参考向量按求法（1/3：P1→P3；2：P3→P4）。结果(原点+姿态)写入 <span class="hl">PR[96]</span>。</p>
+      <p><b>调用</b>：<code>用户坐标系(点1, 点2, 点3, 点4, 求法, 坐标系号, 标志R)</code></p>
+      <p><b>生效</b>：调用后加一行（号写常数）：<code>UFRAME[5]=PR[96]</code>。</p>
+    </div>
+  </div>
+</div>
+
+<h2 class="pb">6. 装好先自检（无真机也能核对）</h2>
+<p>把“输入”手动写进对应 PR（直角坐标），调用宏，<b>单步运行</b>，读“输出” PR 与标志，应一致：</p>
+<table>
+  <tr><th>调用</th><th>输入 PR</th><th>输出（应等于）</th></tr>
+  <tr><td><code>垂足(1,2,3,1,4,100)</code></td><td>PR1(100,200,300) PR2(300,200,300) PR3(250,260,300)</td><td>PR4 = (250, 200, 300)，R100 = 1</td></tr>
+  <tr><td><code>延长线(1,2,1,80,3,100)</code></td><td>PR1(100,100,50) PR2(100,300,50)</td><td>PR3 = (100, 380, 50)，R100 = 1</td></tr>
+  <tr><td><code>交点(1,2,3,4,1,5,100)</code></td><td>PR1(0,0,0) PR2(200,0,0) PR3(120,−50,0) PR4(120,80,0)</td><td>PR5 = (120, 0, 0)，R100 = 1</td></tr>
+  <tr><td><code>圆心(1,2,3,4,1,1,5,100)</code></td><td>PR1(210,150,0) PR2(150,210,0) PR3(90,150,0)</td><td>PR5 = (150, 150, 0)，R100 = 1</td></tr>
+  <tr><td><code>用户坐标系(1,2,3,4,1,1,100)</code></td><td>PR1(0,0,0) PR2(10,0,0) PR3(0,10,0)</td><td>PR96 = (0,0,0, 姿态≈0,0,0)，R100 = 1</td></tr>
+</table>
+<p class="figcap">更全的标准答案：电脑上运行 <code>laser_macros\gen_testsheet.py</code>。</p>
+
+<h2>7. 资源占用 / 前提（安装前确认）</h2>
+<table>
+  <tr><th>项</th><th>要求</th></tr>
+  <tr><td><b>R[61]~R[68]</b></td><td>传参用，现场勿占用（如冲突：改 .ls 里 <code>R[61..]</code> 与 .kl 里 <code>RInt(61..)</code> 两处一致即可）</td></tr>
+  <tr><td><b>PR[96]</b></td><td>AIH_YH 暂存坐标系结果，现场勿占用</td></tr>
+  <tr><td>KAREL 选项 (R632)</td><td>必须已加载（现场已有 .pc 在跑则具备）</td></tr>
+  <tr><td>输入寻位点 PR</td><td>必须<b>直角坐标</b>表示，不能是关节</td></tr>
+  <tr><td>UTOOL / UFRAME</td><td>与寻位时一致；几何在哪个坐标系取点，结果就在哪个坐标系</td></tr>
+</table>
+
+<h2>8. AIH_YH 用户坐标系怎么生效</h2>
+<p>AIH_YH 把算出的坐标系（原点+姿态）写在 <span class="hl">PR[96]</span>。要真正生效，调用后加一行（号写常数）：</p>
+<pre>用户坐标系(1,2,3,4,1,5,100)
+UFRAME[5]=PR[96]</pre>
+<p>这样做是为稳妥（直接写 <code>$MNUFRAME</code> 涉及写保护/刷新）。装好后建议用一组真值数据核一次姿态正负。</p>
+
+<h2>9. 常见问题</h2>
+<table>
+  <tr><th>现象</th><th>处理</th></tr>
+  <tr><td>加载 .pc 报版本不符</td><td>现场机器人软件版本 ≠ V9.40-1。把 5 个 .kl（在 <code>laser_macros\</code>）用现场版本的 ktrans 重编：<code>maketp/ktrans</code> 调用须 <b>cwd=bin、传绝对输入输出路径、不带 /config</b>（与上位机一致）。</td></tr>
+  <tr><td>调用后标志 R = 0</td><td>输入点退化（两点重合/三点共线/两线平行）或输入 PR 非直角坐标——检查寻位点。</td></tr>
+  <tr><td>找不到 <code>AIH_*_K</code></td><td>内核 .pc 没装或没装全；回第 4 节第 2 步。</td></tr>
+  <tr><td>结果姿态不对</td><td>确认“姿态点”参数填的是想继承姿态的那个 PR 号。</td></tr>
+</table>
+
+<p class="meta" style="margin-top:18px; border-top:1px solid #e5e7eb; padding-top:6px;">激光传感器 FANUC 数学宏 · 安装与使用说明 · v1.0 · 2026-06</p>
+
+</body>
+</html>
