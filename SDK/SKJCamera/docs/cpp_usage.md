@@ -15,11 +15,21 @@ include/
 
 bin/<arch>/<Debug|Release>/
   SKJCamera.dll
+  avcodec-*.dll        # 图像解码依赖的 FFmpeg 运行时库
+  avutil-*.dll
+  swscale-*.dll
+  swresample-*.dll     # avcodec 的传递依赖
 
 lib/<arch>/<Debug|Release>/
   SKJCamera.lib        # MSVC import library，若使用 MSVC 构建
   libSKJCamera.a       # MinGW import/static library，若使用 MinGW 构建
 ```
+
+SDK 本身只生成 **一个库** `SKJCamera.dll`。图像解码采用 **动态链接 FFmpeg**（满足 LGPL 要求），
+因此运行时还需要 4 个 FFmpeg DLL：`avcodec`、`avutil`、`swscale`、`swresample`，必须与
+`SKJCamera.dll` 放在同一目录（或加入 `PATH`）。构建脚本已在链接后自动把这 4 个 DLL 拷贝到
+`bin/<arch>/<Debug|Release>/`。仅使用点云功能、不调用图像接口时，进程不会主动加载这些 DLL，
+但 Windows 在加载 `SKJCamera.dll` 时仍会解析其导入表，建议始终一并提供。
 
 业务程序通常只需要包含：
 
@@ -28,6 +38,7 @@ lib/<arch>/<Debug|Release>/
 ```
 
 `protocol.h` 和 `tcp_client.h` 主要用于 SDK 内部、协议诊断或底层测试，普通业务代码不建议直接调用其中的接口。
+图像数据的 `cv::Mat` / `QImage` 零拷贝包装示例见 [image_usage.md](image_usage.md)。
 
 ## 2. 基本流程
 
@@ -48,9 +59,11 @@ SKJCamera_Create
 | 创建/获取接口 | 释放/关闭接口 | 说明 |
 | --- | --- | --- |
 | `SKJCamera_Create()` | `SKJCamera_Destroy()` | 创建和销毁相机实例 |
-| `SKJCamera_Connect()` | `SKJCamera_Disconnect()` | 建立和断开 TCP 连接 |
+| `SKJCamera_Connect()` | `SKJCamera_Disconnect()` | 建立和断开点云 TCP 连接 |
+| `SKJCamera_ConnectImage()` | `SKJCamera_DisconnectImage()` | 建立和断开图像 TCP 连接（独立连接） |
 | `SKJCamera_GetLatestFrame()` | `SKJFrame_Release()` | 推荐的点云帧句柄接口 |
 | `SKJCamera_GetLatestPointCloud()` | `SKJCamera_FreeFrame()` | C 风格结构体接口 |
+| `SKJCamera_GetLatestImage()` | `SKJImage_Release()` | 图像帧句柄接口（解码后 BGR24） |
 | `SKJCamera_SetConnectTimeout()` | `SKJCamera_GetConnectTimeout()` | 连接超时配置 |
 | `SKJCamera_SetCommandTimeout()` | `SKJCamera_GetCommandTimeout()` | 命令超时配置 |
 | `SKJCamera_LaserOn()` | `SKJCamera_LaserOff()` | 激光开关 |
@@ -62,6 +75,9 @@ SKJCamera_Create
 | 设备搜索 | `SKJCamera_SearchDevices()`、`SKJCamera_SearchDevicesFlat()` |
 | 生命周期 | `SKJCamera_Create()`、`SKJCamera_Destroy()` |
 | 连接 | `SKJCamera_Connect()`、`SKJCamera_Disconnect()`、`SKJCamera_IsConnected()` |
+| 图像连接 | `SKJCamera_ConnectImage()`、`SKJCamera_DisconnectImage()`、`SKJCamera_IsImageConnected()` |
+| 图像帧句柄 | `SKJCamera_GetLatestImage()`、`SKJImage_Release()` |
+| 图像帧数据 | `SKJImage_GetWidth()`、`SKJImage_GetHeight()`、`SKJImage_GetStride()`、`SKJImage_GetFormat()`、`SKJImage_GetChannel()`、`SKJImage_GetTimestamp()`、`SKJImage_GetData()`、`SKJImage_GetDataLength()` |
 | 点云帧句柄 | `SKJCamera_GetLatestFrame()`、`SKJFrame_Release()` |
 | 点云帧数据 | `SKJFrame_GetChannel()`、`SKJFrame_GetTimestamp()`、`SKJFrame_GetPoint3DCount()`、`SKJFrame_GetPoint3DData()`、`SKJFrame_GetPoint2DCount()`、`SKJFrame_GetPoint2DData()`、`SKJFrame_GetResultPointValue()`、`SKJFrame_GetFpsImage()`、`SKJFrame_GetFpsPointCloud()`、`SKJFrame_GetErrorText()`、`SKJFrame_GetErrorLength()` |
 | C 风格点云帧 | `SKJCamera_GetLatestPointCloud()`、`SKJCamera_FreeFrame()`、`PointCloudFrame.roi` |
@@ -540,3 +556,39 @@ g++ -std=c++11 -Iinclude example\main.cpp -Llib\x64\Release -lSKJCamera -lws2_32
 - 点云帧数据指针只在对应帧句柄释放前有效。
 - 高频读取点云时，遇到 `SKJ_ERR_NO_DATA` 或 `SKJ_ERR_DATA_DUPLICATE` 后建议 sleep 5 到 10 ms，避免 CPU 空转。
 - 如果业务程序是 C# 或 Python 调用 DLL，应优先绑定 `SKJCamera_GetLatestFrame()` 和 `SKJFrame_*` 访问器，不建议直接跨语言释放 `PointCloudFrame` 内部指针。
+
+## 14. 读取图像帧（解码图像）
+
+图像通路与点云相互独立：使用 `SKJCamera_ConnectImage()` 建立独立的图像 TCP 连接（默认端口 50001），
+SDK 内部图像线程持续接收压缩图像（JPEG/H264/H265），自动识别编码并用 FFmpeg 解码为 **BGR24**，
+缓存最新一帧。读取方式与点云句柄接口一致，复用 `SKJ_ERR_NO_DATA` / `SKJ_ERR_DATA_DUPLICATE` 轮询去重。
+
+```cpp
+int ret = SKJCamera_ConnectImage(cam, "192.168.1.100", 50001);
+if (ret != SKJ_OK) {
+    std::cerr << "ConnectImage failed: " << SKJCamera_GetErrorString(ret) << std::endl;
+}
+
+SKJImageHandle img = NULL;
+ret = SKJCamera_GetLatestImage(cam, &img);
+if (ret == SKJ_OK) {
+    int      w      = SKJImage_GetWidth(img);
+    int      h      = SKJImage_GetHeight(img);
+    int      stride = SKJImage_GetStride(img);   // BGR24 下为 w*3
+    const uint8_t *data = SKJImage_GetData(img);  // 只读，Release 前有效
+    // ... 处理 data（cv::Mat / QImage 零拷贝包装见 image_usage.md）...
+    SKJImage_Release(img);
+} else if (ret == SKJ_ERR_NO_DATA || ret == SKJ_ERR_DATA_DUPLICATE) {
+    // 正常轮询状态，稍后再读。
+}
+
+SKJCamera_DisconnectImage(cam);  // SKJCamera_Destroy() 也会自动断开图像连接
+```
+
+说明：
+
+- 连接超时复用 `SKJCamera_SetConnectTimeout()`，与点云连接一致。
+- `SKJImage_GetData()` 返回只读指针，仅在 `SKJImage_Release()` 前有效，不要手动释放。
+- 输出固定为 BGR24（`SKJ_IMAGE_FORMAT_BGR24`），通道顺序与 OpenCV 默认一致。
+- 把数据包装为 `cv::Mat` / `QImage` 的零拷贝示例见 [image_usage.md](image_usage.md)。
+- 运行时需要 FFmpeg 的 `avcodec`/`avutil`/`swscale`/`swresample` 动态库，见第 1 节。

@@ -30,8 +30,15 @@ void CameraFrameCache::Clear()
 {
     std::lock_guard<std::mutex> locker(m_mutex);
     std::deque<CachedFrame>().swap(m_frames);
-    std::vector<PollStatus>().swap(m_pollStatus);
     m_nextSequence = 0;
+    // 注意：这里【不】清 m_pollStatus。ScanMoveAndCollect 在运动结束、帧已拉走后会再调一次 Clear()
+    // 清帧缓存，若连带清了 poll 日志，会把整场扫描记录 wipe 在快照之前。poll 日志改由 ClearPollStatus() 单独管。
+}
+
+void CameraFrameCache::ClearPollStatus()
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    std::vector<PollStatus>().swap(m_pollStatus);
 }
 
 void CameraFrameCache::AppendFrame(const udpDataShow& frame)
@@ -39,12 +46,14 @@ void CameraFrameCache::AppendFrame(const udpDataShow& frame)
     StoreFrame(frame);
 }
 
-void CameraFrameCache::RecordPollStatus(int ret)
+void CameraFrameCache::RecordPollStatus(int ret, qint64 frameTimestampUs, int pointCount)
 {
     std::lock_guard<std::mutex> locker(m_mutex);
     PollStatus status;
     status.receiveTimestampUs = CameraFrameCacheSteadyNowUs();
     status.ret = ret;
+    status.frameTimestampUs = frameTimestampUs;
+    status.pointCount = pointCount;
     m_pollStatus.push_back(status);
     if (m_pollStatus.size() > m_maxPollStatus)
     {
@@ -57,6 +66,59 @@ std::vector<CameraFrameCache::PollStatus> CameraFrameCache::PollStatusSnapshot()
 {
     std::lock_guard<std::mutex> locker(m_mutex);
     return m_pollStatus;
+}
+
+void CameraFrameCache::SetImageCaptureDir(const QString& dir, int frameStride)
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    m_imageCaptureDir = dir;
+    m_imageCaptureFrameStride = frameStride > 0 ? frameStride : 1;
+}
+
+QString CameraFrameCache::ImageCaptureDir() const
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    return m_imageCaptureDir;
+}
+
+int CameraFrameCache::ImageCaptureFrameStride() const
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    return m_imageCaptureFrameStride;
+}
+
+void CameraFrameCache::SetLiveImageEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    m_liveImageEnabled = enabled;
+    if (!enabled)
+    {
+        m_latestImage = QImage();
+        m_latestImageTimestamp = 0;
+    }
+}
+
+bool CameraFrameCache::LiveImageEnabled() const
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    return m_liveImageEnabled;
+}
+
+void CameraFrameCache::SetLatestImage(const QImage& image, qint64 imageTimestamp)
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    m_latestImage = image;  // QImage 隐式共享，仅引用计数
+    m_latestImageTimestamp = imageTimestamp;
+}
+
+QImage CameraFrameCache::LatestImage(qint64* imageTimestamp) const
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    if (imageTimestamp != nullptr)
+    {
+        *imageTimestamp = m_latestImageTimestamp;
+    }
+    return m_latestImage;
 }
 
 std::uint64_t CameraFrameCache::Mark() const

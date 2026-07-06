@@ -102,7 +102,7 @@ if ($windeployqtPath) {
     # TLS backends (plain sockets only; FTP goes through WinINet) and TUIO touch plugin.
     & $windeployqtPath --release --no-translations --no-opengl-sw `
         --no-system-d3d-compiler --no-system-dxc-compiler `
-        --exclude-plugins qpdf,qtiff,qwebp,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer `
+        --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer `
         --skip-plugin-types tls,networkinformation,generic `
         $exePath
     if ($LASTEXITCODE -ne 0) {
@@ -114,7 +114,7 @@ if ($windeployqtPath) {
     # back into the package (the same mechanism that once leaked vc_redist.x64.exe).
     $staleDeployFiles = @(
         "dxcompiler.dll", "dxil.dll", "D3Dcompiler_47.dll", "Qt6Pdf.dll",
-        "imageformats\qpdf.dll", "imageformats\qtiff.dll", "imageformats\qwebp.dll",
+        "imageformats\qpdf.dll", "imageformats\qtiff.dll",
         "imageformats\qtga.dll", "imageformats\qicns.dll", "imageformats\qwbmp.dll",
         "imageformats\qgif.dll",
         "sqldrivers\qsqlodbc.dll", "sqldrivers\qsqlpsql.dll", "sqldrivers\qsqlmimer.dll"

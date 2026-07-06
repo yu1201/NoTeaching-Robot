@@ -7028,9 +7028,48 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     const double actualCameraReadFps = 1000.0 / static_cast<double>(cameraReadIntervalMs);
 
     frameCache->Clear();
+    frameCache->ClearPollStatus();  // 扫描开始重置 SDK 取帧调用日志；此后到快照期间的记录不再被运动后清帧连带清掉
+
+    // 相机图像随扫描后台采集（SDK v1.2.0 图像传输）：先存进临时目录（结果目录序号在写盘时才分配），
+    // 写盘阶段整体挪到 Result/<案例>/CameraImage/。RAII 保证任何提前 return 都会关闭采集窗口。
+    // 开关与抽帧间隔来自相机参数（ImageCaptureEnable / ImageCaptureFrameStride），关闭时完全不开窗。
+    const bool imageCaptureEnabled = cameraParamForScan.imageCaptureEnable.trimmed() != QStringLiteral("0");
+    bool okImageStride = false;
+    int imageCaptureStride = cameraParamForScan.imageCaptureStride.trimmed().toInt(&okImageStride);
+    if (!okImageStride || imageCaptureStride <= 0)
+    {
+        imageCaptureStride = 5;
+    }
+    QString imageCaptureTmpDir;
+    if (imageCaptureEnabled)
+    {
+        imageCaptureTmpDir = QDir(QStringLiteral("Temp")).filePath(
+            QStringLiteral("CameraImages_%1").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz")));
+        QDir().mkpath(imageCaptureTmpDir);
+        frameCache->SetImageCaptureDir(imageCaptureTmpDir, imageCaptureStride);
+        if (appendLog)
+        {
+            appendLog(QString("相机图像采集已开启：抽帧间隔=%1（每 %1 张存 1 张，WebP），关闭/调整见相机参数页。").arg(imageCaptureStride));
+        }
+    }
+    struct ImageCaptureScopeGuard
+    {
+        CameraFrameCache* cache;
+        ~ImageCaptureScopeGuard()
+        {
+            if (cache != nullptr)
+            {
+                cache->SetImageCaptureDir(QString());
+            }
+        }
+    } imageCaptureScopeGuard{ frameCache };
 
     std::vector<RobotCalculation::TimestampedRobotPose> robotSamples;
     robotSamples.reserve(1000);
+    // (所选时间轴时间戳, PC接收时刻) 样本对：扫描结束后统计估计「PC钟→机器人轴」偏移用（方案A统计对齐）。
+    // 轴=PC接收时间时两者相等（中位差恒0），统一收集不区分。与 robotSamples 共用一把锁。
+    std::vector<std::pair<qint64, qint64>> robotAxisPcPairsUs;
+    robotAxisPcPairsUs.reserve(1000);
     std::mutex robotSamplesMutex;
     std::condition_variable robotSamplesCv;
 
@@ -7143,6 +7182,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
 
     auto appendRobotPose = [
         &robotSamples,
+        &robotAxisPcPairsUs,
         &robotSamplesMutex,
         &robotSamplesCv,
         pRobotDriver,
@@ -7152,6 +7192,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         {
             RobotCalculation::TimestampedRobotPose sample;
             RobotDriverAdaptor::StateSnapshot snapshot;
+            bool hasAxisPcPair = false;
+            qint64 pairAxisUs = 0;
+            qint64 pairPcUs = 0;
             if (pRobotDriver->LatestStateSnapshot(snapshot) && snapshot.valid)
             {
                 const long long selectedTimestampMs = useRobotTimestampForScan
@@ -7170,6 +7213,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                     sample.timestampUs = static_cast<qint64>(selectedTimestampMs) * 1000;
                     lastRobotMonitorMs = selectedTimestampMs;
                     passiveRobotSamplingActive = true;
+                    if (snapshot.pcRecvMs > 0)
+                    {
+                        hasAxisPcPair = true;
+                        pairAxisUs = sample.timestampUs;
+                        pairPcUs = static_cast<qint64>(snapshot.pcRecvMs) * 1000;
+                    }
                 }
             }
             if (sample.timestampUs <= 0)
@@ -7181,6 +7230,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             {
                 std::lock_guard<std::mutex> locker(robotSamplesMutex);
                 robotSamples.push_back(sample);
+                if (hasAxisPcPair)
+                {
+                    robotAxisPcPairsUs.emplace_back(pairAxisUs, pairPcUs);
+                }
             }
             robotSamplesCv.notify_all();
             return true;
@@ -7560,6 +7613,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
 
     const qint64 tailWaitElapsedMs = tailWaitTriggered ? (SteadyNowMs() - tailWaitStartMs) : 0;
 
+    // 扫描运动结束即关闭图像采集窗口（点云处理期无需继续拍摄）。
+    frameCache->SetImageCaptureDir(QString());
+
     // 扫描运动+尾部匹配结束这一刻，对相机 SDK 逐帧取帧状态做快照：此后进入点云处理，相机仍在空转，
     // 必须在此处取，避免处理期的空轮询污染“无新帧间断”统计。除 OK(0) 外的状态稍后逐条写入匹配明细文件。
     const std::vector<CameraFrameCache::PollStatus> pollStatusLog = frameCache->PollStatusSnapshot();
@@ -7605,6 +7661,176 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     finishCameraProcessingWorkers();
     const qint64 postMotionProcessingWaitMs = SteadyNowMs() - processingJoinStartMs;
     const qint64 parallelProcessingElapsedMs = SteadyNowMs() - processingWallStartMs;
+
+    // ===== 统计时间对齐（方案A）=====
+    // 首帧单点对齐的抖动实测可达 ±60ms（机器人位姿50ms采样量化 + 运行态检测抖动 + 单帧传输延迟抖动，
+    // 实测单帧延迟全幅 38.5ms），50mm/s 扫描速度下即 ±3mm 的扫描方向整体平移——同一工件重复扫不重合的根因。
+    // 这里改用整场统计量重估对齐（实测相邻扫描重复性 <2ms）：
+    //   ①相机钟→PC钟：全部成功取帧 (SDK帧时间戳, PC接收时刻) 差值的 P10 低分位（低分位≈最小传输延迟，抗抖动）；
+    //   ②PC钟→机器人轴：全部位姿采样 (所选轴时间戳, PC接收时刻) 差值的中位数（轴=PC接收时间时恒0）。
+    // 重估后对全部已处理帧重新插值匹配+手眼变换（纯内存重算，百ms级）。样本不足时保留首帧对齐并写日志。
+    qint64 statCamToPcUs = 0;
+    qint64 statPcToAxisUs = 0;
+    qint64 statRealignDeltaUs = 0;
+    qint64 statFirstFrameOffsetUs = 0;   // 覆盖前的首帧粗对齐偏移，供日志区分统计值/首帧值
+    std::size_t statCamSampleCount = 0;
+    std::size_t statAxisSampleCount = 0;
+    int statFlippedTailCount = 0;        // 重匹配后由已匹配翻为 unmatched_after 的尾帧数
+    bool statRealignApplied = false;
+    if (hasCameraToRobotTimeOffset)
+    {
+        std::vector<qint64> camPcDeltasUs;
+        camPcDeltasUs.reserve(pollStatusLog.size());
+        for (const CameraFrameCache::PollStatus& poll : pollStatusLog)
+        {
+            if (poll.ret == 0 && poll.frameTimestampUs > 0)
+            {
+                camPcDeltasUs.push_back(poll.receiveTimestampUs - poll.frameTimestampUs);
+            }
+        }
+        std::vector<qint64> axisPcDeltasUs;
+        {
+            std::lock_guard<std::mutex> locker(robotSamplesMutex);
+            axisPcDeltasUs.reserve(robotAxisPcPairsUs.size());
+            for (const std::pair<qint64, qint64>& pair : robotAxisPcPairsUs)
+            {
+                axisPcDeltasUs.push_back(pair.first - pair.second);
+            }
+        }
+        statCamSampleCount = camPcDeltasUs.size();
+        statAxisSampleCount = axisPcDeltasUs.size();
+        if (statCamSampleCount >= 50 && statAxisSampleCount >= 20)
+        {
+            std::sort(camPcDeltasUs.begin(), camPcDeltasUs.end());
+            std::sort(axisPcDeltasUs.begin(), axisPcDeltasUs.end());
+            statCamToPcUs = camPcDeltasUs[camPcDeltasUs.size() / 10];
+            statPcToAxisUs = axisPcDeltasUs[axisPcDeltasUs.size() / 2];
+            const qint64 statOffsetUs = statCamToPcUs + statPcToAxisUs;
+            statFirstFrameOffsetUs = cameraToRobotTimeOffsetUs;
+            statRealignDeltaUs = statOffsetUs - cameraToRobotTimeOffsetUs;
+            cameraToRobotTimeOffsetUs = statOffsetUs;
+
+            // 正向修正会把末帧时间戳右移越过位姿末样本。此刻机器人仍静止在扫描终点（收枪安全位
+            // 在 ScanMoveAndCollect 返回后才执行），补采几个位姿样本延长时间轴覆盖，避免尾帧被改判丢弃。
+            if (statRealignDeltaUs > 0)
+            {
+                qint64 lastFrameNewTimestampUs = 0;
+                {
+                    std::lock_guard<std::mutex> locker(processedCameraSamplesMutex);
+                    for (const ProcessedScanCameraSample& processed : processedCameraSamples)
+                    {
+                        if (processed.sample.rawTimestampUs > 0)
+                        {
+                            lastFrameNewTimestampUs = std::max(
+                                lastFrameNewTimestampUs,
+                                processed.sample.rawTimestampUs + statOffsetUs + cameraTimeOffsetUs);
+                        }
+                    }
+                }
+                for (int extraPoll = 0; extraPoll < 20; ++extraPoll)
+                {
+                    if (latestRobotTimestampUs() >= lastFrameNewTimestampUs)
+                    {
+                        break;
+                    }
+                    appendRobotPose();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(CAMERA_ROBOT_MATCH_TAIL_POLL_MS));
+                }
+            }
+
+            std::lock_guard<std::mutex> locker(processedCameraSamplesMutex);
+            for (ProcessedScanCameraSample& processed : processedCameraSamples)
+            {
+                TimestampedCameraPoint& sample = processed.sample;
+                if (sample.rawTimestampUs <= 0)
+                {
+                    continue;
+                }
+                const qint64 newTimestampUs = sample.rawTimestampUs + statOffsetUs + cameraTimeOffsetUs;
+                sample.timestampUs = newTimestampUs;
+                const bool outOfRange = robotSamples.empty()
+                    || newTimestampUs < robotSamples.front().timestampUs
+                    || newTimestampUs > robotSamples.back().timestampUs;
+                if (outOfRange)
+                {
+                    const bool wasMatched = processed.hasRobotPose;
+                    processed.status = robotSamples.empty()
+                        ? QStringLiteral("unmatched_no_robot_sample")
+                        : (newTimestampUs < robotSamples.front().timestampUs
+                            ? QStringLiteral("unmatched_before_robot")
+                            : QStringLiteral("unmatched_after_robot"));
+                    if (wasMatched && processed.status == QStringLiteral("unmatched_after_robot"))
+                    {
+                        ++statFlippedTailCount;
+                    }
+                    processed.hasRobotPose = false;
+                    processed.hasLaserPoint = false;
+                    processed.contributedWorkpieceFrame = false;
+                    processed.robotWindow = RobotInterpolationWindow();
+                    processed.workpiecePoints.clear();
+                    processed.skippedWorkpieceCloudPointCount = 0;  // 整帧已剔除，跳点计数一并清零，避免污染点云统计口径
+                    continue;
+                }
+                const RobotInterpolationWindow window = FindRobotInterpolationWindow(robotSamples, newTimestampUs);
+                if (window.prevIndex <= 0)
+                {
+                    continue;
+                }
+                const int prevZeroIndex = std::clamp(window.prevIndex - 1, 0, static_cast<int>(robotSamples.size()) - 1);
+                const int nextZeroIndex = std::clamp(window.nextIndex - 1, 0, static_cast<int>(robotSamples.size()) - 1);
+                std::vector<RobotCalculation::TimestampedRobotPose> interpolationSamples;
+                interpolationSamples.push_back(robotSamples[static_cast<std::size_t>(prevZeroIndex)]);
+                if (nextZeroIndex != prevZeroIndex)
+                {
+                    interpolationSamples.push_back(robotSamples[static_cast<std::size_t>(nextZeroIndex)]);
+                }
+                processed.robotWindow = window;
+                processed.robotPose = RobotCalculation::InterpolateRobotPose(interpolationSamples, newTimestampUs);
+                processed.hasRobotPose = true;
+                // 线点云重变换：cameraPoint 为相机系原始点，直接按新位姿重算工件系坐标。
+                // 原先未匹配的帧线点数据未保留（workpiecePoints 为空），无法复活，仅影响边界1~2帧的点云密度。
+                for (ProcessedScanWorkpiecePoint& cloudPoint : processed.workpiecePoints)
+                {
+                    cloudPoint.workpiecePoint =
+                        RobotCalculation::CalcLaserPointInRobot(processed.robotPose, cloudPoint.cameraPoint, calibration);
+                }
+                if (ShouldSkipLaserCalc(sample))
+                {
+                    processed.status = QStringLiteral("skip_invalid_camera_point");
+                    processed.hasLaserPoint = false;
+                }
+                else
+                {
+                    processed.status = QStringLiteral("laser_ok");
+                    processed.laserPoint =
+                        RobotCalculation::CalcLaserPointInRobot(processed.robotPose, sample.point, calibration);
+                    processed.hasLaserPoint = true;
+                }
+            }
+            statRealignApplied = true;
+        }
+    }
+    if (appendLog)
+    {
+        if (statRealignApplied)
+        {
+            appendLog(QString("统计时间对齐已生效：相机→PC钟差(P10)=%1 us（帧样本=%2），PC→机器人轴钟差(中位)=%3 us（位姿样本=%4），相对首帧粗对齐修正 %5 ms，已按新偏移全量重匹配%6。")
+                .arg(statCamToPcUs)
+                .arg(static_cast<int>(statCamSampleCount))
+                .arg(statPcToAxisUs)
+                .arg(static_cast<int>(statAxisSampleCount))
+                .arg(statRealignDeltaUs / 1000.0, 0, 'f', 2)
+                .arg(statFlippedTailCount > 0
+                    ? QString("（%1 个尾帧因时间戳平移超出机器人采样范围被改判丢弃）").arg(statFlippedTailCount)
+                    : QString()));
+        }
+        else if (hasCameraToRobotTimeOffset)
+        {
+            appendLog(QString("统计时间对齐未启用（帧样本=%1<50 或 位姿样本=%2<20），保留首帧粗对齐——扫描方向重复性受限（±3mm级）。")
+                .arg(static_cast<int>(statCamSampleCount))
+                .arg(static_cast<int>(statAxisSampleCount)));
+        }
+    }
 
     {
         std::lock_guard<std::mutex> locker(processedCameraSamplesMutex);
@@ -7881,6 +8107,54 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         matchDebugLines.push_back(sdkFields.join(','));
     }
 
+    // SDK 逐次取帧调用日志：pollStatusLog 里每次 GetLatestFrame 一行（返回码/帧时间戳/点数/PC轮询间隔）。
+    // 用途——帧时间戳(camera_raw_delta)突然翻倍=丢了一帧时，对齐这里判丢帧来源：
+    //   · 跳变窗口内一直是 skj_no_data/duplicate → SDK 当时没新帧可给（上游/相机/网络少给）；
+    //   · pc_delta_us 也跟着跳大（我方定时器卡了没去轮询）→ 我方漏取；
+    //   · 轮询正常(pc_delta≈10ms)却拿到跳变的新帧 → SDK 只给了隔帧。
+    std::vector<QString> sdkPollLogLines;
+    sdkPollLogLines.reserve(pollStatusLog.size() + 1);
+    sdkPollLogLines.push_back("poll_index,pc_recv_us,pc_delta_us,ret,ret_name,frame_ts_us,frame_ts_delta_us,point_count");
+    {
+        qint64 prevPollPcUs = -1;
+        qint64 prevFrameTsUs = -1;
+        int sdkPollIndex = 0;
+        for (const CameraFrameCache::PollStatus& poll : pollStatusLog)
+        {
+            QString retName;
+            if (poll.ret == 0) retName = QStringLiteral("ok");
+            else if (poll.ret == -106) retName = QStringLiteral("skj_no_data");
+            else if (poll.ret == -107) retName = QStringLiteral("skj_duplicate");
+            else retName = QStringLiteral("skj_error(%1)").arg(poll.ret);
+
+            const qint64 pcDeltaUs = (prevPollPcUs >= 0) ? (poll.receiveTimestampUs - prevPollPcUs) : 0;
+            QString frameTsField;
+            QString frameDeltaField;
+            QString pointField;
+            if (poll.ret == 0)
+            {
+                frameTsField = QString::number(poll.frameTimestampUs);
+                if (prevFrameTsUs >= 0)
+                {
+                    frameDeltaField = QString::number(poll.frameTimestampUs - prevFrameTsUs);
+                }
+                pointField = QString::number(poll.pointCount);
+                prevFrameTsUs = poll.frameTimestampUs;
+            }
+            QStringList sdkPollFields;
+            sdkPollFields << QString::number(sdkPollIndex++)
+                << QString::number(poll.receiveTimestampUs)
+                << QString::number(pcDeltaUs)
+                << QString::number(poll.ret)
+                << retName
+                << frameTsField
+                << frameDeltaField
+                << pointField;
+            sdkPollLogLines.push_back(sdkPollFields.join(','));
+            prevPollPcUs = poll.receiveTimestampUs;
+        }
+    }
+
     const qint64 outputBuildElapsedMs = SteadyNowMs() - outputBuildStartMs;
 
     QString error;
@@ -7907,6 +8181,54 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             appendLog(error);
         }
         return false;
+    }
+    // SDK 逐次取帧调用日志（可选，失败不中断主流程）：诊断帧时间戳跳变=我方漏取还是上游少给。
+    if (sdkPollLogLines.size() > 1)
+    {
+        const QString sdkPollLogPath = QDir(laserDir).filePath("PreciseLaserPoint_SdkPollLog.csv");
+        QString sdkPollLogError;
+        if (SaveTextLines(sdkPollLogPath, sdkPollLogLines, sdkPollLogError))
+        {
+            if (appendLog)
+            {
+                appendLog(QString("SDK 取帧调用日志：%1（共 %2 次调用；帧时间戳跳变处对齐 ret/pc_delta 判丢帧来源）")
+                    .arg(sdkPollLogPath).arg(static_cast<int>(pollStatusLog.size())));
+            }
+        }
+        else if (appendLog)
+        {
+            appendLog(QString("SDK 取帧调用日志导出失败（不影响流程）：%1").arg(sdkPollLogError));
+        }
+    }
+    // 扫描期间后台采集的相机图像：从临时目录整体挪进本次结果目录（同盘 rename，瞬间完成）。
+    // 采集窗口早在扫描运动结束时已关闭，此刻距停窗已数秒，保存队列必已排干。空目录直接删除。
+    if (!imageCaptureTmpDir.isEmpty())
+    {
+        QDir imageTmpDir(imageCaptureTmpDir);
+        const int imageCount = imageTmpDir.exists()
+            ? static_cast<int>(imageTmpDir.entryList(QStringList() << "*.webp" << "*.jpg", QDir::Files).size())
+            : 0;
+        if (imageCount > 0)
+        {
+            const QString imageTargetDir = QDir(resultDir).filePath("CameraImage");
+            if (QDir().rename(imageCaptureTmpDir, imageTargetDir))
+            {
+                if (appendLog)
+                {
+                    appendLog(QString("相机图像已保存：%1 张，目录=%2（文件名=img_<SDK图像时间戳>_<PC接收us>.webp，可与取帧日志时间轴对齐）")
+                        .arg(imageCount)
+                        .arg(imageTargetDir));
+                }
+            }
+            else if (appendLog)
+            {
+                appendLog(QString("相机图像归档失败（仍保留在临时目录）：%1（%2 张）").arg(imageCaptureTmpDir).arg(imageCount));
+            }
+        }
+        else if (imageTmpDir.exists())
+        {
+            imageTmpDir.removeRecursively();  // 图像口未连接/无帧：清掉空临时目录
+        }
     }
     // 完整点云逐帧调试文件（可选，失败不中断主流程）：供 CloudCompare 按 frame_index 着色排查散点。
     if (exportWorkpieceFrameDebug && workpieceFrameDebugLines.size() > 1)
@@ -7957,11 +8279,24 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             .arg(cacheEffectiveFps, 0, 'f', 2));
         if (hasCameraToRobotTimeOffset)
         {
-            appendLog(QString("相机时间轴映射到机器人采样时间轴：首帧相机timestamp=%1 us，对齐机器人时间=%2 us，映射偏移=%3 us，额外补偿=%4 ms。")
-                .arg(firstCameraRawTimestampUs)
-                .arg(firstRobotTimestampUs)
-                .arg(cameraToRobotTimeOffsetUs)
-                .arg(param.dCameraTimeOffsetMs, 0, 'f', 3));
+            if (statRealignApplied)
+            {
+                // 统计对齐生效后 cameraToRobotTimeOffsetUs 已是统计值，与首帧两时间戳之差不再相等——分开注明，避免现场按旧句式手算对不上。
+                appendLog(QString("相机时间轴映射到机器人采样时间轴：映射偏移=%1 us（统计对齐值；首帧粗对齐值=%2 us，首帧相机timestamp=%3 us，对齐机器人时间=%4 us），额外补偿=%5 ms。")
+                    .arg(cameraToRobotTimeOffsetUs)
+                    .arg(statFirstFrameOffsetUs)
+                    .arg(firstCameraRawTimestampUs)
+                    .arg(firstRobotTimestampUs)
+                    .arg(param.dCameraTimeOffsetMs, 0, 'f', 3));
+            }
+            else
+            {
+                appendLog(QString("相机时间轴映射到机器人采样时间轴：首帧相机timestamp=%1 us，对齐机器人时间=%2 us，映射偏移=%3 us，额外补偿=%4 ms。")
+                    .arg(firstCameraRawTimestampUs)
+                    .arg(firstRobotTimestampUs)
+                    .arg(cameraToRobotTimeOffsetUs)
+                    .arg(param.dCameraTimeOffsetMs, 0, 'f', 3));
+            }
         }
         if (droppedHeadCameraCount > 0)
         {
@@ -9352,7 +9687,8 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     const StepCallback& setFlowStep,
     const CheckpointCallback& checkpoint,
     double overrideFinalStepMm,
-    bool allowPointwiseWeave) const
+    bool allowPointwiseWeave,
+    int resumeSkipPoints) const
 {
     summary.clear();
     error.clear();
@@ -9367,6 +9703,24 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     if (!LoadWeldPoseFileRecords(poseFilePath, records, error))
     {
         return false;
+    }
+
+    // 断点续焊：丢弃断点(含搭接回退)之前的轨迹点。必须在安全位推算/抽样之前裁剪，
+    // 使下枪安全位按续焊首点重新推算、ARCON 自动生成在续焊首点前。
+    if (resumeSkipPoints > 0)
+    {
+        if (resumeSkipPoints >= records.size() - 1)
+        {
+            error = QString("断点续焊起始点(%1)已到或超过轨迹末尾(共%2点)，无可执行段。")
+                .arg(resumeSkipPoints).arg(records.size());
+            return false;
+        }
+        records.erase(records.begin(), records.begin() + resumeSkipPoints);
+        if (appendLog)
+        {
+            appendLog(QString("断点续焊：已跳过前 %1 个轨迹点，从剩余 %2 点开始执行（起弧在续焊首点前自动生成）。")
+                .arg(resumeSkipPoints).arg(records.size()));
+        }
     }
 
     WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);

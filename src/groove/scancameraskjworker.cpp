@@ -11,6 +11,8 @@
 #include <QLibrary>
 #include <QTimer>
 
+#include <chrono>
+
 #include <limits>
 
 namespace
@@ -22,6 +24,16 @@ constexpr int kSkjErrDataDuplicate = -107; // 最新帧已取过
 
 // 轮询间隔：相机约 60fps（~16ms 一帧），10ms 轮询可跟上，无新帧时返回 DUPLICATE/NO_DATA 属正常。
 constexpr int kPollIntervalMs = 10;
+constexpr int kImageServerPort = 50001;      // 图像传输独立端口（SDK v1.2.0，与点云 50006 分开）
+constexpr int kImagePollIntervalMs = 30;     // 图像轮询周期：视频流一般 ≤30fps，30ms 足够
+constexpr std::size_t kImageQueueMax = 8;    // 保存队列上限：写盘跟不上时丢最旧帧，保护内存
+constexpr int kImageWebpQuality = 80;        // WebP 有损质量：同观感比 JPG85 小约三成
+
+qint64 SkjSteadyNowUs()
+{
+    return static_cast<qint64>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 constexpr int kConnectTimeoutMs = 3000;
 constexpr int kDiagnosticEmitStride = 30;
 
@@ -122,6 +134,17 @@ bool ScanCameraSkjWorker::loadSdk(QString* error)
     m_frameErrorText = reinterpret_cast<FrameTextFn>(resolve("SKJFrame_GetErrorText"));
     m_errorString = reinterpret_cast<ErrorStringFn>(resolve("SKJCamera_GetErrorString"));
 
+    // 图像传输接口（SDK v1.2.0）：全部可选解析——旧 DLL 无这些导出时保持 null，图像功能自动禁用，不影响点云。
+    m_imageConnect = reinterpret_cast<ImageConnectFn>(resolve("SKJCamera_ConnectImage"));
+    m_imageDisconnect = reinterpret_cast<ImageDisconnectFn>(resolve("SKJCamera_DisconnectImage"));
+    m_getLatestImage = reinterpret_cast<GetLatestImageFn>(resolve("SKJCamera_GetLatestImage"));
+    m_imageRelease = reinterpret_cast<ImageReleaseFn>(resolve("SKJImage_Release"));
+    m_imageWidth = reinterpret_cast<ImageIntFn>(resolve("SKJImage_GetWidth"));
+    m_imageHeight = reinterpret_cast<ImageIntFn>(resolve("SKJImage_GetHeight"));
+    m_imageStride = reinterpret_cast<ImageIntFn>(resolve("SKJImage_GetStride"));
+    m_imageData = reinterpret_cast<ImageDataFn>(resolve("SKJImage_GetData"));
+    m_imageTimestamp = reinterpret_cast<ImageTimestampFn>(resolve("SKJImage_GetTimestamp"));
+
     if (m_create == nullptr || m_destroy == nullptr || m_connect == nullptr
         || m_disconnect == nullptr || m_getLatestFrame == nullptr || m_frameRelease == nullptr
         || m_framePoint3DCount == nullptr || m_framePoint3DData == nullptr)
@@ -192,6 +215,38 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
     }
     m_pollTimer->start(m_pollIntervalMs);
     emitDiagnostic(QString("SKJ SDK 已连接 %1:%2，开始取帧（轮询间隔 %3 ms）。").arg(m_serverIP).arg(m_serverPort).arg(m_pollIntervalMs));
+
+    // 图像传输连接（独立端口，失败只告警不影响点云取帧）。
+    m_imageConnected = false;
+    if (m_imageConnect != nullptr && m_getLatestImage != nullptr && m_imageData != nullptr && m_imageRelease != nullptr)
+    {
+        const int imageRet = m_imageConnect(m_handle, ipBytes.constData(), kImageServerPort);
+        if (imageRet == kSkjOk)
+        {
+            m_imageConnected = true;
+            startImageSaveThread();
+            if (m_imageTimer == nullptr)
+            {
+                m_imageTimer = new QTimer(this);
+                m_imageTimer->setTimerType(Qt::CoarseTimer);
+                connect(m_imageTimer, &QTimer::timeout, this, &ScanCameraSkjWorker::pollImage);
+            }
+            m_imageTimer->start(kImagePollIntervalMs);
+            WriteCameraSkjLog(QString("image connected target=%1:%2").arg(m_serverIP).arg(kImageServerPort));
+        }
+        else
+        {
+            const QString reason = (m_errorString != nullptr)
+                ? QString::fromUtf8(m_errorString(imageRet))
+                : QString::number(imageRet);
+            WriteCameraSkjLog(QString("image connect failed target=%1:%2 ret=%3 (%4)")
+                .arg(m_serverIP).arg(kImageServerPort).arg(imageRet).arg(reason));
+        }
+    }
+    else
+    {
+        WriteCameraSkjLog("image transfer APIs not exported by SKJCamera.dll, image capture disabled (old SDK)");
+    }
 }
 
 void ScanCameraSkjWorker::pollFrame()
@@ -205,15 +260,14 @@ void ScanCameraSkjWorker::pollFrame()
     void* frame = nullptr;
     const int ret = m_getLatestFrame(m_handle, &frame);
 
-    // 逐帧记录 SDK 取帧状态（含 0=取到、-106 无新帧、-107 重复、其它错误），供扫描结束后做
-    // 数据完整性判定（长时间无新帧→终止流程）和写入匹配明细文件。
-    if (m_frameCache != nullptr)
-    {
-        m_frameCache->RecordPollStatus(ret);
-    }
-
     if (ret == kSkjErrNoData || ret == kSkjErrDataDuplicate)
     {
+        // 无新帧/重复：记录一次 SDK 取帧调用（无帧数据）。诊断"帧时间戳跳变"时，若跳变窗口内持续
+        // 出现这类调用，说明 SDK 当时确实没有新帧可给（上游少给），而非我方漏取。
+        if (m_frameCache != nullptr)
+        {
+            m_frameCache->RecordPollStatus(ret, 0, -1);
+        }
         ++m_noNewFrameCount;
         if (m_pollCount % kDiagnosticEmitStride == 0)
         {
@@ -223,6 +277,10 @@ void ScanCameraSkjWorker::pollFrame()
     }
     if (ret != kSkjOk || frame == nullptr)
     {
+        if (m_frameCache != nullptr)
+        {
+            m_frameCache->RecordPollStatus(ret, 0, -1);
+        }
         ++m_decodeFailedCount;
         if (frame != nullptr && m_frameRelease != nullptr)
         {
@@ -309,6 +367,8 @@ void ScanCameraSkjWorker::pollFrame()
     ++m_decodedFrameCount;
     if (m_frameCache != nullptr)
     {
+        // 记录本次成功取帧调用：带 SDK 帧时间戳与三维点数，供 SdkPollLog 逐帧对齐分析。
+        m_frameCache->RecordPollStatus(kSkjOk, static_cast<qint64>(timestampUs), count3d);
         m_frameCache->AppendFrame(data);
         ++m_appendedFrameCount;
     }
@@ -327,9 +387,145 @@ void ScanCameraSkjWorker::pollFrame()
     }
 }
 
+void ScanCameraSkjWorker::pollImage()
+{
+    if (!m_running || !m_imageConnected || m_handle == nullptr
+        || m_getLatestImage == nullptr || m_imageData == nullptr || m_imageRelease == nullptr
+        || m_frameCache == nullptr)
+    {
+        return;
+    }
+    // 取图条件：扫描采集窗口开启（保存）或实时预览开启（仅显示）。两者都关时不取，避免空转拷贝。
+    const QString captureDir = m_frameCache->ImageCaptureDir();
+    const bool liveEnabled = m_frameCache->LiveImageEnabled();
+    if (captureDir.isEmpty() && !liveEnabled)
+    {
+        return;
+    }
+
+    void* image = nullptr;
+    const int ret = m_getLatestImage(m_handle, &image);
+    if (ret != kSkjOk || image == nullptr)
+    {
+        if (image != nullptr)
+        {
+            m_imageRelease(image);
+        }
+        return;  // 无新图/重复/错误都静默跳过（30ms 高频轮询不刷日志）
+    }
+
+    const int width = (m_imageWidth != nullptr) ? m_imageWidth(image) : 0;
+    const int height = (m_imageHeight != nullptr) ? m_imageHeight(image) : 0;
+    const int stride = (m_imageStride != nullptr) ? m_imageStride(image) : 0;
+    const unsigned char* data = m_imageData(image);
+    const long long imageTimestamp = (m_imageTimestamp != nullptr) ? m_imageTimestamp(image) : 0;
+    if (width <= 0 || height <= 0 || stride <= 0 || data == nullptr
+        || (imageTimestamp != 0 && imageTimestamp == m_lastSavedImageTimestamp))
+    {
+        m_imageRelease(image);
+        return;
+    }
+    m_lastSavedImageTimestamp = imageTimestamp;
+
+    // 抽帧采样只作用于【保存】；实时显示要最新画面，不抽帧。
+    const int frameStride = m_frameCache->ImageCaptureFrameStride();
+    const qint64 newFrameIndex = m_imageNewFrameCount++;
+    const bool saveThisFrame = !captureDir.isEmpty()
+        && (frameStride <= 1 || (newFrameIndex % frameStride) == 0);
+    if (!saveThisFrame && !liveEnabled)
+    {
+        m_imageRelease(image);
+        return;
+    }
+
+    // BGR24 与 QImage::Format_BGR888 内存布局一致；wrap 后深拷贝再释放 SDK 句柄。
+    QImage imageCopy = QImage(data, width, height, stride, QImage::Format_BGR888).copy();
+    m_imageRelease(image);
+
+    if (liveEnabled)
+    {
+        m_frameCache->SetLatestImage(imageCopy, imageTimestamp);  // 隐式共享，无额外拷贝
+    }
+    if (!saveThisFrame)
+    {
+        return;
+    }
+
+    // 文件名带图像 SDK 时间戳 + PC steady 接收时刻（us），与 SdkPollLog/MatchDebug 的时间轴可直接对齐。
+    PendingImageSave pending;
+    pending.filePath = captureDir + QString("/img_%1_%2.webp").arg(imageTimestamp).arg(SkjSteadyNowUs());
+    pending.image = std::move(imageCopy);
+    {
+        std::lock_guard<std::mutex> locker(m_imageSaveMutex);
+        while (m_imageSaveQueue.size() >= kImageQueueMax)
+        {
+            m_imageSaveQueue.pop_front();  // 写盘跟不上时丢最旧帧，绝不无限占内存
+            ++m_imageDroppedCount;
+        }
+        m_imageSaveQueue.push_back(std::move(pending));
+    }
+    m_imageSaveCv.notify_one();
+}
+
+void ScanCameraSkjWorker::startImageSaveThread()
+{
+    if (m_imageSaveThread.joinable())
+    {
+        return;
+    }
+    m_imageSaveStop.store(false);
+    // JPG 编码+写盘放独立线程：单帧编码 5~15ms，若留在 worker 线程会拖慢点云取帧轮询。
+    m_imageSaveThread = std::thread([this]()
+        {
+            for (;;)
+            {
+                PendingImageSave item;
+                {
+                    std::unique_lock<std::mutex> locker(m_imageSaveMutex);
+                    m_imageSaveCv.wait(locker, [this]()
+                        {
+                            return m_imageSaveStop.load() || !m_imageSaveQueue.empty();
+                        });
+                    if (m_imageSaveQueue.empty())
+                    {
+                        if (m_imageSaveStop.load())
+                        {
+                            return;  // 队列已排干才退出，扫描尾帧不丢
+                        }
+                        continue;
+                    }
+                    item = std::move(m_imageSaveQueue.front());
+                    m_imageSaveQueue.pop_front();
+                }
+                if (item.image.save(item.filePath, "WEBP", kImageWebpQuality))
+                {
+                    ++m_imageSavedCount;
+                }
+            }
+        });
+}
+
+void ScanCameraSkjWorker::stopImageSaveThread()
+{
+    if (!m_imageSaveThread.joinable())
+    {
+        return;
+    }
+    m_imageSaveStop.store(true);
+    m_imageSaveCv.notify_all();
+    m_imageSaveThread.join();
+    std::lock_guard<std::mutex> locker(m_imageSaveMutex);
+    m_imageSaveQueue.clear();
+}
+
 void ScanCameraSkjWorker::stopClient()
 {
     m_running = false;
+    if (m_imageTimer != nullptr)
+    {
+        m_imageTimer->stop();
+    }
+    stopImageSaveThread();
     if (m_pollTimer != nullptr)
     {
         m_pollTimer->stop();
@@ -342,6 +538,11 @@ void ScanCameraSkjWorker::teardownHandle()
 {
     if (m_handle != nullptr)
     {
+        if (m_imageConnected && m_imageDisconnect != nullptr)
+        {
+            m_imageDisconnect(m_handle);
+        }
+        m_imageConnected = false;
         if (m_disconnect != nullptr)
         {
             m_disconnect(m_handle);

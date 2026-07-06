@@ -4,6 +4,7 @@
 
 #include <functional>
 
+class QCheckBox;
 class QCloseEvent;
 class CameraIpAddressEdit;
 class QLabel;
@@ -44,6 +45,8 @@ private:
     QLineEdit* m_pGainLevelEdit = nullptr;
     QLineEdit* m_pCameraTypeEdit = nullptr;
     QLineEdit* m_pReadFpsEdit = nullptr;
+    QCheckBox* m_pImageCaptureEnableCheck = nullptr;
+    QLineEdit* m_pImageCaptureStrideEdit = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
     QString m_cleanSnapshot;
     bool m_savedThisSession = false;

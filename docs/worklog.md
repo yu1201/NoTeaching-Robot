@@ -1,9 +1,20 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-06-30`
+- 人工整理日期：`2026-07-06`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-07-06
+
+- 发布 v2026.07.06.1806：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过，生成 `dist/installer/NoTeaching-Robot-Setup-v2026.07.06.1806.exe`。本批合并 07-01~07-06 全部工作(下述各条)。署名 yu1201。
+- 统计时间对齐(方案A)：同向重复扫描偏移根因=首帧单点对齐抖动(位姿50ms量化+运行态检测+单帧传输抖动全幅38.5ms，合计±60ms×50mm/s=±3mm整体平移，实测拐点偏移与首帧映射偏移严格线性)。改为整场统计估计：相机→PC钟差取900+帧(帧戳,PC接收)P10低分位(实测相邻扫描互差<2ms)、PC→机器人轴取位姿样本(轴戳,pcRecv)中位差；扫描结束用统计偏移对全部帧重新插值匹配+手眼变换(百ms级)，正向修正时先补采静止位姿延长时间轴防尾帧丢弃；样本不足回退首帧法。日志打印新旧偏移与修正量。`ScanMoveAndCollect`。评审(3员对抗)修复：δ0行进方向符号(CRITICAL，起点轴坐标大于终点的示教会反号发散)、示教安全位序列swap后需reverse(MAJOR)、跳点计数清零、映射日志语义分叉、尾帧翻转计数等。
+- 相机时间补偿自动标定：先测后焊页新按钮，一键正向扫→起终点互换反向扫(计算安全位自动按新起点推算；示教安全位列表swap+reverse)→内拐配内拐/外拐配外拐最近邻(±6mm)中位分裂→δ0=split/(2v·u_a)(u_a=行进方向带符号轴分量)→建议补偿=当前−δ0，确认后写入该机器人全部参数组CameraTimeOffsetMs。正向扫后预检拐点≥6不足即中止；门禁：配对≥6、MAD≤1mm、|δ0|≤6mm/(2v)。正反分裂=2vδ的物理：常数延迟正反反号，随机项已被方案A消除故可标。
+- 运行监控最大化窗口(`RunMonitorDialog`，cpp内定义无Q_OBJECT)：流程启动自动最大化弹出——流程步骤+进度、实时激光线点云+相机图像、日志、暂停/继续与断点续焊按钮；主界面实时区迁入。点云视图固定标尺(X恒±120mm中心0、Y同比例尺中心首帧锁定、偏超半窗80%才重锁)+严格等比+黑底网格坐标标注+触控按钮调节点大小(±0.5)/视野(±40mm)。图像QLabel设SizePolicy::Ignored修复setPixmap→sizeHint→布局放大的反馈膨胀。
+- 暂停/继续与断点续焊(STEP)：暂停=SetModeCmd(STOP)(程序态→暂停(1)可续)，继续=SetModeCmd(START)；暂停时记录getCurrentLine行号+快照位姿并落盘`Data/<robot>/WeldBreakpoint.ini`(重启不丢)；继续前回位检查(偏差>2mm弹警告确认，自动回位待真机验证暂停态命令兼容性)。断点续焊独立流程(主界面新按钮)：只认落盘断点(无记录报错，不用当前位姿兜底防挪枪错位)→自动取最新`SeamComp`→落盘位姿最近点(>20mm判不匹配拒绝)→回退3点(≈5mm搭接)→`ExecuteWeldPoseFileWithSafePos`新参数resumeSkipPoints裁剪records(安全位按续焊首点重推、ARCON自动生成在续焊首点前)→成功清除断点。driver新封装GetCurrentProgramLine/SetProgramLine(SetpcCmd)。`.srp`行↔点非线性(条件ARCSET/WaitTime行)故弃行号映射用位姿匹配。
+- 相机SDK v1.2.0(图像传输)接入：旧接口零删除(头diff+DLL导出表双验证)，新增SKJCamera_ConnectImage(独立口50001)/GetLatestImage(SDK内FFmpeg解码BGR24)等13符号，依赖avcodec-61等4个FFmpeg DLL(vcxproj AfterBuild同拷、打包自动带)。worker可选解析(旧DLL自动禁用)；扫描期间按相机参数开关(ImageCaptureEnable默认开)/抽帧间隔(ImageCaptureFrameStride默认5)后台采集存WebP质量80(qwebp插件从windeployqt排除表恢复×4处)，先存Temp扫描后rename进`Result/<案例>/CameraImage/`，文件名img_<SDK图像戳>_<PC接收us>.webp与SdkPollLog时间轴可对齐；保存独立线程(队列上限8丢旧)不拖取帧。实时显示通道CameraFrameCache::SetLatestImage/LiveImageEnabled，坡口相机预览新增「相机图像」页签(主区大图与点云互斥切换，三段线自动切回滤波后)。
+- 修复SDK取帧状态被清空bug：运动结束后二次`frameCache->Clear()`连带清poll日志发生在快照前，致sdk_status列恒空、无帧门禁从未生效；拆出`ClearPollStatus()`仅扫描开始调用。SdkPollLog.csv(poll_index,pc_recv_us,pc_delta_us,ret,ret_name,frame_ts_us,frame_ts_delta_us,point_count)每次GetLatestFrame一行，实测定位丢帧：我方轮询0卡顿，145丢帧=72上游(间隔内连续duplicate)+73轮询同频踩点(帧率60=相机60fps拍频，调250后消)。
+- 扫描时间轴(robot_ms/pc_recv_ms)主页监控面板新增「扫描匹配时间轴」实时行(每刷新现读配置)；STEP暂停键值勘察：MODEKEY枚举(GBK转码)START=4/STOP=23/MSTOP=100，driver既有Prog_startRun_Py/Prog_stop_Py即START/STOP封装。
 
 ## 2026-06-30
 

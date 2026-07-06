@@ -1,7 +1,14 @@
 #pragma once
 
+#include <QImage>
 #include <QObject>
 #include <QString>
+
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 
 class QLibrary;
 class QTimer;
@@ -36,6 +43,7 @@ signals:
 
 private slots:
     void pollFrame();
+    void pollImage();
 
 private:
     bool loadSdk(QString* error);
@@ -43,11 +51,30 @@ private:
     void teardownHandle();
     void emitDiagnostic(const QString& statusText);
     QString resolveDllPath() const;
+    void startImageSaveThread();
+    void stopImageSaveThread();
 
     CameraFrameCache* m_frameCache = nullptr;
     QLibrary* m_library = nullptr;
     void* m_handle = nullptr;
     QTimer* m_pollTimer = nullptr;
+    QTimer* m_imageTimer = nullptr;
+    bool m_imageConnected = false;
+    // 图像保存异步化：worker 线程只取帧+深拷贝入队，JPG 编码/写盘在独立线程做，避免拖慢点云取帧轮询。
+    struct PendingImageSave
+    {
+        QString filePath;
+        QImage image;
+    };
+    std::deque<PendingImageSave> m_imageSaveQueue;
+    std::mutex m_imageSaveMutex;
+    std::condition_variable m_imageSaveCv;
+    std::thread m_imageSaveThread;
+    std::atomic_bool m_imageSaveStop{ false };
+    qint64 m_lastSavedImageTimestamp = -1;
+    qint64 m_imageNewFrameCount = 0;   // 采集窗口内看到的新图像计数（抽帧用）
+    qint64 m_imageSavedCount = 0;
+    qint64 m_imageDroppedCount = 0;
     QString m_serverIP;
     int m_serverPort = 0;
     int m_pollIntervalMs = 10;  // 取帧轮询间隔(ms)，由相机参数 CameraReadFps 换算(1000/帧率)后经 startClient 传入
@@ -77,10 +104,28 @@ private:
     using FrameTextFn = const char*(__cdecl*)(const void*);
     using ErrorStringFn = const char*(__cdecl*)(int);
 
+    // 图像传输接口（SDK v1.2.0 新增，旧 DLL 下解析为 null 即自动禁用图像功能，不影响点云）。
+    using ImageConnectFn = int(__cdecl*)(void*, const char*, int);
+    using ImageDisconnectFn = void(__cdecl*)(void*);
+    using GetLatestImageFn = int(__cdecl*)(void*, void**);
+    using ImageReleaseFn = void(__cdecl*)(void*);
+    using ImageIntFn = int(__cdecl*)(const void*);
+    using ImageDataFn = const unsigned char*(__cdecl*)(const void*);
+    using ImageTimestampFn = long long(__cdecl*)(const void*);
+
     CreateFn m_create = nullptr;
     DestroyFn m_destroy = nullptr;
     ConnectFn m_connect = nullptr;
     DisconnectFn m_disconnect = nullptr;
+    ImageConnectFn m_imageConnect = nullptr;
+    ImageDisconnectFn m_imageDisconnect = nullptr;
+    GetLatestImageFn m_getLatestImage = nullptr;
+    ImageReleaseFn m_imageRelease = nullptr;
+    ImageIntFn m_imageWidth = nullptr;
+    ImageIntFn m_imageHeight = nullptr;
+    ImageIntFn m_imageStride = nullptr;
+    ImageDataFn m_imageData = nullptr;
+    ImageTimestampFn m_imageTimestamp = nullptr;
     IsConnectedFn m_isConnected = nullptr;
     SetTimeoutFn m_setConnectTimeout = nullptr;
     GetLatestFrameFn m_getLatestFrame = nullptr;

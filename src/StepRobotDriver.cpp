@@ -1841,6 +1841,30 @@ bool STEPRobotCtrl::Prog_stop_Py()
 	return true;
 }
 
+int STEPRobotCtrl::GetCurrentProgramLine()
+{
+	if (m_pSTEPRobotClient == nullptr)
+	{
+		return -1;
+	}
+	return m_pSTEPRobotClient->getCurrentLine();
+}
+
+bool STEPRobotCtrl::SetProgramLine(int nLine)
+{
+	if (m_pSTEPRobotClient == nullptr || nLine < 0)
+	{
+		return false;
+	}
+	const int nRet = m_pSTEPRobotClient->SetpcCmd(nLine);
+	if (nRet != 0)
+	{
+		SetLastRobotError(GetStr("STEP设置程序行号失败：行=%d 原因=%s(%d)", nLine, GetErrorText(nRet), nRet));
+		return false;
+	}
+	return true;
+}
+
 bool STEPRobotCtrl::CallJob(std::string sJobName)
 {
 	std::string sNowProjName = GetUserProject();

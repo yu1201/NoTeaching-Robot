@@ -5356,6 +5356,7 @@ namespace
 			m_previewModeTabs->setExpanding(false);
 			m_previewModeTabs->addTab("滤波前");
 			m_previewModeTabs->addTab("滤波后");
+			m_previewModeTabs->addTab("相机图像");
 			m_previewModeTabs->setStyleSheet(
 				"QTabBar::tab {"
 				"background:#182832;"
@@ -5503,9 +5504,18 @@ namespace
 			rightPanelLayout->addWidget(m_infoText, 0);
 			rightPanelLayout->addWidget(cameraControlGroup, 1);
 
+			// 相机实时图像（SDK v1.2.0 图像传输）：占用主显示区，经顶部「相机图像」页签切换，与点云视图互斥显示。
+			m_pCameraImageLabel = new QLabel("相机图像：等待图像帧...\n（需相机图像口 50001 支持）", this);
+			m_pCameraImageLabel->setAlignment(Qt::AlignCenter);
+			m_pCameraImageLabel->setStyleSheet("QLabel { background: #101C24; color: #6E8894; border: 1px solid #2B4552; border-radius: 8px; }");
+			// Ignored：布局忽略 pixmap 撑起的 sizeHint，防 setPixmap→sizeHint→布局放大 的反馈膨胀。
+			m_pCameraImageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+			m_pCameraImageLabel->hide();
+
 			QHBoxLayout* contentLayout = new QHBoxLayout();
 			contentLayout->setSpacing(ScalePixels(12));
 			contentLayout->addWidget(m_view, 1, Qt::AlignCenter);
+			contentLayout->addWidget(m_pCameraImageLabel, 1);
 			contentLayout->addWidget(rightPanel, 0);
 			mainLayout->addLayout(contentLayout, 1);
 
@@ -5546,6 +5556,21 @@ namespace
 			UpdateInfoText(detailText);
 			m_hasFrame = true;
 			RefreshView();
+		}
+
+		void SetCameraImage(const QImage& image)
+		{
+			if (m_pCameraImageLabel == nullptr)
+			{
+				return;
+			}
+			if (image.isNull())
+			{
+				m_pCameraImageLabel->setText("相机图像：等待图像帧...\n（需相机图像口 50001 支持）");
+				return;
+			}
+			m_pCameraImageLabel->setPixmap(QPixmap::fromImage(image).scaled(
+				m_pCameraImageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 		}
 
 		void ClearPreview(const QString& statusText, const QString& detailText = QString())
@@ -5803,6 +5828,23 @@ namespace
 				m_previewModeTabs->setCurrentIndex(index);
 			}
 
+			// 页签2=相机图像：主显示区切到实时图像，点云视图隐藏；其余页签恢复点云视图。
+			const bool showCameraImage = (index == 2);
+			if (m_pCameraImageLabel != nullptr)
+			{
+				m_pCameraImageLabel->setVisible(showCameraImage);
+			}
+			if (m_view != nullptr)
+			{
+				m_view->setVisible(!showCameraImage);
+			}
+			if (showCameraImage)
+			{
+				SetTrendLineButtonChecked(false);
+				m_showTrendLines = false;
+				return;
+			}
+
 			const bool showFiltered = (index == 1);
 			if (!showFiltered)
 			{
@@ -5814,9 +5856,9 @@ namespace
 
 		void SetTrendLineOverlay(bool enabled)
 		{
-			if (enabled && m_previewModeTabs != nullptr && m_previewModeTabs->currentIndex() == 0)
+			if (enabled && m_previewModeTabs != nullptr && m_previewModeTabs->currentIndex() != 1)
 			{
-				m_previewModeTabs->setCurrentIndex(1);
+				m_previewModeTabs->setCurrentIndex(1);  // 三段线叠加只在「滤波后」视图有意义（含从相机图像页切回）
 			}
 			SetTrendLineButtonChecked(enabled);
 			m_showTrendLines = enabled;
@@ -5966,6 +6008,7 @@ namespace
 
 		GroovePointCloudView* m_view = nullptr;
 		QPlainTextEdit* m_infoText = nullptr;
+		QLabel* m_pCameraImageLabel = nullptr;
 		QTabBar* m_previewModeTabs = nullptr;
 		QPushButton* m_trendLineToggleButton = nullptr;
 		QPushButton* m_refreshParamsButton = nullptr;
@@ -8570,9 +8613,16 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 			}
 			const QString stateText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知/异常(%1)").arg(done));
 			const QString sourceText = QString::fromStdString(pRobotDriver->GetStateMonitorSourceText());
+			// 扫描匹配时间轴每次刷新现读配置：管理页下拉切换后，下一个刷新周期即更新，与扫描实际取值一致。
+			const MeasureThenWeldRuntimeConfig::ScanTimestampSource monitorScanTimestampSource =
+				MeasureThenWeldRuntimeConfig::LoadScanTimestampSource();
+			const QString scanAxisText = QString("%1(%2)")
+				.arg(MeasureThenWeldRuntimeConfig::DisplayName(monitorScanTimestampSource))
+				.arg(MeasureThenWeldRuntimeConfig::FieldName(monitorScanTimestampSource));
 			QString monitorText = QString(
 				"状态: %1\n"
 				"接口: %2\n"
+				"扫描匹配时间轴: %21\n"
 				"robot_ms=%3  pc_recv_ms=%4  cache=%5/200\n"
 				"位置: X=%6  Y=%7  Z=%8  W=%9  P=%10  R=%11\n"
 				"脉冲: S=%12  L=%13  U=%14  R=%15  B=%16  T=%17  EX1=%18  EX2=%19  EX3=%20")
@@ -8595,7 +8645,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 				.arg(pulse.nTPulse)
 				.arg(pulse.lBXPulse)
 				.arg(pulse.lBYPulse)
-				.arg(pulse.lBZPulse);
+				.arg(pulse.lBZPulse)
+				.arg(scanAxisText);
 			if (!m_sMeasureThenWeldStatus.isEmpty())
 			{
 				monitorText += "\n\n" + m_sMeasureThenWeldStatus;
@@ -13070,6 +13121,10 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 				m_sGrooveCameraStatusText);
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->RefreshCameraControlParams();
 		}
+		if (CameraFrameCache* liveCache = ScanCameraCacheForUnit(unitIndex))
+		{
+			liveCache->SetLiveImageEnabled(true);  // 预览期间让 SKJ worker 同步取相机图像供显示
+		}
 		if (m_grooveCameraDisplayTimer != nullptr)
 		{
 			m_grooveCameraDisplayTimer->start(33);
@@ -13080,6 +13135,10 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 		if (m_grooveCameraDisplayTimer != nullptr)
 		{
 			m_grooveCameraDisplayTimer->stop();
+		}
+		if (CameraFrameCache* liveCache = ScanCameraCacheForUnit(CurrentRobotUnitIndex()))
+		{
+			liveCache->SetLiveImageEnabled(false);
 		}
 		m_sGrooveCameraStatusText = "已停止坡口相机预览。";
 		if (m_pGroovePointCloudDialog != nullptr)
@@ -13201,6 +13260,10 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 			latestFrame,
 			statusText,
 			m_sGrooveCameraStatusText);
+	}
+	if (m_pGroovePointCloudDialog != nullptr)
+	{
+		static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetCameraImage(cache->LatestImage());
 	}
 }
 
