@@ -1,9 +1,37 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-06-26`
+- 人工整理日期：`2026-07-07`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-07-07
+
+- 发布 v2026.07.07.1720：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过，生成 `dist/installer/NoTeaching-Robot-Setup-v2026.07.07.1720.exe`。署名 yu1201。
+- 相机 SDK 更新(v1.2.0 修改时间戳获取方式/按序取帧版)：整包替换(旧接口零删改双验证)。SDK 内部点云改 FIFO 环形缓冲(2~16 帧可设，`SetFrameBufferCount`)，`GetLatestFrame` 语义从「取最新(单槽覆盖)」变「按序弹最旧」；接入：连接后设 FIFO=8、`pollFrame` 改排空式(每 tick 循环取到空，上限16，旧 DLL 行为兼容)、时间戳单位运行时自适应(首两帧差<2000→毫秒×1000归一，≥2000→微秒原样，判定写 CameraSkjClient 日志——防"修改时间戳获取方式"暗改单位打歪统计对齐)。
+- 时间对齐算法开关：`UseStatTimeAlign`(MeasureGroup<i>.Scan，默认1)。测量焊接参数→相机时间参数组新增「时间对齐算法」真下拉(开启·统计对齐/关闭·首帧对齐旧算法，照 WeldDirection combo 机制)；`ScanMoveAndCollect` 统计对齐块按此开关，关闭时日志明示对照测试模式。用途：相机新时间戳可行性对照(旧算法直测新时间戳质量)。
+- SdkPollLog 增强三列：`recv_frame_seq`(我方成功取帧累计号)、`frame_channel`(SDK帧号——厂商临时以 GetChannel 承载，实测逐帧+1单调递增不回绕，int32 约414天@60fps 才绕)、`channel_delta`(帧号差，>1 即丢帧，差-1=丢帧数——比时间戳差更硬的判据)。worker 在 Release 前读 GetChannel 入 PollStatus。
+- 坡口相机预览「图像传输」开关：相机参数区激光按钮下新增 checkable 按钮，即时 Connect/DisconnectImage(50001)；状态经 CameraFrameCache 共享，扫描自动连接同样尊重(关闭后扫描不再连图像口)；worker 新增 slot setImageTransportEnabled + connect/disconnectImageTransport 拆分。
+- 点云处理库更新 20260706：仅 DLL/lib/h/pdb(接口 diff 零改动；由新旧 DLL 二进制提取参数名对比证实 26 键全保留零新增——"klrb"系 PDB RSDS 签名字节非参数)，无需动界面/模板/运行时兜底。`tmp_sdk_probe.py` 回归通过(0617 崩溃场景 145 万点 Z=-410 正常返回焊道点；探针临时配置补齐 0624 三键)。
+- 丢帧根因排查(证据链完整，结论=相机端点云提取超时跳帧)：①扫描中丢帧率 11.4%(990帧丢127)，49/50 丢帧点间隔期间客户端 FIFO 为空且持续轮询(-106)——非我方取慢；②TCP 可靠传输排除网络；③断开图像传输重扫 11.65% 无改善——排除图像流挤占；④独立 ctypes 探针(FIFO=16排空)单变量实验：空场景(0点/帧)丢帧 1.53%@58.9fps，同位置激光上工件(~417点/帧)丢帧 7.54%@55.5fps——跳号率与相机端提取负载强相关，实际出帧率掉到 55.5 说明相机处理管线掉帧。反馈厂商：优化提取耗时或提供降载选项。丢帧对成品影响可控(点云全帧叠加、统计对齐不依赖连续帧)。
+
+## 2026-07-06
+
+- 发布 v2026.07.06.1806：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过，生成 `dist/installer/NoTeaching-Robot-Setup-v2026.07.06.1806.exe`。本批合并 07-01~07-06 全部工作(下述各条)。署名 yu1201。
+- 统计时间对齐(方案A)：同向重复扫描偏移根因=首帧单点对齐抖动(位姿50ms量化+运行态检测+单帧传输抖动全幅38.5ms，合计±60ms×50mm/s=±3mm整体平移，实测拐点偏移与首帧映射偏移严格线性)。改为整场统计估计：相机→PC钟差取900+帧(帧戳,PC接收)P10低分位(实测相邻扫描互差<2ms)、PC→机器人轴取位姿样本(轴戳,pcRecv)中位差；扫描结束用统计偏移对全部帧重新插值匹配+手眼变换(百ms级)，正向修正时先补采静止位姿延长时间轴防尾帧丢弃；样本不足回退首帧法。日志打印新旧偏移与修正量。`ScanMoveAndCollect`。评审(3员对抗)修复：δ0行进方向符号(CRITICAL，起点轴坐标大于终点的示教会反号发散)、示教安全位序列swap后需reverse(MAJOR)、跳点计数清零、映射日志语义分叉、尾帧翻转计数等。
+- 相机时间补偿自动标定：先测后焊页新按钮，一键正向扫→起终点互换反向扫(计算安全位自动按新起点推算；示教安全位列表swap+reverse)→内拐配内拐/外拐配外拐最近邻(±6mm)中位分裂→δ0=split/(2v·u_a)(u_a=行进方向带符号轴分量)→建议补偿=当前−δ0，确认后写入该机器人全部参数组CameraTimeOffsetMs。正向扫后预检拐点≥6不足即中止；门禁：配对≥6、MAD≤1mm、|δ0|≤6mm/(2v)。正反分裂=2vδ的物理：常数延迟正反反号，随机项已被方案A消除故可标。
+- 运行监控最大化窗口(`RunMonitorDialog`，cpp内定义无Q_OBJECT)：流程启动自动最大化弹出——流程步骤+进度、实时激光线点云+相机图像、日志、暂停/继续与断点续焊按钮；主界面实时区迁入。点云视图固定标尺(X恒±120mm中心0、Y同比例尺中心首帧锁定、偏超半窗80%才重锁)+严格等比+黑底网格坐标标注+触控按钮调节点大小(±0.5)/视野(±40mm)。图像QLabel设SizePolicy::Ignored修复setPixmap→sizeHint→布局放大的反馈膨胀。
+- 暂停/继续与断点续焊(STEP)：暂停=SetModeCmd(STOP)(程序态→暂停(1)可续)，继续=SetModeCmd(START)；暂停时记录getCurrentLine行号+快照位姿并落盘`Data/<robot>/WeldBreakpoint.ini`(重启不丢)；继续前回位检查(偏差>2mm弹警告确认，自动回位待真机验证暂停态命令兼容性)。断点续焊独立流程(主界面新按钮)：只认落盘断点(无记录报错，不用当前位姿兜底防挪枪错位)→自动取最新`SeamComp`→落盘位姿最近点(>20mm判不匹配拒绝)→回退3点(≈5mm搭接)→`ExecuteWeldPoseFileWithSafePos`新参数resumeSkipPoints裁剪records(安全位按续焊首点重推、ARCON自动生成在续焊首点前)→成功清除断点。driver新封装GetCurrentProgramLine/SetProgramLine(SetpcCmd)。`.srp`行↔点非线性(条件ARCSET/WaitTime行)故弃行号映射用位姿匹配。
+- 相机SDK v1.2.0(图像传输)接入：旧接口零删除(头diff+DLL导出表双验证)，新增SKJCamera_ConnectImage(独立口50001)/GetLatestImage(SDK内FFmpeg解码BGR24)等13符号，依赖avcodec-61等4个FFmpeg DLL(vcxproj AfterBuild同拷、打包自动带)。worker可选解析(旧DLL自动禁用)；扫描期间按相机参数开关(ImageCaptureEnable默认开)/抽帧间隔(ImageCaptureFrameStride默认5)后台采集存WebP质量80(qwebp插件从windeployqt排除表恢复×4处)，先存Temp扫描后rename进`Result/<案例>/CameraImage/`，文件名img_<SDK图像戳>_<PC接收us>.webp与SdkPollLog时间轴可对齐；保存独立线程(队列上限8丢旧)不拖取帧。实时显示通道CameraFrameCache::SetLatestImage/LiveImageEnabled，坡口相机预览新增「相机图像」页签(主区大图与点云互斥切换，三段线自动切回滤波后)。
+- 修复SDK取帧状态被清空bug：运动结束后二次`frameCache->Clear()`连带清poll日志发生在快照前，致sdk_status列恒空、无帧门禁从未生效；拆出`ClearPollStatus()`仅扫描开始调用。SdkPollLog.csv(poll_index,pc_recv_us,pc_delta_us,ret,ret_name,frame_ts_us,frame_ts_delta_us,point_count)每次GetLatestFrame一行，实测定位丢帧：我方轮询0卡顿，145丢帧=72上游(间隔内连续duplicate)+73轮询同频踩点(帧率60=相机60fps拍频，调250后消)。
+- 扫描时间轴(robot_ms/pc_recv_ms)主页监控面板新增「扫描匹配时间轴」实时行(每刷新现读配置)；STEP暂停键值勘察：MODEKEY枚举(GBK转码)START=4/STOP=23/MSTOP=100，driver既有Prog_startRun_Py/Prog_stop_Py即START/STOP封装。
+
+## 2026-06-30
+
+- 发布 v2026.06.30.1321：`Release x64` 编译通过(0 错误)；两段式打包通过，生成 `dist/installer/NoTeaching-Robot-Setup-v2026.06.30.1321.exe`。本次提交今日批次：相机取帧状态 CSV + 长时间无帧异常终止、相机读取帧率从测量参数迁至相机参数(`CameraParam.ini` 的 `CameraReadFps`，真正驱动取帧轮询)、调试功能结果打包压缩(zip)。署名 yu1201；其它会话未提交改动(`RobotCalculation`/`PointCloudProcessingConfig`/`LaserWeldFilterDialog`/portable `MeasureThenWeldFilterFit`、点云 SDK DLL)与软著文档/`Job` 散落产物未纳入本次提交(但安装包由当前工作区构建，二进制含上述改动)。
+- 相机取帧状态记录 + 无帧门禁：`ScanCameraSkjWorker::pollFrame` 每次轮询把 SDK 返回码记入 `CameraFrameCache` 的 poll 日志(与帧同一 steady 时钟)；`ScanMoveAndCollect` 在扫描运动+尾部匹配结束时快照，统计相邻取到帧之间的最长无帧间断(+末帧到结束的尾部间断)，>1s(或全程无帧)则写盘后报错 `return false` 终止流程。匹配明细 `PreciseLaserPoint_MatchDebug.csv` 末尾追加独立行记录所有非0取帧状态——新增 `sdk_status`/`sdk_recv_timestamp_us` 两列、不复用原 `status` 列。改动 `CameraFrameCache.h/.cpp`、`groove/scancameraskjworker.cpp`、`MeasureThenWeldService.cpp`。
+- 相机读取帧率迁移到相机参数：原「测量焊接参数→扫描参数」里的 `CameraReadFps` 实际不驱动取帧(轮询写死 `kPollIntervalMs=10ms`)、名不副实(对抗核查 CONFIRMED：全仓无任何 sleep/节流/SDK 帧率设置消费它)。删除该测量参数(UI/结构体/ini 读写/校验/CLI 日志/Python 迁移器模板全清，旧 ini 残留入 `IsObsoletePreciseParamKey` 保存时自动清除)；在「相机参数→测量相机基础参数」(`CameraBasicParamDialog`/`CameraParam.ini` 的 `CameraReadFps`)新增「相机读取帧率(fps)」，经 `LoadGrooveCameraEndpointForUnit` 换算成轮询间隔(round(1000/帧率))驱动 `ScanCameraSkjWorker` 定时器；`CameraRuntime` 加 `cameraPollIntervalMs` 并纳入 `needRestart`，改值在下次预览/扫描重连生效。默认 100fps(=10ms)保持原行为。改动 `RobotDataHelper.h/.cpp`、`CameraBasicParamDialog.h/.cpp`、`groove/scancameraskjworker.h/.cpp`、`QtWidgetsApplication4.h/.cpp`、`MeasureThenWeldDialog.h`、`PreciseMeasureEditDialog.cpp`、`MeasureThenWeldService.cpp`、`tools/migrate_config_to_sqlite.py`。
+- 调试功能「结果打包压缩」：新增 `ResultArchiveDialog`(Qt6 私有 `QZipWriter`，后台 `std::thread` + 进度条 + 取消)，按案例级勾选、按机器人/日期多选，把 `Result/` 打包成 zip，默认存 `Result/Archives/`、可自定义保存位置。改动新增 `ResultArchiveDialog.h/.cpp`，接入 `QtWidgetsApplication4.cpp/.h` 调试菜单与 `.vcxproj`(`QtMoc` 项)。
 
 ## 2026-06-26
 

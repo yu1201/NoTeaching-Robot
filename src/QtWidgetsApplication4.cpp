@@ -30,6 +30,7 @@
 #include "WeldPoseAverageUpdater.h"
 #include "WeldProcessDialog.h"
 #include "WeldSeamCompDialog.h"
+#include "ResultArchiveDialog.h"
 #include "PointCloud3DView.h"
 #include "../portable/LaserFramePoint3DFilter/LaserFramePoint3DFilter.h"
 #include "groove/clientudpformsensorworker.h"
@@ -5355,6 +5356,7 @@ namespace
 			m_previewModeTabs->setExpanding(false);
 			m_previewModeTabs->addTab("滤波前");
 			m_previewModeTabs->addTab("滤波后");
+			m_previewModeTabs->addTab("相机图像");
 			m_previewModeTabs->setStyleSheet(
 				"QTabBar::tab {"
 				"background:#182832;"
@@ -5470,12 +5472,30 @@ namespace
 				"}");
 			cameraControlLayout->addWidget(laserLabel, 3, 0);
 			cameraControlLayout->addWidget(m_laserToggleButton, 3, 1);
+			// 图像传输总开关：断开图像口(50001)给相机端减负，排查/规避图像流挤占导致的点云跳帧。
+			QLabel* imageTransportLabel = new QLabel("图像传输", this);
+			m_imageTransportToggleButton = new QPushButton("图像传输：开", this);
+			m_imageTransportToggleButton->setCheckable(true);
+			m_imageTransportToggleButton->setChecked(true);
+			m_imageTransportToggleButton->setCursor(Qt::PointingHandCursor);
+			m_imageTransportToggleButton->setMinimumSize(ScalePixels(138), ScalePixels(46));
+			m_imageTransportToggleButton->setToolTip("关闭后断开相机图像口（预览图像/扫描存图停用），点云不受影响；用于验证或规避图像流挤占相机资源造成的点云丢帧。");
+			connect(m_imageTransportToggleButton, &QPushButton::toggled, this, [this](bool enabled)
+				{
+					m_imageTransportToggleButton->setText(enabled ? "图像传输：开" : "图像传输：关");
+					if (m_imageTransportToggle)
+					{
+						m_imageTransportToggle(enabled);
+					}
+				});
+			cameraControlLayout->addWidget(imageTransportLabel, 4, 0);
+			cameraControlLayout->addWidget(m_imageTransportToggleButton, 4, 1);
 			m_refreshParamsButton = new QPushButton("刷新参数", this);
 			m_refreshParamsButton->setMinimumHeight(ScalePixels(32));
 			m_cameraControlStatusLabel = new QLabel("参数控制未连接", this);
 			m_cameraControlStatusLabel->setWordWrap(true);
-			cameraControlLayout->addWidget(m_refreshParamsButton, 4, 0);
-			cameraControlLayout->addWidget(m_cameraControlStatusLabel, 4, 1, 1, 2);
+			cameraControlLayout->addWidget(m_refreshParamsButton, 5, 0);
+			cameraControlLayout->addWidget(m_cameraControlStatusLabel, 5, 1, 1, 2);
 			cameraControlGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
 
 			m_view = new GroovePointCloudView(this);
@@ -5502,9 +5522,18 @@ namespace
 			rightPanelLayout->addWidget(m_infoText, 0);
 			rightPanelLayout->addWidget(cameraControlGroup, 1);
 
+			// 相机实时图像（SDK v1.2.0 图像传输）：占用主显示区，经顶部「相机图像」页签切换，与点云视图互斥显示。
+			m_pCameraImageLabel = new QLabel("相机图像：等待图像帧...\n（需相机图像口 50001 支持）", this);
+			m_pCameraImageLabel->setAlignment(Qt::AlignCenter);
+			m_pCameraImageLabel->setStyleSheet("QLabel { background: #101C24; color: #6E8894; border: 1px solid #2B4552; border-radius: 8px; }");
+			// Ignored：布局忽略 pixmap 撑起的 sizeHint，防 setPixmap→sizeHint→布局放大 的反馈膨胀。
+			m_pCameraImageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+			m_pCameraImageLabel->hide();
+
 			QHBoxLayout* contentLayout = new QHBoxLayout();
 			contentLayout->setSpacing(ScalePixels(12));
 			contentLayout->addWidget(m_view, 1, Qt::AlignCenter);
+			contentLayout->addWidget(m_pCameraImageLabel, 1);
 			contentLayout->addWidget(rightPanel, 0);
 			mainLayout->addLayout(contentLayout, 1);
 
@@ -5545,6 +5574,26 @@ namespace
 			UpdateInfoText(detailText);
 			m_hasFrame = true;
 			RefreshView();
+		}
+
+		void SetImageTransportToggleHandler(std::function<void(bool)> handler)
+		{
+			m_imageTransportToggle = std::move(handler);
+		}
+
+		void SetCameraImage(const QImage& image)
+		{
+			if (m_pCameraImageLabel == nullptr)
+			{
+				return;
+			}
+			if (image.isNull())
+			{
+				m_pCameraImageLabel->setText("相机图像：等待图像帧...\n（需相机图像口 50001 支持）");
+				return;
+			}
+			m_pCameraImageLabel->setPixmap(QPixmap::fromImage(image).scaled(
+				m_pCameraImageLabel->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 		}
 
 		void ClearPreview(const QString& statusText, const QString& detailText = QString())
@@ -5802,6 +5851,23 @@ namespace
 				m_previewModeTabs->setCurrentIndex(index);
 			}
 
+			// 页签2=相机图像：主显示区切到实时图像，点云视图隐藏；其余页签恢复点云视图。
+			const bool showCameraImage = (index == 2);
+			if (m_pCameraImageLabel != nullptr)
+			{
+				m_pCameraImageLabel->setVisible(showCameraImage);
+			}
+			if (m_view != nullptr)
+			{
+				m_view->setVisible(!showCameraImage);
+			}
+			if (showCameraImage)
+			{
+				SetTrendLineButtonChecked(false);
+				m_showTrendLines = false;
+				return;
+			}
+
 			const bool showFiltered = (index == 1);
 			if (!showFiltered)
 			{
@@ -5813,9 +5879,9 @@ namespace
 
 		void SetTrendLineOverlay(bool enabled)
 		{
-			if (enabled && m_previewModeTabs != nullptr && m_previewModeTabs->currentIndex() == 0)
+			if (enabled && m_previewModeTabs != nullptr && m_previewModeTabs->currentIndex() != 1)
 			{
-				m_previewModeTabs->setCurrentIndex(1);
+				m_previewModeTabs->setCurrentIndex(1);  // 三段线叠加只在「滤波后」视图有意义（含从相机图像页切回）
 			}
 			SetTrendLineButtonChecked(enabled);
 			m_showTrendLines = enabled;
@@ -5965,6 +6031,9 @@ namespace
 
 		GroovePointCloudView* m_view = nullptr;
 		QPlainTextEdit* m_infoText = nullptr;
+		QLabel* m_pCameraImageLabel = nullptr;
+		QPushButton* m_imageTransportToggleButton = nullptr;
+		std::function<void(bool)> m_imageTransportToggle;
 		QTabBar* m_previewModeTabs = nullptr;
 		QPushButton* m_trendLineToggleButton = nullptr;
 		QPushButton* m_refreshParamsButton = nullptr;
@@ -7381,6 +7450,7 @@ struct QtWidgetsApplication4::CameraRuntime
 	CameraFrameCache* cache = nullptr;
 	QString cameraIP;
 	int cameraPort = 0;
+	int cameraPollIntervalMs = 10;  // 已下发给 worker 的取帧轮询间隔；变化时需重启 worker 才生效
 	QString receiveMode;
 	bool running = false;
 	qint64 datagramCount = 0;
@@ -8065,6 +8135,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 	addMenuAction(managementDebugMenu, createManagementAction("点动控制", [this, openInManagement]() { openInManagement([this]() { OpenRobotJogDialog(); }); }));
 	addMenuAction(managementDebugMenu, createManagementAction("功能测试", [this, openInManagement]() { openInManagement([this]() { OpenFunctionTestDialog(); }); }));
+	addMenuAction(managementDebugMenu, createManagementAction("结果打包压缩", [this]() { OpenResultArchiveDialog(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("工件模型", [this]() { OpenWorkpieceMeshPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("模型配准", [this]() { OpenModelAlignmentPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("虚拟焊道测试", [this]() { OpenVirtualWeldTestPage(); }));
@@ -8340,6 +8411,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	});
 	addToolbarSeparator();
 	addCommandAction(debugMenu, "功能测试", [this]() { OpenFunctionTestDialog(); });
+	addCommandAction(debugMenu, "结果打包压缩", [this]() { OpenResultArchiveDialog(); });
 	if (debugMenu != nullptr)
 	{
 		debugMenu->addSeparator();
@@ -8566,9 +8638,16 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 			}
 			const QString stateText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知/异常(%1)").arg(done));
 			const QString sourceText = QString::fromStdString(pRobotDriver->GetStateMonitorSourceText());
+			// 扫描匹配时间轴每次刷新现读配置：管理页下拉切换后，下一个刷新周期即更新，与扫描实际取值一致。
+			const MeasureThenWeldRuntimeConfig::ScanTimestampSource monitorScanTimestampSource =
+				MeasureThenWeldRuntimeConfig::LoadScanTimestampSource();
+			const QString scanAxisText = QString("%1(%2)")
+				.arg(MeasureThenWeldRuntimeConfig::DisplayName(monitorScanTimestampSource))
+				.arg(MeasureThenWeldRuntimeConfig::FieldName(monitorScanTimestampSource));
 			QString monitorText = QString(
 				"状态: %1\n"
 				"接口: %2\n"
+				"扫描匹配时间轴: %21\n"
 				"robot_ms=%3  pc_recv_ms=%4  cache=%5/200\n"
 				"位置: X=%6  Y=%7  Z=%8  W=%9  P=%10  R=%11\n"
 				"脉冲: S=%12  L=%13  U=%14  R=%15  B=%16  T=%17  EX1=%18  EX2=%19  EX3=%20")
@@ -8591,7 +8670,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 				.arg(pulse.nTPulse)
 				.arg(pulse.lBXPulse)
 				.arg(pulse.lBYPulse)
-				.arg(pulse.lBZPulse);
+				.arg(pulse.lBZPulse)
+				.arg(scanAxisText);
 			if (!m_sMeasureThenWeldStatus.isEmpty())
 			{
 				monitorText += "\n\n" + m_sMeasureThenWeldStatus;
@@ -12342,14 +12422,13 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 		}
 
 		QString savedPath;
-		LogCommandLineMessage(QString("CLI 第%1/%2次扫描开始：参数=%3 [%4]，ScanSpeed=%5 mm/min%6，CameraReadFps=%7，CameraTimeOffsetMs=%8%9")
+		LogCommandLineMessage(QString("CLI 第%1/%2次扫描开始：参数=%3 [%4]，ScanSpeed=%5 mm/min%6，CameraTimeOffsetMs=%7%8")
 			.arg(repeatIndex)
 			.arg(repeatCount)
 			.arg(QString::fromStdString(param.sIniFilePath))
 			.arg(QString::fromStdString(param.sSectionName))
 			.arg(param.dScanSpeed, 0, 'f', 3)
 			.arg(std::isfinite(scanSpeedOverrideMmPerMin) && scanSpeedOverrideMmPerMin > 0.0 ? "（CLI覆盖）" : "")
-			.arg(param.dCameraReadFps, 0, 'f', 3)
 			.arg(param.dCameraTimeOffsetMs, 0, 'f', 3)
 			.arg(std::isfinite(cameraTimeOffsetOverrideMs) ? "（CLI覆盖）" : ""));
 
@@ -12415,7 +12494,7 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 	return allOk;
 }
 
-bool QtWidgetsApplication4::LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort) const
+bool QtWidgetsApplication4::LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort, int* pollIntervalMs) const
 {
 	constexpr int kDefaultTcpSensorPort = 50006;
 	constexpr int kDefaultUdpSensorPort = 50004;
@@ -12461,6 +12540,19 @@ bool QtWidgetsApplication4::LoadGrooveCameraEndpointForUnit(int unitIndex, QStri
 	}
 
 	cameraIP = cameraParam.deviceAddress.trimmed();
+	if (pollIntervalMs != nullptr)
+	{
+		bool okFps = false;
+		const int parsedFps = cameraParam.readFps.trimmed().toInt(&okFps);
+		const int effectiveFps = (okFps && parsedFps > 0) ? parsedFps : 100;
+		// 配置存的是帧率(fps)，worker 轮询用的是间隔(ms)，这里换算：间隔 = round(1000/帧率)。
+		int intervalMs = (1000 + effectiveFps / 2) / effectiveFps;
+		if (intervalMs < 1)
+		{
+			intervalMs = 1;
+		}
+		*pollIntervalMs = intervalMs;
+	}
 	if (m_bUseSharedScanCameraReceiver)
 	{
 		bool okPort = false;
@@ -12701,7 +12793,8 @@ void QtWidgetsApplication4::StopScanCameraRuntimes()
 bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QString& cameraIP, bool clearCache, bool blockingConnect)
 {
 	int cameraPort = 0;
-	if (!LoadGrooveCameraEndpointForUnit(unitIndex, cameraIP, cameraPort))
+	int cameraPollIntervalMs = 10;
+	if (!LoadGrooveCameraEndpointForUnit(unitIndex, cameraIP, cameraPort, &cameraPollIntervalMs))
 	{
 		return false;
 	}
@@ -12775,7 +12868,8 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 
 	const bool needRestart = !runtime->running
 		|| runtime->cameraIP != cameraIP
-		|| runtime->cameraPort != cameraPort;
+		|| runtime->cameraPort != cameraPort
+		|| runtime->cameraPollIntervalMs != cameraPollIntervalMs;
 	if (needRestart)
 	{
 		// 启动期 blockingConnect=false：异步发起，不让相机 3s 同步连接超时阻塞主窗口显示；
@@ -12785,9 +12879,11 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 			"startClient",
 			blockingConnect ? Qt::BlockingQueuedConnection : Qt::QueuedConnection,
 			Q_ARG(QString, cameraIP),
-			Q_ARG(int, cameraPort));
+			Q_ARG(int, cameraPort),
+			Q_ARG(int, cameraPollIntervalMs));
 		runtime->cameraIP = cameraIP;
 		runtime->cameraPort = cameraPort;
+		runtime->cameraPollIntervalMs = cameraPollIntervalMs;
 		runtime->receiveMode = "TCP独立连接";
 		runtime->running = true;
 	}
@@ -13049,6 +13145,25 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 				"正在等待相机帧...",
 				m_sGrooveCameraStatusText);
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->RefreshCameraControlParams();
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetImageTransportToggleHandler(
+				[this](bool enabled)
+				{
+					const int toggleUnitIndex = CurrentRobotUnitIndex();
+					CameraRuntime* toggleRuntime = m_scanCameraRuntimes.value(toggleUnitIndex, nullptr);
+					if (toggleRuntime != nullptr && toggleRuntime->tcpWorker != nullptr)
+					{
+						QMetaObject::invokeMethod(toggleRuntime->tcpWorker, "setImageTransportEnabled",
+							Qt::QueuedConnection, Q_ARG(bool, enabled));
+					}
+					else if (CameraFrameCache* toggleCache = ScanCameraCacheForUnit(toggleUnitIndex))
+					{
+						toggleCache->SetImageTransportEnabled(enabled);  // worker 未建时先记状态，连接时生效
+					}
+				});
+		}
+		if (CameraFrameCache* liveCache = ScanCameraCacheForUnit(unitIndex))
+		{
+			liveCache->SetLiveImageEnabled(true);  // 预览期间让 SKJ worker 同步取相机图像供显示
 		}
 		if (m_grooveCameraDisplayTimer != nullptr)
 		{
@@ -13060,6 +13175,10 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 		if (m_grooveCameraDisplayTimer != nullptr)
 		{
 			m_grooveCameraDisplayTimer->stop();
+		}
+		if (CameraFrameCache* liveCache = ScanCameraCacheForUnit(CurrentRobotUnitIndex()))
+		{
+			liveCache->SetLiveImageEnabled(false);
 		}
 		m_sGrooveCameraStatusText = "已停止坡口相机预览。";
 		if (m_pGroovePointCloudDialog != nullptr)
@@ -13181,6 +13300,10 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 			latestFrame,
 			statusText,
 			m_sGrooveCameraStatusText);
+	}
+	if (m_pGroovePointCloudDialog != nullptr)
+	{
+		static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetCameraImage(cache->LatestImage());
 	}
 }
 
@@ -13546,6 +13669,28 @@ void QtWidgetsApplication4::OpenWeldSeamCompDialog()
 		PrepareEmbeddedPage(m_pWeldSeamCompPage, targetStack);
 	}
 	ShowCurrentEmbeddedPage(m_pWeldSeamCompPage);
+}
+
+void QtWidgetsApplication4::OpenResultArchiveDialog()
+{
+	PageOpenTrace trace("结果打包压缩");
+	if (!RequirePermission(kRoleEngineer, "结果打包压缩"))
+	{
+		return;
+	}
+	// 已打开则前置，避免多个实例（弹窗带后台压缩线程）。
+	if (ResultArchiveDialog* existing = findChild<ResultArchiveDialog*>())
+	{
+		existing->show();
+		existing->raise();
+		existing->activateWindow();
+		return;
+	}
+	const QString resultRoot = QDir::current().absoluteFilePath(QStringLiteral("Result"));
+	QDir().mkpath(resultRoot);
+	auto* dlg = new ResultArchiveDialog(resultRoot, this);
+	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->show();
 }
 
 void QtWidgetsApplication4::OpenCameraParamDialog()

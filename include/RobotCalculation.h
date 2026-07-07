@@ -91,6 +91,22 @@ public:
         double lapStepStationWindowMm = 10.0;    // 单侧拟合窗口长度(主轴 mm)：越长平台斜率/残差估计越稳
         double lapStepSideFlatnessMm = 0.12;     // 平台残差 rms 上限：两侧拟合残差超此=波纹/噪声，非平台
         double lapStepPlatformSlopeMax = 0.10;   // 平台斜率门(mm侧向/mm主轴)：两侧斜率超此=拐角斜边，非平台
+        // 基础焊道首尾段截断（所有几何拟合方案②③④通用，拟合提取关键点之前执行）：按点列数组序(开头=首点侧/
+        // 结尾=末点侧，与焊接方向无关)沿累积弧长截掉开头/结尾指定 mm 的点，用于剔除扫描进/出端坏点。默认关。
+        bool enableEdgeTruncate = false;
+        double truncateHeadMm = 0.0;  // 截掉点列开头(首点侧)的弧长 mm
+        double truncateTailMm = 0.0;  // 截掉点列结尾(末点侧)的弧长 mm
+        // 端区周期一致性补拐点（②③④拟合方案通用）：波纹拐点近似周期，用中段中位段长L反推端区漏点位置，
+        // 再用典型拐角弯折角确认，补回起点/终点段被检测盲区漏掉的拐点。搭接对合成一段算周期。默认关。
+        bool enableEndPeriodCornerRecover = false;
+        double endPeriodRatioThreshold = 1.2;  // 端段长/周期L ≥ 此值才判定漏了拐点(部分周期收尾段不补)
+        double endPeriodMinBendDeg = 5.0;       // 补点候选最小弯折角(度)：与 0.5×典型角取大者作确认阈值
+        double endPeriodMergeFrac = 0.4;        // 删错:相邻同类拐点间距 < 此×周期L 判定找错→合并(搭接对豁免)
+        // 按平台边界重定拐点（②③④拟合方案通用）：波纹拐点全在"平台↔坡"交界。检测平的段(平台)，
+        // 保证每平台两端各有边界角、删掉卡平台内部(放错位)的角。治"拐点放平台中间→平台消失"。默认关。
+        bool enablePlatformCornerSnap = false;
+        double platformSnapFlatSlope = 0.15;    // 侧向局部斜率 < 此值判为平台(平)，≥此值为坡(波纹平台≈0.05,坡≈0.37)
+        double platformSnapMinFrac = 0.25;      // 平台最小长度 = 此×周期L(更短的平的段视作噪声不计)
         // 点云投影提取（完整点云→下层焊道轨迹）参数；0 表示自动按滤波参数派生（原硬编码行为）。
         double projectionStationWindowMm = 0.0;     // 站位窗口：0=max(2.5, 采样步长*1.5)
         double projectionTransverseWindowMm = 0.0;  // 横向窗口：0=max(10, 搜索窗口*1.5)

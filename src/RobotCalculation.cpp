@@ -3748,6 +3748,201 @@ QVector<int> RefitCornersByPlatformPattern(
     return result.size() >= 2 ? result : keyIndexes;
 }
 
+// 端区某点的"航向弯折角"(度)：前后各 win 点在 (s,smoothH) 平面各拟合一条直线，取两方向夹角(锐角)。
+// 直段≈0°，真拐角≈典型角。用于在"周期反推"的预测窗口内确认是否真有拐点。
+double GeometryBendAngleDegAt(
+    const QVector<GeometryProjectedPoint>& projected,
+    int idx,
+    int win)
+{
+    const int n = projected.size();
+    if (idx <= 0 || idx >= n - 1)
+    {
+        return 0.0;
+    }
+    const int a = std::max(0, idx - win);
+    const int b = std::min(n - 1, idx + win);
+    const GeometryFittedLine2D before = FitGeometrySegmentLine(projected, a, idx);
+    const GeometryFittedLine2D after = FitGeometrySegmentLine(projected, idx, b);
+    if (!before.valid || !after.valid)
+    {
+        return 0.0;
+    }
+    double dot = std::abs(before.direction.dot(after.direction));
+    dot = std::min(1.0, std::max(0.0, dot));
+    constexpr double kPiRad = 3.14159265358979323846;
+    return std::acos(dot) * 180.0 / kPiRad;
+}
+
+// 端区周期一致性补拐点(波纹板专用)：波纹拐点近似周期。
+//   长度判据：中段可靠拐点的"中位段长 L"=周期；端区(起点段/终点段)长度 ≥ ratio*L → 里面漏了拐点。
+//   角度判据：典型拐角弯折角 A(中段中位)；按周期反推漏点位置后，在 ±窗口内找弯折角峰，
+//             峰值 ≥ max(minBendDeg, 0.5*A) 才认(直段≈0°不会误补)。长度定位+角度确认双判据。
+//   搭接：相邻两个 isLapStepKey 拐点合成一段(两侧相加)再算周期，否则搭接短段污染统计。
+// 只"插入"非搭接拐点、不动现有拐点；返回新的 keyIndexes(保持原 s 升/降序去重)。insertedCount 回传新增数。
+QVector<int> RecoverEndRegionCornersByPeriod(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    const QVector<char>& isLapStepKey,
+    double ratioThreshold,
+    double minBendDeg,
+    int* insertedCount)
+{
+    if (insertedCount != nullptr)
+    {
+        *insertedCount = 0;
+    }
+    const int m = keyIndexes.size();
+    if (m < 5 || projected.size() < 16)
+    {
+        return keyIndexes;  // 拐点/点数太少，不足以估周期
+    }
+
+    // 1) 搭接对合成：相邻两个 lap step 拐点合成一个"代表点"(中点弧长)。
+    std::vector<double> repS;
+    repS.reserve(m);
+    for (int k = 0; k < m; )
+    {
+        if (k + 1 < m && k + 1 < isLapStepKey.size() && isLapStepKey[k] && isLapStepKey[k + 1])
+        {
+            repS.push_back(0.5 * (projected[keyIndexes[k]].s + projected[keyIndexes[k + 1]].s));
+            k += 2;
+        }
+        else
+        {
+            repS.push_back(projected[keyIndexes[k]].s);
+            ++k;
+        }
+    }
+    const int mm = static_cast<int>(repS.size());
+    if (mm < 4)
+    {
+        return keyIndexes;  // 需 起点 + >=2 中段 + 终点
+    }
+
+    // 2) 中段段长(排除首段 rep0->1、末段 rep[mm-2]->[mm-1]) 中位数 = 周期 L。
+    std::vector<double> interiorSeg;
+    for (int k = 1; k <= mm - 3; ++k)
+    {
+        interiorSeg.push_back(std::abs(repS[k + 1] - repS[k]));
+    }
+    if (interiorSeg.empty())
+    {
+        return keyIndexes;
+    }
+    std::sort(interiorSeg.begin(), interiorSeg.end());
+    const double L = interiorSeg[interiorSeg.size() / 2];
+    if (L <= 2.0)
+    {
+        return keyIndexes;
+    }
+
+    // 3) 典型拐角弯折角 A = 中段(非搭接)拐点弯折角中位数 → 确认阈值 acceptBend。
+    const int bendWin = 10;
+    std::vector<double> interiorBend;
+    for (int k = 1; k < m - 1; ++k)
+    {
+        if (k < isLapStepKey.size() && isLapStepKey[k])
+        {
+            continue;
+        }
+        const double bend = GeometryBendAngleDegAt(projected, keyIndexes[k], bendWin);
+        if (bend > 0.0)
+        {
+            interiorBend.push_back(bend);
+        }
+    }
+    double typicalBend = minBendDeg;
+    if (!interiorBend.empty())
+    {
+        std::sort(interiorBend.begin(), interiorBend.end());
+        typicalBend = interiorBend[interiorBend.size() / 2];
+    }
+    const double acceptBend = std::max(minBendDeg, 0.5 * typicalBend);
+
+    // 在弧长窗口内找弯折角最大且 ≥acceptBend 的 projected 索引。
+    auto findCornerInWindow = [&](double sCenter, double halfWin) -> int
+    {
+        int bestIdx = -1;
+        double bestBend = acceptBend;
+        for (int i = bendWin; i + bendWin < projected.size(); ++i)
+        {
+            if (std::abs(projected[i].s - sCenter) > halfWin)
+            {
+                continue;
+            }
+            const double bend = GeometryBendAngleDegAt(projected, i, bendWin);
+            if (bend > bestBend)
+            {
+                bestBend = bend;
+                bestIdx = i;
+            }
+        }
+        return bestIdx;
+    };
+
+    QVector<int> result = keyIndexes;
+    int inserted = 0;
+
+    // 对一个端段[sNear(端点侧)..sFar(内侧拐点)]：长度≥ratio*L 则按周期从内侧拐点往端点反推补点。
+    auto tryRecoverEndSegment = [&](double sNear, double sFar)
+    {
+        const double segLen = std::abs(sFar - sNear);
+        if (segLen < ratioThreshold * L)
+        {
+            return;  // 段长不足(部分周期收尾)，正常不补
+        }
+        const double dir = (sFar >= sNear) ? 1.0 : -1.0;
+        const double sLo = std::min(sNear, sFar) + 0.15 * L;
+        const double sHi = std::max(sNear, sFar) - 0.15 * L;
+        const int maxMissing = static_cast<int>(segLen / L) + 1;
+        for (int j = 1; j <= maxMissing; ++j)
+        {
+            const double sPred = sFar - dir * j * L;
+            if (sPred < sLo || sPred > sHi)
+            {
+                continue;
+            }
+            const int idx = findCornerInWindow(sPred, 0.35 * L);
+            if (idx < 0 || result.contains(idx))
+            {
+                continue;
+            }
+            bool tooClose = false;
+            for (int existing : result)
+            {
+                if (std::abs(projected[existing].s - projected[idx].s) < 0.15 * L)
+                {
+                    tooClose = true;
+                    break;
+                }
+            }
+            if (!tooClose)
+            {
+                result.push_back(idx);
+                ++inserted;
+            }
+        }
+    };
+
+    tryRecoverEndSegment(repS[0], repS[1]);              // 起点段
+    tryRecoverEndSegment(repS[mm - 1], repS[mm - 2]);    // 终点段
+
+    if (inserted > 0)
+    {
+        const bool ascending = projected[keyIndexes.last()].s >= projected[keyIndexes.first()].s;
+        std::sort(result.begin(), result.end(), [&](int a, int b) {
+            return ascending ? projected[a].s < projected[b].s : projected[a].s > projected[b].s;
+        });
+        result.erase(std::unique(result.begin(), result.end()), result.end());
+    }
+    if (insertedCount != nullptr)
+    {
+        *insertedCount = inserted;
+    }
+    return result;
+}
+
 RobotCalculation::LowerWeldPointType GeometryCornerType(
     const QVector<GeometryProjectedPoint>& projected,
     const QVector<int>& keyIndexes,
@@ -3801,6 +3996,230 @@ double GeometryKeyDistance(
     }
 
     return (projected[keyIndexes[secondPosition]].point - projected[keyIndexes[firstPosition]].point).norm();
+}
+
+// 周期/角度删错拐点：相邻【同类】拐点弧长间距 ≪ 周期L(< distFrac*L)说明其中一个找错——波纹同类拐角(II/OO 各
+// 界定一个平台)间距≈一个周期，挨太近多由平台重算把一个平台的两个边界角凑到一起所致。合并成一个：删弯折角离
+// 典型角更远的那个。搭接台阶对(相邻两个 isLapStepKey)豁免(本就该挨着)。端点不动。只删不插、保持原序。
+QVector<int> MergeTooCloseSameTypeCorners(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    const QVector<char>& isLapStepKey,
+    double distFrac,
+    int* removedCount)
+{
+    if (removedCount != nullptr) { *removedCount = 0; }
+    const int m0 = keyIndexes.size();
+    if (m0 < 5) { return keyIndexes; }
+
+    // 周期 L = 中段段长中位(搭接合成、排除首末段)——与端区补漏 Pass 同口径。
+    std::vector<double> repS;
+    for (int k = 0; k < m0; )
+    {
+        if (k + 1 < m0 && k + 1 < isLapStepKey.size() && isLapStepKey[k] && isLapStepKey[k + 1])
+        {
+            repS.push_back(0.5 * (projected[keyIndexes[k]].s + projected[keyIndexes[k + 1]].s));
+            k += 2;
+        }
+        else
+        {
+            repS.push_back(projected[keyIndexes[k]].s);
+            ++k;
+        }
+    }
+    const int mm = static_cast<int>(repS.size());
+    if (mm < 4) { return keyIndexes; }
+    std::vector<double> seg;
+    for (int k = 1; k <= mm - 3; ++k) { seg.push_back(std::abs(repS[k + 1] - repS[k])); }
+    if (seg.empty()) { return keyIndexes; }
+    std::sort(seg.begin(), seg.end());
+    const double L = seg[seg.size() / 2];
+    if (L <= 2.0) { return keyIndexes; }
+    const double minGap = std::max(0.05, distFrac) * L;
+
+    const int bendWin = 10;
+    std::vector<double> ib;
+    for (int k = 1; k < m0 - 1; ++k)
+    {
+        if (k < isLapStepKey.size() && isLapStepKey[k]) { continue; }
+        const double b = GeometryBendAngleDegAt(projected, keyIndexes[k], bendWin);
+        if (b > 0.0) { ib.push_back(b); }
+    }
+    double typical = 8.0;
+    if (!ib.empty()) { std::sort(ib.begin(), ib.end()); typical = ib[ib.size() / 2]; }
+
+    QVector<int> result = keyIndexes;
+    QVector<char> lapKey = isLapStepKey;
+    // 段 [posA,posB] 的侧向斜率(|ΔsmoothH/Δs|)：平台≈平(小)、上/下坡≈陡(大)。用来分辨"真平台"与"坡上假双拐点"。
+    const double flatSlopeThresh = 0.15;  // <此≈平台，≥此≈坡(波纹平台斜率≈0.03~0.1，坡≈0.3~0.4)
+    auto segSlope = [&](int posA, int posB) -> double
+    {
+        const double ds = projected[result[posB]].s - projected[result[posA]].s;
+        if (std::abs(ds) < 1e-6) { return 0.0; }
+        return std::abs((projected[result[posB]].smoothH - projected[result[posA]].smoothH) / ds);
+    };
+    int removed = 0;
+    bool changed = true;
+    while (changed && result.size() > 4)
+    {
+        changed = false;
+        for (int k = 1; k + 1 <= result.size() - 2; ++k)  // 仅中段相邻对(k,k+1 均为内部拐点)
+        {
+            // 搭接对豁免
+            if ((k < lapKey.size() && lapKey[k]) || (k + 1 < lapKey.size() && lapKey[k + 1])) { continue; }
+            // 必须同类
+            if (GeometryCornerType(projected, result, k) != GeometryCornerType(projected, result, k + 1)) { continue; }
+            // 间距(主轴弧长)≥ minGap 则正常，不删
+            const double gap = std::abs(projected[result[k]].s - projected[result[k + 1]].s);
+            if (gap >= minGap) { continue; }
+            // 【平台保护】两同类拐点【之间】若是平的(flat)→这是一段真平台(哪怕很短)，两端都是真边界，绝不删。
+            // 只有当它们之间是【坡】(斜率陡)时，才说明一条坡上多切了一个拐点(假双拐点)，才删。
+            if (segSlope(k, k + 1) < flatSlopeThresh) { continue; }
+            // 删"坡中"那个(两侧都陡)，保留贴着平台的边界角(另一侧是平台)。两者都/都不像坡中→按弯折角离典型远近。
+            const bool kMidEdge = (k - 1 >= 0) && segSlope(k - 1, k) >= flatSlopeThresh;
+            const bool k1MidEdge = (k + 2 < result.size()) && segSlope(k + 1, k + 2) >= flatSlopeThresh;
+            int removeAt;
+            if (kMidEdge && !k1MidEdge) { removeAt = k; }
+            else if (k1MidEdge && !kMidEdge) { removeAt = k + 1; }
+            else
+            {
+                const double bk = GeometryBendAngleDegAt(projected, result[k], bendWin);
+                const double bk1 = GeometryBendAngleDegAt(projected, result[k + 1], bendWin);
+                removeAt = (std::abs(bk - typical) >= std::abs(bk1 - typical)) ? k : (k + 1);
+            }
+            result.removeAt(removeAt);
+            lapKey.removeAt(removeAt);
+            ++removed;
+            changed = true;
+            break;  // 索引已变，重扫
+        }
+    }
+    if (removedCount != nullptr) { *removedCount = removed; }
+    return result;
+}
+
+// 点 idx 处侧向局部斜率 |dh/ds|（窗口 ±win 点最小二乘拟合）。平台≈0(平)，上/下坡≈陡。
+double LocalLateralSlopeAt(const QVector<GeometryProjectedPoint>& projected, int idx, int win)
+{
+    const int n = projected.size();
+    const int a = std::max(0, idx - win);
+    const int b = std::min(n - 1, idx + win);
+    const int cnt = b - a + 1;
+    if (cnt < 3) { return 0.0; }
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    for (int k = a; k <= b; ++k)
+    {
+        const double x = projected[k].s;
+        const double y = projected[k].smoothH;
+        sx += x; sy += y; sxx += x * x; sxy += x * y;
+    }
+    const double denom = static_cast<double>(cnt) * sxx - sx * sx;
+    if (std::abs(denom) < 1e-9) { return 0.0; }
+    return std::abs((static_cast<double>(cnt) * sxy - sx * sy) / denom);
+}
+
+// 按平台边界重定拐点：波纹的拐点全部位于"平台↔坡"交界。本 Pass 沿焊道检测"平的段(平台)"，
+// 对每个平台保证两端各有一个边界拐点、删掉卡在平台内部(放错位)的拐点。判定针对原拐点集逐平台进行：
+// 平台两端都已有角且内部无角 → 该平台正确，原样不动(幂等)；否则补缺失边界角、删内部误检角。
+// 治"拐点被放到平台正中间→平台塌成长坡消失""端区漏平台边界角"。搭接拐点与起终点不参与，保持不变。
+QVector<int> SnapCornersToPlatforms(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    const QVector<char>& isLapStepKey,
+    double flatSlopeThresh,
+    double minPlatformFrac,
+    int* changedCount)
+{
+    if (changedCount != nullptr) { *changedCount = 0; }
+    const int m0 = keyIndexes.size();
+    const int n = projected.size();
+    if (m0 < 4 || n < 32) { return keyIndexes; }
+
+    // 周期 L = 中段段长中位(搭接对合成到中点)——与其它端区 Pass 同口径
+    std::vector<double> repS;
+    for (int k = 0; k < m0; )
+    {
+        if (k + 1 < m0 && k + 1 < isLapStepKey.size() && isLapStepKey[k] && isLapStepKey[k + 1])
+        { repS.push_back(0.5 * (projected[keyIndexes[k]].s + projected[keyIndexes[k + 1]].s)); k += 2; }
+        else { repS.push_back(projected[keyIndexes[k]].s); ++k; }
+    }
+    const int mm = static_cast<int>(repS.size());
+    if (mm < 4) { return keyIndexes; }
+    std::vector<double> seg;
+    for (int k = 1; k <= mm - 3; ++k) { seg.push_back(std::abs(repS[k + 1] - repS[k])); }
+    if (seg.empty()) { return keyIndexes; }
+    std::sort(seg.begin(), seg.end());
+    const double L = seg[seg.size() / 2];
+    if (L <= 2.0) { return keyIndexes; }
+
+    // 斜率窗 ≈ 7mm（按主轴点间距换算）
+    const double span = std::abs(projected[n - 1].s - projected[0].s);
+    const double spacing = span > 1e-6 ? span / (n - 1) : 1.0;
+    const int win = std::min(40, std::max(6, static_cast<int>(std::lround(7.0 / std::max(0.05, spacing)))));
+
+    // 检测平台运行(flat run)：连续的平点；长度≥minPlatLen 才算真平台
+    std::vector<char> flat(n, 0);
+    for (int i = 0; i < n; ++i)
+    {
+        flat[i] = LocalLateralSlopeAt(projected, i, win) < flatSlopeThresh ? 1 : 0;
+    }
+    const double minPlatLen = std::max(10.0, minPlatformFrac * L);
+    std::vector<std::pair<int, int>> plats;
+    for (int i = 0; i < n; )
+    {
+        if (!flat[i]) { ++i; continue; }
+        int j = i;
+        while (j + 1 < n && flat[j + 1]) { ++j; }
+        if (std::abs(projected[j].s - projected[i].s) >= minPlatLen) { plats.emplace_back(i, j); }
+        i = j + 1;
+    }
+    if (plats.empty()) { return keyIndexes; }
+
+    // 逐平台判定（针对原 keyIndexes，统一收集删/插后一次性应用，避免中途索引漂移）
+    const double marc = std::max(10.0, 0.18 * L);  // 把"已在平台边界附近"的现有角视作边界角的容差
+    std::vector<char> removeFlag(m0, 0);
+    std::vector<int> insertIdx;
+    for (const auto& pab : plats)
+    {
+        const double sa = projected[pab.first].s;
+        const double sb = projected[pab.second].s;
+        const double lo = std::min(sa, sb), hi = std::max(sa, sb);
+        bool hasA = false, hasB = false;
+        std::vector<int> interior;
+        // 边界判定(hasA/hasB)：起点/终点/搭接角同样是合法平台边界，全部计入——否则会误判端区/搭接两侧平台缺边界而插入重复角。
+        for (int k = 0; k < m0; ++k)
+        {
+            const double sc = projected[keyIndexes[k]].s;
+            if (std::abs(sc - sa) <= marc) { hasA = true; }
+            if (std::abs(sc - sb) <= marc) { hasB = true; }
+        }
+        // 内部放错角(可删)：仅限常规中段角(非起终点、非搭接)。
+        for (int k = 1; k < m0 - 1; ++k)
+        {
+            if (k < isLapStepKey.size() && isLapStepKey[k]) { continue; }
+            const double sc = projected[keyIndexes[k]].s;
+            if (sc > lo + marc && sc < hi - marc) { interior.push_back(k); }
+        }
+        if (interior.empty() && hasA && hasB) { continue; }  // 该平台已正确，不动
+        for (int k : interior) { removeFlag[k] = 1; }         // 删平台内部放错的角
+        if (!hasA) { insertIdx.push_back(pab.first); }        // 补缺失的平台边界角
+        if (!hasB) { insertIdx.push_back(pab.second); }
+    }
+
+    int changed = static_cast<int>(insertIdx.size());
+    for (int k = 0; k < m0; ++k) { if (removeFlag[k]) { ++changed; } }
+    if (changed == 0) { return keyIndexes; }
+
+    QVector<int> result;
+    for (int k = 0; k < m0; ++k) { if (!removeFlag[k]) { result.push_back(keyIndexes[k]); } }
+    for (int idx : insertIdx) { if (!result.contains(idx)) { result.push_back(idx); } }
+    const bool ascending = projected[keyIndexes.last()].s >= projected[keyIndexes.first()].s;
+    std::sort(result.begin(), result.end(), [&](int a, int b) {
+        return ascending ? projected[a].s < projected[b].s : projected[a].s > projected[b].s;
+    });
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    if (changedCount != nullptr) { *changedCount = changed; }
+    return result;
 }
 
 QVector<int> PruneShortSameTypeGeometryRuns(
@@ -5124,6 +5543,54 @@ void ExportGeometryFitDebugClouds(
 }
 }  // namespace
 
+namespace
+{
+// 基础焊道首尾段截断：沿点列数组序按累积弧长(mm)截掉开头 headMm、结尾 tailMm 的点（拟合提取关键点之前调用）。
+// 与焊接方向无关(开头=数组首点侧/结尾=末点侧)，用于剔除扫描进/出端坏点。截后不足 2 点 或 head+tail≥总弧长
+// 时放弃截断(原样返回)，避免把焊道截没。keptFrom/keptTo 回传保留区间(供日志)。
+QVector<RobotCalculation::IndexedPoint3D> TrimLowerWeldPathByArcLength(
+    const QVector<RobotCalculation::IndexedPoint3D>& pts,
+    double headMm, double tailMm, int* keptFrom, int* keptTo)
+{
+    const int n = pts.size();
+    if (keptFrom != nullptr) { *keptFrom = 0; }
+    if (keptTo != nullptr) { *keptTo = n - 1; }
+    const double headCut = std::max(0.0, headMm);
+    const double tailCut = std::max(0.0, tailMm);
+    if (n < 3 || (headCut <= 0.0 && tailCut <= 0.0))
+    {
+        return pts;
+    }
+    std::vector<double> arc(n, 0.0);
+    for (int i = 1; i < n; ++i)
+    {
+        arc[i] = arc[i - 1] + (pts[i].point - pts[i - 1].point).norm();
+    }
+    const double total = arc[n - 1];
+    if (headCut + tailCut >= total)
+    {
+        return pts;
+    }
+    int from = 0;
+    while (from < n - 1 && arc[from] < headCut) { ++from; }
+    int to = n - 1;
+    while (to > 0 && (total - arc[to]) < tailCut) { --to; }
+    if (to - from + 1 < 2)
+    {
+        return pts;
+    }
+    if (keptFrom != nullptr) { *keptFrom = from; }
+    if (keptTo != nullptr) { *keptTo = to; }
+    QVector<RobotCalculation::IndexedPoint3D> out;
+    out.reserve(to - from + 1);
+    for (int i = from; i <= to; ++i)
+    {
+        out.push_back(pts[i]);
+    }
+    return out;
+}
+}  // namespace
+
 RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathGeometry(
     const QVector<IndexedPoint3D>& inputPoints,
     const LowerWeldFilterParams& params)
@@ -5150,6 +5617,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         {
             validPoints.push_back(sample);
         }
+    }
+
+    // 基础焊道首尾段截断（拟合提取关键点之前、去噪之前；所有几何拟合方案②③④通用，与焊接方向解耦）。
+    if (params.enableEdgeTruncate && (params.truncateHeadMm > 0.0 || params.truncateTailMm > 0.0))
+    {
+        validPoints = TrimLowerWeldPathByArcLength(
+            validPoints, params.truncateHeadMm, params.truncateTailMm, nullptr, nullptr);
     }
 
     // 输入已去噪(SDK is_remove_noise 开)时跳过程序自身的 MAD 去噪——重复处理会削圆尖角、移位拐点。
@@ -5302,6 +5776,48 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
         isLapStepKey = QVector<char>(keyIndexes.size(), 0);
         for (int k = 0; k < keyIndexes.size(); ++k)
             if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
+        // 端区周期一致性补拐点：用波纹周期(中段中位段长)+典型拐角弯折角，反推并补回端区(起/终段)被检测
+        // 盲区漏掉的拐点(尤其起点引入段)。只插入非搭接拐点；插入后据 lapValues 重建 isLapStepKey 对齐。
+        if (params.enableEndPeriodCornerRecover)
+        {
+            int recoveredCount = 0;
+            keyIndexes = RecoverEndRegionCornersByPeriod(
+                projected, keyIndexes, isLapStepKey,
+                params.endPeriodRatioThreshold, params.endPeriodMinBendDeg, &recoveredCount);
+            if (recoveredCount > 0)
+            {
+                isLapStepKey = QVector<char>(keyIndexes.size(), 0);
+                for (int k = 0; k < keyIndexes.size(); ++k)
+                    if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
+            }
+            // 周期/角度删错拐点：平台重算等可能把一个平台的两个同类边界角凑到 ≪ 周期(如4mm)，
+            // SDK+拟合路径又跳过了 Prune 去重，这里据"相邻同类拐点间距≪周期=找错"合并清理。搭接对豁免。
+            int mergedCount = 0;
+            keyIndexes = MergeTooCloseSameTypeCorners(
+                projected, keyIndexes, isLapStepKey, params.endPeriodMergeFrac, &mergedCount);
+            if (mergedCount > 0)
+            {
+                isLapStepKey = QVector<char>(keyIndexes.size(), 0);
+                for (int k = 0; k < keyIndexes.size(); ++k)
+                    if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
+            }
+        }
+        // 按平台边界重定拐点：波纹拐点全在"平台↔坡"交界。检测平的段(平台)，确保每个平台两端各有边界角、
+        // 删掉卡在平台内部(放错位)的角。治"拐点放到平台中间→平台塌成长坡消失"、端区漏平台边界角。
+        // 对已正确的平台幂等不动；只纠正错的。搭接/起终点不参与。插入/删除后据 lapValues 重建 isLapStepKey。
+        if (params.enablePlatformCornerSnap)
+        {
+            int snappedCount = 0;
+            keyIndexes = SnapCornersToPlatforms(
+                projected, keyIndexes, isLapStepKey,
+                params.platformSnapFlatSlope, params.platformSnapMinFrac, &snappedCount);
+            if (snappedCount > 0)
+            {
+                isLapStepKey = QVector<char>(keyIndexes.size(), 0);
+                for (int k = 0; k < keyIndexes.size(); ++k)
+                    if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
+            }
+        }
     }
     if (keyIndexes.size() < 2)
     {

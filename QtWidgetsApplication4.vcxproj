@@ -74,7 +74,7 @@
       <AdditionalDependencies>orocos-kdld.lib;Robot-SDKd.lib;Qt6Networkd.lib;Qt6Sqld.lib;Qt6OpenGLd.lib;Qt6OpenGLWidgetsd.lib;opengl32.lib;opencv_world460d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtCore\6.7.3;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <DisableSpecificWarnings>4828</DisableSpecificWarnings>
@@ -115,7 +115,7 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtCore\6.7.3;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -159,6 +159,7 @@
     <ClCompile Include="src\RobotDataHelper.cpp" />
     <ClCompile Include="src\WeldPoseAverageUpdater.cpp" />
     <ClCompile Include="src\WeldSeamCompDialog.cpp" />
+    <ClCompile Include="src\ResultArchiveDialog.cpp" />
     <ClCompile Include="src\WeldProcessFile.cpp" />
     <ClCompile Include="src\WeldProcessDialog.cpp" />
     <ClCompile Include="src\OPini.cpp" />
@@ -182,6 +183,7 @@
     <QtMoc Include="include\MeasureThenWeldDialog.h" />
     <QtMoc Include="include\WeldProcessDialog.h" />
     <QtMoc Include="include\VirtualWeldTestDialog.h" />
+    <QtMoc Include="include\ResultArchiveDialog.h" />
     <ClCompile Include="src\Const.cpp" />
     <ClCompile Include="src\QtWidgetsApplication4.cpp" />
     <ClCompile Include="src\main.cpp" />
@@ -247,17 +249,17 @@
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
   <Target Name="AfterBuildDebug" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
-    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qwebp,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types tls,networkinformation,generic &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types tls,networkinformation,generic &quot;$(TargetPath)&quot;" />
     <MakeDir Directories="$(TargetDir)translations" />
     <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460d.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\SKJCamera.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\SKJCamera.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\avcodec-61.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\avutil-59.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\swresample-5.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\swscale-8.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="AfterBuildRelease" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
-    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qwebp,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types tls,networkinformation,generic &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types tls,networkinformation,generic &quot;$(TargetPath)&quot;" />
     <MakeDir Directories="$(TargetDir)translations" />
     <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\SKJCamera.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\SKJCamera.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\avcodec-61.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\avutil-59.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\swresample-5.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\swscale-8.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
 </Project>

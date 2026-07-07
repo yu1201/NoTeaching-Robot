@@ -123,6 +123,10 @@ public:
 	bool Prog_startRun_Py();
 	//停止程序 停止的是目前加载的程序
 	bool Prog_stop_Py();
+	//读当前程序运行行号（暂停时=断点行）；失败返回 -1
+	int GetCurrentProgramLine();
+	//设置程序计数器：下次 START 从第 nLine 行开始（断点续跑用）
+	bool SetProgramLine(int nLine);
 
 
 	//设置当前工具 !+

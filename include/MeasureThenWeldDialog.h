@@ -33,11 +33,12 @@ struct T_PRECISE_MEASURE_PARAM
     int nParamGroupIndex = 0;
     QString sParamGroupName = "参数组1";
 
-    // 配置库当前测量焊接参数组中的运行速度、扫描速度和相机读取/时间补偿参数。
+    // 配置库当前测量焊接参数组中的运行速度、扫描速度和相机时间补偿参数。
+    // 注：相机读取帧率已迁出测量参数，改由相机参数(CameraParam.ini 的 CameraReadFps)维护。
     double dScanSpeed = 0.0;
     double dRunSpeed = 0.0;
-    double dCameraReadFps = 100.0;
     double dCameraTimeOffsetMs = 0.0;
+    bool bUseStatTimeAlign = true;  // 统计时间对齐开关：false=首帧对齐(旧算法，对照测试相机时间戳用)
     double dAcc = 0.0;
     double dDec = 0.0;
 
@@ -146,6 +147,13 @@ private:
     void RunPresetParamFlow();
     void RunSkipScanWeldFlow();
     void RunLineScanProcess();
+    // 相机时间补偿自动标定：同一工件自动正/反向各扫一次，按拐点分裂量解算相机链路固有延迟并写回补偿参数。
+    void RunCameraTimeOffsetCalibrationFlow();
+    // 运行监控窗口的暂停/继续（STEP: SetModeCmd STOP/START，含回位前置）与断点续焊入口。
+    void OnPauseResumeClicked();
+    void OnResumeWeldClicked();
+    // 断点续焊独立流程：只认落盘断点(无记录直接报错)，自动取最新结果的执行文件，落盘位姿定位+搭接回退后续焊。
+    void RunResumeWeldFlow();
     void RefreshWeldModeFromParam();
     void SaveWeldModeToParam(bool doActualWeld);
     bool IsActualWeldModeChecked() const;
@@ -175,6 +183,15 @@ private:
     QPushButton* m_pPresetParamBtn = nullptr;
     QPushButton* m_pSkipScanWeldBtn = nullptr;
     QPushButton* m_pLineScanProcessBtn = nullptr;
+    QPushButton* m_pTimeOffsetCalibBtn = nullptr;
+    // 运行监控最大化窗口(类型在 cpp 匿名空间定义，照 GroovePointCloudDialog 先例)：流程启动时弹出，
+    // 内含流程步骤/进度、实时激光线点云+相机图像、日志、暂停/继续与断点续焊按钮。
+    QDialog* m_pRunMonitor = nullptr;
+    QTimer* m_pLiveViewTimer = nullptr;
+    // 暂停断点记录：暂停那一刻的程序行号与机器人位姿（回位前置与断点续焊用）。
+    int m_pauseProgramLine = -1;
+    T_ROBOT_COORS m_pausePose{};
+    bool m_hasPausePose = false;
     QCheckBox* m_pActualWeldCheck = nullptr;
     QLabel* m_pProgressLabel = nullptr;
     QProgressBar* m_pProgressBar = nullptr;

@@ -4,6 +4,7 @@
 #include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
 
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QDir>
 #include <QDoubleValidator>
@@ -300,6 +301,28 @@ CameraBasicParamDialog::CameraBasicParamDialog(
     MarkNumericEdit(m_pCameraTypeEdit);
     cameraLayout->addWidget(m_pCameraTypeEdit, 4, 1);
 
+    cameraLayout->addWidget(new QLabel("相机读取帧率(fps)", this), 4, 2);
+    m_pReadFpsEdit = new QLineEdit(this);
+    m_pReadFpsEdit->setMinimumWidth(150);
+    m_pReadFpsEdit->setAlignment(Qt::AlignRight);
+    m_pReadFpsEdit->setValidator(new QIntValidator(1, 1000, m_pReadFpsEdit));
+    m_pReadFpsEdit->setToolTip("相机每秒取帧次数（驱动取帧轮询，轮询间隔=1000/帧率，默认 100fps≈10ms）。设得超过相机硬件帧率无意义，多余轮询只会拿到重复/无新帧。仅 TCP 独立连接模式生效，UDP 共享接收模式不使用本设置。修改后需重连相机（下次预览/扫描启动）才生效。");
+    MarkNumericEdit(m_pReadFpsEdit);
+    cameraLayout->addWidget(m_pReadFpsEdit, 4, 3);
+
+    m_pImageCaptureEnableCheck = new QCheckBox("扫描时保存相机图像", this);
+    m_pImageCaptureEnableCheck->setToolTip("开启后每次扫描期间按抽帧间隔保存相机实时画面(WebP格式)到 Result\\<案例>\\CameraImage\\，用于事后排查丢帧/识别失败时刻的实际画面。需要相机图像口(50001)支持。");
+    cameraLayout->addWidget(m_pImageCaptureEnableCheck, 5, 0, 1, 2);
+
+    cameraLayout->addWidget(new QLabel("图像抽帧间隔", this), 5, 2);
+    m_pImageCaptureStrideEdit = new QLineEdit(this);
+    m_pImageCaptureStrideEdit->setMinimumWidth(150);
+    m_pImageCaptureStrideEdit->setAlignment(Qt::AlignRight);
+    m_pImageCaptureStrideEdit->setValidator(new QIntValidator(1, 100, m_pImageCaptureStrideEdit));
+    m_pImageCaptureStrideEdit->setToolTip("每 N 张新图像保存 1 张（默认 5≈每秒6张）。越大磁盘占用越小；1=全部保存（不建议，每次扫描可达数百MB）。");
+    MarkNumericEdit(m_pImageCaptureStrideEdit);
+    cameraLayout->addWidget(m_pImageCaptureStrideEdit, 5, 3);
+
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     buttonLayout->addStretch(1);
     QPushButton* reloadBtn = new QPushButton("重新读取相机参数", this);
@@ -308,7 +331,7 @@ CameraBasicParamDialog::CameraBasicParamDialog(
     saveBtn->setFixedWidth(180);
     buttonLayout->addWidget(reloadBtn);
     buttonLayout->addWidget(saveBtn);
-    cameraLayout->addLayout(buttonLayout, 5, 0, 1, 4);
+    cameraLayout->addLayout(buttonLayout, 6, 0, 1, 4);
     paramContentLayout->addWidget(cameraGroup);
     paramContentLayout->addStretch(1);
     paramScrollArea->setWidget(paramContent);
@@ -362,6 +385,9 @@ bool CameraBasicParamDialog::LoadCameraParam()
     m_pExposureTimeEdit->setText(param.exposureTime);
     m_pGainLevelEdit->setText(param.gainLevel);
     m_pCameraTypeEdit->setText(param.cameraType);
+    m_pReadFpsEdit->setText(param.readFps);
+    m_pImageCaptureEnableCheck->setChecked(param.imageCaptureEnable.trimmed() != "0");
+    m_pImageCaptureStrideEdit->setText(param.imageCaptureStride);
     m_pCameraSectionLabel->setText(QString("当前机器人：%1    当前分组：%2").arg(m_robotName, param.sectionName));
     AppendLog(QString("已读取相机参数数据：%1 [%2]").arg(RobotDataHelper::CameraParamPath(m_robotName), param.sectionName));
     MarkCleanSnapshot();
@@ -377,6 +403,9 @@ bool CameraBasicParamDialog::SaveCameraParam()
     param.exposureTime = m_pExposureTimeEdit->text().trimmed();
     param.gainLevel = m_pGainLevelEdit->text().trimmed();
     param.cameraType = m_pCameraTypeEdit->text().trimmed();
+    param.readFps = m_pReadFpsEdit->text().trimmed();
+    param.imageCaptureEnable = m_pImageCaptureEnableCheck->isChecked() ? "1" : "0";
+    param.imageCaptureStride = m_pImageCaptureStrideEdit->text().trimmed();
 
     QString error;
     if (m_pDeviceAddressEdit == nullptr || !m_pDeviceAddressEdit->isComplete())
@@ -426,7 +455,10 @@ QString CameraBasicParamDialog::BuildSnapshot() const
         m_pDevicePortEdit != nullptr ? m_pDevicePortEdit->text().trimmed() : QString(),
         m_pExposureTimeEdit != nullptr ? m_pExposureTimeEdit->text().trimmed() : QString(),
         m_pGainLevelEdit != nullptr ? m_pGainLevelEdit->text().trimmed() : QString(),
-        m_pCameraTypeEdit != nullptr ? m_pCameraTypeEdit->text().trimmed() : QString()
+        m_pCameraTypeEdit != nullptr ? m_pCameraTypeEdit->text().trimmed() : QString(),
+        m_pReadFpsEdit != nullptr ? m_pReadFpsEdit->text().trimmed() : QString(),
+        m_pImageCaptureEnableCheck != nullptr && m_pImageCaptureEnableCheck->isChecked() ? QStringLiteral("1") : QStringLiteral("0"),
+        m_pImageCaptureStrideEdit != nullptr ? m_pImageCaptureStrideEdit->text().trimmed() : QString()
     }.join('\n');
 }
 

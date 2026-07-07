@@ -53,6 +53,12 @@ public:
         int fitPiecewiseMinSegmentPoints = 10;
         int fitMinPointCount = 4;
         int fitSmoothRadius = 3;
+        // SDK 基础焊道(仅 SdkBaseWeldFit 模式)拟合前预平滑：对 SDK 重建的稠密焊道点做"结构自适应 1D 双边"
+        // 去锯齿——按弧长参数化、值域核以"邻点到局部切线的垂直偏移"加权，使跨搭接X台阶/真实折角的邻点
+        // 权重趋零，从而只磨平直线段小幅锯齿、不会把搭接台阶或拐角圆滑掉。默认关闭(现场按需开+标定)。
+        bool sdkBasePresmoothEnable = false;
+        double sdkBasePresmoothWindowMm = 3.0;  // 空间窗 σs(沿弧长mm)：越大越平滑，须远小于最短直线段
+        double sdkBasePresmoothEdgeMm = 0.5;     // 保边阈值 σr(mm)：垂直偏移>此的跳变(台阶/折角)保留；须>锯齿幅度且<台阶高度
         // 方位角拐点检测参数（SDK基础点云+滤波拟合流程固定使用；判方向转折角度定拐点，
         // 替代 DP「离弦最远点」——避免缓变/台阶拐角标偏、漏检真折角）。
         double fitAzimuthTurnThresholdDeg = 22.0;    // 转角阈值(度)：区分真折角与波纹起伏的分界
@@ -74,6 +80,19 @@ public:
         double lapStepStationWindowMm = 10.0;    // 单侧拟合窗口长度(主轴 mm)
         double lapStepSideFlatnessMm = 0.12;     // 平台残差 rms 上限(排波纹/噪声)
         double lapStepPlatformSlopeMax = 0.10;   // 平台斜率门(排拐角斜边)
+        // 基础焊道首尾段截断（②③④拟合方案通用，拟合前按点列扫描顺序截掉开头/结尾指定弧长的坏点）。默认关。
+        bool fitEdgeTruncateEnable = false;
+        double fitTruncateHeadMm = 0.0;  // 截掉点列开头(首点侧)弧长 mm
+        double fitTruncateTailMm = 0.0;  // 截掉点列结尾(末点侧)弧长 mm
+        // 端区周期一致性补拐点（②③④拟合方案通用，用波纹周期+典型拐角角度补回起/终点段漏掉的拐点）。默认关。
+        bool fitEndPeriodRecoverEnable = false;
+        double fitEndPeriodRatioThreshold = 1.2;  // 端段长/周期 ≥ 此值判漏拐点
+        double fitEndPeriodMinBendDeg = 5.0;       // 补点候选最小弯折角(度)
+        double fitEndPeriodMergeFrac = 0.4;        // 删错:相邻同类拐点间距 < 此×周期 判找错合并
+        // 按平台边界重定拐点（②③④拟合方案通用，检测平台、把拐点归位到平台两端、删平台内放错的角）。默认关。
+        bool fitPlatformSnapEnable = false;
+        double fitPlatformSnapFlatSlope = 0.15;    // 侧向斜率 < 此判为平台(平)，≥此为坡
+        double fitPlatformSnapMinFrac = 0.25;      // 平台最小长度 = 此×周期
         // 点云投影提取参数（方法③点云算法+拟合专用；0=按滤波参数自动派生，等同原硬编码行为）。
         double projectionStationWindowMm = 0.0;
         double projectionTransverseWindowMm = 0.0;

@@ -63,6 +63,17 @@ typedef SKJCamera *SKJCameraHandle;
 /** 点云帧句柄类型，供 C 接口和跨语言绑定使用。 */
 typedef SKJFrame  *SKJFrameHandle;
 
+/** 解码图像帧不透明结构体。由 SKJCamera_GetLatestImage() 创建，由 SKJImage_Release() 释放。 */
+typedef struct SKJImage SKJImage;
+
+/** 解码图像帧句柄类型，供 C 接口和跨语言绑定使用。 */
+typedef SKJImage *SKJImageHandle;
+
+/* 解码图像像素格式。 */
+#define SKJ_IMAGE_FORMAT_UNKNOWN 0 /**< 未知 */
+#define SKJ_IMAGE_FORMAT_BGR24   1 /**< 8 位三通道 BGR，行连续，与 OpenCV CV_8UC3 默认一致 */
+#define SKJ_IMAGE_FORMAT_GRAY8   2 /**< 8 位单通道灰度 */
+
 /**
  * @brief SDK 日志回调函数类型。
  *
@@ -275,6 +286,100 @@ SKJCAMERA_API const char *SKJCAMERA_CALL SKJFrame_GetErrorText(const SKJFrame *f
 /** 获取错误文本长度，单位字节；frame 为 NULL 时返回 0。 */
 SKJCAMERA_API int32_t SKJCAMERA_CALL SKJFrame_GetErrorLength(const SKJFrame *frame);
 
+/* ===== 图像接口 ===== */
+
+/**
+ * @brief 连接图像传输服务器（独立于点云连接的第二条 TCP 连接）。
+ *
+ * 图像与点云使用不同的端口和协议。连接成功后，SDK 内部图像线程会立即启动，
+ * 持续接收压缩图像（JPEG/H264/H265），自动识别编码并用 FFmpeg 解码为 BGR24，
+ * 缓存最新一帧供 SKJCamera_GetLatestImage() 读取。
+ *
+ * @param cam  相机句柄。
+ * @param ip   图像服务器 IPv4 地址，例如 "192.168.1.100"，通常与点云服务器相同。
+ * @param port 图像服务器 TCP 端口，例如 50001。
+ * @return SKJ_OK 表示连接成功；失败时返回 SKJ_ERR_*。
+ *
+ * @note 本接口与 SKJCamera_DisconnectImage() 成对使用；SKJCamera_Destroy() 也会自动断开。
+ * @note 图像连接独立于 SKJCamera_Connect()，可单独建立与断开。
+ */
+SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_ConnectImage(SKJCamera *cam, const char *ip, int port);
+
+/**
+ * @brief 断开图像连接。
+ *
+ * 停止内部图像线程，释放解码器、缓存帧并关闭图像 socket。
+ *
+ * @param cam 相机句柄；允许传入 NULL。
+ *
+ * @note 本接口与 SKJCamera_ConnectImage() 成对使用。
+ */
+SKJCAMERA_API void SKJCAMERA_CALL SKJCamera_DisconnectImage(SKJCamera *cam);
+
+/**
+ * @brief 查询图像连接状态。
+ *
+ * @param cam 相机句柄。
+ * @return 已连接返回 SKJ_OK；未连接返回 SKJ_ERR_NOT_CONNECTED；参数无效返回 SKJ_ERR_INVALID_PARAM。
+ */
+SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_IsImageConnected(SKJCamera *cam);
+
+/**
+ * @brief 获取最新解码图像帧的不透明句柄。
+ *
+ * 通过 SKJImage_GetData() 等访问器获取的指针均为只读，且只在调用 SKJImage_Release() 前有效。
+ * 同一帧只会成功返回一次；若没有更新的帧，重复读取返回 SKJ_ERR_DATA_DUPLICATE。
+ *
+ * @param cam       相机句柄。
+ * @param out_image 输出图像帧句柄；成功时写入有效句柄，失败时写入 NULL。
+ * @return SKJ_OK 表示成功；
+ *         SKJ_ERR_NO_DATA 表示尚未收到可用图像帧；
+ *         SKJ_ERR_DATA_DUPLICATE 表示最新帧已经被取走；
+ *         SKJ_ERR_NOT_CONNECTED 表示图像连接未建立；
+ *         其他返回值见 SKJ_ERR_*。
+ *
+ * @note 本接口与 SKJImage_Release() 成对使用。
+ */
+SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_GetLatestImage(SKJCamera *cam, SKJImage **out_image);
+
+/**
+ * @brief 释放 SKJCamera_GetLatestImage() 返回的图像帧句柄。
+ *
+ * @param image 图像帧句柄；允许传入 NULL。
+ *
+ * @note 释放后由该 image 取得的数据指针立即失效。
+ */
+SKJCAMERA_API void SKJCAMERA_CALL SKJImage_Release(SKJImage *image);
+
+/** 获取图像宽度，单位像素；image 为 NULL 时返回 0。 */
+SKJCAMERA_API int32_t SKJCAMERA_CALL SKJImage_GetWidth(const SKJImage *image);
+
+/** 获取图像高度，单位像素；image 为 NULL 时返回 0。 */
+SKJCAMERA_API int32_t SKJCAMERA_CALL SKJImage_GetHeight(const SKJImage *image);
+
+/** 获取图像每行字节数（BGR24 下为 width*3）；image 为 NULL 时返回 0。 */
+SKJCAMERA_API int32_t SKJCAMERA_CALL SKJImage_GetStride(const SKJImage *image);
+
+/** 获取图像像素格式，见 SKJ_IMAGE_FORMAT_*；image 为 NULL 时返回 0。 */
+SKJCAMERA_API int32_t SKJCAMERA_CALL SKJImage_GetFormat(const SKJImage *image);
+
+/** 获取图像源帧通道号；image 为 NULL 时返回 0。 */
+SKJCAMERA_API int32_t SKJCAMERA_CALL SKJImage_GetChannel(const SKJImage *image);
+
+/** 获取图像时间戳，单位毫秒；image 为 NULL 时返回 0。 */
+SKJCAMERA_API int64_t SKJCAMERA_CALL SKJImage_GetTimestamp(const SKJImage *image);
+
+/**
+ * @brief 获取只读图像像素数据。
+ *
+ * 返回指针由 SDK 持有，不要释放或写入。该指针只在 SKJImage_Release(image) 前有效。
+ * BGR24 格式下，数据按行连续排列，每行 SKJImage_GetStride() 字节。
+ */
+SKJCAMERA_API const uint8_t *SKJCAMERA_CALL SKJImage_GetData(const SKJImage *image);
+
+/** 获取图像数据字节数（= stride*height）；image 为 NULL 时返回 0。 */
+SKJCAMERA_API int32_t SKJCAMERA_CALL SKJImage_GetDataLength(const SKJImage *image);
+
 /* ===== 配置和诊断接口 ===== */
 
 /**
@@ -316,6 +421,33 @@ SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_SetCommandTimeout(SKJCamera *cam, int
  * @note 本接口与 SKJCamera_SetCommandTimeout() 成对使用。
  */
 SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_GetCommandTimeout(SKJCamera *cam, int *out_timeout_ms);
+
+/**
+ * @brief 设置点云 FIFO 缓冲帧数（环形缓冲深度）。
+ *
+ * 点云内部采用 FIFO 环形缓冲：接收线程按到达顺序写入，SKJCamera_GetLatestPointCloud() /
+ * SKJCamera_GetLatestFrame() 每次弹出最旧的一帧，缓冲未满时不丢中间帧；缓冲满后新帧到达
+ * 会丢弃最旧的一帧。增大缓冲帧数可容忍取帧线程短时间处理变慢而不丢点云帧。
+ *
+ * @param cam   相机句柄。
+ * @param count 缓冲帧数，取值范围 2 ~ 16；默认 2。
+ * @return SKJ_OK 表示成功；count 越界或 cam 为空返回 SKJ_ERR_INVALID_PARAM。
+ *
+ * @note 修改缓冲帧数会清空当前已缓冲但未取走的点云帧。设置值在断开重连后仍然生效。
+ * @note 本接口与 SKJCamera_GetFrameBufferCount() 成对使用；仅影响点云，不影响图像。
+ */
+SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_SetFrameBufferCount(SKJCamera *cam, int count);
+
+/**
+ * @brief 读取当前点云 FIFO 缓冲帧数。
+ *
+ * @param cam       相机句柄。
+ * @param out_count 输出当前缓冲帧数（2 ~ 16）。
+ * @return SKJ_OK 表示成功；参数无效返回 SKJ_ERR_INVALID_PARAM。
+ *
+ * @note 本接口与 SKJCamera_SetFrameBufferCount() 成对使用。
+ */
+SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_GetFrameBufferCount(SKJCamera *cam, int *out_count);
 
 /**
  * @brief 设置进程级 SDK 日志回调。

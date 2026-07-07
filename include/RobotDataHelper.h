@@ -36,6 +36,9 @@ public:
         QString exposureTime;
         QString gainLevel;
         QString cameraType;
+        QString readFps;   // 相机读取帧率(fps)：驱动取帧轮询(间隔=1000/帧率)；空/无效则按默认 100
+        QString imageCaptureEnable;  // 扫描时保存相机图像开关：1=开(默认) 0=关
+        QString imageCaptureStride;  // 图像抽帧间隔：每 N 张新图像存 1 张，默认 5（约6fps，控制磁盘用量）
     };
 
     // ===== 工程路径 =====

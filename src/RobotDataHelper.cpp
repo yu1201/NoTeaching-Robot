@@ -107,7 +107,6 @@ QStringList DefaultScanParamLines()
         << "#速度参数"
         << "ScanSpeed=0"
         << "RunSpeed=0"
-        << "CameraReadFps=0"
         << "CameraTimeOffsetMs=0"
         << "dAcc=0"
         << "dDec=0"
@@ -625,6 +624,21 @@ bool RobotDataHelper::LoadCameraParam(const QString& robotName, const QString& c
     {
         param.cameraType = QString::number(intValue);
     }
+    param.readFps = "100";  // 默认 100fps（≈10ms 轮询）；旧 CameraParam.ini 无此键时回退到该值
+    if (ini.ReadString(false, "CameraReadFps", &intValue) > 0 && intValue > 0)
+    {
+        param.readFps = QString::number(intValue);
+    }
+    param.imageCaptureEnable = "1";
+    if (ini.ReadString(false, "ImageCaptureEnable", &intValue) > 0)
+    {
+        param.imageCaptureEnable = intValue != 0 ? "1" : "0";
+    }
+    param.imageCaptureStride = "5";
+    if (ini.ReadString(false, "ImageCaptureFrameStride", &intValue) > 0 && intValue > 0)
+    {
+        param.imageCaptureStride = QString::number(intValue);
+    }
     return true;
 }
 
@@ -649,6 +663,19 @@ bool RobotDataHelper::SaveCameraParam(const QString& robotName, const CameraPara
     const double exposureTime = param.exposureTime.trimmed().toDouble(&okExposure);
     const double gainLevel = param.gainLevel.trimmed().toDouble(&okGain);
     const int cameraType = param.cameraType.trimmed().toInt(&okType);
+    bool okFps = false;
+    int readFps = param.readFps.trimmed().toInt(&okFps);
+    if (!okFps || readFps <= 0)
+    {
+        readFps = 100;  // 读取帧率容错默认，不阻断保存
+    }
+    const int imageCaptureEnable = param.imageCaptureEnable.trimmed() == "0" ? 0 : 1;
+    bool okStride = false;
+    int imageCaptureStride = param.imageCaptureStride.trimmed().toInt(&okStride);
+    if (!okStride || imageCaptureStride <= 0)
+    {
+        imageCaptureStride = 5;  // 抽帧间隔容错默认
+    }
     const QString deviceAddress = param.deviceAddress.trimmed();
     const QString sectionName = param.sectionName.isEmpty() ? "CAMERA0" : param.sectionName;
 
@@ -667,7 +694,10 @@ bool RobotDataHelper::SaveCameraParam(const QString& robotName, const CameraPara
         ini.WriteString("DevicePort", devicePort) &&
         ini.WriteString("ExposureTime", exposureTime, 6) &&
         ini.WriteString("GainLevel", gainLevel, 6) &&
-        ini.WriteString("CameraType", cameraType);
+        ini.WriteString("CameraType", cameraType) &&
+        ini.WriteString("CameraReadFps", readFps) &&
+        ini.WriteString("ImageCaptureEnable", imageCaptureEnable) &&
+        ini.WriteString("ImageCaptureFrameStride", imageCaptureStride);
 
     if (!saveOk && error != nullptr)
     {

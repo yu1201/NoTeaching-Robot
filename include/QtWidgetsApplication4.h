@@ -70,6 +70,7 @@ private slots:
     void OpenPositionTeachDialog();
     void OpenWeldSeamCompDialog();
     void OpenCameraParamDialog();
+    void OpenResultArchiveDialog();
     void FanucConnectTest();
     void FanucDisconnectTest();
     void RobotClearAlarmTest();
@@ -160,7 +161,7 @@ private:
     void RefreshTouchKeyboardModeUi();
     bool LoadGrooveCameraIP(QString& cameraIP) const;
     bool LoadGrooveCameraIPForUnit(int unitIndex, QString& cameraIP) const;
-    bool LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort) const;
+    bool LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort, int* pollIntervalMs = nullptr) const;
     void InitializeScanCameraRuntimes();
     void StopScanCameraRuntimes();
     // blockingConnect=false：相机连接异步发起(Qt::QueuedConnection)，不阻塞调用线程。

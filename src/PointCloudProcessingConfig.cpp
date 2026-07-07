@@ -119,6 +119,9 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.fitPiecewiseMinSegmentPoints = ReadIntSetting("Fit/PiecewiseMinSegmentPoints", settings.fitPiecewiseMinSegmentPoints);
     settings.fitMinPointCount = ReadIntSetting("Fit/MinPointCount", settings.fitMinPointCount);
     settings.fitSmoothRadius = ReadIntSetting("Fit/SmoothRadius", settings.fitSmoothRadius);
+    settings.sdkBasePresmoothEnable = ReadBoolSetting("Fit/SdkBasePresmoothEnable", settings.sdkBasePresmoothEnable);
+    settings.sdkBasePresmoothWindowMm = ReadDoubleSetting("Fit/SdkBasePresmoothWindowMm", settings.sdkBasePresmoothWindowMm);
+    settings.sdkBasePresmoothEdgeMm = ReadDoubleSetting("Fit/SdkBasePresmoothEdgeMm", settings.sdkBasePresmoothEdgeMm);
     settings.fitAzimuthTurnThresholdDeg = ReadDoubleSetting("Fit/AzimuthTurnThresholdDeg", settings.fitAzimuthTurnThresholdDeg);
     settings.fitAzimuthHeadingWindow = ReadIntSetting("Fit/AzimuthHeadingWindow", settings.fitAzimuthHeadingWindow);
     settings.fitAzimuthNmsSpanMm = ReadDoubleSetting("Fit/AzimuthNmsSpanMm", settings.fitAzimuthNmsSpanMm);
@@ -135,6 +138,16 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.lapStepStationWindowMm = ReadDoubleSetting("Fit/LapStepStationWindowMm", settings.lapStepStationWindowMm);
     settings.lapStepSideFlatnessMm = ReadDoubleSetting("Fit/LapStepSideFlatnessMm", settings.lapStepSideFlatnessMm);
     settings.lapStepPlatformSlopeMax = ReadDoubleSetting("Fit/LapStepPlatformSlopeMax", settings.lapStepPlatformSlopeMax);
+    settings.fitEdgeTruncateEnable = ReadBoolSetting("Fit/EdgeTruncateEnable", settings.fitEdgeTruncateEnable);
+    settings.fitTruncateHeadMm = ReadDoubleSetting("Fit/TruncateHeadMm", settings.fitTruncateHeadMm);
+    settings.fitTruncateTailMm = ReadDoubleSetting("Fit/TruncateTailMm", settings.fitTruncateTailMm);
+    settings.fitEndPeriodRecoverEnable = ReadBoolSetting("Fit/EndPeriodRecoverEnable", settings.fitEndPeriodRecoverEnable);
+    settings.fitEndPeriodRatioThreshold = ReadDoubleSetting("Fit/EndPeriodRatioThreshold", settings.fitEndPeriodRatioThreshold);
+    settings.fitEndPeriodMinBendDeg = ReadDoubleSetting("Fit/EndPeriodMinBendDeg", settings.fitEndPeriodMinBendDeg);
+    settings.fitEndPeriodMergeFrac = ReadDoubleSetting("Fit/EndPeriodMergeFrac", settings.fitEndPeriodMergeFrac);
+    settings.fitPlatformSnapEnable = ReadBoolSetting("Fit/PlatformSnapEnable", settings.fitPlatformSnapEnable);
+    settings.fitPlatformSnapFlatSlope = ReadDoubleSetting("Fit/PlatformSnapFlatSlope", settings.fitPlatformSnapFlatSlope);
+    settings.fitPlatformSnapMinFrac = ReadDoubleSetting("Fit/PlatformSnapMinFrac", settings.fitPlatformSnapMinFrac);
     settings.projectionStationWindowMm = ReadDoubleSetting("CloudProjection/StationWindowMm", settings.projectionStationWindowMm);
     settings.projectionTransverseWindowMm = ReadDoubleSetting("CloudProjection/TransverseWindowMm", settings.projectionTransverseWindowMm);
     settings.projectionZBandBelowMm = ReadDoubleSetting("CloudProjection/ZBandBelowMm", settings.projectionZBandBelowMm);
@@ -304,6 +317,9 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("Fit/PiecewiseMinSegmentPoints", QString::number(settings.fitPiecewiseMinSegmentPoints))
         && write("Fit/MinPointCount", QString::number(settings.fitMinPointCount))
         && write("Fit/SmoothRadius", QString::number(settings.fitSmoothRadius))
+        && write("Fit/SdkBasePresmoothEnable", settings.sdkBasePresmoothEnable ? "1" : "0")
+        && write("Fit/SdkBasePresmoothWindowMm", QString::number(settings.sdkBasePresmoothWindowMm, 'f', 6))
+        && write("Fit/SdkBasePresmoothEdgeMm", QString::number(settings.sdkBasePresmoothEdgeMm, 'f', 6))
         && write("Fit/AzimuthTurnThresholdDeg", QString::number(settings.fitAzimuthTurnThresholdDeg, 'f', 6))
         && write("Fit/AzimuthHeadingWindow", QString::number(settings.fitAzimuthHeadingWindow))
         && write("Fit/AzimuthNmsSpanMm", QString::number(settings.fitAzimuthNmsSpanMm, 'f', 6))
@@ -320,6 +336,16 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("Fit/LapStepStationWindowMm", QString::number(settings.lapStepStationWindowMm, 'f', 6))
         && write("Fit/LapStepSideFlatnessMm", QString::number(settings.lapStepSideFlatnessMm, 'f', 6))
         && write("Fit/LapStepPlatformSlopeMax", QString::number(settings.lapStepPlatformSlopeMax, 'f', 6))
+        && write("Fit/EdgeTruncateEnable", settings.fitEdgeTruncateEnable ? "1" : "0")
+        && write("Fit/TruncateHeadMm", QString::number(settings.fitTruncateHeadMm, 'f', 6))
+        && write("Fit/TruncateTailMm", QString::number(settings.fitTruncateTailMm, 'f', 6))
+        && write("Fit/EndPeriodRecoverEnable", settings.fitEndPeriodRecoverEnable ? "1" : "0")
+        && write("Fit/EndPeriodRatioThreshold", QString::number(settings.fitEndPeriodRatioThreshold, 'f', 6))
+        && write("Fit/EndPeriodMinBendDeg", QString::number(settings.fitEndPeriodMinBendDeg, 'f', 6))
+        && write("Fit/EndPeriodMergeFrac", QString::number(settings.fitEndPeriodMergeFrac, 'f', 6))
+        && write("Fit/PlatformSnapEnable", settings.fitPlatformSnapEnable ? "1" : "0")
+        && write("Fit/PlatformSnapFlatSlope", QString::number(settings.fitPlatformSnapFlatSlope, 'f', 6))
+        && write("Fit/PlatformSnapMinFrac", QString::number(settings.fitPlatformSnapMinFrac, 'f', 6))
         && write("CloudProjection/StationWindowMm", QString::number(settings.projectionStationWindowMm, 'f', 6))
         && write("CloudProjection/TransverseWindowMm", QString::number(settings.projectionTransverseWindowMm, 'f', 6))
         && write("CloudProjection/ZBandBelowMm", QString::number(settings.projectionZBandBelowMm, 'f', 6))

@@ -94,7 +94,8 @@ public:
         const StepCallback& setFlowStep = StepCallback(),
         const CheckpointCallback& checkpoint = CheckpointCallback(),
         double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
-        bool allowPointwiseWeave = true) const;   // pointwise 自定义摆动默认放行(含先测后焊)；传 false 可禁用(保留钩子)
+        bool allowPointwiseWeave = true,          // pointwise 自定义摆动默认放行(含先测后焊)；传 false 可禁用(保留钩子)
+        int resumeSkipPoints = 0) const;          // 断点续焊：跳过前 N 个轨迹点从断点(含搭接回退)开始执行；ARCON 自动生成在续焊首点前
     bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
     bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
     bool ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;
