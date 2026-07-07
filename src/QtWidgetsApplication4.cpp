@@ -5472,12 +5472,30 @@ namespace
 				"}");
 			cameraControlLayout->addWidget(laserLabel, 3, 0);
 			cameraControlLayout->addWidget(m_laserToggleButton, 3, 1);
+			// 图像传输总开关：断开图像口(50001)给相机端减负，排查/规避图像流挤占导致的点云跳帧。
+			QLabel* imageTransportLabel = new QLabel("图像传输", this);
+			m_imageTransportToggleButton = new QPushButton("图像传输：开", this);
+			m_imageTransportToggleButton->setCheckable(true);
+			m_imageTransportToggleButton->setChecked(true);
+			m_imageTransportToggleButton->setCursor(Qt::PointingHandCursor);
+			m_imageTransportToggleButton->setMinimumSize(ScalePixels(138), ScalePixels(46));
+			m_imageTransportToggleButton->setToolTip("关闭后断开相机图像口（预览图像/扫描存图停用），点云不受影响；用于验证或规避图像流挤占相机资源造成的点云丢帧。");
+			connect(m_imageTransportToggleButton, &QPushButton::toggled, this, [this](bool enabled)
+				{
+					m_imageTransportToggleButton->setText(enabled ? "图像传输：开" : "图像传输：关");
+					if (m_imageTransportToggle)
+					{
+						m_imageTransportToggle(enabled);
+					}
+				});
+			cameraControlLayout->addWidget(imageTransportLabel, 4, 0);
+			cameraControlLayout->addWidget(m_imageTransportToggleButton, 4, 1);
 			m_refreshParamsButton = new QPushButton("刷新参数", this);
 			m_refreshParamsButton->setMinimumHeight(ScalePixels(32));
 			m_cameraControlStatusLabel = new QLabel("参数控制未连接", this);
 			m_cameraControlStatusLabel->setWordWrap(true);
-			cameraControlLayout->addWidget(m_refreshParamsButton, 4, 0);
-			cameraControlLayout->addWidget(m_cameraControlStatusLabel, 4, 1, 1, 2);
+			cameraControlLayout->addWidget(m_refreshParamsButton, 5, 0);
+			cameraControlLayout->addWidget(m_cameraControlStatusLabel, 5, 1, 1, 2);
 			cameraControlGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
 
 			m_view = new GroovePointCloudView(this);
@@ -5556,6 +5574,11 @@ namespace
 			UpdateInfoText(detailText);
 			m_hasFrame = true;
 			RefreshView();
+		}
+
+		void SetImageTransportToggleHandler(std::function<void(bool)> handler)
+		{
+			m_imageTransportToggle = std::move(handler);
 		}
 
 		void SetCameraImage(const QImage& image)
@@ -6009,6 +6032,8 @@ namespace
 		GroovePointCloudView* m_view = nullptr;
 		QPlainTextEdit* m_infoText = nullptr;
 		QLabel* m_pCameraImageLabel = nullptr;
+		QPushButton* m_imageTransportToggleButton = nullptr;
+		std::function<void(bool)> m_imageTransportToggle;
 		QTabBar* m_previewModeTabs = nullptr;
 		QPushButton* m_trendLineToggleButton = nullptr;
 		QPushButton* m_refreshParamsButton = nullptr;
@@ -13120,6 +13145,21 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 				"正在等待相机帧...",
 				m_sGrooveCameraStatusText);
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->RefreshCameraControlParams();
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetImageTransportToggleHandler(
+				[this](bool enabled)
+				{
+					const int toggleUnitIndex = CurrentRobotUnitIndex();
+					CameraRuntime* toggleRuntime = m_scanCameraRuntimes.value(toggleUnitIndex, nullptr);
+					if (toggleRuntime != nullptr && toggleRuntime->tcpWorker != nullptr)
+					{
+						QMetaObject::invokeMethod(toggleRuntime->tcpWorker, "setImageTransportEnabled",
+							Qt::QueuedConnection, Q_ARG(bool, enabled));
+					}
+					else if (CameraFrameCache* toggleCache = ScanCameraCacheForUnit(toggleUnitIndex))
+					{
+						toggleCache->SetImageTransportEnabled(enabled);  // worker 未建时先记状态，连接时生效
+					}
+				});
 		}
 		if (CameraFrameCache* liveCache = ScanCameraCacheForUnit(unitIndex))
 		{

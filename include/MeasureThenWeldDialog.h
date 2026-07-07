@@ -38,6 +38,7 @@ struct T_PRECISE_MEASURE_PARAM
     double dScanSpeed = 0.0;
     double dRunSpeed = 0.0;
     double dCameraTimeOffsetMs = 0.0;
+    bool bUseStatTimeAlign = true;  // 统计时间对齐开关：false=首帧对齐(旧算法，对照测试相机时间戳用)
     double dAcc = 0.0;
     double dDec = 0.0;
 

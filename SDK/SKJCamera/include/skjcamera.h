@@ -423,6 +423,33 @@ SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_SetCommandTimeout(SKJCamera *cam, int
 SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_GetCommandTimeout(SKJCamera *cam, int *out_timeout_ms);
 
 /**
+ * @brief 设置点云 FIFO 缓冲帧数（环形缓冲深度）。
+ *
+ * 点云内部采用 FIFO 环形缓冲：接收线程按到达顺序写入，SKJCamera_GetLatestPointCloud() /
+ * SKJCamera_GetLatestFrame() 每次弹出最旧的一帧，缓冲未满时不丢中间帧；缓冲满后新帧到达
+ * 会丢弃最旧的一帧。增大缓冲帧数可容忍取帧线程短时间处理变慢而不丢点云帧。
+ *
+ * @param cam   相机句柄。
+ * @param count 缓冲帧数，取值范围 2 ~ 16；默认 2。
+ * @return SKJ_OK 表示成功；count 越界或 cam 为空返回 SKJ_ERR_INVALID_PARAM。
+ *
+ * @note 修改缓冲帧数会清空当前已缓冲但未取走的点云帧。设置值在断开重连后仍然生效。
+ * @note 本接口与 SKJCamera_GetFrameBufferCount() 成对使用；仅影响点云，不影响图像。
+ */
+SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_SetFrameBufferCount(SKJCamera *cam, int count);
+
+/**
+ * @brief 读取当前点云 FIFO 缓冲帧数。
+ *
+ * @param cam       相机句柄。
+ * @param out_count 输出当前缓冲帧数（2 ~ 16）。
+ * @return SKJ_OK 表示成功；参数无效返回 SKJ_ERR_INVALID_PARAM。
+ *
+ * @note 本接口与 SKJCamera_SetFrameBufferCount() 成对使用。
+ */
+SKJCAMERA_API int SKJCAMERA_CALL SKJCamera_GetFrameBufferCount(SKJCamera *cam, int *out_count);
+
+/**
  * @brief 设置进程级 SDK 日志回调。
  *
  * 传入 NULL 可取消日志回调。错误和警告无论是否设置回调、是否启用默认日志，都会实时打印到控制台；

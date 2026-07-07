@@ -244,6 +244,7 @@ QStringList MinimalWeldSectionLinesForPrecise()
 }
 
 constexpr auto CAMERA_TIME_OFFSET_MS_KEY = "CameraTimeOffsetMs";
+constexpr auto USE_STAT_TIME_ALIGN_KEY = "UseStatTimeAlign";
 constexpr double DEFAULT_CAMERA_TIME_OFFSET_MS = -300.0;
 
 QString GroupMetaSectionName()
@@ -561,6 +562,7 @@ QString PreciseParamDisplayName(const QString& key)
         { "Scanlength", "扫描长度" },
         { "ScanDir", "扫描方向" },
         { CAMERA_TIME_OFFSET_MS_KEY, "相机时间补偿(ms)" },
+        { USE_STAT_TIME_ALIGN_KEY, "时间对齐算法" },
         { "ImgStartX", "图像起始X" },
         { "ImgEndX", "图像结束X" },
         { "TableScanDir", "料台扫描方向" },
@@ -639,7 +641,7 @@ QString ScanParamGroupTitleForKey(const QString& key)
         "YMaxCar", "YMinCar", "YMaxRobot", "YMinRobot", "XMax", "XMin", "ZMax", "ZMin"
     };
     static const QSet<QString> speedKeys = {
-        "ScanSpeed", "RunSpeed", "CameraTimeOffsetMs", "dAcc", "dDec",
+        "ScanSpeed", "RunSpeed", "CameraTimeOffsetMs", "UseStatTimeAlign", "dAcc", "dDec",
         "UseComputedScanSafe", "ScanSafeOffsetDistanceMm", "ScanSafeGunAngleDeg",
         "ScanSafeXDirection", "ScanSafeLiftHeightMm", "ScanSafeFlipWarnThresholdDeg"
     };
@@ -778,6 +780,34 @@ void AddOtherParamEditor(
     label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     label->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
     const int uiCol = colInGroup * 2;
+
+    // 统计时间对齐开关：真下拉(开/关)，不是数字编辑框。
+    if (key.compare(QLatin1String(USE_STAT_TIME_ALIGN_KEY), Qt::CaseInsensitive) == 0)
+    {
+        QComboBox* combo = new QComboBox();
+        combo->addItem(QStringLiteral("开启·统计对齐(新算法)"), QStringLiteral("1"));
+        combo->addItem(QStringLiteral("关闭·首帧对齐(旧算法)"), QStringLiteral("0"));
+        bool okValue = false;
+        const int enabledValue = displayValue.trimmed().toInt(&okValue);
+        combo->setCurrentIndex(okValue && enabledValue == 0 ? 1 : 0);
+        combo->setToolTip(inlineComment.isEmpty() ? key : QString("%1\n%2").arg(key, inlineComment));
+        combo->setProperty("paramSection", sectionName);
+        combo->setProperty("paramKey", key);
+        combo->setProperty("inlineComment", inlineComment);
+        combo->setMinimumWidth(kOtherParamEditorMinWidth);
+        combo->setMaximumWidth(kOtherParamEditorMaxWidth);
+        combo->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        comboEditors.insert(editorId, combo);
+        layout->addWidget(label, row, uiCol);
+        layout->addWidget(combo, row, uiCol + 1, Qt::AlignLeft);
+        ++colInGroup;
+        if (colInGroup >= 2)
+        {
+            ++row;
+            colInGroup = 0;
+        }
+        return;
+    }
 
     if (IsWeldDirectionParamKey(key))
     {
@@ -2046,7 +2076,8 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
     loadSectionParams(section, QStringLiteral("扫描参数"), true);
     loadSectionParams(weldSection, QStringLiteral("焊接参数"), false);
 
-    if (!m_otherParamEditors.contains(EditorId(section, CAMERA_TIME_OFFSET_MS_KEY)))
+    if (!m_otherParamEditors.contains(EditorId(section, CAMERA_TIME_OFFSET_MS_KEY))
+        || !m_otherParamEditors.contains(EditorId(section, USE_STAT_TIME_ALIGN_KEY)))
     {
         currentGroupLayout = createCollapsibleGroup(QStringLiteral("相机时间参数"), QStringLiteral("扫描参数"));
     }
@@ -2062,6 +2093,21 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
             section,
             CAMERA_TIME_OFFSET_MS_KEY,
             QString::number(DEFAULT_CAMERA_TIME_OFFSET_MS, 'f', 0));
+        hasOtherParam = true;
+    }
+
+    // 统计时间对齐开关：1=统计对齐(默认)，0=首帧对齐(旧算法，用于对照测试相机时间戳可行性)。
+    if (!m_otherParamEditors.contains(EditorId(section, USE_STAT_TIME_ALIGN_KEY)))
+    {
+        AddOtherParamEditor(
+            ensureGroup(QStringLiteral("相机时间参数"), QStringLiteral("扫描参数")),
+            m_otherParamEditors,
+            m_otherParamComboEditors,
+            row,
+            colInGroup,
+            section,
+            USE_STAT_TIME_ALIGN_KEY,
+            QStringLiteral("1"));
         hasOtherParam = true;
     }
 

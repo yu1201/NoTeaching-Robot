@@ -29,6 +29,7 @@ public:
 public slots:
     void startClient(const QString& serverIP, int serverPort, int pollIntervalMs = 10);
     void stopClient();
+    void setImageTransportEnabled(bool enabled);  // 预览页「图像传输」开关：即时连/断图像口(50001)
 
 signals:
     // 与 ScanCameraTcpClientWorker::diagnosticChanged 同构，复用现有预览诊断显示：
@@ -46,6 +47,9 @@ private slots:
     void pollImage();
 
 private:
+    bool pollFrameOnce();  // 取一帧；true=取到(FIFO 可能还有,继续排空)，false=队列空/错误
+
+private:
     bool loadSdk(QString* error);
     void* resolve(const char* name);
     void teardownHandle();
@@ -53,6 +57,8 @@ private:
     QString resolveDllPath() const;
     void startImageSaveThread();
     void stopImageSaveThread();
+    void connectImageTransport();
+    void disconnectImageTransport();
 
     CameraFrameCache* m_frameCache = nullptr;
     QLibrary* m_library = nullptr;
@@ -78,6 +84,10 @@ private:
     QString m_serverIP;
     int m_serverPort = 0;
     int m_pollIntervalMs = 10;  // 取帧轮询间隔(ms)，由相机参数 CameraReadFps 换算(1000/帧率)后经 startClient 传入
+    // SDK v1.2.0「修改时间戳获取方式」后单位未知（旧版实测微秒、新版文档标毫秒）：
+    // 首两帧按相邻差自适应判定，0=未判定，1=微秒原样，1000=毫秒×1000 归一到微秒。
+    qint64 m_tsUnitMultiplier = 0;
+    qint64 m_lastRawTsForUnitDetect = 0;
     bool m_running = false;
     bool m_loggedFirstFrame = false;
 
@@ -94,6 +104,7 @@ private:
     using DisconnectFn = void(__cdecl*)(void*);
     using IsConnectedFn = int(__cdecl*)(void*);
     using SetTimeoutFn = int(__cdecl*)(void*, int);
+    using SetFrameBufferFn = int(__cdecl*)(void*, int);
     using GetLatestFrameFn = int(__cdecl*)(void*, void**);
     using FrameReleaseFn = void(__cdecl*)(void*);
     using FrameTimestampFn = long long(__cdecl*)(const void*);
@@ -128,6 +139,7 @@ private:
     ImageTimestampFn m_imageTimestamp = nullptr;
     IsConnectedFn m_isConnected = nullptr;
     SetTimeoutFn m_setConnectTimeout = nullptr;
+    SetFrameBufferFn m_setFrameBufferCount = nullptr;  // v1.2.0 FIFO 深度设置，旧 DLL 为 null 自动跳过
     GetLatestFrameFn m_getLatestFrame = nullptr;
     FrameReleaseFn m_frameRelease = nullptr;
     FrameTimestampFn m_frameTimestamp = nullptr;
@@ -137,6 +149,7 @@ private:
     FramePtrFn m_framePoint2DData = nullptr;
     FrameResultFn m_frameResultPoint = nullptr;
     FrameFloatFn m_frameFpsPointCloud = nullptr;
+    FrameIntFn m_frameChannel = nullptr;   // SDK 帧号（厂商临时以 GetChannel 承载，逐帧+1）
     FrameTextFn m_frameErrorText = nullptr;
     ErrorStringFn m_errorString = nullptr;
 };

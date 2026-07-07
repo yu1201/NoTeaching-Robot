@@ -46,7 +46,7 @@ void CameraFrameCache::AppendFrame(const udpDataShow& frame)
     StoreFrame(frame);
 }
 
-void CameraFrameCache::RecordPollStatus(int ret, qint64 frameTimestampUs, int pointCount)
+void CameraFrameCache::RecordPollStatus(int ret, qint64 frameTimestampUs, int pointCount, int frameChannel)
 {
     std::lock_guard<std::mutex> locker(m_mutex);
     PollStatus status;
@@ -54,6 +54,7 @@ void CameraFrameCache::RecordPollStatus(int ret, qint64 frameTimestampUs, int po
     status.ret = ret;
     status.frameTimestampUs = frameTimestampUs;
     status.pointCount = pointCount;
+    status.frameChannel = frameChannel;
     m_pollStatus.push_back(status);
     if (m_pollStatus.size() > m_maxPollStatus)
     {
@@ -102,6 +103,18 @@ bool CameraFrameCache::LiveImageEnabled() const
 {
     std::lock_guard<std::mutex> locker(m_mutex);
     return m_liveImageEnabled;
+}
+
+void CameraFrameCache::SetImageTransportEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    m_imageTransportEnabled = enabled;
+}
+
+bool CameraFrameCache::ImageTransportEnabled() const
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    return m_imageTransportEnabled;
 }
 
 void CameraFrameCache::SetLatestImage(const QImage& image, qint64 imageTimestamp)

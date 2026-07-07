@@ -6525,6 +6525,9 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     ini.ReadString(false, "ScanSpeed", &param.dScanSpeed);
     ini.ReadString(false, "RunSpeed", &param.dRunSpeed);
     ini.ReadString(false, "CameraTimeOffsetMs", &param.dCameraTimeOffsetMs);
+    int useStatTimeAlign = 1;
+    ini.ReadString(false, "UseStatTimeAlign", &useStatTimeAlign);
+    param.bUseStatTimeAlign = (useStatTimeAlign != 0);
     ini.ReadString(false, "dAcc", &param.dAcc);
     ini.ReadString(false, "dDec", &param.dDec);
 
@@ -7677,7 +7680,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     std::size_t statAxisSampleCount = 0;
     int statFlippedTailCount = 0;        // 重匹配后由已匹配翻为 unmatched_after 的尾帧数
     bool statRealignApplied = false;
-    if (hasCameraToRobotTimeOffset)
+    if (hasCameraToRobotTimeOffset && param.bUseStatTimeAlign)
     {
         std::vector<qint64> camPcDeltasUs;
         camPcDeltasUs.reserve(pollStatusLog.size());
@@ -7823,6 +7826,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                 .arg(statFlippedTailCount > 0
                     ? QString("（%1 个尾帧因时间戳平移超出机器人采样范围被改判丢弃）").arg(statFlippedTailCount)
                     : QString()));
+        }
+        else if (hasCameraToRobotTimeOffset && !param.bUseStatTimeAlign)
+        {
+            appendLog("统计时间对齐已按参数关闭（UseStatTimeAlign=0），本次使用首帧对齐（旧算法，对照测试模式）。");
         }
         else if (hasCameraToRobotTimeOffset)
         {
@@ -8114,11 +8121,15 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
     //   · 轮询正常(pc_delta≈10ms)却拿到跳变的新帧 → SDK 只给了隔帧。
     std::vector<QString> sdkPollLogLines;
     sdkPollLogLines.reserve(pollStatusLog.size() + 1);
-    sdkPollLogLines.push_back("poll_index,pc_recv_us,pc_delta_us,ret,ret_name,frame_ts_us,frame_ts_delta_us,point_count");
+    // recv_frame_seq=我方成功取帧累计编号；frame_channel=SDK帧号(厂商以GetChannel承载,逐帧+1递增)，
+    // channel_delta=相邻帧号差(正常1，N=中间丢了N-1帧——比时间戳差更硬的丢帧判据)。
+    sdkPollLogLines.push_back("poll_index,pc_recv_us,pc_delta_us,ret,ret_name,frame_ts_us,frame_ts_delta_us,point_count,recv_frame_seq,frame_channel,channel_delta");
     {
         qint64 prevPollPcUs = -1;
         qint64 prevFrameTsUs = -1;
         int sdkPollIndex = 0;
+        int recvFrameSeq = 0;
+        int prevFrameChannel = -1;
         for (const CameraFrameCache::PollStatus& poll : pollStatusLog)
         {
             QString retName;
@@ -8131,6 +8142,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             QString frameTsField;
             QString frameDeltaField;
             QString pointField;
+            QString frameSeqField;
+            QString frameChannelField;
+            QString channelDeltaField;
             if (poll.ret == 0)
             {
                 frameTsField = QString::number(poll.frameTimestampUs);
@@ -8139,6 +8153,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                     frameDeltaField = QString::number(poll.frameTimestampUs - prevFrameTsUs);
                 }
                 pointField = QString::number(poll.pointCount);
+                frameSeqField = QString::number(++recvFrameSeq);
+                if (poll.frameChannel >= 0)
+                {
+                    frameChannelField = QString::number(poll.frameChannel);
+                    if (prevFrameChannel >= 0)
+                    {
+                        channelDeltaField = QString::number(poll.frameChannel - prevFrameChannel);
+                    }
+                    prevFrameChannel = poll.frameChannel;
+                }
                 prevFrameTsUs = poll.frameTimestampUs;
             }
             QStringList sdkPollFields;
@@ -8149,7 +8173,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
                 << retName
                 << frameTsField
                 << frameDeltaField
-                << pointField;
+                << pointField
+                << frameSeqField
+                << frameChannelField
+                << channelDeltaField;
             sdkPollLogLines.push_back(sdkPollFields.join(','));
             prevPollPcUs = poll.receiveTimestampUs;
         }

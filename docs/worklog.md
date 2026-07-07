@@ -1,9 +1,19 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-07-06`
+- 人工整理日期：`2026-07-07`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-07-07
+
+- 发布 v2026.07.07.1720：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过，生成 `dist/installer/NoTeaching-Robot-Setup-v2026.07.07.1720.exe`。署名 yu1201。
+- 相机 SDK 更新(v1.2.0 修改时间戳获取方式/按序取帧版)：整包替换(旧接口零删改双验证)。SDK 内部点云改 FIFO 环形缓冲(2~16 帧可设，`SetFrameBufferCount`)，`GetLatestFrame` 语义从「取最新(单槽覆盖)」变「按序弹最旧」；接入：连接后设 FIFO=8、`pollFrame` 改排空式(每 tick 循环取到空，上限16，旧 DLL 行为兼容)、时间戳单位运行时自适应(首两帧差<2000→毫秒×1000归一，≥2000→微秒原样，判定写 CameraSkjClient 日志——防"修改时间戳获取方式"暗改单位打歪统计对齐)。
+- 时间对齐算法开关：`UseStatTimeAlign`(MeasureGroup<i>.Scan，默认1)。测量焊接参数→相机时间参数组新增「时间对齐算法」真下拉(开启·统计对齐/关闭·首帧对齐旧算法，照 WeldDirection combo 机制)；`ScanMoveAndCollect` 统计对齐块按此开关，关闭时日志明示对照测试模式。用途：相机新时间戳可行性对照(旧算法直测新时间戳质量)。
+- SdkPollLog 增强三列：`recv_frame_seq`(我方成功取帧累计号)、`frame_channel`(SDK帧号——厂商临时以 GetChannel 承载，实测逐帧+1单调递增不回绕，int32 约414天@60fps 才绕)、`channel_delta`(帧号差，>1 即丢帧，差-1=丢帧数——比时间戳差更硬的判据)。worker 在 Release 前读 GetChannel 入 PollStatus。
+- 坡口相机预览「图像传输」开关：相机参数区激光按钮下新增 checkable 按钮，即时 Connect/DisconnectImage(50001)；状态经 CameraFrameCache 共享，扫描自动连接同样尊重(关闭后扫描不再连图像口)；worker 新增 slot setImageTransportEnabled + connect/disconnectImageTransport 拆分。
+- 点云处理库更新 20260706：仅 DLL/lib/h/pdb(接口 diff 零改动；由新旧 DLL 二进制提取参数名对比证实 26 键全保留零新增——"klrb"系 PDB RSDS 签名字节非参数)，无需动界面/模板/运行时兜底。`tmp_sdk_probe.py` 回归通过(0617 崩溃场景 145 万点 Z=-410 正常返回焊道点；探针临时配置补齐 0624 三键)。
+- 丢帧根因排查(证据链完整，结论=相机端点云提取超时跳帧)：①扫描中丢帧率 11.4%(990帧丢127)，49/50 丢帧点间隔期间客户端 FIFO 为空且持续轮询(-106)——非我方取慢；②TCP 可靠传输排除网络；③断开图像传输重扫 11.65% 无改善——排除图像流挤占；④独立 ctypes 探针(FIFO=16排空)单变量实验：空场景(0点/帧)丢帧 1.53%@58.9fps，同位置激光上工件(~417点/帧)丢帧 7.54%@55.5fps——跳号率与相机端提取负载强相关，实际出帧率掉到 55.5 说明相机处理管线掉帧。反馈厂商：优化提取耗时或提供降载选项。丢帧对成品影响可控(点云全帧叠加、统计对齐不依赖连续帧)。
 
 ## 2026-07-06
 

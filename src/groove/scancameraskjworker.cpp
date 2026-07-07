@@ -122,6 +122,7 @@ bool ScanCameraSkjWorker::loadSdk(QString* error)
     m_disconnect = reinterpret_cast<DisconnectFn>(resolve("SKJCamera_Disconnect"));
     m_isConnected = reinterpret_cast<IsConnectedFn>(resolve("SKJCamera_IsConnected"));
     m_setConnectTimeout = reinterpret_cast<SetTimeoutFn>(resolve("SKJCamera_SetConnectTimeout"));
+    m_setFrameBufferCount = reinterpret_cast<SetFrameBufferFn>(resolve("SKJCamera_SetFrameBufferCount"));
     m_getLatestFrame = reinterpret_cast<GetLatestFrameFn>(resolve("SKJCamera_GetLatestFrame"));
     m_frameRelease = reinterpret_cast<FrameReleaseFn>(resolve("SKJFrame_Release"));
     m_frameTimestamp = reinterpret_cast<FrameTimestampFn>(resolve("SKJFrame_GetTimestamp"));
@@ -131,6 +132,7 @@ bool ScanCameraSkjWorker::loadSdk(QString* error)
     m_framePoint2DData = reinterpret_cast<FramePtrFn>(resolve("SKJFrame_GetPoint2DData"));
     m_frameResultPoint = reinterpret_cast<FrameResultFn>(resolve("SKJFrame_GetResultPointValue"));
     m_frameFpsPointCloud = reinterpret_cast<FrameFloatFn>(resolve("SKJFrame_GetFpsPointCloud"));
+    m_frameChannel = reinterpret_cast<FrameIntFn>(resolve("SKJFrame_GetChannel"));
     m_frameErrorText = reinterpret_cast<FrameTextFn>(resolve("SKJFrame_GetErrorText"));
     m_errorString = reinterpret_cast<ErrorStringFn>(resolve("SKJCamera_GetErrorString"));
 
@@ -207,6 +209,15 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
     }
     WriteCameraSkjLog(QString("connected target=%1:%2").arg(m_serverIP).arg(m_serverPort));
 
+    // v1.2.0 FIFO 环形缓冲：加深到 8 帧（默认 2），取帧线程短暂变慢也不丢中间帧；旧 DLL 无此接口自动跳过。
+    if (m_setFrameBufferCount != nullptr)
+    {
+        const int bufferRet = m_setFrameBufferCount(m_handle, 8);
+        WriteCameraSkjLog(QString("SetFrameBufferCount(8) ret=%1").arg(bufferRet));
+    }
+    m_tsUnitMultiplier = 0;  // 重连后重新判定时间戳单位
+    m_lastRawTsForUnitDetect = 0;
+
     if (m_pollTimer == nullptr)
     {
         m_pollTimer = new QTimer(this);
@@ -216,44 +227,105 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
     m_pollTimer->start(m_pollIntervalMs);
     emitDiagnostic(QString("SKJ SDK 已连接 %1:%2，开始取帧（轮询间隔 %3 ms）。").arg(m_serverIP).arg(m_serverPort).arg(m_pollIntervalMs));
 
-    // 图像传输连接（独立端口，失败只告警不影响点云取帧）。
+    // 图像传输连接（独立端口，失败只告警不影响点云取帧）。总开关(预览页按钮)关闭时不连。
     m_imageConnected = false;
-    if (m_imageConnect != nullptr && m_getLatestImage != nullptr && m_imageData != nullptr && m_imageRelease != nullptr)
+    if (m_frameCache == nullptr || m_frameCache->ImageTransportEnabled())
     {
-        const int imageRet = m_imageConnect(m_handle, ipBytes.constData(), kImageServerPort);
-        if (imageRet == kSkjOk)
+        connectImageTransport();
+    }
+    else
+    {
+        WriteCameraSkjLog("image transport disabled by user switch, skip image connect");
+    }
+}
+
+void ScanCameraSkjWorker::connectImageTransport()
+{
+    if (m_imageConnected || m_handle == nullptr)
+    {
+        return;
+    }
+    if (m_imageConnect == nullptr || m_getLatestImage == nullptr || m_imageData == nullptr || m_imageRelease == nullptr)
+    {
+        WriteCameraSkjLog("image transfer APIs not exported by SKJCamera.dll, image capture disabled (old SDK)");
+        return;
+    }
+    const QByteArray ipBytes = m_serverIP.toLocal8Bit();
+    const int imageRet = m_imageConnect(m_handle, ipBytes.constData(), kImageServerPort);
+    if (imageRet == kSkjOk)
+    {
+        m_imageConnected = true;
+        startImageSaveThread();
+        if (m_imageTimer == nullptr)
         {
-            m_imageConnected = true;
-            startImageSaveThread();
-            if (m_imageTimer == nullptr)
-            {
-                m_imageTimer = new QTimer(this);
-                m_imageTimer->setTimerType(Qt::CoarseTimer);
-                connect(m_imageTimer, &QTimer::timeout, this, &ScanCameraSkjWorker::pollImage);
-            }
-            m_imageTimer->start(kImagePollIntervalMs);
-            WriteCameraSkjLog(QString("image connected target=%1:%2").arg(m_serverIP).arg(kImageServerPort));
+            m_imageTimer = new QTimer(this);
+            m_imageTimer->setTimerType(Qt::CoarseTimer);
+            connect(m_imageTimer, &QTimer::timeout, this, &ScanCameraSkjWorker::pollImage);
         }
-        else
+        m_imageTimer->start(kImagePollIntervalMs);
+        WriteCameraSkjLog(QString("image connected target=%1:%2").arg(m_serverIP).arg(kImageServerPort));
+    }
+    else
+    {
+        const QString reason = (m_errorString != nullptr)
+            ? QString::fromUtf8(m_errorString(imageRet))
+            : QString::number(imageRet);
+        WriteCameraSkjLog(QString("image connect failed target=%1:%2 ret=%3 (%4)")
+            .arg(m_serverIP).arg(kImageServerPort).arg(imageRet).arg(reason));
+    }
+}
+
+void ScanCameraSkjWorker::disconnectImageTransport()
+{
+    if (m_imageTimer != nullptr)
+    {
+        m_imageTimer->stop();
+    }
+    if (m_imageConnected && m_imageDisconnect != nullptr && m_handle != nullptr)
+    {
+        m_imageDisconnect(m_handle);
+        WriteCameraSkjLog("image transport disconnected by user switch");
+    }
+    m_imageConnected = false;
+}
+
+void ScanCameraSkjWorker::setImageTransportEnabled(bool enabled)
+{
+    if (m_frameCache != nullptr)
+    {
+        m_frameCache->SetImageTransportEnabled(enabled);
+    }
+    if (enabled)
+    {
+        if (m_running)
         {
-            const QString reason = (m_errorString != nullptr)
-                ? QString::fromUtf8(m_errorString(imageRet))
-                : QString::number(imageRet);
-            WriteCameraSkjLog(QString("image connect failed target=%1:%2 ret=%3 (%4)")
-                .arg(m_serverIP).arg(kImageServerPort).arg(imageRet).arg(reason));
+            connectImageTransport();
         }
     }
     else
     {
-        WriteCameraSkjLog("image transfer APIs not exported by SKJCamera.dll, image capture disabled (old SDK)");
+        disconnectImageTransport();
     }
 }
 
 void ScanCameraSkjWorker::pollFrame()
 {
+    // v1.2.0 起 GetLatestFrame 为 FIFO 弹最旧帧：每个 tick 排空队列（上限=FIFO最大深度16，防死循环），
+    // 保证既不丢帧也不积压滞后；旧 DLL(单槽最新帧)下循环第二次即返回空，行为不变。
+    for (int drained = 0; drained < 16; ++drained)
+    {
+        if (!pollFrameOnce())
+        {
+            break;
+        }
+    }
+}
+
+bool ScanCameraSkjWorker::pollFrameOnce()
+{
     if (!m_running || m_handle == nullptr || m_getLatestFrame == nullptr)
     {
-        return;
+        return false;
     }
 
     ++m_pollCount;
@@ -273,7 +345,7 @@ void ScanCameraSkjWorker::pollFrame()
         {
             emitDiagnostic("SKJ SDK 收帧中（等待新帧）。");
         }
-        return;
+        return false;
     }
     if (ret != kSkjOk || frame == nullptr)
     {
@@ -290,7 +362,7 @@ void ScanCameraSkjWorker::pollFrame()
             ? QString::fromUtf8(m_errorString(ret))
             : QString::number(ret);
         emitDiagnostic(QString("取帧失败：%1").arg(reason));
-        return;
+        return false;
     }
 
     udpDataShow data;
@@ -345,10 +417,23 @@ void ScanCameraSkjWorker::pollFrame()
     data.targetY.append(-targetPoint.z);
 
     data.mFps = (m_frameFpsPointCloud != nullptr) ? m_frameFpsPointCloud(frame) : 0.0f;
-    // SDK 时间戳【实测为微秒】，与 CameraFrameCache 的 cameraTimestampUs 同单位，直接填入。
-    // 依据：两次会话首帧时间戳差 52,951,358 与墙钟差 52.95s 完全一致（若为毫秒则相差 1000 倍）；
-    // 60fps 下相邻帧差≈16667us。SDK 文档标称"毫秒"有误，以实测为准——切勿再 ×1000。
-    const long long timestampUs = (m_frameTimestamp != nullptr) ? m_frameTimestamp(frame) : 0;
+    // SDK 时间戳单位运行时自适应：旧版 DLL 实测为微秒(文档误标毫秒)，v1.2.0「修改时间戳获取方式」后
+    // 单位未知——用相邻帧差判定一次：差<2000(60fps≈16.7、250fps≈4) → 毫秒×1000 归一；差≥2000(≈16667us) → 微秒原样。
+    const int frameChannel = (m_frameChannel != nullptr) ? m_frameChannel(frame) : -1;  // 帧号须在 Release 前读取
+    const long long rawTimestamp = (m_frameTimestamp != nullptr) ? m_frameTimestamp(frame) : 0;
+    if (m_tsUnitMultiplier == 0 && rawTimestamp > 0)
+    {
+        if (m_lastRawTsForUnitDetect > 0 && rawTimestamp > m_lastRawTsForUnitDetect)
+        {
+            const long long unitDetectDelta = rawTimestamp - m_lastRawTsForUnitDetect;
+            m_tsUnitMultiplier = (unitDetectDelta < 2000) ? 1000 : 1;
+            WriteCameraSkjLog(QString("timestamp unit detected: frame delta=%1 -> %2")
+                .arg(unitDetectDelta)
+                .arg(m_tsUnitMultiplier == 1000 ? "ms(x1000)" : "us(x1)"));
+        }
+        m_lastRawTsForUnitDetect = rawTimestamp;
+    }
+    const long long timestampUs = rawTimestamp * (m_tsUnitMultiplier > 0 ? m_tsUnitMultiplier : 1);
     data.timestamp = static_cast<qulonglong>(timestampUs);
     if (m_frameErrorText != nullptr)
     {
@@ -367,8 +452,8 @@ void ScanCameraSkjWorker::pollFrame()
     ++m_decodedFrameCount;
     if (m_frameCache != nullptr)
     {
-        // 记录本次成功取帧调用：带 SDK 帧时间戳与三维点数，供 SdkPollLog 逐帧对齐分析。
-        m_frameCache->RecordPollStatus(kSkjOk, static_cast<qint64>(timestampUs), count3d);
+        // 记录本次成功取帧调用：带 SDK 帧时间戳、三维点数与帧号，供 SdkPollLog 逐帧对齐/精确数丢帧。
+        m_frameCache->RecordPollStatus(kSkjOk, static_cast<qint64>(timestampUs), count3d, frameChannel);
         m_frameCache->AppendFrame(data);
         ++m_appendedFrameCount;
     }
@@ -385,6 +470,7 @@ void ScanCameraSkjWorker::pollFrame()
     {
         emitDiagnostic("SKJ SDK 收帧中。");
     }
+    return true;
 }
 
 void ScanCameraSkjWorker::pollImage()
