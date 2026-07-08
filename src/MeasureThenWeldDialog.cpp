@@ -6,6 +6,7 @@
 #include "STEPRobotDriver.h"
 #include "HandEyeMatrixConfig.h"
 #include "MeasureThenWeldService.h"
+#include "MeasureThenWeldRuntimeConfig.h"
 #include "OPini.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotDataHelper.h"
@@ -830,8 +831,17 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     m_pActualWeldCheck->setChecked(true);
     QLabel* modeHintLabel = new QLabel("取消勾选后只空跑轨迹，使用焊接参数里的空跑速度。");
     // 最终轨迹点间距已统一到焊道补偿/工艺界面调整（此处原编辑框重复，已移除）。
+    m_pSkipConfirmCheck = new QCheckBox("流程免确认");
+    m_bSkipFlowConfirms.store(MeasureThenWeldRuntimeConfig::LoadSkipFlowConfirms());
+    m_pSkipConfirmCheck->setChecked(m_bSkipFlowConfirms.load());
+    m_pSkipConfirmCheck->setToolTip(
+        "勾选后流程自动跳过这些确认弹窗：移动到扫描起点、扫描终点并采集、扫描收枪、\n"
+        "扫描完成、焊前确认、焊后确认、补偿完成。\n"
+        "以下确认不受影响，始终弹出：首次运动（扫描下枪安全位置）、\n"
+        "进入焊接段（移动到焊接下枪安全位置）、扫描姿态翻转风险告警、跳过扫描的目录核对。");
     modeLayout->addWidget(modeLabel);
     modeLayout->addWidget(m_pActualWeldCheck);
+    modeLayout->addWidget(m_pSkipConfirmCheck);
     modeLayout->addWidget(modeHintLabel);
     modeLayout->addStretch();
     flowLayout->addLayout(modeLayout);
@@ -914,6 +924,14 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     connect(m_pLineScanProcessBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunLineScanProcess);
     connect(m_pTimeOffsetCalibBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow);
     connect(m_pActualWeldCheck, &QCheckBox::toggled, this, &MeasureThenWeldDialog::SaveWeldModeToParam);
+    connect(m_pSkipConfirmCheck, &QCheckBox::toggled, this, [this](bool checked)
+        {
+            m_bSkipFlowConfirms.store(checked);
+            MeasureThenWeldRuntimeConfig::SaveSkipFlowConfirms(checked);
+            AppendLog(checked
+                ? "流程免确认已开启：中间步骤与信息类确认将自动继续（首次运动/进入焊接/风险告警/目录核对仍会弹出）。"
+                : "流程免确认已关闭：所有流程确认弹窗恢复。");
+        });
     connect(m_pRobotCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnRobotChanged);
     connect(m_pParamGroupCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnParamGroupChanged);
     connect(m_pWeldProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &MeasureThenWeldDialog::OnWeldProcessChanged);
@@ -1506,8 +1524,43 @@ bool MeasureThenWeldDialog::SaveTextLines(const QString& filePath, const std::ve
     return m_pService != nullptr && m_pService->SaveTextLines(filePath, lines, error);
 }
 
+void MeasureThenWeldDialog::SetScanDataUploadHook(std::function<void(const QString&)> hook)
+{
+    m_scanDataUploadHook = std::move(hook);
+}
+
+void MeasureThenWeldDialog::NotifyFlowResultForUpload(const QString& poseFilePath)
+{
+    if (!m_scanDataUploadHook || poseFilePath.isEmpty())
+    {
+        return;
+    }
+    // poseFilePath = Result/<机器人>/<案例>/LaserPoint/xxx.txt → 上传单位是案例目录。
+    QDir caseDir = QFileInfo(poseFilePath).dir();
+    if (!caseDir.cdUp())
+    {
+        return;
+    }
+    const QString casePath = caseDir.absolutePath();
+    const auto hook = m_scanDataUploadHook;
+    QMetaObject::invokeMethod(qApp, [hook, casePath]() { hook(casePath); }, Qt::QueuedConnection);
+}
+
 bool MeasureThenWeldDialog::ConfirmContinue(const QString& actionName)
 {
+    // 流程免确认只放行中间衔接运动；首次运动（扫描下枪安全位置）与
+    // 进入焊接段（移动到焊接下枪安全位置并执行焊接轨迹）不在白名单，始终弹框。
+    static const QStringList kSkippableActions = {
+        QStringLiteral("移动到扫描起点"),
+        QStringLiteral("扫描终点并采集相机点"),
+        QStringLiteral("扫描收枪安全位置"),
+    };
+    if (m_bSkipFlowConfirms.load() && kSkippableActions.contains(actionName))
+    {
+        AppendLog(QString("（免确认）自动继续：%1").arg(actionName));
+        return true;
+    }
+
     SetFlowStep(QString("等待确认：%1").arg(actionName));
 
     if (QThread::currentThread() != thread())
@@ -1540,6 +1593,20 @@ bool MeasureThenWeldDialog::ConfirmContinue(const QString& actionName)
 
 bool MeasureThenWeldDialog::ShowCheckpointDialog(const QString& title, const QString& detail)
 {
+    // 流程免确认按标题白名单放行；不在白名单的（跳过扫描确认、扫描姿态翻转
+    // 风险提醒等）一律照常弹框——新增的关键节点默认落在保留侧，安全优先。
+    static const QStringList kSkippableTitles = {
+        QStringLiteral("扫描完成"),
+        QStringLiteral("补偿完成"),
+        QStringLiteral("焊前确认"),
+        QStringLiteral("焊后确认"),
+    };
+    if (m_bSkipFlowConfirms.load() && kSkippableTitles.contains(title))
+    {
+        AppendLog(QString("（免确认）关键节点[%1]自动继续。%2").arg(title).arg(detail));
+        return true;
+    }
+
     SetFlowStep(QString("关键节点确认：%1").arg(title));
 
     if (QThread::currentThread() != thread())
@@ -1745,6 +1812,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         if (self != nullptr)
                         {
                             self->AppendLog(QString("焊接轨迹执行完成：%1").arg(executeSummary));
+                            self->NotifyFlowResultForUpload(savedPath);
                         }
                         message = QString("预设参数流程完成。\n结果位置：%1\n执行结果：%2\n下枪安全位置：%3\n收枪安全位置：%4")
                             .arg(savedPath)

@@ -16,8 +16,11 @@
 #include "MeasureThenWeldDialog.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "MeasureThenWeldService.h"
+#include "OnlineServicesConfig.h"
+#include "OnlineServicesDialog.h"
 #include "OPini.h"
 #include "PointCloudProcessingConfig.h"
+#include "ScanDataUploader.h"
 #include "PreciseMeasureEditDialog.h"
 #include "RobotCalculation.h"
 #include "RobotDataHelper.h"
@@ -5490,12 +5493,93 @@ namespace
 				});
 			cameraControlLayout->addWidget(imageTransportLabel, 4, 0);
 			cameraControlLayout->addWidget(m_imageTransportToggleButton, 4, 1);
+			// 接收缓冲帧数：SDK v1.2.0 接收 FIFO 深度（本地取帧缓冲，非下发相机的参数），
+			// 松开滑条即下发所有相机客户端并保存。样式与曝光/增益行一致。
+			QLabel* frameBufferLabel = new QLabel("接收缓冲帧数", this);
+			frameBufferLabel->setToolTip(
+				"相机客户端接收 FIFO 深度（2~16，默认 8，SDK 出厂默认 2）。\n"
+				"取帧线程短暂卡顿时的缓冲垫，越大越抗积压；对所有机器人单元生效，\n"
+				"改动立即应用并保存，重启保持。扫描流程运行中改动只保存不下发\n"
+				"（SDK 修改缓冲会清空未取帧，避免打断采集），相机下次连接时生效。");
+			m_frameBufferSlider = new QSlider(Qt::Horizontal, this);
+			m_frameBufferSlider->setRange(2, 16);
+			m_frameBufferSlider->setSingleStep(1);
+			m_frameBufferSlider->setPageStep(2);
+			m_frameBufferSlider->setMinimumWidth(ScalePixels(190));
+			m_frameBufferSlider->setValue(8);
+			m_frameBufferSpin = new QSpinBox(this);
+			m_frameBufferSpin->setRange(2, 16);
+			m_frameBufferSpin->setSingleStep(1);
+			m_frameBufferSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+			m_frameBufferSpin->setKeyboardTracking(false);
+			m_frameBufferSpin->setAlignment(Qt::AlignCenter);
+			m_frameBufferSpin->setFixedWidth(ScalePixels(86));
+			m_frameBufferSpin->setValue(8);
+			m_frameBufferSpin->setStyleSheet(
+				"QSpinBox {"
+				"background:#071119;"
+				"color:#DDFBFF;"
+				"border:1px solid #315168;"
+				"border-radius:4px;"
+				"padding:3px 6px;"
+				"selection-background-color:#256A7A;"
+				"}"
+				"QSpinBox:focus {"
+				"border-color:#7FD7E7;"
+				"}");
+			// 提交统一走 CommitFrameBufferCount（带同值去重）：点击滑轨/滚轮/方向键只发
+			// valueChanged 不发 sliderReleased，靠去抖定时器兜底提交，保证显示值必然落库生效。
+			m_frameBufferCommitTimer = new QTimer(this);
+			m_frameBufferCommitTimer->setSingleShot(true);
+			m_frameBufferCommitTimer->setInterval(400);
+			connect(m_frameBufferCommitTimer, &QTimer::timeout, this, [this]() { CommitFrameBufferCount(); });
+			connect(m_frameBufferSlider, &QSlider::valueChanged, this, [this](int value)
+				{
+					if (m_frameBufferSpin != nullptr)
+					{
+						const QSignalBlocker blocker(m_frameBufferSpin);
+						m_frameBufferSpin->setValue(value);
+					}
+					if (m_frameBufferSlider != nullptr && !m_frameBufferSlider->isSliderDown()
+						&& m_frameBufferCommitTimer != nullptr)
+					{
+						m_frameBufferCommitTimer->start();  // 非拖拽改值（点槽/滚轮/键盘）去抖提交
+					}
+				});
+			connect(m_frameBufferSlider, &QSlider::sliderReleased, this, [this]()
+				{
+					if (m_frameBufferCommitTimer != nullptr)
+					{
+						m_frameBufferCommitTimer->stop();
+					}
+					CommitFrameBufferCount();
+				});
+			connect(m_frameBufferSpin, &QSpinBox::editingFinished, this, [this]()
+				{
+					if (m_frameBufferSpin == nullptr)
+					{
+						return;
+					}
+					if (m_frameBufferSlider != nullptr)
+					{
+						const QSignalBlocker blocker(m_frameBufferSlider);
+						m_frameBufferSlider->setValue(m_frameBufferSpin->value());
+					}
+					if (m_frameBufferCommitTimer != nullptr)
+					{
+						m_frameBufferCommitTimer->stop();
+					}
+					CommitFrameBufferCount();  // 同值去重：单纯失焦不会重发
+				});
+			cameraControlLayout->addWidget(frameBufferLabel, 5, 0);
+			cameraControlLayout->addWidget(m_frameBufferSlider, 5, 1);
+			cameraControlLayout->addWidget(m_frameBufferSpin, 5, 2);
 			m_refreshParamsButton = new QPushButton("刷新参数", this);
 			m_refreshParamsButton->setMinimumHeight(ScalePixels(32));
 			m_cameraControlStatusLabel = new QLabel("参数控制未连接", this);
 			m_cameraControlStatusLabel->setWordWrap(true);
-			cameraControlLayout->addWidget(m_refreshParamsButton, 5, 0);
-			cameraControlLayout->addWidget(m_cameraControlStatusLabel, 5, 1, 1, 2);
+			cameraControlLayout->addWidget(m_refreshParamsButton, 6, 0);
+			cameraControlLayout->addWidget(m_cameraControlStatusLabel, 6, 1, 1, 2);
 			cameraControlGroup->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
 
 			m_view = new GroovePointCloudView(this);
@@ -5579,6 +5663,53 @@ namespace
 		void SetImageTransportToggleHandler(std::function<void(bool)> handler)
 		{
 			m_imageTransportToggle = std::move(handler);
+		}
+
+		void SetFrameBufferCountHandler(std::function<void(int)> handler)
+		{
+			m_frameBufferCountChanged = std::move(handler);
+		}
+
+		void ShowCameraControlMessage(const QString& text, bool ok)
+		{
+			UpdateCameraControlStatus(text, ok);
+		}
+
+		void SetFrameBufferCountValue(int count)
+		{
+			if (m_frameBufferSlider != nullptr)
+			{
+				const QSignalBlocker sliderBlocker(m_frameBufferSlider);
+				m_frameBufferSlider->setValue(count);
+			}
+			if (m_frameBufferSpin != nullptr)
+			{
+				const QSignalBlocker spinBlocker(m_frameBufferSpin);
+				m_frameBufferSpin->setValue(count);
+			}
+			m_lastSentFrameBufferCount = count;  // 外部装载值即已生效基线，防止随后一次去抖误提交
+			if (m_frameBufferCommitTimer != nullptr)
+			{
+				m_frameBufferCommitTimer->stop();
+			}
+		}
+
+		void CommitFrameBufferCount()
+		{
+			if (m_frameBufferSlider == nullptr)
+			{
+				return;
+			}
+			const int value = m_frameBufferSlider->value();
+			if (value == m_lastSentFrameBufferCount)
+			{
+				return;  // 同值去重：失焦重复 editingFinished / 原地按放滑块不重发
+			}
+			m_lastSentFrameBufferCount = value;
+			if (m_frameBufferCountChanged)
+			{
+				m_frameBufferCountChanged(value);
+			}
 		}
 
 		void SetCameraImage(const QImage& image)
@@ -6034,6 +6165,11 @@ namespace
 		QLabel* m_pCameraImageLabel = nullptr;
 		QPushButton* m_imageTransportToggleButton = nullptr;
 		std::function<void(bool)> m_imageTransportToggle;
+		QSlider* m_frameBufferSlider = nullptr;
+		QSpinBox* m_frameBufferSpin = nullptr;
+		QTimer* m_frameBufferCommitTimer = nullptr;
+		int m_lastSentFrameBufferCount = 8;
+		std::function<void(int)> m_frameBufferCountChanged;
 		QTabBar* m_previewModeTabs = nullptr;
 		QPushButton* m_trendLineToggleButton = nullptr;
 		QPushButton* m_refreshParamsButton = nullptr;
@@ -7573,6 +7709,18 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		ui.statusBar->hide();
 	}
 	setWindowTitle(QString("%1 v%2").arg(QCoreApplication::applicationName(), BuildAppVersionText()));
+	// 在线服务：启动后恢复上传队列（自动上传开启且有历史待传项时续传——含 CLI 上轮没传完的）。
+	QTimer::singleShot(3000, this, [this]()
+		{
+			if (OnlineServicesConfig::AutoUploadEnabled())
+			{
+				ScanDataUploader* uploader = EnsureScanDataUploader();
+				if (!uploader->PendingList().isEmpty())
+				{
+					uploader->TriggerUploadNow();
+				}
+			}
+		});
 	setMinimumSize(640, 480);
 	setStyleSheet(
 		"QMainWindow, QWidget { background: #111820; color: #ECF3F4; }"
@@ -7875,11 +8023,16 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	dashboardHeaderLayout->setSpacing(8);
 	QHBoxLayout* titleLayout = new QHBoxLayout();
 	titleLayout->setSpacing(10);
-	// 主页不再重复显示大标题（与顶部窗口标题栏重复）；仅保留版本徽章作为轻量状态条。
-	QLabel* versionLabel = new QLabel(QString("v%1").arg(BuildAppVersionText()), m_pDashboardPage);
+	// 主页不再重复显示大标题（与顶部窗口标题栏重复）；版本徽章可点击 → 「关于」（当前/最新版本 + 在线升级）。
+	QPushButton* versionLabel = new QPushButton(QString("v%1").arg(BuildAppVersionText()), m_pDashboardPage);
+	versionLabel->setCursor(Qt::PointingHandCursor);
+	versionLabel->setToolTip("点击查看关于与在线更新");
 	versionLabel->setStyleSheet(
-		"QLabel { background: #173041; color: #9ED8DB; border: 1px solid #3C6173; "
-		"border-radius: 10px; padding: 4px 10px; font-size: 13px; font-weight: bold; }");
+		"QPushButton { background: #173041; color: #9ED8DB; border: 1px solid #3C6173; "
+		"border-radius: 10px; padding: 4px 10px; font-size: 13px; font-weight: bold; }"
+		"QPushButton:hover { border-color: #72D4DD; background: #1D3C51; }"
+		"QPushButton:pressed { background: #122636; }");
+	connect(versionLabel, &QPushButton::clicked, this, [this]() { OpenAboutDialog(); });
 	QPushButton* aboutButton = new QPushButton("关于", m_pDashboardPage);
 	aboutButton->setMinimumHeight(32);
 	aboutButton->setMaximumWidth(88);
@@ -8136,6 +8289,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addMenuAction(managementDebugMenu, createManagementAction("点动控制", [this, openInManagement]() { openInManagement([this]() { OpenRobotJogDialog(); }); }));
 	addMenuAction(managementDebugMenu, createManagementAction("功能测试", [this, openInManagement]() { openInManagement([this]() { OpenFunctionTestDialog(); }); }));
 	addMenuAction(managementDebugMenu, createManagementAction("结果打包压缩", [this]() { OpenResultArchiveDialog(); }));
+	addMenuAction(managementDebugMenu, createManagementAction("在线服务", [this]() { OpenOnlineServicesDialog(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("工件模型", [this]() { OpenWorkpieceMeshPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("模型配准", [this]() { OpenModelAlignmentPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("虚拟焊道测试", [this]() { OpenVirtualWeldTestPage(); }));
@@ -10778,11 +10932,24 @@ void QtWidgetsApplication4::ShowCurrentEmbeddedPage(QWidget* page)
 
 void QtWidgetsApplication4::OpenAboutDialog()
 {
-	QMessageBox aboutBox(this);
-	aboutBox.setWindowTitle("关于");
-	aboutBox.setIcon(QMessageBox::Information);
-	aboutBox.setText(BuildAboutText());
-	aboutBox.exec();
+	// 主页版本号点开的「关于」：在线服务对话框的精简形态（软件名/当前版本/最新版本/
+	// 更新内容 + 一键升级），打开即自动检查更新。无权限门槛——升级安装自带确认与流程守卫。
+	if (OnlineServicesDialog* existing = findChild<OnlineServicesDialog*>(QStringLiteral("OnlineServicesDialogAbout")))
+	{
+		existing->show();
+		existing->raise();
+		existing->activateWindow();
+		return;
+	}
+	auto* dlg = new OnlineServicesDialog(
+		EnsureScanDataUploader(),
+		[this]() { return HasRunningMeasureThenWeldFlow(); },
+		true,
+		false,
+		this);
+	dlg->setObjectName(QStringLiteral("OnlineServicesDialogAbout"));
+	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->show();
 }
 
 void QtWidgetsApplication4::ApplyStartupArguments(const QStringList& arguments)
@@ -11214,6 +11381,21 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 					scanSpeedOverrideMmPerMin,
 					cameraTimeOffsetOverrideMs);
 				LogCommandLineMessage(QString("CLI 先测后焊扫描重复流程%1。").arg(scanOk ? "完成" : "失败"));
+				// CLI 即将随动作结束退出：限时等待本轮上传收尾（成功清空或失败落回队列均结束等待；
+				// 未传完的留在持久化队列，下次启动自动续传）。
+				if (m_pScanDataUploader != nullptr && m_pScanDataUploader->IsBusy())
+				{
+					LogCommandLineMessage("正在等待扫描数据上传收尾（最多 3 分钟）…");
+					QElapsedTimer uploadWait;
+					uploadWait.start();
+					while (m_pScanDataUploader->IsBusy() && uploadWait.elapsed() < 180000)
+					{
+						QCoreApplication::processEvents(QEventLoop::AllEvents, 100);
+						QThread::msleep(100);
+					}
+					LogCommandLineMessage(QString("上传收尾结束，剩余待传 %1 项。")
+						.arg(m_pScanDataUploader->PendingList().size()));
+				}
 			}
 		}
 	}
@@ -12487,6 +12669,35 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 			.arg(repeatIndex)
 			.arg(repeatCount)
 			.arg(savedText));
+
+		// 只扫描数据在线上传：受自动上传总开关控制。savedPath 为空（scan-only 不生成姿态文件）
+		// 时按 Result/<机器人>/ 下最新案例目录定位本次数据（CLI 串行执行，无并发竞争）。
+		if (OnlineServicesConfig::AutoUploadEnabled())
+		{
+			QString caseDir;
+			if (!savedPath.isEmpty())
+			{
+				QDir fromSaved = QFileInfo(savedPath).dir();
+				if (fromSaved.cdUp())
+				{
+					caseDir = fromSaved.absolutePath();
+				}
+			}
+			if (caseDir.isEmpty())
+			{
+				const QDir robotResultDir(QStringLiteral("Result/") + QString::fromStdString(param.sRobotName));
+				const QFileInfoList cases = robotResultDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+				if (!cases.isEmpty())
+				{
+					caseDir = cases.first().absoluteFilePath();
+				}
+			}
+			if (!caseDir.isEmpty())
+			{
+				EnsureScanDataUploader()->QueueUpload(caseDir);
+				LogCommandLineMessage(QString("扫描数据已加入上传队列：%1").arg(QDir::toNativeSeparators(caseDir)));
+			}
+		}
 	}
 
 	QThread::msleep(300);
@@ -12699,6 +12910,7 @@ void QtWidgetsApplication4::InitializeScanCameraRuntimes()
 
 		CameraRuntime* runtime = new CameraRuntime();
 		runtime->cache = new CameraFrameCache();
+		runtime->cache->SetSkjFrameBufferCount(MeasureThenWeldRuntimeConfig::LoadSkjFrameBufferCount());
 		runtime->tcpWorker = new ScanCameraSkjWorker(runtime->cache);
 		runtime->thread = new QThread(this);
 		runtime->receiveMode = "TCP独立连接";
@@ -12828,6 +13040,7 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 	{
 		runtime = new CameraRuntime();
 		runtime->cache = new CameraFrameCache();
+		runtime->cache->SetSkjFrameBufferCount(MeasureThenWeldRuntimeConfig::LoadSkjFrameBufferCount());
 		runtime->tcpWorker = new ScanCameraSkjWorker(runtime->cache);
 		runtime->thread = new QThread(this);
 		runtime->receiveMode = "TCP独立连接";
@@ -13158,6 +13371,42 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 					else if (CameraFrameCache* toggleCache = ScanCameraCacheForUnit(toggleUnitIndex))
 					{
 						toggleCache->SetImageTransportEnabled(enabled);  // worker 未建时先记状态，连接时生效
+					}
+				});
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetFrameBufferCountValue(
+				MeasureThenWeldRuntimeConfig::LoadSkjFrameBufferCount());
+			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetFrameBufferCountHandler(
+				[this](int count)
+				{
+					// 接收缓冲是全局参数：持久化后广播给全部单元。SDK 明示修改缓冲帧数会清空
+					// 已缓冲未取走的帧（skjcamera.h SetFrameBufferCount 注释），扫描流程运行中
+					// 只存不发（写 cache 待相机重连生效），避免采集中途清 FIFO 静默丢帧。
+					MeasureThenWeldRuntimeConfig::SaveSkjFrameBufferCount(count);
+					const bool flowRunning = HasRunningMeasureThenWeldFlow();
+					for (auto it = m_scanCameraRuntimes.constBegin(); it != m_scanCameraRuntimes.constEnd(); ++it)
+					{
+						CameraRuntime* bufferRuntime = it.value();
+						if (bufferRuntime == nullptr)
+						{
+							continue;
+						}
+						if (!flowRunning && bufferRuntime->tcpWorker != nullptr)
+						{
+							QMetaObject::invokeMethod(bufferRuntime->tcpWorker, "setFrameBufferCount",
+								Qt::QueuedConnection, Q_ARG(int, count));
+						}
+						else if (bufferRuntime->cache != nullptr)
+						{
+							bufferRuntime->cache->SetSkjFrameBufferCount(count);
+						}
+					}
+					if (m_pGroovePointCloudDialog != nullptr)
+					{
+						static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ShowCameraControlMessage(
+							flowRunning
+								? QString("接收缓冲帧数已保存为 %1：扫描流程运行中不打断采集，相机下次连接时生效。").arg(count)
+								: QString("接收缓冲帧数已应用：%1").arg(count),
+							true);
 					}
 				});
 		}
@@ -13590,6 +13839,14 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		cameraCacheForUnit,
 		this);
 	page->setWindowModality(Qt::NonModal);
+	// 扫描数据在线上传钩子：流程成功后按「自动上传」开关入队（钩子回调已在 UI 线程）。
+	page->SetScanDataUploadHook([this](const QString& caseDir)
+		{
+			if (OnlineServicesConfig::AutoUploadEnabled())
+			{
+				EnsureScanDataUploader()->QueueUpload(caseDir);
+			}
+		});
 	m_measureThenWeldPages.insert(currentUnitIndex, page);
 	m_pMeasureThenWeldPage = page;
 	m_nMeasureThenWeldPageUnitIndex = currentUnitIndex;
@@ -13689,6 +13946,40 @@ void QtWidgetsApplication4::OpenResultArchiveDialog()
 	const QString resultRoot = QDir::current().absoluteFilePath(QStringLiteral("Result"));
 	QDir().mkpath(resultRoot);
 	auto* dlg = new ResultArchiveDialog(resultRoot, this);
+	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->show();
+}
+
+ScanDataUploader* QtWidgetsApplication4::EnsureScanDataUploader()
+{
+	if (m_pScanDataUploader == nullptr)
+	{
+		m_pScanDataUploader = new ScanDataUploader(this);
+	}
+	return m_pScanDataUploader;
+}
+
+void QtWidgetsApplication4::OpenOnlineServicesDialog()
+{
+	PageOpenTrace trace("在线服务");
+	if (!RequirePermission(kRoleEngineer, "在线服务"))
+	{
+		return;
+	}
+	if (OnlineServicesDialog* existing = findChild<OnlineServicesDialog*>(QStringLiteral("OnlineServicesDialogFull")))
+	{
+		existing->show();
+		existing->raise();
+		existing->activateWindow();
+		return;
+	}
+	auto* dlg = new OnlineServicesDialog(
+		EnsureScanDataUploader(),
+		[this]() { return HasRunningMeasureThenWeldFlow(); },
+		false,
+		RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin),  // admin 才见「远程数据」区
+		this);
+	dlg->setObjectName(QStringLiteral("OnlineServicesDialogFull"));
 	dlg->setAttribute(Qt::WA_DeleteOnClose);
 	dlg->show();
 }

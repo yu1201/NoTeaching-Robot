@@ -209,11 +209,13 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
     }
     WriteCameraSkjLog(QString("connected target=%1:%2").arg(m_serverIP).arg(m_serverPort));
 
-    // v1.2.0 FIFO 环形缓冲：加深到 8 帧（默认 2），取帧线程短暂变慢也不丢中间帧；旧 DLL 无此接口自动跳过。
+    // v1.2.0 FIFO 环形缓冲：深度取界面「接收缓冲帧数」设置（默认 8，SDK 默认 2），
+    // 取帧线程短暂变慢也不丢中间帧；旧 DLL 无此接口自动跳过。
     if (m_setFrameBufferCount != nullptr)
     {
-        const int bufferRet = m_setFrameBufferCount(m_handle, 8);
-        WriteCameraSkjLog(QString("SetFrameBufferCount(8) ret=%1").arg(bufferRet));
+        const int fifoDepth = (m_frameCache != nullptr) ? m_frameCache->SkjFrameBufferCount() : 8;
+        const int bufferRet = m_setFrameBufferCount(m_handle, fifoDepth);
+        WriteCameraSkjLog(QString("SetFrameBufferCount(%1) ret=%2").arg(fifoDepth).arg(bufferRet));
     }
     m_tsUnitMultiplier = 0;  // 重连后重新判定时间戳单位
     m_lastRawTsForUnitDetect = 0;
@@ -305,6 +307,22 @@ void ScanCameraSkjWorker::setImageTransportEnabled(bool enabled)
     else
     {
         disconnectImageTransport();
+    }
+}
+
+void ScanCameraSkjWorker::setFrameBufferCount(int count)
+{
+    const int fifoDepth = count < 2 ? 2 : (count > 16 ? 16 : count);
+    if (m_frameCache != nullptr)
+    {
+        m_frameCache->SetSkjFrameBufferCount(fifoDepth);
+    }
+    // 已连接时立即下发。注意 SDK 明示修改缓冲帧数会清空已缓冲未取走的帧，
+    // 因此 UI 侧在扫描流程运行中不会调本槽（只写 cache 待重连生效），此处无需重复判断。
+    if (m_running && m_handle != nullptr && m_setFrameBufferCount != nullptr)
+    {
+        const int bufferRet = m_setFrameBufferCount(m_handle, fifoDepth);
+        WriteCameraSkjLog(QString("SetFrameBufferCount(%1) runtime-change ret=%2").arg(fifoDepth).arg(bufferRet));
     }
 }
 

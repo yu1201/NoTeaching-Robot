@@ -1960,30 +1960,40 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 		const int nProgramState = CheckDone();
 		if (nProgramState == STEPROBOTSDK::eRun || nProgramState == STEPROBOTSDK::ePause)
 		{
-			if (!Prog_stop_Py())
+			// 暂停态(1)的程序已处于停止键状态，再发 STOP 无效/报错——现场“暂停状态下启动流程失败”的根因。
+			// 暂停态跳过停止步骤直接卸载(ProgramKillCmd 对暂停程序有效)；运行态仍先停止并等待到停止。
+			if (nProgramState == STEPROBOTSDK::eRun)
 			{
-				SetLastRobotError(GetStr("STEP连续运动失败：停止当前程序失败，%s，%s",
-					sCurrentProgram.c_str(), GetRobotStatusText().c_str()));
-				m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 停止当前程序失败：%s", sCurrentProgram.c_str());
-				return -5;
-			}
-
-			bool bStopped = false;
-			for (int i = 0; i < 40; ++i)
-			{
-				if (CheckDone() == STEPROBOTSDK::eStop)
+				if (!Prog_stop_Py())
 				{
-					bStopped = true;
-					break;
+					SetLastRobotError(GetStr("STEP连续运动失败：停止当前程序失败，%s，%s",
+						sCurrentProgram.c_str(), GetRobotStatusText().c_str()));
+					m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 停止当前程序失败：%s", sCurrentProgram.c_str());
+					return -5;
 				}
-				Sleep(50);
+
+				bool bStopped = false;
+				for (int i = 0; i < 40; ++i)
+				{
+					if (CheckDone() == STEPROBOTSDK::eStop)
+					{
+						bStopped = true;
+						break;
+					}
+					Sleep(50);
+				}
+				if (!bStopped)
+				{
+					SetLastRobotError(GetStr("STEP连续运动失败：等待当前程序停止超时，%s，%s",
+						sCurrentProgram.c_str(), GetRobotStatusText().c_str()));
+					m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 等待当前程序停止超时：%s", sCurrentProgram.c_str());
+					return -5;
+				}
 			}
-			if (!bStopped)
+			else
 			{
-				SetLastRobotError(GetStr("STEP连续运动失败：等待当前程序停止超时，%s，%s",
-					sCurrentProgram.c_str(), GetRobotStatusText().c_str()));
-				m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 等待当前程序停止超时：%s", sCurrentProgram.c_str());
-				return -5;
+				m_pRobotLog->write(LogColor::WARNING,
+					"STEP ContiMoveAny 当前程序处于暂停态，跳过停止直接卸载：%s", sCurrentProgram.c_str());
 			}
 		}
 
@@ -2062,25 +2072,39 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 
 	if (m_pSTEPRobotClient->getOperationMode() != STEPROBOTSDK::eAutomatic)
 	{
-		nPrepareRet = m_pSTEPRobotClient->SetModeCmd(STEPROBOTSDK::MODEKEY::AUTO, true);
-		if (nPrepareRet != 0)
-		{
-			return failRunPrepare("切换自动模式", nPrepareRet);
-		}
-
-		bool bAutoMode = false;
-		for (int i = 0; i < 20; ++i)
-		{
-			if (m_pSTEPRobotClient->getOperationMode() == STEPROBOTSDK::eAutomatic)
+		const auto trySwitchAutoMode = [this]() -> bool
 			{
-				bAutoMode = true;
-				break;
-			}
-			Sleep(50);
-		}
-		if (!bAutoMode)
+				if (m_pSTEPRobotClient->SetModeCmd(STEPROBOTSDK::MODEKEY::AUTO, true) != 0)
+				{
+					return false;
+				}
+				for (int i = 0; i < 20; ++i)
+				{
+					if (m_pSTEPRobotClient->getOperationMode() == STEPROBOTSDK::eAutomatic)
+					{
+						return true;
+					}
+					Sleep(50);
+				}
+				return false;
+			};
+
+		if (!trySwitchAutoMode())
 		{
-			return failRunPrepare("等待自动模式", 0);
+			// 现场经验：SDK 会话异常时切自动命令发了也不生效，重连一次后重试才有效。
+			m_pRobotLog->write(LogColor::WARNING,
+				"STEP ContiMoveAny 切换自动模式未生效，重连机器人后重试");
+			m_pSTEPRobotClient->close();
+			Sleep(200);
+			if (!InitSocket(m_sSocketIP.c_str(), m_nSocketPort))
+			{
+				return failRunPrepare("切换自动模式失败后重连机器人", 0);
+			}
+			if (!trySwitchAutoMode())
+			{
+				return failRunPrepare("重连后切换自动模式", 0);
+			}
+			m_pRobotLog->write(LogColor::SUCCESS, "STEP ContiMoveAny 重连后已切换自动模式");
 		}
 	}
 

@@ -26,6 +26,7 @@ class LaserWeldFilterDialog;
 class WorkpieceMeshViewerDialog;
 class ModelAlignmentDialog;
 class VirtualWeldTestDialog;
+class ScanDataUploader;
 class QAction;
 class QCheckBox;
 class QCloseEvent;
@@ -71,6 +72,7 @@ private slots:
     void OpenWeldSeamCompDialog();
     void OpenCameraParamDialog();
     void OpenResultArchiveDialog();
+    void OpenOnlineServicesDialog();
     void FanucConnectTest();
     void FanucDisconnectTest();
     void RobotClearAlarmTest();
@@ -193,6 +195,7 @@ private:
         double weldSpeedMmPerMin) const;
     void RunUpdateWeldPoseAverageForCli(const QString& inputPath) const;
     bool HasRunningMeasureThenWeldFlow() const;
+    ScanDataUploader* EnsureScanDataUploader();
     bool RunMeasureThenWeldScanOnlyRepeatForCli(
         RobotDriverAdaptor* pRobotDriver,
         int unitIndex,
@@ -281,6 +284,8 @@ private:
     QSet<CameraRuntime*> m_liveScanCameraRuntimes;
     SKJCameraControlClient* m_skjCameraControlClient;
     QHash<int, QPointer<MeasureThenWeldDialog>> m_measureThenWeldPages;
+    // 在线服务：扫描数据上传常驻服务（懒创建，自动上传与管理页共用一个实例）。
+    ScanDataUploader* m_pScanDataUploader = nullptr;
     QHash<int, QPointer<RobotJogDialog>> m_robotJogPages;
     bool m_bFanucMovlForward;
     bool m_bFanucMovlRunning;
