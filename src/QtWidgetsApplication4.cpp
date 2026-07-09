@@ -79,6 +79,7 @@
 #include <QFrame>
 #include <QFontMetrics>
 #include <QMetaObject>
+#include <QProgressBar>
 #include <QProgressDialog>
 #include <QMenu>
 #include <QMenuBar>
@@ -8964,6 +8965,71 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 			event->ignore();
 		}
 		return;
+	}
+
+	// 扫描数据上传中：拦截退出，弹进度框（已完成/剩余/速度/ETA），传完自动放行；
+	// 用户可「强制退出」——先删掉传一半的文件再退出；关掉进度框(X/Esc)则不退出、上传继续后台跑。
+	if (m_pScanDataUploader != nullptr && m_pScanDataUploader->IsBusy())
+	{
+		QDialog dlg(this);
+		dlg.setWindowTitle(QStringLiteral("扫描数据上传中"));
+		dlg.setModal(true);
+		dlg.setMinimumWidth(460);
+		QVBoxLayout* lay = new QVBoxLayout(&dlg);
+		QLabel* info = new QLabel(&dlg);
+		info->setWordWrap(true);
+		QProgressBar* bar = new QProgressBar(&dlg);
+		bar->setRange(0, 100);
+		QPushButton* forceBtn = new QPushButton(QStringLiteral("强制退出（删除未传完的文件）"), &dlg);
+		lay->addWidget(info);
+		lay->addWidget(bar);
+		lay->addWidget(forceBtn);
+
+		auto fmtMB = [](qint64 b) { return QString::number(b / 1048576.0, 'f', 1); };
+		auto render = [&](int done, int total, const QString& name, qint64 sent, qint64 tot, double bps, int eta)
+		{
+			const int pct = tot > 0 ? static_cast<int>(sent * 100 / tot) : 0;
+			bar->setValue(pct);
+			const QString etaText = eta > 0 ? QStringLiteral("约 %1 秒").arg(eta) : QStringLiteral("计算中…");
+			info->setText(QStringLiteral(
+				"正在上传第 %1/%2 个案例：%3\n"
+				"当前文件 %4/%5 MB（%6%），速度 %7 MB/s，预计剩余 %8\n"
+				"还有 %9 个案例未完成，请勿断电。")
+				.arg(done + 1).arg(total).arg(name)
+				.arg(fmtMB(sent)).arg(fmtMB(tot)).arg(pct)
+				.arg(QString::number(bps / 1048576.0, 'f', 2)).arg(etaText)
+				.arg(total - done));
+		};
+		const ScanDataUploader::ProgressSnapshot snap = m_pScanDataUploader->CurrentProgress();
+		render(snap.doneItems, snap.totalItems, snap.currentName, snap.sentBytes, snap.totalBytes,
+			snap.bytesPerSec, snap.etaSeconds);
+
+		const QMetaObject::Connection progConn = connect(m_pScanDataUploader, &ScanDataUploader::uploadProgress,
+			&dlg, [&](int done, int total, const QString& name, qint64 sent, qint64 tot, double bps, int eta)
+			{ render(done, total, name, sent, tot, bps, eta); });
+		connect(forceBtn, &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(2); });  // 2=强制退出
+		QTimer poll;
+		connect(&poll, &QTimer::timeout, &dlg, [this, &dlg]()
+			{ if (!m_pScanDataUploader->IsBusy()) { dlg.done(1); } });  // 1=传完自动放行
+		poll.start(200);
+
+		const int r = dlg.exec();
+		disconnect(progConn);
+
+		if (r == 2)
+		{
+			forceBtn->setText(QStringLiteral("正在停止并清理…"));
+			m_pScanDataUploader->CancelAndWait();  // 删服务器半截文件 + 等后台收尾后放行
+		}
+		else if (r != 1)
+		{
+			// X/Esc 关掉了进度框：不退出程序，上传转后台继续。
+			if (event != nullptr)
+			{
+				event->ignore();
+			}
+			return;
+		}
 	}
 
 	QMainWindow::closeEvent(event);

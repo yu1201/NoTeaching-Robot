@@ -339,6 +339,103 @@ bool FtpClient::uploadFile(const std::string& localFilePath, const std::string& 
     }
 }
 
+bool FtpClient::uploadFileWithProgress(const std::string& localFilePath,
+    const std::string& remoteFilePath,
+    std::atomic<bool>* cancelFlag,
+    const std::function<void(long long sent, long long total)>& progressCb,
+    bool deleteBeforeUpload)
+{
+    auto cancelled = [cancelFlag]() { return cancelFlag != nullptr && cancelFlag->load(); };
+
+    if (!connectFtpServer()) {
+        return false;
+    }
+
+    // 打开本地文件，取总大小（进度/ETA 用）。
+    FILE* fp = nullptr;
+    if (fopen_s(&fp, localFilePath.c_str(), "rb") != 0 || fp == nullptr) {
+        m_log->write(LogColor::ERR, "分块上传打不开本地文件：%s", localFilePath.c_str());
+        closeFtpSession();
+        return false;
+    }
+    _fseeki64(fp, 0, SEEK_END);
+    const long long total = _ftelli64(fp);
+    _fseeki64(fp, 0, SEEK_SET);
+
+    // 确保远程父目录存在。
+    const std::string remoteParentDir = getParentDir(remoteFilePath);
+    if (!remoteParentDir.empty() && !createRemoteDirRecursive(remoteParentDir)) {
+        m_log->write(LogColor::ERR, "分块上传远程目录确认失败：%s", remoteParentDir.c_str());
+        fclose(fp);
+        closeFtpSession();
+        return false;
+    }
+
+    if (deleteBeforeUpload) {
+        FtpDeleteFileA(m_hFtpSession, remoteFilePath.c_str());  // 静默删旧文件，失败无妨（可能不存在）
+    }
+
+    // 打开远程文件写句柄（二进制）。
+    HINTERNET hRemote = FtpOpenFileA(m_hFtpSession, remoteFilePath.c_str(),
+        GENERIC_WRITE, FTP_TRANSFER_TYPE_BINARY, 0);
+    if (hRemote == nullptr) {
+        m_log->write(LogColor::ERR, "分块上传打开远程文件失败：%s | %s",
+            remoteFilePath.c_str(), getFtpErrorMsg().c_str());
+        fclose(fp);
+        closeFtpSession();
+        return false;
+    }
+
+    if (progressCb) {
+        progressCb(0, total);
+    }
+
+    // 取消/失败时删除服务器上的半截文件。
+    auto cleanupPartial = [this, &remoteFilePath]() {
+        FtpDeleteFileA(m_hFtpSession, remoteFilePath.c_str());
+    };
+
+    const size_t kChunk = 256 * 1024;  // 256KB/块：足够块间检查取消/更新进度，又不过碎
+    std::vector<char> buf(kChunk);
+    long long sent = 0;
+    bool ok = true;
+    while (true) {
+        if (cancelled()) {
+            ok = false;
+            break;
+        }
+        const size_t nread = fread(buf.data(), 1, kChunk, fp);
+        if (nread == 0) {
+            break;  // 读完
+        }
+        DWORD written = 0;
+        if (!InternetWriteFile(hRemote, buf.data(), static_cast<DWORD>(nread), &written) || written != nread) {
+            m_log->write(LogColor::ERR, "分块上传写入失败 @%lld/%lld：%s",
+                sent, total, getFtpErrorMsg().c_str());
+            ok = false;
+            break;
+        }
+        sent += static_cast<long long>(written);
+        if (progressCb) {
+            progressCb(sent, total);
+        }
+    }
+
+    fclose(fp);
+    InternetCloseHandle(hRemote);
+
+    if (!ok || cancelled()) {
+        cleanupPartial();
+        m_log->write(cancelled() ? LogColor::DEFAULT : LogColor::ERR,
+            "分块上传%s，已删除服务器半截文件：%s",
+            cancelled() ? "被取消" : "失败", remoteFilePath.c_str());
+        return false;
+    }
+
+    m_log->write(LogColor::SUCCESS, "分块上传完成 | %lld 字节 | 远程：%s", sent, remoteFilePath.c_str());
+    return true;
+}
+
 bool FtpClient::listFiles(const std::string& remoteDir, std::vector<FtpRemoteFileInfo>& files)
 {
     files.clear();

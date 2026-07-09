@@ -28,6 +28,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QCloseEvent>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
 #include <QNetworkProxy>
@@ -526,6 +527,28 @@ void OnlineServicesDialog::AppendLog(const QString& text)
 	{
 		m_logText->appendPlainText(text);
 	}
+}
+
+void OnlineServicesDialog::closeEvent(QCloseEvent* event)
+{
+	// 关界面时若正在上传：问用户后台继续还是停止（停止则清服务器半截文件）。
+	if (m_uploader != nullptr && m_uploader->IsBusy())
+	{
+		const QMessageBox::StandardButton ret = QMessageBox::question(
+			this,
+			QStringLiteral("上传进行中"),
+			QStringLiteral("扫描数据还在上传。\n\n「后台继续」：关闭本界面，上传转后台继续。\n"
+				"「停止上传」：中止上传并删除服务器上未传完的半截文件。"),
+			QMessageBox::Yes | QMessageBox::No,
+			QMessageBox::Yes);
+		if (ret == QMessageBox::No)
+		{
+			m_uploader->RequestCancel();  // 后台线程块间中止并删半截文件；案例留队列
+			AppendLog(QStringLiteral("已请求停止上传，服务器半截文件将被清除。"));
+		}
+		// 无论后台继续还是停止，都放行关闭（停止是异步清理，不阻塞关窗）。
+	}
+	QDialog::closeEvent(event);
 }
 
 int OnlineServicesDialog::CompareVersions(const QString& lhs, const QString& rhs)
