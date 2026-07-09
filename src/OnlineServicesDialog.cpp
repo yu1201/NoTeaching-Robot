@@ -30,6 +30,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
+#include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPlainTextEdit>
@@ -60,6 +61,10 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 {
 	setWindowTitle(m_aboutMode ? QStringLiteral("关于") : QStringLiteral("在线服务"));
 	m_network = new QNetworkAccessManager(this);
+	// 自建 OTA 服务器是直连 IP，绝不走系统代理：现场设备若装了代理软件(clash/v2ray 等)，
+	// Qt 默认吃系统代理会把请求转给代理，代理连不到自建服务器就回 502 Bad Gateway。
+	// 显式 NoProxy 让检查更新/下载都直连服务器。（FTP 上传走 WinINet DIRECT，本就不走代理。）
+	m_network->setProxy(QNetworkProxy::NoProxy);
 	BuildUi();
 	LoadConfigToUi();
 
