@@ -1,9 +1,19 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-07-08`
+- 人工整理日期：`2026-07-09`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-07-09
+
+- 发布 v2026.07.09.1001：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过；中性+品牌两个安装包+增量补丁均上架各自 OTA 通道；GitHub Release 同步。署名 yu1201。
+- OTA 服务器实际部署上线(156.239.225.105，Ubuntu 22.04)：nginx :8090 双通道(neutral/brand)静态更新源 + vsftpd(chroot /srv/devicedata、pasv 公网回址修 NAT) + ufw + 30 天 cron 清理。(8080 被机上 qqbot 占用改用 8090。)
+- 在线更新 502 修复(关键)：客户端检查更新默认吃系统代理，现场装了代理软件时代理连不到自建服务器回 502。改 `OnlineServicesDialog` 的 `QNetworkAccessManager` 显式 `setProxy(QNetworkProxy::NoProxy)` 直连；FTP 上传走 WinINet `INTERNET_OPEN_TYPE_DIRECT` 本就不走代理。诊断实测:直连 200 / 经代理 502。
+- 通道判据由 exe 名改 `BrandingConfig::IsActive()`：品牌/中性主程序 exe **同名** `QtWidgetsApplication4.exe`(品牌靠 vcxproj `TargetName` 产出 `HK-Pathlynx-CORPLA.exe`、安装器输出名不同)，exe 名不可区分通道；改用 branding/ 随包分发的 `IsActive()` 判定。
+- FTP 两级账号:`uploader`(上传专用,vsftpd `download_enable=NO` 禁下载,随包默认;共享组 ftpdata+setgid+umask002 保证跨账号 devicedata 能读回)、`devicedata`(全权限,管理员手填)。客户端默认 FTP 账号改为 uploader(`OnlineServicesConfig`)。
+- 上传生命周期与退出交互:`FtpClient` 新增 `uploadFileWithProgress`(FtpOpenFile+InternetWriteFile 256KB分块、进度回调、`std::atomic<bool>*` 取消、取消删半截文件;不动原子 `FtpPutFileA`/STEP 上传);`ScanDataUploader` 加取消标志/进度快照/ETA/`RequestCancel`/`CancelAndWait`;`OnlineServicesDialog::closeEvent` 弹后台继续/停止;主窗口 `closeEvent` 上传中拦退出+进度框(第几案例/文件%/速度/ETA/剩余数)+强退删半截。扫描完 scan-only 也自动上传。
+- 打包残留 exe 修复:同一 x64\Release 反复构建品牌+中性会互留残留 exe，`build_release_package.ps1` 拷贝排除列表原本漏加"另一套 exe"(品牌分支排除 qtwidgetsapplication4.exe、main 排除 hk-pathlynx-corpla.exe)。发布流程固化:中性+品牌一次发齐、各上架对应 OTA 通道。
 
 ## 2026-07-08
 
