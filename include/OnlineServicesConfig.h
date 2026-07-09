@@ -36,7 +36,7 @@ namespace OnlineServicesConfig
 	// 默认直连服务器 IP（156.239.225.105，:8090，8080 被机上 qqbot 占用）；域名解析就绪后可在界面改回域名。
 	inline QString UpdateBaseUrl()
 	{
-		return ReadValue(QStringLiteral("UpdateBaseUrl"), QStringLiteral("http://xiaomomoyun.cn:8090/ota"));
+		return ReadValue(QStringLiteral("UpdateBaseUrl"), QStringLiteral("http://103.217.203.52:8090/ota"));
 	}
 
 	inline void SetUpdateBaseUrl(const QString& url)
@@ -47,7 +47,7 @@ namespace OnlineServicesConfig
 	// —— 数据上传（FTP）——
 	inline QString FtpHost()
 	{
-		return ReadValue(QStringLiteral("FtpHost"), QStringLiteral("xiaomomoyun.cn"));
+		return ReadValue(QStringLiteral("FtpHost"), QStringLiteral("103.217.203.52"));
 	}
 
 	inline void SetFtpHost(const QString& host)

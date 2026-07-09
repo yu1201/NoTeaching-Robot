@@ -13,9 +13,14 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.07.09.1002`
+- 当前源码版本：`v2026.07.09.1003`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.07.09.1002.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.07.09.1003.exe`，不用自己编译源码。
+
+## 2026-07-09 更新（v2026.07.09.1003）
+
+- 客户端默认「升级源地址/FTP 服务器」由域名改回 IP `103.217.203.52`：域名 `xiaomomoyun.cn` 未 ICP 备案，国内对未备案域名指向境内服务器的 HTTP 请求会按 Host 头拦截（返回 403），换端口也躲不掉；IP 直连不受影响（实测 8/8 全 200）。域名备案通过后可再切回域名（届时换服务器免重发版）。含 1002 全部功能。
+- 构建验证：`Debug x64` 与 `Release x64` 编译通过（0 错误）；安装包 `NoTeaching-Robot-Setup-v2026.07.09.1003.exe`。
 
 ## 2026-07-09 更新（v2026.07.09.1002）
 

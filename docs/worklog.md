@@ -7,6 +7,7 @@
 
 ## 2026-07-09
 
+- 发布 v2026.07.09.1003：客户端默认地址由域名改回 IP `103.217.203.52`。原因：域名 `xiaomomoyun.cn` 未 ICP 备案，国内对「未备案域名指向境内服务器」的 HTTP 请求按 Host 头拦截返回 403（Server: ADM/2.1.1，非 nginx；实测域名 8/8 全 403、IP 8/8 全 200，103 上无 WAF/宝塔——拦截在网络路径按 Host 头判、与端口无关），换 8090 端口也躲不掉。IP 直连不受影响。域名备案通过后可再切回域名享受免重发版。数据盘：103 的扫描数据目录 `/srv/devicedata/data` 已 bind 挂载到 110G 数据盘 `/www/devicedata`（fstab 持久化，FTP 上传实测落盘正确）。
 - 发布 v2026.07.09.1002：OTA/上传服务器迁移到 103.217.203.52（三台实测出口带宽 156=0.8Mbps / 106=2.9Mbps / 103=32Mbps，103 最快约 40×，现场下载更新快很多）。客户端默认地址改用**域名** `xiaomomoyun.cn`（`OnlineServicesConfig` UpdateBaseUrl/FtpHost，不再写死 IP，以后换服务器只改 DNS 免重发版），DNS 已指向 103。103 部署同 156（nginx :8090 双通道 + vsftpd 两级账号、共享组 setgid、pasv 公网回址；SSH 端口 48890）。
 - 发布 v2026.07.09.1001：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过；中性+品牌两个安装包+增量补丁均上架各自 OTA 通道；GitHub Release 同步。署名 yu1201。
 - OTA 服务器实际部署上线(156.239.225.105，Ubuntu 22.04)：nginx :8090 双通道(neutral/brand)静态更新源 + vsftpd(chroot /srv/devicedata、pasv 公网回址修 NAT) + ufw + 30 天 cron 清理。(8080 被机上 qqbot 占用改用 8090。)
