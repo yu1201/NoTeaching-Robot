@@ -67,9 +67,12 @@ namespace OnlineServicesConfig
 		WriteValue(QStringLiteral("FtpPort"), QString::number(port));
 	}
 
+	// 默认随包分发「上传专用」账号 uploader：服务器端仅允许上传(STOR/建目录)、禁止下载(RETR)，
+	// 现场设备开箱即可自动上传扫描数据，且下载不到别的设备数据。管理员要远程浏览/下载数据时，
+	// 在界面手动改成「全权限」账号 devicedata（不随包分发）。
 	inline QString FtpUser()
 	{
-		return ReadValue(QStringLiteral("FtpUser"), QString());
+		return ReadValue(QStringLiteral("FtpUser"), QStringLiteral("uploader"));
 	}
 
 	inline void SetFtpUser(const QString& user)
@@ -79,7 +82,8 @@ namespace OnlineServicesConfig
 
 	inline QString FtpPassword()
 	{
-		return ReadValue(QStringLiteral("FtpPassword"), QString());
+		// uploader 的密码（低权限、仅上传，随包默认；全权限账号密码不写死、由管理员手填）。
+		return ReadValue(QStringLiteral("FtpPassword"), QStringLiteral("UprOLDgeLOmM1wjN"));
 	}
 
 	inline void SetFtpPassword(const QString& password)

@@ -5,14 +5,15 @@
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
 
-## 2026-07-09（在线服务上线收尾）
+## 2026-07-09
 
-- OTA 服务器实际部署上线：`deploy_online_services.sh` 部署到 156.239.225.105（Ubuntu 22.04），nginx :8090 双通道(neutral/brand)静态更新源 + vsftpd(账号 devicedata、chroot /srv/devicedata、pasv 公网回址修 NAT) + ufw + 30 天清理。全链路外网实测通过：拉 latest.json、下载安装包 HEAD 200、FTP 登录上传落盘 /data/<设备名>/。域名 xiaomomoyun.cn 已解析到该 IP。
-- 通道判据修正(关键)：初版按 exe 名判 neutral/brand 是错的——品牌与中性构建产出的主程序 exe **同名** `QtWidgetsApplication4.exe`(品牌靠 vcxproj TargetName 改为 `HK-Pathlynx-CORPLA.exe`、iss MyAppExeName 同步)、无法据此区分。改用 `BrandingConfig::IsActive()`(品牌包随包分发 `branding/branding.ini`，装机后为真)，品牌设备正确走 brand 通道、不会误装中性覆盖。
-- 打包残留 exe 修复：同一 `x64\Release` 目录反复构建品牌+中性两版会互留残留 exe，`build_release_package.ps1` 拷贝时未排除，导致品牌安装包混入中性 `QtWidgetsApplication4.exe`(反之亦然)。修复：拷贝排除列表加入「另一套命名的 exe」(品牌分支排除中性名、main 排除品牌名)；两分支各自提交。修复后品牌包只含 `HK-Pathlynx-CORPLA.exe`、中性包只含 `QtWidgetsApplication4.exe`。
-- 扫描数据上传扩到「只扫描」(scan-only CLI)：`--measure-then-weld-scan-only-repeat` 每轮成功后按开关入队上传(savedPath 为空时按 Result/<机器人>/ 最新案例目录定位)；CLI 退出前限时等上传收尾，未传完留持久化队列下次启动续传。
-- 品牌分支 hk-pathlynx-corpla 合并 main(v2026.07.08.1704) 并发布：解 iss 冲突(品牌名+1704)、补 merge 丢失的 vcxproj 在线服务注册；两通道安装包+增量补丁均已上架 OTA。main 与品牌分支均已推送 GitHub。
-- 发版流程固化：以后每版**中性+品牌一次发齐**并各自上架对应 OTA 通道，避免品牌包漏发(历史上 06.30/07.06/07.07 曾只发中性)。
+- 发布 v2026.07.09.1001：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过；中性+品牌两个安装包+增量补丁均上架各自 OTA 通道；GitHub Release 同步。署名 yu1201。
+- OTA 服务器实际部署上线(156.239.225.105，Ubuntu 22.04)：nginx :8090 双通道(neutral/brand)静态更新源 + vsftpd(chroot /srv/devicedata、pasv 公网回址修 NAT) + ufw + 30 天 cron 清理。(8080 被机上 qqbot 占用改用 8090。)
+- 在线更新 502 修复(关键)：客户端检查更新默认吃系统代理，现场装了代理软件时代理连不到自建服务器回 502。改 `OnlineServicesDialog` 的 `QNetworkAccessManager` 显式 `setProxy(QNetworkProxy::NoProxy)` 直连；FTP 上传走 WinINet `INTERNET_OPEN_TYPE_DIRECT` 本就不走代理。诊断实测:直连 200 / 经代理 502。
+- 通道判据由 exe 名改 `BrandingConfig::IsActive()`：品牌/中性主程序 exe **同名** `QtWidgetsApplication4.exe`(品牌靠 vcxproj `TargetName` 产出 `HK-Pathlynx-CORPLA.exe`、安装器输出名不同)，exe 名不可区分通道；改用 branding/ 随包分发的 `IsActive()` 判定。
+- FTP 两级账号:`uploader`(上传专用,vsftpd `download_enable=NO` 禁下载,随包默认;共享组 ftpdata+setgid+umask002 保证跨账号 devicedata 能读回)、`devicedata`(全权限,管理员手填)。客户端默认 FTP 账号改为 uploader(`OnlineServicesConfig`)。
+- 上传生命周期与退出交互:`FtpClient` 新增 `uploadFileWithProgress`(FtpOpenFile+InternetWriteFile 256KB分块、进度回调、`std::atomic<bool>*` 取消、取消删半截文件;不动原子 `FtpPutFileA`/STEP 上传);`ScanDataUploader` 加取消标志/进度快照/ETA/`RequestCancel`/`CancelAndWait`;`OnlineServicesDialog::closeEvent` 弹后台继续/停止;主窗口 `closeEvent` 上传中拦退出+进度框(第几案例/文件%/速度/ETA/剩余数)+强退删半截。扫描完 scan-only 也自动上传。
+- 打包残留 exe 修复:同一 x64\Release 反复构建品牌+中性会互留残留 exe，`build_release_package.ps1` 拷贝排除列表原本漏加"另一套 exe"(品牌分支排除 qtwidgetsapplication4.exe、main 排除 hk-pathlynx-corpla.exe)。发布流程固化:中性+品牌一次发齐、各上架对应 OTA 通道。
 
 ## 2026-07-08
 
@@ -20,8 +21,8 @@
 - 启动流程健壮性修复(`StepRobotDriver.cpp`)：启动前查机器人状态——暂停态(ePause)程序不响应 STOP，改为跳过停止直接 `ProgramKillCmd` 卸载再启动；切自动失败时 `close()`+`InitSocket` 重连后重试。
 - 「流程免确认」勾选框：`ConfirmContinue`/`ShowCheckpointDialog` 按文案白名单放行，跳过中间步骤与信息类确认，保留首次运动/进入焊接/翻转风险告警/跳过扫描目录核对。状态存 `MeasureThenWeld/Runtime.SkipFlowConfirms`(默认关)。
 - 相机接收缓冲帧数界面可调：坡口相机预览滑条(2~16，默认 8)，去抖+同值去重提交；扫描运行中只写配置+cache 不下发 SDK(改缓冲会清空未取帧)。经对抗审查修复 3 问题。
-- 在线服务(`OnlineServicesConfig`/`OnlineServicesDialog`/`ScanDataUploader`)：OTA 在线升级(通道按 `BrandingConfig::IsActive` 判定 neutral/brand——品牌信息随 `branding/` 目录入包，装机后 IsActive=true 走 brand；**不用 exe 名判据**，因品牌/中性构建的主程序 exe 同名 `QtWidgetsApplication4.exe`、不可区分；优先增量补丁、SHA256 校验、引导批处理静默安装并重启、流程中禁装)；扫描数据 FTP 上传(预设参数+scan-only 完成后按开关打包上传 `/data/<设备名>/`、失败留持久化队列重试、上传前 3 秒 TCP 联网预检不卡流程)；admin 远程数据浏览下载解压到 `Result/Remote/<设备>/`；主页版本号点击→「关于」在线更新。
-- 自建 OTA 服务器(`scripts/server/deploy_online_services.sh`，156.239.225.105)：nginx :8090 双通道 + vsftpd chroot(pasv 公网回址、被动口 40000-40100) + 30 天 cron 清理；发布脚本 `scripts/upload_release.ps1`(SHA256/清单/增量补丁/scp 上架，-Channel neutral|brand)。域名 xiaomomoyun.cn 已解析、备案前走 IP:8090。
+- 在线服务(`OnlineServicesConfig`/`OnlineServicesDialog`/`ScanDataUploader`)：OTA 在线升级(清单按 exe 名判定 neutral/brand 通道、优先增量补丁、SHA256 校验、引导批处理静默安装并重启、流程中禁装)；扫描数据 FTP 上传(预设参数+scan-only 完成后按开关打包上传 `/data/<设备名>/`、失败留持久化队列重试、上传前 3 秒 TCP 联网预检不卡流程)；admin 远程数据浏览下载解压到 `Result/Remote/<设备>/`；主页版本号点击→「关于」在线更新。
+- 自建 OTA 服务器(`scripts/server/deploy_online_services.sh`，156.239.225.105)：nginx :8090 双通道 + vsftpd chroot + 30 天清理；发布脚本 `scripts/upload_release.ps1`。
 
 ## 2026-07-07
 

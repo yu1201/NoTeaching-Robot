@@ -37,6 +37,10 @@ public:
         bool remoteBrowseAllowed = false,
         QWidget* parent = nullptr);
 
+protected:
+    // 关界面时若正在上传：弹「后台继续 / 停止并清理服务器半截文件」，由用户决定。
+    void closeEvent(QCloseEvent* event) override;
+
 private:
     void BuildUi();
     void LoadConfigToUi();
