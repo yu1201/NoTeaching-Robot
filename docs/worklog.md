@@ -7,6 +7,7 @@
 
 ## 2026-07-09
 
+- 发布 v2026.07.09.1002：OTA/上传服务器迁移到 103.217.203.52（三台实测出口带宽 156=0.8Mbps / 106=2.9Mbps / 103=32Mbps，103 最快约 40×，现场下载更新快很多）。客户端默认地址改用**域名** `xiaomomoyun.cn`（`OnlineServicesConfig` UpdateBaseUrl/FtpHost，不再写死 IP，以后换服务器只改 DNS 免重发版），DNS 已指向 103。103 部署同 156（nginx :8090 双通道 + vsftpd 两级账号、共享组 setgid、pasv 公网回址；SSH 端口 48890）。
 - 发布 v2026.07.09.1001：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过；中性+品牌两个安装包+增量补丁均上架各自 OTA 通道；GitHub Release 同步。署名 yu1201。
 - OTA 服务器实际部署上线(156.239.225.105，Ubuntu 22.04)：nginx :8090 双通道(neutral/brand)静态更新源 + vsftpd(chroot /srv/devicedata、pasv 公网回址修 NAT) + ufw + 30 天 cron 清理。(8080 被机上 qqbot 占用改用 8090。)
 - 在线更新 502 修复(关键)：客户端检查更新默认吃系统代理，现场装了代理软件时代理连不到自建服务器回 502。改 `OnlineServicesDialog` 的 `QNetworkAccessManager` 显式 `setProxy(QNetworkProxy::NoProxy)` 直连；FTP 上传走 WinINet `INTERNET_OPEN_TYPE_DIRECT` 本就不走代理。诊断实测:直连 200 / 经代理 502。
