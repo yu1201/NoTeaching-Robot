@@ -7,6 +7,7 @@
 
 ## 2026-07-09
 
+- 发布 v2026.07.09.1004：修复扫描数据 FTP 上传始终失败的 bug——`FtpClient` 构造函数不建立连接，而 `ScanDataUploader` 上传预检构造后未 `connect()` 就直接 `createRemoteDirRecursive` 建设备目录，`createRemoteDirRecursive` 首行 `if(!m_hFtpSession) return false` 立即失败，导致**每台设备**都传不上、服务器 `/data` 一直为空（与账号密码/网络无关；WinINet 级实测同机同凭据登录+建目录本可成）。修复：`createRemoteDirRecursive` 会话为空时先 `connectFtpServer()` + 新增公开 `connect()`；上传预检拆「登录/建目录」两步、失败原因分开报（现场可区分密码错 vs 无写权限）。另：管理页「在线服务」由独立弹窗改为嵌入式管理页（`OpenOnlineServicesDialog` 走 `PrepareEmbeddedPage`，`eventFilter` 纳入 Close 名单）。构建 `Release x64` 0 错误、WinINet 级 FTP 连接+建目录实测通过。署名 yu1201。
 - 发布 v2026.07.09.1003：客户端默认地址由域名改回 IP `103.217.203.52`。原因：域名 `xiaomomoyun.cn` 未 ICP 备案，国内对「未备案域名指向境内服务器」的 HTTP 请求按 Host 头拦截返回 403（Server: ADM/2.1.1，非 nginx；实测域名 8/8 全 403、IP 8/8 全 200，103 上无 WAF/宝塔——拦截在网络路径按 Host 头判、与端口无关），换 8090 端口也躲不掉。IP 直连不受影响。域名备案通过后可再切回域名享受免重发版。数据盘：103 的扫描数据目录 `/srv/devicedata/data` 已 bind 挂载到 110G 数据盘 `/www/devicedata`（fstab 持久化，FTP 上传实测落盘正确）。
 - 发布 v2026.07.09.1002：OTA/上传服务器迁移到 103.217.203.52（三台实测出口带宽 156=0.8Mbps / 106=2.9Mbps / 103=32Mbps，103 最快约 40×，现场下载更新快很多）。客户端默认地址改用**域名** `xiaomomoyun.cn`（`OnlineServicesConfig` UpdateBaseUrl/FtpHost，不再写死 IP，以后换服务器只改 DNS 免重发版），DNS 已指向 103。103 部署同 156（nginx :8090 双通道 + vsftpd 两级账号、共享组 setgid、pasv 公网回址；SSH 端口 48890）。
 - 发布 v2026.07.09.1001：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过；中性+品牌两个安装包+增量补丁均上架各自 OTA 通道；GitHub Release 同步。署名 yu1201。

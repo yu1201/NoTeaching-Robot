@@ -37,6 +37,10 @@ public:
         const std::string& ftpPwd = "STEP_ROBOT_SRH"
        );
 
+    // 显式建立（或复用）FTP 连接：成功后会话可被后续 createRemoteDirRecursive/上传复用。
+    // 供上传预检先行探测登录，从而把「登录失败」与「建目录失败」分开报错。
+    bool connect();
+
     // 新增：路径处理
     std::string getParentDir(const std::string& filePath);
     bool createLocalDirRecursive(const std::string& localDir);
