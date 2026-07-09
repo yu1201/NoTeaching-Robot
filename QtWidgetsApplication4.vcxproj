@@ -161,6 +161,7 @@
     <ClCompile Include="src\WeldSeamCompDialog.cpp" />
     <ClCompile Include="src\ResultArchiveDialog.cpp" />
     <ClCompile Include="src\OnlineServicesDialog.cpp" />
+    <ClCompile Include="src\ProcessLoopTestDialog.cpp" />
     <ClCompile Include="src\ScanDataUploader.cpp" />
     <ClCompile Include="src\WeldProcessFile.cpp" />
     <ClCompile Include="src\WeldProcessDialog.cpp" />
@@ -187,6 +188,7 @@
     <QtMoc Include="include\VirtualWeldTestDialog.h" />
     <QtMoc Include="include\ResultArchiveDialog.h" />
     <QtMoc Include="include\OnlineServicesDialog.h" />
+    <QtMoc Include="include\ProcessLoopTestDialog.h" />
     <QtMoc Include="include\ScanDataUploader.h" />
     <ClCompile Include="src\Const.cpp" />
     <ClCompile Include="src\QtWidgetsApplication4.cpp" />

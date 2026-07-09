@@ -3,6 +3,7 @@
 #include <QtWidgets/QMainWindow>
 #include "ui_QtWidgetsApplication4.h"
 #include "ContralUnit.h"
+#include "ProcessLoopTestDialog.h"   // 流程循环测试：设置/默认结构体 + 回调类型
 
 #include <atomic>
 #include <QDateTime>
@@ -147,6 +148,7 @@ private:
     void OpenWorkpieceMeshPage();
     void OpenModelAlignmentPage();
     void OpenVirtualWeldTestPage();
+    void OpenProcessLoopTestPage();
     void OpenConfigDatabaseViewerDialog();
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
@@ -203,6 +205,14 @@ private:
         double scanSpeedOverrideMmPerMin = 0.0,
         double cameraTimeOffsetOverrideMs = std::numeric_limits<double>::quiet_NaN());
 
+    // 流程测试页后端：读某单元先测后焊预设默认（界面预填用）+ 在后台线程循环跑仅扫描流程。
+    ProcessLoopTestDefaults LoadProcessLoopTestDefaults(int unitIndex);
+    void RunProcessLoopTest(
+        const ProcessLoopTestSettings& settings,
+        std::atomic<bool>* stopFlag,
+        const ProcessLoopTestDialog::ProgressCallback& progress,
+        const ProcessLoopTestDialog::LogCallback& log);
+
     Ui::QtWidgetsApplication4Class ui;
     struct CameraRuntime;
     ContralUnit* m_pContralUnit;
@@ -220,6 +230,7 @@ private:
     QWidget* m_pConfigDatabaseViewerPage;
     QWidget* m_pOnlineServicesPage = nullptr;              // 「在线服务」嵌入管理栈的页（非独立弹窗）
     bool m_bOnlineServicesPageRemoteAllowed = false;      // 缓存页构建时的 admin 权限，权限变化则重建
+    QWidget* m_pProcessLoopTestPage = nullptr;            // 「流程测试」嵌入管理栈的页
     LaserWeldFilterDialog* m_pPrecisePointCloudProcessingPage;
     WorkpieceMeshViewerDialog* m_pWorkpieceMeshPage = nullptr;
     ModelAlignmentDialog* m_pModelAlignmentPage = nullptr;
