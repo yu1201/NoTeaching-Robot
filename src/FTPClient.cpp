@@ -98,6 +98,10 @@ void FtpClient::setMessageBoxesEnabled(bool enabled) {
     m_messageBoxesEnabled = enabled;
 }
 
+bool FtpClient::connect() {
+    return connectFtpServer();
+}
+
 std::wstring FtpClient::s2w(const std::string& str) {
     return std::wstring(str.begin(), str.end());
 }
@@ -123,7 +127,10 @@ bool FtpClient::createLocalDirRecursive(const std::string& localDir) {
 
 // 递归创建远程目录（上传用）
 bool FtpClient::createRemoteDirRecursive(const std::string& remoteDir) {
-    if (!m_hFtpSession || remoteDir.empty()) return false;
+    if (remoteDir.empty()) return false;
+    // 会话未建立时先连接：本方法可被外部（如扫描数据上传的建目录预检）在构造后直接调用，
+    // 而构造函数并不连接。内部递归及 uploadFile* 调用时会话已就绪，connectFtpServer 会复用不重连。
+    if (!m_hFtpSession && !connectFtpServer()) return false;
 
     wchar_t oldDir[MAX_PATH] = { 0 };
     DWORD bufSize = MAX_PATH; // 改为 DWORD

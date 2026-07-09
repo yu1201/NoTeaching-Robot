@@ -186,7 +186,20 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 	ftp.setMessageBoxesEnabled(false);  // 后台上传不弹窗，结果走状态信号
 
 	const std::string remoteBase = "/data/" + deviceName.toStdString();
-	bool remoteDirReady = ftp.createRemoteDirRecursive(remoteBase);
+	// 预检分两步、失败原因分开报：先登录（账号/密码/网络），再建设备目录（写权限）。
+	// 注意：FtpClient 构造函数不建立连接，必须先 connect() 再 createRemoteDirRecursive()。
+	QString preflightError;
+	if (!ftp.connect())
+	{
+		preflightError = QStringLiteral("FTP 登录失败：账号或密码不正确、或服务器拒绝连接（账号「%1」，服务器 %2:%3）")
+			.arg(QString::fromStdString(user), QString::fromStdString(host)).arg(port);
+	}
+	else if (!ftp.createRemoteDirRecursive(remoteBase))
+	{
+		preflightError = QStringLiteral("FTP 建设备目录失败：账号「%1」可能没有写权限（目录 %2）")
+			.arg(QString::fromStdString(user), QString::fromStdString(remoteBase));
+	}
+	bool remoteDirReady = preflightError.isEmpty();
 
 	const int totalItems = static_cast<int>(items.size());
 	int doneItems = 0;
@@ -204,8 +217,8 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 		}
 		if (!remoteDirReady)
 		{
-			QMetaObject::invokeMethod(this, [this, caseDir]()
-				{ OnItemFinished(caseDir, false, QStringLiteral("FTP 连接或远端目录创建失败")); }, Qt::QueuedConnection);
+			QMetaObject::invokeMethod(this, [this, caseDir, preflightError]()
+				{ OnItemFinished(caseDir, false, preflightError); }, Qt::QueuedConnection);
 			continue;
 		}
 
@@ -296,6 +309,10 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 		if (!uploaded)
 		{
 			remoteDirReady = false;  // 连接大概率已断，本轮剩余项直接留待重试
+			if (preflightError.isEmpty())
+			{
+				preflightError = QStringLiteral("FTP 连接中断，本轮剩余项留待下次重试");
+			}
 		}
 	}
 

@@ -218,6 +218,8 @@ private:
     QWidget* m_pControlUnitManagementPage;
     QWidget* m_pFtpJobManagementPage;
     QWidget* m_pConfigDatabaseViewerPage;
+    QWidget* m_pOnlineServicesPage = nullptr;              // 「在线服务」嵌入管理栈的页（非独立弹窗）
+    bool m_bOnlineServicesPageRemoteAllowed = false;      // 缓存页构建时的 admin 权限，权限变化则重建
     LaserWeldFilterDialog* m_pPrecisePointCloudProcessingPage;
     WorkpieceMeshViewerDialog* m_pWorkpieceMeshPage = nullptr;
     ModelAlignmentDialog* m_pModelAlignmentPage = nullptr;

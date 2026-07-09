@@ -13,9 +13,15 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.07.09.1003`
+- 当前源码版本：`v2026.07.09.1004`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.07.09.1003.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.07.09.1004.exe`，不用自己编译源码。
+
+## 2026-07-09 更新（v2026.07.09.1004）
+
+- 修复扫描数据 FTP 上传始终失败的 bug：`FtpClient` 构造函数不建立连接，而上传预检直接调 `createRemoteDirRecursive` 建设备目录、未先连接，会话为空第一行即返回失败，导致每台设备都传不上、服务器 `/data` 一直为空（与账号密码/网络无关）。现改为建目录前先连接，并把上传预检拆「登录/建目录」两步、失败原因分开报，便于现场定位。
+- 管理页「在线服务」由独立弹窗改为嵌入式管理页（嵌入管理栈，与账号管理等一致）。
+- 构建验证：`Release x64` 编译通过（0 错误）；WinINet 级 FTP 连接+建目录实测通过；安装包 `NoTeaching-Robot-Setup-v2026.07.09.1004.exe`。
 
 ## 2026-07-09 更新（v2026.07.09.1003）
 

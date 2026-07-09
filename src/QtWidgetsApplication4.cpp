@@ -9057,6 +9057,7 @@ bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 			|| watched == m_pControlUnitManagementPage
 			|| watched == m_pFtpJobManagementPage
 			|| watched == m_pConfigDatabaseViewerPage
+			|| watched == m_pOnlineServicesPage
 			|| watched == m_pPrecisePointCloudProcessingPage)
 		{
 			QWidget* page = qobject_cast<QWidget*>(watched);
@@ -14032,22 +14033,45 @@ void QtWidgetsApplication4::OpenOnlineServicesDialog()
 	{
 		return;
 	}
-	if (OnlineServicesDialog* existing = findChild<OnlineServicesDialog*>(QStringLiteral("OnlineServicesDialogFull")))
+
+	const bool remoteAllowed = RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);  // admin 才见「远程数据」区
+
+	// 无管理栈（异常兜底）时退回独立模态窗口；正常路径嵌入管理栈，作为管理页显示（不再单独弹窗）。
+	if (m_pManagementStack == nullptr)
 	{
-		existing->show();
-		existing->raise();
-		existing->activateWindow();
+		OnlineServicesDialog dialog(
+			EnsureScanDataUploader(),
+			[this]() { return HasRunningMeasureThenWeldFlow(); },
+			false,
+			remoteAllowed,
+			this);
+		dialog.exec();
 		return;
 	}
-	auto* dlg = new OnlineServicesDialog(
+
+	// 账号权限变化（admin 登出后换低权限账号再进）需重建，避免「远程数据」区串给非 admin。
+	if (m_pOnlineServicesPage != nullptr && m_bOnlineServicesPageRemoteAllowed != remoteAllowed)
+	{
+		m_pManagementStack->removeWidget(m_pOnlineServicesPage);
+		m_pOnlineServicesPage->deleteLater();
+		m_pOnlineServicesPage = nullptr;
+	}
+
+	if (m_pOnlineServicesPage != nullptr)
+	{
+		ShowManagementEmbeddedPage(m_pOnlineServicesPage);
+		return;
+	}
+
+	m_pOnlineServicesPage = new OnlineServicesDialog(
 		EnsureScanDataUploader(),
 		[this]() { return HasRunningMeasureThenWeldFlow(); },
 		false,
-		RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin),  // admin 才见「远程数据」区
-		this);
-	dlg->setObjectName(QStringLiteral("OnlineServicesDialogFull"));
-	dlg->setAttribute(Qt::WA_DeleteOnClose);
-	dlg->show();
+		remoteAllowed,
+		m_pManagementStack);
+	m_bOnlineServicesPageRemoteAllowed = remoteAllowed;
+	PrepareEmbeddedPage(m_pOnlineServicesPage, m_pManagementStack);
+	ShowManagementEmbeddedPage(m_pOnlineServicesPage);
 }
 
 void QtWidgetsApplication4::OpenCameraParamDialog()

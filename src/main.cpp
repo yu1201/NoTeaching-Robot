@@ -69,7 +69,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     SetWorkingDirectoryToProjectRoot();  // 提前：使本地 branding/ 品牌覆盖可被定位（不依赖后续步骤）
     app.setApplicationName(BrandingConfig::ApplicationName());
-    app.setApplicationVersion("2026.07.09.1003");
+    app.setApplicationVersion("2026.07.09.1004");
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();
