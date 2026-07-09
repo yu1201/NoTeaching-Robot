@@ -30,6 +30,7 @@ public slots:
     void startClient(const QString& serverIP, int serverPort, int pollIntervalMs = 10);
     void stopClient();
     void setImageTransportEnabled(bool enabled);  // 预览页「图像传输」开关：即时连/断图像口(50001)
+    void setFrameBufferCount(int count);  // 预览页「接收缓冲帧数」：写缓存共享值，已连接时立即下发 SDK
 
 signals:
     // 与 ScanCameraTcpClientWorker::diagnosticChanged 同构，复用现有预览诊断显示：

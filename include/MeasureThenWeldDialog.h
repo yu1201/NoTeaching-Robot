@@ -6,6 +6,7 @@
 #include <QDialog>
 #include <QString>
 
+#include <atomic>
 #include <functional>
 #include <vector>
 
@@ -96,6 +97,8 @@ public:
     MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraCacheFunc cameraCacheForUnit, QWidget* parent = nullptr);
     bool IsRunning() const;
     void ReloadSelectors();
+    // 流程成功后回调（UI 线程，参数=Result 案例目录），主窗口接在线上传。
+    void SetScanDataUploadHook(std::function<void(const QString&)> hook);
 
 signals:
     void FlowStepChanged(const QString& text);
@@ -142,6 +145,8 @@ private:
     // 每个危险动作前弹窗确认；取消会退出当前流程。
     bool ConfirmContinue(const QString& actionName);
     bool ShowCheckpointDialog(const QString& title, const QString& detail);
+    // 流程线程安全：从姿态文件路径推导案例目录，经队列回 UI 线程调用上传钩子。
+    void NotifyFlowResultForUpload(const QString& poseFilePath);
 
     // 预设参数流程入口和整体大线扫粗定位占位入口。
     void RunPresetParamFlow();
@@ -192,7 +197,13 @@ private:
     int m_pauseProgramLine = -1;
     T_ROBOT_COORS m_pausePose{};
     bool m_hasPausePose = false;
+    // 扫描数据在线上传钩子：流程成功后携案例目录回 UI 线程调用（主窗口接 ScanDataUploader）。
+    std::function<void(const QString&)> m_scanDataUploadHook;
     QCheckBox* m_pActualWeldCheck = nullptr;
+    // 流程免确认：勾选后跳过中间步骤/信息类确认弹窗；首次运动、进入焊接、
+    // 翻转风险告警、历史目录核对始终弹出。状态缓存在原子成员供流程线程读取。
+    QCheckBox* m_pSkipConfirmCheck = nullptr;
+    std::atomic<bool> m_bSkipFlowConfirms{ false };
     QLabel* m_pProgressLabel = nullptr;
     QProgressBar* m_pProgressBar = nullptr;
     QTimer* m_pProgressAnimationTimer = nullptr;

@@ -58,6 +58,10 @@ public:
     // 用于排查/规避图像流挤占相机端资源导致的点云跳帧。默认开。
     void SetImageTransportEnabled(bool enabled);
     bool ImageTransportEnabled() const;
+    // SKJ 接收 FIFO 深度（v1.2.0 SetFrameBufferCount，2~16）：UI 改动写这里，
+    // worker 连接时读取；已连接的 worker 另经 setFrameBufferCount 槽立即下发。默认 8。
+    void SetSkjFrameBufferCount(int count);
+    int SkjFrameBufferCount() const;
     void SetLatestImage(const QImage& image, qint64 imageTimestamp);
     QImage LatestImage(qint64* imageTimestamp = nullptr) const;
 
@@ -85,6 +89,7 @@ private:
     int m_imageCaptureFrameStride = 1;
     bool m_liveImageEnabled = false;
     bool m_imageTransportEnabled = true;
+    int m_skjFrameBufferCount = 8;
     QImage m_latestImage;
     qint64 m_latestImageTimestamp = 0;
     std::uint64_t m_nextSequence = 0;

@@ -1,9 +1,18 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-07-07`
+- 人工整理日期：`2026-07-08`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-07-08
+
+- 发布 v2026.07.08.1704：`Debug x64` + `Release x64` 编译通过(0 错误)；两段式打包通过。署名 yu1201。
+- 启动流程健壮性修复(`StepRobotDriver.cpp`)：启动前查机器人状态——暂停态(ePause)程序不响应 STOP，改为跳过停止直接 `ProgramKillCmd` 卸载再启动；切自动失败时 `close()`+`InitSocket` 重连后重试。
+- 「流程免确认」勾选框：`ConfirmContinue`/`ShowCheckpointDialog` 按文案白名单放行，跳过中间步骤与信息类确认，保留首次运动/进入焊接/翻转风险告警/跳过扫描目录核对。状态存 `MeasureThenWeld/Runtime.SkipFlowConfirms`(默认关)。
+- 相机接收缓冲帧数界面可调：坡口相机预览滑条(2~16，默认 8)，去抖+同值去重提交；扫描运行中只写配置+cache 不下发 SDK(改缓冲会清空未取帧)。经对抗审查修复 3 问题。
+- 在线服务(`OnlineServicesConfig`/`OnlineServicesDialog`/`ScanDataUploader`)：OTA 在线升级(清单按 exe 名判定 neutral/brand 通道、优先增量补丁、SHA256 校验、引导批处理静默安装并重启、流程中禁装)；扫描数据 FTP 上传(预设参数+scan-only 完成后按开关打包上传 `/data/<设备名>/`、失败留持久化队列重试、上传前 3 秒 TCP 联网预检不卡流程)；admin 远程数据浏览下载解压到 `Result/Remote/<设备>/`；主页版本号点击→「关于」在线更新。
+- 自建 OTA 服务器(`scripts/server/deploy_online_services.sh`，156.239.225.105)：nginx :8090 双通道 + vsftpd chroot + 30 天清理；发布脚本 `scripts/upload_release.ps1`。
 
 ## 2026-07-07
 

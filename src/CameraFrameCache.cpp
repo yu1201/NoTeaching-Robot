@@ -117,6 +117,18 @@ bool CameraFrameCache::ImageTransportEnabled() const
     return m_imageTransportEnabled;
 }
 
+void CameraFrameCache::SetSkjFrameBufferCount(int count)
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    m_skjFrameBufferCount = count < 2 ? 2 : (count > 16 ? 16 : count);
+}
+
+int CameraFrameCache::SkjFrameBufferCount() const
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    return m_skjFrameBufferCount;
+}
+
 void CameraFrameCache::SetLatestImage(const QImage& image, qint64 imageTimestamp)
 {
     std::lock_guard<std::mutex> locker(m_mutex);
