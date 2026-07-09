@@ -162,7 +162,9 @@ $ignoredReleaseExtensions = @(".lib", ".exp", ".pdb", ".obj", ".iobj", ".ipdb", 
 # The redistributable is downloaded into Prerequisites\ below (the only copy the
 # installer actually runs); a stray copy manually dropped into x64\Release once
 # leaked a duplicate 24 MB vc_redist into the package root.
-$ignoredReleaseFileNames = @("vc_redist.x64.exe", "vc_redist.x86.exe")
+# 同一 x64\Release 目录反复构建品牌+中性两版会互相留下残留 exe，不排除会让品牌包混入
+# 中性 exe。品牌分支产出 HK-Pathlynx-CORPLA.exe，这里排除中性主程序 QtWidgetsApplication4.exe。
+$ignoredReleaseFileNames = @("vc_redist.x64.exe", "vc_redist.x86.exe", "qtwidgetsapplication4.exe")
 Get-ChildItem -LiteralPath $buildDir -File | Where-Object {
     $ignoredReleaseExtensions -notcontains $_.Extension.ToLowerInvariant() -and
     $ignoredReleaseFileNames -notcontains $_.Name.ToLowerInvariant()

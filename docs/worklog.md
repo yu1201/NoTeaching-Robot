@@ -1,9 +1,18 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-07-08`
+- 人工整理日期：`2026-07-09`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-07-09（在线服务上线收尾）
+
+- OTA 服务器实际部署上线：`deploy_online_services.sh` 部署到 156.239.225.105（Ubuntu 22.04），nginx :8090 双通道(neutral/brand)静态更新源 + vsftpd(账号 devicedata、chroot /srv/devicedata、pasv 公网回址修 NAT) + ufw + 30 天清理。全链路外网实测通过：拉 latest.json、下载安装包 HEAD 200、FTP 登录上传落盘 /data/<设备名>/。域名 xiaomomoyun.cn 已解析到该 IP。
+- 通道判据修正(关键)：初版按 exe 名判 neutral/brand 是错的——品牌与中性构建产出的主程序 exe **同名** `QtWidgetsApplication4.exe`(品牌靠 vcxproj TargetName 改为 `HK-Pathlynx-CORPLA.exe`、iss MyAppExeName 同步)、无法据此区分。改用 `BrandingConfig::IsActive()`(品牌包随包分发 `branding/branding.ini`，装机后为真)，品牌设备正确走 brand 通道、不会误装中性覆盖。
+- 打包残留 exe 修复：同一 `x64\Release` 目录反复构建品牌+中性两版会互留残留 exe，`build_release_package.ps1` 拷贝时未排除，导致品牌安装包混入中性 `QtWidgetsApplication4.exe`(反之亦然)。修复：拷贝排除列表加入「另一套命名的 exe」(品牌分支排除中性名、main 排除品牌名)；两分支各自提交。修复后品牌包只含 `HK-Pathlynx-CORPLA.exe`、中性包只含 `QtWidgetsApplication4.exe`。
+- 扫描数据上传扩到「只扫描」(scan-only CLI)：`--measure-then-weld-scan-only-repeat` 每轮成功后按开关入队上传(savedPath 为空时按 Result/<机器人>/ 最新案例目录定位)；CLI 退出前限时等上传收尾，未传完留持久化队列下次启动续传。
+- 品牌分支 hk-pathlynx-corpla 合并 main(v2026.07.08.1704) 并发布：解 iss 冲突(品牌名+1704)、补 merge 丢失的 vcxproj 在线服务注册；两通道安装包+增量补丁均已上架 OTA。main 与品牌分支均已推送 GitHub。
+- 发版流程固化：以后每版**中性+品牌一次发齐**并各自上架对应 OTA 通道，避免品牌包漏发(历史上 06.30/07.06/07.07 曾只发中性)。
 
 ## 2026-07-08
 
@@ -11,8 +20,8 @@
 - 启动流程健壮性修复(`StepRobotDriver.cpp`)：启动前查机器人状态——暂停态(ePause)程序不响应 STOP，改为跳过停止直接 `ProgramKillCmd` 卸载再启动；切自动失败时 `close()`+`InitSocket` 重连后重试。
 - 「流程免确认」勾选框：`ConfirmContinue`/`ShowCheckpointDialog` 按文案白名单放行，跳过中间步骤与信息类确认，保留首次运动/进入焊接/翻转风险告警/跳过扫描目录核对。状态存 `MeasureThenWeld/Runtime.SkipFlowConfirms`(默认关)。
 - 相机接收缓冲帧数界面可调：坡口相机预览滑条(2~16，默认 8)，去抖+同值去重提交；扫描运行中只写配置+cache 不下发 SDK(改缓冲会清空未取帧)。经对抗审查修复 3 问题。
-- 在线服务(`OnlineServicesConfig`/`OnlineServicesDialog`/`ScanDataUploader`)：OTA 在线升级(清单按 exe 名判定 neutral/brand 通道、优先增量补丁、SHA256 校验、引导批处理静默安装并重启、流程中禁装)；扫描数据 FTP 上传(预设参数+scan-only 完成后按开关打包上传 `/data/<设备名>/`、失败留持久化队列重试、上传前 3 秒 TCP 联网预检不卡流程)；admin 远程数据浏览下载解压到 `Result/Remote/<设备>/`；主页版本号点击→「关于」在线更新。
-- 自建 OTA 服务器(`scripts/server/deploy_online_services.sh`，156.239.225.105)：nginx :8090 双通道 + vsftpd chroot + 30 天清理；发布脚本 `scripts/upload_release.ps1`。
+- 在线服务(`OnlineServicesConfig`/`OnlineServicesDialog`/`ScanDataUploader`)：OTA 在线升级(通道按 `BrandingConfig::IsActive` 判定 neutral/brand——品牌信息随 `branding/` 目录入包，装机后 IsActive=true 走 brand；**不用 exe 名判据**，因品牌/中性构建的主程序 exe 同名 `QtWidgetsApplication4.exe`、不可区分；优先增量补丁、SHA256 校验、引导批处理静默安装并重启、流程中禁装)；扫描数据 FTP 上传(预设参数+scan-only 完成后按开关打包上传 `/data/<设备名>/`、失败留持久化队列重试、上传前 3 秒 TCP 联网预检不卡流程)；admin 远程数据浏览下载解压到 `Result/Remote/<设备>/`；主页版本号点击→「关于」在线更新。
+- 自建 OTA 服务器(`scripts/server/deploy_online_services.sh`，156.239.225.105)：nginx :8090 双通道 + vsftpd chroot(pasv 公网回址、被动口 40000-40100) + 30 天 cron 清理；发布脚本 `scripts/upload_release.ps1`(SHA256/清单/增量补丁/scp 上架，-Channel neutral|brand)。域名 xiaomomoyun.cn 已解析、备案前走 IP:8090。
 
 ## 2026-07-07
 
