@@ -8,7 +8,9 @@
 #include "RobotDriverAdaptor.h"
 #include "RobotLog.h"
 #include "RobotMessage.h"
+#include "RobotOperationLease.h"
 #include "RobotPoseTransform.h"
+#include "STEPRobotDriver.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
 
@@ -45,7 +47,9 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <future>
 #include <limits>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -59,6 +63,10 @@ constexpr int kHandEyeAutoAbortValue = -1;
 constexpr double kHandEyeAutoMoveSpeedMmPerMin = 500.0;
 constexpr int kHandEyeAutoMoveDoneTimeoutMs = 180000;
 constexpr int kHandEyeAutoNoMotionTimeoutMs = 8000;
+constexpr int kHandEyeFanucDoneStartupGuardMs = 1200;
+constexpr int kHandEyeFanucDoneStableSamples = 4;
+constexpr int kHandEyeStepDoneFallbackGuardMs = 1000;
+constexpr int kHandEyeStepDoneStableSamples = 2;
 constexpr double kHandEyeAutoMoveDetectMm = 0.05;
 constexpr double kHandEyeAutoRotateDetectDeg = 0.05;
 constexpr double kHandEyeAutoArrivePositionToleranceMm = 2.0;
@@ -480,8 +488,13 @@ bool WaitGenericRobotDone(
     int pollIntervalMs,
     QString* error,
     const T_ROBOT_COORS* targetPose = nullptr,
-    const std::function<void(const QString&)>& progressLog = {})
+    const std::function<void(const QString&)>& progressLog = {},
+    bool* terminalVerifiedOut = nullptr)
 {
+    if (terminalVerifiedOut != nullptr)
+    {
+        *terminalVerifiedOut = false;
+    }
     if (driver == nullptr)
     {
         if (error != nullptr)
@@ -505,22 +518,58 @@ bool WaitGenericRobotDone(
     int stableDoneCount = 0;
     int lastState = -1;
     int lastLogSecond = -1;
+    const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(driver) != nullptr;
+    const auto failUnverified = [driver, error, terminalVerifiedOut](const QString& message) -> bool
+        {
+            QString finalMessage = message;
+            bool stopConfirmed = false;
+            if (!RobotOperationLease::IsCancellationRequested(driver))
+            {
+                stopConfirmed = RobotOperationLease::StopAndConfirmUnverifiedMotion(driver);
+                finalMessage += stopConfirmed
+                    ? QStringLiteral("；已自动安全停止并确认机器人终态。")
+                    : QStringLiteral("；自动安全停止未确认，已保持闭锁，请使用红色安全停止重试。");
+            }
+            if (terminalVerifiedOut != nullptr)
+            {
+                *terminalVerifiedOut = stopConfirmed;
+            }
+            if (error != nullptr)
+            {
+                *error = finalMessage;
+            }
+            return false;
+        };
 
     while (true)
     {
-        lastState = driver->CheckDone();
-        if (lastState < 0)
+        if (RobotOperationLease::IsCancellationRequested(driver))
         {
             if (error != nullptr)
             {
-                *error = QString("读取机器人运行状态失败，返回码=%1。").arg(lastState);
+                *error = "机器人硬件操作已被安全停止取消，未把停止态判作到位完成。";
             }
             return false;
+        }
+        lastState = driver->CheckDone();
+        if (lastState < 0)
+        {
+            return failUnverified(QString("读取机器人运行状态失败，返回码=%1。").arg(lastState));
         }
 
         const auto now = std::chrono::steady_clock::now();
         const int elapsedMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count());
-        if (lastState == 0)
+        const bool runningState = isStepDriver
+            ? (lastState == STEPROBOTSDK::eRun || lastState == STEPROBOTSDK::ePause)
+            : lastState == 0;
+        const bool trustedDoneState = isStepDriver
+            ? lastState == STEPROBOTSDK::eStop
+            : lastState > 0;
+        if (isStepDriver && !runningState && !trustedDoneState)
+        {
+            return failUnverified(QString("STEP机器人返回非运行/暂停/停止状态：%1。").arg(lastState));
+        }
+        if (runningState)
         {
             seenRunning = true;
             stableDoneCount = 0;
@@ -550,24 +599,37 @@ bool WaitGenericRobotDone(
                     .arg(FormatPoseSummary(lastPose)));
             }
 
-            if (hasStartPose
+            if ((!isStepDriver || lastState == STEPROBOTSDK::eRun)
+                && hasStartPose
                 && !movementSeen
                 && elapsedMs >= kHandEyeAutoNoMotionTimeoutMs)
             {
-                if (error != nullptr)
-                {
-                    *error = QString("机器人程序已进入运行态，但 %1 ms 内当前位置未变化。当前状态：%2")
-                        .arg(kHandEyeAutoNoMotionTimeoutMs)
-                        .arg(DecodeRobotMessageText(driver->GetRobotStatusText()));
-                }
-                return false;
+                return failUnverified(QString("机器人程序已进入运行态，但 %1 ms 内当前位置未变化。当前状态：%2")
+                    .arg(kHandEyeAutoNoMotionTimeoutMs)
+                    .arg(DecodeRobotMessageText(driver->GetRobotStatusText())));
             }
         }
-        else if (seenRunning || elapsedMs >= 1000)
+        const bool doneStartupGuardPassed = isStepDriver
+            ? (seenRunning || elapsedMs >= kHandEyeStepDoneFallbackGuardMs)
+            : elapsedMs >= kHandEyeFanucDoneStartupGuardMs;
+        if (!runningState && trustedDoneState && doneStartupGuardPassed)
         {
             ++stableDoneCount;
-            if (stableDoneCount >= 2)
+            const int requiredStableDoneSamples = isStepDriver
+                ? kHandEyeStepDoneStableSamples
+                : kHandEyeFanucDoneStableSamples;
+            if (stableDoneCount >= requiredStableDoneSamples)
             {
+                // 稳定终态先解除 motion pending；后续到位误差失败也不代表机器人仍在运动。
+                const bool markedCompleted = RobotOperationLease::MarkMotionCompleted(driver);
+                if (terminalVerifiedOut != nullptr)
+                {
+                    *terminalVerifiedOut = markedCompleted;
+                }
+                if (!markedCompleted)
+                {
+                    return failUnverified("机器人已稳定停止，但租约层未能登记运动完成。");
+                }
                 if (targetPose != nullptr)
                 {
                     const T_ROBOT_COORS finalPose = driver->GetCurrentPos();
@@ -614,13 +676,9 @@ bool WaitGenericRobotDone(
 
         if (elapsedMs >= timeoutMs)
         {
-            if (error != nullptr)
-            {
-                *error = QString("等待机器人到位超时，最后状态=%1，当前状态：%2")
-                    .arg(lastState)
-                    .arg(DecodeRobotMessageText(driver->GetRobotStatusText()));
-            }
-            return false;
+            return failUnverified(QString("等待机器人到位超时，最后状态=%1，当前状态：%2")
+                .arg(lastState)
+                .arg(DecodeRobotMessageText(driver->GetRobotStatusText())));
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));
@@ -757,15 +815,15 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     ConfigureResponsiveScrollArea(scrollArea);
     scrollArea->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
-    QWidget* scrollContent = new QWidget(scrollArea);
-    scrollContent->setObjectName("HandEyeCalibrationScrollContent");
-    scrollContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    m_pScrollContent = new QWidget(scrollArea);
+    m_pScrollContent->setObjectName("HandEyeCalibrationScrollContent");
+    m_pScrollContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
 
-    QVBoxLayout* rootLayout = new QVBoxLayout(scrollContent);
+    QVBoxLayout* rootLayout = new QVBoxLayout(m_pScrollContent);
     rootLayout->setContentsMargins(12, 12, 12, 12);
     rootLayout->setSpacing(8);
 
-    scrollArea->setWidget(scrollContent);
+    scrollArea->setWidget(m_pScrollContent);
     windowLayout->addWidget(scrollArea, 1);
 
     QLabel* titleLabel = new QLabel(QString("手眼标定 - %1 / %2").arg(robotName, cameraSection));
@@ -996,7 +1054,11 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     QPushButton* reloadBtn = new QPushButton("重新读取");
     QPushButton* saveBtn = new QPushButton("保存采样数据");
     QPushButton* computeBtn = new QPushButton("计算矩阵并写入");
-    QPushButton* testBtn = new QPushButton("手眼参数检测");
+    m_pTestHandEyeBtn = new QPushButton("手眼参数检测");
+    m_pMoveToLastTestPointBtn = new QPushButton("运动到最近检测点");
+    m_pReturnToLastTestPoseBtn = new QPushButton("退回检测起点");
+    m_pMoveToLastTestPointBtn->setEnabled(false);
+    m_pReturnToLastTestPoseBtn->setEnabled(false);
     QPushButton* timestampCheckBtn = new QPushButton("相机时间戳检测");
     QPushButton* matrixBtn = new QPushButton("打开矩阵参数");
     QPushButton* closeBtn = new QPushButton("关闭");
@@ -1006,11 +1068,34 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     buttonLayout->addWidget(reloadBtn);
     buttonLayout->addWidget(saveBtn);
     buttonLayout->addWidget(computeBtn);
-    buttonLayout->addWidget(testBtn);
+    buttonLayout->addWidget(m_pTestHandEyeBtn);
+    buttonLayout->addWidget(m_pMoveToLastTestPointBtn);
+    buttonLayout->addWidget(m_pReturnToLastTestPoseBtn);
     buttonLayout->addWidget(timestampCheckBtn);
     buttonLayout->addWidget(matrixBtn);
     buttonLayout->addWidget(closeBtn);
     rootLayout->addLayout(buttonLayout);
+
+    // 手眼窗口以 exec() 模态运行，主页急停不可点击；安全停止必须固定在滚动区之外。
+    QWidget* safetyBar = new QWidget(this);
+    QHBoxLayout* safetyLayout = new QHBoxLayout(safetyBar);
+    safetyLayout->setContentsMargins(12, 8, 12, 10);
+    safetyLayout->setSpacing(10);
+    QLabel* safetyHint = new QLabel("本窗口机器人任务期间如有异常，请立即使用右侧安全停止。停止失败会保持全局闭锁。", safetyBar);
+    safetyHint->setWordWrap(true);
+    safetyHint->setStyleSheet("color: #FFD4D4; font-weight: bold;");
+    m_pSafetyStopBtn = new QPushButton("安全停止本窗口机器人任务", safetyBar);
+    m_pSafetyStopBtn->setMinimumHeight(56);
+    m_pSafetyStopBtn->setMinimumWidth(330);
+    m_pSafetyStopBtn->setStyleSheet(
+        "QPushButton { background: #B71C1C; color: white; border: 2px solid #FF8A80; "
+        "border-radius: 10px; padding: 10px 20px; font-size: 17px; font-weight: bold; }"
+        "QPushButton:hover { background: #D32F2F; border-color: #FFCDD2; }"
+        "QPushButton:pressed { background: #8E0000; }"
+        "QPushButton:disabled { background: #5B2A2A; color: #D5BABA; border-color: #805050; }");
+    safetyLayout->addWidget(safetyHint, 1);
+    safetyLayout->addWidget(m_pSafetyStopBtn, 0);
+    windowLayout->addWidget(safetyBar, 0);
 
     connect(tcpCaptureBtn, &QPushButton::clicked, this, [this]() { CaptureTcpPoint(); });
     connect(m_pUploadAutoProgramBtn, &QPushButton::clicked, this, [this]() { UploadAutoCalibrationProgram(); });
@@ -1018,16 +1103,51 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     connect(reloadBtn, &QPushButton::clicked, this, [this]() { LoadConfig(); });
     connect(saveBtn, &QPushButton::clicked, this, [this]() { SaveConfig(); });
     connect(computeBtn, &QPushButton::clicked, this, [this]() { ComputeAndSaveMatrix(); });
-    connect(testBtn, &QPushButton::clicked, this, [this]() { TestHandEyeMatrix(); });
+    connect(m_pTestHandEyeBtn, &QPushButton::clicked, this, [this]() { TestHandEyeMatrix(); });
+    connect(m_pMoveToLastTestPointBtn, &QPushButton::clicked, this, [this]()
+        {
+            if (m_hasLastTestMoveTarget)
+            {
+                StartRobotPoseMove(
+                    m_lastTestMoveTarget,
+                    QStringLiteral("运动到激光点"),
+                    true,
+                    m_lastTestReturnPose);
+            }
+        });
+    connect(m_pReturnToLastTestPoseBtn, &QPushButton::clicked, this, [this]()
+        {
+            if (m_hasLastTestReturnPose)
+            {
+                StartRobotPoseMove(
+                    m_lastTestReturnPose,
+                    QStringLiteral("退回扫描位置"),
+                    false,
+                    T_ROBOT_COORS());
+            }
+        });
     connect(timestampCheckBtn, &QPushButton::clicked, this, [this]() { CheckCameraTimestampIntervals(); });
     connect(matrixBtn, &QPushButton::clicked, this, [this]() { OpenMatrixDialog(); });
     connect(closeBtn, &QPushButton::clicked, this, &QDialog::close);
+    connect(m_pSafetyStopBtn, &QPushButton::clicked, this, [this]() { RequestSafetyStop(); });
 
     LoadConfig();
 }
 
 void HandEyeCalibrationDialog::closeEvent(QCloseEvent* event)
 {
+    if (m_bAutoCalibrationRunning.load()
+        || m_bRobotTestRunning.load()
+        || m_bSafetyStopRunning.load()
+        || m_pSafetyStopDriver != nullptr)
+    {
+        const QString message = QStringLiteral(
+            "关闭请求已忽略：本窗口机器人任务或安全停止仍在执行；请使用底部红色安全停止并等待结果。");
+        AppendLog(message);
+        SetAutoCalibrationStateText(message);
+        event->ignore();
+        return;
+    }
     if (!HasUnsavedChanges())
     {
         QDialog::closeEvent(event);
@@ -1042,6 +1162,174 @@ void HandEyeCalibrationDialog::closeEvent(QCloseEvent* event)
     {
         event->ignore();
     }
+}
+
+void HandEyeCalibrationDialog::RequestSafetyStop()
+{
+    QString error;
+    RobotDriverAdaptor* driver = m_pSafetyStopDriver;
+    if (driver == nullptr)
+    {
+        driver = CurrentDriver(&error);
+    }
+    if (driver == nullptr)
+    {
+        const QString message = "安全停止失败：" + error;
+        AppendLog(message);
+        SetAutoCalibrationStateText(message);
+        return;
+    }
+
+    const bool registryPending = RobotOperationLease::MotionCompletionPending(driver)
+        || RobotOperationLease::IsCancellationRequested(driver);
+    if (!m_bAutoCalibrationRunning.load()
+        && !m_bRobotTestRunning.load()
+        && m_pSafetyStopDriver == nullptr
+        && !registryPending)
+    {
+        QMessageBox::information(this, "安全停止", "当前没有本窗口启动的活动机器人任务。");
+        return;
+    }
+    if (m_pSafetyStopDriver == nullptr && registryPending)
+    {
+        m_pSafetyStopDriver = driver;
+        m_activeRobotTaskOwner = RobotOperationLease::CurrentOwner(driver);
+        if (m_activeRobotTaskOwner.isEmpty())
+        {
+            m_activeRobotTaskOwner = QStringLiteral("本窗口终态未确认任务");
+        }
+    }
+    m_bSafetyStopRequested.store(true);
+    if (m_bSafetyStopRunning.exchange(true))
+    {
+        return;
+    }
+    RefreshBusyInteractionState();
+
+    // 非模态采集确认不能挡住停机；拒绝后后台流程会观察 cancellation 并退出。
+    if (m_pCaptureConfirmation != nullptr)
+    {
+        m_pCaptureConfirmation->reject();
+    }
+
+    const QString registryOwner = RobotOperationLease::CurrentOwner(driver);
+    if (m_pSafetyStopDriver != driver
+        && (m_activeRobotTaskOwner.isEmpty() || registryOwner != m_activeRobotTaskOwner))
+    {
+        m_bSafetyStopRunning.store(false);
+        m_bSafetyStopRequested.store(false);
+        RefreshBusyInteractionState();
+        SetAutoCalibrationStateText("当前没有本窗口仍持有租约的活动机器人任务。");
+        return;
+    }
+
+    QString cancelledOwner;
+    const bool cancellationRegistered = RobotOperationLease::RequestCancellation(driver, &cancelledOwner);
+
+    if (!cancellationRegistered)
+    {
+        m_bSafetyStopRunning.store(false);
+        m_bSafetyStopRequested.store(false);
+        const bool staleTarget = RobotOperationLease::CurrentOwner(driver).isEmpty()
+            && !RobotOperationLease::MotionCompletionPending(driver)
+            && !RobotOperationLease::IsCancellationRequested(driver);
+        if (staleTarget && m_pSafetyStopDriver == driver)
+        {
+            m_pSafetyStopDriver = nullptr;
+            m_activeRobotTaskOwner.clear();
+        }
+        RefreshBusyInteractionState();
+        const QString message = staleTarget
+            ? QStringLiteral("本窗口机器人任务已无活动租约或未确认终态，已清理过期安全目标。")
+            : QStringLiteral("当前没有本窗口仍持有租约的活动机器人任务，未发送停止命令。");
+        AppendLog(message);
+        SetAutoCalibrationStateText(message);
+        return;
+    }
+    m_pSafetyStopDriver = driver;
+
+    if (m_pSafetyStopBtn != nullptr)
+    {
+        m_pSafetyStopBtn->setEnabled(false);
+        m_pSafetyStopBtn->setText("正在请求机器人安全停止...");
+    }
+    AppendLog(QString("已锁存安全停止请求，当前流程=%1；正在等待机器人侧真实终止确认。")
+        .arg(cancelledOwner.isEmpty() ? QStringLiteral("未知或上次未确认流程") : cancelledOwner));
+
+    QPointer<HandEyeCalibrationDialog> self(this);
+    std::thread([self, driver, cancelledOwner]()
+        {
+            driver->ClearLastRobotError();
+            bool stopOk = false;
+            QString implementation;
+            if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(driver))
+            {
+                implementation = QStringLiteral("FANUC Prog_stop_Py");
+                stopOk = fanucDriver->Prog_stop_Py();
+            }
+            else if (STEPRobotCtrl* stepDriver = dynamic_cast<STEPRobotCtrl*>(driver))
+            {
+                implementation = QStringLiteral("STEP AbortCurrentProgram");
+                stopOk = stepDriver->AbortCurrentProgram();
+            }
+            else
+            {
+                implementation = QStringLiteral("未支持的机器人驱动");
+                driver->SetLastRobotError("当前机器人驱动没有可验证的安全终止实现。");
+            }
+
+            QString detail = DecodeRobotMessageText(driver->GetLastRobotError());
+            if (stopOk)
+            {
+                // 只有机器人侧停止 API 成功才解除 sticky latch；失败必须保持全局闭锁。
+                RobotOperationLease::MarkMotionCompleted(driver);
+                // 并发主页 STOP 可能已先清除；重复确认返回 false 仍是幂等成功。
+                RobotOperationLease::ConfirmCancellationHandled(driver);
+            }
+            QMetaObject::invokeMethod(qApp, [self, stopOk, implementation, detail, cancelledOwner]()
+                {
+                    if (self == nullptr)
+                    {
+                        return;
+                    }
+                    self->m_bSafetyStopRunning.store(false);
+                    if (self->m_pSafetyStopBtn != nullptr)
+                    {
+                        self->m_pSafetyStopBtn->setEnabled(true);
+                        self->m_pSafetyStopBtn->setText("安全停止本窗口机器人任务");
+                    }
+
+                    const QString ownerText = cancelledOwner.isEmpty()
+                        ? QStringLiteral("本窗口机器人任务")
+                        : QStringLiteral("“%1”").arg(cancelledOwner);
+                    if (stopOk)
+                    {
+                        if (self->m_pSafetyStopDriver != nullptr)
+                        {
+                            self->m_pSafetyStopDriver = nullptr;
+                        }
+                        self->m_activeRobotTaskOwner.clear();
+                        const QString message = QString("%1 已通过 %2 确认停止命令成功；安全停止闭锁已解除。")
+                            .arg(ownerText, implementation);
+                        self->AppendLog(message);
+                        self->SetAutoCalibrationStateText(message);
+                    }
+                    else
+                    {
+                        const QString message = QString(
+                            "%1 的机器人侧终止未获确认（%2）。\n\n%3\n\n"
+                            "已保留 sticky 安全闭锁，禁止后续机器人动作；请排除通信/控制器问题后再次点击红色安全停止。")
+                            .arg(ownerText, implementation, detail.isEmpty() ? QStringLiteral("未返回详细错误。") : detail);
+                        self->AppendLog(message);
+                        self->SetAutoCalibrationStateText("安全停止未确认：已保持闭锁，可再次点击红色按钮重试。");
+                        if (self->m_pSafetyStopBtn != nullptr)
+                        {
+                            self->m_pSafetyStopBtn->setText("安全停止未确认 - 点击重试");
+                        }
+                    }
+                    self->RefreshBusyInteractionState();
+                }, Qt::QueuedConnection);
+        }).detach();
 }
 
 bool HandEyeCalibrationDialog::LoadConfig()
@@ -1211,6 +1499,14 @@ bool HandEyeCalibrationDialog::CaptureTcpPoint()
         AppendLog("读取目标点失败：" + error);
         return false;
     }
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("读取手眼标定目标位姿"), &error);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "手眼标定", error);
+        AppendLog("读取目标点已被互锁拦截：" + error);
+        return false;
+    }
 
     const T_ROBOT_COORS targetPoint = driver->GetCurrentPos();
     if (!ApplyCapturedTargetPoint(targetPoint, &error))
@@ -1235,6 +1531,15 @@ bool HandEyeCalibrationDialog::CaptureSample(int index)
     {
         QMessageBox::warning(this, "手眼标定", error);
         AppendLog(QString("采集第 %1 组失败：%2").arg(index + 1).arg(error));
+        return false;
+    }
+
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("采集手眼标定样本"), &error);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "手眼标定", error);
+        AppendLog(QString("采集第 %1 组已被互锁拦截：%2").arg(index + 1).arg(error));
         return false;
     }
 
@@ -1349,12 +1654,15 @@ bool HandEyeCalibrationDialog::EnsureCameraStarted(const QString& sceneName, QSt
     return true;
 }
 
-bool HandEyeCalibrationDialog::ComputeAndSaveMatrix()
+bool HandEyeCalibrationDialog::ComputeAndSaveMatrix(bool showDialogs)
 {
     QString error;
     if (!SaveConfigSilently(&error))
     {
-        QMessageBox::warning(this, "手眼标定", error);
+        if (showDialogs)
+        {
+            QMessageBox::warning(this, "手眼标定", error);
+        }
         AppendLog("计算前保存采样失败：" + error);
         return false;
     }
@@ -1362,7 +1670,10 @@ bool HandEyeCalibrationDialog::ComputeAndSaveMatrix()
     HandEyeMatrixConfig matrix;
     if (!ComputeHandEyeMatrixFromCalibration(m_robotName, m_config, matrix, &error))
     {
-        QMessageBox::warning(this, "手眼标定", error);
+        if (showDialogs)
+        {
+            QMessageBox::warning(this, "手眼标定", error);
+        }
         AppendLog("计算矩阵失败：" + error);
         return false;
     }
@@ -1370,7 +1681,10 @@ bool HandEyeCalibrationDialog::ComputeAndSaveMatrix()
     QString matrixFilePath;
     if (!SaveHandEyeMatrixConfig(m_robotName, m_cameraSection, matrix, &error, &matrixFilePath))
     {
-        QMessageBox::warning(this, "手眼标定", error);
+        if (showDialogs)
+        {
+            QMessageBox::warning(this, "手眼标定", error);
+        }
         AppendLog("写入矩阵失败：" + error);
         return false;
     }
@@ -1416,48 +1730,60 @@ bool HandEyeCalibrationDialog::ComputeAndSaveMatrix()
     if (!ExportCalibrationReport(matrix, &reportPath, &error))
     {
         AppendLog("报告导出失败：" + error);
-        QMessageBox::warning(this, "手眼标定", QString("矩阵已写入，但报告导出失败：\n%1").arg(error));
-        QMessageBox::information(this, "手眼标定", QString("矩阵已计算并写入：\n%1").arg(matrixFilePath));
+        if (showDialogs)
+        {
+            QMessageBox::warning(this, "手眼标定", QString("矩阵已写入，但报告导出失败：\n%1").arg(error));
+            QMessageBox::information(this, "手眼标定", QString("矩阵已计算并写入：\n%1").arg(matrixFilePath));
+        }
         return true;
     }
 
     AppendLog(QString("标定报告已导出：%1").arg(reportPath));
-    QMessageBox::information(this, "手眼标定", QString("矩阵已计算并写入：\n%1\n\n标定报告：\n%2").arg(matrixFilePath, reportPath));
+    if (showDialogs)
+    {
+        QMessageBox::information(this, "手眼标定", QString("矩阵已计算并写入：\n%1\n\n标定报告：\n%2").arg(matrixFilePath, reportPath));
+    }
     return true;
 }
 
 bool HandEyeCalibrationDialog::TestHandEyeMatrix()
 {
+    if (m_bAutoCalibrationRunning.load())
+    {
+        const QString message = "自动标定正在执行，请等待其完成或使用安全停止。";
+        AppendLog(message);
+        SetAutoCalibrationStateText(message);
+        return false;
+    }
+    if (m_bRobotTestRunning.exchange(true))
+    {
+        const QString message = "手眼参数检测或机器人动作正在执行，请等待其完成或使用安全停止。";
+        AppendLog(message);
+        SetAutoCalibrationStateText(message);
+        return false;
+    }
+
+    auto failBeforeStart = [this](const QString& message)
+        {
+            m_bRobotTestRunning.store(false);
+            SetRobotTestUiRunning(false);
+            AppendLog("手眼参数检测失败：" + message);
+            SetAutoCalibrationStateText("手眼参数检测失败：" + message);
+            return false;
+        };
+
     QString error;
     RobotDriverAdaptor* driver = CurrentDriver(&error);
     if (driver == nullptr)
     {
-        QMessageBox::warning(this, "手眼标定", error);
-        AppendLog("手眼参数检测失败：" + error);
-        return false;
-    }
-
-    Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
-    QString currentCameraError;
-    bool hasCurrentCameraPoint = EnsureCameraReady("手眼参数检测前检查", &cameraPoint, &error);
-    if (!hasCurrentCameraPoint)
-    {
-        currentCameraError = error;
-        QMessageBox::warning(
-            this,
-            "手眼标定",
-            "当前相机点获取失败，将跳过当前点检测，仅计算每组采样目标点。\n\n原因：" + currentCameraError);
-        AppendLog("手眼参数检测：当前相机点获取失败，已跳过当前点检测：" + currentCameraError);
-        error.clear();
+        return failBeforeStart(error);
     }
 
     HandEyeMatrixConfig matrix;
     QString matrixFilePath;
     if (!LoadHandEyeMatrixConfig(m_robotName, m_cameraSection, matrix, &error, &matrixFilePath))
     {
-        QMessageBox::warning(this, "手眼标定", error);
-        AppendLog("手眼参数检测失败：" + error);
-        return false;
+        return failBeforeStart(error);
     }
 
     HandEyeCalibrationConfig checkConfig = m_config;
@@ -1470,19 +1796,13 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
         sample.robotPose = ReadRobotPoseEditors(m_sampleWidgets[index].robotEdits, &parseOk, &parseError);
         if (!parseOk)
         {
-            error = QString("第 %1 组机器人位姿无效：%2").arg(index + 1).arg(parseError);
-            QMessageBox::warning(this, "手眼标定", error);
-            AppendLog("手眼参数检测失败：" + error);
-            return false;
+            return failBeforeStart(QString("第 %1 组机器人位姿无效：%2").arg(index + 1).arg(parseError));
         }
 
         sample.cameraPoint = ReadVectorEditors(m_sampleWidgets[index].cameraEdits, &parseOk, &parseError);
         if (!parseOk)
         {
-            error = QString("第 %1 组相机点无效：%2").arg(index + 1).arg(parseError);
-            QMessageBox::warning(this, "手眼标定", error);
-            AppendLog("手眼参数检测失败：" + error);
-            return false;
+            return failBeforeStart(QString("第 %1 组相机点无效：%2").arg(index + 1).arg(parseError));
         }
     }
 
@@ -1501,9 +1821,7 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
 
         const Eigen::Vector3d sampleTarget =
             RobotCalculation::CalcLaserPointInRobot(sample.robotPose, sample.cameraPoint, matrix);
-        if (!std::isfinite(sampleTarget.x()) ||
-            !std::isfinite(sampleTarget.y()) ||
-            !std::isfinite(sampleTarget.z()))
+        if (!IsFiniteDiagnosticVector(sampleTarget))
         {
             sampleTargetLines.push_back(QString("第%1组：目标点计算结果无效。").arg(index + 1));
             sampleTargetLogLines.push_back(QString("第%1组：目标点计算结果无效。").arg(index + 1));
@@ -1538,328 +1856,579 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
         sampleTargetLogLines.push_back("没有可计算的已采集采样组。");
     }
 
-    const T_ROBOT_COORS robotPose = driver->GetCurrentPos();
-    Eigen::Vector3d laserPoint = Eigen::Vector3d::Zero();
-    bool hasLocalLaserPoint = false;
-    QString localLaserText = "当前相机点未获取，已跳过当前点本地矩阵计算。";
-    if (hasCurrentCameraPoint)
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("手眼矩阵检测"), &error);
+    if (!operationLease)
     {
-        laserPoint = RobotCalculation::CalcLaserPointInRobot(robotPose, cameraPoint, matrix);
-        hasLocalLaserPoint =
-            std::isfinite(laserPoint.x()) &&
-            std::isfinite(laserPoint.y()) &&
-            std::isfinite(laserPoint.z());
-        if (hasLocalLaserPoint)
+        return failBeforeStart(error);
+    }
+    m_bSafetyStopRequested.store(false);
+    m_pSafetyStopDriver = driver;
+    m_activeRobotTaskOwner = QStringLiteral("手眼矩阵检测");
+
+    Eigen::Vector3d initialCameraPoint = Eigen::Vector3d::Zero();
+    QString initialCameraError;
+    const bool hasInitialCameraPoint = ReadLatestCameraPoint(initialCameraPoint, &initialCameraError);
+    bool waitForCamera = false;
+    if (!hasInitialCameraPoint)
+    {
+        QString startError;
+        waitForCamera = EnsureCameraStarted("手眼参数检测前检查", &startError);
+        if (!waitForCamera)
         {
-            localLaserText = QString("X=%1  Y=%2  Z=%3")
-                .arg(laserPoint.x(), 0, 'f', 3)
-                .arg(laserPoint.y(), 0, 'f', 3)
-                .arg(laserPoint.z(), 0, 'f', 3);
+            initialCameraError = startError;
+            AppendLog("手眼参数检测：当前相机点不可用，将跳过当前点检测：" + initialCameraError);
         }
         else
         {
-            localLaserText = "根据当前手眼矩阵计算出的激光位置无效，已跳过当前点 TP 对比和运动。";
-            AppendLog("手眼参数检测：当前点本地矩阵结果无效，已跳过当前点 TP 对比和运动。");
+            AppendLog("手眼参数检测：相机已启动，后台等待首帧；界面保持可操作。");
         }
     }
 
-    Eigen::Vector3d robotLaserPoint = Eigen::Vector3d::Zero();
-    bool hasRobotResult = false;
-    QString robotDetailText = "机器人程序结果：当前驱动不是 FANUC，未执行 TP 对比。";
-    FANUCRobotCtrl* fanucDriver = CurrentFanucDriver(nullptr);
-    if (fanucDriver != nullptr && hasLocalLaserPoint)
-    {
-        AppendLog(QString("机器人手眼检测使用机器人侧现有程序：%1；SENSOR 指令由现场 TP 程序提供，不在检测时自动编译上传。")
-            .arg(kHandEyeRobotCheckProgramName));
+    SetRobotTestUiRunning(true);
+    AppendLog("手眼参数检测已在后台启动；窗口底部安全停止始终可用。");
 
-        int config[7] = { 0 };
-        double prStartSeed[8] =
-        {
-            robotPose.dX, robotPose.dY, robotPose.dZ,
-            robotPose.dRX, robotPose.dRY, robotPose.dRZ,
-            robotPose.dBX, robotPose.dBY
-        };
-        if (!fanucDriver->SetPosVar(kHandEyeRobotCheckStartPrIndex, prStartSeed, POSVAR, 1, config, ENGINEEVAR, POSVAR))
-        {
-            error = QString("写入 PR[%1] 失败，无法启动机器人手眼检测。").arg(kHandEyeRobotCheckStartPrIndex);
-            QMessageBox::warning(this, "手眼标定", error);
-            AppendLog("手眼参数检测失败：" + error);
-            return false;
-        }
-        AppendLog(QString("已将当前位置写入 PR[%1]，准备调用机器人手眼检测程序。")
-            .arg(kHandEyeRobotCheckStartPrIndex));
-
-        AppendLog(QString("准备调用机器人手眼检测程序：%1，按 R[%2]=10/20/1 这套状态流程等待完成。")
-            .arg(kHandEyeRobotCheckProgramName)
-            .arg(kHandEyeRobotCheckStateReg));
-
-        int robotState = 0;
-        if (!fanucDriver->CallJobAndWaitStateDone(
-            kHandEyeRobotCheckProgramName,
-            kHandEyeRobotCheckStateReg,
-            1,
-            10,
-            20,
-            5000,
-            10000,
-            100,
-            &robotState,
-            true))
-        {
-            error = QString("机器人程序 %1 未按状态寄存器约定完成，R[%2] 最终=%3。请确认 TP 程序里有 R[%2]=10/20/1。")
-                .arg(kHandEyeRobotCheckProgramName)
-                .arg(kHandEyeRobotCheckStateReg)
-                .arg(robotState);
-            QMessageBox::warning(this, "手眼标定", error);
-            AppendLog("手眼参数检测失败：" + error);
-            return false;
-        }
-
-        AppendLog(QString("机器人程序已完成：R[%1]=%2，准备读取 PR[%3]。")
-            .arg(kHandEyeRobotCheckStateReg)
-            .arg(robotState)
-            .arg(kHandEyeRobotCheckPrIndex));
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        double pr80[6] = { 0.0 };
-        if (fanucDriver->GetPosVar(kHandEyeRobotCheckPrIndex, pr80, config, POSVAR) != 0)
-        {
-            error = QString("读取 PR[%1] 失败。").arg(kHandEyeRobotCheckPrIndex);
-            QMessageBox::warning(this, "手眼标定", error);
-            AppendLog("手眼参数检测失败：" + error);
-            return false;
-        }
-
-        robotLaserPoint = Eigen::Vector3d(pr80[0], pr80[1], pr80[2]);
-        hasRobotResult = std::isfinite(robotLaserPoint.x()) && std::isfinite(robotLaserPoint.y()) && std::isfinite(robotLaserPoint.z());
-        if (!hasRobotResult)
-        {
-            error = QString("读取到的 PR[%1] 结果无效。").arg(kHandEyeRobotCheckPrIndex);
-            QMessageBox::warning(this, "手眼标定", error);
-            AppendLog("手眼参数检测失败：" + error);
-            return false;
-        }
-
-        const Eigen::Vector3d delta = robotLaserPoint - laserPoint;
-        robotDetailText = QString(
-            "机器人程序结果（PR[%1]）：\n"
-            "X=%2  Y=%3  Z=%4\n"
-            "与本地矩阵差值：dX=%5  dY=%6  dZ=%7")
-            .arg(kHandEyeRobotCheckPrIndex)
-            .arg(robotLaserPoint.x(), 0, 'f', 3)
-            .arg(robotLaserPoint.y(), 0, 'f', 3)
-            .arg(robotLaserPoint.z(), 0, 'f', 3)
-            .arg(delta.x(), 0, 'f', 3)
-            .arg(delta.y(), 0, 'f', 3)
-            .arg(delta.z(), 0, 'f', 3);
-    }
-    else if (fanucDriver != nullptr)
-    {
-        robotDetailText = "机器人程序结果：当前点检测已跳过，未执行 TP 对比。";
-    }
-
-    if (hasLocalLaserPoint)
-    {
-        AppendLog(QString("手眼参数检测：Robot=(%1, %2, %3, %4, %5, %6) Camera=(%7, %8, %9) LocalLaser=(%10, %11, %12)")
-            .arg(robotPose.dX, 0, 'f', 3)
-            .arg(robotPose.dY, 0, 'f', 3)
-            .arg(robotPose.dZ, 0, 'f', 3)
-            .arg(robotPose.dRX, 0, 'f', 3)
-            .arg(robotPose.dRY, 0, 'f', 3)
-            .arg(robotPose.dRZ, 0, 'f', 3)
-            .arg(cameraPoint.x(), 0, 'f', 3)
-            .arg(cameraPoint.y(), 0, 'f', 3)
-            .arg(cameraPoint.z(), 0, 'f', 3)
-            .arg(laserPoint.x(), 0, 'f', 3)
-            .arg(laserPoint.y(), 0, 'f', 3)
-            .arg(laserPoint.z(), 0, 'f', 3));
-    }
-    else
-    {
-        AppendLog(QString("手眼参数检测：当前点检测已跳过。Robot=(%1, %2, %3, %4, %5, %6)")
-            .arg(robotPose.dX, 0, 'f', 3)
-            .arg(robotPose.dY, 0, 'f', 3)
-            .arg(robotPose.dZ, 0, 'f', 3)
-            .arg(robotPose.dRX, 0, 'f', 3)
-            .arg(robotPose.dRY, 0, 'f', 3)
-            .arg(robotPose.dRZ, 0, 'f', 3));
-    }
-    if (hasRobotResult)
-    {
-        AppendLog(QString("机器人程序检测：PR[%1]=(%2, %3, %4)")
-            .arg(kHandEyeRobotCheckPrIndex)
-            .arg(robotLaserPoint.x(), 0, 'f', 3)
-            .arg(robotLaserPoint.y(), 0, 'f', 3)
-            .arg(robotLaserPoint.z(), 0, 'f', 3));
-    }
-
-    QString diagnosticPath;
-    QString diagnosticSummary;
-    QString diagnosticError;
-    if (SaveHandEyeDiagnosticFile(
-        m_robotName,
-        m_cameraSection,
-        "Test",
-        checkConfig,
+    FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(driver);
+    const QString robotName = m_robotName;
+    const QString cameraSection = m_cameraSection;
+    QPointer<HandEyeCalibrationDialog> self(this);
+    std::thread([
+        self,
+        driver,
+        fanucDriver,
+        robotName,
+        cameraSection,
         matrix,
-        &diagnosticPath,
-        &diagnosticSummary,
-        &diagnosticError))
-    {
-        AppendLog(QString("手眼参数检测诊断：%1").arg(diagnosticSummary));
-        AppendLog(QString("手眼参数检测诊断文件：%1").arg(diagnosticPath));
-    }
-    else
-    {
-        AppendLog(QString("手眼参数检测诊断文件保存失败：%1").arg(diagnosticError));
-    }
-
-    AppendLog("手眼参数检测：每组采样目标点计算结果");
-    for (const QString& line : sampleTargetLogLines)
-    {
-        AppendLog(line);
-    }
-
-    const QString cameraPointText = hasCurrentCameraPoint
-        ? QString("X=%1  Y=%2  Z=%3")
-            .arg(cameraPoint.x(), 0, 'f', 3)
-            .arg(cameraPoint.y(), 0, 'f', 3)
-            .arg(cameraPoint.z(), 0, 'f', 3)
-        : QString("获取失败，已跳过当前点检测。\n原因：%1").arg(currentCameraError);
-
-    const QString resultText = QString(
-        "矩阵文件：%1\n\n"
-        "当前位置：\n"
-        "X=%2  Y=%3  Z=%4\n"
-        "RX=%5  RY=%6  RZ=%7\n\n"
-        "相机点：\n"
-        "%8\n\n"
-        "本地矩阵结果：\n"
-        "%9\n\n"
-        "每组采样目标点：\n"
-        "%10\n\n"
-        "%11")
-        .arg(matrixFilePath)
-        .arg(robotPose.dX, 0, 'f', 3)
-        .arg(robotPose.dY, 0, 'f', 3)
-        .arg(robotPose.dZ, 0, 'f', 3)
-        .arg(robotPose.dRX, 0, 'f', 3)
-        .arg(robotPose.dRY, 0, 'f', 3)
-        .arg(robotPose.dRZ, 0, 'f', 3)
-        .arg(cameraPointText)
-        .arg(localLaserText)
-        .arg(sampleTargetLines.join("\n"))
-        .arg(robotDetailText);
-    QMessageBox::information(this, "手眼参数检测", resultText);
-
-    if (fanucDriver != nullptr && hasLocalLaserPoint)
-    {
-        const QString moveQuestion = QString(
-            "是否运动到本地矩阵计算的激光点？\n\n"
-            "目标点：\n"
-            "X=%1  Y=%2  Z=%3\n\n"
-            "运动方式：MOVL\n"
-            "速度：500 mm/min\n"
-            "姿态：保持当前姿态不变")
-            .arg(laserPoint.x(), 0, 'f', 3)
-            .arg(laserPoint.y(), 0, 'f', 3)
-            .arg(laserPoint.z(), 0, 'f', 3);
-
-        if (QMessageBox::question(
-            this,
-            "运动到激光点",
-            moveQuestion,
-            QMessageBox::Yes | QMessageBox::No,
-            QMessageBox::No) == QMessageBox::Yes)
+        matrixFilePath,
+        checkConfig,
+        sampleTargetLines,
+        sampleTargetLogLines,
+        initialCameraPoint,
+        initialCameraError,
+        hasInitialCameraPoint,
+        waitForCamera,
+        operationLease = RobotOperationLease::Ptr(operationLease)]() mutable
         {
-            RobotDriverAdaptor::StateSnapshot snapshot;
-            if (fanucDriver->LatestStateSnapshot(snapshot) && snapshot.done == 0)
+            struct TestOutcome
             {
-                const QString busyMessage = "机器人当前处于运动中，未执行运动到激光点。";
-                QMessageBox::warning(this, "运动到激光点", busyMessage);
-                AppendLog(busyMessage);
-                return false;
-            }
+                bool ok = false;
+                bool cancelled = false;
+                bool offerMove = false;
+                bool terminalVerified = false;
+                QString failure;
+                QString resultText;
+                QStringList logs;
+                T_ROBOT_COORS robotPose;
+                T_ROBOT_COORS moveTarget;
+            } outcome;
 
-            T_ROBOT_COORS targetPose = robotPose;
-            targetPose.dX = laserPoint.x();
-            targetPose.dY = laserPoint.y();
-            targetPose.dZ = laserPoint.z();
+            Eigen::Vector3d cameraPoint = initialCameraPoint;
+            QString cameraError = initialCameraError;
+            bool hasCurrentCameraPoint = hasInitialCameraPoint;
 
-            AppendLog(QString("开始运动到激光点：X=%1 Y=%2 Z=%3，MOVL 500 mm/min。")
-                .arg(targetPose.dX, 0, 'f', 3)
-                .arg(targetPose.dY, 0, 'f', 3)
-                .arg(targetPose.dZ, 0, 'f', 3));
-
-            const bool moveOk = fanucDriver->MoveByJob(
-                targetPose,
-                T_ROBOT_MOVE_SPEED(500.0, 0.0, 0.0),
-                fanucDriver->m_nExternalAxleType,
-                "MOVL");
-            const int done = moveOk ? fanucDriver->CheckRobotDone(100) : -1;
-            if (!moveOk || done <= 0)
+            if (!hasCurrentCameraPoint && waitForCamera)
             {
-                const QString moveError = QString("运动到激光点失败：Move=%1，CheckRobotDone=%2")
-                    .arg(moveOk ? "OK" : "FAIL")
-                    .arg(done);
-                QMessageBox::warning(this, "运动到激光点", moveError);
-                AppendLog(moveError);
-                return false;
-            }
-
-            AppendLog("已运动到激光点。");
-            QMessageBox::information(this, "运动到激光点", "已运动到激光点。");
-
-            const QString returnQuestion = QString(
-                "是否退回扫描位置？\n\n"
-                "扫描位置：\n"
-                "X=%1  Y=%2  Z=%3\n\n"
-                "运动方式：MOVL\n"
-                "速度：500 mm/min\n"
-                "姿态：恢复检测开始时的扫描姿态")
-                .arg(robotPose.dX, 0, 'f', 3)
-                .arg(robotPose.dY, 0, 'f', 3)
-                .arg(robotPose.dZ, 0, 'f', 3);
-
-            if (QMessageBox::question(
-                this,
-                "退回扫描位置",
-                returnQuestion,
-                QMessageBox::Yes | QMessageBox::No,
-                QMessageBox::No) == QMessageBox::Yes)
-            {
-                AppendLog(QString("开始退回扫描位置：X=%1 Y=%2 Z=%3，MOVL 500 mm/min。")
-                    .arg(robotPose.dX, 0, 'f', 3)
-                    .arg(robotPose.dY, 0, 'f', 3)
-                    .arg(robotPose.dZ, 0, 'f', 3));
-
-                const bool returnOk = fanucDriver->MoveByJob(
-                    robotPose,
-                    T_ROBOT_MOVE_SPEED(500.0, 0.0, 0.0),
-                    fanucDriver->m_nExternalAxleType,
-                    "MOVL");
-                const int returnDone = returnOk ? fanucDriver->CheckRobotDone(100) : -1;
-                if (!returnOk || returnDone <= 0)
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+                while (std::chrono::steady_clock::now() < deadline)
                 {
-                    const QString returnError = QString("退回扫描位置失败：Move=%1，CheckRobotDone=%2")
-                        .arg(returnOk ? "OK" : "FAIL")
-                        .arg(returnDone);
-                    QMessageBox::warning(this, "退回扫描位置", returnError);
-                    AppendLog(returnError);
-                    return false;
+                    if (operationLease->CancellationRequested())
+                    {
+                        outcome.cancelled = true;
+                        outcome.failure = "手眼参数检测已由安全停止取消。";
+                        break;
+                    }
+                    if (self == nullptr)
+                    {
+                        return;
+                    }
+                    if (self->ReadLatestCameraPoint(cameraPoint, &cameraError))
+                    {
+                        hasCurrentCameraPoint = true;
+                        outcome.logs << QString("手眼参数检测：收到相机首帧，相机点=(%1, %2, %3)")
+                            .arg(cameraPoint.x(), 0, 'f', 3)
+                            .arg(cameraPoint.y(), 0, 'f', 3)
+                            .arg(cameraPoint.z(), 0, 'f', 3);
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+            if (!hasCurrentCameraPoint && !outcome.cancelled)
+            {
+                outcome.logs << "手眼参数检测：当前相机点获取失败，已跳过当前点检测：" + cameraError;
+            }
+
+            if (!outcome.cancelled)
+            {
+                outcome.robotPose = driver->GetCurrentPos();
+                if (!IsFinitePose(outcome.robotPose))
+                {
+                    outcome.failure = "读取到的机器人当前位置无效。";
+                }
+            }
+
+            Eigen::Vector3d laserPoint = Eigen::Vector3d::Zero();
+            bool hasLocalLaserPoint = false;
+            QString localLaserText = "当前相机点未获取，已跳过当前点本地矩阵计算。";
+            if (outcome.failure.isEmpty() && !outcome.cancelled && hasCurrentCameraPoint)
+            {
+                laserPoint = RobotCalculation::CalcLaserPointInRobot(outcome.robotPose, cameraPoint, matrix);
+                hasLocalLaserPoint = IsFiniteDiagnosticVector(laserPoint);
+                if (hasLocalLaserPoint)
+                {
+                    localLaserText = QString("X=%1  Y=%2  Z=%3")
+                        .arg(laserPoint.x(), 0, 'f', 3)
+                        .arg(laserPoint.y(), 0, 'f', 3)
+                        .arg(laserPoint.z(), 0, 'f', 3);
+                }
+                else
+                {
+                    localLaserText = "根据当前手眼矩阵计算出的激光位置无效，已跳过当前点 TP 对比和运动。";
+                    outcome.logs << "手眼参数检测：当前点本地矩阵结果无效，已跳过当前点 TP 对比和运动。";
+                }
+            }
+
+            Eigen::Vector3d robotLaserPoint = Eigen::Vector3d::Zero();
+            bool hasRobotResult = false;
+            QString robotDetailText = "机器人程序结果：当前驱动不是 FANUC，未执行 TP 对比。";
+            if (outcome.failure.isEmpty() && !outcome.cancelled && fanucDriver != nullptr && hasLocalLaserPoint)
+            {
+                outcome.logs << QString("机器人手眼检测使用机器人侧现有程序：%1。")
+                    .arg(kHandEyeRobotCheckProgramName);
+
+                int config[7] = { 0 };
+                double prStartSeed[8] =
+                {
+                    outcome.robotPose.dX, outcome.robotPose.dY, outcome.robotPose.dZ,
+                    outcome.robotPose.dRX, outcome.robotPose.dRY, outcome.robotPose.dRZ,
+                    outcome.robotPose.dBX, outcome.robotPose.dBY
+                };
+                if (!fanucDriver->SetPosVar(
+                    kHandEyeRobotCheckStartPrIndex, prStartSeed, POSVAR, 1, config, ENGINEEVAR, POSVAR))
+                {
+                    outcome.failure = QString("写入 PR[%1] 失败，无法启动机器人手眼检测。")
+                        .arg(kHandEyeRobotCheckStartPrIndex);
+                }
+                else
+                {
+                    outcome.logs << QString("已将当前位置写入 PR[%1]，准备调用机器人手眼检测程序。")
+                        .arg(kHandEyeRobotCheckStartPrIndex);
+                    int robotState = 0;
+                    if (!fanucDriver->CallJobAndWaitStateDone(
+                        kHandEyeRobotCheckProgramName,
+                        kHandEyeRobotCheckStateReg,
+                        1,
+                        10,
+                        20,
+                        5000,
+                        10000,
+                        100,
+                        &robotState,
+                        true))
+                    {
+                        outcome.cancelled = operationLease->CancellationRequested();
+                        outcome.failure = outcome.cancelled
+                            ? QStringLiteral("手眼参数检测已由安全停止取消。")
+                            : QString("机器人程序 %1 未按状态寄存器约定完成，R[%2] 最终=%3。")
+                                .arg(kHandEyeRobotCheckProgramName)
+                                .arg(kHandEyeRobotCheckStateReg)
+                                .arg(robotState);
+                    }
+                    else
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        double pr80[6] = { 0.0 };
+                        if (fanucDriver->GetPosVar(kHandEyeRobotCheckPrIndex, pr80, config, POSVAR) != 0)
+                        {
+                            outcome.failure = QString("读取 PR[%1] 失败。").arg(kHandEyeRobotCheckPrIndex);
+                        }
+                        else
+                        {
+                            robotLaserPoint = Eigen::Vector3d(pr80[0], pr80[1], pr80[2]);
+                            hasRobotResult = IsFiniteDiagnosticVector(robotLaserPoint);
+                            if (!hasRobotResult)
+                            {
+                                outcome.failure = QString("读取到的 PR[%1] 结果无效。")
+                                    .arg(kHandEyeRobotCheckPrIndex);
+                            }
+                            else
+                            {
+                                const Eigen::Vector3d delta = robotLaserPoint - laserPoint;
+                                robotDetailText = QString(
+                                    "机器人程序结果（PR[%1]）：\n"
+                                    "X=%2  Y=%3  Z=%4\n"
+                                    "与本地矩阵差值：dX=%5  dY=%6  dZ=%7")
+                                    .arg(kHandEyeRobotCheckPrIndex)
+                                    .arg(robotLaserPoint.x(), 0, 'f', 3)
+                                    .arg(robotLaserPoint.y(), 0, 'f', 3)
+                                    .arg(robotLaserPoint.z(), 0, 'f', 3)
+                                    .arg(delta.x(), 0, 'f', 3)
+                                    .arg(delta.y(), 0, 'f', 3)
+                                    .arg(delta.z(), 0, 'f', 3);
+                            }
+                        }
+                    }
+                }
+            }
+            else if (fanucDriver != nullptr)
+            {
+                robotDetailText = "机器人程序结果：当前点检测已跳过，未执行 TP 对比。";
+            }
+
+            if (outcome.failure.isEmpty() && !outcome.cancelled)
+            {
+                QString diagnosticPath;
+                QString diagnosticSummary;
+                QString diagnosticError;
+                if (SaveHandEyeDiagnosticFile(
+                    robotName,
+                    cameraSection,
+                    "Test",
+                    checkConfig,
+                    matrix,
+                    &diagnosticPath,
+                    &diagnosticSummary,
+                    &diagnosticError))
+                {
+                    outcome.logs << QString("手眼参数检测诊断：%1").arg(diagnosticSummary);
+                    outcome.logs << QString("手眼参数检测诊断文件：%1").arg(diagnosticPath);
+                }
+                else
+                {
+                    outcome.logs << QString("手眼参数检测诊断文件保存失败：%1").arg(diagnosticError);
                 }
 
-                AppendLog("已退回扫描位置。");
-                QMessageBox::information(this, "退回扫描位置", "已退回扫描位置。");
+                outcome.logs << "手眼参数检测：每组采样目标点计算结果";
+                outcome.logs.append(sampleTargetLogLines);
+
+                const QString cameraPointText = hasCurrentCameraPoint
+                    ? QString("X=%1  Y=%2  Z=%3")
+                        .arg(cameraPoint.x(), 0, 'f', 3)
+                        .arg(cameraPoint.y(), 0, 'f', 3)
+                        .arg(cameraPoint.z(), 0, 'f', 3)
+                    : QString("获取失败，已跳过当前点检测。\n原因：%1").arg(cameraError);
+                outcome.resultText = QString(
+                    "矩阵文件：%1\n\n"
+                    "当前位置：\n"
+                    "X=%2  Y=%3  Z=%4\n"
+                    "RX=%5  RY=%6  RZ=%7\n\n"
+                    "相机点：\n%8\n\n"
+                    "本地矩阵结果：\n%9\n\n"
+                    "每组采样目标点：\n%10\n\n%11")
+                    .arg(matrixFilePath)
+                    .arg(outcome.robotPose.dX, 0, 'f', 3)
+                    .arg(outcome.robotPose.dY, 0, 'f', 3)
+                    .arg(outcome.robotPose.dZ, 0, 'f', 3)
+                    .arg(outcome.robotPose.dRX, 0, 'f', 3)
+                    .arg(outcome.robotPose.dRY, 0, 'f', 3)
+                    .arg(outcome.robotPose.dRZ, 0, 'f', 3)
+                    .arg(cameraPointText)
+                    .arg(localLaserText)
+                    .arg(sampleTargetLines.join("\n"))
+                    .arg(robotDetailText);
+
+                outcome.ok = true;
+                outcome.offerMove = fanucDriver != nullptr && hasLocalLaserPoint;
+                outcome.moveTarget = outcome.robotPose;
+                outcome.moveTarget.dX = laserPoint.x();
+                outcome.moveTarget.dY = laserPoint.y();
+                outcome.moveTarget.dZ = laserPoint.z();
             }
-        }
-    }
+            else if (!outcome.cancelled)
+            {
+                const QString detail = DecodeRobotMessageText(driver->GetLastRobotError());
+                if (!detail.isEmpty())
+                {
+                    outcome.failure += "\n" + detail;
+                }
+            }
+
+            if (operationLease->CancellationRequested()
+                || (self != nullptr && self->m_bSafetyStopRequested.load()))
+            {
+                outcome.ok = false;
+                outcome.offerMove = false;
+                outcome.cancelled = true;
+                outcome.failure = "手眼参数检测已由安全停止取消。";
+                outcome.resultText.clear();
+            }
+            const bool pendingMotion = RobotOperationLease::MotionCompletionPending(driver);
+            if (pendingMotion && !operationLease->CancellationRequested())
+            {
+                const bool stopped = RobotOperationLease::StopAndConfirmUnverifiedMotion(driver);
+                outcome.terminalVerified = stopped;
+                outcome.ok = false;
+                outcome.offerMove = false;
+                outcome.failure = stopped
+                    ? outcome.failure + QStringLiteral("\n检测程序终态不明，已自动安全停止并确认终态。")
+                    : outcome.failure + QStringLiteral("\n检测程序终态不明且自动停止未确认，请使用红色安全停止重试。");
+            }
+            else
+            {
+                outcome.terminalVerified = !pendingMotion;
+            }
+            operationLease.reset();
+            QMetaObject::invokeMethod(qApp, [self, driver, outcome = std::move(outcome)]() mutable
+                {
+                    if (self == nullptr)
+                    {
+                        return;
+                    }
+                    self->m_bRobotTestRunning.store(false);
+                    self->ApplyRobotTaskTerminalState(
+                        driver,
+                        outcome.terminalVerified,
+                        outcome.terminalVerified
+                            ? QString()
+                            : QStringLiteral("手眼检测终态未确认：仅保留红色安全停止入口。"));
+                    self->SetRobotTestUiRunning(false);
+                    for (const QString& line : outcome.logs)
+                    {
+                        self->AppendLog(line);
+                    }
+
+                    if (outcome.cancelled || self->m_bSafetyStopRequested.load())
+                    {
+                        self->AppendLog(outcome.failure);
+                        self->SetAutoCalibrationStateText("手眼参数检测：已由安全停止取消");
+                        return;
+                    }
+                    if (!outcome.ok)
+                    {
+                        self->AppendLog("手眼参数检测失败：" + outcome.failure);
+                        self->SetAutoCalibrationStateText("手眼参数检测失败：" + outcome.failure);
+                        return;
+                    }
+
+                    self->AppendLog(outcome.resultText);
+                    if (!outcome.offerMove)
+                    {
+                        self->m_hasLastTestMoveTarget = false;
+                        if (self->m_pMoveToLastTestPointBtn != nullptr)
+                        {
+                            self->m_pMoveToLastTestPointBtn->setEnabled(false);
+                        }
+                        return;
+                    }
+                    self->m_lastTestMoveTarget = outcome.moveTarget;
+                    self->m_lastTestReturnPose = outcome.robotPose;
+                    self->m_hasLastTestMoveTarget = true;
+                    if (self->m_pMoveToLastTestPointBtn != nullptr)
+                    {
+                        self->m_pMoveToLastTestPointBtn->setEnabled(true);
+                    }
+                    self->SetAutoCalibrationStateText(
+                        "手眼参数检测完成；如需运动，请点击“运动到最近检测点”。");
+                }, Qt::QueuedConnection);
+        }).detach();
+
     return true;
 }
+
+bool HandEyeCalibrationDialog::StartRobotPoseMove(
+    const T_ROBOT_COORS& targetPose,
+    const QString& actionName,
+    bool offerReturn,
+    const T_ROBOT_COORS& returnPose)
+{
+    if (m_bAutoCalibrationRunning.load())
+    {
+        const QString message = "自动标定正在执行，不能开始新的机器人动作。";
+        AppendLog(message);
+        SetAutoCalibrationStateText(message);
+        return false;
+    }
+    if (m_bRobotTestRunning.exchange(true))
+    {
+        const QString message = "已有手眼测试或机器人动作正在执行。";
+        AppendLog(message);
+        SetAutoCalibrationStateText(message);
+        return false;
+    }
+
+    QString error;
+    RobotDriverAdaptor* driver = CurrentDriver(&error);
+    if (driver == nullptr)
+    {
+        m_bRobotTestRunning.store(false);
+        AppendLog(error);
+        SetAutoCalibrationStateText(error);
+        return false;
+    }
+    const auto operationLease = RobotOperationLease::TryAcquire(driver, actionName, &error);
+    if (!operationLease)
+    {
+        m_bRobotTestRunning.store(false);
+        AppendLog(actionName + "已被互锁拦截：" + error);
+        SetAutoCalibrationStateText(actionName + "已被互锁拦截：" + error);
+        return false;
+    }
+    m_bSafetyStopRequested.store(false);
+    m_pSafetyStopDriver = driver;
+    m_activeRobotTaskOwner = actionName;
+
+    SetRobotTestUiRunning(true);
+    AppendLog(QString("%1已在后台启动：X=%2 Y=%3 Z=%4，MOVL 500 mm/min。")
+        .arg(actionName)
+        .arg(targetPose.dX, 0, 'f', 3)
+        .arg(targetPose.dY, 0, 'f', 3)
+        .arg(targetPose.dZ, 0, 'f', 3));
+
+    QPointer<HandEyeCalibrationDialog> self(this);
+    std::thread([
+        self,
+        driver,
+        targetPose,
+        actionName,
+        offerReturn,
+        returnPose,
+        operationLease = RobotOperationLease::Ptr(operationLease)]() mutable
+        {
+            QString moveError;
+            bool terminalVerified = false;
+            bool sawPreExistingRunning = false;
+            bool moveSubmissionAttempted = false;
+            bool ok = !operationLease->CancellationRequested();
+            if (ok)
+            {
+                RobotDriverAdaptor::StateSnapshot snapshot;
+                if (driver->LatestStateSnapshot(snapshot) && snapshot.done == 0)
+                {
+                    sawPreExistingRunning = true;
+                    ok = false;
+                    moveError = "机器人当前处于运动中，未开始新的手眼检测动作。";
+                }
+            }
+            if (ok)
+            {
+                ok = !operationLease->CancellationRequested()
+                    && (self == nullptr || !self->m_bSafetyStopRequested.load());
+                if (!ok)
+                {
+                    moveError = actionName + "已由安全停止取消，下发 MOVL 前已终止。";
+                }
+            }
+            if (ok)
+            {
+                moveSubmissionAttempted = true;
+                ok = driver->MoveByJob(
+                    targetPose,
+                    T_ROBOT_MOVE_SPEED(500.0, 0.0, 0.0),
+                    driver->m_nExternalAxleType,
+                    "MOVL");
+                if (!ok)
+                {
+                    moveError = "下发 MOVL 失败：" + DecodeRobotMessageText(driver->GetLastRobotError());
+                    if (!RobotOperationLease::IsCancellationRequested(driver))
+                    {
+                        terminalVerified = RobotOperationLease::StopAndConfirmUnverifiedMotion(driver);
+                    }
+                }
+            }
+            if (ok)
+            {
+                ok = WaitGenericRobotDone(
+                    driver,
+                    kHandEyeAutoMoveDoneTimeoutMs,
+                    100,
+                    &moveError,
+                    &targetPose,
+                    {},
+                    &terminalVerified);
+            }
+
+            // 在真正下发运动前被取消时，本流程没有制造待确认运动；若租约层也没有
+            // motion pending，可安全解除本窗口的红色停止目标。发现外部已在运行时
+            // 则保守保持闭锁，不能用“本流程未下发”替外部运动证明终态。
+            if (!terminalVerified && !moveSubmissionAttempted && !sawPreExistingRunning)
+            {
+                terminalVerified = !RobotOperationLease::MotionCompletionPending(driver);
+            }
+
+            const bool localStopRequested = self != nullptr && self->m_bSafetyStopRequested.load();
+            const bool cancelled = localStopRequested
+                || (operationLease->CancellationRequested() && !terminalVerified);
+            if (cancelled)
+            {
+                ok = false;
+                moveError = actionName + "已由安全停止取消。";
+            }
+            operationLease.reset();
+
+            QMetaObject::invokeMethod(qApp, [
+                self,
+                ok,
+                cancelled,
+                moveError,
+                actionName,
+                offerReturn,
+                returnPose,
+                driver,
+                terminalVerified]() mutable
+                {
+                    if (self == nullptr)
+                    {
+                        return;
+                    }
+                    self->m_bRobotTestRunning.store(false);
+                    self->ApplyRobotTaskTerminalState(
+                        driver,
+                        terminalVerified,
+                        terminalVerified
+                            ? QString()
+                            : QStringLiteral("机器人终态未确认：仅保留红色安全停止入口。"));
+                    self->SetRobotTestUiRunning(false);
+                    if (!ok || cancelled || self->m_bSafetyStopRequested.load())
+                    {
+                        self->AppendLog(moveError);
+                        self->SetAutoCalibrationStateText(moveError);
+                        return;
+                    }
+
+                    const QString success = actionName + "已完成。";
+                    self->AppendLog(success);
+                    self->SetAutoCalibrationStateText(success);
+                    if (!offerReturn)
+                    {
+                        self->m_hasLastTestReturnPose = false;
+                        if (self->m_pReturnToLastTestPoseBtn != nullptr)
+                        {
+                            self->m_pReturnToLastTestPoseBtn->setEnabled(false);
+                        }
+                        return;
+                    }
+                    self->m_lastTestReturnPose = returnPose;
+                    self->m_hasLastTestReturnPose = true;
+                    if (self->m_pReturnToLastTestPoseBtn != nullptr)
+                    {
+                        self->m_pReturnToLastTestPoseBtn->setEnabled(true);
+                    }
+                    self->AppendLog("如需退回检测起点，请点击“退回检测起点”；不会自动弹出模态追问。");
+                }, Qt::QueuedConnection);
+        }).detach();
+    return true;
+}
+
 
 bool HandEyeCalibrationDialog::CheckCameraTimestampIntervals()
 {
     QString error;
+    RobotDriverAdaptor* driver = CurrentDriver(&error);
+    if (driver == nullptr)
+    {
+        QMessageBox::warning(this, "相机时间戳检测", error);
+        AppendLog("相机时间戳检测失败：" + error);
+        return false;
+    }
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("手眼相机时间戳检测"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "相机时间戳检测", leaseError);
+        AppendLog("相机时间戳检测已被互锁拦截：" + leaseError);
+        return false;
+    }
     Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
     if (!EnsureCameraReady("相机时间戳检测前检查", &cameraPoint, &error))
     {
@@ -2066,6 +2635,17 @@ bool HandEyeCalibrationDialog::UploadRobotHandEyeCheckProgram(QString* error)
     {
         return false;
     }
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        fanucDriver, QStringLiteral("上传手眼检测程序"), &leaseError);
+    if (!operationLease)
+    {
+        if (error != nullptr)
+        {
+            *error = leaseError;
+        }
+        return false;
+    }
 
     const QString lsPath = FindHandEyeRobotCheckProgramPath();
     if (lsPath.isEmpty() || !QFileInfo::exists(lsPath))
@@ -2106,6 +2686,10 @@ void HandEyeCalibrationDialog::SetAutoCalibrationUiRunning(bool running)
     {
         m_pAutoMoveSpeedSpin->setEnabled(!running);
     }
+    if (m_pTestHandEyeBtn != nullptr)
+    {
+        m_pTestHandEyeBtn->setEnabled(!running && !m_bRobotTestRunning.load());
+    }
     if (running)
     {
         SetAutoCalibrationStateText("自动标定状态：已启动，等待机器人到达位置变量[10]，已完成 0/6 组");
@@ -2116,6 +2700,70 @@ void HandEyeCalibrationDialog::SetAutoCalibrationUiRunning(bool running)
     {
         SetAutoCalibrationStateText("自动标定状态：待启动，已完成 0/6 组");
     }
+    RefreshBusyInteractionState();
+}
+
+void HandEyeCalibrationDialog::SetRobotTestUiRunning(bool running)
+{
+    if (m_pTestHandEyeBtn != nullptr)
+    {
+        m_pTestHandEyeBtn->setEnabled(!running && !m_bAutoCalibrationRunning.load());
+        m_pTestHandEyeBtn->setText(running ? "手眼参数检测进行中..." : "手眼参数检测");
+    }
+    if (m_pUploadAutoProgramBtn != nullptr)
+    {
+        m_pUploadAutoProgramBtn->setEnabled(!running && !m_bAutoCalibrationRunning.load());
+    }
+    if (m_pAutoCalibrationBtn != nullptr)
+    {
+        m_pAutoCalibrationBtn->setEnabled(!running && !m_bAutoCalibrationRunning.load());
+    }
+    if (m_pAutoMoveSpeedSpin != nullptr)
+    {
+        m_pAutoMoveSpeedSpin->setEnabled(!running && !m_bAutoCalibrationRunning.load());
+    }
+    RefreshBusyInteractionState();
+}
+
+void HandEyeCalibrationDialog::RefreshBusyInteractionState()
+{
+    const bool busy = m_bAutoCalibrationRunning.load()
+        || m_bRobotTestRunning.load()
+        || m_bSafetyStopRunning.load()
+        || m_pSafetyStopDriver != nullptr;
+    if (m_pScrollContent != nullptr)
+    {
+        m_pScrollContent->setEnabled(!busy);
+    }
+}
+
+void HandEyeCalibrationDialog::ApplyRobotTaskTerminalState(
+    RobotDriverAdaptor* driver,
+    bool verifiedTerminal,
+    const QString& statusText)
+{
+    const bool stillNeedsLocalStop = !verifiedTerminal && m_pSafetyStopDriver == driver;
+    if (verifiedTerminal && m_pSafetyStopDriver == driver)
+    {
+        m_pSafetyStopDriver = nullptr;
+        m_activeRobotTaskOwner.clear();
+        if (m_pSafetyStopBtn != nullptr)
+        {
+            m_pSafetyStopBtn->setText("安全停止本窗口机器人任务");
+        }
+    }
+    else if (stillNeedsLocalStop)
+    {
+        if (m_pSafetyStopBtn != nullptr)
+        {
+            m_pSafetyStopBtn->setText("终态未确认 - 点击安全停止");
+        }
+    }
+    if (!statusText.isEmpty() && (verifiedTerminal || stillNeedsLocalStop))
+    {
+        SetAutoCalibrationStateText(statusText);
+    }
+    RefreshBusyInteractionState();
 }
 
 void HandEyeCalibrationDialog::SetAutoCalibrationStateText(const QString& text)
@@ -2209,6 +2857,14 @@ bool HandEyeCalibrationDialog::UploadAutoCalibrationProgram()
         AppendLog("发送自动标定程序失败：" + error);
         return false;
     }
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        fanucDriver, QStringLiteral("上传自动标定程序"), &error);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "手眼标定", error);
+        AppendLog("发送自动标定程序已被互锁拦截：" + error);
+        return false;
+    }
 
     const QString lsPath = FindHandEyeAutoProgramPath();
     if (lsPath.isEmpty())
@@ -2237,6 +2893,11 @@ bool HandEyeCalibrationDialog::UploadAutoCalibrationProgram()
 
 bool HandEyeCalibrationDialog::StartAutoCalibration()
 {
+    if (m_bRobotTestRunning.load())
+    {
+        QMessageBox::information(this, "手眼标定", "手眼参数检测或机器人动作正在执行，请等待其完成或使用安全停止。");
+        return false;
+    }
     if (m_bAutoCalibrationRunning.exchange(true))
     {
         QMessageBox::information(this, "手眼标定", "自动标定正在执行，请等待本次流程结束。");
@@ -2271,27 +2932,25 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
         return false;
     }
 
-    if (!EnsureCameraStarted("自动标定前检查", &error))
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("手眼自动标定"), &error);
+    if (!operationLease)
     {
         m_bAutoCalibrationRunning.store(false);
         QMessageBox::warning(this, "手眼标定", error);
-        AppendLog("自动标定启动失败：" + error);
+        AppendLog("自动标定已被互锁拦截：" + error);
         return false;
     }
+    m_bSafetyStopRequested.store(false);
+    m_pSafetyStopDriver = driver;
+    m_activeRobotTaskOwner = QStringLiteral("手眼自动标定");
 
-    QVector<HandEyeAutoTarget> targets;
-    targets.reserve(kHandEyeAutoLastSampleStep - kHandEyeAutoTargetStep + 1);
-    for (int varIndex = kHandEyeAutoTargetStep; varIndex <= kHandEyeAutoLastSampleStep; ++varIndex)
+    if (!EnsureCameraStarted("自动标定前检查", &error))
     {
-        HandEyeAutoTarget target;
-        if (!ReadAutoCalibrationTarget(driver, varIndex, target, &error))
-        {
-            m_bAutoCalibrationRunning.store(false);
-            QMessageBox::warning(this, "手眼标定", error);
-            AppendLog("自动标定启动失败：" + error);
-            return false;
-        }
-        targets.push_back(target);
+        m_bAutoCalibrationRunning.store(false);
+        AppendLog("自动标定启动失败：" + error);
+        ApplyRobotTaskTerminalState(driver, true, "自动标定启动失败：" + error);
+        return false;
     }
 
     const double autoMoveSpeedMmPerMin = (m_pAutoMoveSpeedSpin != nullptr)
@@ -2299,12 +2958,12 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
         : kHandEyeAutoMoveSpeedMmPerMin;
 
     SetAutoCalibrationUiRunning(true);
-    AppendLog(QString("自动标定已启动：机器人=%1，已读取位置变量[10]~[16]，MOVL速度=%2 mm/min。")
+    AppendLog(QString("自动标定已启动：机器人=%1，将在后台读取位置变量[10]~[16]，MOVL速度=%2 mm/min。")
         .arg(m_robotName)
         .arg(autoMoveSpeedMmPerMin, 0, 'f', 1));
 
     QPointer<HandEyeCalibrationDialog> self(this);
-    std::thread([self, driver, targets, autoMoveSpeedMmPerMin]()
+    std::thread([self, driver, autoMoveSpeedMmPerMin, operationLease]()
         {
             using namespace std::chrono_literals;
 
@@ -2332,57 +2991,132 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                         }, Qt::QueuedConnection);
                 };
 
-            auto confirmCapture = [self](int currentStep) -> bool
+            auto confirmCapture = [self, operationLease](int currentStep) -> bool
                 {
-                    bool confirmed = false;
-                    QMetaObject::invokeMethod(qApp, [self, currentStep, &confirmed]()
+                    struct CaptureDecision
+                    {
+                        std::promise<bool> promise;
+                        std::atomic_bool resolved = false;
+                    };
+                    const auto decision = std::make_shared<CaptureDecision>();
+                    std::future<bool> future = decision->promise.get_future();
+                    auto resolve = [decision](bool confirmed)
+                        {
+                            if (!decision->resolved.exchange(true))
+                            {
+                                decision->promise.set_value(confirmed);
+                            }
+                        };
+
+                    QMetaObject::invokeMethod(qApp, [self, currentStep, decision, resolve]()
                         {
                             if (self == nullptr)
+                            {
+                                resolve(false);
+                                return;
+                            }
+                            if (decision->resolved.load())
                             {
                                 return;
                             }
 
                             const QString message = QString(
-                                "机器人已到达 %1。\n\n是否采集当前点数据？")
+                                "机器人已到达 %1。\n\n是否采集当前点数据？\n\n"
+                                "此确认框不锁住标定窗口；底部红色安全停止始终可点击。")
                                 .arg(DescribeAutoCalibrationPoint(currentStep));
-
-                            confirmed = (QMessageBox::question(
-                                self,
+                            QMessageBox* confirmBox = new QMessageBox(
+                                QMessageBox::Question,
                                 "自动标定采集确认",
                                 message,
                                 QMessageBox::Yes | QMessageBox::No,
-                                QMessageBox::Yes) == QMessageBox::Yes);
-                        }, Qt::BlockingQueuedConnection);
-                    return confirmed;
+                                self);
+                            confirmBox->setDefaultButton(QMessageBox::Yes);
+                            confirmBox->setWindowModality(Qt::NonModal);
+                            confirmBox->setModal(false);
+                            confirmBox->setAttribute(Qt::WA_DeleteOnClose);
+                            self->m_pCaptureConfirmation = confirmBox;
+                            QObject::connect(
+                                confirmBox,
+                                &QMessageBox::finished,
+                                self,
+                                [self, confirmBox, resolve](int result)
+                                {
+                                    if (self != nullptr && self->m_pCaptureConfirmation == confirmBox)
+                                    {
+                                        self->m_pCaptureConfirmation.clear();
+                                    }
+                                    resolve(result == QMessageBox::Yes);
+                                });
+                            confirmBox->show();
+                        }, Qt::QueuedConnection);
+
+                    while (future.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready)
+                    {
+                        if (self == nullptr || operationLease->CancellationRequested())
+                        {
+                            resolve(false);
+                            QMetaObject::invokeMethod(qApp, [self]()
+                                {
+                                    if (self != nullptr && self->m_pCaptureConfirmation != nullptr)
+                                    {
+                                        self->m_pCaptureConfirmation->reject();
+                                    }
+                                }, Qt::QueuedConnection);
+                            break;
+                        }
+                    }
+                    return future.get();
                 };
 
-            auto finish = [self](const QString& message, bool showWarning, bool showInfo)
+            auto finish = [self, driver](const QString& message, bool verifiedTerminal)
                 {
-                    QMetaObject::invokeMethod(qApp, [self, message, showWarning, showInfo]()
+                    QMetaObject::invokeMethod(qApp, [self, driver, message, verifiedTerminal]()
                         {
                             if (self == nullptr)
                             {
                                 return;
                             }
-                            self->SetAutoCalibrationUiRunning(false);
                             self->m_bAutoCalibrationRunning.store(false);
-                            self->SetAutoCalibrationStateText("自动标定状态：待启动");
+                            self->ApplyRobotTaskTerminalState(driver, verifiedTerminal, message);
+                            self->SetAutoCalibrationUiRunning(false);
+                            self->SetAutoCalibrationStateText(message);
                             self->AppendLog(message);
-                            if (showWarning)
-                            {
-                                QMessageBox::warning(self, "手眼标定", message);
-                            }
-                            else if (showInfo)
-                            {
-                                QMessageBox::information(self, "手眼标定", message);
-                            }
                         }, Qt::QueuedConnection);
                 };
+            const auto terminalIsVerified = [driver]()
+                {
+                    return !RobotOperationLease::MotionCompletionPending(driver);
+                };
+
+            QVector<HandEyeAutoTarget> targets;
+            targets.reserve(kHandEyeAutoLastSampleStep - kHandEyeAutoTargetStep + 1);
+            for (int varIndex = kHandEyeAutoTargetStep; varIndex <= kHandEyeAutoLastSampleStep; ++varIndex)
+            {
+                if (operationLease->CancellationRequested())
+                {
+                    finish("自动标定已由安全停止取消。", false);
+                    return;
+                }
+                HandEyeAutoTarget target;
+                QString readError;
+                if (!ReadAutoCalibrationTarget(driver, varIndex, target, &readError))
+                {
+                    finish("自动标定启动失败：" + readError, terminalIsVerified());
+                    return;
+                }
+                targets.push_back(target);
+                postLog(QString("已读取%1。").arg(DescribeAutoCalibrationPoint(varIndex)));
+            }
 
             for (const HandEyeAutoTarget& target : targets)
             {
                 if (self == nullptr)
                 {
+                    return;
+                }
+                if (operationLease->CancellationRequested())
+                {
+                    finish("自动标定已由安全停止取消。", false);
                     return;
                 }
 
@@ -2407,16 +3141,34 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                 if (!moveOk)
                 {
                     const QString detail = DecodeRobotMessageText(driver->GetLastRobotError());
+                    bool terminalVerified = false;
+                    if (!operationLease->CancellationRequested())
+                    {
+                        terminalVerified = RobotOperationLease::StopAndConfirmUnverifiedMotion(driver);
+                    }
                     finish(QString("自动标定移动失败：%1。%2")
                         .arg(DescribeAutoCalibrationPoint(target.varIndex))
-                        .arg(detail.isEmpty() ? QString() : QString("原因：%1").arg(detail)), true, false);
+                        .arg(detail.isEmpty() ? QString() : QString("原因：%1").arg(detail)), terminalVerified);
                     return;
                 }
 
                 QString waitError;
-                if (!WaitGenericRobotDone(driver, kHandEyeAutoMoveDoneTimeoutMs, 100, &waitError, &target.target, postLog))
+                bool terminalVerified = false;
+                if (!WaitGenericRobotDone(
+                    driver,
+                    kHandEyeAutoMoveDoneTimeoutMs,
+                    100,
+                    &waitError,
+                    &target.target,
+                    postLog,
+                    &terminalVerified))
                 {
-                    finish(QString("自动标定等待到位失败：%1，%2").arg(DescribeAutoCalibrationPoint(target.varIndex), waitError), true, false);
+                    const bool cancelled = operationLease->CancellationRequested() && !terminalVerified;
+                    finish(
+                        cancelled
+                            ? QStringLiteral("自动标定已由安全停止取消。")
+                            : QString("自动标定等待到位失败：%1，%2").arg(DescribeAutoCalibrationPoint(target.varIndex), waitError),
+                        terminalVerified);
                     return;
                 }
 
@@ -2426,14 +3178,21 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
 
                 if (!confirmCapture(target.varIndex))
                 {
-                    finish(QString("自动标定已中止：用户取消采集 %1。").arg(DescribeAutoCalibrationPoint(target.varIndex)), true, false);
+                    const bool cancelled = operationLease->CancellationRequested();
+                    finish(
+                        cancelled
+                            ? QStringLiteral("自动标定已由安全停止取消。")
+                            : QString("自动标定已中止：用户取消采集 %1。").arg(DescribeAutoCalibrationPoint(target.varIndex)),
+                        terminalIsVerified());
                     return;
                 }
 
                 const T_ROBOT_COORS robotPose = driver->GetCurrentPos();
                 if (!IsFinitePose(robotPose))
                 {
-                    finish(QString("自动标定采样失败：%1 到位后读取当前位置无效。").arg(DescribeAutoCalibrationPoint(target.varIndex)), true, false);
+                    finish(
+                        QString("自动标定采样失败：%1 到位后读取当前位置无效。").arg(DescribeAutoCalibrationPoint(target.varIndex)),
+                        terminalIsVerified());
                     return;
                 }
 
@@ -2454,10 +3213,14 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                 else
                 {
                     Eigen::Vector3d cameraPoint = Eigen::Vector3d::Zero();
+                    if (self == nullptr)
+                    {
+                        return;
+                    }
                     if (!self->ReadLatestCameraPoint(cameraPoint, &applyError))
                     {
                         finish(QString("自动标定采样失败：%1 的相机点无效：%2")
-                            .arg(DescribeAutoCalibrationPoint(target.varIndex), applyError), true, false);
+                            .arg(DescribeAutoCalibrationPoint(target.varIndex), applyError), terminalIsVerified());
                         return;
                     }
 
@@ -2475,13 +3238,20 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
 
                 if (!applyOk)
                 {
-                    finish(QString("自动标定写入失败：%1 -> %2").arg(DescribeAutoCalibrationPoint(target.varIndex), applyError), true, false);
+                    finish(
+                        QString("自动标定写入失败：%1 -> %2").arg(DescribeAutoCalibrationPoint(target.varIndex), applyError),
+                        terminalIsVerified());
                     return;
                 }
 
                 postLog(QString("%1 采样完成。").arg(DescribeAutoCalibrationPoint(target.varIndex)));
             }
 
+            if (operationLease->CancellationRequested())
+            {
+                finish("自动标定已由安全停止取消。", false);
+                return;
+            }
             postState(FormatAutoCalibrationState(kHandEyeAutoDoneStep));
             bool computeOk = false;
             QMetaObject::invokeMethod(self.data(), [&computeOk, self]()
@@ -2490,16 +3260,16 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                     {
                         return;
                     }
-                    computeOk = self->ComputeAndSaveMatrix();
+                    computeOk = self->ComputeAndSaveMatrix(false);
                 }, Qt::BlockingQueuedConnection);
 
             if (computeOk)
             {
-                finish("自动标定完成，位置变量[10]~[16] 采样和矩阵计算均已写入。", false, false);
+                finish("自动标定完成，位置变量[10]~[16] 采样和矩阵计算均已写入。", terminalIsVerified());
             }
             else
             {
-                finish("自动标定采样完成，但矩阵计算失败，请检查采样数据。", false, false);
+                finish("自动标定采样完成，但矩阵计算失败，请检查采样数据。", terminalIsVerified());
             }
         }).detach();
 

@@ -4,6 +4,7 @@
 #include "HandEyeMatrixConfig.h"
 
 #include <QDialog>
+#include <QPointer>
 #include <QVector>
 
 #include <Eigen/Dense>
@@ -52,8 +53,14 @@ private:
     bool SaveConfigSilently(QString* error = nullptr);
     bool CaptureTcpPoint();
     bool CaptureSample(int index);
-    bool ComputeAndSaveMatrix();
+    bool ComputeAndSaveMatrix(bool showDialogs = true);
     bool TestHandEyeMatrix();
+    bool StartRobotPoseMove(
+        const T_ROBOT_COORS& targetPose,
+        const QString& actionName,
+        bool offerReturn,
+        const T_ROBOT_COORS& returnPose);
+    void RequestSafetyStop();
     bool CheckCameraTimestampIntervals();
     bool UploadRobotHandEyeCheckProgram(QString* error = nullptr);
     bool UploadAutoCalibrationProgram();
@@ -69,6 +76,12 @@ private:
     bool ApplyCapturedTargetPoint(const T_ROBOT_COORS& pose, QString* error = nullptr);
     bool ApplyCapturedSample(int index, const T_ROBOT_COORS& pose, const Eigen::Vector3d& cameraPoint, QString* error = nullptr);
     void SetAutoCalibrationUiRunning(bool running);
+    void SetRobotTestUiRunning(bool running);
+    void RefreshBusyInteractionState();
+    void ApplyRobotTaskTerminalState(
+        RobotDriverAdaptor* driver,
+        bool verifiedTerminal,
+        const QString& statusText);
     void SetAutoCalibrationStateText(const QString& text);
     bool ExportCalibrationReport(const HandEyeMatrixConfig& matrix, QString* reportPathOut = nullptr, QString* error = nullptr) const;
 
@@ -99,12 +112,27 @@ private:
     QLabel* m_pReportPathLabel = nullptr;
     QDoubleSpinBox* m_pAutoMoveSpeedSpin = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
+    QWidget* m_pScrollContent = nullptr;
     QPushButton* m_pUploadAutoProgramBtn = nullptr;
     QPushButton* m_pAutoCalibrationBtn = nullptr;
+    QPushButton* m_pTestHandEyeBtn = nullptr;
+    QPushButton* m_pMoveToLastTestPointBtn = nullptr;
+    QPushButton* m_pReturnToLastTestPoseBtn = nullptr;
+    QPushButton* m_pSafetyStopBtn = nullptr;
+    RobotDriverAdaptor* m_pSafetyStopDriver = nullptr;
+    QString m_activeRobotTaskOwner;
+    QPointer<QDialog> m_pCaptureConfirmation;
     QTabWidget* m_pSampleTabWidget = nullptr;
     QVector<QLineEdit*> m_tcpEdits;
     QVector<SampleWidgets> m_sampleWidgets;
     std::atomic_bool m_bAutoCalibrationRunning = false;
+    std::atomic_bool m_bRobotTestRunning = false;
+    std::atomic_bool m_bSafetyStopRunning = false;
+    std::atomic_bool m_bSafetyStopRequested = false;
+    T_ROBOT_COORS m_lastTestMoveTarget;
+    T_ROBOT_COORS m_lastTestReturnPose;
+    bool m_hasLastTestMoveTarget = false;
+    bool m_hasLastTestReturnPose = false;
     bool m_bMatrixComputedThisSession = false;
     QString m_cleanSnapshot;
 };

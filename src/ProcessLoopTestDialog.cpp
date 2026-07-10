@@ -5,6 +5,7 @@
 #include "OPini.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
+#include "RobotOperationLease.h"
 #include "WeldProcessFile.h"
 #include "WindowStyleHelper.h"
 
@@ -714,6 +715,22 @@ void ProcessLoopTestDialog::OnStart()
 
     SaveSettings();  // 记住本次测试设置，下次打开自动恢复
     const ProcessLoopTestSettings settings = CollectSettings();
+    RobotDriverAdaptor* driver = nullptr;
+    if (m_pContralUnit != nullptr
+        && settings.unitIndex >= 0
+        && settings.unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        driver = static_cast<RobotDriverAdaptor*>(
+            m_pContralUnit->m_vtContralUnitInfo[settings.unitIndex].pUnitDriver);
+    }
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("流程循环测试"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, QStringLiteral("流程测试"), leaseError);
+        return;
+    }
     m_logText->clear();
     UpdateProgressUi(0, settings.infinite ? 0 : settings.repeatCount, 0, 0, QStringLiteral("准备中…"), false);
     SetRunningUi(true);
@@ -731,7 +748,7 @@ void ProcessLoopTestDialog::OnStart()
             QMetaObject::invokeMethod(this, [this, text]() { AppendLog(text); }, Qt::QueuedConnection);
         };
 
-    m_worker = std::thread([this, settings, progressCb, logCb]()
+    m_worker = std::thread([this, settings, progressCb, logCb, operationLease]()
         {
             m_runner(settings, &m_stopRequested, progressCb, logCb);
             m_running.store(false);

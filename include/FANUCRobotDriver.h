@@ -37,8 +37,9 @@ public:
 	T_ROBOT_COORS GetCurrentPos() override;
 	double GetCurrentPulse(int nAxisNo) override;
 	T_ANGLE_PULSE GetCurrentPulse() override;
-	int CheckDone();
-	int CheckRobotDone(int nDelayTime = 200);
+	int CheckDone() override;
+	int CheckRobotDone(int nDelayTime = 200) override;
+	bool AbortCurrentProgramSafely() override;
 
 	// 被动状态读取：读取S5监控线程最后一帧缓存，不占用控制socket；时间戳同时返回机器人累计毫秒和PC接收毫秒。
 	T_ROBOT_COORS GetCurrentPosPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
@@ -152,10 +153,10 @@ public:
 	HANDLE m_hMutex;
 	bool m_bLocalDebugMark;
 	std::uintptr_t m_uSocketHandle;
-	bool m_bSocketConnected;
+	std::atomic_bool m_bSocketConnected;
 	bool m_bWSAStarted;
 	// 监控线程缓存：由S5监控通道更新，UI/业务线程只读缓存，减少对控制通道S4的抢占。
-	std::uintptr_t m_uMonitorSocketHandle;
+	std::atomic<std::uintptr_t> m_uMonitorSocketHandle;
 	std::atomic_bool m_bMonitorRunning;
 	bool m_bMonitorWSAStarted;
 	int m_nMonitorPort;
@@ -173,6 +174,8 @@ public:
 	std::atomic<long long> m_llLastCallJobPcMs;
 
 private:
+	bool HasVerifiedProgramStopCapability();
+	void FinalizeContinuousMoveAfterVerifiedStop();
 	void ContinuousMoveWorker();
 	bool UploadContinuousStartBufferToRobot(const std::vector<T_ROBOT_MOVE_INFO>& startBuffer);
 	bool WriteContinuousMovePointToRobot(int prIndex, const T_ROBOT_MOVE_INFO& moveInfo);

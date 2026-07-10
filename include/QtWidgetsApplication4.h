@@ -78,6 +78,7 @@ private slots:
     void FanucConnectTest();
     void FanucDisconnectTest();
     void RobotClearAlarmTest();
+    void RobotEmergencyStop();
     void RobotSwitchStepMode();
     void ReadTool1ToGunTool();
     void FanucGetCurrentPosTest();
@@ -113,6 +114,7 @@ private:
     void RefreshRobotSelectorUi();
     void RefreshRobotOperationAvailability();
     void RefreshDashboardConnectionState();
+    bool EnsureRobotUiActionIdle(const QString& actionName);
     void RunFunctionTestDashboardTool(const QString& actionId);
     bool IsCurrentRobotConnected();
     void ToggleCurrentRobotConnection();
@@ -273,6 +275,7 @@ private:
     QPushButton* m_pGuestLoginBtn;
     QPushButton* m_pDashboardConnectBtn;
     QPushButton* m_pDashboardClearAlarmBtn;
+    QPushButton* m_pDashboardEmergencyStopBtn;
     QPushButton* m_pDashboardModeBtn;
     QPushButton* m_pDashboardDebugLogBtn;
     QWidget* m_pDashboardToolPanel;
@@ -320,4 +323,3 @@ private:
     qint64 m_nLastRobotLogSize = -1;
     std::atomic_bool m_bFanucMonitorReading;
 };
-

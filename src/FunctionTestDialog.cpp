@@ -5,6 +5,7 @@
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
+#include "RobotOperationLease.h"
 #include "WindowStyleHelper.h"
 #include "../portable/LaserFramePoint3DFilter/LaserFramePoint3DFilter.h"
 
@@ -811,9 +812,9 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     commandScrollArea->setObjectName("AdaptiveWindowScrollArea");
     ConfigureResponsiveScrollArea(commandScrollArea);
 
-    QWidget* commandContent = new QWidget(commandScrollArea);
-    commandContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
-    QVBoxLayout* commandLayout = new QVBoxLayout(commandContent);
+    m_pCommandContent = new QWidget(commandScrollArea);
+    m_pCommandContent->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    QVBoxLayout* commandLayout = new QVBoxLayout(m_pCommandContent);
     commandLayout->setContentsMargins(0, 0, 8, 0);
     commandLayout->setSpacing(10);
     commandLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
@@ -865,7 +866,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     motionLayout->addWidget(m_pMovlTestBtn, 0, 0);
     motionLayout->addWidget(m_pMovjTestBtn, 1, 0);
     motionLayout->addWidget(m_pMoveZeroBtn, 2, 0);
-    m_motionButtons = { m_pMovlTestBtn, m_pMovjTestBtn, m_pMoveZeroBtn };
+    m_motionButtons = { m_pMovlTestBtn, m_pMovjTestBtn, m_pMoveZeroBtn, callJobBtn };
     groupLayout->addWidget(motionGroup, 0, 1);
 
     QGroupBox* offlineGroup = new QGroupBox("离线数据处理");
@@ -884,7 +885,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     kinematicsLayout->addWidget(fitDhBtn, 1, 0);
     groupLayout->addWidget(kinematicsGroup, 1, 0);
     commandLayout->addStretch(1);
-    commandScrollArea->setWidget(commandContent);
+    commandScrollArea->setWidget(m_pCommandContent);
     outerLayout->addWidget(commandScrollArea, 1);
 
     m_pLogText = new QPlainTextEdit();
@@ -921,6 +922,12 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
 
 bool FunctionTestDialog::RunDashboardTool(const QString& actionId)
 {
+    if (IsMotionBusy() || m_bRobotCommandRunning || RobotOperationLease::AnyActive())
+    {
+        AppendLog(QString("机器人命令运行中，已忽略新的功能测试入口：%1；请先返回主页使用安全停止或等待完成。")
+            .arg(actionId));
+        return true;
+    }
     if (actionId == "setSpeed")
     {
         FanucSetTpSpeedTest();
@@ -986,12 +993,8 @@ bool FunctionTestDialog::RunDashboardTool(const QString& actionId)
 
 void FunctionTestDialog::closeEvent(QCloseEvent* event)
 {
-    if (IsMotionBusy())
-    {
-        QMessageBox::information(this, "功能测试", "运动测试正在执行，请等本次运动结束后再关闭窗口。");
-        event->ignore();
-        return;
-    }
+    // 嵌入页 close 只会隐藏并返回主页，不会析构；后台线程均以 QPointer 回传，
+    // driver 删除/程序退出另有租约门禁。运行中必须允许返回主页触发固定安全停止。
     QDialog::closeEvent(event);
 }
 
@@ -1039,12 +1042,13 @@ RobotDriverAdaptor* FunctionTestDialog::GetFirstRobotDriverAdaptor()
 
 bool FunctionTestDialog::IsMotionBusy() const
 {
+    // closeEvent 始终允许隐藏本页返回主页；busy 仅用于冻结本页普通操作入口。
     return m_bFanucMovlRunning || m_bFanucMovjRunning || m_bFanucMoveZeroRunning;
 }
 
 void FunctionTestDialog::RefreshMotionButtonState()
 {
-    bool busy = IsMotionBusy();
+    bool busy = IsMotionBusy() || m_bRobotCommandRunning || RobotOperationLease::AnyActive();
     if (!busy && m_pContralUnit != nullptr && m_unitIndex >= 0 && m_unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
         RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
@@ -1060,6 +1064,12 @@ void FunctionTestDialog::RefreshMotionButtonState()
         {
             button->setEnabled(!busy);
         }
+    }
+    // 机器人命令期间整块冻结，避免任意普通按钮再弹 QInputDialog/QMessageBox；
+    // 返回主页属于嵌入页外层导航，不在 commandContent 内，始终保持可用。
+    if (m_pCommandContent != nullptr)
+    {
+        m_pCommandContent->setEnabled(!busy);
     }
 }
 
@@ -1182,6 +1192,14 @@ void FunctionTestDialog::FanucCurposDiagnosticTest()
     FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
     if (pFanucDriver == nullptr)
     {
+        return;
+    }
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pFanucDriver, QStringLiteral("功能测试 CURPOS 诊断"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "CURPOS诊断", leaseError);
         return;
     }
 
@@ -1619,6 +1637,15 @@ void FunctionTestDialog::FanucSetGetIntTest()
         return;
     }
 
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("功能测试写读寄存器"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "写读INT寄存器", leaseError);
+        return;
+    }
+
     if (!pRobotDriver->SetIntVar(index, value))
     {
         QMessageBox::warning(this, "写读INT寄存器", DecodeRobotMessageText(GetStr("写入 INT%d 失败。", index)));
@@ -1646,6 +1673,15 @@ void FunctionTestDialog::FanucSetTpSpeedTest()
         return;
     }
 
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("功能测试设置 TP 速度"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "设置速度", leaseError);
+        return;
+    }
+
     const bool setOk = pRobotDriver->SetTpSpeed(speed);
     const QString message = setOk ? QString("设置速度成功：%1").arg(speed) : QString("设置速度失败：%1").arg(speed);
     AppendLog(message);
@@ -1667,11 +1703,40 @@ void FunctionTestDialog::FanucCallJobTest()
         return;
     }
 
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("功能测试调用机器人任务"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "调用任务", leaseError);
+        return;
+    }
+
     const QByteArray jobNameBytes = jobName.trimmed().toLocal8Bit();
-    const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
-    const QString message = callOk ? QString("调用任务成功：%1").arg(jobName.trimmed()) : QString("调用任务失败：%1").arg(jobName.trimmed());
-    AppendLog(message);
-    QMessageBox::information(this, "调用任务", message);
+    m_bRobotCommandRunning = true;
+    RefreshMotionButtonState();
+    AppendLog(QString("已调用任务 %1，正在后台等待真实完成；可返回主页使用“安全停止本软件活动机器人任务”中止。")
+        .arg(jobName.trimmed()));
+    QPointer<FunctionTestDialog> self(this);
+    std::thread([self, pRobotDriver, jobNameBytes, operationLease]()
+        {
+            const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
+            const int done = callOk ? pRobotDriver->CheckRobotDone(200) : -1;
+            const QString message = QString("调用任务%1：%2，CheckRobotDone=%3")
+                .arg(callOk ? QStringLiteral("成功") : QStringLiteral("失败"))
+                .arg(QString::fromLocal8Bit(jobNameBytes))
+                .arg(done);
+            QMetaObject::invokeMethod(qApp, [self, message]()
+                {
+                    if (self == nullptr)
+                    {
+                        return;
+                    }
+                    self->m_bRobotCommandRunning = false;
+                    self->RefreshMotionButtonState();
+                    self->AppendLog(message);
+                }, Qt::QueuedConnection);
+        }).detach();
 }
 
 void FunctionTestDialog::FanucUploadLsTest()
@@ -1686,6 +1751,15 @@ void FunctionTestDialog::FanucUploadLsTest()
     if (lsPath.isEmpty())
     {
         QMessageBox::warning(this, "发送LS程序", "未找到测试程序文件：SDK/FANUC/STARTALL.ls");
+        return;
+    }
+
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pFanucDriver, QStringLiteral("功能测试上传 LS 程序"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "发送LS程序", leaseError);
         return;
     }
 
@@ -1717,6 +1791,14 @@ void FunctionTestDialog::FanucMovlTest()
         QMessageBox::information(this, "MOVL往返测试", "MOVL测试正在执行，请等本次运动结束。");
         return;
     }
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("功能测试 MOVL"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "MOVL往返测试", leaseError);
+        return;
+    }
 
     const bool moveForward = m_bFanucMovlForward;
     m_bFanucMovlForward = !m_bFanucMovlForward;
@@ -1725,7 +1807,7 @@ void FunctionTestDialog::FanucMovlTest()
     AppendLog(QString("开始 MOVL %1 100mm 测试...").arg(moveForward ? "Y+" : "Y-"));
 
     QPointer<FunctionTestDialog> self(this);
-    std::thread([self, pRobotDriver, moveForward]()
+    std::thread([self, pRobotDriver, moveForward, operationLease]()
         {
             T_ROBOT_COORS target = pRobotDriver->GetCurrentPos();
             target.dY += moveForward ? 100.0 : -100.0;
@@ -1746,7 +1828,6 @@ void FunctionTestDialog::FanucMovlTest()
                     self->m_bFanucMovlRunning = false;
                     self->RefreshMotionButtonState();
                     self->AppendLog(message);
-                    QMessageBox::information(self, "MOVL往返测试", message);
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -1763,13 +1844,21 @@ void FunctionTestDialog::FanucMovjTest()
         QMessageBox::information(this, "MOVJ测试", "MOVJ测试正在执行，请等本次运动结束。");
         return;
     }
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("功能测试 MOVJ"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "MOVJ测试", leaseError);
+        return;
+    }
 
     m_bFanucMovjRunning = true;
     RefreshMotionButtonState();
     AppendLog("开始 MOVJ J2/J3 +5deg 测试...");
 
     QPointer<FunctionTestDialog> self(this);
-    std::thread([self, pRobotDriver]()
+    std::thread([self, pRobotDriver, operationLease]()
         {
             T_ANGLE_PULSE target = pRobotDriver->GetCurrentPulse();
             const double j2PulseUnit = pRobotDriver->m_tAxisUnit.dLPulseUnit;
@@ -1796,7 +1885,6 @@ void FunctionTestDialog::FanucMovjTest()
                     self->m_bFanucMovjRunning = false;
                     self->RefreshMotionButtonState();
                     self->AppendLog(message);
-                    QMessageBox::information(self, "MOVJ测试", message);
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -1825,12 +1913,21 @@ void FunctionTestDialog::FanucMoveZeroTest()
         return;
     }
 
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("功能测试运动到零位"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "运动到零位", leaseError);
+        return;
+    }
+
     m_bFanucMoveZeroRunning = true;
     RefreshMotionButtonState();
     AppendLog("开始 MOVJ 到零位...");
 
     QPointer<FunctionTestDialog> self(this);
-    std::thread([self, pRobotDriver]()
+    std::thread([self, pRobotDriver, operationLease]()
         {
             const T_ANGLE_PULSE zeroPulse = T_ANGLE_PULSE();
             const T_ROBOT_MOVE_SPEED speed(1.0, 0.0, 0.0);
@@ -1870,7 +1967,6 @@ void FunctionTestDialog::FanucMoveZeroTest()
                     self->m_bFanucMoveZeroRunning = false;
                     self->RefreshMotionButtonState();
                     self->AppendLog(message);
-                    QMessageBox::information(self, "运动到零位", message);
                 }, Qt::QueuedConnection);
         }).detach();
 }

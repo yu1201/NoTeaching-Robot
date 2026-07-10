@@ -12,6 +12,7 @@
 #include "RobotDataHelper.h"
 #include "RobotLog.h"
 #include "RobotMessage.h"
+#include "RobotOperationLease.h"
 #include "WeldProcessFile.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
@@ -73,6 +74,18 @@ std::string ToUtf8StdString(const QString& text)
 double SafeSpeed(double value, double fallback)
 {
     return value > 0.0 ? value : fallback;
+}
+
+void ShowNonModalFlowResult(
+    QWidget* parent,
+    QMessageBox::Icon icon,
+    const QString& title,
+    const QString& text)
+{
+    QMessageBox* message = new QMessageBox(icon, title, text, QMessageBox::Ok, parent);
+    message->setAttribute(Qt::WA_DeleteOnClose);
+    message->setWindowModality(Qt::NonModal);
+    message->show();
 }
 
 // 扫描实时激光线视图：把当前帧 XData/YData 画成散点（自动缩放），与坡口相机预览同源数据、轻量版绘制。
@@ -983,12 +996,8 @@ void MeasureThenWeldDialog::ReloadSelectors()
 
 void MeasureThenWeldDialog::closeEvent(QCloseEvent* event)
 {
-    if (m_bRunning)
-    {
-        QMessageBox::information(this, "先测后焊", "流程正在运行，请等待当前流程结束后再关闭。");
-        event->ignore();
-        return;
-    }
+    // 主栈中的 close 仅隐藏缓存页；流程线程/租约继续存活。允许返回主页使用
+    // 不可删除的安全停止入口，真正析构和控制单元重载仍由全局租约门禁拦截。
     QDialog::closeEvent(event);
 }
 
@@ -1678,6 +1687,14 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
         return;
     }
     param.bDoActualWeld = IsActualWeldModeChecked();
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("先测后焊预设流程"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "先测后焊", leaseError);
+        return;
+    }
     const int unitIndexForRun = m_unitIndex;
     m_pCameraCache = nullptr;  // 相机启动成功后再解析，避免 runtime 重建期间保留旧缓存指针。
     SetRunning(true);
@@ -1696,7 +1713,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
 
     // 机器人运动和扫描采集放到后台线程，避免 UI 被 CheckRobotDone 和文件保存卡住。
     QPointer<MeasureThenWeldDialog> self(this);
-    std::thread([self, pRobotDriver, param, unitIndexForRun]()
+    std::thread([self, pRobotDriver, param, unitIndexForRun, operationLease]()
         {
             bool ok = true;
             QString message;
@@ -1889,14 +1906,11 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                     self->FinishProgress(ok, ok ? QStringLiteral("流程完成") : QStringLiteral("流程失败，请查看流程日志"));
                     self->AppendLog(ok ? "流程完成。" : "流程失败。");
                     self->SetRunning(false);
-                    if (ok)
-                    {
-                        QMessageBox::information(self, "预设参数", message);
-                    }
-                    else
-                    {
-                        QMessageBox::warning(self, "预设参数", message);
-                    }
+                    ShowNonModalFlowResult(
+                        self,
+                        ok ? QMessageBox::Information : QMessageBox::Warning,
+                        "预设参数",
+                        message);
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -1971,6 +1985,15 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
         return;
     }
 
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("跳过扫描焊接流程"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "跳过扫描焊接", leaseError);
+        return;
+    }
+
     SetRunning(true);
     ResetProgress("已选择历史结果，准备重新计算");
     SetProgress(8, "已选择历史结果");
@@ -2001,7 +2024,8 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                  seamCompPath = QString(seamCompPath),
                  canRebuildFromLaser,
                  hasExistingPoseFile,
-                 hasExistingSeamCompFile]() mutable
+                 hasExistingSeamCompFile,
+                 operationLease]() mutable
         {
             bool ok = true;
             QString message;
@@ -2190,14 +2214,11 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                     self->FinishProgress(ok, ok ? QStringLiteral("跳过扫描焊接完成") : QStringLiteral("跳过扫描焊接失败"));
                     self->AppendLog(ok ? "跳过扫描焊接流程完成。" : "跳过扫描焊接流程失败。");
                     self->SetRunning(false);
-                    if (ok)
-                    {
-                        QMessageBox::information(self, "跳过扫描焊接", message);
-                    }
-                    else
-                    {
-                        QMessageBox::warning(self, "跳过扫描焊接", message);
-                    }
+                    ShowNonModalFlowResult(
+                        self,
+                        ok ? QMessageBox::Information : QMessageBox::Warning,
+                        "跳过扫描焊接",
+                        message);
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -2298,7 +2319,19 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
             }
         }
     }
-    if (!pStepDriver->Prog_startRun_Py())
+    // 只能继续仍由本页面持有租约的暂停流程；原流程若已失败退出，禁止把残留程序无租约启动。
+    const QString activeOwner = RobotOperationLease::CurrentOwner(pRobotDriver);
+    const bool ownedByThisFlow = activeOwner == QStringLiteral("先测后焊预设流程")
+        || activeOwner == QStringLiteral("跳过扫描焊接流程")
+        || activeOwner == QStringLiteral("断点续焊流程")
+        || activeOwner == QStringLiteral("相机时间补偿标定");
+    if (!m_bRunning || !ownedByThisFlow)
+    {
+        QMessageBox::warning(this, "继续运行",
+            "原流程已经结束或硬件操作租约已释放，禁止直接 START。\n请使用“断点续焊”重新建立完整安全流程。");
+        return;
+    }
+	if (!pStepDriver->Prog_startRun_Py(true))
     {
         AppendLog("继续命令发送失败，详见机器人错误信息。");
         return;
@@ -2461,6 +2494,14 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
         return;
     }
     param.bDoActualWeld = IsActualWeldModeChecked();
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("断点续焊流程"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "断点续焊", leaseError);
+        return;
+    }
     m_pCameraCache = ResolveCameraCacheForUnit(m_unitIndex);
     SetRunning(true);
     ResetProgress("断点续焊：准备执行");
@@ -2470,7 +2511,7 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
     QPointer<MeasureThenWeldDialog> self(this);
     const QString posePathCopy = latestPosePath;
     const QString robotNameCopy = robotName;
-    std::thread([self, pRobotDriver, param, posePathCopy, robotNameCopy, resumeSkipPoints]()
+    std::thread([self, pRobotDriver, param, posePathCopy, robotNameCopy, resumeSkipPoints, operationLease]()
         {
             QString summary;
             QString execError;
@@ -2502,14 +2543,13 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
                     self->SetFlowStep(ok ? "断点续焊完成" : "断点续焊失败");
                     self->FinishProgress(ok, ok ? QStringLiteral("断点续焊完成") : QStringLiteral("断点续焊失败"));
                     self->SetRunning(false);
-                    if (ok)
-                    {
-                        QMessageBox::information(self, "断点续焊", summary.isEmpty() ? QStringLiteral("续焊完成。") : summary);
-                    }
-                    else
-                    {
-                        QMessageBox::warning(self, "断点续焊", execError.isEmpty() ? QStringLiteral("续焊失败，请查看日志。") : execError);
-                    }
+                    ShowNonModalFlowResult(
+                        self,
+                        ok ? QMessageBox::Information : QMessageBox::Warning,
+                        "断点续焊",
+                        ok
+                            ? (summary.isEmpty() ? QStringLiteral("续焊完成。") : summary)
+                            : (execError.isEmpty() ? QStringLiteral("续焊失败，请查看日志。") : execError));
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -2571,6 +2611,15 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
         return;
     }
 
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("相机时间补偿标定"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "相机时间补偿标定", leaseError);
+        return;
+    }
+
     const int unitIndexForRun = m_unitIndex;
     // 上一轮相机 runtime 可能已经被主窗口重建；SetRunning(true) 会立即访问该成员，
     // 因此先清掉旧指针，待本轮启动成功后再在 UI 线程解析并赋回新缓存。
@@ -2585,7 +2634,7 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
         .arg(param.dCameraTimeOffsetMs, 0, 'f', 1));
 
     QPointer<MeasureThenWeldDialog> self(this);
-    std::thread([self, pRobotDriver, param, unitIndexForRun]()
+    std::thread([self, pRobotDriver, param, unitIndexForRun, operationLease]()
         {
             bool ok = true;
             QString message;
@@ -2823,14 +2872,11 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                     self->SetFlowStep(finished ? "标定完成" : "标定失败，请查看流程日志");
                     self->FinishProgress(finished, finished ? QStringLiteral("标定完成") : QStringLiteral("标定失败"));
                     self->SetRunning(false);
-                    if (finished)
-                    {
-                        QMessageBox::information(self, "相机时间补偿标定", finishText);
-                    }
-                    else
-                    {
-                        QMessageBox::warning(self, "相机时间补偿标定", finishText);
-                    }
+                    ShowNonModalFlowResult(
+                        self,
+                        finished ? QMessageBox::Information : QMessageBox::Warning,
+                        "相机时间补偿标定",
+                        finishText);
                 }, Qt::QueuedConnection);
         }).detach();
 }

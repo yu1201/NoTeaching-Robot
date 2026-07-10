@@ -7,6 +7,8 @@
 #include "RobotDriverAdaptor.h"
 
 #include <atomic>
+#include <mutex>
+#include <utility>
 
 #ifndef __STEP_ROBOT_CTRL
 #define __STEP_ROBOT_CTRL
@@ -67,6 +69,7 @@ public:
 	int CheckDone() override;
 	int CheckDonePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
 	int CheckRobotDone(int nDelayTime = 200) override;
+	bool AbortCurrentProgramSafely() override;
 
 	bool CallJob(std::string sJobName) override;
 
@@ -120,9 +123,11 @@ public:
 
 
 	//运行程序 运行的是目前加载的程序
-	bool Prog_startRun_Py();
+	bool Prog_startRun_Py(bool resumeExisting = false);
 	//停止程序 停止的是目前加载的程序
 	bool Prog_stop_Py();
+	// 安全取消：STOP 后杀掉并卸载当前程序，确认不能再由 START 脱离原流程恢复。
+	bool AbortCurrentProgram();
 	//读当前程序运行行号（暂停时=断点行）；失败返回 -1
 	int GetCurrentProgramLine();
 	//设置程序计数器：下次 START 从第 nLine 行开始（断点续跑用）
@@ -187,6 +192,16 @@ public:
 
 
 	HANDLE m_hMutex;
+	// 常规 RobotComClient command/lifecycle 调用只在单次 SDK 调用期间持此锁；
+	// 文件生成、FTP、普通轮询间隔不持锁。唯一例外是 AbortCurrentProgram：它跨稳定停机
+	// 回读持锁，防止旧流程在 STOP/Kill 与确认之间重新加载或启动程序。
+	mutable std::recursive_mutex m_sdkCommandMutex;
+	template <typename Function>
+	auto WithSdkCommand(Function&& function) -> decltype(function())
+	{
+		std::lock_guard<std::recursive_mutex> lock(m_sdkCommandMutex);
+		return std::forward<Function>(function)();
+	}
 	bool m_bLocalDebugMark;
 	std::atomic<bool> m_bSocketConnected;  // 原子：构造连接已移到后台监控线程，与 UI/CLI 读写并发
 	std::string m_sStepProjectName;
@@ -196,6 +211,10 @@ public:
 	static void InvalidateStepSdkInterfaceModeCache();
 
 private:
+	// 首次 START 前在 SDK mutex 内冻结本软件启动的工程/程序；暂停恢复和安全
+	// Kill 都必须仍匹配该身份，禁止误启动/误杀示教器后来换载的其他程序。
+	std::string m_motionTrackedProjectName;
+	std::string m_motionTrackedProgramName;
 	// 状态时间轴会话锁定：0=未锁定 1=机器人时间戳 2=PC 接收时间。
 	// 机器人毫秒与 PC steady_clock 纪元完全不同，同一连接会话内一经锁定不再
 	// 切换，防止 getTimestamp 偶发 0 值把两种纪元混进同一扫描序列破坏时间插值。

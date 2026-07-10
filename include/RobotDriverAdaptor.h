@@ -97,6 +97,8 @@ public:
         std::string* info = nullptr);
     virtual int CheckDone();
     virtual int CheckRobotDone(int nDelayTime = 200);
+    // 必须执行不可恢复的程序中止并稳定回读真实终态；普通暂停不得返回成功。
+    virtual bool AbortCurrentProgramSafely();
     virtual bool CallJob(std::string sJobName);
     virtual int InitFtp();
     virtual int UploadFile(std::string LocalFilePath, std::string RemoteFilePath);
@@ -155,7 +157,8 @@ public:
     int m_nFTPPort;
     std::string m_sFTPUser;
     std::string m_sFTPPassWord;
-    int m_nSocketPort;
+    // 未成功加载配置时保持无效端口，避免租约端点身份或连接代码读取未初始化值。
+    int m_nSocketPort = 0;
 	int m_nRobotType;									//关节臂类型（按工作种类划分）
     int m_nExternalAxleType;                           // 外部轴类型，来自配置库 [ExternalAxle]
     int m_nRobotAxisCount;                             // 机器人轴数，默认 6，外部轴启用后累加

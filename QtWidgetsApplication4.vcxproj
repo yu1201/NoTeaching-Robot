@@ -168,6 +168,7 @@
     <ClCompile Include="src\SKJCameraControlClient.cpp" />
     <ClCompile Include="src\RobotDriverAdaptor.cpp" />
     <ClCompile Include="src\RobotMessage.cpp" />
+    <ClCompile Include="src\RobotOperationLease.cpp" />
     <ClCompile Include="src\RobotJogDialog.cpp" />
     <ClCompile Include="src\StepRobotDriver.cpp" />
     <ClCompile Include="src\SkDataClass.cpp" />
@@ -232,6 +233,7 @@
     <ClInclude Include="include\RobotLog.h" />
     <ClInclude Include="include\SKJCameraControlClient.h" />
     <ClInclude Include="include\RobotMessage.h" />
+    <ClInclude Include="include\RobotOperationLease.h" />
     <ClInclude Include="include\RobotPoseTransform.h" />
     <ClInclude Include="include\RobotJogDialog.h" />
     <ClInclude Include="include\STEPRobotDriver.h" />

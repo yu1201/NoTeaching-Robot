@@ -11,6 +11,7 @@
 #include "WorkpieceMeshBuilder.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
+#include "RobotOperationLease.h"
 #include "RobotPoseTransform.h"
 #include "STEPRobotDriver.h"
 #include "WeldProcessFile.h"
@@ -6412,6 +6413,43 @@ QString RobotMotionStatusText(RobotDriverAdaptor* pRobotDriver)
     return details.join("；");
 }
 
+bool StopUnverifiedMotionAfterFailure(
+    RobotDriverAdaptor* pRobotDriver,
+    const QString& failure,
+    const MeasureThenWeldService::LogCallback& appendLog)
+{
+    if (pRobotDriver == nullptr)
+    {
+        return false;
+    }
+
+    const QString priorDetail = RobotMotionStatusText(pRobotDriver);
+    const bool stopped = RobotOperationLease::StopAndConfirmUnverifiedMotion(pRobotDriver);
+    const QString stopDetail = RobotMotionStatusText(pRobotDriver);
+
+    QString combined = failure;
+    if (!priorDetail.isEmpty() && !combined.contains(priorDetail))
+    {
+        combined += QString("；%1").arg(priorDetail);
+    }
+    if (stopped)
+    {
+        combined += QStringLiteral("；已自动中止并确认机器人任务终态。");
+    }
+    else
+    {
+        combined += stopDetail.isEmpty()
+            ? QStringLiteral("；自动中止未得到机器人终态确认。")
+            : QString("；自动中止未确认：%1").arg(stopDetail);
+    }
+    pRobotDriver->SetLastRobotError(combined.toUtf8().toStdString());
+    if (appendLog)
+    {
+        appendLog(combined);
+    }
+    return stopped;
+}
+
 bool WaitRobotMotionDone(
     RobotDriverAdaptor* pRobotDriver,
     const QString& name,
@@ -6444,7 +6482,31 @@ bool WaitRobotMotionDone(
                 .arg(FANUC_MOTION_STATE_REG)
                 .arg(lastState)
                 .arg(doneOk ? 1 : 0));
-            if (!doneOk)
+        }
+        if (!doneOk)
+        {
+            const QString detail = RobotMotionStatusText(pRobotDriver);
+            const QString failure = detail.isEmpty()
+                ? QString("运动异常：%1，未取得 FANUC 状态寄存器完成态。").arg(name)
+                : QString("运动异常：%1，未取得 FANUC 状态寄存器完成态，%2").arg(name, detail);
+            if (!RobotOperationLease::IsCancellationRequested(pRobotDriver))
+            {
+                StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
+            }
+            else if (appendLog)
+            {
+                appendLog(failure);
+            }
+            return false;
+        }
+
+        // R[93]=1 只是 TP 程序内部里程碑；还要等 CHECK_DONE 稳定回读，
+        // 确认 CALL_JOB 任务本身已终止后才能释放 motionPending。
+        const int taskDone = pFanucDriver->CheckRobotDone(pollDelayMs);
+        if (appendLog)
+        {
+            appendLog(QString("运动任务终态：%1, CheckRobotDone=%2").arg(name).arg(taskDone));
+            if (taskDone <= 0)
             {
                 const QString detail = RobotMotionStatusText(pRobotDriver);
                 if (!detail.isEmpty())
@@ -6453,7 +6515,8 @@ bool WaitRobotMotionDone(
                 }
             }
         }
-        return doneOk;
+        // CheckRobotDone 已对非取消失败执行 StopAndConfirm，此处不重复中止。
+        return taskDone > 0;
     }
 
     const int done = pRobotDriver->CheckRobotDone(pollDelayMs);
@@ -7024,6 +7087,16 @@ bool MeasureThenWeldService::RunScanCycle(
         };
     auto allowAction = [&](const QString& action) -> bool
         {
+            if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+            {
+                result.status = ScanCycleStatus::Stopped;
+                result.error = QString("安全停止已取消当前硬件流程，禁止在%1前继续下发。").arg(action);
+                if (appendLog)
+                {
+                    appendLog(result.error);
+                }
+                return false;
+            }
             if (stopRequested && stopRequested())
             {
                 result.status = ScanCycleStatus::Stopped;
@@ -7199,6 +7272,18 @@ bool MeasureThenWeldService::RunScanCycle(
     if (scanProgress.motionCompleted)
     {
         result.lastPhase = ScanCyclePhase::AtScanEnd;
+    }
+
+    if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+    {
+        result.status = ScanCycleStatus::Stopped;
+        result.stopRequestedDuringCycle = true;
+        result.error = QStringLiteral("扫描期间收到安全停止；已丢弃本轮结果，并禁止自动收枪或后续焊接运动。");
+        if (appendLog)
+        {
+            appendLog(result.error);
+        }
+        return false;
     }
 
     if (!scanProgress.motionCompleted)
@@ -7757,9 +7842,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         "MOVL");
     if (!moveOk)
     {
-        if (appendLog)
+        const QString failure = QStringLiteral("扫描终点运动启动失败。");
+        if (!RobotOperationLease::IsCancellationRequested(pRobotDriver))
         {
-            appendLog("扫描终点运动启动失败。");
+            StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
+        }
+        else if (appendLog)
+        {
+            appendLog(failure);
         }
         finishCameraProcessingWorkers();
         return false;
@@ -7771,7 +7861,18 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
 
     appendRobotPose();
     int motionState = 0;
-    bool motionStarted = false;
+    // STEP ContiMoveAnyWithProgramName 返回成功前已经回读过 eRun；
+    // 首次扫描轮询可能已经直接看到 eStop，不能因此误判为“未启动”。
+    bool motionStarted = pFanucDriver == nullptr;
+    if (motionStarted)
+    {
+        if (progress != nullptr)
+        {
+            progress->motionStarted = true;
+        }
+        scanStartCameraSequence = frameCache->Mark();
+        lastPulledCameraSequence = scanStartCameraSequence;
+    }
     // 扫描完成超时按扫描距离/配置速度动态估计（固定 120s 在慢速测量长焊缝时不够用）：
     // 预计时间×2 + 30s，夹在 [120s, 1800s]，与焊接执行的完成超时算法一致。
     const double scanDistanceMm = std::hypot(
@@ -7797,6 +7898,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     qint64 lastRobotPollMs = motionStartMs - ROBOT_SAMPLE_INTERVAL_MS;
     while (true)
     {
+        if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+        {
+            if (appendLog)
+            {
+                appendLog(QStringLiteral("扫描运动收到安全停止：立即结束采集并丢弃本轮缓存。"));
+            }
+            finishCameraProcessingWorkers();
+            frameCache->Clear();
+            return false;
+        }
         const qint64 nowMs = SteadyNowMs();
 
         if ((nowMs - lastRobotPollMs) >= ROBOT_SAMPLE_INTERVAL_MS)
@@ -7807,10 +7918,27 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 : pRobotDriver->CheckDone();
             const bool isRunningState = pFanucDriver != nullptr
                 ? (motionState == 10 || motionState == 20 || motionState == 1)
-                : (motionState == 0);
+                : (motionState == STEPROBOTSDK::eRun || motionState == STEPROBOTSDK::ePause);
             const bool isDoneState = pFanucDriver != nullptr
                 ? (motionState == 1)
-                : (motionState == 2 || motionState == 1);
+                : (motionState == STEPROBOTSDK::eStop);
+            const bool isInvalidState = pFanucDriver != nullptr
+                ? (motionState != 0 && motionState != 1 && motionState != 10 && motionState != 20)
+                : (motionState != STEPROBOTSDK::eRun
+                    && motionState != STEPROBOTSDK::ePause
+                    && motionState != STEPROBOTSDK::eStop);
+            if (isInvalidState)
+            {
+                const QString failure = pFanucDriver != nullptr
+                    ? QString("扫描运动状态读取失败：R[%1]=%2。")
+                        .arg(FANUC_MOTION_STATE_REG)
+                        .arg(motionState)
+                    : QString("扫描运动状态异常：CheckDone=%1（不是 eRun/ePause/eStop）。")
+                        .arg(motionState);
+                StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
+                finishCameraProcessingWorkers();
+                return false;
+            }
             if (isRunningState)
             {
                 if (!motionStarted)
@@ -7851,6 +7979,21 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             }
             if (motionStarted && isDoneState)
             {
+                // STEP 的 ePause 是可恢复态，绝不是完成；eStop 也要再由
+                // CheckRobotDone 校验无控制器错误。FANUC R[93]=1 同样只是里程碑，
+                // 还需 CHECK_DONE 稳定确认任务退出。
+                const int terminalState = pRobotDriver->CheckRobotDone(100);
+                if (appendLog)
+                {
+                    appendLog(QString("扫描运动终态确认：CheckRobotDone=%1").arg(terminalState));
+                }
+                if (terminalState <= 0)
+                {
+                    // CheckRobotDone 自身已对非取消异常执行可验证中止，不重复 stop。
+                    finishCameraProcessingWorkers();
+                    return false;
+                }
+                RobotOperationLease::MarkMotionCompleted(pRobotDriver);
                 if (progress != nullptr)
                 {
                     progress->motionCompleted = true;
@@ -7863,38 +8006,27 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             const qint64 elapsedMs = SteadyNowMs() - motionStartMs;
 			if (!motionStarted && elapsedMs > 3000)
 			{
-				if (appendLog)
-				{
-					if (pFanucDriver != nullptr)
-					{
-						appendLog(QString("扫描运动未在 3s 内进入运行态：R[%1]=%2").arg(FANUC_MOTION_STATE_REG).arg(motionState));
-					}
-					else
-					{
-						appendLog(QString("扫描运动未在 3s 内进入运行态：CheckDone=%1").arg(motionState));
-					}
-				}
+				const QString failure = pFanucDriver != nullptr
+					? QString("扫描运动未在 3s 内进入运行态：R[%1]=%2。")
+						.arg(FANUC_MOTION_STATE_REG)
+						.arg(motionState)
+					: QString("扫描运动未在 3s 内进入运行态：CheckDone=%1。")
+						.arg(motionState);
+				StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
 				finishCameraProcessingWorkers();
 				return false;
             }
 			if (motionStarted && elapsedMs > scanFinishTimeoutMs)
 			{
-				if (appendLog)
-				{
-					if (pFanucDriver != nullptr)
-					{
-						appendLog(QString("扫描运动等待完成超时（%1 s）：R[%2]=%3")
-							.arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0)
-							.arg(FANUC_MOTION_STATE_REG)
-							.arg(motionState));
-					}
-					else
-					{
-						appendLog(QString("扫描运动等待完成超时（%1 s）：CheckDone=%2")
-							.arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0)
-							.arg(motionState));
-					}
-				}
+				const QString failure = pFanucDriver != nullptr
+					? QString("扫描运动等待完成超时（%1 s）：R[%2]=%3。")
+						.arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0)
+						.arg(FANUC_MOTION_STATE_REG)
+						.arg(motionState)
+					: QString("扫描运动等待完成超时（%1 s）：CheckDone=%2。")
+						.arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0)
+						.arg(motionState);
+				StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
                 finishCameraProcessingWorkers();
                 return false;
             }
@@ -7985,6 +8117,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     finishCameraProcessingWorkers();
     const qint64 postMotionProcessingWaitMs = SteadyNowMs() - processingJoinStartMs;
     const qint64 parallelProcessingElapsedMs = SteadyNowMs() - processingWallStartMs;
+    if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+    {
+        frameCache->Clear();
+        savedPath.clear();
+        if (appendLog)
+        {
+            appendLog(QStringLiteral("扫描后处理开始前检测到安全停止，已丢弃本轮结果。"));
+        }
+        return false;
+    }
 
     // ===== 统计时间对齐（方案A）=====
     // 首帧单点对齐的抖动实测可达 ±60ms（机器人位姿50ms采样量化 + 运行态检测抖动 + 单帧传输延迟抖动，
@@ -8504,6 +8646,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     }
 
     const qint64 outputBuildElapsedMs = SteadyNowMs() - outputBuildStartMs;
+
+    if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+    {
+        savedPath.clear();
+        if (appendLog)
+        {
+            appendLog(QStringLiteral("扫描输出写盘前检测到安全停止，已取消本轮文件保存。"));
+        }
+        return false;
+    }
 
     QString error;
     auto saveTextLinesTimed = [this, &error](const QString& filePath, const std::vector<QString>& lines, qint64& elapsedMs)
@@ -9105,6 +9257,15 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     else if (appendLog)
     {
         appendLog("焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。");
+    }
+    if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+    {
+        savedPath.clear();
+        if (appendLog)
+        {
+            appendLog(QStringLiteral("扫描后处理期间收到安全停止：本轮输出不进入后续焊接流程。"));
+        }
+        return false;
     }
     return true;
 }
@@ -9992,26 +10153,51 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
         return true;
     }
 
-    QString stepProgramNameText = "ContiMoveAny";
-    int ret = 0;
-    if (STEPRobotCtrl* pStepDriver = dynamic_cast<STEPRobotCtrl*>(pRobotDriver))
+    STEPRobotCtrl* pStepDriver = dynamic_cast<STEPRobotCtrl*>(pRobotDriver);
+    if (pStepDriver == nullptr)
     {
-        const std::string stepProgramName = STEPRobotCtrl::MakeTimestampWeldProgramName();
-        stepProgramNameText = QString::fromStdString(stepProgramName);
-        ret = pStepDriver->ContiMoveAnyWithProgramName(moveInfos, stepProgramName);
+        error = QStringLiteral("下发焊接轨迹失败：当前机器人驱动不是 FANUC 或 STEP。");
+        return false;
     }
-    else
+
+    // Downlink 的语义与上面 FANUC 分支保持一致：只生成和上传，
+    // 不加载、不启动机器人程序。不能调用 ContiMoveAnyWithProgramName，
+    // 因为该 API 会立即启动运动，导致本函数在未等待终态时就返回。
+    const std::string stepProgramName = STEPRobotCtrl::MakeTimestampWeldProgramName();
+    const std::string localStepDir = ".\\Job\\STEP";
+    std::string localProgramFile;
+    std::string localDataFile;
+    std::string generateError;
+    if (!STEPRobotCtrl::WriteContiMoveAnyFiles(
+        moveInfos,
+        localStepDir,
+        stepProgramName,
+        pStepDriver->m_tAxisUnit,
+        &localProgramFile,
+        &localDataFile,
+        &generateError,
+        true))
     {
-        ret = pRobotDriver->ContiMoveAny(moveInfos);
-    }
-    if (ret != 0)
-    {
-        error = QString("STEP焊接轨迹下发/启动失败：ret=%1，姿态文件=%2")
-            .arg(ret)
+        error = QString("生成 STEP 焊接轨迹文件失败：%1，姿态文件=%2")
+            .arg(DecodeRobotMessageText(generateError))
             .arg(QDir::toNativeSeparators(QFileInfo(poseFilePath).absoluteFilePath()));
         return false;
     }
-    summary = QString("点数=%1，最终轨迹点间距=%2 mm，方向=%3，轨迹速度=%4 mm/min (下发=%5 %6)，抽样轨迹文件=%7，STEP使用%8生成、上传并启动程序")
+
+    const std::string remoteBaseDir = "/UserPrograms/PCRobot.sr/";
+    const std::string remoteProgramFile = remoteBaseDir + stepProgramName + ".srp";
+    const std::string remoteDataFile = remoteBaseDir + stepProgramName + ".srd";
+    if (pStepDriver->UploadFile(localProgramFile, remoteProgramFile) != 0
+        || pStepDriver->UploadFile(localDataFile, remoteDataFile) != 0)
+    {
+        error = QString("STEP焊接轨迹上传失败：本地SRP=%1，本地SRD=%2，远程目录=%3")
+            .arg(QDir::toNativeSeparators(QString::fromStdString(localProgramFile)))
+            .arg(QDir::toNativeSeparators(QString::fromStdString(localDataFile)))
+            .arg(QString::fromStdString(remoteBaseDir));
+        return false;
+    }
+
+    summary = QString("点数=%1，最终轨迹点间距=%2 mm，方向=%3，轨迹速度=%4 mm/min (下发=%5 %6)，抽样轨迹文件=%7，程序=%8，本地SRP=%9，本地SRD=%10，远程目录=%11，当前仅下发未自动执行")
         .arg(static_cast<int>(moveInfos.size()))
         .arg(param.dFinalWeldTrajectoryStepMm, 0, 'f', 3)
         .arg(WeldDirectionText(preset))
@@ -10019,7 +10205,10 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
         .arg(linearCommandSpeed, 0, 'f', 3)
         .arg(linearCommandSpeedUnit)
         .arg(sampledSaved ? sampledPosePath : QString("保存失败：%1").arg(sampledSaveError))
-        .arg(stepProgramNameText);
+        .arg(QString::fromStdString(stepProgramName))
+        .arg(QDir::toNativeSeparators(QString::fromStdString(localProgramFile)))
+        .arg(QDir::toNativeSeparators(QString::fromStdString(localDataFile)))
+        .arg(QString::fromStdString(remoteBaseDir));
     return true;
 }
 
@@ -10277,6 +10466,12 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             "MOVL"))
         {
             error = "启动下枪安全位置直线运动失败。";
+            if (RobotOperationLease::MotionCompletionPending(pRobotDriver)
+                && !RobotOperationLease::IsCancellationRequested(pRobotDriver))
+            {
+                StopUnverifiedMotionAfterFailure(pRobotDriver, error, appendLog);
+                error = DecodeRobotMessageText(pRobotDriver->GetLastRobotError());
+            }
             return false;
         }
         if (appendLog)
@@ -10297,6 +10492,8 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             error = QString("下发焊接轨迹失败：ret=%1，姿态文件=%2。机器人可能仍在移动到下枪安全位置。")
                 .arg(downlinkRet)
                 .arg(QDir::toNativeSeparators(QFileInfo(poseFilePath).absoluteFilePath()));
+            StopUnverifiedMotionAfterFailure(pRobotDriver, error, appendLog);
+            error = DecodeRobotMessageText(pRobotDriver->GetLastRobotError());
             return false;
         }
 
@@ -10315,6 +10512,28 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             error = QString("下枪安全位置未完成，R[%1]=%2，取消运行焊接轨迹。")
                 .arg(FANUC_MOTION_STATE_REG)
                 .arg(startSafeLastState);
+            StopUnverifiedMotionAfterFailure(pRobotDriver, error, appendLog);
+            error = DecodeRobotMessageText(pRobotDriver->GetLastRobotError());
+            return false;
+        }
+
+        const int startSafeTaskDone = pFanucDriver->CheckRobotDone(100);
+        if (appendLog)
+        {
+            appendLog(QString("下枪安全位置任务终态：CheckRobotDone=%1").arg(startSafeTaskDone));
+        }
+        if (startSafeTaskDone <= 0)
+        {
+            const QString detail = RobotMotionStatusText(pRobotDriver);
+            error = detail.isEmpty()
+                ? QString("下枪安全位置虽写入 R[%1]=%2，但机器人任务未稳定退出：CheckRobotDone=%3。")
+                    .arg(FANUC_MOTION_STATE_REG)
+                    .arg(startSafeLastState)
+                    .arg(startSafeTaskDone)
+                : QString("下枪安全位置任务未稳定退出：CheckRobotDone=%1，%2")
+                    .arg(startSafeTaskDone)
+                    .arg(detail);
+            // CheckRobotDone 已对非取消异常执行可验证中止。
             return false;
         }
 

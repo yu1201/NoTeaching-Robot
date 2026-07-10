@@ -6,8 +6,10 @@
 #include "RobotDataHelper.h"
 #include "WeldProcessFile.h"
 #include "RobotMessage.h"
+#include "RobotOperationLease.h"
 
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDoubleSpinBox>
@@ -135,6 +137,12 @@ VirtualWeldTestDialog::VirtualWeldTestDialog(ContralUnit* pContralUnit, int unit
     AppendLog(QStringLiteral("提示：实焊模式下机器人运行会真实引弧，如仅观察摆动请现场自行断送丝/断气。"));
 
     LoadRobotList();
+}
+
+void VirtualWeldTestDialog::closeEvent(QCloseEvent* event)
+{
+    // 嵌入页 close 只隐藏，后台对象不会销毁；运行中允许回主页使用固定安全停止。
+    QDialog::closeEvent(event);
 }
 
 VirtualWeldTestDialog::~VirtualWeldTestDialog() = default;
@@ -506,6 +514,15 @@ void VirtualWeldTestDialog::OnRunOnRobot()
         return;
     }
 
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("虚拟焊道测试"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, QStringLiteral("下发并运行"), leaseError);
+        return;
+    }
+
     const QString execPath = m_lastWeldPosePath;
     const double pointStepMm = m_lastPointStepMm;
 
@@ -513,7 +530,7 @@ void VirtualWeldTestDialog::OnRunOnRobot()
     AppendLog(QStringLiteral("———— 开始下发并运行虚拟焊道 ————"));
 
     QPointer<VirtualWeldTestDialog> self(this);
-    std::thread([self, driver, execPath, pointStepMm, actualWeld]()
+    std::thread([self, driver, execPath, pointStepMm, actualWeld, operationLease]()
         {
             MeasureThenWeldService service;
             T_PRECISE_MEASURE_PARAM param;

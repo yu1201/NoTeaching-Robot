@@ -3,6 +3,7 @@
 #include "HandEyeMatrixConfig.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
+#include "RobotOperationLease.h"
 #include "WindowStyleHelper.h"
 
 #include <QCloseEvent>
@@ -211,6 +212,15 @@ bool HandEyeMatrixDialog::ReadRobotEyeVariable()
     {
         QMessageBox::warning(this, "读取机器人 eye", error);
         AppendLog("读取机器人 eye 失败：" + error);
+        return false;
+    }
+
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("读取机器人手眼变量"), &error);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "读取机器人 eye", error);
+        AppendLog("读取机器人 eye 已被互锁拦截：" + error);
         return false;
     }
 

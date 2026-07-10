@@ -12,6 +12,7 @@ class FANUCRobotCtrl;
 class RobotDriverAdaptor;
 class QTimer;
 class CameraFrameCache;
+class QWidget;
 
 // 功能测试子界面：把主界面上的机器人调试/运动测试按钮集中管理。
 class FunctionTestDialog : public QDialog
@@ -56,6 +57,7 @@ private:
     QPushButton* m_pMovjTestBtn = nullptr;
     QPushButton* m_pMoveZeroBtn = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
+    QWidget* m_pCommandContent = nullptr;
     QTimer* m_pMotionStateTimer = nullptr;
     QVector<QPushButton*> m_motionButtons;
     QString m_kinematicsSampleFilePath;
@@ -65,4 +67,5 @@ private:
     bool m_bFanucMovlRunning = false;
     bool m_bFanucMovjRunning = false;
     bool m_bFanucMoveZeroRunning = false;
+    bool m_bRobotCommandRunning = false;
 };

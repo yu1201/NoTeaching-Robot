@@ -26,6 +26,7 @@
 #include "RobotDataHelper.h"
 #include "RobotJogDialog.h"
 #include "RobotMessage.h"
+#include "RobotOperationLease.h"
 #include "SKJCameraControlClient.h"
 #include "STEPRobotDriver.h"
 #include "TouchKeyboardManager.h"
@@ -459,6 +460,10 @@ namespace
 			if (event->type() == QEvent::MouseButtonPress)
 			{
 				QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+				if (RobotOperationLease::AnyActive())
+				{
+					return true;
+				}
 				if (mouseEvent->button() == Qt::RightButton)
 				{
 					ShowToolContextMenu(button->toolId(), mouseEvent->globalPosition().toPoint());
@@ -520,6 +525,11 @@ namespace
 			if (event == nullptr)
 			{
 				QWidget::contextMenuEvent(event);
+				return;
+			}
+			if (RobotOperationLease::AnyActive())
+			{
+				event->accept();
 				return;
 			}
 			if (QWidget* child = childAt(event->pos()))
@@ -3888,6 +3898,24 @@ namespace
 			LoadUnits(false);
 		}
 
+		bool IsBusy() const
+		{
+			return m_busy;
+		}
+
+	protected:
+		void closeEvent(QCloseEvent* event) override
+		{
+			if (m_busy)
+			{
+				QMessageBox::information(this, "FTP Job 文件管理",
+					"FTP 操作仍在执行，完成前不能关闭或销毁此页面。");
+				event->ignore();
+				return;
+			}
+			QDialog::closeEvent(event);
+		}
+
 	private:
 		struct UnitConfig
 		{
@@ -4383,7 +4411,7 @@ namespace
 			}
 			if (m_closeBtn != nullptr)
 			{
-				m_closeBtn->setEnabled(true);
+				m_closeBtn->setEnabled(!busy);
 			}
 			if (m_statusLabel != nullptr)
 			{
@@ -4416,6 +4444,16 @@ namespace
 				QMessageBox::warning(this, title, connectionError);
 				return;
 			}
+			const UnitConfig unit = CurrentUnit();
+			RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, unit.unitIndex);
+			QString leaseError;
+			const auto operationLease = RobotOperationLease::TryAcquire(
+				driver, QString("FTP Job：%1").arg(title), &leaseError);
+			if (!operationLease)
+			{
+				QMessageBox::warning(this, title, leaseError);
+				return;
+			}
 
 			const QString logPath = RobotDataHelper::BuildProjectPath("Log/FtpJobManagement.log");
 			QDir().mkpath(QFileInfo(logPath).absolutePath());
@@ -4423,7 +4461,7 @@ namespace
 			AppendLog(title + "开始。");
 
 			QPointer<FtpJobManagementDialog> dialog(this);
-			QThread* taskThread = QThread::create([dialog, connection, title, work, onSuccess, logPath]() mutable
+			QThread* taskThread = QThread::create([dialog, connection, title, work, onSuccess, logPath, operationLease]() mutable
 				{
 					bool ok = false;
 					QString error;
@@ -4448,11 +4486,7 @@ namespace
 						error = "FTP 操作发生未知异常。";
 					}
 
-					if (dialog == nullptr)
-					{
-						return;
-					}
-					QMetaObject::invokeMethod(dialog.data(), [dialog, title, ok, error, onSuccess]() mutable
+					QMetaObject::invokeMethod(qApp, [dialog, title, ok, error, onSuccess]() mutable
 						{
 							if (dialog == nullptr)
 							{
@@ -7649,6 +7683,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pGuestLoginBtn(nullptr)
 	, m_pDashboardConnectBtn(nullptr)
 	, m_pDashboardClearAlarmBtn(nullptr)
+	, m_pDashboardEmergencyStopBtn(nullptr)
 	, m_pDashboardModeBtn(nullptr)
 	, m_pDashboardDebugLogBtn(nullptr)
 	, m_pDashboardToolPanel(nullptr)
@@ -8105,10 +8140,21 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QPushButton* quickJogBtn = makeLargeButton("点动控制\n单步移动/目标点运动", quickGroup);
 	QPushButton* quickTeachPositionBtn = makeLargeButton("扫描位置示教\n下枪/起点/终点/收枪", quickGroup);
 	QPushButton* quickCalibrationBtn = makeLargeButton("标定与相机参数\n手眼标定、矩阵和相机配置", quickGroup);
+	m_pDashboardEmergencyStopBtn = new QPushButton("安全停止所有本软件活动机器人任务（不可从主页删除）", quickGroup);
+	m_pDashboardEmergencyStopBtn->setMinimumHeight(58);
+	m_pDashboardEmergencyStopBtn->setStyleSheet(
+		"QPushButton { background: #8F1D24; color: white; border: 2px solid #FF7B82; border-radius: 12px; "
+		"font-size: 18px; font-weight: 800; padding: 10px 18px; }"
+		"QPushButton:hover { background: #B3262E; border-color: #FFB2B6; }"
+		"QPushButton:pressed { background: #641318; }");
+	m_pDashboardEmergencyStopBtn->setToolTip(
+		"锁存取消本软件持有租约的全部机器人流程，并由机器人侧真实终止/卸载其程序；"
+		"停机未确认时继续闭锁。它不是控制柜急停，不能替代示教器或外部安全回路。");
 	quickLayout->addWidget(quickMeasureBtn, 0, 0);
 	quickLayout->addWidget(quickJogBtn, 0, 1);
 	quickLayout->addWidget(quickTeachPositionBtn, 1, 0);
 	quickLayout->addWidget(quickCalibrationBtn, 1, 1);
+	quickLayout->addWidget(m_pDashboardEmergencyStopBtn, 2, 0, 1, 2);
 	dashboardActionLayout->addWidget(quickGroup, 1);
 
 	QGroupBox* toolGroup = new QGroupBox("现场小工具", m_pDashboardPage);
@@ -8669,6 +8715,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pDashboardDebugLogBtn, &QPushButton::toggled, this, &QtWidgetsApplication4::SetDebugLogMode);
 	connect(m_pDashboardConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ToggleCurrentRobotConnection);
 	connect(m_pDashboardClearAlarmBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotClearAlarmTest);
+	connect(m_pDashboardEmergencyStopBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotEmergencyStop);
 	connect(m_pDashboardModeBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotSwitchStepMode);
 	for (const QPair<QString, QString>& spec : functionToolSpecs)
 	{
@@ -8952,6 +8999,21 @@ bool QtWidgetsApplication4::HasRunningMeasureThenWeldFlow() const
 
 void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 {
+	if (RobotOperationLease::AnyActive())
+	{
+		if (ui.statusBar != nullptr)
+		{
+			ui.statusBar->showMessage(
+				QString("机器人硬件操作正在运行：%1。关闭已拦截；如需终止请使用主页固定红色安全停止按钮。")
+					.arg(RobotOperationLease::ActiveSummary()),
+				12000);
+		}
+		if (event != nullptr)
+		{
+			event->ignore();
+		}
+		return;
+	}
 	if (HasRunningMeasureThenWeldFlow())
 	{
 		QMessageBox::information(
@@ -9396,8 +9458,8 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
 	{
 		currentDriver = static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
 	}
-	const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(currentDriver) != nullptr;
 	const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(currentDriver) != nullptr;
+	const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(currentDriver) != nullptr;
 	if (DashboardToolPanel* panel = dynamic_cast<DashboardToolPanel*>(m_pDashboardToolPanel))
 	{
 		panel->SetCurrentRobotScope(isFanucDriver ? "fanuc" : (isStepDriver ? "step" : QString()));
@@ -9420,6 +9482,7 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
 			}
 			return false;
 		};
+	const bool robotOperationBusy = RobotOperationLease::AnyActive();
     for (const QPointer<QWidget>& widget : m_robotOperationWidgets)
     {
         if (!widget.isNull())
@@ -9450,8 +9513,14 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
 				enabled = false;
 				disableReasons << "该测试依赖 FANUC 驱动，当前机器人不是 FANUC。";
 			}
-            widget->setEnabled(enabled);
-            widget->setToolTip(enabled ? QString() : disableReasons.join('\n'));
+			const QString baseToolTip = enabled ? QString() : disableReasons.join('\n');
+			widget->setProperty("robotSetupEnabled", enabled);
+			widget->setProperty("robotSetupToolTip", baseToolTip);
+			widget->setEnabled(enabled && !robotOperationBusy);
+			widget->setToolTip(robotOperationBusy
+				? QString("机器人硬件操作正在运行（%1）；仅保留主页固定红色安全停止按钮。")
+					.arg(RobotOperationLease::ActiveSummary())
+				: baseToolTip);
         }
     }
     RefreshDashboardConnectionState();
@@ -9489,6 +9558,34 @@ void QtWidgetsApplication4::RefreshDashboardConnectionState()
 		currentDriver = static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
 	}
 	const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(currentDriver) != nullptr;
+	const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(currentDriver) != nullptr;
+	const bool robotOperationBusy = RobotOperationLease::AnyActive();
+	if (m_pDashboardEmergencyStopBtn != nullptr)
+	{
+		m_pDashboardEmergencyStopBtn->setEnabled(robotOperationBusy);
+	}
+	for (const QPointer<QWidget>& widget : m_robotOperationWidgets)
+	{
+		if (widget.isNull())
+		{
+			continue;
+		}
+		const QVariant baseEnabledProperty = widget->property("robotSetupEnabled");
+		const bool baseEnabled = baseEnabledProperty.isValid()
+			? baseEnabledProperty.toBool()
+			: widget->isEnabled();
+		if (!baseEnabledProperty.isValid())
+		{
+			widget->setProperty("robotSetupEnabled", baseEnabled);
+			widget->setProperty("robotSetupToolTip", widget->toolTip());
+		}
+		const QString baseToolTip = widget->property("robotSetupToolTip").toString();
+		widget->setEnabled(baseEnabled && !robotOperationBusy);
+		widget->setToolTip(robotOperationBusy
+			? QString("机器人硬件操作正在运行（%1）；仅保留主页固定红色安全停止按钮。")
+				.arg(RobotOperationLease::ActiveSummary())
+			: baseToolTip);
+	}
 	if (m_pDashboardConnectBtn != nullptr)
 	{
 		m_pDashboardConnectBtn->setText(connected
@@ -9505,10 +9602,11 @@ void QtWidgetsApplication4::RefreshDashboardConnectionState()
 	if (m_pDashboardModeBtn != nullptr)
 	{
 		m_pDashboardModeBtn->setProperty("dashboardToolRuntimeVisible", isStepDriver);
+		m_pDashboardModeBtn->setText("STEP 模式");
 		m_pDashboardModeBtn->hide();
 		m_pDashboardModeBtn->setToolTip(isStepDriver
-			? "切换新时达机器人模式。"
-			: "FANUC 不显示新时达模式切换。");
+			? "切换新时达机器人模式；安全中止请使用主页固定红色按钮。"
+			: "仅 STEP 显示模式切换。");
 	}
 	if (DashboardToolPanel* panel = dynamic_cast<DashboardToolPanel*>(m_pDashboardToolPanel))
 	{
@@ -9516,8 +9614,28 @@ void QtWidgetsApplication4::RefreshDashboardConnectionState()
 	}
 }
 
+bool QtWidgetsApplication4::EnsureRobotUiActionIdle(const QString& actionName)
+{
+	if (!RobotOperationLease::AnyActive())
+	{
+		return true;
+	}
+	if (ui.statusBar != nullptr)
+	{
+		ui.statusBar->showMessage(
+			QString("机器人硬件操作正在运行（%1）；%2已冻结，请使用主页固定红色安全停止按钮。")
+				.arg(RobotOperationLease::ActiveSummary(), actionName),
+			10000);
+	}
+	return false;
+}
+
 void QtWidgetsApplication4::RunFunctionTestDashboardTool(const QString& actionId)
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("普通工具")))
+	{
+		return;
+	}
 	if (!RequirePermission(kRoleEngineer, "机器人功能测试"))
 	{
 		return;
@@ -9530,6 +9648,13 @@ void QtWidgetsApplication4::RunFunctionTestDashboardTool(const QString& actionId
 	}
 	if (m_pFunctionTestPage != nullptr && m_nFunctionTestPageUnitIndex != currentUnitIndex)
 	{
+		if (RobotOperationLease::AnyActive())
+		{
+			QMessageBox::warning(this, "机器人功能测试",
+				QString("机器人硬件操作正在运行（%1），不能销毁原机器人功能测试页。")
+					.arg(RobotOperationLease::ActiveSummary()));
+			return;
+		}
 		delete m_pFunctionTestPage;
 		m_pFunctionTestPage = nullptr;
 	}
@@ -9975,12 +10100,13 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 		RefreshCameraReceiveModeButtonUi();
 		return;
 	}
-	if (HasRunningMeasureThenWeldFlow())
+	if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
 	{
 		QMessageBox::warning(
 			this,
 			QStringLiteral("相机接收模式"),
-			QStringLiteral("先测后焊或流程测试正在运行，不能重建相机接收线程。请先安全停止流程。"));
+			QString("机器人硬件操作正在运行（%1），不能重建相机接收线程。请先安全停止操作。")
+				.arg(RobotOperationLease::ActiveSummary()));
 		RefreshCameraReceiveModeButtonUi();
 		return;
 	}
@@ -9994,6 +10120,12 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 	SaveCameraReceiveMode();
 	RefreshCameraReceiveModeButtonUi();
 
+	delete m_pFunctionTestPage;
+	m_pFunctionTestPage = nullptr;
+	m_nFunctionTestPageUnitIndex = -1;
+	delete m_pCameraParamPage;
+	m_pCameraParamPage = nullptr;
+	m_sCameraParamPageRobotName.clear();
 	StopScanCameraRuntimes();
 	InitializeScanCameraRuntimes();
 
@@ -10496,13 +10628,49 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 	auto reloadControlUnits = [this]()
 		{
 			// 重载会销毁并重建机器人驱动；若有焊接/虚拟焊道流程正在后台线程驱动机器人，重载会造成悬垂指针/并发，必须先拦截。
-			if (HasRunningMeasureThenWeldFlow()
+			if (RobotOperationLease::AnyActive()
+				|| HasRunningMeasureThenWeldFlow()
 				|| (m_pVirtualWeldTestPage != nullptr && m_pVirtualWeldTestPage->IsRunning()))
 			{
 				QMessageBox::information(this, "控制单元管理",
-					"焊接/虚拟焊道流程正在运行，请等待流程结束后再重新加载控制单元。");
+					QString("机器人硬件操作正在运行：%1。\n请等待安全结束后再重新加载控制单元。")
+						.arg(RobotOperationLease::ActiveSummary()));
 				return;
 			}
+
+			// 所有缓存 driver/camera 指针的页面必须在重载前销毁；即使页面当前空闲，
+			// InitContralUnit/StopScanCameraRuntimes 后继续复用也会指向已释放对象。
+			for (const QPointer<MeasureThenWeldDialog>& guardedPage : m_measureThenWeldPages.values())
+			{
+				delete guardedPage.data();
+			}
+			m_measureThenWeldPages.clear();
+			m_pMeasureThenWeldPage = nullptr;
+			m_nMeasureThenWeldPageUnitIndex = -1;
+			for (const QPointer<RobotJogDialog>& guardedPage : m_robotJogPages.values())
+			{
+				delete guardedPage.data();
+			}
+			m_robotJogPages.clear();
+			m_pRobotJogPage = nullptr;
+			m_nRobotJogPageUnitIndex = -1;
+			delete m_pFunctionTestPage;
+			m_pFunctionTestPage = nullptr;
+			m_nFunctionTestPageUnitIndex = -1;
+			delete m_pVirtualWeldTestPage;
+			m_pVirtualWeldTestPage = nullptr;
+			m_nVirtualWeldTestPageUnitIndex = -1;
+			delete m_pProcessLoopTestPage;
+			m_pProcessLoopTestPage = nullptr;
+			delete m_pFtpJobManagementPage;
+			m_pFtpJobManagementPage = nullptr;
+			m_nFtpJobManagementPageUnitIndex = -1;
+			delete m_pCameraParamPage;
+			m_pCameraParamPage = nullptr;
+			m_sCameraParamPageRobotName.clear();
+			delete m_pPreciseMeasureEditPage;
+			m_pPreciseMeasureEditPage = nullptr;
+			CloseGrooveCameraPreviewWindow();
 			StopScanCameraRuntimes();
 			if (m_pContralUnit != nullptr)
 			{
@@ -10623,6 +10791,14 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 
 	if (m_pFtpJobManagementPage != nullptr && m_nFtpJobManagementPageUnitIndex != currentUnitIndex)
 	{
+		FtpJobManagementDialog* ftpPage = static_cast<FtpJobManagementDialog*>(m_pFtpJobManagementPage);
+		if (ftpPage->IsBusy())
+		{
+			QMessageBox::information(this, "FTP Job 文件",
+				"FTP 操作仍在执行，完成前不能切换控制单元或销毁页面。");
+			ShowManagementEmbeddedPage(m_pFtpJobManagementPage);
+			return;
+		}
 		m_pManagementStack->removeWidget(m_pFtpJobManagementPage);
 		m_pFtpJobManagementPage->deleteLater();
 		m_pFtpJobManagementPage = nullptr;
@@ -11031,7 +11207,7 @@ void QtWidgetsApplication4::OpenAboutDialog()
 	}
 	auto* dlg = new OnlineServicesDialog(
 		EnsureScanDataUploader(),
-		[this]() { return HasRunningMeasureThenWeldFlow(); },
+		[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 		true,
 		false,
 		this);
@@ -11525,6 +11701,18 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	{
 		LogCommandLineMessage("CLI 未找到 FANUC 驱动，跳过 FANUC 命令。");
 	}
+	RobotOperationLease::Ptr fanucCliLease;
+	if (pFanucDriver != nullptr && needsFanuc)
+	{
+		QString leaseError;
+		fanucCliLease = RobotOperationLease::TryAcquire(
+			pFanucDriver, QStringLiteral("CLI FANUC 硬件操作"), &leaseError);
+		if (!fanucCliLease)
+		{
+			LogCommandLineMessage("CLI FANUC 操作已被互锁拦截：" + leaseError);
+			pFanucDriver = nullptr;
+		}
+	}
 	if (pFanucDriver != nullptr)
 	{
 		const bool needsSocket = arguments.contains("--fanuc-connect")
@@ -11573,7 +11761,18 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		{
 			if (arguments[i] == "--fanuc-raw" && i + 1 < arguments.size())
 			{
-				const QString command = arguments[++i];
+				const QString command = arguments[++i].trimmed();
+				const QString normalizedCommand = command.toUpper();
+				static const QRegularExpression readOnlyFanucCommand(
+					QStringLiteral("^(?:GET_[A-Z0-9_]+|CHECK_DONE)(?::[A-Z0-9_+.,-]+)?$"));
+				if (!readOnlyFanucCommand.match(normalizedCommand).hasMatch())
+				{
+					LogCommandLineMessage(QString(
+						"CLI FANUC RAW 已拒绝可能改变状态或触发运动的命令：%1。"
+						"RAW 仅允许 GET_* / CHECK_DONE 只读诊断；调用程序请使用 --fanuc-call（会等待真实完成）。")
+						.arg(command));
+					continue;
+				}
 				const std::string response = pFanucDriver->SendRawCommandForTest(command.toStdString());
 				LogCommandLineMessage(QString("CLI FANUC RAW %1 -> %2")
 					.arg(command, QString::fromStdString(response)));
@@ -11582,7 +11781,9 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			{
 				const QString program = arguments[++i];
 				const bool ok = pFanucDriver->CallJob(program.toStdString());
-				LogCommandLineMessage(QString("CLI FANUC CALL %1 -> %2").arg(program, ok ? "OK" : "FAIL"));
+				const int done = ok ? pFanucDriver->CheckRobotDone(200) : -1;
+				LogCommandLineMessage(QString("CLI FANUC CALL %1 -> %2，CheckRobotDone=%3")
+					.arg(program, ok ? "OK" : "FAIL").arg(done));
 			}
 		}
 
@@ -11870,7 +12071,20 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 		return;
 	}
 
-	const bool noWait = CliOptionContains(arguments, "--robot-no-wait");
+	const bool noWaitRequested = CliOptionContains(arguments, "--robot-no-wait");
+	if (noWaitRequested)
+	{
+		LogCommandLineMessage("CLI --robot-no-wait 已因全局硬件互锁禁用：本次仍会等待真实运动完成。");
+	}
+	const bool noWait = false;
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		driver, QStringLiteral("CLI 机器人运动"), &leaseError);
+	if (!operationLease)
+	{
+		LogCommandLineMessage("CLI 机器人运动已被互锁拦截：" + leaseError);
+		return;
+	}
 	bool executedMotion = false;
 	for (int i = 1; i < arguments.size(); ++i)
 	{
@@ -12655,6 +12869,14 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 		LogCommandLineMessage("CLI 先测后焊扫描失败：重复次数必须大于0。");
 		return false;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("CLI 先测后焊扫描"), &leaseError);
+	if (!operationLease)
+	{
+		LogCommandLineMessage("CLI 先测后焊扫描已被互锁拦截：" + leaseError);
+		return false;
+	}
 
 	if (unitIndex < 0 && m_pContralUnit != nullptr)
 	{
@@ -13112,27 +13334,7 @@ void QtWidgetsApplication4::OpenProcessLoopTestPage()
 
 	ProcessLoopTestDialog* loopPage = new ProcessLoopTestDialog(m_pContralUnit, CurrentRobotUnitIndex(),
 		loadDefaults, runner, m_pManagementStack);
-	// 互锁：先测后焊页流程 / 虚拟焊道测试在跑时，拦下流程测试开始（同机同驱动会冲突）。
-	loopPage->SetPreStartGuard([this](QString& reason) -> bool
-		{
-			for (const QPointer<MeasureThenWeldDialog>& guardedPage : m_measureThenWeldPages.values())
-			{
-				if (const MeasureThenWeldDialog* page = guardedPage.data())
-				{
-					if (page->IsRunning())
-					{
-						reason = QStringLiteral("先测后焊流程正在运行，请等待其结束后再开始流程测试。");
-						return false;
-					}
-				}
-			}
-			if (m_pVirtualWeldTestPage != nullptr && m_pVirtualWeldTestPage->IsRunning())
-			{
-				reason = QStringLiteral("虚拟焊道测试正在运行，请等待其结束后再开始流程测试。");
-				return false;
-			}
-			return true;
-		});
+	// 同机互锁由 ProcessLoopTestDialog::OnStart 的原子租约完成；不同机器人允许并行。
 	m_pProcessLoopTestPage = loopPage;
 	PrepareEmbeddedPage(m_pProcessLoopTestPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pProcessLoopTestPage);
@@ -13453,6 +13655,14 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 	{
 		if (runtime == nullptr || !runtime->running || !m_scanCameraReceiversByPort.contains(cameraPort))
 		{
+			// 共享接收拓扑重建会删除所有单元的 CameraFrameCache。任一机器人流程持租约时
+			// 都必须失败关闭，不能为了修当前单元而让另一单元出现悬垂缓存指针。
+			if (RobotOperationLease::AnyActive())
+			{
+				m_sGrooveCameraStatusText = QString("相机接收拓扑缺失，但机器人硬件操作正在运行（%1），已禁止全局重建。")
+					.arg(RobotOperationLease::ActiveSummary());
+				return false;
+			}
 			StopScanCameraRuntimes();
 			InitializeScanCameraRuntimes();
 			runtime = m_scanCameraRuntimes.value(unitIndex, nullptr);
@@ -13662,7 +13872,7 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 	if (m_pGroovePointCloudDialog == nullptr)
 	{
 		constexpr int kSkjCameraControlPort = 50006;
-		auto ensureControlTarget = [this, kSkjCameraControlPort](QString* error) -> bool
+			auto ensureControlTarget = [this, kSkjCameraControlPort](QString* error) -> bool
 		{
 			const int unitIndex = CurrentRobotUnitIndex();
 			QString cameraIP;
@@ -13680,26 +13890,50 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 			{
 				m_skjCameraControlClient = new SKJCameraControlClient();
 			}
-			return m_skjCameraControlClient->EnsureConnected(cameraIP, kSkjCameraControlPort, error);
-		};
-		auto refreshCameraParams = [this, ensureControlTarget](SKJCameraParameterValues& values, QString* error) -> bool
+				return m_skjCameraControlClient->EnsureConnected(cameraIP, kSkjCameraControlPort, error);
+			};
+		auto acquireCameraOperation = [this](const QString& owner, QString* error) -> RobotOperationLease::Ptr
+			{
+				const T_CONTRAL_UNIT* unit = CurrentContralUnit();
+				RobotDriverAdaptor* driver = unit != nullptr
+					? static_cast<RobotDriverAdaptor*>(unit->pUnitDriver)
+					: nullptr;
+				return RobotOperationLease::TryAcquire(driver, owner, error);
+			};
+		auto refreshCameraParams = [this, ensureControlTarget, acquireCameraOperation](SKJCameraParameterValues& values, QString* error) -> bool
 		{
+			const auto operationLease = acquireCameraOperation(QStringLiteral("读取相机参数"), error);
+			if (!operationLease)
+			{
+				return false;
+			}
 			if (!ensureControlTarget(error) || m_skjCameraControlClient == nullptr)
 			{
 				return false;
 			}
 			return m_skjCameraControlClient->ReadParameters(values, error);
 		};
-		auto setCameraParam = [this, ensureControlTarget](SKJCameraControlClient::Parameter parameter, int value, QString* error) -> bool
+		auto setCameraParam = [this, ensureControlTarget, acquireCameraOperation](SKJCameraControlClient::Parameter parameter, int value, QString* error) -> bool
 		{
+			const auto operationLease = acquireCameraOperation(QStringLiteral("修改相机参数"), error);
+			if (!operationLease)
+			{
+				return false;
+			}
 			if (!ensureControlTarget(error) || m_skjCameraControlClient == nullptr)
 			{
 				return false;
 			}
 			return m_skjCameraControlClient->SetParameter(parameter, value, error);
 		};
-		auto setLaserEnabled = [this, ensureControlTarget](bool enabled, QString* error) -> bool
+		auto setLaserEnabled = [this, ensureControlTarget, acquireCameraOperation](bool enabled, QString* error) -> bool
 		{
+			const auto operationLease = acquireCameraOperation(
+				enabled ? QStringLiteral("开启相机激光") : QStringLiteral("关闭相机激光"), error);
+			if (!operationLease)
+			{
+				return false;
+			}
 			if (m_skjCameraControlClient != nullptr)
 			{
 				m_skjCameraControlClient->Disconnect();
@@ -13811,6 +14045,16 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 		}
 		QString cameraIP;
 		const int unitIndex = CurrentRobotUnitIndex();
+		RobotDriverAdaptor* cameraDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, unitIndex);
+		const QString cameraOwner = RobotOperationLease::CurrentOwner(cameraDriver);
+		if (!cameraOwner.isEmpty())
+		{
+			QMessageBox::warning(this, "坡口相机测试",
+				QString("当前机器人正在执行“%1”，不能打开预览并清空本轮相机缓存。").arg(cameraOwner));
+			ui.GrooveCameraTestBtn->setChecked(false);
+			RefreshRobotOperationAvailability();
+			return;
+		}
 		if (!EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true))
 		{
 			QMessageBox::warning(this, "坡口相机测试", "未读取到当前机器人扫描相机的 DeviceAddress。");
@@ -13840,14 +14084,42 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 				m_sGrooveCameraStatusText);
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->RefreshCameraControlParams();
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetImageTransportToggleHandler(
-				[this](bool enabled)
+				[this, unitIndex](bool enabled)
 				{
-					const int toggleUnitIndex = CurrentRobotUnitIndex();
+					RobotDriverAdaptor* toggleDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, unitIndex);
+					QString leaseError;
+					const auto cameraSettingLease = RobotOperationLease::TryAcquire(
+						toggleDriver, QStringLiteral("相机图像传输设置"), &leaseError);
+					if (!cameraSettingLease)
+					{
+						if (m_pGroovePointCloudDialog != nullptr)
+						{
+							static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ShowCameraControlMessage(
+								leaseError + " 图像传输设置未下发。", false);
+						}
+						return;
+					}
+					const int toggleUnitIndex = unitIndex;
 					CameraRuntime* toggleRuntime = m_scanCameraRuntimes.value(toggleUnitIndex, nullptr);
 					if (toggleRuntime != nullptr && toggleRuntime->tcpWorker != nullptr)
 					{
-						QMetaObject::invokeMethod(toggleRuntime->tcpWorker, "setImageTransportEnabled",
-							Qt::QueuedConnection, Q_ARG(bool, enabled));
+						QPointer<ScanCameraSkjWorker> worker(toggleRuntime->tcpWorker);
+						if (worker->thread() == QThread::currentThread())
+						{
+							worker->setImageTransportEnabled(enabled);
+						}
+						else
+						{
+							// 图像口连接可能触发 SDK 网络超时，不能用 BlockingQueuedConnection
+							// 卡住 GUI 和固定红色 STOP；租约随 queued functor 保持到实际执行结束。
+							QMetaObject::invokeMethod(worker.data(), [worker, enabled, cameraSettingLease]()
+								{
+									if (worker != nullptr)
+									{
+										worker->setImageTransportEnabled(enabled);
+									}
+								}, Qt::QueuedConnection);
+						}
 					}
 					else if (CameraFrameCache* toggleCache = ScanCameraCacheForUnit(toggleUnitIndex))
 					{
@@ -13863,7 +14135,24 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 					// 已缓冲未取走的帧（skjcamera.h SetFrameBufferCount 注释），扫描流程运行中
 					// 只存不发（写 cache 待相机重连生效），避免采集中途清 FIFO 静默丢帧。
 					MeasureThenWeldRuntimeConfig::SaveSkjFrameBufferCount(count);
-					const bool flowRunning = HasRunningMeasureThenWeldFlow();
+					std::vector<std::pair<int, RobotOperationLease::Ptr>> cameraSettingLeases;
+					bool canApplyNow = !HasRunningMeasureThenWeldFlow();
+					if (canApplyNow)
+					{
+						for (auto it = m_scanCameraRuntimes.constBegin(); it != m_scanCameraRuntimes.constEnd(); ++it)
+						{
+							RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, it.key());
+							QString leaseError;
+							auto lease = RobotOperationLease::TryAcquire(
+								driver, QStringLiteral("相机接收缓冲设置"), &leaseError);
+							if (!lease)
+							{
+								canApplyNow = false;
+								break;
+							}
+							cameraSettingLeases.emplace_back(it.key(), std::move(lease));
+						}
+					}
 					for (auto it = m_scanCameraRuntimes.constBegin(); it != m_scanCameraRuntimes.constEnd(); ++it)
 					{
 						CameraRuntime* bufferRuntime = it.value();
@@ -13871,10 +14160,29 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 						{
 							continue;
 						}
-						if (!flowRunning && bufferRuntime->tcpWorker != nullptr)
+						if (canApplyNow && bufferRuntime->tcpWorker != nullptr)
 						{
-							QMetaObject::invokeMethod(bufferRuntime->tcpWorker, "setFrameBufferCount",
-								Qt::QueuedConnection, Q_ARG(int, count));
+							const auto leaseIt = std::find_if(
+								cameraSettingLeases.cbegin(), cameraSettingLeases.cend(),
+								[unitIndex = it.key()](const auto& entry) { return entry.first == unitIndex; });
+							const RobotOperationLease::Ptr settingLease = leaseIt != cameraSettingLeases.cend()
+								? leaseIt->second
+								: RobotOperationLease::Ptr();
+							QPointer<ScanCameraSkjWorker> worker(bufferRuntime->tcpWorker);
+							if (worker->thread() == QThread::currentThread())
+							{
+								worker->setFrameBufferCount(count);
+							}
+							else
+							{
+								QMetaObject::invokeMethod(worker.data(), [worker, count, settingLease]()
+									{
+										if (worker != nullptr)
+										{
+											worker->setFrameBufferCount(count);
+										}
+									}, Qt::QueuedConnection);
+							}
 						}
 						else if (bufferRuntime->cache != nullptr)
 						{
@@ -13884,9 +14192,9 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 					if (m_pGroovePointCloudDialog != nullptr)
 					{
 						static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ShowCameraControlMessage(
-							flowRunning
+							!canApplyNow
 								? QString("接收缓冲帧数已保存为 %1：扫描流程运行中不打断采集，相机下次连接时生效。").arg(count)
-								: QString("接收缓冲帧数已应用：%1").arg(count),
+								: QString("接收缓冲帧数已排队应用：%1").arg(count),
 							true);
 					}
 				});
@@ -14057,6 +14365,14 @@ void QtWidgetsApplication4::RobotRunTest()
 	if (pRobotDriverAdaptor == nullptr)
 	{
 		QMessageBox::warning(this, "测试程序", "当前控制单元未创建驱动。");
+		return;
+	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriverAdaptor, QStringLiteral("上传机器人测试服务"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "测试程序", leaseError);
 		return;
 	}
 
@@ -14235,6 +14551,13 @@ void QtWidgetsApplication4::OpenFunctionTestDialog()
 	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
 	if (m_pFunctionTestPage != nullptr && m_nFunctionTestPageUnitIndex != currentUnitIndex)
 	{
+		if (RobotOperationLease::AnyActive())
+		{
+			QMessageBox::warning(this, "功能测试",
+				QString("机器人硬件操作正在运行（%1），不能切换功能测试目标。")
+					.arg(RobotOperationLease::ActiveSummary()));
+			return;
+		}
 		delete m_pFunctionTestPage;
 		m_pFunctionTestPage = nullptr;
 	}
@@ -14320,17 +14643,15 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		cameraCacheForUnit,
 		this);
 	page->setWindowModality(Qt::NonModal);
-	// 互锁：流程测试正在跑时，拦下先测后焊启动（同机同驱动会冲突）。
-	page->SetPreStartGuard([this](QString& reason) -> bool
+	// 提前展示同机占用者；真正的无竞态互锁仍由流程入口 TryAcquire 完成。
+	page->SetPreStartGuard([this, currentUnitIndex](QString& reason) -> bool
 		{
-			if (const ProcessLoopTestDialog* loopPage =
-				qobject_cast<const ProcessLoopTestDialog*>(m_pProcessLoopTestPage))
+			RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, currentUnitIndex);
+			const QString owner = RobotOperationLease::CurrentOwner(driver);
+			if (!owner.isEmpty())
 			{
-				if (loopPage->IsRunning())
-				{
-					reason = QStringLiteral("流程测试正在运行，请先停止流程测试再开始先测后焊。");
-					return false;
-				}
+				reason = QString("当前机器人正在执行“%1”，请等待其安全结束。").arg(owner);
+				return false;
 			}
 			return true;
 		});
@@ -14469,7 +14790,7 @@ void QtWidgetsApplication4::OpenOnlineServicesDialog()
 	{
 		OnlineServicesDialog dialog(
 			EnsureScanDataUploader(),
-			[this]() { return HasRunningMeasureThenWeldFlow(); },
+			[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 			false,
 			remoteAllowed,
 			this);
@@ -14493,7 +14814,7 @@ void QtWidgetsApplication4::OpenOnlineServicesDialog()
 
 	m_pOnlineServicesPage = new OnlineServicesDialog(
 		EnsureScanDataUploader(),
-		[this]() { return HasRunningMeasureThenWeldFlow(); },
+		[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 		false,
 		remoteAllowed,
 		m_pManagementStack);
@@ -14576,6 +14897,14 @@ void QtWidgetsApplication4::FanucConnectTest()
 		QMessageBox::information(this, "机器人连接", "当前机器人已经连接。");
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("连接机器人"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "机器人连接", leaseError);
+		return;
+	}
 
 	const bool ok = pRobotDriver->InitSocket(pRobotDriver->m_sSocketIP.c_str(), static_cast<unsigned short>(pRobotDriver->m_nSocketPort));
 	int ftpRet = -1;
@@ -14629,6 +14958,14 @@ void QtWidgetsApplication4::FanucDisconnectTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("断开机器人连接"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "机器人断开", leaseError);
+		return;
+	}
 
 	bool ok = true;
 	if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
@@ -14654,6 +14991,14 @@ void QtWidgetsApplication4::RobotClearAlarmTest()
 		RefreshDashboardConnectionState();
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("清除报警并上使能"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "清除报警", leaseError);
+		return;
+	}
 	const bool ok = pRobotDriver->cleanAlarm();
 	const bool servoOk = ok ? pRobotDriver->ServoOn() : false;
 	if (pRobotDriver->m_pRobotLog != nullptr)
@@ -14672,8 +15017,166 @@ void QtWidgetsApplication4::RobotClearAlarmTest()
 			: "清除报警失败，请查看日志或示教器报警。");
 }
 
+void QtWidgetsApplication4::RobotEmergencyStop()
+{
+	struct StopTarget
+	{
+		RobotDriverAdaptor* driver = nullptr;
+		QString owner;
+	};
+	struct StopResult
+	{
+		QString label;
+		bool ok = false;
+		QString detail;
+	};
+
+	const auto latchedTargets = RobotOperationLease::LatchGlobalCancellation();
+	std::vector<StopTarget> targets;
+	targets.reserve(latchedTargets.size());
+	for (const RobotOperationLease::CancellationTarget& target : latchedTargets)
+	{
+		RobotDriverAdaptor* driver = const_cast<RobotDriverAdaptor*>(target.driver);
+		if (driver == nullptr)
+		{
+			continue;
+		}
+		targets.push_back(StopTarget{ driver, target.owner });
+	}
+
+	if (targets.empty())
+	{
+		QMessageBox::information(this, "安全停止", "当前没有本软件跟踪的活动机器人硬件流程。");
+		return;
+	}
+
+	if (m_pDashboardEmergencyStopBtn != nullptr)
+	{
+		m_pDashboardEmergencyStopBtn->setEnabled(false);
+		m_pDashboardEmergencyStopBtn->setText("正在安全停止所有本软件活动机器人任务...");
+	}
+
+	QPointer<QtWidgetsApplication4> self(this);
+	std::thread([self, targets = std::move(targets)]() mutable
+		{
+			std::vector<StopResult> results(targets.size());
+			std::vector<std::thread> workers;
+			workers.reserve(targets.size());
+			for (size_t index = 0; index < targets.size(); ++index)
+			{
+				workers.emplace_back([index, &targets, &results]()
+					{
+						RobotDriverAdaptor* driver = targets[index].driver;
+						QString label = QString::fromStdString(driver->m_sCustomName).trimmed();
+						if (label.isEmpty())
+						{
+							label = QString::fromStdString(driver->m_sRobotName).trimmed();
+						}
+						if (label.isEmpty())
+						{
+							label = QString::fromStdString(driver->m_sSocketIP);
+						}
+						bool ok = false;
+						if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(driver))
+						{
+							ok = fanucDriver->Prog_stop_Py();
+						}
+						else if (STEPRobotCtrl* stepDriver = dynamic_cast<STEPRobotCtrl*>(driver))
+						{
+							ok = stepDriver->AbortCurrentProgram();
+						}
+						else
+						{
+							driver->SetLastRobotError("当前机器人驱动没有可验证的安全终止实现。");
+						}
+						results[index] = StopResult{
+							label,
+							ok,
+							DecodeRobotMessageText(driver->GetLastRobotError())
+						};
+						if (driver->m_pRobotLog != nullptr)
+						{
+							driver->m_pRobotLog->write(
+								ok ? LogColor::SUCCESS : LogColor::ERR,
+								"全局安全停止 result=%d owner=%s",
+								ok ? 1 : 0,
+								targets[index].owner.toLocal8Bit().constData());
+						}
+						// 清除闭锁后 UI 可能立即允许重载并销毁 driver；必须把它放在
+						// 本 worker 对 driver 的最后一次访问。
+						if (ok)
+						{
+							RobotOperationLease::MarkMotionCompleted(driver);
+							RobotOperationLease::ConfirmCancellationHandled(driver);
+						}
+					});
+			}
+			for (std::thread& worker : workers)
+			{
+				worker.join();
+			}
+
+			QMetaObject::invokeMethod(qApp, [self, results = std::move(results)]()
+				{
+					if (self == nullptr)
+					{
+						return;
+					}
+					QStringList lines;
+					bool allOk = true;
+					for (const StopResult& result : results)
+					{
+						allOk = allOk && result.ok;
+						lines << (result.ok
+							? QString("%1：本软件任务已取消，机器人侧已确认其程序终止或不存在").arg(result.label)
+							: QString("%1：停机未确认，已保持全局闭锁。%2").arg(result.label, result.detail));
+					}
+					if (self->m_pDashboardEmergencyStopBtn != nullptr)
+					{
+						self->m_pDashboardEmergencyStopBtn->setText("安全停止所有本软件活动机器人任务（不可从主页删除）");
+						self->m_pDashboardEmergencyStopBtn->setEnabled(true);
+					}
+					if (allOk)
+					{
+						QMessageBox::information(self, "安全停止", lines.join('\n'));
+					}
+					else
+					{
+						// 停机未确认时红色按钮必须立即可重试；非模态提示不能截断 STOP。
+						QMessageBox* warning = new QMessageBox(
+							QMessageBox::Critical,
+							"安全停止未完全确认",
+							lines.join('\n'),
+							QMessageBox::Ok,
+							self);
+						warning->setAttribute(Qt::WA_DeleteOnClose);
+						warning->setWindowModality(Qt::NonModal);
+						warning->show();
+						if (self->ui.statusBar != nullptr)
+						{
+							self->ui.statusBar->showMessage(
+								"安全停止尚未全部确认；全局闭锁保留，可立即再次点击红色按钮重试。",
+								15000);
+						}
+					}
+					self->RefreshDashboardConnectionState();
+				}, Qt::QueuedConnection);
+		}).detach();
+}
+
 void QtWidgetsApplication4::RobotSwitchStepMode()
 {
+	if (RobotOperationLease::AnyActive())
+	{
+		if (ui.statusBar != nullptr)
+		{
+			ui.statusBar->showMessage(
+				QString("机器人硬件操作正在运行（%1）；STEP 模式输入已冻结。")
+					.arg(RobotOperationLease::ActiveSummary()),
+				8000);
+		}
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14702,9 +15205,7 @@ void QtWidgetsApplication4::RobotSwitchStepMode()
 		{ "手动模式 (MANUAL=1)", MODEKEY::MANUAL },
 		{ "自动模式 (AUTO=2)", MODEKEY::AUTO },
 		{ "外部自动模式 (AUTO_EXT=3)", MODEKEY::AUTO_EXT },
-		{ "开始/运行 (START=4)", MODEKEY::START },
-		{ "停止 (STOP=23)", MODEKEY::STOP },
-		{ "停止点动 (MSTOP=100)", MODEKEY::MSTOP }
+		{ "开始/运行 (START=4)", MODEKEY::START }
 	};
 	QStringList modeItems;
 	for (const StepModeOption& option : options)
@@ -14755,6 +15256,60 @@ void QtWidgetsApplication4::RobotSwitchStepMode()
 		}
 	}
 
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("切换 STEP 机器人模式"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "模式切换", leaseError);
+		return;
+	}
+
+	if (selectedMode == MODEKEY::START)
+	{
+		QPointer<QtWidgetsApplication4> self(this);
+		std::thread([self, pRobotDriver, pStepDriver, selectedMode, operationLease]()
+			{
+				const bool modeOk = pStepDriver->SetSysMode(selectedMode);
+				const int startDone = modeOk ? pStepDriver->CheckRobotDone(200) : -1;
+				const bool flowOk = modeOk && startDone > 0;
+				if (pRobotDriver->m_pRobotLog != nullptr)
+				{
+					pRobotDriver->m_pRobotLog->write(
+						flowOk ? LogColor::SUCCESS : LogColor::WARNING,
+						"主页STEP模式切换 | mode=%d(%s) result=%d done=%d",
+						selectedMode, GetModeText(selectedMode), flowOk ? 1 : 0, startDone);
+				}
+				const QString errorText = flowOk
+					? QString()
+					: DecodeRobotMessageText(pStepDriver->GetLastRobotError());
+				QMetaObject::invokeMethod(qApp, [self, flowOk, startDone, errorText]()
+					{
+						if (self == nullptr)
+						{
+							return;
+						}
+						const QString resultText = flowOk
+							? QString("新时达机器人 START 流程已结束，CheckRobotDone=%1").arg(startDone)
+							: (errorText.isEmpty()
+								? QStringLiteral("新时达 START 失败，请查看日志或示教器报警。")
+								: QString("新时达 START 失败：%1").arg(errorText));
+						if (self->ui.statusBar != nullptr)
+						{
+							self->ui.statusBar->showMessage(resultText, 15000);
+						}
+						self->RefreshDashboardConnectionState();
+					}, Qt::QueuedConnection);
+			}).detach();
+		if (ui.statusBar != nullptr)
+		{
+			ui.statusBar->show();
+			ui.statusBar->showMessage(
+				"STEP START 已在后台执行；如需终止，请使用主页固定红色安全停止按钮。", 8000);
+		}
+		return;
+	}
+
 	const bool modeOk = pStepDriver->SetSysMode(selectedMode);
 	if (pRobotDriver->m_pRobotLog != nullptr)
 	{
@@ -14770,7 +15325,8 @@ void QtWidgetsApplication4::RobotSwitchStepMode()
 		QMessageBox::information(
 			this,
 			"模式切换",
-			QString("新时达机器人已切换到：%1").arg(QString::fromUtf8(GetModeText(selectedMode))));
+			QString("新时达机器人已切换到：%1")
+				.arg(QString::fromUtf8(GetModeText(selectedMode))));
 	}
 	else
 	{
@@ -14797,6 +15353,14 @@ void QtWidgetsApplication4::ReadTool1ToGunTool()
 	if (unitInfo == nullptr)
 	{
 		QMessageBox::warning(this, "读取Tool1", "未找到当前机器人配置，无法写入枪工具参数。");
+		return;
+	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("读取 Tool1 并写入枪工具"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "读取Tool1", leaseError);
 		return;
 	}
 
@@ -14873,6 +15437,10 @@ void QtWidgetsApplication4::ReadTool1ToGunTool()
 
 void QtWidgetsApplication4::FanucGetCurrentPosTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("读取当前位置")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14889,6 +15457,10 @@ void QtWidgetsApplication4::FanucGetCurrentPosTest()
 
 void QtWidgetsApplication4::FanucGetCurrentPulseTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("读取关节脉冲")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14906,6 +15478,10 @@ void QtWidgetsApplication4::FanucGetCurrentPulseTest()
 
 void QtWidgetsApplication4::FanucCheckDoneTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("检查运行完成")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14918,6 +15494,10 @@ void QtWidgetsApplication4::FanucCheckDoneTest()
 
 void QtWidgetsApplication4::FanucSetGetIntTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("写读 INT 寄存器")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14936,6 +15516,14 @@ void QtWidgetsApplication4::FanucSetGetIntTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页写读寄存器"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "写读INT寄存器", leaseError);
+		return;
+	}
 
 	if (!pRobotDriver->SetIntVar(index, value))
 	{
@@ -14949,6 +15537,10 @@ void QtWidgetsApplication4::FanucSetGetIntTest()
 
 void QtWidgetsApplication4::FanucSetTpSpeedTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("设置速度")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14961,6 +15553,14 @@ void QtWidgetsApplication4::FanucSetTpSpeedTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页设置 TP 速度"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "设置速度", leaseError);
+		return;
+	}
 
 	const bool setOk = pRobotDriver->SetTpSpeed(speed);
 	const std::string message = setOk ? GetStr("设置速度成功：%d", speed) : GetStr("设置速度失败：%d", speed);
@@ -14969,6 +15569,10 @@ void QtWidgetsApplication4::FanucSetTpSpeedTest()
 
 void QtWidgetsApplication4::FanucCallJobTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("调用任务")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14981,15 +15585,54 @@ void QtWidgetsApplication4::FanucCallJobTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页调用机器人任务"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "调用任务", leaseError);
+		return;
+	}
 
 	const QByteArray jobNameBytes = jobName.trimmed().toLocal8Bit();
-	const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
-	const std::string message = callOk ? GetStr("调用任务成功：%s", jobNameBytes.constData()) : GetStr("调用任务失败：%s", jobNameBytes.constData());
-	QMessageBox::information(this, "调用任务", DecodeRobotMessageText(message));
+	QPointer<QtWidgetsApplication4> self(this);
+	std::thread([self, pRobotDriver, jobNameBytes, operationLease]()
+		{
+			const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
+			const int done = callOk ? pRobotDriver->CheckRobotDone(200) : -1;
+			const QString message = callOk
+				? QString("调用任务完成：%1，CheckRobotDone=%2")
+					.arg(QString::fromLocal8Bit(jobNameBytes)).arg(done)
+				: QString("调用任务失败：%1").arg(QString::fromLocal8Bit(jobNameBytes));
+			QMetaObject::invokeMethod(qApp, [self, message, callOk, done]()
+				{
+					if (self == nullptr)
+					{
+						return;
+					}
+					if (self->ui.statusBar != nullptr)
+					{
+						self->ui.statusBar->showMessage(
+							(callOk && done > 0 ? QStringLiteral("成功：") : QStringLiteral("失败：")) + message,
+							12000);
+					}
+					self->RefreshDashboardConnectionState();
+				}, Qt::QueuedConnection);
+		}).detach();
+	if (ui.statusBar != nullptr)
+	{
+		ui.statusBar->show();
+		ui.statusBar->showMessage(
+			QString("任务 %1 已在后台执行；主页停止按钮仍可立即中止。").arg(jobName.trimmed()), 8000);
+	}
 }
 
 void QtWidgetsApplication4::FanucUploadLsTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("发送 LS 程序")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -15010,6 +15653,14 @@ void QtWidgetsApplication4::FanucUploadLsTest()
 		QMessageBox::information(this, "发送LS程序", "LS 编译/上传是 FANUC 专用功能；STEP 请使用通用 FTP 上传或焊道下发流程。");
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pFanucDriver, QStringLiteral("主页上传 LS 程序"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "发送LS程序", leaseError);
+		return;
+	}
 	const int ret = pFanucDriver->UploadLsFile(lsPathBytes.constData());
 	if (ret == 0)
 	{
@@ -15023,6 +15674,10 @@ void QtWidgetsApplication4::FanucUploadLsTest()
 
 void QtWidgetsApplication4::FanucMovlTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("MOVL 测试")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -15033,13 +15688,21 @@ void QtWidgetsApplication4::FanucMovlTest()
 		QMessageBox::information(this, "MOVL往返测试", "MOVL测试正在执行，请等本次运动结束。");
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页 MOVL 测试"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "MOVL往返测试", leaseError);
+		return;
+	}
 
 	const bool moveForward = m_bFanucMovlForward;
 	m_bFanucMovlForward = !m_bFanucMovlForward;
 	m_bFanucMovlRunning = true;
 	ui.FanucMovlTestBtn->setEnabled(false);
 
-	std::thread([this, pRobotDriver, moveForward]()
+	std::thread([this, pRobotDriver, moveForward, operationLease]()
 		{
 			T_ROBOT_COORS target = pRobotDriver->GetCurrentPos();
 			target.dY += moveForward ? 100.0 : -100.0;
@@ -15055,13 +15718,21 @@ void QtWidgetsApplication4::FanucMovlTest()
 				{
 					m_bFanucMovlRunning = false;
 					ui.FanucMovlTestBtn->setEnabled(true);
-					QMessageBox::information(this, "MOVL往返测试", message);
+					if (ui.statusBar != nullptr)
+					{
+						ui.statusBar->showMessage(message, 12000);
+					}
+					RefreshDashboardConnectionState();
 				}, Qt::QueuedConnection);
 		}).detach();
 }
 
 void QtWidgetsApplication4::FanucMovjTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("MOVJ 测试")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -15072,11 +15743,19 @@ void QtWidgetsApplication4::FanucMovjTest()
 		QMessageBox::information(this, "MOVJ测试", "MOVJ测试正在执行，请等本次运动结束。");
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页 MOVJ 测试"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "MOVJ测试", leaseError);
+		return;
+	}
 
 	m_bFanucMovjRunning = true;
 	ui.FanucMovjTestBtn->setEnabled(false);
 
-	std::thread([this, pRobotDriver]()
+	std::thread([this, pRobotDriver, operationLease]()
 		{
 			T_ANGLE_PULSE target = pRobotDriver->GetCurrentPulse();
 			const double j2PulseUnit = pRobotDriver->m_tAxisUnit.dLPulseUnit;
@@ -15098,13 +15777,21 @@ void QtWidgetsApplication4::FanucMovjTest()
 				{
 					m_bFanucMovjRunning = false;
 					ui.FanucMovjTestBtn->setEnabled(true);
-					QMessageBox::information(this, "MOVJ测试", message);
+					if (ui.statusBar != nullptr)
+					{
+						ui.statusBar->showMessage(message, 12000);
+					}
+					RefreshDashboardConnectionState();
 				}, Qt::QueuedConnection);
 		}).detach();
 }
 
 void QtWidgetsApplication4::FanucMoveZeroTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("运动到零位")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -15126,11 +15813,19 @@ void QtWidgetsApplication4::FanucMoveZeroTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页运动到零位"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "运动到零位", leaseError);
+		return;
+	}
 
 	m_bFanucMoveZeroRunning = true;
 	ui.FanucMoveZeroBtn->setEnabled(false);
 
-	std::thread([this, pRobotDriver]()
+	std::thread([this, pRobotDriver, operationLease]()
 		{
 			const T_ANGLE_PULSE zeroPulse = T_ANGLE_PULSE();
 			const T_ROBOT_MOVE_SPEED speed(1.0, 0.0, 0.0);
@@ -15169,7 +15864,11 @@ void QtWidgetsApplication4::FanucMoveZeroTest()
 				{
 					m_bFanucMoveZeroRunning = false;
 					ui.FanucMoveZeroBtn->setEnabled(true);
-					QMessageBox::information(this, "运动到零位", message);
+					if (ui.statusBar != nullptr)
+					{
+						ui.statusBar->showMessage(message, 15000);
+					}
+					RefreshDashboardConnectionState();
 				}, Qt::QueuedConnection);
 		}).detach();
 }

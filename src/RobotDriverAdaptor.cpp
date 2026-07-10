@@ -1063,6 +1063,10 @@ void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
     EnsureConnectionForMonitor();
     while (m_stateMonitorRunning.load())
     {
+		// STEP 等驱动在后台探测并恢复纯连接；具体钩子不得启动程序或运动。
+		// 每轮调用可刷新 atomic 连接快照，GUI 无需等待可能阻塞的 SDK mutex。
+		// FANUC 基类钩子为空，S4/S5 各自按原有策略管理。
+		EnsureConnectionForMonitor();
         const long long nowMs = RobotDriverSteadyMs();
         StateSnapshot snapshot;
         snapshot.robotMs = nowMs;
@@ -1108,6 +1112,12 @@ int RobotDriverAdaptor::CheckRobotDone(int nDelayTime)
 {
     (void)nDelayTime;
     return CheckDone();
+}
+
+bool RobotDriverAdaptor::AbortCurrentProgramSafely()
+{
+    SetLastRobotError("当前机器人驱动未实现可验证的不可恢复程序中止。");
+    return false;
 }
 
 bool RobotDriverAdaptor::CallJob(std::string sJobName)

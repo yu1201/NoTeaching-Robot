@@ -154,6 +154,9 @@
     <ClCompile Include="src\RobotMessage.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\RobotOperationLease.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\RobotJogDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -274,6 +277,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotMessage.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotOperationLease.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotPoseTransform.h">
