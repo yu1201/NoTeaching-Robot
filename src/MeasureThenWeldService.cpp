@@ -52,6 +52,7 @@ constexpr int DEFAULT_CAMERA_READ_FPS = 100;  // 相机参数缺省/无效帧率
 constexpr qint64 ROBOT_SAMPLE_INTERVAL_MS = 50;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_WAIT_MS = 500;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_POLL_MS = 10;
+constexpr int CAMERA_READY_FRAME_TIMEOUT_MS = 5000;
 constexpr qint64 CAMERA_NO_FRAME_FAIL_GAP_US = 1000000;  // 扫描期间连续无新帧超过 1s 判数据不完整、终止流程
 constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
 constexpr auto WORKPIECE_CLOUD_FILE_NAME = "PreciseLaserPoint_WorkpieceCloud.txt";
@@ -7062,6 +7063,21 @@ bool MeasureThenWeldService::RunScanCycle(
             QStringLiteral("扫描前置检查失败：已选择示教安全位，但下枪或收枪安全脉冲列表为空；"
                 "禁止静默改用自动计算安全位。"),
             false);
+    }
+
+    const std::uint64_t readyFrameMark = cameraCache->Mark();
+    QString readyFrameError;
+    if (!cameraCache->WaitForReadyFrameAfter(
+        readyFrameMark, CAMERA_READY_FRAME_TIMEOUT_MS, &readyFrameError))
+    {
+        result.fatalFailure = true;
+        return fail(
+            QString("扫描前置检查失败：当前扫描周期未取得新鲜有效相机帧：%1").arg(readyFrameError),
+            false);
+    }
+    if (appendLog)
+    {
+        appendLog(QStringLiteral("扫描前置检查通过：当前扫描周期已取得新鲜有效相机帧。"));
     }
 
     HandEyeMatrixConfig validatedCalibration;

@@ -146,7 +146,36 @@ def main() -> int:
     require("scanCycle.caseDir" in cli_flow, "CLI upload must consume the explicit case directory")
     require("scanCycle.caseDir" in loop_flow, "ProcessLoop upload must consume the explicit case directory")
     require("WaitForReadyFrameAfter" in app, "camera startup must wait for a fresh frame")
+    require("WaitForReadyFrameAfter" in runner, "every scan cycle must wait for its own fresh frame before motion")
     require("m_readyCondition.wait_for" in camera_cache, "camera readiness must use a blocking condition")
+    cache_clear = section(
+        camera_cache,
+        "void CameraFrameCache::Clear()",
+        "void CameraFrameCache::SetConnectionState(",
+    )
+    require(
+        "m_nextSequence = 0" not in cache_clear,
+        "camera cache sequence must stay monotonic across Clear to avoid stale-mark ABA timeouts",
+    )
+    for required_validity_check in (
+        "frame.timestamp == 0",
+        "frame.errorMessage.trimmed()",
+        "frame.allResultPoint",
+        "std::abs(point.x) > 1e-9",
+        "std::isfinite(target.x)",
+        "if (hasFiniteCloudPoint)",
+        "if (!frameError.isEmpty())",
+        "帧不含有限点云或有效目标点",
+    ):
+        require(
+            required_validity_check in camera_cache,
+            f"camera ready-frame gate missing validity check: {required_validity_check}",
+        )
+    require(
+        camera_cache.index("if (hasFiniteCloudPoint)")
+        < camera_cache.index("if (!frameError.isEmpty())"),
+        "valid full point cloud must be accepted before target-algorithm error is considered",
+    )
     require(
         "LoadExistingValidatedHandEyeMatrixConfig" in runner,
         "RunScanCycle must validate the hand-eye matrix before movement",

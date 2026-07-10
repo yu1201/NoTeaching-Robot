@@ -51,7 +51,8 @@ public:
     void Clear();
     void SetConnectionState(ConnectionState state, const QString& status = QString());
     ConnectionState GetConnectionState(QString* status = nullptr) const;
-    // 扫描前门禁：等待连接成功且出现 beginExclusive 之后的新帧；连接明确失败时提前返回。
+    // 扫描前门禁：等待连接成功且出现 beginExclusive 之后的新帧。完整点云有效时忽略仅针对
+    // 目标点算法的 errorMessage；否则要求 errorMessage 为空且目标点有效。连接失败时提前返回。
     bool WaitForReadyFrameAfter(std::uint64_t beginExclusive, int timeoutMs, QString* error = nullptr) const;
     void AppendFrame(const udpDataShow& frame);
     void RecordPollStatus(int ret, qint64 frameTimestampUs, int pointCount, int frameChannel = -1);
