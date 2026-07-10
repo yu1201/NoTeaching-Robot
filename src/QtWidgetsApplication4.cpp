@@ -12918,6 +12918,17 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 		if (settings.overrideRunSpeed && settings.runSpeedMmPerMin > 0.0) { param.dRunSpeed = settings.runSpeedMmPerMin; }
 		if (settings.overrideCameraOffset) { param.dCameraTimeOffsetMs = settings.cameraTimeOffsetMs; }
 
+		// 记录本次开始前 Result/<机器人>/ 的最新案例目录：本次结束后若出现新目录，即产生了扫描数据。
+		// 点云分析失败的次数也要传原始扫描数据（非波纹板工件分析必失败，但原始激光点数据有效）。
+		auto newestCaseDir = [](const QString& robot) -> QString
+			{
+				const QDir dir(QStringLiteral("Result/") + robot);
+				const QFileInfoList cases = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
+				return cases.isEmpty() ? QString() : cases.first().absoluteFilePath();
+			};
+		const QString robotName = QString::fromStdString(param.sRobotName);
+		const QString caseDirBefore = newestCaseDir(robotName);
+
 		const double runSpeed = (std::isfinite(param.dRunSpeed) && param.dRunSpeed > 0.0) ? param.dRunSpeed : 1.0;
 		auto stepCb = [&](const QString& t) { emitProgress(i, t, false); };
 
@@ -12966,6 +12977,44 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 				emitLog(ok
 					? QStringLiteral("第%1次焊接完成：%2").arg(i).arg(weldSummary)
 					: QStringLiteral("第%1次焊接失败/中止：%2").arg(i).arg(weldError));
+			}
+		}
+
+		// 扫描数据在线上传：受「扫描完成后自动上传」总开关控制，成功/失败都传本次新产生的数据
+		//（案例目录优先从 savedPath 反推；仅扫描/分析失败时按「循环前后最新案例目录变化」判定，
+		// 避免把上一轮的旧案例重复入队）。ConfigDatabase 与上传器须在 UI 线程访问，编列过去。
+		{
+			QString caseDir;
+			if (!savedPath.isEmpty())
+			{
+				QDir fromSaved = QFileInfo(savedPath).dir();
+				if (fromSaved.cdUp())
+				{
+					caseDir = fromSaved.absolutePath();
+				}
+			}
+			if (caseDir.isEmpty())
+			{
+				const QString after = newestCaseDir(robotName);
+				if (!after.isEmpty() && after != caseDirBefore)
+				{
+					caseDir = after;
+				}
+			}
+			if (!caseDir.isEmpty())
+			{
+				QMetaObject::invokeMethod(this, [this, caseDir, log]()
+					{
+						if (!OnlineServicesConfig::AutoUploadEnabled())
+						{
+							return;
+						}
+						EnsureScanDataUploader()->QueueUpload(caseDir);
+						if (log)
+						{
+							log(QStringLiteral("扫描数据已加入上传队列：%1").arg(QDir::toNativeSeparators(caseDir)));
+						}
+					}, Qt::QueuedConnection);
 			}
 		}
 
@@ -13029,15 +13078,6 @@ void QtWidgetsApplication4::OpenProcessLoopTestPage()
 		return;
 	}
 
-	QList<QPair<int, QString>> units;
-	if (m_pContralUnit != nullptr)
-	{
-		for (const T_CONTRAL_UNIT& unitInfo : m_pContralUnit->m_vtContralUnitInfo)
-		{
-			units.append(qMakePair(unitInfo.nUnitNo, QString::fromStdString(unitInfo.sUnitName)));
-		}
-	}
-
 	auto loadDefaults = [this](int unitIndex) { return LoadProcessLoopTestDefaults(unitIndex); };
 	auto runner = [this](const ProcessLoopTestSettings& s, std::atomic<bool>* stop,
 		const ProcessLoopTestDialog::ProgressCallback& progress, const ProcessLoopTestDialog::LogCallback& log)
@@ -13045,7 +13085,7 @@ void QtWidgetsApplication4::OpenProcessLoopTestPage()
 			RunProcessLoopTest(s, stop, progress, log);
 		};
 
-	m_pProcessLoopTestPage = new ProcessLoopTestDialog(units, CurrentRobotUnitIndex(),
+	m_pProcessLoopTestPage = new ProcessLoopTestDialog(m_pContralUnit, CurrentRobotUnitIndex(),
 		loadDefaults, runner, m_pManagementStack);
 	PrepareEmbeddedPage(m_pProcessLoopTestPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pProcessLoopTestPage);

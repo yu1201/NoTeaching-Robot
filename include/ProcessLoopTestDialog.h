@@ -9,6 +9,7 @@
 #include <functional>
 #include <thread>
 
+class ContralUnit;
 class QComboBox;
 class QSpinBox;
 class QDoubleSpinBox;
@@ -62,7 +63,7 @@ public:
     // 读某单元的先测后焊预设默认（扫描/运行速度、相机偏移），用于界面预填。
     using LoadDefaultsFunc = std::function<ProcessLoopTestDefaults(int unitIndex)>;
 
-    ProcessLoopTestDialog(const QList<QPair<int, QString>>& units,
+    ProcessLoopTestDialog(ContralUnit* pContralUnit,
         int defaultUnitIndex,
         LoadDefaultsFunc loadDefaults,
         RunnerFunc runner,
@@ -75,6 +76,8 @@ protected:
 
 private:
     void BuildUi();
+    void LoadSettings();            // 从 ConfigDatabase 恢复上次的测试设置（单元/次数/间隔/覆盖项）
+    void SaveSettings() const;      // 保存当前界面设置（开始测试与关闭页面时各存一次）
     void ReloadDefaultsForCurrentUnit();
     ProcessLoopTestSettings CollectSettings() const;
     void OnStart();
@@ -87,7 +90,22 @@ private:
 
     LoadDefaultsFunc m_loadDefaults;
     RunnerFunc m_runner;
-    QList<QPair<int, QString>> m_units;
+    ContralUnit* m_pContralUnit = nullptr;
+
+    // 与先测后焊一致的参数选择器（改选即写回「当前选用」，LoadPresetParam 自动取到）
+    QString CurrentRobotName() const;
+    void ReloadSelectorsForCurrentUnit();     // 单元切换/打开时装载四个选择器
+    void LoadParamGroupCombo();               // 位置类型（MeasureWeldGroups UseGroupNo）
+    void LoadProcessCombo();                  // 焊接工艺（WeldProcessFile UseWeldParaNo）
+    void LoadCompCombo(QComboBox* combo, const QString& path, const QString& allSection,
+        const QString& rowCountKey, const QString& groupCountKey,
+        const QString& activeKey, const QString& groupSectionPrefix,
+        const QString& defaultNamePrefix);    // 姿态/焊道补偿组通用装载
+    QComboBox* m_paramGroupCombo = nullptr;
+    QComboBox* m_processCombo = nullptr;
+    QComboBox* m_poseCompCombo = nullptr;
+    QComboBox* m_seamCompCombo = nullptr;
+    bool m_loadingSelectors = false;
 
     // 采集区
     QComboBox* m_unitCombo = nullptr;

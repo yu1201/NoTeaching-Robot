@@ -102,9 +102,6 @@ bool FtpClient::connect() {
     return connectFtpServer();
 }
 
-std::wstring FtpClient::s2w(const std::string& str) {
-    return std::wstring(str.begin(), str.end());
-}
 // 获取父目录
 std::string FtpClient::getParentDir(const std::string& filePath) {
     size_t lastSlash = filePath.find_last_of("/\\");
@@ -126,20 +123,24 @@ bool FtpClient::createLocalDirRecursive(const std::string& localDir) {
 }
 
 // 递归创建远程目录（上传用）
+// 编码约定：整个 FtpClient 的远程路径一律走 A 版 API + UTF-8 字节直通（A 版把字节原样发上 FTP 线，
+// Linux/vsftpd 按字节存、UTF-8 环境显示正确，与 FtpOpenFileA/FtpFindFirstFileA 等既有调用一致）。
+// 切勿改回 W 版：W 版内部按系统 ANSI 代码页转换，中文设备名会被转成「?」乱码目录，
+// 且与 A 版传文件的路径对不上导致上传 550 失败（2026-07-10 现场实证）。
 bool FtpClient::createRemoteDirRecursive(const std::string& remoteDir) {
     if (remoteDir.empty()) return false;
     // 会话未建立时先连接：本方法可被外部（如扫描数据上传的建目录预检）在构造后直接调用，
     // 而构造函数并不连接。内部递归及 uploadFile* 调用时会话已就绪，connectFtpServer 会复用不重连。
     if (!m_hFtpSession && !connectFtpServer()) return false;
 
-    wchar_t oldDir[MAX_PATH] = { 0 };
+    char oldDir[MAX_PATH] = { 0 };
     DWORD bufSize = MAX_PATH; // 改为 DWORD
-    const BOOL hasOldDir = FtpGetCurrentDirectory(m_hFtpSession, oldDir, &bufSize); // 传地址
-    BOOL exist = FtpSetCurrentDirectory(m_hFtpSession, s2w(remoteDir).c_str());
+    const BOOL hasOldDir = FtpGetCurrentDirectoryA(m_hFtpSession, oldDir, &bufSize); // 传地址
+    BOOL exist = FtpSetCurrentDirectoryA(m_hFtpSession, remoteDir.c_str());
 
     if (exist) {
         if (hasOldDir) {
-            FtpSetCurrentDirectory(m_hFtpSession, oldDir);
+            FtpSetCurrentDirectoryA(m_hFtpSession, oldDir);
         }
         return true;
     }
@@ -147,24 +148,24 @@ bool FtpClient::createRemoteDirRecursive(const std::string& remoteDir) {
     std::string parent = getParentDir(remoteDir);
     if (!parent.empty() && !createRemoteDirRecursive(parent)) {
         if (hasOldDir) {
-            FtpSetCurrentDirectory(m_hFtpSession, oldDir);
+            FtpSetCurrentDirectoryA(m_hFtpSession, oldDir);
         }
         return false;
     }
 
-    if (FtpCreateDirectory(m_hFtpSession, s2w(remoteDir).c_str())) {
+    if (FtpCreateDirectoryA(m_hFtpSession, remoteDir.c_str())) {
         m_log->write(LogColor::DEFAULT, "远程目录已创建: %s", remoteDir.c_str());
     }
-    else if (!FtpSetCurrentDirectory(m_hFtpSession, s2w(remoteDir).c_str())) {
+    else if (!FtpSetCurrentDirectoryA(m_hFtpSession, remoteDir.c_str())) {
         m_log->write(LogColor::ERR, "远程目录确认失败: %s | %s", remoteDir.c_str(), getFtpErrorMsg().c_str());
         if (hasOldDir) {
-            FtpSetCurrentDirectory(m_hFtpSession, oldDir);
+            FtpSetCurrentDirectoryA(m_hFtpSession, oldDir);
         }
         return false;
     }
 
     if (hasOldDir) {
-        FtpSetCurrentDirectory(m_hFtpSession, oldDir);
+        FtpSetCurrentDirectoryA(m_hFtpSession, oldDir);
     }
     return true;
 }
@@ -194,9 +195,9 @@ bool FtpClient::connectFtpServer() {
     try {
         const auto start = std::chrono::steady_clock::now();
         if (m_hFtpSession != nullptr) {
-            wchar_t currentDir[MAX_PATH] = { 0 };
+            char currentDir[MAX_PATH] = { 0 };
             DWORD currentDirSize = MAX_PATH;
-            if (FtpGetCurrentDirectory(m_hFtpSession, currentDir, &currentDirSize)) {
+            if (FtpGetCurrentDirectoryA(m_hFtpSession, currentDir, &currentDirSize)) {
                 m_log->write(LogColor::DEFAULT, "FTP复用已有连接 | 耗时=%lldms", ElapsedMs(start));
                 return true;
             }
