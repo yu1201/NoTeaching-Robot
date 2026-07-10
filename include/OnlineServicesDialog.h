@@ -44,6 +44,8 @@ public:
 protected:
     // 关界面时若正在上传：弹「后台继续 / 停止并清理服务器半截文件」，由用户决定。
     void closeEvent(QCloseEvent* event) override;
+    // 每次显示自动刷新：正停在「远程数据」页则重新拉取（页面被管理栈缓存复用，构造只跑一次）。
+    void showEvent(QShowEvent* event) override;
 
 private:
     void BuildUi();
@@ -97,6 +99,12 @@ private:
     // 仪表盘：左侧导航 + 右侧页面栈（云控制台式布局），总览页放大数字统计卡与设备资源表
     QListWidget* m_navList = nullptr;
     QStackedWidget* m_pagesStack = nullptr;
+    int m_remoteNavRow = -1;    // 「远程数据」导航行号（-1=未建）
+    int m_accountNavRow = -1;   // 「账号管理」导航行号（-1=未建）
+    // 只上传账号（现场设备默认 uploader）不得浏览别的设备数据、也不能进账号管理：
+    // 按当前 FTP 账号名判定，改账号/保存配置后重新评估，灰掉对应导航项。
+    bool IsUploadOnlyAccount() const;
+    void UpdateRestrictedNav();
     QLabel* m_cardDisk = nullptr;       // 磁盘用量百分比（大数字）
     QLabel* m_cardDiskSub = nullptr;    // 已用/总量/剩余
     QProgressBar* m_diskBar = nullptr;  // 磁盘用量进度条

@@ -36,6 +36,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QCloseEvent>
+#include <QShowEvent>
 #include <QMessageBox>
 #include <QStackedWidget>
 #include <QTableWidget>
@@ -47,6 +48,7 @@
 #include <QProcess>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -113,7 +115,6 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 		{
 			QTimer::singleShot(0, this, [this]()
 				{
-					RefreshServerStats();
 					if (m_accountTable != nullptr)
 					{
 						RefreshAccounts();
@@ -126,6 +127,25 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 	{
 		// 关于页打开即自动查一次新版（结果落在「最新版本/更新说明」区，失败只记日志）。
 		QTimer::singleShot(0, this, [this]() { CheckForUpdate(); });
+	}
+}
+
+void OnlineServicesDialog::showEvent(QShowEvent* event)
+{
+	QDialog::showEvent(event);
+	if (m_aboutMode)
+	{
+		return;
+	}
+	// 页面被管理栈缓存复用，构造只跑一次：每次重新显示都把数据刷成最新。
+	UpdateQueueCard();
+	if (!OnlineServicesConfig::AdminToken().trimmed().isEmpty())
+	{
+		RefreshServerStats();
+	}
+	if (m_navList != nullptr && m_remoteNavRow >= 0 && m_navList->currentRow() == m_remoteNavRow)
+	{
+		RefreshRemoteDevices();   // 上次停在「远程数据」页：重开界面也自动刷新
 	}
 }
 
@@ -270,12 +290,16 @@ void OnlineServicesDialog::BuildUi()
 	QGroupBox* remoteGroup = nullptr;
 	if (!m_aboutMode && m_remoteBrowseAllowed)
 	{
-		remoteGroup = new QGroupBox(QStringLiteral("远程数据（管理员）"), this);
-		QGridLayout* remoteLayout = new QGridLayout(remoteGroup);
+		// 全权限账号可浏览/下载全部设备；只上传账号(uploader)自动锁定为仅本机设备、禁下载。
+		remoteGroup = new QGroupBox(QStringLiteral("远程数据"), this);
+		// 纵向布局：顶行操作条(靠左) + 文件列表(占满) + 底行按钮(靠右)。
+		// 勿用无列拉伸的 QGridLayout：文件列表撑满页宽后多余宽度会分进中间列，标签和下拉间被拉出大空。
+		QVBoxLayout* remoteLayout = new QVBoxLayout(remoteGroup);
+		remoteLayout->setSpacing(10);
 		m_remoteRefreshBtn = new QPushButton(QStringLiteral("刷新设备列表"), this);
 		m_remoteRefreshBtn->setMinimumHeight(40);
 		m_remoteDeviceCombo = new QComboBox(this);
-		m_remoteDeviceCombo->setMinimumWidth(220);
+		m_remoteDeviceCombo->setFixedWidth(300);
 		m_remoteFileList = new QListWidget(this);
 		m_remoteFileList->setSelectionMode(QAbstractItemView::ExtendedSelection);
 		// 文件列表占满页面剩余高度，内容贴顶。
@@ -289,14 +313,21 @@ void OnlineServicesDialog::BuildUi()
 		m_remoteDeleteBtn->setToolTip(QStringLiteral("从服务器上永久删除选中的数据包（不影响设备本地数据）。"));
 		m_remoteMkdirBtn = new QPushButton(QStringLiteral("新建设备目录…"), this);
 		m_remoteMkdirBtn->setMinimumHeight(40);
-		remoteLayout->addWidget(m_remoteRefreshBtn, 0, 0);
-		remoteLayout->addWidget(new QLabel(QStringLiteral("设备："), this), 0, 1);
-		remoteLayout->addWidget(m_remoteDeviceCombo, 0, 2);
-		remoteLayout->addWidget(m_remoteDownloadBtn, 0, 3);
-		remoteLayout->addWidget(m_remoteFileList, 1, 0, 1, 4);
-		remoteLayout->setRowStretch(1, 1);
-		remoteLayout->addWidget(m_remoteDeleteBtn, 2, 2);
-		remoteLayout->addWidget(m_remoteMkdirBtn, 2, 3);
+		QHBoxLayout* remoteTopRow = new QHBoxLayout();
+		remoteTopRow->setSpacing(8);
+		remoteTopRow->addWidget(m_remoteRefreshBtn);
+		remoteTopRow->addWidget(new QLabel(QStringLiteral("设备："), this));
+		remoteTopRow->addWidget(m_remoteDeviceCombo);
+		remoteTopRow->addWidget(m_remoteDownloadBtn);
+		remoteTopRow->addStretch(1);
+		remoteLayout->addLayout(remoteTopRow);
+		remoteLayout->addWidget(m_remoteFileList, 1);
+		QHBoxLayout* remoteBottomRow = new QHBoxLayout();
+		remoteBottomRow->setSpacing(8);
+		remoteBottomRow->addStretch(1);
+		remoteBottomRow->addWidget(m_remoteDeleteBtn);
+		remoteBottomRow->addWidget(m_remoteMkdirBtn);
+		remoteLayout->addLayout(remoteBottomRow);
 
 		connect(m_remoteRefreshBtn, &QPushButton::clicked, this, [this]()
 			{
@@ -482,18 +513,32 @@ void OnlineServicesDialog::BuildUi()
 		addNavPage(QStringLiteral("数据上传"), uploadGroup);
 		if (remoteGroup != nullptr)
 		{
+			m_remoteNavRow = m_navList->count();
 			addNavPage(QStringLiteral("远程数据"), remoteGroup);
 		}
 		if (accountGroup != nullptr)
 		{
+			m_accountNavRow = m_navList->count();
 			addNavPage(QStringLiteral("账号管理"), accountGroup);
 		}
 		addNavPage(QStringLiteral("服务器配置"), configGroup);
 		connect(m_navList, &QListWidget::currentRowChanged, this, [this](int row)
 			{
-				if (m_pagesStack != nullptr && row >= 0 && row < m_pagesStack->count())
+				if (m_pagesStack == nullptr || row < 0 || row >= m_pagesStack->count())
 				{
-					m_pagesStack->setCurrentIndex(row);
+					return;
+				}
+				// 受限账号：即便被程序化选中到禁用页，也弹回总览，绝不显示别的设备数据。
+				QListWidgetItem* item = m_navList->item(row);
+				if (item != nullptr && !(item->flags() & Qt::ItemIsEnabled))
+				{
+					m_navList->setCurrentRow(0);
+					return;
+				}
+				m_pagesStack->setCurrentIndex(row);
+				if (row == m_remoteNavRow)
+				{
+					RefreshRemoteDevices();   // 每次进入「远程数据」自动刷新（受限=锁定本机并列出自己的文件）
 				}
 			});
 		m_navList->setCurrentRow(0);
@@ -546,7 +591,9 @@ void OnlineServicesDialog::BuildUi()
 	connect(saveConfigBtn, &QPushButton::clicked, this, [this]()
 		{
 			SaveConfigFromUi();
-			AppendLog(QStringLiteral("服务器配置已保存。"));
+			AppendLog(m_remoteBusy
+				? QStringLiteral("其它服务器配置已保存；FTP 配置请在远程数据操作完成后再次保存。")
+				: QStringLiteral("服务器配置已保存。"));
 		});
 
 	resize(m_aboutMode ? 640 : 860, m_aboutMode ? 560 : 780);
@@ -570,22 +617,113 @@ void OnlineServicesDialog::LoadConfigToUi()
 		m_pendingListWidget->clear();
 		m_pendingListWidget->addItems(m_uploader->PendingList());
 	}
+	UpdateRestrictedNav();
+}
+
+bool OnlineServicesDialog::IsUploadOnlyAccount() const
+{
+	// 现场设备开箱即随包的只上传账号 uploader（服务器端 download_enable=NO，看不到也下不了别人）。
+	// 权限判断必须与实际 FTP 请求使用同一份「已保存配置」，不能读取尚未保存的输入框文本。
+	const QString user = OnlineServicesConfig::FtpUser().trimmed();
+	return user.compare(QStringLiteral("uploader"), Qt::CaseInsensitive) == 0;
+}
+
+void OnlineServicesDialog::UpdateRestrictedNav()
+{
+	const bool restricted = IsUploadOnlyAccount();
+	const bool unrestrictedIdle = !m_remoteBusy && !restricted;
+
+	// 「账号管理」：只上传账号整页禁用（无令牌也无权限）。「远程数据」保持可进，
+	// 但下方把设备锁定为本机、禁下载/建目录——只能看到自己设备上传的文件。
+	auto setNavRowEnabled = [this](int row, bool enabled, const QString& tip)
+		{
+			if (m_navList == nullptr || row < 0 || row >= m_navList->count())
+			{
+				return;
+			}
+			QListWidgetItem* item = m_navList->item(row);
+			if (item == nullptr)
+			{
+				return;
+			}
+			item->setFlags(enabled ? (item->flags() | Qt::ItemIsEnabled)
+				: (item->flags() & ~Qt::ItemIsEnabled));
+			item->setToolTip(enabled ? QString() : tip);
+			if (!enabled && m_navList->currentRow() == row)
+			{
+				m_navList->setCurrentRow(0);   // 正停在被禁页 → 弹回总览
+			}
+		};
+	setNavRowEnabled(m_accountNavRow, !restricted,
+		QStringLiteral("当前为只上传账号（uploader），无账号管理权限；改用全权限账号后可用。"));
+	setNavRowEnabled(m_remoteNavRow, true, QString());
+
+	// 远程数据控件级限制（about 模式/非 admin 登录时这些控件不存在，判空跳过）。
+	if (m_remoteDeviceCombo != nullptr)
+	{
+		m_remoteDeviceCombo->setEnabled(unrestrictedIdle);   // 忙碌或受限时均不可切换设备
+		m_remoteDeviceCombo->setToolTip(restricted
+			? QStringLiteral("只上传账号仅能查看本机设备的数据。") : QString());
+	}
+	if (m_remoteMkdirBtn != nullptr)
+	{
+		m_remoteMkdirBtn->setEnabled(unrestrictedIdle);
+		m_remoteMkdirBtn->setToolTip(restricted
+			? QStringLiteral("只上传账号不能新建其他设备目录。") : QString());
+	}
+	if (m_remoteDownloadBtn != nullptr)
+	{
+		m_remoteDownloadBtn->setEnabled(unrestrictedIdle);
+		m_remoteDownloadBtn->setToolTip(restricted
+			? QStringLiteral("只上传账号服务器端禁止下载（download_enable=NO），需下载请改用全权限账号。")
+			: QStringLiteral("下载并自动解压到 Result\\Remote\\<设备>\\，可用点云查看等工具直接打开。"));
+	}
+	// 受限且设备列表还不是「只有本机」时重置（清掉之前全权限账号刷出的全部设备）。
+	if (restricted && m_remoteDeviceCombo != nullptr)
+	{
+		const QString selfDevice = OnlineServicesConfig::DeviceName().trimmed();
+		if (m_remoteDeviceCombo->count() != 1 || m_remoteDeviceCombo->currentText() != selfDevice)
+		{
+			RefreshRemoteDevices();
+		}
+	}
 }
 
 void OnlineServicesDialog::SaveConfigFromUi()
 {
 	OnlineServicesConfig::SetUpdateBaseUrl(m_updateBaseUrlEdit->text().trimmed());
-	OnlineServicesConfig::SetFtpHost(m_ftpHostEdit->text().trimmed());
-	bool ok = false;
-	const int port = m_ftpPortEdit->text().trimmed().toInt(&ok);
-	OnlineServicesConfig::SetFtpPort(ok ? port : 21);
-	OnlineServicesConfig::SetFtpUser(m_ftpUserEdit->text().trimmed());
-	OnlineServicesConfig::SetFtpPassword(m_ftpPasswordEdit->text());
-	OnlineServicesConfig::SetDeviceName(m_deviceNameEdit->text().trimmed());
+	if (!m_remoteBusy)
+	{
+		OnlineServicesConfig::SetFtpHost(m_ftpHostEdit->text().trimmed());
+		bool ok = false;
+		const int port = m_ftpPortEdit->text().trimmed().toInt(&ok);
+		OnlineServicesConfig::SetFtpPort(ok ? port : 21);
+		OnlineServicesConfig::SetFtpUser(m_ftpUserEdit->text().trimmed());
+		OnlineServicesConfig::SetFtpPassword(m_ftpPasswordEdit->text());
+		OnlineServicesConfig::SetDeviceName(m_deviceNameEdit->text().trimmed());
+	}
+	else
+	{
+		// 远程 FTP 请求仍持有旧配置快照时，不允许把预先编辑但未保存的新值写入配置。
+		// 等请求结束后再次保存即可，避免旧回调把另一台服务器/账号的数据落到当前页面。
+		bool portOk = false;
+		const int editedPort = m_ftpPortEdit->text().trimmed().toInt(&portOk);
+		const bool hasPendingFtpChanges =
+			m_ftpHostEdit->text().trimmed() != OnlineServicesConfig::FtpHost()
+			|| !portOk || editedPort != OnlineServicesConfig::FtpPort()
+			|| m_ftpUserEdit->text().trimmed() != OnlineServicesConfig::FtpUser()
+			|| m_ftpPasswordEdit->text() != OnlineServicesConfig::FtpPassword()
+			|| m_deviceNameEdit->text().trimmed() != OnlineServicesConfig::DeviceName();
+		if (hasPendingFtpChanges)
+		{
+			AppendLog(QStringLiteral("远程数据操作进行中，FTP 配置暂未保存；请在操作完成后重试。"));
+		}
+	}
 	if (m_adminTokenEdit != nullptr)
 	{
 		OnlineServicesConfig::SetAdminToken(m_adminTokenEdit->text().trimmed());
 	}
+	UpdateRestrictedNav();   // 账号可能改了，重新评估「远程数据/账号管理」是否可用
 }
 
 QString OnlineServicesDialog::UpdateChannel() const
@@ -802,7 +940,11 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 	else
 	{
 		// 全量：/SILENT 静默安装；Inno [Run] postinstall 在 silent 下被跳过，装完由批处理拉起新版。
-		script = QString("@echo off\r\n\"%1\" /SILENT\r\nstart \"\" \"%2\"\r\n").arg(payload).arg(appPath);
+		// /DIR 强制装回当前程序目录：Inno 按 AppId 查注册表定位先前安装，手工拷贝部署（无注册表记录）
+		// 或历史 AppId 对不上时会落到 DefaultDirName={localappdata}，在别的盘装出第二份（2026-07-10 事故）。
+		const QString appDir = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
+		script = QString("@echo off\r\n\"%1\" /SILENT /DIR=\"%3\"\r\nstart \"\" \"%2\"\r\n")
+			.arg(payload).arg(appPath).arg(appDir);
 	}
 
 	QFile bootstrap(bootstrapPath);
@@ -907,28 +1049,46 @@ void OnlineServicesDialog::SetRemoteBusy(bool busy)
 	{
 		m_remoteRefreshBtn->setEnabled(!busy);
 	}
-	if (m_remoteDeviceCombo != nullptr)
-	{
-		m_remoteDeviceCombo->setEnabled(!busy);
-	}
-	if (m_remoteDownloadBtn != nullptr)
-	{
-		m_remoteDownloadBtn->setEnabled(!busy);
-	}
 	if (m_remoteDeleteBtn != nullptr)
 	{
 		m_remoteDeleteBtn->setEnabled(!busy);
 	}
-	if (m_remoteMkdirBtn != nullptr)
+	// FTP 请求使用保存时的配置快照。请求期间锁住这些输入，避免旧请求完成后把
+	// 另一套账号/主机的结果落到当前界面；其它 OTA/管理配置不受影响。
+	for (QLineEdit* edit : { m_ftpHostEdit, m_ftpPortEdit, m_ftpUserEdit, m_ftpPasswordEdit, m_deviceNameEdit })
 	{
-		m_remoteMkdirBtn->setEnabled(!busy);
+		if (edit != nullptr)
+		{
+			edit->setEnabled(!busy);
+		}
 	}
+	// 设备选择/下载/建目录同时受「后台忙碌」和账号权限约束；统一重算，
+	// 避免异步操作结束时 setEnabled(true) 把 uploader 的限制意外撤销。
+	UpdateRestrictedNav();
 }
 
 void OnlineServicesDialog::RefreshRemoteDevices()
 {
 	if (m_remoteBusy)
 	{
+		return;
+	}
+	// 只上传账号：不列服务器全部设备目录，设备锁定为本机设备名（只看自己传的数据）。
+	if (IsUploadOnlyAccount())
+	{
+		if (m_remoteDeviceCombo == nullptr)
+		{
+			return;
+		}
+		const QString selfDevice = OnlineServicesConfig::DeviceName().trimmed();
+		m_remoteDeviceCombo->clear();
+		if (selfDevice.isEmpty())
+		{
+			AppendLog(QStringLiteral("请先在「服务器配置」填写设备名并保存。"));
+			return;
+		}
+		m_remoteDeviceCombo->addItem(selfDevice);   // addItem 触发 currentIndexChanged → 自动刷新文件列表
+		AppendLog(QStringLiteral("只上传账号：仅显示本机设备「%1」的数据。").arg(selfDevice));
 		return;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
@@ -961,15 +1121,34 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 					{
 						return;
 					}
-					self->SetRemoteBusy(false);
 					if (!ok)
 					{
+						self->SetRemoteBusy(false);
 						self->AppendLog(QStringLiteral("获取设备列表失败（检查 FTP 配置与网络）。"));
 						return;
 					}
-					self->m_remoteDeviceCombo->clear();
-					self->m_remoteDeviceCombo->addItems(devices);
-					self->AppendLog(QStringLiteral("设备列表已刷新：共 %1 台。").arg(devices.size()));
+					{
+						// 先静默落地最终列表，再解除 busy 并刷新一次文件；避免 clear/addItems
+						// 中间信号触发嵌套请求，也确保 uploader 最终只能看到本机设备。
+						const QSignalBlocker blocker(self->m_remoteDeviceCombo);
+						self->m_remoteDeviceCombo->clear();
+						if (self->IsUploadOnlyAccount())
+						{
+							const QString selfDevice = OnlineServicesConfig::DeviceName().trimmed();
+							if (!selfDevice.isEmpty())
+							{
+								self->m_remoteDeviceCombo->addItem(selfDevice);
+							}
+						}
+						else
+						{
+							self->m_remoteDeviceCombo->addItems(devices);
+						}
+					}
+					self->SetRemoteBusy(false);
+					self->AppendLog(QStringLiteral("设备列表已刷新：共 %1 台。")
+						.arg(self->m_remoteDeviceCombo->count()));
+					self->RefreshRemoteFiles();
 				}, Qt::QueuedConnection);
 		}).detach();
 }
@@ -984,6 +1163,13 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 	const QString device = m_remoteDeviceCombo->currentText().trimmed();
 	if (device.isEmpty() || m_remoteBusy)
 	{
+		return;
+	}
+	if (IsUploadOnlyAccount()
+		&& device.compare(OnlineServicesConfig::DeviceName().trimmed(), Qt::CaseSensitive) != 0)
+	{
+		AppendLog(QStringLiteral("只上传账号检测到非本机设备，已重置远程数据列表。"));
+		RefreshRemoteDevices();
 		return;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
@@ -1036,6 +1222,11 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 {
 	if (m_remoteBusy || m_remoteFileList == nullptr || m_remoteDeviceCombo == nullptr)
 	{
+		return;
+	}
+	if (IsUploadOnlyAccount())
+	{
+		AppendLog(QStringLiteral("当前为只上传账号，服务器禁止下载；请改用全权限账号。"));
 		return;
 	}
 	const QString device = m_remoteDeviceCombo->currentText().trimmed();
@@ -1111,6 +1302,13 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 		return;
 	}
 	const QString device = m_remoteDeviceCombo->currentText().trimmed();
+	if (IsUploadOnlyAccount()
+		&& device.compare(OnlineServicesConfig::DeviceName().trimmed(), Qt::CaseSensitive) != 0)
+	{
+		AppendLog(QStringLiteral("只上传账号不能删除其它设备的数据，已重置为本机设备。"));
+		RefreshRemoteDevices();
+		return;
+	}
 	const QList<QListWidgetItem*> selected = m_remoteFileList->selectedItems();
 	if (device.isEmpty() || selected.isEmpty())
 	{
@@ -1164,6 +1362,11 @@ void OnlineServicesDialog::CreateRemoteDeviceDir()
 {
 	if (m_remoteBusy)
 	{
+		return;
+	}
+	if (IsUploadOnlyAccount())
+	{
+		AppendLog(QStringLiteral("当前为只上传账号，不能新建设备目录；请改用全权限账号。"));
 		return;
 	}
 	bool okInput = false;

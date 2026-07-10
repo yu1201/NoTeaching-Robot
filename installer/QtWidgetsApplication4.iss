@@ -1,17 +1,20 @@
 ﻿#define MyAppName "HK-Pathlynx-CORPLA"
-#define MyAppGuid "F3E0296A-8AC8-4447-951A-013ADAE97E73"
+; AppId/MyAppGuid 与中性通道共用 A5A7E2A0（历史值，所有存量装机的注册表键都挂在它下面）。
+; ⚠️ AppId 一经发布永不可改：v1643 曾改成 F3E0296A，Inno 认不出既有安装，全量升级落到
+; {localappdata} 在别的盘装出第二份（2026-07-10 事故）。一台设备只装一个通道，共用无害。
+#define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.07.10.1643"
+  #define MyAppVersion "2026.07.10.1750"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.07.10.1643"
+  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.07.10.1750"
 #endif
 #define MyAppPublisher "海瞰智焊"
 #define MyAppExeName "HK-Pathlynx-CORPLA.exe"
 #define MySourceDir "..\dist\QtWidgetsApplication4"
 
 [Setup]
-AppId={{F3E0296A-8AC8-4447-951A-013ADAE97E73}
+AppId={{A5A7E2A0-8226-40BB-B126-94C5D298B3CF}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
