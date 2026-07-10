@@ -940,7 +940,11 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 	else
 	{
 		// 全量：/SILENT 静默安装；Inno [Run] postinstall 在 silent 下被跳过，装完由批处理拉起新版。
-		script = QString("@echo off\r\n\"%1\" /SILENT\r\nstart \"\" \"%2\"\r\n").arg(payload).arg(appPath);
+		// /DIR 强制装回当前程序目录：Inno 按 AppId 查注册表定位先前安装，手工拷贝部署（无注册表记录）
+		// 或历史 AppId 对不上时会落到 DefaultDirName={localappdata}，在别的盘装出第二份（2026-07-10 事故）。
+		const QString appDir = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
+		script = QString("@echo off\r\n\"%1\" /SILENT /DIR=\"%3\"\r\nstart \"\" \"%2\"\r\n")
+			.arg(payload).arg(appPath).arg(appDir);
 	}
 
 	QFile bootstrap(bootstrapPath);
