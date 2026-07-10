@@ -51,8 +51,8 @@ public:
     void Clear();
     void SetConnectionState(ConnectionState state, const QString& status = QString());
     ConnectionState GetConnectionState(QString* status = nullptr) const;
-    // 扫描前门禁：等待连接成功且出现 beginExclusive 之后的新帧。完整点云有效时忽略仅针对
-    // 目标点算法的 errorMessage；否则要求 errorMessage 为空且目标点有效。连接失败时提前返回。
+    // 扫描前门禁：等待连接成功且出现 beginExclusive 之后、时间戳为正的新解码帧。
+    // 空场景帧在机器人到达扫描起点前是正常状态，点云完整性由扫描运动期间的门禁负责。
     bool WaitForReadyFrameAfter(std::uint64_t beginExclusive, int timeoutMs, QString* error = nullptr) const;
     void AppendFrame(const udpDataShow& frame);
     void RecordPollStatus(int ret, qint64 frameTimestampUs, int pointCount, int frameChannel = -1);

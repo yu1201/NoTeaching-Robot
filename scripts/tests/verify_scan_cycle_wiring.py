@@ -158,23 +158,21 @@ def main() -> int:
         "camera cache sequence must stay monotonic across Clear to avoid stale-mark ABA timeouts",
     )
     for required_validity_check in (
-        "frame.timestamp == 0",
-        "frame.errorMessage.trimmed()",
-        "frame.allResultPoint",
-        "std::abs(point.x) > 1e-9",
-        "std::isfinite(target.x)",
-        "if (hasFiniteCloudPoint)",
-        "if (!frameError.isEmpty())",
-        "帧不含有限点云或有效目标点",
+        "static_cast<qint64>(frame.timestamp) <= 0",
+        "帧时间戳小于等于 0",
     ):
         require(
             required_validity_check in camera_cache,
             f"camera ready-frame gate missing validity check: {required_validity_check}",
         )
+    ready_gate = section(
+        camera_cache,
+        "bool CameraFrameCache::WaitForReadyFrameAfter(",
+        "void CameraFrameCache::AppendFrame(",
+    )
     require(
-        camera_cache.index("if (hasFiniteCloudPoint)")
-        < camera_cache.index("if (!frameError.isEmpty())"),
-        "valid full point cloud must be accepted before target-algorithm error is considered",
+        "allResultPoint" not in ready_gate and "targetPoint" not in ready_gate,
+        "pre-motion readiness must accept decoded empty-scene frames; scan-time gates own payload quality",
     )
     require(
         "LoadExistingValidatedHandEyeMatrixConfig" in runner,

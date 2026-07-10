@@ -1,7 +1,6 @@
 #include "CameraFrameCache.h"
 
 #include <chrono>
-#include <cmath>
 
 namespace
 {
@@ -72,65 +71,21 @@ bool CameraFrameCache::WaitForReadyFrameAfter(std::uint64_t beginExclusive, int 
                 }
                 ++seen;
                 const udpDataShow& frame = it->frame;
-                if (frame.timestamp == 0)
+                // worker 只在成功解码/成功取帧后 AppendFrame；源时间戳是 signed int64，
+                // 转入 qulonglong 后必须转回 qint64 检查，避免负值被当成巨大正数放行。
+                if (static_cast<qint64>(frame.timestamp) <= 0)
                 {
                     if (lastReject.isEmpty())
                     {
-                        lastReject = QStringLiteral("帧时间戳为 0");
+                        lastReject = QStringLiteral("帧时间戳小于等于 0");
                     }
                     continue;
                 }
-                bool hasFiniteCloudPoint = false;
-                for (const cv::Point3d& point : frame.allResultPoint)
+                if (candidateCount != nullptr)
                 {
-                    if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z)
-                        && (std::abs(point.x) > 1e-9
-                            || std::abs(point.y) > 1e-9
-                            || std::abs(point.z) > 1e-9))
-                    {
-                        hasFiniteCloudPoint = true;
-                        break;
-                    }
+                    *candidateCount = seen;
                 }
-                // errorMessage 描述的是目标点/坡口算法结果，不能否决已经取得的完整点云。
-                if (hasFiniteCloudPoint)
-                {
-                    if (candidateCount != nullptr)
-                    {
-                        *candidateCount = seen;
-                    }
-                    return true;
-                }
-
-                const QString frameError = frame.errorMessage.trimmed();
-                if (!frameError.isEmpty())
-                {
-                    if (lastReject.isEmpty())
-                    {
-                        lastReject = QStringLiteral("帧无有效完整点云，且目标点算法报错：%1").arg(frameError);
-                    }
-                    continue;
-                }
-
-                const cv::Point3d& target = frame.targetPoint;
-                const bool hasValidTarget = std::isfinite(target.x)
-                    && std::isfinite(target.y)
-                    && std::isfinite(target.z)
-                    && (std::abs(target.x) > 1e-9
-                        || std::abs(target.y) > 1e-9
-                        || std::abs(target.z) > 1e-9);
-                if (hasValidTarget)
-                {
-                    if (candidateCount != nullptr)
-                    {
-                        *candidateCount = seen;
-                    }
-                    return true;
-                }
-                if (lastReject.isEmpty())
-                {
-                    lastReject = QStringLiteral("帧不含有限点云或有效目标点");
-                }
+                return true;
             }
             if (latestRejectReason != nullptr)
             {
@@ -158,7 +113,7 @@ bool CameraFrameCache::WaitForReadyFrameAfter(std::uint64_t beginExclusive, int 
             hasUsableFrameAfter(&rejectReason, &candidateCount);
             if (candidateCount > 0)
             {
-                *error = QString("等待相机有效新帧超时（%1 ms）：已收到 %2 个新帧，但均未通过有效性检查；最近原因：%3。")
+                *error = QString("等待相机有效新帧超时（%1 ms）：已收到 %2 个新帧，但时间戳均无效；最近原因：%3。")
                     .arg(safeTimeoutMs)
                     .arg(candidateCount)
                     .arg(rejectReason.isEmpty() ? QStringLiteral("未知") : rejectReason);
