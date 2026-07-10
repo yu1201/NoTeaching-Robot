@@ -6674,7 +6674,20 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
         }
         if (param.vtStartSafePulse.empty() || param.vtEndSafePulse.empty())
         {
-            param.bUseComputedScanSafe = true;
+            QStringList missingSafePositions;
+            if (param.vtStartSafePulse.empty())
+            {
+                missingSafePositions << QStringLiteral("扫描下枪安全位置");
+            }
+            if (param.vtEndSafePulse.empty())
+            {
+                missingSafePositions << QStringLiteral("扫描收枪安全位置");
+            }
+            error = QStringLiteral(
+                "已选择示教安全位，但%1未配置有效脉冲点。为避免静默改用自动计算安全位，流程已中止；"
+                "请重新示教并保存，或在测量焊接参数中明确启用自动计算安全位。")
+                .arg(missingSafePositions.join(QStringLiteral("、")));
+            return false;
         }
     }
 
@@ -6868,13 +6881,9 @@ bool MeasureThenWeldService::MoveScanStartSafeAndWait(
         return false;
     }
 
-    if (!param.bUseComputedScanSafe && !param.vtStartSafePulse.empty())
+    if (!param.bUseComputedScanSafe)
     {
         return MovePulseListAndWait(pRobotDriver, param.vtStartSafePulse, speed, "下枪安全姿态", appendLog, setFlowStep);
-    }
-    if (!param.bUseComputedScanSafe && appendLog)
-    {
-        appendLog("下枪安全姿态未配置有效脉冲点，自动改用扫描安全位置推算。");
     }
 
     const T_ROBOT_COORS startSafeCoors = BuildScanSafeCoorsFromAnchor(param.tStartPos, param);
@@ -6972,13 +6981,9 @@ bool MeasureThenWeldService::MoveScanEndSafeAndWait(
         return false;
     }
 
-    if (!param.bUseComputedScanSafe && !param.vtEndSafePulse.empty())
+    if (!param.bUseComputedScanSafe)
     {
         return MovePulseListAndWait(pRobotDriver, param.vtEndSafePulse, speed, "收枪姿态", appendLog, setFlowStep);
-    }
-    if (!param.bUseComputedScanSafe && appendLog)
-    {
-        appendLog("收枪姿态未配置有效脉冲点，自动改用扫描安全位置推算。");
     }
 
     const T_ROBOT_COORS endSafeCoors = BuildScanSafeCoorsFromAnchor(param.tEndPos, param);
@@ -7048,6 +7053,15 @@ bool MeasureThenWeldService::RunScanCycle(
     if (cameraCache == nullptr)
     {
         return fail("扫描循环失败：当前机器人没有可用的专属相机缓存。", false);
+    }
+    if (!param.bUseComputedScanSafe
+        && (param.vtStartSafePulse.empty() || param.vtEndSafePulse.empty()))
+    {
+        result.fatalFailure = true;
+        return fail(
+            QStringLiteral("扫描前置检查失败：已选择示教安全位，但下枪或收枪安全脉冲列表为空；"
+                "禁止静默改用自动计算安全位。"),
+            false);
     }
 
     HandEyeMatrixConfig validatedCalibration;
@@ -7181,20 +7195,9 @@ bool MeasureThenWeldService::RunScanCycle(
     }
 
     const bool scanDataOk = scanOk;
-    // 一旦确认机器人到达扫描终点，即使停止请求或后处理失败，也优先受控移动到终点安全位。
-    // GUI 仍可通过 beforeAction 明确取消这一步；无人值守入口不会因 stopFlag 跳过安全收枪。
-    if (beforeAction && !beforeAction("扫描收枪安全位置"))
-    {
-        result.status = scanDataOk ? ScanCycleStatus::Stopped : ScanCycleStatus::Failed;
-        result.error = scanDataOk
-            ? QStringLiteral("已取消：扫描收枪安全位置。")
-            : QStringLiteral("扫描处理失败且未执行扫描收枪安全位置。未继续后续流程。");
-        if (appendLog)
-        {
-            appendLog(result.error);
-        }
-        return false;
-    }
+    // 一旦确认机器人到达扫描终点，安全收枪就是强制收尾步骤：停止请求、后处理失败和
+    // GUI 普通确认回调都不得把机器人留在扫描终点。需要立即制止运动时应使用机器人急停，
+    // 而不是让软件在已完成扫描后跳过配置好的安全撤离路径。
     if (!MoveScanEndSafeAndWait(pRobotDriver, param, safeRunSpeed, appendLog, setFlowStep))
     {
         return fail("扫描循环失败：未能到达扫描收枪安全位置。", true);

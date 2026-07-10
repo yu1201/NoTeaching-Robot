@@ -1765,11 +1765,6 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                             self->SetFlowStep("准备扫描终点并采集相机点");
                             self->SetProgressBusy(40, "扫描运动中，正在采集点云");
                         }
-                        else if (action == QStringLiteral("扫描收枪安全位置"))
-                        {
-                            self->SetFlowStep("准备移动到扫描收枪安全位置");
-                            self->SetProgressBusy(72, "移动到扫描收枪安全位置");
-                        }
                         return true;
                     };
                 ok = self != nullptr
@@ -2577,7 +2572,9 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
     }
 
     const int unitIndexForRun = m_unitIndex;
-    m_pCameraCache = ResolveCameraCacheForUnit(unitIndexForRun);
+    // 上一轮相机 runtime 可能已经被主窗口重建；SetRunning(true) 会立即访问该成员，
+    // 因此先清掉旧指针，待本轮启动成功后再在 UI 线程解析并赋回新缓存。
+    m_pCameraCache = nullptr;
     SetRunning(true);
     ResetProgress("相机时间补偿标定：准备启动相机");
     SetProgress(5, "标定开始");
@@ -2595,9 +2592,10 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
             QString cameraIP;
             QString savedForward;
             QString savedReverse;
+            CameraFrameCache* cameraCacheForRun = nullptr;
             TimeOffsetCalibrationResult calib;
 
-            QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok, unitIndexForRun]()
+            QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok, &cameraCacheForRun, unitIndexForRun]()
                 {
                     if (self == nullptr)
                     {
@@ -2605,11 +2603,72 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                         return;
                     }
                     ok = self->m_startCamera ? self->m_startCamera(unitIndexForRun, cameraIP) : false;
+                    if (ok)
+                    {
+                        // 启动相机可能重建当前单元的 runtime；必须在启动成功后重新取得缓存，
+                        // 禁止沿用启动前的旧指针。
+                        cameraCacheForRun = self->ResolveCameraCacheForUnit(unitIndexForRun);
+                        self->m_pCameraCache = cameraCacheForRun;
+                        ok = cameraCacheForRun != nullptr;
+                    }
                 }, Qt::BlockingQueuedConnection);
             if (!ok)
             {
                 message = "相机启动失败，标定中止。";
             }
+
+            auto runCalibrationScan = [self, pRobotDriver, cameraCacheForRun](
+                const T_PRECISE_MEASURE_PARAM& scanParam,
+                const QString& phaseName,
+                int progressBase,
+                QString& savedPath,
+                QString& scanError) -> bool
+                {
+                    if (self == nullptr || self->m_pService == nullptr || cameraCacheForRun == nullptr)
+                    {
+                        scanError = QStringLiteral("标定扫描运行环境已失效。");
+                        return false;
+                    }
+
+                    MeasureThenWeldService::ScanCycleResult scanCycle;
+                    const bool scanOk = self->m_pService->RunScanCycle(
+                        pRobotDriver,
+                        scanParam,
+                        SafeSpeed(scanParam.dRunSpeed, 1.0),
+                        cameraCacheForRun,
+                        scanCycle,
+                        [self, phaseName](const QString& text)
+                        {
+                            if (self != nullptr)
+                            {
+                                self->AppendLog(QString("%1：%2").arg(phaseName, text));
+                            }
+                        },
+                        [self, phaseName, progressBase](const QString& text)
+                        {
+                            if (self != nullptr)
+                            {
+                                self->SetFlowStep(QString("%1：%2").arg(phaseName, text));
+                                self->SetProgressBusy(progressBase, text);
+                            }
+                        },
+                        [self](const QString& title, const QString& detail) -> bool
+                        {
+                            return self != nullptr && self->ShowCheckpointDialog(title, detail);
+                        });
+                    // 标定只需要 KeyPoints；部分合法处理路径只返回案例目录而不生成最终姿态文件。
+                    // 保留旧 ScanMoveAndCollect 的“文件或案例目录”兼容语义。
+                    savedPath = !scanCycle.weldPosePath.isEmpty()
+                        ? scanCycle.weldPosePath
+                        : scanCycle.caseDir;
+                    if (!scanOk)
+                    {
+                        scanError = scanCycle.error.isEmpty()
+                            ? QStringLiteral("扫描循环失败，请查看日志。")
+                            : scanCycle.error;
+                    }
+                    return scanOk;
+                };
 
             // ---- 第一次：正向扫描 ----
             if (ok)
@@ -2619,28 +2678,11 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                     self->SetFlowStep("标定 1/2：正向扫描");
                     self->SetProgressBusy(15, "正向：移动到下枪安全位置");
                 }
-                ok = self != nullptr && self->MoveScanStartSafeAndWait(pRobotDriver, param, SafeSpeed(param.dRunSpeed, 1.0));
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(22, "正向：移动到扫描起点");
-                    ok = self->MoveCoorsAndWait(pRobotDriver, param.tStartPos, SafeSpeed(param.dRunSpeed, 1.0), "扫描起点(正向)");
-                }
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(30, "正向扫描中");
-                    ok = self->ScanMoveAndCollect(pRobotDriver, param, savedForward);
-                }
+                QString scanError;
+                ok = runCalibrationScan(param, QStringLiteral("标定 1/2 正向"), 30, savedForward, scanError);
                 if (!ok && message.isEmpty())
                 {
-                    message = "正向扫描失败，标定中止。";
+                    message = QString("正向扫描失败，标定中止：%1").arg(scanError);
                 }
                 // 工件适配性预检：正向拐点太少说明工件没有足够特征，立即中止、不再白跑反向扫描。
                 if (ok)
@@ -2688,37 +2730,11 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                     self->SetFlowStep("标定 2/2：反向扫描（起终点互换）");
                     self->SetProgressBusy(50, "反向：移动到下枪安全位置");
                 }
-                ok = self != nullptr && self->MoveScanStartSafeAndWait(pRobotDriver, paramReverse, SafeSpeed(param.dRunSpeed, 1.0));
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(56, "反向：移动到扫描起点");
-                    ok = self->MoveCoorsAndWait(pRobotDriver, paramReverse.tStartPos, SafeSpeed(param.dRunSpeed, 1.0), "扫描起点(反向)");
-                }
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(64, "反向扫描中");
-                    ok = self->ScanMoveAndCollect(pRobotDriver, paramReverse, savedReverse);
-                }
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(84, "移动到收枪安全位置");
-                    ok = self->MoveScanEndSafeAndWait(pRobotDriver, paramReverse, SafeSpeed(param.dRunSpeed, 1.0));
-                }
+                QString scanError;
+                ok = runCalibrationScan(paramReverse, QStringLiteral("标定 2/2 反向"), 64, savedReverse, scanError);
                 if (!ok && message.isEmpty())
                 {
-                    message = "反向扫描失败，标定中止。";
+                    message = QString("反向扫描失败，标定中止：%1").arg(scanError);
                 }
             }
 
