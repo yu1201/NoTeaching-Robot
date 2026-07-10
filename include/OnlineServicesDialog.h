@@ -6,6 +6,8 @@
 #include <functional>
 
 class QComboBox;
+class QFrame;
+class QJsonObject;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -15,6 +17,8 @@ class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QCheckBox;
+class QStackedWidget;
+class QTableWidget;
 class ScanDataUploader;
 
 // 管理页「在线服务」：OTA 在线升级 + 扫描数据上传 + 服务器配置。
@@ -69,6 +73,7 @@ private:
     QProgressBar* m_downloadProgress = nullptr;
 
     // 上传区
+    void ShowPickCasesDialog();   // 多选案例上传：列出 Result 下全部案例，多选后按名字顺序入队
     QCheckBox* m_autoUploadCheck = nullptr;
     QListWidget* m_pendingListWidget = nullptr;
     QPushButton* m_uploadNowBtn = nullptr;
@@ -79,11 +84,41 @@ private:
     QListWidget* m_remoteFileList = nullptr;
     QPushButton* m_remoteRefreshBtn = nullptr;
     QPushButton* m_remoteDownloadBtn = nullptr;
+    QPushButton* m_remoteDeleteBtn = nullptr;   // 删除选中数据包（服务器上）
+    QPushButton* m_remoteMkdirBtn = nullptr;    // 新建设备目录
     bool m_remoteBusy = false;
     void RefreshRemoteDevices();
     void RefreshRemoteFiles();
     void DownloadSelectedRemoteFiles();
+    void DeleteSelectedRemoteFiles();
+    void CreateRemoteDeviceDir();
     void SetRemoteBusy(bool busy);
+
+    // 仪表盘：左侧导航 + 右侧页面栈（云控制台式布局），总览页放大数字统计卡与设备资源表
+    QListWidget* m_navList = nullptr;
+    QStackedWidget* m_pagesStack = nullptr;
+    QLabel* m_cardDisk = nullptr;       // 磁盘用量百分比（大数字）
+    QLabel* m_cardDiskSub = nullptr;    // 已用/总量/剩余
+    QProgressBar* m_diskBar = nullptr;  // 磁盘用量进度条
+    QLabel* m_cardCloud = nullptr;      // 云端数据总量（大数字）
+    QLabel* m_cardDevices = nullptr;    // 设备数（大数字）
+    QLabel* m_cardQueue = nullptr;      // 本机待传队列（大数字）
+    QTableWidget* m_deviceTable = nullptr;   // 设备资源列表（名称/数据量/文件数/最近上传）
+    void RefreshServerStats();
+    void UpdateQueueCard();
+
+    // 账号管理（admin，经服务器管理接口：nginx /admin/ 反代 + X-Admin-Token）
+    QTableWidget* m_accountTable = nullptr;
+    void RefreshAccounts();
+    void ShowAddAccountDialog();
+    void ChangeSelectedAccountPassword();
+    void ToggleSelectedAccountPermission();
+    void DeleteSelectedAccount();
+
+    // 管理接口通用请求（UI 线程，QNetworkAccessManager 异步；令牌空时提示并回调失败）
+    QString AdminApiBase() const;
+    void AdminRequest(const QByteArray& verb, const QString& path, const QJsonObject& body,
+        std::function<void(bool ok, const QJsonObject& resp)> done);
 
     // 配置区
     QLineEdit* m_updateBaseUrlEdit = nullptr;
@@ -92,6 +127,7 @@ private:
     QLineEdit* m_ftpUserEdit = nullptr;
     QLineEdit* m_ftpPasswordEdit = nullptr;
     QLineEdit* m_deviceNameEdit = nullptr;
+    QLineEdit* m_adminTokenEdit = nullptr;   // 管理令牌（admin 手填，混淆存储）
 
     QPlainTextEdit* m_logText = nullptr;
 

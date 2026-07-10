@@ -1,5 +1,15 @@
 #include "ProcessLoopTestDialog.h"
 
+#include "ConfigDatabase.h"
+#include "ContralUnit.h"
+#include "OPini.h"
+#include "RobotDataHelper.h"
+#include "RobotMessage.h"
+#include "WeldProcessFile.h"
+#include "WindowStyleHelper.h"
+
+#include <algorithm>
+
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -14,9 +24,31 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QDateTime>
+#include <QScrollArea>
 #include <QVBoxLayout>
 
-ProcessLoopTestDialog::ProcessLoopTestDialog(const QList<QPair<int, QString>>& units,
+namespace
+{
+	// 测试设置持久化：ConfigDatabase 全局域 ProcessLoopTest 模块（UI 线程读写）。
+	QString ReadTestSetting(const QString& key, const QString& defaultValue)
+	{
+		QString value;
+		if (!ConfigDatabase::ReadScopedSetting(QStringLiteral("global"), QString(),
+			QStringLiteral("ProcessLoopTest"), key, &value) || value.trimmed().isEmpty())
+		{
+			return defaultValue;
+		}
+		return value.trimmed();
+	}
+
+	void WriteTestSetting(const QString& key, const QString& value)
+	{
+		ConfigDatabase::WriteScopedSetting(QStringLiteral("global"), QString(),
+			QStringLiteral("ProcessLoopTest"), key, value);
+	}
+}
+
+ProcessLoopTestDialog::ProcessLoopTestDialog(ContralUnit* pContralUnit,
     int defaultUnitIndex,
     LoadDefaultsFunc loadDefaults,
     RunnerFunc runner,
@@ -24,21 +56,22 @@ ProcessLoopTestDialog::ProcessLoopTestDialog(const QList<QPair<int, QString>>& u
     : QDialog(parent)
     , m_loadDefaults(std::move(loadDefaults))
     , m_runner(std::move(runner))
-    , m_units(units)
+    , m_pContralUnit(pContralUnit)
 {
     setWindowTitle(QStringLiteral("流程测试"));
     BuildUi();
 
-    // 预选默认单元。
+    // 预选默认单元（LoadSettings 里保存过的单元会覆盖它）。
     if (m_unitCombo != nullptr)
     {
-        int sel = 0;
-        for (int i = 0; i < m_units.size(); ++i)
+        const int idx = m_unitCombo->findData(defaultUnitIndex);
+        if (idx >= 0)
         {
-            if (m_units.at(i).first == defaultUnitIndex) { sel = i; break; }
+            m_unitCombo->setCurrentIndex(idx);
         }
-        m_unitCombo->setCurrentIndex(sel);
     }
+    LoadSettings();
+    ReloadSelectorsForCurrentUnit();
     ReloadDefaultsForCurrentUnit();
 }
 
@@ -66,18 +99,37 @@ void ProcessLoopTestDialog::BuildUi()
     hint->setStyleSheet("color: #7E9AA6; font-size: 12px;");
     root->addWidget(hint);
 
+    // 小屏/平板分辨率下内容放不下时滚动而不是挤压重叠：设置与日志全部放进自适应滚动区
+    //（PrepareEmbeddedPage 会对页内 QScrollArea 追加响应式配置，与其它管理页一致）。
+    auto* scrollArea = new QScrollArea(this);
+    scrollArea->setObjectName("AdaptiveWindowScrollArea");
+    ConfigureResponsiveScrollArea(scrollArea);
+    auto* content = new QWidget(scrollArea);
+    content->setSizePolicy(QSizePolicy::MinimumExpanding, QSizePolicy::MinimumExpanding);
+    auto* contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(0, 0, 8, 0);
+    contentLayout->setSpacing(12);
+    contentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+
     // —— 采集设置 ——
     auto* collectBox = new QGroupBox(QStringLiteral("测试设置"), this);
     auto* collectForm = new QFormLayout(collectBox);
     collectForm->setLabelAlignment(Qt::AlignRight);
 
     m_unitCombo = new QComboBox(collectBox);
-    for (const auto& u : m_units)
+    const QVector<RobotDataHelper::RobotInfo> robots = RobotDataHelper::LoadRobotList(m_pContralUnit);
+    for (const RobotDataHelper::RobotInfo& info : robots)
     {
-        m_unitCombo->addItem(QStringLiteral("%1（单元%2）").arg(u.second).arg(u.first), u.first);
+        const int row = m_unitCombo->count();
+        m_unitCombo->addItem(info.displayName, info.unitIndex);
+        m_unitCombo->setItemData(row, info.robotName, Qt::UserRole + 1);
     }
     connect(m_unitCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-        this, [this](int) { ReloadDefaultsForCurrentUnit(); });
+        this, [this](int)
+        {
+            ReloadSelectorsForCurrentUnit();
+            ReloadDefaultsForCurrentUnit();
+        });
     collectForm->addRow(QStringLiteral("目标机器人："), m_unitCombo);
 
     auto* countRow = new QHBoxLayout();
@@ -112,14 +164,119 @@ void ProcessLoopTestDialog::BuildUi()
     intervalRow->addWidget(m_intervalUnitCombo);
     auto* intervalHint = new QLabel(QStringLiteral("（0=连续不等待；每次扫描完成后等待此时间再开始下一次）"), collectBox);
     intervalHint->setStyleSheet("color:#7E9AA6; font-size:11px;");
-    intervalRow->addWidget(intervalHint);
-    intervalRow->addStretch();
+    intervalHint->setWordWrap(true);
+    intervalRow->addWidget(intervalHint, 1);
     collectForm->addRow(QStringLiteral("扫描间隔："), intervalRow);
-    root->addWidget(collectBox);
+    contentLayout->addWidget(collectBox);
 
     // —— 参数覆盖 ——
-    auto* paramBox = new QGroupBox(QStringLiteral("参数（默认取先测后焊预设，勾选「覆盖」才改）"), this);
+    auto* paramBox = new QGroupBox(QStringLiteral("参数（与先测后焊共用「当前选用」，改选即生效；勾选「覆盖」才替换数值）"), this);
     auto* paramLayout = new QVBoxLayout(paramBox);
+
+    // 与先测后焊一致的四个选择器：位置类型 / 焊接工艺 / 姿态补偿组 / 焊道补偿组。
+    // 改选即写回「当前选用」（UseGroupNo / UseWeldParaNo / Active*CompGroupIndex），
+    // 循环里 LoadPresetParam 读的就是这些——两边界面看到的选择始终一致。
+    // 2×2 网格：标签右对齐、四个下拉两列对齐等宽，避免错落。
+    auto* selectorGrid = new QGridLayout();
+    selectorGrid->setHorizontalSpacing(12);
+    selectorGrid->setVerticalSpacing(8);
+    m_paramGroupCombo = new QComboBox(paramBox);
+    m_processCombo = new QComboBox(paramBox);
+    m_poseCompCombo = new QComboBox(paramBox);
+    m_seamCompCombo = new QComboBox(paramBox);
+    for (QComboBox* c : { m_paramGroupCombo, m_processCombo, m_poseCompCombo, m_seamCompCombo })
+    {
+        c->setFixedWidth(300);   // 固定宽度：宽屏下不被拉长
+    }
+    auto addSelector = [selectorGrid, paramBox](int row, int col, const QString& text, QComboBox* combo)
+        {
+            QLabel* lab = new QLabel(text, paramBox);
+            lab->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            selectorGrid->addWidget(lab, row, col * 2);
+            selectorGrid->addWidget(combo, row, col * 2 + 1);
+        };
+    addSelector(0, 0, QStringLiteral("位置类型："), m_paramGroupCombo);
+    addSelector(0, 1, QStringLiteral("焊接工艺："), m_processCombo);
+    addSelector(1, 0, QStringLiteral("姿态补偿组："), m_poseCompCombo);
+    addSelector(1, 1, QStringLiteral("焊道补偿组："), m_seamCompCombo);
+    selectorGrid->setColumnStretch(4, 1);   // 余量全给右侧空列，四个下拉整体靠左
+    paramLayout->addLayout(selectorGrid);
+
+    connect(m_paramGroupCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
+        {
+            if (m_loadingSelectors || m_running.load())
+            {
+                return;
+            }
+            QString error;
+            const QString robot = CurrentRobotName();
+            if (robot.isEmpty() || !RobotDataHelper::WriteParamValue(
+                RobotDataHelper::MeasureWeldParamPath(robot),
+                QStringLiteral("MeasureWeldGroups"), QStringLiteral("UseGroupNo"),
+                QString::number(std::max(0, m_paramGroupCombo->currentData().toInt())), &error))
+            {
+                AppendLog(QStringLiteral("切换位置类型失败：%1").arg(error));
+                return;
+            }
+            AppendLog(QStringLiteral("位置类型已切换为：%1").arg(m_paramGroupCombo->currentText()));
+            ReloadDefaultsForCurrentUnit();
+        });
+    connect(m_processCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
+        {
+            if (m_loadingSelectors || m_running.load() || m_pContralUnit == nullptr)
+            {
+                return;
+            }
+            const int unitIndex = m_unitCombo != nullptr ? m_unitCombo->currentData().toInt() : -1;
+            const int processIndex = m_processCombo->currentData().toInt();
+            if (unitIndex < 0 || processIndex < 0)
+            {
+                return;
+            }
+            WeldProcessFile processFile(*m_pContralUnit, unitIndex);
+            if (!processFile.Init() || !processFile.UpdateUseWeldParaNo(processIndex))
+            {
+                AppendLog(QStringLiteral("切换焊接工艺失败：%1")
+                    .arg(DecodeRobotMessageText(processFile.GetLastError())));
+                return;
+            }
+            AppendLog(QStringLiteral("焊接工艺已切换为：%1").arg(m_processCombo->currentText()));
+        });
+    auto saveCompSelection = [this](QComboBox* combo, const QString& fileName,
+        const QString& allSection, const QString& activeKey, const QString& what)
+        {
+            if (m_loadingSelectors || m_running.load() || combo == nullptr)
+            {
+                return;
+            }
+            const QString robot = CurrentRobotName();
+            if (robot.isEmpty())
+            {
+                return;
+            }
+            QString error;
+            if (!RobotDataHelper::WriteParamValue(
+                RobotDataHelper::BuildProjectPath(QStringLiteral("Data/%1/%2").arg(robot, fileName)),
+                allSection, activeKey,
+                QString::number(std::max(0, combo->currentData().toInt())), &error))
+            {
+                AppendLog(QStringLiteral("切换%1失败：%2").arg(what, error));
+                return;
+            }
+            AppendLog(QStringLiteral("%1已切换为：%2").arg(what, combo->currentText()));
+        };
+    connect(m_poseCompCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+        [this, saveCompSelection](int)
+        {
+            saveCompSelection(m_poseCompCombo, QStringLiteral("WeldPoseCompParam.ini"),
+                QStringLiteral("ALLWeldPoseComp"), QStringLiteral("ActivePoseCompGroupIndex"), QStringLiteral("姿态补偿组"));
+        });
+    connect(m_seamCompCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+        [this, saveCompSelection](int)
+        {
+            saveCompSelection(m_seamCompCombo, QStringLiteral("WeldSeamCompParam.ini"),
+                QStringLiteral("ALLWeldSeamComp"), QStringLiteral("ActiveSeamCompGroupIndex"), QStringLiteral("焊道补偿组"));
+        });
 
     m_defaultsLabel = new QLabel(QStringLiteral("预设：加载中…"), paramBox);
     m_defaultsLabel->setStyleSheet("color: #8FB0BC; font-size: 12px;");
@@ -147,7 +304,7 @@ void ProcessLoopTestDialog::BuildUi()
     addOverrideRow(QStringLiteral("扫描速度"), m_ovScanSpeedCheck, m_scanSpeedSpin, 1.0, 100000.0, 1, QStringLiteral(" mm/min"));
     addOverrideRow(QStringLiteral("运行速度"), m_ovRunSpeedCheck, m_runSpeedSpin, 1.0, 100000.0, 1, QStringLiteral(" mm/min"));
     addOverrideRow(QStringLiteral("相机时间偏移"), m_ovCameraOffsetCheck, m_cameraOffsetSpin, -10000.0, 10000.0, 1, QStringLiteral(" ms"));
-    root->addWidget(paramBox);
+    contentLayout->addWidget(paramBox);
 
     // —— 控制/进度 ——
     auto* ctrlRow = new QHBoxLayout();
@@ -168,24 +325,316 @@ void ProcessLoopTestDialog::BuildUi()
     connect(m_stopBtn, &QPushButton::clicked, this, &ProcessLoopTestDialog::OnStop);
     ctrlRow->addWidget(m_stopBtn);
     ctrlRow->addStretch();
-    root->addLayout(ctrlRow);
+    contentLayout->addLayout(ctrlRow);
 
     m_progressLabel = new QLabel(QStringLiteral("就绪。"), this);
     m_progressLabel->setStyleSheet("font-size: 14px; color: #D6E7EA; font-weight: 600;");
-    root->addWidget(m_progressLabel);
+    m_progressLabel->setWordWrap(true);
+    contentLayout->addWidget(m_progressLabel);
 
     m_statLabel = new QLabel(QStringLiteral("成功 0 · 失败 0"), this);
     m_statLabel->setStyleSheet("color: #8FB0BC; font-size: 12px;");
-    root->addWidget(m_statLabel);
+    contentLayout->addWidget(m_statLabel);
 
     m_logText = new QPlainTextEdit(this);
     m_logText->setReadOnly(true);
     m_logText->setMinimumHeight(160);
     m_logText->setStyleSheet("QPlainTextEdit { background:#0E1A1F; color:#CFE3E6; border:1px solid #294049;"
         "border-radius:6px; font-family: Consolas, monospace; font-size: 12px; }");
-    root->addWidget(m_logText, 1);
+    contentLayout->addWidget(m_logText, 1);
+
+    scrollArea->setWidget(content);
+    root->addWidget(scrollArea, 1);
 
     resize(720, 640);
+}
+
+void ProcessLoopTestDialog::LoadSettings()
+{
+    if (m_unitCombo != nullptr)
+    {
+        bool ok = false;
+        const int savedUnit = ReadTestSetting(QStringLiteral("UnitIndex"), QStringLiteral("-1")).toInt(&ok);
+        if (ok && savedUnit >= 0)
+        {
+            const int idx = m_unitCombo->findData(savedUnit);
+            if (idx >= 0) { m_unitCombo->setCurrentIndex(idx); }
+        }
+    }
+    if (m_repeatSpin != nullptr)
+    {
+        m_repeatSpin->setValue(ReadTestSetting(QStringLiteral("RepeatCount"), QStringLiteral("10")).toInt());
+    }
+    if (m_infiniteCheck != nullptr)
+    {
+        m_infiniteCheck->setChecked(ReadTestSetting(QStringLiteral("Infinite"), QStringLiteral("0")) == QStringLiteral("1"));
+    }
+    if (m_stopOnFailureCheck != nullptr)
+    {
+        m_stopOnFailureCheck->setChecked(ReadTestSetting(QStringLiteral("StopOnFailure"), QStringLiteral("1")) == QStringLiteral("1"));
+    }
+    if (m_doWeldCheck != nullptr)
+    {
+        m_doWeldCheck->setChecked(ReadTestSetting(QStringLiteral("DoWeld"), QStringLiteral("0")) == QStringLiteral("1"));
+    }
+    if (m_intervalSpin != nullptr)
+    {
+        m_intervalSpin->setValue(ReadTestSetting(QStringLiteral("IntervalValue"), QStringLiteral("0")).toInt());
+    }
+    if (m_intervalUnitCombo != nullptr)
+    {
+        const int mul = ReadTestSetting(QStringLiteral("IntervalUnit"), QStringLiteral("1")).toInt();
+        const int idx = m_intervalUnitCombo->findData(mul);
+        if (idx >= 0) { m_intervalUnitCombo->setCurrentIndex(idx); }
+    }
+    // 覆盖项：勾选状态 + 值都恢复；未勾选的值随后由 ReloadDefaultsForCurrentUnit 用预设回填。
+    if (m_ovScanSpeedCheck != nullptr)
+    {
+        m_ovScanSpeedCheck->setChecked(ReadTestSetting(QStringLiteral("OvScanSpeed"), QStringLiteral("0")) == QStringLiteral("1"));
+        if (m_scanSpeedSpin != nullptr && m_ovScanSpeedCheck->isChecked())
+        {
+            m_scanSpeedSpin->setValue(ReadTestSetting(QStringLiteral("ScanSpeed"), QStringLiteral("0")).toDouble());
+        }
+    }
+    if (m_ovRunSpeedCheck != nullptr)
+    {
+        m_ovRunSpeedCheck->setChecked(ReadTestSetting(QStringLiteral("OvRunSpeed"), QStringLiteral("0")) == QStringLiteral("1"));
+        if (m_runSpeedSpin != nullptr && m_ovRunSpeedCheck->isChecked())
+        {
+            m_runSpeedSpin->setValue(ReadTestSetting(QStringLiteral("RunSpeed"), QStringLiteral("0")).toDouble());
+        }
+    }
+    if (m_ovCameraOffsetCheck != nullptr)
+    {
+        m_ovCameraOffsetCheck->setChecked(ReadTestSetting(QStringLiteral("OvCameraOffset"), QStringLiteral("0")) == QStringLiteral("1"));
+        if (m_cameraOffsetSpin != nullptr && m_ovCameraOffsetCheck->isChecked())
+        {
+            m_cameraOffsetSpin->setValue(ReadTestSetting(QStringLiteral("CameraOffset"), QStringLiteral("0")).toDouble());
+        }
+    }
+}
+
+void ProcessLoopTestDialog::SaveSettings() const
+{
+    if (m_unitCombo != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("UnitIndex"), QString::number(m_unitCombo->currentData().toInt()));
+    }
+    if (m_repeatSpin != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("RepeatCount"), QString::number(m_repeatSpin->value()));
+    }
+    if (m_infiniteCheck != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("Infinite"), m_infiniteCheck->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+    }
+    if (m_stopOnFailureCheck != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("StopOnFailure"), m_stopOnFailureCheck->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+    }
+    if (m_doWeldCheck != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("DoWeld"), m_doWeldCheck->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+    }
+    if (m_intervalSpin != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("IntervalValue"), QString::number(m_intervalSpin->value()));
+    }
+    if (m_intervalUnitCombo != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("IntervalUnit"), QString::number(m_intervalUnitCombo->currentData().toInt()));
+    }
+    if (m_ovScanSpeedCheck != nullptr && m_scanSpeedSpin != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("OvScanSpeed"), m_ovScanSpeedCheck->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+        WriteTestSetting(QStringLiteral("ScanSpeed"), QString::number(m_scanSpeedSpin->value(), 'f', 1));
+    }
+    if (m_ovRunSpeedCheck != nullptr && m_runSpeedSpin != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("OvRunSpeed"), m_ovRunSpeedCheck->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+        WriteTestSetting(QStringLiteral("RunSpeed"), QString::number(m_runSpeedSpin->value(), 'f', 1));
+    }
+    if (m_ovCameraOffsetCheck != nullptr && m_cameraOffsetSpin != nullptr)
+    {
+        WriteTestSetting(QStringLiteral("OvCameraOffset"), m_ovCameraOffsetCheck->isChecked() ? QStringLiteral("1") : QStringLiteral("0"));
+        WriteTestSetting(QStringLiteral("CameraOffset"), QString::number(m_cameraOffsetSpin->value(), 'f', 1));
+    }
+}
+
+QString ProcessLoopTestDialog::CurrentRobotName() const
+{
+    if (m_unitCombo != nullptr && m_unitCombo->currentIndex() >= 0)
+    {
+        const QString robotName = m_unitCombo->currentData(Qt::UserRole + 1).toString().trimmed();
+        if (!robotName.isEmpty())
+        {
+            return robotName;
+        }
+    }
+    return QString();
+}
+
+void ProcessLoopTestDialog::ReloadSelectorsForCurrentUnit()
+{
+    m_loadingSelectors = true;
+    LoadParamGroupCombo();
+    LoadProcessCombo();
+    const QString robot = CurrentRobotName();
+    LoadCompCombo(m_poseCompCombo,
+        RobotDataHelper::BuildProjectPath(QStringLiteral("Data/%1/WeldPoseCompParam.ini").arg(robot)),
+        QStringLiteral("ALLWeldPoseComp"), QStringLiteral("PoseCompCount"),
+        QStringLiteral("PoseCompGroupCount"), QStringLiteral("ActivePoseCompGroupIndex"),
+        QStringLiteral("WeldPoseCompGroup"), QStringLiteral("姿态补偿组"));
+    LoadCompCombo(m_seamCompCombo,
+        RobotDataHelper::BuildProjectPath(QStringLiteral("Data/%1/WeldSeamCompParam.ini").arg(robot)),
+        QStringLiteral("ALLWeldSeamComp"), QStringLiteral("SeamCompCount"),
+        QStringLiteral("SeamCompGroupCount"), QStringLiteral("ActiveSeamCompGroupIndex"),
+        QStringLiteral("WeldSeamCompGroup"), QStringLiteral("焊道补偿组"));
+    m_loadingSelectors = false;
+}
+
+void ProcessLoopTestDialog::LoadParamGroupCombo()
+{
+    if (m_paramGroupCombo == nullptr)
+    {
+        return;
+    }
+    m_paramGroupCombo->clear();
+    const QString robot = CurrentRobotName();
+    QString error;
+    if (robot.isEmpty() || !RobotDataHelper::EnsureMeasureWeldParamFile(robot, &error))
+    {
+        return;
+    }
+    COPini ini;
+    const QString path = RobotDataHelper::MeasureWeldParamPath(robot);
+    if (!ini.SetFileName(path.toUtf8().constData()))
+    {
+        return;
+    }
+    int groupCount = 1;
+    int useNo = 0;
+    ini.SetSectionName("MeasureWeldGroups");
+    ini.ReadString(false, "GroupCount", &groupCount);
+    ini.ReadString(false, "UseGroupNo", &useNo);
+    groupCount = std::max(1, groupCount);
+    useNo = std::clamp(useNo, 0, groupCount - 1);
+    for (int index = 0; index < groupCount; ++index)
+    {
+        std::string groupName;
+        ini.ReadString(false, QStringLiteral("Group%1Name").arg(index).toStdString(), groupName);
+        const QString displayName = groupName.empty()
+            ? QStringLiteral("参数组%1").arg(index + 1)
+            : DecodeRobotMessageText(groupName);
+        m_paramGroupCombo->addItem(QStringLiteral("%1 / Group%2").arg(displayName).arg(index), index);
+    }
+    m_paramGroupCombo->setCurrentIndex(useNo);
+}
+
+void ProcessLoopTestDialog::LoadProcessCombo()
+{
+    if (m_processCombo == nullptr)
+    {
+        return;
+    }
+    m_processCombo->clear();
+    m_processCombo->setEnabled(false);
+    const int unitIndex = m_unitCombo != nullptr ? m_unitCombo->currentData().toInt() : -1;
+    if (m_pContralUnit == nullptr || unitIndex < 0
+        || unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        return;
+    }
+    WeldProcessFile processFile(*m_pContralUnit, unitIndex);
+    if (!processFile.Init())
+    {
+        m_processCombo->addItem(QStringLiteral("请先在工艺界面重新创建工艺"), -1);
+        return;
+    }
+    const std::vector<T_WELD_PARA>& weldList = processFile.GetWeldParaList();
+    const int useIndex = weldList.empty()
+        ? -1
+        : std::clamp(processFile.GetUseWeldParaNo(), 0, static_cast<int>(weldList.size()) - 1);
+    int selectedCombo = 0;
+    for (int index = 0; index < static_cast<int>(weldList.size()); ++index)
+    {
+        const T_WELD_PARA& weld = weldList[index];
+        const QString workpiece = DecodeRobotMessageText(weld.strWorkPeace);
+        m_processCombo->addItem(QStringLiteral("%1. %2 | 焊脚%3")
+            .arg(index + 1)
+            .arg(workpiece.isEmpty() ? QStringLiteral("未命名工艺") : workpiece)
+            .arg(weld.dWeldAngleSize, 0, 'f', 1), index);
+        if (index == useIndex)
+        {
+            selectedCombo = m_processCombo->count() - 1;
+        }
+    }
+    if (m_processCombo->count() > 0)
+    {
+        m_processCombo->setEnabled(true);
+        m_processCombo->setCurrentIndex(std::clamp(selectedCombo, 0, m_processCombo->count() - 1));
+    }
+    else
+    {
+        m_processCombo->addItem(QStringLiteral("未读取到焊接工艺"), -1);
+    }
+}
+
+void ProcessLoopTestDialog::LoadCompCombo(QComboBox* combo, const QString& path, const QString& allSection,
+    const QString& rowCountKey, const QString& groupCountKey, const QString& activeKey,
+    const QString& groupSectionPrefix, const QString& defaultNamePrefix)
+{
+    if (combo == nullptr)
+    {
+        return;
+    }
+    constexpr int kCompSegmentCount = 4;   // 每组恰好 4 段（低平台/上升边/高平台/下降边）
+    combo->clear();
+    int activeIndex = 0;
+    int groupCount = 1;
+    if (ConfigDatabase::HasIniFile(path))
+    {
+        COPini ini;
+        if (ini.SetFileName(path.toUtf8().constData()))
+        {
+            ini.SetSectionName(allSection.toUtf8().constData());
+            ini.ReadString(false, activeKey.toUtf8().constData(), &activeIndex);
+            int configuredGroupCount = 0;
+            if (ini.ReadString(false, groupCountKey.toUtf8().constData(), &configuredGroupCount) > 0)
+            {
+                groupCount = std::max(1, configuredGroupCount);
+            }
+            else
+            {
+                int rowCount = kCompSegmentCount;
+                ini.ReadString(false, rowCountKey.toUtf8().constData(), &rowCount);
+                groupCount = std::max(1, (std::max(0, rowCount) + kCompSegmentCount - 1) / kCompSegmentCount);
+            }
+            activeIndex = std::clamp(activeIndex, 0, groupCount - 1);
+            for (int index = 0; index < groupCount; ++index)
+            {
+                QString groupName = QStringLiteral("%1%2").arg(defaultNamePrefix).arg(index + 1);
+                std::string encodedName;
+                ini.SetSectionName(QStringLiteral("%1%2").arg(groupSectionPrefix).arg(index).toUtf8().constData());
+                if (ini.ReadString(false, "Name", encodedName) > 0)
+                {
+                    const QString decoded = DecodeRobotMessageText(encodedName).trimmed();
+                    if (!decoded.isEmpty())
+                    {
+                        groupName = decoded;
+                    }
+                }
+                combo->addItem(QStringLiteral("%1 / Group%2").arg(groupName).arg(index), index);
+            }
+        }
+    }
+    if (combo->count() <= 0)
+    {
+        combo->addItem(QStringLiteral("%1%2 / Group0").arg(defaultNamePrefix).arg(1), 0);
+        activeIndex = 0;
+    }
+    combo->setCurrentIndex(std::clamp(activeIndex, 0, combo->count() - 1));
+    combo->setEnabled(combo->count() > 0);
 }
 
 void ProcessLoopTestDialog::ReloadDefaultsForCurrentUnit()
@@ -252,6 +701,7 @@ void ProcessLoopTestDialog::OnStart()
     }
     JoinWorker();  // 回收上一轮已结束的线程
 
+    SaveSettings();  // 记住本次测试设置，下次打开自动恢复
     const ProcessLoopTestSettings settings = CollectSettings();
     m_logText->clear();
     UpdateProgressUi(0, settings.infinite ? 0 : settings.repeatCount, 0, 0, QStringLiteral("准备中…"), false);
@@ -311,6 +761,10 @@ void ProcessLoopTestDialog::SetRunningUi(bool running)
     {
         if (c != nullptr) { c->setEnabled(!running); }
     }
+    for (QComboBox* c : { m_paramGroupCombo, m_processCombo, m_poseCompCombo, m_seamCompCombo })
+    {
+        if (c != nullptr) { c->setEnabled(!running && c->count() > 0); }
+    }
 }
 
 void ProcessLoopTestDialog::UpdateProgressUi(int iteration, int total, int okCount, int failCount,
@@ -347,6 +801,7 @@ void ProcessLoopTestDialog::AppendLog(const QString& text)
 
 void ProcessLoopTestDialog::closeEvent(QCloseEvent* event)
 {
+    SaveSettings();  // 关页也保存（用户只改设置没点开始的情况）
     if (m_running.load())
     {
         // 安全优先：正在跑就先停下并等其收尾，避免留后台机器人运动。

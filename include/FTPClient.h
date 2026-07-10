@@ -81,7 +81,8 @@ private:
     std::string getFtpErrorMsg(); // 获取WinINet错误信息
 private:
     // 字符串转宽字符串（替代StringToWString）
-    std::wstring s2w(const std::string& str);
+    // 注：不要再引入 string→wstring 的逐字节拉宽转换配合 W 版 API——中文路径会被系统代码页
+    // 转成「?」乱码；远程路径一律 A 版 API + UTF-8 字节直通（见 createRemoteDirRecursive 注释）。
 };
 
 #endif // FTPCLIENT_H

@@ -7,6 +7,8 @@
 
 ## 2026-07-10
 
+- 发布 v2026.07.10.1007：① 中文设备名 FTP 上传乱码/失败修复——`FtpClient` 远程路径由 W 版 WinINet API 改为 A 版 + UTF-8 字节直通（W 版按系统代码页把中文转成「?」乱码目录、且与 A 版传文件路径对不上导致 550；删掉危险的 `s2w`）。② 「在线服务」重做为云控制台式仪表盘：左侧导航（总览/在线升级/数据上传/远程数据/账号管理/服务器配置）+ 总览页大数字统计卡（磁盘用量+进度条/云端数据/设备数/待传队列）+ 设备资源列表。③ FTP 账号管理（管理员）：经服务器管理接口 `scripts/server/ota_admin.py`（systemd `ota-admin`，nginx 8090 的 `/admin/` 反代 + `X-Admin-Token` 鉴权，令牌在服务器 `/opt/ota-admin/token`）做账号增删/改密码/改权限（仅上传/全权限）与磁盘·设备统计；uploader/devicedata 受保护禁删；客户端「服务器配置」加管理令牌（混淆存储）。④ 远程数据加删除服务器数据包/新建设备目录（支持中文）。⑤ 案例上传改多选对话框（全选/Ctrl/Shift，按名字顺序入队）。⑥ 流程测试页：设置持久化（ConfigDatabase）、小屏自适应滚动、循环扫描数据自动上传钩子（成功/失败都传，非波纹板分析失败也收原始激光点）、定时扫描间隔、包含焊接段开关、与先测后焊同源的位置类型/焊接工艺/姿态·焊道补偿组四选择器（改选即写回当前选用）。⑦ 全对话框统一深色控制台 QSS + 列表/表格选中高亮加强。构建 `Release x64` 0 错误；WinINet A 版建中文目录服务器侧实测正确；管理接口账号全生命周期实测通过。署名 yu1201。
+
 - 发布 v2026.07.10.1006：OTA 增量升级增加「版本兼容判定 + 装后自检」，防止把只含 exe 的补丁装到 DLL 不一致的老设备、以及补丁装了版本没变的坑（1004 那类）。① `latest.json` 补丁块加 `baseMinVersion`（=非 exe 载荷/DLL 自哪个版本起没变的最低版本），客户端「本机版本 < baseMinVersion」时自动回退全量安装（`OnlineServicesDialog::OnManifestReply`）；② 升级前记 `PendingUpdateTargetVersion`，重启后 `QtWidgetsApplication4::CheckPendingUpdateResult` 比对实际版本，未达目标弹「升级未生效」告警（本地演示通过）；③ 发版脚本 `scripts/upload_ota.py`：算每通道「非 exe 载荷哈希」（排除 BUILD_VERSION.txt 等每次变的）、维护服务器端 `payload_history.json`、自动算 `baseMinVersion`（载荷没变一路回溯、DLL 一变顶到那版），`--seed-versions` 回填已知同载荷老版本；密码走环境变量不写死（仓库公开）。只传 103（156 已弃）。构建 `Release x64` 0 错误。署名 yu1201。
 
 ## 2026-07-09

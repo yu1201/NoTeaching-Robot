@@ -125,6 +125,18 @@ namespace OnlineServicesConfig
 		WriteValue(QStringLiteral("PendingUploads"), jsonArray);
 	}
 
+	// 服务器管理接口令牌（nginx /admin/ 反代 + X-Admin-Token 鉴权）：账号增删/改权限与磁盘统计用。
+	// 不随包分发，由管理员在「在线服务 → 服务器配置」手填；键名含 Token，ConfigDatabase 自动混淆存储。
+	inline QString AdminToken()
+	{
+		return ReadValue(QStringLiteral("AdminApiToken"), QString());
+	}
+
+	inline void SetAdminToken(const QString& token)
+	{
+		WriteValue(QStringLiteral("AdminApiToken"), token);
+	}
+
 	// 升级（增量或全量）后的目标版本：安装前记下，重启后主窗口自检「实际版本 == 目标?」，
 	// 不符即告警（补丁/安装没生效，如误挂了含旧 exe 的补丁）。空=无待验证升级。
 	inline QString PendingUpdateTargetVersion()

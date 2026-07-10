@@ -17,12 +17,19 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QHeaderView>
+#include <QInputDialog>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -30,6 +37,8 @@
 #include <QListWidget>
 #include <QCloseEvent>
 #include <QMessageBox>
+#include <QStackedWidget>
+#include <QTableWidget>
 #include <QNetworkAccessManager>
 #include <QNetworkProxy>
 #include <QNetworkReply>
@@ -46,6 +55,19 @@ namespace
 	QString DownloadTempDir()
 	{
 		return QStringLiteral("Temp/OnlineUpdate");
+	}
+
+	QString HumanBytes(double bytes)
+	{
+		if (bytes >= 1024.0 * 1024.0 * 1024.0)
+		{
+			return QStringLiteral("%1 GB").arg(QString::number(bytes / (1024.0 * 1024.0 * 1024.0), 'f', 1));
+		}
+		if (bytes >= 1024.0 * 1024.0)
+		{
+			return QStringLiteral("%1 MB").arg(QString::number(bytes / (1024.0 * 1024.0), 'f', 1));
+		}
+		return QStringLiteral("%1 KB").arg(QString::number(bytes / 1024.0, 'f', 0));
 	}
 }
 
@@ -79,7 +101,25 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 					m_pendingListWidget->clear();
 					m_pendingListWidget->addItems(m_uploader->PendingList());
 				}
+				UpdateQueueCard();
 			});
+	}
+
+	if (!m_aboutMode)
+	{
+		UpdateQueueCard();
+		// 配了管理令牌才自动拉服务器统计/账号（没配就静默，卡片显示「待刷新」，避免开页报错刷屏）。
+		if (!OnlineServicesConfig::AdminToken().trimmed().isEmpty())
+		{
+			QTimer::singleShot(0, this, [this]()
+				{
+					RefreshServerStats();
+					if (m_accountTable != nullptr)
+					{
+						RefreshAccounts();
+					}
+				});
+		}
 	}
 
 	if (m_aboutMode)
@@ -91,6 +131,38 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 
 void OnlineServicesDialog::BuildUi()
 {
+	// 统一控件样式（深色控制台风格）：普通/主操作/危险按钮、分组框、表格、输入框、下拉。
+	// 按钮用动态属性 kind=primary/danger 区分主次；qproperty 变化后需 unpolish/polish，但这里创建时即设，无需刷新。
+	if (!m_aboutMode)
+	{
+		setStyleSheet(QStringLiteral(
+			"QGroupBox { border: 1px solid #294049; border-radius: 10px; margin-top: 10px; background: #101E24; }"
+			"QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #9ED8DB; font-weight: 600; }"
+			"QPushButton { background: #1F3542; color: #E7F3F5; border: 1px solid #3A5A69; border-radius: 7px;"
+			"  padding: 7px 16px; font-size: 13px; min-height: 20px; }"
+			"QPushButton:hover { background: #2A4756; border-color: #4E7889; }"
+			"QPushButton:pressed { background: #18303B; }"
+			"QPushButton:disabled { background: #1A2A31; color: #5E7982; border-color: #263C44; }"
+			"QPushButton[kind=\"primary\"] { background: #1F5A46; border-color: #3E8E70; color: #EAFBF3; font-weight: 600; }"
+			"QPushButton[kind=\"primary\"]:hover { background: #2A7358; }"
+			"QPushButton[kind=\"danger\"] { background: #5A2323; border-color: #8E3E3E; color: #FBEAEA; }"
+			"QPushButton[kind=\"danger\"]:hover { background: #733030; }"
+			"QLineEdit { background: #0E1A1F; color: #E7F3F5; border: 1px solid #2E4A57; border-radius: 6px; padding: 6px 8px; selection-background-color: #2A7358; }"
+			"QLineEdit:focus { border-color: #72D4DD; }"
+			"QComboBox { background: #0E1A1F; color: #E7F3F5; border: 1px solid #2E4A57; border-radius: 6px; padding: 5px 8px; }"
+			"QComboBox:focus { border-color: #72D4DD; }"
+			"QComboBox QAbstractItemView { background: #0E1A1F; color: #E7F3F5; selection-background-color: #2A4756; }"
+			"QTableWidget { background: #0E1A1F; alternate-background-color: #12222A; color: #D6E7EA; gridline-color: #22383F;"
+			"  border: 1px solid #294049; border-radius: 8px; selection-background-color: #1F5A46; selection-color: #EAFBF3; }"
+			"QTableWidget::item { padding: 4px 8px; }"
+			"QHeaderView::section { background: #16262E; color: #9ED8DB; border: none; border-bottom: 1px solid #294049;"
+			"  padding: 8px; font-weight: 600; }"
+			"QListWidget { background: #0E1A1F; color: #D6E7EA; border: 1px solid #294049; border-radius: 8px; }"
+			"QListWidget::item { padding: 6px 8px; }"
+			"QListWidget::item:selected { background: #1F5A46; color: #EAFBF3; border-left: 3px solid #7BE0A2; }"
+			"QListWidget::item:hover { background: #16262E; }"));
+	}
+
 	QVBoxLayout* mainLayout = new QVBoxLayout(this);
 	mainLayout->setContentsMargins(16, 14, 16, 14);
 	mainLayout->setSpacing(10);
@@ -116,8 +188,10 @@ void OnlineServicesDialog::BuildUi()
 	m_latestVersionLabel = new QLabel(QStringLiteral("最新版本：未检查"), this);
 	m_checkUpdateBtn = new QPushButton(QStringLiteral("检查更新"), this);
 	m_checkUpdateBtn->setMinimumHeight(44);
+	m_checkUpdateBtn->setProperty("kind", "primary");
 	m_downloadInstallBtn = new QPushButton(QStringLiteral("下载并安装"), this);
 	m_downloadInstallBtn->setMinimumHeight(44);
+	m_downloadInstallBtn->setProperty("kind", "primary");
 	m_downloadInstallBtn->setEnabled(false);
 	m_downloadProgress = new QProgressBar(this);
 	m_downloadProgress->setRange(0, 100);
@@ -132,7 +206,11 @@ void OnlineServicesDialog::BuildUi()
 	updateLayout->addWidget(m_downloadInstallBtn, 0, 3);
 	updateLayout->addWidget(m_downloadProgress, 1, 0, 1, 4);
 	updateLayout->addWidget(m_updateNotes, 2, 0, 1, 4);
-	mainLayout->addWidget(updateGroup);
+	updateLayout->setRowStretch(3, 1);   // 内容贴顶：多余高度给底部空行，不再把控件竖向摊开
+	if (m_aboutMode)
+	{
+		mainLayout->addWidget(updateGroup);   // 关于页保持精简：只有升级区（仪表盘模式挂进页签）
+	}
 
 	// —— 数据上传 ——
 	QGroupBox* uploadGroup = new QGroupBox(QStringLiteral("扫描数据上传"), this);
@@ -140,17 +218,18 @@ void OnlineServicesDialog::BuildUi()
 	m_autoUploadCheck = new QCheckBox(QStringLiteral("扫描流程完成后自动上传"), this);
 	m_uploadNowBtn = new QPushButton(QStringLiteral("立即上传待传项"), this);
 	m_uploadNowBtn->setMinimumHeight(40);
+	m_uploadNowBtn->setProperty("kind", "primary");
 	m_uploadPickBtn = new QPushButton(QStringLiteral("选择案例上传…"), this);
 	m_uploadPickBtn->setMinimumHeight(40);
 	m_pendingListWidget = new QListWidget(this);
-	m_pendingListWidget->setMaximumHeight(110);
+	// 队列列表占满页面剩余高度（不设上限），内容自然贴顶。
 	uploadLayout->addWidget(m_autoUploadCheck, 0, 0);
 	uploadLayout->addWidget(m_uploadNowBtn, 0, 1);
 	uploadLayout->addWidget(m_uploadPickBtn, 0, 2);
 	uploadLayout->addWidget(new QLabel(QStringLiteral("待上传队列："), this), 1, 0);
 	uploadLayout->addWidget(m_pendingListWidget, 2, 0, 1, 3);
+	uploadLayout->setRowStretch(2, 1);
 	uploadGroup->setVisible(!m_aboutMode);
-	mainLayout->addWidget(uploadGroup);
 
 	// —— 服务器配置 ——
 	QGroupBox* configGroup = new QGroupBox(QStringLiteral("服务器配置"), this);
@@ -177,14 +256,21 @@ void OnlineServicesDialog::BuildUi()
 	configLayout->addWidget(m_ftpPasswordEdit, 2, 3);
 	configLayout->addWidget(new QLabel(QStringLiteral("设备名"), this), 3, 0);
 	configLayout->addWidget(m_deviceNameEdit, 3, 1);
-	configLayout->addWidget(saveConfigBtn, 3, 3);
+	// 管理令牌：服务器管理接口（账号管理/磁盘统计）鉴权用，管理员手填、混淆存储。
+	m_adminTokenEdit = new QLineEdit(this);
+	m_adminTokenEdit->setEchoMode(QLineEdit::Password);
+	m_adminTokenEdit->setPlaceholderText(QStringLiteral("管理令牌（账号管理/服务器统计用，管理员填写）"));
+	configLayout->addWidget(new QLabel(QStringLiteral("管理令牌"), this), 4, 0);
+	configLayout->addWidget(m_adminTokenEdit, 4, 1, 1, 2);
+	configLayout->addWidget(saveConfigBtn, 4, 3);
+	configLayout->setRowStretch(5, 1);   // 配置行贴顶
 	configGroup->setVisible(!m_aboutMode);
-	mainLayout->addWidget(configGroup);
 
-	// —— 远程数据（admin）：浏览/下载各设备上传到服务器的扫描数据 ——
+	// —— 远程数据（admin）：浏览/下载/删除各设备上传到服务器的扫描数据、新建设备目录 ——
+	QGroupBox* remoteGroup = nullptr;
 	if (!m_aboutMode && m_remoteBrowseAllowed)
 	{
-		QGroupBox* remoteGroup = new QGroupBox(QStringLiteral("远程数据（管理员）"), this);
+		remoteGroup = new QGroupBox(QStringLiteral("远程数据（管理员）"), this);
 		QGridLayout* remoteLayout = new QGridLayout(remoteGroup);
 		m_remoteRefreshBtn = new QPushButton(QStringLiteral("刷新设备列表"), this);
 		m_remoteRefreshBtn->setMinimumHeight(40);
@@ -192,16 +278,25 @@ void OnlineServicesDialog::BuildUi()
 		m_remoteDeviceCombo->setMinimumWidth(220);
 		m_remoteFileList = new QListWidget(this);
 		m_remoteFileList->setSelectionMode(QAbstractItemView::ExtendedSelection);
-		m_remoteFileList->setMaximumHeight(130);
+		// 文件列表占满页面剩余高度，内容贴顶。
 		m_remoteDownloadBtn = new QPushButton(QStringLiteral("下载选中到本地"), this);
 		m_remoteDownloadBtn->setMinimumHeight(40);
 		m_remoteDownloadBtn->setToolTip(QStringLiteral("下载并自动解压到 Result\\Remote\\<设备>\\，可用点云查看等工具直接打开。"));
+		m_remoteDownloadBtn->setProperty("kind", "primary");
+		m_remoteDeleteBtn = new QPushButton(QStringLiteral("删除选中（服务器）"), this);
+		m_remoteDeleteBtn->setMinimumHeight(40);
+		m_remoteDeleteBtn->setProperty("kind", "danger");
+		m_remoteDeleteBtn->setToolTip(QStringLiteral("从服务器上永久删除选中的数据包（不影响设备本地数据）。"));
+		m_remoteMkdirBtn = new QPushButton(QStringLiteral("新建设备目录…"), this);
+		m_remoteMkdirBtn->setMinimumHeight(40);
 		remoteLayout->addWidget(m_remoteRefreshBtn, 0, 0);
 		remoteLayout->addWidget(new QLabel(QStringLiteral("设备："), this), 0, 1);
 		remoteLayout->addWidget(m_remoteDeviceCombo, 0, 2);
 		remoteLayout->addWidget(m_remoteDownloadBtn, 0, 3);
 		remoteLayout->addWidget(m_remoteFileList, 1, 0, 1, 4);
-		mainLayout->addWidget(remoteGroup);
+		remoteLayout->setRowStretch(1, 1);
+		remoteLayout->addWidget(m_remoteDeleteBtn, 2, 2);
+		remoteLayout->addWidget(m_remoteMkdirBtn, 2, 3);
 
 		connect(m_remoteRefreshBtn, &QPushButton::clicked, this, [this]()
 			{
@@ -216,12 +311,208 @@ void OnlineServicesDialog::BuildUi()
 			{
 				DownloadSelectedRemoteFiles();
 			});
+		connect(m_remoteDeleteBtn, &QPushButton::clicked, this, [this]()
+			{
+				DeleteSelectedRemoteFiles();
+			});
+		connect(m_remoteMkdirBtn, &QPushButton::clicked, this, [this]()
+			{
+				CreateRemoteDeviceDir();
+			});
+	}
+
+	// —— 账号管理（admin，经服务器管理接口：nginx /admin/ + X-Admin-Token）——
+	QGroupBox* accountGroup = nullptr;
+	if (!m_aboutMode && m_remoteBrowseAllowed)
+	{
+		accountGroup = new QGroupBox(QStringLiteral("FTP 账号管理（管理员）"), this);
+		QVBoxLayout* accLayout = new QVBoxLayout(accountGroup);
+		accLayout->setSpacing(10);
+		// 工具条：主操作（添加）+ 选中项操作分组，左对齐紧凑，后置 stretch 不撑满整行。
+		QHBoxLayout* accToolbar = new QHBoxLayout();
+		accToolbar->setSpacing(8);
+		QPushButton* accAddBtn = new QPushButton(QStringLiteral("＋ 添加账号"), this);
+		accAddBtn->setProperty("kind", "primary");
+		QPushButton* accPwBtn = new QPushButton(QStringLiteral("改密码"), this);
+		QPushButton* accPermBtn = new QPushButton(QStringLiteral("切换权限"), this);
+		QPushButton* accDelBtn = new QPushButton(QStringLiteral("删除账号"), this);
+		accDelBtn->setProperty("kind", "danger");
+		QPushButton* accRefreshBtn = new QPushButton(QStringLiteral("刷新"), this);
+		accToolbar->addWidget(accAddBtn);
+		accToolbar->addSpacing(6);
+		accToolbar->addWidget(accPwBtn);
+		accToolbar->addWidget(accPermBtn);
+		accToolbar->addWidget(accDelBtn);
+		accToolbar->addStretch();
+		accToolbar->addWidget(accRefreshBtn);
+		accLayout->addLayout(accToolbar);
+
+		m_accountTable = new QTableWidget(0, 3, this);
+		m_accountTable->setHorizontalHeaderLabels({ QStringLiteral("账号"), QStringLiteral("权限"), QStringLiteral("说明") });
+		m_accountTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Fixed);
+		m_accountTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Fixed);
+		m_accountTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+		m_accountTable->setColumnWidth(0, 200);
+		m_accountTable->setColumnWidth(1, 120);
+		m_accountTable->verticalHeader()->setVisible(false);
+		m_accountTable->verticalHeader()->setDefaultSectionSize(38);
+		m_accountTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+		m_accountTable->setSelectionMode(QAbstractItemView::SingleSelection);
+		m_accountTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+		m_accountTable->setAlternatingRowColors(true);
+		accLayout->addWidget(m_accountTable, 1);
+		QLabel* accHint = new QLabel(QStringLiteral(
+			"「仅上传」账号能上传但下载不到任何数据（现场设备默认）；「全权限」可上传下载浏览全部设备。"
+			"uploader/devicedata 为系统保护账号不可删除；改 uploader 密码会让所有用默认账号的现场设备断传，慎改。"), this);
+		accHint->setWordWrap(true);
+		accHint->setStyleSheet("color: #7E9AA6; font-size: 11px;");
+		accLayout->addWidget(accHint);
+
+		connect(accRefreshBtn, &QPushButton::clicked, this, [this]() { SaveConfigFromUi(); RefreshAccounts(); });
+		connect(accAddBtn, &QPushButton::clicked, this, [this]() { ShowAddAccountDialog(); });
+		connect(accPwBtn, &QPushButton::clicked, this, [this]() { ChangeSelectedAccountPassword(); });
+		connect(accPermBtn, &QPushButton::clicked, this, [this]() { ToggleSelectedAccountPermission(); });
+		connect(accDelBtn, &QPushButton::clicked, this, [this]() { DeleteSelectedAccount(); });
+	}
+
+	// —— 仪表盘组装：左侧导航 + 右侧页面栈（云控制台式布局，关于页不走这里）——
+	if (!m_aboutMode)
+	{
+		// 总览页：大数字统计卡 ×4 + 设备资源列表。
+		QWidget* overviewPage = new QWidget(this);
+		QVBoxLayout* ovLayout = new QVBoxLayout(overviewPage);
+		ovLayout->setContentsMargins(0, 0, 0, 0);
+		ovLayout->setSpacing(10);
+
+		QHBoxLayout* ovHeader = new QHBoxLayout();
+		QLabel* ovTitle = new QLabel(QStringLiteral("服务器总览"), overviewPage);
+		ovTitle->setStyleSheet("font-size: 16px; font-weight: bold; color: #9ED8DB;");
+		QLabel* ovVersion = new QLabel(QStringLiteral("软件 v%1（%2通道）")
+			.arg(QApplication::applicationVersion())
+			.arg(UpdateChannel() == QStringLiteral("brand") ? QStringLiteral("品牌") : QStringLiteral("中性")), overviewPage);
+		ovVersion->setStyleSheet("color: #7E9AA6; font-size: 12px;");
+		QPushButton* statsRefreshBtn = new QPushButton(QStringLiteral("刷新状态"), overviewPage);
+		statsRefreshBtn->setMinimumHeight(38);
+		connect(statsRefreshBtn, &QPushButton::clicked, this, [this]()
+			{
+				SaveConfigFromUi();
+				RefreshServerStats();
+				UpdateQueueCard();
+			});
+		ovHeader->addWidget(ovTitle);
+		ovHeader->addSpacing(14);
+		ovHeader->addWidget(ovVersion);
+		ovHeader->addStretch();
+		ovHeader->addWidget(statsRefreshBtn);
+		ovLayout->addLayout(ovHeader);
+
+		// 大数字统计卡：标题小字 + 数值大字 + 说明小字（+磁盘卡带用量进度条）。
+		auto makeStatCard = [](QWidget* parent, const QString& caption, QLabel*& valueLabel,
+			QLabel** subLabel, const QString& accentColor) -> QFrame*
+			{
+				QFrame* card = new QFrame(parent);
+				card->setStyleSheet(
+					"QFrame { background: #13232B; border: 1px solid #2E4A57; border-radius: 12px; }"
+					"QLabel { border: none; background: transparent; }");
+				QVBoxLayout* cardLayout = new QVBoxLayout(card);
+				cardLayout->setContentsMargins(14, 12, 14, 12);
+				cardLayout->setSpacing(4);
+				QLabel* cap = new QLabel(caption, card);
+				cap->setStyleSheet("color: #7E9AA6; font-size: 12px;");
+				valueLabel = new QLabel(QStringLiteral("--"), card);
+				valueLabel->setStyleSheet(QStringLiteral("color: %1; font-size: 26px; font-weight: bold;").arg(accentColor));
+				cardLayout->addWidget(cap);
+				cardLayout->addWidget(valueLabel);
+				if (subLabel != nullptr)
+				{
+					*subLabel = new QLabel(QString(), card);
+					(*subLabel)->setStyleSheet("color: #8FB0BC; font-size: 11px;");
+					(*subLabel)->setWordWrap(true);
+					cardLayout->addWidget(*subLabel);
+				}
+				return card;
+			};
+		QHBoxLayout* cardsRow = new QHBoxLayout();
+		cardsRow->setSpacing(10);
+		QFrame* diskCard = makeStatCard(overviewPage, QStringLiteral("服务器磁盘"), m_cardDisk, &m_cardDiskSub, QStringLiteral("#72D4DD"));
+		m_diskBar = new QProgressBar(diskCard);
+		m_diskBar->setRange(0, 100);
+		m_diskBar->setValue(0);
+		m_diskBar->setTextVisible(false);
+		m_diskBar->setFixedHeight(6);
+		m_diskBar->setStyleSheet(
+			"QProgressBar { background: #0E1A1F; border: none; border-radius: 3px; }"
+			"QProgressBar::chunk { background: #72D4DD; border-radius: 3px; }");
+		static_cast<QVBoxLayout*>(diskCard->layout())->addWidget(m_diskBar);
+		cardsRow->addWidget(diskCard, 1);
+		cardsRow->addWidget(makeStatCard(overviewPage, QStringLiteral("云端数据"), m_cardCloud, nullptr, QStringLiteral("#7BE0A2")), 1);
+		cardsRow->addWidget(makeStatCard(overviewPage, QStringLiteral("设备数"), m_cardDevices, nullptr, QStringLiteral("#E8D28A")), 1);
+		cardsRow->addWidget(makeStatCard(overviewPage, QStringLiteral("本机待传队列"), m_cardQueue, nullptr, QStringLiteral("#F0A0A0")), 1);
+		ovLayout->addLayout(cardsRow);
+
+		QLabel* devTitle = new QLabel(QStringLiteral("设备资源列表"), overviewPage);
+		devTitle->setStyleSheet("color: #9ED8DB; font-size: 13px; font-weight: 600;");
+		ovLayout->addWidget(devTitle);
+		m_deviceTable = new QTableWidget(0, 4, overviewPage);
+		m_deviceTable->setHorizontalHeaderLabels({ QStringLiteral("设备名"), QStringLiteral("数据量"),
+			QStringLiteral("文件数"), QStringLiteral("最近上传") });
+		m_deviceTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+		m_deviceTable->verticalHeader()->setVisible(false);
+		m_deviceTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+		m_deviceTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+		ovLayout->addWidget(m_deviceTable, 1);
+
+		// 左侧导航 + 右侧页面栈。
+		m_navList = new QListWidget(this);
+		m_navList->setFixedWidth(150);
+		m_navList->setStyleSheet(
+			"QListWidget { background: #0E1A1F; border: 1px solid #294049; border-radius: 10px; outline: none; }"
+			"QListWidget::item { color: #AFC8CE; padding: 12px 14px; font-size: 14px; }"
+			"QListWidget::item:selected { background: #1F3542; color: #F4FAFA; border-left: 3px solid #72D4DD; }"
+			"QListWidget::item:hover { background: #16262E; }");
+		m_pagesStack = new QStackedWidget(this);
+
+		auto addNavPage = [this](const QString& title, QWidget* page)
+			{
+				m_navList->addItem(title);
+				m_pagesStack->addWidget(page);
+			};
+		addNavPage(QStringLiteral("总览"), overviewPage);
+		addNavPage(QStringLiteral("在线升级"), updateGroup);
+		addNavPage(QStringLiteral("数据上传"), uploadGroup);
+		if (remoteGroup != nullptr)
+		{
+			addNavPage(QStringLiteral("远程数据"), remoteGroup);
+		}
+		if (accountGroup != nullptr)
+		{
+			addNavPage(QStringLiteral("账号管理"), accountGroup);
+		}
+		addNavPage(QStringLiteral("服务器配置"), configGroup);
+		connect(m_navList, &QListWidget::currentRowChanged, this, [this](int row)
+			{
+				if (m_pagesStack != nullptr && row >= 0 && row < m_pagesStack->count())
+				{
+					m_pagesStack->setCurrentIndex(row);
+				}
+			});
+		m_navList->setCurrentRow(0);
+
+		QHBoxLayout* bodyRow = new QHBoxLayout();
+		bodyRow->setSpacing(12);
+		bodyRow->addWidget(m_navList);
+		bodyRow->addWidget(m_pagesStack, 1);
+		mainLayout->addLayout(bodyRow, 1);
 	}
 
 	m_logText = new QPlainTextEdit(this);
 	m_logText->setReadOnly(true);
 	m_logText->setPlaceholderText(QStringLiteral("在线服务日志…"));
-	mainLayout->addWidget(m_logText, 1);
+	if (!m_aboutMode)
+	{
+		m_logText->setMaximumHeight(150);   // 仪表盘模式日志固定高度，空间让给页签内容
+	}
+	mainLayout->addWidget(m_logText, m_aboutMode ? 1 : 0);
 
 	connect(m_checkUpdateBtn, &QPushButton::clicked, this, [this]() { CheckForUpdate(); });
 	connect(m_downloadInstallBtn, &QPushButton::clicked, this, [this]()
@@ -250,13 +541,7 @@ void OnlineServicesDialog::BuildUi()
 		});
 	connect(m_uploadPickBtn, &QPushButton::clicked, this, [this]()
 		{
-			const QString dir = QFileDialog::getExistingDirectory(this,
-				QStringLiteral("选择要上传的结果案例目录"), QStringLiteral("Result"));
-			if (!dir.isEmpty() && m_uploader != nullptr)
-			{
-				SaveConfigFromUi();
-				m_uploader->QueueUpload(dir);
-			}
+			ShowPickCasesDialog();
 		});
 	connect(saveConfigBtn, &QPushButton::clicked, this, [this]()
 		{
@@ -275,6 +560,10 @@ void OnlineServicesDialog::LoadConfigToUi()
 	m_ftpUserEdit->setText(OnlineServicesConfig::FtpUser());
 	m_ftpPasswordEdit->setText(OnlineServicesConfig::FtpPassword());
 	m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
+	if (m_adminTokenEdit != nullptr)
+	{
+		m_adminTokenEdit->setText(OnlineServicesConfig::AdminToken());
+	}
 	m_autoUploadCheck->setChecked(OnlineServicesConfig::AutoUploadEnabled());
 	if (m_uploader != nullptr && m_pendingListWidget != nullptr)
 	{
@@ -293,6 +582,10 @@ void OnlineServicesDialog::SaveConfigFromUi()
 	OnlineServicesConfig::SetFtpUser(m_ftpUserEdit->text().trimmed());
 	OnlineServicesConfig::SetFtpPassword(m_ftpPasswordEdit->text());
 	OnlineServicesConfig::SetDeviceName(m_deviceNameEdit->text().trimmed());
+	if (m_adminTokenEdit != nullptr)
+	{
+		OnlineServicesConfig::SetAdminToken(m_adminTokenEdit->text().trimmed());
+	}
 }
 
 QString OnlineServicesDialog::UpdateChannel() const
@@ -622,6 +915,14 @@ void OnlineServicesDialog::SetRemoteBusy(bool busy)
 	{
 		m_remoteDownloadBtn->setEnabled(!busy);
 	}
+	if (m_remoteDeleteBtn != nullptr)
+	{
+		m_remoteDeleteBtn->setEnabled(!busy);
+	}
+	if (m_remoteMkdirBtn != nullptr)
+	{
+		m_remoteMkdirBtn->setEnabled(!busy);
+	}
 }
 
 void OnlineServicesDialog::RefreshRemoteDevices()
@@ -801,4 +1102,471 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 						.arg(okCount).arg(names.size()).arg(QDir::toNativeSeparators(localDir)));
 				}, Qt::QueuedConnection);
 		}).detach();
+}
+
+void OnlineServicesDialog::DeleteSelectedRemoteFiles()
+{
+	if (m_remoteBusy || m_remoteFileList == nullptr || m_remoteDeviceCombo == nullptr)
+	{
+		return;
+	}
+	const QString device = m_remoteDeviceCombo->currentText().trimmed();
+	const QList<QListWidgetItem*> selected = m_remoteFileList->selectedItems();
+	if (device.isEmpty() || selected.isEmpty())
+	{
+		AppendLog(QStringLiteral("请先选择设备和要删除的数据包。"));
+		return;
+	}
+	const QMessageBox::StandardButton ret = QMessageBox::warning(this, QStringLiteral("删除服务器数据"),
+		QStringLiteral("将从服务器永久删除设备 %1 的 %2 个数据包（不影响设备本地数据）。\n\n确定删除？")
+			.arg(device).arg(selected.size()),
+		QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+	if (ret != QMessageBox::Ok)
+	{
+		return;
+	}
+	QStringList names;
+	for (const QListWidgetItem* item : selected)
+	{
+		names << item->data(Qt::UserRole).toString();
+	}
+	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
+	SetRemoteBusy(true);
+	QPointer<OnlineServicesDialog> self(this);
+	std::thread([self, cfg, device, names]()
+		{
+			RobotLog log(".//Log//OnlineServices.txt", false);
+			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
+			ftp.setMessageBoxesEnabled(false);
+			int okCount = 0;
+			for (const QString& name : names)
+			{
+				const std::string remotePath = "/data/" + device.toStdString() + "/" + name.toStdString();
+				if (ftp.deleteFile(remotePath, /*askConfirm=*/false))
+				{
+					++okCount;
+				}
+			}
+			QMetaObject::invokeMethod(qApp, [self, okCount, names]()
+				{
+					if (self == nullptr)
+					{
+						return;
+					}
+					self->SetRemoteBusy(false);
+					self->AppendLog(QStringLiteral("服务器数据删除完成：成功 %1/%2。").arg(okCount).arg(names.size()));
+					self->RefreshRemoteFiles();
+				}, Qt::QueuedConnection);
+		}).detach();
+}
+
+void OnlineServicesDialog::CreateRemoteDeviceDir()
+{
+	if (m_remoteBusy)
+	{
+		return;
+	}
+	bool okInput = false;
+	const QString name = QInputDialog::getText(this, QStringLiteral("新建设备目录"),
+		QStringLiteral("目录名（建在服务器 /data/ 下，支持中文，不能含斜杠）："),
+		QLineEdit::Normal, QString(), &okInput).trimmed();
+	if (!okInput || name.isEmpty())
+	{
+		return;
+	}
+	if (name.contains(QLatin1Char('/')) || name.contains(QLatin1Char('\\')))
+	{
+		AppendLog(QStringLiteral("目录名不能包含斜杠。"));
+		return;
+	}
+	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
+	SetRemoteBusy(true);
+	QPointer<OnlineServicesDialog> self(this);
+	std::thread([self, cfg, name]()
+		{
+			RobotLog log(".//Log//OnlineServices.txt", false);
+			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
+			ftp.setMessageBoxesEnabled(false);
+			const bool ok = ftp.createRemoteDirRecursive("/data/" + name.toStdString());
+			QMetaObject::invokeMethod(qApp, [self, ok, name]()
+				{
+					if (self == nullptr)
+					{
+						return;
+					}
+					self->SetRemoteBusy(false);
+					self->AppendLog(ok ? QStringLiteral("目录已创建：/data/%1").arg(name)
+						: QStringLiteral("创建目录失败：/data/%1").arg(name));
+					if (ok)
+					{
+						self->RefreshRemoteDevices();
+					}
+				}, Qt::QueuedConnection);
+		}).detach();
+}
+
+// ============ 服务器管理接口（统计/账号）：nginx 8090 的 /admin/ 反代，X-Admin-Token 鉴权 ============
+
+QString OnlineServicesDialog::AdminApiBase() const
+{
+	// 从升级源地址推导：http://<host>:8090/ota → http://<host>:8090/admin/api（同端口经 nginx 反代，不开新端口）。
+	QString base = OnlineServicesConfig::UpdateBaseUrl().trimmed();
+	while (base.endsWith(QLatin1Char('/')))
+	{
+		base.chop(1);
+	}
+	if (base.endsWith(QStringLiteral("/ota")))
+	{
+		base.chop(4);
+	}
+	return base + QStringLiteral("/admin/api");
+}
+
+void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& path,
+	const QJsonObject& body, std::function<void(bool ok, const QJsonObject& resp)> done)
+{
+	const QString token = OnlineServicesConfig::AdminToken().trimmed();
+	if (token.isEmpty())
+	{
+		AppendLog(QStringLiteral("未配置管理令牌：请在「服务器配置」页签填写管理令牌并保存。"));
+		if (done)
+		{
+			done(false, QJsonObject());
+		}
+		return;
+	}
+	QNetworkRequest request{ QUrl(AdminApiBase() + path) };
+	request.setTransferTimeout(20000);
+	request.setRawHeader("X-Admin-Token", token.toUtf8());
+	request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+	const QByteArray payload = body.isEmpty() ? QByteArray() : QJsonDocument(body).toJson(QJsonDocument::Compact);
+	QNetworkReply* reply = m_network->sendCustomRequest(request, verb, payload);
+	connect(reply, &QNetworkReply::finished, this, [this, reply, done]()
+		{
+			reply->deleteLater();
+			const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+			const bool ok = reply->error() == QNetworkReply::NoError && obj.value(QStringLiteral("ok")).toBool();
+			if (!ok)
+			{
+				const QString err = obj.value(QStringLiteral("error")).toString();
+				AppendLog(QStringLiteral("管理接口请求失败：%1").arg(err.isEmpty() ? reply->errorString() : err));
+			}
+			if (done)
+			{
+				done(ok, obj);
+			}
+		});
+}
+
+void OnlineServicesDialog::RefreshServerStats()
+{
+	if (m_cardDisk == nullptr || m_cardCloud == nullptr)
+	{
+		return;
+	}
+	AdminRequest("GET", QStringLiteral("/stats"), QJsonObject(), [this](bool ok, const QJsonObject& resp)
+		{
+			if (!ok)
+			{
+				m_cardDisk->setText(QStringLiteral("--"));
+				if (m_cardDiskSub != nullptr)
+				{
+					m_cardDiskSub->setText(QStringLiteral("获取失败（查管理令牌/网络）"));
+				}
+				m_cardCloud->setText(QStringLiteral("--"));
+				if (m_cardDevices != nullptr)
+				{
+					m_cardDevices->setText(QStringLiteral("--"));
+				}
+				return;
+			}
+			const QJsonObject disk = resp.value(QStringLiteral("disk")).toObject();
+			const double total = disk.value(QStringLiteral("totalBytes")).toDouble();
+			const double used = disk.value(QStringLiteral("usedBytes")).toDouble();
+			const int percent = total > 0.0 ? static_cast<int>(used * 100.0 / total + 0.5) : 0;
+			m_cardDisk->setText(QStringLiteral("%1%").arg(percent));
+			if (m_cardDiskSub != nullptr)
+			{
+				m_cardDiskSub->setText(QStringLiteral("已用 %1 / %2 · 剩 %3")
+					.arg(HumanBytes(used), HumanBytes(total),
+						HumanBytes(disk.value(QStringLiteral("freeBytes")).toDouble())));
+			}
+			if (m_diskBar != nullptr)
+			{
+				m_diskBar->setValue(percent);
+			}
+			m_cardCloud->setText(HumanBytes(resp.value(QStringLiteral("dataBytes")).toDouble()));
+			const QJsonArray devices = resp.value(QStringLiteral("devices")).toArray();
+			if (m_cardDevices != nullptr)
+			{
+				m_cardDevices->setText(QStringLiteral("%1 台").arg(devices.size()));
+			}
+			if (m_deviceTable != nullptr)
+			{
+				m_deviceTable->setRowCount(0);
+				for (const QJsonValue& value : devices)
+				{
+					const QJsonObject device = value.toObject();
+					const int row = m_deviceTable->rowCount();
+					m_deviceTable->insertRow(row);
+					m_deviceTable->setItem(row, 0, new QTableWidgetItem(device.value(QStringLiteral("name")).toString()));
+					m_deviceTable->setItem(row, 1, new QTableWidgetItem(HumanBytes(device.value(QStringLiteral("bytes")).toDouble())));
+					m_deviceTable->setItem(row, 2, new QTableWidgetItem(QString::number(device.value(QStringLiteral("files")).toInt())));
+					const qint64 lastEpoch = static_cast<qint64>(device.value(QStringLiteral("lastUploadEpoch")).toDouble());
+					m_deviceTable->setItem(row, 3, new QTableWidgetItem(lastEpoch > 0
+						? QDateTime::fromSecsSinceEpoch(lastEpoch).toString(QStringLiteral("yyyy-MM-dd HH:mm"))
+						: QStringLiteral("—")));
+				}
+			}
+		});
+}
+
+void OnlineServicesDialog::UpdateQueueCard()
+{
+	if (m_cardQueue == nullptr)
+	{
+		return;
+	}
+	const int pending = m_uploader != nullptr ? m_uploader->PendingList().size() : 0;
+	const bool busy = m_uploader != nullptr && m_uploader->IsBusy();
+	m_cardQueue->setText(QStringLiteral("%1 项%2")
+		.arg(pending)
+		.arg(busy ? QStringLiteral(" ↑") : QString()));
+}
+
+void OnlineServicesDialog::RefreshAccounts()
+{
+	if (m_accountTable == nullptr)
+	{
+		return;
+	}
+	AdminRequest("GET", QStringLiteral("/accounts"), QJsonObject(), [this](bool ok, const QJsonObject& resp)
+		{
+			if (!ok || m_accountTable == nullptr)
+			{
+				return;
+			}
+			const QJsonArray accounts = resp.value(QStringLiteral("accounts")).toArray();
+			m_accountTable->setRowCount(0);
+			for (const QJsonValue& value : accounts)
+			{
+				const QJsonObject account = value.toObject();
+				const QString name = account.value(QStringLiteral("name")).toString();
+				const QString perm = account.value(QStringLiteral("permission")).toString();
+				const bool isProtected = account.value(QStringLiteral("protected")).toBool();
+				const int row = m_accountTable->rowCount();
+				m_accountTable->insertRow(row);
+				QTableWidgetItem* nameItem = new QTableWidgetItem(name);
+				nameItem->setData(Qt::UserRole, perm);
+				m_accountTable->setItem(row, 0, nameItem);
+				m_accountTable->setItem(row, 1, new QTableWidgetItem(
+					perm == QStringLiteral("upload") ? QStringLiteral("仅上传") : QStringLiteral("全权限")));
+				m_accountTable->setItem(row, 2, new QTableWidgetItem(
+					isProtected ? QStringLiteral("系统保护（不可删）") : QString()));
+			}
+			AppendLog(QStringLiteral("账号列表已刷新：共 %1 个。").arg(accounts.size()));
+		});
+}
+
+void OnlineServicesDialog::ShowAddAccountDialog()
+{
+	QDialog dlg(this);
+	dlg.setWindowTitle(QStringLiteral("添加 FTP 账号"));
+	QFormLayout* form = new QFormLayout(&dlg);
+	QLineEdit* nameEdit = new QLineEdit(&dlg);
+	nameEdit->setPlaceholderText(QStringLiteral("小写字母开头，3-32 位（小写字母/数字/_-）"));
+	QLineEdit* pwEdit = new QLineEdit(&dlg);
+	pwEdit->setEchoMode(QLineEdit::Password);
+	pwEdit->setPlaceholderText(QStringLiteral("至少 8 位"));
+	QComboBox* permCombo = new QComboBox(&dlg);
+	permCombo->addItem(QStringLiteral("仅上传（现场设备用）"), QStringLiteral("upload"));
+	permCombo->addItem(QStringLiteral("全权限（可下载浏览全部设备）"), QStringLiteral("full"));
+	form->addRow(QStringLiteral("账号名："), nameEdit);
+	form->addRow(QStringLiteral("密码："), pwEdit);
+	form->addRow(QStringLiteral("权限："), permCombo);
+	QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+	form->addRow(buttons);
+	connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+	connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+	if (dlg.exec() != QDialog::Accepted)
+	{
+		return;
+	}
+	QJsonObject body;
+	body.insert(QStringLiteral("name"), nameEdit->text().trimmed());
+	body.insert(QStringLiteral("password"), pwEdit->text());
+	body.insert(QStringLiteral("permission"), permCombo->currentData().toString());
+	AdminRequest("POST", QStringLiteral("/accounts"), body, [this](bool ok, const QJsonObject&)
+		{
+			if (ok)
+			{
+				AppendLog(QStringLiteral("账号已创建。"));
+				RefreshAccounts();
+			}
+		});
+}
+
+void OnlineServicesDialog::ChangeSelectedAccountPassword()
+{
+	if (m_accountTable == nullptr || m_accountTable->currentRow() < 0)
+	{
+		AppendLog(QStringLiteral("请先在账号表中选中一个账号。"));
+		return;
+	}
+	const QString name = m_accountTable->item(m_accountTable->currentRow(), 0)->text();
+	if (name == QStringLiteral("uploader"))
+	{
+		const QMessageBox::StandardButton ret = QMessageBox::warning(this, QStringLiteral("改密码"),
+			QStringLiteral("uploader 是随安装包分发的默认上传账号，改密码会让所有未手动配置账号的现场设备断传。\n\n确定要改？"),
+			QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+		if (ret != QMessageBox::Ok)
+		{
+			return;
+		}
+	}
+	bool okInput = false;
+	const QString pw = QInputDialog::getText(this, QStringLiteral("改密码"),
+		QStringLiteral("账号 %1 的新密码（至少 8 位）：").arg(name), QLineEdit::Password, QString(), &okInput);
+	if (!okInput || pw.isEmpty())
+	{
+		return;
+	}
+	QJsonObject body;
+	body.insert(QStringLiteral("password"), pw);
+	AdminRequest("PATCH", QStringLiteral("/accounts/") + name, body, [this, name](bool ok, const QJsonObject&)
+		{
+			if (ok)
+			{
+				AppendLog(QStringLiteral("账号 %1 密码已修改。").arg(name));
+			}
+		});
+}
+
+void OnlineServicesDialog::ToggleSelectedAccountPermission()
+{
+	if (m_accountTable == nullptr || m_accountTable->currentRow() < 0)
+	{
+		AppendLog(QStringLiteral("请先在账号表中选中一个账号。"));
+		return;
+	}
+	QTableWidgetItem* nameItem = m_accountTable->item(m_accountTable->currentRow(), 0);
+	const QString name = nameItem->text();
+	const QString curPerm = nameItem->data(Qt::UserRole).toString();
+	const QString newPerm = curPerm == QStringLiteral("upload") ? QStringLiteral("full") : QStringLiteral("upload");
+	QJsonObject body;
+	body.insert(QStringLiteral("permission"), newPerm);
+	AdminRequest("PATCH", QStringLiteral("/accounts/") + name, body, [this, name, newPerm](bool ok, const QJsonObject&)
+		{
+			if (ok)
+			{
+				AppendLog(QStringLiteral("账号 %1 权限已切换为%2。").arg(name)
+					.arg(newPerm == QStringLiteral("upload") ? QStringLiteral("「仅上传」") : QStringLiteral("「全权限」")));
+				RefreshAccounts();
+			}
+		});
+}
+
+void OnlineServicesDialog::DeleteSelectedAccount()
+{
+	if (m_accountTable == nullptr || m_accountTable->currentRow() < 0)
+	{
+		AppendLog(QStringLiteral("请先在账号表中选中一个账号。"));
+		return;
+	}
+	const QString name = m_accountTable->item(m_accountTable->currentRow(), 0)->text();
+	const QMessageBox::StandardButton ret = QMessageBox::warning(this, QStringLiteral("删除账号"),
+		QStringLiteral("将删除服务器 FTP 账号 %1（其已上传的数据保留）。\n\n确定删除？").arg(name),
+		QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
+	if (ret != QMessageBox::Ok)
+	{
+		return;
+	}
+	AdminRequest("DELETE", QStringLiteral("/accounts/") + name, QJsonObject(), [this, name](bool ok, const QJsonObject&)
+		{
+			if (ok)
+			{
+				AppendLog(QStringLiteral("账号 %1 已删除。").arg(name));
+				RefreshAccounts();
+			}
+		});
+}
+
+void OnlineServicesDialog::ShowPickCasesDialog()
+{
+	// 列出 Result/<机器人>/<案例> 全部案例目录（跳过 Remote 远程下载区/Archives 打包区），
+	// 支持 Ctrl/Shift 多选；确定后按名字升序依次入队（上传器串行处理=依次打包上传）。
+	QList<QPair<QString, QString>> cases;   // <显示名 Robot / case, 绝对路径>
+	const QDir resultDir(QStringLiteral("Result"));
+	const QStringList robots = resultDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+	for (const QString& robot : robots)
+	{
+		if (robot.compare(QStringLiteral("Remote"), Qt::CaseInsensitive) == 0
+			|| robot.compare(QStringLiteral("Archives"), Qt::CaseInsensitive) == 0)
+		{
+			continue;
+		}
+		const QDir robotDir(resultDir.filePath(robot));
+		const QStringList caseNames = robotDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+		for (const QString& caseName : caseNames)
+		{
+			cases.append(qMakePair(robot + QStringLiteral(" / ") + caseName,
+				robotDir.absoluteFilePath(caseName)));
+		}
+	}
+	if (cases.isEmpty())
+	{
+		AppendLog(QStringLiteral("Result 下没有可上传的案例目录。"));
+		return;
+	}
+
+	QDialog dlg(this);
+	dlg.setWindowTitle(QStringLiteral("选择要上传的案例（可多选）"));
+	QVBoxLayout* layout = new QVBoxLayout(&dlg);
+	QLabel* hint = new QLabel(QStringLiteral("Ctrl 单个加选 / Shift 连续选；确定后按名字顺序依次打包上传。"), &dlg);
+	hint->setStyleSheet("color: #7E9AA6; font-size: 12px;");
+	layout->addWidget(hint);
+	QListWidget* list = new QListWidget(&dlg);
+	list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+	for (const auto& c : cases)
+	{
+		QListWidgetItem* item = new QListWidgetItem(c.first, list);
+		item->setData(Qt::UserRole, c.second);
+	}
+	layout->addWidget(list, 1);
+	QHBoxLayout* btnRow = new QHBoxLayout();
+	QPushButton* selectAllBtn = new QPushButton(QStringLiteral("全选"), &dlg);
+	connect(selectAllBtn, &QPushButton::clicked, list, &QListWidget::selectAll);
+	btnRow->addWidget(selectAllBtn);
+	btnRow->addStretch();
+	QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+	buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("上传选中"));
+	buttons->button(QDialogButtonBox::Ok)->setProperty("kind", "primary");
+	buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+	btnRow->addWidget(buttons);
+	layout->addLayout(btnRow);
+	connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+	connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+	dlg.resize(520, 480);
+	if (dlg.exec() != QDialog::Accepted)
+	{
+		return;
+	}
+
+	QStringList picked;
+	const QList<QListWidgetItem*> selected = list->selectedItems();
+	for (const QListWidgetItem* item : selected)
+	{
+		picked << item->data(Qt::UserRole).toString();
+	}
+	if (picked.isEmpty() || m_uploader == nullptr)
+	{
+		return;
+	}
+	picked.sort(Qt::CaseInsensitive);   // 按名字升序依次入队
+	SaveConfigFromUi();
+	for (const QString& dir : picked)
+	{
+		m_uploader->QueueUpload(dir);
+	}
+	AppendLog(QStringLiteral("已选择 %1 个案例，按名字顺序加入上传队列。").arg(picked.size()));
 }
