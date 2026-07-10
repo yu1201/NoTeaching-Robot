@@ -57,6 +57,7 @@ public:
     QtWidgetsApplication4(QWidget *parent = nullptr);
     ~QtWidgetsApplication4();
     void ApplyStartupArguments(const QStringList& arguments);
+    void CheckPendingUpdateResult();   // GUI 启动自检：升级后实际版本未达目标则告警
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

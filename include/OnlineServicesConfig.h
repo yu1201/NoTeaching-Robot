@@ -124,4 +124,16 @@ namespace OnlineServicesConfig
 	{
 		WriteValue(QStringLiteral("PendingUploads"), jsonArray);
 	}
+
+	// 升级（增量或全量）后的目标版本：安装前记下，重启后主窗口自检「实际版本 == 目标?」，
+	// 不符即告警（补丁/安装没生效，如误挂了含旧 exe 的补丁）。空=无待验证升级。
+	inline QString PendingUpdateTargetVersion()
+	{
+		return ReadValue(QStringLiteral("PendingUpdateTargetVersion"), QString());
+	}
+
+	inline void SetPendingUpdateTargetVersion(const QString& version)
+	{
+		WriteValue(QStringLiteral("PendingUpdateTargetVersion"), version);
+	}
 }

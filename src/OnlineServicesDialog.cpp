@@ -334,12 +334,22 @@ void OnlineServicesDialog::OnManifestReply(QNetworkReply* reply)
 	m_remoteSha256 = obj.value(QStringLiteral("sha256")).toString().toLower();
 	const QString notes = obj.value(QStringLiteral("notes")).toString();
 
-	// 增量补丁字段（可选）：仅含变更文件的 zip，优先于全量安装包。
+	// 增量补丁字段（可选）：仅含变更文件的 zip（当前=主程序 exe），优先于全量安装包。
 	const QJsonObject patch = obj.value(QStringLiteral("patch")).toObject();
 	m_remotePatchFile = patch.value(QStringLiteral("file")).toString();
 	m_remotePatchSha256 = patch.value(QStringLiteral("sha256")).toString().toLower();
 	m_remotePatchSize = static_cast<qint64>(patch.value(QStringLiteral("size")).toDouble());
+	// baseMinVersion：补丁只含 exe，仅当本机版本 >= 此基线（=非 exe 载荷/DLL 与目标一致的最低版本）
+	// 时增量才安全；更老的设备 DLL 可能不一致，自动回退全量安装。缺该字段时按旧行为（有补丁即用）。
+	const QString patchBaseMinVersion = patch.value(QStringLiteral("baseMinVersion")).toString().trimmed();
 	m_usePatch = !m_remotePatchFile.isEmpty();
+	if (m_usePatch && !patchBaseMinVersion.isEmpty()
+		&& CompareVersions(QApplication::applicationVersion(), patchBaseMinVersion) < 0)
+	{
+		m_usePatch = false;
+		AppendLog(QStringLiteral("本机版本 %1 低于增量补丁基线 %2（DLL 可能不一致），改用全量安装。")
+			.arg(QApplication::applicationVersion(), patchBaseMinVersion));
+	}
 
 	if (m_remoteVersion.isEmpty() || m_remoteFile.isEmpty())
 	{
@@ -512,9 +522,13 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 	bootstrap.write(script.toLocal8Bit());
 	bootstrap.close();
 
+	// 记下目标版本：重启后主窗口自检「实际版本 == 目标?」，不符即告警（补丁/安装没生效）。
+	OnlineServicesConfig::SetPendingUpdateTargetVersion(m_remoteVersion);
+
 	AppendLog(QStringLiteral("开始升级：%1").arg(payload));
 	if (!QProcess::startDetached(QStringLiteral("cmd.exe"), { QStringLiteral("/c"), bootstrapPath }))
 	{
+		OnlineServicesConfig::SetPendingUpdateTargetVersion(QString());  // 没启动成功，撤销记录
 		AppendLog(QStringLiteral("启动升级脚本失败，请到 %1 手动处理。").arg(payload));
 		return;
 	}
