@@ -687,6 +687,17 @@ void ProcessLoopTestDialog::OnStart()
     {
         return;
     }
+    // 互锁：先测后焊流程正在驱动机器人时，不允许再起流程测试（同机同驱动会冲突）。
+    if (m_preStartGuard)
+    {
+        QString reason;
+        if (!m_preStartGuard(reason))
+        {
+            QMessageBox::warning(this, QStringLiteral("流程测试"),
+                reason.isEmpty() ? QStringLiteral("当前有流程正在运行，无法开始测试。") : reason);
+            return;
+        }
+    }
     // 焊接段是物理动作、循环里会反复执行：开始前明确二次确认现场安全。
     if (m_doWeldCheck != nullptr && m_doWeldCheck->isChecked())
     {
@@ -804,10 +815,16 @@ void ProcessLoopTestDialog::closeEvent(QCloseEvent* event)
     SaveSettings();  // 关页也保存（用户只改设置没点开始的情况）
     if (m_running.load())
     {
-        // 安全优先：正在跑就先停下并等其收尾，避免留后台机器人运动。
+        // 不阻塞 UI：请求停止即返回，当前步骤在后台自然收尾后循环退出（与「停止」按钮一致）。
+        // 本页对象由主窗口缓存复用、不随关闭销毁，后台线程持有的 this 始终有效；
+        // 线程在下次「开始」(JoinWorker 回收) 或程序退出 (析构 Join) 时回收。
+        // 程序整体退出另有主窗口守卫拦截（流程未结束不放行关闭），不会留悬垂运动。
         m_stopRequested.store(true);
-        AppendLog(QStringLiteral("界面关闭：正在停止测试…"));
+        AppendLog(QStringLiteral("界面关闭：已请求停止，当前步骤结束后自动停下（无需等待）。"));
     }
-    JoinWorker();
+    else
+    {
+        JoinWorker();  // 已结束：顺手回收上一轮线程
+    }
     QDialog::closeEvent(event);
 }

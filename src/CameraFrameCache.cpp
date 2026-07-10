@@ -23,7 +23,7 @@ void CameraFrameCache::Start()
 
 void CameraFrameCache::Stop()
 {
-    // No shared queue thread is used anymore.
+    SetConnectionState(ConnectionState::Stopped, QStringLiteral("相机接收已停止。"));
 }
 
 void CameraFrameCache::Clear()
@@ -33,6 +33,57 @@ void CameraFrameCache::Clear()
     m_nextSequence = 0;
     // 注意：这里【不】清 m_pollStatus。ScanMoveAndCollect 在运动结束、帧已拉走后会再调一次 Clear()
     // 清帧缓存，若连带清了 poll 日志，会把整场扫描记录 wipe 在快照之前。poll 日志改由 ClearPollStatus() 单独管。
+}
+
+void CameraFrameCache::SetConnectionState(ConnectionState state, const QString& status)
+{
+    {
+        std::lock_guard<std::mutex> locker(m_mutex);
+        m_connectionState = state;
+        m_connectionStatus = status;
+    }
+    m_readyCondition.notify_all();
+}
+
+CameraFrameCache::ConnectionState CameraFrameCache::GetConnectionState(QString* status) const
+{
+    std::lock_guard<std::mutex> locker(m_mutex);
+    if (status != nullptr)
+    {
+        *status = m_connectionStatus;
+    }
+    return m_connectionState;
+}
+
+bool CameraFrameCache::WaitForReadyFrameAfter(std::uint64_t beginExclusive, int timeoutMs, QString* error) const
+{
+    std::unique_lock<std::mutex> locker(m_mutex);
+    const auto readyOrTerminal = [&]()
+        {
+            return (m_connectionState == ConnectionState::Connected && m_nextSequence > beginExclusive)
+                || m_connectionState == ConnectionState::Failed
+                || m_connectionState == ConnectionState::Stopped;
+        };
+    const int safeTimeoutMs = timeoutMs > 0 ? timeoutMs : 1;
+    if (!m_readyCondition.wait_for(locker, std::chrono::milliseconds(safeTimeoutMs), readyOrTerminal))
+    {
+        if (error != nullptr)
+        {
+            *error = m_connectionStatus.isEmpty()
+                ? QString("等待相机首帧超时（%1 ms）。").arg(safeTimeoutMs)
+                : QString("等待相机首帧超时（%1 ms）：%2").arg(safeTimeoutMs).arg(m_connectionStatus);
+        }
+        return false;
+    }
+    if (m_connectionState == ConnectionState::Connected && m_nextSequence > beginExclusive)
+    {
+        return true;
+    }
+    if (error != nullptr)
+    {
+        *error = m_connectionStatus.isEmpty() ? QStringLiteral("相机未连接。") : m_connectionStatus;
+    }
+    return false;
 }
 
 void CameraFrameCache::ClearPollStatus()
@@ -208,14 +259,17 @@ int CameraFrameCache::CachedCount() const
 
 void CameraFrameCache::StoreFrame(const udpDataShow& frame)
 {
-    std::lock_guard<std::mutex> locker(m_mutex);
-    CachedFrame cachedFrame;
-    cachedFrame.sequence = ++m_nextSequence;
-    cachedFrame.receiveTimestampUs = CameraFrameCacheSteadyNowUs();
-    cachedFrame.frame = frame;
-    m_frames.push_back(cachedFrame);
-    while (m_frames.size() > m_maxCachedFrames)
     {
-        m_frames.pop_front();
+        std::lock_guard<std::mutex> locker(m_mutex);
+        CachedFrame cachedFrame;
+        cachedFrame.sequence = ++m_nextSequence;
+        cachedFrame.receiveTimestampUs = CameraFrameCacheSteadyNowUs();
+        cachedFrame.frame = frame;
+        m_frames.push_back(cachedFrame);
+        while (m_frames.size() > m_maxCachedFrames)
+        {
+            m_frames.pop_front();
+        }
     }
+    m_readyCondition.notify_all();
 }

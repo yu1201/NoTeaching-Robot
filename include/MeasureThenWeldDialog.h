@@ -99,6 +99,8 @@ public:
     void ReloadSelectors();
     // 流程成功后回调（UI 线程，参数=Result 案例目录），主窗口接在线上传。
     void SetScanDataUploadHook(std::function<void(const QString&)> hook);
+    // 开始前置守卫：返回 false 则拦下先测后焊流程并把原因写进 reason（供主窗口互锁流程测试）。
+    void SetPreStartGuard(std::function<bool(QString& reason)> guard) { m_preStartGuard = std::move(guard); }
 
 signals:
     void FlowStepChanged(const QString& text);
@@ -148,6 +150,8 @@ private:
     // 流程线程安全：从姿态文件路径推导案例目录，经队列回 UI 线程调用上传钩子。
     void NotifyFlowResultForUpload(const QString& poseFilePath);
 
+    // 互锁前置检查：被前置守卫拦下时弹 title 提示并返回 true（表示应当中止启动）。
+    bool BlockedByOtherFlow(const QString& title);
     // 预设参数流程入口和整体大线扫粗定位占位入口。
     void RunPresetParamFlow();
     void RunSkipScanWeldFlow();
@@ -199,6 +203,8 @@ private:
     bool m_hasPausePose = false;
     // 扫描数据在线上传钩子：流程成功后携案例目录回 UI 线程调用（主窗口接 ScanDataUploader）。
     std::function<void(const QString&)> m_scanDataUploadHook;
+    // 互锁：流程测试在跑时拦下本流程，避免两条流程指挥同一台机器人。
+    std::function<bool(QString&)> m_preStartGuard;
     QCheckBox* m_pActualWeldCheck = nullptr;
     // 流程免确认：勾选后跳过中间步骤/信息类确认弹窗；首次运动、进入焊接、
     // 翻转风险告警、历史目录核对始终弹出。状态缓存在原子成员供流程线程读取。

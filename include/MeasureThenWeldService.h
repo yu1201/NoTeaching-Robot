@@ -16,6 +16,48 @@ public:
     using LogCallback = std::function<void(const QString&)>;
     using StepCallback = std::function<void(const QString&)>;
     using CheckpointCallback = std::function<bool(const QString&, const QString&)>;
+    using BeforeActionCallback = std::function<bool(const QString&)>;
+    using StopRequestedCallback = std::function<bool()>;
+
+    enum class ScanCycleStatus
+    {
+        Success,
+        Stopped,
+        Failed
+    };
+
+    enum class ScanCyclePhase
+    {
+        NotStarted,
+        AtStartSafe,
+        AtScanStart,
+        ScanMotionStarted,
+        AtScanEnd,
+        AtEndSafe
+    };
+
+    struct ScanMotionProgress
+    {
+        bool commandAccepted = false;
+        bool motionStarted = false;
+        bool motionCompleted = false;
+    };
+
+    struct ScanCycleResult
+    {
+        ScanCycleStatus status = ScanCycleStatus::Failed;
+        ScanCyclePhase lastPhase = ScanCyclePhase::NotStarted;
+        QString caseDir;
+        QString weldPosePath;
+        QString error;
+        bool motionFailure = false;
+        bool fatalFailure = false;
+        bool scanAttempted = false;
+        bool scanDataSucceeded = false;
+        bool poseGenerated = false;
+        bool safelyRetracted = false;
+        bool stopRequestedDuringCycle = false;
+    };
 
     bool LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error) const;
     bool MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
@@ -23,7 +65,26 @@ public:
     bool MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, const T_ROBOT_COORS& coors, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
     bool MoveScanStartSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed, const LogCallback& appendLog, const StepCallback& setFlowStep, const CheckpointCallback& checkpoint) const;
     bool MoveScanEndSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
-    bool ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep, CameraFrameCache* cameraCache) const;
+    bool RunScanCycle(
+        RobotDriverAdaptor* pRobotDriver,
+        const T_PRECISE_MEASURE_PARAM& param,
+        double runSpeed,
+        CameraFrameCache* cameraCache,
+        ScanCycleResult& result,
+        const LogCallback& appendLog,
+        const StepCallback& setFlowStep,
+        const CheckpointCallback& safetyCheckpoint = CheckpointCallback(),
+        const BeforeActionCallback& beforeAction = BeforeActionCallback(),
+        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
+    bool ScanMoveAndCollect(
+        RobotDriverAdaptor* pRobotDriver,
+        const T_PRECISE_MEASURE_PARAM& param,
+        QString& savedPath,
+        const LogCallback& appendLog,
+        const StepCallback& setFlowStep,
+        CameraFrameCache* cameraCache,
+        ScanMotionProgress* progress = nullptr,
+        const HandEyeMatrixConfig* validatedCalibration = nullptr) const;
     bool RebuildWeldFilesFromLaserDir(
         const T_PRECISE_MEASURE_PARAM& param,
         const QString& laserDir,
@@ -95,7 +156,8 @@ public:
         const CheckpointCallback& checkpoint = CheckpointCallback(),
         double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
         bool allowPointwiseWeave = true,          // pointwise 自定义摆动默认放行(含先测后焊)；传 false 可禁用(保留钩子)
-        int resumeSkipPoints = 0) const;          // 断点续焊：跳过前 N 个轨迹点从断点(含搭接回退)开始执行；ARCON 自动生成在续焊首点前
+        int resumeSkipPoints = 0,                 // 断点续焊：跳过前 N 个轨迹点从断点(含搭接回退)开始执行；ARCON 自动生成在续焊首点前
+        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
     bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
     bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
     bool ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;

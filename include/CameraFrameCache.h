@@ -4,6 +4,7 @@
 
 #include <QImage>
 
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -12,6 +13,14 @@
 class CameraFrameCache
 {
 public:
+    enum class ConnectionState
+    {
+        Stopped,
+        Connecting,
+        Connected,
+        Failed
+    };
+
     struct TimedFrame
     {
         std::uint64_t sequence = 0;
@@ -40,6 +49,10 @@ public:
     void Start();
     void Stop();
     void Clear();
+    void SetConnectionState(ConnectionState state, const QString& status = QString());
+    ConnectionState GetConnectionState(QString* status = nullptr) const;
+    // 扫描前门禁：等待连接成功且出现 beginExclusive 之后的新帧；连接明确失败时提前返回。
+    bool WaitForReadyFrameAfter(std::uint64_t beginExclusive, int timeoutMs, QString* error = nullptr) const;
     void AppendFrame(const udpDataShow& frame);
     void RecordPollStatus(int ret, qint64 frameTimestampUs, int pointCount, int frameChannel = -1);
     void ClearPollStatus();  // 单独清 poll 日志：Clear() 清帧缓存时不再连带清它，避免运动后清帧把整场日志wipe掉
@@ -83,6 +96,9 @@ private:
     void StoreFrame(const udpDataShow& frame);
 
     mutable std::mutex m_mutex;
+    mutable std::condition_variable m_readyCondition;
+    ConnectionState m_connectionState = ConnectionState::Stopped;
+    QString m_connectionStatus;
     std::deque<CachedFrame> m_frames;
     std::vector<PollStatus> m_pollStatus;
     QString m_imageCaptureDir;

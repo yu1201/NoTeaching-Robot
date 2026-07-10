@@ -8937,6 +8937,16 @@ bool QtWidgetsApplication4::HasRunningMeasureThenWeldFlow() const
 			}
 		}
 	}
+	// 流程测试是循环跑的先测后焊，同样在驱动机器人：一并纳入本守卫，
+	// 使关程序/升级安装/先测后焊页避让在流程测试运行时也生效。
+	if (const ProcessLoopTestDialog* loopPage =
+		qobject_cast<const ProcessLoopTestDialog*>(m_pProcessLoopTestPage))
+	{
+		if (loopPage->IsRunning())
+		{
+			return true;
+		}
+	}
 	return false;
 }
 
@@ -9962,6 +9972,15 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 {
 	if (m_bUseSharedScanCameraReceiver == enabled)
 	{
+		RefreshCameraReceiveModeButtonUi();
+		return;
+	}
+	if (HasRunningMeasureThenWeldFlow())
+	{
+		QMessageBox::warning(
+			this,
+			QStringLiteral("相机接收模式"),
+			QStringLiteral("先测后焊或流程测试正在运行，不能重建相机接收线程。请先安全停止流程。"));
 		RefreshCameraReceiveModeButtonUi();
 		return;
 	}
@@ -12712,47 +12731,30 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 		const double runSpeed = std::isfinite(param.dRunSpeed) && param.dRunSpeed > 0.0
 			? param.dRunSpeed
 			: 1.0;
-		bool ok = service.MovePulseListAndWait(
+		auto unattendedSafetyCheckpoint = [&](const QString& title, const QString& detail) -> bool
+			{
+				appendLog(QString("第%1次扫描检测到需要人工确认的安全风险，CLI 无人值守模式不自动放行：%2\n%3")
+					.arg(repeatIndex)
+					.arg(title, detail));
+				return false;
+			};
+		MeasureThenWeldService::ScanCycleResult scanCycle;
+		const bool ok = service.RunScanCycle(
 			pRobotDriver,
-			param.vtStartSafePulse,
+			param,
 			runSpeed,
-			QString("CLI第%1次下枪安全姿态").arg(repeatIndex),
+			cameraCache,
+			scanCycle,
 			appendLog,
-			setFlowStep);
-		if (ok)
-		{
-			ok = service.MoveCoorsAndWait(
-				pRobotDriver,
-				param.tStartPos,
-				runSpeed,
-				QString("CLI第%1次扫描起点").arg(repeatIndex),
-				appendLog,
-				setFlowStep);
-		}
-		if (ok)
-		{
-			ok = service.ScanMoveAndCollect(
-				pRobotDriver,
-				param,
-				savedPath,
-				appendLog,
-				setFlowStep,
-				cameraCache);
-		}
-		if (ok)
-		{
-			ok = service.MovePulseListAndWait(
-				pRobotDriver,
-				param.vtEndSafePulse,
-				runSpeed,
-				QString("CLI第%1次收枪安全姿态").arg(repeatIndex),
-				appendLog,
-				setFlowStep);
-		}
+			setFlowStep,
+			unattendedSafetyCheckpoint);
+		savedPath = scanCycle.weldPosePath;
 
 		if (!ok)
 		{
-			LogCommandLineMessage(QString("CLI 第%1次扫描流程失败，已停止后续重复。").arg(repeatIndex));
+			LogCommandLineMessage(QString("CLI 第%1次扫描流程失败，已停止后续重复：%2")
+				.arg(repeatIndex)
+				.arg(scanCycle.error));
 			allOk = false;
 			break;
 		}
@@ -12765,19 +12767,10 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 			.arg(repeatCount)
 			.arg(savedText));
 
-		// 只扫描数据在线上传：受自动上传总开关控制。savedPath 为空（scan-only 不生成姿态文件）
-		// 时按 Result/<机器人>/ 下最新案例目录定位本次数据（CLI 串行执行，无并发竞争）。
+		// 只扫描数据在线上传：优先使用 Runner 明确返回的案例目录；仅为兼容旧结果再回退最新目录。
 		if (OnlineServicesConfig::AutoUploadEnabled())
 		{
-			QString caseDir;
-			if (!savedPath.isEmpty())
-			{
-				QDir fromSaved = QFileInfo(savedPath).dir();
-				if (fromSaved.cdUp())
-				{
-					caseDir = fromSaved.absolutePath();
-				}
-			}
+			QString caseDir = scanCycle.caseDir;
 			if (caseDir.isEmpty())
 			{
 				const QDir robotResultDir(QStringLiteral("Result/") + QString::fromStdString(param.sRobotName));
@@ -12938,33 +12931,60 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 			.arg(param.dScanSpeed, 0, 'f', 1)
 			.arg(param.dCameraTimeOffsetMs, 0, 'f', 1));
 
-		bool ok = service.MovePulseListAndWait(driver, param.vtStartSafePulse, runSpeed,
-			QStringLiteral("第%1次下枪安全姿态").arg(i), emitLog, stepCb);
-		if (ok && !stopped())
+		auto unattendedSafetyCheckpoint = [&](const QString& title, const QString& detail) -> bool
+			{
+				emitLog(QStringLiteral("第%1次检测到需要人工确认的安全风险，自动循环不自动放行：%2\n%3")
+					.arg(i)
+					.arg(title, detail));
+				return false;
+			};
+		MeasureThenWeldService::ScanCycleResult scanCycle;
+		service.RunScanCycle(
+			driver,
+			param,
+			runSpeed,
+			cameraCache,
+			scanCycle,
+			emitLog,
+			stepCb,
+			unattendedSafetyCheckpoint,
+			MeasureThenWeldService::BeforeActionCallback(),
+			stopped);
+		const bool motionStepFailed = scanCycle.motionFailure;
+		const bool fatalCycleFailure = scanCycle.fatalFailure;
+		bool stopAfterCycle = scanCycle.stopRequestedDuringCycle || stopped();
+		bool ok = scanCycle.scanDataSucceeded && scanCycle.safelyRetracted;
+		QString savedPath = scanCycle.weldPosePath;
+
+		// 扫描前停止：不再发送新的运动，也没有本轮数据需要上传或统计。
+		if (scanCycle.status == MeasureThenWeldService::ScanCycleStatus::Stopped
+			&& !scanCycle.scanAttempted
+			&& stopped())
 		{
-			ok = service.MoveCoorsAndWait(driver, param.tStartPos, runSpeed,
-				QStringLiteral("第%1次扫描起点").arg(i), emitLog, stepCb);
-		}
-		QString savedPath;
-		if (ok && !stopped())
-		{
-			ok = service.ScanMoveAndCollect(driver, param, savedPath, emitLog, stepCb, cameraCache);
-		}
-		if (ok)
-		{
-			ok = service.MovePulseListAndWait(driver, param.vtEndSafePulse, runSpeed,
-				QStringLiteral("第%1次收枪安全姿态").arg(i), emitLog, stepCb);
+			emitLog(QStringLiteral("第%1次已按停止请求结束，不再进入焊接或下一轮。").arg(i));
+			emitProgress(i, QStringLiteral("已停止"), false);
+			break;
 		}
 
 		// 焊接段（勾选「包含焊接段」时）：执行扫描产出的焊接姿态文件。实际焊接/空跑按预设 param.bDoActualWeld。
-		if (ok && settings.doWeld && !stopped())
+		bool weldAttempted = false;
+		if (ok && settings.doWeld && !stopAfterCycle && !stopped())
 		{
 			if (savedPath.isEmpty())
 			{
-				emitLog(QStringLiteral("第%1次：扫描未生成焊接姿态文件，跳过焊接段。").arg(i));
+				emitLog(QStringLiteral("第%1次：要求包含焊接段，但扫描未生成焊接姿态文件，本轮判定失败。").arg(i));
+				ok = false;
 			}
 			else
 			{
+				stopAfterCycle = stopped();
+				if (stopAfterCycle)
+				{
+					emitLog(QStringLiteral("焊接下枪前收到停止请求，已取消本轮焊接。"));
+				}
+				else
+				{
+				weldAttempted = true;
 				QString weldSummary;
 				QString weldError;
 				// 自动化循环：确认点自动放行；用户按「停止」则在下个确认点中止焊接。
@@ -12973,10 +12993,12 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 				ok = service.ExecuteWeldPoseFileWithSafePos(
 					driver, savedPath, param, weldSummary, weldError,
 					nullptr, nullptr, emitLog, stepCb, weldCheckpoint,
-					param.dFinalWeldTrajectoryStepMm, /*allowPointwiseWeave=*/true);
+					param.dFinalWeldTrajectoryStepMm, /*allowPointwiseWeave=*/true,
+					/*resumeSkipPoints=*/0, stopped);
 				emitLog(ok
 					? QStringLiteral("第%1次焊接完成：%2").arg(i).arg(weldSummary)
 					: QStringLiteral("第%1次焊接失败/中止：%2").arg(i).arg(weldError));
+				}
 			}
 		}
 
@@ -12984,15 +13006,7 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 		//（案例目录优先从 savedPath 反推；仅扫描/分析失败时按「循环前后最新案例目录变化」判定，
 		// 避免把上一轮的旧案例重复入队）。ConfigDatabase 与上传器须在 UI 线程访问，编列过去。
 		{
-			QString caseDir;
-			if (!savedPath.isEmpty())
-			{
-				QDir fromSaved = QFileInfo(savedPath).dir();
-				if (fromSaved.cdUp())
-				{
-					caseDir = fromSaved.absolutePath();
-				}
-			}
+			QString caseDir = scanCycle.caseDir;
 			if (caseDir.isEmpty())
 			{
 				const QString after = newestCaseDir(robotName);
@@ -13022,7 +13036,11 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 		{
 			++okCount;
 			emitLog(QStringLiteral("第%1次完成%2。").arg(i)
-				.arg(settings.doWeld ? QStringLiteral("（含焊接）") : QStringLiteral("，已回收枪安全位")));
+				.arg(weldAttempted
+					? QStringLiteral("（含焊接）")
+					: (stopAfterCycle && settings.doWeld
+						? QStringLiteral("（仅扫描，已按停止请求跳过焊接）")
+						: QStringLiteral("，已回收枪安全位"))));
 			emitProgress(i, QStringLiteral("本次完成"), false);
 		}
 		else
@@ -13031,7 +13049,14 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 			const bool byStop = stopped();
 			emitLog(QStringLiteral("第%1次%2。").arg(i).arg(byStop ? QStringLiteral("被停止") : QStringLiteral("失败")));
 			emitProgress(i, byStop ? QStringLiteral("已停止") : QStringLiteral("本次失败"), false);
-			if (byStop || settings.stopOnFailure) { break; }
+			// 任一运动阶段失败后机器人位姿不再可信，禁止因「失败后继续」设置进入下一轮。
+			if (byStop || motionStepFailed || fatalCycleFailure || settings.stopOnFailure) { break; }
+		}
+
+		if (stopAfterCycle)
+		{
+			emitLog(QStringLiteral("停止请求已生效：本轮数据已处理，不再进入下一轮。"));
+			break;
 		}
 
 		// 定时扫描：本次完成后、若还有下一次，等待设定间隔（可被「停止」逐秒打断，UI 显示倒计时）。
@@ -13085,8 +13110,30 @@ void QtWidgetsApplication4::OpenProcessLoopTestPage()
 			RunProcessLoopTest(s, stop, progress, log);
 		};
 
-	m_pProcessLoopTestPage = new ProcessLoopTestDialog(m_pContralUnit, CurrentRobotUnitIndex(),
+	ProcessLoopTestDialog* loopPage = new ProcessLoopTestDialog(m_pContralUnit, CurrentRobotUnitIndex(),
 		loadDefaults, runner, m_pManagementStack);
+	// 互锁：先测后焊页流程 / 虚拟焊道测试在跑时，拦下流程测试开始（同机同驱动会冲突）。
+	loopPage->SetPreStartGuard([this](QString& reason) -> bool
+		{
+			for (const QPointer<MeasureThenWeldDialog>& guardedPage : m_measureThenWeldPages.values())
+			{
+				if (const MeasureThenWeldDialog* page = guardedPage.data())
+				{
+					if (page->IsRunning())
+					{
+						reason = QStringLiteral("先测后焊流程正在运行，请等待其结束后再开始流程测试。");
+						return false;
+					}
+				}
+			}
+			if (m_pVirtualWeldTestPage != nullptr && m_pVirtualWeldTestPage->IsRunning())
+			{
+				reason = QStringLiteral("虚拟焊道测试正在运行，请等待其结束后再开始流程测试。");
+				return false;
+			}
+			return true;
+		});
+	m_pProcessLoopTestPage = loopPage;
 	PrepareEmbeddedPage(m_pProcessLoopTestPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pProcessLoopTestPage);
 }
@@ -13211,6 +13258,9 @@ void QtWidgetsApplication4::InitializeScanCameraRuntimes()
 			runtime->cameraPort = cameraPort;
 			runtime->receiveMode = "UDP共享接收";
 			runtime->running = true;
+			runtime->cache->SetConnectionState(
+				CameraFrameCache::ConnectionState::Connected,
+				QStringLiteral("UDP 共享接收已启动，等待目标相机首帧。"));
 			m_scanCameraUnitByIP.insert(cameraIP, unitInfo.nUnitNo);
 			dispatchTargetsByPort[cameraPort].insert(cameraIP, runtime->cache);
 		}
@@ -13401,7 +13451,7 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 
 	if (m_bUseSharedScanCameraReceiver)
 	{
-		if (runtime == nullptr || !m_scanCameraReceiversByPort.contains(cameraPort))
+		if (runtime == nullptr || !runtime->running || !m_scanCameraReceiversByPort.contains(cameraPort))
 		{
 			StopScanCameraRuntimes();
 			InitializeScanCameraRuntimes();
@@ -13415,10 +13465,23 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 		{
 			runtime->cache->Clear();
 		}
+		const std::uint64_t readyMark = runtime->cache->Mark();
 		runtime->cameraIP = cameraIP;
 		runtime->cameraPort = cameraPort;
 		runtime->receiveMode = "UDP共享接收";
 		runtime->running = true;
+		if (blockingConnect)
+		{
+			QString readyError;
+			const int readyTimeoutMs = std::max(5000, cameraPollIntervalMs * 20);
+			if (!runtime->cache->WaitForReadyFrameAfter(readyMark, readyTimeoutMs, &readyError))
+			{
+				runtime->cameraStatus = readyError;
+				runtime->running = false;
+				return false;
+			}
+			runtime->cameraStatus = QStringLiteral("UDP 共享接收已取得扫描前新帧。");
+		}
 		return true;
 	}
 
@@ -13464,16 +13527,27 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 	{
 		runtime->cache->Clear();
 	}
+	if (runtime->cache == nullptr)
+	{
+		return false;
+	}
+	const std::uint64_t readyMark = runtime->cache->Mark();
+	const CameraFrameCache::ConnectionState connectionState = runtime->cache->GetConnectionState();
 
 	const bool needRestart = !runtime->running
 		|| runtime->cameraIP != cameraIP
 		|| runtime->cameraPort != cameraPort
-		|| runtime->cameraPollIntervalMs != cameraPollIntervalMs;
+		|| runtime->cameraPollIntervalMs != cameraPollIntervalMs
+		|| connectionState == CameraFrameCache::ConnectionState::Stopped
+		|| connectionState == CameraFrameCache::ConnectionState::Failed;
 	if (needRestart)
 	{
 		// 启动期 blockingConnect=false：异步发起，不让相机 3s 同步连接超时阻塞主窗口显示；
-		// 扫描前等场景仍用 BlockingQueuedConnection（注：阻塞只保证"已尝试连接"，不保证连上）。
-		QMetaObject::invokeMethod(
+		// 扫描前等场景用 BlockingQueuedConnection 完成连接尝试，随后再等待一张新点云帧。
+		runtime->cache->SetConnectionState(
+			CameraFrameCache::ConnectionState::Connecting,
+			QString("正在连接相机 %1:%2。").arg(cameraIP).arg(cameraPort));
+		const bool invoked = QMetaObject::invokeMethod(
 			runtime->tcpWorker,
 			"startClient",
 			blockingConnect ? Qt::BlockingQueuedConnection : Qt::QueuedConnection,
@@ -13485,6 +13559,27 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 		runtime->cameraPollIntervalMs = cameraPollIntervalMs;
 		runtime->receiveMode = "TCP独立连接";
 		runtime->running = true;
+		if (!invoked)
+		{
+			runtime->cache->SetConnectionState(
+				CameraFrameCache::ConnectionState::Failed,
+				QStringLiteral("无法调用相机接收线程。"));
+			runtime->cameraStatus = QStringLiteral("无法调用相机接收线程。");
+			runtime->running = false;
+			return false;
+		}
+	}
+	if (blockingConnect)
+	{
+		QString readyError;
+		const int readyTimeoutMs = std::max(5000, cameraPollIntervalMs * 20);
+		if (!runtime->cache->WaitForReadyFrameAfter(readyMark, readyTimeoutMs, &readyError))
+		{
+			runtime->cameraStatus = readyError;
+			runtime->running = false;
+			return false;
+		}
+		runtime->cameraStatus = QStringLiteral("相机已连接并取得扫描前新帧。");
 	}
 	return true;
 }
@@ -14225,6 +14320,20 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		cameraCacheForUnit,
 		this);
 	page->setWindowModality(Qt::NonModal);
+	// 互锁：流程测试正在跑时，拦下先测后焊启动（同机同驱动会冲突）。
+	page->SetPreStartGuard([this](QString& reason) -> bool
+		{
+			if (const ProcessLoopTestDialog* loopPage =
+				qobject_cast<const ProcessLoopTestDialog*>(m_pProcessLoopTestPage))
+			{
+				if (loopPage->IsRunning())
+				{
+					reason = QStringLiteral("流程测试正在运行，请先停止流程测试再开始先测后焊。");
+					return false;
+				}
+			}
+			return true;
+		});
 	// 扫描数据在线上传钩子：流程成功后按「自动上传」开关入队（钩子回调已在 UI 线程）。
 	page->SetScanDataUploadHook([this](const QString& caseDir)
 		{

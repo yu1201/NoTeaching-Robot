@@ -174,6 +174,7 @@ bool EnsureHandEyeMatrixIni(const QString& robotName, const QString& cameraSecti
     ini.WriteString("RobotName", ToUtf8StdString(robotName));
     ini.WriteString("CameraSection", ToUtf8StdString(cameraSection));
     ini.WriteString("RobotType", RobotPoseTransform::NormalizeRobotType(defaultConfig.robotType));
+    ini.WriteString("Calibrated", 0);  // 自动创建的默认矩阵不能用于真实扫描，必须经界面显式保存。
 
     ini.SetSectionName("HandEyeMatrix");
     for (int row = 0; row < 3; ++row)
@@ -247,6 +248,128 @@ bool LoadHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
     return true;
 }
 
+bool LoadExistingValidatedHandEyeMatrixConfig(
+    const QString& robotName,
+    const QString& cameraSection,
+    HandEyeMatrixConfig& config,
+    QString* error,
+    QString* filePathOut)
+{
+    const QString filePath = GetHandEyeMatrixIniPath(robotName, cameraSection);
+    if (filePathOut != nullptr)
+    {
+        *filePathOut = filePath;
+    }
+    const std::string path = ToUtf8StdString(filePath);
+    if (!ConfigDatabase::IsAvailable() || !ConfigDatabase::HasIniFile(path))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("手眼矩阵记录不存在，禁止使用自动默认值：%1").arg(filePath);
+        }
+        return false;
+    }
+
+    COPini metadataIni;
+    if (!metadataIni.SetFileName(path))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("无法打开手眼矩阵记录：%1").arg(filePath);
+        }
+        return false;
+    }
+    metadataIni.SetSectionName("Base");
+    std::string storedRobotName;
+    std::string storedCameraSection;
+    if (metadataIni.ReadString(false, "RobotName", storedRobotName) <= 0
+        || QString::fromUtf8(storedRobotName.c_str()) != robotName)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("手眼矩阵机器人标识不匹配：期望=%1，文件=%2")
+                .arg(robotName, filePath);
+        }
+        return false;
+    }
+    if (metadataIni.ReadString(false, "CameraSection", storedCameraSection) <= 0
+        || QString::fromUtf8(storedCameraSection.c_str()) != cameraSection)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("手眼矩阵相机分组不匹配：期望=%1，文件=%2")
+                .arg(cameraSection, filePath);
+        }
+        return false;
+    }
+
+    int calibrated = 0;
+    const bool hasCalibratedFlag = metadataIni.ReadString(false, "Calibrated", &calibrated) > 0;
+    if (!LoadHandEyeMatrixConfig(robotName, cameraSection, config, error, filePathOut))
+    {
+        return false;
+    }
+
+    if (!config.rotation.allFinite() || !config.translation.allFinite())
+    {
+        if (error != nullptr)
+        {
+            *error = QString("手眼矩阵包含 NaN 或无穷值：%1").arg(filePath);
+        }
+        return false;
+    }
+    const Eigen::Matrix3d orthogonality = config.rotation.transpose() * config.rotation;
+    const double orthogonalityError =
+        (orthogonality - Eigen::Matrix3d::Identity()).cwiseAbs().maxCoeff();
+    const double determinant = config.rotation.determinant();
+    if (orthogonalityError > 0.02 || std::abs(determinant - 1.0) > 0.02)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("手眼旋转矩阵无效：正交误差=%1，det=%2，文件=%3")
+                .arg(orthogonalityError, 0, 'g', 8)
+                .arg(determinant, 0, 'g', 8)
+                .arg(filePath);
+        }
+        return false;
+    }
+
+    if (!hasCalibratedFlag || calibrated == 0)
+    {
+        // 兼容已有现场数据：旧版本没有 Calibrated 字段，只接受显式存在的 HandEyeReady=1，
+        // 且矩阵不能仍是 Ensure 自动写入的硬编码默认值。重新在界面保存后会写入 Calibrated=1。
+        COPini robotIni;
+        const std::string robotParaPath = DATA_PATH + ToUtf8StdString(robotName) + "\\RobotPara.ini";
+        int handEyeReady = 0;
+        if (!robotIni.SetFileName(robotParaPath)
+            || !robotIni.SetSectionName("SetupStatus")
+            || robotIni.ReadString(false, "HandEyeReady", &handEyeReady) <= 0
+            || handEyeReady == 0)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("手眼矩阵尚未明确标记为已标定：%1").arg(filePath);
+            }
+            return false;
+        }
+        const HandEyeMatrixConfig defaultConfig = GetDefaultHandEyeMatrixConfig();
+        const double defaultRotationDelta =
+            (config.rotation - defaultConfig.rotation).cwiseAbs().maxCoeff();
+        const double defaultTranslationDelta =
+            (config.translation - defaultConfig.translation).cwiseAbs().maxCoeff();
+        if (defaultRotationDelta < 1e-9 && defaultTranslationDelta < 1e-9)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("手眼矩阵仍是自动生成的默认值，请在标定/矩阵界面确认并保存：%1")
+                    .arg(filePath);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SaveHandEyeMatrixConfig(const QString& robotName, const QString& cameraSection, const HandEyeMatrixConfig& config, QString* error, QString* filePathOut)
 {
     QString filePath;
@@ -274,6 +397,7 @@ bool SaveHandEyeMatrixConfig(const QString& robotName, const QString& cameraSect
     ini.WriteString("RobotName", ToUtf8StdString(robotName));
     ini.WriteString("CameraSection", ToUtf8StdString(cameraSection));
     ini.WriteString("RobotType", RobotPoseTransform::NormalizeRobotType(config.robotType));
+    ini.WriteString("Calibrated", 1);
     ini.SetSectionName("HandEyeMatrix");
 
     auto writeValue = [&ini, error, filePath](const QString& key, double value) -> bool

@@ -165,7 +165,13 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
     m_serverIP = serverIP.trimmed();
     m_serverPort = serverPort;
     m_pollIntervalMs = (pollIntervalMs > 0) ? pollIntervalMs : kPollIntervalMs;  // 无效则回退默认
-    m_running = true;
+    m_running = false;
+    if (m_frameCache != nullptr)
+    {
+        m_frameCache->SetConnectionState(
+            CameraFrameCache::ConnectionState::Connecting,
+            QString("正在连接相机 %1:%2。").arg(m_serverIP).arg(m_serverPort));
+    }
     m_loggedFirstFrame = false;
     m_pollCount = 0;
     m_noNewFrameCount = 0;
@@ -178,6 +184,10 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
     {
         WriteCameraSkjLog(QString("loadSdk failed: %1").arg(error));
         emitDiagnostic(QString("SKJ SDK 加载失败：%1").arg(error));
+        if (m_frameCache != nullptr)
+        {
+            m_frameCache->SetConnectionState(CameraFrameCache::ConnectionState::Failed, error);
+        }
         return;
     }
 
@@ -187,6 +197,12 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
     {
         WriteCameraSkjLog("SKJCamera_Create returned null");
         emitDiagnostic("创建 SKJCamera 句柄失败。");
+        if (m_frameCache != nullptr)
+        {
+            m_frameCache->SetConnectionState(
+                CameraFrameCache::ConnectionState::Failed,
+                QStringLiteral("创建 SKJCamera 句柄失败。"));
+        }
         return;
     }
     if (m_setConnectTimeout != nullptr)
@@ -205,6 +221,12 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
             .arg(m_serverIP).arg(m_serverPort).arg(ret).arg(reason));
         emitDiagnostic(QString("连接相机失败：%1").arg(reason));
         teardownHandle();
+        if (m_frameCache != nullptr)
+        {
+            m_frameCache->SetConnectionState(
+                CameraFrameCache::ConnectionState::Failed,
+                QString("连接相机失败：%1").arg(reason));
+        }
         return;
     }
     WriteCameraSkjLog(QString("connected target=%1:%2").arg(m_serverIP).arg(m_serverPort));
@@ -225,6 +247,13 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
         m_pollTimer = new QTimer(this);
         m_pollTimer->setTimerType(Qt::PreciseTimer);
         connect(m_pollTimer, &QTimer::timeout, this, &ScanCameraSkjWorker::pollFrame);
+    }
+    m_running = true;
+    if (m_frameCache != nullptr)
+    {
+        m_frameCache->SetConnectionState(
+            CameraFrameCache::ConnectionState::Connected,
+            QString("SKJ SDK 已连接 %1:%2，等待首帧。").arg(m_serverIP).arg(m_serverPort));
     }
     m_pollTimer->start(m_pollIntervalMs);
     emitDiagnostic(QString("SKJ SDK 已连接 %1:%2，开始取帧（轮询间隔 %3 ms）。").arg(m_serverIP).arg(m_serverPort).arg(m_pollIntervalMs));
@@ -635,6 +664,12 @@ void ScanCameraSkjWorker::stopClient()
         m_pollTimer->stop();
     }
     teardownHandle();
+    if (m_frameCache != nullptr)
+    {
+        m_frameCache->SetConnectionState(
+            CameraFrameCache::ConnectionState::Stopped,
+            QStringLiteral("SKJ SDK 已停止。"));
+    }
     emitDiagnostic("SKJ SDK 已停止。");
 }
 
