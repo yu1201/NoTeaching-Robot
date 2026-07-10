@@ -5,6 +5,10 @@
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
 
+## 2026-07-10
+
+- 发布 v2026.07.10.1006：OTA 增量升级增加「版本兼容判定 + 装后自检」，防止把只含 exe 的补丁装到 DLL 不一致的老设备、以及补丁装了版本没变的坑（1004 那类）。① `latest.json` 补丁块加 `baseMinVersion`（=非 exe 载荷/DLL 自哪个版本起没变的最低版本），客户端「本机版本 < baseMinVersion」时自动回退全量安装（`OnlineServicesDialog::OnManifestReply`）；② 升级前记 `PendingUpdateTargetVersion`，重启后 `QtWidgetsApplication4::CheckPendingUpdateResult` 比对实际版本，未达目标弹「升级未生效」告警（本地演示通过）；③ 发版脚本 `scripts/upload_ota.py`：算每通道「非 exe 载荷哈希」（排除 BUILD_VERSION.txt 等每次变的）、维护服务器端 `payload_history.json`、自动算 `baseMinVersion`（载荷没变一路回溯、DLL 一变顶到那版），`--seed-versions` 回填已知同载荷老版本；密码走环境变量不写死（仓库公开）。只传 103（156 已弃）。构建 `Release x64` 0 错误。署名 yu1201。
+
 ## 2026-07-09
 
 - 发布 v2026.07.09.1005：新增管理页「流程测试」（调试菜单，嵌入式管理页）——自动循环跑先测后焊流程用于重复性/稳定性验证。可选目标机器人 / 循环次数（或持续循环）/ 失败即停；参数默认取「测量焊接参数」预设，扫描速度/运行速度/相机时间偏移三项可勾选覆盖；「定时扫描」（两次扫描之间按秒/分钟等待，配合持续循环=每隔 X 分钟自动扫一次）；「包含焊接段」开关（默认仅扫描，勾选后每次扫描完成执行焊接、实际焊接/空跑按预设 `bDoActualWeld`，开始前二次安全确认；确认点循环内自动放行、停止即中止）。后台线程执行、可随时停止（200ms 响应 + 倒计时），相机启动编列主线程。复用 `MeasureThenWeldService`（`LoadPresetParam`/`MovePulseListAndWait`/`MoveCoorsAndWait`/`ScanMoveAndCollect`/`ExecuteWeldPoseFileWithSafePos`）。新增 `ProcessLoopTestDialog.h/.cpp`。构建 `Release x64` 0 错误。署名 yu1201。

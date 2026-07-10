@@ -13,9 +13,14 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.07.09.1005`
+- 当前源码版本：`v2026.07.10.1006`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.07.09.1005.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.07.10.1006.exe`，不用自己编译源码。
+
+## 2026-07-10 更新（v2026.07.10.1006）
+
+- OTA 增量升级更稳（防装错版本/漏 DLL）：`latest.json` 补丁块新增 `baseMinVersion`——补丁只含主程序 exe，客户端仅在「本机版本 >= 该基线」（即非 exe 载荷/DLL 与目标一致）时才走增量，更老的设备自动回退全量安装；升级后重启自检「实际版本是否达到目标」，未达成弹「升级未生效」告警建议改全量。发版脚本 `scripts/upload_ota.py` 自动统计每通道「非 exe 载荷哈希」历史并算出 `baseMinVersion`。
+- 构建验证：`Release x64` 编译通过（0 错误）；安装包 `NoTeaching-Robot-Setup-v2026.07.10.1006.exe`。
 
 ## 2026-07-09 更新（v2026.07.09.1005）
 

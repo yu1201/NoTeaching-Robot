@@ -11023,6 +11023,12 @@ void QtWidgetsApplication4::OpenAboutDialog()
 
 void QtWidgetsApplication4::ApplyStartupArguments(const QStringList& arguments)
 {
+	// GUI 启动自检：上次若有「待验证升级」，比对实际版本是否达到目标；不符则告警（补丁/安装没生效）。
+	if (!arguments.contains(QStringLiteral("--no-show")))
+	{
+		QTimer::singleShot(1500, this, [this]() { CheckPendingUpdateResult(); });
+	}
+
 	if (arguments.size() <= 1)
 	{
 		return;
@@ -11033,6 +11039,26 @@ void QtWidgetsApplication4::ApplyStartupArguments(const QStringList& arguments)
 		{
 			RunCommandLineActions(arguments);
 		});
+}
+
+void QtWidgetsApplication4::CheckPendingUpdateResult()
+{
+	const QString target = OnlineServicesConfig::PendingUpdateTargetVersion();
+	if (target.isEmpty())
+	{
+		return;  // 无待验证升级
+	}
+	const QString current = QApplication::applicationVersion();
+	OnlineServicesConfig::SetPendingUpdateTargetVersion(QString());  // 无论成败都清除，避免反复弹
+	if (current == target)
+	{
+		return;  // 升级成功（版本已达目标），静默
+	}
+	// 版本没达到目标：补丁/安装没真正生效（如误挂了含旧 exe 的补丁——1004 那类问题）。
+	QMessageBox::warning(this, QStringLiteral("升级未生效"),
+		QStringLiteral("上次升级似乎未成功：期望升级到 %1，当前仍是 %2。\n\n"
+			"建议在「在线服务 / 关于」里改用「完整安装包」重新升级；若多次仍失败，请联系维护人员。")
+			.arg(target, current));
 }
 
 void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
