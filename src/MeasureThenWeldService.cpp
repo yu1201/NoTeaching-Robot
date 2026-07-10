@@ -6795,6 +6795,19 @@ bool MeasureThenWeldService::MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, 
 
 bool MeasureThenWeldService::MovePulseListAndWait(RobotDriverAdaptor* pRobotDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const
 {
+    if (pulses.empty())
+    {
+        if (appendLog)
+        {
+            appendLog(QString("运动失败：%1未配置有效脉冲点，禁止按空列表跳过。").arg(name));
+        }
+        if (setFlowStep)
+        {
+            setFlowStep(QString("%1未配置").arg(name));
+        }
+        return false;
+    }
+
     for (size_t index = 0; index < pulses.size(); ++index)
     {
         if (!MovePulseAndWait(pRobotDriver, pulses[index], speed, QString("%1[%2]").arg(name).arg(index), appendLog, setFlowStep))
@@ -6899,7 +6912,15 @@ bool MeasureThenWeldService::MoveScanStartSafeAndWait(
                 .arg(currentPulse.nBPulse)
                 .arg(currentPulse.nTPulse);
 
-            if (checkpoint && !checkpoint("扫描姿态翻转风险提醒", detail))
+            if (!checkpoint)
+            {
+                if (appendLog)
+                {
+                    appendLog("检测到扫描姿态翻转风险，但当前入口无法完成人工确认，流程已安全中止。");
+                }
+                return false;
+            }
+            if (!checkpoint("扫描姿态翻转风险提醒", detail))
             {
                 if (appendLog)
                 {
@@ -6970,8 +6991,256 @@ bool MeasureThenWeldService::MoveScanEndSafeAndWait(
     return MoveCoorsAndWait(pRobotDriver, endSafeCoors, speed, "扫描收枪安全位置", appendLog, setFlowStep);
 }
 
-bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, QString& savedPath, const LogCallback& appendLog, const StepCallback& setFlowStep, CameraFrameCache* cameraCache) const
+bool MeasureThenWeldService::RunScanCycle(
+    RobotDriverAdaptor* pRobotDriver,
+    const T_PRECISE_MEASURE_PARAM& param,
+    double runSpeed,
+    CameraFrameCache* cameraCache,
+    ScanCycleResult& result,
+    const LogCallback& appendLog,
+    const StepCallback& setFlowStep,
+    const CheckpointCallback& safetyCheckpoint,
+    const BeforeActionCallback& beforeAction,
+    const StopRequestedCallback& stopRequested) const
 {
+    result = ScanCycleResult{};
+
+    auto fail = [&](const QString& error, bool motionFailure) -> bool
+        {
+            result.status = ScanCycleStatus::Failed;
+            result.error = error;
+            result.motionFailure = motionFailure;
+            if (appendLog && !error.isEmpty())
+            {
+                appendLog(error);
+            }
+            return false;
+        };
+    auto allowAction = [&](const QString& action) -> bool
+        {
+            if (stopRequested && stopRequested())
+            {
+                result.status = ScanCycleStatus::Stopped;
+                result.error = QString("已在%1前停止。").arg(action);
+                if (appendLog)
+                {
+                    appendLog(result.error);
+                }
+                return false;
+            }
+            if (beforeAction && !beforeAction(action))
+            {
+                result.status = ScanCycleStatus::Stopped;
+                result.error = QString("已取消：%1。").arg(action);
+                if (appendLog)
+                {
+                    appendLog(result.error);
+                }
+                return false;
+            }
+            return true;
+        };
+
+    if (pRobotDriver == nullptr)
+    {
+        return fail("扫描循环失败：机器人驱动为空。", false);
+    }
+    if (cameraCache == nullptr)
+    {
+        return fail("扫描循环失败：当前机器人没有可用的专属相机缓存。", false);
+    }
+
+    HandEyeMatrixConfig validatedCalibration;
+    QString calibrationError;
+    QString calibrationPath;
+    const QString robotName = QString::fromStdString(param.sRobotName);
+    const QString cameraSection = RobotDataHelper::MeasureCameraSection(robotName);
+    if (!LoadExistingValidatedHandEyeMatrixConfig(
+        robotName,
+        cameraSection,
+        validatedCalibration,
+        &calibrationError,
+        &calibrationPath))
+    {
+        result.fatalFailure = true;
+        return fail(
+            QString("扫描前置检查失败：手眼矩阵不可用：%1 [%2]")
+                .arg(calibrationError, cameraSection),
+            false);
+    }
+    if (appendLog)
+    {
+        appendLog(QString("扫描前置检查通过：手眼矩阵=%1 [%2]")
+            .arg(calibrationPath, cameraSection));
+    }
+
+    const double safeRunSpeed = std::isfinite(runSpeed) && runSpeed > 0.0 ? runSpeed : 1.0;
+    if (!allowAction("扫描下枪安全位置"))
+    {
+        return false;
+    }
+    bool safetyCheckpointRejected = false;
+    CheckpointCallback trackedSafetyCheckpoint;
+    if (safetyCheckpoint)
+    {
+        trackedSafetyCheckpoint = [&](const QString& title, const QString& detail) -> bool
+            {
+                const bool approved = safetyCheckpoint(title, detail);
+                safetyCheckpointRejected = !approved;
+                return approved;
+            };
+    }
+    if (!MoveScanStartSafeAndWait(
+        pRobotDriver, param, safeRunSpeed, appendLog, setFlowStep, trackedSafetyCheckpoint))
+    {
+        if (safetyCheckpointRejected)
+        {
+            result.status = ScanCycleStatus::Stopped;
+            result.fatalFailure = true;
+            result.error = QStringLiteral("扫描姿态安全风险未获人工确认，未发送后续运动。");
+            if (appendLog)
+            {
+                appendLog(result.error);
+            }
+            return false;
+        }
+        return fail("扫描循环失败：未能到达扫描下枪安全位置。", true);
+    }
+    result.lastPhase = ScanCyclePhase::AtStartSafe;
+
+    if (!allowAction("移动到扫描起点"))
+    {
+        return false;
+    }
+    if (!MoveCoorsAndWait(
+        pRobotDriver, param.tStartPos, safeRunSpeed, "扫描起点", appendLog, setFlowStep))
+    {
+        return fail("扫描循环失败：未能到达扫描起点。", true);
+    }
+    result.lastPhase = ScanCyclePhase::AtScanStart;
+
+    if (!allowAction("扫描终点并采集相机点"))
+    {
+        return false;
+    }
+    ScanMotionProgress scanProgress;
+    result.scanAttempted = true;
+    QString scanOutputPath;
+    const bool scanOk = ScanMoveAndCollect(
+        pRobotDriver,
+        param,
+        scanOutputPath,
+        appendLog,
+        setFlowStep,
+        cameraCache,
+        &scanProgress,
+        &validatedCalibration);
+    if (!scanOutputPath.isEmpty())
+    {
+        const QFileInfo outputInfo(scanOutputPath);
+        if (outputInfo.isFile())
+        {
+            result.weldPosePath = outputInfo.absoluteFilePath();
+            result.poseGenerated = true;
+            QDir caseDir = outputInfo.dir();  // LaserPoint
+            if (caseDir.cdUp())
+            {
+                result.caseDir = caseDir.absolutePath();
+            }
+        }
+        else
+        {
+            const QDir outputDir(scanOutputPath);
+            if (outputDir.exists())
+            {
+                result.caseDir = outputDir.absolutePath();
+            }
+        }
+    }
+    result.scanDataSucceeded = scanOk;
+    if (stopRequested && stopRequested())
+    {
+        result.stopRequestedDuringCycle = true;
+    }
+    if (scanProgress.motionStarted)
+    {
+        result.lastPhase = ScanCyclePhase::ScanMotionStarted;
+    }
+    if (scanProgress.motionCompleted)
+    {
+        result.lastPhase = ScanCyclePhase::AtScanEnd;
+    }
+
+    if (!scanProgress.motionCompleted)
+    {
+        return fail(
+            scanOk
+                ? QStringLiteral("扫描循环失败：扫描接口返回成功，但未确认机器人到达扫描终点。")
+                : QStringLiteral("扫描循环失败：扫描运动未确认完成，禁止继续运动或进入下一轮。"),
+            true);
+    }
+
+    const bool scanDataOk = scanOk;
+    // 一旦确认机器人到达扫描终点，即使停止请求或后处理失败，也优先受控移动到终点安全位。
+    // GUI 仍可通过 beforeAction 明确取消这一步；无人值守入口不会因 stopFlag 跳过安全收枪。
+    if (beforeAction && !beforeAction("扫描收枪安全位置"))
+    {
+        result.status = scanDataOk ? ScanCycleStatus::Stopped : ScanCycleStatus::Failed;
+        result.error = scanDataOk
+            ? QStringLiteral("已取消：扫描收枪安全位置。")
+            : QStringLiteral("扫描处理失败且未执行扫描收枪安全位置。未继续后续流程。");
+        if (appendLog)
+        {
+            appendLog(result.error);
+        }
+        return false;
+    }
+    if (!MoveScanEndSafeAndWait(pRobotDriver, param, safeRunSpeed, appendLog, setFlowStep))
+    {
+        return fail("扫描循环失败：未能到达扫描收枪安全位置。", true);
+    }
+    result.lastPhase = ScanCyclePhase::AtEndSafe;
+    result.safelyRetracted = true;
+    if (stopRequested && stopRequested())
+    {
+        result.stopRequestedDuringCycle = true;
+    }
+
+    if (!scanDataOk)
+    {
+        return fail("扫描运动已完成并安全收枪，但采集、处理或文件保存失败。", false);
+    }
+
+    if (result.stopRequestedDuringCycle)
+    {
+        result.status = ScanCycleStatus::Stopped;
+        result.error = QStringLiteral("本次扫描和安全收枪已完成；已按停止请求取消焊接及后续循环。");
+        if (appendLog)
+        {
+            appendLog(result.error);
+        }
+        return false;
+    }
+
+    result.status = ScanCycleStatus::Success;
+    result.error.clear();
+    return true;
+}
+
+bool MeasureThenWeldService::ScanMoveAndCollect(
+    RobotDriverAdaptor* pRobotDriver,
+    const T_PRECISE_MEASURE_PARAM& param,
+    QString& savedPath,
+    const LogCallback& appendLog,
+    const StepCallback& setFlowStep,
+    CameraFrameCache* cameraCache,
+    ScanMotionProgress* progress,
+    const HandEyeMatrixConfig* validatedCalibration) const
+{
+    if (progress != nullptr)
+    {
+        *progress = ScanMotionProgress{};
+    }
     if (pRobotDriver == nullptr)
     {
         return false;
@@ -6998,20 +7267,41 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         setFlowStep("扫描运动中，正在采集相机点、机器人位置和激光点");
     }
 
-    HandEyeMatrixConfig calibration = GetDefaultHandEyeMatrixConfig();
+    HandEyeMatrixConfig calibration;
     QString calibrationError;
     QString calibrationPath;
     const QString cameraSection = RobotDataHelper::MeasureCameraSection(QString::fromStdString(param.sRobotName));
-    if (LoadHandEyeMatrixConfig(QString::fromStdString(param.sRobotName), cameraSection, calibration, &calibrationError, &calibrationPath))
+    if (validatedCalibration != nullptr)
+    {
+        calibration = *validatedCalibration;
+        if (appendLog)
+        {
+            appendLog(QString("使用扫描前置检查已锁定的手眼矩阵 [%1]").arg(cameraSection));
+        }
+    }
+    else if (LoadExistingValidatedHandEyeMatrixConfig(
+        QString::fromStdString(param.sRobotName),
+        cameraSection,
+        calibration,
+        &calibrationError,
+        &calibrationPath))
     {
         if (appendLog)
         {
-            appendLog(QString("已读取手眼矩阵参数：%1 [%2]").arg(calibrationPath, cameraSection));
+            appendLog(QString("已读取并校验手眼矩阵参数：%1 [%2]").arg(calibrationPath, cameraSection));
         }
     }
-    else if (appendLog)
+    else
     {
-        appendLog(QString("读取手眼矩阵参数失败，已回退默认值：%1 [%2]").arg(calibrationError, cameraSection));
+        if (appendLog)
+        {
+            appendLog(QString("读取或校验手眼矩阵失败，禁止扫描：%1 [%2]").arg(calibrationError, cameraSection));
+        }
+        if (setFlowStep)
+        {
+            setFlowStep("扫描失败：手眼矩阵不可用");
+        }
+        return false;
     }
 
     // 相机读取帧率已迁至相机参数(CameraParam.ini 的 CameraReadFps)；这里读出来仅用于相机时间戳
@@ -7455,6 +7745,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
         finishCameraProcessingWorkers();
         return false;
     }
+    if (progress != nullptr)
+    {
+        progress->commandAccepted = true;
+    }
 
     appendRobotPose();
     int motionState = 0;
@@ -7502,6 +7796,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             {
                 if (!motionStarted)
                 {
+                    if (progress != nullptr)
+                    {
+                        progress->motionStarted = true;
+                    }
                     scanStartCameraSequence = frameCache->Mark();
 					lastPulledCameraSequence = scanStartCameraSequence;
 					if (appendLog)
@@ -7534,6 +7832,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(RobotDriverAdaptor* pRobotDriver
             }
             if (motionStarted && isDoneState)
             {
+                if (progress != nullptr)
+                {
+                    progress->motionCompleted = true;
+                }
                 scanEndCameraSequence = frameCache->Mark();
                 pullScanCameraFramesTo(scanEndCameraSequence);
                 break;
@@ -9715,7 +10017,8 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     const CheckpointCallback& checkpoint,
     double overrideFinalStepMm,
     bool allowPointwiseWeave,
-    int resumeSkipPoints) const
+    int resumeSkipPoints,
+    const StopRequestedCallback& stopRequested) const
 {
     summary.clear();
     error.clear();
@@ -9911,6 +10214,28 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         120000.0,
         1800000.0));
 
+    auto stopBeforeNextWeldAction = [&](const QString& nextAction) -> bool
+        {
+            if (!stopRequested || !stopRequested())
+            {
+                return false;
+            }
+
+            error = QString("已收到停止请求，当前步骤已结束，未继续%1。").arg(nextAction);
+            if (appendLog)
+            {
+                appendLog(error);
+            }
+            return true;
+        };
+
+    // 自动流程的最后进入门禁：必须放在所有解析/生成之后、第一条机器人运动之前，
+    // 避免用户在扫描完成到焊接函数真正开始之间按下停止仍触发下枪运动。
+    if (stopBeforeNextWeldAction("焊接下枪运动"))
+    {
+        return false;
+    }
+
     if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
     {
         const double safeMoveSpeedMmPerSec =
@@ -9974,6 +10299,11 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             return false;
         }
 
+        if (stopBeforeNextWeldAction("移动到焊接起点"))
+        {
+            return false;
+        }
+
         if (!MoveCoorsAndWait(
             pRobotDriver,
             weldStartCoors,
@@ -9983,6 +10313,11 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             setFlowStep))
         {
             error = "移动到焊接起点失败。";
+            return false;
+        }
+
+        if (stopBeforeNextWeldAction("执行焊接轨迹程序"))
+        {
             return false;
         }
 
@@ -10070,6 +10405,11 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             return false;
         }
 
+        if (stopBeforeNextWeldAction("移动到焊接起点"))
+        {
+            return false;
+        }
+
         if (!MoveCoorsAndWait(
             pRobotDriver,
             weldStartCoors,
@@ -10079,6 +10419,11 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             setFlowStep))
         {
             error = "移动到焊接起点失败。";
+            return false;
+        }
+
+        if (stopBeforeNextWeldAction("生成、上传并执行STEP焊接轨迹"))
+        {
             return false;
         }
 

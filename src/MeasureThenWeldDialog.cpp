@@ -1636,11 +1636,31 @@ bool MeasureThenWeldDialog::ShowCheckpointDialog(const QString& title, const QSt
     return confirmed;
 }
 
+bool MeasureThenWeldDialog::BlockedByOtherFlow(const QString& title)
+{
+    // 互锁：流程测试等其他流程正在驱动同一台机器人时，拦下本次启动。
+    if (m_preStartGuard)
+    {
+        QString reason;
+        if (!m_preStartGuard(reason))
+        {
+            QMessageBox::warning(this, title,
+                reason.isEmpty() ? QStringLiteral("当前有流程正在运行，无法开始。") : reason);
+            return true;
+        }
+    }
+    return false;
+}
+
 void MeasureThenWeldDialog::RunPresetParamFlow()
 {
     if (m_bRunning)
     {
         QMessageBox::information(this, "先测后焊", "流程正在运行。");
+        return;
+    }
+    if (BlockedByOtherFlow("先测后焊"))
+    {
         return;
     }
 
@@ -1659,7 +1679,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
     }
     param.bDoActualWeld = IsActualWeldModeChecked();
     const int unitIndexForRun = m_unitIndex;
-    m_pCameraCache = ResolveCameraCacheForUnit(unitIndexForRun);
+    m_pCameraCache = nullptr;  // 相机启动成功后再解析，避免 runtime 重建期间保留旧缓存指针。
     SetRunning(true);
     ResetProgress("读取预设参数完成，准备启动相机");
     SetProgress(5, "读取预设参数完成");
@@ -1683,12 +1703,13 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
             QString cameraIP;
             QString savedPath;
             QString executeSummary;
+            CameraFrameCache* cameraCacheForRun = nullptr;
 
             if (self != nullptr)
             {
                 self->SetProgressBusy(8, "正在启动扫描相机");
             }
-            QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok, unitIndexForRun]()
+            QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok, &cameraCacheForRun, unitIndexForRun]()
                 {
                     // 相机 UDP 线程由主界面统一管理，这里通过回调启动。
                     if (self == nullptr)
@@ -1697,6 +1718,13 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         return;
                     }
                     ok = self->m_startCamera ? self->m_startCamera(unitIndexForRun, cameraIP) : false;
+                    if (ok)
+                    {
+                        // 启动回调在共享接收模式下可能重建 runtime；必须在成功后重新取得本轮缓存。
+                        cameraCacheForRun = self->ResolveCameraCacheForUnit(unitIndexForRun);
+                        self->m_pCameraCache = cameraCacheForRun;
+                        ok = cameraCacheForRun != nullptr;
+                    }
                 }, Qt::BlockingQueuedConnection);
 
             if (!ok)
@@ -1715,46 +1743,56 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         }
                     }, Qt::QueuedConnection);
 
-                ok = self != nullptr && self->ConfirmContinue("扫描下枪安全位置");
-                if (ok)
+                MeasureThenWeldService::ScanCycleResult scanCycle;
+                auto beforeScanAction = [self](const QString& action) -> bool
+                    {
+                        if (self == nullptr || !self->ConfirmContinue(action))
+                        {
+                            return false;
+                        }
+                        if (action == QStringLiteral("扫描下枪安全位置"))
+                        {
+                            self->SetFlowStep("准备移动到扫描下枪安全位置");
+                            self->SetProgressBusy(18, "移动到扫描下枪安全位置");
+                        }
+                        else if (action == QStringLiteral("移动到扫描起点"))
+                        {
+                            self->SetFlowStep("准备移动到扫描起点");
+                            self->SetProgressBusy(28, "移动到扫描起点");
+                        }
+                        else if (action == QStringLiteral("扫描终点并采集相机点"))
+                        {
+                            self->SetFlowStep("准备扫描终点并采集相机点");
+                            self->SetProgressBusy(40, "扫描运动中，正在采集点云");
+                        }
+                        else if (action == QStringLiteral("扫描收枪安全位置"))
+                        {
+                            self->SetFlowStep("准备移动到扫描收枪安全位置");
+                            self->SetProgressBusy(72, "移动到扫描收枪安全位置");
+                        }
+                        return true;
+                    };
+                ok = self != nullptr
+                    && self->m_pService != nullptr
+                    && self->m_pService->RunScanCycle(
+                        pRobotDriver,
+                        param,
+                        SafeSpeed(param.dRunSpeed, 1.0),
+                        cameraCacheForRun,
+                        scanCycle,
+                        [self](const QString& text) { if (self != nullptr) self->AppendLog(text); },
+                        [self](const QString& text) { if (self != nullptr) self->SetFlowStep(text); },
+                        [self](const QString& title, const QString& detail) -> bool
+                        {
+                            return self != nullptr && self->ShowCheckpointDialog(title, detail);
+                        },
+                        beforeScanAction);
+                savedPath = scanCycle.weldPosePath;
+                if (!ok && message.isEmpty())
                 {
-                    self->SetFlowStep("准备移动到扫描下枪安全位置");
-                    self->SetProgressBusy(18, "移动到扫描下枪安全位置");
-                    // 1. 扫描前按起点位姿和配置推算安全位置，避免直接切入扫描起点。
-                    ok = self != nullptr && self->MoveScanStartSafeAndWait(pRobotDriver, param, SafeSpeed(param.dRunSpeed, 1.0));
-                }
-                if (ok)
-                {
-                    ok = self != nullptr && self->ConfirmContinue("移动到扫描起点");
-                }
-                if (ok)
-                {
-                    self->SetFlowStep("准备移动到扫描起点");
-                    self->SetProgressBusy(28, "移动到扫描起点");
-                    // 2. 到扫描起点使用直线运动，保持扫描段的空间姿态连续。
-                    ok = self != nullptr && self->MoveCoorsAndWait(pRobotDriver, param.tStartPos, SafeSpeed(param.dRunSpeed, 1.0), "扫描起点");
-                }
-                if (ok)
-                {
-                    ok = self != nullptr && self->ConfirmContinue("扫描终点并采集相机点");
-                }
-                if (ok)
-                {
-                    self->SetFlowStep("准备扫描终点并采集相机点");
-                    self->SetProgressBusy(40, "扫描运动中，正在采集点云");
-                    // 3. 从扫描起点运动到扫描终点，同时按 10ms 周期读取相机点。
-                    ok = self != nullptr && self->ScanMoveAndCollect(pRobotDriver, param, savedPath);
-                }
-                if (ok)
-                {
-                    ok = self != nullptr && self->ConfirmContinue("扫描收枪安全位置");
-                }
-                if (ok)
-                {
-                    self->SetFlowStep("准备移动到扫描收枪安全位置");
-                    self->SetProgressBusy(72, "移动到扫描收枪安全位置");
-                    // 4. 扫描结束后按终点位姿和同一配置推算安全位置。
-                    ok = self != nullptr && self->MoveScanEndSafeAndWait(pRobotDriver, param, SafeSpeed(param.dRunSpeed, 1.0));
+                    message = scanCycle.error.isEmpty()
+                        ? QStringLiteral("扫描流程失败或已取消。")
+                        : scanCycle.error;
                 }
                 if (ok)
                 {
@@ -1873,6 +1911,10 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
     if (m_bRunning)
     {
         QMessageBox::information(this, "先测后焊", "流程正在运行。");
+        return;
+    }
+    if (BlockedByOtherFlow("先测后焊"))
+    {
         return;
     }
 
@@ -2289,6 +2331,10 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
         QMessageBox::information(this, "断点续焊", "流程正在运行。");
         return;
     }
+    if (BlockedByOtherFlow("断点续焊"))
+    {
+        return;
+    }
     RobotDriverAdaptor* pRobotDriver = GetRobotDriver();
     if (pRobotDriver == nullptr)
     {
@@ -2478,6 +2524,10 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
     if (m_bRunning)
     {
         QMessageBox::information(this, "相机时间补偿标定", "流程正在运行。");
+        return;
+    }
+    if (BlockedByOtherFlow("相机时间补偿标定"))
+    {
         return;
     }
 

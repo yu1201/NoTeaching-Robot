@@ -43,6 +43,8 @@ HandEyeCalibrationConfig GetDefaultHandEyeCalibrationConfig();
 
 bool EnsureHandEyeMatrixIni(const QString& robotName, const QString& cameraSection, QString* error = nullptr, QString* filePathOut = nullptr);
 bool LoadHandEyeMatrixConfig(const QString& robotName, const QString& cameraSection, HandEyeMatrixConfig& config, QString* error = nullptr, QString* filePathOut = nullptr);
+// 扫描/运动专用严格加载：不自动创建默认矩阵，要求显式就绪标记并校验旋转矩阵有效性。
+bool LoadExistingValidatedHandEyeMatrixConfig(const QString& robotName, const QString& cameraSection, HandEyeMatrixConfig& config, QString* error = nullptr, QString* filePathOut = nullptr);
 bool SaveHandEyeMatrixConfig(const QString& robotName, const QString& cameraSection, const HandEyeMatrixConfig& config, QString* error = nullptr, QString* filePathOut = nullptr);
 bool EnsureHandEyeCalibrationIni(const QString& robotName, const QString& cameraSection, QString* error = nullptr, QString* filePathOut = nullptr);
 bool LoadHandEyeCalibrationConfig(const QString& robotName, const QString& cameraSection, HandEyeCalibrationConfig& config, QString* error = nullptr, QString* filePathOut = nullptr);

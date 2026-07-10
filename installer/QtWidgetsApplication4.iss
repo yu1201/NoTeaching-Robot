@@ -1,17 +1,17 @@
 ﻿#define MyAppName "HK-Pathlynx-CORPLA"
 #define MyAppGuid "F3E0296A-8AC8-4447-951A-013ADAE97E73"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.07.10.1007"
+  #define MyAppVersion "2026.07.10.1643"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.07.10.1007"
+  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.07.10.1643"
 #endif
 #define MyAppPublisher "海瞰智焊"
 #define MyAppExeName "HK-Pathlynx-CORPLA.exe"
 #define MySourceDir "..\dist\QtWidgetsApplication4"
 
 [Setup]
-AppId={{A5A7E2A0-8226-40BB-B126-94C5D298B3CF}
+AppId={{F3E0296A-8AC8-4447-951A-013ADAE97E73}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}

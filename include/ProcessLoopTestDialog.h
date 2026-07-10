@@ -70,6 +70,12 @@ public:
         QWidget* parent = nullptr);
     ~ProcessLoopTestDialog() override;
 
+    // 是否正在跑测试循环（供主窗口互锁：升级安装/关程序守卫、先测后焊页避让）。
+    bool IsRunning() const { return m_running.load(); }
+
+    // 开始前置守卫：返回 false 则拦下并把原因写进 reason（供主窗口互锁先测后焊流程）。
+    void SetPreStartGuard(std::function<bool(QString& reason)> guard) { m_preStartGuard = std::move(guard); }
+
 protected:
     // 关界面/切走时若正在测试：提示并停止（安全优先，不留后台机器人运动）。
     void closeEvent(QCloseEvent* event) override;
@@ -90,6 +96,7 @@ private:
 
     LoadDefaultsFunc m_loadDefaults;
     RunnerFunc m_runner;
+    std::function<bool(QString&)> m_preStartGuard;   // 互锁：先测后焊流程在跑时拦下本测试
     ContralUnit* m_pContralUnit = nullptr;
 
     // 与先测后焊一致的参数选择器（改选即写回「当前选用」，LoadPresetParam 自动取到）
