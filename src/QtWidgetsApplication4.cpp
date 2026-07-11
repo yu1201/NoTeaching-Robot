@@ -9280,7 +9280,7 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 	}
 
 	// 扫描数据上传中：拦截退出，弹进度框（已完成/剩余/速度/ETA），传完自动放行；
-	// 用户可「强制退出」——先删掉传一半的文件再退出；关掉进度框(X/Esc)则不退出、上传继续后台跑。
+	// 用户可「强制退出」——停止当前传输并等待后台收尾；关掉进度框(X/Esc)则不退出、上传继续后台跑。
 	if (m_pScanDataUploader != nullptr && m_pScanDataUploader->IsBusy())
 	{
 		QDialog dlg(this);
@@ -9292,7 +9292,7 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 		info->setWordWrap(true);
 		QProgressBar* bar = new QProgressBar(&dlg);
 		bar->setRange(0, 100);
-		QPushButton* forceBtn = new QPushButton(QStringLiteral("强制退出（删除未传完的文件）"), &dlg);
+		QPushButton* forceBtn = new QPushButton(QStringLiteral("强制退出（停止当前上传）"), &dlg);
 		lay->addWidget(info);
 		lay->addWidget(bar);
 		lay->addWidget(forceBtn);
@@ -9330,8 +9330,8 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 
 		if (r == 2)
 		{
-			forceBtn->setText(QStringLiteral("正在停止并清理…"));
-			m_pScanDataUploader->CancelAndWait();  // 删服务器半截文件 + 等后台收尾后放行
+			forceBtn->setText(QStringLiteral("正在停止上传…"));
+			m_pScanDataUploader->CancelAndWait();  // 等后台停止当前传输并收尾后放行
 		}
 		else if (r != 1)
 		{

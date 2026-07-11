@@ -1,0 +1,209 @@
+name: Offline gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - hk-pathlynx-corpla
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-gates:
+    name: Offline gates (Windows)
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      CI: "true"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      # An accidental publish invocation must fail before opening a connection.
+      OTA_SIGNING_KEY_FILE: ""
+      OTA_SSH_PASSWORD: ""
+
+    steps:
+      - name: Check out without persisted credentials
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14.5"
+
+      - name: Install pinned offline-test dependencies
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --no-deps `
+            bcrypt==5.0.0 cffi==2.0.0 cryptography==49.0.0 invoke==3.0.3 `
+            paramiko==5.0.0 pycparser==3.0 PyNaCl==1.6.2
+          if ($LASTEXITCODE -ne 0) { throw "Pinned Python dependency installation failed." }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw "Python dependency consistency check failed." }
+
+      - name: OTA publisher offline tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -B scripts/tests/test_upload_ota_offline.py
+          if ($LASTEXITCODE -ne 0) { throw "OTA publisher offline tests failed." }
+
+      - name: Critical static safety gates
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -B scripts/tests/verify_app_paths.py --static-only
+          if ($LASTEXITCODE -ne 0) { throw "verify_app_paths.py failed." }
+
+          $tests = @(
+            "scripts/tests/verify_fanuc_actual_weld_gate.py",
+            "scripts/tests/verify_function_test_modal_guard.py",
+            "scripts/tests/verify_hand_eye_safety_stop.py",
+            "scripts/tests/verify_motion_terminal_semantics.py",
+            "scripts/tests/verify_ota_release_gate.py",
+            "scripts/tests/verify_pointcloud_quality_gate.py",
+            "scripts/tests/verify_pointcloud_sdk_temp_isolation.py",
+            "scripts/tests/verify_robot_operation_interlock.py",
+            "scripts/tests/verify_scan_cycle_wiring.py",
+            "scripts/tests/verify_security_credentials.py",
+            "scripts/tests/verify_weld_resume_binding.py"
+          )
+          foreach ($test in $tests) {
+            Write-Host "Running $test"
+            python -B $test
+            if ($LASTEXITCODE -ne 0) { throw "$test failed." }
+          }
+
+      - name: PowerShell release-gate smoke on a clean checkout
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $repoRoot = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
+          . (Join-Path $repoRoot "scripts\release_gate_common.ps1")
+
+          function Assert-CiTrue {
+            param([bool]$Condition, [string]$Message)
+            if (-not $Condition) { throw "ASSERT FAILED: $Message" }
+          }
+          function Assert-CiThrows {
+            param([scriptblock]$Action, [string]$Message)
+            try {
+              & $Action
+            }
+            catch {
+              return
+            }
+            throw "ASSERT FAILED (expected rejection): $Message"
+          }
+
+          foreach ($relative in @(
+            "scripts/release_gate_common.ps1",
+            "scripts/build_release_package.ps1",
+            "scripts/build_installer.ps1",
+            "scripts/prepare_release_worktree.ps1",
+            "scripts/verify_release_pair.ps1",
+            "scripts/upload_release.ps1"
+          )) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $repoRoot $relative), [ref]$tokens, [ref]$errors) | Out-Null
+            Assert-CiTrue ($errors.Count -eq 0) "$relative has PowerShell parse errors"
+          }
+
+          $installerText = Get-Content -LiteralPath (Join-Path $repoRoot "installer\QtWidgetsApplication4.iss") -Raw -Encoding UTF8
+          $versionMatch = [regex]::Match($installerText, '(?m)^\s*#define MyAppVersion "([^"]+)"')
+          Assert-CiTrue $versionMatch.Success "installer version definition is missing"
+          $version = $versionMatch.Groups[1].Value
+          $channel = if ($installerText.Contains('#define MyAppName "HK-Pathlynx-CORPLA"')) { "brand" } else { "neutral" }
+          Assert-ReleaseVersion $version
+          Assert-CiThrows { Assert-ReleaseVersion "v$version" } "v-prefixed release version"
+          $definition = Assert-InstallerDefinition -RepoRoot $repoRoot -AppVersion $version -Channel $channel
+          Assert-CiTrue ([string]$definition.appId -ceq $script:ReleaseGateExpectedAppId) "immutable AppId gate"
+
+          $legacyUploader = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\upload_release.ps1") -Raw -Encoding UTF8
+          Assert-CiTrue ($legacyUploader.Contains("throw") -and -not $legacyUploader.Contains("scp ")) `
+            "legacy single-channel uploader must remain a fail-fast stub"
+
+          $tempRoot = Join-Path $env:RUNNER_TEMP ("offline-release-gates-" + [Guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+          try {
+            $inventoryRoot = Join-Path $tempRoot "inventory"
+            New-Item -ItemType Directory -Path $inventoryRoot -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $inventoryRoot "same.bin") -Value "AAAA" -NoNewline
+            $before = @(Get-ReleaseFileInventory $inventoryRoot)
+            Set-Content -LiteralPath (Join-Path $inventoryRoot "same.bin") -Value "BBBB" -NoNewline
+            Assert-CiThrows {
+              Assert-ReleaseInventoryMatches -Expected $before -Actual @(Get-ReleaseFileInventory $inventoryRoot)
+            } "same-size package tamper"
+
+            $package = Join-Path $tempRoot "package"
+            foreach ($name in @("Data", "Log", "Result", "Temp")) {
+              New-Item -ItemType Directory -Path (Join-Path $package $name) -Force | Out-Null
+            }
+            Assert-EmptyReleaseRuntimeDirectories $package
+            Set-Content -LiteralPath (Join-Path $package "Data\must-not-ship.ini") -Value "field-data" -NoNewline
+            Assert-CiThrows { Assert-EmptyReleaseRuntimeDirectories $package } "runtime-owned Data leakage"
+
+            $reportPath = Join-Path $tempRoot "pending.json"
+            Write-ReleaseGateJson -Value ([ordered]@{ status = "pass"; stale = $true }) -Path $reportPath
+            $runId = New-ReleaseGatePendingReport -Path $reportPath -Kind package -AppVersion $version -Channel $channel
+            $pending = Read-ReleaseGateJson $reportPath
+            Assert-CiTrue ([string]$pending.status -ceq "pending") "old PASS report was not invalidated"
+            Assert-CiTrue ([string]$pending.runId -ceq $runId) "pending report runId changed"
+
+            $missingRuntime = Join-Path $tempRoot "missing-fanuc-runtime"
+            New-Item -ItemType Directory -Path $missingRuntime -Force | Out-Null
+            Assert-CiThrows {
+              Assert-FanucRuntimeManifest -RepoRoot $repoRoot -RuntimeRoot $missingRuntime
+            } "missing ignored FANUC runtime must fail closed"
+          }
+          finally {
+            $fullTemp = [System.IO.Path]::GetFullPath($tempRoot)
+            $runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+            if ($fullTemp.StartsWith($runnerTemp, [System.StringComparison]::OrdinalIgnoreCase) `
+                -and [System.IO.Path]::GetFileName($fullTemp).StartsWith("offline-release-gates-")) {
+              Remove-Item -LiteralPath $fullTemp -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "PASS: clean-checkout PowerShell release-gate smoke"
+
+  online-service-gates:
+    name: Online service offline gates (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out without persisted credentials
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.14.5"
+
+      - name: OTA admin offline tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B scripts/tests/test_ota_admin_offline.py
+
+      - name: Online-service deploy offline tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/server/deploy_online_services.sh
+          bash -n scripts/tests/test_deploy_online_services_offline.sh
+          bash scripts/tests/test_deploy_online_services_offline.sh

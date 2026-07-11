@@ -2,7 +2,7 @@
 
 这份目录用于把当前 Notion 里的核心项目文档同步成 GitHub 可直接预览的 Markdown。
 
-- 人工整理日期：`2026-05-18`
+- 人工整理日期：`2026-07-11`
 - Notion 总入口：<https://www.notion.so/336c868d819b80a181c7ef8a393b53ad>
 
 ## 当前同步页
@@ -12,6 +12,8 @@
 - [CLI 命令说明书](cli-commands.md)
 - [运行目录与旧数据迁移](runtime-paths.md)
 - [本地账号与凭据安全](security-credentials.md)
+- [在线服务部署](server-deployment.md)
+- [CI 离线门禁](ci.md)
 - [波纹板项目方案](wavy-board-plan.md)
 - [问题表摘要](issues.md)
 - [工作记录摘要](worklog.md)

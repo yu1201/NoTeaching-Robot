@@ -43,6 +43,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QHostAddress>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -414,6 +415,27 @@ namespace
 	bool IsSafeRemotePathComponent(const QString& value)
 	{
 		return AppPaths::IsSafePathComponent(value);
+	}
+
+	bool IsCompleteRemoteArchive(const QString& fileName, qulonglong actualBytes)
+	{
+		if (!fileName.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive))
+		{
+			return false;
+		}
+		// 新写一次上传名包含声明长度；不完整 STOR 即使被服务器当作 226，
+		// 也不会出现在数据列表。旧版本归档没有该后缀，保持向后可见。
+		static const QRegularExpression writeOncePattern(QStringLiteral(
+			R"(_\d{8}T\d{9}_[0-9a-f]{12}_(\d+)\.zip$)"),
+			QRegularExpression::CaseInsensitiveOption);
+		const QRegularExpressionMatch match = writeOncePattern.match(fileName);
+		if (!match.hasMatch())
+		{
+			return true;
+		}
+		bool sizeOk = false;
+		const qulonglong expectedBytes = match.captured(1).toULongLong(&sizeOk);
+		return sizeOk && expectedBytes > 0 && expectedBytes == actualBytes;
 	}
 
 	bool IsSafeArchiveEntry(const QZipReader::FileInfo& entry)
@@ -2103,20 +2125,20 @@ void OnlineServicesDialog::AppendLog(const QString& text)
 
 void OnlineServicesDialog::closeEvent(QCloseEvent* event)
 {
-	// 关界面时若正在上传：问用户后台继续还是停止（停止则清服务器半截文件）。
+	// 关界面时若正在上传：问用户后台继续还是停止当前传输。
 	if (m_uploader != nullptr && m_uploader->IsBusy())
 	{
 		const QMessageBox::StandardButton ret = QMessageBox::question(
 			this,
 			QStringLiteral("上传进行中"),
 			QStringLiteral("扫描数据还在上传。\n\n「后台继续」：关闭本界面，上传转后台继续。\n"
-				"「停止上传」：中止上传并删除服务器上未传完的半截文件。"),
+				"「停止上传」：中止当前传输；不完整唯一件不会显示，并由服务器定期清理。"),
 			QMessageBox::Yes | QMessageBox::No,
 			QMessageBox::Yes);
 		if (ret == QMessageBox::No)
 		{
-			m_uploader->RequestCancel();  // 后台线程块间中止并删半截文件；案例留队列
-			AppendLog(QStringLiteral("已请求停止上传，服务器半截文件将被清除。"));
+			m_uploader->RequestCancel();  // 后台线程块间中止；未完整案例留队列
+			AppendLog(QStringLiteral("已请求停止上传；不完整唯一件保持隐藏并由服务器定期清理。"));
 		}
 		// 无论后台继续还是停止，都放行关闭（停止是异步清理，不阻塞关窗）。
 	}
@@ -2342,7 +2364,9 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 			for (const FtpRemoteFileInfo& e : entries)
 			{
 				const QString fileName = QString::fromStdString(e.name);
-				if (!e.isDirectory && IsSafeRemotePathComponent(fileName))
+				if (!e.isDirectory
+					&& IsSafeRemotePathComponent(fileName)
+					&& IsCompleteRemoteArchive(fileName, static_cast<qulonglong>(e.size)))
 				{
 					names << fileName;
 					labels << QStringLiteral("%1（%2 MB）")
@@ -2428,8 +2452,14 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 				const QString localZip = AppPaths::WritableChildPath(
 					QStringLiteral("Result/Remote/%1").arg(device), name);
 				const QByteArray localZipBytes = QDir::toNativeSeparators(localZip).toLocal8Bit();
-				const bool downloaded = !localZip.isEmpty()
+				const bool transferSucceeded = !localZip.isEmpty()
 					&& ftp.downloadFile(remotePath, localZipBytes.toStdString());
+				const bool downloaded = transferSucceeded
+					&& IsCompleteRemoteArchive(name, static_cast<qulonglong>(QFileInfo(localZip).size()));
+				if (transferSucceeded && !downloaded)
+				{
+					QFile::remove(localZip);
+				}
 				bool extracted = false;
 				if (downloaded)
 				{
@@ -2631,6 +2661,23 @@ void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& p
 		}
 		return;
 	}
+	const QUrl adminUrl(AdminApiBase() + path);
+	const QString scheme = adminUrl.scheme().toLower();
+	const QString host = adminUrl.host().toLower();
+	const QHostAddress address(host);
+	const bool isLoopbackHost = host == QStringLiteral("localhost")
+		|| (!address.isNull() && address.isLoopback());
+	if (!adminUrl.isValid() || (scheme != QStringLiteral("https")
+		&& !(scheme == QStringLiteral("http") && isLoopbackHost)))
+	{
+		AppendLog(QStringLiteral(
+			"管理接口已拒绝：令牌和账号变更只能通过 HTTPS 或本机 SSH 隧道发送，禁止公网明文 HTTP。"));
+		if (done)
+		{
+			done(false, QJsonObject());
+		}
+		return;
+	}
 	const QString token = OnlineServicesConfig::AdminToken().trimmed();
 	if (token.isEmpty())
 	{
@@ -2641,8 +2688,9 @@ void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& p
 		}
 		return;
 	}
-	QNetworkRequest request{ QUrl(AdminApiBase() + path) };
+	QNetworkRequest request{ adminUrl };
 	request.setTransferTimeout(20000);
+	request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
 	request.setRawHeader("X-Admin-Token", token.toUtf8());
 	request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
 	const QByteArray payload = body.isEmpty() ? QByteArray() : QJsonDocument(body).toJson(QJsonDocument::Compact);
@@ -2857,6 +2905,11 @@ void OnlineServicesDialog::ToggleSelectedAccountPermission()
 	}
 	QTableWidgetItem* nameItem = m_accountTable->item(m_accountTable->currentRow(), 0);
 	const QString name = nameItem->text();
+	if (name == QStringLiteral("uploader") || name == QStringLiteral("devicedata"))
+	{
+		AppendLog(QStringLiteral("系统账号权限固定：uploader 永远仅上传，devicedata 永远全权限。"));
+		return;
+	}
 	const QString curPerm = nameItem->data(Qt::UserRole).toString();
 	const QString newPerm = curPerm == QStringLiteral("upload") ? QStringLiteral("full") : QStringLiteral("upload");
 	QJsonObject body;

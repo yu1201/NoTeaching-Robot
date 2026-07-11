@@ -44,9 +44,9 @@ public:
     };
     ProgressSnapshot CurrentProgress() const;
 
-    // 请求取消当前上传（UI 线程调用，立即返回）：后台线程块间中止并删服务器半截文件。
+    // 请求取消当前上传（UI 线程调用，立即返回）：后台在线程块间中止；不完整唯一件保持隐藏并定期清理。
     void RequestCancel();
-    // 请求取消并阻塞等待后台线程收尾（含半截文件删除）后返回——退出程序「强制退出」路径用。
+    // 请求取消并阻塞等待后台线程收尾后返回——退出程序「强制退出」路径用。
     void CancelAndWait();
 
 signals:

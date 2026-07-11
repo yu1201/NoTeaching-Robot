@@ -43,7 +43,7 @@ public:
         QWidget* parent = nullptr);
 
 protected:
-    // 关界面时若正在上传：弹「后台继续 / 停止并清理服务器半截文件」，由用户决定。
+    // 关界面时若正在上传：弹「后台继续 / 停止当前上传」，由用户决定。
     void closeEvent(QCloseEvent* event) override;
     // 每次显示自动刷新：正停在「远程数据」页则重新拉取（页面被管理栈缓存复用，构造只跑一次）。
     void showEvent(QShowEvent* event) override;

@@ -27,6 +27,8 @@ def main() -> int:
     laser_filter = read("src/LaserWeldFilterDialog.cpp")
     laser_filter_header = read("include/LaserWeldFilterDialog.h")
     online_dialog = read("src/OnlineServicesDialog.cpp")
+    scan_uploader = read("src/ScanDataUploader.cpp")
+    ftp_client = read("src/FTPClient.cpp")
     migrator = read("tools/migrate_config_to_sqlite.py")
     migrate_batch = read("tools/ConfigMigrate_Run.cmd")
     online = read("include/OnlineServicesConfig.h")
@@ -164,8 +166,37 @@ def main() -> int:
         "m_privilegedActionGuard",
         "configGroup->setVisible(!m_aboutMode && m_remoteBrowseAllowed)",
         "升级源、FTP 与管理令牌仅允许有效的本地管理员会话修改",
+        'name == QStringLiteral("uploader") || name == QStringLiteral("devicedata")',
+        "uploader 永远仅上传，devicedata 永远全权限",
     ):
         require(token in online_dialog, f"online-service live admin gate missing: {token}")
+
+    admin_request_match = re.search(
+        r"void OnlineServicesDialog::AdminRequest\(.*?\n\}\n\nvoid OnlineServicesDialog::RefreshServerStats",
+        online_dialog,
+        re.S,
+    )
+    require(admin_request_match is not None, "AdminRequest implementation is missing")
+    admin_request = admin_request_match.group(0)
+    admin_transport_tokens = (
+        "address.isLoopback()",
+        'scheme != QStringLiteral("https")',
+        "禁止公网明文 HTTP",
+        "OnlineServicesConfig::AdminToken()",
+        "QNetworkRequest::SameOriginRedirectPolicy",
+        'setRawHeader("X-Admin-Token"',
+        "sendCustomRequest",
+    )
+    for token in admin_transport_tokens:
+        require(token in admin_request, f"AdminRequest secure transport gate missing: {token}")
+    require(
+        admin_request.index('scheme != QStringLiteral("https")')
+        < admin_request.index("OnlineServicesConfig::AdminToken()")
+        < admin_request.index("QNetworkRequest::SameOriginRedirectPolicy")
+        < admin_request.index('setRawHeader("X-Admin-Token"')
+        < admin_request.index("sendCustomRequest"),
+        "AdminRequest can read or forward the token before transport and redirect checks",
+    )
 
     require(
         re.search(r'FtpPassword\(\).*?ReadValue\(QStringLiteral\("FtpPassword"\),\s*QString\(\)\)', online, re.S),
@@ -173,6 +204,50 @@ def main() -> int:
     )
     require('const std::string& ftpPwd = ' not in ftp, "FtpClient still has a password default argument")
     require("credential.password.clear();" in app, "robot FTP template still injects a password")
+    require("QUuid::createUuid()" in scan_uploader and "remoteZipName" in scan_uploader,
+            "shared uploader does not use a unique remote filename per attempt")
+    require(
+        "TruncateToUtf8Bytes" in scan_uploader
+        and "kMaximumRemoteComponentUtf8Bytes = 240" in scan_uploader
+        and "remoteZipName.toUtf8().size() > kMaximumRemoteComponentUtf8Bytes" in scan_uploader,
+        "unique remote upload names are not bounded by filesystem UTF-8 byte limits",
+    )
+    require(
+        "QString::number(archiveBytes)" in scan_uploader
+        and "IsCompleteRemoteArchive(fileName" in online_dialog
+        and "expectedBytes == actualBytes" in online_dialog,
+        "write-once archives do not hide incomplete FTP EOF remnants by declared size",
+    )
+    require(
+        re.search(r"uploadFileWithProgress\(.*?\},\s*false\s*\);", scan_uploader, re.S) is not None,
+        "write-once uploader still requests remote delete capability",
+    )
+    upload_body_match = re.search(
+        r"bool FtpClient::uploadFileWithProgress\(.*?\n\}\n\nbool FtpClient::listFiles",
+        ftp_client,
+        re.S,
+    )
+    require(upload_body_match is not None, "FtpClient progress-upload implementation is missing")
+    upload_body = upload_body_match.group(0)
+    for token in (
+        "return allowRemoteDelete && FtpDeleteFileA",
+        "ferror(fp)",
+        "sent != total",
+        "InternetCloseHandle(hRemote) != FALSE",
+    ):
+        require(token in upload_body, f"progress upload completion gate missing: {token}")
+    require(
+        re.search(
+            r"if \(uploaded\).*?\+\+doneItems.*?if \(m_cancel\.load\(\)\).*?OnItemFinished\(caseDir, uploaded",
+            scan_uploader,
+            re.S,
+        ) is not None,
+        "late upload cancellation can retain a fully committed archive for duplicate retry",
+    )
+    require(
+        scan_uploader.count("QCoreApplication::sendPostedEvents(this, QEvent::MetaCall)") >= 2,
+        "joined upload worker callbacks are not synchronously persisted before shutdown",
+    )
 
     require('src\\CredentialSecurity.cpp' in project, "CredentialSecurity.cpp is not in the product build")
     require('src\\ConfigDatabaseAuthentication.cpp' in project, "ConfigDatabaseAuthentication.cpp is not in the product build")

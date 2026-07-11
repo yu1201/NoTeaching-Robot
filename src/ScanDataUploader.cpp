@@ -5,23 +5,55 @@
 #include "OnlineServicesConfig.h"
 #include "RobotLog.h"
 
+#include <QDateTime>
+#include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QEvent>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QMetaObject>
 #include <QTcpSocket>
+#include <QTimer>
+#include <QUuid>
 
 #include <chrono>
-#include <QTimer>
 
 #include <QtCore/private/qzipwriter_p.h>
 
 namespace
 {
 	constexpr int kRetryIntervalMs = 5 * 60 * 1000;  // 失败重试间隔：5 分钟
+	constexpr int kMaximumRemoteComponentUtf8Bytes = 240;
+
+	QString TruncateToUtf8Bytes(const QString& value, int maximumBytes)
+	{
+		QString result;
+		result.reserve(value.size());
+		int usedBytes = 0;
+		for (int index = 0; index < value.size();)
+		{
+			int unitLength = 1;
+			if (value.at(index).isHighSurrogate()
+				&& index + 1 < value.size()
+				&& value.at(index + 1).isLowSurrogate())
+			{
+				unitLength = 2;
+			}
+			const QString unit = value.mid(index, unitLength);
+			const int unitBytes = unit.toUtf8().size();
+			if (usedBytes + unitBytes > maximumBytes)
+			{
+				break;
+			}
+			result += unit;
+			usedBytes += unitBytes;
+			index += unitLength;
+		}
+		return result;
+	}
 
 	QString UploadTempDir()
 	{
@@ -110,6 +142,8 @@ ScanDataUploader::~ScanDataUploader()
 {
 	m_cancel.store(true);  // 先请求取消，避免析构卡在长 FTP 传输上
 	JoinWorker();
+	// worker 已停止，不会再投递；仅冲刷发给本对象的 queued MetaCall，确保成功项先持久化出队。
+	QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
 	delete m_log;
 	m_log = nullptr;
 }
@@ -352,7 +386,29 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 		auto lastEmit = std::chrono::steady_clock::now();
 		long long lastSent = 0;
 		double speed = 0.0;
-		const std::string remotePath = remoteBase + "/" + zipName.toStdString();
+		// uploader 是随安装包分发的共享写一次账号。每次尝试都使用唯一远端名，
+		// 避免 STOR 重试覆盖任何既有文件；失败残件由服务器按策略清理。
+		const QString attemptId = QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMddTHHmmsszzz"))
+			+ QLatin1Char('_')
+			+ QUuid::createUuid().toString(QUuid::WithoutBraces).remove(QLatin1Char('-')).left(12);
+		const qint64 archiveBytes = QFileInfo(zipPath).size();
+		const QString archiveStem = QFileInfo(zipName).completeBaseName();
+		const QString remoteSuffix = QLatin1Char('_') + attemptId + QLatin1Char('_')
+			+ QString::number(archiveBytes) + QStringLiteral(".zip");
+		const int maximumStemBytes = kMaximumRemoteComponentUtf8Bytes - remoteSuffix.toUtf8().size();
+		const QString remoteStem = TruncateToUtf8Bytes(archiveStem, maximumStemBytes);
+		const QString remoteZipName = remoteStem + remoteSuffix;
+		if (archiveBytes <= 0
+			|| remoteStem.isEmpty()
+			|| remoteZipName.toUtf8().size() > kMaximumRemoteComponentUtf8Bytes
+			|| !AppPaths::IsSafePathComponent(remoteZipName))
+		{
+			QFile::remove(zipPath);
+			QMetaObject::invokeMethod(this, [this, caseDir]()
+				{ OnItemFinished(caseDir, false, QStringLiteral("上传远端文件名不安全")); }, Qt::QueuedConnection);
+			continue;
+		}
+		const std::string remotePath = remoteBase + "/" + remoteZipName.toStdString();
 		const QByteArray zipPathBytes = QDir::toNativeSeparators(zipPath).toLocal8Bit();
 		const bool uploaded = ftp.uploadFileWithProgress(zipPathBytes.toStdString(), remotePath, &m_cancel,
 			[this, &lastEmit, &lastSent, &speed, zipName, doneItems, totalItems](long long sent, long long total)
@@ -381,16 +437,8 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 				QMetaObject::invokeMethod(this, [this, doneItems, totalItems, zipName, sent, total, speed, eta]()
 					{ emit uploadProgress(doneItems, totalItems, zipName, sent, total, speed, eta); },
 					Qt::QueuedConnection);
-			}, true);
+			}, false);
 		QFile::remove(zipPath);
-
-		if (m_cancel.load())
-		{
-			// 被取消：半截文件已由 FtpClient 删除，本案例留队列，不计完成、不再处理后续。
-			QMetaObject::invokeMethod(this, [this, caseDir]()
-				{ OnItemFinished(caseDir, false, QStringLiteral("已取消上传（服务器半截文件已清除）")); }, Qt::QueuedConnection);
-			break;
-		}
 
 		if (uploaded)
 		{
@@ -399,6 +447,18 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 				std::lock_guard<std::mutex> lk(m_progMutex);
 				m_prog.doneItems = doneItems;
 			}
+		}
+
+		if (m_cancel.load())
+		{
+			// 最后一块完成后才收到取消时，本案例已可靠落盘并应出队；只停止后续项。
+			QMetaObject::invokeMethod(this, [this, caseDir, uploaded, zipName]()
+				{
+					OnItemFinished(caseDir, uploaded,
+						uploaded ? QStringLiteral("已上传 %1；已停止后续上传").arg(zipName)
+							     : QStringLiteral("已取消上传；不完整唯一残件可能暂存至服务器定期清理"));
+				}, Qt::QueuedConnection);
+			break;
 		}
 
 		QMetaObject::invokeMethod(this, [this, caseDir, uploaded, zipName]()
@@ -447,13 +507,15 @@ ScanDataUploader::ProgressSnapshot ScanDataUploader::CurrentProgress() const
 
 void ScanDataUploader::RequestCancel()
 {
-	m_cancel.store(true);  // 后台线程与 FtpClient 块间读到后中止并删服务器半截文件
+	m_cancel.store(true);  // 后台线程与 FtpClient 块间读到后中止；唯一残件不展示并定期清理
 }
 
 void ScanDataUploader::CancelAndWait()
 {
 	m_cancel.store(true);
-	JoinWorker();          // 阻塞等后台线程收尾（含半截文件删除）后返回
+	JoinWorker();          // 阻塞等后台线程收尾后返回
+	// 不能依赖退出路径之后的事件循环：只处理本对象的 worker 回调，避免已上传案例下次重复上传。
+	QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
 	m_busy.store(false);
 }
 
