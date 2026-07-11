@@ -1,5 +1,7 @@
 #include "ConfigDatabase.h"
 
+#include "AppPaths.h"
+
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
@@ -43,44 +45,7 @@ QString ConnectionName()
 
 QString FindProjectRoot()
 {
-    QStringList bases;
-    if (QCoreApplication::instance() != nullptr)
-    {
-        bases << QCoreApplication::applicationDirPath();
-    }
-    bases << QDir::currentPath();
-
-    QString firstDataRoot;
-    for (const QString& base : bases)
-    {
-        QDir dir(base);
-        for (int depth = 0; depth < 8; ++depth)
-        {
-            const QString dataPath = dir.filePath("Data");
-            const QFileInfo dataInfo(dataPath);
-            if (dataInfo.exists() && dataInfo.isDir())
-            {
-                if (firstDataRoot.isEmpty())
-                {
-                    firstDataRoot = dir.absolutePath();
-                }
-                if (QFileInfo::exists(QDir(dataPath).filePath("ConfigStore.db")))
-                {
-                    return dir.absolutePath();
-                }
-            }
-            if (!dir.cdUp())
-            {
-                break;
-            }
-        }
-    }
-
-    if (!firstDataRoot.isEmpty())
-    {
-        return firstDataRoot;
-    }
-    return QDir::currentPath();
+    return AppPaths::DataRootPath();
 }
 
 QSqlDatabase OpenDatabase()
@@ -594,7 +559,7 @@ QStringList UniqueSorted(QStringList values)
 
 QString ConfigDatabase::DatabasePath()
 {
-    return QDir(FindProjectRoot()).filePath("Data/ConfigStore.db");
+    return AppPaths::WritablePath(QStringLiteral("Data/ConfigStore.db"));
 }
 
 QString ConfigDatabase::NormalizeFilePath(const QString& fileName)
@@ -607,17 +572,7 @@ QString ConfigDatabase::NormalizeFilePath(const QString& fileName)
         path.remove(0, 2);
     }
 
-    const QString lower = path.toLower();
-    const int dataPos = lower.indexOf("/data/");
-    if (dataPos >= 0)
-    {
-        return path.mid(dataPos + 1);
-    }
-    const int resultPos = lower.indexOf("/result/");
-    if (resultPos >= 0)
-    {
-        return path.mid(resultPos + 1);
-    }
+    QString lower = path.toLower();
     if (lower.startsWith("data/"))
     {
         return path;
@@ -630,16 +585,34 @@ QString ConfigDatabase::NormalizeFilePath(const QString& fileName)
     QFileInfo info(path);
     if (info.isAbsolute())
     {
-        QDir root(FindProjectRoot());
+        QDir root(AppPaths::DataRootPath());
         const QString rel = root.relativeFilePath(info.absoluteFilePath()).replace('\\', '/');
-        if (rel.toLower().startsWith("data/"))
+        const QString relLower = rel.toLower();
+        const bool insideDataRoot = !QFileInfo(rel).isAbsolute()
+            && rel != QStringLiteral("..")
+            && !rel.startsWith(QStringLiteral("../"));
+        if (insideDataRoot && relLower.startsWith("data/"))
         {
             return QDir::cleanPath(rel);
         }
-        if (rel.toLower().startsWith("result/"))
+        if (insideDataRoot && relLower.startsWith("result/"))
         {
             return QDir::cleanPath(rel);
         }
+    }
+
+    // 兼容从旧工程根传入的绝对/带前缀路径。用最后一个段标记，避免
+    // D:/data/site/Data/... 误截成 data/site/Data/...。
+    lower = path.toLower();
+    const int dataPos = lower.lastIndexOf("/data/");
+    if (dataPos >= 0)
+    {
+        return path.mid(dataPos + 1);
+    }
+    const int resultPos = lower.lastIndexOf("/result/");
+    if (resultPos >= 0)
+    {
+        return path.mid(resultPos + 1);
     }
 
     return path;

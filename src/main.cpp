@@ -1,36 +1,90 @@
 #include "QtWidgetsApplication4.h"
+#include "AppPaths.h"
+#include "CliHelp.h"
+#include "ConfigDatabase.h"
 #include "WindowStyleHelper.h"
 #include "BrandingConfig.h"
 #include "PointCloudExtractionProcessor.h"
 #include "RobotDriverAdaptor.h"
 
 #include <QDir>
-#include <QFileInfo>
 #include <QIcon>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLibraryInfo>
 #include <QLocale>
 #include <QStringList>
+#include <QStringConverter>
+#include <QTextStream>
 #include <QTranslator>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QMessageBox>
+
+#include <cstdio>
 
 namespace
 {
-void SetWorkingDirectoryToProjectRoot()
+bool IsHeadlessPathInvocation(const QStringList& arguments)
 {
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth)
-    {
-        if (QFileInfo::exists(dir.filePath("QtWidgetsApplication4.sln")))
-        {
-            QDir::setCurrent(dir.absolutePath());
-            return;
-        }
+    return arguments.contains(QStringLiteral("--no-show"))
+        || arguments.contains(QStringLiteral("--print-app-paths-json"))
+        || arguments.contains(QStringLiteral("--pointcloud-extract-worker"));
+}
 
-        if (!dir.cdUp())
-        {
-            break;
-        }
-    }
+int PrintCliHelp()
+{
+    QTextStream stream(stdout);
+    stream.setEncoding(QStringConverter::Utf8);
+    WriteCliHelp(stream);
+    stream.flush();
+    return 0;
+}
+
+int PrintAppPathsJson()
+{
+    const QJsonObject output = {
+        {QStringLiteral("schemaVersion"), 1},
+        {QStringLiteral("installRoot"), AppPaths::InstallRootPath()},
+        {QStringLiteral("dataRoot"), AppPaths::DataRootPath()},
+        {QStringLiteral("originalWorkingDirectory"), AppPaths::OriginalWorkingDirectory()},
+        {QStringLiteral("currentWorkingDirectory"), QDir::currentPath()},
+        {QStringLiteral("databasePath"), ConfigDatabase::DatabasePath()},
+        {QStringLiteral("hasExplicitDataRoot"), AppPaths::HasExplicitDataRoot()},
+        {QStringLiteral("writableProbe"),
+            AppPaths::WritablePath(QStringLiteral("Result/path-probe"))},
+        {QStringLiteral("safeChildProbe"),
+            AppPaths::WritableChildPath(QStringLiteral("Temp/OnlineUpdate"), QStringLiteral("payload.zip"))},
+        {QStringLiteral("cliRelativeProbe"),
+            AppPaths::CommandLinePath(QStringLiteral("relative-path-probe"))},
+        {QStringLiteral("sdkPath"), AppPaths::FindResourcePath(QStringLiteral("SDK"))},
+        {QStringLiteral("toolsPath"), AppPaths::FindResourcePath(QStringLiteral("Tools"))},
+        {QStringLiteral("rejectTraversal"),
+            AppPaths::WritablePath(QStringLiteral("../escape")).isEmpty()},
+        {QStringLiteral("rejectDriveRelative"),
+            AppPaths::WritablePath(QStringLiteral("C:escape")).isEmpty()},
+        {QStringLiteral("rejectAbsolute"),
+            AppPaths::WritablePath(QStringLiteral("C:/escape")).isEmpty()},
+        {QStringLiteral("rejectUnc"),
+            AppPaths::WritablePath(QStringLiteral("//server/share")).isEmpty()},
+        {QStringLiteral("rejectAds"),
+            AppPaths::WritablePath(QStringLiteral("safe/file:stream")).isEmpty()},
+        {QStringLiteral("rejectMixedTraversal"),
+            AppPaths::WritablePath(QStringLiteral("safe\\..\\..\\escape")).isEmpty()},
+        {QStringLiteral("rejectUnsafeComponent"),
+            AppPaths::WritableChildPath(
+                QStringLiteral("Temp/OnlineUpdate"), QStringLiteral("../../Data/ConfigStore.db")).isEmpty()},
+        {QStringLiteral("rejectReservedComponent"),
+            AppPaths::WritableChildPath(QStringLiteral("Temp/OnlineUpdate"), QStringLiteral("CON.txt")).isEmpty()},
+        {QStringLiteral("rejectComponentSlash"),
+            AppPaths::WritableChildPath(QStringLiteral("Temp/OnlineUpdate"), QStringLiteral("nested/file.zip")).isEmpty()},
+        {QStringLiteral("rejectComponentAds"),
+            AppPaths::WritableChildPath(QStringLiteral("Temp/OnlineUpdate"), QStringLiteral("file.zip:stream")).isEmpty()},
+        {QStringLiteral("acceptUnicodeComponent"),
+            !AppPaths::WritableChildPath(QStringLiteral("Temp/OnlineUpdate"), QStringLiteral("设备 1.zip")).isEmpty()}
+    };
+    QTextStream stream(stdout);
+    stream << QJsonDocument(output).toJson(QJsonDocument::Compact) << Qt::endl;
+    return 0;
 }
 
 void InstallChineseQtTranslations(QApplication& app)
@@ -41,6 +95,7 @@ void InstallChineseQtTranslations(QApplication& app)
     static QTranslator qtBaseTranslator;
 
     const QStringList translationDirs = {
+        AppPaths::ResourcePath(QStringLiteral("translations")),
         QDir(QCoreApplication::applicationDirPath()).filePath("translations"),
         QLibraryInfo::path(QLibraryInfo::TranslationsPath)
     };
@@ -67,7 +122,25 @@ void InstallChineseQtTranslations(QApplication& app)
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    SetWorkingDirectoryToProjectRoot();  // 提前：使本地 branding/ 品牌覆盖可被定位（不依赖后续步骤）
+    const QStringList arguments = app.arguments();
+    if (arguments.contains(QStringLiteral("--help-cli")))
+    {
+        return PrintCliHelp();
+    }
+    QString pathError;
+    if (!AppPaths::Initialize(arguments, &pathError))
+    {
+        QTextStream(stderr) << "运行目录初始化失败：" << pathError << Qt::endl;
+        if (!IsHeadlessPathInvocation(arguments))
+        {
+            QMessageBox::critical(nullptr, QStringLiteral("运行目录初始化失败"), pathError);
+        }
+        return 2;
+    }
+    if (arguments.contains(QStringLiteral("--print-app-paths-json")))
+    {
+        return PrintAppPathsJson();
+    }
     app.setApplicationName(BrandingConfig::ApplicationName());
     app.setApplicationVersion("2026.07.10.1750");
     app.setOrganizationName("yu1201");
@@ -97,7 +170,6 @@ int main(int argc, char *argv[])
 
     QtWidgetsApplication4 window;
     window.setWindowIcon(BrandingConfig::WindowIcon());
-    const QStringList arguments = app.arguments();
     if (!arguments.contains("--no-show"))
     {
         window.show();

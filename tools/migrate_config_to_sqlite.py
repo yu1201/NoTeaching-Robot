@@ -687,6 +687,13 @@ def has_current_schema(conn: sqlite3.Connection) -> bool:
     return table_exists(conn, "settings") and SETTINGS_REQUIRED_COLUMNS.issubset(table_columns(conn, "settings"))
 
 
+def current_schema_version(conn: sqlite3.Connection) -> str:
+    if not table_exists(conn, "meta"):
+        return ""
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version' LIMIT 1").fetchone()
+    return str(row[0]).strip() if row and row[0] is not None else ""
+
+
 def has_legacy_schema(conn: sqlite3.Connection) -> bool:
     required = {"file_path", "section_name", "key_name", "value_text"}
     return table_exists(conn, "ini_values") and required.issubset(table_columns(conn, "ini_values"))
@@ -1103,7 +1110,11 @@ def migrate_existing_database_to_v4(db_path: Path, data_dir: Path, encrypt_new_v
         return False
 
     with sqlite3.connect(db_path) as conn:
-        needs_migration = has_current_schema(conn) or has_any_legacy_config_table(conn)
+        has_legacy_tables = has_any_legacy_config_table(conn)
+        has_outdated_current_schema = (
+            has_current_schema(conn) and current_schema_version(conn) != SCHEMA_VERSION
+        )
+        needs_migration = has_legacy_tables or has_outdated_current_schema
         if not needs_migration:
             return False
 
@@ -1148,8 +1159,12 @@ def migrate(
         if not overwrite:
             if migrate_existing_database_to_v4(db_path, data_dir, encrypt):
                 return
-            raise SystemExit(f"Database already exists, pass --overwrite: {db_path}")
-        backup = db_path.with_suffix(db_path.suffix + ".bak")
+            raise SystemExit(
+                "Target database already exists and was not changed. "
+                f"To replace it from legacy Data, rerun with --overwrite (a backup is created first): {db_path}"
+            )
+        timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = db_path.with_suffix(db_path.suffix + f".bak_overwrite_{timestamp}")
         shutil.copy2(db_path, backup)
         db_path.unlink()
         print(f"Backed up old database: {backup}")
@@ -1256,6 +1271,16 @@ def pause_console() -> None:
         pass
 
 
+def current_source_sha256() -> str:
+    if getattr(sys, "frozen", False):
+        source_path = Path(getattr(sys, "_MEIPASS")) / "_migrator_source" / "migrate_config_to_sqlite.py"
+    else:
+        source_path = Path(__file__)
+    if not source_path.is_file():
+        raise RuntimeError(f"Embedded migration source is missing: {source_path}")
+    return hashlib.sha256(source_path.read_bytes()).hexdigest()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Migrate Data config files to ConfigStore.db")
     parser.add_argument("--source", default="Data", help="Data directory to migrate")
@@ -1273,13 +1298,24 @@ def main() -> None:
         help="Continue even if suspicious garbled text markers are found",
     )
     parser.add_argument("--pause", action="store_true", help="Keep the console window open after finishing")
+    parser.add_argument(
+        "--print-source-sha256",
+        action="store_true",
+        help="Print the SHA256 of the source embedded in this executable and exit",
+    )
     args = parser.parse_args()
+
+    if args.print_source_sha256:
+        print(current_source_sha256())
+        return
 
     should_pause = args.pause or launched_from_explorer()
     exit_code = 0
     try:
         source = Path(args.source)
         db = Path(args.db) if args.db else source / "ConfigStore.db"
+        print(f"Resolved source Data: {source.resolve()}")
+        print(f"Resolved target database: {db.resolve()}")
         migrate(source, db, args.overwrite, args.encrypt, args.encoding, args.allow_mojibake)
     except SystemExit as exc:
         if exc.code not in (None, 0):

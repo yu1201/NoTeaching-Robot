@@ -16,6 +16,7 @@
 #include "groove/framebuffer.h"
 
 #include <QApplication>
+#include <QByteArray>
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDir>
@@ -2821,7 +2822,8 @@ bool HandEyeCalibrationDialog::UploadRobotHandEyeCheckProgram(QString* error)
         return false;
     }
 
-    const int uploadRet = fanucDriver->UploadLsFile(lsPath.toStdString(), "/md/");
+    const QByteArray lsPathBytes = lsPath.toLocal8Bit();
+    const int uploadRet = fanucDriver->UploadLsFile(lsPathBytes.constData(), "/md/");
     if (uploadRet != 0)
     {
         if (error != nullptr)

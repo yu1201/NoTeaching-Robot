@@ -1,9 +1,15 @@
 #include "STEPRobotDriver.h"
 
+#include "AppPaths.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "RobotOperationLease.h"
 #include "RobotPoseTransform.h"
 #include "StepSdkBuildConfig.h"
+
+#include <QByteArray>
+#include <QDir>
+#include <QFileInfo>
+#include <QString>
 
 #include <algorithm>
 #include <chrono>
@@ -20,6 +26,38 @@
 
 namespace
 {
+	QString StepDecodeLocalPath(const std::string& text)
+	{
+		return QString::fromLocal8Bit(text.data(), static_cast<int>(text.size()));
+	}
+
+	std::filesystem::path StepFileSystemPath(const QString& path)
+	{
+		return std::filesystem::path(QDir::toNativeSeparators(path).toStdWString());
+	}
+
+	std::string StepLocalPathBytes(const std::filesystem::path& path)
+	{
+		const QString text = QDir::toNativeSeparators(QString::fromStdWString(path.wstring()));
+		const QByteArray bytes = text.toLocal8Bit();
+		return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+	}
+
+	std::filesystem::path StepResolveOutputDirectory(const std::string& localDir)
+	{
+		if (localDir.empty())
+		{
+			return StepFileSystemPath(AppPaths::WritablePath(QStringLiteral("Job/STEP")));
+		}
+
+		const QString decoded = StepDecodeLocalPath(localDir);
+		const QFileInfo info(QDir::fromNativeSeparators(decoded));
+		const QString absolute = info.isAbsolute()
+			? info.absoluteFilePath()
+			: AppPaths::CommandLinePath(decoded);
+		return StepFileSystemPath(absolute);
+	}
+
 	std::string StepMakeProgramName()
 	{
 		return "ContiMoveAny";
@@ -1066,7 +1104,7 @@ namespace
 		return oss.str();
 	}
 
-	bool StepWriteTextFile(const std::string& filePath, const std::string& content)
+	bool StepWriteTextFile(const std::filesystem::path& filePath, const std::string& content)
 	{
 		std::ofstream out(filePath, std::ios::out | std::ios::binary | std::ios::trunc);
 		if (!out.is_open())
@@ -1375,8 +1413,7 @@ bool STEPRobotCtrl::WriteContiMoveAnyFiles(
 	weaveMoveInfo = RobotDriverAdaptor::ApplyWeaveSpeedCompensation(vtRobotMoveInfo, weaveMoveInfo);
 
 	const std::string safeProgramName = StepSanitizeProgramName(programName);
-	const std::string targetDir = localDir.empty() ? ".\\Job\\STEP" : localDir;
-	const std::filesystem::path dirPath(targetDir);
+	const std::filesystem::path dirPath = StepResolveOutputDirectory(localDir);
 	const std::filesystem::path srpPath = dirPath / (safeProgramName + ".srp");
 	const std::filesystem::path srdPath = dirPath / (safeProgramName + ".srd");
 
@@ -1395,10 +1432,10 @@ bool STEPRobotCtrl::WriteContiMoveAnyFiles(
 
 	const std::string srpContent = StepBuildSrpContent(weaveMoveInfo, actualWeld);
 	const std::string srdContent = StepBuildSrdContent(weaveMoveInfo, axisUnit, actualWeld);
-	const std::string srpPathText = srpPath.string();
-	const std::string srdPathText = srdPath.string();
+	const std::string srpPathText = StepLocalPathBytes(srpPath);
+	const std::string srdPathText = StepLocalPathBytes(srdPath);
 
-	if (!StepWriteTextFile(srpPathText, srpContent))
+	if (!StepWriteTextFile(srpPath, srpContent))
 	{
 		if (errorText != nullptr)
 		{
@@ -1406,7 +1443,7 @@ bool STEPRobotCtrl::WriteContiMoveAnyFiles(
 		}
 		return false;
 	}
-	if (!StepWriteTextFile(srdPathText, srdContent))
+	if (!StepWriteTextFile(srdPath, srdContent))
 	{
 		if (errorText != nullptr)
 		{
@@ -3012,16 +3049,18 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 	const std::string sProjectName = StepNormalizeProjectName(kStepDynamicJobProjectName);
 
 	const std::string sProgramName = StepSanitizeProgramName(programName);
-	const std::string sLocalDir = ".\\Job\\STEP";
-	const std::string sLocalProgramFile = sLocalDir + "\\" + sProgramName + ".srp";
-	const std::string sLocalDataFile = sLocalDir + "\\" + sProgramName + ".srd";
+	const std::filesystem::path localDirPath = StepResolveOutputDirectory(std::string());
+	const std::filesystem::path localProgramPath = localDirPath / (sProgramName + ".srp");
+	const std::filesystem::path localDataPath = localDirPath / (sProgramName + ".srd");
+	const std::string sLocalProgramFile = StepLocalPathBytes(localProgramPath);
+	const std::string sLocalDataFile = StepLocalPathBytes(localDataPath);
 	const std::string sRemoteBaseDir = StepBuildRemoteProjectDir(sProjectName);
 	const std::string sRemoteProgramFile = sRemoteBaseDir + "/" + sProgramName + ".srp";
 	const std::string sRemoteDataFile = sRemoteBaseDir + "/" + sProgramName + ".srd";
 
 	try
 	{
-		std::filesystem::create_directories(sLocalDir);
+		std::filesystem::create_directories(localDirPath);
 	}
 	catch (const std::exception& e)
 	{
@@ -3033,13 +3072,13 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 	const std::string sSrpContent = StepBuildSrpContent(weaveMoveInfo, true);
 	const std::string sSrdContent = StepBuildSrdContent(weaveMoveInfo, m_tAxisUnit, true);
 
-	if (!StepWriteTextFile(sLocalProgramFile, sSrpContent))
+	if (!StepWriteTextFile(localProgramPath, sSrpContent))
 	{
 		SetLastRobotError(GetStr("STEP连续运动失败：写入SRP失败，%s", sLocalProgramFile.c_str()));
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 写入SRP失败：%s", sLocalProgramFile.c_str());
 		return -3;
 	}
-	if (!StepWriteTextFile(sLocalDataFile, sSrdContent))
+	if (!StepWriteTextFile(localDataPath, sSrdContent))
 	{
 		SetLastRobotError(GetStr("STEP连续运动失败：写入SRD失败，%s", sLocalDataFile.c_str()));
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 写入SRD失败：%s", sLocalDataFile.c_str());

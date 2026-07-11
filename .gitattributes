@@ -1,6 +1,9 @@
 # 统一所有文本文件行尾为 LF，消除历史 CRLF/LF 混杂导致的整文件 diff 与行尾污染。
 * text=auto eol=lf
 
+# Windows cmd.exe 的 GOTO/标签扫描要求 CRLF；纯 LF 会在部分系统上找不到标签。
+*.cmd text eol=crlf
+
 # 厂商 SDK 整体永不做行尾转换、保持仓库原样（CLAUDE.md：绝不改 SDK 源码）。
 # -text 让 git 既不归一、也挡住 core.autocrlf 在 checkout 时的污染；本次 commit
 # 另用 pathspec 把 SDK 排除在 renormalize 之外，确保 SDK blob 一字节不动。

@@ -1,4 +1,5 @@
 #include "PointCloudExtractionProcessor.h"
+#include "AppPaths.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
@@ -409,7 +410,7 @@ QString PrepareRuntimeExternalConfigPath(
     if (QString::fromLocal8Bit(ConfigLineValue(content, "LOGPATH")).trimmed().isEmpty())
     {
         const QString fallbackLogPath = QDir::toNativeSeparators(
-            QDir::current().absoluteFilePath(QStringLiteral("Log/PointCloudExtration")));
+            AppPaths::WritablePath(QStringLiteral("Log/PointCloudExtration")));
         QDir().mkpath(QDir::fromNativeSeparators(fallbackLogPath));
         ReplaceConfigValue(&content, "LOGPATH", fallbackLogPath.toLocal8Bit());
         changed = true;
@@ -1327,7 +1328,14 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
         }));
     result.invalidInputPointCount = result.inputPointCount - result.finiteInputPointCount;
 
-    QTemporaryDir workDir(QDir::temp().filePath(
+    const QString workerTempRoot = AppPaths::WritablePath(QStringLiteral("Temp/PointCloudWorkers"));
+    if (workerTempRoot.isEmpty() || !QDir().mkpath(workerTempRoot))
+    {
+        result.error = QString("创建SDK子进程临时根目录失败：%1")
+            .arg(QDir::toNativeSeparators(workerTempRoot));
+        return result;
+    }
+    QTemporaryDir workDir(QDir(workerTempRoot).filePath(
         QStringLiteral("QtWidgetsApplication4_sdkworker_%1_XXXXXX")
             .arg(QCoreApplication::applicationPid())));
     workDir.setAutoRemove(true);

@@ -230,7 +230,21 @@ Copy-DirectoryContent -SourceDir (Join-Path $pointCloudExtractionSourceDir "conf
 #   repository only (SDK\STEP\versions\timestamp_*\); per decision it is not
 #   bundled into the installer — distribute it to field sites separately.
 
+$configMigrateBuildScript = Join-Path $repoRoot "scripts\build_config_migrate.ps1"
+if (-not (Test-Path -LiteralPath $configMigrateBuildScript -PathType Leaf)) {
+    throw "Config migration build script was not found: $configMigrateBuildScript"
+}
+& $configMigrateBuildScript
+
 $diagnosticToolsSourceDir = Join-Path $repoRoot "tools"
+$configMigrateSource = Join-Path $diagnosticToolsSourceDir "migrate_config_to_sqlite.py"
+$configMigrateExe = Join-Path $diagnosticToolsSourceDir "ConfigMigrate.exe"
+$expectedMigratorHash = (Get-FileHash -LiteralPath $configMigrateSource -Algorithm SHA256).Hash.ToLowerInvariant()
+$reportedMigratorHash = (& $configMigrateExe --print-source-sha256 | Select-Object -Last 1)
+if ($LASTEXITCODE -ne 0 -or $null -eq $reportedMigratorHash -or $reportedMigratorHash.Trim().ToLowerInvariant() -ne $expectedMigratorHash) {
+    throw "ConfigMigrate.exe is stale or was not built from the current migrate_config_to_sqlite.py."
+}
+
 $diagnosticToolsTargetDir = Join-Path $packageDir "tools"
 if (Test-Path -LiteralPath $diagnosticToolsSourceDir) {
     New-Item -ItemType Directory -Path $diagnosticToolsTargetDir -Force | Out-Null
@@ -255,7 +269,7 @@ foreach ($toolName in @("ConfigMigrate.exe", "ConfigMigrate_Run.cmd")) {
         Copy-Item -LiteralPath $toolSource -Destination (Join-Path $installerToolsDir $toolName) -Force
     }
     else {
-        Write-Warning "Database migration installer tool was not found: $toolSource"
+        throw "Database migration installer tool was not found: $toolSource"
     }
 }
 

@@ -1,5 +1,6 @@
 #include "MeasureThenWeldService.h"
 
+#include "AppPaths.h"
 #include "CameraFrameCache.h"
 #include "ConfigDatabase.h"
 #include "FANUCRobotDriver.h"
@@ -11735,7 +11736,7 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     QFileInfo poseInfo(QDir::fromNativeSeparators(poseFilePath.trimmed()));
     if (!poseInfo.isAbsolute())
     {
-        poseInfo = QFileInfo(QDir::current().filePath(poseInfo.filePath()));
+        poseInfo = QFileInfo(AppPaths::CommandLinePath(poseInfo.filePath()));
     }
     if (!poseInfo.exists() || !poseInfo.isFile())
     {
@@ -11822,7 +11823,7 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
         QFileInfo outputInfo(QDir::fromNativeSeparators(resolvedOutputDir));
         resolvedOutputDir = outputInfo.isAbsolute()
             ? outputInfo.absoluteFilePath()
-            : QFileInfo(QDir::current().filePath(outputInfo.filePath())).absoluteFilePath();
+            : QFileInfo(AppPaths::CommandLinePath(outputInfo.filePath())).absoluteFilePath();
     }
 
     const std::string generatedProgramName = STEPRobotCtrl::MakeTimestampWeldProgramName();
@@ -11842,7 +11843,7 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     }
     if (!STEPRobotCtrl::WriteContiMoveAnyFiles(
         moveInfos,
-        QDir::toNativeSeparators(resolvedOutputDir).toStdString(),
+        QDir::toNativeSeparators(resolvedOutputDir).toLocal8Bit().toStdString(),
         generatedProgramName,
         axisUnit,
         &localSrpPath,
@@ -11855,8 +11856,10 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     }
 
     programName = QString::fromStdString(generatedProgramName);
-    srpPath = QDir::toNativeSeparators(QString::fromStdString(localSrpPath));
-    srdPath = QDir::toNativeSeparators(QString::fromStdString(localSrdPath));
+    srpPath = QDir::toNativeSeparators(QString::fromLocal8Bit(
+        localSrpPath.data(), static_cast<int>(localSrpPath.size())));
+    srdPath = QDir::toNativeSeparators(QString::fromLocal8Bit(
+        localSrdPath.data(), static_cast<int>(localSrdPath.size())));
     summary = QString("STEP焊接程序生成完成：程序=%1，模式=%2，方向=%3，点数=%4，轨迹速度=%5 mm/min，OVERLAPREL=%6，SRP=%7，SRD=%8")
         .arg(programName)
         .arg(actualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑"))
@@ -12208,7 +12211,8 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
     // 不加载、不启动机器人程序。不能调用 ContiMoveAnyWithProgramName，
     // 因为该 API 会立即启动运动，导致本函数在未等待终态时就返回。
     const std::string stepProgramName = STEPRobotCtrl::MakeTimestampWeldProgramName();
-    const std::string localStepDir = ".\\Job\\STEP";
+    const std::string localStepDir = QDir::toNativeSeparators(
+        AppPaths::WritablePath(QStringLiteral("Job/STEP"))).toLocal8Bit().toStdString();
     std::string localProgramFile;
     std::string localDataFile;
     std::string generateError;
@@ -12255,8 +12259,10 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
         || pStepDriver->UploadFile(localDataFile, remoteDataFile) != 0)
     {
         error = QString("STEP焊接轨迹上传失败：本地SRP=%1，本地SRD=%2，远程目录=%3")
-            .arg(QDir::toNativeSeparators(QString::fromStdString(localProgramFile)))
-            .arg(QDir::toNativeSeparators(QString::fromStdString(localDataFile)))
+            .arg(QDir::toNativeSeparators(QString::fromLocal8Bit(
+                localProgramFile.data(), static_cast<int>(localProgramFile.size()))))
+            .arg(QDir::toNativeSeparators(QString::fromLocal8Bit(
+                localDataFile.data(), static_cast<int>(localDataFile.size()))))
             .arg(QString::fromStdString(remoteBaseDir));
         return false;
     }
@@ -12270,8 +12276,10 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
         .arg(linearCommandSpeedUnit)
         .arg(sampledPosePath)
         .arg(QString::fromStdString(stepProgramName))
-        .arg(QDir::toNativeSeparators(QString::fromStdString(localProgramFile)))
-        .arg(QDir::toNativeSeparators(QString::fromStdString(localDataFile)))
+        .arg(QDir::toNativeSeparators(QString::fromLocal8Bit(
+            localProgramFile.data(), static_cast<int>(localProgramFile.size()))))
+        .arg(QDir::toNativeSeparators(QString::fromLocal8Bit(
+            localDataFile.data(), static_cast<int>(localDataFile.size()))))
         .arg(QString::fromStdString(remoteBaseDir));
     return true;
 }

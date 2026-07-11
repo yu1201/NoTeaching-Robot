@@ -1,5 +1,6 @@
 #include "RobotDataHelper.h"
 
+#include "AppPaths.h"
 #include "ConfigDatabase.h"
 #include "ContralUnit.h"
 #include "OPini.h"
@@ -284,43 +285,20 @@ bool EnsureDefaultLinesInSection(COPini& ini, const QString& sectionName, const 
 
 QString RobotDataHelper::FindProjectRootPath()
 {
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth)
-    {
-        if (QFileInfo::exists(dir.filePath("QtWidgetsApplication4.sln")))
-        {
-            return ToNativeAbsolutePath(dir.absolutePath());
-        }
-        if (!dir.cdUp())
-        {
-            break;
-        }
-    }
-    return ToNativeAbsolutePath(QDir::currentPath());
+    return QDir::toNativeSeparators(AppPaths::DataRootPath());
 }
 
 QString RobotDataHelper::FindProjectFilePath(const QString& relativePath)
 {
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth)
-    {
-        const QString candidate = dir.filePath(relativePath);
-        if (QFileInfo::exists(candidate))
-        {
-            return ToNativeAbsolutePath(candidate);
-        }
-        if (!dir.cdUp())
-        {
-            break;
-        }
-    }
-    return QString();
+    const QString existingPath = AppPaths::FindResourcePath(relativePath);
+    return existingPath.isEmpty()
+        ? QString()
+        : QDir::toNativeSeparators(existingPath);
 }
 
 QString RobotDataHelper::BuildProjectPath(const QString& relativePath)
 {
-    const QString root = FindProjectRootPath();
-    return ToNativeAbsolutePath(QDir(root).filePath(relativePath));
+    return QDir::toNativeSeparators(AppPaths::WritablePath(relativePath));
 }
 
 // ===== 激光点文件 =====

@@ -1,5 +1,7 @@
 #include "FunctionTestDialog.h"
 
+#include "AppPaths.h"
+
 #include "CameraFrameCache.h"
 #include "FANUCRobotDriver.h"
 #include "RobotDataHelper.h"
@@ -92,20 +94,7 @@ struct LaserFramePoint3D
 
 QString FindProjectFilePathForFunctionTest(const QString& relativePath)
 {
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth)
-    {
-        const QString candidate = dir.filePath(relativePath);
-        if (QFileInfo::exists(candidate))
-        {
-            return QDir::toNativeSeparators(QFileInfo(candidate).absoluteFilePath());
-        }
-        if (!dir.cdUp())
-        {
-            break;
-        }
-    }
-    return QString();
+    return QDir::toNativeSeparators(AppPaths::FindResourcePath(relativePath));
 }
 
 QPushButton* CreateTestButton(const QString& text)

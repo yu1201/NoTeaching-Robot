@@ -1,5 +1,6 @@
 #include "OnlineServicesDialog.h"
 
+#include "AppPaths.h"
 #include "BrandingConfig.h"
 #include "FtpClient.h"
 #include "OnlineServicesConfig.h"
@@ -10,6 +11,7 @@
 #include <QFileInfo>
 #include <QPointer>
 
+#include <algorithm>
 #include <thread>
 
 #include <QtCore/private/qzipreader_p.h>
@@ -56,7 +58,65 @@ namespace
 {
 	QString DownloadTempDir()
 	{
-		return QStringLiteral("Temp/OnlineUpdate");
+		return AppPaths::WritablePath(QStringLiteral("Temp/OnlineUpdate"));
+	}
+
+	bool IsSafeRemotePathComponent(const QString& value)
+	{
+		return AppPaths::IsSafePathComponent(value);
+	}
+
+	bool IsSafeArchiveEntry(const QZipReader::FileInfo& entry)
+	{
+		if (!entry.isValid() || entry.isSymLink)
+		{
+			return false;
+		}
+		QString normalized = QDir::fromNativeSeparators(entry.filePath);
+		while (normalized.endsWith(QLatin1Char('/')))
+		{
+			normalized.chop(1);
+		}
+		if (normalized.isEmpty() || QDir::isAbsolutePath(normalized))
+		{
+			return false;
+		}
+		const QStringList components = normalized.split(QLatin1Char('/'), Qt::KeepEmptyParts);
+		return std::all_of(components.cbegin(), components.cend(), [](const QString& component)
+			{
+				return AppPaths::IsSafePathComponent(component);
+			});
+	}
+
+	bool HasOnlySafeArchiveEntries(const QZipReader& archive)
+	{
+		const QList<QZipReader::FileInfo> entries = archive.fileInfoList();
+		return archive.isReadable()
+			&& !entries.isEmpty()
+			&& std::all_of(entries.cbegin(), entries.cend(), IsSafeArchiveEntry);
+	}
+
+	bool IsSafeExecutableOnlyPatch(const QString& archivePath)
+	{
+		QZipReader archive(archivePath);
+		const QList<QZipReader::FileInfo> entries = archive.fileInfoList();
+		const QString expectedExeName = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+		const bool safe = archive.isReadable()
+			&& entries.size() == 1
+			&& entries.first().isFile
+			&& !entries.first().isSymLink
+			&& entries.first().filePath == expectedExeName
+			&& IsSafeRemotePathComponent(expectedExeName)
+			&& IsSafeArchiveEntry(entries.first());
+		archive.close();
+		return safe;
+	}
+
+	std::string OnlineServicesLogPath()
+	{
+		return QDir::toNativeSeparators(
+			AppPaths::WritablePath(QStringLiteral("Log/OnlineServices.txt")))
+			.toLocal8Bit().toStdString();
 	}
 
 	QString HumanBytes(double bytes)
@@ -700,7 +760,15 @@ void OnlineServicesDialog::SaveConfigFromUi()
 		OnlineServicesConfig::SetFtpPort(ok ? port : 21);
 		OnlineServicesConfig::SetFtpUser(m_ftpUserEdit->text().trimmed());
 		OnlineServicesConfig::SetFtpPassword(m_ftpPasswordEdit->text());
-		OnlineServicesConfig::SetDeviceName(m_deviceNameEdit->text().trimmed());
+		const QString editedDeviceName = m_deviceNameEdit->text().trimmed();
+		if (editedDeviceName.isEmpty() || IsSafeRemotePathComponent(editedDeviceName))
+		{
+			OnlineServicesConfig::SetDeviceName(editedDeviceName);
+		}
+		else
+		{
+			AppendLog(QStringLiteral("设备名未保存：只能使用安全的单一目录名，不能含路径字符或保留设备名。"));
+		}
 	}
 	else
 	{
@@ -759,6 +827,15 @@ void OnlineServicesDialog::OnManifestReply(QNetworkReply* reply)
 		return;
 	}
 
+	m_remoteVersion.clear();
+	m_remoteFile.clear();
+	m_remoteSha256.clear();
+	m_remotePatchFile.clear();
+	m_remotePatchSha256.clear();
+	m_remotePatchSize = 0;
+	m_usePatch = false;
+	m_downloadInstallBtn->setEnabled(false);
+
 	const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
 	m_remoteVersion = obj.value(QStringLiteral("version")).toString();
 	m_remoteFile = obj.value(QStringLiteral("file")).toString();
@@ -770,6 +847,14 @@ void OnlineServicesDialog::OnManifestReply(QNetworkReply* reply)
 	m_remotePatchFile = patch.value(QStringLiteral("file")).toString();
 	m_remotePatchSha256 = patch.value(QStringLiteral("sha256")).toString().toLower();
 	m_remotePatchSize = static_cast<qint64>(patch.value(QStringLiteral("size")).toDouble());
+	if (!IsSafeRemotePathComponent(m_remoteFile)
+		|| (!m_remotePatchFile.isEmpty() && !IsSafeRemotePathComponent(m_remotePatchFile)))
+	{
+		m_remoteFile.clear();
+		m_remotePatchFile.clear();
+		AppendLog(QStringLiteral("更新清单格式错误：file/patch.file 必须是安全的单一文件名。"));
+		return;
+	}
 	// baseMinVersion：补丁只含 exe，仅当本机版本 >= 此基线（=非 exe 载荷/DLL 与目标一致的最低版本）
 	// 时增量才安全；更老的设备 DLL 可能不一致，自动回退全量安装。缺该字段时按旧行为（有补丁即用）。
 	const QString patchBaseMinVersion = patch.value(QStringLiteral("baseMinVersion")).toString().trimmed();
@@ -818,6 +903,12 @@ void OnlineServicesDialog::StartDownload()
 		return;
 	}
 	const QString fileName = m_usePatch ? m_remotePatchFile : m_remoteFile;
+	if (!IsSafeRemotePathComponent(fileName))
+	{
+		AppendLog(QStringLiteral("更新文件名不安全，已拒绝下载。"));
+		m_downloadInstallBtn->setEnabled(false);
+		return;
+	}
 	const QString url = OnlineServicesConfig::UpdateBaseUrl() + "/" + UpdateChannel() + "/" + fileName;
 	AppendLog(QStringLiteral("开始下载%1：%2").arg(m_usePatch ? QStringLiteral("增量补丁") : QStringLiteral("安装包")).arg(url));
 	m_downloading = true;
@@ -869,17 +960,35 @@ void OnlineServicesDialog::OnDownloadFinished(QNetworkReply* reply)
 		AppendLog(QStringLiteral("清单未提供 SHA256，跳过校验。"));
 	}
 
-	QDir().mkpath(DownloadTempDir());
-	m_downloadedPath = DownloadTempDir() + "/" + (m_usePatch ? m_remotePatchFile : m_remoteFile);
-	QFile out(m_downloadedPath);
-	if (!out.open(QIODevice::WriteOnly))
+	const QString fileName = m_usePatch ? m_remotePatchFile : m_remoteFile;
+	const QString tempDir = DownloadTempDir();
+	const QString targetPath = AppPaths::WritableChildPath(QStringLiteral("Temp/OnlineUpdate"), fileName);
+	if (targetPath.isEmpty() || !QDir().mkpath(tempDir))
 	{
-		m_downloadedPath.clear();
 		m_downloadInstallBtn->setEnabled(true);
-		AppendLog(QStringLiteral("保存安装包失败：无法写入 %1").arg(m_downloadedPath));
+		AppendLog(QStringLiteral("保存安装包失败：更新目录或文件名无效。"));
 		return;
 	}
-	out.write(data);
+	m_downloadedPath = targetPath;
+	QFile out(m_downloadedPath);
+	if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate))
+	{
+		const QString failedPath = m_downloadedPath;
+		m_downloadedPath.clear();
+		m_downloadInstallBtn->setEnabled(true);
+		AppendLog(QStringLiteral("保存安装包失败：无法写入 %1").arg(failedPath));
+		return;
+	}
+	if (out.write(data) != data.size())
+	{
+		const QString failedPath = m_downloadedPath;
+		out.close();
+		QFile::remove(failedPath);
+		m_downloadedPath.clear();
+		m_downloadInstallBtn->setEnabled(true);
+		AppendLog(QStringLiteral("保存安装包失败：文件未完整写入 %1").arg(failedPath));
+		return;
+	}
 	out.close();
 
 	m_downloadProgress->setValue(100);
@@ -903,6 +1012,17 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 			QStringLiteral("焊接/扫描流程正在运行，禁止此时安装升级。\n请等流程结束后再点「立即安装并重启」。"));
 		return;
 	}
+	if (m_usePatch && !IsSafeExecutableOnlyPatch(m_downloadedPath))
+	{
+		const QString rejectedPath = m_downloadedPath;
+		m_downloadedPath.clear();
+		QFile::remove(rejectedPath);
+		m_downloadInstallBtn->setEnabled(false);
+		AppendLog(QStringLiteral("增量补丁内容不安全：仅允许包含当前程序 exe 的单文件 zip，已删除并停止安装。"));
+		QMessageBox::warning(this, QStringLiteral("在线升级"),
+			QStringLiteral("增量补丁包含路径、符号链接或额外文件，已拒绝安装。请重新检查更新或改用全量安装包。"));
+		return;
+	}
 
 	const QMessageBox::StandardButton ret = QMessageBox::question(
 		this,
@@ -921,8 +1041,15 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 
 	const QString payload = QDir::toNativeSeparators(QFileInfo(m_downloadedPath).absoluteFilePath());
 	const QString appPath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+	const QString bootstrapFile = AppPaths::WritableChildPath(
+		QStringLiteral("Temp/OnlineUpdate"), QStringLiteral("apply_update.cmd"));
+	if (bootstrapFile.isEmpty())
+	{
+		AppendLog(QStringLiteral("升级启动脚本路径无效，已停止安装。"));
+		return;
+	}
 	const QString bootstrapPath = QDir::toNativeSeparators(
-		QFileInfo(DownloadTempDir() + "/apply_update.cmd").absoluteFilePath());
+		QFileInfo(bootstrapFile).absoluteFilePath());
 	QString script;
 	if (m_usePatch)
 	{
@@ -934,6 +1061,7 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 			":wait\r\n"
 			"tasklist /FI \"IMAGENAME eq %1\" | find /I \"%1\" >nul && (timeout /t 1 /nobreak >nul & goto wait)\r\n"
 			"tar -xf \"%2\" -C \"%3\"\r\n"
+			"if errorlevel 1 exit /b 1\r\n"
 			"start \"\" \"%4\"\r\n")
 			.arg(exeName).arg(payload).arg(appDir).arg(appPath);
 	}
@@ -1082,9 +1210,9 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 		}
 		const QString selfDevice = OnlineServicesConfig::DeviceName().trimmed();
 		m_remoteDeviceCombo->clear();
-		if (selfDevice.isEmpty())
+		if (!IsSafeRemotePathComponent(selfDevice))
 		{
-			AppendLog(QStringLiteral("请先在「服务器配置」填写设备名并保存。"));
+			AppendLog(QStringLiteral("请先填写安全的设备名（单一目录名，不能含路径字符）。"));
 			return;
 		}
 		m_remoteDeviceCombo->addItem(selfDevice);   // addItem 触发 currentIndexChanged → 自动刷新文件列表
@@ -1102,7 +1230,7 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			std::vector<FtpRemoteFileInfo> entries;
@@ -1110,9 +1238,10 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 			QStringList devices;
 			for (const FtpRemoteFileInfo& e : entries)
 			{
-				if (e.isDirectory)
+				const QString deviceName = QString::fromStdString(e.name);
+				if (e.isDirectory && IsSafeRemotePathComponent(deviceName))
 				{
-					devices << QString::fromStdString(e.name);
+					devices << deviceName;
 				}
 			}
 			QMetaObject::invokeMethod(qApp, [self, ok, devices]()
@@ -1135,7 +1264,7 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 						if (self->IsUploadOnlyAccount())
 						{
 							const QString selfDevice = OnlineServicesConfig::DeviceName().trimmed();
-							if (!selfDevice.isEmpty())
+							if (IsSafeRemotePathComponent(selfDevice))
 							{
 								self->m_remoteDeviceCombo->addItem(selfDevice);
 							}
@@ -1161,8 +1290,13 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 	}
 	m_remoteFileList->clear();
 	const QString device = m_remoteDeviceCombo->currentText().trimmed();
-	if (device.isEmpty() || m_remoteBusy)
+	if (m_remoteBusy)
 	{
+		return;
+	}
+	if (!IsSafeRemotePathComponent(device))
+	{
+		AppendLog(QStringLiteral("远程设备名不安全，已拒绝访问。"));
 		return;
 	}
 	if (IsUploadOnlyAccount()
@@ -1177,7 +1311,7 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg, device]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			std::vector<FtpRemoteFileInfo> entries;
@@ -1187,11 +1321,12 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 			QStringList labels;
 			for (const FtpRemoteFileInfo& e : entries)
 			{
-				if (!e.isDirectory)
+				const QString fileName = QString::fromStdString(e.name);
+				if (!e.isDirectory && IsSafeRemotePathComponent(fileName))
 				{
-					names << QString::fromStdString(e.name);
+					names << fileName;
 					labels << QStringLiteral("%1（%2 MB）")
-						.arg(QString::fromStdString(e.name))
+						.arg(fileName)
 						.arg(QString::number(e.size / 1048576.0, 'f', 1));
 				}
 			}
@@ -1231,39 +1366,53 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 	}
 	const QString device = m_remoteDeviceCombo->currentText().trimmed();
 	const QList<QListWidgetItem*> selected = m_remoteFileList->selectedItems();
-	if (device.isEmpty() || selected.isEmpty())
+	if (!IsSafeRemotePathComponent(device) || selected.isEmpty())
 	{
-		AppendLog(QStringLiteral("请先选择设备和要下载的数据包。"));
+		AppendLog(QStringLiteral("请选择安全的设备名和数据包。"));
 		return;
 	}
 	QStringList names;
 	for (const QListWidgetItem* item : selected)
 	{
-		names << item->data(Qt::UserRole).toString();
+		const QString name = item->data(Qt::UserRole).toString();
+		if (!IsSafeRemotePathComponent(name))
+		{
+			AppendLog(QStringLiteral("远程文件名不安全，已拒绝下载：%1").arg(name));
+			return;
+		}
+		names << name;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
-	const QString localDir = QStringLiteral("Result/Remote/") + device;
-	QDir().mkpath(localDir);
+	const QString localDir = AppPaths::WritableChildPath(QStringLiteral("Result/Remote"), device);
+	if (localDir.isEmpty() || !QDir().mkpath(localDir))
+	{
+		AppendLog(QStringLiteral("远程数据本地目录无效，已拒绝下载。"));
+		return;
+	}
 	SetRemoteBusy(true);
 	AppendLog(QStringLiteral("开始下载 %1 个数据包到 %2 …").arg(names.size()).arg(QDir::toNativeSeparators(localDir)));
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg, device, names, localDir]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			int okCount = 0;
 			for (const QString& name : names)
 			{
 				const std::string remotePath = "/data/" + device.toStdString() + "/" + name.toStdString();
-				const QString localZip = localDir + "/" + name;
-				const bool downloaded = ftp.downloadFile(remotePath, localZip.toStdString());
+				const QString localZip = AppPaths::WritableChildPath(
+					QStringLiteral("Result/Remote/%1").arg(device), name);
+				const QByteArray localZipBytes = QDir::toNativeSeparators(localZip).toLocal8Bit();
+				const bool downloaded = !localZip.isEmpty()
+					&& ftp.downloadFile(remotePath, localZipBytes.toStdString());
 				bool extracted = false;
 				if (downloaded)
 				{
 					// zip 内已带 <机器人>/<案例>/ 前缀，解到设备目录即可分层落地。
 					QZipReader zr(localZip);
-					extracted = zr.isReadable() && zr.extractAll(localDir);
+					const bool safeArchive = HasOnlySafeArchiveEntries(zr);
+					extracted = safeArchive && zr.extractAll(localDir);
 					zr.close();
 					if (extracted)
 					{
@@ -1310,9 +1459,9 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 		return;
 	}
 	const QList<QListWidgetItem*> selected = m_remoteFileList->selectedItems();
-	if (device.isEmpty() || selected.isEmpty())
+	if (!IsSafeRemotePathComponent(device) || selected.isEmpty())
 	{
-		AppendLog(QStringLiteral("请先选择设备和要删除的数据包。"));
+		AppendLog(QStringLiteral("请选择安全的设备名和要删除的数据包。"));
 		return;
 	}
 	const QMessageBox::StandardButton ret = QMessageBox::warning(this, QStringLiteral("删除服务器数据"),
@@ -1326,14 +1475,20 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 	QStringList names;
 	for (const QListWidgetItem* item : selected)
 	{
-		names << item->data(Qt::UserRole).toString();
+		const QString name = item->data(Qt::UserRole).toString();
+		if (!IsSafeRemotePathComponent(name))
+		{
+			AppendLog(QStringLiteral("远程文件名不安全，已拒绝删除：%1").arg(name));
+			return;
+		}
+		names << name;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
 	SetRemoteBusy(true);
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg, device, names]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			int okCount = 0;
@@ -1377,9 +1532,9 @@ void OnlineServicesDialog::CreateRemoteDeviceDir()
 	{
 		return;
 	}
-	if (name.contains(QLatin1Char('/')) || name.contains(QLatin1Char('\\')))
+	if (!IsSafeRemotePathComponent(name))
 	{
-		AppendLog(QStringLiteral("目录名不能包含斜杠。"));
+		AppendLog(QStringLiteral("目录名必须是安全的单一名称，不能含路径字符或保留设备名。"));
 		return;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
@@ -1387,7 +1542,7 @@ void OnlineServicesDialog::CreateRemoteDeviceDir()
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg, name]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			const bool ok = ftp.createRemoteDirRecursive("/data/" + name.toStdString());
@@ -1699,7 +1854,7 @@ void OnlineServicesDialog::ShowPickCasesDialog()
 	// 列出 Result/<机器人>/<案例> 全部案例目录（跳过 Remote 远程下载区/Archives 打包区），
 	// 支持 Ctrl/Shift 多选；确定后按名字升序依次入队（上传器串行处理=依次打包上传）。
 	QList<QPair<QString, QString>> cases;   // <显示名 Robot / case, 绝对路径>
-	const QDir resultDir(QStringLiteral("Result"));
+	const QDir resultDir(AppPaths::WritablePath(QStringLiteral("Result")));
 	const QStringList robots = resultDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
 	for (const QString& robot : robots)
 	{

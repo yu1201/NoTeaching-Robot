@@ -1,5 +1,6 @@
 #include "HandEyeMatrixConfig.h"
 
+#include "AppPaths.h"
 #include "ConfigDatabase.h"
 #include "OPini.h"
 #include "RobotPoseTransform.h"
@@ -19,25 +20,6 @@ std::string ToUtf8StdString(const QString& text)
     const QByteArray bytes = text.toUtf8();
     return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
 }
-
-QString FindProjectRootPathForHandEye()
-{
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth)
-    {
-        if (QFileInfo::exists(dir.filePath("QtWidgetsApplication4.sln")))
-        {
-            return QDir::toNativeSeparators(dir.absolutePath());
-        }
-        if (!dir.cdUp())
-        {
-            break;
-        }
-    }
-    return QDir::toNativeSeparators(QDir::currentPath());
-}
-
-
 
 Eigen::Vector3d ToPositionVector(const T_ROBOT_COORS& pose)
 {
@@ -103,14 +85,14 @@ QString GetMeasureCameraSectionName(const QString& robotName)
 
 QString GetHandEyeMatrixIniPath(const QString& robotName, const QString& cameraSection)
 {
-    const QString rootPath = FindProjectRootPathForHandEye();
-    return QDir::toNativeSeparators(QDir(rootPath).filePath(QString("Data/%1/HandEyeMatrix_%2.ini").arg(robotName, cameraSection)));
+    return QDir::toNativeSeparators(AppPaths::WritablePath(
+        QString("Data/%1/HandEyeMatrix_%2.ini").arg(robotName, cameraSection)));
 }
 
 QString GetHandEyeCalibrationIniPath(const QString& robotName, const QString& cameraSection)
 {
-    const QString rootPath = FindProjectRootPathForHandEye();
-    return QDir::toNativeSeparators(QDir(rootPath).filePath(QString("Data/%1/HandEyeCalibration_%2.ini").arg(robotName, cameraSection)));
+    return QDir::toNativeSeparators(AppPaths::WritablePath(
+        QString("Data/%1/HandEyeCalibration_%2.ini").arg(robotName, cameraSection)));
 }
 
 HandEyeMatrixConfig GetDefaultHandEyeMatrixConfig()

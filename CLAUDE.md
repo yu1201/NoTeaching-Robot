@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 仓库定位（先读这条）
 
 - **真正的工程根 = `QtWidgetsApplication4/` 子目录**，git 仓库、`.sln`、`src/`、`include/` 都在那里。当前打开的 `E:\WorkFile\bowen` 是其父目录，本身**不是** git 仓库，只散落着备份/中间产物（`_backups/`、`*.obj`、`ConfigStore.db` 副本、`Data*/` 等），不要在父目录里改代码。
-- 程序运行时会从 exe 位置**向上最多 6 层**寻找 `QtWidgetsApplication4.sln` 并把工作目录设到该层（`SetWorkingDirectoryToProjectRoot`，`src/main.cpp`）。所有相对路径（`Data/`、`Log/`、`Result/`、`Job/STEP/`、`SDK/FANUC/`）都相对这个根解析；`FindProjectFilePath()` 也按同样的逐级上溯逻辑。
+- 运行目录由 `AppPaths` 在任何窗口/配置库/设备构造前统一：`InstallRoot` 只读承载 `SDK/Tools/branding/translations`，`DataRoot` 可写承载 `Data/Result/Log/Temp/Job`，CLI 用户显式相对路径单独按启动时 cwd 解析。`--data-root` > `QTWIDGETSAPP4_DATA_ROOT` > 安装根；只有标准 `x64/Debug|Release` 开发输出可回溯源码根，仓库内 `dist`/坏包禁止借用祖先资源。
 
 ## 这是什么
 
@@ -28,7 +28,7 @@ powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1          # 
 powershell -ExecutionPolicy Bypass -File scripts\switch_step_sdk.ps1 -Mode timestamp|legacy
 
 # 旧 INI/TXT 配置迁移进 ConfigStore.db（现场用 ConfigMigrate.exe，无需 Python）
-tools\ConfigMigrate_Run.cmd
+tools\ConfigMigrate_Run.cmd --data-root "D:\NoTeachingRobotData" --source "C:\旧版本\Data"
 python tools\migrate_config_to_sqlite.py --source Data --encrypt
 
 # 独立验证可移植滤波模块（唯一的 CMake 子项目，带 example）

@@ -2,8 +2,14 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include "AppPaths.h"
 #include "FANUCRobotDriver.h"
 #include "RobotOperationLease.h"
+
+#include <QByteArray>
+#include <QDir>
+#include <QFileInfo>
+#include <QString>
 
 #include <algorithm>
 #include <cstdint>
@@ -35,6 +41,47 @@ namespace
 	constexpr const char* FANUC_ACTUAL_WELD_UNAVAILABLE_REASON =
 		"FANUC实际焊接已失败关闭：当前工程没有绑定经现场验证的ArcTool LS模板、"
 		"起弧/焊接/过渡/收弧schedule映射和灭弧状态回读契约；当前仅允许空跑轨迹。";
+
+	QString FanucDecodeLocalPath(const std::string& text)
+	{
+		return QString::fromLocal8Bit(text.data(), static_cast<int>(text.size()));
+	}
+
+	QString FanucDecodeConfigText(const std::string& text)
+	{
+		QString value = QString::fromUtf8(text.data(), static_cast<int>(text.size()));
+		if (value.contains(QChar(0xfffd)))
+		{
+			value = FanucDecodeLocalPath(text);
+		}
+		return value;
+	}
+
+	std::filesystem::path FanucFileSystemPath(const QString& path)
+	{
+		return std::filesystem::path(QDir::toNativeSeparators(path).toStdWString());
+	}
+
+	std::string FanucLocalPathBytes(const QString& path)
+	{
+		const QByteArray bytes = QDir::toNativeSeparators(path).toLocal8Bit();
+		return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+	}
+
+	std::string FanucLocalPathBytes(const std::filesystem::path& path)
+	{
+		return FanucLocalPathBytes(QString::fromStdWString(path.wstring()));
+	}
+
+	std::filesystem::path FanucResolveLocalPath(const std::string& pathText)
+	{
+		const QString decoded = FanucDecodeLocalPath(pathText);
+		const QFileInfo info(QDir::fromNativeSeparators(decoded));
+		const QString absolute = info.isAbsolute()
+			? info.absoluteFilePath()
+			: AppPaths::CommandLinePath(decoded);
+		return FanucFileSystemPath(absolute);
+	}
 
 	bool FanucContainsWeldMetadata(const T_ROBOT_MOVE_INFO& info)
 	{
@@ -683,7 +730,7 @@ namespace
 
 	bool FanucWriteTextFile(const std::string& filePath, const std::string& content)
 	{
-		std::ofstream out(filePath, std::ios::out | std::ios::trunc);
+		std::ofstream out(FanucResolveLocalPath(filePath), std::ios::out | std::ios::trunc);
 		if (!out.is_open())
 		{
 			return false;
@@ -693,28 +740,17 @@ namespace
 		return out.good();
 	}
 
-	std::filesystem::path FanucGetExecutableDir()
+	std::filesystem::path FanucFindCompilerToolPath(const std::string& fileName)
 	{
-		char modulePath[MAX_PATH] = {};
-		const DWORD length = GetModuleFileNameA(nullptr, modulePath, MAX_PATH);
-		if (length == 0 || length >= MAX_PATH)
-		{
-			std::error_code ec;
-			return std::filesystem::current_path(ec);
-		}
-
-		return std::filesystem::path(std::string(modulePath, length)).parent_path();
-	}
-
-	std::string FanucFindCompilerToolPath(const std::string& fileName)
-	{
-		const std::filesystem::path exeDir = FanucGetExecutableDir();
+		const QString fileNameText = QString::fromLatin1(fileName.data(), static_cast<int>(fileName.size()));
 		std::vector<std::filesystem::path> candidates =
 		{
-			exeDir / "Tools" / "FANUC" / "WinOLPC" / "bin" / fileName,
-			exeDir / "SDK" / "FANUC" / "WinOLPC" / "bin" / fileName,
-			std::filesystem::path("C:\\Program Files (x86)\\FANUC\\WinOLPC\\bin") / fileName,
-			std::filesystem::path("C:\\Program Files\\FANUC\\WinOLPC\\bin") / fileName
+			FanucFileSystemPath(AppPaths::ResourcePath(
+				QStringLiteral("Tools/FANUC/WinOLPC/bin/") + fileNameText)),
+			FanucFileSystemPath(AppPaths::ResourcePath(
+				QStringLiteral("SDK/FANUC/WinOLPC/bin/") + fileNameText)),
+			std::filesystem::path(L"C:\\Program Files (x86)\\FANUC\\WinOLPC\\bin") / fileNameText.toStdWString(),
+			std::filesystem::path(L"C:\\Program Files\\FANUC\\WinOLPC\\bin") / fileNameText.toStdWString()
 		};
 
 		for (const auto& candidate : candidates)
@@ -722,35 +758,37 @@ namespace
 			std::error_code ec;
 			if (std::filesystem::exists(candidate, ec))
 			{
-				return candidate.string();
+				return candidate;
 			}
 		}
 
-		return candidates.front().string();
+		return candidates.front();
 	}
 
-	std::string FanucGetKtransPath()
+	std::filesystem::path FanucGetKtransPath()
 	{
 		return FanucFindCompilerToolPath("ktrans.exe");
 	}
 
-	std::string FanucGetMaketpPath()
+	std::filesystem::path FanucGetMaketpPath()
 	{
 		return FanucFindCompilerToolPath("maketp.exe");
 	}
 
-	bool FanucFileExists(const std::string& filePath)
+	bool FanucFileExists(const std::filesystem::path& filePath)
 	{
 		std::error_code ec;
 		return std::filesystem::exists(filePath, ec);
 	}
 
+	bool FanucFileExists(const std::string& filePath)
+	{
+		return FanucFileExists(FanucResolveLocalPath(filePath));
+	}
+
 	std::filesystem::path FanucAbsolutePath(const std::string& filePath)
 	{
-		std::error_code ec;
-		const std::filesystem::path path(filePath);
-		const std::filesystem::path absolutePath = std::filesystem::absolute(path, ec);
-		return ec ? path : absolutePath;
+		return FanucResolveLocalPath(filePath);
 	}
 
 	std::string FanucTrim(const std::string& text)
@@ -792,7 +830,7 @@ namespace
 
 	std::filesystem::path FanucReadWinOlpcOutputDir()
 	{
-		const std::string robotIniPath = FanucFindCompilerToolPath("robot.ini");
+		const std::filesystem::path robotIniPath = FanucFindCompilerToolPath("robot.ini");
 		std::ifstream input(robotIniPath);
 		if (!input.is_open())
 		{
@@ -810,7 +848,11 @@ namespace
 			const std::string outputDir = FanucTrim(line.substr(std::string("Output=").size()));
 			if (!outputDir.empty())
 			{
-				return std::filesystem::path(outputDir);
+				const std::filesystem::path configuredPath = FanucFileSystemPath(
+					FanucDecodeLocalPath(outputDir));
+				return configuredPath.is_absolute()
+					? configuredPath
+					: (robotIniPath.parent_path() / configuredPath).lexically_normal();
 			}
 		}
 
@@ -847,17 +889,19 @@ namespace
 
 	std::string FanucBuildProgramPath(const std::string& unitName, const std::string& fileName)
 	{
-		std::vector<std::string> candidates =
+		const QString unitNameText = FanucDecodeConfigText(unitName);
+		const QString fileNameText = FanucDecodeConfigText(fileName);
+		const std::vector<QString> candidates =
 		{
-			".\\Result\\" + unitName + "\\" + fileName,
-			".\\Job\\FANUC\\" + fileName,
-			".\\SDK\\FANUC\\" + fileName
+			AppPaths::WritablePath(QStringLiteral("Result/%1/%2").arg(unitNameText, fileNameText)),
+			AppPaths::WritablePath(QStringLiteral("Job/FANUC/%1").arg(fileNameText)),
+			AppPaths::FindResourcePath(QStringLiteral("SDK/FANUC/%1").arg(fileNameText))
 		};
-		for (const std::string& path : candidates)
+		for (const QString& path : candidates)
 		{
-			if (FanucFileExists(path))
+			if (!path.isEmpty() && QFileInfo::exists(path))
 			{
-				return path;
+				return FanucLocalPathBytes(path);
 			}
 		}
 		return std::string();
@@ -876,15 +920,16 @@ namespace
 	bool FanucCompileKlToPc(const std::string& klPath, const std::string& pcPath, RobotLog* pLog)
 	{
 		const auto compileStart = std::chrono::steady_clock::now();
-		const std::string ktransPath = FanucGetKtransPath();
+		const std::filesystem::path ktransPath = FanucGetKtransPath();
 		const std::filesystem::path absoluteKlPath = FanucAbsolutePath(klPath);
 		const std::filesystem::path absolutePcPath = FanucAbsolutePath(pcPath);
 		if (!FanucFileExists(ktransPath))
 		{
 			if (pLog != nullptr)
 			{
+				const std::string ktransPathText = FanucLocalPathBytes(ktransPath);
 				pLog->write(LogColor::ERR, "FANUC 编译失败：未找到 ktrans.exe，路径=%s | 耗时=%lldms",
-					ktransPath.c_str(), FanucElapsedMs(compileStart));
+					ktransPathText.c_str(), FanucElapsedMs(compileStart));
 			}
 			return false;
 		}
@@ -892,9 +937,9 @@ namespace
 		std::error_code ec;
 		std::filesystem::remove(absolutePcPath, ec);
 
-		const std::string ktransWorkDir = std::filesystem::path(ktransPath).parent_path().string();
-		const std::wstring exePathW(ktransPath.begin(), ktransPath.end());
-		const std::wstring workDirW(ktransWorkDir.begin(), ktransWorkDir.end());
+		const std::filesystem::path ktransWorkDir = ktransPath.parent_path();
+		const std::wstring exePathW = ktransPath.wstring();
+		const std::wstring workDirW = ktransWorkDir.wstring();
 		const std::wstring commandTextW =
 			L"\"" + exePathW + L"\" \"" +
 			absoluteKlPath.wstring() + L"\" \"" +
@@ -937,13 +982,16 @@ namespace
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
 
-		if (exitCode != 0 || !FanucFileExists(absolutePcPath.string()))
+		if (exitCode != 0 || !FanucFileExists(absolutePcPath))
 		{
 			if (pLog != nullptr)
 			{
+				const std::string klPathText = FanucLocalPathBytes(absoluteKlPath);
+				const std::string pcPathText = FanucLocalPathBytes(absolutePcPath);
+				const std::string workDirText = FanucLocalPathBytes(ktransWorkDir);
 				pLog->write(LogColor::ERR,
 					"FANUC 编译失败：ktrans 返回码=%lu，KL=%s，PC=%s，WorkDir=%s | 耗时=%lldms",
-					static_cast<unsigned long>(exitCode), absoluteKlPath.string().c_str(), absolutePcPath.string().c_str(), ktransWorkDir.c_str(),
+					static_cast<unsigned long>(exitCode), klPathText.c_str(), pcPathText.c_str(), workDirText.c_str(),
 					FanucElapsedMs(compileStart));
 			}
 			return false;
@@ -951,8 +999,9 @@ namespace
 
 		if (pLog != nullptr)
 		{
+			const std::string pcPathText = FanucLocalPathBytes(absolutePcPath);
 			pLog->write(LogColor::SUCCESS, "FANUC 编译成功：%s | 耗时=%lldms",
-				absolutePcPath.string().c_str(), FanucElapsedMs(compileStart));
+				pcPathText.c_str(), FanucElapsedMs(compileStart));
 		}
 		return true;
 	}
@@ -960,15 +1009,16 @@ namespace
 	bool FanucCompileLsToTp(const std::string& lsPath, const std::string& tpPath, RobotLog* pLog)
 	{
 		const auto compileStart = std::chrono::steady_clock::now();
-		const std::string maketpPath = FanucGetMaketpPath();
+		const std::filesystem::path maketpPath = FanucGetMaketpPath();
 		const std::filesystem::path absoluteLsPath = FanucAbsolutePath(lsPath);
 		const std::filesystem::path absoluteTpPath = FanucAbsolutePath(tpPath);
 		if (!FanucFileExists(maketpPath))
 		{
 			if (pLog != nullptr)
 			{
+				const std::string maketpPathText = FanucLocalPathBytes(maketpPath);
 				pLog->write(LogColor::ERR, "FANUC TP编译失败：未找到 maketp.exe，路径=%s | 耗时=%lldms",
-					maketpPath.c_str(), FanucElapsedMs(compileStart));
+					maketpPathText.c_str(), FanucElapsedMs(compileStart));
 			}
 			return false;
 		}
@@ -977,9 +1027,9 @@ namespace
 		std::filesystem::create_directories(absoluteTpPath.parent_path(), ec);
 		std::filesystem::remove(absoluteTpPath, ec);
 
-		const std::string maketpWorkDir = std::filesystem::path(maketpPath).parent_path().string();
-		const std::wstring exePathW(maketpPath.begin(), maketpPath.end());
-		const std::wstring workDirW(maketpWorkDir.begin(), maketpWorkDir.end());
+		const std::filesystem::path maketpWorkDir = maketpPath.parent_path();
+		const std::wstring exePathW = maketpPath.wstring();
+		const std::wstring workDirW = maketpWorkDir.wstring();
 		const std::wstring commandTextW =
 			L"\"" + exePathW + L"\" \"" +
 			absoluteLsPath.wstring() + L"\" \"" +
@@ -1022,7 +1072,7 @@ namespace
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
 
-		if (exitCode == 0 && !FanucFileExists(absoluteTpPath.string()))
+		if (exitCode == 0 && !FanucFileExists(absoluteTpPath))
 		{
 			const std::filesystem::path fallbackTpPath = FanucFindCompiledTpInOutputDir(absoluteTpPath);
 			if (!fallbackTpPath.empty())
@@ -1034,21 +1084,26 @@ namespace
 					ec);
 				if (!ec && pLog != nullptr)
 				{
+					const std::string fallbackPathText = FanucLocalPathBytes(fallbackTpPath);
+					const std::string tpPathText = FanucLocalPathBytes(absoluteTpPath);
 					pLog->write(LogColor::DEFAULT,
 						"FANUC TP编译产物已从 WinOLPC 输出目录复制：%s -> %s",
-						fallbackTpPath.string().c_str(),
-						absoluteTpPath.string().c_str());
+						fallbackPathText.c_str(),
+						tpPathText.c_str());
 				}
 			}
 		}
 
-		if (exitCode != 0 || !FanucFileExists(absoluteTpPath.string()))
+		if (exitCode != 0 || !FanucFileExists(absoluteTpPath))
 		{
 			if (pLog != nullptr)
 			{
+				const std::string lsPathText = FanucLocalPathBytes(absoluteLsPath);
+				const std::string tpPathText = FanucLocalPathBytes(absoluteTpPath);
+				const std::string workDirText = FanucLocalPathBytes(maketpWorkDir);
 				pLog->write(LogColor::ERR,
 					"FANUC TP编译失败：maketp 返回码=%lu，LS=%s，TP=%s，WorkDir=%s | 耗时=%lldms",
-					static_cast<unsigned long>(exitCode), absoluteLsPath.string().c_str(), absoluteTpPath.string().c_str(), maketpWorkDir.c_str(),
+					static_cast<unsigned long>(exitCode), lsPathText.c_str(), tpPathText.c_str(), workDirText.c_str(),
 					FanucElapsedMs(compileStart));
 			}
 			return false;
@@ -1056,8 +1111,9 @@ namespace
 
 		if (pLog != nullptr)
 		{
+			const std::string tpPathText = FanucLocalPathBytes(absoluteTpPath);
 			pLog->write(LogColor::SUCCESS, "FANUC TP编译成功：%s | 耗时=%lldms",
-				absoluteTpPath.string().c_str(), FanucElapsedMs(compileStart));
+				tpPathText.c_str(), FanucElapsedMs(compileStart));
 		}
 		return true;
 	}
@@ -2561,13 +2617,14 @@ bool FANUCRobotCtrl::UploadContinuousStartBufferToRobot(const std::vector<T_ROBO
 		return false;
 	}
 
-	const std::string localDir = ".\\Job\\FANUC";
-	const std::string localPath = localDir + "\\JOGBUF.DT";
+	const QString localDirPath = AppPaths::WritablePath(QStringLiteral("Job/FANUC"));
+	const QString localFilePath = QDir(localDirPath).filePath(QStringLiteral("JOGBUF.DT"));
+	const std::string localPath = FanucLocalPathBytes(localFilePath);
 	const std::string remotePath = "JOGBUF.DT";
 
 	try
 	{
-		std::filesystem::create_directories(localDir);
+		std::filesystem::create_directories(FanucFileSystemPath(localDirPath));
 	}
 	catch (...)
 	{
@@ -3370,19 +3427,22 @@ int FANUCRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMo
 
 	const std::string timestamp = FanucMakeTimestamp();
 	const std::string programName = FanucMakeProgramName();
-	const std::string localDir = ".\\Job\\FANUC";
+	const QString localDirPath = AppPaths::WritablePath(QStringLiteral("Job/FANUC"));
 	const std::string klFileName = programName + ".kl";
 	const std::string pcFileName = programName + ".pc";
 	const std::string varFileName = programName + ".var";
-	const std::string localKlPath = localDir + "\\" + klFileName;
-	const std::string localPcPath = localDir + "\\" + pcFileName;
-	const std::string localVarPath = localDir + "\\" + varFileName;
+	const std::string localKlPath = FanucLocalPathBytes(
+		QDir(localDirPath).filePath(QString::fromLatin1(klFileName.data(), static_cast<int>(klFileName.size()))));
+	const std::string localPcPath = FanucLocalPathBytes(
+		QDir(localDirPath).filePath(QString::fromLatin1(pcFileName.data(), static_cast<int>(pcFileName.size()))));
+	const std::string localVarPath = FanucLocalPathBytes(
+		QDir(localDirPath).filePath(QString::fromLatin1(varFileName.data(), static_cast<int>(varFileName.size()))));
 	const std::string remotePcPath = "/md/" + pcFileName;
 	const std::string remoteVarPath = "/md/" + varFileName;
 
 	try
 	{
-		std::filesystem::create_directories(localDir);
+		std::filesystem::create_directories(FanucFileSystemPath(localDirPath));
 	}
 	catch (const std::exception& e)
 	{
@@ -3538,14 +3598,15 @@ int FANUCRobotCtrl::UploadMultiPointTpProgram(
 	}
 
 	const std::string programName = FanucMakeTpProgramName();
-	const std::string localDir = ".\\Job\\FANUC";
+	const QString localDirPath = AppPaths::WritablePath(QStringLiteral("Job/FANUC"));
 	const std::string lsFileName = programName + ".ls";
-	const std::string localLsPath = localDir + "\\" + lsFileName;
+	const std::string localLsPath = FanucLocalPathBytes(
+		QDir(localDirPath).filePath(QString::fromLatin1(lsFileName.data(), static_cast<int>(lsFileName.size()))));
 	const std::string remoteTpPath = "/md/" + programName + ".tp";
 
 	try
 	{
-		std::filesystem::create_directories(localDir);
+		std::filesystem::create_directories(FanucFileSystemPath(localDirPath));
 	}
 	catch (const std::exception& e)
 	{

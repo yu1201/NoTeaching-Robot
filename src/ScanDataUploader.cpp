@@ -1,5 +1,6 @@
 #include "ScanDataUploader.h"
 
+#include "AppPaths.h"
 #include "FtpClient.h"
 #include "OnlineServicesConfig.h"
 #include "RobotLog.h"
@@ -24,14 +25,72 @@ namespace
 
 	QString UploadTempDir()
 	{
-		return QStringLiteral("Temp/OnlineUpload");
+		return AppPaths::WritablePath(QStringLiteral("Temp/OnlineUpload"));
+	}
+
+	bool ResolveSafeResultCaseDir(
+		const QString& caseDir,
+		QString* resolvedPath = nullptr,
+		QString* robotName = nullptr,
+		QString* caseName = nullptr)
+	{
+		const QString resultRoot = AppPaths::WritablePath(QStringLiteral("Result"));
+		const QString canonicalDataRoot = QDir(AppPaths::DataRootPath()).canonicalPath();
+		const QString canonicalRoot = QDir(resultRoot).canonicalPath();
+		const QFileInfo inputInfo(QDir::fromNativeSeparators(caseDir));
+		const QString absoluteInput = inputInfo.isAbsolute()
+			? inputInfo.absoluteFilePath()
+			: QDir(AppPaths::DataRootPath()).absoluteFilePath(inputInfo.filePath());
+		const QFileInfo absoluteInfo(absoluteInput);
+		const QString canonicalInput = absoluteInfo.canonicalFilePath();
+		const QString resultRelativeToData = QDir(canonicalDataRoot)
+			.relativeFilePath(canonicalRoot)
+			.replace(QLatin1Char('\\'), QLatin1Char('/'));
+		if (canonicalDataRoot.isEmpty()
+			|| canonicalRoot.isEmpty()
+			|| resultRelativeToData.compare(QStringLiteral("Result"), Qt::CaseInsensitive) != 0
+			|| canonicalInput.isEmpty()
+			|| !absoluteInfo.isDir())
+		{
+			return false;
+		}
+		const QString relative = QDir(canonicalRoot)
+			.relativeFilePath(canonicalInput)
+			.replace(QLatin1Char('\\'), QLatin1Char('/'));
+		const QStringList components = relative.split(QLatin1Char('/'), Qt::KeepEmptyParts);
+		if (components.size() != 2
+			|| !AppPaths::IsSafePathComponent(components.at(0))
+			|| !AppPaths::IsSafePathComponent(components.at(1)))
+		{
+			return false;
+		}
+		if (resolvedPath != nullptr)
+		{
+			*resolvedPath = QDir::cleanPath(canonicalInput);
+		}
+		if (robotName != nullptr)
+		{
+			*robotName = components.at(0);
+		}
+		if (caseName != nullptr)
+		{
+			*caseName = components.at(1);
+		}
+		return true;
+	}
+
+	std::string OnlineServicesLogPath()
+	{
+		return QDir::toNativeSeparators(
+			AppPaths::WritablePath(QStringLiteral("Log/OnlineServices.txt")))
+			.toLocal8Bit().toStdString();
 	}
 }
 
 ScanDataUploader::ScanDataUploader(QObject* parent)
 	: QObject(parent)
 {
-	m_log = new RobotLog(".//Log//OnlineServices.txt", false);
+	m_log = new RobotLog(OnlineServicesLogPath(), false);
 	LoadPending();
 
 	m_retryTimer = new QTimer(this);
@@ -57,10 +116,11 @@ ScanDataUploader::~ScanDataUploader()
 
 void ScanDataUploader::QueueUpload(const QString& caseDir)
 {
-	const QString normalized = QDir::cleanPath(caseDir);
-	if (normalized.isEmpty() || !QDir(normalized).exists())
+	QString normalized;
+	if (!ResolveSafeResultCaseDir(caseDir, &normalized))
 	{
-		emit uploadStatus(QStringLiteral("上传入队失败：目录不存在 %1").arg(normalized));
+		emit uploadStatus(QStringLiteral("上传入队失败：案例必须是 data root 下安全的 Result/<机器人>/<案例> 目录：%1")
+			.arg(QDir::toNativeSeparators(caseDir)));
 		return;
 	}
 	if (!m_pending.contains(normalized))
@@ -98,9 +158,9 @@ void ScanDataUploader::LoadPending()
 	const QJsonDocument doc = QJsonDocument::fromJson(OnlineServicesConfig::PendingUploads().toUtf8());
 	for (const auto& item : doc.array())
 	{
-		const QString path = item.toString();
+		QString path;
 		// 启动加载时清掉已被现场删除的目录，避免永远重试。
-		if (!path.isEmpty() && QDir(path).exists())
+		if (ResolveSafeResultCaseDir(item.toString(), &path))
 		{
 			m_pending.append(path);
 		}
@@ -133,7 +193,13 @@ void ScanDataUploader::StartWorkerIfIdle()
 	config.port = OnlineServicesConfig::FtpPort();
 	config.user = OnlineServicesConfig::FtpUser().toStdString();
 	config.password = OnlineServicesConfig::FtpPassword().toStdString();
-	config.deviceName = OnlineServicesConfig::DeviceName();
+	config.deviceName = OnlineServicesConfig::DeviceName().trimmed();
+	if (!AppPaths::IsSafePathComponent(config.deviceName))
+	{
+		m_busy.store(false);
+		emit uploadStatus(QStringLiteral("上传未配置：设备名必须是安全的单一目录名。"));
+		return;
+	}
 	m_worker = std::thread([this, snapshot, config]() { WorkerBody(snapshot, config); });
 }
 
@@ -159,6 +225,15 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 			{
 				m_busy.store(false);
 				emit uploadStatus(QStringLiteral("上传未配置：请在管理页「在线服务」填写 FTP 账号。"));
+			}, Qt::QueuedConnection);
+		return;
+	}
+	if (!AppPaths::IsSafePathComponent(deviceName))
+	{
+		QMetaObject::invokeMethod(this, [this]()
+			{
+				m_busy.store(false);
+				emit uploadStatus(QStringLiteral("上传已拒绝：设备名包含路径字符或保留设备名。"));
 			}, Qt::QueuedConnection);
 		return;
 	}
@@ -223,11 +298,28 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 		}
 
 		// zip 名：<机器人>_<案例>.zip（Result/<Robot>/<case> 取两级）
-		const QFileInfo caseInfo(caseDir);
-		const QString robotName = caseInfo.dir().dirName();
-		const QString zipName = QString("%1_%2.zip").arg(robotName).arg(caseInfo.fileName());
-		QDir().mkpath(UploadTempDir());
-		const QString zipPath = UploadTempDir() + "/" + zipName;
+		QString safeCaseDir;
+		QString robotName;
+		QString caseName;
+		if (!ResolveSafeResultCaseDir(caseDir, &safeCaseDir, &robotName, &caseName))
+		{
+			QMetaObject::invokeMethod(this, [this, caseDir]()
+				{ OnItemFinished(caseDir, false, QStringLiteral("案例目录已失效或逃出 Result 根目录")); },
+				Qt::QueuedConnection);
+			continue;
+		}
+		const QString zipName = QString("%1_%2.zip").arg(robotName, caseName);
+		const QString uploadTempDir = UploadTempDir();
+		const QString zipPath = AppPaths::WritableChildPath(QStringLiteral("Temp/OnlineUpload"), zipName);
+		if (!AppPaths::IsSafePathComponent(zipName)
+			|| zipPath.isEmpty()
+			|| !QDir().mkpath(uploadTempDir))
+		{
+			QMetaObject::invokeMethod(this, [this, caseDir]()
+				{ OnItemFinished(caseDir, false, QStringLiteral("上传临时文件路径不安全")); },
+				Qt::QueuedConnection);
+			continue;
+		}
 
 		{
 			std::lock_guard<std::mutex> lk(m_progMutex);
@@ -240,7 +332,7 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 		}
 
 		QString zipError;
-		if (!ZipCaseDir(caseDir, zipPath, &zipError))
+		if (!ZipCaseDir(safeCaseDir, zipPath, &zipError))
 		{
 			QMetaObject::invokeMethod(this, [this, caseDir, zipError]()
 				{ OnItemFinished(caseDir, false, QStringLiteral("压缩失败：%1").arg(zipError)); }, Qt::QueuedConnection);
@@ -252,7 +344,8 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 		long long lastSent = 0;
 		double speed = 0.0;
 		const std::string remotePath = remoteBase + "/" + zipName.toStdString();
-		const bool uploaded = ftp.uploadFileWithProgress(zipPath.toStdString(), remotePath, &m_cancel,
+		const QByteArray zipPathBytes = QDir::toNativeSeparators(zipPath).toLocal8Bit();
+		const bool uploaded = ftp.uploadFileWithProgress(zipPathBytes.toStdString(), remotePath, &m_cancel,
 			[this, &lastEmit, &lastSent, &speed, zipName, doneItems, totalItems](long long sent, long long total)
 			{
 				const auto now = std::chrono::steady_clock::now();

@@ -47,8 +47,8 @@ Name: "{app}\Data"
 ; SDK\STEP\versions（.lib 链接期产物与 SRS 机器人系统升级包）不随安装包分发，升级包按需另发现场。
 Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Data\*,SDK\STEP\versions\*"
 ; 旧 INI/TXT 参数迁移工具，现场机器无需安装 Python。
-Source: "..\dist\tools\ConfigMigrate.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\dist\tools\ConfigMigrate.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
+Source: "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir: "{app}\tools"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
