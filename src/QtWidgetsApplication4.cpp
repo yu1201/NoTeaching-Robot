@@ -1,8 +1,11 @@
 #include "QtWidgetsApplication4.h"
+#include "AppPaths.h"
+#include "CliHelp.h"
 #include <QMessageBox>  // 弹窗头文件，测试用
 #include "CameraFrameCache.h"
 #include "BrandingConfig.h"
 #include "ConfigDatabase.h"
+#include "CredentialSecurity.h"
 #include "FTPClient.h"
 #include "FANUCRobotDriver.h"
 #include "CameraBasicParamDialog.h"
@@ -26,6 +29,8 @@
 #include "RobotDataHelper.h"
 #include "RobotJogDialog.h"
 #include "RobotMessage.h"
+#include "RobotMotionTimeoutPolicy.h"
+#include "RobotOperationLease.h"
 #include "SKJCameraControlClient.h"
 #include "STEPRobotDriver.h"
 #include "TouchKeyboardManager.h"
@@ -46,9 +51,9 @@
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QComboBox>
-#include <QCryptographicHash>
 #include <QDebug>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDirIterator>
 #include <QDoubleValidator>
@@ -57,9 +62,11 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QAbstractItemView>
+#include <QAbstractButton>
 #include <QInputDialog>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -84,6 +91,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMouseEvent>
+#include <QTabletEvent>
 #include <QPainter>
 #include <QPropertyAnimation>
 #include <QPushButton>
@@ -459,6 +467,10 @@ namespace
 			if (event->type() == QEvent::MouseButtonPress)
 			{
 				QMouseEvent* mouseEvent = static_cast<QMouseEvent*>(event);
+				if (RobotOperationLease::AnyActive())
+				{
+					return true;
+				}
 				if (mouseEvent->button() == Qt::RightButton)
 				{
 					ShowToolContextMenu(button->toolId(), mouseEvent->globalPosition().toPoint());
@@ -520,6 +532,11 @@ namespace
 			if (event == nullptr)
 			{
 				QWidget::contextMenuEvent(event);
+				return;
+			}
+			if (RobotOperationLease::AnyActive())
+			{
+				event->accept();
 				return;
 			}
 			if (QWidget* child = childAt(event->pos()))
@@ -1253,22 +1270,9 @@ namespace
 			|| edit->document()->maximumBlockCount() >= 300;
 	}
 
-	QString FindProjectFilePath(const QString& relativePath)
+	QString FindInstalledResourcePath(const QString& relativePath)
 	{
-		QDir dir(QCoreApplication::applicationDirPath());
-		for (int depth = 0; depth < 6; ++depth)
-		{
-			const QString candidate = dir.filePath(relativePath);
-			if (QFileInfo::exists(candidate))
-			{
-				return QDir::toNativeSeparators(QFileInfo(candidate).absoluteFilePath());
-			}
-			if (!dir.cdUp())
-			{
-				break;
-			}
-		}
-		return QString();
+		return QDir::toNativeSeparators(AppPaths::FindResourcePath(relativePath));
 	}
 
 	QString BuildWeldSeamCompOutputPath(const QString& inputFilePath)
@@ -1747,15 +1751,123 @@ namespace
 		return QStringLiteral("LoginState/SavedPasswords");
 	}
 
+	QString RememberedCredentialsGroup()
+	{
+		return QStringLiteral("LoginState/RememberedCredentials");
+	}
+
 	QString CameraReceiveModeGroup()
 	{
 		return QStringLiteral("Camera/ReceiveMode");
 	}
 
-	QString HashAccountPassword(const QString& userName, const QString& password)
+	bool StoredBool(const QString& value, bool defaultValue = false)
 	{
-		return QString::fromLatin1(
-			QCryptographicHash::hash(QString("%1\n%2").arg(userName.trimmed(), password).toUtf8(), QCryptographicHash::Sha256).toHex());
+		if (value.trimmed().isEmpty())
+		{
+			return defaultValue;
+		}
+		const QString normalized = value.trimmed().toLower();
+		return normalized == QStringLiteral("1")
+			|| normalized == QStringLiteral("true")
+			|| normalized == QStringLiteral("yes");
+	}
+
+	bool WriteAccountPasswordRecord(
+		const QString& userName,
+		const QString& password,
+		const QString& expectedPasswordRecord,
+		bool requireMustChangePassword,
+		bool newMustChangePassword,
+		QString& newPasswordRecord,
+		QString& currentRole,
+		QString& securityFingerprint,
+		QString& error)
+	{
+		newPasswordRecord = CredentialSecurity::CreatePasswordRecord(password, &error);
+		if (newPasswordRecord.isEmpty())
+		{
+			return false;
+		}
+		if (!ConfigDatabase::TryCompareAndSetAccountPassword(
+				AccountUserId(userName),
+				expectedPasswordRecord,
+				newPasswordRecord,
+				requireMustChangePassword,
+				newMustChangePassword,
+				&currentRole,
+				&securityFingerprint))
+		{
+			error = QStringLiteral("账号已被删除或安全状态已变化，密码修改已拒绝，请重新登录。");
+			return false;
+		}
+		error.clear();
+		return true;
+	}
+
+	bool WriteNewAccountRecord(
+		const QString& userName,
+		const QString& password,
+		const QString& role,
+		bool mustChangePassword,
+		QString& error,
+		bool initializeAuthentication = false,
+		const QString& administratorId = QString())
+	{
+		const QString record = CredentialSecurity::CreatePasswordRecord(password, &error);
+		if (record.isEmpty())
+		{
+			return false;
+		}
+		const QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
+		QMap<QString, QString> values;
+		values.insert(QStringLiteral("PasswordHash"), record);
+		values.insert(QStringLiteral("Role"), role);
+		values.insert(QStringLiteral("MustChangePassword"), mustChangePassword ? QStringLiteral("1") : QStringLiteral("0"));
+		values.insert(QStringLiteral("CreatedAt"), now);
+		values.insert(QStringLiteral("PasswordChangedAt"), now);
+		const bool written = initializeAuthentication
+			? ConfigDatabase::TryInitializeAuthenticationAccount(
+				AccountUserId(userName), values)
+			: ConfigDatabase::TryCreateAccount(
+				AccountUserId(userName), values, administratorId);
+		if (!written)
+		{
+			error = QStringLiteral("写入账号配置库失败。");
+			return false;
+		}
+		error.clear();
+		return true;
+	}
+
+	int AdminAccountCount()
+	{
+		int count = 0;
+		for (const QString& userName : AccountUserNames())
+		{
+			QString role;
+			if (ConfigDatabase::ReadScopedSetting(
+					QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(),
+					QStringLiteral("Role"), &role)
+				&& role == kRoleAdmin)
+			{
+				++count;
+			}
+		}
+		return count;
+	}
+
+	void ClearRememberedCredential(const QString& userName)
+	{
+		const QString normalized = userName.trimmed();
+		if (normalized.isEmpty())
+		{
+			return;
+		}
+		ConfigDatabase::RemoveScopedSetting(
+			QStringLiteral("global"), QString(), RememberedCredentialsGroup(), normalized);
+		ConfigDatabase::RemoveScopedSetting(
+			QStringLiteral("global"), QString(), SavedPasswordsGroup(), normalized);
 	}
 
 	QString DisplayRoleNameForAccount(const QString& role)
@@ -1774,8 +1886,9 @@ namespace
 	class AccountManagementDialog final : public QDialog
 	{
 	public:
-		explicit AccountManagementDialog(QWidget* parent = nullptr)
+		explicit AccountManagementDialog(const QString& currentUserName, QWidget* parent = nullptr)
 			: QDialog(parent)
+			, m_currentUserName(currentUserName.trimmed())
 		{
 			setWindowTitle("账号管理");
 			ApplyUnifiedWindowChrome(this);
@@ -1855,8 +1968,8 @@ namespace
 			QGroupBox* listGroup = new QGroupBox("账号列表", splitter);
 			QVBoxLayout* listLayout = new QVBoxLayout(listGroup);
 			m_accountTable = new QTableWidget(listGroup);
-			m_accountTable->setColumnCount(3);
-			m_accountTable->setHorizontalHeaderLabels(QStringList() << "账号" << "权限" << "创建时间");
+			m_accountTable->setColumnCount(4);
+			m_accountTable->setHorizontalHeaderLabels(QStringList() << "账号" << "权限" << "创建时间" << "改密状态");
 			m_accountTable->horizontalHeader()->setStretchLastSection(true);
 			m_accountTable->setSelectionBehavior(QAbstractItemView::SelectRows);
 			m_accountTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -1968,15 +2081,19 @@ namespace
 			{
 				QString role;
 				QString createdAt;
+				QString mustChangePassword;
 				if (!ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(user), AccountProfileModule(), "Role", &role))
 				{
 					role = kRoleOperator;
 				}
 				ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(user), AccountProfileModule(), "CreatedAt", &createdAt);
+				ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(user), AccountProfileModule(), "MustChangePassword", &mustChangePassword);
 				m_accountTable->insertRow(row);
 				m_accountTable->setItem(row, 0, new QTableWidgetItem(user));
 				m_accountTable->setItem(row, 1, new QTableWidgetItem(DisplayRoleNameForAccount(role)));
 				m_accountTable->setItem(row, 2, new QTableWidgetItem(createdAt));
+				m_accountTable->setItem(row, 3, new QTableWidgetItem(
+					StoredBool(mustChangePassword) ? QStringLiteral("首次登录须改密") : QStringLiteral("已设置")));
 				++row;
 			}
 			if (row > 0)
@@ -2031,13 +2148,11 @@ namespace
 				QMessageBox::warning(this, "新增账号", "账号已存在。");
 				return false;
 			}
-			const bool writeOk =
-				ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "PasswordHash", HashAccountPassword(userName, password), QStringLiteral("string"), true) &&
-				ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "Role", role) &&
-				ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate), QStringLiteral("datetime"));
-			if (!writeOk)
+			QString error;
+			if (!WriteNewAccountRecord(
+					userName, password, role, true, error, false, m_currentUserName))
 			{
-				QMessageBox::warning(this, "新增账号", "写入账号配置库失败。");
+				QMessageBox::warning(this, "新增账号", error);
 				return false;
 			}
 
@@ -2061,8 +2176,28 @@ namespace
 				QMessageBox::warning(this, "保存修改", "账号不存在。");
 				return false;
 			}
-			bool writeOk = ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "Role", m_editRoleCombo->currentData().toString());
+			QString currentRole;
+			if (!ConfigDatabase::ReadScopedSetting(
+					QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), QStringLiteral("Role"), &currentRole))
+			{
+				QMessageBox::warning(this, "保存修改", "无法读取账号当前权限，已拒绝修改。");
+				return false;
+			}
+			const QString newRole = m_editRoleCombo->currentData().toString();
+			if (currentRole == kRoleAdmin && newRole != kRoleAdmin && AdminAccountCount() <= 1)
+			{
+				QMessageBox::warning(this, "保存修改", "不能降级最后一个管理员账号。");
+				return false;
+			}
 			const QString newPassword = m_editPassEdit->text();
+			if (userName.compare(m_currentUserName, Qt::CaseInsensitive) == 0
+				&& (currentRole != newRole || !newPassword.isEmpty()))
+			{
+				QMessageBox::warning(this, "保存修改", "不能在当前会话中修改自己的权限或重置自己的密码，请由另一个管理员操作。");
+				return false;
+			}
+
+			QString newPasswordRecord;
 			if (!newPassword.isEmpty())
 			{
 				if (newPassword.size() < 8)
@@ -2070,12 +2205,18 @@ namespace
 					QMessageBox::warning(this, "保存修改", "新密码至少需要 8 个字符。");
 					return false;
 				}
-				writeOk = writeOk && ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "PasswordHash", HashAccountPassword(userName, newPassword), QStringLiteral("string"), true);
+				QString error;
+				newPasswordRecord = CredentialSecurity::CreatePasswordRecord(newPassword, &error);
+				if (newPasswordRecord.isEmpty())
+				{
+					QMessageBox::warning(this, "保存修改", error);
+					return false;
+				}
 			}
-			writeOk = writeOk && ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "UpdatedAt", QDateTime::currentDateTime().toString(Qt::ISODate), QStringLiteral("datetime"));
-			if (!writeOk)
+			if (!ConfigDatabase::TryUpdateAccountByAdministrator(
+					m_currentUserName, AccountUserId(userName), newRole, newPasswordRecord))
 			{
-				QMessageBox::warning(this, "保存修改", "保存账号配置库失败。");
+				QMessageBox::warning(this, "保存修改", "账号状态或管理员权限已变化，安全事务已拒绝本次修改。请刷新后重试。");
 				return false;
 			}
 			m_editPassEdit->clear();
@@ -2096,10 +2237,28 @@ namespace
 			{
 				return false;
 			}
-
-			if (!ConfigDatabase::RemoveScopedSettings(QStringLiteral("account"), AccountUserId(userName)))
+			if (userName.compare(m_currentUserName, Qt::CaseInsensitive) == 0)
 			{
-				QMessageBox::warning(this, "删除账号", "删除账号失败。");
+				QMessageBox::warning(this, "删除账号", "不能删除当前登录账号，请由另一个管理员操作。");
+				return false;
+			}
+			QString role;
+			if (!ConfigDatabase::ReadScopedSetting(
+					QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), QStringLiteral("Role"), &role))
+			{
+				QMessageBox::warning(this, "删除账号", "无法读取账号当前权限，已拒绝删除。");
+				return false;
+			}
+			if (role == kRoleAdmin && AdminAccountCount() <= 1)
+			{
+				QMessageBox::warning(this, "删除账号", "不能删除最后一个管理员账号。");
+				return false;
+			}
+
+			if (!ConfigDatabase::TryDeleteAccountByAdministrator(
+					m_currentUserName, AccountUserId(userName)))
+			{
+				QMessageBox::warning(this, "删除账号", "账号状态或管理员权限已变化，安全事务已拒绝删除。请刷新后重试。");
 				return false;
 			}
 			AppendLog(QString("已删除账号 %1。").arg(userName));
@@ -2114,6 +2273,7 @@ namespace
 		QComboBox* m_editRoleCombo = nullptr;
 		QLineEdit* m_editPassEdit = nullptr;
 		QPlainTextEdit* m_logText = nullptr;
+		QString m_currentUserName;
 	};
 
 	class ControlUnitManagementDialog final : public QDialog
@@ -2403,7 +2563,7 @@ namespace
 			const QString templateRobot = robotType == ROBOT_TYPE_STEP ? "RobotB" : "RobotA";
 			FtpCredential credential;
 			credential.user = robotType == ROBOT_TYPE_STEP ? "root" : "anonymous";
-			credential.password = robotType == ROBOT_TYPE_STEP ? "STEP_ROBOT_SRH" : QString();
+			credential.password.clear();
 
 			COPini robotIni;
 			if (robotIni.SetFileName(ToIniBytes(RobotParaPath(templateRobot))))
@@ -3713,10 +3873,15 @@ namespace
 	class FtpJobManagementDialog final : public QDialog
 	{
 	public:
-		explicit FtpJobManagementDialog(ContralUnit* pContralUnit, int currentUnitIndex, QWidget* parent = nullptr)
+		explicit FtpJobManagementDialog(
+			ContralUnit* pContralUnit,
+			int currentUnitIndex,
+			std::function<bool()> liveSessionGuard,
+			QWidget* parent = nullptr)
 			: QDialog(parent)
 			, m_pContralUnit(pContralUnit)
 			, m_initialUnitIndex(currentUnitIndex)
+			, m_liveSessionGuard(std::move(liveSessionGuard))
 		{
 			setWindowTitle("FTP Job 文件管理");
 			ApplyUnifiedWindowChrome(this);
@@ -3886,6 +4051,24 @@ namespace
 				});
 
 			LoadUnits(false);
+		}
+
+		bool IsBusy() const
+		{
+			return m_busy;
+		}
+
+	protected:
+		void closeEvent(QCloseEvent* event) override
+		{
+			if (m_busy)
+			{
+				QMessageBox::information(this, "FTP Job 文件管理",
+					"FTP 操作仍在执行，完成前不能关闭或销毁此页面。");
+				event->ignore();
+				return;
+			}
+			QDialog::closeEvent(event);
 		}
 
 	private:
@@ -4383,7 +4566,7 @@ namespace
 			}
 			if (m_closeBtn != nullptr)
 			{
-				m_closeBtn->setEnabled(true);
+				m_closeBtn->setEnabled(!busy);
 			}
 			if (m_statusLabel != nullptr)
 			{
@@ -4409,11 +4592,31 @@ namespace
 			{
 				return;
 			}
+			// Windows 原生文件选择框会阻塞 Qt 定时器；危险提交点必须同步重读
+			// 账号指纹和工程师权限，不能只依赖 250ms 会话轮询或窗口事件。
+			if (!m_liveSessionGuard || !m_liveSessionGuard())
+			{
+				QMessageBox::warning(
+					this,
+					title,
+					QStringLiteral("账号会话或工程师权限已失效，本次 FTP 操作已拒绝。请重新登录。"));
+				return;
+			}
 			QString connectionError;
 			const FtpConnection connection = CurrentConnection(&connectionError);
 			if (!connectionError.isEmpty())
 			{
 				QMessageBox::warning(this, title, connectionError);
+				return;
+			}
+			const UnitConfig unit = CurrentUnit();
+			RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, unit.unitIndex);
+			QString leaseError;
+			const auto operationLease = RobotOperationLease::TryAcquire(
+				driver, QString("FTP Job：%1").arg(title), &leaseError);
+			if (!operationLease)
+			{
+				QMessageBox::warning(this, title, leaseError);
 				return;
 			}
 
@@ -4423,7 +4626,7 @@ namespace
 			AppendLog(title + "开始。");
 
 			QPointer<FtpJobManagementDialog> dialog(this);
-			QThread* taskThread = QThread::create([dialog, connection, title, work, onSuccess, logPath]() mutable
+			QThread* taskThread = QThread::create([dialog, connection, title, work, onSuccess, logPath, operationLease]() mutable
 				{
 					bool ok = false;
 					QString error;
@@ -4448,11 +4651,7 @@ namespace
 						error = "FTP 操作发生未知异常。";
 					}
 
-					if (dialog == nullptr)
-					{
-						return;
-					}
-					QMetaObject::invokeMethod(dialog.data(), [dialog, title, ok, error, onSuccess]() mutable
+					QMetaObject::invokeMethod(qApp, [dialog, title, ok, error, onSuccess]() mutable
 						{
 							if (dialog == nullptr)
 							{
@@ -4735,6 +4934,7 @@ namespace
 		ContralUnit* m_pContralUnit = nullptr;
 		int m_initialUnitIndex = -1;
 		bool m_busy = false;
+		std::function<bool()> m_liveSessionGuard;
 		QList<UnitConfig> m_units;
 		QComboBox* m_unitCombo = nullptr;
 		QLineEdit* m_hostEdit = nullptr;
@@ -7323,7 +7523,9 @@ namespace
 									const bool sensitive = query.value(6).toInt() != 0;
 									const bool encrypted = query.value(7).toInt() != 0;
 									const QString updatedAt = query.value(8).toString();
-									const QString value = encrypted ? QStringLiteral("<已加密>") : query.value(4).toString();
+									const QString value = (sensitive || encrypted)
+										? QStringLiteral("<敏感值已隐藏>")
+										: query.value(4).toString();
 									const QString valueType = query.value(5).toString();
 									const QString detail = QString(
 										"分类：%1\n控制单元/对象：%2\n功能参数：%3\n参数分组：%4\n参数名：%5\n\n"
@@ -7649,6 +7851,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pGuestLoginBtn(nullptr)
 	, m_pDashboardConnectBtn(nullptr)
 	, m_pDashboardClearAlarmBtn(nullptr)
+	, m_pDashboardEmergencyStopBtn(nullptr)
 	, m_pDashboardModeBtn(nullptr)
 	, m_pDashboardDebugLogBtn(nullptr)
 	, m_pDashboardToolPanel(nullptr)
@@ -7671,12 +7874,20 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_sCurrentUserRole(kRoleOperator)
 	, m_sAuthHintOverride()
 	, m_bAuthRegisterMode(false)
+	, m_bEnforceInteractiveSessionLeaseGate(
+		!QCoreApplication::arguments().contains(QStringLiteral("--no-show")))
 	, m_bOpenEmbeddedInManagement(false)
 	, m_bPendingOpenManagementAfterLogin(false)
 	, m_bDebugLogMode(false)
 	, m_bUseSharedScanCameraReceiver(false)
 	, m_bFanucMonitorReading(false)
 {
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(
+			false,
+			QStringLiteral("请先完成有效的本地账号登录，再启动机器人硬件操作。"));
+	}
 	ui.setupUi(this);
 	ApplyUnifiedWindowChrome(this);
 	m_pTouchKeyboardManager = new TouchKeyboardManager(this);
@@ -8105,10 +8316,21 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QPushButton* quickJogBtn = makeLargeButton("点动控制\n单步移动/目标点运动", quickGroup);
 	QPushButton* quickTeachPositionBtn = makeLargeButton("扫描位置示教\n下枪/起点/终点/收枪", quickGroup);
 	QPushButton* quickCalibrationBtn = makeLargeButton("标定与相机参数\n手眼标定、矩阵和相机配置", quickGroup);
+	m_pDashboardEmergencyStopBtn = new QPushButton("安全停止所有本软件活动机器人任务（不可从主页删除）", quickGroup);
+	m_pDashboardEmergencyStopBtn->setMinimumHeight(58);
+	m_pDashboardEmergencyStopBtn->setStyleSheet(
+		"QPushButton { background: #8F1D24; color: white; border: 2px solid #FF7B82; border-radius: 12px; "
+		"font-size: 18px; font-weight: 800; padding: 10px 18px; }"
+		"QPushButton:hover { background: #B3262E; border-color: #FFB2B6; }"
+		"QPushButton:pressed { background: #641318; }");
+	m_pDashboardEmergencyStopBtn->setToolTip(
+		"锁存取消本软件持有租约的全部机器人流程，并由机器人侧真实终止/卸载其程序；"
+		"停机未确认时继续闭锁。它不是控制柜急停，不能替代示教器或外部安全回路。");
 	quickLayout->addWidget(quickMeasureBtn, 0, 0);
 	quickLayout->addWidget(quickJogBtn, 0, 1);
 	quickLayout->addWidget(quickTeachPositionBtn, 1, 0);
 	quickLayout->addWidget(quickCalibrationBtn, 1, 1);
+	quickLayout->addWidget(m_pDashboardEmergencyStopBtn, 2, 0, 1, 2);
 	dashboardActionLayout->addWidget(quickGroup, 1);
 
 	QGroupBox* toolGroup = new QGroupBox("现场小工具", m_pDashboardPage);
@@ -8669,6 +8891,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	connect(m_pDashboardDebugLogBtn, &QPushButton::toggled, this, &QtWidgetsApplication4::SetDebugLogMode);
 	connect(m_pDashboardConnectBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::ToggleCurrentRobotConnection);
 	connect(m_pDashboardClearAlarmBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotClearAlarmTest);
+	connect(m_pDashboardEmergencyStopBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotEmergencyStop);
 	connect(m_pDashboardModeBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::RobotSwitchStepMode);
 	for (const QPair<QString, QString>& spec : functionToolSpecs)
 	{
@@ -8735,6 +8958,55 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	ui.FanucMovjTestBtn->hide();
 	ui.FanucMoveZeroBtn->hide();
 
+	if (qApp != nullptr)
+	{
+		qApp->installEventFilter(this);
+	}
+	QTimer* accountSessionTimer = new QTimer(this);
+	accountSessionTimer->setInterval(250);
+	connect(accountSessionTimer, &QTimer::timeout, this, [this]()
+		{
+			const bool managementVisible = m_pManagementPage != nullptr
+				&& m_pManagementPage->isVisible();
+			const bool mainSurfaceActive = m_pMainStack != nullptr
+				&& m_pMainStack->currentWidget() != m_pAuthPage;
+			bool taggedSessionWindowVisible = false;
+			if (qApp != nullptr
+				&& !RobotOperationLease::AnyActive()
+				&& !HasRunningMeasureThenWeldFlow())
+			{
+				for (QWidget* window : qApp->topLevelWidgets())
+				{
+					if (window != nullptr
+						&& window->isVisible()
+						&& window->property("_requires_live_account_session").toBool())
+					{
+						taggedSessionWindowVisible = true;
+						break;
+					}
+				}
+			}
+			if ((!managementVisible && !mainSurfaceActive && !taggedSessionWindowVisible)
+				|| m_bAccountSessionEventValidation)
+			{
+				return;
+			}
+			m_bAccountSessionEventValidation = true;
+			const bool validSession = ValidateCurrentAccountSession(
+				managementVisible
+					? QStringLiteral("保持管理页面会话")
+					: QStringLiteral("保持当前页面会话"));
+			const bool authorized = validSession
+				&& (!managementVisible
+					|| RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer));
+			m_bAccountSessionEventValidation = false;
+			if (!authorized)
+			{
+				RevokePrivilegedUiAccess();
+			}
+		});
+	accountSessionTimer->start();
+
 	EnsureDefaultAdminAccount();
 	RefreshAccountUi();
 	LoadCameraReceiveMode();
@@ -8747,8 +9019,13 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		BrandingConfig::ApplyDesktopShortcutIcons();  // 安装后首次启动即把桌面/开始菜单快捷方式图标刷成当前品牌图标
 	}
 	LoadLoginState();
-	ShowAuthPage();
-	TryAutoLogin();
+	ShowAuthPage(m_bAccountRecoveryRequired
+		? QStringLiteral("账号认证库需要安全恢复，已禁用自动登录。请从受控备份恢复账号库或联系维护人员，程序不会重新生成已知默认管理员。")
+		: QString());
+	if (!m_bAccountRecoveryRequired)
+	{
+		TryAutoLogin();
+	}
 
 	m_grooveCameraDisplayTimer = new QTimer(this);
 	connect(m_grooveCameraDisplayTimer, &QTimer::timeout, this, &QtWidgetsApplication4::UpdateGrooveCameraData);
@@ -8883,6 +9160,10 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 QtWidgetsApplication4::~QtWidgetsApplication4()
 {
+	if (qApp != nullptr)
+	{
+		qApp->removeEventFilter(this);
+	}
 	const QList<QPointer<MeasureThenWeldDialog>> measureThenWeldPages = m_measureThenWeldPages.values();
 	for (const QPointer<MeasureThenWeldDialog>& guardedPage : measureThenWeldPages)
 	{
@@ -8922,6 +9203,11 @@ QtWidgetsApplication4::~QtWidgetsApplication4()
 	StopScanCameraRuntimes();
 	delete m_pContralUnit;
 	m_pContralUnit = nullptr;
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		// 测试进程或同进程重建主窗口时不遗留上一窗口的交互式会话状态。
+		RobotOperationLease::SetNewOperationsAllowed(true);
+	}
 }
 
 bool QtWidgetsApplication4::HasRunningMeasureThenWeldFlow() const
@@ -8952,6 +9238,21 @@ bool QtWidgetsApplication4::HasRunningMeasureThenWeldFlow() const
 
 void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 {
+	if (RobotOperationLease::AnyActive())
+	{
+		if (ui.statusBar != nullptr)
+		{
+			ui.statusBar->showMessage(
+				QString("机器人硬件操作正在运行：%1。关闭已拦截；如需终止请使用主页固定红色安全停止按钮。")
+					.arg(RobotOperationLease::ActiveSummary()),
+				12000);
+		}
+		if (event != nullptr)
+		{
+			event->ignore();
+		}
+		return;
+	}
 	if (HasRunningMeasureThenWeldFlow())
 	{
 		QMessageBox::information(
@@ -8979,7 +9280,7 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 	}
 
 	// 扫描数据上传中：拦截退出，弹进度框（已完成/剩余/速度/ETA），传完自动放行；
-	// 用户可「强制退出」——先删掉传一半的文件再退出；关掉进度框(X/Esc)则不退出、上传继续后台跑。
+	// 用户可「强制退出」——停止当前传输并等待后台收尾；关掉进度框(X/Esc)则不退出、上传继续后台跑。
 	if (m_pScanDataUploader != nullptr && m_pScanDataUploader->IsBusy())
 	{
 		QDialog dlg(this);
@@ -8991,7 +9292,7 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 		info->setWordWrap(true);
 		QProgressBar* bar = new QProgressBar(&dlg);
 		bar->setRange(0, 100);
-		QPushButton* forceBtn = new QPushButton(QStringLiteral("强制退出（删除未传完的文件）"), &dlg);
+		QPushButton* forceBtn = new QPushButton(QStringLiteral("强制退出（停止当前上传）"), &dlg);
 		lay->addWidget(info);
 		lay->addWidget(bar);
 		lay->addWidget(forceBtn);
@@ -9029,8 +9330,8 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 
 		if (r == 2)
 		{
-			forceBtn->setText(QStringLiteral("正在停止并清理…"));
-			m_pScanDataUploader->CancelAndWait();  // 删服务器半截文件 + 等后台收尾后放行
+			forceBtn->setText(QStringLiteral("正在停止上传…"));
+			m_pScanDataUploader->CancelAndWait();  // 等后台停止当前传输并收尾后放行
 		}
 		else if (r != 1)
 		{
@@ -9048,11 +9349,116 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 
 bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 {
+	if (event != nullptr && event->type() == QEvent::Show)
+	{
+		QWidget* shownWindow = qobject_cast<QWidget*>(watched);
+		if (shownWindow != nullptr
+			&& shownWindow->isWindow()
+			&& shownWindow != this
+			&& shownWindow != m_pManagementPage)
+		{
+			QWidget* owner = shownWindow->parentWidget();
+			const bool ownerTagged = owner != nullptr
+				&& owner->window() != nullptr
+				&& owner->window()->property("_requires_live_account_session").toBool();
+			const bool ownerInManagement = owner != nullptr
+				&& m_pManagementPage != nullptr
+				&& (owner == m_pManagementPage || m_pManagementPage->isAncestorOf(owner));
+			const bool ownerInActiveMain = owner != nullptr
+				&& m_pMainStack != nullptr
+				&& m_pMainStack->currentWidget() != m_pAuthPage
+				&& (owner == this || isAncestorOf(owner));
+			if (ownerTagged || ownerInManagement || ownerInActiveMain)
+			{
+				shownWindow->setProperty("_requires_live_account_session", true);
+			}
+		}
+	}
+	const bool mouseDrag = event != nullptr
+		&& event->type() == QEvent::MouseMove
+		&& static_cast<QMouseEvent*>(event)->buttons() != Qt::NoButton;
+	const bool tabletDrag = event != nullptr
+		&& event->type() == QEvent::TabletMove
+		&& static_cast<QTabletEvent*>(event)->buttons() != Qt::NoButton;
+	const bool privilegedInput = event != nullptr
+		&& (event->type() == QEvent::MouseButtonPress
+			|| event->type() == QEvent::MouseButtonRelease
+			|| event->type() == QEvent::MouseButtonDblClick
+			|| mouseDrag
+			|| event->type() == QEvent::Wheel
+			|| event->type() == QEvent::KeyPress
+			|| event->type() == QEvent::KeyRelease
+			|| event->type() == QEvent::Shortcut
+			|| event->type() == QEvent::ContextMenu
+			|| event->type() == QEvent::TouchBegin
+			|| event->type() == QEvent::TouchEnd
+			|| event->type() == QEvent::TabletPress
+			|| tabletDrag
+			|| event->type() == QEvent::TabletRelease
+			|| event->type() == QEvent::Gesture
+			|| event->type() == QEvent::NativeGesture);
+	QWidget* watchedWidget = qobject_cast<QWidget*>(watched);
+	const bool insideVisibleManagement = watchedWidget != nullptr
+		&& m_pManagementPage != nullptr
+		&& m_pManagementPage->isVisible()
+		&& (watchedWidget == m_pManagementPage
+			|| m_pManagementPage->isAncestorOf(watchedWidget));
+	const bool insideActiveMainSurface = watchedWidget != nullptr
+		&& m_pMainStack != nullptr
+		&& m_pMainStack->currentWidget() != m_pAuthPage
+		&& (watchedWidget == this || isAncestorOf(watchedWidget));
+	QWidget* watchedWindow = watchedWidget != nullptr ? watchedWidget->window() : nullptr;
+	const bool insideTaggedSessionWindow = watchedWindow != nullptr
+		&& watchedWindow->isVisible()
+		&& watchedWindow->property("_requires_live_account_session").toBool();
+	if (privilegedInput
+		&& (insideVisibleManagement || insideActiveMainSurface || insideTaggedSessionWindow)
+		&& !m_bAccountSessionEventValidation)
+	{
+		m_bAccountSessionEventValidation = true;
+		const bool validSession = ValidateCurrentAccountSession(
+			insideVisibleManagement
+				? QStringLiteral("执行管理页面操作")
+				: QStringLiteral("执行当前页面操作"));
+		const bool authorized = validSession
+			&& (!insideVisibleManagement
+				|| RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer));
+		m_bAccountSessionEventValidation = false;
+		if (!authorized)
+		{
+			RevokePrivilegedUiAccess();
+			const bool safetyEscape = event->type() == QEvent::KeyPress
+				&& static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape;
+			const QAbstractButton* button = qobject_cast<QAbstractButton*>(watchedWidget);
+			const QString safetyControlText = button == nullptr
+				? QString()
+				: (button->objectName() + QLatin1Char(' ') + button->text()).toLower();
+			const bool safetyControl = safetyControlText.contains(QStringLiteral("stop"))
+				|| safetyControlText.contains(QStringLiteral("abort"))
+				|| safetyControlText.contains(QStringLiteral("cancel"))
+				|| safetyControlText.contains(QStringLiteral("release"))
+				|| safetyControlText.contains(QStringLiteral("停止"))
+				|| safetyControlText.contains(QStringLiteral("急停"))
+				|| safetyControlText.contains(QStringLiteral("取消"))
+				|| safetyControlText.contains(QStringLiteral("中止"))
+				|| safetyControlText.contains(QStringLiteral("松开"));
+			if ((RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+				&& (safetyEscape || safetyControl))
+			{
+				return QMainWindow::eventFilter(watched, event);
+			}
+			event->accept();
+			return true;
+		}
+	}
 	if (event != nullptr && event->type() == QEvent::Resize)
 	{
 		if (QWidget* page = qobject_cast<QWidget*>(watched))
 		{
-			PositionEmbeddedBackButton(page);
+			if (page->property("_management_embedded_page").isValid())
+			{
+				PositionEmbeddedBackButton(page);
+			}
 		}
 	}
 	if (event != nullptr && event->type() == QEvent::Close)
@@ -9115,6 +9521,10 @@ void QtWidgetsApplication4::resizeEvent(QResizeEvent* event)
 
 void QtWidgetsApplication4::ShowDashboardPage()
 {
+	if (!ValidateCurrentAccountSession(QStringLiteral("进入主页")))
+	{
+		return;
+	}
 	CloseGrooveCameraPreviewWindow();
 	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
 	setMinimumSize(720, 500);
@@ -9140,6 +9550,10 @@ void QtWidgetsApplication4::ShowDashboardPage()
 
 void QtWidgetsApplication4::ShowCurrentUserMenu()
 {
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开当前用户菜单")))
+	{
+		return;
+	}
 	if (m_pCurrentUserButton == nullptr)
 	{
 		return;
@@ -9172,6 +9586,10 @@ void QtWidgetsApplication4::ShowCurrentUserMenu()
 
 void QtWidgetsApplication4::ShowManagementPage()
 {
+	if (!ValidateCurrentAccountSession(QStringLiteral("进入管理页面")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		const QMessageBox::StandardButton button = QMessageBox::question(
@@ -9203,6 +9621,12 @@ void QtWidgetsApplication4::ShowManagementPage()
 
 void QtWidgetsApplication4::ShowManagementHomePage()
 {
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开管理首页"))
+		|| RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		RevokePrivilegedUiAccess();
+		return;
+	}
 	CloseGrooveCameraPreviewWindow();
 	if (m_pManagementStack != nullptr && m_pManagementHomePage != nullptr)
 	{
@@ -9396,8 +9820,8 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
 	{
 		currentDriver = static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
 	}
-	const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(currentDriver) != nullptr;
 	const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(currentDriver) != nullptr;
+	const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(currentDriver) != nullptr;
 	if (DashboardToolPanel* panel = dynamic_cast<DashboardToolPanel*>(m_pDashboardToolPanel))
 	{
 		panel->SetCurrentRobotScope(isFanucDriver ? "fanuc" : (isStepDriver ? "step" : QString()));
@@ -9420,6 +9844,7 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
 			}
 			return false;
 		};
+	const bool robotOperationBusy = RobotOperationLease::AnyActive();
     for (const QPointer<QWidget>& widget : m_robotOperationWidgets)
     {
         if (!widget.isNull())
@@ -9450,8 +9875,14 @@ void QtWidgetsApplication4::RefreshRobotOperationAvailability()
 				enabled = false;
 				disableReasons << "该测试依赖 FANUC 驱动，当前机器人不是 FANUC。";
 			}
-            widget->setEnabled(enabled);
-            widget->setToolTip(enabled ? QString() : disableReasons.join('\n'));
+			const QString baseToolTip = enabled ? QString() : disableReasons.join('\n');
+			widget->setProperty("robotSetupEnabled", enabled);
+			widget->setProperty("robotSetupToolTip", baseToolTip);
+			widget->setEnabled(enabled && !robotOperationBusy);
+			widget->setToolTip(robotOperationBusy
+				? QString("机器人硬件操作正在运行（%1）；仅保留主页固定红色安全停止按钮。")
+					.arg(RobotOperationLease::ActiveSummary())
+				: baseToolTip);
         }
     }
     RefreshDashboardConnectionState();
@@ -9489,6 +9920,34 @@ void QtWidgetsApplication4::RefreshDashboardConnectionState()
 		currentDriver = static_cast<RobotDriverAdaptor*>(unitInfo->pUnitDriver);
 	}
 	const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(currentDriver) != nullptr;
+	const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(currentDriver) != nullptr;
+	const bool robotOperationBusy = RobotOperationLease::AnyActive();
+	if (m_pDashboardEmergencyStopBtn != nullptr)
+	{
+		m_pDashboardEmergencyStopBtn->setEnabled(robotOperationBusy);
+	}
+	for (const QPointer<QWidget>& widget : m_robotOperationWidgets)
+	{
+		if (widget.isNull())
+		{
+			continue;
+		}
+		const QVariant baseEnabledProperty = widget->property("robotSetupEnabled");
+		const bool baseEnabled = baseEnabledProperty.isValid()
+			? baseEnabledProperty.toBool()
+			: widget->isEnabled();
+		if (!baseEnabledProperty.isValid())
+		{
+			widget->setProperty("robotSetupEnabled", baseEnabled);
+			widget->setProperty("robotSetupToolTip", widget->toolTip());
+		}
+		const QString baseToolTip = widget->property("robotSetupToolTip").toString();
+		widget->setEnabled(baseEnabled && !robotOperationBusy);
+		widget->setToolTip(robotOperationBusy
+			? QString("机器人硬件操作正在运行（%1）；仅保留主页固定红色安全停止按钮。")
+				.arg(RobotOperationLease::ActiveSummary())
+			: baseToolTip);
+	}
 	if (m_pDashboardConnectBtn != nullptr)
 	{
 		m_pDashboardConnectBtn->setText(connected
@@ -9505,10 +9964,11 @@ void QtWidgetsApplication4::RefreshDashboardConnectionState()
 	if (m_pDashboardModeBtn != nullptr)
 	{
 		m_pDashboardModeBtn->setProperty("dashboardToolRuntimeVisible", isStepDriver);
+		m_pDashboardModeBtn->setText("STEP 模式");
 		m_pDashboardModeBtn->hide();
 		m_pDashboardModeBtn->setToolTip(isStepDriver
-			? "切换新时达机器人模式。"
-			: "FANUC 不显示新时达模式切换。");
+			? "切换新时达机器人模式；安全中止请使用主页固定红色按钮。"
+			: "仅 STEP 显示模式切换。");
 	}
 	if (DashboardToolPanel* panel = dynamic_cast<DashboardToolPanel*>(m_pDashboardToolPanel))
 	{
@@ -9516,8 +9976,28 @@ void QtWidgetsApplication4::RefreshDashboardConnectionState()
 	}
 }
 
+bool QtWidgetsApplication4::EnsureRobotUiActionIdle(const QString& actionName)
+{
+	if (!RobotOperationLease::AnyActive())
+	{
+		return true;
+	}
+	if (ui.statusBar != nullptr)
+	{
+		ui.statusBar->showMessage(
+			QString("机器人硬件操作正在运行（%1）；%2已冻结，请使用主页固定红色安全停止按钮。")
+				.arg(RobotOperationLease::ActiveSummary(), actionName),
+			10000);
+	}
+	return false;
+}
+
 void QtWidgetsApplication4::RunFunctionTestDashboardTool(const QString& actionId)
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("普通工具")))
+	{
+		return;
+	}
 	if (!RequirePermission(kRoleEngineer, "机器人功能测试"))
 	{
 		return;
@@ -9530,6 +10010,13 @@ void QtWidgetsApplication4::RunFunctionTestDashboardTool(const QString& actionId
 	}
 	if (m_pFunctionTestPage != nullptr && m_nFunctionTestPageUnitIndex != currentUnitIndex)
 	{
+		if (RobotOperationLease::AnyActive())
+		{
+			QMessageBox::warning(this, "机器人功能测试",
+				QString("机器人硬件操作正在运行（%1），不能销毁原机器人功能测试页。")
+					.arg(RobotOperationLease::ActiveSummary()));
+			return;
+		}
 		delete m_pFunctionTestPage;
 		m_pFunctionTestPage = nullptr;
 	}
@@ -9722,6 +10209,10 @@ int QtWidgetsApplication4::RoleLevel(const QString& role) const
 
 bool QtWidgetsApplication4::RequirePermission(const QString& minimumRole, const QString& actionName)
 {
+	if (!ValidateCurrentAccountSession(actionName))
+	{
+		return false;
+	}
 	if (RoleLevel(m_sCurrentUserRole) >= RoleLevel(minimumRole))
 	{
 		return true;
@@ -9742,15 +10233,164 @@ bool QtWidgetsApplication4::RequirePermission(const QString& minimumRole, const 
 	return false;
 }
 
-void QtWidgetsApplication4::EnsureDefaultAdminAccount()
+bool QtWidgetsApplication4::ValidateCurrentAccountSession(const QString& actionName)
 {
-	if (!AccountUserNames().isEmpty())
+	if (m_bSessionRevocationPendingSafetyStop)
+	{
+		if (m_bEnforceInteractiveSessionLeaseGate)
+		{
+			RobotOperationLease::SetNewOperationsAllowed(
+				false,
+				QStringLiteral("账号会话已失效；禁止启动新的机器人硬件操作。"));
+		}
+		if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+		{
+			return false;
+		}
+		m_bSessionRevocationPendingSafetyStop = false;
+		RevokePrivilegedUiAccess();
+		RefreshAccountUi();
+		ShowAuthPage(QStringLiteral("账号会话已失效；机器人操作已安全结束，请重新登录。"));
+		return false;
+	}
+	if (m_bAccountRecoveryRequired)
+	{
+		ShowAuthPage(QStringLiteral("账号认证库处于安全恢复状态，所有登录、游客、注册和主页操作均已锁定。"));
+		return false;
+	}
+	if (m_sCurrentUserName == QStringLiteral("游客"))
+	{
+		return m_sCurrentUserRole == kRoleOperator;
+	}
+	if (m_sCurrentUserName == QStringLiteral("访客")
+		|| m_sCurrentUserName.trimmed().isEmpty())
+	{
+		ShowAuthPage(QStringLiteral("请先登录或明确选择游客登录。"));
+		return false;
+	}
+	QString passwordRecord;
+	QString currentRole;
+	QString fingerprint;
+	bool mustChangePassword = true;
+	if (m_sCurrentUserSecurityFingerprint.isEmpty()
+		|| !ConfigDatabase::TryReadAccountSecurityState(
+			m_sCurrentUserName,
+			&passwordRecord,
+			&currentRole,
+			&mustChangePassword,
+			&fingerprint)
+		|| mustChangePassword
+		|| currentRole != m_sCurrentUserRole
+		|| fingerprint != m_sCurrentUserSecurityFingerprint)
+	{
+		m_sCurrentUserName = QStringLiteral("访客");
+		m_sCurrentUserRole = kRoleOperator;
+		m_sCurrentUserSecurityFingerprint.clear();
+		m_bPendingOpenManagementAfterLogin = false;
+		if (m_bEnforceInteractiveSessionLeaseGate)
+		{
+			RobotOperationLease::SetNewOperationsAllowed(
+				false,
+				QStringLiteral("账号会话已失效；禁止启动新的机器人硬件操作。"));
+		}
+		if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+		{
+			m_bSessionRevocationPendingSafetyStop = true;
+			if (m_pAccountLogText != nullptr)
+			{
+				m_pAccountLogText->appendPlainText(QStringLiteral(
+					"账号会话已失效；当前仅保留正在运行任务的安全停止/释放操作，任务结束后必须重新登录。"));
+			}
+			RefreshAccountUi();
+			return false;
+		}
+		RevokePrivilegedUiAccess();
+		RefreshAccountUi();
+		ShowAuthPage(actionName.trimmed().isEmpty()
+			? QStringLiteral("账号权限、密码或安全状态已变化，请重新登录。")
+			: QStringLiteral("%1 前检测到账号权限、密码或安全状态已变化，请重新登录。")
+				.arg(actionName));
+		return false;
+	}
+	return true;
+}
+
+void QtWidgetsApplication4::RevokePrivilegedUiAccess()
+{
+	if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
 	{
 		return;
 	}
+	if (m_pManagementPage != nullptr)
+	{
+		m_pManagementPage->hide();
+	}
+	CloseGrooveCameraPreviewWindow();
+	if (qApp != nullptr)
+	{
+		for (QWidget* window : qApp->topLevelWidgets())
+		{
+			if (window != nullptr
+				&& window->property("_requires_live_account_session").toBool())
+			{
+				if (QDialog* dialog = qobject_cast<QDialog*>(window))
+				{
+					dialog->reject();
+				}
+				else
+				{
+					window->hide();
+				}
+			}
+		}
+	}
+}
 
-	QString error;
-	SaveAccount("admin", "admin", kRoleAdmin, error);
+void QtWidgetsApplication4::EnsureDefaultAdminAccount()
+{
+	m_bInitialAdministratorSetupRequired = false;
+	bool authenticationInitialized = false;
+	if (!ConfigDatabase::TryReadAuthenticationInitialized(&authenticationInitialized))
+	{
+		m_bAccountRecoveryRequired = true;
+		qCritical() << "Authentication initialization metadata is missing or invalid; automatic bootstrap is refused.";
+		return;
+	}
+	QStringList accountNames;
+	if (!ConfigDatabase::TryListScopedSettingIds(
+			QStringLiteral("account"), AccountProfileModule(), &accountNames))
+	{
+		m_bAccountRecoveryRequired = true;
+		qCritical() << "Account store enumeration failed; automatic bootstrap is refused.";
+		return;
+	}
+	if (authenticationInitialized && accountNames.isEmpty())
+	{
+		m_bAccountRecoveryRequired = true;
+		qCritical() << "Authentication was initialized but the account store is empty; automatic bootstrap is refused.";
+		return;
+	}
+	if (!authenticationInitialized && !accountNames.isEmpty())
+	{
+		m_bAccountRecoveryRequired = true;
+		qCritical() << "The account store is populated before authentication initialization; automatic bootstrap is refused.";
+		return;
+	}
+	if (authenticationInitialized)
+	{
+		m_bAccountRecoveryRequired = AdminAccountCount() == 0;
+		if (m_bAccountRecoveryRequired)
+		{
+			qCritical() << "Account store has users but no administrator; automatic bootstrap is refused.";
+		}
+		return;
+	}
+
+	// A fresh database has no public bootstrap credential.  The first local
+	// user must choose the administrator password through the setup form; the
+	// account and auth_initialized marker still commit atomically below.
+	m_bAccountRecoveryRequired = false;
+	m_bInitialAdministratorSetupRequired = true;
 }
 
 void QtWidgetsApplication4::RefreshAccountUi()
@@ -9766,8 +10406,11 @@ void QtWidgetsApplication4::RefreshAccountUi()
 	}
 	if (m_pPermissionHintLabel != nullptr)
 	{
-		m_pPermissionHintLabel->setText(
-			"权限说明：登录后可进入主页；工程师或管理员可打开管理页面；管理员还可进入账号管理。首次启动默认管理员为 admin / admin。");
+		m_pPermissionHintLabel->setText(m_bAccountRecoveryRequired
+			? QStringLiteral("安全恢复状态：账号认证库缺失、损坏、账号被清空或没有管理员时，程序不会自动重新生成默认管理员；请恢复受控备份或联系维护人员。")
+			: (m_bInitialAdministratorSetupRequired
+				? QStringLiteral("首次启动：请在本机设置初始管理员密码。程序不提供公开的默认管理员密码。")
+				: QStringLiteral("权限说明：登录后可进入主页；工程师或管理员可打开管理页面；管理员还可进入账号管理。")));
 	}
 
 	if (m_pAccountManagementAction != nullptr)
@@ -9828,6 +10471,10 @@ void QtWidgetsApplication4::RefreshDebugLogButtonUi()
 
 void QtWidgetsApplication4::SetDebugLogMode(bool enabled)
 {
+	if (enabled && !ValidateCurrentAccountSession(QStringLiteral("开启调试日志")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
 	{
 		enabled = false;
@@ -9975,12 +10622,13 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 		RefreshCameraReceiveModeButtonUi();
 		return;
 	}
-	if (HasRunningMeasureThenWeldFlow())
+	if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
 	{
 		QMessageBox::warning(
 			this,
 			QStringLiteral("相机接收模式"),
-			QStringLiteral("先测后焊或流程测试正在运行，不能重建相机接收线程。请先安全停止流程。"));
+			QString("机器人硬件操作正在运行（%1），不能重建相机接收线程。请先安全停止操作。")
+				.arg(RobotOperationLease::ActiveSummary()));
 		RefreshCameraReceiveModeButtonUi();
 		return;
 	}
@@ -9994,6 +10642,12 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 	SaveCameraReceiveMode();
 	RefreshCameraReceiveModeButtonUi();
 
+	delete m_pFunctionTestPage;
+	m_pFunctionTestPage = nullptr;
+	m_nFunctionTestPageUnitIndex = -1;
+	delete m_pCameraParamPage;
+	m_pCameraParamPage = nullptr;
+	m_sCameraParamPageRobotName.clear();
 	StopScanCameraRuntimes();
 	InitializeScanCameraRuntimes();
 
@@ -10010,7 +10664,8 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 
 void QtWidgetsApplication4::SetAuthRegisterMode(bool registerMode)
 {
-	m_bAuthRegisterMode = registerMode;
+	m_bAuthRegisterMode = !m_bAccountRecoveryRequired
+		&& (m_bInitialAdministratorSetupRequired || registerMode);
 	RefreshAuthModeUi();
 }
 
@@ -10020,19 +10675,31 @@ void QtWidgetsApplication4::RefreshAuthModeUi()
 	{
 		QSignalBlocker blockerLogin(m_pAuthLoginModeBtn);
 		m_pAuthLoginModeBtn->setChecked(!m_bAuthRegisterMode);
+		m_pAuthLoginModeBtn->setEnabled(
+			!m_bAccountRecoveryRequired && !m_bInitialAdministratorSetupRequired);
 	}
 	if (m_pAuthRegisterModeBtn != nullptr)
 	{
 		QSignalBlocker blockerRegister(m_pAuthRegisterModeBtn);
 		m_pAuthRegisterModeBtn->setChecked(m_bAuthRegisterMode);
+		m_pAuthRegisterModeBtn->setEnabled(
+			!m_bAccountRecoveryRequired && !m_bInitialAdministratorSetupRequired);
 	}
 	if (m_pAuthSubmitBtn != nullptr)
 	{
-		m_pAuthSubmitBtn->setText(m_bAuthRegisterMode ? "注册账号" : "登录");
+		m_pAuthSubmitBtn->setText(m_bInitialAdministratorSetupRequired
+			? QStringLiteral("创建初始管理员")
+			: (m_bAuthRegisterMode ? QStringLiteral("注册账号") : QStringLiteral("登录")));
 	}
 	if (m_pAuthHintLabel != nullptr)
 	{
-		if (!m_sAuthHintOverride.trimmed().isEmpty())
+		if (m_bInitialAdministratorSetupRequired)
+		{
+			m_pAuthHintLabel->setText(QStringLiteral(
+				"首次启动没有默认密码。请在本机为 admin 设置至少 8 位的新密码；账号与初始化标志会原子写入。"));
+			m_pAuthHintLabel->show();
+		}
+		else if (!m_sAuthHintOverride.trimmed().isEmpty())
 		{
 			m_pAuthHintLabel->setText(m_sAuthHintOverride);
 			m_pAuthHintLabel->show();
@@ -10063,7 +10730,20 @@ void QtWidgetsApplication4::RefreshAuthModeUi()
 	}
 	if (m_pGuestLoginBtn != nullptr)
 	{
-		m_pGuestLoginBtn->setVisible(!m_bAuthRegisterMode);
+		m_pGuestLoginBtn->setVisible(
+			!m_bAuthRegisterMode
+			&& !m_bAccountRecoveryRequired
+			&& !m_bInitialAdministratorSetupRequired);
+		m_pGuestLoginBtn->setEnabled(
+			!m_bAccountRecoveryRequired && !m_bInitialAdministratorSetupRequired);
+	}
+	if (m_pLoginNameCombo != nullptr)
+	{
+		if (m_bInitialAdministratorSetupRequired)
+		{
+			m_pLoginNameCombo->setCurrentText(QStringLiteral("admin"));
+		}
+		m_pLoginNameCombo->setEnabled(!m_bInitialAdministratorSetupRequired);
 	}
 }
 
@@ -10077,8 +10757,6 @@ void QtWidgetsApplication4::LoadLoginState()
 	const QString userName = AppConfigValue(LoginStateGroup(), "UserName");
 	const bool rememberPassword = AppConfigBoolValue(LoginStateGroup(), "RememberPassword", false);
 	const bool autoLogin = AppConfigBoolValue(LoginStateGroup(), "AutoLogin", false);
-	const QByteArray passwordBytes = QByteArray::fromBase64(AppConfigValue(LoginStateGroup(), "PasswordBase64").toUtf8());
-	const QString password = QString::fromUtf8(passwordBytes);
 
 	RefreshLoginNameHistory();
 	if (!userName.trimmed().isEmpty())
@@ -10094,15 +10772,16 @@ void QtWidgetsApplication4::LoadLoginState()
 	}
 	if (rememberPassword)
 	{
-		const QString savedPasswordBase64 = AppConfigValue(SavedPasswordsGroup(), userName);
-		const QString savedPassword = savedPasswordBase64.isEmpty()
-			? password
-			: QString::fromUtf8(QByteArray::fromBase64(savedPasswordBase64.toUtf8()));
-		m_pLoginPasswordEdit->setText(savedPassword);
+		const QString savedPassword = AppConfigValue(RememberedCredentialsGroup(), userName);
+		if (!savedPassword.isEmpty())
+		{
+			m_pLoginPasswordEdit->setText(savedPassword);
+		}
 	}
-	m_pRememberPasswordCheck->setChecked(rememberPassword);
-	m_pAutoLoginCheck->setChecked(rememberPassword && autoLogin);
-	m_pAutoLoginCheck->setEnabled(rememberPassword);
+	const bool credentialAvailable = rememberPassword && !m_pLoginPasswordEdit->text().isEmpty();
+	m_pRememberPasswordCheck->setChecked(credentialAvailable);
+	m_pAutoLoginCheck->setChecked(credentialAvailable && autoLogin);
+	m_pAutoLoginCheck->setEnabled(credentialAvailable);
 }
 
 void QtWidgetsApplication4::SaveLoginState() const
@@ -10123,22 +10802,45 @@ void QtWidgetsApplication4::SaveLoginState() const
 	{
 		history.removeLast();
 	}
-	WriteAppConfigListValue(LoginStateGroup(), "AccountHistory", history);
-	WriteAppConfigValue(LoginStateGroup(), "UserName", userName);
-	WriteAppConfigValue(LoginStateGroup(), "RememberPassword", m_pRememberPasswordCheck->isChecked());
-	WriteAppConfigValue(LoginStateGroup(), "AutoLogin", m_pRememberPasswordCheck->isChecked() && m_pAutoLoginCheck->isChecked());
-	if (m_pRememberPasswordCheck->isChecked())
+	const bool rememberRequested = m_pRememberPasswordCheck->isChecked();
+	bool credentialStored = false;
+	if (rememberRequested)
 	{
-		const QString passwordBase64 = QString::fromLatin1(m_pLoginPasswordEdit->text().toUtf8().toBase64());
-		WriteAppConfigValue(LoginStateGroup(), "PasswordBase64", passwordBase64);
-		WriteAppConfigValue(SavedPasswordsGroup(), userName, passwordBase64);
+		credentialStored = ConfigDatabase::WriteScopedSetting(
+			QStringLiteral("global"),
+			QString(),
+			RememberedCredentialsGroup(),
+			userName,
+			m_pLoginPasswordEdit->text(),
+			QStringLiteral("string"),
+			true);
 	}
-	else
+	if (!credentialStored)
 	{
-		ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), LoginStateGroup(), "PasswordBase64");
-		ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), LoginStateGroup(), "AutoLogin");
-		ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), SavedPasswordsGroup(), userName);
+		ClearRememberedCredential(userName);
+		m_pRememberPasswordCheck->setChecked(false);
+		m_pAutoLoginCheck->setChecked(false);
+		m_pAutoLoginCheck->setEnabled(false);
 	}
+	QMap<QString, QString> loginState;
+	loginState.insert(QStringLiteral("AccountHistory"), history.join(QLatin1Char('\n')));
+	loginState.insert(QStringLiteral("UserName"), userName);
+	loginState.insert(QStringLiteral("RememberPassword"), credentialStored ? QStringLiteral("1") : QStringLiteral("0"));
+	loginState.insert(
+		QStringLiteral("AutoLogin"),
+		credentialStored && m_pAutoLoginCheck->isChecked()
+			? QStringLiteral("1")
+			: QStringLiteral("0"));
+	if (!ConfigDatabase::WriteScopedSettings(
+			QStringLiteral("global"), QString(), LoginStateGroup(), loginState))
+	{
+		ClearRememberedCredential(userName);
+		m_pRememberPasswordCheck->setChecked(false);
+		m_pAutoLoginCheck->setChecked(false);
+		m_pAutoLoginCheck->setEnabled(false);
+	}
+	ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), LoginStateGroup(), "PasswordBase64");
+	ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), SavedPasswordsGroup(), userName);
 }
 
 void QtWidgetsApplication4::RefreshLoginNameHistory()
@@ -10176,26 +10878,13 @@ void QtWidgetsApplication4::FillSavedPasswordForUser(const QString& userName)
 		return;
 	}
 
-	const QString savedBase64 = AppConfigValue(SavedPasswordsGroup(), normalizedUser);
-	if (!savedBase64.isEmpty())
+	const QString savedPassword = AppConfigValue(RememberedCredentialsGroup(), normalizedUser);
+	if (!savedPassword.isEmpty())
 	{
-		m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(savedBase64.toUtf8())));
+		m_pLoginPasswordEdit->setText(savedPassword);
 		m_pRememberPasswordCheck->setChecked(true);
 		m_pAutoLoginCheck->setEnabled(true);
 		return;
-	}
-
-	if (AppConfigValue(LoginStateGroup(), "UserName").trimmed() == normalizedUser
-		&& AppConfigBoolValue(LoginStateGroup(), "RememberPassword", false))
-	{
-		const QString legacyBase64 = AppConfigValue(LoginStateGroup(), "PasswordBase64");
-		if (!legacyBase64.isEmpty())
-		{
-			m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(legacyBase64.toUtf8())));
-			m_pRememberPasswordCheck->setChecked(true);
-			m_pAutoLoginCheck->setEnabled(true);
-			return;
-		}
 	}
 
 	m_pLoginPasswordEdit->clear();
@@ -10206,6 +10895,10 @@ void QtWidgetsApplication4::FillSavedPasswordForUser(const QString& userName)
 
 bool QtWidgetsApplication4::TryAutoLogin()
 {
+	if (m_bAccountRecoveryRequired || m_bInitialAdministratorSetupRequired)
+	{
+		return false;
+	}
 	if (m_pAutoLoginCheck == nullptr || !m_pAutoLoginCheck->isChecked())
 	{
 		return false;
@@ -10225,10 +10918,45 @@ bool QtWidgetsApplication4::TryAutoLogin()
 
 void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 {
+	// 登录页会隐藏主页固定红色 STOP。只要仍有机器人流程在运行，就必须保留
+	// 当前安全停止入口；主动切换账号应先结束流程。真实会话撤销走 pending
+	// safety-stop 分支，不会依赖登录页完成停机。
+	if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+	{
+		m_bPendingOpenManagementAfterLogin = false;
+		if (m_pAccountLogText != nullptr)
+		{
+			m_pAccountLogText->appendPlainText(QStringLiteral(
+				"机器人操作运行期间已拒绝切换到登录页；主页安全停止入口保持可用。"));
+		}
+		QMessageBox* warning = new QMessageBox(
+			QMessageBox::Warning,
+			QStringLiteral("机器人操作正在运行"),
+			QStringLiteral("当前机器人硬件操作尚未结束，不能切换账号。请先使用主页固定红色安全停止按钮或当前流程的停止/取消按钮安全结束操作。"),
+			QMessageBox::Ok,
+			this);
+		warning->setAttribute(Qt::WA_DeleteOnClose);
+		warning->setWindowModality(Qt::NonModal);
+		warning->show();
+		if (ui.statusBar != nullptr)
+		{
+			ui.statusBar->showMessage(
+				QStringLiteral("机器人操作运行期间不能切换账号；主页安全停止入口保持可用。"),
+				12000);
+		}
+		return;
+	}
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(
+			false,
+			QStringLiteral("请先完成有效的本地账号登录，再启动机器人硬件操作。"));
+	}
 	if (m_pMainStack == nullptr || m_pAuthPage == nullptr)
 	{
 		return;
 	}
+	RevokePrivilegedUiAccess();
 
 	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
 	setMinimumSize(620, 480);
@@ -10239,7 +10967,7 @@ void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 	ResizeWindowForAvailableGeometry(this, QSize(920, 700), 0.88, 0.88);
 
 	m_sAuthHintOverride = promptMessage.trimmed();
-	SetAuthRegisterMode(false);
+	SetAuthRegisterMode(m_bInitialAdministratorSetupRequired);
 	m_pMainStack->setCurrentWidget(m_pAuthPage);
 	if (m_pLoginNameEdit != nullptr)
 	{
@@ -10247,8 +10975,16 @@ void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 	}
 }
 
-bool QtWidgetsApplication4::VerifyAccount(const QString& userName, const QString& password, QString& role, QString& error) const
+bool QtWidgetsApplication4::VerifyAccount(
+	const QString& userName,
+	const QString& password,
+	QString& role,
+	bool& mustChangePassword,
+	QString& passwordRecord,
+	QString& error) const
 {
+	mustChangePassword = false;
+	passwordRecord.clear();
 	const QString normalizedUser = userName.trimmed();
 	if (normalizedUser.isEmpty() || password.isEmpty())
 	{
@@ -10256,26 +10992,56 @@ bool QtWidgetsApplication4::VerifyAccount(const QString& userName, const QString
 		return false;
 	}
 
-	if (!AccountUserNames().contains(normalizedUser))
-	{
-		error = "账号不存在。";
-		return false;
-	}
-
 	QString expectedHash;
-	ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "PasswordHash", &expectedHash);
-	if (!ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "Role", &role))
+	QString securityFingerprint;
+	if (!ConfigDatabase::TryReadAccountSecurityState(
+			normalizedUser,
+			&expectedHash,
+			&role,
+			&mustChangePassword,
+			&securityFingerprint))
 	{
-		role = kRoleOperator;
-	}
-
-	const QString actualHash = QString::fromLatin1(
-		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
-	if (expectedHash.compare(actualHash, Qt::CaseInsensitive) != 0)
-	{
-		error = "密码不正确。";
+		error = "账号安全记录无法读取。";
 		return false;
 	}
+
+	const CredentialSecurity::PasswordVerification verification =
+		CredentialSecurity::VerifyPasswordRecord(normalizedUser, password, expectedHash);
+	if (verification == CredentialSecurity::PasswordVerification::Invalid)
+	{
+		error = "账号或密码不正确。";
+		return false;
+	}
+
+	if (verification == CredentialSecurity::PasswordVerification::ValidNeedsUpgrade
+		&& password.size() < 8)
+	{
+		mustChangePassword = true;
+	}
+
+	if (verification == CredentialSecurity::PasswordVerification::ValidNeedsUpgrade)
+	{
+		QString upgradedRecord;
+		QString currentRole;
+		QString upgradedFingerprint;
+		if (!WriteAccountPasswordRecord(
+				normalizedUser,
+				password,
+				expectedHash,
+				false,
+				mustChangePassword,
+				upgradedRecord,
+				currentRole,
+				upgradedFingerprint,
+				error))
+		{
+			error = QStringLiteral("旧账号密码验证成功，但安全升级失败：%1").arg(error);
+			return false;
+		}
+		expectedHash = upgradedRecord;
+		role = currentRole;
+	}
+	passwordRecord = expectedHash;
 	return true;
 }
 
@@ -10295,9 +11061,9 @@ bool QtWidgetsApplication4::SaveAccount(const QString& userName, const QString& 
 			return false;
 		}
 	}
-	if (password.size() < 3)
+	if (password.size() < 8)
 	{
-		error = "密码至少需要 3 个字符。";
+		error = "密码至少需要 8 个字符。";
 		return false;
 	}
 	if (role != kRoleOperator && role != kRoleEngineer && role != kRoleAdmin)
@@ -10312,38 +11078,195 @@ bool QtWidgetsApplication4::SaveAccount(const QString& userName, const QString& 
 		return false;
 	}
 
-	const QString hash = QString::fromLatin1(
-		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
-	const bool writeOk =
-		ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "PasswordHash", hash, QStringLiteral("string"), true) &&
-		ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "Role", role) &&
-		ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate), QStringLiteral("datetime"));
-	if (!writeOk)
+	return WriteNewAccountRecord(normalizedUser, password, role, false, error);
+}
+
+bool QtWidgetsApplication4::PromptForcedPasswordChange(
+	const QString& userName,
+	const QString& temporaryPassword,
+	const QString& expectedPasswordRecord,
+	QString& replacementPassword,
+	QString& currentRole,
+	QString& securityFingerprint)
+{
+	replacementPassword.clear();
+	currentRole.clear();
+	securityFingerprint.clear();
+	QDialog dialog(this);
+	dialog.setWindowTitle(QStringLiteral("首次登录必须修改密码"));
+	dialog.setWindowModality(Qt::ApplicationModal);
+	dialog.setWindowFlag(Qt::WindowContextHelpButtonHint, false);
+	ApplyUnifiedWindowChrome(&dialog);
+	QVBoxLayout* layout = new QVBoxLayout(&dialog);
+	QLabel* hint = new QLabel(
+		QStringLiteral("账号 %1 当前使用临时密码。修改成功前不会建立登录会话，也不能进入主页或管理功能。")
+			.arg(userName),
+		&dialog);
+	hint->setWordWrap(true);
+	layout->addWidget(hint);
+	QFormLayout* form = new QFormLayout();
+	QLineEdit* passwordEdit = new QLineEdit(&dialog);
+	QLineEdit* confirmEdit = new QLineEdit(&dialog);
+	passwordEdit->setEchoMode(QLineEdit::Password);
+	confirmEdit->setEchoMode(QLineEdit::Password);
+	passwordEdit->setPlaceholderText(QStringLiteral("至少 8 个字符"));
+	form->addRow(QStringLiteral("新密码"), passwordEdit);
+	form->addRow(QStringLiteral("确认新密码"), confirmEdit);
+	layout->addLayout(form);
+	QDialogButtonBox* buttons = new QDialogButtonBox(
+		QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &dialog);
+	buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("修改并登录"));
+	buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消登录"));
+	connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+	connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+	layout->addWidget(buttons);
+
+	while (dialog.exec() == QDialog::Accepted)
 	{
-		error = "写入账号配置库失败。";
-		return false;
+		const QString newPassword = passwordEdit->text();
+		if (newPassword.size() < 8)
+		{
+			QMessageBox::warning(&dialog, QStringLiteral("修改密码"), QStringLiteral("新密码至少需要 8 个字符。"));
+			continue;
+		}
+		if (newPassword == temporaryPassword)
+		{
+			QMessageBox::warning(&dialog, QStringLiteral("修改密码"), QStringLiteral("新密码不能与临时密码相同。"));
+			continue;
+		}
+		if (confirmEdit->text() != newPassword)
+		{
+			QMessageBox::warning(&dialog, QStringLiteral("修改密码"), QStringLiteral("两次输入的密码不一致。"));
+			continue;
+		}
+		QString error;
+		QString newPasswordRecord;
+		if (!WriteAccountPasswordRecord(
+				userName,
+				newPassword,
+				expectedPasswordRecord,
+				true,
+				false,
+				newPasswordRecord,
+				currentRole,
+				securityFingerprint,
+				error))
+		{
+			QMessageBox::critical(&dialog, QStringLiteral("修改密码"), error);
+			continue;
+		}
+		ClearRememberedCredential(userName);
+		replacementPassword = newPassword;
+		return true;
 	}
-	return true;
+	return false;
 }
 
 void QtWidgetsApplication4::LoginCurrentAccount()
 {
+	if (m_bAccountRecoveryRequired)
+	{
+		QMessageBox::critical(this, "账号登录", "账号认证库处于安全恢复状态，已拒绝手工登录。");
+		return;
+	}
+	if (m_bInitialAdministratorSetupRequired)
+	{
+		QMessageBox::information(
+			this, "初始化管理员", "请先设置初始管理员密码，当前没有可用的默认登录凭据。");
+		SetAuthRegisterMode(true);
+		return;
+	}
 	if (m_pLoginNameEdit == nullptr || m_pLoginPasswordEdit == nullptr)
 	{
 		return;
 	}
 
 	QString role;
+	bool mustChangePassword = false;
 	QString error;
+	QString verifiedPasswordRecord;
 	const QString userName = m_pLoginNameEdit->text().trimmed();
-	if (!VerifyAccount(userName, m_pLoginPasswordEdit->text(), role, error))
+	const QString submittedPassword = m_pLoginPasswordEdit->text();
+	if (!VerifyAccount(
+			userName,
+			submittedPassword,
+			role,
+			mustChangePassword,
+			verifiedPasswordRecord,
+			error))
 	{
 		QMessageBox::warning(this, "账号登录", error);
 		return;
 	}
+	if (mustChangePassword)
+	{
+		QString replacementPassword;
+		QString changedRole;
+		QString changedFingerprint;
+		if (!PromptForcedPasswordChange(
+				userName,
+				submittedPassword,
+				verifiedPasswordRecord,
+				replacementPassword,
+				changedRole,
+				changedFingerprint))
+		{
+			m_sCurrentUserName = QStringLiteral("访客");
+			m_sCurrentUserRole = kRoleOperator;
+			m_sCurrentUserSecurityFingerprint.clear();
+			m_pLoginPasswordEdit->clear();
+			if (m_pRememberPasswordCheck != nullptr)
+			{
+				m_pRememberPasswordCheck->setChecked(false);
+			}
+			if (m_pAutoLoginCheck != nullptr)
+			{
+				m_pAutoLoginCheck->setChecked(false);
+				m_pAutoLoginCheck->setEnabled(false);
+			}
+			WriteAppConfigValue(LoginStateGroup(), QStringLiteral("RememberPassword"), false);
+			WriteAppConfigValue(LoginStateGroup(), QStringLiteral("AutoLogin"), false);
+			RefreshAccountUi();
+			ShowAuthPage(QStringLiteral("临时密码尚未修改，登录已取消。"));
+			return;
+		}
+		m_pLoginPasswordEdit->setText(replacementPassword);
+		role = changedRole;
+		m_sCurrentUserSecurityFingerprint = changedFingerprint;
+	}
+
+	QString currentPasswordRecord;
+	QString currentRole;
+	QString currentFingerprint;
+	bool currentMustChangePassword = true;
+	if (!ConfigDatabase::TryReadAccountSecurityState(
+			userName,
+			&currentPasswordRecord,
+			&currentRole,
+			&currentMustChangePassword,
+			&currentFingerprint)
+		|| currentMustChangePassword
+		|| (!mustChangePassword && currentPasswordRecord != verifiedPasswordRecord)
+		|| (mustChangePassword && currentFingerprint != m_sCurrentUserSecurityFingerprint))
+	{
+		m_sCurrentUserSecurityFingerprint.clear();
+		QMessageBox::warning(
+			this,
+			"账号登录",
+			"账号在登录过程中已被删除、重置或修改权限，本次登录已取消，请重新输入密码。");
+		ShowAuthPage(QStringLiteral("账号安全状态已变化，请重新登录。"));
+		return;
+	}
+	role = currentRole;
+	m_sCurrentUserSecurityFingerprint = currentFingerprint;
 
 	m_sCurrentUserName = userName;
 	m_sCurrentUserRole = role;
+	m_bSessionRevocationPendingSafetyStop = false;
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(true);
+	}
 	SaveLoginState();
 	RefreshLoginNameHistory();
 	if (m_pRememberPasswordCheck == nullptr || !m_pRememberPasswordCheck->isChecked())
@@ -10369,9 +11292,25 @@ void QtWidgetsApplication4::LoginCurrentAccount()
 
 void QtWidgetsApplication4::LoginAsGuest()
 {
+	if (m_bAccountRecoveryRequired)
+	{
+		QMessageBox::critical(this, "游客登录", "账号认证库处于安全恢复状态，已拒绝游客登录。");
+		return;
+	}
+	if (m_bInitialAdministratorSetupRequired)
+	{
+		QMessageBox::critical(this, "游客登录", "必须先在本机完成初始管理员设置。游客登录已拒绝。");
+		return;
+	}
 	m_sCurrentUserName = "游客";
 	m_sCurrentUserRole = kRoleOperator;
+	m_bSessionRevocationPendingSafetyStop = false;
+	m_sCurrentUserSecurityFingerprint.clear();
 	m_bPendingOpenManagementAfterLogin = false;
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(true);
+	}
 	if (m_pAccountLogText != nullptr)
 	{
 		m_pAccountLogText->appendPlainText(QString("[%1] 游客登录，权限：%2")
@@ -10384,9 +11323,26 @@ void QtWidgetsApplication4::LoginAsGuest()
 
 void QtWidgetsApplication4::LogoutCurrentAccount()
 {
+	if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+	{
+		QMessageBox::warning(
+			this,
+			QStringLiteral("退出登录"),
+			QStringLiteral("机器人硬件操作仍在运行。请先通过当前流程的安全停止/取消按钮结束操作，再退出登录。"));
+		return;
+	}
 	m_sCurrentUserName = "访客";
 	m_sCurrentUserRole = kRoleOperator;
+	m_bSessionRevocationPendingSafetyStop = false;
+	m_sCurrentUserSecurityFingerprint.clear();
 	m_bPendingOpenManagementAfterLogin = false;
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(
+			false,
+			QStringLiteral("已退出登录；禁止启动新的机器人硬件操作。"));
+	}
+	RevokePrivilegedUiAccess();
 	if (m_pAccountLogText != nullptr)
 	{
 		m_pAccountLogText->appendPlainText(QString("[%1] 已退出登录，当前为访客操作员权限。")
@@ -10398,13 +11354,21 @@ void QtWidgetsApplication4::LogoutCurrentAccount()
 
 void QtWidgetsApplication4::RegisterAccount()
 {
+	if (m_bAccountRecoveryRequired)
+	{
+		QMessageBox::critical(this, "注册账号", "账号认证库处于安全恢复状态，已拒绝注册新账号。");
+		return;
+	}
 	if (m_pLoginNameEdit == nullptr || m_pLoginPasswordEdit == nullptr || m_pAuthConfirmPasswordEdit == nullptr)
 	{
 		return;
 	}
 
-	const QString role = kRoleOperator;
-	const QString normalizedUser = m_pLoginNameEdit->text().trimmed();
+	const bool initialAdministratorSetup = m_bInitialAdministratorSetupRequired;
+	const QString role = initialAdministratorSetup ? kRoleAdmin : kRoleOperator;
+	const QString normalizedUser = initialAdministratorSetup
+		? QStringLiteral("admin")
+		: m_pLoginNameEdit->text().trimmed();
 	if (normalizedUser.size() < 4)
 	{
 		QMessageBox::warning(this, "注册账号", "账号至少需要 4 个字符。");
@@ -10422,21 +11386,46 @@ void QtWidgetsApplication4::RegisterAccount()
 		return;
 	}
 	QString error;
-	if (!SaveAccount(m_pLoginNameEdit->text(), password, role, error))
+	const bool saved = initialAdministratorSetup
+		? WriteNewAccountRecord(
+			normalizedUser, password, role, false, error, true)
+		: SaveAccount(normalizedUser, password, role, error);
+	if (!saved)
 	{
-		QMessageBox::warning(this, "注册账号", error);
+		if (initialAdministratorSetup)
+		{
+			EnsureDefaultAdminAccount();
+			RefreshAccountUi();
+			ShowAuthPage(m_bInitialAdministratorSetupRequired
+				? QStringLiteral("初始管理员写入失败，请检查配置库后重试。")
+				: QStringLiteral("初始管理员已由另一进程完成设置，请使用现有账号登录。"));
+		}
+		QMessageBox::warning(
+			this,
+			initialAdministratorSetup ? QStringLiteral("初始化管理员") : QStringLiteral("注册账号"),
+			error);
 		return;
 	}
 
 	if (m_pAccountLogText != nullptr)
 	{
-		m_pAccountLogText->appendPlainText(QString("[%1] 已注册账号 %2，权限：%3")
+		m_pAccountLogText->appendPlainText(QString("[%1] %2账号 %3，权限：%4")
 			.arg(QDateTime::currentDateTime().toString("HH:mm:ss"),
+				initialAdministratorSetup ? QStringLiteral("已初始化管理员") : QStringLiteral("已注册"),
 				normalizedUser,
 				RoleDisplayName(role)));
 	}
-	m_pLoginPasswordEdit->clear();
 	m_pAuthConfirmPasswordEdit->clear();
+	if (initialAdministratorSetup)
+	{
+		m_bInitialAdministratorSetupRequired = false;
+		m_pLoginNameEdit->setText(normalizedUser);
+		RefreshAccountUi();
+		SetAuthRegisterMode(false);
+		LoginCurrentAccount();
+		return;
+	}
+	m_pLoginPasswordEdit->clear();
 	SetAuthRegisterMode(false);
 	if (m_pLoginNameEdit != nullptr)
 	{
@@ -10459,6 +11448,10 @@ void QtWidgetsApplication4::RegisterAccount()
 void QtWidgetsApplication4::OpenAccountManagementDialog()
 {
 	PageOpenTrace trace("账号管理");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开账号管理")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
 	{
 		QMessageBox::information(this, "账号管理", "账号管理仅管理员可用。");
@@ -10468,18 +11461,19 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 	if (m_pManagementStack == nullptr)
 	{
 		CloseGrooveCameraPreviewWindow();
-		AccountManagementDialog dialog(this);
+		AccountManagementDialog dialog(m_sCurrentUserName, this);
 		dialog.exec();
 		return;
 	}
 
 	if (m_pAccountManagementPage != nullptr)
 	{
-		ShowManagementEmbeddedPage(m_pAccountManagementPage);
-		return;
+		m_pManagementStack->removeWidget(m_pAccountManagementPage);
+		delete m_pAccountManagementPage;
+		m_pAccountManagementPage = nullptr;
 	}
 
-	m_pAccountManagementPage = new AccountManagementDialog(m_pManagementStack);
+	m_pAccountManagementPage = new AccountManagementDialog(m_sCurrentUserName, m_pManagementStack);
 	PrepareEmbeddedPage(m_pAccountManagementPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pAccountManagementPage);
 }
@@ -10487,6 +11481,10 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 {
 	PageOpenTrace trace("控制单元管理");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开控制单元管理")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "控制单元管理", "控制单元管理需要工程师或管理员权限。");
@@ -10496,13 +11494,49 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 	auto reloadControlUnits = [this]()
 		{
 			// 重载会销毁并重建机器人驱动；若有焊接/虚拟焊道流程正在后台线程驱动机器人，重载会造成悬垂指针/并发，必须先拦截。
-			if (HasRunningMeasureThenWeldFlow()
+			if (RobotOperationLease::AnyActive()
+				|| HasRunningMeasureThenWeldFlow()
 				|| (m_pVirtualWeldTestPage != nullptr && m_pVirtualWeldTestPage->IsRunning()))
 			{
 				QMessageBox::information(this, "控制单元管理",
-					"焊接/虚拟焊道流程正在运行，请等待流程结束后再重新加载控制单元。");
+					QString("机器人硬件操作正在运行：%1。\n请等待安全结束后再重新加载控制单元。")
+						.arg(RobotOperationLease::ActiveSummary()));
 				return;
 			}
+
+			// 所有缓存 driver/camera 指针的页面必须在重载前销毁；即使页面当前空闲，
+			// InitContralUnit/StopScanCameraRuntimes 后继续复用也会指向已释放对象。
+			for (const QPointer<MeasureThenWeldDialog>& guardedPage : m_measureThenWeldPages.values())
+			{
+				delete guardedPage.data();
+			}
+			m_measureThenWeldPages.clear();
+			m_pMeasureThenWeldPage = nullptr;
+			m_nMeasureThenWeldPageUnitIndex = -1;
+			for (const QPointer<RobotJogDialog>& guardedPage : m_robotJogPages.values())
+			{
+				delete guardedPage.data();
+			}
+			m_robotJogPages.clear();
+			m_pRobotJogPage = nullptr;
+			m_nRobotJogPageUnitIndex = -1;
+			delete m_pFunctionTestPage;
+			m_pFunctionTestPage = nullptr;
+			m_nFunctionTestPageUnitIndex = -1;
+			delete m_pVirtualWeldTestPage;
+			m_pVirtualWeldTestPage = nullptr;
+			m_nVirtualWeldTestPageUnitIndex = -1;
+			delete m_pProcessLoopTestPage;
+			m_pProcessLoopTestPage = nullptr;
+			delete m_pFtpJobManagementPage;
+			m_pFtpJobManagementPage = nullptr;
+			m_nFtpJobManagementPageUnitIndex = -1;
+			delete m_pCameraParamPage;
+			m_pCameraParamPage = nullptr;
+			m_sCameraParamPageRobotName.clear();
+			delete m_pPreciseMeasureEditPage;
+			m_pPreciseMeasureEditPage = nullptr;
+			CloseGrooveCameraPreviewWindow();
 			StopScanCameraRuntimes();
 			if (m_pContralUnit != nullptr)
 			{
@@ -10606,23 +11640,44 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 {
 	PageOpenTrace trace("FTP Job 文件");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开 FTP Job 文件管理")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "FTP Job 文件", "FTP Job 文件管理需要工程师或管理员权限。");
 		return;
 	}
+	const auto liveSessionGuard = [this]()
+	{
+		return ValidateCurrentAccountSession(QStringLiteral("提交 FTP Job 文件操作"))
+			&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer);
+	};
 
 	const int currentUnitIndex = CurrentRobotUnitIndex();
 	if (m_pManagementStack == nullptr)
 	{
 		CloseGrooveCameraPreviewWindow();
-		FtpJobManagementDialog dialog(m_pContralUnit, currentUnitIndex, this);
+		FtpJobManagementDialog dialog(
+			m_pContralUnit,
+			currentUnitIndex,
+			liveSessionGuard,
+			this);
 		dialog.exec();
 		return;
 	}
 
 	if (m_pFtpJobManagementPage != nullptr && m_nFtpJobManagementPageUnitIndex != currentUnitIndex)
 	{
+		FtpJobManagementDialog* ftpPage = static_cast<FtpJobManagementDialog*>(m_pFtpJobManagementPage);
+		if (ftpPage->IsBusy())
+		{
+			QMessageBox::information(this, "FTP Job 文件",
+				"FTP 操作仍在执行，完成前不能切换控制单元或销毁页面。");
+			ShowManagementEmbeddedPage(m_pFtpJobManagementPage);
+			return;
+		}
 		m_pManagementStack->removeWidget(m_pFtpJobManagementPage);
 		m_pFtpJobManagementPage->deleteLater();
 		m_pFtpJobManagementPage = nullptr;
@@ -10634,7 +11689,11 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 		return;
 	}
 
-	m_pFtpJobManagementPage = new FtpJobManagementDialog(m_pContralUnit, currentUnitIndex, m_pManagementStack);
+	m_pFtpJobManagementPage = new FtpJobManagementDialog(
+		m_pContralUnit,
+		currentUnitIndex,
+		liveSessionGuard,
+		m_pManagementStack);
 	m_nFtpJobManagementPageUnitIndex = currentUnitIndex;
 	PrepareEmbeddedPage(m_pFtpJobManagementPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pFtpJobManagementPage);
@@ -10643,6 +11702,10 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 {
 	PageOpenTrace trace("精测点云处理");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开精测点云处理")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "精测点云处理", "精测点云处理需要工程师或管理员权限。");
@@ -10661,7 +11724,17 @@ void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 		return;
 	}
 
-	m_pPrecisePointCloudProcessingPage = new LaserWeldFilterDialog(m_pManagementStack);
+	const auto liveSessionGuard = [this]()
+	{
+		// 角色先行短路，避免撤权关闭页面触发 finished->SaveSettings 时
+		// 再次进入会话撤销 UI；原生选择框返回时角色仍旧则继续同步查库。
+		return RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer)
+			&& ValidateCurrentAccountSession(QStringLiteral("保存精测点云与外部库设置"))
+			&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer);
+	};
+	m_pPrecisePointCloudProcessingPage = new LaserWeldFilterDialog(
+		liveSessionGuard,
+		m_pManagementStack);
 	PrepareEmbeddedPage(m_pPrecisePointCloudProcessingPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pPrecisePointCloudProcessingPage);
 }
@@ -10669,6 +11742,10 @@ void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 void QtWidgetsApplication4::OpenModelAlignmentPage()
 {
 	PageOpenTrace trace("模型配准");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开模型配准")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "模型配准", "模型配准 / 点云去噪需要工程师或管理员权限。");
@@ -10695,6 +11772,10 @@ void QtWidgetsApplication4::OpenModelAlignmentPage()
 void QtWidgetsApplication4::OpenWorkpieceMeshPage()
 {
 	PageOpenTrace trace("工件模型");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开工件模型")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "工件模型", "工件模型查看需要工程师或管理员权限。");
@@ -10721,6 +11802,10 @@ void QtWidgetsApplication4::OpenWorkpieceMeshPage()
 void QtWidgetsApplication4::OpenVirtualWeldTestPage()
 {
 	PageOpenTrace trace("虚拟焊道测试");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开虚拟焊道测试")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "虚拟焊道测试", "虚拟焊道测试需要工程师或管理员权限。");
@@ -10769,6 +11854,10 @@ void QtWidgetsApplication4::OpenVirtualWeldTestPage()
 void QtWidgetsApplication4::OpenConfigDatabaseViewerDialog()
 {
 	PageOpenTrace trace("配置数据库查看");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开配置数据库查看")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
 	{
 		QMessageBox::information(this, "配置数据库查看", "配置数据库查看仅管理员可用。");
@@ -10955,6 +12044,12 @@ void QtWidgetsApplication4::ShowManagementEmbeddedPage(QWidget* page)
 	{
 		return;
 	}
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开管理功能页"))
+		|| RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		RevokePrivilegedUiAccess();
+		return;
+	}
 	if (m_pManagementStack->currentWidget() != page)
 	{
 		CloseGrooveCameraPreviewWindow();
@@ -11031,9 +12126,10 @@ void QtWidgetsApplication4::OpenAboutDialog()
 	}
 	auto* dlg = new OnlineServicesDialog(
 		EnsureScanDataUploader(),
-		[this]() { return HasRunningMeasureThenWeldFlow(); },
+		[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 		true,
 		false,
+		{},
 		this);
 	dlg->setObjectName(QStringLiteral("OnlineServicesDialogAbout"));
 	dlg->setAttribute(Qt::WA_DeleteOnClose);
@@ -11071,6 +12167,31 @@ void QtWidgetsApplication4::CheckPendingUpdateResult()
 	OnlineServicesConfig::SetPendingUpdateTargetVersion(QString());  // 无论成败都清除，避免反复弹
 	if (current == target)
 	{
+		// updater 正等待新进程的健康握手。只有目标版本稳定运行 15 秒才原子写 health；
+		// 批处理在最长 30 秒内同时监控进程与该标记，提前退出会回滚旧 exe，成功后才由
+		// 批处理清 failure marker/backup。应用本身不能提前删除恢复件。
+		QTimer::singleShot(15000, this, [target]()
+			{
+				if (QApplication::applicationVersion() != target)
+				{
+					return;
+				}
+				const QString healthMarker = AppPaths::WritableChildPath(
+					QStringLiteral("Temp/OnlineUpdate"),
+					QStringLiteral("patch_healthy_%1.flag").arg(target));
+				if (healthMarker.isEmpty())
+				{
+					return;
+				}
+				QSaveFile marker(healthMarker);
+				const QByteArray content = target.toUtf8() + '\n';
+				if (!marker.open(QIODevice::WriteOnly)
+					|| marker.write(content) != content.size()
+					|| !marker.commit())
+				{
+					marker.cancelWriting();
+				}
+			});
 		return;  // 升级成功（版本已达目标），静默
 	}
 	// 版本没达到目标：补丁/安装没真正生效（如误挂了含旧 exe 的补丁——1004 那类问题）。
@@ -11128,50 +12249,19 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	{
 		QTextStream out(stdout);
 		ConfigureUtf8TextStream(out);
-		out << "QtWidgetsApplication4 command line options:\n";
-		out << "  --no-show                         不显示主窗口，适合自动测试\n";
-		out << "  --open-function-test              打开机器人功能测试窗口\n";
-		out << "  --open-jog                        打开机器人点动控制窗口\n";
-		out << "  --open-precise-measure            打开测量焊接参数窗口\n";
-		out << "  --open-camera-param               打开相机参数窗口\n";
-		out << "  --robot <UnitNo|RobotA|RobotB|中文名> 选择通用机器人CLI目标，默认当前/第一个可用机器人\n";
-		out << "  --robot-connect                   连接选中的机器人驱动\n";
-		out << "  --robot-movel <X,Y,Z,RX,RY,RZ[,BX,BY,BZ]> 发送直角 MOVL，默认速度500mm/min\n";
-		out << "  --robot-movel-relative <DX,DY,DZ[,DRX,DRY,DRZ,BX,BY,BZ]> 基于当前位置做直角相对MOVL\n";
-		out << "  --robot-movj <S,L,U,R,B,T[,EX1,EX2,EX3]> 发送关节脉冲 MOVJ，默认速度1%\n";
-		out << "  --robot-speed <VALUE>             覆盖本次运动速度，MOVL按mm/min，MOVJ按驱动百分比/约定\n";
-		out << "  --robot-done-delay <ms>           运动完成轮询间隔，默认200ms\n";
-		out << "  --robot-no-wait                   运动下发后不等待完成\n";
-		out << "  --fanuc-connect                   连接 FANUC 常驻服务端口\n";
-		out << "  --fanuc-upload-services           上传/编译 FANUC 服务库和固定 TP\n";
-		out << "  --skip-upload-wait                上传服务后不等待回车，自动化测试用\n";
-		out << "  --fanuc-curpos-diag               运行当前位置/PR20 诊断命令\n";
-		out << "  --fanuc-pr20-diag                 仅读取 FANUC PR[20] 诊断点\n";
-		out << "  --fanuc-raw <CMD>                 发送一条原始 FANUC 服务命令\n";
-		out << "  --fanuc-call <PROGRAM>            调用机器人程序\n";
-		out << "  --measure-then-weld-scan-only-repeat <N> 自动执行先测后焊扫描流程N次，仅到收枪安全位置，不执行焊接，目标机器人同--robot\n";
-		out << "  --measure-then-weld-scan-speed <mm/min> 覆盖本次CLI先测后焊扫描速度，不修改配置库\n";
-		out << "  --measure-then-weld-camera-offset-ms <ms> 覆盖本次CLI相机时间补偿，不修改配置库\n";
-		out << "  --laser-classify <FILE>           对激光点云做去噪/拟合/起终点拐点分类\n";
-		out << "  --laser-classify-dir <DIR>        批量处理目录下所有 PreciseLaserPoint.txt\n";
-		out << "  --laser-classify-output <FILE>    指定分类结果输出文件\n";
-		out << "  --rebuild-measure-weld-files <DIR> 从 LaserPoint 目录重建 PreservePath、焊接姿态和补偿文件，参数机器人同--robot\n";
-		out << "  --pointcloud-processing-mode <sdk|sdkfit|cloudfit|legacy> 仅本次CLI覆盖点云处理方式，不写入配置库\n";
-		out << "  --pointcloud-scan-direction <X,Y,Z> 仅本次CLI覆盖点云SDK扫描方向，用于离线测试\n";
-		out << "  --apply-weld-seam-comp <FILE>     对焊道姿态文件应用配置库中的焊道补偿\n";
-		out << "  --apply-weld-seam-comp-output <FILE> 指定补偿结果输出文件，默认另存 _SeamComp\n";
-		out << "  --generate-step-weld-program <FILE> 根据焊接姿态文件生成 STEP Weld_时间.srp/.srd，默认按实际焊接生成ARCON/ARCOFF\n";
-		out << "  --generate-step-weld-program-output-dir <DIR> 指定 STEP 焊接程序输出目录，默认 Job\\STEP\n";
-		out << "  --generate-step-weld-program-dry-run 按空跑轨迹生成 STEP 文件，不生成ARCON/ARCSET/ARCOFF焊接指令\n";
-		out << "  --test-pointwise-weave [shape amp freq] 离线测试pointwise摆动：造直线中心线跑摆动算法，输出 WeaveTest_centerline/weave.txt（默认 5 3 2，不连机器人）\n";
-		out << "  --generate-step-weld-speed <mm/min> 覆盖本次 STEP 文件轨迹速度，不修改配置库\n";
-		out << "  --update-weld-pose-average <FILE_OR_DIR> 离线统计四类焊道平均姿态并更新补偿姿态库\n";
-		out << "  --quit-after <ms>                 指定毫秒后退出程序\n";
+		WriteCliHelp(out);
 		out.flush();
 		QTimer::singleShot(0, QCoreApplication::instance(), &QCoreApplication::quit);
 		return;
 	}
 
+	const int pointCloudModeIndex = arguments.indexOf("--pointcloud-processing-mode");
+	if (pointCloudModeIndex >= 0 && pointCloudModeIndex + 1 >= arguments.size())
+	{
+		LogCommandLineMessage("CLI 点云处理方式覆盖缺少参数，请使用 sdk/sdkfit/cloudfit/legacy。");
+		QCoreApplication::exit(1);
+		return;
+	}
 	const QString pointCloudModeOverride = CliOptionValue(arguments, "--pointcloud-processing-mode").trimmed();
 	if (!pointCloudModeOverride.isEmpty())
 	{
@@ -11215,9 +12305,18 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		{
 			LogCommandLineMessage(QString("CLI 点云处理方式覆盖无效：%1，请使用 sdk/sdkfit/cloudfit/legacy。")
 				.arg(pointCloudModeOverride));
+			QCoreApplication::exit(1);
+			return;
 		}
 	}
 
+	const int pointCloudScanDirectionIndex = arguments.indexOf("--pointcloud-scan-direction");
+	if (pointCloudScanDirectionIndex >= 0 && pointCloudScanDirectionIndex + 1 >= arguments.size())
+	{
+		LogCommandLineMessage("CLI 点云SDK扫描方向覆盖缺少参数，请使用 X,Y,Z。");
+		QCoreApplication::exit(1);
+		return;
+	}
 	const QString pointCloudScanDirectionOverride = CliOptionValue(arguments, "--pointcloud-scan-direction").trimmed();
 	if (!pointCloudScanDirectionOverride.isEmpty())
 	{
@@ -11242,12 +12341,16 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			{
 				LogCommandLineMessage(QString("CLI 点云SDK扫描方向覆盖无效：%1，请使用 X,Y,Z 数值格式。")
 					.arg(pointCloudScanDirectionOverride));
+				QCoreApplication::exit(1);
+				return;
 			}
 		}
 		else
 		{
 			LogCommandLineMessage(QString("CLI 点云SDK扫描方向覆盖无效：%1，请使用 X,Y,Z 格式。")
 				.arg(pointCloudScanDirectionOverride));
+			QCoreApplication::exit(1);
+			return;
 		}
 	}
 
@@ -11310,62 +12413,126 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	}
 
 	const int laserClassifyIndex = arguments.indexOf("--laser-classify");
-	if (laserClassifyIndex >= 0 && laserClassifyIndex + 1 < arguments.size())
+	if (laserClassifyIndex >= 0)
 	{
+		if (laserClassifyIndex + 1 >= arguments.size())
+		{
+			LogCommandLineMessage("CLI 激光点云分类失败：--laser-classify 缺少文件参数。");
+			QCoreApplication::exit(1);
+			return;
+		}
 		const QString inputPath = arguments[laserClassifyIndex + 1];
 		QString outputPath;
 		const int laserOutputIndex = arguments.indexOf("--laser-classify-output");
-		if (laserOutputIndex >= 0 && laserOutputIndex + 1 < arguments.size())
+		if (laserOutputIndex >= 0)
 		{
+			if (laserOutputIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI 激光点云分类失败：--laser-classify-output 缺少文件参数。");
+				QCoreApplication::exit(1);
+				return;
+			}
 			outputPath = arguments[laserOutputIndex + 1];
 		}
-		RunLaserClassifyForCli(inputPath, outputPath);
-	}
-
-	const int laserClassifyDirIndex = arguments.indexOf("--laser-classify-dir");
-	if (laserClassifyDirIndex >= 0 && laserClassifyDirIndex + 1 < arguments.size())
-	{
-		RunLaserClassifyDirForCli(arguments[laserClassifyDirIndex + 1]);
-	}
-
-	const int rebuildMeasureWeldIndex = arguments.indexOf("--rebuild-measure-weld-files");
-	if (rebuildMeasureWeldIndex >= 0 && rebuildMeasureWeldIndex + 1 < arguments.size())
-	{
-		if (!RunRebuildMeasureWeldFilesForCli(arguments, arguments[rebuildMeasureWeldIndex + 1]))
+		if (!RunLaserClassifyForCli(inputPath, outputPath))
 		{
 			QCoreApplication::exit(1);
 			return;
 		}
 	}
 
-	const int weldSeamCompIndex = arguments.indexOf("--apply-weld-seam-comp");
-	if (weldSeamCompIndex >= 0 && weldSeamCompIndex + 1 < arguments.size())
+	const int laserClassifyDirIndex = arguments.indexOf("--laser-classify-dir");
+	if (laserClassifyDirIndex >= 0)
 	{
+		if (laserClassifyDirIndex + 1 >= arguments.size()
+			|| !RunLaserClassifyDirForCli(arguments[laserClassifyDirIndex + 1]))
+		{
+			if (laserClassifyDirIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI 批量激光点云分类失败：--laser-classify-dir 缺少目录参数。");
+			}
+			QCoreApplication::exit(1);
+			return;
+		}
+	}
+
+	const int rebuildMeasureWeldIndex = arguments.indexOf("--rebuild-measure-weld-files");
+	if (rebuildMeasureWeldIndex >= 0)
+	{
+		if (rebuildMeasureWeldIndex + 1 >= arguments.size()
+			|| !RunRebuildMeasureWeldFilesForCli(arguments, arguments[rebuildMeasureWeldIndex + 1]))
+		{
+			if (rebuildMeasureWeldIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI 先测后焊重建失败：--rebuild-measure-weld-files 缺少目录参数。");
+			}
+			QCoreApplication::exit(1);
+			return;
+		}
+	}
+
+	const int weldSeamCompIndex = arguments.indexOf("--apply-weld-seam-comp");
+	if (weldSeamCompIndex >= 0)
+	{
+		if (weldSeamCompIndex + 1 >= arguments.size())
+		{
+			LogCommandLineMessage("CLI 焊道补偿失败：--apply-weld-seam-comp 缺少文件参数。");
+			QCoreApplication::exit(1);
+			return;
+		}
 		const QString inputPath = arguments[weldSeamCompIndex + 1];
 		QString outputPath;
 		const int weldSeamCompOutputIndex = arguments.indexOf("--apply-weld-seam-comp-output");
-		if (weldSeamCompOutputIndex >= 0 && weldSeamCompOutputIndex + 1 < arguments.size())
+		if (weldSeamCompOutputIndex >= 0)
 		{
+			if (weldSeamCompOutputIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI 焊道补偿失败：--apply-weld-seam-comp-output 缺少文件参数。");
+				QCoreApplication::exit(1);
+				return;
+			}
 			outputPath = arguments[weldSeamCompOutputIndex + 1];
 		}
-		RunWeldSeamCompForCli(arguments, inputPath, outputPath);
+		if (!RunWeldSeamCompForCli(arguments, inputPath, outputPath))
+		{
+			QCoreApplication::exit(1);
+			return;
+		}
 	}
 
 	const int generateStepWeldIndex = arguments.indexOf("--generate-step-weld-program");
-	if (generateStepWeldIndex >= 0 && generateStepWeldIndex + 1 < arguments.size())
+	if (generateStepWeldIndex >= 0)
 	{
+		if (generateStepWeldIndex + 1 >= arguments.size())
+		{
+			LogCommandLineMessage("CLI STEP 焊接程序生成失败：--generate-step-weld-program 缺少文件参数。");
+			QCoreApplication::exit(1);
+			return;
+		}
 		const QString inputPath = arguments[generateStepWeldIndex + 1];
 		QString outputDir;
 		const int stepOutputDirIndex = arguments.indexOf("--generate-step-weld-program-output-dir");
-		if (stepOutputDirIndex >= 0 && stepOutputDirIndex + 1 < arguments.size())
+		if (stepOutputDirIndex >= 0)
 		{
+			if (stepOutputDirIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI STEP 焊接程序生成失败：--generate-step-weld-program-output-dir 缺少目录参数。");
+				QCoreApplication::exit(1);
+				return;
+			}
 			outputDir = arguments[stepOutputDirIndex + 1];
 		}
 
 		double weldSpeedMmPerMin = 0.0;
 		const int stepSpeedIndex = arguments.indexOf("--generate-step-weld-speed");
-		if (stepSpeedIndex >= 0 && stepSpeedIndex + 1 < arguments.size())
+		if (stepSpeedIndex >= 0)
 		{
+			if (stepSpeedIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI STEP 焊接程序生成失败：--generate-step-weld-speed 缺少速度参数。");
+				QCoreApplication::exit(1);
+				return;
+			}
 			bool ok = false;
 			weldSpeedMmPerMin = arguments[stepSpeedIndex + 1].toDouble(&ok);
 			if (!ok || !std::isfinite(weldSpeedMmPerMin) || weldSpeedMmPerMin <= 0.0)
@@ -11376,7 +12543,11 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		}
 
 		const bool actualWeld = !arguments.contains("--generate-step-weld-program-dry-run");
-		RunGenerateStepWeldProgramForCli(arguments, inputPath, outputDir, actualWeld, weldSpeedMmPerMin);
+		if (!RunGenerateStepWeldProgramForCli(arguments, inputPath, outputDir, actualWeld, weldSpeedMmPerMin))
+		{
+			QCoreApplication::exit(1);
+			return;
+		}
 	}
 
 	const int testPointwiseWeaveIndex = arguments.indexOf("--test-pointwise-weave");
@@ -11525,6 +12696,18 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	{
 		LogCommandLineMessage("CLI 未找到 FANUC 驱动，跳过 FANUC 命令。");
 	}
+	RobotOperationLease::Ptr fanucCliLease;
+	if (pFanucDriver != nullptr && needsFanuc)
+	{
+		QString leaseError;
+		fanucCliLease = RobotOperationLease::TryAcquire(
+			pFanucDriver, QStringLiteral("CLI FANUC 硬件操作"), &leaseError);
+		if (!fanucCliLease)
+		{
+			LogCommandLineMessage("CLI FANUC 操作已被互锁拦截：" + leaseError);
+			pFanucDriver = nullptr;
+		}
+	}
 	if (pFanucDriver != nullptr)
 	{
 		const bool needsSocket = arguments.contains("--fanuc-connect")
@@ -11573,7 +12756,18 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		{
 			if (arguments[i] == "--fanuc-raw" && i + 1 < arguments.size())
 			{
-				const QString command = arguments[++i];
+				const QString command = arguments[++i].trimmed();
+				const QString normalizedCommand = command.toUpper();
+				static const QRegularExpression readOnlyFanucCommand(
+					QStringLiteral("^(?:GET_[A-Z0-9_]+|CHECK_DONE)(?::[A-Z0-9_+.,-]+)?$"));
+				if (!readOnlyFanucCommand.match(normalizedCommand).hasMatch())
+				{
+					LogCommandLineMessage(QString(
+						"CLI FANUC RAW 已拒绝可能改变状态或触发运动的命令：%1。"
+						"RAW 仅允许 GET_* / CHECK_DONE 只读诊断；调用程序请使用 --fanuc-call（会等待真实完成）。")
+						.arg(command));
+					continue;
+				}
 				const std::string response = pFanucDriver->SendRawCommandForTest(command.toStdString());
 				LogCommandLineMessage(QString("CLI FANUC RAW %1 -> %2")
 					.arg(command, QString::fromStdString(response)));
@@ -11582,7 +12776,12 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			{
 				const QString program = arguments[++i];
 				const bool ok = pFanucDriver->CallJob(program.toStdString());
-				LogCommandLineMessage(QString("CLI FANUC CALL %1 -> %2").arg(program, ok ? "OK" : "FAIL"));
+				const int done = ok ? pFanucDriver->CheckRobotDone(200, 1800000) : -1;
+				const bool flowOk = ok && done > 0;
+				LogCommandLineMessage(QString("CLI FANUC CALL %1 -> %2，CheckRobotDone=%3，详情=%4")
+					.arg(program, flowOk ? "OK" : "FAIL")
+					.arg(done)
+					.arg(DecodeRobotMessageText(pFanucDriver->GetLastRobotError())));
 			}
 		}
 
@@ -11833,6 +13032,11 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 		LogCommandLineMessage(QString("CLI 机器人运动参数错误：%1").arg(parseError));
 		return;
 	}
+	if (speedSpecified && (!std::isfinite(speedOverride) || speedOverride <= 0.0))
+	{
+		LogCommandLineMessage("CLI 机器人运动参数错误：--robot-speed 必须是有限正数。");
+		return;
+	}
 
 	int doneDelayMs = 200;
 	bool doneDelaySpecified = false;
@@ -11849,6 +13053,19 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 	{
 		return;
 	}
+	const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr;
+	const auto linearCommandSpeed = [isFanucDriver](double speedMmPerMin)
+		{
+			if (!isFanucDriver)
+			{
+				return speedMmPerMin;
+			}
+			const double mmPerSec = speedMmPerMin / 60.0;
+			return mmPerSec >= 1.0 ? std::floor(mmPerSec) : 0.0;
+		};
+	const QString linearCommandSpeedUnit = isFanucDriver
+		? QStringLiteral("mm/sec")
+		: QStringLiteral("mm/min");
 
 	bool connected = driver->IsConnected();
 	if (!connected)
@@ -11870,7 +13087,20 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 		return;
 	}
 
-	const bool noWait = CliOptionContains(arguments, "--robot-no-wait");
+	const bool noWaitRequested = CliOptionContains(arguments, "--robot-no-wait");
+	if (noWaitRequested)
+	{
+		LogCommandLineMessage("CLI --robot-no-wait 已因全局硬件互锁禁用：本次仍会等待真实运动完成。");
+	}
+	const bool noWait = false;
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		driver, QStringLiteral("CLI 机器人运动"), &leaseError);
+	if (!operationLease)
+	{
+		LogCommandLineMessage("CLI 机器人运动已被互锁拦截：" + leaseError);
+		return;
+	}
 	bool executedMotion = false;
 	for (int i = 1; i < arguments.size(); ++i)
 	{
@@ -11902,13 +13132,41 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 			target.dBY = values.size() > 7 ? values[7] : 0.0;
 			target.dBZ = values.size() > 8 ? values[8] : 0.0;
 
-			const double moveSpeed = speedSpecified ? speedOverride : 500.0;
-			LogCommandLineMessage(QString("CLI MOVL下发：机器人=%1，速度=%2mm/min，目标=%3")
+			const double configuredSpeedMmPerMin = speedSpecified ? speedOverride : 500.0;
+			const double moveSpeed = linearCommandSpeed(configuredSpeedMmPerMin);
+			if (moveSpeed <= 0.0)
+			{
+				LogCommandLineMessage(
+					"CLI MOVL已拒绝：FANUC固定TP最低只能表示1mm/sec（60mm/min），禁止静默提速。");
+				continue;
+			}
+			T_ROBOT_COORS current;
+			if (!driver->TryGetCurrentPos(current))
+			{
+				LogCommandLineMessage("CLI MOVL已拒绝：读取当前机器人位置失败，"
+					+ DecodeRobotMessageText(driver->GetLastRobotError()));
+				continue;
+			}
+			int motionTimeoutMs = 0;
+			std::string admissionError;
+			if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
+				current,
+				target,
+				isFanucDriver ? moveSpeed * 60.0 : configuredSpeedMmPerMin,
+				motionTimeoutMs,
+				&admissionError))
+			{
+				LogCommandLineMessage("CLI MOVL已拒绝：" + QString::fromUtf8(admissionError.c_str()));
+				continue;
+			}
+			LogCommandLineMessage(QString("CLI MOVL下发：机器人=%1，配置速度=%2mm/min，下发速度=%3%4，目标=%5")
 				.arg(robotLabel)
+				.arg(configuredSpeedMmPerMin, 0, 'f', 3)
 				.arg(moveSpeed, 0, 'f', 3)
+				.arg(linearCommandSpeedUnit)
 				.arg(FormatCliCoors(target)));
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(moveSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
-			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs) : -1;
+			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs, motionTimeoutMs) : -1;
 			LogCommandLineMessage(QString("CLI MOVL结果：Move=%1%2，CheckRobotDone=%3，状态=%4，最近错误=%5")
 				.arg(moveOk ? "OK" : "FAIL")
 				.arg(noWait ? "，已跳过完成等待" : QString())
@@ -11933,7 +13191,13 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 				continue;
 			}
 
-			const T_ROBOT_COORS current = driver->GetCurrentPos();
+			T_ROBOT_COORS current;
+			if (!driver->TryGetCurrentPos(current))
+			{
+				LogCommandLineMessage("CLI 相对MOVL已拒绝：读取当前机器人位置失败，"
+					+ DecodeRobotMessageText(driver->GetLastRobotError()));
+				continue;
+			}
 			T_ROBOT_COORS target = current;
 			target.dX += values[0];
 			target.dY += values[1];
@@ -11945,14 +13209,35 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 			target.dBY += values.size() > 7 ? values[7] : 0.0;
 			target.dBZ += values.size() > 8 ? values[8] : 0.0;
 
-			const double moveSpeed = speedSpecified ? speedOverride : 500.0;
-			LogCommandLineMessage(QString("CLI 相对MOVL下发：机器人=%1，速度=%2mm/min，当前位置=%3，目标=%4")
+			const double configuredSpeedMmPerMin = speedSpecified ? speedOverride : 500.0;
+			const double moveSpeed = linearCommandSpeed(configuredSpeedMmPerMin);
+			if (moveSpeed <= 0.0)
+			{
+				LogCommandLineMessage(
+					"CLI 相对MOVL已拒绝：FANUC固定TP最低只能表示1mm/sec（60mm/min），禁止静默提速。");
+				continue;
+			}
+			int motionTimeoutMs = 0;
+			std::string admissionError;
+			if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
+				current,
+				target,
+				isFanucDriver ? moveSpeed * 60.0 : configuredSpeedMmPerMin,
+				motionTimeoutMs,
+				&admissionError))
+			{
+				LogCommandLineMessage("CLI 相对MOVL已拒绝：" + QString::fromUtf8(admissionError.c_str()));
+				continue;
+			}
+			LogCommandLineMessage(QString("CLI 相对MOVL下发：机器人=%1，配置速度=%2mm/min，下发速度=%3%4，当前位置=%5，目标=%6")
 				.arg(robotLabel)
+				.arg(configuredSpeedMmPerMin, 0, 'f', 3)
 				.arg(moveSpeed, 0, 'f', 3)
+				.arg(linearCommandSpeedUnit)
 				.arg(FormatCliCoors(current))
 				.arg(FormatCliCoors(target)));
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(moveSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
-			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs) : -1;
+			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs, motionTimeoutMs) : -1;
 			LogCommandLineMessage(QString("CLI 相对MOVL结果：Move=%1%2，CheckRobotDone=%3，状态=%4，最近错误=%5")
 				.arg(moveOk ? "OK" : "FAIL")
 				.arg(noWait ? "，已跳过完成等待" : QString())
@@ -11998,7 +13283,7 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 				.arg(moveSpeed, 0, 'f', 3)
 				.arg(FormatCliPulse(target)));
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(moveSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
-			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs) : -1;
+			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs, 1800000) : -1;
 			LogCommandLineMessage(QString("CLI MOVJ结果：Move=%1%2，CheckRobotDone=%3，状态=%4，最近错误=%5")
 				.arg(moveOk ? "OK" : "FAIL")
 				.arg(noWait ? "，已跳过完成等待" : QString())
@@ -12048,7 +13333,7 @@ bool QtWidgetsApplication4::UploadFanucServiceBundleForCli(FANUCRobotCtrl* pFanu
 	LogCommandLineMessage("CLI 开始上传 FANUC 服务文件");
 	for (const UploadItem& item : items)
 	{
-		const QString localPath = FindProjectFilePath(item.localRelativePath);
+		const QString localPath = FindInstalledResourcePath(item.localRelativePath);
 		if (localPath.isEmpty())
 		{
 			LogCommandLineMessage(QString("CLI 上传失败：未找到%1，文件=%2").arg(item.label, item.localRelativePath));
@@ -12125,7 +13410,7 @@ bool QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 	QFileInfo inputInfo(normalizedInputPath);
 	if (!inputInfo.isAbsolute())
 	{
-		inputInfo = QFileInfo(QDir::current().filePath(normalizedInputPath));
+		inputInfo = QFileInfo(AppPaths::CommandLinePath(normalizedInputPath));
 	}
 	if (!inputInfo.exists())
 	{
@@ -12164,7 +13449,7 @@ bool QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 		: QDir::fromNativeSeparators(outputPath.trimmed());
 	const QString classifiedOutputPath = QFileInfo(normalizedOutputPath).isAbsolute()
 		? QFileInfo(normalizedOutputPath).absoluteFilePath()
-		: QFileInfo(QDir::current().filePath(normalizedOutputPath)).absoluteFilePath();
+		: QFileInfo(AppPaths::CommandLinePath(normalizedOutputPath)).absoluteFilePath();
 	const QString noiseOutputPath = BuildNoiseOutputPath(classifiedOutputPath);
 	const QString keyPointsOutputPath = BuildKeyPointsOutputPath(classifiedOutputPath);
 	const QString cornerCompClassifiedOutputPath = BuildCornerCompClassifiedOutputPath(classifiedOutputPath);
@@ -12331,25 +13616,25 @@ bool QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 	return true;
 }
 
-void QtWidgetsApplication4::RunLaserClassifyDirForCli(const QString& dirPath) const
+bool QtWidgetsApplication4::RunLaserClassifyDirForCli(const QString& dirPath) const
 {
 	QString normalizedDirPath = QDir::fromNativeSeparators(dirPath.trimmed());
 	if (normalizedDirPath.isEmpty())
 	{
 		LogCommandLineMessage("CLI 批量激光点云分类失败：目录为空。");
-		return;
+		return false;
 	}
 
 	QDir rootDir(normalizedDirPath);
 	if (!rootDir.isAbsolute())
 	{
-		rootDir = QDir(QDir::current().filePath(normalizedDirPath));
+		rootDir = QDir(AppPaths::CommandLinePath(normalizedDirPath));
 	}
 	if (!rootDir.exists())
 	{
 		LogCommandLineMessage(QString("CLI 批量激光点云分类失败：未找到目录 %1")
 			.arg(QDir::toNativeSeparators(rootDir.absolutePath())));
-		return;
+		return false;
 	}
 
 	int totalCount = 0;
@@ -12386,6 +13671,12 @@ void QtWidgetsApplication4::RunLaserClassifyDirForCli(const QString& dirPath) co
 			LogCommandLineMessage("  " + failedFile);
 		}
 	}
+	if (totalCount <= 0)
+	{
+		LogCommandLineMessage("CLI 批量激光点云分类失败：目录内没有 PreciseLaserPoint.txt。");
+		return false;
+	}
+	return failedFiles.isEmpty();
 }
 
 bool QtWidgetsApplication4::RunRebuildMeasureWeldFilesForCli(
@@ -12402,7 +13693,7 @@ bool QtWidgetsApplication4::RunRebuildMeasureWeldFilesForCli(
 	QDir laserDir(normalizedDirPath);
 	if (!laserDir.isAbsolute())
 	{
-		laserDir = QDir(QDir::current().filePath(normalizedDirPath));
+		laserDir = QDir(AppPaths::CommandLinePath(normalizedDirPath));
 	}
 	if (!laserDir.exists())
 	{
@@ -12463,7 +13754,7 @@ bool QtWidgetsApplication4::RunRebuildMeasureWeldFilesForCli(
 	return true;
 }
 
-void QtWidgetsApplication4::RunWeldSeamCompForCli(
+bool QtWidgetsApplication4::RunWeldSeamCompForCli(
 	const QStringList& arguments,
 	const QString& inputPath,
 	const QString& outputPath) const
@@ -12472,19 +13763,19 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 	if (normalizedInputPath.isEmpty())
 	{
 		LogCommandLineMessage("CLI 焊道补偿失败：输入文件为空。");
-		return;
+		return false;
 	}
 
 	QFileInfo inputInfo(normalizedInputPath);
 	if (!inputInfo.isAbsolute())
 	{
-		inputInfo = QFileInfo(QDir::current().filePath(normalizedInputPath));
+		inputInfo = QFileInfo(AppPaths::CommandLinePath(normalizedInputPath));
 	}
 	if (!inputInfo.exists())
 	{
 		LogCommandLineMessage(QString("CLI 焊道补偿失败：未找到输入文件 %1")
 			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
-		return;
+		return false;
 	}
 
 	const QString normalizedOutputPath = outputPath.trimmed().isEmpty()
@@ -12492,7 +13783,7 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 		: QDir::fromNativeSeparators(outputPath.trimmed());
 	const QString resolvedOutputPath = QFileInfo(normalizedOutputPath).isAbsolute()
 		? QFileInfo(normalizedOutputPath).absoluteFilePath()
-		: QFileInfo(QDir::current().filePath(normalizedOutputPath)).absoluteFilePath();
+		: QFileInfo(AppPaths::CommandLinePath(normalizedOutputPath)).absoluteFilePath();
 
 	const Qt::CaseSensitivity pathCaseSensitivity =
 #ifdef Q_OS_WIN
@@ -12504,7 +13795,7 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 	{
 		LogCommandLineMessage(QString("CLI 焊道补偿失败：输出文件不能覆盖输入文件 %1")
 			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
-		return;
+		return false;
 	}
 
 	QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath(), QString());
@@ -12534,7 +13825,7 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 		error))
 	{
 		LogCommandLineMessage("CLI 焊道补偿失败：" + error);
-		return;
+		return false;
 	}
 
 	LogCommandLineMessage(QString("CLI 焊道补偿完成：输入=%1，输出=%2，机器人=%3")
@@ -12542,9 +13833,10 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 		.arg(QDir::toNativeSeparators(resolvedOutputPath))
 		.arg(robotName));
 	LogCommandLineMessage("CLI 焊道补偿摘要：" + summary);
+	return true;
 }
 
-void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
+bool QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 	const QStringList& arguments,
 	const QString& inputPath,
 	const QString& outputDir,
@@ -12555,19 +13847,19 @@ void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 	if (normalizedInputPath.isEmpty())
 	{
 		LogCommandLineMessage("CLI STEP焊接程序生成失败：输入文件为空。");
-		return;
+		return false;
 	}
 
 	QFileInfo inputInfo(normalizedInputPath);
 	if (!inputInfo.isAbsolute())
 	{
-		inputInfo = QFileInfo(QDir::current().filePath(normalizedInputPath));
+		inputInfo = QFileInfo(AppPaths::CommandLinePath(normalizedInputPath));
 	}
 	if (!inputInfo.exists())
 	{
 		LogCommandLineMessage(QString("CLI STEP焊接程序生成失败：未找到输入文件 %1")
 			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
-		return;
+		return false;
 	}
 
 	QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath(), QString());
@@ -12605,7 +13897,7 @@ void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 		error))
 	{
 		LogCommandLineMessage("CLI STEP焊接程序生成失败：" + error);
-		return;
+		return false;
 	}
 
 	LogCommandLineMessage(QString("CLI STEP焊接程序生成完成：输入=%1，机器人=%2，程序=%3")
@@ -12615,6 +13907,7 @@ void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 	LogCommandLineMessage("CLI STEP焊接程序摘要：" + summary);
 	LogCommandLineMessage("CLI STEP SRP：" + srpPath);
 	LogCommandLineMessage("CLI STEP SRD：" + srdPath);
+	return true;
 }
 
 void QtWidgetsApplication4::RunUpdateWeldPoseAverageForCli(const QString& inputPath) const
@@ -12653,6 +13946,14 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 	if (repeatCount <= 0)
 	{
 		LogCommandLineMessage("CLI 先测后焊扫描失败：重复次数必须大于0。");
+		return false;
+	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("CLI 先测后焊扫描"), &leaseError);
+	if (!operationLease)
+	{
+		LogCommandLineMessage("CLI 先测后焊扫描已被互锁拦截：" + leaseError);
 		return false;
 	}
 
@@ -12773,7 +14074,8 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 			QString caseDir = scanCycle.caseDir;
 			if (caseDir.isEmpty())
 			{
-				const QDir robotResultDir(QStringLiteral("Result/") + QString::fromStdString(param.sRobotName));
+				const QDir robotResultDir(AppPaths::WritablePath(
+					QStringLiteral("Result/") + QString::fromStdString(param.sRobotName)));
 				const QFileInfoList cases = robotResultDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
 				if (!cases.isEmpty())
 				{
@@ -12847,7 +14149,13 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 	const int total = settings.infinite ? 0 : settings.repeatCount;
 	int okCount = 0;
 	int failCount = 0;
-	auto stopped = [stopFlag]() { return stopFlag != nullptr && stopFlag->load(); };
+	// ProcessLoop 持有一个跨多轮的长租约。账号撤销后全局 gate 会关闭；
+	// 将它并入停止信号，允许当前动作执行安全收枪，但禁止焊接段和下一轮。
+	auto stopped = [stopFlag]()
+		{
+			return (stopFlag != nullptr && stopFlag->load())
+				|| !RobotOperationLease::NewOperationsAllowed();
+		};
 	auto emitLog = [&log](const QString& t) { if (log) { log(t); } };
 	auto emitProgress = [&](int iter, const QString& step, bool finished)
 		{ if (progress) { progress(iter, total, okCount, failCount, step, finished); } };
@@ -12896,7 +14204,13 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 	MeasureThenWeldService service;
 	for (int i = 1; settings.infinite || i <= settings.repeatCount; ++i)
 	{
-		if (stopped()) { emitLog(QStringLiteral("已手动停止。")); break; }
+		if (stopped())
+		{
+			emitLog(RobotOperationLease::NewOperationsAllowed()
+				? QStringLiteral("已手动停止。")
+				: QStringLiteral("账号会话已失效：当前动作安全结束后，不再开始下一轮机器人操作。"));
+			break;
+		}
 
 		T_PRECISE_MEASURE_PARAM param;
 		QString error;
@@ -12910,12 +14224,25 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 		if (settings.overrideScanSpeed && settings.scanSpeedMmPerMin > 0.0) { param.dScanSpeed = settings.scanSpeedMmPerMin; }
 		if (settings.overrideRunSpeed && settings.runSpeedMmPerMin > 0.0) { param.dRunSpeed = settings.runSpeedMmPerMin; }
 		if (settings.overrideCameraOffset) { param.dCameraTimeOffsetMs = settings.cameraTimeOffsetMs; }
+		if (settings.doWeld)
+		{
+			QString invalidateError;
+			if (!MeasureThenWeldService::InvalidateStoredWeldResumeCheckpoint(
+				QString::fromStdString(param.sRobotName), invalidateError))
+			{
+				++failCount;
+				emitLog(QStringLiteral("第%1次：使旧焊接断点失效失败，未开始机器人动作：%2")
+					.arg(i).arg(invalidateError));
+				emitProgress(i, QStringLiteral("断点失效失败"), false);
+				break;
+			}
+		}
 
 		// 记录本次开始前 Result/<机器人>/ 的最新案例目录：本次结束后若出现新目录，即产生了扫描数据。
 		// 点云分析失败的次数也要传原始扫描数据（非波纹板工件分析必失败，但原始激光点数据有效）。
 		auto newestCaseDir = [](const QString& robot) -> QString
 			{
-				const QDir dir(QStringLiteral("Result/") + robot);
+				const QDir dir(AppPaths::WritablePath(QStringLiteral("Result/") + robot));
 				const QFileInfoList cases = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time);
 				return cases.isEmpty() ? QString() : cases.first().absoluteFilePath();
 			};
@@ -12994,7 +14321,8 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 					driver, savedPath, param, weldSummary, weldError,
 					nullptr, nullptr, emitLog, stepCb, weldCheckpoint,
 					param.dFinalWeldTrajectoryStepMm, /*allowPointwiseWeave=*/true,
-					/*resumeSkipPoints=*/0, stopped);
+					MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
+					/*resumeStartArcMm=*/-1.0, /*inputAlreadyInExecutionOrder=*/false, stopped);
 				emitLog(ok
 					? QStringLiteral("第%1次焊接完成：%2").arg(i).arg(weldSummary)
 					: QStringLiteral("第%1次焊接失败/中止：%2").arg(i).arg(weldError));
@@ -13112,27 +14440,7 @@ void QtWidgetsApplication4::OpenProcessLoopTestPage()
 
 	ProcessLoopTestDialog* loopPage = new ProcessLoopTestDialog(m_pContralUnit, CurrentRobotUnitIndex(),
 		loadDefaults, runner, m_pManagementStack);
-	// 互锁：先测后焊页流程 / 虚拟焊道测试在跑时，拦下流程测试开始（同机同驱动会冲突）。
-	loopPage->SetPreStartGuard([this](QString& reason) -> bool
-		{
-			for (const QPointer<MeasureThenWeldDialog>& guardedPage : m_measureThenWeldPages.values())
-			{
-				if (const MeasureThenWeldDialog* page = guardedPage.data())
-				{
-					if (page->IsRunning())
-					{
-						reason = QStringLiteral("先测后焊流程正在运行，请等待其结束后再开始流程测试。");
-						return false;
-					}
-				}
-			}
-			if (m_pVirtualWeldTestPage != nullptr && m_pVirtualWeldTestPage->IsRunning())
-			{
-				reason = QStringLiteral("虚拟焊道测试正在运行，请等待其结束后再开始流程测试。");
-				return false;
-			}
-			return true;
-		});
+	// 同机互锁由 ProcessLoopTestDialog::OnStart 的原子租约完成；不同机器人允许并行。
 	m_pProcessLoopTestPage = loopPage;
 	PrepareEmbeddedPage(m_pProcessLoopTestPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pProcessLoopTestPage);
@@ -13453,6 +14761,14 @@ bool QtWidgetsApplication4::EnsureScanCameraRunningForUnit(int unitIndex, QStrin
 	{
 		if (runtime == nullptr || !runtime->running || !m_scanCameraReceiversByPort.contains(cameraPort))
 		{
+			// 共享接收拓扑重建会删除所有单元的 CameraFrameCache。任一机器人流程持租约时
+			// 都必须失败关闭，不能为了修当前单元而让另一单元出现悬垂缓存指针。
+			if (RobotOperationLease::AnyActive())
+			{
+				m_sGrooveCameraStatusText = QString("相机接收拓扑缺失，但机器人硬件操作正在运行（%1），已禁止全局重建。")
+					.arg(RobotOperationLease::ActiveSummary());
+				return false;
+			}
 			StopScanCameraRuntimes();
 			InitializeScanCameraRuntimes();
 			runtime = m_scanCameraRuntimes.value(unitIndex, nullptr);
@@ -13606,7 +14922,7 @@ void QtWidgetsApplication4::LoadRobotLogFile(const QString& relativePath, bool f
 		resolvedRelative = QString("Log/%1/%2").arg(logDay, relativePath.mid(4));
 	}
 
-	const QString filePath = FindProjectFilePath(resolvedRelative);
+	const QString filePath = AppPaths::WritablePath(resolvedRelative);
 	if (filePath.isEmpty())
 	{
 		if (forceRefresh || m_sLastRobotLogFilePath != resolvedRelative)
@@ -13662,7 +14978,7 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 	if (m_pGroovePointCloudDialog == nullptr)
 	{
 		constexpr int kSkjCameraControlPort = 50006;
-		auto ensureControlTarget = [this, kSkjCameraControlPort](QString* error) -> bool
+			auto ensureControlTarget = [this, kSkjCameraControlPort](QString* error) -> bool
 		{
 			const int unitIndex = CurrentRobotUnitIndex();
 			QString cameraIP;
@@ -13680,26 +14996,50 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 			{
 				m_skjCameraControlClient = new SKJCameraControlClient();
 			}
-			return m_skjCameraControlClient->EnsureConnected(cameraIP, kSkjCameraControlPort, error);
-		};
-		auto refreshCameraParams = [this, ensureControlTarget](SKJCameraParameterValues& values, QString* error) -> bool
+				return m_skjCameraControlClient->EnsureConnected(cameraIP, kSkjCameraControlPort, error);
+			};
+		auto acquireCameraOperation = [this](const QString& owner, QString* error) -> RobotOperationLease::Ptr
+			{
+				const T_CONTRAL_UNIT* unit = CurrentContralUnit();
+				RobotDriverAdaptor* driver = unit != nullptr
+					? static_cast<RobotDriverAdaptor*>(unit->pUnitDriver)
+					: nullptr;
+				return RobotOperationLease::TryAcquire(driver, owner, error);
+			};
+		auto refreshCameraParams = [this, ensureControlTarget, acquireCameraOperation](SKJCameraParameterValues& values, QString* error) -> bool
 		{
+			const auto operationLease = acquireCameraOperation(QStringLiteral("读取相机参数"), error);
+			if (!operationLease)
+			{
+				return false;
+			}
 			if (!ensureControlTarget(error) || m_skjCameraControlClient == nullptr)
 			{
 				return false;
 			}
 			return m_skjCameraControlClient->ReadParameters(values, error);
 		};
-		auto setCameraParam = [this, ensureControlTarget](SKJCameraControlClient::Parameter parameter, int value, QString* error) -> bool
+		auto setCameraParam = [this, ensureControlTarget, acquireCameraOperation](SKJCameraControlClient::Parameter parameter, int value, QString* error) -> bool
 		{
+			const auto operationLease = acquireCameraOperation(QStringLiteral("修改相机参数"), error);
+			if (!operationLease)
+			{
+				return false;
+			}
 			if (!ensureControlTarget(error) || m_skjCameraControlClient == nullptr)
 			{
 				return false;
 			}
 			return m_skjCameraControlClient->SetParameter(parameter, value, error);
 		};
-		auto setLaserEnabled = [this, ensureControlTarget](bool enabled, QString* error) -> bool
+		auto setLaserEnabled = [this, ensureControlTarget, acquireCameraOperation](bool enabled, QString* error) -> bool
 		{
+			const auto operationLease = acquireCameraOperation(
+				enabled ? QStringLiteral("开启相机激光") : QStringLiteral("关闭相机激光"), error);
+			if (!operationLease)
+			{
+				return false;
+			}
 			if (m_skjCameraControlClient != nullptr)
 			{
 				m_skjCameraControlClient->Disconnect();
@@ -13811,6 +15151,16 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 		}
 		QString cameraIP;
 		const int unitIndex = CurrentRobotUnitIndex();
+		RobotDriverAdaptor* cameraDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, unitIndex);
+		const QString cameraOwner = RobotOperationLease::CurrentOwner(cameraDriver);
+		if (!cameraOwner.isEmpty())
+		{
+			QMessageBox::warning(this, "坡口相机测试",
+				QString("当前机器人正在执行“%1”，不能打开预览并清空本轮相机缓存。").arg(cameraOwner));
+			ui.GrooveCameraTestBtn->setChecked(false);
+			RefreshRobotOperationAvailability();
+			return;
+		}
 		if (!EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true))
 		{
 			QMessageBox::warning(this, "坡口相机测试", "未读取到当前机器人扫描相机的 DeviceAddress。");
@@ -13840,14 +15190,42 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 				m_sGrooveCameraStatusText);
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->RefreshCameraControlParams();
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetImageTransportToggleHandler(
-				[this](bool enabled)
+				[this, unitIndex](bool enabled)
 				{
-					const int toggleUnitIndex = CurrentRobotUnitIndex();
+					RobotDriverAdaptor* toggleDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, unitIndex);
+					QString leaseError;
+					const auto cameraSettingLease = RobotOperationLease::TryAcquire(
+						toggleDriver, QStringLiteral("相机图像传输设置"), &leaseError);
+					if (!cameraSettingLease)
+					{
+						if (m_pGroovePointCloudDialog != nullptr)
+						{
+							static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ShowCameraControlMessage(
+								leaseError + " 图像传输设置未下发。", false);
+						}
+						return;
+					}
+					const int toggleUnitIndex = unitIndex;
 					CameraRuntime* toggleRuntime = m_scanCameraRuntimes.value(toggleUnitIndex, nullptr);
 					if (toggleRuntime != nullptr && toggleRuntime->tcpWorker != nullptr)
 					{
-						QMetaObject::invokeMethod(toggleRuntime->tcpWorker, "setImageTransportEnabled",
-							Qt::QueuedConnection, Q_ARG(bool, enabled));
+						QPointer<ScanCameraSkjWorker> worker(toggleRuntime->tcpWorker);
+						if (worker->thread() == QThread::currentThread())
+						{
+							worker->setImageTransportEnabled(enabled);
+						}
+						else
+						{
+							// 图像口连接可能触发 SDK 网络超时，不能用 BlockingQueuedConnection
+							// 卡住 GUI 和固定红色 STOP；租约随 queued functor 保持到实际执行结束。
+							QMetaObject::invokeMethod(worker.data(), [worker, enabled, cameraSettingLease]()
+								{
+									if (worker != nullptr)
+									{
+										worker->setImageTransportEnabled(enabled);
+									}
+								}, Qt::QueuedConnection);
+						}
 					}
 					else if (CameraFrameCache* toggleCache = ScanCameraCacheForUnit(toggleUnitIndex))
 					{
@@ -13863,7 +15241,24 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 					// 已缓冲未取走的帧（skjcamera.h SetFrameBufferCount 注释），扫描流程运行中
 					// 只存不发（写 cache 待相机重连生效），避免采集中途清 FIFO 静默丢帧。
 					MeasureThenWeldRuntimeConfig::SaveSkjFrameBufferCount(count);
-					const bool flowRunning = HasRunningMeasureThenWeldFlow();
+					std::vector<std::pair<int, RobotOperationLease::Ptr>> cameraSettingLeases;
+					bool canApplyNow = !HasRunningMeasureThenWeldFlow();
+					if (canApplyNow)
+					{
+						for (auto it = m_scanCameraRuntimes.constBegin(); it != m_scanCameraRuntimes.constEnd(); ++it)
+						{
+							RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, it.key());
+							QString leaseError;
+							auto lease = RobotOperationLease::TryAcquire(
+								driver, QStringLiteral("相机接收缓冲设置"), &leaseError);
+							if (!lease)
+							{
+								canApplyNow = false;
+								break;
+							}
+							cameraSettingLeases.emplace_back(it.key(), std::move(lease));
+						}
+					}
 					for (auto it = m_scanCameraRuntimes.constBegin(); it != m_scanCameraRuntimes.constEnd(); ++it)
 					{
 						CameraRuntime* bufferRuntime = it.value();
@@ -13871,10 +15266,29 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 						{
 							continue;
 						}
-						if (!flowRunning && bufferRuntime->tcpWorker != nullptr)
+						if (canApplyNow && bufferRuntime->tcpWorker != nullptr)
 						{
-							QMetaObject::invokeMethod(bufferRuntime->tcpWorker, "setFrameBufferCount",
-								Qt::QueuedConnection, Q_ARG(int, count));
+							const auto leaseIt = std::find_if(
+								cameraSettingLeases.cbegin(), cameraSettingLeases.cend(),
+								[unitIndex = it.key()](const auto& entry) { return entry.first == unitIndex; });
+							const RobotOperationLease::Ptr settingLease = leaseIt != cameraSettingLeases.cend()
+								? leaseIt->second
+								: RobotOperationLease::Ptr();
+							QPointer<ScanCameraSkjWorker> worker(bufferRuntime->tcpWorker);
+							if (worker->thread() == QThread::currentThread())
+							{
+								worker->setFrameBufferCount(count);
+							}
+							else
+							{
+								QMetaObject::invokeMethod(worker.data(), [worker, count, settingLease]()
+									{
+										if (worker != nullptr)
+										{
+											worker->setFrameBufferCount(count);
+										}
+									}, Qt::QueuedConnection);
+							}
 						}
 						else if (bufferRuntime->cache != nullptr)
 						{
@@ -13884,9 +15298,9 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 					if (m_pGroovePointCloudDialog != nullptr)
 					{
 						static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ShowCameraControlMessage(
-							flowRunning
+							!canApplyNow
 								? QString("接收缓冲帧数已保存为 %1：扫描流程运行中不打断采集，相机下次连接时生效。").arg(count)
-								: QString("接收缓冲帧数已应用：%1").arg(count),
+								: QString("接收缓冲帧数已排队应用：%1").arg(count),
 							true);
 					}
 				});
@@ -14059,6 +15473,14 @@ void QtWidgetsApplication4::RobotRunTest()
 		QMessageBox::warning(this, "测试程序", "当前控制单元未创建驱动。");
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriverAdaptor, QStringLiteral("上传机器人测试服务"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "测试程序", leaseError);
+		return;
+	}
 
 	FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
 	if (pFanucDriver != nullptr)
@@ -14069,14 +15491,14 @@ void QtWidgetsApplication4::RobotRunTest()
 			QMessageBox::warning(this, "FANUC测试程序", "停止常驻服务失败，可能服务已经停止或网络未连接。\n将继续上传文件，上传完成后请在示教器重新运行 STARTALL。");
 		}
 
-		const QString serviceLibPath = FindProjectFilePath("SDK/FANUC/FanucServiceLib.kl");
-		const QString residentServicePath = FindProjectFilePath("SDK/FANUC/FanucResidentService.kl");
-		const QString monitorServicePath = FindProjectFilePath("SDK/FANUC/FanucMonitorService.kl");
-		const QString jobRunnerPath = FindProjectFilePath("SDK/FANUC/FanucJobRunner.kl");
-		const QString loadJogBufferPath = FindProjectFilePath("SDK/FANUC/LOADJOGBUF.kl");
-		const QString startAllPath = FindProjectFilePath("SDK/FANUC/STARTALL.tp");
-		const QString joglPath = FindProjectFilePath("SDK/FANUC/FANUC_JOGL.ls");
-		const QString jogjPath = FindProjectFilePath("SDK/FANUC/FANUC_JOGJ.ls");
+		const QString serviceLibPath = FindInstalledResourcePath("SDK/FANUC/FanucServiceLib.kl");
+		const QString residentServicePath = FindInstalledResourcePath("SDK/FANUC/FanucResidentService.kl");
+		const QString monitorServicePath = FindInstalledResourcePath("SDK/FANUC/FanucMonitorService.kl");
+		const QString jobRunnerPath = FindInstalledResourcePath("SDK/FANUC/FanucJobRunner.kl");
+		const QString loadJogBufferPath = FindInstalledResourcePath("SDK/FANUC/LOADJOGBUF.kl");
+		const QString startAllPath = FindInstalledResourcePath("SDK/FANUC/STARTALL.tp");
+		const QString joglPath = FindInstalledResourcePath("SDK/FANUC/FANUC_JOGL.ls");
+		const QString jogjPath = FindInstalledResourcePath("SDK/FANUC/FANUC_JOGJ.ls");
 		if (serviceLibPath.isEmpty() || residentServicePath.isEmpty() || monitorServicePath.isEmpty() || jobRunnerPath.isEmpty() || loadJogBufferPath.isEmpty() || startAllPath.isEmpty() || joglPath.isEmpty() || jogjPath.isEmpty())
 		{
 			QMessageBox::warning(this, "FANUC测试程序", "未找到测试程序文件：FanucServiceLib.kl / FanucResidentService.kl / FanucMonitorService.kl / FanucJobRunner.kl / LOADJOGBUF.kl / STARTALL.tp / FANUC_JOGL.ls / FANUC_JOGJ.ls");
@@ -14235,6 +15657,13 @@ void QtWidgetsApplication4::OpenFunctionTestDialog()
 	QStackedWidget* targetStack = CurrentEmbeddedTargetStack();
 	if (m_pFunctionTestPage != nullptr && m_nFunctionTestPageUnitIndex != currentUnitIndex)
 	{
+		if (RobotOperationLease::AnyActive())
+		{
+			QMessageBox::warning(this, "功能测试",
+				QString("机器人硬件操作正在运行（%1），不能切换功能测试目标。")
+					.arg(RobotOperationLease::ActiveSummary()));
+			return;
+		}
 		delete m_pFunctionTestPage;
 		m_pFunctionTestPage = nullptr;
 	}
@@ -14303,6 +15732,11 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 	QPointer<MeasureThenWeldDialog> existingPage = m_measureThenWeldPages.value(currentUnitIndex);
 	if (existingPage != nullptr)
 	{
+		existingPage->setProperty("_requires_live_account_session", true);
+		existingPage->SetLiveSessionGuard([this]()
+			{
+				return ValidateCurrentAccountSession(QStringLiteral("继续先测后焊流程"));
+			});
 		existingPage->ReloadSelectors();
 		existingPage->show();
 		existingPage->raise();
@@ -14320,17 +15754,20 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		cameraCacheForUnit,
 		this);
 	page->setWindowModality(Qt::NonModal);
-	// 互锁：流程测试正在跑时，拦下先测后焊启动（同机同驱动会冲突）。
-	page->SetPreStartGuard([this](QString& reason) -> bool
+	page->setProperty("_requires_live_account_session", true);
+	page->SetLiveSessionGuard([this]()
 		{
-			if (const ProcessLoopTestDialog* loopPage =
-				qobject_cast<const ProcessLoopTestDialog*>(m_pProcessLoopTestPage))
+			return ValidateCurrentAccountSession(QStringLiteral("继续先测后焊流程"));
+		});
+	// 提前展示同机占用者；真正的无竞态互锁仍由流程入口 TryAcquire 完成。
+	page->SetPreStartGuard([this, currentUnitIndex](QString& reason) -> bool
+		{
+			RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, currentUnitIndex);
+			const QString owner = RobotOperationLease::CurrentOwner(driver);
+			if (!owner.isEmpty())
 			{
-				if (loopPage->IsRunning())
-				{
-					reason = QStringLiteral("流程测试正在运行，请先停止流程测试再开始先测后焊。");
-					return false;
-				}
+				reason = QString("当前机器人正在执行“%1”，请等待其安全结束。").arg(owner);
+				return false;
 			}
 			return true;
 		});
@@ -14401,6 +15838,7 @@ void QtWidgetsApplication4::OpenPositionTeachDialog()
 		true,
 		[this]() { StartGrooveCameraPreview(); });
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	dialog->setProperty("_requires_live_account_session", true);
 	ApplyDebugLogVisibility(dialog);
 	dialog->show();
 	dialog->raise();
@@ -14433,15 +15871,17 @@ void QtWidgetsApplication4::OpenResultArchiveDialog()
 	// 已打开则前置，避免多个实例（弹窗带后台压缩线程）。
 	if (ResultArchiveDialog* existing = findChild<ResultArchiveDialog*>())
 	{
+		existing->setProperty("_requires_live_account_session", true);
 		existing->show();
 		existing->raise();
 		existing->activateWindow();
 		return;
 	}
-	const QString resultRoot = QDir::current().absoluteFilePath(QStringLiteral("Result"));
+	const QString resultRoot = AppPaths::WritablePath(QStringLiteral("Result"));
 	QDir().mkpath(resultRoot);
 	auto* dlg = new ResultArchiveDialog(resultRoot, this);
 	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->setProperty("_requires_live_account_session", true);
 	dlg->show();
 }
 
@@ -14469,9 +15909,14 @@ void QtWidgetsApplication4::OpenOnlineServicesDialog()
 	{
 		OnlineServicesDialog dialog(
 			EnsureScanDataUploader(),
-			[this]() { return HasRunningMeasureThenWeldFlow(); },
+			[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 			false,
 			remoteAllowed,
+			[this]()
+			{
+				return ValidateCurrentAccountSession(QStringLiteral("执行在线服务管理员操作"))
+					&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
+			},
 			this);
 		dialog.exec();
 		return;
@@ -14493,9 +15938,14 @@ void QtWidgetsApplication4::OpenOnlineServicesDialog()
 
 	m_pOnlineServicesPage = new OnlineServicesDialog(
 		EnsureScanDataUploader(),
-		[this]() { return HasRunningMeasureThenWeldFlow(); },
+		[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 		false,
 		remoteAllowed,
+		[this]()
+		{
+			return ValidateCurrentAccountSession(QStringLiteral("执行在线服务管理员操作"))
+				&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
+		},
 		m_pManagementStack);
 	m_bOnlineServicesPageRemoteAllowed = remoteAllowed;
 	PrepareEmbeddedPage(m_pOnlineServicesPage, m_pManagementStack);
@@ -14576,6 +16026,14 @@ void QtWidgetsApplication4::FanucConnectTest()
 		QMessageBox::information(this, "机器人连接", "当前机器人已经连接。");
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("连接机器人"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "机器人连接", leaseError);
+		return;
+	}
 
 	const bool ok = pRobotDriver->InitSocket(pRobotDriver->m_sSocketIP.c_str(), static_cast<unsigned short>(pRobotDriver->m_nSocketPort));
 	int ftpRet = -1;
@@ -14629,6 +16087,14 @@ void QtWidgetsApplication4::FanucDisconnectTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("断开机器人连接"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "机器人断开", leaseError);
+		return;
+	}
 
 	bool ok = true;
 	if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
@@ -14654,6 +16120,14 @@ void QtWidgetsApplication4::RobotClearAlarmTest()
 		RefreshDashboardConnectionState();
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("清除报警并上使能"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "清除报警", leaseError);
+		return;
+	}
 	const bool ok = pRobotDriver->cleanAlarm();
 	const bool servoOk = ok ? pRobotDriver->ServoOn() : false;
 	if (pRobotDriver->m_pRobotLog != nullptr)
@@ -14672,8 +16146,166 @@ void QtWidgetsApplication4::RobotClearAlarmTest()
 			: "清除报警失败，请查看日志或示教器报警。");
 }
 
+void QtWidgetsApplication4::RobotEmergencyStop()
+{
+	struct StopTarget
+	{
+		RobotDriverAdaptor* driver = nullptr;
+		QString owner;
+	};
+	struct StopResult
+	{
+		QString label;
+		bool ok = false;
+		QString detail;
+	};
+
+	const auto latchedTargets = RobotOperationLease::LatchGlobalCancellation();
+	std::vector<StopTarget> targets;
+	targets.reserve(latchedTargets.size());
+	for (const RobotOperationLease::CancellationTarget& target : latchedTargets)
+	{
+		RobotDriverAdaptor* driver = const_cast<RobotDriverAdaptor*>(target.driver);
+		if (driver == nullptr)
+		{
+			continue;
+		}
+		targets.push_back(StopTarget{ driver, target.owner });
+	}
+
+	if (targets.empty())
+	{
+		QMessageBox::information(this, "安全停止", "当前没有本软件跟踪的活动机器人硬件流程。");
+		return;
+	}
+
+	if (m_pDashboardEmergencyStopBtn != nullptr)
+	{
+		m_pDashboardEmergencyStopBtn->setEnabled(false);
+		m_pDashboardEmergencyStopBtn->setText("正在安全停止所有本软件活动机器人任务...");
+	}
+
+	QPointer<QtWidgetsApplication4> self(this);
+	std::thread([self, targets = std::move(targets)]() mutable
+		{
+			std::vector<StopResult> results(targets.size());
+			std::vector<std::thread> workers;
+			workers.reserve(targets.size());
+			for (size_t index = 0; index < targets.size(); ++index)
+			{
+				workers.emplace_back([index, &targets, &results]()
+					{
+						RobotDriverAdaptor* driver = targets[index].driver;
+						QString label = QString::fromStdString(driver->m_sCustomName).trimmed();
+						if (label.isEmpty())
+						{
+							label = QString::fromStdString(driver->m_sRobotName).trimmed();
+						}
+						if (label.isEmpty())
+						{
+							label = QString::fromStdString(driver->m_sSocketIP);
+						}
+						bool ok = false;
+						if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(driver))
+						{
+							ok = fanucDriver->Prog_stop_Py();
+						}
+						else if (STEPRobotCtrl* stepDriver = dynamic_cast<STEPRobotCtrl*>(driver))
+						{
+							ok = stepDriver->AbortCurrentProgram();
+						}
+						else
+						{
+							driver->SetLastRobotError("当前机器人驱动没有可验证的安全终止实现。");
+						}
+						results[index] = StopResult{
+							label,
+							ok,
+							DecodeRobotMessageText(driver->GetLastRobotError())
+						};
+						if (driver->m_pRobotLog != nullptr)
+						{
+							driver->m_pRobotLog->write(
+								ok ? LogColor::SUCCESS : LogColor::ERR,
+								"全局安全停止 result=%d owner=%s",
+								ok ? 1 : 0,
+								targets[index].owner.toLocal8Bit().constData());
+						}
+						// 清除闭锁后 UI 可能立即允许重载并销毁 driver；必须把它放在
+						// 本 worker 对 driver 的最后一次访问。
+						if (ok)
+						{
+							RobotOperationLease::MarkMotionCompleted(driver);
+							RobotOperationLease::ConfirmCancellationHandled(driver);
+						}
+					});
+			}
+			for (std::thread& worker : workers)
+			{
+				worker.join();
+			}
+
+			QMetaObject::invokeMethod(qApp, [self, results = std::move(results)]()
+				{
+					if (self == nullptr)
+					{
+						return;
+					}
+					QStringList lines;
+					bool allOk = true;
+					for (const StopResult& result : results)
+					{
+						allOk = allOk && result.ok;
+						lines << (result.ok
+							? QString("%1：本软件任务已取消，机器人侧已确认其程序终止或不存在").arg(result.label)
+							: QString("%1：停机未确认，已保持全局闭锁。%2").arg(result.label, result.detail));
+					}
+					if (self->m_pDashboardEmergencyStopBtn != nullptr)
+					{
+						self->m_pDashboardEmergencyStopBtn->setText("安全停止所有本软件活动机器人任务（不可从主页删除）");
+						self->m_pDashboardEmergencyStopBtn->setEnabled(true);
+					}
+					if (allOk)
+					{
+						QMessageBox::information(self, "安全停止", lines.join('\n'));
+					}
+					else
+					{
+						// 停机未确认时红色按钮必须立即可重试；非模态提示不能截断 STOP。
+						QMessageBox* warning = new QMessageBox(
+							QMessageBox::Critical,
+							"安全停止未完全确认",
+							lines.join('\n'),
+							QMessageBox::Ok,
+							self);
+						warning->setAttribute(Qt::WA_DeleteOnClose);
+						warning->setWindowModality(Qt::NonModal);
+						warning->show();
+						if (self->ui.statusBar != nullptr)
+						{
+							self->ui.statusBar->showMessage(
+								"安全停止尚未全部确认；全局闭锁保留，可立即再次点击红色按钮重试。",
+								15000);
+						}
+					}
+					self->RefreshDashboardConnectionState();
+				}, Qt::QueuedConnection);
+		}).detach();
+}
+
 void QtWidgetsApplication4::RobotSwitchStepMode()
 {
+	if (RobotOperationLease::AnyActive())
+	{
+		if (ui.statusBar != nullptr)
+		{
+			ui.statusBar->showMessage(
+				QString("机器人硬件操作正在运行（%1）；STEP 模式输入已冻结。")
+					.arg(RobotOperationLease::ActiveSummary()),
+				8000);
+		}
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14702,9 +16334,7 @@ void QtWidgetsApplication4::RobotSwitchStepMode()
 		{ "手动模式 (MANUAL=1)", MODEKEY::MANUAL },
 		{ "自动模式 (AUTO=2)", MODEKEY::AUTO },
 		{ "外部自动模式 (AUTO_EXT=3)", MODEKEY::AUTO_EXT },
-		{ "开始/运行 (START=4)", MODEKEY::START },
-		{ "停止 (STOP=23)", MODEKEY::STOP },
-		{ "停止点动 (MSTOP=100)", MODEKEY::MSTOP }
+		{ "开始/运行 (START=4)", MODEKEY::START }
 	};
 	QStringList modeItems;
 	for (const StepModeOption& option : options)
@@ -14755,6 +16385,60 @@ void QtWidgetsApplication4::RobotSwitchStepMode()
 		}
 	}
 
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("切换 STEP 机器人模式"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "模式切换", leaseError);
+		return;
+	}
+
+	if (selectedMode == MODEKEY::START)
+	{
+		QPointer<QtWidgetsApplication4> self(this);
+		std::thread([self, pRobotDriver, pStepDriver, selectedMode, operationLease]()
+			{
+				const bool modeOk = pStepDriver->SetSysMode(selectedMode);
+				const int startDone = modeOk ? pStepDriver->CheckRobotDone(200, 1800000) : -1;
+				const bool flowOk = modeOk && startDone > 0;
+				if (pRobotDriver->m_pRobotLog != nullptr)
+				{
+					pRobotDriver->m_pRobotLog->write(
+						flowOk ? LogColor::SUCCESS : LogColor::WARNING,
+						"主页STEP模式切换 | mode=%d(%s) result=%d done=%d",
+						selectedMode, GetModeText(selectedMode), flowOk ? 1 : 0, startDone);
+				}
+				const QString errorText = flowOk
+					? QString()
+					: DecodeRobotMessageText(pStepDriver->GetLastRobotError());
+				QMetaObject::invokeMethod(qApp, [self, flowOk, startDone, errorText]()
+					{
+						if (self == nullptr)
+						{
+							return;
+						}
+						const QString resultText = flowOk
+							? QString("新时达机器人 START 流程已结束，CheckRobotDone=%1").arg(startDone)
+							: (errorText.isEmpty()
+								? QStringLiteral("新时达 START 失败，请查看日志或示教器报警。")
+								: QString("新时达 START 失败：%1").arg(errorText));
+						if (self->ui.statusBar != nullptr)
+						{
+							self->ui.statusBar->showMessage(resultText, 15000);
+						}
+						self->RefreshDashboardConnectionState();
+					}, Qt::QueuedConnection);
+			}).detach();
+		if (ui.statusBar != nullptr)
+		{
+			ui.statusBar->show();
+			ui.statusBar->showMessage(
+				"STEP START 已在后台执行；如需终止，请使用主页固定红色安全停止按钮。", 8000);
+		}
+		return;
+	}
+
 	const bool modeOk = pStepDriver->SetSysMode(selectedMode);
 	if (pRobotDriver->m_pRobotLog != nullptr)
 	{
@@ -14770,7 +16454,8 @@ void QtWidgetsApplication4::RobotSwitchStepMode()
 		QMessageBox::information(
 			this,
 			"模式切换",
-			QString("新时达机器人已切换到：%1").arg(QString::fromUtf8(GetModeText(selectedMode))));
+			QString("新时达机器人已切换到：%1")
+				.arg(QString::fromUtf8(GetModeText(selectedMode))));
 	}
 	else
 	{
@@ -14797,6 +16482,14 @@ void QtWidgetsApplication4::ReadTool1ToGunTool()
 	if (unitInfo == nullptr)
 	{
 		QMessageBox::warning(this, "读取Tool1", "未找到当前机器人配置，无法写入枪工具参数。");
+		return;
+	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("读取 Tool1 并写入枪工具"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "读取Tool1", leaseError);
 		return;
 	}
 
@@ -14873,6 +16566,10 @@ void QtWidgetsApplication4::ReadTool1ToGunTool()
 
 void QtWidgetsApplication4::FanucGetCurrentPosTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("读取当前位置")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14889,6 +16586,10 @@ void QtWidgetsApplication4::FanucGetCurrentPosTest()
 
 void QtWidgetsApplication4::FanucGetCurrentPulseTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("读取关节脉冲")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14906,6 +16607,10 @@ void QtWidgetsApplication4::FanucGetCurrentPulseTest()
 
 void QtWidgetsApplication4::FanucCheckDoneTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("检查运行完成")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14918,6 +16623,10 @@ void QtWidgetsApplication4::FanucCheckDoneTest()
 
 void QtWidgetsApplication4::FanucSetGetIntTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("写读 INT 寄存器")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14936,6 +16645,14 @@ void QtWidgetsApplication4::FanucSetGetIntTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页写读寄存器"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "写读INT寄存器", leaseError);
+		return;
+	}
 
 	if (!pRobotDriver->SetIntVar(index, value))
 	{
@@ -14949,6 +16666,10 @@ void QtWidgetsApplication4::FanucSetGetIntTest()
 
 void QtWidgetsApplication4::FanucSetTpSpeedTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("设置速度")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14961,6 +16682,14 @@ void QtWidgetsApplication4::FanucSetTpSpeedTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页设置 TP 速度"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "设置速度", leaseError);
+		return;
+	}
 
 	const bool setOk = pRobotDriver->SetTpSpeed(speed);
 	const std::string message = setOk ? GetStr("设置速度成功：%d", speed) : GetStr("设置速度失败：%d", speed);
@@ -14969,6 +16698,10 @@ void QtWidgetsApplication4::FanucSetTpSpeedTest()
 
 void QtWidgetsApplication4::FanucCallJobTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("调用任务")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -14981,22 +16714,67 @@ void QtWidgetsApplication4::FanucCallJobTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页调用机器人任务"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "调用任务", leaseError);
+		return;
+	}
 
 	const QByteArray jobNameBytes = jobName.trimmed().toLocal8Bit();
-	const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
-	const std::string message = callOk ? GetStr("调用任务成功：%s", jobNameBytes.constData()) : GetStr("调用任务失败：%s", jobNameBytes.constData());
-	QMessageBox::information(this, "调用任务", DecodeRobotMessageText(message));
+	QPointer<QtWidgetsApplication4> self(this);
+	std::thread([self, pRobotDriver, jobNameBytes, operationLease]()
+		{
+			const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
+			const int done = callOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
+			const bool flowOk = callOk && done > 0;
+			const QString detail = DecodeRobotMessageText(pRobotDriver->GetLastRobotError());
+			const QString message = flowOk
+				? QString("调用任务完成：%1，CheckRobotDone=%2")
+					.arg(QString::fromLocal8Bit(jobNameBytes)).arg(done)
+				: QString("调用任务失败：%1，CallJob=%2，CheckRobotDone=%3，详情=%4")
+					.arg(QString::fromLocal8Bit(jobNameBytes))
+					.arg(callOk ? QStringLiteral("OK") : QStringLiteral("FAIL"))
+					.arg(done)
+					.arg(detail);
+			QMetaObject::invokeMethod(qApp, [self, message, flowOk]()
+				{
+					if (self == nullptr)
+					{
+						return;
+					}
+					if (self->ui.statusBar != nullptr)
+					{
+						self->ui.statusBar->showMessage(
+							(flowOk ? QStringLiteral("成功：") : QStringLiteral("失败：")) + message,
+							12000);
+					}
+					self->RefreshDashboardConnectionState();
+				}, Qt::QueuedConnection);
+		}).detach();
+	if (ui.statusBar != nullptr)
+	{
+		ui.statusBar->show();
+		ui.statusBar->showMessage(
+			QString("任务 %1 已在后台执行；主页停止按钮仍可立即中止。").arg(jobName.trimmed()), 8000);
+	}
 }
 
 void QtWidgetsApplication4::FanucUploadLsTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("发送 LS 程序")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
 		return;
 	}
 
-	const QString lsPath = FindProjectFilePath("SDK/FANUC/STARTALL.ls");
+	const QString lsPath = FindInstalledResourcePath("SDK/FANUC/STARTALL.ls");
 	if (lsPath.isEmpty())
 	{
 		QMessageBox::warning(this, "发送LS程序", "未找到测试程序文件：SDK/FANUC/STARTALL.ls");
@@ -15008,6 +16786,14 @@ void QtWidgetsApplication4::FanucUploadLsTest()
 	if (pFanucDriver == nullptr)
 	{
 		QMessageBox::information(this, "发送LS程序", "LS 编译/上传是 FANUC 专用功能；STEP 请使用通用 FTP 上传或焊道下发流程。");
+		return;
+	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pFanucDriver, QStringLiteral("主页上传 LS 程序"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "发送LS程序", leaseError);
 		return;
 	}
 	const int ret = pFanucDriver->UploadLsFile(lsPathBytes.constData());
@@ -15023,6 +16809,10 @@ void QtWidgetsApplication4::FanucUploadLsTest()
 
 void QtWidgetsApplication4::FanucMovlTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("MOVL 测试")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -15033,19 +16823,32 @@ void QtWidgetsApplication4::FanucMovlTest()
 		QMessageBox::information(this, "MOVL往返测试", "MOVL测试正在执行，请等本次运动结束。");
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页 MOVL 测试"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "MOVL往返测试", leaseError);
+		return;
+	}
 
 	const bool moveForward = m_bFanucMovlForward;
 	m_bFanucMovlForward = !m_bFanucMovlForward;
 	m_bFanucMovlRunning = true;
 	ui.FanucMovlTestBtn->setEnabled(false);
 
-	std::thread([this, pRobotDriver, moveForward]()
+	std::thread([this, pRobotDriver, moveForward, operationLease]()
 		{
-			T_ROBOT_COORS target = pRobotDriver->GetCurrentPos();
-			target.dY += moveForward ? 100.0 : -100.0;
+			T_ROBOT_COORS target;
+			const bool currentOk = pRobotDriver->TryGetCurrentPos(target);
+			if (currentOk)
+			{
+				target.dY += moveForward ? 100.0 : -100.0;
+			}
 
-			const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
-			const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+			const bool moveOk = currentOk
+				&& pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
+			const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
 			const QString message = QString("MOVL %1 100mm\nMove=%2\nCheckRobotDone=%3")
 				.arg(moveForward ? "Y+" : "Y-")
 				.arg(moveOk ? "OK" : "FAIL")
@@ -15055,13 +16858,21 @@ void QtWidgetsApplication4::FanucMovlTest()
 				{
 					m_bFanucMovlRunning = false;
 					ui.FanucMovlTestBtn->setEnabled(true);
-					QMessageBox::information(this, "MOVL往返测试", message);
+					if (ui.statusBar != nullptr)
+					{
+						ui.statusBar->showMessage(message, 12000);
+					}
+					RefreshDashboardConnectionState();
 				}, Qt::QueuedConnection);
 		}).detach();
 }
 
 void QtWidgetsApplication4::FanucMovjTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("MOVJ 测试")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -15072,22 +16883,35 @@ void QtWidgetsApplication4::FanucMovjTest()
 		QMessageBox::information(this, "MOVJ测试", "MOVJ测试正在执行，请等本次运动结束。");
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页 MOVJ 测试"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "MOVJ测试", leaseError);
+		return;
+	}
 
 	m_bFanucMovjRunning = true;
 	ui.FanucMovjTestBtn->setEnabled(false);
 
-	std::thread([this, pRobotDriver]()
+	std::thread([this, pRobotDriver, operationLease]()
 		{
-			T_ANGLE_PULSE target = pRobotDriver->GetCurrentPulse();
+			T_ANGLE_PULSE target;
+			const bool currentOk = pRobotDriver->TryGetCurrentPulse(target);
 			const double j2PulseUnit = pRobotDriver->m_tAxisUnit.dLPulseUnit;
 			const double j3PulseUnit = pRobotDriver->m_tAxisUnit.dUPulseUnit;
 			const long j2DeltaPulse = j2PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j2PulseUnit));
 			const long j3DeltaPulse = j3PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j3PulseUnit));
-			target.nLPulse += j2DeltaPulse;
-			target.nUPulse += j3DeltaPulse;
+			if (currentOk)
+			{
+				target.nLPulse += j2DeltaPulse;
+				target.nUPulse += j3DeltaPulse;
+			}
 
-			const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
-			const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+			const bool moveOk = currentOk
+				&& pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
+			const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
 			const QString message = QString("MOVJ J2/J3 +5deg\nJ2DeltaPulse=%1\nJ3DeltaPulse=%2\nMove=%3\nCheckRobotDone=%4\n提示：固定TP当前用R[17]%，测试速度取1%%。")
 				.arg(j2DeltaPulse)
 				.arg(j3DeltaPulse)
@@ -15098,13 +16922,21 @@ void QtWidgetsApplication4::FanucMovjTest()
 				{
 					m_bFanucMovjRunning = false;
 					ui.FanucMovjTestBtn->setEnabled(true);
-					QMessageBox::information(this, "MOVJ测试", message);
+					if (ui.statusBar != nullptr)
+					{
+						ui.statusBar->showMessage(message, 12000);
+					}
+					RefreshDashboardConnectionState();
 				}, Qt::QueuedConnection);
 		}).detach();
 }
 
 void QtWidgetsApplication4::FanucMoveZeroTest()
 {
+	if (!EnsureRobotUiActionIdle(QStringLiteral("运动到零位")))
+	{
+		return;
+	}
 	RobotDriverAdaptor* pRobotDriver = GetCurrentRobotDriver(this);
 	if (pRobotDriver == nullptr)
 	{
@@ -15126,16 +16958,24 @@ void QtWidgetsApplication4::FanucMoveZeroTest()
 	{
 		return;
 	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		pRobotDriver, QStringLiteral("主页运动到零位"), &leaseError);
+	if (!operationLease)
+	{
+		QMessageBox::warning(this, "运动到零位", leaseError);
+		return;
+	}
 
 	m_bFanucMoveZeroRunning = true;
 	ui.FanucMoveZeroBtn->setEnabled(false);
 
-	std::thread([this, pRobotDriver]()
+	std::thread([this, pRobotDriver, operationLease]()
 		{
 			const T_ANGLE_PULSE zeroPulse = T_ANGLE_PULSE();
 			const T_ROBOT_MOVE_SPEED speed(1.0, 0.0, 0.0);
 			const bool moveOk = pRobotDriver->MoveByJob(zeroPulse, speed, pRobotDriver->m_nExternalAxleType, "MOVJ");
-			const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+			const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
 			const T_ROBOT_COORS pos = pRobotDriver->GetCurrentPos();
 			const T_ANGLE_PULSE pulse = pRobotDriver->GetCurrentPulse();
 
@@ -15169,7 +17009,11 @@ void QtWidgetsApplication4::FanucMoveZeroTest()
 				{
 					m_bFanucMoveZeroRunning = false;
 					ui.FanucMoveZeroBtn->setEnabled(true);
-					QMessageBox::information(this, "运动到零位", message);
+					if (ui.statusBar != nullptr)
+					{
+						ui.statusBar->showMessage(message, 15000);
+					}
+					RefreshDashboardConnectionState();
 				}, Qt::QueuedConnection);
 		}).detach();
 }
@@ -15191,6 +17035,7 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 	QPointer<RobotJogDialog> existingPage = m_robotJogPages.value(currentUnitIndex);
 	if (existingPage != nullptr)
 	{
+		existingPage->setProperty("_requires_live_account_session", true);
 		existingPage->show();
 		existingPage->raise();
 		existingPage->activateWindow();
@@ -15201,6 +17046,7 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 
 	RobotJogDialog* page = new RobotJogDialog(pRobotDriver, this);
 	page->setWindowModality(Qt::NonModal);
+	page->setProperty("_requires_live_account_session", true);
 	m_robotJogPages.insert(currentUnitIndex, page);
 	m_pRobotJogPage = page;
 	m_nRobotJogPageUnitIndex = currentUnitIndex;

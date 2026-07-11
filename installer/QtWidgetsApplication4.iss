@@ -4,10 +4,10 @@
 ; {localappdata} 在别的盘装出第二份（2026-07-10 事故）。一台设备只装一个通道，共用无害。
 #define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.07.10.1750"
+  #define MyAppVersion "2026.07.12.0606"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.07.10.1750"
+  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.07.12.0606"
 #endif
 #define MyAppPublisher "海瞰智焊"
 #define MyAppExeName "HK-Pathlynx-CORPLA.exe"
@@ -50,8 +50,8 @@ Name: "{app}\Data"
 ; SDK\STEP\versions（.lib 链接期产物与 SRS 机器人系统升级包）不随安装包分发，升级包按需另发现场。
 Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "Data\*,SDK\STEP\versions\*"
 ; 旧 INI/TXT 参数迁移工具，现场机器无需安装 Python。
-Source: "..\dist\tools\ConfigMigrate.exe"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir: "{app}\tools"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\dist\tools\ConfigMigrate.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
+Source: "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir: "{app}\tools"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\branding\app_nobg.ico"

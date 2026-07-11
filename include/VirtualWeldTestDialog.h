@@ -13,6 +13,7 @@ class QCheckBox;
 class QPushButton;
 class QPlainTextEdit;
 class QLabel;
+class QCloseEvent;
 
 // 调试用「虚拟焊道测试」页签（管理界面 → 调试）：
 // 取机器人当前位姿 → 沿 ±Y 造一条长度/点间距可调的虚拟直线焊道 →
@@ -29,6 +30,9 @@ public:
     // 运行态查询（供主窗口在切换机器人/关闭程序前拦截，避免删除正在驱动机器人的页面或并发下发）。
     bool IsRunning() const { return m_running; }
 
+protected:
+    void closeEvent(QCloseEvent* event) override;
+
 private slots:
     void OnReadCurrentPos();
     void OnGenerate();
@@ -44,6 +48,7 @@ private:
     void LoadWeldProcessList();
     void AppendLog(const QString& text);
     void SetRunning(bool running);
+    void InvalidateGeneratedTrajectory();
 
     ContralUnit* m_pContralUnit = nullptr;
     int m_unitIndex = 0;

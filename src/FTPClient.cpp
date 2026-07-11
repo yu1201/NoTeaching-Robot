@@ -351,7 +351,7 @@ bool FtpClient::uploadFileWithProgress(const std::string& localFilePath,
     const std::string& remoteFilePath,
     std::atomic<bool>* cancelFlag,
     const std::function<void(long long sent, long long total)>& progressCb,
-    bool deleteBeforeUpload)
+    bool allowRemoteDelete)
 {
     auto cancelled = [cancelFlag]() { return cancelFlag != nullptr && cancelFlag->load(); };
 
@@ -366,9 +366,19 @@ bool FtpClient::uploadFileWithProgress(const std::string& localFilePath,
         closeFtpSession();
         return false;
     }
-    _fseeki64(fp, 0, SEEK_END);
+    if (_fseeki64(fp, 0, SEEK_END) != 0) {
+        m_log->write(LogColor::ERR, "分块上传无法定位本地文件末尾：%s", localFilePath.c_str());
+        fclose(fp);
+        closeFtpSession();
+        return false;
+    }
     const long long total = _ftelli64(fp);
-    _fseeki64(fp, 0, SEEK_SET);
+    if (total < 0 || _fseeki64(fp, 0, SEEK_SET) != 0) {
+        m_log->write(LogColor::ERR, "分块上传无法读取本地文件大小：%s", localFilePath.c_str());
+        fclose(fp);
+        closeFtpSession();
+        return false;
+    }
 
     // 确保远程父目录存在。
     const std::string remoteParentDir = getParentDir(remoteFilePath);
@@ -379,7 +389,7 @@ bool FtpClient::uploadFileWithProgress(const std::string& localFilePath,
         return false;
     }
 
-    if (deleteBeforeUpload) {
+    if (allowRemoteDelete) {
         FtpDeleteFileA(m_hFtpSession, remoteFilePath.c_str());  // 静默删旧文件，失败无妨（可能不存在）
     }
 
@@ -398,23 +408,31 @@ bool FtpClient::uploadFileWithProgress(const std::string& localFilePath,
         progressCb(0, total);
     }
 
-    // 取消/失败时删除服务器上的半截文件。
-    auto cleanupPartial = [this, &remoteFilePath]() {
-        FtpDeleteFileA(m_hFtpSession, remoteFilePath.c_str());
+    // 管理员账号可主动删半截文件；写一次 uploader 不发送被服务器拒绝的 DELE。
+    // 提前 EOF 仍可能收到 FTP 226，因此残件靠声明长度隐藏并由服务器定期清理。
+    auto cleanupPartial = [this, &remoteFilePath, allowRemoteDelete]() {
+        return allowRemoteDelete && FtpDeleteFileA(m_hFtpSession, remoteFilePath.c_str()) != FALSE;
     };
 
     const size_t kChunk = 256 * 1024;  // 256KB/块：足够块间检查取消/更新进度，又不过碎
     std::vector<char> buf(kChunk);
     long long sent = 0;
     bool ok = true;
-    while (true) {
+    while (sent < total) {
         if (cancelled()) {
             ok = false;
             break;
         }
-        const size_t nread = fread(buf.data(), 1, kChunk, fp);
+        const size_t remaining = static_cast<size_t>(
+            std::min<long long>(static_cast<long long>(kChunk), total - sent));
+        const size_t nread = fread(buf.data(), 1, remaining, fp);
         if (nread == 0) {
-            break;  // 读完
+            m_log->write(LogColor::ERR, ferror(fp)
+                ? "分块上传读取本地文件失败 @%lld/%lld：%s"
+                : "分块上传本地文件提前结束 @%lld/%lld：%s",
+                sent, total, localFilePath.c_str());
+            ok = false;
+            break;
         }
         DWORD written = 0;
         if (!InternetWriteFile(hRemote, buf.data(), static_cast<DWORD>(nread), &written) || written != nread) {
@@ -429,18 +447,31 @@ bool FtpClient::uploadFileWithProgress(const std::string& localFilePath,
         }
     }
 
-    fclose(fp);
-    InternetCloseHandle(hRemote);
+    if (sent != total) {
+        ok = false;
+    }
+    const bool localClosed = fclose(fp) == 0;
+    const bool remoteClosed = InternetCloseHandle(hRemote) != FALSE;
+    if (!localClosed || !remoteClosed) {
+        m_log->write(LogColor::ERR, "分块上传最终关闭失败 @%lld/%lld：%s", sent, total,
+            remoteFilePath.c_str());
+        ok = false;
+    }
 
-    if (!ok || cancelled()) {
-        cleanupPartial();
+    if (!ok) {
+        const bool partialDeleted = cleanupPartial();
         m_log->write(cancelled() ? LogColor::DEFAULT : LogColor::ERR,
-            "分块上传%s，已删除服务器半截文件：%s",
+            partialDeleted
+                ? "分块上传%s，已删除服务器半截文件：%s"
+                : "分块上传%s，未发送远程删除命令；唯一残件可能暂存至服务器定期清理：%s",
             cancelled() ? "被取消" : "失败", remoteFilePath.c_str());
         return false;
     }
 
-    m_log->write(LogColor::SUCCESS, "分块上传完成 | %lld 字节 | 远程：%s", sent, remoteFilePath.c_str());
+    m_log->write(LogColor::SUCCESS, cancelled()
+        ? "分块上传完成（随后收到取消，仅停止后续项） | %lld 字节 | 远程：%s"
+        : "分块上传完成 | %lld 字节 | 远程：%s",
+        sent, remoteFilePath.c_str());
     return true;
 }
 

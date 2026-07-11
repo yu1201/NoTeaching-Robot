@@ -1,5 +1,6 @@
 #include "RobotDataHelper.h"
 
+#include "AppPaths.h"
 #include "ConfigDatabase.h"
 #include "ContralUnit.h"
 #include "OPini.h"
@@ -11,6 +12,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QStringList>
 #include <QStringConverter>
 #include <QTextStream>
@@ -183,6 +185,7 @@ QStringList DefaultWeldParamLines()
         << "WeldSafeMoveSpeedMmPerMin=1000 ;下枪/收枪安全位移动速度(mm/min)"
         << "StepOverlapRel=20 ;STEP连续过渡比例(OVERLAPREL)"
         << "FinalWeldTrajectoryStepMm=4 ;最终焊接轨迹抽样间距(mm)，只影响生成/下发轨迹点"
+        << "ResumeBacktrackDistanceMm=5 ;断点续焊搭接回退距离(mm，按实际执行轨迹弧长)"
         << "WeldDirection=1 ;焊接方向：1起点到终点，-1终点到起点"
         << ""
         << "#坐标和枪角"
@@ -282,43 +285,20 @@ bool EnsureDefaultLinesInSection(COPini& ini, const QString& sectionName, const 
 
 QString RobotDataHelper::FindProjectRootPath()
 {
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth)
-    {
-        if (QFileInfo::exists(dir.filePath("QtWidgetsApplication4.sln")))
-        {
-            return ToNativeAbsolutePath(dir.absolutePath());
-        }
-        if (!dir.cdUp())
-        {
-            break;
-        }
-    }
-    return ToNativeAbsolutePath(QDir::currentPath());
+    return QDir::toNativeSeparators(AppPaths::DataRootPath());
 }
 
 QString RobotDataHelper::FindProjectFilePath(const QString& relativePath)
 {
-    QDir dir(QCoreApplication::applicationDirPath());
-    for (int depth = 0; depth < 6; ++depth)
-    {
-        const QString candidate = dir.filePath(relativePath);
-        if (QFileInfo::exists(candidate))
-        {
-            return ToNativeAbsolutePath(candidate);
-        }
-        if (!dir.cdUp())
-        {
-            break;
-        }
-    }
-    return QString();
+    const QString existingPath = AppPaths::FindResourcePath(relativePath);
+    return existingPath.isEmpty()
+        ? QString()
+        : QDir::toNativeSeparators(existingPath);
 }
 
 QString RobotDataHelper::BuildProjectPath(const QString& relativePath)
 {
-    const QString root = FindProjectRootPath();
-    return ToNativeAbsolutePath(QDir(root).filePath(relativePath));
+    return QDir::toNativeSeparators(AppPaths::WritablePath(relativePath));
 }
 
 // ===== 激光点文件 =====
@@ -417,8 +397,8 @@ bool RobotDataHelper::SaveTextFileLines(const QString& filePath, const QStringLi
     QFileInfo info(filePath);
     QDir().mkpath(info.absolutePath());
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    QSaveFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
     {
         if (error != nullptr)
         {
@@ -432,6 +412,15 @@ bool RobotDataHelper::SaveTextFileLines(const QString& filePath, const QStringLi
     for (const QString& line : lines)
     {
         stream << line << "\n";
+    }
+    stream.flush();
+    if (stream.status() != QTextStream::Ok || !file.commit())
+    {
+        if (error != nullptr)
+        {
+            *error = "原子提交文本文件失败: " + ToNativeAbsolutePath(filePath);
+        }
+        return false;
     }
     return true;
 }

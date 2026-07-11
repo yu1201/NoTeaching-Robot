@@ -1,8 +1,12 @@
 #include "ConfigDatabase.h"
 
+#include "AppPaths.h"
+#include "CredentialSecurity.h"
+
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QRandomGenerator>
@@ -12,10 +16,12 @@
 #include <QThread>
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace
 {
-constexpr char kSchemaVersion[] = "4";
+constexpr char kSchemaVersion[] = "5";
+constexpr char kAuthenticationSemanticVersion[] = "2";
 constexpr char kSecret[] = "NoTeachingRobotConfigStoreV1";
 
 struct ScopedSettingIdentity
@@ -33,7 +39,10 @@ QString NormalizeSection(const QString& sectionName);
 QString NormalizeSourceKey(const QString& keyName);
 ScopedSettingIdentity BuildScopedFileIdentity(const QString& fileName, const QString& keyName = QString());
 ScopedSettingIdentity BuildScopedIniIdentity(const QString& fileName, const QString& sectionName, const QString& keyName);
+bool WriteScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& identity, const QString& value);
 bool EnsureCurrentSchema(QSqlDatabase& db);
+bool HasLegacyDiskConfigurationInputs(const QString& databasePath);
+bool HasUnsafePlaintextConfigStoreResidue(const QString& databasePath);
 
 QString ConnectionName()
 {
@@ -43,44 +52,7 @@ QString ConnectionName()
 
 QString FindProjectRoot()
 {
-    QStringList bases;
-    if (QCoreApplication::instance() != nullptr)
-    {
-        bases << QCoreApplication::applicationDirPath();
-    }
-    bases << QDir::currentPath();
-
-    QString firstDataRoot;
-    for (const QString& base : bases)
-    {
-        QDir dir(base);
-        for (int depth = 0; depth < 8; ++depth)
-        {
-            const QString dataPath = dir.filePath("Data");
-            const QFileInfo dataInfo(dataPath);
-            if (dataInfo.exists() && dataInfo.isDir())
-            {
-                if (firstDataRoot.isEmpty())
-                {
-                    firstDataRoot = dir.absolutePath();
-                }
-                if (QFileInfo::exists(QDir(dataPath).filePath("ConfigStore.db")))
-                {
-                    return dir.absolutePath();
-                }
-            }
-            if (!dir.cdUp())
-            {
-                break;
-            }
-        }
-    }
-
-    if (!firstDataRoot.isEmpty())
-    {
-        return firstDataRoot;
-    }
-    return QDir::currentPath();
+    return AppPaths::DataRootPath();
 }
 
 QSqlDatabase OpenDatabase()
@@ -88,14 +60,29 @@ QSqlDatabase OpenDatabase()
     const QString connectionName = ConnectionName();
     if (QSqlDatabase::contains(connectionName))
     {
-        QSqlDatabase db = QSqlDatabase::database(connectionName);
+        QSqlDatabase db = QSqlDatabase::database(connectionName, false);
         if (db.isOpen())
         {
             return db;
         }
+        if (!QFileInfo::exists(db.databaseName())
+            && (HasLegacyDiskConfigurationInputs(db.databaseName())
+                || HasUnsafePlaintextConfigStoreResidue(db.databaseName())))
+        {
+            qCritical() << "Legacy INI/TXT configuration exists without ConfigStore; "
+                           "run ConfigMigrate before starting the application.";
+            return QSqlDatabase();
+        }
         if (db.open())
         {
-            return db;
+            QSqlQuery pragma(db);
+            pragma.exec("PRAGMA busy_timeout=3000");
+            pragma.exec("PRAGMA secure_delete=ON");
+            if (EnsureCurrentSchema(db))
+            {
+                return db;
+            }
+            db.close();
         }
         return QSqlDatabase();
     }
@@ -105,6 +92,14 @@ QSqlDatabase OpenDatabase()
     QDir dbDir = dbInfo.dir();
     if (!dbDir.exists() && !dbDir.mkpath(QStringLiteral(".")))
     {
+        return QSqlDatabase();
+    }
+    if (!dbInfo.exists()
+        && (HasLegacyDiskConfigurationInputs(dbPath)
+            || HasUnsafePlaintextConfigStoreResidue(dbPath)))
+    {
+        qCritical() << "Legacy INI/TXT configuration exists without ConfigStore; "
+                       "run ConfigMigrate before starting the application.";
         return QSqlDatabase();
     }
     if (dbInfo.exists())
@@ -126,6 +121,7 @@ QSqlDatabase OpenDatabase()
 
     QSqlQuery pragma(db);
     pragma.exec("PRAGMA busy_timeout=3000");
+    pragma.exec("PRAGMA secure_delete=ON");
 
     if (!EnsureCurrentSchema(db))
     {
@@ -168,7 +164,7 @@ QByteArray MakeKeyStream(const QByteArray& nonce, int byteCount)
     return stream;
 }
 
-QString ProtectText(const QString& plainText)
+QString ProtectLegacyText(const QString& plainText)
 {
     QByteArray nonce;
     nonce.resize(16);
@@ -189,7 +185,7 @@ QString ProtectText(const QString& plainText)
         .arg(QString::fromLatin1(bytes.toBase64(QByteArray::OmitTrailingEquals)));
 }
 
-bool UnprotectText(const QString& storedText, QString* plainText)
+bool UnprotectLegacyText(const QString& storedText, QString* plainText)
 {
     if (plainText == nullptr)
     {
@@ -240,15 +236,27 @@ bool ShouldEncryptNewValues(QSqlDatabase& db)
     return value == "1" || value == "true" || value == "yes";
 }
 
-bool DecodeStoredText(const QString& storedText, int encrypted, QString* plainText)
+bool DecodeStoredText(
+    const QString& storedText,
+    int encrypted,
+    const QString& protectionPurpose,
+    QString* plainText)
 {
     if (plainText == nullptr)
     {
         return false;
     }
-    if (encrypted != 0 || storedText.startsWith("enc:v1:"))
+    if (CredentialSecurity::IsCurrentUserProtected(storedText))
     {
-        return UnprotectText(storedText, plainText);
+        return CredentialSecurity::UnprotectForCurrentUser(storedText, protectionPurpose, plainText);
+    }
+    if (storedText.startsWith("enc:v1:"))
+    {
+        return UnprotectLegacyText(storedText, plainText);
+    }
+    if (encrypted != 0)
+    {
+        return false;
     }
     *plainText = storedText;
     return true;
@@ -268,7 +276,32 @@ QString StoredTextForWrite(QSqlDatabase& db, const QString& plainText, int* encr
     {
         *encrypted = 1;
     }
-    return ProtectText(plainText);
+    return ProtectLegacyText(plainText);
+}
+
+bool EncodeStoredText(
+    QSqlDatabase& db,
+    const QString& plainText,
+    bool sensitive,
+    const QString& protectionPurpose,
+    QString* storedText,
+    int* encrypted)
+{
+    if (storedText == nullptr || encrypted == nullptr)
+    {
+        return false;
+    }
+    if (sensitive)
+    {
+        if (!CredentialSecurity::ProtectForCurrentUser(plainText, protectionPurpose, storedText))
+        {
+            return false;
+        }
+        *encrypted = 1;
+        return true;
+    }
+    *storedText = StoredTextForWrite(db, plainText, encrypted);
+    return true;
 }
 
 QString NormalizeSection(const QString& sectionName)
@@ -307,6 +340,20 @@ QString NormalizeScopeId(const QString& scopeId)
     return cleaned.isNull() ? QString::fromLatin1("") : cleaned;
 }
 
+QString ProtectionPurpose(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& module,
+    const QString& keyName)
+{
+    return QStringLiteral("%1\n%2\n%3\n%4")
+        .arg(
+            NormalizeSection(scopeType).toLower(),
+            NormalizeScopeId(scopeId),
+            NormalizeSection(module),
+            NormalizeSourceKey(keyName));
+}
+
 bool IsSensitiveSettingKey(const QString& keyName)
 {
     const QString lower = keyName.toLower();
@@ -314,7 +361,46 @@ bool IsSensitiveSettingKey(const QString& keyName)
         || lower.contains(QStringLiteral("passwd"))
         || lower.contains(QStringLiteral("pass"))
         || lower.contains(QStringLiteral("token"))
-        || lower.contains(QStringLiteral("secret"));
+        || lower.contains(QStringLiteral("secret"))
+        || lower.contains(QStringLiteral("credential"))
+        || lower.contains(QStringLiteral("api_key"))
+        || lower.contains(QStringLiteral("apikey"));
+}
+
+bool IsPortableAuthenticationValue(
+    const QString& scopeType,
+    const QString& module,
+    const QString& keyName)
+{
+    if (NormalizeSection(scopeType).compare(QStringLiteral("account"), Qt::CaseInsensitive) != 0
+        || NormalizeSection(module).compare(QStringLiteral("Profile"), Qt::CaseInsensitive) != 0)
+    {
+        return false;
+    }
+    return keyName.compare(QStringLiteral("PasswordHash"), Qt::CaseInsensitive) == 0
+        || keyName.compare(QStringLiteral("Role"), Qt::CaseInsensitive) == 0
+        || keyName.compare(QStringLiteral("MustChangePassword"), Qt::CaseInsensitive) == 0
+        || keyName.compare(QStringLiteral("PasswordChangedAt"), Qt::CaseInsensitive) == 0;
+}
+
+bool RequiresDpapiProtection(
+    const QString& scopeType,
+    const QString& module,
+    const QString& keyName,
+    bool sensitive)
+{
+    if (!sensitive)
+    {
+        return false;
+    }
+    if (IsPortableAuthenticationValue(scopeType, module, keyName))
+    {
+        // These are a one-way verifier and non-secret account metadata.  Keep
+        // them portable across Windows users; only recoverable credentials use
+        // DPAPI CurrentUser.
+        return false;
+    }
+    return true;
 }
 
 QString ModuleBaseFromStoredFileName(const QString& storedFileName)
@@ -446,7 +532,7 @@ bool ReadScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& ident
     }
 
     QSqlQuery query(db);
-    query.prepare("SELECT value_text, encrypted FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
+    query.prepare("SELECT value_text, encrypted, sensitive FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
     query.addBindValue(NormalizeSection(identity.scopeType).toLower());
     query.addBindValue(NormalizeScopeId(identity.scopeId));
     query.addBindValue(NormalizeSection(identity.module));
@@ -461,7 +547,24 @@ bool ReadScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& ident
     }
     const QString storedText = query.value(0).toString();
     const int encrypted = query.value(1).toInt();
-    return DecodeStoredText(storedText, encrypted, value);
+    const bool sensitive = identity.sensitive || query.value(2).toInt() != 0
+        || IsSensitiveSettingKey(identity.module) || IsSensitiveSettingKey(identity.keyName);
+    const QString purpose = ProtectionPurpose(
+        identity.scopeType, identity.scopeId, identity.module, identity.keyName);
+    if (!DecodeStoredText(storedText, encrypted, purpose, value))
+    {
+        return false;
+    }
+    query.finish();
+    const bool requiresDpapi = RequiresDpapiProtection(
+        identity.scopeType, identity.module, identity.keyName, sensitive);
+    if (requiresDpapi && !CredentialSecurity::IsCurrentUserProtected(storedText))
+    {
+        ScopedSettingIdentity upgraded = identity;
+        upgraded.sensitive = true;
+        return WriteScopedSettingValue(db, upgraded, *value);
+    }
+    return true;
 }
 
 bool WriteScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& identity, const QString& value)
@@ -471,13 +574,23 @@ bool WriteScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& iden
         return false;
     }
 
+    const bool sensitive = identity.sensitive
+        || IsSensitiveSettingKey(identity.module)
+        || IsSensitiveSettingKey(identity.keyName);
     int encrypted = 0;
-    const QString storedText = identity.sensitive
-        ? ProtectText(value)
-        : StoredTextForWrite(db, value, &encrypted);
-    if (identity.sensitive)
+    QString storedText;
+    const QString purpose = ProtectionPurpose(
+        identity.scopeType, identity.scopeId, identity.module, identity.keyName);
+    const bool requiresDpapi = RequiresDpapiProtection(
+        identity.scopeType, identity.module, identity.keyName, sensitive);
+    if (IsPortableAuthenticationValue(
+            identity.scopeType, identity.module, identity.keyName))
     {
-        encrypted = 1;
+        storedText = value;
+    }
+    else if (!EncodeStoredText(db, value, requiresDpapi, purpose, &storedText, &encrypted))
+    {
+        return false;
     }
 
     QSqlQuery query(db);
@@ -491,7 +604,7 @@ bool WriteScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& iden
     query.addBindValue(NormalizeSourceKey(identity.keyName));
     query.addBindValue(storedText);
     query.addBindValue(identity.valueType.trimmed().isEmpty() ? QStringLiteral("string") : identity.valueType.trimmed().toLower());
-    query.addBindValue(identity.sensitive ? 1 : 0);
+    query.addBindValue(sensitive ? 1 : 0);
     query.addBindValue(encrypted);
     return query.exec();
 }
@@ -542,19 +655,33 @@ bool CreateCurrentTables(QSqlDatabase& db)
             "ON settings(scope_type, scope_id, module)"));
 }
 
-bool SetSchemaVersion(QSqlDatabase& db)
+bool TableExists(QSqlDatabase& db, const QString& tableName)
 {
     QSqlQuery query(db);
-    query.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)");
-    query.addBindValue(QString::fromLatin1(kSchemaVersion));
-    if (!query.exec())
-    {
-        return false;
-    }
+    query.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1");
+    query.addBindValue(tableName);
+    return query.exec() && query.next();
+}
 
-    QSqlQuery encryptQuery(db);
-    encryptQuery.prepare("INSERT OR IGNORE INTO meta(key, value) VALUES('encrypt_new_values', '1')");
-    return encryptQuery.exec();
+QString MetaValue(QSqlDatabase& db, const QString& key)
+{
+    if (!TableExists(db, QStringLiteral("meta")))
+    {
+        return QString();
+    }
+    QSqlQuery query(db);
+    query.prepare("SELECT value FROM meta WHERE key=?");
+    query.addBindValue(key);
+    return query.exec() && query.next() ? query.value(0).toString().trimmed() : QString();
+}
+
+bool SetMetaValue(QSqlDatabase& db, const QString& key, const QString& value)
+{
+    QSqlQuery query(db);
+    query.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)");
+    query.addBindValue(key);
+    query.addBindValue(value);
+    return query.exec();
 }
 
 bool HasCurrentSettingsColumns(QSqlDatabase& db)
@@ -577,11 +704,675 @@ bool HasCurrentSettingsColumns(QSqlDatabase& db)
         });
 }
 
+bool IsSafeMigratedAccountName(const QString& userName)
+{
+    if (userName.size() < 3 || userName.size() > 32)
+    {
+        return false;
+    }
+    return std::all_of(userName.cbegin(), userName.cend(), [](const QChar& ch)
+        {
+            return ch.isLetterOrNumber() || ch == '_' || ch == '-' || ch == '.';
+        });
+}
+
+bool ReadRawScopedValue(
+    QSqlDatabase& db,
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& module,
+    const QString& keyName,
+    QString* value)
+{
+    QSqlQuery query(db);
+    query.prepare(
+        "SELECT value_text, encrypted FROM settings "
+        "WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
+    query.addBindValue(NormalizeSection(scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(scopeId));
+    query.addBindValue(NormalizeSection(module));
+    query.addBindValue(NormalizeSourceKey(keyName));
+    if (!query.exec() || !query.next())
+    {
+        return false;
+    }
+    return DecodeStoredText(
+        query.value(0).toString(),
+        query.value(1).toInt(),
+        ProtectionPurpose(scopeType, scopeId, module, keyName),
+        value);
+}
+
+struct LegacyAccount
+{
+    QString userName;
+    QMap<QString, QString> values;
+};
+
+struct SensitiveUpgrade
+{
+    QString scopeType;
+    QString scopeId;
+    QString module;
+    QString keyName;
+    QString value;
+    QString valueType;
+};
+
+bool MigrateLegacyAccounts(QSqlDatabase& db)
+{
+    QMap<QString, LegacyAccount> legacyAccounts;
+
+    QSqlQuery accountQuery(db);
+    accountQuery.prepare(
+        "SELECT module, key_name, value_text, encrypted FROM settings "
+        "WHERE scope_type='global' AND scope_id='' AND module LIKE 'Accounts/Users/%'");
+    if (!accountQuery.exec())
+    {
+        return false;
+    }
+    while (accountQuery.next())
+    {
+        const QString module = accountQuery.value(0).toString();
+        const QString userName = module.mid(QStringLiteral("Accounts/Users/").size()).trimmed();
+        const QString keyName = accountQuery.value(1).toString();
+        if (!IsSafeMigratedAccountName(userName))
+        {
+            return false;
+        }
+        QString decoded;
+        if (!DecodeStoredText(
+                accountQuery.value(2).toString(),
+                accountQuery.value(3).toInt(),
+                ProtectionPurpose(QStringLiteral("global"), QString(), module, keyName),
+                &decoded))
+        {
+            return false;
+        }
+        const QString foldedUserName = userName.toCaseFolded();
+        if (legacyAccounts.contains(foldedUserName)
+            && legacyAccounts.value(foldedUserName).userName != userName)
+        {
+            // The historical UI treated account ids case-sensitively.  Merging
+            // Foo and foo could combine one role with another password.
+            return false;
+        }
+        LegacyAccount& account = legacyAccounts[foldedUserName];
+        account.userName = userName;
+        account.values.insert(keyName, decoded);
+    }
+    accountQuery.finish();
+
+    for (auto it = legacyAccounts.cbegin(); it != legacyAccounts.cend(); ++it)
+    {
+        const LegacyAccount& source = it.value();
+        const QString sourceHash = source.values.value(QStringLiteral("PasswordHash"));
+        const QString sourceRole = source.values.value(QStringLiteral("Role"));
+        if (sourceHash.isEmpty()
+            || (sourceRole != QStringLiteral("operator")
+                && sourceRole != QStringLiteral("engineer")
+                && sourceRole != QStringLiteral("admin")))
+        {
+            return false;
+        }
+
+        QString destinationHash;
+        const bool destinationExists = ReadRawScopedValue(
+            db,
+            QStringLiteral("account"),
+            source.userName,
+            QStringLiteral("Profile"),
+            QStringLiteral("PasswordHash"),
+            &destinationHash);
+        bool replaceDestination = !destinationExists;
+        if (destinationExists
+            && source.userName.compare(QStringLiteral("admin"), Qt::CaseInsensitive) == 0
+            && CredentialSecurity::VerifyPasswordRecord(
+                source.userName, QStringLiteral("admin"), destinationHash)
+                != CredentialSecurity::PasswordVerification::Invalid)
+        {
+            // A v4 start may already have inserted the known bootstrap account
+            // after missing these legacy rows.  Restore the legacy account as
+            // the authoritative value in that one narrow case.
+            replaceDestination = true;
+        }
+
+        if (replaceDestination)
+        {
+            QSqlQuery clearProfile(db);
+            clearProfile.prepare(
+                "DELETE FROM settings WHERE scope_type='account' AND scope_id=? AND module='Profile'");
+            clearProfile.addBindValue(source.userName);
+            if (!clearProfile.exec())
+            {
+                return false;
+            }
+            for (const QString& keyName : {
+                    QStringLiteral("PasswordHash"),
+                    QStringLiteral("Role"),
+                    QStringLiteral("CreatedAt"),
+                    QStringLiteral("UpdatedAt") })
+            {
+                if (!source.values.contains(keyName))
+                {
+                    continue;
+                }
+                ScopedSettingIdentity identity;
+                identity.valid = true;
+                identity.scopeType = QStringLiteral("account");
+                identity.scopeId = source.userName;
+                identity.module = QStringLiteral("Profile");
+                identity.keyName = keyName;
+                identity.valueType = keyName.endsWith(QStringLiteral("At"))
+                    ? QStringLiteral("datetime")
+                    : QStringLiteral("string");
+                identity.sensitive = keyName == QStringLiteral("PasswordHash");
+                if (!WriteScopedSettingValue(db, identity, source.values.value(keyName)))
+                {
+                    return false;
+                }
+            }
+            destinationHash = sourceHash;
+
+            const bool isKnownBootstrap = source.userName.compare(
+                    QStringLiteral("admin"), Qt::CaseInsensitive) == 0
+                && CredentialSecurity::VerifyPasswordRecord(
+                    source.userName, QStringLiteral("admin"), destinationHash)
+                    != CredentialSecurity::PasswordVerification::Invalid;
+            ScopedSettingIdentity mustChangeIdentity;
+            mustChangeIdentity.valid = true;
+            mustChangeIdentity.scopeType = QStringLiteral("account");
+            mustChangeIdentity.scopeId = source.userName;
+            mustChangeIdentity.module = QStringLiteral("Profile");
+            mustChangeIdentity.keyName = QStringLiteral("MustChangePassword");
+            mustChangeIdentity.valueType = QStringLiteral("bool");
+            if (!WriteScopedSettingValue(
+                    db,
+                    mustChangeIdentity,
+                    isKnownBootstrap ? QStringLiteral("1") : QStringLiteral("0")))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            QString existingMustChange;
+            if (!ReadRawScopedValue(
+                    db,
+                    QStringLiteral("account"),
+                    source.userName,
+                    QStringLiteral("Profile"),
+                    QStringLiteral("MustChangePassword"),
+                    &existingMustChange))
+            {
+                ScopedSettingIdentity mustChangeIdentity;
+                mustChangeIdentity.valid = true;
+                mustChangeIdentity.scopeType = QStringLiteral("account");
+                mustChangeIdentity.scopeId = source.userName;
+                mustChangeIdentity.module = QStringLiteral("Profile");
+                mustChangeIdentity.keyName = QStringLiteral("MustChangePassword");
+                mustChangeIdentity.valueType = QStringLiteral("bool");
+                if (!WriteScopedSettingValue(db, mustChangeIdentity, QStringLiteral("1")))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool ParseAuthenticationBool(const QString& value, bool* parsed)
+{
+    if (parsed == nullptr)
+    {
+        return false;
+    }
+    const QString normalized = value.trimmed().toLower();
+    if (normalized == QLatin1String("1")
+        || normalized == QLatin1String("true")
+        || normalized == QLatin1String("yes"))
+    {
+        *parsed = true;
+        return true;
+    }
+    if (normalized == QLatin1String("0")
+        || normalized == QLatin1String("false")
+        || normalized == QLatin1String("no"))
+    {
+        *parsed = false;
+        return true;
+    }
+    return false;
+}
+
+bool IsAuthenticationRole(const QString& role)
+{
+    return role == QLatin1String("operator")
+        || role == QLatin1String("engineer")
+        || role == QLatin1String("admin");
+}
+
+bool NormalizeExistingAccountProfiles(QSqlDatabase& db)
+{
+    QSqlQuery accountQuery(db);
+    if (!accountQuery.exec(QStringLiteral(
+            "SELECT DISTINCT scope_id FROM settings "
+            "WHERE scope_type='account' AND module='Profile' ORDER BY scope_id COLLATE NOCASE")))
+    {
+        return false;
+    }
+    QStringList accountIds;
+    QMap<QString, QString> foldedAccountIds;
+    while (accountQuery.next())
+    {
+        const QString accountId = accountQuery.value(0).toString().trimmed();
+        const QString folded = accountId.toCaseFolded();
+        if (!IsSafeMigratedAccountName(accountId)
+            || (foldedAccountIds.contains(folded)
+                && foldedAccountIds.value(folded) != accountId))
+        {
+            return false;
+        }
+        foldedAccountIds.insert(folded, accountId);
+        accountIds.append(accountId);
+    }
+    accountQuery.finish();
+
+    for (const QString& accountId : accountIds)
+    {
+        QSqlQuery profileQuery(db);
+        profileQuery.prepare(QStringLiteral(
+            "SELECT key_name, value_text, encrypted FROM settings "
+            "WHERE scope_type='account' AND scope_id=? AND module='Profile' "
+            "AND key_name IN ('PasswordHash', 'Role', 'MustChangePassword')"));
+        profileQuery.addBindValue(accountId);
+        if (!profileQuery.exec())
+        {
+            return false;
+        }
+        QMap<QString, QPair<QString, int>> storedValues;
+        while (profileQuery.next())
+        {
+            storedValues.insert(
+                profileQuery.value(0).toString(),
+                qMakePair(profileQuery.value(1).toString(), profileQuery.value(2).toInt()));
+        }
+        profileQuery.finish();
+        if (!storedValues.contains(QStringLiteral("PasswordHash"))
+            || !storedValues.contains(QStringLiteral("Role")))
+        {
+            return false;
+        }
+
+        auto decode = [&storedValues, &accountId](const QString& key, QString* value)
+            {
+                const auto stored = storedValues.value(key);
+                return DecodeStoredText(
+                    stored.first,
+                    stored.second,
+                    ProtectionPurpose(
+                        QStringLiteral("account"), accountId,
+                        QStringLiteral("Profile"), key),
+                    value);
+            };
+        QString passwordRecord;
+        QString role;
+        if (!decode(QStringLiteral("PasswordHash"), &passwordRecord)
+            || !decode(QStringLiteral("Role"), &role)
+            || !CredentialSecurity::IsSupportedPasswordRecord(passwordRecord)
+            || !IsAuthenticationRole(role))
+        {
+            return false;
+        }
+
+        bool mustChangePassword = true;
+        if (storedValues.contains(QStringLiteral("MustChangePassword")))
+        {
+            QString mustChangeText;
+            if (!decode(QStringLiteral("MustChangePassword"), &mustChangeText)
+                || !ParseAuthenticationBool(mustChangeText, &mustChangePassword))
+            {
+                return false;
+            }
+        }
+        if (accountId.compare(QStringLiteral("admin"), Qt::CaseInsensitive) == 0
+            && CredentialSecurity::VerifyPasswordRecord(
+                accountId, QStringLiteral("admin"), passwordRecord)
+                != CredentialSecurity::PasswordVerification::Invalid)
+        {
+            mustChangePassword = true;
+        }
+
+        for (const auto& value : {
+                qMakePair(QStringLiteral("PasswordHash"), passwordRecord),
+                qMakePair(QStringLiteral("Role"), role),
+                qMakePair(
+                    QStringLiteral("MustChangePassword"),
+                    mustChangePassword ? QStringLiteral("1") : QStringLiteral("0")) })
+        {
+            ScopedSettingIdentity identity;
+            identity.valid = true;
+            identity.scopeType = QStringLiteral("account");
+            identity.scopeId = accountId;
+            identity.module = QStringLiteral("Profile");
+            identity.keyName = value.first;
+            identity.valueType = value.first == QLatin1String("MustChangePassword")
+                ? QStringLiteral("bool")
+                : QStringLiteral("string");
+            identity.sensitive = value.first.contains(
+                QStringLiteral("Password"), Qt::CaseInsensitive);
+            if (!WriteScopedSettingValue(db, identity, value.second))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool MigrateLegacyLoginState(QSqlDatabase& db)
+{
+    QSqlQuery loginQuery(db);
+    loginQuery.prepare(
+        "SELECT key_name, value_text, encrypted FROM settings "
+        "WHERE scope_type='global' AND scope_id='' AND module='LoginState/General'");
+    if (!loginQuery.exec())
+    {
+        return false;
+    }
+    QMap<QString, QString> loginValues;
+    while (loginQuery.next())
+    {
+        const QString keyName = loginQuery.value(0).toString();
+        if (keyName != QStringLiteral("UserName")
+            && keyName != QStringLiteral("AccountHistory"))
+        {
+            continue;
+        }
+        QString decoded;
+        if (!DecodeStoredText(
+                loginQuery.value(1).toString(),
+                loginQuery.value(2).toInt(),
+                ProtectionPurpose(QStringLiteral("global"), QString(), QStringLiteral("LoginState/General"), keyName),
+                &decoded))
+        {
+            return false;
+        }
+        loginValues.insert(keyName, decoded);
+    }
+    loginQuery.finish();
+    for (auto it = loginValues.cbegin(); it != loginValues.cend(); ++it)
+    {
+        ScopedSettingIdentity identity;
+        identity.valid = true;
+        identity.scopeType = QStringLiteral("global");
+        identity.module = QStringLiteral("LoginState");
+        identity.keyName = it.key();
+        identity.valueType = it.key() == QStringLiteral("AccountHistory")
+            ? QStringLiteral("list")
+            : QStringLiteral("string");
+        if (!WriteScopedSettingValue(db, identity, it.value()))
+        {
+            return false;
+        }
+    }
+
+    // Never migrate a reversible remembered password.  The next successful
+    // login may opt into a fresh DPAPI-protected credential.
+    if (!ExecSql(db, QStringLiteral(
+            "DELETE FROM settings WHERE scope_type='global' AND scope_id='' AND ("
+            "module LIKE 'Accounts/Users/%' OR module='LoginState/General' OR "
+            "module LIKE 'LoginState/SavedPasswords%' OR "
+            "module LIKE 'LoginState/RememberedCredentials%' OR "
+            "lower(key_name)='passwordbase64')")))
+    {
+        return false;
+    }
+
+    for (const auto& pair : {
+            qMakePair(QStringLiteral("RememberPassword"), QStringLiteral("0")),
+            qMakePair(QStringLiteral("AutoLogin"), QStringLiteral("0")) })
+    {
+        ScopedSettingIdentity identity;
+        identity.valid = true;
+        identity.scopeType = QStringLiteral("global");
+        identity.module = QStringLiteral("LoginState");
+        identity.keyName = pair.first;
+        identity.valueType = QStringLiteral("bool");
+        if (!WriteScopedSettingValue(db, identity, pair.second))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool UpgradeRecoverableSensitiveSettings(QSqlDatabase& db)
+{
+    std::vector<SensitiveUpgrade> sensitiveUpgrades;
+    QSqlQuery sensitiveQuery(db);
+    if (!sensitiveQuery.exec(
+            "SELECT scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted "
+            "FROM settings"))
+    {
+        return false;
+    }
+    while (sensitiveQuery.next())
+    {
+        const QString scopeType = sensitiveQuery.value(0).toString();
+        const QString scopeId = sensitiveQuery.value(1).toString();
+        const QString module = sensitiveQuery.value(2).toString();
+        const QString keyName = sensitiveQuery.value(3).toString();
+        const QString storedText = sensitiveQuery.value(4).toString();
+        const bool sensitive = sensitiveQuery.value(6).toInt() != 0
+            || IsSensitiveSettingKey(module)
+            || IsSensitiveSettingKey(keyName);
+        const bool requiresDpapi = RequiresDpapiProtection(scopeType, module, keyName, sensitive);
+        if (!requiresDpapi)
+        {
+            continue;
+        }
+        QString decoded;
+        if (!DecodeStoredText(
+                storedText,
+                sensitiveQuery.value(7).toInt(),
+                ProtectionPurpose(scopeType, scopeId, module, keyName),
+                &decoded))
+        {
+            return false;
+        }
+        if (CredentialSecurity::IsCurrentUserProtected(storedText))
+        {
+            // A DPAPI-looking prefix is not evidence of a valid credential.
+            // The canonical field purpose must decrypt successfully before the
+            // schema/auth version can commit.
+            continue;
+        }
+        sensitiveUpgrades.push_back({
+            scopeType,
+            scopeId,
+            module,
+            keyName,
+            decoded,
+            sensitiveQuery.value(5).toString() });
+    }
+    sensitiveQuery.finish();
+    for (const SensitiveUpgrade& upgrade : sensitiveUpgrades)
+    {
+        ScopedSettingIdentity identity;
+        identity.valid = true;
+        identity.scopeType = upgrade.scopeType;
+        identity.scopeId = upgrade.scopeId;
+        identity.module = upgrade.module;
+        identity.keyName = upgrade.keyName;
+        identity.valueType = upgrade.valueType;
+        identity.sensitive = true;
+        if (!WriteScopedSettingValue(db, identity, upgrade.value))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool MigrateLegacyAuthenticationSettings(QSqlDatabase& db)
+{
+    return MigrateLegacyAccounts(db)
+        && NormalizeExistingAccountProfiles(db)
+        && MigrateLegacyLoginState(db)
+        && UpgradeRecoverableSensitiveSettings(db)
+        && SetMetaValue(
+            db,
+            QStringLiteral("auth_semantic_version"),
+            QString::fromLatin1(kAuthenticationSemanticVersion));
+}
+
+bool SetCurrentSchemaMetadata(QSqlDatabase& db)
+{
+    return SetMetaValue(db, QStringLiteral("schema_version"), QString::fromLatin1(kSchemaVersion))
+        && SetMetaValue(db, QStringLiteral("encrypt_new_values"), QStringLiteral("0"))
+        && SetMetaValue(db, QStringLiteral("sensitive_protection"), QStringLiteral("dpapi-current-user-v1"));
+}
+
+bool HasLegacyDiskConfigurationInputs(const QString& databasePath)
+{
+    const QFileInfo databaseInfo(databasePath);
+    QDirIterator iterator(
+        databaseInfo.absolutePath(),
+        QDir::Files | QDir::NoDotAndDotDot,
+        QDirIterator::Subdirectories);
+    while (iterator.hasNext())
+    {
+        iterator.next();
+        const QString fileName = iterator.fileName().toLower();
+        if (fileName.contains(QStringLiteral(".ini"))
+            || fileName == QStringLiteral("weavedate.txt")
+            || fileName == QStringLiteral("weldpara.txt"))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool HasUnsafePlaintextConfigStoreResidue(const QString& databasePath)
+{
+    const QDir directory(QFileInfo(databasePath).absolutePath());
+    const QFileInfoList candidates = directory.entryInfoList(
+        QStringList()
+            << QStringLiteral("ConfigStore.db.bak*")
+            << QStringLiteral(".ConfigStore.db.backup-snapshot-*.tmp")
+            << QStringLiteral(".ConfigStore.db.restore-*.tmp")
+            << QStringLiteral(".ConfigStore.db.staging-*.tmp"),
+        QDir::Files | QDir::NoDotAndDotDot);
+    return std::any_of(candidates.cbegin(), candidates.cend(), [](const QFileInfo& candidate)
+        {
+            return !candidate.fileName().endsWith(
+                QStringLiteral(".dpapi.bak"), Qt::CaseInsensitive);
+        });
+}
+
 bool EnsureCurrentSchema(QSqlDatabase& db)
 {
-    return CreateCurrentTables(db)
-        && HasCurrentSettingsColumns(db)
-        && SetSchemaVersion(db);
+    const bool hasMeta = TableExists(db, QLatin1String("meta"));
+    const QString existingVersion = hasMeta ? MetaValue(db, QLatin1String("schema_version")) : QString();
+    if (hasMeta && existingVersion.isEmpty())
+    {
+        return false;
+    }
+    if (!existingVersion.isEmpty()
+        && existingVersion != QStringLiteral("4")
+        && existingVersion != QString::fromLatin1(kSchemaVersion))
+    {
+        return false;
+    }
+    if (HasUnsafePlaintextConfigStoreResidue(db.databaseName()))
+    {
+        qCritical() << "Plaintext ConfigStore backup or temporary residue requires review; "
+                       "remove it and rotate affected credentials before starting the application.";
+        return false;
+    }
+    if ((existingVersion.isEmpty() || existingVersion == QStringLiteral("4"))
+        && HasLegacyDiskConfigurationInputs(db.databaseName()))
+    {
+        qCritical() << "Legacy INI/TXT configuration exists beside a non-current ConfigStore; "
+                       "run ConfigMigrate before starting the application.";
+        return false;
+    }
+
+    if (!hasMeta)
+    {
+        QSqlQuery tablesQuery(db);
+        if (!tablesQuery.exec("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+            || !tablesQuery.next()
+            || tablesQuery.value(0).toInt() != 0)
+        {
+            return false;
+        }
+    }
+
+    if (hasMeta && (!TableExists(db, QStringLiteral("settings")) || !HasCurrentSettingsColumns(db)))
+    {
+        return false;
+    }
+
+    const QString credentialScrubState = hasMeta
+        ? MetaValue(db, QStringLiteral("legacy_credential_scrub_state"))
+        : QString();
+    if (!credentialScrubState.isEmpty()
+        && credentialScrubState != QLatin1String("complete"))
+    {
+        qCritical() << "Legacy credential scrub is incomplete or invalid; "
+                       "rerun ConfigMigrate before starting the application.";
+        return false;
+    }
+
+    const QString authenticationSemanticVersion = MetaValue(
+        db, QStringLiteral("auth_semantic_version"));
+    const bool needsMigration = existingVersion != QString::fromLatin1(kSchemaVersion)
+        || authenticationSemanticVersion != QString::fromLatin1(kAuthenticationSemanticVersion);
+    if (!needsMigration)
+    {
+        bool authenticationStateValid = false;
+        const int authenticationState = MetaValue(
+            db, QLatin1String("auth_initialized")).toInt(&authenticationStateValid);
+        if (!authenticationStateValid || authenticationState < 0 || authenticationState > 1)
+        {
+            return false;
+        }
+        return SetCurrentSchemaMetadata(db);
+    }
+    QString authenticationInitializedValue = hasMeta ? QStringLiteral("1") : QStringLiteral("0");
+    if (existingVersion == QString::fromLatin1(kSchemaVersion))
+    {
+        const QString existingAuthenticationState = MetaValue(
+            db, QStringLiteral("auth_initialized"));
+        if (existingAuthenticationState != QLatin1String("0")
+            && existingAuthenticationState != QLatin1String("1"))
+        {
+            return false;
+        }
+        authenticationInitializedValue = existingAuthenticationState;
+    }
+    if (!db.transaction())
+    {
+        return false;
+    }
+    if (!CreateCurrentTables(db)
+        || !HasCurrentSettingsColumns(db)
+        || !MigrateLegacyAuthenticationSettings(db)
+        || !SetMetaValue(
+            db,
+            QLatin1String("auth_initialized"),
+            authenticationInitializedValue)
+        || !SetCurrentSchemaMetadata(db)
+        || !db.commit())
+    {
+        db.rollback();
+        return false;
+    }
+    return true;
 }
 
 QStringList UniqueSorted(QStringList values)
@@ -594,7 +1385,7 @@ QStringList UniqueSorted(QStringList values)
 
 QString ConfigDatabase::DatabasePath()
 {
-    return QDir(FindProjectRoot()).filePath("Data/ConfigStore.db");
+    return AppPaths::WritablePath(QStringLiteral("Data/ConfigStore.db"));
 }
 
 QString ConfigDatabase::NormalizeFilePath(const QString& fileName)
@@ -607,17 +1398,7 @@ QString ConfigDatabase::NormalizeFilePath(const QString& fileName)
         path.remove(0, 2);
     }
 
-    const QString lower = path.toLower();
-    const int dataPos = lower.indexOf("/data/");
-    if (dataPos >= 0)
-    {
-        return path.mid(dataPos + 1);
-    }
-    const int resultPos = lower.indexOf("/result/");
-    if (resultPos >= 0)
-    {
-        return path.mid(resultPos + 1);
-    }
+    QString lower = path.toLower();
     if (lower.startsWith("data/"))
     {
         return path;
@@ -630,16 +1411,34 @@ QString ConfigDatabase::NormalizeFilePath(const QString& fileName)
     QFileInfo info(path);
     if (info.isAbsolute())
     {
-        QDir root(FindProjectRoot());
+        QDir root(AppPaths::DataRootPath());
         const QString rel = root.relativeFilePath(info.absoluteFilePath()).replace('\\', '/');
-        if (rel.toLower().startsWith("data/"))
+        const QString relLower = rel.toLower();
+        const bool insideDataRoot = !QFileInfo(rel).isAbsolute()
+            && rel != QStringLiteral("..")
+            && !rel.startsWith(QStringLiteral("../"));
+        if (insideDataRoot && relLower.startsWith("data/"))
         {
             return QDir::cleanPath(rel);
         }
-        if (rel.toLower().startsWith("result/"))
+        if (insideDataRoot && relLower.startsWith("result/"))
         {
             return QDir::cleanPath(rel);
         }
+    }
+
+    // 兼容从旧工程根传入的绝对/带前缀路径。用最后一个段标记，避免
+    // D:/data/site/Data/... 误截成 data/site/Data/...。
+    lower = path.toLower();
+    const int dataPos = lower.lastIndexOf("/data/");
+    if (dataPos >= 0)
+    {
+        return path.mid(dataPos + 1);
+    }
+    const int resultPos = lower.lastIndexOf("/result/");
+    if (resultPos >= 0)
+    {
+        return path.mid(resultPos + 1);
     }
 
     return path;
@@ -1032,11 +1831,16 @@ QMap<QString, QString> ConfigDatabase::ReadIniSection(const QString& fileName, c
     while (query.next())
     {
         QString plainText;
-        if (!DecodeStoredText(query.value(1).toString(), query.value(2).toInt(), &plainText))
+        const QString keyName = query.value(0).toString();
+        if (!DecodeStoredText(
+                query.value(1).toString(),
+                query.value(2).toInt(),
+                ProtectionPurpose(identity.scopeType, identity.scopeId, identity.module, keyName),
+                &plainText))
         {
             continue;
         }
-        values.insert(query.value(0).toString(), plainText);
+        values.insert(keyName, plainText);
     }
     return values;
 }
@@ -1082,7 +1886,7 @@ bool ConfigDatabase::ReadScopedSetting(
     }
 
     QSqlQuery query(db);
-    query.prepare("SELECT value_text, encrypted FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
+    query.prepare("SELECT value_text, encrypted, sensitive FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
     query.addBindValue(NormalizeSection(scopeType).toLower());
     query.addBindValue(NormalizeScopeId(scopeId));
     query.addBindValue(NormalizeSection(moduleName));
@@ -1098,7 +1902,90 @@ bool ConfigDatabase::ReadScopedSetting(
 
     const QString storedText = query.value(0).toString();
     const int encrypted = query.value(1).toInt();
-    return DecodeStoredText(storedText, encrypted, value);
+    const bool sensitive = query.value(2).toInt() != 0
+        || IsSensitiveSettingKey(moduleName)
+        || IsSensitiveSettingKey(keyName);
+    const QString purpose = ProtectionPurpose(scopeType, scopeId, moduleName, keyName);
+    if (!DecodeStoredText(storedText, encrypted, purpose, value))
+    {
+        return false;
+    }
+    query.finish();
+    const bool requiresDpapi = RequiresDpapiProtection(scopeType, moduleName, keyName, sensitive);
+    if (requiresDpapi && !CredentialSecurity::IsCurrentUserProtected(storedText))
+    {
+        ScopedSettingIdentity identity;
+        identity.valid = true;
+        identity.scopeType = scopeType;
+        identity.scopeId = scopeId;
+        identity.module = moduleName;
+        identity.keyName = keyName;
+        identity.sensitive = true;
+        return WriteScopedSettingValue(db, identity, *value);
+    }
+    return true;
+}
+
+QMap<QString, QString> ConfigDatabase::ReadScopedSettings(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName)
+{
+    QMap<QString, QString> values;
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        return values;
+    }
+    QSqlQuery query(db);
+    query.prepare(
+        "SELECT key_name, value_text, encrypted, sensitive FROM settings "
+        "WHERE scope_type=? AND scope_id=? AND module=? ORDER BY key_name");
+    query.addBindValue(NormalizeSection(scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(scopeId));
+    query.addBindValue(NormalizeSection(moduleName));
+    if (!query.exec())
+    {
+        return values;
+    }
+    QMap<QString, QString> upgrades;
+    while (query.next())
+    {
+        QString decoded;
+        const QString keyName = query.value(0).toString();
+        if (DecodeStoredText(
+                query.value(1).toString(),
+                query.value(2).toInt(),
+                ProtectionPurpose(scopeType, scopeId, moduleName, keyName),
+                &decoded))
+        {
+            values.insert(keyName, decoded);
+            const bool sensitive = query.value(3).toInt() != 0
+                || IsSensitiveSettingKey(moduleName)
+                || IsSensitiveSettingKey(keyName);
+            const bool requiresDpapi = RequiresDpapiProtection(scopeType, moduleName, keyName, sensitive);
+            if (requiresDpapi && !CredentialSecurity::IsCurrentUserProtected(query.value(1).toString()))
+            {
+                upgrades.insert(keyName, decoded);
+            }
+        }
+    }
+    query.finish();
+    for (auto it = upgrades.cbegin(); it != upgrades.cend(); ++it)
+    {
+        ScopedSettingIdentity identity;
+        identity.valid = true;
+        identity.scopeType = scopeType;
+        identity.scopeId = scopeId;
+        identity.module = moduleName;
+        identity.keyName = it.key();
+        identity.sensitive = true;
+        if (!WriteScopedSettingValue(db, identity, it.value()))
+        {
+            return QMap<QString, QString>();
+        }
+    }
+    return values;
 }
 
 bool ConfigDatabase::WriteScopedSetting(
@@ -1116,13 +2003,16 @@ bool ConfigDatabase::WriteScopedSetting(
         return false;
     }
 
+    const bool effectiveSensitive = sensitive
+        || IsSensitiveSettingKey(moduleName)
+        || IsSensitiveSettingKey(keyName);
     int encrypted = 0;
-    const QString storedText = sensitive
-        ? ProtectText(value)
-        : StoredTextForWrite(db, value, &encrypted);
-    if (sensitive)
+    QString storedText;
+    const QString purpose = ProtectionPurpose(scopeType, scopeId, moduleName, keyName);
+    const bool requiresDpapi = RequiresDpapiProtection(scopeType, moduleName, keyName, effectiveSensitive);
+    if (!EncodeStoredText(db, value, requiresDpapi, purpose, &storedText, &encrypted))
     {
-        encrypted = 1;
+        return false;
     }
     QSqlQuery query(db);
     query.prepare(
@@ -1135,9 +2025,75 @@ bool ConfigDatabase::WriteScopedSetting(
     query.addBindValue(NormalizeSourceKey(keyName));
     query.addBindValue(storedText);
     query.addBindValue(valueType.trimmed().isEmpty() ? QStringLiteral("string") : valueType.trimmed().toLower());
-    query.addBindValue(sensitive ? 1 : 0);
+    query.addBindValue(effectiveSensitive ? 1 : 0);
     query.addBindValue(encrypted);
     return query.exec();
+}
+
+bool ConfigDatabase::WriteScopedSettings(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QMap<QString, QString>& values,
+    const QString& valueType)
+{
+    if (values.isEmpty())
+    {
+        return true;
+    }
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen() || !db.transaction())
+    {
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(
+        "INSERT OR REPLACE INTO settings("
+        "scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))");
+    const QString normalizedScopeType = NormalizeSection(scopeType).toLower();
+    const QString normalizedScopeId = NormalizeScopeId(scopeId);
+    const QString normalizedModule = NormalizeSection(moduleName);
+    const QString normalizedValueType = valueType.trimmed().isEmpty()
+        ? QStringLiteral("string")
+        : valueType.trimmed().toLower();
+    for (auto it = values.cbegin(); it != values.cend(); ++it)
+    {
+        const bool sensitive = IsSensitiveSettingKey(normalizedModule)
+            || IsSensitiveSettingKey(it.key());
+        int encrypted = 0;
+        QString storedText;
+        const QString purpose = ProtectionPurpose(
+            normalizedScopeType, normalizedScopeId, normalizedModule, it.key());
+        const bool requiresDpapi = RequiresDpapiProtection(
+            normalizedScopeType, normalizedModule, it.key(), sensitive);
+        if (!EncodeStoredText(db, it.value(), requiresDpapi, purpose, &storedText, &encrypted))
+        {
+            db.rollback();
+            return false;
+        }
+        query.bindValue(0, normalizedScopeType);
+        query.bindValue(1, normalizedScopeId);
+        query.bindValue(2, normalizedModule);
+        query.bindValue(3, NormalizeSourceKey(it.key()));
+        query.bindValue(4, storedText);
+        query.bindValue(5, normalizedValueType);
+        query.bindValue(6, sensitive ? 1 : 0);
+        query.bindValue(7, encrypted);
+        if (!query.exec())
+        {
+            db.rollback();
+            return false;
+        }
+        query.finish();
+    }
+    if (!db.commit())
+    {
+        db.rollback();
+        return false;
+    }
+    return true;
 }
 
 bool ConfigDatabase::RemoveScopedSetting(
@@ -1163,10 +2119,24 @@ bool ConfigDatabase::RemoveScopedSetting(
 
 QStringList ConfigDatabase::ListScopedSettingIds(const QString& scopeType, const QString& moduleName)
 {
+    QStringList ids;
+    return TryListScopedSettingIds(scopeType, moduleName, &ids) ? ids : QStringList();
+}
+
+bool ConfigDatabase::TryListScopedSettingIds(
+    const QString& scopeType,
+    const QString& moduleName,
+    QStringList* ids)
+{
+    if (ids == nullptr)
+    {
+        return false;
+    }
+    ids->clear();
     QSqlDatabase db = OpenDatabase();
     if (!db.isValid() || !db.isOpen())
     {
-        return QStringList();
+        return false;
     }
 
     QSqlQuery query(db);
@@ -1183,15 +2153,16 @@ QStringList ConfigDatabase::ListScopedSettingIds(const QString& scopeType, const
     }
     if (!query.exec())
     {
-        return QStringList();
+        return false;
     }
 
-    QStringList ids;
+    QStringList values;
     while (query.next())
     {
-        ids << query.value(0).toString();
+        values << query.value(0).toString();
     }
-    return UniqueSorted(ids);
+    *ids = UniqueSorted(values);
+    return true;
 }
 
 bool ConfigDatabase::RemoveScopedSettings(const QString& scopeType, const QString& scopeId, const QString& moduleName)

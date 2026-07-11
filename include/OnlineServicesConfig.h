@@ -7,7 +7,8 @@
 
 // 在线服务配置（OTA 升级 + 扫描数据上传）：全局键，管理页「在线服务」界面编辑。
 // 服务器为自建（xiaomomoyun.cn），OTA 走 HTTP 静态目录（latest.json + 安装包），
-// 数据上传走 FTP（复用 FtpClient/WinINet）。密码键名含 password，ConfigDatabase 自动混淆存储。
+// 数据上传走 FTP（复用 FtpClient/WinINet）。可恢复凭据由 ConfigDatabase 使用
+// Windows DPAPI CurrentUser 保护；安装包不携带服务器密码。
 namespace OnlineServicesConfig
 {
 	inline QString SettingsGroup()
@@ -67,9 +68,7 @@ namespace OnlineServicesConfig
 		WriteValue(QStringLiteral("FtpPort"), QString::number(port));
 	}
 
-	// 默认随包分发「上传专用」账号 uploader：服务器端仅允许上传(STOR/建目录)、禁止下载(RETR)，
-	// 现场设备开箱即可自动上传扫描数据，且下载不到别的设备数据。管理员要远程浏览/下载数据时，
-	// 在界面手动改成「全权限」账号 devicedata（不随包分发）。
+	// 默认仅预填低权限账号名，密码必须由管理员在现场配置，安装包不再分发共享密码。
 	inline QString FtpUser()
 	{
 		return ReadValue(QStringLiteral("FtpUser"), QStringLiteral("uploader"));
@@ -82,8 +81,7 @@ namespace OnlineServicesConfig
 
 	inline QString FtpPassword()
 	{
-		// uploader 的密码（低权限、仅上传，随包默认；全权限账号密码不写死、由管理员手填）。
-		return ReadValue(QStringLiteral("FtpPassword"), QStringLiteral("UprOLDgeLOmM1wjN"));
+		return ReadValue(QStringLiteral("FtpPassword"), QString());
 	}
 
 	inline void SetFtpPassword(const QString& password)
@@ -126,7 +124,7 @@ namespace OnlineServicesConfig
 	}
 
 	// 服务器管理接口令牌（nginx /admin/ 反代 + X-Admin-Token 鉴权）：账号增删/改权限与磁盘统计用。
-	// 不随包分发，由管理员在「在线服务 → 服务器配置」手填；键名含 Token，ConfigDatabase 自动混淆存储。
+	// 不随包分发，由管理员在「在线服务 → 服务器配置」手填；本地使用 DPAPI CurrentUser 保护。
 	inline QString AdminToken()
 	{
 		return ReadValue(QStringLiteral("AdminApiToken"), QString());
@@ -147,5 +145,17 @@ namespace OnlineServicesConfig
 	inline void SetPendingUpdateTargetVersion(const QString& version)
 	{
 		WriteValue(QStringLiteral("PendingUpdateTargetVersion"), version);
+	}
+
+	// 每个 OTA 通道持久化本机见过的最高签名版本。HTTP 传输下用于拒绝已见版本回放；
+	// 不能替代 HTTPS/清单有效期，但可防止设备在见过新版本后被降回旧清单。
+	inline QString HighestSeenUpdateVersion(const QString& channel)
+	{
+		return ReadValue(QStringLiteral("HighestSeenUpdateVersion_%1").arg(channel), QString());
+	}
+
+	inline void SetHighestSeenUpdateVersion(const QString& channel, const QString& version)
+	{
+		WriteValue(QStringLiteral("HighestSeenUpdateVersion_%1").arg(channel), version);
 	}
 }

@@ -33,6 +33,8 @@ public:
         QVector<TrackPoint> keyPointExpandedPoints;
         QVector<TrackPoint> points;
         int inputPointCount = 0;
+        int finiteInputPointCount = 0;
+        int invalidInputPointCount = 0;
         QString dllPath;
         QString configPath;
         QString baseWeldPath;
@@ -46,7 +48,8 @@ public:
         const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
         const PointCloudProcessingConfig::Settings& settings,
         const Eigen::Vector3d& scanDirection,
-        const QString& baseWeldOutputPath = QString());
+        const QString& baseWeldOutputPath,
+        const QString& runtimeConfigDir);
 
     // 进程隔离版：把上面的 SDK 调用放到子进程执行。SDK(PointCloudExtration→pcl_kdtree)在多线程下
     // 可能段错误(0xC0000005)拖垮整个上位机；子进程崩溃时本函数检测到崩溃退出、返回可报告错误，
@@ -58,7 +61,9 @@ public:
         const QString& baseWeldOutputPath = QString());
 
     // 子进程入口：由 main() 在构造主窗口前拦截 --pointcloud-extract-worker 调用。
-    // workerArgs = [inputCloudFile, scanX, scanY, scanZ, baseWeldOutputPath, resultFile]。
+    // workerArgs = [inputCloudFile, scanX, scanY, scanZ, baseWeldOutputPath, resultFile,
+    //               parentOwnedRuntimeDir, settingsSnapshotFile]。所有临时文件均放在父进程持有的 QTemporaryDir 下，
+    // 即使 worker 因 SDK 硬崩溃而无法析构，父进程仍会递归清理。
     static int RunExtractWorker(const QStringList& workerArgs);
 
     static RobotCalculation::MeasureThenWeldAnalysisResult BuildAnalysisResult(

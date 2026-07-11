@@ -12,6 +12,12 @@ if not exist "%PS_SCRIPT%" (
     exit /b 1
 )
 
+if "%~1"=="" (
+    echo [ERROR] AppVersion and Channel are mandatory.
+    echo Usage: %~nx0 -AppVersion 2026.07.12.1200 -Channel neutral^|brand
+    exit /b 2
+)
+
 echo [INFO] Building release package...
 echo.
 powershell -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
@@ -26,7 +32,7 @@ if not "%EXIT_CODE%"=="0" (
 )
 
 echo [OK] Release package build finished.
-echo [OK] Output folder: E:\WorkFile\bowen\QtWidgetsApplication4\dist\QtWidgetsApplication4
+echo [OK] Output folder: %SCRIPT_DIR%..\dist\QtWidgetsApplication4
 echo.
 pause
 exit /b 0

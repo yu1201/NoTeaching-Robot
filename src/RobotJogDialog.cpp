@@ -4,9 +4,12 @@
 #include "FANUCRobotDriver.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
+#include "RobotMotionTimeoutPolicy.h"
+#include "RobotOperationLease.h"
 #include "WindowStyleHelper.h"
 
 #include <QApplication>
+#include <QCloseEvent>
 #include <QDoubleValidator>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -100,7 +103,8 @@ namespace
 	{
 		if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
 		{
-			return std::max(1.0, speedMmPerMin / 60.0);
+			const double mmPerSec = speedMmPerMin / 60.0;
+			return mmPerSec >= 1.0 ? std::floor(mmPerSec) : 0.0;
 		}
 		return std::max(1.0, speedMmPerMin);
 	}
@@ -200,7 +204,26 @@ RobotJogDialog::RobotJogDialog(RobotDriverAdaptor* robotDriver, QWidget* parent)
 RobotJogDialog::~RobotJogDialog()
 {
 	StopJog();
+	if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver))
+	{
+		fanucDriver->EndContinuousMoveQueue();
+		if (fanucDriver->IsContinuousMoveQueueRunning())
+		{
+			// worker 已退出但机器人任务终态未确认时，析构前主动走真实 ABORT；
+			// 失败则 pending 随 lease 析构转为 sticky，绝不静默释放。
+			RobotOperationLease::StopAndConfirmUnverifiedMotion(fanucDriver);
+		}
+	}
+	m_jogOperationLease.reset();
 	SaveSpeedSettings();
+}
+
+void RobotJogDialog::closeEvent(QCloseEvent* event)
+{
+	// 关闭/返回主页时必须立即停止继续喂点。窗口默认仅隐藏，后台目标运动仍可由
+	// 主页的 STOP/MSTOP 处理；连续点动租约会保留到机器人侧真实停机确认。
+	StopJog();
+	QDialog::closeEvent(event);
 }
 
 void RobotJogDialog::BuildUi()
@@ -432,12 +455,11 @@ void RobotJogDialog::ShowMessageOnUiThread(QMessageBox::Icon icon, const QString
 			{
 				return;
 			}
-			QMessageBox msgBox(self);
-			msgBox.setIcon(icon);
-			msgBox.setWindowTitle(title);
-			msgBox.setText(text);
-			msgBox.addButton("确定", QMessageBox::AcceptRole);
-			msgBox.exec();
+			QMessageBox* msgBox = new QMessageBox(
+				icon, title, text, QMessageBox::Ok, self);
+			msgBox->setAttribute(Qt::WA_DeleteOnClose);
+			msgBox->setWindowModality(Qt::NonModal);
+			msgBox->show();
 		}, Qt::QueuedConnection);
 }
 
@@ -447,7 +469,14 @@ void RobotJogDialog::ReadCurrentCartesianTarget()
 	{
 		return;
 	}
-	const T_ROBOT_COORS current = m_robotDriver->GetCurrentPos();
+	T_ROBOT_COORS current;
+	if (!m_robotDriver->TryGetCurrentPos(current))
+	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制",
+			"读取当前位置失败，未改写直角目标框："
+			+ DecodeRobotMessageText(m_robotDriver->GetLastRobotError()));
+		return;
+	}
 	LogCartesianPoint(m_robotDriver, "点动界面读取当前位置并保存到直角编辑框", current);
 	SetCartesianTargetEditors(current);
 }
@@ -458,7 +487,14 @@ void RobotJogDialog::ReadCurrentJointTarget()
 	{
 		return;
 	}
-	const T_ANGLE_PULSE current = m_robotDriver->GetCurrentPulse();
+	T_ANGLE_PULSE current;
+	if (!m_robotDriver->TryGetCurrentPulse(current))
+	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制",
+			"读取当前关节失败，未改写关节目标框："
+			+ DecodeRobotMessageText(m_robotDriver->GetLastRobotError()));
+		return;
+	}
 	LogJointPoint(m_robotDriver, "点动界面读取当前位置并保存到关节编辑框", current);
 	SetJointTargetEditors(current);
 }
@@ -467,7 +503,7 @@ void RobotJogDialog::MoveToCartesianTarget()
 {
 	if (m_robotDriver == nullptr)
 	{
-		QMessageBox::warning(this, "点动控制", "机器人驱动无效。");
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", "机器人驱动无效。");
 		return;
 	}
 	if (IsMotionBusy())
@@ -480,23 +516,65 @@ void RobotJogDialog::MoveToCartesianTarget()
 	QString error;
 	if (!ReadCartesianTargetFromEditors(target, error))
 	{
-		QMessageBox::warning(this, "运动到指定位置", error);
+		ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", error);
 		return;
 	}
 
-	const double robotSpeed = CartesianCommandSpeed(m_robotDriver, CartesianSpeed());
+	T_ROBOT_COORS current;
+	if (!m_robotDriver->TryGetCurrentPos(current))
+	{
+		ShowMessageOnUiThread(
+			QMessageBox::Warning,
+			"运动到指定位置",
+			"读取当前机器人位置失败，已拒绝启动运动："
+			+ DecodeRobotMessageText(m_robotDriver->GetLastRobotError()));
+		return;
+	}
+	const double configuredSpeedMmPerMin = CartesianSpeed();
+	const double robotSpeed = CartesianCommandSpeed(m_robotDriver, configuredSpeedMmPerMin);
+	if (dynamic_cast<FANUCRobotCtrl*>(m_robotDriver) != nullptr && robotSpeed < 1.0)
+	{
+		ShowMessageOnUiThread(
+			QMessageBox::Warning,
+			"运动到指定位置",
+			"FANUC固定TP最低只能表示1mm/sec（60mm/min），已拒绝静默提速。");
+		return;
+	}
+	const double admissionSpeedMmPerMin =
+		dynamic_cast<FANUCRobotCtrl*>(m_robotDriver) != nullptr
+		? robotSpeed * 60.0
+		: configuredSpeedMmPerMin;
+	int motionTimeoutMs = 0;
+	std::string admissionError;
+	if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
+		current, target, admissionSpeedMmPerMin, motionTimeoutMs, &admissionError))
+	{
+		ShowMessageOnUiThread(
+			QMessageBox::Warning,
+			"运动到指定位置",
+			QString::fromUtf8(admissionError.c_str()));
+		return;
+	}
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		m_robotDriver, QStringLiteral("点动界面直角目标运动"), &leaseError);
+	if (!operationLease)
+	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", leaseError);
+		return;
+	}
 	LogCartesianPoint(m_robotDriver, "点动界面从直角编辑框发送目标点", target);
 	RobotDriverAdaptor* driver = m_robotDriver;
 	QPointer<RobotJogDialog> self(this);
 	SetMotionTaskRunning(true);
-		std::thread([self, driver, target, robotSpeed]()
+		std::thread([self, driver, target, robotSpeed, motionTimeoutMs, operationLease]()
 		{
 			if (self == nullptr)
 			{
 				return;
 			}
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
-			const int done = moveOk ? driver->CheckRobotDone(100) : -1;
+			const int done = moveOk ? driver->CheckRobotDone(100, motionTimeoutMs) : -1;
 			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "直角坐标运动", done) : QString();
 			QMetaObject::invokeMethod(self.data(), [self, moveOk, done, failureText]()
 				{
@@ -517,7 +595,7 @@ void RobotJogDialog::MoveToJointTarget()
 {
 	if (m_robotDriver == nullptr)
 	{
-		QMessageBox::warning(this, "点动控制", "机器人驱动无效。");
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", "机器人驱动无效。");
 		return;
 	}
 	if (IsMotionBusy())
@@ -530,23 +608,31 @@ void RobotJogDialog::MoveToJointTarget()
 	QString error;
 	if (!ReadJointTargetFromEditors(target, error))
 	{
-		QMessageBox::warning(this, "运动到指定位置", error);
+		ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", error);
 		return;
 	}
 
 	const double robotSpeed = std::clamp(JointSpeed(), 1.0, 100.0);
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		m_robotDriver, QStringLiteral("点动界面关节目标运动"), &leaseError);
+	if (!operationLease)
+	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "运动到指定位置", leaseError);
+		return;
+	}
 	LogJointPoint(m_robotDriver, "点动界面从关节编辑框发送目标点", target);
 	RobotDriverAdaptor* driver = m_robotDriver;
 	QPointer<RobotJogDialog> self(this);
 	SetMotionTaskRunning(true);
-		std::thread([self, driver, target, robotSpeed]()
+		std::thread([self, driver, target, robotSpeed, operationLease]()
 		{
 			if (self == nullptr)
 			{
 				return;
 			}
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
-			const int done = moveOk ? driver->CheckRobotDone(100) : -1;
+			const int done = moveOk ? driver->CheckRobotDone(100, 1800000) : -1;
 			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "关节脉冲运动", done) : QString();
 			QMetaObject::invokeMethod(self.data(), [self, moveOk, done, failureText]()
 				{
@@ -569,7 +655,7 @@ void RobotJogDialog::StartJog(JogMode mode, int axisIndex, int direction)
 	{
 		if (m_robotDriver == nullptr)
 		{
-			QMessageBox::warning(this, "点动控制", "机器人驱动无效。");
+			ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", "机器人驱动无效。");
 		}
 		return;
 	}
@@ -592,22 +678,44 @@ void RobotJogDialog::BeginJog()
 	}
 
 	const JogMode mode = m_currentMode;
+	QString leaseError;
+	m_jogOperationLease = RobotOperationLease::TryAcquire(
+		m_robotDriver, QStringLiteral("长按连续点动"), &leaseError);
+	if (!m_jogOperationLease)
+	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", leaseError);
+		return;
+	}
 	m_streamCartesianSpeed = CartesianSpeed();
 	m_streamJointSpeed = JointSpeed();
-	m_jogActive = true;
-	m_nextStreamStep = 0;
-	UpdateMotionButtonState();
 
 	if (mode == JogMode::Cartesian)
 	{
-		m_streamBasePos = m_robotDriver->GetCurrentPos();
+		if (!m_robotDriver->TryGetCurrentPos(m_streamBasePos))
+		{
+			m_jogOperationLease.reset();
+			ShowMessageOnUiThread(QMessageBox::Warning, "点动控制",
+				"长按点动已拒绝：读取当前直角位置失败，"
+				+ DecodeRobotMessageText(m_robotDriver->GetLastRobotError()));
+			return;
+		}
 		m_lastStreamPos = m_streamBasePos;
 	}
 	else
 	{
-		m_streamBasePulse = m_robotDriver->GetCurrentPulse();
+		if (!m_robotDriver->TryGetCurrentPulse(m_streamBasePulse))
+		{
+			m_jogOperationLease.reset();
+			ShowMessageOnUiThread(QMessageBox::Warning, "点动控制",
+				"长按点动已拒绝：读取当前关节位置失败，"
+				+ DecodeRobotMessageText(m_robotDriver->GetLastRobotError()));
+			return;
+		}
 		m_lastStreamPulse = m_streamBasePulse;
 	}
+	m_jogActive = true;
+	m_nextStreamStep = 0;
+	UpdateMotionButtonState();
 
 	const double robotSpeed = mode == JogMode::Cartesian
 		? CartesianCommandSpeed(m_robotDriver, m_streamCartesianSpeed)
@@ -631,16 +739,23 @@ void RobotJogDialog::BeginJog()
 	if (fanucDriver == nullptr)
 	{
 		m_jogActive = false;
+		m_jogOperationLease.reset();
 		UpdateMotionButtonState();
-		QMessageBox::information(this, "点动控制", "当前机器人暂不支持长按连续点动，请使用单击步进或目标点运动。");
+		ShowMessageOnUiThread(QMessageBox::Information, "点动控制",
+			"当前机器人暂不支持长按连续点动，请使用单击步进或目标点运动。");
 		return;
 	}
 
 	if (!fanucDriver->StartContinuousMoveQueue(mode == JogMode::Cartesian ? MOVL : MOVJ, robotSpeed))
 	{
 		m_jogActive = false;
+		m_jogOperationLease.reset();
 		UpdateMotionButtonState();
-		QMessageBox::warning(this, "点动控制", "启动连续运动队列失败。");
+		if (m_stateLabel != nullptr)
+		{
+			m_stateLabel->setText(QStringLiteral(
+				"启动连续运动队列失败；若安全停机未确认，请使用主页固定红色停止按钮重试。"));
+		}
 		return;
 	}
 
@@ -677,7 +792,22 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 
 	if (mode == JogMode::Cartesian)
 	{
-		T_ROBOT_COORS target = m_robotDriver->GetCurrentPos();
+		QString leaseError;
+		const auto operationLease = RobotOperationLease::TryAcquire(
+			m_robotDriver, QStringLiteral("点动界面直角步进"), &leaseError);
+		if (!operationLease)
+		{
+			ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", leaseError);
+			return;
+		}
+		T_ROBOT_COORS target;
+		if (!m_robotDriver->TryGetCurrentPos(target))
+		{
+			ShowMessageOnUiThread(QMessageBox::Warning, "点动控制",
+				"直角步进已拒绝：读取当前位置失败，"
+				+ DecodeRobotMessageText(m_robotDriver->GetLastRobotError()));
+			return;
+		}
 		const double stepDistance = CartesianSpeed() * STREAM_POINT_TIME_SEC / 60.0;
 		AddCartesianDelta(target, axisIndex, static_cast<double>(direction) * stepDistance);
 		const double robotSpeed = CartesianCommandSpeed(m_robotDriver, CartesianSpeed());
@@ -685,10 +815,10 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 		SetMotionTaskRunning(true);
 		RobotDriverAdaptor* driver = m_robotDriver;
 		QPointer<RobotJogDialog> self(this);
-		std::thread([self, driver, target, robotSpeed]()
+		std::thread([self, driver, target, robotSpeed, operationLease]()
 			{
 				const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
-				const int done = moveOk ? driver->CheckRobotDone(100) : -1;
+				const int done = moveOk ? driver->CheckRobotDone(100, 1800000) : -1;
 				const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "直角步进", done) : QString();
 				QMetaObject::invokeMethod(qApp, [self, moveOk, done, failureText]()
 					{
@@ -699,7 +829,8 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 						self->SetMotionTaskRunning(false);
 						if (!moveOk || done <= 0)
 						{
-							QMessageBox::warning(self, "点动控制", failureText);
+							self->ShowMessageOnUiThread(
+								QMessageBox::Warning, "点动控制", failureText);
 						}
 					}, Qt::QueuedConnection);
 			}).detach();
@@ -707,7 +838,22 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 		return;
 	}
 
-	T_ANGLE_PULSE target = m_robotDriver->GetCurrentPulse();
+	QString leaseError;
+	const auto operationLease = RobotOperationLease::TryAcquire(
+		m_robotDriver, QStringLiteral("点动界面关节步进"), &leaseError);
+	if (!operationLease)
+	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", leaseError);
+		return;
+	}
+	T_ANGLE_PULSE target;
+	if (!m_robotDriver->TryGetCurrentPulse(target))
+	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制",
+			"关节步进已拒绝：读取当前位置失败，"
+			+ DecodeRobotMessageText(m_robotDriver->GetLastRobotError()));
+		return;
+	}
 	const double stepDeg = std::max(0.25, JointSpeed()) * STREAM_POINT_TIME_SEC;
 	const double pulseUnit = AxisPulseUnit(m_robotDriver, axisIndex);
 	const long deltaPulse = pulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(static_cast<double>(direction) * stepDeg / pulseUnit));
@@ -717,10 +863,10 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 	SetMotionTaskRunning(true);
 	RobotDriverAdaptor* driver = m_robotDriver;
 	QPointer<RobotJogDialog> self(this);
-	std::thread([self, driver, target, robotSpeed]()
+	std::thread([self, driver, target, robotSpeed, operationLease]()
 		{
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
-			const int done = moveOk ? driver->CheckRobotDone(100) : -1;
+			const int done = moveOk ? driver->CheckRobotDone(100, 1800000) : -1;
 			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "关节步进", done) : QString();
 			QMetaObject::invokeMethod(qApp, [self, moveOk, done, failureText]()
 				{
@@ -731,7 +877,8 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 					self->SetMotionTaskRunning(false);
 					if (!moveOk || done <= 0)
 					{
-						QMessageBox::warning(self, "点动控制", failureText);
+						self->ShowMessageOnUiThread(
+							QMessageBox::Warning, "点动控制", failureText);
 					}
 				}, Qt::QueuedConnection);
 		}).detach();
@@ -815,6 +962,14 @@ void RobotJogDialog::RefreshStateText()
 	}
 	const QString doneText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知(%1)").arg(done));
 	const QString sourceText = QString::fromStdString(m_robotDriver->GetStateMonitorSourceText());
+	if (m_jogOperationLease)
+	{
+		FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver);
+		if (fanucDriver == nullptr || !fanucDriver->IsContinuousMoveQueueRunning())
+		{
+			m_jogOperationLease.reset();
+		}
+	}
 	UpdateMotionButtonState();
 
 	m_stateLabel->setText(QString(

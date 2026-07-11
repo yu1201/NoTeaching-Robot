@@ -6,8 +6,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMap>
 
 #include <algorithm>
+#include <cmath>
 
 namespace
 {
@@ -19,29 +21,98 @@ bool g_hasRuntimeScanDirectionOverride = false;
 double g_runtimeScanDirectionX = 1.0;
 double g_runtimeScanDirectionY = 0.0;
 double g_runtimeScanDirectionZ = 0.0;
+thread_local const QMap<QString, QString>* g_activeSettingsSnapshot = nullptr;
+
+class SettingsSnapshotScope
+{
+public:
+    explicit SettingsSnapshotScope(const QMap<QString, QString>& snapshot)
+        : m_previous(g_activeSettingsSnapshot)
+    {
+        g_activeSettingsSnapshot = &snapshot;
+    }
+
+    ~SettingsSnapshotScope()
+    {
+        g_activeSettingsSnapshot = m_previous;
+    }
+
+private:
+    const QMap<QString, QString>* m_previous = nullptr;
+};
+
+void NormalizeFiniteLoadValues(PointCloudProcessingConfig::Settings& settings)
+{
+    const PointCloudProcessingConfig::Settings defaults;
+    const auto useDefaultIfNonFinite = [](double& value, double defaultValue)
+    {
+        if (!std::isfinite(value))
+        {
+            value = defaultValue;
+        }
+    };
+
+    useDefaultIfNonFinite(settings.zTruncationValue, defaults.zTruncationValue);
+    useDefaultIfNonFinite(settings.resampleStepMm, defaults.resampleStepMm);
+    useDefaultIfNonFinite(settings.fitSampleStepMm, defaults.fitSampleStepMm);
+
+    // std::clamp/std::min/std::max do not sanitize NaN. Restore every floating-point
+    // quality threshold before the range clamps and the Enforce safety floors run.
+    useDefaultIfNonFinite(settings.validationMinProjectedSpanMm, defaults.validationMinProjectedSpanMm);
+    useDefaultIfNonFinite(settings.validationMinStationCoverageRatio, defaults.validationMinStationCoverageRatio);
+    useDefaultIfNonFinite(settings.validationMinLongestContinuousRatio, defaults.validationMinLongestContinuousRatio);
+    useDefaultIfNonFinite(settings.validationMaxRejectedRatio, defaults.validationMaxRejectedRatio);
+    useDefaultIfNonFinite(settings.validationMaxMedianResidualMm, defaults.validationMaxMedianResidualMm);
+    useDefaultIfNonFinite(settings.validationMaxP95ResidualMm, defaults.validationMaxP95ResidualMm);
+    useDefaultIfNonFinite(settings.validationResidualInlierThresholdMm, defaults.validationResidualInlierThresholdMm);
+    useDefaultIfNonFinite(settings.validationMinResidualInlierRatio, defaults.validationMinResidualInlierRatio);
+    useDefaultIfNonFinite(settings.validationMinSegmentLengthMm, defaults.validationMinSegmentLengthMm);
+    useDefaultIfNonFinite(settings.validationMinOutputLengthRatio, defaults.validationMinOutputLengthRatio);
+}
+
+void ApplyEnforceValidationSafetyBounds(PointCloudProcessingConfig::Settings& settings)
+{
+    if (settings.validationPolicy != PointCloudProcessingConfig::ValidationPolicy::Enforce)
+    {
+        return;
+    }
+    settings.validationMinFinitePointCount = std::max(300, settings.validationMinFinitePointCount);
+    settings.validationMinProjectedSpanMm = std::max(180.0, settings.validationMinProjectedSpanMm);
+    settings.validationMinStationCoverageRatio = std::max(0.55, settings.validationMinStationCoverageRatio);
+    settings.validationMinLongestContinuousRatio = std::max(0.60, settings.validationMinLongestContinuousRatio);
+    settings.validationMaxRejectedRatio = std::min(0.40, settings.validationMaxRejectedRatio);
+    settings.validationMaxMedianResidualMm =
+        settings.validationMaxMedianResidualMm <= 0.0
+        ? 3.0
+        : std::min(3.0, settings.validationMaxMedianResidualMm);
+    settings.validationMaxP95ResidualMm =
+        settings.validationMaxP95ResidualMm <= 0.0
+        ? 8.0
+        : std::min(8.0, settings.validationMaxP95ResidualMm);
+    settings.validationResidualInlierThresholdMm =
+        settings.validationResidualInlierThresholdMm <= 0.0
+        ? 6.0
+        : std::min(6.0, settings.validationResidualInlierThresholdMm);
+    settings.validationMinResidualInlierRatio = std::max(0.75, settings.validationMinResidualInlierRatio);
+    settings.validationMinKeyPointCount = std::max(6, settings.validationMinKeyPointCount);
+    settings.validationMinCornerCount = std::max(4, settings.validationMinCornerCount);
+    settings.validationMinOutputPointCount = std::max(80, settings.validationMinOutputPointCount);
+    settings.validationMinOutputLengthRatio = std::max(0.70, settings.validationMinOutputLengthRatio);
+}
 
 QString ReadSetting(const QString& key, const QString& defaultValue = QString())
 {
+    if (g_activeSettingsSnapshot != nullptr)
+    {
+        const auto it = g_activeSettingsSnapshot->constFind(key);
+        return it == g_activeSettingsSnapshot->cend() ? defaultValue : it.value();
+    }
     QString value;
     if (ConfigDatabase::ReadScopedSetting(QStringLiteral("global"), QString(), SETTINGS_GROUP, key, &value))
     {
         return value;
     }
     return defaultValue;
-}
-
-bool WriteSetting(const QString& key, const QString& value, QString* error)
-{
-    if (ConfigDatabase::WriteScopedSetting(QStringLiteral("global"), QString(), SETTINGS_GROUP, key, value))
-    {
-        return true;
-    }
-
-    if (error != nullptr)
-    {
-        *error = QString("写入点云处理配置失败：%1").arg(key);
-    }
-    return false;
 }
 
 bool ReadBoolSetting(const QString& key, bool defaultValue)
@@ -65,7 +136,7 @@ double ReadDoubleSetting(const QString& key, double defaultValue)
 {
     bool ok = false;
     const double value = ReadSetting(key, QString::number(defaultValue, 'f', 6)).trimmed().toDouble(&ok);
-    return ok ? value : defaultValue;
+    return ok && std::isfinite(value) ? value : defaultValue;
 }
 
 QString ExistingProjectFilePath(const QString& relativePath)
@@ -97,14 +168,17 @@ QString PointCloudProcessingConfig::DataConfigPath()
 
 PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
 {
+    const QMap<QString, QString> settingsSnapshot = ConfigDatabase::ReadScopedSettings(
+        QStringLiteral("global"), QString(), SETTINGS_GROUP);
+    const SettingsSnapshotScope snapshotScope(settingsSnapshot);
     Settings settings;
     settings.mode = ModeFromConfigValue(ReadSetting("General/ProcessingMode", ModeConfigValue(settings.mode)));
     settings.featurePointStrategy = FeaturePointStrategyFromConfigValue(
         ReadSetting("FeaturePoint/Strategy", FeaturePointStrategyConfigValue(settings.featurePointStrategy)));
     settings.libraryDir = ReadSetting("External/LibraryDir", DefaultLibraryDir()).trimmed();
     settings.configPath = ReadSetting("External/ConfigPath", DefaultConfigPath()).trimmed();
-    settings.zTruncationValue = ReadSetting("External/ZTruncationValue", "6.0").toDouble();
-    settings.resampleStepMm = ReadSetting("External/ResampleStepMm", "2.0").toDouble();
+    settings.zTruncationValue = ReadDoubleSetting("External/ZTruncationValue", settings.zTruncationValue);
+    settings.resampleStepMm = ReadDoubleSetting("External/ResampleStepMm", settings.resampleStepMm);
     settings.sdkUseWeldedStartTruncation = ReadBoolSetting("External/UseWeldedStartTruncation", false);
     settings.sampleAxisMode = SampleAxisModeFromConfigValue(
         ReadSetting("Fit/SampleAxis", SampleAxisModeConfigValue(settings.sampleAxisMode)));
@@ -159,6 +233,11 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.slopeConsistentCornerFit = ReadBoolSetting("FeaturePoint/SlopeConsistentCornerFit", false);
     settings.exportFitDebugCloud = ReadBoolSetting("FeaturePoint/ExportFitDebugCloud", true);
     settings.exportWorkpieceFrameDebug = ReadBoolSetting("FeaturePoint/ExportWorkpieceFrameDebug", false);
+    const int storedValidationProfileVersion =
+        ReadIntSetting("Validation/ProfileVersion", 0);
+    settings.validationProfileVersion = storedValidationProfileVersion;
+    settings.validationPolicy = ValidationPolicyFromConfigValue(
+        ReadSetting("Validation/Policy", ValidationPolicyConfigValue(settings.validationPolicy)));
     settings.validationCoverageEnabled = ReadBoolSetting("Validation/CoverageEnabled", settings.validationCoverageEnabled);
     settings.validationMinFinitePointCount = ReadIntSetting("Validation/MinFinitePointCount", settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = ReadDoubleSetting("Validation/MinProjectedSpanMm", settings.validationMinProjectedSpanMm);
@@ -179,6 +258,21 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.validationOutputEnabled = ReadBoolSetting("Validation/OutputEnabled", settings.validationOutputEnabled);
     settings.validationMinOutputPointCount = ReadIntSetting("Validation/MinOutputPointCount", settings.validationMinOutputPointCount);
     settings.validationMinOutputLengthRatio = ReadDoubleSetting("Validation/MinOutputLengthRatio", settings.validationMinOutputLengthRatio);
+
+    // 旧现场数据库曾把六类门禁全部持久化为 0，安装/OTA 又会保留 Data，单靠 C++ 默认值无法恢复。
+    // Profile v1 已用 101 组历史语料完成阈值回算；旧配置升级时直接进入 Enforce，并强制计算全部六类指标。
+    // 只有显式保存 v1+Audit 才允许“只记录不拦截”，不存在可发布的 Off 状态。
+    if (storedValidationProfileVersion < CURRENT_VALIDATION_PROFILE_VERSION)
+    {
+        settings.validationPolicy = ValidationPolicy::Enforce;
+    }
+    settings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
+    settings.validationCoverageEnabled = true;
+    settings.validationContinuityEnabled = true;
+    settings.validationDenoiseRatioEnabled = true;
+    settings.validationResidualEnabled = true;
+    settings.validationKeyPointEnabled = true;
+    settings.validationOutputEnabled = true;
     if (g_hasRuntimeModeOverride)
     {
         settings.mode = g_runtimeModeOverride;
@@ -211,6 +305,7 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     {
         settings.configPath = DefaultConfigPath();
     }
+    NormalizeFiniteLoadValues(settings);
     if (settings.resampleStepMm <= 0.0)
     {
         settings.resampleStepMm = 2.0;
@@ -283,18 +378,29 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.validationMinSegmentLengthMm = std::max(0.0, settings.validationMinSegmentLengthMm);
     settings.validationMinOutputPointCount = std::max(0, settings.validationMinOutputPointCount);
     settings.validationMinOutputLengthRatio = std::max(0.0, settings.validationMinOutputLengthRatio);
+    ApplyEnforceValidationSafetyBounds(settings);
     return settings;
 }
 
 bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
 {
-    QString localError;
-    const auto write = [&localError](const QString& key, const QString& value)
+    Settings normalizedSettings = settings;
+    normalizedSettings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
+    normalizedSettings.validationCoverageEnabled = true;
+    normalizedSettings.validationContinuityEnabled = true;
+    normalizedSettings.validationDenoiseRatioEnabled = true;
+    normalizedSettings.validationResidualEnabled = true;
+    normalizedSettings.validationKeyPointEnabled = true;
+    normalizedSettings.validationOutputEnabled = true;
+    ApplyEnforceValidationSafetyBounds(normalizedSettings);
+    QMap<QString, QString> pendingValues;
+    const auto write = [&pendingValues](const QString& key, const QString& value)
     {
-        return WriteSetting(key, value, &localError);
+        pendingValues.insert(key, value);
+        return true;
     };
 
-    const bool ok =
+    const bool valuesPrepared =
         write("General/ProcessingMode", ModeConfigValue(settings.mode))
         && write("FeaturePoint/Strategy", FeaturePointStrategyConfigValue(settings.featurePointStrategy))
         && write("External/LibraryDir", QDir::toNativeSeparators(settings.libraryDir))
@@ -354,29 +460,33 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("CloudProjection/LayerLowPercent", QString::number(settings.projectionLayerLowPercent, 'f', 6))
         && write("CloudProjection/LayerHighPercent", QString::number(settings.projectionLayerHighPercent, 'f', 6))
         && write("CloudProjection/SmoothRadius", QString::number(settings.projectionSmoothRadius))
-        && write("Validation/CoverageEnabled", settings.validationCoverageEnabled ? "1" : "0")
-        && write("Validation/MinFinitePointCount", QString::number(settings.validationMinFinitePointCount))
-        && write("Validation/MinProjectedSpanMm", QString::number(settings.validationMinProjectedSpanMm, 'f', 6))
-        && write("Validation/ContinuityEnabled", settings.validationContinuityEnabled ? "1" : "0")
-        && write("Validation/MinStationCoverageRatio", QString::number(settings.validationMinStationCoverageRatio, 'f', 6))
-        && write("Validation/MinLongestContinuousRatio", QString::number(settings.validationMinLongestContinuousRatio, 'f', 6))
-        && write("Validation/DenoiseRatioEnabled", settings.validationDenoiseRatioEnabled ? "1" : "0")
-        && write("Validation/MaxRejectedRatio", QString::number(settings.validationMaxRejectedRatio, 'f', 6))
-        && write("Validation/ResidualEnabled", settings.validationResidualEnabled ? "1" : "0")
-        && write("Validation/MaxMedianResidualMm", QString::number(settings.validationMaxMedianResidualMm, 'f', 6))
-        && write("Validation/MaxP95ResidualMm", QString::number(settings.validationMaxP95ResidualMm, 'f', 6))
-        && write("Validation/ResidualInlierThresholdMm", QString::number(settings.validationResidualInlierThresholdMm, 'f', 6))
-        && write("Validation/MinResidualInlierRatio", QString::number(settings.validationMinResidualInlierRatio, 'f', 6))
-        && write("Validation/KeyPointEnabled", settings.validationKeyPointEnabled ? "1" : "0")
-        && write("Validation/MinKeyPointCount", QString::number(settings.validationMinKeyPointCount))
-        && write("Validation/MinCornerCount", QString::number(settings.validationMinCornerCount))
-        && write("Validation/MinSegmentLengthMm", QString::number(settings.validationMinSegmentLengthMm, 'f', 6))
-        && write("Validation/OutputEnabled", settings.validationOutputEnabled ? "1" : "0")
-        && write("Validation/MinOutputPointCount", QString::number(settings.validationMinOutputPointCount))
-        && write("Validation/MinOutputLengthRatio", QString::number(settings.validationMinOutputLengthRatio, 'f', 6));
+        && write("Validation/ProfileVersion", QString::number(CURRENT_VALIDATION_PROFILE_VERSION))
+        && write("Validation/Policy", ValidationPolicyConfigValue(normalizedSettings.validationPolicy))
+        && write("Validation/CoverageEnabled", "1")
+        && write("Validation/MinFinitePointCount", QString::number(normalizedSettings.validationMinFinitePointCount))
+        && write("Validation/MinProjectedSpanMm", QString::number(normalizedSettings.validationMinProjectedSpanMm, 'f', 6))
+        && write("Validation/ContinuityEnabled", "1")
+        && write("Validation/MinStationCoverageRatio", QString::number(normalizedSettings.validationMinStationCoverageRatio, 'f', 6))
+        && write("Validation/MinLongestContinuousRatio", QString::number(normalizedSettings.validationMinLongestContinuousRatio, 'f', 6))
+        && write("Validation/DenoiseRatioEnabled", "1")
+        && write("Validation/MaxRejectedRatio", QString::number(normalizedSettings.validationMaxRejectedRatio, 'f', 6))
+        && write("Validation/ResidualEnabled", "1")
+        && write("Validation/MaxMedianResidualMm", QString::number(normalizedSettings.validationMaxMedianResidualMm, 'f', 6))
+        && write("Validation/MaxP95ResidualMm", QString::number(normalizedSettings.validationMaxP95ResidualMm, 'f', 6))
+        && write("Validation/ResidualInlierThresholdMm", QString::number(normalizedSettings.validationResidualInlierThresholdMm, 'f', 6))
+        && write("Validation/MinResidualInlierRatio", QString::number(normalizedSettings.validationMinResidualInlierRatio, 'f', 6))
+        && write("Validation/KeyPointEnabled", "1")
+        && write("Validation/MinKeyPointCount", QString::number(normalizedSettings.validationMinKeyPointCount))
+        && write("Validation/MinCornerCount", QString::number(normalizedSettings.validationMinCornerCount))
+        && write("Validation/MinSegmentLengthMm", QString::number(normalizedSettings.validationMinSegmentLengthMm, 'f', 6))
+        && write("Validation/OutputEnabled", "1")
+        && write("Validation/MinOutputPointCount", QString::number(normalizedSettings.validationMinOutputPointCount))
+        && write("Validation/MinOutputLengthRatio", QString::number(normalizedSettings.validationMinOutputLengthRatio, 'f', 6));
+    const bool ok = valuesPrepared && ConfigDatabase::WriteScopedSettings(
+        QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues);
     if (!ok && error != nullptr)
     {
-        *error = localError;
+        *error = QStringLiteral("原子写入点云处理配置失败，数据库已回滚，未留下混合版本。");
     }
     return ok;
 }
@@ -525,6 +635,20 @@ QString PointCloudProcessingConfig::SampleAxisModeConfigValue(SampleAxisMode mod
     default:
         return "auto";
     }
+}
+
+QString PointCloudProcessingConfig::ValidationPolicyConfigValue(ValidationPolicy policy)
+{
+    return policy == ValidationPolicy::Audit ? "Audit" : "Enforce";
+}
+
+PointCloudProcessingConfig::ValidationPolicy PointCloudProcessingConfig::ValidationPolicyFromConfigValue(
+    const QString& value)
+{
+    const QString normalized = value.trimmed().toLower();
+    return normalized == "audit" || normalized == "0"
+        ? ValidationPolicy::Audit
+        : ValidationPolicy::Enforce;
 }
 
 PointCloudProcessingConfig::SampleAxisMode PointCloudProcessingConfig::SampleAxisModeFromConfigValue(const QString& value)

@@ -310,13 +310,38 @@ END WriteCurrentPulse
 ROUTINE WriteDoneState(ch : FILE)
 VAR
   moving : BOOLEAN
+  task_name : STRING[36]
+  task_no : INTEGER
+  task_status : INTEGER
+  task_dummy : STRING[2]
+  task_query_status : INTEGER
 BEGIN
   GET_VAR(g_entry, '*SYSTEM*', '$MOR_GRP[1].$ROB_MOVE', moving, g_status)
   IF g_status = 0 THEN
     IF moving THEN
       WRITE ch('DONE:0', CR)
     ELSE
-      WRITE ch('DONE:1', CR)
+      IF g_active_task_name = '' THEN
+        WRITE ch('DONE:1', CR)
+        RETURN
+      ENDIF
+
+      -- ROB_MOVE=FALSE 只表示采样瞬间没有轴运动；任务仍可能处于等待、暂停、
+      -- 接受或减速中。只有任务查询明确到达 PG_ABORTED 才能释放高层租约。
+      task_name = g_active_task_name
+      task_no = 0
+      GET_TSK_INFO(task_name, task_no, TSK_STATUS,
+                   task_status, task_dummy, task_query_status)
+      IF task_query_status <> 0 THEN
+        WRITE ch('DONE:-1', CR)
+        RETURN
+      ENDIF
+      IF task_status = PG_ABORTED THEN
+        ClearActiveTask
+        WRITE ch('DONE:1', CR)
+      ELSE
+        WRITE ch('DONE:0', CR)
+      ENDIF
     ENDIF
   ELSE
     WRITE ch('DONE:-1', CR)
@@ -414,13 +439,60 @@ END DoGetInt
 ROUTINE DoCallJob(ch : FILE; cmd : STRING)
 BEGIN
   Payload(cmd, 9, g_text1)
+  -- 先把被动完成寄存器置为运行态，再接受任务；这样 S5 不会在 RUN_TASK
+  -- 已接受但 g_active_task_name 尚未写入的窗口误报完成。
+  SET_INT_REG(98, 0, g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'CALL_JOB_STATE_FAIL')
+    RETURN
+  ENDIF
   RUN_TASK(g_text1, 1, FALSE, FALSE, 1, g_status)
   IF g_status = 0 THEN
+    g_active_task_name = g_text1
     WriteOk(ch, '')
   ELSE
+    ClearActiveTask
     WriteErr(ch, 'CALL_JOB_FAIL')
   ENDIF
 END DoCallJob
+
+ROUTINE DoProgramStop(ch : FILE)
+VAR
+  task_name : STRING[36]
+  abort_status : INTEGER
+  task_no : INTEGER
+  task_status : INTEGER
+  task_dummy : STRING[2]
+  task_query_status : INTEGER
+BEGIN
+  task_name = g_active_task_name
+  IF task_name = '' THEN
+    WriteErr(ch, 'NO_ACTIVE_CALL_JOB')
+    RETURN
+  ENDIF
+
+  -- 任务可能刚好在用户按 STOP 前自然结束。先确认终态，避免对已经
+  -- PG_ABORTED 的任务再次 ABORT_TASK 返回错误并留下无法解除的闭锁。
+  task_no = 0
+  GET_TSK_INFO(task_name, task_no, TSK_STATUS,
+               task_status, task_dummy, task_query_status)
+  IF (task_query_status = 0) AND (task_status = PG_ABORTED) THEN
+    ClearActiveTask
+    WriteOk(ch, 'ALREADY_STOPPED')
+    RETURN
+  ENDIF
+
+  -- force_sw=TRUE：即使目标任务设置 ignore-abort 也中止；
+  -- cancel_mtn_sw=TRUE：同步取消该任务所属运动组的当前/排队运动。
+  ABORT_TASK(task_name, TRUE, TRUE, abort_status)
+  IF abort_status = 0 THEN
+    -- ABORT_TASK 成功只代表中止请求被接受；ABORTING/减速期间继续保持
+    -- active name 和 R[98]=0，由 WriteDoneState 的 PG_ABORTED 回读最终清除。
+    WriteOk(ch, 'ABORT_REQUESTED')
+  ELSE
+    WriteErr(ch, 'PROGRAM_STOP_FAIL')
+  ENDIF
+END DoProgramStop
 
 ROUTINE DoSetTpSpeed(ch : FILE; cmd : STRING)
 BEGIN
@@ -615,7 +687,7 @@ BEGIN
     RETURN
   ENDIF
   IF cmd = 'GET_USER_PROGRAM' THEN
-    WRITE ch('PROGRAM:FANUC_RESIDENT_SERVICE;LIB=20260420_CONFIG_COMMA_DIAG', CR)
+    WRITE ch('PROGRAM:FANUC_RESIDENT_SERVICE;LIB=20260710_ABORT_TASK_STATE_V2', CR)
     RETURN
   ENDIF
   IF cmd = 'GET_USER_PROJECT' THEN
@@ -671,7 +743,7 @@ BEGIN
     RETURN
   ENDIF
   IF cmd = 'PROGRAM_STOP' THEN
-    WriteOk(ch, '')
+    DoProgramStop(ch)
     RETURN
   ENDIF
   IF cmd = 'SERVO_ON' THEN

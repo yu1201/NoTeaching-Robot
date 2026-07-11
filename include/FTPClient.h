@@ -32,9 +32,9 @@ public:
     // 构造函数：初始化日志和弹窗，指定FTP服务器信息
     FtpClient(RobotLog* log,
         const std::string& ftpHost,
-        int ftpPort = 21,
-        const std::string& ftpUser = "root",
-        const std::string& ftpPwd = "STEP_ROBOT_SRH"
+        int ftpPort,
+        const std::string& ftpUser,
+        const std::string& ftpPwd
        );
 
     // 显式建立（或复用）FTP 连接：成功后会话可被后续 createRemoteDirRecursive/上传复用。
@@ -49,13 +49,14 @@ public:
     // 核心FTP操作（真实实现）
     bool uploadFile(const std::string& localFilePath, const std::string& remoteFilePath, bool deleteBeforeUpload = true);
     // 分块上传（带进度回调 + 可取消）：progressCb(已发送字节, 总字节) 每块调用一次；
-    // cancelFlag 置真则块间中止并删除服务器上的半截文件。返回 true=完整上传成功，false=失败/被取消。
+    // cancelFlag 置真则块间中止；allowRemoteDelete=true 时尝试删除服务器半截文件。
+    // 写一次上传账号必须传 false；不完整唯一件靠声明长度过滤，并由服务器定期清理。
     // 与 uploadFile(FtpPutFileA) 并存，不影响 STEP 机器人等既有原子上传调用。
     bool uploadFileWithProgress(const std::string& localFilePath,
         const std::string& remoteFilePath,
         std::atomic<bool>* cancelFlag,
         const std::function<void(long long sent, long long total)>& progressCb,
-        bool deleteBeforeUpload = true);
+        bool allowRemoteDelete = true);
     bool listFiles(const std::string& remoteDir, std::vector<FtpRemoteFileInfo>& files);
     bool downloadFile(const std::string& remoteFilePath, const std::string& localFilePath);
     bool deleteFile(const std::string& remoteFilePath, bool askConfirm = true);

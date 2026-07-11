@@ -1,3 +1,51 @@
 #include <windows.h>
 
+#ifndef RELEASE_VERSION_NUM
+#define RELEASE_VERSION_NUM 2026,7,12,606
+#endif
+
+#ifndef RELEASE_VERSION_STR
+#define RELEASE_VERSION_STR "2026.07.12.0606"
+#endif
+
+#ifndef RELEASE_PRODUCT_NAME
+#define RELEASE_PRODUCT_NAME "NoTeaching-Robot"
+#endif
+
+#ifndef RELEASE_EXE_NAME
+#define RELEASE_EXE_NAME "QtWidgetsApplication4.exe"
+#endif
+
 IDI_APP_ICON ICON "icons\\app.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION RELEASE_VERSION_NUM
+ PRODUCTVERSION RELEASE_VERSION_NUM
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "yu1201\0"
+            VALUE "FileDescription", RELEASE_PRODUCT_NAME "\0"
+            VALUE "FileVersion", RELEASE_VERSION_STR "\0"
+            VALUE "InternalName", RELEASE_EXE_NAME "\0"
+            VALUE "OriginalFilename", RELEASE_EXE_NAME "\0"
+            VALUE "ProductName", RELEASE_PRODUCT_NAME "\0"
+            VALUE "ProductVersion", RELEASE_VERSION_STR "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

@@ -227,6 +227,7 @@ QStringList MinimalWeldSectionLinesForPrecise()
         << "WeldSafeMoveSpeedMmPerMin=1000"
         << "StepOverlapRel=20"
         << "FinalWeldTrajectoryStepMm=4"
+        << "ResumeBacktrackDistanceMm=5"
         << "WeldDirection=1"
         << "NormalWeldRx=0"
         << "NormalWeldRy=0"
@@ -573,6 +574,7 @@ QString PreciseParamDisplayName(const QString& key)
         { "WeldSafeMoveSpeedMmPerMin", "安全位速度" },
         { "StepOverlapRel", "STEP过渡比例" },
         { "FinalWeldTrajectoryStepMm", "最终轨迹点间距" },
+        { "ResumeBacktrackDistanceMm", "续焊搭接回退距离(mm)" },
         { "WorldCoorDir", "世界Z方向" },
         { "RobotInstallDir", "机器人安装方向" },
         { "GunAngle", "焊枪角度" },
@@ -697,7 +699,7 @@ QString WeldParamGroupTitleForKey(const QString& key)
     const QString normalized = key.trimmed();
     static const QSet<QString> executeKeys = {
         "WeldEnable", "WeldSpeedMmPerMin", "DryRunSpeedMmPerMin", "WeldSafeMoveSpeedMmPerMin",
-        "StepOverlapRel", "FinalWeldTrajectoryStepMm", "WeldDirection"
+        "StepOverlapRel", "FinalWeldTrajectoryStepMm", "ResumeBacktrackDistanceMm", "WeldDirection"
     };
     static const QSet<QString> coordinateKeys = {
         "WorldCoorDir", "RobotInstallDir", "GunAngle", "GunLaserAngle", "GunCameraAngle",
@@ -1429,8 +1431,18 @@ void PreciseMeasureEditDialog::TeachStartPos()
         return;
     }
 
-    const T_ROBOT_COORS coors = driver->GetCurrentPos();
-    m_taughtStartPulse = driver->GetCurrentPulse();
+    T_ROBOT_COORS coors;
+    T_ANGLE_PULSE pulse;
+    if (!driver->TryGetCurrentPos(coors) || !driver->TryGetCurrentPulse(pulse))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取扫描起点失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前位置。") : detail);
+        QMessageBox::warning(this, "示教扫描起点", message);
+        AppendLog(message);
+        return;
+    }
+    m_taughtStartPulse = pulse;
     m_hasTaughtStartPulse = true;
     SetCoorsEditors("StartPos", coors);
     AppendLog("已读取当前机器人直角坐标和关节脉冲到扫描起点，点击“保存参数”后写入文件。");
@@ -1444,7 +1456,16 @@ void PreciseMeasureEditDialog::TeachStartSafePulse()
         return;
     }
 
-    const T_ANGLE_PULSE pulse = driver->GetCurrentPulse();
+    T_ANGLE_PULSE pulse;
+    if (!driver->TryGetCurrentPulse(pulse))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取下枪安全位置失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前关节位置。") : detail);
+        QMessageBox::warning(this, "示教下枪安全位置", message);
+        AppendLog(message);
+        return;
+    }
     SetPulseEditors("StartSafePulse0", pulse);
     AppendLog("已读取当前机器人脉冲到下枪安全位置，点击“保存参数”后写入文件。");
 }
@@ -1457,7 +1478,16 @@ void PreciseMeasureEditDialog::TeachEndPos()
         return;
     }
 
-    const T_ROBOT_COORS coors = driver->GetCurrentPos();
+    T_ROBOT_COORS coors;
+    if (!driver->TryGetCurrentPos(coors))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取扫描终点失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前位置。") : detail);
+        QMessageBox::warning(this, "示教扫描终点", message);
+        AppendLog(message);
+        return;
+    }
     SetCoorsEditors("EndPos", coors);
     AppendLog("已读取当前机器人直角坐标到扫描终点，点击“保存参数”后写入文件。");
 }
@@ -1470,7 +1500,16 @@ void PreciseMeasureEditDialog::TeachEndSafePulse()
         return;
     }
 
-    const T_ANGLE_PULSE pulse = driver->GetCurrentPulse();
+    T_ANGLE_PULSE pulse;
+    if (!driver->TryGetCurrentPulse(pulse))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取收枪安全位置失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前关节位置。") : detail);
+        QMessageBox::warning(this, "示教收枪安全位置", message);
+        AppendLog(message);
+        return;
+    }
     SetPulseEditors("EndSafePulse0", pulse);
     AppendLog("已读取当前机器人脉冲到收枪安全位置，点击“保存参数”后写入文件。");
 }
@@ -1598,6 +1637,18 @@ bool PreciseMeasureEditDialog::SaveAllParamEdits()
 
             const QString sectionName = edit->property("paramSection").toString();
             const QString paramKey = edit->property("paramKey").toString();
+            if (paramKey.compare(QStringLiteral("ResumeBacktrackDistanceMm"), Qt::CaseInsensitive) == 0)
+            {
+                bool valueOk = false;
+                const double backtrackMm = edit->text().trimmed().toDouble(&valueOk);
+                if (!valueOk || !std::isfinite(backtrackMm) || backtrackMm < 0.0 || backtrackMm > 1000.0)
+                {
+                    error = QStringLiteral("续焊搭接回退距离必须为 0~1000 mm 的有限数值。");
+                    QMessageBox::warning(this, "保存参数", error);
+                    AppendLog("其它参数保存失败：" + error);
+                    return false;
+                }
+            }
             if (!WriteParamValue(sectionName, paramKey, ValueForWriteWithInlineComment(edit), error))
             {
                 QMessageBox::warning(this, "保存参数", error);
@@ -2506,9 +2557,18 @@ void PreciseMeasureEditDialog::TeachCurrentWeldPlatformPose()
         return;
     }
 
+    T_ROBOT_COORS coors;
+    if (!driver->TryGetCurrentPos(coors))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取焊接平台姿态失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前位置。") : detail);
+        QMessageBox::warning(this, "示教焊接平台姿态", message);
+        AppendLog(message);
+        return;
+    }
     const bool wasUsingTaught = m_pUseTaughtWeldPoseCheck != nullptr && m_pUseTaughtWeldPoseCheck->isChecked();
     CacheCurrentWeldPoseEditorValues(wasUsingTaught);
-    const T_ROBOT_COORS coors = driver->GetCurrentPos();
     m_taughtWeldPoseRxDeg = coors.dRX;
     m_taughtWeldPoseRyDeg = coors.dRY;
     m_taughtWeldPoseRzDeg = coors.dRZ;

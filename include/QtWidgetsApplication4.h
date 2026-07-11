@@ -78,6 +78,7 @@ private slots:
     void FanucConnectTest();
     void FanucDisconnectTest();
     void RobotClearAlarmTest();
+    void RobotEmergencyStop();
     void RobotSwitchStepMode();
     void ReadTool1ToGunTool();
     void FanucGetCurrentPosTest();
@@ -113,6 +114,7 @@ private:
     void RefreshRobotSelectorUi();
     void RefreshRobotOperationAvailability();
     void RefreshDashboardConnectionState();
+    bool EnsureRobotUiActionIdle(const QString& actionName);
     void RunFunctionTestDashboardTool(const QString& actionId);
     bool IsCurrentRobotConnected();
     void ToggleCurrentRobotConnection();
@@ -126,6 +128,8 @@ private:
     QString RoleDisplayName(const QString& role) const;
     int RoleLevel(const QString& role) const;
     bool RequirePermission(const QString& minimumRole, const QString& actionName);
+    bool ValidateCurrentAccountSession(const QString& actionName = QString());
+    void RevokePrivilegedUiAccess();
     void EnsureDefaultAdminAccount();
     void RefreshAccountUi();
     void LoadLoginState();
@@ -134,8 +138,21 @@ private:
     void FillSavedPasswordForUser(const QString& userName);
     bool TryAutoLogin();
     void ShowAuthPage(const QString& promptMessage = QString());
-    bool VerifyAccount(const QString& userName, const QString& password, QString& role, QString& error) const;
+    bool VerifyAccount(
+        const QString& userName,
+        const QString& password,
+        QString& role,
+        bool& mustChangePassword,
+        QString& passwordRecord,
+        QString& error) const;
     bool SaveAccount(const QString& userName, const QString& password, const QString& role, QString& error) const;
+    bool PromptForcedPasswordChange(
+        const QString& userName,
+        const QString& temporaryPassword,
+        const QString& expectedPasswordRecord,
+        QString& replacementPassword,
+        QString& currentRole,
+        QString& securityFingerprint);
     void SetAuthRegisterMode(bool registerMode);
     void RefreshAuthModeUi();
     void LoginCurrentAccount();
@@ -187,10 +204,10 @@ private:
     bool UploadFanucServiceBundleForCli(FANUCRobotCtrl* pFanucDriver);
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
     bool RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
-    void RunLaserClassifyDirForCli(const QString& dirPath) const;
+    bool RunLaserClassifyDirForCli(const QString& dirPath) const;
     bool RunRebuildMeasureWeldFilesForCli(const QStringList& arguments, const QString& laserDirPath) const;
-    void RunWeldSeamCompForCli(const QStringList& arguments, const QString& inputPath, const QString& outputPath) const;
-    void RunGenerateStepWeldProgramForCli(
+    bool RunWeldSeamCompForCli(const QStringList& arguments, const QString& inputPath, const QString& outputPath) const;
+    bool RunGenerateStepWeldProgramForCli(
         const QStringList& arguments,
         const QString& inputPath,
         const QString& outputDir,
@@ -273,6 +290,7 @@ private:
     QPushButton* m_pGuestLoginBtn;
     QPushButton* m_pDashboardConnectBtn;
     QPushButton* m_pDashboardClearAlarmBtn;
+    QPushButton* m_pDashboardEmergencyStopBtn;
     QPushButton* m_pDashboardModeBtn;
     QPushButton* m_pDashboardDebugLogBtn;
     QWidget* m_pDashboardToolPanel;
@@ -307,9 +325,15 @@ private:
     bool m_bFanucMoveZeroRunning;
     QString m_sCurrentUserName;
     QString m_sCurrentUserRole;
+    QString m_sCurrentUserSecurityFingerprint;
     QString m_sMeasureThenWeldStatus;
     QString m_sAuthHintOverride;
     bool m_bAuthRegisterMode;
+    bool m_bAccountRecoveryRequired = false;
+    bool m_bInitialAdministratorSetupRequired = false;
+    bool m_bAccountSessionEventValidation = false;
+    bool m_bSessionRevocationPendingSafetyStop = false;
+    bool m_bEnforceInteractiveSessionLeaseGate = false;
     bool m_bOpenEmbeddedInManagement;
     bool m_bPendingOpenManagementAfterLogin = false;
     bool m_bDebugLogMode;
@@ -320,4 +344,3 @@ private:
     qint64 m_nLastRobotLogSize = -1;
     std::atomic_bool m_bFanucMonitorReading;
 };
-

@@ -1,5 +1,6 @@
 #include "BrandingConfig.h"
 
+#include "AppPaths.h"
 #include "ConfigDatabase.h"
 
 #include <QCoreApplication>
@@ -35,29 +36,23 @@ const QString kCfgKey = QStringLiteral("ShowBackground");
 // 安装快捷方式文件名（installer/*.iss 的 [Icons] 用 MyAppName="NoTeaching-Robot"，运行时按此固定名查找）
 const QString kShortcutBaseName = QStringLiteral("NoTeaching-Robot");
 
-// 从“工作目录/exe 目录”向上最多 8 层定位 branding 目录（不依赖 cwd 是否已切到工程根）。
+// 品牌资源只能来自可信安装根，禁止可写 data-root 或启动 cwd 覆盖发布通道身份。
 QString ResolveBrandingDir()
 {
-    QStringList bases;
-    bases << QDir::currentPath() << QCoreApplication::applicationDirPath();
+    const QStringList bases = {
+        AppPaths::InstallRootPath(),
+        QCoreApplication::applicationDirPath()
+    };
     for (const QString& base : bases)
     {
         if (base.isEmpty())
         {
             continue;
         }
-        QDir d(base);
-        for (int i = 0; i < 8; ++i)
+        const QString candidate = QDir(base).filePath(QStringLiteral("branding"));
+        if (QFileInfo::exists(candidate + QStringLiteral("/branding.ini")))
         {
-            const QString candidate = d.filePath(QStringLiteral("branding"));
-            if (QFileInfo::exists(candidate + QStringLiteral("/branding.ini")))
-            {
-                return QDir(candidate).absolutePath();
-            }
-            if (!d.cdUp())
-            {
-                break;
-            }
+            return QDir(candidate).absolutePath();
         }
     }
     return QString();

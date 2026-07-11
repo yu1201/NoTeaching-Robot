@@ -4,6 +4,7 @@
 #include "ContralUnit.h"
 
 #include <QDialog>
+#include <QMutex>
 #include <QString>
 
 #include <atomic>
@@ -52,6 +53,8 @@ struct T_PRECISE_MEASURE_PARAM
     double dStepOverlapRel = 20.0;
     // 最终下发/生成SRP时的焊接轨迹抽样间距，只作用于最后运动点，不影响前序拐点和姿态生成。
     double dFinalWeldTrajectoryStepMm = 4.0;
+    // 断点续焊搭接回退距离（毫米弧长，不再按固定点数估算）。
+    double dResumeBacktrackMm = 5.0;
     // 焊接方向：1 从姿态文件起点焊到终点，-1 从终点焊回起点。
     int nWeldDirection = 1;
     // 焊接轨迹下枪/收枪安全位相对首尾焊点的回退距离，对应配置库中的 GunDownBackSafeDis。
@@ -101,6 +104,8 @@ public:
     void SetScanDataUploadHook(std::function<void(const QString&)> hook);
     // 开始前置守卫：返回 false 则拦下先测后焊流程并把原因写进 reason（供主窗口互锁流程测试）。
     void SetPreStartGuard(std::function<bool(QString& reason)> guard) { m_preStartGuard = std::move(guard); }
+    // 实时账号会话守卫：阻塞选择器/确认框返回后及每个危险动作检查点必须再次通过。
+    void SetLiveSessionGuard(std::function<bool()> guard) { m_liveSessionGuard = std::move(guard); }
 
 signals:
     void FlowStepChanged(const QString& text);
@@ -147,6 +152,7 @@ private:
     // 每个危险动作前弹窗确认；取消会退出当前流程。
     bool ConfirmContinue(const QString& actionName);
     bool ShowCheckpointDialog(const QString& title, const QString& detail);
+    bool HasLiveSession(const QString& actionName);
     // 流程线程安全：从姿态文件路径推导案例目录，经队列回 UI 线程调用上传钩子。
     void NotifyFlowResultForUpload(const QString& poseFilePath);
 
@@ -161,8 +167,27 @@ private:
     // 运行监控窗口的暂停/继续（STEP: SetModeCmd STOP/START，含回位前置）与断点续焊入口。
     void OnPauseResumeClicked();
     void OnResumeWeldClicked();
-    // 断点续焊独立流程：只认落盘断点(无记录直接报错)，自动取最新结果的执行文件，落盘位姿定位+搭接回退后续焊。
+    // 断点续焊独立流程：只认V2落盘记录绑定的实际 FinalSampled 轨迹，校验案例/端点/参数指纹/SHA256 后按毫米弧长续焊。
     void RunResumeWeldFlow();
+    bool PrepareActiveWeldCheckpoint(
+        RobotDriverAdaptor* pRobotDriver,
+        const T_PRECISE_MEASURE_PARAM& param,
+        const QString& sourcePosePath,
+        const QString& sourcePoseSha256,
+        const QString& sampledPosePath,
+        const QString& sampledPoseSha256,
+        qint64 sampledPoseSize,
+        const QString& programName,
+        int sampledPointCount,
+        double effectiveFinalStepMm,
+        const QString& parameterFingerprint,
+        bool resumeCheckpointSupported,
+        const QString& resumeUnsupportedReason,
+        QString& error);
+    QString ActiveWeldCheckpointRecord() const;
+    void ClearActiveWeldCheckpoint();
+    void FinishActiveWeldExecution(bool programCompleted);
+    void SetWeldPauseAvailable(bool available);
     void RefreshWeldModeFromParam();
     void SaveWeldModeToParam(bool doActualWeld);
     bool IsActualWeldModeChecked() const;
@@ -201,10 +226,13 @@ private:
     int m_pauseProgramLine = -1;
     T_ROBOT_COORS m_pausePose{};
     bool m_hasPausePose = false;
+    mutable QMutex m_activeWeldCheckpointMutex;
+    QString m_activeWeldCheckpointRecord;
     // 扫描数据在线上传钩子：流程成功后携案例目录回 UI 线程调用（主窗口接 ScanDataUploader）。
     std::function<void(const QString&)> m_scanDataUploadHook;
     // 互锁：流程测试在跑时拦下本流程，避免两条流程指挥同一台机器人。
     std::function<bool(QString&)> m_preStartGuard;
+    std::function<bool()> m_liveSessionGuard;
     QCheckBox* m_pActualWeldCheck = nullptr;
     // 流程免确认：勾选后跳过中间步骤/信息类确认弹窗；首次运动、进入焊接、
     // 翻转风险告警、历史目录核对始终弹出。状态缓存在原子成员供流程线程读取。

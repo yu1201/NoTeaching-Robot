@@ -4517,6 +4517,7 @@ bool ValidateGeometryKeyPoints(
     const QVector<RobotCalculation::LowerWeldClassifiedPoint>& keyPoints,
     const QVector<Eigen::Vector2d>& keyProjections,
     const RobotCalculation::LowerWeldFilterParams& params,
+    QStringList* warnings,
     QString* error)
 {
     if (!params.validationKeyPointEnabled)
@@ -4536,13 +4537,33 @@ bool ValidateGeometryKeyPoints(
     }
 
     int cornerCount = 0;
+    int startCount = 0;
+    int endCount = 0;
     for (const RobotCalculation::LowerWeldClassifiedPoint& point : keyPoints)
     {
-        if (point.type == RobotCalculation::LowerWeldPointType::InnerCorner
+        if (point.type == RobotCalculation::LowerWeldPointType::Start)
+        {
+            ++startCount;
+        }
+        else if (point.type == RobotCalculation::LowerWeldPointType::End)
+        {
+            ++endCount;
+        }
+        else if (point.type == RobotCalculation::LowerWeldPointType::InnerCorner
             || point.type == RobotCalculation::LowerWeldPointType::OuterCorner)
         {
             ++cornerCount;
         }
+    }
+    if (startCount != 1 || endCount != 1)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：起点/终点必须各恰好 1 个，当前起点 %1 个、终点 %2 个。")
+                .arg(startCount)
+                .arg(endCount);
+        }
+        return false;
     }
     if (cornerCount < params.validationMinCornerCount)
     {
@@ -4558,16 +4579,36 @@ bool ValidateGeometryKeyPoints(
     for (int index = 1; index < keyPoints.size(); ++index)
     {
         const double segmentLength = (keyPoints[index].point - keyPoints[index - 1].point).norm();
-        if (segmentLength < params.validationMinSegmentLengthMm)
+        const bool isLapStepPair = keyPoints[index - 1].isLapStepBoundary
+            && keyPoints[index].isLapStepBoundary;
+        const bool isEndpointAdjacent =
+            keyPoints[index - 1].type == RobotCalculation::LowerWeldPointType::Start
+            || keyPoints[index].type == RobotCalculation::LowerWeldPointType::End;
+        // SDK 直出不提供搭接语义；首尾裁剪却可能合法地产生 2.5mm 端段。
+        // 因此仅“成对搭接”或“紧邻唯一端点”的段使用 0.25mm 重合硬门限，内部非搭接仍保持 3mm。
+        const double hardMinimumMm = (isLapStepPair || isEndpointAdjacent) ? 0.25 : 3.0;
+        if (!std::isfinite(segmentLength) || segmentLength < hardMinimumMm)
         {
             if (error != nullptr)
             {
-                *error = QString("点云有效性检测失败：第 %1 段关键点距离过短，当前 %2 mm，要求至少 %3 mm。")
+                *error = QString("点云有效性检测失败：第 %1 段%2关键点距离无效或过短，当前 %3 mm，硬门限 %4 mm。")
                     .arg(index)
+                    .arg(isLapStepPair ? "搭接台阶" : (isEndpointAdjacent ? "端点相邻" : "非搭接"))
                     .arg(segmentLength, 0, 'f', 3)
-                    .arg(params.validationMinSegmentLengthMm, 0, 'f', 3);
+                    .arg(hardMinimumMm, 0, 'f', 3);
             }
             return false;
+        }
+        if (!isLapStepPair
+            && params.validationMinSegmentLengthMm > hardMinimumMm
+            && segmentLength < params.validationMinSegmentLengthMm
+            && warnings != nullptr)
+        {
+            warnings->push_back(QString("第 %1 段非搭接关键点距离 %2 mm，低于审计建议值 %3 mm（硬门限仍为 %4 mm）。")
+                .arg(index)
+                .arg(segmentLength, 0, 'f', 3)
+                .arg(params.validationMinSegmentLengthMm, 0, 'f', 3)
+                .arg(hardMinimumMm, 0, 'f', 3));
         }
     }
 
@@ -4689,6 +4730,38 @@ bool ValidateGeometryOutput(
         return true;
     }
 
+    double maxOutputStepMm = 0.0;
+    for (int index = 0; index < classification.points.size(); ++index)
+    {
+        const Eigen::Vector3d& point = classification.points[index].point;
+        if (!std::isfinite(point.x()) || !std::isfinite(point.y()) || !std::isfinite(point.z()))
+        {
+            if (error != nullptr)
+            {
+                *error = QString("点云有效性检测失败：输出焊道第 %1 点包含 NaN/Inf。")
+                    .arg(index + 1);
+            }
+            return false;
+        }
+        if (index > 0)
+        {
+            maxOutputStepMm = std::max(
+                maxOutputStepMm,
+                (point - classification.points[index - 1].point).norm());
+        }
+    }
+    constexpr double kHardMaxOutputStepMm = 50.0;
+    if (maxOutputStepMm > kHardMaxOutputStepMm)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("点云有效性检测失败：输出焊道相邻点最大跳距 %1 mm，超过结构硬门限 %2 mm。")
+                .arg(maxOutputStepMm, 0, 'f', 3)
+                .arg(kHardMaxOutputStepMm, 0, 'f', 1);
+        }
+        return false;
+    }
+
     if (classification.points.size() < params.validationMinOutputPointCount)
     {
         if (error != nullptr)
@@ -4730,6 +4803,7 @@ bool ValidateGeometryAnalysisResult(
     const Eigen::Vector3d& sideAxis,
     const RobotCalculation::MeasureThenWeldAnalysisResult& result,
     const RobotCalculation::LowerWeldFilterParams& params,
+    RobotCalculation::MeasureThenWeldAnalysisResult::PointCloudQualityReport* qualityReport,
     QString* error)
 {
     double minStation = 0.0;
@@ -4738,12 +4812,167 @@ bool ValidateGeometryAnalysisResult(
     const QVector<Eigen::Vector2d> keyProjections =
         GeometryKeyProjections(fittedKeyPoints, center, mainAxis, sideAxis);
 
-    return ValidateGeometryCoverage(finitePointCount, projectedSpan, params, error)
-        && ValidateGeometryContinuity(projected, minStation, maxStation, params, error)
-        && ValidateGeometryRejectedRatio(finitePointCount, rejectedCount, params, error)
-        && ValidateGeometryKeyPoints(result.keyPoints, keyProjections, params, error)
-        && ValidateGeometryResidual(projected, keyProjections, params, error)
-        && ValidateGeometryOutput(result.classificationResult, fittedKeyPoints, projectedSpan, params, error);
+    RobotCalculation::MeasureThenWeldAnalysisResult::PointCloudQualityReport report;
+    report.evaluated = true;
+    report.auditOnly = params.validationAuditOnly;
+    report.inputPointCount = finitePointCount + std::max(0, rejectedCount);
+    report.finitePointCount = finitePointCount;
+    report.rejectedPointCount = std::max(0, rejectedCount);
+    report.keyPointCount = result.keyPoints.size();
+    report.outputPointCount = result.classificationResult.points.size();
+    report.projectedSpanMm = projectedSpan;
+    report.rejectedRatio = finitePointCount > 0
+        ? static_cast<double>(std::max(0, rejectedCount)) / static_cast<double>(finitePointCount)
+        : 0.0;
+
+    for (const RobotCalculation::LowerWeldClassifiedPoint& point : result.keyPoints)
+    {
+        if (point.type == RobotCalculation::LowerWeldPointType::InnerCorner
+            || point.type == RobotCalculation::LowerWeldPointType::OuterCorner)
+        {
+            ++report.cornerCount;
+        }
+    }
+
+    if (!projected.isEmpty() && projectedSpan > std::numeric_limits<double>::epsilon())
+    {
+        const double binWidth = std::max(0.5, params.sampleStep > 0.0 ? params.sampleStep : 2.0);
+        const int binCount = std::max(1, static_cast<int>(std::floor(projectedSpan / binWidth)) + 1);
+        QVector<char> occupied(binCount, 0);
+        for (const GeometryProjectedPoint& point : projected)
+        {
+            const int binIndex = std::max(0, std::min(
+                binCount - 1,
+                static_cast<int>(std::floor((point.s - minStation) / binWidth))));
+            occupied[binIndex] = 1;
+        }
+        int occupiedCount = 0;
+        int longestRun = 0;
+        int currentRun = 0;
+        for (char value : occupied)
+        {
+            if (value)
+            {
+                ++occupiedCount;
+                longestRun = std::max(longestRun, ++currentRun);
+            }
+            else
+            {
+                currentRun = 0;
+            }
+        }
+        report.stationCoverageRatio = static_cast<double>(occupiedCount) / static_cast<double>(binCount);
+        report.longestContinuousRatio = static_cast<double>(longestRun) / static_cast<double>(binCount);
+    }
+
+    QVector<double> residuals;
+    residuals.reserve(projected.size());
+    int residualInlierCount = 0;
+    if (keyProjections.size() >= 2)
+    {
+        for (const GeometryProjectedPoint& point : projected)
+        {
+            double minDistance = std::numeric_limits<double>::infinity();
+            const Eigen::Vector2d projection = GeometrySmoothedProjection2D(point);
+            for (int segment = 0; segment + 1 < keyProjections.size(); ++segment)
+            {
+                minDistance = std::min(
+                    minDistance,
+                    GeometryPointToSegmentDistance2D(
+                        projection,
+                        keyProjections[segment],
+                        keyProjections[segment + 1]));
+            }
+            if (std::isfinite(minDistance))
+            {
+                residuals.push_back(minDistance);
+                if (params.validationResidualInlierThresholdMm <= 0.0
+                    || minDistance <= params.validationResidualInlierThresholdMm)
+                {
+                    ++residualInlierCount;
+                }
+            }
+        }
+    }
+    if (!residuals.isEmpty())
+    {
+        report.medianResidualMm = GeometryMedianScalar(residuals);
+        report.p95ResidualMm = GeometryPercentileScalar(residuals, 0.95);
+        report.residualInlierRatio =
+            static_cast<double>(residualInlierCount) / static_cast<double>(residuals.size());
+    }
+
+    report.minNonLapSegmentLengthMm = std::numeric_limits<double>::infinity();
+    report.minLapStepSegmentLengthMm = std::numeric_limits<double>::infinity();
+    for (int index = 1; index < result.keyPoints.size(); ++index)
+    {
+        const double length = (result.keyPoints[index].point - result.keyPoints[index - 1].point).norm();
+        const bool lapPair = result.keyPoints[index - 1].isLapStepBoundary
+            && result.keyPoints[index].isLapStepBoundary;
+        double& minimum = lapPair
+            ? report.minLapStepSegmentLengthMm
+            : report.minNonLapSegmentLengthMm;
+        minimum = std::min(minimum, length);
+    }
+    if (!std::isfinite(report.minNonLapSegmentLengthMm))
+    {
+        report.minNonLapSegmentLengthMm = 0.0;
+    }
+    if (!std::isfinite(report.minLapStepSegmentLengthMm))
+    {
+        report.minLapStepSegmentLengthMm = 0.0;
+    }
+
+    report.outputLengthMm = GeometryPolylineLength(fittedKeyPoints);
+    report.outputLengthRatio = projectedSpan > std::numeric_limits<double>::epsilon()
+        ? report.outputLengthMm / projectedSpan
+        : 0.0;
+    for (int index = 1; index < result.classificationResult.points.size(); ++index)
+    {
+        report.maxOutputStepMm = std::max(
+            report.maxOutputStepMm,
+            (result.classificationResult.points[index].point
+                - result.classificationResult.points[index - 1].point).norm());
+    }
+
+    auto applyCheck = [&report](bool passed, const QString& checkError)
+    {
+        if (!passed)
+        {
+            report.failures.push_back(checkError.isEmpty()
+                ? QStringLiteral("点云质量检查失败（未提供具体原因）。")
+                : checkError);
+        }
+    };
+    QString checkError;
+    bool checkPassed = ValidateGeometryCoverage(finitePointCount, projectedSpan, params, &checkError);
+    applyCheck(checkPassed, checkError);
+    checkError.clear();
+    checkPassed = ValidateGeometryContinuity(projected, minStation, maxStation, params, &checkError);
+    applyCheck(checkPassed, checkError);
+    checkError.clear();
+    checkPassed = ValidateGeometryRejectedRatio(finitePointCount, rejectedCount, params, &checkError);
+    applyCheck(checkPassed, checkError);
+    checkError.clear();
+    checkPassed = ValidateGeometryKeyPoints(result.keyPoints, keyProjections, params, &report.warnings, &checkError);
+    applyCheck(checkPassed, checkError);
+    checkError.clear();
+    checkPassed = ValidateGeometryResidual(projected, keyProjections, params, &checkError);
+    applyCheck(checkPassed, checkError);
+    checkError.clear();
+    checkPassed = ValidateGeometryOutput(result.classificationResult, fittedKeyPoints, projectedSpan, params, &checkError);
+    applyCheck(checkPassed, checkError);
+
+    report.passed = report.failures.isEmpty();
+    if (qualityReport != nullptr)
+    {
+        *qualityReport = report;
+    }
+    if (error != nullptr)
+    {
+        *error = report.failures.join(QStringLiteral("；"));
+    }
+    return report.passed;
 }
 
 
@@ -5939,11 +6168,17 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
             axes.second,
             result,
             params,
+            &result.qualityReport,
             &validationError))
     {
-        result.error = validationError;
-        return result;
+        result.qualityReport.inputPointCount = inputPoints.size();
+        if (!params.validationAuditOnly)
+        {
+            result.error = validationError;
+            return result;
+        }
     }
+    result.qualityReport.inputPointCount = inputPoints.size();
 
     result.cornerCompensatedClassificationResult =
         BuildCornerCompensatedLowerWeldClassification(
@@ -5963,6 +6198,103 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
     const LowerWeldFilterParams& params)
 {
     return AnalyzeMeasureThenWeldLowerWeldPathGeometry(inputPoints, params);
+}
+
+RobotCalculation::MeasureThenWeldAnalysisResult::PointCloudQualityReport
+RobotCalculation::EvaluateMeasureThenWeldOutputQuality(
+    int inputPointCount,
+    int finiteInputPointCount,
+    int rejectedPointCount,
+    const QVector<LowerWeldClassifiedPoint>& keyPoints,
+    const LowerWeldClassificationResult& classification,
+    const LowerWeldFilterParams& params)
+{
+    MeasureThenWeldAnalysisResult::PointCloudQualityReport report;
+    report.evaluated = true;
+    report.auditOnly = params.validationAuditOnly;
+    report.inputPointCount = std::max(0, inputPointCount);
+
+    QVector<IndexedPoint3D> finitePoints;
+    finitePoints.reserve(classification.points.size());
+    for (const LowerWeldClassifiedPoint& point : classification.points)
+    {
+        if (std::isfinite(point.point.x())
+            && std::isfinite(point.point.y())
+            && std::isfinite(point.point.z()))
+        {
+            IndexedPoint3D sample;
+            sample.index = point.index;
+            sample.point = point.point;
+            finitePoints.push_back(sample);
+        }
+    }
+    if (finitePoints.size() < 2)
+    {
+        report.finitePointCount = finitePoints.size();
+        report.outputPointCount = classification.points.size();
+        report.failures.push_back(QString("点云有效性检测失败：SDK直出焊道有限点不足，当前 %1 个。")
+            .arg(finitePoints.size()));
+        return report;
+    }
+
+    Eigen::Vector3d center = Eigen::Vector3d::Zero();
+    for (const IndexedPoint3D& point : finitePoints)
+    {
+        center += point.point;
+    }
+    center /= static_cast<double>(finitePoints.size());
+    const QPair<Eigen::Vector3d, Eigen::Vector3d> axes = BuildGeometryAxes(finitePoints, center);
+    Eigen::Vector3d normalAxis = axes.first.cross(axes.second);
+    if (normalAxis.squaredNorm() <= std::numeric_limits<double>::epsilon())
+    {
+        normalAxis = Eigen::Vector3d::UnitZ();
+    }
+    normalAxis.normalize();
+
+    QVector<GeometryProjectedPoint> projected;
+    projected.reserve(finitePoints.size());
+    for (const IndexedPoint3D& point : finitePoints)
+    {
+        const Eigen::Vector3d delta = point.point - center;
+        GeometryProjectedPoint output;
+        output.inputIndex = point.index;
+        output.point = point.point;
+        output.s = delta.dot(axes.first);
+        output.h = delta.dot(axes.second);
+        output.n = delta.dot(normalAxis);
+        output.smoothH = output.h;
+        output.smoothN = output.n;
+        projected.push_back(output);
+    }
+
+    QVector<Eigen::Vector3d> fittedKeyPoints;
+    fittedKeyPoints.reserve(keyPoints.size());
+    for (const LowerWeldClassifiedPoint& point : keyPoints)
+    {
+        fittedKeyPoints.push_back(point.point);
+    }
+
+    MeasureThenWeldAnalysisResult analysis;
+    analysis.keyPoints = keyPoints;
+    analysis.classificationResult = classification;
+    QString validationError;
+    // SDK 直出模式的采集点数/无效比例来自 SDK 实际收到的完整点云；连续性、残差和输出密度
+    // 则评估本次 SDK 返回并将被执行的轨迹。两者不得再用 max(output,input) 或固定 rejected=0 伪造。
+    const int coverageFinitePointCount = std::max(0, finiteInputPointCount);
+    ValidateGeometryAnalysisResult(
+        coverageFinitePointCount,
+        std::max(0, rejectedPointCount),
+        projected,
+        fittedKeyPoints,
+        center,
+        axes.first,
+        axes.second,
+        analysis,
+        params,
+        &report,
+        &validationError);
+    report.inputPointCount = std::max(0, inputPointCount);
+    return report;
 }
 
 int RobotCalculation::LowerWeldPointTypeCode(LowerWeldPointType type)

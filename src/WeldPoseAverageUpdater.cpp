@@ -4,6 +4,7 @@
 #define NOMINMAX
 #endif
 
+#include "AppPaths.h"
 #include "ConfigDatabase.h"
 #include "OPini.h"
 #include "RobotDataHelper.h"
@@ -230,7 +231,7 @@ QString ResolvePoseFilePath(
     QFileInfo inputInfo(normalizedInputPath);
     if (!inputInfo.isAbsolute())
     {
-        inputInfo = QFileInfo(QDir::current().filePath(normalizedInputPath));
+        inputInfo = QFileInfo(AppPaths::CommandLinePath(normalizedInputPath));
     }
     if (!inputInfo.exists())
     {

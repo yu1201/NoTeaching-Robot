@@ -118,10 +118,17 @@
       <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtCore\6.7.3;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions Condition="'$(ReleaseVersionMajor)' != '' and '$(ReleaseVersionMinor)' != '' and '$(ReleaseVersionPatch)' != '' and '$(ReleaseVersionBuild)' != '' and '$(ReleaseVersionString)' != '' and '$(ReleaseProductName)' != '' and '$(ReleaseExeName)' != ''">RELEASE_VERSION_NUM=$(ReleaseVersionMajor),$(ReleaseVersionMinor),$(ReleaseVersionPatch),$(ReleaseVersionBuild);RELEASE_VERSION_STR=\&quot;$(ReleaseVersionString)\&quot;;RELEASE_PRODUCT_NAME=\&quot;$(ReleaseProductName)\&quot;;RELEASE_EXE_NAME=\&quot;$(ReleaseExeName)\&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\AppPaths.cpp" />
+    <ClCompile Include="src\CliHelp.cpp" />
     <ClCompile Include="src\BrandingConfig.cpp" />
     <ClCompile Include="src\ConfigDatabase.cpp" />
+    <ClCompile Include="src\ConfigDatabaseAuthentication.cpp" />
+    <ClCompile Include="src\CredentialSecurity.cpp" />
     <ClCompile Include="src\ContralUnit.cpp" />
     <ClCompile Include="src\CameraFrameCache.cpp" />
     <ClCompile Include="src\CameraBasicParamDialog.cpp" />
@@ -158,6 +165,7 @@
     <ClCompile Include="src\RobotCalculation.cpp" />
     <ClCompile Include="src\RobotDataHelper.cpp" />
     <ClCompile Include="src\WeldPoseAverageUpdater.cpp" />
+    <ClCompile Include="src\WeldResumePlanner.cpp" />
     <ClCompile Include="src\WeldSeamCompDialog.cpp" />
     <ClCompile Include="src\ResultArchiveDialog.cpp" />
     <ClCompile Include="src\OnlineServicesDialog.cpp" />
@@ -170,6 +178,7 @@
     <ClCompile Include="src\SKJCameraControlClient.cpp" />
     <ClCompile Include="src\RobotDriverAdaptor.cpp" />
     <ClCompile Include="src\RobotMessage.cpp" />
+    <ClCompile Include="src\RobotOperationLease.cpp" />
     <ClCompile Include="src\RobotJogDialog.cpp" />
     <ClCompile Include="src\StepRobotDriver.cpp" />
     <ClCompile Include="src\SkDataClass.cpp" />
@@ -195,9 +204,12 @@
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\AppPaths.h" />
+    <ClInclude Include="include\CliHelp.h" />
     <ClInclude Include="include\BrandingConfig.h" />
     <ClInclude Include="include\OnlineServicesConfig.h" />
     <ClInclude Include="include\ConfigDatabase.h" />
+    <ClInclude Include="include\CredentialSecurity.h" />
     <ClInclude Include="include\Const.h" />
     <ClInclude Include="include\CameraFrameCache.h" />
     <ClInclude Include="include\CameraBasicParamDialog.h" />
@@ -234,6 +246,7 @@
     <ClInclude Include="include\RobotLog.h" />
     <ClInclude Include="include\SKJCameraControlClient.h" />
     <ClInclude Include="include\RobotMessage.h" />
+    <ClInclude Include="include\RobotOperationLease.h" />
     <ClInclude Include="include\RobotPoseTransform.h" />
     <ClInclude Include="include\RobotJogDialog.h" />
     <ClInclude Include="include\STEPRobotDriver.h" />
@@ -244,6 +257,7 @@
     <ClInclude Include="include\TouchKeyboardManager.h" />
     <ClInclude Include="include\WindowStyleHelper.h" />
     <ClInclude Include="include\WeldPoseAverageUpdater.h" />
+    <ClInclude Include="include\WeldResumePlanner.h" />
     <ClInclude Include="include\WeldSeamCompDialog.h" />
     <ClInclude Include="include\WeldProcessFile.h" />
     <ClInclude Include="include\groove\framebuffer.h" />

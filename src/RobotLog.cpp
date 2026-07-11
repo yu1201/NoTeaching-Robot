@@ -1,5 +1,19 @@
 #include "RobotLog.h"
+#include "AppPaths.h"
+
+#include <QByteArray>
+#include <QDir>
+#include <QFileInfo>
 // Windows平台颜色所需头文件
+
+namespace
+{
+std::string ToLocalPathBytes(const QString& path)
+{
+    const QByteArray bytes = QDir::toNativeSeparators(path).toLocal8Bit();
+    return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+}
+}
 
 // 构造函数实现
 RobotLog::RobotLog(const std::string& logPath, bool showConsole)
@@ -7,12 +21,30 @@ RobotLog::RobotLog(const std::string& logPath, bool showConsole)
 {
     // 日志按天归档：在原路径的目录下插入 yyyy-MM-dd 子目录，运行中跨天自动切换。
     try {
-        std::filesystem::path p(logPath);
-        m_fileName = p.filename().string();
-        m_logDir = p.parent_path().string();
+        QString requestedPath = QDir::fromNativeSeparators(
+            QString::fromLocal8Bit(logPath.data(), static_cast<int>(logPath.size()))).trimmed();
+        QFileInfo requestedInfo(requestedPath);
+        QString fileName = requestedInfo.fileName();
+        if (fileName.isEmpty()) {
+            fileName = QStringLiteral("RobotRunLog.txt");
+        }
+        if (requestedPath.isEmpty()
+            || (!requestedInfo.isAbsolute() && requestedInfo.path() == QStringLiteral("."))) {
+            requestedPath = QStringLiteral("Log/%1").arg(fileName);
+        }
+
+        QString resolvedPath = requestedInfo.isAbsolute()
+            ? QDir::cleanPath(requestedInfo.absoluteFilePath())
+            : AppPaths::WritablePath(requestedPath);
+        if (resolvedPath.isEmpty()) {
+            resolvedPath = AppPaths::WritablePath(QStringLiteral("Log/%1").arg(fileName));
+        }
+        const QFileInfo resolvedInfo(resolvedPath);
+        m_fileName = ToLocalPathBytes(resolvedInfo.fileName());
+        m_logDir = ToLocalPathBytes(resolvedInfo.absolutePath());
     } catch (...) {
-        m_fileName = logPath;
-        m_logDir.clear();
+        m_fileName = "RobotRunLog.txt";
+        m_logDir = ToLocalPathBytes(AppPaths::WritablePath(QStringLiteral("Log")));
     }
     if (m_fileName.empty()) {
         m_fileName = "RobotRunLog.txt";
@@ -25,7 +57,7 @@ RobotLog::RobotLog(const std::string& logPath, bool showConsole)
 void RobotLog::openForDay(const std::string& day)
 {
     std::filesystem::path datedDir = m_logDir.empty()
-        ? (std::filesystem::path("Log") / day)
+        ? (std::filesystem::path(ToLocalPathBytes(AppPaths::WritablePath(QStringLiteral("Log")))) / day)
         : (std::filesystem::path(m_logDir) / day);
     std::error_code ec;
     std::filesystem::create_directories(datedDir, ec);

@@ -1,5 +1,6 @@
 #include "BcpdModelAligner.h"
 
+#include "AppPaths.h"
 #include "RobotDataHelper.h"
 
 #include <QByteArray>
@@ -101,7 +102,7 @@ QString BcpdModelAligner::DefaultExePath()
 {
     // 优先工程根/SDK/BCPD（运行时工作目录已切到工程根，与其他 SDK 定位一致）；
     // 回退 exe 同目录（部署目录无 .sln 时工作目录即 exe 目录，SDK 随包在此）。
-    const QString rootPath = RobotDataHelper::BuildProjectPath(QStringLiteral("SDK/BCPD/bcpd.exe"));
+    const QString rootPath = RobotDataHelper::FindProjectFilePath(QStringLiteral("SDK/BCPD/bcpd.exe"));
     if (QFileInfo::exists(rootPath)) return rootPath;
     return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("SDK/BCPD/bcpd.exe"));
 }
@@ -137,7 +138,14 @@ bool BcpdModelAligner::DeformModelToCloud(
         return false;
     }
 
-    QTemporaryDir tmp;
+    const QString tempRoot = AppPaths::WritablePath(QStringLiteral("Temp/BCPD"));
+    if (tempRoot.isEmpty() || !QDir().mkpath(tempRoot))
+    {
+        logmsg(QStringLiteral("BCPD：临时根目录创建失败（%1），跳过配准")
+            .arg(QDir::toNativeSeparators(tempRoot)));
+        return false;
+    }
+    QTemporaryDir tmp(QDir(tempRoot).filePath(QStringLiteral("bcpd_XXXXXX")));
     if (!tmp.isValid())
     {
         logmsg(QStringLiteral("BCPD：临时目录创建失败，跳过配准"));

@@ -1,5 +1,6 @@
 #include "WorkpieceMeshViewerDialog.h"
 
+#include "AppPaths.h"
 #include "WindowStyleHelper.h"
 
 #include <QApplication>
@@ -1645,7 +1646,7 @@ void WorkpieceMeshViewerDialog::BrowseResultDirectory()
         return;
     }
     const QString startDir = m_laserDir.isEmpty()
-        ? QDir::current().filePath("Result")
+        ? AppPaths::WritablePath(QStringLiteral("Result"))
         : QFileInfo(m_laserDir).path();
     const QString chosen = QFileDialog::getExistingDirectory(this, "选择扫描结果目录", startDir);
     if (chosen.isEmpty())

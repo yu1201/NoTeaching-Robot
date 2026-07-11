@@ -1,6 +1,6 @@
 # CLI 命令说明书
 
-更新时间：2026-06-10
+更新时间：2026-07-11
 
 适用程序：`QtWidgetsApplication4.exe` / `NoTeaching-Robot`
 
@@ -34,11 +34,16 @@ QtWidgetsApplication4.exe --no-show --robot RobotB --robot-movel-relative "0,0,1
 | --- | --- | --- |
 | `--help-cli` | 无 | 打印程序内置 CLI 帮助并退出。 |
 | `--no-show` | 无 | 不显示主窗口。若没有打开窗口类命令，CLI 动作结束后会自动退出。 |
+| `--data-root` | `<DIR>` | 指定 `Data/Result/Log/Temp/Job` 的统一可写根；命令行优先于 `QTWIDGETSAPP4_DATA_ROOT` 环境变量。 |
+| `--print-app-paths-json` | 无 | 在构造主窗口和连接硬件前输出路径诊断 JSON 并退出，供安装/自动化验收。 |
 | `--quit-after` | `<ms>` | 指定若干毫秒后退出程序，可和打开窗口类命令一起使用。 |
 
 说明：
 
 - `--quit-after` 参数必须是非负整数。
+- `--help-cli` 在路径布局、配置库、主窗口和机器人驱动初始化前直接输出并退出，不创建 data root，也不闪现 GUI。
+- CLI 显式传入的相对文件路径仍相对启动命令时的目录；程序内部产物不受启动目录影响，统一落在 data root。
+- `--data-root DIR` 与 `--data-root=DIR` 均可；不同的重复值、缺参、Windows `C:foo` 盘符相对路径会在连接硬件前失败并返回退出码 `2`。
 - 只有 `--open-*` 窗口命令会阻止默认自动退出；如需窗口打开后自动关闭，请配合 `--quit-after`。
 
 ## 3. 打开界面窗口

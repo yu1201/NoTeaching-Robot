@@ -39,10 +39,11 @@ public:
         std::function<bool()> flowRunningGuard,
         bool aboutMode = false,
         bool remoteBrowseAllowed = false,
+        std::function<bool()> privilegedActionGuard = {},
         QWidget* parent = nullptr);
 
 protected:
-    // 关界面时若正在上传：弹「后台继续 / 停止并清理服务器半截文件」，由用户决定。
+    // 关界面时若正在上传：弹「后台继续 / 停止当前上传」，由用户决定。
     void closeEvent(QCloseEvent* event) override;
     // 每次显示自动刷新：正停在「远程数据」页则重新拉取（页面被管理栈缓存复用，构造只跑一次）。
     void showEvent(QShowEvent* event) override;
@@ -56,12 +57,14 @@ private:
     void OnManifestReply(QNetworkReply* reply);
     void StartDownload();
     void OnDownloadFinished(QNetworkReply* reply);
+    void FallbackToFullDownload(const QString& reason);
     void InstallDownloadedPackage();
     void AppendLog(const QString& text);
     static int CompareVersions(const QString& lhs, const QString& rhs);  // <0/0/>0
 
     ScanDataUploader* m_uploader = nullptr;
     std::function<bool()> m_flowRunningGuard;
+    std::function<bool()> m_privilegedActionGuard;
     bool m_aboutMode = false;
     bool m_remoteBrowseAllowed = false;
     QNetworkAccessManager* m_network = nullptr;
@@ -95,6 +98,7 @@ private:
     void DeleteSelectedRemoteFiles();
     void CreateRemoteDeviceDir();
     void SetRemoteBusy(bool busy);
+    bool AuthorizePrivilegedAction(const QString& actionName);
 
     // 仪表盘：左侧导航 + 右侧页面栈（云控制台式布局），总览页放大数字统计卡与设备资源表
     QListWidget* m_navList = nullptr;
@@ -144,10 +148,12 @@ private:
     QString m_remoteVersion;
     QString m_remoteFile;
     QString m_remoteSha256;
+    qint64 m_remoteSize = 0;
     QString m_remotePatchFile;
     QString m_remotePatchSha256;
     qint64 m_remotePatchSize = 0;
     bool m_usePatch = false;
     QString m_downloadedPath;
+    bool m_checkingForUpdate = false;
     bool m_downloading = false;
 };

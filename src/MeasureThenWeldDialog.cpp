@@ -12,7 +12,9 @@
 #include "RobotDataHelper.h"
 #include "RobotLog.h"
 #include "RobotMessage.h"
+#include "RobotOperationLease.h"
 #include "WeldProcessFile.h"
+#include "WeldResumePlanner.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
 
@@ -31,6 +33,7 @@
 #include <QLabel>
 #include <QLayout>
 #include <QMessageBox>
+#include <QMutexLocker>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QProgressBar>
@@ -45,10 +48,12 @@
 #include <QTextStream>
 #include <QThread>
 #include <QTimer>
+#include <QUuid>
 #include <QVBoxLayout>
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 #include <thread>
 
 namespace
@@ -63,6 +68,9 @@ constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
 constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
 constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
 constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
+constexpr char WELD_BREAKPOINT_SECTION[] = "Breakpoint";
+constexpr char WELD_BREAKPOINT_RECORD_V2_KEY[] = "RecordV2";
+std::recursive_mutex g_weldBreakpointRecordMutex;
 
 std::string ToUtf8StdString(const QString& text)
 {
@@ -73,6 +81,192 @@ std::string ToUtf8StdString(const QString& text)
 double SafeSpeed(double value, double fallback)
 {
     return value > 0.0 ? value : fallback;
+}
+
+void ShowNonModalFlowResult(
+    QWidget* parent,
+    QMessageBox::Icon icon,
+    const QString& title,
+    const QString& text)
+{
+    QMessageBox* message = new QMessageBox(icon, title, text, QMessageBox::Ok, parent);
+    message->setAttribute(Qt::WA_DeleteOnClose);
+    message->setWindowModality(Qt::NonModal);
+    message->show();
+}
+
+QString WeldBreakpointStoragePath(const QString& robotName)
+{
+    return RobotDataHelper::BuildProjectPath(
+        QString("Data/%1/WeldBreakpoint.ini").arg(robotName));
+}
+
+bool WriteBreakpointRecordValue(
+    const QString& robotName,
+    const QString& encoded,
+    QString* error)
+{
+    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
+    COPini ini;
+    const QString path = WeldBreakpointStoragePath(robotName);
+    if (!ini.SetFileName(ToUtf8StdString(path))
+        || !ini.SetSectionName(WELD_BREAKPOINT_SECTION)
+        || !ini.WriteString(WELD_BREAKPOINT_RECORD_V2_KEY, ToUtf8StdString(encoded)))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("写入断点V2记录失败：%1").arg(path);
+        }
+        return false;
+    }
+    return true;
+}
+
+bool DisableLegacyBreakpoint(const QString& robotName, QString* error)
+{
+    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
+    COPini ini;
+    const QString path = WeldBreakpointStoragePath(robotName);
+    if (!ini.SetFileName(ToUtf8StdString(path))
+        || !ini.SetSectionName(WELD_BREAKPOINT_SECTION)
+        || !ini.WriteString("Valid", 0))
+    {
+        if (error != nullptr)
+        {
+            *error = QString("关闭旧版断点标志失败：%1").arg(path);
+        }
+        return false;
+    }
+    return true;
+}
+
+bool ReadBreakpointRecord(
+    const QString& robotName,
+    WeldResumePlanner::CheckpointRecord& record,
+    QString* encoded,
+    QString* error)
+{
+    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
+    COPini ini;
+    const QString path = WeldBreakpointStoragePath(robotName);
+    std::string stored;
+    if (!ini.SetFileName(ToUtf8StdString(path))
+        || !ini.SetSectionName(WELD_BREAKPOINT_SECTION)
+        || ini.ReadString(false, WELD_BREAKPOINT_RECORD_V2_KEY, stored) <= 0
+        || stored.empty())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral(
+                "没有可验证的V2断点。旧版仅含位姿的断点禁止自动选择最新案例，请在新版本中重新暂停生成断点。");
+        }
+        return false;
+    }
+    const QString value = QString::fromUtf8(stored.data(), static_cast<int>(stored.size()));
+    if (value.startsWith(QStringLiteral("invalidated:v2:")))
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("旧断点已被随后启动的完整焊接失效，禁止继续使用。");
+        }
+        return false;
+    }
+    if (!WeldResumePlanner::DecodeRecord(value, record, error))
+    {
+        return false;
+    }
+    if (encoded != nullptr)
+    {
+        *encoded = value;
+    }
+    return true;
+}
+
+bool SavePausedBreakpointRecord(
+    const WeldResumePlanner::CheckpointRecord& source,
+    QString* error)
+{
+    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
+    WeldResumePlanner::CheckpointRecord writing = source;
+    writing.state = QStringLiteral("writing");
+    QString encodeError;
+    const QString writingValue = WeldResumePlanner::EncodeRecord(writing, &encodeError);
+    if (writingValue.isEmpty()
+        || !WriteBreakpointRecordValue(source.robotName, writingValue, error))
+    {
+        if (error != nullptr && error->isEmpty())
+        {
+            *error = encodeError;
+        }
+        return false;
+    }
+    if (!DisableLegacyBreakpoint(source.robotName, error))
+    {
+        return false;
+    }
+
+    WeldResumePlanner::CheckpointRecord paused = source;
+    paused.state = QStringLiteral("paused");
+    const QString pausedValue = WeldResumePlanner::EncodeRecord(paused, &encodeError);
+    if (pausedValue.isEmpty()
+        || !WriteBreakpointRecordValue(source.robotName, pausedValue, error))
+    {
+        if (error != nullptr && error->isEmpty())
+        {
+            *error = encodeError;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool TransitionBreakpointRecordState(
+    const QString& robotName,
+    const QString& expectedCheckpointId,
+    const QString& expectedState,
+    const QString& newState,
+    QString* error)
+{
+    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
+    WeldResumePlanner::CheckpointRecord record;
+    if (!ReadBreakpointRecord(robotName, record, nullptr, error))
+    {
+        return false;
+    }
+    if (record.checkpointId != expectedCheckpointId || record.state != expectedState)
+    {
+        if (error != nullptr)
+        {
+            *error = QString("断点状态已变化，拒绝覆盖。Expected=%1/%2 Current=%3/%4")
+                .arg(expectedCheckpointId, expectedState, record.checkpointId, record.state);
+        }
+        return false;
+    }
+    record.state = newState;
+    QString encodeError;
+    const QString value = WeldResumePlanner::EncodeRecord(record, &encodeError);
+    if (value.isEmpty() || !WriteBreakpointRecordValue(robotName, value, error))
+    {
+        if (error != nullptr && error->isEmpty())
+        {
+            *error = encodeError;
+        }
+        return false;
+    }
+    return DisableLegacyBreakpoint(robotName, error);
+}
+
+QString RobotDriverTypeName(RobotDriverAdaptor* driver)
+{
+    if (dynamic_cast<STEPRobotCtrl*>(driver) != nullptr)
+    {
+        return QStringLiteral("STEP");
+    }
+    if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
+    {
+        return QStringLiteral("FANUC");
+    }
+    return QStringLiteral("UNKNOWN");
 }
 
 // 扫描实时激光线视图：把当前帧 XData/YData 画成散点（自动缩放），与坡口相机预览同源数据、轻量版绘制。
@@ -278,6 +472,7 @@ public:
         m_pResumeWeldBtn = new QPushButton("断点续焊", this);
         m_pPauseBtn->setMinimumSize(180, 52);
         m_pResumeWeldBtn->setMinimumSize(180, 52);
+        m_pPauseBtn->setEnabled(false);
         m_pResumeWeldBtn->setEnabled(false);
         buttons->addWidget(m_pPauseBtn);
         buttons->addWidget(m_pResumeWeldBtn);
@@ -862,7 +1057,7 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     buttonLayout->addWidget(m_pTimeOffsetCalibBtn, 1, 1);
     QPushButton* resumeWeldFlowBtn = new QPushButton("断点续焊");
     resumeWeldFlowBtn->setMinimumHeight(64);
-    resumeWeldFlowBtn->setToolTip("从上次暂停落盘的断点继续焊接：自动取最新结果的执行轨迹，按断点位姿定位并回退搭接量后从断点续焊。无断点记录时会报错。");
+    resumeWeldFlowBtn->setToolTip("从上次暂停落盘的V2断点继续焊接：只使用断点绑定的案例与实际执行轨迹，校验机器人端点、参数/工艺指纹和SHA256，再按毫米弧长精确回退。旧版断点不会自动匹配最新结果。");
     buttonLayout->addWidget(resumeWeldFlowBtn, 2, 0, 1, 2);
     connect(resumeWeldFlowBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunResumeWeldFlow);
     flowLayout->addLayout(buttonLayout);
@@ -983,12 +1178,8 @@ void MeasureThenWeldDialog::ReloadSelectors()
 
 void MeasureThenWeldDialog::closeEvent(QCloseEvent* event)
 {
-    if (m_bRunning)
-    {
-        QMessageBox::information(this, "先测后焊", "流程正在运行，请等待当前流程结束后再关闭。");
-        event->ignore();
-        return;
-    }
+    // 主栈中的 close 仅隐藏缓存页；流程线程/租约继续存活。允许返回主页使用
+    // 不可删除的安全停止入口，真正析构和控制单元重载仍由全局租约门禁拦截。
     QDialog::closeEvent(event);
 }
 
@@ -1546,23 +1737,20 @@ void MeasureThenWeldDialog::NotifyFlowResultForUpload(const QString& poseFilePat
     QMetaObject::invokeMethod(qApp, [hook, casePath]() { hook(casePath); }, Qt::QueuedConnection);
 }
 
+bool MeasureThenWeldDialog::HasLiveSession(const QString& actionName)
+{
+    if (!m_liveSessionGuard || !m_liveSessionGuard())
+    {
+        const QString message = QStringLiteral("账号会话已失效，已拒绝继续：%1").arg(actionName);
+        AppendLog(message);
+        SetFlowStep(message);
+        return false;
+    }
+    return true;
+}
+
 bool MeasureThenWeldDialog::ConfirmContinue(const QString& actionName)
 {
-    // 流程免确认只放行中间衔接运动；首次运动（扫描下枪安全位置）与
-    // 进入焊接段（移动到焊接下枪安全位置并执行焊接轨迹）不在白名单，始终弹框。
-    static const QStringList kSkippableActions = {
-        QStringLiteral("移动到扫描起点"),
-        QStringLiteral("扫描终点并采集相机点"),
-        QStringLiteral("扫描收枪安全位置"),
-    };
-    if (m_bSkipFlowConfirms.load() && kSkippableActions.contains(actionName))
-    {
-        AppendLog(QString("（免确认）自动继续：%1").arg(actionName));
-        return true;
-    }
-
-    SetFlowStep(QString("等待确认：%1").arg(actionName));
-
     if (QThread::currentThread() != thread())
     {
         // 流程在线程里跑，确认框必须切回 UI 线程并阻塞等待用户选择。
@@ -1580,6 +1768,25 @@ bool MeasureThenWeldDialog::ConfirmContinue(const QString& actionName)
         return confirmed;
     }
 
+    if (!HasLiveSession(actionName))
+    {
+        return false;
+    }
+    // 流程免确认只放行中间衔接运动；首次运动（扫描下枪安全位置）与
+    // 进入焊接段（移动到焊接下枪安全位置并执行焊接轨迹）不在白名单，始终弹框。
+    static const QStringList kSkippableActions = {
+        QStringLiteral("移动到扫描起点"),
+        QStringLiteral("扫描终点并采集相机点"),
+        QStringLiteral("扫描收枪安全位置"),
+    };
+    if (m_bSkipFlowConfirms.load() && kSkippableActions.contains(actionName))
+    {
+        AppendLog(QString("（免确认）自动继续：%1").arg(actionName));
+        return true;
+    }
+
+    SetFlowStep(QString("等待确认：%1").arg(actionName));
+
     const QMessageBox::StandardButton ret = QMessageBox::question(
         this,
         "先测后焊确认",
@@ -1593,22 +1800,6 @@ bool MeasureThenWeldDialog::ConfirmContinue(const QString& actionName)
 
 bool MeasureThenWeldDialog::ShowCheckpointDialog(const QString& title, const QString& detail)
 {
-    // 流程免确认按标题白名单放行；不在白名单的（跳过扫描确认、扫描姿态翻转
-    // 风险提醒等）一律照常弹框——新增的关键节点默认落在保留侧，安全优先。
-    static const QStringList kSkippableTitles = {
-        QStringLiteral("扫描完成"),
-        QStringLiteral("补偿完成"),
-        QStringLiteral("焊前确认"),
-        QStringLiteral("焊后确认"),
-    };
-    if (m_bSkipFlowConfirms.load() && kSkippableTitles.contains(title))
-    {
-        AppendLog(QString("（免确认）关键节点[%1]自动继续。%2").arg(title).arg(detail));
-        return true;
-    }
-
-    SetFlowStep(QString("关键节点确认：%1").arg(title));
-
     if (QThread::currentThread() != thread())
     {
         bool confirmed = false;
@@ -1624,6 +1815,26 @@ bool MeasureThenWeldDialog::ShowCheckpointDialog(const QString& title, const QSt
             }, Qt::BlockingQueuedConnection);
         return confirmed;
     }
+
+    if (!HasLiveSession(title))
+    {
+        return false;
+    }
+    // 流程免确认按标题白名单放行；不在白名单的（跳过扫描确认、扫描姿态翻转
+    // 风险提醒等）一律照常弹框——新增的关键节点默认落在保留侧，安全优先。
+    static const QStringList kSkippableTitles = {
+        QStringLiteral("扫描完成"),
+        QStringLiteral("补偿完成"),
+        QStringLiteral("焊前确认"),
+        QStringLiteral("焊后确认"),
+    };
+    if (m_bSkipFlowConfirms.load() && kSkippableTitles.contains(title))
+    {
+        AppendLog(QString("（免确认）关键节点[%1]自动继续。%2").arg(title).arg(detail));
+        return true;
+    }
+
+    SetFlowStep(QString("关键节点确认：%1").arg(title));
 
     const QMessageBox::StandardButton ret = QMessageBox::question(
         this,
@@ -1678,6 +1889,26 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
         return;
     }
     param.bDoActualWeld = IsActualWeldModeChecked();
+    if (!HasLiveSession(QStringLiteral("启动先测后焊预设流程")))
+    {
+        return;
+    }
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("先测后焊预设流程"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "先测后焊", leaseError);
+        return;
+    }
+    QString invalidateError;
+    if (!MeasureThenWeldService::InvalidateStoredWeldResumeCheckpoint(
+        QString::fromStdString(param.sRobotName), invalidateError))
+    {
+        QMessageBox::warning(this, "先测后焊",
+            invalidateError + QStringLiteral("；未开始相机或机器人动作。"));
+        return;
+    }
     const int unitIndexForRun = m_unitIndex;
     m_pCameraCache = nullptr;  // 相机启动成功后再解析，避免 runtime 重建期间保留旧缓存指针。
     SetRunning(true);
@@ -1696,7 +1927,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
 
     // 机器人运动和扫描采集放到后台线程，避免 UI 被 CheckRobotDone 和文件保存卡住。
     QPointer<MeasureThenWeldDialog> self(this);
-    std::thread([self, pRobotDriver, param, unitIndexForRun]()
+    std::thread([self, pRobotDriver, param, unitIndexForRun, operationLease]()
         {
             bool ok = true;
             QString message;
@@ -1764,11 +1995,6 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         {
                             self->SetFlowStep("准备扫描终点并采集相机点");
                             self->SetProgressBusy(40, "扫描运动中，正在采集点云");
-                        }
-                        else if (action == QStringLiteral("扫描收枪安全位置"))
-                        {
-                            self->SetFlowStep("准备移动到扫描收枪安全位置");
-                            self->SetProgressBusy(72, "移动到扫描收枪安全位置");
                         }
                         return true;
                     };
@@ -1844,6 +2070,37 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                             [self](const QString& title, const QString& detail) -> bool
                             {
                                 return self != nullptr && self->ShowCheckpointDialog(title, detail);
+                            },
+                            0.0,
+                            true,
+                            MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
+                            -1.0,
+                            false,
+                            [pRobotDriver]() { return RobotOperationLease::IsCancellationRequested(pRobotDriver); },
+                            [self, pRobotDriver, param](const MeasureThenWeldService::WeldExecutionIdentity& identity, QString& prepareError)
+                            {
+                                return self != nullptr && self->PrepareActiveWeldCheckpoint(
+                                    pRobotDriver,
+                                    param,
+                                    identity.qualityProofPosePath,
+                                    identity.qualityProofPoseSha256,
+                                    identity.sampledPosePath,
+                                    identity.sampledPoseSha256,
+                                    identity.sampledPoseSize,
+                                    identity.programName,
+                                    identity.sampledPointCount,
+                                    identity.effectiveFinalStepMm,
+                                    identity.parameterFingerprint,
+                                    identity.resumeCheckpointSupported,
+                                    identity.resumeUnsupportedReason,
+                                    prepareError);
+                            },
+                            [self](bool completed)
+                            {
+                                if (self != nullptr)
+                                {
+                                    self->FinishActiveWeldExecution(completed);
+                                }
                             });
                     if (ok)
                     {
@@ -1894,14 +2151,11 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                     self->FinishProgress(ok, ok ? QStringLiteral("流程完成") : QStringLiteral("流程失败，请查看流程日志"));
                     self->AppendLog(ok ? "流程完成。" : "流程失败。");
                     self->SetRunning(false);
-                    if (ok)
-                    {
-                        QMessageBox::information(self, "预设参数", message);
-                    }
-                    else
-                    {
-                        QMessageBox::warning(self, "预设参数", message);
-                    }
+                    ShowNonModalFlowResult(
+                        self,
+                        ok ? QMessageBox::Information : QMessageBox::Warning,
+                        "预设参数",
+                        message);
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -1976,6 +2230,27 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
         return;
     }
 
+    if (!HasLiveSession(QStringLiteral("启动跳过扫描焊接流程")))
+    {
+        return;
+    }
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("跳过扫描焊接流程"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "跳过扫描焊接", leaseError);
+        return;
+    }
+    QString invalidateError;
+    if (!MeasureThenWeldService::InvalidateStoredWeldResumeCheckpoint(
+        QString::fromStdString(param.sRobotName), invalidateError))
+    {
+        QMessageBox::warning(this, "跳过扫描焊接",
+            invalidateError + QStringLiteral("；未开始处理或机器人动作。"));
+        return;
+    }
+
     SetRunning(true);
     ResetProgress("已选择历史结果，准备重新计算");
     SetProgress(8, "已选择历史结果");
@@ -2006,7 +2281,8 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                  seamCompPath = QString(seamCompPath),
                  canRebuildFromLaser,
                  hasExistingPoseFile,
-                 hasExistingSeamCompFile]() mutable
+                 hasExistingSeamCompFile,
+                 operationLease]() mutable
         {
             bool ok = true;
             QString message;
@@ -2148,6 +2424,37 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                         [self](const QString& title, const QString& detail) -> bool
                         {
                             return self != nullptr && self->ShowCheckpointDialog(title, detail);
+                        },
+                        0.0,
+                        true,
+                        MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
+                        -1.0,
+                        false,
+                        [pRobotDriver]() { return RobotOperationLease::IsCancellationRequested(pRobotDriver); },
+                        [self, pRobotDriver, param](const MeasureThenWeldService::WeldExecutionIdentity& identity, QString& prepareError)
+                        {
+                            return self != nullptr && self->PrepareActiveWeldCheckpoint(
+                                pRobotDriver,
+                                param,
+                                identity.qualityProofPosePath,
+                                identity.qualityProofPoseSha256,
+                                identity.sampledPosePath,
+                                identity.sampledPoseSha256,
+                                identity.sampledPoseSize,
+                                identity.programName,
+                                identity.sampledPointCount,
+                                identity.effectiveFinalStepMm,
+                                identity.parameterFingerprint,
+                                identity.resumeCheckpointSupported,
+                                identity.resumeUnsupportedReason,
+                                prepareError);
+                        },
+                        [self](bool completed)
+                        {
+                            if (self != nullptr)
+                            {
+                                self->FinishActiveWeldExecution(completed);
+                            }
                         });
                 if (ok)
                 {
@@ -2195,14 +2502,11 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                     self->FinishProgress(ok, ok ? QStringLiteral("跳过扫描焊接完成") : QStringLiteral("跳过扫描焊接失败"));
                     self->AppendLog(ok ? "跳过扫描焊接流程完成。" : "跳过扫描焊接流程失败。");
                     self->SetRunning(false);
-                    if (ok)
-                    {
-                        QMessageBox::information(self, "跳过扫描焊接", message);
-                    }
-                    else
-                    {
-                        QMessageBox::warning(self, "跳过扫描焊接", message);
-                    }
+                    ShowNonModalFlowResult(
+                        self,
+                        ok ? QMessageBox::Information : QMessageBox::Warning,
+                        "跳过扫描焊接",
+                        message);
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -2217,6 +2521,250 @@ void MeasureThenWeldDialog::RunLineScanProcess()
         "线扫处理用于整体大范围扫描和多个焊道粗定位。\n当前新增的点云库已接入预设参数后的局部精测量流程。");
 }
 
+bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
+    RobotDriverAdaptor* pRobotDriver,
+    const T_PRECISE_MEASURE_PARAM& param,
+    const QString& sourcePosePath,
+    const QString& sourcePoseSha256,
+    const QString& sampledPosePath,
+    const QString& sampledPoseSha256,
+    qint64 sampledPoseSize,
+    const QString& programName,
+    int sampledPointCount,
+    double effectiveFinalStepMm,
+    const QString& parameterFingerprint,
+    bool resumeCheckpointSupported,
+    const QString& resumeUnsupportedReason,
+    QString& error)
+{
+    error.clear();
+    // FANUC 暂停尚未接入；不能因为 STEP 的断点能力阻断 FANUC 原有焊接流程。
+    if (dynamic_cast<STEPRobotCtrl*>(pRobotDriver) == nullptr)
+    {
+        ClearActiveWeldCheckpoint();
+        return true;
+    }
+
+    const QString activeOwner = RobotOperationLease::CurrentOwner(pRobotDriver);
+    const bool isResumeFlow = activeOwner == QStringLiteral("断点续焊流程");
+    if (activeOwner != QStringLiteral("先测后焊预设流程")
+        && activeOwner != QStringLiteral("跳过扫描焊接流程")
+        && !isResumeFlow)
+    {
+        error = QStringLiteral("冻结STEP焊接断点上下文失败：当前页面未持有允许的硬件操作租约。");
+        return false;
+    }
+    if (!resumeCheckpointSupported && isResumeFlow)
+    {
+        error = resumeUnsupportedReason.isEmpty()
+            ? QStringLiteral("当前焊接工艺无法绑定真实执行轨迹，暂停/断点续焊已禁用。")
+            : resumeUnsupportedReason;
+        return false;
+    }
+
+    static const QRegularExpression sha256Pattern(QStringLiteral("^[0-9a-fA-F]{64}$"));
+    if (pRobotDriver == nullptr || programName.trimmed().isEmpty()
+        || sampledPointCount < 2
+        || sampledPoseSize <= 0
+        || !sha256Pattern.match(sourcePoseSha256).hasMatch()
+        || !sha256Pattern.match(sampledPoseSha256).hasMatch()
+        || !std::isfinite(effectiveFinalStepMm) || effectiveFinalStepMm <= 0.0
+        || parameterFingerprint.size() != 64)
+    {
+        error = QStringLiteral("冻结STEP焊接断点上下文失败：程序、轨迹快照、点数、点距或工艺指纹无效。");
+        return false;
+    }
+
+    WeldResumePlanner::CheckpointRecord record;
+    record.state = QStringLiteral("prepared");
+    record.checkpointId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    record.createdAtUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    record.robotName = QString::fromStdString(param.sRobotName).trimmed();
+    record.robotType = RobotDriverTypeName(pRobotDriver);
+    record.robotEndpoint = RobotOperationLease::PersistentEndpointIdentity(pRobotDriver);
+    record.paramGroupIndex = param.nParamGroupIndex;
+    record.paramGroupName = param.sParamGroupName;
+    record.scanSection = QString::fromStdString(param.sSectionName);
+    record.weldSection = QString::fromStdString(param.sWeldSectionName);
+    record.parameterFingerprint = parameterFingerprint;
+    record.programName = programName.trimmed();
+    record.weldDirection = param.nWeldDirection < 0 ? -1 : 1;
+    record.actualWeld = param.bDoActualWeld;
+    record.finalStepMm = effectiveFinalStepMm;
+    record.backtrackMm = param.dResumeBacktrackMm;
+
+    if (record.robotName.isEmpty() || record.robotType != QStringLiteral("STEP")
+        || record.robotEndpoint.isEmpty()
+        || !std::isfinite(record.backtrackMm) || record.backtrackMm < 0.0)
+    {
+        error = QStringLiteral("冻结STEP焊接断点上下文失败：机器人持久端点或回退距离无效。");
+        return false;
+    }
+
+    const QString projectRoot = RobotDataHelper::FindProjectRootPath();
+    if (!WeldResumePlanner::BindTrajectoryIdentity(
+        projectRoot, sampledPosePath, record.robotName, record, &error))
+    {
+        return false;
+    }
+    if (record.trajectorySha256.compare(sampledPoseSha256, Qt::CaseInsensitive) != 0
+        || record.trajectorySize != sampledPoseSize
+        || record.trajectoryPointCount != sampledPointCount)
+    {
+        error = QStringLiteral(
+            "最终执行轨迹在保存与冻结之间发生变化：SHA256、大小或点数与 Service 快照不一致。");
+        return false;
+    }
+
+    const QFileInfo sourceInfo(sourcePosePath);
+    const QString sourceAbsolute = QDir::cleanPath(QDir::fromNativeSeparators(
+        sourceInfo.canonicalFilePath().isEmpty()
+            ? sourceInfo.absoluteFilePath()
+            : sourceInfo.canonicalFilePath()));
+    const QString sourceRelative = QDir::cleanPath(QDir::fromNativeSeparators(
+        QDir(projectRoot).relativeFilePath(sourceAbsolute)));
+    if (!sourceInfo.isFile() || QDir::isAbsolutePath(sourceRelative)
+        || sourceRelative == QStringLiteral("..")
+        || sourceRelative.startsWith(QStringLiteral("../"))
+        || !sourceRelative.startsWith(record.caseRelativeDir + QLatin1Char('/'), Qt::CaseInsensitive))
+    {
+        error = QString("源轨迹不在绑定案例目录内：%1").arg(sourceAbsolute);
+        return false;
+    }
+    const QString currentSourceSha256 = WeldResumePlanner::ComputeFileSha256(sourceAbsolute, &error);
+    if (currentSourceSha256.compare(sourcePoseSha256, Qt::CaseInsensitive) != 0)
+    {
+        if (error.isEmpty())
+        {
+            error = QStringLiteral("质量证明源轨迹在授权与冻结之间发生变化，拒绝生成断点。");
+        }
+        return false;
+    }
+    record.sourceTrajectoryRelativePath = sourceRelative;
+    record.sourceTrajectorySha256 = sourcePoseSha256.toLower();
+
+    QString encodeError;
+    const QString encoded = WeldResumePlanner::EncodeRecord(record, &encodeError);
+    if (encoded.isEmpty())
+    {
+        error = encodeError;
+        return false;
+    }
+
+    // 启动一条新的完整焊接会使旧 paused 断点失去业务意义；在 START 前用当前有效身份
+    // 写入不可续焊 tombstone，避免新焊道完成后仍能误用旧断点重复焊接。
+    if (!isResumeFlow)
+    {
+        WeldResumePlanner::CheckpointRecord superseded = record;
+        superseded.state = QStringLiteral("superseded");
+        const QString supersededValue = WeldResumePlanner::EncodeRecord(superseded, &encodeError);
+        QString storageError;
+        if (supersededValue.isEmpty()
+            || !WriteBreakpointRecordValue(record.robotName, supersededValue, &storageError)
+            || !DisableLegacyBreakpoint(record.robotName, &storageError))
+        {
+            error = storageError.isEmpty()
+                ? QStringLiteral("使旧断点失效失败，已在START前中止新焊接。")
+                : storageError;
+            return false;
+        }
+    }
+    if (!resumeCheckpointSupported)
+    {
+        ClearActiveWeldCheckpoint();
+        const QString reason = resumeUnsupportedReason.isEmpty()
+            ? QStringLiteral("当前焊接工艺无法绑定真实执行轨迹，暂停/断点续焊已禁用。")
+            : resumeUnsupportedReason;
+        AppendLog(reason + QStringLiteral(" 旧断点已失效，正常焊接继续执行。"));
+        return true;
+    }
+    {
+        QMutexLocker lock(&m_activeWeldCheckpointMutex);
+        m_activeWeldCheckpointRecord = encoded;
+    }
+    SetWeldPauseAvailable(true);
+    AppendLog(QString("已冻结可暂停焊接上下文：Case=%1 Program=%2 SHA256=%3…")
+        .arg(record.caseId, record.programName, record.trajectorySha256.left(12)));
+    return true;
+}
+
+QString MeasureThenWeldDialog::ActiveWeldCheckpointRecord() const
+{
+    QMutexLocker lock(&m_activeWeldCheckpointMutex);
+    return m_activeWeldCheckpointRecord;
+}
+
+void MeasureThenWeldDialog::ClearActiveWeldCheckpoint()
+{
+    {
+        QMutexLocker lock(&m_activeWeldCheckpointMutex);
+        m_activeWeldCheckpointRecord.clear();
+    }
+    SetWeldPauseAvailable(false);
+}
+
+void MeasureThenWeldDialog::FinishActiveWeldExecution(bool programCompleted)
+{
+    const QString encoded = ActiveWeldCheckpointRecord();
+    WeldResumePlanner::CheckpointRecord record;
+    QString decodeError;
+    if (!encoded.isEmpty() && WeldResumePlanner::DecodeRecord(encoded, record, &decodeError)
+        && programCompleted
+        && (record.state == QStringLiteral("paused")
+            || record.state == QStringLiteral("continuing")))
+    {
+        QString transitionError;
+        if (!TransitionBreakpointRecordState(
+            record.robotName,
+            record.checkpointId,
+            record.state,
+            QStringLiteral("finished"),
+            &transitionError))
+        {
+            AppendLog(QString("焊接已完成，但断点终态写回失败（保持闭锁）：%1").arg(transitionError));
+        }
+    }
+    ClearActiveWeldCheckpoint();
+    if (programCompleted)
+    {
+        QPointer<MeasureThenWeldDialog> self(this);
+        QMetaObject::invokeMethod(this, [self]()
+            {
+                if (self != nullptr && self->m_pRunMonitor != nullptr)
+                {
+                    static_cast<RunMonitorDialog*>(self->m_pRunMonitor)
+                        ->ResumeWeldButton()->setEnabled(false);
+                }
+            }, Qt::QueuedConnection);
+    }
+}
+
+void MeasureThenWeldDialog::SetWeldPauseAvailable(bool available)
+{
+    if (QThread::currentThread() != thread())
+    {
+        QPointer<MeasureThenWeldDialog> self(this);
+        QMetaObject::invokeMethod(this, [self, available]()
+            {
+                if (self != nullptr)
+                {
+                    self->SetWeldPauseAvailable(available);
+                }
+            }, Qt::QueuedConnection);
+        return;
+    }
+    RunMonitorDialog* monitor = static_cast<RunMonitorDialog*>(m_pRunMonitor);
+    if (monitor == nullptr)
+    {
+        return;
+    }
+    monitor->PauseButton()->setEnabled(available && m_bRunning);
+    if (!available)
+    {
+        monitor->PauseButton()->setText(QStringLiteral("暂停"));
+    }
+}
+
 void MeasureThenWeldDialog::OnPauseResumeClicked()
 {
     RunMonitorDialog* monitor = static_cast<RunMonitorDialog*>(m_pRunMonitor);
@@ -2228,88 +2776,154 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
         return;
     }
 
-    if (monitor->PauseButton()->text() == QStringLiteral("暂停"))
+    const QString activeOwner = RobotOperationLease::CurrentOwner(pRobotDriver);
+    const bool ownedByThisFlow = activeOwner == QStringLiteral("先测后焊预设流程")
+        || activeOwner == QStringLiteral("跳过扫描焊接流程")
+        || activeOwner == QStringLiteral("断点续焊流程");
+    if (!m_bRunning || !ownedByThisFlow)
     {
-        // 暂停 = SetModeCmd(STOP)：程序进入暂停态(1)，可 START 从断点续走。
-        if (!pStepDriver->Prog_stop_Py())
-        {
-            AppendLog("暂停命令发送失败，详见机器人错误信息。");
-            return;
-        }
-        m_pauseProgramLine = pStepDriver->GetCurrentProgramLine();
-        RobotDriverAdaptor::StateSnapshot snapshot;
-        m_hasPausePose = pRobotDriver->LatestStateSnapshot(snapshot) && snapshot.valid;
-        if (m_hasPausePose)
-        {
-            m_pausePose = snapshot.pose;
-        }
-        // 断点落盘（Data/<robot>/WeldBreakpoint.ini 逻辑键，经 ConfigDatabase）：程序重启后断点续焊依据。
-        // 续焊只认这份记录，不用当前位姿兜底——枪被挪动过时按当前位姿定位会焊错位置。
-        if (m_hasPausePose)
-        {
-            COPini breakpointIni;
-            const QString robotName = CurrentRobotName();
-            if (!robotName.isEmpty()
-                && breakpointIni.SetFileName(ToUtf8StdString(QString("Data/%1/WeldBreakpoint.ini").arg(robotName))))
-            {
-                breakpointIni.SetSectionName("Breakpoint");
-                breakpointIni.WriteString("Valid", 1);
-                breakpointIni.WriteString("ProgramLine", m_pauseProgramLine);
-                breakpointIni.WriteString("X", m_pausePose.dX, 3);
-                breakpointIni.WriteString("Y", m_pausePose.dY, 3);
-                breakpointIni.WriteString("Z", m_pausePose.dZ, 3);
-                breakpointIni.WriteString("RX", m_pausePose.dRX, 3);
-                breakpointIni.WriteString("RY", m_pausePose.dRY, 3);
-                breakpointIni.WriteString("RZ", m_pausePose.dRZ, 3);
-                breakpointIni.WriteString("TimeText",
-                    ToUtf8StdString(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")));
-            }
-        }
-        monitor->PauseButton()->setText("继续");
-        monitor->ResumeWeldButton()->setEnabled(true);
-        AppendLog(QString("已暂停：程序行=%1，断点位姿 X=%2 Y=%3 Z=%4。恢复前请勿移动工件。")
-            .arg(m_pauseProgramLine)
-            .arg(m_hasPausePose ? m_pausePose.dX : 0.0, 0, 'f', 1)
-            .arg(m_hasPausePose ? m_pausePose.dY : 0.0, 0, 'f', 1)
-            .arg(m_hasPausePose ? m_pausePose.dZ : 0.0, 0, 'f', 1));
+        QMessageBox::warning(this, "暂停/继续",
+            "当前焊接程序不再由本页面持有硬件租约，禁止发送 STOP/START。");
+        SetWeldPauseAvailable(false);
         return;
     }
 
-    // 继续：回位前置检查——暂停期间机器人被移动过则先确认（自动回位待真机验证暂停态命令兼容性后启用）。
-    if (m_hasPausePose)
+    WeldResumePlanner::CheckpointRecord activeRecord;
+    QString recordError;
+    const QString activeEncoded = ActiveWeldCheckpointRecord();
+    if (!WeldResumePlanner::DecodeRecord(activeEncoded, activeRecord, &recordError)
+        || (activeRecord.state != QStringLiteral("prepared")
+            && activeRecord.state != QStringLiteral("paused")
+            && activeRecord.state != QStringLiteral("continuing"))
+        || activeRecord.robotType != QStringLiteral("STEP")
+        || activeRecord.robotName.compare(CurrentRobotName(), Qt::CaseInsensitive) != 0
+        || activeRecord.robotEndpoint != RobotOperationLease::PersistentEndpointIdentity(pRobotDriver))
     {
-        RobotDriverAdaptor::StateSnapshot snapshot;
-        if (pRobotDriver->LatestStateSnapshot(snapshot) && snapshot.valid)
-        {
-            const double dx = snapshot.pose.dX - m_pausePose.dX;
-            const double dy = snapshot.pose.dY - m_pausePose.dY;
-            const double dz = snapshot.pose.dZ - m_pausePose.dZ;
-            const double deviationMm = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (deviationMm > 2.0)
-            {
-                const QMessageBox::StandardButton confirm = QMessageBox::warning(
-                    this,
-                    "继续运行",
-                    QString("检测到机器人已偏离断点位置 %1 mm（暂停期间被移动过）。\n"
-                        "继续后机器人将从当前位置直接向断点行的目标点移动，请确认路径无碰撞；\n"
-                        "建议先手动点动回到断点附近再继续。\n\n仍要继续吗？")
-                        .arg(deviationMm, 0, 'f', 1),
-                    QMessageBox::Yes | QMessageBox::No,
-                    QMessageBox::No);
-                if (confirm != QMessageBox::Yes)
-                {
-                    return;
-                }
-            }
-        }
+        QMessageBox::warning(this, "暂停/继续",
+            recordError.isEmpty()
+                ? QStringLiteral("当前没有与本次STEP焊接程序一致的可验证断点上下文，禁止暂停。")
+                : recordError);
+        SetWeldPauseAvailable(false);
+        return;
     }
-    if (!pStepDriver->Prog_startRun_Py())
+
+    if (monitor->PauseButton()->text() == QStringLiteral("暂停"))
     {
-        AppendLog("继续命令发送失败，详见机器人错误信息。");
+        std::string pausedProject;
+        std::string pausedProgram;
+        T_ROBOT_COORS stablePose{};
+        int stableProgramLine = -1;
+        if (!pStepDriver->PauseTrackedProgramAndWait(
+            ToUtf8StdString(activeRecord.programName),
+            stableProgramLine,
+            stablePose,
+            &pausedProject,
+            &pausedProgram))
+        {
+            AppendLog(QString("暂停失败：%1").arg(DecodeRobotMessageText(pStepDriver->GetLastRobotError())));
+            return;
+        }
+        if (QString::fromStdString(pausedProgram) != activeRecord.programName)
+        {
+            AppendLog(QString("暂停后程序身份变化，拒绝生成断点：Expected=%1 Actual=%2")
+                .arg(activeRecord.programName, QString::fromStdString(pausedProgram)));
+            monitor->PauseButton()->setText(QStringLiteral("继续"));
+            monitor->ResumeWeldButton()->setEnabled(false);
+            return;
+        }
+
+        m_pauseProgramLine = stableProgramLine;
+        m_pausePose = stablePose;
+        m_hasPausePose = true;
+        activeRecord.state = QStringLiteral("paused");
+        activeRecord.createdAtUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+        activeRecord.programLine = m_pauseProgramLine;
+        activeRecord.x = m_pausePose.dX;
+        activeRecord.y = m_pausePose.dY;
+        activeRecord.z = m_pausePose.dZ;
+        activeRecord.rx = m_pausePose.dRX;
+        activeRecord.ry = m_pausePose.dRY;
+        activeRecord.rz = m_pausePose.dRZ;
+
+        QString saveError;
+        const bool saved = SavePausedBreakpointRecord(activeRecord, &saveError);
+        if (saved)
+        {
+            QString encodeError;
+            const QString pausedEncoded = WeldResumePlanner::EncodeRecord(activeRecord, &encodeError);
+            {
+                QMutexLocker lock(&m_activeWeldCheckpointMutex);
+                m_activeWeldCheckpointRecord = pausedEncoded;
+            }
+            monitor->ResumeWeldButton()->setEnabled(true);
+        }
+        else
+        {
+            monitor->ResumeWeldButton()->setEnabled(false);
+            AppendLog(QString("机器人已暂停，但V2断点写入失败；旧断点已保持无效，禁止断点续焊：%1")
+                .arg(saveError));
+            ShowNonModalFlowResult(this, QMessageBox::Warning, "暂停/继续",
+                QString("机器人已稳定暂停，但断点保存失败。可以点击“继续”恢复本程序；禁止关闭后使用断点续焊。\n%1")
+                    .arg(saveError));
+        }
+        monitor->PauseButton()->setText(QStringLiteral("继续"));
+        AppendLog(QString("已稳定暂停：程序=%1，行=%2，断点位姿 X=%3 Y=%4 Z=%5，V2落盘=%6。恢复前请勿移动工件。")
+            .arg(activeRecord.programName)
+            .arg(m_pauseProgramLine)
+            .arg(m_pausePose.dX, 0, 'f', 1)
+            .arg(m_pausePose.dY, 0, 'f', 1)
+            .arg(m_pausePose.dZ, 0, 'f', 1)
+            .arg(saved ? QStringLiteral("成功") : QStringLiteral("失败")));
+        return;
+    }
+
+    // START 前先把可自动续焊的 paused 原子切为 continuing。若进程在 START 后崩溃，
+    // 磁盘记录保持不可自动续焊，避免重启后从旧断点重复焊接。
+    if (activeRecord.state == QStringLiteral("paused"))
+    {
+        QString transitionError;
+        if (!TransitionBreakpointRecordState(
+            activeRecord.robotName,
+            activeRecord.checkpointId,
+            QStringLiteral("paused"),
+            QStringLiteral("continuing"),
+            &transitionError))
+        {
+            QMessageBox::warning(this, "继续运行",
+                QString("断点状态切换失败，未发送START：%1").arg(transitionError));
+            return;
+        }
+        activeRecord.state = QStringLiteral("continuing");
+        QString encodeError;
+        const QString continuingEncoded = WeldResumePlanner::EncodeRecord(activeRecord, &encodeError);
+        if (continuingEncoded.isEmpty())
+        {
+            AppendLog(QString("断点已闭锁为continuing，但内存上下文更新失败：%1").arg(encodeError));
+            SetWeldPauseAvailable(false);
+            return;
+        }
+        QMutexLocker lock(&m_activeWeldCheckpointMutex);
+        m_activeWeldCheckpointRecord = continuingEncoded;
+    }
+    double positionDeviationMm = 0.0;
+    double angleDeviationDeg = 0.0;
+	if (!pStepDriver->ResumeTrackedProgramFromPause(
+        ToUtf8StdString(activeRecord.programName),
+        m_pausePose,
+        2.0,
+        2.0,
+        &positionDeviationMm,
+        &angleDeviationDeg))
+    {
+        AppendLog(QString("继续命令发送失败；断点保持continuing闭锁：%1")
+            .arg(DecodeRobotMessageText(pStepDriver->GetLastRobotError())));
         return;
     }
     monitor->PauseButton()->setText("暂停");
-    AppendLog(QString("已从断点继续（程序行=%1）。").arg(m_pauseProgramLine));
+    AppendLog(QString("已从断点继续（程序行=%1，偏差=%2 mm/%3 deg）。")
+        .arg(m_pauseProgramLine)
+        .arg(positionDeviationMm, 0, 'f', 3)
+        .arg(angleDeviationDeg, 0, 'f', 3));
 }
 
 void MeasureThenWeldDialog::OnResumeWeldClicked()
@@ -2340,117 +2954,169 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
     {
         return;
     }
-    const QString robotName = CurrentRobotName();
-
-    // ① 断点记录：只认落盘文件，无记录直接报错（不用当前位姿兜底——枪被挪动过会定位错位置）。
-    COPini breakpointIni;
-    int breakpointValid = 0;
-    T_ROBOT_COORS breakpointPose{};
-    std::string breakpointTime;
-    if (breakpointIni.SetFileName(ToUtf8StdString(QString("Data/%1/WeldBreakpoint.ini").arg(robotName))))
+    const QString robotName = CurrentRobotName().trimmed();
+    WeldResumePlanner::CheckpointRecord checkpointRecord;
+    QString error;
+    if (!ReadBreakpointRecord(robotName, checkpointRecord, nullptr, &error))
     {
-        breakpointIni.SetSectionName("Breakpoint");
-        breakpointIni.ReadString(false, "Valid", &breakpointValid);
-        breakpointIni.ReadString(false, "X", &breakpointPose.dX);
-        breakpointIni.ReadString(false, "Y", &breakpointPose.dY);
-        breakpointIni.ReadString(false, "Z", &breakpointPose.dZ);
-        breakpointIni.ReadString(false, "RX", &breakpointPose.dRX);
-        breakpointIni.ReadString(false, "RY", &breakpointPose.dRY);
-        breakpointIni.ReadString(false, "RZ", &breakpointPose.dRZ);
-        breakpointIni.ReadString(false, "TimeText", breakpointTime);
+        QMessageBox::warning(this, "断点续焊", error);
+        return;
     }
-    if (breakpointValid != 1)
+    if (checkpointRecord.state != QStringLiteral("paused"))
     {
         QMessageBox::warning(this, "断点续焊",
-            "没有有效的断点记录（断点在焊接暂停时自动落盘）。\n无断点无法续焊。");
+            QString("断点状态为 %1，不允许自动续焊。只有完整落盘的 paused 状态可执行；resuming 状态需人工复核。")
+                .arg(checkpointRecord.state));
         return;
     }
 
-    // ② 最新结果的执行轨迹（SeamComp 最终执行文件）。
-    QString latestPosePath;
-    QDateTime latestTime;
-    const QDir robotResultDir(QString("Result/%1").arg(robotName));
-    for (const QFileInfo& caseInfo : robotResultDir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
+    T_PRECISE_MEASURE_PARAM param;
+    if (!LoadPresetParam(pRobotDriver, param, error))
     {
-        const QString candidate = caseInfo.absoluteFilePath() + "/LaserPoint/PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
-        const QFileInfo fi(candidate);
-        if (fi.isFile() && (latestPosePath.isEmpty() || fi.lastModified() > latestTime))
-        {
-            latestPosePath = candidate;
-            latestTime = fi.lastModified();
-        }
-    }
-    if (latestPosePath.isEmpty())
-    {
-        QMessageBox::warning(this, "断点续焊", "未找到可执行的焊接轨迹文件（SeamComp）。");
+        QMessageBox::warning(this, "断点续焊", error);
         return;
     }
+    param.bDoActualWeld = IsActualWeldModeChecked();
 
-    // ③ 用【落盘断点位姿】在轨迹里找最近点（文件每行前3列=X Y Z）。
-    QFile poseFile(latestPosePath);
-    if (!poseFile.open(QIODevice::ReadOnly | QIODevice::Text))
-    {
-        QMessageBox::warning(this, "断点续焊", "打开轨迹文件失败：" + latestPosePath);
-        return;
-    }
-    int totalPoints = 0;
-    int nearestIndex = -1;
-    double nearestDistance = 1e18;
-    {
-        QTextStream stream(&poseFile);
-        while (!stream.atEnd())
-        {
-            const QString line = stream.readLine().trimmed();
-            if (line.isEmpty() || line.startsWith('#'))
-            {
-                continue;
-            }
-            const QStringList parts = line.split(QRegularExpression("[\\s,]+"), Qt::SkipEmptyParts);
-            if (parts.size() < 3)
-            {
-                continue;
-            }
-            const double dx = parts[0].toDouble() - breakpointPose.dX;
-            const double dy = parts[1].toDouble() - breakpointPose.dY;
-            const double dz = parts[2].toDouble() - breakpointPose.dZ;
-            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (distance < nearestDistance)
-            {
-                nearestDistance = distance;
-                nearestIndex = totalPoints;
-            }
-            ++totalPoints;
-        }
-    }
-    if (nearestIndex < 0 || totalPoints < 2)
-    {
-        QMessageBox::warning(this, "断点续焊", "轨迹文件无有效点，无法定位断点。");
-        return;
-    }
-    if (nearestDistance > 20.0)
+    const QString currentEndpoint = RobotOperationLease::PersistentEndpointIdentity(pRobotDriver);
+    const QString currentType = RobotDriverTypeName(pRobotDriver);
+    if (checkpointRecord.robotName.compare(robotName, Qt::CaseInsensitive) != 0
+        || checkpointRecord.robotType != currentType
+        || currentType != QStringLiteral("STEP")
+        || currentEndpoint.isEmpty()
+        || checkpointRecord.robotEndpoint != currentEndpoint)
     {
         QMessageBox::warning(this, "断点续焊",
-            QString("断点位姿距最新轨迹最近点 %1 mm（>20mm），断点可能不属于该轨迹（结果目录与断点不匹配），已中止。")
-                .arg(nearestDistance, 0, 'f', 1));
+            QString("断点机器人身份不一致，已中止。\nRecord=%1 / %2 / %3\nCurrent=%4 / %5 / %6")
+                .arg(checkpointRecord.robotName, checkpointRecord.robotType, checkpointRecord.robotEndpoint,
+                    robotName, currentType, currentEndpoint));
+        return;
+    }
+    if (checkpointRecord.paramGroupIndex != param.nParamGroupIndex
+        || checkpointRecord.paramGroupName != param.sParamGroupName
+        || checkpointRecord.scanSection != QString::fromStdString(param.sSectionName)
+        || checkpointRecord.weldSection != QString::fromStdString(param.sWeldSectionName)
+        || checkpointRecord.weldDirection != (param.nWeldDirection < 0 ? -1 : 1)
+        || checkpointRecord.actualWeld != param.bDoActualWeld
+        || std::abs(checkpointRecord.backtrackMm - param.dResumeBacktrackMm) > 1e-9)
+    {
+        QMessageBox::warning(this, "断点续焊",
+            "当前参数组、焊接方向、运行模式或回退距离已与暂停时不同，已中止。请恢复暂停时配置后重试。");
         return;
     }
 
-    // ④ 搭接回退：2mm 点间距 ≈ 5mm/2mm = 3 点，覆盖熄弧弧坑。
-    constexpr int kBacktrackPoints = 3;
-    const int resumeSkipPoints = std::max(0, nearestIndex - kBacktrackPoints);
+    QString currentFingerprint;
+    double currentFinalStepMm = 0.0;
+    bool resumeCheckpointSupported = false;
+    QString resumeUnsupportedReason;
+    if (m_pService == nullptr
+        || !m_pService->ResolveWeldExecutionParameters(
+            param,
+            0.0,
+            currentFingerprint,
+            currentFinalStepMm,
+            error,
+            &resumeCheckpointSupported,
+            &resumeUnsupportedReason))
+    {
+        QMessageBox::warning(this, "断点续焊", error);
+        return;
+    }
+    if (!resumeCheckpointSupported)
+    {
+        QMessageBox::warning(this, "断点续焊",
+            resumeUnsupportedReason.isEmpty()
+                ? QStringLiteral("当前工艺无法绑定真实执行轨迹，禁止自动断点续焊。")
+                : resumeUnsupportedReason);
+        return;
+    }
+    if (currentFingerprint != checkpointRecord.parameterFingerprint
+        || std::abs(currentFinalStepMm - checkpointRecord.finalStepMm) > 1e-9)
+    {
+        QMessageBox::warning(this, "断点续焊",
+            "当前焊接工艺（电流/电压/速度/摆动/跟踪/点距）与暂停时指纹不一致，已中止。");
+        return;
+    }
+
+    const QString projectRoot = RobotDataHelper::FindProjectRootPath();
+    QString posePath;
+    QString qualityProofSourcePosePath;
+    if (!WeldResumePlanner::ResolveBoundTrajectory(
+        projectRoot, robotName, checkpointRecord, posePath, &error))
+    {
+        QMessageBox::warning(this, "断点续焊", error);
+        return;
+    }
+    if (!checkpointRecord.sourceTrajectoryRelativePath.isEmpty())
+    {
+        const QString sourceRelative = QDir::cleanPath(QDir::fromNativeSeparators(
+            checkpointRecord.sourceTrajectoryRelativePath));
+        if (QDir::isAbsolutePath(sourceRelative)
+            || sourceRelative == QStringLiteral("..")
+            || sourceRelative.startsWith(QStringLiteral("../"))
+            || !sourceRelative.startsWith(
+                checkpointRecord.caseRelativeDir + QLatin1Char('/'), Qt::CaseInsensitive)
+            || checkpointRecord.sourceTrajectorySha256.size() != 64)
+        {
+            QMessageBox::warning(this, "断点续焊", "断点中的源轨迹相对路径或SHA256无效，已中止。");
+            return;
+        }
+        const QString sourcePath = QDir(projectRoot).filePath(
+            sourceRelative);
+        qualityProofSourcePosePath = sourcePath;
+        const QString sourceHash = WeldResumePlanner::ComputeFileSha256(sourcePath, &error);
+        if (sourceHash.isEmpty() || sourceHash != checkpointRecord.sourceTrajectorySha256)
+        {
+            QMessageBox::warning(this, "断点续焊",
+                error.isEmpty() ? QStringLiteral("暂停时源轨迹的SHA256已变化，已中止。") : error);
+            return;
+        }
+    }
+    if (qualityProofSourcePosePath.isEmpty())
+    {
+        QMessageBox::warning(this, "断点续焊",
+            "断点没有绑定最初的 SeamComp 源轨迹，无法验证点云质量证明，已中止。");
+        return;
+    }
+
+    WeldResumePlanner::ResumePlan resumePlan;
+    if (!WeldResumePlanner::PlanFromPausedPoseBound(
+        posePath,
+        checkpointRecord,
+        checkpointRecord.x,
+        checkpointRecord.y,
+        checkpointRecord.z,
+        checkpointRecord.backtrackMm,
+        resumePlan,
+        &error))
+    {
+        QMessageBox::warning(this, "断点续焊", error);
+        return;
+    }
+    if (!std::isfinite(resumePlan.matchDistanceMm) || resumePlan.matchDistanceMm > 20.0)
+    {
+        QMessageBox::warning(this, "断点续焊",
+            QString("暂停位姿距绑定轨迹 %1 mm（允许上限 20 mm），已中止。")
+                .arg(resumePlan.matchDistanceMm, 0, 'f', 3));
+        return;
+    }
 
     const QMessageBox::StandardButton confirm = QMessageBox::question(
         this,
         "断点续焊",
-        QString("断点记录时间：%1\n轨迹：%2\n断点定位：第 %3 点 / 共 %4 点（偏差 %5 mm）\n"
-            "搭接回退：%6 点（≈%7 mm）→ 从第 %8 点开始续焊。\n\n"
-            "机器人将先经安全位到续焊起点（起弧自动生成）。确认续焊？")
-            .arg(QString::fromStdString(breakpointTime))
-            .arg(latestPosePath)
-            .arg(nearestIndex + 1).arg(totalPoints)
-            .arg(nearestDistance, 0, 'f', 1)
-            .arg(kBacktrackPoints).arg(kBacktrackPoints * 2)
-            .arg(resumeSkipPoints + 1),
+        QString("断点时间：%1\n案例：%2\n绑定轨迹：%3\nSHA256：%4\n"
+                "暂停弧长：%5 / %6 mm（匹配偏差 %7 mm）\n"
+                "按执行顺序回退：%8 mm → 从弧长 %9 mm 精确插值续焊。\n\n"
+                "机器人将先经安全位到续焊起点，并按暂停时工艺重新起弧。确认续焊？")
+            .arg(checkpointRecord.createdAtUtc)
+            .arg(checkpointRecord.caseId)
+            .arg(QDir::toNativeSeparators(posePath))
+            .arg(checkpointRecord.trajectorySha256)
+            .arg(resumePlan.pauseArcMm, 0, 'f', 3)
+            .arg(resumePlan.totalArcMm, 0, 'f', 3)
+            .arg(resumePlan.matchDistanceMm, 0, 'f', 3)
+            .arg(resumePlan.actualBacktrackMm, 0, 'f', 3)
+            .arg(resumePlan.resumeArcMm, 0, 'f', 3),
         QMessageBox::Yes | QMessageBox::No,
         QMessageBox::No);
     if (confirm != QMessageBox::Yes)
@@ -2458,63 +3124,197 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
         return;
     }
 
-    T_PRECISE_MEASURE_PARAM param;
-    QString error;
-    if (!LoadPresetParam(pRobotDriver, param, error))
+    if (!HasLiveSession(QStringLiteral("启动断点续焊流程")))
     {
-        QMessageBox::warning(this, "断点续焊", error);
         return;
     }
-    param.bDoActualWeld = IsActualWeldModeChecked();
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("断点续焊流程"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "断点续焊", leaseError);
+        return;
+    }
+    QString revalidatedPosePath;
+    QString revalidateError;
+    if (RobotOperationLease::PersistentEndpointIdentity(pRobotDriver) != checkpointRecord.robotEndpoint
+        || RobotDriverTypeName(pRobotDriver) != checkpointRecord.robotType
+        || !WeldResumePlanner::ResolveBoundTrajectory(
+            projectRoot, robotName, checkpointRecord, revalidatedPosePath, &revalidateError)
+        || QFileInfo(revalidatedPosePath).canonicalFilePath().compare(
+            QFileInfo(posePath).canonicalFilePath(), Qt::CaseInsensitive) != 0)
+    {
+        QMessageBox::warning(this, "断点续焊",
+            revalidateError.isEmpty()
+                ? QStringLiteral("取得硬件租约后机器人端点或绑定轨迹发生变化，未启动机器人。")
+                : revalidateError);
+        return;
+    }
+    QString transitionError;
+    if (!TransitionBreakpointRecordState(
+        robotName,
+        checkpointRecord.checkpointId,
+        QStringLiteral("paused"),
+        QStringLiteral("resuming"),
+        &transitionError))
+    {
+        QMessageBox::warning(this, "断点续焊",
+            QString("断点状态原子切换失败，未启动机器人：%1").arg(transitionError));
+        return;
+    }
+
     m_pCameraCache = ResolveCameraCacheForUnit(m_unitIndex);
     SetRunning(true);
     ResetProgress("断点续焊：准备执行");
-    AppendLog(QString("断点续焊开始：%1，从第 %2/%3 点续焊（断点第 %4 点，搭接回退 %5 点）。")
-        .arg(latestPosePath).arg(resumeSkipPoints + 1).arg(totalPoints).arg(nearestIndex + 1).arg(kBacktrackPoints));
+    AppendLog(QString("断点续焊开始：Case=%1，轨迹=%2，PauseArc=%3 mm，ResumeArc=%4 mm，回退=%5 mm。")
+        .arg(checkpointRecord.caseId, posePath)
+        .arg(resumePlan.pauseArcMm, 0, 'f', 3)
+        .arg(resumePlan.resumeArcMm, 0, 'f', 3)
+        .arg(resumePlan.actualBacktrackMm, 0, 'f', 3));
 
     QPointer<MeasureThenWeldDialog> self(this);
-    const QString posePathCopy = latestPosePath;
-    const QString robotNameCopy = robotName;
-    std::thread([self, pRobotDriver, param, posePathCopy, robotNameCopy, resumeSkipPoints]()
+    std::thread([self, pRobotDriver, param, posePath, qualityProofSourcePosePath,
+        robotName, checkpointRecord, resumePlan, operationLease]()
         {
             QString summary;
             QString execError;
-            const bool ok = self != nullptr && self->m_pService != nullptr
+            const auto validateResumeIdentity =
+                [pRobotDriver, param, checkpointRecord, posePath](const MeasureThenWeldService::WeldExecutionIdentity& identity, QString& prepareError)
+                {
+                    if (pRobotDriver == nullptr)
+                    {
+                        prepareError = QStringLiteral("续焊复核失败：机器人驱动为空。");
+                        return false;
+                    }
+                    const QString startEndpoint = RobotOperationLease::PersistentEndpointIdentity(pRobotDriver);
+                    const QString startRobotType = RobotDriverTypeName(pRobotDriver);
+                    const QString startRobotName = QString::fromStdString(param.sRobotName).trimmed();
+                    if (startRobotName.compare(checkpointRecord.robotName, Qt::CaseInsensitive) != 0
+                        || startRobotType != checkpointRecord.robotType
+                        || startEndpoint != checkpointRecord.robotEndpoint)
+                    {
+                        prepareError = QStringLiteral("续焊运动/START前机器人名称、类型或端点身份发生变化，已中止。");
+                        return false;
+                    }
+                    if (identity.parameterFingerprint != checkpointRecord.parameterFingerprint
+                        || std::abs(identity.effectiveFinalStepMm - checkpointRecord.finalStepMm) > 1e-9)
+                    {
+                        prepareError = QStringLiteral("续焊运动/START前工艺指纹或最终点距发生变化，已中止。");
+                        return false;
+                    }
+                    const QFileInfo identitySourceInfo(QDir::fromNativeSeparators(identity.sourcePosePath));
+                    const QFileInfo expectedSourceInfo(QDir::fromNativeSeparators(posePath));
+                    const QString identitySourcePath = QDir::cleanPath(
+                        identitySourceInfo.canonicalFilePath().isEmpty()
+                            ? identitySourceInfo.absoluteFilePath()
+                            : identitySourceInfo.canonicalFilePath());
+                    const QString expectedSourcePath = QDir::cleanPath(
+                        expectedSourceInfo.canonicalFilePath().isEmpty()
+                            ? expectedSourceInfo.absoluteFilePath()
+                            : expectedSourceInfo.canonicalFilePath());
+                    if (identitySourcePath.compare(expectedSourcePath, Qt::CaseInsensitive) != 0
+                        || identity.sourcePoseSha256.compare(
+                            checkpointRecord.trajectorySha256, Qt::CaseInsensitive) != 0
+                        || identity.sourcePoseSize != checkpointRecord.trajectorySize)
+                    {
+                        prepareError = QStringLiteral(
+                            "续焊运动/START前 Service 实际解析的轨迹路径、SHA256或大小与断点绑定不一致，已中止。");
+                        return false;
+                    }
+                    return true;
+                };
+            bool ok = self != nullptr && self->m_pService != nullptr
                 && self->m_pService->ExecuteWeldPoseFileWithSafePos(
-                    pRobotDriver, posePathCopy, param, summary, execError,
+                    pRobotDriver, posePath, param, summary, execError,
                     nullptr, nullptr,
                     [self](const QString& text) { if (self != nullptr) self->AppendLog(text); },
                     [self](const QString& text) { if (self != nullptr) self->SetFlowStep(text); },
                     [self](const QString& title, const QString& detail)
                         { return self != nullptr && self->ShowCheckpointDialog(title, detail); },
-                    0.0, true, resumeSkipPoints);
-            QMetaObject::invokeMethod(qApp, [self, ok, summary, execError, robotNameCopy]()
+                    checkpointRecord.finalStepMm,
+                    true,
+                    MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
+                    resumePlan.resumeArcMm,
+                    true,
+                    [pRobotDriver, expectedEndpoint = checkpointRecord.robotEndpoint]()
+                    {
+                        return RobotOperationLease::IsCancellationRequested(pRobotDriver)
+                            || RobotOperationLease::PersistentEndpointIdentity(pRobotDriver) != expectedEndpoint;
+                    },
+                    [self, pRobotDriver, param, checkpointRecord, validateResumeIdentity](const MeasureThenWeldService::WeldExecutionIdentity& identity, QString& prepareError)
+                    {
+                        if (!validateResumeIdentity(identity, prepareError))
+                        {
+                            return false;
+                        }
+                        return self != nullptr && self->PrepareActiveWeldCheckpoint(
+                            pRobotDriver,
+                            param,
+                            identity.qualityProofPosePath,
+                            identity.qualityProofPoseSha256,
+                            identity.sampledPosePath,
+                            identity.sampledPoseSha256,
+                            identity.sampledPoseSize,
+                            identity.programName,
+                            identity.sampledPointCount,
+                            identity.effectiveFinalStepMm,
+                            identity.parameterFingerprint,
+                            identity.resumeCheckpointSupported,
+                            identity.resumeUnsupportedReason,
+                            prepareError);
+                    },
+                    [self](bool completed)
+                    {
+                        if (self != nullptr)
+                        {
+                            self->FinishActiveWeldExecution(completed);
+                        }
+                    },
+                    checkpointRecord.trajectorySha256,
+                    validateResumeIdentity,
+                    qualityProofSourcePosePath);
+
+            if (ok)
+            {
+                QString finishError;
+                if (!TransitionBreakpointRecordState(
+                    robotName,
+                    checkpointRecord.checkpointId,
+                    QStringLiteral("resuming"),
+                    QStringLiteral("finished"),
+                    &finishError))
+                {
+                    WeldResumePlanner::CheckpointRecord current;
+                    QString readError;
+                    const bool replacedByNewCheckpoint = ReadBreakpointRecord(
+                        robotName, current, nullptr, &readError)
+                        && current.checkpointId != checkpointRecord.checkpointId;
+                    if (!replacedByNewCheckpoint)
+                    {
+                        ok = false;
+                        execError = QString("续焊程序已完成，但旧断点终态写回失败，保持闭锁：%1")
+                            .arg(finishError);
+                    }
+                }
+            }
+
+            QMetaObject::invokeMethod(qApp, [self, ok, summary, execError]()
                 {
                     if (self == nullptr)
                     {
                         return;
                     }
-                    if (ok)
-                    {
-                        // 续焊成功后清除断点记录，防止误用旧断点重复续焊。
-                        COPini clearIni;
-                        if (clearIni.SetFileName(ToUtf8StdString(QString("Data/%1/WeldBreakpoint.ini").arg(robotNameCopy))))
-                        {
-                            clearIni.SetSectionName("Breakpoint");
-                            clearIni.WriteString("Valid", 0);
-                        }
-                    }
                     self->SetFlowStep(ok ? "断点续焊完成" : "断点续焊失败");
                     self->FinishProgress(ok, ok ? QStringLiteral("断点续焊完成") : QStringLiteral("断点续焊失败"));
                     self->SetRunning(false);
-                    if (ok)
-                    {
-                        QMessageBox::information(self, "断点续焊", summary.isEmpty() ? QStringLiteral("续焊完成。") : summary);
-                    }
-                    else
-                    {
-                        QMessageBox::warning(self, "断点续焊", execError.isEmpty() ? QStringLiteral("续焊失败，请查看日志。") : execError);
-                    }
+                    ShowNonModalFlowResult(
+                        self,
+                        ok ? QMessageBox::Information : QMessageBox::Warning,
+                        "断点续焊",
+                        ok
+                            ? (summary.isEmpty() ? QStringLiteral("续焊完成。") : summary)
+                            : (execError.isEmpty() ? QStringLiteral("续焊失败，请查看日志。") : execError));
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -2576,8 +3376,23 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
         return;
     }
 
+    if (!HasLiveSession(QStringLiteral("启动相机时间补偿标定")))
+    {
+        return;
+    }
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        pRobotDriver, QStringLiteral("相机时间补偿标定"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "相机时间补偿标定", leaseError);
+        return;
+    }
+
     const int unitIndexForRun = m_unitIndex;
-    m_pCameraCache = ResolveCameraCacheForUnit(unitIndexForRun);
+    // 上一轮相机 runtime 可能已经被主窗口重建；SetRunning(true) 会立即访问该成员，
+    // 因此先清掉旧指针，待本轮启动成功后再在 UI 线程解析并赋回新缓存。
+    m_pCameraCache = nullptr;
     SetRunning(true);
     ResetProgress("相机时间补偿标定：准备启动相机");
     SetProgress(5, "标定开始");
@@ -2588,16 +3403,17 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
         .arg(param.dCameraTimeOffsetMs, 0, 'f', 1));
 
     QPointer<MeasureThenWeldDialog> self(this);
-    std::thread([self, pRobotDriver, param, unitIndexForRun]()
+    std::thread([self, pRobotDriver, param, unitIndexForRun, operationLease]()
         {
             bool ok = true;
             QString message;
             QString cameraIP;
             QString savedForward;
             QString savedReverse;
+            CameraFrameCache* cameraCacheForRun = nullptr;
             TimeOffsetCalibrationResult calib;
 
-            QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok, unitIndexForRun]()
+            QMetaObject::invokeMethod(qApp, [self, &cameraIP, &ok, &cameraCacheForRun, unitIndexForRun]()
                 {
                     if (self == nullptr)
                     {
@@ -2605,11 +3421,72 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                         return;
                     }
                     ok = self->m_startCamera ? self->m_startCamera(unitIndexForRun, cameraIP) : false;
+                    if (ok)
+                    {
+                        // 启动相机可能重建当前单元的 runtime；必须在启动成功后重新取得缓存，
+                        // 禁止沿用启动前的旧指针。
+                        cameraCacheForRun = self->ResolveCameraCacheForUnit(unitIndexForRun);
+                        self->m_pCameraCache = cameraCacheForRun;
+                        ok = cameraCacheForRun != nullptr;
+                    }
                 }, Qt::BlockingQueuedConnection);
             if (!ok)
             {
                 message = "相机启动失败，标定中止。";
             }
+
+            auto runCalibrationScan = [self, pRobotDriver, cameraCacheForRun](
+                const T_PRECISE_MEASURE_PARAM& scanParam,
+                const QString& phaseName,
+                int progressBase,
+                QString& savedPath,
+                QString& scanError) -> bool
+                {
+                    if (self == nullptr || self->m_pService == nullptr || cameraCacheForRun == nullptr)
+                    {
+                        scanError = QStringLiteral("标定扫描运行环境已失效。");
+                        return false;
+                    }
+
+                    MeasureThenWeldService::ScanCycleResult scanCycle;
+                    const bool scanOk = self->m_pService->RunScanCycle(
+                        pRobotDriver,
+                        scanParam,
+                        SafeSpeed(scanParam.dRunSpeed, 1.0),
+                        cameraCacheForRun,
+                        scanCycle,
+                        [self, phaseName](const QString& text)
+                        {
+                            if (self != nullptr)
+                            {
+                                self->AppendLog(QString("%1：%2").arg(phaseName, text));
+                            }
+                        },
+                        [self, phaseName, progressBase](const QString& text)
+                        {
+                            if (self != nullptr)
+                            {
+                                self->SetFlowStep(QString("%1：%2").arg(phaseName, text));
+                                self->SetProgressBusy(progressBase, text);
+                            }
+                        },
+                        [self](const QString& title, const QString& detail) -> bool
+                        {
+                            return self != nullptr && self->ShowCheckpointDialog(title, detail);
+                        });
+                    // 标定只需要 KeyPoints；部分合法处理路径只返回案例目录而不生成最终姿态文件。
+                    // 保留旧 ScanMoveAndCollect 的“文件或案例目录”兼容语义。
+                    savedPath = !scanCycle.weldPosePath.isEmpty()
+                        ? scanCycle.weldPosePath
+                        : scanCycle.caseDir;
+                    if (!scanOk)
+                    {
+                        scanError = scanCycle.error.isEmpty()
+                            ? QStringLiteral("扫描循环失败，请查看日志。")
+                            : scanCycle.error;
+                    }
+                    return scanOk;
+                };
 
             // ---- 第一次：正向扫描 ----
             if (ok)
@@ -2619,28 +3496,11 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                     self->SetFlowStep("标定 1/2：正向扫描");
                     self->SetProgressBusy(15, "正向：移动到下枪安全位置");
                 }
-                ok = self != nullptr && self->MoveScanStartSafeAndWait(pRobotDriver, param, SafeSpeed(param.dRunSpeed, 1.0));
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(22, "正向：移动到扫描起点");
-                    ok = self->MoveCoorsAndWait(pRobotDriver, param.tStartPos, SafeSpeed(param.dRunSpeed, 1.0), "扫描起点(正向)");
-                }
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(30, "正向扫描中");
-                    ok = self->ScanMoveAndCollect(pRobotDriver, param, savedForward);
-                }
+                QString scanError;
+                ok = runCalibrationScan(param, QStringLiteral("标定 1/2 正向"), 30, savedForward, scanError);
                 if (!ok && message.isEmpty())
                 {
-                    message = "正向扫描失败，标定中止。";
+                    message = QString("正向扫描失败，标定中止：%1").arg(scanError);
                 }
                 // 工件适配性预检：正向拐点太少说明工件没有足够特征，立即中止、不再白跑反向扫描。
                 if (ok)
@@ -2688,37 +3548,11 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                     self->SetFlowStep("标定 2/2：反向扫描（起终点互换）");
                     self->SetProgressBusy(50, "反向：移动到下枪安全位置");
                 }
-                ok = self != nullptr && self->MoveScanStartSafeAndWait(pRobotDriver, paramReverse, SafeSpeed(param.dRunSpeed, 1.0));
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(56, "反向：移动到扫描起点");
-                    ok = self->MoveCoorsAndWait(pRobotDriver, paramReverse.tStartPos, SafeSpeed(param.dRunSpeed, 1.0), "扫描起点(反向)");
-                }
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(64, "反向扫描中");
-                    ok = self->ScanMoveAndCollect(pRobotDriver, paramReverse, savedReverse);
-                }
-                if (ok)
-                {
-                    ok = self != nullptr;
-                }
-                if (ok)
-                {
-                    self->SetProgressBusy(84, "移动到收枪安全位置");
-                    ok = self->MoveScanEndSafeAndWait(pRobotDriver, paramReverse, SafeSpeed(param.dRunSpeed, 1.0));
-                }
+                QString scanError;
+                ok = runCalibrationScan(paramReverse, QStringLiteral("标定 2/2 反向"), 64, savedReverse, scanError);
                 if (!ok && message.isEmpty())
                 {
-                    message = "反向扫描失败，标定中止。";
+                    message = QString("反向扫描失败，标定中止：%1").arg(scanError);
                 }
             }
 
@@ -2807,14 +3641,11 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                     self->SetFlowStep(finished ? "标定完成" : "标定失败，请查看流程日志");
                     self->FinishProgress(finished, finished ? QStringLiteral("标定完成") : QStringLiteral("标定失败"));
                     self->SetRunning(false);
-                    if (finished)
-                    {
-                        QMessageBox::information(self, "相机时间补偿标定", finishText);
-                    }
-                    else
-                    {
-                        QMessageBox::warning(self, "相机时间补偿标定", finishText);
-                    }
+                    ShowNonModalFlowResult(
+                        self,
+                        finished ? QMessageBox::Information : QMessageBox::Warning,
+                        "相机时间补偿标定",
+                        finishText);
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -3118,6 +3949,18 @@ void MeasureThenWeldDialog::UpdateProgressAnimation()
 
 void MeasureThenWeldDialog::SetRunning(bool running)
 {
+    if (running)
+    {
+        ClearActiveWeldCheckpoint();
+        if (m_pRunMonitor != nullptr)
+        {
+            static_cast<RunMonitorDialog*>(m_pRunMonitor)->ResumeWeldButton()->setEnabled(false);
+        }
+    }
+    else
+    {
+        SetWeldPauseAvailable(false);
+    }
     m_bRunning = running;
     m_pPresetParamBtn->setEnabled(!running);
     m_pSkipScanWeldBtn->setEnabled(!running);

@@ -30,6 +30,14 @@ public:
         AxisY = 2
     };
 
+    enum class ValidationPolicy
+    {
+        Audit = 0,
+        Enforce = 1
+    };
+
+    static constexpr int CURRENT_VALIDATION_PROFILE_VERSION = 1;
+
     struct Settings
     {
         Mode mode = Mode::LegacyLaserPath;
@@ -108,6 +116,8 @@ public:
         // 调试：导出完整点云逐帧文件(每点带帧号/相机原始坐标/机器人位姿/时间戳，647MB级)排查散点。
         // 默认关闭——仅排查相机散点时手动勾选，否则每次扫描生成大文件会明显拖慢流程。
         bool exportWorkpieceFrameDebug = false;
+        ValidationPolicy validationPolicy = ValidationPolicy::Enforce;
+        int validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
         bool validationCoverageEnabled = true;
         int validationMinFinitePointCount = 300;
         double validationMinProjectedSpanMm = 180.0;
@@ -146,6 +156,8 @@ public:
     static QString FeaturePointStrategyDisplayName(FeaturePointStrategy strategy);
     static QString FeaturePointStrategyConfigValue(FeaturePointStrategy strategy);
     static FeaturePointStrategy FeaturePointStrategyFromConfigValue(const QString& value);
+    static QString ValidationPolicyConfigValue(ValidationPolicy policy);
+    static ValidationPolicy ValidationPolicyFromConfigValue(const QString& value);
     static QString SampleAxisModeConfigValue(SampleAxisMode mode);
     static SampleAxisMode SampleAxisModeFromConfigValue(const QString& value);
 };

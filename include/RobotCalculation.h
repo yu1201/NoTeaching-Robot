@@ -4,6 +4,7 @@
 #include "HandEyeMatrixConfig.h"
 
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <Eigen/Dense>
@@ -122,6 +123,7 @@ public:
         bool exportFitDebugCloud = false;
         QString fitDebugDir;
         bool enableCornerCompensation = false;
+        bool validationAuditOnly = false;
         bool validationCoverageEnabled = true;
         int validationMinFinitePointCount = 300;
         double validationMinProjectedSpanMm = 180.0;
@@ -204,6 +206,34 @@ public:
 
     struct MeasureThenWeldAnalysisResult
     {
+        struct PointCloudQualityReport
+        {
+            bool evaluated = false;
+            bool passed = false;
+            bool auditOnly = false;
+            int profileVersion = 1;
+            int inputPointCount = 0;
+            int finitePointCount = 0;
+            int rejectedPointCount = 0;
+            int keyPointCount = 0;
+            int cornerCount = 0;
+            int outputPointCount = 0;
+            double projectedSpanMm = 0.0;
+            double stationCoverageRatio = 0.0;
+            double longestContinuousRatio = 0.0;
+            double rejectedRatio = 0.0;
+            double medianResidualMm = 0.0;
+            double p95ResidualMm = 0.0;
+            double residualInlierRatio = 0.0;
+            double minNonLapSegmentLengthMm = 0.0;
+            double minLapStepSegmentLengthMm = 0.0;
+            double outputLengthMm = 0.0;
+            double outputLengthRatio = 0.0;
+            double maxOutputStepMm = 0.0;
+            QStringList failures;
+            QStringList warnings;
+        };
+
         bool ok = false;
         QString error;
         LowerWeldFilterResult filterResult;
@@ -211,6 +241,7 @@ public:
         QVector<LowerWeldClassifiedPoint> keyPoints;
         LowerWeldClassificationResult cornerCompensatedClassificationResult;
         QVector<LowerWeldClassifiedPoint> cornerCompensatedKeyPoints;
+        PointCloudQualityReport qualityReport;
     };
 
     static T_ROBOT_COORS InterpolateRobotPose(const std::vector<TimestampedRobotPose>& robotSamples, qint64 targetTimestampUs);
@@ -224,6 +255,13 @@ public:
         const LowerWeldFilterParams& params);
     static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPathGeometry(
         const QVector<IndexedPoint3D>& inputPoints,
+        const LowerWeldFilterParams& params);
+    static MeasureThenWeldAnalysisResult::PointCloudQualityReport EvaluateMeasureThenWeldOutputQuality(
+        int inputPointCount,
+        int finiteInputPointCount,
+        int rejectedPointCount,
+        const QVector<LowerWeldClassifiedPoint>& keyPoints,
+        const LowerWeldClassificationResult& classification,
         const LowerWeldFilterParams& params);
     static LowerWeldClassificationResult BuildCornerCompensatedLowerWeldClassification(
         const QVector<LowerWeldClassifiedPoint>& keyPoints,

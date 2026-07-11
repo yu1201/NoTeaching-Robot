@@ -1,5 +1,6 @@
 #include "ModelAlignmentDialog.h"
 
+#include "AppPaths.h"
 #include "BcpdModelAligner.h"
 #include "PointCloud3DView.h"
 #include "PointCloudModelDenoiser.h"
@@ -224,7 +225,7 @@ void ModelAlignmentDialog::RefreshModelList(const QString& selectName)
 
 void ModelAlignmentDialog::OnImportModelFromResult()
 {
-    const QString startDir = QDir::current().filePath(QStringLiteral("Result"));
+    const QString startDir = AppPaths::WritablePath(QStringLiteral("Result"));
     const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("选择干净工件的扫描结果目录"), startDir);
     if (dir.isEmpty()) return;
 
@@ -415,7 +416,7 @@ void ModelAlignmentDialog::OnDeleteGroup()
 void ModelAlignmentDialog::OnBrowseCloud()
 {
     if (m_busy) return;
-    const QString startDir = QDir::current().filePath(QStringLiteral("Result"));
+    const QString startDir = AppPaths::WritablePath(QStringLiteral("Result"));
     const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("选择待处理点云"),
         startDir, QStringLiteral("点云文本 (*.txt);;所有文件 (*)"));
     if (path.isEmpty()) return;

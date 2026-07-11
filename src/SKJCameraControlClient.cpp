@@ -1,5 +1,7 @@
 #include "SKJCameraControlClient.h"
 
+#include "AppPaths.h"
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
@@ -36,30 +38,10 @@ int DisplayExposureToDevice(int displayValue)
 
 QString FindProjectFilePath(const QString& relativePath)
 {
-    const QString normalized = QDir::fromNativeSeparators(relativePath);
-    const QStringList roots = {
-        QCoreApplication::applicationDirPath(),
-        QDir::currentPath()
-    };
-
-    for (const QString& root : roots)
-    {
-        QDir dir(root);
-        for (int depth = 0; depth < 6; ++depth)
-        {
-            const QString candidate = dir.filePath(normalized);
-            if (QFileInfo::exists(candidate))
-            {
-                return QFileInfo(candidate).absoluteFilePath();
-            }
-            if (!dir.cdUp())
-            {
-                break;
-            }
-        }
-    }
-
-    return QDir(QDir::currentPath()).filePath(normalized);
+    const QString existing = AppPaths::FindResourcePath(relativePath);
+    return existing.isEmpty()
+        ? AppPaths::ResourcePath(relativePath)
+        : existing;
 }
 }
 

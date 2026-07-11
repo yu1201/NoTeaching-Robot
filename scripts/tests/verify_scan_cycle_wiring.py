@@ -56,6 +56,11 @@ def main() -> int:
         "void QtWidgetsApplication4::RunProcessLoopTest(",
         "void QtWidgetsApplication4::OpenProcessLoopTestPage()",
     )
+    calibration_flow = section(
+        dialog,
+        "void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()",
+        "void MeasureThenWeldDialog::RefreshWeldModeFromParam()",
+    )
 
     for name, flow in (("GUI", gui_flow), ("CLI", cli_flow), ("ProcessLoop", loop_flow)):
         require(flow.count("RunScanCycle(") == 1, f"{name} must call RunScanCycle exactly once")
@@ -69,6 +74,26 @@ def main() -> int:
         "bool MeasureThenWeldService::RunScanCycle(",
         "bool MeasureThenWeldService::ScanMoveAndCollect(",
     )
+    preset_loader = section(
+        service,
+        "bool MeasureThenWeldService::LoadPresetParam(",
+        "bool MeasureThenWeldService::ReadPulse(",
+    )
+    manual_safe_loader = section(
+        preset_loader,
+        "if (!param.bUseComputedScanSafe)",
+        "return true;",
+    )
+    start_safe_move = section(
+        service,
+        "bool MeasureThenWeldService::MoveScanStartSafeAndWait(",
+        "bool MeasureThenWeldService::MoveScanEndSafeAndWait(",
+    )
+    end_safe_move = section(
+        service,
+        "bool MeasureThenWeldService::MoveScanEndSafeAndWait(",
+        "bool MeasureThenWeldService::RunScanCycle(",
+    )
     for required_call in (
         "MoveScanStartSafeAndWait(",
         "MoveCoorsAndWait(",
@@ -77,9 +102,43 @@ def main() -> int:
     ):
         require(required_call in runner, f"RunScanCycle missing {required_call}")
 
-    require("if (pulses.empty())" in service, "empty pulse lists must fail closed")
+    require(
+        "param.vtStartSafePulse.empty()" in manual_safe_loader
+        and "param.vtEndSafePulse.empty()" in manual_safe_loader,
+        "manual scan-safe mode must explicitly detect an empty start/end pulse list",
+    )
+    require(
+        "param.bUseComputedScanSafe = true" not in manual_safe_loader,
+        "empty taught safe positions must not silently switch to computed-safe mode",
+    )
+    require(
+        "return false;" in manual_safe_loader
+        and "流程已中止" in manual_safe_loader,
+        "empty taught safe positions must fail closed with an actionable error",
+    )
+    for name, safe_move in (("start-safe", start_safe_move), ("end-safe", end_safe_move)):
+        require(
+            "if (!param.bUseComputedScanSafe)" in safe_move
+            and "MovePulseListAndWait(" in safe_move,
+            f"{name} helper must route taught-safe mode through the fail-closed pulse-list mover",
+        )
+        require(
+            "自动改用扫描安全位置推算" not in safe_move,
+            f"{name} helper must not silently fall back to computed-safe motion",
+        )
     require("if (!scanProgress.motionCompleted)" in runner, "runner must gate on confirmed scan completion")
     require("result.safelyRetracted = true" in runner, "runner must record safe retraction")
+    require(
+        'beforeAction("扫描收枪安全位置")' not in runner,
+        "confirmed scan completion must force safe retraction without a cancellable GUI checkpoint",
+    )
+    require(
+        "!param.bUseComputedScanSafe" in runner
+        and "param.vtStartSafePulse.empty()" in runner
+        and "param.vtEndSafePulse.empty()" in runner
+        and "禁止静默改用自动计算安全位" in runner,
+        "RunScanCycle must defensively reject empty taught safe positions before motion",
+    )
     require("progress->motionStarted = true" in service, "scan motion start must be recorded")
     require("progress->motionCompleted = true" in service, "scan motion completion must be recorded")
     require("QString caseDir;" in service_header, "scan result must expose its case directory")
@@ -87,15 +146,67 @@ def main() -> int:
     require("scanCycle.caseDir" in cli_flow, "CLI upload must consume the explicit case directory")
     require("scanCycle.caseDir" in loop_flow, "ProcessLoop upload must consume the explicit case directory")
     require("WaitForReadyFrameAfter" in app, "camera startup must wait for a fresh frame")
+    require("WaitForReadyFrameAfter" in runner, "every scan cycle must wait for its own fresh frame before motion")
     require("m_readyCondition.wait_for" in camera_cache, "camera readiness must use a blocking condition")
+    cache_clear = section(
+        camera_cache,
+        "void CameraFrameCache::Clear()",
+        "void CameraFrameCache::SetConnectionState(",
+    )
+    require(
+        "m_nextSequence = 0" not in cache_clear,
+        "camera cache sequence must stay monotonic across Clear to avoid stale-mark ABA timeouts",
+    )
+    for required_validity_check in (
+        "static_cast<qint64>(frame.timestamp) <= 0",
+        "帧时间戳小于等于 0",
+    ):
+        require(
+            required_validity_check in camera_cache,
+            f"camera ready-frame gate missing validity check: {required_validity_check}",
+        )
+    ready_gate = section(
+        camera_cache,
+        "bool CameraFrameCache::WaitForReadyFrameAfter(",
+        "void CameraFrameCache::AppendFrame(",
+    )
+    require(
+        "allResultPoint" not in ready_gate and "targetPoint" not in ready_gate,
+        "pre-motion readiness must accept decoded empty-scene frames; scan-time gates own payload quality",
+    )
     require(
         "LoadExistingValidatedHandEyeMatrixConfig" in runner,
         "RunScanCycle must validate the hand-eye matrix before movement",
     )
     require("Calibrated\", 0" in hand_eye, "auto-created hand-eye matrices must be marked uncalibrated")
     require("Calibrated\", 1" in hand_eye, "explicitly saved hand-eye matrices must be marked calibrated")
+    require(
+        "RunScanCycle(" in calibration_flow
+        and "runCalibrationScan(param," in calibration_flow
+        and "runCalibrationScan(paramReverse," in calibration_flow,
+        "forward and reverse time-offset calibration scans must use the shared safe scan runner",
+    )
+    require(
+        "self->ScanMoveAndCollect(" not in calibration_flow,
+        "time-offset calibration must not bypass forced safe retraction",
+    )
+    require(
+        "cameraCacheForRun = self->ResolveCameraCacheForUnit" in calibration_flow,
+        "time-offset calibration must refresh its cache after camera startup",
+    )
+    stale_cache_clear = calibration_flow.find("m_pCameraCache = nullptr;")
+    calibration_running = calibration_flow.find("SetRunning(true);")
+    require(
+        0 <= stale_cache_clear < calibration_running,
+        "time-offset calibration must clear a stale cache pointer before SetRunning touches it",
+    )
+    require(
+        "!scanCycle.weldPosePath.isEmpty()" in calibration_flow
+        and ": scanCycle.caseDir" in calibration_flow,
+        "time-offset calibration must preserve the case-directory fallback for key-point-only results",
+    )
 
-    print("PASS: shared scan runner, fresh-frame gate and strict hand-eye wiring are present")
+    print("PASS: shared scan runner, fail-closed safe positions, forced retraction (including calibration), fresh-frame gate and strict hand-eye wiring are present")
     return 0
 
 

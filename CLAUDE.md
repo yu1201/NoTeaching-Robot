@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 仓库定位（先读这条）
 
 - **真正的工程根 = `QtWidgetsApplication4/` 子目录**，git 仓库、`.sln`、`src/`、`include/` 都在那里。当前打开的 `E:\WorkFile\bowen` 是其父目录，本身**不是** git 仓库，只散落着备份/中间产物（`_backups/`、`*.obj`、`ConfigStore.db` 副本、`Data*/` 等），不要在父目录里改代码。
-- 程序运行时会从 exe 位置**向上最多 6 层**寻找 `QtWidgetsApplication4.sln` 并把工作目录设到该层（`SetWorkingDirectoryToProjectRoot`，`src/main.cpp`）。所有相对路径（`Data/`、`Log/`、`Result/`、`Job/STEP/`、`SDK/FANUC/`）都相对这个根解析；`FindProjectFilePath()` 也按同样的逐级上溯逻辑。
+- 运行目录由 `AppPaths` 在任何窗口/配置库/设备构造前统一：`InstallRoot` 只读承载 `SDK/Tools/branding/translations`，`DataRoot` 可写承载 `Data/Result/Log/Temp/Job`，CLI 用户显式相对路径单独按启动时 cwd 解析。`--data-root` > `QTWIDGETSAPP4_DATA_ROOT` > 安装根；只有标准 `x64/Debug|Release` 开发输出可回溯源码根，仓库内 `dist`/坏包禁止借用祖先资源。
 
 ## 这是什么
 
@@ -21,20 +21,23 @@ MSBuild.exe QtWidgetsApplication4.sln /m /p:Configuration=Release /p:Platform=x6
 #   或用 VS2022 打开 .sln 直接编译
 
 # 两段式发版打包
-powershell -ExecutionPolicy Bypass -File scripts\build_release_package.ps1   # → dist\QtWidgetsApplication4\
-powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1          # → dist\installer\NoTeaching-Robot-Setup-v<ver>.exe（Inno Setup）
+$version = "2026.07.12.1200" # 示例；必须显式给出，并与源码/iss 内嵌版本一致
+powershell -ExecutionPolicy Bypass -File scripts\build_release_package.ps1 -AppVersion $version -Channel neutral
+powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1 -AppVersion $version -Channel neutral
 
 # 切换 STEP SDK（之后必须重新编译 Debug+Release 两个配置）
 powershell -ExecutionPolicy Bypass -File scripts\switch_step_sdk.ps1 -Mode timestamp|legacy
 
 # 旧 INI/TXT 配置迁移进 ConfigStore.db（现场用 ConfigMigrate.exe，无需 Python）
-tools\ConfigMigrate_Run.cmd
+tools\ConfigMigrate_Run.cmd --data-root "D:\NoTeachingRobotData" --source "C:\旧版本\Data"
 python tools\migrate_config_to_sqlite.py --source Data --encrypt
 
 # 独立验证可移植滤波模块（唯一的 CMake 子项目，带 example）
 cmake -S portable/MeasureThenWeldFilterFit -B portable/MeasureThenWeldFilterFit/build
 cmake --build portable/MeasureThenWeldFilterFit/build --config Release
 ```
+
+正式发版必须在同一 Git common-dir 的中性/品牌 linked worktree 以同一 `$version` 分别完成两段式打包，且品牌 HEAD 必须继承中性 HEAD。随后用 `scripts\verify_release_pair.ps1` 生成规范 `dist\release-gates\release-pair-<version>.json`，再运行 `python scripts\upload_ota.py prepare-dual ...` 生成离线候选报告；只有签名、双通道清单和远端回读等门禁全部通过后才可运行 `publish-dual`。旧 `scripts\upload_release.ps1` 已永久停用。
 
 **构建依赖路径硬编码在 `.vcxproj` 里**，换机器必须改：Qt `E:\workspace\soft\QT\6.7.3\msvc2022_64`、OpenCV `E:\OpenCV4.6.0`、Eigen `E:\Eigen3.4\eigen-3.4.0`、Orocos KDL `C:\Program Files\orocos_kdl`；STEP `Robot-SDK.lib`/`Robot-SDKd.lib` 需自行放进 `SDK\STEP`。必需编译选项 `/utf-8 /bigobj /Zm2000` 与 `DisableSpecificWarnings 4828` 不能去掉（翻译单元巨大、中文字面量多）。`AfterBuildDebug/Release` MSBuild target 会自动跑 `windeployqt` 并拷贝 `opencv_world460[d].dll`、`SKJCamera.dll`、`qt_zh_CN.qm`，因此裸构建出的 `x64\<Config>\` 已可直接运行。
 
@@ -56,11 +59,11 @@ QtWidgetsApplication4.exe --no-show --fanuc-upload-services --skip-upload-wait  
 
 整套代码的主线是「**扫描重建焊缝 → 生成补偿后轨迹 → 下发机器人**」，分以下层次（多数逻辑需跨文件阅读）：
 
-**1. 应用外壳（`QtWidgetsApplication4.cpp`，约 14.8k 行）** — 单窗口三页：`m_pAuthPage`（登录）/`m_pDashboardPage`（大按钮主页，面向操作员）在 `m_pMainStack` 内，而**管理页 `m_pManagementPage` 是独立顶层窗口**，自带 `m_pManagementStack` 和菜单栏。各功能弹窗不是自由对话框，而是通过 `PrepareEmbeddedPage` **嵌入某个 stack**；落到主栈还是管理栈由 `m_bOpenEmbeddedInManagement` 标志决定。账号/角色（operator/engineer/admin，`kRole*`，等级 1/2/3）经 `RequirePermission` 把守：管理页需 engineer+，账号管理/调试日志需 admin。账号、登录态、密码、接收模式都存在 `ConfigDatabase`（非 QSettings），密码 `SHA256(user\npassword)`，首启 `EnsureDefaultAdminAccount` 种 admin/admin。
+**1. 应用外壳（`QtWidgetsApplication4.cpp`，约 14.8k 行）** — 单窗口三页：`m_pAuthPage`（登录）/`m_pDashboardPage`（大按钮主页，面向操作员）在 `m_pMainStack` 内，而**管理页 `m_pManagementPage` 是独立顶层窗口**，自带 `m_pManagementStack` 和菜单栏。各功能弹窗不是自由对话框，而是通过 `PrepareEmbeddedPage` **嵌入某个 stack**；落到主栈还是管理栈由 `m_bOpenEmbeddedInManagement` 标志决定。账号/角色（operator/engineer/admin，`kRole*`，等级 1/2/3）经 `RequirePermission` 把守：管理页需 engineer+，账号管理/调试日志需 admin。账号摘要使用随机盐 PBKDF2-HMAC-SHA256；旧 SHA256 只在正确登录后原子升级。全新空库不生成公开默认口令，必须由首位本机用户设置初始 `admin` 密码，账号与初始化标志原子提交。
 
 **2. 机器人驱动抽象** — `RobotDriverAdaptor`（基类，声明全套 `virtual` 连接/运动/状态/变量/FTP 接口，并用 **Orocos KDL** 实现品牌无关的 DH FK/IK）。`ContralUnit::InitContralUnit` 读每个单元 `Data\<UnitName>\RobotPara.ini` 的 `[BaseParam]RobotType`：`1`→`STEPRobotCtrl`、`2`→`FANUCRobotCtrl`（`Const.h`：`ROBOT_TYPE_STEP/FANUC`），存为 `T_CONTRAL_UNIT.pUnitDriver`。**全程用基类指针；FANUC 专有功能（常驻服务上传、CURPOS/raw 诊断、固定 TP 点动）必须 `dynamic_cast<FANUCRobotCtrl*>` 并判空。** FANUC 用两条 TCP：S4 控制口（newline 文本协议，`FanucRequest` 经 `m_hMutex` 串行化，出错即 `CloseSocket` 触发重连）+ S5 监控口（后台线程解析 `MON:` 帧填互斥保护的状态缓存，passive 读不占 S4）。STEP 无裸 socket，包 `STEPROBOTSDK::RobotComClient`；连续运动生成 `.srp/.srd` 文本经 FTP（`FtpClient`，WinINet）上传到 `PCRobot` 工程再加载运行。
 
-**3. 配置与持久化** — 历史上每字段一个 INI/TXT，现已**统一进单个 SQLite `Data/ConfigStore.db`**（Qt `QSQLITE`，schema 版本 **4**）。`COPini`（`OPini.cpp`）保留旧 `ReadString/WriteString` 签名但转发给 `ConfigDatabase`；像 `Data/RobotA/RobotPara.ini` 这样的路径现在只是**逻辑键**，磁盘上没有这些文件——**不要再写代码去 fopen/QFile 这些 .ini/.txt**。`ConfigDatabase` 把 `(file, section, key)` 三元组映射成 scope（`global`/`robot`/`workpiece_template`/`result`/`account`）+ module + key 行；`Data/<RobotName>/…`→scope=robot。敏感键（含 password/pass/token/secret）与开启 `encrypt_new_values` 时的新值以 `enc:v1:` XOR **混淆**（非真加密）存储，C++ 与 Python 迁移器实现必须**字节兼容**。
+**3. 配置与持久化** — 历史上每字段一个 INI/TXT，现已**统一进单个 SQLite `Data/ConfigStore.db`**（Qt `QSQLITE`，schema 版本 **5**）。`COPini`（`OPini.cpp`）保留旧 `ReadString/WriteString` 签名但转发给 `ConfigDatabase`；像 `Data/RobotA/RobotPara.ini` 这样的路径现在只是**逻辑键**，磁盘上没有这些文件——**不要再写代码去 fopen/QFile 这些 .ini/.txt**。`ConfigDatabase` 把 `(file, section, key)` 三元组映射成 scope（`global`/`robot`/`workpiece_template`/`result`/`account`）+ module + key 行；`Data/<RobotName>/…`→scope=robot。可恢复敏感值使用字段绑定的 Windows DPAPI CurrentUser；旧 `enc:v1:` 仅用于读取历史值并在事务迁移中升级，禁止再用于新凭据。非当前 schema 的数据库旁存在旧 INI/TXT 时应用必须拒绝启动，先运行当前 `ConfigMigrate`；v4 与磁盘旧配置并存只能在审查 DPAPI 备份后显式 `--overwrite`，禁止猜测合并或绕过凭据清理证明。
 
 **4. 先测后焊核心管线（`MeasureThenWeldService.cpp`，约 9.2k 行，逻辑几乎都在匿名命名空间自由函数里，公有方法在约 6075 行后）** — `MeasureThenWeldDialog::RunPresetParamFlow` 在 detached `std::thread` 上按序驱动、每步弹确认框：开相机 → `MoveScanStartSafeAndWait`（脉冲安全位）→ `MoveCoorsAndWait(起点)` → **`ScanMoveAndCollect`**（核心，约 6681–7931 行）→ `MoveScanEndSafeAndWait` → `ExecuteWeldPoseFileWithSafePos`。`ScanMoveAndCollect` 并发采三路：机器人位姿（~50ms）、相机帧（`CameraFrameCache`）、帧内激光点；**时间插值匹配是关键不变量**——相机时间戳通过一次性偏移对齐到机器人时间轴，`InterpolateRobotPose` 插出该时刻机器人位姿，`CalcLaserPointInRobot`（手眼矩阵）把相机点变换到机器人/基坐标，早于首个/晚于末个机器人采样的帧丢弃。随后 `AnalyzeMeasureThenWeldPointCloud` 走外部 SDK 或旧算法 → PreservePath + 分类关键点 → `BuildSegmentPoseOutputLines` 分四段算 RZ、套姿态补偿、2mm 加密 → `PreciseLaserPoint_WeldPose_2mm.txt` → `ApplyWeldSeamCompToPoseFile` 焊缝补偿 → `…_SeamComp.txt`（最终执行文件）。`RebuildWeldFilesFromLaserDir` 支持从已存 `LaserPoint` 目录离线重建（跳过扫描）。
 
@@ -82,14 +85,14 @@ QtWidgetsApplication4.exe --no-show --fanuc-upload-services --skip-upload-wait  
 - **RZ 角度必须环绕规范化**：用 `NormalizeAngleNear` 取最近等价、`NormalizeRobotRzOutputRange` 夹到 (-180,180] 且 +180 映射为 -180；RZ 平均要带参考值，勿用朴素均值。
 - **`STEP_SDK_HAS_TIMESTAMP`**（`include/StepSdkBuildConfig.h`，由 `switch_step_sdk.ps1` 生成，勿手改）用 `#if` 切换 `StepRobotDriver.cpp` 的真实行为；宏与所链 `.lib` 不匹配会静默走错 API。
 - 中文文本统一以 UTF-8 `std::string` 存取；机器人/报警文本经 `DecodeRobotMessageText`（UTF-8→GBK→local 兜底）渲染。UI 跨线程更新一律 `QMetaObject::invokeMethod`。
-- **`Data/` 由现场拥有**：安装/升级**不覆盖、不删除** `Data/`（`installer/QtWidgetsApplication4.iss` 排除 `Data\*`，打包脚本剥离 `ConfigStore.db*`），首启自动建空 schema + admin/admin。
+- **`Data/` 由现场拥有**：安装/升级**不覆盖、不删除** `Data/`（`installer/QtWidgetsApplication4.iss` 排除 `Data\*`，打包脚本剥离 `ConfigStore.db*`）。首启必须在本机设置初始管理员密码，不存在随包公开的默认口令；安装包不携带远程服务密码。
 - **版本号需多处同步**：`v2026.MM.DD[.HHMM]` 要在 `src/main.cpp`（`setApplicationVersion`）、`src/QtWidgetsApplication4.cpp`、`installer/*.iss`、`README.md` 同步更新，并追加 README/worklog 更新条目。
 - git：`.gitignore` 忽略所有 `*.exe/dll/lib` 但**强制纳入** `SDK/STEP/Robot-SDK[d].lib` 与整个 `SDK/PointCloudExtration/`；**安装包不进 git**（2026-06-12 起，经 GitHub Release 分发，`dist/` 整目录忽略）；`*.srp/*.srd` 经 `.gitattributes` 强制 LF。提交一律署名 `yu1201`，不加任何 Co-Authored-By 行。
 - **Sk\* 是有意保留的厂商库，勿删**：`SkFunction.cpp/SkDataClass.cpp/SkGrooveRecog_global.h`（SkGrooveRecog 坡口识别）是**相机厂商的源码库**，当前零调用但按用户决定保留备用（实时焊缝跟踪领域模型：坡口间隙/错边输出、跟踪状态机、RANSAC 拟合）。死代码审计时跳过它。
 
 ## 数据与产物路径
 
-- 配置：单文件 `Data/ConfigStore.db`（+ 现场账号 `Data/Accounts.ini`、`Data/LoginState.ini` 被 gitignore）。
+- 配置：单文件 `Data/ConfigStore.db`；旧 `Data/Accounts.ini`、`Data/LoginState.ini` 只作为一次性迁移输入并被 gitignore。
 - 扫描结果：`Result/<RobotName>/yyyyMMdd_NNN/{CameraPoint,RobotPoint,LaserPoint}/…`（`NNN` 三位自增）。`CameraPoint/RobotPoint` 为逗号 CSV，`LaserPoint` 点云为空格分隔；落盘用序号排序（内部仍按时间戳插值）。
 - 关键 LaserPoint 文件：`PreciseLaserPoint.txt`（原始）/`_WorkpieceCloud.txt`/`_PreservePath_2mm.txt`/`_Classified.txt` + `_KeyPoints.txt`/`_WeldPose_2mm.txt`/`_WeldPose_2mm_SeamComp.txt`（执行文件）。
 

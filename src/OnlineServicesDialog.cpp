@@ -1,16 +1,30 @@
 #include "OnlineServicesDialog.h"
 
+#include "AppPaths.h"
 #include "BrandingConfig.h"
 #include "FtpClient.h"
 #include "OnlineServicesConfig.h"
+#include "RobotOperationLease.h"
 #include "RobotLog.h"
 #include "ScanDataUploader.h"
 
 #include <QComboBox>
+#include <QDate>
 #include <QFileInfo>
 #include <QPointer>
 
+#include <algorithm>
+#include <cmath>
 #include <thread>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
+#endif
 
 #include <QtCore/private/qzipreader_p.h>
 
@@ -21,6 +35,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QSaveFile>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -28,10 +43,12 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QHostAddress>
 #include <QInputDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -46,17 +63,509 @@
 #include <QNetworkRequest>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSignalBlocker>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 
 namespace
 {
+	constexpr qint64 kMaximumManifestBytes = 256 * 1024;
+	constexpr qint64 kMaximumUpdatePayloadBytes = 512LL * 1024 * 1024;
+	constexpr char kOtaSignatureAlgorithm[] = "RSA-PKCS1-SHA256";
+	// RSA-3072 公钥；对应私钥仅以 CurrentUser DPAPI 形式保存在仓库外。
+	constexpr char kOtaReleasePublicKeyBlobBase64[] =
+		"UlNBMQAMAAADAAAAgAEAAAAAAAAAAAAAAQAB4ax2i7VFMjmJhtYWOJvaLLN+sAE/nXCUimEtrdo9l1co8mT3rYz2vy5lsB+ztcN+c+iXZ+G6YMy1Xrfp2AN3jKd6ZfXNG9z0UPXDlS/0AlUnONobSyVSkMtarODxrPNKb9Kq7+XkF/sgOxYzfgg9QVU8lfqD4pInm54C8+6OQDD8WpckvmUqOZ4jHeqgEzvavPiRyI+IR0WYDJdFh/NhQRpxGmzgNFvzhvzHyvALJ+KxKh7+YW0/r3+YvRaJeTD+bFJxO0q/ZeoMjtTz+WY9WgCHB+VnH7VKDtpUd2lPxYXc8y1wIkc78FYMQZFWcXGV5GVn7Lf8jG5QVmrOncg+GvkNErdAUlz+B1cntccuVhBQpeXVVK8J9gz802O4dDXU1xKSsHScEDYC4MtwsR/M9YWcackdYsBnMAPSu5fYqzTDWkQR2HbfYRom55QVh8cmVO3fK4DZ0Iyehky8Vi3UWusSbzkYhAsfLrn/c2eY7Jx4COFK/ZVyZWMRgS79sjnz";
+	constexpr char kOtaKnownAnswerPayloadSha256[] =
+		"2903794ff9ac838ef8db7c14a7b808fc5aba37e95f5cf330c00af08180f0a80f";
+	constexpr char kOtaKnownAnswerSignatureBase64[] =
+		"TXkCqU69V5nldnVs6V3J3J/4MoL/ziTvq/cI6JIrwZLiDR/q4I6N6P4FlRZWfTydY/d4HVWzGy8O6O01XcjGb858RteHjNtgajFWkUYSlu3CPdntJLg+QA/GyIDjucb0X9p859bRzhw1aRlQ9+dLVOYqdNeNKpFndeJVjERD+SLx2YHZTZmx+mIqGXlddNa56tchJOC4Ow8ZC+t7hYPznfMVH437w1s/YscTZRWIENV05JEFghtfRstcEXObuaXUvB0Eh2gFEtQT+6vLR3ItNJWDjx95x4ZiOdt09QR3YhPKl8DFMZHDJ2vT2Dia7UDV8y6XO9tG4urm//p+kPDLhLtKDpqg+bSbneHToVA0gpORg4q14BVagREGnyZNXql27QRi5d3nrfvsv4wQPev2g++xwKmTrdrmey16QpGQEYLnu0P+vPPR65Vb9fyM4GkkhCX4e2rNd3mZS7dNoFMAKK+g6BCibv4tL8/PPwJgleBCc3/PeHcRSV1UjpuLw25K";
+
+	bool IsStrictOtaVersion(const QString& value)
+	{
+		static const QRegularExpression pattern(
+			QStringLiteral(R"(^\d{4}\.\d{2}\.\d{2}\.\d{4}$)"));
+		if (!pattern.match(value).hasMatch())
+		{
+			return false;
+		}
+		const QStringList parts = value.split(QLatin1Char('.'));
+		bool yearOk = false;
+		bool monthOk = false;
+		bool dayOk = false;
+		bool timeOk = false;
+		const int year = parts.at(0).toInt(&yearOk);
+		const int month = parts.at(1).toInt(&monthOk);
+		const int day = parts.at(2).toInt(&dayOk);
+		const int hhmm = parts.at(3).toInt(&timeOk);
+		return yearOk && monthOk && dayOk && timeOk
+			&& year >= 2000
+			&& QDate(year, month, day).isValid()
+			&& hhmm / 100 >= 0 && hhmm / 100 <= 23
+			&& hhmm % 100 >= 0 && hhmm % 100 <= 59;
+	}
+
+	bool IsStrictSha256(const QString& value)
+	{
+		static const QRegularExpression pattern(QStringLiteral(R"(^[0-9a-f]{64}$)"));
+		return pattern.match(value).hasMatch();
+	}
+
+	bool TryReadManifestSize(const QJsonValue& value, qint64* size)
+	{
+		if (size != nullptr)
+		{
+			*size = 0;
+		}
+		if (!value.isDouble())
+		{
+			return false;
+		}
+		const double number = value.toDouble();
+		if (!std::isfinite(number)
+			|| std::floor(number) != number
+			|| number <= 0.0
+			|| number > static_cast<double>(kMaximumUpdatePayloadBytes))
+		{
+			return false;
+		}
+		if (size != nullptr)
+		{
+			*size = static_cast<qint64>(number);
+		}
+		return true;
+	}
+
+	bool HasOnlyObjectKeys(
+		const QJsonObject& object,
+		std::initializer_list<const char*> allowedKeys)
+	{
+		for (auto it = object.constBegin(); it != object.constEnd(); ++it)
+		{
+			bool allowed = false;
+			for (const char* key : allowedKeys)
+			{
+				if (it.key() == QLatin1String(key))
+				{
+					allowed = true;
+					break;
+				}
+			}
+			if (!allowed)
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool IsStrictManifestShape(const QJsonObject& manifest)
+	{
+		if (!HasOnlyObjectKeys(manifest,
+			{ "schemaVersion", "channel", "version", "file", "sha256", "size",
+				"notes", "patch", "signatureAlgorithm", "signature" })
+			|| manifest.size() < 9
+			|| !manifest.value(QStringLiteral("schemaVersion")).isDouble()
+			|| manifest.value(QStringLiteral("schemaVersion")).toDouble() != 2.0
+			|| !manifest.value(QStringLiteral("channel")).isString()
+			|| !manifest.value(QStringLiteral("version")).isString()
+			|| !manifest.value(QStringLiteral("file")).isString()
+			|| !manifest.value(QStringLiteral("sha256")).isString()
+			|| !manifest.value(QStringLiteral("size")).isDouble()
+			|| !manifest.value(QStringLiteral("notes")).isString()
+			|| !manifest.value(QStringLiteral("signatureAlgorithm")).isString()
+			|| !manifest.value(QStringLiteral("signature")).isString())
+		{
+			return false;
+		}
+
+		if (!manifest.contains(QStringLiteral("patch")))
+		{
+			return true;
+		}
+		const QJsonValue patchValue = manifest.value(QStringLiteral("patch"));
+		if (!patchValue.isObject())
+		{
+			return false;
+		}
+		const QJsonObject patch = patchValue.toObject();
+		return patch.size() == 4
+			&& HasOnlyObjectKeys(patch, { "file", "sha256", "size", "baseMinVersion" })
+			&& patch.value(QStringLiteral("file")).isString()
+			&& patch.value(QStringLiteral("sha256")).isString()
+			&& patch.value(QStringLiteral("size")).isDouble()
+			&& patch.value(QStringLiteral("baseMinVersion")).isString();
+	}
+
+	QString HashFileSha256(const QString& path)
+	{
+		QFile file(path);
+		if (!file.open(QIODevice::ReadOnly))
+		{
+			return {};
+		}
+		QCryptographicHash hash(QCryptographicHash::Sha256);
+		while (!file.atEnd())
+		{
+			const QByteArray chunk = file.read(1024 * 1024);
+			if (chunk.isEmpty() && file.error() != QFileDevice::NoError)
+			{
+				return {};
+			}
+			hash.addData(chunk);
+		}
+		return QString::fromLatin1(hash.result().toHex()).toLower();
+	}
+
+	QByteArray BuildOtaManifestSignaturePayload(const QJsonObject& manifest)
+	{
+		const QString notes = manifest.value(QStringLiteral("notes")).toString();
+		const QString notesSha256 = QString::fromLatin1(
+			QCryptographicHash::hash(notes.toUtf8(), QCryptographicHash::Sha256).toHex());
+		const QJsonObject patch = manifest.value(QStringLiteral("patch")).toObject();
+		const auto integerText = [](const QJsonValue& value) -> QByteArray
+			{
+				const double number = value.toDouble(0.0);
+				return std::isfinite(number) && std::floor(number) == number
+					? QByteArray::number(static_cast<qint64>(number))
+					: QByteArrayLiteral("0");
+			};
+		QByteArray payload("NoTeaching-Robot OTA Manifest Signature v2\n");
+		const auto appendField = [&payload](const char* name, const QByteArray& value)
+			{
+				payload.append(name);
+				payload.append('=');
+				payload.append(value);
+				payload.append('\n');
+			};
+		appendField("schemaVersion", QByteArrayLiteral("2"));
+		appendField("channel", manifest.value(QStringLiteral("channel")).toString().toUtf8());
+		appendField("version", manifest.value(QStringLiteral("version")).toString().toUtf8());
+		appendField("file", manifest.value(QStringLiteral("file")).toString().toUtf8());
+		appendField("sha256", manifest.value(QStringLiteral("sha256")).toString().toUtf8());
+		appendField("size", integerText(manifest.value(QStringLiteral("size"))));
+		appendField("notesSha256", notesSha256.toLatin1());
+		appendField("patch.file", patch.value(QStringLiteral("file")).toString().toUtf8());
+		appendField("patch.sha256", patch.value(QStringLiteral("sha256")).toString().toUtf8());
+		appendField("patch.size", integerText(patch.value(QStringLiteral("size"))));
+		appendField("patch.baseMinVersion",
+			patch.value(QStringLiteral("baseMinVersion")).toString().toUtf8());
+		return payload;
+	}
+
+	bool VerifyOtaRsaSignature(const QJsonObject& manifest, const QByteArray& signature)
+	{
+#ifdef Q_OS_WIN
+		const QByteArray publicBlob = QByteArray::fromBase64(kOtaReleasePublicKeyBlobBase64);
+		const QByteArray digest = QCryptographicHash::hash(
+			BuildOtaManifestSignaturePayload(manifest), QCryptographicHash::Sha256);
+		BCRYPT_ALG_HANDLE algorithm = nullptr;
+		BCRYPT_KEY_HANDLE key = nullptr;
+		NTSTATUS status = BCryptOpenAlgorithmProvider(
+			&algorithm, BCRYPT_RSA_ALGORITHM, nullptr, 0);
+		if (status >= 0)
+		{
+			status = BCryptImportKeyPair(
+				algorithm,
+				nullptr,
+				BCRYPT_RSAPUBLIC_BLOB,
+				&key,
+				reinterpret_cast<PUCHAR>(const_cast<char*>(publicBlob.constData())),
+				static_cast<ULONG>(publicBlob.size()),
+				0);
+		}
+		if (status >= 0)
+		{
+			BCRYPT_PKCS1_PADDING_INFO paddingInfo{ BCRYPT_SHA256_ALGORITHM };
+			status = BCryptVerifySignature(
+				key,
+				&paddingInfo,
+				reinterpret_cast<PUCHAR>(const_cast<char*>(digest.constData())),
+				static_cast<ULONG>(digest.size()),
+				reinterpret_cast<PUCHAR>(const_cast<char*>(signature.constData())),
+				static_cast<ULONG>(signature.size()),
+				BCRYPT_PAD_PKCS1);
+		}
+		if (key != nullptr)
+		{
+			BCryptDestroyKey(key);
+		}
+		if (algorithm != nullptr)
+		{
+			BCryptCloseAlgorithmProvider(algorithm, 0);
+		}
+		return status >= 0;
+#else
+		Q_UNUSED(manifest);
+		return false;
+#endif
+	}
+
+	bool OtaManifestKnownAnswerSelfTest()
+	{
+		const QJsonObject patch{
+			{ QStringLiteral("file"), QStringLiteral("HK-Pathlynx-CORPLA-Patch-v2026.07.12.0030.zip") },
+			{ QStringLiteral("sha256"), QString(64, QLatin1Char('b')) },
+			{ QStringLiteral("size"), 3456789 },
+			{ QStringLiteral("baseMinVersion"), QStringLiteral("2026.07.10.1750") }
+		};
+		const QJsonObject manifest{
+			{ QStringLiteral("schemaVersion"), 2 },
+			{ QStringLiteral("channel"), QStringLiteral("brand") },
+			{ QStringLiteral("version"), QStringLiteral("2026.07.12.0030") },
+			{ QStringLiteral("file"), QStringLiteral("HK-Pathlynx-CORPLA-Setup-v2026.07.12.0030.exe") },
+			{ QStringLiteral("sha256"), QString(64, QLatin1Char('a')) },
+			{ QStringLiteral("size"), 86657296 },
+			{ QStringLiteral("notes"), QStringLiteral("签名回归") },
+			{ QStringLiteral("patch"), patch },
+			{ QStringLiteral("signatureAlgorithm"), QString::fromLatin1(kOtaSignatureAlgorithm) }
+		};
+		const QByteArray payloadDigest = QCryptographicHash::hash(
+			BuildOtaManifestSignaturePayload(manifest), QCryptographicHash::Sha256).toHex();
+		const QByteArray signature = QByteArray::fromBase64(kOtaKnownAnswerSignatureBase64);
+		return payloadDigest == QByteArray(kOtaKnownAnswerPayloadSha256)
+			&& signature.toBase64() == QByteArray(kOtaKnownAnswerSignatureBase64)
+			&& VerifyOtaRsaSignature(manifest, signature);
+	}
+
+	bool VerifyOtaManifestSignature(const QJsonObject& manifest)
+	{
+		static const bool knownAnswerPassed = OtaManifestKnownAnswerSelfTest();
+		if (!knownAnswerPassed
+			|| manifest.value(QStringLiteral("schemaVersion")).toDouble() != 2.0
+			|| manifest.value(QStringLiteral("signatureAlgorithm")).toString()
+				!= QString::fromLatin1(kOtaSignatureAlgorithm))
+		{
+			return false;
+		}
+		const QByteArray encodedSignature =
+			manifest.value(QStringLiteral("signature")).toString().toLatin1();
+		const QByteArray signature = QByteArray::fromBase64(encodedSignature);
+		return !signature.isEmpty()
+			&& signature.toBase64() == encodedSignature
+			&& VerifyOtaRsaSignature(manifest, signature);
+	}
+
+	QString ExpectedInstallerName(const QString& channel, const QString& version)
+	{
+		return channel == QStringLiteral("brand")
+			? QStringLiteral("HK-Pathlynx-CORPLA-Setup-v%1.exe").arg(version)
+			: QStringLiteral("NoTeaching-Robot-Setup-v%1.exe").arg(version);
+	}
+
+	QString ExpectedPatchName(const QString& version)
+	{
+		return QStringLiteral("HK-Pathlynx-CORPLA-Patch-v%1.zip").arg(version);
+	}
+
+	QString EscapeBatchLiteral(QString value)
+	{
+		// cmd.exe 会在双引号内仍展开 %VAR%；路径中的百分号必须成对转义。
+		value.replace(QStringLiteral("%"), QStringLiteral("%%"));
+		return value;
+	}
+
+	bool IsAllowedOtaUrl(const QUrl& url)
+	{
+		const QString scheme = url.scheme().toLower();
+		return url.isValid()
+			&& (scheme == QStringLiteral("http") || scheme == QStringLiteral("https"))
+			&& !url.host().isEmpty()
+			&& url.userName().isEmpty()
+			&& url.password().isEmpty();
+	}
+
 	QString DownloadTempDir()
 	{
-		return QStringLiteral("Temp/OnlineUpdate");
+		return AppPaths::WritablePath(QStringLiteral("Temp/OnlineUpdate"));
+	}
+
+	QString PatchFailureMarkerPath(const QString& version)
+	{
+		if (!IsStrictOtaVersion(version))
+		{
+			return {};
+		}
+		return AppPaths::WritableChildPath(
+			QStringLiteral("Temp/OnlineUpdate"),
+			QStringLiteral("patch_failed_%1.flag").arg(version));
+	}
+
+	QString PatchHealthMarkerPath(const QString& version)
+	{
+		if (!IsStrictOtaVersion(version))
+		{
+			return {};
+		}
+		return AppPaths::WritableChildPath(
+			QStringLiteral("Temp/OnlineUpdate"),
+			QStringLiteral("patch_healthy_%1.flag").arg(version));
+	}
+
+	bool PatchFailedForVersion(const QString& version)
+	{
+		const QString markerPath = PatchFailureMarkerPath(version);
+		return !markerPath.isEmpty() && QFile::exists(markerPath);
+	}
+
+	bool IsSafeRemotePathComponent(const QString& value)
+	{
+		return AppPaths::IsSafePathComponent(value);
+	}
+
+	bool IsCompleteRemoteArchive(const QString& fileName, qulonglong actualBytes)
+	{
+		if (!fileName.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive))
+		{
+			return false;
+		}
+		// 新写一次上传名包含声明长度；不完整 STOR 即使被服务器当作 226，
+		// 也不会出现在数据列表。旧版本归档没有该后缀，保持向后可见。
+		static const QRegularExpression writeOncePattern(QStringLiteral(
+			R"(_\d{8}T\d{9}_[0-9a-f]{12}_(\d+)\.zip$)"),
+			QRegularExpression::CaseInsensitiveOption);
+		const QRegularExpressionMatch match = writeOncePattern.match(fileName);
+		if (!match.hasMatch())
+		{
+			return true;
+		}
+		bool sizeOk = false;
+		const qulonglong expectedBytes = match.captured(1).toULongLong(&sizeOk);
+		return sizeOk && expectedBytes > 0 && expectedBytes == actualBytes;
+	}
+
+	bool IsSafeArchiveEntry(const QZipReader::FileInfo& entry)
+	{
+		if (!entry.isValid() || entry.isSymLink)
+		{
+			return false;
+		}
+		QString normalized = QDir::fromNativeSeparators(entry.filePath);
+		while (normalized.endsWith(QLatin1Char('/')))
+		{
+			normalized.chop(1);
+		}
+		if (normalized.isEmpty() || QDir::isAbsolutePath(normalized))
+		{
+			return false;
+		}
+		const QStringList components = normalized.split(QLatin1Char('/'), Qt::KeepEmptyParts);
+		return std::all_of(components.cbegin(), components.cend(), [](const QString& component)
+			{
+				return AppPaths::IsSafePathComponent(component);
+			});
+	}
+
+	bool HasOnlySafeArchiveEntries(const QZipReader& archive)
+	{
+		const QList<QZipReader::FileInfo> entries = archive.fileInfoList();
+		return archive.isReadable()
+			&& !entries.isEmpty()
+			&& std::all_of(entries.cbegin(), entries.cend(), IsSafeArchiveEntry);
+	}
+
+	bool IsSafeExecutableOnlyPatch(const QString& archivePath)
+	{
+		QZipReader archive(archivePath);
+		const QList<QZipReader::FileInfo> entries = archive.fileInfoList();
+		const QString expectedExeName = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+		const bool safe = archive.isReadable()
+			&& entries.size() == 1
+			&& entries.first().isFile
+			&& !entries.first().isSymLink
+			&& entries.first().filePath == expectedExeName
+			&& IsSafeRemotePathComponent(expectedExeName)
+			&& IsSafeArchiveEntry(entries.first());
+		archive.close();
+		return safe;
+	}
+
+	bool BytesContainVersion(const QByteArray& bytes, const QString& version)
+	{
+		const QByteArray ascii = version.toLatin1();
+		QByteArray utf16;
+		utf16.reserve(version.size() * 2);
+		for (const QChar character : version)
+		{
+			const ushort value = character.unicode();
+			utf16.append(static_cast<char>(value & 0xff));
+			utf16.append(static_cast<char>((value >> 8) & 0xff));
+		}
+		return bytes.contains(ascii) || bytes.contains(utf16);
+	}
+
+	bool ExtractExecutablePatchToStaging(
+		const QString& archivePath,
+		const QString& expectedVersion,
+		const QString& stagingPath,
+		QString* stagedSha256,
+		qint64* stagedSize)
+	{
+		if (stagedSha256 != nullptr)
+		{
+			stagedSha256->clear();
+		}
+		if (stagedSize != nullptr)
+		{
+			*stagedSize = 0;
+		}
+		QZipReader archive(archivePath);
+		const QList<QZipReader::FileInfo> entries = archive.fileInfoList();
+		const QString expectedExeName = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+		if (!archive.isReadable()
+			|| entries.size() != 1
+			|| !entries.first().isFile
+			|| entries.first().isSymLink
+			|| entries.first().filePath != expectedExeName
+			|| entries.first().size <= 0
+			|| entries.first().size > kMaximumUpdatePayloadBytes
+			|| !IsSafeArchiveEntry(entries.first()))
+		{
+			archive.close();
+			return false;
+		}
+		const QByteArray executableBytes = archive.fileData(expectedExeName);
+		archive.close();
+		if (executableBytes.size() != entries.first().size
+			|| !BytesContainVersion(executableBytes, expectedVersion))
+		{
+			return false;
+		}
+
+		QSaveFile staging(stagingPath);
+		if (!staging.open(QIODevice::WriteOnly)
+			|| staging.write(executableBytes) != executableBytes.size()
+			|| !staging.commit())
+		{
+			staging.cancelWriting();
+			return false;
+		}
+		const QString digest = HashFileSha256(stagingPath);
+		if (!IsStrictSha256(digest) || QFileInfo(stagingPath).size() != executableBytes.size())
+		{
+			QFile::remove(stagingPath);
+			return false;
+		}
+		if (stagedSha256 != nullptr)
+		{
+			*stagedSha256 = digest;
+		}
+		if (stagedSize != nullptr)
+		{
+			*stagedSize = executableBytes.size();
+		}
+		return true;
+	}
+
+	std::string OnlineServicesLogPath()
+	{
+		return QDir::toNativeSeparators(
+			AppPaths::WritablePath(QStringLiteral("Log/OnlineServices.txt")))
+			.toLocal8Bit().toStdString();
 	}
 
 	QString HumanBytes(double bytes)
@@ -77,10 +586,12 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 	std::function<bool()> flowRunningGuard,
 	bool aboutMode,
 	bool remoteBrowseAllowed,
+	std::function<bool()> privilegedActionGuard,
 	QWidget* parent)
 	: QDialog(parent)
 	, m_uploader(uploader)
 	, m_flowRunningGuard(std::move(flowRunningGuard))
+	, m_privilegedActionGuard(std::move(privilegedActionGuard))
 	, m_aboutMode(aboutMode)
 	, m_remoteBrowseAllowed(remoteBrowseAllowed)
 {
@@ -284,7 +795,9 @@ void OnlineServicesDialog::BuildUi()
 	configLayout->addWidget(m_adminTokenEdit, 4, 1, 1, 2);
 	configLayout->addWidget(saveConfigBtn, 4, 3);
 	configLayout->setRowStretch(5, 1);   // 配置行贴顶
-	configGroup->setVisible(!m_aboutMode);
+	// 升级源、FTP 目的端和管理令牌都会改变软件/数据的信任边界，
+	// 只允许持有实时本地 admin 会话的页面查看和修改。
+	configGroup->setVisible(!m_aboutMode && m_remoteBrowseAllowed);
 
 	// —— 远程数据（admin）：浏览/下载/删除各设备上传到服务器的扫描数据、新建设备目录 ——
 	QGroupBox* remoteGroup = nullptr;
@@ -601,15 +1114,18 @@ void OnlineServicesDialog::BuildUi()
 
 void OnlineServicesDialog::LoadConfigToUi()
 {
-	m_updateBaseUrlEdit->setText(OnlineServicesConfig::UpdateBaseUrl());
-	m_ftpHostEdit->setText(OnlineServicesConfig::FtpHost());
-	m_ftpPortEdit->setText(QString::number(OnlineServicesConfig::FtpPort()));
-	m_ftpUserEdit->setText(OnlineServicesConfig::FtpUser());
-	m_ftpPasswordEdit->setText(OnlineServicesConfig::FtpPassword());
-	m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
-	if (m_adminTokenEdit != nullptr)
+	if (m_remoteBrowseAllowed)
 	{
-		m_adminTokenEdit->setText(OnlineServicesConfig::AdminToken());
+		m_updateBaseUrlEdit->setText(OnlineServicesConfig::UpdateBaseUrl());
+		m_ftpHostEdit->setText(OnlineServicesConfig::FtpHost());
+		m_ftpPortEdit->setText(QString::number(OnlineServicesConfig::FtpPort()));
+		m_ftpUserEdit->setText(OnlineServicesConfig::FtpUser());
+		m_ftpPasswordEdit->setText(OnlineServicesConfig::FtpPassword());
+		m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
+		if (m_adminTokenEdit != nullptr)
+		{
+			m_adminTokenEdit->setText(OnlineServicesConfig::AdminToken());
+		}
 	}
 	m_autoUploadCheck->setChecked(OnlineServicesConfig::AutoUploadEnabled());
 	if (m_uploader != nullptr && m_pendingListWidget != nullptr)
@@ -691,6 +1207,16 @@ void OnlineServicesDialog::UpdateRestrictedNav()
 
 void OnlineServicesDialog::SaveConfigFromUi()
 {
+	if (!m_remoteBrowseAllowed
+		|| !m_privilegedActionGuard
+		|| !m_privilegedActionGuard())
+	{
+		if (!m_aboutMode)
+		{
+			AppendLog(QStringLiteral("升级源、FTP 与管理令牌仅允许有效的本地管理员会话修改，本次未保存。"));
+		}
+		return;
+	}
 	OnlineServicesConfig::SetUpdateBaseUrl(m_updateBaseUrlEdit->text().trimmed());
 	if (!m_remoteBusy)
 	{
@@ -700,7 +1226,15 @@ void OnlineServicesDialog::SaveConfigFromUi()
 		OnlineServicesConfig::SetFtpPort(ok ? port : 21);
 		OnlineServicesConfig::SetFtpUser(m_ftpUserEdit->text().trimmed());
 		OnlineServicesConfig::SetFtpPassword(m_ftpPasswordEdit->text());
-		OnlineServicesConfig::SetDeviceName(m_deviceNameEdit->text().trimmed());
+		const QString editedDeviceName = m_deviceNameEdit->text().trimmed();
+		if (editedDeviceName.isEmpty() || IsSafeRemotePathComponent(editedDeviceName))
+		{
+			OnlineServicesConfig::SetDeviceName(editedDeviceName);
+		}
+		else
+		{
+			AppendLog(QStringLiteral("设备名未保存：只能使用安全的单一目录名，不能含路径字符或保留设备名。"));
+		}
 	}
 	else
 	{
@@ -737,57 +1271,224 @@ QString OnlineServicesDialog::UpdateChannel() const
 
 void OnlineServicesDialog::CheckForUpdate()
 {
+	if (m_checkingForUpdate)
+	{
+		AppendLog(QStringLiteral("更新清单正在检查，请勿重复请求。"));
+		return;
+	}
+	if (m_downloading)
+	{
+		AppendLog(QStringLiteral("更新文件正在下载，完成或失败前禁止刷新清单。"));
+		return;
+	}
 	SaveConfigFromUi();
 	const QString url = OnlineServicesConfig::UpdateBaseUrl() + "/" + UpdateChannel() + "/latest.json";
+	const QUrl manifestUrl(url);
+	// 一旦开始刷新，旧 offer 立即失效。网络失败、服务端撤回或签名失败都不能继续使用
+	// 上一次清单留下的下载按钮/载荷。
+	m_remoteVersion.clear();
+	m_remoteFile.clear();
+	m_remoteSha256.clear();
+	m_remoteSize = 0;
+	m_remotePatchFile.clear();
+	m_remotePatchSha256.clear();
+	m_remotePatchSize = 0;
+	m_usePatch = false;
+	if (!m_downloadedPath.isEmpty())
+	{
+		QFile::remove(m_downloadedPath);
+		m_downloadedPath.clear();
+	}
+	m_downloadInstallBtn->setEnabled(false);
+	m_downloadProgress->setValue(0);
+	if (!IsAllowedOtaUrl(manifestUrl))
+	{
+		AppendLog(QStringLiteral("升级源 URL 无效：只允许无内嵌账号的 HTTP/HTTPS 地址。"));
+		return;
+	}
 	AppendLog(QStringLiteral("检查更新：%1").arg(url));
+	m_checkingForUpdate = true;
 	m_checkUpdateBtn->setEnabled(false);
 
-	QNetworkRequest request{ QUrl(url) };
+	QNetworkRequest request{ manifestUrl };
 	request.setTransferTimeout(15000);
+	request.setAttribute(
+		QNetworkRequest::RedirectPolicyAttribute,
+		QNetworkRequest::SameOriginRedirectPolicy);
 	QNetworkReply* reply = m_network->get(request);
+	reply->setReadBufferSize(kMaximumManifestBytes + 1);
+	reply->setProperty("otaManifestBytes", QByteArray());
+	connect(reply, &QNetworkReply::metaDataChanged, this, [reply]()
+		{
+			bool contentLengthOk = false;
+			const qint64 contentLength =
+				reply->header(QNetworkRequest::ContentLengthHeader).toLongLong(&contentLengthOk);
+			if (contentLengthOk && contentLength > kMaximumManifestBytes)
+			{
+				reply->setProperty("otaManifestSizeRejected", true);
+				reply->abort();
+			}
+		});
+	connect(reply, &QNetworkReply::readyRead, this, [reply]()
+		{
+			QByteArray bytes = reply->property("otaManifestBytes").toByteArray();
+			const qint64 remaining = kMaximumManifestBytes + 1 - bytes.size();
+			if (remaining > 0)
+			{
+				bytes.append(reply->read(remaining));
+			}
+			if (bytes.size() > kMaximumManifestBytes || reply->bytesAvailable() > 0)
+			{
+				reply->setProperty("otaManifestSizeRejected", true);
+				reply->abort();
+				return;
+			}
+			reply->setProperty("otaManifestBytes", bytes);
+		});
 	connect(reply, &QNetworkReply::finished, this, [this, reply]() { OnManifestReply(reply); });
 }
 
 void OnlineServicesDialog::OnManifestReply(QNetworkReply* reply)
 {
 	reply->deleteLater();
+	m_checkingForUpdate = false;
 	m_checkUpdateBtn->setEnabled(true);
 	if (reply->error() != QNetworkReply::NoError)
 	{
 		m_latestVersionLabel->setText(QStringLiteral("最新版本：检查失败"));
-		AppendLog(QStringLiteral("检查更新失败：%1").arg(reply->errorString()));
+		AppendLog(reply->property("otaManifestSizeRejected").toBool()
+			? QStringLiteral("更新清单响应超过 256 KiB，已在接收过程中中止。")
+			: QStringLiteral("检查更新失败：%1").arg(reply->errorString()));
 		return;
 	}
 
-	const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
-	m_remoteVersion = obj.value(QStringLiteral("version")).toString();
-	m_remoteFile = obj.value(QStringLiteral("file")).toString();
-	m_remoteSha256 = obj.value(QStringLiteral("sha256")).toString().toLower();
+	QByteArray manifestBytes = reply->property("otaManifestBytes").toByteArray();
+	manifestBytes.append(reply->read(kMaximumManifestBytes + 1 - manifestBytes.size()));
+	if (manifestBytes.isEmpty() || manifestBytes.size() > kMaximumManifestBytes)
+	{
+		AppendLog(QStringLiteral("更新清单为空或超过 256 KiB，已拒绝。"));
+		return;
+	}
+	QJsonParseError parseError;
+	const QJsonDocument document = QJsonDocument::fromJson(manifestBytes, &parseError);
+	if (parseError.error != QJsonParseError::NoError || !document.isObject())
+	{
+		AppendLog(QStringLiteral("更新清单不是有效的 JSON 对象，已拒绝：%1").arg(parseError.errorString()));
+		return;
+	}
+	const QJsonObject obj = document.object();
+	if (!IsStrictManifestShape(obj))
+	{
+		AppendLog(QStringLiteral("更新清单字段、类型或 schema 不严格，已拒绝。"));
+		return;
+	}
+	const QString channel = UpdateChannel();
+	if (channel == QStringLiteral("neutral") && obj.contains(QStringLiteral("patch")))
+	{
+		AppendLog(QStringLiteral("中性通道清单禁止包含 patch，已拒绝。"));
+		return;
+	}
+	const QString remoteVersion = obj.value(QStringLiteral("version")).toString();
+	const QString remoteFile = obj.value(QStringLiteral("file")).toString();
+	const QString remoteSha256 = obj.value(QStringLiteral("sha256")).toString();
+	qint64 remoteSize = 0;
+	if (!IsStrictOtaVersion(remoteVersion)
+		|| remoteFile != ExpectedInstallerName(channel, remoteVersion)
+		|| !IsSafeRemotePathComponent(remoteFile)
+		|| !IsStrictSha256(remoteSha256)
+		|| !TryReadManifestSize(obj.value(QStringLiteral("size")), &remoteSize))
+	{
+		AppendLog(QStringLiteral(
+			"更新清单格式错误：全量包必须提供严格版本、通道绑定文件名、64 位 SHA256 和正整数 size。"));
+		return;
+	}
+	if (obj.value(QStringLiteral("channel")).toString() != channel
+		|| !VerifyOtaManifestSignature(obj))
+	{
+		AppendLog(QStringLiteral(
+			"更新清单通道或 RSA 签名验证失败，可能被篡改或不是正式发布，已拒绝。"));
+		return;
+	}
+	const QString currentVersion = QApplication::applicationVersion().trimmed();
+	if (!IsStrictOtaVersion(currentVersion))
+	{
+		AppendLog(QStringLiteral("本机内嵌版本格式无效，无法安全比较 OTA 版本，已拒绝更新。"));
+		return;
+	}
+	QString highestSeenVersion = OnlineServicesConfig::HighestSeenUpdateVersion(channel);
+	if (!IsStrictOtaVersion(highestSeenVersion))
+	{
+		highestSeenVersion = currentVersion;
+	}
+	if (CompareVersions(remoteVersion, highestSeenVersion) < 0)
+	{
+		AppendLog(QStringLiteral(
+			"签名清单版本 %1 低于本机已见最高版本 %2，疑似旧清单回放，已拒绝。")
+			.arg(remoteVersion, highestSeenVersion));
+		return;
+	}
+	if (CompareVersions(remoteVersion, highestSeenVersion) > 0)
+	{
+		OnlineServicesConfig::SetHighestSeenUpdateVersion(channel, remoteVersion);
+		if (OnlineServicesConfig::HighestSeenUpdateVersion(channel) != remoteVersion)
+		{
+			AppendLog(QStringLiteral("无法持久化 OTA 防回放版本水位，已拒绝本次更新。"));
+			return;
+		}
+	}
+
+	m_remoteVersion = remoteVersion;
+	m_remoteFile = remoteFile;
+	m_remoteSha256 = remoteSha256;
+	m_remoteSize = remoteSize;
 	const QString notes = obj.value(QStringLiteral("notes")).toString();
-
-	// 增量补丁字段（可选）：仅含变更文件的 zip（当前=主程序 exe），优先于全量安装包。
-	const QJsonObject patch = obj.value(QStringLiteral("patch")).toObject();
-	m_remotePatchFile = patch.value(QStringLiteral("file")).toString();
-	m_remotePatchSha256 = patch.value(QStringLiteral("sha256")).toString().toLower();
-	m_remotePatchSize = static_cast<qint64>(patch.value(QStringLiteral("size")).toDouble());
-	// baseMinVersion：补丁只含 exe，仅当本机版本 >= 此基线（=非 exe 载荷/DLL 与目标一致的最低版本）
-	// 时增量才安全；更老的设备 DLL 可能不一致，自动回退全量安装。缺该字段时按旧行为（有补丁即用）。
-	const QString patchBaseMinVersion = patch.value(QStringLiteral("baseMinVersion")).toString().trimmed();
-	m_usePatch = !m_remotePatchFile.isEmpty();
-	if (m_usePatch && !patchBaseMinVersion.isEmpty()
-		&& CompareVersions(QApplication::applicationVersion(), patchBaseMinVersion) < 0)
+	if (notes.size() > 4000)
 	{
-		m_usePatch = false;
-		AppendLog(QStringLiteral("本机版本 %1 低于增量补丁基线 %2（DLL 可能不一致），改用全量安装。")
-			.arg(QApplication::applicationVersion(), patchBaseMinVersion));
-	}
-
-	if (m_remoteVersion.isEmpty() || m_remoteFile.isEmpty())
-	{
-		AppendLog(QStringLiteral("更新清单格式错误（缺 version/file 字段）。"));
+		AppendLog(QStringLiteral("更新清单 notes 超过 4000 字符，已拒绝。"));
 		return;
 	}
 
+	// 中性通道固定只走全量。品牌补丁是可选优化，但只要任一字段缺失/非法就
+	// fail closed 回退全量，绝不沿用历史“缺 baseMinVersion 也直接打补丁”的行为。
+	const QJsonValue patchValue = obj.value(QStringLiteral("patch"));
+	if (channel == QStringLiteral("brand") && !patchValue.isUndefined() && !patchValue.isNull())
+	{
+		const QJsonObject patch = patchValue.toObject();
+		const QString patchFile = patch.value(QStringLiteral("file")).toString();
+		const QString patchSha256 = patch.value(QStringLiteral("sha256")).toString();
+		const QString patchBaseMinVersion =
+			patch.value(QStringLiteral("baseMinVersion")).toString();
+		qint64 patchSize = 0;
+		const bool validPatch = patchValue.isObject()
+			&& patchFile == ExpectedPatchName(remoteVersion)
+			&& IsSafeRemotePathComponent(patchFile)
+			&& IsStrictSha256(patchSha256)
+			&& TryReadManifestSize(patch.value(QStringLiteral("size")), &patchSize)
+			&& IsStrictOtaVersion(patchBaseMinVersion)
+			&& CompareVersions(patchBaseMinVersion, remoteVersion) <= 0;
+		if (!validPatch)
+		{
+			AppendLog(QStringLiteral("品牌增量补丁字段不完整或不合法，已安全回退全量安装。"));
+		}
+		else if (CompareVersions(currentVersion, patchBaseMinVersion) < 0)
+		{
+			AppendLog(QStringLiteral("本机版本 %1 低于增量补丁基线 %2（DLL 可能不一致），改用全量安装。")
+				.arg(currentVersion, patchBaseMinVersion));
+		}
+		else if (PatchFailedForVersion(remoteVersion))
+		{
+			AppendLog(QStringLiteral(
+				"版本 %1 的增量替换曾在退出后失败，本次强制改用全量安装包。")
+				.arg(remoteVersion));
+		}
+		else
+		{
+			m_remotePatchFile = patchFile;
+			m_remotePatchSha256 = patchSha256;
+			m_remotePatchSize = patchSize;
+			m_usePatch = true;
+		}
+	}
 	m_latestVersionLabel->setText(QStringLiteral("最新版本：%1").arg(m_remoteVersion));
 	m_updateNotes->setPlainText(notes);
 	m_downloadedPath.clear();
@@ -817,18 +1518,117 @@ void OnlineServicesDialog::StartDownload()
 	{
 		return;
 	}
-	const QString fileName = m_usePatch ? m_remotePatchFile : m_remoteFile;
-	const QString url = OnlineServicesConfig::UpdateBaseUrl() + "/" + UpdateChannel() + "/" + fileName;
-	AppendLog(QStringLiteral("开始下载%1：%2").arg(m_usePatch ? QStringLiteral("增量补丁") : QStringLiteral("安装包")).arg(url));
+	const bool usePatch = m_usePatch;
+	const QString downloadVersion = m_remoteVersion;
+	const QString channel = UpdateChannel();
+	const QString fileName = usePatch ? m_remotePatchFile : m_remoteFile;
+	const QString expectedSha = usePatch ? m_remotePatchSha256 : m_remoteSha256;
+	const qint64 expectedSize = usePatch ? m_remotePatchSize : m_remoteSize;
+	if (!IsSafeRemotePathComponent(fileName))
+	{
+		AppendLog(QStringLiteral("更新文件名不安全，已拒绝下载。"));
+		m_downloadInstallBtn->setEnabled(false);
+		return;
+	}
+	if (expectedSize <= 0 || expectedSize > kMaximumUpdatePayloadBytes)
+	{
+		AppendLog(QStringLiteral("更新清单中的文件大小无效，已拒绝下载。"));
+		m_downloadInstallBtn->setEnabled(false);
+		return;
+	}
+	const QString url = OnlineServicesConfig::UpdateBaseUrl() + "/" + channel + "/" + fileName;
+	const QUrl payloadUrl(url);
+	if (!IsAllowedOtaUrl(payloadUrl))
+	{
+		AppendLog(QStringLiteral("更新载荷 URL 无效，已拒绝下载。"));
+		m_downloadInstallBtn->setEnabled(false);
+		return;
+	}
+	const QString tempDir = DownloadTempDir();
+	const QString targetPath = AppPaths::WritableChildPath(QStringLiteral("Temp/OnlineUpdate"), fileName);
+	if (targetPath.isEmpty() || !QDir().mkpath(tempDir))
+	{
+		m_downloadInstallBtn->setEnabled(false);
+		AppendLog(QStringLiteral("更新目录或文件名无效，已拒绝下载。"));
+		return;
+	}
+	const QString partPath = targetPath + QStringLiteral(".part");
+	QFile::remove(partPath);
+	QFile* sink = new QFile(partPath);
+	if (!sink->open(QIODevice::WriteOnly | QIODevice::Truncate))
+	{
+		delete sink;
+		m_downloadInstallBtn->setEnabled(true);
+		AppendLog(QStringLiteral("无法创建更新临时文件：%1").arg(partPath));
+		return;
+	}
+	sink->setObjectName(QStringLiteral("otaPayloadSink"));
+	AppendLog(QStringLiteral("开始下载%1：%2").arg(usePatch ? QStringLiteral("增量补丁") : QStringLiteral("安装包")).arg(url));
 	m_downloading = true;
+	m_checkUpdateBtn->setEnabled(false);
 	m_downloadInstallBtn->setEnabled(false);
 	m_downloadProgress->setValue(0);
 
-	QNetworkRequest request{ QUrl(url) };
+	QNetworkRequest request{ payloadUrl };
 	request.setTransferTimeout(10 * 60 * 1000);  // 大文件：10 分钟超时
+	request.setAttribute(
+		QNetworkRequest::RedirectPolicyAttribute,
+		QNetworkRequest::SameOriginRedirectPolicy);
 	QNetworkReply* reply = m_network->get(request);
-	connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total)
+	sink->setParent(reply);
+	connect(sink, &QObject::destroyed, [partPath]()
 		{
+			// 对话框/QNAM 在下载中被销毁时 finished 可能不再到达；QFile 析构关句柄后
+			// 无条件清理 .part。成功路径已 rename，此处删除不存在文件是幂等的。
+			QFile::remove(partPath);
+		});
+	reply->setReadBufferSize(1024 * 1024);
+	reply->setProperty("otaExpectedSize", expectedSize);
+	reply->setProperty("otaWasPatch", usePatch);
+	reply->setProperty("otaVersion", downloadVersion);
+	reply->setProperty("otaChannel", channel);
+	reply->setProperty("otaFileName", fileName);
+	reply->setProperty("otaExpectedSha256", expectedSha);
+	reply->setProperty("otaTransferredSize", static_cast<qint64>(0));
+	reply->setProperty("otaPartPath", partPath);
+	reply->setProperty("otaTargetPath", targetPath);
+	connect(reply, &QNetworkReply::metaDataChanged, this, [reply, expectedSize]()
+		{
+			bool contentLengthOk = false;
+			const qint64 contentLength =
+				reply->header(QNetworkRequest::ContentLengthHeader).toLongLong(&contentLengthOk);
+			if (contentLengthOk && contentLength != expectedSize)
+			{
+				reply->setProperty("otaSizeRejected", true);
+				reply->abort();
+			}
+		});
+	connect(reply, &QNetworkReply::readyRead, this, [reply, sink, expectedSize]()
+		{
+			const QByteArray chunk = reply->readAll();
+			const qint64 transferred = reply->property("otaTransferredSize").toLongLong();
+			if (chunk.size() > expectedSize - transferred)
+			{
+				reply->setProperty("otaSizeRejected", true);
+				reply->abort();
+				return;
+			}
+			if (!sink->isOpen() || sink->write(chunk) != chunk.size())
+			{
+				reply->setProperty("otaWriteRejected", true);
+				reply->abort();
+				return;
+			}
+			reply->setProperty("otaTransferredSize", transferred + chunk.size());
+		});
+	connect(reply, &QNetworkReply::downloadProgress, this, [this, reply, expectedSize](qint64 received, qint64 total)
+		{
+			if ((total > 0 && total != expectedSize) || received > expectedSize)
+			{
+				reply->setProperty("otaSizeRejected", true);
+				reply->abort();
+				return;
+			}
 			if (total > 0)
 			{
 				m_downloadProgress->setValue(static_cast<int>(received * 100 / total));
@@ -841,53 +1641,133 @@ void OnlineServicesDialog::OnDownloadFinished(QNetworkReply* reply)
 {
 	reply->deleteLater();
 	m_downloading = false;
+	m_checkUpdateBtn->setEnabled(true);
+	QFile* sink = reply->findChild<QFile*>(QStringLiteral("otaPayloadSink"), Qt::FindDirectChildrenOnly);
+	const QString partPath = reply->property("otaPartPath").toString();
+	const QString targetPath = reply->property("otaTargetPath").toString();
+	const bool wasPatch = reply->property("otaWasPatch").toBool();
+	const QString downloadVersion = reply->property("otaVersion").toString();
+	const QString downloadChannel = reply->property("otaChannel").toString();
+	const QString downloadFileName = reply->property("otaFileName").toString();
+	const QString expectedSha = reply->property("otaExpectedSha256").toString();
+	qint64 transferred = reply->property("otaTransferredSize").toLongLong();
+	bool streamOk = sink != nullptr && sink->isOpen();
+	const QByteArray tail = reply->readAll();
+	const qint64 expectedSize = reply->property("otaExpectedSize").toLongLong();
+	if (streamOk && tail.size() <= expectedSize - transferred)
+	{
+		streamOk = sink->write(tail) == tail.size();
+		transferred += tail.size();
+	}
+	else if (!tail.isEmpty())
+	{
+		streamOk = false;
+	}
+	if (sink != nullptr)
+	{
+		streamOk = sink->flush() && streamOk;
+		sink->close();
+	}
+
+	const auto rejectDownload = [this, &partPath, wasPatch, &downloadVersion](const QString& reason)
+		{
+			QFile::remove(partPath);
+			if (wasPatch && m_remoteVersion == downloadVersion)
+			{
+				FallbackToFullDownload(reason);
+			}
+			else
+			{
+				m_downloadInstallBtn->setEnabled(true);
+				AppendLog(reason);
+			}
+		};
 	if (reply->error() != QNetworkReply::NoError)
 	{
-		m_downloadInstallBtn->setEnabled(true);
-		AppendLog(QStringLiteral("下载失败：%1").arg(reply->errorString()));
+		rejectDownload(reply->property("otaSizeRejected").toBool()
+			? QStringLiteral("下载响应大小与签发清单不一致，已中止并丢弃。")
+			: (reply->property("otaWriteRejected").toBool()
+				? QStringLiteral("下载过程中写入临时文件失败，已丢弃。")
+				: QStringLiteral("下载失败：%1").arg(reply->errorString())));
 		return;
 	}
 
-	const QByteArray data = reply->readAll();
-
-	// SHA256 校验（清单里提供时才校验；不提供也放行但记日志）。
-	const QString expectedSha = m_usePatch ? m_remotePatchSha256 : m_remoteSha256;
-	if (!expectedSha.isEmpty())
+	bool contentLengthOk = false;
+	const qint64 contentLength =
+		reply->header(QNetworkRequest::ContentLengthHeader).toLongLong(&contentLengthOk);
+	if (!contentLengthOk || contentLength != expectedSize)
 	{
-		const QString actual = QString::fromLatin1(
-			QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex()).toLower();
-		if (actual != expectedSha)
-		{
-			m_downloadInstallBtn->setEnabled(true);
-			AppendLog(QStringLiteral("SHA256 校验失败，文件可能损坏或被篡改，已丢弃。"));
-			return;
-		}
-		AppendLog(QStringLiteral("SHA256 校验通过。"));
-	}
-	else
-	{
-		AppendLog(QStringLiteral("清单未提供 SHA256，跳过校验。"));
-	}
-
-	QDir().mkpath(DownloadTempDir());
-	m_downloadedPath = DownloadTempDir() + "/" + (m_usePatch ? m_remotePatchFile : m_remoteFile);
-	QFile out(m_downloadedPath);
-	if (!out.open(QIODevice::WriteOnly))
-	{
-		m_downloadedPath.clear();
-		m_downloadInstallBtn->setEnabled(true);
-		AppendLog(QStringLiteral("保存安装包失败：无法写入 %1").arg(m_downloadedPath));
+		rejectDownload(QStringLiteral("服务器 Content-Length 与签发清单 size 不一致，已拒绝安装。"));
 		return;
 	}
-	out.write(data);
-	out.close();
+	if (!streamOk || transferred != expectedSize || QFileInfo(partPath).size() != expectedSize)
+	{
+		rejectDownload(QStringLiteral("实际落盘字节数与签发清单 size 不一致，已丢弃。"));
+		return;
+	}
+
+	// SHA256 是清单硬字段；清单解析阶段已强制 64 位小写十六进制。
+	if (!IsStrictSha256(expectedSha))
+	{
+		rejectDownload(QStringLiteral("签发清单 SHA256 非法，已拒绝安装。"));
+		return;
+	}
+	const QString actual = HashFileSha256(partPath);
+	if (actual != expectedSha)
+	{
+		rejectDownload(QStringLiteral("SHA256 校验失败，文件可能损坏或被篡改，已丢弃。"));
+		return;
+	}
+	AppendLog(QStringLiteral("Content-Length、size 与 SHA256 三项校验通过。"));
+	if (downloadVersion != m_remoteVersion
+		|| downloadChannel != UpdateChannel()
+		|| downloadFileName != QFileInfo(targetPath).fileName())
+	{
+		rejectDownload(QStringLiteral("下载期间更新会话身份发生变化，已丢弃载荷。"));
+		return;
+	}
+
+	if ((!QFile::remove(targetPath) && QFile::exists(targetPath))
+		|| !QFile::rename(partPath, targetPath))
+	{
+		rejectDownload(QStringLiteral("保存已验证更新文件失败，已停止安装。"));
+		return;
+	}
+	m_downloadedPath = targetPath;
 
 	m_downloadProgress->setValue(100);
 	m_downloadInstallBtn->setEnabled(true);
 	m_downloadInstallBtn->setText(QStringLiteral("立即安装并重启"));
 	AppendLog(QStringLiteral("下载完成：%1（%2 MB）。点击「立即安装并重启」完成升级。")
-		.arg(m_downloadedPath).arg(QString::number(data.size() / 1048576.0, 'f', 1)));
+		.arg(m_downloadedPath).arg(QString::number(expectedSize / 1048576.0, 'f', 1)));
 	InstallDownloadedPackage();
+}
+
+void OnlineServicesDialog::FallbackToFullDownload(const QString& reason)
+{
+	if (!m_usePatch)
+	{
+		m_downloadInstallBtn->setEnabled(true);
+		AppendLog(reason);
+		return;
+	}
+
+	m_usePatch = false;
+	m_remotePatchFile.clear();
+	m_remotePatchSha256.clear();
+	m_remotePatchSize = 0;
+	m_downloadedPath.clear();
+	m_downloadProgress->setValue(0);
+	m_downloadInstallBtn->setEnabled(true);
+	m_downloadInstallBtn->setText(QStringLiteral("下载全量安装包"));
+	AppendLog(QStringLiteral("%1 已自动切换为签发清单中的全量安装包。").arg(reason));
+	QTimer::singleShot(0, this, [this]()
+		{
+			if (!m_downloading && !m_usePatch && !m_remoteFile.isEmpty())
+			{
+				StartDownload();
+			}
+		});
 }
 
 void OnlineServicesDialog::InstallDownloadedPackage()
@@ -901,6 +1781,17 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 	{
 		QMessageBox::warning(this, QStringLiteral("在线升级"),
 			QStringLiteral("焊接/扫描流程正在运行，禁止此时安装升级。\n请等流程结束后再点「立即安装并重启」。"));
+		return;
+	}
+	if (m_usePatch && !IsSafeExecutableOnlyPatch(m_downloadedPath))
+	{
+		const QString rejectedPath = m_downloadedPath;
+		m_downloadedPath.clear();
+		QFile::remove(rejectedPath);
+		QMessageBox::warning(this, QStringLiteral("在线升级"),
+			QStringLiteral("增量补丁包含路径、符号链接或额外文件，已拒绝安装；将自动改用全量安装包。"));
+		FallbackToFullDownload(
+			QStringLiteral("增量补丁内容不安全：仅允许包含当前程序 exe 的单文件 zip，已删除。"));
 		return;
 	}
 
@@ -918,33 +1809,260 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 	{
 		return;
 	}
-
-	const QString payload = QDir::toNativeSeparators(QFileInfo(m_downloadedPath).absoluteFilePath());
-	const QString appPath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
-	const QString bootstrapPath = QDir::toNativeSeparators(
-		QFileInfo(DownloadTempDir() + "/apply_update.cmd").absoluteFilePath());
-	QString script;
-	if (m_usePatch)
+	if (!RobotOperationLease::NewOperationsAllowed())
 	{
-		// 增量：等本进程退出（按映像名轮询）→ tar 解压补丁 zip 覆盖安装目录（Win10+ 自带 bsdtar 支持 zip）→ 重启。
-		const QString exeName = QFileInfo(appPath).fileName();
-		const QString appDir = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
+		QMessageBox::warning(this, QStringLiteral("在线升级"),
+			QStringLiteral("当前会话已禁止新的机器人操作，不能进入升级退出阶段。"));
+		return;
+	}
+	struct ScopedNewOperationBlock final
+	{
+		ScopedNewOperationBlock()
+		{
+			token = RobotOperationLease::AddNewOperationsBlock(
+				QStringLiteral("在线升级即将退出程序，禁止启动新的机器人操作。"));
+		}
+		~ScopedNewOperationBlock()
+		{
+			RobotOperationLease::RemoveNewOperationsBlock(token);
+		}
+		void KeepBlocked() { token = 0; }
+		RobotOperationLease::NewOperationBlockToken token = 0;
+	} operationBlock;
+	if ((m_flowRunningGuard && m_flowRunningGuard()) || RobotOperationLease::AnyActive())
+	{
+		QMessageBox::warning(this, QStringLiteral("在线升级"),
+			QStringLiteral("确认期间有焊接、扫描或机器人操作启动，已取消本次升级。"));
+		return;
+	}
+
+	const bool usePatch = m_usePatch;
+	const qint64 signedPayloadSize = usePatch ? m_remotePatchSize : m_remoteSize;
+	const QString signedPayloadSha = usePatch ? m_remotePatchSha256 : m_remoteSha256;
+	const QString downloadedPath = QFileInfo(m_downloadedPath).absoluteFilePath();
+	const auto rejectChangedPayload = [this, usePatch, &downloadedPath](const QString& reason)
+		{
+			QFile::remove(downloadedPath);
+			m_downloadedPath.clear();
+			m_downloadProgress->setValue(0);
+			QMessageBox::warning(this, QStringLiteral("在线升级"), reason);
+			if (usePatch)
+			{
+				FallbackToFullDownload(reason);
+			}
+			else
+			{
+				m_downloadInstallBtn->setEnabled(true);
+				m_downloadInstallBtn->setText(QStringLiteral("重新下载全量安装包"));
+				AppendLog(reason);
+			}
+		};
+	if (signedPayloadSize <= 0
+		|| !IsStrictSha256(signedPayloadSha)
+		|| QFileInfo(downloadedPath).size() != signedPayloadSize
+		|| HashFileSha256(downloadedPath) != signedPayloadSha
+		|| (usePatch && !IsSafeExecutableOnlyPatch(downloadedPath)))
+	{
+		rejectChangedPayload(QStringLiteral("确认期间更新文件已损坏或被替换，重新校验失败，已删除。"));
+		return;
+	}
+
+	QString payloadSourcePath = downloadedPath;
+	QString payloadSha = signedPayloadSha;
+	qint64 payloadSize = signedPayloadSize;
+	if (usePatch)
+	{
+		const QString expectedExeName = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+		const QString stagedPatchPath = AppPaths::WritableChildPath(
+			QStringLiteral("Temp/OnlineUpdate"), expectedExeName + QStringLiteral(".ota-staged"));
+		QString stagedSha;
+		qint64 stagedSize = 0;
+		QFile::remove(stagedPatchPath);
+		if (stagedPatchPath.isEmpty()
+			|| !ExtractExecutablePatchToStaging(
+				downloadedPath, m_remoteVersion, stagedPatchPath, &stagedSha, &stagedSize)
+			// 解压前后再次验证 zip；避免确认后的可写 Temp 文件在读取窗口被替换。
+			|| QFileInfo(downloadedPath).size() != signedPayloadSize
+			|| HashFileSha256(downloadedPath) != signedPayloadSha)
+		{
+			QFile::remove(stagedPatchPath);
+			rejectChangedPayload(QStringLiteral("增量补丁预解压或二次校验失败，已删除并改用全量安装包。"));
+			return;
+		}
+		payloadSourcePath = stagedPatchPath;
+		payloadSha = stagedSha;
+		payloadSize = stagedSize;
+	}
+
+	const QString rawAppPath = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+	const QString payload = EscapeBatchLiteral(QDir::toNativeSeparators(payloadSourcePath));
+	const QString appPath = EscapeBatchLiteral(rawAppPath);
+	const QString appDir = EscapeBatchLiteral(
+		QDir::toNativeSeparators(QCoreApplication::applicationDirPath()));
+	const QString bootstrapFile = AppPaths::WritableChildPath(
+		QStringLiteral("Temp/OnlineUpdate"), QStringLiteral("apply_update.cmd"));
+	const QString failureLogFile = AppPaths::WritableChildPath(
+		QStringLiteral("Temp/OnlineUpdate"), QStringLiteral("install_failed.txt"));
+	const QString patchFailureMarkerFile = PatchFailureMarkerPath(m_remoteVersion);
+	const QString patchHealthMarkerFile = PatchHealthMarkerPath(m_remoteVersion);
+	if (bootstrapFile.isEmpty() || failureLogFile.isEmpty()
+		|| patchFailureMarkerFile.isEmpty() || patchHealthMarkerFile.isEmpty())
+	{
+		AppendLog(QStringLiteral("升级启动脚本路径无效，已停止安装。"));
+		return;
+	}
+	const QString bootstrapPath = QDir::toNativeSeparators(
+		QFileInfo(bootstrapFile).absoluteFilePath());
+	const QString failureLogPath = EscapeBatchLiteral(QDir::toNativeSeparators(
+		QFileInfo(failureLogFile).absoluteFilePath()));
+	const QString patchFailureMarkerPath = EscapeBatchLiteral(QDir::toNativeSeparators(
+		QFileInfo(patchFailureMarkerFile).absoluteFilePath()));
+	const QString patchHealthMarkerPath = EscapeBatchLiteral(QDir::toNativeSeparators(
+		QFileInfo(patchHealthMarkerFile).absoluteFilePath()));
+	const qint64 currentPid = QCoreApplication::applicationPid();
+	const QString waitForCurrentProcess = QString(
+		"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
+		"$process = Get-Process -Id %1 -ErrorAction SilentlyContinue; "
+		"if ($null -ne $process) { $process.WaitForExit() }; exit 0 } catch { exit 1 }\"\r\n")
+		.arg(currentPid);
+	const QString verifyPayload = QString(
+		"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
+		"$item = Get-Item -LiteralPath $env:NO_TEACHING_OTA_PAYLOAD -ErrorAction Stop; "
+		"if ($item.Length -ne %1) { exit 2 }; "
+		"$actual = (Get-FileHash -LiteralPath $env:NO_TEACHING_OTA_PAYLOAD -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant(); "
+		"if ($actual -ceq '%2') { exit 0 } else { exit 3 } } catch { exit 4 }\"\r\n")
+		.arg(payloadSize)
+		.arg(payloadSha);
+	QString script;
+	if (usePatch)
+	{
+		// 增量包在退出前已预解压并验证。退出后先复制到安装目录同卷临时名，随后用
+		// File.Replace 原子替换并自动备份旧 exe；任何失败都保持/恢复旧 exe，绝不 tar 直覆。
 		script = QString(
 			"@echo off\r\n"
-			":wait\r\n"
-			"tasklist /FI \"IMAGENAME eq %1\" | find /I \"%1\" >nul && (timeout /t 1 /nobreak >nul & goto wait)\r\n"
-			"tar -xf \"%2\" -C \"%3\"\r\n"
-			"start \"\" \"%4\"\r\n")
-			.arg(exeName).arg(payload).arg(appDir).arg(appPath);
+			"setlocal DisableDelayedExpansion\r\n"
+			"set \"NO_TEACHING_OTA_PAYLOAD=%2\"\r\n"
+			"set \"OTA_APP=%5\"\r\n"
+			"set \"OTA_NEW=%5.ota-new\"\r\n"
+			"set \"OTA_BACKUP=%5.ota-backup\"\r\n"
+			"set \"OTA_FAILED=%5.ota-failed\"\r\n"
+			"set \"OTA_PATCH_FAILURE_MARKER=%7\"\r\n"
+			"set \"OTA_HEALTH=%8\"\r\n"
+			"%1"
+			"if errorlevel 1 goto :wait_failed\r\n"
+			"if not errorlevel 0 goto :wait_failed\r\n"
+			"%6"
+			"if errorlevel 1 goto :verify_failed\r\n"
+			"if not errorlevel 0 goto :verify_failed\r\n"
+			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_in_progress\r\n"
+			"del /f /q \"%OTA_NEW%\" \"%OTA_BACKUP%\" \"%OTA_FAILED%\" \"%OTA_HEALTH%\" 2>nul\r\n"
+			"copy /b /y \"%NO_TEACHING_OTA_PAYLOAD%\" \"%OTA_NEW%\" >nul\r\n"
+			"if errorlevel 1 goto :copy_failed\r\n"
+			"if not errorlevel 0 goto :copy_failed\r\n"
+			"set \"NO_TEACHING_OTA_PAYLOAD=%OTA_NEW%\"\r\n"
+			"%6"
+			"if errorlevel 1 goto :copy_verify_failed\r\n"
+			"if not errorlevel 0 goto :copy_verify_failed\r\n"
+			"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
+			"[System.IO.File]::Replace($env:OTA_NEW, $env:OTA_APP, $env:OTA_BACKUP, $true); exit 0 } catch { exit 1 }\"\r\n"
+			"if errorlevel 1 goto :replace_failed\r\n"
+			"if not errorlevel 0 goto :replace_failed\r\n"
+			"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
+			"$process = Start-Process -FilePath $env:OTA_APP -PassThru -ErrorAction Stop; "
+			"$deadline = [DateTime]::UtcNow.AddSeconds(30); while ([DateTime]::UtcNow -lt $deadline) { "
+			"if ($process.HasExited) { exit 1 }; if (Test-Path -LiteralPath $env:OTA_HEALTH) { exit 0 }; "
+			"Start-Sleep -Seconds 1 }; exit 2 } catch { exit 3 }\"\r\n"
+			"if errorlevel 1 goto :restart_failed\r\n"
+			"if not errorlevel 0 goto :restart_failed\r\n"
+			"del /f /q \"%OTA_PATCH_FAILURE_MARKER%\" \"%OTA_HEALTH%\" \"%OTA_BACKUP%\" \"%OTA_FAILED%\" 2>nul\r\n"
+			"exit /b 0\r\n"
+			":wait_failed\r\n"
+			">\"%4\" echo Waiting for the running application failed.\r\n"
+			"exit /b 1\r\n"
+			":verify_failed\r\n"
+			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
+			">\"%4\" echo Staged patch hash or size verification failed.\r\n"
+			"start \"\" \"%OTA_APP%\"\r\n"
+			"exit /b 2\r\n"
+			":copy_failed\r\n"
+			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
+			">\"%4\" echo Copying the staged executable failed; original was preserved.\r\n"
+			"start \"\" \"%OTA_APP%\"\r\n"
+			"exit /b 3\r\n"
+			":copy_verify_failed\r\n"
+			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
+			">\"%4\" echo Copied executable verification failed; original was preserved.\r\n"
+			"del /f /q \"%OTA_NEW%\" 2>nul\r\n"
+			"start \"\" \"%OTA_APP%\"\r\n"
+			"exit /b 4\r\n"
+			":replace_failed\r\n"
+			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
+			">\"%4\" echo Atomic executable replacement failed; original was preserved.\r\n"
+			"del /f /q \"%OTA_NEW%\" 2>nul\r\n"
+			"start \"\" \"%OTA_APP%\"\r\n"
+			"exit /b 5\r\n"
+			":restart_failed\r\n"
+			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
+			"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
+			"[System.IO.File]::Replace($env:OTA_BACKUP, $env:OTA_APP, $env:OTA_FAILED, $true); exit 0 } catch { exit 1 }\"\r\n"
+			"if errorlevel 1 goto :rollback_failed\r\n"
+			"if not errorlevel 0 goto :rollback_failed\r\n"
+			">\"%4\" echo Updated application start failed; old executable was restored.\r\n"
+			"start \"\" \"%OTA_APP%\"\r\n"
+			"exit /b 6\r\n"
+			":rollback_failed\r\n"
+			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
+			">\"%4\" echo Updated application start failed and rollback failed.\r\n"
+			"exit /b 7\r\n")
+			.arg(waitForCurrentProcess, payload, appDir, failureLogPath, appPath, verifyPayload,
+				patchFailureMarkerPath, patchHealthMarkerPath);
 	}
 	else
 	{
-		// 全量：/SILENT 静默安装；Inno [Run] postinstall 在 silent 下被跳过，装完由批处理拉起新版。
+		// 全量同样必须先等当前 PID 退出，并检查 Inno 退出码；失败时不拉起旧程序。
 		// /DIR 强制装回当前程序目录：Inno 按 AppId 查注册表定位先前安装，手工拷贝部署（无注册表记录）
 		// 或历史 AppId 对不上时会落到 DefaultDirName={localappdata}，在别的盘装出第二份（2026-07-10 事故）。
-		const QString appDir = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
-		script = QString("@echo off\r\n\"%1\" /SILENT /DIR=\"%3\"\r\nstart \"\" \"%2\"\r\n")
-			.arg(payload).arg(appPath).arg(appDir);
+		script = QString(
+			"@echo off\r\n"
+			"setlocal DisableDelayedExpansion\r\n"
+			"set \"NO_TEACHING_OTA_PAYLOAD=%2\"\r\n"
+			"set \"OTA_APP=%5\"\r\n"
+			"set \"OTA_HEALTH=%8\"\r\n"
+			"del /f /q \"%OTA_HEALTH%\" 2>nul\r\n"
+			"%1"
+			"if errorlevel 1 goto :wait_failed\r\n"
+			"if not errorlevel 0 goto :wait_failed\r\n"
+			"%6"
+			"if errorlevel 1 goto :verify_failed\r\n"
+			"if not errorlevel 0 goto :verify_failed\r\n"
+			"start \"\" /wait \"%2\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"%3\"\r\n"
+			"if errorlevel 1 goto :install_failed\r\n"
+			"if not errorlevel 0 goto :install_failed\r\n"
+			"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
+			"$process = Start-Process -FilePath $env:OTA_APP -PassThru -ErrorAction Stop; "
+			"$deadline = [DateTime]::UtcNow.AddSeconds(30); while ([DateTime]::UtcNow -lt $deadline) { "
+			"if ($process.HasExited) { exit 1 }; if (Test-Path -LiteralPath $env:OTA_HEALTH) { exit 0 }; "
+			"Start-Sleep -Seconds 1 }; exit 2 } catch { exit 3 }\"\r\n"
+			"if errorlevel 1 goto :restart_failed\r\n"
+			"if not errorlevel 0 goto :restart_failed\r\n"
+			"del /f /q \"%7\" \"%OTA_HEALTH%\" \"%5.ota-backup\" \"%5.ota-failed\" 2>nul\r\n"
+			"exit /b 0\r\n"
+			":wait_failed\r\n"
+			">\"%4\" echo Waiting for the running application failed.\r\n"
+			"exit /b 1\r\n"
+			":verify_failed\r\n"
+			">\"%4\" echo Full installer hash or size verification failed.\r\n"
+			"start \"\" \"%5\"\r\n"
+			"exit /b 2\r\n"
+			":install_failed\r\n"
+			">\"%4\" echo Full installer failed.\r\n"
+			"exit /b 3\r\n"
+			":restart_failed\r\n"
+			">\"%7\" echo full_failed\r\n"
+			">\"%4\" echo Updated application restart failed.\r\n"
+			"exit /b 4\r\n")
+			.arg(waitForCurrentProcess, payload, appDir, failureLogPath, appPath, verifyPayload,
+				patchFailureMarkerPath, patchHealthMarkerPath);
 	}
 
 	QFile bootstrap(bootstrapPath);
@@ -954,19 +2072,46 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 		return;
 	}
 	// 批处理按系统 ANSI 代码页写（cmd 默认按 ANSI 解析，路径含中文时 toLatin1 会坏）。
-	bootstrap.write(script.toLocal8Bit());
+	const QByteArray scriptBytes = script.toLocal8Bit();
+	if (bootstrap.write(scriptBytes) != scriptBytes.size() || !bootstrap.flush())
+	{
+		bootstrap.close();
+		QFile::remove(bootstrapPath);
+		AppendLog(QStringLiteral("升级引导脚本未完整落盘，已停止安装。"));
+		return;
+	}
 	bootstrap.close();
 
 	// 记下目标版本：重启后主窗口自检「实际版本 == 目标?」，不符即告警（补丁/安装没生效）。
 	OnlineServicesConfig::SetPendingUpdateTargetVersion(m_remoteVersion);
 
 	AppendLog(QStringLiteral("开始升级：%1").arg(payload));
-	if (!QProcess::startDetached(QStringLiteral("cmd.exe"), { QStringLiteral("/c"), bootstrapPath }))
+	QProcess launcher;
+	QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+	environment.remove(QStringLiteral("ERRORLEVEL"));
+	environment.insert(QStringLiteral("NO_TEACHING_OTA_BOOTSTRAP"), bootstrapPath);
+	// 原进程可能由 --data-root 启动；updater 重启时没有原 argv，因此把已经解析、规范化的
+	// 当前真源显式传给子进程环境，保证 health marker、配置和现场数据仍落在同一目录。
+	environment.insert(QStringLiteral("QTWIDGETSAPP4_DATA_ROOT"), AppPaths::DataRootPath());
+	launcher.setProcessEnvironment(environment);
+	launcher.setProgram(QStringLiteral("cmd.exe"));
+#ifdef Q_OS_WIN
+	// cmd 不把反斜杠当作引号转义；QProcess 的普通参数拼接会把 /C 后的命令错误地
+	// 变成 \"path\"。Windows 原生命令行必须保持 cmd 要求的双层引号形式。
+	launcher.setNativeArguments(
+		QStringLiteral("/D /V:OFF /S /C \"\"%NO_TEACHING_OTA_BOOTSTRAP%\"\""));
+#else
+	launcher.setArguments({ QStringLiteral("/D"), QStringLiteral("/V:OFF"),
+		QStringLiteral("/S"), QStringLiteral("/C"),
+		QStringLiteral("\"%NO_TEACHING_OTA_BOOTSTRAP%\"") });
+#endif
+	if (!launcher.startDetached())
 	{
 		OnlineServicesConfig::SetPendingUpdateTargetVersion(QString());  // 没启动成功，撤销记录
 		AppendLog(QStringLiteral("启动升级脚本失败，请到 %1 手动处理。").arg(payload));
 		return;
 	}
+	operationBlock.KeepBlocked();
 	QApplication::quit();
 }
 
@@ -980,20 +2125,20 @@ void OnlineServicesDialog::AppendLog(const QString& text)
 
 void OnlineServicesDialog::closeEvent(QCloseEvent* event)
 {
-	// 关界面时若正在上传：问用户后台继续还是停止（停止则清服务器半截文件）。
+	// 关界面时若正在上传：问用户后台继续还是停止当前传输。
 	if (m_uploader != nullptr && m_uploader->IsBusy())
 	{
 		const QMessageBox::StandardButton ret = QMessageBox::question(
 			this,
 			QStringLiteral("上传进行中"),
 			QStringLiteral("扫描数据还在上传。\n\n「后台继续」：关闭本界面，上传转后台继续。\n"
-				"「停止上传」：中止上传并删除服务器上未传完的半截文件。"),
+				"「停止上传」：中止当前传输；不完整唯一件不会显示，并由服务器定期清理。"),
 			QMessageBox::Yes | QMessageBox::No,
 			QMessageBox::Yes);
 		if (ret == QMessageBox::No)
 		{
-			m_uploader->RequestCancel();  // 后台线程块间中止并删半截文件；案例留队列
-			AppendLog(QStringLiteral("已请求停止上传，服务器半截文件将被清除。"));
+			m_uploader->RequestCancel();  // 后台线程块间中止；未完整案例留队列
+			AppendLog(QStringLiteral("已请求停止上传；不完整唯一件保持隐藏并由服务器定期清理。"));
 		}
 		// 无论后台继续还是停止，都放行关闭（停止是异步清理，不阻塞关窗）。
 	}
@@ -1002,14 +2147,17 @@ void OnlineServicesDialog::closeEvent(QCloseEvent* event)
 
 int OnlineServicesDialog::CompareVersions(const QString& lhs, const QString& rhs)
 {
-	// 版本形如 2026.07.08.1031：按 '.' 分段数值比较，段数不足按 0。
+	// 版本必须是经过严格日期/HHMM 校验的四段格式；非法值一律不可用于升级判定。
+	if (!IsStrictOtaVersion(lhs) || !IsStrictOtaVersion(rhs))
+	{
+		return 0;
+	}
 	const QStringList a = lhs.split('.');
 	const QStringList b = rhs.split('.');
-	const int n = qMax(a.size(), b.size());
-	for (int i = 0; i < n; ++i)
+	for (int i = 0; i < 4; ++i)
 	{
-		const int va = i < a.size() ? a.at(i).toInt() : 0;
-		const int vb = i < b.size() ? b.at(i).toInt() : 0;
+		const int va = a.at(i).toInt();
+		const int vb = b.at(i).toInt();
 		if (va != vb)
 		{
 			return va < vb ? -1 : 1;
@@ -1042,6 +2190,20 @@ namespace
 	}
 }
 
+bool OnlineServicesDialog::AuthorizePrivilegedAction(const QString& actionName)
+{
+	if (!m_remoteBrowseAllowed
+		|| !m_privilegedActionGuard
+		|| !m_privilegedActionGuard())
+	{
+		const QString message = QStringLiteral("本地管理员会话已失效，已拒绝%1。请重新登录。").arg(actionName);
+		AppendLog(message);
+		QMessageBox::warning(this, QStringLiteral("权限已失效"), message);
+		return false;
+	}
+	return true;
+}
+
 void OnlineServicesDialog::SetRemoteBusy(bool busy)
 {
 	m_remoteBusy = busy;
@@ -1069,6 +2231,10 @@ void OnlineServicesDialog::SetRemoteBusy(bool busy)
 
 void OnlineServicesDialog::RefreshRemoteDevices()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("刷新远程设备")))
+	{
+		return;
+	}
 	if (m_remoteBusy)
 	{
 		return;
@@ -1082,9 +2248,9 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 		}
 		const QString selfDevice = OnlineServicesConfig::DeviceName().trimmed();
 		m_remoteDeviceCombo->clear();
-		if (selfDevice.isEmpty())
+		if (!IsSafeRemotePathComponent(selfDevice))
 		{
-			AppendLog(QStringLiteral("请先在「服务器配置」填写设备名并保存。"));
+			AppendLog(QStringLiteral("请先填写安全的设备名（单一目录名，不能含路径字符）。"));
 			return;
 		}
 		m_remoteDeviceCombo->addItem(selfDevice);   // addItem 触发 currentIndexChanged → 自动刷新文件列表
@@ -1102,7 +2268,7 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			std::vector<FtpRemoteFileInfo> entries;
@@ -1110,9 +2276,10 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 			QStringList devices;
 			for (const FtpRemoteFileInfo& e : entries)
 			{
-				if (e.isDirectory)
+				const QString deviceName = QString::fromStdString(e.name);
+				if (e.isDirectory && IsSafeRemotePathComponent(deviceName))
 				{
-					devices << QString::fromStdString(e.name);
+					devices << deviceName;
 				}
 			}
 			QMetaObject::invokeMethod(qApp, [self, ok, devices]()
@@ -1135,7 +2302,7 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 						if (self->IsUploadOnlyAccount())
 						{
 							const QString selfDevice = OnlineServicesConfig::DeviceName().trimmed();
-							if (!selfDevice.isEmpty())
+							if (IsSafeRemotePathComponent(selfDevice))
 							{
 								self->m_remoteDeviceCombo->addItem(selfDevice);
 							}
@@ -1155,14 +2322,23 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 
 void OnlineServicesDialog::RefreshRemoteFiles()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("刷新远程文件")))
+	{
+		return;
+	}
 	if (m_remoteFileList == nullptr || m_remoteDeviceCombo == nullptr)
 	{
 		return;
 	}
 	m_remoteFileList->clear();
 	const QString device = m_remoteDeviceCombo->currentText().trimmed();
-	if (device.isEmpty() || m_remoteBusy)
+	if (m_remoteBusy)
 	{
+		return;
+	}
+	if (!IsSafeRemotePathComponent(device))
+	{
+		AppendLog(QStringLiteral("远程设备名不安全，已拒绝访问。"));
 		return;
 	}
 	if (IsUploadOnlyAccount()
@@ -1177,7 +2353,7 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg, device]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			std::vector<FtpRemoteFileInfo> entries;
@@ -1187,11 +2363,14 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 			QStringList labels;
 			for (const FtpRemoteFileInfo& e : entries)
 			{
-				if (!e.isDirectory)
+				const QString fileName = QString::fromStdString(e.name);
+				if (!e.isDirectory
+					&& IsSafeRemotePathComponent(fileName)
+					&& IsCompleteRemoteArchive(fileName, static_cast<qulonglong>(e.size)))
 				{
-					names << QString::fromStdString(e.name);
+					names << fileName;
 					labels << QStringLiteral("%1（%2 MB）")
-						.arg(QString::fromStdString(e.name))
+						.arg(fileName)
 						.arg(QString::number(e.size / 1048576.0, 'f', 1));
 				}
 			}
@@ -1220,6 +2399,10 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 
 void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("下载远程数据")))
+	{
+		return;
+	}
 	if (m_remoteBusy || m_remoteFileList == nullptr || m_remoteDeviceCombo == nullptr)
 	{
 		return;
@@ -1231,39 +2414,59 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 	}
 	const QString device = m_remoteDeviceCombo->currentText().trimmed();
 	const QList<QListWidgetItem*> selected = m_remoteFileList->selectedItems();
-	if (device.isEmpty() || selected.isEmpty())
+	if (!IsSafeRemotePathComponent(device) || selected.isEmpty())
 	{
-		AppendLog(QStringLiteral("请先选择设备和要下载的数据包。"));
+		AppendLog(QStringLiteral("请选择安全的设备名和数据包。"));
 		return;
 	}
 	QStringList names;
 	for (const QListWidgetItem* item : selected)
 	{
-		names << item->data(Qt::UserRole).toString();
+		const QString name = item->data(Qt::UserRole).toString();
+		if (!IsSafeRemotePathComponent(name))
+		{
+			AppendLog(QStringLiteral("远程文件名不安全，已拒绝下载：%1").arg(name));
+			return;
+		}
+		names << name;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
-	const QString localDir = QStringLiteral("Result/Remote/") + device;
-	QDir().mkpath(localDir);
+	const QString localDir = AppPaths::WritableChildPath(QStringLiteral("Result/Remote"), device);
+	if (localDir.isEmpty() || !QDir().mkpath(localDir))
+	{
+		AppendLog(QStringLiteral("远程数据本地目录无效，已拒绝下载。"));
+		return;
+	}
 	SetRemoteBusy(true);
 	AppendLog(QStringLiteral("开始下载 %1 个数据包到 %2 …").arg(names.size()).arg(QDir::toNativeSeparators(localDir)));
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg, device, names, localDir]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			int okCount = 0;
 			for (const QString& name : names)
 			{
 				const std::string remotePath = "/data/" + device.toStdString() + "/" + name.toStdString();
-				const QString localZip = localDir + "/" + name;
-				const bool downloaded = ftp.downloadFile(remotePath, localZip.toStdString());
+				const QString localZip = AppPaths::WritableChildPath(
+					QStringLiteral("Result/Remote/%1").arg(device), name);
+				const QByteArray localZipBytes = QDir::toNativeSeparators(localZip).toLocal8Bit();
+				const bool transferSucceeded = !localZip.isEmpty()
+					&& ftp.downloadFile(remotePath, localZipBytes.toStdString());
+				const bool downloaded = transferSucceeded
+					&& IsCompleteRemoteArchive(name, static_cast<qulonglong>(QFileInfo(localZip).size()));
+				if (transferSucceeded && !downloaded)
+				{
+					QFile::remove(localZip);
+				}
 				bool extracted = false;
 				if (downloaded)
 				{
 					// zip 内已带 <机器人>/<案例>/ 前缀，解到设备目录即可分层落地。
 					QZipReader zr(localZip);
-					extracted = zr.isReadable() && zr.extractAll(localDir);
+					const bool safeArchive = HasOnlySafeArchiveEntries(zr);
+					extracted = safeArchive && zr.extractAll(localDir);
 					zr.close();
 					if (extracted)
 					{
@@ -1297,6 +2500,10 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 
 void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("删除远程数据")))
+	{
+		return;
+	}
 	if (m_remoteBusy || m_remoteFileList == nullptr || m_remoteDeviceCombo == nullptr)
 	{
 		return;
@@ -1310,9 +2517,9 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 		return;
 	}
 	const QList<QListWidgetItem*> selected = m_remoteFileList->selectedItems();
-	if (device.isEmpty() || selected.isEmpty())
+	if (!IsSafeRemotePathComponent(device) || selected.isEmpty())
 	{
-		AppendLog(QStringLiteral("请先选择设备和要删除的数据包。"));
+		AppendLog(QStringLiteral("请选择安全的设备名和要删除的数据包。"));
 		return;
 	}
 	const QMessageBox::StandardButton ret = QMessageBox::warning(this, QStringLiteral("删除服务器数据"),
@@ -1323,17 +2530,27 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 	{
 		return;
 	}
+	if (!AuthorizePrivilegedAction(QStringLiteral("删除远程数据")))
+	{
+		return;
+	}
 	QStringList names;
 	for (const QListWidgetItem* item : selected)
 	{
-		names << item->data(Qt::UserRole).toString();
+		const QString name = item->data(Qt::UserRole).toString();
+		if (!IsSafeRemotePathComponent(name))
+		{
+			AppendLog(QStringLiteral("远程文件名不安全，已拒绝删除：%1").arg(name));
+			return;
+		}
+		names << name;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
 	SetRemoteBusy(true);
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg, device, names]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			int okCount = 0;
@@ -1360,6 +2577,10 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 
 void OnlineServicesDialog::CreateRemoteDeviceDir()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("新建远程设备目录")))
+	{
+		return;
+	}
 	if (m_remoteBusy)
 	{
 		return;
@@ -1377,9 +2598,13 @@ void OnlineServicesDialog::CreateRemoteDeviceDir()
 	{
 		return;
 	}
-	if (name.contains(QLatin1Char('/')) || name.contains(QLatin1Char('\\')))
+	if (!IsSafeRemotePathComponent(name))
 	{
-		AppendLog(QStringLiteral("目录名不能包含斜杠。"));
+		AppendLog(QStringLiteral("目录名必须是安全的单一名称，不能含路径字符或保留设备名。"));
+		return;
+	}
+	if (!AuthorizePrivilegedAction(QStringLiteral("新建远程设备目录")))
+	{
 		return;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
@@ -1387,7 +2612,7 @@ void OnlineServicesDialog::CreateRemoteDeviceDir()
 	QPointer<OnlineServicesDialog> self(this);
 	std::thread([self, cfg, name]()
 		{
-			RobotLog log(".//Log//OnlineServices.txt", false);
+			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			const bool ok = ftp.createRemoteDirRecursive("/data/" + name.toStdString());
@@ -1428,6 +2653,31 @@ QString OnlineServicesDialog::AdminApiBase() const
 void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& path,
 	const QJsonObject& body, std::function<void(bool ok, const QJsonObject& resp)> done)
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("执行服务器管理请求")))
+	{
+		if (done)
+		{
+			done(false, QJsonObject());
+		}
+		return;
+	}
+	const QUrl adminUrl(AdminApiBase() + path);
+	const QString scheme = adminUrl.scheme().toLower();
+	const QString host = adminUrl.host().toLower();
+	const QHostAddress address(host);
+	const bool isLoopbackHost = host == QStringLiteral("localhost")
+		|| (!address.isNull() && address.isLoopback());
+	if (!adminUrl.isValid() || (scheme != QStringLiteral("https")
+		&& !(scheme == QStringLiteral("http") && isLoopbackHost)))
+	{
+		AppendLog(QStringLiteral(
+			"管理接口已拒绝：令牌和账号变更只能通过 HTTPS 或本机 SSH 隧道发送，禁止公网明文 HTTP。"));
+		if (done)
+		{
+			done(false, QJsonObject());
+		}
+		return;
+	}
 	const QString token = OnlineServicesConfig::AdminToken().trimmed();
 	if (token.isEmpty())
 	{
@@ -1438,8 +2688,9 @@ void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& p
 		}
 		return;
 	}
-	QNetworkRequest request{ QUrl(AdminApiBase() + path) };
+	QNetworkRequest request{ adminUrl };
 	request.setTransferTimeout(20000);
+	request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
 	request.setRawHeader("X-Admin-Token", token.toUtf8());
 	request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
 	const QByteArray payload = body.isEmpty() ? QByteArray() : QJsonDocument(body).toJson(QJsonDocument::Compact);
@@ -1654,6 +2905,11 @@ void OnlineServicesDialog::ToggleSelectedAccountPermission()
 	}
 	QTableWidgetItem* nameItem = m_accountTable->item(m_accountTable->currentRow(), 0);
 	const QString name = nameItem->text();
+	if (name == QStringLiteral("uploader") || name == QStringLiteral("devicedata"))
+	{
+		AppendLog(QStringLiteral("系统账号权限固定：uploader 永远仅上传，devicedata 永远全权限。"));
+		return;
+	}
 	const QString curPerm = nameItem->data(Qt::UserRole).toString();
 	const QString newPerm = curPerm == QStringLiteral("upload") ? QStringLiteral("full") : QStringLiteral("upload");
 	QJsonObject body;
@@ -1699,7 +2955,7 @@ void OnlineServicesDialog::ShowPickCasesDialog()
 	// 列出 Result/<机器人>/<案例> 全部案例目录（跳过 Remote 远程下载区/Archives 打包区），
 	// 支持 Ctrl/Shift 多选；确定后按名字升序依次入队（上传器串行处理=依次打包上传）。
 	QList<QPair<QString, QString>> cases;   // <显示名 Robot / case, 绝对路径>
-	const QDir resultDir(QStringLiteral("Result"));
+	const QDir resultDir(AppPaths::WritablePath(QStringLiteral("Result")));
 	const QStringList robots = resultDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
 	for (const QString& robot : robots)
 	{

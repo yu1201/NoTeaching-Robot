@@ -6,8 +6,10 @@
 #include "RobotDataHelper.h"
 #include "WeldProcessFile.h"
 #include "RobotMessage.h"
+#include "RobotOperationLease.h"
 
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDoubleSpinBox>
@@ -129,12 +131,33 @@ VirtualWeldTestDialog::VirtualWeldTestDialog(ContralUnit* pContralUnit, int unit
     connect(m_runBtn, &QPushButton::clicked, this, &VirtualWeldTestDialog::OnRunOnRobot);
     connect(m_pRobotCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &VirtualWeldTestDialog::OnRobotChanged);
     connect(m_pWeldProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &VirtualWeldTestDialog::OnWeldProcessChanged);
+	const auto invalidateGeneratedInput = [this]()
+		{
+			if (!m_loadingSelectors && !m_running)
+			{
+				InvalidateGeneratedTrajectory();
+			}
+		};
+	connect(m_lengthSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+		[invalidateGeneratedInput](double) { invalidateGeneratedInput(); });
+	connect(m_stepSpin, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
+		[invalidateGeneratedInput](double) { invalidateGeneratedInput(); });
+	connect(m_directionCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+		[invalidateGeneratedInput](int) { invalidateGeneratedInput(); });
+	connect(m_actualWeldCheck, &QCheckBox::toggled, this,
+		[invalidateGeneratedInput](bool) { invalidateGeneratedInput(); });
 
     AppendLog(QStringLiteral("说明：取机器人当前位姿沿 Y 方向造一条虚拟直线焊道，复用正常轨迹生成（读取所选机器人/工艺已保存的参数：姿态/圆滑/摆动），"
                              "产出 _WeldPose_2mm / _SeamComp / srp / srd；点间距即机器人最终逐点执行间距，便于测试密集点摆动。"));
     AppendLog(QStringLiteral("提示：实焊模式下机器人运行会真实引弧，如仅观察摆动请现场自行断送丝/断气。"));
 
     LoadRobotList();
+}
+
+void VirtualWeldTestDialog::closeEvent(QCloseEvent* event)
+{
+    // 嵌入页 close 只隐藏，后台对象不会销毁；运行中允许回主页使用固定安全停止。
+    QDialog::closeEvent(event);
 }
 
 VirtualWeldTestDialog::~VirtualWeldTestDialog() = default;
@@ -288,9 +311,8 @@ void VirtualWeldTestDialog::OnRobotChanged(int index)
     m_unitIndex = m_pRobotCombo->currentData().toInt();
     // 切换机器人后，之前读到的起点/已生成文件不再适用，需重新读取与生成。
     m_hasStartCoors = false;
-    m_lastWeldPosePath.clear();
+    InvalidateGeneratedTrajectory();
     if (m_posLabel != nullptr) m_posLabel->setText(QStringLiteral("当前起点：未读取"));
-    if (m_runBtn != nullptr) m_runBtn->setEnabled(false);
     LoadWeldProcessList();
     AppendLog(QString(QStringLiteral("当前机器人已切换为：%1")).arg(m_pRobotCombo->currentText()));
 }
@@ -302,6 +324,7 @@ void VirtualWeldTestDialog::OnWeldProcessChanged(int index)
     {
         return;
     }
+	InvalidateGeneratedTrajectory();
     if (m_pContralUnit == nullptr
         || m_unitIndex < 0
         || m_unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
@@ -381,6 +404,15 @@ void VirtualWeldTestDialog::SetRunning(bool running)
     if (m_actualWeldCheck != nullptr) m_actualWeldCheck->setEnabled(!running);
 }
 
+void VirtualWeldTestDialog::InvalidateGeneratedTrajectory()
+{
+	m_lastWeldPosePath.clear();
+	if (m_runBtn != nullptr)
+	{
+		m_runBtn->setEnabled(false);
+	}
+}
+
 void VirtualWeldTestDialog::OnReadCurrentPos()
 {
     RobotDriverAdaptor* driver = ResolveDriver();
@@ -388,13 +420,26 @@ void VirtualWeldTestDialog::OnReadCurrentPos()
     {
         return;
     }
+	// 每次重新读取都开启一个新的起点代次；无论读取成功与否，旧轨迹都不能再
+	// 与新的/未知起点混用并直接下发。
+	m_hasStartCoors = false;
+	InvalidateGeneratedTrajectory();
     if (!driver->IsConnected())
     {
         QMessageBox::warning(this, QStringLiteral("读取当前位置"), QStringLiteral("机器人未连接，无法读取当前位置。"));
         return;
     }
 
-    const T_ROBOT_COORS coors = driver->GetCurrentPos();
+    T_ROBOT_COORS coors;
+    if (!driver->TryGetCurrentPos(coors))
+    {
+        const QString detail = DecodeRobotMessageText(driver->GetLastRobotError());
+        const QString message = QString("读取当前位置失败，已禁止生成和下发虚拟焊道：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的位置。") : detail);
+        QMessageBox::warning(this, QStringLiteral("读取当前位置"), message);
+        AppendLog(message);
+        return;
+    }
     m_startCoors = coors;
     m_hasStartCoors = true;
     const QString text = QString("当前起点：X=%1 Y=%2 Z=%3 RX=%4 RY=%5 RZ=%6")
@@ -418,6 +463,8 @@ void VirtualWeldTestDialog::OnGenerate()
     {
         return;
     }
+	// 每次生成尝试先作废旧产物；本次失败时不得继续运行上一次的轨迹。
+	InvalidateGeneratedTrajectory();
     if (!m_hasStartCoors)
     {
         QMessageBox::information(this, QStringLiteral("生成虚拟焊道"), QStringLiteral("请先点击“读取当前机器人位置”。"));
@@ -478,7 +525,7 @@ void VirtualWeldTestDialog::OnRunOnRobot()
     {
         return;
     }
-    if (m_lastWeldPosePath.isEmpty())
+    if (m_lastWeldPosePath.isEmpty() || !m_hasStartCoors)
     {
         QMessageBox::information(this, QStringLiteral("下发并运行"), QStringLiteral("请先生成虚拟焊道。"));
         return;
@@ -506,6 +553,15 @@ void VirtualWeldTestDialog::OnRunOnRobot()
         return;
     }
 
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("虚拟焊道测试"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, QStringLiteral("下发并运行"), leaseError);
+        return;
+    }
+
     const QString execPath = m_lastWeldPosePath;
     const double pointStepMm = m_lastPointStepMm;
 
@@ -513,7 +569,7 @@ void VirtualWeldTestDialog::OnRunOnRobot()
     AppendLog(QStringLiteral("———— 开始下发并运行虚拟焊道 ————"));
 
     QPointer<VirtualWeldTestDialog> self(this);
-    std::thread([self, driver, execPath, pointStepMm, actualWeld]()
+    std::thread([self, driver, execPath, pointStepMm, actualWeld, operationLease]()
         {
             MeasureThenWeldService service;
             T_PRECISE_MEASURE_PARAM param;
@@ -566,7 +622,9 @@ void VirtualWeldTestDialog::OnRunOnRobot()
             QString execError;
             const bool ok = service.ExecuteWeldPoseFileWithSafePos(
                 driver, execPath, param, summary, execError,
-                nullptr, nullptr, appendLog, setFlowStep, checkpoint, pointStepMm, /*allowPointwiseWeave=*/true);
+                nullptr, nullptr, appendLog, setFlowStep, checkpoint, pointStepMm,
+                /*allowPointwiseWeave=*/true,
+                MeasureThenWeldService::WeldPoseSource::SyntheticVirtualTest);
 
             QMetaObject::invokeMethod(qApp, [self, ok, summary, execError]()
                 {

@@ -30,7 +30,8 @@ void CameraFrameCache::Clear()
 {
     std::lock_guard<std::mutex> locker(m_mutex);
     std::deque<CachedFrame>().swap(m_frames);
-    m_nextSequence = 0;
+    // sequence 是 WaitForReadyFrameAfter 的代际标记，缓存生命周期内必须单调递增。
+    // Clear 只丢帧内容；若重置为 0，等待者持有的旧 mark 会把重建后的新帧误判为旧帧（ABA）。
     // 注意：这里【不】清 m_pollStatus。ScanMoveAndCollect 在运动结束、帧已拉走后会再调一次 Clear()
     // 清帧缓存，若连带清了 poll 日志，会把整场扫描记录 wipe 在快照之前。poll 日志改由 ClearPollStatus() 单独管。
 }
@@ -58,9 +59,47 @@ CameraFrameCache::ConnectionState CameraFrameCache::GetConnectionState(QString* 
 bool CameraFrameCache::WaitForReadyFrameAfter(std::uint64_t beginExclusive, int timeoutMs, QString* error) const
 {
     std::unique_lock<std::mutex> locker(m_mutex);
+    auto hasUsableFrameAfter = [&](QString* latestRejectReason, int* candidateCount) -> bool
+        {
+            int seen = 0;
+            QString lastReject;
+            for (auto it = m_frames.rbegin(); it != m_frames.rend(); ++it)
+            {
+                if (it->sequence <= beginExclusive)
+                {
+                    break;
+                }
+                ++seen;
+                const udpDataShow& frame = it->frame;
+                // worker 只在成功解码/成功取帧后 AppendFrame；源时间戳是 signed int64，
+                // 转入 qulonglong 后必须转回 qint64 检查，避免负值被当成巨大正数放行。
+                if (static_cast<qint64>(frame.timestamp) <= 0)
+                {
+                    if (lastReject.isEmpty())
+                    {
+                        lastReject = QStringLiteral("帧时间戳小于等于 0");
+                    }
+                    continue;
+                }
+                if (candidateCount != nullptr)
+                {
+                    *candidateCount = seen;
+                }
+                return true;
+            }
+            if (latestRejectReason != nullptr)
+            {
+                *latestRejectReason = lastReject;
+            }
+            if (candidateCount != nullptr)
+            {
+                *candidateCount = seen;
+            }
+            return false;
+        };
     const auto readyOrTerminal = [&]()
         {
-            return (m_connectionState == ConnectionState::Connected && m_nextSequence > beginExclusive)
+            return (m_connectionState == ConnectionState::Connected && hasUsableFrameAfter(nullptr, nullptr))
                 || m_connectionState == ConnectionState::Failed
                 || m_connectionState == ConnectionState::Stopped;
         };
@@ -69,13 +108,26 @@ bool CameraFrameCache::WaitForReadyFrameAfter(std::uint64_t beginExclusive, int 
     {
         if (error != nullptr)
         {
-            *error = m_connectionStatus.isEmpty()
-                ? QString("等待相机首帧超时（%1 ms）。").arg(safeTimeoutMs)
-                : QString("等待相机首帧超时（%1 ms）：%2").arg(safeTimeoutMs).arg(m_connectionStatus);
+            QString rejectReason;
+            int candidateCount = 0;
+            hasUsableFrameAfter(&rejectReason, &candidateCount);
+            if (candidateCount > 0)
+            {
+                *error = QString("等待相机有效新帧超时（%1 ms）：已收到 %2 个新帧，但时间戳均无效；最近原因：%3。")
+                    .arg(safeTimeoutMs)
+                    .arg(candidateCount)
+                    .arg(rejectReason.isEmpty() ? QStringLiteral("未知") : rejectReason);
+            }
+            else
+            {
+                *error = m_connectionStatus.isEmpty()
+                    ? QString("等待相机有效新帧超时（%1 ms），期间未收到新帧。").arg(safeTimeoutMs)
+                    : QString("等待相机有效新帧超时（%1 ms）：%2").arg(safeTimeoutMs).arg(m_connectionStatus);
+            }
         }
         return false;
     }
-    if (m_connectionState == ConnectionState::Connected && m_nextSequence > beginExclusive)
+    if (m_connectionState == ConnectionState::Connected && hasUsableFrameAfter(nullptr, nullptr))
     {
         return true;
     }

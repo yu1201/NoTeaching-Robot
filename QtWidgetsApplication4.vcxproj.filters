@@ -47,7 +47,19 @@
     <ClCompile Include="src\QtWidgetsApplication4.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\AppPaths.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\CliHelp.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\ConfigDatabase.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ConfigDatabaseAuthentication.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\CredentialSecurity.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\CameraFrameCache.cpp">
@@ -142,6 +154,9 @@
     <ClCompile Include="src\WeldPoseAverageUpdater.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\WeldResumePlanner.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\WeldSeamCompDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -152,6 +167,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\RobotMessage.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotOperationLease.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\RobotJogDialog.cpp">
@@ -183,7 +201,16 @@
     <ClInclude Include="include\Const.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\AppPaths.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\CliHelp.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\ConfigDatabase.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\CredentialSecurity.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\CameraFrameCache.h">
@@ -276,6 +303,9 @@
     <ClInclude Include="include\RobotMessage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\RobotOperationLease.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\RobotPoseTransform.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -289,6 +319,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldPoseAverageUpdater.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\WeldResumePlanner.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldSeamCompDialog.h">

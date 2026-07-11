@@ -8,16 +8,23 @@
 #include <QTimer>
 #include <QVector>
 
+#include <memory>
+
 #include "Const.h"
 
 class RobotDriverAdaptor;
+class RobotOperationLease;
 class QGridLayout;
+class QCloseEvent;
 
 class RobotJogDialog : public QDialog
 {
 public:
 	explicit RobotJogDialog(RobotDriverAdaptor* robotDriver, QWidget* parent = nullptr);
 	~RobotJogDialog() override;
+
+protected:
+	void closeEvent(QCloseEvent* event) override;
 
 private:
 	enum class JogMode
@@ -67,6 +74,7 @@ private:
 	QVector<QLineEdit*> m_jointTargetEdits;
 	bool m_jogActive;
 	bool m_motionTaskRunning;
+	std::shared_ptr<RobotOperationLease> m_jogOperationLease;
 	JogMode m_currentMode;
 	int m_currentAxis;
 	int m_currentDirection;
