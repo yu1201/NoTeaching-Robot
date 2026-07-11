@@ -44,6 +44,11 @@ public:
         bool allowed,
         const QString& blockedReason = QString());
     static bool NewOperationsAllowed();
+    // 临时阻止新操作的独立 token。释放 token 只移除自己的阻塞，不会把账号会话等
+    // 其他 owner 设置的全局禁止误改为允许。
+    using NewOperationBlockToken = std::uint64_t;
+    static NewOperationBlockToken AddNewOperationsBlock(const QString& blockedReason);
+    static void RemoveNewOperationsBlock(NewOperationBlockToken token);
     static QString CurrentOwner(const RobotDriverAdaptor* driver);
     // 可持久化的物理 TCP 端点；端点无效时返回空，绝不返回只在本进程有效的 pointer 身份。
     static QString PersistentEndpointIdentity(const RobotDriverAdaptor* driver);

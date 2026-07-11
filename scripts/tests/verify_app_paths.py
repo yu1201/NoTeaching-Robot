@@ -47,7 +47,12 @@ def assert_static_wiring() -> None:
         "src/MeasureThenWeldService.cpp": ("AppPaths::CommandLinePath",),
         "src/WeldPoseAverageUpdater.cpp": ("AppPaths::CommandLinePath",),
         "tools/ConfigMigrate_Run.cmd": ("QTWIDGETSAPP4_DATA_ROOT", "--data-root", "DB_PATH"),
-        "scripts/build_release_package.ps1": ("--print-source-sha256", "ConfigMigrate.exe is stale"),
+        "scripts/build_release_package.ps1": ("Assert-ConfigMigrateProvenance", "New-PackageGateReport"),
+        "scripts/release_gate_common.ps1": (
+            "Assert-ConfigMigrateProvenance",
+            "isolated verification executable",
+            "bytes differ from an isolated rebuild",
+        ),
     }
     for relative, fragments in required_fragments.items():
         text = (REPO_ROOT / relative).read_text(encoding="utf-8", errors="replace")
@@ -87,10 +92,15 @@ def assert_static_wiring() -> None:
             raise AssertionError(f"Untrusted online filename concatenation remains: {unsafe_fragment}")
     if online_text.count("IsSafeRemotePathComponent") < 10 or "IsSafeArchiveEntry" not in online_text:
         raise AssertionError("OTA/FTP untrusted names are not fail-closed at every use boundary")
-    patch_check = online_text.find("if (m_usePatch && !IsSafeExecutableOnlyPatch(m_downloadedPath))")
-    tar_extract = online_text.find('"tar -xf')
-    if patch_check < 0 or tar_extract < 0 or patch_check > tar_extract:
-        raise AssertionError("OTA patch archive is not validated before external tar extraction")
+    install_start = online_text.find("void OnlineServicesDialog::InstallDownloadedPackage()")
+    patch_check = online_text.find(
+        "if (m_usePatch && !IsSafeExecutableOnlyPatch(m_downloadedPath))", install_start
+    )
+    staged_extract = online_text.find("ExtractExecutablePatchToStaging(", patch_check + 1)
+    if install_start < 0 or patch_check < 0 or staged_extract < 0 or patch_check > staged_extract:
+        raise AssertionError("OTA patch is not validated before pre-extraction to staging")
+    if '"tar -xf' in online_text or "[System.IO.File]::Replace" not in online_text:
+        raise AssertionError("OTA patch can bypass staged atomic executable replacement")
 
     uploader_text = (REPO_ROOT / "src" / "ScanDataUploader.cpp").read_text(
         encoding="utf-8", errors="replace"

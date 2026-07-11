@@ -63,6 +63,25 @@ int main()
     RobotOperationLease::SetNewOperationsAllowed(true);
     Check(RobotOperationLease::NewOperationsAllowed(),
         "restored new-operation gate remained disabled");
+    const auto transientBlock = RobotOperationLease::AddNewOperationsBlock(
+        QStringLiteral("test-transient-block"));
+    Check(!RobotOperationLease::NewOperationsAllowed(),
+        "transient new-operation block did not close the gate");
+    QString transientReason;
+    Check(!RobotOperationLease::TryAcquire(
+        firstDriver, QStringLiteral("transient-contender"), &transientReason)
+            && transientReason == QStringLiteral("test-transient-block"),
+        "transient blocker did not reject acquisition with its own reason");
+    RobotOperationLease::SetNewOperationsAllowed(false, QStringLiteral("revoked-during-block"));
+    RobotOperationLease::RemoveNewOperationsBlock(transientBlock);
+    Check(!RobotOperationLease::NewOperationsAllowed(),
+        "removing a transient blocker incorrectly reopened a revoked session gate");
+    QString revokedReason;
+    Check(!RobotOperationLease::TryAcquire(
+        firstDriver, QStringLiteral("revoked-contender"), &revokedReason)
+            && revokedReason == QStringLiteral("revoked-during-block"),
+        "session revocation was not preserved after transient blocker removal");
+    RobotOperationLease::SetNewOperationsAllowed(true);
     auto restoredGateLease = RobotOperationLease::TryAcquire(
         firstDriver, QStringLiteral("restored-session-gate"));
     Check(static_cast<bool>(restoredGateLease),

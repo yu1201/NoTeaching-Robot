@@ -1,4 +1,9 @@
 param(
+    [Parameter(Mandatory = $true)]
+    [string]$AppVersion,
+    [Parameter(Mandatory = $true)]
+    [ValidateSet("neutral", "brand")]
+    [string]$Channel,
     [switch]$SkipBuild,
     [switch]$SkipVcRedistDownload,
     [switch]$SkipFanucCompilerTools,
@@ -37,6 +42,20 @@ function Copy-DirectoryContent {
     Copy-Item -Path (Join-Path $SourceDir "*") -Destination $TargetDir -Recurse -Force
 }
 
+function Copy-TrackedReleaseFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+
+    $sourcePath = Assert-GitTrackedReleaseFile -RepoRoot $repoRoot -RelativePath $RelativePath
+    $parent = Split-Path -Parent $DestinationPath
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $sourcePath -Destination $DestinationPath -Force
+}
+
 function Download-FileIfNeeded {
     param(
         [string]$Url,
@@ -62,9 +81,46 @@ function Download-FileIfNeeded {
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptRoot "..")).Path
+$gateCommon = Join-Path $scriptRoot "release_gate_common.ps1"
+if (-not (Test-Path -LiteralPath $gateCommon -PathType Leaf)) {
+    throw "Release gate helpers were not found: $gateCommon"
+}
+. $gateCommon
+
+Assert-ReleaseVersion $AppVersion
+$packageGateReport = Get-PackageGateReportPath -RepoRoot $repoRoot -AppVersion $AppVersion -Channel $Channel
+$packageGateRunId = New-ReleaseGatePendingReport `
+    -Path $packageGateReport `
+    -Kind "package" `
+    -AppVersion $AppVersion `
+    -Channel $Channel
+if ($SkipBuild) {
+    throw "-SkipBuild is forbidden for release packaging because it can reuse a stale executable."
+}
+if ($SkipVcRedistDownload) {
+    throw "-SkipVcRedistDownload is forbidden for release packaging because VC runtime presence is a hard gate."
+}
+if ($Configuration -cne "Release" -or $Platform -cne "x64") {
+    throw "Release packaging is fixed to Configuration=Release and Platform=x64."
+}
+$gitState = Assert-GitReleaseState -RepoRoot $repoRoot -AppVersion $AppVersion -Channel $Channel
+$channelSpec = Get-ReleaseChannelSpec $Channel
+Assert-SourceApplicationVersion -RepoRoot $repoRoot -AppVersion $AppVersion | Out-Null
+
 $solutionPath = Join-Path $repoRoot "QtWidgetsApplication4.sln"
 $buildDir = Join-Path $repoRoot ("x64\" + $Configuration)
 $packageDir = Join-Path $repoRoot "dist\QtWidgetsApplication4"
+$canonicalBuildDir = Join-Path $repoRoot "x64\Release"
+$controlledIntermediateRoot = Join-Path $repoRoot "tmp\ReleaseBuild"
+$intermediateDir = Join-Path $controlledIntermediateRoot "$Channel\$AppVersion\obj"
+if (-not (Test-ReleaseGateSamePath $buildDir $canonicalBuildDir)) {
+    throw "Release build cleanup escaped the canonical x64/Release directory: $buildDir"
+}
+$intermediateFull = Resolve-ReleaseGatePath $intermediateDir
+$intermediatePrefix = (Resolve-ReleaseGatePath $controlledIntermediateRoot) + [System.IO.Path]::DirectorySeparatorChar
+if (-not $intermediateFull.StartsWith($intermediatePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Release intermediate cleanup escaped the controlled tmp/ReleaseBuild directory: $intermediateDir"
+}
 
 $msbuildPath = Find-FirstExistingPath @(
     "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
@@ -77,81 +133,110 @@ $windeployqtPath = Find-FirstExistingPath @(
     "$env:QTDIR\bin\windeployqt.exe"
 )
 
-if (-not $SkipBuild) {
-    if (-not $msbuildPath) {
-        throw "MSBuild.exe was not found. Please install Visual Studio 2022 Build Tools or fix the path in scripts/build_release_package.ps1."
-    }
-
-    Write-Host "Building Release package with MSBuild..."
-    & $msbuildPath $solutionPath /m /p:Configuration=$Configuration /p:Platform=$Platform /v:m
-    if ($LASTEXITCODE -ne 0) {
-        throw "MSBuild failed with exit code $LASTEXITCODE."
-    }
+if (-not $msbuildPath) {
+    throw "MSBuild.exe was not found. Please install Visual Studio 2022 Build Tools or fix the path in scripts/build_release_package.ps1."
 }
 
-$exePath = Join-Path $buildDir "QtWidgetsApplication4.exe"
+if (Test-Path -LiteralPath $buildDir) {
+    Remove-Item -LiteralPath $buildDir -Recurse -Force
+}
+if (Test-Path -LiteralPath $intermediateDir) {
+    Remove-Item -LiteralPath $intermediateDir -Recurse -Force
+}
+if (Test-Path -LiteralPath $buildDir) {
+    throw "Controlled Release build directory could not be cleaned: $buildDir"
+}
+if (Test-Path -LiteralPath $intermediateDir) {
+    throw "Controlled Release intermediate directory could not be cleaned: $intermediateDir"
+}
+$versionParts = @($AppVersion.Split('.') | ForEach-Object { [int]$_ })
+Write-Host "Building Release package with a clean MSBuild Rebuild..."
+& $msbuildPath $solutionPath /m /t:Rebuild `
+    "/p:Configuration=$Configuration" `
+    "/p:Platform=$Platform" `
+    "/p:OutDir=$buildDir\" `
+    "/p:IntDir=$intermediateDir\" `
+    "/p:ReleaseVersionMajor=$($versionParts[0])" `
+    "/p:ReleaseVersionMinor=$($versionParts[1])" `
+    "/p:ReleaseVersionPatch=$($versionParts[2])" `
+    "/p:ReleaseVersionBuild=$($versionParts[3])" `
+    "/p:ReleaseVersionString=$AppVersion" `
+    "/p:ReleaseProductName=$($channelSpec.AppName)" `
+    "/p:ReleaseExeName=$($channelSpec.ExeName)" `
+    /v:m
+if ($LASTEXITCODE -ne 0) {
+    throw "MSBuild failed with exit code $LASTEXITCODE."
+}
+
+$exePath = Join-Path $buildDir $channelSpec.ExeName
 if (-not (Test-Path -LiteralPath $exePath)) {
     throw "Release executable was not found: $exePath"
 }
+Assert-WindowsPeReleaseVersion `
+    -Path $exePath `
+    -AppVersion $AppVersion `
+    -ExpectedProductName $channelSpec.AppName `
+    -ExpectedOriginalFilename $channelSpec.ExeName | Out-Null
 
-if ($windeployqtPath) {
-    Write-Host "Running windeployqt on the Release executable..."
-    # Trim payload the app never loads: D3D/DXC shader compilers (pure Widgets + QOpenGLWidget,
-    # no Qt Quick/RHI), PDF plugin chain (no PDF feature), unused image formats (icons are svg/ico,
-    # png is built into Qt6Gui; keep qjpeg conservatively), unused SQL drivers (only QSQLITE),
-    # TLS backends (plain sockets only; FTP goes through WinINet) and TUIO touch plugin.
-    & $windeployqtPath --release --no-translations --no-opengl-sw `
-        --no-system-d3d-compiler --no-system-dxc-compiler `
-        --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer `
-        --skip-plugin-types tls,networkinformation,generic `
-        $exePath
-    if ($LASTEXITCODE -ne 0) {
-        throw "windeployqt failed with exit code $LASTEXITCODE."
-    }
+if (-not $windeployqtPath) {
+    throw "windeployqt.exe was not found. A release package without a verified Qt runtime is forbidden."
+}
 
-    # windeployqt only ever adds files. Remove previously deployed payload that the
-    # options above no longer produce, so stale files in x64\<Config> cannot leak
-    # back into the package (the same mechanism that once leaked vc_redist.x64.exe).
-    $staleDeployFiles = @(
-        "dxcompiler.dll", "dxil.dll", "D3Dcompiler_47.dll", "Qt6Pdf.dll",
-        "imageformats\qpdf.dll", "imageformats\qtiff.dll",
-        "imageformats\qtga.dll", "imageformats\qicns.dll", "imageformats\qwbmp.dll",
-        "imageformats\qgif.dll",
-        "sqldrivers\qsqlodbc.dll", "sqldrivers\qsqlpsql.dll", "sqldrivers\qsqlmimer.dll"
-    )
-    foreach ($staleRelative in $staleDeployFiles) {
-        $stalePath = Join-Path $buildDir $staleRelative
-        if (Test-Path -LiteralPath $stalePath) {
-            Remove-Item -LiteralPath $stalePath -Force
-        }
-    }
-    foreach ($staleDir in @("tls", "networkinformation", "generic")) {
-        $staleDirPath = Join-Path $buildDir $staleDir
-        if (Test-Path -LiteralPath $staleDirPath) {
-            Remove-Item -LiteralPath $staleDirPath -Recurse -Force
-        }
-    }
+Write-Host "Running windeployqt on the Release executable..."
+# Trim payload the app never loads: D3D/DXC shader compilers (pure Widgets + QOpenGLWidget,
+# no Qt Quick/RHI), PDF plugin chain (no PDF feature), unused image formats (icons are svg/ico,
+# png is built into Qt6Gui; keep qjpeg conservatively), unused SQL drivers (only QSQLITE),
+# TLS backends (plain sockets only; FTP goes through WinINet) and TUIO touch plugin.
+& $windeployqtPath --release --no-translations --no-opengl-sw `
+    --no-system-d3d-compiler --no-system-dxc-compiler `
+    --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer `
+    --skip-plugin-types tls,networkinformation,generic `
+    $exePath
+if ($LASTEXITCODE -ne 0) {
+    throw "windeployqt failed with exit code $LASTEXITCODE."
+}
 
-    $qtRoot = Split-Path -Parent (Split-Path -Parent $windeployqtPath)
-    $qtTranslationsDir = Join-Path $qtRoot "translations"
-    $buildTranslationsDir = Join-Path $buildDir "translations"
-    if (Test-Path -LiteralPath $buildTranslationsDir) {
-        Remove-Item -LiteralPath $buildTranslationsDir -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $buildTranslationsDir -Force | Out-Null
-    foreach ($translationFile in @("qt_zh_CN.qm", "qtbase_zh_CN.qm")) {
-        $sourceTranslation = Join-Path $qtTranslationsDir $translationFile
-        if (Test-Path -LiteralPath $sourceTranslation) {
-            Copy-Item -LiteralPath $sourceTranslation -Destination (Join-Path $buildTranslationsDir $translationFile) -Force
-        }
-        else {
-            Write-Warning "Qt translation file was not found: $sourceTranslation"
-        }
+# windeployqt only ever adds files. Remove previously deployed payload that the
+# options above no longer produce, so stale files in x64\<Config> cannot leak
+# back into the package (the same mechanism that once leaked vc_redist.x64.exe).
+$staleDeployFiles = @(
+    "dxcompiler.dll", "dxil.dll", "D3Dcompiler_47.dll", "Qt6Pdf.dll",
+    "imageformats\qpdf.dll", "imageformats\qtiff.dll",
+    "imageformats\qtga.dll", "imageformats\qicns.dll", "imageformats\qwbmp.dll",
+    "imageformats\qgif.dll",
+    "sqldrivers\qsqlodbc.dll", "sqldrivers\qsqlpsql.dll", "sqldrivers\qsqlmimer.dll"
+)
+foreach ($staleRelative in $staleDeployFiles) {
+    $stalePath = Join-Path $buildDir $staleRelative
+    if (Test-Path -LiteralPath $stalePath) {
+        Remove-Item -LiteralPath $stalePath -Force
     }
 }
-else {
-    Write-Warning "windeployqt.exe was not found. Qt runtime deployment was skipped."
+foreach ($staleDir in @("tls", "networkinformation", "generic")) {
+    $staleDirPath = Join-Path $buildDir $staleDir
+    if (Test-Path -LiteralPath $staleDirPath) {
+        Remove-Item -LiteralPath $staleDirPath -Recurse -Force
+    }
 }
+
+$qtRoot = Split-Path -Parent (Split-Path -Parent $windeployqtPath)
+$qtTranslationsDir = Join-Path $qtRoot "translations"
+$buildTranslationsDir = Join-Path $buildDir "translations"
+if (Test-Path -LiteralPath $buildTranslationsDir) {
+    Remove-Item -LiteralPath $buildTranslationsDir -Recurse -Force
+}
+New-Item -ItemType Directory -Path $buildTranslationsDir -Force | Out-Null
+foreach ($translationFile in @("qt_zh_CN.qm", "qtbase_zh_CN.qm")) {
+    $sourceTranslation = Join-Path $qtTranslationsDir $translationFile
+    if (-not (Test-Path -LiteralPath $sourceTranslation -PathType Leaf)) {
+        throw "Required Qt translation file was not found: $sourceTranslation"
+    }
+    Copy-Item -LiteralPath $sourceTranslation -Destination (Join-Path $buildTranslationsDir $translationFile) -Force
+}
+
+# The build directory is shared by both channel builds. Any second top-level application
+# executable means the caller did not clean the other channel and packaging must stop.
+Assert-ExpectedReleaseExecutable -Directory $buildDir -AppVersion $AppVersion -Channel $Channel | Out-Null
 
 if (Test-Path -LiteralPath $packageDir) {
     Remove-Item -LiteralPath $packageDir -Recurse -Force
@@ -162,9 +247,9 @@ $ignoredReleaseExtensions = @(".lib", ".exp", ".pdb", ".obj", ".iobj", ".ipdb", 
 # The redistributable is downloaded into Prerequisites\ below (the only copy the
 # installer actually runs); a stray copy manually dropped into x64\Release once
 # leaked a duplicate 24 MB vc_redist into the package root.
-# 同一 x64\Release 目录反复构建品牌+中性两版会互相留下残留 exe，不排除会让中性包混入
-# 品牌 exe。main(中性)产出 QtWidgetsApplication4.exe，这里排除品牌主程序 HK-Pathlynx-CORPLA.exe。
-$ignoredReleaseFileNames = @("vc_redist.x64.exe", "vc_redist.x86.exe", "hk-pathlynx-corpla.exe")
+# The unique-executable gate above has already rejected any opposite-channel or
+# unrelated top-level exe. Redistributables are staged under Prerequisites only.
+$ignoredReleaseFileNames = @("vc_redist.x64.exe", "vc_redist.x86.exe")
 Get-ChildItem -LiteralPath $buildDir -File | Where-Object {
     $ignoredReleaseExtensions -notcontains $_.Extension.ToLowerInvariant() -and
     $ignoredReleaseFileNames -notcontains $_.Name.ToLowerInvariant()
@@ -172,25 +257,26 @@ Get-ChildItem -LiteralPath $buildDir -File | Where-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $packageDir $_.Name) -Force
 }
 
-Get-ChildItem -LiteralPath $buildDir -Directory | ForEach-Object {
+$runtimeOwnedDirectories = @("data", "log", "result", "temp")
+Get-ChildItem -LiteralPath $buildDir -Directory | Where-Object {
+    $runtimeOwnedDirectories -notcontains $_.Name.ToLowerInvariant()
+} | ForEach-Object {
     Copy-DirectoryContent -SourceDir $_.FullName -TargetDir (Join-Path $packageDir $_.Name)
 }
 
-$dataSourceDir = Join-Path $repoRoot "Data"
-$dataTargetDir = Join-Path $packageDir "Data"
-New-Item -ItemType Directory -Path $dataTargetDir -Force | Out-Null
-# Data is runtime-owned. Do not ship field robots, templates, INI/TXT defaults,
-# or the per-device ConfigStore.db. A fresh install creates an empty database on
-# first run; an update must leave the existing Data directory untouched.
-Get-ChildItem -LiteralPath $dataTargetDir -Filter "ConfigStore.db*" -File -ErrorAction SilentlyContinue | ForEach-Object {
-    Remove-Item -LiteralPath $_.FullName -Force
+foreach ($runtimeDir in @("Data", "Log", "Result", "Temp")) {
+    $runtimePath = Join-Path $packageDir $runtimeDir
+    if (Test-Path -LiteralPath $runtimePath) {
+        Remove-Item -LiteralPath $runtimePath -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $runtimePath -Force | Out-Null
 }
 
 Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "icons") -TargetDir (Join-Path $packageDir "icons")
 
 # 品牌覆盖包：仅当 branding/ 被 git 跟踪（品牌分支）才随包分发；
 # main 等中性分支的 branding/ 被 .gitignore、不入包，安装包保持纯中性 NoTeaching-Robot。
-if (& git -C $repoRoot ls-files "branding/") {
+if ($channelSpec.RequiresBranding) {
     Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "branding") -TargetDir (Join-Path $packageDir "branding")
 }
 
@@ -212,16 +298,26 @@ $pointCloudExtractionRuntimeFiles = @(
 )
 New-Item -ItemType Directory -Path $pointCloudExtractionTargetDir -Force | Out-Null
 foreach ($runtimeFile in $pointCloudExtractionRuntimeFiles) {
-    $runtimeSource = Join-Path $pointCloudExtractionSourceDir $runtimeFile
-    if (Test-Path -LiteralPath $runtimeSource) {
-        Copy-Item -LiteralPath $runtimeSource -Destination (Join-Path $pointCloudExtractionTargetDir $runtimeFile) -Force
-    }
-    else {
-        Write-Warning "PointCloudExtration runtime file was not found: $runtimeSource"
-    }
+    $relative = "SDK/PointCloudExtration/$runtimeFile"
+    Copy-TrackedReleaseFile -RelativePath $relative -DestinationPath (Join-Path $pointCloudExtractionTargetDir $runtimeFile)
 }
 # config\ holds the default algorithm INI the app reads to derive *.runtime.ini.
-Copy-DirectoryContent -SourceDir (Join-Path $pointCloudExtractionSourceDir "config") -TargetDir (Join-Path $pointCloudExtractionTargetDir "config")
+$pointCloudConfigDir = Join-Path $pointCloudExtractionSourceDir "config"
+if (-not (Test-Path -LiteralPath $pointCloudConfigDir -PathType Container)) {
+    throw "PointCloudExtration config directory was not found: $pointCloudConfigDir"
+}
+$trackedPointCloudConfig = @(Invoke-ReleaseGit -RepoRoot $repoRoot -Arguments @("ls-files", "--", "SDK/PointCloudExtration/config"))
+if ($trackedPointCloudConfig.Count -eq 0) {
+    throw "PointCloudExtration config directory is empty: $pointCloudConfigDir"
+}
+foreach ($relative in $trackedPointCloudConfig) {
+    $normalized = ([string]$relative).Replace('\', '/')
+    if (-not $normalized.StartsWith("SDK/PointCloudExtration/config/", [System.StringComparison]::Ordinal)) {
+        throw "Unexpected tracked PointCloud config path: $relative"
+    }
+    $configRelative = $normalized.Substring("SDK/PointCloudExtration/".Length).Replace('/', '\')
+    Copy-TrackedReleaseFile -RelativePath $normalized -DestinationPath (Join-Path $pointCloudExtractionTargetDir $configRelative)
+}
 
 # SDK\STEP\versions is intentionally NOT shipped at all:
 # - The STEP SDK is statically linked into the exe (dumpbin shows no Robot-SDK.dll),
@@ -234,31 +330,30 @@ $configMigrateBuildScript = Join-Path $repoRoot "scripts\build_config_migrate.ps
 if (-not (Test-Path -LiteralPath $configMigrateBuildScript -PathType Leaf)) {
     throw "Config migration build script was not found: $configMigrateBuildScript"
 }
-& $configMigrateBuildScript
+& $configMigrateBuildScript -OutputPath (Join-Path $repoRoot "tools\ConfigMigrate.exe") | Out-Null
 
 $diagnosticToolsSourceDir = Join-Path $repoRoot "tools"
-$configMigrateSource = Join-Path $diagnosticToolsSourceDir "migrate_config_to_sqlite.py"
 $configMigrateExe = Join-Path $diagnosticToolsSourceDir "ConfigMigrate.exe"
-$expectedMigratorHash = (Get-FileHash -LiteralPath $configMigrateSource -Algorithm SHA256).Hash.ToLowerInvariant()
-$reportedMigratorHash = (& $configMigrateExe --print-source-sha256 | Select-Object -Last 1)
-if ($LASTEXITCODE -ne 0 -or $null -eq $reportedMigratorHash -or $reportedMigratorHash.Trim().ToLowerInvariant() -ne $expectedMigratorHash) {
-    throw "ConfigMigrate.exe is stale or was not built from the current migrate_config_to_sqlite.py."
-}
+$configMigrateSourceProvenance = Assert-ConfigMigrateProvenance -RepoRoot $repoRoot -ExecutablePath $configMigrateExe
 
 $diagnosticToolsTargetDir = Join-Path $packageDir "tools"
 if (Test-Path -LiteralPath $diagnosticToolsSourceDir) {
-    New-Item -ItemType Directory -Path $diagnosticToolsTargetDir -Force | Out-Null
-    Get-ChildItem -LiteralPath $diagnosticToolsSourceDir -File | Where-Object {
-        $_.Extension.ToLowerInvariant() -in @(".ps1", ".cmd", ".bat", ".py", ".txt", ".md")
-    } | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $diagnosticToolsTargetDir $_.Name) -Force
+    $trackedTools = @(Invoke-ReleaseGit -RepoRoot $repoRoot -Arguments @("ls-files", "--", "tools")) | Where-Object {
+        [System.IO.Path]::GetExtension([string]$_).ToLowerInvariant() -in @(".ps1", ".cmd", ".bat", ".py", ".txt", ".md")
+    }
+    foreach ($relative in $trackedTools) {
+        $normalized = ([string]$relative).Replace('\', '/')
+        if (-not $normalized.StartsWith("tools/", [System.StringComparison]::Ordinal)) {
+            throw "Unexpected tracked diagnostic tool path: $relative"
+        }
+        $toolRelative = $normalized.Substring("tools/".Length).Replace('/', '\')
+        Copy-TrackedReleaseFile -RelativePath $normalized -DestinationPath (Join-Path $diagnosticToolsTargetDir $toolRelative)
     }
 }
 
 $stepSdkSwitchScript = Join-Path $repoRoot "scripts\switch_step_sdk.ps1"
 if (Test-Path -LiteralPath $stepSdkSwitchScript) {
-    New-Item -ItemType Directory -Path $diagnosticToolsTargetDir -Force | Out-Null
-    Copy-Item -LiteralPath $stepSdkSwitchScript -Destination (Join-Path $diagnosticToolsTargetDir "switch_step_sdk.ps1") -Force
+    Copy-TrackedReleaseFile -RelativePath "scripts/switch_step_sdk.ps1" -DestinationPath (Join-Path $diagnosticToolsTargetDir "switch_step_sdk.ps1")
 }
 
 $installerToolsDir = Join-Path $repoRoot "dist\tools"
@@ -272,50 +367,48 @@ foreach ($toolName in @("ConfigMigrate.exe", "ConfigMigrate_Run.cmd")) {
         throw "Database migration installer tool was not found: $toolSource"
     }
 }
+$installerConfigMigrate = Join-Path $installerToolsDir "ConfigMigrate.exe"
+$installerConfigProvenance = Assert-ConfigMigrateProvenance -RepoRoot $repoRoot -ExecutablePath $installerConfigMigrate
+if ($installerConfigProvenance.sha256 -cne $configMigrateSourceProvenance.sha256) {
+    throw "dist/tools/ConfigMigrate.exe differs from the source-provenance-checked tools/ConfigMigrate.exe."
+}
 
 $fanucSourceDir = Join-Path $repoRoot "SDK\FANUC"
 $fanucTargetDir = Join-Path $packageDir "SDK\FANUC"
 New-Item -ItemType Directory -Path $fanucTargetDir -Force | Out-Null
-# 只拷 SDK\FANUC 顶层的现场所需脚本(.kl/.ls/.pc/.tp 等)。任何子目录(如明图激光宏 mingtu / laser_macros 的源码与编译产物)
-# 都是开发交付件、不进现场安装包——故意用 -File(不递归)；勿改成 -Recurse，否则会把这些子目录带进包。
-Get-ChildItem -LiteralPath $fanucSourceDir -File | Where-Object {
-    $_.Extension.ToLowerInvariant() -in @(".kl", ".ls", ".pc", ".tp", ".var", ".ini", ".txt")
-} | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $fanucTargetDir $_.Name) -Force
+Assert-FanucRuntimeManifest -RepoRoot $repoRoot -RuntimeRoot $repoRoot | Out-Null
+# Only the exact versioned manifest is field runtime input. Source .kl/.ls and
+# ignored compiler byproducts must never enter an installer by directory scan.
+$fanucManifest = Read-FanucRuntimeManifest $repoRoot
+foreach ($item in @($fanucManifest.manifest.files)) {
+    $relative = ([string]$item.path).Replace('/', '\')
+    Copy-Item -LiteralPath (Join-Path $repoRoot $relative) -Destination (Join-Path $fanucTargetDir ([System.IO.Path]::GetFileName($relative))) -Force
 }
+Assert-FanucRuntimeManifest -RepoRoot $repoRoot -RuntimeRoot $packageDir | Out-Null
 
 # Ship BCPD (self-contained bcpd.exe + MIT license) for the model-alignment / point-cloud
 # denoising feature. Runtime locates it at <root>\SDK\BCPD\bcpd.exe.
 $bcpdSourceDir = Join-Path $repoRoot "SDK\BCPD"
 $bcpdTargetDir = Join-Path $packageDir "SDK\BCPD"
 if (Test-Path -LiteralPath $bcpdSourceDir) {
-    New-Item -ItemType Directory -Path $bcpdTargetDir -Force | Out-Null
-    Get-ChildItem -LiteralPath $bcpdSourceDir -File | Where-Object {
-        $_.Extension.ToLowerInvariant() -in @(".exe", ".md", ".txt")
-    } | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $bcpdTargetDir $_.Name) -Force
+    $trackedBcpd = @(Invoke-ReleaseGit -RepoRoot $repoRoot -Arguments @("ls-files", "--", "SDK/BCPD"))
+    foreach ($relative in $trackedBcpd) {
+        $normalized = ([string]$relative).Replace('\', '/')
+        if (-not $normalized.StartsWith("SDK/BCPD/", [System.StringComparison]::Ordinal)) {
+            throw "Unexpected tracked BCPD path: $relative"
+        }
+        $bcpdRelative = $normalized.Substring("SDK/BCPD/".Length).Replace('/', '\')
+        Copy-TrackedReleaseFile -RelativePath $normalized -DestinationPath (Join-Path $bcpdTargetDir $bcpdRelative)
     }
-}
-
-if (-not $SkipFanucCompilerTools) {
-    $fanucCompilerSourceDir = Find-FirstExistingPath @(
-        "C:\Program Files (x86)\FANUC\WinOLPC\bin",
-        "C:\Program Files\FANUC\WinOLPC\bin"
-    )
-
-    if ($fanucCompilerSourceDir) {
-        $fanucCompilerTargetDir = Join-Path $packageDir "Tools\FANUC\WinOLPC\bin"
-        New-Item -ItemType Directory -Path $fanucCompilerTargetDir -Force | Out-Null
-        Get-ChildItem -LiteralPath $fanucCompilerSourceDir -File | Where-Object {
-            $_.Extension.ToLowerInvariant() -in @(".exe", ".dll", ".ini")
-        } | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $fanucCompilerTargetDir $_.Name) -Force
+    foreach ($requiredBcpd in @("bcpd.exe", "LICENSE.md")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $bcpdTargetDir $requiredBcpd) -PathType Leaf)) {
+            throw "Tracked BCPD release asset is missing: $requiredBcpd"
         }
     }
-    else {
-        Write-Warning "FANUC WinOLPC bin directory was not found. FANUC compile tools were not bundled."
-    }
 }
+
+# Machine-local WinOLPC directories have no repository manifest and are therefore
+# deliberately excluded from every release, regardless of this legacy switch.
 
 $redistDir = Join-Path $packageDir "Prerequisites"
 New-Item -ItemType Directory -Path $redistDir -Force | Out-Null
@@ -323,12 +416,18 @@ if (-not $SkipVcRedistDownload) {
     $vcRedistTarget = Join-Path $redistDir "vc_redist.x64.exe"
     $vcRedistOk = Download-FileIfNeeded -Url "https://aka.ms/vc14/vc_redist.x64.exe" -TargetPath $vcRedistTarget
     if (-not $vcRedistOk) {
-        Write-Warning "VC++ runtime installer was not bundled. The target PC may need a manual runtime install."
+        throw "VC++ runtime installer download failed; an incomplete release package is forbidden."
     }
 }
-
-foreach ($runtimeDir in @("Log", "Result", "Temp")) {
-    New-Item -ItemType Directory -Path (Join-Path $packageDir $runtimeDir) -Force | Out-Null
+$vcRedistPath = Join-Path $redistDir "vc_redist.x64.exe"
+if (-not (Test-Path -LiteralPath $vcRedistPath -PathType Leaf) -or (Get-Item -LiteralPath $vcRedistPath).Length -le 0) {
+    throw "VC++ runtime installer is missing or empty: $vcRedistPath"
+}
+$vcRedistSignature = Get-AuthenticodeSignature -LiteralPath $vcRedistPath
+if ($vcRedistSignature.Status -ne [System.Management.Automation.SignatureStatus]::Valid `
+    -or $null -eq $vcRedistSignature.SignerCertificate `
+    -or $vcRedistSignature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') {
+    throw "VC++ runtime installer does not have a valid Microsoft Authenticode signature: $vcRedistPath"
 }
 
 $notesPath = Join-Path $packageDir "DEPLOY_NOTES.txt"
@@ -339,14 +438,36 @@ $notes = @(
     "2. The application writes logs, results and editable config files next to the executable.",
     "3. Because of that, the installer defaults to a user-writable folder instead of Program Files.",
     "4. The installer bundles the Microsoft Visual C++ 2015-2022 Redistributable x64 installer and can run it automatically.",
-    "5. The package also bundles FANUC WinOLPC compile tools when they are available on the build PC.",
-    "6. Please make sure your FANUC tool redistribution follows your license agreement.",
+    "5. FANUC WinOLPC compiler tools are not bundled because machine-local files have no release manifest.",
+    "6. Only the exact versioned FANUC .tp/.pc runtime manifest is shipped.",
     "7. SDK\\STEP\\versions is not shipped: STEP SDK .lib archives are link-time only (the SDK is statically linked),",
     "   and the SRS robot-system upgrade package is archived in the source repository and distributed separately.",
     "8. Rebuilds (incl. legacy SDK switch via switch_step_sdk.ps1) are done from the source repository."
 )
 $notes | Set-Content -LiteralPath $notesPath -Encoding UTF8
 
+$buildInfoPath = Join-Path $packageDir "BUILD_VERSION.txt"
+@(
+    $channelSpec.AppName,
+    "Version: $AppVersion",
+    "Channel: $Channel",
+    "Commit: $($gitState.head)",
+    "Installer: $($channelSpec.OutputPrefix)$AppVersion.exe",
+    "BuiltAtUtc: $([DateTime]::UtcNow.ToString('o'))"
+) | Set-Content -LiteralPath $buildInfoPath -Encoding UTF8
+
+Assert-EmptyReleaseRuntimeDirectories $packageDir
+$writtenGateReport = New-PackageGateReport `
+    -RepoRoot $repoRoot `
+    -PackageDir $packageDir `
+    -AppVersion $AppVersion `
+    -Channel $Channel `
+    -ConfigMigratePath $installerConfigMigrate `
+    -RunId $packageGateRunId `
+    -OutputPath $packageGateReport
+
 Write-Host ""
 Write-Host "Release package is ready:"
 Write-Host "  $packageDir"
+Write-Host "Package gate report:"
+Write-Host "  $writtenGateReport"

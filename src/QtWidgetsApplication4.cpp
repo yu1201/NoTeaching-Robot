@@ -62,6 +62,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QAbstractItemView>
@@ -12166,6 +12167,31 @@ void QtWidgetsApplication4::CheckPendingUpdateResult()
 	OnlineServicesConfig::SetPendingUpdateTargetVersion(QString());  // 无论成败都清除，避免反复弹
 	if (current == target)
 	{
+		// updater 正等待新进程的健康握手。只有目标版本稳定运行 15 秒才原子写 health；
+		// 批处理在最长 30 秒内同时监控进程与该标记，提前退出会回滚旧 exe，成功后才由
+		// 批处理清 failure marker/backup。应用本身不能提前删除恢复件。
+		QTimer::singleShot(15000, this, [target]()
+			{
+				if (QApplication::applicationVersion() != target)
+				{
+					return;
+				}
+				const QString healthMarker = AppPaths::WritableChildPath(
+					QStringLiteral("Temp/OnlineUpdate"),
+					QStringLiteral("patch_healthy_%1.flag").arg(target));
+				if (healthMarker.isEmpty())
+				{
+					return;
+				}
+				QSaveFile marker(healthMarker);
+				const QByteArray content = target.toUtf8() + '\n';
+				if (!marker.open(QIODevice::WriteOnly)
+					|| marker.write(content) != content.size()
+					|| !marker.commit())
+				{
+					marker.cancelWriting();
+				}
+			});
 		return;  // 升级成功（版本已达目标），静默
 	}
 	// 版本没达到目标：补丁/安装没真正生效（如误挂了含旧 exe 的补丁——1004 那类问题）。

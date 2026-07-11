@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""Static fail-closed OTA client and immutable installer identity gate."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import base64
+import hashlib
+import os
+import re
+import subprocess
+import struct
+import sys
+import tempfile
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+
+ROOT = Path(__file__).resolve().parents[2]
+APP_ID = "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
+OTA_PUBLIC_KEY_FINGERPRINT = "5686a45ad2f6c2d84ba7d911c31cfb4ab972d6afcd9e677c0d9b535629749eda"
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from ota_manifest_signing import (  # noqa: E402
+    SIGNATURE_ALGORITHM,
+    cng_public_blob,
+    signature_payload,
+    verify_manifest,
+)
+
+
+def read(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def section(text: str, start: str, end: str) -> str:
+    begin = text.find(start)
+    require(begin >= 0, f"missing section start: {start}")
+    finish = text.find(end, begin + len(start))
+    require(finish >= 0, f"missing section end: {end}")
+    return text[begin:finish]
+
+
+def verify_native_cmd_bootstrap_launch() -> None:
+    if os.name != "nt":
+        return
+    with tempfile.TemporaryDirectory(prefix="ota-cmd-") as temporary:
+        special_dir = Path(temporary) / "%OTA_SHOULD_NOT_EXPAND% ! path with spaces"
+        special_dir.mkdir()
+        bootstrap = special_dir / "apply update.cmd"
+        sentinel = special_dir / "ran.txt"
+        bootstrap.write_bytes(
+            b'@echo off\r\n>"%~dp0ran.txt" echo ok\r\nexit /b 0\r\n'
+        )
+        environment = os.environ.copy()
+        environment["NO_TEACHING_OTA_BOOTSTRAP"] = str(bootstrap)
+        environment["OTA_SHOULD_NOT_EXPAND"] = "EXPANDED"
+        environment["ERRORLEVEL"] = "0"
+        completed = subprocess.run(
+            'cmd.exe /D /V:OFF /S /C ""%NO_TEACHING_OTA_BOOTSTRAP%""',
+            env=environment,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        require(completed.returncode == 0 and sentinel.read_text().strip() == "ok",
+                "native cmd bootstrap launch failed for spaces/percent/bang path")
+
+        exit_check = special_dir / "negative exit check.cmd"
+        caught = special_dir / "caught-negative.txt"
+        exit_check.write_bytes(
+            b'@echo off\r\n'
+            b'powershell.exe -NoLogo -NoProfile -NonInteractive -Command "exit -1"\r\n'
+            b'if errorlevel 1 goto :caught\r\n'
+            b'if not errorlevel 0 goto :caught\r\n'
+            b'exit /b 9\r\n'
+            b':caught\r\n'
+            b'>"%~dp0caught-negative.txt" echo caught\r\n'
+            b'exit /b 0\r\n'
+        )
+        environment["NO_TEACHING_OTA_BOOTSTRAP"] = str(exit_check)
+        completed = subprocess.run(
+            'cmd.exe /D /V:OFF /S /C ""%NO_TEACHING_OTA_BOOTSTRAP%""',
+            env=environment,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        require(completed.returncode == 0 and caught.read_text().strip() == "caught",
+                "negative cmd exit code bypassed the poisoned-ERRORLEVEL-safe gate")
+
+
+def main() -> int:
+    app = read("src/OnlineServicesDialog.cpp")
+    main_app = read("src/QtWidgetsApplication4.cpp")
+    header = read("include/OnlineServicesDialog.h")
+    installer = read("installer/QtWidgetsApplication4.iss")
+    verify_native_cmd_bootstrap_launch()
+
+    for token in (
+        "IsStrictOtaVersion",
+        "IsStrictSha256",
+        "TryReadManifestSize",
+        "ExpectedInstallerName",
+        "ExpectedPatchName",
+        "kMaximumManifestBytes",
+        "kMaximumUpdatePayloadBytes",
+        "BuildOtaManifestSignaturePayload",
+        "VerifyOtaManifestSignature",
+        "OtaManifestKnownAnswerSelfTest",
+        "IsStrictManifestShape",
+        "HashFileSha256",
+        "BCryptVerifySignature",
+        "BCRYPT_PAD_PKCS1",
+    ):
+        require(token in app, f"strict OTA manifest primitive missing: {token}")
+    require("qint64 m_remoteSize" in header, "full installer manifest size is not retained")
+    public_blob_match = re.search(
+        r'kOtaReleasePublicKeyBlobBase64\[\]\s*=\s*\n?\s*"([A-Za-z0-9+/=]+)"',
+        app,
+    )
+    require(public_blob_match is not None, "embedded OTA release public key is missing")
+    embedded_blob = base64.b64decode(public_blob_match.group(1), validate=True)
+    require(hashlib.sha256(embedded_blob).hexdigest() == OTA_PUBLIC_KEY_FINGERPRINT,
+            "embedded OTA release public-key fingerprint drifted")
+
+    manifest = section(
+        app,
+        "void OnlineServicesDialog::OnManifestReply(",
+        "void OnlineServicesDialog::StartDownload()",
+    )
+    for token in (
+        "QJsonParseError",
+        "TryReadManifestSize(obj.value(QStringLiteral(\"size\"))",
+        "IsStrictSha256(remoteSha256)",
+        "patchBaseMinVersion",
+        "品牌增量补丁字段不完整或不合法，已安全回退全量安装",
+        "中性通道清单禁止包含 patch",
+        "RSA 签名验证失败",
+        "HighestSeenUpdateVersion",
+        "疑似旧清单回放",
+        "PatchFailedForVersion",
+        "曾在退出后失败，本次强制改用全量安装包",
+    ):
+        require(token in manifest, f"manifest fail-closed gate missing: {token}")
+    require("缺该字段时按旧行为" not in manifest,
+            "patch still accepts a missing baseMinVersion")
+    require('setReadBufferSize(kMaximumManifestBytes + 1)' in app
+            and 'otaManifestSizeRejected' in app,
+            "manifest response is not bounded while being received")
+
+    sample = {
+        "schemaVersion": 2,
+        "signatureAlgorithm": SIGNATURE_ALGORITHM,
+        "channel": "brand",
+        "version": "2026.07.12.0030",
+        "file": "HK-Pathlynx-CORPLA-Setup-v2026.07.12.0030.exe",
+        "sha256": "a" * 64,
+        "size": 86657296,
+        "notes": "签名回归",
+        "patch": {
+            "file": "HK-Pathlynx-CORPLA-Patch-v2026.07.12.0030.zip",
+            "sha256": "b" * 64,
+            "size": 3456789,
+            "baseMinVersion": "2026.07.10.1750",
+        },
+    }
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    signature = key.sign(signature_payload(sample), padding.PKCS1v15(), hashes.SHA256())
+    encoded = base64.b64encode(signature).decode("ascii")
+    require(verify_manifest(sample, encoded, key.public_key()),
+            "Python signer/verifier rejected a valid canonical manifest")
+    tampered = dict(sample)
+    tampered["size"] += 1
+    require(not verify_manifest(tampered, encoded, key.public_key()),
+            "manifest signature did not bind installer size")
+    require(cng_public_blob(key.public_key())[:4] == b"RSA1",
+            "generated client public-key blob is not a CNG RSA1 blob")
+
+    known_hash_match = re.search(
+        r'kOtaKnownAnswerPayloadSha256\[\]\s*=\s*\n?\s*"([0-9a-f]{64})"', app
+    )
+    known_signature_match = re.search(
+        r'kOtaKnownAnswerSignatureBase64\[\]\s*=\s*\n?\s*"([A-Za-z0-9+/=]+)"', app
+    )
+    require(known_hash_match is not None and known_signature_match is not None,
+            "C++ OTA canonical known-answer vector is missing")
+    require(hashlib.sha256(signature_payload(sample)).hexdigest() == known_hash_match.group(1),
+            "Python canonical payload drifted from the C++ known-answer digest")
+    magic, bit_length, exponent_size, modulus_size, prime1_size, prime2_size = \
+        struct.unpack("<LLLLLL", embedded_blob[:24])
+    require(magic == 0x31415352 and bit_length == modulus_size * 8
+            and prime1_size == 0 and prime2_size == 0,
+            "embedded CNG RSA public blob header is invalid")
+    exponent_start = 24
+    modulus_start = exponent_start + exponent_size
+    production_public_key = rsa.RSAPublicNumbers(
+        int.from_bytes(embedded_blob[exponent_start:modulus_start], "big"),
+        int.from_bytes(embedded_blob[modulus_start:modulus_start + modulus_size], "big"),
+    ).public_key()
+    require(verify_manifest(sample, known_signature_match.group(1), production_public_key),
+            "production public key rejected the fixed cross-language manifest vector")
+
+    download = section(
+        app,
+        "void OnlineServicesDialog::OnDownloadFinished(",
+        "void OnlineServicesDialog::InstallDownloadedPackage()",
+    )
+    for token in (
+        "QNetworkRequest::ContentLengthHeader",
+        "contentLength != expectedSize",
+        "transferred != expectedSize",
+        "QFileInfo(partPath).size() != expectedSize",
+        "HashFileSha256(partPath)",
+        "IsStrictSha256(expectedSha)",
+        "actual != expectedSha",
+    ):
+        require(token in download, f"download size/hash gate missing: {token}")
+    require("跳过校验" not in download, "missing SHA256 still has a pass-through path")
+    require('setReadBufferSize(1024 * 1024)' in app and 'otaPayloadSink' in app,
+            "payload is not streamed through a bounded reply buffer")
+    for token in (
+        'otaWasPatch',
+        'otaVersion',
+        'otaChannel',
+        'otaFileName',
+        'otaExpectedSha256',
+        'm_checkingForUpdate',
+        '更新文件正在下载，完成或失败前禁止刷新清单',
+    ):
+        require(token in app or token in header,
+                f"download/manifest asynchronous state is not pinned: {token}")
+    require('FallbackToFullDownload(reason)' in download
+            and '已自动切换为签发清单中的全量安装包' in download,
+            "brand patch failures do not switch to the signed full installer")
+
+    install = section(
+        app,
+        "void OnlineServicesDialog::InstallDownloadedPackage()",
+        "void OnlineServicesDialog::AppendLog(",
+    )
+    for token in (
+        "Get-Process -Id",
+        ".WaitForExit()",
+        "Get-FileHash",
+        "ExtractExecutablePatchToStaging",
+        "[System.IO.File]::Replace",
+        'start \\"\\" /wait \\"%2\\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=',
+        "if errorlevel 1 goto",
+        "if not errorlevel 0 goto",
+        "install_failed.txt",
+        "SetPendingUpdateTargetVersion",
+        'QStringLiteral("/D")',
+        'QStringLiteral("/V:OFF")',
+        "scriptBytes.size()",
+        "bootstrap.flush()",
+        "setNativeArguments",
+        '/D /V:OFF /S /C \\\"\\\"%NO_TEACHING_OTA_BOOTSTRAP%\\\"\\\"',
+        "RobotOperationLease::AddNewOperationsBlock",
+        "RobotOperationLease::RemoveNewOperationsBlock",
+        "RobotOperationLease::AnyActive",
+        "OTA_PATCH_FAILURE_MARKER",
+        "OTA_HEALTH",
+        "echo patch_failed",
+    ):
+        require(token in install, f"full OTA wait/failure gate missing: {token}")
+    require(install.find("Get-Process -Id") < install.find("/VERYSILENT"),
+            "full installer can start before the running application exits")
+    require("tar -xf" not in install,
+            "incremental OTA still extracts directly over the live executable")
+    require('"%ERRORLEVEL%"' not in install,
+            "batch exit checks trust a poisonable ERRORLEVEL environment variable")
+    for token in (
+        "QTimer::singleShot(15000",
+        "patch_healthy_%1.flag",
+        "QSaveFile marker",
+    ):
+        require(token in main_app, f"post-update health handshake missing: {token}")
+    require("connect(sink, &QObject::destroyed" in app and "QFile::remove(partPath)" in app,
+            "destroying the OTA dialog can leak a partial download file")
+
+    require(
+        re.search(rf'#define MyAppGuid "{re.escape(APP_ID)}"', installer) is not None,
+        "installer MyAppGuid drifted from the published identity",
+    )
+    require(f"AppId={{{{{APP_ID}}}" in installer,
+            "installer AppId drifted from the published identity")
+
+    print("PASS: OTA manifest, payload size/hash, full-install wait, /DIR, and AppId gates")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except AssertionError as exc:
+        print(f"FAIL: {exc}")
+        raise SystemExit(1)

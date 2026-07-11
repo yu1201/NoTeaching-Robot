@@ -39,7 +39,9 @@ std::map<QString, ActiveOperation> g_activeOperations;
 std::map<QString, UnresolvedStop> g_unresolvedStops;
 bool g_newOperationsAllowed = true;
 QString g_newOperationsBlockedReason;
+std::map<RobotOperationLease::NewOperationBlockToken, QString> g_newOperationBlocks;
 std::atomic<std::uint64_t> g_nextOperationToken{ 1 };
+std::atomic<std::uint64_t> g_nextOperationBlockToken{ 1 };
 
 QString PointerIdentity(const RobotDriverAdaptor* driver)
 {
@@ -142,7 +144,32 @@ void RobotOperationLease::SetNewOperationsAllowed(
 bool RobotOperationLease::NewOperationsAllowed()
 {
     std::lock_guard<std::mutex> lock(g_operationMutex);
-    return g_newOperationsAllowed;
+    return g_newOperationsAllowed && g_newOperationBlocks.empty();
+}
+
+RobotOperationLease::NewOperationBlockToken RobotOperationLease::AddNewOperationsBlock(
+    const QString& blockedReason)
+{
+    const NewOperationBlockToken token =
+        g_nextOperationBlockToken.fetch_add(1, std::memory_order_relaxed);
+    QString reason = blockedReason.trimmed();
+    if (reason.isEmpty())
+    {
+        reason = QStringLiteral("系统正在切换状态，禁止开始新的机器人硬件操作。");
+    }
+    std::lock_guard<std::mutex> lock(g_operationMutex);
+    g_newOperationBlocks.emplace(token, std::move(reason));
+    return token;
+}
+
+void RobotOperationLease::RemoveNewOperationsBlock(NewOperationBlockToken token)
+{
+    if (token == 0)
+    {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(g_operationMutex);
+    g_newOperationBlocks.erase(token);
 }
 
 RobotOperationLease::Ptr RobotOperationLease::TryAcquire(
@@ -170,13 +197,20 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquire(
     // 先构造未注册租约以保证异常安全：map 插入失败时不会留下幽灵占用。
     Ptr lease(new RobotOperationLease(driver, identityKey, 0, owner));
     std::lock_guard<std::mutex> lock(g_operationMutex);
-    if (!g_newOperationsAllowed)
+    if (!g_newOperationsAllowed || !g_newOperationBlocks.empty())
     {
         if (reason != nullptr)
         {
-            *reason = g_newOperationsBlockedReason.isEmpty()
-                ? QStringLiteral("账号会话未通过，禁止开始新的机器人硬件操作。")
-                : g_newOperationsBlockedReason;
+            if (!g_newOperationsAllowed)
+            {
+                *reason = g_newOperationsBlockedReason.isEmpty()
+                    ? QStringLiteral("账号会话未通过，禁止开始新的机器人硬件操作。")
+                    : g_newOperationsBlockedReason;
+            }
+            else
+            {
+                *reason = g_newOperationBlocks.cbegin()->second;
+            }
         }
         return {};
     }

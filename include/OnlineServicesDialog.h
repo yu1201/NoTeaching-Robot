@@ -57,6 +57,7 @@ private:
     void OnManifestReply(QNetworkReply* reply);
     void StartDownload();
     void OnDownloadFinished(QNetworkReply* reply);
+    void FallbackToFullDownload(const QString& reason);
     void InstallDownloadedPackage();
     void AppendLog(const QString& text);
     static int CompareVersions(const QString& lhs, const QString& rhs);  // <0/0/>0
@@ -147,10 +148,12 @@ private:
     QString m_remoteVersion;
     QString m_remoteFile;
     QString m_remoteSha256;
+    qint64 m_remoteSize = 0;
     QString m_remotePatchFile;
     QString m_remotePatchSha256;
     qint64 m_remotePatchSize = 0;
     bool m_usePatch = false;
     QString m_downloadedPath;
+    bool m_checkingForUpdate = false;
     bool m_downloading = false;
 };

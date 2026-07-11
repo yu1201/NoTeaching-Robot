@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "manifestVersion": "2026.07.12.1",
+  "description": "Required top-level FANUC runtime compiler outputs. This file is authoritative and must never be regenerated from a release worktree during packaging.",
+  "expectedFileCount": 21,
+  "expectedTpCount": 12,
+  "expectedPcCount": 9,
+  "files": [
+    {
+      "path": "SDK/FANUC/AUTOCAL1.tp",
+      "size": 353,
+      "sha256": "84cfcd2566d4ca9e2c4450d6c5d55efe04b37f0dc8240274db7ed153fb5041df"
+    },
+    {
+      "path": "SDK/FANUC/ceshi20260418.tp",
+      "size": 212,
+      "sha256": "2720530557515d8380035a4b1156f683f861e815a002350aefbcb6510556c837"
+    },
+    {
+      "path": "SDK/FANUC/FANUC_HECALIB.tp",
+      "size": 359,
+      "sha256": "4842053b73485efc11d8e3383a7235d8eb42be1ab85dfbee5e4155e233d0d770"
+    },
+    {
+      "path": "SDK/FANUC/FANUC_JOGJ.tp",
+      "size": 503,
+      "sha256": "a975f8b79be38d9b69114adaaa00f5430fbf4308722bba6adda99748b16b08c5"
+    },
+    {
+      "path": "SDK/FANUC/FANUC_JOGL.tp",
+      "size": 504,
+      "sha256": "30a4313227022abd97171a93e2d32da12e2d277e0559943f7d1084314283b1e6"
+    },
+    {
+      "path": "SDK/FANUC/FANUC_MOVJ.tp",
+      "size": 144,
+      "sha256": "c775299c188ab85bb54f47d2a864143d22c5b6ac43ce0d2db90939ecefd457bf"
+    },
+    {
+      "path": "SDK/FANUC/FANUC_MOVL.tp",
+      "size": 145,
+      "sha256": "8b43a00bb1728eb5241c3b37ef6a6d045b17330009514acaa2a12bd3e36f047f"
+    },
+    {
+      "path": "SDK/FANUC/FanucJobRunner.pc",
+      "size": 1148,
+      "sha256": "02c271bceee814d50c975479f48f30515508cc3c9b22e6bd71dfcdc97f57bf2c"
+    },
+    {
+      "path": "SDK/FANUC/FanucMonitorService.pc",
+      "size": 2782,
+      "sha256": "c58b93e07630bcb4f95fa00cb003511f4db8b2433f3387bd73625c68de2fc5d7"
+    },
+    {
+      "path": "SDK/FANUC/FanucPortOpenTest.pc",
+      "size": 1407,
+      "sha256": "c5f820850e8daf8f7fbc7682c65c7db5820e8db09cab2e767a3010a3a9eda876"
+    },
+    {
+      "path": "SDK/FANUC/FanucResidentService.pc",
+      "size": 1866,
+      "sha256": "091c79d45bfee7c3fb68752f0fa54225811ebb1512842626d7e3c77dc02baceb"
+    },
+    {
+      "path": "SDK/FANUC/FanucServiceLib.pc",
+      "size": 7085,
+      "sha256": "97f8c765b5365a30932175156c74df4521101b35f0c6c527a8f6c3fc31169dbc"
+    },
+    {
+      "path": "SDK/FANUC/LOADJOGBUF.pc",
+      "size": 2062,
+      "sha256": "2daa7be87551f48f1265a54103e0a997a0ec002729c2e57542e39aa083f77006"
+    },
+    {
+      "path": "SDK/FANUC/STARTALL.tp",
+      "size": 142,
+      "sha256": "a1cd6c69bdbf48a2a38135b92cbed90884419d5921928ed48a98576b5e7dc2b0"
+    },
+    {
+      "path": "SDK/FANUC/STARTMON.tp",
+      "size": 126,
+      "sha256": "dffba50d8bb540e200f1846713d4adcd825f6b21ea0292238395c26a484dd54a"
+    },
+    {
+      "path": "SDK/FANUC/STARTSVC.tp",
+      "size": 131,
+      "sha256": "4e106effab9b8139c9caf3fd95b3ee5380e1f0eda8013ac36ae15c8e214ce6cc"
+    },
+    {
+      "path": "SDK/FANUC/STARTSVC_test_config.tp",
+      "size": 131,
+      "sha256": "2681a41fca21bb78e1eca8fd431fa369423dee2692529aac58c9880942113d90"
+    },
+    {
+      "path": "SDK/FANUC/STARTSVC_test_noconfig.tp",
+      "size": 131,
+      "sha256": "108788d43c6b5ea5b7fd12f0984a8b09696fb25694dceb81ab52958360a575a5"
+    },
+    {
+      "path": "SDK/FANUC/WeldLWeave.pc",
+      "size": 637,
+      "sha256": "7bdf60cdb4b4a5ecf5e2bd8cd61f1379106d9a282c0c00763bfa9dc85577233d"
+    },
+    {
+      "path": "SDK/FANUC/WeldProgram.pc",
+      "size": 667,
+      "sha256": "1f118712071352ffb04a7012cb39781f049bd4e439edc461a05581d731cc62c4"
+    },
+    {
+      "path": "SDK/FANUC/WeldTriangleWeave.pc",
+      "size": 644,
+      "sha256": "787dc0ea1c3eb3ba1b4e9d4577da32a81b623223711c5d96558988c2e849615d"
+    }
+  ]
+}

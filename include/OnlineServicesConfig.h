@@ -146,4 +146,16 @@ namespace OnlineServicesConfig
 	{
 		WriteValue(QStringLiteral("PendingUpdateTargetVersion"), version);
 	}
+
+	// 每个 OTA 通道持久化本机见过的最高签名版本。HTTP 传输下用于拒绝已见版本回放；
+	// 不能替代 HTTPS/清单有效期，但可防止设备在见过新版本后被降回旧清单。
+	inline QString HighestSeenUpdateVersion(const QString& channel)
+	{
+		return ReadValue(QStringLiteral("HighestSeenUpdateVersion_%1").arg(channel), QString());
+	}
+
+	inline void SetHighestSeenUpdateVersion(const QString& channel, const QString& version)
+	{
+		WriteValue(QStringLiteral("HighestSeenUpdateVersion_%1").arg(channel), version);
+	}
 }

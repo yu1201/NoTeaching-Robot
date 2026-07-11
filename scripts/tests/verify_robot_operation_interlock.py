@@ -45,11 +45,13 @@ def main() -> int:
     step_driver = read("src/StepRobotDriver.cpp")
 
     for token in ("TryAcquire", "SetNewOperationsAllowed", "NewOperationsAllowed",
+                  "AddNewOperationsBlock", "RemoveNewOperationsBlock",
                   "CurrentOwner", "AnyActive", "ActiveSummary", "Matches",
                   "MarkMotionStarted", "MarkMotionCompleted", "MotionCompletionPending",
                   "StopAndConfirmUnverifiedMotion"):
         require(token in lease_h, f"lease API missing: {token}")
     for token in ("std::mutex", "g_activeOperations", "g_newOperationsAllowed",
+                  "g_newOperationBlocks", "g_nextOperationBlockToken",
                   "g_newOperationsBlockedReason", "g_nextOperationToken", "second.token == m_token",
                   "NormalizeSocketHost", "m_sSocketIP", "m_nSocketPort", "m_identityKey"):
         require(token in lease_cpp, f"lease registry safety mechanism missing: {token}")

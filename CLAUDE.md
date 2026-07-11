@@ -21,8 +21,9 @@ MSBuild.exe QtWidgetsApplication4.sln /m /p:Configuration=Release /p:Platform=x6
 #   或用 VS2022 打开 .sln 直接编译
 
 # 两段式发版打包
-powershell -ExecutionPolicy Bypass -File scripts\build_release_package.ps1   # → dist\QtWidgetsApplication4\
-powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1          # → dist\installer\NoTeaching-Robot-Setup-v<ver>.exe（Inno Setup）
+$version = "2026.07.12.1200" # 示例；必须显式给出，并与源码/iss 内嵌版本一致
+powershell -ExecutionPolicy Bypass -File scripts\build_release_package.ps1 -AppVersion $version -Channel neutral
+powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1 -AppVersion $version -Channel neutral
 
 # 切换 STEP SDK（之后必须重新编译 Debug+Release 两个配置）
 powershell -ExecutionPolicy Bypass -File scripts\switch_step_sdk.ps1 -Mode timestamp|legacy
@@ -35,6 +36,8 @@ python tools\migrate_config_to_sqlite.py --source Data --encrypt
 cmake -S portable/MeasureThenWeldFilterFit -B portable/MeasureThenWeldFilterFit/build
 cmake --build portable/MeasureThenWeldFilterFit/build --config Release
 ```
+
+正式发版必须在同一 Git common-dir 的中性/品牌 linked worktree 以同一 `$version` 分别完成两段式打包，且品牌 HEAD 必须继承中性 HEAD。随后用 `scripts\verify_release_pair.ps1` 生成规范 `dist\release-gates\release-pair-<version>.json`，再运行 `python scripts\upload_ota.py prepare-dual ...` 生成离线候选报告；只有签名、双通道清单和远端回读等门禁全部通过后才可运行 `publish-dual`。旧 `scripts\upload_release.ps1` 已永久停用。
 
 **构建依赖路径硬编码在 `.vcxproj` 里**，换机器必须改：Qt `E:\workspace\soft\QT\6.7.3\msvc2022_64`、OpenCV `E:\OpenCV4.6.0`、Eigen `E:\Eigen3.4\eigen-3.4.0`、Orocos KDL `C:\Program Files\orocos_kdl`；STEP `Robot-SDK.lib`/`Robot-SDKd.lib` 需自行放进 `SDK\STEP`。必需编译选项 `/utf-8 /bigobj /Zm2000` 与 `DisableSpecificWarnings 4828` 不能去掉（翻译单元巨大、中文字面量多）。`AfterBuildDebug/Release` MSBuild target 会自动跑 `windeployqt` 并拷贝 `opencv_world460[d].dll`、`SKJCamera.dll`、`qt_zh_CN.qm`，因此裸构建出的 `x64\<Config>\` 已可直接运行。
 
