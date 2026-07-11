@@ -11,6 +11,7 @@
 #include "WorkpieceMeshBuilder.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
+#include "RobotMotionTimeoutPolicy.h"
 #include "RobotOperationLease.h"
 #include "RobotPoseTransform.h"
 #include "STEPRobotDriver.h"
@@ -3655,6 +3656,38 @@ double EstimateMoveInfosPathLengthMm(const std::vector<T_ROBOT_MOVE_INFO>& moveI
     return totalLengthMm;
 }
 
+double EstimateMoveInfosRunMs(
+    const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
+    bool fanucSpeedIsMmPerSec)
+{
+    if (moveInfos.size() < 2)
+    {
+        return 0.0;
+    }
+
+    double totalRunMs = 0.0;
+    for (size_t index = 1; index < moveInfos.size(); ++index)
+    {
+        const T_ROBOT_COORS& prev = moveInfos[index - 1].tCoord;
+        const T_ROBOT_COORS& curr = moveInfos[index].tCoord;
+        const double dx = curr.dX - prev.dX;
+        const double dy = curr.dY - prev.dY;
+        const double dz = curr.dZ - prev.dZ;
+        const double segmentLengthMm = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const double configuredSpeed = moveInfos[index].tSpeed.dSpeed;
+        const double speedMmPerSec = fanucSpeedIsMmPerSec
+            ? configuredSpeed
+            : configuredSpeed / 60.0;
+        if (!std::isfinite(segmentLengthMm) || !std::isfinite(speedMmPerSec)
+            || speedMmPerSec <= 0.0)
+        {
+            return std::numeric_limits<double>::infinity();
+        }
+        totalRunMs += segmentLengthMm / speedMmPerSec * 1000.0;
+    }
+    return totalRunMs;
+}
+
 struct WeldSeamCompApplyStats
 {
     int zAdjustedCount = 0;
@@ -6666,7 +6699,7 @@ double FanucLinearSpeedMmPerSecFromConfig(double speedMmPerMin, double fallbackM
     }
 
     const double converted = speedMmPerMin / 60.0;
-    return converted > 0.0 ? converted : fallbackMmPerSec;
+    return converted >= 1.0 ? std::floor(converted) : 0.0;
 }
 
 double LinearCommandSpeedForRobot(RobotDriverAdaptor* pRobotDriver, double speedMmPerMin, double fallback)
@@ -6748,7 +6781,7 @@ bool WaitRobotMotionDone(
     const QString& name,
     const MeasureThenWeldService::LogCallback& appendLog,
     int startTimeoutMs = 3000,
-    int finishTimeoutMs = 120000,
+    int finishTimeoutMs = 1800000,
     int pollDelayMs = 100)
 {
     if (pRobotDriver == nullptr)
@@ -6795,7 +6828,7 @@ bool WaitRobotMotionDone(
 
         // R[93]=1 只是 TP 程序内部里程碑；还要等 CHECK_DONE 稳定回读，
         // 确认 CALL_JOB 任务本身已终止后才能释放 motionPending。
-        const int taskDone = pFanucDriver->CheckRobotDone(pollDelayMs);
+        const int taskDone = pFanucDriver->CheckRobotDone(pollDelayMs, finishTimeoutMs);
         if (appendLog)
         {
             appendLog(QString("运动任务终态：%1, CheckRobotDone=%2").arg(name).arg(taskDone));
@@ -6812,7 +6845,7 @@ bool WaitRobotMotionDone(
         return taskDone > 0;
     }
 
-    const int done = pRobotDriver->CheckRobotDone(pollDelayMs);
+    const int done = pRobotDriver->CheckRobotDone(pollDelayMs, finishTimeoutMs);
     if (appendLog)
     {
         appendLog(QString("运动结束：%1, CheckRobotDone=%2").arg(name).arg(done));
@@ -7267,6 +7300,35 @@ bool MeasureThenWeldService::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, 
     }
     const double commandSpeed = LinearCommandSpeedForRobot(pRobotDriver, speed, 1.0);
     const QString commandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
+	T_ROBOT_COORS current;
+	if (!pRobotDriver->TryGetCurrentPos(current))
+	{
+		const QString failure = QString("直线运动失败：%1，读取当前位置失败，%2")
+			.arg(name, RobotMotionStatusText(pRobotDriver));
+		if (appendLog)
+		{
+			appendLog(failure);
+		}
+		return false;
+	}
+	int motionTimeoutMs = 0;
+	std::string admissionError;
+	if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
+		current,
+		coors,
+		dynamic_cast<FANUCRobotCtrl*>(pRobotDriver) != nullptr ? commandSpeed * 60.0 : speed,
+		motionTimeoutMs,
+		&admissionError))
+	{
+		const QString failure = QString("直线运动已拒绝：%1，%2")
+			.arg(name, QString::fromUtf8(admissionError.c_str()));
+		pRobotDriver->SetLastRobotError(failure.toUtf8().toStdString());
+		if (appendLog)
+		{
+			appendLog(failure);
+		}
+		return false;
+	}
     if (setFlowStep)
     {
         setFlowStep(QString("正在直线运动：%1").arg(name));
@@ -7293,7 +7355,13 @@ bool MeasureThenWeldService::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, 
         return false;
     }
 
-    return WaitRobotMotionDone(pRobotDriver, name, appendLog);
+    return WaitRobotMotionDone(
+		pRobotDriver,
+		name,
+		appendLog,
+		3000,
+		motionTimeoutMs,
+		100);
 }
 
 bool MeasureThenWeldService::MoveScanStartSafeAndWait(
@@ -7327,7 +7395,16 @@ bool MeasureThenWeldService::MoveScanStartSafeAndWait(
 
     if (param.bHasStartPulse)
     {
-        const T_ANGLE_PULSE currentPulse = pRobotDriver->GetCurrentPulse();
+        T_ANGLE_PULSE currentPulse;
+        if (!pRobotDriver->TryGetCurrentPulse(currentPulse))
+        {
+            if (appendLog)
+            {
+                appendLog("扫描安全位规划已拒绝：读取当前关节位置失败，"
+                    + RobotMotionStatusText(pRobotDriver));
+            }
+            return false;
+        }
         const double maxWristDeltaDeg = MaxWristDeltaDeg(currentPulse, param.tStartPulse, pRobotDriver->m_tAxisUnit);
         const double warnThresholdDeg = param.dScanSafeFlipWarnThresholdDeg > 0.0
             ? param.dScanSafeFlipWarnThresholdDeg
@@ -7366,7 +7443,16 @@ bool MeasureThenWeldService::MoveScanStartSafeAndWait(
                 return false;
             }
 
-            T_ROBOT_COORS currentCoors = pRobotDriver->GetCurrentPos();
+            T_ROBOT_COORS currentCoors;
+            if (!pRobotDriver->TryGetCurrentPos(currentCoors))
+            {
+                if (appendLog)
+                {
+                    appendLog("扫描姿态翻转保护已拒绝：读取当前直角位置失败，"
+                        + RobotMotionStatusText(pRobotDriver));
+                }
+                return false;
+            }
             const double liftHeight = std::max(0.0, param.dScanSafeLiftHeightMm);
             if (liftHeight > 1e-6)
             {
@@ -7542,6 +7628,33 @@ bool MeasureThenWeldService::RunScanCycle(
     }
 
     const double safeRunSpeed = std::isfinite(runSpeed) && runSpeed > 0.0 ? runSpeed : 1.0;
+	if (dynamic_cast<FANUCRobotCtrl*>(pRobotDriver) != nullptr)
+	{
+		const double safeCommandSpeed = LinearCommandSpeedForRobot(
+			pRobotDriver, safeRunSpeed, 0.0);
+		const double scanCommandSpeed = LinearCommandSpeedForRobot(
+			pRobotDriver, param.dScanSpeed, 0.0);
+		QStringList unrepresentableSpeeds;
+		if (safeCommandSpeed < 1.0)
+		{
+			unrepresentableSpeeds << QString("安全移动速度=%1mm/min")
+				.arg(safeRunSpeed, 0, 'f', 3);
+		}
+		if (scanCommandSpeed < 1.0)
+		{
+			unrepresentableSpeeds << QString("扫描速度=%1mm/min")
+				.arg(param.dScanSpeed, 0, 'f', 3);
+		}
+		if (!unrepresentableSpeeds.isEmpty())
+		{
+			result.fatalFailure = true;
+			return fail(
+				QString("FANUC扫描流程已在首条运动前拒绝：固定TP最低只能表示1mm/sec（60mm/min），"
+					"禁止把低速静默替换为更高速度。不可表示项：%1")
+					.arg(unrepresentableSpeeds.join("，")),
+				false);
+		}
+	}
     if (!allowAction("扫描下枪安全位置"))
     {
         return false;
@@ -7965,26 +8078,62 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                     && passiveRobotSamplingActive
                     && selectedTimestampMs == lastRobotMonitorMs)
                 {
-                    return false;
+					// 状态监控通常慢于扫描主循环；重复看到同一有效被动帧只表示
+					// “暂无新样本”，不是读取失败。保持成功但不重复入队，下一轮等待新帧。
+                    return true;
                 }
 
                 if (selectedTimestampMs > 0)
                 {
-                    sample.pose = snapshot.pose;
-                    sample.timestampUs = static_cast<qint64>(selectedTimestampMs) * 1000;
-                    lastRobotMonitorMs = selectedTimestampMs;
-                    passiveRobotSamplingActive = true;
-                    if (snapshot.pcRecvMs > 0)
+                    const bool usableSnapshotPose = RobotMotionTimeoutPolicy::IsFinitePose(snapshot.pose)
+                        && (std::abs(snapshot.pose.dX) >= 1e-12
+                            || std::abs(snapshot.pose.dY) >= 1e-12
+                            || std::abs(snapshot.pose.dZ) >= 1e-12
+                            || std::abs(snapshot.pose.dRX) >= 1e-12
+                            || std::abs(snapshot.pose.dRY) >= 1e-12
+                            || std::abs(snapshot.pose.dRZ) >= 1e-12
+                            || std::abs(snapshot.pose.dBX) >= 1e-12
+                            || std::abs(snapshot.pose.dBY) >= 1e-12
+                            || std::abs(snapshot.pose.dBZ) >= 1e-12);
+                    if (usableSnapshotPose)
                     {
-                        hasAxisPcPair = true;
-                        pairAxisUs = sample.timestampUs;
-                        pairPcUs = static_cast<qint64>(snapshot.pcRecvMs) * 1000;
+                        sample.pose = snapshot.pose;
+                        sample.timestampUs = static_cast<qint64>(selectedTimestampMs) * 1000;
+                        lastRobotMonitorMs = selectedTimestampMs;
+                        passiveRobotSamplingActive = true;
+                        if (snapshot.pcRecvMs > 0)
+                        {
+                            hasAxisPcPair = true;
+                            pairAxisUs = sample.timestampUs;
+                            pairPcUs = static_cast<qint64>(snapshot.pcRecvMs) * 1000;
+                        }
                     }
                 }
             }
             if (sample.timestampUs <= 0)
             {
-                sample.pose = pRobotDriver->GetCurrentPos();
+				// 本轮若锁定机器人时间轴，主动GET_CUR_POS只有PC接收时刻，不能把
+				// steady-clock纪元混入robot_ms序列；拿不到同帧被动时间戳就失败关闭。
+				if (useRobotTimestampForScan)
+				{
+					return false;
+				}
+                T_ROBOT_COORS strictPose;
+                if (!pRobotDriver->TryGetCurrentPos(strictPose)
+                    || !RobotMotionTimeoutPolicy::IsFinitePose(strictPose)
+                    || (std::abs(strictPose.dX) < 1e-12
+                        && std::abs(strictPose.dY) < 1e-12
+                        && std::abs(strictPose.dZ) < 1e-12
+                        && std::abs(strictPose.dRX) < 1e-12
+                        && std::abs(strictPose.dRY) < 1e-12
+                        && std::abs(strictPose.dRZ) < 1e-12
+                        && std::abs(strictPose.dBX) < 1e-12
+                        && std::abs(strictPose.dBY) < 1e-12
+                        && std::abs(strictPose.dBZ) < 1e-12))
+                {
+                    return false;
+                }
+                sample.pose = strictPose;
                 sample.timestampUs = SteadyNowUs();
             }
 
@@ -8199,6 +8348,47 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             .arg(scanCommandSpeedUnit));
     }
 
+    // 超长扫描必须在第一条运动前拒绝；30分钟是异常运行边界，不能用来截断
+    // 已知会合法运行更久的扫描。
+    const double scanDistanceMm = std::hypot(
+        param.tEndPos.dX - param.tStartPos.dX,
+        param.tEndPos.dY - param.tStartPos.dY,
+        param.tEndPos.dZ - param.tStartPos.dZ);
+    const double scanSpeedMmPerSec = pFanucDriver != nullptr
+        ? scanCommandSpeed
+        : (param.dScanSpeed > 1e-6 ? param.dScanSpeed / 60.0 : 0.0);
+    const double estimatedScanMs = scanSpeedMmPerSec > 1e-6
+        ? (scanDistanceMm / scanSpeedMmPerSec) * 1000.0
+        : std::numeric_limits<double>::infinity();
+    const double requiredScanTimeoutMs = estimatedScanMs * 2.0 + 30000.0;
+    if (!std::isfinite(requiredScanTimeoutMs)
+        || requiredScanTimeoutMs > RobotMotionTimeoutPolicy::kMotionTimeoutMs)
+    {
+        const QString failure = QString(
+            "扫描运动已拒绝：距离≈%1 mm、预计≈%2 min，含安全裕量后超过30分钟上限；请提高扫描速度或拆分扫描。")
+            .arg(scanDistanceMm, 0, 'f', 1)
+            .arg(estimatedScanMs / 60000.0, 0, 'f', 1);
+        pRobotDriver->SetLastRobotError(failure.toUtf8().toStdString());
+        if (appendLog)
+        {
+            appendLog(failure);
+        }
+        finishCameraProcessingWorkers();
+        frameCache->Clear();
+        return false;
+    }
+    const int scanFinishTimeoutMs = static_cast<int>(std::clamp(
+        requiredScanTimeoutMs,
+        120000.0,
+        static_cast<double>(RobotMotionTimeoutPolicy::kMotionTimeoutMs)));
+    if (appendLog)
+    {
+        appendLog(QString("扫描距离≈%1 mm，预计扫描≈%2 s，完成超时=%3 s。")
+            .arg(scanDistanceMm, 0, 'f', 1)
+            .arg(estimatedScanMs / 1000.0, 0, 'f', 1)
+            .arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0));
+    }
+
     const bool moveOk = pRobotDriver->MoveByJob(
         param.tEndPos,
         T_ROBOT_MOVE_SPEED(scanCommandSpeed, 0.0, 0.0),
@@ -8223,7 +8413,15 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         progress->commandAccepted = true;
     }
 
-    appendRobotPose();
+    if (!appendRobotPose())
+    {
+        const QString failure = QStringLiteral(
+            "扫描运动已启动，但首个严格机器人位姿读取失败；已中止运动并丢弃本轮扫描。");
+        StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
+        finishCameraProcessingWorkers();
+        frameCache->Clear();
+        return false;
+    }
     int motionState = 0;
     // STEP ContiMoveAnyWithProgramName 返回成功前已经回读过 eRun；
     // 首次扫描轮询可能已经直接看到 eStop，不能因此误判为“未启动”。
@@ -8236,27 +8434,6 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         }
         scanStartCameraSequence = frameCache->Mark();
         lastPulledCameraSequence = scanStartCameraSequence;
-    }
-    // 扫描完成超时按扫描距离/配置速度动态估计（固定 120s 在慢速测量长焊缝时不够用）：
-    // 预计时间×2 + 30s，夹在 [120s, 1800s]，与焊接执行的完成超时算法一致。
-    const double scanDistanceMm = std::hypot(
-        param.tEndPos.dX - param.tStartPos.dX,
-        param.tEndPos.dY - param.tStartPos.dY,
-        param.tEndPos.dZ - param.tStartPos.dZ);
-    const double scanSpeedMmPerSec = param.dScanSpeed > 1e-6 ? param.dScanSpeed / 60.0 : 0.0;
-    const double estimatedScanMs = scanSpeedMmPerSec > 1e-6
-        ? (scanDistanceMm / scanSpeedMmPerSec) * 1000.0
-        : 0.0;
-    const int scanFinishTimeoutMs = static_cast<int>(std::clamp(
-        estimatedScanMs * 2.0 + 30000.0,
-        120000.0,
-        1800000.0));
-    if (appendLog)
-    {
-        appendLog(QString("扫描距离≈%1 mm，预计扫描≈%2 s，完成超时=%3 s。")
-            .arg(scanDistanceMm, 0, 'f', 1)
-            .arg(estimatedScanMs / 1000.0, 0, 'f', 1)
-            .arg(scanFinishTimeoutMs / 1000.0, 0, 'f', 0));
     }
     const qint64 motionStartMs = SteadyNowMs();
     qint64 lastRobotPollMs = motionStartMs - ROBOT_SAMPLE_INTERVAL_MS;
@@ -8329,7 +8506,15 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             }
             if (motionStarted)
             {
-                appendRobotPose();
+                if (!appendRobotPose())
+                {
+                    const QString failure = QStringLiteral(
+                        "扫描运动期间严格机器人位姿读取失败；已中止运动并丢弃本轮扫描，禁止生成焊道。");
+                    StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
+                    finishCameraProcessingWorkers();
+                    frameCache->Clear();
+                    return false;
+                }
                 if (!hasCameraTimeBaseRobotTimestamp)
                 {
                     const qint64 latestRobotUs = latestRobotTimestampUs();
@@ -8346,7 +8531,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 // STEP 的 ePause 是可恢复态，绝不是完成；eStop 也要再由
                 // CheckRobotDone 校验无控制器错误。FANUC R[93]=1 同样只是里程碑，
                 // 还需 CHECK_DONE 稳定确认任务退出。
-                const int terminalState = pRobotDriver->CheckRobotDone(100);
+                const int terminalState = pRobotDriver->CheckRobotDone(100, 30000);
                 if (appendLog)
                 {
                     appendLog(QString("扫描运动终态确认：CheckRobotDone=%1").arg(terminalState));
@@ -8398,7 +8583,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    appendRobotPose();
+    if (!appendRobotPose())
+    {
+        if (appendLog)
+        {
+            appendLog(QStringLiteral("扫描终态位姿读取失败，已丢弃本轮扫描，禁止生成焊道。"));
+        }
+        finishCameraProcessingWorkers();
+        frameCache->Clear();
+        return false;
+    }
     const qint64 scanMotionElapsedMs = SteadyNowMs() - motionStartMs;
 
     if (scanEndCameraSequence == 0)
@@ -8422,7 +8616,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         }
         tailWaitTriggered = true;
 
-        appendRobotPose();
+        if (!appendRobotPose())
+        {
+            if (appendLog)
+            {
+                appendLog(QStringLiteral("扫描尾部位姿读取失败，已丢弃本轮扫描，禁止生成焊道。"));
+            }
+            finishCameraProcessingWorkers();
+            frameCache->Clear();
+            return false;
+        }
         if (latestEnqueuedCameraTimestampUs <= latestRobotTimestampUs())
         {
             break;
@@ -8563,7 +8766,15 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                     {
                         break;
                     }
-                    appendRobotPose();
+                    if (!appendRobotPose())
+                    {
+                        if (appendLog)
+                        {
+                            appendLog(QStringLiteral(
+                                "扫描统计校时补采位姿失败，已丢弃本轮扫描，禁止生成焊道。"));
+                        }
+                        return false;
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(CAMERA_ROBOT_MATCH_TAIL_POLL_MS));
                 }
             }
@@ -10726,9 +10937,43 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         (weldPosePreset.transitionSpeedEnabled && weldPosePreset.transitionSpeedMmPerMin > 0.0)
         ? LinearCommandSpeedForRobot(pRobotDriver, weldPosePreset.transitionSpeedMmPerMin, weldCommandSpeed)
         : 0.0;
+    const double safeMoveCommandSpeed =
+        LinearCommandSpeedForRobot(pRobotDriver, safeMoveSpeedMmPerMin, 1.0);
     const QString weldCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
-    const double weldEstimateSpeedMmPerSec =
-        FanucLinearSpeedMmPerSecFromConfig(weldSpeedMmPerMin, 1.0);
+    const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver) != nullptr;
+    if (isFanucDriver)
+    {
+        QStringList unrepresentableSpeeds;
+        if (weldCommandSpeed < 1.0)
+        {
+            unrepresentableSpeeds << QString("焊接/空跑速度=%1mm/min")
+                .arg(weldSpeedMmPerMin, 0, 'f', 3);
+        }
+        if (safeMoveCommandSpeed < 1.0)
+        {
+            unrepresentableSpeeds << QString("安全移动速度=%1mm/min")
+                .arg(safeMoveSpeedMmPerMin, 0, 'f', 3);
+        }
+        if (weldPosePreset.transitionSpeedEnabled
+            && weldPosePreset.transitionSpeedMmPerMin > 0.0
+            && transitionCommandSpeed < 1.0)
+        {
+            unrepresentableSpeeds << QString("拐点过渡速度=%1mm/min")
+                .arg(weldPosePreset.transitionSpeedMmPerMin, 0, 'f', 3);
+        }
+        if (!unrepresentableSpeeds.isEmpty())
+        {
+            error = "FANUC焊接流程已在首条运动前拒绝：固定TP最低只能表示1mm/sec（60mm/min），"
+                "禁止把低速静默替换为更高速度。不可表示项："
+                + unrepresentableSpeeds.join("，");
+            pRobotDriver->SetLastRobotError(error.toUtf8().toStdString());
+            if (appendLog)
+            {
+                appendLog(error);
+            }
+            return false;
+        }
+    }
     std::vector<T_ROBOT_MOVE_INFO> moveInfos;
     QVector<WeldPoseFileRecord> sampledRecords;
     if (!BuildWeldPoseMoveInfos(
@@ -10744,6 +10989,27 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         inputAlreadyInExecutionOrder))
     {
         return false;
+    }
+    if (dynamic_cast<FANUCRobotCtrl*>(pRobotDriver) != nullptr)
+    {
+        for (size_t index = 0; index < moveInfos.size(); ++index)
+        {
+            const T_ROBOT_MOVE_INFO& info = moveInfos[index];
+            if (info.nMoveType == MOVL
+                && (!std::isfinite(info.tSpeed.dSpeed) || info.tSpeed.dSpeed < 1.0))
+            {
+                error = QString(
+                    "FANUC焊接轨迹已在首条运动前拒绝：点%1的线速度无法表示（%2 mm/sec），最低1mm/sec且禁止静默提速。")
+                    .arg(index)
+                    .arg(info.tSpeed.dSpeed, 0, 'f', 6);
+                pRobotDriver->SetLastRobotError(error.toUtf8().toStdString());
+                if (appendLog)
+                {
+                    appendLog(error);
+                }
+                return false;
+            }
+        }
     }
     const QString sampledPosePath = BuildFinalSampledWeldPosePath(
         poseFilePath, inputAlreadyInExecutionOrder);
@@ -10877,13 +11143,28 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     QString programNameText;
     int lastState = 0;
     const double pathLengthMm = EstimateMoveInfosPathLengthMm(moveInfos);
-    const double estimatedRunMs = weldEstimateSpeedMmPerSec > 1e-6
-        ? (pathLengthMm / weldEstimateSpeedMmPerSec) * 1000.0
-        : 0.0;
+    const double estimatedRunMs = EstimateMoveInfosRunMs(
+        moveInfos,
+        dynamic_cast<FANUCRobotCtrl*>(pRobotDriver) != nullptr);
+    const double requiredFinishTimeoutMs = estimatedRunMs * 2.0 + 30000.0;
+    if (!std::isfinite(requiredFinishTimeoutMs)
+        || requiredFinishTimeoutMs > RobotMotionTimeoutPolicy::kMotionTimeoutMs)
+    {
+        error = QString(
+            "焊接轨迹已拒绝：长度≈%1 mm、预计≈%2 min，含安全裕量后超过30分钟上限；请提高速度或拆分轨迹。")
+            .arg(pathLengthMm, 0, 'f', 1)
+            .arg(estimatedRunMs / 60000.0, 0, 'f', 1);
+        if (appendLog)
+        {
+            appendLog(error);
+        }
+        pRobotDriver->SetLastRobotError(error.toUtf8().toStdString());
+        return false;
+    }
     const int finishTimeoutMs = static_cast<int>(std::clamp(
-        estimatedRunMs * 2.0 + 30000.0,
+        requiredFinishTimeoutMs,
         120000.0,
-        1800000.0));
+        static_cast<double>(RobotMotionTimeoutPolicy::kMotionTimeoutMs)));
 
     auto stopBeforeNextWeldAction = [&](const QString& nextAction) -> bool
         {
@@ -10939,8 +11220,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
 
     if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
     {
-        const double safeMoveSpeedMmPerSec =
-            FanucLinearSpeedMmPerSecFromConfig(safeMoveSpeedMmPerMin, 1.0);
+        const double safeMoveSpeedMmPerSec = safeMoveCommandSpeed;
         if (setFlowStep)
         {
             setFlowStep("正在移动到下枪安全位置，并行下发焊接轨迹");
@@ -10950,6 +11230,36 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             appendLog(QString("开始直线运动：下枪安全位置，配置速度= %1 mm/min，下发速度= %2 mm/sec")
                 .arg(safeMoveSpeedMmPerMin, 0, 'f', 3)
                 .arg(safeMoveSpeedMmPerSec, 0, 'f', 3));
+        }
+
+        T_ROBOT_COORS currentSafeStart;
+        if (!pFanucDriver->TryGetCurrentPos(currentSafeStart))
+        {
+            error = "下枪安全位置运动已拒绝：读取当前机器人位置失败，"
+                + RobotMotionStatusText(pRobotDriver);
+            if (appendLog)
+            {
+                appendLog(error);
+            }
+            return false;
+        }
+        int startSafeTimeoutMs = 0;
+        std::string startSafeAdmissionError;
+        if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
+            currentSafeStart,
+            startSafeCoors,
+            safeMoveSpeedMmPerSec * 60.0,
+            startSafeTimeoutMs,
+            &startSafeAdmissionError))
+        {
+            error = "下枪安全位置运动已拒绝："
+                + QString::fromUtf8(startSafeAdmissionError.c_str());
+            pRobotDriver->SetLastRobotError(error.toUtf8().toStdString());
+            if (appendLog)
+            {
+                appendLog(error);
+            }
+            return false;
         }
 
         if (!pFanucDriver->MoveByJob(
@@ -10992,7 +11302,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
 
         int startSafeLastState = 0;
         const bool startSafeDoneOk = pFanucDriver->WaitStateDone(
-            FANUC_MOTION_STATE_REG, 1, 10, 20, 3000, 120000, 100, &startSafeLastState);
+            FANUC_MOTION_STATE_REG, 1, 10, 20, 3000, startSafeTimeoutMs, 100, &startSafeLastState);
         if (appendLog)
         {
             appendLog(QString("直线运动结束：下枪安全位置, R[%1]=%2, WaitStateDone=%3")
@@ -11010,7 +11320,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             return false;
         }
 
-        const int startSafeTaskDone = pFanucDriver->CheckRobotDone(100);
+        const int startSafeTaskDone = pFanucDriver->CheckRobotDone(100, 30000);
         if (appendLog)
         {
             appendLog(QString("下枪安全位置任务终态：CheckRobotDone=%1").arg(startSafeTaskDone));
@@ -11253,7 +11563,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             return false;
         }
 
-        lastState = pRobotDriver->CheckRobotDone(100);
+        lastState = pRobotDriver->CheckRobotDone(100, finishTimeoutMs);
         if (lastState <= 0)
         {
             const QString detail = RobotMotionStatusText(pRobotDriver);

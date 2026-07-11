@@ -8,6 +8,7 @@
 #include "RobotDriverAdaptor.h"
 #include "RobotLog.h"
 #include "RobotMessage.h"
+#include "RobotMotionTimeoutPolicy.h"
 #include "RobotOperationLease.h"
 #include "RobotPoseTransform.h"
 #include "STEPRobotDriver.h"
@@ -61,7 +62,6 @@ constexpr int kHandEyeAutoLastSampleStep = 16;
 constexpr int kHandEyeAutoDoneStep = 999;
 constexpr int kHandEyeAutoAbortValue = -1;
 constexpr double kHandEyeAutoMoveSpeedMmPerMin = 500.0;
-constexpr int kHandEyeAutoMoveDoneTimeoutMs = 180000;
 constexpr int kHandEyeAutoNoMotionTimeoutMs = 8000;
 constexpr int kHandEyeFanucDoneStartupGuardMs = 1200;
 constexpr int kHandEyeFanucDoneStableSamples = 4;
@@ -77,6 +77,91 @@ constexpr int kHandEyeRobotCheckPrIndex = 80;
 constexpr int kHandEyeRobotCheckStateReg = 92;
 constexpr const char* kHandEyeRobotCheckProgramName = "FANUC_HECHECK";
 constexpr int kCameraTimestampCheckDurationMs = 5000;
+
+double HandEyeLinearCommandSpeed(
+    RobotDriverAdaptor* driver,
+    double speedMmPerMin)
+{
+    if (!std::isfinite(speedMmPerMin) || speedMmPerMin <= 0.0)
+    {
+        return 0.0;
+    }
+    if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
+    {
+        const double mmPerSec = speedMmPerMin / 60.0;
+        return mmPerSec >= 1.0 ? std::floor(mmPerSec) : 0.0;
+    }
+    return speedMmPerMin;
+}
+
+bool ConfirmRobotStoppedBeforeHandEyeMove(RobotDriverAdaptor* driver, QString* error)
+{
+    if (driver == nullptr)
+    {
+        if (error != nullptr)
+        {
+            *error = "机器人驱动为空，无法确认运动前停止状态。";
+        }
+        return false;
+    }
+    if (RobotOperationLease::MotionCompletionPending(driver))
+    {
+        if (error != nullptr)
+        {
+            *error = "仍有上一条运动等待终态确认，已拒绝下发新的 MOVL。";
+        }
+        return false;
+    }
+
+    const int done = driver->CheckDone();
+    if (RobotOperationLease::MotionCompletionPending(driver))
+    {
+        if (error != nullptr)
+        {
+            *error = "确认机器人状态期间出现待确认运动，已拒绝下发新的 MOVL。";
+        }
+        return false;
+    }
+
+    if (dynamic_cast<STEPRobotCtrl*>(driver) != nullptr)
+    {
+        if (done != STEPROBOTSDK::eStop)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("STEP 机器人运动前状态=%1，仅明确停止 eStop(%2) 允许下发 MOVL；运行、暂停或未知状态均已拒绝。")
+                    .arg(done)
+                    .arg(STEPROBOTSDK::eStop);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
+    {
+        if (done != 1)
+        {
+            if (error != nullptr)
+            {
+                *error = QString("FANUC 机器人运动前 DONE=%1，仅可信停止 DONE=1 允许下发 MOVL；运行或读取失败均已拒绝。")
+                    .arg(done);
+                if (done < 0)
+                {
+                    *error += "原因：" + DecodeRobotMessageText(driver->GetLastRobotError());
+                }
+            }
+            return false;
+        }
+        return true;
+    }
+
+    if (error != nullptr)
+    {
+        *error = "当前机器人驱动不支持手眼 MOVL 的主动停止状态确认，已拒绝运动。";
+    }
+    return false;
+}
 
 QString FormatDouble(double value, int precision = 6)
 {
@@ -509,16 +594,6 @@ bool WaitGenericRobotDone(
         pollIntervalMs = 100;
     }
 
-    const auto startTime = std::chrono::steady_clock::now();
-    bool seenRunning = false;
-    bool movementSeen = false;
-    const T_ROBOT_COORS startPose = driver->GetCurrentPos();
-    T_ROBOT_COORS lastPose = startPose;
-    const bool hasStartPose = IsFinitePose(startPose);
-    int stableDoneCount = 0;
-    int lastState = -1;
-    int lastLogSecond = -1;
-    const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(driver) != nullptr;
     const auto failUnverified = [driver, error, terminalVerifiedOut](const QString& message) -> bool
         {
             QString finalMessage = message;
@@ -540,6 +615,22 @@ bool WaitGenericRobotDone(
             }
             return false;
         };
+    const auto startTime = std::chrono::steady_clock::now();
+    bool seenRunning = false;
+    T_ROBOT_COORS startPose;
+    if (!driver->TryGetCurrentPos(startPose) || !IsFinitePose(startPose))
+    {
+        return failUnverified(
+            "运动已下发，但严格读取起始位置失败："
+            + DecodeRobotMessageText(driver->GetLastRobotError()));
+    }
+    T_ROBOT_COORS lastPose = startPose;
+	T_ROBOT_COORS lastProgressPose = startPose;
+	auto lastProgressTime = startTime;
+    int stableDoneCount = 0;
+    int lastState = -1;
+    int lastLogSecond = -1;
+    const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(driver) != nullptr;
 
     while (true)
     {
@@ -574,20 +665,27 @@ bool WaitGenericRobotDone(
             seenRunning = true;
             stableDoneCount = 0;
 
-            const T_ROBOT_COORS currentPose = driver->GetCurrentPos();
-            if (IsFinitePose(currentPose))
+            T_ROBOT_COORS currentPose;
+            if (!driver->TryGetCurrentPos(currentPose) || !IsFinitePose(currentPose))
             {
-                lastPose = currentPose;
-                if (hasStartPose)
-                {
-                    const double moveDelta = PoseTranslationDistance(startPose, currentPose);
-                    const double rotateDelta = PoseRotationDistance(startPose, currentPose);
-                    if (moveDelta >= kHandEyeAutoMoveDetectMm || rotateDelta >= kHandEyeAutoRotateDetectDeg)
-                    {
-                        movementSeen = true;
-                    }
-                }
+                return failUnverified(
+                    "机器人运行中读取当前位置失败："
+                    + DecodeRobotMessageText(driver->GetLastRobotError()));
             }
+            lastPose = currentPose;
+            const double moveDelta = PoseTranslationDistance(lastProgressPose, currentPose);
+            const double rotateDelta = PoseRotationDistance(lastProgressPose, currentPose);
+            if (moveDelta >= kHandEyeAutoMoveDetectMm || rotateDelta >= kHandEyeAutoRotateDetectDeg)
+            {
+				lastProgressPose = currentPose;
+				lastProgressTime = now;
+            }
+			if (isStepDriver && lastState == STEPROBOTSDK::ePause)
+			{
+				// 可恢复暂停不计入“无进展”；恢复eRun后重新给足完整看门狗窗口。
+				lastProgressPose = currentPose;
+				lastProgressTime = now;
+			}
 
             const int elapsedSecond = elapsedMs / 1000;
             if (progressLog && elapsedSecond != lastLogSecond)
@@ -600,11 +698,10 @@ bool WaitGenericRobotDone(
             }
 
             if ((!isStepDriver || lastState == STEPROBOTSDK::eRun)
-                && hasStartPose
-                && !movementSeen
-                && elapsedMs >= kHandEyeAutoNoMotionTimeoutMs)
+				&& std::chrono::duration_cast<std::chrono::milliseconds>(
+					now - lastProgressTime).count() >= kHandEyeAutoNoMotionTimeoutMs)
             {
-                return failUnverified(QString("机器人程序已进入运行态，但 %1 ms 内当前位置未变化。当前状态：%2")
+				return failUnverified(QString("机器人程序处于运行态，但连续 %1 ms 无可验证位姿进展。当前状态：%2")
                     .arg(kHandEyeAutoNoMotionTimeoutMs)
                     .arg(DecodeRobotMessageText(driver->GetRobotStatusText())));
             }
@@ -632,12 +729,13 @@ bool WaitGenericRobotDone(
                 }
                 if (targetPose != nullptr)
                 {
-                    const T_ROBOT_COORS finalPose = driver->GetCurrentPos();
-                    if (!IsFinitePose(finalPose))
+                    T_ROBOT_COORS finalPose;
+                    if (!driver->TryGetCurrentPos(finalPose) || !IsFinitePose(finalPose))
                     {
                         if (error != nullptr)
                         {
-                            *error = "机器人状态已停止，但读取当前位置无效，无法确认是否真正到位。";
+                            *error = "机器人状态已停止，但严格读取当前位置失败，无法确认是否真正到位："
+                                + DecodeRobotMessageText(driver->GetLastRobotError());
                         }
                         return false;
                     }
@@ -1334,6 +1432,7 @@ void HandEyeCalibrationDialog::RequestSafetyStop()
 
 bool HandEyeCalibrationDialog::LoadConfig()
 {
+	InvalidateLastTestActions();
     QString error;
     QString filePath;
     if (!LoadHandEyeCalibrationConfig(m_robotName, m_cameraSection, m_config, &error, &filePath))
@@ -1368,6 +1467,7 @@ bool HandEyeCalibrationDialog::LoadConfig()
 
 bool HandEyeCalibrationDialog::SaveConfig()
 {
+	InvalidateLastTestActions();
     QString error;
     if (!SaveConfigSilently(&error))
     {
@@ -1508,7 +1608,16 @@ bool HandEyeCalibrationDialog::CaptureTcpPoint()
         return false;
     }
 
-    const T_ROBOT_COORS targetPoint = driver->GetCurrentPos();
+    T_ROBOT_COORS targetPoint;
+    if (!driver->TryGetCurrentPos(targetPoint))
+    {
+        error = "严格读取机器人当前位置失败，已拒绝覆盖固定标定目标点："
+            + DecodeRobotMessageText(driver->GetLastRobotError());
+        QMessageBox::warning(this, "手眼标定", error);
+        AppendLog("读取目标点失败：" + error);
+        return false;
+    }
+	InvalidateLastTestActions();
     if (!ApplyCapturedTargetPoint(targetPoint, &error))
     {
         QMessageBox::warning(this, "手眼标定", error);
@@ -1551,7 +1660,16 @@ bool HandEyeCalibrationDialog::CaptureSample(int index)
         return false;
     }
 
-    const T_ROBOT_COORS robotPose = driver->GetCurrentPos();
+    T_ROBOT_COORS robotPose;
+    if (!driver->TryGetCurrentPos(robotPose))
+    {
+        error = "严格读取机器人当前位置失败，已拒绝覆盖当前采样组："
+            + DecodeRobotMessageText(driver->GetLastRobotError());
+        QMessageBox::warning(this, "手眼标定", error);
+        AppendLog(QString("采集第 %1 组失败：%2").arg(index + 1).arg(error));
+        return false;
+    }
+	InvalidateLastTestActions();
     if (!ApplyCapturedSample(index, robotPose, cameraPoint, &error))
     {
         QMessageBox::warning(this, "手眼标定", error);
@@ -1656,6 +1774,7 @@ bool HandEyeCalibrationDialog::EnsureCameraStarted(const QString& sceneName, QSt
 
 bool HandEyeCalibrationDialog::ComputeAndSaveMatrix(bool showDialogs)
 {
+	InvalidateLastTestActions();
     QString error;
     if (!SaveConfigSilently(&error))
     {
@@ -1762,6 +1881,10 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
         SetAutoCalibrationStateText(message);
         return false;
     }
+
+	// 新一轮检测一旦取得执行权，上一轮目标和退回点立即作废。任何启动失败、
+	// 运行失败或取消都不得让旧目标恢复可点；仅本轮成功结果可重新赋值。
+	InvalidateLastTestActions();
 
     auto failBeforeStart = [this](const QString& message)
         {
@@ -1960,10 +2083,14 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
 
             if (!outcome.cancelled)
             {
-                outcome.robotPose = driver->GetCurrentPos();
-                if (!IsFinitePose(outcome.robotPose))
+                if (!driver->TryGetCurrentPos(outcome.robotPose))
                 {
-                    outcome.failure = "读取到的机器人当前位置无效。";
+                    outcome.failure = "严格读取机器人当前位置失败，参数诊断已失败："
+                        + DecodeRobotMessageText(driver->GetLastRobotError());
+                }
+                else if (!IsFinitePose(outcome.robotPose))
+                {
+                    outcome.failure = "严格读取到的机器人当前位置无效，参数诊断已失败。";
                 }
             }
 
@@ -2288,15 +2415,44 @@ bool HandEyeCalibrationDialog::StartRobotPoseMove(
             bool terminalVerified = false;
             bool sawPreExistingRunning = false;
             bool moveSubmissionAttempted = false;
+            int motionTimeoutMs = 0;
+            const double moveCommandSpeed = HandEyeLinearCommandSpeed(driver, 500.0);
             bool ok = !operationLease->CancellationRequested();
             if (ok)
             {
-                RobotDriverAdaptor::StateSnapshot snapshot;
-                if (driver->LatestStateSnapshot(snapshot) && snapshot.done == 0)
+                ok = !operationLease->CancellationRequested()
+                    && (self == nullptr || !self->m_bSafetyStopRequested.load());
+                if (!ok)
                 {
-                    sawPreExistingRunning = true;
+                    moveError = actionName + "已由安全停止取消，下发 MOVL 前已终止。";
+                }
+            }
+            if (ok)
+            {
+                T_ROBOT_COORS currentPose;
+                if (!driver->TryGetCurrentPos(currentPose))
+                {
                     ok = false;
-                    moveError = "机器人当前处于运动中，未开始新的手眼检测动作。";
+                    moveError = "读取当前机器人位置失败，已拒绝下发 MOVL："
+                        + DecodeRobotMessageText(driver->GetLastRobotError());
+                }
+                else
+                {
+                    const double admissionSpeedMmPerMin =
+                        dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr
+                        ? moveCommandSpeed * 60.0
+                        : moveCommandSpeed;
+                    std::string admissionError;
+                    if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
+                        currentPose,
+                        targetPose,
+                        admissionSpeedMmPerMin,
+                        motionTimeoutMs,
+                        &admissionError))
+                    {
+                        ok = false;
+                        moveError = QString::fromUtf8(admissionError.c_str());
+                    }
                 }
             }
             if (ok)
@@ -2310,10 +2466,18 @@ bool HandEyeCalibrationDialog::StartRobotPoseMove(
             }
             if (ok)
             {
+                if (!ConfirmRobotStoppedBeforeHandEyeMove(driver, &moveError))
+                {
+                    sawPreExistingRunning = true;
+                    ok = false;
+                }
+            }
+            if (ok)
+            {
                 moveSubmissionAttempted = true;
                 ok = driver->MoveByJob(
                     targetPose,
-                    T_ROBOT_MOVE_SPEED(500.0, 0.0, 0.0),
+                    T_ROBOT_MOVE_SPEED(moveCommandSpeed, 0.0, 0.0),
                     driver->m_nExternalAxleType,
                     "MOVL");
                 if (!ok)
@@ -2329,7 +2493,7 @@ bool HandEyeCalibrationDialog::StartRobotPoseMove(
             {
                 ok = WaitGenericRobotDone(
                     driver,
-                    kHandEyeAutoMoveDoneTimeoutMs,
+                    motionTimeoutMs,
                     100,
                     &moveError,
                     &targetPose,
@@ -2774,6 +2938,22 @@ void HandEyeCalibrationDialog::SetAutoCalibrationStateText(const QString& text)
     }
 }
 
+void HandEyeCalibrationDialog::InvalidateLastTestActions()
+{
+	m_hasLastTestMoveTarget = false;
+	m_hasLastTestReturnPose = false;
+	m_lastTestMoveTarget = T_ROBOT_COORS();
+	m_lastTestReturnPose = T_ROBOT_COORS();
+	if (m_pMoveToLastTestPointBtn != nullptr)
+	{
+		m_pMoveToLastTestPointBtn->setEnabled(false);
+	}
+	if (m_pReturnToLastTestPoseBtn != nullptr)
+	{
+		m_pReturnToLastTestPoseBtn->setEnabled(false);
+	}
+}
+
 bool HandEyeCalibrationDialog::ExportCalibrationReport(const HandEyeMatrixConfig& matrix, QString* reportPathOut, QString* error) const
 {
     const QString reportPath = BuildHandEyeCalibrationReportPath(m_robotName, m_cameraSection);
@@ -2898,6 +3078,7 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
         QMessageBox::information(this, "手眼标定", "手眼参数检测或机器人动作正在执行，请等待其完成或使用安全停止。");
         return false;
     }
+	InvalidateLastTestActions();
     if (m_bAutoCalibrationRunning.exchange(true))
     {
         QMessageBox::information(this, "手眼标定", "自动标定正在执行，请等待本次流程结束。");
@@ -3131,9 +3312,56 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                     config[i] = target.config[static_cast<size_t>(i)];
                 }
 
+                const double moveCommandSpeed = HandEyeLinearCommandSpeed(driver, autoMoveSpeedMmPerMin);
+                T_ROBOT_COORS currentPose;
+                if (!driver->TryGetCurrentPos(currentPose))
+                {
+                    finish(
+                        QString("自动标定移动准入失败：%1，读取当前机器人位置失败。原因：%2")
+                            .arg(DescribeAutoCalibrationPoint(target.varIndex))
+                            .arg(DecodeRobotMessageText(driver->GetLastRobotError())),
+                        terminalIsVerified());
+                    return;
+                }
+                const double admissionSpeedMmPerMin =
+                    dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr
+                    ? moveCommandSpeed * 60.0
+                    : moveCommandSpeed;
+                int motionTimeoutMs = 0;
+                std::string admissionError;
+                if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
+                    currentPose,
+                    target.target,
+                    admissionSpeedMmPerMin,
+                    motionTimeoutMs,
+                    &admissionError))
+                {
+                    finish(
+                        QString("自动标定移动准入失败：%1，%2")
+                            .arg(DescribeAutoCalibrationPoint(target.varIndex))
+                            .arg(QString::fromUtf8(admissionError.c_str())),
+                        terminalIsVerified());
+                    return;
+                }
+
+                if (operationLease->CancellationRequested())
+                {
+                    finish("自动标定已由安全停止取消，下发 MOVL 前已终止。", false);
+                    return;
+                }
+                QString stoppedStateError;
+                if (!ConfirmRobotStoppedBeforeHandEyeMove(driver, &stoppedStateError))
+                {
+                    finish(
+                        QString("自动标定已拒绝下发 MOVL：%1，%2")
+                            .arg(DescribeAutoCalibrationPoint(target.varIndex), stoppedStateError),
+                        false);
+                    return;
+                }
+
                 const bool moveOk = driver->MoveByJob(
                     target.target,
-                    T_ROBOT_MOVE_SPEED(autoMoveSpeedMmPerMin, 0.0, 0.0),
+                    T_ROBOT_MOVE_SPEED(moveCommandSpeed, 0.0, 0.0),
                     driver->m_nExternalAxleType,
                     "MOVL",
                     1,
@@ -3156,7 +3384,7 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                 bool terminalVerified = false;
                 if (!WaitGenericRobotDone(
                     driver,
-                    kHandEyeAutoMoveDoneTimeoutMs,
+                    motionTimeoutMs,
                     100,
                     &waitError,
                     &target.target,
@@ -3187,11 +3415,13 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                     return;
                 }
 
-                const T_ROBOT_COORS robotPose = driver->GetCurrentPos();
-                if (!IsFinitePose(robotPose))
+                T_ROBOT_COORS robotPose;
+                if (!driver->TryGetCurrentPos(robotPose) || !IsFinitePose(robotPose))
                 {
                     finish(
-                        QString("自动标定采样失败：%1 到位后读取当前位置无效。").arg(DescribeAutoCalibrationPoint(target.varIndex)),
+                        QString("自动标定采样失败：%1 到位后严格读取当前位置失败，已保留原有点、样本和矩阵。原因：%2")
+                            .arg(DescribeAutoCalibrationPoint(target.varIndex))
+                            .arg(DecodeRobotMessageText(driver->GetLastRobotError())),
                         terminalIsVerified());
                     return;
                 }
@@ -3278,6 +3508,7 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
 
 void HandEyeCalibrationDialog::OpenMatrixDialog()
 {
+	InvalidateLastTestActions();
     HandEyeMatrixDialog dialog(m_pContralUnit, m_robotName, m_cameraSection, this);
     dialog.exec();
     UpdatePathLabels();

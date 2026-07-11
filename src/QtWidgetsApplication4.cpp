@@ -26,6 +26,7 @@
 #include "RobotDataHelper.h"
 #include "RobotJogDialog.h"
 #include "RobotMessage.h"
+#include "RobotMotionTimeoutPolicy.h"
 #include "RobotOperationLease.h"
 #include "SKJCameraControlClient.h"
 #include "STEPRobotDriver.h"
@@ -11781,9 +11782,12 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			{
 				const QString program = arguments[++i];
 				const bool ok = pFanucDriver->CallJob(program.toStdString());
-				const int done = ok ? pFanucDriver->CheckRobotDone(200) : -1;
-				LogCommandLineMessage(QString("CLI FANUC CALL %1 -> %2，CheckRobotDone=%3")
-					.arg(program, ok ? "OK" : "FAIL").arg(done));
+				const int done = ok ? pFanucDriver->CheckRobotDone(200, 1800000) : -1;
+				const bool flowOk = ok && done > 0;
+				LogCommandLineMessage(QString("CLI FANUC CALL %1 -> %2，CheckRobotDone=%3，详情=%4")
+					.arg(program, flowOk ? "OK" : "FAIL")
+					.arg(done)
+					.arg(DecodeRobotMessageText(pFanucDriver->GetLastRobotError())));
 			}
 		}
 
@@ -12034,6 +12038,11 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 		LogCommandLineMessage(QString("CLI 机器人运动参数错误：%1").arg(parseError));
 		return;
 	}
+	if (speedSpecified && (!std::isfinite(speedOverride) || speedOverride <= 0.0))
+	{
+		LogCommandLineMessage("CLI 机器人运动参数错误：--robot-speed 必须是有限正数。");
+		return;
+	}
 
 	int doneDelayMs = 200;
 	bool doneDelaySpecified = false;
@@ -12050,6 +12059,19 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 	{
 		return;
 	}
+	const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr;
+	const auto linearCommandSpeed = [isFanucDriver](double speedMmPerMin)
+		{
+			if (!isFanucDriver)
+			{
+				return speedMmPerMin;
+			}
+			const double mmPerSec = speedMmPerMin / 60.0;
+			return mmPerSec >= 1.0 ? std::floor(mmPerSec) : 0.0;
+		};
+	const QString linearCommandSpeedUnit = isFanucDriver
+		? QStringLiteral("mm/sec")
+		: QStringLiteral("mm/min");
 
 	bool connected = driver->IsConnected();
 	if (!connected)
@@ -12116,13 +12138,41 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 			target.dBY = values.size() > 7 ? values[7] : 0.0;
 			target.dBZ = values.size() > 8 ? values[8] : 0.0;
 
-			const double moveSpeed = speedSpecified ? speedOverride : 500.0;
-			LogCommandLineMessage(QString("CLI MOVL下发：机器人=%1，速度=%2mm/min，目标=%3")
+			const double configuredSpeedMmPerMin = speedSpecified ? speedOverride : 500.0;
+			const double moveSpeed = linearCommandSpeed(configuredSpeedMmPerMin);
+			if (moveSpeed <= 0.0)
+			{
+				LogCommandLineMessage(
+					"CLI MOVL已拒绝：FANUC固定TP最低只能表示1mm/sec（60mm/min），禁止静默提速。");
+				continue;
+			}
+			T_ROBOT_COORS current;
+			if (!driver->TryGetCurrentPos(current))
+			{
+				LogCommandLineMessage("CLI MOVL已拒绝：读取当前机器人位置失败，"
+					+ DecodeRobotMessageText(driver->GetLastRobotError()));
+				continue;
+			}
+			int motionTimeoutMs = 0;
+			std::string admissionError;
+			if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
+				current,
+				target,
+				isFanucDriver ? moveSpeed * 60.0 : configuredSpeedMmPerMin,
+				motionTimeoutMs,
+				&admissionError))
+			{
+				LogCommandLineMessage("CLI MOVL已拒绝：" + QString::fromUtf8(admissionError.c_str()));
+				continue;
+			}
+			LogCommandLineMessage(QString("CLI MOVL下发：机器人=%1，配置速度=%2mm/min，下发速度=%3%4，目标=%5")
 				.arg(robotLabel)
+				.arg(configuredSpeedMmPerMin, 0, 'f', 3)
 				.arg(moveSpeed, 0, 'f', 3)
+				.arg(linearCommandSpeedUnit)
 				.arg(FormatCliCoors(target)));
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(moveSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
-			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs) : -1;
+			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs, motionTimeoutMs) : -1;
 			LogCommandLineMessage(QString("CLI MOVL结果：Move=%1%2，CheckRobotDone=%3，状态=%4，最近错误=%5")
 				.arg(moveOk ? "OK" : "FAIL")
 				.arg(noWait ? "，已跳过完成等待" : QString())
@@ -12147,7 +12197,13 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 				continue;
 			}
 
-			const T_ROBOT_COORS current = driver->GetCurrentPos();
+			T_ROBOT_COORS current;
+			if (!driver->TryGetCurrentPos(current))
+			{
+				LogCommandLineMessage("CLI 相对MOVL已拒绝：读取当前机器人位置失败，"
+					+ DecodeRobotMessageText(driver->GetLastRobotError()));
+				continue;
+			}
 			T_ROBOT_COORS target = current;
 			target.dX += values[0];
 			target.dY += values[1];
@@ -12159,14 +12215,35 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 			target.dBY += values.size() > 7 ? values[7] : 0.0;
 			target.dBZ += values.size() > 8 ? values[8] : 0.0;
 
-			const double moveSpeed = speedSpecified ? speedOverride : 500.0;
-			LogCommandLineMessage(QString("CLI 相对MOVL下发：机器人=%1，速度=%2mm/min，当前位置=%3，目标=%4")
+			const double configuredSpeedMmPerMin = speedSpecified ? speedOverride : 500.0;
+			const double moveSpeed = linearCommandSpeed(configuredSpeedMmPerMin);
+			if (moveSpeed <= 0.0)
+			{
+				LogCommandLineMessage(
+					"CLI 相对MOVL已拒绝：FANUC固定TP最低只能表示1mm/sec（60mm/min），禁止静默提速。");
+				continue;
+			}
+			int motionTimeoutMs = 0;
+			std::string admissionError;
+			if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
+				current,
+				target,
+				isFanucDriver ? moveSpeed * 60.0 : configuredSpeedMmPerMin,
+				motionTimeoutMs,
+				&admissionError))
+			{
+				LogCommandLineMessage("CLI 相对MOVL已拒绝：" + QString::fromUtf8(admissionError.c_str()));
+				continue;
+			}
+			LogCommandLineMessage(QString("CLI 相对MOVL下发：机器人=%1，配置速度=%2mm/min，下发速度=%3%4，当前位置=%5，目标=%6")
 				.arg(robotLabel)
+				.arg(configuredSpeedMmPerMin, 0, 'f', 3)
 				.arg(moveSpeed, 0, 'f', 3)
+				.arg(linearCommandSpeedUnit)
 				.arg(FormatCliCoors(current))
 				.arg(FormatCliCoors(target)));
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(moveSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
-			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs) : -1;
+			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs, motionTimeoutMs) : -1;
 			LogCommandLineMessage(QString("CLI 相对MOVL结果：Move=%1%2，CheckRobotDone=%3，状态=%4，最近错误=%5")
 				.arg(moveOk ? "OK" : "FAIL")
 				.arg(noWait ? "，已跳过完成等待" : QString())
@@ -12212,7 +12289,7 @@ void QtWidgetsApplication4::RunRobotMotionForCli(const QStringList& arguments)
 				.arg(moveSpeed, 0, 'f', 3)
 				.arg(FormatCliPulse(target)));
 			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(moveSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
-			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs) : -1;
+			const int done = (moveOk && !noWait) ? driver->CheckRobotDone(doneDelayMs, 1800000) : -1;
 			LogCommandLineMessage(QString("CLI MOVJ结果：Move=%1%2，CheckRobotDone=%3，状态=%4，最近错误=%5")
 				.arg(moveOk ? "OK" : "FAIL")
 				.arg(noWait ? "，已跳过完成等待" : QString())
@@ -15284,7 +15361,7 @@ void QtWidgetsApplication4::RobotSwitchStepMode()
 		std::thread([self, pRobotDriver, pStepDriver, selectedMode, operationLease]()
 			{
 				const bool modeOk = pStepDriver->SetSysMode(selectedMode);
-				const int startDone = modeOk ? pStepDriver->CheckRobotDone(200) : -1;
+				const int startDone = modeOk ? pStepDriver->CheckRobotDone(200, 1800000) : -1;
 				const bool flowOk = modeOk && startDone > 0;
 				if (pRobotDriver->m_pRobotLog != nullptr)
 				{
@@ -15612,12 +15689,18 @@ void QtWidgetsApplication4::FanucCallJobTest()
 	std::thread([self, pRobotDriver, jobNameBytes, operationLease]()
 		{
 			const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
-			const int done = callOk ? pRobotDriver->CheckRobotDone(200) : -1;
-			const QString message = callOk
+			const int done = callOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
+			const bool flowOk = callOk && done > 0;
+			const QString detail = DecodeRobotMessageText(pRobotDriver->GetLastRobotError());
+			const QString message = flowOk
 				? QString("调用任务完成：%1，CheckRobotDone=%2")
 					.arg(QString::fromLocal8Bit(jobNameBytes)).arg(done)
-				: QString("调用任务失败：%1").arg(QString::fromLocal8Bit(jobNameBytes));
-			QMetaObject::invokeMethod(qApp, [self, message, callOk, done]()
+				: QString("调用任务失败：%1，CallJob=%2，CheckRobotDone=%3，详情=%4")
+					.arg(QString::fromLocal8Bit(jobNameBytes))
+					.arg(callOk ? QStringLiteral("OK") : QStringLiteral("FAIL"))
+					.arg(done)
+					.arg(detail);
+			QMetaObject::invokeMethod(qApp, [self, message, flowOk]()
 				{
 					if (self == nullptr)
 					{
@@ -15626,7 +15709,7 @@ void QtWidgetsApplication4::FanucCallJobTest()
 					if (self->ui.statusBar != nullptr)
 					{
 						self->ui.statusBar->showMessage(
-							(callOk && done > 0 ? QStringLiteral("成功：") : QStringLiteral("失败：")) + message,
+							(flowOk ? QStringLiteral("成功：") : QStringLiteral("失败：")) + message,
 							12000);
 					}
 					self->RefreshDashboardConnectionState();
@@ -15717,11 +15800,16 @@ void QtWidgetsApplication4::FanucMovlTest()
 
 	std::thread([this, pRobotDriver, moveForward, operationLease]()
 		{
-			T_ROBOT_COORS target = pRobotDriver->GetCurrentPos();
-			target.dY += moveForward ? 100.0 : -100.0;
+			T_ROBOT_COORS target;
+			const bool currentOk = pRobotDriver->TryGetCurrentPos(target);
+			if (currentOk)
+			{
+				target.dY += moveForward ? 100.0 : -100.0;
+			}
 
-			const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
-			const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+			const bool moveOk = currentOk
+				&& pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
+			const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
 			const QString message = QString("MOVL %1 100mm\nMove=%2\nCheckRobotDone=%3")
 				.arg(moveForward ? "Y+" : "Y-")
 				.arg(moveOk ? "OK" : "FAIL")
@@ -15770,16 +15858,21 @@ void QtWidgetsApplication4::FanucMovjTest()
 
 	std::thread([this, pRobotDriver, operationLease]()
 		{
-			T_ANGLE_PULSE target = pRobotDriver->GetCurrentPulse();
+			T_ANGLE_PULSE target;
+			const bool currentOk = pRobotDriver->TryGetCurrentPulse(target);
 			const double j2PulseUnit = pRobotDriver->m_tAxisUnit.dLPulseUnit;
 			const double j3PulseUnit = pRobotDriver->m_tAxisUnit.dUPulseUnit;
 			const long j2DeltaPulse = j2PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j2PulseUnit));
 			const long j3DeltaPulse = j3PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j3PulseUnit));
-			target.nLPulse += j2DeltaPulse;
-			target.nUPulse += j3DeltaPulse;
+			if (currentOk)
+			{
+				target.nLPulse += j2DeltaPulse;
+				target.nUPulse += j3DeltaPulse;
+			}
 
-			const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
-			const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+			const bool moveOk = currentOk
+				&& pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
+			const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
 			const QString message = QString("MOVJ J2/J3 +5deg\nJ2DeltaPulse=%1\nJ3DeltaPulse=%2\nMove=%3\nCheckRobotDone=%4\n提示：固定TP当前用R[17]%，测试速度取1%%。")
 				.arg(j2DeltaPulse)
 				.arg(j3DeltaPulse)
@@ -15843,7 +15936,7 @@ void QtWidgetsApplication4::FanucMoveZeroTest()
 			const T_ANGLE_PULSE zeroPulse = T_ANGLE_PULSE();
 			const T_ROBOT_MOVE_SPEED speed(1.0, 0.0, 0.0);
 			const bool moveOk = pRobotDriver->MoveByJob(zeroPulse, speed, pRobotDriver->m_nExternalAxleType, "MOVJ");
-			const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+			const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
 			const T_ROBOT_COORS pos = pRobotDriver->GetCurrentPos();
 			const T_ANGLE_PULSE pulse = pRobotDriver->GetCurrentPulse();
 

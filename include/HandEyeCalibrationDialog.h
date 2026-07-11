@@ -83,6 +83,7 @@ private:
         bool verifiedTerminal,
         const QString& statusText);
     void SetAutoCalibrationStateText(const QString& text);
+    void InvalidateLastTestActions();
     bool ExportCalibrationReport(const HandEyeMatrixConfig& matrix, QString* reportPathOut = nullptr, QString* error = nullptr) const;
 
     void SetRobotPoseEditors(QVector<QLineEdit*>& edits, const T_ROBOT_COORS& pose);

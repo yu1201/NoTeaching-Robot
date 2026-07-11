@@ -60,15 +60,17 @@ public:
 
 	double GetCurrentPos(int nAxisNo) override;
 	T_ROBOT_COORS GetCurrentPos() override;
+	bool TryGetCurrentPos(T_ROBOT_COORS& pos) override;
 	T_ROBOT_COORS GetCurrentPosPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
 	double GetCurrentPulse(int nAxisNo) override;
 	T_ANGLE_PULSE GetCurrentPulse() override;
+	bool TryGetCurrentPulse(T_ANGLE_PULSE& pulse) override;
 	T_ANGLE_PULSE GetCurrentPulsePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
 
 
 	int CheckDone() override;
 	int CheckDonePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
-	int CheckRobotDone(int nDelayTime = 200) override;
+	int CheckRobotDone(int nDelayTime = 200, int runTimeoutMs = 1800000) override;
 	bool AbortCurrentProgramSafely() override;
 
 	bool CallJob(std::string sJobName) override;
@@ -227,10 +229,24 @@ public:
 	static void InvalidateStepSdkInterfaceModeCache();
 
 private:
+	bool ArmGeneratedProgramCompletionWitness(
+		const std::string& projectName,
+		const std::string& programName,
+		std::string& error);
+	bool VerifyGeneratedProgramReadyForStartLocked(
+		const std::string& projectName,
+		const std::string& programName,
+		std::string& error);
+	bool VerifyGeneratedProgramCompletionWitnessLocked(std::string& error);
+	void ClearGeneratedProgramCompletionWitnessLocked();
 	// 首次 START 前在 SDK mutex 内冻结本软件启动的工程/程序；暂停恢复和安全
 	// Kill 都必须仍匹配该身份，禁止误启动/误杀示教器后来换载的其他程序。
 	std::string m_motionTrackedProjectName;
 	std::string m_motionTrackedProgramName;
+	// 本软件生成的 SRP 首行清零、末行置位 ntdone；只有同一工程/程序回读到 1，
+	// 稳定 eStop 才能被判为自然完成。外部 STOP 与提前中止保持 0 并 fail-closed。
+	std::string m_completionWitnessProjectName;
+	std::string m_completionWitnessProgramName;
 	// 状态时间轴会话锁定：0=未锁定 1=机器人时间戳 2=PC 接收时间。
 	// 机器人毫秒与 PC steady_clock 纪元完全不同，同一连接会话内一经锁定不再
 	// 切换，防止 getTimestamp 偶发 0 值把两种纪元混进同一扫描序列破坏时间插值。

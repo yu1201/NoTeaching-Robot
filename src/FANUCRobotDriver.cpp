@@ -6,12 +6,16 @@
 #include "RobotOperationLease.h"
 
 #include <cstdint>
+#include <charconv>
+#include <cerrno>
+#include <cctype>
 #include <cstdlib>
 #include <cmath>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -200,7 +204,26 @@ namespace
 
 		for (size_t i = 0; i < count; ++i)
 		{
-			values[i] = atof(parts[i].c_str());
+			const std::string& part = parts[i];
+			const char* first = part.c_str();
+			while (*first != '\0' && std::isspace(static_cast<unsigned char>(*first)))
+			{
+				++first;
+			}
+			errno = 0;
+			char* end = nullptr;
+			const double parsed = std::strtod(first, &end);
+			while (end != nullptr && *end != '\0'
+				&& std::isspace(static_cast<unsigned char>(*end)))
+			{
+				++end;
+			}
+			if (first == end || end == nullptr || *end != '\0'
+				|| errno == ERANGE || !std::isfinite(parsed))
+			{
+				return false;
+			}
+			values[i] = parsed;
 		}
 		return true;
 	}
@@ -220,7 +243,25 @@ namespace
 
 		for (size_t i = 0; i < count; ++i)
 		{
-			values[i] = atol(parts[i].c_str());
+			const std::string& part = parts[i];
+			const char* first = part.c_str();
+			while (*first != '\0' && std::isspace(static_cast<unsigned char>(*first)))
+			{
+				++first;
+			}
+			errno = 0;
+			char* end = nullptr;
+			const long parsed = std::strtol(first, &end, 10);
+			while (end != nullptr && *end != '\0'
+				&& std::isspace(static_cast<unsigned char>(*end)))
+			{
+				++end;
+			}
+			if (first == end || end == nullptr || *end != '\0' || errno == ERANGE)
+			{
+				return false;
+			}
+			values[i] = parsed;
 		}
 		return true;
 	}
@@ -233,11 +274,19 @@ namespace
 
 	long FanucPositionToPulse(double position, double pulseUnit)
 	{
-		if (pulseUnit == 0.0)
+		if (!std::isfinite(position) || !std::isfinite(pulseUnit)
+			|| std::abs(pulseUnit) < 1e-15)
 		{
 			return 0;
 		}
-		return static_cast<long>(std::lround(position / pulseUnit));
+		const double scaled = position / pulseUnit;
+		if (!std::isfinite(scaled)
+			|| scaled < static_cast<double>(std::numeric_limits<long>::lowest())
+			|| scaled > static_cast<double>(std::numeric_limits<long>::max()))
+		{
+			return 0;
+		}
+		return static_cast<long>(std::lround(scaled));
 	}
 
 	std::string FanucBuildConfigText(const int config[7])
@@ -296,9 +345,9 @@ namespace
 
 	int FanucSpeedPercent(double speed)
 	{
-		if (speed <= 0.0)
+		if (!std::isfinite(speed) || speed <= 0.0)
 		{
-			return 20;
+			return 0;
 		}
 
 		// FANUC项目里同时存在两种传参口径：
@@ -312,22 +361,25 @@ namespace
 		}
 		if (percent < 1.0)
 		{
-			return 1;
+			return 0;
 		}
 		if (percent > 100.0)
 		{
 			return 100;
 		}
-		return static_cast<int>(std::lround(percent));
+		return static_cast<int>(std::floor(percent));
 	}
 
-	double FanucLinearSpeed(double speed)
+	bool FanucLinearSpeedRegister(double speed, int& speedRegister)
 	{
-		if (speed <= 0.0)
+		speedRegister = 0;
+		if (!std::isfinite(speed) || speed < 1.0
+			|| speed > static_cast<double>(std::numeric_limits<int>::max()))
 		{
-			return 100.0;
+			return false;
 		}
-		return speed;
+		speedRegister = static_cast<int>(std::floor(speed));
+		return speedRegister >= 1;
 	}
 
 	std::string FanucBuildLsHeader(const std::string& programName, size_t lineCount, const char* comment)
@@ -417,10 +469,12 @@ namespace
 				: GetStr("CNT%d", FANUC_WELD_PATH_CNT_VALUE);
 			if (info.nMoveType == MOVL)
 			{
-				oss << GetStr("%4u:  L P[%u] %.0fmm/sec %s ;",
+				int linearSpeed = 0;
+				FanucLinearSpeedRegister(info.tSpeed.dSpeed, linearSpeed);
+				oss << GetStr("%4u:  L P[%u] %dmm/sec %s ;",
 					static_cast<unsigned>(lineIndex),
 					static_cast<unsigned>(pointIndex),
-					FanucLinearSpeed(info.tSpeed.dSpeed),
+					linearSpeed,
 					termination.c_str()) << "\n";
 			}
 			else
@@ -673,6 +727,25 @@ namespace
 		}
 		const size_t end = text.find_last_not_of(" \t\r\n");
 		return text.substr(begin, end - begin + 1);
+	}
+
+	bool FanucParseIntStrict(const std::string& text, int& value)
+	{
+		const std::string trimmed = FanucTrim(text);
+		if (trimmed.empty())
+		{
+			return false;
+		}
+		int parsed = 0;
+		const char* begin = trimmed.data();
+		const char* end = begin + trimmed.size();
+		const std::from_chars_result result = std::from_chars(begin, end, parsed);
+		if (result.ec != std::errc() || result.ptr != end)
+		{
+			return false;
+		}
+		value = parsed;
+		return true;
 	}
 
 	std::string FanucToLower(std::string text)
@@ -1007,7 +1080,7 @@ FANUCRobotCtrl::~FANUCRobotCtrl()
 
 namespace
 {
-	constexpr long long FANUC_DONE_STARTUP_GUARD_MS = 1200;
+	constexpr long long FANUC_DONE_STARTUP_GUARD_MS = 5000;
 	constexpr int FANUC_DONE_PASSIVE_STABLE_COUNT = 3;
 	constexpr int FANUC_DONE_ACTIVE_STABLE_COUNT = 4;
 
@@ -1052,9 +1125,17 @@ namespace
 		return ctrl->InitSocket(ctrl->m_sSocketIP.c_str(), static_cast<unsigned short>(ctrl->m_nSocketPort));
 	}
 
-	bool FanucRequest(FANUCRobotCtrl* ctrl, const std::string& command, std::string& response)
+	bool FanucRequest(
+		FANUCRobotCtrl* ctrl,
+		const std::string& command,
+		std::string& response,
+		bool* commandMayHaveBeenSent = nullptr)
 	{
 		response.clear();
+		if (commandMayHaveBeenSent != nullptr)
+		{
+			*commandMayHaveBeenSent = false;
+		}
 		if (ctrl == nullptr || ctrl->m_hMutex == nullptr)
 		{
 			if (ctrl != nullptr)
@@ -1104,6 +1185,11 @@ namespace
 			return false;
 		}
 
+		// 一旦进入 send，失败也可能已经发送了部分字节，必须按“结果未知”处理。
+		if (commandMayHaveBeenSent != nullptr)
+		{
+			*commandMayHaveBeenSent = true;
+		}
 		const bool sent = FanucSendLine(sock, command);
 		const bool recvOk = sent && FanucReceiveLine(sock, response);
 
@@ -1359,25 +1445,56 @@ double FANUCRobotCtrl::GetCurrentPos(int nAxisNo)
 // 主动读取当前TCP位姿，协议命令为GET_CUR_POS。
 T_ROBOT_COORS FANUCRobotCtrl::GetCurrentPos()
 {
+	T_ROBOT_COORS pos;
+	return TryGetCurrentPos(pos) ? pos : T_ROBOT_COORS();
+}
+
+bool FANUCRobotCtrl::TryGetCurrentPos(T_ROBOT_COORS& pos)
+{
+	pos = T_ROBOT_COORS();
 	std::string response;
 	double values[6] = {};
 	if (!FanucRequest(this, "GET_CUR_POS", response))
 	{
-		return T_ROBOT_COORS();
+		return false;
 	}
 
 	if (!FanucStartsWith(response, "POS:") || !FanucParseDoubles(FanucResponsePayload(response), values, 6))
 	{
-		return T_ROBOT_COORS();
+		SetLastRobotError("FANUC当前位置响应无效：" + response);
+		return false;
 	}
-
-	return T_ROBOT_COORS(values[0], values[1], values[2], values[3], values[4], values[5], 0, 0, 0);
+	for (double value : values)
+	{
+		if (!std::isfinite(value))
+		{
+			SetLastRobotError("FANUC当前位置包含非有限值：" + response);
+			return false;
+		}
+	}
+	pos = T_ROBOT_COORS(values[0], values[1], values[2], values[3], values[4], values[5], 0, 0, 0);
+	return true;
 }
 
 // 被动读取当前TCP位姿缓存，同时可取机器人侧robot_ms和PC侧pc_recv_ms。
 T_ROBOT_COORS FANUCRobotCtrl::GetCurrentPosPassive(long long* pRobotMs, long long* pPcRecvMs)
 {
 	std::lock_guard<std::mutex> lock(m_monitorMutex);
+	const bool monitorConnected = m_bMonitorRunning.load()
+		&& m_uMonitorSocketHandle.load()
+			!= static_cast<std::uintptr_t>(FanucInvalidSocket());
+	if (!monitorConnected)
+	{
+		if (pRobotMs != nullptr)
+		{
+			*pRobotMs = 0;
+		}
+		if (pPcRecvMs != nullptr)
+		{
+			*pPcRecvMs = 0;
+		}
+		return T_ROBOT_COORS();
+	}
 	if (pRobotMs != nullptr)
 	{
 		*pRobotMs = m_llMonitorRobotMs;
@@ -1416,29 +1533,53 @@ double FANUCRobotCtrl::GetCurrentPulse(int nAxisNo)
 // 主动读取当前关节位置；机器人返回角度/外部轴位置，PC侧按ini里的轴当量换算为脉冲。
 T_ANGLE_PULSE FANUCRobotCtrl::GetCurrentPulse()
 {
+	T_ANGLE_PULSE pulse;
+	return TryGetCurrentPulse(pulse) ? pulse : T_ANGLE_PULSE();
+}
+
+bool FANUCRobotCtrl::TryGetCurrentPulse(T_ANGLE_PULSE& pulse)
+{
+	pulse = T_ANGLE_PULSE();
 	std::string response;
 	double values[9] = {};
 	const std::string command = "GET_CUR_PULSE:" + std::to_string(m_nRobotAxisCount);
 	if (!FanucRequest(this, command, response))
 	{
-		return T_ANGLE_PULSE();
+		return false;
 	}
 
 	if (!FanucStartsWith(response, "PULSE:") || !FanucParseDoubles(FanucResponsePayload(response), values, 9))
 	{
-		return T_ANGLE_PULSE();
+		SetLastRobotError("FANUC当前关节响应无效：" + response);
+		return false;
 	}
-
-	return T_ANGLE_PULSE(
-		FanucPositionToPulse(values[0], m_tAxisUnit.dSPulseUnit),
-		FanucPositionToPulse(values[1], m_tAxisUnit.dLPulseUnit),
-		FanucPositionToPulse(values[2], m_tAxisUnit.dUPulseUnit),
-		FanucPositionToPulse(values[3], m_tAxisUnit.dRPulseUnit),
-		FanucPositionToPulse(values[4], m_tAxisUnit.dBPulseUnit),
-		FanucPositionToPulse(values[5], m_tAxisUnit.dTPulseUnit),
-		FanucPositionToPulse(values[6], m_tAxisUnit.dBXPulseUnit),
-		FanucPositionToPulse(values[7], m_tAxisUnit.dBYPulseUnit),
-		FanucPositionToPulse(values[8], m_tAxisUnit.dBZPulseUnit));
+	const int activeAxisCount = std::clamp(m_nRobotAxisCount, 6, 9);
+	long converted[9] = {};
+	for (int axis = 0; axis < activeAxisCount; ++axis)
+	{
+		const double unit = m_tAxisUnit.GetValueByIndex(axis);
+		if (!std::isfinite(values[axis]) || !std::isfinite(unit) || std::abs(unit) < 1e-15)
+		{
+			SetLastRobotError(GetStr(
+				"FANUC当前关节读取失败：轴%d数值或脉冲当量无效。", axis + 1));
+			return false;
+		}
+		const double scaled = values[axis] / unit;
+		if (!std::isfinite(scaled)
+			|| scaled < static_cast<double>(std::numeric_limits<long>::lowest())
+			|| scaled > static_cast<double>(std::numeric_limits<long>::max()))
+		{
+			SetLastRobotError(GetStr(
+				"FANUC当前关节读取失败：轴%d换算结果超出脉冲范围。", axis + 1));
+			return false;
+		}
+		converted[axis] = static_cast<long>(std::lround(scaled));
+	}
+	pulse = T_ANGLE_PULSE(
+		converted[0], converted[1], converted[2],
+		converted[3], converted[4], converted[5],
+		converted[6], converted[7], converted[8]);
+	return true;
 }
 
 // 被动读取关节脉冲缓存，同时可取这一帧的机器人侧和PC侧时间戳。
@@ -1473,7 +1614,14 @@ int FANUCRobotCtrl::CheckDone()
 		SetLastRobotError("FANUC完成状态检测失败：响应格式异常，RSP=" + response);
 		return -1;
 	}
-	return atoi(FanucResponsePayload(response).c_str());
+	const std::string payload = FanucResponsePayload(response);
+	int done = -1;
+	if (FanucParseIntStrict(payload, done) && (done == 0 || done == 1))
+	{
+		return done;
+	}
+	SetLastRobotError("FANUC完成状态检测失败：DONE仅允许0/1，RSP=" + response);
+	return -1;
 }
 
 // 被动读取机器人状态缓存，不占用S4控制通道。
@@ -1492,15 +1640,21 @@ int FANUCRobotCtrl::CheckDonePassive(long long* pRobotMs, long long* pPcRecvMs)
 }
 
 // 阻塞等待最近一次 CALL_JOB 程序结束；通信失败会返回-1，避免断线时永久卡住。
-int FANUCRobotCtrl::CheckRobotDone(int nDelayTime)
+int FANUCRobotCtrl::CheckRobotDone(int nDelayTime, int runTimeoutMs)
 {
 	if (nDelayTime <= 0)
 	{
 		nDelayTime = 200;
 	}
+	if (runTimeoutMs <= 0)
+	{
+		runTimeoutMs = 1800000;
+	}
 
 	int nRet = -1;
 	int nStableDoneCount = 0;
+	bool observedRunning = false;
+	const auto waitStartTime = std::chrono::steady_clock::now();
 	auto lastLogTime = std::chrono::steady_clock::now();
 
 	while (true)
@@ -1509,6 +1663,22 @@ int FANUCRobotCtrl::CheckRobotDone(int nDelayTime)
 		{
 			SetLastRobotError("FANUC硬件操作已被安全停止取消，禁止把停机状态判作正常完成。");
 			return -20000;
+		}
+		if (FanucElapsedMs(waitStartTime) >= runTimeoutMs)
+		{
+			const std::string timeoutError = GetStr(
+				"FANUC等待运动完成超时：已等待%lldms，上限=%dms。",
+				FanucElapsedMs(waitStartTime), runTimeoutMs);
+			if (m_pRobotLog != nullptr)
+			{
+				m_pRobotLog->write(LogColor::ERR, "%s", timeoutError.c_str());
+			}
+			const bool stopped = RobotOperationLease::StopAndConfirmUnverifiedMotion(this);
+			const std::string stopDetail = GetLastRobotError();
+			SetLastRobotError(timeoutError + (stopped
+				? "；已自动中止并确认机器人任务终态。"
+				: "；自动中止未确认：" + stopDetail));
+			return -30000;
 		}
 		nRet = CheckDone();
 		if (nRet < 0)
@@ -1526,15 +1696,49 @@ int FANUCRobotCtrl::CheckRobotDone(int nDelayTime)
 				: "；自动中止未确认：" + stopDetail));
 			return nRet;
 		}
+		if (nRet == 0)
+		{
+			observedRunning = true;
+		}
 
 		const long long lastCallJobPcMs = m_llLastCallJobPcMs.load();
-		const bool startupGuardActive = (lastCallJobPcMs > 0 && (FanucSteadyMs() - lastCallJobPcMs) < FANUC_DONE_STARTUP_GUARD_MS);
+		const long long witnessCallMs = m_llCompletionWitnessCallJobPcMs.load();
+		const int witnessReg = m_nCompletionWitnessStateReg.load();
+		const int witnessDoneState = m_nCompletionWitnessDoneState.load();
+		int witnessValue = 0;
+		const bool witnessReadOk = witnessReg >= 0
+			&& TryGetIntVarStrict(witnessReg, "INT", witnessValue);
+		const bool completionWitnessed = lastCallJobPcMs > 0
+			&& witnessCallMs == lastCallJobPcMs
+			&& witnessReg >= 0
+			&& witnessReadOk
+			&& witnessValue == witnessDoneState;
+		const bool startupGuardActive = nRet != 0
+			&& !completionWitnessed
+			&& !observedRunning
+			&& lastCallJobPcMs > 0
+			&& (FanucSteadyMs() - lastCallJobPcMs) < FANUC_DONE_STARTUP_GUARD_MS;
 
 		if (nRet != 0 && !startupGuardActive)
 		{
 			++nStableDoneCount;
 			if (nStableDoneCount >= FANUC_DONE_ACTIVE_STABLE_COUNT)
 			{
+				if (!completionWitnessed)
+				{
+					const std::string unknownCompletion = GetStr(
+						"FANUC任务已终止，但没有同一次CALL_JOB的程序完成见证：Call=%lld WitnessCall=%lld R[%d]=%d Expected=%d",
+						lastCallJobPcMs, witnessCallMs, witnessReg, witnessValue, witnessDoneState);
+					const bool stopped = RobotOperationLease::StopAndConfirmUnverifiedMotion(this);
+					const std::string stopDetail = GetLastRobotError();
+					SetLastRobotError(unknownCompletion + (stopped
+						? "；已确认任务终态，但不得报告程序自然完成。"
+						: "；终态二次确认失败：" + stopDetail));
+					return -31001;
+				}
+				m_llCompletionWitnessCallJobPcMs.store(0);
+				m_nCompletionWitnessStateReg.store(-1);
+				m_nCompletionWitnessDoneState.store(0);
 				RobotOperationLease::MarkMotionCompleted(this);
 				return nRet;
 			}
@@ -1576,14 +1780,85 @@ bool FANUCRobotCtrl::HasVerifiedProgramStopCapability()
 	return true;
 }
 
-// 通过常驻服务异步启动指定TP/KAREL程序。
+// 通用程序没有可验证的自然完成契约，公开入口必须 fail-closed。
 bool FANUCRobotCtrl::CallJob(std::string sJobName)
 {
+	SetLastRobotError(
+		"FANUC拒绝启动无完成寄存器契约的程序：" + sJobName
+		+ "。请使用带完成状态寄存器的受验证入口，或连续点动专用入口。");
+	return false;
+}
+
+bool FANUCRobotCtrl::CallJobWithCompletionState(
+	std::string sJobName,
+	int nStateReg,
+	int nDoneState)
+{
+	if (nStateReg < 0 || nDoneState == 0)
+	{
+		SetLastRobotError(GetStr(
+			"FANUC程序完成契约无效：Program=%s R[%d] Expected=%d",
+			sJobName.c_str(), nStateReg, nDoneState));
+		return false;
+	}
 	if (RobotOperationLease::IsCancellationRequested(this))
 	{
 		SetLastRobotError("FANUC硬件操作已被安全停止取消，拒绝启动后续程序：" + sJobName);
 		return false;
 	}
+
+	std::lock_guard<std::mutex> startLock(m_callJobStartMutex);
+	if (RobotOperationLease::MotionCompletionPending(this))
+	{
+		SetLastRobotError(
+			"FANUC拒绝覆盖尚未确认终态的程序完成契约：" + sJobName);
+		return false;
+	}
+	if (!SetIntVar(nStateReg, 0))
+	{
+		SetLastRobotError(GetStr(
+			"FANUC程序启动前清零完成寄存器失败：Program=%s R[%d]",
+			sJobName.c_str(), nStateReg));
+		return false;
+	}
+	int resetValue = 0;
+	if (!TryGetIntVarStrict(nStateReg, "INT", resetValue) || resetValue != 0)
+	{
+		SetLastRobotError(GetStr(
+			"FANUC程序启动前完成寄存器回读未清零：Program=%s R[%d]=%d",
+			sJobName.c_str(), nStateReg, resetValue));
+		return false;
+	}
+	return CallJobInternal(sJobName, nStateReg, nDoneState, false);
+}
+
+// 调用方必须持有 m_callJobStartMutex；连续点动使用自身 R80/R81/R82 协议，
+// 其完成证明不允许泄漏到公开的通用 CALL_JOB 入口。
+bool FANUCRobotCtrl::CallJobInternal(
+	const std::string& sJobName,
+	int nCompletionStateReg,
+	int nCompletionDoneState,
+	bool allowManagedUnwitnessed)
+{
+	const bool hasCompletionWitness = nCompletionStateReg >= 0 && nCompletionDoneState != 0;
+	if (!hasCompletionWitness && !allowManagedUnwitnessed)
+	{
+		SetLastRobotError("FANUC拒绝启动无完成见证的内部程序：" + sJobName);
+		return false;
+	}
+	if (allowManagedUnwitnessed
+		&& sJobName != "FANUC_JOGL"
+		&& sJobName != "FANUC_JOGJ")
+	{
+		SetLastRobotError("FANUC拒绝把非连续点动程序当作受管流任务启动：" + sJobName);
+		return false;
+	}
+	if (RobotOperationLease::IsCancellationRequested(this))
+	{
+		SetLastRobotError("FANUC硬件操作已被安全停止取消，拒绝启动后续程序：" + sJobName);
+		return false;
+	}
+
 	QString motionError;
 	if (!RobotOperationLease::MarkMotionStarted(this, false, &motionError))
 	{
@@ -1602,20 +1877,35 @@ bool FANUCRobotCtrl::CallJob(std::string sJobName)
 		}
 		return false;
 	}
+	m_llCompletionWitnessCallJobPcMs.store(0);
+	m_nCompletionWitnessStateReg.store(hasCompletionWitness ? nCompletionStateReg : -1);
+	m_nCompletionWitnessDoneState.store(hasCompletionWitness ? nCompletionDoneState : 0);
 	// 只有机器人侧真实实现 ABORT_TASK(cancel_mtn=TRUE) 的服务版本才允许启动任务。
 	// 旧服务的 PROGRAM_STOP 只返回 OK、并不会停止运动，必须 fail-closed。
 	if (!HasVerifiedProgramStopCapability())
 	{
 		// 尚未发送 CALL_JOB，能力检查失败可安全撤销本次 armed 状态。
+		m_llCompletionWitnessCallJobPcMs.store(0);
+		m_nCompletionWitnessStateReg.store(-1);
+		m_nCompletionWitnessDoneState.store(0);
 		RobotOperationLease::MarkMotionCompleted(this);
 		return false;
 	}
 	std::string response;
-	const bool requestOk = FanucRequest(this, "CALL_JOB:" + sJobName, response);
+	bool commandMayHaveBeenSent = false;
+	const bool requestOk = FanucRequest(
+		this,
+		"CALL_JOB:" + sJobName,
+		response,
+		&commandMayHaveBeenSent);
+	const std::string requestError = GetLastRobotError();
+	const bool commandDefinitelyNotSent = !requestOk && !commandMayHaveBeenSent;
 	const bool ok = requestOk && FanucIsOkResponse(response);
 	if (ok)
 	{
-		m_llLastCallJobPcMs.store(FanucSteadyMs());
+		const long long callJobPcMs = FanucSteadyMs();
+		m_llLastCallJobPcMs.store(callJobPcMs);
+		m_llCompletionWitnessCallJobPcMs.store(hasCompletionWitness ? callJobPcMs : 0);
 		std::lock_guard<std::mutex> lock(m_monitorMutex);
 		m_nMonitorDone = 0;
 		m_nMonitorDoneRaw = 0;
@@ -1624,6 +1914,21 @@ bool FANUCRobotCtrl::CallJob(std::string sJobName)
 	}
 	else
 	{
+		m_llCompletionWitnessCallJobPcMs.store(0);
+		m_nCompletionWitnessStateReg.store(-1);
+		m_nCompletionWitnessDoneState.store(0);
+		if (commandDefinitelyNotSent)
+		{
+			// socket层已证明 CALL_JOB 未进入 send；可撤销 armed，
+			// 无需用 NO_ACTIVE_CALL_JOB 伪造停止证明。
+			RobotOperationLease::MarkMotionCompleted(this);
+			if (RobotOperationLease::IsCancellationRequested(this))
+			{
+				RobotOperationLease::ConfirmCancellationHandled(this);
+			}
+			SetLastRobotError(requestError);
+			return false;
+		}
 		// 服务明确返回 ERR 时 RUN_TASK 未被接受，可撤销本次 armed 状态；
 		// 请求无响应时则保留 pending，异常收尾会尝试安全中止。
 		if (requestOk)
@@ -1680,28 +1985,14 @@ bool FANUCRobotCtrl::CallJobAndWaitStateDone(
 		nFinishTimeoutMs = 10000;
 	}
 
-	if (bResetStateBeforeCall)
+	if (!bResetStateBeforeCall)
 	{
-		if (!SetIntVar(nStateReg, 0))
-		{
-			if (m_pRobotLog != nullptr)
-			{
-				m_pRobotLog->write(LogColor::ERR,
-					"FANUC CallJobAndWaitStateDone 初始化状态寄存器失败：Program=%s R[%d]",
-					sJobName.c_str(), nStateReg);
-			}
-			return false;
-		}
-
-		if (m_pRobotLog != nullptr)
-		{
-			m_pRobotLog->write(LogColor::DEFAULT,
-				"FANUC CallJobAndWaitStateDone 已清零 R[%d]，准备启动程序：%s",
-				nStateReg, sJobName.c_str());
-		}
+		SetLastRobotError(
+			"FANUC拒绝复用未清零的完成寄存器；CallJobAndWaitStateDone 必须在本轮启动前清零并回读。");
+		return false;
 	}
 
-	if (!CallJob(sJobName))
+	if (!CallJobWithCompletionState(sJobName, nStateReg, nDoneState))
 	{
 		if (m_pRobotLog != nullptr)
 		{
@@ -1752,7 +2043,7 @@ bool FANUCRobotCtrl::CallJobAndWaitStateDone(
 		return false;
 	}
 
-	const int jobDone = CheckRobotDone(nDelayTime);
+	const int jobDone = CheckRobotDone(nDelayTime, 30000);
 	if (jobDone <= 0)
 	{
 		if (m_pRobotLog != nullptr)
@@ -1809,7 +2100,7 @@ bool FANUCRobotCtrl::WaitStateDone(
 
 	if (nFinishTimeoutMs <= 0)
 	{
-		nFinishTimeoutMs = 120000;
+		nFinishTimeoutMs = 1800000;
 	}
 
 	int lastState = 0;
@@ -1822,7 +2113,12 @@ bool FANUCRobotCtrl::WaitStateDone(
 			SetLastRobotError("FANUC等待运动启动期间收到安全停止，流程已取消。");
 			return false;
 		}
-		lastState = GetIntVar(nStateReg);
+		if (!TryGetIntVarStrict(nStateReg, "INT", lastState))
+		{
+			SetLastRobotError(GetStr(
+				"FANUC等待运动启动时读取状态寄存器失败：R[%d]", nStateReg));
+			return false;
+		}
 		if (lastState == nStartStateA || lastState == nStartStateB || lastState == nDoneState)
 		{
 			hasStarted = true;
@@ -1851,6 +2147,9 @@ bool FANUCRobotCtrl::WaitStateDone(
 	if (lastState != nDoneState)
 	{
 		const auto finishDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(nFinishTimeoutMs);
+		const auto finishMonitorStart = std::chrono::steady_clock::now();
+		bool taskObservedRunning = false;
+		int stableStoppedBeforeDone = 0;
 		while (std::chrono::steady_clock::now() < finishDeadline)
 		{
 			if (RobotOperationLease::IsCancellationRequested(this))
@@ -1858,10 +2157,43 @@ bool FANUCRobotCtrl::WaitStateDone(
 				SetLastRobotError("FANUC等待运动完成期间收到安全停止，流程已取消。");
 				return false;
 			}
-			lastState = GetIntVar(nStateReg);
+			if (!TryGetIntVarStrict(nStateReg, "INT", lastState))
+			{
+				SetLastRobotError(GetStr(
+					"FANUC等待运动完成时读取状态寄存器失败：R[%d]", nStateReg));
+				return false;
+			}
 			if (lastState == nDoneState)
 			{
 				break;
+			}
+			const int taskDone = CheckDone();
+			if (taskDone < 0)
+			{
+				SetLastRobotError(GetStr(
+					"FANUC等待R[%d]完成期间任务状态读取失败：R[%d]=%d，%s",
+					nStateReg, nStateReg, lastState, GetRobotStatusText().c_str()));
+				return false;
+			}
+			if (taskDone == 0)
+			{
+				taskObservedRunning = true;
+				stableStoppedBeforeDone = 0;
+			}
+			else
+			{
+				const bool startupGraceExpired = FanucElapsedMs(finishMonitorStart)
+					>= FANUC_DONE_STARTUP_GUARD_MS;
+				if (taskObservedRunning || startupGraceExpired)
+				{
+					if (++stableStoppedBeforeDone >= FANUC_DONE_ACTIVE_STABLE_COUNT)
+					{
+						SetLastRobotError(GetStr(
+							"FANUC任务在完成寄存器置位前已终止：R[%d]=%d Expected=%d。",
+							nStateReg, lastState, nDoneState));
+						return false;
+					}
+				}
 			}
 			Sleep(nDelayTime);
 		}
@@ -1914,6 +2246,7 @@ namespace
 	const int FANUC_STREAM_END_COUNT_REG = 82;
 	const int FANUC_STREAM_LOAD_BUFFER_REG = 83;
 	const int FANUC_STREAM_LOAD_STATUS_REG = 84;
+	const int FANUC_STREAM_TERMINAL_REG = 85;
 	const int FANUC_STREAM_SAFE_GAP = 3;
 	const int FANUC_STREAM_STOP_COUNT_TIMEOUT_MS = 5000;
 	const int FANUC_STREAM_STOP_JOB_TIMEOUT_MS = 5000;
@@ -1927,10 +2260,25 @@ namespace
 
 bool FANUCRobotCtrl::StartContinuousMoveQueue(int nMoveType, double dSpeed)
 {
-	std::lock_guard<std::mutex> lifecycleLock(m_continuousMoveLifecycleMutex);
+	std::unique_lock<std::mutex> lifecycleLock(m_continuousMoveLifecycleMutex);
+	m_continuousMoveLifecycleCv.wait(lifecycleLock, [this]()
+		{
+			return !m_continuousMoveJoinInProgress;
+		});
 	if (RobotOperationLease::IsCancellationRequested(this))
 	{
 		SetLastRobotError("FANUC硬件操作已被安全停止取消，拒绝启动连续点动。");
+		return false;
+	}
+	int requestedSpeedRegister = 0;
+	const bool speedRepresentable = nMoveType == MOVL
+		? FanucLinearSpeedRegister(dSpeed, requestedSpeedRegister)
+		: (requestedSpeedRegister = FanucSpeedPercent(dSpeed)) > 0;
+	if (!speedRepresentable)
+	{
+		SetLastRobotError(GetStr(
+			"FANUC连续点动速度无法安全表示：Mode=%s Requested=%.6f。MOVL最低为1mm/sec，且禁止向上取整。",
+			nMoveType == MOVL ? "MOVL" : "MOVJ", dSpeed));
 		return false;
 	}
 
@@ -1956,7 +2304,7 @@ bool FANUCRobotCtrl::StartContinuousMoveQueue(int nMoveType, double dSpeed)
 		m_continuousMoveStopRequested = false;
 		m_continuousMoveRobotStarted = false;
 		m_continuousMoveType = nMoveType == MOVL ? MOVL : MOVJ;
-		m_continuousMoveSpeed = dSpeed <= 0.0 ? 1.0 : dSpeed;
+		m_continuousMoveSpeed = dSpeed;
 		m_continuousWrittenCount = 0;
 		m_continuousConsumedCount = 0;
 	}
@@ -2016,25 +2364,42 @@ void FANUCRobotCtrl::RequestEndContinuousMoveQueue()
 
 void FANUCRobotCtrl::EndContinuousMoveQueue()
 {
-	std::lock_guard<std::mutex> lifecycleLock(m_continuousMoveLifecycleMutex);
-
-	if (!m_continuousMoveRunning.load() && !m_continuousMoveThread.joinable())
+	std::thread threadToJoin;
 	{
-		return;
-	}
+		std::unique_lock<std::mutex> lifecycleLock(m_continuousMoveLifecycleMutex);
+		m_continuousMoveLifecycleCv.wait(lifecycleLock, [this]()
+			{
+				return !m_continuousMoveJoinInProgress;
+			});
+		if (!m_continuousMoveRunning.load() && !m_continuousMoveThread.joinable())
+		{
+			return;
+		}
 
-	{
-		std::lock_guard<std::mutex> lock(m_continuousMoveMutex);
-		m_continuousMoveStopRequested = true;
+		{
+			std::lock_guard<std::mutex> lock(m_continuousMoveMutex);
+			m_continuousMoveStopRequested = true;
+		}
+		if (m_continuousMoveThread.joinable()
+			&& m_continuousMoveThread.get_id() != std::this_thread::get_id())
+		{
+			m_continuousMoveJoinInProgress = true;
+			m_continuousMoveJoiningThreadId = m_continuousMoveThread.get_id();
+			threadToJoin = std::move(m_continuousMoveThread);
+		}
 	}
 	m_continuousMoveCv.notify_all();
 
-	if (m_continuousMoveThread.joinable())
+	// 绝不能持 lifecycle mutex 等 worker；worker 的异常停止路径也会进入 Finalize。
+	if (threadToJoin.joinable())
 	{
-		if (m_continuousMoveThread.get_id() != std::this_thread::get_id())
+		threadToJoin.join();
 		{
-			m_continuousMoveThread.join();
+			std::lock_guard<std::mutex> lifecycleLock(m_continuousMoveLifecycleMutex);
+			m_continuousMoveJoinInProgress = false;
+			m_continuousMoveJoiningThreadId = std::thread::id();
 		}
+		m_continuousMoveLifecycleCv.notify_all();
 	}
 	// worker 只有在机器人侧任务真实结束后才会清 running；通信失败/停止未确认时保持 true，
 	// 上层租约因而不会释放，控制单元重载与后续运动继续 fail-closed。
@@ -2054,21 +2419,56 @@ void FANUCRobotCtrl::FinalizeContinuousMoveAfterVerifiedStop()
 {
 	// PROGRAM_STOP 已通过机器人侧任务终态稳定回读。此处只负责收拢本地
 	// 连续点动 worker，解除“停止未确认”留下的本地 running 闭锁。
-	std::lock_guard<std::mutex> lifecycleLock(m_continuousMoveLifecycleMutex);
+	std::thread threadToJoin;
+	bool ownsJoin = false;
 	{
-		std::lock_guard<std::mutex> lock(m_continuousMoveMutex);
-		m_continuousMoveStopRequested = true;
-		m_continuousMoveQueue.clear();
+		std::unique_lock<std::mutex> lifecycleLock(m_continuousMoveLifecycleMutex);
+		const bool currentWorkerIsBeingJoined = m_continuousMoveJoinInProgress
+			&& m_continuousMoveJoiningThreadId == std::this_thread::get_id();
+		if (!currentWorkerIsBeingJoined)
+		{
+			m_continuousMoveLifecycleCv.wait(lifecycleLock, [this]()
+				{
+					return !m_continuousMoveJoinInProgress;
+				});
+		}
+		{
+			std::lock_guard<std::mutex> lock(m_continuousMoveMutex);
+			m_continuousMoveStopRequested = true;
+			m_continuousMoveQueue.clear();
+		}
+		if (m_continuousMoveThread.joinable()
+			&& m_continuousMoveThread.get_id() != std::this_thread::get_id())
+		{
+			m_continuousMoveJoinInProgress = true;
+			m_continuousMoveJoiningThreadId = m_continuousMoveThread.get_id();
+			threadToJoin = std::move(m_continuousMoveThread);
+			ownsJoin = true;
+		}
 	}
 	m_continuousMoveCv.notify_all();
-	if (m_continuousMoveThread.joinable()
-		&& m_continuousMoveThread.get_id() != std::this_thread::get_id())
+	if (threadToJoin.joinable())
 	{
-		m_continuousMoveThread.join();
+		threadToJoin.join();
 	}
-	m_continuousMoveRobotStarted = false;
-	RobotOperationLease::MarkMotionCompleted(this);
-	m_continuousMoveRunning.store(false);
+	{
+		std::lock_guard<std::mutex> lifecycleLock(m_continuousMoveLifecycleMutex);
+		m_continuousMoveRobotStarted.store(false);
+		m_llCompletionWitnessCallJobPcMs.store(0);
+		m_nCompletionWitnessStateReg.store(-1);
+		m_nCompletionWitnessDoneState.store(0);
+		RobotOperationLease::MarkMotionCompleted(this);
+		m_continuousMoveRunning.store(false);
+		if (ownsJoin)
+		{
+			m_continuousMoveJoinInProgress = false;
+			m_continuousMoveJoiningThreadId = std::thread::id();
+		}
+	}
+	if (ownsJoin)
+	{
+		m_continuousMoveLifecycleCv.notify_all();
+	}
 }
 
 bool FANUCRobotCtrl::WriteContinuousMovePointToRobot(int prIndex, const T_ROBOT_MOVE_INFO& moveInfo)
@@ -2277,10 +2677,23 @@ void FANUCRobotCtrl::ContinuousMoveWorker()
 				{
 					return false;
 				}
-				if (done > 0)
+				int terminalMarker = 0;
+				const bool markerReadOk = TryGetIntVarStrict(
+					FANUC_STREAM_TERMINAL_REG, "INT", terminalMarker);
+				const long long lastCallJobPcMs = m_llLastCallJobPcMs.load();
+				const bool sameCallWitness = markerReadOk
+					&& terminalMarker == 1
+					&& m_nCompletionWitnessStateReg.load() == FANUC_STREAM_TERMINAL_REG
+					&& m_nCompletionWitnessDoneState.load() == 1
+					&& m_llCompletionWitnessCallJobPcMs.load() == lastCallJobPcMs
+					&& lastCallJobPcMs > 0;
+				if (done > 0 && sameCallWitness)
 				{
 					if (++stableDoneCount >= FANUC_DONE_ACTIVE_STABLE_COUNT)
 					{
+						m_llCompletionWitnessCallJobPcMs.store(0);
+						m_nCompletionWitnessStateReg.store(-1);
+						m_nCompletionWitnessDoneState.store(0);
 						RobotOperationLease::MarkMotionCompleted(this);
 						return true;
 					}
@@ -2293,12 +2706,42 @@ void FANUCRobotCtrl::ContinuousMoveWorker()
 			}
 			return false;
 		};
+	const auto setAndVerifyStreamReg = [this](int reg, int expected) -> bool
+		{
+			if (!SetIntVar(reg, expected))
+			{
+				SetLastRobotError(GetStr(
+					"FANUC连续点动寄存器写入失败：R[%d]=%d", reg, expected));
+				return false;
+			}
+			int actual = 0;
+			if (!TryGetIntVarStrict(reg, "INT", actual) || actual != expected)
+			{
+				SetLastRobotError(GetStr(
+					"FANUC连续点动寄存器回读不一致：R[%d]=%d Expected=%d",
+					reg, actual, expected));
+				return false;
+			}
+			return true;
+		};
+	const auto startManagedStreamJob = [this, &setAndVerifyStreamReg](const std::string& programName) -> bool
+		{
+			std::lock_guard<std::mutex> startLock(m_callJobStartMutex);
+			// R[85] 是本次流式 TP 的自然完成见证。清零、严格回读、arm 与 CALL
+			// 必须紧邻且共用启动锁；TP 首行也再次清零，以覆盖机器人端残留旧程序
+			// 在主机回读之后、CALL 之前才写入旧终态的极窄窗口。
+			return setAndVerifyStreamReg(FANUC_STREAM_TERMINAL_REG, 0)
+				&& CallJobInternal(programName, FANUC_STREAM_TERMINAL_REG, 1, true);
+		};
 
-	SetIntVar(FANUC_STREAM_RUN_REG, 0);
-	SetIntVar(FANUC_STREAM_DONE_COUNT_REG, 0);
-	SetIntVar(FANUC_STREAM_END_COUNT_REG, 0);
-	SetIntVar(FANUC_STREAM_LOAD_BUFFER_REG, 0);
-	SetIntVar(FANUC_STREAM_LOAD_STATUS_REG, 0);
+	const bool initRunOk = setAndVerifyStreamReg(FANUC_STREAM_RUN_REG, 0);
+	const bool initDoneOk = setAndVerifyStreamReg(FANUC_STREAM_DONE_COUNT_REG, 0);
+	const bool initEndOk = setAndVerifyStreamReg(FANUC_STREAM_END_COUNT_REG, 0);
+	const bool initLoadBufferOk = setAndVerifyStreamReg(FANUC_STREAM_LOAD_BUFFER_REG, 0);
+	const bool initLoadStatusOk = setAndVerifyStreamReg(FANUC_STREAM_LOAD_STATUS_REG, 0);
+	const bool initTerminalOk = setAndVerifyStreamReg(FANUC_STREAM_TERMINAL_REG, 0);
+	ok = initRunOk && initDoneOk && initEndOk && initLoadBufferOk && initLoadStatusOk
+		&& initTerminalOk;
 
 	std::vector<T_ROBOT_MOVE_INFO> startBuffer;
 	startBuffer.reserve(FANUC_STREAM_START_POINT_COUNT);
@@ -2359,11 +2802,27 @@ void FANUCRobotCtrl::ContinuousMoveWorker()
 
 	if (ok && hasLastPoint)
 	{
-		SetTpSpeed(static_cast<int>(std::max(1.0, m_continuousMoveSpeed)));
-		SetIntVar(FANUC_STREAM_LOAD_STATUS_REG, 0);
-		const bool runFlagOk = SetIntVar(FANUC_STREAM_RUN_REG, 1);
-		jobAccepted = runFlagOk
-			&& CallJob(m_continuousMoveType == MOVL ? "FANUC_JOGL" : "FANUC_JOGJ");
+		int speedReg = 0;
+		const bool speedRepresentable = m_continuousMoveType == MOVL
+			? FanucLinearSpeedRegister(m_continuousMoveSpeed, speedReg)
+			: (speedReg = FanucSpeedPercent(m_continuousMoveSpeed)) > 0;
+		const bool speedWriteOk = speedRepresentable && SetTpSpeed(speedReg);
+		int speedReadback = 0;
+		const bool speedReadbackOk = speedWriteOk
+			&& TryGetIntVarStrict(17, "INT", speedReadback)
+			&& speedReadback == speedReg;
+		if (!speedReadbackOk)
+		{
+			SetLastRobotError(GetStr(
+				"FANUC连续点动速度未可靠写入：R[17]=%d Expected=%d",
+				speedReadback, speedReg));
+		}
+		const bool loadStatusResetOk = speedReadbackOk
+			&& setAndVerifyStreamReg(FANUC_STREAM_LOAD_STATUS_REG, 0);
+		const bool runFlagOk = loadStatusResetOk
+			&& setAndVerifyStreamReg(FANUC_STREAM_RUN_REG, 1);
+		jobAccepted = speedReadbackOk && runFlagOk
+			&& startManagedStreamJob(m_continuousMoveType == MOVL ? "FANUC_JOGL" : "FANUC_JOGJ");
 		ok = jobAccepted;
 
 		int loadStatus = 0;
@@ -2417,11 +2876,16 @@ void FANUCRobotCtrl::ContinuousMoveWorker()
 
 				if (ok)
 				{
-					SetIntVar(FANUC_STREAM_LOAD_BUFFER_REG, 2);
-					SetIntVar(FANUC_STREAM_LOAD_STATUS_REG, 0);
-					const bool fallbackRunFlagOk = SetIntVar(FANUC_STREAM_RUN_REG, 1);
-					jobAccepted = fallbackRunFlagOk
-						&& CallJob(m_continuousMoveType == MOVL ? "FANUC_JOGL" : "FANUC_JOGJ");
+					const bool fallbackLoadModeOk = setAndVerifyStreamReg(FANUC_STREAM_LOAD_BUFFER_REG, 2);
+					const bool fallbackStatusOk = fallbackLoadModeOk
+						&& setAndVerifyStreamReg(FANUC_STREAM_LOAD_STATUS_REG, 0);
+					const bool fallbackTerminalOk = fallbackStatusOk
+						&& setAndVerifyStreamReg(FANUC_STREAM_TERMINAL_REG, 0);
+					const bool fallbackRunFlagOk = fallbackTerminalOk
+						&& setAndVerifyStreamReg(FANUC_STREAM_RUN_REG, 1);
+					jobAccepted = fallbackLoadModeOk && fallbackStatusOk
+						&& fallbackTerminalOk && fallbackRunFlagOk
+						&& startManagedStreamJob(m_continuousMoveType == MOVL ? "FANUC_JOGL" : "FANUC_JOGJ");
 					ok = jobAccepted;
 				}
 
@@ -2629,7 +3093,7 @@ void FANUCRobotCtrl::ContinuousMoveWorker()
 			"FANUC 连续运动线程结束: written=%lld consumed=%lld robotStarted=%d",
 			m_continuousWrittenCount,
 			m_continuousConsumedCount,
-			m_continuousMoveRobotStarted ? 1 : 0);
+			m_continuousMoveRobotStarted.load() ? 1 : 0);
 	}
 
 	m_continuousMoveRobotStarted = jobAccepted;
@@ -2960,6 +3424,23 @@ int FANUCRobotCtrl::UploadMultiPointTpProgram(
 			m_pRobotLog->write(LogColor::ERR, "FANUC UploadMultiPointTpProgram 失败：轨迹点为空");
 		}
 		return -1;
+	}
+	for (size_t index = 0; index < vtRobotMoveInfo.size(); ++index)
+	{
+		const T_ROBOT_MOVE_INFO& info = vtRobotMoveInfo[index];
+		int speedRegister = 0;
+		const bool speedOk = info.nMoveType == MOVL
+			? FanucLinearSpeedRegister(info.tSpeed.dSpeed, speedRegister)
+			: (speedRegister = FanucSpeedPercent(info.tSpeed.dSpeed)) > 0;
+		if (!speedOk)
+		{
+			SetLastRobotError(GetStr(
+				"FANUC轨迹点速度无法安全表示：Index=%u Mode=%s Requested=%.6f",
+				static_cast<unsigned>(index),
+				info.nMoveType == MOVL ? "MOVL" : "MOVJ",
+				info.tSpeed.dSpeed));
+			return -6;
+		}
 	}
 
 	const std::string programName = FanucMakeTpProgramName();
@@ -3350,9 +3831,16 @@ bool FANUCRobotCtrl::Prog_stop_Py()
 	const bool noTrackedCallJob = response == "ERR:NO_ACTIVE_CALL_JOB";
 	if (noTrackedCallJob)
 	{
-		// 固定红色按钮只承诺终止本软件持租约的流程。服务明确没有本软件
-		// 追踪的 CALL_JOB 时直接视为无需中止，不能用瞬时 ROB_MOVE=FALSE
-		// 谎称示教器或外部程序已经不可恢复地终止。
+		// 服务重启会丢失 RAM 中的 active task identity，但此前 RUN_TASK 启动的
+		// TP 仍可能独立运行或暂停。存在本软件 pending 时，NO_ACTIVE 绝不是停止证明。
+		if (RobotOperationLease::MotionCompletionPending(this))
+		{
+			SetLastRobotError(
+				"FANUC PROGRAM_STOP 无法确认中止：机器人服务未保留活动任务身份，"
+				"但本软件仍有未确认运动。保持安全互锁，禁止继续运动。");
+			return false;
+		}
+		// 本来就没有本软件 pending 时，NO_ACTIVE 仅作为幂等 no-op 收拢本地线程。
 		FinalizeContinuousMoveAfterVerifiedStop();
 		ClearLastRobotError();
 		return true;
@@ -3556,17 +4044,30 @@ bool FANUCRobotCtrl::SetSpeed(int nIndex, double adSpeed[5])
 // 读取整数寄存器，默认读取INT<n>。
 int FANUCRobotCtrl::GetIntVar(int nIndex, const char* cStrPreFix)
 {
+	int value = 0;
+	return TryGetIntVarStrict(nIndex, cStrPreFix, value) ? value : 0;
+}
+
+bool FANUCRobotCtrl::TryGetIntVarStrict(int nIndex, const char* cStrPreFix, int& value)
+{
+	value = 0;
 	std::string response;
 	const std::string prefix = cStrPreFix == nullptr ? "INT" : cStrPreFix;
 	if (!FanucRequest(this, "GET_INT:" + prefix + "," + std::to_string(nIndex), response))
 	{
-		return 0;
+		return false;
 	}
 	if (!FanucStartsWith(response, "INT:"))
 	{
-		return 0;
+		SetLastRobotError("FANUC整数变量响应格式无效：" + response);
+		return false;
 	}
-	return atoi(FanucResponsePayload(response).c_str());
+	if (!FanucParseIntStrict(FanucResponsePayload(response), value))
+	{
+		SetLastRobotError("FANUC整数变量响应无效：" + response);
+		return false;
+	}
+	return true;
 }
 
 // 按编号写整数寄存器，默认写INT<n>。
@@ -3688,11 +4189,19 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 		return false;
 	}
 
-	const int speed = moveType == MOVL
-		? static_cast<int>(std::lround(FanucLinearSpeed(moveInfo.tSpeed.dSpeed)))
-		: FanucSpeedPercent(moveInfo.tSpeed.dSpeed);
+	int speed = 0;
+	const bool speedRepresentable = moveType == MOVL
+		? FanucLinearSpeedRegister(moveInfo.tSpeed.dSpeed, speed)
+		: (speed = FanucSpeedPercent(moveInfo.tSpeed.dSpeed)) > 0;
+	if (!speedRepresentable)
+	{
+		ctrl->SetLastRobotError(GetStr(
+			"FANUC固定TP运动失败：速度无法安全表示，Mode=%s Requested=%.6f；MOVL最低1mm/sec且禁止向上取整。",
+			moveType == MOVL ? "MOVL" : "MOVJ", moveInfo.tSpeed.dSpeed));
+		return false;
+	}
 
-	if (!ctrl->SetTpSpeed(speed))
+	if (!ctrl->SetTpSpeed(speed) || ctrl->GetIntVar(17) != speed)
 	{
 		ctrl->SetLastRobotError(GetStr("FANUC固定TP运动失败：设置速度失败，Speed=%d，%s",
 			speed, ctrl->GetRobotStatusText().c_str()));
@@ -3757,17 +4266,7 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 		}
 	}
 
-	if (!ctrl->SetIntVar(93, 0))
-	{
-		ctrl->SetLastRobotError("FANUC固定TP运动失败：初始化R[93]失败，Program=" + programName + "，" + ctrl->GetRobotStatusText());
-		if (ctrl->m_pRobotLog != nullptr)
-		{
-			ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC 固定TP运动初始化 R[93] 失败：%s", programName.c_str());
-		}
-		return false;
-	}
-
-	if (!ctrl->CallJob(programName))
+	if (!ctrl->CallJobWithCompletionState(programName, 93, 1))
 	{
 		ctrl->SetLastRobotError("FANUC固定TP运动失败：启动程序失败，Program=" + programName + "，" + ctrl->GetRobotStatusText());
 		if (ctrl->m_pRobotLog != nullptr)

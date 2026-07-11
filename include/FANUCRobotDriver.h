@@ -35,10 +35,12 @@ public:
 	// 主动状态读取：通过控制socket实时请求机器人数据，会占用S4控制通道。
 	double GetCurrentPos(int nAxisNo) override;
 	T_ROBOT_COORS GetCurrentPos() override;
+	bool TryGetCurrentPos(T_ROBOT_COORS& pos) override;
 	double GetCurrentPulse(int nAxisNo) override;
 	T_ANGLE_PULSE GetCurrentPulse() override;
+	bool TryGetCurrentPulse(T_ANGLE_PULSE& pulse) override;
 	int CheckDone() override;
-	int CheckRobotDone(int nDelayTime = 200) override;
+	int CheckRobotDone(int nDelayTime = 200, int runTimeoutMs = 1800000) override;
 	bool AbortCurrentProgramSafely() override;
 
 	// 被动状态读取：读取S5监控线程最后一帧缓存，不占用控制socket；时间戳同时返回机器人累计毫秒和PC接收毫秒。
@@ -48,6 +50,7 @@ public:
 
 	// 程序调用与监控通道：CallJob走S4控制通道，Monitor走S5独立推送通道。
 	bool CallJob(std::string sJobName);
+	bool CallJobWithCompletionState(std::string sJobName, int nStateReg, int nDoneState);
 	// 通用TP完成检测：约定程序启动后写入运行态(默认10/20)，完成时写入完成态(默认1)。
 	bool CallJobAndWaitStateDone(
 		std::string sJobName,
@@ -67,9 +70,11 @@ public:
 		int nStartStateA = 10,
 		int nStartStateB = 20,
 		int nStartTimeoutMs = 3000,
-		int nFinishTimeoutMs = 120000,
+		int nFinishTimeoutMs = 1800000,
 		int nDelayTime = 100,
 		int* pLastState = nullptr);
+	// 为当前 CALL_JOB 绑定由 TP 程序写入的完成寄存器；CHECK_DONE 只证明任务已终止，
+	// 只有该寄存器也命中才允许 CheckRobotDone 返回自然完成。
 	bool StopRobotServices();
 	bool StartMonitor(int nPort = 0);
 	void StopMonitor();
@@ -172,8 +177,19 @@ public:
 	long long m_llMonitorRobotMs;
 	long long m_llMonitorPcRecvMs;
 	std::atomic<long long> m_llLastCallJobPcMs;
+	std::atomic<long long> m_llCompletionWitnessCallJobPcMs{ 0 };
+	std::atomic<int> m_nCompletionWitnessStateReg{ -1 };
+	std::atomic<int> m_nCompletionWitnessDoneState{ 0 };
+	// 串行化“清零并回读完成寄存器 -> armed -> CALL_JOB”，禁止并发调用覆盖见证契约。
+	std::mutex m_callJobStartMutex;
 
 private:
+	bool CallJobInternal(
+		const std::string& sJobName,
+		int nCompletionStateReg,
+		int nCompletionDoneState,
+		bool allowManagedUnwitnessed);
+	bool TryGetIntVarStrict(int nIndex, const char* cStrPreFix, int& value);
 	bool HasVerifiedProgramStopCapability();
 	void FinalizeContinuousMoveAfterVerifiedStop();
 	void ContinuousMoveWorker();
@@ -183,12 +199,15 @@ private:
 
 	std::thread m_continuousMoveThread;
 	mutable std::mutex m_continuousMoveLifecycleMutex;
+	std::condition_variable m_continuousMoveLifecycleCv;
+	bool m_continuousMoveJoinInProgress{ false };
+	std::thread::id m_continuousMoveJoiningThreadId;
 	mutable std::mutex m_continuousMoveMutex;
 	std::condition_variable m_continuousMoveCv;
 	std::deque<T_ROBOT_MOVE_INFO> m_continuousMoveQueue;
 	std::atomic_bool m_continuousMoveRunning;
 	bool m_continuousMoveStopRequested;
-	bool m_continuousMoveRobotStarted;
+	std::atomic_bool m_continuousMoveRobotStarted;
 	int m_continuousMoveType;
 	double m_continuousMoveSpeed;
 	long long m_continuousWrittenCount;

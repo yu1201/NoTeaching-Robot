@@ -48,6 +48,7 @@ private:
     void LoadWeldProcessList();
     void AppendLog(const QString& text);
     void SetRunning(bool running);
+    void InvalidateGeneratedTrajectory();
 
     ContralUnit* m_pContralUnit = nullptr;
     int m_unitIndex = 0;

@@ -1715,17 +1715,21 @@ void FunctionTestDialog::FanucCallJobTest()
     const QByteArray jobNameBytes = jobName.trimmed().toLocal8Bit();
     m_bRobotCommandRunning = true;
     RefreshMotionButtonState();
-    AppendLog(QString("已调用任务 %1，正在后台等待真实完成；可返回主页使用“安全停止本软件活动机器人任务”中止。")
+    AppendLog(QString("正在尝试调用任务 %1；仅带可验证完成契约的入口允许启动。")
         .arg(jobName.trimmed()));
     QPointer<FunctionTestDialog> self(this);
     std::thread([self, pRobotDriver, jobNameBytes, operationLease]()
         {
             const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
-            const int done = callOk ? pRobotDriver->CheckRobotDone(200) : -1;
-            const QString message = QString("调用任务%1：%2，CheckRobotDone=%3")
-                .arg(callOk ? QStringLiteral("成功") : QStringLiteral("失败"))
+            const int done = callOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
+            const bool flowOk = callOk && done > 0;
+            const QString detail = DecodeRobotMessageText(pRobotDriver->GetLastRobotError());
+            const QString message = QString("调用任务%1：%2，CallJob=%3，CheckRobotDone=%4，详情=%5")
+                .arg(flowOk ? QStringLiteral("成功") : QStringLiteral("失败"))
                 .arg(QString::fromLocal8Bit(jobNameBytes))
-                .arg(done);
+                .arg(callOk ? QStringLiteral("OK") : QStringLiteral("FAIL"))
+                .arg(done)
+                .arg(detail);
             QMetaObject::invokeMethod(qApp, [self, message]()
                 {
                     if (self == nullptr)
@@ -1809,11 +1813,16 @@ void FunctionTestDialog::FanucMovlTest()
     QPointer<FunctionTestDialog> self(this);
     std::thread([self, pRobotDriver, moveForward, operationLease]()
         {
-            T_ROBOT_COORS target = pRobotDriver->GetCurrentPos();
-            target.dY += moveForward ? 100.0 : -100.0;
+            T_ROBOT_COORS target;
+            const bool currentOk = pRobotDriver->TryGetCurrentPos(target);
+            if (currentOk)
+            {
+                target.dY += moveForward ? 100.0 : -100.0;
+            }
 
-            const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
-            const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+            const bool moveOk = currentOk
+                && pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
+            const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
             const QString message = QString("MOVL %1 100mm, Move=%2, CheckRobotDone=%3")
                 .arg(moveForward ? "Y+" : "Y-")
                 .arg(moveOk ? "OK" : "FAIL")
@@ -1860,16 +1869,21 @@ void FunctionTestDialog::FanucMovjTest()
     QPointer<FunctionTestDialog> self(this);
     std::thread([self, pRobotDriver, operationLease]()
         {
-            T_ANGLE_PULSE target = pRobotDriver->GetCurrentPulse();
+            T_ANGLE_PULSE target;
+            const bool currentOk = pRobotDriver->TryGetCurrentPulse(target);
             const double j2PulseUnit = pRobotDriver->m_tAxisUnit.dLPulseUnit;
             const double j3PulseUnit = pRobotDriver->m_tAxisUnit.dUPulseUnit;
             const long j2DeltaPulse = j2PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j2PulseUnit));
             const long j3DeltaPulse = j3PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j3PulseUnit));
-            target.nLPulse += j2DeltaPulse;
-            target.nUPulse += j3DeltaPulse;
+            if (currentOk)
+            {
+                target.nLPulse += j2DeltaPulse;
+                target.nUPulse += j3DeltaPulse;
+            }
 
-            const bool moveOk = pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
-            const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
+            const bool moveOk = currentOk
+                && pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
+            const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
             const QString message = QString("MOVJ J2/J3 +5deg, J2DeltaPulse=%1, J3DeltaPulse=%2, Move=%3, CheckRobotDone=%4")
                 .arg(j2DeltaPulse)
                 .arg(j3DeltaPulse)
@@ -1932,14 +1946,17 @@ void FunctionTestDialog::FanucMoveZeroTest()
             const T_ANGLE_PULSE zeroPulse = T_ANGLE_PULSE();
             const T_ROBOT_MOVE_SPEED speed(1.0, 0.0, 0.0);
             const bool moveOk = pRobotDriver->MoveByJob(zeroPulse, speed, pRobotDriver->m_nExternalAxleType, "MOVJ");
-            const int done = moveOk ? pRobotDriver->CheckRobotDone(200) : -1;
-            const T_ROBOT_COORS pos = pRobotDriver->GetCurrentPos();
-            const T_ANGLE_PULSE pulse = pRobotDriver->GetCurrentPulse();
+            const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
+            T_ROBOT_COORS pos;
+            T_ANGLE_PULSE pulse;
+            const bool feedbackOk = pRobotDriver->TryGetCurrentPos(pos)
+                && pRobotDriver->TryGetCurrentPulse(pulse);
 
             const QString message = QString(
                 "MOVJ 到零位, Move=%1, CheckRobotDone=%2\n"
                 "当前位置: X=%3, Y=%4, Z=%5, RX=%6, RY=%7, RZ=%8\n"
-                "当前脉冲: S=%9, L=%10, U=%11, R=%12, B=%13, T=%14, EX1=%15, EX2=%16, EX3=%17")
+                "当前脉冲: S=%9, L=%10, U=%11, R=%12, B=%13, T=%14, EX1=%15, EX2=%16, EX3=%17\n"
+                "反馈读取=%18")
                 .arg(moveOk ? "OK" : "FAIL")
                 .arg(done)
                 .arg(pos.dX, 0, 'f', 3)
@@ -1956,7 +1973,8 @@ void FunctionTestDialog::FanucMoveZeroTest()
                 .arg(pulse.nTPulse)
                 .arg(pulse.lBXPulse)
                 .arg(pulse.lBYPulse)
-                .arg(pulse.lBZPulse);
+                .arg(pulse.lBZPulse)
+                .arg(feedbackOk ? QStringLiteral("OK") : QStringLiteral("FAIL"));
 
             QMetaObject::invokeMethod(qApp, [self, message]()
                 {

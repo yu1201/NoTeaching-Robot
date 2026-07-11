@@ -64,6 +64,8 @@ namespace
 	constexpr const char* kStepArcRealName = "real0";
 	constexpr const char* kStepWeaveDataName = "wd0";
 	constexpr const char* kStepTrackDataName = "td0";
+	constexpr const char* kStepCompletionWitnessName = "ntdone";
+	constexpr int kStepPauseWaitTimeoutMs = 1800000;
 
 	long long StepRobotSteadyNowMs()
 	{
@@ -857,6 +859,8 @@ namespace
 		std::ostringstream oss;
 		oss << std::fixed << std::setprecision(6);
 		const StepVariablePlan variablePlan = StepBuildVariablePlan(moveInfos);
+		StepAppendFileComment(oss, "程序自然完成见证：START前和首行清零，所有运动/收弧完成后末行置1");
+		oss << "INT " << kStepCompletionWitnessName << " := 0" << "\n";
 
 		StepAppendFileComment(oss, "点位数据：SRP运动语句使用的TCP/AP变量");
 		for (size_t i = 0; i < moveInfos.size(); ++i)
@@ -976,6 +980,8 @@ namespace
 		const std::string sharedOverlapName = StepBuildOverlapName(0);
 		const bool hasWeldProcess = StepHasWeldProcess(moveInfos);
 		const bool emitWeldCommands = hasWeldProcess && actualWeld;
+		StepAppendFileComment(oss, "任何新运行先清零自然完成见证，禁止沿用上一次结果");
+		StepAppendCommand(oss, std::string(kStepCompletionWitnessName) + ":=0;");
 		if (emitWeldCommands)
 		{
 			const T_ROBOT_MOVE_INFO* processInfo = StepFirstWeldProcessInfo(moveInfos);
@@ -1052,6 +1058,10 @@ namespace
 			StepAppendFileComment(oss, "焊接结束：使用停弧参数停弧");
 			StepAppendCommand(oss, std::string("ARCOFF(") + kStepArcOffDataName + ");");
 		}
+		StepAppendFileComment(oss, "打断预读并等待末段物理运动及收弧真正完成");
+		StepAppendCommand(oss, "WaitIsFinished();");
+		StepAppendFileComment(oss, "仅在全部运动以及可选ARCOFF完成后写入自然完成见证");
+		StepAppendCommand(oss, std::string(kStepCompletionWitnessName) + ":=1;");
 
 		return oss.str();
 	}
@@ -1186,6 +1196,151 @@ std::string STEPRobotCtrl::MakeTimestampWeldProgramName()
 	oss << "Weld_" << std::put_time(&localTime, "%Y%m%d_%H%M%S")
 		<< "_" << std::setw(3) << std::setfill('0') << nowMs.count();
 	return StepSanitizeProgramName(oss.str());
+}
+
+void STEPRobotCtrl::ClearGeneratedProgramCompletionWitnessLocked()
+{
+	m_completionWitnessProjectName.clear();
+	m_completionWitnessProgramName.clear();
+}
+
+bool STEPRobotCtrl::ArmGeneratedProgramCompletionWitness(
+	const std::string& projectName,
+	const std::string& programName,
+	std::string& error)
+{
+	error.clear();
+	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
+	ClearGeneratedProgramCompletionWitnessLocked();
+	if (m_pSTEPRobotClient == nullptr || projectName.empty() || programName.empty())
+	{
+		error = "STEP自然完成见证准备失败：SDK客户端、工程或程序身份无效。";
+		return false;
+	}
+	if (!m_bLocalDebugMark
+		&& (!m_bSocketConnected.load() || m_pSTEPRobotClient->ConnectStatus() < 0))
+	{
+		error = "STEP自然完成见证准备失败：机器人连接不可用。";
+		return false;
+	}
+	const std::string currentProject = StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName());
+	const std::string currentProgram = m_pSTEPRobotClient->getProgramName();
+	const int initialLine = m_pSTEPRobotClient->getCurrentLine();
+	const int initialState = static_cast<int>(m_pSTEPRobotClient->getProgramState());
+	if (currentProject != projectName || currentProgram != programName
+		|| initialLine < 0 || initialLine > 1
+		|| initialState != STEPROBOTSDK::eStop)
+	{
+		error = GetStr(
+			"STEP自然完成见证准备失败：加载身份、初始程序行或状态异常。Expected=%s/%s Current=%s/%s Line=%d State=%d",
+			projectName.c_str(), programName.c_str(), currentProject.c_str(), currentProgram.c_str(),
+			initialLine, initialState);
+		return false;
+	}
+	const int writeRet = m_pSTEPRobotClient->VariableIntModifyCmd(
+		projectName, programName, kStepCompletionWitnessName, 0);
+	int readValue = -1;
+	const int readRet = writeRet == 0
+		? m_pSTEPRobotClient->VariableIntReadCmd(
+			projectName, programName, kStepCompletionWitnessName, readValue)
+		: -1;
+	if (writeRet != 0 || readRet != 0 || readValue != 0)
+	{
+		error = GetStr(
+			"STEP自然完成见证清零/回读失败：Program=%s Variable=%s WriteRet=%d ReadRet=%d Value=%d",
+			programName.c_str(), kStepCompletionWitnessName, writeRet, readRet, readValue);
+		return false;
+	}
+	m_completionWitnessProjectName = projectName;
+	m_completionWitnessProgramName = programName;
+	return true;
+}
+
+bool STEPRobotCtrl::VerifyGeneratedProgramCompletionWitnessLocked(std::string& error)
+{
+	error.clear();
+	if (m_pSTEPRobotClient == nullptr)
+	{
+		error = "SDK客户端未初始化";
+		return false;
+	}
+	if (!m_bLocalDebugMark
+		&& (!m_bSocketConnected.load() || m_pSTEPRobotClient->ConnectStatus() < 0))
+	{
+		error = "机器人连接不可用，状态和变量回读可能陈旧";
+		return false;
+	}
+	const std::string currentProject = StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName());
+	const std::string currentProgram = m_pSTEPRobotClient->getProgramName();
+	if (m_completionWitnessProjectName.empty() || m_completionWitnessProgramName.empty()
+		|| m_completionWitnessProjectName != m_motionTrackedProjectName
+		|| m_completionWitnessProgramName != m_motionTrackedProgramName
+		|| currentProject != m_motionTrackedProjectName
+		|| currentProgram != m_motionTrackedProgramName)
+	{
+		error = GetStr(
+			"缺少同一程序的自然完成见证。Witness=%s/%s Tracked=%s/%s Current=%s/%s",
+			m_completionWitnessProjectName.c_str(), m_completionWitnessProgramName.c_str(),
+			m_motionTrackedProjectName.c_str(), m_motionTrackedProgramName.c_str(),
+			currentProject.c_str(), currentProgram.c_str());
+		return false;
+	}
+	int witnessValue = -1;
+	const int readRet = m_pSTEPRobotClient->VariableIntReadCmd(
+		currentProject, currentProgram, kStepCompletionWitnessName, witnessValue);
+	if (readRet != 0 || witnessValue != 1)
+	{
+		error = GetStr(
+			"自然完成见证未置位：Program=%s Variable=%s ReadRet=%d Value=%d Line=%d",
+			currentProgram.c_str(), kStepCompletionWitnessName, readRet, witnessValue,
+			m_pSTEPRobotClient->getCurrentLine());
+		return false;
+	}
+	return true;
+}
+
+bool STEPRobotCtrl::VerifyGeneratedProgramReadyForStartLocked(
+	const std::string& projectName,
+	const std::string& programName,
+	std::string& error)
+{
+	error.clear();
+	if (m_pSTEPRobotClient == nullptr
+		|| m_completionWitnessProjectName != projectName
+		|| m_completionWitnessProgramName != programName
+		|| StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName()) != projectName
+		|| m_pSTEPRobotClient->getProgramName() != programName)
+	{
+		error = GetStr(
+			"STEP START前程序身份与完成见证不一致。Witness=%s/%s Expected=%s/%s Current=%s/%s",
+			m_completionWitnessProjectName.c_str(), m_completionWitnessProgramName.c_str(),
+			projectName.c_str(), programName.c_str(),
+			m_pSTEPRobotClient != nullptr
+				? StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName()).c_str() : "",
+			m_pSTEPRobotClient != nullptr ? m_pSTEPRobotClient->getProgramName().c_str() : "");
+		return false;
+	}
+	if (!m_bLocalDebugMark
+		&& (!m_bSocketConnected.load() || m_pSTEPRobotClient->ConnectStatus() < 0))
+	{
+		error = "STEP START前机器人连接不可用。";
+		return false;
+	}
+	const int currentLine = m_pSTEPRobotClient->getCurrentLine();
+	const int currentState = static_cast<int>(m_pSTEPRobotClient->getProgramState());
+	int witnessValue = -1;
+	const int witnessRet = m_pSTEPRobotClient->VariableIntReadCmd(
+		projectName, programName, kStepCompletionWitnessName, witnessValue);
+	if (currentLine < 0 || currentLine > 1
+		|| currentState != STEPROBOTSDK::eStop
+		|| witnessRet != 0 || witnessValue != 0)
+	{
+		error = GetStr(
+			"STEP START前程序不在可验证初始态：Program=%s Line=%d State=%d WitnessRet=%d Witness=%d",
+			programName.c_str(), currentLine, currentState, witnessRet, witnessValue);
+		return false;
+	}
+	return true;
 }
 
 bool STEPRobotCtrl::WriteContiMoveAnyFiles(
@@ -1491,36 +1646,127 @@ double STEPRobotCtrl::GetCurrentPos(int nAxisNo)
 
 T_ROBOT_COORS STEPRobotCtrl::GetCurrentPos()
 {
-	if (m_pSTEPRobotClient == nullptr)
+	T_ROBOT_COORS pos;
+	return TryGetCurrentPos(pos) ? pos : T_ROBOT_COORS();
+}
+
+bool STEPRobotCtrl::TryGetCurrentPos(T_ROBOT_COORS& pos)
+{
+	pos = T_ROBOT_COORS();
+	if (m_pSTEPRobotClient == nullptr
+		|| (!m_bLocalDebugMark && !m_bSocketConnected.load()))
 	{
-		return T_ROBOT_COORS();
+		SetLastRobotError("STEP当前位置读取失败：机器人未连接。");
+		return false;
 	}
 
+	const int beforeStatus = m_bLocalDebugMark
+		? 0
+		: WithSdkCommand([&]() { return m_pSTEPRobotClient->ConnectStatus(); });
+	if (!m_bLocalDebugMark && beforeStatus < 0)
+	{
+		m_bSocketConnected.store(false);
+		SetLastRobotError("STEP当前位置读取失败：SDK连接状态无效。");
+		return false;
+	}
 	RobotCartPos cartposworld = WithSdkCommand([&]() { return m_pSTEPRobotClient->getCartPosWorld(); });
-	return StepRobotCartPosToCoors(cartposworld);
+	const int afterStatus = m_bLocalDebugMark
+		? 0
+		: WithSdkCommand([&]() { return m_pSTEPRobotClient->ConnectStatus(); });
+	if (!m_bLocalDebugMark && (!m_bSocketConnected.load() || afterStatus < 0))
+	{
+		m_bSocketConnected.store(false);
+		SetLastRobotError("STEP当前位置读取期间机器人连接已断开。");
+		return false;
+	}
+	pos = StepRobotCartPosToCoors(cartposworld);
+	const bool finite = std::isfinite(pos.dX) && std::isfinite(pos.dY) && std::isfinite(pos.dZ)
+		&& std::isfinite(pos.dRX) && std::isfinite(pos.dRY) && std::isfinite(pos.dRZ)
+		&& std::isfinite(pos.dBX) && std::isfinite(pos.dBY) && std::isfinite(pos.dBZ);
+	if (!finite)
+	{
+		SetLastRobotError("STEP当前位置读取失败：SDK返回非有限值。");
+		pos = T_ROBOT_COORS();
+		return false;
+	}
+	const bool allZero = std::abs(pos.dX) < 1e-12 && std::abs(pos.dY) < 1e-12
+		&& std::abs(pos.dZ) < 1e-12 && std::abs(pos.dRX) < 1e-12
+		&& std::abs(pos.dRY) < 1e-12 && std::abs(pos.dRZ) < 1e-12
+		&& std::abs(pos.dBX) < 1e-12 && std::abs(pos.dBY) < 1e-12
+		&& std::abs(pos.dBZ) < 1e-12;
+	if (!m_bLocalDebugMark && allZero)
+	{
+		SetLastRobotError(
+			"STEP当前位置读取失败：SDK返回全零哨兵值，禁止将其当作真实当前位置。");
+		pos = T_ROBOT_COORS();
+		return false;
+	}
+	return true;
 }
 
 T_ROBOT_COORS STEPRobotCtrl::GetCurrentPosPassive(long long* pRobotMs, long long* pPcRecvMs)
 {
 	if (m_pSTEPRobotClient == nullptr)
 	{
-		const long long pcMs = StepRobotSteadyNowMs();
-		StepFillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
+		if (pRobotMs != nullptr) *pRobotMs = 0;
+		if (pPcRecvMs != nullptr) *pPcRecvMs = 0;
 		return T_ROBOT_COORS();
 	}
 
 	if (m_bLocalDebugMark || !m_bSocketConnected || !StepUseTimestampSdkInterface())
 	{
-		T_ROBOT_COORS pose = GetCurrentPos();
+		T_ROBOT_COORS pose;
+		if (!TryGetCurrentPos(pose))
+		{
+			if (pRobotMs != nullptr) *pRobotMs = 0;
+			if (pPcRecvMs != nullptr) *pPcRecvMs = 0;
+			return T_ROBOT_COORS();
+		}
 		const long long pcMs = StepRobotSteadyNowMs();
 		StepFillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
 		return pose;
 	}
 
 #if STEP_SDK_HAS_TIMESTAMP
+	const int beforeStatus = WithSdkCommand([&]() { return m_pSTEPRobotClient->ConnectStatus(); });
+	if (beforeStatus < 0)
+	{
+		m_bSocketConnected.store(false);
+		if (pRobotMs != nullptr) *pRobotMs = 0;
+		if (pPcRecvMs != nullptr) *pPcRecvMs = 0;
+		SetLastRobotError("STEP被动位姿读取失败：SDK连接状态无效。");
+		return T_ROBOT_COORS();
+	}
 	const TimestampAddCartpos timestampedPos = WithSdkCommand([&]() { return m_pSTEPRobotClient->getTimestamp(); });
 	const long long pcRecvMs = StepRobotSteadyNowMs();
+	const int afterStatus = WithSdkCommand([&]() { return m_pSTEPRobotClient->ConnectStatus(); });
+	if (!m_bSocketConnected.load() || afterStatus < 0)
+	{
+		m_bSocketConnected.store(false);
+		if (pRobotMs != nullptr) *pRobotMs = 0;
+		if (pPcRecvMs != nullptr) *pPcRecvMs = 0;
+		SetLastRobotError("STEP被动位姿读取期间机器人连接已断开。");
+		return T_ROBOT_COORS();
+	}
 	const unsigned long long robotTimestampMs = static_cast<unsigned long long>(timestampedPos.m_TimeStamp_ms);
+	const T_ROBOT_COORS pose = StepRobotCartPosToCoors(timestampedPos.m_CartPos.m_CartPos);
+	const bool finite = std::isfinite(pose.dX) && std::isfinite(pose.dY) && std::isfinite(pose.dZ)
+		&& std::isfinite(pose.dRX) && std::isfinite(pose.dRY) && std::isfinite(pose.dRZ)
+		&& std::isfinite(pose.dBX) && std::isfinite(pose.dBY) && std::isfinite(pose.dBZ);
+	const bool allZero = std::abs(pose.dX) < 1e-12 && std::abs(pose.dY) < 1e-12
+		&& std::abs(pose.dZ) < 1e-12 && std::abs(pose.dRX) < 1e-12
+		&& std::abs(pose.dRY) < 1e-12 && std::abs(pose.dRZ) < 1e-12
+		&& std::abs(pose.dBX) < 1e-12 && std::abs(pose.dBY) < 1e-12
+		&& std::abs(pose.dBZ) < 1e-12;
+	if (!finite || allZero)
+	{
+		if (pRobotMs != nullptr) *pRobotMs = 0;
+		if (pPcRecvMs != nullptr) *pPcRecvMs = 0;
+		SetLastRobotError(!finite
+			? "STEP被动位姿读取失败：SDK返回非有限值。"
+			: "STEP被动位姿读取失败：SDK返回全零哨兵值。");
+		return T_ROBOT_COORS();
+	}
 
 	// 时间轴会话锁定：首个样本决定本次连接走机器人时间戳还是 PC 接收时间，
 	// 之后不再切换——两种纪元完全不同，混进同一扫描序列会破坏时间插值。
@@ -1545,9 +1791,12 @@ T_ROBOT_COORS STEPRobotCtrl::GetCurrentPosPassive(long long* pRobotMs, long long
 		}
 		else
 		{
-			// 已锁定机器人时间轴时偶发 0 值：沿用上一有效时间戳（时间冻结一帧），
-			// 不回退 PC 纪元。
-			robotMs = m_lastValidRobotMs.load();
+			// 已锁定机器人时间轴后，0 不再沿用旧帧；旧位姿配旧时间戳会被误作
+			// 本轮扫描的新样本，必须让状态快照标为无效并等待下一帧。
+			if (pRobotMs != nullptr) *pRobotMs = 0;
+			if (pPcRecvMs != nullptr) *pPcRecvMs = 0;
+			SetLastRobotError("STEP被动位姿读取失败：机器人时间戳在锁定后返回0。");
+			return T_ROBOT_COORS();
 		}
 	}
 	else
@@ -1563,11 +1812,18 @@ T_ROBOT_COORS STEPRobotCtrl::GetCurrentPosPassive(long long* pRobotMs, long long
 	{
 		*pPcRecvMs = pcRecvMs;
 	}
-	return StepRobotCartPosToCoors(timestampedPos.m_CartPos.m_CartPos);
+	return pose;
 #else
+	T_ROBOT_COORS pose;
+	if (!TryGetCurrentPos(pose))
+	{
+		if (pRobotMs != nullptr) *pRobotMs = 0;
+		if (pPcRecvMs != nullptr) *pPcRecvMs = 0;
+		return T_ROBOT_COORS();
+	}
 	const long long pcMs = StepRobotSteadyNowMs();
 	StepFillPcPassiveTimestamp(pRobotMs, pPcRecvMs, pcMs);
-	return GetCurrentPos();
+	return pose;
 #endif
 }
 
@@ -1598,17 +1854,81 @@ double STEPRobotCtrl::GetCurrentPulse(int nAxisNo)
 
 T_ANGLE_PULSE STEPRobotCtrl::GetCurrentPulse()
 {
-	T_ANGLE_PULSE tPulse = T_ANGLE_PULSE();
-	tPulse.nSPulse = GetCurrentPulse(0);
-	tPulse.nLPulse = GetCurrentPulse(1);
-	tPulse.nUPulse = GetCurrentPulse(2);
-	tPulse.nRPulse = GetCurrentPulse(3);
-	tPulse.nBPulse = GetCurrentPulse(4);
-	tPulse.nTPulse = GetCurrentPulse(5);
-	tPulse.lBXPulse = GetCurrentPulse(6);
-	tPulse.lBYPulse = GetCurrentPulse(7);
-	tPulse.lBZPulse = GetCurrentPulse(8);
-	return tPulse;
+	T_ANGLE_PULSE pulse;
+	return TryGetCurrentPulse(pulse) ? pulse : T_ANGLE_PULSE();
+}
+
+bool STEPRobotCtrl::TryGetCurrentPulse(T_ANGLE_PULSE& pulse)
+{
+	pulse = T_ANGLE_PULSE();
+	if (m_pSTEPRobotClient == nullptr
+		|| (!m_bLocalDebugMark && !m_bSocketConnected.load()))
+	{
+		SetLastRobotError("STEP当前关节读取失败：机器人未连接。");
+		return false;
+	}
+	const int beforeStatus = m_bLocalDebugMark
+		? 0
+		: WithSdkCommand([&]() { return m_pSTEPRobotClient->ConnectStatus(); });
+	if (!m_bLocalDebugMark && beforeStatus < 0)
+	{
+		m_bSocketConnected.store(false);
+		SetLastRobotError("STEP当前关节读取失败：SDK连接状态无效。");
+		return false;
+	}
+	const AXISPOS axisPos = WithSdkCommand([&]() { return m_pSTEPRobotClient->getAxisPos(); });
+	const int afterStatus = m_bLocalDebugMark
+		? 0
+		: WithSdkCommand([&]() { return m_pSTEPRobotClient->ConnectStatus(); });
+	if (!m_bLocalDebugMark && (!m_bSocketConnected.load() || afterStatus < 0))
+	{
+		m_bSocketConnected.store(false);
+		SetLastRobotError("STEP当前关节读取期间机器人连接已断开。");
+		return false;
+	}
+
+	long converted[9] = {};
+	bool allZero = true;
+	const int activeAxisCount = std::clamp(m_nRobotAxisCount, 6, 9);
+	for (int axis = 0; axis < activeAxisCount; ++axis)
+	{
+		const double position = axis < 6
+			? axisPos.m_Joint[axis]
+			: axisPos.m_AuxJoint[axis - 6];
+		const double unit = m_tAxisUnit.GetValueByIndex(axis);
+		if (!std::isfinite(position) || !std::isfinite(unit) || std::abs(unit) < 1e-15)
+		{
+			SetLastRobotError(GetStr(
+				"STEP当前关节读取失败：轴%d数值或脉冲当量无效。", axis + 1));
+			return false;
+		}
+		const double scaled = position / unit;
+		if (!std::isfinite(scaled)
+			|| scaled < static_cast<double>(std::numeric_limits<long>::lowest())
+			|| scaled > static_cast<double>(std::numeric_limits<long>::max()))
+		{
+			SetLastRobotError(GetStr(
+				"STEP当前关节读取失败：轴%d换算结果超出脉冲范围。", axis + 1));
+			return false;
+		}
+		converted[axis] = static_cast<long>(std::lround(scaled));
+		allZero = allZero && std::abs(position) < 1e-12;
+	}
+	if (!m_bLocalDebugMark && allZero)
+	{
+		T_ROBOT_COORS cartesian;
+		if (!TryGetCurrentPos(cartesian))
+		{
+			SetLastRobotError(
+				"STEP当前关节读取失败：关节与直角接口同时返回全零哨兵值。");
+			return false;
+		}
+	}
+	pulse = T_ANGLE_PULSE(
+		converted[0], converted[1], converted[2],
+		converted[3], converted[4], converted[5],
+		converted[6], converted[7], converted[8]);
+	return true;
 }
 
 T_ANGLE_PULSE STEPRobotCtrl::GetCurrentPulsePassive(long long* pRobotMs, long long* pPcRecvMs)
@@ -1640,13 +1960,33 @@ int STEPRobotCtrl::CheckDonePassive(long long* pRobotMs, long long* pPcRecvMs)
 	return done;
 }
 
-int STEPRobotCtrl::CheckRobotDone(int nDelayTime)
+int STEPRobotCtrl::CheckRobotDone(int nDelayTime, int runTimeoutMs)
 {
 	if (nDelayTime <= 0)
 	{
 		nDelayTime = 200;
 	}
+	if (runTimeoutMs <= 0)
+	{
+		runTimeoutMs = 1800000;
+	}
+	const auto failUnverified = [this](const std::string& reason, int code)
+		{
+			if (m_pRobotLog != nullptr)
+			{
+				m_pRobotLog->write(LogColor::ERR, "%s", reason.c_str());
+			}
+			const bool stopped = RobotOperationLease::StopAndConfirmUnverifiedMotion(this);
+			const std::string stopDetail = GetLastRobotError();
+			SetLastRobotError(reason + (stopped
+				? "；已自动中止并确认机器人程序不可恢复。"
+				: "；自动中止未确认：" + stopDetail));
+			return code;
+		};
 	int nRet = -1;
+	auto lastPollTime = std::chrono::steady_clock::now();
+	std::chrono::milliseconds activeRunElapsed(0);
+	std::chrono::milliseconds pauseElapsed(0);
 	while (1)
 	{
 		if (RobotOperationLease::IsCancellationRequested(this))
@@ -1654,7 +1994,42 @@ int STEPRobotCtrl::CheckRobotDone(int nDelayTime)
 			SetLastRobotError("STEP硬件操作已被安全停止取消，禁止把停止态判作正常完成。");
 			return -20000;
 		}
+		if (!m_bLocalDebugMark
+			&& (m_pSTEPRobotClient == nullptr
+				|| !m_bSocketConnected.load()
+				|| WithSdkCommand([&]() { return m_pSTEPRobotClient->ConnectStatus(); }) < 0))
+		{
+			return failUnverified("STEP等待运动完成失败：机器人连接已断开。", -32000);
+		}
 		nRet = CheckDone();
+		const auto now = std::chrono::steady_clock::now();
+		if (nRet == STEPROBOTSDK::eRun)
+		{
+			activeRunElapsed += std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPollTime);
+		}
+		else if (nRet == STEPROBOTSDK::ePause)
+		{
+			pauseElapsed += std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPollTime);
+		}
+		lastPollTime = now;
+		if (activeRunElapsed.count() >= runTimeoutMs)
+		{
+			std::string trackedProgram;
+			{
+				std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+				trackedProgram = m_motionTrackedProgramName;
+			}
+			return failUnverified(GetStr(
+				"STEP运动等待超时：活动运行已达%lldms，上限=%dms，Program=%s",
+				static_cast<long long>(activeRunElapsed.count()), runTimeoutMs,
+				trackedProgram.c_str()), -30000);
+		}
+		if (pauseElapsed.count() >= kStepPauseWaitTimeoutMs)
+		{
+			return failUnverified(GetStr(
+				"STEP暂停等待超时：累计暂停已达%lldms，上限=%dms。",
+				static_cast<long long>(pauseElapsed.count()), kStepPauseWaitTimeoutMs), -30001);
+		}
 		// 暂停是可恢复的运行态：外层流程和其硬件租约必须继续存活，等待用户 START。
 		// 若把 ePause 当失败返回，流程会释放租约，而机器人程序仍可被界面无租约地继续。
 		if (nRet == STEPROBOTSDK::eRun || nRet == STEPROBOTSDK::ePause)
@@ -1684,22 +2059,26 @@ int STEPRobotCtrl::CheckRobotDone(int nDelayTime)
 				{
 					const std::string statusText = GetRobotStatusText();
 					const std::string waitError = "STEP运动未正常完成：" + statusText;
-					if (m_pRobotLog != nullptr)
-					{
-						m_pRobotLog->write(LogColor::ERR, "%s", waitError.c_str());
-					}
-					const bool stopped = RobotOperationLease::StopAndConfirmUnverifiedMotion(this);
-					const std::string stopDetail = GetLastRobotError();
-					SetLastRobotError(waitError + (stopped
-						? "；已自动中止并确认机器人程序不可恢复。"
-						: "；自动中止未确认：" + stopDetail));
-					return -1000 - nRet;
+					return failUnverified(waitError, -31000);
+				}
+				std::string witnessError;
+				bool naturallyCompleted = false;
+				{
+					std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+					naturallyCompleted = VerifyGeneratedProgramCompletionWitnessLocked(witnessError);
+				}
+				if (!naturallyCompleted)
+				{
+					return failUnverified(
+						"STEP程序进入eStop但没有自然完成见证，按提前STOP/中止处理：" + witnessError,
+						-31001);
 				}
 				{
 					std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
 					RobotOperationLease::MarkMotionCompleted(this);
 					m_motionTrackedProjectName.clear();
 					m_motionTrackedProgramName.clear();
+					ClearGeneratedProgramCompletionWitnessLocked();
 				}
 				return nRet;
 			}
@@ -1888,6 +2267,15 @@ bool STEPRobotCtrl::SetSysMode(int nMode)
 			SetLastRobotError("STEP START 已拒绝：当前没有已加载程序。");
 			return false;
 		}
+		std::string witnessError;
+		if (!VerifyGeneratedProgramReadyForStartLocked(startProject, startProgram, witnessError))
+		{
+			SetLastRobotError(
+				"STEP START 已拒绝：通用入口不能把任意已加载程序升级为可信程序；"
+				"只有本软件刚生成/上传并保留来源见证的程序可启动，" + witnessError);
+			ClearGeneratedProgramCompletionWitnessLocked();
+			return false;
+		}
 		QString motionError;
 		if (!RobotOperationLease::MarkMotionStarted(this, false, &motionError))
 		{
@@ -1979,6 +2367,32 @@ bool STEPRobotCtrl::Prog_startRun_Py(bool resumeExisting)
 			? "；原程序已自动中止并确认不可恢复。"
 			: "；程序身份异常且自动中止未确认：" + stopDetail));
 		return false;
+	}
+	if (!resumeExisting)
+	{
+		std::string witnessError;
+		if (!VerifyGeneratedProgramReadyForStartLocked(startProject, startProgram, witnessError))
+		{
+			SetLastRobotError("STEP START前程序身份已变化或不在可验证初始态，拒绝启动：" + witnessError);
+			ClearGeneratedProgramCompletionWitnessLocked();
+			return false;
+		}
+	}
+	else
+	{
+		int witnessValue = -1;
+		const int witnessRet = m_pSTEPRobotClient->VariableIntReadCmd(
+			startProject, startProgram, kStepCompletionWitnessName, witnessValue);
+		if (m_completionWitnessProjectName != startProject
+			|| m_completionWitnessProgramName != startProgram
+			|| witnessRet != 0 || witnessValue != 0)
+		{
+			SetLastRobotError(GetStr(
+				"STEP继续运行失败：暂停程序完成见证无效。Witness=%s/%s Current=%s/%s ReadRet=%d Value=%d",
+				m_completionWitnessProjectName.c_str(), m_completionWitnessProgramName.c_str(),
+				startProject.c_str(), startProgram.c_str(), witnessRet, witnessValue));
+			return false;
+		}
 	}
 	QString motionError;
 	if (!RobotOperationLease::MarkMotionStarted(this, resumeExisting, &motionError))
@@ -2418,11 +2832,40 @@ bool STEPRobotCtrl::AbortCurrentProgram()
 		// 不得误杀示教器或外部通道当前加载的程序。
 		m_motionTrackedProjectName.clear();
 		m_motionTrackedProgramName.clear();
+		ClearGeneratedProgramCompletionWitnessLocked();
 		ClearLastRobotError();
 		return true;
 	}
 	const std::string currentProject = StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName());
 	const std::string currentProgram = m_pSTEPRobotClient->getProgramName();
+	if (currentProgram.empty())
+	{
+		int stableStoppedCount = 0;
+		for (int retry = 0; retry < 40; ++retry)
+		{
+			if (m_pSTEPRobotClient->getProgramName().empty()
+				&& m_pSTEPRobotClient->getProgramState() == STEPROBOTSDK::eStop)
+			{
+				if (++stableStoppedCount >= 4)
+				{
+					RobotOperationLease::MarkMotionCompleted(this);
+					m_motionTrackedProjectName.clear();
+					m_motionTrackedProgramName.clear();
+					ClearGeneratedProgramCompletionWitnessLocked();
+					ClearLastRobotError();
+					return true;
+				}
+			}
+			else
+			{
+				stableStoppedCount = 0;
+			}
+			Sleep(50);
+		}
+		SetLastRobotError(
+			"STEP安全取消未确认：程序已卸载，但未稳定回读到空程序+eStop终态。");
+		return false;
+	}
 	if (m_motionTrackedProgramName.empty()
 		|| currentProject != m_motionTrackedProjectName
 		|| currentProgram != m_motionTrackedProgramName)
@@ -2467,6 +2910,7 @@ bool STEPRobotCtrl::AbortCurrentProgram()
 				RobotOperationLease::MarkMotionCompleted(this);
 				m_motionTrackedProjectName.clear();
 				m_motionTrackedProgramName.clear();
+				ClearGeneratedProgramCompletionWitnessLocked();
 				ClearLastRobotError();
 				return true;
 			}
@@ -2521,17 +2965,10 @@ bool STEPRobotCtrl::CallJob(std::string sJobName)
 		SetLastRobotError("STEP硬件操作已被安全停止取消，拒绝调用后续程序：" + sJobName);
 		return false;
 	}
-	std::string sNowProjName = GetUserProject();
-	
-	if (!LoadUserProgram(sNowProjName, sJobName))
-	{
-		return false;
-	}
-	if (!Prog_startRun_Py())
-	{
-		return false;
-	}
-	return true;
+	SetLastRobotError(
+		"STEP拒绝通过通用CallJob启动来源未验证的程序：" + sJobName
+		+ "。请使用本软件生成/上传且带WaitIsFinished+ntdone契约的受验证入口。");
+	return false;
 }
 
 int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo)
@@ -2714,9 +3151,21 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 	m_pRobotLog->write(LogColor::SUCCESS,
 		"STEP ContiMoveAny 已加载程序 | Project=%s | Program=%s",
 		sProjectName.c_str(), sProgramName.c_str());
+	std::string completionWitnessError;
+	if (!ArmGeneratedProgramCompletionWitness(
+		sProjectName, sProgramName, completionWitnessError))
+	{
+		SetLastRobotError(completionWitnessError);
+		m_pRobotLog->write(LogColor::ERR, "%s", completionWitnessError.c_str());
+		return -10;
+	}
 
 	const auto failRunPrepare = [this, &sProgramName](const char* stepName, int ret) -> int
 		{
+			{
+				std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+				ClearGeneratedProgramCompletionWitnessLocked();
+			}
 			SetLastRobotError(GetStr("STEP连续运动失败：启动前%s失败，Program=%s，返回=%d，%s",
 				stepName, sProgramName.c_str(), ret, GetRobotStatusText().c_str()));
 			m_pRobotLog->write(LogColor::ERR, "%s", GetLastRobotError().c_str());

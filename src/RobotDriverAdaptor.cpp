@@ -914,6 +914,21 @@ T_ROBOT_COORS RobotDriverAdaptor::GetCurrentPos()
     return T_ROBOT_COORS();
 }
 
+bool RobotDriverAdaptor::TryGetCurrentPos(T_ROBOT_COORS& pos)
+{
+    pos = GetCurrentPos();
+    const bool finite = std::isfinite(pos.dX) && std::isfinite(pos.dY) && std::isfinite(pos.dZ)
+        && std::isfinite(pos.dRX) && std::isfinite(pos.dRY) && std::isfinite(pos.dRZ)
+        && std::isfinite(pos.dBX) && std::isfinite(pos.dBY) && std::isfinite(pos.dBZ);
+    if (!finite || !IsConnected())
+    {
+        SetLastRobotError("机器人当前位置读取失败或返回非有限值。");
+        pos = T_ROBOT_COORS();
+        return false;
+    }
+    return true;
+}
+
 double RobotDriverAdaptor::GetCurrentPulse(int nAxisNo)
 {
     return 0;
@@ -921,6 +936,18 @@ double RobotDriverAdaptor::GetCurrentPulse(int nAxisNo)
 T_ANGLE_PULSE RobotDriverAdaptor::GetCurrentPulse()
 {
     return T_ANGLE_PULSE();
+}
+
+bool RobotDriverAdaptor::TryGetCurrentPulse(T_ANGLE_PULSE& pulse)
+{
+    pulse = GetCurrentPulse();
+    if (!IsConnected())
+    {
+        SetLastRobotError("机器人当前关节/脉冲读取失败：机器人未连接。");
+        pulse = T_ANGLE_PULSE();
+        return false;
+    }
+    return true;
 }
 
 T_ROBOT_COORS RobotDriverAdaptor::GetCurrentPosPassive(long long* pRobotMs, long long* pPcRecvMs)
@@ -1086,10 +1113,30 @@ void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
             snapshot.pose = GetCurrentPosPassive(&poseRobotMs, &posePcRecvMs);
             snapshot.pulse = GetCurrentPulsePassive(&pulseRobotMs, &pulsePcRecvMs);
             snapshot.done = CheckDonePassive(&doneRobotMs, &donePcRecvMs);
+			const long long validationNowMs = RobotDriverSteadyMs();
 
-            snapshot.robotMs = poseRobotMs > 0 ? poseRobotMs : (doneRobotMs > 0 ? doneRobotMs : nowMs);
-            snapshot.pcRecvMs = posePcRecvMs > 0 ? posePcRecvMs : (donePcRecvMs > 0 ? donePcRecvMs : nowMs);
-            snapshot.valid = snapshot.pcRecvMs > 0;
+			// 位姿样本的两条时间轴必须来自同一次位姿读取。done或本机now只能描述
+			// 状态请求，不能补写成pose的robot_ms/pc_recv_ms，否则会混淆扫描纪元。
+            snapshot.robotMs = poseRobotMs;
+            snapshot.pcRecvMs = posePcRecvMs;
+            const bool finitePose = std::isfinite(snapshot.pose.dX)
+                && std::isfinite(snapshot.pose.dY) && std::isfinite(snapshot.pose.dZ)
+                && std::isfinite(snapshot.pose.dRX) && std::isfinite(snapshot.pose.dRY)
+                && std::isfinite(snapshot.pose.dRZ) && std::isfinite(snapshot.pose.dBX)
+                && std::isfinite(snapshot.pose.dBY) && std::isfinite(snapshot.pose.dBZ);
+            const bool nonZeroPose = std::abs(snapshot.pose.dX) >= 1e-12
+                || std::abs(snapshot.pose.dY) >= 1e-12 || std::abs(snapshot.pose.dZ) >= 1e-12
+                || std::abs(snapshot.pose.dRX) >= 1e-12 || std::abs(snapshot.pose.dRY) >= 1e-12
+                || std::abs(snapshot.pose.dRZ) >= 1e-12 || std::abs(snapshot.pose.dBX) >= 1e-12
+                || std::abs(snapshot.pose.dBY) >= 1e-12 || std::abs(snapshot.pose.dBZ) >= 1e-12;
+            const long long maxPoseAgeMs = std::max<long long>(500, intervalMs * 4LL);
+			// 被动接口在请求完成时记录pc_recv_ms，因此必须用全部读取结束后的时刻
+			// 验证新鲜度；读取前的nowMs会把正常STEP帧误判成“来自未来”。
+            const bool freshPose = posePcRecvMs > 0 && posePcRecvMs <= validationNowMs
+                && (validationNowMs - posePcRecvMs) <= maxPoseAgeMs;
+            // valid 只证明“这一帧位姿本身可用于业务”，不能再由 done 的时间戳或
+            // 本机 nowMs 代替失败的位姿读取。扫描插值只接受严格、非零且新鲜的pose。
+            snapshot.valid = freshPose && finitePose && nonZeroPose;
         }
 
         StoreStateSnapshot(snapshot);
@@ -1108,9 +1155,10 @@ int RobotDriverAdaptor::CheckDone()
     return -1;
 }
 
-int RobotDriverAdaptor::CheckRobotDone(int nDelayTime)
+int RobotDriverAdaptor::CheckRobotDone(int nDelayTime, int runTimeoutMs)
 {
     (void)nDelayTime;
+    (void)runTimeoutMs;
     return CheckDone();
 }
 

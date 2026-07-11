@@ -1431,8 +1431,18 @@ void PreciseMeasureEditDialog::TeachStartPos()
         return;
     }
 
-    const T_ROBOT_COORS coors = driver->GetCurrentPos();
-    m_taughtStartPulse = driver->GetCurrentPulse();
+    T_ROBOT_COORS coors;
+    T_ANGLE_PULSE pulse;
+    if (!driver->TryGetCurrentPos(coors) || !driver->TryGetCurrentPulse(pulse))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取扫描起点失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前位置。") : detail);
+        QMessageBox::warning(this, "示教扫描起点", message);
+        AppendLog(message);
+        return;
+    }
+    m_taughtStartPulse = pulse;
     m_hasTaughtStartPulse = true;
     SetCoorsEditors("StartPos", coors);
     AppendLog("已读取当前机器人直角坐标和关节脉冲到扫描起点，点击“保存参数”后写入文件。");
@@ -1446,7 +1456,16 @@ void PreciseMeasureEditDialog::TeachStartSafePulse()
         return;
     }
 
-    const T_ANGLE_PULSE pulse = driver->GetCurrentPulse();
+    T_ANGLE_PULSE pulse;
+    if (!driver->TryGetCurrentPulse(pulse))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取下枪安全位置失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前关节位置。") : detail);
+        QMessageBox::warning(this, "示教下枪安全位置", message);
+        AppendLog(message);
+        return;
+    }
     SetPulseEditors("StartSafePulse0", pulse);
     AppendLog("已读取当前机器人脉冲到下枪安全位置，点击“保存参数”后写入文件。");
 }
@@ -1459,7 +1478,16 @@ void PreciseMeasureEditDialog::TeachEndPos()
         return;
     }
 
-    const T_ROBOT_COORS coors = driver->GetCurrentPos();
+    T_ROBOT_COORS coors;
+    if (!driver->TryGetCurrentPos(coors))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取扫描终点失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前位置。") : detail);
+        QMessageBox::warning(this, "示教扫描终点", message);
+        AppendLog(message);
+        return;
+    }
     SetCoorsEditors("EndPos", coors);
     AppendLog("已读取当前机器人直角坐标到扫描终点，点击“保存参数”后写入文件。");
 }
@@ -1472,7 +1500,16 @@ void PreciseMeasureEditDialog::TeachEndSafePulse()
         return;
     }
 
-    const T_ANGLE_PULSE pulse = driver->GetCurrentPulse();
+    T_ANGLE_PULSE pulse;
+    if (!driver->TryGetCurrentPulse(pulse))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取收枪安全位置失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前关节位置。") : detail);
+        QMessageBox::warning(this, "示教收枪安全位置", message);
+        AppendLog(message);
+        return;
+    }
     SetPulseEditors("EndSafePulse0", pulse);
     AppendLog("已读取当前机器人脉冲到收枪安全位置，点击“保存参数”后写入文件。");
 }
@@ -2520,9 +2557,18 @@ void PreciseMeasureEditDialog::TeachCurrentWeldPlatformPose()
         return;
     }
 
+    T_ROBOT_COORS coors;
+    if (!driver->TryGetCurrentPos(coors))
+    {
+        const QString detail = QString::fromUtf8(driver->GetLastRobotError().c_str());
+        const QString message = QString("读取焊接平台姿态失败，已保留原参数：%1")
+            .arg(detail.isEmpty() ? QStringLiteral("机器人未返回可验证的当前位置。") : detail);
+        QMessageBox::warning(this, "示教焊接平台姿态", message);
+        AppendLog(message);
+        return;
+    }
     const bool wasUsingTaught = m_pUseTaughtWeldPoseCheck != nullptr && m_pUseTaughtWeldPoseCheck->isChecked();
     CacheCurrentWeldPoseEditorValues(wasUsingTaught);
-    const T_ROBOT_COORS coors = driver->GetCurrentPos();
     m_taughtWeldPoseRxDeg = coors.dRX;
     m_taughtWeldPoseRyDeg = coors.dRY;
     m_taughtWeldPoseRzDeg = coors.dRZ;
