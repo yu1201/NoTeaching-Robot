@@ -104,4 +104,16 @@ public:
         double backtrackMm,
         ResumePlan& plan,
         QString* error = nullptr);
+
+    // 续焊生产入口必须在同一次 readAll 快照上同时校验 SHA/大小/点数并规划，
+    // 防止 Resolve、解析和最终执行之间使用不同版本的轨迹文件。
+    static bool PlanFromPausedPoseBound(
+        const QString& trajectoryPath,
+        const CheckpointRecord& expectedIdentity,
+        double pauseX,
+        double pauseY,
+        double pauseZ,
+        double backtrackMm,
+        ResumePlan& plan,
+        QString* error = nullptr);
 };

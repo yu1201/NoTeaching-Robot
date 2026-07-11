@@ -13,6 +13,12 @@ class CameraFrameCache;
 class MeasureThenWeldService
 {
 public:
+    enum class WeldPoseSource
+    {
+        PointCloudProduction = 0,
+        SyntheticVirtualTest = 1
+    };
+
     using LogCallback = std::function<void(const QString&)>;
     using StepCallback = std::function<void(const QString&)>;
     using CheckpointCallback = std::function<bool(const QString&, const QString&)>;
@@ -22,7 +28,14 @@ public:
     struct WeldExecutionIdentity
     {
         QString sourcePosePath;
+        QString sourcePoseSha256;
+        qint64 sourcePoseSize = -1;
+        QString qualityProofPosePath;
+        QString qualityProofPoseSha256;
+        qint64 qualityProofPoseSize = -1;
         QString sampledPosePath;
+        QString sampledPoseSha256;
+        qint64 sampledPoseSize = -1;
         QString programName;
         QString localProgramPath;
         int sampledPointCount = 0;
@@ -135,7 +148,9 @@ public:
         const QString& inputPath,
         const QString& outputPath,
         QString& summary,
-        QString& error) const;
+        QString& error,
+        QString* generatedSha256 = nullptr,
+        qint64* generatedSize = nullptr) const;
     bool GenerateStepWeldProgramFiles(
         const QString& robotName,
         const QString& poseFilePath,
@@ -148,7 +163,8 @@ public:
         QString& summary,
         QString& error,
         double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
-        bool allowPointwiseWeave = true) const;   // pointwise 自定义摆动默认放行(含先测后焊)；传 false 可禁用(保留钩子)
+        bool allowPointwiseWeave = true,
+        WeldPoseSource poseSource = WeldPoseSource::PointCloudProduction) const;
 
     // 调试用：从机器人当前位姿沿 ±Y 造一条干净的虚拟直线焊道，保持当前焊枪姿态，
     // 不走点云拟合/姿态补偿/焊缝补偿/起终裁剪/拐点处理，直接生成 srp/srd（摆动/速度/姿态仍读保存的工艺）。
@@ -174,7 +190,8 @@ public:
         const QString& poseFilePath,
         double linearSpeedConfigMmPerMin,
         QString& summary,
-        QString& error) const;
+        QString& error,
+        WeldPoseSource poseSource = WeldPoseSource::PointCloudProduction) const;
     bool ExecuteWeldPoseFileWithSafePos(
         RobotDriverAdaptor* pRobotDriver,
         const QString& poseFilePath,
@@ -188,13 +205,15 @@ public:
         const CheckpointCallback& checkpoint = CheckpointCallback(),
         double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
         bool allowPointwiseWeave = true,          // pointwise 自定义摆动默认放行(含先测后焊)；传 false 可禁用(保留钩子)
+        WeldPoseSource poseSource = WeldPoseSource::PointCloudProduction,
         double resumeStartArcMm = -1.0,           // 断点续焊：执行顺序轨迹上的精确起始弧长；<0 表示普通全轨迹执行
         bool inputAlreadyInExecutionOrder = false,// V2续焊传实际 FinalSampled 时为 true，禁止再次按 WeldDirection 反转
         const StopRequestedCallback& stopRequested = StopRequestedCallback(),
         const WeldExecutionPreparedCallback& executionPrepared = WeldExecutionPreparedCallback(),
         const WeldExecutionFinishedCallback& executionFinished = WeldExecutionFinishedCallback(),
         const QString& expectedSourceSha256 = QString(),
-        const WeldExecutionPreMotionCallback& executionPreMotion = WeldExecutionPreMotionCallback()) const;
+        const WeldExecutionPreMotionCallback& executionPreMotion = WeldExecutionPreMotionCallback(),
+        const QString& qualityProofSourcePosePath = QString()) const;
     bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
     bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
     bool ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;

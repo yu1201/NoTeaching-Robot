@@ -33,6 +33,8 @@ public:
         QVector<TrackPoint> keyPointExpandedPoints;
         QVector<TrackPoint> points;
         int inputPointCount = 0;
+        int finiteInputPointCount = 0;
+        int invalidInputPointCount = 0;
         QString dllPath;
         QString configPath;
         QString baseWeldPath;

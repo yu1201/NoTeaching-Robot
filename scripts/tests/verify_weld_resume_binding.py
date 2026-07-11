@@ -52,7 +52,7 @@ def main() -> int:
         "parameterFingerprint",
         "ResolveBoundTrajectory",
         "sourceTrajectorySha256",
-        "PlanFromPausedPose",
+        "PlanFromPausedPoseBound",
         "resumePlan.resumeArcMm",
         "取得硬件租约后机器人端点或绑定轨迹发生变化",
         "续焊运动/START前机器人名称、类型或端点身份发生变化",
@@ -64,6 +64,8 @@ def main() -> int:
                     "V2 trajectory is not explicitly marked as execution-order input")
         else:
             require(token in resume, f"bound resume gate missing: {token}")
+    require("WeldResumePlanner::PlanFromPausedPose(" not in resume,
+            "production resume still plans from an unbound trajectory snapshot")
 
     pause = section(
         dialog,
@@ -106,7 +108,7 @@ def main() -> int:
         "resumeMode && !executionPrepared",
         "expectedSourceSha256",
         "ComputeFileSha256ForResumeGate",
-        "V2续焊绑定轨迹在机器人运动前已变化",
+        "V2续焊实际解析轨迹与绑定的预期 SHA256 不一致",
         "executionPreMotion",
         "机器人运动前复核焊接执行身份失败",
         "invalidated:v2:",
@@ -116,6 +118,9 @@ def main() -> int:
         require(token in service, f"service execution identity/lifecycle gate missing: {token}")
     require("WeldExecutionFinishedCallback" in service_h,
             "service cannot close the pause context immediately after weld completion")
+    require("qualityProofPosePath" in service_h
+            and "identity.qualityProofPosePath" in dialog,
+            "repeat resume loses the original authorized SeamComp proof source")
     require('superseded.state = QStringLiteral("superseded")' in dialog,
             "starting a new full weld does not tombstone an older paused checkpoint")
     preset_flow = section(dialog, "void MeasureThenWeldDialog::RunPresetParamFlow()",
@@ -155,8 +160,18 @@ def main() -> int:
         "parts[2].toDouble",
         "parts[3].toDouble",
         "parts[4].toDouble",
+        "LoadExecutionTrajectorySnapshot",
+        "QCryptographicHash::hash(payload",
+        "size = payload.size()",
+        "PlanFromPausedPoseBound",
+        "expectedIdentity.trajectorySha256",
+        "expectedIdentity.trajectorySize",
+        "expectedIdentity.trajectoryPointCount",
     ):
         require(token in planner, f"planner validation/column parsing missing: {token}")
+    require("executionIdentity.sampledPoseSha256" in service
+            and "record.trajectorySha256.compare(sampledPoseSha256" in dialog,
+            "saved FinalSampled snapshot is not identical to the frozen checkpoint identity")
 
     require('src\\WeldResumePlanner.cpp' in project and 'include\\WeldResumePlanner.h' in project,
             "planner sources are not part of the Visual Studio project")

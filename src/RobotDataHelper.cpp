@@ -11,6 +11,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QStringList>
 #include <QStringConverter>
 #include <QTextStream>
@@ -418,8 +419,8 @@ bool RobotDataHelper::SaveTextFileLines(const QString& filePath, const QStringLi
     QFileInfo info(filePath);
     QDir().mkpath(info.absolutePath());
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    QSaveFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
     {
         if (error != nullptr)
         {
@@ -433,6 +434,15 @@ bool RobotDataHelper::SaveTextFileLines(const QString& filePath, const QStringLi
     for (const QString& line : lines)
     {
         stream << line << "\n";
+    }
+    stream.flush();
+    if (stream.status() != QTextStream::Ok || !file.commit())
+    {
+        if (error != nullptr)
+        {
+            *error = "原子提交文本文件失败: " + ToNativeAbsolutePath(filePath);
+        }
+        return false;
     }
     return true;
 }

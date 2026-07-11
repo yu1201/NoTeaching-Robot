@@ -622,7 +622,9 @@ void VirtualWeldTestDialog::OnRunOnRobot()
             QString execError;
             const bool ok = service.ExecuteWeldPoseFileWithSafePos(
                 driver, execPath, param, summary, execError,
-                nullptr, nullptr, appendLog, setFlowStep, checkpoint, pointStepMm, /*allowPointwiseWeave=*/true);
+                nullptr, nullptr, appendLog, setFlowStep, checkpoint, pointStepMm,
+                /*allowPointwiseWeave=*/true,
+                MeasureThenWeldService::WeldPoseSource::SyntheticVirtualTest);
 
             QMetaObject::invokeMethod(qApp, [self, ok, summary, execError]()
                 {

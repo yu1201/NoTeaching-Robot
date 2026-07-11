@@ -1101,6 +1101,39 @@ bool ConfigDatabase::ReadScopedSetting(
     return DecodeStoredText(storedText, encrypted, value);
 }
 
+QMap<QString, QString> ConfigDatabase::ReadScopedSettings(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName)
+{
+    QMap<QString, QString> values;
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        return values;
+    }
+    QSqlQuery query(db);
+    query.prepare(
+        "SELECT key_name, value_text, encrypted FROM settings "
+        "WHERE scope_type=? AND scope_id=? AND module=? ORDER BY key_name");
+    query.addBindValue(NormalizeSection(scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(scopeId));
+    query.addBindValue(NormalizeSection(moduleName));
+    if (!query.exec())
+    {
+        return values;
+    }
+    while (query.next())
+    {
+        QString decoded;
+        if (DecodeStoredText(query.value(1).toString(), query.value(2).toInt(), &decoded))
+        {
+            values.insert(query.value(0).toString(), decoded);
+        }
+    }
+    return values;
+}
+
 bool ConfigDatabase::WriteScopedSetting(
     const QString& scopeType,
     const QString& scopeId,
@@ -1138,6 +1171,60 @@ bool ConfigDatabase::WriteScopedSetting(
     query.addBindValue(sensitive ? 1 : 0);
     query.addBindValue(encrypted);
     return query.exec();
+}
+
+bool ConfigDatabase::WriteScopedSettings(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QMap<QString, QString>& values,
+    const QString& valueType)
+{
+    if (values.isEmpty())
+    {
+        return true;
+    }
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen() || !db.transaction())
+    {
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(
+        "INSERT OR REPLACE INTO settings("
+        "scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at) "
+        "VALUES(?, ?, ?, ?, ?, ?, 0, ?, datetime('now'))");
+    const QString normalizedScopeType = NormalizeSection(scopeType).toLower();
+    const QString normalizedScopeId = NormalizeScopeId(scopeId);
+    const QString normalizedModule = NormalizeSection(moduleName);
+    const QString normalizedValueType = valueType.trimmed().isEmpty()
+        ? QStringLiteral("string")
+        : valueType.trimmed().toLower();
+    for (auto it = values.cbegin(); it != values.cend(); ++it)
+    {
+        int encrypted = 0;
+        const QString storedText = StoredTextForWrite(db, it.value(), &encrypted);
+        query.bindValue(0, normalizedScopeType);
+        query.bindValue(1, normalizedScopeId);
+        query.bindValue(2, normalizedModule);
+        query.bindValue(3, NormalizeSourceKey(it.key()));
+        query.bindValue(4, storedText);
+        query.bindValue(5, normalizedValueType);
+        query.bindValue(6, encrypted);
+        if (!query.exec())
+        {
+            db.rollback();
+            return false;
+        }
+        query.finish();
+    }
+    if (!db.commit())
+    {
+        db.rollback();
+        return false;
+    }
+    return true;
 }
 
 bool ConfigDatabase::RemoveScopedSetting(

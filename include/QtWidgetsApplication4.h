@@ -189,10 +189,10 @@ private:
     bool UploadFanucServiceBundleForCli(FANUCRobotCtrl* pFanucDriver);
     void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
     bool RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
-    void RunLaserClassifyDirForCli(const QString& dirPath) const;
+    bool RunLaserClassifyDirForCli(const QString& dirPath) const;
     bool RunRebuildMeasureWeldFilesForCli(const QStringList& arguments, const QString& laserDirPath) const;
-    void RunWeldSeamCompForCli(const QStringList& arguments, const QString& inputPath, const QString& outputPath) const;
-    void RunGenerateStepWeldProgramForCli(
+    bool RunWeldSeamCompForCli(const QStringList& arguments, const QString& inputPath, const QString& outputPath) const;
+    bool RunGenerateStepWeldProgramForCli(
         const QStringList& arguments,
         const QString& inputPath,
         const QString& outputDir,

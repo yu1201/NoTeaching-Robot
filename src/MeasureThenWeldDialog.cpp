@@ -2049,6 +2049,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                             },
                             0.0,
                             true,
+                            MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
                             -1.0,
                             false,
                             [pRobotDriver]() { return RobotOperationLease::IsCancellationRequested(pRobotDriver); },
@@ -2057,8 +2058,11 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                                 return self != nullptr && self->PrepareActiveWeldCheckpoint(
                                     pRobotDriver,
                                     param,
-                                    identity.sourcePosePath,
+                                    identity.qualityProofPosePath,
+                                    identity.qualityProofPoseSha256,
                                     identity.sampledPosePath,
+                                    identity.sampledPoseSha256,
+                                    identity.sampledPoseSize,
                                     identity.programName,
                                     identity.sampledPointCount,
                                     identity.effectiveFinalStepMm,
@@ -2395,6 +2399,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                         },
                         0.0,
                         true,
+                        MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
                         -1.0,
                         false,
                         [pRobotDriver]() { return RobotOperationLease::IsCancellationRequested(pRobotDriver); },
@@ -2403,8 +2408,11 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                             return self != nullptr && self->PrepareActiveWeldCheckpoint(
                                 pRobotDriver,
                                 param,
-                                identity.sourcePosePath,
+                                identity.qualityProofPosePath,
+                                identity.qualityProofPoseSha256,
                                 identity.sampledPosePath,
+                                identity.sampledPoseSha256,
+                                identity.sampledPoseSize,
                                 identity.programName,
                                 identity.sampledPointCount,
                                 identity.effectiveFinalStepMm,
@@ -2489,7 +2497,10 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
     RobotDriverAdaptor* pRobotDriver,
     const T_PRECISE_MEASURE_PARAM& param,
     const QString& sourcePosePath,
+    const QString& sourcePoseSha256,
     const QString& sampledPosePath,
+    const QString& sampledPoseSha256,
+    qint64 sampledPoseSize,
     const QString& programName,
     int sampledPointCount,
     double effectiveFinalStepMm,
@@ -2523,12 +2534,16 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
         return false;
     }
 
+    static const QRegularExpression sha256Pattern(QStringLiteral("^[0-9a-fA-F]{64}$"));
     if (pRobotDriver == nullptr || programName.trimmed().isEmpty()
         || sampledPointCount < 2
+        || sampledPoseSize <= 0
+        || !sha256Pattern.match(sourcePoseSha256).hasMatch()
+        || !sha256Pattern.match(sampledPoseSha256).hasMatch()
         || !std::isfinite(effectiveFinalStepMm) || effectiveFinalStepMm <= 0.0
         || parameterFingerprint.size() != 64)
     {
-        error = QStringLiteral("冻结STEP焊接断点上下文失败：程序、点数、点距或工艺指纹无效。");
+        error = QStringLiteral("冻结STEP焊接断点上下文失败：程序、轨迹快照、点数、点距或工艺指纹无效。");
         return false;
     }
 
@@ -2564,11 +2579,12 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
     {
         return false;
     }
-    if (record.trajectoryPointCount != sampledPointCount)
+    if (record.trajectorySha256.compare(sampledPoseSha256, Qt::CaseInsensitive) != 0
+        || record.trajectorySize != sampledPoseSize
+        || record.trajectoryPointCount != sampledPointCount)
     {
-        error = QString("最终执行轨迹点数在冻结期间变化：Service=%1 File=%2")
-            .arg(sampledPointCount)
-            .arg(record.trajectoryPointCount);
+        error = QStringLiteral(
+            "最终执行轨迹在保存与冻结之间发生变化：SHA256、大小或点数与 Service 快照不一致。");
         return false;
     }
 
@@ -2587,16 +2603,17 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
         error = QString("源轨迹不在绑定案例目录内：%1").arg(sourceAbsolute);
         return false;
     }
-    record.sourceTrajectoryRelativePath = sourceRelative;
-    record.sourceTrajectorySha256 = WeldResumePlanner::ComputeFileSha256(sourceAbsolute, &error);
-    if (record.sourceTrajectorySha256.size() != 64)
+    const QString currentSourceSha256 = WeldResumePlanner::ComputeFileSha256(sourceAbsolute, &error);
+    if (currentSourceSha256.compare(sourcePoseSha256, Qt::CaseInsensitive) != 0)
     {
         if (error.isEmpty())
         {
-            error = QStringLiteral("计算源轨迹SHA256失败。");
+            error = QStringLiteral("质量证明源轨迹在授权与冻结之间发生变化，拒绝生成断点。");
         }
         return false;
     }
+    record.sourceTrajectoryRelativePath = sourceRelative;
+    record.sourceTrajectorySha256 = sourcePoseSha256.toLower();
 
     QString encodeError;
     const QString encoded = WeldResumePlanner::EncodeRecord(record, &encodeError);
@@ -2995,6 +3012,7 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
 
     const QString projectRoot = RobotDataHelper::FindProjectRootPath();
     QString posePath;
+    QString qualityProofSourcePosePath;
     if (!WeldResumePlanner::ResolveBoundTrajectory(
         projectRoot, robotName, checkpointRecord, posePath, &error))
     {
@@ -3017,6 +3035,7 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
         }
         const QString sourcePath = QDir(projectRoot).filePath(
             sourceRelative);
+        qualityProofSourcePosePath = sourcePath;
         const QString sourceHash = WeldResumePlanner::ComputeFileSha256(sourcePath, &error);
         if (sourceHash.isEmpty() || sourceHash != checkpointRecord.sourceTrajectorySha256)
         {
@@ -3025,10 +3044,17 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
             return;
         }
     }
+    if (qualityProofSourcePosePath.isEmpty())
+    {
+        QMessageBox::warning(this, "断点续焊",
+            "断点没有绑定最初的 SeamComp 源轨迹，无法验证点云质量证明，已中止。");
+        return;
+    }
 
     WeldResumePlanner::ResumePlan resumePlan;
-    if (!WeldResumePlanner::PlanFromPausedPose(
+    if (!WeldResumePlanner::PlanFromPausedPoseBound(
         posePath,
+        checkpointRecord,
         checkpointRecord.x,
         checkpointRecord.y,
         checkpointRecord.z,
@@ -3116,12 +3142,13 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
         .arg(resumePlan.actualBacktrackMm, 0, 'f', 3));
 
     QPointer<MeasureThenWeldDialog> self(this);
-    std::thread([self, pRobotDriver, param, posePath, robotName, checkpointRecord, resumePlan, operationLease]()
+    std::thread([self, pRobotDriver, param, posePath, qualityProofSourcePosePath,
+        robotName, checkpointRecord, resumePlan, operationLease]()
         {
             QString summary;
             QString execError;
             const auto validateResumeIdentity =
-                [pRobotDriver, param, checkpointRecord](const MeasureThenWeldService::WeldExecutionIdentity& identity, QString& prepareError)
+                [pRobotDriver, param, checkpointRecord, posePath](const MeasureThenWeldService::WeldExecutionIdentity& identity, QString& prepareError)
                 {
                     if (pRobotDriver == nullptr)
                     {
@@ -3144,14 +3171,23 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
                         prepareError = QStringLiteral("续焊运动/START前工艺指纹或最终点距发生变化，已中止。");
                         return false;
                     }
-                    QString sourceHashError;
-                    const QString sourceHash = WeldResumePlanner::ComputeFileSha256(
-                        identity.sourcePosePath, &sourceHashError);
-                    if (sourceHash != checkpointRecord.trajectorySha256)
+                    const QFileInfo identitySourceInfo(QDir::fromNativeSeparators(identity.sourcePosePath));
+                    const QFileInfo expectedSourceInfo(QDir::fromNativeSeparators(posePath));
+                    const QString identitySourcePath = QDir::cleanPath(
+                        identitySourceInfo.canonicalFilePath().isEmpty()
+                            ? identitySourceInfo.absoluteFilePath()
+                            : identitySourceInfo.canonicalFilePath());
+                    const QString expectedSourcePath = QDir::cleanPath(
+                        expectedSourceInfo.canonicalFilePath().isEmpty()
+                            ? expectedSourceInfo.absoluteFilePath()
+                            : expectedSourceInfo.canonicalFilePath());
+                    if (identitySourcePath.compare(expectedSourcePath, Qt::CaseInsensitive) != 0
+                        || identity.sourcePoseSha256.compare(
+                            checkpointRecord.trajectorySha256, Qt::CaseInsensitive) != 0
+                        || identity.sourcePoseSize != checkpointRecord.trajectorySize)
                     {
-                        prepareError = sourceHashError.isEmpty()
-                            ? QStringLiteral("续焊运动/START前绑定轨迹SHA256发生变化，已中止。")
-                            : sourceHashError;
+                        prepareError = QStringLiteral(
+                            "续焊运动/START前 Service 实际解析的轨迹路径、SHA256或大小与断点绑定不一致，已中止。");
                         return false;
                     }
                     return true;
@@ -3166,6 +3202,7 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
                         { return self != nullptr && self->ShowCheckpointDialog(title, detail); },
                     checkpointRecord.finalStepMm,
                     true,
+                    MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
                     resumePlan.resumeArcMm,
                     true,
                     [pRobotDriver, expectedEndpoint = checkpointRecord.robotEndpoint]()
@@ -3182,8 +3219,11 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
                         return self != nullptr && self->PrepareActiveWeldCheckpoint(
                             pRobotDriver,
                             param,
-                            identity.sourcePosePath,
+                            identity.qualityProofPosePath,
+                            identity.qualityProofPoseSha256,
                             identity.sampledPosePath,
+                            identity.sampledPoseSha256,
+                            identity.sampledPoseSize,
                             identity.programName,
                             identity.sampledPointCount,
                             identity.effectiveFinalStepMm,
@@ -3200,7 +3240,8 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
                         }
                     },
                     checkpointRecord.trajectorySha256,
-                    validateResumeIdentity);
+                    validateResumeIdentity,
+                    qualityProofSourcePosePath);
 
             if (ok)
             {

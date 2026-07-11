@@ -1,6 +1,7 @@
 #include "WeldResumePlanner.h"
 
 #include <QByteArray>
+#include <QBuffer>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -179,6 +180,108 @@ bool JsonBool(const QJsonObject& object, const QString& key, bool& value)
         return false;
     }
     value = jsonValue.toBool();
+    return true;
+}
+
+bool ParseExecutionTrajectoryPayload(
+    const QByteArray& payload,
+    QVector<WeldResumePlanner::TrajectoryPoint>& points,
+    QString* error)
+{
+    points.clear();
+    QBuffer buffer;
+    buffer.setData(payload);
+    if (!buffer.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        SetError(error, QStringLiteral("无法打开实际执行轨迹内存快照。"));
+        return false;
+    }
+
+    QTextStream stream(&buffer);
+    static const QRegularExpression separator(QStringLiteral("[\\s,]+"));
+    int lineNumber = 0;
+    while (!stream.atEnd())
+    {
+        ++lineNumber;
+        const QString line = stream.readLine().trimmed();
+        if (line.isEmpty() || line.startsWith(QLatin1Char('#')))
+        {
+            continue;
+        }
+
+        const QStringList parts = line.split(separator, Qt::SkipEmptyParts);
+        if (parts.size() >= 5
+            && parts[0].compare(QStringLiteral("weld_index"), Qt::CaseInsensitive) == 0)
+        {
+            continue;
+        }
+        if (parts.size() < 5)
+        {
+            SetError(error, QString("实际执行轨迹第%1行字段不足，期望 weldIndex rawIndex X Y Z ...")
+                .arg(lineNumber));
+            return false;
+        }
+
+        bool weldIndexOk = false;
+        bool rawIndexOk = false;
+        bool xOk = false;
+        bool yOk = false;
+        bool zOk = false;
+        parts[0].toInt(&weldIndexOk);
+        parts[1].toInt(&rawIndexOk);
+        WeldResumePlanner::TrajectoryPoint point;
+        point.x = parts[2].toDouble(&xOk);
+        point.y = parts[3].toDouble(&yOk);
+        point.z = parts[4].toDouble(&zOk);
+        if (!weldIndexOk || !rawIndexOk || !xOk || !yOk || !zOk
+            || !IsFinite(point.x) || !IsFinite(point.y) || !IsFinite(point.z))
+        {
+            SetError(error, QString("实际执行轨迹第%1行索引或XYZ无效。").arg(lineNumber));
+            return false;
+        }
+        points.push_back(point);
+    }
+
+    if (points.size() < 2)
+    {
+        SetError(error, QString("实际执行轨迹有效点不足：%1").arg(points.size()));
+        points.clear();
+        return false;
+    }
+    return true;
+}
+
+bool LoadExecutionTrajectorySnapshot(
+    const QString& trajectoryPath,
+    QVector<WeldResumePlanner::TrajectoryPoint>& points,
+    QString& sha256,
+    qint64& size,
+    QString* error)
+{
+    points.clear();
+    sha256.clear();
+    size = -1;
+
+    QFile file(trajectoryPath);
+    if (!file.open(QIODevice::ReadOnly))
+    {
+        SetError(error, QString("无法打开实际执行轨迹：%1").arg(trajectoryPath));
+        return false;
+    }
+    const QByteArray payload = file.readAll();
+    if (file.error() != QFileDevice::NoError)
+    {
+        SetError(error, QString("读取实际执行轨迹快照失败：%1").arg(trajectoryPath));
+        return false;
+    }
+    if (!ParseExecutionTrajectoryPayload(payload, points, error))
+    {
+        return false;
+    }
+
+    sha256 = QString::fromLatin1(
+        QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex()).toLower();
+    size = payload.size();
     return true;
 }
 }
@@ -378,19 +481,12 @@ bool WeldResumePlanner::BindTrajectoryIdentity(
         return false;
     }
 
-    QString hashError;
-    const QString sha256 = ComputeFileSha256(absoluteTrajectory, &hashError);
-    if (sha256.isEmpty())
-    {
-        SetError(error, hashError);
-        return false;
-    }
-
     QVector<TrajectoryPoint> points;
-    QString pointError;
-    if (!LoadExecutionTrajectory(absoluteTrajectory, points, &pointError))
+    QString sha256;
+    qint64 trajectorySize = -1;
+    if (!LoadExecutionTrajectorySnapshot(
+            absoluteTrajectory, points, sha256, trajectorySize, error))
     {
-        SetError(error, pointError);
         return false;
     }
 
@@ -399,7 +495,7 @@ bool WeldResumePlanner::BindTrajectoryIdentity(
     record.caseRelativeDir = parts.mid(0, 3).join(QLatin1Char('/'));
     record.trajectoryRelativePath = relative;
     record.trajectorySha256 = sha256;
-    record.trajectorySize = trajectoryInfo.size();
+    record.trajectorySize = trajectorySize;
     record.trajectoryPointCount = points.size();
     record.trajectoryInExecutionOrder = true;
     return true;
@@ -450,88 +546,35 @@ bool WeldResumePlanner::LoadExecutionTrajectory(
     QVector<TrajectoryPoint>& points,
     QString* error)
 {
-    points.clear();
-    QFile file(trajectoryPath);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-    {
-        SetError(error, QString("无法打开实际执行轨迹：%1").arg(trajectoryPath));
-        return false;
-    }
-
-    QTextStream stream(&file);
-    static const QRegularExpression separator(QStringLiteral("[\\s,]+"));
-    int lineNumber = 0;
-    while (!stream.atEnd())
-    {
-        ++lineNumber;
-        const QString line = stream.readLine().trimmed();
-        if (line.isEmpty() || line.startsWith(QLatin1Char('#')))
-        {
-            continue;
-        }
-
-        const QStringList parts = line.split(separator, Qt::SkipEmptyParts);
-        if (parts.size() >= 5
-            && parts[0].compare(QStringLiteral("weld_index"), Qt::CaseInsensitive) == 0)
-        {
-            continue;
-        }
-        if (parts.size() < 5)
-        {
-            SetError(error, QString("实际执行轨迹第%1行字段不足，期望 weldIndex rawIndex X Y Z ...")
-                .arg(lineNumber));
-            return false;
-        }
-
-        bool weldIndexOk = false;
-        bool rawIndexOk = false;
-        bool xOk = false;
-        bool yOk = false;
-        bool zOk = false;
-        parts[0].toInt(&weldIndexOk);
-        parts[1].toInt(&rawIndexOk);
-        TrajectoryPoint point;
-        point.x = parts[2].toDouble(&xOk);
-        point.y = parts[3].toDouble(&yOk);
-        point.z = parts[4].toDouble(&zOk);
-        if (!weldIndexOk || !rawIndexOk || !xOk || !yOk || !zOk
-            || !IsFinite(point.x) || !IsFinite(point.y) || !IsFinite(point.z))
-        {
-            SetError(error, QString("实际执行轨迹第%1行索引或XYZ无效。").arg(lineNumber));
-            return false;
-        }
-        points.push_back(point);
-    }
-
-    if (points.size() < 2)
-    {
-        SetError(error, QString("实际执行轨迹有效点不足：%1").arg(points.size()));
-        points.clear();
-        return false;
-    }
-    return true;
+    QString sha256;
+    qint64 size = -1;
+    return LoadExecutionTrajectorySnapshot(trajectoryPath, points, sha256, size, error);
 }
 
-bool WeldResumePlanner::PlanFromPausedPose(
-    const QString& trajectoryPath,
+namespace
+{
+bool BuildResumePlanFromPoints(
+    const QVector<WeldResumePlanner::TrajectoryPoint>& sourcePoints,
     double pauseX,
     double pauseY,
     double pauseZ,
     double backtrackMm,
-    ResumePlan& plan,
+    WeldResumePlanner::ResumePlan& plan,
     QString* error)
 {
-    plan = ResumePlan();
+    plan = WeldResumePlanner::ResumePlan();
     if (!IsFinite(pauseX) || !IsFinite(pauseY) || !IsFinite(pauseZ)
         || !IsFinite(backtrackMm) || backtrackMm < 0.0)
     {
         SetError(error, QStringLiteral("断点位姿或毫米回退距离无效。"));
         return false;
     }
-    if (!LoadExecutionTrajectory(trajectoryPath, plan.points, error))
+    if (sourcePoints.size() < 2)
     {
+        SetError(error, QStringLiteral("实际执行轨迹有效点不足，无法规划续焊。"));
         return false;
     }
+    plan.points = sourcePoints;
     plan.sourcePointCount = plan.points.size();
 
     struct Candidate
@@ -545,8 +588,8 @@ bool WeldResumePlanner::PlanFromPausedPose(
     double cumulativeArc = 0.0;
     for (int index = 0; index + 1 < plan.points.size(); ++index)
     {
-        const TrajectoryPoint& begin = plan.points[index];
-        const TrajectoryPoint& end = plan.points[index + 1];
+        const WeldResumePlanner::TrajectoryPoint& begin = plan.points[index];
+        const WeldResumePlanner::TrajectoryPoint& end = plan.points[index + 1];
         const double dx = end.x - begin.x;
         const double dy = end.y - begin.y;
         const double dz = end.z - begin.z;
@@ -562,11 +605,11 @@ bool WeldResumePlanner::PlanFromPausedPose(
                 / lengthSquared,
             0.0,
             1.0);
-        TrajectoryPoint projected;
+        WeldResumePlanner::TrajectoryPoint projected;
         projected.x = begin.x + dx * projection;
         projected.y = begin.y + dy * projection;
         projected.z = begin.z + dz * projection;
-        TrajectoryPoint pause;
+        WeldResumePlanner::TrajectoryPoint pause;
         pause.x = pauseX;
         pause.y = pauseY;
         pause.z = pauseZ;
@@ -616,4 +659,57 @@ bool WeldResumePlanner::PlanFromPausedPose(
     plan.resumeArcMm = std::max(0.0, best.arc - backtrackMm);
     plan.actualBacktrackMm = best.arc - plan.resumeArcMm;
     return true;
+}
+}
+
+bool WeldResumePlanner::PlanFromPausedPose(
+    const QString& trajectoryPath,
+    double pauseX,
+    double pauseY,
+    double pauseZ,
+    double backtrackMm,
+    ResumePlan& plan,
+    QString* error)
+{
+    QVector<TrajectoryPoint> points;
+    QString sha256;
+    qint64 size = -1;
+    if (!LoadExecutionTrajectorySnapshot(trajectoryPath, points, sha256, size, error))
+    {
+        plan = ResumePlan();
+        return false;
+    }
+    return BuildResumePlanFromPoints(
+        points, pauseX, pauseY, pauseZ, backtrackMm, plan, error);
+}
+
+bool WeldResumePlanner::PlanFromPausedPoseBound(
+    const QString& trajectoryPath,
+    const CheckpointRecord& expectedIdentity,
+    double pauseX,
+    double pauseY,
+    double pauseZ,
+    double backtrackMm,
+    ResumePlan& plan,
+    QString* error)
+{
+    QVector<TrajectoryPoint> points;
+    QString sha256;
+    qint64 size = -1;
+    if (!LoadExecutionTrajectorySnapshot(trajectoryPath, points, sha256, size, error))
+    {
+        plan = ResumePlan();
+        return false;
+    }
+    if (sha256.compare(expectedIdentity.trajectorySha256, Qt::CaseInsensitive) != 0
+        || size != expectedIdentity.trajectorySize
+        || points.size() != expectedIdentity.trajectoryPointCount)
+    {
+        plan = ResumePlan();
+        SetError(error, QStringLiteral(
+            "续焊规划读取的轨迹快照与断点绑定的 SHA256、大小或点数不一致，拒绝规划。"));
+        return false;
+    }
+    return BuildResumePlanFromPoints(
+        points, pauseX, pauseY, pauseZ, backtrackMm, plan, error);
 }

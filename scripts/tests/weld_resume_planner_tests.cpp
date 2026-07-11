@@ -215,6 +215,74 @@ void TestPathBindingAndTamperDetection(const QString& root)
         "same-size/same-point-count trajectory mutation bypassed SHA256 binding");
 }
 
+void TestBoundPlanningSnapshot(const QString& root)
+{
+    const QString path = WriteTrajectory(
+        root,
+        QStringLiteral("RobotA"),
+        QStringLiteral("CaseBoundPlan"),
+        QStringLiteral("PreciseLaserPoint_WeldPose_2mm_SeamComp_FinalSampled.txt"),
+        { { 0.0, 0.0, 0.0 }, { 10.0, 0.0, 0.0 }, { 20.0, 0.0, 0.0 } });
+    const WeldResumePlanner::CheckpointRecord record = CompleteRecord(root, path);
+
+    WeldResumePlanner::ResumePlan plan;
+    QString error;
+    Check(WeldResumePlanner::PlanFromPausedPoseBound(
+        path, record, 12.0, 0.0, 0.0, 5.0, plan, &error),
+        qPrintable(QStringLiteral("bound snapshot plan failed: %1").arg(error)));
+    CheckNear(plan.pauseArcMm, 12.0, "bound snapshot pause arc is wrong");
+    CheckNear(plan.resumeArcMm, 7.0, "bound snapshot resume arc is wrong");
+
+    QFile tampered(path);
+    Check(tampered.open(QIODevice::ReadWrite), "could not mutate bound-plan trajectory");
+    QByteArray bytes = tampered.readAll();
+    const QByteArray originalCoordinate("10.000000000");
+    const QByteArray replacementCoordinate("11.000000000");
+    const qsizetype coordinateOffset = bytes.indexOf(originalCoordinate);
+    Check(coordinateOffset >= 0, "could not locate bound-plan tamper fixture");
+    bytes.replace(coordinateOffset, originalCoordinate.size(), replacementCoordinate);
+    Check(bytes.size() == record.trajectorySize,
+        "bound-plan same-size tamper unexpectedly changed file length");
+    Check(tampered.seek(0), "could not rewind bound-plan trajectory");
+    Check(tampered.write(bytes) == bytes.size(), "could not write bound-plan tamper");
+    tampered.close();
+    Check(!WeldResumePlanner::PlanFromPausedPoseBound(
+        path, record, 12.0, 0.0, 0.0, 5.0, plan, &error),
+        "same-size replacement between Resolve and Plan bypassed bound planning");
+
+    WriteTrajectory(
+        root,
+        QStringLiteral("RobotA"),
+        QStringLiteral("CaseBoundPlan"),
+        QStringLiteral("PreciseLaserPoint_WeldPose_2mm_SeamComp_FinalSampled.txt"),
+        { { 0.0, 0.0, 0.0 }, { 10.0, 0.0, 0.0 }, { 20.0, 0.0, 0.0 } });
+
+    WeldResumePlanner::CheckpointRecord wrongIdentity = record;
+    wrongIdentity.trajectorySha256[0] = wrongIdentity.trajectorySha256[0] == QLatin1Char('0')
+        ? QLatin1Char('1')
+        : QLatin1Char('0');
+    Check(!WeldResumePlanner::PlanFromPausedPoseBound(
+        path, wrongIdentity, 12.0, 0.0, 0.0, 5.0, plan, &error),
+        "bound planning accepted an incorrect SHA256");
+
+    wrongIdentity = record;
+    ++wrongIdentity.trajectorySize;
+    Check(!WeldResumePlanner::PlanFromPausedPoseBound(
+        path, wrongIdentity, 12.0, 0.0, 0.0, 5.0, plan, &error),
+        "bound planning accepted an incorrect file size");
+
+    wrongIdentity = record;
+    ++wrongIdentity.trajectoryPointCount;
+    Check(!WeldResumePlanner::PlanFromPausedPoseBound(
+        path, wrongIdentity, 12.0, 0.0, 0.0, 5.0, plan, &error),
+        "bound planning accepted an incorrect point count");
+
+    Check(WeldResumePlanner::PlanFromPausedPoseBound(
+        path, record, 12.0, 0.0, 0.0, 5.0, plan, &error),
+        qPrintable(QStringLiteral("bound plan did not recover after restoring source: %1")
+            .arg(error)));
+}
+
 void TestForwardAndReverseArcLength(const QString& root)
 {
     const QString forward = WriteTrajectory(
@@ -351,11 +419,12 @@ int main(int argc, char* argv[])
 
     TestColumnParsingAndRecordRoundTrip(project.path());
     TestPathBindingAndTamperDetection(project.path());
+    TestBoundPlanningSnapshot(project.path());
     TestForwardAndReverseArcLength(project.path());
     TestNonUniformThreeDimensionalArcAndBounds(project.path());
     TestSelfIntersectionAmbiguity(project.path());
 
-    std::cout << "PASS: V2 record, bound trajectory integrity, column parsing, "
-        "execution-order arc backtrack, bounds, and ambiguity rejection\n";
+    std::cout << "PASS: V2 record, bound trajectory integrity and planning snapshot, "
+        "column parsing, execution-order arc backtrack, bounds, and ambiguity rejection\n";
     return 0;
 }

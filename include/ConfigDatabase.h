@@ -45,6 +45,10 @@ public:
         const QString& moduleName,
         const QString& keyName,
         QString* value);
+    static QMap<QString, QString> ReadScopedSettings(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName);
     static bool WriteScopedSetting(
         const QString& scopeType,
         const QString& scopeId,
@@ -53,6 +57,12 @@ public:
         const QString& value,
         const QString& valueType = QStringLiteral("string"),
         bool sensitive = false);
+    static bool WriteScopedSettings(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName,
+        const QMap<QString, QString>& values,
+        const QString& valueType = QStringLiteral("string"));
     static bool RemoveScopedSetting(
         const QString& scopeType,
         const QString& scopeId,

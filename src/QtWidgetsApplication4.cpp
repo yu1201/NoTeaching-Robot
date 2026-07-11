@@ -11349,6 +11349,13 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		return;
 	}
 
+	const int pointCloudModeIndex = arguments.indexOf("--pointcloud-processing-mode");
+	if (pointCloudModeIndex >= 0 && pointCloudModeIndex + 1 >= arguments.size())
+	{
+		LogCommandLineMessage("CLI 点云处理方式覆盖缺少参数，请使用 sdk/sdkfit/cloudfit/legacy。");
+		QCoreApplication::exit(1);
+		return;
+	}
 	const QString pointCloudModeOverride = CliOptionValue(arguments, "--pointcloud-processing-mode").trimmed();
 	if (!pointCloudModeOverride.isEmpty())
 	{
@@ -11392,9 +11399,18 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		{
 			LogCommandLineMessage(QString("CLI 点云处理方式覆盖无效：%1，请使用 sdk/sdkfit/cloudfit/legacy。")
 				.arg(pointCloudModeOverride));
+			QCoreApplication::exit(1);
+			return;
 		}
 	}
 
+	const int pointCloudScanDirectionIndex = arguments.indexOf("--pointcloud-scan-direction");
+	if (pointCloudScanDirectionIndex >= 0 && pointCloudScanDirectionIndex + 1 >= arguments.size())
+	{
+		LogCommandLineMessage("CLI 点云SDK扫描方向覆盖缺少参数，请使用 X,Y,Z。");
+		QCoreApplication::exit(1);
+		return;
+	}
 	const QString pointCloudScanDirectionOverride = CliOptionValue(arguments, "--pointcloud-scan-direction").trimmed();
 	if (!pointCloudScanDirectionOverride.isEmpty())
 	{
@@ -11419,12 +11435,16 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 			{
 				LogCommandLineMessage(QString("CLI 点云SDK扫描方向覆盖无效：%1，请使用 X,Y,Z 数值格式。")
 					.arg(pointCloudScanDirectionOverride));
+				QCoreApplication::exit(1);
+				return;
 			}
 		}
 		else
 		{
 			LogCommandLineMessage(QString("CLI 点云SDK扫描方向覆盖无效：%1，请使用 X,Y,Z 格式。")
 				.arg(pointCloudScanDirectionOverride));
+			QCoreApplication::exit(1);
+			return;
 		}
 	}
 
@@ -11487,62 +11507,126 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 	}
 
 	const int laserClassifyIndex = arguments.indexOf("--laser-classify");
-	if (laserClassifyIndex >= 0 && laserClassifyIndex + 1 < arguments.size())
+	if (laserClassifyIndex >= 0)
 	{
+		if (laserClassifyIndex + 1 >= arguments.size())
+		{
+			LogCommandLineMessage("CLI 激光点云分类失败：--laser-classify 缺少文件参数。");
+			QCoreApplication::exit(1);
+			return;
+		}
 		const QString inputPath = arguments[laserClassifyIndex + 1];
 		QString outputPath;
 		const int laserOutputIndex = arguments.indexOf("--laser-classify-output");
-		if (laserOutputIndex >= 0 && laserOutputIndex + 1 < arguments.size())
+		if (laserOutputIndex >= 0)
 		{
+			if (laserOutputIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI 激光点云分类失败：--laser-classify-output 缺少文件参数。");
+				QCoreApplication::exit(1);
+				return;
+			}
 			outputPath = arguments[laserOutputIndex + 1];
 		}
-		RunLaserClassifyForCli(inputPath, outputPath);
-	}
-
-	const int laserClassifyDirIndex = arguments.indexOf("--laser-classify-dir");
-	if (laserClassifyDirIndex >= 0 && laserClassifyDirIndex + 1 < arguments.size())
-	{
-		RunLaserClassifyDirForCli(arguments[laserClassifyDirIndex + 1]);
-	}
-
-	const int rebuildMeasureWeldIndex = arguments.indexOf("--rebuild-measure-weld-files");
-	if (rebuildMeasureWeldIndex >= 0 && rebuildMeasureWeldIndex + 1 < arguments.size())
-	{
-		if (!RunRebuildMeasureWeldFilesForCli(arguments, arguments[rebuildMeasureWeldIndex + 1]))
+		if (!RunLaserClassifyForCli(inputPath, outputPath))
 		{
 			QCoreApplication::exit(1);
 			return;
 		}
 	}
 
-	const int weldSeamCompIndex = arguments.indexOf("--apply-weld-seam-comp");
-	if (weldSeamCompIndex >= 0 && weldSeamCompIndex + 1 < arguments.size())
+	const int laserClassifyDirIndex = arguments.indexOf("--laser-classify-dir");
+	if (laserClassifyDirIndex >= 0)
 	{
+		if (laserClassifyDirIndex + 1 >= arguments.size()
+			|| !RunLaserClassifyDirForCli(arguments[laserClassifyDirIndex + 1]))
+		{
+			if (laserClassifyDirIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI 批量激光点云分类失败：--laser-classify-dir 缺少目录参数。");
+			}
+			QCoreApplication::exit(1);
+			return;
+		}
+	}
+
+	const int rebuildMeasureWeldIndex = arguments.indexOf("--rebuild-measure-weld-files");
+	if (rebuildMeasureWeldIndex >= 0)
+	{
+		if (rebuildMeasureWeldIndex + 1 >= arguments.size()
+			|| !RunRebuildMeasureWeldFilesForCli(arguments, arguments[rebuildMeasureWeldIndex + 1]))
+		{
+			if (rebuildMeasureWeldIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI 先测后焊重建失败：--rebuild-measure-weld-files 缺少目录参数。");
+			}
+			QCoreApplication::exit(1);
+			return;
+		}
+	}
+
+	const int weldSeamCompIndex = arguments.indexOf("--apply-weld-seam-comp");
+	if (weldSeamCompIndex >= 0)
+	{
+		if (weldSeamCompIndex + 1 >= arguments.size())
+		{
+			LogCommandLineMessage("CLI 焊道补偿失败：--apply-weld-seam-comp 缺少文件参数。");
+			QCoreApplication::exit(1);
+			return;
+		}
 		const QString inputPath = arguments[weldSeamCompIndex + 1];
 		QString outputPath;
 		const int weldSeamCompOutputIndex = arguments.indexOf("--apply-weld-seam-comp-output");
-		if (weldSeamCompOutputIndex >= 0 && weldSeamCompOutputIndex + 1 < arguments.size())
+		if (weldSeamCompOutputIndex >= 0)
 		{
+			if (weldSeamCompOutputIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI 焊道补偿失败：--apply-weld-seam-comp-output 缺少文件参数。");
+				QCoreApplication::exit(1);
+				return;
+			}
 			outputPath = arguments[weldSeamCompOutputIndex + 1];
 		}
-		RunWeldSeamCompForCli(arguments, inputPath, outputPath);
+		if (!RunWeldSeamCompForCli(arguments, inputPath, outputPath))
+		{
+			QCoreApplication::exit(1);
+			return;
+		}
 	}
 
 	const int generateStepWeldIndex = arguments.indexOf("--generate-step-weld-program");
-	if (generateStepWeldIndex >= 0 && generateStepWeldIndex + 1 < arguments.size())
+	if (generateStepWeldIndex >= 0)
 	{
+		if (generateStepWeldIndex + 1 >= arguments.size())
+		{
+			LogCommandLineMessage("CLI STEP 焊接程序生成失败：--generate-step-weld-program 缺少文件参数。");
+			QCoreApplication::exit(1);
+			return;
+		}
 		const QString inputPath = arguments[generateStepWeldIndex + 1];
 		QString outputDir;
 		const int stepOutputDirIndex = arguments.indexOf("--generate-step-weld-program-output-dir");
-		if (stepOutputDirIndex >= 0 && stepOutputDirIndex + 1 < arguments.size())
+		if (stepOutputDirIndex >= 0)
 		{
+			if (stepOutputDirIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI STEP 焊接程序生成失败：--generate-step-weld-program-output-dir 缺少目录参数。");
+				QCoreApplication::exit(1);
+				return;
+			}
 			outputDir = arguments[stepOutputDirIndex + 1];
 		}
 
 		double weldSpeedMmPerMin = 0.0;
 		const int stepSpeedIndex = arguments.indexOf("--generate-step-weld-speed");
-		if (stepSpeedIndex >= 0 && stepSpeedIndex + 1 < arguments.size())
+		if (stepSpeedIndex >= 0)
 		{
+			if (stepSpeedIndex + 1 >= arguments.size())
+			{
+				LogCommandLineMessage("CLI STEP 焊接程序生成失败：--generate-step-weld-speed 缺少速度参数。");
+				QCoreApplication::exit(1);
+				return;
+			}
 			bool ok = false;
 			weldSpeedMmPerMin = arguments[stepSpeedIndex + 1].toDouble(&ok);
 			if (!ok || !std::isfinite(weldSpeedMmPerMin) || weldSpeedMmPerMin <= 0.0)
@@ -11553,7 +11637,11 @@ void QtWidgetsApplication4::RunCommandLineActions(const QStringList& arguments)
 		}
 
 		const bool actualWeld = !arguments.contains("--generate-step-weld-program-dry-run");
-		RunGenerateStepWeldProgramForCli(arguments, inputPath, outputDir, actualWeld, weldSpeedMmPerMin);
+		if (!RunGenerateStepWeldProgramForCli(arguments, inputPath, outputDir, actualWeld, weldSpeedMmPerMin))
+		{
+			QCoreApplication::exit(1);
+			return;
+		}
 	}
 
 	const int testPointwiseWeaveIndex = arguments.indexOf("--test-pointwise-weave");
@@ -12622,13 +12710,13 @@ bool QtWidgetsApplication4::RunLaserClassifyForCli(const QString& inputPath, con
 	return true;
 }
 
-void QtWidgetsApplication4::RunLaserClassifyDirForCli(const QString& dirPath) const
+bool QtWidgetsApplication4::RunLaserClassifyDirForCli(const QString& dirPath) const
 {
 	QString normalizedDirPath = QDir::fromNativeSeparators(dirPath.trimmed());
 	if (normalizedDirPath.isEmpty())
 	{
 		LogCommandLineMessage("CLI 批量激光点云分类失败：目录为空。");
-		return;
+		return false;
 	}
 
 	QDir rootDir(normalizedDirPath);
@@ -12640,7 +12728,7 @@ void QtWidgetsApplication4::RunLaserClassifyDirForCli(const QString& dirPath) co
 	{
 		LogCommandLineMessage(QString("CLI 批量激光点云分类失败：未找到目录 %1")
 			.arg(QDir::toNativeSeparators(rootDir.absolutePath())));
-		return;
+		return false;
 	}
 
 	int totalCount = 0;
@@ -12677,6 +12765,12 @@ void QtWidgetsApplication4::RunLaserClassifyDirForCli(const QString& dirPath) co
 			LogCommandLineMessage("  " + failedFile);
 		}
 	}
+	if (totalCount <= 0)
+	{
+		LogCommandLineMessage("CLI 批量激光点云分类失败：目录内没有 PreciseLaserPoint.txt。");
+		return false;
+	}
+	return failedFiles.isEmpty();
 }
 
 bool QtWidgetsApplication4::RunRebuildMeasureWeldFilesForCli(
@@ -12754,7 +12848,7 @@ bool QtWidgetsApplication4::RunRebuildMeasureWeldFilesForCli(
 	return true;
 }
 
-void QtWidgetsApplication4::RunWeldSeamCompForCli(
+bool QtWidgetsApplication4::RunWeldSeamCompForCli(
 	const QStringList& arguments,
 	const QString& inputPath,
 	const QString& outputPath) const
@@ -12763,7 +12857,7 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 	if (normalizedInputPath.isEmpty())
 	{
 		LogCommandLineMessage("CLI 焊道补偿失败：输入文件为空。");
-		return;
+		return false;
 	}
 
 	QFileInfo inputInfo(normalizedInputPath);
@@ -12775,7 +12869,7 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 	{
 		LogCommandLineMessage(QString("CLI 焊道补偿失败：未找到输入文件 %1")
 			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
-		return;
+		return false;
 	}
 
 	const QString normalizedOutputPath = outputPath.trimmed().isEmpty()
@@ -12795,7 +12889,7 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 	{
 		LogCommandLineMessage(QString("CLI 焊道补偿失败：输出文件不能覆盖输入文件 %1")
 			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
-		return;
+		return false;
 	}
 
 	QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath(), QString());
@@ -12825,7 +12919,7 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 		error))
 	{
 		LogCommandLineMessage("CLI 焊道补偿失败：" + error);
-		return;
+		return false;
 	}
 
 	LogCommandLineMessage(QString("CLI 焊道补偿完成：输入=%1，输出=%2，机器人=%3")
@@ -12833,9 +12927,10 @@ void QtWidgetsApplication4::RunWeldSeamCompForCli(
 		.arg(QDir::toNativeSeparators(resolvedOutputPath))
 		.arg(robotName));
 	LogCommandLineMessage("CLI 焊道补偿摘要：" + summary);
+	return true;
 }
 
-void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
+bool QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 	const QStringList& arguments,
 	const QString& inputPath,
 	const QString& outputDir,
@@ -12846,7 +12941,7 @@ void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 	if (normalizedInputPath.isEmpty())
 	{
 		LogCommandLineMessage("CLI STEP焊接程序生成失败：输入文件为空。");
-		return;
+		return false;
 	}
 
 	QFileInfo inputInfo(normalizedInputPath);
@@ -12858,7 +12953,7 @@ void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 	{
 		LogCommandLineMessage(QString("CLI STEP焊接程序生成失败：未找到输入文件 %1")
 			.arg(QDir::toNativeSeparators(inputInfo.absoluteFilePath())));
-		return;
+		return false;
 	}
 
 	QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath(), QString());
@@ -12896,7 +12991,7 @@ void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 		error))
 	{
 		LogCommandLineMessage("CLI STEP焊接程序生成失败：" + error);
-		return;
+		return false;
 	}
 
 	LogCommandLineMessage(QString("CLI STEP焊接程序生成完成：输入=%1，机器人=%2，程序=%3")
@@ -12906,6 +13001,7 @@ void QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 	LogCommandLineMessage("CLI STEP焊接程序摘要：" + summary);
 	LogCommandLineMessage("CLI STEP SRP：" + srpPath);
 	LogCommandLineMessage("CLI STEP SRD：" + srdPath);
+	return true;
 }
 
 void QtWidgetsApplication4::RunUpdateWeldPoseAverageForCli(const QString& inputPath) const
@@ -13306,6 +13402,7 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 					driver, savedPath, param, weldSummary, weldError,
 					nullptr, nullptr, emitLog, stepCb, weldCheckpoint,
 					param.dFinalWeldTrajectoryStepMm, /*allowPointwiseWeave=*/true,
+					MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
 					/*resumeStartArcMm=*/-1.0, /*inputAlreadyInExecutionOrder=*/false, stopped);
 				emitLog(ok
 					? QStringLiteral("第%1次焊接完成：%2").arg(i).arg(weldSummary)
