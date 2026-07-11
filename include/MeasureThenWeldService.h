@@ -19,6 +19,28 @@ public:
     using BeforeActionCallback = std::function<bool(const QString&)>;
     using StopRequestedCallback = std::function<bool()>;
 
+    struct WeldExecutionIdentity
+    {
+        QString sourcePosePath;
+        QString sampledPosePath;
+        QString programName;
+        QString localProgramPath;
+        int sampledPointCount = 0;
+        double effectiveFinalStepMm = 0.0;
+        QString parameterFingerprint;
+        bool trajectoryInExecutionOrder = true;
+        bool resumeCheckpointSupported = true;
+        QString resumeUnsupportedReason;
+    };
+    using WeldExecutionPreparedCallback =
+        std::function<bool(const WeldExecutionIdentity&, QString&)>;
+    // 续焊等高风险入口可在任何机器人运动前复核冻结身份；此时程序名可能尚未生成。
+    using WeldExecutionPreMotionCallback =
+        std::function<bool(const WeldExecutionIdentity&, QString&)>;
+    // executionPrepared 成功后，无论启动失败、流程取消还是程序正常完成都恰好回调一次；
+    // true 表示焊接程序已确认完成，false 表示尚未完成便退出。调用方据此及时关闭暂停窗口。
+    using WeldExecutionFinishedCallback = std::function<void(bool)>;
+
     enum class ScanCycleStatus
     {
         Success,
@@ -59,7 +81,17 @@ public:
         bool stopRequestedDuringCycle = false;
     };
 
+    // 启动任何会产生新焊道身份的完整流程前调用；失败时必须在第一条机器人运动前中止。
+    static bool InvalidateStoredWeldResumeCheckpoint(const QString& robotName, QString& error);
     bool LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error) const;
+    bool ResolveWeldExecutionParameters(
+        const T_PRECISE_MEASURE_PARAM& param,
+        double overrideFinalStepMm,
+        QString& fingerprint,
+        double& effectiveFinalStepMm,
+        QString& error,
+        bool* resumeCheckpointSupported = nullptr,
+        QString* resumeUnsupportedReason = nullptr) const;
     bool MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
     bool MovePulseListAndWait(RobotDriverAdaptor* pRobotDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
     bool MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, const T_ROBOT_COORS& coors, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
@@ -156,8 +188,13 @@ public:
         const CheckpointCallback& checkpoint = CheckpointCallback(),
         double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
         bool allowPointwiseWeave = true,          // pointwise 自定义摆动默认放行(含先测后焊)；传 false 可禁用(保留钩子)
-        int resumeSkipPoints = 0,                 // 断点续焊：跳过前 N 个轨迹点从断点(含搭接回退)开始执行；ARCON 自动生成在续焊首点前
-        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
+        double resumeStartArcMm = -1.0,           // 断点续焊：执行顺序轨迹上的精确起始弧长；<0 表示普通全轨迹执行
+        bool inputAlreadyInExecutionOrder = false,// V2续焊传实际 FinalSampled 时为 true，禁止再次按 WeldDirection 反转
+        const StopRequestedCallback& stopRequested = StopRequestedCallback(),
+        const WeldExecutionPreparedCallback& executionPrepared = WeldExecutionPreparedCallback(),
+        const WeldExecutionFinishedCallback& executionFinished = WeldExecutionFinishedCallback(),
+        const QString& expectedSourceSha256 = QString(),
+        const WeldExecutionPreMotionCallback& executionPreMotion = WeldExecutionPreMotionCallback()) const;
     bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
     bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
     bool ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;

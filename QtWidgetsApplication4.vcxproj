@@ -156,6 +156,7 @@
     <ClCompile Include="src\RobotCalculation.cpp" />
     <ClCompile Include="src\RobotDataHelper.cpp" />
     <ClCompile Include="src\WeldPoseAverageUpdater.cpp" />
+    <ClCompile Include="src\WeldResumePlanner.cpp" />
     <ClCompile Include="src\WeldSeamCompDialog.cpp" />
     <ClCompile Include="src\ResultArchiveDialog.cpp" />
     <ClCompile Include="src\OnlineServicesDialog.cpp" />
@@ -244,6 +245,7 @@
     <ClInclude Include="include\TouchKeyboardManager.h" />
     <ClInclude Include="include\WindowStyleHelper.h" />
     <ClInclude Include="include\WeldPoseAverageUpdater.h" />
+    <ClInclude Include="include\WeldResumePlanner.h" />
     <ClInclude Include="include\WeldSeamCompDialog.h" />
     <ClInclude Include="include\WeldProcessFile.h" />
     <ClInclude Include="include\groove\framebuffer.h" />

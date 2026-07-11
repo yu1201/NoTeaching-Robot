@@ -126,6 +126,22 @@ public:
 	bool Prog_startRun_Py(bool resumeExisting = false);
 	//停止程序 停止的是目前加载的程序
 	bool Prog_stop_Py();
+	// 仅暂停本软件当前跟踪的焊接程序：核对工程/程序身份，等待稳定 ePause，随后直读行号和位姿。
+	// 暂停不会清除 MotionCompletionPending，原程序仍只能在持有同一租约的流程内恢复或安全中止。
+	bool PauseTrackedProgramAndWait(
+		const std::string& expectedProgramName,
+		int& programLine,
+		T_ROBOT_COORS& pausedPose,
+		std::string* projectName = nullptr,
+		std::string* programName = nullptr);
+	// 继续前在同一SDK锁内直读双帧位姿，核对仍为同一暂停程序且未偏离落盘断点，随后原子START。
+	bool ResumeTrackedProgramFromPause(
+		const std::string& expectedProgramName,
+		const T_ROBOT_COORS& checkpointPose,
+		double maxPositionDeviationMm,
+		double maxAngleDeviationDeg,
+		double* positionDeviationMm = nullptr,
+		double* angleDeviationDeg = nullptr);
 	// 安全取消：STOP 后杀掉并卸载当前程序，确认不能再由 START 脱离原流程恢复。
 	bool AbortCurrentProgram();
 	//读当前程序运行行号（暂停时=断点行）；失败返回 -1

@@ -142,6 +142,9 @@
     <ClCompile Include="src\WeldPoseAverageUpdater.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\WeldResumePlanner.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\WeldSeamCompDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -295,6 +298,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldPoseAverageUpdater.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\WeldResumePlanner.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldSeamCompDialog.h">

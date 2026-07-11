@@ -39,6 +39,8 @@ public:
         const QString& requestedOwner,
         QString* reason = nullptr);
     static QString CurrentOwner(const RobotDriverAdaptor* driver);
+    // 可持久化的物理 TCP 端点；端点无效时返回空，绝不返回只在本进程有效的 pointer 身份。
+    static QString PersistentEndpointIdentity(const RobotDriverAdaptor* driver);
     // 安全停止不抢占当前租约，而是给当前高层流程锁存取消状态。
     static bool RequestCancellation(const RobotDriverAdaptor* driver, QString* cancelledOwner = nullptr);
     // 在注册表锁内原子地取消全部活动流程，并把 requiredDriver（通常为主页当前机器人）

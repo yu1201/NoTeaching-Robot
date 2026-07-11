@@ -84,19 +84,29 @@ QString ResolveDriverIdentity(const RobotDriverAdaptor* driver)
         return {};
     }
 
+    const QString persistentIdentity = RobotOperationLease::PersistentEndpointIdentity(driver);
+    return persistentIdentity.isEmpty() ? PointerIdentity(driver) : persistentIdentity;
+}
+}
+
+QString RobotOperationLease::PersistentEndpointIdentity(const RobotDriverAdaptor* driver)
+{
+    if (driver == nullptr)
+    {
+        return {};
+    }
     const QString host = NormalizeSocketHost(driver->m_sSocketIP);
     // 先判断 host，避免读取尚未装载配置的 driver 中可能未初始化的端口字段。
     if (host.isEmpty())
     {
-        return PointerIdentity(driver);
+        return {};
     }
     const int port = driver->m_nSocketPort;
     if (port <= 0 || port > 65535)
     {
-        return PointerIdentity(driver);
+        return {};
     }
     return QStringLiteral("tcp:[%1]:%2").arg(host).arg(port);
-}
 }
 
 RobotOperationLease::RobotOperationLease(

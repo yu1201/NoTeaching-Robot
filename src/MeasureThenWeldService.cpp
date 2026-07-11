@@ -17,15 +17,19 @@
 #include "WeldProcessFile.h"
 #include "groove/framebuffer.h"
 
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
 #include <QStringConverter>
 #include <QTextStream>
+#include <QUuid>
 
 #include <algorithm>
 #include <atomic>
@@ -92,6 +96,7 @@ constexpr char INNER_TO_INNER_CORNER_COMP_KEY[] = "InnerToInner";
 constexpr char OUTER_TO_OUTER_CORNER_COMP_KEY[] = "OuterToOuter";
 constexpr char OUTER_TO_INNER_CORNER_COMP_KEY[] = "OuterToInner";
 constexpr double DEFAULT_FINAL_WELD_TRAJECTORY_SAMPLE_STEP_MM = 4.0;
+constexpr double DEFAULT_RESUME_BACKTRACK_DISTANCE_MM = 5.0;
 
 double NormalizeFinalWeldTrajectorySampleStepMm(double value)
 {
@@ -120,6 +125,49 @@ std::string ToUtf8StdString(const QString& text)
 {
     const QByteArray bytes = text.toUtf8();
     return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
+}
+
+bool InvalidateStoredWeldResumeCheckpointImpl(const QString& robotName, QString& error)
+{
+    error.clear();
+    const QString normalizedRobotName = robotName.trimmed();
+    if (normalizedRobotName.isEmpty())
+    {
+        error = QStringLiteral("机器人名称为空，无法使旧断点失效。");
+        return false;
+    }
+    const QString storagePath = RobotDataHelper::BuildProjectPath(
+        QString("Data/%1/WeldBreakpoint.ini").arg(normalizedRobotName));
+    COPini ini;
+    if (!ini.SetFileName(ToUtf8StdString(storagePath))
+        || !ini.SetSectionName("Breakpoint")
+        || !ini.WriteString("RecordV2", ToUtf8StdString(
+            QString("invalidated:v2:%1").arg(
+                QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs))))
+        || !ini.WriteString("Valid", 0))
+    {
+        error = QString("使旧焊接断点失效失败：%1").arg(storagePath);
+        return false;
+    }
+    return true;
+}
+
+QString ComputeFileSha256ForResumeGate(const QString& filePath, QString& error)
+{
+    error.clear();
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly))
+    {
+        error = QString("无法读取V2续焊绑定轨迹：%1").arg(filePath);
+        return QString();
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (!hash.addData(&file))
+    {
+        error = QString("读取V2续焊绑定轨迹计算SHA256失败：%1").arg(filePath);
+        return QString();
+    }
+    return QString::fromLatin1(hash.result().toHex()).toLower();
 }
 
 qint64 SteadyNowMs()
@@ -236,6 +284,149 @@ struct WeldPosePreset
     bool poseCompFromIni = false;
     bool seamCompFromIni = false;
 };
+
+double ResolveEffectiveFinalStepMm(
+    const T_PRECISE_MEASURE_PARAM& param,
+    const WeldPosePreset& preset,
+    double overrideFinalStepMm)
+{
+    if (std::isfinite(overrideFinalStepMm) && overrideFinalStepMm > 0.0)
+    {
+        return NormalizeFinalWeldTrajectorySampleStepMm(overrideFinalStepMm);
+    }
+    if (std::isfinite(preset.finalWeldStepFromProcessMm)
+        && preset.finalWeldStepFromProcessMm > 0.0)
+    {
+        return NormalizeFinalWeldTrajectorySampleStepMm(preset.finalWeldStepFromProcessMm);
+    }
+    return NormalizeFinalWeldTrajectorySampleStepMm(param.dFinalWeldTrajectoryStepMm);
+}
+
+QString BuildEffectiveWeldExecutionFingerprint(
+    const T_PRECISE_MEASURE_PARAM& param,
+    const WeldPosePreset& preset,
+    double effectiveFinalStepMm)
+{
+    QJsonArray values;
+    const auto addText = [&values](const char* key, const QString& value)
+        {
+            values.append(QString::fromLatin1(key) + QLatin1Char('=') + value);
+        };
+    const auto addInt = [&addText](const char* key, qint64 value)
+        {
+            addText(key, QString::number(value));
+        };
+    const auto addBool = [&addInt](const char* key, bool value)
+        {
+            addInt(key, value ? 1 : 0);
+        };
+    const auto addDouble = [&addText](const char* key, double value)
+        {
+            addText(key, std::isfinite(value)
+                ? QString::number(value, 'g', 17)
+                : QStringLiteral("non-finite"));
+        };
+
+    addText("schema", QStringLiteral("weld-execution-v2"));
+    addText("robot", QString::fromStdString(param.sRobotName));
+    addInt("groupIndex", param.nParamGroupIndex);
+    addText("groupName", param.sParamGroupName);
+    addText("scanSection", QString::fromStdString(param.sSectionName));
+    addText("weldSection", QString::fromStdString(param.sWeldSectionName));
+    addBool("actualWeld", param.bDoActualWeld);
+    addDouble("weldSpeed", param.dWeldSpeedMmPerMin);
+    addDouble("dryRunSpeed", param.dDryRunSpeedMmPerMin);
+    addDouble("safeMoveSpeed", param.dWeldSafeMoveSpeedMmPerMin);
+    addDouble("gunBackSafe", param.dGunDownBackSafeDis);
+    addDouble("resumeBacktrack", param.dResumeBacktrackMm);
+    addInt("weldDirection", preset.weldDirection);
+    addDouble("effectiveFinalStep", effectiveFinalStepMm);
+
+    addInt("robotType", preset.robotType);
+    addBool("processLoaded", preset.weldProcessLoaded);
+    addDouble("processFinalStep", preset.finalWeldStepFromProcessMm);
+    addDouble("stepOverlap", preset.stepOverlapRel);
+    addInt("postureType", preset.weldPostureType);
+    addInt("dynamicMode", preset.weldDynamicMode);
+    addDouble("startCurrent", preset.startArcCurrent);
+    addDouble("startVoltage", preset.startArcVoltage);
+    addDouble("startWait", preset.startArcWaitTime);
+    addDouble("weldCurrent", preset.weldCurrent);
+    addDouble("weldVoltage", preset.weldVoltage);
+    addDouble("processSpeed", preset.weldProcessSpeedMmPerMin);
+    addDouble("stopCurrent", preset.stopArcCurrent);
+    addDouble("stopVoltage", preset.stopArcVoltage);
+    addDouble("stopWait", preset.stopArcWaitTime);
+    addInt("arcMode", preset.arcMode);
+    addBool("transitionSpeedEnabled", preset.transitionSpeedEnabled);
+    addDouble("transitionSpeed", preset.transitionSpeedMmPerMin);
+    addBool("transitionCurrentVoltageEnabled", preset.transitionCurrentVoltageEnabled);
+    addBool("transitionEnableMismatch", preset.transitionCurrentVoltageEnableMismatch);
+    addDouble("transitionCurrent", preset.transitionCurrent);
+    addDouble("transitionVoltage", preset.transitionVoltage);
+    addInt("transitionScope", preset.transitionApplyScope);
+    addBool("keepAnchorsOnly", preset.keepAnchorsOnly);
+
+    addBool("weaveEnabled", preset.weaveEnabled);
+    addBool("pointwiseWeave", preset.weaveAppPointwise);
+    addInt("weavePointsPerCycle", preset.weavePointsPerCycle);
+    const T_WeaveDate& weave = preset.weaveParam;
+    addInt("weave.type", weave.nWeaveType);
+    addInt("weave.shape", weave.nWeaveShape);
+    addDouble("weave.frequency", weave.dWeaveFrequencyHz);
+    addDouble("weave.amplitude", weave.dWeaveAmplitudeMm);
+    addDouble("weave.swingDirection", weave.dSwingDirectionDeg);
+    addDouble("weave.planeAngle", weave.dWeavePlaneAngleDeg);
+    addDouble("weave.spaceAngle", weave.dSpaceAngleDeg);
+    addInt("weave.pause1", weave.nPauseTime1Ms);
+    addInt("weave.pause2", weave.nPauseTime2Ms);
+    addInt("weave.pause3", weave.nPauseTime3Ms);
+    addInt("weave.pause4", weave.nPauseTime4Ms);
+    addInt("weave.pauseContinue", weave.nPauseContinue);
+    addDouble("weave.endLength", weave.dEndLengthMm);
+    addDouble("weave.endWidth", weave.dEndWidthMm);
+    addDouble("weave.centerHeight", weave.dCenterHeightMm);
+
+    addBool("trackEnabled", preset.trackEnabled);
+    const T_TrackData& track = preset.trackParam;
+    addInt("track.lateralBegin", track.nLateralBeginCycle);
+    addDouble("track.lateralGain", track.dLateralGain);
+    addDouble("track.leftArea", track.dLeftAreaCoefficient);
+    addDouble("track.rightArea", track.dRightAreaCoefficient);
+    addInt("track.verticalMode", track.nVerticalModeFlag);
+    addDouble("track.verticalReference", track.dVerticalReferenceCurrent);
+    addInt("track.verticalBegin", track.nVerticalBeginCycle);
+    addInt("track.verticalSustain", track.nVerticalSustainCycle);
+    addDouble("track.verticalCycleLength", track.dVerticalCycleLength);
+    addDouble("track.verticalGain", track.dVerticalGain);
+    addInt("track.intervalMode", track.nTimeOrDistanceMode);
+    addInt("track.timeInterval", track.nTimeIntervalMs);
+    addInt("track.distanceInterval", track.nDistanceIntervalMm);
+    addDouble("track.lateralMinCycle", track.dLateralMinCompPerCycle);
+    addDouble("track.lateralMaxCycle", track.dLateralMaxCompPerCycle);
+    addDouble("track.lateralMaxTotal", track.dLateralMaxCompTotal);
+    addDouble("track.lateralAsymmetry", track.dLateralAsymmetryCoefficient);
+    addDouble("track.lateralReserved6", track.dLateralReserved6);
+    addDouble("track.lateralReserved5", track.dLateralReserved5);
+    addDouble("track.lateralReserved4", track.dLateralReserved4);
+    addDouble("track.lateralReserved3", track.dLateralReserved3);
+    addDouble("track.lateralReserved2", track.dLateralReserved2);
+    addDouble("track.lateralReserved1", track.dLateralReserved1);
+    addDouble("track.verticalMinCycle", track.dVerticalMinCompPerCycle);
+    addDouble("track.verticalMaxCycle", track.dVerticalMaxCompPerCycle);
+    addDouble("track.verticalMaxTotal", track.dVerticalMaxCompTotal);
+    addDouble("track.verticalAsymmetry", track.dVerticalAsymmetryCoefficient);
+    addDouble("track.verticalReserved6", track.dVerticalReserved6);
+    addDouble("track.verticalReserved5", track.dVerticalReserved5);
+    addDouble("track.verticalReserved4", track.dVerticalReserved4);
+    addDouble("track.verticalReserved3", track.dVerticalReserved3);
+    addDouble("track.verticalReserved2", track.dVerticalReserved2);
+    addDouble("track.verticalReserved1", track.dVerticalReserved1);
+
+    return QString::fromLatin1(QCryptographicHash::hash(
+        QJsonDocument(values).toJson(QJsonDocument::Compact),
+        QCryptographicHash::Sha256).toHex()).toLower();
+}
 
 struct MeasurementPoseReference
 {
@@ -2741,13 +2932,25 @@ bool LoadWeldPoseFileRecords(
     return true;
 }
 
-QString BuildFinalSampledWeldPosePath(const QString& poseFilePath)
+QString BuildFinalSampledWeldPosePath(const QString& poseFilePath, bool uniqueResumeOutput = false)
 {
     const QFileInfo poseInfo(QDir::fromNativeSeparators(poseFilePath));
-    const QString baseName = poseInfo.completeBaseName().isEmpty()
+    QString baseName = poseInfo.completeBaseName().isEmpty()
         ? QStringLiteral("WeldPose")
         : poseInfo.completeBaseName();
-    return QDir::toNativeSeparators(poseInfo.dir().filePath(baseName + "_FinalSampled.txt"));
+    // 重复续焊始终从固定 stem 派生短文件名，避免执行后缀在 Windows 路径中无限叠加。
+    static const QRegularExpression executionSuffix(
+        QStringLiteral("(?:_Resume_[0-9a-f-]+)?_FinalSampled$"),
+        QRegularExpression::CaseInsensitiveOption);
+    while (baseName.contains(executionSuffix))
+    {
+        baseName.remove(executionSuffix);
+    }
+    const QString suffix = uniqueResumeOutput
+        ? QString("_Resume_%1_FinalSampled.txt").arg(
+            QUuid::createUuid().toString(QUuid::WithoutBraces).remove(QLatin1Char('-')).left(12))
+        : QStringLiteral("_FinalSampled.txt");
+    return QDir::toNativeSeparators(poseInfo.dir().filePath(baseName + suffix));
 }
 
 bool SaveWeldPoseFileRecords(
@@ -3271,7 +3474,8 @@ bool BuildWeldPoseMoveInfos(
     double finalTrajectorySampleStepMm = DEFAULT_FINAL_WELD_TRAJECTORY_SAMPLE_STEP_MM,
     double transitionLinearSpeed = 0.0,
     bool enableWeldProcess = false,
-    QVector<WeldPoseFileRecord>* executionRecordsOut = nullptr)
+    QVector<WeldPoseFileRecord>* executionRecordsOut = nullptr,
+    bool preserveInputRecords = false)
 {
     moveInfos.clear();
     // 工艺里设置了点间距(>0)时优先用工艺的，否则用测量参数页传入值。
@@ -3280,8 +3484,11 @@ bool BuildWeldPoseMoveInfos(
     {
         effectiveSampleStepMm = preset->finalWeldStepFromProcessMm;
     }
-    const QVector<WeldPoseFileRecord> executionRecords =
-        SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(effectiveSampleStepMm),
+    const QVector<WeldPoseFileRecord> executionRecords = preserveInputRecords
+        ? records
+        : SampleFinalWeldTrajectoryRecords(
+            records,
+            NormalizeFinalWeldTrajectorySampleStepMm(effectiveSampleStepMm),
             preset != nullptr && preset->keepAnchorsOnly);
     if (executionRecordsOut != nullptr)
     {
@@ -3565,6 +3772,85 @@ WeldPoseFileRecord InterpolateWeldPoseRecord(
         record.segmentKind = end.segmentKind;
     }
     return record;
+}
+
+void RenumberWeldPoseRecords(QVector<WeldPoseFileRecord>& records);
+
+bool ClipWeldPoseRecordsAtArcLength(
+    QVector<WeldPoseFileRecord>& records,
+    double resumeStartArcMm,
+    double* actualStartArcMm,
+    QString& error)
+{
+    if (actualStartArcMm != nullptr)
+    {
+        *actualStartArcMm = 0.0;
+    }
+    if (!std::isfinite(resumeStartArcMm) || resumeStartArcMm < 0.0)
+    {
+        error = QStringLiteral("断点续焊起始弧长无效。");
+        return false;
+    }
+    if (resumeStartArcMm <= 1e-9)
+    {
+        return true;
+    }
+
+    double cumulative = 0.0;
+    for (int index = 0; index + 1 < records.size(); ++index)
+    {
+        const double segmentLength = (records[index + 1].point - records[index].point).norm();
+        if (!std::isfinite(segmentLength) || segmentLength <= 1e-9)
+        {
+            continue;
+        }
+        const double segmentEndArc = cumulative + segmentLength;
+        if (resumeStartArcMm <= segmentEndArc + 1e-9)
+        {
+            const double ratio = std::clamp(
+                (resumeStartArcMm - cumulative) / segmentLength,
+                0.0,
+                1.0);
+            QVector<WeldPoseFileRecord> clipped;
+            clipped.reserve(records.size() - index);
+            if (ratio <= 1e-9)
+            {
+                clipped.push_back(records[index]);
+            }
+            else if (ratio >= 1.0 - 1e-9)
+            {
+                clipped.push_back(records[index + 1]);
+            }
+            else
+            {
+                clipped.push_back(InterpolateWeldPoseRecord(records[index], records[index + 1], ratio));
+            }
+
+            const int remainingBegin = ratio >= 1.0 - 1e-9 ? index + 2 : index + 1;
+            for (int remainingIndex = remainingBegin; remainingIndex < records.size(); ++remainingIndex)
+            {
+                clipped.push_back(records[remainingIndex]);
+            }
+            if (clipped.size() < 2)
+            {
+                error = QStringLiteral("断点续焊起始弧长已到轨迹末端，无可执行段。");
+                return false;
+            }
+            RenumberWeldPoseRecords(clipped);
+            records = clipped;
+            if (actualStartArcMm != nullptr)
+            {
+                *actualStartArcMm = std::min(resumeStartArcMm, segmentEndArc);
+            }
+            return true;
+        }
+        cumulative = segmentEndArc;
+    }
+
+    error = QString("断点续焊起始弧长 %1 mm 已到或超过轨迹总长 %2 mm，无可执行段。")
+        .arg(resumeStartArcMm, 0, 'f', 3)
+        .arg(cumulative, 0, 'f', 3);
+    return false;
 }
 
 void RenumberWeldPoseRecords(QVector<WeldPoseFileRecord>& records)
@@ -6363,6 +6649,13 @@ double MeasureThenWeldService::SafeSpeed(double value, double fallback)
     return value > 0.0 ? value : fallback;
 }
 
+bool MeasureThenWeldService::InvalidateStoredWeldResumeCheckpoint(
+    const QString& robotName,
+    QString& error)
+{
+    return InvalidateStoredWeldResumeCheckpointImpl(robotName, error);
+}
+
 namespace
 {
 double FanucLinearSpeedMmPerSecFromConfig(double speedMmPerMin, double fallbackMmPerSec = 1.0)
@@ -6617,6 +6910,7 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     pWeldIni->ReadString(false, "WeldSafeMoveSpeedMmPerMin", &param.dWeldSafeMoveSpeedMmPerMin);
     pWeldIni->ReadString(false, "StepOverlapRel", &param.dStepOverlapRel);
     pWeldIni->ReadString(false, "FinalWeldTrajectoryStepMm", &param.dFinalWeldTrajectoryStepMm);
+    pWeldIni->ReadString(false, "ResumeBacktrackDistanceMm", &param.dResumeBacktrackMm);
     pWeldIni->ReadString(false, "WeldDirection", &param.nWeldDirection);
     pWeldIni->ReadString(false, "GunDownBackSafeDis", &param.dGunDownBackSafeDis);
     pWeldIni->ReadString(false, "WeldRzGainDeg", &param.dWeldRzGainDeg);
@@ -6662,6 +6956,11 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     }
     param.dStepOverlapRel = std::max(0.0, param.dStepOverlapRel);
     param.dFinalWeldTrajectoryStepMm = NormalizeFinalWeldTrajectorySampleStepMm(param.dFinalWeldTrajectoryStepMm);
+    if (!std::isfinite(param.dResumeBacktrackMm) || param.dResumeBacktrackMm < 0.0)
+    {
+        param.dResumeBacktrackMm = DEFAULT_RESUME_BACKTRACK_DISTANCE_MM;
+    }
+    param.dResumeBacktrackMm = std::clamp(param.dResumeBacktrackMm, 0.0, 1000.0);
     param.nWeldDirection = param.nWeldDirection < 0 ? -1 : 1;
     // 焊接方向已迁入工艺参数：当前工艺设置过（非0）时优先于测量参数页旧值，
     // 此处统一覆盖，下游（执行反转/已焊起点截断/预览箭头）全部跟随。
@@ -6755,6 +7054,71 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
         }
     }
 
+    return true;
+}
+
+bool MeasureThenWeldService::ResolveWeldExecutionParameters(
+    const T_PRECISE_MEASURE_PARAM& param,
+    double overrideFinalStepMm,
+    QString& fingerprint,
+    double& effectiveFinalStepMm,
+    QString& error,
+    bool* resumeCheckpointSupported,
+    QString* resumeUnsupportedReason) const
+{
+    fingerprint.clear();
+    effectiveFinalStepMm = 0.0;
+    error.clear();
+    if (resumeCheckpointSupported != nullptr)
+    {
+        *resumeCheckpointSupported = false;
+    }
+    if (resumeUnsupportedReason != nullptr)
+    {
+        resumeUnsupportedReason->clear();
+    }
+    if (!std::isfinite(overrideFinalStepMm) || overrideFinalStepMm < 0.0)
+    {
+        error = QStringLiteral("最终轨迹点距覆盖值无效。");
+        return false;
+    }
+
+    const WeldPosePreset preset = LoadWeldPosePreset(param);
+    const bool checkpointSupported = !(param.bDoActualWeld
+        && (preset.weaveEnabled || preset.trackEnabled));
+    const QString unsupportedReason = checkpointSupported
+        ? QString()
+        : QStringLiteral("当前实际焊接工艺启用了摆焊或焊缝跟踪；FinalSampled仅是中心线，无法证明机器人真实TCP弧长，禁止生成或使用自动续焊断点。");
+    if (param.bDoActualWeld && !preset.weldProcessLoaded)
+    {
+        error = preset.weldProcessLoadError.isEmpty()
+            ? QStringLiteral("当前实际焊接工艺未能加载，无法冻结执行参数。")
+            : preset.weldProcessLoadError;
+        return false;
+    }
+    if (param.bDoActualWeld && preset.transitionCurrentVoltageEnableMismatch)
+    {
+        error = QStringLiteral("拐点过渡电流和电压启用状态不一致，无法冻结执行参数。");
+        return false;
+    }
+
+    effectiveFinalStepMm = ResolveEffectiveFinalStepMm(param, preset, overrideFinalStepMm);
+    fingerprint = BuildEffectiveWeldExecutionFingerprint(param, preset, effectiveFinalStepMm);
+    if (fingerprint.size() != 64 || !std::isfinite(effectiveFinalStepMm) || effectiveFinalStepMm <= 0.0)
+    {
+        error = QStringLiteral("生成焊接执行参数指纹失败。");
+        fingerprint.clear();
+        effectiveFinalStepMm = 0.0;
+        return false;
+    }
+    if (resumeCheckpointSupported != nullptr)
+    {
+        *resumeCheckpointSupported = checkpointSupported;
+    }
+    if (resumeUnsupportedReason != nullptr)
+    {
+        *resumeUnsupportedReason = unsupportedReason;
+    }
     return true;
 }
 
@@ -10099,7 +10463,6 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
         error = "机器人驱动为空。";
         return false;
     }
-
     QVector<WeldPoseFileRecord> records;
     if (!LoadWeldPoseFileRecords(poseFilePath, records, error))
     {
@@ -10225,8 +10588,13 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     const CheckpointCallback& checkpoint,
     double overrideFinalStepMm,
     bool allowPointwiseWeave,
-    int resumeSkipPoints,
-    const StopRequestedCallback& stopRequested) const
+    double resumeStartArcMm,
+    bool inputAlreadyInExecutionOrder,
+    const StopRequestedCallback& stopRequested,
+    const WeldExecutionPreparedCallback& executionPrepared,
+    const WeldExecutionFinishedCallback& executionFinished,
+    const QString& expectedSourceSha256,
+    const WeldExecutionPreMotionCallback& executionPreMotion) const
 {
     summary.clear();
     error.clear();
@@ -10236,29 +10604,55 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         error = "机器人驱动为空。";
         return false;
     }
+    if (!std::isfinite(overrideFinalStepMm) || overrideFinalStepMm < 0.0)
+    {
+        error = QStringLiteral("最终轨迹点距覆盖值必须为 0 或有限正数。");
+        return false;
+    }
 
     QVector<WeldPoseFileRecord> records;
     if (!LoadWeldPoseFileRecords(poseFilePath, records, error))
     {
         return false;
     }
-
-    // 断点续焊：丢弃断点(含搭接回退)之前的轨迹点。必须在安全位推算/抽样之前裁剪，
-    // 使下枪安全位按续焊首点重新推算、ARCON 自动生成在续焊首点前。
-    if (resumeSkipPoints > 0)
+    if (inputAlreadyInExecutionOrder)
     {
-        if (resumeSkipPoints >= records.size() - 1)
+        static const QRegularExpression sha256Pattern(QStringLiteral("^[0-9a-fA-F]{64}$"));
+        if (!sha256Pattern.match(expectedSourceSha256).hasMatch())
         {
-            error = QString("断点续焊起始点(%1)已到或超过轨迹末尾(共%2点)，无可执行段。")
-                .arg(resumeSkipPoints).arg(records.size());
+            error = QStringLiteral("V2续焊缺少有效的预期源轨迹SHA256。");
             return false;
         }
-        records.erase(records.begin(), records.begin() + resumeSkipPoints);
-        if (appendLog)
+        QString hashError;
+        const QString currentSourceSha256 = ComputeFileSha256ForResumeGate(poseFilePath, hashError);
+        if (currentSourceSha256.isEmpty()
+            || currentSourceSha256.compare(expectedSourceSha256, Qt::CaseInsensitive) != 0)
         {
-            appendLog(QString("断点续焊：已跳过前 %1 个轨迹点，从剩余 %2 点开始执行（起弧在续焊首点前自动生成）。")
-                .arg(resumeSkipPoints).arg(records.size()));
+            error = hashError.isEmpty()
+                ? QStringLiteral("V2续焊绑定轨迹在机器人运动前已变化，SHA256不一致。")
+                : hashError;
+            return false;
         }
+    }
+    else if (!expectedSourceSha256.isEmpty())
+    {
+        error = QStringLiteral("普通完整焊接不应携带V2续焊源轨迹SHA256。");
+        return false;
+    }
+
+    if (!std::isfinite(resumeStartArcMm)
+        || (resumeStartArcMm < 0.0 && resumeStartArcMm != -1.0))
+    {
+        error = QStringLiteral("断点续焊起始弧长必须为 -1（普通执行）或有限非负毫米值。");
+        return false;
+    }
+    const bool resumeMode = resumeStartArcMm >= 0.0;
+    if (resumeMode != inputAlreadyInExecutionOrder
+        || (resumeMode && !executionPrepared))
+    {
+        error = QStringLiteral(
+            "断点续焊必须同时提供非负弧长、已按执行顺序绑定的FinalSampled输入和START前身份回调。");
+        return false;
     }
 
     WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
@@ -10267,16 +10661,33 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         error = QStringLiteral("pointwise 自定义摆动已被禁用(allowPointwiseWeave=false)，无法生成轨迹");
         return false;
     }
-    const double effectiveFinalStepMm =
-        (std::isfinite(overrideFinalStepMm) && overrideFinalStepMm > 0.0)
-        ? NormalizeFinalWeldTrajectorySampleStepMm(overrideFinalStepMm)
-        : param.dFinalWeldTrajectoryStepMm;
+    const double effectiveFinalStepMm = ResolveEffectiveFinalStepMm(
+        param, weldPosePreset, overrideFinalStepMm);
+    const QString executionParameterFingerprint = BuildEffectiveWeldExecutionFingerprint(
+        param, weldPosePreset, effectiveFinalStepMm);
     if (std::isfinite(overrideFinalStepMm) && overrideFinalStepMm > 0.0)
     {
         // 虚拟焊道测试：用户点间距覆盖工艺，作为机器人最终逐点执行间距。
         weldPosePreset.finalWeldStepFromProcessMm = effectiveFinalStepMm;
     }
-    ApplyWeldDirectionToExecutionRecords(weldPosePreset, records);
+    if (!inputAlreadyInExecutionOrder)
+    {
+        ApplyWeldDirectionToExecutionRecords(weldPosePreset, records);
+    }
+    if (resumeStartArcMm >= 0.0)
+    {
+        double actualStartArcMm = 0.0;
+        if (!ClipWeldPoseRecordsAtArcLength(records, resumeStartArcMm, &actualStartArcMm, error))
+        {
+            return false;
+        }
+        if (appendLog)
+        {
+            appendLog(QString("断点续焊：按执行顺序从弧长 %1 mm 精确插值裁剪，剩余 %2 个源点；起弧在续焊首点前自动生成。")
+                .arg(actualStartArcMm, 0, 'f', 3)
+                .arg(records.size()));
+        }
+    }
     T_ROBOT_COORS startSafeCoors;
     if (!TryBuildWeldSafeCoors(records, 0, param.dGunDownBackSafeDis, weldPosePreset.robotType, startSafeCoors, error))
     {
@@ -10329,13 +10740,65 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         effectiveFinalStepMm,
         transitionCommandSpeed,
         param.bDoActualWeld,
-        &sampledRecords))
+        &sampledRecords,
+        inputAlreadyInExecutionOrder))
     {
         return false;
     }
-    const QString sampledPosePath = BuildFinalSampledWeldPosePath(poseFilePath);
+    const QString sampledPosePath = BuildFinalSampledWeldPosePath(
+        poseFilePath, inputAlreadyInExecutionOrder);
     QString sampledSaveError;
     const bool sampledSaved = SaveWeldPoseFileRecords(sampledPosePath, sampledRecords, sampledSaveError);
+    if (executionPrepared && !sampledSaved)
+    {
+        error = QString("无法保存可验证的实际执行轨迹，已在机器人运动前中止：%1")
+            .arg(sampledSaveError);
+        return false;
+    }
+
+    WeldExecutionIdentity executionIdentity;
+    executionIdentity.sourcePosePath = QDir::toNativeSeparators(QFileInfo(poseFilePath).absoluteFilePath());
+    executionIdentity.sampledPosePath = QDir::toNativeSeparators(QFileInfo(sampledPosePath).absoluteFilePath());
+    executionIdentity.sampledPointCount = sampledRecords.size();
+    executionIdentity.effectiveFinalStepMm = effectiveFinalStepMm;
+    executionIdentity.parameterFingerprint = executionParameterFingerprint;
+    executionIdentity.trajectoryInExecutionOrder = true;
+    executionIdentity.resumeCheckpointSupported = !(param.bDoActualWeld
+        && (weldPosePreset.weaveEnabled || weldPosePreset.trackEnabled));
+    if (!executionIdentity.resumeCheckpointSupported)
+    {
+        executionIdentity.resumeUnsupportedReason = QStringLiteral(
+            "当前实际焊接工艺启用了摆焊或焊缝跟踪；FinalSampled仅是中心线，无法证明机器人真实TCP弧长，禁止生成或使用自动续焊断点。");
+    }
+
+    // 必须早于旧断点失效和第一条机器人运动。续焊调用方在这里复核机器人、工艺和
+    // 轨迹身份；后续 executionPrepared 还会在具体程序 START 前再次复核并冻结暂停上下文。
+    if (executionPreMotion)
+    {
+        QString preMotionError;
+        if (!executionPreMotion(executionIdentity, preMotionError))
+        {
+            error = preMotionError.isEmpty()
+                ? QStringLiteral("机器人运动前复核焊接执行身份失败，已中止。")
+                : preMotionError;
+            return false;
+        }
+    }
+
+    // 所有入口共用：任何新的完整焊接在第一条机器人运动前都必须使旧 paused 记录失效。
+    // V2续焊输入除外，它已在对话框中先原子切到 resuming，并需保留到新程序终态。
+    if (!inputAlreadyInExecutionOrder)
+    {
+        QString invalidateError;
+        const QString robotName = QString::fromStdString(param.sRobotName).trimmed().isEmpty()
+            ? QString::fromStdString(pRobotDriver->m_sRobotName)
+            : QString::fromStdString(param.sRobotName);
+        if (!InvalidateStoredWeldResumeCheckpoint(robotName, invalidateError))
+        {
+            error = invalidateError + QStringLiteral("；为避免新焊道完成后误用旧断点，已在机器人运动前中止。");
+            return false;
+        }
+    }
 
     if (pStartSafeCoors != nullptr)
     {
@@ -10436,6 +10899,36 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             }
             return true;
         };
+
+    class ExecutionContextGuard
+    {
+    public:
+        explicit ExecutionContextGuard(const WeldExecutionFinishedCallback& callback)
+            : m_callback(callback)
+        {
+        }
+        ~ExecutionContextGuard()
+        {
+            Finish(false);
+        }
+        void Arm() { m_armed = true; }
+        void Finish(bool programCompleted)
+        {
+            if (!m_armed)
+            {
+                return;
+            }
+            m_armed = false;
+            if (m_callback)
+            {
+                m_callback(programCompleted);
+            }
+        }
+
+    private:
+        const WeldExecutionFinishedCallback& m_callback;
+        bool m_armed = false;
+    } executionContextGuard(executionFinished);
 
     // 自动流程的最后进入门禁：必须放在所有解析/生成之后、第一条机器人运动之前，
     // 避免用户在扫描完成到焊接函数真正开始之间按下停止仍触发下枪运动。
@@ -10588,6 +11081,25 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
                 .arg(QDir::toNativeSeparators(QString::fromStdString(localLsPath)))
                 .arg(QString::fromStdString(remoteTpPath));
         programNameText = QString::fromStdString(programName);
+        executionIdentity.programName = programNameText;
+        executionIdentity.localProgramPath = QString::fromStdString(localLsPath);
+        if (executionPrepared)
+        {
+            QString prepareError;
+            if (!executionPrepared(executionIdentity, prepareError))
+            {
+                error = prepareError.isEmpty()
+                    ? QStringLiteral("冻结焊接执行身份失败，未启动机器人程序。")
+                    : prepareError;
+                return false;
+            }
+            executionContextGuard.Arm();
+        }
+
+        if (stopBeforeNextWeldAction("启动焊接轨迹程序"))
+        {
+            return false;
+        }
 
         if (setFlowStep)
         {
@@ -10620,6 +11132,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
                 .arg(lastState);
             return false;
         }
+        executionContextGuard.Finish(true);
 
         if (appendLog)
         {
@@ -10687,6 +11200,24 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         programNameText = pStepDriver != nullptr
             ? QString::fromStdString(stepProgramName)
             : QStringLiteral("STEP ContiMoveAny");
+        executionIdentity.programName = programNameText;
+        executionIdentity.localProgramPath.clear();
+        if (executionPrepared)
+        {
+            QString prepareError;
+            if (!executionPrepared(executionIdentity, prepareError))
+            {
+                error = prepareError.isEmpty()
+                    ? QStringLiteral("冻结焊接执行身份失败，未启动STEP程序。")
+                    : prepareError;
+                return false;
+            }
+            executionContextGuard.Arm();
+        }
+        if (stopBeforeNextWeldAction("启动STEP焊接轨迹程序"))
+        {
+            return false;
+        }
         downlinkSummary =
             QString("点数=%1，模式=%2，轨迹速度=%3 mm/min，来源=%4 (下发=%5 %6)，STEP使用%7生成、上传并启动程序")
                 .arg(static_cast<int>(moveInfos.size()))
@@ -10731,6 +11262,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
                 : QString("STEP焊接轨迹等待完成失败：CheckRobotDone=%1，%2").arg(lastState).arg(detail);
             return false;
         }
+        executionContextGuard.Finish(true);
         if (appendLog)
         {
             appendLog(QString("STEP焊接轨迹执行完成：CheckRobotDone=%1").arg(lastState));

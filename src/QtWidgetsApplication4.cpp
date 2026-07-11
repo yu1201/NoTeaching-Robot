@@ -13132,6 +13132,19 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 		if (settings.overrideScanSpeed && settings.scanSpeedMmPerMin > 0.0) { param.dScanSpeed = settings.scanSpeedMmPerMin; }
 		if (settings.overrideRunSpeed && settings.runSpeedMmPerMin > 0.0) { param.dRunSpeed = settings.runSpeedMmPerMin; }
 		if (settings.overrideCameraOffset) { param.dCameraTimeOffsetMs = settings.cameraTimeOffsetMs; }
+		if (settings.doWeld)
+		{
+			QString invalidateError;
+			if (!MeasureThenWeldService::InvalidateStoredWeldResumeCheckpoint(
+				QString::fromStdString(param.sRobotName), invalidateError))
+			{
+				++failCount;
+				emitLog(QStringLiteral("第%1次：使旧焊接断点失效失败，未开始机器人动作：%2")
+					.arg(i).arg(invalidateError));
+				emitProgress(i, QStringLiteral("断点失效失败"), false);
+				break;
+			}
+		}
 
 		// 记录本次开始前 Result/<机器人>/ 的最新案例目录：本次结束后若出现新目录，即产生了扫描数据。
 		// 点云分析失败的次数也要传原始扫描数据（非波纹板工件分析必失败，但原始激光点数据有效）。
@@ -13216,7 +13229,7 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 					driver, savedPath, param, weldSummary, weldError,
 					nullptr, nullptr, emitLog, stepCb, weldCheckpoint,
 					param.dFinalWeldTrajectoryStepMm, /*allowPointwiseWeave=*/true,
-					/*resumeSkipPoints=*/0, stopped);
+					/*resumeStartArcMm=*/-1.0, /*inputAlreadyInExecutionOrder=*/false, stopped);
 				emitLog(ok
 					? QStringLiteral("第%1次焊接完成：%2").arg(i).arg(weldSummary)
 					: QStringLiteral("第%1次焊接失败/中止：%2").arg(i).arg(weldError));

@@ -227,6 +227,7 @@ QStringList MinimalWeldSectionLinesForPrecise()
         << "WeldSafeMoveSpeedMmPerMin=1000"
         << "StepOverlapRel=20"
         << "FinalWeldTrajectoryStepMm=4"
+        << "ResumeBacktrackDistanceMm=5"
         << "WeldDirection=1"
         << "NormalWeldRx=0"
         << "NormalWeldRy=0"
@@ -573,6 +574,7 @@ QString PreciseParamDisplayName(const QString& key)
         { "WeldSafeMoveSpeedMmPerMin", "安全位速度" },
         { "StepOverlapRel", "STEP过渡比例" },
         { "FinalWeldTrajectoryStepMm", "最终轨迹点间距" },
+        { "ResumeBacktrackDistanceMm", "续焊搭接回退距离(mm)" },
         { "WorldCoorDir", "世界Z方向" },
         { "RobotInstallDir", "机器人安装方向" },
         { "GunAngle", "焊枪角度" },
@@ -697,7 +699,7 @@ QString WeldParamGroupTitleForKey(const QString& key)
     const QString normalized = key.trimmed();
     static const QSet<QString> executeKeys = {
         "WeldEnable", "WeldSpeedMmPerMin", "DryRunSpeedMmPerMin", "WeldSafeMoveSpeedMmPerMin",
-        "StepOverlapRel", "FinalWeldTrajectoryStepMm", "WeldDirection"
+        "StepOverlapRel", "FinalWeldTrajectoryStepMm", "ResumeBacktrackDistanceMm", "WeldDirection"
     };
     static const QSet<QString> coordinateKeys = {
         "WorldCoorDir", "RobotInstallDir", "GunAngle", "GunLaserAngle", "GunCameraAngle",
@@ -1598,6 +1600,18 @@ bool PreciseMeasureEditDialog::SaveAllParamEdits()
 
             const QString sectionName = edit->property("paramSection").toString();
             const QString paramKey = edit->property("paramKey").toString();
+            if (paramKey.compare(QStringLiteral("ResumeBacktrackDistanceMm"), Qt::CaseInsensitive) == 0)
+            {
+                bool valueOk = false;
+                const double backtrackMm = edit->text().trimmed().toDouble(&valueOk);
+                if (!valueOk || !std::isfinite(backtrackMm) || backtrackMm < 0.0 || backtrackMm > 1000.0)
+                {
+                    error = QStringLiteral("续焊搭接回退距离必须为 0~1000 mm 的有限数值。");
+                    QMessageBox::warning(this, "保存参数", error);
+                    AppendLog("其它参数保存失败：" + error);
+                    return false;
+                }
+            }
             if (!WriteParamValue(sectionName, paramKey, ValueForWriteWithInlineComment(edit), error))
             {
                 QMessageBox::warning(this, "保存参数", error);
