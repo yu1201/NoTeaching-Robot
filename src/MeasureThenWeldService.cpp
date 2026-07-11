@@ -12172,6 +12172,7 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
         }
         const int downlinkRet = pFanucDriver->UploadMultiPointTpProgram(
             moveInfos,
+            FANUCRobotCtrl::TrajectoryProgramMode::DryRun,
             &programName,
             &localLsPath,
             &remoteTpPath);
@@ -12496,7 +12497,22 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     const double safeMoveCommandSpeed =
         LinearCommandSpeedForRobot(pRobotDriver, safeMoveSpeedMmPerMin, 1.0);
     const QString weldCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
-    const bool isFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver) != nullptr;
+    FANUCRobotCtrl* pFanucDriverForGate = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver);
+    const bool isFanucDriver = pFanucDriverForGate != nullptr;
+    if (isFanucDriver && param.bDoActualWeld)
+    {
+        std::string contractReason;
+        if (!pFanucDriverForGate->HasVerifiedArcWeldContract(&contractReason))
+        {
+            error = DecodeRobotMessageText(contractReason);
+            pRobotDriver->SetLastRobotError(contractReason);
+            if (appendLog)
+            {
+                appendLog(error);
+            }
+            return false;
+        }
+    }
     if (isFanucDriver)
     {
         QStringList unrepresentableSpeeds;
@@ -12867,6 +12883,9 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         std::string remoteTpPath;
         const int downlinkRet = pFanucDriver->UploadMultiPointTpProgram(
             moveInfos,
+            param.bDoActualWeld
+                ? FANUCRobotCtrl::TrajectoryProgramMode::ActualWeld
+                : FANUCRobotCtrl::TrajectoryProgramMode::DryRun,
             &programName,
             &localLsPath,
             &remoteTpPath);

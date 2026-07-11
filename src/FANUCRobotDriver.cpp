@@ -5,6 +5,7 @@
 #include "FANUCRobotDriver.h"
 #include "RobotOperationLease.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <charconv>
 #include <cerrno>
@@ -29,6 +30,35 @@ namespace
 	const size_t FANUC_SOCKET_MAX_LINE_SIZE = 4096;
 	const int FANUC_DEFAULT_MOTION_STATE_REG = 93;
 	const int FANUC_WELD_PATH_CNT_VALUE = 50;
+	const int FANUC_ACTUAL_WELD_CONTRACT_MISSING = -20;
+	const int FANUC_DRY_RUN_CONTAINS_WELD_METADATA = -21;
+	constexpr const char* FANUC_ACTUAL_WELD_UNAVAILABLE_REASON =
+		"FANUC实际焊接已失败关闭：当前工程没有绑定经现场验证的ArcTool LS模板、"
+		"起弧/焊接/过渡/收弧schedule映射和灭弧状态回读契约；当前仅允许空跑轨迹。";
+
+	bool FanucContainsWeldMetadata(const T_ROBOT_MOVE_INFO& info)
+	{
+		const auto hasProcessNumber = [](double value)
+			{
+				return !std::isfinite(value) || std::abs(value) > 1e-9;
+			};
+		return info.bWeldProcessEnabled
+			|| info.bArcStartBeforeMove
+			|| info.bArcEndAfterMove
+			|| info.bUseTransitionWeldParams
+			|| info.bHasWeaveParam
+			|| info.bAppPointwiseWeave
+			|| info.bHasTrackParam
+			|| hasProcessNumber(info.dArcStartCurrent)
+			|| hasProcessNumber(info.dArcStartVoltage)
+			|| hasProcessNumber(info.dArcStartWaitTime)
+			|| hasProcessNumber(info.dWeldCurrent)
+			|| hasProcessNumber(info.dWeldVoltage)
+			|| hasProcessNumber(info.dWeldSpeedMmPerMin)
+			|| hasProcessNumber(info.dArcEndCurrent)
+			|| hasProcessNumber(info.dArcEndVoltage)
+			|| hasProcessNumber(info.dArcEndWaitTime);
+	}
 
 	long long FanucElapsedMs(std::chrono::steady_clock::time_point start)
 	{
@@ -463,7 +493,12 @@ namespace
 			const T_ROBOT_MOVE_INFO& info = moveInfos[i];
 			const size_t pointIndex = i + 1;
 			const size_t lineIndex = i + 4;
-			const bool useFine = (i == 0) || (i + 1 == moveInfos.size());
+			// 搭接台阶等零过渡点必须精确到位；普通点继续沿用现场既有 CNT50，
+			// 避免把 STEP 的 OVERLAPREL 数值直接误当作 FANUC CNT 等级。
+			const bool useFine = (i == 0)
+				|| (i + 1 == moveInfos.size())
+				|| !std::isfinite(info.dOverlapRel)
+				|| info.dOverlapRel <= 0.0;
 			const std::string termination = useFine
 				? "FINE"
 				: GetStr("CNT%d", FANUC_WELD_PATH_CNT_VALUE);
@@ -3303,7 +3338,8 @@ std::string FANUCRobotCtrl::GetRobotStatusText()
 
 // ===================== 连续运动与特殊程序上传 =====================
 
-// 多点连续运动：生成临时KL/VAR文件并上传，适合路径/焊接等非固定单点动作。
+// 多点连续运动：生成临时KL/VAR文件并上传，只允许纯运动数据。
+// FANUC 实焊必须走独立且已验证的 ArcTool 契约，禁止从旧接口旁路。
 int FANUCRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo)
 {
 	if (vtRobotMoveInfo.empty())
@@ -3313,6 +3349,23 @@ int FANUCRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMo
 			m_pRobotLog->write(LogColor::ERR, "FANUC ContiMoveAny 失败：轨迹点为空");
 		}
 		return -1;
+	}
+	const auto weldMetadataIt = std::find_if(
+		vtRobotMoveInfo.begin(),
+		vtRobotMoveInfo.end(),
+		[](const T_ROBOT_MOVE_INFO& info) { return FanucContainsWeldMetadata(info); });
+	if (weldMetadataIt != vtRobotMoveInfo.end())
+	{
+		const size_t index = static_cast<size_t>(std::distance(vtRobotMoveInfo.begin(), weldMetadataIt));
+		const std::string reason = GetStr(
+			"FANUC旧连续运动接口包含焊接元数据，已拒绝生成KL/VAR：Index=%u。实焊不得旁路ArcTool契约。",
+			static_cast<unsigned>(index));
+		SetLastRobotError(reason);
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR, "%s", reason.c_str());
+		}
+		return FANUC_DRY_RUN_CONTAINS_WELD_METADATA;
 	}
 
 	const std::string timestamp = FanucMakeTimestamp();
@@ -3411,8 +3464,18 @@ int FANUCRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMo
 	return 0;
 }
 
+bool FANUCRobotCtrl::HasVerifiedArcWeldContract(std::string* pReason) const
+{
+	if (pReason != nullptr)
+	{
+		*pReason = FANUC_ACTUAL_WELD_UNAVAILABLE_REASON;
+	}
+	return false;
+}
+
 int FANUCRobotCtrl::UploadMultiPointTpProgram(
 	const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo,
+	TrajectoryProgramMode mode,
 	std::string* pProgramName,
 	std::string* pLocalLsPath,
 	std::string* pRemoteTpPath)
@@ -3425,6 +3488,37 @@ int FANUCRobotCtrl::UploadMultiPointTpProgram(
 		}
 		return -1;
 	}
+
+	if (mode == TrajectoryProgramMode::ActualWeld)
+	{
+		std::string reason;
+		HasVerifiedArcWeldContract(&reason);
+		SetLastRobotError(reason);
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR, "%s", reason.c_str());
+		}
+		return FANUC_ACTUAL_WELD_CONTRACT_MISSING;
+	}
+
+	const auto weldMetadataIt = std::find_if(
+		vtRobotMoveInfo.begin(),
+		vtRobotMoveInfo.end(),
+		[](const T_ROBOT_MOVE_INFO& info) { return FanucContainsWeldMetadata(info); });
+	if (weldMetadataIt != vtRobotMoveInfo.end())
+	{
+		const size_t index = static_cast<size_t>(std::distance(vtRobotMoveInfo.begin(), weldMetadataIt));
+		const std::string reason = GetStr(
+			"FANUC空跑轨迹包含焊接元数据，已拒绝生成普通TP：Index=%u。禁止静默丢弃起弧/收弧/摆动/跟踪字段。",
+			static_cast<unsigned>(index));
+		SetLastRobotError(reason);
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR, "%s", reason.c_str());
+		}
+		return FANUC_DRY_RUN_CONTAINS_WELD_METADATA;
+	}
+
 	for (size_t index = 0; index < vtRobotMoveInfo.size(); ++index)
 	{
 		const T_ROBOT_MOVE_INFO& info = vtRobotMoveInfo[index];
@@ -3521,37 +3615,45 @@ int FANUCRobotCtrl::UploadMultiPointTpProgram(
 	return 0;
 }
 
-// 上传三角摆焊KAREL程序，并写入焊缝编号参数。
+// 这三个历史 KAREL 文件自带 "placeholder"，没有任何焊接动作。
+// 禁止把它们作为可用焊接程序上传，避免界面或后续调用者误判能力已闭环。
 bool FANUCRobotCtrl::SendWeldTriangleWeaveProgram(int nWeldTrackNum)
 {
-	const std::string filePath = FanucBuildProgramPath(m_sRobotName, "WeldTriangleWeave.kl");
-	if (filePath.empty())
+	(void)nWeldTrackNum;
+	const std::string reason =
+		"FANUC三角摆焊程序已禁止下发：WeldTriangleWeave.kl/.pc仍是占位文件，未绑定现场ArcTool契约。";
+	SetLastRobotError(reason);
+	if (m_pRobotLog != nullptr)
 	{
-		return false;
+		m_pRobotLog->write(LogColor::ERR, "%s", reason.c_str());
 	}
-	return UploadKlFile(filePath) == 0 && SetIntVar("WELD_TRACK_NO", nWeldTrackNum);
+	return false;
 }
 
-// 上传L形摆焊KAREL程序，并写入焊缝编号参数。
 bool FANUCRobotCtrl::SendWeldLWeaveProgram(int nWeldTrackNum)
 {
-	const std::string filePath = FanucBuildProgramPath(m_sRobotName, "WeldLWeave.kl");
-	if (filePath.empty())
+	(void)nWeldTrackNum;
+	const std::string reason =
+		"FANUCL形摆焊程序已禁止下发：WeldLWeave.kl/.pc仍是占位文件，未绑定现场ArcTool契约。";
+	SetLastRobotError(reason);
+	if (m_pRobotLog != nullptr)
 	{
-		return false;
+		m_pRobotLog->write(LogColor::ERR, "%s", reason.c_str());
 	}
-	return UploadKlFile(filePath) == 0 && SetIntVar("WELD_TRACK_NO", nWeldTrackNum);
+	return false;
 }
 
-// 上传普通焊接KAREL程序，并写入焊缝编号参数。
 bool FANUCRobotCtrl::SendWeldProgram(int nWeldTrackNum)
 {
-	const std::string filePath = FanucBuildProgramPath(m_sRobotName, "WeldProgram.kl");
-	if (filePath.empty())
+	(void)nWeldTrackNum;
+	const std::string reason =
+		"FANUC普通焊接程序已禁止下发：WeldProgram.kl/.pc仍是占位文件，未绑定现场ArcTool契约。";
+	SetLastRobotError(reason);
+	if (m_pRobotLog != nullptr)
 	{
-		return false;
+		m_pRobotLog->write(LogColor::ERR, "%s", reason.c_str());
 	}
-	return UploadKlFile(filePath) == 0 && SetIntVar("WELD_TRACK_NO", nWeldTrackNum);
+	return false;
 }
 
 // 编译KL为PC后上传到机器人；KL源码本身不上传。

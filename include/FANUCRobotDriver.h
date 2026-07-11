@@ -83,8 +83,17 @@ public:
 
 	// 连续运动：生成并上传临时程序，适合多点路径/特殊运动；与下方固定TP单点运动区分。
 	int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo) override;
+	enum class TrajectoryProgramMode
+	{
+		DryRun,
+		ActualWeld
+	};
+	// 当前版本尚未绑定经现场验证的 ArcTool LS 模板、schedule 映射和灭弧反馈契约。
+	// 实焊必须失败关闭；调用方不得把普通多点 TP 当作 FANUC 实焊程序。
+	bool HasVerifiedArcWeldContract(std::string* pReason = nullptr) const;
 	int UploadMultiPointTpProgram(
 		const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo,
+		TrajectoryProgramMode mode,
 		std::string* pProgramName = nullptr,
 		std::string* pLocalLsPath = nullptr,
 		std::string* pRemoteTpPath = nullptr);
