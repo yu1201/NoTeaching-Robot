@@ -1737,23 +1737,20 @@ void MeasureThenWeldDialog::NotifyFlowResultForUpload(const QString& poseFilePat
     QMetaObject::invokeMethod(qApp, [hook, casePath]() { hook(casePath); }, Qt::QueuedConnection);
 }
 
+bool MeasureThenWeldDialog::HasLiveSession(const QString& actionName)
+{
+    if (!m_liveSessionGuard || !m_liveSessionGuard())
+    {
+        const QString message = QStringLiteral("账号会话已失效，已拒绝继续：%1").arg(actionName);
+        AppendLog(message);
+        SetFlowStep(message);
+        return false;
+    }
+    return true;
+}
+
 bool MeasureThenWeldDialog::ConfirmContinue(const QString& actionName)
 {
-    // 流程免确认只放行中间衔接运动；首次运动（扫描下枪安全位置）与
-    // 进入焊接段（移动到焊接下枪安全位置并执行焊接轨迹）不在白名单，始终弹框。
-    static const QStringList kSkippableActions = {
-        QStringLiteral("移动到扫描起点"),
-        QStringLiteral("扫描终点并采集相机点"),
-        QStringLiteral("扫描收枪安全位置"),
-    };
-    if (m_bSkipFlowConfirms.load() && kSkippableActions.contains(actionName))
-    {
-        AppendLog(QString("（免确认）自动继续：%1").arg(actionName));
-        return true;
-    }
-
-    SetFlowStep(QString("等待确认：%1").arg(actionName));
-
     if (QThread::currentThread() != thread())
     {
         // 流程在线程里跑，确认框必须切回 UI 线程并阻塞等待用户选择。
@@ -1771,6 +1768,25 @@ bool MeasureThenWeldDialog::ConfirmContinue(const QString& actionName)
         return confirmed;
     }
 
+    if (!HasLiveSession(actionName))
+    {
+        return false;
+    }
+    // 流程免确认只放行中间衔接运动；首次运动（扫描下枪安全位置）与
+    // 进入焊接段（移动到焊接下枪安全位置并执行焊接轨迹）不在白名单，始终弹框。
+    static const QStringList kSkippableActions = {
+        QStringLiteral("移动到扫描起点"),
+        QStringLiteral("扫描终点并采集相机点"),
+        QStringLiteral("扫描收枪安全位置"),
+    };
+    if (m_bSkipFlowConfirms.load() && kSkippableActions.contains(actionName))
+    {
+        AppendLog(QString("（免确认）自动继续：%1").arg(actionName));
+        return true;
+    }
+
+    SetFlowStep(QString("等待确认：%1").arg(actionName));
+
     const QMessageBox::StandardButton ret = QMessageBox::question(
         this,
         "先测后焊确认",
@@ -1784,22 +1800,6 @@ bool MeasureThenWeldDialog::ConfirmContinue(const QString& actionName)
 
 bool MeasureThenWeldDialog::ShowCheckpointDialog(const QString& title, const QString& detail)
 {
-    // 流程免确认按标题白名单放行；不在白名单的（跳过扫描确认、扫描姿态翻转
-    // 风险提醒等）一律照常弹框——新增的关键节点默认落在保留侧，安全优先。
-    static const QStringList kSkippableTitles = {
-        QStringLiteral("扫描完成"),
-        QStringLiteral("补偿完成"),
-        QStringLiteral("焊前确认"),
-        QStringLiteral("焊后确认"),
-    };
-    if (m_bSkipFlowConfirms.load() && kSkippableTitles.contains(title))
-    {
-        AppendLog(QString("（免确认）关键节点[%1]自动继续。%2").arg(title).arg(detail));
-        return true;
-    }
-
-    SetFlowStep(QString("关键节点确认：%1").arg(title));
-
     if (QThread::currentThread() != thread())
     {
         bool confirmed = false;
@@ -1815,6 +1815,26 @@ bool MeasureThenWeldDialog::ShowCheckpointDialog(const QString& title, const QSt
             }, Qt::BlockingQueuedConnection);
         return confirmed;
     }
+
+    if (!HasLiveSession(title))
+    {
+        return false;
+    }
+    // 流程免确认按标题白名单放行；不在白名单的（跳过扫描确认、扫描姿态翻转
+    // 风险提醒等）一律照常弹框——新增的关键节点默认落在保留侧，安全优先。
+    static const QStringList kSkippableTitles = {
+        QStringLiteral("扫描完成"),
+        QStringLiteral("补偿完成"),
+        QStringLiteral("焊前确认"),
+        QStringLiteral("焊后确认"),
+    };
+    if (m_bSkipFlowConfirms.load() && kSkippableTitles.contains(title))
+    {
+        AppendLog(QString("（免确认）关键节点[%1]自动继续。%2").arg(title).arg(detail));
+        return true;
+    }
+
+    SetFlowStep(QString("关键节点确认：%1").arg(title));
 
     const QMessageBox::StandardButton ret = QMessageBox::question(
         this,
@@ -1869,6 +1889,10 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
         return;
     }
     param.bDoActualWeld = IsActualWeldModeChecked();
+    if (!HasLiveSession(QStringLiteral("启动先测后焊预设流程")))
+    {
+        return;
+    }
     QString leaseError;
     const auto operationLease = RobotOperationLease::TryAcquire(
         pRobotDriver, QStringLiteral("先测后焊预设流程"), &leaseError);
@@ -2206,6 +2230,10 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
         return;
     }
 
+    if (!HasLiveSession(QStringLiteral("启动跳过扫描焊接流程")))
+    {
+        return;
+    }
     QString leaseError;
     const auto operationLease = RobotOperationLease::TryAcquire(
         pRobotDriver, QStringLiteral("跳过扫描焊接流程"), &leaseError);
@@ -3096,6 +3124,10 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
         return;
     }
 
+    if (!HasLiveSession(QStringLiteral("启动断点续焊流程")))
+    {
+        return;
+    }
     QString leaseError;
     const auto operationLease = RobotOperationLease::TryAcquire(
         pRobotDriver, QStringLiteral("断点续焊流程"), &leaseError);
@@ -3344,6 +3376,10 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
         return;
     }
 
+    if (!HasLiveSession(QStringLiteral("启动相机时间补偿标定")))
+    {
+        return;
+    }
     QString leaseError;
     const auto operationLease = RobotOperationLease::TryAcquire(
         pRobotDriver, QStringLiteral("相机时间补偿标定"), &leaseError);

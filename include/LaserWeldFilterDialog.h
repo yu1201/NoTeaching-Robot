@@ -4,6 +4,8 @@
 
 #include <QDialog>
 
+#include <functional>
+
 class QComboBox;
 class QDoubleSpinBox;
 class QCheckBox;
@@ -17,7 +19,9 @@ class QTabWidget;
 class LaserWeldFilterDialog : public QDialog
 {
 public:
-    explicit LaserWeldFilterDialog(QWidget* parent = nullptr);
+    explicit LaserWeldFilterDialog(
+        std::function<bool()> liveSessionGuard,
+        QWidget* parent = nullptr);
 
 private:
     void BuildUi();
@@ -34,6 +38,7 @@ private:
     PointCloudProcessingConfig::FeaturePointStrategy CurrentFeaturePointStrategy() const;
 
 private:
+    std::function<bool()> m_liveSessionGuard;
     QComboBox* m_pProcessingModeCombo = nullptr;
     QTabWidget* m_pAlgorithmTabWidget = nullptr;
     QLineEdit* m_pExternalLibraryDirEdit = nullptr;

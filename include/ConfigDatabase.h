@@ -63,11 +63,45 @@ public:
         const QString& moduleName,
         const QMap<QString, QString>& values,
         const QString& valueType = QStringLiteral("string"));
+    static bool TryReadAuthenticationInitialized(bool* initialized);
+    static bool TryInitializeAuthenticationAccount(
+        const QString& accountId,
+        const QMap<QString, QString>& profileValues);
+    static bool TryCreateAccount(
+        const QString& accountId,
+        const QMap<QString, QString>& profileValues,
+        const QString& administratorId = QString());
+    static bool TryReadAccountSecurityState(
+        const QString& accountId,
+        QString* passwordRecord,
+        QString* role,
+        bool* mustChangePassword,
+        QString* fingerprint);
+    static bool TryCompareAndSetAccountPassword(
+        const QString& accountId,
+        const QString& expectedPasswordRecord,
+        const QString& newPasswordRecord,
+        bool requireMustChangePassword,
+        bool newMustChangePassword,
+        QString* currentRole,
+        QString* newFingerprint);
+    static bool TryUpdateAccountByAdministrator(
+        const QString& administratorId,
+        const QString& accountId,
+        const QString& newRole,
+        const QString& newPasswordRecord = QString());
+    static bool TryDeleteAccountByAdministrator(
+        const QString& administratorId,
+        const QString& accountId);
     static bool RemoveScopedSetting(
         const QString& scopeType,
         const QString& scopeId,
         const QString& moduleName,
         const QString& keyName);
     static QStringList ListScopedSettingIds(const QString& scopeType, const QString& moduleName = QString());
+    static bool TryListScopedSettingIds(
+        const QString& scopeType,
+        const QString& moduleName,
+        QStringList* ids);
     static bool RemoveScopedSettings(const QString& scopeType, const QString& scopeId, const QString& moduleName = QString());
 };

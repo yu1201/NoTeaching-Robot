@@ -32,9 +32,9 @@ public:
     // 构造函数：初始化日志和弹窗，指定FTP服务器信息
     FtpClient(RobotLog* log,
         const std::string& ftpHost,
-        int ftpPort = 21,
-        const std::string& ftpUser = "root",
-        const std::string& ftpPwd = "STEP_ROBOT_SRH"
+        int ftpPort,
+        const std::string& ftpUser,
+        const std::string& ftpPwd
        );
 
     // 显式建立（或复用）FTP 连接：成功后会话可被后续 createRemoteDirRecursive/上传复用。

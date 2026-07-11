@@ -5,6 +5,7 @@
 #include "CameraFrameCache.h"
 #include "BrandingConfig.h"
 #include "ConfigDatabase.h"
+#include "CredentialSecurity.h"
 #include "FTPClient.h"
 #include "FANUCRobotDriver.h"
 #include "CameraBasicParamDialog.h"
@@ -50,9 +51,9 @@
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QComboBox>
-#include <QCryptographicHash>
 #include <QDebug>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QDirIterator>
 #include <QDoubleValidator>
@@ -64,6 +65,7 @@
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QAbstractItemView>
+#include <QAbstractButton>
 #include <QInputDialog>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -88,6 +90,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMouseEvent>
+#include <QTabletEvent>
 #include <QPainter>
 #include <QPropertyAnimation>
 #include <QPushButton>
@@ -1747,15 +1750,123 @@ namespace
 		return QStringLiteral("LoginState/SavedPasswords");
 	}
 
+	QString RememberedCredentialsGroup()
+	{
+		return QStringLiteral("LoginState/RememberedCredentials");
+	}
+
 	QString CameraReceiveModeGroup()
 	{
 		return QStringLiteral("Camera/ReceiveMode");
 	}
 
-	QString HashAccountPassword(const QString& userName, const QString& password)
+	bool StoredBool(const QString& value, bool defaultValue = false)
 	{
-		return QString::fromLatin1(
-			QCryptographicHash::hash(QString("%1\n%2").arg(userName.trimmed(), password).toUtf8(), QCryptographicHash::Sha256).toHex());
+		if (value.trimmed().isEmpty())
+		{
+			return defaultValue;
+		}
+		const QString normalized = value.trimmed().toLower();
+		return normalized == QStringLiteral("1")
+			|| normalized == QStringLiteral("true")
+			|| normalized == QStringLiteral("yes");
+	}
+
+	bool WriteAccountPasswordRecord(
+		const QString& userName,
+		const QString& password,
+		const QString& expectedPasswordRecord,
+		bool requireMustChangePassword,
+		bool newMustChangePassword,
+		QString& newPasswordRecord,
+		QString& currentRole,
+		QString& securityFingerprint,
+		QString& error)
+	{
+		newPasswordRecord = CredentialSecurity::CreatePasswordRecord(password, &error);
+		if (newPasswordRecord.isEmpty())
+		{
+			return false;
+		}
+		if (!ConfigDatabase::TryCompareAndSetAccountPassword(
+				AccountUserId(userName),
+				expectedPasswordRecord,
+				newPasswordRecord,
+				requireMustChangePassword,
+				newMustChangePassword,
+				&currentRole,
+				&securityFingerprint))
+		{
+			error = QStringLiteral("账号已被删除或安全状态已变化，密码修改已拒绝，请重新登录。");
+			return false;
+		}
+		error.clear();
+		return true;
+	}
+
+	bool WriteNewAccountRecord(
+		const QString& userName,
+		const QString& password,
+		const QString& role,
+		bool mustChangePassword,
+		QString& error,
+		bool initializeAuthentication = false,
+		const QString& administratorId = QString())
+	{
+		const QString record = CredentialSecurity::CreatePasswordRecord(password, &error);
+		if (record.isEmpty())
+		{
+			return false;
+		}
+		const QString now = QDateTime::currentDateTime().toString(Qt::ISODate);
+		QMap<QString, QString> values;
+		values.insert(QStringLiteral("PasswordHash"), record);
+		values.insert(QStringLiteral("Role"), role);
+		values.insert(QStringLiteral("MustChangePassword"), mustChangePassword ? QStringLiteral("1") : QStringLiteral("0"));
+		values.insert(QStringLiteral("CreatedAt"), now);
+		values.insert(QStringLiteral("PasswordChangedAt"), now);
+		const bool written = initializeAuthentication
+			? ConfigDatabase::TryInitializeAuthenticationAccount(
+				AccountUserId(userName), values)
+			: ConfigDatabase::TryCreateAccount(
+				AccountUserId(userName), values, administratorId);
+		if (!written)
+		{
+			error = QStringLiteral("写入账号配置库失败。");
+			return false;
+		}
+		error.clear();
+		return true;
+	}
+
+	int AdminAccountCount()
+	{
+		int count = 0;
+		for (const QString& userName : AccountUserNames())
+		{
+			QString role;
+			if (ConfigDatabase::ReadScopedSetting(
+					QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(),
+					QStringLiteral("Role"), &role)
+				&& role == kRoleAdmin)
+			{
+				++count;
+			}
+		}
+		return count;
+	}
+
+	void ClearRememberedCredential(const QString& userName)
+	{
+		const QString normalized = userName.trimmed();
+		if (normalized.isEmpty())
+		{
+			return;
+		}
+		ConfigDatabase::RemoveScopedSetting(
+			QStringLiteral("global"), QString(), RememberedCredentialsGroup(), normalized);
+		ConfigDatabase::RemoveScopedSetting(
+			QStringLiteral("global"), QString(), SavedPasswordsGroup(), normalized);
 	}
 
 	QString DisplayRoleNameForAccount(const QString& role)
@@ -1774,8 +1885,9 @@ namespace
 	class AccountManagementDialog final : public QDialog
 	{
 	public:
-		explicit AccountManagementDialog(QWidget* parent = nullptr)
+		explicit AccountManagementDialog(const QString& currentUserName, QWidget* parent = nullptr)
 			: QDialog(parent)
+			, m_currentUserName(currentUserName.trimmed())
 		{
 			setWindowTitle("账号管理");
 			ApplyUnifiedWindowChrome(this);
@@ -1855,8 +1967,8 @@ namespace
 			QGroupBox* listGroup = new QGroupBox("账号列表", splitter);
 			QVBoxLayout* listLayout = new QVBoxLayout(listGroup);
 			m_accountTable = new QTableWidget(listGroup);
-			m_accountTable->setColumnCount(3);
-			m_accountTable->setHorizontalHeaderLabels(QStringList() << "账号" << "权限" << "创建时间");
+			m_accountTable->setColumnCount(4);
+			m_accountTable->setHorizontalHeaderLabels(QStringList() << "账号" << "权限" << "创建时间" << "改密状态");
 			m_accountTable->horizontalHeader()->setStretchLastSection(true);
 			m_accountTable->setSelectionBehavior(QAbstractItemView::SelectRows);
 			m_accountTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -1968,15 +2080,19 @@ namespace
 			{
 				QString role;
 				QString createdAt;
+				QString mustChangePassword;
 				if (!ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(user), AccountProfileModule(), "Role", &role))
 				{
 					role = kRoleOperator;
 				}
 				ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(user), AccountProfileModule(), "CreatedAt", &createdAt);
+				ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(user), AccountProfileModule(), "MustChangePassword", &mustChangePassword);
 				m_accountTable->insertRow(row);
 				m_accountTable->setItem(row, 0, new QTableWidgetItem(user));
 				m_accountTable->setItem(row, 1, new QTableWidgetItem(DisplayRoleNameForAccount(role)));
 				m_accountTable->setItem(row, 2, new QTableWidgetItem(createdAt));
+				m_accountTable->setItem(row, 3, new QTableWidgetItem(
+					StoredBool(mustChangePassword) ? QStringLiteral("首次登录须改密") : QStringLiteral("已设置")));
 				++row;
 			}
 			if (row > 0)
@@ -2031,13 +2147,11 @@ namespace
 				QMessageBox::warning(this, "新增账号", "账号已存在。");
 				return false;
 			}
-			const bool writeOk =
-				ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "PasswordHash", HashAccountPassword(userName, password), QStringLiteral("string"), true) &&
-				ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "Role", role) &&
-				ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate), QStringLiteral("datetime"));
-			if (!writeOk)
+			QString error;
+			if (!WriteNewAccountRecord(
+					userName, password, role, true, error, false, m_currentUserName))
 			{
-				QMessageBox::warning(this, "新增账号", "写入账号配置库失败。");
+				QMessageBox::warning(this, "新增账号", error);
 				return false;
 			}
 
@@ -2061,8 +2175,28 @@ namespace
 				QMessageBox::warning(this, "保存修改", "账号不存在。");
 				return false;
 			}
-			bool writeOk = ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "Role", m_editRoleCombo->currentData().toString());
+			QString currentRole;
+			if (!ConfigDatabase::ReadScopedSetting(
+					QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), QStringLiteral("Role"), &currentRole))
+			{
+				QMessageBox::warning(this, "保存修改", "无法读取账号当前权限，已拒绝修改。");
+				return false;
+			}
+			const QString newRole = m_editRoleCombo->currentData().toString();
+			if (currentRole == kRoleAdmin && newRole != kRoleAdmin && AdminAccountCount() <= 1)
+			{
+				QMessageBox::warning(this, "保存修改", "不能降级最后一个管理员账号。");
+				return false;
+			}
 			const QString newPassword = m_editPassEdit->text();
+			if (userName.compare(m_currentUserName, Qt::CaseInsensitive) == 0
+				&& (currentRole != newRole || !newPassword.isEmpty()))
+			{
+				QMessageBox::warning(this, "保存修改", "不能在当前会话中修改自己的权限或重置自己的密码，请由另一个管理员操作。");
+				return false;
+			}
+
+			QString newPasswordRecord;
 			if (!newPassword.isEmpty())
 			{
 				if (newPassword.size() < 8)
@@ -2070,12 +2204,18 @@ namespace
 					QMessageBox::warning(this, "保存修改", "新密码至少需要 8 个字符。");
 					return false;
 				}
-				writeOk = writeOk && ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "PasswordHash", HashAccountPassword(userName, newPassword), QStringLiteral("string"), true);
+				QString error;
+				newPasswordRecord = CredentialSecurity::CreatePasswordRecord(newPassword, &error);
+				if (newPasswordRecord.isEmpty())
+				{
+					QMessageBox::warning(this, "保存修改", error);
+					return false;
+				}
 			}
-			writeOk = writeOk && ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), "UpdatedAt", QDateTime::currentDateTime().toString(Qt::ISODate), QStringLiteral("datetime"));
-			if (!writeOk)
+			if (!ConfigDatabase::TryUpdateAccountByAdministrator(
+					m_currentUserName, AccountUserId(userName), newRole, newPasswordRecord))
 			{
-				QMessageBox::warning(this, "保存修改", "保存账号配置库失败。");
+				QMessageBox::warning(this, "保存修改", "账号状态或管理员权限已变化，安全事务已拒绝本次修改。请刷新后重试。");
 				return false;
 			}
 			m_editPassEdit->clear();
@@ -2096,10 +2236,28 @@ namespace
 			{
 				return false;
 			}
-
-			if (!ConfigDatabase::RemoveScopedSettings(QStringLiteral("account"), AccountUserId(userName)))
+			if (userName.compare(m_currentUserName, Qt::CaseInsensitive) == 0)
 			{
-				QMessageBox::warning(this, "删除账号", "删除账号失败。");
+				QMessageBox::warning(this, "删除账号", "不能删除当前登录账号，请由另一个管理员操作。");
+				return false;
+			}
+			QString role;
+			if (!ConfigDatabase::ReadScopedSetting(
+					QStringLiteral("account"), AccountUserId(userName), AccountProfileModule(), QStringLiteral("Role"), &role))
+			{
+				QMessageBox::warning(this, "删除账号", "无法读取账号当前权限，已拒绝删除。");
+				return false;
+			}
+			if (role == kRoleAdmin && AdminAccountCount() <= 1)
+			{
+				QMessageBox::warning(this, "删除账号", "不能删除最后一个管理员账号。");
+				return false;
+			}
+
+			if (!ConfigDatabase::TryDeleteAccountByAdministrator(
+					m_currentUserName, AccountUserId(userName)))
+			{
+				QMessageBox::warning(this, "删除账号", "账号状态或管理员权限已变化，安全事务已拒绝删除。请刷新后重试。");
 				return false;
 			}
 			AppendLog(QString("已删除账号 %1。").arg(userName));
@@ -2114,6 +2272,7 @@ namespace
 		QComboBox* m_editRoleCombo = nullptr;
 		QLineEdit* m_editPassEdit = nullptr;
 		QPlainTextEdit* m_logText = nullptr;
+		QString m_currentUserName;
 	};
 
 	class ControlUnitManagementDialog final : public QDialog
@@ -2403,7 +2562,7 @@ namespace
 			const QString templateRobot = robotType == ROBOT_TYPE_STEP ? "RobotB" : "RobotA";
 			FtpCredential credential;
 			credential.user = robotType == ROBOT_TYPE_STEP ? "root" : "anonymous";
-			credential.password = robotType == ROBOT_TYPE_STEP ? "STEP_ROBOT_SRH" : QString();
+			credential.password.clear();
 
 			COPini robotIni;
 			if (robotIni.SetFileName(ToIniBytes(RobotParaPath(templateRobot))))
@@ -3713,10 +3872,15 @@ namespace
 	class FtpJobManagementDialog final : public QDialog
 	{
 	public:
-		explicit FtpJobManagementDialog(ContralUnit* pContralUnit, int currentUnitIndex, QWidget* parent = nullptr)
+		explicit FtpJobManagementDialog(
+			ContralUnit* pContralUnit,
+			int currentUnitIndex,
+			std::function<bool()> liveSessionGuard,
+			QWidget* parent = nullptr)
 			: QDialog(parent)
 			, m_pContralUnit(pContralUnit)
 			, m_initialUnitIndex(currentUnitIndex)
+			, m_liveSessionGuard(std::move(liveSessionGuard))
 		{
 			setWindowTitle("FTP Job 文件管理");
 			ApplyUnifiedWindowChrome(this);
@@ -4427,6 +4591,16 @@ namespace
 			{
 				return;
 			}
+			// Windows 原生文件选择框会阻塞 Qt 定时器；危险提交点必须同步重读
+			// 账号指纹和工程师权限，不能只依赖 250ms 会话轮询或窗口事件。
+			if (!m_liveSessionGuard || !m_liveSessionGuard())
+			{
+				QMessageBox::warning(
+					this,
+					title,
+					QStringLiteral("账号会话或工程师权限已失效，本次 FTP 操作已拒绝。请重新登录。"));
+				return;
+			}
 			QString connectionError;
 			const FtpConnection connection = CurrentConnection(&connectionError);
 			if (!connectionError.isEmpty())
@@ -4759,6 +4933,7 @@ namespace
 		ContralUnit* m_pContralUnit = nullptr;
 		int m_initialUnitIndex = -1;
 		bool m_busy = false;
+		std::function<bool()> m_liveSessionGuard;
 		QList<UnitConfig> m_units;
 		QComboBox* m_unitCombo = nullptr;
 		QLineEdit* m_hostEdit = nullptr;
@@ -7347,7 +7522,9 @@ namespace
 									const bool sensitive = query.value(6).toInt() != 0;
 									const bool encrypted = query.value(7).toInt() != 0;
 									const QString updatedAt = query.value(8).toString();
-									const QString value = encrypted ? QStringLiteral("<已加密>") : query.value(4).toString();
+									const QString value = (sensitive || encrypted)
+										? QStringLiteral("<敏感值已隐藏>")
+										: query.value(4).toString();
 									const QString valueType = query.value(5).toString();
 									const QString detail = QString(
 										"分类：%1\n控制单元/对象：%2\n功能参数：%3\n参数分组：%4\n参数名：%5\n\n"
@@ -7696,12 +7873,20 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_sCurrentUserRole(kRoleOperator)
 	, m_sAuthHintOverride()
 	, m_bAuthRegisterMode(false)
+	, m_bEnforceInteractiveSessionLeaseGate(
+		!QCoreApplication::arguments().contains(QStringLiteral("--no-show")))
 	, m_bOpenEmbeddedInManagement(false)
 	, m_bPendingOpenManagementAfterLogin(false)
 	, m_bDebugLogMode(false)
 	, m_bUseSharedScanCameraReceiver(false)
 	, m_bFanucMonitorReading(false)
 {
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(
+			false,
+			QStringLiteral("请先完成有效的本地账号登录，再启动机器人硬件操作。"));
+	}
 	ui.setupUi(this);
 	ApplyUnifiedWindowChrome(this);
 	m_pTouchKeyboardManager = new TouchKeyboardManager(this);
@@ -8772,6 +8957,55 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	ui.FanucMovjTestBtn->hide();
 	ui.FanucMoveZeroBtn->hide();
 
+	if (qApp != nullptr)
+	{
+		qApp->installEventFilter(this);
+	}
+	QTimer* accountSessionTimer = new QTimer(this);
+	accountSessionTimer->setInterval(250);
+	connect(accountSessionTimer, &QTimer::timeout, this, [this]()
+		{
+			const bool managementVisible = m_pManagementPage != nullptr
+				&& m_pManagementPage->isVisible();
+			const bool mainSurfaceActive = m_pMainStack != nullptr
+				&& m_pMainStack->currentWidget() != m_pAuthPage;
+			bool taggedSessionWindowVisible = false;
+			if (qApp != nullptr
+				&& !RobotOperationLease::AnyActive()
+				&& !HasRunningMeasureThenWeldFlow())
+			{
+				for (QWidget* window : qApp->topLevelWidgets())
+				{
+					if (window != nullptr
+						&& window->isVisible()
+						&& window->property("_requires_live_account_session").toBool())
+					{
+						taggedSessionWindowVisible = true;
+						break;
+					}
+				}
+			}
+			if ((!managementVisible && !mainSurfaceActive && !taggedSessionWindowVisible)
+				|| m_bAccountSessionEventValidation)
+			{
+				return;
+			}
+			m_bAccountSessionEventValidation = true;
+			const bool validSession = ValidateCurrentAccountSession(
+				managementVisible
+					? QStringLiteral("保持管理页面会话")
+					: QStringLiteral("保持当前页面会话"));
+			const bool authorized = validSession
+				&& (!managementVisible
+					|| RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer));
+			m_bAccountSessionEventValidation = false;
+			if (!authorized)
+			{
+				RevokePrivilegedUiAccess();
+			}
+		});
+	accountSessionTimer->start();
+
 	EnsureDefaultAdminAccount();
 	RefreshAccountUi();
 	LoadCameraReceiveMode();
@@ -8784,8 +9018,13 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		BrandingConfig::ApplyDesktopShortcutIcons();  // 安装后首次启动即把桌面/开始菜单快捷方式图标刷成当前品牌图标
 	}
 	LoadLoginState();
-	ShowAuthPage();
-	TryAutoLogin();
+	ShowAuthPage(m_bAccountRecoveryRequired
+		? QStringLiteral("账号认证库需要安全恢复，已禁用自动登录。请从受控备份恢复账号库或联系维护人员，程序不会重新生成已知默认管理员。")
+		: QString());
+	if (!m_bAccountRecoveryRequired)
+	{
+		TryAutoLogin();
+	}
 
 	m_grooveCameraDisplayTimer = new QTimer(this);
 	connect(m_grooveCameraDisplayTimer, &QTimer::timeout, this, &QtWidgetsApplication4::UpdateGrooveCameraData);
@@ -8920,6 +9159,10 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 QtWidgetsApplication4::~QtWidgetsApplication4()
 {
+	if (qApp != nullptr)
+	{
+		qApp->removeEventFilter(this);
+	}
 	const QList<QPointer<MeasureThenWeldDialog>> measureThenWeldPages = m_measureThenWeldPages.values();
 	for (const QPointer<MeasureThenWeldDialog>& guardedPage : measureThenWeldPages)
 	{
@@ -8959,6 +9202,11 @@ QtWidgetsApplication4::~QtWidgetsApplication4()
 	StopScanCameraRuntimes();
 	delete m_pContralUnit;
 	m_pContralUnit = nullptr;
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		// 测试进程或同进程重建主窗口时不遗留上一窗口的交互式会话状态。
+		RobotOperationLease::SetNewOperationsAllowed(true);
+	}
 }
 
 bool QtWidgetsApplication4::HasRunningMeasureThenWeldFlow() const
@@ -9100,11 +9348,116 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 
 bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 {
+	if (event != nullptr && event->type() == QEvent::Show)
+	{
+		QWidget* shownWindow = qobject_cast<QWidget*>(watched);
+		if (shownWindow != nullptr
+			&& shownWindow->isWindow()
+			&& shownWindow != this
+			&& shownWindow != m_pManagementPage)
+		{
+			QWidget* owner = shownWindow->parentWidget();
+			const bool ownerTagged = owner != nullptr
+				&& owner->window() != nullptr
+				&& owner->window()->property("_requires_live_account_session").toBool();
+			const bool ownerInManagement = owner != nullptr
+				&& m_pManagementPage != nullptr
+				&& (owner == m_pManagementPage || m_pManagementPage->isAncestorOf(owner));
+			const bool ownerInActiveMain = owner != nullptr
+				&& m_pMainStack != nullptr
+				&& m_pMainStack->currentWidget() != m_pAuthPage
+				&& (owner == this || isAncestorOf(owner));
+			if (ownerTagged || ownerInManagement || ownerInActiveMain)
+			{
+				shownWindow->setProperty("_requires_live_account_session", true);
+			}
+		}
+	}
+	const bool mouseDrag = event != nullptr
+		&& event->type() == QEvent::MouseMove
+		&& static_cast<QMouseEvent*>(event)->buttons() != Qt::NoButton;
+	const bool tabletDrag = event != nullptr
+		&& event->type() == QEvent::TabletMove
+		&& static_cast<QTabletEvent*>(event)->buttons() != Qt::NoButton;
+	const bool privilegedInput = event != nullptr
+		&& (event->type() == QEvent::MouseButtonPress
+			|| event->type() == QEvent::MouseButtonRelease
+			|| event->type() == QEvent::MouseButtonDblClick
+			|| mouseDrag
+			|| event->type() == QEvent::Wheel
+			|| event->type() == QEvent::KeyPress
+			|| event->type() == QEvent::KeyRelease
+			|| event->type() == QEvent::Shortcut
+			|| event->type() == QEvent::ContextMenu
+			|| event->type() == QEvent::TouchBegin
+			|| event->type() == QEvent::TouchEnd
+			|| event->type() == QEvent::TabletPress
+			|| tabletDrag
+			|| event->type() == QEvent::TabletRelease
+			|| event->type() == QEvent::Gesture
+			|| event->type() == QEvent::NativeGesture);
+	QWidget* watchedWidget = qobject_cast<QWidget*>(watched);
+	const bool insideVisibleManagement = watchedWidget != nullptr
+		&& m_pManagementPage != nullptr
+		&& m_pManagementPage->isVisible()
+		&& (watchedWidget == m_pManagementPage
+			|| m_pManagementPage->isAncestorOf(watchedWidget));
+	const bool insideActiveMainSurface = watchedWidget != nullptr
+		&& m_pMainStack != nullptr
+		&& m_pMainStack->currentWidget() != m_pAuthPage
+		&& (watchedWidget == this || isAncestorOf(watchedWidget));
+	QWidget* watchedWindow = watchedWidget != nullptr ? watchedWidget->window() : nullptr;
+	const bool insideTaggedSessionWindow = watchedWindow != nullptr
+		&& watchedWindow->isVisible()
+		&& watchedWindow->property("_requires_live_account_session").toBool();
+	if (privilegedInput
+		&& (insideVisibleManagement || insideActiveMainSurface || insideTaggedSessionWindow)
+		&& !m_bAccountSessionEventValidation)
+	{
+		m_bAccountSessionEventValidation = true;
+		const bool validSession = ValidateCurrentAccountSession(
+			insideVisibleManagement
+				? QStringLiteral("执行管理页面操作")
+				: QStringLiteral("执行当前页面操作"));
+		const bool authorized = validSession
+			&& (!insideVisibleManagement
+				|| RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer));
+		m_bAccountSessionEventValidation = false;
+		if (!authorized)
+		{
+			RevokePrivilegedUiAccess();
+			const bool safetyEscape = event->type() == QEvent::KeyPress
+				&& static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape;
+			const QAbstractButton* button = qobject_cast<QAbstractButton*>(watchedWidget);
+			const QString safetyControlText = button == nullptr
+				? QString()
+				: (button->objectName() + QLatin1Char(' ') + button->text()).toLower();
+			const bool safetyControl = safetyControlText.contains(QStringLiteral("stop"))
+				|| safetyControlText.contains(QStringLiteral("abort"))
+				|| safetyControlText.contains(QStringLiteral("cancel"))
+				|| safetyControlText.contains(QStringLiteral("release"))
+				|| safetyControlText.contains(QStringLiteral("停止"))
+				|| safetyControlText.contains(QStringLiteral("急停"))
+				|| safetyControlText.contains(QStringLiteral("取消"))
+				|| safetyControlText.contains(QStringLiteral("中止"))
+				|| safetyControlText.contains(QStringLiteral("松开"));
+			if ((RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+				&& (safetyEscape || safetyControl))
+			{
+				return QMainWindow::eventFilter(watched, event);
+			}
+			event->accept();
+			return true;
+		}
+	}
 	if (event != nullptr && event->type() == QEvent::Resize)
 	{
 		if (QWidget* page = qobject_cast<QWidget*>(watched))
 		{
-			PositionEmbeddedBackButton(page);
+			if (page->property("_management_embedded_page").isValid())
+			{
+				PositionEmbeddedBackButton(page);
+			}
 		}
 	}
 	if (event != nullptr && event->type() == QEvent::Close)
@@ -9167,6 +9520,10 @@ void QtWidgetsApplication4::resizeEvent(QResizeEvent* event)
 
 void QtWidgetsApplication4::ShowDashboardPage()
 {
+	if (!ValidateCurrentAccountSession(QStringLiteral("进入主页")))
+	{
+		return;
+	}
 	CloseGrooveCameraPreviewWindow();
 	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
 	setMinimumSize(720, 500);
@@ -9192,6 +9549,10 @@ void QtWidgetsApplication4::ShowDashboardPage()
 
 void QtWidgetsApplication4::ShowCurrentUserMenu()
 {
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开当前用户菜单")))
+	{
+		return;
+	}
 	if (m_pCurrentUserButton == nullptr)
 	{
 		return;
@@ -9224,6 +9585,10 @@ void QtWidgetsApplication4::ShowCurrentUserMenu()
 
 void QtWidgetsApplication4::ShowManagementPage()
 {
+	if (!ValidateCurrentAccountSession(QStringLiteral("进入管理页面")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		const QMessageBox::StandardButton button = QMessageBox::question(
@@ -9255,6 +9620,12 @@ void QtWidgetsApplication4::ShowManagementPage()
 
 void QtWidgetsApplication4::ShowManagementHomePage()
 {
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开管理首页"))
+		|| RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		RevokePrivilegedUiAccess();
+		return;
+	}
 	CloseGrooveCameraPreviewWindow();
 	if (m_pManagementStack != nullptr && m_pManagementHomePage != nullptr)
 	{
@@ -9837,6 +10208,10 @@ int QtWidgetsApplication4::RoleLevel(const QString& role) const
 
 bool QtWidgetsApplication4::RequirePermission(const QString& minimumRole, const QString& actionName)
 {
+	if (!ValidateCurrentAccountSession(actionName))
+	{
+		return false;
+	}
 	if (RoleLevel(m_sCurrentUserRole) >= RoleLevel(minimumRole))
 	{
 		return true;
@@ -9857,15 +10232,164 @@ bool QtWidgetsApplication4::RequirePermission(const QString& minimumRole, const 
 	return false;
 }
 
-void QtWidgetsApplication4::EnsureDefaultAdminAccount()
+bool QtWidgetsApplication4::ValidateCurrentAccountSession(const QString& actionName)
 {
-	if (!AccountUserNames().isEmpty())
+	if (m_bSessionRevocationPendingSafetyStop)
+	{
+		if (m_bEnforceInteractiveSessionLeaseGate)
+		{
+			RobotOperationLease::SetNewOperationsAllowed(
+				false,
+				QStringLiteral("账号会话已失效；禁止启动新的机器人硬件操作。"));
+		}
+		if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+		{
+			return false;
+		}
+		m_bSessionRevocationPendingSafetyStop = false;
+		RevokePrivilegedUiAccess();
+		RefreshAccountUi();
+		ShowAuthPage(QStringLiteral("账号会话已失效；机器人操作已安全结束，请重新登录。"));
+		return false;
+	}
+	if (m_bAccountRecoveryRequired)
+	{
+		ShowAuthPage(QStringLiteral("账号认证库处于安全恢复状态，所有登录、游客、注册和主页操作均已锁定。"));
+		return false;
+	}
+	if (m_sCurrentUserName == QStringLiteral("游客"))
+	{
+		return m_sCurrentUserRole == kRoleOperator;
+	}
+	if (m_sCurrentUserName == QStringLiteral("访客")
+		|| m_sCurrentUserName.trimmed().isEmpty())
+	{
+		ShowAuthPage(QStringLiteral("请先登录或明确选择游客登录。"));
+		return false;
+	}
+	QString passwordRecord;
+	QString currentRole;
+	QString fingerprint;
+	bool mustChangePassword = true;
+	if (m_sCurrentUserSecurityFingerprint.isEmpty()
+		|| !ConfigDatabase::TryReadAccountSecurityState(
+			m_sCurrentUserName,
+			&passwordRecord,
+			&currentRole,
+			&mustChangePassword,
+			&fingerprint)
+		|| mustChangePassword
+		|| currentRole != m_sCurrentUserRole
+		|| fingerprint != m_sCurrentUserSecurityFingerprint)
+	{
+		m_sCurrentUserName = QStringLiteral("访客");
+		m_sCurrentUserRole = kRoleOperator;
+		m_sCurrentUserSecurityFingerprint.clear();
+		m_bPendingOpenManagementAfterLogin = false;
+		if (m_bEnforceInteractiveSessionLeaseGate)
+		{
+			RobotOperationLease::SetNewOperationsAllowed(
+				false,
+				QStringLiteral("账号会话已失效；禁止启动新的机器人硬件操作。"));
+		}
+		if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+		{
+			m_bSessionRevocationPendingSafetyStop = true;
+			if (m_pAccountLogText != nullptr)
+			{
+				m_pAccountLogText->appendPlainText(QStringLiteral(
+					"账号会话已失效；当前仅保留正在运行任务的安全停止/释放操作，任务结束后必须重新登录。"));
+			}
+			RefreshAccountUi();
+			return false;
+		}
+		RevokePrivilegedUiAccess();
+		RefreshAccountUi();
+		ShowAuthPage(actionName.trimmed().isEmpty()
+			? QStringLiteral("账号权限、密码或安全状态已变化，请重新登录。")
+			: QStringLiteral("%1 前检测到账号权限、密码或安全状态已变化，请重新登录。")
+				.arg(actionName));
+		return false;
+	}
+	return true;
+}
+
+void QtWidgetsApplication4::RevokePrivilegedUiAccess()
+{
+	if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
 	{
 		return;
 	}
+	if (m_pManagementPage != nullptr)
+	{
+		m_pManagementPage->hide();
+	}
+	CloseGrooveCameraPreviewWindow();
+	if (qApp != nullptr)
+	{
+		for (QWidget* window : qApp->topLevelWidgets())
+		{
+			if (window != nullptr
+				&& window->property("_requires_live_account_session").toBool())
+			{
+				if (QDialog* dialog = qobject_cast<QDialog*>(window))
+				{
+					dialog->reject();
+				}
+				else
+				{
+					window->hide();
+				}
+			}
+		}
+	}
+}
 
-	QString error;
-	SaveAccount("admin", "admin", kRoleAdmin, error);
+void QtWidgetsApplication4::EnsureDefaultAdminAccount()
+{
+	m_bInitialAdministratorSetupRequired = false;
+	bool authenticationInitialized = false;
+	if (!ConfigDatabase::TryReadAuthenticationInitialized(&authenticationInitialized))
+	{
+		m_bAccountRecoveryRequired = true;
+		qCritical() << "Authentication initialization metadata is missing or invalid; automatic bootstrap is refused.";
+		return;
+	}
+	QStringList accountNames;
+	if (!ConfigDatabase::TryListScopedSettingIds(
+			QStringLiteral("account"), AccountProfileModule(), &accountNames))
+	{
+		m_bAccountRecoveryRequired = true;
+		qCritical() << "Account store enumeration failed; automatic bootstrap is refused.";
+		return;
+	}
+	if (authenticationInitialized && accountNames.isEmpty())
+	{
+		m_bAccountRecoveryRequired = true;
+		qCritical() << "Authentication was initialized but the account store is empty; automatic bootstrap is refused.";
+		return;
+	}
+	if (!authenticationInitialized && !accountNames.isEmpty())
+	{
+		m_bAccountRecoveryRequired = true;
+		qCritical() << "The account store is populated before authentication initialization; automatic bootstrap is refused.";
+		return;
+	}
+	if (authenticationInitialized)
+	{
+		m_bAccountRecoveryRequired = AdminAccountCount() == 0;
+		if (m_bAccountRecoveryRequired)
+		{
+			qCritical() << "Account store has users but no administrator; automatic bootstrap is refused.";
+		}
+		return;
+	}
+
+	// A fresh database has no public bootstrap credential.  The first local
+	// user must choose the administrator password through the setup form; the
+	// account and auth_initialized marker still commit atomically below.
+	m_bAccountRecoveryRequired = false;
+	m_bInitialAdministratorSetupRequired = true;
 }
 
 void QtWidgetsApplication4::RefreshAccountUi()
@@ -9881,8 +10405,11 @@ void QtWidgetsApplication4::RefreshAccountUi()
 	}
 	if (m_pPermissionHintLabel != nullptr)
 	{
-		m_pPermissionHintLabel->setText(
-			"权限说明：登录后可进入主页；工程师或管理员可打开管理页面；管理员还可进入账号管理。首次启动默认管理员为 admin / admin。");
+		m_pPermissionHintLabel->setText(m_bAccountRecoveryRequired
+			? QStringLiteral("安全恢复状态：账号认证库缺失、损坏、账号被清空或没有管理员时，程序不会自动重新生成默认管理员；请恢复受控备份或联系维护人员。")
+			: (m_bInitialAdministratorSetupRequired
+				? QStringLiteral("首次启动：请在本机设置初始管理员密码。程序不提供公开的默认管理员密码。")
+				: QStringLiteral("权限说明：登录后可进入主页；工程师或管理员可打开管理页面；管理员还可进入账号管理。")));
 	}
 
 	if (m_pAccountManagementAction != nullptr)
@@ -9943,6 +10470,10 @@ void QtWidgetsApplication4::RefreshDebugLogButtonUi()
 
 void QtWidgetsApplication4::SetDebugLogMode(bool enabled)
 {
+	if (enabled && !ValidateCurrentAccountSession(QStringLiteral("开启调试日志")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
 	{
 		enabled = false;
@@ -10132,7 +10663,8 @@ void QtWidgetsApplication4::SetSharedScanCameraReceiverMode(bool enabled)
 
 void QtWidgetsApplication4::SetAuthRegisterMode(bool registerMode)
 {
-	m_bAuthRegisterMode = registerMode;
+	m_bAuthRegisterMode = !m_bAccountRecoveryRequired
+		&& (m_bInitialAdministratorSetupRequired || registerMode);
 	RefreshAuthModeUi();
 }
 
@@ -10142,19 +10674,31 @@ void QtWidgetsApplication4::RefreshAuthModeUi()
 	{
 		QSignalBlocker blockerLogin(m_pAuthLoginModeBtn);
 		m_pAuthLoginModeBtn->setChecked(!m_bAuthRegisterMode);
+		m_pAuthLoginModeBtn->setEnabled(
+			!m_bAccountRecoveryRequired && !m_bInitialAdministratorSetupRequired);
 	}
 	if (m_pAuthRegisterModeBtn != nullptr)
 	{
 		QSignalBlocker blockerRegister(m_pAuthRegisterModeBtn);
 		m_pAuthRegisterModeBtn->setChecked(m_bAuthRegisterMode);
+		m_pAuthRegisterModeBtn->setEnabled(
+			!m_bAccountRecoveryRequired && !m_bInitialAdministratorSetupRequired);
 	}
 	if (m_pAuthSubmitBtn != nullptr)
 	{
-		m_pAuthSubmitBtn->setText(m_bAuthRegisterMode ? "注册账号" : "登录");
+		m_pAuthSubmitBtn->setText(m_bInitialAdministratorSetupRequired
+			? QStringLiteral("创建初始管理员")
+			: (m_bAuthRegisterMode ? QStringLiteral("注册账号") : QStringLiteral("登录")));
 	}
 	if (m_pAuthHintLabel != nullptr)
 	{
-		if (!m_sAuthHintOverride.trimmed().isEmpty())
+		if (m_bInitialAdministratorSetupRequired)
+		{
+			m_pAuthHintLabel->setText(QStringLiteral(
+				"首次启动没有默认密码。请在本机为 admin 设置至少 8 位的新密码；账号与初始化标志会原子写入。"));
+			m_pAuthHintLabel->show();
+		}
+		else if (!m_sAuthHintOverride.trimmed().isEmpty())
 		{
 			m_pAuthHintLabel->setText(m_sAuthHintOverride);
 			m_pAuthHintLabel->show();
@@ -10185,7 +10729,20 @@ void QtWidgetsApplication4::RefreshAuthModeUi()
 	}
 	if (m_pGuestLoginBtn != nullptr)
 	{
-		m_pGuestLoginBtn->setVisible(!m_bAuthRegisterMode);
+		m_pGuestLoginBtn->setVisible(
+			!m_bAuthRegisterMode
+			&& !m_bAccountRecoveryRequired
+			&& !m_bInitialAdministratorSetupRequired);
+		m_pGuestLoginBtn->setEnabled(
+			!m_bAccountRecoveryRequired && !m_bInitialAdministratorSetupRequired);
+	}
+	if (m_pLoginNameCombo != nullptr)
+	{
+		if (m_bInitialAdministratorSetupRequired)
+		{
+			m_pLoginNameCombo->setCurrentText(QStringLiteral("admin"));
+		}
+		m_pLoginNameCombo->setEnabled(!m_bInitialAdministratorSetupRequired);
 	}
 }
 
@@ -10199,8 +10756,6 @@ void QtWidgetsApplication4::LoadLoginState()
 	const QString userName = AppConfigValue(LoginStateGroup(), "UserName");
 	const bool rememberPassword = AppConfigBoolValue(LoginStateGroup(), "RememberPassword", false);
 	const bool autoLogin = AppConfigBoolValue(LoginStateGroup(), "AutoLogin", false);
-	const QByteArray passwordBytes = QByteArray::fromBase64(AppConfigValue(LoginStateGroup(), "PasswordBase64").toUtf8());
-	const QString password = QString::fromUtf8(passwordBytes);
 
 	RefreshLoginNameHistory();
 	if (!userName.trimmed().isEmpty())
@@ -10216,15 +10771,16 @@ void QtWidgetsApplication4::LoadLoginState()
 	}
 	if (rememberPassword)
 	{
-		const QString savedPasswordBase64 = AppConfigValue(SavedPasswordsGroup(), userName);
-		const QString savedPassword = savedPasswordBase64.isEmpty()
-			? password
-			: QString::fromUtf8(QByteArray::fromBase64(savedPasswordBase64.toUtf8()));
-		m_pLoginPasswordEdit->setText(savedPassword);
+		const QString savedPassword = AppConfigValue(RememberedCredentialsGroup(), userName);
+		if (!savedPassword.isEmpty())
+		{
+			m_pLoginPasswordEdit->setText(savedPassword);
+		}
 	}
-	m_pRememberPasswordCheck->setChecked(rememberPassword);
-	m_pAutoLoginCheck->setChecked(rememberPassword && autoLogin);
-	m_pAutoLoginCheck->setEnabled(rememberPassword);
+	const bool credentialAvailable = rememberPassword && !m_pLoginPasswordEdit->text().isEmpty();
+	m_pRememberPasswordCheck->setChecked(credentialAvailable);
+	m_pAutoLoginCheck->setChecked(credentialAvailable && autoLogin);
+	m_pAutoLoginCheck->setEnabled(credentialAvailable);
 }
 
 void QtWidgetsApplication4::SaveLoginState() const
@@ -10245,22 +10801,45 @@ void QtWidgetsApplication4::SaveLoginState() const
 	{
 		history.removeLast();
 	}
-	WriteAppConfigListValue(LoginStateGroup(), "AccountHistory", history);
-	WriteAppConfigValue(LoginStateGroup(), "UserName", userName);
-	WriteAppConfigValue(LoginStateGroup(), "RememberPassword", m_pRememberPasswordCheck->isChecked());
-	WriteAppConfigValue(LoginStateGroup(), "AutoLogin", m_pRememberPasswordCheck->isChecked() && m_pAutoLoginCheck->isChecked());
-	if (m_pRememberPasswordCheck->isChecked())
+	const bool rememberRequested = m_pRememberPasswordCheck->isChecked();
+	bool credentialStored = false;
+	if (rememberRequested)
 	{
-		const QString passwordBase64 = QString::fromLatin1(m_pLoginPasswordEdit->text().toUtf8().toBase64());
-		WriteAppConfigValue(LoginStateGroup(), "PasswordBase64", passwordBase64);
-		WriteAppConfigValue(SavedPasswordsGroup(), userName, passwordBase64);
+		credentialStored = ConfigDatabase::WriteScopedSetting(
+			QStringLiteral("global"),
+			QString(),
+			RememberedCredentialsGroup(),
+			userName,
+			m_pLoginPasswordEdit->text(),
+			QStringLiteral("string"),
+			true);
 	}
-	else
+	if (!credentialStored)
 	{
-		ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), LoginStateGroup(), "PasswordBase64");
-		ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), LoginStateGroup(), "AutoLogin");
-		ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), SavedPasswordsGroup(), userName);
+		ClearRememberedCredential(userName);
+		m_pRememberPasswordCheck->setChecked(false);
+		m_pAutoLoginCheck->setChecked(false);
+		m_pAutoLoginCheck->setEnabled(false);
 	}
+	QMap<QString, QString> loginState;
+	loginState.insert(QStringLiteral("AccountHistory"), history.join(QLatin1Char('\n')));
+	loginState.insert(QStringLiteral("UserName"), userName);
+	loginState.insert(QStringLiteral("RememberPassword"), credentialStored ? QStringLiteral("1") : QStringLiteral("0"));
+	loginState.insert(
+		QStringLiteral("AutoLogin"),
+		credentialStored && m_pAutoLoginCheck->isChecked()
+			? QStringLiteral("1")
+			: QStringLiteral("0"));
+	if (!ConfigDatabase::WriteScopedSettings(
+			QStringLiteral("global"), QString(), LoginStateGroup(), loginState))
+	{
+		ClearRememberedCredential(userName);
+		m_pRememberPasswordCheck->setChecked(false);
+		m_pAutoLoginCheck->setChecked(false);
+		m_pAutoLoginCheck->setEnabled(false);
+	}
+	ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), LoginStateGroup(), "PasswordBase64");
+	ConfigDatabase::RemoveScopedSetting(QStringLiteral("global"), QString(), SavedPasswordsGroup(), userName);
 }
 
 void QtWidgetsApplication4::RefreshLoginNameHistory()
@@ -10298,26 +10877,13 @@ void QtWidgetsApplication4::FillSavedPasswordForUser(const QString& userName)
 		return;
 	}
 
-	const QString savedBase64 = AppConfigValue(SavedPasswordsGroup(), normalizedUser);
-	if (!savedBase64.isEmpty())
+	const QString savedPassword = AppConfigValue(RememberedCredentialsGroup(), normalizedUser);
+	if (!savedPassword.isEmpty())
 	{
-		m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(savedBase64.toUtf8())));
+		m_pLoginPasswordEdit->setText(savedPassword);
 		m_pRememberPasswordCheck->setChecked(true);
 		m_pAutoLoginCheck->setEnabled(true);
 		return;
-	}
-
-	if (AppConfigValue(LoginStateGroup(), "UserName").trimmed() == normalizedUser
-		&& AppConfigBoolValue(LoginStateGroup(), "RememberPassword", false))
-	{
-		const QString legacyBase64 = AppConfigValue(LoginStateGroup(), "PasswordBase64");
-		if (!legacyBase64.isEmpty())
-		{
-			m_pLoginPasswordEdit->setText(QString::fromUtf8(QByteArray::fromBase64(legacyBase64.toUtf8())));
-			m_pRememberPasswordCheck->setChecked(true);
-			m_pAutoLoginCheck->setEnabled(true);
-			return;
-		}
 	}
 
 	m_pLoginPasswordEdit->clear();
@@ -10328,6 +10894,10 @@ void QtWidgetsApplication4::FillSavedPasswordForUser(const QString& userName)
 
 bool QtWidgetsApplication4::TryAutoLogin()
 {
+	if (m_bAccountRecoveryRequired || m_bInitialAdministratorSetupRequired)
+	{
+		return false;
+	}
 	if (m_pAutoLoginCheck == nullptr || !m_pAutoLoginCheck->isChecked())
 	{
 		return false;
@@ -10347,10 +10917,45 @@ bool QtWidgetsApplication4::TryAutoLogin()
 
 void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 {
+	// 登录页会隐藏主页固定红色 STOP。只要仍有机器人流程在运行，就必须保留
+	// 当前安全停止入口；主动切换账号应先结束流程。真实会话撤销走 pending
+	// safety-stop 分支，不会依赖登录页完成停机。
+	if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+	{
+		m_bPendingOpenManagementAfterLogin = false;
+		if (m_pAccountLogText != nullptr)
+		{
+			m_pAccountLogText->appendPlainText(QStringLiteral(
+				"机器人操作运行期间已拒绝切换到登录页；主页安全停止入口保持可用。"));
+		}
+		QMessageBox* warning = new QMessageBox(
+			QMessageBox::Warning,
+			QStringLiteral("机器人操作正在运行"),
+			QStringLiteral("当前机器人硬件操作尚未结束，不能切换账号。请先使用主页固定红色安全停止按钮或当前流程的停止/取消按钮安全结束操作。"),
+			QMessageBox::Ok,
+			this);
+		warning->setAttribute(Qt::WA_DeleteOnClose);
+		warning->setWindowModality(Qt::NonModal);
+		warning->show();
+		if (ui.statusBar != nullptr)
+		{
+			ui.statusBar->showMessage(
+				QStringLiteral("机器人操作运行期间不能切换账号；主页安全停止入口保持可用。"),
+				12000);
+		}
+		return;
+	}
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(
+			false,
+			QStringLiteral("请先完成有效的本地账号登录，再启动机器人硬件操作。"));
+	}
 	if (m_pMainStack == nullptr || m_pAuthPage == nullptr)
 	{
 		return;
 	}
+	RevokePrivilegedUiAccess();
 
 	setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
 	setMinimumSize(620, 480);
@@ -10361,7 +10966,7 @@ void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 	ResizeWindowForAvailableGeometry(this, QSize(920, 700), 0.88, 0.88);
 
 	m_sAuthHintOverride = promptMessage.trimmed();
-	SetAuthRegisterMode(false);
+	SetAuthRegisterMode(m_bInitialAdministratorSetupRequired);
 	m_pMainStack->setCurrentWidget(m_pAuthPage);
 	if (m_pLoginNameEdit != nullptr)
 	{
@@ -10369,8 +10974,16 @@ void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 	}
 }
 
-bool QtWidgetsApplication4::VerifyAccount(const QString& userName, const QString& password, QString& role, QString& error) const
+bool QtWidgetsApplication4::VerifyAccount(
+	const QString& userName,
+	const QString& password,
+	QString& role,
+	bool& mustChangePassword,
+	QString& passwordRecord,
+	QString& error) const
 {
+	mustChangePassword = false;
+	passwordRecord.clear();
 	const QString normalizedUser = userName.trimmed();
 	if (normalizedUser.isEmpty() || password.isEmpty())
 	{
@@ -10378,26 +10991,56 @@ bool QtWidgetsApplication4::VerifyAccount(const QString& userName, const QString
 		return false;
 	}
 
-	if (!AccountUserNames().contains(normalizedUser))
-	{
-		error = "账号不存在。";
-		return false;
-	}
-
 	QString expectedHash;
-	ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "PasswordHash", &expectedHash);
-	if (!ConfigDatabase::ReadScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "Role", &role))
+	QString securityFingerprint;
+	if (!ConfigDatabase::TryReadAccountSecurityState(
+			normalizedUser,
+			&expectedHash,
+			&role,
+			&mustChangePassword,
+			&securityFingerprint))
 	{
-		role = kRoleOperator;
-	}
-
-	const QString actualHash = QString::fromLatin1(
-		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
-	if (expectedHash.compare(actualHash, Qt::CaseInsensitive) != 0)
-	{
-		error = "密码不正确。";
+		error = "账号安全记录无法读取。";
 		return false;
 	}
+
+	const CredentialSecurity::PasswordVerification verification =
+		CredentialSecurity::VerifyPasswordRecord(normalizedUser, password, expectedHash);
+	if (verification == CredentialSecurity::PasswordVerification::Invalid)
+	{
+		error = "账号或密码不正确。";
+		return false;
+	}
+
+	if (verification == CredentialSecurity::PasswordVerification::ValidNeedsUpgrade
+		&& password.size() < 8)
+	{
+		mustChangePassword = true;
+	}
+
+	if (verification == CredentialSecurity::PasswordVerification::ValidNeedsUpgrade)
+	{
+		QString upgradedRecord;
+		QString currentRole;
+		QString upgradedFingerprint;
+		if (!WriteAccountPasswordRecord(
+				normalizedUser,
+				password,
+				expectedHash,
+				false,
+				mustChangePassword,
+				upgradedRecord,
+				currentRole,
+				upgradedFingerprint,
+				error))
+		{
+			error = QStringLiteral("旧账号密码验证成功，但安全升级失败：%1").arg(error);
+			return false;
+		}
+		expectedHash = upgradedRecord;
+		role = currentRole;
+	}
+	passwordRecord = expectedHash;
 	return true;
 }
 
@@ -10417,9 +11060,9 @@ bool QtWidgetsApplication4::SaveAccount(const QString& userName, const QString& 
 			return false;
 		}
 	}
-	if (password.size() < 3)
+	if (password.size() < 8)
 	{
-		error = "密码至少需要 3 个字符。";
+		error = "密码至少需要 8 个字符。";
 		return false;
 	}
 	if (role != kRoleOperator && role != kRoleEngineer && role != kRoleAdmin)
@@ -10434,38 +11077,195 @@ bool QtWidgetsApplication4::SaveAccount(const QString& userName, const QString& 
 		return false;
 	}
 
-	const QString hash = QString::fromLatin1(
-		QCryptographicHash::hash(QString("%1\n%2").arg(normalizedUser, password).toUtf8(), QCryptographicHash::Sha256).toHex());
-	const bool writeOk =
-		ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "PasswordHash", hash, QStringLiteral("string"), true) &&
-		ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "Role", role) &&
-		ConfigDatabase::WriteScopedSetting(QStringLiteral("account"), AccountUserId(normalizedUser), AccountProfileModule(), "CreatedAt", QDateTime::currentDateTime().toString(Qt::ISODate), QStringLiteral("datetime"));
-	if (!writeOk)
+	return WriteNewAccountRecord(normalizedUser, password, role, false, error);
+}
+
+bool QtWidgetsApplication4::PromptForcedPasswordChange(
+	const QString& userName,
+	const QString& temporaryPassword,
+	const QString& expectedPasswordRecord,
+	QString& replacementPassword,
+	QString& currentRole,
+	QString& securityFingerprint)
+{
+	replacementPassword.clear();
+	currentRole.clear();
+	securityFingerprint.clear();
+	QDialog dialog(this);
+	dialog.setWindowTitle(QStringLiteral("首次登录必须修改密码"));
+	dialog.setWindowModality(Qt::ApplicationModal);
+	dialog.setWindowFlag(Qt::WindowContextHelpButtonHint, false);
+	ApplyUnifiedWindowChrome(&dialog);
+	QVBoxLayout* layout = new QVBoxLayout(&dialog);
+	QLabel* hint = new QLabel(
+		QStringLiteral("账号 %1 当前使用临时密码。修改成功前不会建立登录会话，也不能进入主页或管理功能。")
+			.arg(userName),
+		&dialog);
+	hint->setWordWrap(true);
+	layout->addWidget(hint);
+	QFormLayout* form = new QFormLayout();
+	QLineEdit* passwordEdit = new QLineEdit(&dialog);
+	QLineEdit* confirmEdit = new QLineEdit(&dialog);
+	passwordEdit->setEchoMode(QLineEdit::Password);
+	confirmEdit->setEchoMode(QLineEdit::Password);
+	passwordEdit->setPlaceholderText(QStringLiteral("至少 8 个字符"));
+	form->addRow(QStringLiteral("新密码"), passwordEdit);
+	form->addRow(QStringLiteral("确认新密码"), confirmEdit);
+	layout->addLayout(form);
+	QDialogButtonBox* buttons = new QDialogButtonBox(
+		QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &dialog);
+	buttons->button(QDialogButtonBox::Ok)->setText(QStringLiteral("修改并登录"));
+	buttons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消登录"));
+	connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+	connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+	layout->addWidget(buttons);
+
+	while (dialog.exec() == QDialog::Accepted)
 	{
-		error = "写入账号配置库失败。";
-		return false;
+		const QString newPassword = passwordEdit->text();
+		if (newPassword.size() < 8)
+		{
+			QMessageBox::warning(&dialog, QStringLiteral("修改密码"), QStringLiteral("新密码至少需要 8 个字符。"));
+			continue;
+		}
+		if (newPassword == temporaryPassword)
+		{
+			QMessageBox::warning(&dialog, QStringLiteral("修改密码"), QStringLiteral("新密码不能与临时密码相同。"));
+			continue;
+		}
+		if (confirmEdit->text() != newPassword)
+		{
+			QMessageBox::warning(&dialog, QStringLiteral("修改密码"), QStringLiteral("两次输入的密码不一致。"));
+			continue;
+		}
+		QString error;
+		QString newPasswordRecord;
+		if (!WriteAccountPasswordRecord(
+				userName,
+				newPassword,
+				expectedPasswordRecord,
+				true,
+				false,
+				newPasswordRecord,
+				currentRole,
+				securityFingerprint,
+				error))
+		{
+			QMessageBox::critical(&dialog, QStringLiteral("修改密码"), error);
+			continue;
+		}
+		ClearRememberedCredential(userName);
+		replacementPassword = newPassword;
+		return true;
 	}
-	return true;
+	return false;
 }
 
 void QtWidgetsApplication4::LoginCurrentAccount()
 {
+	if (m_bAccountRecoveryRequired)
+	{
+		QMessageBox::critical(this, "账号登录", "账号认证库处于安全恢复状态，已拒绝手工登录。");
+		return;
+	}
+	if (m_bInitialAdministratorSetupRequired)
+	{
+		QMessageBox::information(
+			this, "初始化管理员", "请先设置初始管理员密码，当前没有可用的默认登录凭据。");
+		SetAuthRegisterMode(true);
+		return;
+	}
 	if (m_pLoginNameEdit == nullptr || m_pLoginPasswordEdit == nullptr)
 	{
 		return;
 	}
 
 	QString role;
+	bool mustChangePassword = false;
 	QString error;
+	QString verifiedPasswordRecord;
 	const QString userName = m_pLoginNameEdit->text().trimmed();
-	if (!VerifyAccount(userName, m_pLoginPasswordEdit->text(), role, error))
+	const QString submittedPassword = m_pLoginPasswordEdit->text();
+	if (!VerifyAccount(
+			userName,
+			submittedPassword,
+			role,
+			mustChangePassword,
+			verifiedPasswordRecord,
+			error))
 	{
 		QMessageBox::warning(this, "账号登录", error);
 		return;
 	}
+	if (mustChangePassword)
+	{
+		QString replacementPassword;
+		QString changedRole;
+		QString changedFingerprint;
+		if (!PromptForcedPasswordChange(
+				userName,
+				submittedPassword,
+				verifiedPasswordRecord,
+				replacementPassword,
+				changedRole,
+				changedFingerprint))
+		{
+			m_sCurrentUserName = QStringLiteral("访客");
+			m_sCurrentUserRole = kRoleOperator;
+			m_sCurrentUserSecurityFingerprint.clear();
+			m_pLoginPasswordEdit->clear();
+			if (m_pRememberPasswordCheck != nullptr)
+			{
+				m_pRememberPasswordCheck->setChecked(false);
+			}
+			if (m_pAutoLoginCheck != nullptr)
+			{
+				m_pAutoLoginCheck->setChecked(false);
+				m_pAutoLoginCheck->setEnabled(false);
+			}
+			WriteAppConfigValue(LoginStateGroup(), QStringLiteral("RememberPassword"), false);
+			WriteAppConfigValue(LoginStateGroup(), QStringLiteral("AutoLogin"), false);
+			RefreshAccountUi();
+			ShowAuthPage(QStringLiteral("临时密码尚未修改，登录已取消。"));
+			return;
+		}
+		m_pLoginPasswordEdit->setText(replacementPassword);
+		role = changedRole;
+		m_sCurrentUserSecurityFingerprint = changedFingerprint;
+	}
+
+	QString currentPasswordRecord;
+	QString currentRole;
+	QString currentFingerprint;
+	bool currentMustChangePassword = true;
+	if (!ConfigDatabase::TryReadAccountSecurityState(
+			userName,
+			&currentPasswordRecord,
+			&currentRole,
+			&currentMustChangePassword,
+			&currentFingerprint)
+		|| currentMustChangePassword
+		|| (!mustChangePassword && currentPasswordRecord != verifiedPasswordRecord)
+		|| (mustChangePassword && currentFingerprint != m_sCurrentUserSecurityFingerprint))
+	{
+		m_sCurrentUserSecurityFingerprint.clear();
+		QMessageBox::warning(
+			this,
+			"账号登录",
+			"账号在登录过程中已被删除、重置或修改权限，本次登录已取消，请重新输入密码。");
+		ShowAuthPage(QStringLiteral("账号安全状态已变化，请重新登录。"));
+		return;
+	}
+	role = currentRole;
+	m_sCurrentUserSecurityFingerprint = currentFingerprint;
 
 	m_sCurrentUserName = userName;
 	m_sCurrentUserRole = role;
+	m_bSessionRevocationPendingSafetyStop = false;
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(true);
+	}
 	SaveLoginState();
 	RefreshLoginNameHistory();
 	if (m_pRememberPasswordCheck == nullptr || !m_pRememberPasswordCheck->isChecked())
@@ -10491,9 +11291,25 @@ void QtWidgetsApplication4::LoginCurrentAccount()
 
 void QtWidgetsApplication4::LoginAsGuest()
 {
+	if (m_bAccountRecoveryRequired)
+	{
+		QMessageBox::critical(this, "游客登录", "账号认证库处于安全恢复状态，已拒绝游客登录。");
+		return;
+	}
+	if (m_bInitialAdministratorSetupRequired)
+	{
+		QMessageBox::critical(this, "游客登录", "必须先在本机完成初始管理员设置。游客登录已拒绝。");
+		return;
+	}
 	m_sCurrentUserName = "游客";
 	m_sCurrentUserRole = kRoleOperator;
+	m_bSessionRevocationPendingSafetyStop = false;
+	m_sCurrentUserSecurityFingerprint.clear();
 	m_bPendingOpenManagementAfterLogin = false;
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(true);
+	}
 	if (m_pAccountLogText != nullptr)
 	{
 		m_pAccountLogText->appendPlainText(QString("[%1] 游客登录，权限：%2")
@@ -10506,9 +11322,26 @@ void QtWidgetsApplication4::LoginAsGuest()
 
 void QtWidgetsApplication4::LogoutCurrentAccount()
 {
+	if (RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow())
+	{
+		QMessageBox::warning(
+			this,
+			QStringLiteral("退出登录"),
+			QStringLiteral("机器人硬件操作仍在运行。请先通过当前流程的安全停止/取消按钮结束操作，再退出登录。"));
+		return;
+	}
 	m_sCurrentUserName = "访客";
 	m_sCurrentUserRole = kRoleOperator;
+	m_bSessionRevocationPendingSafetyStop = false;
+	m_sCurrentUserSecurityFingerprint.clear();
 	m_bPendingOpenManagementAfterLogin = false;
+	if (m_bEnforceInteractiveSessionLeaseGate)
+	{
+		RobotOperationLease::SetNewOperationsAllowed(
+			false,
+			QStringLiteral("已退出登录；禁止启动新的机器人硬件操作。"));
+	}
+	RevokePrivilegedUiAccess();
 	if (m_pAccountLogText != nullptr)
 	{
 		m_pAccountLogText->appendPlainText(QString("[%1] 已退出登录，当前为访客操作员权限。")
@@ -10520,13 +11353,21 @@ void QtWidgetsApplication4::LogoutCurrentAccount()
 
 void QtWidgetsApplication4::RegisterAccount()
 {
+	if (m_bAccountRecoveryRequired)
+	{
+		QMessageBox::critical(this, "注册账号", "账号认证库处于安全恢复状态，已拒绝注册新账号。");
+		return;
+	}
 	if (m_pLoginNameEdit == nullptr || m_pLoginPasswordEdit == nullptr || m_pAuthConfirmPasswordEdit == nullptr)
 	{
 		return;
 	}
 
-	const QString role = kRoleOperator;
-	const QString normalizedUser = m_pLoginNameEdit->text().trimmed();
+	const bool initialAdministratorSetup = m_bInitialAdministratorSetupRequired;
+	const QString role = initialAdministratorSetup ? kRoleAdmin : kRoleOperator;
+	const QString normalizedUser = initialAdministratorSetup
+		? QStringLiteral("admin")
+		: m_pLoginNameEdit->text().trimmed();
 	if (normalizedUser.size() < 4)
 	{
 		QMessageBox::warning(this, "注册账号", "账号至少需要 4 个字符。");
@@ -10544,21 +11385,46 @@ void QtWidgetsApplication4::RegisterAccount()
 		return;
 	}
 	QString error;
-	if (!SaveAccount(m_pLoginNameEdit->text(), password, role, error))
+	const bool saved = initialAdministratorSetup
+		? WriteNewAccountRecord(
+			normalizedUser, password, role, false, error, true)
+		: SaveAccount(normalizedUser, password, role, error);
+	if (!saved)
 	{
-		QMessageBox::warning(this, "注册账号", error);
+		if (initialAdministratorSetup)
+		{
+			EnsureDefaultAdminAccount();
+			RefreshAccountUi();
+			ShowAuthPage(m_bInitialAdministratorSetupRequired
+				? QStringLiteral("初始管理员写入失败，请检查配置库后重试。")
+				: QStringLiteral("初始管理员已由另一进程完成设置，请使用现有账号登录。"));
+		}
+		QMessageBox::warning(
+			this,
+			initialAdministratorSetup ? QStringLiteral("初始化管理员") : QStringLiteral("注册账号"),
+			error);
 		return;
 	}
 
 	if (m_pAccountLogText != nullptr)
 	{
-		m_pAccountLogText->appendPlainText(QString("[%1] 已注册账号 %2，权限：%3")
+		m_pAccountLogText->appendPlainText(QString("[%1] %2账号 %3，权限：%4")
 			.arg(QDateTime::currentDateTime().toString("HH:mm:ss"),
+				initialAdministratorSetup ? QStringLiteral("已初始化管理员") : QStringLiteral("已注册"),
 				normalizedUser,
 				RoleDisplayName(role)));
 	}
-	m_pLoginPasswordEdit->clear();
 	m_pAuthConfirmPasswordEdit->clear();
+	if (initialAdministratorSetup)
+	{
+		m_bInitialAdministratorSetupRequired = false;
+		m_pLoginNameEdit->setText(normalizedUser);
+		RefreshAccountUi();
+		SetAuthRegisterMode(false);
+		LoginCurrentAccount();
+		return;
+	}
+	m_pLoginPasswordEdit->clear();
 	SetAuthRegisterMode(false);
 	if (m_pLoginNameEdit != nullptr)
 	{
@@ -10581,6 +11447,10 @@ void QtWidgetsApplication4::RegisterAccount()
 void QtWidgetsApplication4::OpenAccountManagementDialog()
 {
 	PageOpenTrace trace("账号管理");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开账号管理")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
 	{
 		QMessageBox::information(this, "账号管理", "账号管理仅管理员可用。");
@@ -10590,18 +11460,19 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 	if (m_pManagementStack == nullptr)
 	{
 		CloseGrooveCameraPreviewWindow();
-		AccountManagementDialog dialog(this);
+		AccountManagementDialog dialog(m_sCurrentUserName, this);
 		dialog.exec();
 		return;
 	}
 
 	if (m_pAccountManagementPage != nullptr)
 	{
-		ShowManagementEmbeddedPage(m_pAccountManagementPage);
-		return;
+		m_pManagementStack->removeWidget(m_pAccountManagementPage);
+		delete m_pAccountManagementPage;
+		m_pAccountManagementPage = nullptr;
 	}
 
-	m_pAccountManagementPage = new AccountManagementDialog(m_pManagementStack);
+	m_pAccountManagementPage = new AccountManagementDialog(m_sCurrentUserName, m_pManagementStack);
 	PrepareEmbeddedPage(m_pAccountManagementPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pAccountManagementPage);
 }
@@ -10609,6 +11480,10 @@ void QtWidgetsApplication4::OpenAccountManagementDialog()
 void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 {
 	PageOpenTrace trace("控制单元管理");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开控制单元管理")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "控制单元管理", "控制单元管理需要工程师或管理员权限。");
@@ -10764,17 +11639,30 @@ void QtWidgetsApplication4::OpenControlUnitManagementDialog()
 void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 {
 	PageOpenTrace trace("FTP Job 文件");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开 FTP Job 文件管理")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "FTP Job 文件", "FTP Job 文件管理需要工程师或管理员权限。");
 		return;
 	}
+	const auto liveSessionGuard = [this]()
+	{
+		return ValidateCurrentAccountSession(QStringLiteral("提交 FTP Job 文件操作"))
+			&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer);
+	};
 
 	const int currentUnitIndex = CurrentRobotUnitIndex();
 	if (m_pManagementStack == nullptr)
 	{
 		CloseGrooveCameraPreviewWindow();
-		FtpJobManagementDialog dialog(m_pContralUnit, currentUnitIndex, this);
+		FtpJobManagementDialog dialog(
+			m_pContralUnit,
+			currentUnitIndex,
+			liveSessionGuard,
+			this);
 		dialog.exec();
 		return;
 	}
@@ -10800,7 +11688,11 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 		return;
 	}
 
-	m_pFtpJobManagementPage = new FtpJobManagementDialog(m_pContralUnit, currentUnitIndex, m_pManagementStack);
+	m_pFtpJobManagementPage = new FtpJobManagementDialog(
+		m_pContralUnit,
+		currentUnitIndex,
+		liveSessionGuard,
+		m_pManagementStack);
 	m_nFtpJobManagementPageUnitIndex = currentUnitIndex;
 	PrepareEmbeddedPage(m_pFtpJobManagementPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pFtpJobManagementPage);
@@ -10809,6 +11701,10 @@ void QtWidgetsApplication4::OpenFtpJobManagementDialog()
 void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 {
 	PageOpenTrace trace("精测点云处理");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开精测点云处理")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "精测点云处理", "精测点云处理需要工程师或管理员权限。");
@@ -10827,7 +11723,17 @@ void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 		return;
 	}
 
-	m_pPrecisePointCloudProcessingPage = new LaserWeldFilterDialog(m_pManagementStack);
+	const auto liveSessionGuard = [this]()
+	{
+		// 角色先行短路，避免撤权关闭页面触发 finished->SaveSettings 时
+		// 再次进入会话撤销 UI；原生选择框返回时角色仍旧则继续同步查库。
+		return RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer)
+			&& ValidateCurrentAccountSession(QStringLiteral("保存精测点云与外部库设置"))
+			&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer);
+	};
+	m_pPrecisePointCloudProcessingPage = new LaserWeldFilterDialog(
+		liveSessionGuard,
+		m_pManagementStack);
 	PrepareEmbeddedPage(m_pPrecisePointCloudProcessingPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pPrecisePointCloudProcessingPage);
 }
@@ -10835,6 +11741,10 @@ void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 void QtWidgetsApplication4::OpenModelAlignmentPage()
 {
 	PageOpenTrace trace("模型配准");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开模型配准")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "模型配准", "模型配准 / 点云去噪需要工程师或管理员权限。");
@@ -10861,6 +11771,10 @@ void QtWidgetsApplication4::OpenModelAlignmentPage()
 void QtWidgetsApplication4::OpenWorkpieceMeshPage()
 {
 	PageOpenTrace trace("工件模型");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开工件模型")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "工件模型", "工件模型查看需要工程师或管理员权限。");
@@ -10887,6 +11801,10 @@ void QtWidgetsApplication4::OpenWorkpieceMeshPage()
 void QtWidgetsApplication4::OpenVirtualWeldTestPage()
 {
 	PageOpenTrace trace("虚拟焊道测试");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开虚拟焊道测试")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
 		QMessageBox::information(this, "虚拟焊道测试", "虚拟焊道测试需要工程师或管理员权限。");
@@ -10935,6 +11853,10 @@ void QtWidgetsApplication4::OpenVirtualWeldTestPage()
 void QtWidgetsApplication4::OpenConfigDatabaseViewerDialog()
 {
 	PageOpenTrace trace("配置数据库查看");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开配置数据库查看")))
+	{
+		return;
+	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleAdmin))
 	{
 		QMessageBox::information(this, "配置数据库查看", "配置数据库查看仅管理员可用。");
@@ -11121,6 +12043,12 @@ void QtWidgetsApplication4::ShowManagementEmbeddedPage(QWidget* page)
 	{
 		return;
 	}
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开管理功能页"))
+		|| RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		RevokePrivilegedUiAccess();
+		return;
+	}
 	if (m_pManagementStack->currentWidget() != page)
 	{
 		CloseGrooveCameraPreviewWindow();
@@ -11200,6 +12128,7 @@ void QtWidgetsApplication4::OpenAboutDialog()
 		[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 		true,
 		false,
+		{},
 		this);
 	dlg->setObjectName(QStringLiteral("OnlineServicesDialogAbout"));
 	dlg->setAttribute(Qt::WA_DeleteOnClose);
@@ -13194,7 +14123,13 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 	const int total = settings.infinite ? 0 : settings.repeatCount;
 	int okCount = 0;
 	int failCount = 0;
-	auto stopped = [stopFlag]() { return stopFlag != nullptr && stopFlag->load(); };
+	// ProcessLoop 持有一个跨多轮的长租约。账号撤销后全局 gate 会关闭；
+	// 将它并入停止信号，允许当前动作执行安全收枪，但禁止焊接段和下一轮。
+	auto stopped = [stopFlag]()
+		{
+			return (stopFlag != nullptr && stopFlag->load())
+				|| !RobotOperationLease::NewOperationsAllowed();
+		};
 	auto emitLog = [&log](const QString& t) { if (log) { log(t); } };
 	auto emitProgress = [&](int iter, const QString& step, bool finished)
 		{ if (progress) { progress(iter, total, okCount, failCount, step, finished); } };
@@ -13243,7 +14178,13 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 	MeasureThenWeldService service;
 	for (int i = 1; settings.infinite || i <= settings.repeatCount; ++i)
 	{
-		if (stopped()) { emitLog(QStringLiteral("已手动停止。")); break; }
+		if (stopped())
+		{
+			emitLog(RobotOperationLease::NewOperationsAllowed()
+				? QStringLiteral("已手动停止。")
+				: QStringLiteral("账号会话已失效：当前动作安全结束后，不再开始下一轮机器人操作。"));
+			break;
+		}
 
 		T_PRECISE_MEASURE_PARAM param;
 		QString error;
@@ -14765,6 +15706,11 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 	QPointer<MeasureThenWeldDialog> existingPage = m_measureThenWeldPages.value(currentUnitIndex);
 	if (existingPage != nullptr)
 	{
+		existingPage->setProperty("_requires_live_account_session", true);
+		existingPage->SetLiveSessionGuard([this]()
+			{
+				return ValidateCurrentAccountSession(QStringLiteral("继续先测后焊流程"));
+			});
 		existingPage->ReloadSelectors();
 		existingPage->show();
 		existingPage->raise();
@@ -14782,6 +15728,11 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 		cameraCacheForUnit,
 		this);
 	page->setWindowModality(Qt::NonModal);
+	page->setProperty("_requires_live_account_session", true);
+	page->SetLiveSessionGuard([this]()
+		{
+			return ValidateCurrentAccountSession(QStringLiteral("继续先测后焊流程"));
+		});
 	// 提前展示同机占用者；真正的无竞态互锁仍由流程入口 TryAcquire 完成。
 	page->SetPreStartGuard([this, currentUnitIndex](QString& reason) -> bool
 		{
@@ -14861,6 +15812,7 @@ void QtWidgetsApplication4::OpenPositionTeachDialog()
 		true,
 		[this]() { StartGrooveCameraPreview(); });
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	dialog->setProperty("_requires_live_account_session", true);
 	ApplyDebugLogVisibility(dialog);
 	dialog->show();
 	dialog->raise();
@@ -14893,6 +15845,7 @@ void QtWidgetsApplication4::OpenResultArchiveDialog()
 	// 已打开则前置，避免多个实例（弹窗带后台压缩线程）。
 	if (ResultArchiveDialog* existing = findChild<ResultArchiveDialog*>())
 	{
+		existing->setProperty("_requires_live_account_session", true);
 		existing->show();
 		existing->raise();
 		existing->activateWindow();
@@ -14902,6 +15855,7 @@ void QtWidgetsApplication4::OpenResultArchiveDialog()
 	QDir().mkpath(resultRoot);
 	auto* dlg = new ResultArchiveDialog(resultRoot, this);
 	dlg->setAttribute(Qt::WA_DeleteOnClose);
+	dlg->setProperty("_requires_live_account_session", true);
 	dlg->show();
 }
 
@@ -14932,6 +15886,11 @@ void QtWidgetsApplication4::OpenOnlineServicesDialog()
 			[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 			false,
 			remoteAllowed,
+			[this]()
+			{
+				return ValidateCurrentAccountSession(QStringLiteral("执行在线服务管理员操作"))
+					&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
+			},
 			this);
 		dialog.exec();
 		return;
@@ -14956,6 +15915,11 @@ void QtWidgetsApplication4::OpenOnlineServicesDialog()
 		[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 		false,
 		remoteAllowed,
+		[this]()
+		{
+			return ValidateCurrentAccountSession(QStringLiteral("执行在线服务管理员操作"))
+				&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
+		},
 		m_pManagementStack);
 	m_bOnlineServicesPageRemoteAllowed = remoteAllowed;
 	PrepareEmbeddedPage(m_pOnlineServicesPage, m_pManagementStack);
@@ -16045,6 +17009,7 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 	QPointer<RobotJogDialog> existingPage = m_robotJogPages.value(currentUnitIndex);
 	if (existingPage != nullptr)
 	{
+		existingPage->setProperty("_requires_live_account_session", true);
 		existingPage->show();
 		existingPage->raise();
 		existingPage->activateWindow();
@@ -16055,6 +17020,7 @@ void QtWidgetsApplication4::OpenRobotJogDialog()
 
 	RobotJogDialog* page = new RobotJogDialog(pRobotDriver, this);
 	page->setWindowModality(Qt::NonModal);
+	page->setProperty("_requires_live_account_session", true);
 	m_robotJogPages.insert(currentUnitIndex, page);
 	m_pRobotJogPage = page;
 	m_nRobotJogPageUnitIndex = currentUnitIndex;

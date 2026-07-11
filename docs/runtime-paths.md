@@ -46,7 +46,11 @@ tools\ConfigMigrate_Run.cmd `
 
 自动化调用追加 `--no-pause`。脚本会打印最终 source、data root 和数据库绝对路径，目标固定为 `<DataRoot>\Data\ConfigStore.db`。
 
-如果新版程序已经先创建了 v4 数据库，迁移器会明确失败且保持数据库原样，禁止把“只补默认值”假报成旧配置已导入。确认要用旧 `Data` 替换目标库时显式追加 `--overwrite`；工具会先生成带时间戳的 `.bak_overwrite_*` 备份，再重建目标库。
+如果新版程序已经先创建了 v5 数据库，迁移器会明确失败且保持数据库原样，禁止把“只补默认值”假报成旧配置已导入。唯一例外是同一 `Data` 内已存在由本次迁移事务写入的 `pending` 清理证明：带 `--scrub-legacy-credentials` 的默认批处理会按文件清理前/后 SHA256 幂等续清，且不改数据库；清理已标记 `complete` 后新出现的凭据文件会拒绝自动删除。
+
+应用只允许在目录中没有旧 INI/TXT 时把纯数据库 v4 就地升级到 v5。非当前 schema 的数据库旁只要还有旧磁盘配置，启动即失败并要求先运行 `ConfigMigrate`，避免 OTA 首启绕过旧数据导入。已有 v4 数据库与旧 INI/TXT 并存时，迁移器同样不会猜测两份数据的优先级；审查 DPAPI 回滚件后，显式追加 `--overwrite` 才会从完整旧 `Data` 重建目标库。
+
+新建和 `--overwrite` 都先在目标目录构建临时数据库，所有解析、DPAPI 和语义迁移成功后才原子替换最终文件；失败时原数据库保持不变且不保留 staging。覆盖/升级前创建的回滚件是经回读和 SHA256 验证的 `.dpapi.bak`，不是明文 SQLite；备份内容由内存 SQLite 快照直接序列化后保护，可用迁移器的 `--restore-dpapi-backup` 恢复。默认批处理仅在源与目标都是同一个 `Data` 时清除已写入证明清单的旧 INI 凭据；跨目录源保持逐字节不变。包含凭据的 `.ini.bak`、此前遗留的明文数据库备份、WAL、journal 或恢复临时件都会输出非零发布硬门禁，必须人工处置并轮换凭据。
 
 发版打包前会由当前 `migrate_config_to_sqlite.py` 重建 `ConfigMigrate.exe`，并比较可执行文件内嵌源码 SHA256；工具缺失或源码不一致时打包和安装器编译都会硬失败。
 

@@ -44,6 +44,31 @@ int main()
     const auto* firstDriver = &firstDriverStorage;
     const auto* secondDriver = &secondDriverStorage;
 
+    RobotOperationLease::SetNewOperationsAllowed(
+        false,
+        QStringLiteral("test-session-gate"));
+    Check(!RobotOperationLease::NewOperationsAllowed(),
+        "disabled new-operation gate reported itself enabled");
+    QString gatedFirstReason;
+    QString gatedSecondReason;
+    Check(!RobotOperationLease::TryAcquire(
+        firstDriver, QStringLiteral("gated-first"), &gatedFirstReason),
+        "disabled session gate admitted the first driver");
+    Check(!RobotOperationLease::TryAcquire(
+        secondDriver, QStringLiteral("gated-second"), &gatedSecondReason),
+        "disabled session gate admitted a different driver");
+    Check(gatedFirstReason == QStringLiteral("test-session-gate")
+            && gatedSecondReason == QStringLiteral("test-session-gate"),
+        "disabled session gate did not return its fail-closed reason");
+    RobotOperationLease::SetNewOperationsAllowed(true);
+    Check(RobotOperationLease::NewOperationsAllowed(),
+        "restored new-operation gate remained disabled");
+    auto restoredGateLease = RobotOperationLease::TryAcquire(
+        firstDriver, QStringLiteral("restored-session-gate"));
+    Check(static_cast<bool>(restoredGateLease),
+        "restored session gate did not admit a new operation");
+    restoredGateLease.reset();
+
     constexpr int contenderCount = 32;
     std::atomic<int> ready{ 0 };
     std::atomic<int> attempted{ 0 };
@@ -324,6 +349,6 @@ int main()
         "null driver unexpectedly acquired a lease");
     Check(!nullReason.isEmpty(), "null-driver rejection did not provide a reason");
 
-    std::cout << "PASS: pointer and normalized-endpoint exclusion, endpoint fallback, parallelism, release, and summary\n";
+    std::cout << "PASS: session gate, pointer and normalized-endpoint exclusion, endpoint fallback, parallelism, release, and summary\n";
     return 0;
 }

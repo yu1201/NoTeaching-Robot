@@ -31,6 +31,7 @@
 #include <QVBoxLayout>
 
 #include <cmath>
+#include <utility>
 
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -455,8 +456,11 @@ void SetPathEditText(QLineEdit* edit, const QString& text)
 }
 }
 
-LaserWeldFilterDialog::LaserWeldFilterDialog(QWidget* parent)
+LaserWeldFilterDialog::LaserWeldFilterDialog(
+    std::function<bool()> liveSessionGuard,
+    QWidget* parent)
     : QDialog(parent)
+    , m_liveSessionGuard(std::move(liveSessionGuard))
 {
     setWindowTitle("精测点云处理");
     ApplyUnifiedWindowChrome(this);
@@ -1434,6 +1438,20 @@ void LaserWeldFilterDialog::LoadSettings()
 
 bool LaserWeldFilterDialog::SaveSettings(QString* error) const
 {
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    // finished/自动保存也会进入这里；撤权关闭页面时必须 fail closed，不能把
+    // 未提交的外部 DLL/INI 路径作为副作用写回配置库。
+    if (!m_liveSessionGuard || !m_liveSessionGuard())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("账号会话或工程师权限已失效，设置未保存。");
+        }
+        return false;
+    }
     PointCloudProcessingConfig::Settings processingSettings = PointCloudProcessingConfig::Load();
     processingSettings.mode = CurrentProcessingMode();
     processingSettings.featurePointStrategy = CurrentFeaturePointStrategy();
@@ -1633,6 +1651,13 @@ void LaserWeldFilterDialog::BrowseExternalLibraryDir()
     {
         return;
     }
+    // Windows 原生目录框可能阻塞 Qt 会话定时器；返回后、修改任何可持久化
+    // 外部 DLL 路径之前同步重验工程师会话。
+    if (!m_liveSessionGuard || !m_liveSessionGuard())
+    {
+        AppendLog(QStringLiteral("账号会话或工程师权限已失效，已丢弃所选外部点云库目录。"));
+        return;
+    }
 
     SetPathEditText(m_pExternalLibraryDirEdit, QDir::toNativeSeparators(path));
     const QString defaultConfig = QDir(path).filePath("config/CorrugatedSheetPointCloudEctration.ini");
@@ -1653,6 +1678,11 @@ void LaserWeldFilterDialog::BrowseExternalConfigFile()
         "配置文件 (*.ini);;所有文件 (*.*)");
     if (path.isEmpty())
     {
+        return;
+    }
+    if (!m_liveSessionGuard || !m_liveSessionGuard())
+    {
+        AppendLog(QStringLiteral("账号会话或工程师权限已失效，已丢弃所选外部点云库配置。"));
         return;
     }
 

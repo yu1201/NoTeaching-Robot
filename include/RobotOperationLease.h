@@ -38,6 +38,12 @@ public:
         const RobotDriverAdaptor* driver,
         const QString& requestedOwner,
         QString* reason = nullptr);
+    // 交互式账号会话失效时，统一禁止所有模块启动新的机器人硬件操作。
+    // 已持有的租约不受影响，以便原流程仍可执行安全停止和清理。
+    static void SetNewOperationsAllowed(
+        bool allowed,
+        const QString& blockedReason = QString());
+    static bool NewOperationsAllowed();
     static QString CurrentOwner(const RobotDriverAdaptor* driver);
     // 可持久化的物理 TCP 端点；端点无效时返回空，绝不返回只在本进程有效的 pointer 身份。
     static QString PersistentEndpointIdentity(const RobotDriverAdaptor* driver);

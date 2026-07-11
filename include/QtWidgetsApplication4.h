@@ -128,6 +128,8 @@ private:
     QString RoleDisplayName(const QString& role) const;
     int RoleLevel(const QString& role) const;
     bool RequirePermission(const QString& minimumRole, const QString& actionName);
+    bool ValidateCurrentAccountSession(const QString& actionName = QString());
+    void RevokePrivilegedUiAccess();
     void EnsureDefaultAdminAccount();
     void RefreshAccountUi();
     void LoadLoginState();
@@ -136,8 +138,21 @@ private:
     void FillSavedPasswordForUser(const QString& userName);
     bool TryAutoLogin();
     void ShowAuthPage(const QString& promptMessage = QString());
-    bool VerifyAccount(const QString& userName, const QString& password, QString& role, QString& error) const;
+    bool VerifyAccount(
+        const QString& userName,
+        const QString& password,
+        QString& role,
+        bool& mustChangePassword,
+        QString& passwordRecord,
+        QString& error) const;
     bool SaveAccount(const QString& userName, const QString& password, const QString& role, QString& error) const;
+    bool PromptForcedPasswordChange(
+        const QString& userName,
+        const QString& temporaryPassword,
+        const QString& expectedPasswordRecord,
+        QString& replacementPassword,
+        QString& currentRole,
+        QString& securityFingerprint);
     void SetAuthRegisterMode(bool registerMode);
     void RefreshAuthModeUi();
     void LoginCurrentAccount();
@@ -310,9 +325,15 @@ private:
     bool m_bFanucMoveZeroRunning;
     QString m_sCurrentUserName;
     QString m_sCurrentUserRole;
+    QString m_sCurrentUserSecurityFingerprint;
     QString m_sMeasureThenWeldStatus;
     QString m_sAuthHintOverride;
     bool m_bAuthRegisterMode;
+    bool m_bAccountRecoveryRequired = false;
+    bool m_bInitialAdministratorSetupRequired = false;
+    bool m_bAccountSessionEventValidation = false;
+    bool m_bSessionRevocationPendingSafetyStop = false;
+    bool m_bEnforceInteractiveSessionLeaseGate = false;
     bool m_bOpenEmbeddedInManagement;
     bool m_bPendingOpenManagementAfterLogin = false;
     bool m_bDebugLogMode;

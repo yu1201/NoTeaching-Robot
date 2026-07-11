@@ -58,7 +58,7 @@ echo Resolved data root: %DATA_ROOT%
 echo Resolved source Data: %SOURCE_DIR%
 echo Resolved target database: %DB_PATH%
 echo.
-"%TOOL_DIR%ConfigMigrate.exe" --source "%SOURCE_DIR%" --db "%DB_PATH%" --encrypt %OVERWRITE_ARG%
+"%TOOL_DIR%ConfigMigrate.exe" --source "%SOURCE_DIR%" --db "%DB_PATH%" --encrypt --scrub-legacy-credentials %OVERWRITE_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 if not "%EXIT_CODE%"=="0" (

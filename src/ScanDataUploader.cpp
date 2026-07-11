@@ -228,6 +228,15 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 			}, Qt::QueuedConnection);
 		return;
 	}
+	if (password.empty())
+	{
+		QMetaObject::invokeMethod(this, [this]()
+			{
+				m_busy.store(false);
+				emit uploadStatus(QStringLiteral("上传未配置：请在管理页「在线服务」填写 FTP 密码。"));
+			}, Qt::QueuedConnection);
+		return;
+	}
 	if (!AppPaths::IsSafePathComponent(deviceName))
 	{
 		QMetaObject::invokeMethod(this, [this]()

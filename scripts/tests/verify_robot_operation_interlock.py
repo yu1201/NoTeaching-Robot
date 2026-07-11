@@ -44,11 +44,13 @@ def main() -> int:
     fanuc_driver = read("src/FANUCRobotDriver.cpp")
     step_driver = read("src/StepRobotDriver.cpp")
 
-    for token in ("TryAcquire", "CurrentOwner", "AnyActive", "ActiveSummary", "Matches",
+    for token in ("TryAcquire", "SetNewOperationsAllowed", "NewOperationsAllowed",
+                  "CurrentOwner", "AnyActive", "ActiveSummary", "Matches",
                   "MarkMotionStarted", "MarkMotionCompleted", "MotionCompletionPending",
                   "StopAndConfirmUnverifiedMotion"):
         require(token in lease_h, f"lease API missing: {token}")
-    for token in ("std::mutex", "g_activeOperations", "g_nextOperationToken", "second.token == m_token",
+    for token in ("std::mutex", "g_activeOperations", "g_newOperationsAllowed",
+                  "g_newOperationsBlockedReason", "g_nextOperationToken", "second.token == m_token",
                   "NormalizeSocketHost", "m_sSocketIP", "m_nSocketPort", "m_identityKey"):
         require(token in lease_cpp, f"lease registry safety mechanism missing: {token}")
     for token in ("motionCompletionPending", "UnresolvedStop{ m_driver, true }",
@@ -84,6 +86,15 @@ def main() -> int:
             "measure-then-weld background result can block safety-stop retry")
 
     require_leased(process_loop, "void ProcessLoopTestDialog::OnStart()", "void ProcessLoopTestDialog::OnStop()", captured=True)
+    process_loop_runner = section(
+        app,
+        "void QtWidgetsApplication4::RunProcessLoopTest(",
+        "void QtWidgetsApplication4::OpenProcessLoopTestPage()")
+    require("!RobotOperationLease::NewOperationsAllowed()" in process_loop_runner
+            and "stopped" in process_loop_runner,
+            "long-lived process-loop lease can start another cycle after account-session revocation")
+    require(process_loop_runner.count("stopped()") >= 8,
+            "process loop does not recheck session/stop state at cycle, weld, and interval boundaries")
     virtual_start = virtual_weld.find("void VirtualWeldTestDialog::OnRunOnRobot()")
     require(virtual_start >= 0, "missing virtual-weld hardware entry")
     virtual_body = virtual_weld[virtual_start:]
@@ -155,9 +166,28 @@ def main() -> int:
     require("fanucCliLease" in app and "CheckRobotDone" in section(
         app, "void QtWidgetsApplication4::RunCommandLineActions(", "FANUCRobotCtrl* QtWidgetsApplication4::GetFirstFanucDriverForCli()"),
         "CLI FANUC operations are not held through completion")
-    require("FTP Job：%1" in app and "operationLease" in section(
-        app, "void RunFtpTask(", "void RefreshRemoteFiles()"),
+    ftp_task = section(app, "void RunFtpTask(", "void RefreshRemoteFiles()")
+    require("FTP Job：%1" in app and "operationLease" in ftp_task,
         "FTP job operations are not covered by the per-robot lease")
+    require("m_liveSessionGuard" in ftp_task
+            and ftp_task.find("m_liveSessionGuard") < ftp_task.find("RobotOperationLease::TryAcquire"),
+            "FTP native-dialog return can reach a robot lease without synchronous live-session validation")
+    require("提交 FTP Job 文件操作" in app
+            and "RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleEngineer)" in app,
+            "FTP task submission is not tied to a current engineer session")
+    for token in ("m_bEnforceInteractiveSessionLeaseGate", "账号会话已失效；禁止启动新的机器人硬件操作。"):
+        require(token in app, f"interactive account-to-lease gate missing: {token}")
+    require(app.count("RobotOperationLease::SetNewOperationsAllowed(true)") == 3,
+            "only successful login/guest and teardown may reopen the lease gate")
+    require(app.count("RobotOperationLease::SetNewOperationsAllowed(") >= 8,
+            "login/logout/session-revocation paths do not consistently drive the lease gate")
+    auth_page = section(app, "void QtWidgetsApplication4::ShowAuthPage(", "bool QtWidgetsApplication4::VerifyAccount(")
+    require("RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow()" in auth_page
+            and "setWindowModality(Qt::NonModal)" in auth_page,
+            "account switching can hide the only safety-stop entry during an active robot flow")
+    require(auth_page.find("RobotOperationLease::AnyActive()")
+            < auth_page.find("RobotOperationLease::SetNewOperationsAllowed("),
+            "voluntary account switching closes the lease gate before preserving active-flow safety controls")
 
     close_guard = section(app, "void QtWidgetsApplication4::closeEvent(", "bool QtWidgetsApplication4::eventFilter(")
     reload_guard = section(app, "auto reloadControlUnits = [this]()", "auto unitIndexForRobotName = [this]")

@@ -39,6 +39,7 @@ public:
         std::function<bool()> flowRunningGuard,
         bool aboutMode = false,
         bool remoteBrowseAllowed = false,
+        std::function<bool()> privilegedActionGuard = {},
         QWidget* parent = nullptr);
 
 protected:
@@ -62,6 +63,7 @@ private:
 
     ScanDataUploader* m_uploader = nullptr;
     std::function<bool()> m_flowRunningGuard;
+    std::function<bool()> m_privilegedActionGuard;
     bool m_aboutMode = false;
     bool m_remoteBrowseAllowed = false;
     QNetworkAccessManager* m_network = nullptr;
@@ -95,6 +97,7 @@ private:
     void DeleteSelectedRemoteFiles();
     void CreateRemoteDeviceDir();
     void SetRemoteBusy(bool busy);
+    bool AuthorizePrivilegedAction(const QString& actionName);
 
     // 仪表盘：左侧导航 + 右侧页面栈（云控制台式布局），总览页放大数字统计卡与设备资源表
     QListWidget* m_navList = nullptr;

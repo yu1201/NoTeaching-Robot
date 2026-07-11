@@ -56,6 +56,12 @@
     <ClCompile Include="src\ConfigDatabase.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\ConfigDatabaseAuthentication.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\CredentialSecurity.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\CameraFrameCache.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -202,6 +208,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\ConfigDatabase.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\CredentialSecurity.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\CameraFrameCache.h">

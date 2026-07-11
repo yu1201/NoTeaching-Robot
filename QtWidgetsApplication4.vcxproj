@@ -122,6 +122,8 @@
     <ClCompile Include="src\CliHelp.cpp" />
     <ClCompile Include="src\BrandingConfig.cpp" />
     <ClCompile Include="src\ConfigDatabase.cpp" />
+    <ClCompile Include="src\ConfigDatabaseAuthentication.cpp" />
+    <ClCompile Include="src\CredentialSecurity.cpp" />
     <ClCompile Include="src\ContralUnit.cpp" />
     <ClCompile Include="src\CameraFrameCache.cpp" />
     <ClCompile Include="src\CameraBasicParamDialog.cpp" />
@@ -202,6 +204,7 @@
     <ClInclude Include="include\BrandingConfig.h" />
     <ClInclude Include="include\OnlineServicesConfig.h" />
     <ClInclude Include="include\ConfigDatabase.h" />
+    <ClInclude Include="include\CredentialSecurity.h" />
     <ClInclude Include="include\Const.h" />
     <ClInclude Include="include\CameraFrameCache.h" />
     <ClInclude Include="include\CameraBasicParamDialog.h" />

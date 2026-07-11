@@ -11,6 +11,7 @@
 - [界面说明](ui.md)
 - [CLI 命令说明书](cli-commands.md)
 - [运行目录与旧数据迁移](runtime-paths.md)
+- [本地账号与凭据安全](security-credentials.md)
 - [波纹板项目方案](wavy-board-plan.md)
 - [问题表摘要](issues.md)
 - [工作记录摘要](worklog.md)

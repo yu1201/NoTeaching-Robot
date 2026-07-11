@@ -137,10 +137,12 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 	std::function<bool()> flowRunningGuard,
 	bool aboutMode,
 	bool remoteBrowseAllowed,
+	std::function<bool()> privilegedActionGuard,
 	QWidget* parent)
 	: QDialog(parent)
 	, m_uploader(uploader)
 	, m_flowRunningGuard(std::move(flowRunningGuard))
+	, m_privilegedActionGuard(std::move(privilegedActionGuard))
 	, m_aboutMode(aboutMode)
 	, m_remoteBrowseAllowed(remoteBrowseAllowed)
 {
@@ -344,7 +346,9 @@ void OnlineServicesDialog::BuildUi()
 	configLayout->addWidget(m_adminTokenEdit, 4, 1, 1, 2);
 	configLayout->addWidget(saveConfigBtn, 4, 3);
 	configLayout->setRowStretch(5, 1);   // 配置行贴顶
-	configGroup->setVisible(!m_aboutMode);
+	// 升级源、FTP 目的端和管理令牌都会改变软件/数据的信任边界，
+	// 只允许持有实时本地 admin 会话的页面查看和修改。
+	configGroup->setVisible(!m_aboutMode && m_remoteBrowseAllowed);
 
 	// —— 远程数据（admin）：浏览/下载/删除各设备上传到服务器的扫描数据、新建设备目录 ——
 	QGroupBox* remoteGroup = nullptr;
@@ -661,15 +665,18 @@ void OnlineServicesDialog::BuildUi()
 
 void OnlineServicesDialog::LoadConfigToUi()
 {
-	m_updateBaseUrlEdit->setText(OnlineServicesConfig::UpdateBaseUrl());
-	m_ftpHostEdit->setText(OnlineServicesConfig::FtpHost());
-	m_ftpPortEdit->setText(QString::number(OnlineServicesConfig::FtpPort()));
-	m_ftpUserEdit->setText(OnlineServicesConfig::FtpUser());
-	m_ftpPasswordEdit->setText(OnlineServicesConfig::FtpPassword());
-	m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
-	if (m_adminTokenEdit != nullptr)
+	if (m_remoteBrowseAllowed)
 	{
-		m_adminTokenEdit->setText(OnlineServicesConfig::AdminToken());
+		m_updateBaseUrlEdit->setText(OnlineServicesConfig::UpdateBaseUrl());
+		m_ftpHostEdit->setText(OnlineServicesConfig::FtpHost());
+		m_ftpPortEdit->setText(QString::number(OnlineServicesConfig::FtpPort()));
+		m_ftpUserEdit->setText(OnlineServicesConfig::FtpUser());
+		m_ftpPasswordEdit->setText(OnlineServicesConfig::FtpPassword());
+		m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
+		if (m_adminTokenEdit != nullptr)
+		{
+			m_adminTokenEdit->setText(OnlineServicesConfig::AdminToken());
+		}
 	}
 	m_autoUploadCheck->setChecked(OnlineServicesConfig::AutoUploadEnabled());
 	if (m_uploader != nullptr && m_pendingListWidget != nullptr)
@@ -751,6 +758,16 @@ void OnlineServicesDialog::UpdateRestrictedNav()
 
 void OnlineServicesDialog::SaveConfigFromUi()
 {
+	if (!m_remoteBrowseAllowed
+		|| !m_privilegedActionGuard
+		|| !m_privilegedActionGuard())
+	{
+		if (!m_aboutMode)
+		{
+			AppendLog(QStringLiteral("升级源、FTP 与管理令牌仅允许有效的本地管理员会话修改，本次未保存。"));
+		}
+		return;
+	}
 	OnlineServicesConfig::SetUpdateBaseUrl(m_updateBaseUrlEdit->text().trimmed());
 	if (!m_remoteBusy)
 	{
@@ -1170,6 +1187,20 @@ namespace
 	}
 }
 
+bool OnlineServicesDialog::AuthorizePrivilegedAction(const QString& actionName)
+{
+	if (!m_remoteBrowseAllowed
+		|| !m_privilegedActionGuard
+		|| !m_privilegedActionGuard())
+	{
+		const QString message = QStringLiteral("本地管理员会话已失效，已拒绝%1。请重新登录。").arg(actionName);
+		AppendLog(message);
+		QMessageBox::warning(this, QStringLiteral("权限已失效"), message);
+		return false;
+	}
+	return true;
+}
+
 void OnlineServicesDialog::SetRemoteBusy(bool busy)
 {
 	m_remoteBusy = busy;
@@ -1197,6 +1228,10 @@ void OnlineServicesDialog::SetRemoteBusy(bool busy)
 
 void OnlineServicesDialog::RefreshRemoteDevices()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("刷新远程设备")))
+	{
+		return;
+	}
 	if (m_remoteBusy)
 	{
 		return;
@@ -1284,6 +1319,10 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 
 void OnlineServicesDialog::RefreshRemoteFiles()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("刷新远程文件")))
+	{
+		return;
+	}
 	if (m_remoteFileList == nullptr || m_remoteDeviceCombo == nullptr)
 	{
 		return;
@@ -1355,6 +1394,10 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 
 void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("下载远程数据")))
+	{
+		return;
+	}
 	if (m_remoteBusy || m_remoteFileList == nullptr || m_remoteDeviceCombo == nullptr)
 	{
 		return;
@@ -1446,6 +1489,10 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 
 void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("删除远程数据")))
+	{
+		return;
+	}
 	if (m_remoteBusy || m_remoteFileList == nullptr || m_remoteDeviceCombo == nullptr)
 	{
 		return;
@@ -1469,6 +1516,10 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 			.arg(device).arg(selected.size()),
 		QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
 	if (ret != QMessageBox::Ok)
+	{
+		return;
+	}
+	if (!AuthorizePrivilegedAction(QStringLiteral("删除远程数据")))
 	{
 		return;
 	}
@@ -1515,6 +1566,10 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 
 void OnlineServicesDialog::CreateRemoteDeviceDir()
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("新建远程设备目录")))
+	{
+		return;
+	}
 	if (m_remoteBusy)
 	{
 		return;
@@ -1535,6 +1590,10 @@ void OnlineServicesDialog::CreateRemoteDeviceDir()
 	if (!IsSafeRemotePathComponent(name))
 	{
 		AppendLog(QStringLiteral("目录名必须是安全的单一名称，不能含路径字符或保留设备名。"));
+		return;
+	}
+	if (!AuthorizePrivilegedAction(QStringLiteral("新建远程设备目录")))
+	{
 		return;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
@@ -1583,6 +1642,14 @@ QString OnlineServicesDialog::AdminApiBase() const
 void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& path,
 	const QJsonObject& body, std::function<void(bool ok, const QJsonObject& resp)> done)
 {
+	if (!AuthorizePrivilegedAction(QStringLiteral("执行服务器管理请求")))
+	{
+		if (done)
+		{
+			done(false, QJsonObject());
+		}
+		return;
+	}
 	const QString token = OnlineServicesConfig::AdminToken().trimmed();
 	if (token.isEmpty())
 	{

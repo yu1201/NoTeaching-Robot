@@ -37,6 +37,8 @@ std::mutex g_operationMutex;
 std::map<QString, ActiveOperation> g_activeOperations;
 // STOP 发出后直到机器人侧真实停机回读成功前持续闭锁；即使原流程先释放租约也不清除。
 std::map<QString, UnresolvedStop> g_unresolvedStops;
+bool g_newOperationsAllowed = true;
+QString g_newOperationsBlockedReason;
 std::atomic<std::uint64_t> g_nextOperationToken{ 1 };
 
 QString PointerIdentity(const RobotDriverAdaptor* driver)
@@ -121,6 +123,28 @@ RobotOperationLease::RobotOperationLease(
 {
 }
 
+void RobotOperationLease::SetNewOperationsAllowed(
+    bool allowed,
+    const QString& blockedReason)
+{
+    std::lock_guard<std::mutex> lock(g_operationMutex);
+    g_newOperationsAllowed = allowed;
+    g_newOperationsBlockedReason = allowed
+        ? QString()
+        : blockedReason.trimmed();
+    if (!allowed && g_newOperationsBlockedReason.isEmpty())
+    {
+        g_newOperationsBlockedReason =
+            QStringLiteral("账号会话未通过，禁止开始新的机器人硬件操作。");
+    }
+}
+
+bool RobotOperationLease::NewOperationsAllowed()
+{
+    std::lock_guard<std::mutex> lock(g_operationMutex);
+    return g_newOperationsAllowed;
+}
+
 RobotOperationLease::Ptr RobotOperationLease::TryAcquire(
     const RobotDriverAdaptor* driver,
     const QString& requestedOwner,
@@ -146,6 +170,16 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquire(
     // 先构造未注册租约以保证异常安全：map 插入失败时不会留下幽灵占用。
     Ptr lease(new RobotOperationLease(driver, identityKey, 0, owner));
     std::lock_guard<std::mutex> lock(g_operationMutex);
+    if (!g_newOperationsAllowed)
+    {
+        if (reason != nullptr)
+        {
+            *reason = g_newOperationsBlockedReason.isEmpty()
+                ? QStringLiteral("账号会话未通过，禁止开始新的机器人硬件操作。")
+                : g_newOperationsBlockedReason;
+        }
+        return {};
+    }
     const auto unresolved = std::find_if(
         g_unresolvedStops.cbegin(),
         g_unresolvedStops.cend(),
