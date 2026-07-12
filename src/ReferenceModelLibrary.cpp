@@ -66,10 +66,14 @@ bool ReferenceModelLibrary::ImportFromFile(const QString& name, const QString& s
     return WorkpieceMeshBuilder::SaveMeshPly(ModelPath(name), mesh, error);
 }
 
-bool ReferenceModelLibrary::LoadModel(const QString& name, WorkpieceMeshBuilder::Mesh& mesh, QString& error)
+bool ReferenceModelLibrary::LoadModel(
+    const QString& name,
+    WorkpieceMeshBuilder::Mesh& mesh,
+    QString& error,
+    const WorkpieceMeshBuilder::CancelCallback& cancelRequested)
 {
     if (!Exists(name)) { error = QStringLiteral("基准模型不存在：%1").arg(name); return false; }
-    return WorkpieceMeshBuilder::LoadMeshPly(ModelPath(name), mesh, error);
+    return WorkpieceMeshBuilder::LoadMeshPly(ModelPath(name), mesh, error, cancelRequested);
 }
 
 bool ReferenceModelLibrary::DeleteModel(const QString& name, QString& error)

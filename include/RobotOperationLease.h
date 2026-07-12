@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QString>
+#include "WeldResumePlanner.h"
+#include "RobotRecoverySafetyPolicy.h"
 
 #include <cstdint>
 #include <memory>
@@ -37,6 +39,22 @@ public:
     static Ptr TryAcquire(
         const RobotDriverAdaptor* driver,
         const QString& requestedOwner,
+        QString* reason = nullptr);
+    // 仅供显式“焊后安全回撤恢复”使用：仍遵守账号/活动租约/未确认 STOP，
+    // 但允许在持久 SafeRetreatPending 门禁下取得唯一恢复租约。
+    static Ptr TryAcquireSafetyRecovery(
+        const RobotDriverAdaptor* driver,
+        const QString& requestedOwner,
+        const WeldResumePlanner::CheckpointRecord& expectedRecord,
+        RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding* binding,
+        QString* reason = nullptr);
+    // 仅供 paused 断点续焊：先登记唯一硬件租约，再在租约仍持有时原子重读
+    // 持久 marker/RecordV2 并绑定调用方确认过的完整身份。普通 TryAcquire 继续受 pending 阻断。
+    static Ptr TryAcquirePausedResume(
+        const RobotDriverAdaptor* driver,
+        const QString& requestedOwner,
+        const WeldResumePlanner::CheckpointRecord& expectedRecord,
+        RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding* binding,
         QString* reason = nullptr);
     // 交互式账号会话失效时，统一禁止所有模块启动新的机器人硬件操作。
     // 已持有的租约不受影响，以便原流程仍可执行安全停止和清理。
@@ -89,6 +107,11 @@ public:
     bool Matches(const RobotDriverAdaptor* driver) const;
 
 private:
+    static Ptr TryAcquireImpl(
+        const RobotDriverAdaptor* driver,
+        const QString& requestedOwner,
+        bool allowPersistentRecovery,
+        QString* reason);
     RobotOperationLease(
         const RobotDriverAdaptor* driver,
         QString identityKey,
@@ -98,6 +121,8 @@ private:
     const RobotDriverAdaptor* m_driver = nullptr;
     // 析构必须使用取得租约时冻结的 identity；不能受后续配置字段变化影响。
     QString m_identityKey;
+    QString m_storeRecoveryEndpoint;
+    QString m_storeRecoveryToken;
     std::uint64_t m_token = 0;
     QString m_owner;
 };

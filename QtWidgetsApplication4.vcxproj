@@ -133,6 +133,7 @@
     <ClCompile Include="src\CameraParamDialog.cpp" />
     <ClCompile Include="src\FTPClient.cpp" />
     <ClCompile Include="src\FANUCRobotDriver.cpp" />
+    <ClCompile Include="src\FanucTpContentIdentity.cpp" />
     <ClCompile Include="src\FunctionTestDialog.cpp" />
     <ClCompile Include="portable\LaserFramePoint3DFilter\LaserFramePoint3DFilter.cpp">
       <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">MaxSpeed</Optimization>
@@ -148,6 +149,8 @@
     <ClCompile Include="src\LaserWeldFilterDialog.cpp" />
     <ClCompile Include="src\MeasureThenWeldDialog.cpp" />
     <ClCompile Include="src\MeasureThenWeldService.cpp" />
+    <ClCompile Include="src\PointCloudProofIntegrity.cpp" />
+    <ClCompile Include="src\RemoteArchiveSecurity.cpp" />
     <ClCompile Include="src\PointCloud3DView.cpp" />
     <ClCompile Include="src\PointCloudExtractionProcessor.cpp" />
     <ClCompile Include="src\PointCloudProcessingConfig.cpp" />
@@ -164,6 +167,7 @@
     <ClCompile Include="src\RobotDataHelper.cpp" />
     <ClCompile Include="src\WeldPoseAverageUpdater.cpp" />
     <ClCompile Include="src\WeldResumePlanner.cpp" />
+    <ClCompile Include="src\WeldSafetyRecoveryStore.cpp" />
     <ClCompile Include="src\WeldSeamCompDialog.cpp" />
     <ClCompile Include="src\ResultArchiveDialog.cpp" />
     <ClCompile Include="src\OnlineServicesDialog.cpp" />
@@ -177,6 +181,7 @@
     <ClCompile Include="src\RobotDriverAdaptor.cpp" />
     <ClCompile Include="src\RobotMessage.cpp" />
     <ClCompile Include="src\RobotOperationLease.cpp" />
+    <ClCompile Include="src\ApplicationInstanceGuard.cpp" />
     <ClCompile Include="src\RobotJogDialog.cpp" />
     <ClCompile Include="src\StepRobotDriver.cpp" />
     <ClCompile Include="src\SkDataClass.cpp" />
@@ -214,6 +219,7 @@
     <ClInclude Include="include\CameraParamDialog.h" />
     <ClInclude Include="include\ContralUnit.h" />
     <ClInclude Include="include\FANUCRobotDriver.h" />
+    <ClInclude Include="include\FanucTpContentIdentity.h" />
     <ClInclude Include="include\FunctionTestDialog.h" />
     <QtMoc Include="include\groove\clientudpformsensorworker.h" />
     <QtMoc Include="include\groove\scancameratcpclientworker.h" />
@@ -226,6 +232,9 @@
     <ClInclude Include="include\LaserWeldFilterDialog.h" />
     <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h" />
     <ClInclude Include="include\MeasureThenWeldService.h" />
+    <ClInclude Include="include\PointCloudProofIntegrity.h" />
+    <ClInclude Include="include\RemoteArchiveSecurity.h" />
+    <ClInclude Include="include\RemoteWorkerLifecycle.h" />
     <ClInclude Include="include\BcpdModelAligner.h" />
     <ClInclude Include="include\ModelAlignmentConfig.h" />
     <ClInclude Include="include\ModelAlignmentDialog.h" />
@@ -245,6 +254,8 @@
     <ClInclude Include="include\SKJCameraControlClient.h" />
     <ClInclude Include="include\RobotMessage.h" />
     <ClInclude Include="include\RobotOperationLease.h" />
+    <ClInclude Include="include\RobotRecoverySafetyPolicy.h" />
+    <ClInclude Include="include\ApplicationInstanceGuard.h" />
     <ClInclude Include="include\RobotPoseTransform.h" />
     <ClInclude Include="include\RobotJogDialog.h" />
     <ClInclude Include="include\STEPRobotDriver.h" />
@@ -256,6 +267,8 @@
     <ClInclude Include="include\WindowStyleHelper.h" />
     <ClInclude Include="include\WeldPoseAverageUpdater.h" />
     <ClInclude Include="include\WeldResumePlanner.h" />
+    <ClInclude Include="include\WeldSafetyRecoveryStore.h" />
+    <ClInclude Include="include\WeldExecutionSafety.h" />
     <ClInclude Include="include\WeldSeamCompDialog.h" />
     <ClInclude Include="include\WeldProcessFile.h" />
     <ClInclude Include="include\groove\framebuffer.h" />

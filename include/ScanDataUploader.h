@@ -11,6 +11,69 @@
 class QTimer;
 class RobotLog;
 
+namespace ScanDataUploadPolicy
+{
+    inline constexpr qint64 TempArchiveTtlMs = 24LL * 60 * 60 * 1000;
+
+    inline bool IsOwnedTempArchiveName(const QString& name)
+    {
+        static const QString prefix = QStringLiteral("upload_");
+        static const QString suffix = QStringLiteral(".zip");
+        if (!name.startsWith(prefix, Qt::CaseSensitive)
+            || !name.endsWith(suffix, Qt::CaseSensitive)
+            || name.size() != prefix.size() + 32 + suffix.size())
+        {
+            return false;
+        }
+        const QString token = name.mid(prefix.size(), 32);
+        for (const QChar ch : token)
+        {
+            if (!ch.isDigit() && !(ch >= QLatin1Char('a') && ch <= QLatin1Char('f')))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    inline bool IsOwnedTempArchiveListName(const QString& name)
+    {
+        static const QString suffix = QStringLiteral(".files");
+        return name.endsWith(suffix, Qt::CaseSensitive)
+            && IsOwnedTempArchiveName(name.left(name.size() - suffix.size()));
+    }
+
+    inline bool ShouldDeleteTempArchive(
+        const QString& name,
+        bool isRegularFile,
+        bool isLinkLike,
+        qint64 modifiedUtcMs,
+        qint64 nowUtcMs)
+    {
+        return IsOwnedTempArchiveName(name)
+            && isRegularFile
+            && !isLinkLike
+            && modifiedUtcMs > 0
+            && nowUtcMs >= modifiedUtcMs
+            && nowUtcMs - modifiedUtcMs >= TempArchiveTtlMs;
+    }
+
+    inline bool ShouldDeleteTempArchiveList(
+        const QString& name,
+        bool isRegularFile,
+        bool isLinkLike,
+        qint64 modifiedUtcMs,
+        qint64 nowUtcMs)
+    {
+        return IsOwnedTempArchiveListName(name)
+            && isRegularFile
+            && !isLinkLike
+            && modifiedUtcMs > 0
+            && nowUtcMs >= modifiedUtcMs
+            && nowUtcMs - modifiedUtcMs >= TempArchiveTtlMs;
+    }
+}
+
 // 扫描数据在线上传服务：把 Result/<机器人>/<案例> 目录压成 zip 经 FTP 推到自建服务器
 // /data/<设备名>/ 下。扫描流程完成后自动入队（受 OnlineServicesConfig::AutoUploadEnabled
 // 开关控制），失败留在待传队列（持久化到 ConfigDatabase），定时重试 + 管理页可手动触发。
@@ -75,7 +138,11 @@ private:
     // 后台线程体：处理传入快照，逐项 zip+FTP；每项结果回 UI 线程 OnItemFinished。
     void WorkerBody(const QStringList& items, const UploadConfig& config);
     void OnItemFinished(const QString& caseDir, bool ok, const QString& message);
-    static bool ZipCaseDir(const QString& caseDir, const QString& zipPath, QString* error);
+    static bool ZipCaseDir(
+        const QString& caseDir,
+        const QString& zipPath,
+        QString* error,
+        const std::atomic<bool>* cancel);
 
     QStringList m_pending;
     std::thread m_worker;
@@ -85,4 +152,7 @@ private:
     ProgressSnapshot m_prog;                   // 进度快照（worker 写、UI 读，m_progMutex 保护）
     QTimer* m_retryTimer = nullptr;
     RobotLog* m_log = nullptr;
+    bool m_pendingStoreBlocked = false;        // 持久化队列超限/损坏时失败关闭，不覆盖原数据
+    QString m_pendingStoreError;
+    QString m_startupCleanupError;
 };

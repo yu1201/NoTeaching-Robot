@@ -28,9 +28,13 @@ def main() -> int:
     extraction_h = read("include/PointCloudExtractionProcessor.h")
     service_h = read("include/MeasureThenWeldService.h")
     service = read("src/MeasureThenWeldService.cpp")
+    proof_integrity_h = read("include/PointCloudProofIntegrity.h")
+    proof_integrity = read("src/PointCloudProofIntegrity.cpp")
+    proof_integrity_test = read("scripts/tests/pointcloud_proof_integrity_tests.cpp")
     dialog = read("src/MeasureThenWeldDialog.cpp")
     virtual = read("src/VirtualWeldTestDialog.cpp")
     robot_data = read("src/RobotDataHelper.cpp")
+    seam_dialog = read("src/WeldSeamCompDialog.cpp")
     app_h = read("include/QtWidgetsApplication4.h")
     app = read("src/QtWidgetsApplication4.cpp")
 
@@ -92,8 +96,98 @@ def main() -> int:
             "proof can be copied across case directories without rejection")
     require("POINT_CLOUD_QUALITY_ALGORITHM_REVISION" in service,
             "proof policy does not bind an explicit algorithm revision")
-    require('POINT_CLOUD_QUALITY_ALGORITHM_REVISION = "pcq-v1-20260711-d"' in service,
+    require('POINT_CLOUD_QUALITY_ALGORITHM_REVISION = "pcq-v3-20260712-a"' in service,
             "proof algorithm revision was not advanced for topology/orientation changes")
+    require("POINT_CLOUD_QUALITY_SCHEMA_VERSION = 3" in service
+            and 'root.insert("schemaVersion", POINT_CLOUD_QUALITY_SCHEMA_VERSION)' in service,
+            "MAC/receipt-bound schema 3 is not the only newly written proof schema")
+    for token in (
+        "SignPointCloudQualityProof",
+        "VerifyPointCloudQualityProofMac",
+        "ConstantTimeBytesEqual",
+        "POINT_CLOUD_PROOF_RECEIPT_SCOPE",
+        "RegisterPointCloudProofReceipt",
+        "VerifyPointCloudProofReceipt",
+        "VerifyPointCloudProofInputs",
+        "QStringLiteral(\"secret\")",
+    ):
+        require(token in service, f"schema-3 proof integrity/receipt wiring missing: {token}")
+    for token in (
+        "QMessageAuthenticationCode::hash",
+        "POINT_CLOUD_PROOF_HMAC_ALGORITHM",
+        "ConstantTimeEqual",
+        "SignProof",
+        "VerifyProofMac",
+        "BuildReceiptRecord",
+        "VerifyReceiptRecord",
+        "BeginProofReplacement",
+        "RequireProofReplacementActive",
+        "VerifyProofNotDenied",
+        "CompleteProofReplacement",
+        "AbandonProofReplacement",
+        "AcquireProofUseLease",
+        "g_activeProofReaders",
+        "QSaveFile marker",
+        "setDirectWriteFallback(false)",
+    ):
+        require(token in proof_integrity,
+                f"shared C++ proof integrity implementation missing: {token}")
+    require("PointCloudProofIntegrity::SignProof" in service
+            and "PointCloudProofIntegrity::VerifyProofMac" in service
+            and "PointCloudProofIntegrity::VerifyReceiptRecord" in service,
+            "production verifier is not wired to the shared dynamically tested C++ implementation")
+    for attack in (
+        "state mutation must invalidate",
+        "input-evidence mutation must invalidate",
+        "different machine/key",
+        "missing DPAPI receipt",
+        "another case path",
+        "pose-evidence mutation",
+        "production-context mutation",
+        "proof-time mutation",
+        "exclusive old proof fixture must force deletion failure",
+        "locked old authorized proof must remain rejected",
+        "failed marker removal must keep proof denied",
+        "normal cancellation must retain a persistent denial tombstone",
+        "non-owner thread must not inherit active producer privilege",
+        "corrupt persisted denial marker must reject proof without memory state",
+        "replacement writer must fail immediately while motion lease is active",
+        "motion reader must fail immediately while replacement writer is active",
+        "oversized proof must reject before readAll allocation",
+        "sparse giant evidence must reject before streaming",
+        "oversized tombstone must fail closed without readAll",
+    ):
+        require(attack in proof_integrity_test,
+                f"real C++ point-cloud attack regression missing: {attack}")
+    require(service.index("VerifyPointCloudQualityProofMac(root, error)")
+            < service.index("ValidatePointCloudProductionContext(",
+                            service.index("bool VerifyPointCloudQualityGate(")),
+            "production verifier trusts context before checking proof MAC")
+    for token in (
+        'root.insert("productionContext", productionContextJson)',
+        'result.insert("scanRunId", context.scanRunId)',
+        'result.insert("scanStartedUtc", context.scanStartedUtc)',
+        'result.insert("robotEndpoint", context.robotEndpoint)',
+        'result.insert("cameraSection", context.cameraSection)',
+        'result.insert("handEyeSha256", context.handEyeSha256)',
+        'context.origin = QStringLiteral("liveRobotCameraScan")',
+        "RobotOperationLease::PersistentEndpointIdentity(driver)",
+        "HandEyeMatrixContentSha256(calibration)",
+    ):
+        require(token in service, f"production proof context binding missing: {token}")
+    require("POINT_CLOUD_PROOF_MAX_AGE_SECONDS = 24 * 60 * 60" in service
+            and "POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS = 5 * 60" in service
+            and "ParseStrictUtcTimestamp" in service
+            and "proofAgeSeconds > POINT_CLOUD_PROOF_MAX_AGE_SECONDS" in service
+            and "scanAgeSeconds > POINT_CLOUD_PROOF_MAX_AGE_SECONDS" in service,
+            "proof/scan UTC freshness and future-skew gates are incomplete")
+    require("expectedDriver != nullptr" in service
+            and service.count("pRobotDriver))") >= 4
+            and "pRobotDriver);" in service,
+            "movement paths do not compare the proof endpoint with the current driver")
+    require("frozenExpectation != nullptr" in service
+            and "PointCloudProduction 验证缺少当前机器人或 UI 线程冻结的完整生产上下文" in service,
+            "offline production verification can run without current/frozen robot context")
     require("ComputeFileSha256ForResumeGate" in service,
             "proof does not bind files by SHA256")
     require("ValidateFinalWeldPoseArtifact" in service,
@@ -106,9 +200,10 @@ def main() -> int:
             "resume flow does not bind proof to original SeamComp source")
     require("identity.qualityProofPosePath" in dialog,
             "a second resume would lose the original authorized SeamComp proof source")
-    require("QBuffer payloadBuffer" in service
-            and "QCryptographicHash::hash(payload" in service,
-            "pose parsing and SHA256 are not derived from the same immutable read snapshot")
+    require("QCryptographicHash payloadHash" in service
+            and "file.readLine(" in service
+            and "payloadHash.addData(rawLine)" in service,
+            "pose parsing and SHA256 are not derived from the same bounded streamed bytes")
     require("RegisterSyntheticPoseAuthorization" in service
             and "VerifySyntheticPoseAuthorization" in service,
             "SyntheticVirtualTest remains an unbound public-enum bypass")
@@ -152,6 +247,14 @@ def main() -> int:
     require('QStringLiteral("candidatePose")' in service
             and "Audit：最终焊接姿态结构验证未通过" in service,
             "Audit failures cannot persist an explicitly unauthorized evidence report")
+    require("hasValidatedAuthorizedPose && hasProductionContext" in service
+            and "Enforce 质量通过但缺少 live-scan" in service,
+            "an offline/missing-context result can still become authorized")
+    require("authorize && inputPaths.isEmpty()" in service
+            and "if (authorize)" in service
+            and "inputs.size() != inputPaths.size()" in service
+            and "预期点云输入为空或不存在" in service,
+            "authorized proof can omit a missing/empty expected point-cloud input")
     require("expectedRetainedSourceLengthMm" in service
             and "declaredStartSkipMm" in service
             and "declaredEndSkipMm" in service,
@@ -159,15 +262,60 @@ def main() -> int:
     build_evidence_start = service.index("bool BuildQualityFileEvidence(")
     build_evidence_end = service.index("bool WritePointCloudQualityGate(")
     build_evidence = service[build_evidence_start:build_evidence_end]
-    require("const QByteArray payload = file.readAll();" in build_evidence
-            and "payload.size()" in build_evidence,
-            "quality evidence combines file size and hash from different snapshots")
+    require("PointCloudProofIntegrity::HashFileBounded" in build_evidence
+            and "MaximumEvidenceFileBytes" in build_evidence
+            and "stopRequested" in build_evidence
+            and "readAll()" not in build_evidence,
+            "quality evidence is not bounded/cancelable streaming hash evidence")
+    for token in (
+        "MaximumProofBytes",
+        "MaximumDenialTombstoneBytes",
+        "MaximumEvidenceFileBytes",
+        "MaximumEvidenceTotalBytes",
+        "MaximumWeldPoseBytes",
+        "MaximumWeldPoseLines",
+    ):
+        require(token in proof_integrity_h, f"proof/evidence hard limit missing: {token}")
     require("保存可验证的下发轨迹失败" in service
             and "保存可验证的 STEP 最终抽样轨迹失败" in service,
             "FinalSampled save failure is not fail-closed before generation/downlink")
     require("savedSha256" in service and "sampledPoseSha256" in service_h
             and "identity.sampledPoseSha256" in dialog,
             "FinalSampled save and checkpoint freeze do not bind the serialized byte snapshot")
+
+    rebuild_start = service.index("bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(")
+    rebuild_end = service.index("QString MeasureThenWeldService::BuildResultDir(", rebuild_start)
+    rebuild = service[rebuild_start:rebuild_end]
+    require(rebuild.index("LoadValidatedRebuildPointCloudContext(")
+            < rebuild.index("InvalidatePointCloudQualityGate("),
+            "rebuild destroys the old proof before freezing its live-scan context")
+    require(rebuild.index("BeginProofReplacement(")
+            < rebuild.index("InvalidatePointCloudQualityGate("),
+            "rebuild can touch the old proof before persisting its denial tombstone")
+    require("const bool invalidated = InvalidatePointCloudQualityGate" in rebuild
+            and "旧 proof 删除失败但仍被拒绝" in rebuild,
+            "rebuild cancellation still swallows proof invalidation failure")
+    require(rebuild.index('cancellationPoint(QStringLiteral("STEP 程序同步后"))')
+            < rebuild.rindex("qualityGateReplacement.Complete(error)"),
+            "rebuild releases its denial tombstone before STEP/cancellation completes")
+    require("PointCloudProofReplacementSession qualityGateReplacement" in rebuild,
+            "rebuild early returns do not abandon producer privilege through RAII")
+    require("旧 schema 1/2 点云质量证明" in service
+            and "VerifyPointCloudProofInputs(root, dir, error, stopRequested)" in service
+            and "return PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error);"
+                in service,
+            "legacy/self-declared proof or modified scan inputs can still be upgraded")
+    require("productionExpectation.robotName.trimmed().isEmpty()" in rebuild
+            and "离线预览不能生成可运动授权" in rebuild,
+            "offline rebuild can synthesize a production proof without robot context")
+    require("CapturePointCloudProductionExpectation" in service_h
+            and "productionExpectation" in dialog
+            and "rebuildExpectation" in seam_dialog
+            and "productionExpectation" in app,
+            "production rebuild entry points do not propagate a frozen robot context")
+    require("rebuildDriver" not in seam_dialog
+            and "rebuildExpectation, cancelFlag" in seam_dialog,
+            "preview background worker still captures a raw robot driver")
 
     require("ApplyEnforceValidationSafetyBounds" in config_cpp,
             "Enforce thresholds can still be weakened to an effective off state")
@@ -220,13 +368,56 @@ def main() -> int:
             "service text outputs are not atomically committed")
     require("QSaveFile file(filePath);" in robot_data,
             "RobotDataHelper text outputs are not atomically committed")
-    require("stream.status() != QTextStream::Ok" in service
+    require("file.error() != QFileDevice::NoError" in service
             and "stream.status() != QTextStream::Ok" in robot_data,
-            "text stream errors are not checked")
+            "streamed text/file errors are not checked")
 
     scan_start = service.index("bool MeasureThenWeldService::ScanMoveAndCollect(")
     scan_end = service.index("bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(")
     scan = service[scan_start:scan_end]
+    require(scan.index("BeginProofReplacement(")
+            < scan.index("InvalidatePointCloudQualityGate("),
+            "live scan can touch a proof before persisting its denial tombstone")
+    require(scan.index("RobotOperationLease::IsCancellationRequested(pRobotDriver)")
+            < scan.rindex("qualityGateReplacement.Complete(qualityGateError)"),
+            "live scan releases its denial tombstone before its final STOP check")
+    require("PointCloudProofReplacementSession qualityGateReplacement" in scan,
+            "live-scan early returns do not abandon producer privilege through RAII")
+
+    write_gate_start = service.index("bool WritePointCloudQualityGate(")
+    write_gate_end = service.index("bool InvalidatePointCloudQualityGate(", write_gate_start)
+    write_gate = service[write_gate_start:write_gate_end]
+    require("RequireProofReplacementActive(reportPath, error)" in write_gate,
+            "proof writer can publish outside an active denied replacement session")
+
+    verify_gate_start = service.index("bool VerifyPointCloudQualityGate(")
+    verify_gate_end = service.index("bool VerifyWeldPoseAuthorization(", verify_gate_start)
+    verify_gate = service[verify_gate_start:verify_gate_end]
+    require(verify_gate.index("if (!verifyNotDenied())")
+            < verify_gate.index("PointCloudProofIntegrity::ReadFileBounded("),
+            "production verifier reads proof bytes before checking the denial tombstone")
+    require("return verifyNotDenied();" in verify_gate,
+            "production verifier does not recheck denial after proof/context/input reads")
+
+    context_start = service.index("bool LoadValidatedRebuildPointCloudContext(")
+    context_end = service.index("bool WritePointCloudQualityGate(", context_start)
+    context_loader = service[context_start:context_end]
+    require(context_loader.index("VerifyProofNotDenied(reportPath, error)")
+            < context_loader.index("PointCloudProofIntegrity::ReadFileBounded("),
+            "rebuild context loader can inherit a persistently denied proof")
+
+    execute_start = service.index("bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(")
+    execute_end = service.index("bool MeasureThenWeldService::LoadCompPreviewBaseline(", execute_start)
+    execute = service[execute_start:execute_end]
+    require("PointCloudProofIntegrity::ProofUseLease qualityProofUseLease" in execute
+            and execute.index("AcquireProofUseLease(") < execute.index("verifyLoadedPoseAuthorization()")
+            and execute.index("AcquireProofUseLease(") < execute.index("MoveByJob(")
+            and execute.index("AcquireProofUseLease(") < execute.index("CallJobAndWaitStateDone("),
+            "actual motion does not retain a proof use lease across verify and START")
+    generate_start = service.index("bool MeasureThenWeldService::GenerateStepWeldProgramFiles(")
+    generate_end = service.index("bool MeasureThenWeldService::GenerateVirtualStraightWeldFiles(", generate_start)
+    require("AcquireProofUseLease(" not in service[generate_start:generate_end],
+            "pure STEP file generation incorrectly acquires a motion proof lease")
     for message in (
         "保存SDK提取焊道结果失败",
         "保存先测后焊特征提取结果失败",

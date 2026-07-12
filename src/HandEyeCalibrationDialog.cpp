@@ -595,20 +595,37 @@ bool WaitGenericRobotDone(
         pollIntervalMs = 100;
     }
 
-    const auto failUnverified = [driver, error, terminalVerifiedOut](const QString& message) -> bool
+    const auto failUnverified = [driver, error, terminalVerifiedOut](
+        const QString& message,
+        bool attemptRobotStop) -> bool
         {
             QString finalMessage = message;
             bool stopConfirmed = false;
-            if (!RobotOperationLease::IsCancellationRequested(driver))
+            const bool cancellationAlreadyLatched = RobotOperationLease::IsCancellationRequested(driver);
+            if (attemptRobotStop && !cancellationAlreadyLatched)
             {
                 stopConfirmed = RobotOperationLease::StopAndConfirmUnverifiedMotion(driver);
                 finalMessage += stopConfirmed
                     ? QStringLiteral("；已自动安全停止并确认机器人终态。")
-                    : QStringLiteral("；自动安全停止未确认，已保持闭锁，请使用红色安全停止重试。");
+                    : QStringLiteral("；自动安全停止未确认。");
+            }
+
+            // 自动停止成功也只能证明“已停”，不能证明“自然运行完成”。
+            // 重新锁存 unresolved stop，使任何失败/未知结果都保留红色 STOP 目标和后续动作闭锁。
+            const bool cancellationLatched = RobotOperationLease::RequestCancellation(driver);
+            if (cancellationLatched)
+            {
+                finalMessage += QStringLiteral(
+                    "；未把 stopped 状态当作自然完成，已保留红色安全停止目标与操作闭锁。");
+            }
+            else
+            {
+                finalMessage += QStringLiteral(
+                    "；未能锁存安全停止目标，请立即使用全局安全停止。");
             }
             if (terminalVerifiedOut != nullptr)
             {
-                *terminalVerifiedOut = stopConfirmed;
+                *terminalVerifiedOut = false;
             }
             if (error != nullptr)
             {
@@ -623,7 +640,8 @@ bool WaitGenericRobotDone(
     {
         return failUnverified(
             "运动已下发，但严格读取起始位置失败："
-            + DecodeRobotMessageText(driver->GetLastRobotError()));
+            + DecodeRobotMessageText(driver->GetLastRobotError()),
+            true);
     }
     T_ROBOT_COORS lastPose = startPose;
 	T_ROBOT_COORS lastProgressPose = startPose;
@@ -646,7 +664,7 @@ bool WaitGenericRobotDone(
         lastState = driver->CheckDone();
         if (lastState < 0)
         {
-            return failUnverified(QString("读取机器人运行状态失败，返回码=%1。").arg(lastState));
+            return failUnverified(QString("读取机器人运行状态失败，返回码=%1。").arg(lastState), true);
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -659,7 +677,7 @@ bool WaitGenericRobotDone(
             : lastState > 0;
         if (isStepDriver && !runningState && !trustedDoneState)
         {
-            return failUnverified(QString("STEP机器人返回非运行/暂停/停止状态：%1。").arg(lastState));
+            return failUnverified(QString("STEP机器人返回非运行/暂停/停止状态：%1。").arg(lastState), true);
         }
         if (runningState)
         {
@@ -671,7 +689,8 @@ bool WaitGenericRobotDone(
             {
                 return failUnverified(
                     "机器人运行中读取当前位置失败："
-                    + DecodeRobotMessageText(driver->GetLastRobotError()));
+                    + DecodeRobotMessageText(driver->GetLastRobotError()),
+                    true);
             }
             lastPose = currentPose;
             const double moveDelta = PoseTranslationDistance(lastProgressPose, currentPose);
@@ -704,7 +723,7 @@ bool WaitGenericRobotDone(
             {
 				return failUnverified(QString("机器人程序处于运行态，但连续 %1 ms 无可验证位姿进展。当前状态：%2")
                     .arg(kHandEyeAutoNoMotionTimeoutMs)
-                    .arg(DecodeRobotMessageText(driver->GetRobotStatusText())));
+                    .arg(DecodeRobotMessageText(driver->GetRobotStatusText())), true);
             }
         }
         const bool doneStartupGuardPassed = isStepDriver
@@ -718,56 +737,93 @@ bool WaitGenericRobotDone(
                 : kHandEyeFanucDoneStableSamples;
             if (stableDoneCount >= requiredStableDoneSamples)
             {
-                // 稳定终态先解除 motion pending；后续到位误差失败也不代表机器人仍在运动。
-                const bool markedCompleted = RobotOperationLease::MarkMotionCompleted(driver);
+                // 稳定 stopped 只表示可以开始复核，不是“程序自然完成”证据。
+                // 必须先通过最终位置复核，再进入驱动 CheckRobotDone：
+                // FANUC 会核对同一次 CALL_JOB completion witness，STEP 会核对 ntdone。
+                // 驱动只在见证通过时调用 MarkMotionCompleted，因而 pending 不会在到位复核前被清除。
+                if (targetPose == nullptr)
+                {
+                    return failUnverified(
+                        "机器人已稳定停止，但未提供最终目标位姿，禁止判定运动完成。",
+                        false);
+                }
+
+                T_ROBOT_COORS finalPose;
+                if (!driver->TryGetCurrentPos(finalPose) || !IsFinitePose(finalPose))
+                {
+                    return failUnverified(
+                        "机器人状态已停止，但严格读取当前位置失败，无法确认是否真正到位："
+                        + DecodeRobotMessageText(driver->GetLastRobotError()),
+                        false);
+                }
+
+                const double positionError = PoseTranslationDistance(finalPose, *targetPose);
+                const double rotationError = PoseRotationDistance(finalPose, *targetPose);
+                if (progressLog)
+                {
+                    progressLog(QString("到位位置复核：XYZ误差=%1 mm，姿态误差=%2 deg；目标=%3；当前=%4")
+                        .arg(positionError, 0, 'f', 3)
+                        .arg(rotationError, 0, 'f', 3)
+                        .arg(FormatPoseSummary(*targetPose))
+                        .arg(FormatPoseSummary(finalPose)));
+                }
+
+                if (positionError > kHandEyeAutoArrivePositionToleranceMm
+                    || rotationError > kHandEyeAutoArriveRotationToleranceDeg)
+                {
+                    return failUnverified(
+                        QString("机器人状态已停止，但当前位置未到目标。XYZ误差=%1 mm(阈值%2)，姿态误差=%3 deg(阈值%4)。目标=%5；当前=%6；当前状态：%7")
+                            .arg(positionError, 0, 'f', 3)
+                            .arg(kHandEyeAutoArrivePositionToleranceMm, 0, 'f', 3)
+                            .arg(rotationError, 0, 'f', 3)
+                            .arg(kHandEyeAutoArriveRotationToleranceDeg, 0, 'f', 3)
+                            .arg(FormatPoseSummary(*targetPose))
+                            .arg(FormatPoseSummary(finalPose))
+                            .arg(DecodeRobotMessageText(driver->GetRobotStatusText())),
+                        false);
+                }
+
+                const auto witnessStart = std::chrono::steady_clock::now();
+                const int elapsedBeforeWitnessMs = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(witnessStart - startTime).count());
+                const int remainingTimeoutMs = timeoutMs - elapsedBeforeWitnessMs;
+                if (remainingTimeoutMs <= 0)
+                {
+                    return failUnverified(
+                        "最终位置复核已通过，但等待控制器完成见证前整体超时。",
+                        false);
+                }
+
+                if (progressLog)
+                {
+                    progressLog(isStepDriver
+                        ? QStringLiteral("最终位置已通过，正在验证 STEP ntdone 自然完成见证...")
+                        : QStringLiteral("最终位置已通过，正在验证 FANUC 同一次 CALL_JOB 完成见证..."));
+                }
+                const int witnessedState = driver->CheckRobotDone(pollIntervalMs, remainingTimeoutMs);
+                if (witnessedState <= 0)
+                {
+                    return failUnverified(
+                        QString("最终位置已通过，但控制器自然完成见证失败，返回码=%1：%2")
+                            .arg(witnessedState)
+                            .arg(DecodeRobotMessageText(driver->GetLastRobotError())),
+                        false);
+                }
+                if (RobotOperationLease::MotionCompletionPending(driver))
+                {
+                    return failUnverified(
+                        "控制器自然完成见证已返回成功，但租约层 motion pending 仍未清除。",
+                        false);
+                }
                 if (terminalVerifiedOut != nullptr)
                 {
-                    *terminalVerifiedOut = markedCompleted;
+                    *terminalVerifiedOut = true;
                 }
-                if (!markedCompleted)
+                if (progressLog)
                 {
-                    return failUnverified("机器人已稳定停止，但租约层未能登记运动完成。");
-                }
-                if (targetPose != nullptr)
-                {
-                    T_ROBOT_COORS finalPose;
-                    if (!driver->TryGetCurrentPos(finalPose) || !IsFinitePose(finalPose))
-                    {
-                        if (error != nullptr)
-                        {
-                            *error = "机器人状态已停止，但严格读取当前位置失败，无法确认是否真正到位："
-                                + DecodeRobotMessageText(driver->GetLastRobotError());
-                        }
-                        return false;
-                    }
-
-                    const double positionError = PoseTranslationDistance(finalPose, *targetPose);
-                    const double rotationError = PoseRotationDistance(finalPose, *targetPose);
-                    if (progressLog)
-                    {
-                        progressLog(QString("到位位置复核：XYZ误差=%1 mm，姿态误差=%2 deg；目标=%3；当前=%4")
-                            .arg(positionError, 0, 'f', 3)
-                            .arg(rotationError, 0, 'f', 3)
-                            .arg(FormatPoseSummary(*targetPose))
-                            .arg(FormatPoseSummary(finalPose)));
-                    }
-
-                    if (positionError > kHandEyeAutoArrivePositionToleranceMm
-                        || rotationError > kHandEyeAutoArriveRotationToleranceDeg)
-                    {
-                        if (error != nullptr)
-                        {
-                            *error = QString("机器人状态已停止，但当前位置未到目标。XYZ误差=%1 mm(阈值%2)，姿态误差=%3 deg(阈值%4)。目标=%5；当前=%6；当前状态：%7")
-                                .arg(positionError, 0, 'f', 3)
-                                .arg(kHandEyeAutoArrivePositionToleranceMm, 0, 'f', 3)
-                                .arg(rotationError, 0, 'f', 3)
-                                .arg(kHandEyeAutoArriveRotationToleranceDeg, 0, 'f', 3)
-                                .arg(FormatPoseSummary(*targetPose))
-                                .arg(FormatPoseSummary(finalPose))
-                                .arg(DecodeRobotMessageText(driver->GetRobotStatusText()));
-                        }
-                        return false;
-                    }
+                    progressLog(isStepDriver
+                        ? QStringLiteral("STEP ntdone 自然完成见证已通过。")
+                        : QStringLiteral("FANUC 同一次 CALL_JOB 完成见证已通过。"));
                 }
                 return true;
             }
@@ -777,7 +833,7 @@ bool WaitGenericRobotDone(
         {
             return failUnverified(QString("等待机器人到位超时，最后状态=%1，当前状态：%2")
                 .arg(lastState)
-                .arg(DecodeRobotMessageText(driver->GetRobotStatusText())));
+                .arg(DecodeRobotMessageText(driver->GetRobotStatusText())), true);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));

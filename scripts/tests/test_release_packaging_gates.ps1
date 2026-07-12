@@ -3,6 +3,11 @@ param()
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 . (Join-Path $repoRoot "scripts\release_gate_common.ps1")
+$testPythonExecutable = (& python.exe -I -c "import sys; print(sys.executable)" | Select-Object -Last 1).Trim()
+$testPythonSha256 = Get-ReleaseFileSha256 $testPythonExecutable
+Set-ReleasePythonTool `
+    -PythonExecutable $testPythonExecutable `
+    -PythonSha256 $testPythonSha256
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -132,7 +137,7 @@ try {
     Assert-Throws { Assert-ReleaseVersion "v2026.07.12.1200" } "version with v prefix must fail"
     Assert-Throws { Assert-ReleaseVersion "2026.7.12.1200" } "non-canonical version must fail"
     Assert-Throws { Assert-ReleaseVersion "2026.99.99.9999" } "invalid calendar version must fail"
-    $currentInstallerDefinition = Assert-InstallerDefinition -RepoRoot $repoRoot -AppVersion "2026.07.12.0606" -Channel neutral
+    $currentInstallerDefinition = Assert-InstallerDefinition -RepoRoot $repoRoot -AppVersion "2026.07.13.0610" -Channel neutral
     Assert-True ([string]$currentInstallerDefinition.appId -ceq $script:ReleaseGateExpectedAppId) "installer AppId hard gate failed"
 
     $installerFixture = Join-Path $tempRoot "installer-definition"
@@ -143,7 +148,7 @@ try {
         param([string]$Text, [string]$Message)
         Assert-True ($Text -cne $installerTextOriginal) "installer attack fixture mutation did not change the source: $Message"
         Set-Content -LiteralPath $installerFixturePath -Value $Text -Encoding UTF8
-        Assert-Throws { Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.12.0606" -Channel neutral } $Message
+        Assert-Throws { Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.13.0610" -Channel neutral } $Message
     }
     $sourceDirDefine = '#define MySourceDir "..\dist\QtWidgetsApplication4"'
     Assert-InstallerTextRejected `
@@ -184,7 +189,7 @@ try {
         -Text ($installerTextOriginal.Replace('Source: "..\dist\tools\ConfigMigrate_Run.cmd"', 'DestName: "ConfigMigrate_Run.cmd"')) `
         -Message "[Files] record missing Source key must fail"
     Set-Content -LiteralPath $installerFixturePath -Value $installerTextOriginal -Encoding UTF8
-    Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.12.0606" -Channel neutral | Out-Null
+    Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.13.0610" -Channel neutral | Out-Null
 
     $fixture = Join-Path $tempRoot "fanuc"
     Copy-ManifestRuntimeFixture $fixture
@@ -258,11 +263,26 @@ try {
     Assert-Throws { Assert-ExpectedReleaseExecutable -Directory $exeDir -AppVersion "2026.07.12.1200" -Channel neutral } "opposite-channel exe must fail"
     Remove-Item -LiteralPath (Join-Path $exeDir "HK-Pathlynx-CORPLA.exe") -Force
     Assert-Throws { Assert-ExpectedReleaseExecutable -Directory $exeDir -AppVersion "2026.07.12.1201" -Channel neutral } "embedded version mismatch must fail"
-    Set-Content -LiteralPath (Join-Path $exeDir "QtWidgetsApplication4.exe") -Value "fake PE marker 2026.07.12.1200" -NoNewline
-    Assert-Throws { Assert-ExpectedReleaseExecutable -Directory $exeDir -AppVersion "2026.07.12.1200" -Channel neutral } "plain-text exe must fail"
+    [System.IO.File]::WriteAllBytes(
+        (Join-Path $exeDir "QtWidgetsApplication4.exe"),
+        [System.Text.Encoding]::ASCII.GetBytes("MZ-fake PE marker 2026.07.12.1200"))
+    Assert-Throws { Assert-ExpectedReleaseExecutable -Directory $exeDir -AppVersion "2026.07.12.1200" -Channel neutral } "fake MZ/version-marker exe must fail"
     Remove-Item -LiteralPath (Join-Path $exeDir "QtWidgetsApplication4.exe") -Force
     New-TestPeFixture -Path (Join-Path $exeDir "QtWidgetsApplication4.exe") -Version "2026.07.12.1200" -ProductName "NoTeaching-Robot" -Platform x86
     Assert-Throws { Assert-ExpectedReleaseExecutable -Directory $exeDir -AppVersion "2026.07.12.1200" -Channel neutral } "x86 application exe must fail"
+
+    $installerPe = Join-Path $tempRoot "NoTeaching-Robot-Setup-v2026.07.12.1200.exe"
+    New-TestPeFixture -Path $installerPe -Version "2026.07.12.1200" -ProductName "NoTeaching-Robot"
+    Assert-InstallerProductVersion -InstallerPath $installerPe -AppVersion "2026.07.12.1200" -Channel neutral
+    Assert-Throws {
+        Assert-InstallerProductVersion -InstallerPath $installerPe -AppVersion "2026.07.12.1201" -Channel neutral
+    } "real installer PE with the wrong requested version must fail"
+    [System.IO.File]::WriteAllBytes(
+        $installerPe,
+        [System.Text.Encoding]::ASCII.GetBytes("MZ-fake installer 2026.07.12.1200"))
+    Assert-Throws {
+        Assert-InstallerProductVersion -InstallerPath $installerPe -AppVersion "2026.07.12.1200" -Channel neutral
+    } "fake MZ/version-marker installer must fail"
 
     $inventoryRoot = Join-Path $tempRoot "inventory"
     New-Item -ItemType Directory -Path $inventoryRoot -Force | Out-Null
@@ -284,13 +304,21 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $configFixture "tools"), (Join-Path $configFixture "scripts") -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $repoRoot "tools\migrate_config_to_sqlite.py") -Destination (Join-Path $configFixture "tools\migrate_config_to_sqlite.py")
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\build_config_migrate.ps1") -Destination (Join-Path $configFixture "scripts\build_config_migrate.ps1")
-    & (Join-Path $configFixture "scripts\build_config_migrate.ps1") -OutputPath (Join-Path $configFixture "tools\ConfigMigrate.exe") | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\release_gate_common.ps1") -Destination (Join-Path $configFixture "scripts\release_gate_common.ps1")
+    & (Join-Path $configFixture "scripts\build_config_migrate.ps1") `
+        -PythonExecutable $testPythonExecutable `
+        -PythonSha256 $testPythonSha256 `
+        -OutputPath (Join-Path $configFixture "tools\ConfigMigrate.exe") | Out-Null
     Assert-ConfigMigrateProvenance -RepoRoot $configFixture -ExecutablePath (Join-Path $configFixture "tools\ConfigMigrate.exe") | Out-Null
     $configFixtureOtherRoot = Join-Path $tempRoot "config-other-worktree"
     New-Item -ItemType Directory -Path (Join-Path $configFixtureOtherRoot "tools"), (Join-Path $configFixtureOtherRoot "scripts") -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $repoRoot "tools\migrate_config_to_sqlite.py") -Destination (Join-Path $configFixtureOtherRoot "tools\migrate_config_to_sqlite.py")
     Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\build_config_migrate.ps1") -Destination (Join-Path $configFixtureOtherRoot "scripts\build_config_migrate.ps1")
-    & (Join-Path $configFixtureOtherRoot "scripts\build_config_migrate.ps1") -OutputPath (Join-Path $configFixtureOtherRoot "tools\ConfigMigrate.exe") | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\release_gate_common.ps1") -Destination (Join-Path $configFixtureOtherRoot "scripts\release_gate_common.ps1")
+    & (Join-Path $configFixtureOtherRoot "scripts\build_config_migrate.ps1") `
+        -PythonExecutable $testPythonExecutable `
+        -PythonSha256 $testPythonSha256 `
+        -OutputPath (Join-Path $configFixtureOtherRoot "tools\ConfigMigrate.exe") | Out-Null
     Assert-True `
         ((Get-ReleaseFileSha256 (Join-Path $configFixture "tools\ConfigMigrate.exe")) -ceq (Get-ReleaseFileSha256 (Join-Path $configFixtureOtherRoot "tools\ConfigMigrate.exe"))) `
         "ConfigMigrate rebuild bytes must be deterministic across linked-worktree root paths"
@@ -313,9 +341,9 @@ try {
     Invoke-GitFixture $gitFixture @("config", "user.name", "Release Gate Test")
     Invoke-GitFixture $gitFixture @("add", "--", "installer/QtWidgetsApplication4.iss", "icons/app.ico")
     Invoke-GitFixture $gitFixture @("commit", "-q", "-m", "fixture")
-    Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.12.0606" -Channel neutral | Out-Null
+    Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.13.0610" -Channel neutral | Out-Null
     Set-Content -LiteralPath (Join-Path $gitFixture "untracked-release-asset.dll") -Value "stale" -NoNewline
-    Assert-Throws { Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.12.0606" -Channel neutral } "untracked release asset must make Git state ambiguous"
+    Assert-Throws { Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.13.0610" -Channel neutral } "untracked release asset must make Git state ambiguous"
 
     $neutralWorktree = Join-Path $tempRoot "linked-neutral"
     $brandWorktree = Join-Path $tempRoot "linked-brand"
@@ -364,12 +392,24 @@ try {
 
     $releaseText = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\build_release_package.ps1") -Raw
     $installerText = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\build_installer.ps1") -Raw
+    $configBuilderText = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\build_config_migrate.ps1") -Raw
     $pairText = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\verify_release_pair.ps1") -Raw
     $commonText = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\release_gate_common.ps1") -Raw
     foreach ($token in @("AppVersion", "Channel", "Assert-ExpectedReleaseExecutable", "Assert-EmptyReleaseRuntimeDirectories", "Get-AuthenticodeSignature", "New-PackageGateReport", "/t:Rebuild", "ReleaseVersionMajor", "ReleaseVersionBuild")) {
         Assert-True ($releaseText.Contains($token)) "build_release_package missing hard gate token $token"
     }
     Assert-True ($releaseText.Contains("-SkipBuild is forbidden")) "SkipBuild must fail closed"
+    foreach ($token in @("MSBuildExecutable", "MSBuildSha256", "WinDeployQtExecutable", "WinDeployQtSha256", "PythonExecutable", "PythonSha256", "Assert-ReleaseExternalTool")) {
+        Assert-True ($releaseText.Contains($token)) "release build must explicitly bind trusted tool $token"
+    }
+    foreach ($token in @("InnoCompilerExecutable", "InnoCompilerSha256", "Assert-ReleaseExternalTool")) {
+        Assert-True ($installerText.Contains($token)) "installer build must explicitly bind trusted tool $token"
+    }
+    Assert-True (-not $releaseText.Contains('$env:QTDIR') -and -not $releaseText.Contains('Find-FirstExistingPath')) "Qt/MSBuild path fallback must be absent"
+    Assert-True (-not $installerText.Contains('Get-ItemProperty') -and -not $installerText.Contains('Find-InnoSetupCompiler')) "ISCC registry/path discovery must be absent"
+    Assert-True ($configBuilderText.Contains('-I -B -c $isolatedBootstrap') `
+        -and $configBuilderText.Contains("[python, '-s', '-P', '-B', '-m', 'PyInstaller'") `
+        -and $configBuilderText.Contains('PythonSha256')) "ConfigMigrate must use explicit hash-bound isolated Python"
     Assert-True (-not $installerText.Contains("Set-Content -LiteralPath `$buildInfoPath")) "installer must not relabel package metadata after package gate"
     Assert-True ($installerText.Contains("-PackageGateReport") -and $installerText.Contains("Assert-PackageGateReport")) "SkipPackageBuild must consume a gate report"
     Assert-True ($releaseText.Contains('Remove-Item -LiteralPath $buildDir -Recurse -Force')) "release build directory must be cleaned before Rebuild"
@@ -377,6 +417,16 @@ try {
     Assert-True ($commonText.Contains('FileVersionInfo') -and $commonText.Contains('0x8664') -and -not $commonText.Contains('ASCII.GetString')) "main executable gate must use x64 PE VersionInfo, not byte markers"
     Assert-True ($pairText.Contains("2MB") -and $pairText.Contains("Assert-ReleaseInventoryMatches") -and $pairText.Contains("Assert-LinkedReleaseWorktrees")) "pair verifier must enforce size, inventory, and linked ancestry gates"
     Assert-True ($pairText.IndexOf('Assert-InstallerGateReport') -lt $pairText.IndexOf('Write-ReleaseGateJson -Value $pending')) "pair must validate inputs before writing pending"
+    foreach ($token in @(
+        'ParameterSetName = "Attest"',
+        'PublishChallenge',
+        'ExpectedCandidateSha256',
+        'ExpectedPairGateSha256',
+        'Assert-ExistingReleasePairMatchesLiveState',
+        'Resolve-PublishAttestationOutputPath',
+        'kind                 = "publish-attestation"')) {
+        Assert-True ($pairText.Contains($token)) "pair verifier fresh publish-attestation mode is missing $token"
+    }
 
     Write-Host "PASS: release packaging gates reject stale, incomplete, cross-channel, and tampered fixtures."
 }

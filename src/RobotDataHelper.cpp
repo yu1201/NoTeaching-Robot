@@ -303,7 +303,11 @@ QString RobotDataHelper::BuildProjectPath(const QString& relativePath)
 
 // ===== 激光点文件 =====
 
-bool RobotDataHelper::LoadIndexedPoint3DFile(const QString& filePath, QVector<RobotCalculation::IndexedPoint3D>& points, QString* error)
+bool RobotDataHelper::LoadIndexedPoint3DFile(
+    const QString& filePath,
+    QVector<RobotCalculation::IndexedPoint3D>& points,
+    QString* error,
+    const std::function<bool()>& stopRequested)
 {
     points.clear();
 
@@ -338,8 +342,18 @@ bool RobotDataHelper::LoadIndexedPoint3DFile(const QString& filePath, QVector<Ro
         return true;
     };
 
+    quint64 lineCount = 0;
     while (!file.atEnd())
     {
+        if ((lineCount++ & 0x3ffU) == 0U && stopRequested && stopRequested())
+        {
+            points.clear();
+            if (error != nullptr)
+            {
+                *error = "已取消读取点文件: " + ToNativeAbsolutePath(filePath);
+            }
+            return false;
+        }
         const QByteArray line = file.readLine();
 
         const char* cursor = line.constData();

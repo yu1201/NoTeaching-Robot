@@ -115,6 +115,9 @@
     <ClCompile Include="src\FANUCRobotDriver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\FanucTpContentIdentity.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\FunctionTestDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -131,6 +134,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\MeasureThenWeldService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\PointCloudProofIntegrity.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RemoteArchiveSecurity.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\PointCloud3DView.cpp">
@@ -157,6 +166,9 @@
     <ClCompile Include="src\WeldResumePlanner.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\WeldSafetyRecoveryStore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\WeldSeamCompDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -170,6 +182,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\RobotOperationLease.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ApplicationInstanceGuard.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\RobotJogDialog.cpp">
@@ -237,6 +252,9 @@
     <ClInclude Include="include\FANUCRobotDriver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\FanucTpContentIdentity.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\FunctionTestDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -259,6 +277,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\MeasureThenWeldService.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\PointCloudProofIntegrity.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RemoteArchiveSecurity.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RemoteWorkerLifecycle.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\OPini.h">
@@ -306,6 +333,9 @@
     <ClInclude Include="include\RobotOperationLease.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\ApplicationInstanceGuard.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\RobotPoseTransform.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -322,6 +352,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldResumePlanner.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotRecoverySafetyPolicy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\WeldSafetyRecoveryStore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\WeldExecutionSafety.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldSeamCompDialog.h">

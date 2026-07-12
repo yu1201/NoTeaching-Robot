@@ -8,25 +8,16 @@ param(
     [switch]$SkipVcRedistDownload,
     [switch]$SkipFanucCompilerTools,
     [string]$Configuration = "Release",
-    [string]$Platform = "x64"
+    [string]$Platform = "x64",
+    [Parameter(Mandatory = $true)][string]$MSBuildExecutable,
+    [Parameter(Mandatory = $true)][string]$MSBuildSha256,
+    [Parameter(Mandatory = $true)][string]$WinDeployQtExecutable,
+    [Parameter(Mandatory = $true)][string]$WinDeployQtSha256,
+    [Parameter(Mandatory = $true)][string]$PythonExecutable,
+    [Parameter(Mandatory = $true)][string]$PythonSha256
 )
 
 $ErrorActionPreference = "Stop"
-
-function Find-FirstExistingPath {
-    param([string[]]$Candidates)
-
-    foreach ($candidate in $Candidates) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) {
-            continue
-        }
-        if (Test-Path -LiteralPath $candidate) {
-            return (Resolve-Path -LiteralPath $candidate).Path
-        }
-    }
-
-    return $null
-}
 
 function Copy-DirectoryContent {
     param(
@@ -87,6 +78,18 @@ if (-not (Test-Path -LiteralPath $gateCommon -PathType Leaf)) {
 }
 . $gateCommon
 
+$msbuildPath = Assert-ReleaseExternalTool `
+    -Path $MSBuildExecutable `
+    -ExpectedSha256 $MSBuildSha256 `
+    -ExpectedFileName "MSBuild.exe" `
+    -PublisherPattern '(?i)Microsoft Corporation'
+$windeployqtPath = Assert-ReleaseExternalTool `
+    -Path $WinDeployQtExecutable `
+    -ExpectedSha256 $WinDeployQtSha256 `
+    -ExpectedFileName "windeployqt.exe" `
+    -PublisherPattern '(?i)The Qt Company'
+Set-ReleasePythonTool -PythonExecutable $PythonExecutable -PythonSha256 $PythonSha256
+
 Assert-ReleaseVersion $AppVersion
 $packageGateReport = Get-PackageGateReportPath -RepoRoot $repoRoot -AppVersion $AppVersion -Channel $Channel
 $packageGateRunId = New-ReleaseGatePendingReport `
@@ -113,6 +116,7 @@ $packageDir = Join-Path $repoRoot "dist\QtWidgetsApplication4"
 $canonicalBuildDir = Join-Path $repoRoot "x64\Release"
 $controlledIntermediateRoot = Join-Path $repoRoot "tmp\ReleaseBuild"
 $intermediateDir = Join-Path $controlledIntermediateRoot "$Channel\$AppVersion\obj"
+$controlledUserRoot = Join-Path $controlledIntermediateRoot "$Channel\$AppVersion\empty-user-root"
 if (-not (Test-ReleaseGateSamePath $buildDir $canonicalBuildDir)) {
     throw "Release build cleanup escaped the canonical x64/Release directory: $buildDir"
 }
@@ -120,21 +124,6 @@ $intermediateFull = Resolve-ReleaseGatePath $intermediateDir
 $intermediatePrefix = (Resolve-ReleaseGatePath $controlledIntermediateRoot) + [System.IO.Path]::DirectorySeparatorChar
 if (-not $intermediateFull.StartsWith($intermediatePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Release intermediate cleanup escaped the controlled tmp/ReleaseBuild directory: $intermediateDir"
-}
-
-$msbuildPath = Find-FirstExistingPath @(
-    "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
-    "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
-    "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
-)
-
-$windeployqtPath = Find-FirstExistingPath @(
-    "E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe",
-    "$env:QTDIR\bin\windeployqt.exe"
-)
-
-if (-not $msbuildPath) {
-    throw "MSBuild.exe was not found. Please install Visual Studio 2022 Build Tools or fix the path in scripts/build_release_package.ps1."
 }
 
 if (Test-Path -LiteralPath $buildDir) {
@@ -149,13 +138,26 @@ if (Test-Path -LiteralPath $buildDir) {
 if (Test-Path -LiteralPath $intermediateDir) {
     throw "Controlled Release intermediate directory could not be cleaned: $intermediateDir"
 }
+New-Item -ItemType Directory -Path $controlledUserRoot -Force | Out-Null
 $versionParts = @($AppVersion.Split('.') | ForEach-Object { [int]$_ })
 Write-Host "Building Release package with a clean MSBuild Rebuild..."
+$msbuildPath = Assert-ReleaseExternalTool `
+    -Path $msbuildPath -ExpectedSha256 $MSBuildSha256 `
+    -ExpectedFileName "MSBuild.exe" -PublisherPattern '(?i)Microsoft Corporation'
 & $msbuildPath $solutionPath /m /t:Rebuild `
     "/p:Configuration=$Configuration" `
     "/p:Platform=$Platform" `
     "/p:OutDir=$buildDir\" `
     "/p:IntDir=$intermediateDir\" `
+    "/p:UserRootDir=$controlledUserRoot\" `
+    "/p:ImportDirectoryBuildProps=false" `
+    "/p:ImportDirectoryBuildTargets=false" `
+    "/p:DirectoryBuildPropsPath=" `
+    "/p:DirectoryBuildTargetsPath=" `
+    "/p:CustomBeforeMicrosoftCommonTargets=" `
+    "/p:CustomAfterMicrosoftCommonTargets=" `
+    "/p:ForceImportBeforeCppTargets=" `
+    "/p:ForceImportAfterCppTargets=" `
     "/p:ReleaseVersionMajor=$($versionParts[0])" `
     "/p:ReleaseVersionMinor=$($versionParts[1])" `
     "/p:ReleaseVersionPatch=$($versionParts[2])" `
@@ -167,6 +169,9 @@ Write-Host "Building Release package with a clean MSBuild Rebuild..."
 if ($LASTEXITCODE -ne 0) {
     throw "MSBuild failed with exit code $LASTEXITCODE."
 }
+$msbuildPath = Assert-ReleaseExternalTool `
+    -Path $msbuildPath -ExpectedSha256 $MSBuildSha256 `
+    -ExpectedFileName "MSBuild.exe" -PublisherPattern '(?i)Microsoft Corporation'
 
 $exePath = Join-Path $buildDir $channelSpec.ExeName
 if (-not (Test-Path -LiteralPath $exePath)) {
@@ -178,15 +183,14 @@ Assert-WindowsPeReleaseVersion `
     -ExpectedProductName $channelSpec.AppName `
     -ExpectedOriginalFilename $channelSpec.ExeName | Out-Null
 
-if (-not $windeployqtPath) {
-    throw "windeployqt.exe was not found. A release package without a verified Qt runtime is forbidden."
-}
-
 Write-Host "Running windeployqt on the Release executable..."
 # Trim payload the app never loads: D3D/DXC shader compilers (pure Widgets + QOpenGLWidget,
 # no Qt Quick/RHI), PDF plugin chain (no PDF feature), unused image formats (icons are svg/ico,
 # png is built into Qt6Gui; keep qjpeg conservatively), unused SQL drivers (only QSQLITE),
 # TLS backends (plain sockets only; FTP goes through WinINet) and TUIO touch plugin.
+$windeployqtPath = Assert-ReleaseExternalTool `
+    -Path $windeployqtPath -ExpectedSha256 $WinDeployQtSha256 `
+    -ExpectedFileName "windeployqt.exe" -PublisherPattern '(?i)The Qt Company'
 & $windeployqtPath --release --no-translations --no-opengl-sw `
     --no-system-d3d-compiler --no-system-dxc-compiler `
     --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer `
@@ -195,6 +199,9 @@ Write-Host "Running windeployqt on the Release executable..."
 if ($LASTEXITCODE -ne 0) {
     throw "windeployqt failed with exit code $LASTEXITCODE."
 }
+$windeployqtPath = Assert-ReleaseExternalTool `
+    -Path $windeployqtPath -ExpectedSha256 $WinDeployQtSha256 `
+    -ExpectedFileName "windeployqt.exe" -PublisherPattern '(?i)The Qt Company'
 
 # windeployqt only ever adds files. Remove previously deployed payload that the
 # options above no longer produce, so stale files in x64\<Config> cannot leak
@@ -330,7 +337,10 @@ $configMigrateBuildScript = Join-Path $repoRoot "scripts\build_config_migrate.ps
 if (-not (Test-Path -LiteralPath $configMigrateBuildScript -PathType Leaf)) {
     throw "Config migration build script was not found: $configMigrateBuildScript"
 }
-& $configMigrateBuildScript -OutputPath (Join-Path $repoRoot "tools\ConfigMigrate.exe") | Out-Null
+& $configMigrateBuildScript `
+    -PythonExecutable $PythonExecutable `
+    -PythonSha256 $PythonSha256 `
+    -OutputPath (Join-Path $repoRoot "tools\ConfigMigrate.exe") | Out-Null
 
 $diagnosticToolsSourceDir = Join-Path $repoRoot "tools"
 $configMigrateExe = Join-Path $diagnosticToolsSourceDir "ConfigMigrate.exe"

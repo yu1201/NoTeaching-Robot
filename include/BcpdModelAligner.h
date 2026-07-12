@@ -33,6 +33,10 @@ public:
         double beta = 0.0;         // -b 平滑核宽，越大形变越平滑、越不会拟合噪声；0 = 默认。
         bool useAcceleration = true;  // -A 加速（仅当模型顶点数 > 70 时实际启用）。
         int timeoutMs = 180000;    // bcpd 进程超时（ms）。
+        // 对话框关闭/流程取消时的协作式中止。回调必须无阻塞且线程安全；返回 true 后
+        // DeformModelToCloud 会中止临时文件写入/结果解析，或立即 kill 子进程，
+        // 避免析构在 UI 线程等待大文件前后处理或完整 timeout。
+        std::function<bool()> cancelRequested;
     };
 
     using LogCallback = std::function<void(const QString&)>;

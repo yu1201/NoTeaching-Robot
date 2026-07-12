@@ -4,7 +4,7 @@
 # 安全约定：
 #   * 默认只做 dry-run；真正修改系统必须同时给出 --apply，并交互确认或给出 --yes。
 #   * 密码和管理令牌只从权限受限的文件读取，绝不接受命令行明文参数，也绝不打印。
-#   * 现有 FTP 白名单只追加 devicedata/uploader，绝不覆盖、排序或删除已有账号。
+#   * 共享 uploader 永久退役；devicedata 是唯一 full 账号，普通账号必须绑定独立目录。
 #   * 管理文件先在同目录写临时文件，再原子替换；失败时从受限备份目录回滚。
 #   * 不删除 nginx 的 default/其他站点，不递归改写已有上传数据的属主或权限。
 #
@@ -13,9 +13,10 @@
 #   sudo -H /bin/bash -p deploy_online_services.sh --apply --skip-packages
 #   sudo -H /bin/bash -p deploy_online_services.sh --apply --yes --skip-packages \
 #       --devicedata-password-file /root/secrets/devicedata.password \
-#       --uploader-password-file /root/secrets/uploader.password
+#       --enable-ufw --ftp-allow-cidr 10.20.0.0/16 \
+#       --data-filesystem-max-bytes 107374182400
 #
-# 新建 devicedata/uploader 时必须提供各自密码文件。账号已存在时省略对应参数会
+# 新建 devicedata 时必须提供密码文件。账号已存在时省略对应参数会
 # 保留原密码。管理令牌若已存在则原样保留；全新部署会在服务器本机生成。
 # 即使操作者误用 bash -x/-v 或继承 xtrace/verbose，也先关闭跟踪，避免后续读取的
 # 密码和令牌在参数展开时进入终端、CI 日志或 journal。
@@ -67,6 +68,7 @@ PASV_ADDRESS=""
 FTP_ALLOW_CIDR=""
 DEVICEDATA_PASSWORD_FILE=""
 UPLOADER_PASSWORD_FILE=""
+DATA_FILESYSTEM_MAX_BYTES=""
 ADMIN_TOKEN_SOURCE=""
 OTA_ADMIN_SOURCE="${SCRIPT_DIR}/ota_admin.py"
 
@@ -74,6 +76,7 @@ OTA_ADMIN_SOURCE="${SCRIPT_DIR}/ota_admin.py"
 DEPLOY_ROOT="${DEPLOY_ROOT:-}"
 DEPLOY_NSS_FIXTURE_DIR="${DEPLOY_NSS_FIXTURE_DIR:-}"
 DEPLOY_UFW_RULES_FIXTURE="${DEPLOY_UFW_RULES_FIXTURE:-}"
+DEPLOY_CAPACITY_FIXTURE="${DEPLOY_CAPACITY_FIXTURE:-}"
 if [[ -n "$DEPLOY_ROOT" && "${DEPLOY_OFFLINE_TEST:-0}" != "1" ]]; then
     echo "错误: DEPLOY_ROOT 仅允许在 DEPLOY_OFFLINE_TEST=1 的离线测试中使用。" >&2
     exit 2
@@ -88,6 +91,11 @@ if [[ -n "$DEPLOY_UFW_RULES_FIXTURE" &&
     echo "错误: DEPLOY_UFW_RULES_FIXTURE 仅允许隔离离线测试使用。" >&2
     exit 2
 fi
+if [[ -n "$DEPLOY_CAPACITY_FIXTURE" &&
+      ( -z "$DEPLOY_ROOT" || "${DEPLOY_OFFLINE_TEST:-0}" != "1" ) ]]; then
+    echo "错误: DEPLOY_CAPACITY_FIXTURE 仅允许隔离离线测试使用。" >&2
+    exit 2
+fi
 DEPLOY_ROOT="${DEPLOY_ROOT:-}"
 
 usage() {
@@ -100,23 +108,24 @@ usage() {
   --yes                           与 --apply 配合，跳过交互确认
   --devicedata-password-file FILE
                                   从 FILE 设置 devicedata 密码；仅新建账号时必需
-  --uploader-password-file FILE   从 FILE 设置 uploader 密码；仅新建账号时必需
+  --uploader-password-file FILE   已废弃且拒绝：共享 uploader 永久退役
   --admin-token-file FILE         从 FILE 安装管理令牌；省略则保留或本机生成
   --ota-admin-source FILE         ota_admin.py 来源（默认与本脚本同目录）
   --skip-packages                 确认依赖已在隔离维护窗口预装；--apply 必需
-  --configure-ufw                 幂等添加 21/8090/40000:40100 规则
-  --enable-ufw                    同时启用 UFW（隐含 --configure-ufw，风险较高）
+  --configure-ufw                 幂等添加私网 FTP 边界（--apply 时必须）
+  --enable-ufw                    确保 UFW 为 active（--apply 时必须）
   --ssh-port PORT                 UFW 放行的 SSH 端口（默认 48890）
   --pasv-address HOST_OR_IP       FTP 被动模式公网回址；NAT 服务器应显式提供
   --ftp-allow-cidr CIDR           仅允许该 VPN/受信网段访问 FTP 主/被动端口
+  --data-filesystem-max-bytes N   独立 /srv/devicedata 文件系统允许的最大实际容量
   -h, --help                      显示帮助
 
 安全提示：不要把密码或令牌直接放到命令行；秘密文件应由 root 拥有且权限为 0600。
 部署器只为本轮新建账号设置初始密码；既有账号改密必须使用 ota-admin 单账号轮换。
 既有全局 download/chmod/umask/file-mode 限制不会被静默放宽；冲突时须人工迁移为
 每账号 canonical 权限配置后再部署。
-上线验收还必须给 /srv/devicedata 配置独立受限文件系统或 quota、剩余空间告警和
-保留阈值；30 天/残件清理不构成容量上限。
+--apply 会实测 /srv/devicedata（或 data）是独立挂载且实际总容量不超过 N；
+没有这个硬边界会失败。当前仍没有 per-device quota，须另行配置告警和保留阈值。
 部署器绝不运行 apt：nginx/vsftpd/ufw/python3/acl 等依赖必须先在独立维护窗口预装。
 预装前先用上游 ACL 隔离公网 TCP 21；若做不到，先执行
 systemctl mask --runtime --now vsftpd.service，避免 postinst 在 canonical 配置生效前启动 FTP。
@@ -152,6 +161,11 @@ while [[ $# -gt 0 ]]; do
         --uploader-password-file)
             [[ $# -ge 2 ]] || die "$1 缺少文件路径"
             UPLOADER_PASSWORD_FILE="$2"
+            shift 2
+            ;;
+        --data-filesystem-max-bytes)
+            [[ $# -ge 2 ]] || die "$1 缺少字节数"
+            DATA_FILESYSTEM_MAX_BYTES="$2"
             shift 2
             ;;
         --admin-token-file)
@@ -208,6 +222,12 @@ done
 
 [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && (( SSH_PORT >= 1 && SSH_PORT <= 65535 )) ||
     die "--ssh-port 必须是 1-65535"
+[[ -z "$DATA_FILESYSTEM_MAX_BYTES" ||
+   ( "$DATA_FILESYSTEM_MAX_BYTES" =~ ^[1-9][0-9]*$ &&
+     ${#DATA_FILESYSTEM_MAX_BYTES} -le 20 ) ]] ||
+    die "--data-filesystem-max-bytes 必须是 1-20 位正整数字节数"
+[[ -z "$UPLOADER_PASSWORD_FILE" ]] ||
+    die "共享 uploader 已永久退役；禁止再提供 --uploader-password-file"
 if [[ -n "$PASV_ADDRESS" ]]; then
     [[ ${#PASV_ADDRESS} -le 253 && "$PASV_ADDRESS" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ &&
        "$PASV_ADDRESS" != *..* ]] ||
@@ -241,6 +261,12 @@ fi
 if [[ "$MODE" == "apply" && "$PACKAGES_PREINSTALLED_ACK" -ne 1 ]]; then
     die "--apply 必须显式给出 --skip-packages，确认依赖已在隔离维护窗口预装；部署器绝不运行 apt"
 fi
+if [[ "$MODE" == "apply" ]]; then
+    [[ "$CONFIGURE_UFW" -eq 1 && "$ENABLE_UFW" -eq 1 && -n "$FTP_ALLOW_CIDR" ]] ||
+        die "明文 FTP 生产部署必须给出 --enable-ufw 和私网/VPN --ftp-allow-cidr"
+    [[ -n "$DATA_FILESYSTEM_MAX_BYTES" ]] ||
+        die "--apply 必须给出 --data-filesystem-max-bytes，并通过独立受限文件系统实测"
+fi
 if [[ "$MODE" == "apply" && -z "$DEPLOY_ROOT" ]]; then
     [[ "$EUID" -eq 0 ]] || die "--apply 必须由 root 执行"
 fi
@@ -253,7 +279,7 @@ for command_name in awk basename cat chmod chown cp date dirname find grep insta
     command -v "$command_name" >/dev/null 2>&1 || die "缺少预装命令: $command_name"
 done
 if [[ -z "$DEPLOY_ROOT" ]]; then
-    for command_name in chpasswd flock getent getfacl gpasswd groupadd groupdel id nginx \
+    for command_name in chpasswd findmnt flock getent gpasswd groupadd groupdel id nginx \
         systemctl timeout useradd userdel usermod vsftpd; do
         command -v "$command_name" >/dev/null 2>&1 ||
             die "缺少预装系统依赖: $command_name；请退出部署并在隔离维护窗口安装"
@@ -288,6 +314,120 @@ readonly OTA_ROOT="$(target_path /var/www/ota)"
 readonly OFFLINE_ACCOUNT_STATE="$(target_path /var/lib/no-teaching-online-services/test-accounts)"
 readonly ACCOUNT_LOCK_DIR="/run/no-teaching-ota"
 readonly ACCOUNT_LOCK_FILE="${ACCOUNT_LOCK_DIR}/ota-accounts.lock"
+
+CAPACITY_STATUS="--apply 时必须实测独立受限文件系统"
+validate_capacity_boundary() {
+    local fixture_target fixture_total fixture_source fixture_identity fixture_parent_identity
+    local fixture_fstype fixture_options query mount_target mount_source mount_identity mount_fstype mount_options
+    local stat_values block_size block_count mount_device parent_device parent_path
+    if [[ -n "$DEPLOY_ROOT" ]]; then
+        [[ -f "$DEPLOY_CAPACITY_FIXTURE" && ! -L "$DEPLOY_CAPACITY_FIXTURE" ]] ||
+            die "离线 --apply 必须提供普通文件 DEPLOY_CAPACITY_FIXTURE"
+        IFS=$'\t' read -r fixture_target fixture_total fixture_source fixture_identity \
+            fixture_parent_identity fixture_fstype fixture_options < <(python3 -I - "$DEPLOY_CAPACITY_FIXTURE" <<'PY'
+import json
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as stream:
+    value = json.load(stream)
+required = {
+    "mountTarget", "totalBytes", "mountSource", "mountIdentity",
+    "parentIdentity", "fsType", "mountOptions",
+}
+if set(value) != required:
+    raise SystemExit("容量夹具字段不完整或含未知字段")
+target = value["mountTarget"]
+total = value["totalBytes"]
+if target not in ("/srv/devicedata", "/srv/devicedata/data"):
+    raise SystemExit("容量夹具 mountTarget 必须是独立设备数据挂载点")
+if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+    raise SystemExit("容量夹具 totalBytes 必须是正整数")
+for key in required - {"totalBytes"}:
+    if not isinstance(value[key], str) or not value[key] or any(ch in value[key] for ch in "\r\n\t"):
+        raise SystemExit(f"容量夹具 {key} 必须是单行非空字符串")
+if value["fsType"] not in {"ext4", "xfs"}:
+    raise SystemExit("容量夹具只接受独立 ext4/xfs；btrfs 子卷须先实现并实测 qgroup quota")
+if not value["mountSource"].startswith("/dev/"):
+    raise SystemExit("容量夹具 mountSource 必须是独立块设备")
+if not re.fullmatch(r"[0-9]+:[0-9]+", value["mountIdentity"]) or not re.fullmatch(
+    r"[0-9]+:[0-9]+", value["parentIdentity"]
+):
+    raise SystemExit("容量夹具 mountIdentity/parentIdentity 格式无效")
+if value["mountIdentity"] == value["parentIdentity"]:
+    raise SystemExit("容量夹具显示数据目录与父目录同一文件系统（bind/共享盘）")
+options = set(value["mountOptions"].split(","))
+if "bind" in options or "rbind" in options:
+    raise SystemExit("容量夹具显示 bind/rbind，不能隔离磁盘耗尽")
+print(
+    target, total, value["mountSource"], value["mountIdentity"],
+    value["parentIdentity"], value["fsType"], value["mountOptions"], sep="\t"
+)
+PY
+        ) || die "无法验证离线容量夹具"
+        fixture_options="${fixture_options//$'\r'/}"
+        [[ "$fixture_total" -le "$DATA_FILESYSTEM_MAX_BYTES" ]] ||
+            die "独立数据文件系统实际容量 ${fixture_total} 超过声明上限 ${DATA_FILESYSTEM_MAX_BYTES}"
+        CAPACITY_STATUS="离线夹具证明 ${fixture_target}(${fixture_source},${fixture_identity},${fixture_fstype}) 独立容量=${fixture_total} bytes"
+        return
+    fi
+
+    # 生产前置条件由外部存储维护窗口完成。部署器不创建 loop/LVM，也不把一个
+    # “已确认”开关当配额；它只接受 findmnt/stat 对当前内核挂载状态的实测结果。
+    if [[ -d /srv/devicedata/data && ! -L /srv/devicedata/data ]]; then
+        query=/srv/devicedata/data
+    elif [[ -d /srv/devicedata && ! -L /srv/devicedata ]]; then
+        query=/srv/devicedata
+    else
+        die "容量硬门禁要求预先挂载独立 /srv/devicedata（或 /srv/devicedata/data）文件系统"
+    fi
+    mount_target="$(findmnt --raw --noheadings --output TARGET --target "$query")" ||
+        die "findmnt 无法解析设备数据挂载点"
+    [[ "$mount_target" != *$'\n'* &&
+       ( "$mount_target" == "/srv/devicedata" || "$mount_target" == "/srv/devicedata/data" ) ]] ||
+        die "设备数据仍落在共享文件系统 ${mount_target:-未知}；必须使用独立受限挂载"
+    [[ "$(readlink -f -- "$mount_target")" == "$mount_target" ]] ||
+        die "设备数据挂载点不得经过符号链接或非规范路径"
+    mount_source="$(findmnt --raw --noheadings --output SOURCE --target "$query")" ||
+        die "无法回读设备数据挂载源"
+    mount_identity="$(findmnt --raw --noheadings --output MAJ:MIN --target "$query")" ||
+        die "无法回读设备数据挂载设备号"
+    mount_fstype="$(findmnt --raw --noheadings --output FSTYPE --target "$query")" ||
+        die "无法回读设备数据文件系统类型"
+    mount_options="$(findmnt --raw --noheadings --output OPTIONS --target "$query")" ||
+        die "无法回读设备数据挂载选项"
+    [[ "$mount_source" == /dev/* && "$mount_identity" =~ ^[0-9]+:[0-9]+$ ]] ||
+        die "设备数据挂载必须来自可审计的独立块设备"
+    [[ "$mount_fstype" == "ext4" || "$mount_fstype" == "xfs" ]] ||
+        die "只接受独立 ext4/xfs；btrfs 子卷须先实现并实测 qgroup quota"
+    [[ ",${mount_options}," != *,bind,* && ",${mount_options}," != *,rbind,* ]] ||
+        die "bind/rbind 挂载与父目录共享容量，拒绝冒充独立上限"
+    parent_path="$(dirname -- "$mount_target")"
+    mount_device="$(stat -c '%d' -- "$mount_target")" || die "无法回读数据挂载设备身份"
+    parent_device="$(stat -c '%d' -- "$parent_path")" || die "无法回读父目录设备身份"
+    [[ "$mount_device" != "$parent_device" ]] ||
+        die "数据挂载与父目录 st_dev 相同，无法排除 bind/同源共享文件系统"
+    stat_values="$(stat -f -c '%S:%b' -- "$mount_target")" ||
+        die "无法实测设备数据文件系统容量"
+    IFS=: read -r block_size block_count <<< "$stat_values"
+    fixture_total="$(python3 -I - "$block_size" "$block_count" "$DATA_FILESYSTEM_MAX_BYTES" <<'PY'
+import sys
+block_size, block_count, expected_max = (int(value) for value in sys.argv[1:])
+actual = block_size * block_count
+if block_size <= 0 or block_count <= 0 or actual > expected_max:
+    raise SystemExit(
+        f"独立数据文件系统实际容量 {actual} 超过声明上限 {expected_max}"
+    )
+print(actual)
+PY
+    )" || die "独立数据文件系统不满足声明容量上限"
+    CAPACITY_STATUS="${mount_target}(${mount_source},${mount_identity},${mount_fstype}) 独立容量=${fixture_total} bytes（上限 ${DATA_FILESYSTEM_MAX_BYTES}）"
+}
+
+if [[ "$MODE" == "apply" ]]; then
+    validate_capacity_boundary
+fi
 
 for regular_target in "$NGINX_SITE" "$VSFTPD_CONFIG" "$VSFTPD_USERLIST" \
     "$SHELLS_FILE" "$OTA_ADMIN_TARGET" "$OTA_ADMIN_TOKEN" "$OTA_ADMIN_UNIT" \
@@ -375,6 +515,51 @@ validate_ftpdata_group() {
         die "ftpdata 的 GID=${gid} 被其他组别名占用或无法唯一确认"
 }
 
+validate_devicedata_private_group() {
+    local passwd_entry admin_uid admin_gid group_entry group_name group_members aliases users_with_gid ftp_entry ftp_gid
+    passwd_entry="$(lookup_passwd_entry devicedata)" || die "无法读取 devicedata 身份"
+    IFS=: read -r _ _ admin_uid admin_gid _ _ _ _ <<< "$passwd_entry"
+    [[ "$admin_uid" =~ ^[0-9]+$ && "$admin_uid" -ge 1000 &&
+       "$admin_gid" =~ ^[0-9]+$ && "$admin_gid" -gt 0 ]] ||
+        die "devicedata 必须使用非特权 UID 和私有主 GID"
+    group_entry="$(all_group_entries | awk -F: -v gid="$admin_gid" '$3 == gid { print }')"
+    [[ -n "$group_entry" && "$group_entry" != *$'\n'* ]] ||
+        die "devicedata 主 GID=${admin_gid} 未唯一映射到私有组"
+    IFS=: read -r group_name _ _ group_members _ <<< "$group_entry"
+    aliases="$(all_group_entries | awk -F: -v gid="$admin_gid" '$3 == gid { print $1 }')"
+    [[ "$aliases" == "$group_name" ]] || die "devicedata 私有 GID 存在组别名"
+    [[ -z "$group_members" || "$group_members" == "devicedata" ]] ||
+        die "devicedata 私有组含其它成员，无法隔离普通设备目录"
+    users_with_gid="$(all_passwd_entries | awk -F: -v gid="$admin_gid" '$4 == gid { print $1 }')"
+    [[ "$users_with_gid" == "devicedata" ]] ||
+        die "devicedata 主 GID 被其它账号共享，无法作为管理访问边界"
+    ftp_entry="$(lookup_group_entry ftpdata)" || die "无法读取 ftpdata 组"
+    IFS=: read -r _ _ ftp_gid _ _ <<< "$ftp_entry"
+    [[ "$admin_gid" != "$ftp_gid" ]] ||
+        die "devicedata 主组不能是共享 ftpdata；请先迁移为私有主组"
+}
+
+validate_device_private_group() {
+    local account="$1" passwd_entry primary_gid admin_entry admin_gid ftp_entry ftp_gid group_entry group_name members aliases users
+    passwd_entry="$(lookup_passwd_entry "$account")" || die "无法读取设备账号 ${account} 身份"
+    IFS=: read -r _ _ _ primary_gid _ _ _ _ <<< "$passwd_entry"
+    admin_entry="$(lookup_passwd_entry devicedata)" || die "无法读取 devicedata 身份"
+    IFS=: read -r _ _ _ admin_gid _ _ _ _ <<< "$admin_entry"
+    ftp_entry="$(lookup_group_entry ftpdata)" || die "无法读取 ftpdata 组"
+    IFS=: read -r _ _ ftp_gid _ _ <<< "$ftp_entry"
+    [[ "$primary_gid" != "$ftp_gid" && "$primary_gid" != "$admin_gid" ]] ||
+        die "设备账号 ${account} 必须使用独立私有主组"
+    group_entry="$(all_group_entries | awk -F: -v gid="$primary_gid" '$3 == gid { print }')"
+    [[ -n "$group_entry" && "$group_entry" != *$'\n'* ]] ||
+        die "设备账号 ${account} 主 GID 未唯一映射"
+    IFS=: read -r group_name _ _ members _ <<< "$group_entry"
+    aliases="$(all_group_entries | awk -F: -v gid="$primary_gid" '$3 == gid { print $1 }')"
+    users="$(all_passwd_entries | awk -F: -v gid="$primary_gid" '$4 == gid { print $1 }')"
+    [[ "$group_name" == "$account" && "$aliases" == "$account" && "$users" == "$account" &&
+       ( -z "$members" || "$members" == "$account" ) ]] ||
+        die "设备账号 ${account} 的私有主组被共享、别名化或含其它成员"
+}
+
 validate_ftpdata_membership_closure() {
     local entry name password gid members extra passwd_line p_name p_gid member
     local -a supplementary=()
@@ -391,6 +576,11 @@ validate_ftpdata_membership_closure() {
     done < <(all_passwd_entries)
 
     for member in "${!seen_members[@]}"; do
+        if [[ "$member" == "uploader" ]]; then
+            ! grep -Fqx -- uploader "${STAGE_DIR}/vsftpd.userlist" ||
+                die "共享 uploader 已退役，禁止保留在最终 FTP 白名单"
+            continue
+        fi
         grep -Fqx -- "$member" "${STAGE_DIR}/vsftpd.userlist" ||
             die "ftpdata 成员 ${member} 未在最终 vsftpd.userlist，拒绝隐藏组权限"
         validate_existing_ftp_account "$member"
@@ -416,7 +606,6 @@ user_in_ftpdata() {
 mark_ftpdata_membership_added() {
     case "$1" in
         devicedata) ADDED_DEVICEDATA_TO_FTPDATA=1 ;;
-        uploader) ADDED_UPLOADER_TO_FTPDATA=1 ;;
         *) die "内部错误: 未知 FTP 账号 $1" ;;
     esac
 }
@@ -459,18 +648,16 @@ create_ftp_account() {
     id "$account" >/dev/null 2>&1 && die "内部错误: ${account} 已存在却进入创建路径"
     case "$account" in
         devicedata) CREATED_DEVICEDATA=1 ;;
-        uploader) CREATED_UPLOADER=1 ;;
         *) die "内部错误: 不允许创建账号 ${account}" ;;
     esac
     set +e
     timeout --signal=TERM --kill-after=5s 30s \
-        useradd -M -d /srv/devicedata -s /usr/sbin/nologin -G ftpdata "$account"
+        useradd -U -M -d /srv/devicedata -s /usr/sbin/nologin -G ftpdata "$account"
     rc=$?
     set -e
     if ! id "$account" >/dev/null 2>&1; then
         case "$account" in
             devicedata) CREATED_DEVICEDATA=0 ;;
-            uploader) CREATED_UPLOADER=0 ;;
         esac
         die "创建 ${account} 失败（退出码 ${rc}）"
     fi
@@ -578,6 +765,40 @@ audit_existing_ufw_ftp_rules() {
     local rules_file="${STAGE_DIR}/ufw-added-rules"
     LC_ALL=C ufw show added > "$rules_file" || die "无法审计现有 UFW 规则"
     validate_ufw_rules_file "$rules_file"
+}
+
+verify_final_private_ftp_firewall() {
+    local rules_file="${STAGE_DIR}/ufw-final-added-rules"
+    local status_file="${STAGE_DIR}/ufw-final-status"
+    LC_ALL=C ufw status verbose > "$status_file" || die "无法回读最终 UFW 状态"
+    grep -Fqx 'Status: active' "$status_file" ||
+        die "最终 UFW 不是 active，明文 FTP 边界未生效"
+    grep -Eq '^Default: deny \(incoming\),' "$status_file" ||
+        die "最终 UFW 默认入站策略不是 deny，私网 FTP allow 不能形成边界"
+    LC_ALL=C ufw show added > "$rules_file" || die "无法回读最终 UFW 规则"
+    validate_ufw_rules_file "$rules_file"
+    grep -Fqx "ufw allow from ${FTP_ALLOW_CIDR} to any port 21 proto tcp" "$rules_file" ||
+        die "最终 UFW 缺少 FTP 控制端口私网规则"
+    grep -Fqx "ufw allow from ${FTP_ALLOW_CIDR} to any port 40000:40100 proto tcp" "$rules_file" ||
+        die "最终 UFW 缺少 FTP 被动端口私网规则"
+}
+
+ensure_private_ftp_firewall() {
+    [[ -f /etc/default/ufw && ! -L /etc/default/ufw ]] ||
+        die "缺少可信 /etc/default/ufw，无法证明启用后的默认入站策略"
+    grep -Fqx 'DEFAULT_INPUT_POLICY="DROP"' /etc/default/ufw ||
+        die "UFW DEFAULT_INPUT_POLICY 必须预先设为 DROP；部署器不擅自改写全局策略"
+    audit_existing_ufw_ftp_rules
+    # SSH 规则先落地；FTP 永远只接收经严格 CIDR 校验的私网/VPN 来源。
+    ufw allow "${SSH_PORT}/tcp"
+    ufw allow 8090/tcp
+    ufw allow from "$FTP_ALLOW_CIDR" to any port 21 proto tcp
+    ufw allow from "$FTP_ALLOW_CIDR" to any port 40000:40100 proto tcp
+    if ! LC_ALL=C ufw status | grep -Fqx 'Status: active'; then
+        validate_ssh_listener_before_ufw_enable
+        ufw --force enable
+    fi
+    verify_final_private_ftp_firewall
 }
 
 account_lock_directory_is_secure() {
@@ -720,9 +941,6 @@ validate_secret_file() {
 if [[ -n "$DEVICEDATA_PASSWORD_FILE" ]]; then
     validate_secret_file "$DEVICEDATA_PASSWORD_FILE" "devicedata 密码文件" 8
 fi
-if [[ -n "$UPLOADER_PASSWORD_FILE" ]]; then
-    validate_secret_file "$UPLOADER_PASSWORD_FILE" "uploader 密码文件" 8
-fi
 if [[ -n "$ADMIN_TOKEN_SOURCE" ]]; then
     validate_secret_file "$ADMIN_TOKEN_SOURCE" "管理令牌文件" 32
 fi
@@ -761,9 +979,7 @@ declare -a SERVICE_ENABLED=()
 declare -a SERVICE_ACTIVE=()
 CREATED_FTP_GROUP=0
 CREATED_DEVICEDATA=0
-CREATED_UPLOADER=0
 ADDED_DEVICEDATA_TO_FTPDATA=0
-ADDED_UPLOADER_TO_FTPDATA=0
 ACCOUNT_LOCK_FD=""
 ACCOUNT_LOCK_HELD=0
 ROLLBACK_INCOMPLETE=0
@@ -795,14 +1011,6 @@ rollback_transaction() {
     done
 
     if [[ -z "$DEPLOY_ROOT" ]]; then
-        if [[ "$ADDED_UPLOADER_TO_FTPDATA" -eq 1 ]]; then
-            timeout --signal=TERM --kill-after=5s 30s \
-                gpasswd -d uploader ftpdata >/dev/null 2>&1 || true
-            if user_in_ftpdata uploader; then
-                echo "警告: 回滚未能撤销 uploader 的 ftpdata 组成员关系" >&2
-                ROLLBACK_INCOMPLETE=1
-            fi
-        fi
         if [[ "$ADDED_DEVICEDATA_TO_FTPDATA" -eq 1 ]]; then
             timeout --signal=TERM --kill-after=5s 30s \
                 gpasswd -d devicedata ftpdata >/dev/null 2>&1 || true
@@ -811,13 +1019,13 @@ rollback_transaction() {
                 ROLLBACK_INCOMPLETE=1
             fi
         fi
-        if [[ "$CREATED_UPLOADER" -eq 1 ]]; then
-            timeout --signal=TERM --kill-after=5s 20s userdel uploader >/dev/null 2>&1 || true
-            id uploader >/dev/null 2>&1 && ROLLBACK_INCOMPLETE=1
-        fi
         if [[ "$CREATED_DEVICEDATA" -eq 1 ]]; then
             timeout --signal=TERM --kill-after=5s 20s userdel devicedata >/dev/null 2>&1 || true
             id devicedata >/dev/null 2>&1 && ROLLBACK_INCOMPLETE=1
+            if lookup_group_entry devicedata >/dev/null 2>&1; then
+                timeout --signal=TERM --kill-after=5s 20s groupdel devicedata >/dev/null 2>&1 || true
+                lookup_group_entry devicedata >/dev/null 2>&1 && ROLLBACK_INCOMPLETE=1
+            fi
         fi
         if [[ "$CREATED_FTP_GROUP" -eq 1 ]]; then
             timeout --signal=TERM --kill-after=5s 20s groupdel ftpdata >/dev/null 2>&1 || true
@@ -909,7 +1117,7 @@ server {
     root /var/www;
     autoindex off;
 
-    location ~ ^/ota/(neutral|brand)/latest\.json$ {
+    location ~ ^/ota/(neutral|brand)/latest(?:-v3)?\.json$ {
         limit_except GET { deny all; }
         try_files $uri =404;
         default_type application/json;
@@ -1026,7 +1234,7 @@ for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=Fa
                 )
             except FileNotFoundError:
                 continue
-            if not stat.S_ISREG(before.st_mode) or before.st_mtime > cutoff:
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_mtime > cutoff:
                 continue
             if before.st_size == int(match.group(1)):
                 continue
@@ -1051,8 +1259,9 @@ for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=Fa
             os.close(directory_fd)
 PY
 
-find "$DATA_ROOT" -xdev -type f -mtime +30 -delete
-find "$DATA_ROOT" -xdev -mindepth 1 -type d -empty -delete
+find "$DATA_ROOT" -xdev -type f -links 1 -mtime +30 -delete
+# depth=1 是账号授权根目录；即使暂时为空也必须保留，否则次日登录会失效。
+find "$DATA_ROOT" -xdev -mindepth 2 -type d -empty -delete
 CRON
 
 build_vsftpd_candidate() {
@@ -1205,99 +1414,17 @@ build_vsftpd_candidate() {
     ' "$source" > "$output" || die "vsftpd 全局配置校验失败"
 }
 
-# 合并 uploader 的既有按用户配置：保留未知限制，并确保 upload-only 不具备
-# 下载、续传、追加、删除、改名或 chmod 能力。0440 让首次 STOR 的已打开文件可
-# 写完，但落盘关闭后不可再次打开覆写；STOR/MKD 初次上传仍保持可用。
-build_uploader_user_conf_candidate() {
+remove_retired_uploader_candidate() {
     local source="$1" output="$2"
     [[ -f "$source" ]] || source="/dev/null"
     awk '
-        function fail(reason) {
-            print "错误: uploader 既有配置不安全: " reason > "/dev/stderr"
-            failed = 1
-            exit 42
-        }
-        function add_denied(command) {
-            if (command in denied) fail("cmds_denied 含重复命令 " command)
-            denied[command] = 1
-            denied_order[++denied_count] = command
-        }
-        BEGIN {
-            required_order[1] = "DELE"
-            required_order[2] = "RMD"
-            required_order[3] = "RNFR"
-            required_order[4] = "RNTO"
-            required_order[5] = "APPE"
-            required_order[6] = "REST"
-            required_count = 6
-            for (i = 1; i <= required_count; i++) required[required_order[i]] = 1
-        }
         {
-            raw = $0
-            line = $0
-            gsub(/^[ \t]+|[ \t]+$/, "", line)
-            if (line == "" || line ~ /^#/) {
-                print raw
-                next
-            }
-            if (index(line, "=") == 0) fail("存在无效行")
-            key = line
-            sub(/[ \t]*=.*/, "", key)
-            value = line
-            sub(/^[^=]*=[ \t]*/, "", value)
-            sub(/[ \t]+$/, "", value)
-            if (key !~ /^[a-z][a-z0-9_]*$/) fail("无效指令名 " key)
-            if (key in seen) fail("重复指令 " key)
-            seen[key] = 1
-
-            if (key == "download_enable" || key == "chmod_enable") {
-                if (value != "NO") fail(key " 必须为 NO")
-                next
-            }
-            if (key == "file_open_mode") {
-                if (value != "0440") fail("file_open_mode 必须为 0440")
-                next
-            }
-            if (key == "cmds_denied") {
-                count = split(value, commands, ",")
-                if (count == 0) fail("cmds_denied 为空")
-                for (i = 1; i <= count; i++) {
-                    command = commands[i]
-                    if (command !~ /^[A-Z][A-Z0-9_]*$/) fail("cmds_denied 格式无效")
-                    add_denied(command)
-                }
-                next
-            }
-            if (key == "hide_ids" && value == "YES") {
-                safe_extra[++safe_count] = key "=" value
-                next
-            }
-            if (key ~ /_enable$/ && value == "NO") {
-                safe_extra[++safe_count] = key "=" value
-                next
-            }
-            fail("不支持可能放权的指令 " key)
+            logical = $0
+            gsub(/^[ \t]+|[ \t]+$/, "", logical)
+            if (logical == "uploader") next
+            print
         }
-        END {
-            if (failed) exit 42
-            print "download_enable=NO"
-            print "chmod_enable=NO"
-            print "file_open_mode=0440"
-            for (i = 1; i <= required_count; i++) {
-                command = required_order[i]
-                if (!(command in denied)) {
-                    denied[command] = 1
-                    denied_order[++denied_count] = command
-                }
-            }
-            printf "cmds_denied="
-            for (i = 1; i <= denied_count; i++) {
-                printf "%s%s", (i == 1 ? "" : ","), denied_order[i]
-            }
-            printf "\n"
-            for (i = 1; i <= safe_count; i++) print safe_extra[i]
-        }
-    ' "$source" > "$output" || die "uploader 按用户配置校验失败"
+    ' "$source" > "$output"
 }
 
 validate_upload_only_user_conf() {
@@ -1306,7 +1433,7 @@ validate_upload_only_user_conf() {
         die "账号 ${account} 的按用户配置不是普通文件"
     [[ "$(stat -c '%s' -- "$path")" -le 65536 ]] ||
         die "账号 ${account} 的按用户配置超过 64KiB"
-    awk -v account="$account" '
+    awk -v account="$account" -v expected_root="/srv/devicedata" '
         function fail(reason) {
             print "错误: 账号 " account " 的 upload-only 配置不安全: " reason > "/dev/stderr"
             failed = 1
@@ -1332,6 +1459,14 @@ validate_upload_only_user_conf() {
                 if (value != "0440") fail("file_open_mode 必须为 0440")
                 next
             }
+            if (key == "local_umask") {
+                if (value != "007") fail("local_umask 必须为 007")
+                next
+            }
+            if (key == "local_root") {
+                if (value != expected_root) fail("local_root 必须保持 root-owned /srv/devicedata chroot")
+                next
+            }
             if (key == "cmds_denied") {
                 count = split(value, commands, ",")
                 for (i = 1; i <= count; i++) {
@@ -1350,11 +1485,33 @@ validate_upload_only_user_conf() {
         END {
             if (failed) exit 42
             if (!("download_enable" in seen) || !("chmod_enable" in seen) ||
-                !("file_open_mode" in seen) || !("cmds_denied" in seen)) exit 43
+                !("file_open_mode" in seen) || !("local_umask" in seen) ||
+                !("local_root" in seen) || !("cmds_denied" in seen)) exit 43
             split("DELE RMD RNFR RNTO APPE REST", required, " ")
             for (i = 1; i <= 6; i++) if (!(required[i] in denied)) exit 44
         }
     ' "$path" || die "账号 ${account} 的 upload-only 配置不满足 canonical"
+}
+
+validate_device_directory() {
+    local account="$1" path="${FTP_DATA}/$1" account_entry admin_entry account_uid admin_gid attrs mode uid gid unsafe
+    [[ "$account" =~ ^[a-z][a-z0-9_-]{2,31}$ && "$account" != "uploader" ]] ||
+        die "设备账号名无效或仍使用已退役 uploader"
+    [[ -d "$path" && ! -L "$path" ]] ||
+        die "账号 ${account} 缺少真实独立目录 ${path}；拒绝共享目录上传"
+    unsafe="$(find "$path" -xdev \( -type l -o \( -type f -links +1 \) \) -print -quit)"
+    [[ -z "$unsafe" ]] ||
+        die "账号 ${account} 目录含符号链接/硬链接，无法证明设备边界"
+    if [[ -z "$DEPLOY_ROOT" ]]; then
+        account_entry="$(lookup_passwd_entry "$account")"
+        admin_entry="$(lookup_passwd_entry devicedata)"
+        IFS=: read -r _ _ account_uid _ _ _ _ _ <<< "$account_entry"
+        IFS=: read -r _ _ _ admin_gid _ _ _ _ <<< "$admin_entry"
+        attrs="$(stat -c '%a:%u:%g' -- "$path")"
+        IFS=: read -r mode uid gid <<< "$attrs"
+        [[ "$mode" == "2770" && "$uid" == "$account_uid" && "$gid" == "$admin_gid" ]] ||
+            die "账号 ${account} 目录必须为 account:devicedata-private-gid 2770"
+    fi
 }
 
 append_line_candidate() {
@@ -1371,6 +1528,7 @@ verify_userlist_preserved() {
     [[ -f "$original" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == "uploader" ]] && continue
         grep -Fqx -- "$line" "$candidate" || die "内部错误: FTP 白名单候选丢失既有账号"
     done < "$original"
 }
@@ -1382,12 +1540,11 @@ refresh_ftp_candidates() {
         : > "${STAGE_DIR}/original-vsftpd.userlist"
     fi
     build_vsftpd_candidate "$VSFTPD_CONFIG" "${STAGE_DIR}/vsftpd.conf"
-    append_line_candidate "$VSFTPD_USERLIST" "${STAGE_DIR}/vsftpd.userlist.first" "devicedata"
-    append_line_candidate "${STAGE_DIR}/vsftpd.userlist.first" \
-        "${STAGE_DIR}/vsftpd.userlist" "uploader"
+    remove_retired_uploader_candidate "$VSFTPD_USERLIST" \
+        "${STAGE_DIR}/vsftpd.userlist.without-uploader"
+    append_line_candidate "${STAGE_DIR}/vsftpd.userlist.without-uploader" \
+        "${STAGE_DIR}/vsftpd.userlist" "devicedata"
     append_line_candidate "$SHELLS_FILE" "${STAGE_DIR}/shells" "/usr/sbin/nologin"
-    build_uploader_user_conf_candidate "${VSFTPD_USER_CONF_DIR}/uploader" \
-        "${STAGE_DIR}/uploader.user.conf"
     verify_userlist_preserved "$VSFTPD_USERLIST" "${STAGE_DIR}/vsftpd.userlist"
 }
 
@@ -1415,19 +1572,8 @@ validate_ftp_candidates() {
     fi
     grep -Fqx 'devicedata' "${STAGE_DIR}/vsftpd.userlist" ||
         die "内部错误: FTP 白名单缺少 devicedata"
-    grep -Fqx 'uploader' "${STAGE_DIR}/vsftpd.userlist" ||
-        die "内部错误: FTP 白名单缺少 uploader"
-    grep -Fqx 'download_enable=NO' "${STAGE_DIR}/uploader.user.conf" ||
-        die "内部错误: uploader 未禁用下载"
-    grep -Fqx 'chmod_enable=NO' "${STAGE_DIR}/uploader.user.conf" ||
-        die "内部错误: uploader 未禁用 chmod"
-    grep -Fqx 'file_open_mode=0440' "${STAGE_DIR}/uploader.user.conf" ||
-        die "内部错误: uploader 未启用 write-once 文件模式"
-    for denied_command in DELE RMD RNFR RNTO APPE REST; do
-        grep -Eq "^cmds_denied=([^,]+,)*${denied_command}(,[^,]+)*$" \
-            "${STAGE_DIR}/uploader.user.conf" ||
-            die "内部错误: uploader 未禁用 ${denied_command}"
-    done
+    ! grep -Fqx 'uploader' "${STAGE_DIR}/vsftpd.userlist" ||
+        die "内部错误: 共享 uploader 未从候选白名单退役"
 }
 
 validate_final_ftp_account_state() {
@@ -1436,6 +1582,8 @@ validate_final_ftp_account_state() {
     while IFS= read -r account || [[ -n "$account" ]]; do
         [[ "$account" =~ ^[a-z][a-z0-9_-]{2,31}$ ]] ||
             die "vsftpd.userlist 含无效账号名: $account"
+        [[ "$account" != "uploader" ]] ||
+            die "共享 uploader 已退役，禁止出现在最终 FTP 白名单"
         [[ ! -v "seen_accounts[$account]" ]] ||
             die "vsftpd.userlist 含重复账号: $account"
         seen_accounts["$account"]=1
@@ -1446,21 +1594,40 @@ validate_final_ftp_account_state() {
         if [[ "$account" == "devicedata" ]]; then
             [[ ! -e "$conf" && ! -L "$conf" ]] ||
                 die "devicedata 必须为 full，不能有按用户限制文件"
-        elif [[ -e "$conf" || -L "$conf" ]]; then
+        else
+            validate_device_private_group "$account"
             validate_upload_only_user_conf "$account"
-        elif [[ "$account" == "uploader" ]]; then
-            die "uploader 缺少 canonical write-once 配置"
+            validate_device_directory "$account"
         fi
     done < <(awk '
         { gsub(/^[ \t]+|[ \t]+$/, "") }
         NF && $0 !~ /^#/ { print }
     ' "$VSFTPD_USERLIST")
-    [[ -v 'seen_accounts[devicedata]' && -v 'seen_accounts[uploader]' ]] ||
-        die "最终白名单缺少受保护账号"
+    [[ -v 'seen_accounts[devicedata]' ]] || die "最终白名单缺少 devicedata 管理账号"
+    validate_devicedata_private_group
+}
+
+validate_preexisting_device_isolation() {
+    local account
+    [[ -z "$DEPLOY_ROOT" || -n "$DEPLOY_NSS_FIXTURE_DIR" ]] || return 0
+    if account_exists devicedata; then
+        validate_existing_ftp_account devicedata
+        validate_devicedata_private_group
+    fi
+    while IFS= read -r account || [[ -n "$account" ]]; do
+        [[ -z "$account" || "$account" == \#* || "$account" == "devicedata" ]] && continue
+        validate_existing_ftp_account "$account"
+        user_in_ftpdata "$account" || die "设备账号 ${account} 不是 ftpdata 成员"
+        validate_device_private_group "$account"
+        validate_upload_only_user_conf "$account"
+        validate_device_directory "$account"
+    done < <(awk '{ gsub(/^[ \t]+|[ \t]+$/, ""); if (NF && $0 !~ /^#/) print }' \
+        "${STAGE_DIR}/vsftpd.userlist")
 }
 
 refresh_ftp_candidates
 validate_ftp_candidates
+validate_preexisting_device_isolation
 
 if command -v python3 >/dev/null 2>&1; then
     OTA_ADMIN_STAGED_FOR_CHECK="$OTA_ADMIN_STAGED" python3 -I - <<'PY'
@@ -1489,11 +1656,12 @@ if [[ "$MODE" == "dry-run" ]]; then
 将原子管理: ${NGINX_SITE}
              ${VSFTPD_CONFIG}
              ${OTA_ADMIN_UNIT}
-将保留 FTP 白名单中的 ${existing_users} 个既有条目，并仅在缺少时追加 devicedata/uploader。
-账号能力: devicedata=full；uploader=write-once（禁止下载、续传、追加、删除、改名、chmod）。
+将保留除已退役 uploader 外的既有 FTP 白名单，并在缺少时追加 devicedata。
+账号能力: devicedata=唯一 full；普通账号=write-once + /data/<account> 独立目录。
 PASV 公网回址: ${PASV_STATUS}
 不会删除其他 nginx 站点，不会重置既有 FTP 密码，不会递归改写上传数据。
-UFW 规则: $([[ "$CONFIGURE_UFW" -eq 1 ]] && echo "明确请求，只追加 SSH ${SSH_PORT}/tcp、OTA 8090/tcp，FTP 限制到 ${FTP_ALLOW_CIDR}" || echo "未请求，不改动")
+UFW 规则: --apply 强制 active，FTP 仅允许 ${FTP_ALLOW_CIDR:-<必须提供的私网/VPN CIDR>}
+容量边界: ${CAPACITY_STATUS}
 
 确认计划后，使用 --apply；无人值守执行还必须显式给出 --yes。
 EOF
@@ -1516,7 +1684,7 @@ else
 fi
 
 if [[ -z "$DEPLOY_ROOT" ]]; then
-    for secret_source in "$DEVICEDATA_PASSWORD_FILE" "$UPLOADER_PASSWORD_FILE" "$ADMIN_TOKEN_SOURCE"; do
+    for secret_source in "$DEVICEDATA_PASSWORD_FILE" "$ADMIN_TOKEN_SOURCE"; do
         [[ -z "$secret_source" ]] && continue
         [[ "$(stat -c '%u' -- "$secret_source")" == "0" ]] ||
             die "--apply 使用的秘密文件必须由 root 拥有: $secret_source"
@@ -1543,19 +1711,11 @@ else
     [[ -n "$DEVICEDATA_PASSWORD_FILE" ]] ||
         die "新建 devicedata 必须提供 --devicedata-password-file；脚本拒绝生成无法取回的 FTP 密码"
 fi
-if account_exists uploader; then
-    [[ -z "$UPLOADER_PASSWORD_FILE" ]] ||
-        die "既有 uploader 禁止由部署器改密；请通过 ota-admin 单账号轮换"
-else
-    [[ -n "$UPLOADER_PASSWORD_FILE" ]] ||
-        die "新建 uploader 必须提供 --uploader-password-file；脚本拒绝生成无法取回的 FTP 密码"
-fi
 if [[ -z "$DEPLOY_ROOT" ]]; then
     if getent group ftpdata >/dev/null 2>&1; then
         validate_ftpdata_group
     fi
     account_exists devicedata && validate_existing_ftp_account devicedata
-    account_exists uploader && validate_existing_ftp_account uploader
 fi
 
 readonly BACKUP_BASE="$(target_path /var/backups/no-teaching-online-services)"
@@ -1719,26 +1879,9 @@ ensure_directory() {
     fi
 }
 
-audit_existing_uploader_files() {
-    local writable_file acl_report="${STAGE_DIR}/existing-upload-acl-audit"
-    writable_file="$(find "$FTP_DATA" -xdev -type f \
-        \( \( -user uploader -perm -0200 \) -o -perm /0022 \) \
-        -print -quit)"
-    [[ -z "$writable_file" ]] ||
-        die "存量上传文件仍可被 uploader 覆写；请人工移除写位/调整属主后重试（未自动递归修改）"
-
-    getfacl --absolute-names --skip-base -R -- "$FTP_DATA" > "$acl_report" 2>/dev/null ||
-        die "无法审计存量上传目录 ACL"
-    [[ ! -s "$acl_report" ]] ||
-        die "存量上传目录含扩展 ACL，部署器无法证明 write-once；请人工审计并清理后重试"
-    rm -f -- "$acl_report"
-    unset writable_file
-}
-
 log "=== 2/7 准备非破坏 FTP 目录和账号 ==="
 if [[ -n "$DEPLOY_ROOT" ]]; then
     account_exists devicedata || CREATED_DEVICEDATA=1
-    account_exists uploader || CREATED_UPLOADER=1
 else
     if ! getent group ftpdata >/dev/null 2>&1; then
         create_ftpdata_group
@@ -1752,16 +1895,8 @@ else
         validate_existing_ftp_account devicedata
         add_existing_account_to_ftpdata devicedata
     fi
-    if ! id uploader >/dev/null 2>&1; then
-        create_ftp_account uploader
-    else
-        [[ -z "$UPLOADER_PASSWORD_FILE" ]] ||
-            die "uploader 在部署期间变为既有账号，拒绝继续或改密"
-        validate_existing_ftp_account uploader
-        add_existing_account_to_ftpdata uploader
-    fi
     validate_existing_ftp_account devicedata
-    validate_existing_ftp_account uploader
+    validate_devicedata_private_group
 fi
 if [[ -z "$DEPLOY_ROOT" || -n "$DEPLOY_NSS_FIXTURE_DIR" ]]; then
     validate_ftpdata_group
@@ -1769,7 +1904,7 @@ if [[ -z "$DEPLOY_ROOT" || -n "$DEPLOY_NSS_FIXTURE_DIR" ]]; then
 fi
 
 ensure_directory "$FTP_ROOT" root root 0755
-ensure_directory "$FTP_DATA" root ftpdata 2770
+ensure_directory "$FTP_DATA" root devicedata 2771
 ensure_directory "$VSFTPD_USER_CONF_DIR" root root 0755
 ensure_directory "$OTA_ROOT" root root 0755
 ensure_directory "${OTA_ROOT}/neutral" root root 0755
@@ -1777,12 +1912,8 @@ ensure_directory "${OTA_ROOT}/brand" root root 0755
 ensure_directory "$OTA_ADMIN_DIR" root root 0700
 if [[ -n "$DEPLOY_ROOT" ]]; then
     ensure_directory "$(dirname -- "$OFFLINE_ACCOUNT_STATE")" root root 0700
-    append_line_candidate "$OFFLINE_ACCOUNT_STATE" "${STAGE_DIR}/offline-accounts.first" "devicedata"
-    append_line_candidate "${STAGE_DIR}/offline-accounts.first" \
-        "${STAGE_DIR}/offline-accounts" "uploader"
+    append_line_candidate "$OFFLINE_ACCOUNT_STATE" "${STAGE_DIR}/offline-accounts" "devicedata"
     atomic_install_file "${STAGE_DIR}/offline-accounts" "$OFFLINE_ACCOUNT_STATE" 0600 root root
-else
-    audit_existing_uploader_files
 fi
 
 log "=== 3/7 原子安装 nginx/vsftpd 配置 ==="
@@ -1792,8 +1923,13 @@ atomic_install_file "${STAGE_DIR}/vsftpd.conf" "$VSFTPD_CONFIG" 0600 root root
 atomic_install_file "${STAGE_DIR}/vsftpd.userlist" "$VSFTPD_USERLIST" 0600 root root
 atomic_install_file "${STAGE_DIR}/shells" "$SHELLS_FILE" 0644 root root
 verify_userlist_preserved "${STAGE_DIR}/original-vsftpd.userlist" "$VSFTPD_USERLIST"
-atomic_install_file "${STAGE_DIR}/uploader.user.conf" \
-    "${VSFTPD_USER_CONF_DIR}/uploader" 0600 root root
+# 共享 uploader 已不在 allow-list；删除其旧按用户文件，避免后续误判为可恢复账号。
+if [[ -e "${VSFTPD_USER_CONF_DIR}/uploader" || -L "${VSFTPD_USER_CONF_DIR}/uploader" ]]; then
+    [[ -f "${VSFTPD_USER_CONF_DIR}/uploader" && ! -L "${VSFTPD_USER_CONF_DIR}/uploader" ]] ||
+        die "退役 uploader 配置不是普通文件"
+    snapshot_target "${VSFTPD_USER_CONF_DIR}/uploader"
+    rm -f -- "${VSFTPD_USER_CONF_DIR}/uploader"
+fi
 # 无按用户覆盖即为 full。任何旧配置都会先备份，再移除；失败回滚时恢复。
 if [[ -e "${VSFTPD_USER_CONF_DIR}/devicedata" || -L "${VSFTPD_USER_CONF_DIR}/devicedata" ]]; then
     [[ -f "${VSFTPD_USER_CONF_DIR}/devicedata" && ! -L "${VSFTPD_USER_CONF_DIR}/devicedata" ]] ||
@@ -1804,17 +1940,14 @@ fi
 if [[ -z "$DEPLOY_ROOT" ]]; then
     id -nG devicedata | tr ' ' '\n' | grep -Fqx ftpdata ||
         die "devicedata 未加入 ftpdata 共享组"
-    id -nG uploader | tr ' ' '\n' | grep -Fqx ftpdata ||
-        die "uploader 未加入 ftpdata 共享组"
-    [[ "$(stat -c '%a' -- "$FTP_DATA")" == "2770" ]] ||
-        die "共享数据目录未保持 2770/setgid"
-    [[ "$(stat -c '%G' -- "$FTP_DATA")" == "ftpdata" ]] ||
-        die "共享数据目录组不是 ftpdata"
+    [[ "$(stat -c '%a' -- "$FTP_DATA")" == "2771" ]] ||
+        die "数据根目录未保持 2771（管理员 rwx、设备仅 traverse）"
+    admin_gid="$(lookup_passwd_entry devicedata | awk -F: '{print $4}')"
+    [[ "$(stat -c '%g' -- "$FTP_DATA")" == "$admin_gid" ]] ||
+        die "数据根目录组不是 devicedata 私有主组"
 fi
 [[ ! -e "${VSFTPD_USER_CONF_DIR}/devicedata" ]] ||
     die "devicedata 应为 full，不能残留按用户限制"
-grep -Fqx 'download_enable=NO' "${VSFTPD_USER_CONF_DIR}/uploader" ||
-    die "uploader upload-only 配置安装失败"
 if [[ -z "$DEPLOY_ROOT" || -n "$DEPLOY_NSS_FIXTURE_DIR" ]]; then
     validate_final_ftp_account_state
 fi
@@ -1854,6 +1987,8 @@ if [[ -z "$DEPLOY_ROOT" ]]; then
     if command -v systemd-analyze >/dev/null 2>&1; then
         systemd-analyze verify "$OTA_ADMIN_UNIT"
     fi
+    # 明文 FTP 不得在防火墙边界确认前启动。规则即使后续事务回滚也只会更收紧。
+    ensure_private_ftp_firewall
     systemctl daemon-reload
     systemctl enable --now nginx vsftpd ota-admin
     systemctl reload nginx
@@ -1911,31 +2046,20 @@ if [[ -n "$DEPLOY_ROOT" ]]; then
     # 密码文件已完成格式/权限校验；离线模式严禁调用宿主机 chpasswd，也不落盘秘密。
     [[ "$CREATED_DEVICEDATA" -eq 0 || -n "$DEVICEDATA_PASSWORD_FILE" ]] ||
         die "内部错误: 离线新建 devicedata 缺少密码文件"
-    [[ "$CREATED_UPLOADER" -eq 0 || -n "$UPLOADER_PASSWORD_FILE" ]] ||
-        die "内部错误: 离线新建 uploader 缺少密码文件"
-    log "离线测试：两账号密码输入已校验，未调用宿主机 chpasswd。"
+    log "离线测试：devicedata 密码输入已校验，未调用宿主机 chpasswd。"
 else
     if [[ "$CREATED_DEVICEDATA" -eq 0 ]]; then
         [[ -z "$DEVICEDATA_PASSWORD_FILE" ]] || die "内部错误: 既有 devicedata 收到改密文件"
         log "既有 devicedata 保留原密码；部署器不承担密码轮换。"
     fi
-    if [[ "$CREATED_UPLOADER" -eq 0 ]]; then
-        [[ -z "$UPLOADER_PASSWORD_FILE" ]] || die "内部错误: 既有 uploader 收到改密文件"
-        log "既有 uploader 保留原密码；部署器不承担密码轮换。"
-    fi
-    if [[ "$CREATED_DEVICEDATA" -eq 1 || "$CREATED_UPLOADER" -eq 1 ]]; then
-        # 单次批量 chpasswd 共用 10s 阶段预算；秘密只经匿名管道传递，不落盘/参数/日志。
+    if [[ "$CREATED_DEVICEDATA" -eq 1 ]]; then
+        # 单账号 chpasswd 使用 10s 阶段预算；秘密只经匿名管道传递，不落盘/参数/日志。
         set +e
         {
             if [[ "$CREATED_DEVICEDATA" -eq 1 ]]; then
                 IFS= read -r devicedata_password < "$DEVICEDATA_PASSWORD_FILE" || true
                 printf 'devicedata:%s\n' "$devicedata_password"
                 unset devicedata_password
-            fi
-            if [[ "$CREATED_UPLOADER" -eq 1 ]]; then
-                IFS= read -r uploader_password < "$UPLOADER_PASSWORD_FILE" || true
-                printf 'uploader:%s\n' "$uploader_password"
-                unset uploader_password
             fi
         } | timeout --signal=TERM --kill-after=5s 10s chpasswd
         password_status=("${PIPESTATUS[@]}")
@@ -1953,30 +2077,11 @@ if [[ -z "$DEPLOY_ROOT" ]]; then
     release_account_mutation_lock
 fi
 
-# UFW 是显式 opt-in 的外部状态，无法与文件原子回滚；因此只在核心提交后作为
-# 最后一步执行并明确报告。
-
-log "=== 7/7 防火墙（核心事务提交后的显式可选步骤） ==="
-if [[ "$CONFIGURE_UFW" -eq 1 ]]; then
-    if [[ -n "$DEPLOY_ROOT" ]]; then
-        log "离线测试：仅验证 UFW 计划，未调用宿主机 ufw。"
-    else
-        log "核心部署已提交；UFW 规则只追加、不删除，且不属于文件回滚范围。"
-        # SSH 规则必须最先加入；只追加规则且绝不 reset/delete，避免启用 UFW 后锁死远程会话。
-        ufw allow "${SSH_PORT}/tcp"
-        ufw allow 8090/tcp
-        ufw allow from "$FTP_ALLOW_CIDR" to any port 21 proto tcp
-        ufw allow from "$FTP_ALLOW_CIDR" to any port 40000:40100 proto tcp
-        if [[ "$ENABLE_UFW" -eq 1 ]]; then
-            # enable 永远最后执行，后面不再做任何可能改变部署结论的验证或变更。
-            validate_ssh_listener_before_ufw_enable
-            ufw --force enable
-        else
-            log "已添加规则，但未改变 UFW 的启用状态。"
-        fi
-    fi
+log "=== 7/7 回读强制防火墙边界 ==="
+if [[ -n "$DEPLOY_ROOT" ]]; then
+    log "离线测试：已验证强制 UFW 参数/规则夹具，未调用宿主机 ufw。"
 else
-    log "未请求 --configure-ufw；保持现有防火墙不变。"
+    verify_final_private_ftp_firewall
 fi
 
 log ""
@@ -1984,4 +2089,5 @@ log "部署和本机验证完成。"
 log "备份目录: $BACKUP_DIR"
 log "管理令牌仅保存在受限文件 /opt/ota-admin/token；本脚本不会显示其内容。"
 log "管理接口默认仅允许 loopback；远程管理必须经 TLS 或 SSH 等可信隧道。"
-log "uploader 为 write-once；存量文件若有写位或扩展 ACL，本脚本会拒绝部署而不自动迁移。"
+log "共享 uploader 已退役；普通账号只写 /data/<account>，devicedata 通过私有组管理。"
+log "容量边界: ${CAPACITY_STATUS}；当前无 per-device quota。"

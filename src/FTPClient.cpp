@@ -4,11 +4,32 @@
 #include <sstream>
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 
 namespace
 {
+    constexpr DWORD kFtpConnectTimeoutMs = 15 * 1000;
+    constexpr DWORD kFtpIoTimeoutMs = 30 * 1000;
+
+    bool SetFtpInternetTimeout(HINTERNET handle, DWORD option, DWORD timeoutMs)
+    {
+        return handle != nullptr
+            && InternetSetOptionA(handle, option, &timeoutMs, sizeof(timeoutMs)) != FALSE;
+    }
+
+    bool ConfigureFtpInternetTimeouts(HINTERNET handle)
+    {
+        // Set on the InternetOpen root before InternetConnect; WinINet inherits
+        // these options to every derived FTP connection/file/find handle.
+        return SetFtpInternetTimeout(handle, INTERNET_OPTION_CONNECT_TIMEOUT, kFtpConnectTimeoutMs)
+            && SetFtpInternetTimeout(handle, INTERNET_OPTION_SEND_TIMEOUT, kFtpIoTimeoutMs)
+            && SetFtpInternetTimeout(handle, INTERNET_OPTION_RECEIVE_TIMEOUT, kFtpIoTimeoutMs)
+            && SetFtpInternetTimeout(handle, INTERNET_OPTION_DATA_SEND_TIMEOUT, kFtpIoTimeoutMs)
+            && SetFtpInternetTimeout(handle, INTERNET_OPTION_DATA_RECEIVE_TIMEOUT, kFtpIoTimeoutMs);
+    }
+
     long long ElapsedMs(std::chrono::steady_clock::time_point start)
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -216,6 +237,15 @@ bool FtpClient::connectFtpServer() {
             if (m_messageBoxesEnabled) {
                 showErrorMessage("FTP错误", "%s", errMsg.c_str());
             }
+            return false;
+        }
+        if (!ConfigureFtpInternetTimeouts(m_hInternet)) {
+            const std::string errMsg = "FTP超时策略设置失败，已拒绝建立无界连接 | " + getFtpErrorMsg();
+            m_log->write(LogColor::ERR, "%s", errMsg.c_str());
+            if (m_messageBoxesEnabled) {
+                showErrorMessage("FTP错误", "%s", errMsg.c_str());
+            }
+            closeFtpSession();
             return false;
         }
 
@@ -475,9 +505,19 @@ bool FtpClient::uploadFileWithProgress(const std::string& localFilePath,
     return true;
 }
 
-bool FtpClient::listFiles(const std::string& remoteDir, std::vector<FtpRemoteFileInfo>& files)
+bool FtpClient::listFiles(
+    const std::string& remoteDir,
+    std::vector<FtpRemoteFileInfo>& files,
+    std::atomic<bool>* cancelFlag,
+    size_t maximumEntries)
 {
     files.clear();
+    auto cancelled = [cancelFlag]()
+        { return cancelFlag != nullptr && cancelFlag->load(); };
+    if (maximumEntries == 0 || maximumEntries > 10000 || cancelled())
+    {
+        return false;
+    }
     const auto totalStart = std::chrono::steady_clock::now();
     if (m_log != nullptr)
     {
@@ -528,6 +568,11 @@ bool FtpClient::listFiles(const std::string& remoteDir, std::vector<FtpRemoteFil
     DWORD nextError = ERROR_SUCCESS;
     do
     {
+        if (cancelled())
+        {
+            nextError = ERROR_OPERATION_ABORTED;
+            break;
+        }
         const std::string name = findData.cFileName;
         if (name.empty() || name == "." || name == "..")
         {
@@ -540,13 +585,22 @@ bool FtpClient::listFiles(const std::string& remoteDir, std::vector<FtpRemoteFil
         info.isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         info.size = FileSizeFromFindData(findData);
         info.modifiedTime = FormatFileTimeText(findData.ftLastWriteTime);
+        if (files.size() >= maximumEntries)
+        {
+            nextError = ERROR_BUFFER_OVERFLOW;
+            break;
+        }
         files.push_back(info);
     } while (InternetFindNextFileA(findHandle, &findData));
 
-    nextError = GetLastError();
+    if (nextError == ERROR_SUCCESS)
+    {
+        nextError = GetLastError();
+    }
     InternetCloseHandle(findHandle);
     if (nextError != ERROR_NO_MORE_FILES)
     {
+        SetLastError(nextError);
         std::string errMsg = "读取FTP目录中断 | 目录：" + remoteDir + " | " + getFtpErrorMsg();
         if (m_log != nullptr)
         {
@@ -634,6 +688,161 @@ bool FtpClient::downloadFile(const std::string& remoteFilePath, const std::strin
         closeFtpSession();
         return false;
     }
+}
+
+bool FtpClient::downloadFileBounded(
+    const std::string& remoteFilePath,
+    const std::string& localFilePath,
+    unsigned long long expectedRemoteBytes,
+    unsigned long long maximumBytes,
+    std::atomic<bool>* cancelFlag)
+{
+    auto cancelled = [cancelFlag]()
+        { return cancelFlag != nullptr && cancelFlag->load(); };
+    if (expectedRemoteBytes == 0
+        || maximumBytes == 0
+        || expectedRemoteBytes > maximumBytes
+        || cancelled())
+    {
+        return false;
+    }
+    if (m_log != nullptr)
+    {
+        m_log->write(LogColor::DEFAULT,
+            "开始受限FTP下载 | 远程：%s | 声明：%llu | 上限：%llu",
+            remoteFilePath.c_str(), expectedRemoteBytes, maximumBytes);
+    }
+    if (!connectFtpServer() || cancelled())
+    {
+        closeFtpSession();
+        return false;
+    }
+
+    HINTERNET remoteFile = FtpOpenFileA(
+        m_hFtpSession,
+        remoteFilePath.c_str(),
+        GENERIC_READ,
+        FTP_TRANSFER_TYPE_BINARY | INTERNET_FLAG_RELOAD,
+        0);
+    if (remoteFile == nullptr)
+    {
+        closeFtpSession();
+        return false;
+    }
+    DWORD highSize = 0;
+    SetLastError(ERROR_SUCCESS);
+    const DWORD lowSize = FtpGetFileSize(remoteFile, &highSize);
+    const DWORD sizeError = GetLastError();
+    const bool sizeKnown = lowSize != INVALID_FILE_SIZE || sizeError == ERROR_SUCCESS;
+    const unsigned long long openedBytes =
+        (static_cast<unsigned long long>(highSize) << 32)
+        | static_cast<unsigned long long>(lowSize);
+    if (!sizeKnown
+        || openedBytes != expectedRemoteBytes
+        || openedBytes > maximumBytes
+        || cancelled())
+    {
+        InternetCloseHandle(remoteFile);
+        closeFtpSession();
+        if (m_log != nullptr)
+        {
+            m_log->write(LogColor::ERR,
+                "受限FTP下载拒绝：打开后大小与LIST声明不一致或越界 | LIST=%llu | OPEN=%llu",
+                expectedRemoteBytes, openedBytes);
+        }
+        return false;
+    }
+
+    const HANDLE localFile = CreateFileA(
+        localFilePath.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (localFile == INVALID_HANDLE_VALUE)
+    {
+        InternetCloseHandle(remoteFile);
+        closeFtpSession();
+        return false;
+    }
+
+    bool ok = true;
+    unsigned long long received = 0;
+    std::array<unsigned char, 64 * 1024> buffer{};
+    while (!cancelled())
+    {
+        DWORD bytesRead = 0;
+        if (!InternetReadFile(
+            remoteFile,
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()),
+            &bytesRead))
+        {
+            ok = false;
+            break;
+        }
+        if (bytesRead == 0)
+        {
+            break;
+        }
+        if (bytesRead > maximumBytes
+            || received > maximumBytes - bytesRead
+            || received + bytesRead > expectedRemoteBytes)
+        {
+            ok = false;
+            break;
+        }
+        DWORD writtenTotal = 0;
+        while (writtenTotal < bytesRead)
+        {
+            DWORD written = 0;
+            if (!WriteFile(
+                localFile,
+                buffer.data() + writtenTotal,
+                bytesRead - writtenTotal,
+                &written,
+                nullptr)
+                || written == 0)
+            {
+                ok = false;
+                break;
+            }
+            writtenTotal += written;
+        }
+        if (!ok)
+        {
+            break;
+        }
+        received += bytesRead;
+    }
+    ok = ok
+        && !cancelled()
+        && received == expectedRemoteBytes
+        && FlushFileBuffers(localFile) != FALSE;
+    CloseHandle(localFile);
+    InternetCloseHandle(remoteFile);
+    closeFtpSession();
+    if (!ok)
+    {
+        DeleteFileA(localFilePath.c_str());
+        if (m_log != nullptr)
+        {
+            m_log->write(cancelled() ? LogColor::WARNING : LogColor::ERR,
+                "受限FTP下载%s | 已收：%llu/%llu | 远程：%s",
+                cancelled() ? "取消" : "失败", received, expectedRemoteBytes,
+                remoteFilePath.c_str());
+        }
+        return false;
+    }
+    if (m_log != nullptr)
+    {
+        m_log->write(LogColor::SUCCESS,
+            "受限FTP下载完成 | %llu 字节 | 远程：%s",
+            received, remoteFilePath.c_str());
+    }
+    return true;
 }
 
 // 真实文件删除逻辑

@@ -57,8 +57,20 @@ public:
         std::atomic<bool>* cancelFlag,
         const std::function<void(long long sent, long long total)>& progressCb,
         bool allowRemoteDelete = true);
-    bool listFiles(const std::string& remoteDir, std::vector<FtpRemoteFileInfo>& files);
+    bool listFiles(const std::string& remoteDir,
+        std::vector<FtpRemoteFileInfo>& files,
+        std::atomic<bool>* cancelFlag = nullptr,
+        size_t maximumEntries = 10000);
     bool downloadFile(const std::string& remoteFilePath, const std::string& localFilePath);
+    // Bounded/cancellable download used by the remote archive browser. The remote
+    // size observed after FtpOpenFile must equal the earlier LIST snapshot, including
+    // for legacy .zip names without an embedded length. The destination is created
+    // exclusively and every failure/cancellation removes the partial file.
+    bool downloadFileBounded(const std::string& remoteFilePath,
+        const std::string& localFilePath,
+        unsigned long long expectedRemoteBytes,
+        unsigned long long maximumBytes,
+        std::atomic<bool>* cancelFlag);
     bool deleteFile(const std::string& remoteFilePath, bool askConfirm = true);
     void setMessageBoxesEnabled(bool enabled);
 

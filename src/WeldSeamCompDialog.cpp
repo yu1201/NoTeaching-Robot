@@ -312,12 +312,23 @@ WeldSeamCompDialog::WeldSeamCompDialog(ContralUnit* pContralUnit, QWidget* paren
 
 WeldSeamCompDialog::~WeldSeamCompDialog()
 {
-    // 退出/析构时若后台载入线程仍在跑：置销毁标记让其尽快收尾（不再回投 UI），等计数归零再析构。
+    // 退出/析构不再用 5 ms 忙等追踪 detach 线程。取消令牌会贯穿
+    // 重建/读取/计算，然后在明确的 std::thread 所有权边界 join。
     m_destroyed->store(true);
-    while (m_workerCount->load() > 0)
+    StopAndJoinPreviewWorker();
+}
+
+void WeldSeamCompDialog::StopAndJoinPreviewWorker()
+{
+    if (m_previewCancel)
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        m_previewCancel->store(true, std::memory_order_relaxed);
     }
+    if (m_previewWorker.joinable())
+    {
+        m_previewWorker.join();
+    }
+    m_previewCancel.reset();
 }
 
 void WeldSeamCompDialog::closeEvent(QCloseEvent* event)
@@ -2326,6 +2337,20 @@ bool WeldSeamCompDialog::ExecuteCompPreviewRebuild(bool showErrorBox)
         }
         return false;
     }
+    MeasureThenWeldService::PointCloudProductionExpectation productionExpectation;
+    if (!MeasureThenWeldService::CapturePointCloudProductionExpectation(
+            driver,
+            QString::fromStdString(param.sRobotName),
+            productionExpectation,
+            error))
+    {
+        AppendLog("重算基准：冻结生产上下文失败：" + error);
+        if (showErrorBox)
+        {
+            QMessageBox::warning(this, "重算基准焊道", error);
+        }
+        return false;
+    }
 
     QApplication::setOverrideCursor(Qt::WaitCursor);
     QString preservePath;
@@ -2340,7 +2365,9 @@ bool WeldSeamCompDialog::ExecuteCompPreviewRebuild(bool showErrorBox)
         seamCompPath,
         summary,
         error,
-        [this](const QString& text) { AppendLog("重算基准：" + text); });
+        [this](const QString& text) { AppendLog("重算基准：" + text); },
+        MeasureThenWeldService::StepCallback(),
+        productionExpectation);
     QApplication::restoreOverrideCursor();
 
     if (!ok)
@@ -3064,6 +3091,9 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
     {
         return;  // 上一次载入未完成（进度框 WindowModal 通常已挡住重入）。
     }
+    // 上一个 worker 已通过 UI 回调标记完成时，thread 仍需显式 join
+    // 才能重用成员。此时 join 只回收已结束的线程，不做忙等。
+    StopAndJoinPreviewWorker();
 
     m_compPreviewDir = QDir::toNativeSeparators(dir);
     if (m_pCompPreviewDirEdit != nullptr)
@@ -3086,6 +3116,7 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
 
     // 重算需要驱动 + 测量参数：驱动/DB 访问留在 UI 线程，参数拷贝进后台线程。
     T_PRECISE_MEASURE_PARAM rebuildParam;
+    MeasureThenWeldService::PointCloudProductionExpectation rebuildExpectation;
     if (needRebuild)
     {
         RobotDriverAdaptor* driver = nullptr;
@@ -3102,9 +3133,15 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
             }
         }
         QString paramError;
-        if (driver == nullptr || !m_compPreviewService.LoadPresetParam(driver, rebuildParam, paramError))
+        if (driver == nullptr
+            || !m_compPreviewService.LoadPresetParam(driver, rebuildParam, paramError)
+            || !MeasureThenWeldService::CapturePointCloudProductionExpectation(
+                driver,
+                QString::fromStdString(rebuildParam.sRobotName),
+                rebuildExpectation,
+                paramError))
         {
-            AppendLog(QString("自动重算跳过：读取测量参数失败（%1）。")
+            AppendLog(QString("自动重算跳过：冻结测量参数/生产上下文失败（%1）。")
                 .arg(driver == nullptr ? QString("未找到机器人驱动") : paramError));
             needRebuild = false;
         }
@@ -3123,6 +3160,7 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
     EnsurePreviewProgress();
     m_pPreviewProgress->setLabelText("正在载入补偿预览…");
     auto cancelFlag = std::make_shared<std::atomic_bool>(false);
+    m_previewCancel = cancelFlag;
     if (m_previewProgressCancelConn)
     {
         disconnect(m_previewProgressCancelConn);
@@ -3132,11 +3170,15 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
     m_pPreviewProgress->show();
 
     auto destroyed = m_destroyed;
-    auto workerCount = m_workerCount;
-    workerCount->fetch_add(1);
-    std::thread([this, laserDir, robotName, currentEdits, savedEdits, needRebuild, rebuildParam, cancelFlag, destroyed, workerCount]()
+    m_previewWorker = std::thread([this, laserDir, robotName, currentEdits, savedEdits, needRebuild,
+                 rebuildParam, rebuildExpectation, cancelFlag, destroyed]()
         {
             CompPreviewLoadResult result;
+            const auto isStopRequested = [cancelFlag, destroyed]()
+            {
+                return cancelFlag->load(std::memory_order_relaxed)
+                    || destroyed->load(std::memory_order_relaxed);
+            };
             const auto setStage = [this, cancelFlag, destroyed](const QString& text)
             {
                 if (cancelFlag->load() || destroyed->load())
@@ -3162,7 +3204,10 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
                 QString rebuildError;
                 const bool ok = m_compPreviewService.RebuildWeldFilesFromLaserDir(
                     rebuildParam, laserDir, preservePath, weldPosePath, seamCompPath, summary, rebuildError,
-                    [&result](const QString& text) { result.logs.append("重算基准：" + text); });
+                    [&result](const QString& text) { result.logs.append("重算基准：" + text); },
+                    MeasureThenWeldService::StepCallback(),
+                    rebuildExpectation,
+                    isStopRequested);
                 result.logs.append(ok ? ("已重算基准焊道。" + summary) : ("重算基准失败：" + rebuildError));
             }
 
@@ -3174,14 +3219,16 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
             {
                 setStage("正在读取焊道数据…");
                 QString originalError;
-                if (!m_compPreviewService.LoadCompPreviewOriginalTrack(laserDir, result.original, originalError))
+                if (!m_compPreviewService.LoadCompPreviewOriginalTrack(
+                        laserDir, result.original, originalError, isStopRequested))
                 {
                     result.original.clear();
                     result.logs.append("原始焊道：" + originalError);
                 }
                 QString rawError;
                 QString rawDesc;
-                if (!m_compPreviewService.LoadCompPreviewRawCloud(laserDir, result.raw, rawError, &rawDesc))
+                if (!m_compPreviewService.LoadCompPreviewRawCloud(
+                        laserDir, result.raw, rawError, &rawDesc, isStopRequested))
                 {
                     result.raw.clear();
                     result.logs.append("原始数据：" + rawError);
@@ -3193,13 +3240,17 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
 
                 setStage("正在读取基准焊道…");
                 result.baselineOk = m_compPreviewService.LoadCompPreviewBaseline(
-                    MeasureThenWeldService::CompPreviewKind::Seam, laserDir, result.baseline, result.baselineError);
+                    MeasureThenWeldService::CompPreviewKind::Seam,
+                    laserDir,
+                    result.baseline,
+                    result.baselineError,
+                    isStopRequested);
 
                 if (result.baselineOk && !cancelFlag->load() && !destroyed->load())
                 {
                     setStage("正在计算补偿预览…");
                     result.stages = m_compPreviewService.ComputeCompPreviewStages(
-                        robotName, result.baseline, currentEdits, savedEdits, true);
+                        robotName, result.baseline, currentEdits, savedEdits, true, isStopRequested);
                 }
                 if (cancelFlag->load())
                 {
@@ -3214,8 +3265,7 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
                         OnCompPreviewLoaded(result);
                     }, Qt::QueuedConnection);
             }
-            workerCount->fetch_sub(1);
-        }).detach();
+        });
 }
 
 void WeldSeamCompDialog::OnCompPreviewLoaded(const CompPreviewLoadResult& result)

@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QDataStream>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
@@ -1161,7 +1162,10 @@ bool ReadWorkerSettingsFile(
     return true;
 }
 
-bool WriteWorkerCloudFile(const QString& path, const QVector<RobotCalculation::IndexedPoint3D>& pts)
+bool WriteWorkerCloudFile(
+    const QString& path,
+    const QVector<RobotCalculation::IndexedPoint3D>& pts,
+    const std::function<bool()>& stopRequested)
 {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
@@ -1170,8 +1174,15 @@ bool WriteWorkerCloudFile(const QString& path, const QVector<RobotCalculation::I
     }
     QTextStream out(&f);
     out << pts.size() << '\n';
+    int pointIndex = 0;
     for (const RobotCalculation::IndexedPoint3D& p : pts)
     {
+        if ((pointIndex++ & 0x3ff) == 0 && stopRequested && stopRequested())
+        {
+            f.close();
+            QFile::remove(path);
+            return false;
+        }
         out << QString::number(p.point.x(), 'g', 12) << ' '
             << QString::number(p.point.y(), 'g', 12) << ' '
             << QString::number(p.point.z(), 'g', 12) << '\n';
@@ -1232,13 +1243,25 @@ void WriteWorkerTrackArray(QTextStream& out, const QVector<PointCloudExtractionP
     }
 }
 
-QVector<PointCloudExtractionProcessor::TrackPoint> ReadWorkerTrackArray(QTextStream& in)
+QVector<PointCloudExtractionProcessor::TrackPoint> ReadWorkerTrackArray(
+    QTextStream& in,
+    const std::function<bool()>& stopRequested,
+    bool* canceled)
 {
     QVector<PointCloudExtractionProcessor::TrackPoint> a;
     const int n = in.readLine().trimmed().toInt();
     a.reserve(n);
     for (int i = 0; i < n; ++i)
     {
+        if ((i & 0x3ff) == 0 && stopRequested && stopRequested())
+        {
+            if (canceled != nullptr)
+            {
+                *canceled = true;
+            }
+            a.clear();
+            return a;
+        }
         const QStringList t = in.readLine().split(' ', Qt::SkipEmptyParts);
         if (t.size() < 5)
         {
@@ -1277,7 +1300,10 @@ bool WriteWorkerResultFile(const QString& path, const PointCloudExtractionProces
     return true;
 }
 
-PointCloudExtractionProcessor::ExtractionResult ReadWorkerResultFile(const QString& path, bool* fileOk)
+PointCloudExtractionProcessor::ExtractionResult ReadWorkerResultFile(
+    const QString& path,
+    bool* fileOk,
+    const std::function<bool()>& stopRequested)
 {
     PointCloudExtractionProcessor::ExtractionResult r;
     *fileOk = false;
@@ -1303,9 +1329,14 @@ PointCloudExtractionProcessor::ExtractionResult ReadWorkerResultFile(const QStri
     r.dllPath = in.readLine();
     r.configPath = in.readLine();
     r.baseWeldPath = in.readLine();
-    r.points = ReadWorkerTrackArray(in);
-    r.rawPoints = ReadWorkerTrackArray(in);
-    r.keyPointExpandedPoints = ReadWorkerTrackArray(in);
+    bool canceled = false;
+    r.points = ReadWorkerTrackArray(in, stopRequested, &canceled);
+    r.rawPoints = ReadWorkerTrackArray(in, stopRequested, &canceled);
+    r.keyPointExpandedPoints = ReadWorkerTrackArray(in, stopRequested, &canceled);
+    if (canceled)
+    {
+        return PointCloudExtractionProcessor::ExtractionResult();
+    }
     *fileOk = true;
     return r;
 }
@@ -1315,17 +1346,27 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
     const PointCloudProcessingConfig::Settings& settings,
     const Eigen::Vector3d& scanDirection,
-    const QString& baseWeldOutputPath)
+    const QString& baseWeldOutputPath,
+    const std::function<bool()>& stopRequested)
 {
     ExtractionResult result;
     result.inputPointCount = inputPoints.size();
-    result.finiteInputPointCount = static_cast<int>(std::count_if(
-        inputPoints.cbegin(), inputPoints.cend(), [](const RobotCalculation::IndexedPoint3D& point)
+    result.finiteInputPointCount = 0;
+    for (int index = 0; index < inputPoints.size(); ++index)
+    {
+        if ((index & 0x3ff) == 0 && stopRequested && stopRequested())
         {
-            return std::isfinite(point.point.x())
-                && std::isfinite(point.point.y())
-                && std::isfinite(point.point.z());
-        }));
+            result.error = QStringLiteral("已取消 SDK 点云提取（输入预检）。");
+            return result;
+        }
+        const RobotCalculation::IndexedPoint3D& point = inputPoints[index];
+        if (std::isfinite(point.point.x())
+            && std::isfinite(point.point.y())
+            && std::isfinite(point.point.z()))
+        {
+            ++result.finiteInputPointCount;
+        }
+    }
     result.invalidInputPointCount = result.inputPointCount - result.finiteInputPointCount;
 
     const QString workerTempRoot = AppPaths::WritablePath(QStringLiteral("Temp/PointCloudWorkers"));
@@ -1350,9 +1391,11 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     const QString resultFile = workDir.filePath(QStringLiteral("extract_result.txt"));
     const QString settingsFile = workDir.filePath(QStringLiteral("extract_settings.bin"));
 
-    if (!WriteWorkerCloudFile(cloudFile, inputPoints))
+    if (!WriteWorkerCloudFile(cloudFile, inputPoints, stopRequested))
     {
-        result.error = "无法写入 SDK 子进程输入点云临时文件：" + cloudFile;
+        result.error = stopRequested && stopRequested()
+            ? QStringLiteral("已取消 SDK 点云提取（写入子进程输入）。")
+            : "无法写入 SDK 子进程输入点云临时文件：" + cloudFile;
         return result;
     }
     if (!WriteWorkerSettingsFile(settingsFile, settings))
@@ -1381,7 +1424,20 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
         result.error = "无法启动 SDK 点云子进程（进程隔离）。";
         return result;
     }
-    if (!proc.waitForFinished(300000))  // SDK 多线程提取通常数秒，给 5 分钟上限防卡死
+    QElapsedTimer workerTimer;
+    workerTimer.start();
+    while (proc.state() != QProcess::NotRunning && workerTimer.elapsed() < 300000)
+    {
+        if (stopRequested && stopRequested())
+        {
+            proc.kill();
+            proc.waitForFinished(3000);
+            result.error = QStringLiteral("已取消 SDK 点云提取（子进程已终止）。");
+            return result;
+        }
+        proc.waitForFinished(50);
+    }
+    if (proc.state() != QProcess::NotRunning)
     {
         proc.kill();
         proc.waitForFinished(3000);
@@ -1401,7 +1457,12 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
         return result;
     }
     bool fileOk = false;
-    const ExtractionResult parsed = ReadWorkerResultFile(resultFile, &fileOk);
+    const ExtractionResult parsed = ReadWorkerResultFile(resultFile, &fileOk, stopRequested);
+    if (stopRequested && stopRequested())
+    {
+        result.error = QStringLiteral("已取消 SDK 点云提取（读取结果）。");
+        return result;
+    }
     if (!fileOk)
     {
         result.error = "SDK 子进程已结束但结果文件无法解析。";

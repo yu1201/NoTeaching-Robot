@@ -3,29 +3,93 @@
 #include "AppPaths.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "RobotOperationLease.h"
+#include "RobotRecoverySafetyPolicy.h"
+#include "WeldProcessValidation.h"
 #include "RobotPoseTransform.h"
 #include "StepSdkBuildConfig.h"
 
 #include <QByteArray>
+#include <QCryptographicHash>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QString>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <cmath>
 #include <ctime>
 #include <iomanip>
 #include <limits>
+#include <mutex>
 #include <sstream>
 #include <utility>
 #include <vector>
 
 namespace
 {
+	constexpr size_t kStepMaxProgramNameLength = 31; // SDK m_ProgramName[32] reserves the last byte for NUL.
+	std::atomic<std::uint64_t> g_stepGeneratedNameSequence{ 0 };
+	std::mutex g_stepGeneratedFilePairMutex;
+
+	std::uint64_t StepFnv1a64(const std::string& text)
+	{
+		std::uint64_t value = 1469598103934665603ULL;
+		for (const unsigned char ch : text)
+		{
+			value ^= static_cast<std::uint64_t>(ch);
+			value *= 1099511628211ULL;
+		}
+		return value;
+	}
+
+	std::string StepBase36(std::uint64_t value, size_t width)
+	{
+		static constexpr char kDigits[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+		std::string result(width, '0');
+		for (size_t index = width; index > 0; --index)
+		{
+			result[index - 1] = kDigits[value % 36ULL];
+			value /= 36ULL;
+		}
+		return result;
+	}
+
+	std::uint64_t StepProcessNonce()
+	{
+		static const std::uint64_t nonce = []()
+			{
+				std::ostringstream identity;
+				identity << GetCurrentProcessId() << '|'
+					<< std::chrono::high_resolution_clock::now().time_since_epoch().count() << '|'
+					<< std::chrono::steady_clock::now().time_since_epoch().count() << '|'
+					<< reinterpret_cast<std::uintptr_t>(&g_stepGeneratedNameSequence);
+				return StepFnv1a64(identity.str());
+			}();
+		return nonce;
+	}
+
+	std::string StepMakeUniqueToken(const std::string& identity)
+	{
+		const std::uint64_t sequence = g_stepGeneratedNameSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+		const std::uint64_t identityHash = StepFnv1a64(identity);
+		// Multiplication by an odd constant keeps the per-process sequence bijective in 64 bits;
+		// endpoint/instance identity and a process nonce isolate independent controllers/processes.
+		const std::uint64_t mixedLow = StepProcessNonce()
+			^ identityHash
+			^ (sequence * 0x9E3779B97F4A7C15ULL);
+		const std::uint64_t mixedHigh = StepFnv1a64(
+			identity + "|" + std::to_string(sequence) + "|" + std::to_string(StepProcessNonce()));
+		// 17 base36 characters retain about 84 bits while fitting the STEP char[32]
+		// program field together with the readable weld timestamp.
+		return StepBase36(mixedHigh, 4) + StepBase36(mixedLow, 13);
+	}
+
 	QString StepDecodeLocalPath(const std::string& text)
 	{
 		return QString::fromLocal8Bit(text.data(), static_cast<int>(text.size()));
@@ -58,9 +122,35 @@ namespace
 		return StepFileSystemPath(absolute);
 	}
 
-	std::string StepMakeProgramName()
+	std::string StepControllerIdentity(const STEPRobotCtrl* ctrl)
 	{
-		return "ContiMoveAny";
+		if (ctrl == nullptr)
+		{
+			return "STEP|NO_CONTROLLER";
+		}
+		std::ostringstream identity;
+		identity << "STEP|" << ctrl->m_sRobotName
+			<< '|' << ctrl->m_sSocketIP << ':' << ctrl->m_nSocketPort
+			<< '|' << ctrl->m_sFTPIP << ':' << ctrl->m_nFTPPort
+			<< "|PID=" << GetCurrentProcessId()
+			<< "|INSTANCE=" << reinterpret_cast<std::uintptr_t>(ctrl);
+		return identity.str();
+	}
+
+	std::filesystem::path StepInstanceOutputDirectory(const STEPRobotCtrl* ctrl)
+	{
+		const std::string identity = StepControllerIdentity(ctrl);
+		std::ostringstream folder;
+		folder << "endpoint_" << std::uppercase << std::hex << std::setw(16) << std::setfill('0')
+			<< StepFnv1a64(identity)
+			<< "_p" << std::dec << GetCurrentProcessId()
+			<< "_i" << std::uppercase << std::hex << reinterpret_cast<std::uintptr_t>(ctrl);
+		return StepResolveOutputDirectory(std::string()) / folder.str();
+	}
+
+	std::string StepMakeProgramName(const STEPRobotCtrl* ctrl = nullptr)
+	{
+		return "MOVE_" + StepMakeUniqueToken(StepControllerIdentity(ctrl));
 	}
 
 	std::string StepSanitizeProgramName(std::string programName)
@@ -73,22 +163,24 @@ namespace
 		for (char& ch : programName)
 		{
 			const unsigned char value = static_cast<unsigned char>(ch);
-			if (value < 32
-				|| ch == '<'
-				|| ch == '>'
-				|| ch == ':'
-				|| ch == '"'
-				|| ch == '/'
-				|| ch == '\\'
-				|| ch == '|'
-				|| ch == '?'
-				|| ch == '*'
-				|| ch == '.')
+			if (!std::isalnum(value) && ch != '_')
 			{
 				ch = '_';
 			}
 		}
-		return programName.empty() ? StepMakeProgramName() : programName;
+		if (programName.empty())
+		{
+			programName = StepMakeProgramName();
+		}
+		if (!std::isalpha(static_cast<unsigned char>(programName.front())))
+		{
+			programName.insert(0, "P_");
+		}
+		if (programName.size() > kStepMaxProgramNameLength)
+		{
+			programName.resize(kStepMaxProgramNameLength);
+		}
+		return programName;
 	}
 
 	constexpr const char* kStepDynamicJobProjectName = "PCRobot";
@@ -892,8 +984,28 @@ namespace
 		return oss.str();
 	}
 
-	std::string StepBuildSrdContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, const T_AXISUNIT& axisUnit, bool actualWeld)
+	std::string StepBuildSrdContent(
+		const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
+		const T_AXISUNIT& axisUnit,
+		bool actualWeld,
+		std::string* validationError = nullptr)
 	{
+		if (validationError != nullptr)
+		{
+			validationError->clear();
+		}
+		if (actualWeld)
+		{
+			std::string error;
+			if (!WeldProcessValidation::ValidateActualMoveInfos(moveInfos, error))
+			{
+				if (validationError != nullptr)
+				{
+					*validationError = "STEP实际焊接工艺安全校验失败：" + error;
+				}
+				return std::string();
+			}
+		}
 		std::ostringstream oss;
 		oss << std::fixed << std::setprecision(6);
 		const StepVariablePlan variablePlan = StepBuildVariablePlan(moveInfos);
@@ -1104,14 +1216,72 @@ namespace
 		return oss.str();
 	}
 
-	bool StepWriteTextFile(const std::filesystem::path& filePath, const std::string& content)
+	bool StepAtomicReplaceTextFile(const std::filesystem::path& filePath, const std::string& content)
 	{
-		std::ofstream out(filePath, std::ios::out | std::ios::binary | std::ios::trunc);
-		if (!out.is_open())
+		for (int attempt = 0; attempt < 8; ++attempt)
 		{
+			const std::string temporaryToken = StepMakeUniqueToken(StepLocalPathBytes(filePath));
+			std::filesystem::path temporaryPath = filePath;
+			temporaryPath += std::filesystem::path(
+				L".tmp." + std::to_wstring(GetCurrentProcessId()) + L"."
+				+ std::wstring(temporaryToken.begin(), temporaryToken.end()));
+
+			HANDLE fileHandle = CreateFileW(
+				temporaryPath.c_str(),
+				GENERIC_WRITE,
+				0,
+				nullptr,
+				CREATE_NEW,
+				FILE_ATTRIBUTE_TEMPORARY,
+				nullptr);
+			if (fileHandle == INVALID_HANDLE_VALUE)
+			{
+				if (GetLastError() == ERROR_FILE_EXISTS || GetLastError() == ERROR_ALREADY_EXISTS)
+				{
+					continue;
+				}
+				return false;
+			}
+
+			bool writeOk = true;
+			size_t offset = 0;
+			while (offset < content.size())
+			{
+				const DWORD chunkSize = static_cast<DWORD>(std::min<size_t>(
+					content.size() - offset,
+					static_cast<size_t>(std::numeric_limits<DWORD>::max())));
+				DWORD written = 0;
+				if (!WriteFile(fileHandle, content.data() + offset, chunkSize, &written, nullptr)
+					|| written == 0)
+				{
+					writeOk = false;
+					break;
+				}
+				offset += written;
+			}
+			if (writeOk && !FlushFileBuffers(fileHandle))
+			{
+				writeOk = false;
+			}
+			if (!CloseHandle(fileHandle))
+			{
+				writeOk = false;
+			}
+			if (writeOk && MoveFileExW(
+				temporaryPath.c_str(),
+				filePath.c_str(),
+				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+			{
+				return true;
+			}
+			DeleteFileW(temporaryPath.c_str());
 			return false;
 		}
+		return false;
+	}
 
+	bool StepWriteTextFile(const std::filesystem::path& filePath, const std::string& content)
+	{
 		std::string normalized;
 		normalized.reserve(content.size());
 		std::string line;
@@ -1155,9 +1325,70 @@ namespace
 			appendCleanLine();
 		}
 
-		out.write(normalized.data(), static_cast<std::streamsize>(normalized.size()));
-		return out.good();
+		return StepAtomicReplaceTextFile(filePath, normalized);
 	}
+
+	constexpr qint64 kStepMaximumGeneratedProgramBytes = 128LL * 1024LL * 1024LL;
+
+	bool StepReadProgramContentIdentity(
+		const std::filesystem::path& filePath,
+		RobotRecoverySafetyPolicy::ProgramContentIdentity& identity,
+		std::string& error)
+	{
+		identity = {};
+		error.clear();
+		QFile file(QString::fromStdWString(filePath.wstring()));
+		if (!file.open(QIODevice::ReadOnly))
+		{
+			error = "无法只读打开生成程序文件：" + StepLocalPathBytes(filePath);
+			return false;
+		}
+		const qint64 expectedSize = file.size();
+		if (expectedSize < 0 || expectedSize > kStepMaximumGeneratedProgramBytes)
+		{
+			error = "生成程序文件大小无效或超过128MiB上限：" + StepLocalPathBytes(filePath);
+			return false;
+		}
+		QCryptographicHash hash(QCryptographicHash::Sha256);
+		qint64 totalRead = 0;
+		while (!file.atEnd())
+		{
+			const QByteArray chunk = file.read(64 * 1024);
+			if (chunk.isEmpty() && file.error() != QFileDevice::NoError)
+			{
+				error = "读取生成程序文件失败：" + StepLocalPathBytes(filePath);
+				return false;
+			}
+			hash.addData(chunk);
+			totalRead += chunk.size();
+		}
+		if (totalRead != expectedSize || file.size() != expectedSize)
+		{
+			error = "生成程序文件在身份计算期间发生变化：" + StepLocalPathBytes(filePath);
+			return false;
+		}
+		identity.size = expectedSize;
+		identity.sha256 = hash.result().toHex().toLower();
+		if (!identity.IsValid())
+		{
+			error = "生成程序文件内容身份无效：" + StepLocalPathBytes(filePath);
+			return false;
+		}
+		return true;
+	}
+
+	struct StepTemporaryFileCleanup
+	{
+		std::filesystem::path programPath;
+		std::filesystem::path dataPath;
+		~StepTemporaryFileCleanup()
+		{
+			std::error_code ignored;
+			std::filesystem::remove(programPath, ignored);
+			ignored.clear();
+			std::filesystem::remove(dataPath, ignored);
+		}
+	};
 
 	std::string StepGetProgramScopeName(STEPRobotCtrl* ctrl, int scoper)
 	{
@@ -1222,7 +1453,6 @@ std::string STEPRobotCtrl::MakeTimestampWeldProgramName()
 {
 	const auto now = std::chrono::system_clock::now();
 	const std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
-	const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
 	std::tm localTime = {};
 #if defined(_WIN32)
 	localtime_s(&localTime, &nowTime);
@@ -1231,15 +1461,361 @@ std::string STEPRobotCtrl::MakeTimestampWeldProgramName()
 #endif
 
 	std::ostringstream oss;
-	oss << "Weld_" << std::put_time(&localTime, "%Y%m%d_%H%M%S")
-		<< "_" << std::setw(3) << std::setfill('0') << nowMs.count();
+	// Preserve the established Weld_ prefix while fitting a readable hour stamp
+	// and an 84-bit process/sequence token in the STEP char[32] field.
+	oss << "Weld_" << std::put_time(&localTime, "%y%m%d%H")
+		<< "_" << StepMakeUniqueToken("STEP_WELD_PROGRAM");
 	return StepSanitizeProgramName(oss.str());
 }
 
-void STEPRobotCtrl::ClearGeneratedProgramCompletionWitnessLocked()
+void STEPRobotCtrl::ClearGeneratedProgramContentWitnessLocked()
+{
+	if (++m_contentWitnessGeneration == 0)
+	{
+		++m_contentWitnessGeneration;
+	}
+	m_contentWitnessProjectName.clear();
+	m_contentWitnessProgramName.clear();
+	m_contentWitnessRemoteProgramPath.clear();
+	m_contentWitnessRemoteDataPath.clear();
+	m_contentWitnessProgramIdentity = {};
+	m_contentWitnessDataIdentity = {};
+}
+
+void STEPRobotCtrl::ClearGeneratedProgramCompletionWitnessLocked(bool preserveContentWitness)
 {
 	m_completionWitnessProjectName.clear();
 	m_completionWitnessProgramName.clear();
+	if (!preserveContentWitness)
+	{
+		ClearGeneratedProgramContentWitnessLocked();
+	}
+}
+
+bool STEPRobotCtrl::VerifyGeneratedProgramRemoteContentLocked(std::string& error)
+{
+	RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot snapshot;
+	snapshot.generation = m_contentWitnessGeneration;
+	snapshot.projectName = m_contentWitnessProjectName;
+	snapshot.programName = m_contentWitnessProgramName;
+	snapshot.remoteProgramPath = m_contentWitnessRemoteProgramPath;
+	snapshot.remoteDataPath = m_contentWitnessRemoteDataPath;
+	snapshot.programIdentity = m_contentWitnessProgramIdentity;
+	snapshot.dataIdentity = m_contentWitnessDataIdentity;
+	auto cancelToken = std::make_shared<std::atomic<bool>>(false);
+	return VerifyGeneratedProgramRemoteContentSnapshot(snapshot, cancelToken, error);
+}
+
+bool STEPRobotCtrl::VerifyGeneratedProgramRemoteContentSnapshot(
+	const RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot& snapshot,
+	const RobotRecoverySafetyPolicy::RemoteContentVerificationGate::Token& cancelToken,
+	std::string& error)
+{
+	error.clear();
+	if (m_pFTP == nullptr || cancelToken == nullptr || !snapshot.IsValid())
+	{
+		error = "STEP远端程序内容见证未建立。";
+		return false;
+	}
+	std::filesystem::path verifyDirectory;
+	try
+	{
+		verifyDirectory = StepInstanceOutputDirectory(this) / "verify";
+		std::filesystem::create_directories(verifyDirectory);
+	}
+	catch (const std::exception& e)
+	{
+		error = std::string("STEP远端内容回读临时目录创建失败：") + e.what();
+		return false;
+	}
+	const std::string token = StepMakeUniqueToken(
+		snapshot.projectName + "|" + snapshot.programName + "|REMOTE_VERIFY");
+	StepTemporaryFileCleanup cleanup;
+	cleanup.programPath = verifyDirectory / (token + ".srp.readback.tmp");
+	cleanup.dataPath = verifyDirectory / (token + ".srd.readback.tmp");
+	m_pFTP->setMessageBoxesEnabled(false);
+	if (!RobotRecoverySafetyPolicy::ProgramContentWithinLimit(
+			snapshot.programIdentity, kStepMaximumGeneratedProgramBytes)
+		|| !RobotRecoverySafetyPolicy::ProgramContentWithinLimit(
+			snapshot.dataIdentity, kStepMaximumGeneratedProgramBytes))
+	{
+		error = "STEP远端SRP/SRD声明大小为空或超过128MiB上限，读取主体前拒绝。";
+		return false;
+	}
+	if (!m_pFTP->downloadFileBounded(
+			snapshot.remoteProgramPath,
+			StepLocalPathBytes(cleanup.programPath),
+			static_cast<unsigned long long>(snapshot.programIdentity.size),
+			static_cast<unsigned long long>(kStepMaximumGeneratedProgramBytes),
+			cancelToken.get())
+		|| !m_pFTP->downloadFileBounded(
+			snapshot.remoteDataPath,
+			StepLocalPathBytes(cleanup.dataPath),
+			static_cast<unsigned long long>(snapshot.dataIdentity.size),
+			static_cast<unsigned long long>(kStepMaximumGeneratedProgramBytes),
+			cancelToken.get()))
+	{
+		error = "STEP远端SRP/SRD下载回读失败，无法建立内容身份。";
+		return false;
+	}
+	RobotRecoverySafetyPolicy::ProgramContentIdentity observedProgram;
+	RobotRecoverySafetyPolicy::ProgramContentIdentity observedData;
+	std::string identityError;
+	if (!StepReadProgramContentIdentity(cleanup.programPath, observedProgram, identityError)
+		|| !StepReadProgramContentIdentity(cleanup.dataPath, observedData, identityError))
+	{
+		error = "STEP远端SRP/SRD回读身份计算失败：" + identityError;
+		return false;
+	}
+	if (!RobotRecoverySafetyPolicy::SameProgramContent(
+			snapshot.programIdentity, observedProgram)
+		|| !RobotRecoverySafetyPolicy::SameProgramContent(
+			snapshot.dataIdentity, observedData))
+	{
+		error = GetStr(
+			"STEP远端SRP/SRD内容身份变化：Program=%s SRP=%lld/%lld:%s/%s SRD=%lld/%lld:%s/%s",
+			snapshot.programName.c_str(),
+			static_cast<long long>(snapshot.programIdentity.size),
+			static_cast<long long>(observedProgram.size),
+			snapshot.programIdentity.sha256.constData(), observedProgram.sha256.constData(),
+			static_cast<long long>(snapshot.dataIdentity.size),
+			static_cast<long long>(observedData.size),
+			snapshot.dataIdentity.sha256.constData(), observedData.sha256.constData());
+		return false;
+	}
+	return true;
+}
+
+bool STEPRobotCtrl::CaptureGeneratedProgramContentSnapshotLocked(
+	const std::string& expectedProject,
+	const std::string& expectedProgram,
+	RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot& snapshot,
+	std::string& error) const
+{
+	snapshot = {};
+	if (m_pSTEPRobotClient == nullptr || m_pFTP == nullptr
+		|| expectedProject.empty() || expectedProgram.empty())
+	{
+		error = "STEP START后内容复核缺少SDK、FTP或程序身份。";
+		return false;
+	}
+	if (!m_bLocalDebugMark
+		&& (!m_bSocketConnected.load() || m_pSTEPRobotClient->ConnectStatus() < 0))
+	{
+		error = "STEP START后内容复核时机器人连接不可用。";
+		return false;
+	}
+	snapshot.generation = m_contentWitnessGeneration;
+	snapshot.projectName = m_contentWitnessProjectName;
+	snapshot.programName = m_contentWitnessProgramName;
+	snapshot.remoteProgramPath = m_contentWitnessRemoteProgramPath;
+	snapshot.remoteDataPath = m_contentWitnessRemoteDataPath;
+	snapshot.programIdentity = m_contentWitnessProgramIdentity;
+	snapshot.dataIdentity = m_contentWitnessDataIdentity;
+	snapshot.observedProjectName = StepNormalizeProjectName(
+		m_pSTEPRobotClient->getProjectName());
+	snapshot.observedProgramName = m_pSTEPRobotClient->getProgramName();
+	snapshot.observedProgramState = static_cast<int>(
+		m_pSTEPRobotClient->getProgramState());
+	if (!snapshot.IsValid()
+		|| snapshot.projectName != expectedProject
+		|| snapshot.programName != expectedProgram
+		|| snapshot.observedProjectName != expectedProject
+		|| snapshot.observedProgramName != expectedProgram)
+	{
+		error = GetStr(
+			"STEP START后内容复核快照身份不一致。Witness=%s/%s Current=%s/%s Expected=%s/%s",
+			snapshot.projectName.c_str(), snapshot.programName.c_str(),
+			snapshot.observedProjectName.c_str(), snapshot.observedProgramName.c_str(),
+			expectedProject.c_str(), expectedProgram.c_str());
+		return false;
+	}
+	return true;
+}
+
+void STEPRobotCtrl::ClearGeneratedProgramContentWitnessIfSnapshotLocked(
+	const RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot& snapshot)
+{
+	RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot current;
+	current.generation = m_contentWitnessGeneration;
+	current.projectName = m_contentWitnessProjectName;
+	current.programName = m_contentWitnessProgramName;
+	current.remoteProgramPath = m_contentWitnessRemoteProgramPath;
+	current.remoteDataPath = m_contentWitnessRemoteDataPath;
+	current.programIdentity = m_contentWitnessProgramIdentity;
+	current.dataIdentity = m_contentWitnessDataIdentity;
+	if (RobotRecoverySafetyPolicy::SameProgramContentWitness(snapshot, current)
+		&& m_completionWitnessProjectName == snapshot.projectName
+		&& m_completionWitnessProgramName == snapshot.programName)
+	{
+		ClearGeneratedProgramCompletionWitnessLocked();
+	}
+}
+
+void STEPRobotCtrl::CancelActiveRemoteContentVerification()
+{
+	m_remoteContentVerificationGate.CancelActive();
+}
+
+bool STEPRobotCtrl::VerifyGeneratedProgramAfterStartWithSdkUnlock(
+	std::unique_lock<std::recursive_mutex>& sdkLock,
+	const std::string& expectedProject,
+	const std::string& expectedProgram,
+	std::string& error)
+{
+	error.clear();
+	if (!sdkLock.owns_lock())
+	{
+		error = "STEP START后内容复核调用未持SDK锁。";
+		return false;
+	}
+	RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot snapshot;
+	const auto failStartedProgramLocked = [&](const std::string& detail)
+		{
+			const bool sameProgramStillLoaded = m_pSTEPRobotClient != nullptr
+				&& StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName()) == expectedProject
+				&& m_pSTEPRobotClient->getProgramName() == expectedProgram;
+			const bool stopped = sameProgramStillLoaded
+				&& StopAndUnloadGeneratedProgramLocked(expectedProject, expectedProgram);
+			if (stopped)
+			{
+				RobotOperationLease::MarkMotionCompleted(this);
+			}
+			if (snapshot.IsValid())
+			{
+				ClearGeneratedProgramContentWitnessIfSnapshotLocked(snapshot);
+			}
+			error = detail + (stopped
+				? "；原快照绑定程序已STOP/Kill并稳定确认。"
+				: "；未确认原快照绑定程序已终止，运动闭锁保持有效。");
+			return false;
+		};
+	if (!CaptureGeneratedProgramContentSnapshotLocked(
+			expectedProject, expectedProgram, snapshot, error))
+	{
+		const std::string captureError = error;
+		return failStartedProgramLocked(captureError);
+	}
+	const auto cancelToken = m_remoteContentVerificationGate.TryBegin();
+	if (cancelToken == nullptr)
+	{
+		return failStartedProgramLocked(
+			"STEP START后已有另一内容复核正在执行，已失败关闭。");
+	}
+
+	// 关键：WinINet 回读期间不持 m_sdkCommandMutex。红色 STOP 可立即取得
+	// SDK 锁执行 STOP/Kill，并通过独立 token 让下载在下一取消点尽快结束。
+	sdkLock.unlock();
+	std::string downloadError;
+	const bool downloadVerified = VerifyGeneratedProgramRemoteContentSnapshot(
+		snapshot, cancelToken, downloadError);
+	sdkLock.lock();
+	m_remoteContentVerificationGate.End(cancelToken);
+
+	RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot current;
+	std::string currentError;
+	const bool currentCaptured = CaptureGeneratedProgramContentSnapshotLocked(
+		expectedProject, expectedProgram, current, currentError);
+	const int currentState = current.observedProgramState;
+	// START 返回后只接受仍在运行或已自然到达停止态；若又变为暂停，
+	// 说明下载窗口中发生了外部状态切换，必须失败关闭。
+	const bool currentStateAllowed = currentState == STEPROBOTSDK::eRun
+		|| currentState == STEPROBOTSDK::eStop;
+	const bool snapshotStateKnown = snapshot.observedProgramState == STEPROBOTSDK::eRun
+		|| snapshot.observedProgramState == STEPROBOTSDK::ePause
+		|| snapshot.observedProgramState == STEPROBOTSDK::eStop;
+	const bool snapshotStillBound = currentCaptured
+		&& RobotRecoverySafetyPolicy::SameProgramContentWitness(snapshot, current)
+		&& m_motionTrackedProjectName == expectedProject
+		&& m_motionTrackedProgramName == expectedProgram
+		&& m_completionWitnessProjectName == expectedProject
+		&& m_completionWitnessProgramName == expectedProgram
+		&& snapshotStateKnown
+		&& currentStateAllowed;
+	const bool cancelled = cancelToken->load(std::memory_order_acquire)
+		|| RobotOperationLease::IsCancellationRequested(this);
+	if (downloadVerified && snapshotStillBound && !cancelled)
+	{
+		return true;
+	}
+
+	const std::string detail = !downloadVerified
+		? downloadError
+		: (!currentError.empty() ? currentError
+			: (cancelled ? "红色STOP已取消内容复核。"
+				: "下载期间见证、当前程序、状态或运动身份已变化。"));
+	// 只能停止/清除本次冻结的同一程序和见证；下载期间若被其他程序
+	// 替换，绝不误杀或误清，且 MotionCompletionPending 保持 sticky。
+	return failStartedProgramLocked(detail);
+}
+
+bool STEPRobotCtrl::ArmGeneratedProgramContentWitness(
+	const std::string& projectName,
+	const std::string& programName,
+	const std::string& remoteProgramPath,
+	const std::string& remoteDataPath,
+	const RobotRecoverySafetyPolicy::ProgramContentIdentity& programIdentity,
+	const RobotRecoverySafetyPolicy::ProgramContentIdentity& dataIdentity,
+	std::string& error)
+{
+	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
+	ClearGeneratedProgramContentWitnessLocked();
+	if (projectName.empty() || programName.empty()
+		|| remoteProgramPath.empty() || remoteDataPath.empty()
+		|| !programIdentity.IsValid() || !dataIdentity.IsValid())
+	{
+		error = "STEP生成程序内容见证参数无效。";
+		return false;
+	}
+	m_contentWitnessProjectName = projectName;
+	m_contentWitnessProgramName = programName;
+	m_contentWitnessRemoteProgramPath = remoteProgramPath;
+	m_contentWitnessRemoteDataPath = remoteDataPath;
+	m_contentWitnessProgramIdentity = programIdentity;
+	m_contentWitnessDataIdentity = dataIdentity;
+	if (!VerifyGeneratedProgramRemoteContentLocked(error))
+	{
+		ClearGeneratedProgramContentWitnessLocked();
+		return false;
+	}
+	return true;
+}
+
+bool STEPRobotCtrl::StopAndUnloadGeneratedProgramLocked(
+	const std::string& projectName,
+	const std::string& programName)
+{
+	if (m_pSTEPRobotClient == nullptr
+		|| programName.empty()
+		|| StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName()) != projectName
+		|| m_pSTEPRobotClient->getProgramName() != programName)
+	{
+		return false;
+	}
+	m_pSTEPRobotClient->SetModeCmd(MODEKEY::STOP, true);
+	const int killRet = m_pSTEPRobotClient->ProgramKillCmd(projectName, programName, true);
+	if (killRet != 0)
+	{
+		return false;
+	}
+	int stableCount = 0;
+	for (int retry = 0; retry < 40; ++retry)
+	{
+		if (m_pSTEPRobotClient->getProgramName().empty()
+			&& m_pSTEPRobotClient->getProgramState() == STEPROBOTSDK::eStop)
+		{
+			if (++stableCount >= 4)
+			{
+				return true;
+			}
+		}
+		else
+		{
+			stableCount = 0;
+		}
+		Sleep(50);
+	}
+	return false;
 }
 
 bool STEPRobotCtrl::ArmGeneratedProgramCompletionWitness(
@@ -1249,7 +1825,7 @@ bool STEPRobotCtrl::ArmGeneratedProgramCompletionWitness(
 {
 	error.clear();
 	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
-	ClearGeneratedProgramCompletionWitnessLocked();
+	ClearGeneratedProgramCompletionWitnessLocked(true);
 	if (m_pSTEPRobotClient == nullptr || projectName.empty() || programName.empty())
 	{
 		error = "STEP自然完成见证准备失败：SDK客户端、工程或程序身份无效。";
@@ -1364,6 +1940,16 @@ bool STEPRobotCtrl::VerifyGeneratedProgramReadyForStartLocked(
 		error = "STEP START前机器人连接不可用。";
 		return false;
 	}
+	std::string remoteContentError;
+	if (!VerifyGeneratedProgramRemoteContentLocked(remoteContentError))
+	{
+		const bool stopped = StopAndUnloadGeneratedProgramLocked(projectName, programName);
+		error = "STEP START前远端SRP/SRD内容复核失败，已拒绝START："
+			+ remoteContentError
+			+ (stopped ? "；已STOP/Kill并稳定确认卸载。" : "；STOP/Kill未能稳定确认。" );
+		ClearGeneratedProgramContentWitnessLocked();
+		return false;
+	}
 	const int currentLine = m_pSTEPRobotClient->getCurrentLine();
 	const int currentState = static_cast<int>(m_pSTEPRobotClient->getProgramState());
 	int witnessValue = -1;
@@ -1431,25 +2017,40 @@ bool STEPRobotCtrl::WriteContiMoveAnyFiles(
 	}
 
 	const std::string srpContent = StepBuildSrpContent(weaveMoveInfo, actualWeld);
-	const std::string srdContent = StepBuildSrdContent(weaveMoveInfo, axisUnit, actualWeld);
-	const std::string srpPathText = StepLocalPathBytes(srpPath);
-	const std::string srdPathText = StepLocalPathBytes(srdPath);
-
-	if (!StepWriteTextFile(srpPath, srpContent))
+	std::string processValidationError;
+	const std::string srdContent = StepBuildSrdContent(
+		weaveMoveInfo, axisUnit, actualWeld, &processValidationError);
+	if (!processValidationError.empty())
 	{
 		if (errorText != nullptr)
 		{
-			*errorText = "写入SRP失败：" + srpPathText;
+			*errorText = processValidationError;
 		}
 		return false;
 	}
-	if (!StepWriteTextFile(srdPath, srdContent))
+	const std::string srpPathText = StepLocalPathBytes(srpPath);
+	const std::string srdPathText = StepLocalPathBytes(srdPath);
+
 	{
-		if (errorText != nullptr)
+		// Keep the SRP/SRD pair coherent even when two offline generation requests
+		// target the same explicit name. Each individual replacement is atomic.
+		std::lock_guard<std::mutex> filePairLock(g_stepGeneratedFilePairMutex);
+		if (!StepWriteTextFile(srpPath, srpContent))
 		{
-			*errorText = "写入SRD失败：" + srdPathText;
+			if (errorText != nullptr)
+			{
+				*errorText = "写入SRP失败：" + srpPathText;
+			}
+			return false;
 		}
-		return false;
+		if (!StepWriteTextFile(srdPath, srdContent))
+		{
+			if (errorText != nullptr)
+			{
+				*errorText = "写入SRD失败：" + srdPathText;
+			}
+			return false;
+		}
 	}
 
 	if (localProgramFile != nullptr)
@@ -1565,6 +2166,9 @@ void STEPRobotCtrl::EnsureConnectionForMonitor()
 bool STEPRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifRecord)
 {
 	ClearLastRobotError();
+	// Copy before SDK use: callers commonly pass m_sSocketIP.c_str(), and assigning
+	// that aliased pointer back into the same std::string is not a safe update path.
+	const std::string connectedIp = ip != nullptr ? std::string(ip) : std::string();
 	int nRet = 0;
 	if (!m_bLocalDebugMark)
 	{
@@ -1579,6 +2183,14 @@ bool STEPRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifRecor
 		}
 	}
 	m_bSocketConnected = true;
+	if (!connectedIp.empty())
+	{
+		m_sSocketIP = connectedIp;
+	}
+	if (Port > 0)
+	{
+		m_nSocketPort = static_cast<int>(Port);
+	}
 	// 新连接会话：时间轴锁定重置，由首个状态样本重新决定。
 	m_nTimestampAxisLatch.store(0);
 	m_lastValidRobotMs.store(0);
@@ -2152,6 +2764,8 @@ bool STEPRobotCtrl::LoadUserProgram(std::string sProjName, std::string sProgName
 	if (bForceReload || sProjName != sNowProject || sProgName != sNowProgram)
 	{
 		bool cancelledBeforeLoad = false;
+		bool contentIdentityChanged = false;
+		std::string contentIdentityError;
 		nRet = WithSdkCommand([&]()
 			{
 				// 与 ProgramLoadCmd 共用同一把 SDK 锁，关闭“安全终止已确认后，
@@ -2161,13 +2775,42 @@ bool STEPRobotCtrl::LoadUserProgram(std::string sProjName, std::string sProgName
 					cancelledBeforeLoad = true;
 					return -1;
 				}
-				return m_pSTEPRobotClient->ProgramLoadCmd(sProjName, sProgName, vnErrLine, true);
+				const bool contentWitnessApplies =
+					m_contentWitnessProjectName == StepNormalizeProjectName(sProjName)
+					&& m_contentWitnessProgramName == sProgName;
+				if (!m_contentWitnessProgramName.empty()
+					&& (!contentWitnessApplies
+						|| !VerifyGeneratedProgramRemoteContentLocked(contentIdentityError)))
+				{
+					contentIdentityChanged = true;
+					ClearGeneratedProgramContentWitnessLocked();
+					return -1;
+				}
+				const int loadRet = m_pSTEPRobotClient->ProgramLoadCmd(
+					sProjName, sProgName, vnErrLine, true);
+				if (loadRet == 0 && contentWitnessApplies
+					&& !VerifyGeneratedProgramRemoteContentLocked(contentIdentityError))
+				{
+					contentIdentityChanged = true;
+					StopAndUnloadGeneratedProgramLocked(
+						StepNormalizeProjectName(sProjName), sProgName);
+					ClearGeneratedProgramContentWitnessLocked();
+					return -1;
+				}
+				return loadRet;
 			});
 		if (cancelledBeforeLoad)
 		{
 			SetLastRobotError(GetStr(
 				"STEP硬件操作已被安全停止取消，拒绝加载后续程序：Project=%s Program=%s",
 				sProjName.c_str(), sProgName.c_str()));
+			return false;
+		}
+		if (contentIdentityChanged)
+		{
+			SetLastRobotError(GetStr(
+				"STEP加载程序前后远端SRP/SRD内容身份无效或已变化，拒绝加载/START：Project=%s Program=%s Detail=%s",
+				sProjName.c_str(), sProgName.c_str(), contentIdentityError.c_str()));
 			return false;
 		}
 		if (nRet != 0)
@@ -2284,19 +2927,29 @@ bool STEPRobotCtrl::SetSysMode(int nMode)
 		return false;
 	}
 	const bool safetyStop = nMode == MODEKEY::STOP || nMode == MODEKEY::MSTOP;
+	if (safetyStop)
+	{
+		CancelActiveRemoteContentVerification();
+	}
 	std::unique_lock<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+	if (safetyStop)
+	{
+		CancelActiveRemoteContentVerification();
+	}
 	if (!safetyStop && RobotOperationLease::IsCancellationRequested(this))
 	{
 		SetLastRobotError("STEP硬件操作已被安全停止取消，拒绝恢复或切换到新的运行模式。");
 		return false;
 	}
 	const bool startsProgram = nMode == MODEKEY::START;
+	std::string startProject;
+	std::string startProgram;
 	if (startsProgram)
 	{
-		const std::string startProject = m_pSTEPRobotClient != nullptr
+		startProject = m_pSTEPRobotClient != nullptr
 			? StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName())
 			: std::string();
-		const std::string startProgram = m_pSTEPRobotClient != nullptr
+		startProgram = m_pSTEPRobotClient != nullptr
 			? m_pSTEPRobotClient->getProgramName()
 			: std::string();
 		if (startProgram.empty())
@@ -2361,6 +3014,18 @@ bool STEPRobotCtrl::SetSysMode(int nMode)
 		}
 		return false;
 	}
+	if (startsProgram)
+	{
+		std::string postStartContentError;
+		if (!VerifyGeneratedProgramAfterStartWithSdkUnlock(
+				modeLock, startProject, startProgram, postStartContentError))
+		{
+			SetLastRobotError(
+				"STEP START后远端SRP/SRD内容复核失败，已立即STOP/Kill："
+				+ postStartContentError);
+			return false;
+		}
+	}
 	return true;
 }
 
@@ -2368,6 +3033,18 @@ bool STEPRobotCtrl::SetSysMode(int nMode)
 bool STEPRobotCtrl::Prog_startRun_Py(bool resumeExisting)
 {
 	std::unique_lock<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+	return ProgStartRunWithSdkLock(modeLock, resumeExisting);
+}
+
+bool STEPRobotCtrl::ProgStartRunWithSdkLock(
+	std::unique_lock<std::recursive_mutex>& modeLock,
+	bool resumeExisting)
+{
+	if (!modeLock.owns_lock())
+	{
+		SetLastRobotError("STEP START内部调用未持SDK锁。");
+		return false;
+	}
 	if (RobotOperationLease::IsCancellationRequested(this))
 	{
 		SetLastRobotError("STEP硬件操作已被安全停止取消，拒绝重新启动程序。");
@@ -2417,6 +3094,21 @@ bool STEPRobotCtrl::Prog_startRun_Py(bool resumeExisting)
 	}
 	else
 	{
+		std::string resumeContentError;
+		if (!VerifyGeneratedProgramRemoteContentLocked(resumeContentError))
+		{
+			const bool stopped = StopAndUnloadGeneratedProgramLocked(startProject, startProgram);
+			if (stopped)
+			{
+				RobotOperationLease::MarkMotionCompleted(this);
+			}
+			SetLastRobotError(
+				"STEP暂停恢复START前远端SRP/SRD内容已变化，拒绝继续："
+				+ resumeContentError
+				+ (stopped ? "；已STOP/Kill并稳定确认。" : "；STOP/Kill未确认。"));
+			ClearGeneratedProgramCompletionWitnessLocked();
+			return false;
+		}
 		int witnessValue = -1;
 		const int witnessRet = m_pSTEPRobotClient->VariableIntReadCmd(
 			startProject, startProgram, kStepCompletionWitnessName, witnessValue);
@@ -2470,13 +3162,24 @@ bool STEPRobotCtrl::Prog_startRun_Py(bool resumeExisting)
 			: "；START结果不明，自动中止未确认：" + stopDetail));
 		return false;
 	}
+	std::string postStartContentError;
+	if (!VerifyGeneratedProgramAfterStartWithSdkUnlock(
+			modeLock, startProject, startProgram, postStartContentError))
+	{
+		SetLastRobotError(
+			"STEP START后远端SRP/SRD内容复核失败，已立即STOP/Kill："
+			+ postStartContentError);
+		return false;
+	}
 	return true;
 }
 
 //停止程序 停止的是目前加载的程序
 bool STEPRobotCtrl::Prog_stop_Py()
 {
+	CancelActiveRemoteContentVerification();
 	std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+	CancelActiveRemoteContentVerification();
 	int nRet = m_pSTEPRobotClient->SetModeCmd(MODEKEY::STOP, true);
 	if (nRet != 0)
 	{
@@ -2712,7 +3415,7 @@ bool STEPRobotCtrl::ResumeTrackedProgramFromPause(
 	{
 		*angleDeviationDeg = std::numeric_limits<double>::infinity();
 	}
-	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
+	std::unique_lock<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
 	if (m_pSTEPRobotClient == nullptr)
 	{
 		SetLastRobotError("STEP继续失败：SDK客户端未初始化。");
@@ -2826,13 +3529,16 @@ bool STEPRobotCtrl::ResumeTrackedProgramFromPause(
 		return false;
 	}
 
-	// m_sdkCommandMutex 为 recursive_mutex；保持本锁进入现有 START 实现，关闭核对与启动之间的程序切换竞态。
-	return Prog_startRun_Py(true);
+	// 复用当前唯一 SDK lock，关闭位姿核对与 START 的竞态；START 后内容回读会
+	// 显式释放这一把锁，因此红色 STOP 不会被外层递归锁继续阻塞。
+	return ProgStartRunWithSdkLock(sdkLock, true);
 }
 
 bool STEPRobotCtrl::AbortCurrentProgram()
 {
+	CancelActiveRemoteContentVerification();
 	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
+	CancelActiveRemoteContentVerification();
 	if (m_pSTEPRobotClient == nullptr)
 	{
 		SetLastRobotError("STEP安全取消失败：SDK客户端未初始化。");
@@ -2971,6 +3677,141 @@ bool STEPRobotCtrl::AbortCurrentProgram()
 	return false;
 }
 
+bool STEPRobotCtrl::AbortPersistedProgramForRecovery(const std::string& expectedProgramName)
+{
+	CancelActiveRemoteContentVerification();
+	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
+	CancelActiveRemoteContentVerification();
+	if (m_pSTEPRobotClient == nullptr || expectedProgramName.empty())
+	{
+		SetLastRobotError("STEP持久恢复终止失败：SDK客户端或记录绑定程序名无效。");
+		return false;
+	}
+	if (!m_bLocalDebugMark)
+	{
+		const int connectStatus = m_bSocketConnected.load()
+			? m_pSTEPRobotClient->ConnectStatus() : -1;
+		if (connectStatus < 0)
+		{
+			const int initRet = m_pSTEPRobotClient->init(m_sSocketIP.c_str(), m_nSocketPort);
+			if (initRet != 0)
+			{
+				m_bSocketConnected.store(false);
+				SetLastRobotError(GetStr(
+					"STEP持久恢复终止重连失败：IP=%s Port=%d 原因=%s(%d)",
+					m_sSocketIP.c_str(), m_nSocketPort, GetErrorText(initRet), initRet));
+				return false;
+			}
+			m_bSocketConnected.store(true);
+			m_nTimestampAxisLatch.store(0);
+			m_lastValidRobotMs.store(0);
+			m_bTimestampFallbackLogged.store(false);
+		}
+	}
+
+	const auto stableEmptyStopped = [this]()
+		{
+			int stableCount = 0;
+			for (int retry = 0; retry < 40; ++retry)
+			{
+				if (!m_bLocalDebugMark
+					&& (!m_bSocketConnected.load()
+						|| m_pSTEPRobotClient->ConnectStatus() < 0))
+				{
+					return false;
+				}
+				if (m_pSTEPRobotClient->getProgramName().empty()
+					&& m_pSTEPRobotClient->getProgramState() == STEPROBOTSDK::eStop)
+				{
+					if (++stableCount >= 4)
+					{
+						return true;
+					}
+				}
+				else
+				{
+					stableCount = 0;
+				}
+				Sleep(50);
+			}
+			return false;
+		};
+
+	const std::string currentProgram = m_pSTEPRobotClient->getProgramName();
+	const std::string currentProject = StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName());
+	const int currentState = static_cast<int>(m_pSTEPRobotClient->getProgramState());
+	RobotRecoverySafetyPolicy::ObservedProgramState observedState =
+		RobotRecoverySafetyPolicy::ObservedProgramState::Unknown;
+	if (currentState == STEPROBOTSDK::eRun)
+	{
+		observedState = RobotRecoverySafetyPolicy::ObservedProgramState::Running;
+	}
+	else if (currentState == STEPROBOTSDK::ePause)
+	{
+		observedState = RobotRecoverySafetyPolicy::ObservedProgramState::Paused;
+	}
+	else if (currentState == STEPROBOTSDK::eStop)
+	{
+		observedState = RobotRecoverySafetyPolicy::ObservedProgramState::Stopped;
+	}
+	const bool alreadyStable = currentProgram.empty() && stableEmptyStopped();
+	const auto action = RobotRecoverySafetyPolicy::ResolveStepPersistedProgramAction(
+		QString::fromStdString(expectedProgramName), QString::fromStdString(currentProgram),
+		observedState, alreadyStable);
+	if (action == RobotRecoverySafetyPolicy::PersistedProgramAction::AlreadyStopped)
+	{
+		m_motionTrackedProjectName.clear();
+		m_motionTrackedProgramName.clear();
+		ClearGeneratedProgramCompletionWitnessLocked();
+		ClearLastRobotError();
+		return true;
+	}
+	if (action == RobotRecoverySafetyPolicy::PersistedProgramAction::Reject)
+	{
+		SetLastRobotError(GetStr(
+			"STEP持久恢复终止已拒绝：记录程序与控制器当前程序/状态不一致。Expected=%s Current=%s/%s State=%d",
+			expectedProgramName.c_str(), currentProject.c_str(), currentProgram.c_str(), currentState));
+		return false;
+	}
+	if (currentProject.empty())
+	{
+		SetLastRobotError("STEP持久恢复终止失败：同名程序已加载但当前工程名为空，拒绝无身份 Kill。");
+		return false;
+	}
+	if (action == RobotRecoverySafetyPolicy::PersistedProgramAction::StopThenKill)
+	{
+		const int stopRet = m_pSTEPRobotClient->SetModeCmd(MODEKEY::STOP, true);
+		if (stopRet != 0)
+		{
+			SetLastRobotError(GetStr(
+				"STEP持久恢复 STOP 失败：Program=%s Ret=%d", currentProgram.c_str(), stopRet));
+			return false;
+		}
+	}
+	const int killRet = m_pSTEPRobotClient->ProgramKillCmd(
+		currentProject, currentProgram, true);
+	if (killRet != 0)
+	{
+		SetLastRobotError(GetStr(
+			"STEP持久恢复 Kill 失败：Project=%s Program=%s Ret=%d",
+			currentProject.c_str(), currentProgram.c_str(), killRet));
+		return false;
+	}
+	if (!stableEmptyStopped())
+	{
+		SetLastRobotError(GetStr(
+			"STEP持久恢复终止未确认：Kill 后未稳定回读空程序+eStop。Expected=%s Remaining=%s State=%d",
+			expectedProgramName.c_str(), m_pSTEPRobotClient->getProgramName().c_str(),
+			static_cast<int>(m_pSTEPRobotClient->getProgramState())));
+		return false;
+	}
+	m_motionTrackedProjectName.clear();
+	m_motionTrackedProgramName.clear();
+	ClearGeneratedProgramCompletionWitnessLocked();
+	ClearLastRobotError();
+	return true;
+}
+
 int STEPRobotCtrl::GetCurrentProgramLine()
 {
 	if (m_pSTEPRobotClient == nullptr)
@@ -3010,7 +3851,7 @@ bool STEPRobotCtrl::CallJob(std::string sJobName)
 
 int STEPRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo)
 {
-	return ContiMoveAnyWithProgramName(vtRobotMoveInfo, StepMakeProgramName());
+	return ContiMoveAnyWithProgramName(vtRobotMoveInfo, StepMakeProgramName(this));
 }
 
 int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo, const std::string& programName)
@@ -3049,7 +3890,9 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 	const std::string sProjectName = StepNormalizeProjectName(kStepDynamicJobProjectName);
 
 	const std::string sProgramName = StepSanitizeProgramName(programName);
-	const std::filesystem::path localDirPath = StepResolveOutputDirectory(std::string());
+	// Remote names are controller-safe and globally unique; local artifacts add
+	// endpoint + process + driver-instance isolation so two robots never share files.
+	const std::filesystem::path localDirPath = StepInstanceOutputDirectory(this);
 	const std::filesystem::path localProgramPath = localDirPath / (sProgramName + ".srp");
 	const std::filesystem::path localDataPath = localDirPath / (sProgramName + ".srd");
 	const std::string sLocalProgramFile = StepLocalPathBytes(localProgramPath);
@@ -3057,6 +3900,10 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 	const std::string sRemoteBaseDir = StepBuildRemoteProjectDir(sProjectName);
 	const std::string sRemoteProgramFile = sRemoteBaseDir + "/" + sProgramName + ".srp";
 	const std::string sRemoteDataFile = sRemoteBaseDir + "/" + sProgramName + ".srd";
+	{
+		std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
+		ClearGeneratedProgramCompletionWitnessLocked();
+	}
 
 	try
 	{
@@ -3070,19 +3917,42 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 	}
 
 	const std::string sSrpContent = StepBuildSrpContent(weaveMoveInfo, true);
-	const std::string sSrdContent = StepBuildSrdContent(weaveMoveInfo, m_tAxisUnit, true);
-
-	if (!StepWriteTextFile(localProgramPath, sSrpContent))
+	std::string processValidationError;
+	const std::string sSrdContent = StepBuildSrdContent(
+		weaveMoveInfo, m_tAxisUnit, true, &processValidationError);
+	if (!processValidationError.empty())
 	{
-		SetLastRobotError(GetStr("STEP连续运动失败：写入SRP失败，%s", sLocalProgramFile.c_str()));
-		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 写入SRP失败：%s", sLocalProgramFile.c_str());
-		return -3;
+		SetLastRobotError(processValidationError);
+		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 实际焊接工艺校验失败：%s",
+			processValidationError.c_str());
+		return -2;
 	}
-	if (!StepWriteTextFile(localDataPath, sSrdContent))
+
+	RobotRecoverySafetyPolicy::ProgramContentIdentity localProgramIdentity;
+	RobotRecoverySafetyPolicy::ProgramContentIdentity localDataIdentity;
 	{
-		SetLastRobotError(GetStr("STEP连续运动失败：写入SRD失败，%s", sLocalDataFile.c_str()));
-		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 写入SRD失败：%s", sLocalDataFile.c_str());
-		return -4;
+		std::lock_guard<std::mutex> filePairLock(g_stepGeneratedFilePairMutex);
+		if (!StepWriteTextFile(localProgramPath, sSrpContent))
+		{
+			SetLastRobotError(GetStr("STEP连续运动失败：写入SRP失败，%s", sLocalProgramFile.c_str()));
+			m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 写入SRP失败：%s", sLocalProgramFile.c_str());
+			return -3;
+		}
+		if (!StepWriteTextFile(localDataPath, sSrdContent))
+		{
+			SetLastRobotError(GetStr("STEP连续运动失败：写入SRD失败，%s", sLocalDataFile.c_str()));
+			m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 写入SRD失败：%s", sLocalDataFile.c_str());
+			return -4;
+		}
+		std::string identityError;
+		if (!StepReadProgramContentIdentity(
+				localProgramPath, localProgramIdentity, identityError)
+			|| !StepReadProgramContentIdentity(
+				localDataPath, localDataIdentity, identityError))
+		{
+			SetLastRobotError("STEP连续运动失败：本地SRP/SRD写后身份计算失败，" + identityError);
+			return -4;
+		}
 	}
 
 	m_pRobotLog->write(LogColor::SUCCESS,
@@ -3159,6 +4029,21 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 初始化FTP失败");
 		return -6;
 	}
+	RobotRecoverySafetyPolicy::ProgramContentIdentity beforeUploadProgram;
+	RobotRecoverySafetyPolicy::ProgramContentIdentity beforeUploadData;
+	std::string localIdentityError;
+	if (!StepReadProgramContentIdentity(
+			localProgramPath, beforeUploadProgram, localIdentityError)
+		|| !StepReadProgramContentIdentity(
+			localDataPath, beforeUploadData, localIdentityError)
+		|| !RobotRecoverySafetyPolicy::SameProgramContent(
+			localProgramIdentity, beforeUploadProgram)
+		|| !RobotRecoverySafetyPolicy::SameProgramContent(
+			localDataIdentity, beforeUploadData))
+	{
+		SetLastRobotError("STEP连续运动失败：上传前本地SRP/SRD内容发生变化，" + localIdentityError);
+		return -6;
+	}
 
 	if (!m_pFTP->uploadFile(sLocalProgramFile, sRemoteProgramFile, false))
 	{
@@ -3170,6 +4055,31 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 	{
 		SetLastRobotError(GetStr("STEP连续运动失败：上传SRD失败，%s", sRemoteDataFile.c_str()));
 		m_pRobotLog->write(LogColor::ERR, "STEP ContiMoveAny 上传SRD失败：%s", sRemoteDataFile.c_str());
+		return -8;
+	}
+	RobotRecoverySafetyPolicy::ProgramContentIdentity afterUploadProgram;
+	RobotRecoverySafetyPolicy::ProgramContentIdentity afterUploadData;
+	if (!StepReadProgramContentIdentity(
+			localProgramPath, afterUploadProgram, localIdentityError)
+		|| !StepReadProgramContentIdentity(
+			localDataPath, afterUploadData, localIdentityError)
+		|| !RobotRecoverySafetyPolicy::SameProgramContent(
+			localProgramIdentity, afterUploadProgram)
+		|| !RobotRecoverySafetyPolicy::SameProgramContent(
+			localDataIdentity, afterUploadData))
+	{
+		SetLastRobotError("STEP连续运动失败：上传后本地SRP/SRD内容发生变化，" + localIdentityError);
+		return -8;
+	}
+	std::string contentWitnessError;
+	if (!ArmGeneratedProgramContentWitness(
+			sProjectName, sProgramName,
+			sRemoteProgramFile, sRemoteDataFile,
+			localProgramIdentity, localDataIdentity,
+			contentWitnessError))
+	{
+		SetLastRobotError("STEP连续运动失败：远端SRP/SRD上传回读身份不一致，" + contentWitnessError);
+		m_pRobotLog->write(LogColor::ERR, "%s", GetLastRobotError().c_str());
 		return -8;
 	}
 

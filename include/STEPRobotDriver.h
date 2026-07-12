@@ -5,6 +5,7 @@
 
 #include "RobotMessage.h"
 #include "RobotDriverAdaptor.h"
+#include "RobotRecoverySafetyPolicy.h"
 
 #include <atomic>
 #include <mutex>
@@ -146,6 +147,9 @@ public:
 		double* angleDeviationDeg = nullptr);
 	// 安全取消：STOP 后杀掉并卸载当前程序，确认不能再由 START 脱离原流程恢复。
 	bool AbortCurrentProgram();
+	// 进程重启后的持久恢复专用：不依赖 RAM 中的 m_motionTracked*，只允许处理
+	// RecordV2 绑定的同名程序；空程序+稳定 eStop 幂等成功，任何异名程序均拒绝误杀。
+	bool AbortPersistedProgramForRecovery(const std::string& expectedProgramName);
 	//读当前程序运行行号（暂停时=断点行）；失败返回 -1
 	int GetCurrentProgramLine();
 	//设置程序计数器：下次 START 从第 nLine 行开始（断点续跑用）
@@ -229,6 +233,39 @@ public:
 	static void InvalidateStepSdkInterfaceModeCache();
 
 private:
+	bool ArmGeneratedProgramContentWitness(
+		const std::string& projectName,
+		const std::string& programName,
+		const std::string& remoteProgramPath,
+		const std::string& remoteDataPath,
+		const RobotRecoverySafetyPolicy::ProgramContentIdentity& programIdentity,
+		const RobotRecoverySafetyPolicy::ProgramContentIdentity& dataIdentity,
+		std::string& error);
+	bool VerifyGeneratedProgramRemoteContentLocked(std::string& error);
+	bool CaptureGeneratedProgramContentSnapshotLocked(
+		const std::string& expectedProject,
+		const std::string& expectedProgram,
+		RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot& snapshot,
+		std::string& error) const;
+	bool VerifyGeneratedProgramRemoteContentSnapshot(
+		const RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot& snapshot,
+		const RobotRecoverySafetyPolicy::RemoteContentVerificationGate::Token& cancelToken,
+		std::string& error);
+	bool VerifyGeneratedProgramAfterStartWithSdkUnlock(
+		std::unique_lock<std::recursive_mutex>& sdkLock,
+		const std::string& expectedProject,
+		const std::string& expectedProgram,
+		std::string& error);
+	bool ProgStartRunWithSdkLock(
+		std::unique_lock<std::recursive_mutex>& sdkLock,
+		bool resumeExisting);
+	void ClearGeneratedProgramContentWitnessIfSnapshotLocked(
+		const RobotRecoverySafetyPolicy::ProgramContentWitnessSnapshot& snapshot);
+	void CancelActiveRemoteContentVerification();
+	bool StopAndUnloadGeneratedProgramLocked(
+		const std::string& projectName,
+		const std::string& programName);
+	void ClearGeneratedProgramContentWitnessLocked();
 	bool ArmGeneratedProgramCompletionWitness(
 		const std::string& projectName,
 		const std::string& programName,
@@ -238,7 +275,7 @@ private:
 		const std::string& programName,
 		std::string& error);
 	bool VerifyGeneratedProgramCompletionWitnessLocked(std::string& error);
-	void ClearGeneratedProgramCompletionWitnessLocked();
+	void ClearGeneratedProgramCompletionWitnessLocked(bool preserveContentWitness = false);
 	// 首次 START 前在 SDK mutex 内冻结本软件启动的工程/程序；暂停恢复和安全
 	// Kill 都必须仍匹配该身份，禁止误启动/误杀示教器后来换载的其他程序。
 	std::string m_motionTrackedProjectName;
@@ -247,6 +284,14 @@ private:
 	// 稳定 eStop 才能被判为自然完成。外部 STOP 与提前中止保持 0 并 fail-closed。
 	std::string m_completionWitnessProjectName;
 	std::string m_completionWitnessProgramName;
+	std::string m_contentWitnessProjectName;
+	std::string m_contentWitnessProgramName;
+	std::string m_contentWitnessRemoteProgramPath;
+	std::string m_contentWitnessRemoteDataPath;
+	RobotRecoverySafetyPolicy::ProgramContentIdentity m_contentWitnessProgramIdentity;
+	RobotRecoverySafetyPolicy::ProgramContentIdentity m_contentWitnessDataIdentity;
+	std::uint64_t m_contentWitnessGeneration = 0;
+	RobotRecoverySafetyPolicy::RemoteContentVerificationGate m_remoteContentVerificationGate;
 	// 状态时间轴会话锁定：0=未锁定 1=机器人时间戳 2=PC 接收时间。
 	// 机器人毫秒与 PC steady_clock 纪元完全不同，同一连接会话内一经锁定不再
 	// 切换，防止 getTimestamp 偶发 0 值把两种纪元混进同一扫描序列破坏时间插值。

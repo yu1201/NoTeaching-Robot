@@ -6,53 +6,18 @@ param(
     [string]$Channel,
     [switch]$SkipPackageBuild,
     [string]$PackageGateReport = "",
-    [string]$OutputBaseFilename = ""
+    [string]$OutputBaseFilename = "",
+    [Parameter(Mandatory = $true)][string]$MSBuildExecutable,
+    [Parameter(Mandatory = $true)][string]$MSBuildSha256,
+    [Parameter(Mandatory = $true)][string]$WinDeployQtExecutable,
+    [Parameter(Mandatory = $true)][string]$WinDeployQtSha256,
+    [Parameter(Mandatory = $true)][string]$InnoCompilerExecutable,
+    [Parameter(Mandatory = $true)][string]$InnoCompilerSha256,
+    [Parameter(Mandatory = $true)][string]$PythonExecutable,
+    [Parameter(Mandatory = $true)][string]$PythonSha256
 )
 
 $ErrorActionPreference = "Stop"
-
-function Find-FirstExistingPath {
-    param([string[]]$Candidates)
-
-    foreach ($candidate in $Candidates) {
-        if ([string]::IsNullOrWhiteSpace($candidate)) {
-            continue
-        }
-        if (Test-Path -LiteralPath $candidate) {
-            return (Resolve-Path -LiteralPath $candidate).Path
-        }
-    }
-    return $null
-}
-
-function Find-InnoSetupCompiler {
-    $standardPaths = @(
-        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-        "C:\Program Files\Inno Setup 6\ISCC.exe",
-        "C:\Program Files (x86)\Inno Setup 5\ISCC.exe"
-    )
-    $directHit = Find-FirstExistingPath $standardPaths
-    if ($directHit) {
-        return $directHit
-    }
-
-    $uninstallKeys = @(
-        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
-    )
-    foreach ($key in $uninstallKeys) {
-        $installEntries = Get-ItemProperty $key -ErrorAction SilentlyContinue | Where-Object {
-            $_.DisplayName -like "*Inno Setup*"
-        }
-        foreach ($entry in $installEntries) {
-            $candidate = Join-Path $entry.InstallLocation "ISCC.exe"
-            if (Test-Path -LiteralPath $candidate) {
-                return (Resolve-Path -LiteralPath $candidate).Path
-            }
-        }
-    }
-    return $null
-}
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptRoot "..")).Path
@@ -61,6 +26,13 @@ if (-not (Test-Path -LiteralPath $gateCommon -PathType Leaf)) {
     throw "Release gate helpers were not found: $gateCommon"
 }
 . $gateCommon
+
+Set-ReleasePythonTool -PythonExecutable $PythonExecutable -PythonSha256 $PythonSha256
+$isccPath = Assert-ReleaseExternalTool `
+    -Path $InnoCompilerExecutable `
+    -ExpectedSha256 $InnoCompilerSha256 `
+    -ExpectedFileName "ISCC.exe" `
+    -PublisherPattern '(?i)Pyrsys B\.V\.'
 
 Assert-ReleaseVersion $AppVersion
 $channelSpec = Get-ReleaseChannelSpec $Channel
@@ -85,7 +57,15 @@ if (-not $SkipPackageBuild) {
     if (-not [string]::IsNullOrWhiteSpace($PackageGateReport)) {
         throw "-PackageGateReport is only accepted together with -SkipPackageBuild."
     }
-    & $packageScript -AppVersion $AppVersion -Channel $Channel
+    & $packageScript `
+        -AppVersion $AppVersion `
+        -Channel $Channel `
+        -MSBuildExecutable $MSBuildExecutable `
+        -MSBuildSha256 $MSBuildSha256 `
+        -WinDeployQtExecutable $WinDeployQtExecutable `
+        -WinDeployQtSha256 $WinDeployQtSha256 `
+        -PythonExecutable $PythonExecutable `
+        -PythonSha256 $PythonSha256
     $PackageGateReport = $expectedPackageGateReport
 }
 else {
@@ -106,21 +86,22 @@ if (-not (Test-ReleaseGateSamePath ([string]$packageReport.packageDir) $packageD
     throw "Package gate report points at a non-canonical package directory."
 }
 
-$isccPath = Find-InnoSetupCompiler
-if (-not $isccPath) {
-    throw "ISCC.exe was not found. Please install Inno Setup 6 first."
-}
-
 $installerPath = Join-Path (Join-Path $repoRoot "dist\installer") "$OutputBaseFilename.exe"
 if (Test-Path -LiteralPath $installerPath) {
     Remove-Item -LiteralPath $installerPath -Force
 }
 
 Write-Host "Compiling Inno Setup installer..."
+$isccPath = Assert-ReleaseExternalTool `
+    -Path $isccPath -ExpectedSha256 $InnoCompilerSha256 `
+    -ExpectedFileName "ISCC.exe" -PublisherPattern '(?i)Pyrsys B\.V\.'
 & $isccPath "/DMyAppVersion=$AppVersion" "/DMyOutputBaseFilename=$OutputBaseFilename" $issPath
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
 }
+$isccPath = Assert-ReleaseExternalTool `
+    -Path $isccPath -ExpectedSha256 $InnoCompilerSha256 `
+    -ExpectedFileName "ISCC.exe" -PublisherPattern '(?i)Pyrsys B\.V\.'
 
 $writtenInstallerGate = New-InstallerGateReport `
     -RepoRoot $repoRoot `

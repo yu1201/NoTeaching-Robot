@@ -8,6 +8,13 @@
 class ConfigDatabase
 {
 public:
+    enum class ReadStatus
+    {
+        Found,
+        NotFound,
+        Error
+    };
+
     static QString DatabasePath();
     static QString NormalizeFilePath(const QString& fileName);
     static std::string NormalizeFilePath(const std::string& fileName);
@@ -17,6 +24,11 @@ public:
     static bool HasIniFile(const std::string& fileName);
     static bool HasIniFile(const QString& fileName);
     static bool ReadIniValue(
+        const std::string& fileName,
+        const std::string& sectionName,
+        const std::string& keyName,
+        std::string* value);
+    static ReadStatus ReadIniValueStatus(
         const std::string& fileName,
         const std::string& sectionName,
         const std::string& keyName,
@@ -40,6 +52,12 @@ public:
     static bool RemoveIniSection(const QString& fileName, const QString& sectionName);
 
     static bool ReadScopedSetting(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName,
+        const QString& keyName,
+        QString* value);
+    static ReadStatus ReadScopedSettingStatus(
         const QString& scopeType,
         const QString& scopeId,
         const QString& moduleName,
@@ -102,6 +120,12 @@ public:
     static bool TryListScopedSettingIds(
         const QString& scopeType,
         const QString& moduleName,
+        QStringList* ids);
+    static bool TryListScopedSettingIdsBounded(
+        const QString& scopeType,
+        const QString& moduleName,
+        qsizetype maxCount,
+        qsizetype maxIdLength,
         QStringList* ids);
     static bool RemoveScopedSettings(const QString& scopeType, const QString& scopeId, const QString& moduleName = QString());
 };

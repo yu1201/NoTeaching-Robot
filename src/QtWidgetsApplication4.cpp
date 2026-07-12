@@ -19,6 +19,7 @@
 #include "MeasureThenWeldDialog.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "MeasureThenWeldService.h"
+#include "WeldSafetyRecoveryStore.h"
 #include "OnlineServicesConfig.h"
 #include "OnlineServicesDialog.h"
 #include "OPini.h"
@@ -9344,6 +9345,41 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 		}
 	}
 
+	// This is deliberately the final asynchronous-exit gate. Once a remote page is
+	// permanently shut down below, no later uploader dialog may cancel application
+	// exit and leave the cached page unusable.
+	QList<OnlineServicesDialog*> busyRemotePages;
+	for (OnlineServicesDialog* onlinePage : findChildren<OnlineServicesDialog*>())
+	{
+		if (onlinePage != nullptr && onlinePage->IsRemoteOperationBusy())
+		{
+			busyRemotePages.push_back(onlinePage);
+		}
+	}
+	if (!busyRemotePages.isEmpty())
+	{
+		const QMessageBox::StandardButton ret = QMessageBox::question(
+			this,
+			QStringLiteral("在线服务远程操作中"),
+			QStringLiteral("远程 FTP 下载/删除/刷新或 ZIP staging 尚未结束。\n\n"
+				"选择「是」会取消全部远程操作、等待 owned worker 完整退出后关闭；"
+				"选择「否」继续运行程序。"),
+			QMessageBox::Yes | QMessageBox::No,
+			QMessageBox::No);
+		if (ret != QMessageBox::Yes)
+		{
+			if (event != nullptr)
+			{
+				event->ignore();
+			}
+			return;
+		}
+		for (OnlineServicesDialog* onlinePage : busyRemotePages)
+		{
+			onlinePage->CancelRemoteOperationAndWait(true);
+		}
+	}
+
 	QMainWindow::closeEvent(event);
 }
 
@@ -13718,6 +13754,16 @@ bool QtWidgetsApplication4::RunRebuildMeasureWeldFilesForCli(
 		LogCommandLineMessage("CLI 先测后焊重建失败：读取预设参数失败：" + error);
 		return false;
 	}
+	MeasureThenWeldService::PointCloudProductionExpectation productionExpectation;
+	if (!MeasureThenWeldService::CapturePointCloudProductionExpectation(
+			pRobotDriver,
+			QString::fromStdString(param.sRobotName),
+			productionExpectation,
+			error))
+	{
+		LogCommandLineMessage("CLI 先测后焊重建失败：冻结生产上下文失败：" + error);
+		return false;
+	}
 
 	auto appendLog = [this](const QString& text)
 		{
@@ -13741,7 +13787,8 @@ bool QtWidgetsApplication4::RunRebuildMeasureWeldFilesForCli(
 		summary,
 		error,
 		appendLog,
-		setFlowStep))
+		setFlowStep,
+		productionExpectation))
 	{
 		LogCommandLineMessage("CLI 先测后焊重建失败：" + error);
 		return false;
@@ -13862,20 +13909,28 @@ bool QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 		return false;
 	}
 
+	QString robotLabel;
+	RobotDriverAdaptor* authorizationDriver = GetRobotDriverForCli(arguments, &robotLabel);
+	if (authorizationDriver == nullptr)
+	{
+		LogCommandLineMessage(
+			"CLI STEP焊接程序生成失败：PointCloudProduction 必须通过 --robot 提供当前机器人上下文。");
+		return false;
+	}
+	const QString driverRobotName = DecodeConfigText(authorizationDriver->m_sRobotName).trimmed();
 	QString robotName = InferRobotNameFromResultPath(inputInfo.absoluteFilePath(), QString());
 	if (robotName.isEmpty())
 	{
-		QString robotLabel;
-		if (RobotDriverAdaptor* driver = GetRobotDriverForCli(arguments, &robotLabel))
-		{
-			robotName = DecodeConfigText(driver->m_sRobotName).trimmed();
-			LogCommandLineMessage(QString("CLI STEP焊接程序：输入路径未包含 Result/机器人目录，使用 --robot 解析目标：%1")
-				.arg(robotLabel));
-		}
+		robotName = driverRobotName;
+		LogCommandLineMessage(QString("CLI STEP焊接程序：输入路径未包含 Result/机器人目录，使用 --robot 解析目标：%1")
+			.arg(robotLabel));
 	}
-	if (robotName.isEmpty())
+	else if (robotName.compare(driverRobotName, Qt::CaseInsensitive) != 0)
 	{
-		robotName = QStringLiteral("RobotA");
+		LogCommandLineMessage(QString(
+			"CLI STEP焊接程序生成失败：输入路径机器人=%1 与 --robot 当前机器人=%2 不一致。")
+			.arg(robotName, driverRobotName));
+		return false;
 	}
 
 	MeasureThenWeldService service;
@@ -13884,6 +13939,16 @@ bool QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 	QString srdPath;
 	QString summary;
 	QString error;
+	MeasureThenWeldService::PointCloudProductionExpectation authorizationExpectation;
+	if (!MeasureThenWeldService::CapturePointCloudProductionExpectation(
+			authorizationDriver,
+			robotName,
+			authorizationExpectation,
+			error))
+	{
+		LogCommandLineMessage("CLI STEP焊接程序生成失败：冻结生产上下文失败：" + error);
+		return false;
+	}
 	if (!service.GenerateStepWeldProgramFiles(
 		robotName,
 		inputInfo.absoluteFilePath(),
@@ -13894,7 +13959,11 @@ bool QtWidgetsApplication4::RunGenerateStepWeldProgramForCli(
 		srpPath,
 		srdPath,
 		summary,
-		error))
+		error,
+		0.0,
+		true,
+		MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
+		authorizationExpectation))
 	{
 		LogCommandLineMessage("CLI STEP焊接程序生成失败：" + error);
 		return false;
@@ -14314,6 +14383,8 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 				weldAttempted = true;
 				QString weldSummary;
 				QString weldError;
+				const auto weldSafetySession =
+					std::make_shared<WeldSafetyRecoverySession>(driver, param);
 				// 自动化循环：确认点自动放行；用户按「停止」则在下个确认点中止焊接。
 				auto weldCheckpoint = [&](const QString& t, const QString&) -> bool
 					{ if (!t.isEmpty()) { emitProgress(i, t, false); } return !stopped(); };
@@ -14322,7 +14393,15 @@ void QtWidgetsApplication4::RunProcessLoopTest(
 					nullptr, nullptr, emitLog, stepCb, weldCheckpoint,
 					param.dFinalWeldTrajectoryStepMm, /*allowPointwiseWeave=*/true,
 					MeasureThenWeldService::WeldPoseSource::PointCloudProduction,
-					/*resumeStartArcMm=*/-1.0, /*inputAlreadyInExecutionOrder=*/false, stopped);
+					/*resumeStartArcMm=*/-1.0, /*inputAlreadyInExecutionOrder=*/false, stopped,
+					[weldSafetySession](const MeasureThenWeldService::WeldExecutionIdentity& identity, QString& prepareError)
+					{
+						return weldSafetySession->Prepare(identity, prepareError);
+					},
+					[weldSafetySession](const WeldExecutionTerminalResult& terminal, QString& finishError)
+					{
+						return weldSafetySession->Finish(terminal, finishError);
+					});
 				emitLog(ok
 					? QStringLiteral("第%1次焊接完成：%2").arg(i).arg(weldSummary)
 					: QStringLiteral("第%1次焊接失败/中止：%2").arg(i).arg(weldError));

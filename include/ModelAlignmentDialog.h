@@ -9,7 +9,7 @@
 #include <QVector>
 
 #include <atomic>
-#include <memory>
+#include <thread>
 
 class QCheckBox;
 class QComboBox;
@@ -54,12 +54,17 @@ private:
 
     // 点云 + 运行
     void OnBrowseCloud();
+    void OnCloudLoadFinished(
+        const QString& path,
+        bool ok,
+        const QString& error,
+        QVector<RobotCalculation::IndexedPoint3D> points);
     void OnRun();
     void OnRunFinished(bool ok, const QString& message);
     void OnSaveResult();
     void UpdatePreview();
     void SetBusy(bool busy);
-    void EnsureProgressDialog(const QString& label);
+    void EnsureProgressDialog(const QString& label, bool determinate = false);
     void Info(const QString& text);
 
     // 模型库 / 参数组控件
@@ -89,7 +94,8 @@ private:
     bool m_busy = false;
     bool m_suppressGroupSignal = false;  // 切组时抑制控件信号回写
 
-    // 后台线程生命周期守卫（同 WorkpieceMeshViewerDialog 模式）。
-    std::shared_ptr<std::atomic_bool> m_destroyed = std::make_shared<std::atomic_bool>(false);
-    std::shared_ptr<std::atomic_int> m_workerCount = std::make_shared<std::atomic_int>(0);
+    // 单一 owned worker：析构先请求取消再 join，禁止 detached 线程访问已销毁窗口。
+    std::atomic_bool m_stopRequested{ false };
+    std::atomic_bool m_destroying{ false };
+    std::thread m_worker;
 };

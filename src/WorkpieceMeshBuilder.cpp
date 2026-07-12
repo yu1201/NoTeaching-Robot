@@ -11,12 +11,22 @@
 #include <QTextStream>
 
 #include <algorithm>
+#include <cerrno>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
 
 namespace
 {
@@ -566,86 +576,244 @@ bool WorkpieceMeshBuilder::SaveMeshPly(const QString& filePath, const Mesh& mesh
     return true;
 }
 
-bool WorkpieceMeshBuilder::LoadMeshPly(const QString& filePath, Mesh& mesh, QString& error)
+bool WorkpieceMeshBuilder::LoadMeshPly(
+    const QString& filePath,
+    Mesh& mesh,
+    QString& error,
+    const CancelCallback& cancelRequested)
 {
+    // 这里是一个信任边界：基准模型可以由用户导入，不能让 PLY 头驱动
+    // 无界分配。上限覆盖本工程 150 万三角形的正常缓存，同时将单模型
+    // 常驻数据压在可控范围内。
+    constexpr qint64 kMaximumFileBytes = 256LL * 1024LL * 1024LL;
+    constexpr qint64 kMaximumHeaderBytes = 64LL * 1024LL;
+    constexpr qsizetype kMaximumHeaderLineBytes = 1024;
+    constexpr int kMaximumHeaderLines = 128;
+    constexpr qint64 kMaximumVertices = 2'000'000;
+    constexpr qint64 kMaximumFaces = 4'000'000;
+    constexpr qint64 kVertexRecordBytes = 6LL * static_cast<qint64>(sizeof(float));
+    constexpr qint64 kFaceRecordBytes = 1LL + 3LL * static_cast<qint64>(sizeof(quint32));
+    constexpr qint64 kRecordsPerChunk = 4096;
+
     mesh = Mesh();
-    QFile file(filePath);
-    if (!file.open(QIODevice::ReadOnly))
+    error.clear();
+    const auto cancelled = [&cancelRequested]()
     {
-        error = QString("打开模型文件失败：%1").arg(filePath);
+        return cancelRequested && cancelRequested();
+    };
+    const auto fail = [&error](const QString& message)
+    {
+        error = message;
         return false;
-    }
-    // 仅解析自家写出的 header 形态（binary_little_endian + xyz/nxnynz + uchar+uint face）。
-    qsizetype vertexCount = 0;
-    qsizetype faceCount = 0;
-    bool headerEnd = false;
-    while (!file.atEnd())
-    {
-        const QByteArray line = file.readLine().trimmed();
-        if (line.startsWith("element vertex"))
-        {
-            vertexCount = line.mid(15).trimmed().toLongLong();
-        }
-        else if (line.startsWith("element face"))
-        {
-            faceCount = line.mid(13).trimmed().toLongLong();
-        }
-        else if (line == "end_header")
-        {
-            headerEnd = true;
-            break;
-        }
-        else if (line.startsWith("format") && !line.contains("binary_little_endian"))
-        {
-            error = "模型文件格式不是二进制 PLY。";
-            return false;
-        }
-    }
-    if (!headerEnd || vertexCount < 3 || faceCount < 1)
-    {
-        error = "模型文件头不完整。";
-        return false;
-    }
+    };
 
-    QByteArray vertexBlock = file.read(vertexCount * 6 * sizeof(float));
-    if (vertexBlock.size() != vertexCount * 6 * static_cast<qsizetype>(sizeof(float)))
+    try
     {
-        error = "模型文件顶点数据不完整。";
-        return false;
-    }
-    mesh.vertices.resize(vertexCount);
-    mesh.normals.resize(vertexCount);
-    const float* vp = reinterpret_cast<const float*>(vertexBlock.constData());
-    for (qsizetype i = 0; i < vertexCount; ++i)
-    {
-        mesh.vertices[i] = Eigen::Vector3f(vp[0], vp[1], vp[2]);
-        mesh.normals[i] = Eigen::Vector3f(vp[3], vp[4], vp[5]);
-        vp += 6;
-    }
+        if (cancelled()) return fail(QStringLiteral("加载模型已取消。"));
 
-    QByteArray faceBlock = file.read(faceCount * (1 + 3 * static_cast<qsizetype>(sizeof(quint32))));
-    if (faceBlock.size() != faceCount * (1 + 3 * static_cast<qsizetype>(sizeof(quint32))))
-    {
-        error = "模型文件面数据不完整。";
-        return false;
-    }
-    mesh.indices.resize(faceCount * 3);
-    const char* fp = faceBlock.constData();
-    for (qsizetype i = 0; i < faceCount; ++i)
-    {
-        if (*fp++ != char(3))
+        const QFileInfo info(filePath);
+        if (!info.exists() || !info.isFile() || info.isSymLink())
+            return fail(QStringLiteral("模型路径不是可读的普通文件：%1").arg(filePath));
+        if (info.size() <= 0 || info.size() > kMaximumFileBytes)
+            return fail(QStringLiteral("模型文件大小超出限制（最大 256MiB）。"));
+
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly))
+            return fail(QStringLiteral("打开模型文件失败：%1").arg(filePath));
+        const qint64 openedFileSize = file.size();
+        if (openedFileSize != info.size() || openedFileSize <= 0 || openedFileSize > kMaximumFileBytes)
+            return fail(QStringLiteral("模型文件在加载前已变化或超出大小限制。"));
+
+        qint64 vertexCount = -1;
+        qint64 faceCount = -1;
+        bool sawPly = false;
+        bool sawFormat = false;
+        bool sawVertexElement = false;
+        bool sawFaceElement = false;
+        bool headerEnd = false;
+        int vertexPropertyIndex = 0;
+        int facePropertyIndex = 0;
+        enum class Element { None, Vertex, Face } currentElement = Element::None;
+        static const QByteArray kVertexProperties[] = {
+            "property float x", "property float y", "property float z",
+            "property float nx", "property float ny", "property float nz"
+        };
+
+        for (int lineNumber = 0; lineNumber < kMaximumHeaderLines && !file.atEnd(); ++lineNumber)
         {
-            error = "模型文件存在非三角面。";
-            return false;
+            if (cancelled()) return fail(QStringLiteral("加载模型已取消。"));
+            const QByteArray rawLine = file.readLine(kMaximumHeaderLineBytes + 1);
+            if (rawLine.isEmpty() && file.error() != QFileDevice::NoError)
+                return fail(QStringLiteral("读取模型文件头失败。"));
+            if (rawLine.size() > kMaximumHeaderLineBytes
+                || (!rawLine.endsWith('\n') && !file.atEnd()))
+                return fail(QStringLiteral("模型文件头存在超长行。"));
+            if (file.pos() > kMaximumHeaderBytes)
+                return fail(QStringLiteral("模型文件头超过 64KiB 限制。"));
+
+            const QByteArray line = rawLine.trimmed();
+            if (lineNumber == 0)
+            {
+                if (line != "ply") return fail(QStringLiteral("模型文件缺少 PLY 签名。"));
+                sawPly = true;
+                continue;
+            }
+            if (line.startsWith("comment ") || line.startsWith("obj_info ")) continue;
+            if (line == "format binary_little_endian 1.0")
+            {
+                if (sawFormat || sawVertexElement)
+                    return fail(QStringLiteral("模型文件 format 声明位置或数量非法。"));
+                sawFormat = true;
+                continue;
+            }
+            if (line.startsWith("element "))
+            {
+                const QList<QByteArray> fields = line.simplified().split(' ');
+                if (fields.size() != 3 || !sawFormat)
+                    return fail(QStringLiteral("模型文件 element 声明非法。"));
+                bool countOk = false;
+                const qint64 count = fields.at(2).toLongLong(&countOk, 10);
+                if (!countOk)
+                    return fail(QStringLiteral("模型文件 element 数量非法。"));
+                if (fields.at(1) == "vertex" && !sawVertexElement && !sawFaceElement)
+                {
+                    if (count < 3 || count > kMaximumVertices)
+                        return fail(QStringLiteral("模型顶点数超出限制。"));
+                    vertexCount = count;
+                    sawVertexElement = true;
+                    currentElement = Element::Vertex;
+                }
+                else if (fields.at(1) == "face" && sawVertexElement && !sawFaceElement
+                         && vertexPropertyIndex == 6)
+                {
+                    if (count < 1 || count > kMaximumFaces)
+                        return fail(QStringLiteral("模型面数超出限制。"));
+                    faceCount = count;
+                    sawFaceElement = true;
+                    currentElement = Element::Face;
+                }
+                else
+                {
+                    return fail(QStringLiteral("模型文件含未支持或重复的 element。"));
+                }
+                continue;
+            }
+            if (line.startsWith("property "))
+            {
+                if (currentElement == Element::Vertex)
+                {
+                    if (vertexPropertyIndex >= 6 || line != kVertexProperties[vertexPropertyIndex++])
+                        return fail(QStringLiteral("模型顶点属性 schema 不匹配。"));
+                }
+                else if (currentElement == Element::Face)
+                {
+                    if (facePropertyIndex != 0
+                        || line != "property list uchar uint vertex_indices")
+                        return fail(QStringLiteral("模型面属性 schema 不匹配。"));
+                    ++facePropertyIndex;
+                }
+                else
+                {
+                    return fail(QStringLiteral("模型属性缺少所属 element。"));
+                }
+                continue;
+            }
+            if (line == "end_header")
+            {
+                headerEnd = true;
+                break;
+            }
+            return fail(QStringLiteral("模型文件头含未支持的声明。"));
         }
-        quint32 idx[3];
-        std::memcpy(idx, fp, sizeof(idx));
-        fp += sizeof(idx);
-        mesh.indices[i * 3] = idx[0];
-        mesh.indices[i * 3 + 1] = idx[1];
-        mesh.indices[i * 3 + 2] = idx[2];
+
+        if (!sawPly || !sawFormat || !headerEnd || !sawVertexElement || !sawFaceElement
+            || vertexPropertyIndex != 6 || facePropertyIndex != 1)
+            return fail(QStringLiteral("模型文件头不完整或 schema 不匹配。"));
+
+        const qint64 headerBytes = file.pos();
+        const qint64 vertexBytes = vertexCount * kVertexRecordBytes;
+        const qint64 faceBytes = faceCount * kFaceRecordBytes;
+        if (headerBytes <= 0 || headerBytes > kMaximumHeaderBytes
+            || headerBytes + vertexBytes + faceBytes != openedFileSize)
+            return fail(QStringLiteral("模型载荷长度与文件头不匹配。"));
+
+        if (cancelled()) return fail(QStringLiteral("加载模型已取消。"));
+        Mesh loaded;
+        loaded.vertices.resize(static_cast<qsizetype>(vertexCount));
+        loaded.normals.resize(static_cast<qsizetype>(vertexCount));
+        loaded.indices.resize(static_cast<qsizetype>(faceCount * 3));
+
+        for (qint64 base = 0; base < vertexCount; base += kRecordsPerChunk)
+        {
+            if (cancelled()) return fail(QStringLiteral("加载模型已取消。"));
+            const qint64 recordCount = std::min(kRecordsPerChunk, vertexCount - base);
+            const qint64 bytes = recordCount * kVertexRecordBytes;
+            const QByteArray block = file.read(bytes);
+            if (block.size() != bytes)
+                return fail(QStringLiteral("模型文件顶点数据不完整。"));
+            for (qint64 offset = 0; offset < recordCount; ++offset)
+            {
+                float values[6];
+                std::memcpy(values, block.constData() + offset * kVertexRecordBytes, sizeof(values));
+                const Eigen::Vector3f vertex(values[0], values[1], values[2]);
+                const Eigen::Vector3f normal(values[3], values[4], values[5]);
+                if (!IsFiniteVec(vertex) || !IsFiniteVec(normal))
+                    return fail(QStringLiteral("模型文件含 NaN/Inf 顶点或法线。"));
+                const qsizetype index = static_cast<qsizetype>(base + offset);
+                loaded.vertices[index] = vertex;
+                loaded.normals[index] = normal;
+            }
+        }
+
+        for (qint64 base = 0; base < faceCount; base += kRecordsPerChunk)
+        {
+            if (cancelled()) return fail(QStringLiteral("加载模型已取消。"));
+            const qint64 recordCount = std::min(kRecordsPerChunk, faceCount - base);
+            const qint64 bytes = recordCount * kFaceRecordBytes;
+            const QByteArray block = file.read(bytes);
+            if (block.size() != bytes)
+                return fail(QStringLiteral("模型文件面数据不完整。"));
+            for (qint64 offset = 0; offset < recordCount; ++offset)
+            {
+                const char* record = block.constData() + offset * kFaceRecordBytes;
+                if (static_cast<unsigned char>(record[0]) != 3U)
+                    return fail(QStringLiteral("模型文件存在非三角面。"));
+                quint32 indices[3];
+                std::memcpy(indices, record + 1, sizeof(indices));
+                if (indices[0] >= static_cast<quint32>(vertexCount)
+                    || indices[1] >= static_cast<quint32>(vertexCount)
+                    || indices[2] >= static_cast<quint32>(vertexCount))
+                    return fail(QStringLiteral("模型面引用了越界顶点。"));
+                const qsizetype index = static_cast<qsizetype>((base + offset) * 3);
+                loaded.indices[index] = indices[0];
+                loaded.indices[index + 1] = indices[1];
+                loaded.indices[index + 2] = indices[2];
+            }
+        }
+
+        if (cancelled()) return fail(QStringLiteral("加载模型已取消。"));
+        if (file.error() != QFileDevice::NoError || file.pos() != openedFileSize || !file.atEnd())
+            return fail(QStringLiteral("模型文件末尾或读取状态异常。"));
+        if (!loaded.IsValid()) return fail(QStringLiteral("模型网格无效。"));
+        mesh = std::move(loaded);
+        return true;
     }
-    return mesh.IsValid();
+    catch (const std::bad_alloc&)
+    {
+        mesh = Mesh();
+        return fail(QStringLiteral("加载模型所需内存超出可用范围。"));
+    }
+    catch (const std::exception& ex)
+    {
+        mesh = Mesh();
+        return fail(QStringLiteral("加载模型发生异常：%1")
+            .arg(QString::fromLocal8Bit(ex.what()).left(256)));
+    }
+    catch (...)
+    {
+        mesh = Mesh();
+        return fail(QStringLiteral("加载模型发生未知异常。"));
+    }
 }
 
 bool WorkpieceMeshBuilder::SaveMeshStl(const QString& filePath, const Mesh& mesh, QString& error)
@@ -700,73 +868,186 @@ bool WorkpieceMeshBuilder::LoadCloudPointsWithProgress(
     const QString& cloudFilePath,
     QVector<RobotCalculation::IndexedPoint3D>& points,
     QString& error,
-    const ProgressCallback& progress)
+    const ProgressCallback& progress,
+    const CloudLoadLimits* tighterLimits)
 {
-    points.clear();
-    QFile file(cloudFilePath);
-    if (!file.open(QIODevice::ReadOnly))
-    {
-        error = QString("打开点云文件失败：%1").arg(cloudFilePath);
-        return false;
-    }
-    const qint64 totalBytes = std::max<qint64>(1, file.size());
-    points.reserve(static_cast<qsizetype>(std::min<qint64>(totalBytes / 40, 8000000)));
+    constexpr qint64 kMaximumFileBytes = 768LL * 1024LL * 1024LL;
+    constexpr qint64 kMaximumPhysicalLines = 10'000'000;
+    constexpr qsizetype kMaximumLineBytes = 64 * 1024;
+    constexpr qsizetype kMaximumValidPoints = 8'000'000;
+    constexpr qint64 kMaximumPollIntervalLines = 64 * 1024;
+    constexpr qint64 kProgressPollBytes = 1LL * 1024LL * 1024LL;
 
-    qint64 lineCounter = 0;
-    while (!file.atEnd())
+    error.clear();
+    const auto fail = [&error](const QString& message)
     {
-        const QByteArray line = file.readLine();
-        // 每 ~1.6 万行报一次进度并检查取消（约每 0.7MB 一次，开销可忽略）。
-        if ((++lineCounter & 0x3FFF) == 0 && progress)
-        {
-            const int percent = static_cast<int>(file.pos() * 100 / totalBytes);
-            if (!progress(percent, QStringLiteral("读取完整点云")))
-            {
-                error = QStringLiteral("已取消");
-                return false;
-            }
-        }
-        // 手写解析 "index x y z"（空格分隔）：表头/非数字行 strtoll 解析失败自动跳过。
-        const char* cursor = line.constData();
-        char* next = nullptr;
-        const long long index = std::strtoll(cursor, &next, 10);
-        if (next == cursor)
-        {
-            continue;
-        }
-        cursor = next;
-        const double x = std::strtod(cursor, &next);
-        if (next == cursor)
-        {
-            continue;
-        }
-        cursor = next;
-        const double y = std::strtod(cursor, &next);
-        if (next == cursor)
-        {
-            continue;
-        }
-        cursor = next;
-        const double z = std::strtod(cursor, &next);
-        if (next == cursor)
-        {
-            continue;
-        }
-        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
-        {
-            continue;
-        }
-        RobotCalculation::IndexedPoint3D point;
-        point.index = static_cast<int>(index);
-        point.point = Eigen::Vector3d(x, y, z);
-        points.push_back(point);
-    }
-    if (points.size() < 16)
-    {
-        error = QString("点云文件有效点过少（%1）：%2").arg(points.size()).arg(cloudFilePath);
+        error = message;
         return false;
+    };
+
+    try
+    {
+        const CloudLoadLimits defaults;
+        const CloudLoadLimits& limits = tighterLimits != nullptr ? *tighterLimits : defaults;
+        if (limits.maximumFileBytes <= 0 || limits.maximumFileBytes > kMaximumFileBytes
+            || limits.maximumPhysicalLines <= 0
+            || limits.maximumPhysicalLines > kMaximumPhysicalLines
+            || limits.maximumLineBytes <= 0 || limits.maximumLineBytes > kMaximumLineBytes
+            || limits.maximumValidPoints < 16 || limits.maximumValidPoints > kMaximumValidPoints
+            || limits.progressPollIntervalLines <= 0
+            || limits.progressPollIntervalLines > kMaximumPollIntervalLines)
+            return fail(QStringLiteral("点云加载限制参数非法。"));
+
+        if (progress && !progress(0, QStringLiteral("检查点云文件")))
+            return fail(QStringLiteral("已取消"));
+
+        const QFileInfo info(cloudFilePath);
+        if (!info.exists() || !info.isFile() || info.isSymLink())
+            return fail(QStringLiteral("点云路径不是可读的普通文件：%1").arg(cloudFilePath));
+#ifdef _WIN32
+        const QString nativePath = QDir::toNativeSeparators(info.absoluteFilePath());
+        const DWORD attributes = ::GetFileAttributesW(
+            reinterpret_cast<LPCWSTR>(nativePath.utf16()));
+        if (attributes == INVALID_FILE_ATTRIBUTES
+            || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+            || (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+            || (attributes & FILE_ATTRIBUTE_DEVICE) != 0)
+            return fail(QStringLiteral("点云路径不得是 Windows reparse/device 链接。"));
+#endif
+        if (info.canonicalFilePath().isEmpty())
+            return fail(QStringLiteral("无法确认点云文件的规范路径。"));
+        if (info.size() <= 0 || info.size() > limits.maximumFileBytes)
+            return fail(QStringLiteral("点云文件为空或超过大小限制（最大 %1MiB）。")
+                .arg(limits.maximumFileBytes / (1024 * 1024)));
+
+        QFile file(cloudFilePath);
+        if (!file.open(QIODevice::ReadOnly))
+            return fail(QStringLiteral("打开点云文件失败：%1").arg(cloudFilePath));
+        const qint64 openedFileSize = file.size();
+        if (openedFileSize != info.size() || openedFileSize <= 0
+            || openedFileSize > limits.maximumFileBytes)
+            return fail(QStringLiteral("点云文件在加载前已变化或超出大小限制。"));
+
+        QVector<RobotCalculation::IndexedPoint3D> loaded;
+        loaded.reserve(static_cast<qsizetype>(std::min<qint64>(
+            openedFileSize / 40, std::min<qint64>(limits.maximumValidPoints, 1'000'000))));
+
+        qint64 lineCounter = 0;
+        qint64 lastProgressBytes = 0;
+        while (file.pos() < openedFileSize)
+        {
+            const QByteArray line = file.readLine(limits.maximumLineBytes + 1);
+            if (line.isEmpty() && file.error() != QFileDevice::NoError)
+                return fail(QStringLiteral("读取点云文件失败。"));
+            if (line.size() > limits.maximumLineBytes
+                || (!line.endsWith('\n') && file.pos() < openedFileSize))
+                return fail(QStringLiteral("点云第 %1 行超过 64KiB 限制。")
+                    .arg(lineCounter + 1));
+            if (file.pos() > openedFileSize)
+                return fail(QStringLiteral("点云文件在读取期间增长。"));
+            ++lineCounter;
+            if (lineCounter > limits.maximumPhysicalLines)
+                return fail(QStringLiteral("点云物理行数超过限制。"));
+
+            const qint64 currentBytes = file.pos();
+            if (progress
+                && (lineCounter % limits.progressPollIntervalLines == 0
+                    || currentBytes - lastProgressBytes >= kProgressPollBytes))
+            {
+                lastProgressBytes = currentBytes;
+                const int percent = static_cast<int>(currentBytes * 100 / openedFileSize);
+                if (!progress(percent, QStringLiteral("读取完整点云")))
+                    return fail(QStringLiteral("已取消"));
+            }
+
+            // 手写解析 "index x y z"（空格分隔）。纯文字表头允许跳过；
+            // 一旦首列是数字，整行必须严格完整，禁止静默吞掉损坏数据。
+            const char* cursor = line.constData();
+            const char* const end = line.constData() + line.size();
+            char* next = nullptr;
+            errno = 0;
+            const long long index = std::strtoll(cursor, &next, 10);
+            if (next == cursor)
+            {
+                const QByteArray normalized = line.simplified();
+                static const QByteArray kSimpleHeader("index x y z");
+                static const QByteArray kLegacyHeader(
+                    "index frame_index line_point_index x y z camera_x camera_y camera_z "
+                    "robot_x robot_y robot_z robot_rx robot_ry robot_rz");
+                // 只允许空行、明确 # 注释和两种已知 schema 表头。其他非数字
+                // 行是损坏数据，禁止在后续已有 16 个有效点时被静默吞掉。
+                if (normalized.isEmpty() || normalized.startsWith('#')
+                    || normalized == kSimpleHeader || normalized == kLegacyHeader)
+                    continue;
+                return fail(QStringLiteral("点云第 %1 行是未知非数字内容，不是允许的表头/注释。")
+                    .arg(lineCounter));
+            }
+            if (errno == ERANGE
+                || index < static_cast<long long>(std::numeric_limits<int>::min())
+                || index > static_cast<long long>(std::numeric_limits<int>::max()))
+                return fail(QStringLiteral("点云第 %1 行 index 超出 int 范围。").arg(lineCounter));
+
+            cursor = next;
+            // 同时支持当前 "index x y z" 与历史完整扫描行
+            // "index frame line x y z camera...robot..."。仅接受 4/15 列两种完整
+            // schema，避免旧文件被错把 frame/line 当成 XYZ，也不静默接受尾字段。
+            double values[14] = {};
+            int valueCount = 0;
+            while (true)
+            {
+                while (cursor < end && std::isspace(static_cast<unsigned char>(*cursor))) ++cursor;
+                if (cursor == end) break;
+                if (valueCount >= 14)
+                    return fail(QStringLiteral("点云第 %1 行列数超出支持的 schema。").arg(lineCounter));
+                const double value = std::strtod(cursor, &next);
+                if (next == cursor)
+                    return fail(QStringLiteral("点云第 %1 行含非数字字段。").arg(lineCounter));
+                if (!std::isfinite(value))
+                    return fail(QStringLiteral("点云第 %1 行含 NaN/Inf 数值。").arg(lineCounter));
+                values[valueCount++] = value;
+                cursor = next;
+            }
+            if (valueCount != 3 && valueCount != 14)
+                return fail(QStringLiteral("点云第 %1 行不是 4 列或 15 列完整 schema。")
+                    .arg(lineCounter));
+            const int xyzOffset = valueCount == 3 ? 0 : 2;
+            const double x = values[xyzOffset];
+            const double y = values[xyzOffset + 1];
+            const double z = values[xyzOffset + 2];
+            if (loaded.size() >= limits.maximumValidPoints)
+                return fail(QStringLiteral("点云有效点数超过限制。"));
+
+            RobotCalculation::IndexedPoint3D point;
+            point.index = static_cast<int>(index);
+            point.point = Eigen::Vector3d(x, y, z);
+            loaded.push_back(point);
+        }
+
+        if (file.error() != QFileDevice::NoError
+            || file.pos() != openedFileSize || file.size() != openedFileSize)
+            return fail(QStringLiteral("点云文件在读取期间变化或读取失败。"));
+        if (loaded.size() < 16)
+            return fail(QStringLiteral("点云文件有效点过少（%1）：%2")
+                .arg(loaded.size()).arg(cloudFilePath));
+        if (progress && !progress(100, QStringLiteral("完成")))
+            return fail(QStringLiteral("已取消"));
+
+        points = std::move(loaded);  // 只有所有边界/取消检查全过才原子发布
+        return true;
     }
-    return true;
+    catch (const std::bad_alloc&)
+    {
+        return fail(QStringLiteral("点云加载所需内存超出可用范围。"));
+    }
+    catch (const std::exception& ex)
+    {
+        return fail(QStringLiteral("点云加载发生异常：%1")
+            .arg(QString::fromLocal8Bit(ex.what()).left(256)));
+    }
+    catch (...)
+    {
+        return fail(QStringLiteral("点云加载发生未知异常。"));
+    }
 }
 
 bool WorkpieceMeshBuilder::EnsureMeshCache(

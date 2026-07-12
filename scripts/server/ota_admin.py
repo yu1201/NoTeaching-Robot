@@ -8,13 +8,19 @@ only on loopback, and is intended to be exposed through the existing nginx
 token file is root-owned and must not be readable by group or other users.
 
 FTP account mutations follow the deployed vsftpd layout without ever deleting
-the shared chroot directory:
+uploaded device data:
 
-* accounts are members of ``ftpdata`` and use ``/srv/devicedata`` as home;
+* accounts are members of ``ftpdata`` and use ``/srv/devicedata`` as chroot;
 * ``/etc/vsftpd.userlist`` is the publication/allow-list boundary;
-* ``download_enable=NO`` means upload-only; no per-user file means full access;
-* ``uploader`` is permanently upload-only and ``devicedata`` permanently full;
-  neither account can be deleted.
+* every ordinary account is upload-only.  Its FTP chroot stays at the
+  root-owned, non-writable ``/srv/devicedata``; Unix directory ownership binds
+  it to the writable host path ``/srv/devicedata/data/<account>``;
+* that directory is owned by the account and grouped to the private primary
+  group of ``devicedata``.  Mode 2770 lets the administrator access it without
+  granting another member of the shared ``ftpdata`` group any filesystem
+  access;
+* ``uploader`` is retired and may never be allow-listed.  ``devicedata`` is the
+  only full-access account and cannot be deleted.
 
 All file publication uses same-directory atomic replacement.  Account changes
 are serialized in-process and with a deployment-shared ``flock`` because
@@ -62,15 +68,14 @@ MIN_MANAGED_UID = 1000
 
 USERADD = "/usr/sbin/useradd"
 USERDEL = "/usr/sbin/userdel"
+GROUPDEL = "/usr/sbin/groupdel"
 CHPASSWD = "/usr/sbin/chpasswd"
 ACCOUNT_LOCK_FILE = "/run/no-teaching-ota/ota-accounts.lock"
 REQUIRED_LOCK_OWNER_UID = 0
 
-FIXED_ACCOUNT_PERMISSIONS = {
-    "uploader": "upload",
-    "devicedata": "full",
-}
-PROTECTED = frozenset(FIXED_ACCOUNT_PERMISSIONS)
+FIXED_ACCOUNT_PERMISSIONS = {"devicedata": "full"}
+RETIRED_ACCOUNTS = frozenset({"uploader"})
+PROTECTED = frozenset((*FIXED_ACCOUNT_PERMISSIONS, *RETIRED_ACCOUNTS))
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{2,31}$")
 MAX_BODY_BYTES = 16 * 1024
 MAX_CONFIG_BYTES = 64 * 1024
@@ -78,18 +83,23 @@ COMMAND_TIMEOUT_SECONDS = 10
 OPERATION_TIMEOUT_SECONDS = 12
 ROLLBACK_RESERVE_SECONDS = 2
 LOCK_POLL_SECONDS = 0.05
+MAX_DIRECTORY_SCAN_ENTRIES = 250_000
+MAX_DIRECTORY_SCAN_DEPTH = 64
 MIN_PASSWORD_CHARS = 8
 MAX_PASSWORD_CHARS = 256
 MIN_TOKEN_CHARS = 32
 MAX_TOKEN_CHARS = 512
 RETRYABLE_TIMEOUT_MESSAGE = "操作超时，结果可能不确定，请使用相同参数重试确认"
-UPLOAD_ONLY_CONFIG = (
+UPLOAD_ONLY_CONFIG_PREFIX = (
     "download_enable=NO\n"
     "chmod_enable=NO\n"
     "file_open_mode=0440\n"
+    "local_umask=007\n"
     "cmds_denied=DELE,RMD,RNFR,RNTO,APPE,REST\n"
 )
 SAFE_EXTRA_UPLOAD_DIRECTIVES = {"hide_ids": frozenset({"YES"})}
+DEVICE_DIRECTORY_MODE = 0o2770
+ENFORCE_POSIX_OWNERSHIP = os.name == "posix"
 
 _account_lock = threading.RLock()
 _stats_lock = threading.Lock()
@@ -173,6 +183,25 @@ class OperationDeadline:
         if usable <= 0:
             raise OperationTimeoutError("account operation deadline exceeded")
         return min(COMMAND_TIMEOUT_SECONDS, usable)
+
+
+class DirectoryScanBudget:
+    """One entry/depth budget shared by every directory scanned for one request."""
+
+    def __init__(self, max_entries=None, max_depth=None):
+        self.max_entries = (
+            MAX_DIRECTORY_SCAN_ENTRIES if max_entries is None else max_entries
+        )
+        self.max_depth = MAX_DIRECTORY_SCAN_DEPTH if max_depth is None else max_depth
+        self.entries = 0
+
+    def consume(self, depth, deadline):
+        deadline.remaining()
+        if depth > self.max_depth:
+            raise IntegrityError("managed device tree exceeds the maximum scan depth")
+        self.entries += 1
+        if self.entries > self.max_entries:
+            raise IntegrityError("managed device tree exceeds the maximum entry budget")
 
 
 def run(cmd, input_text=None, deadline=None, reserve_seconds=0):
@@ -274,6 +303,17 @@ def _account_operation_scope(exclusive):
 def _validate_name(name):
     if not isinstance(name, str) or NAME_RE.fullmatch(name) is None:
         raise ApiError("账号名需小写字母开头、3-32位（小写字母/数字/_-）")
+    if name in RETIRED_ACCOUNTS:
+        raise ApiError("共享 uploader 账号已退役；请使用与设备名完全一致的独立账号")
+    return name
+
+
+def _validate_stored_name(name):
+    """Validate an on-disk account name, including retired-name detection."""
+    if not isinstance(name, str) or NAME_RE.fullmatch(name) is None:
+        raise IntegrityError("invalid account name in managed state")
+    if name in RETIRED_ACCOUNTS:
+        raise IntegrityError("retired shared uploader account is still published")
     return name
 
 
@@ -299,6 +339,8 @@ def _validate_fixed_account_permission(name, permission):
     expected = FIXED_ACCOUNT_PERMISSIONS.get(name)
     if expected is not None and permission != expected:
         raise ApiError("系统账号权限固定，禁止修改")
+    if expected is None and permission != "upload":
+        raise ApiError("普通设备账号必须保持 upload-only 独立目录权限")
     return permission
 
 
@@ -306,6 +348,8 @@ def _assert_fixed_account_permission(name, permission):
     expected = FIXED_ACCOUNT_PERMISSIONS.get(name)
     if expected is not None and permission != expected:
         raise IntegrityError("fixed system account permission invariant is broken")
+    if expected is None and permission != "upload":
+        raise IntegrityError("ordinary device account is not upload-only")
 
 
 def _assert_regular_file(path, max_bytes=None):
@@ -418,6 +462,212 @@ def _safe_conf_path(name):
     return candidate
 
 
+def _safe_device_path(name):
+    _validate_name(name)
+    base = os.path.abspath(DATA_DIR)
+    _assert_directory(base)
+    _assert_ftp_directory_boundary()
+    candidate = os.path.abspath(os.path.join(base, name))
+    try:
+        inside = os.path.commonpath((base, candidate)) == base
+    except ValueError:
+        inside = False
+    if not inside or candidate == base:
+        raise IntegrityError("device directory escaped its root")
+    return candidate
+
+
+def _assert_ftp_directory_boundary():
+    if not ENFORCE_POSIX_OWNERSHIP:
+        return
+    admin = _get_device_admin_record()
+    for path, expected_mode, expected_gid in (
+        (FTP_HOME, 0o755, 0),
+        (DATA_DIR, 0o2771, admin.pw_gid),
+    ):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError as exc:
+            raise IntegrityError("managed FTP directory boundary is missing") from exc
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise IntegrityError("managed FTP directory boundary is not a real directory")
+        if info.st_uid != 0 or info.st_gid != expected_gid or stat.S_IMODE(info.st_mode) != expected_mode:
+            raise IntegrityError("managed FTP directory boundary owner/mode has drifted")
+
+
+def _device_local_root(name):
+    _validate_name(name)
+    # With chroot_local_user=YES, vsftpd treats local_root as the chroot root.
+    # Pointing it at the user-owned device directory would make that root
+    # writable and login would fail while allow_writeable_chroot=NO.  Keep the
+    # root fixed/root-owned; the 2771 parent + account-owned 2770 child is the
+    # actual per-device authorization boundary.
+    return FTP_HOME
+
+
+def _upload_only_config(name):
+    return UPLOAD_ONLY_CONFIG_PREFIX + "local_root=%s\n" % _device_local_root(name)
+
+
+def _get_device_admin_record():
+    record = _get_system_account("devicedata")
+    if record is None:
+        raise IntegrityError("devicedata administrator account is missing")
+    if record.pw_uid < MIN_MANAGED_UID or record.pw_gid <= 0:
+        raise IntegrityError("devicedata administrator identity is privileged")
+    if record.pw_dir != FTP_HOME or record.pw_shell != NOLOGIN_SHELL:
+        raise IntegrityError("devicedata administrator is outside the managed FTP profile")
+    try:
+        same_uid = [entry for entry in pwd.getpwall() if entry.pw_uid == record.pw_uid]
+        same_primary_gid = [entry for entry in pwd.getpwall() if entry.pw_gid == record.pw_gid]
+        admin_group = grp.getgrgid(record.pw_gid)
+    except (KeyError, OSError) as exc:
+        raise IntegrityError("devicedata private group cannot be resolved") from exc
+    if len(same_uid) != 1 or same_uid[0].pw_name != "devicedata":
+        raise IntegrityError("devicedata UID is shared or aliased")
+    if len(same_primary_gid) != 1 or same_primary_gid[0].pw_name != "devicedata":
+        raise IntegrityError("devicedata primary GID is shared")
+    if any(member != "devicedata" for member in admin_group.gr_mem):
+        raise IntegrityError("devicedata private group has an unexpected member")
+    try:
+        ftp_group = grp.getgrnam(FTP_GROUP)
+    except KeyError as exc:
+        raise IntegrityError("managed FTP group is missing") from exc
+    if record.pw_gid == ftp_group.gr_gid:
+        raise IntegrityError("devicedata primary group must be private, not ftpdata")
+    return record
+
+
+def _walk_device_tree(path, deadline, budget):
+    """Yield bounded lstat records without letting os.walk preallocate an unbounded directory."""
+    stack = [(os.path.abspath(path), 0)]
+    while stack:
+        directory, depth = stack.pop()
+        deadline.remaining()
+        try:
+            iterator = os.scandir(directory)
+        except OSError as exc:
+            raise IntegrityError("managed device directory cannot be scanned") from exc
+        child_directories = []
+        try:
+            for entry in iterator:
+                child_depth = depth + 1
+                budget.consume(child_depth, deadline)
+                try:
+                    # DirEntry.stat().st_nlink is reported as zero by some Windows
+                    # Python builds used by offline CI; lstat is the portable identity.
+                    info = os.lstat(entry.path)
+                except OSError as exc:
+                    raise IntegrityError("managed device entry changed during scan") from exc
+                yield entry.path, info, child_depth
+                if stat.S_ISDIR(info.st_mode):
+                    child_directories.append((entry.path, child_depth))
+        finally:
+            iterator.close()
+        stack.extend(reversed(child_directories))
+
+
+def _assert_device_tree_has_no_links(path, deadline, budget):
+    """Reject link-based crossings under one shared request deadline and entry budget."""
+    for _candidate, info, _depth in _walk_device_tree(path, deadline, budget):
+        if stat.S_ISLNK(info.st_mode):
+            raise IntegrityError("device directory contains a symbolic link")
+        if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+            raise IntegrityError("device directory contains a hard-linked file")
+
+
+def _assert_device_directory(
+    name,
+    account_record=None,
+    scan_links=False,
+    deadline=None,
+    scan_budget=None,
+):
+    path = _safe_device_path(name)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise IntegrityError("device account is missing its bound data directory") from exc
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise IntegrityError("bound device data path is not a real directory")
+    if account_record is None:
+        account_record = _assert_managed_system_account(name)
+    admin = _get_device_admin_record()
+    if ENFORCE_POSIX_OWNERSHIP:
+        if info.st_uid != account_record.pw_uid or info.st_gid != admin.pw_gid:
+            raise IntegrityError("bound device directory owner/group is not isolated")
+        if stat.S_IMODE(info.st_mode) != DEVICE_DIRECTORY_MODE:
+            raise IntegrityError("bound device directory mode must be 2770")
+    if scan_links:
+        if deadline is None:
+            deadline = OperationDeadline()
+        if scan_budget is None:
+            scan_budget = DirectoryScanBudget()
+        _assert_device_tree_has_no_links(path, deadline, scan_budget)
+    return path
+
+
+def _create_device_directory(name, account_record):
+    path = _safe_device_path(name)
+    if os.path.lexists(path):
+        raise ConflictError("同名设备数据目录已存在（可能是保留数据），禁止重建账号接管")
+    admin = _get_device_admin_record()
+    os.mkdir(path, 0o700)
+    try:
+        if ENFORCE_POSIX_OWNERSHIP:
+            os.chown(path, account_record.pw_uid, admin.pw_gid)
+        os.chmod(path, DEVICE_DIRECTORY_MODE)
+        _assert_device_directory(name, account_record=account_record)
+    except Exception:
+        try:
+            os.rmdir(path)
+        except OSError:
+            LOG.critical("rollback failed for new device directory")
+        raise
+    _fsync_directory(DATA_DIR)
+    return path
+
+
+def _retire_device_directory(name):
+    """Preserve data while preventing a recycled UID from traversing it."""
+    path = _safe_device_path(name)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise IntegrityError("cannot retire a non-directory device data path")
+    admin = _get_device_admin_record()
+    if ENFORCE_POSIX_OWNERSHIP:
+        os.chown(path, 0, admin.pw_gid)
+    os.chmod(path, DEVICE_DIRECTORY_MODE)
+    _fsync_directory(DATA_DIR)
+
+
+def _restore_device_directory_metadata(name, metadata):
+    path = _safe_device_path(name)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise IntegrityError("cannot restore a non-directory device data path")
+    if ENFORCE_POSIX_OWNERSHIP:
+        os.chown(path, metadata.st_uid, metadata.st_gid)
+    os.chmod(path, stat.S_IMODE(metadata.st_mode))
+    _fsync_directory(DATA_DIR)
+
+
+def _rollback_new_device_directory(name):
+    path = _safe_device_path(name)
+    if not os.path.lexists(path):
+        return
+    try:
+        os.rmdir(path)
+        _fsync_directory(DATA_DIR)
+    except OSError:
+        # Unexpected content must remain inaccessible even if rollback cannot
+        # remove it.  The retained path also blocks same-name recreation.
+        try:
+            _retire_device_directory(name)
+        except Exception:
+            LOG.critical("rollback failed to quarantine new device directory")
+
+
 def _parse_userlist_document(content):
     """Return account names while leaving comments/blank lines opaque.
 
@@ -434,6 +684,7 @@ def _parse_userlist_document(content):
             continue
         if logical != stripped or NAME_RE.fullmatch(logical) is None or logical in seen:
             raise IntegrityError("invalid or duplicate account in vsftpd allow-list")
+        _validate_stored_name(logical)
         seen.add(logical)
         names.append(logical)
     return names
@@ -536,6 +787,10 @@ def _read_permission_unlocked(name):
         raise IntegrityError("upload-only account is missing a required restriction")
     if directives.get("file_open_mode") != "0440":
         raise IntegrityError("upload-only account is missing write-once file mode")
+    if directives.get("local_umask") != "007":
+        raise IntegrityError("upload-only account is missing its private directory umask")
+    if directives.get("local_root") != _device_local_root(name):
+        raise IntegrityError("upload-only account escaped the root-owned FTP chroot")
     denied_items = directives.get("cmds_denied", "").split(",")
     if any(not item or item != item.strip() or item != item.upper() for item in denied_items):
         raise IntegrityError("invalid cmds_denied restriction")
@@ -551,6 +806,10 @@ def _read_permission_unlocked(name):
             continue
         if key == "file_open_mode" and value == "0440":
             continue
+        if key == "local_umask" and value == "007":
+            continue
+        if key == "local_root" and value == _device_local_root(name):
+            continue
         allowed_values = SAFE_EXTRA_UPLOAD_DIRECTIVES.get(key)
         if allowed_values is not None and value in allowed_values:
             continue
@@ -564,7 +823,7 @@ def _set_permission_unlocked(name, permission):
     _validate_fixed_account_permission(name, permission)
     conf = _safe_conf_path(name)
     if permission == "upload":
-        _atomic_write_text(conf, UPLOAD_ONLY_CONFIG, mode=0o600)
+        _atomic_write_text(conf, _upload_only_config(name), mode=0o600)
     else:
         _remove_regular_file(conf)
 
@@ -575,11 +834,22 @@ def set_permission(name, permission):
 
 
 def list_accounts():
-    with _account_operation_scope(exclusive=False):
+    with _account_operation_scope(exclusive=False) as deadline:
         accounts = []
+        scan_budget = DirectoryScanBudget()
         for name in _read_userlist_unlocked():
+            deadline.remaining()
             permission = _read_permission_unlocked(name)
             _assert_fixed_account_permission(name, permission)
+            record = _assert_managed_system_account(name)
+            if name != "devicedata":
+                _assert_device_directory(
+                    name,
+                    account_record=record,
+                    scan_links=True,
+                    deadline=deadline,
+                    scan_budget=scan_budget,
+                )
             accounts.append(
                 {
                     "name": name,
@@ -595,6 +865,15 @@ def _get_system_account(name):
         raise RuntimeError("POSIX account database is unavailable")
     try:
         return pwd.getpwnam(name)
+    except KeyError:
+        return None
+
+
+def _get_system_group(name):
+    if grp is None:
+        raise RuntimeError("POSIX group database is unavailable")
+    try:
+        return grp.getgrnam(name)
     except KeyError:
         return None
 
@@ -632,6 +911,25 @@ def _assert_managed_system_account(name):
         raise IntegrityError("managed FTP group GID is ambiguous")
     if record.pw_gid != group.gr_gid and name not in group.gr_mem:
         raise IntegrityError("allow-listed account is not a member of the managed FTP group")
+    if name != "devicedata":
+        admin_gid = _get_device_admin_record().pw_gid
+        if record.pw_gid in (group.gr_gid, admin_gid):
+            raise IntegrityError("ordinary device account does not use a private primary group")
+        try:
+            private_group = grp.getgrgid(record.pw_gid)
+            same_gid_groups = [entry for entry in grp.getgrall() if entry.gr_gid == record.pw_gid]
+            same_primary_gid = [entry for entry in pwd.getpwall() if entry.pw_gid == record.pw_gid]
+        except (KeyError, OSError) as exc:
+            raise IntegrityError("device account private primary group cannot be resolved") from exc
+        if (
+            private_group.gr_name != name
+            or len(same_gid_groups) != 1
+            or same_gid_groups[0].gr_name != name
+            or len(same_primary_gid) != 1
+            or same_primary_gid[0].pw_name != name
+            or any(member != name for member in private_group.gr_mem)
+        ):
+            raise IntegrityError("device account primary group is shared or aliased")
     return record
 
 
@@ -653,15 +951,20 @@ def account_create(name, password, permission):
             raise ConflictError("账号已存在")
         if _get_system_account(name) is not None:
             raise ConflictError("同名系统账号已存在，拒绝接管")
+        if name != "devicedata" and _get_system_group(name) is not None:
+            raise ConflictError("同名系统组已存在，拒绝接管或复用旧 GID")
         conf = _safe_conf_path(name)
         if _snapshot_file(conf) is not None:
             raise ConflictError("账号存在残留权限配置，拒绝覆盖")
+        if name != "devicedata" and os.path.lexists(_safe_device_path(name)):
+            raise ConflictError("同名设备数据已保留，禁止新 UID 重建账号接管")
 
         user_added = False
+        device_directory_created = False
         try:
             try:
                 run(
-                    [USERADD, "-M", "-d", FTP_HOME, "-s", NOLOGIN_SHELL, "-G", FTP_GROUP, name],
+                    [USERADD, "-U", "-M", "-d", FTP_HOME, "-s", NOLOGIN_SHELL, "-G", FTP_GROUP, name],
                     deadline=deadline,
                     reserve_seconds=ROLLBACK_RESERVE_SECONDS,
                 )
@@ -680,15 +983,25 @@ def account_create(name, password, permission):
                 reserve_seconds=ROLLBACK_RESERVE_SECONDS,
             )
             deadline.remaining()
+            if name != "devicedata":
+                _create_device_directory(name, _assert_managed_system_account(name))
+                device_directory_created = True
             _set_permission_unlocked(name, permission)
             _publish_userlist_document_unlocked(_append_account_line(userlist_document, name))
         except Exception:
+            _rollback_file(conf, None, "new account permission")
+            if device_directory_created or (name != "devicedata" and os.path.lexists(_safe_device_path(name))):
+                _rollback_new_device_directory(name)
             if user_added:
                 try:
                     run([USERDEL, name], deadline=deadline)
                 except Exception:
                     LOG.critical("rollback failed for newly-created system account")
-            _rollback_file(conf, None, "new account permission")
+            if name != "devicedata" and _get_system_account(name) is None:
+                try:
+                    run([GROUPDEL, name], deadline=deadline)
+                except Exception:
+                    LOG.critical("rollback left a private device group")
             raise
 
 
@@ -706,7 +1019,15 @@ def account_update(name, password=None, permission=None):
         names = _read_userlist_unlocked()
         if name not in names:
             raise NotFoundError("账号不存在")
-        _assert_managed_system_account(name)
+        record = _assert_managed_system_account(name)
+        if name != "devicedata":
+            _assert_device_directory(
+                name,
+                account_record=record,
+                scan_links=True,
+                deadline=deadline,
+                scan_budget=DirectoryScanBudget(),
+            )
         conf = _safe_conf_path(name)
         permission_snapshot = _snapshot_file(conf)
         current_permission = _read_permission_unlocked(name)
@@ -734,7 +1055,15 @@ def account_delete(name):
         userlist_document, names = _read_userlist_document_unlocked()
         if name not in names:
             raise NotFoundError("账号不存在")
-        _assert_managed_system_account(name)
+        record = _assert_managed_system_account(name)
+        device_path = _assert_device_directory(
+            name,
+            account_record=record,
+            scan_links=True,
+            deadline=deadline,
+            scan_budget=DirectoryScanBudget(),
+        )
+        device_metadata = os.lstat(device_path)
         conf = _safe_conf_path(name)
         permission_snapshot = _snapshot_file(conf)
 
@@ -742,6 +1071,10 @@ def account_delete(name):
             # Reversible visibility changes happen before the irreversible userdel.
             _remove_regular_file(conf)
             _publish_userlist_document_unlocked(_remove_account_line(userlist_document, name))
+            # Retire only the directory entry, not its contents.  Changing its
+            # owner to root before userdel closes the UID-reuse window while the
+            # private devicedata group preserves administrator access.
+            _retire_device_directory(name)
             try:
                 run([USERDEL, name], deadline=deadline)  # deliberately never passes -r
             except Exception:
@@ -749,9 +1082,24 @@ def account_delete(name):
                 # desired deletion is already complete; do not republish a
                 # now-nonexistent account into the allow-list.
                 if _get_system_account(name) is None:
+                    try:
+                        run([GROUPDEL, name], deadline=deadline)
+                    except Exception:
+                        LOG.critical("deleted account left a private device group")
                     return
                 raise
+            try:
+                run([GROUPDEL, name], deadline=deadline)
+            except Exception:
+                # userdel may already remove user-private groups.  A stale empty
+                # group blocks unsafe same-name recreation but does not expose data.
+                LOG.warning("deleted account private group was already absent or retained")
         except Exception:
+            if _get_system_account(name) is not None:
+                try:
+                    _restore_device_directory_metadata(name, device_metadata)
+                except Exception:
+                    LOG.critical("rollback failed for device directory metadata")
             try:
                 _publish_userlist_document_unlocked(userlist_document)
             except Exception:
@@ -760,22 +1108,16 @@ def account_delete(name):
             raise
 
 
-def _scan_device_directory(path):
+def _scan_device_directory(path, deadline, scan_budget):
     size = 0
     files = 0
     newest = 0.0
-    for root, directories, filenames in os.walk(path, topdown=True, followlinks=False):
-        directories[:] = [
-            item for item in directories if not os.path.islink(os.path.join(root, item))
-        ]
-        for filename in filenames:
-            candidate = os.path.join(root, filename)
-            try:
-                info = os.lstat(candidate)
-            except OSError:
-                continue
-            if not stat.S_ISREG(info.st_mode):
-                continue
+    for _candidate, info, _depth in _walk_device_tree(path, deadline, scan_budget):
+        if stat.S_ISLNK(info.st_mode):
+            continue
+        if stat.S_ISREG(info.st_mode):
+            if info.st_nlink != 1:
+                raise IntegrityError("device stats tree contains a hard-linked file")
             size += info.st_size
             files += 1
             newest = max(newest, info.st_mtime)
@@ -783,22 +1125,38 @@ def _scan_device_directory(path):
 
 
 def build_stats():
+    deadline = OperationDeadline()
     now = time.time()
-    with _stats_lock:
+    acquired = _stats_lock.acquire(timeout=deadline.remaining())
+    if not acquired:
+        raise OperationTimeoutError("stats operation deadline exceeded")
+    try:
         if _stats_cache["data"] is not None and now - _stats_cache["at"] < 30:
             return _stats_cache["data"]
+        deadline.remaining()
         _assert_directory(DATA_DIR)
         disk = shutil.disk_usage(DATA_DIR)
         devices = []
         total = 0
+        scan_budget = DirectoryScanBudget()
         if os.path.isdir(DATA_DIR) and not os.path.islink(DATA_DIR):
+            device_entries = []
             with os.scandir(DATA_DIR) as entries:
-                device_entries = sorted(
-                    (entry for entry in entries if entry.is_dir(follow_symlinks=False)),
-                    key=lambda entry: entry.name,
-                )
+                for entry in entries:
+                    scan_budget.consume(1, deadline)
+                    try:
+                        info = os.lstat(entry.path)
+                    except OSError as exc:
+                        raise IntegrityError("device stats root changed during scan") from exc
+                    if stat.S_ISLNK(info.st_mode):
+                        continue
+                    if stat.S_ISDIR(info.st_mode):
+                        device_entries.append(entry)
+            device_entries.sort(key=lambda entry: entry.name)
             for entry in device_entries:
-                size, files, newest = _scan_device_directory(entry.path)
+                size, files, newest = _scan_device_directory(
+                    entry.path, deadline, scan_budget
+                )
                 total += size
                 devices.append(
                     {
@@ -821,6 +1179,8 @@ def build_stats():
         _stats_cache["at"] = now
         _stats_cache["data"] = data
         return data
+    finally:
+        _stats_lock.release()
 
 
 def load_admin_token(path=TOKEN_FILE):

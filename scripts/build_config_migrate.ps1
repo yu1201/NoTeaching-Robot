@@ -1,5 +1,6 @@
 param(
-    [string]$PythonExecutable = "python",
+    [Parameter(Mandatory = $true)][string]$PythonExecutable,
+    [Parameter(Mandatory = $true)][string]$PythonSha256,
     [string]$OutputPath = "",
     # Kept for command-line compatibility. Rebuilds are now unconditional.
     [switch]$Force
@@ -8,6 +9,13 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$gateCommon = Join-Path $PSScriptRoot "release_gate_common.ps1"
+if (-not (Test-Path -LiteralPath $gateCommon -PathType Leaf)) {
+    throw "Release gate helpers were not found: $gateCommon"
+}
+. $gateCommon
+Set-ReleasePythonTool -PythonExecutable $PythonExecutable -PythonSha256 $PythonSha256
+$pythonTool = Get-ReleasePythonTool
 $sourcePath = Join-Path $repoRoot "tools\migrate_config_to_sqlite.py"
 $targetPath = if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     Join-Path $repoRoot "tools\ConfigMigrate.exe"
@@ -58,7 +66,39 @@ try {
     $dataArgument = "$deterministicSourcePath;_migrator_source"
     $env:PYTHONHASHSEED = "1"
     $env:SOURCE_DATE_EPOCH = "946684800"
-    & $PythonExecutable -m PyInstaller `
+    # CPython -I deliberately ignores PYTHONHASHSEED, while PyInstaller archive
+    # ordering must use a fixed hash seed for byte-for-byte provenance rebuilds.
+    # A verified -I supervisor therefore launches the exact same hash-pinned
+    # interpreter with an explicit minimal environment, disabled user site, safe
+    # sys.path, and the sole deterministic PYTHONHASHSEED exception.
+    $isolatedBootstrap = @'
+import os
+import subprocess
+import sys
+
+python = sys.argv[1]
+arguments = sys.argv[2:]
+allowed = {
+    'APPDATA', 'COMSPEC', 'HOME', 'LOCALAPPDATA', 'PATH', 'PATHEXT',
+    'PROGRAMDATA', 'SYSTEMROOT', 'TEMP', 'TMP', 'USERPROFILE', 'WINDIR',
+}
+environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+environment.update({
+    'PYTHONHASHSEED': '1',
+    'PYTHONDONTWRITEBYTECODE': '1',
+    'PYTHONNOUSERSITE': '1',
+    'PYTHONSAFEPATH': '1',
+    'SOURCE_DATE_EPOCH': '946684800',
+})
+completed = subprocess.run(
+    [python, '-s', '-P', '-B', '-m', 'PyInstaller', *arguments],
+    env=environment,
+    stdin=subprocess.DEVNULL,
+    check=False,
+)
+raise SystemExit(completed.returncode)
+'@
+    & $pythonTool.path -I -B -c $isolatedBootstrap $pythonTool.path `
         --noconfirm `
         --clean `
         --log-level WARN `
@@ -73,6 +113,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller failed with exit code $LASTEXITCODE"
     }
+    Get-ReleasePythonTool | Out-Null
 
     $builtPath = Join-Path $distPath "ConfigMigrate.exe"
     if (-not (Test-Path -LiteralPath $builtPath -PathType Leaf)) {

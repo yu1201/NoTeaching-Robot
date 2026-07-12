@@ -5,6 +5,7 @@
 #include "MeasureThenWeldService.h"
 #include "RobotDataHelper.h"
 #include "WeldProcessFile.h"
+#include "WeldSafetyRecoveryStore.h"
 #include "RobotMessage.h"
 #include "RobotOperationLease.h"
 
@@ -27,6 +28,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <memory>
 #include <thread>
 
 VirtualWeldTestDialog::VirtualWeldTestDialog(ContralUnit* pContralUnit, int unitIndex, QWidget* parent)
@@ -620,11 +622,23 @@ void VirtualWeldTestDialog::OnRunOnRobot()
 
             QString summary;
             QString execError;
+            const auto safetySession = std::make_shared<WeldSafetyRecoverySession>(driver, param);
             const bool ok = service.ExecuteWeldPoseFileWithSafePos(
                 driver, execPath, param, summary, execError,
                 nullptr, nullptr, appendLog, setFlowStep, checkpoint, pointStepMm,
                 /*allowPointwiseWeave=*/true,
-                MeasureThenWeldService::WeldPoseSource::SyntheticVirtualTest);
+                MeasureThenWeldService::WeldPoseSource::SyntheticVirtualTest,
+                /*resumeStartArcMm=*/-1.0,
+                /*inputAlreadyInExecutionOrder=*/false,
+                [driver]() { return RobotOperationLease::IsCancellationRequested(driver); },
+                [safetySession](const MeasureThenWeldService::WeldExecutionIdentity& identity, QString& prepareError)
+                {
+                    return safetySession->Prepare(identity, prepareError);
+                },
+                [safetySession](const WeldExecutionTerminalResult& terminal, QString& finishError)
+                {
+                    return safetySession->Finish(terminal, finishError);
+                });
 
             QMetaObject::invokeMethod(qApp, [self, ok, summary, execError]()
                 {

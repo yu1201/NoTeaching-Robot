@@ -3,6 +3,7 @@
 #include "ConfigDatabase.h"
 #include "RobotLog.h"
 #include "RobotMessage.h"
+#include "WeldProcessValidation.h"
 
 #include <QtGlobal>
 
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <exception>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -202,6 +204,20 @@ struct ScopedSettingsReader
 {
     QString scopeId;
     QString module;
+    bool ok = true;
+    std::string error;
+
+    void Fail(const char* key, const QString& text, const char* expectedType)
+    {
+        if (!ok)
+        {
+            return;
+        }
+        ok = false;
+        error = QStringLiteral("配置字段 %1=%2 不是有效的%3。")
+            .arg(QLatin1String(key), text, QString::fromLatin1(expectedType))
+            .toUtf8().constData();
+    }
 
     void operator()(const char* key, int& value)
     {
@@ -213,6 +229,10 @@ struct ScopedSettingsReader
             if (parsed)
             {
                 value = parsedValue;
+            }
+            else
+            {
+                Fail(key, text, "整数");
             }
         }
     }
@@ -226,6 +246,10 @@ struct ScopedSettingsReader
             if (parsed)
             {
                 value = parsedValue;
+            }
+            else
+            {
+                Fail(key, text, "浮点数");
             }
         }
     }
@@ -349,6 +373,13 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
     const bool loadedFromSettings = TryLoadWeaveFromSettings() && TryLoadWeldFromSettings();
     if (!loadedFromSettings)
     {
+        // Missing multi-key data may legitimately fall back to the legacy mirror.
+        // Present-but-invalid primary data must never be hidden by that fallback.
+        if (!m_sLastError.empty())
+        {
+            LogError("%s", m_sLastError.c_str());
+            return false;
+        }
         m_vtWeaveTypeList.clear();
         m_vtWeldParaList.clear();
         m_nAllWeaveTypeNum = 0;
@@ -517,6 +548,15 @@ bool WeldProcessFile::UpdateWeaveType(int nTypeNo, const T_WeaveDate& tWeaveDate
         return false;
     }
 
+    std::string validationError;
+    if (!WeldProcessValidation::ValidateWeave(tWeaveDate, validationError))
+    {
+        m_sLastError = "摆动参数安全校验失败：" + validationError;
+        LogError("%s", m_sLastError.c_str());
+        ShowError(m_sLastError);
+        return false;
+    }
+
     m_vtWeaveTypeList[nTypeNo] = tWeaveDate;
     if (!SaveWeaveTxt())
     {
@@ -538,6 +578,14 @@ bool WeldProcessFile::UpdateWeldPara(int nParaNo, const T_WELD_PARA& tWeldPara)
     }
 
     T_WELD_PARA item = tWeldPara;
+    std::string validationError;
+    if (!WeldProcessValidation::ValidateStoredWeldProcess(item, validationError))
+    {
+        m_sLastError = "焊接工艺安全校验失败：" + validationError;
+        LogError("%s", m_sLastError.c_str());
+        ShowError(m_sLastError);
+        return false;
+    }
     item.nWeaveEnable = item.nWeaveEnable != 0 ? 1 : 0;
     item.nTrackEnable = item.nTrackEnable != 0 ? 1 : 0;
     item.nArcMode = NormalizeArcMode(item.nArcMode);
@@ -570,6 +618,14 @@ bool WeldProcessFile::AddWeldPara(const T_WELD_PARA& tWeldPara, int& newIndex)
     }
 
     T_WELD_PARA item = tWeldPara;
+    std::string validationError;
+    if (!WeldProcessValidation::ValidateStoredWeldProcess(item, validationError))
+    {
+        m_sLastError = "焊接工艺安全校验失败：" + validationError;
+        LogError("%s", m_sLastError.c_str());
+        ShowError(m_sLastError);
+        return false;
+    }
     item.nWeaveEnable = item.nWeaveEnable != 0 ? 1 : 0;
     item.nTrackEnable = item.nTrackEnable != 0 ? 1 : 0;
     item.nArcMode = NormalizeArcMode(item.nArcMode);
@@ -1053,17 +1109,44 @@ bool WeldProcessFile::TryLoadWeaveFromSettings()
     {
         return false;
     }
+    std::string entryCountError;
+    if (!WeldProcessValidation::ValidateStoredEntryCount(entryCount, entryCountError))
+    {
+        m_sLastError = "摆动配置条目数安全校验失败：" + entryCountError;
+        return false;
+    }
 
     m_vtWeaveTypeList.clear();
     m_nUseWeaveTypeNo = 0;
     ReadScopedInt(scopeId, kWeaveModule, kUseIndexKey, m_nUseWeaveTypeNo);
 
-    m_vtWeaveTypeList.reserve(static_cast<size_t>(entryCount));
+    try
+    {
+        m_vtWeaveTypeList.reserve(static_cast<size_t>(entryCount));
+    }
+    catch (const std::exception& e)
+    {
+        m_sLastError = "摆动配置预分配失败：" + std::string(e.what());
+        return false;
+    }
     for (int index = 0; index < entryCount; ++index)
     {
         T_WeaveDate item {};
         ScopedSettingsReader reader { scopeId, WeaveEntryModule(index) };
         VisitWeaveFields(item, reader);
+        if (!reader.ok)
+        {
+            m_sLastError = "读取摆动配置失败，Entry" + std::to_string(index)
+                + "：" + reader.error;
+            return false;
+        }
+        std::string validationError;
+        if (!WeldProcessValidation::ValidateWeave(item, validationError))
+        {
+            m_sLastError = "摆动配置安全校验失败，Entry" + std::to_string(index)
+                + "：" + validationError;
+            return false;
+        }
         m_vtWeaveTypeList.push_back(item);
     }
 
@@ -1084,17 +1167,44 @@ bool WeldProcessFile::TryLoadWeldFromSettings()
     {
         return false;
     }
+    std::string entryCountError;
+    if (!WeldProcessValidation::ValidateStoredEntryCount(entryCount, entryCountError))
+    {
+        m_sLastError = "焊接工艺条目数安全校验失败：" + entryCountError;
+        return false;
+    }
 
     m_vtWeldParaList.clear();
     m_nUseWeldParaNo = 0;
     ReadScopedInt(scopeId, kWeldModule, kUseIndexKey, m_nUseWeldParaNo);
 
-    m_vtWeldParaList.reserve(static_cast<size_t>(entryCount));
+    try
+    {
+        m_vtWeldParaList.reserve(static_cast<size_t>(entryCount));
+    }
+    catch (const std::exception& e)
+    {
+        m_sLastError = "焊接工艺预分配失败：" + std::string(e.what());
+        return false;
+    }
     for (int index = 0; index < entryCount; ++index)
     {
         T_WELD_PARA item {};
         ScopedSettingsReader reader { scopeId, WeldEntryModule(index) };
         VisitWeldParaFields(item, reader);
+        if (!reader.ok)
+        {
+            m_sLastError = "读取焊接工艺配置失败，Entry" + std::to_string(index)
+                + "：" + reader.error;
+            return false;
+        }
+        std::string validationError;
+        if (!WeldProcessValidation::ValidateStoredWeldProcess(item, validationError))
+        {
+            m_sLastError = "焊接工艺配置安全校验失败，Entry" + std::to_string(index)
+                + "：" + validationError;
+            return false;
+        }
         item.nWeaveEnable = item.nWeaveEnable != 0 ? 1 : 0;
         item.nTrackEnable = item.nTrackEnable != 0 ? 1 : 0;
         item.nArcMode = NormalizeArcMode(item.nArcMode);
@@ -1114,6 +1224,16 @@ bool WeldProcessFile::SaveWeaveToSettings() const
     {
         const_cast<WeldProcessFile*>(this)->m_sLastError = "控制单元名称为空，无法写入配置库摆动数据。";
         return false;
+    }
+    for (size_t index = 0; index < m_vtWeaveTypeList.size(); ++index)
+    {
+        std::string validationError;
+        if (!WeldProcessValidation::ValidateWeave(m_vtWeaveTypeList[index], validationError))
+        {
+            const_cast<WeldProcessFile*>(this)->m_sLastError =
+                "拒绝写入非法摆动参数，Entry" + std::to_string(index) + "：" + validationError;
+            return false;
+        }
     }
 
     // 缩减时清理多余条目模块（整模块删除）。
@@ -1152,6 +1272,17 @@ bool WeldProcessFile::SaveWeldToSettings() const
     {
         const_cast<WeldProcessFile*>(this)->m_sLastError = "控制单元名称为空，无法写入配置库焊接工艺数据。";
         return false;
+    }
+    for (size_t index = 0; index < m_vtWeldParaList.size(); ++index)
+    {
+        std::string validationError;
+        if (!WeldProcessValidation::ValidateStoredWeldProcess(
+                m_vtWeldParaList[index], validationError))
+        {
+            const_cast<WeldProcessFile*>(this)->m_sLastError =
+                "拒绝写入非法焊接工艺，Entry" + std::to_string(index) + "：" + validationError;
+            return false;
+        }
     }
 
     int previousCount = 0;
@@ -1239,7 +1370,7 @@ bool WeldProcessFile::ParseWeaveLine(const std::vector<std::string>& fields, T_W
         const_cast<WeldProcessFile*>(this)->m_sLastError = "摆动参数格式已升级，请重新创建工艺内容。";
         return false;
     }
-    return TryParseInt(fields[0], tWeaveDate.nWeaveType)
+    const bool parsed = TryParseInt(fields[0], tWeaveDate.nWeaveType)
         && TryParseInt(fields[1], tWeaveDate.nWeaveShape)
         && TryParseDouble(fields[2], tWeaveDate.dWeaveFrequencyHz)
         && TryParseDouble(fields[3], tWeaveDate.dWeaveAmplitudeMm)
@@ -1254,6 +1385,18 @@ bool WeldProcessFile::ParseWeaveLine(const std::vector<std::string>& fields, T_W
         && TryParseDouble(fields[12], tWeaveDate.dEndLengthMm)
         && TryParseDouble(fields[13], tWeaveDate.dEndWidthMm)
         && TryParseDouble(fields[14], tWeaveDate.dCenterHeightMm);
+    if (!parsed)
+    {
+        return false;
+    }
+    std::string validationError;
+    if (!WeldProcessValidation::ValidateWeave(tWeaveDate, validationError))
+    {
+        const_cast<WeldProcessFile*>(this)->m_sLastError =
+            "摆动参数安全校验失败：" + validationError;
+        return false;
+    }
+    return true;
 }
 
 bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WELD_PARA& tWeldPara) const
@@ -1357,9 +1500,6 @@ bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WE
         && TryParseInt(fields[83], tWeldPara.nArcMode);
     if (parsed)
     {
-        tWeldPara.nWeaveEnable = tWeldPara.nWeaveEnable != 0 ? 1 : 0;
-        tWeldPara.nTrackEnable = tWeldPara.nTrackEnable != 0 ? 1 : 0;
-        tWeldPara.nArcMode = NormalizeArcMode(tWeldPara.nArcMode);
         // 扩展字段(86)：姿态 + 圆滑。旧 84 字段缺省→默认(可变/20)，下次保存自动补全。
         tWeldPara.nWeldPostureType = 1;
         tWeldPara.dWeldOverlapRel = 20.0;
@@ -1367,17 +1507,37 @@ bool WeldProcessFile::ParseWeldLine(const std::vector<std::string>& fields, T_WE
         {
             int posture = 1;
             double overlap = 20.0;
-            if (TryParseInt(fields[84], posture) && posture >= 0 && posture <= 3)
+            if (!TryParseInt(fields[84], posture) || posture < 0 || posture > 3)
             {
-                tWeldPara.nWeldPostureType = posture;
+                const_cast<WeldProcessFile*>(this)->m_sLastError =
+                    "焊接工艺字段 WeldPostureType=" + fields[84] + " 无效，允许范围 [0,3]。";
+                return false;
             }
-            if (TryParseDouble(fields[85], overlap) && overlap >= 0.0)
+            if (!TryParseDouble(fields[85], overlap))
             {
-                tWeldPara.dWeldOverlapRel = overlap;
+                const_cast<WeldProcessFile*>(this)->m_sLastError =
+                    "焊接工艺字段 WeldOverlapRel=" + fields[85] + " 不是有效浮点数。";
+                return false;
             }
+            tWeldPara.nWeldPostureType = posture;
+            tWeldPara.dWeldOverlapRel = overlap;
         }
     }
-    return parsed;
+    if (!parsed)
+    {
+        return false;
+    }
+    std::string validationError;
+    if (!WeldProcessValidation::ValidateStoredWeldProcess(tWeldPara, validationError))
+    {
+        const_cast<WeldProcessFile*>(this)->m_sLastError =
+            "焊接工艺参数安全校验失败：" + validationError;
+        return false;
+    }
+    tWeldPara.nWeaveEnable = tWeldPara.nWeaveEnable != 0 ? 1 : 0;
+    tWeldPara.nTrackEnable = tWeldPara.nTrackEnable != 0 ? 1 : 0;
+    tWeldPara.nArcMode = NormalizeArcMode(tWeldPara.nArcMode);
+    return true;
 }
 
 std::vector<std::string> WeldProcessFile::BuildWeaveFields(const T_WeaveDate& tWeaveDate) const

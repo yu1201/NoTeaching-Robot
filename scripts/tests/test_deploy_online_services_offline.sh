@@ -24,6 +24,7 @@ managed_before="$(mktemp "${TMPDIR:-/tmp}/deploy-managed-before.XXXXXX")"
 managed_after="$(mktemp "${TMPDIR:-/tmp}/deploy-managed-after.XXXXXX")"
 nss_fixture="$(mktemp -d "${TMPDIR:-/tmp}/deploy-nss-fixture.XXXXXX")"
 ufw_fixture="$(mktemp "${TMPDIR:-/tmp}/deploy-ufw-rules.XXXXXX")"
+capacity_fixture="$(mktemp "${TMPDIR:-/tmp}/deploy-capacity.XXXXXX")"
 cleanup_root="$(mktemp -d "${TMPDIR:-/tmp}/deploy-cleanup-data.XXXXXX")"
 preflight_root="$(mktemp -d "${TMPDIR:-/tmp}/deploy-preflight-root.XXXXXX")"
 missing_path="$(mktemp -d "${TMPDIR:-/tmp}/deploy-missing-path.XXXXXX")"
@@ -32,7 +33,8 @@ fake_path_sentinel="${fake_path}/invoked"
 python_hijack_dir="$(mktemp -d "${TMPDIR:-/tmp}/deploy-python-hijack.XXXXXX")"
 python_hijack_sentinel="${python_hijack_dir}/imported"
 preflight_before="${preflight_root}.before"
-trap 'rm -rf -- "$root" "$before" "$apply_root" "$secret_dir" "$nss_fixture" "$cleanup_root" "$preflight_root" "$preflight_before" "$missing_path" "$fake_path" "$python_hijack_dir"; rm -f -- "$managed_before" "$managed_after" "$ufw_fixture"' EXIT
+trap 'rm -rf -- "$root" "$before" "$apply_root" "$secret_dir" "$nss_fixture" "$cleanup_root" "$preflight_root" "$preflight_before" "$missing_path" "$fake_path" "$python_hijack_dir"; rm -f -- "$managed_before" "$managed_after" "$ufw_fixture" "$capacity_fixture"' EXIT
+printf '%s\n' '{"mountTarget":"/srv/devicedata","totalBytes":1073741824,"mountSource":"/dev/loop7","mountIdentity":"7:7","parentIdentity":"8:1","fsType":"ext4","mountOptions":"rw,relatime"}' > "$capacity_fixture"
 
 readonly offline_root_marker='NO_TEACHING_ONLINE_SERVICES_OFFLINE_ROOT_V1'
 for offline_root in "$root" "$apply_root" "$preflight_root"; do
@@ -88,18 +90,37 @@ diff -ru -- "$preflight_before" "$preflight_root" >/dev/null ||
     fail "依赖预装确认失败后仍写入了部署根目录"
 
 # 用空 PATH 模拟缺失核心依赖；离线 marker 校验使用可信绝对路径完成后才恢复这个
-# 测试 PATH，因此脚本应在 awk 处 fail closed，不得进入 staging。
+# 测试 PATH，因此脚本应在 CIDR 所需 python3 处 fail closed，不得进入 staging。
 set +e
 missing_dependency_output="$(
     PATH="$missing_path" DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$preflight_root" \
-        "$bash_bin" "$DEPLOY_SCRIPT" --apply --yes --skip-packages 2>&1
+        DEPLOY_CAPACITY_FIXTURE="$capacity_fixture" \
+        "$bash_bin" "$DEPLOY_SCRIPT" --apply --yes --skip-packages \
+        --enable-ufw --ftp-allow-cidr 10.20.0.0/16 \
+        --data-filesystem-max-bytes 1073741824 2>&1
 )"
 missing_dependency_rc=$?
 set -e
 [[ $missing_dependency_rc -ne 0 ]] || fail "缺少预装依赖时 apply 仍继续执行"
-assert_contains "$missing_dependency_output" "缺少预装命令: awk"
+assert_contains "$missing_dependency_output" "CIDR 校验需要 python3"
 diff -ru -- "$preflight_before" "$preflight_root" >/dev/null ||
     fail "预装依赖缺失后仍写入了部署根目录"
+
+# 同源 bind 即使 TARGET 恰好是 /srv/devicedata 也不构成独立容量边界。
+printf '%s\n' '{"mountTarget":"/srv/devicedata","totalBytes":1073741824,"mountSource":"/dev/sda1","mountIdentity":"8:1","parentIdentity":"8:1","fsType":"ext4","mountOptions":"rw,bind"}' > "$capacity_fixture"
+set +e
+bind_capacity_output="$(
+    DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$preflight_root" \
+        DEPLOY_CAPACITY_FIXTURE="$capacity_fixture" \
+        "$bash_bin" "$DEPLOY_SCRIPT" --apply --yes --skip-packages \
+        --enable-ufw --ftp-allow-cidr 10.20.0.0/16 \
+        --data-filesystem-max-bytes 1073741824 2>&1
+)"
+bind_capacity_rc=$?
+set -e
+[[ $bind_capacity_rc -ne 0 ]] || fail "同源 bind 容量夹具未被拒绝"
+assert_contains "$bind_capacity_output" "bind"
+printf '%s\n' '{"mountTarget":"/srv/devicedata","totalBytes":1073741824,"mountSource":"/dev/loop7","mountIdentity":"7:7","parentIdentity":"8:1","fsType":"ext4","mountOptions":"rw,relatime"}' > "$capacity_fixture"
 
 # 普通/生产 dry-run 即使带测试 flag 但没有隔离根目录，也必须覆盖调用方 PATH；
 # 任何伪造的 basename/dirname/awk/python3 都不得在可信 PATH 门禁前被执行。
@@ -159,10 +180,10 @@ output="$(
         --pasv-address ftp.example.test
 )"
 assert_contains "$output" "预演（未修改任何文件）"
-assert_contains "$output" "白名单中的 3 个既有条目"
-assert_contains "$output" "devicedata/uploader"
-assert_contains "$output" "uploader=write-once"
-assert_contains "$output" "FTP 限制到 10.20.0.0/16"
+assert_contains "$output" "保留除已退役 uploader 外的既有 FTP 白名单"
+assert_contains "$output" "已退役 uploader"
+assert_contains "$output" "普通账号=write-once + /data/<account>"
+assert_contains "$output" "FTP 仅允许 10.20.0.0/16"
 assert_contains "$output" "PASV 公网回址: 显式设置为 ftp.example.test"
 diff -ru -- "$before" "$root" >/dev/null || fail "dry-run 修改了临时根目录"
 
@@ -229,47 +250,16 @@ for restrictive_directive in \
     mv -f -- "${root}/etc/vsftpd.conf.safe" "${root}/etc/vsftpd.conf"
 done
 
-# cmds_allowed 与 cmds_denied 混用的语义容易导致无法登录或意外放权，必须 fail closed。
-printf '%s\n' 'cmds_allowed=STOR,MKD' >> "${root}/etc/vsftpd_user_conf/uploader"
+# 共享 uploader 不再有任何可恢复权限模型；旧密码参数必须直接拒绝。
 set +e
-conflict_output="$(
+retired_uploader_output="$(
     DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$root" \
-        bash "$DEPLOY_SCRIPT" --skip-packages 2>&1
+        bash "$DEPLOY_SCRIPT" --uploader-password-file /tmp/retired 2>&1
 )"
-conflict_rc=$?
+retired_uploader_rc=$?
 set -e
-[[ $conflict_rc -ne 0 ]] || fail "cmds_allowed 冲突未被拒绝"
-assert_contains "$conflict_output" "cmds_allowed"
-
-# 未知或正向放权指令也必须被拒绝，保持与 ota_admin.py 的读取规则一致。
-printf '%s\n' 'write_enable=YES' > "${root}/etc/vsftpd_user_conf/uploader"
-set +e
-positive_output="$(
-    DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$root" \
-        bash "$DEPLOY_SCRIPT" --skip-packages 2>&1
-)"
-positive_rc=$?
-set -e
-[[ $positive_rc -ne 0 ]] || fail "未知正向放权指令未被拒绝"
-assert_contains "$positive_output" "write_enable"
-
-cat > "${root}/etc/vsftpd_user_conf/uploader" <<'EOF'
-download_enable=NO
-download_enable=NO
-EOF
-set +e
-duplicate_output="$(
-    DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$root" \
-        bash "$DEPLOY_SCRIPT" --skip-packages 2>&1
-)"
-duplicate_rc=$?
-set -e
-[[ $duplicate_rc -ne 0 ]] || fail "重复 uploader 指令未被拒绝"
-assert_contains "$duplicate_output" "重复"
-cat > "${root}/etc/vsftpd_user_conf/uploader" <<'EOF'
-hide_ids=YES
-cmds_denied=SITE_CHMOD
-EOF
+[[ $retired_uploader_rc -ne 0 ]] || fail "退役 uploader 密码参数仍被接受"
+assert_contains "$retired_uploader_output" "永久退役"
 
 # 命令行明文秘密必须被当成未知位置参数拒绝。
 set +e
@@ -352,14 +342,37 @@ assert_contains "$unrelated_ufw_output" "预演（未修改任何文件）"
 
 grep -Fq 'SSH_PORT=48890' "$DEPLOY_SCRIPT" || fail "默认 SSH 端口漂移"
 grep -Fq 'local_umask"]="002"' "$DEPLOY_SCRIPT" || fail "ftpdata 共享 umask 漂移"
-grep -Fq 'ensure_directory "$FTP_DATA" root ftpdata 2770' "$DEPLOY_SCRIPT" ||
-    fail "共享目录 setgid/ftpdata 门禁漂移"
+grep -Fq 'ensure_directory "$FTP_DATA" root devicedata 2771' "$DEPLOY_SCRIPT" ||
+    fail "数据根目录 traverse-only/devicedata 私有组门禁漂移"
+grep -Fq 'local_root 必须保持 root-owned /srv/devicedata chroot' "$DEPLOY_SCRIPT" ||
+    fail "root-owned chroot 门禁缺失"
 if grep -Eq 'rm[[:space:]]+-f[[:space:]]+/etc/nginx/sites-enabled/default' "$DEPLOY_SCRIPT"; then
     fail "部署脚本仍会删除其他 nginx 站点"
 fi
 if grep -Eq 'echo[[:space:]]+.*>[[:space:]]*/etc/vsftpd\.userlist' "$DEPLOY_SCRIPT"; then
     fail "部署脚本仍会覆盖 FTP 白名单"
 fi
+
+# 按 POSIX 内核 owner/group/other 选择规则验证最终访问矩阵：设备 A 能 traverse
+# root/data 并写自己的目录，但对 B 目录无 stat/list/write 权限；管理员组可访问二者。
+python3 -I - <<'PY'
+def bits(mode, owner, group, uid, groups):
+    shift = 6 if uid == owner else (3 if group in groups else 0)
+    return (mode >> shift) & 0o7
+
+ftp_root = (0o755, 0, 0)
+data_root = (0o2771, 0, 2000)
+device_a = (0o2770, 1002, 2000)
+device_b = (0o2770, 1003, 2000)
+uid_a, groups_a = 1002, {995, 5002}
+uid_admin, groups_admin = 1000, {995, 2000}
+assert bits(*ftp_root, uid_a, groups_a) & 0o1
+assert bits(*data_root, uid_a, groups_a) == 0o1
+assert bits(*device_a, uid_a, groups_a) == 0o7
+assert bits(*device_b, uid_a, groups_a) == 0
+assert bits(*device_a, uid_admin, groups_admin) == 0o7
+assert bits(*device_b, uid_admin, groups_admin) == 0o7
+PY
 
 # 真正执行到隔离根目录，证明 apply 不会触碰宿主账号/服务/防火墙，并可重复执行。
 mkdir -p -- \
@@ -382,9 +395,8 @@ cat > "${apply_root}/etc/shells" <<'EOF'
 /bin/sh
 EOF
 printf '%s\n' 'offline-devicedata-password' > "${secret_dir}/devicedata.password"
-printf '%s\n' 'offline-uploader-password' > "${secret_dir}/uploader.password"
 printf '%s\n' 'offline-admin-token-0123456789abcdef' > "${secret_dir}/admin.token"
-chmod 0600 -- "${secret_dir}/devicedata.password" "${secret_dir}/uploader.password" \
+chmod 0600 -- "${secret_dir}/devicedata.password" \
     "${secret_dir}/admin.token"
 supports_posix_modes=1
 if [[ "$(stat -c '%a' -- "${secret_dir}/devicedata.password")" != "600" ]]; then
@@ -403,18 +415,18 @@ apply_once() {
         --apply --yes --skip-packages
         --configure-ufw --enable-ufw --ssh-port 48890 \
         --ftp-allow-cidr 10.20.0.0/16 \
+        --data-filesystem-max-bytes 1073741824 \
         --pasv-address ftp.example.test
     )
     if [[ "$initialize_accounts" -eq 1 ]]; then
         args+=(
             --devicedata-password-file "${secret_dir}/devicedata.password"
-            --uploader-password-file "${secret_dir}/uploader.password"
             --admin-token-file "${secret_dir}/admin.token"
         )
     fi
     local -a bash_args=()
     [[ "$enable_xtrace" -eq 0 ]] || bash_args+=(-x)
-    DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$apply_root" \
+    DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$apply_root" DEPLOY_CAPACITY_FIXTURE="$capacity_fixture" \
         DEPLOY_OFFLINE_TEST_RELAX_SECRET_MODE="$((1 - supports_posix_modes))" \
         "$bash_bin" "${bash_args[@]}" "$DEPLOY_SCRIPT" "${args[@]}"
 }
@@ -428,7 +440,6 @@ managed_fingerprint() {
             etc/nginx/sites-enabled/ota \
             etc/vsftpd.conf \
             etc/vsftpd.userlist \
-            etc/vsftpd_user_conf/uploader \
             etc/shells \
             etc/systemd/system/ota-admin.service \
             etc/cron.daily/clean-devicedata \
@@ -451,7 +462,7 @@ first_apply_output="$(apply_once 1 1 2>&1)"
 assert_contains "$first_apply_output" "离线测试根目录"
 assert_contains "$first_apply_output" "未调用宿主机 chpasswd"
 assert_contains "$first_apply_output" "未调用宿主机 ufw"
-for secret_value in offline-devicedata-password offline-uploader-password \
+for secret_value in offline-devicedata-password \
     offline-admin-token-0123456789abcdef; do
     [[ "$first_apply_output" != *"$secret_value"* ]] ||
         fail "bash -x/-v 输出泄露了秘密文件内容"
@@ -464,11 +475,13 @@ for unit_directive in \
         fail "ota-admin unit 缺少安全运行目录配置: $unit_directive"
 done
 
-for account in legacy-camera devicedata uploader; do
+for account in legacy-camera devicedata; do
     [[ "$(grep -Fxc -- "$account" "${apply_root}/etc/vsftpd.userlist")" == "1" ]] ||
         fail "白名单账号缺失或重复: $account"
 done
-for account in devicedata uploader; do
+! grep -Fqx uploader "${apply_root}/etc/vsftpd.userlist" || fail "退役 uploader 仍在白名单"
+[[ ! -e "${apply_root}/etc/vsftpd_user_conf/uploader" ]] || fail "退役 uploader 配置仍存在"
+for account in devicedata; do
     [[ "$(grep -Fxc -- "$account" "${apply_root}/var/lib/no-teaching-online-services/test-accounts")" == "1" ]] ||
         fail "离线账号状态缺失或重复: $account"
 done
@@ -490,22 +503,13 @@ grep -Fqx 'pasv_address=ftp.example.test' "${apply_root}/etc/vsftpd.conf" ||
     fail "PASV 公网回址未安装"
 grep -Fqx 'pasv_addr_resolve=YES' "${apply_root}/etc/vsftpd.conf" ||
     fail "PASV 主机解析未启用"
-grep -Fqx 'hide_ids=YES' "${apply_root}/etc/vsftpd_user_conf/uploader" ||
-    fail "uploader 既有限制丢失"
-grep -Fqx 'file_open_mode=0440' "${apply_root}/etc/vsftpd_user_conf/uploader" ||
-    fail "uploader write-once 文件模式缺失"
-grep -Eq '^cmds_denied=.*SITE_CHMOD' "${apply_root}/etc/vsftpd_user_conf/uploader" ||
-    fail "uploader 既有禁用命令丢失"
-for denied_command in DELE RMD RNFR RNTO APPE REST; do
-    grep -Eq "^cmds_denied=([^,]+,)*${denied_command}(,[^,]+)*$" \
-        "${apply_root}/etc/vsftpd_user_conf/uploader" ||
-        fail "uploader 未禁用 ${denied_command}"
-done
 [[ ! -e "${apply_root}/etc/vsftpd_user_conf/devicedata" ]] ||
     fail "devicedata 未保持 full"
 if [[ "$supports_posix_modes" -eq 1 ]]; then
-    [[ "$(stat -c '%a' -- "${apply_root}/srv/devicedata/data")" == "2770" ]] ||
-        fail "共享目录不是 2770/setgid"
+    [[ "$(stat -c '%a' -- "${apply_root}/srv/devicedata")" == "755" ]] ||
+        fail "chroot 根不是 root-owned non-writable 0755"
+    [[ "$(stat -c '%a' -- "${apply_root}/srv/devicedata/data")" == "2771" ]] ||
+        fail "数据根目录不是 2771/traverse-only"
 fi
 [[ -f "${apply_root}/etc/systemd/system/ota-admin.service" ]] || fail "缺少 ota-admin unit"
 grep -Fqx '        allow 127.0.0.1;' "${apply_root}/etc/nginx/sites-available/ota" ||
@@ -516,6 +520,40 @@ grep -Fqx '        deny all;' "${apply_root}/etc/nginx/sites-available/ota" ||
     fail "admin 未拒绝公网来源"
 grep -Fqx '        proxy_read_timeout 15s;' "${apply_root}/etc/nginx/sites-available/ota" ||
     fail "nginx 管理代理超时未保持 15s"
+[[ "$(grep -Fxc '    location ~ ^/ota/(neutral|brand)/latest(?:-v3)?\.json$ {' \
+    "${apply_root}/etc/nginx/sites-available/ota")" -eq 1 ]] ||
+    fail "nginx 必须用一个精确 location 同时放行 latest.json/latest-v3.json"
+NGINX_OTA_CONFIG="${apply_root}/etc/nginx/sites-available/ota" python3 -I - <<'PY' ||
+import os
+import re
+from pathlib import Path
+
+text = Path(os.environ["NGINX_OTA_CONFIG"]).read_text(encoding="utf-8")
+line = next(
+    (item.strip() for item in text.splitlines() if item.strip().startswith("location ~ ^/ota/")),
+    "",
+)
+pattern = line.removeprefix("location ~ ").removesuffix(" {")
+compiled = re.compile(pattern)
+allowed = (
+    "/ota/neutral/latest.json",
+    "/ota/neutral/latest-v3.json",
+    "/ota/brand/latest.json",
+    "/ota/brand/latest-v3.json",
+)
+for path in allowed:
+    if compiled.fullmatch(path) is None:
+        raise SystemExit(f"current/legacy manifest endpoint is not served: {path}")
+for path in (
+    "/ota/neutral/latest-v4.json",
+    "/ota/neutral/payload_history.json",
+    "/ota/other/latest-v3.json",
+    "/ota/brand/latest-v3.json/extra",
+):
+    if compiled.fullmatch(path) is not None:
+        raise SystemExit(f"nginx manifest location is over-broad: {path}")
+PY
+    fail "nginx OTA manifest endpoint exact-match regression"
 cmp -s -- "$REPO_ROOT/scripts/server/ota_admin.py" "${apply_root}/opt/ota-admin/ota_admin.py" ||
     fail "ota_admin.py 安装内容不一致"
 [[ -f "${apply_root}/etc/cron.daily/clean-devicedata" ]] || fail "缺少清理任务"
@@ -523,6 +561,7 @@ printf '%s' 'abc' > "${cleanup_root}/scan_20260712T120000123_a1b2c3d4e5f6_4.zip"
 printf '%s' 'abc' > "${cleanup_root}/scan_20260712T120001123_a1b2c3d4e5f7_3.zip"
 printf '%s' 'abc' > "${cleanup_root}/scan_20260712T120002123_a1b2c3d4e5f8_4.zip"
 printf '%s' 'legacy' > "${cleanup_root}/legacy.zip"
+mkdir -p -- "${cleanup_root}/empty-device" "${cleanup_root}/device-with-empty-child/empty-child"
 touch -d '20 minutes ago' -- \
     "${cleanup_root}/scan_20260712T120000123_a1b2c3d4e5f6_4.zip" \
     "${cleanup_root}/scan_20260712T120001123_a1b2c3d4e5f7_3.zip"
@@ -535,6 +574,10 @@ NO_TEACHING_DATA_ROOT="$cleanup_root" sh "${apply_root}/etc/cron.daily/clean-dev
 [[ -e "${cleanup_root}/scan_20260712T120002123_a1b2c3d4e5f8_4.zip" ]] ||
     fail "未静置 10 分钟的新上传被误删"
 [[ ! -e "${cleanup_root}/legacy.zip" ]] || fail "旧命名 30 天清理策略失效"
+[[ -d "${cleanup_root}/empty-device" && -d "${cleanup_root}/device-with-empty-child" ]] ||
+    fail "清理任务删除了 depth=1 设备账号根目录"
+[[ ! -e "${cleanup_root}/device-with-empty-child/empty-child" ]] ||
+    fail "清理任务未删除 depth>=2 空子目录"
 [[ -s "${apply_root}/opt/ota-admin/token" ]] || fail "管理令牌未生成"
 if [[ "$supports_posix_modes" -eq 1 ]]; then
     [[ "$(stat -c '%a' -- "${apply_root}/opt/ota-admin/token")" == "600" ]] ||
@@ -542,21 +585,37 @@ if [[ "$supports_posix_modes" -eq 1 ]]; then
 fi
 
 apply_with_nss_fixture() {
-    DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$apply_root" \
+    DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$apply_root" DEPLOY_CAPACITY_FIXTURE="$capacity_fixture" \
         DEPLOY_NSS_FIXTURE_DIR="$nss_fixture" \
         DEPLOY_OFFLINE_TEST_RELAX_SECRET_MODE="$((1 - supports_posix_modes))" \
         bash "$DEPLOY_SCRIPT" --apply --yes --skip-packages \
+        --enable-ufw --ftp-allow-cidr 10.20.0.0/16 \
+        --data-filesystem-max-bytes 1073741824 \
         --pasv-address ftp.example.test
 }
 
 cat > "${nss_fixture}/passwd" <<'EOF'
-devicedata:x:1000:1000::/srv/devicedata:/usr/sbin/nologin
+devicedata:x:1000:2000::/srv/devicedata:/usr/sbin/nologin
 uploader:x:1001:1001::/srv/devicedata:/usr/sbin/nologin
 legacy-camera:x:1002:1002::/srv/devicedata:/usr/sbin/nologin
 rogue:x:1003:1003::/srv/devicedata:/usr/sbin/nologin
 EOF
 cat > "${nss_fixture}/group" <<'EOF'
 ftpdata:x:995:devicedata,uploader,legacy-camera,rogue
+devicedata:x:2000:
+uploader:x:1001:
+legacy-camera:x:1002:
+rogue:x:1003:
+EOF
+mkdir -p -- "${apply_root}/srv/devicedata/data/legacy-camera"
+chmod 2770 -- "${apply_root}/srv/devicedata/data/legacy-camera" 2>/dev/null || true
+cat > "${apply_root}/etc/vsftpd_user_conf/legacy-camera" <<'EOF'
+download_enable=NO
+chmod_enable=NO
+file_open_mode=0440
+local_umask=007
+cmds_denied=DELE,RMD,RNFR,RNTO,APPE,REST
+local_root=/srv/devicedata
 EOF
 set +e
 rogue_supplementary_output="$(apply_with_nss_fixture 2>&1)"
@@ -565,55 +624,17 @@ set -e
 [[ $rogue_supplementary_rc -ne 0 ]] || fail "隐藏 supplementary ftpdata 成员未被拒绝"
 assert_contains "$rogue_supplementary_output" "rogue 未在最终 vsftpd.userlist"
 
-cat > "${nss_fixture}/passwd" <<'EOF'
-devicedata:x:1000:1000::/srv/devicedata:/usr/sbin/nologin
-uploader:x:1001:1001::/srv/devicedata:/usr/sbin/nologin
-legacy-camera:x:1002:1002::/srv/devicedata:/usr/sbin/nologin
-rogue:x:1003:995::/srv/devicedata:/usr/sbin/nologin
-EOF
-cat > "${nss_fixture}/group" <<'EOF'
-ftpdata:x:995:devicedata,uploader,legacy-camera
-EOF
-set +e
-rogue_primary_output="$(apply_with_nss_fixture 2>&1)"
-rogue_primary_rc=$?
-set -e
-[[ $rogue_primary_rc -ne 0 ]] || fail "隐藏 primary-GID ftpdata 成员未被拒绝"
-assert_contains "$rogue_primary_output" "rogue 未在最终 vsftpd.userlist"
-
-cat > "${nss_fixture}/passwd" <<'EOF'
-devicedata:x:1000:1000::/srv/devicedata:/usr/sbin/nologin
-devicedata-alias:x:1000:2000::/srv/devicedata:/bin/bash
-uploader:x:1001:1001::/srv/devicedata:/usr/sbin/nologin
-legacy-camera:x:1002:1002::/srv/devicedata:/usr/sbin/nologin
-EOF
-cat > "${nss_fixture}/group" <<'EOF'
-ftpdata:x:995:devicedata,uploader,legacy-camera
-EOF
-set +e
-uid_alias_output="$(apply_with_nss_fixture 2>&1)"
-uid_alias_rc=$?
-set -e
-[[ $uid_alias_rc -ne 0 ]] || fail "共享 UID 登录别名未被拒绝"
-assert_contains "$uid_alias_output" "UID=1000 被其他用户名共享"
-
-cat > "${nss_fixture}/passwd" <<'EOF'
-devicedata:x:1000:1000::/srv/devicedata:/usr/sbin/nologin
-uploader:x:1001:1001::/srv/devicedata:/usr/sbin/nologin
-legacy-camera:x:1002:1002::/srv/devicedata:/usr/sbin/nologin
-EOF
-cat > "${nss_fixture}/group" <<'EOF'
-ftpdata:x:995:devicedata,uploader,legacy-camera
-EOF
-printf '%s\n' 'download_enable=NO' > \
+sed -i 's|local_root=/srv/devicedata|local_root=/srv/devicedata/data/other|' \
     "${apply_root}/etc/vsftpd_user_conf/legacy-camera"
+sed -i 's/,rogue//' "${nss_fixture}/group"
 set +e
 weak_permission_output="$(apply_with_nss_fixture 2>&1)"
 weak_permission_rc=$?
 set -e
-[[ $weak_permission_rc -ne 0 ]] || fail "弱 per-user 配置未被深度账号校验拒绝"
-assert_contains "$weak_permission_output" "legacy-camera 的 upload-only 配置不满足 canonical"
-rm -f -- "${apply_root}/etc/vsftpd_user_conf/legacy-camera"
+[[ $weak_permission_rc -ne 0 ]] || fail "跨设备 local_root 未被拒绝"
+assert_contains "$weak_permission_output" "local_root 必须保持 root-owned"
+sed -i 's|local_root=/srv/devicedata/data/other|local_root=/srv/devicedata|' \
+    "${apply_root}/etc/vsftpd_user_conf/legacy-camera"
 managed_members_output="$(apply_with_nss_fixture)"
 assert_contains "$managed_members_output" "部署和本机验证完成"
 
@@ -643,8 +664,9 @@ host_accounts_after="$(
 # 真实账号路径无法在无 root 的离线夹具执行，以静态门禁锁住身份校验和回滚顺序。
 grep -Fq 'validate_existing_ftp_account devicedata' "$DEPLOY_SCRIPT" ||
     fail "缺少 devicedata 既有账号身份校验"
-grep -Fq 'validate_existing_ftp_account uploader' "$DEPLOY_SCRIPT" ||
-    fail "缺少 uploader 既有账号身份校验"
+if grep -Fq 'create_ftp_account uploader' "$DEPLOY_SCRIPT"; then
+    fail "部署器仍会创建已退役共享 uploader"
+fi
 grep -Fq '[[ "$home" == "/srv/devicedata" ]]' "$DEPLOY_SCRIPT" ||
     fail "既有账号 home 门禁漂移"
 grep -Fq '[[ "$shell" == "/usr/sbin/nologin" ]]' "$DEPLOY_SCRIPT" ||
@@ -667,15 +689,11 @@ grep -Fq 'timeout --signal=TERM --kill-after=5s 30s usermod -a -G ftpdata' "$DEP
     fail "usermod 超时后状态复核门禁漂移"
 grep -Fq 'ADDED_DEVICEDATA_TO_FTPDATA=1' "$DEPLOY_SCRIPT" ||
     fail "devicedata 新增组关系未登记"
-grep -Fq 'ADDED_UPLOADER_TO_FTPDATA=1' "$DEPLOY_SCRIPT" ||
-    fail "uploader 新增组关系未登记"
 grep -Fq '} | timeout --signal=TERM --kill-after=5s 10s chpasswd' "$DEPLOY_SCRIPT" ||
-    fail "新账号批量 chpasswd 缺少 10s 阶段预算"
+    fail "新 devicedata 账号 chpasswd 缺少 10s 阶段预算"
 grep -Fq 'create_ftpdata_group' "$DEPLOY_SCRIPT" || fail "groupadd 不确定结果封装缺失"
 grep -Fq 'create_ftp_account devicedata' "$DEPLOY_SCRIPT" ||
     fail "devicedata useradd 不确定结果封装缺失"
-grep -Fq 'create_ftp_account uploader' "$DEPLOY_SCRIPT" ||
-    fail "uploader useradd 不确定结果封装缺失"
 grep -Fq '严重: 回滚未完整完成' "$DEPLOY_SCRIPT" ||
     fail "回滚失败仍可能被宣称完成"
 extract_dependency_loop() {
@@ -698,17 +716,12 @@ for command_name in awk basename cat chmod chown cp date dirname find grep insta
         <<< "$common_dependency_block" ||
         fail "${command_name} 未纳入通用依赖命令预检"
 done
-for command_name in chpasswd flock getent getfacl gpasswd groupadd groupdel id nginx \
+for command_name in chpasswd findmnt flock getent gpasswd groupadd groupdel id nginx \
     systemctl timeout useradd userdel usermod vsftpd; do
     grep -Eq "(^|[[:space:]\\\\])${command_name}([[:space:];\\\\]|$)" \
         <<< "$system_dependency_block" ||
         fail "${command_name} 未纳入真实模式依赖命令预检"
 done
-gpasswd_line="$(grep -nF 'gpasswd -d uploader ftpdata' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
-userdel_line="$(grep -nF 'userdel uploader' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
-[[ -n "$gpasswd_line" && -n "$userdel_line" && "$gpasswd_line" -lt "$userdel_line" ]] ||
-    fail "rollback 未在删除新账号前撤销既有组关系"
-
 grep -Fq 'validate_ssh_listener_before_ufw_enable' "$DEPLOY_SCRIPT" ||
     fail "UFW enable 缺少 SSH listener 门禁"
 grep -Fq '要求 SSH_CONNECTION' "$DEPLOY_SCRIPT" ||
@@ -726,10 +739,14 @@ grep -Fq 'LC_ALL=C ufw show added' "$DEPLOY_SCRIPT" ||
     fail "配置 FTP 防火墙前未审计既有 UFW 规则"
 grep -Fq '发现更宽或无法证明等价的旧 FTP UFW 规则' "$DEPLOY_SCRIPT" ||
     fail "更宽旧 FTP UFW 规则未 fail closed"
-grep -Fq 'audit_existing_uploader_files' "$DEPLOY_SCRIPT" ||
-    fail "存量 write-once 文件审计缺失"
-grep -Fq -- '-perm /0022' "$DEPLOY_SCRIPT" ||
-    fail "存量 group/other write 位未纳入审计"
+grep -Fq 'verify_final_private_ftp_firewall' "$DEPLOY_SCRIPT" ||
+    fail "最终 UFW active/CIDR 远端回读缺失"
+grep -Fq 'DEFAULT_INPUT_POLICY="DROP"' "$DEPLOY_SCRIPT" ||
+    fail "UFW 默认入站 deny 前置门禁缺失"
+grep -Fq 'Default: deny \(incoming\)' "$DEPLOY_SCRIPT" ||
+    fail "UFW 最终默认入站 deny 回读缺失"
+grep -Fq 'validate_capacity_boundary' "$DEPLOY_SCRIPT" ||
+    fail "独立受限文件系统容量硬门禁缺失"
 grep -Fq 'atomic_install_file "$OTA_ADMIN_STAGED" "$OTA_ADMIN_TARGET"' "$DEPLOY_SCRIPT" ||
     fail "ota_admin.py 未从已校验 staged bytes 安装"
 grep -Fq 'ota_admin.py 安装后哈希不一致' "$DEPLOY_SCRIPT" ||
@@ -776,7 +793,8 @@ fi
 
 rollback_stop_line="$(grep -nF 'systemctl stop "${SERVICE_NAMES[$i]}"' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
 rollback_start_line="$(grep -nF 'systemctl start "$svc"' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
-[[ "$rollback_stop_line" -lt "$gpasswd_line" && "$gpasswd_line" -lt "$rollback_start_line" ]] ||
+rollback_account_line="$(grep -nF 'userdel devicedata' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
+[[ "$rollback_stop_line" -lt "$rollback_account_line" && "$rollback_account_line" -lt "$rollback_start_line" ]] ||
     fail "rollback 服务恢复发生在账号/目录恢复之前"
 runtime_branch_line="$(grep -nF '                enabled-runtime)' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
 runtime_disable_line="$(grep -nF '                        systemctl disable "$svc"' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
@@ -815,10 +833,10 @@ preinstall_line="$(grep -nF '验证外部维护窗口已预装依赖' "$DEPLOY_S
 stage_create_line="$(grep -nF 'STAGE_DIR="$(mktemp -d' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
 stop_vsftpd_line="$(grep -nF '        systemctl stop vsftpd' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
 final_refresh_line="$(grep -nF '    refresh_ftp_candidates' "$DEPLOY_SCRIPT" | tail -n1 | cut -d: -f1)"
-audit_files_line="$(grep -nF '    audit_existing_uploader_files' "$DEPLOY_SCRIPT" | tail -n1 | cut -d: -f1)"
+install_userlist_line="$(grep -nF 'atomic_install_file "${STAGE_DIR}/vsftpd.userlist"' "$DEPLOY_SCRIPT" | head -n1 | cut -d: -f1)"
 [[ "$apply_ack_line" -lt "$preinstall_line" && "$preinstall_line" -lt "$stage_create_line" &&
    "$stage_create_line" -lt "$stop_vsftpd_line" && "$stop_vsftpd_line" -lt "$final_refresh_line" &&
-   "$final_refresh_line" -lt "$audit_files_line" ]] ||
-    fail "apply 确认/依赖验证未先于 staging，或停服/刷新候选/审计存量排序错误"
+   "$final_refresh_line" -lt "$install_userlist_line" ]] ||
+    fail "apply 确认/依赖验证未先于 staging，或停服/刷新候选/原子安装排序错误"
 
 echo "deploy_online_services 离线门禁通过"
