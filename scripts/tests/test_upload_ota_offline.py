@@ -760,21 +760,29 @@ class LocalGateTests(unittest.TestCase):
             root = Path(temporary)
             qt_bin = root / "qt" / "bin"
             qt_plugins = root / "qt" / "plugins"
+            qt_msbuild = root / "qtmsbuild"
             inno = root / "inno"
             qt_bin.mkdir(parents=True)
             qt_plugins.mkdir(parents=True)
+            qt_msbuild.mkdir()
             inno.mkdir()
             qt_core = qt_bin / "Qt6Core.dll"
             qt_core.write_bytes(b"trusted-qt-core")
             (qt_plugins / "qwindows.dll").write_bytes(b"trusted-plugin")
             iscc_dependency = inno / "Setup.e32"
             iscc_dependency.write_bytes(b"trusted-inno-engine")
+            qt_msbuild_props = qt_msbuild / "Qt.props"
+            qt_msbuild_props.write_bytes(b"trusted-qt-msbuild-props")
             initial_qt = ota._snapshot_bounded_tree(
                 "Qt build/deploy", [("bin", qt_bin), ("plugins", qt_plugins)],
                 max_entries=32, max_bytes=4096,
             )
             initial_inno = ota._snapshot_bounded_tree(
                 "Inno Setup compiler", [("install", inno)],
+                max_entries=32, max_bytes=4096,
+            )
+            initial_qt_msbuild = ota._snapshot_bounded_tree(
+                "Qt MSBuild integration", [("install", qt_msbuild)],
                 max_entries=32, max_bytes=4096,
             )
             expectations = {
@@ -784,7 +792,7 @@ class LocalGateTests(unittest.TestCase):
                     "files": snapshot.files,
                     "size": snapshot.size,
                 }
-                for snapshot in (initial_qt, initial_inno)
+                for snapshot in (initial_qt, initial_inno, initial_qt_msbuild)
             }
             qt_core.write_bytes(b"pre-start-attacker-qt-core")
             attacked_qt = ota._snapshot_bounded_tree(
@@ -793,7 +801,7 @@ class LocalGateTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ota.ReleaseGateError, "禁止学习"):
                 ota._require_expected_toolchain_closures(
-                    (attacked_qt, initial_inno), expectations
+                    (attacked_qt, initial_inno, initial_qt_msbuild), expectations
                 )
             qt_core.write_bytes(b"trusted-qt-core")
             iscc_dependency.write_bytes(b"pre-start-attacker-inno-engine")
@@ -803,9 +811,19 @@ class LocalGateTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ota.ReleaseGateError, "禁止学习"):
                 ota._require_expected_toolchain_closures(
-                    (initial_qt, attacked_inno), expectations
+                    (initial_qt, attacked_inno, initial_qt_msbuild), expectations
                 )
             iscc_dependency.write_bytes(b"trusted-inno-engine")
+            qt_msbuild_props.write_bytes(b"pre-start-attacker-qt-msbuild")
+            attacked_qt_msbuild = ota._snapshot_bounded_tree(
+                "Qt MSBuild integration", [("install", qt_msbuild)],
+                max_entries=32, max_bytes=4096,
+            )
+            with self.assertRaisesRegex(ota.ReleaseGateError, "禁止学习"):
+                ota._require_expected_toolchain_closures(
+                    (initial_qt, initial_inno, attacked_qt_msbuild), expectations
+                )
+            qt_msbuild_props.write_bytes(b"trusted-qt-msbuild-props")
             closure = ota._snapshot_bounded_tree(
                 "fixture toolchain",
                 [("bin", qt_bin), ("plugins", qt_plugins), ("inno", inno)],

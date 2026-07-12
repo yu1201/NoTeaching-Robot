@@ -399,10 +399,10 @@ try {
         Assert-True ($releaseText.Contains($token)) "build_release_package missing hard gate token $token"
     }
     Assert-True ($releaseText.Contains("-SkipBuild is forbidden")) "SkipBuild must fail closed"
-    foreach ($token in @("MSBuildExecutable", "MSBuildSha256", "WinDeployQtExecutable", "WinDeployQtSha256", "PythonExecutable", "PythonSha256", "Assert-ReleaseExternalTool")) {
+    foreach ($token in @("MSBuildExecutable", "MSBuildSha256", "WinDeployQtExecutable", "WinDeployQtSha256", "QtMsBuildPath", "/p:QtMsBuild=", "PythonExecutable", "PythonSha256", "Assert-ReleaseExternalTool")) {
         Assert-True ($releaseText.Contains($token)) "release build must explicitly bind trusted tool $token"
     }
-    foreach ($token in @("InnoCompilerExecutable", "InnoCompilerSha256", "Assert-ReleaseExternalTool")) {
+    foreach ($token in @("QtMsBuildPath", "InnoCompilerExecutable", "InnoCompilerSha256", "Assert-ReleaseExternalTool")) {
         Assert-True ($installerText.Contains($token)) "installer build must explicitly bind trusted tool $token"
     }
     Assert-True (-not $releaseText.Contains('$env:QTDIR') -and -not $releaseText.Contains('Find-FirstExistingPath')) "Qt/MSBuild path fallback must be absent"

@@ -13,6 +13,7 @@ param(
     [Parameter(Mandatory = $true)][string]$MSBuildSha256,
     [Parameter(Mandatory = $true)][string]$WinDeployQtExecutable,
     [Parameter(Mandatory = $true)][string]$WinDeployQtSha256,
+    [Parameter(Mandatory = $true)][string]$QtMsBuildPath,
     [Parameter(Mandatory = $true)][string]$PythonExecutable,
     [Parameter(Mandatory = $true)][string]$PythonSha256
 )
@@ -88,6 +89,20 @@ $windeployqtPath = Assert-ReleaseExternalTool `
     -ExpectedSha256 $WinDeployQtSha256 `
     -ExpectedFileName "windeployqt.exe" `
     -PublisherPattern '(?i)The Qt Company'
+$qtMsBuildRoot = (Resolve-Path -LiteralPath $QtMsBuildPath -ErrorAction Stop).Path
+$qtMsBuildItem = Get-Item -LiteralPath $qtMsBuildRoot -Force
+if (-not $qtMsBuildItem.PSIsContainer `
+    -or (($qtMsBuildItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+    throw "QtMsBuildPath must be a non-reparse directory: $qtMsBuildRoot"
+}
+foreach ($requiredQtMsBuildFile in @("Qt.props", "qt.targets")) {
+    $requiredQtMsBuildPath = Join-Path $qtMsBuildRoot $requiredQtMsBuildFile
+    if (-not (Test-Path -LiteralPath $requiredQtMsBuildPath -PathType Leaf) `
+        -or (((Get-Item -LiteralPath $requiredQtMsBuildPath -Force).Attributes `
+            -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "QtMsBuildPath is missing a non-reparse $requiredQtMsBuildFile file."
+    }
+}
 Set-ReleasePythonTool -PythonExecutable $PythonExecutable -PythonSha256 $PythonSha256
 
 Assert-ReleaseVersion $AppVersion
@@ -154,6 +169,7 @@ $msbuildPath = Assert-ReleaseExternalTool `
     "/p:ImportDirectoryBuildTargets=false" `
     "/p:DirectoryBuildPropsPath=" `
     "/p:DirectoryBuildTargetsPath=" `
+    "/p:QtMsBuild=$qtMsBuildRoot" `
     "/p:CustomBeforeMicrosoftCommonTargets=" `
     "/p:CustomAfterMicrosoftCommonTargets=" `
     "/p:ForceImportBeforeCppTargets=" `

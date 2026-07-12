@@ -11,6 +11,7 @@ param(
     [Parameter(Mandatory = $true)][string]$MSBuildSha256,
     [Parameter(Mandatory = $true)][string]$WinDeployQtExecutable,
     [Parameter(Mandatory = $true)][string]$WinDeployQtSha256,
+    [Parameter(Mandatory = $true)][string]$QtMsBuildPath,
     [Parameter(Mandatory = $true)][string]$InnoCompilerExecutable,
     [Parameter(Mandatory = $true)][string]$InnoCompilerSha256,
     [Parameter(Mandatory = $true)][string]$PythonExecutable,
@@ -64,6 +65,7 @@ if (-not $SkipPackageBuild) {
         -MSBuildSha256 $MSBuildSha256 `
         -WinDeployQtExecutable $WinDeployQtExecutable `
         -WinDeployQtSha256 $WinDeployQtSha256 `
+        -QtMsBuildPath $QtMsBuildPath `
         -PythonExecutable $PythonExecutable `
         -PythonSha256 $PythonSha256
     $PackageGateReport = $expectedPackageGateReport

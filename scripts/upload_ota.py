@@ -96,6 +96,7 @@ DEFAULT_MSBUILD_EXE = Path(
 DEFAULT_WINDEPLOYQT_EXE = Path(
     r"E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe"
 )
+DEFAULT_QT_MSBUILD_DIR = Path(r"C:\Users\OMEN\AppData\Local\QtMsBuild")
 DEFAULT_ISCC_EXE = Path(r"D:\SoftWare\Inno Setup 6\ISCC.exe")
 EXPECTED_TOOLCHAIN_CLOSURES: dict[str, dict[str, Any]] = {
     "Qt build/deploy": {
@@ -109,6 +110,12 @@ EXPECTED_TOOLCHAIN_CLOSURES: dict[str, dict[str, Any]] = {
         "entries": 130,
         "files": 122,
         "size": 34_121_271,
+    },
+    "Qt MSBuild integration": {
+        "sha256": "1e06f486e8e483450c1399210b7a7480cf587fac527a172041dca7282e29dd5e",
+        "entries": 67,
+        "files": 56,
+        "size": 830_376,
     },
 }
 TRUSTED_RELEASE_FILES = (
@@ -745,6 +752,7 @@ def _verify_bounded_tree_snapshot(snapshot: _TrustedTreeSnapshot) -> None:
 def _snapshot_release_toolchain_closures(
     windeployqt_tool: _TrustedTool,
     iscc_tool: _TrustedTool,
+    qt_msbuild_dir: os.PathLike[str] | str,
 ) -> tuple[_TrustedTreeSnapshot, ...]:
     qt_root = windeployqt_tool.path.parent.parent
     qt_library_names = (
@@ -772,7 +780,27 @@ def _snapshot_release_toolchain_closures(
         max_entries=2_000,
         max_bytes=512 * 1024 * 1024,
     )
-    return qt_snapshot, inno_snapshot
+    try:
+        qt_msbuild_root = Path(qt_msbuild_dir).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise ReleaseGateError("Qt MSBuild integration 目录不存在或无法解析。") from exc
+    _require(qt_msbuild_root.is_dir()
+             and not qt_msbuild_root.is_symlink()
+             and not _path_is_reparse_point(qt_msbuild_root),
+             "Qt MSBuild integration 必须是非链接真实目录。")
+    for required_name in ("Qt.props", "qt.targets"):
+        required = qt_msbuild_root / required_name
+        _require(required.is_file()
+                 and not required.is_symlink()
+                 and not _path_is_reparse_point(required),
+                 f"Qt MSBuild integration 缺少受信文件 {required_name}。")
+    qt_msbuild_snapshot = _snapshot_bounded_tree(
+        "Qt MSBuild integration",
+        [("install", qt_msbuild_root)],
+        max_entries=5_000,
+        max_bytes=1024 * 1024 * 1024,
+    )
+    return qt_snapshot, inno_snapshot, qt_msbuild_snapshot
 
 
 def _require_expected_toolchain_closures(
@@ -3310,6 +3338,18 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
     build_tools = (
         msbuild_tool, windeployqt_tool, iscc_tool, qt_core_tool, *inno_critical_tools
     )
+    try:
+        qt_msbuild_root = Path(
+            getattr(args, "qt_msbuild_dir", DEFAULT_QT_MSBUILD_DIR)
+        ).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise ReleaseGateError("Qt MSBuild integration 目录不存在或无法解析。") from exc
+    try:
+        qt_msbuild_root.relative_to(repo_root)
+    except ValueError:
+        pass
+    else:
+        raise ReleaseGateError("Qt MSBuild integration 禁止位于项目目录内。")
     previous_git, previous_gh, previous_python = (
         _ACTIVE_GIT_TOOL, _ACTIVE_GH_TOOL, _ACTIVE_PYTHON_TOOL
     )
@@ -3324,7 +3364,7 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
         ),
     ),)
     toolchain_closures = _snapshot_release_toolchain_closures(
-        windeployqt_tool, iscc_tool
+        windeployqt_tool, iscc_tool, qt_msbuild_root
     )
     _require_expected_toolchain_closures(toolchain_closures)
     python_runtime_root, python_runtime_sha256 = (
@@ -3382,6 +3422,7 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
                         "-MSBuildSha256", msbuild_tool.sha256,
                         "-WinDeployQtExecutable", str(windeployqt_tool.path),
                         "-WinDeployQtSha256", windeployqt_tool.sha256,
+                        "-QtMsBuildPath", str(qt_msbuild_root),
                         "-InnoCompilerExecutable", str(iscc_tool.path),
                         "-InnoCompilerSha256", iscc_tool.sha256,
                         "-PythonExecutable", str(python_tool.path),
@@ -4278,6 +4319,8 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="受信任 Microsoft MSBuild.exe 绝对路径")
     trusted.add_argument("--windeployqt-exe", default=str(DEFAULT_WINDEPLOYQT_EXE),
                          help="受信任 Qt windeployqt.exe 绝对路径")
+    trusted.add_argument("--qt-msbuild-dir", default=str(DEFAULT_QT_MSBUILD_DIR),
+                         help="受固定 closure 摘要约束的 Qt MSBuild integration 目录")
     trusted.add_argument("--iscc-exe", default=str(DEFAULT_ISCC_EXE),
                          help="受信任 Inno Setup ISCC.exe 绝对路径")
     password_group = trusted.add_mutually_exclusive_group(required=True)
