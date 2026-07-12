@@ -35,7 +35,7 @@ if /I "%~1"=="--overwrite" (
     shift /1
     goto parse_args
 )
-echo Unknown argument: %~1
+echo Unknown argument: "%~1"
 goto usage_error
 
 :args_done
@@ -46,17 +46,19 @@ for %%I in ("%SOURCE_DIR%") do set "SOURCE_DIR=%%~fI"
 set "DB_PATH=%DATA_ROOT%\Data\ConfigStore.db"
 
 if not exist "%TOOL_DIR%ConfigMigrate.exe" (
-    echo ConfigMigrate.exe not found: %TOOL_DIR%ConfigMigrate.exe
+    echo ConfigMigrate.exe not found: "%TOOL_DIR%ConfigMigrate.exe"
     goto failed
 )
 if not exist "%SOURCE_DIR%" (
-    echo Legacy Data directory not found: %SOURCE_DIR%
+    echo Legacy Data directory not found: "%SOURCE_DIR%"
     goto failed
 )
 
-echo Resolved data root: %DATA_ROOT%
-echo Resolved source Data: %SOURCE_DIR%
-echo Resolved target database: %DB_PATH%
+rem 路径必须整体保留在引号内：cmd.exe 会在变量展开后再次解释命令元字符。
+rem Windows 合法路径可含命令元字符；不加引号既会破坏迁移，也可能以维护账户权限执行额外命令。
+echo Resolved data root: "%DATA_ROOT%"
+echo Resolved source Data: "%SOURCE_DIR%"
+echo Resolved target database: "%DB_PATH%"
 echo.
 "%TOOL_DIR%ConfigMigrate.exe" --source "%SOURCE_DIR%" --db "%DB_PATH%" --encrypt --scrub-legacy-credentials %OVERWRITE_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"

@@ -524,12 +524,16 @@ ScopedSettingIdentity BuildScopedIniIdentity(const QString& fileName, const QStr
     return identity;
 }
 
-bool ReadScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& identity, QString* value)
+ConfigDatabase::ReadStatus ReadScopedSettingValueStatus(
+    QSqlDatabase& db,
+    const ScopedSettingIdentity& identity,
+    QString* value)
 {
     if (!identity.valid || value == nullptr)
     {
-        return false;
+        return ConfigDatabase::ReadStatus::Error;
     }
+    value->clear();
 
     QSqlQuery query(db);
     query.prepare("SELECT value_text, encrypted, sensitive FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
@@ -539,11 +543,21 @@ bool ReadScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& ident
     query.addBindValue(NormalizeSourceKey(identity.keyName));
     if (!query.exec())
     {
-        return false;
+        return ConfigDatabase::ReadStatus::Error;
     }
-    if (!query.next())
+    const bool hasRow = query.next();
+#if defined(CONFIG_DATABASE_TEST_INJECT_CURSOR_ERROR)
+    if (!hasRow
+        && qEnvironmentVariableIntValue("QTWIDGETSAPP4_TEST_CONFIG_CURSOR_ERROR") == 1)
     {
-        return false;
+        return ConfigDatabase::ReadStatus::Error;
+    }
+#endif
+    if (!hasRow)
+    {
+        return query.lastError().isValid()
+            ? ConfigDatabase::ReadStatus::Error
+            : ConfigDatabase::ReadStatus::NotFound;
     }
     const QString storedText = query.value(0).toString();
     const int encrypted = query.value(1).toInt();
@@ -553,7 +567,7 @@ bool ReadScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& ident
         identity.scopeType, identity.scopeId, identity.module, identity.keyName);
     if (!DecodeStoredText(storedText, encrypted, purpose, value))
     {
-        return false;
+        return ConfigDatabase::ReadStatus::Error;
     }
     query.finish();
     const bool requiresDpapi = RequiresDpapiProtection(
@@ -562,9 +576,17 @@ bool ReadScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& ident
     {
         ScopedSettingIdentity upgraded = identity;
         upgraded.sensitive = true;
-        return WriteScopedSettingValue(db, upgraded, *value);
+        return WriteScopedSettingValue(db, upgraded, *value)
+            ? ConfigDatabase::ReadStatus::Found
+            : ConfigDatabase::ReadStatus::Error;
     }
-    return true;
+    return ConfigDatabase::ReadStatus::Found;
+}
+
+bool ReadScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& identity, QString* value)
+{
+    return ReadScopedSettingValueStatus(db, identity, value)
+        == ConfigDatabase::ReadStatus::Found;
 }
 
 bool WriteScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& identity, const QString& value)
@@ -1494,15 +1516,26 @@ bool ConfigDatabase::ReadIniValue(
     const std::string& keyName,
     std::string* value)
 {
+    return ReadIniValueStatus(fileName, sectionName, keyName, value)
+        == ReadStatus::Found;
+}
+
+ConfigDatabase::ReadStatus ConfigDatabase::ReadIniValueStatus(
+    const std::string& fileName,
+    const std::string& sectionName,
+    const std::string& keyName,
+    std::string* value)
+{
     if (value == nullptr)
     {
-        return false;
+        return ReadStatus::Error;
     }
+    value->clear();
 
     QSqlDatabase db = OpenDatabase();
     if (!db.isValid() || !db.isOpen())
     {
-        return false;
+        return ReadStatus::Error;
     }
 
     const ScopedSettingIdentity scopedIdentity = BuildScopedIniIdentity(
@@ -1511,17 +1544,18 @@ bool ConfigDatabase::ReadIniValue(
         DecodeMaybeLocal(keyName));
     if (!scopedIdentity.valid)
     {
-        return false;
+        return ReadStatus::Error;
     }
     QString scopedValue;
-    if (!ReadScopedSettingValue(db, scopedIdentity, &scopedValue))
+    const ReadStatus status = ReadScopedSettingValueStatus(db, scopedIdentity, &scopedValue);
+    if (status != ReadStatus::Found)
     {
-        return false;
+        return status;
     }
 
     const QByteArray bytes = scopedValue.toUtf8();
     *value = std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
-    return true;
+    return ReadStatus::Found;
 }
 
 bool ConfigDatabase::WriteIniValue(
@@ -1874,56 +1908,37 @@ bool ConfigDatabase::ReadScopedSetting(
     const QString& keyName,
     QString* value)
 {
+    return ReadScopedSettingStatus(scopeType, scopeId, moduleName, keyName, value)
+        == ReadStatus::Found;
+}
+
+ConfigDatabase::ReadStatus ConfigDatabase::ReadScopedSettingStatus(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QString& keyName,
+    QString* value)
+{
     if (value == nullptr)
     {
-        return false;
+        return ReadStatus::Error;
     }
-
+    value->clear();
     QSqlDatabase db = OpenDatabase();
     if (!db.isValid() || !db.isOpen())
     {
-        return false;
+        return ReadStatus::Error;
     }
-
-    QSqlQuery query(db);
-    query.prepare("SELECT value_text, encrypted, sensitive FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?");
-    query.addBindValue(NormalizeSection(scopeType).toLower());
-    query.addBindValue(NormalizeScopeId(scopeId));
-    query.addBindValue(NormalizeSection(moduleName));
-    query.addBindValue(NormalizeSourceKey(keyName));
-    if (!query.exec())
-    {
-        return false;
-    }
-    if (!query.next())
-    {
-        return false;
-    }
-
-    const QString storedText = query.value(0).toString();
-    const int encrypted = query.value(1).toInt();
-    const bool sensitive = query.value(2).toInt() != 0
-        || IsSensitiveSettingKey(moduleName)
-        || IsSensitiveSettingKey(keyName);
-    const QString purpose = ProtectionPurpose(scopeType, scopeId, moduleName, keyName);
-    if (!DecodeStoredText(storedText, encrypted, purpose, value))
-    {
-        return false;
-    }
-    query.finish();
-    const bool requiresDpapi = RequiresDpapiProtection(scopeType, moduleName, keyName, sensitive);
-    if (requiresDpapi && !CredentialSecurity::IsCurrentUserProtected(storedText))
-    {
-        ScopedSettingIdentity identity;
-        identity.valid = true;
-        identity.scopeType = scopeType;
-        identity.scopeId = scopeId;
-        identity.module = moduleName;
-        identity.keyName = keyName;
-        identity.sensitive = true;
-        return WriteScopedSettingValue(db, identity, *value);
-    }
-    return true;
+    ScopedSettingIdentity identity;
+    identity.scopeType = scopeType;
+    identity.scopeId = scopeId;
+    identity.module = moduleName;
+    identity.keyName = keyName;
+    identity.sensitive = IsSensitiveSettingKey(moduleName) || IsSensitiveSettingKey(keyName);
+    identity.valid = !NormalizeSection(scopeType).isEmpty()
+        && !NormalizeSection(moduleName).isEmpty()
+        && !NormalizeSourceKey(keyName).isEmpty();
+    return ReadScopedSettingValueStatus(db, identity, value);
 }
 
 QMap<QString, QString> ConfigDatabase::ReadScopedSettings(
@@ -2163,6 +2178,65 @@ bool ConfigDatabase::TryListScopedSettingIds(
     }
     *ids = UniqueSorted(values);
     return true;
+}
+
+bool ConfigDatabase::TryListScopedSettingIdsBounded(
+    const QString& scopeType,
+    const QString& moduleName,
+    qsizetype maxCount,
+    qsizetype maxIdLength,
+    QStringList* ids)
+{
+    if (ids == nullptr || maxCount <= 0 || maxIdLength <= 0)
+    {
+        return false;
+    }
+    ids->clear();
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        return false;
+    }
+
+    QSqlQuery query(db);
+    if (moduleName.trimmed().isEmpty())
+    {
+        query.prepare(
+            "SELECT DISTINCT scope_id FROM settings WHERE scope_type=? "
+            "ORDER BY scope_id COLLATE NOCASE LIMIT ?");
+        query.addBindValue(NormalizeSection(scopeType).toLower());
+        query.addBindValue(static_cast<qlonglong>(maxCount + 1));
+    }
+    else
+    {
+        query.prepare(
+            "SELECT DISTINCT scope_id FROM settings WHERE scope_type=? AND module=? "
+            "ORDER BY scope_id COLLATE NOCASE LIMIT ?");
+        query.addBindValue(NormalizeSection(scopeType).toLower());
+        query.addBindValue(NormalizeSection(moduleName));
+        query.addBindValue(static_cast<qlonglong>(maxCount + 1));
+    }
+    if (!query.exec())
+    {
+        return false;
+    }
+
+    QStringList values;
+    while (query.next())
+    {
+        const QString id = query.value(0).toString();
+        if (id.isEmpty() || id.size() > maxIdLength || values.size() >= maxCount)
+        {
+            return false;
+        }
+        values << id;
+    }
+    if (query.lastError().isValid())
+    {
+        return false;
+    }
+    *ids = UniqueSorted(values);
+    return ids->size() == values.size();
 }
 
 bool ConfigDatabase::RemoveScopedSettings(const QString& scopeType, const QString& scopeId, const QString& moduleName)

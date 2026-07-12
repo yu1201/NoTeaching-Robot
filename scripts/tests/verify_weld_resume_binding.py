@@ -46,6 +46,8 @@ def main() -> int:
     for token in (
         "ReadBreakpointRecord",
         'checkpointRecord.state != QStringLiteral("paused")',
+        "ValidateCheckpointTime",
+        "QDateTime::currentDateTimeUtc()",
         "PersistentEndpointIdentity",
         "ResolveWeldExecutionParameters",
         "resumeCheckpointSupported",
@@ -56,7 +58,7 @@ def main() -> int:
         "resumePlan.resumeArcMm",
         "取得硬件租约后机器人端点或绑定轨迹发生变化",
         "续焊运动/START前机器人名称、类型或端点身份发生变化",
-        'QStringLiteral("paused"),\n        QStringLiteral("resuming")',
+        '&pausedRecoveryBinding,\n            QStringLiteral("paused"),\n            QStringLiteral("resuming")',
         "inputAlreadyInExecutionOrder",
     ):
         if token == "inputAlreadyInExecutionOrder":
@@ -111,9 +113,10 @@ def main() -> int:
         "V2续焊实际解析轨迹与绑定的预期 SHA256 不一致",
         "executionPreMotion",
         "机器人运动前复核焊接执行身份失败",
-        "invalidated:v2:",
+        "WeldSafetyRecoveryStore::InvalidateIfNoPending",
         'stopBeforeNextWeldAction("启动STEP焊接轨迹程序")',
-        "executionContextGuard.Finish(true)",
+        "PersistProgramCompletedUnretracted",
+        "FinishSafelyRetracted",
     ):
         require(token in service, f"service execution identity/lifecycle gate missing: {token}")
     require("WeldExecutionFinishedCallback" in service_h,
@@ -148,7 +151,7 @@ def main() -> int:
         "connectionUsable()",
         "ConnectStatus() < 0",
         "positionDeviation > maxPositionDeviationMm",
-        "return Prog_startRun_Py(true)",
+        "return ProgStartRunWithSdkLock(sdkLock, true)",
     ):
         require(token in step, f"STEP stable-pause safety check missing: {token}")
 
@@ -164,6 +167,10 @@ def main() -> int:
         "QCryptographicHash::hash(payload",
         "size = payload.size()",
         "PlanFromPausedPoseBound",
+        "MaxResumeCheckpointAgeSeconds",
+        "MaxFutureClockSkewSeconds",
+        "created.secsTo(now)",
+        "断点已超过 %1 小时有效期",
         "expectedIdentity.trajectorySha256",
         "expectedIdentity.trajectorySize",
         "expectedIdentity.trajectoryPointCount",

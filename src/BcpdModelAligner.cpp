@@ -13,14 +13,42 @@
 #include <QStringList>
 #include <QTemporaryDir>
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace
 {
+// QTemporaryDir 的存续期必须严格长于子进程。第一次有界等待保持
+// 取消 UI 反馈；若句柄退出延迟，再次 kill 并无限等待 NotRunning。
+// 宁可在异常操作系统状态下停在这里，也不能让仍在写的 bcpd.exe
+// 与 QTemporaryDir 析构/删除临时文件竞争。本函数不分配内存。
+bool TerminateProcessAndConfirmStopped(QProcess& process) noexcept
+{
+    if (process.state() == QProcess::NotRunning) return true;
+
+    process.kill();
+    if (process.waitForFinished(2000)
+        && process.state() == QProcess::NotRunning)
+        return true;
+
+    process.kill();
+    while (process.state() != QProcess::NotRunning)
+    {
+        // Windows 的 TerminateProcess 返回后句柄可能尚未 signal；-1 确保
+        // QProcess 已观察到真正退出。若平台层短暂返回 false，
+        // 重新 kill 后继续等，绝不携活子进程返回。
+        if (!process.waitForFinished(-1)
+            && process.state() != QProcess::NotRunning)
+            process.kill();
+    }
+    return true;
+}
+
 // 点云（可降采样）→ BCPD 输入矩阵：每行 "x y z"，空格分隔、无表头。
 bool WriteCloudMatrix(const QString& path,
                       const QVector<RobotCalculation::IndexedPoint3D>& pts,
-                      int stride, int& written)
+                      int stride, int& written,
+                      const std::function<bool()>& isCancelled)
 {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
@@ -30,6 +58,7 @@ bool WriteCloudMatrix(const QString& path,
     written = 0;
     for (int i = 0; i < pts.size(); i += stride)
     {
+        if ((written & 0x3ff) == 0 && isCancelled && isCancelled()) return false;
         const Eigen::Vector3d& p = pts[i].point;
         buf += QByteArray::number(p.x(), 'f', 4);
         buf += ' ';
@@ -38,63 +67,82 @@ bool WriteCloudMatrix(const QString& path,
         buf += QByteArray::number(p.z(), 'f', 4);
         buf += '\n';
         ++written;
-        if (buf.size() >= (4 << 20)) { f.write(buf); buf.clear(); }
+        if (buf.size() >= (4 << 20))
+        {
+            if (f.write(buf) != buf.size()) return false;
+            buf.clear();
+        }
     }
-    if (!buf.isEmpty()) f.write(buf);
+    if (!buf.isEmpty() && f.write(buf) != buf.size()) return false;
     f.close();
     return written > 0;
 }
 
 // 网格顶点 → BCPD 输入矩阵（source Y）。
-bool WriteMeshVertices(const QString& path, const WorkpieceMeshBuilder::Mesh& mesh)
+bool WriteMeshVertices(const QString& path, const WorkpieceMeshBuilder::Mesh& mesh,
+                       const std::function<bool()>& isCancelled)
 {
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
     QByteArray buf;
     buf.reserve(1 << 20);
-    for (const Eigen::Vector3f& v : mesh.vertices)
+    for (qsizetype index = 0; index < mesh.vertices.size(); ++index)
     {
+        if ((index & 0x3ff) == 0 && isCancelled && isCancelled()) return false;
+        const Eigen::Vector3f& v = mesh.vertices.at(index);
         buf += QByteArray::number(v.x(), 'f', 4);
         buf += ' ';
         buf += QByteArray::number(v.y(), 'f', 4);
         buf += ' ';
         buf += QByteArray::number(v.z(), 'f', 4);
         buf += '\n';
-        if (buf.size() >= (4 << 20)) { f.write(buf); buf.clear(); }
+        if (buf.size() >= (4 << 20))
+        {
+            if (f.write(buf) != buf.size()) return false;
+            buf.clear();
+        }
     }
-    if (!buf.isEmpty()) f.write(buf);
+    if (!buf.isEmpty() && f.write(buf) != buf.size()) return false;
     f.close();
     return mesh.vertices.size() > 0;
 }
 
 // 读 BCPD 形变后顶点（M×3 文本）。手写 strtod 解析，比正则快。
-bool ReadDeformedVertices(const QString& path, QVector<Eigen::Vector3f>& out, int reserveHint)
+bool ReadDeformedVertices(const QString& path, QVector<Eigen::Vector3f>& out, int reserveHint,
+                          const std::function<bool()>& isCancelled)
 {
+    constexpr qint64 kMaximumBytesPerVertex = 192;
+    if (reserveHint <= 0) return false;
+    const QFileInfo info(path);
+    const qint64 maximumBytes = std::min<qint64>(
+        1024LL * 1024LL * 1024LL,
+        static_cast<qint64>(reserveHint) * kMaximumBytesPerVertex + 1024);
+    if (!info.isFile() || info.size() <= 0 || info.size() > maximumBytes) return false;
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) return false;
-    const QByteArray data = f.readAll();
-    f.close();
     out.clear();
     if (reserveHint > 0) out.reserve(reserveHint);
-    const char* p = data.constData();
-    const char* const end = p + data.size();
-    while (p < end)
+    while (!f.atEnd())
     {
-        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
-        if (p >= end) break;
-        char* q = nullptr;
-        const double x = std::strtod(p, &q);
-        if (q == p) { ++p; continue; }
-        p = q;
-        const double y = std::strtod(p, &q);
-        if (q == p) { ++p; continue; }
-        p = q;
-        const double z = std::strtod(p, &q);
-        if (q == p) { ++p; continue; }
-        p = q;
-        out.push_back(Eigen::Vector3f(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)));
+        if ((out.size() & 0x3ff) == 0 && isCancelled && isCancelled()) return false;
+        if (out.size() >= reserveHint) return false;
+        const QByteArray line = f.readLine(512);
+        if (line.isEmpty() && f.error() != QFileDevice::NoError) return false;
+        if (line.size() >= 511 && !line.endsWith('\n')) return false;
+        const QList<QByteArray> fields = line.simplified().split(' ');
+        if (fields.size() != 3) return false;
+        bool okX = false, okY = false, okZ = false;
+        const double x = fields.at(0).toDouble(&okX);
+        const double y = fields.at(1).toDouble(&okY);
+        const double z = fields.at(2).toDouble(&okZ);
+        if (!okX || !okY || !okZ || !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+            return false;
+        const Eigen::Vector3f vertex(
+            static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+        if (!vertex.allFinite()) return false;  // finite double 仍可在窄化成 float 时溢出
+        out.push_back(vertex);
     }
-    return !out.isEmpty();
+    return f.error() == QFileDevice::NoError && out.size() == reserveHint;
 }
 }  // namespace
 
@@ -120,6 +168,16 @@ bool BcpdModelAligner::DeformModelToCloud(
     const Options& options, const LogCallback& log)
 {
     auto logmsg = [&](const QString& m) { if (log) log(m); };
+    const auto isCancelled = [&options]()
+        {
+            return options.cancelRequested && options.cancelRequested();
+        };
+
+    if (isCancelled())
+    {
+        logmsg(QStringLiteral("BCPD：任务已取消，未启动配准"));
+        return false;
+    }
 
     const QString exe = options.bcpdExePath.isEmpty() ? DefaultExePath() : options.bcpdExePath;
     if (!QFileInfo::exists(exe))
@@ -161,12 +219,12 @@ bool BcpdModelAligner::DeformModelToCloud(
     if (options.targetSampleCap > 0 && cloud.size() > options.targetSampleCap)
         stride = (cloud.size() + options.targetSampleCap - 1) / options.targetSampleCap;
     int xWritten = 0;
-    if (!WriteCloudMatrix(xFile, cloud, stride, xWritten))
+    if (!WriteCloudMatrix(xFile, cloud, stride, xWritten, isCancelled))
     {
         logmsg(QStringLiteral("BCPD：写点云临时文件失败，跳过配准"));
         return false;
     }
-    if (!WriteMeshVertices(yFile, model))
+    if (!WriteMeshVertices(yFile, model, isCancelled))
     {
         logmsg(QStringLiteral("BCPD：写模型临时文件失败，跳过配准"));
         return false;
@@ -195,25 +253,57 @@ bool BcpdModelAligner::DeformModelToCloud(
     proc.start(exe, args);
     if (!proc.waitForStarted(10000))
     {
+        TerminateProcessAndConfirmStopped(proc);
         logmsg(QStringLiteral("BCPD：进程启动失败，跳过配准"));
         return false;
     }
-    if (!proc.waitForFinished(options.timeoutMs))
+    const int timeoutMs = std::max(1, options.timeoutMs);
+    bool timedOut = false;
+    QByteArray outputTail;
+    const auto drainOutput = [&]()
     {
-        proc.kill();
-        proc.waitForFinished(2000);
-        logmsg(QStringLiteral("BCPD：配准超时（>%1ms），跳过").arg(options.timeoutMs));
+        outputTail.append(proc.readAll());
+        constexpr qsizetype kMaximumDiagnosticBytes = 8192;
+        if (outputTail.size() > kMaximumDiagnosticBytes)
+        {
+            outputTail.remove(0, outputTail.size() - kMaximumDiagnosticBytes);
+        }
+    };
+    while (proc.state() != QProcess::NotRunning)
+    {
+        if (isCancelled())
+        {
+            TerminateProcessAndConfirmStopped(proc);
+            drainOutput();
+            logmsg(QStringLiteral("BCPD：任务已取消，子进程已终止"));
+            return false;
+        }
+        const int remainingMs = timeoutMs - static_cast<int>(timer.elapsed());
+        if (remainingMs <= 0)
+        {
+            timedOut = true;
+            break;
+        }
+        proc.waitForFinished(std::min(100, remainingMs));
+        drainOutput();
+    }
+    drainOutput();
+    if (timedOut)
+    {
+        TerminateProcessAndConfirmStopped(proc);
+        drainOutput();
+        logmsg(QStringLiteral("BCPD：配准超时（>%1ms），跳过").arg(timeoutMs));
         return false;
     }
     if (proc.exitStatus() != QProcess::NormalExit || proc.exitCode() != 0)
     {
-        const QString tail = QString::fromLocal8Bit(proc.readAll()).trimmed().right(300);
+        const QString tail = QString::fromLocal8Bit(outputTail).trimmed().right(300);
         logmsg(QStringLiteral("BCPD：进程异常退出（code=%1）：%2").arg(proc.exitCode()).arg(tail));
         return false;
     }
 
     QVector<Eigen::Vector3f> deformed;
-    if (!ReadDeformedVertices(outY, deformed, model.vertices.size()))
+    if (!ReadDeformedVertices(outY, deformed, model.vertices.size(), isCancelled))
     {
         logmsg(QStringLiteral("BCPD：读形变结果失败（%1）").arg(outY));
         return false;

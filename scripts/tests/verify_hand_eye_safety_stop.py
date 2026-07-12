@@ -69,11 +69,27 @@ def main() -> int:
         "kHandEyeFanucDoneStableSamples",
         "elapsedMs >= kHandEyeFanucDoneStartupGuardMs",
         "RobotOperationLease::StopAndConfirmUnverifiedMotion(driver)",
-        "RobotOperationLease::MarkMotionCompleted(driver)",
+        "RobotOperationLease::RequestCancellation(driver)",
+        "driver->CheckRobotDone(pollIntervalMs, remainingTimeoutMs)",
+        "RobotOperationLease::MotionCompletionPending(driver)",
     ):
         require(token in wait, f"trusted motion completion contract missing: {token}")
-    require(wait.find("RobotOperationLease::MarkMotionCompleted(driver)") < wait.find("if (targetPose != nullptr)"),
-            "stable robot terminal is not registered before the final pose check")
+    final_pose_read = wait.find("driver->TryGetCurrentPos(finalPose)")
+    target_tolerance = wait.find("positionError > kHandEyeAutoArrivePositionToleranceMm")
+    completion_witness = wait.find("driver->CheckRobotDone(pollIntervalMs, remainingTimeoutMs)")
+    pending_cleared = wait.find("RobotOperationLease::MotionCompletionPending(driver)", completion_witness)
+    terminal_success = wait.find("*terminalVerifiedOut = true;")
+    require(0 <= final_pose_read < target_tolerance < completion_witness < pending_cleared < terminal_success,
+            "final pose/tolerance and the driver witness must pass before pending/terminal success")
+    require(wait.find("RobotOperationLease::StopAndConfirmUnverifiedMotion(driver)")
+            < wait.find("RobotOperationLease::RequestCancellation(driver)"),
+            "an automatic emergency stop failure path is not re-latched for explicit STOP acknowledgement")
+    require("RobotOperationLease::MarkMotionCompleted(driver)" not in wait,
+            "HandEye wait clears motion pending directly instead of delegating to the driver completion witness")
+    require("*terminalVerifiedOut = stopConfirmed" not in wait,
+            "an emergency stop is still being reported as natural motion completion")
+    require("*terminalVerifiedOut = false;" in wait,
+            "unverified completion no longer keeps the HandEye safety-stop target")
 
     test = section(
         source,
@@ -187,7 +203,7 @@ def main() -> int:
     ):
         require(token in busy_ui, f"hand-eye busy interaction freeze missing: {token}")
 
-    print("PASS: hand-eye modal window keeps a local safety stop and runs robot tests/moves asynchronously")
+    print("PASS: hand-eye motion requires final-pose and controller-witness completion before clearing safety state")
     return 0
 
 

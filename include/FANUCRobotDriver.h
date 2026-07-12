@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Const.h"
+#include "FanucTpContentIdentity.h"
 #include "RobotCom.hpp"
 #include "RobotLog.h"
 #include "RobotMessage.h"
@@ -193,6 +194,12 @@ public:
 	std::mutex m_callJobStartMutex;
 
 private:
+	bool CreateUploadRunTpMove(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos);
+	bool EnsureFixedMoveTpUploaded(
+		int moveType,
+		const std::string& localTpPath,
+		const std::string& programName);
+	void InvalidateFixedMoveUploadCache();
 	bool CallJobInternal(
 		const std::string& sJobName,
 		int nCompletionStateReg,
@@ -217,6 +224,15 @@ private:
 	std::atomic_bool m_continuousMoveRunning;
 	bool m_continuousMoveStopRequested;
 	std::atomic_bool m_continuousMoveRobotStarted;
+	// Fixed MOVL/MOVJ upload state belongs to one driver instance and one current
+	// controller endpoint. The mutex covers remote verification and cache mutation.
+	std::mutex m_fixedMoveExecutionMutex;
+	std::mutex m_fixedMoveUploadMutex;
+	std::string m_fixedMoveUploadEndpointKey;
+	bool m_fixedMovlUploaded{ false };
+	bool m_fixedMovjUploaded{ false };
+	FanucTpContentIdentity::Identity m_fixedMovlLocalIdentity;
+	FanucTpContentIdentity::Identity m_fixedMovjLocalIdentity;
 	int m_continuousMoveType;
 	double m_continuousMoveSpeed;
 	long long m_continuousWrittenCount;

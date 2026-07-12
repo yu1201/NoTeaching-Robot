@@ -26,7 +26,9 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
-#include <chrono>
+#include <algorithm>
+#include <exception>
+#include <new>
 #include <thread>
 
 ModelAlignmentDialog::ModelAlignmentDialog(QWidget* parent)
@@ -42,10 +44,11 @@ ModelAlignmentDialog::ModelAlignmentDialog(QWidget* parent)
 
 ModelAlignmentDialog::~ModelAlignmentDialog()
 {
-    m_destroyed->store(true);
-    while (m_workerCount->load() > 0)
+    m_destroying.store(true, std::memory_order_release);
+    m_stopRequested.store(true, std::memory_order_release);
+    if (m_worker.joinable())
     {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        m_worker.join();
     }
 }
 
@@ -421,23 +424,141 @@ void ModelAlignmentDialog::OnBrowseCloud()
         startDir, QStringLiteral("点云文本 (*.txt);;所有文件 (*)"));
     if (path.isEmpty()) return;
 
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    QVector<RobotCalculation::IndexedPoint3D> pts;
-    QString error;
-    const bool ok = WorkpieceMeshBuilder::LoadCloudPointsWithProgress(path, pts, error);
-    QApplication::restoreOverrideCursor();
-    if (!ok || pts.isEmpty())
+    SetBusy(true);
+    EnsureProgressDialog(QStringLiteral("正在安全加载点云…"), true);
+    try
     {
-        QMessageBox::warning(this, QStringLiteral("加载点云"), QStringLiteral("加载失败：%1").arg(error));
+        if (m_worker.joinable()) m_worker.join();
+        m_stopRequested.store(false, std::memory_order_release);
+        m_worker = std::thread([this, path]() noexcept
+        {
+            try
+            {
+                bool ok = false;
+                QString error;
+                QVector<RobotCalculation::IndexedPoint3D> points;
+                try
+                {
+                    int lastPostedPercent = -1;
+                    const WorkpieceMeshBuilder::ProgressCallback progress =
+                        [this, &lastPostedPercent](int percent, const QString& stage)
+                        {
+                            if (m_stopRequested.load(std::memory_order_acquire)) return false;
+                            percent = std::clamp(percent, 0, 100);
+                            if (percent != lastPostedPercent
+                                && !m_destroying.load(std::memory_order_acquire))
+                            {
+                                lastPostedPercent = percent;
+                                QMetaObject::invokeMethod(this, [this, percent, stage]()
+                                {
+                                    if (m_stopRequested.load(std::memory_order_acquire)
+                                        || m_destroying.load(std::memory_order_acquire)) return;
+                                    if (m_pProgress)
+                                    {
+                                        m_pProgress->setLabelText(stage);
+                                        m_pProgress->setValue(percent);
+                                    }
+                                }, Qt::QueuedConnection);
+                            }
+                            return !m_stopRequested.load(std::memory_order_acquire);
+                        };
+                    ok = WorkpieceMeshBuilder::LoadCloudPointsWithProgress(
+                        path, points, error, progress);
+                    if (ok && points.isEmpty())
+                    {
+                        ok = false;
+                        error = QStringLiteral("点云加载结果为空。");
+                    }
+                }
+                catch (const std::bad_alloc&)
+                {
+                    error = QStringLiteral("加载点云时内存不足。");
+                }
+                catch (const std::exception& ex)
+                {
+                    error = QStringLiteral("加载点云异常：%1")
+                        .arg(QString::fromLocal8Bit(ex.what()).left(256));
+                }
+                catch (...)
+                {
+                    error = QStringLiteral("加载点云发生未知异常。");
+                }
+
+                if (!m_destroying.load(std::memory_order_acquire))
+                {
+                    QMetaObject::invokeMethod(this,
+                        [this, path, ok, error, points = std::move(points)]() mutable
+                        {
+                            OnCloudLoadFinished(path, ok, error, std::move(points));
+                        }, Qt::QueuedConnection);
+                }
+            }
+            catch (...)
+            {
+                // 点云工作线程与配准线程共享同一条 no-throw 边界，
+                // 极端 OOM 也不得逃逸到 std::thread 导致进程 terminate。
+            }
+        });
+    }
+    catch (const std::bad_alloc&)
+    {
+        OnCloudLoadFinished(path, false, QStringLiteral("启动点云加载失败：内存不足。"), {});
+    }
+    catch (const std::exception& ex)
+    {
+        OnCloudLoadFinished(path, false,
+            QStringLiteral("启动点云加载失败：%1")
+                .arg(QString::fromLocal8Bit(ex.what()).left(256)), {});
+    }
+    catch (...)
+    {
+        OnCloudLoadFinished(path, false, QStringLiteral("启动点云加载失败。"), {});
+    }
+}
+
+void ModelAlignmentDialog::OnCloudLoadFinished(
+    const QString& path,
+    bool ok,
+    const QString& error,
+    QVector<RobotCalculation::IndexedPoint3D> points)
+{
+    if (m_worker.joinable()) m_worker.join();
+    bool accepted = ok;
+    QString finalError = error;
+    if (m_stopRequested.load(std::memory_order_acquire))
+    {
+        // 取消与“worker 已读完、UI 尚未处理完成回调”竞争时，
+        // 用户取消优先，禁止延迟回调发布新 m_inputCloud。
+        accepted = false;
+        finalError = QStringLiteral("已取消");
+        points.clear();
+    }
+    if (m_pProgress) m_pProgress->reset();
+    SetBusy(false);
+
+    if (!accepted || points.isEmpty())
+    {
+        if (finalError.contains(QStringLiteral("取消")))
+        {
+            Info(QStringLiteral("已取消加载点云，已有输入/去噪结果未改变。"));
+        }
+        else
+        {
+            Info(QStringLiteral("点云加载失败，已有输入/去噪结果未改变。"));
+            QMessageBox::warning(this, QStringLiteral("加载点云"),
+                QStringLiteral("加载失败：%1").arg(finalError));
+        }
         return;
     }
+
     m_cloudPath = path;
-    m_inputCloud = pts;
+    m_inputCloud = std::move(points);  // 只在 worker 完整成功后发布
     m_denoisedCloud.clear();
     m_pCloudEdit->setText(QDir::toNativeSeparators(path));
     m_pSaveResultBtn->setEnabled(false);
     UpdatePreview();
-    Info(QStringLiteral("已加载点云 %1 点。选基准模型后点「运行」。").arg(pts.size()));
+    Info(QStringLiteral("已加载点云 %1 点。选基准模型后点「运行」。")
+        .arg(m_inputCloud.size()));
 }
 
 void ModelAlignmentDialog::OnRun()
@@ -454,62 +575,139 @@ void ModelAlignmentDialog::OnRun()
     SetBusy(true);
     EnsureProgressDialog(QStringLiteral("模型配准 + 去噪中…"));
 
-    auto destroyed = m_destroyed;
-    auto workerCount = m_workerCount;
-    workerCount->fetch_add(1);
-    const QVector<RobotCalculation::IndexedPoint3D> cloud = m_inputCloud;  // 复制给线程
-
-    std::thread([this, cloud, p, destroyed, workerCount]()
+    try
     {
-        bool ok = false;
-        QString msg;
-        QVector<RobotCalculation::IndexedPoint3D> result;
-        do
+        if (m_worker.joinable())
         {
-            WorkpieceMeshBuilder::Mesh model;
-            QString err;
-            if (!ReferenceModelLibrary::LoadModel(p.referenceModel, model, err))
-            {
-                msg = QStringLiteral("加载基准模型失败：%1").arg(err);
-                break;
-            }
-            BcpdModelAligner::Options bo;
-            bo.omega = p.omega;
-            bo.lambda = p.lambda;
-            bo.beta = p.beta;
-            bo.targetSampleCap = p.targetSampleCap;
-            bo.useAcceleration = p.useAcceleration;
-            WorkpieceMeshBuilder::Mesh deformed;
-            if (!BcpdModelAligner::DeformModelToCloud(cloud, model, deformed, bo))
-            {
-                msg = QStringLiteral("BCPD 配准失败（bcpd.exe 缺失/超时/异常），未去噪。");
-                break;
-            }
-            PointCloudModelDenoiser::Options dopt;
-            dopt.distanceThresholdMm = p.distanceThresholdMm;
-            dopt.keepPointsWithoutSurface = p.keepPointsWithoutSurface;
-            PointCloudModelDenoiser::Stats st;
-            result = PointCloudModelDenoiser::DenoiseByModelDistance(cloud, deformed, dopt, &st);
-            msg = QStringLiteral("去噪完成：%1 → %2 点（远离剔除 %3，保留点最大距离 %4mm）")
-                      .arg(cloud.size()).arg(result.size()).arg(st.removedFar)
-                      .arg(st.maxKeptDistMm, 0, 'f', 2);
-            ok = true;
-        } while (false);
-
-        if (!destroyed->load())
-        {
-            QMetaObject::invokeMethod(this, [this, ok, msg, result]()
-            {
-                m_denoisedCloud = result;
-                OnRunFinished(ok, msg);
-            }, Qt::QueuedConnection);
+            m_worker.join();
         }
-        workerCount->fetch_sub(1);
-    }).detach();
+        m_stopRequested.store(false, std::memory_order_release);
+        QVector<RobotCalculation::IndexedPoint3D> cloud = m_inputCloud;  // 复制给线程
+
+        // noexcept + 最外层 catch(...) 是 std::thread 的硬边界：任何模型读取、
+        // QVector/std::vector 分配或第三方异常都不得逃逸到线程入口而调用 terminate。
+        m_worker = std::thread([this, cloud = std::move(cloud), p]() noexcept
+        {
+            try
+            {
+                bool ok = false;
+                QString msg;
+                QVector<RobotCalculation::IndexedPoint3D> result;
+                try
+                {
+                    do
+                    {
+                        if (m_stopRequested.load(std::memory_order_acquire))
+                        {
+                            msg = QStringLiteral("模型配准任务已取消。");
+                            break;
+                        }
+                        WorkpieceMeshBuilder::Mesh model;
+                        QString err;
+                        const auto stopRequested = [this]()
+                        {
+                            return m_stopRequested.load(std::memory_order_acquire);
+                        };
+                        if (!ReferenceModelLibrary::LoadModel(
+                                p.referenceModel, model, err, stopRequested))
+                        {
+                            msg = stopRequested()
+                                ? QStringLiteral("模型配准任务已取消。")
+                                : QStringLiteral("加载基准模型失败：%1").arg(err);
+                            break;
+                        }
+                        BcpdModelAligner::Options bo;
+                        bo.omega = p.omega;
+                        bo.lambda = p.lambda;
+                        bo.beta = p.beta;
+                        bo.targetSampleCap = p.targetSampleCap;
+                        bo.useAcceleration = p.useAcceleration;
+                        bo.cancelRequested = stopRequested;
+                        WorkpieceMeshBuilder::Mesh deformed;
+                        if (!BcpdModelAligner::DeformModelToCloud(cloud, model, deformed, bo))
+                        {
+                            msg = stopRequested()
+                                ? QStringLiteral("模型配准任务已取消。")
+                                : QStringLiteral("BCPD 配准失败（bcpd.exe 缺失/超时/异常），未去噪。");
+                            break;
+                        }
+                        PointCloudModelDenoiser::Options dopt;
+                        dopt.distanceThresholdMm = p.distanceThresholdMm;
+                        dopt.keepPointsWithoutSurface = p.keepPointsWithoutSurface;
+                        dopt.cancelRequested = stopRequested;
+                        PointCloudModelDenoiser::Stats st;
+                        result = PointCloudModelDenoiser::DenoiseByModelDistance(
+                            cloud, deformed, dopt, &st);
+                        if (st.cancelled || stopRequested())
+                        {
+                            result.clear();
+                            msg = QStringLiteral("模型配准任务已取消。");
+                            break;
+                        }
+                        if (st.resourceLimitExceeded)
+                        {
+                            result.clear();
+                            msg = QStringLiteral("模型空间索引超出安全限制，未产生去噪结果。");
+                            break;
+                        }
+                        msg = QStringLiteral("去噪完成：%1 → %2 点（远离剔除 %3，保留点最大距离 %4mm）")
+                                  .arg(cloud.size()).arg(result.size()).arg(st.removedFar)
+                                  .arg(st.maxKeptDistMm, 0, 'f', 2);
+                        ok = true;
+                    } while (false);
+                }
+                catch (const std::bad_alloc&)
+                {
+                    result.clear();
+                    msg = QStringLiteral("模型配准内存不足，任务已安全终止。");
+                }
+                catch (const std::exception& ex)
+                {
+                    result.clear();
+                    msg = QStringLiteral("模型配准发生异常，任务已安全终止：%1")
+                        .arg(QString::fromLocal8Bit(ex.what()).left(256));
+                }
+                catch (...)
+                {
+                    result.clear();
+                    msg = QStringLiteral("模型配准发生未知异常，任务已安全终止。");
+                }
+
+                // 用户点“取消”仍需要回到非 busy UI；只有真正析构时才禁止投递。
+                if (!m_destroying.load(std::memory_order_acquire))
+                {
+                    QMetaObject::invokeMethod(this, [this, ok, msg, result]()
+                    {
+                        m_denoisedCloud = result;
+                        OnRunFinished(ok, msg);
+                    }, Qt::QueuedConnection);
+                }
+            }
+            catch (...)
+            {
+                // 最后防线：即使极端 OOM 让异常文案/队列投递也失败，
+                // std::thread 入口仍不允许异常逃逸导致整进程 terminate。
+            }
+        });
+    }
+    catch (const std::bad_alloc&)
+    {
+        OnRunFinished(false, QStringLiteral("启动模型配准失败：内存不足。"));
+    }
+    catch (const std::exception& ex)
+    {
+        OnRunFinished(false, QStringLiteral("启动模型配准失败：%1")
+            .arg(QString::fromLocal8Bit(ex.what()).left(256)));
+    }
+    catch (...)
+    {
+        OnRunFinished(false, QStringLiteral("启动模型配准失败：未知异常。"));
+    }
 }
 
 void ModelAlignmentDialog::OnRunFinished(bool ok, const QString& message)
 {
+    if (m_worker.joinable()) m_worker.join();
     if (m_pProgress) m_pProgress->reset();
     SetBusy(false);
     Info(message);
@@ -574,20 +772,30 @@ void ModelAlignmentDialog::SetBusy(bool busy)
 {
     m_busy = busy;
     if (m_pRunBtn) m_pRunBtn->setEnabled(!busy);
+    if (m_pSaveResultBtn)
+        m_pSaveResultBtn->setEnabled(!busy && !m_denoisedCloud.isEmpty());
 }
 
-void ModelAlignmentDialog::EnsureProgressDialog(const QString& label)
+void ModelAlignmentDialog::EnsureProgressDialog(const QString& label, bool determinate)
 {
     if (!m_pProgress)
     {
         m_pProgress = new QProgressDialog(this);
         m_pProgress->setWindowModality(Qt::WindowModal);
         m_pProgress->setMinimumDuration(0);
-        m_pProgress->setRange(0, 0);  // 不确定进度（BCPD 单进程不回报百分比）
-        m_pProgress->setCancelButton(nullptr);  // BCPD 子进程不便中途取消，去掉取消钮
+        m_pProgress->setCancelButtonText(QStringLiteral("取消"));
         m_pProgress->setAutoReset(false);
         m_pProgress->setAutoClose(false);
+        connect(m_pProgress, &QProgressDialog::canceled, this, [this]()
+        {
+            if (!m_busy) return;
+            m_stopRequested.store(true, std::memory_order_release);
+            Info(QStringLiteral("正在取消模型配准，并等待已启动的子进程/读取安全退出…"));
+        });
     }
+    m_pProgress->reset();  // 清除上一轮 wasCanceled/进度，同一对话框可安全复用
+    m_pProgress->setRange(0, determinate ? 100 : 0);
+    if (determinate) m_pProgress->setValue(0);
     m_pProgress->setLabelText(label);
     m_pProgress->show();
 }

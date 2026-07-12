@@ -23,6 +23,9 @@ OTA_PUBLIC_KEY_FINGERPRINT = "5686a45ad2f6c2d84ba7d911c31cfb4ab972d6afcd9e677c0d
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from ota_manifest_signing import (  # noqa: E402
+    MANIFEST_CLOCK_SKEW_SECONDS,
+    MANIFEST_VALIDITY_SECONDS,
+    SCHEMA_VERSION,
     SIGNATURE_ALGORITHM,
     cng_public_blob,
     signature_payload,
@@ -107,6 +110,9 @@ def main() -> int:
         "IsStrictOtaVersion",
         "IsStrictSha256",
         "TryReadManifestSize",
+        "TryParseCanonicalOtaUtc",
+        "ValidateOtaFreshnessWindow",
+        "ValidateOtaManifestFreshness",
         "ExpectedInstallerName",
         "ExpectedPatchName",
         "kMaximumManifestBytes",
@@ -121,6 +127,9 @@ def main() -> int:
     ):
         require(token in app, f"strict OTA manifest primitive missing: {token}")
     require("qint64 m_remoteSize" in header, "full installer manifest size is not retained")
+    require("m_remoteManifestPublishedAtUtc" in header
+            and "m_remoteManifestExpiresAtUtc" in header,
+            "signed manifest freshness window is not retained through download authorization")
     public_blob_match = re.search(
         r'kOtaReleasePublicKeyBlobBase64\[\]\s*=\s*\n?\s*"([A-Za-z0-9+/=]+)"',
         app,
@@ -143,6 +152,9 @@ def main() -> int:
         "品牌增量补丁字段不完整或不合法，已安全回退全量安装",
         "中性通道清单禁止包含 patch",
         "RSA 签名验证失败",
+        "UTC 新鲜度合约失败",
+        "manifestPublishedAtUtc",
+        "manifestExpiresAtUtc",
         "HighestSeenUpdateVersion",
         "疑似旧清单回放",
         "PatchFailedForVersion",
@@ -151,15 +163,29 @@ def main() -> int:
         require(token in manifest, f"manifest fail-closed gate missing: {token}")
     require("缺该字段时按旧行为" not in manifest,
             "patch still accepts a missing baseMinVersion")
+    signature_gate = manifest.find("VerifyOtaManifestSignature(obj)")
+    freshness_gate = manifest.find("ValidateOtaManifestFreshness(")
+    watermark_read = manifest.find("HighestSeenUpdateVersion")
+    notes_gate = manifest.find("IsValidOtaNotes(notes)")
+    patch_gate = manifest.find("const bool validPatch")
+    watermark_write = manifest.find("SetHighestSeenUpdateVersion")
+    offer_state = manifest.find("m_remoteVersion = remoteVersion")
+    require(0 <= signature_gate < freshness_gate < watermark_read < notes_gate < patch_gate
+            < watermark_write < offer_state,
+            "watermark must be committed only after signature, freshness, notes, and patch semantics")
+    require('/latest-v3.json' in app and 'latest.json remains the signed v2' in app,
+            "current client does not use the separate v3 endpoint during compatibility migration")
     require('setReadBufferSize(kMaximumManifestBytes + 1)' in app
             and 'otaManifestSizeRejected' in app,
             "manifest response is not bounded while being received")
 
     sample = {
-        "schemaVersion": 2,
+        "schemaVersion": SCHEMA_VERSION,
         "signatureAlgorithm": SIGNATURE_ALGORITHM,
         "channel": "brand",
         "version": "2026.07.12.0030",
+        "publishedAtUtc": "2026-07-12T00:30:00Z",
+        "expiresAtUtc": "2026-07-19T00:30:00Z",
         "file": "HK-Pathlynx-CORPLA-Setup-v2026.07.12.0030.exe",
         "sha256": "a" * 64,
         "size": 86657296,
@@ -180,6 +206,13 @@ def main() -> int:
     tampered["size"] += 1
     require(not verify_manifest(tampered, encoded, key.public_key()),
             "manifest signature did not bind installer size")
+    tampered_time = dict(sample)
+    tampered_time["expiresAtUtc"] = "2026-07-19T00:30:01Z"
+    require(not verify_manifest(tampered_time, encoded, key.public_key()),
+            "manifest signature did not bind freshness timestamps")
+    require(MANIFEST_VALIDITY_SECONDS == 7 * 24 * 60 * 60
+            and MANIFEST_CLOCK_SKEW_SECONDS == 10 * 60,
+            "Python freshness constants drifted from the reviewed 7-day/10-minute TOFU contract")
     require(cng_public_blob(key.public_key())[:4] == b"RSA1",
             "generated client public-key blob is not a CNG RSA1 blob")
 
@@ -225,6 +258,14 @@ def main() -> int:
     require("跳过校验" not in download, "missing SHA256 still has a pass-through path")
     require('setReadBufferSize(1024 * 1024)' in app and 'otaPayloadSink' in app,
             "payload is not streamed through a bounded reply buffer")
+    start_download = section(
+        app,
+        "void OnlineServicesDialog::StartDownload()",
+        "void OnlineServicesDialog::OnDownloadFinished(",
+    )
+    require(start_download.find("ValidateOtaFreshnessWindow(")
+            < start_download.find("m_network->get(request)"),
+            "download can start without re-checking expiry/system-clock drift")
     for token in (
         'otaWasPatch',
         'otaVersion',
@@ -292,7 +333,7 @@ def main() -> int:
     require(f"AppId={{{{{APP_ID}}}" in installer,
             "installer AppId drifted from the published identity")
 
-    print("PASS: OTA manifest, payload size/hash, full-install wait, /DIR, and AppId gates")
+    print("PASS: OTA v3 freshness/signature, payload size/hash, /DIR, and AppId gates")
     return 0
 
 

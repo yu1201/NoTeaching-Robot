@@ -27,6 +27,7 @@ def main() -> int:
     laser_filter = read("src/LaserWeldFilterDialog.cpp")
     laser_filter_header = read("include/LaserWeldFilterDialog.h")
     online_dialog = read("src/OnlineServicesDialog.cpp")
+    remote_archive = read("src/RemoteArchiveSecurity.cpp")
     scan_uploader = read("src/ScanDataUploader.cpp")
     ftp_client = read("src/FTPClient.cpp")
     migrator = read("tools/migrate_config_to_sqlite.py")
@@ -166,8 +167,9 @@ def main() -> int:
         "m_privilegedActionGuard",
         "configGroup->setVisible(!m_aboutMode && m_remoteBrowseAllowed)",
         "升级源、FTP 与管理令牌仅允许有效的本地管理员会话修改",
-        'name == QStringLiteral("uploader") || name == QStringLiteral("devicedata")',
-        "uploader 永远仅上传，devicedata 永远全权限",
+        'return user != QStringLiteral("devicedata")',
+        "账号管理仅允许已保存的 devicedata 身份并要求管理令牌",
+        "普通设备账号权限由服务端固定为 upload-only",
     ):
         require(token in online_dialog, f"online-service live admin gate missing: {token}")
 
@@ -179,6 +181,7 @@ def main() -> int:
     require(admin_request_match is not None, "AdminRequest implementation is missing")
     admin_request = admin_request_match.group(0)
     admin_transport_tokens = (
+        'FtpUser().trimmed() != QStringLiteral("devicedata")',
         "address.isLoopback()",
         'scheme != QStringLiteral("https")',
         "禁止公网明文 HTTP",
@@ -202,10 +205,14 @@ def main() -> int:
         re.search(r'FtpPassword\(\).*?ReadValue\(QStringLiteral\("FtpPassword"\),\s*QString\(\)\)', online, re.S),
         "online FTP password still has a non-empty source default",
     )
+    require(
+        re.search(r'FtpUser\(\).*?ReadValue\(QStringLiteral\("FtpUser"\),\s*QString\(\)\)', online, re.S),
+        "retired shared FTP user still has a non-empty source default",
+    )
     require('const std::string& ftpPwd = ' not in ftp, "FtpClient still has a password default argument")
     require("credential.password.clear();" in app, "robot FTP template still injects a password")
     require("QUuid::createUuid()" in scan_uploader and "remoteZipName" in scan_uploader,
-            "shared uploader does not use a unique remote filename per attempt")
+            "device uploader does not use a unique remote filename per attempt")
     require(
         "TruncateToUtf8Bytes" in scan_uploader
         and "kMaximumRemoteComponentUtf8Bytes = 240" in scan_uploader
@@ -215,7 +222,8 @@ def main() -> int:
     require(
         "QString::number(archiveBytes)" in scan_uploader
         and "IsCompleteRemoteArchive(fileName" in online_dialog
-        and "expectedBytes == actualBytes" in online_dialog,
+        and "embeddedBytes != listedBytes" in remote_archive
+        and "openedBytes != listedBytes" in remote_archive,
         "write-once archives do not hide incomplete FTP EOF remnants by declared size",
     )
     require(

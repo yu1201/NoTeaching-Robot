@@ -8,6 +8,8 @@
 #include <QStringList>
 #include <QVector>
 
+#include <functional>
+
 class ContralUnit;
 class RobotDriverAdaptor;
 
@@ -71,7 +73,11 @@ public:
     static int ReadActiveWeldDirectionFallback(const QString& robotName);
 
     // ===== 激光点文件 =====
-    static bool LoadIndexedPoint3DFile(const QString& filePath, QVector<RobotCalculation::IndexedPoint3D>& points, QString* error = nullptr);
+    static bool LoadIndexedPoint3DFile(
+        const QString& filePath,
+        QVector<RobotCalculation::IndexedPoint3D>& points,
+        QString* error = nullptr,
+        const std::function<bool()>& stopRequested = std::function<bool()>());
     static bool SaveTextFileLines(const QString& filePath, const QStringList& lines, QString* error = nullptr);
 
     // ===== 底层 ini 读写 =====

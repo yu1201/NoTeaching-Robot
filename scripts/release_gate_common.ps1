@@ -1,6 +1,34 @@
 $script:ReleaseGateExpectedAppId = "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 $script:ReleaseGateSchemaVersion = 1
 $script:ReleaseGateCommonPath = $PSCommandPath
+$releaseGitCandidate = if ([string]::IsNullOrWhiteSpace($env:NO_TEACHING_RELEASE_GIT_EXE)) {
+    "C:\Program Files\Git\cmd\git.exe"
+}
+else {
+    $env:NO_TEACHING_RELEASE_GIT_EXE
+}
+if (-not [System.IO.Path]::IsPathRooted($releaseGitCandidate)) {
+    throw "Release Git executable must use an absolute path."
+}
+$script:ReleaseGateGitExe = [System.IO.Path]::GetFullPath($releaseGitCandidate)
+if (-not (Test-Path -LiteralPath $script:ReleaseGateGitExe -PathType Leaf) `
+    -or [System.IO.Path]::GetFileName($script:ReleaseGateGitExe) -cne "git.exe") {
+    throw "Release Git executable is missing or has an unexpected name."
+}
+$releaseGitItem = Get-Item -LiteralPath $script:ReleaseGateGitExe -Force
+if (($releaseGitItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Release Git executable must not be a reparse point."
+}
+$releaseGitSignature = Get-AuthenticodeSignature -LiteralPath $script:ReleaseGateGitExe
+$releaseGitSubject = if ($null -ne $releaseGitSignature.SignerCertificate) {
+    [string]$releaseGitSignature.SignerCertificate.Subject
+}
+else { "" }
+if ([string]$releaseGitSignature.Status -cne "Valid" `
+    -or ($releaseGitSubject -notmatch '(?i)Johannes Schindelin|Git for Windows')) {
+    throw "Release Git executable does not have the expected valid Authenticode publisher."
+}
+$script:ReleaseGateGitSha256 = (Get-FileHash -LiteralPath $script:ReleaseGateGitExe -Algorithm SHA256).Hash.ToLowerInvariant()
 
 function Get-ReleaseChannelSpec {
     param([Parameter(Mandatory = $true)][ValidateSet("neutral", "brand")][string]$Channel)
@@ -67,6 +95,75 @@ function Get-ReleaseFileSha256 {
         throw "Required file does not exist: $Path"
     }
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Assert-ReleaseExternalTool {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedFileName,
+        [Parameter(Mandatory = $true)][string]$PublisherPattern
+    )
+
+    if (-not [System.IO.Path]::IsPathRooted($Path) `
+        -or $ExpectedSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "Release external tool path/hash is not canonical."
+    }
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf) `
+        -or [System.IO.Path]::GetFileName($resolved) -cne $ExpectedFileName) {
+        throw "Release external tool is missing or has an unexpected name: $resolved"
+    }
+    $cursorPath = $resolved
+    while (-not [string]::IsNullOrWhiteSpace($cursorPath)) {
+        $cursor = Get-Item -LiteralPath $cursorPath -Force
+        if (($cursor.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Release external tool path contains a reparse point: $($cursor.FullName)"
+        }
+        $parentPath = Split-Path -Parent $cursorPath
+        if ([string]::IsNullOrWhiteSpace($parentPath) -or $parentPath -ceq $cursorPath) {
+            break
+        }
+        $cursorPath = $parentPath
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $resolved
+    $subject = if ($null -ne $signature.SignerCertificate) {
+        [string]$signature.SignerCertificate.Subject
+    }
+    else { "" }
+    if ([string]$signature.Status -cne "Valid" -or $subject -notmatch $PublisherPattern) {
+        throw "Release external tool publisher is not trusted: $resolved"
+    }
+    if ((Get-ReleaseFileSha256 $resolved) -cne $ExpectedSha256) {
+        throw "Release external tool hash changed: $resolved"
+    }
+    return $resolved
+}
+
+function Set-ReleasePythonTool {
+    param(
+        [Parameter(Mandatory = $true)][string]$PythonExecutable,
+        [Parameter(Mandatory = $true)][string]$PythonSha256
+    )
+    $script:ReleasePythonExecutable = Assert-ReleaseExternalTool `
+        -Path $PythonExecutable `
+        -ExpectedSha256 $PythonSha256 `
+        -ExpectedFileName "python.exe" `
+        -PublisherPattern '(?i)Python Software Foundation'
+    $script:ReleasePythonSha256 = $PythonSha256
+}
+
+function Get-ReleasePythonTool {
+    if ([string]::IsNullOrWhiteSpace($script:ReleasePythonExecutable) `
+        -or [string]::IsNullOrWhiteSpace($script:ReleasePythonSha256)) {
+        throw "Release Python tool was not explicitly initialized."
+    }
+    $path = Assert-ReleaseExternalTool `
+        -Path $script:ReleasePythonExecutable `
+        -ExpectedSha256 $script:ReleasePythonSha256 `
+        -ExpectedFileName "python.exe" `
+        -PublisherPattern '(?i)Python Software Foundation'
+    return [pscustomobject]@{ path = $path; sha256 = $script:ReleasePythonSha256 }
 }
 
 function Get-ReleaseRelativePath {
@@ -212,7 +309,11 @@ function Invoke-ReleaseGit {
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
-    $output = @(& git -C $RepoRoot @Arguments 2>&1)
+    if ((Get-FileHash -LiteralPath $script:ReleaseGateGitExe -Algorithm SHA256).Hash.ToLowerInvariant() `
+        -cne $script:ReleaseGateGitSha256) {
+        throw "Release Git executable changed during gate execution."
+    }
+    $output = @(& $script:ReleaseGateGitExe -C $RepoRoot @Arguments 2>&1)
     if ($LASTEXITCODE -ne 0) {
         throw "git $($Arguments -join ' ') failed in ${RepoRoot}: $($output -join [Environment]::NewLine)"
     }
@@ -819,6 +920,7 @@ function Assert-ConfigMigrateProvenance {
         [Parameter(Mandatory = $true)][string]$ExecutablePath
     )
 
+    $pythonTool = Get-ReleasePythonTool
     $sourcePath = Join-Path $RepoRoot "tools\migrate_config_to_sqlite.py"
     $buildScript = Join-Path $RepoRoot "scripts\build_config_migrate.ps1"
     $expectedSourceHash = Get-ReleaseFileSha256 $sourcePath
@@ -831,7 +933,10 @@ function Assert-ConfigMigrateProvenance {
     $rebuiltPath = Join-Path $verificationRoot "ConfigMigrate.exe"
     try {
         New-Item -ItemType Directory -Path $verificationRoot -Force | Out-Null
-        $buildOutput = @(& $buildScript -OutputPath $rebuiltPath | ForEach-Object { [string]$_ })
+        $buildOutput = @(& $buildScript `
+            -PythonExecutable $pythonTool.path `
+            -PythonSha256 $pythonTool.sha256 `
+            -OutputPath $rebuiltPath | ForEach-Object { [string]$_ })
         if (-not (Test-Path -LiteralPath $rebuiltPath -PathType Leaf)) {
             throw "Current ConfigMigrate builder did not create the isolated verification executable: $rebuiltPath"
         }
@@ -853,6 +958,7 @@ function Assert-ConfigMigrateProvenance {
             sourceSha256        = $expectedSourceHash
             builderSha256       = $buildScriptHash
             isolatedRebuildSha256 = $rebuiltHash
+            pythonSha256        = $pythonTool.sha256
         }
     }
     finally {
@@ -1091,7 +1197,8 @@ function Assert-PackageGateReport {
     if ($config.sha256 -cne [string]$report.configMigrate.sha256 `
         -or $config.sourceSha256 -cne [string]$report.configMigrate.sourceSha256 `
         -or $config.builderSha256 -cne [string]$report.configMigrate.builderSha256 `
-        -or $config.isolatedRebuildSha256 -cne [string]$report.configMigrate.isolatedRebuildSha256) {
+        -or $config.isolatedRebuildSha256 -cne [string]$report.configMigrate.isolatedRebuildSha256 `
+        -or $config.pythonSha256 -cne [string]$report.configMigrate.pythonSha256) {
         throw "ConfigMigrate provenance changed after package gate creation."
     }
     $configRunSourceHash = Get-ReleaseFileSha256 (Join-Path $ExpectedRepoRoot "tools\ConfigMigrate_Run.cmd")

@@ -8,6 +8,7 @@
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "OPini.h"
 #include "PointCloudExtractionProcessor.h"
+#include "PointCloudProofIntegrity.h"
 #include "PointCloudProcessingConfig.h"
 #include "WorkpieceMeshBuilder.h"
 #include "RobotDataHelper.h"
@@ -17,6 +18,8 @@
 #include "RobotPoseTransform.h"
 #include "STEPRobotDriver.h"
 #include "WeldProcessFile.h"
+#include "WeldProcessValidation.h"
+#include "WeldSafetyRecoveryStore.h"
 #include "groove/framebuffer.h"
 
 #include <QCryptographicHash>
@@ -29,8 +32,10 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMessageAuthenticationCode>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
@@ -137,27 +142,7 @@ std::string ToUtf8StdString(const QString& text)
 
 bool InvalidateStoredWeldResumeCheckpointImpl(const QString& robotName, QString& error)
 {
-    error.clear();
-    const QString normalizedRobotName = robotName.trimmed();
-    if (normalizedRobotName.isEmpty())
-    {
-        error = QStringLiteral("机器人名称为空，无法使旧断点失效。");
-        return false;
-    }
-    const QString storagePath = RobotDataHelper::BuildProjectPath(
-        QString("Data/%1/WeldBreakpoint.ini").arg(normalizedRobotName));
-    COPini ini;
-    if (!ini.SetFileName(ToUtf8StdString(storagePath))
-        || !ini.SetSectionName("Breakpoint")
-        || !ini.WriteString("RecordV2", ToUtf8StdString(
-            QString("invalidated:v2:%1").arg(
-                QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs))))
-        || !ini.WriteString("Valid", 0))
-    {
-        error = QString("使旧焊接断点失效失败：%1").arg(storagePath);
-        return false;
-    }
-    return true;
+    return WeldSafetyRecoveryStore::InvalidateIfNoPending(robotName, error);
 }
 
 QString ComputeFileSha256ForResumeGate(const QString& filePath, QString& error)
@@ -179,7 +164,16 @@ QString ComputeFileSha256ForResumeGate(const QString& filePath, QString& error)
 }
 
 constexpr auto POINT_CLOUD_QUALITY_GATE_FILE_NAME = "PreciseLaserPoint_QualityGate.json";
-constexpr auto POINT_CLOUD_QUALITY_ALGORITHM_REVISION = "pcq-v1-20260711-d";
+constexpr auto POINT_CLOUD_QUALITY_ALGORITHM_REVISION = "pcq-v3-20260712-a";
+constexpr int POINT_CLOUD_QUALITY_SCHEMA_VERSION = 3;
+constexpr int POINT_CLOUD_PRODUCTION_CONTEXT_REVISION = 1;
+constexpr auto POINT_CLOUD_PROOF_SECURITY_MODULE = "PointCloudProofSecurity";
+constexpr auto POINT_CLOUD_PROOF_HMAC_KEY_NAME = "HmacKeyV1";
+constexpr auto POINT_CLOUD_PROOF_RECEIPT_SCOPE = "pointcloud-proof-receipt";
+constexpr auto POINT_CLOUD_PROOF_RECEIPT_MODULE = "QualityGateReceiptV1";
+constexpr auto POINT_CLOUD_PROOF_RECEIPT_KEY = "Receipt";
+constexpr qint64 POINT_CLOUD_PROOF_MAX_AGE_SECONDS = 24 * 60 * 60;
+constexpr qint64 POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS = 5 * 60;
 constexpr double FINAL_MAX_POSITION_STEP_MM = 50.0;
 constexpr double FINAL_MAX_CONTROLLER_EULER_STEP_DEG = 90.0;
 constexpr double FINAL_MAX_PHYSICAL_ORIENTATION_STEP_DEG = 90.0;
@@ -199,8 +193,60 @@ struct SyntheticPoseAuthorization
     qint64 size = -1;
 };
 
+struct PointCloudProductionContext
+{
+    QString scanRunId;
+    QString scanStartedUtc;
+    QString robotEndpoint;
+    QString cameraSection;
+    QString handEyeSha256;
+    QString origin;
+};
+
 QMutex g_syntheticPoseAuthorizationMutex;
 QHash<QString, SyntheticPoseAuthorization> g_syntheticPoseAuthorizations;
+QMutex g_pointCloudProofSecurityMutex;
+
+class PointCloudProofReplacementSession
+{
+public:
+    PointCloudProofReplacementSession() = default;
+    PointCloudProofReplacementSession(const PointCloudProofReplacementSession&) = delete;
+    PointCloudProofReplacementSession& operator=(const PointCloudProofReplacementSession&) = delete;
+
+    ~PointCloudProofReplacementSession()
+    {
+        if (m_active)
+        {
+            PointCloudProofIntegrity::AbandonProofReplacement(m_proofPath);
+        }
+    }
+
+    void Arm(const QString& proofPath)
+    {
+        m_proofPath = proofPath;
+        m_active = true;
+    }
+
+    bool Complete(QString& error)
+    {
+        if (!m_active)
+        {
+            error = QStringLiteral("点云证明替换会话未激活，禁止解除拒绝闭锁。");
+            return false;
+        }
+        if (!PointCloudProofIntegrity::CompleteProofReplacement(m_proofPath, error))
+        {
+            return false;
+        }
+        m_active = false;
+        return true;
+    }
+
+private:
+    QString m_proofPath;
+    bool m_active = false;
+};
 
 QString PoseAuthorizationPathKey(const QString& filePath)
 {
@@ -215,6 +261,202 @@ bool IsSha256Text(const QString& value)
 {
     static const QRegularExpression pattern(QStringLiteral("^[0-9a-fA-F]{64}$"));
     return pattern.match(value).hasMatch();
+}
+
+QString HandEyeMatrixContentSha256(const HandEyeMatrixConfig& calibration)
+{
+    QByteArray canonical;
+    canonical.reserve(512);
+    canonical += "robotType=" + QByteArray::number(calibration.robotType) + '\n';
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int column = 0; column < 3; ++column)
+        {
+            double value = calibration.rotation(row, column);
+            if (value == 0.0)
+            {
+                value = 0.0; // Canonicalize negative zero.
+            }
+            canonical += "r" + QByteArray::number(row) + QByteArray::number(column)
+                + "=" + QByteArray::number(value, 'g', 17) + '\n';
+        }
+    }
+    for (int index = 0; index < 3; ++index)
+    {
+        double value = calibration.translation(index);
+        if (value == 0.0)
+        {
+            value = 0.0;
+        }
+        canonical += "t" + QByteArray::number(index)
+            + "=" + QByteArray::number(value, 'g', 17) + '\n';
+    }
+    return QString::fromLatin1(QCryptographicHash::hash(
+        canonical, QCryptographicHash::Sha256).toHex()).toLower();
+}
+
+PointCloudProductionContext BuildLivePointCloudProductionContext(
+    const RobotDriverAdaptor* driver,
+    const QString& cameraSection,
+    const HandEyeMatrixConfig& calibration)
+{
+    PointCloudProductionContext context;
+    context.scanRunId = QUuid::createUuid().toString(QUuid::WithoutBraces).toLower();
+    context.scanStartedUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    context.robotEndpoint = RobotOperationLease::PersistentEndpointIdentity(driver);
+    context.cameraSection = cameraSection.trimmed();
+    context.handEyeSha256 = HandEyeMatrixContentSha256(calibration);
+    context.origin = QStringLiteral("liveRobotCameraScan");
+    return context;
+}
+
+QJsonObject PointCloudProductionContextToJson(const PointCloudProductionContext& context)
+{
+    QJsonObject result;
+    result.insert("contextRevision", POINT_CLOUD_PRODUCTION_CONTEXT_REVISION);
+    result.insert("origin", context.origin);
+    result.insert("scanRunId", context.scanRunId);
+    result.insert("scanStartedUtc", context.scanStartedUtc);
+    result.insert("robotEndpoint", context.robotEndpoint);
+    result.insert("cameraSection", context.cameraSection);
+    result.insert("handEyeSha256", context.handEyeSha256);
+    return result;
+}
+
+PointCloudProductionContext PointCloudProductionContextFromJson(const QJsonObject& object)
+{
+    PointCloudProductionContext context;
+    context.origin = object.value("origin").toString();
+    context.scanRunId = object.value("scanRunId").toString();
+    context.scanStartedUtc = object.value("scanStartedUtc").toString();
+    context.robotEndpoint = object.value("robotEndpoint").toString();
+    context.cameraSection = object.value("cameraSection").toString();
+    context.handEyeSha256 = object.value("handEyeSha256").toString().toLower();
+    return context;
+}
+
+bool ParseStrictUtcTimestamp(const QString& text, QDateTime& value)
+{
+    if (!text.endsWith(QLatin1Char('Z'), Qt::CaseSensitive))
+    {
+        return false;
+    }
+    value = QDateTime::fromString(text, Qt::ISODateWithMs);
+    if (!value.isValid())
+    {
+        value = QDateTime::fromString(text, Qt::ISODate);
+    }
+    return value.isValid() && value.toUTC().toString(Qt::ISODate).endsWith(QLatin1Char('Z'));
+}
+
+bool ValidatePointCloudProductionContext(
+    const QJsonObject& contextObject,
+    const QString& proofCreatedUtc,
+    const QString& expectedRobotEndpoint,
+    const QString& expectedCameraSection,
+    const QString& expectedHandEyeSha256,
+    PointCloudProductionContext* validatedContext,
+    QString& error)
+{
+    if (contextObject.value("contextRevision").toInt(-1)
+            != POINT_CLOUD_PRODUCTION_CONTEXT_REVISION)
+    {
+        error = QStringLiteral("点云质量证明缺少受支持的生产上下文版本；旧证明禁止运动，请重新扫描。");
+        return false;
+    }
+    const PointCloudProductionContext context = PointCloudProductionContextFromJson(contextObject);
+    const QUuid runId(context.scanRunId);
+    if (context.origin != QStringLiteral("liveRobotCameraScan")
+        || runId.isNull()
+        || runId.toString(QUuid::WithoutBraces).compare(context.scanRunId, Qt::CaseInsensitive) != 0
+        || context.robotEndpoint.trimmed().isEmpty()
+        || context.cameraSection.trimmed().isEmpty()
+        || !IsSha256Text(context.handEyeSha256))
+    {
+        error = QStringLiteral("点云质量证明的扫描运行、机器人端点或手眼标定上下文不完整；禁止运动，请重新扫描。");
+        return false;
+    }
+
+    QDateTime createdUtc;
+    QDateTime scanStartedUtc;
+    if (!ParseStrictUtcTimestamp(proofCreatedUtc, createdUtc)
+        || !ParseStrictUtcTimestamp(context.scanStartedUtc, scanStartedUtc))
+    {
+        error = QStringLiteral("点云质量证明时间不是明确 UTC 时间；禁止运动，请重新扫描/重建。");
+        return false;
+    }
+    createdUtc = createdUtc.toUTC();
+    scanStartedUtc = scanStartedUtc.toUTC();
+    const QDateTime nowUtc = QDateTime::currentDateTimeUtc();
+    const qint64 proofAgeSeconds = createdUtc.secsTo(nowUtc);
+    const qint64 scanAgeSeconds = scanStartedUtc.secsTo(nowUtc);
+    if (proofAgeSeconds > POINT_CLOUD_PROOF_MAX_AGE_SECONDS
+        || scanAgeSeconds > POINT_CLOUD_PROOF_MAX_AGE_SECONDS)
+    {
+        error = QStringLiteral("点云质量证明或其原始扫描已超过 24 小时新鲜度，禁止运动；请重新扫描。");
+        return false;
+    }
+    if (proofAgeSeconds < -POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS
+        || scanAgeSeconds < -POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS
+        || scanStartedUtc > createdUtc.addSecs(POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS))
+    {
+        error = QStringLiteral("点云质量证明时间位于未来或扫描/证明时序异常，禁止运动；请校时后重新扫描。");
+        return false;
+    }
+    if (!expectedRobotEndpoint.trimmed().isEmpty()
+        && context.robotEndpoint.compare(expectedRobotEndpoint.trimmed(), Qt::CaseInsensitive) != 0)
+    {
+        error = QStringLiteral("点云质量证明绑定的机器人持久端点与当前机器人不一致，禁止运动。");
+        return false;
+    }
+    if (context.cameraSection != expectedCameraSection
+        || context.handEyeSha256.compare(expectedHandEyeSha256, Qt::CaseInsensitive) != 0)
+    {
+        error = QStringLiteral("当前测量相机或已验证手眼标定内容与扫描证明不一致；请重新扫描。");
+        return false;
+    }
+    if (validatedContext != nullptr)
+    {
+        *validatedContext = context;
+    }
+    return true;
+}
+
+bool LoadCurrentPointCloudContextExpectations(
+    const QString& robotName,
+    const RobotDriverAdaptor* driver,
+    bool requireDriverEndpoint,
+    QString& robotEndpoint,
+    QString& cameraSection,
+    QString& handEyeSha256,
+    QString& error)
+{
+    robotEndpoint = RobotOperationLease::PersistentEndpointIdentity(driver);
+    if (requireDriverEndpoint && robotEndpoint.isEmpty())
+    {
+        error = QStringLiteral("当前机器人没有有效的持久 TCP 端点，禁止生成或继承生产质量证明。");
+        return false;
+    }
+    cameraSection = RobotDataHelper::MeasureCameraSection(robotName);
+    HandEyeMatrixConfig calibration;
+    QString calibrationPath;
+    if (!LoadExistingValidatedHandEyeMatrixConfig(
+            robotName,
+            cameraSection,
+            calibration,
+            &error,
+            &calibrationPath))
+    {
+        error = QStringLiteral("无法加载当前严格验证的手眼标定，禁止使用点云生产证明：") + error;
+        return false;
+    }
+    handEyeSha256 = HandEyeMatrixContentSha256(calibration);
+    if (!IsSha256Text(handEyeSha256))
+    {
+        error = QStringLiteral("当前手眼标定内容指纹生成失败，禁止使用点云生产证明。");
+        return false;
+    }
+    return true;
 }
 
 bool RegisterSyntheticPoseAuthorization(
@@ -361,34 +603,392 @@ bool BuildQualityFileEvidence(
     const QString& filePath,
     const QString& laserDir,
     QJsonObject& evidence,
-    QString& error)
+    QString& error,
+    const MeasureThenWeldService::StopRequestedCallback& stopRequested =
+        MeasureThenWeldService::StopRequestedCallback(),
+    qint64* evidenceBytes = nullptr,
+    qint64* evidenceLines = nullptr,
+    qint64 maximumBytes = PointCloudProofIntegrity::MaximumEvidenceFileBytes,
+    qint64 maximumLines = PointCloudProofIntegrity::MaximumEvidenceLinesPerFile)
 {
     const QFileInfo fileInfo(QDir::fromNativeSeparators(filePath));
     const QFileInfo laserInfo(QDir::fromNativeSeparators(laserDir));
+    const QString canonicalFile = fileInfo.canonicalFilePath();
+    const QString canonicalLaser = laserInfo.canonicalFilePath();
     if (!fileInfo.exists() || !fileInfo.isFile()
-        || fileInfo.dir().absolutePath().compare(laserInfo.absoluteFilePath(), Qt::CaseInsensitive) != 0)
+        || fileInfo.isSymLink()
+#ifdef Q_OS_WIN
+        || fileInfo.isJunction()
+#endif
+        || canonicalFile.isEmpty()
+        || canonicalLaser.isEmpty()
+        || QFileInfo(canonicalFile).dir().absolutePath().compare(
+            canonicalLaser, Qt::CaseInsensitive) != 0)
     {
-        error = QString("质量证明文件必须是 LaserPoint 的直接子文件且真实存在：%1").arg(filePath);
+        error = QString("质量证明文件必须是 LaserPoint 的直接普通文件且真实存在：%1").arg(filePath);
         return false;
     }
-    QFile file(fileInfo.absoluteFilePath());
-    if (!file.open(QIODevice::ReadOnly))
+    PointCloudProofIntegrity::BoundedFileDigest digest;
+    if (!PointCloudProofIntegrity::HashFileBounded(
+            canonicalFile,
+            maximumBytes,
+            maximumLines,
+            digest,
+            error,
+            stopRequested))
     {
-        error = QString("无法读取质量证明文件：%1").arg(fileInfo.absoluteFilePath());
+        error = QStringLiteral("质量证明文件流式证据失败：") + error;
         return false;
     }
-    const QByteArray payload = file.readAll();
-    if (file.error() != QFileDevice::NoError)
+    if (evidenceBytes != nullptr)
     {
-        error = QString("完整读取质量证明文件失败：%1").arg(fileInfo.absoluteFilePath());
-        return false;
+        *evidenceBytes = digest.size;
     }
-    const QString sha256 = QString::fromLatin1(
-        QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex()).toLower();
+    if (evidenceLines != nullptr)
+    {
+        *evidenceLines = digest.lineCount;
+    }
     evidence.insert("relativePath", fileInfo.fileName());
-    evidence.insert("size", static_cast<double>(payload.size()));
-    evidence.insert("sha256", sha256);
+    evidence.insert("size", static_cast<double>(digest.size));
+    evidence.insert("sha256", digest.sha256);
     return true;
+}
+
+bool ConstantTimeBytesEqual(const QByteArray& left, const QByteArray& right)
+{
+    return PointCloudProofIntegrity::ConstantTimeEqual(left, right);
+}
+
+bool DecodePointCloudProofKey(const QString& encoded, QByteArray& key)
+{
+    const QByteArray encodedBytes = encoded.trimmed().toLatin1();
+    key = QByteArray::fromBase64(encodedBytes, QByteArray::Base64UrlEncoding);
+    return key.size() == 32
+        && key.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals)
+            == encodedBytes;
+}
+
+bool LoadPointCloudProofMacKey(bool createIfMissing, QByteArray& key, QString& error)
+{
+    QMutexLocker locker(&g_pointCloudProofSecurityMutex);
+    QString encoded;
+    if (ConfigDatabase::ReadScopedSetting(
+            QStringLiteral("global"),
+            QString(),
+            QString::fromLatin1(POINT_CLOUD_PROOF_SECURITY_MODULE),
+            QString::fromLatin1(POINT_CLOUD_PROOF_HMAC_KEY_NAME),
+            &encoded))
+    {
+        if (!DecodePointCloudProofKey(encoded, key))
+        {
+            error = QStringLiteral("点云证明 HMAC 密钥损坏或长度无效，已拒绝授权。");
+            return false;
+        }
+        return true;
+    }
+    if (!createIfMissing)
+    {
+        error = QStringLiteral("本机没有可解密的点云证明 HMAC 密钥；旧/异机证明禁止授权。");
+        return false;
+    }
+
+    QByteArray generated(32, '\0');
+    for (qsizetype offset = 0; offset < generated.size(); offset += 4)
+    {
+        const quint32 randomWord = QRandomGenerator::system()->generate();
+        std::memcpy(generated.data() + offset, &randomWord, sizeof(randomWord));
+    }
+    const QString generatedText = QString::fromLatin1(generated.toBase64(
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+    if (!ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("global"),
+            QString(),
+            QString::fromLatin1(POINT_CLOUD_PROOF_SECURITY_MODULE),
+            QString::fromLatin1(POINT_CLOUD_PROOF_HMAC_KEY_NAME),
+            generatedText,
+            QStringLiteral("secret"),
+            true))
+    {
+        error = QStringLiteral("无法用 DPAPI CurrentUser 持久化点云证明 HMAC 密钥。");
+        return false;
+    }
+    QString persisted;
+    if (!ConfigDatabase::ReadScopedSetting(
+            QStringLiteral("global"),
+            QString(),
+            QString::fromLatin1(POINT_CLOUD_PROOF_SECURITY_MODULE),
+            QString::fromLatin1(POINT_CLOUD_PROOF_HMAC_KEY_NAME),
+            &persisted)
+        || !DecodePointCloudProofKey(persisted, key)
+        || !ConstantTimeBytesEqual(key, generated))
+    {
+        error = QStringLiteral("点云证明 HMAC 密钥写后回读/DPAPI 解密校验失败。");
+        key.clear();
+        return false;
+    }
+    return true;
+}
+
+bool SignPointCloudQualityProof(QJsonObject& root, QString& error)
+{
+    QByteArray key;
+    if (!LoadPointCloudProofMacKey(true, key, error))
+    {
+        return false;
+    }
+    return PointCloudProofIntegrity::SignProof(root, key, error);
+}
+
+bool VerifyPointCloudQualityProofMac(const QJsonObject& root, QString& error)
+{
+    QByteArray key;
+    if (!LoadPointCloudProofMacKey(false, key, error))
+    {
+        return false;
+    }
+    return PointCloudProofIntegrity::VerifyProofMac(root, key, error);
+}
+
+bool BuildPointCloudProofReceiptRecord(
+    const QJsonObject& root,
+    const QDir& laserDir,
+    const QByteArray& proofPayload,
+    QString& scanRunId,
+    QString& record,
+    QString& error)
+{
+    const QString canonicalCasePath = laserDir.canonicalPath();
+    return PointCloudProofIntegrity::BuildReceiptRecord(
+        root, canonicalCasePath, proofPayload, scanRunId, record, error);
+}
+
+bool RegisterPointCloudProofReceipt(
+    const QJsonObject& root,
+    const QDir& laserDir,
+    const QByteArray& proofPayload,
+    QString& error)
+{
+    QString scanRunId;
+    QString record;
+    if (!BuildPointCloudProofReceiptRecord(
+            root, laserDir, proofPayload, scanRunId, record, error))
+    {
+        return false;
+    }
+    if (!ConfigDatabase::WriteScopedSetting(
+            QString::fromLatin1(POINT_CLOUD_PROOF_RECEIPT_SCOPE),
+            scanRunId,
+            QString::fromLatin1(POINT_CLOUD_PROOF_RECEIPT_MODULE),
+            QString::fromLatin1(POINT_CLOUD_PROOF_RECEIPT_KEY),
+            record,
+            QStringLiteral("json"),
+            true))
+    {
+        error = QStringLiteral("无法用 DPAPI CurrentUser 登记点云扫描持久收据。");
+        return false;
+    }
+    QString persisted;
+    if (!ConfigDatabase::ReadScopedSetting(
+            QString::fromLatin1(POINT_CLOUD_PROOF_RECEIPT_SCOPE),
+            scanRunId,
+            QString::fromLatin1(POINT_CLOUD_PROOF_RECEIPT_MODULE),
+            QString::fromLatin1(POINT_CLOUD_PROOF_RECEIPT_KEY),
+            &persisted)
+        || !ConstantTimeBytesEqual(persisted.toUtf8(), record.toUtf8()))
+    {
+        error = QStringLiteral("点云扫描收据写后回读/DPAPI 解密校验失败。");
+        return false;
+    }
+    return true;
+}
+
+bool VerifyPointCloudProofReceipt(
+    const QJsonObject& root,
+    const QDir& laserDir,
+    const QByteArray& proofPayload,
+    QString& error)
+{
+    QString scanRunId;
+    QString expected;
+    if (!BuildPointCloudProofReceiptRecord(
+            root, laserDir, proofPayload, scanRunId, expected, error))
+    {
+        return false;
+    }
+    QString persisted;
+    if (!ConfigDatabase::ReadScopedSetting(
+            QString::fromLatin1(POINT_CLOUD_PROOF_RECEIPT_SCOPE),
+            scanRunId,
+            QString::fromLatin1(POINT_CLOUD_PROOF_RECEIPT_MODULE),
+            QString::fromLatin1(POINT_CLOUD_PROOF_RECEIPT_KEY),
+            &persisted))
+    {
+        error = QStringLiteral("本机不存在该 scanRunId 的 DPAPI 持久收据；手写/异机证明禁止授权。");
+        return false;
+    }
+    return PointCloudProofIntegrity::VerifyReceiptRecord(
+        root, laserDir.canonicalPath(), proofPayload, persisted, error);
+}
+
+bool VerifyPointCloudProofInputs(
+    const QJsonObject& root,
+    const QDir& laserDir,
+    QString& error,
+    const MeasureThenWeldService::StopRequestedCallback& stopRequested =
+        MeasureThenWeldService::StopRequestedCallback())
+{
+    const QJsonArray inputs = root.value(QStringLiteral("inputs")).toArray();
+    constexpr int maximumInputEvidenceFiles = 8;
+    if (inputs.isEmpty() || inputs.size() > maximumInputEvidenceFiles)
+    {
+        error = QStringLiteral("点云质量证明扫描输入数量必须在 1..%1：当前 %2。")
+            .arg(maximumInputEvidenceFiles).arg(inputs.size());
+        return false;
+    }
+    qint64 totalEvidenceBytes = 0;
+    qint64 totalEvidenceLines = 0;
+    for (const QJsonValue& inputValue : inputs)
+    {
+        if (stopRequested && stopRequested())
+        {
+            error = QStringLiteral("扫描输入证据回读已取消。");
+            return false;
+        }
+        if (!inputValue.isObject())
+        {
+            error = QStringLiteral("点云质量证明包含非对象输入证据。");
+            return false;
+        }
+        const QJsonObject expectedEvidence = inputValue.toObject();
+        const QString relativePath = expectedEvidence.value(QStringLiteral("relativePath")).toString();
+        if (expectedEvidence.size() != 3
+            || relativePath.isEmpty()
+            || QFileInfo(relativePath).fileName() != relativePath
+            || !IsSha256Text(expectedEvidence.value(QStringLiteral("sha256")).toString())
+            || expectedEvidence.value(QStringLiteral("size")).toDouble(-1.0) <= 0.0)
+        {
+            error = QStringLiteral("点云质量证明的扫描输入证据格式无效。");
+            return false;
+        }
+        QJsonObject currentEvidence;
+        qint64 evidenceBytes = 0;
+        qint64 evidenceLines = 0;
+        if (!BuildQualityFileEvidence(
+                laserDir.filePath(relativePath),
+                laserDir.absolutePath(),
+                currentEvidence,
+                error,
+                stopRequested,
+                &evidenceBytes,
+                &evidenceLines))
+        {
+            error = QStringLiteral("扫描输入证据回读失败：") + error;
+            return false;
+        }
+        if (evidenceBytes > PointCloudProofIntegrity::MaximumEvidenceTotalBytes - totalEvidenceBytes
+            || evidenceLines > PointCloudProofIntegrity::MaximumEvidenceTotalLines - totalEvidenceLines)
+        {
+            error = QStringLiteral("扫描输入证据总字节或总行数超过硬上限。");
+            return false;
+        }
+        totalEvidenceBytes += evidenceBytes;
+        totalEvidenceLines += evidenceLines;
+        if (currentEvidence != expectedEvidence)
+        {
+            error = QString("扫描输入 %1 在签发证明后发生变化，禁止下发/执行。").arg(relativePath);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool LoadValidatedRebuildPointCloudContext(
+    const QString& laserDir,
+    const QString& expectedRobotName,
+    const MeasureThenWeldService::PointCloudProductionExpectation& expectation,
+    PointCloudProductionContext& context,
+    QString& error,
+    const MeasureThenWeldService::StopRequestedCallback& stopRequested)
+{
+    const QDir dir(QDir::fromNativeSeparators(laserDir));
+    const QString reportPath = dir.filePath(
+        QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
+    if (!PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error))
+    {
+        error = QStringLiteral("原 live-scan 点云证明已被拒绝闭锁，不能继承重建上下文：") + error;
+        return false;
+    }
+    QByteArray proofPayload;
+    if (!PointCloudProofIntegrity::ReadFileBounded(
+            reportPath,
+            PointCloudProofIntegrity::MaximumProofBytes,
+            proofPayload,
+            error))
+    {
+        error = QStringLiteral(
+            "生产重建缺少原 live-scan 质量证明上下文；离线目录不能生成可运动授权，请重新扫描：")
+            + reportPath + QStringLiteral("；") + error;
+        return false;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(proofPayload, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject())
+    {
+        error = QStringLiteral("原点云质量证明损坏，不能继承扫描上下文；请重新扫描：")
+            + parseError.errorString();
+        return false;
+    }
+    const QJsonObject root = document.object();
+    if (root.value("schemaVersion").toInt(-1) != POINT_CLOUD_QUALITY_SCHEMA_VERSION)
+    {
+        error = QStringLiteral(
+            "旧 schema 1/2 点云质量证明没有本机 HMAC/持久收据，禁止重建为生产授权；请重新扫描。");
+        return false;
+    }
+    if (root.value("purpose").toString() != QStringLiteral("production")
+        || root.value("robotName").toString().compare(
+            expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0)
+    {
+        error = QStringLiteral("原点云质量证明的用途或机器人绑定不一致，禁止继承；请重新扫描。");
+        return false;
+    }
+    const QString expectedCaseId = QFileInfo(dir.absolutePath()).dir().dirName();
+    if (root.value("caseId").toString().compare(expectedCaseId, Qt::CaseInsensitive) != 0)
+    {
+        error = QStringLiteral("原点云质量证明不属于当前案例目录，禁止继承扫描上下文。");
+        return false;
+    }
+    if (!VerifyPointCloudQualityProofMac(root, error)
+        || !VerifyPointCloudProofReceipt(root, dir, proofPayload, error))
+    {
+        return false;
+    }
+
+    if (expectation.robotName.compare(expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0
+        || expectation.robotEndpoint.trimmed().isEmpty()
+        || expectation.cameraSection.trimmed().isEmpty()
+        || !IsSha256Text(expectation.handEyeSha256))
+    {
+        error = QStringLiteral("冻结的生产上下文不完整或机器人不匹配，禁止后台重建生产证明。");
+        return false;
+    }
+    if (!ValidatePointCloudProductionContext(
+            root.value("productionContext").toObject(),
+            root.value("createdUtc").toString(),
+            expectation.robotEndpoint,
+            expectation.cameraSection,
+            expectation.handEyeSha256,
+            &context,
+            error))
+    {
+        return false;
+    }
+
+    if (!VerifyPointCloudProofInputs(root, dir, error, stopRequested))
+    {
+        return false;
+    }
+    return PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error);
 }
 
 bool WritePointCloudQualityGate(
@@ -403,13 +1003,24 @@ bool WritePointCloudQualityGate(
     const QString& authorizedPosePath,
     const QString& validatedAuthorizedPoseSha256,
     qint64 validatedAuthorizedPoseSize,
-    QString& error)
+    const PointCloudProductionContext& productionContext,
+    const QString& generationMode,
+    QString& error,
+    const MeasureThenWeldService::StopRequestedCallback& stopRequested =
+        MeasureThenWeldService::StopRequestedCallback())
 {
     error.clear();
     const QDir dir(QDir::fromNativeSeparators(laserDir));
     if (!dir.exists() || dir.dirName().compare(QStringLiteral("LaserPoint"), Qt::CaseInsensitive) != 0)
     {
         error = QString("质量报告目录必须是已存在的 LaserPoint：%1").arg(laserDir);
+        return false;
+    }
+    const QString reportPath = dir.filePath(
+        QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
+    if (!PointCloudProofIntegrity::RequireProofReplacementActive(reportPath, error))
+    {
+        error = QStringLiteral("点云质量证明写入缺少持久拒绝闭锁：") + error;
         return false;
     }
 
@@ -420,11 +1031,45 @@ bool WritePointCloudQualityGate(
     const bool hasValidatedWeldPose = !weldPosePath.isEmpty()
         && IsSha256Text(validatedWeldPoseSha256)
         && validatedWeldPoseSize > 0;
-    const bool authorize = enforce && report.evaluated && report.passed && hasValidatedAuthorizedPose;
+    const QString proofCreatedUtc =
+        QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    const QJsonObject productionContextJson =
+        PointCloudProductionContextToJson(productionContext);
+    QString productionContextError;
+    const bool productionContextSemanticallyValid = ValidatePointCloudProductionContext(
+        productionContextJson,
+        proofCreatedUtc,
+        productionContext.robotEndpoint,
+        productionContext.cameraSection,
+        productionContext.handEyeSha256,
+        nullptr,
+        productionContextError);
+    const bool hasProductionContext = productionContext.origin == QStringLiteral("liveRobotCameraScan")
+        && !QUuid(productionContext.scanRunId).isNull()
+        && !productionContext.robotEndpoint.trimmed().isEmpty()
+        && !productionContext.cameraSection.trimmed().isEmpty()
+        && IsSha256Text(productionContext.handEyeSha256)
+        && !productionContext.scanStartedUtc.trimmed().isEmpty()
+        && (generationMode == QStringLiteral("liveScan")
+            || generationMode == QStringLiteral("validatedRebuild"))
+        && productionContextSemanticallyValid;
+    const bool authorize = enforce && report.evaluated && report.passed
+        && hasValidatedAuthorizedPose && hasProductionContext;
+    if (enforce && report.evaluated && report.passed
+        && hasValidatedAuthorizedPose && !hasProductionContext)
+    {
+        error = productionContextError.isEmpty()
+            ? QStringLiteral(
+                "Enforce 质量通过但缺少 live-scan 端点/运行/标定上下文，禁止生成生产授权。")
+            : productionContextError;
+        return false;
+    }
     QJsonObject root;
-    root.insert("schemaVersion", 1);
+    root.insert("schemaVersion", POINT_CLOUD_QUALITY_SCHEMA_VERSION);
     root.insert("purpose", "production");
-    root.insert("createdUtc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    root.insert("createdUtc", proofCreatedUtc);
+    root.insert("generationMode", generationMode);
+    root.insert("productionContext", productionContextJson);
     root.insert("robotName", robotName.trimmed());
     root.insert("caseId", dir.dirName().compare(QStringLiteral("LaserPoint"), Qt::CaseInsensitive) == 0
         ? QFileInfo(dir.absolutePath()).dir().dirName()
@@ -444,15 +1089,49 @@ bool WritePointCloudQualityGate(
     root.insert("thresholds", BuildPointCloudQualityThresholds(settings));
 
     QJsonArray inputs;
+    constexpr int maximumInputEvidenceFiles = 8;
+    if (authorize && inputPaths.isEmpty())
+    {
+        error = QStringLiteral("生产质量证明没有预期点云输入，禁止生成 authorized 凭证。");
+        return false;
+    }
+    if (inputPaths.size() > maximumInputEvidenceFiles)
+    {
+        error = QStringLiteral("生产质量证明输入文件超过 %1 个硬上限。")
+            .arg(maximumInputEvidenceFiles);
+        return false;
+    }
+    qint64 totalEvidenceBytes = 0;
+    qint64 totalEvidenceLines = 0;
     for (const QString& inputPath : inputPaths)
     {
+        if (stopRequested && stopRequested())
+        {
+            error = QStringLiteral("生成点云输入证据已取消。");
+            return false;
+        }
         if (inputPath.isEmpty() || !QFileInfo::exists(inputPath))
         {
+            if (authorize)
+            {
+                error = QString("生产质量证明的预期点云输入为空或不存在，禁止跳过：%1")
+                    .arg(inputPath);
+                return false;
+            }
             continue;
         }
         QJsonObject evidence;
         QString evidenceError;
-        if (!BuildQualityFileEvidence(inputPath, dir.absolutePath(), evidence, evidenceError))
+        qint64 evidenceBytes = 0;
+        qint64 evidenceLines = 0;
+        if (!BuildQualityFileEvidence(
+                inputPath,
+                dir.absolutePath(),
+                evidence,
+                evidenceError,
+                stopRequested,
+                &evidenceBytes,
+                &evidenceLines))
         {
             if (authorize)
             {
@@ -461,7 +1140,20 @@ bool WritePointCloudQualityGate(
             }
             continue;
         }
+        if (evidenceBytes > PointCloudProofIntegrity::MaximumEvidenceTotalBytes - totalEvidenceBytes
+            || evidenceLines > PointCloudProofIntegrity::MaximumEvidenceTotalLines - totalEvidenceLines)
+        {
+            error = QStringLiteral("生产质量证明输入证据总字节或总行数超过硬上限。");
+            return false;
+        }
+        totalEvidenceBytes += evidenceBytes;
+        totalEvidenceLines += evidenceLines;
         inputs.push_back(evidence);
+    }
+    if (authorize && inputs.size() != inputPaths.size())
+    {
+        error = QStringLiteral("生产质量证明未能为每个预期点云输入建立证据，禁止授权。");
+        return false;
     }
     root.insert("inputs", inputs);
 
@@ -475,7 +1167,15 @@ bool WritePointCloudQualityGate(
         }
         QJsonObject currentEvidence;
         if (!BuildQualityFileEvidence(
-                weldPosePath, dir.absolutePath(), currentEvidence, error))
+                weldPosePath,
+                dir.absolutePath(),
+                currentEvidence,
+                error,
+                stopRequested,
+                nullptr,
+                nullptr,
+                PointCloudProofIntegrity::MaximumWeldPoseBytes,
+                PointCloudProofIntegrity::MaximumWeldPoseLines))
         {
             return false;
         }
@@ -499,7 +1199,15 @@ bool WritePointCloudQualityGate(
         }
         QJsonObject currentEvidence;
         if (!BuildQualityFileEvidence(
-                authorizedPosePath, dir.absolutePath(), currentEvidence, error))
+                authorizedPosePath,
+                dir.absolutePath(),
+                currentEvidence,
+                error,
+                stopRequested,
+                nullptr,
+                nullptr,
+                PointCloudProofIntegrity::MaximumWeldPoseBytes,
+                PointCloudProofIntegrity::MaximumWeldPoseLines))
         {
             return false;
         }
@@ -516,8 +1224,11 @@ bool WritePointCloudQualityGate(
             currentEvidence);
     }
     root.insert("artifacts", artifacts);
+    if (!SignPointCloudQualityProof(root, error))
+    {
+        return false;
+    }
 
-    const QString reportPath = dir.filePath(QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
     QSaveFile file(reportPath);
     if (!file.open(QIODevice::WriteOnly))
     {
@@ -525,6 +1236,12 @@ bool WritePointCloudQualityGate(
         return false;
     }
     const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (payload.isEmpty() || payload.size() > PointCloudProofIntegrity::MaximumProofBytes)
+    {
+        error = QStringLiteral("点云质量证明超过 %1 字节硬上限，拒绝提交。")
+            .arg(PointCloudProofIntegrity::MaximumProofBytes);
+        return false;
+    }
     if (file.write(payload) != payload.size() || !file.commit())
     {
         error = QString("原子提交点云质量报告失败：%1").arg(reportPath);
@@ -537,11 +1254,36 @@ bool WritePointCloudQualityGate(
         error = QString("点云质量报告写后回读失败：%1").arg(reportPath);
         return false;
     }
+    const QByteArray verifyPayload = verifyFile.readAll();
     QJsonParseError parseError;
-    const QJsonDocument verifyDocument = QJsonDocument::fromJson(verifyFile.readAll(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !verifyDocument.isObject())
+    const QJsonDocument verifyDocument = QJsonDocument::fromJson(verifyPayload, &parseError);
+    if (verifyPayload != payload
+        || parseError.error != QJsonParseError::NoError
+        || !verifyDocument.isObject())
     {
+        verifyFile.close();
+        QFile::remove(reportPath);
         error = QString("点云质量报告写后解析失败：%1").arg(parseError.errorString());
+        return false;
+    }
+    if (!VerifyPointCloudQualityProofMac(verifyDocument.object(), error))
+    {
+        verifyFile.close();
+        QFile::remove(reportPath);
+        return false;
+    }
+    verifyFile.close();
+    if (hasProductionContext
+        && !RegisterPointCloudProofReceipt(root, dir, payload, error))
+    {
+        // 文件和 DB 无法跨介质原子提交；失败时删除新 proof，留下旧/缺失收据只会 fail-closed。
+        QFile::remove(reportPath);
+        return false;
+    }
+    if (authorize && !hasProductionContext)
+    {
+        QFile::remove(reportPath);
+        error = QStringLiteral("授权点云证明没有可登记的扫描收据，已删除。");
         return false;
     }
     return true;
@@ -552,6 +1294,11 @@ bool InvalidatePointCloudQualityGate(const QString& laserDir, QString& error)
     error.clear();
     const QString path = QDir(QDir::fromNativeSeparators(laserDir))
         .filePath(QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
+    if (!PointCloudProofIntegrity::RequireProofReplacementActive(path, error))
+    {
+        error = QStringLiteral("撤销点云质量证明前拒绝闭锁无效：") + error;
+        return false;
+    }
     if (QFileInfo::exists(path) && !QFile::remove(path))
     {
         error = QString("无法使旧点云质量证明失效：%1").arg(path);
@@ -565,6 +1312,9 @@ bool VerifyPointCloudQualityGate(
     const QString& expectedRobotName,
     const QString& loadedPoseSha256,
     qint64 loadedPoseSize,
+    const RobotDriverAdaptor* expectedDriver,
+    const MeasureThenWeldService::PointCloudProductionExpectation* frozenExpectation,
+    bool allowActiveProofReplacement,
     QString& error)
 {
     error.clear();
@@ -580,14 +1330,29 @@ bool VerifyPointCloudQualityGate(
         return false;
     }
     const QString reportPath = laserDir.filePath(QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
-    QFile file(reportPath);
-    if (!file.open(QIODevice::ReadOnly))
+    const auto verifyNotDenied = [&]()
     {
-        error = QString("缺少点云质量证明，禁止下发/执行焊道：%1").arg(reportPath);
+        return allowActiveProofReplacement
+            ? PointCloudProofIntegrity::RequireProofReplacementActive(reportPath, error)
+            : PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error);
+    };
+    if (!verifyNotDenied())
+    {
+        return false;
+    }
+    QByteArray proofPayload;
+    if (!PointCloudProofIntegrity::ReadFileBounded(
+            reportPath,
+            PointCloudProofIntegrity::MaximumProofBytes,
+            proofPayload,
+            error))
+    {
+        error = QString("缺少、过大或无法完整读取点云质量证明，禁止下发/执行焊道：%1；%2")
+            .arg(reportPath, error);
         return false;
     }
     QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    const QJsonDocument document = QJsonDocument::fromJson(proofPayload, &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject())
     {
         error = QString("点云质量证明损坏：%1").arg(parseError.errorString());
@@ -595,7 +1360,7 @@ bool VerifyPointCloudQualityGate(
     }
     const QJsonObject root = document.object();
     const PointCloudProcessingConfig::Settings currentSettings = PointCloudProcessingConfig::Load();
-    if (root.value("schemaVersion").toInt() != 1
+    if (root.value("schemaVersion").toInt() != POINT_CLOUD_QUALITY_SCHEMA_VERSION
         || root.value("profileVersion").toInt() != PointCloudProcessingConfig::CURRENT_VALIDATION_PROFILE_VERSION
         || root.value("algorithmRevision").toString() != QString::fromLatin1(POINT_CLOUD_QUALITY_ALGORITHM_REVISION)
         || root.value("purpose").toString() != QStringLiteral("production")
@@ -603,9 +1368,12 @@ bool VerifyPointCloudQualityGate(
         || !root.value("analysisEvaluated").toBool()
         || !root.value("qualityPassed").toBool()
         || !root.value("authorized").toBool()
-        || root.value("state").toString() != QStringLiteral("authorized"))
+        || root.value("state").toString() != QStringLiteral("authorized")
+        || (root.value("generationMode").toString() != QStringLiteral("liveScan")
+            && root.value("generationMode").toString() != QStringLiteral("validatedRebuild")))
     {
-        error = QStringLiteral("点云质量证明未处于 Enforce/PASS/authorized 状态，禁止下发/执行焊道。");
+        error = QStringLiteral(
+            "点云质量证明不是当前 schema 3 的 Enforce/PASS/authorized 证明，禁止下发/执行；旧证明请重新扫描/重建。");
         return false;
     }
     if (!expectedRobotName.trimmed().isEmpty()
@@ -618,6 +1386,65 @@ bool VerifyPointCloudQualityGate(
     if (root.value("caseId").toString().compare(expectedCaseId, Qt::CaseInsensitive) != 0)
     {
         error = QStringLiteral("点云质量证明绑定的案例目录与当前轨迹目录不一致。");
+        return false;
+    }
+    // 先验证不可伪造的本机 MAC 与持久收据，再相信任何 PASS/上下文字段。
+    const MeasureThenWeldService::StopRequestedCallback evidenceStopRequested =
+        expectedDriver != nullptr
+        ? MeasureThenWeldService::StopRequestedCallback([expectedDriver]()
+            {
+                return RobotOperationLease::IsCancellationRequested(expectedDriver);
+            })
+        : MeasureThenWeldService::StopRequestedCallback();
+    if (!VerifyPointCloudQualityProofMac(root, error)
+        || !VerifyPointCloudProofReceipt(root, laserDir, proofPayload, error)
+        || !VerifyPointCloudProofInputs(root, laserDir, error, evidenceStopRequested))
+    {
+        return false;
+    }
+    QString expectedEndpoint;
+    QString expectedCameraSection;
+    QString expectedHandEyeSha256;
+    if (expectedDriver != nullptr)
+    {
+        if (!LoadCurrentPointCloudContextExpectations(
+                expectedRobotName,
+                expectedDriver,
+                true,
+                expectedEndpoint,
+                expectedCameraSection,
+                expectedHandEyeSha256,
+                error))
+        {
+            return false;
+        }
+    }
+    else if (frozenExpectation != nullptr
+        && frozenExpectation->robotName.compare(
+            expectedRobotName.trimmed(), Qt::CaseInsensitive) == 0
+        && !frozenExpectation->robotEndpoint.trimmed().isEmpty()
+        && !frozenExpectation->cameraSection.trimmed().isEmpty()
+        && IsSha256Text(frozenExpectation->handEyeSha256))
+    {
+        expectedEndpoint = frozenExpectation->robotEndpoint;
+        expectedCameraSection = frozenExpectation->cameraSection;
+        expectedHandEyeSha256 = frozenExpectation->handEyeSha256;
+    }
+    else
+    {
+        error = QStringLiteral(
+            "PointCloudProduction 验证缺少当前机器人或 UI 线程冻结的完整生产上下文；离线只能生成 Audit/unauthorized 产物。");
+        return false;
+    }
+    if (!ValidatePointCloudProductionContext(
+            root.value("productionContext").toObject(),
+            root.value("createdUtc").toString(),
+            expectedEndpoint,
+            expectedCameraSection,
+            expectedHandEyeSha256,
+            nullptr,
+            error))
+    {
         return false;
     }
     if (currentSettings.validationPolicy != PointCloudProcessingConfig::ValidationPolicy::Enforce
@@ -642,7 +1469,9 @@ bool VerifyPointCloudQualityGate(
         error = QStringLiteral("点云质量证明绑定的焊道 SHA256 与实际解析字节不一致，文件可能已被修改。");
         return false;
     }
-    return true;
+    // Recheck after every proof/input/context read. A replacement that begins
+    // while verification is in flight must deny the final authorization.
+    return verifyNotDenied();
 }
 
 bool VerifyWeldPoseAuthorization(
@@ -651,11 +1480,21 @@ bool VerifyWeldPoseAuthorization(
     const QString& expectedRobotName,
     const QString& loadedPoseSha256,
     qint64 loadedPoseSize,
-    QString& error)
+    QString& error,
+    const RobotDriverAdaptor* expectedDriver = nullptr,
+    const MeasureThenWeldService::PointCloudProductionExpectation* frozenExpectation = nullptr,
+    bool allowActiveProofReplacement = false)
 {
     return poseSource == MeasureThenWeldService::WeldPoseSource::PointCloudProduction
         ? VerifyPointCloudQualityGate(
-            posePath, expectedRobotName, loadedPoseSha256, loadedPoseSize, error)
+            posePath,
+            expectedRobotName,
+            loadedPoseSha256,
+            loadedPoseSize,
+            expectedDriver,
+            frozenExpectation,
+            allowActiveProofReplacement,
+            error)
         : VerifySyntheticPoseAuthorization(
             posePath, expectedRobotName, loadedPoseSha256, loadedPoseSize, error);
 }
@@ -744,6 +1583,7 @@ struct WeldPosePreset
     int weldDirection = 1;
     bool weldProcessLoaded = false;
     QString weldProcessLoadError;
+    QString weldProcessSafetyError;
     bool cornerArcRadiusFromWeldProcess = false;
     bool transitionSpeedEnabled = false;
     bool transitionCurrentVoltageEnabled = false;
@@ -1326,6 +2166,7 @@ bool WriteTextLinesToFile(const QString& path, const std::vector<QString>& lines
         }
         return false;
     }
+
     QTextStream stream(&file);
     for (const QString& line : lines)
     {
@@ -1399,7 +2240,8 @@ void SaveMethodBaseTrackFile(
 int BilateralPresmoothSdkBaseWeld(
     QVector<PointCloudExtractionProcessor::TrackPoint>& pts,
     double windowMm,
-    double edgeMm)
+    double edgeMm,
+    const MeasureThenWeldService::StopRequestedCallback& stopRequested)
 {
     const int n = pts.size();
     if (n < 5 || windowMm <= 1e-6 || edgeMm <= 1e-6)
@@ -1410,6 +2252,10 @@ int BilateralPresmoothSdkBaseWeld(
     std::vector<double> arc(n, 0.0);
     for (int i = 1; i < n; ++i)
     {
+        if ((i & 0x3ff) == 0 && stopRequested && stopRequested())
+        {
+            return -1;
+        }
         arc[i] = arc[i - 1] + (pts[i].point - pts[i - 1].point).norm();
     }
 
@@ -1431,6 +2277,10 @@ int BilateralPresmoothSdkBaseWeld(
     int moved = 0;
     for (int i = 0; i < n; ++i)
     {
+        if ((i & 0xff) == 0 && stopRequested && stopRequested())
+        {
+            return -1;
+        }
         if (pts[i].type == PointCloudExtractionProcessor::TrackPointType::Start
             || pts[i].type == PointCloudExtractionProcessor::TrackPointType::End)
         {
@@ -1483,8 +2333,24 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
     const QString& methodTrackOutputDir,
     const MeasureThenWeldService::LogCallback& appendLog,
     bool* usedExternalLibrary = nullptr,
-    PointCloudExtractionProcessor::ExtractionResult* externalExtraction = nullptr)
+    PointCloudExtractionProcessor::ExtractionResult* externalExtraction = nullptr,
+    const MeasureThenWeldService::StopRequestedCallback& stopRequested =
+        MeasureThenWeldService::StopRequestedCallback())
 {
+    const auto canceledResult = []()
+    {
+        RobotCalculation::MeasureThenWeldAnalysisResult canceled;
+        canceled.error = QStringLiteral("已取消点云特征分析。");
+        return canceled;
+    };
+    const auto isCanceled = [&stopRequested]()
+    {
+        return stopRequested && stopRequested();
+    };
+    if (isCanceled())
+    {
+        return canceledResult();
+    }
     if (usedExternalLibrary != nullptr)
     {
         *usedExternalLibrary = false;
@@ -1546,7 +2412,12 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 fullCloudInput,
                 settings,
                 BuildScanDirection(param),
-                useBaseWeldFit ? sdkBaseWeldOutputPath : QString());
+                useBaseWeldFit ? sdkBaseWeldOutputPath : QString(),
+                stopRequested);
+        if (isCanceled())
+        {
+            return canceledResult();
+        }
         if (!extraction.ok)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
@@ -1606,7 +2477,12 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 const int movedCount = BilateralPresmoothSdkBaseWeld(
                     workingExtraction.points,
                     settings.sdkBasePresmoothWindowMm,
-                    settings.sdkBasePresmoothEdgeMm);
+                    settings.sdkBasePresmoothEdgeMm,
+                    stopRequested);
+                if (movedCount < 0)
+                {
+                    return canceledResult();
+                }
                 if (appendLog)
                 {
                     appendLog(QString("SDK基础焊道预平滑(结构自适应双边)：窗口=%1mm，保边阈值=%2mm，平滑点=%3/%4。")
@@ -1662,6 +2538,10 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         }
         SaveMethodBaseTrackFile(
             methodTrackOutputDir, settings.mode, BuildMethodTrackLines(workingExtraction.points), appendLog);
+        if (isCanceled())
+        {
+            return canceledResult();
+        }
         return analysis;
     }
     if (settings.mode == PointCloudProcessingConfig::Mode::CloudFit)
@@ -1691,6 +2571,10 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         }
         const RobotCalculation::LowerWeldFilterResult projectedPath =
             RobotCalculation::ProjectWorkpieceCloudToLowerWeldPath(fullCloudInput, legacyLaserInput, fitParams);
+        if (isCanceled())
+        {
+            return canceledResult();
+        }
         if (!projectedPath.ok)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
@@ -1712,6 +2596,10 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         RobotCalculation::MeasureThenWeldAnalysisResult analysis =
             RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
                 ToIndexedInput(projectedPath.points), fitParams);
+        if (isCanceled())
+        {
+            return canceledResult();
+        }
         if (!analysis.ok)
         {
             if (appendLog)
@@ -2709,6 +3597,16 @@ bool TryLoadActiveWeldProcessParam(const QString& robotName, T_WELD_PARA& weldPa
     }
 
     weldPara = *activePara;  // 含 BindWeldToWeave 已灌入的 tWeaveParam
+    std::string validationError;
+    if (!WeldProcessValidation::ValidateStoredWeldProcess(weldPara, validationError))
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("当前焊接工艺包含非法字段：")
+                + QString::fromUtf8(validationError.c_str());
+        }
+        return false;
+    }
     return true;
 }
 
@@ -2823,6 +3721,12 @@ void ApplyActiveWeldProcessToPreset(const T_PRECISE_MEASURE_PARAM& param, WeldPo
         && weldPara.dFinalWeldTrajectoryStepMm > 0.0)
     {
         preset.finalWeldStepFromProcessMm = weldPara.dFinalWeldTrajectoryStepMm;
+    }
+    std::string validationError;
+    if (!WeldProcessValidation::ValidateActualWeldProcess(weldPara, validationError))
+    {
+        preset.weldProcessSafetyError = QStringLiteral("当前焊接工艺未通过实际焊接安全门禁：")
+            + QString::fromUtf8(validationError.c_str());
     }
 }
 
@@ -3436,7 +4340,9 @@ bool LoadWeldPoseFileRecords(
     QVector<WeldPoseFileRecord>& records,
     QString& error,
     QString* loadedSha256 = nullptr,
-    qint64* loadedSize = nullptr)
+    qint64* loadedSize = nullptr,
+    const MeasureThenWeldService::StopRequestedCallback& stopRequested =
+        MeasureThenWeldService::StopRequestedCallback())
 {
     records.clear();
     error.clear();
@@ -3449,34 +4355,76 @@ bool LoadWeldPoseFileRecords(
         *loadedSize = -1;
     }
 
-    QFile file(filePath);
+    const QFileInfo poseInfo(QDir::fromNativeSeparators(filePath));
+    if (!poseInfo.isFile()
+        || poseInfo.isSymLink()
+#ifdef Q_OS_WIN
+        || poseInfo.isJunction()
+#endif
+        || poseInfo.size() <= 0
+        || poseInfo.size() > PointCloudProofIntegrity::MaximumWeldPoseBytes)
+    {
+        error = QString("焊道姿态必须是 0..%1 字节范围内的普通文件：%2")
+            .arg(PointCloudProofIntegrity::MaximumWeldPoseBytes)
+            .arg(poseInfo.absoluteFilePath());
+        return false;
+    }
+    QFile file(poseInfo.absoluteFilePath());
     if (!file.open(QIODevice::ReadOnly))
     {
         error = "打开焊道姿态文件失败：" + QFileInfo(filePath).absoluteFilePath();
         return false;
     }
-    const QByteArray payload = file.readAll();
-    if (file.error() != QFileDevice::NoError)
+    const qint64 expectedBytes = file.size();
+    QCryptographicHash payloadHash(QCryptographicHash::Sha256);
+    qint64 readBytes = 0;
+    qint64 lineNumber = 0;
+    while (!file.atEnd())
     {
-        error = "完整读取焊道姿态文件失败：" + QFileInfo(filePath).absoluteFilePath();
-        return false;
-    }
-
-    QBuffer payloadBuffer;
-    payloadBuffer.setData(payload);
-    if (!payloadBuffer.open(QIODevice::ReadOnly))
-    {
-        error = "创建焊道姿态不可变解析快照失败：" + QFileInfo(filePath).absoluteFilePath();
-        return false;
-    }
-    QTextStream stream(&payloadBuffer);
-    stream.setEncoding(QStringConverter::Utf8);
-
-    int lineNumber = 0;
-    while (!stream.atEnd())
-    {
-        const QString line = stream.readLine().trimmed();
+        if (stopRequested && stopRequested())
+        {
+            error = QStringLiteral("焊道姿态流式读取已取消：") + poseInfo.absoluteFilePath();
+            return false;
+        }
+        const QByteArray rawLine = file.readLine(
+            PointCloudProofIntegrity::MaximumWeldPoseLineBytes + 1);
+        if (rawLine.isEmpty() && file.error() != QFileDevice::NoError)
+        {
+            error = QStringLiteral("流式读取焊道姿态失败：") + poseInfo.absoluteFilePath();
+            return false;
+        }
+        if (rawLine.size() > PointCloudProofIntegrity::MaximumWeldPoseLineBytes
+            || (!rawLine.endsWith('\n') && !file.atEnd()))
+        {
+            error = QString("焊道姿态单行超过 %1 字节硬上限：%2")
+                .arg(PointCloudProofIntegrity::MaximumWeldPoseLineBytes)
+                .arg(poseInfo.absoluteFilePath());
+            return false;
+        }
+        if (readBytes > PointCloudProofIntegrity::MaximumWeldPoseBytes - rawLine.size())
+        {
+            error = QStringLiteral("焊道姿态流式读取超过总字节硬上限。");
+            return false;
+        }
+        readBytes += rawLine.size();
+        payloadHash.addData(rawLine);
         ++lineNumber;
+        if (lineNumber > PointCloudProofIntegrity::MaximumWeldPoseLines)
+        {
+            error = QString("焊道姿态超过 %1 行硬上限：%2")
+                .arg(PointCloudProofIntegrity::MaximumWeldPoseLines)
+                .arg(poseInfo.absoluteFilePath());
+            return false;
+        }
+        QStringDecoder decoder(QStringDecoder::Utf8);
+        const QString decodedLine = decoder(rawLine);
+        const QString line = decodedLine.trimmed();
+        if (decoder.hasError())
+        {
+            error = QString("焊道姿态第 %1 行不是严格 UTF-8：%2")
+                .arg(lineNumber).arg(poseInfo.absoluteFilePath());
+            return false;
+        }
         if (line.isEmpty() || line.startsWith('#'))
         {
             continue;
@@ -3498,9 +4446,12 @@ bool LoadWeldPoseFileRecords(
 
         records.push_back(record);
     }
-    if (stream.status() != QTextStream::Ok)
+    if (file.error() != QFileDevice::NoError
+        || readBytes != expectedBytes
+        || file.size() != expectedBytes)
     {
-        error = "读取焊道姿态解析快照失败：" + QFileInfo(filePath).absoluteFilePath();
+        error = "读取焊道姿态流式快照失败或读取期间文件变化："
+            + QFileInfo(filePath).absoluteFilePath();
         return false;
     }
 
@@ -3514,12 +4465,11 @@ bool LoadWeldPoseFileRecords(
 
     if (loadedSha256 != nullptr)
     {
-        *loadedSha256 = QString::fromLatin1(
-            QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex()).toLower();
+        *loadedSha256 = QString::fromLatin1(payloadHash.result().toHex()).toLower();
     }
     if (loadedSize != nullptr)
     {
-        *loadedSize = payload.size();
+        *loadedSize = readBytes;
     }
 
     return true;
@@ -3625,7 +4575,9 @@ bool ValidateFinalWeldPoseArtifact(
     qint64& validatedSourceSize,
     QString& validatedSha256,
     qint64& validatedSize,
-    QString& error)
+    QString& error,
+    const MeasureThenWeldService::StopRequestedCallback& stopRequested =
+        MeasureThenWeldService::StopRequestedCallback())
 {
     validatedSourceSha256.clear();
     validatedSourceSize = -1;
@@ -3643,14 +4595,20 @@ bool ValidateFinalWeldPoseArtifact(
             sourceRecords,
             error,
             &validatedSourceSha256,
-            &validatedSourceSize))
+            &validatedSourceSize,
+            stopRequested))
     {
         error = QStringLiteral("补偿前焊接姿态回读失败：") + error;
         return false;
     }
     QVector<WeldPoseFileRecord> records;
     if (!LoadWeldPoseFileRecords(
-            filePath, records, error, &validatedSha256, &validatedSize))
+            filePath,
+            records,
+            error,
+            &validatedSha256,
+            &validatedSize,
+            stopRequested))
     {
         return false;
     }
@@ -4262,6 +5220,16 @@ QString RobotCoorsText(const T_ROBOT_COORS& coors)
         .arg(coors.dBX, 0, 'f', 3)
         .arg(coors.dBY, 0, 'f', 3)
         .arg(coors.dBZ, 0, 'f', 3);
+}
+
+double WrappedAngleDistanceDeg(double left, double right)
+{
+    double delta = std::fmod(std::abs(left - right), 360.0);
+    if (delta > 180.0)
+    {
+        delta = 360.0 - delta;
+    }
+    return delta;
 }
 
 double DegToRad(double deg)
@@ -7778,6 +8746,46 @@ bool MeasureThenWeldService::InvalidateStoredWeldResumeCheckpoint(
     return InvalidateStoredWeldResumeCheckpointImpl(robotName, error);
 }
 
+bool MeasureThenWeldService::CapturePointCloudProductionExpectation(
+    const RobotDriverAdaptor* pRobotDriver,
+    const QString& expectedRobotName,
+    PointCloudProductionExpectation& expectation,
+    QString& error)
+{
+    expectation = PointCloudProductionExpectation{};
+    error.clear();
+    if (pRobotDriver == nullptr)
+    {
+        error = QStringLiteral("缺少当前机器人驱动，无法冻结点云生产上下文。");
+        return false;
+    }
+    const QString driverRobotName =
+        QString::fromStdString(pRobotDriver->m_sRobotName).trimmed();
+    const QString normalizedRobotName = expectedRobotName.trimmed().isEmpty()
+        ? driverRobotName
+        : expectedRobotName.trimmed();
+    if (normalizedRobotName.isEmpty()
+        || driverRobotName.compare(normalizedRobotName, Qt::CaseInsensitive) != 0)
+    {
+        error = QStringLiteral("当前驱动机器人与待冻结的点云生产机器人不一致。");
+        return false;
+    }
+    if (!LoadCurrentPointCloudContextExpectations(
+            normalizedRobotName,
+            pRobotDriver,
+            true,
+            expectation.robotEndpoint,
+            expectation.cameraSection,
+            expectation.handEyeSha256,
+            error))
+    {
+        expectation = PointCloudProductionExpectation{};
+        return false;
+    }
+    expectation.robotName = normalizedRobotName;
+    return true;
+}
+
 namespace
 {
 double FanucLinearSpeedMmPerSecFromConfig(double speedMmPerMin, double fallbackMmPerSec = 1.0)
@@ -8218,6 +9226,11 @@ bool MeasureThenWeldService::ResolveWeldExecutionParameters(
             : preset.weldProcessLoadError;
         return false;
     }
+    if (param.bDoActualWeld && !preset.weldProcessSafetyError.isEmpty())
+    {
+        error = preset.weldProcessSafetyError;
+        return false;
+    }
     if (param.bDoActualWeld && preset.transitionCurrentVoltageEnableMismatch)
     {
         error = QStringLiteral("拐点过渡电流和电压启用状态不一致，无法冻结执行参数。");
@@ -8451,6 +9464,51 @@ bool MeasureThenWeldService::MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, 
 		3000,
 		motionTimeoutMs,
 		100);
+}
+
+bool MeasureThenWeldService::VerifyRobotAtSafePose(
+    RobotDriverAdaptor* pRobotDriver,
+    const T_ROBOT_COORS& expected,
+    T_ROBOT_COORS& observed,
+    QString& error) const
+{
+    error.clear();
+    if (pRobotDriver == nullptr || !pRobotDriver->TryGetCurrentPos(observed))
+    {
+        error = QStringLiteral("安全回撤终态验证失败：无法读取机器人当前位置。");
+        return false;
+    }
+
+    constexpr double kCartesianToleranceMm = 5.0;
+    constexpr double kAngularToleranceDeg = 5.0;
+    constexpr double kExternalToleranceMm = 5.0;
+    const double cartesianError = std::hypot(
+        std::hypot(observed.dX - expected.dX, observed.dY - expected.dY),
+        observed.dZ - expected.dZ);
+    const double angularError = (std::max)({
+        WrappedAngleDistanceDeg(observed.dRX, expected.dRX),
+        WrappedAngleDistanceDeg(observed.dRY, expected.dRY),
+        WrappedAngleDistanceDeg(observed.dRZ, expected.dRZ) });
+    const double externalError = std::hypot(
+        std::hypot(observed.dBX - expected.dBX, observed.dBY - expected.dBY),
+        observed.dBZ - expected.dBZ);
+    if (!std::isfinite(cartesianError) || !std::isfinite(angularError) || !std::isfinite(externalError)
+        || cartesianError > kCartesianToleranceMm
+        || angularError > kAngularToleranceDeg
+        || externalError > kExternalToleranceMm)
+    {
+        error = QString(
+            "安全回撤终态验证失败：位置偏差=%1 mm（上限%2），姿态偏差=%3 deg（上限%4），外部轴偏差=%5（上限%6）。Expected=[%7] Observed=[%8]")
+            .arg(cartesianError, 0, 'f', 3)
+            .arg(kCartesianToleranceMm, 0, 'f', 1)
+            .arg(angularError, 0, 'f', 3)
+            .arg(kAngularToleranceDeg, 0, 'f', 1)
+            .arg(externalError, 0, 'f', 3)
+            .arg(kExternalToleranceMm, 0, 'f', 1)
+            .arg(RobotCoorsText(expected), RobotCoorsText(observed));
+        return false;
+    }
+    return true;
 }
 
 bool MeasureThenWeldService::MoveScanStartSafeAndWait(
@@ -8973,6 +10031,27 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         }
         return false;
     }
+
+    const PointCloudProductionContext productionContext =
+        BuildLivePointCloudProductionContext(pRobotDriver, cameraSection, calibration);
+    if (productionContext.robotEndpoint.isEmpty())
+    {
+        if (appendLog)
+        {
+            appendLog(QStringLiteral(
+                "当前机器人没有有效的持久 TCP 端点，本次扫描不能形成生产质量证明。"));
+        }
+        if (setFlowStep)
+        {
+            setFlowStep(QStringLiteral("扫描失败：机器人持久端点无效"));
+        }
+        return false;
+    }
+    PointCloudProductionExpectation productionExpectation;
+    productionExpectation.robotName = QString::fromStdString(param.sRobotName).trimmed();
+    productionExpectation.robotEndpoint = productionContext.robotEndpoint;
+    productionExpectation.cameraSection = productionContext.cameraSection;
+    productionExpectation.handEyeSha256 = productionContext.handEyeSha256;
 
     // 相机读取帧率已迁至相机参数(CameraParam.ini 的 CameraReadFps)；这里读出来仅用于相机时间戳
     // 跳变告警阈值与日志显示——真正驱动取帧节奏的是相机 worker 的轮询定时器（按 1000/帧率 的间隔轮询）。
@@ -10006,7 +11085,27 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     QDir().mkpath(cameraDir);
     QDir().mkpath(robotDir);
     QDir().mkpath(laserDir);
+    const QString qualityGatePath = QDir(laserDir).filePath(
+        QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
     QString qualityGateError;
+    PointCloudProofReplacementSession qualityGateReplacement;
+    if (!PointCloudProofIntegrity::BeginProofReplacement(
+            qualityGatePath,
+            QStringLiteral("liveScan 后处理尚未完整完成，拒绝任何旧/中间点云授权。"),
+            qualityGateError))
+    {
+        if (appendLog)
+        {
+            appendLog(QStringLiteral("扫描失败：无法建立点云证明持久拒绝闭锁：")
+                + qualityGateError);
+        }
+        if (setFlowStep)
+        {
+            setFlowStep("扫描失败：无法建立质量证明拒绝闭锁");
+        }
+        return false;
+    }
+    qualityGateReplacement.Arm(qualityGatePath);
     if (!InvalidatePointCloudQualityGate(laserDir, qualityGateError))
     {
         if (appendLog)
@@ -10015,7 +11114,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         }
         if (setFlowStep)
         {
-            setFlowStep("扫描失败：无法使旧质量证明失效");
+            setFlowStep("扫描失败：旧质量证明删除失败，拒绝闭锁保持有效");
         }
         return false;
     }
@@ -10644,7 +11743,13 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 QString(),
                 QString(),
                 -1,
-                reportError)
+                productionContext,
+                QStringLiteral("liveScan"),
+                reportError,
+                [pRobotDriver]()
+                {
+                    return RobotOperationLease::IsCancellationRequested(pRobotDriver);
+                })
             && appendLog)
         {
             appendLog(QString("保存点云质量失败报告失败：%1").arg(reportError));
@@ -10937,7 +12042,11 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             seamCompSummary,
             error,
             &generatedSeamCompSha256,
-            &generatedSeamCompSize))
+            &generatedSeamCompSize,
+            [pRobotDriver]()
+            {
+                return RobotOperationLease::IsCancellationRequested(pRobotDriver);
+            }))
         {
             if (appendLog)
             {
@@ -10965,7 +12074,11 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 validatedSourcePoseSize,
                 validatedPoseSha256,
                 validatedPoseSize,
-                error);
+                error,
+                [pRobotDriver]()
+                {
+                    return RobotOperationLease::IsCancellationRequested(pRobotDriver);
+                });
         if (!finalArtifactValid)
         {
             if (pointCloudSettings.validationPolicy
@@ -11000,7 +12113,13 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 weldPoseSeamCompPath,
                 validatedPoseSha256,
                 validatedPoseSize,
-                error))
+                productionContext,
+                QStringLiteral("liveScan"),
+                error,
+                [pRobotDriver]()
+                {
+                    return RobotOperationLease::IsCancellationRequested(pRobotDriver);
+                }))
         {
             if (appendLog)
             {
@@ -11023,13 +12142,23 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 appendLog("当前为点云质量审计模式：已生成分析产物，但不会生成可执行证明或进入焊接。");
             }
             savedPath.clear();
+            if (!qualityGateReplacement.Complete(qualityGateError))
+            {
+                if (appendLog)
+                {
+                    appendLog(QStringLiteral("审计产物已生成，但解除点云证明拒绝闭锁失败：")
+                        + qualityGateError);
+                }
+                return false;
+            }
             return true;
         }
         // 焊道补偿生成后立即同步生成 STEP job(srp/srd)到焊道同目录，便于提取查看，不必等下枪执行才保存。
         {
             QString jobName, jobSrp, jobSrd, jobSum, jobErr;
             if (GenerateStepWeldProgramFiles(QString::fromStdString(param.sRobotName), weldPoseSeamCompPath,
-                    QFileInfo(weldPoseSeamCompPath).absolutePath(), true, 0.0, jobName, jobSrp, jobSrd, jobSum, jobErr))
+                    QFileInfo(weldPoseSeamCompPath).absolutePath(), true, 0.0, jobName, jobSrp, jobSrd, jobSum, jobErr,
+                    0.0, true, WeldPoseSource::PointCloudProduction, productionExpectation, true))
             {
                 if (appendLog) { appendLog(QString("STEP焊接程序(job)已同步生成：srp=%1，srd=%2").arg(jobSrp, jobSrd)); }
             }
@@ -11055,6 +12184,16 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         }
         return false;
     }
+    if (!qualityGateReplacement.Complete(qualityGateError))
+    {
+        savedPath.clear();
+        if (appendLog)
+        {
+            appendLog(QStringLiteral("扫描产物完成，但解除点云证明拒绝闭锁失败：")
+                + qualityGateError);
+        }
+        return false;
+    }
     return true;
 }
 
@@ -11067,7 +12206,9 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     QString& summary,
     QString& error,
     const LogCallback& appendLog,
-    const StepCallback& setFlowStep) const
+    const StepCallback& setFlowStep,
+    const PointCloudProductionExpectation& productionExpectation,
+    const StopRequestedCallback& stopRequested) const
 {
     preservePath.clear();
     weldPosePath.clear();
@@ -11075,13 +12216,85 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     summary.clear();
     error.clear();
 
+    if (stopRequested && stopRequested())
+    {
+        error = QStringLiteral("已取消重建（启动前）。");
+        return false;
+    }
+
     const QDir dir(laserDir);
     if (!dir.exists())
     {
         error = QString("LaserPoint目录不存在：%1").arg(laserDir);
         return false;
     }
+    const PointCloudProcessingConfig::Settings pointCloudSettings =
+        PointCloudProcessingConfig::Load();
+    PointCloudProductionContext productionContext;
+    if (pointCloudSettings.validationPolicy
+        == PointCloudProcessingConfig::ValidationPolicy::Enforce)
+    {
+        if (productionExpectation.robotName.trimmed().isEmpty()
+            || productionExpectation.robotEndpoint.trimmed().isEmpty()
+            || productionExpectation.cameraSection.trimmed().isEmpty()
+            || !IsSha256Text(productionExpectation.handEyeSha256))
+        {
+            error = QStringLiteral(
+                "Enforce 生产重建必须提供当前机器人上下文；离线预览不能生成可运动授权。");
+            return false;
+        }
+        if (!LoadValidatedRebuildPointCloudContext(
+                laserDir,
+                QString::fromStdString(param.sRobotName),
+                productionExpectation,
+                productionContext,
+                error,
+                stopRequested))
+        {
+            return false;
+        }
+    }
+    const QString qualityGatePath = dir.filePath(
+        QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
+    PointCloudProofReplacementSession qualityGateReplacement;
+    if (!PointCloudProofIntegrity::BeginProofReplacement(
+            qualityGatePath,
+            QStringLiteral("validatedRebuild 尚未完整完成，拒绝任何旧/中间点云授权。"),
+            error))
+    {
+        error = QStringLiteral("无法建立重建期间的点云证明持久拒绝闭锁：") + error;
+        return false;
+    }
+    qualityGateReplacement.Arm(qualityGatePath);
     if (!InvalidatePointCloudQualityGate(laserDir, error))
+    {
+        error += QStringLiteral("；持久拒绝标记仍有效，旧证明不会被接受。");
+        return false;
+    }
+    const auto cancellationPoint = [&](const QString& phase) -> bool
+    {
+        if (!stopRequested || !stopRequested())
+        {
+            return false;
+        }
+        // 只有完整成功后才解除持久拒绝标记。取消时再次尝试删除 proof；
+        // 即使 Windows 独占/ACL 令删除失败，denied tombstone 仍会让
+        // Verify fail-closed，并且删除错误必须向上报告。
+        QString invalidateError;
+        const bool invalidated = InvalidatePointCloudQualityGate(laserDir, invalidateError);
+        preservePath.clear();
+        weldPosePath.clear();
+        seamCompPath.clear();
+        summary.clear();
+        error = QString("已取消重建（%1）；持久拒绝标记保持有效，未发布可执行质量证明。")
+            .arg(phase);
+        if (!invalidated)
+        {
+            error += QStringLiteral("；旧 proof 删除失败但仍被拒绝：") + invalidateError;
+        }
+        return true;
+    };
+    if (cancellationPoint(QStringLiteral("撤销旧质量证明后")))
     {
         return false;
     }
@@ -11101,7 +12314,6 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     weldPosePath = dir.filePath(WELD_POSE_FILE_NAME);
     seamCompPath = dir.filePath(WELD_POSE_SEAM_COMP_FILE_NAME);
 
-    const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
     QString sourceLaserPath = dir.filePath(RAW_LASER_FILE_NAME);
     if (!QFileInfo::exists(sourceLaserPath))
     {
@@ -11144,7 +12356,8 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     {
         const qint64 readStartMs = SteadyNowMs();
         QString laserLoadError;
-        if (RobotDataHelper::LoadIndexedPoint3DFile(sourceLaserPath, laserFitInput, &laserLoadError))
+        if (RobotDataHelper::LoadIndexedPoint3DFile(
+                sourceLaserPath, laserFitInput, &laserLoadError, stopRequested))
         {
             logReadRate(QStringLiteral("原始激光点"), sourceLaserPath, laserFitInput.size(), SteadyNowMs() - readStartMs);
         }
@@ -11160,7 +12373,8 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     if (QFileInfo::exists(workpieceCloudPath))
     {
         const qint64 readStartMs = SteadyNowMs();
-        if (RobotDataHelper::LoadIndexedPoint3DFile(workpieceCloudPath, workpieceCloudInput, &workpieceLoadError))
+        if (RobotDataHelper::LoadIndexedPoint3DFile(
+                workpieceCloudPath, workpieceCloudInput, &workpieceLoadError, stopRequested))
         {
             logReadRate(QStringLiteral("完整点云"), workpieceCloudPath, workpieceCloudInput.size(), SteadyNowMs() - readStartMs);
         }
@@ -11170,8 +12384,14 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         }
     }
 
-    const RobotCalculation::LowerWeldFilterParams originalFitParams =
+    if (cancellationPoint(QStringLiteral("读取点云后")))
+    {
+        return false;
+    }
+
+    RobotCalculation::LowerWeldFilterParams originalFitParams =
         BuildOriginalTrackFitParams(param, pointCloudSettings);
+    originalFitParams.stopRequested = stopRequested;
 
     // ①②③ 三种点云链方法都以完整点云为输入（③另需相机轨迹点做投影种子，④只用激光轨迹点）。
     const bool canUseExternalCloud =
@@ -11213,8 +12433,22 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             laserDir,
             appendLog,
             &usedExternalLibrary,
-            &externalExtraction);
-    EnsureWorkpieceMeshCacheFromCloud(laserDir, workpieceCloudInput, appendLog);
+            &externalExtraction,
+            stopRequested);
+    if (cancellationPoint(QStringLiteral("特征分析后")))
+    {
+        return false;
+    }
+    // 网格缓存只是查看器加速材料，不影响重建/焊接安全。当调用方
+    // 提供取消令牌（预览 worker）时不进入尚未支持中断的大网格构建。
+    if (!stopRequested)
+    {
+        EnsureWorkpieceMeshCacheFromCloud(laserDir, workpieceCloudInput, appendLog);
+    }
+    else if (appendLog)
+    {
+        appendLog(QStringLiteral("可取消重建跳过非必要的工件网格缓存生成。"));
+    }
     if (!originalAnalysis.ok)
     {
         error = QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error);
@@ -11231,7 +12465,10 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
                 QString(),
                 QString(),
                 -1,
-                reportError)
+                productionContext,
+                QStringLiteral("validatedRebuild"),
+                reportError,
+                stopRequested)
             && appendLog)
         {
             appendLog(QString("保存点云质量失败报告失败：%1").arg(reportError));
@@ -11242,14 +12479,15 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     if (usedExternalLibrary)
     {
         QDir().mkpath(sdkPointCloudDir);
-        if (!SaveTextLines(sdkSeamExtractedPath, BuildSdkTrackOutputLines(externalExtraction.rawPoints, "sdk_extracted"), error))
+        if (!SaveTextLines(sdkSeamExtractedPath, BuildSdkTrackOutputLines(externalExtraction.rawPoints, "sdk_extracted"), error, stopRequested))
         {
             return false;
         }
         if (!SaveTextLines(
                 sdkSeamExtracted2mmPath,
                 BuildSdkTrackOutputLines(externalExtraction.keyPointExpandedPoints, "sdk_keypoint_2mm"),
-                error))
+                error,
+                stopRequested))
         {
             return false;
         }
@@ -11268,11 +12506,16 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         }
     }
 
-    if (!SaveTextLines(preservePath, BuildFilterOutputLines(originalAnalysis.filterResult), error))
+    if (cancellationPoint(QStringLiteral("SDK 辅助输出后")))
     {
         return false;
     }
-    if (!SaveTextLines(classifiedPath, BuildClassifiedOutputLines(originalAnalysis.classificationResult), error))
+
+    if (!SaveTextLines(preservePath, BuildFilterOutputLines(originalAnalysis.filterResult), error, stopRequested))
+    {
+        return false;
+    }
+    if (!SaveTextLines(classifiedPath, BuildClassifiedOutputLines(originalAnalysis.classificationResult), error, stopRequested))
     {
         return false;
     }
@@ -11294,11 +12537,11 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         }
     }
 
-    if (!SaveTextLines(keyPointsPath, BuildKeyPointOutputLines(originalAnalysis.keyPoints), error))
+    if (!SaveTextLines(keyPointsPath, BuildKeyPointOutputLines(originalAnalysis.keyPoints), error, stopRequested))
     {
         return false;
     }
-    if (!SaveTextLines(classifiedNoisePath, BuildNoiseOutputLines(laserFitInput, originalAnalysis.filterResult), error))
+    if (!SaveTextLines(classifiedNoisePath, BuildNoiseOutputLines(laserFitInput, originalAnalysis.filterResult), error, stopRequested))
     {
         return false;
     }
@@ -11310,11 +12553,12 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         if (!SaveTextLines(
                 cornerCompClassifiedPath,
                 BuildClassifiedOutputLines(originalAnalysis.cornerCompensatedClassificationResult),
-                error))
+                error,
+                stopRequested))
         {
             return false;
         }
-        if (!SaveTextLines(cornerCompKeyPointsPath, BuildKeyPointOutputLines(originalAnalysis.cornerCompensatedKeyPoints), error))
+        if (!SaveTextLines(cornerCompKeyPointsPath, BuildKeyPointOutputLines(originalAnalysis.cornerCompensatedKeyPoints), error, stopRequested))
         {
             return false;
         }
@@ -11325,6 +12569,11 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             originalAnalysis.cornerCompensatedClassificationResult.error.isEmpty()
                 ? QStringLiteral("未找到可补偿的上坡/下坡拐点或补偿值为 0。")
                 : originalAnalysis.cornerCompensatedClassificationResult.error));
+    }
+
+    if (cancellationPoint(QStringLiteral("原子写入特征产物后")))
+    {
+        return false;
     }
 
     QString measurementPoseError;
@@ -11394,7 +12643,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         error = "焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。";
         return false;
     }
-    if (!SaveTextLines(weldPosePath, weldPoseLines, error))
+    if (!SaveTextLines(weldPosePath, weldPoseLines, error, stopRequested))
     {
         return false;
     }
@@ -11413,7 +12662,12 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         seamCompSummary,
         error,
         &generatedSeamCompSha256,
-        &generatedSeamCompSize))
+        &generatedSeamCompSize,
+        stopRequested))
+    {
+        return false;
+    }
+    if (cancellationPoint(QStringLiteral("焊道补偿原子输出后")))
     {
         return false;
     }
@@ -11435,7 +12689,8 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             validatedSourcePoseSize,
             validatedPoseSha256,
             validatedPoseSize,
-            error);
+            error,
+            stopRequested);
     if (!finalArtifactValid)
     {
         if (pointCloudSettings.validationPolicy
@@ -11466,7 +12721,14 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             seamCompPath,
             validatedPoseSha256,
             validatedPoseSize,
-            error))
+            productionContext,
+            QStringLiteral("validatedRebuild"),
+            error,
+            stopRequested))
+    {
+        return false;
+    }
+    if (cancellationPoint(QStringLiteral("质量证明提交后")))
     {
         return false;
     }
@@ -11491,17 +12753,36 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         {
             appendLog("当前为点云质量审计模式：跳过 STEP job 生成并禁止进入焊接。");
         }
+        if (!qualityGateReplacement.Complete(error))
+        {
+            error = QStringLiteral("审计重建完成，但解除点云证明拒绝闭锁失败：") + error;
+            return false;
+        }
         return true;
     }
     // 焊道补偿生成后立即同步生成 STEP job(srp/srd)到焊道同目录，便于提取查看，不必等下枪执行才保存。
     {
         QString jobName, jobSrp, jobSrd, jobSum, jobErr;
         if (GenerateStepWeldProgramFiles(QString::fromStdString(param.sRobotName), seamCompPath,
-                QFileInfo(seamCompPath).absolutePath(), true, 0.0, jobName, jobSrp, jobSrd, jobSum, jobErr))
+                QFileInfo(seamCompPath).absolutePath(), true, 0.0, jobName, jobSrp, jobSrd, jobSum, jobErr,
+                0.0, true, WeldPoseSource::PointCloudProduction, productionExpectation, true))
         {
             if (appendLog) { appendLog(QString("STEP焊接程序(job)已同步生成：srp=%1，srd=%2").arg(jobSrp, jobSrd)); }
         }
         else if (appendLog) { appendLog(QString("STEP焊接程序(job)同步生成失败(不影响焊道)：%1").arg(jobErr)); }
+    }
+    if (cancellationPoint(QStringLiteral("STEP 程序同步后")))
+    {
+        return false;
+    }
+    if (!qualityGateReplacement.Complete(error))
+    {
+        preservePath.clear();
+        weldPosePath.clear();
+        seamCompPath.clear();
+        summary.clear();
+        error = QStringLiteral("重建产物完成，但解除点云证明拒绝闭锁失败：") + error;
+        return false;
     }
     return true;
 }
@@ -11534,7 +12815,11 @@ QString MeasureThenWeldService::BuildResultDir(const std::string& robotName) con
     return QDir::toNativeSeparators(flowDir);
 }
 
-bool MeasureThenWeldService::SaveTextLines(const QString& filePath, const std::vector<QString>& lines, QString& error) const
+bool MeasureThenWeldService::SaveTextLines(
+    const QString& filePath,
+    const std::vector<QString>& lines,
+    QString& error,
+    const StopRequestedCallback& stopRequested) const
 {
     const QFileInfo fileInfo(filePath);
     const QDir parentDir = fileInfo.dir();
@@ -11556,8 +12841,15 @@ bool MeasureThenWeldService::SaveTextLines(const QString& filePath, const std::v
     constexpr int kFlushThreshold = 4 * 1024 * 1024;
     QByteArray buffer;
     buffer.reserve(kFlushThreshold + 256);
+    size_t lineIndex = 0;
     for (const QString& line : lines)
     {
+        if ((lineIndex++ & 0xffU) == 0U && stopRequested && stopRequested())
+        {
+            error = QString("已取消写入：%1").arg(filePath);
+            file.cancelWriting();
+            return false;
+        }
         buffer += line.toUtf8();
         buffer += '\n';
         if (buffer.size() >= kFlushThreshold)
@@ -11570,6 +12862,12 @@ bool MeasureThenWeldService::SaveTextLines(const QString& filePath, const std::v
             }
             buffer.clear();
         }
+    }
+    if (stopRequested && stopRequested())
+    {
+        error = QString("已取消写入：%1").arg(filePath);
+        file.cancelWriting();
+        return false;
     }
     if (!buffer.isEmpty() && file.write(buffer) != buffer.size())
     {
@@ -11592,7 +12890,8 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
     QString& summary,
     QString& error,
     QString* generatedSha256,
-    qint64* generatedSize) const
+    qint64* generatedSize,
+    const StopRequestedCallback& stopRequested) const
 {
     summary.clear();
     error.clear();
@@ -11606,7 +12905,8 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
     }
 
     QVector<WeldPoseFileRecord> records;
-    if (!LoadWeldPoseFileRecords(inputPath, records, error))
+    if (!LoadWeldPoseFileRecords(
+            inputPath, records, error, nullptr, nullptr, stopRequested))
     {
         return false;
     }
@@ -11725,7 +13025,9 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     QString& error,
     double overrideFinalStepMm,
     bool allowPointwiseWeave,
-    WeldPoseSource poseSource) const
+    WeldPoseSource poseSource,
+    const PointCloudProductionExpectation& authorizationExpectation,
+    bool allowActiveProofReplacement) const
 {
     programName.clear();
     srpPath.clear();
@@ -11758,13 +13060,25 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
             robotName,
             loadedPoseSha256,
             loadedPoseSize,
-            error))
+            error,
+            nullptr,
+            &authorizationExpectation,
+            allowActiveProofReplacement))
     {
         return false;
     }
 
     T_PRECISE_MEASURE_PARAM param = BuildMeasureWeldParamShell(robotName);
     WeldPosePreset preset = LoadWeldPosePreset(param);
+    if (actualWeld && (!preset.weldProcessLoaded || !preset.weldProcessSafetyError.isEmpty()))
+    {
+        error = !preset.weldProcessSafetyError.isEmpty()
+            ? preset.weldProcessSafetyError
+            : (preset.weldProcessLoadError.isEmpty()
+                ? QStringLiteral("当前实际焊接工艺未能加载，禁止生成实际焊接程序。")
+                : preset.weldProcessLoadError);
+        return false;
+    }
     if (!allowPointwiseWeave && preset.weaveEnabled && preset.weaveAppPointwise)
     {
         error = QStringLiteral("pointwise 自定义摆动已被禁用(allowPointwiseWeave=false)，无法生成轨迹");
@@ -11837,7 +13151,10 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
             robotName,
             loadedPoseSha256,
             loadedPoseSize,
-            error))
+            error,
+            nullptr,
+            &authorizationExpectation,
+            allowActiveProofReplacement))
     {
         return false;
     }
@@ -12132,7 +13449,8 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
             robotName,
             loadedPoseSha256,
             loadedPoseSize,
-            error))
+            error,
+            pRobotDriver))
     {
         return false;
     }
@@ -12169,7 +13487,8 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
                 robotName,
                 loadedPoseSha256,
                 loadedPoseSize,
-                error))
+                error,
+                pRobotDriver))
         {
             return false;
         }
@@ -12222,7 +13541,8 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
             robotName,
             loadedPoseSha256,
             loadedPoseSize,
-            error))
+            error,
+            pRobotDriver))
     {
         return false;
     }
@@ -12251,7 +13571,8 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
             robotName,
             loadedPoseSha256,
             loadedPoseSize,
-            error))
+            error,
+            pRobotDriver))
     {
         return false;
     }
@@ -12313,6 +13634,14 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     if (pRobotDriver == nullptr)
     {
         error = "机器人驱动为空。";
+        return false;
+    }
+    // 本入口始终会下发真实机器人运动；SyntheticVirtualTest 只放宽点云来源，绝不表示离线。
+    // 没有持久准备/终态回调的 CLI、虚拟焊道或未来调用点必须在第一条运动前 fail-closed。
+    if (!executionPrepared || !executionFinished)
+    {
+        error = QStringLiteral(
+            "生产焊接缺少START前持久门禁或安全终态回调，已在任何机器人运动前拒绝执行。");
         return false;
     }
     const QString qualityProofRobotName = QString::fromStdString(param.sRobotName).trimmed().isEmpty()
@@ -12416,6 +13745,25 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         return false;
     }
 
+    // Keep a non-blocking read-use lease for the entire real motion lifecycle.
+    // BeginProofReplacement takes the exclusive writer side and therefore cannot
+    // install a denial tombstone between a successful final verification and any
+    // Move/START/Call below.  Pure STEP file generation never enters this function
+    // and deliberately does not receive a motion lease.
+    PointCloudProofIntegrity::ProofUseLease qualityProofUseLease;
+    if (poseSource == WeldPoseSource::PointCloudProduction)
+    {
+        const QString qualityProofPath = QFileInfo(qualityProofPosePath).dir().filePath(
+            QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
+        if (!PointCloudProofIntegrity::AcquireProofUseLease(
+                qualityProofPath, qualityProofUseLease, error))
+        {
+            error = QStringLiteral(
+                "生产焊接无法取得点云证明全生命周期只读租约，已在任何运动前拒绝：") + error;
+            return false;
+        }
+    }
+
     const auto verifyLoadedPoseAuthorization = [&]() -> bool
     {
         return VerifyWeldPoseAuthorization(
@@ -12424,7 +13772,8 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             qualityProofRobotName,
             qualityProofPoseSha256,
             qualityProofPoseSize,
-            error);
+            error,
+            pRobotDriver);
     };
     if (!verifyLoadedPoseAuthorization())
     {
@@ -12432,6 +13781,16 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     }
 
     WeldPosePreset weldPosePreset = LoadWeldPosePreset(param);
+    if (param.bDoActualWeld
+        && (!weldPosePreset.weldProcessLoaded || !weldPosePreset.weldProcessSafetyError.isEmpty()))
+    {
+        error = !weldPosePreset.weldProcessSafetyError.isEmpty()
+            ? weldPosePreset.weldProcessSafetyError
+            : (weldPosePreset.weldProcessLoadError.isEmpty()
+                ? QStringLiteral("当前实际焊接工艺未能加载，已在机器人运动前中止。")
+                : weldPosePreset.weldProcessLoadError);
+        return false;
+    }
     if (!allowPointwiseWeave && weldPosePreset.weaveEnabled && weldPosePreset.weaveAppPointwise)
     {
         error = QStringLiteral("pointwise 自定义摆动已被禁用(allowPointwiseWeave=false)，无法生成轨迹");
@@ -12623,6 +13982,8 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     executionIdentity.effectiveFinalStepMm = effectiveFinalStepMm;
     executionIdentity.parameterFingerprint = executionParameterFingerprint;
     executionIdentity.trajectoryInExecutionOrder = true;
+    executionIdentity.requiredEndSafePose = endSafeCoors;
+    executionIdentity.safeMoveSpeedMmPerMin = safeMoveSpeedMmPerMin;
     executionIdentity.resumeCheckpointSupported = !(param.bDoActualWeld
         && (weldPosePreset.weaveEnabled || weldPosePreset.trackEnabled));
     if (!executionIdentity.resumeCheckpointSupported)
@@ -12783,32 +14144,113 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     class ExecutionContextGuard
     {
     public:
-        explicit ExecutionContextGuard(const WeldExecutionFinishedCallback& callback)
-            : m_callback(callback)
+        ExecutionContextGuard(
+            RobotDriverAdaptor* driver,
+            const WeldExecutionFinishedCallback& callback)
+            : m_driver(driver), m_callback(callback)
         {
         }
         ~ExecutionContextGuard()
         {
-            Finish(false);
-        }
-        void Arm() { m_armed = true; }
-        void Finish(bool programCompleted)
-        {
-            if (!m_armed)
+            if (!m_armed || m_programCompletionPersisted)
             {
                 return;
             }
-            m_armed = false;
+            if (m_result.programStartAttempted)
+            {
+                RobotOperationLease::RequestCancellation(m_driver);
+            }
+            m_result.state = WeldExecutionTerminalState::Incomplete;
+            m_result.reason = m_result.programStartAttempted
+                ? QStringLiteral("机器人程序START已尝试，但未形成完整焊接+安全回撤终态；保持持久闭锁。")
+                : QStringLiteral("已确认未尝试机器人程序START，释放本轮预锁存门禁。");
+            m_result.observedAtUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+            QString ignoredError;
             if (m_callback)
             {
-                m_callback(programCompleted);
+                m_callback(m_result, ignoredError);
             }
+        }
+        void Arm(const WeldExecutionIdentity& identity)
+        {
+            m_result.requiredSafePose = identity.requiredEndSafePose;
+            m_result.safeMoveSpeedMmPerMin = identity.safeMoveSpeedMmPerMin;
+            m_armed = true;
+        }
+        void MarkProgramStartAttempted()
+        {
+            if (m_armed)
+            {
+                m_result.programStartAttempted = true;
+            }
+        }
+        bool IsArmed() const { return m_armed; }
+        bool PersistProgramCompletedUnretracted(const QString& reason, QString& persistError)
+        {
+            if (!m_armed)
+            {
+                persistError = QStringLiteral("焊接安全终态门禁未预先冻结。");
+                return false;
+            }
+            m_result.state = WeldExecutionTerminalState::ProgramCompletedUnretracted;
+            m_result.reason = reason;
+            m_result.observedAtUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+            T_ROBOT_COORS observed;
+            m_result.observedTerminalPoseValid =
+                m_driver != nullptr && m_driver->TryGetCurrentPos(observed);
+            if (m_result.observedTerminalPoseValid)
+            {
+                m_result.observedTerminalPose = observed;
+            }
+            if (!m_callback || !m_callback(m_result, persistError))
+            {
+                return false;
+            }
+            m_programCompletionPersisted = true;
+            return true;
+        }
+        void UpdateUnretractedReason(const QString& reason)
+        {
+            if (!m_armed || !m_programCompletionPersisted || !m_callback)
+            {
+                return;
+            }
+            m_result.state = WeldExecutionTerminalState::ProgramCompletedUnretracted;
+            m_result.reason = reason;
+            m_result.observedAtUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+            QString ignoredError;
+            m_callback(m_result, ignoredError);
+        }
+        bool FinishSafelyRetracted(const T_ROBOT_COORS& observed, QString& persistError)
+        {
+            if (!m_armed || !m_programCompletionPersisted)
+            {
+                persistError = QStringLiteral("焊接程序完成/未回撤终态尚未持久化，禁止释放安全门禁。");
+                return false;
+            }
+            m_result.state = WeldExecutionTerminalState::SafelyRetracted;
+            m_result.reason = QStringLiteral("焊接程序完成，收枪安全位置运动及实际位置回读均已验证成功。");
+            m_result.observedAtUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+            m_result.observedTerminalPose = observed;
+            m_result.observedTerminalPoseValid = true;
+            if (m_callback)
+            {
+                if (!m_callback(m_result, persistError))
+                {
+                    return false;
+                }
+            }
+            m_armed = false;
+            return true;
         }
 
     private:
+        RobotDriverAdaptor* m_driver = nullptr;
         const WeldExecutionFinishedCallback& m_callback;
+        WeldExecutionTerminalResult m_result;
         bool m_armed = false;
-    } executionContextGuard(executionFinished);
+        bool m_programCompletionPersisted = false;
+    } executionContextGuard(pRobotDriver, executionFinished);
 
     // 自动流程的最后进入门禁：必须放在所有解析/生成之后、第一条机器人运动之前，
     // 避免用户在扫描完成到焊接函数真正开始之间按下停止仍触发下枪运动。
@@ -13015,7 +14457,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
                     : prepareError;
                 return false;
             }
-            executionContextGuard.Arm();
+            executionContextGuard.Arm(executionIdentity);
         }
 
         if (stopBeforeNextWeldAction("启动焊接轨迹程序"))
@@ -13041,6 +14483,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             error = QStringLiteral("焊接程序启动前焊道授权复核失败：") + error;
             return false;
         }
+        executionContextGuard.MarkProgramStartAttempted();
         if (!pFanucDriver->CallJobAndWaitStateDone(
             programName,
             FANUC_MOTION_STATE_REG,
@@ -13059,8 +14502,6 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
                 .arg(lastState);
             return false;
         }
-        executionContextGuard.Finish(true);
-
         if (appendLog)
         {
             appendLog(QString("焊接轨迹程序执行完成：%1，R[%2]=%3")
@@ -13149,7 +14590,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
                     : prepareError;
                 return false;
             }
-            executionContextGuard.Arm();
+            executionContextGuard.Arm(executionIdentity);
         }
         if (stopBeforeNextWeldAction("启动STEP焊接轨迹程序"))
         {
@@ -13183,6 +14624,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
             error = QStringLiteral("STEP 焊接程序启动前焊道授权复核失败：") + error;
             return false;
         }
+        executionContextGuard.MarkProgramStartAttempted();
         const int ret = pStepDriver != nullptr
             ? pStepDriver->ContiMoveAnyWithProgramName(moveInfos, stepProgramName)
             : pRobotDriver->ContiMoveAny(moveInfos);
@@ -13204,20 +14646,50 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
                 : QString("STEP焊接轨迹等待完成失败：CheckRobotDone=%1，%2").arg(lastState).arg(detail);
             return false;
         }
-        executionContextGuard.Finish(true);
         if (appendLog)
         {
             appendLog(QString("STEP焊接轨迹执行完成：CheckRobotDone=%1").arg(lastState));
         }
     }
 
-    if (checkpoint && !checkpoint(
-        "焊后确认",
-        QString("焊接轨迹已执行完成。\n程序：%1\n完成状态=%2\n是否继续移动到收枪安全位置？")
-            .arg(programNameText)
-            .arg(lastState)))
+    QString terminalPersistError;
+    if (executionContextGuard.IsArmed()
+        && !executionContextGuard.PersistProgramCompletedUnretracted(
+            QStringLiteral("焊接程序已确认完成，仅待用户确认并执行收枪安全回撤。"),
+            terminalPersistError))
     {
-        error = "用户在焊后确认节点取消了流程。";
+        RobotOperationLease::RequestCancellation(pRobotDriver);
+        error = QStringLiteral("焊接程序已完成，但持久化未回撤安全门禁失败；已锁存安全停止：")
+            + terminalPersistError;
+        return false;
+    }
+
+    const bool postWeldConfirmed = !checkpoint || checkpoint(
+        "焊后确认",
+        QString("焊接轨迹已执行完成。\n程序：%1\n完成状态=%2\n"
+                "确定：移动到收枪安全位置并验证。\n"
+                "取消：立即终止流程，保留“程序已完成/未回撤”持久锁；之后只能走焊后安全回撤恢复，绝不会重焊焊缝。")
+            .arg(programNameText)
+            .arg(lastState));
+    if (!postWeldConfirmed)
+    {
+        executionContextGuard.UpdateUnretractedReason(
+            QStringLiteral("用户在焊后确认选择取消；未发起任何新运动，保留未回撤恢复门禁。"));
+        RobotOperationLease::RequestCancellation(pRobotDriver);
+        error = QStringLiteral(
+            "用户在焊后确认节点取消了流程；焊接程序已完成但未安全回撤，恢复门禁和端点闭锁已保留。");
+        return false;
+    }
+
+    const bool stopLatched = RobotOperationLease::IsCancellationRequested(pRobotDriver)
+        || (stopRequested && stopRequested());
+    if (!WeldExecutionSafety::ShouldAttemptMandatoryRetreat(postWeldConfirmed, stopLatched))
+    {
+        executionContextGuard.UpdateUnretractedReason(
+            QStringLiteral("焊接程序完成后检测到安全 STOP 锁存；禁止绕过 STOP 自动回撤。"));
+        RobotOperationLease::RequestCancellation(pRobotDriver);
+        error = QStringLiteral(
+            "焊接程序已完成，但安全 STOP 已锁存；未发起收枪运动，未回撤恢复门禁保持有效。");
         return false;
     }
 
@@ -13229,7 +14701,33 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         appendLog,
         setFlowStep))
     {
-        error = "移动到收枪安全位置失败。";
+        const QString retreatFailure = QStringLiteral("移动到收枪安全位置失败；程序已完成但回撤未验证。");
+        if (RobotOperationLease::MotionCompletionPending(pRobotDriver)
+            && !RobotOperationLease::IsCancellationRequested(pRobotDriver))
+        {
+            RobotOperationLease::StopAndConfirmUnverifiedMotion(pRobotDriver);
+        }
+        RobotOperationLease::RequestCancellation(pRobotDriver);
+        executionContextGuard.UpdateUnretractedReason(retreatFailure);
+        error = retreatFailure;
+        return false;
+    }
+
+    T_ROBOT_COORS observedSafePose;
+    QString safePoseError;
+    if (!VerifyRobotAtSafePose(pRobotDriver, endSafeCoors, observedSafePose, safePoseError))
+    {
+        RobotOperationLease::RequestCancellation(pRobotDriver);
+        executionContextGuard.UpdateUnretractedReason(safePoseError);
+        error = safePoseError;
+        return false;
+    }
+    QString finishPersistError;
+    if (executionContextGuard.IsArmed()
+        && !executionContextGuard.FinishSafelyRetracted(observedSafePose, finishPersistError))
+    {
+        RobotOperationLease::RequestCancellation(pRobotDriver);
+        error = QStringLiteral("安全回撤已验证，但持久终态写回失败，仍保持闭锁：") + finishPersistError;
         return false;
     }
 
@@ -13251,7 +14749,8 @@ bool MeasureThenWeldService::LoadCompPreviewBaseline(
     CompPreviewKind kind,
     const QString& laserDir,
     QVector<CompPreviewPoint>& baseline,
-    QString& error) const
+    QString& error,
+    const StopRequestedCallback& stopRequested) const
 {
     baseline.clear();
     QDir dir(laserDir);
@@ -13273,8 +14772,15 @@ bool MeasureThenWeldService::LoadCompPreviewBaseline(
         }
         QTextStream keyStream(&keyFile);
         keyStream.setEncoding(QStringConverter::Utf8);
+        quint64 lineIndex = 0;
         while (!keyStream.atEnd())
         {
+            if ((lineIndex++ & 0xffU) == 0U && stopRequested && stopRequested())
+            {
+                baseline.clear();
+                error = QStringLiteral("已取消读取拐点预览。");
+                return false;
+            }
             const QString lineText = keyStream.readLine().trimmed();
             if (lineText.isEmpty() || lineText.startsWith('#'))
             {
@@ -13320,8 +14826,15 @@ bool MeasureThenWeldService::LoadCompPreviewBaseline(
     }
     QTextStream stream(&file);
     stream.setEncoding(QStringConverter::Utf8);
+    quint64 lineIndex = 0;
     while (!stream.atEnd())
     {
+        if ((lineIndex++ & 0xffU) == 0U && stopRequested && stopRequested())
+        {
+            baseline.clear();
+            error = QStringLiteral("已取消读取基准焊道预览。");
+            return false;
+        }
         const QString line = stream.readLine();
         WeldPoseFileRecord record;
         if (!TryParseWeldPoseFileRecord(line, record))
@@ -13356,7 +14869,8 @@ bool MeasureThenWeldService::LoadCompPreviewBaseline(
 bool MeasureThenWeldService::LoadCompPreviewOriginalTrack(
     const QString& laserDir,
     QVector<CompPreviewPoint>& points,
-    QString& error) const
+    QString& error,
+    const StopRequestedCallback& stopRequested) const
 {
     points.clear();
     QDir dir(laserDir);
@@ -13374,8 +14888,15 @@ bool MeasureThenWeldService::LoadCompPreviewOriginalTrack(
     }
     QTextStream stream(&file);
     stream.setEncoding(QStringConverter::Utf8);
+    quint64 lineIndex = 0;
     while (!stream.atEnd())
     {
+        if ((lineIndex++ & 0xffU) == 0U && stopRequested && stopRequested())
+        {
+            points.clear();
+            error = QStringLiteral("已取消读取原始焊道预览。");
+            return false;
+        }
         const QString lineText = stream.readLine().trimmed();
         if (lineText.isEmpty() || lineText.startsWith('#'))
         {
@@ -13730,7 +15251,8 @@ bool LoadSampledPointFile(
     const QString& filePath,
     int maxPoints,
     QVector<MeasureThenWeldService::CompPreviewPoint>& points,
-    QString& error)
+    QString& error,
+    const MeasureThenWeldService::StopRequestedCallback& stopRequested)
 {
     points.clear();
     QFile file(filePath);
@@ -13748,6 +15270,12 @@ bool LoadSampledPointFile(
     qint64 lineIndex = 0;
     while (!stream.atEnd())
     {
+        if ((lineIndex & 0xff) == 0 && stopRequested && stopRequested())
+        {
+            points.clear();
+            error = QStringLiteral("已取消读取原始点云预览。");
+            return false;
+        }
         const QString line = stream.readLine();
         if ((lineIndex++ % stride) != 0)
         {
@@ -13908,7 +15436,8 @@ bool MeasureThenWeldService::LoadCompPreviewRawCloud(
     const QString& laserDir,
     QVector<CompPreviewPoint>& points,
     QString& error,
-    QString* sourceDescription) const
+    QString* sourceDescription,
+    const StopRequestedCallback& stopRequested) const
 {
     points.clear();
     if (sourceDescription != nullptr)
@@ -13929,7 +15458,8 @@ bool MeasureThenWeldService::LoadCompPreviewRawCloud(
     const QString methodFilePath = dir.filePath(methodFileName);
     QString methodError;
     if (QFileInfo::exists(methodFilePath)
-        && LoadSampledPointFile(methodFilePath, std::numeric_limits<int>::max(), points, methodError))
+        && LoadSampledPointFile(
+            methodFilePath, std::numeric_limits<int>::max(), points, methodError, stopRequested))
     {
         if (sourceDescription != nullptr)
         {
@@ -13941,13 +15471,21 @@ bool MeasureThenWeldService::LoadCompPreviewRawCloud(
     }
 
     QVector<RobotCalculation::IndexedPoint3D> rawPoints;
-    if (!RobotDataHelper::LoadIndexedPoint3DFile(dir.filePath(RAW_LASER_FILE_NAME), rawPoints, &error))
+    if (!RobotDataHelper::LoadIndexedPoint3DFile(
+            dir.filePath(RAW_LASER_FILE_NAME), rawPoints, &error, stopRequested))
     {
         return false;
     }
     points.reserve(rawPoints.size());
+    int rawIndex = 0;
     for (const RobotCalculation::IndexedPoint3D& raw : rawPoints)
     {
+        if ((rawIndex++ & 0xff) == 0 && stopRequested && stopRequested())
+        {
+            points.clear();
+            error = QStringLiteral("已取消生成原始点云预览。");
+            return false;
+        }
         CompPreviewPoint point;
         point.x = raw.point.x();
         point.y = raw.point.y();
@@ -13971,9 +15509,19 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
     const QVector<CompPreviewPoint>& baseline,
     const CompPreviewEditValues& currentEdits,
     const CompPreviewEditValues& savedEdits,
-    bool includePoseArrows) const
+    bool includePoseArrows,
+    const StopRequestedCallback& stopRequested) const
 {
     CompPreviewStages stages;
+    const auto canceled = [&stopRequested]()
+    {
+        return stopRequested && stopRequested();
+    };
+    if (canceled())
+    {
+        stages.error = QStringLiteral("已取消计算补偿预览。");
+        return stages;
+    }
     if (baseline.isEmpty())
     {
         stages.error = QStringLiteral("没有可用的基准焊道点。");
@@ -14006,8 +15554,14 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
     // 位移纯加性，等价于用当前值重跑姿态生成。
     QVector<WeldPoseFileRecord> records;
     records.reserve(baseline.size());
+    int baseIndex = 0;
     for (const CompPreviewPoint& base : baseline)
     {
+        if ((baseIndex++ & 0xff) == 0 && canceled())
+        {
+            stages.error = QStringLiteral("已取消计算姿态补偿预览。");
+            return stages;
+        }
         WeldPoseFileRecord record;
         record.weldIndex = base.weldIndex;
         record.rawIndex = base.rawIndex;
@@ -14092,11 +15646,21 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
         preset.seamCompSlots[slotIndex].weldSeamDirComp = currentEdits.weldSeamDirComp[slotIndex];
     }
     WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
+    if (canceled())
+    {
+        stages.error = QStringLiteral("已取消计算焊道补偿预览。");
+        return stages;
+    }
     stages.seamComp = snapshotRecords(records);
 
     // 阶段「圆弧过渡」：完整后处理（端点/自交裁剪、拐点恢复、加密、圆弧过渡、锐角裁剪、平滑、重编号）。
     const QVector<WeldPoseFileRecord> recordsBeforeTrim = records;
     FinalizeSeamCompedWeldPoseRecords(preset, recordsBeforeTrim, records, compStats);
+    if (canceled())
+    {
+        stages.error = QStringLiteral("已取消计算圆弧过渡预览。");
+        return stages;
+    }
     if (records.isEmpty())
     {
         records = recordsBeforeTrim;  // 后处理裁空则回退显示纯补偿平移结果

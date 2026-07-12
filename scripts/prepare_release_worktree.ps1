@@ -2,12 +2,15 @@ param(
     [Parameter(Mandatory = $true)][string]$TrustedSourceRoot,
     [Parameter(Mandatory = $true)][string]$TargetWorktreeRoot,
     [Parameter(Mandatory = $true)][string]$AppVersion,
-    [Parameter(Mandatory = $true)][ValidateSet("neutral", "brand")][string]$Channel
+    [Parameter(Mandatory = $true)][ValidateSet("neutral", "brand")][string]$Channel,
+    [Parameter(Mandatory = $true)][string]$PythonExecutable,
+    [Parameter(Mandatory = $true)][string]$PythonSha256
 )
 
 $ErrorActionPreference = "Stop"
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptRoot "release_gate_common.ps1")
+Set-ReleasePythonTool -PythonExecutable $PythonExecutable -PythonSha256 $PythonSha256
 
 Assert-ReleaseVersion $AppVersion
 $trustedRoot = Resolve-ReleaseGatePath $TrustedSourceRoot
@@ -50,7 +53,10 @@ if ((Get-ReleaseFileSha256 $trustedMigrationSource) -cne (Get-ReleaseFileSha256 
 }
 $trustedConfigExe = Join-Path $trustedRoot "tools\ConfigMigrate.exe"
 $trustedConfigBuilder = Join-Path $trustedRoot "scripts\build_config_migrate.ps1"
-& $trustedConfigBuilder -OutputPath $trustedConfigExe | Out-Null
+& $trustedConfigBuilder `
+    -PythonExecutable $PythonExecutable `
+    -PythonSha256 $PythonSha256 `
+    -OutputPath $trustedConfigExe | Out-Null
 $trustedConfig = Assert-ConfigMigrateProvenance -RepoRoot $trustedRoot -ExecutablePath $trustedConfigExe
 
 foreach ($item in @($trustedManifest.manifest.files)) {

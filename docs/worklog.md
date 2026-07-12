@@ -1,9 +1,13 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-07-12`
+- 人工整理日期：`2026-07-13`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-07-13
+
+- 版本 v2026.07.13.0610：完成运动恢复、点云授权、异步生命周期与发版可信链的第二轮系统加固。① 中性 GUI、品牌 GUI 与控制型 CLI 共用机器级单实例互斥，第二进程不能绕过进程内机器人操作租约；持久恢复记录纳入端点别名/索引、工程/程序内容身份和完整快照 CAS，暂停或中断重启在首条运动前必须完成可验证 STOP/Kill/灭弧，STEP SRP/SRD 上传后下载回读 SHA-256/大小，并在 START 后复核窗口保持 STOP 可在 500ms 内完成。② 点云 schema3 质量证明增加 HMAC/DPAPI、授权上下文、执行期租约和可持久回读的 denied tombstone；即使授权文件因独占或 ACL 无法删除，旧授权也不能再次被 Verify 接受。焊接输入、轨迹和恢复数据增加有限值、大小、行数、身份与终态门禁，失败后保持安全闭锁和可恢复收枪。③ 模型对齐、点云读取、BCPD、远端 ZIP/worker、扫描归档和上传统一使用受控取消、进程退出等待、对象所有权与原子提升语义；PLY/点云/轨迹/管理响应加入硬上限。④ 发版链固定可信 Git/GitHub、MSBuild、Qt、Inno Setup、Python/PyInstaller 工具闭包及关键 PE 发布者/哈希，使用净化子进程环境、严格凭据 ACL、SSH 主机指纹和有界 SFTP；GitHub 分支经认证 API 校验后才允许 OTA/GitHub 外发，OTA 升级为签名 v3 清单。⑤ 共享 `uploader` 账号按新策略退出默认入口，设备上传改用独立身份。完整 C++/PowerShell/Python/Windows/Ubuntu 离线矩阵、独立 P1/P2 审查、无并发 Release x64 clean Rebuild 与 AppPaths 动态检查通过。署名 yu1201。
 
 ## 2026-07-12
 

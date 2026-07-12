@@ -1,4 +1,5 @@
 #include "QtWidgetsApplication4.h"
+#include "ApplicationInstanceGuard.h"
 #include "AppPaths.h"
 #include "CliHelp.h"
 #include "ConfigDatabase.h"
@@ -142,7 +143,7 @@ int main(int argc, char *argv[])
         return PrintAppPathsJson();
     }
     app.setApplicationName(BrandingConfig::ApplicationName());
-    app.setApplicationVersion(QStringLiteral("2026.07.12.0606"));
+    app.setApplicationVersion(QStringLiteral("2026.07.13.0610"));
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();
@@ -158,6 +159,22 @@ int main(int argc, char *argv[])
         {
             return PointCloudExtractionProcessor::RunExtractWorker(earlyArgs.mid(workerIdx + 1));
         }
+    }
+
+    // RobotOperationLease 的活动表和 STOP 锁存均为进程内状态。除上面的只读/隔离 worker
+    // 入口外，中性 GUI、品牌 GUI 与 --no-show CLI 必须共享同一个跨进程单实例锁，避免
+    // 第二个进程绕过租约并同时控制实体机器人。
+    QString instanceGuardError;
+    auto instanceGuard = ApplicationInstanceGuard::TryAcquire(
+        ApplicationInstanceGuard::RobotControlScope(), &instanceGuardError);
+    if (!instanceGuard)
+    {
+        QTextStream(stderr) << instanceGuardError << Qt::endl;
+        if (!arguments.contains(QStringLiteral("--no-show")))
+        {
+            QMessageBox::critical(nullptr, QStringLiteral("机器人控制进程互锁"), instanceGuardError);
+        }
+        return 3;
     }
 
     // GUI 模式(非 --no-show)：机器人驱动构造不再同步连接，连接改由后台状态监控线程发起，

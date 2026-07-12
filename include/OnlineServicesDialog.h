@@ -3,7 +3,10 @@
 #include <QDialog>
 #include <QString>
 
+#include "RemoteWorkerLifecycle.h"
+
 #include <functional>
+#include <thread>
 
 class QComboBox;
 class QFrame;
@@ -22,8 +25,9 @@ class QTableWidget;
 class ScanDataUploader;
 
 // 管理页「在线服务」：OTA 在线升级 + 扫描数据上传 + 服务器配置。
-// OTA 源为自建服务器 HTTP 静态目录：{UpdateBaseUrl}/{channel}/latest.json 描述最新版
-// （version/notes/file/sha256），channel 按品牌自动取 neutral 或 brand。
+// OTA 源为自建服务器 HTTP 静态目录：{UpdateBaseUrl}/{channel}/latest-v3.json 描述最新版
+// （version/notes/file/sha256/publishedAtUtc/expiresAtUtc），channel 按品牌自动取
+// neutral 或 brand。客户端只接受验签且处于有效期内的当前 schema 清单。
 // 下载完成 SHA256 校验后提示用户确认，退出程序并以 /SILENT 启动 Inno 安装器。
 class OnlineServicesDialog : public QDialog
 {
@@ -41,6 +45,10 @@ public:
         bool remoteBrowseAllowed = false,
         std::function<bool()> privilegedActionGuard = {},
         QWidget* parent = nullptr);
+    ~OnlineServicesDialog() override;
+
+    bool IsRemoteOperationBusy() const noexcept;
+    void CancelRemoteOperationAndWait(bool permanentShutdown = false);
 
 protected:
     // 关界面时若正在上传：弹「后台继续 / 停止当前上传」，由用户决定。
@@ -84,7 +92,8 @@ private:
     QPushButton* m_uploadNowBtn = nullptr;
     QPushButton* m_uploadPickBtn = nullptr;
 
-    // 远程数据区（admin）：FTP 阻塞操作跑一次性后台线程，回调经 QPointer 防悬空。
+    // 远程数据区（admin）：恰好一个 owned/joinable FTP worker。析构和主程序退出
+    // 都先置取消并 join；worker 只向本对象投递 generation-bound 回调，绝不向 qApp 投递。
     QComboBox* m_remoteDeviceCombo = nullptr;
     QListWidget* m_remoteFileList = nullptr;
     QPushButton* m_remoteRefreshBtn = nullptr;
@@ -92,12 +101,17 @@ private:
     QPushButton* m_remoteDeleteBtn = nullptr;   // 删除选中数据包（服务器上）
     QPushButton* m_remoteMkdirBtn = nullptr;    // 新建设备目录
     bool m_remoteBusy = false;
+    std::thread m_remoteWorker;
+    RemoteWorkerLifecycle m_remoteLifecycle;
     void RefreshRemoteDevices();
     void RefreshRemoteFiles();
     void DownloadSelectedRemoteFiles();
     void DeleteSelectedRemoteFiles();
     void CreateRemoteDeviceDir();
     void SetRemoteBusy(bool busy);
+    bool StartRemoteWorker(std::function<void(quint64)> work);
+    bool RemoteWorkerCancelled(quint64 generation) const noexcept;
+    void FinishRemoteWorker(quint64 generation);
     bool AuthorizePrivilegedAction(const QString& actionName);
 
     // 仪表盘：左侧导航 + 右侧页面栈（云控制台式布局），总览页放大数字统计卡与设备资源表
@@ -152,6 +166,8 @@ private:
     QString m_remotePatchFile;
     QString m_remotePatchSha256;
     qint64 m_remotePatchSize = 0;
+    qint64 m_remoteManifestPublishedAtUtc = 0;
+    qint64 m_remoteManifestExpiresAtUtc = 0;
     bool m_usePatch = false;
     QString m_downloadedPath;
     bool m_checkingForUpdate = false;

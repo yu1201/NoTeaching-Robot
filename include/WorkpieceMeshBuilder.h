@@ -59,8 +59,15 @@ public:
         int targetMaxTriangles = 1500000);
 
     // 二进制 PLY 读写（little-endian；写出格式同时兼容 CloudCompare/MeshLab）。
+    // 读取器只接受本工程的固定 schema，并严格限制文件/头/行/顶点/面数；
+    // cancelRequested 为后台模型配准提供贯穿头、顶点块和面块的协作式取消。
+    using CancelCallback = std::function<bool()>;
     static bool SaveMeshPly(const QString& filePath, const Mesh& mesh, QString& error);
-    static bool LoadMeshPly(const QString& filePath, Mesh& mesh, QString& error);
+    static bool LoadMeshPly(
+        const QString& filePath,
+        Mesh& mesh,
+        QString& error,
+        const CancelCallback& cancelRequested = CancelCallback());
 
     // 二进制 STL 导出（面法线；SolidWorks/UG 等 CAD 软件可直接导入）。
     static bool SaveMeshStl(const QString& filePath, const Mesh& mesh, QString& error);
@@ -69,13 +76,25 @@ public:
     // 可在任意线程调用（生成流程设计为后台线程跑，回调内自行投递回 UI）。
     using ProgressCallback = std::function<bool(int percent, const QString& stage)>;
 
+    struct CloudLoadLimits
+    {
+        // 下列值只允许在测试/更严环境中缩小，LoadCloudPointsWithProgress
+        // 会拒绝任何超过生产硬上限的覆盖值。
+        qint64 maximumFileBytes = 768LL * 1024LL * 1024LL;
+        qint64 maximumPhysicalLines = 10'000'000;
+        qsizetype maximumLineBytes = 64 * 1024;
+        qsizetype maximumValidPoints = 8'000'000;
+        qint64 progressPollIntervalLines = 256;
+    };
+
     // 带进度的完整点云读取（index x y z 文本，手写解析，比正则快一个量级），
     // 进度按已读字节/总字节计。取消时返回 false 且 error 为"已取消"。
     static bool LoadCloudPointsWithProgress(
         const QString& cloudFilePath,
         QVector<RobotCalculation::IndexedPoint3D>& points,
         QString& error,
-        const ProgressCallback& progress = ProgressCallback());
+        const ProgressCallback& progress = ProgressCallback(),
+        const CloudLoadLimits* tighterLimits = nullptr);
 
     // 缓存保障：缓存有效直接返回 true；否则从完整点云文件生成并落盘。
     // cloudFilePath 为 _WorkpieceCloud.txt 全路径；生成失败/取消返回 false（error 带原因）。

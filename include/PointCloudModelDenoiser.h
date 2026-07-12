@@ -40,6 +40,10 @@ public:
 
         // 邻域搜索的格子环数上限（每环向外扩一圈格子直到命中三角形或达上限）。
         int maxSearchRings = 3;
+
+        // 对话框关闭/任务取消时的协作式停止。回调必须无阻塞且线程安全。
+        // 构建网格桶和逐点查询都会周期检查，避免析构等待大点云处理完毕。
+        std::function<bool()> cancelRequested;
     };
 
     struct Stats
@@ -51,6 +55,8 @@ public:
         double maxKeptDistMm = 0.0;  // 保留点里到表面的最大距离（用于核对阈值是否合理）
         qint64 buildMs = 0;   // 空间哈希构建耗时
         qint64 queryMs = 0;   // 全部点查询耗时
+        bool cancelled = false;
+        bool resourceLimitExceeded = false;  // 病态网格/分配超限，不得对外发布部分结果
     };
 
     using LogCallback = std::function<void(const QString&)>;

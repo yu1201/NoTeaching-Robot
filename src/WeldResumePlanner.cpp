@@ -14,7 +14,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <limits>
+#include <new>
 
 namespace
 {
@@ -128,6 +130,37 @@ QJsonObject RecordToJson(const WeldResumePlanner::CheckpointRecord& record)
     pose.insert(QStringLiteral("ry"), record.ry);
     pose.insert(QStringLiteral("rz"), record.rz);
     root.insert(QStringLiteral("pose"), pose);
+
+    QJsonObject safety;
+    safety.insert(QStringLiteral("observedAtUtc"), record.safetyObservedAtUtc);
+    safety.insert(QStringLiteral("reason"), record.safetyReason);
+    safety.insert(QStringLiteral("programCompleted"), record.safetyProgramCompleted);
+    safety.insert(QStringLiteral("moveSpeedMmPerMin"), record.safetyMoveSpeedMmPerMin);
+    QJsonObject requiredPose;
+    requiredPose.insert(QStringLiteral("x"), record.safeX);
+    requiredPose.insert(QStringLiteral("y"), record.safeY);
+    requiredPose.insert(QStringLiteral("z"), record.safeZ);
+    requiredPose.insert(QStringLiteral("rx"), record.safeRx);
+    requiredPose.insert(QStringLiteral("ry"), record.safeRy);
+    requiredPose.insert(QStringLiteral("rz"), record.safeRz);
+    requiredPose.insert(QStringLiteral("bx"), record.safeBx);
+    requiredPose.insert(QStringLiteral("by"), record.safeBy);
+    requiredPose.insert(QStringLiteral("bz"), record.safeBz);
+    safety.insert(QStringLiteral("requiredPose"), requiredPose);
+    QJsonObject terminalPose;
+    terminalPose.insert(QStringLiteral("valid"), record.terminalPoseValid);
+    terminalPose.insert(QStringLiteral("x"), record.terminalX);
+    terminalPose.insert(QStringLiteral("y"), record.terminalY);
+    terminalPose.insert(QStringLiteral("z"), record.terminalZ);
+    terminalPose.insert(QStringLiteral("rx"), record.terminalRx);
+    terminalPose.insert(QStringLiteral("ry"), record.terminalRy);
+    terminalPose.insert(QStringLiteral("rz"), record.terminalRz);
+    terminalPose.insert(QStringLiteral("bx"), record.terminalBx);
+    terminalPose.insert(QStringLiteral("by"), record.terminalBy);
+    terminalPose.insert(QStringLiteral("bz"), record.terminalBz);
+    safety.insert(QStringLiteral("terminalPose"), terminalPose);
+    safety.insert(QStringLiteral("witnessSha256"), record.safetyWitnessSha256);
+    root.insert(QStringLiteral("safeRetreat"), safety);
     return root;
 }
 
@@ -189,6 +222,51 @@ bool ParseExecutionTrajectoryPayload(
     QString* error)
 {
     points.clear();
+
+    int physicalLineCount = 0;
+    qsizetype lineStart = 0;
+    for (qsizetype index = 0; index < payload.size(); ++index)
+    {
+        if (payload[index] != '\n')
+        {
+            continue;
+        }
+        const int currentLineNumber = physicalLineCount + 1;
+        if (index - lineStart > WeldResumePlanner::MaxExecutionTrajectoryLineBytes)
+        {
+            SetError(error, QString("实际执行轨迹第%1行超过 %2 字节硬上限。")
+                .arg(currentLineNumber)
+                .arg(WeldResumePlanner::MaxExecutionTrajectoryLineBytes));
+            return false;
+        }
+        ++physicalLineCount;
+        if (physicalLineCount > WeldResumePlanner::MaxExecutionTrajectoryLines)
+        {
+            SetError(error, QString("实际执行轨迹超过 %1 行硬上限。")
+                .arg(WeldResumePlanner::MaxExecutionTrajectoryLines));
+            return false;
+        }
+        lineStart = index + 1;
+    }
+    if (lineStart < payload.size())
+    {
+        const int currentLineNumber = physicalLineCount + 1;
+        if (payload.size() - lineStart > WeldResumePlanner::MaxExecutionTrajectoryLineBytes)
+        {
+            SetError(error, QString("实际执行轨迹第%1行超过 %2 字节硬上限。")
+                .arg(currentLineNumber)
+                .arg(WeldResumePlanner::MaxExecutionTrajectoryLineBytes));
+            return false;
+        }
+        ++physicalLineCount;
+        if (physicalLineCount > WeldResumePlanner::MaxExecutionTrajectoryLines)
+        {
+            SetError(error, QString("实际执行轨迹超过 %1 行硬上限。")
+                .arg(WeldResumePlanner::MaxExecutionTrajectoryLines));
+            return false;
+        }
+    }
+
     QBuffer buffer;
     buffer.setData(payload);
     if (!buffer.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -240,6 +318,13 @@ bool ParseExecutionTrajectoryPayload(
             return false;
         }
         points.push_back(point);
+        if (points.size() > WeldResumePlanner::MaxExecutionTrajectoryPoints)
+        {
+            SetError(error, QString("实际执行轨迹有效点超过 %1 个硬上限。")
+                .arg(WeldResumePlanner::MaxExecutionTrajectoryPoints));
+            points.clear();
+            return false;
+        }
     }
 
     if (points.size() < 2)
@@ -268,21 +353,60 @@ bool LoadExecutionTrajectorySnapshot(
         SetError(error, QString("无法打开实际执行轨迹：%1").arg(trajectoryPath));
         return false;
     }
-    const QByteArray payload = file.readAll();
-    if (file.error() != QFileDevice::NoError)
+    const QFileInfo openedInfo(file);
+    if (!openedInfo.isFile() || openedInfo.isSymLink())
     {
-        SetError(error, QString("读取实际执行轨迹快照失败：%1").arg(trajectoryPath));
+        SetError(error, QString("实际执行轨迹不是普通文件或是符号链接：%1").arg(trajectoryPath));
         return false;
     }
-    if (!ParseExecutionTrajectoryPayload(payload, points, error))
+    if (openedInfo.size() < 0 || openedInfo.size() > WeldResumePlanner::MaxExecutionTrajectoryBytes)
     {
+        SetError(error, QString("实际执行轨迹超过 %1 字节硬上限：%2")
+            .arg(WeldResumePlanner::MaxExecutionTrajectoryBytes)
+            .arg(trajectoryPath));
         return false;
     }
 
-    sha256 = QString::fromLatin1(
-        QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex()).toLower();
-    size = payload.size();
-    return true;
+    try
+    {
+        const QByteArray payload = file.read(WeldResumePlanner::MaxExecutionTrajectoryBytes + 1);
+        if (file.error() != QFileDevice::NoError
+            || payload.size() > WeldResumePlanner::MaxExecutionTrajectoryBytes
+            || !file.atEnd())
+        {
+            SetError(error, QString("读取实际执行轨迹有界快照失败或文件在读取时超限：%1")
+                .arg(trajectoryPath));
+            return false;
+        }
+        if (!ParseExecutionTrajectoryPayload(payload, points, error))
+        {
+            return false;
+        }
+
+        sha256 = QString::fromLatin1(
+            QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex()).toLower();
+        size = payload.size();
+        return true;
+    }
+    catch (const std::bad_alloc&)
+    {
+        points.clear();
+        SetError(error, QString("实际执行轨迹内存分配失败，已拒绝续焊：%1").arg(trajectoryPath));
+        return false;
+    }
+    catch (const std::exception& exception)
+    {
+        points.clear();
+        SetError(error, QString("读取实际执行轨迹异常，已拒绝续焊：%1 (%2)")
+            .arg(trajectoryPath, QString::fromLocal8Bit(exception.what())));
+        return false;
+    }
+    catch (...)
+    {
+        points.clear();
+        SetError(error, QString("读取实际执行轨迹发生未知异常，已拒绝续焊：%1").arg(trajectoryPath));
+        return false;
+    }
 }
 }
 
@@ -328,6 +452,10 @@ bool WeldResumePlanner::DecodeRecord(const QString& encoded, CheckpointRecord& r
     const QJsonObject trajectory = root.value(QStringLiteral("trajectory")).toObject();
     const QJsonObject program = root.value(QStringLiteral("program")).toObject();
     const QJsonObject pose = root.value(QStringLiteral("pose")).toObject();
+    const bool hasSafeRetreat = root.value(QStringLiteral("safeRetreat")).isObject();
+    const QJsonObject safeRetreat = root.value(QStringLiteral("safeRetreat")).toObject();
+    const QJsonObject requiredSafePose = safeRetreat.value(QStringLiteral("requiredPose")).toObject();
+    const QJsonObject terminalPose = safeRetreat.value(QStringLiteral("terminalPose")).toObject();
 
     double trajectorySize = -1.0;
     if (!JsonInt(root, QStringLiteral("schemaVersion"), record.schemaVersion)
@@ -368,12 +496,44 @@ bool WeldResumePlanner::DecodeRecord(const QString& encoded, CheckpointRecord& r
         return false;
     }
 
+    if (hasSafeRetreat
+        && (!JsonString(safeRetreat, QStringLiteral("observedAtUtc"), record.safetyObservedAtUtc)
+            || !JsonString(safeRetreat, QStringLiteral("reason"), record.safetyReason)
+            || !JsonBool(safeRetreat, QStringLiteral("programCompleted"), record.safetyProgramCompleted)
+            || !JsonDouble(safeRetreat, QStringLiteral("moveSpeedMmPerMin"), record.safetyMoveSpeedMmPerMin)
+            || !JsonDouble(requiredSafePose, QStringLiteral("x"), record.safeX)
+            || !JsonDouble(requiredSafePose, QStringLiteral("y"), record.safeY)
+            || !JsonDouble(requiredSafePose, QStringLiteral("z"), record.safeZ)
+            || !JsonDouble(requiredSafePose, QStringLiteral("rx"), record.safeRx)
+            || !JsonDouble(requiredSafePose, QStringLiteral("ry"), record.safeRy)
+            || !JsonDouble(requiredSafePose, QStringLiteral("rz"), record.safeRz)
+            || !JsonDouble(requiredSafePose, QStringLiteral("bx"), record.safeBx)
+            || !JsonDouble(requiredSafePose, QStringLiteral("by"), record.safeBy)
+            || !JsonDouble(requiredSafePose, QStringLiteral("bz"), record.safeBz)
+            || !JsonBool(terminalPose, QStringLiteral("valid"), record.terminalPoseValid)
+            || !JsonDouble(terminalPose, QStringLiteral("x"), record.terminalX)
+            || !JsonDouble(terminalPose, QStringLiteral("y"), record.terminalY)
+            || !JsonDouble(terminalPose, QStringLiteral("z"), record.terminalZ)
+            || !JsonDouble(terminalPose, QStringLiteral("rx"), record.terminalRx)
+            || !JsonDouble(terminalPose, QStringLiteral("ry"), record.terminalRy)
+            || !JsonDouble(terminalPose, QStringLiteral("rz"), record.terminalRz)
+            || !JsonDouble(terminalPose, QStringLiteral("bx"), record.terminalBx)
+            || !JsonDouble(terminalPose, QStringLiteral("by"), record.terminalBy)
+            || !JsonDouble(terminalPose, QStringLiteral("bz"), record.terminalBz)
+            || !JsonString(safeRetreat, QStringLiteral("witnessSha256"), record.safetyWitnessSha256)))
+    {
+        SetError(error, QStringLiteral("断点V2安全回撤记录缺少必需字段或字段类型错误。"));
+        return false;
+    }
+
     static const QRegularExpression sha256Pattern(QStringLiteral("^[0-9a-fA-F]{64}$"));
     const bool knownState = record.state == QStringLiteral("prepared")
         || record.state == QStringLiteral("writing")
         || record.state == QStringLiteral("paused")
         || record.state == QStringLiteral("continuing")
         || record.state == QStringLiteral("resuming")
+        || record.state == QStringLiteral("interrupted")
+        || record.state == QStringLiteral("unretracted")
         || record.state == QStringLiteral("superseded")
         || record.state == QStringLiteral("finished");
     const bool sourceIdentityConsistent =
@@ -411,6 +571,50 @@ bool WeldResumePlanner::DecodeRecord(const QString& encoded, CheckpointRecord& r
         return false;
     }
     record.trajectorySize = static_cast<qint64>(trajectorySize);
+    if ((record.state == QStringLiteral("interrupted")
+            || record.state == QStringLiteral("unretracted"))
+        && !ValidateSafeRetreatRecoveryRecord(record, error))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool WeldResumePlanner::ValidateCheckpointTime(
+    const CheckpointRecord& record,
+    const QDateTime& currentUtc,
+    QString* error)
+{
+    QDateTime created = QDateTime::fromString(record.createdAtUtc.trimmed(), Qt::ISODateWithMs);
+    if (!created.isValid())
+    {
+        created = QDateTime::fromString(record.createdAtUtc.trimmed(), Qt::ISODate);
+    }
+    if (!created.isValid() || !currentUtc.isValid())
+    {
+        SetError(error, QStringLiteral("断点时间格式无效，禁止自动续焊。"));
+        return false;
+    }
+
+    created = created.toUTC();
+    const QDateTime now = currentUtc.toUTC();
+    const qint64 ageSeconds = created.secsTo(now);
+    if (ageSeconds < -MaxFutureClockSkewSeconds)
+    {
+        SetError(error, QStringLiteral("断点时间晚于当前时间超过 %1 分钟，禁止自动续焊。")
+            .arg(MaxFutureClockSkewSeconds / 60));
+        return false;
+    }
+    if (ageSeconds > MaxResumeCheckpointAgeSeconds)
+    {
+        SetError(error, QStringLiteral("断点已超过 %1 小时有效期，工件/工位状态可能已变化，禁止自动续焊。")
+            .arg(MaxResumeCheckpointAgeSeconds / 3600));
+        return false;
+    }
+    if (error != nullptr)
+    {
+        error->clear();
+    }
     return true;
 }
 
@@ -442,6 +646,73 @@ QString WeldResumePlanner::BuildParameterFingerprint(const QStringList& orderedF
     return QString::fromLatin1(QCryptographicHash::hash(
         QJsonDocument(values).toJson(QJsonDocument::Compact),
         QCryptographicHash::Sha256).toHex()).toLower();
+}
+
+QString WeldResumePlanner::BuildSafeRetreatWitness(const CheckpointRecord& record)
+{
+    const auto number = [](double value)
+    {
+        return QString::number(value, 'g', 17);
+    };
+    const QStringList fields = {
+        record.checkpointId,
+        record.robotName,
+        record.robotType,
+        record.robotEndpoint,
+        record.programName,
+        record.trajectoryRelativePath,
+        record.trajectorySha256.toLower(),
+        QString::number(record.trajectorySize),
+        record.safetyObservedAtUtc,
+        record.safetyReason,
+        record.safetyProgramCompleted ? QStringLiteral("1") : QStringLiteral("0"),
+        number(record.safetyMoveSpeedMmPerMin),
+        number(record.safeX), number(record.safeY), number(record.safeZ),
+        number(record.safeRx), number(record.safeRy), number(record.safeRz),
+        number(record.safeBx), number(record.safeBy), number(record.safeBz),
+        record.terminalPoseValid ? QStringLiteral("1") : QStringLiteral("0"),
+        number(record.terminalX), number(record.terminalY), number(record.terminalZ),
+        number(record.terminalRx), number(record.terminalRy), number(record.terminalRz),
+        number(record.terminalBx), number(record.terminalBy), number(record.terminalBz)
+    };
+    return QString::fromLatin1(QCryptographicHash::hash(
+        fields.join(QLatin1Char('\n')).toUtf8(),
+        QCryptographicHash::Sha256).toHex()).toLower();
+}
+
+bool WeldResumePlanner::ValidateSafeRetreatRecoveryRecord(
+    const CheckpointRecord& record,
+    QString* error)
+{
+    const auto finite = [](double value) { return std::isfinite(value); };
+    static const QRegularExpression sha256Pattern(QStringLiteral("^[0-9a-f]{64}$"));
+    const bool isUnretracted = record.state == QStringLiteral("unretracted");
+    const bool isInterrupted = record.state == QStringLiteral("interrupted");
+    const QDateTime observed = QDateTime::fromString(
+        record.safetyObservedAtUtc.trimmed(), Qt::ISODateWithMs);
+    if ((!isUnretracted && !isInterrupted)
+        || (isUnretracted && !record.safetyProgramCompleted)
+        || record.safetyReason.trimmed().isEmpty()
+        || !observed.isValid()
+        || !finite(record.safetyMoveSpeedMmPerMin)
+        || record.safetyMoveSpeedMmPerMin <= 0.0
+        || !finite(record.safeX) || !finite(record.safeY) || !finite(record.safeZ)
+        || !finite(record.safeRx) || !finite(record.safeRy) || !finite(record.safeRz)
+        || !finite(record.safeBx) || !finite(record.safeBy) || !finite(record.safeBz)
+        || !finite(record.terminalX) || !finite(record.terminalY) || !finite(record.terminalZ)
+        || !finite(record.terminalRx) || !finite(record.terminalRy) || !finite(record.terminalRz)
+        || !finite(record.terminalBx) || !finite(record.terminalBy) || !finite(record.terminalBz)
+        || !sha256Pattern.match(record.safetyWitnessSha256).hasMatch()
+        || record.safetyWitnessSha256 != BuildSafeRetreatWitness(record))
+    {
+        SetError(error, QStringLiteral("焊后安全回撤恢复记录身份、位置见证或SHA256无效。"));
+        return false;
+    }
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    return true;
 }
 
 bool WeldResumePlanner::BindTrajectoryIdentity(

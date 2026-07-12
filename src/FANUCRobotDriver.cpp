@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "AppPaths.h"
+#include "FanucTpContentIdentity.h"
 #include "FANUCRobotDriver.h"
 #include "RobotOperationLease.h"
 
@@ -10,8 +11,10 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QString>
+#include <QTemporaryDir>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <charconv>
 #include <cerrno>
@@ -23,9 +26,11 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #pragma comment(lib, "ws2_32.lib")
@@ -41,6 +46,103 @@ namespace
 	constexpr const char* FANUC_ACTUAL_WELD_UNAVAILABLE_REASON =
 		"FANUC实际焊接已失败关闭：当前工程没有绑定经现场验证的ArcTool LS模板、"
 		"起弧/焊接/过渡/收弧schedule映射和灭弧状态回读契约；当前仅允许空跑轨迹。";
+	constexpr size_t FANUC_MAX_GENERATED_PROGRAM_NAME = 31;
+	std::atomic<std::uint64_t> g_fanucGeneratedNameSequence{ 0 };
+	std::mutex g_fanucGeneratedFilePairMutex;
+	std::mutex g_fanucCompilerMutex;
+	std::mutex g_fanucFixedEndpointMutexRegistryMutex;
+	std::unordered_map<std::string, std::weak_ptr<std::mutex>> g_fanucFixedEndpointMutexes;
+
+	std::shared_ptr<std::mutex> FanucFixedEndpointTransferMutex(const std::string& endpointKey)
+	{
+		std::lock_guard<std::mutex> registryLock(g_fanucFixedEndpointMutexRegistryMutex);
+		std::shared_ptr<std::mutex> endpointMutex = g_fanucFixedEndpointMutexes[endpointKey].lock();
+		if (endpointMutex == nullptr)
+		{
+			endpointMutex = std::make_shared<std::mutex>();
+			g_fanucFixedEndpointMutexes[endpointKey] = endpointMutex;
+		}
+		return endpointMutex;
+	}
+
+	std::uint64_t FanucFnv1a64(const std::string& text)
+	{
+		std::uint64_t value = 1469598103934665603ULL;
+		for (const unsigned char ch : text)
+		{
+			value ^= static_cast<std::uint64_t>(ch);
+			value *= 1099511628211ULL;
+		}
+		return value;
+	}
+
+	std::string FanucBase36(std::uint64_t value, size_t width)
+	{
+		static constexpr char kDigits[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+		std::string result(width, '0');
+		for (size_t index = width; index > 0; --index)
+		{
+			result[index - 1] = kDigits[value % 36ULL];
+			value /= 36ULL;
+		}
+		return result;
+	}
+
+	std::uint64_t FanucProcessNonce()
+	{
+		static const std::uint64_t nonce = []()
+			{
+				std::ostringstream identity;
+				identity << GetCurrentProcessId() << '|'
+					<< std::chrono::high_resolution_clock::now().time_since_epoch().count() << '|'
+					<< std::chrono::steady_clock::now().time_since_epoch().count() << '|'
+					<< reinterpret_cast<std::uintptr_t>(&g_fanucGeneratedNameSequence);
+				return FanucFnv1a64(identity.str());
+			}();
+		return nonce;
+	}
+
+	std::string FanucMakeUniqueToken(const std::string& identity)
+	{
+		const std::uint64_t sequence = g_fanucGeneratedNameSequence.fetch_add(1, std::memory_order_relaxed) + 1;
+		const std::uint64_t mixedLow = FanucProcessNonce()
+			^ FanucFnv1a64(identity)
+			^ (sequence * 0x9E3779B97F4A7C15ULL);
+		const std::uint64_t mixedHigh = FanucFnv1a64(
+			identity + "|" + std::to_string(sequence) + "|" + std::to_string(FanucProcessNonce()));
+		return FanucBase36(mixedHigh, 4) + FanucBase36(mixedLow, 13);
+	}
+
+	std::string FanucControllerIdentity(const FANUCRobotCtrl* ctrl, bool includeInstance = true)
+	{
+		if (ctrl == nullptr)
+		{
+			return "FANUC|NO_CONTROLLER";
+		}
+		std::ostringstream identity;
+		identity << "FANUC|" << ctrl->m_sRobotName
+			<< '|' << ctrl->m_sSocketIP << ':' << ctrl->m_nSocketPort
+			<< '|' << ctrl->m_sFTPIP << ':' << ctrl->m_nFTPPort;
+		if (includeInstance)
+		{
+			identity << "|PID=" << GetCurrentProcessId()
+				<< "|INSTANCE=" << reinterpret_cast<std::uintptr_t>(ctrl);
+		}
+		return identity.str();
+	}
+
+	std::filesystem::path FanucGeneratedProgramDirectory(const FANUCRobotCtrl* ctrl)
+	{
+		const std::string identity = FanucControllerIdentity(ctrl);
+		std::ostringstream folder;
+		folder << "endpoint_" << std::uppercase << std::hex << std::setw(16) << std::setfill('0')
+			<< FanucFnv1a64(identity)
+			<< "_p" << std::dec << GetCurrentProcessId()
+			<< "_i" << std::uppercase << std::hex << reinterpret_cast<std::uintptr_t>(ctrl);
+		const QString basePath = QDir::toNativeSeparators(
+			AppPaths::WritablePath(QStringLiteral("Job/FANUC")));
+		return std::filesystem::path(basePath.toStdWString()) / folder.str();
+	}
 
 	QString FanucDecodeLocalPath(const std::string& text)
 	{
@@ -81,6 +183,13 @@ namespace
 			? info.absoluteFilePath()
 			: AppPaths::CommandLinePath(decoded);
 		return FanucFileSystemPath(absolute);
+	}
+
+	bool FanucReadFileIdentity(
+		const std::string& filePath,
+		FanucTpContentIdentity::Identity& identity)
+	{
+		return FanucTpContentIdentity::Read(FanucResolveLocalPath(filePath), identity);
 	}
 
 	bool FanucContainsWeldMetadata(const T_ROBOT_MOVE_INFO& info)
@@ -204,17 +313,41 @@ namespace
 	bool FanucReceiveLine(SOCKET sock, std::string& out, int timeoutMs = FANUC_SOCKET_TIMEOUT_MS)
 	{
 		out.clear();
+		if (timeoutMs <= 0)
+		{
+			return false;
+		}
+
+		// The timeout is a deadline for the complete line, not an idle timeout that
+		// restarts after every byte.  Otherwise a peer can keep this worker alive
+		// indefinitely by trickling one byte before each select() timeout.
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		size_t rawBytesReceived = 0;
 		char ch = 0;
 
 		while (true)
 		{
-			if (!FanucWaitReadable(sock, timeoutMs))
+			const auto now = std::chrono::steady_clock::now();
+			if (now >= deadline)
+			{
+				return false;
+			}
+
+			const auto remainingMilliseconds =
+				std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+			const int remainingTimeoutMs = static_cast<int>(std::max<std::int64_t>(1, remainingMilliseconds));
+			if (!FanucWaitReadable(sock, remainingTimeoutMs))
 			{
 				return false;
 			}
 
 			const int recved = recv(sock, &ch, 1, 0);
 			if (recved <= 0)
+			{
+				return false;
+			}
+			++rawBytesReceived;
+			if (rawBytesReceived > FANUC_SOCKET_MAX_LINE_SIZE)
 			{
 				return false;
 			}
@@ -227,10 +360,6 @@ namespace
 			if (ch != '\r')
 			{
 				out.push_back(ch);
-				if (out.size() >= FANUC_SOCKET_MAX_LINE_SIZE)
-				{
-					return false;
-				}
 			}
 		}
 	}
@@ -390,19 +519,25 @@ namespace
 			st.wHour, st.wMinute, st.wSecond);
 	}
 
-	std::string FanucMakeProgramName()
+	std::string FanucMakeControllerProgramName(const FANUCRobotCtrl* ctrl, const char* prefix)
 	{
-		SYSTEMTIME st = {};
-		GetLocalTime(&st);
-		return GetStr("FM%02d%02d%02d%02d",
-			st.wMonth, st.wDay, st.wHour, st.wMinute);
+		const std::string safePrefix = prefix != nullptr && prefix[0] != '\0' ? prefix : "F";
+		std::string programName = safePrefix + FanucMakeUniqueToken(FanucControllerIdentity(ctrl));
+		if (programName.size() > FANUC_MAX_GENERATED_PROGRAM_NAME)
+		{
+			programName.resize(FANUC_MAX_GENERATED_PROGRAM_NAME);
+		}
+		return programName;
 	}
 
-	std::string FanucMakeTpProgramName()
+	std::string FanucMakeProgramName(const FANUCRobotCtrl* ctrl)
 	{
-		SYSTEMTIME st = {};
-		GetLocalTime(&st);
-		return GetStr("FM%02d%02d%02d", st.wHour, st.wMinute, st.wSecond);
+		return FanucMakeControllerProgramName(ctrl, "FK");
+	}
+
+	std::string FanucMakeTpProgramName(const FANUCRobotCtrl* ctrl)
+	{
+		return FanucMakeControllerProgramName(ctrl, "FT");
 	}
 
 	std::string FanucMoveTypeText(int moveType)
@@ -730,14 +865,67 @@ namespace
 
 	bool FanucWriteTextFile(const std::string& filePath, const std::string& content)
 	{
-		std::ofstream out(FanucResolveLocalPath(filePath), std::ios::out | std::ios::trunc);
-		if (!out.is_open())
+		const std::filesystem::path resolvedPath = FanucResolveLocalPath(filePath);
+		for (int attempt = 0; attempt < 8; ++attempt)
 		{
+			const std::string temporaryToken = FanucMakeUniqueToken(filePath);
+			std::filesystem::path temporaryPath = resolvedPath;
+			temporaryPath += std::filesystem::path(
+				L".tmp." + std::to_wstring(GetCurrentProcessId()) + L"."
+				+ std::wstring(temporaryToken.begin(), temporaryToken.end()));
+
+			HANDLE fileHandle = CreateFileW(
+				temporaryPath.c_str(),
+				GENERIC_WRITE,
+				0,
+				nullptr,
+				CREATE_NEW,
+				FILE_ATTRIBUTE_TEMPORARY,
+				nullptr);
+			if (fileHandle == INVALID_HANDLE_VALUE)
+			{
+				if (GetLastError() == ERROR_FILE_EXISTS || GetLastError() == ERROR_ALREADY_EXISTS)
+				{
+					continue;
+				}
+				return false;
+			}
+
+			bool writeOk = true;
+			size_t offset = 0;
+			while (offset < content.size())
+			{
+				const DWORD chunkSize = static_cast<DWORD>(std::min<size_t>(
+					content.size() - offset,
+					static_cast<size_t>(std::numeric_limits<DWORD>::max())));
+				DWORD written = 0;
+				if (!WriteFile(fileHandle, content.data() + offset, chunkSize, &written, nullptr)
+					|| written == 0)
+				{
+					writeOk = false;
+					break;
+				}
+				offset += written;
+			}
+			if (writeOk && !FlushFileBuffers(fileHandle))
+			{
+				writeOk = false;
+			}
+			if (!CloseHandle(fileHandle))
+			{
+				writeOk = false;
+			}
+			if (writeOk && MoveFileExW(
+				temporaryPath.c_str(),
+				resolvedPath.c_str(),
+				MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+			{
+				return true;
+			}
+			DeleteFileW(temporaryPath.c_str());
 			return false;
 		}
-
-		out << content;
-		return out.good();
+		return false;
 	}
 
 	std::filesystem::path FanucFindCompilerToolPath(const std::string& fileName)
@@ -919,6 +1107,8 @@ namespace
 
 	bool FanucCompileKlToPc(const std::string& klPath, const std::string& pcPath, RobotLog* pLog)
 	{
+		// WinOLPC tools share robot.ini/output state and are not safe to run concurrently.
+		std::lock_guard<std::mutex> compilerLock(g_fanucCompilerMutex);
 		const auto compileStart = std::chrono::steady_clock::now();
 		const std::filesystem::path ktransPath = FanucGetKtransPath();
 		const std::filesystem::path absoluteKlPath = FanucAbsolutePath(klPath);
@@ -1008,6 +1198,7 @@ namespace
 
 	bool FanucCompileLsToTp(const std::string& lsPath, const std::string& tpPath, RobotLog* pLog)
 	{
+		std::lock_guard<std::mutex> compilerLock(g_fanucCompilerMutex);
 		const auto compileStart = std::chrono::steady_clock::now();
 		const std::filesystem::path maketpPath = FanucGetMaketpPath();
 		const std::filesystem::path absoluteLsPath = FanucAbsolutePath(lsPath);
@@ -1382,6 +1573,7 @@ bool FANUCRobotCtrl::InitRobotDriver(std::string strUnitName)
 	cIni.ReadString("GunTool_d", "", m_tTools.tGunTool, T_ROBOT_COORS(1, 1, 1, 1, 1, 1, -1, -1, -1));
 	cIni.ReadString("CameraTool_d", "", m_tTools.tCameraTool, T_ROBOT_COORS(1, 1, 1, 1, 1, 1, -1, -1, -1));
 
+	InvalidateFixedMoveUploadCache();
 	return true;
 }
 
@@ -1477,6 +1669,11 @@ bool FANUCRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifReco
 		return false;
 	}
 
+	// The runtime endpoint is authoritative for per-controller caches and local
+	// artifact isolation, including callers that reconnect to a non-INI endpoint.
+	m_sSocketIP = socketIp;
+	m_nSocketPort = static_cast<int>(socketPort);
+	InvalidateFixedMoveUploadCache();
 	return true;
 }
 
@@ -1506,6 +1703,8 @@ bool FANUCRobotCtrl::CloseSocket()
 		m_bWSAStarted = false;
 	}
 
+	// A later reconnect must re-verify/re-upload the fixed TP on that controller.
+	InvalidateFixedMoveUploadCache();
 	return true;
 }
 
@@ -2617,14 +2816,14 @@ bool FANUCRobotCtrl::UploadContinuousStartBufferToRobot(const std::vector<T_ROBO
 		return false;
 	}
 
-	const QString localDirPath = AppPaths::WritablePath(QStringLiteral("Job/FANUC"));
-	const QString localFilePath = QDir(localDirPath).filePath(QStringLiteral("JOGBUF.DT"));
+	const std::filesystem::path localDirPath = FanucGeneratedProgramDirectory(this);
+	const std::filesystem::path localFilePath = localDirPath / "JOGBUF.DT";
 	const std::string localPath = FanucLocalPathBytes(localFilePath);
 	const std::string remotePath = "JOGBUF.DT";
 
 	try
 	{
-		std::filesystem::create_directories(FanucFileSystemPath(localDirPath));
+		std::filesystem::create_directories(localDirPath);
 	}
 	catch (...)
 	{
@@ -3426,23 +3625,20 @@ int FANUCRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMo
 	}
 
 	const std::string timestamp = FanucMakeTimestamp();
-	const std::string programName = FanucMakeProgramName();
-	const QString localDirPath = AppPaths::WritablePath(QStringLiteral("Job/FANUC"));
+	const std::string programName = FanucMakeProgramName(this);
+	const std::filesystem::path localDirPath = FanucGeneratedProgramDirectory(this);
 	const std::string klFileName = programName + ".kl";
 	const std::string pcFileName = programName + ".pc";
 	const std::string varFileName = programName + ".var";
-	const std::string localKlPath = FanucLocalPathBytes(
-		QDir(localDirPath).filePath(QString::fromLatin1(klFileName.data(), static_cast<int>(klFileName.size()))));
-	const std::string localPcPath = FanucLocalPathBytes(
-		QDir(localDirPath).filePath(QString::fromLatin1(pcFileName.data(), static_cast<int>(pcFileName.size()))));
-	const std::string localVarPath = FanucLocalPathBytes(
-		QDir(localDirPath).filePath(QString::fromLatin1(varFileName.data(), static_cast<int>(varFileName.size()))));
+	const std::string localKlPath = FanucLocalPathBytes(localDirPath / klFileName);
+	const std::string localPcPath = FanucLocalPathBytes(localDirPath / pcFileName);
+	const std::string localVarPath = FanucLocalPathBytes(localDirPath / varFileName);
 	const std::string remotePcPath = "/md/" + pcFileName;
 	const std::string remoteVarPath = "/md/" + varFileName;
 
 	try
 	{
-		std::filesystem::create_directories(FanucFileSystemPath(localDirPath));
+		std::filesystem::create_directories(localDirPath);
 	}
 	catch (const std::exception& e)
 	{
@@ -3456,13 +3652,16 @@ int FANUCRobotCtrl::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMo
 	const std::string klContent = FanucBuildKlContent(programName, varFileName, vtRobotMoveInfo);
 	const std::string varContent = FanucBuildVarContent(programName, vtRobotMoveInfo);
 
-	if (!FanucWriteTextFile(localKlPath, klContent) || !FanucWriteTextFile(localVarPath, varContent))
 	{
-		if (m_pRobotLog != nullptr)
+		std::lock_guard<std::mutex> filePairLock(g_fanucGeneratedFilePairMutex);
+		if (!FanucWriteTextFile(localKlPath, klContent) || !FanucWriteTextFile(localVarPath, varContent))
 		{
-			m_pRobotLog->write(LogColor::ERR, "FANUC ContiMoveAny 生成文件失败：%s 或 %s", localKlPath.c_str(), localVarPath.c_str());
+			if (m_pRobotLog != nullptr)
+			{
+				m_pRobotLog->write(LogColor::ERR, "FANUC ContiMoveAny 生成文件失败：%s 或 %s", localKlPath.c_str(), localVarPath.c_str());
+			}
+			return -3;
 		}
-		return -3;
 	}
 
 	if (m_pRobotLog != nullptr)
@@ -3597,16 +3796,15 @@ int FANUCRobotCtrl::UploadMultiPointTpProgram(
 		}
 	}
 
-	const std::string programName = FanucMakeTpProgramName();
-	const QString localDirPath = AppPaths::WritablePath(QStringLiteral("Job/FANUC"));
+	const std::string programName = FanucMakeTpProgramName(this);
+	const std::filesystem::path localDirPath = FanucGeneratedProgramDirectory(this);
 	const std::string lsFileName = programName + ".ls";
-	const std::string localLsPath = FanucLocalPathBytes(
-		QDir(localDirPath).filePath(QString::fromLatin1(lsFileName.data(), static_cast<int>(lsFileName.size()))));
+	const std::string localLsPath = FanucLocalPathBytes(localDirPath / lsFileName);
 	const std::string remoteTpPath = "/md/" + programName + ".tp";
 
 	try
 	{
-		std::filesystem::create_directories(FanucFileSystemPath(localDirPath));
+		std::filesystem::create_directories(localDirPath);
 	}
 	catch (const std::exception& e)
 	{
@@ -4302,19 +4500,145 @@ bool FANUCRobotCtrl::PosMove(int nAxisNo, double dDist, long lRobotSpd, int nCoo
 	return PosMove(nAxisNo, dDist, lRobotSpd, nCoorType, nMovtype, config, nToolNo, lCoordFrm);
 }
 
-// 固定TP单点运动公共流程：设置目标PR/速度R，必要时上传固定TP，然后调用任务。
-static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+void FANUCRobotCtrl::InvalidateFixedMoveUploadCache()
 {
+	std::lock_guard<std::mutex> cacheLock(m_fixedMoveUploadMutex);
+	m_fixedMoveUploadEndpointKey.clear();
+	m_fixedMovlUploaded = false;
+	m_fixedMovjUploaded = false;
+	m_fixedMovlLocalIdentity = {};
+	m_fixedMovjLocalIdentity = {};
+}
+
+bool FANUCRobotCtrl::EnsureFixedMoveTpUploaded(
+	int moveType,
+	const std::string& localTpPath,
+	const std::string& programName)
+{
+	std::lock_guard<std::mutex> cacheLock(m_fixedMoveUploadMutex);
+	const std::string endpointKey = FanucControllerIdentity(this, false);
+	FanucTpContentIdentity::Identity localIdentity;
+	if (!FanucReadFileIdentity(localTpPath, localIdentity))
+	{
+		return false;
+	}
+	if (m_fixedMoveUploadEndpointKey != endpointKey)
+	{
+		m_fixedMoveUploadEndpointKey = endpointKey;
+		m_fixedMovlUploaded = false;
+		m_fixedMovjUploaded = false;
+		m_fixedMovlLocalIdentity = {};
+		m_fixedMovjLocalIdentity = {};
+	}
+
+	bool& uploaded = moveType == MOVL ? m_fixedMovlUploaded : m_fixedMovjUploaded;
+	FanucTpContentIdentity::Identity& cachedIdentity = moveType == MOVL
+		? m_fixedMovlLocalIdentity
+		: m_fixedMovjLocalIdentity;
+	const std::string remoteFileName = programName + ".tp";
+	const std::string remoteTpPath = "/md/" + remoteFileName;
+	// Use a cache-local FTP client built from the current endpoint. The shared
+	// m_pFTP may belong to another in-flight transfer or to pre-reload settings.
+	FtpClient fixedMoveFtp(
+		m_pRobotLog,
+		m_sFTPIP,
+		m_nFTPPort,
+		m_sFTPUser,
+		m_sFTPPassWord);
+	fixedMoveFtp.setMessageBoxesEnabled(false);
+
+	const auto remoteFileMatchesContent = [&]() -> bool
+		{
+			std::vector<FtpRemoteFileInfo> files;
+			if (!fixedMoveFtp.listFiles("/md/", files))
+			{
+				return false;
+			}
+			const bool declaredFilePresent = std::any_of(files.begin(), files.end(), [&](const FtpRemoteFileInfo& file)
+				{
+					return !file.isDirectory
+						&& file.size == localIdentity.size
+						&& _stricmp(file.name.c_str(), remoteFileName.c_str()) == 0;
+				});
+			if (!declaredFilePresent)
+			{
+				return false;
+			}
+
+			// 保持机器人既有程序名（以及 CALL_JOB 语义）不变，避免把哈希塞进受限的
+			// FANUC 文件名。每次执行前把控制器二进制下载到独立临时目录并比较 SHA-256；
+			// 因此同名、同长度替换也绝不会被缓存命中。
+			QTemporaryDir verificationDir;
+			if (!verificationDir.isValid())
+			{
+				return false;
+			}
+			const QString downloadedPath = verificationDir.filePath(QStringLiteral("remote.tp"));
+			if (!fixedMoveFtp.downloadFile(remoteTpPath, FanucLocalPathBytes(downloadedPath)))
+			{
+				return false;
+			}
+			FanucTpContentIdentity::Identity remoteIdentity;
+			return FanucTpContentIdentity::Read(FanucFileSystemPath(downloadedPath), remoteIdentity)
+				&& FanucTpContentIdentity::Matches(localIdentity, remoteIdentity);
+		};
+
+	if (uploaded
+		&& FanucTpContentIdentity::Matches(cachedIdentity, localIdentity)
+		&& remoteFileMatchesContent())
+	{
+		return true;
+	}
+	if (uploaded && m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::WARNING,
+			"FANUC 固定TP缓存已失效，远端文件缺失或不可验证，将重新上传：%s",
+			remoteTpPath.c_str());
+	}
+	uploaded = false;
+	cachedIdentity = {};
+
+	if (!fixedMoveFtp.uploadFile(localTpPath, remoteTpPath))
+	{
+		return false;
+	}
+	// 上传期间本地受信任 TP 也不得被并发替换；远端与最初读取的身份必须同时保持一致。
+	FanucTpContentIdentity::Identity localIdentityAfterUpload;
+	if (!FanucReadFileIdentity(localTpPath, localIdentityAfterUpload)
+		|| !FanucTpContentIdentity::Matches(localIdentity, localIdentityAfterUpload)
+		|| !remoteFileMatchesContent())
+	{
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"FANUC 固定TP上传后远端回读失败：%s",
+				remoteTpPath.c_str());
+		}
+		return false;
+	}
+	uploaded = true;
+	cachedIdentity = localIdentity;
+	if (m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::SUCCESS,
+			"FANUC 固定TP已上传并回读确认：%s | Endpoint=%s:%d",
+			remoteTpPath.c_str(), m_sFTPIP.c_str(), m_nFTPPort);
+	}
+	return true;
+}
+
+// 固定TP单点运动公共流程：设置目标PR/速度R，必要时上传固定TP，然后调用任务。
+bool FANUCRobotCtrl::CreateUploadRunTpMove(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos)
+{
+	FANUCRobotCtrl* ctrl = this;
+	std::lock_guard<std::mutex> executionLock(m_fixedMoveExecutionMutex);
 	// Single-point MOVL/MOVJ uses fixed TP programs:
 	// update PR[1] and R[17], upload the fixed TP once, then CALL_JOB.
 	// This avoids invoking maketp.exe for every small jog command.
-	if (ctrl == nullptr || moveInfos.empty())
+	if (moveInfos.empty())
 	{
-		if (ctrl != nullptr)
-		{
-			ctrl->ClearLastRobotError();
-			ctrl->SetLastRobotError("FANUC固定TP运动失败：目标点为空");
-		}
+		ctrl->ClearLastRobotError();
+		ctrl->SetLastRobotError("FANUC固定TP运动失败：目标点为空");
 		return false;
 	}
 	ctrl->ClearLastRobotError();
@@ -4407,30 +4731,27 @@ static bool FanucCreateUploadRunTpMove(FANUCRobotCtrl* ctrl, const std::vector<T
 		return false;
 	}
 
-	static bool movjUploaded = false;
-	static bool movlUploaded = false;
-	bool& uploaded = moveType == MOVL ? movlUploaded : movjUploaded;
-	if (!uploaded)
+	const std::string remoteTpPath = "/md/" + programName + ".tp";
+	// 同一控制器的“远端内容回读 -> CALL_JOB”必须是一个不可插入区间；否则另一 driver
+	// 可能在哈希验证后、启动前替换同名程序。全局单实例 + endpoint mutex 同时封住进程间/进程内窗口。
+	const std::string endpointKey = FanucControllerIdentity(ctrl, false);
+	const std::shared_ptr<std::mutex> endpointMutex = FanucFixedEndpointTransferMutex(endpointKey);
+	std::lock_guard<std::mutex> endpointVerifiedCallLock(*endpointMutex);
+	if (!ctrl->EnsureFixedMoveTpUploaded(moveType, localTpPath, programName))
 	{
-		const std::string remoteTpPath = "/md/" + programName + ".tp";
-		if (ctrl->UploadFile(localTpPath, remoteTpPath) != 0)
-		{
-			ctrl->SetLastRobotError("FANUC固定TP运动失败：上传TP失败，Remote=" + remoteTpPath + "，" + ctrl->GetRobotStatusText());
-			if (ctrl->m_pRobotLog != nullptr)
-			{
-				ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC 固定TP上传失败：%s", remoteTpPath.c_str());
-			}
-			return false;
-		}
-		uploaded = true;
+		ctrl->SetLastRobotError("FANUC固定TP运动失败：上传或远端回读TP失败，Remote=" + remoteTpPath + "，" + ctrl->GetRobotStatusText());
 		if (ctrl->m_pRobotLog != nullptr)
 		{
-			ctrl->m_pRobotLog->write(LogColor::SUCCESS, "FANUC 固定TP已上传：%s", remoteTpPath.c_str());
+			ctrl->m_pRobotLog->write(LogColor::ERR, "FANUC 固定TP上传/回读失败：%s", remoteTpPath.c_str());
 		}
+		return false;
 	}
 
 	if (!ctrl->CallJobWithCompletionState(programName, 93, 1))
 	{
+		// Do not auto-retry CALL_JOB: a transport failure may have started motion.
+		// Invalidate only, so the next explicit user operation re-verifies/re-uploads.
+		ctrl->InvalidateFixedMoveUploadCache();
 		ctrl->SetLastRobotError("FANUC固定TP运动失败：启动程序失败，Program=" + programName + "，" + ctrl->GetRobotStatusText());
 		if (ctrl->m_pRobotLog != nullptr)
 		{
@@ -4483,7 +4804,7 @@ bool FANUCRobotCtrl::MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPul
 			0);
 	}
 
-	return FanucCreateUploadRunTpMove(this, std::vector<T_ROBOT_MOVE_INFO>{ moveInfo });
+	return CreateUploadRunTpMove(std::vector<T_ROBOT_MOVE_INFO>{ moveInfo });
 }
 
 // Cartesian单点MOVL：写PR[1]为XYZWPR后调用FANUC_MOVL固定TP。
@@ -4497,7 +4818,7 @@ bool FANUCRobotCtrl::MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEE
 	moveInfo.nMoveType = MOVL;
 	moveInfo.tCoord = tRobotJointCoord;
 	moveInfo.tSpeed = tPulseMove;
-	return FanucCreateUploadRunTpMove(this, std::vector<T_ROBOT_MOVE_INFO>{ moveInfo });
+	return CreateUploadRunTpMove(std::vector<T_ROBOT_MOVE_INFO>{ moveInfo });
 }
 
 // Joint单点MOVJ：写PR[1]为JOINTPOS后调用FANUC_MOVJ固定TP。
@@ -4510,5 +4831,5 @@ bool FANUCRobotCtrl::MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEE
 	moveInfo.nMoveType = MOVJ;
 	moveInfo.tPulse = tRobotJointCoord;
 	moveInfo.tSpeed = tPulseMove;
-	return FanucCreateUploadRunTpMove(this, std::vector<T_ROBOT_MOVE_INFO>{ moveInfo });
+	return CreateUploadRunTpMove(std::vector<T_ROBOT_MOVE_INFO>{ moveInfo });
 }

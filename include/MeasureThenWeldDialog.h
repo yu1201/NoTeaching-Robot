@@ -1,5 +1,7 @@
 #pragma once
 
+#include "WeldExecutionSafety.h"
+
 #include "Const.h"
 #include "ContralUnit.h"
 
@@ -169,6 +171,7 @@ private:
     void OnResumeWeldClicked();
     // 断点续焊独立流程：只认V2落盘记录绑定的实际 FinalSampled 轨迹，校验案例/端点/参数指纹/SHA256 后按毫米弧长续焊。
     void RunResumeWeldFlow();
+    void RunSafeRetreatRecoveryFlow();
     bool PrepareActiveWeldCheckpoint(
         RobotDriverAdaptor* pRobotDriver,
         const T_PRECISE_MEASURE_PARAM& param,
@@ -183,10 +186,14 @@ private:
         const QString& parameterFingerprint,
         bool resumeCheckpointSupported,
         const QString& resumeUnsupportedReason,
+        const T_ROBOT_COORS& requiredEndSafePose,
+        double safeMoveSpeedMmPerMin,
         QString& error);
     QString ActiveWeldCheckpointRecord() const;
     void ClearActiveWeldCheckpoint();
-    void FinishActiveWeldExecution(bool programCompleted);
+    bool FinishActiveWeldExecution(
+        const WeldExecutionTerminalResult& terminal,
+        QString& error);
     void SetWeldPauseAvailable(bool available);
     void RefreshWeldModeFromParam();
     void SaveWeldModeToParam(bool doActualWeld);
@@ -228,6 +235,8 @@ private:
     bool m_hasPausePose = false;
     mutable QMutex m_activeWeldCheckpointMutex;
     QString m_activeWeldCheckpointRecord;
+    QString m_activeWeldPriorStoredRecord;
+    bool m_activeWeldResumeFlow = false;
     // 扫描数据在线上传钩子：流程成功后携案例目录回 UI 线程调用（主窗口接 ScanDataUploader）。
     std::function<void(const QString&)> m_scanDataUploadHook;
     // 互锁：流程测试在跑时拦下本流程，避免两条流程指挥同一台机器人。

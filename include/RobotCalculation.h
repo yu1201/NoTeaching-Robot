@@ -9,6 +9,7 @@
 
 #include <Eigen/Dense>
 
+#include <functional>
 #include <vector>
 
 class RobotCalculation
@@ -146,6 +147,9 @@ public:
         double validationMinOutputLengthRatio = 0.70;
         CornerCompensation risingCornerCompensation;
         CornerCompensation fallingCornerCompensation;
+        // 后台重建/预览可选停止令牌。默认为空，不改变生产流程；
+        // 大点集几何阶段按有界间隔检查，让析构 join 不必等整段计算。
+        std::function<bool()> stopRequested;
     };
 
     struct LowerWeldFilterPoint

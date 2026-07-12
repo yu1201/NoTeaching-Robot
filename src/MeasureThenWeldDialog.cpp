@@ -13,8 +13,10 @@
 #include "RobotLog.h"
 #include "RobotMessage.h"
 #include "RobotOperationLease.h"
+#include "RobotRecoverySafetyPolicy.h"
 #include "WeldProcessFile.h"
 #include "WeldResumePlanner.h"
+#include "WeldSafetyRecoveryStore.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
 
@@ -68,9 +70,6 @@ constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
 constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
 constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
 constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
-constexpr char WELD_BREAKPOINT_SECTION[] = "Breakpoint";
-constexpr char WELD_BREAKPOINT_RECORD_V2_KEY[] = "RecordV2";
-std::recursive_mutex g_weldBreakpointRecordMutex;
 
 std::string ToUtf8StdString(const QString& text)
 {
@@ -95,49 +94,22 @@ void ShowNonModalFlowResult(
     message->show();
 }
 
-QString WeldBreakpointStoragePath(const QString& robotName)
-{
-    return RobotDataHelper::BuildProjectPath(
-        QString("Data/%1/WeldBreakpoint.ini").arg(robotName));
-}
-
 bool WriteBreakpointRecordValue(
     const QString& robotName,
     const QString& encoded,
     QString* error)
 {
-    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
-    COPini ini;
-    const QString path = WeldBreakpointStoragePath(robotName);
-    if (!ini.SetFileName(ToUtf8StdString(path))
-        || !ini.SetSectionName(WELD_BREAKPOINT_SECTION)
-        || !ini.WriteString(WELD_BREAKPOINT_RECORD_V2_KEY, ToUtf8StdString(encoded)))
-    {
-        if (error != nullptr)
-        {
-            *error = QString("写入断点V2记录失败：%1").arg(path);
-        }
-        return false;
-    }
-    return true;
+    return WeldSafetyRecoveryStore::WriteRecord(robotName, encoded, error);
+}
+
+bool SafeRetreatPending(const QString& robotName, bool& pending, QString* error)
+{
+    return WeldSafetyRecoveryStore::ReadPending(robotName, pending, error);
 }
 
 bool DisableLegacyBreakpoint(const QString& robotName, QString* error)
 {
-    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
-    COPini ini;
-    const QString path = WeldBreakpointStoragePath(robotName);
-    if (!ini.SetFileName(ToUtf8StdString(path))
-        || !ini.SetSectionName(WELD_BREAKPOINT_SECTION)
-        || !ini.WriteString("Valid", 0))
-    {
-        if (error != nullptr)
-        {
-            *error = QString("关闭旧版断点标志失败：%1").arg(path);
-        }
-        return false;
-    }
-    return true;
+    return WeldSafetyRecoveryStore::DisableLegacy(robotName, error);
 }
 
 bool ReadBreakpointRecord(
@@ -146,47 +118,13 @@ bool ReadBreakpointRecord(
     QString* encoded,
     QString* error)
 {
-    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
-    COPini ini;
-    const QString path = WeldBreakpointStoragePath(robotName);
-    std::string stored;
-    if (!ini.SetFileName(ToUtf8StdString(path))
-        || !ini.SetSectionName(WELD_BREAKPOINT_SECTION)
-        || ini.ReadString(false, WELD_BREAKPOINT_RECORD_V2_KEY, stored) <= 0
-        || stored.empty())
-    {
-        if (error != nullptr)
-        {
-            *error = QStringLiteral(
-                "没有可验证的V2断点。旧版仅含位姿的断点禁止自动选择最新案例，请在新版本中重新暂停生成断点。");
-        }
-        return false;
-    }
-    const QString value = QString::fromUtf8(stored.data(), static_cast<int>(stored.size()));
-    if (value.startsWith(QStringLiteral("invalidated:v2:")))
-    {
-        if (error != nullptr)
-        {
-            *error = QStringLiteral("旧断点已被随后启动的完整焊接失效，禁止继续使用。");
-        }
-        return false;
-    }
-    if (!WeldResumePlanner::DecodeRecord(value, record, error))
-    {
-        return false;
-    }
-    if (encoded != nullptr)
-    {
-        *encoded = value;
-    }
-    return true;
+    return WeldSafetyRecoveryStore::ReadRecord(robotName, record, encoded, error);
 }
 
 bool SavePausedBreakpointRecord(
     const WeldResumePlanner::CheckpointRecord& source,
     QString* error)
 {
-    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
     WeldResumePlanner::CheckpointRecord writing = source;
     writing.state = QStringLiteral("writing");
     QString encodeError;
@@ -227,33 +165,9 @@ bool TransitionBreakpointRecordState(
     const QString& newState,
     QString* error)
 {
-    const std::lock_guard<std::recursive_mutex> lock(g_weldBreakpointRecordMutex);
-    WeldResumePlanner::CheckpointRecord record;
-    if (!ReadBreakpointRecord(robotName, record, nullptr, error))
-    {
-        return false;
-    }
-    if (record.checkpointId != expectedCheckpointId || record.state != expectedState)
-    {
-        if (error != nullptr)
-        {
-            *error = QString("断点状态已变化，拒绝覆盖。Expected=%1/%2 Current=%3/%4")
-                .arg(expectedCheckpointId, expectedState, record.checkpointId, record.state);
-        }
-        return false;
-    }
-    record.state = newState;
-    QString encodeError;
-    const QString value = WeldResumePlanner::EncodeRecord(record, &encodeError);
-    if (value.isEmpty() || !WriteBreakpointRecordValue(robotName, value, error))
-    {
-        if (error != nullptr && error->isEmpty())
-        {
-            *error = encodeError;
-        }
-        return false;
-    }
-    return DisableLegacyBreakpoint(robotName, error);
+    return WeldSafetyRecoveryStore::TransitionRecordState(
+        robotName, expectedCheckpointId, expectedState, newState, error)
+        && WeldSafetyRecoveryStore::DisableLegacy(robotName, error);
 }
 
 QString RobotDriverTypeName(RobotDriverAdaptor* driver)
@@ -267,6 +181,56 @@ QString RobotDriverTypeName(RobotDriverAdaptor* driver)
         return QStringLiteral("FANUC");
     }
     return QStringLiteral("UNKNOWN");
+}
+
+bool TerminatePersistedProgramBeforeRecovery(
+    RobotDriverAdaptor* driver,
+    const WeldResumePlanner::CheckpointRecord& record,
+    QString& error)
+{
+    error.clear();
+    if (driver == nullptr
+        || record.programName.trimmed().isEmpty()
+        || RobotOperationLease::PersistentEndpointIdentity(driver) != record.robotEndpoint)
+    {
+        error = QStringLiteral("持久恢复终止缺少匹配的机器人端点或程序身份，禁止后续运动。");
+        return false;
+    }
+    if (auto* step = dynamic_cast<STEPRobotCtrl*>(driver))
+    {
+        if (step->AbortPersistedProgramForRecovery(record.programName.toStdString()))
+        {
+            return true;
+        }
+        error = QStringLiteral("STEP旧程序未得到可验证终止，持久门禁保持有效：")
+            + QString::fromStdString(step->GetLastRobotError());
+        return false;
+    }
+    if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
+    {
+        // 服务重启后 FANUC 会丢失 active task RAM 身份。先在恢复租约上登记未知运动，
+        // 使 ERR:NO_ACTIVE_CALL_JOB 永远不能被 Prog_stop_Py 当作停止证明。
+        QString motionError;
+        if (!RobotOperationLease::MarkMotionStarted(driver, false, &motionError))
+        {
+            error = QStringLiteral("FANUC持久恢复无法登记旧程序未知终态：") + motionError;
+            return false;
+        }
+        if (!driver->AbortCurrentProgramSafely())
+        {
+            error = QStringLiteral("FANUC旧程序STOP/灭弧终态未确认，持久门禁保持有效：")
+                + QString::fromStdString(driver->GetLastRobotError());
+            return false;
+        }
+        if (!RobotOperationLease::MarkMotionCompleted(driver))
+        {
+            error = QStringLiteral("FANUC旧程序虽返回停止，但恢复租约无法登记稳定终态，禁止后续运动。");
+            return false;
+        }
+        return true;
+    }
+    error = QStringLiteral("当前机器人类型没有持久程序终止证明，禁止恢复运动。");
+    return false;
 }
 
 // 扫描实时激光线视图：把当前帧 XData/YData 画成散点（自动缩放），与坡口相机预览同源数据、轻量版绘制。
@@ -1060,6 +1024,13 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     resumeWeldFlowBtn->setToolTip("从上次暂停落盘的V2断点继续焊接：只使用断点绑定的案例与实际执行轨迹，校验机器人端点、参数/工艺指纹和SHA256，再按毫米弧长精确回退。旧版断点不会自动匹配最新结果。");
     buttonLayout->addWidget(resumeWeldFlowBtn, 2, 0, 1, 2);
     connect(resumeWeldFlowBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunResumeWeldFlow);
+    QPushButton* safeRetreatRecoveryBtn = new QPushButton("焊后安全回撤恢复");
+    safeRetreatRecoveryBtn->setMinimumHeight(64);
+    safeRetreatRecoveryBtn->setToolTip(
+        "仅恢复到持久记录绑定的收枪安全位，不会再次执行焊缝。用于焊接程序已完成、但因取消/STOP/回撤失败而保持闭锁的场景。");
+    buttonLayout->addWidget(safeRetreatRecoveryBtn, 3, 0, 1, 2);
+    connect(safeRetreatRecoveryBtn, &QPushButton::clicked,
+        this, &MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow);
     flowLayout->addLayout(buttonLayout);
 
     // 运行监控最大化窗口（实时点云/图像/日志/暂停控制都在里面，不挤主界面）；数据泵随流程启停。
@@ -2090,17 +2061,21 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                                     identity.programName,
                                     identity.sampledPointCount,
                                     identity.effectiveFinalStepMm,
-                                    identity.parameterFingerprint,
-                                    identity.resumeCheckpointSupported,
-                                    identity.resumeUnsupportedReason,
-                                    prepareError);
+                                     identity.parameterFingerprint,
+                                     identity.resumeCheckpointSupported,
+                                     identity.resumeUnsupportedReason,
+                                     identity.requiredEndSafePose,
+                                     identity.safeMoveSpeedMmPerMin,
+                                     prepareError);
                             },
-                            [self](bool completed)
+                            [self](const WeldExecutionTerminalResult& terminal, QString& finishError) -> bool
                             {
-                                if (self != nullptr)
+                                if (self == nullptr)
                                 {
-                                    self->FinishActiveWeldExecution(completed);
+                                    finishError = QStringLiteral("焊接页面已关闭，无法持久化安全回撤终态。");
+                                    return false;
                                 }
+                                return self->FinishActiveWeldExecution(terminal, finishError);
                             });
                     if (ok)
                     {
@@ -2242,6 +2217,16 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
         QMessageBox::warning(this, "跳过扫描焊接", leaseError);
         return;
     }
+    MeasureThenWeldService::PointCloudProductionExpectation productionExpectation;
+    if (!MeasureThenWeldService::CapturePointCloudProductionExpectation(
+            pRobotDriver,
+            QString::fromStdString(param.sRobotName),
+            productionExpectation,
+            error))
+    {
+        QMessageBox::warning(this, "跳过扫描焊接", error);
+        return;
+    }
     QString invalidateError;
     if (!MeasureThenWeldService::InvalidateStoredWeldResumeCheckpoint(
         QString::fromStdString(param.sRobotName), invalidateError))
@@ -2282,6 +2267,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                  canRebuildFromLaser,
                  hasExistingPoseFile,
                  hasExistingSeamCompFile,
+                 productionExpectation,
                  operationLease]() mutable
         {
             bool ok = true;
@@ -2324,7 +2310,8 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                         rebuildSummary,
                         processError,
                         [self](const QString& text) { if (self != nullptr) self->AppendLog(text); },
-                        [self](const QString& text) { if (self != nullptr) self->SetFlowStep(text); });
+                        [self](const QString& text) { if (self != nullptr) self->SetFlowStep(text); },
+                        productionExpectation);
                 if (self != nullptr)
                 {
                     if (ok)
@@ -2444,17 +2431,21 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                                 identity.programName,
                                 identity.sampledPointCount,
                                 identity.effectiveFinalStepMm,
-                                identity.parameterFingerprint,
-                                identity.resumeCheckpointSupported,
-                                identity.resumeUnsupportedReason,
-                                prepareError);
+                                     identity.parameterFingerprint,
+                                     identity.resumeCheckpointSupported,
+                                     identity.resumeUnsupportedReason,
+                                     identity.requiredEndSafePose,
+                                     identity.safeMoveSpeedMmPerMin,
+                                     prepareError);
                         },
-                        [self](bool completed)
+                        [self](const WeldExecutionTerminalResult& terminal, QString& finishError) -> bool
                         {
-                            if (self != nullptr)
+                            if (self == nullptr)
                             {
-                                self->FinishActiveWeldExecution(completed);
+                                finishError = QStringLiteral("焊接页面已关闭，无法持久化安全回撤终态。");
+                                return false;
                             }
+                            return self->FinishActiveWeldExecution(terminal, finishError);
                         });
                 if (ok)
                 {
@@ -2535,15 +2526,12 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
     const QString& parameterFingerprint,
     bool resumeCheckpointSupported,
     const QString& resumeUnsupportedReason,
+    const T_ROBOT_COORS& requiredEndSafePose,
+    double safeMoveSpeedMmPerMin,
     QString& error)
 {
     error.clear();
-    // FANUC 暂停尚未接入；不能因为 STEP 的断点能力阻断 FANUC 原有焊接流程。
-    if (dynamic_cast<STEPRobotCtrl*>(pRobotDriver) == nullptr)
-    {
-        ClearActiveWeldCheckpoint();
-        return true;
-    }
+    const bool isStepRobot = dynamic_cast<STEPRobotCtrl*>(pRobotDriver) != nullptr;
 
     const QString activeOwner = RobotOperationLease::CurrentOwner(pRobotDriver);
     const bool isResumeFlow = activeOwner == QStringLiteral("断点续焊流程");
@@ -2593,9 +2581,11 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
     record.finalStepMm = effectiveFinalStepMm;
     record.backtrackMm = param.dResumeBacktrackMm;
 
-    if (record.robotName.isEmpty() || record.robotType != QStringLiteral("STEP")
+    if (record.robotName.isEmpty()
+        || (record.robotType != QStringLiteral("STEP") && record.robotType != QStringLiteral("FANUC"))
         || record.robotEndpoint.isEmpty()
-        || !std::isfinite(record.backtrackMm) || record.backtrackMm < 0.0)
+        || !std::isfinite(record.backtrackMm) || record.backtrackMm < 0.0
+        || !std::isfinite(safeMoveSpeedMmPerMin) || safeMoveSpeedMmPerMin <= 0.0)
     {
         error = QStringLiteral("冻结STEP焊接断点上下文失败：机器人持久端点或回退距离无效。");
         return false;
@@ -2642,6 +2632,20 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
     }
     record.sourceTrajectoryRelativePath = sourceRelative;
     record.sourceTrajectorySha256 = sourcePoseSha256.toLower();
+    record.safetyObservedAtUtc = record.createdAtUtc;
+    record.safetyReason = QStringLiteral("焊接程序尚未启动；已预先锁存焊后安全回撤门禁。");
+    record.safetyProgramCompleted = false;
+    record.safetyMoveSpeedMmPerMin = safeMoveSpeedMmPerMin;
+    record.safeX = requiredEndSafePose.dX;
+    record.safeY = requiredEndSafePose.dY;
+    record.safeZ = requiredEndSafePose.dZ;
+    record.safeRx = requiredEndSafePose.dRX;
+    record.safeRy = requiredEndSafePose.dRY;
+    record.safeRz = requiredEndSafePose.dRZ;
+    record.safeBx = requiredEndSafePose.dBX;
+    record.safeBy = requiredEndSafePose.dBY;
+    record.safeBz = requiredEndSafePose.dBZ;
+    record.safetyWitnessSha256 = WeldResumePlanner::BuildSafeRetreatWitness(record);
 
     QString encodeError;
     const QString encoded = WeldResumePlanner::EncodeRecord(record, &encodeError);
@@ -2669,22 +2673,36 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
             return false;
         }
     }
-    if (!resumeCheckpointSupported)
+    QString priorStoredRecord;
+    WeldResumePlanner::CheckpointRecord priorRecord;
+    QString priorReadError;
+    ReadBreakpointRecord(record.robotName, priorRecord, &priorStoredRecord, &priorReadError);
+    // pending 必须先于记录写入：若进程恰在两次写之间退出，留下 pending=1 + 旧记录
+    // 会安全阻断并要求维护，绝不能留下“新程序可启动但没有持久门禁”的窗口。
+    if (!WeldSafetyRecoveryStore::BeginOrUpdatePending(record.robotName, encoded, &error))
     {
-        ClearActiveWeldCheckpoint();
-        const QString reason = resumeUnsupportedReason.isEmpty()
-            ? QStringLiteral("当前焊接工艺无法绑定真实执行轨迹，暂停/断点续焊已禁用。")
-            : resumeUnsupportedReason;
-        AppendLog(reason + QStringLiteral(" 旧断点已失效，正常焊接继续执行。"));
-        return true;
+        if (error.isEmpty())
+        {
+            error = QStringLiteral("持久化焊后安全回撤门禁失败，已在START前中止。");
+        }
+        return false;
     }
     {
         QMutexLocker lock(&m_activeWeldCheckpointMutex);
         m_activeWeldCheckpointRecord = encoded;
+        m_activeWeldPriorStoredRecord = priorStoredRecord;
+        m_activeWeldResumeFlow = isResumeFlow;
     }
-    SetWeldPauseAvailable(true);
-    AppendLog(QString("已冻结可暂停焊接上下文：Case=%1 Program=%2 SHA256=%3…")
-        .arg(record.caseId, record.programName, record.trajectorySha256.left(12)));
+    SetWeldPauseAvailable(isStepRobot && resumeCheckpointSupported);
+    if (!resumeCheckpointSupported)
+    {
+        const QString reason = resumeUnsupportedReason.isEmpty()
+            ? QStringLiteral("当前焊接工艺无法绑定真实执行轨迹，暂停/断点续焊已禁用。")
+            : resumeUnsupportedReason;
+        AppendLog(reason + QStringLiteral(" 但焊后安全回撤身份已独立冻结。"));
+    }
+    AppendLog(QString("已在START前冻结焊接身份和安全回撤门禁：Robot=%1 Endpoint=%2 Program=%3 SHA256=%4…")
+        .arg(record.robotName, record.robotEndpoint, record.programName, record.trajectorySha256.left(12)));
     return true;
 }
 
@@ -2699,44 +2717,150 @@ void MeasureThenWeldDialog::ClearActiveWeldCheckpoint()
     {
         QMutexLocker lock(&m_activeWeldCheckpointMutex);
         m_activeWeldCheckpointRecord.clear();
+        m_activeWeldPriorStoredRecord.clear();
+        m_activeWeldResumeFlow = false;
     }
     SetWeldPauseAvailable(false);
 }
 
-void MeasureThenWeldDialog::FinishActiveWeldExecution(bool programCompleted)
+bool MeasureThenWeldDialog::FinishActiveWeldExecution(
+    const WeldExecutionTerminalResult& terminal,
+    QString& error)
 {
-    const QString encoded = ActiveWeldCheckpointRecord();
+    error.clear();
+    QString encoded;
+    QString priorStoredRecord;
+    bool resumeFlow = false;
+    {
+        QMutexLocker lock(&m_activeWeldCheckpointMutex);
+        encoded = m_activeWeldCheckpointRecord;
+        priorStoredRecord = m_activeWeldPriorStoredRecord;
+        resumeFlow = m_activeWeldResumeFlow;
+    }
     WeldResumePlanner::CheckpointRecord record;
     QString decodeError;
-    if (!encoded.isEmpty() && WeldResumePlanner::DecodeRecord(encoded, record, &decodeError)
-        && programCompleted
-        && (record.state == QStringLiteral("paused")
-            || record.state == QStringLiteral("continuing")))
+    if (encoded.isEmpty() || !WeldResumePlanner::DecodeRecord(encoded, record, &decodeError))
     {
-        QString transitionError;
-        if (!TransitionBreakpointRecordState(
-            record.robotName,
-            record.checkpointId,
-            record.state,
-            QStringLiteral("finished"),
-            &transitionError))
+        error = decodeError.isEmpty()
+            ? QStringLiteral("缺少START前冻结的焊接/安全回撤身份，禁止释放门禁。")
+            : decodeError;
+        return false;
+    }
+
+    const auto applyTerminal = [&]()
+    {
+        record.safetyObservedAtUtc = terminal.observedAtUtc.trimmed().isEmpty()
+            ? QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)
+            : terminal.observedAtUtc;
+        record.safetyReason = terminal.reason.trimmed().isEmpty()
+            ? QStringLiteral("焊接安全终态未提供原因。")
+            : terminal.reason;
+        record.safetyProgramCompleted =
+            terminal.state != WeldExecutionTerminalState::Incomplete;
+        record.safetyMoveSpeedMmPerMin = terminal.safeMoveSpeedMmPerMin;
+        record.safeX = terminal.requiredSafePose.dX;
+        record.safeY = terminal.requiredSafePose.dY;
+        record.safeZ = terminal.requiredSafePose.dZ;
+        record.safeRx = terminal.requiredSafePose.dRX;
+        record.safeRy = terminal.requiredSafePose.dRY;
+        record.safeRz = terminal.requiredSafePose.dRZ;
+        record.safeBx = terminal.requiredSafePose.dBX;
+        record.safeBy = terminal.requiredSafePose.dBY;
+        record.safeBz = terminal.requiredSafePose.dBZ;
+        record.terminalPoseValid = terminal.observedTerminalPoseValid;
+        record.terminalX = terminal.observedTerminalPose.dX;
+        record.terminalY = terminal.observedTerminalPose.dY;
+        record.terminalZ = terminal.observedTerminalPose.dZ;
+        record.terminalRx = terminal.observedTerminalPose.dRX;
+        record.terminalRy = terminal.observedTerminalPose.dRY;
+        record.terminalRz = terminal.observedTerminalPose.dRZ;
+        record.terminalBx = terminal.observedTerminalPose.dBX;
+        record.terminalBy = terminal.observedTerminalPose.dBY;
+        record.terminalBz = terminal.observedTerminalPose.dBZ;
+        record.safetyWitnessSha256 = WeldResumePlanner::BuildSafeRetreatWitness(record);
+    };
+
+    if (terminal.state == WeldExecutionTerminalState::Incomplete
+        && !terminal.programStartAttempted)
+    {
+        // 已确认尚未尝试 START，可恢复本轮覆盖前的断点；这是唯一允许清除预锁存门禁的失败路径。
+        if (resumeFlow && !priorStoredRecord.isEmpty())
         {
-            AppendLog(QString("焊接已完成，但断点终态写回失败（保持闭锁）：%1").arg(transitionError));
+            if (!WeldSafetyRecoveryStore::WriteCompletedAndClearPending(
+                record.robotName, priorStoredRecord, &error))
+            {
+                return false;
+            }
         }
+        else
+        {
+            record.state = QStringLiteral("superseded");
+            applyTerminal();
+            const QString value = WeldResumePlanner::EncodeRecord(record, &error);
+            if (value.isEmpty() || !WeldSafetyRecoveryStore::WriteCompletedAndClearPending(
+                record.robotName, value, &error))
+            {
+                return false;
+            }
+        }
+        ClearActiveWeldCheckpoint();
+        return true;
+    }
+
+    applyTerminal();
+    if (terminal.state == WeldExecutionTerminalState::Incomplete)
+    {
+        record.state = QStringLiteral("interrupted");
+    }
+    else if (terminal.state == WeldExecutionTerminalState::ProgramCompletedUnretracted)
+    {
+        record.state = QStringLiteral("unretracted");
+    }
+    else
+    {
+        record.state = QStringLiteral("finished");
+    }
+
+    const QString value = WeldResumePlanner::EncodeRecord(record, &error);
+    if (value.isEmpty())
+    {
+        return false;
+    }
+
+    if (terminal.state != WeldExecutionTerminalState::SafelyRetracted)
+    {
+        // 未回撤/启动不确定必须先确保 pending=1，再更新详细记录；崩溃窗口只能更保守，不能失锁。
+        if (!WeldSafetyRecoveryStore::BeginOrUpdatePending(record.robotName, value, &error))
+        {
+            return false;
+        }
+        {
+            QMutexLocker lock(&m_activeWeldCheckpointMutex);
+            m_activeWeldCheckpointRecord = value;
+        }
+        SetWeldPauseAvailable(false);
+        AppendLog(QString("焊后安全回撤未验证，已持久闭锁：State=%1 Endpoint=%2 Program=%3 Reason=%4")
+            .arg(record.state, record.robotEndpoint, record.programName, record.safetyReason));
+        return true;
+    }
+
+    // 先落盘 finished，再清 pending；任一步失败都保留 fail-closed 门禁。
+    if (!WeldSafetyRecoveryStore::WriteCompletedAndClearPending(
+        record.robotName, value, &error))
+    {
+        return false;
     }
     ClearActiveWeldCheckpoint();
-    if (programCompleted)
-    {
-        QPointer<MeasureThenWeldDialog> self(this);
-        QMetaObject::invokeMethod(this, [self]()
+    QPointer<MeasureThenWeldDialog> self(this);
+    QMetaObject::invokeMethod(this, [self]()
+        {
+            if (self != nullptr && self->m_pRunMonitor != nullptr)
             {
-                if (self != nullptr && self->m_pRunMonitor != nullptr)
-                {
-                    static_cast<RunMonitorDialog*>(self->m_pRunMonitor)
-                        ->ResumeWeldButton()->setEnabled(false);
-                }
-            }, Qt::QueuedConnection);
-    }
+                static_cast<RunMonitorDialog*>(self->m_pRunMonitor)
+                    ->ResumeWeldButton()->setEnabled(false);
+            }
+        }, Qt::QueuedConnection);
+    return true;
 }
 
 void MeasureThenWeldDialog::SetWeldPauseAvailable(bool available)
@@ -2969,6 +3093,12 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
                 .arg(checkpointRecord.state));
         return;
     }
+    if (!WeldResumePlanner::ValidateCheckpointTime(
+            checkpointRecord, QDateTime::currentDateTimeUtc(), &error))
+    {
+        QMessageBox::warning(this, "断点续焊", error);
+        return;
+    }
 
     T_PRECISE_MEASURE_PARAM param;
     if (!LoadPresetParam(pRobotDriver, param, error))
@@ -3129,13 +3259,16 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
         return;
     }
     QString leaseError;
-    const auto operationLease = RobotOperationLease::TryAcquire(
-        pRobotDriver, QStringLiteral("断点续焊流程"), &leaseError);
+    RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding pausedRecoveryBinding;
+    const auto operationLease = RobotOperationLease::TryAcquirePausedResume(
+        pRobotDriver, QStringLiteral("断点续焊流程"), checkpointRecord,
+        &pausedRecoveryBinding, &leaseError);
     if (!operationLease)
     {
         QMessageBox::warning(this, "断点续焊", leaseError);
         return;
     }
+    checkpointRecord = pausedRecoveryBinding.record;
     QString revalidatedPosePath;
     QString revalidateError;
     if (RobotOperationLease::PersistentEndpointIdentity(pRobotDriver) != checkpointRecord.robotEndpoint
@@ -3151,13 +3284,24 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
                 : revalidateError);
         return;
     }
+    QString terminatePausedError;
+    if (!TerminatePersistedProgramBeforeRecovery(
+            pRobotDriver, checkpointRecord, terminatePausedError))
+    {
+        QMessageBox::warning(this, "断点续焊",
+            QStringLiteral("旧 paused 程序未终止，未切换 resuming、未发起任何运动：")
+                + terminatePausedError);
+        return;
+    }
     QString transitionError;
-    if (!TransitionBreakpointRecordState(
-        robotName,
-        checkpointRecord.checkpointId,
-        QStringLiteral("paused"),
-        QStringLiteral("resuming"),
-        &transitionError))
+    if (!WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(
+            pausedRecoveryBinding, &transitionError)
+        || !WeldSafetyRecoveryStore::TransitionBoundRecordState(
+            &pausedRecoveryBinding,
+            QStringLiteral("paused"),
+            QStringLiteral("resuming"),
+            &transitionError)
+        || !WeldSafetyRecoveryStore::DisableLegacy(robotName, &transitionError))
     {
         QMessageBox::warning(this, "断点续焊",
             QString("断点状态原子切换失败，未启动机器人：%1").arg(transitionError));
@@ -3259,17 +3403,21 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
                             identity.programName,
                             identity.sampledPointCount,
                             identity.effectiveFinalStepMm,
-                            identity.parameterFingerprint,
-                            identity.resumeCheckpointSupported,
-                            identity.resumeUnsupportedReason,
-                            prepareError);
+                             identity.parameterFingerprint,
+                             identity.resumeCheckpointSupported,
+                             identity.resumeUnsupportedReason,
+                             identity.requiredEndSafePose,
+                             identity.safeMoveSpeedMmPerMin,
+                             prepareError);
                     },
-                    [self](bool completed)
+                    [self](const WeldExecutionTerminalResult& terminal, QString& finishError) -> bool
                     {
-                        if (self != nullptr)
+                        if (self == nullptr)
                         {
-                            self->FinishActiveWeldExecution(completed);
+                            finishError = QStringLiteral("焊接页面已关闭，无法持久化安全回撤终态。");
+                            return false;
                         }
+                        return self->FinishActiveWeldExecution(terminal, finishError);
                     },
                     checkpointRecord.trajectorySha256,
                     validateResumeIdentity,
@@ -3319,6 +3467,219 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
         }).detach();
 }
 
+void MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow()
+{
+    if (m_bRunning)
+    {
+        QMessageBox::information(this, "焊后安全回撤恢复", "流程正在运行。");
+        return;
+    }
+    if (BlockedByOtherFlow("焊后安全回撤恢复"))
+    {
+        return;
+    }
+
+    RobotDriverAdaptor* pRobotDriver = GetRobotDriver();
+    if (pRobotDriver == nullptr)
+    {
+        return;
+    }
+    const QString robotName = QString::fromStdString(pRobotDriver->m_sRobotName).trimmed();
+    bool pending = false;
+    QString error;
+    if (!SafeRetreatPending(robotName, pending, &error))
+    {
+        QMessageBox::warning(this, "焊后安全回撤恢复", error);
+        return;
+    }
+    if (!pending)
+    {
+        QMessageBox::information(this, "焊后安全回撤恢复", "当前机器人没有未完成的焊后安全回撤门禁。");
+        return;
+    }
+
+    WeldResumePlanner::CheckpointRecord record;
+    QString encoded;
+    if (!ReadBreakpointRecord(robotName, record, &encoded, &error)
+        || !WeldResumePlanner::ValidateSafeRetreatRecoveryRecord(record, &error))
+    {
+        QMessageBox::warning(this, "焊后安全回撤恢复",
+            error + QStringLiteral("\n记录无效时禁止自动运动；请人工确认现场并由维护人员处理持久门禁。"));
+        return;
+    }
+    const QString currentEndpoint = RobotOperationLease::PersistentEndpointIdentity(pRobotDriver);
+    if (currentEndpoint.isEmpty() || currentEndpoint != record.robotEndpoint)
+    {
+        QMessageBox::warning(this, "焊后安全回撤恢复",
+            QString("记录绑定端点与当前机器人不一致，禁止运动。\nRecord=%1\nCurrent=%2")
+                .arg(record.robotEndpoint, currentEndpoint));
+        return;
+    }
+    if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+    {
+        QMessageBox::warning(this, "焊后安全回撤恢复",
+            QStringLiteral("机器人 STOP/安全停止仍处于锁存状态。请先通过全局安全停止流程真实确认机器人已停止并解除内存停机锁；本入口不会绕过 STOP。"));
+        return;
+    }
+    if (!HasLiveSession(QStringLiteral("启动焊后安全回撤恢复")))
+    {
+        return;
+    }
+
+    const T_ROBOT_COORS requiredSafePose(
+        record.safeX, record.safeY, record.safeZ,
+        record.safeRx, record.safeRy, record.safeRz,
+        record.safeBx, record.safeBy, record.safeBz);
+    const QMessageBox::StandardButton confirm = QMessageBox::warning(
+        this,
+        "焊后安全回撤恢复",
+        QString("将只执行一条到记录绑定收枪安全位的直线运动，绝不会再次执行焊缝。\n"
+                "状态：%1\n机器人：%2\n端点：%3\n已完成程序：%4\n轨迹SHA256：%5…\n"
+                "目标安全位：X=%6 Y=%7 Z=%8 RX=%9 RY=%10 RZ=%11\n"
+                "原因：%12\n\n请确认路径无障碍并继续？")
+            .arg(record.state, record.robotName, record.robotEndpoint, record.programName,
+                record.trajectorySha256.left(12))
+            .arg(record.safeX, 0, 'f', 3)
+            .arg(record.safeY, 0, 'f', 3)
+            .arg(record.safeZ, 0, 'f', 3)
+            .arg(record.safeRx, 0, 'f', 3)
+            .arg(record.safeRy, 0, 'f', 3)
+            .arg(record.safeRz, 0, 'f', 3)
+            .arg(record.safetyReason),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (confirm != QMessageBox::Yes)
+    {
+        return;
+    }
+
+    QString leaseError;
+    RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding safeRecoveryBinding;
+    const auto operationLease = RobotOperationLease::TryAcquireSafetyRecovery(
+        pRobotDriver, QStringLiteral("焊后安全回撤恢复"), record,
+        &safeRecoveryBinding, &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, "焊后安全回撤恢复", leaseError);
+        return;
+    }
+    SetRunning(true);
+    ResetProgress(QStringLiteral("准备恢复焊后安全回撤"));
+    SetFlowStep(QStringLiteral("复核持久门禁和机器人端点"));
+    {
+        QMutexLocker lock(&m_activeWeldCheckpointMutex);
+        m_activeWeldCheckpointRecord = encoded;
+        m_activeWeldPriorStoredRecord.clear();
+        m_activeWeldResumeFlow = false;
+    }
+
+    QPointer<MeasureThenWeldDialog> self(this);
+    std::thread([self, pRobotDriver, robotName, record, requiredSafePose,
+        safeRecoveryBinding, operationLease]()
+        {
+            bool ok = false;
+            QString recoveryError;
+            T_ROBOT_COORS observed;
+            const WeldResumePlanner::CheckpointRecord current = safeRecoveryBinding.record;
+            if (self == nullptr || self->m_pService == nullptr)
+            {
+                recoveryError = QStringLiteral("焊接页面或服务已关闭，未发起恢复运动。");
+            }
+            else if (!WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(
+                    safeRecoveryBinding, &recoveryError)
+                || current.checkpointId != record.checkpointId
+                || current.safetyWitnessSha256 != record.safetyWitnessSha256
+                || !WeldResumePlanner::ValidateSafeRetreatRecoveryRecord(current, &recoveryError)
+                || RobotOperationLease::PersistentEndpointIdentity(pRobotDriver) != record.robotEndpoint)
+            {
+                if (recoveryError.isEmpty())
+                {
+                    recoveryError = QStringLiteral("恢复运动前持久记录、见证或机器人端点发生变化，已中止。");
+                }
+            }
+            else if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+            {
+                recoveryError = QStringLiteral("恢复运动前 STOP 再次锁存，未发起任何运动。");
+            }
+            else if (current.state == QStringLiteral("interrupted")
+                && !TerminatePersistedProgramBeforeRecovery(
+                    pRobotDriver, current, recoveryError))
+            {
+                // pending 保持 1；终止未验证时绝不发送第一条 Move。
+            }
+            else if (!WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(
+                    safeRecoveryBinding, &recoveryError))
+            {
+                // STOP/Kill 期间新增别名记录或替换 RecordV2 时，绝不 Move。
+            }
+            else if (!RobotRecoverySafetyPolicy::MayMoveForSafeRetreat(
+                current.state, current.safetyProgramCompleted, true))
+            {
+                recoveryError = QStringLiteral("持久终态不允许自动安全回撤，未发起任何运动。");
+            }
+            else if (!self->m_pService->MoveCoorsAndWait(
+                pRobotDriver,
+                requiredSafePose,
+                record.safetyMoveSpeedMmPerMin,
+                QStringLiteral("焊后安全回撤恢复"),
+                [self](const QString& text) { if (self != nullptr) self->AppendLog(text); },
+                [self](const QString& text) { if (self != nullptr) self->SetFlowStep(text); }))
+            {
+                recoveryError = QStringLiteral("焊后安全回撤恢复运动失败，持久门禁保持有效。");
+                if (RobotOperationLease::MotionCompletionPending(pRobotDriver)
+                    && !RobotOperationLease::IsCancellationRequested(pRobotDriver))
+                {
+                    RobotOperationLease::StopAndConfirmUnverifiedMotion(pRobotDriver);
+                }
+                RobotOperationLease::RequestCancellation(pRobotDriver);
+            }
+            else if (!self->m_pService->VerifyRobotAtSafePose(
+                pRobotDriver, requiredSafePose, observed, recoveryError))
+            {
+                RobotOperationLease::RequestCancellation(pRobotDriver);
+            }
+            else
+            {
+                WeldExecutionTerminalResult terminal;
+                terminal.state = WeldExecutionTerminalState::SafelyRetracted;
+                terminal.programStartAttempted = true;
+                terminal.reason = QStringLiteral("显式焊后安全回撤恢复已运动并回读验证到位。");
+                terminal.observedAtUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+                terminal.requiredSafePose = requiredSafePose;
+                terminal.observedTerminalPose = observed;
+                terminal.observedTerminalPoseValid = true;
+                terminal.safeMoveSpeedMmPerMin = record.safetyMoveSpeedMmPerMin;
+                ok = self->FinishActiveWeldExecution(terminal, recoveryError);
+                if (!ok)
+                {
+                    RobotOperationLease::RequestCancellation(pRobotDriver);
+                }
+            }
+
+            QMetaObject::invokeMethod(qApp, [self, ok, recoveryError]()
+                {
+                    if (self == nullptr)
+                    {
+                        return;
+                    }
+                    self->SetFlowStep(ok ? QStringLiteral("焊后安全回撤恢复完成")
+                        : QStringLiteral("焊后安全回撤恢复失败"));
+                    self->FinishProgress(ok,
+                        ok ? QStringLiteral("安全回撤已验证") : QStringLiteral("安全回撤未完成"));
+                    self->SetRunning(false);
+                    ShowNonModalFlowResult(
+                        self,
+                        ok ? QMessageBox::Information : QMessageBox::Warning,
+                        "焊后安全回撤恢复",
+                        ok
+                            ? QStringLiteral("已到达记录绑定的收枪安全位并完成位置回读，持久门禁已解除；没有重复执行焊缝。")
+                            : (recoveryError.isEmpty()
+                                ? QStringLiteral("恢复未完成，持久门禁保持有效。")
+                                : recoveryError));
+                }, Qt::QueuedConnection);
+        }).detach();
+}
+
 void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
 {
     if (m_bRunning)
@@ -3345,6 +3706,17 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
         return;
     }
     param.bDoActualWeld = false;  // 标定只扫描，不进入焊接
+    bool safeRetreatPending = false;
+    QString safeRetreatError;
+    if (!SafeRetreatPending(QString::fromStdString(param.sRobotName), safeRetreatPending, &safeRetreatError)
+        || safeRetreatPending)
+    {
+        QMessageBox::warning(this, "相机时间补偿标定",
+            safeRetreatError.isEmpty()
+                ? QStringLiteral("该机器人存在未验证的焊后安全回撤，禁止启动任何自动标定运动。请先执行焊后安全回撤恢复。")
+                : safeRetreatError);
+        return;
+    }
 
     const double scanDistanceMm = std::sqrt(
         std::pow(param.tStartPos.dX - param.tEndPos.dX, 2.0)

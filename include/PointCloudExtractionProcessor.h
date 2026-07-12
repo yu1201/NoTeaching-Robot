@@ -7,6 +7,8 @@
 
 #include <QVector>
 
+#include <functional>
+
 class PointCloudExtractionProcessor
 {
 public:
@@ -58,7 +60,8 @@ public:
         const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
         const PointCloudProcessingConfig::Settings& settings,
         const Eigen::Vector3d& scanDirection,
-        const QString& baseWeldOutputPath = QString());
+        const QString& baseWeldOutputPath = QString(),
+        const std::function<bool()>& stopRequested = std::function<bool()>());
 
     // 子进程入口：由 main() 在构造主窗口前拦截 --pointcloud-extract-worker 调用。
     // workerArgs = [inputCloudFile, scanX, scanY, scanZ, baseWeldOutputPath, resultFile,

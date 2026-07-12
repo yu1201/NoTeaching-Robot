@@ -215,6 +215,39 @@ void TestPathBindingAndTamperDetection(const QString& root)
         "same-size/same-point-count trajectory mutation bypassed SHA256 binding");
 }
 
+void TestTrajectoryResourceBounds(const QString& root)
+{
+    const QString directory = QDir(root).filePath(
+        QStringLiteral("Result/RobotA/CaseBounds/LaserPoint"));
+    Check(QDir().mkpath(directory), "could not create trajectory bounds directory");
+
+    const QString longLinePath = QDir(directory).filePath(
+        QStringLiteral("PreciseLaserPoint_WeldPose_2mm_SeamComp_Long_FinalSampled.txt"));
+    QFile longLine(longLinePath);
+    Check(longLine.open(QIODevice::WriteOnly | QIODevice::Truncate),
+        "could not create overlong trajectory line fixture");
+    const QByteArray oversizedLine(WeldResumePlanner::MaxExecutionTrajectoryLineBytes + 1, '1');
+    Check(longLine.write(oversizedLine) == oversizedLine.size(),
+        "could not write overlong trajectory line fixture");
+    longLine.close();
+
+    QVector<WeldResumePlanner::TrajectoryPoint> points;
+    QString error;
+    Check(!WeldResumePlanner::LoadExecutionTrajectory(longLinePath, points, &error),
+        "trajectory with an overlong line was accepted");
+
+    const QString oversizedPath = QDir(directory).filePath(
+        QStringLiteral("PreciseLaserPoint_WeldPose_2mm_SeamComp_Oversize_FinalSampled.txt"));
+    QFile oversized(oversizedPath);
+    Check(oversized.open(QIODevice::WriteOnly | QIODevice::Truncate),
+        "could not create oversized trajectory fixture");
+    Check(oversized.resize(WeldResumePlanner::MaxExecutionTrajectoryBytes + 1),
+        "could not resize oversized trajectory fixture");
+    oversized.close();
+    Check(!WeldResumePlanner::LoadExecutionTrajectory(oversizedPath, points, &error),
+        "trajectory exceeding the byte limit was accepted");
+}
+
 void TestBoundPlanningSnapshot(const QString& root)
 {
     const QString path = WriteTrajectory(
@@ -409,6 +442,87 @@ void TestSelfIntersectionAmbiguity(const QString& root)
     CheckNear(plan.pauseArcMm, 1.9, "near-vertex pause arc is wrong");
     CheckNear(plan.resumeArcMm, 1.4, "near-vertex backtrack arc is wrong");
 }
+
+void TestCheckpointTimeGate()
+{
+    WeldResumePlanner::CheckpointRecord record;
+    QString error;
+    const QDateTime now = QDateTime::fromString(
+        QStringLiteral("2026-07-12T12:00:00.000Z"), Qt::ISODateWithMs);
+
+    record.createdAtUtc = QStringLiteral("2026-07-11T12:00:00.000Z");
+    Check(WeldResumePlanner::ValidateCheckpointTime(record, now, &error),
+        "checkpoint at the exact 24-hour boundary was rejected");
+
+    record.createdAtUtc = QStringLiteral("2026-07-11T11:59:59.000Z");
+    Check(!WeldResumePlanner::ValidateCheckpointTime(record, now, &error),
+        "checkpoint older than 24 hours was accepted");
+
+    record.createdAtUtc = QStringLiteral("2026-07-12T12:05:00.000Z");
+    Check(WeldResumePlanner::ValidateCheckpointTime(record, now, &error),
+        "checkpoint at the allowed future-clock-skew boundary was rejected");
+
+    record.createdAtUtc = QStringLiteral("2026-07-12T12:05:01.000Z");
+    Check(!WeldResumePlanner::ValidateCheckpointTime(record, now, &error),
+        "checkpoint beyond the future-clock-skew boundary was accepted");
+
+    record.createdAtUtc = QStringLiteral("not-an-iso-time");
+    Check(!WeldResumePlanner::ValidateCheckpointTime(record, now, &error),
+        "checkpoint with an invalid timestamp was accepted");
+}
+
+void TestSafeRetreatRecoveryRecord(const QString& root)
+{
+    const QString path = WriteTrajectory(
+        root,
+        QStringLiteral("RobotA"),
+        QStringLiteral("CaseSafeRetreat"),
+        QStringLiteral("PreciseLaserPoint_WeldPose_2mm_SeamComp_FinalSampled.txt"),
+        { { 0.0, 0.0, 0.0 }, { 20.0, 0.0, 0.0 } });
+    WeldResumePlanner::CheckpointRecord record = CompleteRecord(root, path);
+    record.state = QStringLiteral("unretracted");
+    record.safetyObservedAtUtc = QStringLiteral("2026-07-12T12:00:00.000Z");
+    record.safetyReason = QStringLiteral("user cancelled after completed weld");
+    record.safetyProgramCompleted = true;
+    record.safetyMoveSpeedMmPerMin = 600.0;
+    record.safeX = -70.0;
+    record.safeY = 0.0;
+    record.safeZ = 10.0;
+    record.safeRx = 180.0;
+    record.safeRy = 0.0;
+    record.safeRz = 90.0;
+    record.terminalPoseValid = true;
+    record.terminalX = 20.0;
+    record.terminalY = 0.0;
+    record.terminalZ = 0.0;
+    record.terminalRx = 180.0;
+    record.terminalRy = 0.0;
+    record.terminalRz = 90.0;
+    record.safetyWitnessSha256 = WeldResumePlanner::BuildSafeRetreatWitness(record);
+
+    QString error;
+    Check(WeldResumePlanner::ValidateSafeRetreatRecoveryRecord(record, &error),
+        qPrintable(QStringLiteral("valid unretracted record rejected: %1").arg(error)));
+    const QString encoded = WeldResumePlanner::EncodeRecord(record, &error);
+    WeldResumePlanner::CheckpointRecord decoded;
+    Check(!encoded.isEmpty() && WeldResumePlanner::DecodeRecord(encoded, decoded, &error),
+        qPrintable(QStringLiteral("unretracted record round-trip failed: %1").arg(error)));
+
+    decoded.safetyReason += QStringLiteral(" tampered");
+    Check(!WeldResumePlanner::ValidateSafeRetreatRecoveryRecord(decoded, &error),
+        "tampered safe-retreat reason retained a valid witness");
+
+    record.safetyProgramCompleted = false;
+    record.safetyWitnessSha256 = WeldResumePlanner::BuildSafeRetreatWitness(record);
+    Check(!WeldResumePlanner::ValidateSafeRetreatRecoveryRecord(record, &error),
+        "unretracted state accepted programCompleted=false");
+
+    record.state = QStringLiteral("interrupted");
+    record.safetyReason = QStringLiteral("START attempted; completion unknown");
+    record.safetyWitnessSha256 = WeldResumePlanner::BuildSafeRetreatWitness(record);
+    Check(WeldResumePlanner::ValidateSafeRetreatRecoveryRecord(record, &error),
+        qPrintable(QStringLiteral("interrupted recovery record rejected: %1").arg(error)));
+}
 }
 
 int main(int argc, char* argv[])
@@ -419,12 +533,15 @@ int main(int argc, char* argv[])
 
     TestColumnParsingAndRecordRoundTrip(project.path());
     TestPathBindingAndTamperDetection(project.path());
+    TestTrajectoryResourceBounds(project.path());
     TestBoundPlanningSnapshot(project.path());
     TestForwardAndReverseArcLength(project.path());
     TestNonUniformThreeDimensionalArcAndBounds(project.path());
     TestSelfIntersectionAmbiguity(project.path());
+    TestCheckpointTimeGate();
+    TestSafeRetreatRecoveryRecord(project.path());
 
     std::cout << "PASS: V2 record, bound trajectory integrity and planning snapshot, "
-        "column parsing, execution-order arc backtrack, bounds, and ambiguity rejection\n";
+        "column parsing, execution-order arc backtrack, bounds, ambiguity, and checkpoint TTL\n";
     return 0;
 }

@@ -3,6 +3,7 @@
 #include "MeasureThenWeldDialog.h"
 #include "PointCloudProcessingConfig.h"
 #include "RobotCalculation.h"
+#include "WeldExecutionSafety.h"
 
 #include <functional>
 #include <vector>
@@ -44,15 +45,29 @@ public:
         bool trajectoryInExecutionOrder = true;
         bool resumeCheckpointSupported = true;
         QString resumeUnsupportedReason;
+        T_ROBOT_COORS requiredEndSafePose;
+        double safeMoveSpeedMmPerMin = 0.0;
+    };
+
+    // 可跨线程按值传递的只读生产绑定。只能在拥有当前机器人驱动的线程中通过
+    // CapturePointCloudProductionExpectation 创建；后台重建不得持有/解引用裸驱动指针。
+    struct PointCloudProductionExpectation
+    {
+        QString robotName;
+        QString robotEndpoint;
+        QString cameraSection;
+        QString handEyeSha256;
     };
     using WeldExecutionPreparedCallback =
         std::function<bool(const WeldExecutionIdentity&, QString&)>;
     // 续焊等高风险入口可在任何机器人运动前复核冻结身份；此时程序名可能尚未生成。
     using WeldExecutionPreMotionCallback =
         std::function<bool(const WeldExecutionIdentity&, QString&)>;
-    // executionPrepared 成功后，无论启动失败、流程取消还是程序正常完成都恰好回调一次；
-    // true 表示焊接程序已确认完成，false 表示尚未完成便退出。调用方据此及时关闭暂停窗口。
-    using WeldExecutionFinishedCallback = std::function<void(bool)>;
+    // executionPrepared 成功后报告安全终态。程序完成后先同步报告
+    // ProgramCompletedUnretracted 以持久化恢复门禁；只有强制回撤并验证到位后才报告
+    // SafelyRetracted。启动前退出或启动结果不确定报告 Incomplete。
+    using WeldExecutionFinishedCallback =
+        std::function<bool(const WeldExecutionTerminalResult&, QString&)>;
 
     enum class ScanCycleStatus
     {
@@ -96,6 +111,11 @@ public:
 
     // 启动任何会产生新焊道身份的完整流程前调用；失败时必须在第一条机器人运动前中止。
     static bool InvalidateStoredWeldResumeCheckpoint(const QString& robotName, QString& error);
+    static bool CapturePointCloudProductionExpectation(
+        const RobotDriverAdaptor* pRobotDriver,
+        const QString& expectedRobotName,
+        PointCloudProductionExpectation& expectation,
+        QString& error);
     bool LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error) const;
     bool ResolveWeldExecutionParameters(
         const T_PRECISE_MEASURE_PARAM& param,
@@ -108,6 +128,11 @@ public:
     bool MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
     bool MovePulseListAndWait(RobotDriverAdaptor* pRobotDriver, const std::vector<T_ANGLE_PULSE>& pulses, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
     bool MoveCoorsAndWait(RobotDriverAdaptor* pRobotDriver, const T_ROBOT_COORS& coors, double speed, const QString& name, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
+    bool VerifyRobotAtSafePose(
+        RobotDriverAdaptor* pRobotDriver,
+        const T_ROBOT_COORS& expected,
+        T_ROBOT_COORS& observed,
+        QString& error) const;
     bool MoveScanStartSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed, const LogCallback& appendLog, const StepCallback& setFlowStep, const CheckpointCallback& checkpoint) const;
     bool MoveScanEndSafeAndWait(RobotDriverAdaptor* pRobotDriver, const T_PRECISE_MEASURE_PARAM& param, double speed, const LogCallback& appendLog, const StepCallback& setFlowStep) const;
     bool RunScanCycle(
@@ -139,10 +164,17 @@ public:
         QString& summary,
         QString& error,
         const LogCallback& appendLog = LogCallback(),
-        const StepCallback& setFlowStep = StepCallback()) const;
+        const StepCallback& setFlowStep = StepCallback(),
+        const PointCloudProductionExpectation& productionExpectation =
+            PointCloudProductionExpectation(),
+        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
 
     QString BuildResultDir(const std::string& robotName) const;
-    bool SaveTextLines(const QString& filePath, const std::vector<QString>& lines, QString& error) const;
+    bool SaveTextLines(
+        const QString& filePath,
+        const std::vector<QString>& lines,
+        QString& error,
+        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
     bool ApplyWeldSeamCompToPoseFile(
         const QString& robotName,
         const QString& inputPath,
@@ -150,7 +182,8 @@ public:
         QString& summary,
         QString& error,
         QString* generatedSha256 = nullptr,
-        qint64* generatedSize = nullptr) const;
+        qint64* generatedSize = nullptr,
+        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
     bool GenerateStepWeldProgramFiles(
         const QString& robotName,
         const QString& poseFilePath,
@@ -164,7 +197,10 @@ public:
         QString& error,
         double overrideFinalStepMm = 0.0,         // >0 时强制覆盖最终轨迹点间距（虚拟焊道测试用）
         bool allowPointwiseWeave = true,
-        WeldPoseSource poseSource = WeldPoseSource::PointCloudProduction) const;
+        WeldPoseSource poseSource = WeldPoseSource::PointCloudProduction,
+        const PointCloudProductionExpectation& authorizationExpectation =
+            PointCloudProductionExpectation(),
+        bool allowActiveProofReplacement = false) const;
 
     // 调试用：从机器人当前位姿沿 ±Y 造一条干净的虚拟直线焊道，保持当前焊枪姿态，
     // 不走点云拟合/姿态补偿/焊缝补偿/起终裁剪/拐点处理，直接生成 srp/srd（摆动/速度/姿态仍读保存的工艺）。
@@ -305,11 +341,20 @@ public:
     };
 
     // 从扫描结果目录读取补偿前基准焊道（Seam/Pose 读 _WeldPose_2mm.txt；Corner 读 _KeyPoints.txt）。
-    bool LoadCompPreviewBaseline(CompPreviewKind kind, const QString& laserDir, QVector<CompPreviewPoint>& baseline, QString& error) const;
+    bool LoadCompPreviewBaseline(
+        CompPreviewKind kind,
+        const QString& laserDir,
+        QVector<CompPreviewPoint>& baseline,
+        QString& error,
+        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
     // 按当前编辑的补偿值，对基准焊道实时重算补偿后焊道（零复刻，复用管线真实补偿数学）。
     CompPreviewResult RecomputeCompPreview(CompPreviewKind kind, const QString& robotName, const QVector<CompPreviewPoint>& baseline, const CompPreviewEditValues& edits) const;
     // 读取原始焊道（分类后几何 _Classified.txt）作为对照图层。
-    bool LoadCompPreviewOriginalTrack(const QString& laserDir, QVector<CompPreviewPoint>& points, QString& error) const;
+    bool LoadCompPreviewOriginalTrack(
+        const QString& laserDir,
+        QVector<CompPreviewPoint>& points,
+        QString& error,
+        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
     // 四种处理方法各自的基础焊道文件名（处理成功时落盘到 LaserPoint 目录；
     // 文件存在即表示该目录已按该方法完成焊道生成）。
     static QString MethodBaseTrackFileName(PointCloudProcessingConfig::Mode mode);
@@ -323,7 +368,8 @@ public:
         const QString& laserDir,
         QVector<CompPreviewPoint>& points,
         QString& error,
-        QString* sourceDescription = nullptr) const;
+        QString* sourceDescription = nullptr,
+        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
 
     // ===== 五阶段流水线预览：原始数据→原始焊道→姿态补偿→焊道补偿→圆弧过渡 =====
     // 基准 = _WeldPose_2mm.txt（已烘焙扫描时保存的姿态补偿）。
@@ -344,7 +390,8 @@ public:
         const QVector<CompPreviewPoint>& baseline,
         const CompPreviewEditValues& currentEdits,
         const CompPreviewEditValues& savedEdits,
-        bool includePoseArrows) const;
+        bool includePoseArrows,
+        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
 
 private:
     static double SafeSpeed(double value, double fallback);

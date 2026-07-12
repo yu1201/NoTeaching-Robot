@@ -2,6 +2,7 @@
 
 #if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
 #include "RobotDriverAdaptor.h"
+#include "WeldSafetyRecoveryStore.h"
 #endif
 
 #include <QHostAddress>
@@ -177,6 +178,107 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquire(
     const QString& requestedOwner,
     QString* reason)
 {
+    return TryAcquireImpl(driver, requestedOwner, false, reason);
+}
+
+RobotOperationLease::Ptr RobotOperationLease::TryAcquireSafetyRecovery(
+    const RobotDriverAdaptor* driver,
+    const QString& requestedOwner,
+    const WeldResumePlanner::CheckpointRecord& expectedRecord,
+    RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding* binding,
+    QString* reason)
+{
+    if (binding == nullptr)
+    {
+        if (reason != nullptr)
+        {
+            *reason = QStringLiteral("安全回撤恢复缺少 Store 独占绑定输出。");
+        }
+        return {};
+    }
+    const Ptr lease = TryAcquireImpl(driver, requestedOwner, true, reason);
+    if (!lease)
+    {
+        return {};
+    }
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    const QString robotName = QString::fromStdString(driver->m_sRobotName).trimmed();
+    const QString endpoint = PersistentEndpointIdentity(driver);
+    if (!WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
+            robotName,
+            endpoint,
+            expectedRecord,
+            RobotRecoverySafetyPolicy::RecoveryBindingMode::SafeRetreat,
+            binding,
+            reason))
+    {
+        return {};
+    }
+    lease->m_storeRecoveryEndpoint = binding->endpointIdentity;
+    lease->m_storeRecoveryToken = binding->token;
+    return lease;
+#else
+    Q_UNUSED(expectedRecord);
+    if (reason != nullptr)
+    {
+        *reason = QStringLiteral("测试桩不支持持久安全回撤绑定。");
+    }
+    return {};
+#endif
+}
+
+RobotOperationLease::Ptr RobotOperationLease::TryAcquirePausedResume(
+    const RobotDriverAdaptor* driver,
+    const QString& requestedOwner,
+    const WeldResumePlanner::CheckpointRecord& expectedRecord,
+    RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding* binding,
+    QString* reason)
+{
+    if (binding == nullptr)
+    {
+        if (reason != nullptr)
+        {
+            *reason = QStringLiteral("paused 恢复缺少原子回读输出，拒绝取得硬件租约。");
+        }
+        return {};
+    }
+    const Ptr lease = TryAcquireImpl(driver, requestedOwner, true, reason);
+    if (!lease)
+    {
+        return {};
+    }
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    const QString robotName = QString::fromStdString(driver->m_sRobotName).trimmed();
+    const QString endpoint = PersistentEndpointIdentity(driver);
+    if (!WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
+            robotName,
+            endpoint,
+            expectedRecord,
+            RobotRecoverySafetyPolicy::RecoveryBindingMode::PausedResume,
+            binding,
+            reason))
+    {
+        return {};
+    }
+    lease->m_storeRecoveryEndpoint = binding->endpointIdentity;
+    lease->m_storeRecoveryToken = binding->token;
+    return lease;
+#else
+    Q_UNUSED(expectedRecord);
+    if (reason != nullptr)
+    {
+        *reason = QStringLiteral("测试桩不支持持久 paused 恢复绑定。");
+    }
+    return {};
+#endif
+}
+
+RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
+    const RobotDriverAdaptor* driver,
+    const QString& requestedOwner,
+    bool allowPersistentRecovery,
+    QString* reason)
+{
     if (reason != nullptr)
     {
         reason->clear();
@@ -194,6 +296,24 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquire(
         ? QStringLiteral("未命名硬件操作")
         : requestedOwner.trimmed();
     const QString identityKey = ResolveDriverIdentity(driver);
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    if (!allowPersistentRecovery)
+    {
+        const QString robotName = QString::fromStdString(driver->m_sRobotName).trimmed();
+        QString persistentReason;
+        if (WeldSafetyRecoveryStore::PersistentAdmissionBlocked(
+            robotName, identityKey, &persistentReason))
+        {
+            if (reason != nullptr)
+            {
+                *reason = persistentReason;
+            }
+            return {};
+        }
+    }
+#else
+    Q_UNUSED(allowPersistentRecovery);
+#endif
     // 先构造未注册租约以保证异常安全：map 插入失败时不会留下幽灵占用。
     Ptr lease(new RobotOperationLease(driver, identityKey, 0, owner));
     std::lock_guard<std::mutex> lock(g_operationMutex);
@@ -627,6 +747,13 @@ QString RobotOperationLease::ActiveSummary()
 
 RobotOperationLease::~RobotOperationLease()
 {
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    if (!m_storeRecoveryEndpoint.isEmpty() && !m_storeRecoveryToken.isEmpty())
+    {
+        WeldSafetyRecoveryStore::ReleaseExclusiveRecoveryBinding(
+            m_storeRecoveryEndpoint, m_storeRecoveryToken);
+    }
+#endif
     if (m_driver == nullptr || m_identityKey.isEmpty() || m_token == 0)
     {
         return;

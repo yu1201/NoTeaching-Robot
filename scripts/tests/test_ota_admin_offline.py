@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import stat
 import tempfile
 import threading
@@ -94,6 +95,7 @@ class FakeGrpDatabase:
     def __init__(self, pwd_database):
         self.pwd_database = pwd_database
         self.ftp_gid = 2400
+        self.admin_gid = 2500
         self.extra_records = []
 
     def _ftp_record(self):
@@ -104,9 +106,14 @@ class FakeGrpDatabase:
         )
 
     def getgrnam(self, name):
-        if name != ota.FTP_GROUP:
-            raise KeyError(name)
-        return self._ftp_record()
+        if name == ota.FTP_GROUP:
+            return self._ftp_record()
+        if name == "devicedata":
+            return types.SimpleNamespace(gr_name="devicedata", gr_gid=self.admin_gid, gr_mem=[])
+        record = self.pwd_database.records.get(name)
+        if record is not None:
+            return types.SimpleNamespace(gr_name=name, gr_gid=record.pw_gid, gr_mem=[])
+        raise KeyError(name)
 
     def getgrgid(self, gid):
         for record in self.getgrall():
@@ -115,7 +122,17 @@ class FakeGrpDatabase:
         raise KeyError(gid)
 
     def getgrall(self):
-        return [self._ftp_record(), *self.extra_records]
+        dynamic = [
+            types.SimpleNamespace(gr_name=name, gr_gid=record.pw_gid, gr_mem=[])
+            for name, record in self.pwd_database.records.items()
+            if name != "devicedata"
+        ]
+        return [
+            self._ftp_record(),
+            types.SimpleNamespace(gr_name="devicedata", gr_gid=self.admin_gid, gr_mem=[]),
+            *dynamic,
+            *self.extra_records,
+        ]
 
 
 class FakeFcntl:
@@ -148,6 +165,12 @@ class AdminFixture(unittest.TestCase):
 
         self.fake_pwd = FakePwdDatabase()
         self.fake_grp = FakeGrpDatabase(self.fake_pwd)
+        self.fake_pwd.records["devicedata"] = types.SimpleNamespace(
+            pw_uid=2000,
+            pw_dir=ota.FTP_HOME,
+            pw_shell=ota.NOLOGIN_SHELL,
+            pw_gid=self.fake_grp.admin_gid,
+        )
         self.fake_fcntl = FakeFcntl()
         self.account_lock = self.root / "account.lock"
         self.commands = []
@@ -164,6 +187,7 @@ class AdminFixture(unittest.TestCase):
             grp=self.fake_grp,
             fcntl=self.fake_fcntl,
             run=self.fake_run,
+            ENFORCE_POSIX_OWNERSHIP=False,
         )
         self.patch.start()
         ota._stats_cache["at"] = 0.0
@@ -180,25 +204,30 @@ class AdminFixture(unittest.TestCase):
             raise ota.CommandError(executable, 1)
         if executable == ota.USERADD:
             name = command[-1]
+            uid = self.fake_pwd.allocate_uid()
             self.fake_pwd.records[name] = types.SimpleNamespace(
-                pw_uid=self.fake_pwd.allocate_uid(),
+                pw_uid=uid,
                 pw_dir=ota.FTP_HOME,
                 pw_shell=ota.NOLOGIN_SHELL,
-                pw_gid=1000,
+                pw_gid=uid + 4000,
             )
         elif executable == ota.USERDEL:
             self.fake_pwd.records.pop(command[-1], None)
 
-    def seed_account(self, name, permission="full"):
-        names = [account["name"] for account in ota.list_accounts()]
-        ota.write_userlist(names + [name])
-        self.fake_pwd.records[name] = types.SimpleNamespace(
-            pw_uid=self.fake_pwd.allocate_uid(),
-            pw_dir=ota.FTP_HOME,
-            pw_shell=ota.NOLOGIN_SHELL,
-            pw_gid=1000,
-        )
+    def seed_account(self, name, permission="upload"):
+        _content, names = ota._read_userlist_document_unlocked()
+        if name != "devicedata":
+            uid = self.fake_pwd.allocate_uid()
+            self.fake_pwd.records[name] = types.SimpleNamespace(
+                pw_uid=uid,
+                pw_dir=ota.FTP_HOME,
+                pw_shell=ota.NOLOGIN_SHELL,
+                pw_gid=uid + 4000,
+            )
+            (self.data_dir / name).mkdir()
+            os.chmod(self.data_dir / name, ota.DEVICE_DIRECTORY_MODE)
         ota.set_permission(name, permission)
+        ota.write_userlist(names + [name])
 
 
 class AccountMutationTests(AdminFixture):
@@ -268,11 +297,56 @@ class AccountMutationTests(AdminFixture):
         created = self.userlist.read_bytes().decode("utf-8")
         self.assertTrue(created.startswith(original + "\n"))
         self.assertTrue(created.endswith("alpha\n"))
-        self.assertEqual(ota.UPLOAD_ONLY_CONFIG, (self.conf_dir / "alpha").read_text(encoding="utf-8"))
+        self.assertEqual(ota._upload_only_config("alpha"), (self.conf_dir / "alpha").read_text(encoding="utf-8"))
 
         ota.account_delete("alpha")
         self.assertEqual(original + "\n", self.userlist.read_bytes().decode("utf-8"))
         self.assertFalse((self.conf_dir / "alpha").exists())
+
+    def test_device_account_uses_private_group_and_retained_data_blocks_uid_reuse(self):
+        ota.account_create("alpha", "valid-pass", "upload")
+        useradd = next(command for command in self.commands if command[0] == ota.USERADD)
+        self.assertIn("-U", useradd)
+        payload = self.data_dir / "alpha" / "retained.bin"
+        payload.write_bytes(b"retained")
+
+        ota.account_delete("alpha")
+        self.assertEqual(b"retained", payload.read_bytes())
+        self.assertIn((ota.GROUPDEL, "alpha"), self.commands)
+        before = list(self.commands)
+        with self.assertRaises(ota.ConflictError):
+            ota.account_create("alpha", "valid-pass", "upload")
+        self.assertEqual(before, self.commands)
+
+    def test_cross_device_local_root_and_shared_primary_gid_fail_closed(self):
+        self.seed_account("alpha")
+        self.seed_account("bravo")
+        alpha_conf = self.conf_dir / "alpha"
+        alpha_conf.write_text(
+            ota._upload_only_config("alpha").replace(
+                "local_root=/srv/devicedata", "local_root=/srv/devicedata/data/bravo"
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(ota.IntegrityError):
+            ota.list_accounts()
+
+        alpha_conf.write_text(ota._upload_only_config("alpha"), encoding="utf-8")
+        self.fake_pwd.records["bravo"].pw_gid = self.fake_pwd.records["alpha"].pw_gid
+        with self.assertRaises(ota.IntegrityError):
+            ota.list_accounts()
+
+    def test_symbolic_and_hard_links_inside_device_tree_fail_closed(self):
+        self.seed_account("alpha")
+        outside = self.root / "outside.bin"
+        outside.write_bytes(b"outside")
+        linked = self.data_dir / "alpha" / "hard-linked.bin"
+        try:
+            os.link(outside, linked)
+        except OSError:
+            self.skipTest("host filesystem does not permit hard links")
+        with self.assertRaises(ota.IntegrityError):
+            ota.list_accounts()
 
     def test_upload_permission_is_exact_and_forbids_destructive_commands_only(self):
         self.seed_account("alpha", "upload")
@@ -281,7 +355,9 @@ class AccountMutationTests(AdminFixture):
             "download_enable=NO\n"
             "chmod_enable=NO\n"
             "file_open_mode=0440\n"
-            "cmds_denied=DELE,RMD,RNFR,RNTO,APPE,REST\n",
+            "local_umask=007\n"
+            "cmds_denied=DELE,RMD,RNFR,RNTO,APPE,REST\n"
+            "local_root=/srv/devicedata\n",
             content,
         )
         self.assertNotIn("STOR", content)
@@ -296,7 +372,9 @@ class AccountMutationTests(AdminFixture):
             "download_enable=NO\n"
             "chmod_enable=NO\n"
             "file_open_mode=0440\n"
+            "local_umask=007\n"
             "cmds_denied=SITE_CHMOD,DELE,RMD,RNFR,RNTO,APPE,REST\n"
+            "local_root=/srv/devicedata\n"
             "dirlist_enable=NO\n",
             encoding="utf-8",
         )
@@ -306,39 +384,42 @@ class AccountMutationTests(AdminFixture):
             "download_enable=NO\n"
             "chmod_enable=NO\n"
             "file_open_mode=0440\n"
-            "cmds_denied=DELE,RMD,RNFR,RNTO,APPE\n",
+            "local_umask=007\n"
+            "cmds_denied=DELE,RMD,RNFR,RNTO,APPE\n"
+            "local_root=/srv/devicedata\n",
             encoding="utf-8",
         )
         with self.assertRaises(ota.IntegrityError):
             ota.list_accounts()
 
         (self.conf_dir / "alpha").write_text(
-            ota.UPLOAD_ONLY_CONFIG.replace("file_open_mode=0440", "file_open_mode=0666"),
+            ota._upload_only_config("alpha").replace("file_open_mode=0440", "file_open_mode=0666"),
             encoding="utf-8",
         )
         with self.assertRaises(ota.IntegrityError):
             ota.list_accounts()
 
         (self.conf_dir / "alpha").write_text(
-            ota.UPLOAD_ONLY_CONFIG.replace("file_open_mode=0440\n", ""),
+            ota._upload_only_config("alpha").replace("file_open_mode=0440\n", ""),
             encoding="utf-8",
         )
         with self.assertRaises(ota.IntegrityError):
             ota.list_accounts()
 
         (self.conf_dir / "alpha").write_text(
-            ota.UPLOAD_ONLY_CONFIG + "download_enable=NO\n",
+            ota._upload_only_config("alpha") + "download_enable=NO\n",
             encoding="utf-8",
         )
         with self.assertRaises(ota.IntegrityError):
             ota.list_accounts()
 
     def test_update_restores_permission_when_chpasswd_fails(self):
-        self.seed_account("alpha", "full")
+        self.seed_account("alpha", "upload")
+        before = (self.conf_dir / "alpha").read_bytes()
         self.fail_executable = ota.CHPASSWD
         with self.assertRaises(ota.CommandError):
             ota.account_update("alpha", password="valid-pass", permission="upload")
-        self.assertFalse((self.conf_dir / "alpha").exists())
+        self.assertEqual(before, (self.conf_dir / "alpha").read_bytes())
 
     def test_delete_restores_allowlist_and_permission_when_userdel_fails(self):
         self.seed_account("alpha", "upload")
@@ -371,33 +452,40 @@ class AccountMutationTests(AdminFixture):
         self.assertEqual([], self.commands)
 
     def test_fixed_system_accounts_reject_reverse_permissions_but_allow_password_updates(self):
-        for name, expected in ota.FIXED_ACCOUNT_PERMISSIONS.items():
-            with self.subTest(name=name):
-                opposite = "full" if expected == "upload" else "upload"
-                with self.assertRaises(ota.ApiError):
-                    ota.account_create(name, "valid-pass", opposite)
-                self.assertNotIn(name, self.fake_pwd.records)
+        self.seed_account("devicedata", "full")
+        before_commands = list(self.commands)
+        with self.assertRaises(ota.ApiError):
+            ota.account_update("devicedata", permission="upload")
+        self.assertEqual(before_commands, self.commands)
+        self.assertEqual("full", ota.list_accounts()[-1]["permission"])
 
-                self.seed_account(name, expected)
-                before_commands = list(self.commands)
-                with self.assertRaises(ota.ApiError):
-                    ota.account_update(name, permission=opposite)
-                self.assertEqual(before_commands, self.commands)
-                self.assertEqual(expected, ota.list_accounts()[-1]["permission"])
-
-                ota.account_update(name, password="new-valid-pass")
-                self.assertEqual((ota.CHPASSWD,), self.commands[-1])
+        ota.account_update("devicedata", password="new-valid-pass")
+        self.assertEqual((ota.CHPASSWD,), self.commands[-1])
 
     def test_corrupt_fixed_permission_fails_closed_for_list_and_password_update(self):
-        self.seed_account("uploader", "upload")
-        (self.conf_dir / "uploader").unlink()
+        self.seed_account("devicedata", "full")
+        (self.conf_dir / "devicedata").write_text(
+            ota._upload_only_config("devicedata"), encoding="utf-8"
+        )
 
         with self.assertRaises(ota.IntegrityError):
             ota.list_accounts()
         before_commands = list(self.commands)
         with self.assertRaises(ota.IntegrityError):
-            ota.account_update("uploader", password="new-valid-pass")
+            ota.account_update("devicedata", password="new-valid-pass")
         self.assertEqual(before_commands, self.commands)
+
+    def test_retired_shared_uploader_is_never_publishable(self):
+        for operation in (
+            lambda: ota.account_create("uploader", "valid-pass", "upload"),
+            lambda: ota.account_update("uploader", password="valid-pass"),
+            lambda: ota.write_userlist(["uploader"]),
+        ):
+            with self.assertRaises(ota.ApiError):
+                operation()
+        self.userlist.write_text("uploader\n", encoding="utf-8")
+        with self.assertRaises(ota.IntegrityError):
+            ota.list_accounts()
 
     def test_create_transaction_shares_budget_with_rollback(self):
         clock = [100.0]
@@ -430,6 +518,8 @@ class AccountMutationTests(AdminFixture):
                 clock[0] += 1
                 self.fake_pwd.records.pop(command[-1], None)
                 return types.SimpleNamespace(returncode=0)
+            if executable == ota.GROUPDEL:
+                return types.SimpleNamespace(returncode=0)
             self.fail("unexpected subprocess")
 
         def bounded_real_run(command, input_text=None, deadline=None, reserve_seconds=0):
@@ -448,8 +538,11 @@ class AccountMutationTests(AdminFixture):
             with self.assertRaises(ota.CommandError):
                 ota.account_create("alpha", "valid-pass", "upload")
 
-        self.assertEqual([ota.USERADD, ota.CHPASSWD, ota.USERDEL], [item[0] for item in subprocess_calls])
-        self.assertEqual([10, 3, 2], [item[1] for item in subprocess_calls])
+        self.assertEqual(
+            [ota.USERADD, ota.CHPASSWD, ota.USERDEL, ota.GROUPDEL],
+            [item[0] for item in subprocess_calls],
+        )
+        self.assertEqual([10, 3, 2, 1], [item[1] for item in subprocess_calls])
         self.assertLessEqual(clock[0] - 100.0, ota.OPERATION_TIMEOUT_SECONDS)
         self.assertNotIn("alpha", self.fake_pwd.records)
         self.assertNotIn("alpha", self.userlist.read_text(encoding="utf-8"))
@@ -956,23 +1049,25 @@ class HttpApiTests(AdminFixture):
         self.assertEqual(200, status)
         self.assertEqual("upload", body["accounts"][0]["permission"])
         status, _, _ = self.request("PATCH", "/admin/api/accounts/alpha", {"permission": "full"})
+        self.assertEqual(400, status)
+        status, _, _ = self.request(
+            "PATCH", "/admin/api/accounts/alpha", {"password": "new-valid-pass"}
+        )
         self.assertEqual(200, status)
         status, _, _ = self.request("DELETE", "/admin/api/accounts/alpha")
         self.assertEqual(200, status)
+        self.assertTrue((self.data_dir / "alpha").is_dir())
+        with self.assertRaises(ota.ConflictError):
+            ota.account_create("alpha", "valid-pass", "upload")
 
-    def test_http_rejects_fixed_account_permission_reversal_but_allows_password(self):
-        self.seed_account("uploader", "upload")
-        status, _, body = self.request(
-            "PATCH", "/admin/api/accounts/uploader", {"permission": "full"}
-        )
-        self.assertEqual(400, status)
-        self.assertFalse(body["ok"])
-
-        status, _, body = self.request(
-            "PATCH", "/admin/api/accounts/uploader", {"password": "new-valid-pass"}
-        )
-        self.assertEqual(200, status)
-        self.assertTrue(body["ok"])
+    def test_http_rejects_retired_shared_uploader(self):
+        for method, path, payload in (
+            ("POST", "/admin/api/accounts", {"name": "uploader", "password": "valid-pass", "permission": "upload"}),
+            ("PATCH", "/admin/api/accounts/uploader", {"password": "new-valid-pass"}),
+        ):
+            status, _, body = self.request(method, path, payload)
+            self.assertEqual(400, status)
+            self.assertFalse(body["ok"])
 
 
 class StatsTests(AdminFixture):
@@ -991,6 +1086,57 @@ class StatsTests(AdminFixture):
         self.assertEqual(4, stats["dataBytes"])
         self.assertEqual(1, stats["devices"][0]["files"])
         self.assertEqual(["device-a"], [device["name"] for device in stats["devices"]])
+
+    def test_stats_share_one_entry_budget_across_all_devices(self):
+        for device_name in ("device-a", "device-b"):
+            device = self.data_dir / device_name
+            device.mkdir()
+            (device / "one.bin").write_bytes(b"1")
+            (device / "two.bin").write_bytes(b"2")
+        with mock.patch.object(ota, "MAX_DIRECTORY_SCAN_ENTRIES", 4), \
+                self.assertRaisesRegex(ota.IntegrityError, "entry budget"):
+            ota.build_stats()
+
+
+class DirectoryScanLimitTests(AdminFixture):
+    def test_account_list_rejects_excessive_depth_and_entry_count(self):
+        self.seed_account("alpha")
+        root = self.data_dir / "alpha"
+        current = root
+        for index in range(4):
+            current = current / f"depth-{index}"
+            current.mkdir()
+        with mock.patch.object(ota, "MAX_DIRECTORY_SCAN_DEPTH", 2), \
+                self.assertRaisesRegex(ota.IntegrityError, "maximum scan depth"):
+            ota.list_accounts()
+
+        shutil.rmtree(root / "depth-0")
+        for index in range(5):
+            (root / f"entry-{index}.bin").write_bytes(b"x")
+        with mock.patch.object(ota, "MAX_DIRECTORY_SCAN_ENTRIES", 3), \
+                self.assertRaisesRegex(ota.IntegrityError, "entry budget"):
+            ota.list_accounts()
+
+    def test_scan_checks_shared_deadline_while_enumerating(self):
+        root = self.data_dir / "deadline"
+        root.mkdir()
+        for index in range(10):
+            (root / f"entry-{index}.bin").write_bytes(b"x")
+
+        class ExpiringDeadline:
+            def __init__(self):
+                self.calls = 0
+
+            def remaining(self):
+                self.calls += 1
+                if self.calls > 4:
+                    raise ota.OperationTimeoutError("scan deadline")
+                return 1.0
+
+        deadline = ExpiringDeadline()
+        with self.assertRaises(ota.OperationTimeoutError):
+            list(ota._walk_device_tree(root, deadline, ota.DirectoryScanBudget()))
+        self.assertGreater(deadline.calls, 4)
 
 
 if __name__ == "__main__":

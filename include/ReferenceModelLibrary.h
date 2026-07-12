@@ -24,7 +24,11 @@ public:
     // 从已有 .ply 文件导入为基准（先校验是合法网格，再存入库）。
     static bool ImportFromFile(const QString& name, const QString& srcPlyPath, QString& error);
     // 加载某基准模型为网格。
-    static bool LoadModel(const QString& name, WorkpieceMeshBuilder::Mesh& mesh, QString& error);
+    static bool LoadModel(
+        const QString& name,
+        WorkpieceMeshBuilder::Mesh& mesh,
+        QString& error,
+        const WorkpieceMeshBuilder::CancelCallback& cancelRequested = WorkpieceMeshBuilder::CancelCallback());
     static bool DeleteModel(const QString& name, QString& error);
     static bool RenameModel(const QString& fromName, const QString& toName, QString& error);
 

@@ -4,6 +4,7 @@
 #include "BrandingConfig.h"
 #include "FtpClient.h"
 #include "OnlineServicesConfig.h"
+#include "RemoteArchiveSecurity.h"
 #include "RobotOperationLease.h"
 #include "RobotLog.h"
 #include "ScanDataUploader.h"
@@ -11,10 +12,12 @@
 #include <QComboBox>
 #include <QDate>
 #include <QFileInfo>
-#include <QPointer>
+#include <QUuid>
+#include <QVariant>
 
 #include <algorithm>
 #include <cmath>
+#include <system_error>
 #include <thread>
 
 #ifdef Q_OS_WIN
@@ -75,15 +78,20 @@
 namespace
 {
 	constexpr qint64 kMaximumManifestBytes = 256 * 1024;
+	constexpr qint64 kMaximumAdminResponseBytes = 256 * 1024;
 	constexpr qint64 kMaximumUpdatePayloadBytes = 512LL * 1024 * 1024;
+	constexpr int kMaximumRemoteArchivesPerOperation = 32;
+	constexpr int kOtaManifestSchemaVersion = 3;
+	constexpr qint64 kOtaManifestValiditySeconds = 7LL * 24 * 60 * 60;
+	constexpr qint64 kOtaManifestClockSkewSeconds = 10LL * 60;
 	constexpr char kOtaSignatureAlgorithm[] = "RSA-PKCS1-SHA256";
 	// RSA-3072 公钥；对应私钥仅以 CurrentUser DPAPI 形式保存在仓库外。
 	constexpr char kOtaReleasePublicKeyBlobBase64[] =
 		"UlNBMQAMAAADAAAAgAEAAAAAAAAAAAAAAQAB4ax2i7VFMjmJhtYWOJvaLLN+sAE/nXCUimEtrdo9l1co8mT3rYz2vy5lsB+ztcN+c+iXZ+G6YMy1Xrfp2AN3jKd6ZfXNG9z0UPXDlS/0AlUnONobSyVSkMtarODxrPNKb9Kq7+XkF/sgOxYzfgg9QVU8lfqD4pInm54C8+6OQDD8WpckvmUqOZ4jHeqgEzvavPiRyI+IR0WYDJdFh/NhQRpxGmzgNFvzhvzHyvALJ+KxKh7+YW0/r3+YvRaJeTD+bFJxO0q/ZeoMjtTz+WY9WgCHB+VnH7VKDtpUd2lPxYXc8y1wIkc78FYMQZFWcXGV5GVn7Lf8jG5QVmrOncg+GvkNErdAUlz+B1cntccuVhBQpeXVVK8J9gz802O4dDXU1xKSsHScEDYC4MtwsR/M9YWcackdYsBnMAPSu5fYqzTDWkQR2HbfYRom55QVh8cmVO3fK4DZ0Iyehky8Vi3UWusSbzkYhAsfLrn/c2eY7Jx4COFK/ZVyZWMRgS79sjnz";
 	constexpr char kOtaKnownAnswerPayloadSha256[] =
-		"2903794ff9ac838ef8db7c14a7b808fc5aba37e95f5cf330c00af08180f0a80f";
+		"cb0c83d93e479c34777b19a872a239975b3eb51bf7be11665827696c7f77761d";
 	constexpr char kOtaKnownAnswerSignatureBase64[] =
-		"TXkCqU69V5nldnVs6V3J3J/4MoL/ziTvq/cI6JIrwZLiDR/q4I6N6P4FlRZWfTydY/d4HVWzGy8O6O01XcjGb858RteHjNtgajFWkUYSlu3CPdntJLg+QA/GyIDjucb0X9p859bRzhw1aRlQ9+dLVOYqdNeNKpFndeJVjERD+SLx2YHZTZmx+mIqGXlddNa56tchJOC4Ow8ZC+t7hYPznfMVH437w1s/YscTZRWIENV05JEFghtfRstcEXObuaXUvB0Eh2gFEtQT+6vLR3ItNJWDjx95x4ZiOdt09QR3YhPKl8DFMZHDJ2vT2Dia7UDV8y6XO9tG4urm//p+kPDLhLtKDpqg+bSbneHToVA0gpORg4q14BVagREGnyZNXql27QRi5d3nrfvsv4wQPev2g++xwKmTrdrmey16QpGQEYLnu0P+vPPR65Vb9fyM4GkkhCX4e2rNd3mZS7dNoFMAKK+g6BCibv4tL8/PPwJgleBCc3/PeHcRSV1UjpuLw25K";
+		"ntqXbA0HR6AbEaJCWVeXijAV8Lw1wYCezYItbmfpA+ZtK9blYozoUZrncLtWzjJYDBDUOlfKQT+fP+Lp/IAIKQePbOnlhEGCPwu6TLnKxapCuV4FR2kwC9Ld1up3Emb2S1lZw76aw556g7pnUzWNYDImMe6ZmeY0sutQcjn1XTmsk8GAZS6hbHve9uBHbydWOYwxR8odeYO1hT8qOA2pjELTShKT/ObPd2VttWNXkz+ENAo2OZTsrs+ubW69qU9uoZ66mO1w2h7wrLwzX7SnVLmKvS2MfmHzPsBe36zUDH/CMlQvY1bj5jHBHxzi6YqJDO9NVZgxoLgmKE/vjfWp34P4AzVVovgV88yhTYmiMeGMOtvc4+T/WJThI1a3IZ0pHQyic7lglic/EWpO+Vls5TH23BePXc9O6eGK1VnGYfwqRdNnrvkc/Yu1jU6OrsM6b/S/WGkeJnuqy5iY7CFDo6c5rLAFhUxQ6KELM/70iCfoETMKh7twQk8fTK31LLLQ";
 
 	bool IsStrictOtaVersion(const QString& value)
 	{
@@ -113,6 +121,26 @@ namespace
 	{
 		static const QRegularExpression pattern(QStringLiteral(R"(^[0-9a-f]{64}$)"));
 		return pattern.match(value).hasMatch();
+	}
+
+	bool IsValidOtaNotes(const QString& value)
+	{
+		// Python str and QString use different storage widths. Count Unicode scalar values
+		// explicitly so non-BMP text (for example emoji) has the same 4000-character
+		// contract in the publisher and client.
+		const QList<uint> codePoints = value.toUcs4();
+		if (codePoints.size() > 4000)
+		{
+			return false;
+		}
+		for (const uint codePoint : codePoints)
+		{
+			if (codePoint != '\r' && codePoint != '\n' && codePoint < 0x20u)
+			{
+				return false;
+			}
+		}
+		return true;
 	}
 
 	bool TryReadManifestSize(const QJsonValue& value, qint64* size)
@@ -163,20 +191,126 @@ namespace
 		return true;
 	}
 
+	bool TryParseCanonicalOtaUtc(const QJsonValue& value, QDateTime* result)
+	{
+		if (result != nullptr)
+		{
+			*result = {};
+		}
+		if (!value.isString())
+		{
+			return false;
+		}
+		const QString text = value.toString();
+		static const QRegularExpression canonicalUtc(
+			QStringLiteral(R"(^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\dZ$)"));
+		if (!canonicalUtc.match(text).hasMatch())
+		{
+			return false;
+		}
+		const QDateTime parsed = QDateTime::fromString(text, Qt::ISODate);
+		if (!parsed.isValid()
+			|| parsed.offsetFromUtc() != 0
+			|| parsed.toUTC().toString(QStringLiteral("yyyy-MM-dd'T'HH:mm:ss'Z'")) != text)
+		{
+			return false;
+		}
+		if (result != nullptr)
+		{
+			*result = parsed.toUTC();
+		}
+		return true;
+	}
+
+	bool ValidateOtaFreshnessWindow(
+		qint64 publishedAtUtc,
+		qint64 expiresAtUtc,
+		qint64 nowUtc,
+		QString* error)
+	{
+		if (expiresAtUtc - publishedAtUtc != kOtaManifestValiditySeconds)
+		{
+			if (error != nullptr)
+			{
+				*error = QStringLiteral("expiresAtUtc 必须精确等于 publishedAtUtc + 7 天");
+			}
+			return false;
+		}
+		if (publishedAtUtc > nowUtc + kOtaManifestClockSkewSeconds)
+		{
+			if (error != nullptr)
+			{
+				*error = QStringLiteral("publishedAtUtc 超过本机 UTC 10 分钟容差");
+			}
+			return false;
+		}
+		if (nowUtc > expiresAtUtc + kOtaManifestClockSkewSeconds)
+		{
+			if (error != nullptr)
+			{
+				*error = QStringLiteral("expiresAtUtc 已过期（含 10 分钟时钟容差）");
+			}
+			return false;
+		}
+		return true;
+	}
+
+	bool ValidateOtaManifestFreshness(
+		const QJsonObject& manifest,
+		const QDateTime& nowUtc,
+		qint64* publishedAtUtc,
+		qint64* expiresAtUtc,
+		QString* error)
+	{
+		QDateTime published;
+		QDateTime expires;
+		if (!nowUtc.isValid()
+			|| !TryParseCanonicalOtaUtc(manifest.value(QStringLiteral("publishedAtUtc")), &published)
+			|| !TryParseCanonicalOtaUtc(manifest.value(QStringLiteral("expiresAtUtc")), &expires))
+		{
+			if (error != nullptr)
+			{
+				*error = QStringLiteral(
+					"时间字段必须是无小数、带 Z 的严格 UTC YYYY-MM-DDTHH:MM:SSZ");
+			}
+			return false;
+		}
+		const qint64 publishedSeconds = published.toSecsSinceEpoch();
+		const qint64 expiresSeconds = expires.toSecsSinceEpoch();
+		if (!ValidateOtaFreshnessWindow(
+			publishedSeconds, expiresSeconds, nowUtc.toUTC().toSecsSinceEpoch(), error))
+		{
+			return false;
+		}
+		if (publishedAtUtc != nullptr)
+		{
+			*publishedAtUtc = publishedSeconds;
+		}
+		if (expiresAtUtc != nullptr)
+		{
+			*expiresAtUtc = expiresSeconds;
+		}
+		return true;
+	}
+
 	bool IsStrictManifestShape(const QJsonObject& manifest)
 	{
 		if (!HasOnlyObjectKeys(manifest,
 			{ "schemaVersion", "channel", "version", "file", "sha256", "size",
-				"notes", "patch", "signatureAlgorithm", "signature" })
-			|| manifest.size() < 9
+				"notes", "publishedAtUtc", "expiresAtUtc", "patch",
+				"signatureAlgorithm", "signature" })
+			|| manifest.size() < 11
 			|| !manifest.value(QStringLiteral("schemaVersion")).isDouble()
-			|| manifest.value(QStringLiteral("schemaVersion")).toDouble() != 2.0
+			|| manifest.value(QStringLiteral("schemaVersion")).toDouble()
+				!= static_cast<double>(kOtaManifestSchemaVersion)
 			|| !manifest.value(QStringLiteral("channel")).isString()
 			|| !manifest.value(QStringLiteral("version")).isString()
 			|| !manifest.value(QStringLiteral("file")).isString()
 			|| !manifest.value(QStringLiteral("sha256")).isString()
 			|| !manifest.value(QStringLiteral("size")).isDouble()
 			|| !manifest.value(QStringLiteral("notes")).isString()
+			|| !manifest.value(QStringLiteral("publishedAtUtc")).isString()
+			|| !manifest.value(QStringLiteral("expiresAtUtc")).isString()
 			|| !manifest.value(QStringLiteral("signatureAlgorithm")).isString()
 			|| !manifest.value(QStringLiteral("signature")).isString())
 		{
@@ -234,7 +368,7 @@ namespace
 					? QByteArray::number(static_cast<qint64>(number))
 					: QByteArrayLiteral("0");
 			};
-		QByteArray payload("NoTeaching-Robot OTA Manifest Signature v2\n");
+		QByteArray payload("NoTeaching-Robot OTA Manifest Signature v3\n");
 		const auto appendField = [&payload](const char* name, const QByteArray& value)
 			{
 				payload.append(name);
@@ -242,9 +376,13 @@ namespace
 				payload.append(value);
 				payload.append('\n');
 			};
-		appendField("schemaVersion", QByteArrayLiteral("2"));
+		appendField("schemaVersion", QByteArray::number(kOtaManifestSchemaVersion));
 		appendField("channel", manifest.value(QStringLiteral("channel")).toString().toUtf8());
 		appendField("version", manifest.value(QStringLiteral("version")).toString().toUtf8());
+		appendField("publishedAtUtc",
+			manifest.value(QStringLiteral("publishedAtUtc")).toString().toUtf8());
+		appendField("expiresAtUtc",
+			manifest.value(QStringLiteral("expiresAtUtc")).toString().toUtf8());
 		appendField("file", manifest.value(QStringLiteral("file")).toString().toUtf8());
 		appendField("sha256", manifest.value(QStringLiteral("sha256")).toString().toUtf8());
 		appendField("size", integerText(manifest.value(QStringLiteral("size"))));
@@ -314,9 +452,11 @@ namespace
 			{ QStringLiteral("baseMinVersion"), QStringLiteral("2026.07.10.1750") }
 		};
 		const QJsonObject manifest{
-			{ QStringLiteral("schemaVersion"), 2 },
+			{ QStringLiteral("schemaVersion"), kOtaManifestSchemaVersion },
 			{ QStringLiteral("channel"), QStringLiteral("brand") },
 			{ QStringLiteral("version"), QStringLiteral("2026.07.12.0030") },
+			{ QStringLiteral("publishedAtUtc"), QStringLiteral("2026-07-12T00:30:00Z") },
+			{ QStringLiteral("expiresAtUtc"), QStringLiteral("2026-07-19T00:30:00Z") },
 			{ QStringLiteral("file"), QStringLiteral("HK-Pathlynx-CORPLA-Setup-v2026.07.12.0030.exe") },
 			{ QStringLiteral("sha256"), QString(64, QLatin1Char('a')) },
 			{ QStringLiteral("size"), 86657296 },
@@ -336,7 +476,8 @@ namespace
 	{
 		static const bool knownAnswerPassed = OtaManifestKnownAnswerSelfTest();
 		if (!knownAnswerPassed
-			|| manifest.value(QStringLiteral("schemaVersion")).toDouble() != 2.0
+			|| manifest.value(QStringLiteral("schemaVersion")).toDouble()
+				!= static_cast<double>(kOtaManifestSchemaVersion)
 			|| manifest.value(QStringLiteral("signatureAlgorithm")).toString()
 				!= QString::fromLatin1(kOtaSignatureAlgorithm))
 		{
@@ -419,23 +560,7 @@ namespace
 
 	bool IsCompleteRemoteArchive(const QString& fileName, qulonglong actualBytes)
 	{
-		if (!fileName.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive))
-		{
-			return false;
-		}
-		// 新写一次上传名包含声明长度；不完整 STOR 即使被服务器当作 226，
-		// 也不会出现在数据列表。旧版本归档没有该后缀，保持向后可见。
-		static const QRegularExpression writeOncePattern(QStringLiteral(
-			R"(_\d{8}T\d{9}_[0-9a-f]{12}_(\d+)\.zip$)"),
-			QRegularExpression::CaseInsensitiveOption);
-		const QRegularExpressionMatch match = writeOncePattern.match(fileName);
-		if (!match.hasMatch())
-		{
-			return true;
-		}
-		bool sizeOk = false;
-		const qulonglong expectedBytes = match.captured(1).toULongLong(&sizeOk);
-		return sizeOk && expectedBytes > 0 && expectedBytes == actualBytes;
+		return RemoteArchiveSecurity::ValidateListedArchive(fileName, actualBytes);
 	}
 
 	bool IsSafeArchiveEntry(const QZipReader::FileInfo& entry)
@@ -458,14 +583,6 @@ namespace
 			{
 				return AppPaths::IsSafePathComponent(component);
 			});
-	}
-
-	bool HasOnlySafeArchiveEntries(const QZipReader& archive)
-	{
-		const QList<QZipReader::FileInfo> entries = archive.fileInfoList();
-		return archive.isReadable()
-			&& !entries.isEmpty()
-			&& std::all_of(entries.cbegin(), entries.cend(), IsSafeArchiveEntry);
 	}
 
 	bool IsSafeExecutableOnlyPatch(const QString& archivePath)
@@ -641,6 +758,19 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 	}
 }
 
+OnlineServicesDialog::~OnlineServicesDialog()
+{
+	// No event loop is required for shutdown. Invalidate every queued generation,
+	// cooperatively stop the owned worker, and join before QObject starts destroying
+	// children. Queued callbacks target this object (never qApp) and Qt discards them
+	// when the receiver is destroyed.
+	m_remoteLifecycle.BeginCancel(true);
+	if (m_remoteWorker.joinable())
+	{
+		m_remoteWorker.join();
+	}
+}
+
 void OnlineServicesDialog::showEvent(QShowEvent* event)
 {
 	QDialog::showEvent(event);
@@ -803,7 +933,7 @@ void OnlineServicesDialog::BuildUi()
 	QGroupBox* remoteGroup = nullptr;
 	if (!m_aboutMode && m_remoteBrowseAllowed)
 	{
-		// 全权限账号可浏览/下载全部设备；只上传账号(uploader)自动锁定为仅本机设备、禁下载。
+		// 只有 devicedata 是全权限账号；空账号和其它设备账号一律按 upload-only 锁定。
 		remoteGroup = new QGroupBox(QStringLiteral("远程数据"), this);
 		// 纵向布局：顶行操作条(靠左) + 文件列表(占满) + 底行按钮(靠右)。
 		// 勿用无列拉伸的 QGridLayout：文件列表撑满页宽后多余宽度会分进中间列，标签和下拉间被拉出大空。
@@ -878,14 +1008,12 @@ void OnlineServicesDialog::BuildUi()
 		QPushButton* accAddBtn = new QPushButton(QStringLiteral("＋ 添加账号"), this);
 		accAddBtn->setProperty("kind", "primary");
 		QPushButton* accPwBtn = new QPushButton(QStringLiteral("改密码"), this);
-		QPushButton* accPermBtn = new QPushButton(QStringLiteral("切换权限"), this);
 		QPushButton* accDelBtn = new QPushButton(QStringLiteral("删除账号"), this);
 		accDelBtn->setProperty("kind", "danger");
 		QPushButton* accRefreshBtn = new QPushButton(QStringLiteral("刷新"), this);
 		accToolbar->addWidget(accAddBtn);
 		accToolbar->addSpacing(6);
 		accToolbar->addWidget(accPwBtn);
-		accToolbar->addWidget(accPermBtn);
 		accToolbar->addWidget(accDelBtn);
 		accToolbar->addStretch();
 		accToolbar->addWidget(accRefreshBtn);
@@ -906,8 +1034,8 @@ void OnlineServicesDialog::BuildUi()
 		m_accountTable->setAlternatingRowColors(true);
 		accLayout->addWidget(m_accountTable, 1);
 		QLabel* accHint = new QLabel(QStringLiteral(
-			"「仅上传」账号能上传但下载不到任何数据（现场设备默认）；「全权限」可上传下载浏览全部设备。"
-			"uploader/devicedata 为系统保护账号不可删除；改 uploader 密码会让所有用默认账号的现场设备断传，慎改。"), this);
+			"devicedata 是唯一全权限系统账号，需同时配置管理令牌才可管理账号；"
+			"所有其它账号固定为仅上传，并被限制到与账号同名的设备目录。"), this);
 		accHint->setWordWrap(true);
 		accHint->setStyleSheet("color: #7E9AA6; font-size: 11px;");
 		accLayout->addWidget(accHint);
@@ -915,7 +1043,6 @@ void OnlineServicesDialog::BuildUi()
 		connect(accRefreshBtn, &QPushButton::clicked, this, [this]() { SaveConfigFromUi(); RefreshAccounts(); });
 		connect(accAddBtn, &QPushButton::clicked, this, [this]() { ShowAddAccountDialog(); });
 		connect(accPwBtn, &QPushButton::clicked, this, [this]() { ChangeSelectedAccountPassword(); });
-		connect(accPermBtn, &QPushButton::clicked, this, [this]() { ToggleSelectedAccountPermission(); });
 		connect(accDelBtn, &QPushButton::clicked, this, [this]() { DeleteSelectedAccount(); });
 	}
 
@@ -1138,16 +1265,18 @@ void OnlineServicesDialog::LoadConfigToUi()
 
 bool OnlineServicesDialog::IsUploadOnlyAccount() const
 {
-	// 现场设备开箱即随包的只上传账号 uploader（服务器端 download_enable=NO，看不到也下不了别人）。
-	// 权限判断必须与实际 FTP 请求使用同一份「已保存配置」，不能读取尚未保存的输入框文本。
+	// 服务端模型只有 devicedata 是 full；空账号和所有其它账号都必须失败关闭为
+	// upload-only。权限判断使用已保存配置，不能读取尚未保存的输入框文本。
 	const QString user = OnlineServicesConfig::FtpUser().trimmed();
-	return user.compare(QStringLiteral("uploader"), Qt::CaseInsensitive) == 0;
+	return user != QStringLiteral("devicedata");
 }
 
 void OnlineServicesDialog::UpdateRestrictedNav()
 {
 	const bool restricted = IsUploadOnlyAccount();
 	const bool unrestrictedIdle = !m_remoteBusy && !restricted;
+	const bool canManageAccounts = !restricted
+		&& !OnlineServicesConfig::AdminToken().trimmed().isEmpty();
 
 	// 「账号管理」：只上传账号整页禁用（无令牌也无权限）。「远程数据」保持可进，
 	// 但下方把设备锁定为本机、禁下载/建目录——只能看到自己设备上传的文件。
@@ -1170,8 +1299,8 @@ void OnlineServicesDialog::UpdateRestrictedNav()
 				m_navList->setCurrentRow(0);   // 正停在被禁页 → 弹回总览
 			}
 		};
-	setNavRowEnabled(m_accountNavRow, !restricted,
-		QStringLiteral("当前为只上传账号（uploader），无账号管理权限；改用全权限账号后可用。"));
+	setNavRowEnabled(m_accountNavRow, canManageAccounts,
+		QStringLiteral("账号管理仅允许已保存的 devicedata 身份并要求管理令牌。"));
 	setNavRowEnabled(m_remoteNavRow, true, QString());
 
 	// 远程数据控件级限制（about 模式/非 admin 登录时这些控件不存在，判空跳过）。
@@ -1224,16 +1353,25 @@ void OnlineServicesDialog::SaveConfigFromUi()
 		bool ok = false;
 		const int port = m_ftpPortEdit->text().trimmed().toInt(&ok);
 		OnlineServicesConfig::SetFtpPort(ok ? port : 21);
-		OnlineServicesConfig::SetFtpUser(m_ftpUserEdit->text().trimmed());
 		OnlineServicesConfig::SetFtpPassword(m_ftpPasswordEdit->text());
+		const QString editedUser = m_ftpUserEdit->text().trimmed();
 		const QString editedDeviceName = m_deviceNameEdit->text().trimmed();
-		if (editedDeviceName.isEmpty() || IsSafeRemotePathComponent(editedDeviceName))
+		const bool validDevice = OnlineServicesConfig::IsServerAccountName(editedDeviceName);
+		const bool validUser = editedUser.isEmpty()
+			|| editedUser == QStringLiteral("devicedata")
+			|| (OnlineServicesConfig::IsServerAccountName(editedUser)
+				&& editedUser != QStringLiteral("uploader")
+				&& editedUser == editedDeviceName);
+		if (validDevice && validUser)
 		{
+			OnlineServicesConfig::SetFtpUser(editedUser);
 			OnlineServicesConfig::SetDeviceName(editedDeviceName);
 		}
 		else
 		{
-			AppendLog(QStringLiteral("设备名未保存：只能使用安全的单一目录名，不能含路径字符或保留设备名。"));
+			AppendLog(QStringLiteral(
+				"FTP 身份未保存：设备名/普通账号必须匹配 ^[a-z][a-z0-9_-]{2,31}$，"
+				"普通账号必须与设备名严格相同；uploader 已退役，只有 devicedata 可作为独立全权限账号。"));
 		}
 	}
 	else
@@ -1282,7 +1420,10 @@ void OnlineServicesDialog::CheckForUpdate()
 		return;
 	}
 	SaveConfigFromUi();
-	const QString url = OnlineServicesConfig::UpdateBaseUrl() + "/" + UpdateChannel() + "/latest.json";
+	// latest.json remains the signed v2 compatibility endpoint for already-deployed
+	// clients. Current clients use a separate v3 endpoint so the transition cannot
+	// strand the installed v2 population.
+	const QString url = OnlineServicesConfig::UpdateBaseUrl() + "/" + UpdateChannel() + "/latest-v3.json";
 	const QUrl manifestUrl(url);
 	// 一旦开始刷新，旧 offer 立即失效。网络失败、服务端撤回或签名失败都不能继续使用
 	// 上一次清单留下的下载按钮/载荷。
@@ -1293,6 +1434,8 @@ void OnlineServicesDialog::CheckForUpdate()
 	m_remotePatchFile.clear();
 	m_remotePatchSha256.clear();
 	m_remotePatchSize = 0;
+	m_remoteManifestPublishedAtUtc = 0;
+	m_remoteManifestExpiresAtUtc = 0;
 	m_usePatch = false;
 	if (!m_downloadedPath.isEmpty())
 	{
@@ -1402,11 +1545,30 @@ void OnlineServicesDialog::OnManifestReply(QNetworkReply* reply)
 			"更新清单格式错误：全量包必须提供严格版本、通道绑定文件名、64 位 SHA256 和正整数 size。"));
 		return;
 	}
-	if (obj.value(QStringLiteral("channel")).toString() != channel
-		|| !VerifyOtaManifestSignature(obj))
+	if (obj.value(QStringLiteral("channel")).toString() != channel)
+	{
+		AppendLog(QStringLiteral("更新清单通道与当前应用不匹配，已拒绝。"));
+		return;
+	}
+	if (!VerifyOtaManifestSignature(obj))
 	{
 		AppendLog(QStringLiteral(
-			"更新清单通道或 RSA 签名验证失败，可能被篡改或不是正式发布，已拒绝。"));
+			"更新清单 RSA 签名验证失败，可能被篡改或不是正式发布，已拒绝。"));
+		return;
+	}
+	qint64 manifestPublishedAtUtc = 0;
+	qint64 manifestExpiresAtUtc = 0;
+	QString freshnessError;
+	if (!ValidateOtaManifestFreshness(
+		obj,
+		QDateTime::currentDateTimeUtc(),
+		&manifestPublishedAtUtc,
+		&manifestExpiresAtUtc,
+		&freshnessError))
+	{
+		AppendLog(QStringLiteral(
+			"已验签更新清单的 UTC 新鲜度合约失败：%1，已拒绝。")
+			.arg(freshnessError));
 		return;
 	}
 	const QString currentVersion = QApplication::applicationVersion().trimmed();
@@ -1427,29 +1589,19 @@ void OnlineServicesDialog::OnManifestReply(QNetworkReply* reply)
 			.arg(remoteVersion, highestSeenVersion));
 		return;
 	}
-	if (CompareVersions(remoteVersion, highestSeenVersion) > 0)
-	{
-		OnlineServicesConfig::SetHighestSeenUpdateVersion(channel, remoteVersion);
-		if (OnlineServicesConfig::HighestSeenUpdateVersion(channel) != remoteVersion)
-		{
-			AppendLog(QStringLiteral("无法持久化 OTA 防回放版本水位，已拒绝本次更新。"));
-			return;
-		}
-	}
-
-	m_remoteVersion = remoteVersion;
-	m_remoteFile = remoteFile;
-	m_remoteSha256 = remoteSha256;
-	m_remoteSize = remoteSize;
 	const QString notes = obj.value(QStringLiteral("notes")).toString();
-	if (notes.size() > 4000)
+	if (!IsValidOtaNotes(notes))
 	{
-		AppendLog(QStringLiteral("更新清单 notes 超过 4000 字符，已拒绝。"));
+		AppendLog(QStringLiteral("更新清单 notes 超过 4000 个 Unicode 字符或含控制字符，已拒绝。"));
 		return;
 	}
 
 	// 中性通道固定只走全量。品牌补丁是可选优化，但只要任一字段缺失/非法就
 	// fail closed 回退全量，绝不沿用历史“缺 baseMinVersion 也直接打补丁”的行为。
+	QString selectedPatchFile;
+	QString selectedPatchSha256;
+	qint64 selectedPatchSize = 0;
+	bool usePatch = false;
 	const QJsonValue patchValue = obj.value(QStringLiteral("patch"));
 	if (channel == QStringLiteral("brand") && !patchValue.isUndefined() && !patchValue.isNull())
 	{
@@ -1483,12 +1635,35 @@ void OnlineServicesDialog::OnManifestReply(QNetworkReply* reply)
 		}
 		else
 		{
-			m_remotePatchFile = patchFile;
-			m_remotePatchSha256 = patchSha256;
-			m_remotePatchSize = patchSize;
-			m_usePatch = true;
+			selectedPatchFile = patchFile;
+			selectedPatchSha256 = patchSha256;
+			selectedPatchSize = patchSize;
+			usePatch = true;
 		}
 	}
+
+	// Commit the anti-replay waterline only after the complete signed offer has passed
+	// every client-side semantic check. A malformed-but-signed optional field or notes
+	// string must never poison the persistent version floor.
+	if (CompareVersions(remoteVersion, highestSeenVersion) > 0)
+	{
+		OnlineServicesConfig::SetHighestSeenUpdateVersion(channel, remoteVersion);
+		if (OnlineServicesConfig::HighestSeenUpdateVersion(channel) != remoteVersion)
+		{
+			AppendLog(QStringLiteral("无法持久化 OTA 防回放版本水位，已拒绝本次更新。"));
+			return;
+		}
+	}
+	m_remoteVersion = remoteVersion;
+	m_remoteFile = remoteFile;
+	m_remoteSha256 = remoteSha256;
+	m_remoteSize = remoteSize;
+	m_remotePatchFile = selectedPatchFile;
+	m_remotePatchSha256 = selectedPatchSha256;
+	m_remotePatchSize = selectedPatchSize;
+	m_remoteManifestPublishedAtUtc = manifestPublishedAtUtc;
+	m_remoteManifestExpiresAtUtc = manifestExpiresAtUtc;
+	m_usePatch = usePatch;
 	m_latestVersionLabel->setText(QStringLiteral("最新版本：%1").arg(m_remoteVersion));
 	m_updateNotes->setPlainText(notes);
 	m_downloadedPath.clear();
@@ -1516,6 +1691,30 @@ void OnlineServicesDialog::StartDownload()
 {
 	if (m_downloading || m_remoteFile.isEmpty())
 	{
+		return;
+	}
+	QString freshnessError;
+	if (!ValidateOtaFreshnessWindow(
+		m_remoteManifestPublishedAtUtc,
+		m_remoteManifestExpiresAtUtc,
+		QDateTime::currentDateTimeUtc().toSecsSinceEpoch(),
+		&freshnessError))
+	{
+		m_downloadInstallBtn->setEnabled(false);
+		m_remoteVersion.clear();
+		m_remoteFile.clear();
+		m_remoteSha256.clear();
+		m_remoteSize = 0;
+		m_remotePatchFile.clear();
+		m_remotePatchSha256.clear();
+		m_remotePatchSize = 0;
+		m_remoteManifestPublishedAtUtc = 0;
+		m_remoteManifestExpiresAtUtc = 0;
+		m_usePatch = false;
+		m_latestVersionLabel->setText(QStringLiteral("最新版本：清单已失效"));
+		AppendLog(QStringLiteral(
+			"下载前复核发现更新清单已过期或本机时钟偏移：%1。"
+			"已撤销下载授权，请重新检查更新。").arg(freshnessError));
 		return;
 	}
 	const bool usePatch = m_usePatch;
@@ -2125,6 +2324,26 @@ void OnlineServicesDialog::AppendLog(const QString& text)
 
 void OnlineServicesDialog::closeEvent(QCloseEvent* event)
 {
+	if (m_remoteBusy)
+	{
+		const QMessageBox::StandardButton ret = QMessageBox::question(
+			this,
+			QStringLiteral("远程操作进行中"),
+			QStringLiteral("远程 FTP 操作或 ZIP staging 处理尚未结束。\n\n"
+				"选择「是」会请求取消并等待 worker 完整收尾；选择「否」保持本页打开。"),
+			QMessageBox::Yes | QMessageBox::No,
+			QMessageBox::No);
+		if (ret != QMessageBox::Yes)
+		{
+			if (event != nullptr)
+			{
+				event->ignore();
+			}
+			return;
+		}
+		CancelRemoteOperationAndWait();
+		AppendLog(QStringLiteral("远程操作已取消并完成线程收尾。"));
+	}
 	// 关界面时若正在上传：问用户后台继续还是停止当前传输。
 	if (m_uploader != nullptr && m_uploader->IsBusy())
 	{
@@ -2166,7 +2385,7 @@ int OnlineServicesDialog::CompareVersions(const QString& lhs, const QString& rhs
 	return 0;
 }
 
-// ============ 远程数据（admin）：FTP 阻塞操作跑一次性 detach 线程，回调经 QPointer 防悬空 ============
+// ============ 远程数据（admin）：single owned/cancellable/joinable FTP worker ============
 
 namespace
 {
@@ -2188,6 +2407,114 @@ namespace
 		cfg.password = OnlineServicesConfig::FtpPassword().toStdString();
 		return cfg;
 	}
+}
+
+bool OnlineServicesDialog::IsRemoteOperationBusy() const noexcept
+{
+	return m_remoteBusy;
+}
+
+bool OnlineServicesDialog::RemoteWorkerCancelled(quint64 generation) const noexcept
+{
+	return m_remoteLifecycle.IsCancelled(generation);
+}
+
+bool OnlineServicesDialog::StartRemoteWorker(std::function<void(quint64)> work)
+{
+	if (!m_remoteLifecycle.CanStart() || m_remoteBusy || !work)
+	{
+		return false;
+	}
+	if (m_remoteWorker.joinable())
+	{
+		m_remoteWorker.join();
+	}
+	const quint64 generation = m_remoteLifecycle.BeginWorker();
+	if (generation == 0)
+	{
+		return false;
+	}
+	SetRemoteBusy(true);
+	try
+	{
+		m_remoteWorker = std::thread(
+			[this, generation, work = std::move(work)]() mutable
+			{
+				try
+				{
+					work(generation);
+				}
+				catch (const std::exception& error)
+				{
+					const QString detail = QString::fromLocal8Bit(error.what());
+					if (!RemoteWorkerCancelled(generation))
+					{
+						QMetaObject::invokeMethod(this, [this, generation, detail]()
+							{
+								if (!RemoteWorkerCancelled(generation))
+								{
+									FinishRemoteWorker(generation);
+									AppendLog(QStringLiteral("远程 FTP worker 异常：%1").arg(detail));
+								}
+							}, Qt::QueuedConnection);
+					}
+				}
+				catch (...)
+				{
+					if (!RemoteWorkerCancelled(generation))
+					{
+						QMetaObject::invokeMethod(this, [this, generation]()
+							{
+								if (!RemoteWorkerCancelled(generation))
+								{
+									FinishRemoteWorker(generation);
+									AppendLog(QStringLiteral("远程 FTP worker 发生未知异常。"));
+								}
+							}, Qt::QueuedConnection);
+					}
+				}
+			});
+	}
+	catch (const std::system_error& error)
+	{
+		m_remoteLifecycle.BeginCancel(false);
+		SetRemoteBusy(false);
+		m_remoteLifecycle.FinishCancel();
+		AppendLog(QStringLiteral("无法启动远程 FTP worker：%1")
+			.arg(QString::fromLocal8Bit(error.what())));
+		return false;
+	}
+	return true;
+}
+
+void OnlineServicesDialog::FinishRemoteWorker(quint64 generation)
+{
+	if (m_remoteLifecycle.IsCancelled(generation))
+	{
+		return;
+	}
+	if (m_remoteWorker.joinable())
+	{
+		m_remoteWorker.join();
+	}
+	SetRemoteBusy(false);
+}
+
+void OnlineServicesDialog::CancelRemoteOperationAndWait(bool permanentShutdown)
+{
+	// Suppress UpdateRestrictedNav's auto-refresh while SetRemoteBusy(false) runs.
+	// A normal cached-page close then re-enables future generations; application exit
+	// and destruction keep the lifecycle permanently closed.
+	m_remoteLifecycle.BeginCancel(permanentShutdown);
+	if (m_remoteWorker.joinable())
+	{
+		m_remoteWorker.join();
+	}
+	if (m_remoteBusy)
+	{
+		SetRemoteBusy(false);
+	}
+	m_remoteLifecycle.FinishCancel();
 }
 
 bool OnlineServicesDialog::AuthorizePrivilegedAction(const QString& actionName)
@@ -2225,7 +2552,7 @@ void OnlineServicesDialog::SetRemoteBusy(bool busy)
 		}
 	}
 	// 设备选择/下载/建目录同时受「后台忙碌」和账号权限约束；统一重算，
-	// 避免异步操作结束时 setEnabled(true) 把 uploader 的限制意外撤销。
+	// 避免异步操作结束时 setEnabled(true) 把 upload-only 账号限制意外撤销。
 	UpdateRestrictedNav();
 }
 
@@ -2263,16 +2590,15 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 		AppendLog(QStringLiteral("请先填写 FTP 账号并保存配置。"));
 		return;
 	}
-	SetRemoteBusy(true);
 	AppendLog(QStringLiteral("正在获取设备列表…"));
-	QPointer<OnlineServicesDialog> self(this);
-	std::thread([self, cfg]()
+	StartRemoteWorker([this, cfg](quint64 generation)
 		{
 			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			std::vector<FtpRemoteFileInfo> entries;
-			const bool ok = ftp.listFiles("/data", entries);
+			const bool ok = !RemoteWorkerCancelled(generation)
+				&& ftp.listFiles("/data", entries, m_remoteLifecycle.CancelFlag());
 			QStringList devices;
 			for (const FtpRemoteFileInfo& e : entries)
 			{
@@ -2282,42 +2608,45 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 					devices << deviceName;
 				}
 			}
-			QMetaObject::invokeMethod(qApp, [self, ok, devices]()
+			if (RemoteWorkerCancelled(generation))
+			{
+				return;
+			}
+			QMetaObject::invokeMethod(this, [this, generation, ok, devices]()
 				{
-					if (self == nullptr)
+					if (RemoteWorkerCancelled(generation))
 					{
 						return;
 					}
+					FinishRemoteWorker(generation);
 					if (!ok)
 					{
-						self->SetRemoteBusy(false);
-						self->AppendLog(QStringLiteral("获取设备列表失败（检查 FTP 配置与网络）。"));
+						AppendLog(QStringLiteral("获取设备列表失败（检查 FTP 配置与网络）。"));
 						return;
 					}
 					{
 						// 先静默落地最终列表，再解除 busy 并刷新一次文件；避免 clear/addItems
-						// 中间信号触发嵌套请求，也确保 uploader 最终只能看到本机设备。
-						const QSignalBlocker blocker(self->m_remoteDeviceCombo);
-						self->m_remoteDeviceCombo->clear();
-						if (self->IsUploadOnlyAccount())
+						// 中间信号触发嵌套请求，也确保 upload-only 账号最终只能看到本机设备。
+						const QSignalBlocker blocker(m_remoteDeviceCombo);
+						m_remoteDeviceCombo->clear();
+						if (IsUploadOnlyAccount())
 						{
 							const QString selfDevice = OnlineServicesConfig::DeviceName().trimmed();
 							if (IsSafeRemotePathComponent(selfDevice))
 							{
-								self->m_remoteDeviceCombo->addItem(selfDevice);
+								m_remoteDeviceCombo->addItem(selfDevice);
 							}
 						}
 						else
 						{
-							self->m_remoteDeviceCombo->addItems(devices);
+							m_remoteDeviceCombo->addItems(devices);
 						}
 					}
-					self->SetRemoteBusy(false);
-					self->AppendLog(QStringLiteral("设备列表已刷新：共 %1 台。")
-						.arg(self->m_remoteDeviceCombo->count()));
-					self->RefreshRemoteFiles();
+					AppendLog(QStringLiteral("设备列表已刷新：共 %1 台。")
+						.arg(m_remoteDeviceCombo->count()));
+					RefreshRemoteFiles();
 				}, Qt::QueuedConnection);
-		}).detach();
+		});
 }
 
 void OnlineServicesDialog::RefreshRemoteFiles()
@@ -2349,18 +2678,18 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 		return;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
-	SetRemoteBusy(true);
-	QPointer<OnlineServicesDialog> self(this);
-	std::thread([self, cfg, device]()
+	StartRemoteWorker([this, cfg, device](quint64 generation)
 		{
 			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			std::vector<FtpRemoteFileInfo> entries;
 			const std::string remoteDir = "/data/" + device.toStdString();
-			const bool ok = ftp.listFiles(remoteDir, entries);
+			const bool ok = !RemoteWorkerCancelled(generation)
+				&& ftp.listFiles(remoteDir, entries, m_remoteLifecycle.CancelFlag());
 			QStringList names;
 			QStringList labels;
+			QList<qulonglong> sizes;
 			for (const FtpRemoteFileInfo& e : entries)
 			{
 				const QString fileName = QString::fromStdString(e.name);
@@ -2369,32 +2698,38 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 					&& IsCompleteRemoteArchive(fileName, static_cast<qulonglong>(e.size)))
 				{
 					names << fileName;
+					sizes << static_cast<qulonglong>(e.size);
 					labels << QStringLiteral("%1（%2 MB）")
 						.arg(fileName)
 						.arg(QString::number(e.size / 1048576.0, 'f', 1));
 				}
 			}
-			QMetaObject::invokeMethod(qApp, [self, ok, device, names, labels]()
+			if (RemoteWorkerCancelled(generation))
+			{
+				return;
+			}
+			QMetaObject::invokeMethod(this, [this, generation, ok, device, names, labels, sizes]()
 				{
-					if (self == nullptr)
+					if (RemoteWorkerCancelled(generation))
 					{
 						return;
 					}
-					self->SetRemoteBusy(false);
+					FinishRemoteWorker(generation);
 					if (!ok)
 					{
-						self->AppendLog(QStringLiteral("获取 %1 的文件列表失败。").arg(device));
+						AppendLog(QStringLiteral("获取 %1 的文件列表失败。").arg(device));
 						return;
 					}
-					self->m_remoteFileList->clear();
+					m_remoteFileList->clear();
 					for (int i = 0; i < names.size(); ++i)
 					{
-						QListWidgetItem* item = new QListWidgetItem(labels.at(i), self->m_remoteFileList);
+						QListWidgetItem* item = new QListWidgetItem(labels.at(i), m_remoteFileList);
 						item->setData(Qt::UserRole, names.at(i));
+						item->setData(Qt::UserRole + 1, QVariant::fromValue(sizes.at(i)));
 					}
-					self->AppendLog(QStringLiteral("设备 %1：共 %2 个数据包。").arg(device).arg(names.size()));
+					AppendLog(QStringLiteral("设备 %1：共 %2 个数据包。").arg(device).arg(names.size()));
 				}, Qt::QueuedConnection);
-		}).detach();
+		});
 }
 
 void OnlineServicesDialog::DownloadSelectedRemoteFiles()
@@ -2414,21 +2749,31 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 	}
 	const QString device = m_remoteDeviceCombo->currentText().trimmed();
 	const QList<QListWidgetItem*> selected = m_remoteFileList->selectedItems();
-	if (!IsSafeRemotePathComponent(device) || selected.isEmpty())
+	if (!IsSafeRemotePathComponent(device)
+		|| selected.isEmpty()
+		|| selected.size() > kMaximumRemoteArchivesPerOperation)
 	{
-		AppendLog(QStringLiteral("请选择安全的设备名和数据包。"));
+		AppendLog(QStringLiteral("请选择安全设备名，且每次最多下载 %1 个数据包。")
+			.arg(kMaximumRemoteArchivesPerOperation));
 		return;
 	}
-	QStringList names;
+	QList<QPair<QString, qulonglong>> archives;
+	qulonglong maximumListedBytes = 0;
 	for (const QListWidgetItem* item : selected)
 	{
 		const QString name = item->data(Qt::UserRole).toString();
-		if (!IsSafeRemotePathComponent(name))
+		bool sizeOk = false;
+		const qulonglong listedBytes = item->data(Qt::UserRole + 1).toULongLong(&sizeOk);
+		QString archiveError;
+		if (!sizeOk
+			|| !RemoteArchiveSecurity::ValidateListedArchive(name, listedBytes, &archiveError))
 		{
-			AppendLog(QStringLiteral("远程文件名不安全，已拒绝下载：%1").arg(name));
+			AppendLog(QStringLiteral("远程 ZIP 列表声明无效，已拒绝下载：%1（%2）")
+				.arg(name, archiveError));
 			return;
 		}
-		names << name;
+		archives.push_back(qMakePair(name, listedBytes));
+		maximumListedBytes = std::max(maximumListedBytes, listedBytes);
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
 	const QString localDir = AppPaths::WritableChildPath(QStringLiteral("Result/Remote"), device);
@@ -2437,65 +2782,209 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 		AppendLog(QStringLiteral("远程数据本地目录无效，已拒绝下载。"));
 		return;
 	}
-	SetRemoteBusy(true);
-	AppendLog(QStringLiteral("开始下载 %1 个数据包到 %2 …").arg(names.size()).arg(QDir::toNativeSeparators(localDir)));
-	QPointer<OnlineServicesDialog> self(this);
-	std::thread([self, cfg, device, names, localDir]()
+	QString capacityError;
+	if (!RemoteArchiveSecurity::HasWorkspaceCapacity(localDir, maximumListedBytes, &capacityError))
+	{
+		AppendLog(QStringLiteral("远程 ZIP 下载前磁盘门禁失败：%1").arg(capacityError));
+		return;
+	}
+	AppendLog(QStringLiteral("开始下载 %1 个数据包到 %2 …")
+		.arg(archives.size()).arg(QDir::toNativeSeparators(localDir)));
+	StartRemoteWorker([this, cfg, device, archives, localDir](quint64 generation)
 		{
+			RemoteArchiveSecurity::StagingAuditResult stagingAudit;
+			QString stagingAuditError;
+			if (!RemoteArchiveSecurity::AuditAndCleanupStaging(
+				localDir, &stagingAudit, &stagingAuditError))
+			{
+				if (!RemoteWorkerCancelled(generation))
+				{
+					QMetaObject::invokeMethod(this,
+						[this, generation, stagingAuditError]()
+						{
+							if (!RemoteWorkerCancelled(generation))
+							{
+								FinishRemoteWorker(generation);
+								AppendLog(QStringLiteral(
+									"远程 ZIP 批次未启动：staging 残留审计/清理失败（%1）")
+									.arg(stagingAuditError));
+							}
+						}, Qt::QueuedConnection);
+				}
+				return;
+			}
 			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
 			int okCount = 0;
-			for (const QString& name : names)
+			bool stoppedForStagingCleanup = false;
+			QString stagingStopReason;
+			for (const auto& selectedArchive : archives)
 			{
-				const std::string remotePath = "/data/" + device.toStdString() + "/" + name.toStdString();
-				const QString localZip = AppPaths::WritableChildPath(
-					QStringLiteral("Result/Remote/%1").arg(device), name);
-				const QByteArray localZipBytes = QDir::toNativeSeparators(localZip).toLocal8Bit();
-				const bool transferSucceeded = !localZip.isEmpty()
-					&& ftp.downloadFile(remotePath, localZipBytes.toStdString());
-				const bool downloaded = transferSucceeded
-					&& IsCompleteRemoteArchive(name, static_cast<qulonglong>(QFileInfo(localZip).size()));
-				if (transferSucceeded && !downloaded)
+				if (RemoteWorkerCancelled(generation))
 				{
-					QFile::remove(localZip);
+					break;
 				}
-				bool extracted = false;
-				if (downloaded)
+				const QString name = selectedArchive.first;
+				const qulonglong listedBytes = selectedArchive.second;
+				const std::string remotePath = "/data/" + device.toStdString() + "/" + name.toStdString();
+				QString itemMessage;
+				QString capacityError;
+				if (!RemoteArchiveSecurity::HasWorkspaceCapacity(localDir, listedBytes, &capacityError))
 				{
-					// zip 内已带 <机器人>/<案例>/ 前缀，解到设备目录即可分层落地。
-					QZipReader zr(localZip);
-					const bool safeArchive = HasOnlySafeArchiveEntries(zr);
-					extracted = safeArchive && zr.extractAll(localDir);
-					zr.close();
-					if (extracted)
+					itemMessage = QStringLiteral("下载已拒绝（磁盘余量不足）：%1（%2）")
+						.arg(name, capacityError);
+				}
+				const QString transactionName = QStringLiteral("remote-staging-%1")
+					.arg(QUuid::createUuid().toString(QUuid::WithoutBraces).remove(QLatin1Char('-')));
+				const QString transactionRoot = QDir(localDir).filePath(transactionName);
+				const QString localZip = QDir(transactionRoot).filePath(QStringLiteral("payload.zip"));
+				if (itemMessage.isEmpty()
+					&& (!AppPaths::IsSafePathComponent(transactionName)
+						|| !QDir().mkpath(transactionRoot)))
+				{
+					itemMessage = QStringLiteral("无法创建唯一下载 staging：%1").arg(name);
+				}
+				const QByteArray localZipBytes = QDir::toNativeSeparators(localZip).toLocal8Bit();
+				bool downloaded = false;
+				bool archiveProcessorInvoked = false;
+				RemoteArchiveSecurity::PromotionResult promotion;
+				if (itemMessage.isEmpty())
+				{
+					downloaded = ftp.downloadFileBounded(
+						remotePath,
+						localZipBytes.toStdString(),
+						listedBytes,
+						static_cast<unsigned long long>(RemoteArchiveSecurity::MaximumArchiveBytes),
+						m_remoteLifecycle.CancelFlag());
+					QString sizeError;
+					if (downloaded
+						&& !RemoteArchiveSecurity::ValidateOpenedArchiveSize(
+							name,
+							listedBytes,
+							static_cast<qulonglong>(QFileInfo(localZip).size()),
+							&sizeError))
 					{
-						QFile::remove(localZip);
-						++okCount;
+						downloaded = false;
+						itemMessage = QStringLiteral("下载后大小复验失败：%1（%2）")
+							.arg(name, sizeError);
 					}
 				}
-				QMetaObject::invokeMethod(qApp, [self, name, downloaded, extracted]()
-					{
-						if (self != nullptr)
-						{
-							self->AppendLog(downloaded && extracted
-								? QStringLiteral("已下载并解压：%1").arg(name)
-								: QStringLiteral("下载失败：%1%2").arg(name)
-									.arg(downloaded ? QStringLiteral("（解压失败，zip 保留）") : QString()));
-						}
-					}, Qt::QueuedConnection);
-			}
-			QMetaObject::invokeMethod(qApp, [self, okCount, names, localDir]()
+				if (downloaded && !RemoteWorkerCancelled(generation))
 				{
-					if (self == nullptr)
+					archiveProcessorInvoked = true;
+					promotion = RemoteArchiveSecurity::ExtractValidateAndPromote(
+						localZip,
+						localDir,
+						m_remoteLifecycle.CancelFlag());
+					if (!promotion.IsCommitted())
+					{
+						itemMessage = QStringLiteral("ZIP staging/验证/原子提升失败：%1（%2）")
+							.arg(name, promotion.message);
+					}
+				}
+				else if (!downloaded && itemMessage.isEmpty())
+				{
+					itemMessage = RemoteWorkerCancelled(generation)
+						? QStringLiteral("已取消下载并清理 staging：%1").arg(name)
+						: QStringLiteral("受限 FTP 下载失败并已清理 staging：%1").arg(name);
+				}
+				// Transfer/preflight failures never entered the archive processor.  Their
+				// cleanup is checked here and any ambiguity stops the batch immediately.
+				if (!archiveProcessorInvoked && QFileInfo::exists(transactionRoot))
+				{
+					QString cleanupError;
+					if (!RemoteArchiveSecurity::CleanupStagingTransaction(
+						transactionRoot, localDir, &cleanupError))
+					{
+						stoppedForStagingCleanup = true;
+						stagingStopReason = QStringLiteral(
+							"下载未落地且 staging 清理失败：%1（%2）")
+							.arg(name, cleanupError);
+						itemMessage += QStringLiteral("；%1；已停止剩余批次")
+							.arg(stagingStopReason);
+					}
+				}
+				if (promotion.IsCommitted())
+				{
+					++okCount;
+					if (promotion.status == RemoteArchiveSecurity::PromotionStatus::Promoted)
+					{
+						itemMessage = QStringLiteral("已下载、完整验证并原子落地：%1 → %2")
+							.arg(name,
+								QDir::toNativeSeparators(promotion.promotedCasePath));
+					}
+					else
+					{
+						QString retryError;
+						const bool retryCleaned =
+							RemoteArchiveSecurity::CleanupStagingTransaction(
+								transactionRoot, localDir, &retryError);
+						stoppedForStagingCleanup = true;
+						stagingStopReason = QStringLiteral(
+							"案例已落地但 staging 清理失败：%1 → %2（%3；立即重试%4）")
+							.arg(name,
+								QDir::toNativeSeparators(promotion.promotedCasePath),
+								promotion.message,
+								retryCleaned
+									? QStringLiteral("已确认清理完成")
+									: QStringLiteral("仍失败：%1").arg(retryError));
+						itemMessage = stagingStopReason
+							+ QStringLiteral("；为避免状态歧义，已停止剩余批次");
+					}
+				}
+				else if (archiveProcessorInvoked && promotion.RequiresBatchStop())
+				{
+					QString retryError;
+					const bool retryCleaned =
+						RemoteArchiveSecurity::CleanupStagingTransaction(
+							transactionRoot, localDir, &retryError);
+					stoppedForStagingCleanup = true;
+					stagingStopReason = QStringLiteral(
+						"案例未落地且 staging 清理失败：%1（立即重试%2）")
+						.arg(name,
+							retryCleaned
+								? QStringLiteral("已确认清理完成")
+								: QStringLiteral("仍失败：%1").arg(retryError));
+					itemMessage += QStringLiteral("；%1；已停止剩余批次")
+						.arg(stagingStopReason);
+				}
+				if (!RemoteWorkerCancelled(generation))
+				{
+					QMetaObject::invokeMethod(this, [this, generation, itemMessage]()
+						{
+							if (!RemoteWorkerCancelled(generation))
+							{
+								AppendLog(itemMessage);
+							}
+						}, Qt::QueuedConnection);
+				}
+				if (stoppedForStagingCleanup)
+				{
+					break;
+				}
+			}
+			if (RemoteWorkerCancelled(generation))
+			{
+				return;
+			}
+			QMetaObject::invokeMethod(this,
+				[this, generation, okCount, archives, localDir,
+					stoppedForStagingCleanup, stagingStopReason]()
+				{
+					if (RemoteWorkerCancelled(generation))
 					{
 						return;
 					}
-					self->SetRemoteBusy(false);
-					self->AppendLog(QStringLiteral("下载完成：成功 %1/%2，数据在 %3（点云查看等工具可直接打开）。")
-						.arg(okCount).arg(names.size()).arg(QDir::toNativeSeparators(localDir)));
+					FinishRemoteWorker(generation);
+					AppendLog(stoppedForStagingCleanup
+						? QStringLiteral("下载批次已安全停止：成功落地 %1/%2；%3")
+							.arg(okCount).arg(archives.size()).arg(stagingStopReason)
+						: QStringLiteral("下载完成：成功 %1/%2，数据在 %3（点云查看等工具可直接打开）。")
+							.arg(okCount).arg(archives.size())
+							.arg(QDir::toNativeSeparators(localDir)));
 				}, Qt::QueuedConnection);
-		}).detach();
+		});
 }
 
 void OnlineServicesDialog::DeleteSelectedRemoteFiles()
@@ -2517,9 +3006,12 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 		return;
 	}
 	const QList<QListWidgetItem*> selected = m_remoteFileList->selectedItems();
-	if (!IsSafeRemotePathComponent(device) || selected.isEmpty())
+	if (!IsSafeRemotePathComponent(device)
+		|| selected.isEmpty()
+		|| selected.size() > kMaximumRemoteArchivesPerOperation)
 	{
-		AppendLog(QStringLiteral("请选择安全的设备名和要删除的数据包。"));
+		AppendLog(QStringLiteral("请选择安全设备名，且每次最多删除 %1 个数据包。")
+			.arg(kMaximumRemoteArchivesPerOperation));
 		return;
 	}
 	const QMessageBox::StandardButton ret = QMessageBox::warning(this, QStringLiteral("删除服务器数据"),
@@ -2546,9 +3038,7 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 		names << name;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
-	SetRemoteBusy(true);
-	QPointer<OnlineServicesDialog> self(this);
-	std::thread([self, cfg, device, names]()
+	StartRemoteWorker([this, cfg, device, names](quint64 generation)
 		{
 			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
@@ -2556,23 +3046,31 @@ void OnlineServicesDialog::DeleteSelectedRemoteFiles()
 			int okCount = 0;
 			for (const QString& name : names)
 			{
+				if (RemoteWorkerCancelled(generation))
+				{
+					break;
+				}
 				const std::string remotePath = "/data/" + device.toStdString() + "/" + name.toStdString();
 				if (ftp.deleteFile(remotePath, /*askConfirm=*/false))
 				{
 					++okCount;
 				}
 			}
-			QMetaObject::invokeMethod(qApp, [self, okCount, names]()
+			if (RemoteWorkerCancelled(generation))
+			{
+				return;
+			}
+			QMetaObject::invokeMethod(this, [this, generation, okCount, names]()
 				{
-					if (self == nullptr)
+					if (RemoteWorkerCancelled(generation))
 					{
 						return;
 					}
-					self->SetRemoteBusy(false);
-					self->AppendLog(QStringLiteral("服务器数据删除完成：成功 %1/%2。").arg(okCount).arg(names.size()));
-					self->RefreshRemoteFiles();
+					FinishRemoteWorker(generation);
+					AppendLog(QStringLiteral("服务器数据删除完成：成功 %1/%2。").arg(okCount).arg(names.size()));
+					RefreshRemoteFiles();
 				}, Qt::QueuedConnection);
-		}).detach();
+		});
 }
 
 void OnlineServicesDialog::CreateRemoteDeviceDir()
@@ -2608,29 +3106,32 @@ void OnlineServicesDialog::CreateRemoteDeviceDir()
 		return;
 	}
 	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
-	SetRemoteBusy(true);
-	QPointer<OnlineServicesDialog> self(this);
-	std::thread([self, cfg, name]()
+	StartRemoteWorker([this, cfg, name](quint64 generation)
 		{
 			RobotLog log(OnlineServicesLogPath(), false);
 			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
 			ftp.setMessageBoxesEnabled(false);
-			const bool ok = ftp.createRemoteDirRecursive("/data/" + name.toStdString());
-			QMetaObject::invokeMethod(qApp, [self, ok, name]()
+			const bool ok = !RemoteWorkerCancelled(generation)
+				&& ftp.createRemoteDirRecursive("/data/" + name.toStdString());
+			if (RemoteWorkerCancelled(generation))
+			{
+				return;
+			}
+			QMetaObject::invokeMethod(this, [this, generation, ok, name]()
 				{
-					if (self == nullptr)
+					if (RemoteWorkerCancelled(generation))
 					{
 						return;
 					}
-					self->SetRemoteBusy(false);
-					self->AppendLog(ok ? QStringLiteral("目录已创建：/data/%1").arg(name)
+					FinishRemoteWorker(generation);
+					AppendLog(ok ? QStringLiteral("目录已创建：/data/%1").arg(name)
 						: QStringLiteral("创建目录失败：/data/%1").arg(name));
 					if (ok)
 					{
-						self->RefreshRemoteDevices();
+						RefreshRemoteDevices();
 					}
 				}, Qt::QueuedConnection);
-		}).detach();
+		});
 }
 
 // ============ 服务器管理接口（统计/账号）：nginx 8090 的 /admin/ 反代，X-Admin-Token 鉴权 ============
@@ -2655,6 +3156,15 @@ void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& p
 {
 	if (!AuthorizePrivilegedAction(QStringLiteral("执行服务器管理请求")))
 	{
+		if (done)
+		{
+			done(false, QJsonObject());
+		}
+		return;
+	}
+	if (OnlineServicesConfig::FtpUser().trimmed() != QStringLiteral("devicedata"))
+	{
+		AppendLog(QStringLiteral("管理接口已拒绝：只有已保存的 devicedata 全权限身份可使用管理令牌。"));
 		if (done)
 		{
 			done(false, QJsonObject());
@@ -2695,14 +3205,61 @@ void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& p
 	request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
 	const QByteArray payload = body.isEmpty() ? QByteArray() : QJsonDocument(body).toJson(QJsonDocument::Compact);
 	QNetworkReply* reply = m_network->sendCustomRequest(request, verb, payload);
+	reply->setReadBufferSize(kMaximumAdminResponseBytes + 1);
+	reply->setProperty("boundedAdminResponse", QByteArray());
+	reply->setProperty("adminResponseTooLarge", false);
+	connect(reply, &QNetworkReply::metaDataChanged, this, [reply]()
+		{
+			bool contentLengthOk = false;
+			const qint64 contentLength =
+				reply->header(QNetworkRequest::ContentLengthHeader).toLongLong(&contentLengthOk);
+			if (contentLengthOk && contentLength > kMaximumAdminResponseBytes)
+			{
+				reply->setProperty("adminResponseTooLarge", true);
+				reply->abort();
+			}
+		});
+	connect(reply, &QNetworkReply::readyRead, this, [reply]()
+		{
+			QByteArray bytes = reply->property("boundedAdminResponse").toByteArray();
+			const qint64 remaining = kMaximumAdminResponseBytes + 1 - bytes.size();
+			if (remaining > 0)
+			{
+				bytes.append(reply->read(remaining));
+			}
+			reply->setProperty("boundedAdminResponse", bytes);
+			if (bytes.size() > kMaximumAdminResponseBytes || reply->bytesAvailable() > 0)
+			{
+				reply->setProperty("adminResponseTooLarge", true);
+				reply->abort();
+			}
+		});
 	connect(reply, &QNetworkReply::finished, this, [this, reply, done]()
 		{
 			reply->deleteLater();
-			const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
-			const bool ok = reply->error() == QNetworkReply::NoError && obj.value(QStringLiteral("ok")).toBool();
+			QByteArray response = reply->property("boundedAdminResponse").toByteArray();
+			const qint64 remaining = kMaximumAdminResponseBytes + 1 - response.size();
+			if (remaining > 0)
+			{
+				response.append(reply->read(remaining));
+			}
+			const bool responseTooLarge = reply->property("adminResponseTooLarge").toBool()
+				|| response.size() > kMaximumAdminResponseBytes
+				|| reply->bytesAvailable() > 0;
+			QJsonParseError parseError;
+			const QJsonDocument document = responseTooLarge
+				? QJsonDocument()
+				: QJsonDocument::fromJson(response, &parseError);
+			const QJsonObject obj = document.isObject() ? document.object() : QJsonObject();
+			const bool ok = !responseTooLarge
+				&& parseError.error == QJsonParseError::NoError
+				&& reply->error() == QNetworkReply::NoError
+				&& obj.value(QStringLiteral("ok")).toBool();
 			if (!ok)
 			{
-				const QString err = obj.value(QStringLiteral("error")).toString();
+				const QString err = responseTooLarge
+					? QStringLiteral("管理接口响应超过 256 KiB 安全上限，已中止接收")
+					: obj.value(QStringLiteral("error")).toString();
 				AppendLog(QStringLiteral("管理接口请求失败：%1").arg(err.isEmpty() ? reply->errorString() : err));
 			}
 			if (done)
@@ -2832,12 +3389,9 @@ void OnlineServicesDialog::ShowAddAccountDialog()
 	QLineEdit* pwEdit = new QLineEdit(&dlg);
 	pwEdit->setEchoMode(QLineEdit::Password);
 	pwEdit->setPlaceholderText(QStringLiteral("至少 8 位"));
-	QComboBox* permCombo = new QComboBox(&dlg);
-	permCombo->addItem(QStringLiteral("仅上传（现场设备用）"), QStringLiteral("upload"));
-	permCombo->addItem(QStringLiteral("全权限（可下载浏览全部设备）"), QStringLiteral("full"));
 	form->addRow(QStringLiteral("账号名："), nameEdit);
 	form->addRow(QStringLiteral("密码："), pwEdit);
-	form->addRow(QStringLiteral("权限："), permCombo);
+	form->addRow(QStringLiteral("权限："), new QLabel(QStringLiteral("仅上传（服务端固定）"), &dlg));
 	QDialogButtonBox* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
 	form->addRow(buttons);
 	connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
@@ -2846,10 +3400,19 @@ void OnlineServicesDialog::ShowAddAccountDialog()
 	{
 		return;
 	}
+	const QString accountName = nameEdit->text().trimmed();
+	if (!OnlineServicesConfig::IsServerAccountName(accountName)
+		|| accountName == QStringLiteral("uploader")
+		|| accountName == QStringLiteral("devicedata"))
+	{
+		AppendLog(QStringLiteral(
+			"账号未创建：必须匹配 ^[a-z][a-z0-9_-]{2,31}$，且不能使用保留名 uploader/devicedata。"));
+		return;
+	}
 	QJsonObject body;
-	body.insert(QStringLiteral("name"), nameEdit->text().trimmed());
+	body.insert(QStringLiteral("name"), accountName);
 	body.insert(QStringLiteral("password"), pwEdit->text());
-	body.insert(QStringLiteral("permission"), permCombo->currentData().toString());
+	body.insert(QStringLiteral("permission"), QStringLiteral("upload"));
 	AdminRequest("POST", QStringLiteral("/accounts"), body, [this](bool ok, const QJsonObject&)
 		{
 			if (ok)
@@ -2868,16 +3431,6 @@ void OnlineServicesDialog::ChangeSelectedAccountPassword()
 		return;
 	}
 	const QString name = m_accountTable->item(m_accountTable->currentRow(), 0)->text();
-	if (name == QStringLiteral("uploader"))
-	{
-		const QMessageBox::StandardButton ret = QMessageBox::warning(this, QStringLiteral("改密码"),
-			QStringLiteral("uploader 是随安装包分发的默认上传账号，改密码会让所有未手动配置账号的现场设备断传。\n\n确定要改？"),
-			QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
-		if (ret != QMessageBox::Ok)
-		{
-			return;
-		}
-	}
 	bool okInput = false;
 	const QString pw = QInputDialog::getText(this, QStringLiteral("改密码"),
 		QStringLiteral("账号 %1 的新密码（至少 8 位）：").arg(name), QLineEdit::Password, QString(), &okInput);
@@ -2903,26 +3456,10 @@ void OnlineServicesDialog::ToggleSelectedAccountPermission()
 		AppendLog(QStringLiteral("请先在账号表中选中一个账号。"));
 		return;
 	}
-	QTableWidgetItem* nameItem = m_accountTable->item(m_accountTable->currentRow(), 0);
-	const QString name = nameItem->text();
-	if (name == QStringLiteral("uploader") || name == QStringLiteral("devicedata"))
-	{
-		AppendLog(QStringLiteral("系统账号权限固定：uploader 永远仅上传，devicedata 永远全权限。"));
-		return;
-	}
-	const QString curPerm = nameItem->data(Qt::UserRole).toString();
-	const QString newPerm = curPerm == QStringLiteral("upload") ? QStringLiteral("full") : QStringLiteral("upload");
-	QJsonObject body;
-	body.insert(QStringLiteral("permission"), newPerm);
-	AdminRequest("PATCH", QStringLiteral("/accounts/") + name, body, [this, name, newPerm](bool ok, const QJsonObject&)
-		{
-			if (ok)
-			{
-				AppendLog(QStringLiteral("账号 %1 权限已切换为%2。").arg(name)
-					.arg(newPerm == QStringLiteral("upload") ? QStringLiteral("「仅上传」") : QStringLiteral("「全权限」")));
-				RefreshAccounts();
-			}
-		});
+	const QString name = m_accountTable->item(m_accountTable->currentRow(), 0)->text();
+	AppendLog(name == QStringLiteral("devicedata")
+		? QStringLiteral("devicedata 是唯一全权限账号，权限固定为 full。")
+		: QStringLiteral("普通设备账号权限由服务端固定为 upload-only，禁止提升。"));
 }
 
 void OnlineServicesDialog::DeleteSelectedAccount()
@@ -2933,6 +3470,11 @@ void OnlineServicesDialog::DeleteSelectedAccount()
 		return;
 	}
 	const QString name = m_accountTable->item(m_accountTable->currentRow(), 0)->text();
+	if (name == QStringLiteral("devicedata"))
+	{
+		AppendLog(QStringLiteral("devicedata 是唯一全权限系统账号，禁止删除。"));
+		return;
+	}
 	const QMessageBox::StandardButton ret = QMessageBox::warning(this, QStringLiteral("删除账号"),
 		QStringLiteral("将删除服务器 FTP 账号 %1（其已上传的数据保留）。\n\n确定删除？").arg(name),
 		QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel);
