@@ -287,6 +287,7 @@ private:
     QPushButton* m_pAuthLoginModeBtn;
     QPushButton* m_pAuthRegisterModeBtn;
     QPushButton* m_pAuthSubmitBtn;
+    QPushButton* m_pAuthCancelBtn;
     QPushButton* m_pGuestLoginBtn;
     QPushButton* m_pDashboardConnectBtn;
     QPushButton* m_pDashboardClearAlarmBtn;

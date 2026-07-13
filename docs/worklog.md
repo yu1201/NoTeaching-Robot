@@ -7,6 +7,8 @@
 
 ## 2026-07-13
 
+- 版本 v2026.07.13.2115：完成账号/配置数据库覆盖安装迁移与认证恢复界面闭环。① 安装前只在 `Data` 同目录创建或升级随机暂存库，正式库在新版文件安装完成后通过写穿透原子替换发布；事务记录先于任何数据库变更持久化，并绑定输入目录递归清单、相对路径、长度、SHA-256、正式库/暂存库/DPAPI 备份身份。② `NOOP_ABSENT` 绑定规范空输入，CREATE 全生命周期绑定实际导入输入；恢复、提交、取消和回滚逐阶段回读，拒绝 sidecar、重解析点、伪造状态、晚到凭据、非凭据参数漂移和残留明文备份。③ 发布后凭据清理未完成时进入持久 `PUBLISHED_FINALIZE_PENDING`，事务记录不会提前删除；INI 正常替换与回滚在 Windows 均使用 `MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)`，清理完成并联合回读为 complete 后才解锁。④ C++ 在任何账号/数据库访问入口检查精确事务记录对象，已打开连接遇到记录也立即关闭；记录移除后必须重新打开并完整验证 schema/auth，pending 或损坏库不能利用连接缓存恢复。⑤ 认证安全恢复页隐藏所有登录/注册输入，仅保留完整说明与关闭按钮，避免小窗口挤压。安装事务 474 秒故障矩阵、schema 31/31、Python/EXE parity、14 个 C++ runner、Windows/Ubuntu/OTA 全量离线回归、真实 ISCC、独立 P1/P2 终审、Release x64 clean Rebuild 与 AppPaths 动态检查全部通过。署名 yu1201。
+
 - 版本 v2026.07.13.0610：完成运动恢复、点云授权、异步生命周期与发版可信链的第二轮系统加固。① 中性 GUI、品牌 GUI 与控制型 CLI 共用机器级单实例互斥，第二进程不能绕过进程内机器人操作租约；持久恢复记录纳入端点别名/索引、工程/程序内容身份和完整快照 CAS，暂停或中断重启在首条运动前必须完成可验证 STOP/Kill/灭弧，STEP SRP/SRD 上传后下载回读 SHA-256/大小，并在 START 后复核窗口保持 STOP 可在 500ms 内完成。② 点云 schema3 质量证明增加 HMAC/DPAPI、授权上下文、执行期租约和可持久回读的 denied tombstone；即使授权文件因独占或 ACL 无法删除，旧授权也不能再次被 Verify 接受。焊接输入、轨迹和恢复数据增加有限值、大小、行数、身份与终态门禁，失败后保持安全闭锁和可恢复收枪。③ 模型对齐、点云读取、BCPD、远端 ZIP/worker、扫描归档和上传统一使用受控取消、进程退出等待、对象所有权与原子提升语义；PLY/点云/轨迹/管理响应加入硬上限。④ 发版链固定可信 Git/GitHub、MSBuild、Qt、Inno Setup、Python/PyInstaller 工具闭包及关键 PE 发布者/哈希，使用净化子进程环境、严格凭据 ACL、SSH 主机指纹和有界 SFTP；GitHub 分支经认证 API 校验后才允许 OTA/GitHub 外发，OTA 升级为签名 v3 清单。⑤ 共享 `uploader` 账号按新策略退出默认入口，设备上传改用独立身份。完整 C++/PowerShell/Python/Windows/Ubuntu 离线矩阵、独立 P1/P2 审查、无并发 Release x64 clean Rebuild 与 AppPaths 动态检查通过。署名 yu1201。
 
 ## 2026-07-12

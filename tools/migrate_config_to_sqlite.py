@@ -12,6 +12,7 @@ import base64
 import binascii
 import ctypes
 from ctypes import wintypes
+from contextlib import closing
 import datetime as _dt
 import hashlib
 import hmac
@@ -37,6 +38,69 @@ DPAPI_ENTROPY_PREFIX = (
     "NoTeaching-Robot|A5A7E2A0-8226-40BB-B126-94C5D298B3CF|credentials-v1|"
 )
 TEXT_FILE_NAMES = {"WeaveDate.txt", "WeldPara.txt"}
+INSTALLER_STAGING_NAME_RE = re.compile(
+    r"\.ConfigStore\.db\.install-(create|upgrade)-([0-9a-f]{32})\.tmp"
+)
+RUNTIME_ONLY_INI_NAMES = {
+    # This is an SDK runtime input, not a source of ConfigStore settings.  It
+    # legitimately lives beside Data in deployed installations and must not
+    # force an otherwise self-contained schema upgrade into --overwrite.
+    "corrugatedsheetpointcloudectration.ini",
+}
+RUNTIME_POINT_CLOUD_KEYS = {
+    b"ifupright",
+    b"Plate_thickness",
+    b"Remove_Floor_ZValue",
+    b"Thread_Number",
+    b"Move_distance",
+    b"DEBUGLOG",
+    b"LOGPATH",
+    b"Plane_Threshold",
+    b"Merge_Lines_Angle_Threshold",
+    b"Lines_Dis_Threshold",
+    b"Merge_Lines_Dis_Threshold",
+    b"ClusterTolerance",
+    b"if_Cluster",
+    b"Discrete_Value",
+    b"Dilate_Value",
+    b"Erode_Value",
+    b"Line_Length",
+    b"X_AXIS",
+    b"Y_AXIS",
+    b"Z_AXIS",
+    b"Save_File_Name",
+    b"Step",
+    b"is_remove_noise",
+    b"is_sample",
+    b"sample_size",
+    b"above_z",
+}
+
+# MoveFileExW flags used for durable same-volume replacement on Windows.  The
+# write-through flag is part of the credential-scrub durability contract: a
+# successful return must not merely mean that the rename is still cached.
+MOVEFILE_REPLACE_EXISTING = 0x00000001
+MOVEFILE_WRITE_THROUGH = 0x00000008
+LEGACY_ACCOUNT_MODULE = "Accounts/Users"
+LEGACY_ACCOUNT_MODULE_PREFIX = LEGACY_ACCOUNT_MODULE + "/"
+LEGACY_ACCOUNT_PROFILE_FIELDS = {
+    "PasswordHash",
+    "Role",
+    "CreatedAt",
+    "UpdatedAt",
+    "MustChangePassword",
+}
+LEGACY_ACCOUNT_TIME_FIELDS = {"CreatedAt", "UpdatedAt"}
+ACCOUNT_PROFILE_TIME_FIELDS = LEGACY_ACCOUNT_TIME_FIELDS | {"PasswordChangedAt"}
+ACCOUNT_PROFILE_PORTABLE_FIELDS = {
+    "PasswordHash",
+    "Role",
+    "MustChangePassword",
+} | ACCOUNT_PROFILE_TIME_FIELDS
+# Retain the existing name for the canonical-field/case checks.  Every
+# authentication Profile field is also a portable field; none may be tied to
+# the Windows account that happened to run a migration or verification.
+ACCOUNT_PROFILE_SECURITY_FIELDS = ACCOUNT_PROFILE_PORTABLE_FIELDS
 SETTINGS_REQUIRED_COLUMNS = {
     "scope_type",
     "scope_id",
@@ -453,6 +517,33 @@ def _legacy_ini_credential_action(path: Path, section: str, key: str) -> str:
     return "keep"
 
 
+def _replace_file_write_through(source: Path, destination: Path) -> None:
+    if os.name != "nt":
+        os.replace(source, destination)
+        return
+
+    move_file_ex = ctypes.WinDLL(
+        "kernel32", use_last_error=True
+    ).MoveFileExW
+    move_file_ex.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+    )
+    move_file_ex.restype = wintypes.BOOL
+    flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+    source_text = os.path.abspath(os.fspath(source))
+    destination_text = os.path.abspath(os.fspath(destination))
+    if not move_file_ex(source_text, destination_text, flags):
+        error = ctypes.get_last_error()
+        raise OSError(
+            error,
+            f"MoveFileExW write-through replacement failed: "
+            f"{ctypes.FormatError(error)}",
+            destination_text,
+        )
+
+
 def _atomic_replace_bytes(path: Path, content: bytes) -> None:
     file_descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.credential-scrub-",
@@ -467,13 +558,35 @@ def _atomic_replace_bytes(path: Path, content: bytes) -> None:
             os.fsync(stream.fileno())
         if path.exists():
             shutil.copystat(path, temporary_path)
-        os.replace(temporary_path, path)
+        _replace_file_write_through(temporary_path, path)
     except Exception:
         try:
             os.close(file_descriptor)
         except OSError:
             pass
         temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _atomic_create_bytes(path: Path, content: bytes) -> None:
+    """Create a file exclusively and never replace a pre-existing path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    file_descriptor = os.open(path, flags, 0o600)
+    created = True
+    try:
+        with os.fdopen(file_descriptor, "wb") as stream:
+            file_descriptor = -1
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        if created:
+            path.unlink(missing_ok=True)
         raise
 
 
@@ -587,6 +700,7 @@ def apply_legacy_ini_credential_scrub(
     manifest: list[dict[str, object]],
 ) -> tuple[int, int]:
     root = data_dir.resolve()
+    plans: list[tuple[Path, bytes, bytes, int]] = []
     modified_files = 0
     removed_values = 0
     for item in manifest:
@@ -608,9 +722,40 @@ def apply_legacy_ini_credential_scrub(
         sanitized, removed = _sanitized_legacy_ini_bytes(path, forced_encoding)
         if not hmac.compare_digest(hashlib.sha256(sanitized).hexdigest(), after_hash):
             raise ValueError(f"Legacy credential scrub output changed unexpectedly: {path}")
-        _atomic_replace_bytes(path, sanitized)
-        modified_files += 1
-        removed_values += removed
+        plans.append((path, current, sanitized, removed))
+
+    # Validate every source and every expected output before changing the first
+    # file.  Cross-file replacement is not an OS transaction, so retain each
+    # original and roll back already-written files if an unexpected I/O error
+    # occurs during the commit pass.
+    committed: list[tuple[Path, bytes]] = []
+    try:
+        for path, original, sanitized, removed in plans:
+            _atomic_replace_bytes(path, sanitized)
+            committed.append((path, original))
+            modified_files += 1
+            removed_values += removed
+        for path, _original, sanitized, _removed in plans:
+            if not hmac.compare_digest(
+                hashlib.sha256(path.read_bytes()).digest(),
+                hashlib.sha256(sanitized).digest(),
+            ):
+                raise ValueError(
+                    f"Legacy credential scrub did not persist expected bytes: {path}"
+                )
+    except Exception as exc:
+        rollback_failures: list[str] = []
+        for path, original in reversed(committed):
+            try:
+                _atomic_replace_bytes(path, original)
+            except Exception as rollback_exc:
+                rollback_failures.append(f"{path}: {rollback_exc}")
+        if rollback_failures:
+            raise RuntimeError(
+                "Legacy credential scrub failed and rollback was incomplete: "
+                + "; ".join(rollback_failures)
+            ) from exc
+        raise
     return modified_files, removed_values
 
 
@@ -734,8 +879,17 @@ def is_portable_authentication_value(scope_type: str, module: str, key: str) -> 
     return (
         normalize_section(scope_type).lower() == "account"
         and normalize_section(module).lower() == "profile"
-        and normalize_source_key(key).lower()
-        in {"passwordhash", "role", "mustchangepassword", "passwordchangedat"}
+        and normalize_source_key(key).casefold()
+        in {field.casefold() for field in ACCOUNT_PROFILE_PORTABLE_FIELDS}
+    )
+
+
+def is_login_preference(scope_type: str, module: str, key: str) -> bool:
+    return (
+        normalize_section(scope_type).casefold() == "global"
+        and normalize_section(module).casefold() == "loginstate"
+        and normalize_source_key(key).casefold()
+        in {"rememberpassword", "autologin"}
     )
 
 
@@ -750,6 +904,50 @@ def requires_dpapi_protection(
     if is_portable_authentication_value(scope_type, module, key):
         return False
     return True
+
+
+def is_compatible_disabled_login_preference(
+    scope_type: str,
+    scope_id: str,
+    module: str,
+    key: str,
+    stored: str,
+    value_type: str,
+    sensitive: object,
+    encrypted: object,
+) -> bool:
+    # Released schema-v5/auth-v2 builds wrote a few exact boolean preference
+    # shapes as plaintext; these values are not credentials.  Keep the
+    # exception read-only and shape-exact.  Current writers still use the
+    # recoverable-secret DPAPI policy, and all near-miss shapes fail closed.
+    if (
+        scope_type != "global"
+        or scope_id != ""
+        or module != "LoginState"
+        or key not in {"RememberPassword", "AutoLogin"}
+        or encrypted not in (0, "0", False)
+    ):
+        return False
+    marker_is_sensitive = sensitive in (1, "1", True)
+    marker_is_nonsensitive = sensitive in (0, "0", False)
+    python_cleared_shape = (
+        stored == "0"
+        and value_type == "bool"
+        and marker_is_sensitive
+    )
+    if python_cleared_shape:
+        return True
+    if key == "RememberPassword":
+        return (
+            stored == "0"
+            and value_type == "string"
+            and marker_is_sensitive
+        )
+    return (
+        stored in {"0", "1"}
+        and value_type == "string"
+        and marker_is_nonsensitive
+    )
 
 
 def module_base_from_stored_file_name(stored_file_name: str) -> str:
@@ -897,7 +1095,12 @@ def protection_purpose(scope_type: str, scope_id: str, module: str, key: str) ->
 
 def _blob_from_bytes(data: bytes) -> tuple[_DataBlob, ctypes.Array]:
     buffer = ctypes.create_string_buffer(data, max(1, len(data)))
-    pointer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte)) if data else None
+    # CryptProtectData accepts cbData == 0, but Windows still requires pbData
+    # to address valid storage.  A null pointer makes protection of an empty
+    # sensitive value fail with ERROR_INVALID_PARAMETER on affected systems.
+    # Keep the one-byte buffer alive and pass it as a non-null sentinel while
+    # retaining the truthful zero byte count.
+    pointer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ubyte))
     return _DataBlob(len(data), pointer), buffer
 
 
@@ -991,7 +1194,7 @@ def _read_dpapi_database_backup(path: Path) -> bytes:
 
 
 def create_dpapi_database_backup(db_path: Path, backup_path: Path) -> Path:
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_created = False
     try:
         source = sqlite3.connect(db_path)
         destination = sqlite3.connect(":memory:")
@@ -1006,13 +1209,18 @@ def create_dpapi_database_backup(db_path: Path, backup_path: Path) -> Path:
         digest = hashlib.sha256(database_bytes).hexdigest().encode("ascii")
         protected = _dpapi_crypt(database_bytes, DPAPI_BACKUP_PURPOSE, True)
         encoded = base64.urlsafe_b64encode(protected)
-        _atomic_replace_bytes(backup_path, DPAPI_BACKUP_MAGIC + digest + b"\n" + encoded + b"\n")
+        _atomic_create_bytes(
+            backup_path,
+            DPAPI_BACKUP_MAGIC + digest + b"\n" + encoded + b"\n",
+        )
+        backup_created = True
         verified = _read_dpapi_database_backup(backup_path)
         if not hmac.compare_digest(hashlib.sha256(verified).digest(), hashlib.sha256(database_bytes).digest()):
             raise ValueError("DPAPI backup verification failed")
         return backup_path
     except Exception:
-        backup_path.unlink(missing_ok=True)
+        if backup_created:
+            backup_path.unlink(missing_ok=True)
         raise
 
 
@@ -1138,7 +1346,10 @@ def init_schema(conn: sqlite3.Connection, encrypt: bool) -> None:
 
 def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type='table' AND lower(name)=lower(?) LIMIT 1
+        """,
         (table_name,),
     ).fetchone()
     return row is not None
@@ -1357,7 +1568,11 @@ def insert_scoped_setting(
     normalized_module = normalize_section(module)
     if not scope_type.strip() or not normalized_module or not normalized_key:
         return False
-    sensitive = is_sensitive_setting_key(normalized_module) or is_sensitive_setting_key(normalized_key)
+    sensitive = (
+        is_sensitive_setting_key(normalized_module)
+        or is_sensitive_setting_key(normalized_key)
+        or is_login_preference(scope_type, normalized_module, normalized_key)
+    )
     purpose = protection_purpose(
         normalize_section(scope_type).lower(), scope_id.strip(),
         normalized_module, normalized_key
@@ -1482,42 +1697,135 @@ def _parse_authentication_bool(value: str) -> bool | None:
     return None
 
 
-def _normalize_existing_account_profiles(
-    conn: sqlite3.Connection,
-    encrypt: bool,
-) -> tuple[int, int]:
-    account_rows = conn.execute(
+def _require_portable_account_profile_storage(
+    stored: str,
+    encrypted: object,
+    field: str,
+    context: str,
+) -> None:
+    if field not in ACCOUNT_PROFILE_PORTABLE_FIELDS:
+        raise ValueError("Unsupported portable account/Profile field")
+    if (
+        encrypted not in (0, "0", False)
+        or stored.startswith(DPAPI_PREFIX)
+        or stored.startswith("enc:v1:")
+    ):
+        raise ValueError(
+            f"{context} account/Profile {field} must use portable plaintext storage"
+        )
+
+
+def _account_iso_instant(value: str, field: str) -> _dt.datetime:
+    if field not in ACCOUNT_PROFILE_TIME_FIELDS:
+        raise ValueError("Unsupported account timestamp field")
+    if (
+        value != value.strip()
+        or len(value) > 64
+        or re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+            r"(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?",
+            value,
+        ) is None
+    ):
+        raise ValueError(f"Legacy account {field} is not a strict ISO timestamp")
+    try:
+        parsed = _dt.datetime.fromisoformat(
+            value[:-1] + "+00:00" if value.endswith("Z") else value
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"Legacy account {field} is not a valid ISO timestamp"
+        ) from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=_dt.timezone.utc)
+    offset = parsed.utcoffset()
+    if offset is None:
+        raise ValueError(f"Legacy account {field} has an invalid timezone")
+    return parsed.astimezone(_dt.timezone.utc)
+
+
+def _merge_account_timestamps(field: str, values: list[str]) -> str | None:
+    if not values:
+        return None
+    parsed = [(_account_iso_instant(value, field), value) for value in values]
+    if field == "CreatedAt":
+        return min(parsed, key=lambda item: (item[0], item[1]))[1]
+    if field == "UpdatedAt":
+        return max(parsed, key=lambda item: (item[0], item[1]))[1]
+    raise ValueError("Unsupported account timestamp merge field")
+
+
+def _account_profile_ids(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
         """
-        SELECT DISTINCT scope_id FROM settings
-        WHERE scope_type='account' AND module='Profile'
+        SELECT DISTINCT scope_type, scope_id, module FROM settings
+        WHERE lower(trim(scope_type))='account'
+          AND lower(trim(module))='profile'
         ORDER BY scope_id COLLATE NOCASE
         """
     ).fetchall()
     account_ids: list[str] = []
     folded_account_ids: dict[str, str] = {}
-    for (raw_account_id,) in account_rows:
+    seen_account_ids: set[str] = set()
+    for raw_scope_type, raw_account_id, raw_module in rows:
+        scope_type = str(raw_scope_type)
         account_id = str(raw_account_id)
+        module = str(raw_module)
+        if scope_type != "account" or module != "Profile":
+            raise ValueError(
+                "Account profile scope_type/module has non-canonical spelling"
+            )
         if account_id != account_id.strip() or not _is_safe_account_name(account_id):
             raise ValueError("Unsafe existing account/Profile id")
         folded = account_id.casefold()
         if folded in folded_account_ids and folded_account_ids[folded] != account_id:
             raise ValueError("Case-colliding account/Profile ids cannot be merged safely")
         folded_account_ids[folded] = account_id
-        account_ids.append(account_id)
+        if account_id not in seen_account_ids:
+            account_ids.append(account_id)
+            seen_account_ids.add(account_id)
+    return account_ids
+
+
+def _normalize_existing_account_profiles(
+    conn: sqlite3.Connection,
+    encrypt: bool,
+) -> tuple[int, int]:
+    account_ids = _account_profile_ids(conn)
 
     administrator_count = 0
     for account_id in account_ids:
-        stored_values = {
-            str(key): (str(stored), encrypted)
-            for key, stored, encrypted in conn.execute(
-                """
-                SELECT key_name, value_text, encrypted FROM settings
-                WHERE scope_type='account' AND scope_id=? AND module='Profile'
-                  AND key_name IN ('PasswordHash', 'Role', 'MustChangePassword')
-                """,
-                (account_id,),
-            ).fetchall()
-        }
+        stored_values: dict[str, tuple[str, object]] = {}
+        for key, stored, encrypted in conn.execute(
+            """
+            SELECT key_name, value_text, encrypted FROM settings
+            WHERE scope_type='account' AND scope_id=? AND module='Profile'
+            """,
+            (account_id,),
+        ).fetchall():
+            key_text = str(key)
+            canonical_key = next(
+                (
+                    candidate
+                    for candidate in ACCOUNT_PROFILE_SECURITY_FIELDS
+                    if candidate.casefold() == key_text.casefold()
+                ),
+                None,
+            )
+            if canonical_key is None:
+                continue
+            if key_text != canonical_key:
+                raise ValueError(
+                    "Existing account/Profile has a case-variant authentication field"
+                )
+            _require_portable_account_profile_storage(
+                str(stored), encrypted, key_text, "Existing"
+            )
+            if key_text in {
+                "PasswordHash", "Role", "MustChangePassword",
+                "CreatedAt", "UpdatedAt", "PasswordChangedAt",
+            }:
+                stored_values[key_text] = (str(stored), encrypted)
         if "PasswordHash" not in stored_values or "Role" not in stored_values:
             raise ValueError("Existing account/Profile has no complete password/role record")
 
@@ -1565,6 +1873,23 @@ def _normalize_existing_account_profiles(
         if _is_known_bootstrap_password_record(account_id, password_record):
             must_change_password = True
 
+        for time_field in ("CreatedAt", "UpdatedAt", "PasswordChangedAt"):
+            if time_field not in stored_values:
+                continue
+            stored, encrypted = stored_values[time_field]
+            decoded = decode_stored_text(
+                stored,
+                encrypted,
+                protection_purpose(
+                    "account", account_id, "Profile", time_field
+                ),
+            )
+            if decoded is None:
+                raise ValueError(
+                    f"Cannot decode existing account/Profile {time_field}"
+                )
+            _account_iso_instant(decoded, time_field)
+
         for key, value, value_type in (
             ("PasswordHash", password_record, "string"),
             ("Role", role, "string"),
@@ -1588,24 +1913,89 @@ def _normalize_existing_account_profiles(
     return len(account_ids), administrator_count
 
 
+def _validate_legacy_authentication_module_spelling(
+    conn: sqlite3.Connection,
+) -> None:
+    account_base = LEGACY_ACCOUNT_MODULE
+    login_general = "LoginState/General"
+    saved_passwords = "LoginState/SavedPasswords"
+    remembered_credentials = "LoginState/RememberedCredentials"
+    rows = conn.execute(
+        """
+        SELECT DISTINCT module FROM settings
+        WHERE scope_type='global' AND scope_id='' AND (
+            lower(module)=lower(?) OR lower(module) LIKE lower(?) OR
+            lower(module)=lower(?) OR lower(module) LIKE lower(?) OR
+            lower(module) LIKE lower(?)
+        )
+        """,
+        (
+            account_base,
+            LEGACY_ACCOUNT_MODULE_PREFIX + "%",
+            login_general,
+            saved_passwords + "%",
+            remembered_credentials + "%",
+        ),
+    ).fetchall()
+    for (raw_module,) in rows:
+        module = str(raw_module)
+        folded = module.casefold()
+        canonical = False
+        if folded == account_base.casefold():
+            canonical = module == account_base
+        elif folded.startswith(LEGACY_ACCOUNT_MODULE_PREFIX.casefold()):
+            canonical = module.startswith(LEGACY_ACCOUNT_MODULE_PREFIX)
+        elif folded == login_general.casefold():
+            canonical = module == login_general
+        elif folded.startswith(saved_passwords.casefold()):
+            canonical = module.startswith(saved_passwords)
+        elif folded.startswith(remembered_credentials.casefold()):
+            canonical = module.startswith(remembered_credentials)
+        if not canonical:
+            raise ValueError(
+                "Legacy authentication module has non-canonical casing"
+            )
+
+
 def migrate_authentication_semantics(
     conn: sqlite3.Connection,
     encrypt: bool,
 ) -> tuple[int, int]:
+    _validate_legacy_authentication_module_spelling(conn)
     legacy_accounts: dict[str, dict[str, object]] = {}
     rows = conn.execute(
         """
         SELECT module, key_name, value_text, encrypted FROM settings
-        WHERE scope_type='global' AND scope_id='' AND module LIKE 'Accounts/Users/%'
+        WHERE scope_type='global' AND scope_id='' AND (
+            lower(module)=lower(?) OR lower(module) LIKE lower(?)
+        )
         """
+        , (LEGACY_ACCOUNT_MODULE, LEGACY_ACCOUNT_MODULE_PREFIX + "%")
     ).fetchall()
     for module, key, stored, encrypted in rows:
         module_text = str(module)
-        user_name = module_text[len("Accounts/Users/"):].strip()
-        if not _is_safe_account_name(user_name):
+        key_text = str(key)
+        if module_text == LEGACY_ACCOUNT_MODULE:
+            key_parts = key_text.split("/")
+            if len(key_parts) != 2:
+                raise ValueError("Malformed flat legacy account key")
+            user_name, profile_key = key_parts
+        elif module_text.startswith(LEGACY_ACCOUNT_MODULE_PREFIX):
+            user_name = module_text[len(LEGACY_ACCOUNT_MODULE_PREFIX):]
+            profile_key = key_text
+        else:
+            raise ValueError("Unexpected legacy account module")
+        if (
+            user_name != user_name.strip()
+            or profile_key != profile_key.strip()
+            or not _is_safe_account_name(user_name)
+        ):
             raise ValueError("Unsafe legacy account name")
+        if profile_key not in LEGACY_ACCOUNT_PROFILE_FIELDS:
+            raise ValueError("Unsupported legacy account profile field")
         decoded = decode_stored_text(
-            str(stored), encrypted, protection_purpose("global", "", module_text, str(key))
+            str(stored), encrypted,
+            protection_purpose("global", "", module_text, key_text),
         )
         if decoded is None:
             raise ValueError("Cannot decode a legacy account record")
@@ -1615,7 +2005,22 @@ def migrate_authentication_semantics(
         bucket = legacy_accounts.setdefault(folded_user_name, {"user": user_name, "values": {}})
         values = bucket["values"]
         assert isinstance(values, dict)
-        values[str(key)] = decoded
+        if profile_key in LEGACY_ACCOUNT_TIME_FIELDS:
+            candidates = [decoded]
+            if profile_key in values:
+                candidates.append(str(values[profile_key]))
+            merged_timestamp = _merge_account_timestamps(profile_key, candidates)
+            assert merged_timestamp is not None
+            values[profile_key] = merged_timestamp
+        else:
+            if profile_key in values and values[profile_key] != decoded:
+                raise ValueError("Conflicting duplicate legacy account profile field")
+            values[profile_key] = decoded
+
+    existing_account_ids = {
+        account_id.casefold(): account_id
+        for account_id in _account_profile_ids(conn)
+    }
 
     for bucket in legacy_accounts.values():
         user_name = str(bucket["user"])
@@ -1623,52 +2028,161 @@ def migrate_authentication_semantics(
         assert isinstance(values, dict)
         source_hash = str(values.get("PasswordHash", ""))
         source_role = str(values.get("Role", ""))
-        if not source_hash or source_role not in {"operator", "engineer", "admin"}:
-            raise ValueError("Legacy account has no complete password/role record")
-        destination_hash = _decoded_scoped_value(conn, "account", user_name, "Profile", "PasswordHash")
-        replace_destination = destination_hash is None
         if (
-            destination_hash is not None
-            and _is_known_bootstrap_password_record(user_name, destination_hash)
+            not _is_supported_password_record(source_hash)
+            or source_role not in {"operator", "engineer", "admin"}
         ):
-            replace_destination = True
+            raise ValueError("Legacy account has no complete password/role record")
+        source_must_change_explicit = "MustChangePassword" in values
+        source_must_change = _is_known_bootstrap_password_record(user_name, source_hash)
+        if source_must_change_explicit:
+            parsed = _parse_authentication_bool(str(values["MustChangePassword"]))
+            if parsed is None:
+                raise ValueError("Legacy account has an invalid MustChangePassword")
+            source_must_change = parsed or source_must_change
+
+        folded_user_name = user_name.casefold()
+        existing_account_id = existing_account_ids.get(folded_user_name)
+        if existing_account_id is not None and existing_account_id != user_name:
+            raise ValueError("Legacy account conflicts with a differently-cased target account")
+
+        destination_values: dict[str, str] = {}
+        destination_rows = conn.execute(
+            """
+            SELECT key_name, value_text, encrypted FROM settings
+            WHERE scope_type='account' AND scope_id=? AND module='Profile'
+            """,
+            (user_name,),
+        ).fetchall()
+        for destination_key, destination_stored, destination_encrypted in destination_rows:
+            destination_key_text = str(destination_key)
+            canonical_destination_key = next(
+                (
+                    candidate
+                    for candidate in ACCOUNT_PROFILE_SECURITY_FIELDS
+                    if candidate.casefold() == destination_key_text.casefold()
+                ),
+                None,
+            )
+            if canonical_destination_key is None:
+                continue
+            if destination_key_text != canonical_destination_key:
+                raise ValueError(
+                    "Target account/Profile has a case-variant authentication field"
+                )
+            _require_portable_account_profile_storage(
+                str(destination_stored), destination_encrypted,
+                destination_key_text, "Target",
+            )
+            decoded_destination = decode_stored_text(
+                str(destination_stored),
+                destination_encrypted,
+                protection_purpose(
+                    "account", user_name, "Profile", destination_key_text
+                ),
+            )
+            if decoded_destination is None:
+                raise ValueError("Cannot decode a target account/Profile field")
+            destination_values[destination_key_text] = decoded_destination
+
+        destination_exists = bool(destination_rows)
+        destination_hash = destination_values.get("PasswordHash")
+        destination_role = destination_values.get("Role")
+        merged_time_values: dict[str, str] = {}
+        for time_field in ("CreatedAt", "UpdatedAt"):
+            time_candidates: list[str] = []
+            if time_field in values:
+                time_candidates.append(str(values[time_field]))
+            if time_field in destination_values:
+                time_candidates.append(destination_values[time_field])
+            merged_timestamp = _merge_account_timestamps(
+                time_field, time_candidates
+            )
+            if merged_timestamp is not None:
+                merged_time_values[time_field] = merged_timestamp
+        replace_destination = not destination_exists
+        if destination_exists:
+            if destination_hash is None or destination_role is None:
+                raise ValueError("Legacy account conflicts with an incomplete target profile")
+            if (
+                not _is_supported_password_record(destination_hash)
+                or destination_role not in {"operator", "engineer", "admin"}
+            ):
+                raise ValueError("Legacy account conflicts with an invalid target profile")
+            if (
+                destination_role == "admin"
+                and _is_known_bootstrap_password_record(user_name, destination_hash)
+            ):
+                replace_destination = True
+            elif destination_hash != source_hash or destination_role != source_role:
+                raise ValueError("Legacy account conflicts with an existing target profile")
+            else:
+                if "MustChangePassword" in destination_values:
+                    parsed_destination = _parse_authentication_bool(
+                        destination_values["MustChangePassword"]
+                    )
+                    if parsed_destination is None:
+                        raise ValueError(
+                            "Legacy account conflicts with an invalid target MustChangePassword"
+                        )
+                    if (
+                        source_must_change_explicit
+                        and parsed_destination != source_must_change
+                    ):
+                        raise ValueError(
+                            "Legacy account conflicts with target MustChangePassword"
+                        )
         if replace_destination:
             conn.execute(
                 "DELETE FROM settings WHERE scope_type='account' AND scope_id=? AND module='Profile'",
                 (user_name,),
             )
-            for key in ("PasswordHash", "Role", "CreatedAt", "UpdatedAt"):
-                if key not in values:
-                    continue
+            for key in ("PasswordHash", "Role"):
                 insert_scoped_setting(
                     conn, "account", user_name, "Profile", key, str(values[key]),
-                    encrypt, "datetime" if key.endswith("At") else "string", overwrite=True,
+                    encrypt, "string", overwrite=True,
                 )
-            destination_hash = source_hash
-            is_bootstrap = (
-                destination_hash is not None
-                and _is_known_bootstrap_password_record(user_name, destination_hash)
-            )
+            for key, timestamp in merged_time_values.items():
+                insert_scoped_setting(
+                    conn, "account", user_name, "Profile", key, timestamp,
+                    encrypt, "datetime", overwrite=True,
+                )
             insert_scoped_setting(
                 conn, "account", user_name, "Profile", "MustChangePassword",
-                "1" if is_bootstrap else "0", encrypt, "bool", overwrite=True,
+                "1" if source_must_change else "0", encrypt, "bool", overwrite=True,
             )
-        elif _decoded_scoped_value(
-            conn, "account", user_name, "Profile", "MustChangePassword"
-        ) is None:
-            insert_scoped_setting(
-                conn, "account", user_name, "Profile", "MustChangePassword",
-                "1", encrypt, "bool", overwrite=True,
-            )
+        else:
+            for key, timestamp in merged_time_values.items():
+                if destination_values.get(key) != timestamp:
+                    insert_scoped_setting(
+                        conn, "account", user_name, "Profile", key,
+                        timestamp, encrypt, "datetime", overwrite=True,
+                    )
+            if "MustChangePassword" not in destination_values:
+                missing_destination_must_change = (
+                    source_must_change
+                    if source_must_change_explicit
+                    else True
+                )
+                insert_scoped_setting(
+                    conn, "account", user_name, "Profile", "MustChangePassword",
+                    "1" if missing_destination_must_change else "0",
+                    encrypt, "bool", overwrite=True,
+                )
+
+        existing_account_ids[folded_user_name] = user_name
 
     account_counts = _normalize_existing_account_profiles(conn, encrypt)
 
-    for key, stored, encrypted in conn.execute(
+    for login_module, key, stored, encrypted in conn.execute(
         """
-        SELECT key_name, value_text, encrypted FROM settings
-        WHERE scope_type='global' AND scope_id='' AND module='LoginState/General'
+        SELECT module, key_name, value_text, encrypted FROM settings
+        WHERE scope_type='global' AND scope_id=''
+          AND lower(module)=lower('LoginState/General')
         """
     ).fetchall():
+        if str(login_module) != "LoginState/General":
+            raise ValueError("Legacy login-state module has non-canonical casing")
         key_text = str(key)
         if key_text not in {"UserName", "AccountHistory"}:
             continue
@@ -1686,12 +2200,14 @@ def migrate_authentication_semantics(
     conn.execute(
         """
         DELETE FROM settings WHERE scope_type='global' AND scope_id='' AND (
-            module LIKE 'Accounts/Users/%' OR module='LoginState/General' OR
-            module LIKE 'LoginState/SavedPasswords%' OR
-            module LIKE 'LoginState/RememberedCredentials%' OR
+            lower(module)=lower(?) OR lower(module) LIKE lower(?) OR
+            lower(module)=lower('LoginState/General') OR
+            lower(module) LIKE lower('LoginState/SavedPasswords%') OR
+            lower(module) LIKE lower('LoginState/RememberedCredentials%') OR
             lower(key_name)='passwordbase64'
         )
-        """
+        """,
+        (LEGACY_ACCOUNT_MODULE, LEGACY_ACCOUNT_MODULE_PREFIX + "%"),
     )
     insert_scoped_setting(conn, "global", "", "LoginState", "RememberPassword", "0", encrypt, "bool", True)
     insert_scoped_setting(conn, "global", "", "LoginState", "AutoLogin", "0", encrypt, "bool", True)
@@ -1703,7 +2219,12 @@ def migrate_authentication_semantics(
         FROM settings
         """
     ).fetchall():
-        semantic_sensitive = bool(sensitive) or is_sensitive_setting_key(str(module)) or is_sensitive_setting_key(str(key))
+        semantic_sensitive = (
+            bool(sensitive)
+            or is_sensitive_setting_key(str(module))
+            or is_sensitive_setting_key(str(key))
+            or is_login_preference(str(scope_type), str(module), str(key))
+        )
         recoverable_secret = requires_dpapi_protection(
             str(scope_type), str(module), str(key), semantic_sensitive
         )
@@ -2064,6 +2585,7 @@ def _finish_legacy_credential_scrub(
         raise ValueError(
             "Current v5 database has no pending legacy-migration scrub provenance; refusing to delete source credentials"
         )
+    enforce_no_plaintext_configstore_residue(data_dir, forced_encoding)
     modified_files, removed_values = apply_legacy_ini_credential_scrub(
         data_dir, forced_encoding, manifest
     )
@@ -2080,17 +2602,720 @@ def _finish_legacy_credential_scrub(
     )
 
 
+def _is_runtime_only_ini(path: Path, data_dir: Path) -> bool:
+    if path.name.casefold() not in RUNTIME_ONLY_INI_NAMES:
+        return False
+    try:
+        link_status = path.lstat()
+    except OSError:
+        return False
+    if path.is_symlink() or (
+        getattr(link_status, "st_file_attributes", 0) & 0x400
+    ):
+        return False
+    if path.resolve().parent.as_posix().casefold() != data_dir.resolve().as_posix().casefold():
+        return False
+    try:
+        size = path.stat().st_size
+        if size <= 0 or size > 128 * 1024:
+            return False
+        content = path.read_bytes()
+    except OSError:
+        return False
+    if b"\0" in content:
+        return False
+
+    observed_keys: set[bytes] = set()
+    has_runtime_setting = False
+    for line in content.split(b"\n"):
+        line = line.strip()
+        if line.startswith(b"\xef\xbb\xbf"):
+            line = line[3:].strip()
+        if not line or line.startswith((b"//", b"#", b";")):
+            continue
+        if line.startswith(b"["):
+            return False
+        equals = line.find(b"=")
+        if equals <= 0:
+            return False
+        key = line[:equals].strip()
+        folded_key = key.lower()
+        if key not in RUNTIME_POINT_CLOUD_KEYS or folded_key in observed_keys:
+            return False
+        observed_keys.add(folded_key)
+        has_runtime_setting = True
+    return has_runtime_setting
+
+
+def _validated_upgrade_backup_path(
+    db_path: Path,
+    backup_path: Path,
+    require_absent: bool = True,
+) -> Path:
+    if not backup_path.is_absolute():
+        raise ValueError("--upgrade-backup must be an absolute path")
+    resolved_db = db_path.resolve()
+    resolved_backup = backup_path.resolve()
+    if resolved_backup.parent != resolved_db.parent:
+        raise ValueError("--upgrade-backup must be beside the target database")
+    backup_name = resolved_backup.name.casefold()
+    if (
+        not backup_name.startswith(resolved_db.name.casefold() + ".")
+        or not backup_name.endswith(".dpapi.bak")
+    ):
+        raise ValueError(
+            "--upgrade-backup must be named after the target database and end in .dpapi.bak"
+        )
+    if resolved_backup == resolved_db:
+        raise ValueError("--upgrade-backup cannot be the target database")
+    if require_absent and resolved_backup.exists():
+        raise FileExistsError(f"Upgrade backup already exists: {resolved_backup}")
+    return resolved_backup
+
+
+def _path_is_reparse_point(path: Path) -> bool:
+    try:
+        status = path.lstat()
+    except OSError:
+        return False
+    return path.is_symlink() or bool(
+        getattr(status, "st_file_attributes", 0) & 0x400
+    )
+
+
+def _absolute_lexical_path(path: Path) -> Path:
+    # Path.resolve() follows reparse points.  Installer-path policy must inspect
+    # the caller-provided directory/file identity before resolving it.
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _same_lexical_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.fspath(left)) == os.path.normcase(os.fspath(right))
+
+
+def _file_sha256_digest(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.digest()
+
+
+def _installer_staging_sidecars(db_path: Path) -> tuple[Path, Path, Path]:
+    return tuple(Path(os.fspath(db_path) + suffix) for suffix in ("-journal", "-wal", "-shm"))
+
+
+def _reject_installer_staging_sidecars(db_path: Path) -> None:
+    for sidecar in _installer_staging_sidecars(db_path):
+        if os.path.lexists(sidecar):
+            raise ValueError(
+                f"Installer staging database has an unsafe SQLite sidecar: {sidecar.name}"
+            )
+
+
+def _validate_installer_staging_target(
+    data_dir: Path,
+    db_path: Path,
+) -> tuple[Path, Path, str]:
+    lexical_data = _absolute_lexical_path(data_dir)
+    lexical_db = _absolute_lexical_path(db_path)
+    if not lexical_data.is_dir() or _path_is_reparse_point(lexical_data):
+        raise ValueError("--installer-staging requires a non-reparse Data directory")
+    if not _same_lexical_path(lexical_db.parent, lexical_data):
+        raise ValueError("--installer-staging target must be directly inside Data")
+
+    match = INSTALLER_STAGING_NAME_RE.fullmatch(lexical_db.name)
+    if match is None:
+        raise ValueError(
+            "--installer-staging target name must be "
+            ".ConfigStore.db.install-(create|upgrade)-<32 lowercase hex>.tmp"
+        )
+    mode = match.group(1)
+    target_exists = os.path.lexists(lexical_db)
+    if target_exists and (
+        _path_is_reparse_point(lexical_db) or not lexical_db.is_file()
+    ):
+        raise ValueError("--installer-staging target must be a non-reparse regular file")
+    if mode == "create" and target_exists:
+        raise FileExistsError(f"Installer create staging target already exists: {lexical_db}")
+    if mode == "upgrade" and not target_exists:
+        raise FileNotFoundError(f"Installer upgrade staging target is missing: {lexical_db}")
+
+    resolved_data = lexical_data.resolve(strict=True)
+    if _path_is_reparse_point(resolved_data):
+        raise ValueError("--installer-staging resolved Data directory is a reparse point")
+    resolved_db = resolved_data / lexical_db.name
+    if mode == "upgrade" and lexical_db.resolve(strict=True) != resolved_db:
+        raise ValueError("--installer-staging target escapes the real Data directory")
+
+    final_db = resolved_data / "ConfigStore.db"
+    final_exists = os.path.lexists(final_db)
+    if mode == "create":
+        if final_exists:
+            raise FileExistsError(
+                "Installer create staging requires the final ConfigStore.db to be absent"
+            )
+    else:
+        if (
+            not final_exists
+            or _path_is_reparse_point(final_db)
+            or not final_db.is_file()
+        ):
+            raise FileNotFoundError(
+                "Installer upgrade staging requires a regular final ConfigStore.db"
+            )
+        if (
+            final_db.stat().st_size != resolved_db.stat().st_size
+            or not hmac.compare_digest(
+                _file_sha256_digest(final_db), _file_sha256_digest(resolved_db)
+            )
+        ):
+            raise ValueError(
+                "Installer upgrade staging is not a byte-identical copy of ConfigStore.db"
+            )
+    _reject_installer_staging_sidecars(resolved_db)
+    return resolved_data, resolved_db, mode
+
+
+def _validate_installer_verification_paths(
+    data_dir: Path,
+    db_path: Path,
+) -> tuple[Path, Path]:
+    lexical_data = _absolute_lexical_path(data_dir)
+    lexical_db = _absolute_lexical_path(db_path)
+    if not lexical_data.is_dir() or _path_is_reparse_point(lexical_data):
+        raise ValueError(
+            "--verify-installer-state requires a non-reparse Data directory"
+        )
+    if not _same_lexical_path(lexical_db.parent, lexical_data):
+        raise ValueError(
+            "--verify-installer-state database must be directly inside Data"
+        )
+    if (
+        lexical_db.name != "ConfigStore.db"
+        and INSTALLER_STAGING_NAME_RE.fullmatch(lexical_db.name) is None
+    ):
+        raise ValueError(
+            "--verify-installer-state database name is not canonical"
+        )
+    if (
+        not lexical_db.is_file()
+        or _path_is_reparse_point(lexical_db)
+    ):
+        raise ValueError(
+            "--verify-installer-state database must be a non-reparse regular file"
+        )
+
+    resolved_data = lexical_data.resolve(strict=True)
+    resolved_db = lexical_db.resolve(strict=True)
+    if resolved_db != resolved_data / lexical_db.name:
+        raise ValueError(
+            "--verify-installer-state database escapes the Data directory"
+        )
+    _reject_installer_staging_sidecars(resolved_db)
+    return resolved_data, resolved_db
+
+
+def _read_only_data_inventory(
+    data_dir: Path,
+) -> tuple[tuple[str, int, str], ...]:
+    root = data_dir.resolve(strict=True)
+    paths = sorted(
+        root.rglob("*"),
+        key=lambda path: path.relative_to(root).as_posix().casefold(),
+    )
+    inventory: list[tuple[str, int, str]] = []
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        if _path_is_reparse_point(path):
+            raise ValueError(
+                f"Installer Data inventory contains a reparse point: {relative}"
+            )
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError(
+                f"Installer Data inventory contains a non-regular entry: {relative}"
+            )
+        resolved = path.resolve(strict=True)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Installer Data inventory entry escapes Data: {relative}"
+            ) from exc
+        inventory.append(
+            (relative, resolved.stat().st_size, _file_sha256_digest(resolved).hex())
+        )
+    return tuple(inventory)
+
+
+def _reserve_installer_create_target(db_path: Path) -> None:
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    descriptor = os.open(db_path, flags, 0o600)
+    os.close(descriptor)
+
+
+def _canonical_scrub_manifest_map(
+    manifest: list[dict[str, object]],
+) -> dict[str, tuple[str, dict[str, object]]]:
+    entries: dict[str, tuple[str, dict[str, object]]] = {}
+    for item in manifest:
+        path_text = str(item["path"])
+        relative = Path(path_text)
+        if (
+            not path_text
+            or "\\" in path_text
+            or relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or relative.as_posix() != path_text
+        ):
+            raise ValueError("Legacy credential scrub manifest path is not canonical")
+        identity = path_text.casefold()
+        if identity in entries:
+            raise ValueError("Legacy credential scrub manifest has duplicate paths")
+        entries[identity] = (path_text, item)
+    return entries
+
+
+def _validate_installer_scrub_provenance(
+    data_dir: Path,
+    db_path: Path,
+    forced_encoding: str | None,
+    fresh_manifest: list[dict[str, object]],
+) -> str:
+    state, stored_manifest = read_legacy_credential_scrub_provenance(db_path)
+    if state not in {"pending", "complete"} or stored_manifest is None:
+        raise ValueError(
+            "Installer staging database has no valid credential scrub provenance"
+        )
+
+    root = data_dir.resolve()
+    stored_entries = _canonical_scrub_manifest_map(stored_manifest)
+    fresh_entries = _canonical_scrub_manifest_map(fresh_manifest)
+    for identity, (_path_text, fresh_item) in fresh_entries.items():
+        stored = stored_entries.get(identity)
+        if stored is None or fresh_item != stored[1]:
+            raise ValueError(
+                "Legacy credentials appeared outside the stored scrub provenance"
+            )
+
+    expected_fresh: set[str] = set()
+    for identity, (path_text, item) in stored_entries.items():
+        relative = Path(path_text)
+        candidate = root.joinpath(*relative.parts)
+        if (
+            not candidate.is_file()
+            or _path_is_reparse_point(candidate)
+        ):
+            raise ValueError(
+                f"Stored legacy credential source is missing or unsafe: {path_text}"
+            )
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                "Stored legacy credential source escapes the Data directory"
+            ) from exc
+
+        current_hash = _file_sha256_digest(resolved).hex()
+        before_hash = str(item["before_sha256"])
+        after_hash = str(item["after_sha256"])
+        if hmac.compare_digest(before_hash, after_hash):
+            raise ValueError("Stored legacy credential scrub transition is empty")
+        is_before = hmac.compare_digest(current_hash, before_hash)
+        is_after = hmac.compare_digest(current_hash, after_hash)
+        if state == "complete":
+            if not is_after:
+                raise ValueError(
+                    f"Completed legacy credential source changed: {path_text}"
+                )
+            continue
+        if not (is_before or is_after):
+            raise ValueError(
+                f"Pending legacy credential source changed: {path_text}"
+            )
+        if is_before:
+            sanitized, removed_values = _sanitized_legacy_ini_bytes(
+                resolved, forced_encoding
+            )
+            if (
+                not hmac.compare_digest(
+                    hashlib.sha256(sanitized).hexdigest(), after_hash
+                )
+                or removed_values != int(item["removed_values"])
+            ):
+                raise ValueError(
+                    f"Pending legacy credential scrub output changed: {path_text}"
+                )
+            expected_fresh.add(identity)
+
+    if state == "complete":
+        if fresh_entries:
+            raise ValueError(
+                "Legacy credentials appeared after the completed migration scrub"
+            )
+    elif set(fresh_entries) != expected_fresh:
+        raise ValueError(
+            "Pending legacy credential scrub provenance does not match current sources"
+        )
+    # The installer must reject every already-known finalization blocker before
+    # it publishes the staged database and new application files.  Pending
+    # provenance permits only the recorded before/after INI transition; it does
+    # not make plaintext database or credential-bearing backup residue safe.
+    enforce_no_plaintext_configstore_residue(data_dir, forced_encoding)
+    return state
+
+
+def _verify_and_report_deferred_scrub(
+    data_dir: Path,
+    db_path: Path,
+    forced_encoding: str | None,
+    scrub_manifest: list[dict[str, object]] | None,
+    installer_staging: bool,
+) -> None:
+    if scrub_manifest is None:
+        raise ValueError("Deferred credential scrub manifest was not prepared")
+    if installer_staging:
+        state = _validate_installer_scrub_provenance(
+            data_dir, db_path, forced_encoding, scrub_manifest
+        )
+        _reject_installer_staging_sidecars(db_path)
+        if state == "pending":
+            print(
+                "Legacy credential scrub deferred with verified pending provenance; "
+                "finalize after installer staging commit before starting the application."
+            )
+        else:
+            print(
+                "Legacy credential scrub provenance is complete and verified; "
+                "no installer finalization is required."
+            )
+    else:
+        print(
+            "Legacy credential scrub deferred with verified pending provenance; "
+            "finalize with --scrub-legacy-credentials before starting the application."
+        )
+
+
+def verify_installer_state(data_dir: Path, db_path: Path) -> tuple[str, Path]:
+    resolved_data, resolved_db = _validate_installer_verification_paths(
+        data_dir, db_path
+    )
+    before_inventory = _read_only_data_inventory(resolved_data)
+    before_db_hash = _file_sha256_digest(resolved_db)
+    current_state = verify_current_database(resolved_db)
+    fresh_manifest = prepare_legacy_ini_credential_scrub(resolved_data, None)
+    provenance_state = _validate_installer_scrub_provenance(
+        resolved_data, resolved_db, None, fresh_manifest
+    )
+    if provenance_state != current_state:
+        raise ValueError(
+            "Installer database verification and scrub provenance states differ"
+        )
+    _reject_installer_staging_sidecars(resolved_db)
+    after_inventory = _read_only_data_inventory(resolved_data)
+    after_db_hash = _file_sha256_digest(resolved_db)
+    if (
+        before_inventory != after_inventory
+        or not hmac.compare_digest(before_db_hash, after_db_hash)
+    ):
+        raise ValueError(
+            "Read-only installer verification observed a Data directory change"
+        )
+    return current_state, resolved_db
+
+
+def _default_upgrade_backup_path(db_path: Path) -> Path:
+    timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"{db_path.name}.bak_v{SCHEMA_VERSION}_{timestamp}"
+    for suffix in range(1000):
+        unique = "" if suffix == 0 else f"_{suffix}"
+        candidate = db_path.with_name(f"{base_name}{unique}.dpapi.bak")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError("Cannot allocate a unique protected upgrade backup path")
+
+
+def verify_current_database(db_path: Path) -> str:
+    resolved = db_path.resolve()
+    if not resolved.is_file():
+        raise ValueError(f"ConfigStore database not found: {resolved}")
+    connection = sqlite3.connect(resolved.as_uri() + "?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if integrity != ("ok",):
+            raise ValueError(f"ConfigStore integrity_check failed: {integrity}")
+        if current_schema_version(connection) != SCHEMA_VERSION:
+            raise ValueError("ConfigStore is not schema v5")
+        if not has_current_schema(connection):
+            raise ValueError("ConfigStore settings schema is incompatible")
+
+        for legacy_table in ("ini_values", "text_files", "app_settings"):
+            if table_exists(connection, legacy_table):
+                raise ValueError(
+                    f"Current ConfigStore retains legacy table: {legacy_table}"
+                )
+        orphan_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM settings
+            WHERE (
+                lower(module)=lower(?) OR lower(module) LIKE lower(?) OR
+                lower(module)=lower('LoginState/General') OR
+                (lower(module) LIKE lower('LoginState/SavedPasswords%') AND NOT (
+                    module='LoginState/SavedPasswords' AND
+                    scope_type='global' AND scope_id=''
+                )) OR
+                (lower(module) LIKE lower('LoginState/RememberedCredentials%') AND NOT (
+                    module='LoginState/RememberedCredentials' AND
+                    scope_type='global' AND scope_id=''
+                )) OR
+                lower(key_name)='passwordbase64'
+            )
+            """,
+            (LEGACY_ACCOUNT_MODULE, LEGACY_ACCOUNT_MODULE_PREFIX + "%"),
+        ).fetchone()
+        if orphan_count is None or int(orphan_count[0]) != 0:
+            raise ValueError("Current ConfigStore retains legacy authentication rows")
+
+        for (
+            scope_type, scope_id, module, key, stored, value_type,
+            sensitive, encrypted,
+        ) in connection.execute(
+            """
+            SELECT scope_type, scope_id, module, key_name, value_text,
+                   value_type, sensitive, encrypted
+            FROM settings
+            WHERE module IN (
+                'LoginState/SavedPasswords',
+                'LoginState/RememberedCredentials'
+            )
+            """
+        ).fetchall():
+            scope_text = str(scope_type)
+            scope_id_text = str(scope_id)
+            module_text = str(module)
+            key_text = str(key)
+            stored_text_value = str(stored)
+            if (
+                scope_text != "global"
+                or scope_id_text != ""
+                or not _is_safe_account_name(key_text)
+                or str(value_type) != "string"
+                or sensitive not in (1, "1", True)
+                or encrypted not in (1, "1", True)
+                or not stored_text_value.startswith(DPAPI_PREFIX)
+            ):
+                raise ValueError(
+                    "Current remembered credential has a non-canonical shape"
+                )
+            decoded_credential = decode_stored_text(
+                stored_text_value,
+                encrypted,
+                protection_purpose(
+                    scope_text, scope_id_text, module_text, key_text
+                ),
+            )
+            if decoded_credential is None or decoded_credential == "":
+                raise ValueError(
+                    "Current remembered credential cannot be read back"
+                )
+
+        meta_rows = connection.execute("SELECT key, value FROM meta").fetchall()
+        if any(key is None or value is None for key, value in meta_rows):
+            raise ValueError("ConfigStore metadata contains null keys or values")
+        duplicate_meta = connection.execute(
+            "SELECT key FROM meta GROUP BY key HAVING COUNT(*)<>1 LIMIT 1"
+        ).fetchone()
+        if duplicate_meta is not None:
+            raise ValueError("ConfigStore metadata contains duplicate keys")
+        meta = dict(meta_rows)
+        required_meta = {
+            "schema_version",
+            "encrypt_new_values",
+            "sensitive_protection",
+            "auth_semantic_version",
+            "auth_initialized",
+        }
+        if not required_meta.issubset(meta):
+            raise ValueError("ConfigStore metadata is incomplete")
+        if str(meta.get("encrypt_new_values", "")) not in {"0", "1"}:
+            raise ValueError("ConfigStore encrypt_new_values marker is invalid")
+        if str(meta.get("sensitive_protection", "")) != "dpapi-current-user-v1":
+            raise ValueError("ConfigStore sensitive protection marker is invalid")
+        if "created_at" in meta and not str(meta["created_at"]).strip():
+            raise ValueError("ConfigStore created_at metadata is invalid")
+        if str(meta.get("auth_semantic_version", "")) != AUTH_SEMANTIC_VERSION:
+            raise ValueError("ConfigStore authentication semantic version is not current")
+        authentication_initialized = str(meta.get("auth_initialized", ""))
+        if authentication_initialized not in {"0", "1"}:
+            raise ValueError("ConfigStore auth_initialized marker is invalid")
+
+        scrub_state = str(meta.get(SCRUB_STATE_KEY, ""))
+        scrub_manifest_text = meta.get(SCRUB_MANIFEST_KEY)
+        if scrub_state:
+            if scrub_state not in {"pending", "complete"}:
+                raise ValueError("ConfigStore legacy credential scrub state is invalid")
+            if not isinstance(scrub_manifest_text, str):
+                raise ValueError("ConfigStore legacy credential scrub manifest is missing")
+            parse_legacy_credential_scrub_manifest(scrub_manifest_text)
+        elif scrub_manifest_text is not None:
+            raise ValueError("ConfigStore has a scrub manifest without a scrub state")
+
+        account_ids = _account_profile_ids(connection)
+
+        administrator_count = 0
+        for account_id in account_ids:
+            for raw_key, stored, encrypted in connection.execute(
+                """
+                SELECT key_name, value_text, encrypted FROM settings
+                WHERE scope_type='account' AND scope_id=? AND module='Profile'
+                """,
+                (account_id,),
+            ).fetchall():
+                key_text = str(raw_key)
+                canonical_key = next(
+                    (
+                        candidate
+                        for candidate in ACCOUNT_PROFILE_SECURITY_FIELDS
+                        if candidate.casefold() == key_text.casefold()
+                    ),
+                    None,
+                )
+                if canonical_key is not None and key_text != canonical_key:
+                    raise ValueError(
+                        "Current account/Profile has a case-variant authentication field"
+                    )
+                if canonical_key is not None:
+                    _require_portable_account_profile_storage(
+                        str(stored), encrypted, key_text, "Current"
+                    )
+            values: dict[str, str] = {}
+            for key, stored, encrypted in connection.execute(
+                """
+                SELECT key_name, value_text, encrypted FROM settings
+                WHERE scope_type='account' AND scope_id=? AND module='Profile'
+                  AND key_name IN ('PasswordHash', 'Role', 'MustChangePassword')
+                """,
+                (account_id,),
+            ).fetchall():
+                key_text = str(key)
+                decoded = decode_stored_text(
+                    str(stored), encrypted,
+                    protection_purpose(
+                        "account", account_id, "Profile", key_text
+                    ),
+                )
+                if decoded is None:
+                    raise ValueError("Cannot decode a current account/Profile field")
+                values[key_text] = decoded
+            if set(values) != {"PasswordHash", "Role", "MustChangePassword"}:
+                raise ValueError("Current account/Profile is incomplete")
+            if not _is_supported_password_record(values["PasswordHash"]):
+                raise ValueError("Current account/Profile password record is invalid")
+            if values["Role"] not in {"operator", "engineer", "admin"}:
+                raise ValueError("Current account/Profile role is invalid")
+            if _parse_authentication_bool(values["MustChangePassword"]) is None:
+                raise ValueError("Current account/Profile MustChangePassword is invalid")
+            for key, stored, encrypted in connection.execute(
+                """
+                SELECT key_name, value_text, encrypted FROM settings
+                WHERE scope_type='account' AND scope_id=? AND module='Profile'
+                  AND key_name IN ('CreatedAt', 'UpdatedAt', 'PasswordChangedAt')
+                """,
+                (account_id,),
+            ).fetchall():
+                key_text = str(key)
+                decoded = decode_stored_text(
+                    str(stored), encrypted,
+                    protection_purpose(
+                        "account", account_id, "Profile", key_text
+                    ),
+                )
+                if decoded is None:
+                    raise ValueError(
+                        "Cannot decode a current account/Profile timestamp"
+                    )
+                _account_iso_instant(decoded, key_text)
+            if values["Role"] == "admin":
+                administrator_count += 1
+
+        if authentication_initialized == "0" and account_ids:
+            raise ValueError("Uninitialized authentication contains account profiles")
+        if authentication_initialized == "1" and (
+            not account_ids or administrator_count == 0
+        ):
+            raise ValueError("Initialized authentication has no valid administrator")
+
+        for (
+            scope_type, scope_id, module, key, stored, value_type,
+            sensitive, encrypted,
+        ) in connection.execute(
+            """
+            SELECT scope_type, scope_id, module, key_name, value_text,
+                   value_type, sensitive, encrypted
+            FROM settings
+            """
+        ).fetchall():
+            scope_text = str(scope_type)
+            scope_id_text = str(scope_id)
+            module_text = str(module)
+            key_text = str(key)
+            stored_value = str(stored)
+            value_type_text = str(value_type)
+            purpose = protection_purpose(
+                scope_text, scope_id_text, module_text, key_text
+            )
+            login_preference = is_login_preference(
+                scope_text, module_text, key_text
+            )
+            compatible_disabled_preference = (
+                is_compatible_disabled_login_preference(
+                    scope_text, scope_id_text, module_text, key_text,
+                    stored_value, value_type_text, sensitive, encrypted,
+                )
+            )
+            semantic_sensitive = (
+                bool(sensitive)
+                or is_sensitive_setting_key(module_text)
+                or is_sensitive_setting_key(key_text)
+                or login_preference
+            )
+            requires_dpapi = requires_dpapi_protection(
+                scope_text, module_text, key_text, semantic_sensitive
+            )
+            if (
+                requires_dpapi
+                and not stored_value.startswith(DPAPI_PREFIX)
+                and not compatible_disabled_preference
+            ):
+                raise ValueError("A recoverable sensitive setting is not protected by DPAPI")
+            if (
+                stored_value.startswith(DPAPI_PREFIX)
+                or encrypted not in (None, 0, "0", False)
+            ) and decode_stored_text(stored_value, encrypted, purpose) is None:
+                raise ValueError("A protected ConfigStore setting cannot be read back")
+    finally:
+        connection.close()
+    return scrub_state or "none"
+
+
 def migrate_existing_database_to_current(
     db_path: Path,
     data_dir: Path,
     encrypt_new_values: bool,
     scrub_manifest: list[dict[str, object]] | None = None,
     forced_encoding: str | None = None,
+    upgrade_backup_path: Path | None = None,
 ) -> bool:
     if not db_path.exists():
         return False
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         has_legacy_tables = has_any_legacy_config_table(conn)
         has_settings_schema = has_current_schema(conn)
         has_meta_table = table_exists(conn, "meta")
@@ -2171,7 +3396,10 @@ def migrate_existing_database_to_current(
         has_disk_inputs = any(
             path.is_file()
             and (
-                ".ini" in path.name.casefold()
+                (
+                    ".ini" in path.name.casefold()
+                    and not _is_runtime_only_ini(path, data_dir)
+                )
                 or path.name.casefold() in legacy_text_names
             )
             for path in data_dir.rglob("*")
@@ -2182,19 +3410,30 @@ def migrate_existing_database_to_current(
                 "Refusing to ignore or scrub them; use an explicit --overwrite migration after reviewing the protected backup."
             )
 
-    timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup = db_path.with_name(
-        f"{db_path.name}.bak_v{SCHEMA_VERSION}_{timestamp}.dpapi.bak"
+    backup = (
+        _validated_upgrade_backup_path(db_path, upgrade_backup_path)
+        if upgrade_backup_path is not None
+        else _default_upgrade_backup_path(db_path)
     )
     create_dpapi_database_backup(db_path, backup)
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         try:
             conn.execute("PRAGMA secure_delete=ON")
             conn.execute("BEGIN")
             create_current_tables(conn)
             legacy_counts = migrate_legacy_tables_to_settings(conn, encrypt_new_values)
-            migrate_authentication_semantics(conn, encrypt_new_values)
+            account_count, administrator_count = migrate_authentication_semantics(
+                conn, encrypt_new_values
+            )
+            if (
+                (authentication_initialized and account_count == 0)
+                or (not authentication_initialized and account_count != 0)
+                or (account_count > 0 and administrator_count == 0)
+            ):
+                raise ValueError(
+                    "Migrated authentication initialization/account/admin state is inconsistent"
+                )
             default_count, default_details = ensure_runtime_defaults(conn, data_dir, encrypt_new_values)
             drop_legacy_config_tables(conn)
             set_schema_meta(
@@ -2224,18 +3463,86 @@ def migrate(
     forced_encoding: str | None,
     allow_mojibake: bool,
     scrub_legacy_credentials: bool = False,
+    upgrade_backup_path: Path | None = None,
+    defer_credential_scrub: bool = False,
+    installer_staging: bool = False,
 ) -> None:
-    data_dir = data_dir.resolve()
-    db_path = db_path.resolve()
+    installer_staging_mode = ""
+    if installer_staging:
+        if not defer_credential_scrub:
+            raise ValueError(
+                "--installer-staging requires --defer-credential-scrub"
+            )
+        if overwrite:
+            raise ValueError("--installer-staging cannot be combined with --overwrite")
+        data_dir, db_path, installer_staging_mode = (
+            _validate_installer_staging_target(data_dir, db_path)
+        )
+    else:
+        data_dir = data_dir.resolve()
+        db_path = db_path.resolve()
     if not data_dir.exists():
         raise SystemExit(f"Data directory not found: {data_dir}")
+    if defer_credential_scrub and scrub_legacy_credentials:
+        raise ValueError(
+            "--defer-credential-scrub and --scrub-legacy-credentials are mutually exclusive"
+        )
+    if defer_credential_scrub and not installer_staging:
+        if overwrite or db_path.exists():
+            raise ValueError(
+                "--defer-credential-scrub is only valid for a new non-overwrite database"
+            )
+        if (
+            db_path.name.casefold() != "configstore.db"
+            or data_dir != db_path.parent
+        ):
+            raise ValueError(
+                "--defer-credential-scrub requires an in-place Data/ConfigStore.db target"
+            )
+    if upgrade_backup_path is not None:
+        if overwrite:
+            raise ValueError("--upgrade-backup is only valid for a non-overwrite database upgrade")
+        if not db_path.exists():
+            raise ValueError("--upgrade-backup requires an existing target database")
+        # Validate path policy before inspecting or changing the database.  The
+        # file itself is created only after a real upgrade has been confirmed.
+        upgrade_backup_path = _validated_upgrade_backup_path(
+            db_path,
+            upgrade_backup_path,
+            require_absent=installer_staging,
+        )
+    if installer_staging_mode == "upgrade":
+        if upgrade_backup_path is None:
+            raise ValueError(
+                "Installer upgrade staging requires an explicit --upgrade-backup"
+            )
+        expected_backup = db_path.with_name(
+            db_path.name + ".install-backup.dpapi.bak"
+        )
+        if upgrade_backup_path != expected_backup:
+            raise ValueError(
+                "Installer upgrade staging backup must be named "
+                "<staging basename>.install-backup.dpapi.bak"
+            )
+    elif installer_staging_mode == "create" and upgrade_backup_path is not None:
+        raise ValueError("Installer create staging cannot use --upgrade-backup")
     in_place_scrub = (
-        scrub_legacy_credentials
+        (scrub_legacy_credentials or defer_credential_scrub)
         and db_path.name.casefold() == "configstore.db"
         and data_dir == db_path.parent
     )
+    deferred_staging_scrub = installer_staging and defer_credential_scrub
     scrub_manifest = prepare_legacy_ini_credential_scrub(data_dir, forced_encoding) \
-        if in_place_scrub else None
+        if (in_place_scrub or deferred_staging_scrub) else None
+
+    if deferred_staging_scrub and db_path.exists() and scrub_manifest is not None:
+        existing_scrub_state, _existing_scrub_manifest = (
+            read_legacy_credential_scrub_provenance(db_path)
+        )
+        if existing_scrub_state:
+            _validate_installer_scrub_provenance(
+                data_dir, db_path, forced_encoding, scrub_manifest
+            )
 
     if db_path.exists():
         if not overwrite:
@@ -2245,9 +3552,28 @@ def migrate(
                 encrypt,
                 scrub_manifest,
                 forced_encoding,
+                upgrade_backup_path,
             ):
+                if defer_credential_scrub:
+                    _verify_and_report_deferred_scrub(
+                        data_dir,
+                        db_path,
+                        forced_encoding,
+                        scrub_manifest,
+                        installer_staging,
+                    )
+                    return
                 _finish_legacy_credential_scrub(
                     data_dir, db_path, forced_encoding, scrub_legacy_credentials
+                )
+                return
+            if deferred_staging_scrub:
+                _verify_and_report_deferred_scrub(
+                    data_dir,
+                    db_path,
+                    forced_encoding,
+                    scrub_manifest,
+                    installer_staging,
                 )
                 return
             if in_place_scrub:
@@ -2267,13 +3593,19 @@ def migrate(
         print(f"Created and verified DPAPI-protected database backup: {backup}")
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    staging_fd, staging_name = tempfile.mkstemp(
-        prefix=f".{db_path.name}.staging-",
-        suffix=".tmp",
-        dir=db_path.parent,
-    )
-    os.close(staging_fd)
-    staging_path = Path(staging_name)
+    publish_staging_path = True
+    if installer_staging_mode == "create":
+        _reserve_installer_create_target(db_path)
+        staging_path = db_path
+        publish_staging_path = False
+    else:
+        staging_fd, staging_name = tempfile.mkstemp(
+            prefix=f".{db_path.name}.staging-",
+            suffix=".tmp",
+            dir=db_path.parent,
+        )
+        os.close(staging_fd)
+        staging_path = Path(staging_name)
     ini_count = 0
     text_count = 0
     value_count = 0
@@ -2322,7 +3654,8 @@ def migrate(
             conn.commit()
         finally:
             conn.close()
-        os.replace(staging_path, db_path)
+        if publish_staging_path:
+            os.replace(staging_path, db_path)
     except Exception:
         staging_path.unlink(missing_ok=True)
         raise
@@ -2332,9 +3665,18 @@ def migrate(
     print(f"Text files: {text_count}")
     print(f"Runtime defaults added: {default_count} ({default_details})")
     print(f"Encrypted: {'yes' if encrypt else 'no'}")
-    _finish_legacy_credential_scrub(
-        data_dir, db_path, forced_encoding, scrub_legacy_credentials
-    )
+    if defer_credential_scrub:
+        _verify_and_report_deferred_scrub(
+            data_dir,
+            db_path,
+            forced_encoding,
+            scrub_manifest,
+            installer_staging,
+        )
+    else:
+        _finish_legacy_credential_scrub(
+            data_dir, db_path, forced_encoding, scrub_legacy_credentials
+        )
     if default_replacements:
         print("Mojibake values replaced with defaults:")
         for file_path, section, key, old_value, new_value in default_replacements:
@@ -2411,7 +3753,7 @@ def current_source_sha256() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Migrate Data config files to ConfigStore.db")
-    parser.add_argument("--source", default="Data", help="Data directory to migrate")
+    parser.add_argument("--source", default=None, help="Data directory to migrate (default: Data)")
     parser.add_argument("--db", default=None, help="Output SQLite database path")
     parser.add_argument("--overwrite", action="store_true", help="Replace existing database")
     parser.add_argument("--encrypt", action="store_true", help="Encrypt stored values")
@@ -2421,10 +3763,49 @@ def main() -> None:
         help="After a successful in-place migration, atomically remove recoverable credentials from legacy INI files",
     )
     parser.add_argument(
+        "--defer-credential-scrub",
+        action="store_true",
+        help=(
+            "For a new in-place non-overwrite database, persist pending scrub "
+            "provenance without changing legacy INI files"
+        ),
+    )
+    parser.add_argument(
+        "--installer-staging",
+        action="store_true",
+        help=(
+            "Installer-only transaction mode: migrate an exact create/upgrade "
+            "staging database beside the real Data source and retain pending "
+            "credential-scrub provenance"
+        ),
+    )
+    parser.add_argument(
         "--restore-dpapi-backup",
         type=Path,
         default=None,
         help="Restore a ConfigStore DPAPI backup to --db and exit",
+    )
+    parser.add_argument(
+        "--upgrade-backup",
+        type=Path,
+        default=None,
+        help=(
+            "Absolute, non-existing .dpapi.bak path beside --db for the "
+            "verified pre-upgrade backup (existing non-overwrite upgrades only)"
+        ),
+    )
+    parser.add_argument(
+        "--verify-current",
+        action="store_true",
+        help="Read-only verification of a current ConfigStore database",
+    )
+    parser.add_argument(
+        "--verify-installer-state",
+        action="store_true",
+        help=(
+            "Strict read-only verification of current ConfigStore schema and "
+            "its real Data credential-scrub provenance"
+        ),
     )
     parser.add_argument(
         "--encoding",
@@ -2444,6 +3825,41 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.verify_installer_state:
+        incompatible = (
+            args.overwrite
+            or args.encrypt
+            or args.scrub_legacy_credentials
+            or args.defer_credential_scrub
+            or args.installer_staging
+            or args.restore_dpapi_backup is not None
+            or args.upgrade_backup is not None
+            or args.verify_current
+            or args.encoding is not None
+            or args.allow_mojibake
+            or args.print_source_sha256
+        )
+        if args.source is None or args.db is None or incompatible:
+            parser.error(
+                "--verify-installer-state requires explicit --source and --db "
+                "and cannot be combined with other modes"
+            )
+
+    if args.installer_staging:
+        if not args.defer_credential_scrub:
+            parser.error("--installer-staging requires --defer-credential-scrub")
+        if (
+            args.scrub_legacy_credentials
+            or args.overwrite
+            or args.restore_dpapi_backup is not None
+            or args.verify_current
+            or args.verify_installer_state
+        ):
+            parser.error(
+                "--installer-staging cannot be combined with scrub, overwrite, "
+                "restore, or verify modes"
+            )
+
     if args.print_source_sha256:
         print(current_source_sha256())
         return
@@ -2451,8 +3867,42 @@ def main() -> None:
     should_pause = args.pause or launched_from_explorer()
     exit_code = 0
     try:
-        source = Path(args.source)
+        source = Path(args.source) if args.source is not None else Path("Data")
         db = Path(args.db) if args.db else source / "ConfigStore.db"
+        if args.verify_installer_state:
+            scrub_state, resolved_db = verify_installer_state(source, db)
+            print(
+                "Verified installer ConfigStore state "
+                f"(scrub={scrub_state}): {resolved_db}"
+            )
+            return
+        if args.verify_current:
+            incompatible = (
+                args.overwrite
+                or args.encrypt
+                or args.scrub_legacy_credentials
+                or args.defer_credential_scrub
+                or args.installer_staging
+                or args.verify_installer_state
+                or args.restore_dpapi_backup is not None
+                or args.upgrade_backup is not None
+                or args.encoding is not None
+                or args.allow_mojibake
+            )
+            if args.db is None or incompatible:
+                raise ValueError(
+                    "--verify-current requires explicit --db and cannot be combined with migration options"
+                )
+            before = hashlib.sha256(db.resolve().read_bytes()).hexdigest()
+            scrub_state = verify_current_database(db)
+            after = hashlib.sha256(db.resolve().read_bytes()).hexdigest()
+            if not hmac.compare_digest(before, after):
+                raise ValueError("Read-only verification observed a database change")
+            print(
+                f"Verified current ConfigStore schema v{SCHEMA_VERSION} "
+                f"(scrub={scrub_state}): {db.resolve()}"
+            )
+            return
         if args.restore_dpapi_backup is not None:
             print(f"Resolved DPAPI backup: {args.restore_dpapi_backup.resolve()}")
             print(f"Resolved restore target: {db.resolve()}")
@@ -2470,6 +3920,9 @@ def main() -> None:
             args.encoding,
             args.allow_mojibake,
             args.scrub_legacy_credentials,
+            args.upgrade_backup,
+            args.defer_credential_scrub,
+            args.installer_staging,
         )
     except SystemExit as exc:
         if exc.code not in (None, 0):

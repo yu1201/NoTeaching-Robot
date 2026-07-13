@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QPasswordDigestor>
+#include <QSet>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
@@ -16,6 +17,15 @@
 
 #include <atomic>
 #include <thread>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+
+#ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+#define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
+#endif
 
 namespace
 {
@@ -28,17 +38,23 @@ void Check(bool condition, const QString& message)
     }
 }
 
-void CreateSettingsTable(QSqlDatabase& db)
+void CreateSettingsTable(QSqlDatabase& db, bool upperCaseNames = false)
 {
     QSqlQuery query(db);
-    Check(query.exec("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"), QStringLiteral("create meta"));
-    Check(query.exec(
-        "CREATE TABLE settings("
+    const QString metaName = upperCaseNames
+        ? QStringLiteral("META") : QStringLiteral("meta");
+    const QString settingsName = upperCaseNames
+        ? QStringLiteral("SETTINGS") : QStringLiteral("settings");
+    Check(query.exec(QStringLiteral(
+        "CREATE TABLE %1(key TEXT PRIMARY KEY, value TEXT NOT NULL)").arg(metaName)),
+        QStringLiteral("create meta"));
+    Check(query.exec(QStringLiteral(
+        "CREATE TABLE %1("
         "scope_type TEXT NOT NULL, scope_id TEXT NOT NULL DEFAULT '', module TEXT NOT NULL, "
         "key_name TEXT NOT NULL, value_text TEXT NOT NULL, value_type TEXT NOT NULL DEFAULT 'string', "
         "sensitive INTEGER NOT NULL DEFAULT 0, encrypted INTEGER NOT NULL DEFAULT 0, "
         "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
-        "PRIMARY KEY(scope_type, scope_id, module, key_name))"),
+        "PRIMARY KEY(scope_type, scope_id, module, key_name))").arg(settingsName)),
         QStringLiteral("create settings"));
 }
 
@@ -50,17 +66,19 @@ void InsertRaw(
     const QString& key,
     const QString& value,
     bool sensitive = false,
-    bool encrypted = false)
+    bool encrypted = false,
+    const QString& valueType = QStringLiteral("string"))
 {
     QSqlQuery query(db);
     query.prepare(
-        "INSERT INTO settings(scope_type, scope_id, module, key_name, value_text, sensitive, encrypted) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?)");
+        "INSERT INTO settings(scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted) "
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?)");
     query.addBindValue(scope);
     query.addBindValue(scopeId.isNull() ? QStringLiteral("") : scopeId);
     query.addBindValue(module);
     query.addBindValue(key);
     query.addBindValue(value);
+    query.addBindValue(valueType);
     query.addBindValue(sensitive ? 1 : 0);
     query.addBindValue(encrypted ? 1 : 0);
     const bool inserted = query.exec();
@@ -73,6 +91,22 @@ QString FileSha256(const QString& path)
     QFile file(path);
     Check(file.open(QIODevice::ReadOnly), QStringLiteral("open database for hash"));
     return QString::fromLatin1(QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256).toHex());
+}
+
+QByteArray ReadFileBytes(const QString& path)
+{
+    QFile file(path);
+    Check(file.open(QIODevice::ReadOnly), QStringLiteral("open fixture file for byte comparison"));
+    return file.readAll();
+}
+
+QByteArray InstallerTransactionRecord(const QStringList& payloadLines)
+{
+    const QByteArray payload = payloadLines.join(QLatin1Char('\n')).toUtf8();
+    return payload
+        + QByteArrayLiteral("\nPAYLOAD_SHA256=")
+        + QCryptographicHash::hash(payload, QCryptographicHash::Sha256).toHex()
+        + QByteArrayLiteral("\n");
 }
 
 QString ProtectLegacyFixture(const QString& plainText)
@@ -235,8 +269,18 @@ int RunAuthenticationInitializationTest()
         ConfigDatabase::TryReadAuthenticationInitialized(&initialized) && !initialized,
         QStringLiteral("fresh database has an explicit uninitialized authentication marker"));
 
+    const QString initialAdministratorRecord = CredentialSecurity::CreatePasswordRecord(
+        QStringLiteral("Synthetic-Initial-Administrator-Test"));
+    const QString currentAdministratorRecord = CredentialSecurity::CreatePasswordRecord(
+        QStringLiteral("Synthetic-Current-Administrator-Test"));
+    const QString secondAdministratorRecord = CredentialSecurity::CreatePasswordRecord(
+        QStringLiteral("Synthetic-Second-Administrator-Test"));
+    Check(!initialAdministratorRecord.isEmpty()
+        && !currentAdministratorRecord.isEmpty()
+        && !secondAdministratorRecord.isEmpty(),
+        QStringLiteral("create supported authentication test records"));
     QMap<QString, QString> bootstrap;
-    bootstrap.insert(QStringLiteral("PasswordHash"), QStringLiteral("synthetic-test-record"));
+    bootstrap.insert(QStringLiteral("PasswordHash"), initialAdministratorRecord);
     bootstrap.insert(QStringLiteral("Role"), QStringLiteral("admin"));
     bootstrap.insert(QStringLiteral("MustChangePassword"), QStringLiteral("1"));
     {
@@ -279,13 +323,46 @@ int RunAuthenticationInitializationTest()
         ConfigDatabase::TryReadAuthenticationInitialized(&initialized) && initialized,
         QStringLiteral("bootstrap account and initialization marker commit together"));
 
+    QMap<QString, QString> loginPreferences;
+    loginPreferences.insert(QStringLiteral("RememberPassword"), QStringLiteral("1"));
+    loginPreferences.insert(QStringLiteral("AutoLogin"), QStringLiteral("1"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("global"), QString(),
+            QStringLiteral("LoginState/RememberedCredentials"),
+            QStringLiteral("admin"), QStringLiteral("Synthetic-Remembered-Credential"),
+            QStringLiteral("string"), true)
+            && ConfigDatabase::WriteScopedSettings(
+                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                loginPreferences, QStringLiteral("bool")),
+        QStringLiteral("create real protected remembered-login fixture"));
+    std::atomic_bool rememberedStateReopens{ false };
+    std::thread rememberedStateProbe([&rememberedStateReopens]()
+        {
+            rememberedStateReopens = ConfigDatabase::IsAvailable();
+        });
+    rememberedStateProbe.join();
+    Check(rememberedStateReopens.load(),
+        QStringLiteral("protected remembered login state survives a fresh thread reopen"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("global"), QString(),
+            QStringLiteral("LoginState/SavedPasswords"),
+            QStringLiteral("admin"), QStringLiteral("Synthetic-Saved-Password"),
+            QStringLiteral("string"), true)
+            && ConfigDatabase::WriteScopedSetting(
+                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                QStringLiteral("PasswordBase64"), QStringLiteral("Synthetic-Base64"),
+                QStringLiteral("string"), true),
+        QStringLiteral("create deprecated remembered rows for credential-clear test"));
+
     QString currentRole;
     QString currentFingerprint;
     Check(
         ConfigDatabase::TryCompareAndSetAccountPassword(
             QStringLiteral("admin"),
-            QStringLiteral("synthetic-test-record"),
-            QStringLiteral("synthetic-current-admin-record"),
+            initialAdministratorRecord,
+            currentAdministratorRecord,
             false,
             false,
             &currentRole,
@@ -293,6 +370,26 @@ int RunAuthenticationInitializationTest()
             && currentRole == QStringLiteral("admin")
             && !currentFingerprint.isEmpty(),
         QStringLiteral("forced password change uses compare-and-set"));
+    QString removedCredential;
+    Check(
+        !ConfigDatabase::ReadScopedSetting(
+            QStringLiteral("global"), QString(),
+            QStringLiteral("LoginState/RememberedCredentials"),
+            QStringLiteral("admin"), &removedCredential)
+            && !ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/SavedPasswords"),
+                QStringLiteral("admin"), &removedCredential)
+            && !ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                QStringLiteral("PasswordBase64"), &removedCredential)
+            && !ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                QStringLiteral("RememberPassword"), &removedCredential)
+            && !ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                QStringLiteral("AutoLogin"), &removedCredential),
+        QStringLiteral("password change removes all remembered credential state"));
     QString storedPassword;
     bool storedMustChange = true;
     QString storedFingerprint;
@@ -300,7 +397,7 @@ int RunAuthenticationInitializationTest()
         ConfigDatabase::TryReadAccountSecurityState(
             QStringLiteral("admin"), &storedPassword, &currentRole,
             &storedMustChange, &storedFingerprint)
-            && storedPassword == QStringLiteral("synthetic-current-admin-record")
+            && storedPassword == currentAdministratorRecord
             && !storedMustChange
             && storedFingerprint == currentFingerprint,
         QStringLiteral("strict account security snapshot after password change"));
@@ -316,7 +413,7 @@ int RunAuthenticationInitializationTest()
         QStringLiteral("stale password snapshot cannot overwrite a newer password"));
 
     QMap<QString, QString> secondAdmin;
-    secondAdmin.insert(QStringLiteral("PasswordHash"), QStringLiteral("synthetic-second-admin-record"));
+    secondAdmin.insert(QStringLiteral("PasswordHash"), secondAdministratorRecord);
     secondAdmin.insert(QStringLiteral("Role"), QStringLiteral("admin"));
     secondAdmin.insert(QStringLiteral("MustChangePassword"), QStringLiteral("0"));
     Check(
@@ -373,6 +470,23 @@ int RunAuthenticationInitializationTest()
         }
     }
     Check(remainingAdministrators == 1, QStringLiteral("exactly one administrator survives concurrent deletion"));
+    const int connectionCountBeforeStress = QSqlDatabase::connectionNames().size();
+    std::atomic_int threadConnectionSuccesses{ 0 };
+    for (int iteration = 0; iteration < 64; ++iteration)
+    {
+        std::thread probe([&threadConnectionSuccesses]()
+            {
+                if (ConfigDatabase::IsAvailable())
+                {
+                    ++threadConnectionSuccesses;
+                }
+            });
+        probe.join();
+    }
+    Check(
+        threadConnectionSuccesses.load() == 64
+            && QSqlDatabase::connectionNames().size() == connectionCountBeforeStress,
+        QStringLiteral("thread-id reuse cannot retain or cross-use ConfigStore connections"));
     const QString survivingAccount = ConfigDatabase::ListScopedSettingIds(
         QStringLiteral("account"), QStringLiteral("Profile")).value(0);
     Check(
@@ -431,6 +545,7 @@ int RunEmptyV4RecoveryTest()
         db.close();
     }
     QSqlDatabase::removeDatabase(QStringLiteral("empty_v4_fixture"));
+    const QString before = FileSha256(dbPath);
     QString pathError;
     Check(
         AppPaths::Initialize(
@@ -438,19 +553,11 @@ int RunEmptyV4RecoveryTest()
                           << QStringLiteral("--data-root") << temp.path(),
             &pathError),
         QStringLiteral("initialize empty v4 root: %1").arg(pathError));
-    Check(ConfigDatabase::IsAvailable(), QStringLiteral("migrate empty v4 store"));
-    bool initialized = false;
-    Check(
-        ConfigDatabase::TryReadAuthenticationInitialized(&initialized) && initialized,
-        QStringLiteral("an existing empty database is marked initialized for recovery"));
-    QMap<QString, QString> bootstrap;
-    bootstrap.insert(QStringLiteral("PasswordHash"), QStringLiteral("synthetic-test-record"));
-    bootstrap.insert(QStringLiteral("Role"), QStringLiteral("admin"));
-    Check(
-        !ConfigDatabase::TryInitializeAuthenticationAccount(
-            QStringLiteral("admin"), bootstrap),
-        QStringLiteral("empty migrated v4 store refuses known bootstrap recreation"));
-    QTextStream(stdout) << "PASS: empty existing ConfigStore enters recovery semantics" << Qt::endl;
+    Check(!ConfigDatabase::IsAvailable(), QStringLiteral("empty initialized v4 store fails closed"));
+    Check(!ConfigDatabase::IsAvailable(), QStringLiteral("empty v4 store remains unavailable"));
+    Check(FileSha256(dbPath) == before,
+        QStringLiteral("empty v4 administrator-integrity failure rolls back byte-identically"));
+    QTextStream(stdout) << "PASS: empty existing ConfigStore fails admin integrity without modification" << Qt::endl;
     return 0;
 }
 
@@ -594,6 +701,1012 @@ int RunPlaintextBackupGateTest()
     QTextStream(stdout) << "PASS: runtime rejects plaintext ConfigStore backup residue" << Qt::endl;
     return 0;
 }
+
+QString LegacyPasswordHash(const QString& userName, const QString& password)
+{
+    return QString::fromLatin1(QCryptographicHash::hash(
+        QStringLiteral("%1\n%2").arg(userName, password).toUtf8(),
+        QCryptographicHash::Sha256).toHex());
+}
+
+void InsertFlatLegacyAccount(
+    QSqlDatabase& db,
+    const QString& userName,
+    const QString& passwordHash,
+    const QString& role)
+{
+    InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users"),
+        userName + QStringLiteral("/PasswordHash"), passwordHash, true);
+    InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users"),
+        userName + QStringLiteral("/Role"), role);
+}
+
+void InsertNestedLegacyAccount(
+    QSqlDatabase& db,
+    const QString& userName,
+    const QString& passwordHash,
+    const QString& role)
+{
+    const QString module = QStringLiteral("Accounts/Users/") + userName;
+    InsertRaw(db, QStringLiteral("global"), QString(), module,
+        QStringLiteral("PasswordHash"), passwordHash, true);
+    InsertRaw(db, QStringLiteral("global"), QString(), module,
+        QStringLiteral("Role"), role);
+}
+
+void InsertCurrentAuthenticationMetadata(
+    QSqlDatabase& db,
+    bool authenticationInitialized)
+{
+    QSqlQuery query(db);
+    for (const auto& item : {
+            qMakePair(QStringLiteral("schema_version"), QStringLiteral("5")),
+            qMakePair(QStringLiteral("auth_semantic_version"), QStringLiteral("2")),
+            qMakePair(
+                QStringLiteral("auth_initialized"),
+                authenticationInitialized ? QStringLiteral("1") : QStringLiteral("0")),
+            qMakePair(QStringLiteral("encrypt_new_values"), QStringLiteral("0")),
+            qMakePair(
+                QStringLiteral("sensitive_protection"),
+                QStringLiteral("dpapi-current-user-v1")) })
+    {
+        query.prepare(QStringLiteral("INSERT INTO meta(key, value) VALUES(?, ?)"));
+        query.addBindValue(item.first);
+        query.addBindValue(item.second);
+        Check(query.exec(), QStringLiteral("insert current metadata %1").arg(item.first));
+    }
+}
+
+void InsertCurrentAccountProfile(
+    QSqlDatabase& db,
+    const QString& userName,
+    const QString& role)
+{
+    InsertRaw(
+        db, QStringLiteral("account"), userName, QStringLiteral("Profile"),
+        QStringLiteral("PasswordHash"),
+        LegacyPasswordHash(userName, QStringLiteral("Current-Integrity-Test")),
+        true);
+    InsertRaw(
+        db, QStringLiteral("account"), userName, QStringLiteral("Profile"),
+        QStringLiteral("Role"), role);
+    InsertRaw(
+        db, QStringLiteral("account"), userName, QStringLiteral("Profile"),
+        QStringLiteral("MustChangePassword"), QStringLiteral("0"), true);
+}
+
+void CreateCurrentCompleteAuthenticationFixture(const QString& databasePath)
+{
+    static std::atomic_uint fixtureId{ 0 };
+    const QString connectionName = QStringLiteral("installer_transaction_fixture_%1")
+        .arg(fixtureId.fetch_add(1));
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        db.setDatabaseName(databasePath);
+        Check(db.open(), QStringLiteral("open installer transaction fixture"));
+        CreateSettingsTable(db);
+        InsertCurrentAuthenticationMetadata(db, true);
+        InsertCurrentAccountProfile(db, QStringLiteral("admin"), QStringLiteral("admin"));
+        QSqlQuery query(db);
+        Check(query.exec(QStringLiteral(
+            "INSERT INTO meta(key, value) VALUES('legacy_credential_scrub_state', 'complete')")),
+            QStringLiteral("write complete credential scrub state"));
+        Check(query.exec(QStringLiteral(
+            "INSERT INTO meta(key, value) VALUES('legacy_credential_scrub_manifest', '[]')")),
+            QStringLiteral("write complete credential scrub manifest"));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+}
+
+bool CreateTestFileSymbolicLink(const QString& linkPath, const QString& targetPath)
+{
+    if (CreateSymbolicLinkW(
+            reinterpret_cast<LPCWSTR>(linkPath.utf16()),
+            reinterpret_cast<LPCWSTR>(targetPath.utf16()),
+            SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE)
+    {
+        return true;
+    }
+    if (GetLastError() == ERROR_INVALID_PARAMETER)
+    {
+        return CreateSymbolicLinkW(
+            reinterpret_cast<LPCWSTR>(linkPath.utf16()),
+            reinterpret_cast<LPCWSTR>(targetPath.utf16()),
+            0) != FALSE;
+    }
+    return false;
+}
+
+bool RemoveTestFilesystemObject(const QString& path, bool directory)
+{
+    if (directory)
+    {
+        return QDir(path).removeRecursively();
+    }
+    if (QFile::remove(path))
+    {
+        return true;
+    }
+    return DeleteFileW(reinterpret_cast<LPCWSTR>(path.utf16())) != FALSE;
+}
+
+int RunInstallerTransactionGateTest(const QString& scenario)
+{
+    const QSet<QString> supportedScenarios = {
+        QStringLiteral("valid"),
+        QStringLiteral("arbitrary"),
+        QStringLiteral("directory"),
+        QStringLiteral("symlink"),
+        QStringLiteral("dangling-symlink"),
+        QStringLiteral("existing-connection"),
+        QStringLiteral("existing-connection-pending"),
+        QStringLiteral("existing-connection-corrupt"),
+        QStringLiteral("noop-absent")
+    };
+    Check(supportedScenarios.contains(scenario),
+        QStringLiteral("known installer transaction gate scenario"));
+
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("installer transaction gate temp root"));
+    const QString dataPath = temp.filePath(QStringLiteral("Data"));
+    Check(QDir().mkpath(dataPath), QStringLiteral("installer transaction gate data dir"));
+    const QString databasePath = QDir(dataPath).filePath(QStringLiteral("ConfigStore.db"));
+    const QString transactionPath = QDir(dataPath).filePath(
+        QStringLiteral("ConfigStore.db.install-transaction-v1"));
+    const bool databaseInitiallyAbsent = scenario == QStringLiteral("noop-absent");
+    if (!databaseInitiallyAbsent)
+    {
+        CreateCurrentCompleteAuthenticationFixture(databasePath);
+    }
+
+    QString pathError;
+    const bool connectionPreopened = scenario.startsWith(
+        QStringLiteral("existing-connection"));
+    if (connectionPreopened)
+    {
+        Check(AppPaths::Initialize(
+            QStringList() << QStringLiteral("CredentialSecurityTests")
+                          << QStringLiteral("--data-root") << temp.path(),
+            &pathError), QStringLiteral("initialize pre-open transaction root: %1").arg(pathError));
+        Check(ConfigDatabase::IsAvailable(),
+            QStringLiteral("open current database before installer record appears"));
+    }
+
+    QByteArray expectedRecordBytes;
+    QString linkedTargetPath;
+    const bool recordIsDirectory = scenario == QStringLiteral("directory");
+    const bool recordIsSymlink = scenario == QStringLiteral("symlink")
+        || scenario == QStringLiteral("dangling-symlink");
+    if (recordIsDirectory)
+    {
+        Check(QDir().mkpath(transactionPath), QStringLiteral("create transaction directory barrier"));
+        QFile sentinel(QDir(transactionPath).filePath(QStringLiteral("sentinel.bin")));
+        expectedRecordBytes = QByteArrayLiteral("transaction-directory-must-stay-byte-identical\0payload");
+        Check(sentinel.open(QIODevice::WriteOnly), QStringLiteral("create transaction directory sentinel"));
+        Check(sentinel.write(expectedRecordBytes) == expectedRecordBytes.size(),
+            QStringLiteral("write transaction directory sentinel"));
+        sentinel.close();
+    }
+    else if (recordIsSymlink)
+    {
+        linkedTargetPath = temp.filePath(QStringLiteral("transaction-record-target"));
+        if (scenario == QStringLiteral("symlink"))
+        {
+            QFile target(linkedTargetPath);
+            expectedRecordBytes = QByteArrayLiteral("linked-installer-transaction-record");
+            Check(target.open(QIODevice::WriteOnly), QStringLiteral("create transaction symlink target"));
+            Check(target.write(expectedRecordBytes) == expectedRecordBytes.size(),
+                QStringLiteral("write transaction symlink target"));
+            target.close();
+        }
+        if (!CreateTestFileSymbolicLink(transactionPath, linkedTargetPath))
+        {
+            QTextStream(stdout)
+                << "SKIP: Windows cannot create installer transaction symlink; "
+                   "source-level dangling-link enumeration remains required"
+                << Qt::endl;
+            return 0;
+        }
+        Check(QFileInfo(transactionPath).isSymLink(),
+            QStringLiteral("installer transaction fixture is a symbolic link"));
+    }
+    else
+    {
+        if (scenario == QStringLiteral("arbitrary"))
+        {
+            expectedRecordBytes = QByteArray::fromHex("00ff10434f52525550540d0a")
+                + QByteArrayLiteral("not-a-valid-transaction");
+        }
+        else if (databaseInitiallyAbsent)
+        {
+            expectedRecordBytes = InstallerTransactionRecord({
+                QStringLiteral("FORMAT=NoTeaching-Robot-Install-Transaction-v1"),
+                QStringLiteral("MODE=NOOP_ABSENT"),
+                QStringLiteral("SOURCE_INVENTORY_SHA256=") + QString(64, QLatin1Char('0')),
+                QStringLiteral("ORIGINAL_STATE=ABSENT")
+            });
+        }
+        else
+        {
+            expectedRecordBytes = InstallerTransactionRecord({
+                QStringLiteral("FORMAT=NoTeaching-Robot-Install-Transaction-v1"),
+                QStringLiteral("MODE=NOOP_CURRENT"),
+                QStringLiteral("CURRENT_SHA256=") + FileSha256(databasePath)
+            });
+        }
+        QFile record(transactionPath);
+        Check(record.open(QIODevice::WriteOnly | QIODevice::NewOnly),
+            QStringLiteral("create installer transaction record"));
+        Check(record.write(expectedRecordBytes) == expectedRecordBytes.size(),
+            QStringLiteral("write installer transaction record"));
+        record.close();
+    }
+
+    if (!connectionPreopened)
+    {
+        Check(AppPaths::Initialize(
+            QStringList() << QStringLiteral("CredentialSecurityTests")
+                          << QStringLiteral("--data-root") << temp.path(),
+            &pathError), QStringLiteral("initialize transaction gate root: %1").arg(pathError));
+    }
+
+    const QString databaseHashBefore = databaseInitiallyAbsent
+        ? QString() : FileSha256(databasePath);
+    QMap<QString, QString> blockedBootstrap;
+    blockedBootstrap.insert(
+        QStringLiteral("PasswordHash"),
+        CredentialSecurity::CreatePasswordRecord(QStringLiteral("Blocked-Installer-Account-Test")));
+    blockedBootstrap.insert(QStringLiteral("Role"), QStringLiteral("admin"));
+    blockedBootstrap.insert(QStringLiteral("MustChangePassword"), QStringLiteral("1"));
+    Check(!blockedBootstrap.value(QStringLiteral("PasswordHash")).isEmpty(),
+        QStringLiteral("create supported blocked bootstrap record"));
+
+    Check(!ConfigDatabase::IsAvailable(),
+        QStringLiteral("installer transaction blocks database availability"));
+    Check(!ConfigDatabase::IsAvailable(),
+        QStringLiteral("installer transaction repeatedly blocks database availability"));
+    bool initialized = true;
+    Check(!ConfigDatabase::TryReadAuthenticationInitialized(&initialized),
+        QStringLiteral("installer transaction blocks authentication metadata reads"));
+    Check(!ConfigDatabase::TryInitializeAuthenticationAccount(
+            QStringLiteral("blocked_bootstrap"), blockedBootstrap),
+        QStringLiteral("installer transaction blocks default account bootstrap"));
+    Check(!ConfigDatabase::TryCreateAccount(
+            QStringLiteral("blocked_created"), blockedBootstrap),
+        QStringLiteral("installer transaction blocks account creation"));
+    QString blockedValue;
+    Check(ConfigDatabase::ReadScopedSettingStatus(
+            QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+            QStringLiteral("AutoLogin"), &blockedValue) == ConfigDatabase::ReadStatus::Error,
+        QStringLiteral("installer transaction blocks login-state reads"));
+    Check(!ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+            QStringLiteral("AutoLogin"), QStringLiteral("1"), QStringLiteral("bool")),
+        QStringLiteral("installer transaction blocks login-state writes"));
+    std::atomic_bool threadAvailable{ true };
+    std::thread threadProbe([&threadAvailable]()
+        {
+            threadAvailable = ConfigDatabase::IsAvailable();
+        });
+    threadProbe.join();
+    Check(!threadAvailable.load(),
+        QStringLiteral("installer transaction blocks fresh-thread database access"));
+
+    if (databaseInitiallyAbsent)
+    {
+        Check(!QFileInfo::exists(databasePath),
+            QStringLiteral("NOOP_ABSENT transaction never creates ConfigStore"));
+    }
+    else
+    {
+        Check(FileSha256(databasePath) == databaseHashBefore,
+            QStringLiteral("installer transaction gate leaves ConfigStore byte-identical"));
+    }
+    if (recordIsDirectory)
+    {
+        Check(ReadFileBytes(QDir(transactionPath).filePath(QStringLiteral("sentinel.bin")))
+                == expectedRecordBytes,
+            QStringLiteral("transaction directory remains byte-identical"));
+        Check(QDir(transactionPath).entryList(
+                QDir::AllEntries | QDir::NoDotAndDotDot).size() == 1,
+            QStringLiteral("transaction directory inventory remains unchanged"));
+    }
+    else if (scenario == QStringLiteral("dangling-symlink"))
+    {
+        Check(QFileInfo(transactionPath).isSymLink() && !QFileInfo::exists(linkedTargetPath),
+            QStringLiteral("dangling transaction symlink remains unchanged"));
+    }
+    else
+    {
+        Check(ReadFileBytes(transactionPath) == expectedRecordBytes,
+            QStringLiteral("installer transaction record remains byte-identical"));
+    }
+
+    const bool invalidateWhileBlocked = scenario == QStringLiteral("existing-connection-pending")
+        || scenario == QStringLiteral("existing-connection-corrupt");
+    QString invalidDatabaseHash;
+    if (invalidateWhileBlocked)
+    {
+        const QString tamperConnectionName = QStringLiteral("blocked_database_tamper_") + scenario;
+        {
+            QSqlDatabase tamperDatabase = QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"), tamperConnectionName);
+            tamperDatabase.setDatabaseName(databasePath);
+            Check(tamperDatabase.open(),
+                QStringLiteral("open externally modified database while runtime is blocked"));
+            QSqlQuery query(tamperDatabase);
+            if (scenario == QStringLiteral("existing-connection-pending"))
+            {
+                Check(query.exec(QStringLiteral(
+                    "UPDATE meta SET value='pending' "
+                    "WHERE key='legacy_credential_scrub_state'"))
+                        && query.numRowsAffected() == 1,
+                    QStringLiteral("externally mark credential scrub pending while blocked"));
+            }
+            else
+            {
+                Check(query.exec(QStringLiteral(
+                    "UPDATE meta SET value='invalid' WHERE key='auth_initialized'"))
+                        && query.numRowsAffected() == 1,
+                    QStringLiteral("externally corrupt authentication metadata while blocked"));
+            }
+            tamperDatabase.close();
+        }
+        QSqlDatabase::removeDatabase(tamperConnectionName);
+        invalidDatabaseHash = FileSha256(databasePath);
+        Check(invalidDatabaseHash != databaseHashBefore,
+            QStringLiteral("external blocked-period database change is observable"));
+        Check(ReadFileBytes(transactionPath) == expectedRecordBytes,
+            QStringLiteral("external database change does not alter transaction record"));
+    }
+
+    Check(RemoveTestFilesystemObject(transactionPath, recordIsDirectory),
+        QStringLiteral("simulate helper commit removing transaction record"));
+    Check(!QFileInfo::exists(transactionPath) && !QFileInfo(transactionPath).isSymLink(),
+        QStringLiteral("installer transaction record is gone after simulated helper commit"));
+    if (invalidateWhileBlocked)
+    {
+        Check(!ConfigDatabase::IsAvailable(),
+            QStringLiteral("record removal cannot bypass a full reopen and schema validation"));
+        Check(!ConfigDatabase::IsAvailable(),
+            QStringLiteral("invalid database remains rejected after the cached connection reopens"));
+        bool invalidInitialized = true;
+        Check(!ConfigDatabase::TryReadAuthenticationInitialized(&invalidInitialized),
+            QStringLiteral("invalid reopened database exposes no authentication metadata"));
+        Check(!ConfigDatabase::TryInitializeAuthenticationAccount(
+                QStringLiteral("blocked_bootstrap"), blockedBootstrap),
+            QStringLiteral("invalid reopened database cannot bootstrap a default account"));
+        Check(FileSha256(databasePath) == invalidDatabaseHash,
+            QStringLiteral("full reopen rejection leaves blocked-period database bytes unchanged"));
+        QTextStream(stdout) << "PASS: installer transaction gate " << scenario
+            << " closes cached connections and revalidates after record removal" << Qt::endl;
+        return 0;
+    }
+
+    Check(ConfigDatabase::IsAvailable(),
+        QStringLiteral("valid database access recovers only after transaction record removal"));
+    if (databaseInitiallyAbsent)
+    {
+        Check(QFileInfo::exists(databasePath),
+            QStringLiteral("fresh ConfigStore is created only after NOOP_ABSENT record removal"));
+        bool freshInitialized = true;
+        Check(ConfigDatabase::TryReadAuthenticationInitialized(&freshInitialized)
+                && !freshInitialized,
+            QStringLiteral("fresh post-transaction store remains explicitly uninitialized"));
+    }
+    else
+    {
+        const QStringList accounts = ConfigDatabase::ListScopedSettingIds(
+            QStringLiteral("account"), QStringLiteral("Profile"));
+        Check(accounts == QStringList{ QStringLiteral("admin") },
+            QStringLiteral("recovered database contains only the authoritative account"));
+        Check(FileSha256(databasePath) == databaseHashBefore,
+            QStringLiteral("record removal and read-only recovery leave ConfigStore byte-identical"));
+    }
+
+    QTextStream(stdout) << "PASS: installer transaction gate " << scenario
+        << " fails closed without mutation and recovers after record removal" << Qt::endl;
+    return 0;
+}
+
+int RunLegacyTimestampMergeTest()
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("legacy timestamp merge temp root"));
+    Check(QDir().mkpath(temp.filePath(QStringLiteral("Data"))),
+        QStringLiteral("legacy timestamp merge data dir"));
+    const QString dbPath = temp.filePath(QStringLiteral("Data/ConfigStore.db"));
+    const QString adminHash = LegacyPasswordHash(
+        QStringLiteral("admin"), QStringLiteral("Field-Timestamp-Merge-Test"));
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), QStringLiteral("legacy_timestamp_merge_fixture"));
+        db.setDatabaseName(dbPath);
+        Check(db.open(), QStringLiteral("open legacy timestamp merge fixture"));
+        CreateSettingsTable(db);
+        QSqlQuery query(db);
+        Check(query.exec("INSERT INTO meta(key, value) VALUES('schema_version', '4')"),
+            QStringLiteral("write timestamp merge schema 4"));
+
+        InsertFlatLegacyAccount(
+            db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+        InsertRaw(db, QStringLiteral("global"), QString(),
+            QStringLiteral("Accounts/Users"), QStringLiteral("admin/CreatedAt"),
+            QStringLiteral("2026-05-07T00:00:00"));
+        InsertRaw(db, QStringLiteral("global"), QString(),
+            QStringLiteral("Accounts/Users"), QStringLiteral("admin/UpdatedAt"),
+            QStringLiteral("2026-05-15T00:00:00"));
+
+        InsertNestedLegacyAccount(
+            db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+        InsertRaw(db, QStringLiteral("global"), QString(),
+            QStringLiteral("Accounts/Users/admin"), QStringLiteral("CreatedAt"),
+            ProtectLegacyFixture(QStringLiteral("2026-05-28T00:00:00")),
+            false, true, QStringLiteral("datetime"));
+        InsertRaw(db, QStringLiteral("global"), QString(),
+            QStringLiteral("Accounts/Users/admin"), QStringLiteral("UpdatedAt"),
+            ProtectLegacyFixture(QStringLiteral("2026-05-20T00:00:00")),
+            false, true, QStringLiteral("datetime"));
+
+        InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+            QStringLiteral("Profile"), QStringLiteral("PasswordHash"), adminHash, true);
+        InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+            QStringLiteral("Profile"), QStringLiteral("Role"), QStringLiteral("admin"));
+        InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+            QStringLiteral("Profile"), QStringLiteral("MustChangePassword"), QStringLiteral("0"), true);
+        InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+            QStringLiteral("Profile"), QStringLiteral("CreatedAt"),
+            QStringLiteral("2026-06-05T00:00:00"));
+        InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+            QStringLiteral("Profile"), QStringLiteral("UpdatedAt"),
+            QStringLiteral("2026-06-01T00:00:00"),
+            false, false, QStringLiteral("datetime"));
+        InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+            QStringLiteral("Profile"), QStringLiteral("PasswordChangedAt"),
+            QStringLiteral("2026-05-31T12:34:56Z"),
+            true, false, QStringLiteral("datetime"));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(QStringLiteral("legacy_timestamp_merge_fixture"));
+
+    QString pathError;
+    Check(AppPaths::Initialize(
+        QStringList() << QStringLiteral("CredentialSecurityTests")
+                      << QStringLiteral("--data-root") << temp.path(),
+        &pathError), QStringLiteral("initialize timestamp merge root: %1").arg(pathError));
+    Check(ConfigDatabase::IsAvailable(),
+        QStringLiteral("three-way account timestamp conflict is safely mergeable"));
+    QString createdAt;
+    QString updatedAt;
+    QString passwordChangedAt;
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            QStringLiteral("account"), QStringLiteral("admin"),
+            QStringLiteral("Profile"), QStringLiteral("CreatedAt"), &createdAt)
+            && ConfigDatabase::ReadScopedSetting(
+            QStringLiteral("account"), QStringLiteral("admin"),
+            QStringLiteral("Profile"), QStringLiteral("UpdatedAt"), &updatedAt)
+            && ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("PasswordChangedAt"),
+                &passwordChangedAt)
+            && createdAt == QStringLiteral("2026-05-07T00:00:00")
+            && updatedAt == QStringLiteral("2026-06-01T00:00:00")
+            && passwordChangedAt == QStringLiteral("2026-05-31T12:34:56Z"),
+        QStringLiteral("timestamps merge deterministically and encrypted source timestamps normalize"));
+    QTextStream(stdout)
+        << "PASS: three-way legacy/target account timestamps merge deterministically"
+        << Qt::endl;
+    return 0;
+}
+
+int RunCurrentAuthenticationIntegrityTest(const QString& scenario)
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("current authentication integrity temp root"));
+    Check(QDir().mkpath(temp.filePath(QStringLiteral("Data"))),
+        QStringLiteral("current authentication integrity data dir"));
+    const QString dbPath = temp.filePath(QStringLiteral("Data/ConfigStore.db"));
+    const QString connectionName = QStringLiteral("current_auth_integrity_") + scenario;
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        db.setDatabaseName(dbPath);
+        Check(db.open(), QStringLiteral("open current authentication integrity fixture"));
+        CreateSettingsTable(db, scenario == QStringLiteral("table-name-case"));
+        InsertCurrentAuthenticationMetadata(db, true);
+        InsertCurrentAccountProfile(
+            db, QStringLiteral("admin"),
+            scenario == QStringLiteral("no-admin")
+                ? QStringLiteral("operator") : QStringLiteral("admin"));
+        QSqlQuery query(db);
+        const auto insertMeta = [&query](const QString& key, const QString& value)
+            {
+                query.prepare(QStringLiteral("INSERT INTO meta(key, value) VALUES(?, ?)"));
+                query.addBindValue(key);
+                query.addBindValue(value);
+                Check(query.exec(), QStringLiteral("insert current integrity metadata %1").arg(key));
+            };
+        if (scenario == QStringLiteral("module-case-shadow"))
+        {
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("profile"), QStringLiteral("Shadow"),
+                QStringLiteral("must-not-survive"));
+        }
+        else if (scenario == QStringLiteral("legacy-orphan"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("Accounts/Users"), QStringLiteral("admin/Role"),
+                QStringLiteral("admin"));
+        }
+        else if (scenario == QStringLiteral("bad-dpapi"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("OnlineServices"), QStringLiteral("FtpPassword"),
+                QStringLiteral("dpapi:user:v1:not-valid-base64"), true, true);
+        }
+        else if (scenario == QStringLiteral("portable-dpapi-prefix"))
+        {
+            QString protectedRole;
+            Check(CredentialSecurity::ProtectForCurrentUser(
+                QStringLiteral("admin"),
+                QStringLiteral("account\nadmin\nProfile\nRole"),
+                &protectedRole), QStringLiteral("protect portable Role fixture"));
+            query.prepare(QStringLiteral(
+                "UPDATE settings SET value_text=?, encrypted=0 "
+                "WHERE scope_type='account' AND scope_id='admin' "
+                "AND module='Profile' AND key_name='Role'"));
+            query.addBindValue(protectedRole);
+            Check(query.exec() && query.numRowsAffected() == 1,
+                QStringLiteral("write DPAPI-prefixed portable Role fixture"));
+        }
+        else if (scenario == QStringLiteral("portable-legacy-prefix"))
+        {
+            query.prepare(QStringLiteral(
+                "UPDATE settings SET value_text=?, encrypted=0 "
+                "WHERE scope_type='account' AND scope_id='admin' "
+                "AND module='Profile' AND key_name='Role'"));
+            query.addBindValue(ProtectLegacyFixture(QStringLiteral("admin")));
+            Check(query.exec() && query.numRowsAffected() == 1,
+                QStringLiteral("write enc:v1-prefixed portable Role fixture"));
+        }
+        else if (scenario == QStringLiteral("portable-created-at-encrypted"))
+        {
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("CreatedAt"),
+                ProtectLegacyFixture(QStringLiteral("2026-07-13T00:00:00Z")),
+                false, true, QStringLiteral("datetime"));
+        }
+        else if (scenario == QStringLiteral("bad-password-changed-at"))
+        {
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("PasswordChangedAt"),
+                QStringLiteral("not-an-iso-timestamp"), true, false,
+                QStringLiteral("datetime"));
+        }
+        else if (scenario == QStringLiteral("manifest-without-state"))
+        {
+            insertMeta(QStringLiteral("legacy_credential_scrub_manifest"), QStringLiteral("[]"));
+        }
+        else if (scenario == QStringLiteral("bad-complete-manifest"))
+        {
+            insertMeta(QStringLiteral("legacy_credential_scrub_state"), QStringLiteral("complete"));
+            insertMeta(QStringLiteral("legacy_credential_scrub_manifest"), QStringLiteral("{}"));
+        }
+        else if (scenario == QStringLiteral("complete-scrub"))
+        {
+            insertMeta(QStringLiteral("legacy_credential_scrub_state"), QStringLiteral("complete"));
+            insertMeta(QStringLiteral("legacy_credential_scrub_manifest"), QStringLiteral("[]"));
+        }
+        else if (scenario == QStringLiteral("legacy-disabled-login-preferences"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState"), QStringLiteral("RememberPassword"),
+                QStringLiteral("0"), true, false, QStringLiteral("bool"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState"), QStringLiteral("AutoLogin"),
+                QStringLiteral("0"), true, false, QStringLiteral("bool"));
+        }
+        else if (scenario == QStringLiteral("plaintext-enabled-login-preference"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState"), QStringLiteral("RememberPassword"),
+                QStringLiteral("1"), true, false, QStringLiteral("bool"));
+        }
+        else if (scenario == QStringLiteral("plaintext-autologin-sensitive-zero"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState"), QStringLiteral("AutoLogin"),
+                QStringLiteral("1"), false, false, QStringLiteral("bool"));
+        }
+        else if (scenario == QStringLiteral("released-login-preferences"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState"), QStringLiteral("RememberPassword"),
+                QStringLiteral("0"), true, false, QStringLiteral("string"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState"), QStringLiteral("AutoLogin"),
+                QStringLiteral("1"), false, false, QStringLiteral("string"));
+        }
+        else if (scenario == QStringLiteral("protected-remembered-credential"))
+        {
+            QString protectedCredential;
+            QString protectedSavedPassword;
+            Check(CredentialSecurity::ProtectForCurrentUser(
+                QStringLiteral("remembered-secret"),
+                QStringLiteral("global\n\nLoginState/RememberedCredentials\nadmin"),
+                &protectedCredential),
+                QStringLiteral("protect remembered credential fixture"));
+            Check(CredentialSecurity::ProtectForCurrentUser(
+                QStringLiteral("saved-secret"),
+                QStringLiteral("global\n\nLoginState/SavedPasswords\nadmin"),
+                &protectedSavedPassword),
+                QStringLiteral("protect saved password fixture"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/RememberedCredentials"),
+                QStringLiteral("admin"), protectedCredential,
+                true, true, QStringLiteral("string"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/SavedPasswords"),
+                QStringLiteral("admin"), protectedSavedPassword,
+                true, true, QStringLiteral("string"));
+        }
+        else if (scenario.startsWith(QStringLiteral("remembered-credential-invalid-")))
+        {
+            QString keyName = QStringLiteral("admin");
+            QString plainText = QStringLiteral("remembered-secret");
+            QString valueType = QStringLiteral("string");
+            bool sensitive = true;
+            bool encrypted = true;
+            if (scenario.endsWith(QStringLiteral("unsafe-key")))
+            {
+                keyName = QStringLiteral("..");
+            }
+            else if (scenario.endsWith(QStringLiteral("empty")))
+            {
+                plainText.clear();
+            }
+            else if (scenario.endsWith(QStringLiteral("type")))
+            {
+                valueType = QStringLiteral("bool");
+            }
+            else if (scenario.endsWith(QStringLiteral("sensitive")))
+            {
+                sensitive = false;
+            }
+            else if (scenario.endsWith(QStringLiteral("encrypted")))
+            {
+                encrypted = false;
+            }
+            else
+            {
+                Check(false, QStringLiteral("unknown invalid remembered credential scenario"));
+            }
+            QString protectedCredential;
+            Check(CredentialSecurity::ProtectForCurrentUser(
+                plainText,
+                QStringLiteral("global\n\nLoginState/RememberedCredentials\n") + keyName,
+                &protectedCredential),
+                QStringLiteral("protect invalid remembered credential fixture"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/RememberedCredentials"),
+                keyName, protectedCredential, sensitive, encrypted, valueType);
+        }
+        else if (scenario == QStringLiteral("empty-created-at"))
+        {
+            insertMeta(QStringLiteral("created_at"), QStringLiteral("   "));
+        }
+        else if (scenario == QStringLiteral("legacy-table-case"))
+        {
+            Check(query.exec(QStringLiteral("CREATE TABLE INI_VALUES(dummy INTEGER)")),
+                QStringLiteral("create case-variant legacy table"));
+        }
+        else if (scenario != QStringLiteral("no-admin")
+            && scenario != QStringLiteral("valid")
+            && scenario != QStringLiteral("table-name-case"))
+        {
+            Check(false, QStringLiteral("unknown current integrity scenario"));
+        }
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    const QString before = FileSha256(dbPath);
+    QString pathError;
+    Check(AppPaths::Initialize(
+        QStringList() << QStringLiteral("CredentialSecurityTests")
+                      << QStringLiteral("--data-root") << temp.path(),
+        &pathError), QStringLiteral("initialize current integrity root: %1").arg(pathError));
+    const bool shouldOpen = scenario == QStringLiteral("valid")
+        || scenario == QStringLiteral("complete-scrub")
+        || scenario == QStringLiteral("legacy-disabled-login-preferences")
+        || scenario == QStringLiteral("released-login-preferences")
+        || scenario == QStringLiteral("protected-remembered-credential")
+        || scenario == QStringLiteral("table-name-case");
+    Check(ConfigDatabase::IsAvailable() == shouldOpen,
+        QStringLiteral("current integrity result for %1").arg(scenario));
+    Check(ConfigDatabase::IsAvailable() == shouldOpen,
+        QStringLiteral("current integrity result remains stable for %1").arg(scenario));
+    std::atomic_bool threadResult{ !shouldOpen };
+    std::thread threadProbe([&threadResult]()
+        {
+            threadResult = ConfigDatabase::IsAvailable();
+        });
+    threadProbe.join();
+    Check(threadResult.load() == shouldOpen,
+        QStringLiteral("current integrity result on fresh thread for %1").arg(scenario));
+    Check(FileSha256(dbPath) == before,
+        QStringLiteral("current integrity %1 leaves database byte-identical").arg(scenario));
+    if (scenario == QStringLiteral("released-login-preferences"))
+    {
+        QString rememberPassword;
+        QString autoLogin;
+        Check(ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                QStringLiteral("RememberPassword"), &rememberPassword)
+                && ConfigDatabase::ReadScopedSetting(
+                    QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                    QStringLiteral("AutoLogin"), &autoLogin)
+                && rememberPassword == QLatin1String("0")
+                && autoLogin == QLatin1String("1"),
+            QStringLiteral("released login preferences remain readable"));
+        const QString verifyConnection = QStringLiteral("released_login_preference_verify");
+        {
+            QSqlDatabase verifyDb = QSqlDatabase::addDatabase(
+                QStringLiteral("QSQLITE"), verifyConnection);
+            verifyDb.setDatabaseName(dbPath);
+            Check(verifyDb.open(), QStringLiteral("open upgraded login preference verification"));
+            QSqlQuery verifyQuery(verifyDb);
+            Check(verifyQuery.exec(QStringLiteral(
+                "SELECT value_text, value_type, sensitive, encrypted FROM settings "
+                "WHERE scope_type='global' AND scope_id='' AND module='LoginState' "
+                "AND key_name IN ('RememberPassword','AutoLogin') ORDER BY key_name")),
+                QStringLiteral("read upgraded login preference storage"));
+            int verified = 0;
+            while (verifyQuery.next())
+            {
+                Check(CredentialSecurity::IsCurrentUserProtected(
+                        verifyQuery.value(0).toString())
+                        && verifyQuery.value(1).toString() == QLatin1String("string")
+                        && verifyQuery.value(2).toInt() == 1
+                        && verifyQuery.value(3).toInt() == 1,
+                    QStringLiteral("legacy login preference upgrades to canonical DPAPI"));
+                ++verified;
+            }
+            Check(verified == 2,
+                QStringLiteral("both released login preferences were upgraded"));
+            verifyDb.close();
+        }
+        QSqlDatabase::removeDatabase(verifyConnection);
+    }
+    QTextStream(stdout) << "PASS: current schema " << scenario
+        << (shouldOpen ? " validates" : " fails closed")
+        << (scenario == QStringLiteral("released-login-preferences")
+                ? " read-only then upgrades on access" : " without database writes")
+        << Qt::endl;
+    return 0;
+}
+
+int RunLegacyMigrationRollbackTest(const QString& scenario)
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("legacy rollback temp root"));
+    Check(QDir().mkpath(temp.filePath(QStringLiteral("Data"))),
+        QStringLiteral("legacy rollback data dir"));
+    const QString dbPath = temp.filePath(QStringLiteral("Data/ConfigStore.db"));
+    const QString connectionName = QStringLiteral("legacy_rollback_fixture_") + scenario;
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        db.setDatabaseName(dbPath);
+        Check(db.open(), QStringLiteral("open legacy rollback fixture"));
+        CreateSettingsTable(db);
+        QSqlQuery query(db);
+        Check(query.exec("INSERT INTO meta(key, value) VALUES('schema_version', '4')"),
+            QStringLiteral("write rollback schema 4"));
+        const QString adminHash = LegacyPasswordHash(
+            QStringLiteral("admin"), QStringLiteral("Original-Admin-Test"));
+        if (scenario == QStringLiteral("source-conflict"))
+        {
+            InsertFlatLegacyAccount(db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+            InsertNestedLegacyAccount(
+                db, QStringLiteral("admin"),
+                LegacyPasswordHash(QStringLiteral("admin"), QStringLiteral("Different-Admin-Test")),
+                QStringLiteral("admin"));
+        }
+        else if (scenario == QStringLiteral("target-conflict"))
+        {
+            InsertFlatLegacyAccount(db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("PasswordHash"),
+                LegacyPasswordHash(QStringLiteral("admin"), QStringLiteral("Different-Target-Test")),
+                true);
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("Role"), QStringLiteral("admin"));
+        }
+        else if (scenario == QStringLiteral("target-protected-portable"))
+        {
+            InsertFlatLegacyAccount(db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("PasswordHash"), adminHash, true);
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("Role"),
+                ProtectLegacyFixture(QStringLiteral("admin")), false, true);
+        }
+        else if (scenario == QStringLiteral("target-malformed-password-changed-at"))
+        {
+            InsertFlatLegacyAccount(db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("PasswordHash"),
+                LegacyPasswordHash(QStringLiteral("admin"), QStringLiteral("admin")), true);
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("Role"), QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("account"), QStringLiteral("admin"),
+                QStringLiteral("Profile"), QStringLiteral("PasswordChangedAt"),
+                QStringLiteral("not-iso"), true, false, QStringLiteral("datetime"));
+        }
+        else if (scenario == QStringLiteral("no-admin"))
+        {
+            InsertFlatLegacyAccount(
+                db, QStringLiteral("cyh"),
+                LegacyPasswordHash(QStringLiteral("cyh"), QStringLiteral("Operator-Test")),
+                QStringLiteral("operator"));
+        }
+        else if (scenario == QStringLiteral("user-case-conflict"))
+        {
+            InsertFlatLegacyAccount(db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+            InsertNestedLegacyAccount(
+                db, QStringLiteral("Admin"),
+                LegacyPasswordHash(QStringLiteral("Admin"), QStringLiteral("Other-Admin-Test")),
+                QStringLiteral("admin"));
+        }
+        else if (scenario == QStringLiteral("field-case-conflict"))
+        {
+            InsertFlatLegacyAccount(db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("Accounts/Users/admin"), QStringLiteral("role"),
+                QStringLiteral("admin"));
+        }
+        else if (scenario == QStringLiteral("login-module-case-conflict"))
+        {
+            InsertFlatLegacyAccount(db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("loginstate/general"), QStringLiteral("UserName"),
+                QStringLiteral("admin"));
+        }
+        else if (scenario == QStringLiteral("login-field-case-conflict"))
+        {
+            InsertFlatLegacyAccount(db, QStringLiteral("admin"), adminHash, QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/General"), QStringLiteral("username"),
+                QStringLiteral("admin"));
+        }
+        else
+        {
+            Check(false, QStringLiteral("unknown legacy rollback scenario"));
+        }
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    const QString before = FileSha256(dbPath);
+    QString pathError;
+    Check(AppPaths::Initialize(
+        QStringList() << QStringLiteral("CredentialSecurityTests")
+                      << QStringLiteral("--data-root") << temp.path(),
+        &pathError), QStringLiteral("initialize rollback root: %1").arg(pathError));
+    Check(!ConfigDatabase::IsAvailable(),
+        QStringLiteral("legacy %1 must fail closed").arg(scenario));
+    Check(!ConfigDatabase::IsAvailable(),
+        QStringLiteral("legacy %1 remains unavailable").arg(scenario));
+    Check(FileSha256(dbPath) == before,
+        QStringLiteral("legacy %1 rolls back byte-identically").arg(scenario));
+    QTextStream(stdout) << "PASS: legacy " << scenario
+        << " fails closed with byte-identical rollback" << Qt::endl;
+    return 0;
+}
+
+int RunRejectedRuntimeIniTest(const QString& scenario)
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("runtime INI rejection temp root"));
+    const QString dataDir = temp.filePath(QStringLiteral("Data"));
+    Check(QDir().mkpath(dataDir), QStringLiteral("runtime INI rejection data dir"));
+    const QString dbPath = temp.filePath(QStringLiteral("Data/ConfigStore.db"));
+    const QString connectionName = QStringLiteral("runtime_ini_fixture_") + scenario;
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        db.setDatabaseName(dbPath);
+        Check(db.open(), QStringLiteral("open runtime INI rejection fixture"));
+        CreateSettingsTable(db);
+        QSqlQuery query(db);
+        Check(query.exec("INSERT INTO meta(key, value) VALUES('schema_version', '4')"),
+            QStringLiteral("write runtime INI schema 4"));
+        InsertFlatLegacyAccount(
+            db, QStringLiteral("admin"),
+            LegacyPasswordHash(QStringLiteral("admin"), QStringLiteral("Admin-Ini-Test")),
+            QStringLiteral("admin"));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+
+    QString iniDirectory = dataDir;
+    QByteArray content;
+    if (scenario == QStringLiteral("unknown-key"))
+    {
+        content = QByteArrayLiteral("ifupright=true\nUnexpectedRuntimeKey=1\n");
+    }
+    else if (scenario == QStringLiteral("section"))
+    {
+        content = QByteArrayLiteral("[PointCloud]\nifupright=true\n");
+    }
+    else if (scenario == QStringLiteral("nested"))
+    {
+        iniDirectory = QDir(dataDir).filePath(QStringLiteral("runtime"));
+        Check(QDir().mkpath(iniDirectory), QStringLiteral("create nested runtime INI dir"));
+        content = QByteArrayLiteral("ifupright=true\nPlate_thickness=5\n");
+    }
+    else if (scenario == QStringLiteral("credential-key"))
+    {
+        content = QByteArrayLiteral("ifupright=true\nPassword=plaintext-secret\n");
+    }
+    else if (scenario == QStringLiteral("symlink"))
+    {
+        const QString targetPath = temp.filePath(QStringLiteral("RuntimePointCloudTarget.ini"));
+        QFile target(targetPath);
+        content = QByteArrayLiteral("ifupright=true\nPlate_thickness=5\n");
+        Check(target.open(QIODevice::WriteOnly), QStringLiteral("write runtime INI symlink target"));
+        Check(target.write(content) == content.size(),
+            QStringLiteral("write complete runtime INI symlink target"));
+        target.close();
+        const QString linkPath = QDir(iniDirectory).filePath(
+            QStringLiteral("CorrugatedSheetPointCloudEctration.ini"));
+        bool linked = CreateSymbolicLinkW(
+            reinterpret_cast<LPCWSTR>(linkPath.utf16()),
+            reinterpret_cast<LPCWSTR>(targetPath.utf16()),
+            SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+        DWORD linkError = linked ? ERROR_SUCCESS : GetLastError();
+        if (!linked && linkError == ERROR_INVALID_PARAMETER)
+        {
+            linked = CreateSymbolicLinkW(
+                reinterpret_cast<LPCWSTR>(linkPath.utf16()),
+                reinterpret_cast<LPCWSTR>(targetPath.utf16()),
+                0) != FALSE;
+            linkError = linked ? ERROR_SUCCESS : GetLastError();
+        }
+        if (!linked)
+        {
+            QTextStream(stdout) << "SKIP: Windows cannot create runtime INI symlink (error "
+                << linkError << "); source-level isSymLink gate remains required" << Qt::endl;
+            return 0;
+        }
+        Check(QFileInfo(linkPath).isSymLink(), QStringLiteral("runtime INI fixture is a symlink"));
+        content.clear();
+    }
+    else
+    {
+        Check(false, QStringLiteral("unknown runtime INI scenario"));
+    }
+    if (scenario != QStringLiteral("symlink"))
+    {
+        QFile ini(QDir(iniDirectory).filePath(
+            QStringLiteral("CorrugatedSheetPointCloudEctration.ini")));
+        Check(ini.open(QIODevice::WriteOnly), QStringLiteral("write rejected runtime INI"));
+        Check(ini.write(content) == content.size(), QStringLiteral("write complete rejected runtime INI"));
+        ini.close();
+    }
+
+    const QString before = FileSha256(dbPath);
+    QString pathError;
+    Check(AppPaths::Initialize(
+        QStringList() << QStringLiteral("CredentialSecurityTests")
+                      << QStringLiteral("--data-root") << temp.path(),
+        &pathError), QStringLiteral("initialize rejected runtime INI root: %1").arg(pathError));
+    Check(!ConfigDatabase::IsAvailable(),
+        QStringLiteral("runtime INI %1 must remain blocked").arg(scenario));
+    Check(FileSha256(dbPath) == before,
+        QStringLiteral("runtime INI %1 leaves schema4 byte-identical").arg(scenario));
+    QTextStream(stdout) << "PASS: runtime INI " << scenario
+        << " remains a blocking legacy input" << Qt::endl;
+    return 0;
+}
 }
 
 int main(int argc, char* argv[])
@@ -607,6 +1720,38 @@ int main(int argc, char* argv[])
     if (pythonInteropIndex >= 0 && pythonInteropIndex + 1 < app.arguments().size())
     {
         return RunPythonInteropTest(app.arguments().at(pythonInteropIndex + 1));
+    }
+    if (app.arguments().contains(QStringLiteral("--legacy-timestamp-merge")))
+    {
+        return RunLegacyTimestampMergeTest();
+    }
+    const int currentIntegrityIndex = app.arguments().indexOf(
+        QStringLiteral("--current-auth-integrity"));
+    if (currentIntegrityIndex >= 0
+        && currentIntegrityIndex + 1 < app.arguments().size())
+    {
+        return RunCurrentAuthenticationIntegrityTest(
+            app.arguments().at(currentIntegrityIndex + 1));
+    }
+    const int installerTransactionIndex = app.arguments().indexOf(
+        QStringLiteral("--installer-transaction-gate"));
+    if (installerTransactionIndex >= 0
+        && installerTransactionIndex + 1 < app.arguments().size())
+    {
+        return RunInstallerTransactionGateTest(
+            app.arguments().at(installerTransactionIndex + 1));
+    }
+    const int legacyRollbackIndex = app.arguments().indexOf(QStringLiteral("--legacy-rollback"));
+    if (legacyRollbackIndex >= 0 && legacyRollbackIndex + 1 < app.arguments().size())
+    {
+        return RunLegacyMigrationRollbackTest(app.arguments().at(legacyRollbackIndex + 1));
+    }
+    const int rejectedRuntimeIniIndex = app.arguments().indexOf(
+        QStringLiteral("--rejected-runtime-ini"));
+    if (rejectedRuntimeIniIndex >= 0
+        && rejectedRuntimeIniIndex + 1 < app.arguments().size())
+    {
+        return RunRejectedRuntimeIniTest(app.arguments().at(rejectedRuntimeIniIndex + 1));
     }
     if (app.arguments().contains(QStringLiteral("--corrupt-dpapi")))
     {
@@ -714,6 +1859,16 @@ int main(int argc, char* argv[])
         CredentialSecurity::UnprotectForCurrentUser(protectedFirst, purpose, &recovered, &error)
             && recovered == password,
         QStringLiteral("DPAPI Unicode round trip: %1").arg(error));
+    QString protectedEmpty;
+    recovered = QStringLiteral("sentinel");
+    Check(
+        CredentialSecurity::ProtectForCurrentUser(
+            QString(), purpose, &protectedEmpty, &error)
+            && !protectedEmpty.isEmpty()
+            && CredentialSecurity::UnprotectForCurrentUser(
+                protectedEmpty, purpose, &recovered, &error)
+            && recovered.isEmpty(),
+        QStringLiteral("DPAPI empty payload round trip: %1").arg(error));
     recovered.clear();
     Check(
         !CredentialSecurity::UnprotectForCurrentUser(
@@ -732,19 +1887,33 @@ int main(int argc, char* argv[])
     Check(temp.isValid(), QStringLiteral("v4 migration temp root"));
     Check(QDir().mkpath(temp.filePath(QStringLiteral("Data"))), QStringLiteral("v4 data dir"));
     const QString dbPath = temp.filePath(QStringLiteral("Data/ConfigStore.db"));
-    const QString legacyUser = QStringLiteral("legacy_operator");
+    const QString legacyUser = QStringLiteral("cyh");
     const QString legacyPassword = QStringLiteral("Legacy-Account-Test-Only");
     const QString legacyHash = QString::fromLatin1(QCryptographicHash::hash(
         QStringLiteral("%1\n%2").arg(legacyUser, legacyPassword).toUtf8(),
         QCryptographicHash::Sha256).toHex());
-    const QString remoteSecret = QStringLiteral("Synthetic-Remote-Credential-Test-Only");
+    const QString adminPassword = QStringLiteral("Original-Admin-Test-Only");
+    const QString adminHash = QString::fromLatin1(QCryptographicHash::hash(
+        QStringLiteral("admin\n%1").arg(adminPassword).toUtf8(),
+        QCryptographicHash::Sha256).toHex());
+    const QString remoteSecret = QStringLiteral("");
     const QString authoritativeUser = QStringLiteral("current_admin");
     const QString authoritativePasswordRecord = CredentialSecurity::CreatePasswordRecord(
         QStringLiteral("Current-Authoritative-Password"), &error);
     Check(!authoritativePasswordRecord.isEmpty(), QStringLiteral("create authoritative account fixture"));
-    const QString staleLegacyHash = QString::fromLatin1(QCryptographicHash::hash(
-        QStringLiteral("%1\nStale-Legacy-Password").arg(authoritativeUser).toUtf8(),
-        QCryptographicHash::Sha256).toHex());
+    {
+        QFile runtimeIni(temp.filePath(
+            QStringLiteral("Data/CorrugatedSheetPointCloudEctration.ini")));
+        Check(runtimeIni.open(QIODevice::WriteOnly), QStringLiteral("create runtime point-cloud INI"));
+        const QByteArray runtimeSettings = QByteArrayLiteral(
+            "// runtime point-cloud parameters\n"
+            "ifupright = true\n"
+            "Plate_thickness = 5\n"
+            "Save_File_Name = .\\AllType.txt\n"
+            "above_z = 0.5\n");
+        Check(runtimeIni.write(runtimeSettings) == runtimeSettings.size(),
+            QStringLiteral("write runtime point-cloud INI"));
+    }
     {
         QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), QStringLiteral("v4_fixture"));
         db.setDatabaseName(dbPath);
@@ -753,22 +1922,32 @@ int main(int argc, char* argv[])
         QSqlQuery query(db);
         Check(query.exec("INSERT INTO meta(key, value) VALUES('schema_version', '4')"), QStringLiteral("write schema 4"));
         Check(query.exec("INSERT INTO meta(key, value) VALUES('encrypt_new_values', '0')"), QStringLiteral("write old encryption flag"));
-        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/legacy_operator"), QStringLiteral("PasswordHash"), legacyHash, true);
-        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/legacy_operator"), QStringLiteral("Role"), QStringLiteral("operator"));
-        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/legacy_operator"), QStringLiteral("CreatedAt"), QStringLiteral("2026-01-02T03:04:05"));
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users"), QStringLiteral("cyh/PasswordHash"), legacyHash, true);
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users"), QStringLiteral("cyh/Role"), QStringLiteral("operator"));
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users"), QStringLiteral("cyh/CreatedAt"), QStringLiteral("2026-01-02T03:04:05"));
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users"), QStringLiteral("admin/PasswordHash"), adminHash, true);
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users"), QStringLiteral("admin/Role"), QStringLiteral("admin"));
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users"), QStringLiteral("admin/CreatedAt"), QStringLiteral("2026-01-02T03:04:05"));
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/admin"),
+            QStringLiteral("PasswordHash"), ProtectLegacyFixture(adminHash), true, true);
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/admin"),
+            QStringLiteral("Role"), ProtectLegacyFixture(QStringLiteral("admin")), false, true);
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/admin"),
+            QStringLiteral("CreatedAt"),
+            ProtectLegacyFixture(QStringLiteral("2026-01-02T03:04:05")), false, true);
         InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("LoginState/General"), QStringLiteral("UserName"), legacyUser);
         InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("LoginState/General"), QStringLiteral("RememberPassword"), QStringLiteral("1"));
         InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("LoginState/General"), QStringLiteral("AutoLogin"), QStringLiteral("1"));
         InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("LoginState/General"), QStringLiteral("PasswordBase64"), QString::fromLatin1(legacyPassword.toUtf8().toBase64()));
         InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("OnlineServices"), QStringLiteral("FtpPassword"), remoteSecret);
-        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/current_admin"), QStringLiteral("PasswordHash"), staleLegacyHash, true);
-        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/current_admin"), QStringLiteral("Role"), QStringLiteral("operator"));
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/current_admin"), QStringLiteral("PasswordHash"), authoritativePasswordRecord, true);
+        InsertRaw(db, QStringLiteral("global"), QString(), QStringLiteral("Accounts/Users/current_admin"), QStringLiteral("Role"), QStringLiteral("admin"));
         InsertRaw(
             db, QStringLiteral("account"), authoritativeUser, QStringLiteral("Profile"),
-            QStringLiteral("PasswordHash"), ProtectLegacyFixture(authoritativePasswordRecord), true, true);
+            QStringLiteral("PasswordHash"), authoritativePasswordRecord, true, false);
         InsertRaw(
             db, QStringLiteral("account"), authoritativeUser, QStringLiteral("Profile"),
-            QStringLiteral("Role"), ProtectLegacyFixture(QStringLiteral("admin")), false, true);
+            QStringLiteral("Role"), QStringLiteral("admin"), false, false);
         db.close();
     }
     QSqlDatabase::removeDatabase(QStringLiteral("v4_fixture"));
@@ -788,8 +1967,11 @@ int main(int argc, char* argv[])
         QStringLiteral("migrated account store requires recovery instead of default bootstrap"));
     Check(
         ConfigDatabase::ListScopedSettingIds(QStringLiteral("account"), QStringLiteral("Profile"))
-            .contains(legacyUser),
-        QStringLiteral("legacy account semantic mapping"));
+            .contains(legacyUser)
+            && ConfigDatabase::ListScopedSettingIds(
+                QStringLiteral("account"), QStringLiteral("Profile"))
+                .contains(QStringLiteral("admin")),
+        QStringLiteral("flat cyh plus duplicate-layout admin semantic mapping"));
     QString migratedHash;
     Check(
         ConfigDatabase::ReadScopedSetting(
@@ -800,6 +1982,20 @@ int main(int argc, char* argv[])
         CredentialSecurity::VerifyPasswordRecord(legacyUser, legacyPassword, migratedHash)
             == CredentialSecurity::PasswordVerification::ValidNeedsUpgrade,
         QStringLiteral("legacy account remains verifiable for login-time KDF upgrade"));
+    QString migratedAdminHash;
+    QString migratedAdminRole;
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            QStringLiteral("account"), QStringLiteral("admin"), QStringLiteral("Profile"),
+            QStringLiteral("PasswordHash"), &migratedAdminHash)
+            && ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("account"), QStringLiteral("admin"), QStringLiteral("Profile"),
+                QStringLiteral("Role"), &migratedAdminRole)
+            && migratedAdminRole == QStringLiteral("admin")
+            && CredentialSecurity::VerifyPasswordRecord(
+                QStringLiteral("admin"), adminPassword, migratedAdminHash)
+                == CredentialSecurity::PasswordVerification::ValidNeedsUpgrade,
+        QStringLiteral("duplicate-layout admin remains complete and verifiable"));
     QString value;
     Check(
         ConfigDatabase::ReadScopedSetting(
@@ -816,8 +2012,8 @@ int main(int argc, char* argv[])
         ConfigDatabase::ReadScopedSetting(
             QStringLiteral("global"), QString(), QStringLiteral("OnlineServices"),
             QStringLiteral("FtpPassword"), &value)
-            && value == remoteSecret,
-        QStringLiteral("remote credential survives DPAPI migration"));
+            && value.isEmpty(),
+        QStringLiteral("empty remote credential survives DPAPI migration"));
     QString authoritativeHashAfter;
     QString authoritativeRoleAfter;
     QString authoritativeMustChangeAfter;
@@ -860,8 +2056,22 @@ int main(int argc, char* argv[])
         Check(query.exec("SELECT value FROM meta WHERE key='schema_version'") && query.next()
             && query.value(0).toString() == QStringLiteral("5"), QStringLiteral("schema version 5"));
         Check(query.exec(
-            "SELECT COUNT(*) FROM settings WHERE module LIKE 'Accounts/Users/%' "
-            "OR module LIKE 'LoginState/SavedPasswords%' OR lower(key_name)='passwordbase64'")
+            "SELECT key, value FROM meta WHERE key IN "
+            "('schema_version', 'auth_semantic_version', 'auth_initialized') ORDER BY key")
+            && query.next() && query.value(0).toString() == QStringLiteral("auth_initialized")
+            && query.value(1).toString() == QStringLiteral("1")
+            && query.next() && query.value(0).toString() == QStringLiteral("auth_semantic_version")
+            && query.value(1).toString() == QStringLiteral("2")
+            && query.next() && query.value(0).toString() == QStringLiteral("schema_version")
+            && query.value(1).toString() == QStringLiteral("5")
+            && !query.next(), QStringLiteral("authentication migration metadata"));
+        Check(query.exec(
+            "SELECT COUNT(*) FROM settings WHERE lower(module)='accounts/users' "
+            "OR lower(module) GLOB 'accounts/users/*' "
+            "OR lower(module)='loginstate/general' "
+            "OR lower(module) GLOB 'loginstate/savedpasswords*' "
+            "OR lower(module) GLOB 'loginstate/rememberedcredentials*' "
+            "OR lower(key_name)='passwordbase64'")
             && query.next() && query.value(0).toInt() == 0,
             QStringLiteral("legacy authentication rows removed"));
         Check(query.exec(

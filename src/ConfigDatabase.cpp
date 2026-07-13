@@ -5,16 +5,25 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDate>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
 #include <QRandomGenerator>
+#include <QRegularExpression>
+#include <QSet>
 #include <QSqlDatabase>
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QThread>
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -43,11 +52,49 @@ bool WriteScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& iden
 bool EnsureCurrentSchema(QSqlDatabase& db);
 bool HasLegacyDiskConfigurationInputs(const QString& databasePath);
 bool HasUnsafePlaintextConfigStoreResidue(const QString& databasePath);
+bool HasInstallerTransactionRecord(const QString& databasePath);
+
+class ThreadDatabaseConnection
+{
+public:
+    ThreadDatabaseConnection()
+    {
+        static std::atomic<quint64> nextId{ 0 };
+        const quintptr threadId = reinterpret_cast<quintptr>(QThread::currentThreadId());
+        m_name = QStringLiteral("ConfigStore_%1_%2")
+            .arg(threadId)
+            .arg(nextId.fetch_add(1, std::memory_order_relaxed));
+    }
+
+    ~ThreadDatabaseConnection()
+    {
+        if (!QSqlDatabase::contains(m_name))
+        {
+            return;
+        }
+        {
+            QSqlDatabase database = QSqlDatabase::database(m_name, false);
+            if (database.isValid())
+            {
+                database.close();
+            }
+        }
+        QSqlDatabase::removeDatabase(m_name);
+    }
+
+    const QString& name() const
+    {
+        return m_name;
+    }
+
+private:
+    QString m_name;
+};
 
 QString ConnectionName()
 {
-    const quintptr threadId = reinterpret_cast<quintptr>(QThread::currentThreadId());
-    return QString("ConfigStore_%1").arg(threadId);
+    thread_local ThreadDatabaseConnection connection;
+    return connection.name();
 }
 
 QString FindProjectRoot()
@@ -55,12 +102,67 @@ QString FindProjectRoot()
     return AppPaths::DataRootPath();
 }
 
+bool HasInstallerTransactionRecord(const QString& databasePath)
+{
+    const QFileInfo databaseInfo(databasePath);
+    const QString recordName = QStringLiteral("ConfigStore.db.install-transaction-v1");
+    const QString recordPath = databaseInfo.dir().filePath(recordName);
+    const QFileInfo recordInfo(recordPath);
+    if (recordInfo.exists() || recordInfo.isSymLink())
+    {
+        return true;
+    }
+
+    // QFileInfo::exists() is false for a dangling symbolic link. Enumerating with
+    // QDir::System keeps that link visible, so every filesystem object at the
+    // transaction-record path remains a fail-closed startup barrier.
+    const QDir dataDirectory = databaseInfo.dir();
+    const QFileInfoList entries = dataDirectory.entryInfoList(
+        QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
+    return std::any_of(entries.cbegin(), entries.cend(), [&recordName](const QFileInfo& entry)
+        {
+#ifdef Q_OS_WIN
+            return entry.fileName().compare(recordName, Qt::CaseInsensitive) == 0;
+#else
+            return entry.fileName() == recordName;
+#endif
+        });
+}
+
 QSqlDatabase OpenDatabase()
 {
+    const QString configuredDatabasePath = ConfigDatabase::DatabasePath();
     const QString connectionName = ConnectionName();
+    if (HasInstallerTransactionRecord(configuredDatabasePath))
+    {
+        if (QSqlDatabase::contains(connectionName))
+        {
+            QSqlDatabase existingDatabase = QSqlDatabase::database(connectionName, false);
+            if (existingDatabase.isValid())
+            {
+                existingDatabase.close();
+            }
+        }
+        qCritical() << "ConfigStore installer transaction is unresolved; "
+                       "account access remains in security recovery.";
+        return QSqlDatabase();
+    }
+
     if (QSqlDatabase::contains(connectionName))
     {
         QSqlDatabase db = QSqlDatabase::database(connectionName, false);
+        const QString connectionDatabasePath = db.databaseName().isEmpty()
+            ? configuredDatabasePath : db.databaseName();
+        if (HasInstallerTransactionRecord(connectionDatabasePath))
+        {
+            if (db.isValid())
+            {
+                db.close();
+            }
+            qCritical() << "ConfigStore installer transaction appeared while a database "
+                           "connection was open; account access remains in security recovery.";
+            return QSqlDatabase();
+        }
         if (db.isOpen())
         {
             return db;
@@ -75,6 +177,11 @@ QSqlDatabase OpenDatabase()
         }
         if (db.open())
         {
+            if (HasInstallerTransactionRecord(connectionDatabasePath))
+            {
+                db.close();
+                return QSqlDatabase();
+            }
             QSqlQuery pragma(db);
             pragma.exec("PRAGMA busy_timeout=3000");
             pragma.exec("PRAGMA secure_delete=ON");
@@ -87,7 +194,7 @@ QSqlDatabase OpenDatabase()
         return QSqlDatabase();
     }
 
-    const QString dbPath = ConfigDatabase::DatabasePath();
+    const QString dbPath = configuredDatabasePath;
     const QFileInfo dbInfo(dbPath);
     QDir dbDir = dbInfo.dir();
     if (!dbDir.exists() && !dbDir.mkpath(QStringLiteral(".")))
@@ -114,8 +221,19 @@ QSqlDatabase OpenDatabase()
 
     QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
     db.setDatabaseName(dbPath);
+    if (HasInstallerTransactionRecord(dbPath))
+    {
+        db.close();
+        return QSqlDatabase();
+    }
     if (!db.open())
     {
+        return QSqlDatabase();
+    }
+
+    if (HasInstallerTransactionRecord(dbPath))
+    {
+        db.close();
         return QSqlDatabase();
     }
 
@@ -124,6 +242,12 @@ QSqlDatabase OpenDatabase()
     pragma.exec("PRAGMA secure_delete=ON");
 
     if (!EnsureCurrentSchema(db))
+    {
+        db.close();
+        return QSqlDatabase();
+    }
+
+    if (HasInstallerTransactionRecord(dbPath))
     {
         db.close();
         return QSqlDatabase();
@@ -364,7 +488,8 @@ bool IsSensitiveSettingKey(const QString& keyName)
         || lower.contains(QStringLiteral("secret"))
         || lower.contains(QStringLiteral("credential"))
         || lower.contains(QStringLiteral("api_key"))
-        || lower.contains(QStringLiteral("apikey"));
+        || lower.contains(QStringLiteral("apikey"))
+        || lower == QLatin1String("autologin");
 }
 
 bool IsPortableAuthenticationValue(
@@ -380,7 +505,16 @@ bool IsPortableAuthenticationValue(
     return keyName.compare(QStringLiteral("PasswordHash"), Qt::CaseInsensitive) == 0
         || keyName.compare(QStringLiteral("Role"), Qt::CaseInsensitive) == 0
         || keyName.compare(QStringLiteral("MustChangePassword"), Qt::CaseInsensitive) == 0
-        || keyName.compare(QStringLiteral("PasswordChangedAt"), Qt::CaseInsensitive) == 0;
+        || keyName.compare(QStringLiteral("PasswordChangedAt"), Qt::CaseInsensitive) == 0
+        || keyName.compare(QStringLiteral("CreatedAt"), Qt::CaseInsensitive) == 0
+        || keyName.compare(QStringLiteral("UpdatedAt"), Qt::CaseInsensitive) == 0;
+}
+
+bool HasPortableAuthenticationStorage(const QString& storedText, int encrypted)
+{
+    return encrypted == 0
+        && !CredentialSecurity::IsCurrentUserProtected(storedText)
+        && !storedText.startsWith(QLatin1String("enc:v1:"));
 }
 
 bool RequiresDpapiProtection(
@@ -680,7 +814,9 @@ bool CreateCurrentTables(QSqlDatabase& db)
 bool TableExists(QSqlDatabase& db, const QString& tableName)
 {
     QSqlQuery query(db);
-    query.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1");
+    query.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND lower(name)=lower(?) LIMIT 1");
     query.addBindValue(tableName);
     return query.exec() && query.next();
 }
@@ -771,6 +907,305 @@ struct LegacyAccount
     QMap<QString, QString> values;
 };
 
+const QStringList& LegacyAccountFieldNames()
+{
+    static const QStringList fields = {
+        QStringLiteral("PasswordHash"),
+        QStringLiteral("Role"),
+        QStringLiteral("CreatedAt"),
+        QStringLiteral("UpdatedAt"),
+        QStringLiteral("MustChangePassword")
+    };
+    return fields;
+}
+
+bool CanonicalLegacyAccountField(const QString& fieldName, QString* canonical)
+{
+    if (canonical == nullptr)
+    {
+        return false;
+    }
+    for (const QString& supported : LegacyAccountFieldNames())
+    {
+        if (fieldName.compare(supported, Qt::CaseInsensitive) == 0)
+        {
+            *canonical = supported;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ParseAuthenticationBool(const QString& value, bool* parsed);
+bool CanonicalCurrentAccountSecurityField(
+    const QString& fieldName,
+    QString* canonical);
+
+bool IsLegacyAccountTimestampField(const QString& fieldName)
+{
+    return fieldName == QLatin1String("CreatedAt")
+        || fieldName == QLatin1String("UpdatedAt");
+}
+
+bool ParseAccountTimestampInstant(const QString& value, qint64* instantMicros)
+{
+    if (instantMicros == nullptr
+        || value != value.trimmed()
+        || value.size() > 64)
+    {
+        return false;
+    }
+    static const QRegularExpression expression(QStringLiteral(
+        "\\A(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})"
+        "(?:\\.(\\d{1,6}))?(?:(Z)|([+-])(\\d{2}):(\\d{2}))?\\z"));
+    const QRegularExpressionMatch match = expression.match(value);
+    if (!match.hasMatch())
+    {
+        return false;
+    }
+    const QDate date(
+        match.captured(1).toInt(),
+        match.captured(2).toInt(),
+        match.captured(3).toInt());
+    const int hour = match.captured(4).toInt();
+    const int minute = match.captured(5).toInt();
+    const int second = match.captured(6).toInt();
+    if (!date.isValid()
+        || hour < 0 || hour > 23
+        || minute < 0 || minute > 59
+        || second < 0 || second > 59)
+    {
+        return false;
+    }
+    QString fraction = match.captured(7);
+    fraction = fraction.leftJustified(6, QLatin1Char('0'));
+    const int microsecond = fraction.isEmpty() ? 0 : fraction.toInt();
+    int offsetSeconds = 0;
+    if (!match.captured(9).isEmpty())
+    {
+        const int offsetHour = match.captured(10).toInt();
+        const int offsetMinute = match.captured(11).toInt();
+        if (offsetHour > 23 || offsetMinute > 59)
+        {
+            return false;
+        }
+        offsetSeconds = (offsetHour * 60 + offsetMinute) * 60;
+        if (match.captured(9) == QLatin1String("-"))
+        {
+            offsetSeconds = -offsetSeconds;
+        }
+    }
+    const qint64 localSeconds = date.toJulianDay() * 24 * 60 * 60
+        + hour * 60 * 60 + minute * 60 + second;
+    *instantMicros = (localSeconds - offsetSeconds) * 1000000 + microsecond;
+    return true;
+}
+
+bool MergeAccountTimestamps(
+    const QString& fieldName,
+    const QStringList& candidates,
+    QString* merged)
+{
+    if (merged == nullptr || !IsLegacyAccountTimestampField(fieldName))
+    {
+        return false;
+    }
+    merged->clear();
+    qint64 selectedInstant = 0;
+    bool selected = false;
+    for (const QString& candidate : candidates)
+    {
+        qint64 candidateInstant = 0;
+        if (!ParseAccountTimestampInstant(candidate, &candidateInstant))
+        {
+            return false;
+        }
+        const int lexicalOrder = selected
+            ? QString::compare(candidate, *merged, Qt::CaseSensitive) : 0;
+        const bool choose = !selected
+            || (fieldName == QLatin1String("CreatedAt")
+                && (candidateInstant < selectedInstant
+                    || (candidateInstant == selectedInstant && lexicalOrder < 0)))
+            || (fieldName == QLatin1String("UpdatedAt")
+                && (candidateInstant > selectedInstant
+                    || (candidateInstant == selectedInstant && lexicalOrder > 0)));
+        if (choose)
+        {
+            *merged = candidate;
+            selectedInstant = candidateInstant;
+            selected = true;
+        }
+    }
+    return true;
+}
+
+bool ValidateCredentialScrubManifest(const QString& value)
+{
+    if (value.toUtf8().size() > 1024 * 1024)
+    {
+        return false;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(
+        value.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isArray())
+    {
+        return false;
+    }
+    static const QSet<QString> requiredKeys = {
+        QStringLiteral("path"),
+        QStringLiteral("before_sha256"),
+        QStringLiteral("after_sha256"),
+        QStringLiteral("removed_values")
+    };
+    static const QRegularExpression sha256Pattern(
+        QStringLiteral("\\A[0-9a-f]{64}\\z"));
+    for (const QJsonValue& entry : document.array())
+    {
+        if (!entry.isObject())
+        {
+            return false;
+        }
+        const QJsonObject object = entry.toObject();
+        const QStringList objectKeys = object.keys();
+        const QSet<QString> keys(objectKeys.cbegin(), objectKeys.cend());
+        const QJsonValue removedValues = object.value(QStringLiteral("removed_values"));
+        if (keys != requiredKeys
+            || !object.value(QStringLiteral("path")).isString()
+            || !object.value(QStringLiteral("before_sha256")).isString()
+            || !object.value(QStringLiteral("after_sha256")).isString()
+            || !removedValues.isDouble()
+            || !std::isfinite(removedValues.toDouble())
+            || removedValues.toDouble() < 0
+            || std::floor(removedValues.toDouble()) != removedValues.toDouble()
+            || !sha256Pattern.match(
+                object.value(QStringLiteral("before_sha256")).toString()).hasMatch()
+            || !sha256Pattern.match(
+                object.value(QStringLiteral("after_sha256")).toString()).hasMatch())
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ValidateLegacyAccountValues(LegacyAccount* account)
+{
+    if (account == nullptr
+        || !account->values.contains(QStringLiteral("PasswordHash"))
+        || !account->values.contains(QStringLiteral("Role")))
+    {
+        return false;
+    }
+    const QString passwordRecord = account->values.value(QStringLiteral("PasswordHash"));
+    const QString role = account->values.value(QStringLiteral("Role"));
+    if (passwordRecord.size() > 512
+        || !CredentialSecurity::IsSupportedPasswordRecord(passwordRecord)
+        || (role != QStringLiteral("operator")
+            && role != QStringLiteral("engineer")
+            && role != QStringLiteral("admin")))
+    {
+        return false;
+    }
+    for (const QString& timestampField : {
+            QStringLiteral("CreatedAt"), QStringLiteral("UpdatedAt") })
+    {
+        qint64 ignoredInstant = 0;
+        if (account->values.contains(timestampField)
+            && !ParseAccountTimestampInstant(
+                account->values.value(timestampField), &ignoredInstant))
+        {
+            return false;
+        }
+    }
+    if (account->values.contains(QStringLiteral("MustChangePassword")))
+    {
+        bool mustChange = false;
+        if (!ParseAuthenticationBool(
+                account->values.value(QStringLiteral("MustChangePassword")), &mustChange))
+        {
+            return false;
+        }
+        account->values[QStringLiteral("MustChangePassword")] = mustChange
+            ? QStringLiteral("1") : QStringLiteral("0");
+    }
+    return true;
+}
+
+bool ReadExistingAccountProfile(
+    QSqlDatabase& db,
+    const QString& userName,
+    bool* exists,
+    QMap<QString, QString>* values)
+{
+    if (exists == nullptr || values == nullptr)
+    {
+        return false;
+    }
+    *exists = false;
+    values->clear();
+    QSqlQuery query(db);
+    query.prepare(
+        "SELECT key_name, value_text, encrypted FROM settings "
+        "WHERE scope_type='account' AND scope_id=? AND module='Profile' "
+        "ORDER BY key_name");
+    query.addBindValue(userName);
+    if (!query.exec())
+    {
+        return false;
+    }
+    while (query.next())
+    {
+        *exists = true;
+        const QString rawField = query.value(0).toString();
+        QString canonicalField;
+        if (!CanonicalCurrentAccountSecurityField(rawField, &canonicalField))
+        {
+            // Other profile metadata is allowed, but a case-variant of a
+            // security field must never be silently ignored or merged.
+            continue;
+        }
+        if (rawField != canonicalField || values->contains(canonicalField))
+        {
+            return false;
+        }
+        bool encryptedValid = false;
+        const int encrypted = query.value(2).toInt(&encryptedValid);
+        const QString storedText = query.value(1).toString();
+        if (!encryptedValid
+            || !HasPortableAuthenticationStorage(storedText, encrypted))
+        {
+            return false;
+        }
+        values->insert(canonicalField, storedText);
+    }
+    if (values->contains(QStringLiteral("MustChangePassword")))
+    {
+        bool mustChange = false;
+        if (!ParseAuthenticationBool(
+                values->value(QStringLiteral("MustChangePassword")), &mustChange))
+        {
+            return false;
+        }
+        (*values)[QStringLiteral("MustChangePassword")] = mustChange
+            ? QStringLiteral("1") : QStringLiteral("0");
+    }
+    for (const QString& timestampField : {
+            QStringLiteral("CreatedAt"),
+            QStringLiteral("UpdatedAt"),
+            QStringLiteral("PasswordChangedAt") })
+    {
+        qint64 ignoredInstant = 0;
+        if (values->contains(timestampField)
+            && !ParseAccountTimestampInstant(
+                values->value(timestampField), &ignoredInstant))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 struct SensitiveUpgrade
 {
     QString scopeType;
@@ -787,26 +1222,60 @@ bool MigrateLegacyAccounts(QSqlDatabase& db)
 
     QSqlQuery accountQuery(db);
     accountQuery.prepare(
-        "SELECT module, key_name, value_text, encrypted FROM settings "
-        "WHERE scope_type='global' AND scope_id='' AND module LIKE 'Accounts/Users/%'");
+        "SELECT scope_type, scope_id, module, key_name, value_text, encrypted FROM settings "
+        "WHERE lower(module)='accounts/users' "
+        "OR lower(module) GLOB 'accounts/users/*' "
+        "ORDER BY module, key_name");
     if (!accountQuery.exec())
     {
         return false;
     }
     while (accountQuery.next())
     {
-        const QString module = accountQuery.value(0).toString();
-        const QString userName = module.mid(QStringLiteral("Accounts/Users/").size()).trimmed();
-        const QString keyName = accountQuery.value(1).toString();
-        if (!IsSafeMigratedAccountName(userName))
+        if (accountQuery.value(0).toString() != QStringLiteral("global")
+            || !accountQuery.value(1).toString().isEmpty())
+        {
+            return false;
+        }
+        const QString module = accountQuery.value(2).toString();
+        const QString rawKeyName = accountQuery.value(3).toString();
+        QString userName;
+        QString rawFieldName;
+        if (module == QStringLiteral("Accounts/Users"))
+        {
+            const int separator = rawKeyName.indexOf(QLatin1Char('/'));
+            if (separator <= 0 || separator != rawKeyName.lastIndexOf(QLatin1Char('/')))
+            {
+                return false;
+            }
+            userName = rawKeyName.left(separator);
+            rawFieldName = rawKeyName.mid(separator + 1);
+        }
+        else if (module.startsWith(QStringLiteral("Accounts/Users/")))
+        {
+            userName = module.mid(QStringLiteral("Accounts/Users/").size());
+            rawFieldName = rawKeyName;
+        }
+        else
+        {
+            // The SQL deliberately finds ASCII case variants so they fail
+            // closed instead of surviving as an ambiguous orphan record.
+            return false;
+        }
+        QString fieldName;
+        if (userName != userName.trimmed()
+            || rawFieldName != rawFieldName.trimmed()
+            || !IsSafeMigratedAccountName(userName)
+            || !CanonicalLegacyAccountField(rawFieldName, &fieldName)
+            || rawFieldName != fieldName)
         {
             return false;
         }
         QString decoded;
         if (!DecodeStoredText(
-                accountQuery.value(2).toString(),
-                accountQuery.value(3).toInt(),
-                ProtectionPurpose(QStringLiteral("global"), QString(), module, keyName),
+                accountQuery.value(4).toString(),
+                accountQuery.value(5).toInt(),
+                ProtectionPurpose(QStringLiteral("global"), QString(), module, rawKeyName),
                 &decoded))
         {
             return false;
@@ -821,46 +1290,128 @@ bool MigrateLegacyAccounts(QSqlDatabase& db)
         }
         LegacyAccount& account = legacyAccounts[foldedUserName];
         account.userName = userName;
-        account.values.insert(keyName, decoded);
+        if (account.values.contains(fieldName))
+        {
+            if (IsLegacyAccountTimestampField(fieldName))
+            {
+                QString mergedTimestamp;
+                if (!MergeAccountTimestamps(
+                        fieldName,
+                        QStringList{ account.values.value(fieldName), decoded },
+                        &mergedTimestamp))
+                {
+                    return false;
+                }
+                account.values[fieldName] = mergedTimestamp;
+                continue;
+            }
+            // v4 databases can contain both historical layouts.  Identical
+            // security-field duplicates are harmless; conflicting duplicates
+            // are not safe to merge because that could pair one role with
+            // another password or forced-change state.
+            if (account.values.value(fieldName) != decoded)
+            {
+                return false;
+            }
+            continue;
+        }
+        account.values.insert(fieldName, decoded);
     }
     accountQuery.finish();
 
-    for (auto it = legacyAccounts.cbegin(); it != legacyAccounts.cend(); ++it)
+    for (auto it = legacyAccounts.begin(); it != legacyAccounts.end(); ++it)
     {
-        const LegacyAccount& source = it.value();
-        const QString sourceHash = source.values.value(QStringLiteral("PasswordHash"));
-        const QString sourceRole = source.values.value(QStringLiteral("Role"));
-        if (sourceHash.isEmpty()
-            || (sourceRole != QStringLiteral("operator")
-                && sourceRole != QStringLiteral("engineer")
-                && sourceRole != QStringLiteral("admin")))
+        LegacyAccount& source = it.value();
+        if (!ValidateLegacyAccountValues(&source))
         {
             return false;
         }
-
-        QString destinationHash;
-        const bool destinationExists = ReadRawScopedValue(
-            db,
-            QStringLiteral("account"),
-            source.userName,
-            QStringLiteral("Profile"),
-            QStringLiteral("PasswordHash"),
-            &destinationHash);
+        const QString sourceHash = source.values.value(QStringLiteral("PasswordHash"));
+        const QString sourceRole = source.values.value(QStringLiteral("Role"));
+        bool destinationExists = false;
+        QMap<QString, QString> destinationValues;
+        if (!ReadExistingAccountProfile(
+                db, source.userName, &destinationExists, &destinationValues))
+        {
+            return false;
+        }
         bool replaceDestination = !destinationExists;
-        if (destinationExists
+        const QString destinationHash = destinationValues.value(QStringLiteral("PasswordHash"));
+        QMap<QString, QString> mergedTimeValues;
+        for (const QString& timestampField : {
+                QStringLiteral("CreatedAt"),
+                QStringLiteral("UpdatedAt") })
+        {
+            QStringList candidates;
+            if (source.values.contains(timestampField))
+            {
+                candidates.append(source.values.value(timestampField));
+            }
+            if (destinationValues.contains(timestampField))
+            {
+                candidates.append(destinationValues.value(timestampField));
+            }
+            if (!candidates.isEmpty())
+            {
+                QString mergedTimestamp;
+                if (!MergeAccountTimestamps(
+                        timestampField, candidates, &mergedTimestamp))
+                {
+                    return false;
+                }
+                mergedTimeValues.insert(timestampField, mergedTimestamp);
+            }
+        }
+        const bool replaceKnownBootstrap = destinationExists
+            && destinationValues.contains(QStringLiteral("PasswordHash"))
+            && destinationValues.contains(QStringLiteral("Role"))
+            && destinationValues.value(QStringLiteral("Role")) == QStringLiteral("admin")
+            && sourceRole == QStringLiteral("admin")
             && source.userName.compare(QStringLiteral("admin"), Qt::CaseInsensitive) == 0
             && CredentialSecurity::VerifyPasswordRecord(
                 source.userName, QStringLiteral("admin"), destinationHash)
-                != CredentialSecurity::PasswordVerification::Invalid)
+                != CredentialSecurity::PasswordVerification::Invalid;
+        if (replaceKnownBootstrap)
         {
             // A v4 start may already have inserted the known bootstrap account
             // after missing these legacy rows.  Restore the legacy account as
             // the authoritative value in that one narrow case.
             replaceDestination = true;
         }
+        else if (destinationExists)
+        {
+            if (!destinationValues.contains(QStringLiteral("PasswordHash"))
+                || !destinationValues.contains(QStringLiteral("Role"))
+                || !CredentialSecurity::IsSupportedPasswordRecord(destinationHash)
+                || (destinationValues.value(QStringLiteral("Role")) != QStringLiteral("operator")
+                    && destinationValues.value(QStringLiteral("Role")) != QStringLiteral("engineer")
+                    && destinationValues.value(QStringLiteral("Role")) != QStringLiteral("admin")))
+            {
+                return false;
+            }
+            for (auto value = source.values.cbegin(); value != source.values.cend(); ++value)
+            {
+                if (IsLegacyAccountTimestampField(value.key()))
+                {
+                    continue;
+                }
+                if (!destinationValues.contains(value.key())
+                    || destinationValues.value(value.key()) != value.value())
+                {
+                    // Never guess whether the v4 source or a partially-created
+                    // account/Profile target is authoritative.
+                    return false;
+                }
+            }
+        }
 
         if (replaceDestination)
         {
+            for (auto timestamp = mergedTimeValues.cbegin();
+                 timestamp != mergedTimeValues.cend(); ++timestamp)
+            {
+                source.values[timestamp.key()] = timestamp.value();
+            }
             QSqlQuery clearProfile(db);
             clearProfile.prepare(
                 "DELETE FROM settings WHERE scope_type='account' AND scope_id=? AND module='Profile'");
@@ -894,12 +1445,10 @@ bool MigrateLegacyAccounts(QSqlDatabase& db)
                     return false;
                 }
             }
-            destinationHash = sourceHash;
-
             const bool isKnownBootstrap = source.userName.compare(
                     QStringLiteral("admin"), Qt::CaseInsensitive) == 0
                 && CredentialSecurity::VerifyPasswordRecord(
-                    source.userName, QStringLiteral("admin"), destinationHash)
+                    source.userName, QStringLiteral("admin"), sourceHash)
                     != CredentialSecurity::PasswordVerification::Invalid;
             ScopedSettingIdentity mustChangeIdentity;
             mustChangeIdentity.valid = true;
@@ -911,13 +1460,35 @@ bool MigrateLegacyAccounts(QSqlDatabase& db)
             if (!WriteScopedSettingValue(
                     db,
                     mustChangeIdentity,
-                    isKnownBootstrap ? QStringLiteral("1") : QStringLiteral("0")))
+                    source.values.contains(QStringLiteral("MustChangePassword"))
+                        ? source.values.value(QStringLiteral("MustChangePassword"))
+                        : (isKnownBootstrap ? QStringLiteral("1") : QStringLiteral("0"))))
             {
                 return false;
             }
         }
         else
         {
+            for (auto timestamp = mergedTimeValues.cbegin();
+                 timestamp != mergedTimeValues.cend(); ++timestamp)
+            {
+                if (destinationValues.value(timestamp.key()) == timestamp.value())
+                {
+                    continue;
+                }
+                ScopedSettingIdentity timestampIdentity;
+                timestampIdentity.valid = true;
+                timestampIdentity.scopeType = QStringLiteral("account");
+                timestampIdentity.scopeId = source.userName;
+                timestampIdentity.module = QStringLiteral("Profile");
+                timestampIdentity.keyName = timestamp.key();
+                timestampIdentity.valueType = QStringLiteral("datetime");
+                if (!WriteScopedSettingValue(
+                        db, timestampIdentity, timestamp.value()))
+                {
+                    return false;
+                }
+            }
             QString existingMustChange;
             if (!ReadRawScopedValue(
                     db,
@@ -975,12 +1546,23 @@ bool IsAuthenticationRole(const QString& role)
         || role == QLatin1String("admin");
 }
 
-bool NormalizeExistingAccountProfiles(QSqlDatabase& db)
+bool NormalizeExistingAccountProfiles(
+    QSqlDatabase& db,
+    int* accountCount,
+    int* administratorCount)
 {
+    if (accountCount == nullptr || administratorCount == nullptr)
+    {
+        return false;
+    }
+    *accountCount = 0;
+    *administratorCount = 0;
     QSqlQuery accountQuery(db);
     if (!accountQuery.exec(QStringLiteral(
-            "SELECT DISTINCT scope_id FROM settings "
-            "WHERE scope_type='account' AND module='Profile' ORDER BY scope_id COLLATE NOCASE")))
+            "SELECT DISTINCT scope_type, scope_id, module FROM settings "
+            "WHERE lower(trim(scope_type))='account' "
+            "AND lower(trim(module))='profile' "
+            "ORDER BY scope_id COLLATE NOCASE")))
     {
         return false;
     }
@@ -988,9 +1570,13 @@ bool NormalizeExistingAccountProfiles(QSqlDatabase& db)
     QMap<QString, QString> foldedAccountIds;
     while (accountQuery.next())
     {
-        const QString accountId = accountQuery.value(0).toString().trimmed();
+        const QString rawAccountId = accountQuery.value(1).toString();
+        const QString accountId = rawAccountId.trimmed();
         const QString folded = accountId.toCaseFolded();
-        if (!IsSafeMigratedAccountName(accountId)
+        if (accountQuery.value(0).toString() != QStringLiteral("account")
+            || accountQuery.value(2).toString() != QStringLiteral("Profile")
+            || rawAccountId != accountId
+            || !IsSafeMigratedAccountName(accountId)
             || (foldedAccountIds.contains(folded)
                 && foldedAccountIds.value(folded) != accountId))
         {
@@ -1007,7 +1593,7 @@ bool NormalizeExistingAccountProfiles(QSqlDatabase& db)
         profileQuery.prepare(QStringLiteral(
             "SELECT key_name, value_text, encrypted FROM settings "
             "WHERE scope_type='account' AND scope_id=? AND module='Profile' "
-            "AND key_name IN ('PasswordHash', 'Role', 'MustChangePassword')"));
+            "ORDER BY key_name"));
         profileQuery.addBindValue(accountId);
         if (!profileQuery.exec())
         {
@@ -1016,9 +1602,30 @@ bool NormalizeExistingAccountProfiles(QSqlDatabase& db)
         QMap<QString, QPair<QString, int>> storedValues;
         while (profileQuery.next())
         {
+            const QString rawField = profileQuery.value(0).toString();
+            QString canonicalField;
+            if (!CanonicalCurrentAccountSecurityField(rawField, &canonicalField))
+            {
+                continue;
+            }
+            if (rawField != canonicalField)
+            {
+                return false;
+            }
+            if (storedValues.contains(canonicalField))
+            {
+                return false;
+            }
+            bool encryptedValid = false;
+            const int encrypted = profileQuery.value(2).toInt(&encryptedValid);
+            const QString storedText = profileQuery.value(1).toString();
+            if (!encryptedValid
+                || !HasPortableAuthenticationStorage(storedText, encrypted))
+            {
+                return false;
+            }
             storedValues.insert(
-                profileQuery.value(0).toString(),
-                qMakePair(profileQuery.value(1).toString(), profileQuery.value(2).toInt()));
+                canonicalField, qMakePair(storedText, encrypted));
         }
         profileQuery.finish();
         if (!storedValues.contains(QStringLiteral("PasswordHash"))
@@ -1047,6 +1654,10 @@ bool NormalizeExistingAccountProfiles(QSqlDatabase& db)
         {
             return false;
         }
+        if (role == QStringLiteral("admin"))
+        {
+            ++(*administratorCount);
+        }
 
         bool mustChangePassword = true;
         if (storedValues.contains(QStringLiteral("MustChangePassword")))
@@ -1064,6 +1675,26 @@ bool NormalizeExistingAccountProfiles(QSqlDatabase& db)
                 != CredentialSecurity::PasswordVerification::Invalid)
         {
             mustChangePassword = true;
+        }
+
+        QMap<QString, QString> normalizedTimestamps;
+        for (const QString& timestampField : {
+                QStringLiteral("CreatedAt"),
+                QStringLiteral("UpdatedAt"),
+                QStringLiteral("PasswordChangedAt") })
+        {
+            if (!storedValues.contains(timestampField))
+            {
+                continue;
+            }
+            QString timestamp;
+            qint64 ignoredInstant = 0;
+            if (!decode(timestampField, &timestamp)
+                || !ParseAccountTimestampInstant(timestamp, &ignoredInstant))
+            {
+                return false;
+            }
+            normalizedTimestamps.insert(timestampField, timestamp);
         }
 
         for (const auto& value : {
@@ -1089,16 +1720,55 @@ bool NormalizeExistingAccountProfiles(QSqlDatabase& db)
                 return false;
             }
         }
+        for (auto timestamp = normalizedTimestamps.cbegin();
+             timestamp != normalizedTimestamps.cend(); ++timestamp)
+        {
+            ScopedSettingIdentity identity;
+            identity.valid = true;
+            identity.scopeType = QStringLiteral("account");
+            identity.scopeId = accountId;
+            identity.module = QStringLiteral("Profile");
+            identity.keyName = timestamp.key();
+            identity.valueType = QStringLiteral("datetime");
+            identity.sensitive = timestamp.key() == QLatin1String("PasswordChangedAt");
+            if (!WriteScopedSettingValue(db, identity, timestamp.value()))
+            {
+                return false;
+            }
+        }
     }
+    *accountCount = accountIds.size();
     return true;
+}
+
+bool CanonicalLegacyLoginField(const QString& fieldName, QString* canonical)
+{
+    if (canonical == nullptr)
+    {
+        return false;
+    }
+    for (const QString& supported : {
+            QStringLiteral("UserName"),
+            QStringLiteral("AccountHistory"),
+            QStringLiteral("RememberPassword"),
+            QStringLiteral("AutoLogin"),
+            QStringLiteral("PasswordBase64") })
+    {
+        if (fieldName.compare(supported, Qt::CaseInsensitive) == 0)
+        {
+            *canonical = supported;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool MigrateLegacyLoginState(QSqlDatabase& db)
 {
     QSqlQuery loginQuery(db);
     loginQuery.prepare(
-        "SELECT key_name, value_text, encrypted FROM settings "
-        "WHERE scope_type='global' AND scope_id='' AND module='LoginState/General'");
+        "SELECT scope_type, scope_id, module, key_name, value_text, encrypted FROM settings "
+        "WHERE lower(module)='loginstate/general' ORDER BY module, key_name");
     if (!loginQuery.exec())
     {
         return false;
@@ -1106,7 +1776,19 @@ bool MigrateLegacyLoginState(QSqlDatabase& db)
     QMap<QString, QString> loginValues;
     while (loginQuery.next())
     {
-        const QString keyName = loginQuery.value(0).toString();
+        if (loginQuery.value(0).toString() != QStringLiteral("global")
+            || !loginQuery.value(1).toString().isEmpty()
+            || loginQuery.value(2).toString() != QStringLiteral("LoginState/General"))
+        {
+            return false;
+        }
+        const QString keyName = loginQuery.value(3).toString();
+        QString canonicalField;
+        if (CanonicalLegacyLoginField(keyName, &canonicalField)
+            && keyName != canonicalField)
+        {
+            return false;
+        }
         if (keyName != QStringLiteral("UserName")
             && keyName != QStringLiteral("AccountHistory"))
         {
@@ -1114,10 +1796,14 @@ bool MigrateLegacyLoginState(QSqlDatabase& db)
         }
         QString decoded;
         if (!DecodeStoredText(
-                loginQuery.value(1).toString(),
-                loginQuery.value(2).toInt(),
+                loginQuery.value(4).toString(),
+                loginQuery.value(5).toInt(),
                 ProtectionPurpose(QStringLiteral("global"), QString(), QStringLiteral("LoginState/General"), keyName),
                 &decoded))
+        {
+            return false;
+        }
+        if (loginValues.contains(keyName))
         {
             return false;
         }
@@ -1144,9 +1830,10 @@ bool MigrateLegacyLoginState(QSqlDatabase& db)
     // login may opt into a fresh DPAPI-protected credential.
     if (!ExecSql(db, QStringLiteral(
             "DELETE FROM settings WHERE scope_type='global' AND scope_id='' AND ("
-            "module LIKE 'Accounts/Users/%' OR module='LoginState/General' OR "
-            "module LIKE 'LoginState/SavedPasswords%' OR "
-            "module LIKE 'LoginState/RememberedCredentials%' OR "
+            "module='Accounts/Users' OR module GLOB 'Accounts/Users/*' OR "
+            "lower(module)='loginstate/general' OR "
+            "lower(module) GLOB 'loginstate/savedpasswords*' OR "
+            "lower(module) GLOB 'loginstate/rememberedcredentials*' OR "
             "lower(key_name)='passwordbase64')")))
     {
         return false;
@@ -1190,7 +1877,8 @@ bool UpgradeRecoverableSensitiveSettings(QSqlDatabase& db)
         const bool sensitive = sensitiveQuery.value(6).toInt() != 0
             || IsSensitiveSettingKey(module)
             || IsSensitiveSettingKey(keyName);
-        const bool requiresDpapi = RequiresDpapiProtection(scopeType, module, keyName, sensitive);
+        const bool requiresDpapi = RequiresDpapiProtection(
+            scopeType, module, keyName, sensitive);
         if (!requiresDpapi)
         {
             continue;
@@ -1238,13 +1926,34 @@ bool UpgradeRecoverableSensitiveSettings(QSqlDatabase& db)
     return true;
 }
 
-bool MigrateLegacyAuthenticationSettings(QSqlDatabase& db)
+bool MigrateLegacyAuthenticationSettings(QSqlDatabase& db, bool authenticationInitialized)
 {
-    return MigrateLegacyAccounts(db)
-        && NormalizeExistingAccountProfiles(db)
-        && MigrateLegacyLoginState(db)
-        && UpgradeRecoverableSensitiveSettings(db)
-        && SetMetaValue(
+    int accountCount = 0;
+    int administratorCount = 0;
+    if (!MigrateLegacyAccounts(db)
+        || !NormalizeExistingAccountProfiles(db, &accountCount, &administratorCount)
+        || (!authenticationInitialized && accountCount != 0)
+        || (authenticationInitialized && administratorCount == 0)
+        || !MigrateLegacyLoginState(db)
+        || !UpgradeRecoverableSensitiveSettings(db))
+    {
+        return false;
+    }
+    QSqlQuery orphanQuery(db);
+    if (!orphanQuery.exec(QStringLiteral(
+            "SELECT COUNT(*) FROM settings WHERE "
+            "lower(module)='accounts/users' OR "
+            "lower(module) GLOB 'accounts/users/*' OR "
+            "lower(module)='loginstate/general' OR "
+            "lower(module) GLOB 'loginstate/savedpasswords*' OR "
+            "lower(module) GLOB 'loginstate/rememberedcredentials*' OR "
+            "lower(key_name)='passwordbase64'"))
+        || !orphanQuery.next()
+        || orphanQuery.value(0).toInt() != 0)
+    {
+        return false;
+    }
+    return SetMetaValue(
             db,
             QStringLiteral("auth_semantic_version"),
             QString::fromLatin1(kAuthenticationSemanticVersion));
@@ -1252,9 +1961,421 @@ bool MigrateLegacyAuthenticationSettings(QSqlDatabase& db)
 
 bool SetCurrentSchemaMetadata(QSqlDatabase& db)
 {
-    return SetMetaValue(db, QStringLiteral("schema_version"), QString::fromLatin1(kSchemaVersion))
+    return ExecSql(db, QStringLiteral(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES("
+            "'created_at', strftime('%Y-%m-%dT%H:%M:%S', 'now'))"))
+        && !MetaValue(db, QStringLiteral("created_at")).isEmpty()
+        && SetMetaValue(db, QStringLiteral("schema_version"), QString::fromLatin1(kSchemaVersion))
         && SetMetaValue(db, QStringLiteral("encrypt_new_values"), QStringLiteral("0"))
         && SetMetaValue(db, QStringLiteral("sensitive_protection"), QStringLiteral("dpapi-current-user-v1"));
+}
+
+bool CanonicalCurrentAccountSecurityField(
+    const QString& fieldName,
+    QString* canonical)
+{
+    if (CanonicalLegacyAccountField(fieldName, canonical))
+    {
+        return true;
+    }
+    if (canonical != nullptr
+        && fieldName.compare(
+            QStringLiteral("PasswordChangedAt"), Qt::CaseInsensitive) == 0)
+    {
+        *canonical = QStringLiteral("PasswordChangedAt");
+        return true;
+    }
+    return false;
+}
+
+bool ValidateCurrentAuthenticationIntegrity(
+    QSqlDatabase& db,
+    bool authenticationInitialized)
+{
+    const auto reject = [](const char* reason)
+        {
+            qCritical() << "Current authentication integrity check failed:" << reason;
+            return false;
+        };
+    QSqlQuery integrityQuery(db);
+    if (!integrityQuery.exec(QStringLiteral("PRAGMA integrity_check"))
+        || !integrityQuery.next()
+        || integrityQuery.value(0).toString() != QLatin1String("ok")
+        || integrityQuery.next())
+    {
+        return reject("sqlite-integrity");
+    }
+    for (const QString& legacyTable : {
+            QStringLiteral("ini_values"),
+            QStringLiteral("text_files"),
+            QStringLiteral("app_settings") })
+    {
+        if (TableExists(db, legacyTable))
+        {
+            return reject("legacy-table");
+        }
+    }
+
+    QSqlQuery orphanQuery(db);
+    if (!orphanQuery.exec(QStringLiteral(
+            "SELECT COUNT(*) FROM settings WHERE "
+            "lower(module)='accounts/users' OR "
+            "lower(module) GLOB 'accounts/users/*' OR "
+            "lower(module)='loginstate/general' OR "
+            "(lower(module) GLOB 'loginstate/savedpasswords*' "
+            "AND NOT (module='LoginState/SavedPasswords' "
+            "AND scope_type='global' AND scope_id='')) OR "
+            "(lower(module) GLOB 'loginstate/rememberedcredentials*' "
+            "AND NOT (module='LoginState/RememberedCredentials' "
+            "AND scope_type='global' AND scope_id='')) OR "
+            "lower(key_name)='passwordbase64'"))
+        || !orphanQuery.next()
+        || orphanQuery.value(0).toInt() != 0)
+    {
+        return reject("legacy-authentication-orphan");
+    }
+
+    QSqlQuery accountQuery(db);
+    if (!accountQuery.exec(QStringLiteral(
+            "SELECT DISTINCT scope_type, scope_id, module FROM settings "
+            "WHERE lower(trim(scope_type))='account' "
+            "AND lower(trim(module))='profile' "
+            "ORDER BY scope_id COLLATE NOCASE")))
+    {
+        return reject("account-profile-query");
+    }
+    QStringList accountIds;
+    QMap<QString, QString> foldedAccountIds;
+    while (accountQuery.next())
+    {
+        const QString scopeType = accountQuery.value(0).toString();
+        const QString accountId = accountQuery.value(1).toString();
+        const QString module = accountQuery.value(2).toString();
+        const QString foldedAccountId = accountId.toCaseFolded();
+        if (scopeType != QLatin1String("account")
+            || module != QLatin1String("Profile")
+            || accountId != accountId.trimmed()
+            || !IsSafeMigratedAccountName(accountId)
+            || (foldedAccountIds.contains(foldedAccountId)
+                && foldedAccountIds.value(foldedAccountId) != accountId))
+        {
+            return reject("account-profile-shadow-or-id");
+        }
+        foldedAccountIds.insert(foldedAccountId, accountId);
+        if (!accountIds.contains(accountId))
+        {
+            accountIds.append(accountId);
+        }
+    }
+    accountQuery.finish();
+
+    int administratorCount = 0;
+    for (const QString& accountId : accountIds)
+    {
+        QSqlQuery profileQuery(db);
+        profileQuery.prepare(QStringLiteral(
+            "SELECT key_name, value_text, encrypted FROM settings "
+            "WHERE scope_type='account' AND scope_id=? AND module='Profile' "
+            "ORDER BY key_name"));
+        profileQuery.addBindValue(accountId);
+        if (!profileQuery.exec())
+        {
+            return reject("account-profile-read");
+        }
+        QMap<QString, QPair<QString, int>> storedValues;
+        while (profileQuery.next())
+        {
+            const QString rawField = profileQuery.value(0).toString();
+            QString canonicalField;
+            if (!CanonicalCurrentAccountSecurityField(rawField, &canonicalField))
+            {
+                continue;
+            }
+            if (rawField != canonicalField)
+            {
+                return reject("account-field-case");
+            }
+            if (storedValues.contains(canonicalField))
+            {
+                return reject("account-field-duplicate");
+            }
+            bool encryptedValid = false;
+            const int encrypted = profileQuery.value(2).toInt(&encryptedValid);
+            if (!encryptedValid)
+            {
+                return reject("account-field-encrypted-marker");
+            }
+            storedValues.insert(
+                canonicalField,
+                qMakePair(profileQuery.value(1).toString(), encrypted));
+        }
+        profileQuery.finish();
+        for (const QString& requiredField : {
+                QStringLiteral("PasswordHash"),
+                QStringLiteral("Role"),
+                QStringLiteral("MustChangePassword") })
+        {
+            if (!storedValues.contains(requiredField))
+            {
+                return reject("account-required-fields");
+            }
+        }
+        for (const QString& portableField : {
+                QStringLiteral("PasswordHash"),
+                QStringLiteral("Role"),
+                QStringLiteral("MustChangePassword"),
+                QStringLiteral("PasswordChangedAt"),
+                QStringLiteral("CreatedAt"),
+                QStringLiteral("UpdatedAt") })
+        {
+            if (!storedValues.contains(portableField))
+            {
+                continue;
+            }
+            const auto stored = storedValues.value(portableField);
+            if (!HasPortableAuthenticationStorage(stored.first, stored.second))
+            {
+                return reject("portable-account-field-protection");
+            }
+        }
+        auto decode = [&storedValues, &accountId](
+                          const QString& fieldName, QString* value)
+            {
+                const auto stored = storedValues.value(fieldName);
+                return DecodeStoredText(
+                    stored.first,
+                    stored.second,
+                    ProtectionPurpose(
+                        QStringLiteral("account"), accountId,
+                        QStringLiteral("Profile"), fieldName),
+                    value);
+            };
+        QString passwordRecord;
+        QString role;
+        QString mustChangeText;
+        bool mustChange = false;
+        if (!decode(QStringLiteral("PasswordHash"), &passwordRecord)
+            || !decode(QStringLiteral("Role"), &role)
+            || !decode(QStringLiteral("MustChangePassword"), &mustChangeText)
+            || !CredentialSecurity::IsSupportedPasswordRecord(passwordRecord)
+            || !IsAuthenticationRole(role)
+            || !ParseAuthenticationBool(mustChangeText, &mustChange))
+        {
+            return reject("account-security-values");
+        }
+        if (role == QLatin1String("admin"))
+        {
+            ++administratorCount;
+        }
+        for (const QString& timestampField : {
+                QStringLiteral("CreatedAt"),
+                QStringLiteral("UpdatedAt"),
+                QStringLiteral("PasswordChangedAt") })
+        {
+            if (!storedValues.contains(timestampField))
+            {
+                continue;
+            }
+            QString timestamp;
+            qint64 ignoredInstant = 0;
+            if (!decode(timestampField, &timestamp)
+                || !ParseAccountTimestampInstant(timestamp, &ignoredInstant))
+            {
+                return reject("account-timestamp");
+            }
+        }
+    }
+    if ((!authenticationInitialized && !accountIds.isEmpty())
+        || (authenticationInitialized
+            && (accountIds.isEmpty() || administratorCount == 0)))
+    {
+        return reject("administrator-invariant");
+    }
+
+    QSqlQuery sensitiveQuery(db);
+    if (!sensitiveQuery.exec(QStringLiteral(
+            "SELECT scope_type, scope_id, module, key_name, value_text, sensitive, encrypted, value_type "
+            "FROM settings")))
+    {
+        return reject("sensitive-setting-query");
+    }
+    while (sensitiveQuery.next())
+    {
+        bool sensitiveValid = false;
+        bool encryptedValid = false;
+        const int sensitiveMarker = sensitiveQuery.value(5).toInt(&sensitiveValid);
+        const int encrypted = sensitiveQuery.value(6).toInt(&encryptedValid);
+        if (!sensitiveValid || !encryptedValid)
+        {
+            return reject("sensitive-setting-marker");
+        }
+        const QString scopeType = sensitiveQuery.value(0).toString();
+        const QString scopeId = sensitiveQuery.value(1).toString();
+        const QString module = sensitiveQuery.value(2).toString();
+        const QString keyName = sensitiveQuery.value(3).toString();
+        const QString storedText = sensitiveQuery.value(4).toString();
+        const QString valueType = sensitiveQuery.value(7).toString();
+        const bool canonicalRememberedCredential =
+            scopeType == QLatin1String("global")
+            && scopeId.isEmpty()
+            && (module == QLatin1String("LoginState/RememberedCredentials")
+                || module == QLatin1String("LoginState/SavedPasswords"));
+        if (canonicalRememberedCredential)
+        {
+            QString decodedCredential;
+            if (!IsSafeMigratedAccountName(keyName)
+                || valueType != QLatin1String("string")
+                || sensitiveMarker != 1
+                || encrypted != 1
+                || !CredentialSecurity::IsCurrentUserProtected(storedText)
+                || !DecodeStoredText(
+                    storedText, encrypted,
+                    ProtectionPurpose(scopeType, scopeId, module, keyName),
+                    &decodedCredential)
+                || decodedCredential.isEmpty())
+            {
+                return reject("remembered-credential-shape");
+            }
+        }
+        const bool semanticSensitive = sensitiveMarker != 0
+            || IsSensitiveSettingKey(module)
+            || IsSensitiveSettingKey(keyName);
+        const bool requiresDpapi = RequiresDpapiProtection(
+            scopeType, module, keyName, semanticSensitive);
+        const bool canonicalLoginPreference =
+            scopeType == QLatin1String("global")
+            && scopeId.isEmpty()
+            && module == QLatin1String("LoginState")
+            && (keyName == QLatin1String("RememberPassword")
+                || keyName == QLatin1String("AutoLogin"))
+            && encrypted == 0;
+        const bool compatibleLegacyLoginPreference = canonicalLoginPreference
+            && ((storedText == QLatin1String("0")
+                    && valueType == QLatin1String("bool")
+                    && sensitiveMarker == 1)
+                || (keyName == QLatin1String("RememberPassword")
+                    && storedText == QLatin1String("0")
+                    && valueType == QLatin1String("string")
+                    && sensitiveMarker == 1)
+                || (keyName == QLatin1String("AutoLogin")
+                    && (storedText == QLatin1String("0")
+                        || storedText == QLatin1String("1"))
+                    && valueType == QLatin1String("string")
+                    && sensitiveMarker == 0));
+        if (requiresDpapi
+            && !CredentialSecurity::IsCurrentUserProtected(storedText)
+            && !compatibleLegacyLoginPreference)
+        {
+            return reject("sensitive-setting-not-dpapi");
+        }
+        if (CredentialSecurity::IsCurrentUserProtected(storedText)
+            || encrypted != 0)
+        {
+            QString decoded;
+            if (!DecodeStoredText(
+                    storedText,
+                    encrypted,
+                    ProtectionPurpose(scopeType, scopeId, module, keyName),
+                    &decoded))
+            {
+                return reject("protected-setting-unreadable");
+            }
+        }
+    }
+    return true;
+}
+
+bool IsKnownRuntimePointCloudIni(
+    const QFileInfo& candidate,
+    const QFileInfo& databaseInfo)
+{
+    if (candidate.fileName().compare(
+            QStringLiteral("CorrugatedSheetPointCloudEctration.ini"),
+            Qt::CaseInsensitive) != 0
+        || candidate.isSymLink()
+        || QDir::cleanPath(candidate.absolutePath()).compare(
+            QDir::cleanPath(databaseInfo.absolutePath()), Qt::CaseInsensitive) != 0
+        || candidate.size() <= 0
+        || candidate.size() > 128 * 1024)
+    {
+        return false;
+    }
+
+    QFile file(candidate.absoluteFilePath());
+    if (!file.open(QIODevice::ReadOnly))
+    {
+        return false;
+    }
+    const QByteArray content = file.readAll();
+    if (content.contains('\0'))
+    {
+        return false;
+    }
+    static const QSet<QByteArray> allowedKeys = {
+        QByteArrayLiteral("ifupright"),
+        QByteArrayLiteral("Plate_thickness"),
+        QByteArrayLiteral("Remove_Floor_ZValue"),
+        QByteArrayLiteral("Thread_Number"),
+        QByteArrayLiteral("Move_distance"),
+        QByteArrayLiteral("DEBUGLOG"),
+        QByteArrayLiteral("LOGPATH"),
+        QByteArrayLiteral("Plane_Threshold"),
+        QByteArrayLiteral("Merge_Lines_Angle_Threshold"),
+        QByteArrayLiteral("Lines_Dis_Threshold"),
+        QByteArrayLiteral("Merge_Lines_Dis_Threshold"),
+        QByteArrayLiteral("ClusterTolerance"),
+        QByteArrayLiteral("if_Cluster"),
+        QByteArrayLiteral("Discrete_Value"),
+        QByteArrayLiteral("Dilate_Value"),
+        QByteArrayLiteral("Erode_Value"),
+        QByteArrayLiteral("Line_Length"),
+        QByteArrayLiteral("X_AXIS"),
+        QByteArrayLiteral("Y_AXIS"),
+        QByteArrayLiteral("Z_AXIS"),
+        QByteArrayLiteral("Save_File_Name"),
+        QByteArrayLiteral("Step"),
+        QByteArrayLiteral("is_remove_noise"),
+        QByteArrayLiteral("is_sample"),
+        QByteArrayLiteral("sample_size"),
+        QByteArrayLiteral("above_z")
+    };
+    QSet<QByteArray> observedKeys;
+    bool hasRuntimeSetting = false;
+    const QList<QByteArray> lines = content.split('\n');
+    for (QByteArray line : lines)
+    {
+        line = line.trimmed();
+        if (line.startsWith("\xEF\xBB\xBF"))
+        {
+            line.remove(0, 3);
+            line = line.trimmed();
+        }
+        if (line.isEmpty()
+            || line.startsWith("//")
+            || line.startsWith('#')
+            || line.startsWith(';'))
+        {
+            continue;
+        }
+        if (line.startsWith('['))
+        {
+            return false;
+        }
+        const int equals = line.indexOf('=');
+        if (equals <= 0)
+        {
+            return false;
+        }
+        const QByteArray key = line.left(equals).trimmed();
+        const QByteArray folded = key.toLower();
+        if (!allowedKeys.contains(key) || observedKeys.contains(folded))
+        {
+            return false;
+        }
+        observedKeys.insert(folded);
+        hasRuntimeSetting = true;
+    }
+    return hasRuntimeSetting;
 }
 
 bool HasLegacyDiskConfigurationInputs(const QString& databasePath)
@@ -1268,6 +2389,11 @@ bool HasLegacyDiskConfigurationInputs(const QString& databasePath)
     {
         iterator.next();
         const QString fileName = iterator.fileName().toLower();
+        if (fileName.endsWith(QStringLiteral(".ini"))
+            && IsKnownRuntimePointCloudIni(iterator.fileInfo(), databaseInfo))
+        {
+            continue;
+        }
         if (fileName.contains(QStringLiteral(".ini"))
             || fileName == QStringLiteral("weavedate.txt")
             || fileName == QStringLiteral("weldpara.txt"))
@@ -1297,6 +2423,13 @@ bool HasUnsafePlaintextConfigStoreResidue(const QString& databasePath)
 
 bool EnsureCurrentSchema(QSqlDatabase& db)
 {
+    if (HasInstallerTransactionRecord(db.databaseName()))
+    {
+        db.close();
+        qCritical() << "ConfigStore schema access is blocked by an unresolved installer transaction.";
+        return false;
+    }
+
     const bool hasMeta = TableExists(db, QLatin1String("meta"));
     const QString existingVersion = hasMeta ? MetaValue(db, QLatin1String("schema_version")) : QString();
     if (hasMeta && existingVersion.isEmpty())
@@ -1342,10 +2475,40 @@ bool EnsureCurrentSchema(QSqlDatabase& db)
     const QString credentialScrubState = hasMeta
         ? MetaValue(db, QStringLiteral("legacy_credential_scrub_state"))
         : QString();
+    bool credentialScrubManifestExists = false;
+    QString credentialScrubManifest;
+    if (hasMeta)
+    {
+        QSqlQuery manifestQuery(db);
+        manifestQuery.prepare(QStringLiteral(
+            "SELECT value FROM meta WHERE key='legacy_credential_scrub_manifest'"));
+        if (!manifestQuery.exec())
+        {
+            return false;
+        }
+        if (manifestQuery.next())
+        {
+            credentialScrubManifestExists = true;
+            credentialScrubManifest = manifestQuery.value(0).toString();
+            if (manifestQuery.next())
+            {
+                return false;
+            }
+        }
+    }
     if (!credentialScrubState.isEmpty()
         && credentialScrubState != QLatin1String("complete"))
     {
         qCritical() << "Legacy credential scrub is incomplete or invalid; "
+                       "rerun ConfigMigrate before starting the application.";
+        return false;
+    }
+    if ((credentialScrubState == QLatin1String("complete")
+            && (!credentialScrubManifestExists
+                || !ValidateCredentialScrubManifest(credentialScrubManifest)))
+        || (credentialScrubState.isEmpty() && credentialScrubManifestExists))
+    {
+        qCritical() << "Legacy credential scrub manifest provenance is invalid; "
                        "rerun ConfigMigrate before starting the application.";
         return false;
     }
@@ -1356,14 +2519,42 @@ bool EnsureCurrentSchema(QSqlDatabase& db)
         || authenticationSemanticVersion != QString::fromLatin1(kAuthenticationSemanticVersion);
     if (!needsMigration)
     {
-        bool authenticationStateValid = false;
-        const int authenticationState = MetaValue(
-            db, QLatin1String("auth_initialized")).toInt(&authenticationStateValid);
-        if (!authenticationStateValid || authenticationState < 0 || authenticationState > 1)
+        const QString authenticationState = MetaValue(
+            db, QLatin1String("auth_initialized"));
+        const QString encryptNewValues = MetaValue(
+            db, QLatin1String("encrypt_new_values"));
+        if ((authenticationState != QLatin1String("0")
+                && authenticationState != QLatin1String("1"))
+            || (encryptNewValues != QLatin1String("0")
+                && encryptNewValues != QLatin1String("1"))
+            || MetaValue(db, QStringLiteral("sensitive_protection"))
+                != QLatin1String("dpapi-current-user-v1"))
+        {
+            qCritical() << "Current authentication metadata check failed";
+            return false;
+        }
+        QSqlQuery createdAtQuery(db);
+        createdAtQuery.prepare(QStringLiteral(
+            "SELECT value FROM meta WHERE key='created_at'"));
+        if (!createdAtQuery.exec())
         {
             return false;
         }
-        return SetCurrentSchemaMetadata(db);
+        if (createdAtQuery.next()
+            && (createdAtQuery.value(0).isNull()
+                || createdAtQuery.value(0).toString().trimmed().isEmpty()))
+        {
+            qCritical() << "Current schema created_at metadata is empty";
+            return false;
+        }
+        const bool authenticationIntegrityValid = ValidateCurrentAuthenticationIntegrity(
+            db, authenticationState == QLatin1String("1"));
+        if (HasInstallerTransactionRecord(db.databaseName()))
+        {
+            db.close();
+            return false;
+        }
+        return authenticationIntegrityValid;
     }
     QString authenticationInitializedValue = hasMeta ? QStringLiteral("1") : QStringLiteral("0");
     if (existingVersion == QString::fromLatin1(kSchemaVersion))
@@ -1377,21 +2568,44 @@ bool EnsureCurrentSchema(QSqlDatabase& db)
         }
         authenticationInitializedValue = existingAuthenticationState;
     }
+    if (HasInstallerTransactionRecord(db.databaseName()))
+    {
+        db.close();
+        return false;
+    }
     if (!db.transaction())
     {
         return false;
     }
-    if (!CreateCurrentTables(db)
-        || !HasCurrentSettingsColumns(db)
-        || !MigrateLegacyAuthenticationSettings(db)
-        || !SetMetaValue(
+    const bool authenticationInitialized = authenticationInitializedValue == QLatin1String("1");
+    const bool migrationValid = CreateCurrentTables(db)
+        && HasCurrentSettingsColumns(db)
+        && MigrateLegacyAuthenticationSettings(db, authenticationInitialized)
+        && SetMetaValue(
             db,
             QLatin1String("auth_initialized"),
             authenticationInitializedValue)
-        || !SetCurrentSchemaMetadata(db)
-        || !db.commit())
+        && SetCurrentSchemaMetadata(db)
+        && ValidateCurrentAuthenticationIntegrity(db, authenticationInitialized);
+    if (!migrationValid)
     {
         db.rollback();
+        return false;
+    }
+    if (HasInstallerTransactionRecord(db.databaseName()))
+    {
+        db.rollback();
+        db.close();
+        return false;
+    }
+    if (!db.commit())
+    {
+        db.rollback();
+        return false;
+    }
+    if (HasInstallerTransactionRecord(db.databaseName()))
+    {
+        db.close();
         return false;
     }
     return true;
@@ -1978,7 +3192,8 @@ QMap<QString, QString> ConfigDatabase::ReadScopedSettings(
             const bool sensitive = query.value(3).toInt() != 0
                 || IsSensitiveSettingKey(moduleName)
                 || IsSensitiveSettingKey(keyName);
-            const bool requiresDpapi = RequiresDpapiProtection(scopeType, moduleName, keyName, sensitive);
+            const bool requiresDpapi = RequiresDpapiProtection(
+                scopeType, moduleName, keyName, sensitive);
             if (requiresDpapi && !CredentialSecurity::IsCurrentUserProtected(query.value(1).toString()))
             {
                 upgrades.insert(keyName, decoded);
@@ -2024,7 +3239,8 @@ bool ConfigDatabase::WriteScopedSetting(
     int encrypted = 0;
     QString storedText;
     const QString purpose = ProtectionPurpose(scopeType, scopeId, moduleName, keyName);
-    const bool requiresDpapi = RequiresDpapiProtection(scopeType, moduleName, keyName, effectiveSensitive);
+    const bool requiresDpapi = RequiresDpapiProtection(
+        scopeType, moduleName, keyName, effectiveSensitive);
     if (!EncodeStoredText(db, value, requiresDpapi, purpose, &storedText, &encrypted))
     {
         return false;

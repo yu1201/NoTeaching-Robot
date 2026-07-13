@@ -75,6 +75,57 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "CredentialSecurity plaintext-backup-gate test failed: $LASTEXITCODE"
 }
+& $outputExe --legacy-timestamp-merge
+if ($LASTEXITCODE -ne 0) {
+    throw "CredentialSecurity legacy timestamp merge test failed: $LASTEXITCODE"
+}
+foreach ($scenario in @(
+    'valid', 'module-case-shadow', 'no-admin', 'legacy-orphan', 'bad-dpapi',
+    'portable-dpapi-prefix', 'portable-legacy-prefix',
+    'portable-created-at-encrypted', 'bad-password-changed-at',
+    'manifest-without-state', 'bad-complete-manifest', 'complete-scrub',
+    'legacy-disabled-login-preferences', 'plaintext-enabled-login-preference',
+    'plaintext-autologin-sensitive-zero', 'released-login-preferences',
+    'protected-remembered-credential',
+    'remembered-credential-invalid-unsafe-key',
+    'remembered-credential-invalid-empty',
+    'remembered-credential-invalid-type',
+    'remembered-credential-invalid-sensitive',
+    'remembered-credential-invalid-encrypted',
+    'empty-created-at', 'table-name-case', 'legacy-table-case'
+)) {
+    & $outputExe --current-auth-integrity $scenario
+    if ($LASTEXITCODE -ne 0) {
+        throw "CredentialSecurity current authentication integrity '$scenario' test failed: $LASTEXITCODE"
+    }
+}
+foreach ($scenario in @(
+    'valid', 'arbitrary', 'directory', 'symlink', 'dangling-symlink',
+    'existing-connection', 'existing-connection-pending',
+    'existing-connection-corrupt', 'noop-absent'
+)) {
+    & $outputExe --installer-transaction-gate $scenario
+    if ($LASTEXITCODE -ne 0) {
+        throw "CredentialSecurity installer transaction gate '$scenario' test failed: $LASTEXITCODE"
+    }
+}
+foreach ($scenario in @(
+    'source-conflict', 'target-conflict', 'target-protected-portable',
+    'target-malformed-password-changed-at',
+    'no-admin', 'user-case-conflict',
+    'field-case-conflict', 'login-module-case-conflict', 'login-field-case-conflict'
+)) {
+    & $outputExe --legacy-rollback $scenario
+    if ($LASTEXITCODE -ne 0) {
+        throw "CredentialSecurity legacy rollback '$scenario' test failed: $LASTEXITCODE"
+    }
+}
+foreach ($scenario in @('unknown-key', 'section', 'nested', 'credential-key', 'symlink')) {
+    & $outputExe --rejected-runtime-ini $scenario
+    if ($LASTEXITCODE -ne 0) {
+        throw "CredentialSecurity rejected runtime INI '$scenario' test failed: $LASTEXITCODE"
+    }
+}
 
 $interopRoot = Join-Path $outputDir 'PythonInteropRoot'
 $resolvedOutput = [System.IO.Path]::GetFullPath($outputDir).TrimEnd('\') + '\'
@@ -115,4 +166,9 @@ if ($LASTEXITCODE -ne 0) {
 & $outputExe --python-interop-root (Join-Path $resolvedInterop 'RuntimeRoot')
 if ($LASTEXITCODE -ne 0) {
     throw "Python-to-C++ DPAPI interop test failed: $LASTEXITCODE"
+}
+
+& python (Join-Path $repo 'scripts\tests\test_config_migrate_schema4_upgrade.py')
+if ($LASTEXITCODE -ne 0) {
+    throw "ConfigMigrate schema4 upgrade regression failed: $LASTEXITCODE"
 }

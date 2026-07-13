@@ -384,7 +384,7 @@ if (Test-Path -LiteralPath $stepSdkSwitchScript) {
 
 $installerToolsDir = Join-Path $repoRoot "dist\tools"
 New-Item -ItemType Directory -Path $installerToolsDir -Force | Out-Null
-foreach ($toolName in @("ConfigMigrate.exe", "ConfigMigrate_Run.cmd")) {
+foreach ($toolName in @("ConfigMigrate.exe", "ConfigMigrate_Run.cmd", "ConfigMigrate_Install.ps1")) {
     $toolSource = Join-Path $diagnosticToolsSourceDir $toolName
     if (Test-Path -LiteralPath $toolSource) {
         Copy-Item -LiteralPath $toolSource -Destination (Join-Path $installerToolsDir $toolName) -Force

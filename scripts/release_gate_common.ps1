@@ -450,6 +450,7 @@ function Get-InnoFilesRecords {
             destDir  = $destDir.Replace('/', '\')
             flags    = @($flags)
             excludes = if ($fields.ContainsKey("excludes")) { [string]$fields["excludes"] } else { "" }
+            destname = if ($fields.ContainsKey("destname")) { [string]$fields["destname"] } else { "" }
             fieldNames = @($fields.Keys | Sort-Object)
             raw      = $rawLine
         }
@@ -532,15 +533,29 @@ function Assert-InstallerDefinition {
         [pscustomobject]@{
             Name = "ConfigMigrate_Run.cmd"; Source = "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir = "{app}\tools"
             AllowedFields = @("destdir", "flags", "source"); RequiredFlags = @("ignoreversion"); RequiredExcludes = @()
+        },
+        [pscustomobject]@{
+            Name = "ConfigMigrate_Install.ps1"; Source = "..\dist\tools\ConfigMigrate_Install.ps1"; DestDir = "{app}\tools"
+            AllowedFields = @("destdir", "flags", "source"); RequiredFlags = @("ignoreversion"); RequiredExcludes = @()
+        },
+        [pscustomobject]@{
+            Name = "pre-install ConfigMigrate.exe"; Source = "..\dist\tools\ConfigMigrate.exe"; DestDir = "{tmp}"
+            AllowedFields = @("destdir", "destname", "flags", "source"); RequiredFlags = @("dontcopy"); RequiredExcludes = @()
+            RequiredDestName = "ConfigMigrate_PreInstall.exe"
+        },
+        [pscustomobject]@{
+            Name = "pre-install ConfigMigrate_Install.ps1"; Source = "..\dist\tools\ConfigMigrate_Install.ps1"; DestDir = "{tmp}"
+            AllowedFields = @("destdir", "destname", "flags", "source"); RequiredFlags = @("dontcopy"); RequiredExcludes = @()
+            RequiredDestName = "ConfigMigrate_PreInstall.ps1"
         }
     )
     if ($fileRecords.Count -ne $required.Count) {
-        throw "Installer [Files] must contain exactly the three approved release Source records; found $($fileRecords.Count): $issPath"
+        throw "Installer [Files] must contain exactly the six approved release Source records; found $($fileRecords.Count): $issPath"
     }
     $actualSources = @($fileRecords | ForEach-Object { [string]$_.source } | Sort-Object)
     $allowedSources = @($required | ForEach-Object { [string]$_.Source } | Sort-Object)
     if (($actualSources -join "`n") -cne ($allowedSources -join "`n")) {
-        throw "Installer [Files] Source set is not exactly the approved three paths: $($actualSources -join ', ')"
+        throw "Installer [Files] Source set is not exactly the approved migration-safe paths: $($actualSources -join ', ')"
     }
     foreach ($expectation in $required) {
         $matches = @($fileRecords | Where-Object {
@@ -559,6 +574,12 @@ function Assert-InstallerDefinition {
         if (($actualFlags -join "`n") -cne ($requiredFlags -join "`n")) {
             throw "Installer required $($expectation.Name) flags must be exact; expected $($requiredFlags -join ', '), actual $($actualFlags -join ', '): $issPath"
         }
+        if ($expectation.PSObject.Properties.Name -contains "RequiredDestName") {
+            $actualDestName = Get-InnoQuotedValue -Value ([string]$record.destname) -FieldName "DestName"
+            if ($actualDestName -cne [string]$expectation.RequiredDestName) {
+                throw "Installer required $($expectation.Name) DestName must be exactly $($expectation.RequiredDestName): $issPath"
+            }
+        }
         if (@($expectation.RequiredExcludes).Count -gt 0) {
             $rawExcludes = Get-InnoQuotedValue -Value ([string]$record.excludes) -FieldName "Excludes"
             $actualExcludes = @($rawExcludes -split ',' | ForEach-Object { $_.Trim().Replace('/', '\').ToLowerInvariant() } | Sort-Object)
@@ -567,6 +588,41 @@ function Assert-InstallerDefinition {
                 throw "Installer recursive payload exclusions must be exact; expected $($requiredExcludes -join ', '), actual $($actualExcludes -join ', '): $issPath"
             }
         }
+    }
+    foreach ($migrationFragment in @(
+        "function PrepareToInstall(var NeedsRestart: Boolean): string;",
+        "ExtractTemporaryFile('ConfigMigrate_PreInstall.exe');",
+        "ExtractTemporaryFile('ConfigMigrate_PreInstall.ps1');",
+        "CloseApplications=force",
+        "CloseApplicationsFilter={#MyAppExeName}",
+        "RestartApplications=no",
+        "-ApplicationExecutable",
+        "procedure DeinitializeSetup;",
+        "function GetCustomSetupExitCode: Integer;",
+        "-RollbackPendingTransaction",
+        "-CommitPendingTransaction",
+        "AppendPreparationRollbackOutcome(Result);",
+        "OK:PENDING_PUBLISHED_PRESERVED",
+        "OK:PENDING_TRANSACTION_COMMITTED_FINALIZE_REQUIRED",
+        "OK:LEGACY_DATABASE_CREATED_AND_VERIFIED",
+        "if not CommitPendingDatabaseTransaction(CommitStatus) then",
+        "if DatabaseMigrationReady and MigrationNeedsFinalize and",
+        "DatabaseMigrationHelperReady",
+        "if (not DatabaseMigrationAttempted) or (not DatabaseMigrationHelperReady) or",
+        "Check: DatabaseMigrationSucceeded"
+    )) {
+        if (-not $text.Contains($migrationFragment)) {
+            throw "Installer pre-install database migration/rollback wiring is missing: $migrationFragment"
+        }
+    }
+    if ($text.Contains("AllowNoPendingTransaction") -or
+        $text.Contains("NO_PENDING_TRANSACTION_ALLOWED")) {
+        throw "Installer rollback must never accept a missing transaction record after the helper started: $issPath"
+    }
+    $commitIndex = $text.IndexOf("if not CommitPendingDatabaseTransaction(CommitStatus) then", [System.StringComparison]::Ordinal)
+    $finalizeIndex = $text.IndexOf("not FinalizeDeferredCredentialScrub", [System.StringComparison]::Ordinal)
+    if ($commitIndex -lt 0 -or $finalizeIndex -le $commitIndex) {
+        throw "Installer must publish the staged database before deferred credential scrub: $issPath"
     }
     return [pscustomobject]@{
         path    = Resolve-ReleaseGatePath $issPath
@@ -1085,6 +1141,25 @@ function New-PackageGateReport {
     if ($configRunSourceHash -cne $configRunDistHash) {
         throw "dist/tools/ConfigMigrate_Run.cmd differs from the tracked source command."
     }
+    $configInstallSource = Join-Path $RepoRoot "tools\ConfigMigrate_Install.ps1"
+    $configInstallDist = Join-Path $RepoRoot "dist\tools\ConfigMigrate_Install.ps1"
+    $configInstallSourceHash = Get-ReleaseFileSha256 $configInstallSource
+    $configInstallDistHash = Get-ReleaseFileSha256 $configInstallDist
+    if ($configInstallSourceHash -cne $configInstallDistHash) {
+        throw "dist/tools/ConfigMigrate_Install.ps1 differs from the tracked source helper."
+    }
+    $configInstallText = Get-Content -LiteralPath $configInstallSource -Raw -Encoding UTF8
+    if (-not $configInstallText.Contains("'--verify-installer-state'") `
+        -or -not $configInstallText.Contains("'--source', `$script:DataPath") `
+        -or (($configInstallText.Split('Invoke-InstallerStateVerification').Count - 1) -lt 12) `
+        -or $configInstallText.Contains("'--verify-current'") `
+        -or -not $configInstallText.Contains('SOURCE_INVENTORY_SHA256=') `
+        -or -not $configInstallText.Contains('MODE=PUBLISHED_FINALIZE_PENDING') `
+        -or -not $configInstallText.Contains('PENDING_TRANSACTION_COMMITTED_FINALIZE_REQUIRED') `
+        -or -not $configInstallText.Contains('Assert-NoopAbsentSourceInventory') `
+        -or -not $configInstallText.Contains('Assert-CreateSourceInventory')) {
+        throw "Installer helper must use source-aware installer-state verification for every lifecycle database readback."
+    }
     $gateScriptPath = $script:ReleaseGateCommonPath
     if ([string]::IsNullOrWhiteSpace($RunId)) {
         $RunId = [Guid]::NewGuid().ToString("D")
@@ -1114,6 +1189,7 @@ function New-PackageGateReport {
         fanucManifest      = [ordered]@{ sha256 = $fanuc.sha256; fileCount = [int]$fanuc.manifest.expectedFileCount }
         configMigrate      = $config
         configMigrateRun   = [ordered]@{ path = Resolve-ReleaseGatePath $configRunDist; sha256 = $configRunDistHash }
+        configMigrateInstall = [ordered]@{ path = Resolve-ReleaseGatePath $configInstallDist; sha256 = $configInstallDistHash }
         packageInventory   = @(Get-ReleaseFileInventory $PackageDir)
     }
     Write-ReleaseGateJson -Value $report -Path $OutputPath
@@ -1162,7 +1238,8 @@ function Assert-PackageGateReport {
     $packageDir = Resolve-ReleaseGatePath ([string]$report.packageDir)
     if (-not (Test-ReleaseGateSamePath $packageDir (Join-Path $ExpectedRepoRoot "dist\QtWidgetsApplication4")) `
         -or -not (Test-ReleaseGateSamePath ([string]$report.configMigrate.path) (Join-Path $ExpectedRepoRoot "dist\tools\ConfigMigrate.exe")) `
-        -or -not (Test-ReleaseGateSamePath ([string]$report.configMigrateRun.path) (Join-Path $ExpectedRepoRoot "dist\tools\ConfigMigrate_Run.cmd"))) {
+        -or -not (Test-ReleaseGateSamePath ([string]$report.configMigrateRun.path) (Join-Path $ExpectedRepoRoot "dist\tools\ConfigMigrate_Run.cmd")) `
+        -or -not (Test-ReleaseGateSamePath ([string]$report.configMigrateInstall.path) (Join-Path $ExpectedRepoRoot "dist\tools\ConfigMigrate_Install.ps1"))) {
         throw "Package gate report contains a non-canonical dist path."
     }
     $actualInventory = @(Get-ReleaseFileInventory $packageDir)
@@ -1205,6 +1282,12 @@ function Assert-PackageGateReport {
     $configRunDistHash = Get-ReleaseFileSha256 ([string]$report.configMigrateRun.path)
     if ($configRunSourceHash -cne $configRunDistHash -or $configRunDistHash -cne [string]$report.configMigrateRun.sha256) {
         throw "ConfigMigrate_Run.cmd changed after package gate creation."
+    }
+    $configInstallSourceHash = Get-ReleaseFileSha256 (Join-Path $ExpectedRepoRoot "tools\ConfigMigrate_Install.ps1")
+    $configInstallDistHash = Get-ReleaseFileSha256 ([string]$report.configMigrateInstall.path)
+    if ($configInstallSourceHash -cne $configInstallDistHash `
+        -or $configInstallDistHash -cne [string]$report.configMigrateInstall.sha256) {
+        throw "ConfigMigrate_Install.ps1 changed after package gate creation."
     }
     Assert-EmptyReleaseRuntimeDirectories $packageDir
     return $report

@@ -277,6 +277,7 @@ class CandidateFixture:
         migrator_sha = "c" * 64
         source_sha = "d" * 64
         migrate_run_sha = "e" * 64
+        migrate_install_sha = "9" * 64
         heads = {"neutral": "a" * 40, "brand": "b" * 40}
         channel_nodes = {}
         for channel, dist_dir, installer_path in (
@@ -305,6 +306,10 @@ class CandidateFixture:
                 "configMigrate": {"sha256": migrator_sha, "sourceSha256": source_sha},
                 "configMigrateRun": {"path": str(self.root / "ConfigMigrate_Run.cmd"),
                                      "sha256": migrate_run_sha},
+                "configMigrateInstall": {
+                    "path": str(self.root / "ConfigMigrate_Install.ps1"),
+                    "sha256": migrate_install_sha,
+                },
                 "packageInventory": dist["inventory"],
             }
             self._write_json(package_path, package)
@@ -358,6 +363,7 @@ class CandidateFixture:
             "commonInventoryFileCount": 1,
             "fanucManifestSha256": fanuc_sha,
             "configMigrateSha256": migrator_sha,
+            "configMigrateInstallSha256": migrate_install_sha,
             "neutral": channel_nodes["neutral"],
             "brand": channel_nodes["brand"],
         }

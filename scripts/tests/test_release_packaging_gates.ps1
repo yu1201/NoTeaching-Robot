@@ -137,7 +137,7 @@ try {
     Assert-Throws { Assert-ReleaseVersion "v2026.07.12.1200" } "version with v prefix must fail"
     Assert-Throws { Assert-ReleaseVersion "2026.7.12.1200" } "non-canonical version must fail"
     Assert-Throws { Assert-ReleaseVersion "2026.99.99.9999" } "invalid calendar version must fail"
-    $currentInstallerDefinition = Assert-InstallerDefinition -RepoRoot $repoRoot -AppVersion "2026.07.13.0610" -Channel neutral
+    $currentInstallerDefinition = Assert-InstallerDefinition -RepoRoot $repoRoot -AppVersion "2026.07.13.2115" -Channel neutral
     Assert-True ([string]$currentInstallerDefinition.appId -ceq $script:ReleaseGateExpectedAppId) "installer AppId hard gate failed"
 
     $installerFixture = Join-Path $tempRoot "installer-definition"
@@ -148,7 +148,7 @@ try {
         param([string]$Text, [string]$Message)
         Assert-True ($Text -cne $installerTextOriginal) "installer attack fixture mutation did not change the source: $Message"
         Set-Content -LiteralPath $installerFixturePath -Value $Text -Encoding UTF8
-        Assert-Throws { Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.13.0610" -Channel neutral } $Message
+        Assert-Throws { Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.13.2115" -Channel neutral } $Message
     }
     $sourceDirDefine = '#define MySourceDir "..\dist\QtWidgetsApplication4"'
     Assert-InstallerTextRejected `
@@ -188,8 +188,26 @@ try {
     Assert-InstallerTextRejected `
         -Text ($installerTextOriginal.Replace('Source: "..\dist\tools\ConfigMigrate_Run.cmd"', 'DestName: "ConfigMigrate_Run.cmd"')) `
         -Message "[Files] record missing Source key must fail"
+    Assert-InstallerTextRejected `
+        -Text ($installerTextOriginal -replace '(?m)^Source: "\.\.\\dist\\tools\\ConfigMigrate_Install\.ps1"; DestDir: "\{app\}\\tools".*(?:\r?\n|$)', '') `
+        -Message "missing installed ConfigMigrate_Install.ps1 helper must fail"
+    Assert-InstallerTextRejected `
+        -Text ($installerTextOriginal.Replace('DestName: "ConfigMigrate_PreInstall.exe"; Flags: dontcopy', 'DestName: "ConfigMigrate_PreInstall.exe"; Flags: ignoreversion')) `
+        -Message "pre-install migrator without dontcopy must fail"
+    Assert-InstallerTextRejected `
+        -Text ($installerTextOriginal.Replace('DestName: "ConfigMigrate_PreInstall.ps1"', 'DestName: "ConfigMigrate_PreInstall-Tampered.ps1"')) `
+        -Message "pre-install helper DestName drift must fail"
+    Assert-InstallerTextRejected `
+        -Text ($installerTextOriginal.Replace('function PrepareToInstall(var NeedsRestart: Boolean): string;', 'function PrepareDatabaseLater(var NeedsRestart: Boolean): string;')) `
+        -Message "missing PrepareToInstall migration hook must fail"
+    Assert-InstallerTextRejected `
+        -Text ($installerTextOriginal.Replace('[Code]', "[Code]`r`n; AllowNoPendingTransaction")) `
+        -Message "installer rollback that permits a missing transaction record must fail"
+    Assert-InstallerTextRejected `
+        -Text ($installerTextOriginal.Replace('if not CommitPendingDatabaseTransaction(CommitStatus) then', 'if False then')) `
+        -Message "missing staged database post-install commit must fail"
     Set-Content -LiteralPath $installerFixturePath -Value $installerTextOriginal -Encoding UTF8
-    Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.13.0610" -Channel neutral | Out-Null
+    Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.13.2115" -Channel neutral | Out-Null
 
     $fixture = Join-Path $tempRoot "fanuc"
     Copy-ManifestRuntimeFixture $fixture
@@ -341,9 +359,9 @@ try {
     Invoke-GitFixture $gitFixture @("config", "user.name", "Release Gate Test")
     Invoke-GitFixture $gitFixture @("add", "--", "installer/QtWidgetsApplication4.iss", "icons/app.ico")
     Invoke-GitFixture $gitFixture @("commit", "-q", "-m", "fixture")
-    Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.13.0610" -Channel neutral | Out-Null
+    Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.13.2115" -Channel neutral | Out-Null
     Set-Content -LiteralPath (Join-Path $gitFixture "untracked-release-asset.dll") -Value "stale" -NoNewline
-    Assert-Throws { Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.13.0610" -Channel neutral } "untracked release asset must make Git state ambiguous"
+    Assert-Throws { Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.13.2115" -Channel neutral } "untracked release asset must make Git state ambiguous"
 
     $neutralWorktree = Join-Path $tempRoot "linked-neutral"
     $brandWorktree = Join-Path $tempRoot "linked-brand"

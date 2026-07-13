@@ -1096,10 +1096,14 @@ def _inspect_pair_gate(
 
     pair_fanuc_sha = pair.get("fanucManifestSha256")
     pair_migrator_sha = pair.get("configMigrateSha256")
+    pair_install_migrator_sha = pair.get("configMigrateInstallSha256")
     _require(isinstance(pair_fanuc_sha, str) and SHA256_RE.fullmatch(pair_fanuc_sha) is not None,
              "pair gate FANUC manifest 哈希非法。")
     _require(isinstance(pair_migrator_sha, str) and SHA256_RE.fullmatch(pair_migrator_sha) is not None,
              "pair gate ConfigMigrate 哈希非法。")
+    _require(isinstance(pair_install_migrator_sha, str)
+             and SHA256_RE.fullmatch(pair_install_migrator_sha) is not None,
+             "pair gate ConfigMigrate_Install 哈希非法。")
 
     channel_evidence: dict[str, Any] = {}
     package_reports: dict[str, dict[str, Any]] = {}
@@ -1196,6 +1200,7 @@ def _inspect_pair_gate(
         fanuc = package_gate.get("fanucManifest")
         migrator = package_gate.get("configMigrate")
         migrate_run = package_gate.get("configMigrateRun")
+        migrate_install = package_gate.get("configMigrateInstall")
         _require(isinstance(fanuc, dict) and fanuc.get("sha256") == pair_fanuc_sha
                  and fanuc.get("fileCount") == EXPECTED_FANUC_TP_COUNT + EXPECTED_FANUC_PC_COUNT,
                  f"{channel} FANUC gate 证据不匹配。")
@@ -1207,6 +1212,9 @@ def _inspect_pair_gate(
                  and isinstance(migrate_run.get("sha256"), str)
                  and SHA256_RE.fullmatch(migrate_run["sha256"]) is not None,
                  f"{channel} ConfigMigrate_Run gate 证据不匹配。")
+        _require(isinstance(migrate_install, dict)
+                 and migrate_install.get("sha256") == pair_install_migrator_sha,
+                 f"{channel} ConfigMigrate_Install gate 证据不匹配。")
         package_reports[channel] = package_gate
         channel_evidence[channel] = {
             "head": head,
@@ -1222,6 +1230,9 @@ def _inspect_pair_gate(
     _require(package_reports["neutral"]["configMigrateRun"]["sha256"]
              == package_reports["brand"]["configMigrateRun"]["sha256"],
              "双通道 ConfigMigrate_Run.cmd 不一致。")
+    _require(package_reports["neutral"]["configMigrateInstall"]["sha256"]
+             == package_reports["brand"]["configMigrateInstall"]["sha256"],
+             "双通道 ConfigMigrate_Install.ps1 不一致。")
     return {
         "path": str(pair_path),
         "verifierRoot": str(verifier_root),
