@@ -7849,6 +7849,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pAuthLoginModeBtn(nullptr)
 	, m_pAuthRegisterModeBtn(nullptr)
 	, m_pAuthSubmitBtn(nullptr)
+	, m_pAuthCancelBtn(nullptr)
 	, m_pGuestLoginBtn(nullptr)
 	, m_pDashboardConnectBtn(nullptr)
 	, m_pDashboardClearAlarmBtn(nullptr)
@@ -7978,7 +7979,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 
 	QWidget* authCard = new QWidget(m_pAuthPage);
 	authCard->setObjectName("AuthCard");
-	authCard->setMaximumWidth(360);
+	authCard->setMaximumWidth(520);
 	authCard->setStyleSheet(
 		"QWidget#AuthCard { background: transparent; border: none; }"
 		"QWidget#AuthCard QLabel { color: #BACBD1; }"
@@ -8016,7 +8017,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pAuthHintLabel = new QLabel("软件启动后先登录；没有账号时可切换到注册，只创建操作员权限。", authCard);
 	m_pAuthHintLabel->setAlignment(Qt::AlignCenter);
 	m_pAuthHintLabel->setWordWrap(true);
-	m_pAuthHintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 11px; }");
+	m_pAuthHintLabel->setMinimumWidth(420);
+	m_pAuthHintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 13px; padding: 6px 10px; }");
 	m_pAuthHintLabel->hide();
 	authCardLayout->addWidget(m_pAuthHintLabel);
 
@@ -8031,16 +8033,20 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pAuthRegisterModeBtn->setCursor(Qt::PointingHandCursor);
 	m_pAuthLoginModeBtn->setMinimumHeight(28);
 	m_pAuthRegisterModeBtn->setMinimumHeight(28);
-	m_pAuthLoginModeBtn->setFixedWidth(86);
-	m_pAuthRegisterModeBtn->setFixedWidth(86);
+	m_pAuthLoginModeBtn->setFixedWidth(110);
+	m_pAuthRegisterModeBtn->setFixedWidth(110);
 	m_pAuthLoginModeBtn->setFlat(true);
 	m_pAuthRegisterModeBtn->setFlat(true);
 	m_pAuthLoginModeBtn->setStyleSheet(
 		"QPushButton { color: #AFC8CE; border: none; background: transparent; font-size: 15px; }"
-		"QPushButton:checked { color: #72D4DD; font-weight: 700; }");
+		"QPushButton:checked { color: #72D4DD; font-weight: 700; }"
+		"QPushButton:disabled { color: #78909A; }"
+		"QPushButton:checked:disabled { color: #8FC7CB; font-weight: 600; }");
 	m_pAuthRegisterModeBtn->setStyleSheet(
 		"QPushButton { color: #AFC8CE; border: none; background: transparent; font-size: 15px; }"
-		"QPushButton:checked { color: #72D4DD; font-weight: 700; }");
+		"QPushButton:checked { color: #72D4DD; font-weight: 700; }"
+		"QPushButton:disabled { color: #78909A; }"
+		"QPushButton:checked:disabled { color: #8FC7CB; font-weight: 600; }");
 	authModeLayout->addStretch(1);
 	authModeLayout->addWidget(m_pAuthLoginModeBtn);
 	authModeLayout->addWidget(m_pAuthRegisterModeBtn);
@@ -8058,7 +8064,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pLoginNameEdit = m_pLoginNameCombo->lineEdit();
 	m_pLoginPasswordEdit = new QLineEdit(authCard);
 	m_pAuthConfirmPasswordRow = new QWidget(authCard);
-	m_pAuthConfirmPasswordRow->setFixedSize(300, 44);
+	m_pAuthConfirmPasswordRow->setFixedSize(420, 44);
 	QHBoxLayout* confirmRowLayout = new QHBoxLayout(m_pAuthConfirmPasswordRow);
 	confirmRowLayout->setContentsMargins(0, 0, 0, 0);
 	confirmRowLayout->setSpacing(0);
@@ -8069,9 +8075,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	m_pLoginNameEdit->setPlaceholderText("请输入账号");
 	m_pLoginPasswordEdit->setPlaceholderText("请输入密码");
 	m_pAuthConfirmPasswordEdit->setPlaceholderText("再次输入密码");
-	m_pLoginNameCombo->setFixedSize(300, 44);
-	m_pLoginPasswordEdit->setFixedSize(300, 44);
-	m_pAuthConfirmPasswordEdit->setFixedSize(300, 44);
+	m_pLoginNameCombo->setFixedSize(420, 44);
+	m_pLoginPasswordEdit->setFixedSize(420, 44);
+	m_pAuthConfirmPasswordEdit->setFixedSize(420, 44);
 	auto styleAuthEdit = [](QLineEdit* edit)
 		{
 			edit->setStyleSheet(
@@ -8131,14 +8137,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	authButtonLayout->setContentsMargins(0, 0, 0, 0);
 	authButtonLayout->setSpacing(12);
 	m_pAuthSubmitBtn = new QPushButton("登录", authCard);
-	QPushButton* authCancelBtn = new QPushButton("退出登录", authCard);
+	m_pAuthCancelBtn = new QPushButton("退出登录", authCard);
 	m_pGuestLoginBtn = new QPushButton("游客登录", authCard);
 	m_pAuthSubmitBtn->setCursor(Qt::PointingHandCursor);
-	authCancelBtn->setCursor(Qt::PointingHandCursor);
+	m_pAuthCancelBtn->setCursor(Qt::PointingHandCursor);
 	m_pGuestLoginBtn->setCursor(Qt::PointingHandCursor);
-	m_pAuthSubmitBtn->setFixedSize(144, 42);
-	authCancelBtn->setFixedSize(144, 42);
-	m_pGuestLoginBtn->setFixedSize(300, 34);
+	m_pAuthSubmitBtn->setFixedSize(204, 42);
+	m_pAuthCancelBtn->setFixedSize(204, 42);
+	m_pGuestLoginBtn->setFixedSize(420, 34);
 	m_pAuthSubmitBtn->setStyleSheet(
 		"QPushButton {"
 		"  background: #67B5FF;"
@@ -8150,7 +8156,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"}"
 		"QPushButton:hover { background: #5AA8F3; }"
 		"QPushButton:pressed { background: #4B97EA; }");
-	authCancelBtn->setStyleSheet(
+	m_pAuthCancelBtn->setStyleSheet(
 		"QPushButton {"
 		"  background: #16212D;"
 		"  color: #AFC8CE;"
@@ -8169,7 +8175,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"QPushButton:hover { color: #72D4DD; }");
 	authButtonLayout->addStretch(1);
 	authButtonLayout->addWidget(m_pAuthSubmitBtn);
-	authButtonLayout->addWidget(authCancelBtn);
+	authButtonLayout->addWidget(m_pAuthCancelBtn);
 	authButtonLayout->addStretch(1);
 	authCardLayout->addLayout(authButtonLayout);
 	authCardLayout->addWidget(m_pGuestLoginBtn, 0, Qt::AlignHCenter);
@@ -8214,7 +8220,15 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 				LoginCurrentAccount();
 			}
 		});
-	connect(authCancelBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::LogoutCurrentAccount);
+	connect(m_pAuthCancelBtn, &QPushButton::clicked, this, [this]()
+		{
+			if (m_bAccountRecoveryRequired)
+			{
+				close();
+				return;
+			}
+			LogoutCurrentAccount();
+		});
 	connect(m_pGuestLoginBtn, &QPushButton::clicked, this, &QtWidgetsApplication4::LoginAsGuest);
 	connect(m_pLoginNameCombo, &QComboBox::currentTextChanged, this, [this](const QString& userName)
 		{
@@ -8917,7 +8931,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		{
 			if (m_pAutoLoginCheck != nullptr)
 			{
-				m_pAutoLoginCheck->setEnabled(checked);
+				m_pAutoLoginCheck->setEnabled(checked && !m_bAccountRecoveryRequired);
 				if (!checked)
 				{
 					m_pAutoLoginCheck->setChecked(false);
@@ -9021,7 +9035,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	}
 	LoadLoginState();
 	ShowAuthPage(m_bAccountRecoveryRequired
-		? QStringLiteral("账号认证库需要安全恢复，已禁用自动登录。请从受控备份恢复账号库或联系维护人员，程序不会重新生成已知默认管理员。")
+		? QStringLiteral("账号认证库升级或完整性校验未通过，所有登录入口已安全锁定。请关闭程序并运行受控恢复/迁移，或联系维护人员；程序不会重建默认管理员。")
 		: QString());
 	if (!m_bAccountRecoveryRequired)
 	{
@@ -10443,7 +10457,7 @@ void QtWidgetsApplication4::RefreshAccountUi()
 	if (m_pPermissionHintLabel != nullptr)
 	{
 		m_pPermissionHintLabel->setText(m_bAccountRecoveryRequired
-			? QStringLiteral("安全恢复状态：账号认证库缺失、损坏、账号被清空或没有管理员时，程序不会自动重新生成默认管理员；请恢复受控备份或联系维护人员。")
+			? QStringLiteral("账号库锁定：升级、完整性或管理员校验未通过。程序不会自动重新生成默认管理员；请执行受控迁移、恢复已验证备份或联系维护人员。")
 			: (m_bInitialAdministratorSetupRequired
 				? QStringLiteral("首次启动：请在本机设置初始管理员密码。程序不提供公开的默认管理员密码。")
 				: QStringLiteral("权限说明：登录后可进入主页；工程师或管理员可打开管理页面；管理员还可进入账号管理。")));
@@ -10707,29 +10721,60 @@ void QtWidgetsApplication4::SetAuthRegisterMode(bool registerMode)
 
 void QtWidgetsApplication4::RefreshAuthModeUi()
 {
+	const bool recoveryRequired = m_bAccountRecoveryRequired;
+	const bool initialAdministratorSetup = m_bInitialAdministratorSetupRequired;
+	const bool showModeSwitch = !recoveryRequired && !initialAdministratorSetup;
 	if (m_pAuthLoginModeBtn != nullptr)
 	{
 		QSignalBlocker blockerLogin(m_pAuthLoginModeBtn);
 		m_pAuthLoginModeBtn->setChecked(!m_bAuthRegisterMode);
-		m_pAuthLoginModeBtn->setEnabled(
-			!m_bAccountRecoveryRequired && !m_bInitialAdministratorSetupRequired);
+		m_pAuthLoginModeBtn->setVisible(showModeSwitch);
+		m_pAuthLoginModeBtn->setEnabled(showModeSwitch);
 	}
 	if (m_pAuthRegisterModeBtn != nullptr)
 	{
 		QSignalBlocker blockerRegister(m_pAuthRegisterModeBtn);
 		m_pAuthRegisterModeBtn->setChecked(m_bAuthRegisterMode);
-		m_pAuthRegisterModeBtn->setEnabled(
-			!m_bAccountRecoveryRequired && !m_bInitialAdministratorSetupRequired);
+		m_pAuthRegisterModeBtn->setVisible(showModeSwitch);
+		m_pAuthRegisterModeBtn->setEnabled(showModeSwitch);
 	}
 	if (m_pAuthSubmitBtn != nullptr)
 	{
-		m_pAuthSubmitBtn->setText(m_bInitialAdministratorSetupRequired
+		m_pAuthSubmitBtn->setText(initialAdministratorSetup
 			? QStringLiteral("创建初始管理员")
 			: (m_bAuthRegisterMode ? QStringLiteral("注册账号") : QStringLiteral("登录")));
+		m_pAuthSubmitBtn->setVisible(!recoveryRequired);
+		m_pAuthSubmitBtn->setEnabled(!recoveryRequired);
+	}
+	if (m_pAuthCancelBtn != nullptr)
+	{
+		m_pAuthCancelBtn->setText(recoveryRequired
+			? QStringLiteral("关闭程序")
+			: QStringLiteral("退出登录"));
 	}
 	if (m_pAuthHintLabel != nullptr)
 	{
-		if (m_bInitialAdministratorSetupRequired)
+		if (recoveryRequired)
+		{
+			m_pAuthHintLabel->setStyleSheet(
+				"QLabel { color: #FFD4A3; background: rgba(92, 54, 25, 0.45); "
+				"border: 1px solid #9C6A36; border-radius: 8px; font-size: 13px; padding: 10px 14px; }");
+		}
+		else
+		{
+			m_pAuthHintLabel->setStyleSheet(
+				"QLabel { color: #AFC8CE; font-size: 13px; padding: 6px 10px; }");
+		}
+		if (recoveryRequired)
+		{
+			const QString recoveryMessage = m_sAuthHintOverride.trimmed().isEmpty()
+				? QStringLiteral(
+					"账号认证库未能通过完整性或版本迁移校验，所有登录入口均已锁定。请关闭程序，恢复已验证备份或联系维护人员；程序不会重建默认管理员。")
+				: m_sAuthHintOverride.trimmed();
+			m_pAuthHintLabel->setText(recoveryMessage);
+			m_pAuthHintLabel->show();
+		}
+		else if (initialAdministratorSetup)
 		{
 			m_pAuthHintLabel->setText(QStringLiteral(
 				"首次启动没有默认密码。请在本机为 admin 设置至少 8 位的新密码；账号与初始化标志会原子写入。"));
@@ -10750,18 +10795,23 @@ void QtWidgetsApplication4::RefreshAuthModeUi()
 	}
 	if (m_pAuthConfirmPasswordRow != nullptr)
 	{
-		m_pAuthConfirmPasswordRow->setVisible(m_bAuthRegisterMode);
+		m_pAuthConfirmPasswordRow->setVisible(!recoveryRequired && m_bAuthRegisterMode);
 	}
 	if (m_pRememberPasswordCheck != nullptr)
 	{
-		m_pRememberPasswordCheck->setVisible(!m_bAuthRegisterMode);
+		m_pRememberPasswordCheck->setVisible(!recoveryRequired && !m_bAuthRegisterMode);
+		m_pRememberPasswordCheck->setEnabled(!recoveryRequired);
 	}
 	if (m_pAutoLoginCheck != nullptr)
 	{
-		m_pAutoLoginCheck->setVisible(!m_bAuthRegisterMode);
-		if (!m_bAuthRegisterMode)
+		m_pAutoLoginCheck->setVisible(!recoveryRequired && !m_bAuthRegisterMode);
+		if (!recoveryRequired && !m_bAuthRegisterMode)
 		{
 			m_pAutoLoginCheck->setEnabled(m_pRememberPasswordCheck == nullptr || m_pRememberPasswordCheck->isChecked());
+		}
+		else
+		{
+			m_pAutoLoginCheck->setEnabled(false);
 		}
 	}
 	if (m_pGuestLoginBtn != nullptr)
@@ -10775,11 +10825,21 @@ void QtWidgetsApplication4::RefreshAuthModeUi()
 	}
 	if (m_pLoginNameCombo != nullptr)
 	{
-		if (m_bInitialAdministratorSetupRequired)
+		if (initialAdministratorSetup)
 		{
 			m_pLoginNameCombo->setCurrentText(QStringLiteral("admin"));
 		}
-		m_pLoginNameCombo->setEnabled(!m_bInitialAdministratorSetupRequired);
+		m_pLoginNameCombo->setVisible(!recoveryRequired);
+		m_pLoginNameCombo->setEnabled(!recoveryRequired && !initialAdministratorSetup);
+	}
+	if (m_pLoginPasswordEdit != nullptr)
+	{
+		m_pLoginPasswordEdit->setVisible(!recoveryRequired);
+		m_pLoginPasswordEdit->setEnabled(!recoveryRequired);
+	}
+	if (m_pAuthConfirmPasswordEdit != nullptr)
+	{
+		m_pAuthConfirmPasswordEdit->setEnabled(!recoveryRequired);
 	}
 }
 
@@ -11005,7 +11065,11 @@ void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 	m_sAuthHintOverride = promptMessage.trimmed();
 	SetAuthRegisterMode(m_bInitialAdministratorSetupRequired);
 	m_pMainStack->setCurrentWidget(m_pAuthPage);
-	if (m_pLoginNameEdit != nullptr)
+	if (m_bAccountRecoveryRequired && m_pAuthCancelBtn != nullptr)
+	{
+		m_pAuthCancelBtn->setFocus(Qt::OtherFocusReason);
+	}
+	else if (m_pLoginNameEdit != nullptr)
 	{
 		m_pLoginNameEdit->setFocus(Qt::OtherFocusReason);
 	}

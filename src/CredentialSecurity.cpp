@@ -167,10 +167,15 @@ QString WindowsErrorText(DWORD code)
 
 DATA_BLOB BlobFor(QByteArray& bytes)
 {
+    // CryptProtectData/CryptUnprotectData accept cbData == 0, but Windows does
+    // not consistently accept a null pbData for that valid empty payload.  A
+    // stable one-byte sentinel keeps the pointer valid without changing the
+    // logical blob length and lets empty credentials round-trip normally.
+    static BYTE emptyBlobSentinel = 0;
     DATA_BLOB blob{};
     blob.cbData = static_cast<DWORD>(bytes.size());
     blob.pbData = bytes.isEmpty()
-        ? nullptr
+        ? &emptyBlobSentinel
         : reinterpret_cast<BYTE*>(bytes.data());
     return blob;
 }

@@ -101,6 +101,9 @@ function Get-ReleasePairLiveState {
     if ([string]$neutralPackage.configMigrateRun.sha256 -cne [string]$brandPackage.configMigrateRun.sha256) {
         throw "Neutral and brand ConfigMigrate_Run.cmd bytes differ."
     }
+    if ([string]$neutralPackage.configMigrateInstall.sha256 -cne [string]$brandPackage.configMigrateInstall.sha256) {
+        throw "Neutral and brand ConfigMigrate_Install.ps1 bytes differ."
+    }
 
     $neutralComparable = @(Get-ComparablePackageInventory -Inventory @($neutralPackage.packageInventory) -Channel neutral)
     $brandComparable = @(Get-ComparablePackageInventory -Inventory @($brandPackage.packageInventory) -Channel brand)
@@ -159,7 +162,7 @@ function Assert-ExistingReleasePairMatchesLiveState {
         "gateScriptSha256", "producerScriptSha256", "appId", "version", "gitCommonDir",
         "neutralAncestorHead", "brandDescendantHead", "maxInstallerSizeDifferenceBytes",
         "installerSizeDifferenceBytes", "commonInventoryFileCount", "fanucManifestSha256",
-        "configMigrateSha256", "neutral", "brand")
+        "configMigrateSha256", "configMigrateInstallSha256", "neutral", "brand")
     if ([int]$Pair.schemaVersion -ne $script:ReleaseGateSchemaVersion `
         -or [string]$Pair.kind -cne "release-pair" `
         -or [string]$Pair.status -cne "pass" `
@@ -204,7 +207,8 @@ function Assert-ExistingReleasePairMatchesLiveState {
         -or [int64]$Pair.installerSizeDifferenceBytes -ne [int64]$Live.installerSizeDifference `
         -or [int]$Pair.commonInventoryFileCount -ne [int]$Live.neutralComparable.Count `
         -or [string]$Pair.fanucManifestSha256 -cne [string]$Live.neutralPackage.fanucManifest.sha256 `
-        -or [string]$Pair.configMigrateSha256 -cne [string]$Live.neutralPackage.configMigrate.sha256) {
+        -or [string]$Pair.configMigrateSha256 -cne [string]$Live.neutralPackage.configMigrate.sha256 `
+        -or [string]$Pair.configMigrateInstallSha256 -cne [string]$Live.neutralPackage.configMigrateInstall.sha256) {
         throw "Existing release-pair cross-channel evidence is stale."
     }
 
@@ -358,7 +362,9 @@ $protectedPaths = @(
     [string]$neutralPackage.configMigrate.path,
     [string]$brandPackage.configMigrate.path,
     [string]$neutralPackage.configMigrateRun.path,
-    [string]$brandPackage.configMigrateRun.path
+    [string]$brandPackage.configMigrateRun.path,
+    [string]$neutralPackage.configMigrateInstall.path,
+    [string]$brandPackage.configMigrateInstall.path
 )
 foreach ($item in @($neutralPackage.packageInventory)) {
     $protectedPaths += Join-Path ([string]$neutralPackage.packageDir) (([string]$item.path).Replace('/', '\'))
@@ -402,6 +408,7 @@ $pairReport = [ordered]@{
     commonInventoryFileCount         = [int]$neutralComparable.Count
     fanucManifestSha256              = [string]$neutralPackage.fanucManifest.sha256
     configMigrateSha256              = [string]$neutralPackage.configMigrate.sha256
+    configMigrateInstallSha256       = [string]$neutralPackage.configMigrateInstall.sha256
     neutral                          = [ordered]@{
         head                 = [string]$neutral.head
         repoRoot             = [string]$neutral.repoRoot

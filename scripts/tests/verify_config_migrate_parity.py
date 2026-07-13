@@ -56,6 +56,17 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def data_inventory(path: Path) -> dict[str, tuple[int, str]]:
+    return {
+        entry.relative_to(path).as_posix(): (
+            entry.stat().st_size,
+            file_sha256(entry),
+        )
+        for entry in path.rglob("*")
+        if entry.is_file()
+    }
+
+
 def create_settings_schema(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     connection.execute(
@@ -70,6 +81,57 @@ def create_settings_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def write_auth1_database(
+    path: Path,
+    scrub_state: str,
+    scrub_manifest_text: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "PasswordHash": hashlib.sha256(
+            b"admin\ninstaller-auth1-parity"
+        ).hexdigest(),
+        "Role": "admin",
+        "MustChangePassword": "0",
+        "CreatedAt": "2026-01-02T03:04:05",
+        "UpdatedAt": "2026-02-03T04:05:06Z",
+        "PasswordChangedAt": "2026-02-02T03:04:05+08:00",
+    }
+    with sqlite3.connect(path) as connection:
+        create_settings_schema(connection)
+        connection.executemany(
+            "INSERT INTO meta(key, value) VALUES(?, ?)",
+            (
+                ("schema_version", "5"),
+                ("auth_semantic_version", "1"),
+                ("auth_initialized", "1"),
+                ("encrypt_new_values", "1"),
+                ("sensitive_protection", "dpapi-current-user-v1"),
+                ("legacy_credential_scrub_state", scrub_state),
+                ("legacy_credential_scrub_manifest", scrub_manifest_text),
+            ),
+        )
+        for key, value in profile.items():
+            connection.execute(
+                """
+                INSERT INTO settings(
+                    scope_type, scope_id, module, key_name, value_text,
+                    value_type, sensitive, encrypted
+                ) VALUES('account', 'admin', 'Profile', ?, ?, ?, ?, 0)
+                """,
+                (
+                    key,
+                    value,
+                    (
+                        "bool" if key == "MustChangePassword"
+                        else "datetime" if key.endswith("At")
+                        else "string"
+                    ),
+                    1 if "Password" in key else 0,
+                ),
+            )
 
 
 def write_fixture(root: Path) -> None:
@@ -298,6 +360,475 @@ def main() -> int:
             for path in template.rglob("*.ini")
         } != template_hashes:
             raise AssertionError("Cross-directory migration modified the legacy source files")
+
+        installer_runners = (
+            ("python", [sys.executable, str(source_script)]),
+            ("exe", [str(exe)]),
+        )
+        installer_create_data = temp / "installer-create" / "Data"
+        write_fixture(installer_create_data)
+        installer_create_source_hashes = {
+            path.relative_to(installer_create_data): file_sha256(path)
+            for path in installer_create_data.rglob("*.ini")
+        }
+        installer_create_snapshots = {}
+        for label, runner in installer_runners:
+            staging = installer_create_data / (
+                ".ConfigStore.db.install-create-"
+                + ("1" if label == "python" else "2") * 32
+                + ".tmp"
+            )
+            run_checked(
+                runner + [
+                    "--source", str(installer_create_data),
+                    "--db", str(staging),
+                    "--encrypt",
+                    "--defer-credential-scrub",
+                    "--installer-staging",
+                ],
+                temp,
+            )
+            if (installer_create_data / "ConfigStore.db").exists():
+                raise AssertionError(
+                    f"{label} installer create staging wrote the final database"
+                )
+            if installer_create_source_hashes != {
+                path.relative_to(installer_create_data): file_sha256(path)
+                for path in installer_create_data.rglob("*.ini")
+            }:
+                raise AssertionError(
+                    f"{label} installer create staging modified legacy source files"
+                )
+            before_verify = data_inventory(installer_create_data)
+            verified = run_checked(
+                runner + [
+                    "--verify-installer-state",
+                    "--source", str(installer_create_data),
+                    "--db", str(staging),
+                ],
+                temp,
+            )
+            if "(scrub=pending)" not in verified.stdout:
+                raise AssertionError(
+                    f"{label} installer create staging did not verify as pending"
+                )
+            if data_inventory(installer_create_data) != before_verify:
+                raise AssertionError(
+                    f"{label} installer create verification modified Data"
+                )
+            installer_create_snapshots[label] = database_snapshot(
+                staging, decrypt_value, purpose_value
+            )
+        if installer_create_snapshots["python"] != installer_create_snapshots["exe"]:
+            python_meta, python_settings = installer_create_snapshots["python"]
+            exe_meta, exe_settings = installer_create_snapshots["exe"]
+            raise AssertionError(
+                "Python and ConfigMigrate.exe installer create staging differ logically: "
+                f"meta_only_python={set(python_meta) - set(exe_meta)!r}, "
+                f"meta_only_exe={set(exe_meta) - set(python_meta)!r}, "
+                f"settings_only_python={set(python_settings) - set(exe_settings)!r}, "
+                f"settings_only_exe={set(exe_settings) - set(python_settings)!r}"
+            )
+
+        installer_upgrade_data = temp / "installer-upgrade" / "Data"
+        installer_upgrade_data.mkdir(parents=True)
+        installer_upgrade_final = installer_upgrade_data / "ConfigStore.db"
+        admin_record = hashlib.sha256(
+            b"admin\ninstaller-upgrade-parity"
+        ).hexdigest()
+        with sqlite3.connect(installer_upgrade_final) as connection:
+            create_settings_schema(connection)
+            connection.execute(
+                "INSERT INTO meta(key, value) VALUES('schema_version', '4')"
+            )
+            connection.executemany(
+                """
+                INSERT INTO settings(
+                    scope_type, scope_id, module, key_name, value_text,
+                    value_type, sensitive, encrypted
+                ) VALUES('global', '', 'Accounts/Users/admin', ?, ?, ?, ?, 0)
+                """,
+                (
+                    ("PasswordHash", admin_record, "string", 1),
+                    ("Role", "admin", "string", 0),
+                    ("CreatedAt", "2026-01-02T03:04:05", "datetime", 0),
+                ),
+            )
+        installer_upgrade_ini = (
+            installer_upgrade_data / "CorrugatedSheetPointCloudEctration.ini"
+        )
+        installer_upgrade_ini.write_text(
+            "ifupright=true\nSave_File_Name=installer-upgrade-parity\n",
+            encoding="utf-8",
+        )
+        installer_upgrade_final_before = file_sha256(installer_upgrade_final)
+        installer_upgrade_ini_before = file_sha256(installer_upgrade_ini)
+        installer_upgrade_snapshots = {}
+        for label, runner in installer_runners:
+            staging = installer_upgrade_data / (
+                ".ConfigStore.db.install-upgrade-"
+                + ("3" if label == "python" else "4") * 32
+                + ".tmp"
+            )
+            staging.write_bytes(installer_upgrade_final.read_bytes())
+            backup = staging.with_name(
+                staging.name + ".install-backup.dpapi.bak"
+            )
+            run_checked(
+                runner + [
+                    "--source", str(installer_upgrade_data),
+                    "--db", str(staging),
+                    "--encrypt",
+                    "--defer-credential-scrub",
+                    "--installer-staging",
+                    "--upgrade-backup", str(backup),
+                ],
+                temp,
+            )
+            if file_sha256(installer_upgrade_final) != installer_upgrade_final_before:
+                raise AssertionError(
+                    f"{label} installer upgrade staging modified final ConfigStore.db"
+                )
+            if file_sha256(installer_upgrade_ini) != installer_upgrade_ini_before:
+                raise AssertionError(
+                    f"{label} installer upgrade staging modified legacy source files"
+                )
+            if not backup.is_file():
+                raise AssertionError(
+                    f"{label} installer upgrade staging did not create its bound backup"
+                )
+            before_verify = data_inventory(installer_upgrade_data)
+            verified = run_checked(
+                runner + [
+                    "--verify-installer-state",
+                    "--source", str(installer_upgrade_data),
+                    "--db", str(staging),
+                ],
+                temp,
+            )
+            if "(scrub=pending)" not in verified.stdout:
+                raise AssertionError(
+                    f"{label} installer upgrade staging did not verify as pending"
+                )
+            if data_inventory(installer_upgrade_data) != before_verify:
+                raise AssertionError(
+                    f"{label} installer upgrade verification modified Data"
+                )
+            installer_upgrade_snapshots[label] = database_snapshot(
+                staging, decrypt_value, purpose_value
+            )
+        if installer_upgrade_snapshots["python"] != installer_upgrade_snapshots["exe"]:
+            raise AssertionError(
+                "Python and ConfigMigrate.exe installer upgrade staging differ logically"
+            )
+
+        auth1_complete_data = temp / "installer-auth1-complete" / "Data"
+        auth1_complete_data.mkdir(parents=True)
+        auth1_complete_runtime = (
+            auth1_complete_data / "CorrugatedSheetPointCloudEctration.ini"
+        )
+        auth1_complete_runtime.write_text(
+            "ifupright=true\nSave_File_Name=auth1-complete-parity\n",
+            encoding="utf-8",
+        )
+        auth1_complete_final = auth1_complete_data / "ConfigStore.db"
+        write_auth1_database(auth1_complete_final, "complete", "[]")
+        auth1_complete_final_hash = file_sha256(auth1_complete_final)
+        auth1_complete_source_hash = file_sha256(auth1_complete_runtime)
+        auth1_complete_snapshots = {}
+        for label, runner in installer_runners:
+            staging = auth1_complete_data / (
+                ".ConfigStore.db.install-upgrade-"
+                + ("5" if label == "python" else "6") * 32
+                + ".tmp"
+            )
+            staging.write_bytes(auth1_complete_final.read_bytes())
+            backup = staging.with_name(
+                staging.name + ".install-backup.dpapi.bak"
+            )
+            result = run_checked(
+                runner + [
+                    "--source", str(auth1_complete_data),
+                    "--db", str(staging),
+                    "--encrypt",
+                    "--defer-credential-scrub",
+                    "--installer-staging",
+                    "--upgrade-backup", str(backup),
+                ],
+                temp,
+            )
+            if "no installer finalization is required" not in result.stdout:
+                raise AssertionError(
+                    f"{label} auth1 complete staging incorrectly requested finalization"
+                )
+            before_verify = data_inventory(auth1_complete_data)
+            verified = run_checked(
+                runner + [
+                    "--verify-installer-state",
+                    "--source", str(auth1_complete_data),
+                    "--db", str(staging),
+                ],
+                temp,
+            )
+            if "(scrub=complete)" not in verified.stdout:
+                raise AssertionError(
+                    f"{label} auth1 complete staging did not preserve complete provenance"
+                )
+            if data_inventory(auth1_complete_data) != before_verify:
+                raise AssertionError(
+                    f"{label} auth1 complete verification modified Data"
+                )
+            if (
+                file_sha256(auth1_complete_final) != auth1_complete_final_hash
+                or file_sha256(auth1_complete_runtime) != auth1_complete_source_hash
+            ):
+                raise AssertionError(
+                    f"{label} auth1 complete staging modified final/source files"
+                )
+            auth1_complete_snapshots[label] = database_snapshot(
+                staging, decrypt_value, purpose_value
+            )
+            staging.unlink()
+            backup.unlink()
+        if auth1_complete_snapshots["python"] != auth1_complete_snapshots["exe"]:
+            raise AssertionError(
+                "Python and ConfigMigrate.exe auth1 complete staging differ logically"
+            )
+
+        auth1_pending_data = temp / "installer-auth1-pending" / "Data"
+        auth1_pending_data.mkdir(parents=True)
+        auth1_pending_first = auth1_pending_data / "First.ini"
+        auth1_pending_second = auth1_pending_data / "Second.ini"
+        auth1_pending_first.write_text(
+            "[Remote]\nApiToken=first-parity-secret\nKeepMe=1\n",
+            encoding="utf-8",
+        )
+        auth1_pending_second.write_text(
+            "[Remote]\nPassword=second-parity-secret\nKeepMe=2\n",
+            encoding="utf-8",
+        )
+        auth1_pending_manifest = migration_module[
+            "prepare_legacy_ini_credential_scrub"
+        ](auth1_pending_data, None)
+        auth1_pending_final = auth1_pending_data / "ConfigStore.db"
+        write_auth1_database(
+            auth1_pending_final,
+            "pending",
+            migration_module["serialize_legacy_credential_scrub_manifest"](
+                auth1_pending_manifest
+            ),
+        )
+        first_after, _removed = migration_module[
+            "_sanitized_legacy_ini_bytes"
+        ](auth1_pending_first, None)
+        auth1_pending_first.write_bytes(first_after)
+        auth1_pending_final_hash = file_sha256(auth1_pending_final)
+        auth1_pending_source_hashes = {
+            path.name: file_sha256(path)
+            for path in (auth1_pending_first, auth1_pending_second)
+        }
+        auth1_pending_snapshots = {}
+        for label, runner in installer_runners:
+            staging = auth1_pending_data / (
+                ".ConfigStore.db.install-upgrade-"
+                + ("7" if label == "python" else "8") * 32
+                + ".tmp"
+            )
+            staging.write_bytes(auth1_pending_final.read_bytes())
+            backup = staging.with_name(
+                staging.name + ".install-backup.dpapi.bak"
+            )
+            run_checked(
+                runner + [
+                    "--source", str(auth1_pending_data),
+                    "--db", str(staging),
+                    "--encrypt",
+                    "--defer-credential-scrub",
+                    "--installer-staging",
+                    "--upgrade-backup", str(backup),
+                ],
+                temp,
+            )
+            before_verify = data_inventory(auth1_pending_data)
+            verified = run_checked(
+                runner + [
+                    "--verify-installer-state",
+                    "--source", str(auth1_pending_data),
+                    "--db", str(staging),
+                ],
+                temp,
+            )
+            if "(scrub=pending)" not in verified.stdout:
+                raise AssertionError(
+                    f"{label} auth1 partial-after staging did not preserve pending provenance"
+                )
+            if data_inventory(auth1_pending_data) != before_verify:
+                raise AssertionError(
+                    f"{label} auth1 pending verification modified Data"
+                )
+            if file_sha256(auth1_pending_final) != auth1_pending_final_hash:
+                raise AssertionError(
+                    f"{label} auth1 partial-after staging modified final ConfigStore.db"
+                )
+            if {
+                path.name: file_sha256(path)
+                for path in (auth1_pending_first, auth1_pending_second)
+            } != auth1_pending_source_hashes:
+                raise AssertionError(
+                    f"{label} auth1 partial-after staging modified source files"
+                )
+            auth1_pending_snapshots[label] = database_snapshot(
+                staging, decrypt_value, purpose_value
+            )
+            staging.unlink()
+            backup.unlink()
+        if auth1_pending_snapshots["python"] != auth1_pending_snapshots["exe"]:
+            raise AssertionError(
+                "Python and ConfigMigrate.exe auth1 partial-after staging differ logically"
+            )
+
+        verify_complete_data = temp / "verify-complete-new-credentials" / "Data"
+        verify_complete_data.mkdir(parents=True)
+        verify_complete_db = verify_complete_data / "ConfigStore.db"
+        write_auth1_database(verify_complete_db, "complete", "[]")
+        with sqlite3.connect(verify_complete_db) as connection:
+            connection.execute(
+                "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+            )
+            connection.commit()
+        (verify_complete_data / "Unexpected.ini").write_text(
+            "[Remote]\nPassword=new-password\nApiToken=new-token\n",
+            encoding="utf-8",
+        )
+        verify_complete_before = data_inventory(verify_complete_data)
+        for label, runner in installer_runners:
+            result = run_command(
+                runner + [
+                    "--verify-installer-state",
+                    "--source", str(verify_complete_data),
+                    "--db", str(verify_complete_db),
+                ],
+                temp,
+            )
+            if result.returncode == 0:
+                raise AssertionError(
+                    f"{label} installer verification accepted credentials added after complete scrub"
+                )
+            if data_inventory(verify_complete_data) != verify_complete_before:
+                raise AssertionError(
+                    f"{label} rejected complete-state verification modified Data"
+                )
+
+        for case in ("unknown", "changed"):
+            verify_pending_data = (
+                temp / f"verify-pending-{case}" / "Data"
+            )
+            verify_pending_data.mkdir(parents=True)
+            verify_pending_known = verify_pending_data / "Known.ini"
+            verify_pending_known.write_text(
+                "[Remote]\nApiToken=known-secret\nKeepMe=1\n",
+                encoding="utf-8",
+            )
+            verify_pending_manifest = migration_module[
+                "prepare_legacy_ini_credential_scrub"
+            ](verify_pending_data, None)
+            verify_pending_db = verify_pending_data / "ConfigStore.db"
+            write_auth1_database(
+                verify_pending_db,
+                "pending",
+                migration_module[
+                    "serialize_legacy_credential_scrub_manifest"
+                ](verify_pending_manifest),
+            )
+            with sqlite3.connect(verify_pending_db) as connection:
+                connection.execute(
+                    "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+                )
+                connection.commit()
+            if case == "unknown":
+                (verify_pending_data / "Unknown.ini").write_text(
+                    "[Remote]\nPassword=unknown-secret\n",
+                    encoding="utf-8",
+                )
+            else:
+                verify_pending_known.write_bytes(
+                    verify_pending_known.read_bytes() + b"Changed=1\n"
+                )
+            verify_pending_before = data_inventory(verify_pending_data)
+            for label, runner in installer_runners:
+                result = run_command(
+                    runner + [
+                        "--verify-installer-state",
+                        "--source", str(verify_pending_data),
+                        "--db", str(verify_pending_db),
+                    ],
+                    temp,
+                )
+                if result.returncode == 0:
+                    raise AssertionError(
+                        f"{label} installer verification accepted {case} pending credentials"
+                    )
+                if data_inventory(verify_pending_data) != verify_pending_before:
+                    raise AssertionError(
+                        f"{label} rejected {case} pending verification modified Data"
+                    )
+
+        for case in ("database-backup", "credential-ini-backup"):
+            residue_data = temp / f"verify-pending-residue-{case}" / "Data"
+            residue_data.mkdir(parents=True)
+            (residue_data / "Known.ini").write_text(
+                "[Remote]\nApiToken=known-secret\nKeepMe=1\n",
+                encoding="utf-8",
+            )
+            if case == "database-backup":
+                (residue_data / "ConfigStore.db.bak-preexisting").write_bytes(
+                    b"plaintext database backup sentinel"
+                )
+            else:
+                (residue_data / "Credentials.ini.bak").write_text(
+                    "[Remote]\nPassword=backup-secret\nKeepMe=2\n",
+                    encoding="utf-8",
+                )
+            residue_manifest = migration_module[
+                "prepare_legacy_ini_credential_scrub"
+            ](residue_data, None)
+            residue_db = residue_data / "ConfigStore.db"
+            write_auth1_database(
+                residue_db,
+                "pending",
+                migration_module[
+                    "serialize_legacy_credential_scrub_manifest"
+                ](residue_manifest),
+            )
+            with sqlite3.connect(residue_db) as connection:
+                connection.execute(
+                    "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+                )
+                connection.commit()
+            residue_before = data_inventory(residue_data)
+            for label, runner in installer_runners:
+                result = run_command(
+                    runner + [
+                        "--verify-installer-state",
+                        "--source", str(residue_data),
+                        "--db", str(residue_db),
+                    ],
+                    temp,
+                )
+                combined_output = result.stdout + result.stderr
+                if (
+                    result.returncode == 0
+                    or "Plaintext ConfigStore backup/journal candidates block release"
+                    not in combined_output
+                ):
+                    raise AssertionError(
+                        f"{label} installer verification accepted pending {case} residue: "
+                        f"{combined_output}"
+                    )
+                if data_inventory(residue_data) != residue_before:
+                    raise AssertionError(
+                        f"{label} rejected pending {case} residue modified Data"
+                    )
 
         in_place_data = temp / "in-place" / "Data"
         write_fixture(in_place_data)
@@ -539,7 +1070,7 @@ def main() -> int:
 
         semantic_source = temp / "semantic-upgrade-empty-source"
         semantic_source.mkdir()
-        for initialized_value in ("0", "1"):
+        for initialized_value in ("1",):
             semantic_account = f"semantic_user_{initialized_value}"
             semantic_password_record = hashlib.sha256(
                 f"{semantic_account}\nSynthetic-Semantic-Password".encode("utf-8")
@@ -612,48 +1143,314 @@ def main() -> int:
             finally:
                 connection.close()
 
-            run_checked(
+            semantic_before = file_sha256(semantic_db)
+            semantic_result = run_command(
                 [
                     str(exe), "--source", str(semantic_source),
                     "--db", str(semantic_db), "--encrypt",
                 ],
                 temp,
             )
-            connection = sqlite3.connect(semantic_db)
-            try:
-                semantic_meta = dict(connection.execute(
-                    "SELECT key, value FROM meta WHERE key IN "
-                    "('auth_semantic_version', 'auth_initialized')"
-                ).fetchall())
-                portable_profile = connection.execute(
+            if (
+                semantic_result.returncode == 0
+                or "portable plaintext storage" not in (
+                    semantic_result.stdout + semantic_result.stderr
+                )
+                or file_sha256(semantic_db) != semantic_before
+            ):
+                raise AssertionError(
+                    "Machine-bound existing account/Profile values were not rejected atomically"
+                )
+
+        portable_values = {
+            "PasswordHash": hashlib.sha256(
+                b"admin\nPortable-Profile-Parity"
+            ).hexdigest(),
+            "Role": "admin",
+            "MustChangePassword": "0",
+            "PasswordChangedAt": "2026-05-28T12:34:56+08:00",
+            "CreatedAt": "2026-05-07T00:00:00",
+            "UpdatedAt": "2026-06-01T00:00:00Z",
+        }
+        for wrapper in ("dpapi", "enc"):
+            for field, plain in portable_values.items():
+                portable_db = (
+                    temp / f"portable-{wrapper}-{field}" / "ConfigStore.db"
+                )
+                portable_db.parent.mkdir(parents=True)
+                with sqlite3.connect(portable_db) as connection:
+                    migration_module["create_current_tables"](connection)
+                    migration_module["set_schema_meta"](
+                        connection, True, authentication_initialized=True
+                    )
+                    for candidate, value in portable_values.items():
+                        stored = value
+                        if candidate == field:
+                            stored = (
+                                protect_sensitive_value(
+                                    value,
+                                    purpose_value(
+                                        "account", "admin", "Profile", candidate
+                                    ),
+                                )
+                                if wrapper == "dpapi"
+                                else protect_legacy_value(value)
+                            )
+                        connection.execute(
+                            """
+                            INSERT INTO settings(
+                                scope_type, scope_id, module, key_name,
+                                value_text, value_type, sensitive, encrypted
+                            ) VALUES('account', 'admin', 'Profile', ?, ?, ?, ?, 0)
+                            """,
+                            (
+                                candidate,
+                                stored,
+                                "bool" if candidate == "MustChangePassword"
+                                else "datetime" if candidate.endswith("At")
+                                else "string",
+                                1 if "Password" in candidate else 0,
+                            ),
+                        )
+                portable_before = file_sha256(portable_db)
+                portable_result = run_command(
+                    [str(exe), "--verify-current", "--db", str(portable_db)],
+                    temp,
+                )
+                if (
+                    portable_result.returncode == 0
+                    or "portable plaintext storage" not in (
+                        portable_result.stdout + portable_result.stderr
+                    )
+                    or file_sha256(portable_db) != portable_before
+                ):
+                    raise AssertionError(
+                        f"Wrapped portable field was not rejected read-only: {wrapper}/{field}"
+                    )
+
+        credential_modules = (
+            "LoginState/RememberedCredentials",
+            "LoginState/SavedPasswords",
+        )
+        for module in credential_modules:
+            credential_db = temp / f"credential-{module.rsplit('/', 1)[-1]}" / "ConfigStore.db"
+            credential_db.parent.mkdir(parents=True)
+            protected = protect_sensitive_value(
+                "remembered-secret",
+                purpose_value("global", "", module, "admin"),
+            )
+            with sqlite3.connect(credential_db) as connection:
+                migration_module["create_current_tables"](connection)
+                migration_module["set_schema_meta"](
+                    connection, True, authentication_initialized=False
+                )
+                connection.execute(
                     """
-                    SELECT key_name, value_text, sensitive, encrypted
-                    FROM settings
-                    WHERE scope_type='account' AND scope_id=? AND module='Profile'
-                      AND key_name IN ('PasswordHash', 'Role', 'MustChangePassword')
-                    ORDER BY key_name
+                    INSERT INTO settings(
+                        scope_type, scope_id, module, key_name, value_text,
+                        value_type, sensitive, encrypted
+                    ) VALUES('global', '', ?, 'admin', ?, 'string', 1, 1)
                     """,
-                    (semantic_account,),
-                ).fetchall()
-            finally:
-                connection.close()
-            if semantic_meta != {
-                "auth_semantic_version": "2",
-                "auth_initialized": initialized_value,
-            }:
-                raise AssertionError(
-                    f"Current-v5 semantic upgrade did not preserve auth_initialized: {semantic_meta}"
+                    (module, protected),
                 )
-            expected_must_change = "0" if initialized_value == "0" else "1"
-            if portable_profile != [
-                ("MustChangePassword", expected_must_change, 1, 0),
-                ("PasswordHash", semantic_password_record, 1, 0),
-                ("Role", "admin", 0, 0),
-            ]:
+            credential_before = file_sha256(credential_db)
+            run_checked(
+                [str(exe), "--verify-current", "--db", str(credential_db)],
+                temp,
+            )
+            if file_sha256(credential_db) != credential_before:
                 raise AssertionError(
-                    "Existing account/Profile values were not strictly decoded and normalized to plaintext: "
-                    f"{portable_profile}"
+                    f"Read-only credential verification modified {module}"
                 )
+
+        invalid_credential_shapes = (
+            ("scope", "robot", "RobotA", credential_modules[0], "admin", "protected"),
+            ("case", "global", "", "loginstate/rememberedcredentials", "admin", "protected"),
+            ("nested", "global", "", credential_modules[0] + "/admin", "admin", "protected"),
+            ("plaintext", "global", "", credential_modules[0], "admin", "plaintext"),
+            ("damaged", "global", "", credential_modules[0], "admin", "damaged"),
+        )
+        for name, scope_type, scope_id, module, key, storage in invalid_credential_shapes:
+            credential_db = temp / f"invalid-credential-{name}" / "ConfigStore.db"
+            credential_db.parent.mkdir(parents=True)
+            stored = (
+                "remembered-secret" if storage == "plaintext"
+                else migration_module["DPAPI_PREFIX"] + "not-valid-base64"
+                if storage == "damaged"
+                else protect_sensitive_value(
+                    "remembered-secret",
+                    purpose_value(scope_type, scope_id, module, key),
+                )
+            )
+            with sqlite3.connect(credential_db) as connection:
+                migration_module["create_current_tables"](connection)
+                migration_module["set_schema_meta"](
+                    connection, True, authentication_initialized=False
+                )
+                connection.execute(
+                    """
+                    INSERT INTO settings(
+                        scope_type, scope_id, module, key_name, value_text,
+                        value_type, sensitive, encrypted
+                    ) VALUES(?, ?, ?, ?, ?, 'string', 1, ?)
+                    """,
+                    (
+                        scope_type, scope_id, module, key, stored,
+                        0 if storage == "plaintext" else 1,
+                    ),
+                )
+            credential_before = file_sha256(credential_db)
+            credential_result = run_command(
+                [str(exe), "--verify-current", "--db", str(credential_db)],
+                temp,
+            )
+            if (
+                credential_result.returncode == 0
+                or file_sha256(credential_db) != credential_before
+            ):
+                raise AssertionError(
+                    f"Invalid remembered credential was not rejected read-only: {name}"
+                )
+
+        compatible_current_db = temp / "current-without-created-at" / "ConfigStore.db"
+        compatible_current_db.parent.mkdir(parents=True)
+        with sqlite3.connect(compatible_current_db) as connection:
+            migration_module["create_current_tables"](connection)
+            migration_module["set_schema_meta"](
+                connection, True, authentication_initialized=False
+            )
+            connection.execute("DELETE FROM meta WHERE key='created_at'")
+            connection.executemany(
+                """
+                INSERT INTO settings(
+                    scope_type, scope_id, module, key_name, value_text,
+                    value_type, sensitive, encrypted
+                ) VALUES('global', '', 'LoginState', ?, '0', 'bool', ?, 0)
+                """,
+                (("RememberPassword", 1), ("AutoLogin", 1)),
+            )
+        compatible_before = file_sha256(compatible_current_db)
+        run_checked(
+            [str(exe), "--verify-current", "--db", str(compatible_current_db)],
+            temp,
+        )
+        if file_sha256(compatible_current_db) != compatible_before:
+            raise AssertionError(
+                "Read-only verification modified a compatible DB without created_at"
+            )
+        with sqlite3.connect(compatible_current_db) as connection:
+            connection.execute(
+                """
+                UPDATE settings
+                SET value_text='0', value_type='string', sensitive=1
+                WHERE scope_type='global' AND scope_id=''
+                  AND module='LoginState' AND key_name='RememberPassword'
+                """
+            )
+            connection.execute(
+                """
+                UPDATE settings
+                SET value_text='1', value_type='string', sensitive=0
+                WHERE scope_type='global' AND scope_id=''
+                  AND module='LoginState' AND key_name='AutoLogin'
+                """
+            )
+        published_preference_before = file_sha256(compatible_current_db)
+        run_checked(
+            [str(exe), "--verify-current", "--db", str(compatible_current_db)],
+            temp,
+        )
+        if file_sha256(compatible_current_db) != published_preference_before:
+            raise AssertionError(
+                "Read-only verification modified published LoginState shapes"
+            )
+        with sqlite3.connect(compatible_current_db) as connection:
+            connection.execute(
+                """
+                UPDATE settings SET value_text='1'
+                WHERE scope_type='global' AND scope_id=''
+                  AND module='LoginState' AND key_name='RememberPassword'
+                """
+            )
+        incompatible_preference_before = file_sha256(compatible_current_db)
+        incompatible_preference_result = run_command(
+            [str(exe), "--verify-current", "--db", str(compatible_current_db)],
+            temp,
+        )
+        if (
+            incompatible_preference_result.returncode == 0
+            or file_sha256(compatible_current_db)
+            != incompatible_preference_before
+        ):
+            raise AssertionError(
+                "Nonzero plaintext login preference was not rejected read-only"
+            )
+
+        uppercase_legacy_db = temp / "current-uppercase-legacy-table" / "ConfigStore.db"
+        uppercase_legacy_db.parent.mkdir(parents=True)
+        with sqlite3.connect(uppercase_legacy_db) as connection:
+            migration_module["create_current_tables"](connection)
+            migration_module["set_schema_meta"](
+                connection, True, authentication_initialized=False
+            )
+            connection.execute(
+                "CREATE TABLE INI_VALUES(file_path TEXT, section_name TEXT, key_name TEXT, value_text TEXT)"
+            )
+        uppercase_before = file_sha256(uppercase_legacy_db)
+        uppercase_result = run_command(
+            [str(exe), "--verify-current", "--db", str(uppercase_legacy_db)],
+            temp,
+        )
+        if (
+            uppercase_result.returncode == 0
+            or file_sha256(uppercase_legacy_db) != uppercase_before
+        ):
+            raise AssertionError(
+                "Case-variant legacy table was not rejected read-only"
+            )
+
+        semantic_empty_db = temp / "semantic-v1-uninitialized-empty" / "ConfigStore.db"
+        semantic_empty_db.parent.mkdir(parents=True)
+        connection = sqlite3.connect(semantic_empty_db)
+        try:
+            create_settings_schema(connection)
+            connection.executemany(
+                "INSERT INTO meta(key, value) VALUES(?, ?)",
+                (
+                    ("schema_version", "5"),
+                    ("auth_semantic_version", "1"),
+                    ("auth_initialized", "0"),
+                    ("encrypt_new_values", "1"),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        run_checked(
+            [
+                str(exe), "--source", str(semantic_source),
+                "--db", str(semantic_empty_db), "--encrypt",
+            ],
+            temp,
+        )
+        connection = sqlite3.connect(semantic_empty_db)
+        try:
+            empty_semantic_meta = dict(connection.execute(
+                "SELECT key, value FROM meta WHERE key IN "
+                "('auth_semantic_version', 'auth_initialized')"
+            ).fetchall())
+            empty_semantic_accounts = connection.execute(
+                "SELECT COUNT(*) FROM settings WHERE scope_type='account' AND module='Profile'"
+            ).fetchone()
+        finally:
+            connection.close()
+        if empty_semantic_meta != {
+            "auth_semantic_version": "2",
+            "auth_initialized": "0",
+        } or empty_semantic_accounts != (0,):
+            raise AssertionError(
+                "Uninitialized semantic upgrade did not remain account-empty"
+            )
 
         semantic_in_place_data = temp / "semantic-v1-in-place" / "Data"
         semantic_in_place_data.mkdir(parents=True)
@@ -674,7 +1471,7 @@ def main() -> int:
                 (
                     ("schema_version", "5"),
                     ("auth_semantic_version", "1"),
-                    ("auth_initialized", "0"),
+                    ("auth_initialized", "1"),
                     ("legacy_credential_scrub_state", "complete"),
                     ("legacy_credential_scrub_manifest", "[]"),
                 ),
@@ -693,7 +1490,7 @@ def main() -> int:
                         semantic_in_place_hash,
                         1,
                     ),
-                    (semantic_in_place_account, "Role", "operator", 0),
+                    (semantic_in_place_account, "Role", "admin", 0),
                 ),
             )
             connection.commit()
@@ -723,7 +1520,7 @@ def main() -> int:
             connection.close()
         if preserved_provenance != {
             "auth_semantic_version": "2",
-            "auth_initialized": "0",
+            "auth_initialized": "1",
             "legacy_credential_scrub_state": "complete",
             "legacy_credential_scrub_manifest": "[]",
         }:
@@ -1084,7 +1881,10 @@ def main() -> int:
         if future_result.returncode == 0 or file_sha256(future_db) != future_before:
             raise AssertionError("Future schema with legacy-looking tables was not rejected byte-identically")
 
-    print("PASS: ConfigMigrate v5 parity, DPAPI/auth migration, atomic overwrite/rollback, and future-schema gate")
+    print(
+        "PASS: ConfigMigrate v5 parity, installer staging, DPAPI/auth migration, "
+        "atomic overwrite/rollback, and future-schema gate"
+    )
     return 0
 
 

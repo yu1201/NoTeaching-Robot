@@ -84,6 +84,14 @@ if ((Get-ReleaseFileSha256 $trustedRunCmd) -cne (Get-ReleaseFileSha256 $targetRu
 }
 Copy-Item -LiteralPath $trustedRunCmd -Destination $targetDistRunCmd -Force
 
+$trustedInstallHelper = Join-Path $trustedRoot "tools\ConfigMigrate_Install.ps1"
+$targetInstallHelper = Join-Path $targetRoot "tools\ConfigMigrate_Install.ps1"
+$targetDistInstallHelper = Join-Path $targetInstallerToolsDir "ConfigMigrate_Install.ps1"
+if ((Get-ReleaseFileSha256 $trustedInstallHelper) -cne (Get-ReleaseFileSha256 $targetInstallHelper)) {
+    throw "ConfigMigrate_Install.ps1 differs between trusted source and target. Merge the target branch first."
+}
+Copy-Item -LiteralPath $trustedInstallHelper -Destination $targetDistInstallHelper -Force
+
 $targetConfig = Assert-ConfigMigrateProvenance -RepoRoot $targetRoot -ExecutablePath $targetConfigExe
 $targetDistConfig = Assert-ConfigMigrateProvenance -RepoRoot $targetRoot -ExecutablePath $targetDistConfigExe
 if ($trustedConfig.sha256 -cne $targetConfig.sha256 -or $trustedConfig.sha256 -cne $targetDistConfig.sha256) {
@@ -91,6 +99,9 @@ if ($trustedConfig.sha256 -cne $targetConfig.sha256 -or $trustedConfig.sha256 -c
 }
 if ((Get-ReleaseFileSha256 $targetRunCmd) -cne (Get-ReleaseFileSha256 $targetDistRunCmd)) {
     throw "Prepared dist/tools/ConfigMigrate_Run.cmd does not match the tracked target command."
+}
+if ((Get-ReleaseFileSha256 $targetInstallHelper) -cne (Get-ReleaseFileSha256 $targetDistInstallHelper)) {
+    throw "Prepared dist/tools/ConfigMigrate_Install.ps1 does not match the tracked target helper."
 }
 
 $verifiedManifest = Assert-FanucRuntimeManifest -RepoRoot $targetRoot -RuntimeRoot $targetRoot

@@ -75,6 +75,7 @@ jobs:
             "scripts/tests/verify_pointcloud_sdk_temp_isolation.py",
             "scripts/tests/verify_robot_operation_interlock.py",
             "scripts/tests/verify_scan_cycle_wiring.py",
+            "scripts/tests/verify_auth_recovery_ui.py",
             "scripts/tests/verify_security_credentials.py",
             "scripts/tests/verify_weld_resume_binding.py"
           )
@@ -83,6 +84,13 @@ jobs:
             python -B $test
             if ($LASTEXITCODE -ne 0) { throw "$test failed." }
           }
+
+      - name: Installer database upgrade lifecycle tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          & scripts/tests/test_installer_config_migration.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Installer database migration tests failed." }
 
       - name: PowerShell release-gate smoke on a clean checkout
         shell: powershell

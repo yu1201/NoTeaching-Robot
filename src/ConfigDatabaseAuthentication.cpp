@@ -181,17 +181,13 @@ bool ClearRememberedCredentials(QSqlDatabase& database, const QString& accountId
     remove.prepare(QStringLiteral(
         "DELETE FROM settings WHERE scope_type='global' AND scope_id='' AND ("
         "(module IN ('LoginState/RememberedCredentials', 'LoginState/SavedPasswords') AND key_name=?) "
-        "OR (module='LoginState' AND lower(key_name)='passwordbase64'))"));
+        "OR (module='LoginState' AND (lower(key_name)='passwordbase64' "
+        "OR key_name IN ('RememberPassword', 'AutoLogin'))))"));
     remove.addBindValue(accountId.trimmed());
-    if (!remove.exec())
-    {
-        return false;
-    }
-    QSqlQuery disable(database);
-    return disable.exec(QStringLiteral(
-        "UPDATE settings SET value_text='0', encrypted=0, updated_at=datetime('now') "
-        "WHERE scope_type='global' AND scope_id='' AND module='LoginState' "
-        "AND key_name IN ('RememberPassword', 'AutoLogin')"));
+    // Absence is the canonical false/default state.  Updating these
+    // password-named rows to plaintext "0" would violate the current schema's
+    // DPAPI integrity contract on the next process start.
+    return remove.exec();
 }
 
 bool ValidateAdministrator(QSqlDatabase& database, const QString& accountId)
