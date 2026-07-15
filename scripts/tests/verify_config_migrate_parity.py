@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import closing
 import hashlib
 import os
 from pathlib import Path
@@ -99,7 +100,7 @@ def write_auth1_database(
         "UpdatedAt": "2026-02-03T04:05:06Z",
         "PasswordChangedAt": "2026-02-02T03:04:05+08:00",
     }
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         create_settings_schema(connection)
         connection.executemany(
             "INSERT INTO meta(key, value) VALUES(?, ?)",
@@ -269,6 +270,8 @@ def main() -> int:
         }
         python_db = temp / "python" / "target" / "ConfigStore.db"
         exe_db = temp / "exe" / "target" / "ConfigStore.db"
+        python_db.parent.mkdir(parents=True)
+        exe_db.parent.mkdir(parents=True)
 
         run_checked(
             [sys.executable, str(source_script), "--source", str(template), "--db", str(python_db), "--encrypt"],
@@ -308,7 +311,7 @@ def main() -> int:
             for _, _, module, key, *_ in exe_snapshot[1]
         ):
             raise AssertionError("Legacy reversible authentication state survived migration")
-        with sqlite3.connect(exe_db) as raw_connection:
+        with closing(sqlite3.connect(exe_db)) as raw_connection, raw_connection:
             schema = raw_connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if schema != ("5",):
                 raise AssertionError(f"Unexpected schema version: {schema}")
@@ -436,10 +439,22 @@ def main() -> int:
         admin_record = hashlib.sha256(
             b"admin\ninstaller-upgrade-parity"
         ).hexdigest()
-        with sqlite3.connect(installer_upgrade_final) as connection:
+        installer_upgrade_profile = {
+            "PasswordHash": admin_record,
+            "Role": "admin",
+            "MustChangePassword": "0",
+            "PasswordChangedAt": "2026-02-02T03:04:05+08:00",
+            "CreatedAt": "2026-01-02T03:04:05",
+            "UpdatedAt": "2026-02-03T04:05:06Z",
+        }
+        with closing(sqlite3.connect(installer_upgrade_final)) as connection, connection:
             create_settings_schema(connection)
-            connection.execute(
-                "INSERT INTO meta(key, value) VALUES('schema_version', '4')"
+            connection.executemany(
+                "INSERT INTO meta(key, value) VALUES(?, ?)",
+                (
+                    ("schema_version", "4"),
+                    ("encrypt_new_values", "1"),
+                ),
             )
             connection.executemany(
                 """
@@ -451,7 +466,37 @@ def main() -> int:
                 (
                     ("PasswordHash", admin_record, "string", 1),
                     ("Role", "admin", "string", 0),
+                    ("MustChangePassword", "0", "bool", 1),
                     ("CreatedAt", "2026-01-02T03:04:05", "datetime", 0),
+                    ("UpdatedAt", "2026-02-03T04:05:06Z", "datetime", 0),
+                ),
+            )
+            # Match the released failure shape: the same account already exists
+            # in account/Profile, with PasswordHash wrapped as enc:v1/encrypted=1
+            # while the other portable profile fields remain plaintext.
+            connection.executemany(
+                """
+                INSERT INTO settings(
+                    scope_type, scope_id, module, key_name, value_text,
+                    value_type, sensitive, encrypted
+                ) VALUES('account', 'admin', 'Profile', ?, ?, ?, ?, ?)
+                """,
+                tuple(
+                    (
+                        key,
+                        (
+                            protect_legacy_value(value)
+                            if key == "PasswordHash" else value
+                        ),
+                        (
+                            "bool" if key == "MustChangePassword"
+                            else "datetime" if key.endswith("At")
+                            else "string"
+                        ),
+                        1 if "Password" in key else 0,
+                        1 if key == "PasswordHash" else 0,
+                    )
+                    for key, value in installer_upgrade_profile.items()
                 ),
             )
         installer_upgrade_ini = (
@@ -497,6 +542,135 @@ def main() -> int:
                 raise AssertionError(
                     f"{label} installer upgrade staging did not create its bound backup"
                 )
+            backup_snapshot = read_dpapi_backup(backup)
+            if hashlib.sha256(installer_upgrade_final.read_bytes()).digest() == (
+                hashlib.sha256(backup_snapshot).digest()
+            ):
+                raise AssertionError(
+                    f"{label} fixture does not exercise the old raw-file SHA mismatch"
+                )
+            backup_hash_before = file_sha256(backup)
+            original_hash_before_backup_verify = file_sha256(
+                installer_upgrade_final
+            )
+            run_checked(
+                runner + [
+                    "--verify-dpapi-backup-against", str(backup),
+                    "--db", str(installer_upgrade_final),
+                ],
+                temp,
+            )
+            if (
+                file_sha256(backup) != backup_hash_before
+                or file_sha256(installer_upgrade_final)
+                != original_hash_before_backup_verify
+            ):
+                raise AssertionError(
+                    f"{label} logical DPAPI backup verification modified an input"
+                )
+
+            tampered_backup = backup.with_name(
+                f"tampered-{label}.dpapi.bak"
+            )
+            tampered_bytes = bytearray(backup.read_bytes())
+            backup_magic = b"NoTeaching-Robot ConfigStore DPAPI backup v1\n"
+            tampered_bytes[len(backup_magic)] = (
+                ord("0")
+                if tampered_bytes[len(backup_magic)] != ord("0")
+                else ord("1")
+            )
+            tampered_backup.write_bytes(tampered_bytes)
+            tampered_before = (
+                file_sha256(tampered_backup),
+                file_sha256(installer_upgrade_final),
+            )
+            tampered_result = run_command(
+                runner + [
+                    "--verify-dpapi-backup-against", str(tampered_backup),
+                    "--db", str(installer_upgrade_final),
+                ],
+                temp,
+            )
+            if tampered_result.returncode == 0 or tampered_before != (
+                file_sha256(tampered_backup),
+                file_sha256(installer_upgrade_final),
+            ):
+                raise AssertionError(
+                    f"{label} accepted or modified a tampered DPAPI backup"
+                )
+
+            wrong_database = backup.with_name(
+                f"backup-wrong-database-{label}.db"
+            )
+            wrong_database.write_bytes(installer_upgrade_final.read_bytes())
+            with closing(sqlite3.connect(wrong_database)) as connection, connection:
+                connection.execute(
+                    """
+                    UPDATE settings SET value_text='engineer'
+                    WHERE scope_type='global' AND scope_id=''
+                      AND module='Accounts/Users/admin' AND key_name='Role'
+                    """
+                )
+            wrong_before = (
+                file_sha256(backup),
+                file_sha256(wrong_database),
+            )
+            wrong_result = run_command(
+                runner + [
+                    "--verify-dpapi-backup-against", str(backup),
+                    "--db", str(wrong_database),
+                ],
+                temp,
+            )
+            if wrong_result.returncode == 0 or wrong_before != (
+                file_sha256(backup),
+                file_sha256(wrong_database),
+            ):
+                raise AssertionError(
+                    f"{label} accepted or modified a logically different database"
+                )
+
+            valid_wrong_backup = backup.with_name(
+                f"valid-wrong-{label}.dpapi.bak"
+            )
+            migration_module["create_dpapi_database_backup"](
+                wrong_database, valid_wrong_backup
+            )
+            valid_wrong_before = (
+                file_sha256(valid_wrong_backup),
+                file_sha256(installer_upgrade_final),
+            )
+            valid_wrong_result = run_command(
+                runner + [
+                    "--verify-dpapi-backup-against", str(valid_wrong_backup),
+                    "--db", str(installer_upgrade_final),
+                ],
+                temp,
+            )
+            if valid_wrong_result.returncode == 0 or valid_wrong_before != (
+                file_sha256(valid_wrong_backup),
+                file_sha256(installer_upgrade_final),
+            ):
+                raise AssertionError(
+                    f"{label} accepted or modified a valid backup for another database"
+                )
+            with closing(sqlite3.connect(staging)) as connection, connection:
+                raw_profile = {
+                    str(key): (str(stored), int(encrypted))
+                    for key, stored, encrypted in connection.execute(
+                        """
+                        SELECT key_name, value_text, encrypted FROM settings
+                        WHERE scope_type='account' AND scope_id='admin'
+                          AND module='Profile'
+                        """
+                    )
+                }
+            for key, expected_value in installer_upgrade_profile.items():
+                if raw_profile.get(key) != (expected_value, 0):
+                    raise AssertionError(
+                        f"{label} v4 wrapped Profile field was not normalized "
+                        f"to portable plaintext storage: {key}={raw_profile.get(key)!r}"
+                    )
             before_verify = data_inventory(installer_upgrade_data)
             verified = run_checked(
                 runner + [
@@ -521,6 +695,93 @@ def main() -> int:
             raise AssertionError(
                 "Python and ConfigMigrate.exe installer upgrade staging differ logically"
             )
+
+        # Exercise the actual elevated-install helper contract in an isolated
+        # temporary Data directory.  This covers prepare -> atomic commit ->
+        # deferred scrub finalize with the real frozen migrator, including its
+        # logical protected-backup proof rather than a raw SQLite file hash.
+        real_helper_data = temp / "real-installer-helper" / "Data"
+        real_helper_data.mkdir(parents=True)
+        real_helper_db = real_helper_data / "ConfigStore.db"
+        real_helper_db.write_bytes(installer_upgrade_final.read_bytes())
+        real_helper_runtime = (
+            real_helper_data / "CorrugatedSheetPointCloudEctration.ini"
+        )
+        real_helper_runtime.write_bytes(installer_upgrade_ini.read_bytes())
+        real_helper_db_before = file_sha256(real_helper_db)
+        real_helper_runtime_before = file_sha256(real_helper_runtime)
+        real_helper_status = temp / "real-installer-helper.status"
+        real_helper_script = REPO_ROOT / "tools" / "ConfigMigrate_Install.ps1"
+        real_helper_command = [
+            "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", str(real_helper_script),
+            "-DataDirectory", str(real_helper_data),
+            "-MigrateExecutable", str(exe),
+            "-StatusFile", str(real_helper_status),
+            "-InstallerHoldsInstanceLease",
+        ]
+
+        def real_helper_status_text() -> str:
+            return real_helper_status.read_text(
+                encoding="utf-8-sig"
+            ).replace("\r\n", "\n").strip()
+
+        run_checked(real_helper_command, temp)
+        prepared_status = real_helper_status_text()
+        if not (
+            prepared_status.startswith("OK:MIGRATED_AND_VERIFIED\n")
+            and prepared_status.endswith("\nFINALIZE=1")
+        ):
+            raise AssertionError(
+                f"Real installer helper prepare status mismatch: {prepared_status!r}"
+            )
+        if (
+            file_sha256(real_helper_db) != real_helper_db_before
+            or file_sha256(real_helper_runtime) != real_helper_runtime_before
+        ):
+            raise AssertionError(
+                "Real installer helper prepare modified final DB or runtime input"
+            )
+
+        run_checked(real_helper_command + ["-CommitPendingTransaction"], temp)
+        if real_helper_status_text() != (
+            "OK:PENDING_TRANSACTION_COMMITTED_FINALIZE_REQUIRED"
+        ):
+            raise AssertionError("Real installer helper commit status mismatch")
+        run_checked(real_helper_command + ["-FinalizeDeferredScrub"], temp)
+        if real_helper_status_text() != (
+            "OK:DEFERRED_SCRUB_FINALIZED_AND_VERIFIED"
+        ):
+            raise AssertionError("Real installer helper finalize status mismatch")
+        if (real_helper_data / "ConfigStore.db.install-transaction-v1").exists():
+            raise AssertionError("Real installer helper left a transaction record")
+        if file_sha256(real_helper_runtime) != real_helper_runtime_before:
+            raise AssertionError("Real installer helper changed runtime-only INI")
+        run_checked(
+            [
+                str(exe), "--verify-installer-state",
+                "--source", str(real_helper_data),
+                "--db", str(real_helper_db),
+            ],
+            temp,
+        )
+        with closing(sqlite3.connect(real_helper_db)) as connection, connection:
+            real_helper_profile = {
+                str(key): (str(stored), int(encrypted))
+                for key, stored, encrypted in connection.execute(
+                    """
+                    SELECT key_name, value_text, encrypted FROM settings
+                    WHERE scope_type='account' AND scope_id='admin'
+                      AND module='Profile'
+                    """
+                )
+            }
+        for key, expected_value in installer_upgrade_profile.items():
+            if real_helper_profile.get(key) != (expected_value, 0):
+                raise AssertionError(
+                    "Real installer helper did not publish a portable Profile "
+                    f"field: {key}={real_helper_profile.get(key)!r}"
+                )
 
         auth1_complete_data = temp / "installer-auth1-complete" / "Data"
         auth1_complete_data.mkdir(parents=True)
@@ -691,7 +952,7 @@ def main() -> int:
         verify_complete_data.mkdir(parents=True)
         verify_complete_db = verify_complete_data / "ConfigStore.db"
         write_auth1_database(verify_complete_db, "complete", "[]")
-        with sqlite3.connect(verify_complete_db) as connection:
+        with closing(sqlite3.connect(verify_complete_db)) as connection, connection:
             connection.execute(
                 "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
             )
@@ -740,7 +1001,7 @@ def main() -> int:
                     "serialize_legacy_credential_scrub_manifest"
                 ](verify_pending_manifest),
             )
-            with sqlite3.connect(verify_pending_db) as connection:
+            with closing(sqlite3.connect(verify_pending_db)) as connection, connection:
                 connection.execute(
                     "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
                 )
@@ -800,7 +1061,7 @@ def main() -> int:
                     "serialize_legacy_credential_scrub_manifest"
                 ](residue_manifest),
             )
-            with sqlite3.connect(residue_db) as connection:
+            with closing(sqlite3.connect(residue_db)) as connection, connection:
                 connection.execute(
                     "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
                 )
@@ -866,7 +1127,7 @@ def main() -> int:
             or "PasswordBase64=" not in login_backup.read_text(encoding="utf-8")
         ):
             raise AssertionError("Credential backup gate changed the unproven INI backup or lost the migrated DB")
-        with sqlite3.connect(in_place_db) as connection:
+        with closing(sqlite3.connect(in_place_db)) as connection, connection:
             scrub_state = connection.execute(
                 "SELECT value FROM meta WHERE key='legacy_credential_scrub_state'"
             ).fetchone()
@@ -880,7 +1141,7 @@ def main() -> int:
             ],
             temp,
         )
-        with sqlite3.connect(in_place_db) as connection:
+        with closing(sqlite3.connect(in_place_db)) as connection, connection:
             scrub_state = connection.execute(
                 "SELECT value FROM meta WHERE key='legacy_credential_scrub_state'"
             ).fetchone()
@@ -1027,7 +1288,7 @@ def main() -> int:
         unproven_v4_data = temp / "unproven-v4" / "Data"
         unproven_v4_data.mkdir(parents=True)
         unproven_v4_db = unproven_v4_data / "ConfigStore.db"
-        with sqlite3.connect(unproven_v4_db) as connection:
+        with closing(sqlite3.connect(unproven_v4_db)) as connection, connection:
             connection.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             connection.execute("INSERT INTO meta(key, value) VALUES('schema_version', '4')")
             connection.execute(
@@ -1162,6 +1423,45 @@ def main() -> int:
                     "Machine-bound existing account/Profile values were not rejected atomically"
                 )
 
+        exact_v5_db = temp / "semantic-v1-exact-enc-v1" / "ConfigStore.db"
+        write_auth1_database(exact_v5_db, "complete", "[]")
+        with closing(sqlite3.connect(exact_v5_db)) as connection, connection:
+            password_row = connection.execute(
+                """
+                SELECT value_text FROM settings
+                WHERE scope_type='account' AND scope_id='admin'
+                  AND module='Profile' AND key_name='PasswordHash'
+                """
+            ).fetchone()
+            if password_row is None:
+                raise AssertionError("Exact v5 wrapper fixture has no PasswordHash")
+            connection.execute(
+                """
+                UPDATE settings SET value_text=?, encrypted=1
+                WHERE scope_type='account' AND scope_id='admin'
+                  AND module='Profile' AND key_name='PasswordHash'
+                """,
+                (protect_legacy_value(str(password_row[0])),),
+            )
+        exact_v5_before = file_sha256(exact_v5_db)
+        exact_v5_result = run_command(
+            [
+                str(exe), "--source", str(semantic_source),
+                "--db", str(exact_v5_db), "--encrypt",
+            ],
+            temp,
+        )
+        if (
+            exact_v5_result.returncode == 0
+            or "portable plaintext storage" not in (
+                exact_v5_result.stdout + exact_v5_result.stderr
+            )
+            or file_sha256(exact_v5_db) != exact_v5_before
+        ):
+            raise AssertionError(
+                "Current-v5 enc:v1+encrypted=1 Profile was not rejected atomically"
+            )
+
         portable_values = {
             "PasswordHash": hashlib.sha256(
                 b"admin\nPortable-Profile-Parity"
@@ -1178,7 +1478,7 @@ def main() -> int:
                     temp / f"portable-{wrapper}-{field}" / "ConfigStore.db"
                 )
                 portable_db.parent.mkdir(parents=True)
-                with sqlite3.connect(portable_db) as connection:
+                with closing(sqlite3.connect(portable_db)) as connection, connection:
                     migration_module["create_current_tables"](connection)
                     migration_module["set_schema_meta"](
                         connection, True, authentication_initialized=True
@@ -1239,7 +1539,7 @@ def main() -> int:
                 "remembered-secret",
                 purpose_value("global", "", module, "admin"),
             )
-            with sqlite3.connect(credential_db) as connection:
+            with closing(sqlite3.connect(credential_db)) as connection, connection:
                 migration_module["create_current_tables"](connection)
                 migration_module["set_schema_meta"](
                     connection, True, authentication_initialized=False
@@ -1282,7 +1582,7 @@ def main() -> int:
                     purpose_value(scope_type, scope_id, module, key),
                 )
             )
-            with sqlite3.connect(credential_db) as connection:
+            with closing(sqlite3.connect(credential_db)) as connection, connection:
                 migration_module["create_current_tables"](connection)
                 migration_module["set_schema_meta"](
                     connection, True, authentication_initialized=False
@@ -1314,7 +1614,7 @@ def main() -> int:
 
         compatible_current_db = temp / "current-without-created-at" / "ConfigStore.db"
         compatible_current_db.parent.mkdir(parents=True)
-        with sqlite3.connect(compatible_current_db) as connection:
+        with closing(sqlite3.connect(compatible_current_db)) as connection, connection:
             migration_module["create_current_tables"](connection)
             migration_module["set_schema_meta"](
                 connection, True, authentication_initialized=False
@@ -1338,7 +1638,7 @@ def main() -> int:
             raise AssertionError(
                 "Read-only verification modified a compatible DB without created_at"
             )
-        with sqlite3.connect(compatible_current_db) as connection:
+        with closing(sqlite3.connect(compatible_current_db)) as connection, connection:
             connection.execute(
                 """
                 UPDATE settings
@@ -1364,7 +1664,7 @@ def main() -> int:
             raise AssertionError(
                 "Read-only verification modified published LoginState shapes"
             )
-        with sqlite3.connect(compatible_current_db) as connection:
+        with closing(sqlite3.connect(compatible_current_db)) as connection, connection:
             connection.execute(
                 """
                 UPDATE settings SET value_text='1'
@@ -1388,7 +1688,7 @@ def main() -> int:
 
         uppercase_legacy_db = temp / "current-uppercase-legacy-table" / "ConfigStore.db"
         uppercase_legacy_db.parent.mkdir(parents=True)
-        with sqlite3.connect(uppercase_legacy_db) as connection:
+        with closing(sqlite3.connect(uppercase_legacy_db)) as connection, connection:
             migration_module["create_current_tables"](connection)
             migration_module["set_schema_meta"](
                 connection, True, authentication_initialized=False
@@ -1670,6 +1970,7 @@ def main() -> int:
 
         existing_root = temp / "existing-v5-root"
         existing_db = existing_root / "Data" / "ConfigStore.db"
+        existing_db.parent.mkdir(parents=True, exist_ok=True)
         empty_source = temp / "empty-source" / "Data"
         empty_source.mkdir(parents=True)
         run_checked(
@@ -1739,6 +2040,7 @@ def main() -> int:
         if b"SQLite format 3\x00" in protected_raw or b"Synthetic" in protected_raw:
             raise AssertionError("DPAPI database backup exposes a SQLite header or fixture secret")
         restored_db = temp / "restored-backup" / "ConfigStore.db"
+        restored_db.parent.mkdir(parents=True, exist_ok=True)
         run_checked(
             [
                 str(exe), "--restore-dpapi-backup", str(protected_backup),
@@ -1765,6 +2067,7 @@ def main() -> int:
         )
         operator_only_source_hash = file_sha256(operator_only_accounts)
         operator_only_new_db = temp / "operator-only-new-target" / "ConfigStore.db"
+        operator_only_new_db.parent.mkdir(parents=True, exist_ok=True)
         operator_only_new_result = run_command(
             [
                 str(exe), "--source", str(operator_only_source),
@@ -1785,6 +2088,7 @@ def main() -> int:
 
         atomic_root = temp / "atomic-overwrite"
         atomic_db = atomic_root / "Data" / "ConfigStore.db"
+        atomic_db.parent.mkdir(parents=True, exist_ok=True)
         run_checked(
             [str(exe), "--source", str(empty_source), "--db", str(atomic_db), "--encrypt"],
             temp,
@@ -1835,7 +2139,7 @@ def main() -> int:
 
         corrupt_legacy_db = temp / "corrupt-legacy" / "ConfigStore.db"
         corrupt_legacy_db.parent.mkdir(parents=True)
-        with sqlite3.connect(corrupt_legacy_db) as connection:
+        with closing(sqlite3.connect(corrupt_legacy_db)) as connection, connection:
             connection.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             connection.execute("INSERT INTO meta(key, value) VALUES('schema_version', '4')")
             connection.execute(
@@ -1859,7 +2163,7 @@ def main() -> int:
             raise AssertionError("Corrupt encrypted legacy row was accepted")
         if file_sha256(corrupt_legacy_db) != corrupt_before:
             raise AssertionError("Corrupt legacy migration was not fully rolled back")
-        with sqlite3.connect(corrupt_legacy_db) as connection:
+        with closing(sqlite3.connect(corrupt_legacy_db)) as connection, connection:
             if connection.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() != ("4",):
                 raise AssertionError("Corrupt legacy migration changed schema_version")
             if connection.execute("SELECT COUNT(*) FROM ini_values").fetchone() != (1,):
@@ -1867,7 +2171,7 @@ def main() -> int:
 
         future_db = temp / "future-schema" / "ConfigStore.db"
         future_db.parent.mkdir(parents=True)
-        with sqlite3.connect(future_db) as connection:
+        with closing(sqlite3.connect(future_db)) as connection, connection:
             connection.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             connection.execute("INSERT INTO meta(key, value) VALUES('schema_version', '6')")
             connection.execute(

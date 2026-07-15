@@ -1,9 +1,13 @@
 # 工作记录摘要
 
-- 人工整理日期：`2026-07-13`
+- 人工整理日期：`2026-07-15`
 - Notion 页面：<https://www.notion.so/1eb0a83f808e4cdd84d554753436275f>
 
 这份文档按日期整理当前阶段已经完成或已立项的关键工作项，详细表结构仍以 Notion 为准。
+
+## 2026-07-15
+
+- 版本 v2026.07.15.0928：完成安装迁移原子事务与同版本恢复的第三轮失败关闭加固。① Python 与 PowerShell/内嵌 C# 的正式库发布、OLD quarantine、失败 staging、DPAPI envelope、解密回读临时库均改为精确句柄绑定；首次绑定必须是单链接普通文件，绑定后才出现的硬链接由同一句柄统一清零并 `FlushFileBuffers`，之后才做 delete disposition，避免目录项删除或进程强杀后通过 alias 留下账号/配置原文。② NEW 已完整回读且受保护备份有效后才进入不可逆 OLD scrub；该提交点之后禁止恢复旧库，raw/empty quarantine、sidecar、事务记录及强杀拓扑都由下一进程按持久记录收敛。③ 安装文件已落盘但数据库 commit/finalize 失败时写入 HKLM64 受保护恢复标记，绑定版本、neutral/brand 通道、规范安装目录、主 EXE、事务路径与 SHA-256；同包重跑在 InitializeSetup 与 PrepareToInstall 双重回读，伪造 `NOOP_CURRENT`、HKCU、异通道、`/DIR` 换目录或事务漂移均失败关闭。④ 手工迁移入口补齐目标 Data 目录安全创建，parity 夹具同步遵守核心迁移器“目标父目录必须预先存在”的身份边界。Python 74 项、PowerShell 安装迁移完整矩阵（460.652 秒）、ConfigMigrate parity、13 个 C++ runner、Windows/Ubuntu/OTA 离线矩阵、中性/品牌 Inno 编译、Release x64 clean Rebuild、AppPaths 与独立 P1/P2 终审全部通过。署名 yu1201。
 
 ## 2026-07-13
 

@@ -53,6 +53,13 @@ if not exist "%SOURCE_DIR%" (
     echo Legacy Data directory not found: "%SOURCE_DIR%"
     goto failed
 )
+if not exist "%DATA_ROOT%\Data\." (
+    mkdir "%DATA_ROOT%\Data" >nul 2>&1
+    if errorlevel 1 (
+        echo Target Data directory could not be created: "%DATA_ROOT%\Data"
+        goto failed
+    )
+)
 
 rem 路径必须整体保留在引号内：cmd.exe 会在变量展开后再次解释命令元字符。
 rem Windows 合法路径可含命令元字符；不加引号既会破坏迁移，也可能以维护账户权限执行额外命令。

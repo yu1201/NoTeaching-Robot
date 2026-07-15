@@ -59,6 +59,29 @@ function Get-TextSha256 {
     }
 }
 
+function New-TestHardLink {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+    New-Item -ItemType HardLink -Path $Path -Target $Target -ErrorAction Stop | Out-Null
+    Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) 'test hardlink was not created'
+}
+
+function Get-TestReadbackPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Data,
+        [Parameter(Mandatory = $true)][string]$BackupName
+    )
+    $match = [regex]::Match(
+        $BackupName,
+        '^\.ConfigStore\.db\.install-upgrade-([0-9a-f]{32})\.tmp\.install-backup\.dpapi\.bak$',
+        [System.Text.RegularExpressions.RegexOptions]::CultureInvariant
+    )
+    Assert-True $match.Success 'test backup name is not transaction-bound'
+    return Join-Path $Data ('.ConfigStore.db.install-readback-' + $match.Groups[1].Value + '.tmp')
+}
+
 function Read-KeyValueFile {
     param([string]$Path)
     $map = @{}
@@ -94,7 +117,7 @@ function ConvertTo-ProcessArgument {
 }
 
 function Start-InstallHelper {
-    param([string]$Data, [string]$Status)
+    param([string]$Data, [string]$Status, [string[]]$Extra = @())
     $arguments = @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
         '-File', $helper,
@@ -102,6 +125,7 @@ function Start-InstallHelper {
         '-MigrateExecutable', $fakeMigrator,
         '-StatusFile', $Status
     )
+    $arguments += $Extra
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = 'powershell.exe'
     $start.Arguments = (($arguments | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) -join ' ')
@@ -131,11 +155,29 @@ function Stop-CrashWindowTree {
         [Parameter(Mandatory = $true)][string]$SignalPath
     )
     $holderPid = [int]([System.IO.File]::ReadAllText($SignalPath).Trim())
-    & taskkill.exe /PID $HelperProcess.Id /T /F *> $null
+    # The crash-window child may finish between the signal write and taskkill.
+    # Treat taskkill's "process not found" result as a benign race, then rely on
+    # the explicit postcondition checks below to prove both processes are gone.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        if (-not $HelperProcess.HasExited) {
+            & taskkill.exe /PID $HelperProcess.Id /T /F *> $null
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     try { $HelperProcess.WaitForExit(10000) | Out-Null } catch {}
     $holder = Get-Process -Id $holderPid -ErrorAction SilentlyContinue
     if ($null -ne $holder) {
-        & taskkill.exe /PID $holderPid /F *> $null
+        try {
+            $ErrorActionPreference = 'SilentlyContinue'
+            & taskkill.exe /PID $holderPid /F *> $null
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         try { Wait-Process -Id $holderPid -Timeout 10 -ErrorAction SilentlyContinue } catch {}
     }
     Assert-True ($null -eq (Get-Process -Id $HelperProcess.Id -ErrorAction SilentlyContinue)) `
@@ -152,6 +194,8 @@ function Assert-NoTransactionArtifacts {
             Where-Object {
                 $_.Name -ceq $transactionName -or
                 $_.Name -cmatch '^\.ConfigStore\.db\.install-(create|upgrade)-[0-9a-f]{32}\.tmp(?:-journal|-wal|-shm)?$' -or
+                $_.Name -cmatch '^\.ConfigStore\.db\.install-readback-[0-9a-f]{32}\.tmp(?:-journal|-wal|-shm)?$' -or
+                $_.Name -cmatch '^\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-original\.quarantine(?:-journal|-wal|-shm)?$' -or
                 $_.Name -cmatch '^\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-backup\.dpapi\.bak$'
             }
     )
@@ -265,6 +309,14 @@ public static class FakeConfigMigrate
         }
 
         string db = GetValue(args, "--db");
+        if (Has(args, "--verify-dpapi-backup-against"))
+        {
+            string backup = GetValue(args, "--verify-dpapi-backup-against");
+            if (!File.Exists(db) || !File.Exists(backup)) return 31;
+            byte[] expected = File.ReadAllBytes(db);
+            byte[] restored = ReadBackup(backup);
+            return expected.SequenceEqual(restored) ? 0 : 32;
+        }
         if (Has(args, "--restore-dpapi-backup"))
         {
             File.WriteAllBytes(db, ReadBackup(GetValue(args, "--restore-dpapi-backup")));
@@ -475,12 +527,47 @@ try {
         Assert-NoTransactionArtifacts $sourceDriftData "create source-$sourceDriftMode drift cleanup"
     }
 
+    # Replacing the staging path after the last ordinary verification must not
+    # redirect publication.  The test-only hook attempts the replacement only
+    # after the helper holds the identity-bound staging handle.
+    $createSwapData = Join-Path $tempRoot 'create publish identity swap Data'
+    New-Item -ItemType Directory $createSwapData -Force | Out-Null
+    [System.IO.File]::WriteAllText(
+        (Join-Path $createSwapData 'OnlineServicesConfig.ini'),
+        'AdminPassword=create-publish-swap'
+    )
+    $createSwapPreStatus = Join-Path $tempRoot 'create-publish-swap-pre.status'
+    $code = Invoke-InstallHelper $createSwapData $createSwapPreStatus
+    Assert-True ($code -eq 0) 'create publish-swap staging setup failed'
+    $createSwapRecordPath = Join-Path $createSwapData $transactionName
+    $createSwapRecord = Read-KeyValueFile $createSwapRecordPath
+    $createSwapStaging = Join-Path $createSwapData $createSwapRecord.STAGING_NAME
+    $createSwapStagingHash = Get-Sha256 $createSwapStaging
+    $createSwapAttack = Join-Path $createSwapData '.ConfigStore.db.publish-swap-create.tmp'
+    Write-DatabaseState $createSwapAttack 'ATTACK_CREATE_PUBLISH'
+    $createSwapCommitStatus = Join-Path $tempRoot 'create-publish-swap-commit.status'
+    $code = Invoke-InstallHelper $createSwapData $createSwapCommitStatus @(
+        '-CommitPendingTransaction',
+        '-TestOnlyStagingReplacementPath', $createSwapAttack
+    )
+    Assert-True ($code -ne 0) 'create commit accepted an injected staging-path replacement'
+    Assert-True ((Get-Content $createSwapCommitStatus -Raw).StartsWith('ERROR:')) 'create publish-swap failure did not remain fail-closed'
+    Assert-True (-not (Test-Path (Join-Path $createSwapData 'ConfigStore.db'))) 'create publish-swap attack published a final database'
+    Assert-True ((Get-Sha256 $createSwapStaging) -ceq $createSwapStagingHash) 'create publish-swap changed the verified staging identity'
+    Assert-True (Test-Path $createSwapRecordPath -PathType Leaf) 'create publish-swap failure deleted its transaction record'
+    Assert-True (Test-Path $createSwapAttack -PathType Leaf) 'create publish-swap unexpectedly consumed the attack file'
+    Remove-Item -LiteralPath $createSwapAttack -Force
+    $code = Invoke-InstallHelper $createSwapData (Join-Path $tempRoot 'create-publish-swap-rollback.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0) 'create publish-swap transaction could not be rolled back'
+    Assert-NoTransactionArtifacts $createSwapData 'create publish-swap rollback'
+
     # Post-file commit publishes the verified create atomically; only then may scrub finalize.
     $code = Invoke-InstallHelper $legacyData $legacyStatus
     Assert-True ($code -eq 0) 'second staged create failed'
     $createCommitStatus = Join-Path $tempRoot 'create-commit.status'
     $code = Invoke-InstallHelper $legacyData $createCommitStatus @('-CommitPendingTransaction')
-    Assert-True ($code -eq 0 -and (Get-Content $createCommitStatus -Raw).Trim() -ceq 'OK:PENDING_TRANSACTION_COMMITTED_FINALIZE_REQUIRED') 'staged create commit did not require finalize'
+    $createCommitStatusText = (Get-Content $createCommitStatus -Raw -ErrorAction SilentlyContinue).Trim()
+    Assert-True ($code -eq 0 -and $createCommitStatusText -ceq 'OK:PENDING_TRANSACTION_COMMITTED_FINALIZE_REQUIRED') "staged create commit did not require finalize: exit=$code status=$createCommitStatusText"
     $legacyDb = Join-Path $legacyData 'ConfigStore.db'
     Assert-True ((Get-DatabaseState $legacyDb).StartsWith('DEFERRED')) 'create commit did not publish the staged database'
     Assert-True (Test-Path (Join-Path $legacyData $transactionName) -PathType Leaf) 'pending create commit removed its finalize safety record'
@@ -510,6 +597,707 @@ try {
     Assert-True ($code -eq 0 -and (Get-Sha256 $upgradeDb) -ceq $upgradeOriginalHash) 'status-loss upgrade rollback changed the original final database'
     Assert-NoTransactionArtifacts $upgradeData 'upgrade rollback'
 
+    # A non-empty alias that predates the exact discard handle could point at an
+    # unrelated same-content victim.  The elevated helper must not become an
+    # arbitrary-file truncate oracle: reject it without changing either link or
+    # clearing the transaction record.
+    $preexistingAliasData = Join-Path $tempRoot 'preexisting staging alias Data'
+    New-Item -ItemType Directory $preexistingAliasData -Force | Out-Null
+    [System.IO.File]::WriteAllText(
+        (Join-Path $preexistingAliasData 'legacy.ini'),
+        'Password=preexisting-alias-secret'
+    )
+    $code = Invoke-InstallHelper $preexistingAliasData (Join-Path $tempRoot 'preexisting-alias-pre.status')
+    Assert-True ($code -eq 0) 'preexisting alias create fixture could not be staged'
+    $preexistingAliasRecordPath = Join-Path $preexistingAliasData $transactionName
+    $preexistingAliasRecord = Read-KeyValueFile $preexistingAliasRecordPath
+    $preexistingAliasStaging = Join-Path $preexistingAliasData $preexistingAliasRecord.STAGING_NAME
+    $preexistingAliasPath = Join-Path $preexistingAliasData 'preexisting-staging-alias.bin'
+    $preexistingAliasHash = Get-Sha256 $preexistingAliasStaging
+    New-TestHardLink $preexistingAliasPath $preexistingAliasStaging
+    $code = Invoke-InstallHelper $preexistingAliasData (Join-Path $tempRoot 'preexisting-alias-rollback.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -ne 0) 'rollback accepted a non-empty preexisting staging hardlink'
+    Assert-True (
+        (Get-Sha256 $preexistingAliasStaging) -ceq $preexistingAliasHash -and
+        (Get-Sha256 $preexistingAliasPath) -ceq $preexistingAliasHash
+    ) 'preexisting staging hardlink rejection changed the canonical or alias payload'
+    Assert-True (Test-Path -LiteralPath $preexistingAliasRecordPath -PathType Leaf) 'preexisting staging hardlink rejection cleared the transaction record'
+    Remove-Item -LiteralPath $preexistingAliasPath -Force
+    $code = Invoke-InstallHelper $preexistingAliasData (Join-Path $tempRoot 'preexisting-alias-cleanup.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0) 'preexisting staging hardlink transaction could not roll back after alias removal'
+    Assert-NoTransactionArtifacts $preexistingAliasData 'preexisting staging alias cleanup'
+
+    # Crash after durable staging scrub but before disposition.  The next
+    # explicit rollback must recognize the exact empty canonical object,
+    # re-scrub it idempotently, dispose it, and clear the CREATE_VERIFIED record.
+    $stagingScrubCrashData = Join-Path $tempRoot 'staging scrub crash Data'
+    New-Item -ItemType Directory $stagingScrubCrashData -Force | Out-Null
+    [System.IO.File]::WriteAllText(
+        (Join-Path $stagingScrubCrashData 'legacy.ini'),
+        'Password=staging-scrub-crash'
+    )
+    $code = Invoke-InstallHelper $stagingScrubCrashData (Join-Path $tempRoot 'staging-scrub-pre.status')
+    Assert-True ($code -eq 0) 'staging scrub crash fixture could not be staged'
+    $stagingScrubRecordPath = Join-Path $stagingScrubCrashData $transactionName
+    $stagingScrubRecord = Read-KeyValueFile $stagingScrubRecordPath
+    $stagingScrubPath = Join-Path $stagingScrubCrashData $stagingScrubRecord.STAGING_NAME
+    $stagingScrubProcess = Start-InstallHelper `
+        $stagingScrubCrashData `
+        (Join-Path $tempRoot 'staging-scrub-crash.status') `
+        @('-RollbackPendingTransaction', '-TestOnlyUpgradeCrashPoint', 'after-staging-discard-scrub')
+    Assert-True ($stagingScrubProcess.WaitForExit(30000)) 'staging after-scrub helper did not terminate'
+    Assert-True ($stagingScrubProcess.ExitCode -ne 0) 'staging after-scrub crash hook returned success'
+    $stagingScrubProcess.Dispose()
+    Assert-True (
+        (Test-Path -LiteralPath $stagingScrubPath -PathType Leaf) -and
+        (Get-Item -LiteralPath $stagingScrubPath).Length -eq 0 -and
+        (Test-Path -LiteralPath $stagingScrubRecordPath -PathType Leaf) -and
+        -not (Test-Path -LiteralPath (Join-Path $stagingScrubCrashData 'ConfigStore.db'))
+    ) 'staging after-scrub crash did not retain an empty canonical object plus its CREATE_VERIFIED record'
+    $code = Invoke-InstallHelper $stagingScrubCrashData (Join-Path $tempRoot 'staging-scrub-restart.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0) 'staging after-scrub crash could not be safely rolled back on restart'
+    Assert-NoTransactionArtifacts $stagingScrubCrashData 'staging after-scrub restart'
+
+    # A hardlink introduced only after the exact single-link staging bind is
+    # scrubbed through the open identity.  Killing immediately after disposition
+    # must leave the alias empty and the UPGRADE_VERIFIED record recoverable.
+    $stagingDispositionData = Join-Path $tempRoot 'staging disposition alias crash Data'
+    $stagingDispositionDb = Join-Path $stagingDispositionData 'ConfigStore.db'
+    Write-DatabaseState $stagingDispositionDb 'OLD_STAGING_DISPOSITION'
+    $stagingDispositionOldHash = Get-Sha256 $stagingDispositionDb
+    $stagingDispositionPreStatus = Join-Path $tempRoot 'staging-disposition-pre.status'
+    $code = Invoke-InstallHelper $stagingDispositionData $stagingDispositionPreStatus
+    $stagingDispositionPreText = if (Test-Path -LiteralPath $stagingDispositionPreStatus -PathType Leaf) {
+        (Get-Content -LiteralPath $stagingDispositionPreStatus -Raw).Trim()
+    }
+    else { '<missing>' }
+    Assert-True ($code -eq 0) "staging disposition crash fixture could not be staged (exit=$code status=$stagingDispositionPreText)"
+    $stagingDispositionRecordPath = Join-Path $stagingDispositionData $transactionName
+    $stagingDispositionRecord = Read-KeyValueFile $stagingDispositionRecordPath
+    $stagingDispositionPath = Join-Path $stagingDispositionData $stagingDispositionRecord.STAGING_NAME
+    $stagingDispositionBackup = Join-Path $stagingDispositionData $stagingDispositionRecord.BACKUP_NAME
+    $stagingDispositionAlias = Join-Path $stagingDispositionData 'staging-disposition-alias.bin'
+    $stagingDispositionProcess = Start-InstallHelper `
+        $stagingDispositionData `
+        (Join-Path $tempRoot 'staging-disposition-crash.status') `
+        @(
+            '-RollbackPendingTransaction',
+            '-TestOnlyUpgradeAttack', 'staging-discard-hardlink',
+            '-TestOnlyUpgradeAttackPath', $stagingDispositionAlias,
+            '-TestOnlyUpgradeCrashPoint', 'after-staging-discard-disposition'
+        )
+    Assert-True ($stagingDispositionProcess.WaitForExit(30000)) 'staging after-disposition helper did not terminate'
+    Assert-True ($stagingDispositionProcess.ExitCode -ne 0) 'staging after-disposition crash hook returned success'
+    $stagingDispositionProcess.Dispose()
+    Assert-True (
+        -not (Test-Path -LiteralPath $stagingDispositionPath) -and
+        (Test-Path -LiteralPath $stagingDispositionAlias -PathType Leaf) -and
+        (Get-Item -LiteralPath $stagingDispositionAlias).Length -eq 0 -and
+        (Test-Path -LiteralPath $stagingDispositionBackup -PathType Leaf) -and
+        (Test-Path -LiteralPath $stagingDispositionRecordPath -PathType Leaf) -and
+        (Get-Sha256 $stagingDispositionDb) -ceq $stagingDispositionOldHash
+    ) 'staging after-disposition crash exposed bytes or lost its recoverable transaction state'
+    $code = Invoke-InstallHelper $stagingDispositionData (Join-Path $tempRoot 'staging-disposition-restart.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0 -and (Get-Item -LiteralPath $stagingDispositionAlias).Length -eq 0) 'staging after-disposition crash could not recover safely'
+    Remove-Item -LiteralPath $stagingDispositionAlias -Force
+    Assert-NoTransactionArtifacts $stagingDispositionData 'staging after-disposition restart'
+
+    # The DPAPI envelope follows the same rule.  A crash after backup scrub
+    # retains an empty canonical envelope, which restart must accept only as an
+    # idempotent scrub residue before removing the transaction record.
+    $backupScrubData = Join-Path $tempRoot 'backup scrub crash Data'
+    $backupScrubDb = Join-Path $backupScrubData 'ConfigStore.db'
+    Write-DatabaseState $backupScrubDb 'OLD_BACKUP_SCRUB'
+    $backupScrubOldHash = Get-Sha256 $backupScrubDb
+    $code = Invoke-InstallHelper $backupScrubData (Join-Path $tempRoot 'backup-scrub-pre.status')
+    Assert-True ($code -eq 0) 'backup scrub crash fixture could not be staged'
+    $backupScrubRecordPath = Join-Path $backupScrubData $transactionName
+    $backupScrubRecord = Read-KeyValueFile $backupScrubRecordPath
+    $backupScrubStaging = Join-Path $backupScrubData $backupScrubRecord.STAGING_NAME
+    $backupScrubPath = Join-Path $backupScrubData $backupScrubRecord.BACKUP_NAME
+    $backupScrubProcess = Start-InstallHelper `
+        $backupScrubData `
+        (Join-Path $tempRoot 'backup-scrub-crash.status') `
+        @('-RollbackPendingTransaction', '-TestOnlyUpgradeCrashPoint', 'after-backup-discard-scrub')
+    Assert-True ($backupScrubProcess.WaitForExit(30000)) 'backup after-scrub helper did not terminate'
+    Assert-True ($backupScrubProcess.ExitCode -ne 0) 'backup after-scrub crash hook returned success'
+    $backupScrubProcess.Dispose()
+    Assert-True (
+        -not (Test-Path -LiteralPath $backupScrubStaging) -and
+        (Test-Path -LiteralPath $backupScrubPath -PathType Leaf) -and
+        (Get-Item -LiteralPath $backupScrubPath).Length -eq 0 -and
+        (Test-Path -LiteralPath $backupScrubRecordPath -PathType Leaf) -and
+        (Get-Sha256 $backupScrubDb) -ceq $backupScrubOldHash
+    ) 'backup after-scrub crash did not retain an empty envelope plus its record'
+    $code = Invoke-InstallHelper $backupScrubData (Join-Path $tempRoot 'backup-scrub-restart.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0) 'backup after-scrub crash could not be safely rolled back on restart'
+    Assert-NoTransactionArtifacts $backupScrubData 'backup after-scrub restart'
+
+    $backupDispositionData = Join-Path $tempRoot 'backup disposition alias crash Data'
+    $backupDispositionDb = Join-Path $backupDispositionData 'ConfigStore.db'
+    Write-DatabaseState $backupDispositionDb 'OLD_BACKUP_DISPOSITION'
+    $backupDispositionOldHash = Get-Sha256 $backupDispositionDb
+    $code = Invoke-InstallHelper $backupDispositionData (Join-Path $tempRoot 'backup-disposition-pre.status')
+    Assert-True ($code -eq 0) 'backup disposition crash fixture could not be staged'
+    $backupDispositionRecordPath = Join-Path $backupDispositionData $transactionName
+    $backupDispositionRecord = Read-KeyValueFile $backupDispositionRecordPath
+    $backupDispositionPath = Join-Path $backupDispositionData $backupDispositionRecord.BACKUP_NAME
+    $backupDispositionAlias = Join-Path $backupDispositionData 'backup-disposition-alias.bin'
+    $backupDispositionProcess = Start-InstallHelper `
+        $backupDispositionData `
+        (Join-Path $tempRoot 'backup-disposition-crash.status') `
+        @(
+            '-RollbackPendingTransaction',
+            '-TestOnlyUpgradeAttack', 'backup-discard-hardlink',
+            '-TestOnlyUpgradeAttackPath', $backupDispositionAlias,
+            '-TestOnlyUpgradeCrashPoint', 'after-backup-discard-disposition'
+        )
+    Assert-True ($backupDispositionProcess.WaitForExit(30000)) 'backup after-disposition helper did not terminate'
+    Assert-True ($backupDispositionProcess.ExitCode -ne 0) 'backup after-disposition crash hook returned success'
+    $backupDispositionProcess.Dispose()
+    Assert-True (
+        -not (Test-Path -LiteralPath $backupDispositionPath) -and
+        (Test-Path -LiteralPath $backupDispositionAlias -PathType Leaf) -and
+        (Get-Item -LiteralPath $backupDispositionAlias).Length -eq 0 -and
+        (Test-Path -LiteralPath $backupDispositionRecordPath -PathType Leaf) -and
+        (Get-Sha256 $backupDispositionDb) -ceq $backupDispositionOldHash
+    ) 'backup after-disposition crash exposed envelope bytes or lost its record'
+    $code = Invoke-InstallHelper $backupDispositionData (Join-Path $tempRoot 'backup-disposition-restart.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0 -and (Get-Item -LiteralPath $backupDispositionAlias).Length -eq 0) 'backup after-disposition crash could not recover safely'
+    Remove-Item -LiteralPath $backupDispositionAlias -Force
+    Assert-NoTransactionArtifacts $backupDispositionData 'backup after-disposition restart'
+
+    # Decrypted backup readback uses a deterministic transaction-derived name so
+    # an empty crash residue can be found and securely disposed on restart.
+    $readbackScrubData = Join-Path $tempRoot 'readback scrub crash Data'
+    $readbackScrubDb = Join-Path $readbackScrubData 'ConfigStore.db'
+    Write-DatabaseState $readbackScrubDb 'OLD_READBACK_SCRUB'
+    $readbackScrubOldHash = Get-Sha256 $readbackScrubDb
+    $readbackScrubProcess = Start-InstallHelper `
+        $readbackScrubData `
+        (Join-Path $tempRoot 'readback-scrub-crash.status') `
+        @('-TestOnlyUpgradeCrashPoint', 'after-readback-discard-scrub')
+    Assert-True ($readbackScrubProcess.WaitForExit(30000)) 'readback after-scrub helper did not terminate'
+    Assert-True ($readbackScrubProcess.ExitCode -ne 0) 'readback after-scrub crash hook returned success'
+    $readbackScrubProcess.Dispose()
+    $readbackScrubRecordPath = Join-Path $readbackScrubData $transactionName
+    $readbackScrubRecord = Read-KeyValueFile $readbackScrubRecordPath
+    $readbackScrubPath = Get-TestReadbackPath $readbackScrubData $readbackScrubRecord.BACKUP_NAME
+    Assert-True (
+        $readbackScrubRecord.MODE -ceq 'UPGRADE_PREPARED' -and
+        (Test-Path -LiteralPath $readbackScrubPath -PathType Leaf) -and
+        (Get-Item -LiteralPath $readbackScrubPath).Length -eq 0 -and
+        (Get-Sha256 $readbackScrubDb) -ceq $readbackScrubOldHash
+    ) 'readback after-scrub crash did not retain an empty deterministic temp plus PREPARED record'
+    $code = Invoke-InstallHelper $readbackScrubData (Join-Path $tempRoot 'readback-scrub-restart.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0) 'readback after-scrub crash could not be safely rolled back on restart'
+    Assert-NoTransactionArtifacts $readbackScrubData 'readback after-scrub restart'
+
+    $readbackDispositionData = Join-Path $tempRoot 'readback disposition alias crash Data'
+    $readbackDispositionDb = Join-Path $readbackDispositionData 'ConfigStore.db'
+    Write-DatabaseState $readbackDispositionDb 'OLD_READBACK_DISPOSITION'
+    $readbackDispositionOldHash = Get-Sha256 $readbackDispositionDb
+    $readbackDispositionAlias = Join-Path $readbackDispositionData 'readback-disposition-alias.bin'
+    $readbackDispositionProcess = Start-InstallHelper `
+        $readbackDispositionData `
+        (Join-Path $tempRoot 'readback-disposition-crash.status') `
+        @(
+            '-TestOnlyUpgradeAttack', 'readback-discard-hardlink',
+            '-TestOnlyUpgradeAttackPath', $readbackDispositionAlias,
+            '-TestOnlyUpgradeCrashPoint', 'after-readback-discard-disposition'
+        )
+    Assert-True ($readbackDispositionProcess.WaitForExit(30000)) 'readback after-disposition helper did not terminate'
+    Assert-True ($readbackDispositionProcess.ExitCode -ne 0) 'readback after-disposition crash hook returned success'
+    $readbackDispositionProcess.Dispose()
+    $readbackDispositionRecordPath = Join-Path $readbackDispositionData $transactionName
+    $readbackDispositionRecord = Read-KeyValueFile $readbackDispositionRecordPath
+    $readbackDispositionPath = Get-TestReadbackPath $readbackDispositionData $readbackDispositionRecord.BACKUP_NAME
+    Assert-True (
+        $readbackDispositionRecord.MODE -ceq 'UPGRADE_PREPARED' -and
+        -not (Test-Path -LiteralPath $readbackDispositionPath) -and
+        (Test-Path -LiteralPath $readbackDispositionAlias -PathType Leaf) -and
+        (Get-Item -LiteralPath $readbackDispositionAlias).Length -eq 0 -and
+        (Get-Sha256 $readbackDispositionDb) -ceq $readbackDispositionOldHash
+    ) 'readback after-disposition crash exposed plaintext or lost its PREPARED record'
+    $code = Invoke-InstallHelper $readbackDispositionData (Join-Path $tempRoot 'readback-disposition-restart.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0 -and (Get-Item -LiteralPath $readbackDispositionAlias).Length -eq 0) 'readback after-disposition crash could not recover safely'
+    Remove-Item -LiteralPath $readbackDispositionAlias -Force
+    Assert-NoTransactionArtifacts $readbackDispositionData 'readback after-disposition restart'
+
+    $upgradeSwapData = Join-Path $tempRoot 'upgrade publish identity swap Data'
+    $upgradeSwapDb = Join-Path $upgradeSwapData 'ConfigStore.db'
+    Write-DatabaseState $upgradeSwapDb 'OLD_UPGRADE_PUBLISH_SWAP'
+    $upgradeSwapOriginalHash = Get-Sha256 $upgradeSwapDb
+    $upgradeSwapPreStatus = Join-Path $tempRoot 'upgrade-publish-swap-pre.status'
+    $code = Invoke-InstallHelper $upgradeSwapData $upgradeSwapPreStatus
+    Assert-True ($code -eq 0) 'upgrade publish-swap staging setup failed'
+    $upgradeSwapRecordPath = Join-Path $upgradeSwapData $transactionName
+    $upgradeSwapRecord = Read-KeyValueFile $upgradeSwapRecordPath
+    $upgradeSwapStaging = Join-Path $upgradeSwapData $upgradeSwapRecord.STAGING_NAME
+    $upgradeSwapBackup = Join-Path $upgradeSwapData $upgradeSwapRecord.BACKUP_NAME
+    $upgradeSwapStagingHash = Get-Sha256 $upgradeSwapStaging
+    $upgradeSwapBackupHash = Get-Sha256 $upgradeSwapBackup
+    $upgradeSwapAttack = Join-Path $upgradeSwapData '.ConfigStore.db.publish-swap-upgrade.tmp'
+    Write-DatabaseState $upgradeSwapAttack 'ATTACK_UPGRADE_PUBLISH'
+    $upgradeSwapCommitStatus = Join-Path $tempRoot 'upgrade-publish-swap-commit.status'
+    $code = Invoke-InstallHelper $upgradeSwapData $upgradeSwapCommitStatus @(
+        '-CommitPendingTransaction',
+        '-TestOnlyStagingReplacementPath', $upgradeSwapAttack
+    )
+    Assert-True ($code -ne 0) 'upgrade commit accepted an injected staging-path replacement'
+    Assert-True ((Get-Content $upgradeSwapCommitStatus -Raw).StartsWith('ERROR:')) 'upgrade publish-swap failure did not remain fail-closed'
+    Assert-True ((Get-Sha256 $upgradeSwapDb) -ceq $upgradeSwapOriginalHash) 'upgrade publish-swap lost or replaced the original final database'
+    Assert-True ((Get-Sha256 $upgradeSwapStaging) -ceq $upgradeSwapStagingHash) 'upgrade publish-swap changed the verified staging identity'
+    Assert-True ((Get-Sha256 $upgradeSwapBackup) -ceq $upgradeSwapBackupHash) 'upgrade publish-swap changed the protected backup'
+    Assert-True (Test-Path $upgradeSwapRecordPath -PathType Leaf) 'upgrade publish-swap failure deleted its transaction record'
+    Assert-True (Test-Path $upgradeSwapAttack -PathType Leaf) 'upgrade publish-swap unexpectedly consumed the attack file'
+    Remove-Item -LiteralPath $upgradeSwapAttack -Force
+    $code = Invoke-InstallHelper $upgradeSwapData (Join-Path $tempRoot 'upgrade-publish-swap-rollback.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0 -and (Get-Sha256 $upgradeSwapDb) -ceq $upgradeSwapOriginalHash) 'upgrade publish-swap transaction could not be safely rolled back'
+    Assert-NoTransactionArtifacts $upgradeSwapData 'upgrade publish-swap rollback'
+
+    # Accept only the immediately preceding unreleased eight-line VERIFIED
+    # record, deriving its quarantine name from the already-bound staging UUID.
+    $legacyRecordData = Join-Path $tempRoot 'legacy verified record shape Data'
+    $legacyRecordDb = Join-Path $legacyRecordData 'ConfigStore.db'
+    Write-DatabaseState $legacyRecordDb 'OLD_LEGACY_VERIFIED_RECORD'
+    $legacyRecordOldHash = Get-Sha256 $legacyRecordDb
+    $code = Invoke-InstallHelper $legacyRecordData (Join-Path $tempRoot 'legacy-record-pre.status')
+    Assert-True ($code -eq 0) 'legacy VERIFIED record compatibility fixture could not be staged'
+    $legacyRecordPath = Join-Path $legacyRecordData $transactionName
+    $legacyPayloadLines = @(
+        Get-Content -LiteralPath $legacyRecordPath |
+            Where-Object { -not $_.StartsWith('QUARANTINE_NAME=') -and -not $_.StartsWith('PAYLOAD_SHA256=') }
+    )
+    $legacyPayload = $legacyPayloadLines -join "`n"
+    $legacyRecordText = $legacyPayload + "`nPAYLOAD_SHA256=" + (Get-TextSha256 $legacyPayload) + "`n"
+    [System.IO.File]::WriteAllText($legacyRecordPath, $legacyRecordText, (New-Object System.Text.UTF8Encoding($false)))
+    $code = Invoke-InstallHelper $legacyRecordData (Join-Path $tempRoot 'legacy-record-resume.status')
+    Assert-True ($code -eq 0 -and (Get-Sha256 $legacyRecordDb) -ceq $legacyRecordOldHash) 'legacy eight-line VERIFIED record could not be strictly resumed'
+    $code = Invoke-InstallHelper $legacyRecordData (Join-Path $tempRoot 'legacy-record-rollback.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0 -and (Get-Sha256 $legacyRecordDb) -ceq $legacyRecordOldHash) 'legacy eight-line VERIFIED record could not be rolled back'
+    Assert-NoTransactionArtifacts $legacyRecordData 'legacy VERIFIED record rollback'
+
+    # The upgrade publisher must hold both exact file identities and reserve the
+    # final SQLite sidecar names for the entire two-rename atomic region.
+    foreach ($upgradeAttack in @('writer', 'target-replace', 'target-hardlink', 'staging-hardlink', 'sidecar')) {
+        $attackData = Join-Path $tempRoot ("upgrade exact-handle attack $upgradeAttack Data")
+        $attackDb = Join-Path $attackData 'ConfigStore.db'
+        Write-DatabaseState $attackDb ("OLD_EXACT_" + $upgradeAttack.ToUpperInvariant())
+        $attackOriginalHash = Get-Sha256 $attackDb
+        $attackStatus = Join-Path $tempRoot ("upgrade-exact-$upgradeAttack-pre.status")
+        $code = Invoke-InstallHelper $attackData $attackStatus
+        Assert-True ($code -eq 0) "upgrade $upgradeAttack attack fixture could not be staged"
+        $attackRecordPath = Join-Path $attackData $transactionName
+        $attackRecord = Read-KeyValueFile $attackRecordPath
+        $attackStaging = Join-Path $attackData $attackRecord.STAGING_NAME
+        $attackQuarantine = Join-Path $attackData $attackRecord.QUARANTINE_NAME
+        $attackStagingHash = Get-Sha256 $attackStaging
+        Assert-True ($attackRecord.QUARANTINE_NAME -ceq ($attackRecord.STAGING_NAME + '.install-original.quarantine')) 'upgrade record quarantine name is not strictly derived from staging'
+
+        $attackAlias = Join-Path $attackData ("$upgradeAttack-injected.bin")
+        $attackExtra = @('-CommitPendingTransaction', '-TestOnlyUpgradeAttack', $upgradeAttack)
+        if ($upgradeAttack -in @('target-replace', 'target-hardlink', 'staging-hardlink')) {
+            if ($upgradeAttack -ceq 'target-replace') {
+                [System.IO.File]::WriteAllText($attackAlias, 'late-target-replacement')
+            }
+            $attackExtra += @('-TestOnlyUpgradeAttackPath', $attackAlias)
+        }
+        $code = Invoke-InstallHelper $attackData (Join-Path $tempRoot ("upgrade-exact-$upgradeAttack-commit.status")) $attackExtra
+        Assert-True ($code -ne 0) "upgrade publication accepted the injected $upgradeAttack attack"
+        Assert-True ((Get-Sha256 $attackDb) -ceq $attackOriginalHash) "upgrade $upgradeAttack attack changed the original canonical database"
+        Assert-True (-not (Test-Path -LiteralPath $attackQuarantine)) "upgrade $upgradeAttack attack left a raw quarantine"
+        Assert-True (Test-Path -LiteralPath $attackRecordPath -PathType Leaf) "upgrade $upgradeAttack attack deleted its durable transaction record"
+
+        if ($upgradeAttack -ceq 'staging-hardlink') {
+            Assert-True (-not (Test-Path -LiteralPath $attackStaging)) 'staging hardlink attack retained the compromised staging name'
+            Assert-True ((Test-Path -LiteralPath $attackAlias -PathType Leaf) -and (Get-Item -LiteralPath $attackAlias).Length -eq 0) 'staging hardlink alias was not exact-handle truncated and flushed'
+            $retryCode = Invoke-InstallHelper $attackData (Join-Path $tempRoot 'staging-hardlink-retry.status')
+            Assert-True ($retryCode -ne 0) 'missing staging after hardlink scrub did not remain fail-closed'
+            Remove-Item -LiteralPath $attackAlias -Force
+            $scrubbedRollbackStatus = Join-Path $tempRoot 'staging-hardlink-rollback.status'
+            $rollbackCode = Invoke-InstallHelper $attackData $scrubbedRollbackStatus @('-RollbackPendingTransaction')
+            $scrubbedRollbackText = if (Test-Path -LiteralPath $scrubbedRollbackStatus -PathType Leaf) { (Get-Content $scrubbedRollbackStatus -Raw).Trim() } else { '<missing>' }
+            Assert-True ($rollbackCode -eq 0 -and (Get-Sha256 $attackDb) -ceq $attackOriginalHash) "scrubbed-staging abort state could not be explicitly rolled back (exit=$rollbackCode status=$scrubbedRollbackText)"
+            Assert-NoTransactionArtifacts $attackData 'scrubbed-staging explicit rollback'
+            continue
+        }
+
+        Assert-True ((Test-Path -LiteralPath $attackStaging -PathType Leaf) -and (Get-Sha256 $attackStaging) -ceq $attackStagingHash) "upgrade $upgradeAttack attack changed the verified staging database"
+        if ($upgradeAttack -ceq 'target-replace') {
+            Assert-True ((Test-Path -LiteralPath $attackAlias -PathType Leaf) -and ([System.IO.File]::ReadAllText($attackAlias) -ceq 'late-target-replacement')) 'blocked target replacement consumed or changed the attack file'
+            Remove-Item -LiteralPath $attackAlias -Force
+        }
+        elseif ($upgradeAttack -ceq 'target-hardlink') {
+            Assert-True ((Test-Path -LiteralPath $attackAlias -PathType Leaf) -and (Get-Sha256 $attackAlias) -ceq $attackOriginalHash) 'target hardlink injection was not detected against the bound original identity'
+            Remove-Item -LiteralPath $attackAlias -Force
+        }
+        elseif ($upgradeAttack -ceq 'sidecar') {
+            Assert-True (-not (Test-Path -LiteralPath ($attackDb + '-wal'))) 'atomic sidecar reservation survived helper exit'
+        }
+        $code = Invoke-InstallHelper $attackData (Join-Path $tempRoot ("upgrade-exact-$upgradeAttack-rollback.status")) @('-RollbackPendingTransaction')
+        Assert-True ($code -eq 0 -and (Get-Sha256 $attackDb) -ceq $attackOriginalHash) "upgrade $upgradeAttack attack transaction could not be rolled back"
+        Assert-NoTransactionArtifacts $attackData "upgrade $upgradeAttack attack rollback"
+    }
+
+    # A hardlink that appears after old disposition is detected from the exact
+    # old handle. Preserve NEW, scrub every alias of OLD, and retain the record
+    # until the next strict published-state reconciliation.
+    $lateOldData = Join-Path $tempRoot 'upgrade late old hardlink Data'
+    $lateOldDb = Join-Path $lateOldData 'ConfigStore.db'
+    Write-DatabaseState $lateOldDb 'OLD_LATE_DISPOSITION_LINK'
+    $lateOldOriginalHash = Get-Sha256 $lateOldDb
+    $code = Invoke-InstallHelper $lateOldData (Join-Path $tempRoot 'late-old-pre.status')
+    Assert-True ($code -eq 0) 'late old hardlink fixture could not be staged'
+    $lateOldRecord = Read-KeyValueFile (Join-Path $lateOldData $transactionName)
+    $lateOldStaging = Join-Path $lateOldData $lateOldRecord.STAGING_NAME
+    $lateOldQuarantine = Join-Path $lateOldData $lateOldRecord.QUARANTINE_NAME
+    $lateOldAlias = Join-Path $lateOldData 'late-old-alias.bin'
+    $code = Invoke-InstallHelper $lateOldData (Join-Path $tempRoot 'late-old-commit.status') @(
+        '-CommitPendingTransaction',
+        '-TestOnlyUpgradeAttack', 'late-old-hardlink',
+        '-TestOnlyUpgradeAttackPath', $lateOldAlias
+    )
+    Assert-True ($code -ne 0) 'late old hardlink injection was accepted without a durable warning'
+    Assert-True ((Get-Sha256 $lateOldDb) -ceq $lateOldRecord.MIGRATED_SHA256 -and -not (Test-Path -LiteralPath $lateOldStaging) -and -not (Test-Path -LiteralPath $lateOldQuarantine)) 'late old hardlink handling did not preserve one verified NEW canonical database'
+    Assert-True ((Test-Path -LiteralPath $lateOldAlias -PathType Leaf) -and (Get-Item -LiteralPath $lateOldAlias).Length -eq 0) 'late old hardlink alias did not receive exact-handle scrub'
+    Assert-True ($lateOldOriginalHash -cne (Get-Sha256 $lateOldDb) -and (Test-Path -LiteralPath (Join-Path $lateOldData $transactionName))) 'late old hardlink handling lost its durable published-state record'
+    Remove-Item -LiteralPath $lateOldAlias -Force
+    $code = Invoke-InstallHelper $lateOldData (Join-Path $tempRoot 'late-old-resume.status')
+    Assert-True ($code -eq 0) 'late old hardlink published state could not be strictly resumed'
+    $code = Invoke-InstallHelper $lateOldData (Join-Path $tempRoot 'late-old-recommit.status') @('-CommitPendingTransaction')
+    Assert-True ($code -eq 0) 'late old hardlink published state could not be recommitted'
+    $code = Invoke-InstallHelper $lateOldData (Join-Path $tempRoot 'late-old-finalize.status') @('-FinalizeDeferredScrub')
+    Assert-True ($code -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $lateOldData $transactionName))) 'late old hardlink published state could not be finalized'
+
+    # Killing immediately after OLD disposition must be harmless even when one
+    # alias appeared at the last possible pre-scrub point.  The quarantine name
+    # is gone after restart, so only pre-disposition exact-handle zero+flush can
+    # guarantee that the otherwise undiscoverable alias contains no raw OLD data.
+    $directDispositionCrashData = Join-Path $tempRoot 'direct disposition crash with alias Data'
+    $directDispositionCrashDb = Join-Path $directDispositionCrashData 'ConfigStore.db'
+    Write-DatabaseState $directDispositionCrashDb 'OLD_DIRECT_DISPOSITION_CRASH'
+    $code = Invoke-InstallHelper $directDispositionCrashData (Join-Path $tempRoot 'direct-disposition-pre.status')
+    Assert-True ($code -eq 0) 'direct disposition crash fixture could not be staged'
+    $directDispositionRecordPath = Join-Path $directDispositionCrashData $transactionName
+    $directDispositionRecord = Read-KeyValueFile $directDispositionRecordPath
+    $directDispositionStaging = Join-Path $directDispositionCrashData $directDispositionRecord.STAGING_NAME
+    $directDispositionQuarantine = Join-Path $directDispositionCrashData $directDispositionRecord.QUARANTINE_NAME
+    $directDispositionAlias = Join-Path $directDispositionCrashData 'direct-disposition-old-alias.bin'
+    $directDispositionProcess = Start-InstallHelper `
+        $directDispositionCrashData `
+        (Join-Path $tempRoot 'direct-disposition-crash.status') `
+        @(
+            '-CommitPendingTransaction',
+            '-TestOnlyUpgradeAttack', 'late-old-hardlink',
+            '-TestOnlyUpgradeAttackPath', $directDispositionAlias,
+            '-TestOnlyUpgradeCrashPoint', 'after-old-disposition'
+        )
+    Assert-True ($directDispositionProcess.WaitForExit(30000)) 'direct disposition crash helper did not terminate'
+    Assert-True ($directDispositionProcess.ExitCode -ne 0) 'direct disposition crash hook returned success'
+    $directDispositionProcess.Dispose()
+    Assert-True (
+        (Get-Sha256 $directDispositionCrashDb) -ceq $directDispositionRecord.MIGRATED_SHA256 -and
+        -not (Test-Path -LiteralPath $directDispositionStaging) -and
+        -not (Test-Path -LiteralPath $directDispositionQuarantine) -and
+        (Test-Path -LiteralPath $directDispositionRecordPath -PathType Leaf)
+    ) 'direct disposition crash did not preserve verified NEW plus its durable record'
+    Assert-True (
+        (Test-Path -LiteralPath $directDispositionAlias -PathType Leaf) -and
+        (Get-Item -LiteralPath $directDispositionAlias).Length -eq 0
+    ) 'direct disposition crash exposed raw OLD bytes through the surviving alias'
+    $code = Invoke-InstallHelper $directDispositionCrashData (Join-Path $tempRoot 'direct-disposition-resume.status')
+    Assert-True ($code -eq 0) 'direct disposition crash did not resume from verified NEW'
+    Remove-Item -LiteralPath $directDispositionAlias -Force
+    $code = Invoke-InstallHelper $directDispositionCrashData (Join-Path $tempRoot 'direct-disposition-commit.status') @('-CommitPendingTransaction')
+    Assert-True ($code -eq 0) 'direct disposition crash could not commit after safe resume'
+    $code = Invoke-InstallHelper $directDispositionCrashData (Join-Path $tempRoot 'direct-disposition-finalize.status') @('-FinalizeDeferredScrub')
+    Assert-True ($code -eq 0 -and -not (Test-Path -LiteralPath $directDispositionRecordPath)) 'direct disposition crash could not finalize'
+
+    # A kill after durable scrub but before disposition leaves NEW plus an empty
+    # Q. Recovery must recognize that exact empty object, never restore it as OLD,
+    # scrub/delete it again idempotently, and remain fail-closed while an alias is
+    # still present.
+    $emptyQuarantineData = Join-Path $tempRoot 'empty quarantine restart Data'
+    $emptyQuarantineDb = Join-Path $emptyQuarantineData 'ConfigStore.db'
+    Write-DatabaseState $emptyQuarantineDb 'OLD_EMPTY_Q_RESTART'
+    $code = Invoke-InstallHelper $emptyQuarantineData (Join-Path $tempRoot 'empty-q-pre.status')
+    Assert-True ($code -eq 0) 'empty quarantine fixture could not be staged'
+    $emptyQuarantineRecordPath = Join-Path $emptyQuarantineData $transactionName
+    $emptyQuarantineRecord = Read-KeyValueFile $emptyQuarantineRecordPath
+    $emptyQuarantineStaging = Join-Path $emptyQuarantineData $emptyQuarantineRecord.STAGING_NAME
+    $emptyQuarantinePath = Join-Path $emptyQuarantineData $emptyQuarantineRecord.QUARANTINE_NAME
+    $emptyQuarantineAlias = Join-Path $emptyQuarantineData 'empty-q-old-alias.bin'
+    $emptyQuarantineProcess = Start-InstallHelper `
+        $emptyQuarantineData `
+        (Join-Path $tempRoot 'empty-q-crash.status') `
+        @(
+            '-CommitPendingTransaction',
+            '-TestOnlyUpgradeAttack', 'late-old-hardlink',
+            '-TestOnlyUpgradeAttackPath', $emptyQuarantineAlias,
+            '-TestOnlyUpgradeCrashPoint', 'after-old-scrub'
+        )
+    Assert-True ($emptyQuarantineProcess.WaitForExit(30000)) 'empty quarantine crash helper did not terminate'
+    Assert-True ($emptyQuarantineProcess.ExitCode -ne 0) 'empty quarantine crash hook returned success'
+    $emptyQuarantineProcess.Dispose()
+    Assert-True (
+        (Get-Sha256 $emptyQuarantineDb) -ceq $emptyQuarantineRecord.MIGRATED_SHA256 -and
+        -not (Test-Path -LiteralPath $emptyQuarantineStaging) -and
+        (Test-Path -LiteralPath $emptyQuarantinePath -PathType Leaf) -and
+        (Get-Item -LiteralPath $emptyQuarantinePath).Length -eq 0 -and
+        (Get-Item -LiteralPath $emptyQuarantineAlias).Length -eq 0
+    ) 'after-old-scrub crash did not retain verified NEW plus an exact empty OLD object'
+    $code = Invoke-InstallHelper $emptyQuarantineData (Join-Path $tempRoot 'empty-q-first-recovery.status')
+    Assert-True ($code -ne 0) 'empty quarantine recovery accepted a still-linked OLD alias without a durable warning'
+    Assert-True (
+        (Get-Sha256 $emptyQuarantineDb) -ceq $emptyQuarantineRecord.MIGRATED_SHA256 -and
+        -not (Test-Path -LiteralPath $emptyQuarantinePath) -and
+        (Get-Item -LiteralPath $emptyQuarantineAlias).Length -eq 0 -and
+        (Test-Path -LiteralPath $emptyQuarantineRecordPath -PathType Leaf)
+    ) 'empty quarantine recovery did not preserve NEW and fail closed after safe alias scrub'
+    Remove-Item -LiteralPath $emptyQuarantineAlias -Force
+    $code = Invoke-InstallHelper $emptyQuarantineData (Join-Path $tempRoot 'empty-q-resume.status')
+    Assert-True ($code -eq 0) 'empty quarantine recovery could not resume after alias removal'
+    $code = Invoke-InstallHelper $emptyQuarantineData (Join-Path $tempRoot 'empty-q-commit.status') @('-CommitPendingTransaction')
+    Assert-True ($code -eq 0) 'empty quarantine recovery could not commit'
+    $code = Invoke-InstallHelper $emptyQuarantineData (Join-Path $tempRoot 'empty-q-finalize.status') @('-FinalizeDeferredScrub')
+    Assert-True ($code -eq 0 -and -not (Test-Path -LiteralPath $emptyQuarantineRecordPath)) 'empty quarantine recovery could not finalize'
+
+    # Reproduce the same one-alias OLD quarantine race during restart recovery,
+    # using the hook only to create the link after exact-handle verification. The
+    # accept/reject decision still comes solely from the real handle identity,
+    # link-count, scrub, and disposition code.
+    $recoveryLateOldData = Join-Path $tempRoot 'recovery late old hardlink Data'
+    $recoveryLateOldDb = Join-Path $recoveryLateOldData 'ConfigStore.db'
+    Write-DatabaseState $recoveryLateOldDb 'OLD_RECOVERY_LATE_LINK'
+    $code = Invoke-InstallHelper $recoveryLateOldData (Join-Path $tempRoot 'recovery-late-old-pre.status')
+    Assert-True ($code -eq 0) 'recovery late old hardlink fixture could not be staged'
+    $recoveryLateOldRecordPath = Join-Path $recoveryLateOldData $transactionName
+    $recoveryLateOldRecord = Read-KeyValueFile $recoveryLateOldRecordPath
+    $recoveryLateOldStaging = Join-Path $recoveryLateOldData $recoveryLateOldRecord.STAGING_NAME
+    $recoveryLateOldQuarantine = Join-Path $recoveryLateOldData $recoveryLateOldRecord.QUARANTINE_NAME
+    $recoveryLateOldProcess = Start-InstallHelper `
+        $recoveryLateOldData `
+        (Join-Path $tempRoot 'recovery-late-old-crash.status') `
+        @('-CommitPendingTransaction', '-TestOnlyUpgradeCrashPoint', 'after-new-publish')
+    Assert-True ($recoveryLateOldProcess.WaitForExit(30000)) 'recovery late old helper did not terminate at after-new-publish'
+    Assert-True ($recoveryLateOldProcess.ExitCode -ne 0) 'recovery late old crash hook returned success'
+    $recoveryLateOldProcess.Dispose()
+    Assert-True (
+        (Get-Sha256 $recoveryLateOldDb) -ceq $recoveryLateOldRecord.MIGRATED_SHA256 -and
+        -not (Test-Path -LiteralPath $recoveryLateOldStaging) -and
+        (Get-Sha256 $recoveryLateOldQuarantine) -ceq $recoveryLateOldRecord.ORIGINAL_SHA256
+    ) 'recovery late old crash did not retain NEW plus the exact OLD quarantine'
+    $recoveryLateOldAlias = Join-Path $recoveryLateOldData 'recovery-late-old-alias.bin'
+    $code = Invoke-InstallHelper $recoveryLateOldData (Join-Path $tempRoot 'recovery-late-old-rejected.status') @(
+        '-TestOnlyUpgradeAttack', 'late-old-hardlink',
+        '-TestOnlyUpgradeAttackPath', $recoveryLateOldAlias
+    )
+    Assert-True ($code -ne 0) 'restart recovery accepted one surviving OLD hardlink alias'
+    $recoveryLateOldActualHash = if (Test-Path -LiteralPath $recoveryLateOldDb -PathType Leaf) { Get-Sha256 $recoveryLateOldDb } else { '<missing>' }
+    $recoveryLateOldStagingExists = Test-Path -LiteralPath $recoveryLateOldStaging
+    $recoveryLateOldQuarantineExists = Test-Path -LiteralPath $recoveryLateOldQuarantine
+    $recoveryLateOldRecordExists = Test-Path -LiteralPath $recoveryLateOldRecordPath -PathType Leaf
+    Assert-True (
+        $recoveryLateOldActualHash -ceq $recoveryLateOldRecord.MIGRATED_SHA256 -and
+        -not $recoveryLateOldStagingExists -and
+        -not $recoveryLateOldQuarantineExists -and
+        $recoveryLateOldRecordExists
+    ) ("restart recovery did not preserve one verified NEW canonical database and durable record " +
+        "(db=$recoveryLateOldActualHash expected=$($recoveryLateOldRecord.MIGRATED_SHA256) " +
+        "staging=$recoveryLateOldStagingExists quarantine=$recoveryLateOldQuarantineExists " +
+        "record=$recoveryLateOldRecordExists)")
+    Assert-True (
+        (Test-Path -LiteralPath $recoveryLateOldAlias -PathType Leaf) -and
+        (Get-Item -LiteralPath $recoveryLateOldAlias).Length -eq 0
+    ) 'restart recovery did not exact-handle scrub the surviving OLD alias'
+    Remove-Item -LiteralPath $recoveryLateOldAlias -Force
+    $code = Invoke-InstallHelper $recoveryLateOldData (Join-Path $tempRoot 'recovery-late-old-resume.status')
+    Assert-True ($code -eq 0) 'restart recovery could not reconcile after the scrubbed OLD alias was removed'
+    $code = Invoke-InstallHelper $recoveryLateOldData (Join-Path $tempRoot 'recovery-late-old-commit.status') @('-CommitPendingTransaction')
+    Assert-True ($code -eq 0) 'restart recovery could not recommit the verified NEW database'
+    $code = Invoke-InstallHelper $recoveryLateOldData (Join-Path $tempRoot 'recovery-late-old-finalize.status') @('-FinalizeDeferredScrub')
+    Assert-True ($code -eq 0 -and -not (Test-Path -LiteralPath $recoveryLateOldRecordPath)) 'restart recovery could not finalize after the late OLD alias was removed'
+
+    # Repeat the alias + post-disposition kill from the restart-reconciliation
+    # branch itself. On the following process there is no Q name from which the
+    # alias could be rediscovered, so its durable zero length is the safety proof.
+    $recoveryDispositionCrashData = Join-Path $tempRoot 'recovery disposition crash with alias Data'
+    $recoveryDispositionCrashDb = Join-Path $recoveryDispositionCrashData 'ConfigStore.db'
+    Write-DatabaseState $recoveryDispositionCrashDb 'OLD_RECOVERY_DISPOSITION_CRASH'
+    $code = Invoke-InstallHelper $recoveryDispositionCrashData (Join-Path $tempRoot 'recovery-disposition-pre.status')
+    Assert-True ($code -eq 0) 'recovery disposition crash fixture could not be staged'
+    $recoveryDispositionRecordPath = Join-Path $recoveryDispositionCrashData $transactionName
+    $recoveryDispositionRecord = Read-KeyValueFile $recoveryDispositionRecordPath
+    $recoveryDispositionStaging = Join-Path $recoveryDispositionCrashData $recoveryDispositionRecord.STAGING_NAME
+    $recoveryDispositionQuarantine = Join-Path $recoveryDispositionCrashData $recoveryDispositionRecord.QUARANTINE_NAME
+    $publishForRecoveryProcess = Start-InstallHelper `
+        $recoveryDispositionCrashData `
+        (Join-Path $tempRoot 'recovery-disposition-publish-crash.status') `
+        @('-CommitPendingTransaction', '-TestOnlyUpgradeCrashPoint', 'after-new-publish')
+    Assert-True ($publishForRecoveryProcess.WaitForExit(30000)) 'recovery disposition publish fixture did not crash'
+    Assert-True ($publishForRecoveryProcess.ExitCode -ne 0) 'recovery disposition publish crash returned success'
+    $publishForRecoveryProcess.Dispose()
+    Assert-True (
+        (Get-Sha256 $recoveryDispositionCrashDb) -ceq $recoveryDispositionRecord.MIGRATED_SHA256 -and
+        -not (Test-Path -LiteralPath $recoveryDispositionStaging) -and
+        (Get-Sha256 $recoveryDispositionQuarantine) -ceq $recoveryDispositionRecord.ORIGINAL_SHA256
+    ) 'recovery disposition fixture did not retain NEW plus raw OLD quarantine'
+    $recoveryDispositionAlias = Join-Path $recoveryDispositionCrashData 'recovery-disposition-old-alias.bin'
+    $recoveryDispositionProcess = Start-InstallHelper `
+        $recoveryDispositionCrashData `
+        (Join-Path $tempRoot 'recovery-disposition-crash.status') `
+        @(
+            '-TestOnlyUpgradeAttack', 'late-old-hardlink',
+            '-TestOnlyUpgradeAttackPath', $recoveryDispositionAlias,
+            '-TestOnlyUpgradeCrashPoint', 'after-old-disposition'
+        )
+    Assert-True ($recoveryDispositionProcess.WaitForExit(30000)) 'recovery disposition helper did not terminate'
+    Assert-True ($recoveryDispositionProcess.ExitCode -ne 0) 'recovery disposition crash hook returned success'
+    $recoveryDispositionProcess.Dispose()
+    Assert-True (
+        (Get-Sha256 $recoveryDispositionCrashDb) -ceq $recoveryDispositionRecord.MIGRATED_SHA256 -and
+        -not (Test-Path -LiteralPath $recoveryDispositionStaging) -and
+        -not (Test-Path -LiteralPath $recoveryDispositionQuarantine) -and
+        (Test-Path -LiteralPath $recoveryDispositionRecordPath -PathType Leaf)
+    ) 'recovery disposition crash did not preserve verified NEW and its record'
+    Assert-True (
+        (Test-Path -LiteralPath $recoveryDispositionAlias -PathType Leaf) -and
+        (Get-Item -LiteralPath $recoveryDispositionAlias).Length -eq 0
+    ) 'recovery disposition crash exposed raw OLD bytes through the surviving alias'
+    $code = Invoke-InstallHelper $recoveryDispositionCrashData (Join-Path $tempRoot 'recovery-disposition-resume.status')
+    Assert-True ($code -eq 0) 'recovery disposition crash did not resume from verified NEW'
+    Remove-Item -LiteralPath $recoveryDispositionAlias -Force
+    $code = Invoke-InstallHelper $recoveryDispositionCrashData (Join-Path $tempRoot 'recovery-disposition-commit.status') @('-CommitPendingTransaction')
+    Assert-True ($code -eq 0) 'recovery disposition crash could not commit after resume'
+    $code = Invoke-InstallHelper $recoveryDispositionCrashData (Join-Path $tempRoot 'recovery-disposition-finalize.status') @('-FinalizeDeferredScrub')
+    Assert-True ($code -eq 0 -and -not (Test-Path -LiteralPath $recoveryDispositionRecordPath)) 'recovery disposition crash could not finalize'
+
+    # Kill at every durable two-rename/disposition boundary. Restart must reduce each legal
+    # F/S/Q topology to one canonical database before normal commit continues.
+    foreach ($publishCrashPoint in @('after-old-quarantine', 'after-new-publish', 'after-old-scrub', 'after-old-disposition')) {
+        $publishCrashData = Join-Path $tempRoot ("upgrade publish crash $publishCrashPoint Data")
+        $publishCrashDb = Join-Path $publishCrashData 'ConfigStore.db'
+        Write-DatabaseState $publishCrashDb ("OLD_CRASH_" + $publishCrashPoint.ToUpperInvariant())
+        $publishCrashOriginalHash = Get-Sha256 $publishCrashDb
+        $code = Invoke-InstallHelper $publishCrashData (Join-Path $tempRoot ("upgrade-$publishCrashPoint-pre.status"))
+        Assert-True ($code -eq 0) "upgrade $publishCrashPoint crash fixture could not be staged"
+        $publishCrashRecord = Read-KeyValueFile (Join-Path $publishCrashData $transactionName)
+        $publishCrashStaging = Join-Path $publishCrashData $publishCrashRecord.STAGING_NAME
+        $publishCrashQuarantine = Join-Path $publishCrashData $publishCrashRecord.QUARANTINE_NAME
+        $publishCrashMigratedHash = $publishCrashRecord.MIGRATED_SHA256
+        $crashProcess = Start-InstallHelper `
+            $publishCrashData `
+            (Join-Path $tempRoot ("upgrade-$publishCrashPoint-crash.status")) `
+            @('-CommitPendingTransaction', '-TestOnlyUpgradeCrashPoint', $publishCrashPoint)
+        Assert-True ($crashProcess.WaitForExit(30000)) "upgrade $publishCrashPoint helper did not terminate at the crash hook"
+        Assert-True ($crashProcess.ExitCode -ne 0) "upgrade $publishCrashPoint crash hook returned success"
+        $crashProcess.Dispose()
+        Assert-True (-not (Test-Path -LiteralPath ($publishCrashDb + '-wal')) -and
+            -not (Test-Path -LiteralPath ($publishCrashDb + '-journal')) -and
+            -not (Test-Path -LiteralPath ($publishCrashDb + '-shm'))) "upgrade $publishCrashPoint crash left reserved sidecar sentinels"
+        if ($publishCrashPoint -ceq 'after-old-quarantine') {
+            Assert-True (-not (Test-Path -LiteralPath $publishCrashDb)) 'old-quarantine crash unexpectedly retained a canonical database'
+            Assert-True ((Get-Sha256 $publishCrashQuarantine) -ceq $publishCrashOriginalHash -and (Get-Sha256 $publishCrashStaging) -ceq $publishCrashMigratedHash) 'old-quarantine crash did not retain the exact old/staging identities'
+        }
+        elseif ($publishCrashPoint -ceq 'after-new-publish') {
+            Assert-True ((Get-Sha256 $publishCrashDb) -ceq $publishCrashMigratedHash -and (Get-Sha256 $publishCrashQuarantine) -ceq $publishCrashOriginalHash -and -not (Test-Path -LiteralPath $publishCrashStaging)) 'new-publish crash did not retain the exact new/quarantined-old topology'
+        }
+        elseif ($publishCrashPoint -ceq 'after-old-scrub') {
+            Assert-True ((Get-Sha256 $publishCrashDb) -ceq $publishCrashMigratedHash -and (Test-Path -LiteralPath $publishCrashQuarantine -PathType Leaf) -and (Get-Item -LiteralPath $publishCrashQuarantine).Length -eq 0 -and -not (Test-Path -LiteralPath $publishCrashStaging)) 'old-scrub crash did not retain verified NEW plus an empty quarantine'
+        }
+        else {
+            Assert-True ((Get-Sha256 $publishCrashDb) -ceq $publishCrashMigratedHash -and -not (Test-Path -LiteralPath $publishCrashQuarantine) -and -not (Test-Path -LiteralPath $publishCrashStaging)) 'old-disposition crash did not retain the unique new canonical topology'
+        }
+
+        $resumeStatus = Join-Path $tempRoot ("upgrade-$publishCrashPoint-resume.status")
+        $code = Invoke-InstallHelper $publishCrashData $resumeStatus
+        Assert-True ($code -eq 0) "upgrade $publishCrashPoint crash topology could not be reconciled"
+        Assert-True (-not (Test-Path -LiteralPath $publishCrashQuarantine)) "upgrade $publishCrashPoint reconciliation left raw quarantine"
+        if ($publishCrashPoint -ceq 'after-old-quarantine') {
+            Assert-True ((Get-Sha256 $publishCrashDb) -ceq $publishCrashOriginalHash -and (Get-Sha256 $publishCrashStaging) -ceq $publishCrashMigratedHash) 'old-quarantine reconciliation did not restore the original canonical state'
+        }
+        else {
+            Assert-True ((Get-Sha256 $publishCrashDb) -ceq $publishCrashMigratedHash -and -not (Test-Path -LiteralPath $publishCrashStaging)) 'new-publish reconciliation did not preserve the verified new canonical state'
+        }
+        $commitStatus = Join-Path $tempRoot ("upgrade-$publishCrashPoint-commit.status")
+        $code = Invoke-InstallHelper $publishCrashData $commitStatus @('-CommitPendingTransaction')
+        Assert-True ($code -eq 0 -and (Get-Sha256 $publishCrashDb) -ceq $publishCrashMigratedHash -and -not (Test-Path -LiteralPath $publishCrashQuarantine) -and -not (Test-Path -LiteralPath $publishCrashStaging)) "upgrade $publishCrashPoint reconciled transaction could not commit uniquely"
+        $code = Invoke-InstallHelper $publishCrashData (Join-Path $tempRoot ("upgrade-$publishCrashPoint-finalize.status")) @('-FinalizeDeferredScrub')
+        Assert-True ($code -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $publishCrashData $transactionName))) "upgrade $publishCrashPoint reconciled transaction could not finalize"
+    }
+
+    # A crash-retained OLD quarantine must never be removed before its protected
+    # backup is revalidated against the durable record.
+    $backupGateData = Join-Path $tempRoot 'upgrade backup-before-quarantine-delete Data'
+    $backupGateDb = Join-Path $backupGateData 'ConfigStore.db'
+    Write-DatabaseState $backupGateDb 'OLD_BACKUP_GATE'
+    $backupGateOldHash = Get-Sha256 $backupGateDb
+    $code = Invoke-InstallHelper $backupGateData (Join-Path $tempRoot 'backup-gate-pre.status')
+    Assert-True ($code -eq 0) 'backup-before-quarantine-delete fixture could not be staged'
+    $backupGateRecord = Read-KeyValueFile (Join-Path $backupGateData $transactionName)
+    $backupGatePath = Join-Path $backupGateData $backupGateRecord.BACKUP_NAME
+    $backupGateBytes = [System.IO.File]::ReadAllBytes($backupGatePath)
+    $backupGateQuarantine = Join-Path $backupGateData $backupGateRecord.QUARANTINE_NAME
+    $backupGateProcess = Start-InstallHelper $backupGateData (Join-Path $tempRoot 'backup-gate-crash.status') @(
+        '-CommitPendingTransaction', '-TestOnlyUpgradeCrashPoint', 'after-new-publish'
+    )
+    Assert-True ($backupGateProcess.WaitForExit(30000)) 'backup-gate crash helper did not terminate'
+    $backupGateProcess.Dispose()
+    Assert-True ((Get-Sha256 $backupGateQuarantine) -ceq $backupGateOldHash) 'backup-gate crash did not retain exact OLD quarantine'
+    [System.IO.File]::WriteAllText($backupGatePath, 'corrupted-protected-backup')
+    $code = Invoke-InstallHelper $backupGateData (Join-Path $tempRoot 'backup-gate-rejected.status')
+    Assert-True ($code -ne 0 -and (Test-Path -LiteralPath $backupGateQuarantine -PathType Leaf) -and (Get-Sha256 $backupGateQuarantine) -ceq $backupGateOldHash) 'corrupt protected backup was accepted or OLD quarantine was deleted first'
+    [System.IO.File]::WriteAllBytes($backupGatePath, $backupGateBytes)
+    $code = Invoke-InstallHelper $backupGateData (Join-Path $tempRoot 'backup-gate-resume.status')
+    Assert-True ($code -eq 0 -and -not (Test-Path -LiteralPath $backupGateQuarantine)) 'restored protected backup could not reconcile NEW plus OLD quarantine'
+    $code = Invoke-InstallHelper $backupGateData (Join-Path $tempRoot 'backup-gate-commit.status') @('-CommitPendingTransaction')
+    Assert-True ($code -eq 0) 'backup-gate reconciled transaction could not commit'
+    $code = Invoke-InstallHelper $backupGateData (Join-Path $tempRoot 'backup-gate-finalize.status') @('-FinalizeDeferredScrub')
+    Assert-True ($code -eq 0) 'backup-gate reconciled transaction could not finalize'
+
+    # Raw quarantine files are owned only by their exact UPGRADE_VERIFIED
+    # record. No-record, other-mode, and wrong-UUID cases all fail closed.
+    $orphanQData = Join-Path $tempRoot 'orphan quarantine no record Data'
+    New-Item -ItemType Directory $orphanQData -Force | Out-Null
+    $orphanQName = '.ConfigStore.db.install-upgrade-' + ('1' * 32) + '.tmp.install-original.quarantine'
+    $orphanQPath = Join-Path $orphanQData $orphanQName
+    Write-DatabaseState $orphanQPath 'ORPHAN_NO_RECORD'
+    $orphanQHash = Get-Sha256 $orphanQPath
+    $code = Invoke-InstallHelper $orphanQData (Join-Path $tempRoot 'orphan-q-no-record.status')
+    Assert-True ($code -ne 0 -and (Get-Sha256 $orphanQPath) -ceq $orphanQHash) 'no-record orphan quarantine was accepted or changed'
+
+    $wrongQData = Join-Path $tempRoot 'wrong quarantine uuid Data'
+    $wrongQDb = Join-Path $wrongQData 'ConfigStore.db'
+    Write-DatabaseState $wrongQDb 'OLD_WRONG_Q_UUID'
+    $code = Invoke-InstallHelper $wrongQData (Join-Path $tempRoot 'wrong-q-pre.status')
+    Assert-True ($code -eq 0) 'wrong-quarantine UUID fixture could not be staged'
+    $wrongQPath = Join-Path $wrongQData ('.ConfigStore.db.install-upgrade-' + ('2' * 32) + '.tmp.install-original.quarantine')
+    Write-DatabaseState $wrongQPath 'WRONG_Q_UUID'
+    $wrongQHash = Get-Sha256 $wrongQPath
+    $code = Invoke-InstallHelper $wrongQData (Join-Path $tempRoot 'wrong-q-rejected.status')
+    Assert-True ($code -ne 0 -and (Get-Sha256 $wrongQPath) -ceq $wrongQHash) 'wrong-UUID quarantine was accepted or changed'
+    Remove-Item -LiteralPath $wrongQPath -Force
+    $code = Invoke-InstallHelper $wrongQData (Join-Path $tempRoot 'wrong-q-rollback.status') @('-RollbackPendingTransaction')
+    Assert-True ($code -eq 0) 'wrong-UUID quarantine fixture could not roll back after removal'
+
+    $publishedQData = Join-Path $tempRoot 'published mode orphan quarantine Data'
+    $publishedQDb = Join-Path $publishedQData 'ConfigStore.db'
+    Write-DatabaseState $publishedQDb 'OLD_PUBLISHED_Q'
+    $code = Invoke-InstallHelper $publishedQData (Join-Path $tempRoot 'published-q-pre.status')
+    Assert-True ($code -eq 0) 'published quarantine fixture could not be staged'
+    $publishedQVerified = Read-KeyValueFile (Join-Path $publishedQData $transactionName)
+    $publishedQPath = Join-Path $publishedQData $publishedQVerified.QUARANTINE_NAME
+    $code = Invoke-InstallHelper $publishedQData (Join-Path $tempRoot 'published-q-commit.status') @('-CommitPendingTransaction')
+    Assert-True ($code -eq 0) 'published quarantine fixture could not commit'
+    Write-DatabaseState $publishedQPath 'ORPHAN_AFTER_PUBLISHED'
+    $publishedQHash = Get-Sha256 $publishedQPath
+    $code = Invoke-InstallHelper $publishedQData (Join-Path $tempRoot 'published-q-rejected.status')
+    Assert-True ($code -ne 0 -and (Get-Sha256 $publishedQPath) -ceq $publishedQHash) 'PUBLISHED-mode orphan quarantine was accepted or changed'
+    Remove-Item -LiteralPath $publishedQPath -Force
+    $code = Invoke-InstallHelper $publishedQData (Join-Path $tempRoot 'published-q-finalize.status') @('-FinalizeDeferredScrub')
+    Assert-True ($code -eq 0) 'published quarantine fixture could not finalize after orphan removal'
+
     # Exercise the real upgrade publish and the idempotent post-publish recovery branch.
     $code = Invoke-InstallHelper $upgradeData $upgradeStatus
     Assert-True ($code -eq 0 -and (Get-Sha256 $upgradeDb) -ceq $upgradeOriginalHash) 'upgrade restaging failed'
@@ -529,7 +1317,11 @@ try {
     Assert-True ($code -eq 0 -and (Read-KeyValueFile $pendingNoopStatus).FINALIZE -ceq '1') 'pending NOOP_CURRENT preflight failed'
     $pendingNoopCommitStatus = Join-Path $tempRoot 'pending-noop-commit.status'
     $code = Invoke-InstallHelper $pendingNoopData $pendingNoopCommitStatus @('-CommitPendingTransaction')
-    Assert-True ($code -eq 0 -and (Test-Path (Join-Path $pendingNoopData $transactionName) -PathType Leaf) -and (Get-Content $pendingNoopCommitStatus -Raw).Trim() -ceq 'OK:PENDING_TRANSACTION_COMMITTED_FINALIZE_REQUIRED') 'pending NOOP_CURRENT commit did not require finalize'
+    $pendingNoopCommitText = if (Test-Path -LiteralPath $pendingNoopCommitStatus -PathType Leaf) {
+        (Get-Content $pendingNoopCommitStatus -Raw).Trim()
+    }
+    else { '<missing>' }
+    Assert-True ($code -eq 0 -and (Test-Path (Join-Path $pendingNoopData $transactionName) -PathType Leaf) -and $pendingNoopCommitText -ceq 'OK:PENDING_TRANSACTION_COMMITTED_FINALIZE_REQUIRED') "pending NOOP_CURRENT commit did not require finalize (exit=$code status=$pendingNoopCommitText)"
     $code = Invoke-InstallHelper $pendingNoopData (Join-Path $tempRoot 'pending-noop-finalize.status') @('-FinalizeDeferredScrub')
     Assert-True ($code -eq 0 -and -not (Test-Path (Join-Path $pendingNoopData $transactionName))) 'pending NOOP_CURRENT finalize failed'
 
@@ -722,8 +1514,23 @@ try {
         }
         Stop-CrashWindowTree $crashProcess $signal
         Remove-Item Env:FAKE_CRASH_KIND,Env:FAKE_CRASH_SIGNAL,Env:FAKE_CRASH_RELEASE,Env:FAKE_WRITE_STAGING_SIDECAR -ErrorAction SilentlyContinue
+        $preparedCrashRecordPath = Join-Path $crashData $transactionName
+        $preparedCrashRecord = Read-KeyValueFile $preparedCrashRecordPath
+        $preparedCrashStaging = Join-Path $crashData $preparedCrashRecord.STAGING_NAME
+        $preparedCrashSidecar = $preparedCrashStaging + '-wal'
+        Assert-True (
+            $preparedCrashRecord.MODE -ceq ($crashKind.ToUpperInvariant() + '_PREPARED') -and
+            (Test-Path -LiteralPath $preparedCrashSidecar -PathType Leaf)
+        ) "forced-kill $crashKind did not retain its reachable PREPARED sidecar topology"
         $rollbackCode = Invoke-InstallHelper $crashData (Join-Path $tempRoot ("$crashKind-crash-rollback.status")) @('-RollbackPendingTransaction')
-        Assert-True ($rollbackCode -eq 0) "forced-kill $crashKind rollback failed"
+        Assert-True ($rollbackCode -ne 0) "forced-kill $crashKind rollback silently deleted an unbound staging sidecar"
+        Assert-True (
+            (Test-Path -LiteralPath $preparedCrashRecordPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $preparedCrashSidecar -PathType Leaf)
+        ) "forced-kill $crashKind sidecar rejection did not preserve its record and evidence"
+        Remove-Item -LiteralPath $preparedCrashSidecar -Force
+        $rollbackCode = Invoke-InstallHelper $crashData (Join-Path $tempRoot ("$crashKind-crash-clean-rollback.status")) @('-RollbackPendingTransaction')
+        Assert-True ($rollbackCode -eq 0) "forced-kill $crashKind rollback failed after explicit sidecar removal"
         if ($crashKind -ceq 'create') {
             Assert-True (-not (Test-Path $crashDb)) 'forced-kill create rollback changed absent final state'
             Assert-True ((Get-Content (Join-Path $crashData 'legacy.ini') -Raw).Contains('must-remain')) 'forced-kill create scrubbed legacy input'
@@ -777,6 +1584,12 @@ try {
         $helperText.Contains("'--source', `$script:DataPath") -and
         (($helperText.Split('Invoke-InstallerStateVerification').Count - 1) -ge 12)) `
         'helper does not use source-aware installer-state verification for every lifecycle readback'
+    Assert-True ($helperText.Contains("'--verify-dpapi-backup-against'") -and
+        $helperText.Contains("'--db', `$script:DatabasePath")) `
+        'helper does not use logical SQLite snapshot verification for DPAPI backups'
+    Assert-True (-not $helperText.Contains(
+        '(Get-FileSha256 $stagingPath) -cne $ExpectedDatabaseSha256')) `
+        'helper still compares a restored SQLite backup to the original raw file hash'
     Assert-True (-not $helperText.Contains("'--verify-current'")) 'helper still uses database-only verification in an installer lifecycle'
     Assert-True ($helperText.Contains('SOURCE_INVENTORY_SHA256=') -and
         $helperText.Contains('Assert-NoopAbsentSourceInventory') -and
@@ -786,8 +1599,28 @@ try {
         $helperText.Contains('Write-PublishedFinalizePending')) `
         'published pending scrub is not persisted across commit/finalize'
     Assert-True ($helperText.Contains('[System.IO.File]::Copy($script:DatabasePath, $script:UpgradeStagingPath, $false)')) 'upgrade does not copy final database to staging'
-    Assert-True ($helperText.Contains('Invoke-AtomicFileReplace $stagingPath $script:DatabasePath')) 'upgrade commit is not an atomic same-directory replace'
-    Assert-True ($helperText.Contains('Invoke-AtomicFileMoveNoReplace $stagingPath $script:DatabasePath')) 'create commit can overwrite a racing final database'
+    Assert-True ($helperText.Contains('Invoke-IdentityBoundFilePublish') -and
+        $helperText.Contains('SetFileInformationByHandle') -and
+        $helperText.Contains('The identity-locked staging database changed after verification.')) `
+        'staging publication is not bound to one revalidated open file identity'
+    $identityPublishCalls = [regex]::Matches(
+        $helperText,
+        'Invoke-IdentityBoundFilePublish\s+\x60\s*-Source \$stagingPath'
+    ).Count
+    Assert-True ($identityPublishCalls -eq 1) 'create no-replace publication is not isolated from upgrade publication'
+    Assert-True ($helperText.Contains('PublishUpgradeVerified') -and
+        $helperText.Contains('ReconcileUpgradeVerified') -and
+        $helperText.Contains('QUARANTINE_NAME=') -and
+        $helperText.Contains('The exact original upgrade database')) `
+        'upgrade commit does not bind old/staging exact handles to a durable quarantine state machine'
+    Assert-True ($helperText.Contains('DiscardVerified') -and
+        $helperText.Contains('Invoke-IdentityBoundSecureDiscard') -and
+        $helperText.Contains('stream.Flush(true)') -and
+        -not $helperText.Contains('Remove-Item -LiteralPath $stagingPath -Force')) `
+        'sensitive staging/readback discard is not exact-handle zero+flush before disposition'
+    Assert-True ($helperText.Contains('replaceExisting ? 1 : 0') -and
+        $helperText.Contains('FileRenameInfo')) `
+        'create commit does not use identity-bound no-replace publication'
     Assert-True (-not $helperText.Contains('[System.IO.File]::Move($temporaryPath, $Path)')) 'initial PREPARED record does not use write-through atomic move'
     Assert-True (-not $helperText.Contains('AllowNoPendingTransaction')) 'helper still permits unproven no-record rollback success'
     Assert-True ($helperText.Contains("'MODE=UPGRADE_PREPARED'") -and $helperText.Contains("'MODE=UPGRADE_VERIFIED'")) 'upgrade write-ahead phases are missing'

@@ -20,7 +20,26 @@ param(
 
     [switch]$CommitPendingTransaction,
 
-    [switch]$InstallerHoldsInstanceLease
+    [switch]$InstallerHoldsInstanceLease,
+
+    # Deterministic security-test hook.  When set, the identity-bound publish
+    # primitive attempts to replace the locked staging path with this file and
+    # then fails closed without publishing.  Production installers never pass it.
+    [string]$TestOnlyStagingReplacementPath = '',
+
+    # Deterministic upgrade-publication attack/crash hooks. Production
+    # installers never pass these switches.
+    [ValidateSet('', 'writer', 'target-replace', 'target-hardlink', 'staging-hardlink', 'late-old-hardlink', 'sidecar',
+        'staging-discard-hardlink', 'backup-discard-hardlink', 'readback-discard-hardlink')]
+    [string]$TestOnlyUpgradeAttack = '',
+
+    [string]$TestOnlyUpgradeAttackPath = '',
+
+    [ValidateSet('', 'after-old-quarantine', 'after-new-publish', 'after-old-scrub', 'after-old-disposition',
+        'after-staging-discard-scrub', 'after-staging-discard-disposition',
+        'after-backup-discard-scrub', 'after-backup-discard-disposition',
+        'after-readback-discard-scrub', 'after-readback-discard-disposition')]
+    [string]$TestOnlyUpgradeCrashPoint = ''
 )
 
 # This helper is executed by Inno Setup from its verified temporary payload before
@@ -216,7 +235,10 @@ function Initialize-AtomicFileType {
         Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
+using System.IO;
+using System.Security.Cryptography;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace NoTeachingRobot
 {
@@ -224,9 +246,75 @@ namespace NoTeachingRobot
     {
         private const int MoveFileReplaceExisting = 0x1;
         private const int MoveFileWriteThrough = 0x8;
+        private const uint GenericRead = 0x80000000;
+        private const uint GenericWrite = 0x40000000;
+        private const uint Delete = 0x00010000;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint FileShareDelete = 0x00000004;
+        private const uint CreateNew = 1;
+        private const uint OpenExisting = 3;
+        private const uint FileFlagOpenReparsePoint = 0x00200000;
+        private const uint FileFlagDeleteOnClose = 0x04000000;
+        private const uint FileFlagBackupSemantics = 0x02000000;
+        private const int FileRenameInfo = 3;
+        private const int FileDispositionInfo = 4;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleFileInformation
+        {
+            public uint FileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
+        }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool MoveFileEx(string existingName, string newName, int flags);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetFileInformationByHandle(
+            SafeFileHandle file,
+            int fileInformationClass,
+            IntPtr fileInformation,
+            uint bufferSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file,
+            out ByHandleFileInformation fileInformation);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            SafeFileHandle file,
+            System.Text.StringBuilder path,
+            uint pathLength,
+            uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool FlushFileBuffers(SafeFileHandle file);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CreateHardLink(
+            string newFileName,
+            string existingFileName,
+            IntPtr securityAttributes);
 
         public static void Replace(string source, string destination)
         {
@@ -238,6 +326,949 @@ namespace NoTeachingRobot
         {
             if (!MoveFileEx(source, destination, MoveFileWriteThrough))
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Atomic no-replace file move failed");
+        }
+
+        private static void RenameOpenHandle(
+            SafeFileHandle sourceHandle,
+            string destination,
+            bool replaceExisting)
+        {
+            byte[] destinationBytes = System.Text.Encoding.Unicode.GetBytes(
+                Path.GetFullPath(destination));
+            int rootDirectoryOffset = IntPtr.Size == 8 ? 8 : 4;
+            int nameLengthOffset = rootDirectoryOffset + IntPtr.Size;
+            int fileNameOffset = nameLengthOffset + 4;
+            // FILE_RENAME_INFO ends in WCHAR FileName[1].  Reserve that complete
+            // trailing element (including its NUL) even though FileNameLength
+            // itself deliberately excludes the terminator.
+            int bufferSize = checked(fileNameOffset + destinationBytes.Length + 2);
+            IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
+            try
+            {
+                Marshal.Copy(new byte[bufferSize], 0, buffer, bufferSize);
+                Marshal.WriteInt32(buffer, 0, replaceExisting ? 1 : 0);
+                Marshal.WriteIntPtr(buffer, rootDirectoryOffset, IntPtr.Zero);
+                Marshal.WriteInt32(buffer, nameLengthOffset, destinationBytes.Length);
+                Marshal.Copy(destinationBytes, 0, IntPtr.Add(buffer, fileNameOffset), destinationBytes.Length);
+                if (!SetFileInformationByHandle(
+                        sourceHandle,
+                        FileRenameInfo,
+                        buffer,
+                        checked((uint)bufferSize)))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Identity-bound atomic file publish failed");
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        private static SafeFileHandle OpenExact(
+            string path,
+            uint desiredAccess,
+            uint shareMode,
+            uint extraFlags)
+        {
+            SafeFileHandle handle = CreateFile(
+                Path.GetFullPath(path),
+                desiredAccess,
+                shareMode,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint | extraFlags,
+                IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                throw new Win32Exception(error, "Exact file identity could not be opened: " + path);
+            }
+            return handle;
+        }
+
+        private static string NormalizeHandlePath(string value)
+        {
+            if (value.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                value = @"\\" + value.Substring(8);
+            else if (value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+                value = value.Substring(4);
+            return Path.GetFullPath(value).TrimEnd(Path.DirectorySeparatorChar);
+        }
+
+        private static string GetHandlePath(SafeFileHandle handle)
+        {
+            System.Text.StringBuilder path = new System.Text.StringBuilder(32768);
+            uint length = GetFinalPathNameByHandle(handle, path, (uint)path.Capacity, 0);
+            if (length == 0 || length >= path.Capacity)
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "The exact file path could not be read from its handle");
+            return NormalizeHandlePath(path.ToString());
+        }
+
+        private static ByHandleFileInformation GetIdentity(SafeFileHandle handle)
+        {
+            ByHandleFileInformation information;
+            if (!GetFileInformationByHandle(handle, out information))
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "The exact file identity could not be queried");
+            return information;
+        }
+
+        private static string HashExactHandle(SafeFileHandle handle)
+        {
+            using (SafeFileHandle borrowed = new SafeFileHandle(handle.DangerousGetHandle(), false))
+            using (FileStream stream = new FileStream(borrowed, FileAccess.Read, 4096, false))
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                stream.Position = 0;
+                return BitConverter.ToString(sha256.ComputeHash(stream))
+                    .Replace("-", "")
+                    .ToLowerInvariant();
+            }
+        }
+
+        private static ByHandleFileInformation VerifyExactRegularFile(
+            SafeFileHandle handle,
+            string expectedPath,
+            string description,
+            bool requireSingleLink)
+        {
+            ByHandleFileInformation information = GetIdentity(handle);
+            if ((information.FileAttributes & 0x10) != 0 ||
+                (information.FileAttributes & 0x400) != 0 ||
+                information.NumberOfLinks == 0 ||
+                (requireSingleLink && information.NumberOfLinks != 1))
+            {
+                throw new InvalidOperationException(
+                    description + (requireSingleLink
+                        ? " is not a single-link regular non-reparse file."
+                        : " is not a linked regular non-reparse file."));
+            }
+            if (!String.Equals(
+                    GetHandlePath(handle),
+                    NormalizeHandlePath(expectedPath),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    description + " is no longer at its exact bound path.");
+            }
+            return information;
+        }
+
+        private static void VerifyExactDatabasePayload(
+            SafeFileHandle handle,
+            string expectedSha256,
+            string description)
+        {
+            if (!String.Equals(
+                    HashExactHandle(handle),
+                    expectedSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    description + " changed after transaction verification.");
+            }
+            using (SafeFileHandle borrowed = new SafeFileHandle(handle.DangerousGetHandle(), false))
+            using (FileStream stream = new FileStream(borrowed, FileAccess.Read, 4096, false))
+            {
+                byte[] header = new byte[16];
+                stream.Position = 0;
+                if (stream.Read(header, 0, header.Length) != header.Length ||
+                    !String.Equals(
+                        System.Text.Encoding.ASCII.GetString(header),
+                        "SQLite format 3\0",
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                    description + " has an invalid SQLite header.");
+                }
+            }
+        }
+
+        private static void VerifyExactDatabase(
+            SafeFileHandle handle,
+            string expectedPath,
+            string expectedSha256,
+            string description)
+        {
+            VerifyExactRegularFile(handle, expectedPath, description, true);
+            VerifyExactDatabasePayload(handle, expectedSha256, description);
+        }
+
+        private static void VerifyExactDatabaseOrEmptyForScrub(
+            SafeFileHandle handle,
+            string expectedPath,
+            string expectedSha256,
+            string description)
+        {
+            ByHandleFileInformation information = VerifyExactRegularFile(
+                handle, expectedPath, description, false);
+            if (information.FileSizeHigh == 0 && information.FileSizeLow == 0)
+                return;
+            VerifyExactDatabasePayload(handle, expectedSha256, description);
+        }
+
+        private static void VerifyExactEmptyAfterScrub(
+            SafeFileHandle handle,
+            string description)
+        {
+            ByHandleFileInformation information = GetIdentity(handle);
+            if ((information.FileAttributes & 0x10) != 0 ||
+                (information.FileAttributes & 0x400) != 0 ||
+                information.FileSizeHigh != 0 ||
+                information.FileSizeLow != 0)
+            {
+                throw new InvalidOperationException(
+                    description + " was not durably reduced to an empty regular file.");
+            }
+        }
+
+        private static SafeFileHandle OpenAndVerifyParent(string directory)
+        {
+            SafeFileHandle handle = OpenExact(
+                directory,
+                GenericRead,
+                FileShareRead | FileShareWrite,
+                FileFlagBackupSemantics);
+            ByHandleFileInformation information = GetIdentity(handle);
+            if ((information.FileAttributes & 0x10) == 0 ||
+                (information.FileAttributes & 0x400) != 0 ||
+                !String.Equals(
+                    GetHandlePath(handle),
+                    NormalizeHandlePath(directory),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                handle.Dispose();
+                throw new InvalidOperationException(
+                    "The upgrade publication parent is not the exact regular directory.");
+            }
+            return handle;
+        }
+
+        private static bool PathEntryExists(string path)
+        {
+            return File.Exists(path) || Directory.Exists(path);
+        }
+
+        private static void DeleteOpenHandle(SafeFileHandle handle)
+        {
+            IntPtr information = Marshal.AllocHGlobal(1);
+            try
+            {
+                Marshal.WriteByte(information, 1);
+                if (!SetFileInformationByHandle(
+                        handle,
+                        FileDispositionInfo,
+                        information,
+                        1))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Exact-handle deletion failed");
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(information);
+            }
+        }
+
+        private static void ZeroAndDeleteOpenHandle(SafeFileHandle handle)
+        {
+            using (SafeFileHandle borrowed = new SafeFileHandle(handle.DangerousGetHandle(), false))
+            using (FileStream stream = new FileStream(borrowed, FileAccess.ReadWrite, 4096, false))
+            {
+                stream.Position = 0;
+                stream.SetLength(0);
+                stream.Flush(true);
+            }
+            DeleteOpenHandle(handle);
+        }
+
+        private static void ZeroOpenHandle(SafeFileHandle handle)
+        {
+            using (SafeFileHandle borrowed = new SafeFileHandle(handle.DangerousGetHandle(), false))
+            using (FileStream stream = new FileStream(borrowed, FileAccess.ReadWrite, 4096, false))
+            {
+                stream.Position = 0;
+                stream.SetLength(0);
+                stream.Flush(true);
+            }
+        }
+
+        private static SafeFileHandle[] ReserveFinalSidecars(string destination)
+        {
+            string[] suffixes = new string[] { "-journal", "-wal", "-shm" };
+            SafeFileHandle[] handles = new SafeFileHandle[suffixes.Length];
+            try
+            {
+                for (int index = 0; index < suffixes.Length; ++index)
+                {
+                    string path = Path.GetFullPath(destination) + suffixes[index];
+                    handles[index] = CreateFile(
+                        path,
+                        GenericRead | GenericWrite | Delete,
+                        0,
+                        IntPtr.Zero,
+                        CreateNew,
+                        FileFlagOpenReparsePoint | FileFlagDeleteOnClose,
+                        IntPtr.Zero);
+                    if (handles[index].IsInvalid)
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "The final SQLite sidecar name could not be exclusively reserved: " + path);
+                }
+                return handles;
+            }
+            catch
+            {
+                DisposeHandles(handles);
+                throw;
+            }
+        }
+
+        private static void DisposeHandles(SafeFileHandle[] handles)
+        {
+            if (handles == null)
+                return;
+            foreach (SafeFileHandle handle in handles)
+            {
+                if (handle != null)
+                    handle.Dispose();
+            }
+        }
+
+        private static void RequireSameParent(
+            string source,
+            string destination,
+            string quarantine)
+        {
+            string sourceParent = Path.GetDirectoryName(Path.GetFullPath(source));
+            string destinationParent = Path.GetDirectoryName(Path.GetFullPath(destination));
+            string quarantineParent = Path.GetDirectoryName(Path.GetFullPath(quarantine));
+            if (!String.Equals(sourceParent, destinationParent, StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(sourceParent, quarantineParent, StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(
+                    Path.GetFullPath(quarantine),
+                    Path.GetFullPath(source) + ".install-original.quarantine",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Upgrade publication paths are not one strictly derived transaction family.");
+            }
+        }
+
+        public static void DiscardVerified(
+            string path,
+            string expectedSha256,
+            string testOnlyHardlinkPath,
+            string testOnlyCrashPoint,
+            string crashScope)
+        {
+            string fullPath = Path.GetFullPath(path);
+            if (String.IsNullOrEmpty(expectedSha256) || expectedSha256.Length != 64)
+                throw new InvalidOperationException(
+                    "Secure discard requires one exact lowercase SHA-256 binding.");
+            for (int index = 0; index < expectedSha256.Length; ++index)
+            {
+                char value = expectedSha256[index];
+                if (!((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')))
+                    throw new InvalidOperationException(
+                        "Secure discard requires one exact lowercase SHA-256 binding.");
+            }
+            if (!String.Equals(crashScope, "staging-discard", StringComparison.Ordinal) &&
+                !String.Equals(crashScope, "backup-discard", StringComparison.Ordinal) &&
+                !String.Equals(crashScope, "readback-discard", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Secure discard received an invalid test scope.");
+            }
+
+            using (SafeFileHandle parent = OpenAndVerifyParent(Path.GetDirectoryName(fullPath)))
+            using (SafeFileHandle exact = OpenExact(
+                fullPath,
+                GenericRead | GenericWrite | Delete,
+                FileShareRead,
+                0))
+            {
+                ByHandleFileInformation initial = VerifyExactRegularFile(
+                    exact, fullPath, "The securely discarded exact object", false);
+                bool alreadyEmpty = initial.FileSizeHigh == 0 && initial.FileSizeLow == 0;
+                // A non-empty object with a pre-existing alias is not safe to
+                // truncate from an elevated installer: the canonical pathname
+                // could have been replaced with a same-content victim hardlink.
+                // Only aliases created after this single-link exact binding are
+                // eligible for scrub.  Empty crash-retained objects are harmless
+                // to re-scrub even when their already-empty aliases survive.
+                if (!alreadyEmpty && initial.NumberOfLinks != 1)
+                    throw new InvalidOperationException(
+                        "The securely discarded non-empty object already has a hardlink alias.");
+                if (!alreadyEmpty && !String.Equals(
+                        HashExactHandle(exact), expectedSha256, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "The securely discarded exact object changed after its hash binding.");
+                }
+                if (!String.IsNullOrEmpty(testOnlyHardlinkPath))
+                {
+                    if (!CreateHardLink(
+                            Path.GetFullPath(testOnlyHardlinkPath),
+                            fullPath,
+                            IntPtr.Zero))
+                    {
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "The secure-discard hardlink injection could not be created");
+                    }
+                }
+
+                // Recheck the exact handle after the deterministic race hook.
+                // Then make every current/future name for this file identity
+                // durably empty before the canonical name can disappear.
+                ByHandleFileInformation rechecked = VerifyExactRegularFile(
+                    exact, fullPath, "The rechecked securely discarded object", false);
+                bool recheckedEmpty = rechecked.FileSizeHigh == 0 && rechecked.FileSizeLow == 0;
+                if (!recheckedEmpty && !String.Equals(
+                        HashExactHandle(exact), expectedSha256, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "The securely discarded exact object changed immediately before scrub.");
+                }
+                ZeroOpenHandle(exact);
+                VerifyExactEmptyAfterScrub(exact, "The securely discarded exact object");
+                CrashAt(testOnlyCrashPoint, "after-" + crashScope + "-scrub");
+                DeleteOpenHandle(exact);
+                CrashAt(testOnlyCrashPoint, "after-" + crashScope + "-disposition");
+                if (GetIdentity(exact).NumberOfLinks != 0)
+                {
+                    VerifyExactEmptyAfterScrub(
+                        exact, "A surviving securely discarded hardlink");
+                    throw new InvalidOperationException(
+                        "A secure-discard hardlink survived disposition; all aliases were scrubbed.");
+                }
+            }
+
+            if (PathEntryExists(fullPath))
+                throw new InvalidOperationException(
+                    "The securely discarded canonical path survived disposition.");
+        }
+
+        private static void CrashAt(string requestedPoint, string actualPoint)
+        {
+            if (!String.Equals(requestedPoint, actualPoint, StringComparison.Ordinal))
+                return;
+            System.Diagnostics.Process.GetCurrentProcess().Kill();
+            System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);
+        }
+
+        public static void PublishUpgradeVerified(
+            string source,
+            string destination,
+            string quarantine,
+            string expectedSourceSha256,
+            string expectedDestinationSha256,
+            string testOnlyStagingReplacement,
+            string testOnlyAttack,
+            string testOnlyAttackPath,
+            string testOnlyCrashPoint)
+        {
+            string sourceFullPath = Path.GetFullPath(source);
+            string destinationFullPath = Path.GetFullPath(destination);
+            string quarantineFullPath = Path.GetFullPath(quarantine);
+            RequireSameParent(sourceFullPath, destinationFullPath, quarantineFullPath);
+            string parentPath = Path.GetDirectoryName(destinationFullPath);
+            bool oldQuarantined = false;
+            bool newPublished = false;
+            bool stagingAliasInjected = false;
+            bool oldScrubStarted = false;
+            SafeFileHandle[] sidecarReservations = ReserveFinalSidecars(destinationFullPath);
+            try
+            {
+                using (SafeFileHandle parent = OpenAndVerifyParent(parentPath))
+                using (SafeFileHandle staging = OpenExact(
+                    sourceFullPath,
+                    GenericRead | GenericWrite | Delete,
+                    FileShareRead,
+                    0))
+                using (SafeFileHandle original = OpenExact(
+                    destinationFullPath,
+                    GenericRead | GenericWrite | Delete,
+                    FileShareRead,
+                    0))
+                {
+                  try
+                  {
+                    VerifyExactDatabase(
+                        staging, sourceFullPath, expectedSourceSha256,
+                        "The exact upgrade staging database");
+                    VerifyExactDatabase(
+                        original, destinationFullPath, expectedDestinationSha256,
+                        "The exact original upgrade database");
+                    if (PathEntryExists(quarantineFullPath))
+                        throw new InvalidOperationException(
+                            "The derived upgrade quarantine path is already occupied.");
+                    if (!FlushFileBuffers(staging))
+                        throw new Win32Exception(
+                            Marshal.GetLastWin32Error(),
+                            "The exact staging database could not be flushed");
+
+                    if (!String.IsNullOrWhiteSpace(testOnlyStagingReplacement))
+                    {
+                        bool replaced = MoveFileEx(
+                            Path.GetFullPath(testOnlyStagingReplacement),
+                            sourceFullPath,
+                            MoveFileReplaceExisting | MoveFileWriteThrough);
+                        int replacementError = Marshal.GetLastWin32Error();
+                        if (replaced)
+                            throw new InvalidOperationException(
+                                "Injected staging replacement bypassed the upgrade identity lock.");
+                        throw new Win32Exception(
+                            replacementError,
+                            "Injected staging replacement was blocked before upgrade publication");
+                    }
+
+                    if (String.Equals(testOnlyAttack, "writer", StringComparison.Ordinal))
+                    {
+                        using (SafeFileHandle writer = CreateFile(
+                            destinationFullPath,
+                            GenericWrite,
+                            FileShareRead | FileShareWrite | FileShareDelete,
+                            IntPtr.Zero,
+                            OpenExisting,
+                            FileFlagOpenReparsePoint,
+                            IntPtr.Zero))
+                        {
+                            if (!writer.IsInvalid)
+                                throw new InvalidOperationException(
+                                    "Injected late writer bypassed the locked original target.");
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "Injected late writer was blocked by the original target lock");
+                        }
+                    }
+                    if (String.Equals(testOnlyAttack, "target-replace", StringComparison.Ordinal))
+                    {
+                        bool replaced = MoveFileEx(
+                            Path.GetFullPath(testOnlyAttackPath),
+                            destinationFullPath,
+                            MoveFileReplaceExisting | MoveFileWriteThrough);
+                        int replacementError = Marshal.GetLastWin32Error();
+                        if (replaced)
+                            throw new InvalidOperationException(
+                                "Injected late target replacement bypassed the original lock.");
+                        throw new Win32Exception(
+                            replacementError,
+                            "Injected late target replacement was blocked by the original lock");
+                    }
+                    if (String.Equals(testOnlyAttack, "target-hardlink", StringComparison.Ordinal))
+                    {
+                        if (!CreateHardLink(
+                                Path.GetFullPath(testOnlyAttackPath),
+                                destinationFullPath,
+                                IntPtr.Zero))
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "The target hardlink injection could not be created");
+                    }
+                    if (String.Equals(testOnlyAttack, "staging-hardlink", StringComparison.Ordinal))
+                    {
+                        if (!CreateHardLink(
+                                Path.GetFullPath(testOnlyAttackPath),
+                                sourceFullPath,
+                                IntPtr.Zero))
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "The staging hardlink injection could not be created");
+                        stagingAliasInjected = true;
+                    }
+                    if (String.Equals(testOnlyAttack, "sidecar", StringComparison.Ordinal))
+                    {
+                        using (SafeFileHandle sidecar = CreateFile(
+                            destinationFullPath + "-wal",
+                            GenericRead | GenericWrite | Delete,
+                            0,
+                            IntPtr.Zero,
+                            CreateNew,
+                            FileFlagOpenReparsePoint,
+                            IntPtr.Zero))
+                        {
+                            if (!sidecar.IsInvalid)
+                                throw new InvalidOperationException(
+                                    "Injected SQLite sidecar bypassed the reserved final name.");
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "Injected SQLite sidecar was blocked by the atomic reservation");
+                        }
+                    }
+
+                    // The attack hooks run after the initial handle binding.  These
+                    // rechecks are the last gate before the old exact object moves.
+                    VerifyExactDatabase(
+                        original, destinationFullPath, expectedDestinationSha256,
+                        "The rechecked original upgrade database");
+                    VerifyExactDatabase(
+                        staging, sourceFullPath, expectedSourceSha256,
+                        "The rechecked upgrade staging database");
+
+                    RenameOpenHandle(original, quarantineFullPath, false);
+                    oldQuarantined = true;
+                    VerifyExactDatabase(
+                        original, quarantineFullPath, expectedDestinationSha256,
+                        "The quarantined original upgrade database");
+                    VerifyExactDatabase(
+                        staging, sourceFullPath, expectedSourceSha256,
+                        "The staged upgrade database after original quarantine");
+                    CrashAt(testOnlyCrashPoint, "after-old-quarantine");
+
+                    RenameOpenHandle(staging, destinationFullPath, false);
+                    newPublished = true;
+                    VerifyExactDatabase(
+                        staging, destinationFullPath, expectedSourceSha256,
+                        "The published exact upgrade database");
+                    VerifyExactDatabase(
+                        original, quarantineFullPath, expectedDestinationSha256,
+                        "The retained exact original upgrade database");
+                    CrashAt(testOnlyCrashPoint, "after-new-publish");
+
+                    VerifyExactDatabase(
+                        original, quarantineFullPath, expectedDestinationSha256,
+                        "The final exact original upgrade database");
+                    if (String.Equals(testOnlyAttack, "late-old-hardlink", StringComparison.Ordinal))
+                    {
+                        if (!CreateHardLink(
+                                Path.GetFullPath(testOnlyAttackPath),
+                                quarantineFullPath,
+                                IntPtr.Zero))
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "The late old-quarantine hardlink injection could not be created");
+                    }
+                    // NEW is already exact-handle published and the PowerShell
+                    // caller has revalidated the protected backup.  From this
+                    // point onward OLD must never be restored: first make every
+                    // hardlink to the exact object durably empty, then discard
+                    // the quarantine name.
+                    oldScrubStarted = true;
+                    ZeroOpenHandle(original);
+                    VerifyExactEmptyAfterScrub(
+                        original, "The scrubbed original upgrade database");
+                    CrashAt(testOnlyCrashPoint, "after-old-scrub");
+                    DeleteOpenHandle(original);
+                    oldQuarantined = false;
+                    CrashAt(testOnlyCrashPoint, "after-old-disposition");
+                    uint remainingOldLinks = GetIdentity(original).NumberOfLinks;
+                    if (remainingOldLinks != 0)
+                    {
+                        VerifyExactEmptyAfterScrub(
+                            original, "A surviving original-database hardlink");
+                        throw new InvalidOperationException(
+                            "A late original-database hardlink survived disposition; all old aliases were scrubbed.");
+                    }
+                  }
+                  catch (Exception publishError)
+                  {
+                    // Once exact-handle OLD scrubbing starts, rollback would
+                    // reintroduce a truncated database or overwrite verified NEW.
+                    // Preserve NEW plus the durable VERIFIED record for strict
+                    // next-run reconciliation, whether Q is raw, empty, or gone.
+                    if (oldScrubStarted)
+                        throw;
+                    Exception rollbackError = null;
+                    try
+                    {
+                        if (newPublished)
+                        {
+                            RenameOpenHandle(staging, sourceFullPath, false);
+                            newPublished = false;
+                        }
+                        if (stagingAliasInjected || GetIdentity(staging).NumberOfLinks != 1)
+                            ZeroAndDeleteOpenHandle(staging);
+                        if (oldQuarantined)
+                        {
+                            RenameOpenHandle(original, destinationFullPath, false);
+                            oldQuarantined = false;
+                        }
+                    }
+                    catch (Exception failure)
+                    {
+                        rollbackError = failure;
+                    }
+                    if (rollbackError != null)
+                        throw new AggregateException(
+                            "Upgrade publication and exact rollback both failed.",
+                            publishError,
+                            rollbackError);
+                    throw;
+                  }
+                }
+            }
+            finally
+            {
+                DisposeHandles(sidecarReservations);
+            }
+
+            if (!File.Exists(destinationFullPath) ||
+                File.Exists(sourceFullPath) ||
+                PathEntryExists(quarantineFullPath))
+            {
+                throw new InvalidOperationException(
+                    "The exact upgrade publication did not reach one canonical file.");
+            }
+        }
+
+        public static string ReconcileUpgradeVerified(
+            string source,
+            string destination,
+            string quarantine,
+            string expectedSourceSha256,
+            string expectedDestinationSha256,
+            string testOnlyAttack,
+            string testOnlyAttackPath,
+            string testOnlyCrashPoint)
+        {
+            string sourceFullPath = Path.GetFullPath(source);
+            string destinationFullPath = Path.GetFullPath(destination);
+            string quarantineFullPath = Path.GetFullPath(quarantine);
+            RequireSameParent(sourceFullPath, destinationFullPath, quarantineFullPath);
+            SafeFileHandle[] sidecarReservations = ReserveFinalSidecars(destinationFullPath);
+            try
+            {
+              using (SafeFileHandle parent = OpenAndVerifyParent(
+                  Path.GetDirectoryName(destinationFullPath)))
+              {
+                bool sourceExists = PathEntryExists(sourceFullPath);
+                bool destinationExists = PathEntryExists(destinationFullPath);
+                bool quarantineExists = PathEntryExists(quarantineFullPath);
+
+                if (destinationExists && sourceExists && !quarantineExists)
+                {
+                    using (SafeFileHandle original = OpenExact(
+                        destinationFullPath, GenericRead, FileShareRead, 0))
+                    using (SafeFileHandle staging = OpenExact(
+                        sourceFullPath, GenericRead, FileShareRead, 0))
+                    {
+                        VerifyExactDatabase(
+                            original, destinationFullPath, expectedDestinationSha256,
+                            "The reconciled staged original database");
+                        VerifyExactDatabase(
+                            staging, sourceFullPath, expectedSourceSha256,
+                            "The reconciled staged upgrade database");
+                    }
+                    return "STAGED";
+                }
+
+                if (!destinationExists && sourceExists && quarantineExists)
+                {
+                    using (SafeFileHandle quarantined = OpenExact(
+                        quarantineFullPath,
+                        GenericRead | GenericWrite | Delete,
+                        FileShareRead,
+                        0))
+                    using (SafeFileHandle staging = OpenExact(
+                        sourceFullPath, GenericRead, FileShareRead, 0))
+                    {
+                        VerifyExactDatabase(
+                            quarantined, quarantineFullPath, expectedDestinationSha256,
+                            "The crash-retained original database");
+                        VerifyExactDatabase(
+                            staging, sourceFullPath, expectedSourceSha256,
+                            "The crash-retained staging database");
+                        RenameOpenHandle(quarantined, destinationFullPath, false);
+                        VerifyExactDatabase(
+                            quarantined, destinationFullPath, expectedDestinationSha256,
+                            "The crash-restored original database");
+                    }
+                    if (!File.Exists(destinationFullPath) || PathEntryExists(quarantineFullPath))
+                        throw new InvalidOperationException(
+                            "Original crash recovery did not restore one canonical database.");
+                    return "STAGED";
+                }
+
+                if (destinationExists && !sourceExists && quarantineExists)
+                {
+                    using (SafeFileHandle published = OpenExact(
+                        destinationFullPath, GenericRead, FileShareRead, 0))
+                    using (SafeFileHandle quarantined = OpenExact(
+                        quarantineFullPath,
+                        GenericRead | GenericWrite | Delete,
+                        FileShareRead,
+                        0))
+                    {
+                        VerifyExactDatabase(
+                            published, destinationFullPath, expectedSourceSha256,
+                            "The crash-published upgrade database");
+                        // A prior process may have died after durably scrubbing
+                        // OLD but before removing Q. Accept either the exact raw
+                        // OLD database or that exact now-empty object. Multiple
+                        // links are allowed only because all of them are about to
+                        // be scrubbed through this same writable handle.
+                        VerifyExactDatabaseOrEmptyForScrub(
+                            quarantined, quarantineFullPath, expectedDestinationSha256,
+                            "The crash-retained original-or-empty database");
+                        if (String.Equals(testOnlyAttack, "late-old-hardlink", StringComparison.Ordinal))
+                        {
+                            if (!CreateHardLink(
+                                    Path.GetFullPath(testOnlyAttackPath),
+                                    quarantineFullPath,
+                                    IntPtr.Zero))
+                                throw new Win32Exception(
+                                    Marshal.GetLastWin32Error(),
+                                "The recovery old-quarantine hardlink injection could not be created");
+                        }
+                        ZeroOpenHandle(quarantined);
+                        VerifyExactEmptyAfterScrub(
+                            quarantined, "The recovery-scrubbed original database");
+                        CrashAt(testOnlyCrashPoint, "after-old-scrub");
+                        DeleteOpenHandle(quarantined);
+                        CrashAt(testOnlyCrashPoint, "after-old-disposition");
+                        if (GetIdentity(quarantined).NumberOfLinks != 0)
+                        {
+                            VerifyExactEmptyAfterScrub(
+                                quarantined, "A surviving crash-quarantine hardlink");
+                            throw new InvalidOperationException(
+                                "A late crash-quarantine hardlink survived disposition; all old aliases were scrubbed.");
+                        }
+                    }
+                    if (PathEntryExists(quarantineFullPath))
+                        throw new InvalidOperationException(
+                            "Published crash recovery did not remove the exact quarantine.");
+                    return "PUBLISHED";
+                }
+
+                if (destinationExists && !sourceExists && !quarantineExists)
+                {
+                    using (SafeFileHandle published = OpenExact(
+                        destinationFullPath, GenericRead, FileShareRead, 0))
+                    {
+                        string finalSha256 = HashExactHandle(published);
+                        if (String.Equals(finalSha256, expectedSourceSha256, StringComparison.Ordinal))
+                        {
+                            VerifyExactDatabase(
+                                published, destinationFullPath, expectedSourceSha256,
+                                "The reconciled published upgrade database");
+                            return "PUBLISHED";
+                        }
+                        if (String.Equals(finalSha256, expectedDestinationSha256, StringComparison.Ordinal))
+                        {
+                            VerifyExactDatabase(
+                                published, destinationFullPath, expectedDestinationSha256,
+                                "The scrubbed-staging abort original database");
+                            return "STAGING_SCRUBBED_ABORT_REQUIRED";
+                        }
+                        throw new InvalidOperationException(
+                            "The staging-absent canonical database matches neither OLD nor NEW.");
+                    }
+                }
+              }
+
+              throw new InvalidOperationException(
+                  "The verified upgrade publication is in an unknown crash state.");
+            }
+            finally
+            {
+                DisposeHandles(sidecarReservations);
+            }
+        }
+
+        public static void PublishVerified(
+            string source,
+            string destination,
+            string expectedSha256,
+            bool replaceExisting,
+            string testOnlyReplacement)
+        {
+            string sourceFullPath = Path.GetFullPath(source);
+            string destinationFullPath = Path.GetFullPath(destination);
+            if (!String.Equals(
+                    Path.GetDirectoryName(sourceFullPath),
+                    Path.GetDirectoryName(destinationFullPath),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Identity-bound publication requires one fixed directory.");
+            }
+
+            using (SafeFileHandle handle = CreateFile(
+                sourceFullPath,
+                GenericRead | GenericWrite | Delete,
+                FileShareRead,
+                IntPtr.Zero,
+                OpenExisting,
+                FileFlagOpenReparsePoint,
+                IntPtr.Zero))
+            {
+                if (handle.IsInvalid)
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "The verified staging database could not be identity-locked");
+
+                ByHandleFileInformation information;
+                if (!GetFileInformationByHandle(handle, out information))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "The locked staging identity could not be queried");
+                if ((information.FileAttributes & 0x10) != 0 ||
+                    (information.FileAttributes & 0x400) != 0 ||
+                    information.NumberOfLinks != 1)
+                {
+                    throw new InvalidOperationException(
+                        "The locked staging database is not a single-link regular file.");
+                }
+
+                using (FileStream stream = new FileStream(handle, FileAccess.ReadWrite, 4096, false))
+                {
+                    string actualSha256;
+                    using (SHA256 sha256 = SHA256.Create())
+                    {
+                        stream.Position = 0;
+                        actualSha256 = BitConverter.ToString(sha256.ComputeHash(stream))
+                            .Replace("-", "")
+                            .ToLowerInvariant();
+                    }
+                    if (!String.Equals(actualSha256, expectedSha256, StringComparison.Ordinal))
+                        throw new InvalidOperationException(
+                            "The identity-locked staging database changed after verification.");
+
+                    stream.Position = 0;
+                    byte[] header = new byte[16];
+                    if (stream.Read(header, 0, header.Length) != header.Length ||
+                        !String.Equals(
+                            System.Text.Encoding.ASCII.GetString(header),
+                            "SQLite format 3\0",
+                            StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException(
+                            "The identity-locked staging database has an invalid SQLite header.");
+                    }
+                    stream.Flush(true);
+
+                    if (!String.IsNullOrWhiteSpace(testOnlyReplacement))
+                    {
+                        bool replaced = MoveFileEx(
+                            Path.GetFullPath(testOnlyReplacement),
+                            sourceFullPath,
+                            MoveFileReplaceExisting | MoveFileWriteThrough);
+                        int replacementError = Marshal.GetLastWin32Error();
+                        if (replaced)
+                            throw new InvalidOperationException(
+                                "Injected staging replacement unexpectedly bypassed the identity lock.");
+                        throw new Win32Exception(
+                            replacementError,
+                            "Injected staging replacement was blocked before publication");
+                    }
+
+                    // Rename the exact verified file object represented by this
+                    // handle.  No later source-path lookup participates in the
+                    // publication decision.
+                    RenameOpenHandle(handle, destinationFullPath, replaceExisting);
+                    stream.Flush(true);
+                }
+            }
         }
     }
 }
@@ -263,6 +1294,96 @@ function Invoke-AtomicFileMoveNoReplace {
 
     Initialize-AtomicFileType
     [NoTeachingRobot.InstallerAtomicFile]::MoveNoReplace($Source, $Destination)
+}
+
+function Invoke-IdentityBoundFilePublish {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [switch]$ReplaceExisting
+    )
+
+    Initialize-AtomicFileType
+    [NoTeachingRobot.InstallerAtomicFile]::PublishVerified(
+        $Source,
+        $Destination,
+        $ExpectedSha256,
+        [bool]$ReplaceExisting,
+        $TestOnlyStagingReplacementPath
+    )
+}
+
+function Invoke-IdentityBoundUpgradePublish {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Quarantine,
+        [Parameter(Mandatory = $true)][string]$ExpectedSourceSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedDestinationSha256
+    )
+
+    Initialize-AtomicFileType
+    [NoTeachingRobot.InstallerAtomicFile]::PublishUpgradeVerified(
+        $Source,
+        $Destination,
+        $Quarantine,
+        $ExpectedSourceSha256,
+        $ExpectedDestinationSha256,
+        $TestOnlyStagingReplacementPath,
+        $TestOnlyUpgradeAttack,
+        $TestOnlyUpgradeAttackPath,
+        $TestOnlyUpgradeCrashPoint
+    )
+}
+
+function Invoke-IdentityBoundUpgradeReconciliation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Quarantine,
+        [Parameter(Mandatory = $true)][string]$ExpectedSourceSha256,
+        [Parameter(Mandatory = $true)][string]$ExpectedDestinationSha256
+    )
+
+    Initialize-AtomicFileType
+    return [NoTeachingRobot.InstallerAtomicFile]::ReconcileUpgradeVerified(
+        $Source,
+        $Destination,
+        $Quarantine,
+        $ExpectedSourceSha256,
+        $ExpectedDestinationSha256,
+        $TestOnlyUpgradeAttack,
+        $TestOnlyUpgradeAttackPath,
+        $TestOnlyUpgradeCrashPoint
+    )
+}
+
+function Invoke-IdentityBoundSecureDiscard {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('staging-discard', 'backup-discard', 'readback-discard')]
+        [string]$Scope
+    )
+
+    $testHardlinkPath = ''
+    if ($TestOnlyUpgradeAttack -ceq ($Scope + '-hardlink')) {
+        if ([string]::IsNullOrWhiteSpace($TestOnlyUpgradeAttackPath)) {
+            throw 'The secure-discard hardlink test hook requires an alias path.'
+        }
+        $testHardlinkPath = $TestOnlyUpgradeAttackPath
+    }
+
+    Initialize-AtomicFileType
+    [NoTeachingRobot.InstallerAtomicFile]::DiscardVerified(
+        $Path,
+        $ExpectedSha256,
+        $testHardlinkPath,
+        $TestOnlyUpgradeCrashPoint,
+        $Scope
+    )
 }
 
 function Write-AtomicUtf8Text {
@@ -369,22 +1490,36 @@ function Read-PendingTransactionRecord {
     }
 
     if ($lines[1] -ceq 'MODE=UPGRADE_VERIFIED') {
-        if ($lines.Count -ne 8 -or
+        $stagingName = if ($lines.Count -ge 3) {
+            $lines[2].Substring('STAGING_NAME='.Length)
+        }
+        else { '' }
+        $derivedQuarantineName = $stagingName + '.install-original.quarantine'
+        # The eight-line shape was written by the immediately preceding,
+        # unreleased helper. Accept it only with a strictly derived quarantine
+        # name so an interrupted local installation can be resumed safely.
+        $legacyShape = $lines.Count -eq 8
+        $fieldOffset = if ($legacyShape) { 0 } else { 1 }
+        if ($lines.Count -notin @(8, 9) -or
             $lines[2] -cnotmatch '^STAGING_NAME=\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp$' -or
-            $lines[3] -cnotmatch '^BACKUP_NAME=\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-backup\.dpapi\.bak$' -or
-            $lines[3] -cne ('BACKUP_NAME=' + $lines[2].Substring('STAGING_NAME='.Length) + '.install-backup.dpapi.bak') -or
-            $lines[4] -cnotmatch '^BACKUP_SHA256=[0-9a-f]{64}$' -or
-            $lines[5] -cnotmatch '^ORIGINAL_SHA256=[0-9a-f]{64}$' -or
-            $lines[6] -cnotmatch '^MIGRATED_SHA256=[0-9a-f]{64}$') {
+            (-not $legacyShape -and
+                ($lines[3] -cnotmatch '^QUARANTINE_NAME=\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-original\.quarantine$' -or
+                 $lines[3] -cne ('QUARANTINE_NAME=' + $derivedQuarantineName))) -or
+            $lines[3 + $fieldOffset] -cnotmatch '^BACKUP_NAME=\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-backup\.dpapi\.bak$' -or
+            $lines[3 + $fieldOffset] -cne ('BACKUP_NAME=' + $stagingName + '.install-backup.dpapi.bak') -or
+            $lines[4 + $fieldOffset] -cnotmatch '^BACKUP_SHA256=[0-9a-f]{64}$' -or
+            $lines[5 + $fieldOffset] -cnotmatch '^ORIGINAL_SHA256=[0-9a-f]{64}$' -or
+            $lines[6 + $fieldOffset] -cnotmatch '^MIGRATED_SHA256=[0-9a-f]{64}$') {
             throw 'The pending upgrade transaction record has unknown or invalid fields.'
         }
         return [pscustomobject]@{
             Mode = 'UPGRADE_VERIFIED'
-            StagingName = $lines[2].Substring('STAGING_NAME='.Length)
-            BackupName = $lines[3].Substring('BACKUP_NAME='.Length)
-            BackupSha256 = $lines[4].Substring('BACKUP_SHA256='.Length)
-            OriginalSha256 = $lines[5].Substring('ORIGINAL_SHA256='.Length)
-            MigratedSha256 = $lines[6].Substring('MIGRATED_SHA256='.Length)
+            StagingName = $stagingName
+            QuarantineName = $derivedQuarantineName
+            BackupName = $lines[3 + $fieldOffset].Substring('BACKUP_NAME='.Length)
+            BackupSha256 = $lines[4 + $fieldOffset].Substring('BACKUP_SHA256='.Length)
+            OriginalSha256 = $lines[5 + $fieldOffset].Substring('ORIGINAL_SHA256='.Length)
+            MigratedSha256 = $lines[6 + $fieldOffset].Substring('MIGRATED_SHA256='.Length)
         }
     }
 
@@ -539,6 +1674,7 @@ function Advance-PendingUpgradeVerified {
         'FORMAT=' + $script:TransactionFormat
         'MODE=UPGRADE_VERIFIED'
         'STAGING_NAME=' + $prepared.StagingName
+        'QUARANTINE_NAME=' + $prepared.StagingName + '.install-original.quarantine'
         'BACKUP_NAME=' + $prepared.BackupName
         'BACKUP_SHA256=' + $BackupSha256
         'ORIGINAL_SHA256=' + $prepared.OriginalSha256
@@ -549,6 +1685,7 @@ function Advance-PendingUpgradeVerified {
     $verified = Read-PendingTransactionRecord
     if ($null -eq $verified -or $verified.Mode -cne 'UPGRADE_VERIFIED' -or
         $verified.StagingName -cne $prepared.StagingName -or
+        $verified.QuarantineName -cne ($prepared.StagingName + '.install-original.quarantine') -or
         $verified.BackupName -cne $prepared.BackupName -or
         $verified.BackupSha256 -cne $BackupSha256 -or
         $verified.OriginalSha256 -cne $prepared.OriginalSha256 -or
@@ -889,7 +2026,16 @@ function Restore-ProtectedBackupToStaging {
         throw 'ConfigMigrate produced an invalid protected-backup envelope.'
     }
 
-    $stagingPath = Join-Path $script:DataPath ('.ConfigStore.db.restore-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $backupName = [System.IO.Path]::GetFileName($BackupPath)
+    if ($backupName -cnotmatch '^\.ConfigStore\.db\.install-upgrade-([0-9a-f]{32})\.tmp\.install-backup\.dpapi\.bak$') {
+        throw 'The protected-backup readback name is not transaction-bound.'
+    }
+    $stagingPath = Join-Path $script:DataPath ('.ConfigStore.db.install-readback-' + $Matches[1] + '.tmp')
+    Remove-BoundSensitiveDatabaseArtifact `
+        -Path $stagingPath `
+        -NamePattern '^\.ConfigStore\.db\.install-readback-[0-9a-f]{32}\.tmp$' `
+        -Description 'A retained protected-backup readback database' `
+        -Scope 'readback-discard'
     try {
         $restore = Invoke-ConfigMigrate @(
             '--restore-dpapi-backup', $BackupPath,
@@ -901,9 +2047,11 @@ function Restore-ProtectedBackupToStaging {
         return $stagingPath
     }
     catch {
-        if (Test-Path -LiteralPath $stagingPath) {
-            Remove-Item -LiteralPath $stagingPath -Force -ErrorAction SilentlyContinue
-        }
+        Remove-BoundSensitiveDatabaseArtifact `
+            -Path $stagingPath `
+            -NamePattern '^\.ConfigStore\.db\.install-readback-[0-9a-f]{32}\.tmp$' `
+            -Description 'The failed protected-backup readback database' `
+            -Scope 'readback-discard'
         throw
     }
 }
@@ -911,21 +2059,51 @@ function Restore-ProtectedBackupToStaging {
 function Test-ProtectedBackupReadback {
     param(
         [Parameter(Mandatory = $true)][string]$BackupPath,
-        [Parameter(Mandatory = $true)][string]$ExpectedDatabaseSha256
+        [Parameter(Mandatory = $true)][string]$ExpectedDatabaseSha256,
+        [string]$ComparisonDatabasePath = $script:DatabasePath,
+        [switch]$AllowOriginalUnavailable
     )
 
+    if ($ExpectedDatabaseSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'The expected original database hash is invalid.'
+    }
+    $backupSha256Before = Get-FileSha256 $BackupPath
     $stagingPath = Restore-ProtectedBackupToStaging $BackupPath
     try {
-        if ($ExpectedDatabaseSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-            (Get-FileSha256 $stagingPath) -cne $ExpectedDatabaseSha256) {
-            throw 'The protected backup read-back does not match the original database hash.'
+        # ConfigMigrate intentionally creates a consistent SQLite backup snapshot.
+        # SQLite may serialize that logically identical snapshot with different
+        # page bytes than the source file, so a raw restored-file SHA comparison
+        # is not a valid equivalence check.  While the original database is still
+        # present, require the signed migrator to compare canonical snapshots.
+        $originalAvailable = (
+            (Test-Path -LiteralPath $ComparisonDatabasePath -PathType Leaf) -and
+            (Get-FileSha256 $ComparisonDatabasePath) -ceq $ExpectedDatabaseSha256
+        )
+        if ($originalAvailable) {
+            $logicalVerification = Invoke-ConfigMigrate @(
+                '--verify-dpapi-backup-against', $BackupPath,
+                '--db', $ComparisonDatabasePath
+            )
+            if ($logicalVerification.ExitCode -ne 0) {
+                throw 'The protected backup does not match the original database logical snapshot.'
+            }
+            if ((Get-FileSha256 $ComparisonDatabasePath) -cne $ExpectedDatabaseSha256) {
+                throw 'The original database changed during protected-backup verification.'
+            }
+        }
+        elseif (-not $AllowOriginalUnavailable) {
+            throw 'The original database is unavailable for protected-backup comparison.'
+        }
+        if ((Get-FileSha256 $BackupPath) -cne $backupSha256Before) {
+            throw 'The protected backup changed during logical read-back verification.'
         }
     }
     finally {
-        Remove-Item -LiteralPath $stagingPath -Force -ErrorAction SilentlyContinue
-        foreach ($suffix in @('-journal', '-wal', '-shm')) {
-            Remove-Item -LiteralPath ($stagingPath + $suffix) -Force -ErrorAction SilentlyContinue
-        }
+        Remove-BoundSensitiveDatabaseArtifact `
+            -Path $stagingPath `
+            -NamePattern '^\.ConfigStore\.db\.install-readback-[0-9a-f]{32}\.tmp$' `
+            -Description 'The protected-backup readback database' `
+            -Scope 'readback-discard'
     }
 }
 
@@ -962,6 +2140,37 @@ function Assert-RegularFileInData {
     }
 }
 
+function Remove-BoundSensitiveDatabaseArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$NamePattern,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('staging-discard', 'readback-discard')]
+        [string]$Scope,
+        [string]$ExpectedSha256 = ''
+    )
+
+    # Sidecars are not independently bound in the durable transaction record.
+    # Preserve them and the record as evidence instead of deleting by pathname.
+    Assert-NoDatabaseSidecars $Path $Description
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    Assert-RegularFileInData $Path $NamePattern $Description
+    $boundSha256 = $ExpectedSha256
+    if ([string]::IsNullOrWhiteSpace($boundSha256)) {
+        $boundSha256 = Get-FileSha256 $Path
+    }
+    if ($boundSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw ($Description + ' has no valid exact hash binding for secure discard.')
+    }
+    Invoke-IdentityBoundSecureDiscard $Path $boundSha256 $Scope
+    if (Test-Path -LiteralPath $Path) {
+        throw ($Description + ' survived exact-handle secure discard.')
+    }
+}
+
 function Remove-BoundTransactionStaging {
     param(
         [Parameter(Mandatory = $true)][string]$StagingName,
@@ -972,31 +2181,12 @@ function Remove-BoundTransactionStaging {
         throw 'The transaction staging name is not canonical.'
     }
     $stagingPath = Join-Path $script:DataPath $StagingName
-    if (Test-Path -LiteralPath $stagingPath) {
-        Assert-RegularFileInData $stagingPath `
-            '^\.ConfigStore\.db\.install-(create|upgrade)-[0-9a-f]{32}\.tmp$' `
-            'The bound transaction staging database'
-        if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256) -and
-            ($ExpectedSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-             (Get-FileSha256 $stagingPath) -cne $ExpectedSha256)) {
-            throw 'The verified staging database changed; automatic deletion is refused.'
-        }
-    }
-    foreach ($suffix in @('-journal', '-wal', '-shm')) {
-        $sidecar = $stagingPath + $suffix
-        if (Test-Path -LiteralPath $sidecar) {
-            Assert-RegularFileInData $sidecar `
-                ('^' + [regex]::Escape($StagingName + $suffix) + '$') `
-                'A bound staging sidecar'
-            Remove-Item -LiteralPath $sidecar -Force
-        }
-    }
-    if (Test-Path -LiteralPath $stagingPath) {
-        Remove-Item -LiteralPath $stagingPath -Force
-    }
-    if (Test-Path -LiteralPath $stagingPath) {
-        throw 'The bound transaction staging database survived deletion.'
-    }
+    Remove-BoundSensitiveDatabaseArtifact `
+        -Path $stagingPath `
+        -NamePattern '^\.ConfigStore\.db\.install-(create|upgrade)-[0-9a-f]{32}\.tmp$' `
+        -Description 'The bound transaction staging database' `
+        -Scope 'staging-discard' `
+        -ExpectedSha256 $ExpectedSha256
 }
 
 function Remove-BoundUpgradeBackup {
@@ -1009,20 +2199,29 @@ function Remove-BoundUpgradeBackup {
         throw 'The bound upgrade backup name is not canonical.'
     }
     $backupPath = Join-Path $script:DataPath $BackupName
+    $readbackId = $BackupName.Substring('.ConfigStore.db.install-upgrade-'.Length, 32)
+    $readbackPath = Join-Path $script:DataPath ('.ConfigStore.db.install-readback-' + $readbackId + '.tmp')
+    Remove-BoundSensitiveDatabaseArtifact `
+        -Path $readbackPath `
+        -NamePattern '^\.ConfigStore\.db\.install-readback-[0-9a-f]{32}\.tmp$' `
+        -Description 'A retained protected-backup readback database' `
+        -Scope 'readback-discard'
     if (-not (Test-Path -LiteralPath $backupPath)) {
         return
     }
     Assert-RegularFileInData $backupPath `
         '^\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-backup\.dpapi\.bak$' `
         'The bound protected upgrade backup'
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedSha256) -and
-        ($ExpectedSha256 -cnotmatch '^[0-9a-f]{64}$' -or
-         (Get-FileSha256 $backupPath) -cne $ExpectedSha256)) {
-        throw 'The verified protected upgrade backup changed; automatic deletion is refused.'
+    $boundSha256 = $ExpectedSha256
+    if ([string]::IsNullOrWhiteSpace($boundSha256)) {
+        $boundSha256 = Get-FileSha256 $backupPath
     }
-    Remove-Item -LiteralPath $backupPath -Force
+    if ($boundSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'The protected upgrade backup has no valid exact hash binding for secure discard.'
+    }
+    Invoke-IdentityBoundSecureDiscard $backupPath $boundSha256 'backup-discard'
     if (Test-Path -LiteralPath $backupPath) {
-        throw 'The bound protected upgrade backup survived deletion.'
+        throw 'The bound protected upgrade backup survived exact-handle secure discard.'
     }
 }
 
@@ -1040,6 +2239,119 @@ function Flush-TransactionDatabase {
     }
     finally {
         $stream.Dispose()
+    }
+}
+
+function Invoke-VerifiedUpgradePublicationReconciliation {
+    param([Parameter(Mandatory = $true)]$Record)
+
+    if ($Record.Mode -cne 'UPGRADE_VERIFIED' -or
+        $Record.StagingName -cnotmatch '^\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp$' -or
+        $Record.QuarantineName -cne ($Record.StagingName + '.install-original.quarantine')) {
+        throw 'Upgrade publication reconciliation received a non-canonical verified record.'
+    }
+    $stagingPath = Join-Path $script:DataPath $Record.StagingName
+    $quarantinePath = Join-Path $script:DataPath $Record.QuarantineName
+    $backupPath = Join-Path $script:DataPath $Record.BackupName
+    Assert-NoDatabaseSidecars $script:DatabasePath 'The upgrade reconciliation canonical database'
+    Assert-NoDatabaseSidecars $stagingPath 'The upgrade reconciliation staging database'
+    Assert-NoDatabaseSidecars $quarantinePath 'The upgrade reconciliation quarantine database'
+
+    $unexpectedQuarantines = @(
+        Get-ChildItem -LiteralPath $script:DataPath -Force -ErrorAction Stop |
+            Where-Object {
+                $_.Name -cmatch '^\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-original\.quarantine$' -and
+                $_.Name -cne $Record.QuarantineName
+            }
+    )
+    if ($unexpectedQuarantines.Count -ne 0) {
+        throw 'An unbound raw upgrade quarantine exists; automatic reconciliation is refused.'
+    }
+
+    # Rollback secure discard can be killed after staging disposition and while
+    # the protected envelope is already durably empty (or just disposed).  With
+    # exact OLD still canonical and no staging/quarantine name, no publication is
+    # possible and an empty/missing envelope has nothing left to authenticate.
+    # Return the explicit abort state so rollback can idempotently finish secure
+    # disposal without trying to decrypt an intentional zero-length residue.
+    $backupIsDiscarded = -not (Test-Path -LiteralPath $backupPath)
+    if (-not $backupIsDiscarded -and
+        (Test-Path -LiteralPath $backupPath -PathType Leaf) -and
+        ((Get-Item -LiteralPath $backupPath -Force).Attributes -band
+            [System.IO.FileAttributes]::ReparsePoint) -eq 0 -and
+        (Get-Item -LiteralPath $backupPath -Force).Length -eq 0) {
+        $backupIsDiscarded = $true
+    }
+    if ($backupIsDiscarded -and
+        -not (Test-Path -LiteralPath $stagingPath) -and
+        -not (Test-Path -LiteralPath $quarantinePath) -and
+        (Test-Path -LiteralPath $script:DatabasePath -PathType Leaf) -and
+        (Get-FileSha256 $script:DatabasePath) -ceq $Record.OriginalSha256) {
+        return 'STAGING_SCRUBBED_ABORT_REQUIRED'
+    }
+
+    # Never discard the crash-retained OLD object until the protected backup is
+    # independently readable and still bound to the durable record.
+    Assert-RegularFileInData $backupPath `
+        '^\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-backup\.dpapi\.bak$' `
+        'The reconciliation protected upgrade backup'
+    if ((Get-FileSha256 $backupPath) -cne $Record.BackupSha256) {
+        throw 'The reconciliation protected upgrade backup no longer matches its bound hash.'
+    }
+    $comparisonPath = $script:DatabasePath
+    if ((Test-Path -LiteralPath $quarantinePath -PathType Leaf) -and
+        (Get-FileSha256 $quarantinePath) -ceq $Record.OriginalSha256) {
+        $comparisonPath = $quarantinePath
+    }
+    $comparisonAvailable = (Test-Path -LiteralPath $comparisonPath -PathType Leaf) -and
+        (Get-FileSha256 $comparisonPath) -ceq $Record.OriginalSha256
+    Test-ProtectedBackupReadback `
+        -BackupPath $backupPath `
+        -ExpectedDatabaseSha256 $Record.OriginalSha256 `
+        -ComparisonDatabasePath $comparisonPath `
+        -AllowOriginalUnavailable:(-not $comparisonAvailable)
+    if ((Get-FileSha256 $backupPath) -cne $Record.BackupSha256) {
+        throw 'The reconciliation protected upgrade backup changed during read-back.'
+    }
+
+    return Invoke-IdentityBoundUpgradeReconciliation `
+        -Source $stagingPath `
+        -Destination $script:DatabasePath `
+        -Quarantine $quarantinePath `
+        -ExpectedSourceSha256 $Record.MigratedSha256 `
+        -ExpectedDestinationSha256 $Record.OriginalSha256
+}
+
+function Assert-NoUnboundUpgradeQuarantines {
+    param($Record)
+
+    if (-not (Test-Path -LiteralPath $script:DataPath)) {
+        if ($null -ne $Record) {
+            throw 'A pending transaction cannot exist without its fixed Data directory.'
+        }
+        return
+    }
+    if (-not (Test-Path -LiteralPath $script:DataPath -PathType Container)) {
+        throw 'The fixed Data path is not a directory during quarantine ownership validation.'
+    }
+    $boundName = ''
+    if ($null -ne $Record -and $Record.Mode -ceq 'UPGRADE_VERIFIED') {
+        $boundName = $Record.QuarantineName
+        if ($boundName -cne ($Record.StagingName + '.install-original.quarantine')) {
+            throw 'The verified transaction quarantine binding is not canonical.'
+        }
+    }
+    $quarantines = @(
+        Get-ChildItem -LiteralPath $script:DataPath -Force -ErrorAction Stop |
+            Where-Object {
+                $_.Name -cmatch '^\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-original\.quarantine$'
+            }
+    )
+    foreach ($quarantine in $quarantines) {
+        if ([string]::IsNullOrWhiteSpace($boundName) -or
+            $quarantine.Name -cne $boundName) {
+            throw 'An upgrade quarantine is not uniquely bound to the active verified transaction.'
+        }
     }
 }
 
@@ -1086,6 +2398,14 @@ function Invoke-PendingTransactionRollback {
     }
 
     if ($record.Mode -in @('UPGRADE_PREPARED', 'UPGRADE_VERIFIED')) {
+        $upgradeReconciliationState = ''
+        if ($record.Mode -ceq 'UPGRADE_VERIFIED') {
+            $upgradeReconciliationState = Invoke-VerifiedUpgradePublicationReconciliation $record | Select-Object -Last 1
+            if ($PreserveReconciledRecord -and
+                $upgradeReconciliationState -ceq 'STAGING_SCRUBBED_ABORT_REQUIRED') {
+                return 'PENDING_STAGING_SCRUBBED_ABORT_REQUIRED'
+            }
+        }
         if (-not (Test-Path -LiteralPath $script:DatabasePath -PathType Leaf) -or
             ((Get-Item -LiteralPath $script:DatabasePath -Force).Attributes -band
                 [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -1230,6 +2550,9 @@ function Commit-PendingTransaction {
     if ($record.Mode -notin @('UPGRADE_VERIFIED', 'CREATE_VERIFIED')) {
         throw 'A prepared transaction cannot be committed before verified advancement.'
     }
+    if ($record.Mode -ceq 'UPGRADE_VERIFIED') {
+        Invoke-VerifiedUpgradePublicationReconciliation $record | Out-Null
+    }
 
     $stagingPath = Join-Path $script:DataPath $record.StagingName
     $expectedNewSha256 = if ($record.Mode -ceq 'UPGRADE_VERIFIED') {
@@ -1264,7 +2587,10 @@ function Commit-PendingTransaction {
         if ((Get-FileSha256 $backupPath) -cne $record.BackupSha256) {
             throw 'The verified protected upgrade backup no longer matches its bound hash.'
         }
-        Test-ProtectedBackupReadback $backupPath $record.OriginalSha256
+        Test-ProtectedBackupReadback `
+            -BackupPath $backupPath `
+            -ExpectedDatabaseSha256 $record.OriginalSha256 `
+            -AllowOriginalUnavailable:($finalHash -cne $record.OriginalSha256)
         if ((Get-FileSha256 $backupPath) -cne $record.BackupSha256) {
             throw 'The protected upgrade backup changed during read-back verification.'
         }
@@ -1296,25 +2622,37 @@ function Commit-PendingTransaction {
         Assert-NoDatabaseSidecars $stagingPath 'The verified staging database'
         Flush-TransactionDatabase $stagingPath
         if ($record.Mode -ceq 'UPGRADE_VERIFIED') {
-            # Narrow the external-writer window before the unavoidable atomic
-            # replace of the exact bound original.
+            # Bind the original and staging identities together. The old exact
+            # object is quarantined no-replace before the exact staging object
+            # is published no-replace; the durable VERIFIED record reconciles
+            # either crash boundary on the next installer run.
             Assert-NoDatabaseSidecars $script:DatabasePath 'The final upgrade database before publish'
             if ((Get-FileSha256 $script:DatabasePath) -cne $record.OriginalSha256) {
                 throw 'The final upgrade database changed immediately before publication.'
             }
-            Invoke-AtomicFileReplace $stagingPath $script:DatabasePath
+            Invoke-IdentityBoundUpgradePublish `
+                -Source $stagingPath `
+                -Destination $script:DatabasePath `
+                -Quarantine (Join-Path $script:DataPath $record.QuarantineName) `
+                -ExpectedSourceSha256 $expectedNewSha256 `
+                -ExpectedDestinationSha256 $record.OriginalSha256
         }
         else {
             # Create must never overwrite a database that appeared after the
-            # precheck; MOVEFILE_WRITE_THROUGH without REPLACE_EXISTING is CAS-like.
+            # precheck; the identity-bound handle rename keeps ReplaceIfExists off.
             Assert-CreateSourceInventory $record 'The staged create source inventory immediately before publish'
-            Invoke-AtomicFileMoveNoReplace $stagingPath $script:DatabasePath
+            Invoke-IdentityBoundFilePublish `
+                -Source $stagingPath `
+                -Destination $script:DatabasePath `
+                -ExpectedSha256 $expectedNewSha256
         }
     }
 
     if (-not (Test-Path -LiteralPath $script:DatabasePath -PathType Leaf) -or
         (Get-FileSha256 $script:DatabasePath) -cne $expectedNewSha256 -or
-        (Test-Path -LiteralPath $stagingPath)) {
+        (Test-Path -LiteralPath $stagingPath) -or
+        ($record.Mode -ceq 'UPGRADE_VERIFIED' -and
+            (Test-Path -LiteralPath (Join-Path $script:DataPath $record.QuarantineName)))) {
         throw 'The staged database publication did not reach its exact committed state.'
     }
     Assert-NoDatabaseSidecars $script:DatabasePath 'The published final database'
@@ -1550,6 +2888,8 @@ try {
     if (-not $InstallerHoldsInstanceLease) {
         Acquire-ApplicationInstanceLease
     }
+    $entryTransactionRecord = Read-PendingTransactionRecord
+    Assert-NoUnboundUpgradeQuarantines $entryTransactionRecord
     Assert-DatabaseExclusiveAccess
     Assert-NoDatabaseSidecars $script:DatabasePath 'The final database'
     if ((Test-Path -LiteralPath $script:DatabasePath) -and
@@ -1644,6 +2984,7 @@ try {
             exit 0
         }
         if ($pendingRecord.Mode -ceq 'UPGRADE_VERIFIED') {
+            Invoke-VerifiedUpgradePublicationReconciliation $pendingRecord | Out-Null
             $pendingStaging = Join-Path $script:DataPath $pendingRecord.StagingName
             $pendingBackup = Join-Path $script:DataPath $pendingRecord.BackupName
             $pendingFinalHash = Get-FileSha256 $script:DatabasePath
@@ -1677,9 +3018,35 @@ try {
             }
             $pendingScrubState = Get-VerifiedCredentialScrubState $pendingVerification
             Assert-NoDatabaseSidecars $pendingVerificationPath 'The verified or published upgrade database'
-            Test-ProtectedBackupReadback $pendingBackup $pendingRecord.OriginalSha256
+            Test-ProtectedBackupReadback `
+                -BackupPath $pendingBackup `
+                -ExpectedDatabaseSha256 $pendingRecord.OriginalSha256 `
+                -AllowOriginalUnavailable:($pendingFinalHash -cne $pendingRecord.OriginalSha256)
             if ((Get-FileSha256 $pendingBackup) -cne $pendingRecord.BackupSha256) {
                 throw 'The protected upgrade backup changed during resume verification.'
+            }
+            # The backup read-back can be slow enough for another process to
+            # change the final/staging state after the first verification.  Bind
+            # the status result to the same exact published-or-staged state one
+            # last time before returning OK:MIGRATED_AND_VERIFIED.
+            $pendingFinalHashAfterReadback = Get-FileSha256 $script:DatabasePath
+            if ($pendingFinalHash -ceq $pendingRecord.OriginalSha256) {
+                Assert-NoDatabaseSidecars $pendingStaging 'The rechecked upgrade staging database'
+                if ($pendingFinalHashAfterReadback -cne $pendingRecord.OriginalSha256 -or
+                    -not (Test-Path -LiteralPath $pendingStaging -PathType Leaf) -or
+                    (Get-FileSha256 $pendingStaging) -cne $pendingRecord.MigratedSha256) {
+                    throw 'The verified staged upgrade changed during protected-backup read-back.'
+                }
+            }
+            else {
+                Assert-NoDatabaseSidecars $script:DatabasePath 'The rechecked published upgrade database'
+                if ($pendingFinalHashAfterReadback -cne $pendingRecord.MigratedSha256 -or
+                    (Test-Path -LiteralPath $pendingStaging)) {
+                    throw 'The published upgrade changed during protected-backup read-back.'
+                }
+            }
+            if ((Get-FileSha256 $pendingVerificationPath) -cne $pendingRecord.MigratedSha256) {
+                throw 'The verified upgrade database changed before status publication.'
             }
             $pendingUpgradeStatus =
                 "OK:MIGRATED_AND_VERIFIED`r`nBACKUP_NAME=" +
@@ -1891,6 +3258,14 @@ try {
     Assert-NoDatabaseSidecars $script:UpgradeStagingPath 'The verified upgrade staging database'
 
     $migratedSha256 = Get-FileSha256 $script:UpgradeStagingPath
+    Assert-NoDatabaseSidecars $script:DatabasePath 'The final database before prepared-status publication'
+    if (-not (Test-Path -LiteralPath $script:DatabasePath -PathType Leaf) -or
+        (Get-FileSha256 $script:DatabasePath) -cne $databaseHashBefore -or
+        -not (Test-Path -LiteralPath $script:UpgradeStagingPath -PathType Leaf) -or
+        (Get-FileSha256 $script:UpgradeStagingPath) -cne $migratedSha256 -or
+        (Get-FileSha256 $upgradeBackupPath) -cne $backupSha256) {
+        throw 'The prepared upgrade changed before its verified state was persisted.'
+    }
     Advance-PendingUpgradeVerified $backupSha256 $migratedSha256
     $upgradeStatus =
         "OK:MIGRATED_AND_VERIFIED`r`nBACKUP_NAME=" +
