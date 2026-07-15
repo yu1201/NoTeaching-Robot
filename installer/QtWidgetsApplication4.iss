@@ -4,10 +4,10 @@
 ; {localappdata} 在别的盘装出第二份（2026-07-10 事故）。一台设备只装一个通道，共用无害。
 #define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.07.13.2115"
+  #define MyAppVersion "2026.07.15.0928"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.07.13.2115"
+  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.07.15.0928"
 #endif
 #define MyAppPublisher "海瞰智焊"
 #define MyAppExeName "HK-Pathlynx-CORPLA.exe"
@@ -35,6 +35,7 @@ OutputDir=..\dist\installer
 OutputBaseFilename={#MyOutputBaseFilename}
 SetupIconFile=..\icons\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayName={#MyAppName} version {#MyAppVersion}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -86,10 +87,27 @@ var
   DatabaseFinalizeFailed: Boolean;
   InstallationInstanceLeaseHandle: LongWord;
   InstallationInstanceLeaseHeld: Boolean;
+  SameVersionRecoveryRequired: Boolean;
+  SameVersionRecoveryRegistryRoot: Integer;
+  SameVersionRecoveryUninstallKey: string;
+  SameVersionRecoveryDataPath: string;
+  SameVersionRecoveryRecordPath: string;
+  SameVersionRecoveryRecordSha256: string;
+  DatabaseClosingFailed: Boolean;
+  DatabaseClosingExpectedRecordSha256: string;
 
 const
   ErrorAlreadyExists = 183;
   ApplicationInstanceMutexName = 'Global\NoTeaching-Robot-Hardware-Control-v1-1659b29cef5475429cd49311046dad5f450d375d8468d89e5caf3a85bc97e0f3';
+  SameVersionRecoveryFormat = 'NoTeaching-Robot-Same-Version-Recovery-v1';
+  RecoveryReadyValueName = 'NoTeachingRobotRecoveryReady';
+  RecoveryFormatValueName = 'NoTeachingRobotRecoveryFormat';
+  RecoveryVersionValueName = 'NoTeachingRobotRecoveryVersion';
+  RecoveryDisplayNameValueName = 'NoTeachingRobotRecoveryDisplayName';
+  RecoveryExecutableValueName = 'NoTeachingRobotRecoveryExecutable';
+  RecoveryInstallDirectoryValueName = 'NoTeachingRobotRecoveryInstallDirectory';
+  RecoveryRecordPathValueName = 'NoTeachingRobotRecoveryRecordPath';
+  RecoveryRecordSha256ValueName = 'NoTeachingRobotRecoveryRecordSha256';
 
 function CreateMutex(SecurityAttributes: LongWord; InitialOwner: Boolean;
   Name: string): LongWord;
@@ -214,6 +232,361 @@ begin
   end;
 end;
 
+function GetApplicationUninstallKey: string;
+begin
+  Result := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{' +
+    '{#MyAppGuid}' + '}_is1';
+end;
+
+function TryReadInstalledAppRegistration(
+  RootKey: Integer;
+  const UninstallKey: string;
+  var Version: string;
+  var InstallLocation: string;
+  var DisplayName: string;
+  var DisplayIcon: string): Boolean;
+begin
+  Result :=
+    RegQueryStringValue(RootKey, UninstallKey, 'DisplayVersion', Version) and
+    RegQueryStringValue(RootKey, UninstallKey, 'InstallLocation', InstallLocation) and
+    RegQueryStringValue(RootKey, UninstallKey, 'DisplayName', DisplayName) and
+    RegQueryStringValue(RootKey, UninstallKey, 'DisplayIcon', DisplayIcon);
+end;
+
+function GetInstalledAppRegistration(
+  var RootKey: Integer;
+  var UninstallKey: string;
+  var Version: string;
+  var InstallLocation: string;
+  var DisplayName: string;
+  var DisplayIcon: string): Boolean;
+begin
+  UninstallKey := GetApplicationUninstallKey;
+  RootKey := HKLM64;
+  Result := TryReadInstalledAppRegistration(
+    RootKey, UninstallKey, Version, InstallLocation, DisplayName, DisplayIcon);
+  if not Result then
+  begin
+    RootKey := HKLM;
+    Result := TryReadInstalledAppRegistration(
+      RootKey, UninstallKey, Version, InstallLocation, DisplayName, DisplayIcon);
+  end;
+  if not Result then
+  begin
+    RootKey := HKCU;
+    Result := TryReadInstalledAppRegistration(
+      RootKey, UninstallKey, Version, InstallLocation, DisplayName, DisplayIcon);
+  end;
+end;
+
+function NormalizeAbsoluteLocalPath(const Value: string; var Normalized: string): Boolean;
+var
+  Candidate: string;
+begin
+  Candidate := Trim(Value);
+  Result :=
+    (Length(Candidate) >= 3) and
+    (((Candidate[1] >= 'A') and (Candidate[1] <= 'Z')) or
+     ((Candidate[1] >= 'a') and (Candidate[1] <= 'z'))) and
+    (Candidate[2] = ':') and
+    (Candidate[3] = '\');
+  if not Result then
+    Exit;
+  Normalized := RemoveBackslashUnlessRoot(ExpandFileName(Candidate));
+end;
+
+function DeleteRecoveryValueIfPresent(
+  RootKey: Integer;
+  const UninstallKey: string;
+  const ValueName: string): Boolean;
+begin
+  Result := True;
+  if RegValueExists(RootKey, UninstallKey, ValueName) then
+    Result := RegDeleteValue(RootKey, UninstallKey, ValueName);
+end;
+
+function ClearSameVersionRecoveryMarker: Boolean;
+var
+  UninstallKey: string;
+begin
+  UninstallKey := GetApplicationUninstallKey;
+  Result := DeleteRecoveryValueIfPresent(
+    HKLM64, UninstallKey, RecoveryReadyValueName);
+  if not Result then
+  begin
+    Log('CRITICAL: could not invalidate the protected same-version recovery marker.');
+    Exit;
+  end;
+
+  if not DeleteRecoveryValueIfPresent(HKLM64, UninstallKey, RecoveryFormatValueName) then
+    Result := False;
+  if not DeleteRecoveryValueIfPresent(HKLM64, UninstallKey, RecoveryVersionValueName) then
+    Result := False;
+  if not DeleteRecoveryValueIfPresent(HKLM64, UninstallKey, RecoveryDisplayNameValueName) then
+    Result := False;
+  if not DeleteRecoveryValueIfPresent(HKLM64, UninstallKey, RecoveryExecutableValueName) then
+    Result := False;
+  if not DeleteRecoveryValueIfPresent(HKLM64, UninstallKey, RecoveryInstallDirectoryValueName) then
+    Result := False;
+  if not DeleteRecoveryValueIfPresent(HKLM64, UninstallKey, RecoveryRecordPathValueName) then
+    Result := False;
+  if not DeleteRecoveryValueIfPresent(HKLM64, UninstallKey, RecoveryRecordSha256ValueName) then
+    Result := False;
+  if not Result then
+    Log('CRITICAL: the invalidated same-version recovery marker could not be fully removed.');
+end;
+
+function TryReadSameVersionRecoveryMarker(
+  RootKey: Integer;
+  const UninstallKey: string;
+  var Version: string;
+  var DisplayName: string;
+  var ExecutableName: string;
+  var InstallDirectory: string;
+  var RecordPath: string;
+  var RecordSha256: string): Boolean;
+var
+  Ready: string;
+  MarkerFormat: string;
+begin
+  Result :=
+    RegQueryStringValue(RootKey, UninstallKey, RecoveryReadyValueName, Ready) and
+    RegQueryStringValue(RootKey, UninstallKey, RecoveryFormatValueName, MarkerFormat) and
+    RegQueryStringValue(RootKey, UninstallKey, RecoveryVersionValueName, Version) and
+    RegQueryStringValue(RootKey, UninstallKey, RecoveryDisplayNameValueName, DisplayName) and
+    RegQueryStringValue(RootKey, UninstallKey, RecoveryExecutableValueName, ExecutableName) and
+    RegQueryStringValue(RootKey, UninstallKey, RecoveryInstallDirectoryValueName, InstallDirectory) and
+    RegQueryStringValue(RootKey, UninstallKey, RecoveryRecordPathValueName, RecordPath) and
+    RegQueryStringValue(RootKey, UninstallKey, RecoveryRecordSha256ValueName, RecordSha256) and
+    (Ready = '1') and
+    (MarkerFormat = SameVersionRecoveryFormat);
+end;
+
+function ValidateSameVersionRecoveryMarker(
+  RootKey: Integer;
+  const UninstallKey: string;
+  const InstalledVersion: string;
+  const InstalledLocation: string;
+  const InstalledDisplayName: string;
+  const InstalledDisplayIcon: string;
+  var DataPath: string;
+  var RecordPath: string;
+  var RecordSha256: string): Boolean;
+var
+  MarkerVersion: string;
+  MarkerDisplayName: string;
+  MarkerExecutableName: string;
+  MarkerInstallDirectory: string;
+  MarkerRecordPath: string;
+  MarkerRecordSha256: string;
+  NormalizedInstallLocation: string;
+  NormalizedMarkerInstallDirectory: string;
+  NormalizedDisplayIcon: string;
+  NormalizedMarkerRecordPath: string;
+  ExpectedDisplayIcon: string;
+  ExpectedRecordPath: string;
+  ActualRecordSha256: string;
+begin
+  Result := False;
+  if (RootKey <> HKLM64) or
+     (UninstallKey <> GetApplicationUninstallKey) or
+     (InstalledVersion <> '{#MyAppVersion}') or
+     (InstalledDisplayName <> '{#MyAppName} version {#MyAppVersion}') then
+    Exit;
+  if not NormalizeAbsoluteLocalPath(InstalledLocation, NormalizedInstallLocation) then
+    Exit;
+  ExpectedDisplayIcon := AddBackslash(NormalizedInstallLocation) + '{#MyAppExeName}';
+  if not NormalizeAbsoluteLocalPath(InstalledDisplayIcon, NormalizedDisplayIcon) or
+     (CompareText(NormalizedDisplayIcon, ExpectedDisplayIcon) <> 0) or
+     (not FileExists(ExpectedDisplayIcon)) then
+    Exit;
+
+  if not TryReadSameVersionRecoveryMarker(
+       RootKey,
+       UninstallKey,
+       MarkerVersion,
+       MarkerDisplayName,
+       MarkerExecutableName,
+       MarkerInstallDirectory,
+       MarkerRecordPath,
+       MarkerRecordSha256) then
+    Exit;
+  if (MarkerVersion <> InstalledVersion) or
+     (MarkerDisplayName <> InstalledDisplayName) or
+     (MarkerExecutableName <> '{#MyAppExeName}') or
+     (not IsLowerHexSha256(MarkerRecordSha256)) then
+    Exit;
+  if not NormalizeAbsoluteLocalPath(
+       MarkerInstallDirectory, NormalizedMarkerInstallDirectory) or
+     (CompareText(NormalizedMarkerInstallDirectory, NormalizedInstallLocation) <> 0) then
+    Exit;
+
+  DataPath := AddBackslash(NormalizedInstallLocation) + 'Data';
+  ExpectedRecordPath := AddBackslash(DataPath) +
+    'ConfigStore.db.install-transaction-v1';
+  if not NormalizeAbsoluteLocalPath(MarkerRecordPath, NormalizedMarkerRecordPath) or
+     (CompareText(NormalizedMarkerRecordPath, ExpectedRecordPath) <> 0) or
+     (not FileExists(ExpectedRecordPath)) then
+    Exit;
+  try
+    ActualRecordSha256 := Lowercase(GetSHA256OfFile(ExpectedRecordPath));
+  except
+    Exit;
+  end;
+  if ActualRecordSha256 <> MarkerRecordSha256 then
+    Exit;
+
+  RecordPath := ExpectedRecordPath;
+  RecordSha256 := MarkerRecordSha256;
+  Result := True;
+end;
+
+function TryGetPendingTransactionRecordSha256(
+  const DataPath: string;
+  var RecordSha256: string): Boolean;
+var
+  NormalizedDataPath: string;
+  RecordPath: string;
+begin
+  Result := False;
+  RecordSha256 := '';
+  if not NormalizeAbsoluteLocalPath(DataPath, NormalizedDataPath) then
+    Exit;
+  RecordPath := AddBackslash(NormalizedDataPath) +
+    'ConfigStore.db.install-transaction-v1';
+  if not FileExists(RecordPath) then
+    Exit;
+  try
+    RecordSha256 := Lowercase(GetSHA256OfFile(RecordPath));
+  except
+    RecordSha256 := '';
+    Exit;
+  end;
+  Result := IsLowerHexSha256(RecordSha256);
+end;
+
+function PersistSameVersionRecoveryMarker: Boolean;
+var
+  UninstallKey: string;
+  InstalledVersion: string;
+  InstalledLocation: string;
+  InstalledDisplayName: string;
+  InstalledDisplayIcon: string;
+  NormalizedInstallLocation: string;
+  NormalizedCurrentInstallLocation: string;
+  RecordPath: string;
+  RecordSha256: string;
+  VerifiedDataPath: string;
+  VerifiedRecordPath: string;
+  VerifiedRecordSha256: string;
+begin
+  Result := False;
+  UninstallKey := GetApplicationUninstallKey;
+  if not TryReadInstalledAppRegistration(
+       HKLM64,
+       UninstallKey,
+       InstalledVersion,
+       InstalledLocation,
+       InstalledDisplayName,
+       InstalledDisplayIcon) then
+    Exit;
+  if (InstalledVersion <> '{#MyAppVersion}') or
+     (InstalledDisplayName <> '{#MyAppName} version {#MyAppVersion}') or
+     (not NormalizeAbsoluteLocalPath(InstalledLocation, NormalizedInstallLocation)) or
+     (not NormalizeAbsoluteLocalPath(
+       ExpandConstant('{app}'), NormalizedCurrentInstallLocation)) or
+     (CompareText(NormalizedInstallLocation, NormalizedCurrentInstallLocation) <> 0) then
+    Exit;
+
+  RecordPath := AddBackslash(NormalizedInstallLocation) +
+    'Data\ConfigStore.db.install-transaction-v1';
+  if not FileExists(RecordPath) then
+    Exit;
+  try
+    RecordSha256 := Lowercase(GetSHA256OfFile(RecordPath));
+  except
+    Exit;
+  end;
+  if not IsLowerHexSha256(RecordSha256) or
+     (RecordSha256 <> DatabaseClosingExpectedRecordSha256) then
+    Exit;
+  if not ClearSameVersionRecoveryMarker then
+    Exit;
+
+  if not RegWriteStringValue(
+       HKLM64, UninstallKey, RecoveryFormatValueName, SameVersionRecoveryFormat) then
+  begin
+    ClearSameVersionRecoveryMarker;
+    Exit;
+  end;
+  if not RegWriteStringValue(
+       HKLM64, UninstallKey, RecoveryVersionValueName, InstalledVersion) then
+  begin
+    ClearSameVersionRecoveryMarker;
+    Exit;
+  end;
+  if not RegWriteStringValue(
+       HKLM64, UninstallKey, RecoveryDisplayNameValueName, InstalledDisplayName) then
+  begin
+    ClearSameVersionRecoveryMarker;
+    Exit;
+  end;
+  if not RegWriteStringValue(
+       HKLM64, UninstallKey, RecoveryExecutableValueName, '{#MyAppExeName}') then
+  begin
+    ClearSameVersionRecoveryMarker;
+    Exit;
+  end;
+  if not RegWriteStringValue(
+       HKLM64,
+       UninstallKey,
+       RecoveryInstallDirectoryValueName,
+       NormalizedInstallLocation) then
+  begin
+    ClearSameVersionRecoveryMarker;
+    Exit;
+  end;
+  if not RegWriteStringValue(
+       HKLM64, UninstallKey, RecoveryRecordPathValueName, RecordPath) then
+  begin
+    ClearSameVersionRecoveryMarker;
+    Exit;
+  end;
+  if not RegWriteStringValue(
+       HKLM64, UninstallKey, RecoveryRecordSha256ValueName, RecordSha256) then
+  begin
+    ClearSameVersionRecoveryMarker;
+    Exit;
+  end;
+  { Ready is the commit point.  It is written last and deleted first. }
+  if not RegWriteStringValue(
+       HKLM64, UninstallKey, RecoveryReadyValueName, '1') then
+  begin
+    ClearSameVersionRecoveryMarker;
+    Exit;
+  end;
+
+  Result := ValidateSameVersionRecoveryMarker(
+    HKLM64,
+    UninstallKey,
+    InstalledVersion,
+    InstalledLocation,
+    InstalledDisplayName,
+    InstalledDisplayIcon,
+    VerifiedDataPath,
+    VerifiedRecordPath,
+    VerifiedRecordSha256);
+  Result := Result and
+    (CompareText(VerifiedRecordPath, RecordPath) = 0) and
+    (VerifiedRecordSha256 = RecordSha256);
+  if not Result then
+  begin
+    ClearSameVersionRecoveryMarker;
+    Exit;
+  end;
+  Log('Persisted and read-back verified the HKLM-bound same-version recovery marker.');
+end;
+
 function IsCanonicalUpgradeBackupName(const Value: string): Boolean;
 var
   Prefix: string;
@@ -327,6 +700,10 @@ begin
     DatabaseTransactionReconciled := True;
     FailureMessage := FailureMessage + #13#10 +
       '安装器已按独立事务记录完成数据库回滚。状态：' + RollbackStatus;
+    if (RollbackStatus <> 'OK:PENDING_PUBLISHED_PRESERVED') and
+       (not ClearSameVersionRecoveryMarker) then
+      FailureMessage := FailureMessage + #13#10 +
+        '严重错误：数据库已回滚，但 HKLM 同版本恢复凭证未能完整清除。';
   end
   else
     FailureMessage := FailureMessage + #13#10 +
@@ -340,6 +717,13 @@ var
   Parameters: string;
   StatusText: string;
   ExpectedStatusText: string;
+  RecoveryInstalledVersion: string;
+  RecoveryInstalledLocation: string;
+  RecoveryInstalledDisplayName: string;
+  RecoveryInstalledDisplayIcon: string;
+  RevalidatedRecoveryDataPath: string;
+  RevalidatedRecoveryRecordPath: string;
+  RevalidatedRecoveryRecordSha256: string;
   ResultCode: Integer;
 begin
   Result := '';
@@ -352,13 +736,52 @@ begin
 
   DatabaseMigrationAttempted := True;
   DatabaseMigrationReady := False;
+  DatabaseClosingExpectedRecordSha256 := '';
+  MigrationDataPath := ExpandConstant('{app}\Data');
+  if SameVersionRecoveryRequired then
+  begin
+    if CompareText(
+         RemoveBackslashUnlessRoot(ExpandFileName(MigrationDataPath)),
+         RemoveBackslashUnlessRoot(ExpandFileName(SameVersionRecoveryDataPath))) <> 0 then
+    begin
+      Result :=
+        '同版本恢复安装的目标目录与原安装事务不一致，安装已在写入任何文件前停止。' + #13#10 +
+        '必须从原安装目录恢复：' + SameVersionRecoveryDataPath;
+      Exit;
+    end;
+    if not TryReadInstalledAppRegistration(
+         SameVersionRecoveryRegistryRoot,
+         SameVersionRecoveryUninstallKey,
+         RecoveryInstalledVersion,
+         RecoveryInstalledLocation,
+         RecoveryInstalledDisplayName,
+         RecoveryInstalledDisplayIcon) or
+       not ValidateSameVersionRecoveryMarker(
+         SameVersionRecoveryRegistryRoot,
+         SameVersionRecoveryUninstallKey,
+         RecoveryInstalledVersion,
+         RecoveryInstalledLocation,
+         RecoveryInstalledDisplayName,
+         RecoveryInstalledDisplayIcon,
+         RevalidatedRecoveryDataPath,
+         RevalidatedRecoveryRecordPath,
+         RevalidatedRecoveryRecordSha256) or
+       (CompareText(RevalidatedRecoveryDataPath, SameVersionRecoveryDataPath) <> 0) or
+       (CompareText(RevalidatedRecoveryRecordPath, SameVersionRecoveryRecordPath) <> 0) or
+       (RevalidatedRecoveryRecordSha256 <> SameVersionRecoveryRecordSha256) then
+    begin
+      Result :=
+        '同版本恢复所需的 HKLM 凭证或数据库事务绑定已改变，安装已在写入任何文件前停止。' + #13#10 +
+        '请勿绕过恢复门禁、修改注册表或手工创建事务记录。';
+      Exit;
+    end;
+  end;
   if not AcquireInstallationInstanceLease(Result) then
     Exit;
   ExtractTemporaryFile('ConfigMigrate_PreInstall.exe');
   ExtractTemporaryFile('ConfigMigrate_PreInstall.ps1');
 
   PowerShellPath := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
-  MigrationDataPath := ExpandConstant('{app}\Data');
   MigrationExePath := ExpandConstant('{tmp}\ConfigMigrate_PreInstall.exe');
   MigrationScriptPath := ExpandConstant('{tmp}\ConfigMigrate_PreInstall.ps1');
   MigrationStatusPath := ExpandConstant('{tmp}\ConfigMigrate_PreInstall.status');
@@ -471,6 +894,14 @@ begin
     Exit;
   end;
 
+  if not TryGetPendingTransactionRecordSha256(
+       MigrationDataPath, DatabaseClosingExpectedRecordSha256) then
+  begin
+    Result :=
+      '账号和配置数据库升级状态缺少可回读的事务记录，安装已停止。';
+    AppendPreparationRollbackOutcome(Result);
+    Exit;
+  end;
   DatabaseMigrationReady := True;
 end;
 
@@ -534,6 +965,7 @@ begin
     begin
       DatabaseMigrationReady := False;
       DatabaseFinalizeFailed := True;
+      DatabaseClosingFailed := True;
       Log('CRITICAL: pending database transaction commit failed. Status=' + CommitStatus);
       if not WizardSilent then
         MsgBox(
@@ -544,10 +976,31 @@ begin
           MB_OK);
     end;
     if DatabaseMigrationReady and MigrationNeedsFinalize and
+       (not TryGetPendingTransactionRecordSha256(
+         MigrationDataPath, DatabaseClosingExpectedRecordSha256)) then
+    begin
+      DatabaseMigrationReady := False;
+      DatabaseFinalizeFailed := True;
+      DatabaseClosingFailed := True;
+      Log('CRITICAL: the committed finalize-pending transaction record could not be hash-bound.');
+    end;
+    if DatabaseMigrationReady and MigrationNeedsFinalize and
        (not FinalizeDeferredCredentialScrub) then
     begin
       DatabaseMigrationReady := False;
       DatabaseFinalizeFailed := True;
+      DatabaseClosingFailed := True;
+    end;
+    if DatabaseClosingFailed then
+    begin
+      if not PersistSameVersionRecoveryMarker then
+        Log('CRITICAL: database closing failed and no protected same-version recovery marker could be persisted.');
+    end
+    else if not ClearSameVersionRecoveryMarker then
+    begin
+      DatabaseMigrationReady := False;
+      DatabaseFinalizeFailed := True;
+      Log('CRITICAL: successful database closing could not clear the protected same-version recovery marker.');
     end;
     { ssPostInstall means the new file set is complete.  From this point onward
       the safe state is the new program plus its v5 database; never roll it back
@@ -585,6 +1038,9 @@ begin
       Log('Pending database transaction was reconciled after installation did not complete. Status=' +
         RollbackStatus);
       DatabaseMigrationReady := False;
+      if (RollbackStatus <> 'OK:PENDING_PUBLISHED_PRESERVED') and
+         (not ClearSameVersionRecoveryMarker) then
+        Log('CRITICAL: rollback succeeded but the protected same-version recovery marker was not fully cleared.');
       Exit;
     end;
 
@@ -603,24 +1059,54 @@ begin
   end;
 end;
 
-function GetInstalledAppVersion(var Version: string): Boolean;
-var
-  UninstallKey: string;
-begin
-  UninstallKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{' + '{#MyAppGuid}' + '}_is1';
-  Result :=
-    RegQueryStringValue(HKLM64, UninstallKey, 'DisplayVersion', Version) or
-    RegQueryStringValue(HKLM, UninstallKey, 'DisplayVersion', Version) or
-    RegQueryStringValue(HKCU, UninstallKey, 'DisplayVersion', Version);
-end;
-
 function InitializeSetup(): Boolean;
 var
+  InstalledRootKey: Integer;
+  InstalledUninstallKey: string;
   InstalledVersion: string;
+  InstalledLocation: string;
+  InstalledDisplayName: string;
+  InstalledDisplayIcon: string;
+  ValidatedDataPath: string;
+  ValidatedRecordPath: string;
+  ValidatedRecordSha256: string;
 begin
   Result := True;
-  if GetInstalledAppVersion(InstalledVersion) and (InstalledVersion = '{#MyAppVersion}') then
+  SameVersionRecoveryRequired := False;
+  SameVersionRecoveryRegistryRoot := 0;
+  SameVersionRecoveryUninstallKey := '';
+  SameVersionRecoveryDataPath := '';
+  SameVersionRecoveryRecordPath := '';
+  SameVersionRecoveryRecordSha256 := '';
+  if GetInstalledAppRegistration(
+       InstalledRootKey,
+       InstalledUninstallKey,
+       InstalledVersion,
+       InstalledLocation,
+       InstalledDisplayName,
+       InstalledDisplayIcon) and
+     (InstalledVersion = '{#MyAppVersion}') then
   begin
+    if ValidateSameVersionRecoveryMarker(
+         InstalledRootKey,
+         InstalledUninstallKey,
+         InstalledVersion,
+         InstalledLocation,
+         InstalledDisplayName,
+         InstalledDisplayIcon,
+         ValidatedDataPath,
+         ValidatedRecordPath,
+         ValidatedRecordSha256) then
+    begin
+      SameVersionRecoveryRequired := True;
+      SameVersionRecoveryRegistryRoot := InstalledRootKey;
+      SameVersionRecoveryUninstallKey := InstalledUninstallKey;
+      SameVersionRecoveryDataPath := ValidatedDataPath;
+      SameVersionRecoveryRecordPath := ValidatedRecordPath;
+      SameVersionRecoveryRecordSha256 := ValidatedRecordSha256;
+      Log('Same-version installation is allowed only by a read-back verified HKLM recovery marker.');
+      Exit;
+    end;
     MsgBox(
       ExpandConstant('{#MyAppName}') + ' ' + InstalledVersion +
       ' 已经安装，本次不再重复安装。' + #13#10 +
