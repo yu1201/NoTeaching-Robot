@@ -137,7 +137,15 @@ try {
     Assert-Throws { Assert-ReleaseVersion "v2026.07.12.1200" } "version with v prefix must fail"
     Assert-Throws { Assert-ReleaseVersion "2026.7.12.1200" } "non-canonical version must fail"
     Assert-Throws { Assert-ReleaseVersion "2026.99.99.9999" } "invalid calendar version must fail"
-    $currentInstallerDefinition = Assert-InstallerDefinition -RepoRoot $repoRoot -AppVersion "2026.07.13.2115" -Channel neutral
+    $currentMainText = Get-Content -LiteralPath (Join-Path $repoRoot "src\main.cpp") -Raw -Encoding UTF8
+    $currentVersionMatches = [regex]::Matches(
+        $currentMainText,
+        'app\.setApplicationVersion\s*\(\s*QStringLiteral\s*\(\s*"([^"]+)"\s*\)\s*\)')
+    Assert-True ($currentVersionMatches.Count -eq 1) "src/main.cpp must contain exactly one application version"
+    $currentAppVersion = [string]$currentVersionMatches[0].Groups[1].Value
+    Assert-ReleaseVersion $currentAppVersion
+    Assert-SourceApplicationVersion -RepoRoot $repoRoot -AppVersion $currentAppVersion | Out-Null
+    $currentInstallerDefinition = Assert-InstallerDefinition -RepoRoot $repoRoot -AppVersion $currentAppVersion -Channel neutral
     Assert-True ([string]$currentInstallerDefinition.appId -ceq $script:ReleaseGateExpectedAppId) "installer AppId hard gate failed"
 
     $installerFixture = Join-Path $tempRoot "installer-definition"
@@ -148,7 +156,7 @@ try {
         param([string]$Text, [string]$Message)
         Assert-True ($Text -cne $installerTextOriginal) "installer attack fixture mutation did not change the source: $Message"
         Set-Content -LiteralPath $installerFixturePath -Value $Text -Encoding UTF8
-        Assert-Throws { Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.13.2115" -Channel neutral } $Message
+        Assert-Throws { Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion $currentAppVersion -Channel neutral } $Message
     }
     $sourceDirDefine = '#define MySourceDir "..\dist\QtWidgetsApplication4"'
     Assert-InstallerTextRejected `
@@ -207,7 +215,7 @@ try {
         -Text ($installerTextOriginal.Replace('if not CommitPendingDatabaseTransaction(CommitStatus) then', 'if False then')) `
         -Message "missing staged database post-install commit must fail"
     Set-Content -LiteralPath $installerFixturePath -Value $installerTextOriginal -Encoding UTF8
-    Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion "2026.07.13.2115" -Channel neutral | Out-Null
+    Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion $currentAppVersion -Channel neutral | Out-Null
 
     $fixture = Join-Path $tempRoot "fanuc"
     Copy-ManifestRuntimeFixture $fixture
@@ -359,9 +367,9 @@ try {
     Invoke-GitFixture $gitFixture @("config", "user.name", "Release Gate Test")
     Invoke-GitFixture $gitFixture @("add", "--", "installer/QtWidgetsApplication4.iss", "icons/app.ico")
     Invoke-GitFixture $gitFixture @("commit", "-q", "-m", "fixture")
-    Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.13.2115" -Channel neutral | Out-Null
+    Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion $currentAppVersion -Channel neutral | Out-Null
     Set-Content -LiteralPath (Join-Path $gitFixture "untracked-release-asset.dll") -Value "stale" -NoNewline
-    Assert-Throws { Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion "2026.07.13.2115" -Channel neutral } "untracked release asset must make Git state ambiguous"
+    Assert-Throws { Assert-GitReleaseState -RepoRoot $gitFixture -AppVersion $currentAppVersion -Channel neutral } "untracked release asset must make Git state ambiguous"
 
     $neutralWorktree = Join-Path $tempRoot "linked-neutral"
     $brandWorktree = Join-Path $tempRoot "linked-brand"
