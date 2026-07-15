@@ -1431,6 +1431,38 @@ class WindowsSchema4UpgradeTests(unittest.TestCase):
                     sensitive=1 if "Password" in key else 0,
                 )
 
+    def _create_auth3_login_preference_type_drift(
+        self,
+        path: Path,
+        *,
+        remember_password: str = "1",
+        auto_login: str = "1",
+    ) -> None:
+        self._create_auth1_database(path, "complete", [])
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute(
+                "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
+            )
+            for key, value in (
+                ("RememberPassword", remember_password),
+                ("AutoLogin", auto_login),
+            ):
+                purpose = MIGRATOR["protection_purpose"](
+                    "global", "", "LoginState", key
+                )
+                insert_setting(
+                    connection,
+                    "global",
+                    "",
+                    "LoginState",
+                    key,
+                    MIGRATOR["protect_sensitive_text"](value, purpose),
+                    value_type="string",
+                    sensitive=1,
+                    encrypted=1,
+                )
+
     def test_auth2_settings_plaintext_autologin_upgrades_with_backup(self) -> None:
         with tempfile.TemporaryDirectory() as text:
             data = Path(text) / "Data"
@@ -1580,6 +1612,230 @@ class WindowsSchema4UpgradeTests(unittest.TestCase):
                     ).fetchone(),
                     ("1", "string", 0, 0),
                 )
+
+    def test_installer_repairs_only_known_auth3_preference_type_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as text:
+            data = Path(text) / "Data"
+            data.mkdir()
+            final_db = data / "ConfigStore.db"
+            self._create_auth3_login_preference_type_drift(final_db)
+            final_before = final_db.read_bytes()
+            with closing(sqlite3.connect(final_db)) as connection:
+                account_before = tuple(connection.execute(
+                    """
+                    SELECT scope_type, scope_id, module, key_name, value_text,
+                           value_type, sensitive, encrypted, updated_at
+                    FROM settings WHERE scope_type='account'
+                    ORDER BY scope_id, module, key_name
+                    """
+                ))
+
+            staging = data / (
+                ".ConfigStore.db.install-upgrade-"
+                "abababababababababababababababab.tmp"
+            )
+            staging.write_bytes(final_before)
+            backup = staging.with_name(
+                staging.name + ".install-backup.dpapi.bak"
+            )
+            result = self._run_cli(
+                "--source", data,
+                "--db", staging,
+                "--encrypt",
+                "--defer-credential-scrub",
+                "--installer-staging",
+                "--upgrade-backup", backup,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "auth3_login_preference_type_repair", result.stdout
+            )
+            self.assertEqual(final_db.read_bytes(), final_before)
+            self.assertTrue(backup.is_file())
+            self.assertEqual(
+                MIGRATOR["verify_current_database"](staging), "complete"
+            )
+
+            with closing(sqlite3.connect(staging)) as connection:
+                account_after = tuple(connection.execute(
+                    """
+                    SELECT scope_type, scope_id, module, key_name, value_text,
+                           value_type, sensitive, encrypted, updated_at
+                    FROM settings WHERE scope_type='account'
+                    ORDER BY scope_id, module, key_name
+                    """
+                ))
+                preference_rows = tuple(connection.execute(
+                    """
+                    SELECT key_name, value_text, value_type, sensitive, encrypted
+                    FROM settings
+                    WHERE scope_type='global' AND scope_id=''
+                      AND module='LoginState'
+                      AND key_name IN ('RememberPassword', 'AutoLogin')
+                    ORDER BY key_name
+                    """
+                ))
+            self.assertEqual(account_after, account_before)
+            self.assertEqual(len(preference_rows), 2)
+            for key, stored, value_type, sensitive, encrypted in preference_rows:
+                self.assertEqual((value_type, sensitive, encrypted), ("bool", 1, 1))
+                self.assertEqual(
+                    MIGRATOR["decode_stored_text"](
+                        str(stored),
+                        encrypted,
+                        MIGRATOR["protection_purpose"](
+                            "global", "", "LoginState", str(key)
+                        ),
+                    ),
+                    "0",
+                )
+
+            restored = data / "auth3-drift-backup-restored.tmp"
+            restored.write_bytes(MIGRATOR["_read_dpapi_database_backup"](backup))
+            with closing(sqlite3.connect(restored)) as connection:
+                self.assertEqual(
+                    {
+                        key: value_type
+                        for key, value_type in connection.execute(
+                            """
+                            SELECT key_name, value_type FROM settings
+                            WHERE scope_type='global' AND scope_id=''
+                              AND module='LoginState'
+                              AND key_name IN ('RememberPassword', 'AutoLogin')
+                            """
+                        )
+                    },
+                    {"RememberPassword": "string", "AutoLogin": "string"},
+                )
+
+            repaired_before = staging.read_bytes()
+            unused_backup = data / "idempotent-second-run.dpapi.bak"
+            self.assertFalse(MIGRATOR["migrate_existing_database_to_current"](
+                staging,
+                data,
+                True,
+                upgrade_backup_path=unused_backup,
+            ))
+            self.assertEqual(staging.read_bytes(), repaired_before)
+            self.assertFalse(unused_backup.exists())
+
+    def test_auth3_single_canonical_preference_remains_a_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as text:
+            data = Path(text) / "Data"
+            data.mkdir()
+            db = data / "ConfigStore.db"
+            self._create_auth1_database(db, "complete", [])
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                    (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
+                )
+                key = "RememberPassword"
+                purpose = MIGRATOR["protection_purpose"](
+                    "global", "", "LoginState", key
+                )
+                insert_setting(
+                    connection,
+                    "global",
+                    "",
+                    "LoginState",
+                    key,
+                    MIGRATOR["protect_sensitive_text"]("0", purpose),
+                    value_type="bool",
+                    sensitive=1,
+                    encrypted=1,
+                )
+
+            before = db.read_bytes()
+            backup = data / "must-remain-absent.dpapi.bak"
+            self.assertEqual(
+                MIGRATOR["verify_current_database"](db), "complete"
+            )
+            self.assertFalse(MIGRATOR["migrate_existing_database_to_current"](
+                db,
+                data,
+                True,
+                upgrade_backup_path=backup,
+            ))
+            self.assertEqual(db.read_bytes(), before)
+            self.assertFalse(backup.exists())
+
+    def test_auth3_preference_drift_rejects_unproven_shapes_atomically(self) -> None:
+        cases = (
+            "unreadable",
+            "invalid-value",
+            "mixed-shape",
+            "missing-row",
+            "invalid-account",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as text:
+                data = Path(text) / "Data"
+                data.mkdir()
+                db = data / "ConfigStore.db"
+                self._create_auth3_login_preference_type_drift(db)
+                with closing(sqlite3.connect(db)) as connection, connection:
+                    if case == "unreadable":
+                        connection.execute(
+                            """
+                            UPDATE settings SET value_text=?
+                            WHERE scope_type='global' AND scope_id=''
+                              AND module='LoginState'
+                              AND key_name='AutoLogin'
+                            """,
+                            (MIGRATOR["DPAPI_PREFIX"] + "not-valid-base64",),
+                        )
+                    elif case == "invalid-value":
+                        purpose = MIGRATOR["protection_purpose"](
+                            "global", "", "LoginState", "AutoLogin"
+                        )
+                        connection.execute(
+                            """
+                            UPDATE settings SET value_text=?
+                            WHERE scope_type='global' AND scope_id=''
+                              AND module='LoginState'
+                              AND key_name='AutoLogin'
+                            """,
+                            (MIGRATOR["protect_sensitive_text"]("2", purpose),),
+                        )
+                    elif case == "mixed-shape":
+                        connection.execute(
+                            """
+                            UPDATE settings SET value_type='bool'
+                            WHERE scope_type='global' AND scope_id=''
+                              AND module='LoginState'
+                              AND key_name='AutoLogin'
+                            """
+                        )
+                    elif case == "missing-row":
+                        connection.execute(
+                            """
+                            DELETE FROM settings
+                            WHERE scope_type='global' AND scope_id=''
+                              AND module='LoginState'
+                              AND key_name='AutoLogin'
+                            """
+                        )
+                    else:
+                        connection.execute(
+                            """
+                            DELETE FROM settings
+                            WHERE scope_type='account' AND scope_id='admin'
+                              AND module='Profile' AND key_name='Role'
+                            """
+                        )
+
+                before = db.read_bytes()
+                backup = data / "must-not-exist.dpapi.bak"
+                with self.assertRaises((ValueError, SystemExit)):
+                    MIGRATOR["migrate_existing_database_to_current"](
+                        db,
+                        data,
+                        True,
+                        upgrade_backup_path=backup,
+                    )
+                self.assertEqual(db.read_bytes(), before)
+                self.assertFalse(backup.exists())
 
     def test_read_only_verification_refuses_pending_atomic_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as text:

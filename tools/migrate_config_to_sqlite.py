@@ -6301,7 +6301,72 @@ def _default_upgrade_backup_path(db_path: Path) -> Path:
     raise RuntimeError("Cannot allocate a unique protected upgrade backup path")
 
 
-def verify_current_database(db_path: Path) -> str:
+def _has_known_auth3_login_preference_type_drift(
+    connection: sqlite3.Connection,
+) -> bool:
+    """Recognize only the auth3 writer bug that stored both bools as strings."""
+    rows = connection.execute(
+        """
+        SELECT key_name, value_text, value_type, sensitive, encrypted
+        FROM settings
+        WHERE scope_type='global' AND scope_id='' AND module='LoginState'
+          AND key_name IN ('RememberPassword', 'AutoLogin')
+        ORDER BY key_name
+        """
+    ).fetchall()
+    if not rows:
+        return False
+
+    shapes: set[str] = set()
+    for key, stored, value_type, sensitive, encrypted in rows:
+        key_text = str(key)
+        stored_text_value = str(stored)
+        common_shape = (
+            sensitive in (1, "1", True)
+            and encrypted in (1, "1", True)
+            and stored_text_value.startswith(DPAPI_PREFIX)
+        )
+        if not common_shape:
+            raise ValueError(
+                "Current auth3 login preference drift is not safely recoverable"
+            )
+        decoded = decode_stored_text(
+            stored_text_value,
+            encrypted,
+            protection_purpose(
+                "global", "", "LoginState", key_text
+            ),
+        )
+        if decoded not in {"0", "1"}:
+            raise ValueError(
+                "Current auth3 login preference drift cannot be read safely"
+            )
+        shapes.add(str(value_type))
+
+    if shapes == {"bool"}:
+        return False
+    if (
+        shapes == {"string"}
+        and len(rows) == 2
+        and {str(row[0]) for row in rows} == {
+            "RememberPassword", "AutoLogin"
+        }
+    ):
+        return True
+    if shapes == {"string"}:
+        raise ValueError(
+            "Current auth3 string login preference drift is incomplete"
+        )
+    raise ValueError(
+        "Current auth3 login preferences have a mixed canonical/drift shape"
+    )
+
+
+def verify_current_database(
+    db_path: Path,
+    *,
+    allow_known_auth3_login_preference_drift: bool = False,
+) -> str:
     db_path = Path(os.path.abspath(db_path))
     _reject_pending_atomic_replacement(db_path)
     _reject_sqlite_sidecars(db_path, "Current ConfigStore verification")
@@ -6333,6 +6398,14 @@ def verify_current_database(db_path: Path) -> str:
             raise ValueError("ConfigStore is not schema v5")
         if not has_current_schema(connection):
             raise ValueError("ConfigStore meta/settings schema is incompatible")
+        if (
+            allow_known_auth3_login_preference_drift
+            and not _has_known_auth3_login_preference_type_drift(connection)
+        ):
+            raise ValueError(
+                "Current ConfigStore does not contain the exact recoverable "
+                "auth3 login preference drift"
+            )
 
         duplicate_setting = connection.execute(
             """
@@ -6395,8 +6468,14 @@ def verify_current_database(db_path: Path) -> str:
         ).fetchall():
             key_text = str(key)
             stored_text_value = str(stored)
+            value_type_text = str(value_type)
+            canonical_shape = value_type_text == "bool"
+            known_drift_shape = (
+                allow_known_auth3_login_preference_drift
+                and value_type_text == "string"
+            )
             if (
-                str(value_type) != "bool"
+                not (canonical_shape or known_drift_shape)
                 or sensitive not in (1, "1", True)
                 or encrypted not in (1, "1", True)
                 or not stored_text_value.startswith(DPAPI_PREFIX)
@@ -6783,10 +6862,31 @@ def migrate_existing_database_to_current(
                 version == SCHEMA_VERSION
                 and authentication_semantic_version != AUTH_SEMANTIC_VERSION
             )
+            known_auth3_login_preference_drift = (
+                version == SCHEMA_VERSION
+                and authentication_semantic_version == AUTH_SEMANTIC_VERSION
+                and _has_known_auth3_login_preference_type_drift(conn)
+            )
+            if known_auth3_login_preference_drift:
+                # Prove that this exact locked source is otherwise a fully valid
+                # current database before allowing the narrow writer-bug repair.
+                verify_current_database(
+                    db_path,
+                    allow_known_auth3_login_preference_drift=True,
+                )
+                locked_database.ensure_single_link()
+                if not hmac.compare_digest(
+                    hashlib.sha256(source_content).digest(),
+                    hashlib.sha256(locked_database.read_bytes()).digest(),
+                ):
+                    raise ValueError(
+                        "Known auth3 login preference source changed during validation"
+                    )
             needs_migration = (
                 has_legacy_tables
                 or has_outdated_current_schema
                 or needs_authentication_semantic_upgrade
+                or known_auth3_login_preference_drift
             )
             if not needs_migration:
                 conn.rollback()
@@ -6844,33 +6944,52 @@ def migrate_existing_database_to_current(
 
             conn.execute("PRAGMA secure_delete=ON")
             create_current_tables(conn)
-            legacy_counts = migrate_legacy_tables_to_settings(
-                conn, encrypt_new_values
-            )
-            account_count, administrator_count = migrate_authentication_semantics(
-                conn,
-                encrypt_new_values,
-                allow_legacy_v4_wrapped_profiles=(version == "4"),
-            )
-            if (
-                (authentication_initialized and account_count == 0)
-                or (not authentication_initialized and account_count != 0)
-                or (account_count > 0 and administrator_count == 0)
-            ):
-                raise ValueError(
-                    "Migrated authentication initialization/account/admin state is inconsistent"
+            if known_auth3_login_preference_drift:
+                for preference_key in ("RememberPassword", "AutoLogin"):
+                    insert_scoped_setting(
+                        conn,
+                        "global",
+                        "",
+                        "LoginState",
+                        preference_key,
+                        "0",
+                        encrypt_new_values,
+                        "bool",
+                        overwrite=True,
+                    )
+                legacy_counts = (0, 0, 0)
+                default_count = 0
+                default_details = {
+                    "auth3_login_preference_type_repair": 2,
+                }
+            else:
+                legacy_counts = migrate_legacy_tables_to_settings(
+                    conn, encrypt_new_values
                 )
-            default_count, default_details = ensure_runtime_defaults(
-                conn, data_dir, encrypt_new_values
-            )
-            drop_legacy_config_tables(conn)
-            set_schema_meta(
-                conn,
-                encrypt_new_values,
-                authentication_initialized=authentication_initialized,
-            )
-            if version != SCHEMA_VERSION:
-                set_legacy_credential_scrub_pending(conn, scrub_manifest)
+                account_count, administrator_count = migrate_authentication_semantics(
+                    conn,
+                    encrypt_new_values,
+                    allow_legacy_v4_wrapped_profiles=(version == "4"),
+                )
+                if (
+                    (authentication_initialized and account_count == 0)
+                    or (not authentication_initialized and account_count != 0)
+                    or (account_count > 0 and administrator_count == 0)
+                ):
+                    raise ValueError(
+                        "Migrated authentication initialization/account/admin state is inconsistent"
+                    )
+                default_count, default_details = ensure_runtime_defaults(
+                    conn, data_dir, encrypt_new_values
+                )
+                drop_legacy_config_tables(conn)
+                set_schema_meta(
+                    conn,
+                    encrypt_new_values,
+                    authentication_initialized=authentication_initialized,
+                )
+                if version != SCHEMA_VERSION:
+                    set_legacy_credential_scrub_pending(conn, scrub_manifest)
             integrity = conn.execute("PRAGMA integrity_check").fetchall()
             if integrity != [("ok",)]:
                 raise ValueError(

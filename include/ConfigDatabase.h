@@ -15,6 +15,13 @@ public:
         Error
     };
 
+    struct ScopedSettingValue
+    {
+        QString value;
+        QString valueType = QStringLiteral("string");
+        bool sensitive = false;
+    };
+
     static QString DatabasePath();
     static QString NormalizeFilePath(const QString& fileName);
     static std::string NormalizeFilePath(const std::string& fileName);
@@ -81,6 +88,16 @@ public:
         const QString& moduleName,
         const QMap<QString, QString>& values,
         const QString& valueType = QStringLiteral("string"));
+    static bool WriteScopedSettings(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName,
+        const QMap<QString, ScopedSettingValue>& values);
+    static bool WriteLoginState(
+        const QStringList& accountHistory,
+        const QString& userName,
+        bool rememberPassword,
+        bool autoLogin);
     static bool TryReadAuthenticationInitialized(bool* initialized);
     static bool TryInitializeAuthenticationAccount(
         const QString& accountId,

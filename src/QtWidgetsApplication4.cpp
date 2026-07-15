@@ -10918,17 +10918,11 @@ void QtWidgetsApplication4::SaveLoginState() const
 		m_pAutoLoginCheck->setChecked(false);
 		m_pAutoLoginCheck->setEnabled(false);
 	}
-	QMap<QString, QString> loginState;
-	loginState.insert(QStringLiteral("AccountHistory"), history.join(QLatin1Char('\n')));
-	loginState.insert(QStringLiteral("UserName"), userName);
-	loginState.insert(QStringLiteral("RememberPassword"), credentialStored ? QStringLiteral("1") : QStringLiteral("0"));
-	loginState.insert(
-		QStringLiteral("AutoLogin"),
-		credentialStored && m_pAutoLoginCheck->isChecked()
-			? QStringLiteral("1")
-			: QStringLiteral("0"));
-	if (!ConfigDatabase::WriteScopedSettings(
-			QStringLiteral("global"), QString(), LoginStateGroup(), loginState))
+	if (!ConfigDatabase::WriteLoginState(
+			history,
+			userName,
+			credentialStored,
+			credentialStored && m_pAutoLoginCheck->isChecked()))
 	{
 		ClearRememberedCredential(userName);
 		m_pRememberPasswordCheck->setChecked(false);
