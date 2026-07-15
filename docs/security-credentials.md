@@ -4,7 +4,7 @@ ConfigStore schema v5 将账号口令与可恢复凭据分开处理：
 
 - 账号口令保存为自描述的 PBKDF2-HMAC-SHA256 记录，使用 16 字节随机盐、600,000 次迭代和 32 字节派生值。摘要不是可恢复凭据，不绑定 Windows 用户；旧的单次 SHA256 记录只在正确密码验证后升级，升级写入失败时拒绝登录。
 - 记住密码、机器人/在线服务 FTP 密码和管理令牌使用 Windows DPAPI CurrentUser。DPAPI 的 optional entropy 绑定到 scope、module 和 key，复制到另一个字段后不能解密；保护或解密失败时没有明文、Base64 或 XOR 回退。
-- 全新空数据库不携带或生成公开的默认管理员密码，而是在认证页要求首位本机用户为固定账号名 `admin` 设置至少 8 位密码；管理员创建或重置的其他账号仍设置 `MustChangePassword=1`，完成改密前不建立用户会话。
+- 全新空数据库不携带或生成公开的默认管理员密码，而是在认证页要求首位本机用户为固定账号名 `admin` 设置至少 8 位密码；管理员新建的其他账号使用初始临时密码并设置 `MustChangePassword=1`。管理界面修改既有账号密码时默认作为最终密码直接生效，只有管理员显式勾选“下次登录强制再次修改密码（临时密码）”才保留 `MustChangePassword=1`；需要改密时，完成前不建立用户会话。
 - 只有真正新建且没有账号的数据库带 `auth_initialized=0`；用户自设密码的初始管理员记录与该标志在 `BEGIN IMMEDIATE` 事务中一次性提交。既有库、未显式重建的旧空库、账号被清空或有账号但无管理员时都进入恢复状态，不能重新生成已知默认凭据。
 - v4→v5 在单一 SQLite 事务中恢复旧 `Accounts.ini` 语义映射、清除旧 `PasswordBase64/SavedPasswords`，再升级可恢复凭据。未知未来 schema 或非法认证元数据直接拒绝打开，不降级覆盖。
 - 认证语义版本 2 会把既有 `account/Profile` 中旧 `enc:v1` 的 PasswordHash/Role 解码后严格校验，并将 PasswordHash、Role、MustChangePassword 规范为 `encrypted=0` 的不可恢复验证元数据；缺少改密标志时强制为 1。存在账号但没有合法管理员的迁移会原子失败。

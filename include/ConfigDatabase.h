@@ -124,7 +124,8 @@ public:
         const QString& administratorId,
         const QString& accountId,
         const QString& newRole,
-        const QString& newPasswordRecord = QString());
+        const QString& newPasswordRecord,
+        bool forcePasswordChange);
     static bool TryDeleteAccountByAdministrator(
         const QString& administratorId,
         const QString& accountId);
