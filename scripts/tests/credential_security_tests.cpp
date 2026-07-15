@@ -323,19 +323,16 @@ int RunAuthenticationInitializationTest()
         ConfigDatabase::TryReadAuthenticationInitialized(&initialized) && initialized,
         QStringLiteral("bootstrap account and initialization marker commit together"));
 
-    QMap<QString, QString> loginPreferences;
-    loginPreferences.insert(QStringLiteral("RememberPassword"), QStringLiteral("1"));
-    loginPreferences.insert(QStringLiteral("AutoLogin"), QStringLiteral("1"));
     Check(
         ConfigDatabase::WriteScopedSetting(
             QStringLiteral("global"), QString(),
             QStringLiteral("LoginState/RememberedCredentials"),
             QStringLiteral("admin"), QStringLiteral("Synthetic-Remembered-Credential"),
             QStringLiteral("string"), true)
-            && ConfigDatabase::WriteScopedSettings(
-                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
-                loginPreferences, QStringLiteral("bool")),
-        QStringLiteral("create real protected remembered-login fixture"));
+            && ConfigDatabase::WriteLoginState(
+                { QStringLiteral("admin"), QStringLiteral("operator") },
+                QStringLiteral("admin"), true, true),
+        QStringLiteral("atomically persist mixed-type remembered-login state"));
     std::atomic_bool rememberedStateReopens{ false };
     std::thread rememberedStateProbe([&rememberedStateReopens]()
         {
@@ -343,7 +340,38 @@ int RunAuthenticationInitializationTest()
         });
     rememberedStateProbe.join();
     Check(rememberedStateReopens.load(),
-        QStringLiteral("protected remembered login state survives a fresh thread reopen"));
+        QStringLiteral("mixed-type remembered login state passes fresh schema verification"));
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), QStringLiteral("login_state_type_verify"));
+        db.setDatabaseName(temp.filePath(QStringLiteral("Data/ConfigStore.db")));
+        Check(db.open(), QStringLiteral("open mixed-type login state verification"));
+        QSqlQuery query(db);
+        Check(query.exec(QStringLiteral(
+                "SELECT key_name, value_text, value_type, sensitive, encrypted FROM settings "
+                "WHERE scope_type='global' AND scope_id='' AND module='LoginState' "
+                "ORDER BY key_name")),
+            QStringLiteral("read mixed-type login state storage"));
+        int rows = 0;
+        while (query.next())
+        {
+            const QString keyName = query.value(0).toString();
+            const bool preference = keyName == QLatin1String("RememberPassword")
+                || keyName == QLatin1String("AutoLogin");
+            Check(query.value(2).toString()
+                    == (preference ? QLatin1String("bool") : QLatin1String("string"))
+                    && query.value(3).toInt() == (preference ? 1 : 0)
+                    && query.value(4).toInt() == (preference ? 1 : 0)
+                    && (!preference || CredentialSecurity::IsCurrentUserProtected(
+                        query.value(1).toString())),
+                QStringLiteral("login state field has canonical type and protection: %1")
+                    .arg(keyName));
+            ++rows;
+        }
+        Check(rows == 4, QStringLiteral("all mixed-type login state fields persisted"));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(QStringLiteral("login_state_type_verify"));
     Check(
         ConfigDatabase::WriteScopedSetting(
             QStringLiteral("global"), QString(),

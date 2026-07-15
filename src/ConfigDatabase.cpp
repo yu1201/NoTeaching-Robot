@@ -3312,6 +3312,23 @@ bool ConfigDatabase::WriteScopedSettings(
     const QMap<QString, QString>& values,
     const QString& valueType)
 {
+    QMap<QString, ScopedSettingValue> typedValues;
+    for (auto it = values.cbegin(); it != values.cend(); ++it)
+    {
+        ScopedSettingValue typedValue;
+        typedValue.value = it.value();
+        typedValue.valueType = valueType;
+        typedValues.insert(it.key(), typedValue);
+    }
+    return WriteScopedSettings(scopeType, scopeId, moduleName, typedValues);
+}
+
+bool ConfigDatabase::WriteScopedSettings(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QMap<QString, ScopedSettingValue>& values)
+{
     if (values.isEmpty())
     {
         return true;
@@ -3330,12 +3347,14 @@ bool ConfigDatabase::WriteScopedSettings(
     const QString normalizedScopeType = NormalizeSection(scopeType).toLower();
     const QString normalizedScopeId = NormalizeScopeId(scopeId);
     const QString normalizedModule = NormalizeSection(moduleName);
-    const QString normalizedValueType = valueType.trimmed().isEmpty()
-        ? QStringLiteral("string")
-        : valueType.trimmed().toLower();
     for (auto it = values.cbegin(); it != values.cend(); ++it)
     {
-        const bool sensitive = IsSensitiveSettingKey(normalizedModule)
+        const ScopedSettingValue& typedValue = it.value();
+        const QString normalizedValueType = typedValue.valueType.trimmed().isEmpty()
+            ? QStringLiteral("string")
+            : typedValue.valueType.trimmed().toLower();
+        const bool sensitive = typedValue.sensitive
+            || IsSensitiveSettingKey(normalizedModule)
             || IsSensitiveSettingKey(it.key());
         int encrypted = 0;
         QString storedText;
@@ -3343,7 +3362,8 @@ bool ConfigDatabase::WriteScopedSettings(
             normalizedScopeType, normalizedScopeId, normalizedModule, it.key());
         const bool requiresDpapi = RequiresDpapiProtection(
             normalizedScopeType, normalizedModule, it.key(), sensitive);
-        if (!EncodeStoredText(db, it.value(), requiresDpapi, purpose, &storedText, &encrypted))
+        if (!EncodeStoredText(
+                db, typedValue.value, requiresDpapi, purpose, &storedText, &encrypted))
         {
             db.rollback();
             return false;
@@ -3369,6 +3389,31 @@ bool ConfigDatabase::WriteScopedSettings(
         return false;
     }
     return true;
+}
+
+bool ConfigDatabase::WriteLoginState(
+    const QStringList& accountHistory,
+    const QString& userName,
+    bool rememberPassword,
+    bool autoLogin)
+{
+    QMap<QString, ScopedSettingValue> values;
+    values.insert(
+        QStringLiteral("AccountHistory"),
+        { accountHistory.join(QLatin1Char('\n')), QStringLiteral("string"), false });
+    values.insert(
+        QStringLiteral("UserName"),
+        { userName, QStringLiteral("string"), false });
+    values.insert(
+        QStringLiteral("RememberPassword"),
+        { rememberPassword ? QStringLiteral("1") : QStringLiteral("0"),
+          QStringLiteral("bool"), true });
+    values.insert(
+        QStringLiteral("AutoLogin"),
+        { autoLogin ? QStringLiteral("1") : QStringLiteral("0"),
+          QStringLiteral("bool"), true });
+    return WriteScopedSettings(
+        QStringLiteral("global"), QString(), QStringLiteral("LoginState"), values);
 }
 
 bool ConfigDatabase::RemoveScopedSetting(
