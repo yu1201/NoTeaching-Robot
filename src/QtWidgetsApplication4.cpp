@@ -1930,11 +1930,13 @@ namespace
 			titleLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 			titleLabel->setFixedHeight(34);
 			rootLayout->addWidget(titleLabel);
-			QLabel* hintLabel = new QLabel("这里可以新增账号、修改权限、重置密码或删除账号。仅管理员可使用。");
+			QLabel* hintLabel = new QLabel(
+				"这里可以新增账号、修改权限、修改密码或删除账号。新建账号使用初始临时密码；"
+				"编辑账号时的新密码默认直接生效，也可以显式要求下次登录再次修改。仅管理员可使用。");
 			hintLabel->setWordWrap(true);
 			hintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
 			hintLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-			hintLabel->setMaximumHeight(48);
+			hintLabel->setMaximumHeight(72);
 			rootLayout->addWidget(hintLabel);
 
 			QGroupBox* createGroup = new QGroupBox("新增账号", this);
@@ -1951,7 +1953,7 @@ namespace
 			m_createPassEdit->setMinimumWidth(260);
 			m_createRoleCombo->setMinimumWidth(180);
 			createForm->addRow("账号", m_createUserEdit);
-			createForm->addRow("密码", m_createPassEdit);
+			createForm->addRow("初始临时密码", m_createPassEdit);
 			createForm->addRow("权限", m_createRoleCombo);
 			QHBoxLayout* createButtonLayout = new QHBoxLayout();
 			QPushButton* createBtn = new QPushButton("创建账号", createGroup);
@@ -1988,10 +1990,14 @@ namespace
 			m_editPassEdit = new QLineEdit(editGroup);
 			m_editPassEdit->setEchoMode(QLineEdit::Password);
 			m_editPassEdit->setPlaceholderText("留空表示不修改密码");
+			m_forcePasswordChangeCheck = new QCheckBox("下次登录强制再次修改密码（临时密码）", editGroup);
+			m_forcePasswordChangeCheck->setChecked(false);
+			m_forcePasswordChangeCheck->setEnabled(false);
 			m_editRoleCombo->setMinimumWidth(180);
 			m_editPassEdit->setMinimumWidth(260);
 			editForm->addRow("权限", m_editRoleCombo);
 			editForm->addRow("新密码", m_editPassEdit);
+			editForm->addRow("密码策略", m_forcePasswordChangeCheck);
 			editLayout->addLayout(editForm);
 			QHBoxLayout* editButtonLayout = new QHBoxLayout();
 			QPushButton* saveBtn = new QPushButton("保存修改", editGroup);
@@ -2040,6 +2046,14 @@ namespace
 					}
 				});
 			connect(closeBtn, &QPushButton::clicked, this, &QDialog::accept);
+			connect(m_editPassEdit, &QLineEdit::textChanged, this, [this](const QString& password)
+				{
+					m_forcePasswordChangeCheck->setEnabled(!password.isEmpty());
+					if (password.isEmpty())
+					{
+						m_forcePasswordChangeCheck->setChecked(false);
+					}
+				});
 			connect(m_accountTable, &QTableWidget::itemSelectionChanged, this, [this]() { SyncEditorFromSelection(); });
 			LoadAccounts();
 		}
@@ -2094,7 +2108,7 @@ namespace
 				m_accountTable->setItem(row, 1, new QTableWidgetItem(DisplayRoleNameForAccount(role)));
 				m_accountTable->setItem(row, 2, new QTableWidgetItem(createdAt));
 				m_accountTable->setItem(row, 3, new QTableWidgetItem(
-					StoredBool(mustChangePassword) ? QStringLiteral("首次登录须改密") : QStringLiteral("已设置")));
+					StoredBool(mustChangePassword) ? QStringLiteral("下次登录须改密") : QStringLiteral("已设置")));
 				++row;
 			}
 			if (row > 0)
@@ -2121,6 +2135,8 @@ namespace
 			{
 				m_editRoleCombo->setCurrentIndex(roleIndex);
 			}
+			m_editPassEdit->clear();
+			m_forcePasswordChangeCheck->setChecked(false);
 		}
 
 		bool CreateAccount()
@@ -2191,6 +2207,8 @@ namespace
 				return false;
 			}
 			const QString newPassword = m_editPassEdit->text();
+			const bool forcePasswordChange = !newPassword.isEmpty()
+				&& m_forcePasswordChangeCheck->isChecked();
 			if (userName.compare(m_currentUserName, Qt::CaseInsensitive) == 0
 				&& (currentRole != newRole || !newPassword.isEmpty()))
 			{
@@ -2215,13 +2233,20 @@ namespace
 				}
 			}
 			if (!ConfigDatabase::TryUpdateAccountByAdministrator(
-					m_currentUserName, AccountUserId(userName), newRole, newPasswordRecord))
+					m_currentUserName, AccountUserId(userName), newRole,
+					newPasswordRecord, forcePasswordChange))
 			{
 				QMessageBox::warning(this, "保存修改", "账号状态或管理员权限已变化，安全事务已拒绝本次修改。请刷新后重试。");
 				return false;
 			}
 			m_editPassEdit->clear();
-			AppendLog(QString("已更新账号 %1 的权限与密码。").arg(userName));
+			AppendLog(newPassword.isEmpty()
+				? QString("已更新账号 %1 的权限。").arg(userName)
+				: QString("已更新账号 %1 的权限与密码；%2。").arg(
+					userName,
+					forcePasswordChange
+						? QStringLiteral("下次登录须再次修改密码")
+						: QStringLiteral("新密码已直接生效")));
 			return true;
 		}
 
@@ -2273,6 +2298,7 @@ namespace
 		QComboBox* m_createRoleCombo = nullptr;
 		QComboBox* m_editRoleCombo = nullptr;
 		QLineEdit* m_editPassEdit = nullptr;
+		QCheckBox* m_forcePasswordChangeCheck = nullptr;
 		QPlainTextEdit* m_logText = nullptr;
 		QString m_currentUserName;
 	};
@@ -11187,7 +11213,7 @@ bool QtWidgetsApplication4::PromptForcedPasswordChange(
 	currentRole.clear();
 	securityFingerprint.clear();
 	QDialog dialog(this);
-	dialog.setWindowTitle(QStringLiteral("首次登录必须修改密码"));
+	dialog.setWindowTitle(QStringLiteral("临时密码必须修改"));
 	dialog.setWindowModality(Qt::ApplicationModal);
 	dialog.setWindowFlag(Qt::WindowContextHelpButtonHint, false);
 	ApplyUnifiedWindowChrome(&dialog);

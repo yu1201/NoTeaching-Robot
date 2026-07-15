@@ -533,9 +533,12 @@ bool ConfigDatabase::TryUpdateAccountByAdministrator(
     const QString& administratorId,
     const QString& accountId,
     const QString& newRole,
-    const QString& newPasswordRecord)
+    const QString& newPasswordRecord,
+    bool forcePasswordChange)
 {
-    if (!IsValidRole(newRole) || !IsAvailable())
+    if (!IsValidRole(newRole)
+        || (forcePasswordChange && newPasswordRecord.isEmpty())
+        || !IsAvailable())
     {
         return false;
     }
@@ -591,7 +594,8 @@ bool ConfigDatabase::TryUpdateAccountByAdministrator(
         updatePassword.addBindValue(target);
         if (!updatePassword.exec() || updatePassword.numRowsAffected() != 1
             || !UpsertProfileValue(
-                database, target, QStringLiteral("MustChangePassword"), QStringLiteral("1"),
+                database, target, QStringLiteral("MustChangePassword"),
+                forcePasswordChange ? QStringLiteral("1") : QStringLiteral("0"),
                 QStringLiteral("bool"), true)
             || !UpsertProfileValue(
                 database, target, QStringLiteral("PasswordChangedAt"),

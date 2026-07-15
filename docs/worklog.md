@@ -7,6 +7,8 @@
 
 ## 2026-07-15
 
+- 版本 v2026.07.15.1519：修复账号管理“修改密码”被固定当成临时密码重置、导致用户使用新密码登录后仍被强制二次改密的问题。① `TryUpdateAccountByAdministrator` 增加显式密码策略参数，管理界面默认把新密码作为最终密码，仅勾选“下次登录强制再次修改密码（临时密码）”时写入 `MustChangePassword=1`；空密码与强制策略的矛盾组合失败关闭。② 新建账号继续使用初始临时密码；账号列表与改密窗口文案区分“首次创建”和“下次登录”，切换目标账号时清空未保存的新密码与策略。③ 动态测试验证两种管理员改密模式、旧密码失效、新密码有效、记忆凭据撤销及异常组合不改变账户状态；完整 C++ 认证 runner、80 项 Python 数据库回归与独立审查通过。署名 yu1201。
+
 - 版本 v2026.07.15.1440：修复 v2026.07.15.1118 登录成功后再次启动被账号库完整性门禁锁定的问题。根因是 `SaveLoginState` 将字符串字段与布尔偏好放进同一个默认 `string` 批写，导致迁移时已规范化的 `RememberPassword`/`AutoLogin` 在首次登录后又被写回 DPAPI `string`。① 新增 `ConfigDatabase::WriteLoginState` 专用原子入口，固定四字段的 string/string/bool/bool 类型及敏感保护，界面与动态测试共用同一生产入口。② 安装迁移器只对已完整证明的 auth3 双字段 DPAPI string 0/1 漂移开放恢复；先验证全部 schema/认证结构并创建 DPAPI 备份，再在私有事务中把两项安全关闭并 CAS 原子发布，账号/Profile 行不参与重写。③ 缺行、混合形态、不可解密、非 0/1 或账号异常均在备份/发布前失败且源字节不变；0 行或部分/完整 canonical bool 保持兼容 no-op。完整 C++ runner、80 项 Python、ConfigMigrate parity、`git diff --check` 与两轮独立 P1/P2 审查通过。署名 yu1201。
 
 - 版本 v2026.07.15.1118：修复 v2026.07.15.0928 覆盖安装后认证库仍进入安全恢复页的问题。根因是旧数据库存在 `LoginState/Settings/AutoLogin` 明文行，而 Python 安装迁移器只迁移 `LoginState/General`，导致安装器校验与 C++ 启动校验语义不一致。① auth 语义升级到 v3，Python/C++ 同时迁移 General、Settings 与现有 canonical LoginState；`UserName`、`AccountHistory` 仅在解码值一致时合并，任何来源/目标冲突、大小写影子或错误 scope 都原子回滚。② `RememberPassword`、`AutoLogin` 不继承旧值，统一写为 DPAPI 保护的 bool 0；auth3 只接受规范 DPAPI 布尔形态，旧 plaintext 发布形态仅允许作为 auth1/auth2 迁移输入。③ C++ 启动路径与安装迁移器统一前向闭锁，schema5 只允许 auth1/auth2/auth3，缺失、损坏或未来版本在事务前拒绝且数据库完整字节不变。④ 使用 `D:\SoftWare\HK-Pathlynx-CORPLA\Data` 的只读副本完成 preinstall、commit、最终 verify 演练，原始数据库 SHA-256 不变；77 项 Python、完整 C++ runner、ConfigMigrate parity、PowerShell 安装迁移与同版本恢复、AppPaths/恢复界面检查全部通过。署名 yu1201。

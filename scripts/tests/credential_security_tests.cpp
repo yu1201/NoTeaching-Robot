@@ -275,9 +275,18 @@ int RunAuthenticationInitializationTest()
         QStringLiteral("Synthetic-Current-Administrator-Test"));
     const QString secondAdministratorRecord = CredentialSecurity::CreatePasswordRecord(
         QStringLiteral("Synthetic-Second-Administrator-Test"));
+    const QString managedInitialRecord = CredentialSecurity::CreatePasswordRecord(
+        QStringLiteral("Synthetic-Managed-Initial-Test"));
+    const QString managedDirectRecord = CredentialSecurity::CreatePasswordRecord(
+        QStringLiteral("Synthetic-Managed-Direct-Test"));
+    const QString managedTemporaryRecord = CredentialSecurity::CreatePasswordRecord(
+        QStringLiteral("Synthetic-Managed-Temporary-Test"));
     Check(!initialAdministratorRecord.isEmpty()
         && !currentAdministratorRecord.isEmpty()
-        && !secondAdministratorRecord.isEmpty(),
+        && !secondAdministratorRecord.isEmpty()
+        && !managedInitialRecord.isEmpty()
+        && !managedDirectRecord.isEmpty()
+        && !managedTemporaryRecord.isEmpty(),
         QStringLiteral("create supported authentication test records"));
     QMap<QString, QString> bootstrap;
     bootstrap.insert(QStringLiteral("PasswordHash"), initialAdministratorRecord);
@@ -454,13 +463,98 @@ int RunAuthenticationInitializationTest()
         QStringLiteral("case-colliding account creation is rejected"));
     Check(
         !ConfigDatabase::TryUpdateAccountByAdministrator(
-            QStringLiteral("admin"), QStringLiteral("admin"), QStringLiteral("operator")),
+            QStringLiteral("admin"), QStringLiteral("admin"), QStringLiteral("operator"),
+            QString(), false),
         QStringLiteral("administrator cannot demote the active actor"));
     Check(
         !ConfigDatabase::TryUpdateAccountByAdministrator(
             QStringLiteral("admin"), QStringLiteral("admin"), QStringLiteral("admin"),
-            QStringLiteral("self-reset-must-fail")),
+            QStringLiteral("self-reset-must-fail"), false),
         QStringLiteral("administrator cannot reset the active actor password"));
+
+    QMap<QString, QString> managedUser;
+    managedUser.insert(QStringLiteral("PasswordHash"), managedInitialRecord);
+    managedUser.insert(QStringLiteral("Role"), QStringLiteral("operator"));
+    managedUser.insert(QStringLiteral("MustChangePassword"), QStringLiteral("0"));
+    Check(
+        ConfigDatabase::TryCreateAccount(
+            QStringLiteral("managed_user"), managedUser, QStringLiteral("admin")),
+        QStringLiteral("administrator creates managed password-policy fixture"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("global"), QString(),
+            QStringLiteral("LoginState/RememberedCredentials"),
+            QStringLiteral("managed_user"), QStringLiteral("Synthetic-Managed-Remembered"),
+            QStringLiteral("string"), true),
+        QStringLiteral("create managed remembered credential before direct password update"));
+    Check(
+        ConfigDatabase::TryUpdateAccountByAdministrator(
+            QStringLiteral("admin"), QStringLiteral("managed_user"),
+            QStringLiteral("operator"), managedDirectRecord, false),
+        QStringLiteral("administrator can set a directly usable password"));
+    Check(
+        ConfigDatabase::TryReadAccountSecurityState(
+            QStringLiteral("managed_user"), &storedPassword, &currentRole,
+            &storedMustChange, &storedFingerprint)
+            && storedPassword == managedDirectRecord
+            && currentRole == QStringLiteral("operator")
+            && !storedMustChange
+            && CredentialSecurity::VerifyPasswordRecord(
+                QStringLiteral("managed_user"),
+                QStringLiteral("Synthetic-Managed-Direct-Test"), storedPassword)
+                == CredentialSecurity::PasswordVerification::Valid
+            && CredentialSecurity::VerifyPasswordRecord(
+                QStringLiteral("managed_user"),
+                QStringLiteral("Synthetic-Managed-Initial-Test"), storedPassword)
+                == CredentialSecurity::PasswordVerification::Invalid
+            && !ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/RememberedCredentials"),
+                QStringLiteral("managed_user"), &removedCredential),
+        QStringLiteral("direct administrator password update does not force a second change"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("global"), QString(),
+            QStringLiteral("LoginState/RememberedCredentials"),
+            QStringLiteral("managed_user"), QStringLiteral("Synthetic-Managed-Remembered-Again"),
+            QStringLiteral("string"), true),
+        QStringLiteral("create managed remembered credential before temporary password update"));
+    Check(
+        ConfigDatabase::TryUpdateAccountByAdministrator(
+            QStringLiteral("admin"), QStringLiteral("managed_user"),
+            QStringLiteral("operator"), managedTemporaryRecord, true),
+        QStringLiteral("administrator can explicitly issue a temporary password"));
+    Check(
+        ConfigDatabase::TryReadAccountSecurityState(
+            QStringLiteral("managed_user"), &storedPassword, &currentRole,
+            &storedMustChange, &storedFingerprint)
+            && storedPassword == managedTemporaryRecord
+            && currentRole == QStringLiteral("operator")
+            && storedMustChange
+            && CredentialSecurity::VerifyPasswordRecord(
+                QStringLiteral("managed_user"),
+                QStringLiteral("Synthetic-Managed-Temporary-Test"), storedPassword)
+                == CredentialSecurity::PasswordVerification::Valid
+            && CredentialSecurity::VerifyPasswordRecord(
+                QStringLiteral("managed_user"),
+                QStringLiteral("Synthetic-Managed-Direct-Test"), storedPassword)
+                == CredentialSecurity::PasswordVerification::Invalid
+            && !ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/RememberedCredentials"),
+                QStringLiteral("managed_user"), &removedCredential),
+        QStringLiteral("explicit temporary password requires a second change"));
+    Check(
+        !ConfigDatabase::TryUpdateAccountByAdministrator(
+            QStringLiteral("admin"), QStringLiteral("managed_user"),
+            QStringLiteral("operator"), QString(), true)
+            && ConfigDatabase::TryReadAccountSecurityState(
+                QStringLiteral("managed_user"), &storedPassword, &currentRole,
+                &storedMustChange, &storedFingerprint)
+            && storedPassword == managedTemporaryRecord
+            && currentRole == QStringLiteral("operator")
+            && storedMustChange,
+        QStringLiteral("temporary-password policy without a new password fails closed"));
 
     std::atomic_int deleteSuccesses{ 0 };
     std::thread firstDelete([&deleteSuccesses]()

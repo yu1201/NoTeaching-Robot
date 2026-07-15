@@ -135,6 +135,8 @@ def main() -> int:
         "ValidNeedsUpgrade",
         "TryCompareAndSetAccountPassword",
         "TryUpdateAccountByAdministrator",
+        "下次登录强制再次修改密码（临时密码）",
+        "新密码已直接生效",
         "TryDeleteAccountByAdministrator",
         "ValidateCurrentAccountSession",
         "RevokePrivilegedUiAccess",
@@ -152,6 +154,11 @@ def main() -> int:
         "!RobotOperationLease::NewOperationsAllowed()",
     ):
         require(token in app, f"account lifecycle gate missing: {token}")
+    require(
+        'forcePasswordChange ? QStringLiteral("1") : QStringLiteral("0")'
+        in authentication,
+        "administrator password policy is not explicit and selectable",
+    )
     require("std::function<bool()> liveSessionGuard" in laser_filter_header,
             "point-cloud external library settings do not receive a live engineer-session guard")
     require(laser_filter.count("!m_liveSessionGuard || !m_liveSessionGuard()") >= 3,
