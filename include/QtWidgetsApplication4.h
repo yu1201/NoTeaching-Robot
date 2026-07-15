@@ -154,6 +154,8 @@ private:
         QString& currentRole,
         QString& securityFingerprint);
     void SetAuthRegisterMode(bool registerMode);
+    void StartAccountDatabaseRepair();
+    void CheckPendingAccountDatabaseRepairResult();
     void RefreshAuthModeUi();
     void LoginCurrentAccount();
     void LoginAsGuest();
@@ -287,6 +289,7 @@ private:
     QPushButton* m_pAuthLoginModeBtn;
     QPushButton* m_pAuthRegisterModeBtn;
     QPushButton* m_pAuthSubmitBtn;
+    QPushButton* m_pAuthRepairBtn;
     QPushButton* m_pAuthCancelBtn;
     QPushButton* m_pGuestLoginBtn;
     QPushButton* m_pDashboardConnectBtn;
@@ -330,6 +333,7 @@ private:
     QString m_sMeasureThenWeldStatus;
     QString m_sAuthHintOverride;
     bool m_bAuthRegisterMode;
+    bool m_bAuthRepairRunning = false;
     bool m_bAccountRecoveryRequired = false;
     bool m_bInitialAdministratorSetupRequired = false;
     bool m_bAccountSessionEventValidation = false;

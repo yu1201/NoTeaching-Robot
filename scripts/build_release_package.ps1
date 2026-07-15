@@ -203,14 +203,15 @@ Write-Host "Running windeployqt on the Release executable..."
 # Trim payload the app never loads: D3D/DXC shader compilers (pure Widgets + QOpenGLWidget,
 # no Qt Quick/RHI), PDF plugin chain (no PDF feature), unused image formats (icons are svg/ico,
 # png is built into Qt6Gui; keep qjpeg conservatively), unused SQL drivers (only QSQLITE),
-# TLS backends (plain sockets only; FTP goes through WinINet) and TUIO touch plugin.
+# Network-information and generic/TUIO plugins are unused. Keep the TLS plugin type:
+# OTA and the server-management API use HTTPS and require qschannelbackend.dll on Windows.
 $windeployqtPath = Assert-ReleaseExternalTool `
     -Path $windeployqtPath -ExpectedSha256 $WinDeployQtSha256 `
     -ExpectedFileName "windeployqt.exe" -PublisherPattern '(?i)The Qt Company'
 & $windeployqtPath --release --no-translations --no-opengl-sw `
     --no-system-d3d-compiler --no-system-dxc-compiler `
     --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer `
-    --skip-plugin-types tls,networkinformation,generic `
+    --skip-plugin-types networkinformation,generic `
     $exePath
 if ($LASTEXITCODE -ne 0) {
     throw "windeployqt failed with exit code $LASTEXITCODE."
@@ -235,11 +236,16 @@ foreach ($staleRelative in $staleDeployFiles) {
         Remove-Item -LiteralPath $stalePath -Force
     }
 }
-foreach ($staleDir in @("tls", "networkinformation", "generic")) {
+foreach ($staleDir in @("networkinformation", "generic")) {
     $staleDirPath = Join-Path $buildDir $staleDir
     if (Test-Path -LiteralPath $staleDirPath) {
         Remove-Item -LiteralPath $staleDirPath -Recurse -Force
     }
+}
+
+$schannelBackendPath = Join-Path $buildDir "tls\qschannelbackend.dll"
+if (-not (Test-Path -LiteralPath $schannelBackendPath -PathType Leaf)) {
+    throw "Required Qt Schannel TLS backend was not deployed: $schannelBackendPath"
 }
 
 $qtRoot = Split-Path -Parent (Split-Path -Parent $windeployqtPath)
