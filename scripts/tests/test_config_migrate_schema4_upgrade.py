@@ -137,6 +137,11 @@ class StrictLegacyAccountTests(unittest.TestCase):
         connection.commit()
         return connection
 
+    def test_autologin_is_an_exact_sensitive_key(self) -> None:
+        self.assertTrue(MIGRATOR["is_sensitive_setting_key"]("AutoLogin"))
+        self.assertTrue(MIGRATOR["is_sensitive_setting_key"]("autologin"))
+        self.assertFalse(MIGRATOR["is_sensitive_setting_key"]("AutoLoginMode"))
+
     def test_rejects_conflicting_duplicate_layouts(self) -> None:
         connection = self._connection()
         try:
@@ -206,6 +211,10 @@ class StrictLegacyAccountTests(unittest.TestCase):
                 "authentication module",
             ),
             (
+                (("LoginState/settings", "UserName", "admin", 0),),
+                "authentication module",
+            ),
+            (
                 (("LoginState/savedpasswords", "admin", "legacy", 1),),
                 "authentication module",
             ),
@@ -218,6 +227,46 @@ class StrictLegacyAccountTests(unittest.TestCase):
                         insert_setting(
                             connection, "global", "", module, key, value,
                             sensitive=sensitive,
+                        )
+                    with self.assertRaisesRegex(ValueError, expected):
+                        MIGRATOR["migrate_authentication_semantics"](
+                            connection, True
+                        )
+                finally:
+                    connection.close()
+
+    def test_legacy_login_sources_and_current_state_fail_on_conflict(self) -> None:
+        fixtures = (
+            (
+                (
+                    ("LoginState/General", "UserName", "stale-user"),
+                    ("LoginState/Settings", "UserName", "other-user"),
+                ),
+                "Conflicting legacy login-state field",
+            ),
+            (
+                (
+                    ("LoginState/Settings", "AccountHistory", "stale-user"),
+                    ("LoginState", "AccountHistory", "current-user"),
+                ),
+                "Conflicting target login-state field",
+            ),
+            (
+                (("LoginState/Settings", "UnexpectedField", "value"),),
+                "unsupported field",
+            ),
+            (
+                (("LoginState/Settings", "autologin", "1"),),
+                "non-canonical casing",
+            ),
+        )
+        for rows, expected in fixtures:
+            with self.subTest(expected=expected):
+                connection = self._connection()
+                try:
+                    for module, key, value in rows:
+                        insert_setting(
+                            connection, "global", "", module, key, value
                         )
                     with self.assertRaisesRegex(ValueError, expected):
                         MIGRATOR["migrate_authentication_semantics"](
@@ -484,7 +533,10 @@ class RuntimeIniGateTests(unittest.TestCase):
                 create_settings_schema(connection, "5")
                 connection.executemany(
                     "INSERT INTO meta(key, value) VALUES(?, ?)",
-                    (("auth_semantic_version", "2"), ("auth_initialized", "0")),
+                    (
+                        ("auth_semantic_version", MIGRATOR["AUTH_SEMANTIC_VERSION"]),
+                        ("auth_initialized", "0"),
+                    ),
                 )
             changed = MIGRATOR["migrate_existing_database_to_current"](
                 db, data, True, upgrade_backup_path=backup
@@ -803,7 +855,9 @@ class ReadOnlyCurrentVerificationTests(unittest.TestCase):
 
     def test_verify_rejects_orphans_and_incomplete_metadata(self) -> None:
         cases = (
-            "auth-row", "auth-row-case", "login-row-case", "legacy-table",
+            "auth-row", "auth-row-case", "login-row-case",
+            "login-settings-row", "login-module-shadow", "login-key-shadow",
+            "legacy-table",
             "legacy-table-case", "missing-meta", "blank-created-at",
             "plaintext-secret", "profile-module-case",
             "profile-scope-case", "profile-scope-id",
@@ -825,6 +879,21 @@ class ReadOnlyCurrentVerificationTests(unittest.TestCase):
                         insert_setting(
                             connection, "global", "", "loginstate/general",
                             "UserName", "admin",
+                        )
+                    elif case == "login-settings-row":
+                        insert_setting(
+                            connection, "global", "", "LoginState/Settings",
+                            "AutoLogin", "1",
+                        )
+                    elif case == "login-module-shadow":
+                        insert_setting(
+                            connection, "global", "", "loginstate",
+                            "Unrelated", "shadow",
+                        )
+                    elif case == "login-key-shadow":
+                        insert_setting(
+                            connection, "global", "", "LoginState",
+                            "autologin", "0",
                         )
                     elif case in {"legacy-table", "legacy-table-case"}:
                         connection.execute(
@@ -989,7 +1058,7 @@ class ReadOnlyCurrentVerificationTests(unittest.TestCase):
                     MIGRATOR["verify_current_database"](db)
                 self.assertEqual(hashlib.sha256(db.read_bytes()).hexdigest(), before)
 
-    def test_plaintext_disabled_login_preferences_are_compatible_read_only(self) -> None:
+    def test_auth3_verifier_rejects_plaintext_login_preferences_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as text:
             db = self._current_database(Path(text))
             with closing(sqlite3.connect(db)) as connection, connection:
@@ -1004,7 +1073,8 @@ class ReadOnlyCurrentVerificationTests(unittest.TestCase):
                     sensitive=1, encrypted=0,
                 )
             before = hashlib.sha256(db.read_bytes()).hexdigest()
-            self.assertEqual(MIGRATOR["verify_current_database"](db), "none")
+            with self.assertRaisesRegex(ValueError, "non-canonical protected shape"):
+                MIGRATOR["verify_current_database"](db)
             self.assertEqual(hashlib.sha256(db.read_bytes()).hexdigest(), before)
 
         published_shapes = (
@@ -1028,9 +1098,8 @@ class ReadOnlyCurrentVerificationTests(unittest.TestCase):
                         encrypted=0,
                     )
                 before = hashlib.sha256(db.read_bytes()).hexdigest()
-                self.assertEqual(
-                    MIGRATOR["verify_current_database"](db), "none"
-                )
+                with self.assertRaises(ValueError):
+                    MIGRATOR["verify_current_database"](db)
                 self.assertEqual(
                     hashlib.sha256(db.read_bytes()).hexdigest(), before
                 )
@@ -1362,6 +1431,156 @@ class WindowsSchema4UpgradeTests(unittest.TestCase):
                     sensitive=1 if "Password" in key else 0,
                 )
 
+    def test_auth2_settings_plaintext_autologin_upgrades_with_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as text:
+            data = Path(text) / "Data"
+            data.mkdir()
+            db = data / "ConfigStore.db"
+            self._create_auth1_database(db, "complete", [])
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "UPDATE meta SET value='2' "
+                    "WHERE key='auth_semantic_version'"
+                )
+                insert_setting(
+                    connection, "global", "", "LoginState",
+                    "UserName", "current-user",
+                )
+                for module, key, value in (
+                    ("LoginState/General", "UserName", "current-user"),
+                    ("LoginState/General", "AccountHistory", "current-user\nadmin"),
+                    ("LoginState/General", "RememberPassword", "1"),
+                    ("LoginState/Settings", "UserName", "current-user"),
+                    ("LoginState/Settings", "AccountHistory", "current-user\nadmin"),
+                    ("LoginState/Settings", "AutoLogin", "1"),
+                ):
+                    insert_setting(
+                        connection, "global", "", module, key, value
+                    )
+                canonical_before = connection.execute(
+                    """
+                    SELECT value_text, value_type, sensitive, encrypted, updated_at
+                    FROM settings
+                    WHERE scope_type='global' AND scope_id=''
+                      AND module='LoginState' AND key_name='UserName'
+                    """
+                ).fetchone()
+            backup = data / "ConfigStore.db.auth2-upgrade.dpapi.bak"
+
+            changed = MIGRATOR["migrate_existing_database_to_current"](
+                db,
+                data,
+                True,
+                upgrade_backup_path=backup,
+            )
+
+            self.assertTrue(changed)
+            self.assertTrue(backup.is_file())
+            self.assertEqual(
+                MIGRATOR["verify_current_database"](db), "complete"
+            )
+            with closing(sqlite3.connect(db)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT value FROM meta "
+                        "WHERE key='auth_semantic_version'"
+                    ).fetchone(),
+                    (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
+                )
+                self.assertEqual(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) FROM settings
+                        WHERE lower(module) IN (
+                            lower('LoginState/General'),
+                            lower('LoginState/Settings')
+                        )
+                        """
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(
+                    connection.execute(
+                        """
+                        SELECT value_text, value_type, sensitive, encrypted,
+                               updated_at
+                        FROM settings
+                        WHERE scope_type='global' AND scope_id=''
+                          AND module='LoginState' AND key_name='UserName'
+                        """
+                    ).fetchone(),
+                    canonical_before,
+                )
+                history = connection.execute(
+                    """
+                    SELECT value_text, encrypted FROM settings
+                    WHERE scope_type='global' AND scope_id=''
+                      AND module='LoginState' AND key_name='AccountHistory'
+                    """
+                ).fetchone()
+                self.assertIsNotNone(history)
+                self.assertEqual(
+                    MIGRATOR["decode_stored_text"](
+                        str(history[0]),
+                        history[1],
+                        MIGRATOR["protection_purpose"](
+                            "global", "", "LoginState", "AccountHistory"
+                        ),
+                    ),
+                    "current-user\nadmin",
+                )
+                preferences = {
+                    key: (stored, value_type, sensitive, encrypted)
+                    for key, stored, value_type, sensitive, encrypted
+                    in connection.execute(
+                        """
+                        SELECT key_name, value_text, value_type,
+                               sensitive, encrypted
+                        FROM settings
+                        WHERE scope_type='global' AND scope_id=''
+                          AND module='LoginState'
+                          AND key_name IN ('RememberPassword', 'AutoLogin')
+                        """
+                    )
+                }
+            self.assertEqual(set(preferences), {"RememberPassword", "AutoLogin"})
+            for key, (stored, value_type, sensitive, encrypted) in preferences.items():
+                self.assertEqual(value_type, "bool")
+                self.assertEqual((sensitive, encrypted), (1, 1))
+                self.assertTrue(str(stored).startswith(MIGRATOR["DPAPI_PREFIX"]))
+                self.assertEqual(
+                    MIGRATOR["decode_stored_text"](
+                        str(stored),
+                        encrypted,
+                        MIGRATOR["protection_purpose"](
+                            "global", "", "LoginState", key
+                        ),
+                    ),
+                    "0",
+                )
+
+            restored = data / "auth2-upgrade-backup-restored.tmp"
+            restored.write_bytes(MIGRATOR["_read_dpapi_database_backup"](backup))
+            with closing(sqlite3.connect(restored)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT value FROM meta "
+                        "WHERE key='auth_semantic_version'"
+                    ).fetchone(),
+                    ("2",),
+                )
+                self.assertEqual(
+                    connection.execute(
+                        """
+                        SELECT value_text, value_type, sensitive, encrypted
+                        FROM settings
+                        WHERE module='LoginState/Settings'
+                          AND key_name='AutoLogin'
+                        """
+                    ).fetchone(),
+                    ("1", "string", 0, 0),
+                )
+
     def test_read_only_verification_refuses_pending_atomic_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as text:
             data = Path(text) / "Data"
@@ -1420,8 +1639,8 @@ class WindowsSchema4UpgradeTests(unittest.TestCase):
             self._create_auth1_database(db, "complete", [])
             with closing(sqlite3.connect(db)) as connection, connection:
                 connection.execute(
-                    "UPDATE meta SET value='2' "
-                    "WHERE key='auth_semantic_version'"
+                    "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                    (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
                 )
             external_alias = root / "external-configstore-alias.db"
             os.link(db, external_alias)
@@ -1440,8 +1659,8 @@ class WindowsSchema4UpgradeTests(unittest.TestCase):
             self._create_auth1_database(db, "complete", [])
             with closing(sqlite3.connect(db)) as connection, connection:
                 connection.execute(
-                    "UPDATE meta SET value='2' "
-                    "WHERE key='auth_semantic_version'"
+                    "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                    (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
                 )
             replacement = root / "replacement.db"
             replacement.write_bytes(db.read_bytes())
@@ -1491,8 +1710,8 @@ class WindowsSchema4UpgradeTests(unittest.TestCase):
             self._create_auth1_database(attacker_db, "complete", [])
             with closing(sqlite3.connect(attacker_db)) as connection, connection:
                 connection.execute(
-                    "UPDATE meta SET value='2' "
-                    "WHERE key='auth_semantic_version'"
+                    "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                    (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
                 )
             moved = root / "OriginalData"
             function_globals = MIGRATOR["verify_installer_state"].__globals__
@@ -3831,7 +4050,7 @@ migrator["_atomic_replace_bytes"](
                 ))
                 self.assertEqual(meta, {
                     "schema_version": "5",
-                    "auth_semantic_version": "2",
+                    "auth_semantic_version": MIGRATOR["AUTH_SEMANTIC_VERSION"],
                     "auth_initialized": "1",
                 })
                 preserved = tuple(connection.execute(
@@ -5075,7 +5294,10 @@ migrator["_atomic_replace_bytes"](
                     "('auth_semantic_version', ?, ?)",
                     (MIGRATOR["SCRUB_STATE_KEY"], MIGRATOR["SCRUB_MANIFEST_KEY"]),
                 ))
-            self.assertEqual(meta["auth_semantic_version"], "2")
+            self.assertEqual(
+                meta["auth_semantic_version"],
+                MIGRATOR["AUTH_SEMANTIC_VERSION"],
+            )
             self.assertEqual(meta[MIGRATOR["SCRUB_STATE_KEY"]], "complete")
             self.assertEqual(
                 MIGRATOR["parse_legacy_credential_scrub_manifest"](
@@ -5163,7 +5385,10 @@ migrator["_atomic_replace_bytes"](
                     "('auth_semantic_version', ?, ?)",
                     (MIGRATOR["SCRUB_STATE_KEY"], MIGRATOR["SCRUB_MANIFEST_KEY"]),
                 ))
-            self.assertEqual(meta["auth_semantic_version"], "2")
+            self.assertEqual(
+                meta["auth_semantic_version"],
+                MIGRATOR["AUTH_SEMANTIC_VERSION"],
+            )
             self.assertEqual(meta[MIGRATOR["SCRUB_STATE_KEY"]], "pending")
             self.assertEqual(
                 MIGRATOR["parse_legacy_credential_scrub_manifest"](
@@ -5242,7 +5467,8 @@ migrator["_atomic_replace_bytes"](
             self._create_auth1_database(db, "complete", [])
             with closing(sqlite3.connect(db)) as connection, connection:
                 connection.execute(
-                    "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+                    "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                    (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
                 )
             credentials = data / "Unexpected.ini"
             credentials.write_text(
@@ -5272,7 +5498,8 @@ migrator["_atomic_replace_bytes"](
                 self._create_auth1_database(db, "pending", manifest)
                 with closing(sqlite3.connect(db)) as connection, connection:
                     connection.execute(
-                        "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+                        "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                        (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
                     )
                 if case == "unknown":
                     (data / "Unknown.ini").write_text(
@@ -5313,7 +5540,8 @@ migrator["_atomic_replace_bytes"](
                 self._create_auth1_database(db, "pending", manifest)
                 with closing(sqlite3.connect(db)) as connection, connection:
                     connection.execute(
-                        "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+                        "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                        (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
                     )
                 before = self._tree_snapshot(data)
 
@@ -5353,7 +5581,8 @@ migrator["_atomic_replace_bytes"](
                 self._create_auth1_database(db, "complete", [])
                 with closing(sqlite3.connect(db)) as connection, connection:
                     connection.execute(
-                        "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+                        "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                        (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
                     )
                 arguments: list[object] = [
                     "--verify-installer-state",

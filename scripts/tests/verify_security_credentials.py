@@ -31,6 +31,7 @@ def main() -> int:
     scan_uploader = read("src/ScanDataUploader.cpp")
     ftp_client = read("src/FTPClient.cpp")
     migrator = read("tools/migrate_config_to_sqlite.py")
+    credential_tests = read("scripts/tests/credential_security_tests.cpp")
     migrate_batch = read("tools/ConfigMigrate_Run.cmd")
     online = read("include/OnlineServicesConfig.h")
     ftp = read("include/FTPClient.h")
@@ -51,8 +52,9 @@ def main() -> int:
 
     for token in (
         'constexpr char kSchemaVersion[] = "5"',
-        'constexpr char kAuthenticationSemanticVersion[] = "2"',
+        'constexpr char kAuthenticationSemanticVersion[] = "3"',
         "MigrateLegacyAuthenticationSettings",
+        "MigrateLegacyLoginState",
         "NormalizeExistingAccountProfiles",
         "IsPortableAuthenticationValue",
         "HasUnsafePlaintextConfigStoreResidue",
@@ -61,8 +63,27 @@ def main() -> int:
         "sensitive_protection",
         "ProtectionPurpose",
         "CredentialSecurity::ProtectForCurrentUser",
+        "'loginstate/general', 'loginstate/settings'",
+        'lower == QLatin1String("autologin")',
     ):
         require(token in config, f"v5 credential migration gate missing: {token}")
+    require(
+        config.count("lower(module)='loginstate/settings'") >= 3,
+        "LoginState/Settings is not covered by deletion, orphan, and integrity gates",
+    )
+    require(
+        "compatibleLegacyLoginPreference" not in config,
+        "auth3 still accepts released plaintext login preferences",
+    )
+    for token in (
+        'valueType != QLatin1String("bool")',
+        "sensitiveMarker != 1",
+        "encrypted != 1",
+        'decodedPreference != QLatin1String("0")',
+        'decodedPreference != QLatin1String("1")',
+        'return reject("login-preference-shape")',
+    ):
+        require(token in config, f"auth3 canonical login preference gate missing: {token}")
     for token in (
         "BEGIN IMMEDIATE",
         "auth_initialized",
@@ -83,7 +104,7 @@ def main() -> int:
         "create_dpapi_database_backup",
         "restore_dpapi_database_backup",
         "SCRUB_STATE_KEY",
-        'AUTH_SEMANTIC_VERSION = "2"',
+        'AUTH_SEMANTIC_VERSION = "3"',
         "_normalize_existing_account_profiles",
         "is_portable_authentication_value",
         "Migrated account/Profile data has no valid administrator",
@@ -98,6 +119,14 @@ def main() -> int:
         'auth_initialized", "1" if authentication_initialized else "0"',
     ):
         require(token in migrator, f"migration credential cleanup gate missing: {token}")
+    for token in (
+        "--legacy-login-semantic",
+        'QStringLiteral("current-settings-orphan")',
+        'QStringLiteral("source-conflict")',
+        'QStringLiteral("target-conflict")',
+        "auth2 LoginState General/Settings upgrades to auth3 safely",
+    ):
+        require(token in credential_tests, f"login-state semantic regression missing: {token}")
     require("--scrub-legacy-credentials" in migrate_batch, "default migration wrapper does not scrub in-place credentials")
 
     for token in (

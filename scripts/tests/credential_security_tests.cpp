@@ -594,6 +594,61 @@ int RunInvalidAuthenticationMetadataTest()
     return 0;
 }
 
+int RunAuthenticationSemanticVersionGateTest(const QString& scenario)
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("authentication semantic gate temp root"));
+    Check(QDir().mkpath(temp.filePath(QStringLiteral("Data"))),
+        QStringLiteral("authentication semantic gate data dir"));
+    const QString dbPath = temp.filePath(QStringLiteral("Data/ConfigStore.db"));
+    const QString connectionName = QStringLiteral("auth_semantic_gate_%1").arg(scenario);
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        db.setDatabaseName(dbPath);
+        Check(db.open(), QStringLiteral("open authentication semantic gate fixture"));
+        CreateSettingsTable(db);
+        QSqlQuery query(db);
+        Check(query.exec("INSERT INTO meta(key, value) VALUES('schema_version', '5')"),
+            QStringLiteral("write authentication semantic gate schema"));
+        Check(query.exec("INSERT INTO meta(key, value) VALUES('auth_initialized', '0')"),
+            QStringLiteral("write authentication semantic gate initialization marker"));
+        if (scenario == QStringLiteral("invalid"))
+        {
+            Check(query.exec("INSERT INTO meta(key, value) VALUES('auth_semantic_version', 'invalid')"),
+                QStringLiteral("write invalid authentication semantic version"));
+        }
+        else if (scenario == QStringLiteral("future"))
+        {
+            Check(query.exec("INSERT INTO meta(key, value) VALUES('auth_semantic_version', '999')"),
+                QStringLiteral("write future authentication semantic version"));
+        }
+        else
+        {
+            Check(scenario == QStringLiteral("missing"),
+                QStringLiteral("known authentication semantic gate scenario"));
+        }
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+
+    const QByteArray before = ReadFileBytes(dbPath);
+    QString pathError;
+    Check(AppPaths::Initialize(
+        QStringList() << QStringLiteral("CredentialSecurityTests")
+                      << QStringLiteral("--data-root") << temp.path(),
+        &pathError),
+        QStringLiteral("initialize authentication semantic gate root: %1").arg(pathError));
+    Check(!ConfigDatabase::IsAvailable(),
+        QStringLiteral("authentication semantic %1 must be rejected").arg(scenario));
+    Check(!ConfigDatabase::IsAvailable(),
+        QStringLiteral("authentication semantic %1 remains rejected after reopen").arg(scenario));
+    Check(ReadFileBytes(dbPath) == before,
+        QStringLiteral("authentication semantic %1 remains byte-identical").arg(scenario));
+    QTextStream(stdout) << "PASS: authentication semantic " << scenario
+        << " is rejected without modification" << Qt::endl;
+    return 0;
+}
+
 int RunLegacyDiskInputGateTest()
 {
     QTemporaryDir temp;
@@ -639,7 +694,7 @@ int RunCredentialScrubPendingGateTest()
         CreateSettingsTable(db);
         QSqlQuery query(db);
         Check(query.exec("INSERT INTO meta(key, value) VALUES('schema_version', '5')"), QStringLiteral("write pending schema"));
-        Check(query.exec("INSERT INTO meta(key, value) VALUES('auth_semantic_version', '2')"), QStringLiteral("write pending auth semantic"));
+        Check(query.exec("INSERT INTO meta(key, value) VALUES('auth_semantic_version', '3')"), QStringLiteral("write pending auth semantic"));
         Check(query.exec("INSERT INTO meta(key, value) VALUES('auth_initialized', '1')"), QStringLiteral("write pending auth marker"));
         Check(query.exec("INSERT INTO meta(key, value) VALUES('legacy_credential_scrub_state', 'pending')"), QStringLiteral("write pending scrub state"));
         db.close();
@@ -673,7 +728,7 @@ int RunPlaintextBackupGateTest()
         CreateSettingsTable(db);
         QSqlQuery query(db);
         Check(query.exec("INSERT INTO meta(key, value) VALUES('schema_version', '5')"), QStringLiteral("write backup schema"));
-        Check(query.exec("INSERT INTO meta(key, value) VALUES('auth_semantic_version', '2')"), QStringLiteral("write backup auth semantic"));
+        Check(query.exec("INSERT INTO meta(key, value) VALUES('auth_semantic_version', '3')"), QStringLiteral("write backup auth semantic"));
         Check(query.exec("INSERT INTO meta(key, value) VALUES('auth_initialized', '0')"), QStringLiteral("write backup auth marker"));
         db.close();
     }
@@ -736,12 +791,15 @@ void InsertNestedLegacyAccount(
 
 void InsertCurrentAuthenticationMetadata(
     QSqlDatabase& db,
-    bool authenticationInitialized)
+    bool authenticationInitialized,
+    const QString& authenticationSemanticVersion = QStringLiteral("3"))
 {
     QSqlQuery query(db);
     for (const auto& item : {
             qMakePair(QStringLiteral("schema_version"), QStringLiteral("5")),
-            qMakePair(QStringLiteral("auth_semantic_version"), QStringLiteral("2")),
+            qMakePair(
+                QStringLiteral("auth_semantic_version"),
+                authenticationSemanticVersion),
             qMakePair(
                 QStringLiteral("auth_initialized"),
                 authenticationInitialized ? QStringLiteral("1") : QStringLiteral("0")),
@@ -797,6 +855,199 @@ void CreateCurrentCompleteAuthenticationFixture(const QString& databasePath)
         db.close();
     }
     QSqlDatabase::removeDatabase(connectionName);
+}
+
+int RunLegacyLoginSemanticUpgradeTest(const QString& scenario)
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("legacy login semantic temp root"));
+    Check(QDir().mkpath(temp.filePath(QStringLiteral("Data"))),
+        QStringLiteral("legacy login semantic data dir"));
+    const QString dbPath = temp.filePath(QStringLiteral("Data/ConfigStore.db"));
+    const QString connectionName = QStringLiteral("legacy_login_semantic_") + scenario;
+    {
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        db.setDatabaseName(dbPath);
+        Check(db.open(), QStringLiteral("open legacy login semantic fixture"));
+        CreateSettingsTable(db);
+        InsertCurrentAuthenticationMetadata(
+            db, true,
+            scenario == QStringLiteral("current-settings-orphan")
+                ? QStringLiteral("3") : QStringLiteral("2"));
+        InsertCurrentAccountProfile(db, QStringLiteral("admin"), QStringLiteral("admin"));
+
+        if (scenario == QStringLiteral("success"))
+        {
+            const QString accountHistory = QStringLiteral("admin,operator");
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState"), QStringLiteral("UserName"),
+                QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/General"), QStringLiteral("UserName"),
+                QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/Settings"), QStringLiteral("UserName"),
+                QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/General"), QStringLiteral("AccountHistory"),
+                accountHistory);
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/Settings"), QStringLiteral("AccountHistory"),
+                accountHistory);
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/General"), QStringLiteral("RememberPassword"),
+                QStringLiteral("1"), true, false, QStringLiteral("bool"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/Settings"), QStringLiteral("AutoLogin"),
+                QStringLiteral("1"), false, false, QStringLiteral("string"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/Settings"), QStringLiteral("PasswordBase64"),
+                QStringLiteral("c3ludGhldGljLXRlc3Qtb25seQ=="));
+        }
+        else if (scenario == QStringLiteral("module-case"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("loginstate/settings"), QStringLiteral("UserName"),
+                QStringLiteral("admin"));
+        }
+        else if (scenario == QStringLiteral("field-case"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/Settings"), QStringLiteral("username"),
+                QStringLiteral("admin"));
+        }
+        else if (scenario == QStringLiteral("source-conflict"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/General"), QStringLiteral("UserName"),
+                QStringLiteral("admin"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/Settings"), QStringLiteral("UserName"),
+                QStringLiteral("operator"));
+        }
+        else if (scenario == QStringLiteral("target-conflict"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState"), QStringLiteral("UserName"),
+                QStringLiteral("current-admin"));
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/Settings"), QStringLiteral("UserName"),
+                QStringLiteral("stale-admin"));
+        }
+        else if (scenario == QStringLiteral("current-settings-orphan"))
+        {
+            InsertRaw(db, QStringLiteral("global"), QString(),
+                QStringLiteral("LoginState/Settings"), QStringLiteral("AutoLogin"),
+                QStringLiteral("1"), false, false, QStringLiteral("string"));
+        }
+        else
+        {
+            Check(false, QStringLiteral("unknown legacy login semantic scenario"));
+        }
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+
+    const QString before = FileSha256(dbPath);
+    QString pathError;
+    Check(AppPaths::Initialize(
+        QStringList() << QStringLiteral("CredentialSecurityTests")
+                      << QStringLiteral("--data-root") << temp.path(),
+        &pathError), QStringLiteral("initialize legacy login semantic root: %1").arg(pathError));
+    const bool shouldOpen = scenario == QStringLiteral("success");
+    Check(ConfigDatabase::IsAvailable() == shouldOpen,
+        QStringLiteral("legacy login semantic result for %1").arg(scenario));
+    const QString afterFirstOpen = FileSha256(dbPath);
+    Check(ConfigDatabase::IsAvailable() == shouldOpen,
+        QStringLiteral("legacy login semantic result remains stable for %1").arg(scenario));
+    if (!shouldOpen)
+    {
+        Check(afterFirstOpen == before && FileSha256(dbPath) == before,
+            QStringLiteral("legacy login semantic %1 rolls back byte-identically").arg(scenario));
+        QTextStream(stdout) << "PASS: legacy login semantic " << scenario
+            << " fails closed with byte-identical rollback" << Qt::endl;
+        return 0;
+    }
+
+    Check(afterFirstOpen != before && FileSha256(dbPath) == afterFirstOpen,
+        QStringLiteral("auth2 login semantic upgrade commits once"));
+    QString userName;
+    QString accountHistory;
+    QString rememberPassword;
+    QString autoLogin;
+    Check(ConfigDatabase::ReadScopedSetting(
+            QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+            QStringLiteral("UserName"), &userName)
+            && ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                QStringLiteral("AccountHistory"), &accountHistory)
+            && ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                QStringLiteral("RememberPassword"), &rememberPassword)
+            && ConfigDatabase::ReadScopedSetting(
+                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
+                QStringLiteral("AutoLogin"), &autoLogin)
+            && userName == QLatin1String("admin")
+            && accountHistory == QLatin1String("admin,operator")
+            && rememberPassword == QLatin1String("0")
+            && autoLogin == QLatin1String("0"),
+        QStringLiteral("auth2 login state preserves identity and disables remembered login"));
+
+    QString passwordRecord;
+    QString role;
+    QString fingerprint;
+    bool mustChangePassword = true;
+    Check(ConfigDatabase::TryReadAccountSecurityState(
+            QStringLiteral("admin"), &passwordRecord, &role,
+            &mustChangePassword, &fingerprint)
+            && role == QLatin1String("admin")
+            && !passwordRecord.isEmpty()
+            && !fingerprint.isEmpty(),
+        QStringLiteral("auth2 login semantic upgrade preserves administrator"));
+
+    const QString verifyConnection = QStringLiteral("legacy_login_semantic_verify");
+    {
+        QSqlDatabase verifyDb = QSqlDatabase::addDatabase(
+            QStringLiteral("QSQLITE"), verifyConnection);
+        verifyDb.setDatabaseName(dbPath);
+        Check(verifyDb.open(), QStringLiteral("open upgraded login semantic verification"));
+        QSqlQuery verifyQuery(verifyDb);
+        Check(verifyQuery.exec(QStringLiteral(
+                "SELECT value FROM meta WHERE key='auth_semantic_version'"))
+                && verifyQuery.next()
+                && verifyQuery.value(0).toString() == QLatin1String("3")
+                && !verifyQuery.next(),
+            QStringLiteral("auth semantic version upgraded to 3"));
+        Check(verifyQuery.exec(QStringLiteral(
+                "SELECT COUNT(*) FROM settings WHERE "
+                "lower(module) IN ('loginstate/general', 'loginstate/settings')"))
+                && verifyQuery.next() && verifyQuery.value(0).toInt() == 0,
+            QStringLiteral("legacy General and Settings modules removed"));
+        Check(verifyQuery.exec(QStringLiteral(
+                "SELECT value_text, value_type, sensitive, encrypted FROM settings "
+                "WHERE scope_type='global' AND scope_id='' AND module='LoginState' "
+                "AND key_name IN ('RememberPassword','AutoLogin') ORDER BY key_name")),
+            QStringLiteral("read canonical disabled login preference storage"));
+        int verifiedPreferences = 0;
+        while (verifyQuery.next())
+        {
+            Check(CredentialSecurity::IsCurrentUserProtected(
+                    verifyQuery.value(0).toString())
+                    && verifyQuery.value(1).toString() == QLatin1String("bool")
+                    && verifyQuery.value(2).toInt() == 1
+                    && verifyQuery.value(3).toInt() == 1,
+                QStringLiteral("disabled login preference is canonical DPAPI bool"));
+            ++verifiedPreferences;
+        }
+        Check(verifiedPreferences == 2,
+            QStringLiteral("both canonical login preferences were reset"));
+        verifyDb.close();
+    }
+    QSqlDatabase::removeDatabase(verifyConnection);
+    QTextStream(stdout)
+        << "PASS: auth2 LoginState General/Settings upgrades to auth3 safely"
+        << Qt::endl;
+    return 0;
 }
 
 bool CreateTestFileSymbolicLink(const QString& linkPath, const QString& targetPath)
@@ -1418,8 +1669,6 @@ int RunCurrentAuthenticationIntegrityTest(const QString& scenario)
         &pathError), QStringLiteral("initialize current integrity root: %1").arg(pathError));
     const bool shouldOpen = scenario == QStringLiteral("valid")
         || scenario == QStringLiteral("complete-scrub")
-        || scenario == QStringLiteral("legacy-disabled-login-preferences")
-        || scenario == QStringLiteral("released-login-preferences")
         || scenario == QStringLiteral("protected-remembered-credential")
         || scenario == QStringLiteral("table-name-case");
     Check(ConfigDatabase::IsAvailable() == shouldOpen,
@@ -1436,52 +1685,9 @@ int RunCurrentAuthenticationIntegrityTest(const QString& scenario)
         QStringLiteral("current integrity result on fresh thread for %1").arg(scenario));
     Check(FileSha256(dbPath) == before,
         QStringLiteral("current integrity %1 leaves database byte-identical").arg(scenario));
-    if (scenario == QStringLiteral("released-login-preferences"))
-    {
-        QString rememberPassword;
-        QString autoLogin;
-        Check(ConfigDatabase::ReadScopedSetting(
-                QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
-                QStringLiteral("RememberPassword"), &rememberPassword)
-                && ConfigDatabase::ReadScopedSetting(
-                    QStringLiteral("global"), QString(), QStringLiteral("LoginState"),
-                    QStringLiteral("AutoLogin"), &autoLogin)
-                && rememberPassword == QLatin1String("0")
-                && autoLogin == QLatin1String("1"),
-            QStringLiteral("released login preferences remain readable"));
-        const QString verifyConnection = QStringLiteral("released_login_preference_verify");
-        {
-            QSqlDatabase verifyDb = QSqlDatabase::addDatabase(
-                QStringLiteral("QSQLITE"), verifyConnection);
-            verifyDb.setDatabaseName(dbPath);
-            Check(verifyDb.open(), QStringLiteral("open upgraded login preference verification"));
-            QSqlQuery verifyQuery(verifyDb);
-            Check(verifyQuery.exec(QStringLiteral(
-                "SELECT value_text, value_type, sensitive, encrypted FROM settings "
-                "WHERE scope_type='global' AND scope_id='' AND module='LoginState' "
-                "AND key_name IN ('RememberPassword','AutoLogin') ORDER BY key_name")),
-                QStringLiteral("read upgraded login preference storage"));
-            int verified = 0;
-            while (verifyQuery.next())
-            {
-                Check(CredentialSecurity::IsCurrentUserProtected(
-                        verifyQuery.value(0).toString())
-                        && verifyQuery.value(1).toString() == QLatin1String("string")
-                        && verifyQuery.value(2).toInt() == 1
-                        && verifyQuery.value(3).toInt() == 1,
-                    QStringLiteral("legacy login preference upgrades to canonical DPAPI"));
-                ++verified;
-            }
-            Check(verified == 2,
-                QStringLiteral("both released login preferences were upgraded"));
-            verifyDb.close();
-        }
-        QSqlDatabase::removeDatabase(verifyConnection);
-    }
     QTextStream(stdout) << "PASS: current schema " << scenario
         << (shouldOpen ? " validates" : " fails closed")
-        << (scenario == QStringLiteral("released-login-preferences")
-                ? " read-only then upgrades on access" : " without database writes")
+        << " without database writes"
         << Qt::endl;
     return 0;
 }
@@ -1733,6 +1939,14 @@ int main(int argc, char* argv[])
         return RunCurrentAuthenticationIntegrityTest(
             app.arguments().at(currentIntegrityIndex + 1));
     }
+    const int legacyLoginSemanticIndex = app.arguments().indexOf(
+        QStringLiteral("--legacy-login-semantic"));
+    if (legacyLoginSemanticIndex >= 0
+        && legacyLoginSemanticIndex + 1 < app.arguments().size())
+    {
+        return RunLegacyLoginSemanticUpgradeTest(
+            app.arguments().at(legacyLoginSemanticIndex + 1));
+    }
     const int installerTransactionIndex = app.arguments().indexOf(
         QStringLiteral("--installer-transaction-gate"));
     if (installerTransactionIndex >= 0
@@ -1768,6 +1982,14 @@ int main(int argc, char* argv[])
     if (app.arguments().contains(QStringLiteral("--invalid-auth-metadata")))
     {
         return RunInvalidAuthenticationMetadataTest();
+    }
+    const int authenticationSemanticGateIndex = app.arguments().indexOf(
+        QStringLiteral("--auth-semantic-gate"));
+    if (authenticationSemanticGateIndex >= 0
+        && authenticationSemanticGateIndex + 1 < app.arguments().size())
+    {
+        return RunAuthenticationSemanticVersionGateTest(
+            app.arguments().at(authenticationSemanticGateIndex + 1));
     }
     if (app.arguments().contains(QStringLiteral("--legacy-disk-gate")))
     {
@@ -2061,7 +2283,7 @@ int main(int argc, char* argv[])
             && query.next() && query.value(0).toString() == QStringLiteral("auth_initialized")
             && query.value(1).toString() == QStringLiteral("1")
             && query.next() && query.value(0).toString() == QStringLiteral("auth_semantic_version")
-            && query.value(1).toString() == QStringLiteral("2")
+            && query.value(1).toString() == QStringLiteral("3")
             && query.next() && query.value(0).toString() == QStringLiteral("schema_version")
             && query.value(1).toString() == QStringLiteral("5")
             && !query.next(), QStringLiteral("authentication migration metadata"));
@@ -2069,6 +2291,7 @@ int main(int argc, char* argv[])
             "SELECT COUNT(*) FROM settings WHERE lower(module)='accounts/users' "
             "OR lower(module) GLOB 'accounts/users/*' "
             "OR lower(module)='loginstate/general' "
+            "OR lower(module)='loginstate/settings' "
             "OR lower(module) GLOB 'loginstate/savedpasswords*' "
             "OR lower(module) GLOB 'loginstate/rememberedcredentials*' "
             "OR lower(key_name)='passwordbase64'")
