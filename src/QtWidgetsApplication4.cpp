@@ -1,5 +1,6 @@
 #include "QtWidgetsApplication4.h"
 #include "AppPaths.h"
+#include "ApplicationInstanceGuard.h"
 #include "CliHelp.h"
 #include <QMessageBox>  // 弹窗头文件，测试用
 #include "CameraFrameCache.h"
@@ -50,6 +51,7 @@
 #include <QCloseEvent>
 #include <QContextMenuEvent>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QEventLoop>
 #include <QComboBox>
 #include <QDebug>
@@ -89,6 +91,8 @@
 #include <QMetaObject>
 #include <QProgressBar>
 #include <QProgressDialog>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMouseEvent>
@@ -139,6 +143,7 @@
 #include <cstdio>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <thread>
@@ -181,6 +186,86 @@ namespace
 	void ConfigureUtf8TextStream(QTextStream& stream)
 	{
 		stream.setEncoding(QStringConverter::Utf8);
+	}
+
+	QByteArray AuthRepairFileSha256(const QString& filePath)
+	{
+		QFile file(filePath);
+		if (!file.open(QIODevice::ReadOnly))
+		{
+			return {};
+		}
+		QCryptographicHash hash(QCryptographicHash::Sha256);
+		while (!file.atEnd())
+		{
+			const QByteArray chunk = file.read(1024 * 1024);
+			if (chunk.isEmpty() && file.error() != QFileDevice::NoError)
+			{
+				return {};
+			}
+			hash.addData(chunk);
+		}
+		return hash.result().toHex().toLower();
+	}
+
+	QString TrustedWindowsPowerShellPath()
+	{
+#ifdef Q_OS_WIN
+		wchar_t systemDirectoryBuffer[MAX_PATH + 1] = {};
+		const UINT systemDirectoryLength = GetSystemDirectoryW(
+			systemDirectoryBuffer,
+			static_cast<UINT>(std::size(systemDirectoryBuffer)));
+		if (systemDirectoryLength == 0
+			|| systemDirectoryLength >= std::size(systemDirectoryBuffer))
+		{
+			return {};
+		}
+
+		const QString systemDirectory = QDir::cleanPath(
+			QString::fromWCharArray(systemDirectoryBuffer, systemDirectoryLength));
+		const QString powerShellDirectory = QDir(systemDirectory).filePath(
+			QStringLiteral("WindowsPowerShell/v1.0"));
+		const QString powerShellPath = QDir(powerShellDirectory).filePath(
+			QStringLiteral("powershell.exe"));
+		const QFileInfo powerShellInfo(powerShellPath);
+		if (!powerShellInfo.isFile() || powerShellInfo.isSymLink())
+		{
+			return {};
+		}
+
+		// 系统路径由 GetSystemDirectoryW 提供，不读取可伪造的 PATH/SystemRoot。
+		// 同时拒绝候选文件及其专用父目录上的重解析点，避免目录联接绕过。
+		for (const QString& path : {
+			powerShellPath,
+			powerShellDirectory,
+			QFileInfo(powerShellDirectory).dir().absolutePath() })
+		{
+			const DWORD attributes = GetFileAttributesW(
+				reinterpret_cast<LPCWSTR>(QDir::toNativeSeparators(path).utf16()));
+			if (attributes == INVALID_FILE_ATTRIBUTES
+				|| (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+			{
+				return {};
+			}
+		}
+
+		const QString canonicalSystemDirectory = QFileInfo(systemDirectory).canonicalFilePath();
+		const QString canonicalPowerShellDirectory = QFileInfo(powerShellDirectory).canonicalFilePath();
+		const QString expectedCanonicalPowerShellDirectory = QFileInfo(
+			QDir(canonicalSystemDirectory).filePath(QStringLiteral("WindowsPowerShell/v1.0")))
+			.canonicalFilePath();
+		if (canonicalSystemDirectory.isEmpty()
+			|| canonicalPowerShellDirectory.isEmpty()
+			|| expectedCanonicalPowerShellDirectory.isEmpty()
+			|| canonicalPowerShellDirectory.compare(
+				expectedCanonicalPowerShellDirectory, Qt::CaseInsensitive) != 0)
+		{
+			return {};
+		}
+		return powerShellInfo.canonicalFilePath();
+#else
+		return {};
+#endif
 	}
 
 	void MarkNumericEditGlobal(QLineEdit* edit)
@@ -7875,6 +7960,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	, m_pAuthLoginModeBtn(nullptr)
 	, m_pAuthRegisterModeBtn(nullptr)
 	, m_pAuthSubmitBtn(nullptr)
+	, m_pAuthRepairBtn(nullptr)
 	, m_pAuthCancelBtn(nullptr)
 	, m_pGuestLoginBtn(nullptr)
 	, m_pDashboardConnectBtn(nullptr)
@@ -8163,12 +8249,15 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	authButtonLayout->setContentsMargins(0, 0, 0, 0);
 	authButtonLayout->setSpacing(12);
 	m_pAuthSubmitBtn = new QPushButton("登录", authCard);
+	m_pAuthRepairBtn = new QPushButton("自动修复", authCard);
 	m_pAuthCancelBtn = new QPushButton("退出登录", authCard);
 	m_pGuestLoginBtn = new QPushButton("游客登录", authCard);
 	m_pAuthSubmitBtn->setCursor(Qt::PointingHandCursor);
+	m_pAuthRepairBtn->setCursor(Qt::PointingHandCursor);
 	m_pAuthCancelBtn->setCursor(Qt::PointingHandCursor);
 	m_pGuestLoginBtn->setCursor(Qt::PointingHandCursor);
 	m_pAuthSubmitBtn->setFixedSize(204, 42);
+	m_pAuthRepairBtn->setFixedSize(204, 42);
 	m_pAuthCancelBtn->setFixedSize(204, 42);
 	m_pGuestLoginBtn->setFixedSize(420, 34);
 	m_pAuthSubmitBtn->setStyleSheet(
@@ -8182,6 +8271,19 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"}"
 		"QPushButton:hover { background: #5AA8F3; }"
 		"QPushButton:pressed { background: #4B97EA; }");
+	m_pAuthRepairBtn->setStyleSheet(
+		"QPushButton {"
+		"  background: #2F8F72;"
+		"  color: #FFFFFF;"
+		"  border: 1px solid #67D6AF;"
+		"  border-radius: 11px;"
+		"  font-size: 15px;"
+		"  font-weight: 700;"
+		"}"
+		"QPushButton:hover { background: #38A17F; border-color: #8BE7C5; }"
+		"QPushButton:pressed { background: #26765E; }"
+		"QPushButton:disabled { background: #34434A; color: #84969D; border-color: #4A5B62; }");
+	m_pAuthRepairBtn->hide();
 	m_pAuthCancelBtn->setStyleSheet(
 		"QPushButton {"
 		"  background: #16212D;"
@@ -8190,7 +8292,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"  border-radius: 11px;"
 		"  font-size: 13px;"
 		"}"
-		"QPushButton:hover { background: #1B2835; }");
+		"QPushButton:hover { background: #1B2835; }"
+		"QPushButton:disabled { background: #202A32; color: #65747A; border-color: #34444D; }");
 	m_pGuestLoginBtn->setStyleSheet(
 		"QPushButton {"
 		"  background: transparent;"
@@ -8201,6 +8304,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		"QPushButton:hover { color: #72D4DD; }");
 	authButtonLayout->addStretch(1);
 	authButtonLayout->addWidget(m_pAuthSubmitBtn);
+	authButtonLayout->addWidget(m_pAuthRepairBtn);
 	authButtonLayout->addWidget(m_pAuthCancelBtn);
 	authButtonLayout->addStretch(1);
 	authCardLayout->addLayout(authButtonLayout);
@@ -8246,6 +8350,8 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 				LoginCurrentAccount();
 			}
 		});
+	connect(m_pAuthRepairBtn, &QPushButton::clicked,
+		this, &QtWidgetsApplication4::StartAccountDatabaseRepair);
 	connect(m_pAuthCancelBtn, &QPushButton::clicked, this, [this]()
 		{
 			if (m_bAccountRecoveryRequired)
@@ -8357,21 +8463,28 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	QPushButton* quickJogBtn = makeLargeButton("点动控制\n单步移动/目标点运动", quickGroup);
 	QPushButton* quickTeachPositionBtn = makeLargeButton("扫描位置示教\n下枪/起点/终点/收枪", quickGroup);
 	QPushButton* quickCalibrationBtn = makeLargeButton("标定与相机参数\n手眼标定、矩阵和相机配置", quickGroup);
-	m_pDashboardEmergencyStopBtn = new QPushButton("安全停止所有本软件活动机器人任务（不可从主页删除）", quickGroup);
-	m_pDashboardEmergencyStopBtn->setMinimumHeight(58);
+	m_pDashboardEmergencyStopBtn = new QPushButton("急停\nSTOP", m_pDashboardPage);
+	m_pDashboardEmergencyStopBtn->setObjectName("DashboardEmergencyStopButton");
+	m_pDashboardEmergencyStopBtn->setAccessibleName("机器人任务急停");
+	m_pDashboardEmergencyStopBtn->setFixedSize(104, 104);
+	m_pDashboardEmergencyStopBtn->setEnabled(false);
 	m_pDashboardEmergencyStopBtn->setStyleSheet(
-		"QPushButton { background: #8F1D24; color: white; border: 2px solid #FF7B82; border-radius: 12px; "
-		"font-size: 18px; font-weight: 800; padding: 10px 18px; }"
-		"QPushButton:hover { background: #B3262E; border-color: #FFB2B6; }"
-		"QPushButton:pressed { background: #641318; }");
+		"QPushButton#DashboardEmergencyStopButton {"
+		" background: qradialgradient(cx:0.42, cy:0.35, radius:0.72, fx:0.38, fy:0.30, stop:0 #F2555B, stop:0.58 #C5232C, stop:1 #8B1118);"
+		" color: white; border: 7px solid #FF9197; border-radius: 52px;"
+		" font-size: 17px; font-weight: 900; padding: 0px; }"
+		"QPushButton#DashboardEmergencyStopButton:hover {"
+		" background: qradialgradient(cx:0.42, cy:0.35, radius:0.72, fx:0.38, fy:0.30, stop:0 #FF6B70, stop:0.58 #D72C35, stop:1 #9B151C);"
+		" border-color: #FFC0C3; }"
+		"QPushButton#DashboardEmergencyStopButton:pressed { background: #731016; border-color: #FF737B; }"
+		"QPushButton#DashboardEmergencyStopButton:disabled {"
+		" background: #444C54; color: #AEB7BF; border-color: #68737D; }");
 	m_pDashboardEmergencyStopBtn->setToolTip(
-		"锁存取消本软件持有租约的全部机器人流程，并由机器人侧真实终止/卸载其程序；"
-		"停机未确认时继续闭锁。它不是控制柜急停，不能替代示教器或外部安全回路。");
+		"当前没有本软件正在运行的机器人程序，急停按钮已禁用。");
 	quickLayout->addWidget(quickMeasureBtn, 0, 0);
 	quickLayout->addWidget(quickJogBtn, 0, 1);
 	quickLayout->addWidget(quickTeachPositionBtn, 1, 0);
 	quickLayout->addWidget(quickCalibrationBtn, 1, 1);
-	quickLayout->addWidget(m_pDashboardEmergencyStopBtn, 2, 0, 1, 2);
 	dashboardActionLayout->addWidget(quickGroup, 1);
 
 	QGroupBox* toolGroup = new QGroupBox("现场小工具", m_pDashboardPage);
@@ -8925,7 +9038,36 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	robotInfoSplitter->setStretchFactor(0, 1);
 	robotInfoSplitter->setStretchFactor(1, 1);
 
-	dashboardLayout->addWidget(robotInfoSplitter, 1);
+	// 监控与日志保持在左侧上下分区；急停使用其右侧原本空出的窄栏，
+	// 避免在主页纵向布局中单独占一整行，也不挤占“现场小工具”。
+	QGroupBox* emergencyStopGroup = new QGroupBox("任务安全控制", m_pDashboardPage);
+	emergencyStopGroup->setObjectName("DashboardEmergencyStopGroup");
+	emergencyStopGroup->setFixedWidth(190);
+	emergencyStopGroup->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+	QVBoxLayout* emergencyStopPanelLayout = new QVBoxLayout(emergencyStopGroup);
+	emergencyStopPanelLayout->setContentsMargins(14, 18, 14, 12);
+	emergencyStopPanelLayout->setSpacing(8);
+	emergencyStopPanelLayout->addStretch(1);
+	emergencyStopPanelLayout->addWidget(
+		m_pDashboardEmergencyStopBtn,
+		0,
+		Qt::AlignHCenter);
+	QLabel* emergencyStopHint = new QLabel(
+		"仅停止本软件活动任务\n不替代控制柜、示教器急停",
+		emergencyStopGroup);
+	emergencyStopHint->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+	emergencyStopHint->setWordWrap(true);
+	emergencyStopHint->setStyleSheet(
+		"QLabel { color: #8297A0; font-size: 11px; }");
+	emergencyStopPanelLayout->addWidget(emergencyStopHint, 0, Qt::AlignHCenter);
+	emergencyStopPanelLayout->addStretch(1);
+
+	QHBoxLayout* monitorAndSafetyLayout = new QHBoxLayout();
+	monitorAndSafetyLayout->setContentsMargins(0, 0, 0, 0);
+	monitorAndSafetyLayout->setSpacing(14);
+	monitorAndSafetyLayout->addWidget(robotInfoSplitter, 1);
+	monitorAndSafetyLayout->addWidget(emergencyStopGroup, 0);
+	dashboardLayout->addLayout(monitorAndSafetyLayout, 1);
 	dashboardLayout->addWidget(entryGroup, 0);
 
 	connect(m_pCurrentUserButton, &QPushButton::clicked, this, &QtWidgetsApplication4::ShowCurrentUserMenu);
@@ -9061,8 +9203,9 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	}
 	LoadLoginState();
 	ShowAuthPage(m_bAccountRecoveryRequired
-		? QStringLiteral("账号认证库升级或完整性校验未通过，所有登录入口已安全锁定。请关闭程序并运行受控恢复/迁移，或联系维护人员；程序不会重建默认管理员。")
+		? QStringLiteral("账号认证库升级或完整性校验未通过，所有登录入口已安全锁定。可点击“自动修复”执行受控备份与迁移；只有修复后再次校验通过才会恢复登录，程序不会重建默认管理员。")
 		: QString());
+	CheckPendingAccountDatabaseRepairResult();
 	if (!m_bAccountRecoveryRequired)
 	{
 		TryAutoLogin();
@@ -10001,6 +10144,13 @@ void QtWidgetsApplication4::RefreshDashboardConnectionState()
 	if (m_pDashboardEmergencyStopBtn != nullptr)
 	{
 		m_pDashboardEmergencyStopBtn->setEnabled(robotOperationBusy);
+		m_pDashboardEmergencyStopBtn->setCursor(
+			robotOperationBusy ? Qt::PointingHandCursor : Qt::ArrowCursor);
+		m_pDashboardEmergencyStopBtn->setToolTip(robotOperationBusy
+			? QStringLiteral(
+				"锁存取消本软件持有租约的全部机器人流程，并由机器人侧真实终止/卸载其程序；"
+				"停机未确认时继续闭锁。它不是控制柜急停，不能替代示教器或外部安全回路。")
+			: QStringLiteral("当前没有本软件正在运行的机器人程序，急停按钮已禁用。"));
 	}
 	for (const QPointer<QWidget>& widget : m_robotOperationWidgets)
 	{
@@ -10745,6 +10895,271 @@ void QtWidgetsApplication4::SetAuthRegisterMode(bool registerMode)
 	RefreshAuthModeUi();
 }
 
+void QtWidgetsApplication4::StartAccountDatabaseRepair()
+{
+	if (!m_bAccountRecoveryRequired || m_bAuthRepairRunning)
+	{
+		return;
+	}
+
+	m_bAuthRepairRunning = true;
+	m_sAuthHintOverride = QStringLiteral("正在准备受控修复，程序随后会自动关闭、修复并重新打开……");
+	RefreshAuthModeUi();
+	if (m_pAuthRepairBtn != nullptr)
+	{
+		m_pAuthRepairBtn->repaint();
+	}
+	if (m_pAuthHintLabel != nullptr)
+	{
+		m_pAuthHintLabel->repaint();
+	}
+
+	auto failPreparation = [this](const QString& message)
+		{
+			m_bAuthRepairRunning = false;
+			m_sAuthHintOverride = message;
+			RefreshAuthModeUi();
+			QMessageBox::warning(this, QStringLiteral("自动修复"), message);
+		};
+
+	QString toolPath = QDir(QCoreApplication::applicationDirPath()).filePath(
+		QStringLiteral("tools/ConfigMigrate.exe"));
+	QFileInfo toolInfo(toolPath);
+	if (!toolInfo.isFile() || toolInfo.isSymLink())
+	{
+		toolPath = AppPaths::FindResourcePath(QStringLiteral("tools/ConfigMigrate.exe"));
+		toolInfo.setFile(toolPath);
+	}
+	if (toolPath.isEmpty() || !toolInfo.isFile() || toolInfo.isSymLink())
+	{
+		failPreparation(QStringLiteral(
+			"未找到可信的自动修复组件。请重新生成 Debug/Release，或联系维护人员；认证库没有被修改。"));
+		return;
+	}
+
+	const QString toolDirectory = QDir::cleanPath(toolInfo.dir().canonicalPath());
+	QStringList allowedToolDirectories;
+	for (const QString& root : {
+			QCoreApplication::applicationDirPath(),
+			AppPaths::InstallRootPath() })
+	{
+		const QFileInfo directoryInfo(QDir(root).filePath(QStringLiteral("tools")));
+		const QString canonical = QDir::cleanPath(directoryInfo.canonicalFilePath());
+		if (!canonical.isEmpty())
+		{
+			allowedToolDirectories.append(canonical);
+		}
+	}
+#ifdef Q_OS_WIN
+	const auto samePath = [](const QString& left, const QString& right)
+		{ return left.compare(right, Qt::CaseInsensitive) == 0; };
+#else
+	const auto samePath = [](const QString& left, const QString& right)
+		{ return left == right; };
+#endif
+	const bool trustedToolDirectory = std::any_of(
+		allowedToolDirectories.cbegin(), allowedToolDirectories.cend(),
+		[&toolDirectory, &samePath](const QString& allowed)
+			{ return samePath(toolDirectory, allowed); });
+	if (toolDirectory.isEmpty() || !trustedToolDirectory)
+	{
+		failPreparation(QStringLiteral(
+			"自动修复组件不在程序的可信 tools 目录中，已拒绝运行；认证库没有被修改。"));
+		return;
+	}
+
+	// 开发版同时保留迁移源码：运行前核对工具内嵌源码哈希，防止 x64 目录误用旧工具。
+	// 正式包不交付 Python 源码，其工具一致性由打包门禁保证。
+	const QString migrationSourcePath = AppPaths::FindResourcePath(
+		QStringLiteral("tools/migrate_config_to_sqlite.py"));
+	const QFileInfo migrationSourceInfo(migrationSourcePath);
+	if (!migrationSourcePath.isEmpty() && migrationSourceInfo.exists())
+	{
+		if (!migrationSourceInfo.isFile() || migrationSourceInfo.isSymLink())
+		{
+			failPreparation(QStringLiteral(
+				"迁移源码路径异常，已拒绝运行自动修复；认证库没有被修改。"));
+			return;
+		}
+		const QByteArray expectedSourceHash = AuthRepairFileSha256(migrationSourcePath);
+		QProcess provenanceProbe;
+		provenanceProbe.setProgram(toolInfo.absoluteFilePath());
+		provenanceProbe.setArguments({ QStringLiteral("--print-source-sha256") });
+		provenanceProbe.start();
+		const bool probeStarted = provenanceProbe.waitForStarted(5000);
+		const bool probeFinished = probeStarted && provenanceProbe.waitForFinished(15000);
+		if (!probeFinished)
+		{
+			provenanceProbe.kill();
+			provenanceProbe.waitForFinished(2000);
+		}
+		const QByteArray embeddedSourceHash = provenanceProbe.readAllStandardOutput()
+			.trimmed().toLower();
+		if (expectedSourceHash.size() != 64
+			|| !probeFinished
+			|| provenanceProbe.exitStatus() != QProcess::NormalExit
+			|| provenanceProbe.exitCode() != 0
+			|| embeddedSourceHash != expectedSourceHash)
+		{
+			failPreparation(QStringLiteral(
+				"自动修复组件与当前代码版本不一致。请重新生成 x64 Debug/Release 后再试；认证库没有被修改。"));
+			return;
+		}
+	}
+
+	const QString dataRoot = QDir::cleanPath(AppPaths::DataRootPath());
+	const QString dataDirectory = AppPaths::WritablePath(QStringLiteral("Data"));
+	const QString databasePath = ConfigDatabase::DatabasePath();
+	const QString applicationPath = QCoreApplication::applicationFilePath();
+	const QString statusFile = AppPaths::WritableChildPath(
+		QStringLiteral("Temp/AuthRecovery"), QStringLiteral("repair_status.txt"));
+	const QString logFile = AppPaths::WritableChildPath(
+		QStringLiteral("Temp/AuthRecovery"), QStringLiteral("repair_log.txt"));
+	const QString instanceMutexName = ApplicationInstanceGuard::MachineMutexName(
+		ApplicationInstanceGuard::RobotControlScope());
+	if (dataRoot.isEmpty() || dataDirectory.isEmpty() || databasePath.isEmpty()
+		|| applicationPath.isEmpty() || statusFile.isEmpty()
+		|| logFile.isEmpty() || instanceMutexName.isEmpty()
+		|| !QFileInfo(dataDirectory).isDir())
+	{
+		failPreparation(QStringLiteral(
+			"自动修复所需的数据路径无效，已停止；认证库没有被修改。"));
+		return;
+	}
+	const QString repairDirectory = QFileInfo(statusFile).absolutePath();
+	if (!QDir().mkpath(repairDirectory))
+	{
+		failPreparation(QStringLiteral(
+			"无法创建自动修复工作目录，已停止；认证库没有被修改。"));
+		return;
+	}
+	const QString powerShellPath = TrustedWindowsPowerShellPath();
+	if (powerShellPath.isEmpty())
+	{
+		failPreparation(QStringLiteral(
+			"无法验证 Windows 系统修复引导程序，已停止；认证库没有被修改。"));
+		return;
+	}
+
+	QFile::remove(statusFile);
+	QFile::remove(logFile);
+	const QString repairCommand = QStringLiteral(
+		"$code=127; $status='failed:127'; $mutex=$null; try { "
+		"$process=Get-Process -Id ([int]$env:AUTH_REPAIR_PID) -ErrorAction SilentlyContinue; "
+		"if ($null -ne $process) { $process.WaitForExit() }; "
+		"$created=$false; $mutex=[System.Threading.Mutex]::new($false,$env:AUTH_REPAIR_MUTEX,[ref]$created); "
+		"if (-not $created) { $code=126; $status='failed:126' } else { try { "
+		"& $env:AUTH_REPAIR_TOOL --source $env:AUTH_REPAIR_SOURCE --db $env:AUTH_REPAIR_DB --encrypt --scrub-legacy-credentials 1> $env:AUTH_REPAIR_LOG 2>&1; "
+		"if ($null -ne $LASTEXITCODE) { $code=[int]$LASTEXITCODE }; "
+		"if ($code -eq 0) { $status='success' } else { $status='failed:'+$code } "
+		"} catch { $code=127; $status='failed:127'; "
+		"[System.IO.File]::WriteAllText($env:AUTH_REPAIR_LOG,'ConfigMigrate launch failed: '+$_.Exception.GetType().FullName,[System.Text.UTF8Encoding]::new($false)) } } "
+		"} catch { $code=125; $status='wait_failed'; try { "
+		"[System.IO.File]::WriteAllText($env:AUTH_REPAIR_LOG,'Repair handoff failed: '+$_.Exception.GetType().FullName,[System.Text.UTF8Encoding]::new($false)) } catch {} "
+		"} finally { try { [System.IO.File]::WriteAllText($env:AUTH_REPAIR_STATUS,$status,[System.Text.UTF8Encoding]::new($false)) } catch { $code=124 }; "
+		"if ($null -ne $mutex) { $mutex.Dispose() } }; "
+		"try { Start-Process -FilePath $env:AUTH_REPAIR_APP -ErrorAction Stop | Out-Null } catch { if ($code -eq 0) { $code=123 } }; exit $code");
+
+	QProcess launcher;
+	QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+	environment.remove(QStringLiteral("ERRORLEVEL"));
+	environment.insert(QStringLiteral("QTWIDGETSAPP4_DATA_ROOT"), dataRoot);
+	environment.insert(QStringLiteral("AUTH_REPAIR_TOOL"), toolInfo.absoluteFilePath());
+	environment.insert(QStringLiteral("AUTH_REPAIR_SOURCE"), dataDirectory);
+	environment.insert(QStringLiteral("AUTH_REPAIR_DB"), databasePath);
+	environment.insert(QStringLiteral("AUTH_REPAIR_APP"), applicationPath);
+	environment.insert(QStringLiteral("AUTH_REPAIR_STATUS"), statusFile);
+	environment.insert(QStringLiteral("AUTH_REPAIR_LOG"), logFile);
+	environment.insert(QStringLiteral("AUTH_REPAIR_MUTEX"), instanceMutexName);
+	environment.insert(QStringLiteral("AUTH_REPAIR_PID"),
+		QString::number(QCoreApplication::applicationPid()));
+	launcher.setProcessEnvironment(environment);
+	launcher.setProgram(powerShellPath);
+	launcher.setArguments({ QStringLiteral("-NoLogo"), QStringLiteral("-NoProfile"),
+		QStringLiteral("-NonInteractive"), QStringLiteral("-Command"), repairCommand });
+#ifdef Q_OS_WIN
+	launcher.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* arguments)
+		{
+			arguments->flags |= CREATE_NO_WINDOW;
+		});
+#endif
+	if (!launcher.startDetached())
+	{
+		failPreparation(QStringLiteral(
+			"无法启动自动修复引导程序，已停止；认证库没有被修改。"));
+		return;
+	}
+
+	// 引导程序会等待当前 PID 完全退出后才接触数据库；成功或失败都会重启同一程序，
+	// 新进程仍以运行时已经确定的数据根重新执行完整认证校验。
+	QApplication::quit();
+}
+
+void QtWidgetsApplication4::CheckPendingAccountDatabaseRepairResult()
+{
+	const QString statusFile = AppPaths::WritableChildPath(
+		QStringLiteral("Temp/AuthRecovery"), QStringLiteral("repair_status.txt"));
+	const QString logFile = AppPaths::WritableChildPath(
+		QStringLiteral("Temp/AuthRecovery"), QStringLiteral("repair_log.txt"));
+	const QFileInfo statusInfo(statusFile);
+	if (statusFile.isEmpty() || !statusInfo.isFile() || statusInfo.isSymLink()
+		|| statusInfo.size() <= 0 || statusInfo.size() > 256)
+	{
+		return;
+	}
+	QFile status(statusFile);
+	if (!status.open(QIODevice::ReadOnly))
+	{
+		return;
+	}
+	const QString result = QString::fromLatin1(status.readAll()).trimmed();
+	status.close();
+	QFile::remove(statusFile);
+
+	QString dialogTitle = QStringLiteral("自动修复");
+	QString dialogText;
+	QMessageBox::Icon dialogIcon = QMessageBox::Information;
+	if (!m_bAccountRecoveryRequired)
+	{
+		if (result == QStringLiteral("success"))
+		{
+			dialogText = QStringLiteral("账号认证库已完成受控备份、迁移和复核，请正常登录。");
+			QFile::remove(logFile);
+		}
+		else
+		{
+			dialogIcon = QMessageBox::Warning;
+			dialogText = QStringLiteral(
+				"账号认证库已通过程序复核，可以正常登录；但修复引导返回了异常状态。" );
+			if (!logFile.isEmpty())
+			{
+				dialogText += QStringLiteral("\n修复日志：%1")
+					.arg(QDir::toNativeSeparators(logFile));
+			}
+		}
+		m_sAuthHintOverride = dialogText;
+	}
+	else
+	{
+		dialogIcon = QMessageBox::Warning;
+		dialogText = result == QStringLiteral("success")
+			? QStringLiteral("迁移工具已完成，但账号认证库仍未通过程序复核，登录继续锁定。")
+			: QStringLiteral("自动修复未完成，登录继续锁定；原认证库不会被程序重建。" );
+		if (!logFile.isEmpty())
+		{
+			dialogText += QStringLiteral("\n修复日志：%1")
+				.arg(QDir::toNativeSeparators(logFile));
+		}
+		m_sAuthHintOverride = dialogText;
+	}
+	RefreshAuthModeUi();
+	QTimer::singleShot(0, this, [this, dialogIcon, dialogTitle, dialogText]()
+		{
+			QMessageBox box(dialogIcon, dialogTitle, dialogText, QMessageBox::Ok, this);
+			box.exec();
+		});
+}
+
 void QtWidgetsApplication4::RefreshAuthModeUi()
 {
 	const bool recoveryRequired = m_bAccountRecoveryRequired;
@@ -10772,11 +11187,24 @@ void QtWidgetsApplication4::RefreshAuthModeUi()
 		m_pAuthSubmitBtn->setVisible(!recoveryRequired);
 		m_pAuthSubmitBtn->setEnabled(!recoveryRequired);
 	}
+	if (m_pAuthRepairBtn != nullptr)
+	{
+		m_pAuthRepairBtn->setText(m_bAuthRepairRunning
+			? QStringLiteral("正在准备……")
+			: QStringLiteral("自动修复"));
+		m_pAuthRepairBtn->setVisible(recoveryRequired);
+		m_pAuthRepairBtn->setEnabled(recoveryRequired && !m_bAuthRepairRunning);
+		m_pAuthRepairBtn->setCursor(m_bAuthRepairRunning
+			? Qt::BusyCursor : Qt::PointingHandCursor);
+		m_pAuthRepairBtn->setToolTip(QStringLiteral(
+			"安全退出当前程序后，由受控迁移器创建加密备份并尝试修复；未知损坏会拒绝修改。"));
+	}
 	if (m_pAuthCancelBtn != nullptr)
 	{
 		m_pAuthCancelBtn->setText(recoveryRequired
 			? QStringLiteral("关闭程序")
 			: QStringLiteral("退出登录"));
+		m_pAuthCancelBtn->setEnabled(!m_bAuthRepairRunning);
 	}
 	if (m_pAuthHintLabel != nullptr)
 	{
@@ -10795,7 +11223,7 @@ void QtWidgetsApplication4::RefreshAuthModeUi()
 		{
 			const QString recoveryMessage = m_sAuthHintOverride.trimmed().isEmpty()
 				? QStringLiteral(
-					"账号认证库未能通过完整性或版本迁移校验，所有登录入口均已锁定。请关闭程序，恢复已验证备份或联系维护人员；程序不会重建默认管理员。")
+					"账号认证库未能通过完整性或版本迁移校验，所有登录入口均已锁定。可点击“自动修复”执行受控备份与迁移；未知损坏会拒绝修改，程序不会重建默认管理员。")
 				: m_sAuthHintOverride.trimmed();
 			m_pAuthHintLabel->setText(recoveryMessage);
 			m_pAuthHintLabel->show();
@@ -11085,7 +11513,14 @@ void QtWidgetsApplication4::ShowAuthPage(const QString& promptMessage)
 	m_sAuthHintOverride = promptMessage.trimmed();
 	SetAuthRegisterMode(m_bInitialAdministratorSetupRequired);
 	m_pMainStack->setCurrentWidget(m_pAuthPage);
-	if (m_bAccountRecoveryRequired && m_pAuthCancelBtn != nullptr)
+	if (m_bAccountRecoveryRequired
+		&& m_pAuthRepairBtn != nullptr
+		&& m_pAuthRepairBtn->isVisible()
+		&& m_pAuthRepairBtn->isEnabled())
+	{
+		m_pAuthRepairBtn->setFocus(Qt::OtherFocusReason);
+	}
+	else if (m_bAccountRecoveryRequired && m_pAuthCancelBtn != nullptr)
 	{
 		m_pAuthCancelBtn->setFocus(Qt::OtherFocusReason);
 	}
@@ -16338,6 +16773,7 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 
 	if (targets.empty())
 	{
+		RefreshDashboardConnectionState();
 		QMessageBox::information(this, "安全停止", "当前没有本软件跟踪的活动机器人硬件流程。");
 		return;
 	}
@@ -16345,7 +16781,9 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 	if (m_pDashboardEmergencyStopBtn != nullptr)
 	{
 		m_pDashboardEmergencyStopBtn->setEnabled(false);
-		m_pDashboardEmergencyStopBtn->setText("正在安全停止所有本软件活动机器人任务...");
+		m_pDashboardEmergencyStopBtn->setCursor(Qt::BusyCursor);
+		m_pDashboardEmergencyStopBtn->setText("停止中\nSTOP");
+		m_pDashboardEmergencyStopBtn->setToolTip("正在安全停止本软件持有的机器人任务...");
 	}
 
 	QPointer<QtWidgetsApplication4> self(this);
@@ -16425,9 +16863,9 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 					}
 					if (self->m_pDashboardEmergencyStopBtn != nullptr)
 					{
-						self->m_pDashboardEmergencyStopBtn->setText("安全停止所有本软件活动机器人任务（不可从主页删除）");
-						self->m_pDashboardEmergencyStopBtn->setEnabled(true);
+						self->m_pDashboardEmergencyStopBtn->setText("急停\nSTOP");
 					}
+					self->RefreshDashboardConnectionState();
 					if (allOk)
 					{
 						QMessageBox::information(self, "安全停止", lines.join('\n'));
@@ -16451,7 +16889,6 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 								15000);
 						}
 					}
-					self->RefreshDashboardConnectionState();
 				}, Qt::QueuedConnection);
 		}).detach();
 }

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Static gate for the fail-closed account recovery page.
+"""Static gate for the fail-closed account recovery and controlled repair page.
 
 The recovery state must not leave normal login controls looking actionable, and
-its diagnostic text must remain readable on the application's minimum window.
+its repair action must hand the database to the provenance-checked migrator only
+after this process exits.  Unknown damage must remain locked.
 """
 
 from pathlib import Path
@@ -57,6 +58,8 @@ def main() -> None:
         "m_pAuthLoginModeBtn->setVisible(showModeSwitch);",
         "m_pAuthRegisterModeBtn->setVisible(showModeSwitch);",
         "m_pAuthSubmitBtn->setVisible(!recoveryRequired);",
+        "m_pAuthRepairBtn->setVisible(recoveryRequired);",
+        "m_pAuthRepairBtn->setEnabled(recoveryRequired && !m_bAuthRepairRunning);",
         "m_pLoginNameCombo->setVisible(!recoveryRequired);",
         "m_pLoginPasswordEdit->setVisible(!recoveryRequired);",
         'QStringLiteral("关闭程序")',
@@ -65,6 +68,11 @@ def main() -> None:
     require(
         "QPushButton* m_pAuthCancelBtn;" in HEADER,
         "recovery close action is not retained as managed UI state",
+    )
+    require(
+        "QPushButton* m_pAuthRepairBtn;" in HEADER
+        and "void StartAccountDatabaseRepair();" in HEADER,
+        "controlled account repair action is not retained as managed UI state",
     )
     require(
         "if (m_bAccountRecoveryRequired)" in construction
@@ -76,12 +84,77 @@ def main() -> None:
         "bool QtWidgetsApplication4::VerifyAccount(",
     )
     require(
-        "m_bAccountRecoveryRequired && m_pAuthCancelBtn != nullptr" in show_auth
+        "m_bAccountRecoveryRequired" in show_auth
+        and "m_pAuthRepairBtn->setFocus(Qt::OtherFocusReason);" in show_auth
         and "m_pAuthCancelBtn->setFocus(Qt::OtherFocusReason);" in show_auth,
-        "keyboard focus is left on a hidden login field during recovery",
+        "keyboard focus does not prefer repair with a close fallback during recovery",
     )
 
-    print("PASS: account recovery page is readable, explicit, and non-actionable")
+    repair = section(
+        "void QtWidgetsApplication4::StartAccountDatabaseRepair()",
+        "void QtWidgetsApplication4::CheckPendingAccountDatabaseRepairResult()",
+    )
+    for token in (
+        'QStringLiteral("tools/ConfigMigrate.exe")',
+        'QStringLiteral("tools/migrate_config_to_sqlite.py")',
+        'QStringLiteral("--print-source-sha256")',
+        "AuthRepairFileSha256(migrationSourcePath)",
+        "m_pAuthRepairBtn->repaint();",
+        "provenanceProbe.waitForStarted(5000)",
+        "provenanceProbe.waitForFinished(15000)",
+        "ApplicationInstanceGuard::MachineMutexName(",
+        "Get-Process -Id ([int]$env:AUTH_REPAIR_PID)",
+        "--source $env:AUTH_REPAIR_SOURCE --db $env:AUTH_REPAIR_DB --encrypt --scrub-legacy-credentials",
+        'environment.insert(QStringLiteral("AUTH_REPAIR_TOOL")',
+        'environment.insert(QStringLiteral("AUTH_REPAIR_PID")',
+        "TrustedWindowsPowerShellPath()",
+        "launcher.setProgram(powerShellPath)",
+        "CREATE_NO_WINDOW",
+        "launcher.startDetached()",
+        "QApplication::quit();",
+    ):
+        require(token in repair, f"controlled repair handoff missing: {token}")
+    require(
+        "--overwrite" not in repair,
+        "automatic repair must never request a destructive overwrite migration",
+    )
+    require(
+        "$status+'`r`n'" not in repair
+        and "WriteAllText($env:AUTH_REPAIR_STATUS,$status," in repair,
+        "repair status must be written as the exact success/failure token",
+    )
+    require(
+        repair.index("Get-Process -Id ([int]$env:AUTH_REPAIR_PID)")
+        < repair.index("--source $env:AUTH_REPAIR_SOURCE"),
+        "repair tool may run before the current process exits",
+    )
+    require(
+        ".arg(" not in repair,
+        "repair bootstrap must not interpolate writable paths into shell source",
+    )
+    require(
+        'launcher.setProgram(QStringLiteral("powershell.exe"))' not in repair,
+        "repair bootstrap must not resolve PowerShell through cwd or PATH",
+    )
+    for token in (
+        "GetSystemDirectoryW(",
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        "powerShellInfo.canonicalFilePath()",
+    ):
+        require(token in SOURCE, f"trusted system PowerShell resolution missing: {token}")
+
+    result = section(
+        "void QtWidgetsApplication4::CheckPendingAccountDatabaseRepairResult()",
+        "void QtWidgetsApplication4::RefreshAuthModeUi()",
+    )
+    require(
+        "if (!m_bAccountRecoveryRequired)" in result
+        and 'if (result == QStringLiteral("success"))' in result
+        and "已通过程序复核，可以正常登录" in result,
+        "repair success is trusted without the restarted runtime integrity gate",
+    )
+
+    print("PASS: account recovery stays fail-closed and offers controlled repair")
 
 
 if __name__ == "__main__":

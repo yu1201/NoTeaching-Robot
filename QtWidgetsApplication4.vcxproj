@@ -281,14 +281,14 @@
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
   <Target Name="AfterBuildDebug" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
-    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types tls,networkinformation,generic &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types networkinformation,generic &quot;$(TargetPath)&quot;" />
     <MakeDir Directories="$(TargetDir)translations" />
     <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460d.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\SKJCamera.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\avcodec-61.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\avutil-59.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\swresample-5.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\swscale-8.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="AfterBuildRelease" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
-    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types tls,networkinformation,generic &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types networkinformation,generic &quot;$(TargetPath)&quot;" />
     <MakeDir Directories="$(TargetDir)translations" />
     <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
     <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
