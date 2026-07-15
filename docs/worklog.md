@@ -7,6 +7,8 @@
 
 ## 2026-07-15
 
+- 版本 v2026.07.15.1118：修复 v2026.07.15.0928 覆盖安装后认证库仍进入安全恢复页的问题。根因是旧数据库存在 `LoginState/Settings/AutoLogin` 明文行，而 Python 安装迁移器只迁移 `LoginState/General`，导致安装器校验与 C++ 启动校验语义不一致。① auth 语义升级到 v3，Python/C++ 同时迁移 General、Settings 与现有 canonical LoginState；`UserName`、`AccountHistory` 仅在解码值一致时合并，任何来源/目标冲突、大小写影子或错误 scope 都原子回滚。② `RememberPassword`、`AutoLogin` 不继承旧值，统一写为 DPAPI 保护的 bool 0；auth3 只接受规范 DPAPI 布尔形态，旧 plaintext 发布形态仅允许作为 auth1/auth2 迁移输入。③ C++ 启动路径与安装迁移器统一前向闭锁，schema5 只允许 auth1/auth2/auth3，缺失、损坏或未来版本在事务前拒绝且数据库完整字节不变。④ 使用 `D:\SoftWare\HK-Pathlynx-CORPLA\Data` 的只读副本完成 preinstall、commit、最终 verify 演练，原始数据库 SHA-256 不变；77 项 Python、完整 C++ runner、ConfigMigrate parity、PowerShell 安装迁移与同版本恢复、AppPaths/恢复界面检查全部通过。署名 yu1201。
+
 - 版本 v2026.07.15.0928：完成安装迁移原子事务与同版本恢复的第三轮失败关闭加固。① Python 与 PowerShell/内嵌 C# 的正式库发布、OLD quarantine、失败 staging、DPAPI envelope、解密回读临时库均改为精确句柄绑定；首次绑定必须是单链接普通文件，绑定后才出现的硬链接由同一句柄统一清零并 `FlushFileBuffers`，之后才做 delete disposition，避免目录项删除或进程强杀后通过 alias 留下账号/配置原文。② NEW 已完整回读且受保护备份有效后才进入不可逆 OLD scrub；该提交点之后禁止恢复旧库，raw/empty quarantine、sidecar、事务记录及强杀拓扑都由下一进程按持久记录收敛。③ 安装文件已落盘但数据库 commit/finalize 失败时写入 HKLM64 受保护恢复标记，绑定版本、neutral/brand 通道、规范安装目录、主 EXE、事务路径与 SHA-256；同包重跑在 InitializeSetup 与 PrepareToInstall 双重回读，伪造 `NOOP_CURRENT`、HKCU、异通道、`/DIR` 换目录或事务漂移均失败关闭。④ 手工迁移入口补齐目标 Data 目录安全创建，parity 夹具同步遵守核心迁移器“目标父目录必须预先存在”的身份边界。Python 74 项、PowerShell 安装迁移完整矩阵（460.652 秒）、ConfigMigrate parity、13 个 C++ runner、Windows/Ubuntu/OTA 离线矩阵、中性/品牌 Inno 编译、Release x64 clean Rebuild、AppPaths 与独立 P1/P2 终审全部通过。署名 yu1201。
 
 ## 2026-07-13

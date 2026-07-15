@@ -27,7 +27,7 @@ from typing import Callable, NamedTuple
 
 SECRET = b"NoTeachingRobotConfigStoreV1"
 SCHEMA_VERSION = "5"
-AUTH_SEMANTIC_VERSION = "2"
+AUTH_SEMANTIC_VERSION = "3"
 DPAPI_PREFIX = "dpapi:user:v1:"
 DPAPI_BACKUP_MAGIC = b"NoTeaching-Robot ConfigStore DPAPI backup v1\n"
 DPAPI_BACKUP_PURPOSE = "configstore-database-backup-v1"
@@ -1210,7 +1210,7 @@ def build_ini_identity(source_path: str, section: str, key: str) -> dict[str, st
 
 def is_sensitive_setting_key(key: str) -> bool:
     lowered = key.lower()
-    return any(marker in lowered for marker in (
+    return lowered == "autologin" or any(marker in lowered for marker in (
         "password", "passwd", "pass", "token", "secret", "credential", "api_key", "apikey"
     ))
 
@@ -1244,50 +1244,6 @@ def requires_dpapi_protection(
     if is_portable_authentication_value(scope_type, module, key):
         return False
     return True
-
-
-def is_compatible_disabled_login_preference(
-    scope_type: str,
-    scope_id: str,
-    module: str,
-    key: str,
-    stored: str,
-    value_type: str,
-    sensitive: object,
-    encrypted: object,
-) -> bool:
-    # Released schema-v5/auth-v2 builds wrote a few exact boolean preference
-    # shapes as plaintext; these values are not credentials.  Keep the
-    # exception read-only and shape-exact.  Current writers still use the
-    # recoverable-secret DPAPI policy, and all near-miss shapes fail closed.
-    if (
-        scope_type != "global"
-        or scope_id != ""
-        or module != "LoginState"
-        or key not in {"RememberPassword", "AutoLogin"}
-        or encrypted not in (0, "0", False)
-    ):
-        return False
-    marker_is_sensitive = sensitive in (1, "1", True)
-    marker_is_nonsensitive = sensitive in (0, "0", False)
-    python_cleared_shape = (
-        stored == "0"
-        and value_type == "bool"
-        and marker_is_sensitive
-    )
-    if python_cleared_shape:
-        return True
-    if key == "RememberPassword":
-        return (
-            stored == "0"
-            and value_type == "string"
-            and marker_is_sensitive
-        )
-    return (
-        stored in {"0", "1"}
-        and value_type == "string"
-        and marker_is_nonsensitive
-    )
 
 
 def module_base_from_stored_file_name(stored_file_name: str) -> str:
@@ -4800,6 +4756,7 @@ def _validate_legacy_authentication_module_spelling(
 ) -> None:
     account_base = LEGACY_ACCOUNT_MODULE
     login_general = "LoginState/General"
+    login_settings = "LoginState/Settings"
     saved_passwords = "LoginState/SavedPasswords"
     remembered_credentials = "LoginState/RememberedCredentials"
     rows = conn.execute(
@@ -4807,7 +4764,8 @@ def _validate_legacy_authentication_module_spelling(
         SELECT DISTINCT module FROM settings
         WHERE scope_type='global' AND scope_id='' AND (
             lower(module)=lower(?) OR lower(module) LIKE lower(?) OR
-            lower(module)=lower(?) OR lower(module) LIKE lower(?) OR
+            lower(module)=lower(?) OR lower(module)=lower(?) OR
+            lower(module) LIKE lower(?) OR
             lower(module) LIKE lower(?)
         )
         """,
@@ -4815,6 +4773,7 @@ def _validate_legacy_authentication_module_spelling(
             account_base,
             LEGACY_ACCOUNT_MODULE_PREFIX + "%",
             login_general,
+            login_settings,
             saved_passwords + "%",
             remembered_credentials + "%",
         ),
@@ -4829,6 +4788,8 @@ def _validate_legacy_authentication_module_spelling(
             canonical = module.startswith(LEGACY_ACCOUNT_MODULE_PREFIX)
         elif folded == login_general.casefold():
             canonical = module == login_general
+        elif folded == login_settings.casefold():
+            canonical = module == login_settings
         elif folded.startswith(saved_passwords.casefold()):
             canonical = module.startswith(saved_passwords)
         elif folded.startswith(remembered_credentials.casefold()):
@@ -5062,27 +5023,124 @@ def migrate_authentication_semantics(
         allow_legacy_v4_wrapped=allow_legacy_v4_wrapped_profiles,
     )
 
-    for login_module, key, stored, encrypted in conn.execute(
+    canonical_login_fields = {
+        field.casefold(): field
+        for field in (
+            "UserName",
+            "AccountHistory",
+            "RememberPassword",
+            "AutoLogin",
+            "PasswordBase64",
+        )
+    }
+    portable_login_fields = {
+        "UserName": "string",
+        "AccountHistory": "list",
+    }
+    migrated_login_values: dict[str, str] = {}
+    for (
+        login_scope_type,
+        login_scope_id,
+        login_module,
+        key,
+        stored,
+        encrypted,
+    ) in conn.execute(
         """
-        SELECT module, key_name, value_text, encrypted FROM settings
-        WHERE scope_type='global' AND scope_id=''
-          AND lower(module)=lower('LoginState/General')
+        SELECT scope_type, scope_id, module, key_name, value_text, encrypted
+        FROM settings
+        WHERE lower(module) IN (
+            lower('LoginState/General'), lower('LoginState/Settings')
+        )
+        ORDER BY module, key_name
         """
     ).fetchall():
-        if str(login_module) != "LoginState/General":
+        module_text = str(login_module)
+        if (
+            str(login_scope_type) != "global"
+            or str(login_scope_id) != ""
+            or module_text not in {"LoginState/General", "LoginState/Settings"}
+        ):
             raise ValueError("Legacy login-state module has non-canonical casing")
         key_text = str(key)
-        if key_text not in {"UserName", "AccountHistory"}:
+        canonical_key = canonical_login_fields.get(key_text.casefold())
+        if canonical_key is None:
+            raise ValueError("Legacy login-state module has an unsupported field")
+        if key_text != canonical_key:
+            raise ValueError("Legacy login-state field has non-canonical casing")
+        if canonical_key not in portable_login_fields:
             continue
         decoded = decode_stored_text(
             str(stored), encrypted,
-            protection_purpose("global", "", "LoginState/General", key_text),
+            protection_purpose("global", "", module_text, canonical_key),
         )
         if decoded is None:
             raise ValueError("Cannot decode legacy login state")
+        previous = migrated_login_values.get(canonical_key)
+        if previous is not None and previous != decoded:
+            raise ValueError("Conflicting legacy login-state field")
+        migrated_login_values[canonical_key] = decoded
+
+    if conn.execute(
+        """
+        SELECT 1 FROM settings
+        WHERE lower(module)=lower('LoginState') AND module<>'LoginState'
+        LIMIT 1
+        """
+    ).fetchone() is not None:
+        raise ValueError("Target login-state module has non-canonical casing")
+
+    existing_login_keys: set[str] = set()
+    for (
+        login_scope_type,
+        login_scope_id,
+        login_module,
+        key,
+        stored,
+        encrypted,
+    ) in conn.execute(
+        """
+        SELECT scope_type, scope_id, module, key_name, value_text, encrypted
+        FROM settings
+        WHERE lower(module)=lower('LoginState')
+          AND lower(key_name) IN (
+              lower('UserName'), lower('AccountHistory'),
+              lower('RememberPassword'), lower('AutoLogin'),
+              lower('PasswordBase64')
+          )
+        ORDER BY module, key_name
+        """
+    ).fetchall():
+        module_text = str(login_module)
+        key_text = str(key)
+        canonical_key = canonical_login_fields.get(key_text.casefold())
+        if (
+            str(login_scope_type) != "global"
+            or str(login_scope_id) != ""
+            or module_text != "LoginState"
+            or canonical_key is None
+            or key_text != canonical_key
+        ):
+            raise ValueError("Target login-state field has non-canonical casing")
+        if canonical_key not in portable_login_fields:
+            continue
+        decoded = decode_stored_text(
+            str(stored), encrypted,
+            protection_purpose("global", "", "LoginState", canonical_key),
+        )
+        if decoded is None:
+            raise ValueError("Cannot decode target login state")
+        previous = migrated_login_values.get(canonical_key)
+        if previous is not None and previous != decoded:
+            raise ValueError("Conflicting target login-state field")
+        existing_login_keys.add(canonical_key)
+
+    for key_text, decoded in migrated_login_values.items():
+        if key_text in existing_login_keys:
+            continue
         insert_scoped_setting(
             conn, "global", "", "LoginState", key_text, decoded,
-            encrypt, "list" if key_text == "AccountHistory" else "string", overwrite=True,
+            encrypt, portable_login_fields[key_text], overwrite=True,
         )
 
     conn.execute(
@@ -5090,6 +5148,7 @@ def migrate_authentication_semantics(
         DELETE FROM settings WHERE scope_type='global' AND scope_id='' AND (
             lower(module)=lower(?) OR lower(module) LIKE lower(?) OR
             lower(module)=lower('LoginState/General') OR
+            lower(module)=lower('LoginState/Settings') OR
             lower(module) LIKE lower('LoginState/SavedPasswords%') OR
             lower(module) LIKE lower('LoginState/RememberedCredentials%') OR
             lower(key_name)='passwordbase64'
@@ -6298,6 +6357,18 @@ def verify_current_database(db_path: Path) -> str:
             WHERE (
                 lower(module)=lower(?) OR lower(module) LIKE lower(?) OR
                 lower(module)=lower('LoginState/General') OR
+                lower(module)=lower('LoginState/Settings') OR
+                (lower(module)=lower('LoginState') AND module<>'LoginState') OR
+                (module='LoginState' AND lower(key_name) IN (
+                    lower('UserName'), lower('AccountHistory'),
+                    lower('RememberPassword'), lower('AutoLogin'),
+                    lower('PasswordBase64')
+                ) AND (
+                    key_name NOT IN (
+                        'UserName', 'AccountHistory', 'RememberPassword',
+                        'AutoLogin', 'PasswordBase64'
+                    ) OR scope_type<>'global' OR scope_id<>''
+                )) OR
                 (lower(module) LIKE lower('LoginState/SavedPasswords%') AND NOT (
                     module='LoginState/SavedPasswords' AND
                     scope_type='global' AND scope_id=''
@@ -6313,6 +6384,35 @@ def verify_current_database(db_path: Path) -> str:
         ).fetchone()
         if orphan_count is None or int(orphan_count[0]) != 0:
             raise ValueError("Current ConfigStore retains legacy authentication rows")
+
+        for key, stored, value_type, sensitive, encrypted in connection.execute(
+            """
+            SELECT key_name, value_text, value_type, sensitive, encrypted
+            FROM settings
+            WHERE scope_type='global' AND scope_id='' AND module='LoginState'
+              AND key_name IN ('RememberPassword', 'AutoLogin')
+            """
+        ).fetchall():
+            key_text = str(key)
+            stored_text_value = str(stored)
+            if (
+                str(value_type) != "bool"
+                or sensitive not in (1, "1", True)
+                or encrypted not in (1, "1", True)
+                or not stored_text_value.startswith(DPAPI_PREFIX)
+            ):
+                raise ValueError(
+                    "Current login preference has a non-canonical protected shape"
+                )
+            decoded_preference = decode_stored_text(
+                stored_text_value,
+                encrypted,
+                protection_purpose(
+                    "global", "", "LoginState", key_text
+                ),
+            )
+            if decoded_preference not in {"0", "1"}:
+                raise ValueError("Current login preference is not a canonical boolean")
 
         for (
             scope_type, scope_id, module, key, stored, value_type,
@@ -6505,12 +6605,6 @@ def verify_current_database(db_path: Path) -> str:
             login_preference = is_login_preference(
                 scope_text, module_text, key_text
             )
-            compatible_disabled_preference = (
-                is_compatible_disabled_login_preference(
-                    scope_text, scope_id_text, module_text, key_text,
-                    stored_value, value_type_text, sensitive, encrypted,
-                )
-            )
             semantic_sensitive = (
                 bool(sensitive)
                 or is_sensitive_setting_key(module_text)
@@ -6523,7 +6617,6 @@ def verify_current_database(db_path: Path) -> str:
             if (
                 requires_dpapi
                 and not stored_value.startswith(DPAPI_PREFIX)
-                and not compatible_disabled_preference
             ):
                 raise ValueError("A recoverable sensitive setting is not protected by DPAPI")
             if (
@@ -6667,7 +6760,7 @@ def migrate_existing_database_to_current(
                     authentication_semantic_version = str(semantic_row[0])
             if version == SCHEMA_VERSION:
                 if authentication_semantic_version not in {
-                    "1", AUTH_SEMANTIC_VERSION
+                    "1", "2", AUTH_SEMANTIC_VERSION
                 }:
                     raise SystemExit(
                         "Unsupported or missing current-v5 authentication semantic version"

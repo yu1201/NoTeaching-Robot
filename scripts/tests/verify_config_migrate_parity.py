@@ -234,6 +234,9 @@ def main() -> int:
         raise AssertionError(f"Stale ConfigMigrate.exe: expected {expected_hash}, got {reported}")
 
     migration_module = runpy.run_path(str(source_script), run_name="config_migrate_parity_module")
+    current_auth_semantic_version = str(
+        migration_module["AUTH_SEMANTIC_VERSION"]
+    )
     decrypt_value = migration_module["decode_stored_text"]
     purpose_value = migration_module["protection_purpose"]
     protect_legacy_value = migration_module["protect_legacy_text"]
@@ -954,7 +957,8 @@ def main() -> int:
         write_auth1_database(verify_complete_db, "complete", "[]")
         with closing(sqlite3.connect(verify_complete_db)) as connection, connection:
             connection.execute(
-                "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+                "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                (current_auth_semantic_version,),
             )
             connection.commit()
         (verify_complete_data / "Unexpected.ini").write_text(
@@ -1003,7 +1007,8 @@ def main() -> int:
             )
             with closing(sqlite3.connect(verify_pending_db)) as connection, connection:
                 connection.execute(
-                    "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+                    "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                    (current_auth_semantic_version,),
                 )
                 connection.commit()
             if case == "unknown":
@@ -1063,7 +1068,8 @@ def main() -> int:
             )
             with closing(sqlite3.connect(residue_db)) as connection, connection:
                 connection.execute(
-                    "UPDATE meta SET value='2' WHERE key='auth_semantic_version'"
+                    "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                    (current_auth_semantic_version,),
                 )
                 connection.commit()
             residue_before = data_inventory(residue_data)
@@ -1620,15 +1626,23 @@ def main() -> int:
                 connection, True, authentication_initialized=False
             )
             connection.execute("DELETE FROM meta WHERE key='created_at'")
-            connection.executemany(
-                """
-                INSERT INTO settings(
-                    scope_type, scope_id, module, key_name, value_text,
-                    value_type, sensitive, encrypted
-                ) VALUES('global', '', 'LoginState', ?, '0', 'bool', ?, 0)
-                """,
-                (("RememberPassword", 1), ("AutoLogin", 1)),
-            )
+            for key in ("RememberPassword", "AutoLogin"):
+                connection.execute(
+                    """
+                    INSERT INTO settings(
+                        scope_type, scope_id, module, key_name, value_text,
+                        value_type, sensitive, encrypted
+                    ) VALUES('global', '', 'LoginState', ?, ?, 'bool', 1, 1)
+                    """,
+                    (
+                        key,
+                        protect_sensitive_value(
+                            "0", purpose_value(
+                                "global", "", "LoginState", key
+                            )
+                        ),
+                    ),
+                )
         compatible_before = file_sha256(compatible_current_db)
         run_checked(
             [str(exe), "--verify-current", "--db", str(compatible_current_db)],
@@ -1638,53 +1652,61 @@ def main() -> int:
             raise AssertionError(
                 "Read-only verification modified a compatible DB without created_at"
             )
-        with closing(sqlite3.connect(compatible_current_db)) as connection, connection:
-            connection.execute(
-                """
-                UPDATE settings
-                SET value_text='0', value_type='string', sensitive=1
-                WHERE scope_type='global' AND scope_id=''
-                  AND module='LoginState' AND key_name='RememberPassword'
-                """
-            )
-            connection.execute(
-                """
-                UPDATE settings
-                SET value_text='1', value_type='string', sensitive=0
-                WHERE scope_type='global' AND scope_id=''
-                  AND module='LoginState' AND key_name='AutoLogin'
-                """
-            )
-        published_preference_before = file_sha256(compatible_current_db)
-        run_checked(
-            [str(exe), "--verify-current", "--db", str(compatible_current_db)],
-            temp,
+
+        published_plaintext_preferences = (
+            ("remember-bool-zero", "RememberPassword", "0", "bool", 1, 0),
+            ("auto-bool-zero", "AutoLogin", "0", "bool", 1, 0),
+            ("remember-string-zero", "RememberPassword", "0", "string", 1, 0),
+            ("auto-string-zero", "AutoLogin", "0", "string", 0, 0),
+            ("auto-string-one", "AutoLogin", "1", "string", 0, 0),
         )
-        if file_sha256(compatible_current_db) != published_preference_before:
-            raise AssertionError(
-                "Read-only verification modified published LoginState shapes"
-            )
-        with closing(sqlite3.connect(compatible_current_db)) as connection, connection:
-            connection.execute(
-                """
-                UPDATE settings SET value_text='1'
-                WHERE scope_type='global' AND scope_id=''
-                  AND module='LoginState' AND key_name='RememberPassword'
-                """
-            )
-        incompatible_preference_before = file_sha256(compatible_current_db)
-        incompatible_preference_result = run_command(
-            [str(exe), "--verify-current", "--db", str(compatible_current_db)],
-            temp,
+        invalid_protected_preferences = (
+            ("protected-string", "RememberPassword", "0", "string", 1, 1),
+            ("protected-nonsensitive", "AutoLogin", "0", "bool", 0, 1),
+            ("protected-flag-clear", "AutoLogin", "0", "bool", 1, 0),
+            ("protected-nonboolean", "AutoLogin", "2", "bool", 1, 1),
         )
-        if (
-            incompatible_preference_result.returncode == 0
-            or file_sha256(compatible_current_db)
-            != incompatible_preference_before
-        ):
-            raise AssertionError(
-                "Nonzero plaintext login preference was not rejected read-only"
+        for (
+            name, key, plain_value, value_type, sensitive, encrypted
+        ) in published_plaintext_preferences + invalid_protected_preferences:
+            preference_db = temp / f"invalid-login-preference-{name}" / "ConfigStore.db"
+            preference_db.parent.mkdir(parents=True)
+            stored_value = plain_value
+            if name.startswith("protected-"):
+                stored_value = protect_sensitive_value(
+                    plain_value,
+                    purpose_value("global", "", "LoginState", key),
+                )
+            with closing(sqlite3.connect(preference_db)) as connection, connection:
+                migration_module["create_current_tables"](connection)
+                migration_module["set_schema_meta"](
+                    connection, True, authentication_initialized=False
+                )
+                connection.execute("DELETE FROM meta WHERE key='created_at'")
+                connection.execute(
+                    """
+                    INSERT INTO settings(
+                        scope_type, scope_id, module, key_name, value_text,
+                        value_type, sensitive, encrypted
+                    ) VALUES('global', '', 'LoginState', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        key, stored_value, value_type, sensitive, encrypted,
+                    ),
+                )
+            preference_before = file_sha256(preference_db)
+            preference_result = run_command(
+                [str(exe), "--verify-current", "--db", str(preference_db)],
+                temp,
             )
+            if (
+                preference_result.returncode == 0
+                or file_sha256(preference_db) != preference_before
+            ):
+                raise AssertionError(
+                    "Invalid login preference was not rejected read-only: "
+                    f"{name}"
+                )
 
         uppercase_legacy_db = temp / "current-uppercase-legacy-table" / "ConfigStore.db"
         uppercase_legacy_db.parent.mkdir(parents=True)
@@ -1745,7 +1767,7 @@ def main() -> int:
         finally:
             connection.close()
         if empty_semantic_meta != {
-            "auth_semantic_version": "2",
+            "auth_semantic_version": current_auth_semantic_version,
             "auth_initialized": "0",
         } or empty_semantic_accounts != (0,):
             raise AssertionError(
@@ -1819,7 +1841,7 @@ def main() -> int:
         finally:
             connection.close()
         if preserved_provenance != {
-            "auth_semantic_version": "2",
+            "auth_semantic_version": current_auth_semantic_version,
             "auth_initialized": "1",
             "legacy_credential_scrub_state": "complete",
             "legacy_credential_scrub_manifest": "[]",

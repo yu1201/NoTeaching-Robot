@@ -30,7 +30,7 @@
 namespace
 {
 constexpr char kSchemaVersion[] = "5";
-constexpr char kAuthenticationSemanticVersion[] = "2";
+constexpr char kAuthenticationSemanticVersion[] = "3";
 constexpr char kSecret[] = "NoTeachingRobotConfigStoreV1";
 
 struct ScopedSettingIdentity
@@ -1768,24 +1768,49 @@ bool MigrateLegacyLoginState(QSqlDatabase& db)
     QSqlQuery loginQuery(db);
     loginQuery.prepare(
         "SELECT scope_type, scope_id, module, key_name, value_text, encrypted FROM settings "
-        "WHERE lower(module)='loginstate/general' ORDER BY module, key_name");
+        "WHERE lower(module) IN ('loginstate/general', 'loginstate/settings') OR ("
+        "lower(module)='loginstate' AND lower(key_name) IN ("
+        "'username', 'accounthistory', 'rememberpassword', 'autologin', 'passwordbase64')) "
+        "ORDER BY module, key_name");
     if (!loginQuery.exec())
     {
         return false;
     }
     QMap<QString, QString> loginValues;
+    const auto mergeLoginValue = [&loginValues](
+                                     const QString& keyName,
+                                     const QString& value)
+        {
+            if (loginValues.contains(keyName))
+            {
+                return loginValues.value(keyName) == value;
+            }
+            loginValues.insert(keyName, value);
+            return true;
+        };
     while (loginQuery.next())
     {
-        if (loginQuery.value(0).toString() != QStringLiteral("global")
-            || !loginQuery.value(1).toString().isEmpty()
-            || loginQuery.value(2).toString() != QStringLiteral("LoginState/General"))
+        const QString scopeType = loginQuery.value(0).toString();
+        const QString scopeId = loginQuery.value(1).toString();
+        const QString module = loginQuery.value(2).toString();
+        const QString lowerModule = module.toLower();
+        const bool legacyGeneral = lowerModule == QLatin1String("loginstate/general");
+        const bool legacySettings = lowerModule == QLatin1String("loginstate/settings");
+        const QString canonicalModule = legacyGeneral
+            ? QStringLiteral("LoginState/General")
+            : legacySettings
+                ? QStringLiteral("LoginState/Settings")
+                : QStringLiteral("LoginState");
+        if (scopeType != QStringLiteral("global")
+            || !scopeId.isEmpty()
+            || module != canonicalModule)
         {
             return false;
         }
         const QString keyName = loginQuery.value(3).toString();
         QString canonicalField;
-        if (CanonicalLegacyLoginField(keyName, &canonicalField)
-            && keyName != canonicalField)
+        if (!CanonicalLegacyLoginField(keyName, &canonicalField)
+            || keyName != canonicalField)
         {
             return false;
         }
@@ -1798,16 +1823,15 @@ bool MigrateLegacyLoginState(QSqlDatabase& db)
         if (!DecodeStoredText(
                 loginQuery.value(4).toString(),
                 loginQuery.value(5).toInt(),
-                ProtectionPurpose(QStringLiteral("global"), QString(), QStringLiteral("LoginState/General"), keyName),
+                ProtectionPurpose(scopeType, scopeId, module, keyName),
                 &decoded))
         {
             return false;
         }
-        if (loginValues.contains(keyName))
+        if (!mergeLoginValue(canonicalField, decoded))
         {
             return false;
         }
-        loginValues.insert(keyName, decoded);
     }
     loginQuery.finish();
     for (auto it = loginValues.cbegin(); it != loginValues.cend(); ++it)
@@ -1832,6 +1856,7 @@ bool MigrateLegacyLoginState(QSqlDatabase& db)
             "DELETE FROM settings WHERE scope_type='global' AND scope_id='' AND ("
             "module='Accounts/Users' OR module GLOB 'Accounts/Users/*' OR "
             "lower(module)='loginstate/general' OR "
+            "lower(module)='loginstate/settings' OR "
             "lower(module) GLOB 'loginstate/savedpasswords*' OR "
             "lower(module) GLOB 'loginstate/rememberedcredentials*' OR "
             "lower(key_name)='passwordbase64')")))
@@ -1945,6 +1970,7 @@ bool MigrateLegacyAuthenticationSettings(QSqlDatabase& db, bool authenticationIn
             "lower(module)='accounts/users' OR "
             "lower(module) GLOB 'accounts/users/*' OR "
             "lower(module)='loginstate/general' OR "
+            "lower(module)='loginstate/settings' OR "
             "lower(module) GLOB 'loginstate/savedpasswords*' OR "
             "lower(module) GLOB 'loginstate/rememberedcredentials*' OR "
             "lower(key_name)='passwordbase64'"))
@@ -2022,6 +2048,13 @@ bool ValidateCurrentAuthenticationIntegrity(
             "lower(module)='accounts/users' OR "
             "lower(module) GLOB 'accounts/users/*' OR "
             "lower(module)='loginstate/general' OR "
+            "lower(module)='loginstate/settings' OR "
+            "(lower(module)='loginstate' AND module<>'LoginState') OR "
+            "(module='LoginState' AND lower(key_name) IN ("
+            "'username', 'accounthistory', 'rememberpassword', 'autologin', 'passwordbase64') "
+            "AND (key_name NOT IN ("
+            "'UserName', 'AccountHistory', 'RememberPassword', 'AutoLogin', 'PasswordBase64') "
+            "OR scope_type<>'global' OR scope_id<>'')) OR "
             "(lower(module) GLOB 'loginstate/savedpasswords*' "
             "AND NOT (module='LoginState/SavedPasswords' "
             "AND scope_type='global' AND scope_id='')) OR "
@@ -2247,24 +2280,27 @@ bool ValidateCurrentAuthenticationIntegrity(
             && scopeId.isEmpty()
             && module == QLatin1String("LoginState")
             && (keyName == QLatin1String("RememberPassword")
-                || keyName == QLatin1String("AutoLogin"))
-            && encrypted == 0;
-        const bool compatibleLegacyLoginPreference = canonicalLoginPreference
-            && ((storedText == QLatin1String("0")
-                    && valueType == QLatin1String("bool")
-                    && sensitiveMarker == 1)
-                || (keyName == QLatin1String("RememberPassword")
-                    && storedText == QLatin1String("0")
-                    && valueType == QLatin1String("string")
-                    && sensitiveMarker == 1)
-                || (keyName == QLatin1String("AutoLogin")
-                    && (storedText == QLatin1String("0")
-                        || storedText == QLatin1String("1"))
-                    && valueType == QLatin1String("string")
-                    && sensitiveMarker == 0));
+                || keyName == QLatin1String("AutoLogin"));
+        if (canonicalLoginPreference)
+        {
+            QString decodedPreference;
+            if (valueType != QLatin1String("bool")
+                || sensitiveMarker != 1
+                || encrypted != 1
+                || !CredentialSecurity::IsCurrentUserProtected(storedText)
+                || !DecodeStoredText(
+                    storedText,
+                    encrypted,
+                    ProtectionPurpose(scopeType, scopeId, module, keyName),
+                    &decodedPreference)
+                || (decodedPreference != QLatin1String("0")
+                    && decodedPreference != QLatin1String("1")))
+            {
+                return reject("login-preference-shape");
+            }
+        }
         if (requiresDpapi
-            && !CredentialSecurity::IsCurrentUserProtected(storedText)
-            && !compatibleLegacyLoginPreference)
+            && !CredentialSecurity::IsCurrentUserProtected(storedText))
         {
             return reject("sensitive-setting-not-dpapi");
         }
@@ -2515,6 +2551,14 @@ bool EnsureCurrentSchema(QSqlDatabase& db)
 
     const QString authenticationSemanticVersion = MetaValue(
         db, QStringLiteral("auth_semantic_version"));
+    if (existingVersion == QString::fromLatin1(kSchemaVersion)
+        && authenticationSemanticVersion != QLatin1String("1")
+        && authenticationSemanticVersion != QLatin1String("2")
+        && authenticationSemanticVersion != QString::fromLatin1(kAuthenticationSemanticVersion))
+    {
+        qCritical() << "Current schema has an unsupported or missing authentication semantic version";
+        return false;
+    }
     const bool needsMigration = existingVersion != QString::fromLatin1(kSchemaVersion)
         || authenticationSemanticVersion != QString::fromLatin1(kAuthenticationSemanticVersion);
     if (!needsMigration)

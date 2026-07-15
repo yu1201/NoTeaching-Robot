@@ -13,9 +13,15 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.07.15.0928`
+- 当前源码版本：`v2026.07.15.1118`
 
-建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.07.15.0928.exe`，不用自己编译源码。
+建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.07.15.1118.exe`，不用自己编译源码。
+
+## 2026-07-15 更新（v2026.07.15.1118）
+
+- 修复覆盖安装后账号库仍被安全锁定：安装迁移现在同时识别旧版 `LoginState/General` 与 `LoginState/Settings`，保留无冲突的用户名和账号历史，并将“记住密码/自动登录”统一重置为 DPAPI 保护的关闭状态；旧路径、大小写影子或内容冲突全部原子失败，不会静默覆盖账号数据。
+- 认证语义升级到 auth3：程序与安装迁移器仅允许已知 auth1/auth2 升级，缺失、损坏或未来认证语义版本会在任何写入前拒绝并保持数据库字节不变；auth3 中存在的登录偏好必须是规范的 DPAPI 布尔值。
+- 验证：真实现场数据库副本完成安装前迁移、提交与回读演练；77 项 Python 数据库回归、ConfigMigrate 源码/EXE parity、完整 C++ 安全 runner、PowerShell 安装迁移生命周期与同版本恢复矩阵、AppPaths 和认证恢复界面检查全部通过。
 
 ## 2026-07-15 更新（v2026.07.15.0928）
 

@@ -63,6 +63,12 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "CredentialSecurity invalid-auth-metadata test failed: $LASTEXITCODE"
 }
+foreach ($scenario in @('missing', 'invalid', 'future')) {
+    & $outputExe --auth-semantic-gate $scenario
+    if ($LASTEXITCODE -ne 0) {
+        throw "CredentialSecurity auth-semantic-gate '$scenario' test failed: $LASTEXITCODE"
+    }
+}
 & $outputExe --legacy-disk-gate
 if ($LASTEXITCODE -ne 0) {
     throw "CredentialSecurity legacy-disk-gate test failed: $LASTEXITCODE"
@@ -97,6 +103,15 @@ foreach ($scenario in @(
     & $outputExe --current-auth-integrity $scenario
     if ($LASTEXITCODE -ne 0) {
         throw "CredentialSecurity current authentication integrity '$scenario' test failed: $LASTEXITCODE"
+    }
+}
+foreach ($scenario in @(
+    'success', 'module-case', 'field-case', 'source-conflict',
+    'target-conflict', 'current-settings-orphan'
+)) {
+    & $outputExe --legacy-login-semantic $scenario
+    if ($LASTEXITCODE -ne 0) {
+        throw "CredentialSecurity legacy login semantic '$scenario' test failed: $LASTEXITCODE"
     }
 }
 foreach ($scenario in @(
