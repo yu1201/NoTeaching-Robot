@@ -25,6 +25,8 @@ public:
     using CheckpointCallback = std::function<bool(const QString&, const QString&)>;
     using BeforeActionCallback = std::function<bool(const QString&)>;
     using StopRequestedCallback = std::function<bool()>;
+    using ScanProgressCallback = std::function<void(double)>;
+    using ScanPauseAvailabilityCallback = std::function<void(bool, const QString&)>;
 
     struct WeldExecutionIdentity
     {
@@ -145,7 +147,10 @@ public:
         const StepCallback& setFlowStep,
         const CheckpointCallback& safetyCheckpoint = CheckpointCallback(),
         const BeforeActionCallback& beforeAction = BeforeActionCallback(),
-        const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
+        const StopRequestedCallback& stopRequested = StopRequestedCallback(),
+        const ScanProgressCallback& scanProgress = ScanProgressCallback(),
+        const ScanPauseAvailabilityCallback& scanPauseAvailability =
+            ScanPauseAvailabilityCallback()) const;
     bool ScanMoveAndCollect(
         RobotDriverAdaptor* pRobotDriver,
         const T_PRECISE_MEASURE_PARAM& param,
@@ -154,7 +159,10 @@ public:
         const StepCallback& setFlowStep,
         CameraFrameCache* cameraCache,
         ScanMotionProgress* progress = nullptr,
-        const HandEyeMatrixConfig* validatedCalibration = nullptr) const;
+        const HandEyeMatrixConfig* validatedCalibration = nullptr,
+        const ScanProgressCallback& scanProgress = ScanProgressCallback(),
+        const ScanPauseAvailabilityCallback& scanPauseAvailability =
+            ScanPauseAvailabilityCallback()) const;
     bool RebuildWeldFilesFromLaserDir(
         const T_PRECISE_MEASURE_PARAM& param,
         const QString& laserDir,

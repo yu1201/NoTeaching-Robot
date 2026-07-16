@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <system_error>
 #include <thread>
 
@@ -508,6 +509,30 @@ namespace
 		// cmd.exe 会在双引号内仍展开 %VAR%；路径中的百分号必须成对转义。
 		value.replace(QStringLiteral("%"), QStringLiteral("%%"));
 		return value;
+	}
+
+	QString RenderNamedBatchTemplate(
+		QString script,
+		std::initializer_list<QPair<QString, QString>> replacements)
+	{
+		const QString markerPrefix = QStringLiteral("@@OTA_");
+		static const QRegularExpression markerPattern(
+			QStringLiteral(R"(^@@OTA_[A-Z0-9_]+@@$)"));
+		for (const auto& replacement : replacements)
+		{
+			const QString& marker = replacement.first;
+			const QString& value = replacement.second;
+			// 每个命名哨兵必须由调用方恰好提供一次，且替换值不能重新注入哨兵。
+			// 这样模板新增/删除字段时会安全失败，不再依赖 QString::arg 的“最低编号”语义。
+			if (!markerPattern.match(marker).hasMatch()
+				|| value.contains(markerPrefix)
+				|| script.count(marker) <= 0)
+			{
+				return {};
+			}
+			script.replace(marker, value);
+		}
+		return script.contains(markerPrefix) ? QString() : script;
 	}
 
 	bool IsAllowedOtaUrl(const QUrl& url)
@@ -2119,38 +2144,48 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 	const QString patchHealthMarkerPath = EscapeBatchLiteral(QDir::toNativeSeparators(
 		QFileInfo(patchHealthMarkerFile).absoluteFilePath()));
 	const qint64 currentPid = QCoreApplication::applicationPid();
-	const QString waitForCurrentProcess = QString(
-		"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
-		"$process = Get-Process -Id %1 -ErrorAction SilentlyContinue; "
-		"if ($null -ne $process) { $process.WaitForExit() }; exit 0 } catch { exit 1 }\"\r\n")
-		.arg(currentPid);
-	const QString verifyPayload = QString(
-		"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
-		"$item = Get-Item -LiteralPath $env:NO_TEACHING_OTA_PAYLOAD -ErrorAction Stop; "
-		"if ($item.Length -ne %1) { exit 2 }; "
-		"$actual = (Get-FileHash -LiteralPath $env:NO_TEACHING_OTA_PAYLOAD -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant(); "
-		"if ($actual -ceq '%2') { exit 0 } else { exit 3 } } catch { exit 4 }\"\r\n")
-		.arg(payloadSize)
-		.arg(payloadSha);
+	const QString waitForCurrentProcess = RenderNamedBatchTemplate(
+		QStringLiteral(
+			"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
+			"$process = Get-Process -Id @@OTA_PID@@ -ErrorAction SilentlyContinue; "
+			"if ($null -ne $process) { $process.WaitForExit() }; exit 0 } catch { exit 1 }\"\r\n"),
+		{ { QStringLiteral("@@OTA_PID@@"), QString::number(currentPid) } });
+	const QString verifyPayload = RenderNamedBatchTemplate(
+		QStringLiteral(
+			"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
+			"$item = Get-Item -LiteralPath $env:NO_TEACHING_OTA_PAYLOAD -ErrorAction Stop; "
+			"if ($item.Length -ne @@OTA_PAYLOAD_SIZE@@) { exit 2 }; "
+			"$actual = (Get-FileHash -LiteralPath $env:NO_TEACHING_OTA_PAYLOAD -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant(); "
+			"if ($actual -ceq '@@OTA_PAYLOAD_SHA256@@') { exit 0 } else { exit 3 } } catch { exit 4 }\"\r\n"),
+		{
+			{ QStringLiteral("@@OTA_PAYLOAD_SIZE@@"), QString::number(payloadSize) },
+			{ QStringLiteral("@@OTA_PAYLOAD_SHA256@@"), payloadSha }
+		});
+	if (waitForCurrentProcess.isEmpty() || verifyPayload.isEmpty())
+	{
+		AppendLog(QStringLiteral("升级引导命令渲染失败，已停止安装。"));
+		return;
+	}
 	QString script;
 	if (usePatch)
 	{
 		// 增量包在退出前已预解压并验证。退出后先复制到安装目录同卷临时名，随后用
 		// File.Replace 原子替换并自动备份旧 exe；任何失败都保持/恢复旧 exe，绝不 tar 直覆。
-		script = QString(
+		// OTA_PATCH_BOOTSTRAP_TEMPLATE_BEGIN
+		const QString patchTemplate = QStringLiteral(
 			"@echo off\r\n"
 			"setlocal DisableDelayedExpansion\r\n"
-			"set \"NO_TEACHING_OTA_PAYLOAD=%2\"\r\n"
-			"set \"OTA_APP=%5\"\r\n"
-			"set \"OTA_NEW=%5.ota-new\"\r\n"
-			"set \"OTA_BACKUP=%5.ota-backup\"\r\n"
-			"set \"OTA_FAILED=%5.ota-failed\"\r\n"
-			"set \"OTA_PATCH_FAILURE_MARKER=%7\"\r\n"
-			"set \"OTA_HEALTH=%8\"\r\n"
-			"%1"
+			"set \"NO_TEACHING_OTA_PAYLOAD=@@OTA_PAYLOAD@@\"\r\n"
+			"set \"OTA_APP=@@OTA_APP@@\"\r\n"
+			"set \"OTA_NEW=@@OTA_APP@@.ota-new\"\r\n"
+			"set \"OTA_BACKUP=@@OTA_APP@@.ota-backup\"\r\n"
+			"set \"OTA_FAILED=@@OTA_APP@@.ota-failed\"\r\n"
+			"set \"OTA_PATCH_FAILURE_MARKER=@@OTA_PATCH_FAILURE_MARKER@@\"\r\n"
+			"set \"OTA_HEALTH=@@OTA_HEALTH_MARKER@@\"\r\n"
+			"@@OTA_WAIT_FOR_PROCESS@@"
 			"if errorlevel 1 goto :wait_failed\r\n"
 			"if not errorlevel 0 goto :wait_failed\r\n"
-			"%6"
+			"@@OTA_VERIFY_PAYLOAD@@"
 			"if errorlevel 1 goto :verify_failed\r\n"
 			"if not errorlevel 0 goto :verify_failed\r\n"
 			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_in_progress\r\n"
@@ -2159,7 +2194,7 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 			"if errorlevel 1 goto :copy_failed\r\n"
 			"if not errorlevel 0 goto :copy_failed\r\n"
 			"set \"NO_TEACHING_OTA_PAYLOAD=%OTA_NEW%\"\r\n"
-			"%6"
+			"@@OTA_VERIFY_PAYLOAD@@"
 			"if errorlevel 1 goto :copy_verify_failed\r\n"
 			"if not errorlevel 0 goto :copy_verify_failed\r\n"
 			"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
@@ -2176,27 +2211,27 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 			"del /f /q \"%OTA_PATCH_FAILURE_MARKER%\" \"%OTA_HEALTH%\" \"%OTA_BACKUP%\" \"%OTA_FAILED%\" 2>nul\r\n"
 			"exit /b 0\r\n"
 			":wait_failed\r\n"
-			">\"%4\" echo Waiting for the running application failed.\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Waiting for the running application failed.\r\n"
 			"exit /b 1\r\n"
 			":verify_failed\r\n"
 			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
-			">\"%4\" echo Staged patch hash or size verification failed.\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Staged patch hash or size verification failed.\r\n"
 			"start \"\" \"%OTA_APP%\"\r\n"
 			"exit /b 2\r\n"
 			":copy_failed\r\n"
 			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
-			">\"%4\" echo Copying the staged executable failed; original was preserved.\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Copying the staged executable failed; original was preserved.\r\n"
 			"start \"\" \"%OTA_APP%\"\r\n"
 			"exit /b 3\r\n"
 			":copy_verify_failed\r\n"
 			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
-			">\"%4\" echo Copied executable verification failed; original was preserved.\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Copied executable verification failed; original was preserved.\r\n"
 			"del /f /q \"%OTA_NEW%\" 2>nul\r\n"
 			"start \"\" \"%OTA_APP%\"\r\n"
 			"exit /b 4\r\n"
 			":replace_failed\r\n"
 			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
-			">\"%4\" echo Atomic executable replacement failed; original was preserved.\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Atomic executable replacement failed; original was preserved.\r\n"
 			"del /f /q \"%OTA_NEW%\" 2>nul\r\n"
 			"start \"\" \"%OTA_APP%\"\r\n"
 			"exit /b 5\r\n"
@@ -2206,35 +2241,48 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 			"[System.IO.File]::Replace($env:OTA_BACKUP, $env:OTA_APP, $env:OTA_FAILED, $true); exit 0 } catch { exit 1 }\"\r\n"
 			"if errorlevel 1 goto :rollback_failed\r\n"
 			"if not errorlevel 0 goto :rollback_failed\r\n"
-			">\"%4\" echo Updated application start failed; old executable was restored.\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Updated application start failed; old executable was restored.\r\n"
 			"start \"\" \"%OTA_APP%\"\r\n"
 			"exit /b 6\r\n"
 			":rollback_failed\r\n"
 			">\"%OTA_PATCH_FAILURE_MARKER%\" echo patch_failed\r\n"
-			">\"%4\" echo Updated application start failed and rollback failed.\r\n"
-			"exit /b 7\r\n")
-			.arg(waitForCurrentProcess, payload, appDir, failureLogPath, appPath, verifyPayload,
-				patchFailureMarkerPath, patchHealthMarkerPath);
+			">\"@@OTA_FAILURE_LOG@@\" echo Updated application start failed and rollback failed.\r\n"
+			"exit /b 7\r\n");
+		// OTA_PATCH_BOOTSTRAP_TEMPLATE_END
+		// OTA_PATCH_BOOTSTRAP_RENDER_BEGIN
+		script = RenderNamedBatchTemplate(
+			patchTemplate,
+			{
+				{ QStringLiteral("@@OTA_WAIT_FOR_PROCESS@@"), waitForCurrentProcess },
+				{ QStringLiteral("@@OTA_PAYLOAD@@"), payload },
+				{ QStringLiteral("@@OTA_FAILURE_LOG@@"), failureLogPath },
+				{ QStringLiteral("@@OTA_APP@@"), appPath },
+				{ QStringLiteral("@@OTA_VERIFY_PAYLOAD@@"), verifyPayload },
+				{ QStringLiteral("@@OTA_PATCH_FAILURE_MARKER@@"), patchFailureMarkerPath },
+				{ QStringLiteral("@@OTA_HEALTH_MARKER@@"), patchHealthMarkerPath }
+			});
+		// OTA_PATCH_BOOTSTRAP_RENDER_END
 	}
 	else
 	{
 		// 全量同样必须先等当前 PID 退出，并检查 Inno 退出码；失败时不拉起旧程序。
 		// /DIR 强制装回当前程序目录：Inno 按 AppId 查注册表定位先前安装，手工拷贝部署（无注册表记录）
 		// 或历史 AppId 对不上时会落到 DefaultDirName={localappdata}，在别的盘装出第二份（2026-07-10 事故）。
-		script = QString(
+		// OTA_FULL_BOOTSTRAP_TEMPLATE_BEGIN
+		const QString fullTemplate = QStringLiteral(
 			"@echo off\r\n"
 			"setlocal DisableDelayedExpansion\r\n"
-			"set \"NO_TEACHING_OTA_PAYLOAD=%2\"\r\n"
-			"set \"OTA_APP=%5\"\r\n"
-			"set \"OTA_HEALTH=%8\"\r\n"
+			"set \"NO_TEACHING_OTA_PAYLOAD=@@OTA_PAYLOAD@@\"\r\n"
+			"set \"OTA_APP=@@OTA_APP@@\"\r\n"
+			"set \"OTA_HEALTH=@@OTA_HEALTH_MARKER@@\"\r\n"
 			"del /f /q \"%OTA_HEALTH%\" 2>nul\r\n"
-			"%1"
+			"@@OTA_WAIT_FOR_PROCESS@@"
 			"if errorlevel 1 goto :wait_failed\r\n"
 			"if not errorlevel 0 goto :wait_failed\r\n"
-			"%6"
+			"@@OTA_VERIFY_PAYLOAD@@"
 			"if errorlevel 1 goto :verify_failed\r\n"
 			"if not errorlevel 0 goto :verify_failed\r\n"
-			"start \"\" /wait \"%2\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"%3\"\r\n"
+			"start \"\" /wait \"@@OTA_PAYLOAD@@\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=\"@@OTA_APP_DIR@@\"\r\n"
 			"if errorlevel 1 goto :install_failed\r\n"
 			"if not errorlevel 0 goto :install_failed\r\n"
 			"powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"try { "
@@ -2244,24 +2292,42 @@ void OnlineServicesDialog::InstallDownloadedPackage()
 			"Start-Sleep -Seconds 1 }; exit 2 } catch { exit 3 }\"\r\n"
 			"if errorlevel 1 goto :restart_failed\r\n"
 			"if not errorlevel 0 goto :restart_failed\r\n"
-			"del /f /q \"%7\" \"%OTA_HEALTH%\" \"%5.ota-backup\" \"%5.ota-failed\" 2>nul\r\n"
+			"del /f /q \"@@OTA_PATCH_FAILURE_MARKER@@\" \"%OTA_HEALTH%\" \"@@OTA_APP@@.ota-backup\" \"@@OTA_APP@@.ota-failed\" 2>nul\r\n"
 			"exit /b 0\r\n"
 			":wait_failed\r\n"
-			">\"%4\" echo Waiting for the running application failed.\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Waiting for the running application failed.\r\n"
 			"exit /b 1\r\n"
 			":verify_failed\r\n"
-			">\"%4\" echo Full installer hash or size verification failed.\r\n"
-			"start \"\" \"%5\"\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Full installer hash or size verification failed.\r\n"
+			"start \"\" \"@@OTA_APP@@\"\r\n"
 			"exit /b 2\r\n"
 			":install_failed\r\n"
-			">\"%4\" echo Full installer failed.\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Full installer failed.\r\n"
 			"exit /b 3\r\n"
 			":restart_failed\r\n"
-			">\"%7\" echo full_failed\r\n"
-			">\"%4\" echo Updated application restart failed.\r\n"
-			"exit /b 4\r\n")
-			.arg(waitForCurrentProcess, payload, appDir, failureLogPath, appPath, verifyPayload,
-				patchFailureMarkerPath, patchHealthMarkerPath);
+			">\"@@OTA_PATCH_FAILURE_MARKER@@\" echo full_failed\r\n"
+			">\"@@OTA_FAILURE_LOG@@\" echo Updated application restart failed.\r\n"
+			"exit /b 4\r\n");
+		// OTA_FULL_BOOTSTRAP_TEMPLATE_END
+		// OTA_FULL_BOOTSTRAP_RENDER_BEGIN
+		script = RenderNamedBatchTemplate(
+			fullTemplate,
+			{
+				{ QStringLiteral("@@OTA_WAIT_FOR_PROCESS@@"), waitForCurrentProcess },
+				{ QStringLiteral("@@OTA_PAYLOAD@@"), payload },
+				{ QStringLiteral("@@OTA_APP_DIR@@"), appDir },
+				{ QStringLiteral("@@OTA_FAILURE_LOG@@"), failureLogPath },
+				{ QStringLiteral("@@OTA_APP@@"), appPath },
+				{ QStringLiteral("@@OTA_VERIFY_PAYLOAD@@"), verifyPayload },
+				{ QStringLiteral("@@OTA_PATCH_FAILURE_MARKER@@"), patchFailureMarkerPath },
+				{ QStringLiteral("@@OTA_HEALTH_MARKER@@"), patchHealthMarkerPath }
+			});
+		// OTA_FULL_BOOTSTRAP_RENDER_END
+	}
+	if (script.isEmpty())
+	{
+		AppendLog(QStringLiteral("升级引导脚本模板字段不完整，已停止安装。"));
+		return;
 	}
 
 	QFile bootstrap(bootstrapPath);

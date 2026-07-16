@@ -9667,7 +9667,9 @@ bool MeasureThenWeldService::RunScanCycle(
     const StepCallback& setFlowStep,
     const CheckpointCallback& safetyCheckpoint,
     const BeforeActionCallback& beforeAction,
-    const StopRequestedCallback& stopRequested) const
+    const StopRequestedCallback& stopRequested,
+    const ScanProgressCallback& scanProgressCallback,
+    const ScanPauseAvailabilityCallback& scanPauseAvailability) const
 {
     result = ScanCycleResult{};
 
@@ -9861,7 +9863,9 @@ bool MeasureThenWeldService::RunScanCycle(
         setFlowStep,
         cameraCache,
         &scanProgress,
-        &validatedCalibration);
+        &validatedCalibration,
+        scanProgressCallback,
+        scanPauseAvailability);
     if (!scanOutputPath.isEmpty())
     {
         const QFileInfo outputInfo(scanOutputPath);
@@ -9963,7 +9967,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     const StepCallback& setFlowStep,
     CameraFrameCache* cameraCache,
     ScanMotionProgress* progress,
-    const HandEyeMatrixConfig* validatedCalibration) const
+    const HandEyeMatrixConfig* validatedCalibration,
+    const ScanProgressCallback& scanProgressCallback,
+    const ScanPauseAvailabilityCallback& scanPauseAvailability) const
 {
     if (progress != nullptr)
     {
@@ -9981,6 +9987,32 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     }
     CameraFrameCache* frameCache = cameraCache;
     FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver);
+    STEPRobotCtrl* pStepDriver = dynamic_cast<STEPRobotCtrl*>(pRobotDriver);
+    bool scanPausePublished = false;
+    auto publishScanPauseAvailability = [&](bool available, const QString& programName = QString())
+        {
+            if (!scanPauseAvailability)
+            {
+                return;
+            }
+            if (!available && !scanPausePublished)
+            {
+                return;
+            }
+            scanPauseAvailability(available, available ? programName : QString());
+            scanPausePublished = available;
+        };
+    struct ScanPauseScopeGuard
+    {
+        std::function<void()> cleanup;
+        ~ScanPauseScopeGuard()
+        {
+            if (cleanup)
+            {
+                cleanup();
+            }
+        }
+    } scanPauseScopeGuard{ [&]() { publishScanPauseAvailability(false); } };
     const double scanCommandSpeed = LinearCommandSpeedForRobot(pRobotDriver, param.dScanSpeed, 1.0);
     const QString scanCommandSpeedUnit = LinearCommandSpeedUnitText(pRobotDriver);
     const qint64 cameraTimeOffsetUs = static_cast<qint64>(std::llround(param.dCameraTimeOffsetMs * 1000.0));
@@ -10323,6 +10355,50 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             return robotSamples.empty() ? 0 : robotSamples.back().timestampUs;
         };
 
+    int lastReportedScanPercent = -1;
+    auto reportScanProgress = [&](bool forceComplete = false)
+        {
+            if (!scanProgressCallback)
+            {
+                return;
+            }
+            double ratio = forceComplete ? 1.0 : 0.0;
+            if (!forceComplete)
+            {
+                T_ROBOT_COORS currentPose{};
+                bool hasPose = false;
+                {
+                    std::lock_guard<std::mutex> locker(robotSamplesMutex);
+                    if (!robotSamples.empty())
+                    {
+                        currentPose = robotSamples.back().pose;
+                        hasPose = true;
+                    }
+                }
+                const double vx = param.tEndPos.dX - param.tStartPos.dX;
+                const double vy = param.tEndPos.dY - param.tStartPos.dY;
+                const double vz = param.tEndPos.dZ - param.tStartPos.dZ;
+                const double lengthSquared = vx * vx + vy * vy + vz * vz;
+                if (hasPose && lengthSquared > 1e-9)
+                {
+                    const double px = currentPose.dX - param.tStartPos.dX;
+                    const double py = currentPose.dY - param.tStartPos.dY;
+                    const double pz = currentPose.dZ - param.tStartPos.dZ;
+                    ratio = std::clamp(
+                        (px * vx + py * vy + pz * vz) / lengthSquared,
+                        0.0,
+                        1.0);
+                }
+            }
+            const int percent = std::clamp(
+                static_cast<int>(std::floor(ratio * 100.0 + 1e-9)), 0, 100);
+            if (forceComplete || percent > lastReportedScanPercent)
+            {
+                lastReportedScanPercent = (std::max)(lastReportedScanPercent, percent);
+                scanProgressCallback(static_cast<double>(lastReportedScanPercent) / 100.0);
+            }
+        };
+
     auto pullScanCameraFramesTo = [frameCache, &lastPulledCameraSequence, &appendCameraFrame](std::uint64_t targetSequence)
         {
             if (targetSequence <= lastPulledCameraSequence)
@@ -10581,6 +10657,37 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         progress->commandAccepted = true;
     }
 
+    QString trackedScanProgram;
+    if (pStepDriver != nullptr && scanPauseAvailability)
+    {
+        std::string trackedProject;
+        std::string trackedProgram;
+        bool trackedMotionAlreadyStopped = false;
+        if (!pStepDriver->GetTrackedMotionIdentity(
+            trackedProject, trackedProgram, &trackedMotionAlreadyStopped))
+        {
+            const QString failure = QString("扫描运动已启动，但无法冻结受跟踪的 STEP 程序身份：%1")
+                .arg(DecodeRobotMessageText(pStepDriver->GetLastRobotError()));
+            StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
+            finishCameraProcessingWorkers();
+            frameCache->Clear();
+            return false;
+        }
+        trackedScanProgram = QString::fromStdString(trackedProgram);
+        if (!trackedMotionAlreadyStopped)
+        {
+            publishScanPauseAvailability(true, trackedScanProgram);
+        }
+        if (appendLog)
+        {
+            appendLog(trackedMotionAlreadyStopped
+                ? QString("STEP 扫描程序在暂停入口开放前已自然停止；保留身份用于终态见证，不开放暂停按钮：Project=%1 Program=%2")
+                    .arg(QString::fromStdString(trackedProject), trackedScanProgram)
+                : QString("扫描暂停控制已绑定受跟踪程序：Project=%1 Program=%2")
+                    .arg(QString::fromStdString(trackedProject), trackedScanProgram));
+        }
+    }
+
     if (!appendRobotPose())
     {
         const QString failure = QStringLiteral(
@@ -10590,6 +10697,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         frameCache->Clear();
         return false;
     }
+    reportScanProgress();
     int motionState = 0;
     // STEP ContiMoveAnyWithProgramName 返回成功前已经回读过 eRun；
     // 首次扫描轮询可能已经直接看到 eStop，不能因此误判为“未启动”。
@@ -10605,6 +10713,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     }
     const qint64 motionStartMs = SteadyNowMs();
     qint64 lastRobotPollMs = motionStartMs - ROBOT_SAMPLE_INTERVAL_MS;
+    qint64 lastBudgetTickMs = motionStartMs;
+    qint64 activeRunElapsedMs = 0;
+    qint64 pauseStartedMs = -1;
+    bool scanPaused = false;
     while (true)
     {
         if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
@@ -10627,7 +10739,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 : pRobotDriver->CheckDone();
             const bool isRunningState = pFanucDriver != nullptr
                 ? (motionState == 10 || motionState == 20 || motionState == 1)
-                : (motionState == STEPROBOTSDK::eRun || motionState == STEPROBOTSDK::ePause);
+                : (motionState == STEPROBOTSDK::eRun);
+            const bool isPausedState = pStepDriver != nullptr
+                && motionState == STEPROBOTSDK::ePause;
             const bool isDoneState = pFanucDriver != nullptr
                 ? (motionState == 1)
                 : (motionState == STEPROBOTSDK::eStop);
@@ -10636,6 +10750,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 : (motionState != STEPROBOTSDK::eRun
                     && motionState != STEPROBOTSDK::ePause
                     && motionState != STEPROBOTSDK::eStop);
+            const qint64 budgetDeltaMs = (std::max)(qint64(0), nowMs - lastBudgetTickMs);
+            if (motionStarted && !scanPaused)
+            {
+                activeRunElapsedMs += budgetDeltaMs;
+            }
+            lastBudgetTickMs = nowMs;
             if (isInvalidState)
             {
                 const QString failure = pFanucDriver != nullptr
@@ -10647,6 +10767,59 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
                 finishCameraProcessingWorkers();
                 return false;
+            }
+            if (isPausedState)
+            {
+                // 暂停期间持续推进丢弃水位。恢复后从最后一次暂停水位继续拉取，
+                // 既排除静止积压，又保留 UI 发送 START 之后产生的有效运动帧。
+                lastPulledCameraSequence = frameCache->Mark();
+                if (!scanPaused)
+                {
+                    scanPaused = true;
+                    pauseStartedMs = nowMs;
+                    if (imageCaptureEnabled)
+                    {
+                        frameCache->SetImageCaptureDir(QString());
+                    }
+                    if (setFlowStep)
+                    {
+                        setFlowStep(QStringLiteral("扫描已暂停；采样与运动超时计时均已暂停"));
+                    }
+                    if (appendLog)
+                    {
+                        appendLog(QStringLiteral(
+                            "STEP 扫描已稳定进入暂停态：停止写入机器人位姿和相机帧，保留当前受跟踪程序等待继续。"));
+                    }
+                }
+                if (pauseStartedMs >= 0
+                    && (nowMs - pauseStartedMs) > RobotMotionTimeoutPolicy::kMotionTimeoutMs)
+                {
+                    const QString failure = QStringLiteral(
+                        "STEP 扫描暂停超过 30 分钟安全上限；已中止当前程序并丢弃本轮扫描。");
+                    publishScanPauseAvailability(false);
+                    StopUnverifiedMotionAfterFailure(pRobotDriver, failure, appendLog);
+                    finishCameraProcessingWorkers();
+                    frameCache->Clear();
+                    return false;
+                }
+            }
+            else if (scanPaused)
+            {
+                scanPaused = false;
+                pauseStartedMs = -1;
+                if (imageCaptureEnabled && !imageCaptureTmpDir.isEmpty())
+                {
+                    frameCache->SetImageCaptureDir(imageCaptureTmpDir, imageCaptureStride);
+                }
+                if (setFlowStep)
+                {
+                    setFlowStep(QStringLiteral("扫描已继续，恢复采集相机点、机器人位置和激光点"));
+                }
+                if (appendLog)
+                {
+                    appendLog(QStringLiteral(
+                        "STEP 扫描已继续：暂停期间积压帧已持续丢弃，START 后有效帧和位姿采集已恢复。"));
+                }
             }
             if (isRunningState)
             {
@@ -10669,10 +10842,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
 							appendLog(QString("扫描运动进入运行态：CheckDone=%1").arg(motionState));
 						}
 					}
-				}
+                }
                 motionStarted = true;
             }
-            if (motionStarted)
+            if (motionStarted && !isPausedState)
             {
                 if (!appendRobotPose())
                 {
@@ -10683,6 +10856,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                     frameCache->Clear();
                     return false;
                 }
+                reportScanProgress();
                 if (!hasCameraTimeBaseRobotTimestamp)
                 {
                     const qint64 latestRobotUs = latestRobotTimestampUs();
@@ -10696,6 +10870,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             }
             if (motionStarted && isDoneState)
             {
+                publishScanPauseAvailability(false);
                 // STEP 的 ePause 是可恢复态，绝不是完成；eStop 也要再由
                 // CheckRobotDone 校验无控制器错误。FANUC R[93]=1 同样只是里程碑，
                 // 还需 CHECK_DONE 稳定确认任务退出。
@@ -10715,13 +10890,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 {
                     progress->motionCompleted = true;
                 }
+                reportScanProgress(true);
                 scanEndCameraSequence = frameCache->Mark();
                 pullScanCameraFramesTo(scanEndCameraSequence);
                 break;
             }
 
-            const qint64 elapsedMs = SteadyNowMs() - motionStartMs;
-			if (!motionStarted && elapsedMs > 3000)
+            const qint64 startupElapsedMs = SteadyNowMs() - motionStartMs;
+			if (!motionStarted && startupElapsedMs > 3000)
 			{
 				const QString failure = pFanucDriver != nullptr
 					? QString("扫描运动未在 3s 内进入运行态：R[%1]=%2。")
@@ -10733,7 +10909,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
 				finishCameraProcessingWorkers();
 				return false;
             }
-			if (motionStarted && elapsedMs > scanFinishTimeoutMs)
+			if (motionStarted && activeRunElapsedMs > scanFinishTimeoutMs)
 			{
 				const QString failure = pFanucDriver != nullptr
 					? QString("扫描运动等待完成超时（%1 s）：R[%2]=%3。")
@@ -10761,7 +10937,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         frameCache->Clear();
         return false;
     }
-    const qint64 scanMotionElapsedMs = SteadyNowMs() - motionStartMs;
+    const qint64 scanMotionElapsedMs = activeRunElapsedMs;
 
     if (scanEndCameraSequence == 0)
     {

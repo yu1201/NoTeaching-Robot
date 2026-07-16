@@ -3454,6 +3454,68 @@ bool STEPRobotCtrl::Prog_stop_Py()
 	return true;
 }
 
+bool STEPRobotCtrl::GetTrackedMotionIdentity(
+	std::string& projectName,
+	std::string& programName,
+	bool* alreadyStopped)
+{
+	projectName.clear();
+	programName.clear();
+	if (alreadyStopped != nullptr)
+	{
+		*alreadyStopped = false;
+	}
+	std::lock_guard<std::recursive_mutex> sdkLock(m_sdkCommandMutex);
+	if (m_pSTEPRobotClient == nullptr)
+	{
+		SetLastRobotError("STEP运动身份读取失败：SDK客户端未初始化。");
+		return false;
+	}
+	if (!m_bLocalDebugMark
+		&& (!m_bSocketConnected.load() || m_pSTEPRobotClient->ConnectStatus() < 0))
+	{
+		SetLastRobotError("STEP运动身份读取失败：机器人连接不可用。");
+		return false;
+	}
+	if (RobotOperationLease::IsCancellationRequested(this)
+		|| !RobotOperationLease::MotionCompletionPending(this))
+	{
+		SetLastRobotError("STEP运动身份读取失败：当前没有受跟踪的未完成运动。");
+		return false;
+	}
+
+	const std::string currentProject =
+		StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName());
+	const std::string currentProgram = m_pSTEPRobotClient->getProgramName();
+	const int currentState = static_cast<int>(m_pSTEPRobotClient->getProgramState());
+	if (m_motionTrackedProjectName.empty()
+		|| m_motionTrackedProgramName.empty()
+		|| currentProject != m_motionTrackedProjectName
+		|| currentProgram != m_motionTrackedProgramName
+		|| (currentState != STEPROBOTSDK::eRun
+			&& currentState != STEPROBOTSDK::ePause
+			&& currentState != STEPROBOTSDK::eStop))
+	{
+		SetLastRobotError(GetStr(
+			"STEP运动身份读取失败：跟踪身份或运行状态不一致。Tracked=%s/%s Current=%s/%s State=%d",
+			m_motionTrackedProjectName.c_str(),
+			m_motionTrackedProgramName.c_str(),
+			currentProject.c_str(),
+			currentProgram.c_str(),
+			currentState));
+		return false;
+	}
+
+	projectName = m_motionTrackedProjectName;
+	programName = m_motionTrackedProgramName;
+	if (alreadyStopped != nullptr)
+	{
+		*alreadyStopped = currentState == STEPROBOTSDK::eStop;
+	}
+	ClearLastRobotError();
+	return true;
+}
+
 bool STEPRobotCtrl::PauseTrackedProgramAndWait(
 	const std::string& expectedProgramName,
 	int& programLine,

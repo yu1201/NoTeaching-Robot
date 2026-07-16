@@ -13,6 +13,8 @@
 
 #include <chrono>
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace
@@ -35,7 +37,28 @@ qint64 SkjSteadyNowUs()
         std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 constexpr int kConnectTimeoutMs = 3000;
+constexpr int kCommandTimeoutMs = 3000;
+constexpr int kExposureUnitScale = 25;
 constexpr int kDiagnosticEmitStride = 30;
+
+int DeviceExposureToDisplay(int deviceValue)
+{
+    if (deviceValue <= 0)
+    {
+        return 0;
+    }
+    if (deviceValue > std::numeric_limits<int>::max() / kExposureUnitScale)
+    {
+        return std::numeric_limits<int>::max();
+    }
+    return deviceValue * kExposureUnitScale;
+}
+
+int DisplayExposureToDevice(int displayValue)
+{
+    return std::max(1, static_cast<int>(std::lround(
+        static_cast<double>(displayValue) / kExposureUnitScale)));
+}
 
 // 与 SDK protocol.h 的 Point3d/Point2d 二进制布局一致（均为 double 字段）。
 struct SkjPoint3d
@@ -122,6 +145,15 @@ bool ScanCameraSkjWorker::loadSdk(QString* error)
     m_disconnect = reinterpret_cast<DisconnectFn>(resolve("SKJCamera_Disconnect"));
     m_isConnected = reinterpret_cast<IsConnectedFn>(resolve("SKJCamera_IsConnected"));
     m_setConnectTimeout = reinterpret_cast<SetTimeoutFn>(resolve("SKJCamera_SetConnectTimeout"));
+    m_setCommandTimeout = reinterpret_cast<SetTimeoutFn>(resolve("SKJCamera_SetCommandTimeout"));
+    m_getExposure = reinterpret_cast<GetIntFn>(resolve("SKJCamera_GetExposure"));
+    m_setExposure = reinterpret_cast<SetIntFn>(resolve("SKJCamera_SetExposure"));
+    m_getGain = reinterpret_cast<GetIntFn>(resolve("SKJCamera_GetGain"));
+    m_setGain = reinterpret_cast<SetIntFn>(resolve("SKJCamera_SetGain"));
+    m_getBinarize = reinterpret_cast<GetIntFn>(resolve("SKJCamera_GetBinarize"));
+    m_setBinarize = reinterpret_cast<SetIntFn>(resolve("SKJCamera_SetBinarize"));
+    m_laserOn = reinterpret_cast<CommandFn>(resolve("SKJCamera_LaserOn"));
+    m_laserOff = reinterpret_cast<CommandFn>(resolve("SKJCamera_LaserOff"));
     m_setFrameBufferCount = reinterpret_cast<SetFrameBufferFn>(resolve("SKJCamera_SetFrameBufferCount"));
     m_getLatestFrame = reinterpret_cast<GetLatestFrameFn>(resolve("SKJCamera_GetLatestFrame"));
     m_frameRelease = reinterpret_cast<FrameReleaseFn>(resolve("SKJFrame_Release"));
@@ -208,6 +240,10 @@ void ScanCameraSkjWorker::startClient(const QString& serverIP, int serverPort, i
     if (m_setConnectTimeout != nullptr)
     {
         m_setConnectTimeout(m_handle, kConnectTimeoutMs);
+    }
+    if (m_setCommandTimeout != nullptr)
+    {
+        m_setCommandTimeout(m_handle, kCommandTimeoutMs);
     }
 
     const QByteArray ipBytes = m_serverIP.toLocal8Bit();
@@ -353,6 +389,180 @@ void ScanCameraSkjWorker::setFrameBufferCount(int count)
         const int bufferRet = m_setFrameBufferCount(m_handle, fifoDepth);
         WriteCameraSkjLog(QString("SetFrameBufferCount(%1) runtime-change ret=%2").arg(fifoDepth).arg(bufferRet));
     }
+}
+
+bool ScanCameraSkjWorker::readControlParameters(SKJCameraParameterValues* values, QString* error)
+{
+    if (values == nullptr)
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("相机参数输出对象为空。");
+        }
+        return false;
+    }
+    if (!m_running || m_handle == nullptr || (m_isConnected != nullptr && m_isConnected(m_handle) != kSkjOk))
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("相机点云/命令连接尚未就绪。");
+        }
+        return false;
+    }
+    if (m_getExposure == nullptr || m_getGain == nullptr || m_getBinarize == nullptr)
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("SKJCamera.dll 缺少相机参数读取接口。");
+        }
+        return false;
+    }
+
+    auto errorText = [this](const QString& action, int code)
+        {
+            const QString reason = m_errorString != nullptr
+                ? QString::fromUtf8(m_errorString(code))
+                : QString::number(code);
+            return QStringLiteral("%1失败：%2（错误码 %3）").arg(action, reason).arg(code);
+        };
+
+    int exposure = 0;
+    int gain = 0;
+    int binarize = 0;
+    int ret = m_getExposure(m_handle, &exposure);
+    if (ret != kSkjOk)
+    {
+        if (error != nullptr)
+        {
+            *error = errorText(QStringLiteral("读取曝光"), ret);
+        }
+        return false;
+    }
+    ret = m_getGain(m_handle, &gain);
+    if (ret != kSkjOk)
+    {
+        if (error != nullptr)
+        {
+            *error = errorText(QStringLiteral("读取增益"), ret);
+        }
+        return false;
+    }
+    ret = m_getBinarize(m_handle, &binarize);
+    if (ret != kSkjOk)
+    {
+        if (error != nullptr)
+        {
+            *error = errorText(QStringLiteral("读取二值化阈值"), ret);
+        }
+        return false;
+    }
+
+    values->exposure = DeviceExposureToDisplay(exposure);
+    values->gain = gain;
+    values->binarize = binarize;
+    WriteCameraSkjLog(QString("read control parameters on shared handle exposure=%1 gain=%2 binarize=%3")
+        .arg(values->exposure).arg(values->gain).arg(values->binarize));
+    return true;
+}
+
+bool ScanCameraSkjWorker::setControlParameter(
+    SKJCameraControlClient::Parameter parameter,
+    int value,
+    QString* error)
+{
+    if (!m_running || m_handle == nullptr || (m_isConnected != nullptr && m_isConnected(m_handle) != kSkjOk))
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("相机点云/命令连接尚未就绪。");
+        }
+        return false;
+    }
+
+    int ret = kSkjOk;
+    QString action;
+    switch (parameter)
+    {
+    case SKJCameraControlClient::Parameter::Exposure:
+        action = QStringLiteral("设置曝光");
+        if (m_setExposure == nullptr)
+        {
+            ret = std::numeric_limits<int>::min();
+        }
+        else
+        {
+            ret = m_setExposure(m_handle, DisplayExposureToDevice(value));
+        }
+        break;
+    case SKJCameraControlClient::Parameter::Gain:
+        action = QStringLiteral("设置增益");
+        ret = m_setGain != nullptr ? m_setGain(m_handle, value) : std::numeric_limits<int>::min();
+        break;
+    case SKJCameraControlClient::Parameter::Binarize:
+        action = QStringLiteral("设置二值化阈值");
+        ret = m_setBinarize != nullptr ? m_setBinarize(m_handle, value) : std::numeric_limits<int>::min();
+        break;
+    }
+
+    if (ret == std::numeric_limits<int>::min())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("SKJCamera.dll 缺少%1接口。").arg(action);
+        }
+        return false;
+    }
+    if (ret != kSkjOk)
+    {
+        const QString reason = m_errorString != nullptr
+            ? QString::fromUtf8(m_errorString(ret))
+            : QString::number(ret);
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("%1失败：%2（错误码 %3）").arg(action, reason).arg(ret);
+        }
+        return false;
+    }
+    WriteCameraSkjLog(QString("%1 on shared handle value=%2 ret=%3").arg(action).arg(value).arg(ret));
+    return true;
+}
+
+bool ScanCameraSkjWorker::setLaserEnabled(bool enabled, QString* error)
+{
+    if (!m_running || m_handle == nullptr || (m_isConnected != nullptr && m_isConnected(m_handle) != kSkjOk))
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("相机点云/命令连接尚未就绪。");
+        }
+        return false;
+    }
+
+    CommandFn command = enabled ? m_laserOn : m_laserOff;
+    const QString action = enabled ? QStringLiteral("打开激光") : QStringLiteral("关闭激光");
+    if (command == nullptr)
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("SKJCamera.dll 缺少%1接口。").arg(action);
+        }
+        return false;
+    }
+
+    const int ret = command(m_handle);
+    WriteCameraSkjLog(QString("%1 on shared handle ret=%2").arg(action).arg(ret));
+    if (ret != kSkjOk)
+    {
+        const QString reason = m_errorString != nullptr
+            ? QString::fromUtf8(m_errorString(ret))
+            : QString::number(ret);
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("%1失败：%2（错误码 %3）").arg(action, reason).arg(ret);
+        }
+        return false;
+    }
+    return true;
 }
 
 void ScanCameraSkjWorker::pollFrame()

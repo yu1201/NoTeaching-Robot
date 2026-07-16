@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SKJCameraControlClient.h"
+
 #include <QImage>
 #include <QObject>
 #include <QString>
@@ -31,6 +33,11 @@ public slots:
     void stopClient();
     void setImageTransportEnabled(bool enabled);  // 预览页「图像传输」开关：即时连/断图像口(50001)
     void setFrameBufferCount(int count);  // 预览页「接收缓冲帧数」：写缓存共享值，已连接时立即下发 SDK
+    // 参数与激光命令必须复用点云连接的同一个 SDK 句柄，并在 worker 所在线程调用。
+    // 相机端只允许一条 50006 命令/点云会话；另建控制句柄会抢占现有连接并连带中断图像预览。
+    bool readControlParameters(SKJCameraParameterValues* values, QString* error = nullptr);
+    bool setControlParameter(SKJCameraControlClient::Parameter parameter, int value, QString* error = nullptr);
+    bool setLaserEnabled(bool enabled, QString* error = nullptr);
 
 signals:
     // 与 ScanCameraTcpClientWorker::diagnosticChanged 同构，复用现有预览诊断显示：
@@ -105,6 +112,9 @@ private:
     using DisconnectFn = void(__cdecl*)(void*);
     using IsConnectedFn = int(__cdecl*)(void*);
     using SetTimeoutFn = int(__cdecl*)(void*, int);
+    using GetIntFn = int(__cdecl*)(void*, int*);
+    using SetIntFn = int(__cdecl*)(void*, int);
+    using CommandFn = int(__cdecl*)(void*);
     using SetFrameBufferFn = int(__cdecl*)(void*, int);
     using GetLatestFrameFn = int(__cdecl*)(void*, void**);
     using FrameReleaseFn = void(__cdecl*)(void*);
@@ -140,6 +150,15 @@ private:
     ImageTimestampFn m_imageTimestamp = nullptr;
     IsConnectedFn m_isConnected = nullptr;
     SetTimeoutFn m_setConnectTimeout = nullptr;
+    SetTimeoutFn m_setCommandTimeout = nullptr;
+    GetIntFn m_getExposure = nullptr;
+    SetIntFn m_setExposure = nullptr;
+    GetIntFn m_getGain = nullptr;
+    SetIntFn m_setGain = nullptr;
+    GetIntFn m_getBinarize = nullptr;
+    SetIntFn m_setBinarize = nullptr;
+    CommandFn m_laserOn = nullptr;
+    CommandFn m_laserOff = nullptr;
     SetFrameBufferFn m_setFrameBufferCount = nullptr;  // v1.2.0 FIFO 深度设置，旧 DLL 为 null 自动跳过
     GetLatestFrameFn m_getLatestFrame = nullptr;
     FrameReleaseFn m_frameRelease = nullptr;
