@@ -280,10 +280,13 @@ private:
 	// Kill 都必须仍匹配该身份，禁止误启动/误杀示教器后来换载的其他程序。
 	std::string m_motionTrackedProjectName;
 	std::string m_motionTrackedProgramName;
-	// 本软件生成的 SRP 首行清零、末行置位 ntdone；只有同一工程/程序回读到 1，
-	// 稳定 eStop 才能被判为自然完成。外部 STOP 与提前中止保持 0 并 fail-closed。
+	// 本软件生成的 SRP 首行清零 ntdone；WaitIsFinished 后置位并发送按程序唯一的
+	// eInfo 令牌。运行态锁存令牌后，只有同一工程/程序稳定 eStop 才能判为自然完成。
+	// 提前 STOP 在物理完成屏障之前拿不到令牌，继续 fail-closed。
 	std::string m_completionWitnessProjectName;
 	std::string m_completionWitnessProgramName;
+	std::string m_completionWitnessMessageToken;
+	bool m_completionWitnessRuntimeLatched = false;
 	std::string m_contentWitnessProjectName;
 	std::string m_contentWitnessProgramName;
 	std::string m_contentWitnessRemoteProgramPath;

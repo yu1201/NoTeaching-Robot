@@ -43,6 +43,8 @@ def main() -> int:
     matrix = read("src/HandEyeMatrixDialog.cpp")
     fanuc_driver = read("src/FANUCRobotDriver.cpp")
     step_driver = read("src/StepRobotDriver.cpp")
+    driver_adaptor_h = read("include/RobotDriverAdaptor.h")
+    driver_adaptor = read("src/RobotDriverAdaptor.cpp")
 
     for token in ("TryAcquire", "SetNewOperationsAllowed", "NewOperationsAllowed",
                   "AddNewOperationsBlock", "RemoveNewOperationsBlock",
@@ -160,6 +162,78 @@ def main() -> int:
         ("void QtWidgetsApplication4::FanucMoveZeroTest()", "void QtWidgetsApplication4::OpenRobotJogDialog()"),
     ):
         require_leased(app, start, end)
+
+    disconnect = section(
+        app,
+        "void QtWidgetsApplication4::FanucDisconnectTest()",
+        "void QtWidgetsApplication4::RobotClearAlarmTest()")
+    pending_feedback = disconnect.find("状态: 正在断开机器人连接，请稍候")
+    paint_feedback = disconnect.find("ui.FanucMonitorText->repaint();")
+    stop_monitor = disconnect.find("pRobotDriver->StopStateMonitor();")
+    close_socket = disconnect.find("pRobotDriver->CloseSocket()")
+    clear_snapshots = disconnect.find("pRobotDriver->ClearStateMonitorSnapshots();")
+    refresh_ui = disconnect.find("RefreshDashboardConnectionState();")
+    result_dialog = disconnect.find("QMessageBox::information(this, \"机器人断开\"")
+    require(0 <= pending_feedback < paint_feedback < stop_monitor
+            < close_socket < clear_snapshots < refresh_ui < result_dialog,
+            "manual disconnect must stop auto-reconnect, clear stale state, and refresh UI before its result dialog")
+    require("m_pDashboardConnectBtn->repaint();" in disconnect
+            and "ui.FanucConnectBtn->repaint();" in disconnect
+            and "processEvents" not in disconnect,
+            "manual disconnect pending feedback can be overwritten by re-entrant timer events")
+    require("ui.FanucConnectBtn->setEnabled(false)" not in disconnect,
+            "manual disconnect permanently disables the management connection button")
+    require("QMessageBox::warning(this, \"机器人断开\"" in disconnect
+            and "GetLastRobotError()" in disconnect,
+            "manual disconnect failure does not expose the driver error")
+    monitor_feedback = disconnect.find("ui.FanucMonitorText->setPlainText")
+    failure_dialog = disconnect.rfind("QMessageBox::warning(this, \"机器人断开\"")
+    require(0 <= monitor_feedback < result_dialog
+            and monitor_feedback < failure_dialog
+            and "机器人手动断开 | close=%d overall=%d" in disconnect,
+            "manual disconnect does not update visible/log feedback before its modal result")
+
+    connect = section(
+        app,
+        "void QtWidgetsApplication4::FanucConnectTest()",
+        "void QtWidgetsApplication4::FanucDisconnectTest()")
+    require(0 <= connect.find("pRobotDriver->InitSocket(") < connect.find("pRobotDriver->StartStateMonitor(50)"),
+            "manual reconnect does not restart state monitoring after a successful socket connection")
+
+    monitor_ui = section(app, "QTimer* fanucMonitorTimer", "//RobotLog* ContralUnitLog")
+    disconnected_branch = monitor_ui.find("if (!pRobotDriver->IsConnected())")
+    stale_snapshot_read = monitor_ui.find("LatestStateSnapshot(snapshot)")
+    require(0 <= disconnected_branch < stale_snapshot_read
+            and "状态: 已手动断开" in monitor_ui
+            and "return;" in monitor_ui[disconnected_branch:stale_snapshot_read],
+            "dashboard monitor can still display stale robot samples after disconnect")
+    require("ClearStateMonitorSnapshots" in driver_adaptor_h
+            and "void RobotDriverAdaptor::ClearStateMonitorSnapshots()" in driver_adaptor
+            and "m_stateMonitorFrames.clear();" in driver_adaptor,
+            "state monitor cache cannot be invalidated on a manual disconnect")
+    clear_cache = section(
+        driver_adaptor,
+        "void RobotDriverAdaptor::ClearStateMonitorSnapshots()",
+        "bool RobotDriverAdaptor::LatestStateSnapshot(")
+    require("std::lock_guard<std::mutex> lock(m_stateMonitorMutex);" in clear_cache
+            and "m_stateMonitorNextSequence" not in clear_cache,
+            "state monitor cache clearing is not locked or breaks monotonic snapshot identity")
+
+    monitor_worker = section(
+        driver_adaptor,
+        "void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)",
+        "int RobotDriverAdaptor::ContiMoveAny(")
+    require(monitor_worker.count("EnsureConnectionForMonitor();") == 1
+            and "if (!m_stateMonitorRunning.load())" in monitor_worker,
+            "state monitor can start or continue a reconnect after a stop request")
+
+    step_close = section(step_driver, "bool STEPRobotCtrl::CloseSocket()", "bool STEPRobotCtrl::IsConnected()")
+    require("STEP断开失败" in step_close
+            and "SetLastRobotError(error);" in step_close
+            and "connected_before" in step_close,
+            "STEP close return code is not preserved in the error/log feedback")
+    require(step_close.find("m_pSTEPRobotClient->close()") < step_close.rfind("m_bSocketConnected.store(false)"),
+            "STEP connection snapshot is not finalized after the serialized SDK close call")
 
     require_leased(app, "void QtWidgetsApplication4::RunRobotMotionForCli(", "bool QtWidgetsApplication4::UploadFanucServiceBundleForCli(")
     require_leased(app, "bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(", "ProcessLoopTestDefaults QtWidgetsApplication4::LoadProcessLoopTestDefaults(")

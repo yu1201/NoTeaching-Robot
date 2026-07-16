@@ -28,6 +28,7 @@
 #include <limits>
 #include <mutex>
 #include <sstream>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -195,7 +196,25 @@ namespace
 	constexpr const char* kStepWeaveDataName = "wd0";
 	constexpr const char* kStepTrackDataName = "td0";
 	constexpr const char* kStepCompletionWitnessName = "ntdone";
+	constexpr const char* kStepCompletionWitnessHoldName = "ntdonewait";
+	constexpr int kStepCompletionWitnessHoldMs = 1500;
 	constexpr int kStepPauseWaitTimeoutMs = 1800000;
+	constexpr int kStepCompletionWitnessSettleTimeoutMs = 1000;
+	constexpr int kStepCompletionWitnessPollIntervalMs = 50;
+	constexpr int kStepCompletionWitnessStableReads = 3;
+
+	std::string StepBuildCompletionMessageToken(const std::string& programName)
+	{
+		return "NTDONE|" + StepSanitizeProgramName(programName);
+	}
+
+	std::string StepMessageText(const STEPROBOTSDK::MessageData& message)
+	{
+		const char* const begin = message.m_MessageString;
+		const char* const end = std::find(
+			begin, begin + sizeof(message.m_MessageString), '\0');
+		return std::string(begin, end);
+	}
 
 	long long StepRobotSteadyNowMs()
 	{
@@ -1009,8 +1028,10 @@ namespace
 		std::ostringstream oss;
 		oss << std::fixed << std::setprecision(6);
 		const StepVariablePlan variablePlan = StepBuildVariablePlan(moveInfos);
-		StepAppendFileComment(oss, "程序自然完成见证：START前和首行清零，所有运动/收弧完成后末行置1");
+		StepAppendFileComment(oss, "程序自然完成见证：START前和首行清零，物理完成后置1并留出上位机锁存窗口");
 		oss << "INT " << kStepCompletionWitnessName << " := 0" << "\n";
+		oss << "INT " << kStepCompletionWitnessHoldName << " := "
+			<< kStepCompletionWitnessHoldMs << "\n";
 
 		StepAppendFileComment(oss, "点位数据：SRP运动语句使用的TCP/AP变量");
 		for (size_t i = 0; i < moveInfos.size(); ++i)
@@ -1123,7 +1144,10 @@ namespace
 		return oss.str();
 	}
 
-	std::string StepBuildSrpContent(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, bool actualWeld)
+	std::string StepBuildSrpContent(
+		const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
+		bool actualWeld,
+		const std::string& programName)
 	{
 		std::ostringstream oss;
 		const StepVariablePlan variablePlan = StepBuildVariablePlan(moveInfos);
@@ -1212,6 +1236,12 @@ namespace
 		StepAppendCommand(oss, "WaitIsFinished();");
 		StepAppendFileComment(oss, "仅在全部运动以及可选ARCOFF完成后写入自然完成见证");
 		StepAppendCommand(oss, std::string(kStepCompletionWitnessName) + ":=1;");
+		StepAppendFileComment(oss, "发送本次唯一完成令牌，并保持运行态供SDK锁存；不写控制器磁盘");
+		StepAppendCommand(oss,
+			"Message(\"" + StepBuildCompletionMessageToken(programName)
+			+ "\",eInfo," + kStepCompletionWitnessName + "," + kStepCompletionWitnessName + ");");
+		StepAppendCommand(oss,
+			std::string("WaitTime(") + kStepCompletionWitnessHoldName + ",TRUE);");
 
 		return oss.str();
 	}
@@ -1486,6 +1516,8 @@ void STEPRobotCtrl::ClearGeneratedProgramCompletionWitnessLocked(bool preserveCo
 {
 	m_completionWitnessProjectName.clear();
 	m_completionWitnessProgramName.clear();
+	m_completionWitnessMessageToken.clear();
+	m_completionWitnessRuntimeLatched = false;
 	if (!preserveContentWitness)
 	{
 		ClearGeneratedProgramContentWitnessLocked();
@@ -1696,6 +1728,12 @@ bool STEPRobotCtrl::VerifyGeneratedProgramAfterStartWithSdkUnlock(
 		const std::string captureError = error;
 		return failStartedProgramLocked(captureError);
 	}
+	// 极短/零距离程序可能在 START 返回后立刻越过物理完成屏障。先在当前
+	// SDK 快照中尝试锁存一次，再进入不持 SDK 锁的 FTP 内容复核窗口。
+	{
+		std::string ignoredWitnessError;
+		VerifyGeneratedProgramCompletionWitnessLocked(ignoredWitnessError);
+	}
 	const auto cancelToken = m_remoteContentVerificationGate.TryBegin();
 	if (cancelToken == nullptr)
 	{
@@ -1705,10 +1743,58 @@ bool STEPRobotCtrl::VerifyGeneratedProgramAfterStartWithSdkUnlock(
 
 	// 关键：WinINet 回读期间不持 m_sdkCommandMutex。红色 STOP 可立即取得
 	// SDK 锁执行 STOP/Kill，并通过独立 token 让下载在下一取消点尽快结束。
+	// 同时用一个短生命周期观察线程锁存运行态完成令牌，避免慢 FTP 吃掉
+	// SRP 末尾 1.5s 的令牌保持窗口；线程只读 SDK 状态并在返回前必定 join。
 	sdkLock.unlock();
+	std::atomic<bool> stopCompletionObserver{ false };
+	std::thread completionObserver;
+	try
+	{
+		completionObserver = std::thread([this, &stopCompletionObserver, &cancelToken]()
+			{
+				try
+				{
+					while (!stopCompletionObserver.load(std::memory_order_acquire)
+						&& !cancelToken->load(std::memory_order_acquire))
+					{
+						{
+							std::lock_guard<std::recursive_mutex> observerLock(m_sdkCommandMutex);
+							std::string ignoredWitnessError;
+							VerifyGeneratedProgramCompletionWitnessLocked(ignoredWitnessError);
+						}
+						Sleep(kStepCompletionWitnessPollIntervalMs);
+					}
+				}
+				catch (...)
+				{
+					// 观察器异常不得越过线程边界；主线程随后仍会按未见证状态失败关闭。
+				}
+			});
+	}
+	catch (const std::exception& e)
+	{
+		sdkLock.lock();
+		m_remoteContentVerificationGate.End(cancelToken);
+		return failStartedProgramLocked(
+			std::string("STEP START后完成令牌观察器创建失败：") + e.what());
+	}
 	std::string downloadError;
-	const bool downloadVerified = VerifyGeneratedProgramRemoteContentSnapshot(
-		snapshot, cancelToken, downloadError);
+	bool downloadVerified = false;
+	try
+	{
+		downloadVerified = VerifyGeneratedProgramRemoteContentSnapshot(
+			snapshot, cancelToken, downloadError);
+	}
+	catch (const std::exception& e)
+	{
+		downloadError = std::string("STEP START后远端内容复核异常：") + e.what();
+	}
+	catch (...)
+	{
+		downloadError = "STEP START后远端内容复核发生未知异常。";
+	}
+	stopCompletionObserver.store(true, std::memory_order_release);
+	completionObserver.join();
 	sdkLock.lock();
 	m_remoteContentVerificationGate.End(cancelToken);
 
@@ -1858,15 +1944,22 @@ bool STEPRobotCtrl::ArmGeneratedProgramCompletionWitness(
 		? m_pSTEPRobotClient->VariableIntReadCmd(
 			projectName, programName, kStepCompletionWitnessName, readValue)
 		: -1;
-	if (writeRet != 0 || readRet != 0 || readValue != 0)
+	const std::string expectedMessageToken = StepBuildCompletionMessageToken(programName);
+	const STEPROBOTSDK::MessageData initialMessage = m_pSTEPRobotClient->getMessageData();
+	const std::string initialMessageText = StepMessageText(initialMessage);
+	if (writeRet != 0 || readRet != 0 || readValue != 0
+		|| initialMessageText == expectedMessageToken)
 	{
 		error = GetStr(
-			"STEP自然完成见证清零/回读失败：Program=%s Variable=%s WriteRet=%d ReadRet=%d Value=%d",
-			programName.c_str(), kStepCompletionWitnessName, writeRet, readRet, readValue);
+			"STEP自然完成见证清零/负检查失败：Program=%s Variable=%s WriteRet=%d ReadRet=%d Value=%d MessageCollision=%d",
+			programName.c_str(), kStepCompletionWitnessName, writeRet, readRet, readValue,
+			initialMessageText == expectedMessageToken ? 1 : 0);
 		return false;
 	}
 	m_completionWitnessProjectName = projectName;
 	m_completionWitnessProgramName = programName;
+	m_completionWitnessMessageToken = expectedMessageToken;
+	m_completionWitnessRuntimeLatched = false;
 	return true;
 }
 
@@ -1887,6 +1980,7 @@ bool STEPRobotCtrl::VerifyGeneratedProgramCompletionWitnessLocked(std::string& e
 	const std::string currentProject = StepNormalizeProjectName(m_pSTEPRobotClient->getProjectName());
 	const std::string currentProgram = m_pSTEPRobotClient->getProgramName();
 	if (m_completionWitnessProjectName.empty() || m_completionWitnessProgramName.empty()
+		|| m_completionWitnessMessageToken.empty()
 		|| m_completionWitnessProjectName != m_motionTrackedProjectName
 		|| m_completionWitnessProgramName != m_motionTrackedProgramName
 		|| currentProject != m_motionTrackedProjectName
@@ -1899,17 +1993,28 @@ bool STEPRobotCtrl::VerifyGeneratedProgramCompletionWitnessLocked(std::string& e
 			currentProject.c_str(), currentProgram.c_str());
 		return false;
 	}
+	if (m_completionWitnessRuntimeLatched)
+	{
+		return true;
+	}
 	int witnessValue = -1;
 	const int readRet = m_pSTEPRobotClient->VariableIntReadCmd(
 		currentProject, currentProgram, kStepCompletionWitnessName, witnessValue);
-	if (readRet != 0 || witnessValue != 1)
+	const STEPROBOTSDK::MessageData message = m_pSTEPRobotClient->getMessageData();
+	const std::string messageText = StepMessageText(message);
+	const bool exactMessageWitness = message.m_MessageType == STEPROBOTSDK::eInfo
+		&& messageText == m_completionWitnessMessageToken;
+	const bool runtimeVariableWitness = readRet == 0 && witnessValue == 1;
+	if (!exactMessageWitness && !runtimeVariableWitness)
 	{
 		error = GetStr(
-			"自然完成见证未置位：Program=%s Variable=%s ReadRet=%d Value=%d Line=%d",
+			"自然完成运行态见证未观察到：Program=%s Variable=%s ReadRet=%d Value=%d MessageType=%d Message=%s Line=%d",
 			currentProgram.c_str(), kStepCompletionWitnessName, readRet, witnessValue,
+			static_cast<int>(message.m_MessageType), messageText.c_str(),
 			m_pSTEPRobotClient->getCurrentLine());
 		return false;
 	}
+	m_completionWitnessRuntimeLatched = true;
 	return true;
 }
 
@@ -1955,13 +2060,22 @@ bool STEPRobotCtrl::VerifyGeneratedProgramReadyForStartLocked(
 	int witnessValue = -1;
 	const int witnessRet = m_pSTEPRobotClient->VariableIntReadCmd(
 		projectName, programName, kStepCompletionWitnessName, witnessValue);
+	const STEPROBOTSDK::MessageData currentMessage = m_pSTEPRobotClient->getMessageData();
+	const std::string currentMessageText = StepMessageText(currentMessage);
+	const std::string expectedMessageToken = StepBuildCompletionMessageToken(programName);
 	if (currentLine < 0 || currentLine > 1
 		|| currentState != STEPROBOTSDK::eStop
-		|| witnessRet != 0 || witnessValue != 0)
+		|| witnessRet != 0 || witnessValue != 0
+		|| m_completionWitnessRuntimeLatched
+		|| m_completionWitnessMessageToken != expectedMessageToken
+		|| currentMessageText == expectedMessageToken)
 	{
 		error = GetStr(
-			"STEP START前程序不在可验证初始态：Program=%s Line=%d State=%d WitnessRet=%d Witness=%d",
-			programName.c_str(), currentLine, currentState, witnessRet, witnessValue);
+			"STEP START前程序不在可验证初始态：Program=%s Line=%d State=%d WitnessRet=%d Witness=%d Latched=%d TokenBound=%d MessageCollision=%d",
+			programName.c_str(), currentLine, currentState, witnessRet, witnessValue,
+			m_completionWitnessRuntimeLatched ? 1 : 0,
+			m_completionWitnessMessageToken == expectedMessageToken ? 1 : 0,
+			currentMessageText == expectedMessageToken ? 1 : 0);
 		return false;
 	}
 	return true;
@@ -2016,7 +2130,8 @@ bool STEPRobotCtrl::WriteContiMoveAnyFiles(
 		return false;
 	}
 
-	const std::string srpContent = StepBuildSrpContent(weaveMoveInfo, actualWeld);
+	const std::string srpContent = StepBuildSrpContent(
+		weaveMoveInfo, actualWeld, safeProgramName);
 	std::string processValidationError;
 	const std::string srdContent = StepBuildSrdContent(
 		weaveMoveInfo, axisUnit, actualWeld, &processValidationError);
@@ -2205,22 +2320,44 @@ void STEPRobotCtrl::InvalidateStepSdkInterfaceModeCache()
 
 bool STEPRobotCtrl::CloseSocket()
 {
+	ClearLastRobotError();
 	int nRet = 0;
-	const bool wasConnected = m_bSocketConnected;
-	m_bSocketConnected = false;
+	const bool wasConnected = m_bSocketConnected.load();
 	if (m_pSTEPRobotClient == nullptr)
 	{
+		m_bSocketConnected.store(false);
 		return true;
 	}
 	if (!m_bLocalDebugMark)
 	{
 		nRet = WithSdkCommand([&]() { return m_pSTEPRobotClient->close(); });
-		if (0 != nRet)
-		{
-			return false;
-		}
 	}
-	return wasConnected || nRet == 0;
+	// SDK 调用结束后再次落定连接快照，避免其他线程看到“已断开”后排队重连，
+	// 又被本次 close 的尾部状态覆盖。
+	m_bSocketConnected.store(false);
+	if (0 != nRet)
+	{
+		const std::string error = GetStr(
+			"STEP断开失败：原因=%s(%d)", GetErrorText(nRet), nRet);
+		SetLastRobotError(error);
+		if (m_pRobotLog != nullptr)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"STEP断开失败 | ret=%d reason=%s connected_before=%d",
+				nRet,
+				GetErrorText(nRet),
+				wasConnected ? 1 : 0);
+		}
+		return false;
+	}
+	if (m_pRobotLog != nullptr)
+	{
+		m_pRobotLog->write(LogColor::SUCCESS,
+			"STEP连接已断开 | ret=%d connected_before=%d",
+			nRet,
+			wasConnected ? 1 : 0);
+	}
+	return true;
 }
 
 bool STEPRobotCtrl::IsConnected()
@@ -2652,6 +2789,22 @@ int STEPRobotCtrl::CheckRobotDone(int nDelayTime, int runTimeoutMs)
 		}
 		nRet = CheckDone();
 		const auto now = std::chrono::steady_clock::now();
+		if (nRet == STEPROBOTSDK::eRun || nRet == STEPROBOTSDK::ePause)
+		{
+			bool newlyLatched = false;
+			{
+				std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+				const bool wasLatched = m_completionWitnessRuntimeLatched;
+				std::string ignoredWitnessError;
+				VerifyGeneratedProgramCompletionWitnessLocked(ignoredWitnessError);
+				newlyLatched = !wasLatched && m_completionWitnessRuntimeLatched;
+			}
+			if (newlyLatched && m_pRobotLog != nullptr)
+			{
+				m_pRobotLog->write(LogColor::SUCCESS,
+					"STEP自然完成运行态令牌已锁存，等待同一程序进入eStop");
+			}
+		}
 		if (nRet == STEPROBOTSDK::eRun)
 		{
 			activeRunElapsed += std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPollTime);
@@ -2710,17 +2863,104 @@ int STEPRobotCtrl::CheckRobotDone(int nDelayTime, int runTimeoutMs)
 					const std::string waitError = "STEP运动未正常完成：" + statusText;
 					return failUnverified(waitError, -31000);
 				}
+				// 控制器的程序状态和变量监控通道不是同一快照：自然结束时 eStop
+				// 可能先可见，末行 ntdone 稍后才可读。仅在同一受跟踪程序持续 eStop、
+				// 没有控制器错误时给变量一个很短的稳定窗口；外部 STOP 的 ntdone
+				// 会始终保持 0，因此不会被放宽成成功。
 				std::string witnessError;
 				bool naturallyCompleted = false;
+				bool returnedToRunningState = false;
+				int stableWitnessReads = 0;
+				int witnessAttempts = 0;
+				const auto witnessDeadline = std::chrono::steady_clock::now()
+					+ std::chrono::milliseconds(kStepCompletionWitnessSettleTimeoutMs);
+				while (std::chrono::steady_clock::now() <= witnessDeadline)
 				{
-					std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
-					naturallyCompleted = VerifyGeneratedProgramCompletionWitnessLocked(witnessError);
+					if (RobotOperationLease::IsCancellationRequested(this))
+					{
+						SetLastRobotError(
+							"STEP硬件操作已被安全停止取消，完成见证等待已终止。");
+						return -20000;
+					}
+					if (!m_bLocalDebugMark
+						&& (m_pSTEPRobotClient == nullptr
+							|| !m_bSocketConnected.load()
+							|| WithSdkCommand([&]() { return m_pSTEPRobotClient->ConnectStatus(); }) < 0))
+					{
+						return failUnverified(
+							"STEP等待自然完成见证失败：机器人连接已断开。", -32000);
+					}
+
+					int witnessState = -1;
+					STEPROBOTSDK::MessageData witnessMessage;
+					bool witnessReadOk = false;
+					{
+						std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+						witnessState = m_pSTEPRobotClient != nullptr
+							? static_cast<int>(m_pSTEPRobotClient->getProgramState())
+							: -1;
+						witnessMessage = m_pSTEPRobotClient != nullptr
+							? m_pSTEPRobotClient->getMessageData()
+							: STEPROBOTSDK::MessageData();
+						if (witnessState == STEPROBOTSDK::eStop
+							&& witnessMessage.m_MessageType != STEPROBOTSDK::eError)
+						{
+							witnessReadOk = VerifyGeneratedProgramCompletionWitnessLocked(witnessError);
+						}
+					}
+					++witnessAttempts;
+
+					if (witnessState == STEPROBOTSDK::eRun
+						|| witnessState == STEPROBOTSDK::ePause)
+					{
+						returnedToRunningState = true;
+						break;
+					}
+					if (witnessState != STEPROBOTSDK::eStop
+						|| witnessMessage.m_MessageType == STEPROBOTSDK::eError)
+					{
+						return failUnverified(
+							"STEP自然完成见证等待期间程序状态/控制器消息异常："
+							+ GetRobotStatusText(), -31000);
+					}
+					if (witnessReadOk)
+					{
+						++stableWitnessReads;
+						if (stableWitnessReads >= kStepCompletionWitnessStableReads)
+						{
+							naturallyCompleted = true;
+							break;
+						}
+					}
+					else
+					{
+						stableWitnessReads = 0;
+					}
+					Sleep(kStepCompletionWitnessPollIntervalMs);
+				}
+				if (returnedToRunningState)
+				{
+					Sleep(nDelayTime);
+					continue;
 				}
 				if (!naturallyCompleted)
 				{
 					return failUnverified(
-						"STEP程序进入eStop但没有自然完成见证，按提前STOP/中止处理：" + witnessError,
+						GetStr(
+							"STEP程序进入eStop但在%dms稳定窗口内没有自然完成见证，按提前STOP/中止处理："
+							"Attempts=%d StableReads=%d %s",
+							kStepCompletionWitnessSettleTimeoutMs,
+							witnessAttempts,
+							stableWitnessReads,
+							witnessError.c_str()),
 						-31001);
+				}
+				if (m_pRobotLog != nullptr)
+				{
+					m_pRobotLog->write(LogColor::SUCCESS,
+						"STEP自然完成见证稳定确认 | Attempts=%d StableReads=%d",
+						witnessAttempts,
+						stableWitnessReads);
 				}
 				{
 					std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
@@ -3112,15 +3352,35 @@ bool STEPRobotCtrl::ProgStartRunWithSdkLock(
 		int witnessValue = -1;
 		const int witnessRet = m_pSTEPRobotClient->VariableIntReadCmd(
 			startProject, startProgram, kStepCompletionWitnessName, witnessValue);
-		if (m_completionWitnessProjectName != startProject
-			|| m_completionWitnessProgramName != startProgram
-			|| witnessRet != 0 || witnessValue != 0)
+		const STEPROBOTSDK::MessageData resumeMessage = m_pSTEPRobotClient->getMessageData();
+		const bool exactMessageWitness = resumeMessage.m_MessageType == STEPROBOTSDK::eInfo
+			&& StepMessageText(resumeMessage) == m_completionWitnessMessageToken;
+		const bool witnessIdentityMatches = m_completionWitnessProjectName == startProject
+			&& m_completionWitnessProgramName == startProgram
+			&& m_completionWitnessMessageToken == StepBuildCompletionMessageToken(startProgram);
+		const bool initialWitnessState = witnessValue == 0
+			&& !m_completionWitnessRuntimeLatched && !exactMessageWitness;
+		const bool completedBarrierState = (witnessValue == 0 || witnessValue == 1)
+			&& (m_completionWitnessRuntimeLatched || exactMessageWitness);
+		if (!witnessIdentityMatches || witnessRet != 0
+			|| (!initialWitnessState && !completedBarrierState))
 		{
-			SetLastRobotError(GetStr(
-				"STEP继续运行失败：暂停程序完成见证无效。Witness=%s/%s Current=%s/%s ReadRet=%d Value=%d",
+			const std::string resumeWitnessError = GetStr(
+				"STEP继续运行失败：暂停程序完成见证无效。Witness=%s/%s Current=%s/%s ReadRet=%d Value=%d Latched=%d ExactMessage=%d",
 				m_completionWitnessProjectName.c_str(), m_completionWitnessProgramName.c_str(),
-				startProject.c_str(), startProgram.c_str(), witnessRet, witnessValue));
+				startProject.c_str(), startProgram.c_str(), witnessRet, witnessValue,
+				m_completionWitnessRuntimeLatched ? 1 : 0, exactMessageWitness ? 1 : 0);
+			modeLock.unlock();
+			const bool stopped = RobotOperationLease::StopAndConfirmUnverifiedMotion(this);
+			const std::string stopDetail = GetLastRobotError();
+			SetLastRobotError(resumeWitnessError + (stopped
+				? "；已自动中止并确认暂停程序不可恢复。"
+				: "；自动中止暂停程序未确认：" + stopDetail));
 			return false;
+		}
+		if (completedBarrierState)
+		{
+			m_completionWitnessRuntimeLatched = true;
 		}
 	}
 	QString motionError;
@@ -3916,7 +4176,8 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 		return -2;
 	}
 
-	const std::string sSrpContent = StepBuildSrpContent(weaveMoveInfo, true);
+	const std::string sSrpContent = StepBuildSrpContent(
+		weaveMoveInfo, true, sProgramName);
 	std::string processValidationError;
 	const std::string sSrdContent = StepBuildSrdContent(
 		weaveMoveInfo, m_tAxisUnit, true, &processValidationError);
@@ -4242,35 +4503,63 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 		}
 	}
 
-	if (getProgramMode() != STEPROBOTSDK::eContinue)
+	// 每次启动动态程序前都显式下发连续运行模式。现场控制器可能仍处于单步/运动单步，
+	// 而 SDK 的 getProgramMode() 快照短时间内仍回报 eContinue；若据此跳过命令，
+	// 程序会只执行首条运动便进入 eStop，末尾 ntdone 自然完成见证也不会置位。
+	const int programModeBefore = static_cast<int>(getProgramMode());
 	{
+		std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+		if (RobotOperationLease::IsCancellationRequested(this))
 		{
-			std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
-			if (RobotOperationLease::IsCancellationRequested(this))
-			{
-				return failRunPrepare("安全停止后取消切换连续运行模式", -20000);
-			}
-			nPrepareRet = m_pSTEPRobotClient->ProgramRunModeCmd(static_cast<int>(STEPROBOTSDK::eContinue));
+			return failRunPrepare("安全停止后取消切换连续运行模式", -20000);
 		}
-		if (nPrepareRet != 0)
-		{
-			return failRunPrepare("切换连续运行模式", nPrepareRet);
-		}
+		nPrepareRet = m_pSTEPRobotClient->ProgramRunModeCmd(static_cast<int>(STEPROBOTSDK::eContinue));
+	}
+	if (nPrepareRet != 0)
+	{
+		m_pRobotLog->write(LogColor::ERR,
+			"STEP ContiMoveAny 设置连续运行模式失败 | Before=%d CommandRet=%d",
+			programModeBefore,
+			nPrepareRet);
+		return failRunPrepare("切换连续运行模式", nPrepareRet);
+	}
 
-		bool bContinueMode = false;
-		for (int i = 0; i < 20; ++i)
+	// 命令返回只表示已受理。至少等待一个刷新周期，并要求连续三次稳定回读，
+	// 避免把命令前残留的 eContinue 快照误当作本次切换已生效。
+	Sleep(50);
+	int stableContinueReads = 0;
+	int programModeAfter = static_cast<int>(getProgramMode());
+	for (int i = 0; i < 20; ++i)
+	{
+		if (RobotOperationLease::IsCancellationRequested(this))
 		{
-			if (getProgramMode() == STEPROBOTSDK::eContinue)
+			return failRunPrepare("安全停止后取消等待连续运行模式", -20000);
+		}
+		programModeAfter = static_cast<int>(getProgramMode());
+		if (programModeAfter == static_cast<int>(STEPROBOTSDK::eContinue))
+		{
+			++stableContinueReads;
+			if (stableContinueReads >= 3)
 			{
-				bContinueMode = true;
 				break;
 			}
-			Sleep(50);
 		}
-		if (!bContinueMode)
+		else
 		{
-			return failRunPrepare("等待连续运行模式", 0);
+			stableContinueReads = 0;
 		}
+		Sleep(50);
+	}
+	m_pRobotLog->write(
+		stableContinueReads >= 3 ? LogColor::SUCCESS : LogColor::ERR,
+		"STEP ContiMoveAny 连续运行模式确认 | Before=%d CommandRet=%d After=%d StableReads=%d",
+		programModeBefore,
+		nPrepareRet,
+		programModeAfter,
+		stableContinueReads);
+	if (stableContinueReads < 3)
+	{
+		return failRunPrepare("等待连续运行模式", programModeAfter);
 	}
 
 	if (!Prog_startRun_Py())
@@ -4282,21 +4571,27 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 	}
 
 	bool bStarted = false;
+	bool bCompletedBeforeRunConfirmation = false;
 	for (int i = 0; i < 50; ++i)
 	{
-		const int nProgramState = CheckDone();
-		if (nProgramState == STEPROBOTSDK::eRun)
-		{
-			bStarted = true;
-			break;
-		}
-
+		int nProgramState = -1;
 		STEPROBOTSDK::MessageData message;
+		bool completionWitnessed = false;
 		{
 			std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+			nProgramState = m_pSTEPRobotClient != nullptr
+				? static_cast<int>(m_pSTEPRobotClient->getProgramState())
+				: -1;
 			message = m_pSTEPRobotClient != nullptr
 				? m_pSTEPRobotClient->getMessageData()
 				: STEPROBOTSDK::MessageData();
+			if (nProgramState == STEPROBOTSDK::eStop
+				&& message.m_MessageType != STEPROBOTSDK::eError)
+			{
+				std::string ignoredWitnessError;
+				completionWitnessed = VerifyGeneratedProgramCompletionWitnessLocked(
+					ignoredWitnessError);
+			}
 		}
 		if (message.m_MessageType == STEPROBOTSDK::eError)
 		{
@@ -4310,6 +4605,20 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 				: "；自动中止未确认：" + stopDetail));
 			m_pRobotLog->write(LogColor::ERR, "%s", GetLastRobotError().c_str());
 			return -10;
+		}
+		if (nProgramState == STEPROBOTSDK::eRun)
+		{
+			bStarted = true;
+			break;
+		}
+		// 极短/零距离程序可能在 START 后的远端内容复核窗口内已经自然完成。
+		// 只有同一工程/程序、无控制器错误且运行态令牌已锁存时才接受 eStop；
+		// 随后的 CheckRobotDone 仍会执行稳定终态和同一见证确认。
+		if (nProgramState == STEPROBOTSDK::eStop && completionWitnessed)
+		{
+			bStarted = true;
+			bCompletedBeforeRunConfirmation = true;
+			break;
 		}
 
 		Sleep(20);
@@ -4328,7 +4637,11 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 		return -10;
 	}
 
-	m_pRobotLog->write(LogColor::SUCCESS, "STEP ContiMoveAny 已启动程序：%s", sProgramName.c_str());
+	m_pRobotLog->write(LogColor::SUCCESS,
+		bCompletedBeforeRunConfirmation
+			? "STEP ContiMoveAny 已启动且在启动确认窗口内自然完成：%s"
+			: "STEP ContiMoveAny 已启动程序：%s",
+		sProgramName.c_str());
 
 	return 0;
 }

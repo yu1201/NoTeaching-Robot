@@ -9237,6 +9237,19 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 				}
 				return;
 			}
+			if (!pRobotDriver->IsConnected())
+			{
+				QString monitorText = pRobotDriver->IsStateMonitorRunning()
+					? QStringLiteral("状态: 未连接\n后台正在等待或尝试恢复机器人连接。")
+					: QStringLiteral("状态: 已手动断开\n点击“连接服务”可重新连接机器人。");
+				const QString lastError = DecodeRobotMessageText(pRobotDriver->GetLastRobotError()).trimmed();
+				if (!lastError.isEmpty())
+				{
+					monitorText += QStringLiteral("\n最近错误: ") + lastError;
+				}
+				ui.FanucMonitorText->setPlainText(monitorText);
+				return;
+			}
 
 			long long robotMs = 0;
 			long long pcRecvMs = 0;
@@ -16694,15 +16707,68 @@ void QtWidgetsApplication4::FanucDisconnectTest()
 		return;
 	}
 
+	if (m_pDashboardConnectBtn != nullptr)
+	{
+		m_pDashboardConnectBtn->setText(QStringLiteral("正在断开…"));
+		m_pDashboardConnectBtn->repaint();
+	}
+	if (ui.FanucConnectBtn != nullptr)
+	{
+		ui.FanucConnectBtn->setText(QStringLiteral("正在断开…"));
+		ui.FanucConnectBtn->repaint();
+	}
+	if (ui.FanucMonitorText != nullptr)
+	{
+		ui.FanucMonitorText->setPlainText(QStringLiteral("状态: 正在断开机器人连接，请稍候…"));
+		ui.FanucMonitorText->repaint();
+	}
+
+	// 手动断开必须先终止状态监控。STEP 监控线程会在每轮检测到断线后自动
+	// InitSocket；若不停线程，CloseSocket 返回后会在约 50~200ms 内重新连上。
+	pRobotDriver->StopStateMonitor();
 	bool ok = true;
 	if (FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriver))
 	{
 		ok = pFanucDriver->StopRobotServices();
 		pFanucDriver->StopMonitor();
 	}
-	ok = pRobotDriver->CloseSocket() && ok;
-	QMessageBox::information(this, "机器人断开", ok ? "已断开当前机器人连接。" : "机器人断开时返回失败，请检查日志。");
+	const bool closeOk = pRobotDriver->CloseSocket();
+	ok = closeOk && ok;
+	pRobotDriver->ClearStateMonitorSnapshots();
+	if (ok)
+	{
+		pRobotDriver->ClearLastRobotError();
+	}
+	if (pRobotDriver->m_pRobotLog != nullptr)
+	{
+		pRobotDriver->m_pRobotLog->write(
+			ok ? LogColor::SUCCESS : LogColor::ERR,
+			"机器人手动断开 | close=%d overall=%d monitor=stopped",
+			closeOk ? 1 : 0,
+			ok ? 1 : 0);
+	}
+
+	// 在模态提示框出现前先更新首页；用户能立即看到按钮切换和监控缓存清空。
 	RefreshDashboardConnectionState();
+	if (ui.FanucMonitorText != nullptr)
+	{
+		ui.FanucMonitorText->setPlainText(ok
+			? QStringLiteral("状态: 已手动断开\n点击“连接服务”可重新连接机器人。")
+			: QStringLiteral("状态: 断开请求失败\n请查看下方提示和机器人日志后重试。"));
+	}
+	if (ok)
+	{
+		QMessageBox::information(this, "机器人断开", "已断开当前机器人连接。");
+	}
+	else
+	{
+		QString detail = DecodeRobotMessageText(pRobotDriver->GetLastRobotError()).trimmed();
+		if (detail.isEmpty())
+		{
+			detail = QStringLiteral("机器人驱动未返回详细原因，请检查机器人日志。");
+		}
+		QMessageBox::warning(this, "机器人断开", QStringLiteral("机器人断开失败：\n%1").arg(detail));
+	}
 }
 
 void QtWidgetsApplication4::RobotClearAlarmTest()

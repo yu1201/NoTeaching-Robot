@@ -78,6 +78,7 @@ public:
     bool StartStateMonitor(int intervalMs = 50);
     void StopStateMonitor();
     bool IsStateMonitorRunning() const;
+    void ClearStateMonitorSnapshots();
     bool LatestStateSnapshot(StateSnapshot& snapshot) const;
     std::vector<StateSnapshot> StateSnapshotsBetween(std::uint64_t beginExclusive, std::uint64_t endInclusive) const;
     std::uint64_t StateMonitorMark() const;
