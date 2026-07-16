@@ -30,6 +30,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -45,6 +46,7 @@
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QSignalBlocker>
+#include <QStyle>
 #include <QStringList>
 #include <QTextDocument>
 #include <QTextStream>
@@ -70,6 +72,41 @@ constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
 constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
 constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
 constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
+
+QString FormatFlowElapsed(qint64 elapsedMs)
+{
+    const qint64 totalSeconds = (std::max)(qint64(0), elapsedMs / 1000);
+    const qint64 hours = totalSeconds / 3600;
+    const qint64 minutes = (totalSeconds % 3600) / 60;
+    const qint64 seconds = totalSeconds % 60;
+    if (hours > 0)
+    {
+        return QStringLiteral("%1:%2:%3")
+            .arg(hours)
+            .arg(minutes, 2, 10, QLatin1Char('0'))
+            .arg(seconds, 2, 10, QLatin1Char('0'));
+    }
+    return QStringLiteral("%1:%2")
+        .arg(minutes, 2, 10, QLatin1Char('0'))
+        .arg(seconds, 2, 10, QLatin1Char('0'));
+}
+
+void ApplyFlowProgressState(QProgressBar* progressBar, QLabel* metaLabel, const char* state)
+{
+    auto refresh = [state](QWidget* widget)
+        {
+            if (widget == nullptr)
+            {
+                return;
+            }
+            widget->setProperty("flowState", state);
+            widget->style()->unpolish(widget);
+            widget->style()->polish(widget);
+            widget->update();
+        };
+    refresh(progressBar);
+    refresh(metaLabel);
+}
 
 std::string ToUtf8StdString(const QString& text)
 {
@@ -367,12 +404,31 @@ public:
         root->setContentsMargins(14, 12, 14, 12);
         root->setSpacing(8);
 
-        m_pStepLabel = new QLabel("等待流程启动...", this);
-        m_pStepLabel->setStyleSheet("font-size: 20px; font-weight: 600; color: #9ED8DB;");
-        root->addWidget(m_pStepLabel);
-        m_pProgress = new QProgressBar(this);
+        QFrame* progressCard = new QFrame(this);
+        progressCard->setObjectName("FlowProgressCard");
+        QVBoxLayout* progressLayout = new QVBoxLayout(progressCard);
+        progressLayout->setContentsMargins(16, 12, 16, 14);
+        progressLayout->setSpacing(7);
+        QHBoxLayout* progressHeader = new QHBoxLayout();
+        QLabel* progressCaption = new QLabel("当前阶段", progressCard);
+        progressCaption->setObjectName("FlowProgressCaption");
+        m_pProgressMetaLabel = new QLabel("等待开始", progressCard);
+        m_pProgressMetaLabel->setObjectName("FlowProgressMeta");
+        progressHeader->addWidget(progressCaption);
+        progressHeader->addStretch(1);
+        progressHeader->addWidget(m_pProgressMetaLabel);
+        progressLayout->addLayout(progressHeader);
+        m_pStepLabel = new QLabel("等待流程启动...", progressCard);
+        m_pStepLabel->setObjectName("RunFlowProgressStage");
+        m_pStepLabel->setWordWrap(true);
+        progressLayout->addWidget(m_pStepLabel);
+        m_pProgress = new QProgressBar(progressCard);
+        m_pProgress->setObjectName("FlowProgressBar");
         m_pProgress->setRange(0, 100);
-        root->addWidget(m_pProgress);
+        m_pProgress->setValue(0);
+        m_pProgress->setTextVisible(false);
+        progressLayout->addWidget(m_pProgress);
+        root->addWidget(progressCard);
 
         // 显示调节工具条（平板触控友好的大按钮）：点大小 − / +，视野 放大 / 缩小，实时生效。
         QHBoxLayout* viewToolbar = new QHBoxLayout();
@@ -444,7 +500,38 @@ public:
     }
 
     void SetStep(const QString& text) { m_pStepLabel->setText(text); }
-    void SetProgressValue(int value) { m_pProgress->setValue(std::clamp(value, 0, 100)); }
+    void SetProgressValue(int value)
+    {
+        const int safeValue = std::clamp(value, 0, 100);
+        m_pProgress->setRange(0, 100);
+        m_pProgress->setValue(safeValue);
+        m_pProgressMetaLabel->setText(QStringLiteral("%1%").arg(safeValue));
+        ApplyFlowProgressState(m_pProgress, m_pProgressMetaLabel, "normal");
+    }
+    void SetProgressBusy(int value, const QString& elapsedText)
+    {
+        const int safeValue = std::clamp(value, 0, 100);
+        m_pProgress->setRange(0, 100);
+        m_pProgress->setValue(safeValue);
+        m_pProgress->setTextVisible(false);
+        SetBusyElapsed(safeValue, elapsedText);
+        ApplyFlowProgressState(m_pProgress, m_pProgressMetaLabel, "busy");
+    }
+    void SetBusyElapsed(int value, const QString& elapsedText)
+    {
+        m_pProgressMetaLabel->setText(
+            QStringLiteral("约 %1% · 本阶段耗时 %2")
+                .arg(std::clamp(value, 0, 100))
+                .arg(elapsedText));
+    }
+    void SetProgressResult(bool ok, int value)
+    {
+        const int safeValue = std::clamp(value, 0, 100);
+        m_pProgress->setRange(0, 100);
+        m_pProgress->setValue(safeValue);
+        m_pProgressMetaLabel->setText(ok ? QStringLiteral("已完成") : QStringLiteral("已停止"));
+        ApplyFlowProgressState(m_pProgress, m_pProgressMetaLabel, ok ? "success" : "failure");
+    }
     void AppendLogLine(const QString& text) { m_pLog->appendPlainText(text); }
     void SetLine(const udpDataShow& frame) { m_pLineView->SetFrame(frame); }
     void ClearLine() { m_pLineView->ClearFrame(); }
@@ -484,6 +571,7 @@ protected:
 
 private:
     QLabel* m_pStepLabel = nullptr;
+    QLabel* m_pProgressMetaLabel = nullptr;
     QProgressBar* m_pProgress = nullptr;
     LaserLineLiveView* m_pLineView = nullptr;
     QLabel* m_pImageLabel = nullptr;
@@ -934,6 +1022,17 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
         "QPlainTextEdit { background: #081018; color: #BFE8EC; border: 1px solid #2C4653; border-radius: 10px; padding: 8px; }"
         "QProgressBar { background: #081018; color: #F5FAFA; border: 1px solid #2C4653; border-radius: 8px; text-align: center; min-height: 18px; }"
         "QProgressBar::chunk { background: #2D8DA0; border-radius: 7px; }"
+        "QFrame#FlowProgressCard { background: #0A131B; border: 1px solid #294754; border-radius: 14px; }"
+        "QLabel#FlowProgressCaption { color: #6F929F; font-size: 12px; font-weight: 600; letter-spacing: 1px; }"
+        "QLabel#FlowProgressStage { color: #DDECEF; font-size: 15px; font-weight: 600; padding: 1px 0 2px 0; }"
+        "QLabel#RunFlowProgressStage { color: #DDECEF; font-size: 20px; font-weight: 600; padding: 1px 0 3px 0; }"
+        "QLabel#FlowProgressMeta { background: #142731; color: #88DCE3; border: 1px solid #2E5965; border-radius: 10px; padding: 3px 10px; font-size: 12px; font-weight: 600; }"
+        "QLabel#FlowProgressMeta[flowState=\"success\"] { background: #153329; color: #7EE0B5; border-color: #2F715B; }"
+        "QLabel#FlowProgressMeta[flowState=\"failure\"] { background: #3A2024; color: #FF9CA6; border-color: #7A3D46; }"
+        "QProgressBar#FlowProgressBar { background: #061018; border: 1px solid #203A46; border-radius: 6px; min-height: 12px; max-height: 12px; color: transparent; }"
+        "QProgressBar#FlowProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #267F92, stop:1 #55D0D8); border-radius: 5px; }"
+        "QProgressBar#FlowProgressBar[flowState=\"success\"]::chunk { background: #43C995; }"
+        "QProgressBar#FlowProgressBar[flowState=\"failure\"]::chunk { background: #D95B68; }"
         "QLabel { color: #BACBD1; }");
 
     QVBoxLayout* rootLayout = new QVBoxLayout(this);
@@ -1057,24 +1156,38 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
             monitor->SetImage(m_pCameraCache->LatestImage());
         });
 
-    QVBoxLayout* progressLayout = new QVBoxLayout();
+    m_pProgressCard = new QFrame();
+    m_pProgressCard->setObjectName("FlowProgressCard");
+    QVBoxLayout* progressLayout = new QVBoxLayout(m_pProgressCard);
+    progressLayout->setContentsMargins(14, 10, 14, 12);
     progressLayout->setSpacing(6);
+    QHBoxLayout* progressHeader = new QHBoxLayout();
+    QLabel* progressCaption = new QLabel("流程进度");
+    progressCaption->setObjectName("FlowProgressCaption");
+    m_pProgressMetaLabel = new QLabel("等待开始");
+    m_pProgressMetaLabel->setObjectName("FlowProgressMeta");
+    progressHeader->addWidget(progressCaption);
+    progressHeader->addStretch(1);
+    progressHeader->addWidget(m_pProgressMetaLabel);
+    progressLayout->addLayout(progressHeader);
     m_pProgressLabel = new QLabel("等待操作");
-    m_pProgressLabel->setStyleSheet("color: #9ED8DB; font-weight: 600;");
+    m_pProgressLabel->setObjectName("FlowProgressStage");
+    m_pProgressLabel->setWordWrap(true);
     m_pProgressBar = new QProgressBar();
+    m_pProgressBar->setObjectName("FlowProgressBar");
     m_pProgressBar->setRange(0, 100);
     m_pProgressBar->setValue(0);
+    m_pProgressBar->setTextVisible(false);
     progressLayout->addWidget(m_pProgressLabel);
     progressLayout->addWidget(m_pProgressBar);
-    flowLayout->addLayout(progressLayout);
-    m_pProgressLabel->hide();
-    m_pProgressBar->hide();
+    flowLayout->addWidget(m_pProgressCard);
+    m_pProgressCard->hide();
     flowLayout->addStretch(1);
     flowScrollArea->setWidget(flowContent);
     rootLayout->addWidget(flowScrollArea, 1);
 
     m_pProgressAnimationTimer = new QTimer(this);
-    m_pProgressAnimationTimer->setInterval(300);
+    m_pProgressAnimationTimer->setInterval(1000);
     connect(m_pProgressAnimationTimer, &QTimer::timeout, this, &MeasureThenWeldDialog::UpdateProgressAnimation);
 
     m_pLogText = new QPlainTextEdit();
@@ -1925,6 +2038,12 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         // 启动回调在共享接收模式下可能重建 runtime；必须在成功后重新取得本轮缓存。
                         cameraCacheForRun = self->ResolveCameraCacheForUnit(unitIndexForRun);
                         self->m_pCameraCache = cameraCacheForRun;
+                        if (cameraCacheForRun != nullptr)
+                        {
+                            // SetRunning(true) 发生在相机启动前，当时缓存被刻意置空；
+                            // 新 runtime 建立后必须补开实时图像泵，否则运行监控永远拿不到图像帧。
+                            cameraCacheForRun->SetLiveImageEnabled(true);
+                        }
                         ok = cameraCacheForRun != nullptr;
                     }
                 }, Qt::BlockingQueuedConnection);
@@ -1978,12 +2097,63 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         cameraCacheForRun,
                         scanCycle,
                         [self](const QString& text) { if (self != nullptr) self->AppendLog(text); },
-                        [self](const QString& text) { if (self != nullptr) self->SetFlowStep(text); },
+                        [self](const QString& text)
+                        {
+                            if (self == nullptr)
+                            {
+                                return;
+                            }
+                            self->SetFlowStep(text);
+                            int milestone = -1;
+                            if (text.contains(QStringLiteral("扫描运动中")))
+                            {
+                                milestone = 40;
+                            }
+                            else if (text.contains(QStringLiteral("特征分析")))
+                            {
+                                milestone = 63;
+                            }
+                            else if (text.contains(QStringLiteral("焊接姿态")))
+                            {
+                                milestone = 78;
+                            }
+                            else if (text.contains(QStringLiteral("焊道分类")))
+                            {
+                                milestone = 70;
+                            }
+                            else if (text.contains(QStringLiteral("扫描收枪安全位置")))
+                            {
+                                milestone = 82;
+                            }
+                            if (milestone >= 0)
+                            {
+                                self->SetProgressBusy(milestone, text);
+                            }
+                        },
                         [self](const QString& title, const QString& detail) -> bool
                         {
                             return self != nullptr && self->ShowCheckpointDialog(title, detail);
                         },
-                        beforeScanAction);
+                        beforeScanAction,
+                        MeasureThenWeldService::StopRequestedCallback(),
+                        [self](double ratio)
+                        {
+                            if (self != nullptr)
+                            {
+                                const int value = 40 + static_cast<int>(std::lround(
+                                    std::clamp(ratio, 0.0, 1.0) * 15.0));
+                                self->SetProgressBusy(
+                                    value,
+                                    QStringLiteral("扫描运动中，正在采集点云"));
+                            }
+                        },
+                        [self](bool available, const QString& programName)
+                        {
+                            if (self != nullptr)
+                            {
+                                self->SetScanPauseAvailable(available, programName);
+                            }
+                        });
                 savedPath = scanCycle.weldPosePath;
                 if (!ok && message.isEmpty())
                 {
@@ -2863,6 +3033,44 @@ bool MeasureThenWeldDialog::FinishActiveWeldExecution(
     return true;
 }
 
+void MeasureThenWeldDialog::SetScanPauseAvailable(
+    bool available,
+    const QString& programName)
+{
+    if (QThread::currentThread() != thread())
+    {
+        QPointer<MeasureThenWeldDialog> self(this);
+        QMetaObject::invokeMethod(this, [self, available, programName]()
+            {
+                if (self != nullptr)
+                {
+                    self->SetScanPauseAvailable(available, programName);
+                }
+            }, Qt::QueuedConnection);
+        return;
+    }
+
+    if (available && !programName.trimmed().isEmpty())
+    {
+        if (m_pauseControlMode != PauseControlMode::Weld)
+        {
+            m_pauseControlMode = PauseControlMode::Scan;
+            m_scanPauseProgramName = programName.trimmed();
+            m_scanMotionPaused = false;
+            m_pauseProgramLine = -1;
+            m_pausePose = T_ROBOT_COORS{};
+            m_hasPausePose = false;
+        }
+    }
+    else if (m_pauseControlMode == PauseControlMode::Scan)
+    {
+        m_pauseControlMode = PauseControlMode::None;
+        m_scanPauseProgramName.clear();
+        m_scanMotionPaused = false;
+    }
+    RefreshPauseButtonAvailability();
+}
+
 void MeasureThenWeldDialog::SetWeldPauseAvailable(bool available)
 {
     if (QThread::currentThread() != thread())
@@ -2877,13 +3085,29 @@ void MeasureThenWeldDialog::SetWeldPauseAvailable(bool available)
             }, Qt::QueuedConnection);
         return;
     }
+    if (available)
+    {
+        m_pauseControlMode = PauseControlMode::Weld;
+        m_scanPauseProgramName.clear();
+        m_scanMotionPaused = false;
+    }
+    else if (m_pauseControlMode == PauseControlMode::Weld)
+    {
+        m_pauseControlMode = PauseControlMode::None;
+    }
+    RefreshPauseButtonAvailability();
+}
+
+void MeasureThenWeldDialog::RefreshPauseButtonAvailability()
+{
     RunMonitorDialog* monitor = static_cast<RunMonitorDialog*>(m_pRunMonitor);
     if (monitor == nullptr)
     {
         return;
     }
-    monitor->PauseButton()->setEnabled(available && m_bRunning);
-    if (!available)
+    monitor->PauseButton()->setEnabled(
+        m_bRunning && m_pauseControlMode != PauseControlMode::None);
+    if (m_pauseControlMode == PauseControlMode::None)
     {
         monitor->PauseButton()->setText(QStringLiteral("暂停"));
     }
@@ -2903,12 +3127,90 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
     const QString activeOwner = RobotOperationLease::CurrentOwner(pRobotDriver);
     const bool ownedByThisFlow = activeOwner == QStringLiteral("先测后焊预设流程")
         || activeOwner == QStringLiteral("跳过扫描焊接流程")
-        || activeOwner == QStringLiteral("断点续焊流程");
+        || activeOwner == QStringLiteral("断点续焊流程")
+        || activeOwner == QStringLiteral("相机时间补偿标定");
     if (!m_bRunning || !ownedByThisFlow)
     {
         QMessageBox::warning(this, "暂停/继续",
-            "当前焊接程序不再由本页面持有硬件租约，禁止发送 STOP/START。");
+            "当前程序不再由本页面持有硬件租约，禁止发送 STOP/START。");
+        SetScanPauseAvailable(false);
         SetWeldPauseAvailable(false);
+        return;
+    }
+
+    if (m_pauseControlMode == PauseControlMode::Scan)
+    {
+        const QString expectedProgram = m_scanPauseProgramName;
+        if (expectedProgram.isEmpty()
+            || (activeOwner != QStringLiteral("先测后焊预设流程")
+                && activeOwner != QStringLiteral("相机时间补偿标定")))
+        {
+            QMessageBox::warning(this, "扫描暂停/继续",
+                "当前没有与本次 STEP 扫描一致的受跟踪程序上下文，禁止发送 STOP/START。");
+            SetScanPauseAvailable(false);
+            return;
+        }
+
+        if (!m_scanMotionPaused)
+        {
+            std::string pausedProject;
+            std::string pausedProgram;
+            T_ROBOT_COORS stablePose{};
+            int stableProgramLine = -1;
+            if (!pStepDriver->PauseTrackedProgramAndWait(
+                ToUtf8StdString(expectedProgram),
+                stableProgramLine,
+                stablePose,
+                &pausedProject,
+                &pausedProgram))
+            {
+                AppendLog(QString("扫描暂停失败：%1")
+                    .arg(DecodeRobotMessageText(pStepDriver->GetLastRobotError())));
+                return;
+            }
+            if (QString::fromStdString(pausedProgram) != expectedProgram)
+            {
+                AppendLog(QString("扫描暂停后程序身份变化，拒绝继续控制：Expected=%1 Actual=%2")
+                    .arg(expectedProgram, QString::fromStdString(pausedProgram)));
+                SetScanPauseAvailable(false);
+                return;
+            }
+            m_pauseProgramLine = stableProgramLine;
+            m_pausePose = stablePose;
+            m_hasPausePose = true;
+            m_scanMotionPaused = true;
+            monitor->PauseButton()->setText(QStringLiteral("继续"));
+            monitor->ResumeWeldButton()->setEnabled(false);
+            AppendLog(QString("扫描已稳定暂停：程序=%1，行=%2，位姿 X=%3 Y=%4 Z=%5。暂停期间不采集数据。")
+                .arg(expectedProgram)
+                .arg(stableProgramLine)
+                .arg(stablePose.dX, 0, 'f', 1)
+                .arg(stablePose.dY, 0, 'f', 1)
+                .arg(stablePose.dZ, 0, 'f', 1));
+            return;
+        }
+
+        double positionDeviationMm = 0.0;
+        double angleDeviationDeg = 0.0;
+        if (!m_hasPausePose
+            || !pStepDriver->ResumeTrackedProgramFromPause(
+                ToUtf8StdString(expectedProgram),
+                m_pausePose,
+                2.0,
+                2.0,
+                &positionDeviationMm,
+                &angleDeviationDeg))
+        {
+            AppendLog(QString("扫描继续失败：%1")
+                .arg(DecodeRobotMessageText(pStepDriver->GetLastRobotError())));
+            return;
+        }
+        m_scanMotionPaused = false;
+        monitor->PauseButton()->setText(QStringLiteral("暂停"));
+        AppendLog(QString("扫描已从暂停点继续（程序行=%1，偏差=%2 mm/%3 deg）。")
+            .arg(m_pauseProgramLine)
+            .arg(positionDeviationMm, 0, 'f', 3)
+            .arg(angleDeviationDeg, 0, 'f', 3));
         return;
     }
 
@@ -3799,6 +4101,11 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                         // 禁止沿用启动前的旧指针。
                         cameraCacheForRun = self->ResolveCameraCacheForUnit(unitIndexForRun);
                         self->m_pCameraCache = cameraCacheForRun;
+                        if (cameraCacheForRun != nullptr)
+                        {
+                            // SetRunning(true) 时缓存尚未解析；新缓存接管后补开实时图像泵。
+                            cameraCacheForRun->SetLiveImageEnabled(true);
+                        }
                         ok = cameraCacheForRun != nullptr;
                     }
                 }, Qt::BlockingQueuedConnection);
@@ -3839,12 +4146,46 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
                             if (self != nullptr)
                             {
                                 self->SetFlowStep(QString("%1：%2").arg(phaseName, text));
-                                self->SetProgressBusy(progressBase, text);
+                                int milestone = progressBase;
+                                if (text.contains(QStringLiteral("特征分析")))
+                                {
+                                    milestone += 12;
+                                }
+                                else if (text.contains(QStringLiteral("焊接姿态"))
+                                    || text.contains(QStringLiteral("扫描收枪安全位置")))
+                                {
+                                    milestone += 20;
+                                }
+                                else if (text.contains(QStringLiteral("焊道分类")))
+                                {
+                                    milestone += 16;
+                                }
+                                self->SetProgressBusy((std::min)(milestone, 90), text);
                             }
                         },
                         [self](const QString& title, const QString& detail) -> bool
                         {
                             return self != nullptr && self->ShowCheckpointDialog(title, detail);
+                        },
+                        MeasureThenWeldService::BeforeActionCallback(),
+                        MeasureThenWeldService::StopRequestedCallback(),
+                        [self, phaseName, progressBase](double ratio)
+                        {
+                            if (self != nullptr)
+                            {
+                                const int value = progressBase + static_cast<int>(std::lround(
+                                    std::clamp(ratio, 0.0, 1.0) * 10.0));
+                                self->SetProgressBusy(
+                                    (std::min)(value, 90),
+                                    QString("%1：扫描运动中").arg(phaseName));
+                            }
+                        },
+                        [self](bool available, const QString& programName)
+                        {
+                            if (self != nullptr)
+                            {
+                                self->SetScanPauseAvailable(available, programName);
+                            }
                         });
                     // 标定只需要 KeyPoints；部分合法处理路径只返回案例目录而不生成最终姿态文件。
                     // 保留旧 ScanMoveAndCollect 的“文件或案例目录”兼容语义。
@@ -4142,11 +4483,25 @@ void MeasureThenWeldDialog::SetFlowStep(const QString& text)
         return;
     }
 
+    const QString normalizedText = text.trimmed().isEmpty() ? QStringLiteral("处理中") : text.trimmed();
+    if (m_bProgressBusy && normalizedText != m_sProgressText)
+    {
+        m_sProgressText = normalizedText;
+        m_progressStageElapsed.restart();
+        if (m_pProgressLabel != nullptr)
+        {
+            m_pProgressLabel->setText(m_sProgressText);
+        }
+    }
     if (m_pRunMonitor != nullptr)
     {
-        static_cast<RunMonitorDialog*>(m_pRunMonitor)->SetStep(text);
+        static_cast<RunMonitorDialog*>(m_pRunMonitor)->SetStep(normalizedText);
     }
-    emit FlowStepChanged(QString("先测后焊流程进行中，目前：%1").arg(text));
+    if (m_bProgressBusy)
+    {
+        UpdateProgressAnimation();
+    }
+    emit FlowStepChanged(QString("先测后焊流程进行中，目前：%1").arg(normalizedText));
 }
 
 void MeasureThenWeldDialog::ResetProgress(const QString& text)
@@ -4167,21 +4522,36 @@ void MeasureThenWeldDialog::ResetProgress(const QString& text)
     m_bProgressBusy = false;
     m_nProgressValue = 0;
     m_sProgressText = text.trimmed().isEmpty() ? QStringLiteral("准备开始") : text.trimmed();
+    m_progressStageElapsed.invalidate();
     if (m_pProgressAnimationTimer != nullptr)
     {
         m_pProgressAnimationTimer->stop();
     }
+    if (m_pRunMonitor != nullptr)
+    {
+        RunMonitorDialog* monitor = static_cast<RunMonitorDialog*>(m_pRunMonitor);
+        monitor->SetStep(m_sProgressText);
+        monitor->SetProgressValue(0);
+    }
+    if (m_pProgressCard != nullptr)
+    {
+        m_pProgressCard->show();
+    }
     if (m_pProgressLabel != nullptr)
     {
         m_pProgressLabel->setText(m_sProgressText);
-        m_pProgressLabel->show();
+    }
+    if (m_pProgressMetaLabel != nullptr)
+    {
+        m_pProgressMetaLabel->setText(QStringLiteral("0%"));
     }
     if (m_pProgressBar != nullptr)
     {
         m_pProgressBar->setRange(0, 100);
         m_pProgressBar->setValue(0);
-        m_pProgressBar->show();
+        m_pProgressBar->setTextVisible(false);
     }
+    ApplyFlowProgressState(m_pProgressBar, m_pProgressMetaLabel, "normal");
 }
 
 void MeasureThenWeldDialog::SetProgress(int value, const QString& text)
@@ -4199,28 +4569,39 @@ void MeasureThenWeldDialog::SetProgress(int value, const QString& text)
         return;
     }
 
-    if (m_pRunMonitor != nullptr)
-    {
-        static_cast<RunMonitorDialog*>(m_pRunMonitor)->SetProgressValue(value);
-    }
     m_bProgressBusy = false;
     m_nProgressValue = std::clamp(value, 0, 100);
-    m_sProgressText = text.trimmed();
+    m_sProgressText = text.trimmed().isEmpty() ? QStringLiteral("处理中") : text.trimmed();
+    m_progressStageElapsed.invalidate();
     if (m_pProgressAnimationTimer != nullptr)
     {
         m_pProgressAnimationTimer->stop();
     }
+    if (m_pRunMonitor != nullptr)
+    {
+        RunMonitorDialog* monitor = static_cast<RunMonitorDialog*>(m_pRunMonitor);
+        monitor->SetStep(m_sProgressText);
+        monitor->SetProgressValue(m_nProgressValue);
+    }
+    if (m_pProgressCard != nullptr)
+    {
+        m_pProgressCard->show();
+    }
     if (m_pProgressLabel != nullptr)
     {
-        m_pProgressLabel->setText(m_sProgressText.isEmpty() ? QStringLiteral("处理中") : m_sProgressText);
-        m_pProgressLabel->show();
+        m_pProgressLabel->setText(m_sProgressText);
+    }
+    if (m_pProgressMetaLabel != nullptr)
+    {
+        m_pProgressMetaLabel->setText(QStringLiteral("%1%").arg(m_nProgressValue));
     }
     if (m_pProgressBar != nullptr)
     {
         m_pProgressBar->setRange(0, 100);
         m_pProgressBar->setValue(m_nProgressValue);
-        m_pProgressBar->show();
+        m_pProgressBar->setTextVisible(false);
     }
+    ApplyFlowProgressState(m_pProgressBar, m_pProgressMetaLabel, "normal");
 }
 
 void MeasureThenWeldDialog::SetProgressBusy(int baseValue, const QString& text)
@@ -4238,20 +4619,45 @@ void MeasureThenWeldDialog::SetProgressBusy(int baseValue, const QString& text)
         return;
     }
 
+    const QString nextText = text.trimmed().isEmpty() ? QStringLiteral("处理中") : text.trimmed();
+    const bool stageChanged = !m_bProgressBusy || nextText != m_sProgressText;
     m_bProgressBusy = true;
-    m_nProgressValue = (std::max)(m_nProgressValue, std::clamp(baseValue, 0, 96));
-    m_sProgressText = text.trimmed().isEmpty() ? QStringLiteral("处理中") : text.trimmed();
+    m_nProgressValue = (std::max)(m_nProgressValue, std::clamp(baseValue, 0, 99));
+    m_sProgressText = nextText;
+    if (stageChanged || !m_progressStageElapsed.isValid())
+    {
+        m_progressStageElapsed.restart();
+    }
+    const QString elapsedText = FormatFlowElapsed(m_progressStageElapsed.elapsed());
+    if (m_pRunMonitor != nullptr)
+    {
+        RunMonitorDialog* monitor = static_cast<RunMonitorDialog*>(m_pRunMonitor);
+        monitor->SetStep(m_sProgressText);
+        monitor->SetProgressBusy(m_nProgressValue, elapsedText);
+    }
+    if (m_pProgressCard != nullptr)
+    {
+        m_pProgressCard->show();
+    }
     if (m_pProgressLabel != nullptr)
     {
         m_pProgressLabel->setText(m_sProgressText);
-        m_pProgressLabel->show();
+    }
+    if (m_pProgressMetaLabel != nullptr)
+    {
+        m_pProgressMetaLabel->setText(
+            QStringLiteral("约 %1% · 本阶段耗时 %2")
+                .arg(m_nProgressValue)
+                .arg(elapsedText));
     }
     if (m_pProgressBar != nullptr)
     {
+        // 数值只来自可观察的扫描位姿和真实流程里程碑；计时器只刷新耗时文本。
         m_pProgressBar->setRange(0, 100);
         m_pProgressBar->setValue(m_nProgressValue);
-        m_pProgressBar->show();
+        m_pProgressBar->setTextVisible(false);
     }
+    ApplyFlowProgressState(m_pProgressBar, m_pProgressMetaLabel, "busy");
     if (m_pProgressAnimationTimer != nullptr && !m_pProgressAnimationTimer->isActive())
     {
         m_pProgressAnimationTimer->start();
@@ -4278,21 +4684,36 @@ void MeasureThenWeldDialog::FinishProgress(bool ok, const QString& text)
     m_sProgressText = text.trimmed().isEmpty()
         ? (ok ? QStringLiteral("流程完成") : QStringLiteral("流程失败"))
         : text.trimmed();
+    m_progressStageElapsed.invalidate();
     if (m_pProgressAnimationTimer != nullptr)
     {
         m_pProgressAnimationTimer->stop();
     }
+    if (m_pRunMonitor != nullptr)
+    {
+        RunMonitorDialog* monitor = static_cast<RunMonitorDialog*>(m_pRunMonitor);
+        monitor->SetStep(m_sProgressText);
+        monitor->SetProgressResult(ok, m_nProgressValue);
+    }
+    if (m_pProgressCard != nullptr)
+    {
+        m_pProgressCard->show();
+    }
     if (m_pProgressLabel != nullptr)
     {
         m_pProgressLabel->setText(m_sProgressText);
-        m_pProgressLabel->show();
+    }
+    if (m_pProgressMetaLabel != nullptr)
+    {
+        m_pProgressMetaLabel->setText(ok ? QStringLiteral("已完成") : QStringLiteral("已停止"));
     }
     if (m_pProgressBar != nullptr)
     {
         m_pProgressBar->setRange(0, 100);
         m_pProgressBar->setValue(m_nProgressValue);
-        m_pProgressBar->show();
+        m_pProgressBar->setTextVisible(false);
     }
+    ApplyFlowProgressState(m_pProgressBar, m_pProgressMetaLabel, ok ? "success" : "failure");
 }
 
 void MeasureThenWeldDialog::UpdateProgressAnimation()
@@ -4306,16 +4727,19 @@ void MeasureThenWeldDialog::UpdateProgressAnimation()
         return;
     }
 
-    m_nProgressValue = (std::min)(95, m_nProgressValue + 1);
-    static int dotTick = 0;
-    dotTick = (dotTick + 1) % 4;
-    if (m_pProgressLabel != nullptr)
+    const QString elapsedText = FormatFlowElapsed(
+        m_progressStageElapsed.isValid() ? m_progressStageElapsed.elapsed() : 0);
+    if (m_pProgressMetaLabel != nullptr)
     {
-        m_pProgressLabel->setText(QString("%1%2").arg(m_sProgressText, QString(dotTick, QLatin1Char('.'))));
+        m_pProgressMetaLabel->setText(
+            QStringLiteral("约 %1% · 本阶段耗时 %2")
+                .arg(m_nProgressValue)
+                .arg(elapsedText));
     }
-    if (m_pProgressBar != nullptr)
+    if (m_pRunMonitor != nullptr)
     {
-        m_pProgressBar->setValue(m_nProgressValue);
+        static_cast<RunMonitorDialog*>(m_pRunMonitor)->SetBusyElapsed(
+            m_nProgressValue, elapsedText);
     }
 }
 
@@ -4323,6 +4747,7 @@ void MeasureThenWeldDialog::SetRunning(bool running)
 {
     if (running)
     {
+        SetScanPauseAvailable(false);
         ClearActiveWeldCheckpoint();
         if (m_pRunMonitor != nullptr)
         {
@@ -4331,9 +4756,11 @@ void MeasureThenWeldDialog::SetRunning(bool running)
     }
     else
     {
+        SetScanPauseAvailable(false);
         SetWeldPauseAvailable(false);
     }
     m_bRunning = running;
+    RefreshPauseButtonAvailability();
     m_pPresetParamBtn->setEnabled(!running);
     m_pSkipScanWeldBtn->setEnabled(!running);
     m_pLineScanProcessBtn->setEnabled(!running);

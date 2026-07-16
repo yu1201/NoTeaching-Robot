@@ -129,6 +129,12 @@ public:
 	bool Prog_startRun_Py(bool resumeExisting = false);
 	//停止程序 停止的是目前加载的程序
 	bool Prog_stop_Py();
+	// 获取本软件当前受跟踪程序的身份。alreadyStopped=true 表示极短运动已自然进入
+	// eStop：身份仍可用于终态见证，但不得再开放暂停按钮。
+	bool GetTrackedMotionIdentity(
+		std::string& projectName,
+		std::string& programName,
+		bool* alreadyStopped = nullptr);
 	// 仅暂停本软件当前跟踪的焊接程序：核对工程/程序身份，等待稳定 ePause，随后直读行号和位姿。
 	// 暂停不会清除 MotionCompletionPending，原程序仍只能在持有同一租约的流程内恢复或安全中止。
 	bool PauseTrackedProgramAndWait(

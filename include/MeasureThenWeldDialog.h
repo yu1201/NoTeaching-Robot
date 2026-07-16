@@ -6,6 +6,7 @@
 #include "ContralUnit.h"
 
 #include <QDialog>
+#include <QElapsedTimer>
 #include <QMutex>
 #include <QString>
 
@@ -20,6 +21,7 @@ class COPini;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QFrame;
 class QLabel;
 class QProgressBar;
 class QPushButton;
@@ -194,7 +196,15 @@ private:
     bool FinishActiveWeldExecution(
         const WeldExecutionTerminalResult& terminal,
         QString& error);
+    enum class PauseControlMode
+    {
+        None,
+        Scan,
+        Weld
+    };
+    void SetScanPauseAvailable(bool available, const QString& programName = QString());
     void SetWeldPauseAvailable(bool available);
+    void RefreshPauseButtonAvailability();
     void RefreshWeldModeFromParam();
     void SaveWeldModeToParam(bool doActualWeld);
     bool IsActualWeldModeChecked() const;
@@ -233,6 +243,9 @@ private:
     int m_pauseProgramLine = -1;
     T_ROBOT_COORS m_pausePose{};
     bool m_hasPausePose = false;
+    PauseControlMode m_pauseControlMode = PauseControlMode::None;
+    QString m_scanPauseProgramName;
+    bool m_scanMotionPaused = false;
     mutable QMutex m_activeWeldCheckpointMutex;
     QString m_activeWeldCheckpointRecord;
     QString m_activeWeldPriorStoredRecord;
@@ -247,7 +260,9 @@ private:
     // 翻转风险告警、历史目录核对始终弹出。状态缓存在原子成员供流程线程读取。
     QCheckBox* m_pSkipConfirmCheck = nullptr;
     std::atomic<bool> m_bSkipFlowConfirms{ false };
+    QFrame* m_pProgressCard = nullptr;
     QLabel* m_pProgressLabel = nullptr;
+    QLabel* m_pProgressMetaLabel = nullptr;
     QProgressBar* m_pProgressBar = nullptr;
     QTimer* m_pProgressAnimationTimer = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
@@ -257,4 +272,5 @@ private:
     bool m_bProgressBusy = false;
     int m_nProgressValue = 0;
     QString m_sProgressText;
+    QElapsedTimer m_progressStageElapsed;
 };

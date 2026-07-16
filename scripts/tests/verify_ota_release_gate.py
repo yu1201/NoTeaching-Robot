@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import ast
 import base64
 import hashlib
 import os
@@ -48,6 +49,128 @@ def section(text: str, start: str, end: str) -> str:
     finish = text.find(end, begin + len(start))
     require(finish >= 0, f"missing section end: {end}")
     return text[begin:finish]
+
+
+def extract_cpp_string_template(source: str, begin_marker: str, end_marker: str) -> str:
+    block = section(source, begin_marker, end_marker)
+    literal_parts = re.findall(r'"(?:\\.|[^"\\])*"', block)
+    require(literal_parts, f"no C++ string literals found between {begin_marker} and {end_marker}")
+    try:
+        return "".join(ast.literal_eval(part) for part in literal_parts)
+    except (SyntaxError, ValueError) as exc:
+        raise AssertionError(f"invalid C++ batch template literal: {exc}") from exc
+
+
+def extract_named_render_bindings(
+    source: str,
+    begin_marker: str,
+    end_marker: str,
+) -> list[tuple[str, str]]:
+    block = section(source, begin_marker, end_marker)
+    bindings = re.findall(
+        r'\{\s*QStringLiteral\("(@@OTA_[A-Z0-9_]+@@)"\),\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}',
+        block,
+    )
+    require(bindings, f"no named batch bindings found between {begin_marker} and {end_marker}")
+    require(len({marker for marker, _ in bindings}) == len(bindings),
+            f"duplicate named batch binding between {begin_marker} and {end_marker}")
+    return bindings
+
+
+def render_bootstrap_from_production_source(
+    source: str,
+    template_markers: tuple[str, str],
+    render_markers: tuple[str, str],
+    sample_values: dict[str, str],
+) -> str:
+    template = extract_cpp_string_template(source, *template_markers)
+    bindings = extract_named_render_bindings(source, *render_markers)
+    template_sentinels = set(re.findall(r"@@OTA_[A-Z0-9_]+@@", template))
+    bound_sentinels = {marker for marker, _ in bindings}
+    require(template_sentinels == bound_sentinels,
+            f"template/binding sentinel mismatch: {sorted(template_sentinels ^ bound_sentinels)}")
+    rendered = template
+    for marker, variable in bindings:
+        require(variable in sample_values, f"no regression sample for production binding {variable}")
+        require("@@OTA_" not in sample_values[variable],
+                f"regression sample for {variable} injects a named sentinel")
+        rendered = rendered.replace(marker, sample_values[variable])
+    require("@@OTA_" not in rendered, "rendered OTA bootstrap retains a named sentinel")
+    return rendered
+
+
+def verify_rendered_ota_bootstrap(source: str) -> None:
+    app = r"D:\Program Files\HK-Pathlynx-CORPLA\HK-Pathlynx-CORPLA.exe"
+    app_dir = r"D:\Program Files\HK-Pathlynx-CORPLA"
+    payload = r"D:\Program Files\HK-Pathlynx-CORPLA\Temp\OnlineUpdate\payload.bin"
+    failure_log = r"D:\Program Files\HK-Pathlynx-CORPLA\Temp\OnlineUpdate\install_failed.txt"
+    failure_marker = r"D:\Program Files\HK-Pathlynx-CORPLA\Temp\OnlineUpdate\patch_failed_2099.12.31.2359.flag"
+    health_marker = r"D:\Program Files\HK-Pathlynx-CORPLA\Temp\OnlineUpdate\patch_healthy_2099.12.31.2359.flag"
+    wait_command = (
+        'powershell.exe -NoLogo -NoProfile -NonInteractive -Command "wait-for-pid"\r\n'
+    )
+    verify_command = (
+        'powershell.exe -NoLogo -NoProfile -NonInteractive -Command "verify-size-and-sha256"\r\n'
+    )
+    samples = {
+        "waitForCurrentProcess": wait_command,
+        "payload": payload,
+        "appDir": app_dir,
+        "failureLogPath": failure_log,
+        "appPath": app,
+        "verifyPayload": verify_command,
+        "patchFailureMarkerPath": failure_marker,
+        "patchHealthMarkerPath": health_marker,
+    }
+    patch = render_bootstrap_from_production_source(
+        source,
+        ("// OTA_PATCH_BOOTSTRAP_TEMPLATE_BEGIN", "// OTA_PATCH_BOOTSTRAP_TEMPLATE_END"),
+        ("// OTA_PATCH_BOOTSTRAP_RENDER_BEGIN", "// OTA_PATCH_BOOTSTRAP_RENDER_END"),
+        samples,
+    )
+    full = render_bootstrap_from_production_source(
+        source,
+        ("// OTA_FULL_BOOTSTRAP_TEMPLATE_BEGIN", "// OTA_FULL_BOOTSTRAP_TEMPLATE_END"),
+        ("// OTA_FULL_BOOTSTRAP_RENDER_BEGIN", "// OTA_FULL_BOOTSTRAP_RENDER_END"),
+        samples,
+    )
+
+    for name, rendered in (("patch", patch), ("full", full)):
+        without_crlf = rendered.replace("\r\n", "")
+        require("\r" not in without_crlf and "\n" not in without_crlf,
+                f"{name} bootstrap contains a non-CRLF line ending")
+        require(rendered.endswith("\r\n"), f"{name} bootstrap lacks a final CRLF")
+        require(not re.search(r"%[1-9][0-9]?", rendered),
+                f"{name} bootstrap retains a positional QString placeholder")
+        require(f'set "OTA_APP={app}"\r\n' in rendered,
+                f"{name} bootstrap OTA_APP is not the real executable")
+        require(f'set "OTA_HEALTH={health_marker}"\r\n' in rendered,
+                f"{name} bootstrap health marker is misbound")
+        require(failure_log not in re.search(r'^set "OTA_APP=.*$', rendered, re.MULTILINE).group(0),
+                f"{name} bootstrap points OTA_APP at install_failed.txt")
+        require(wait_command + "if errorlevel 1 goto :wait_failed\r\n" in rendered,
+                f"{name} bootstrap wait command is not line-delimited")
+
+    for assignment in (
+        f'set "OTA_NEW={app}.ota-new"\r\n',
+        f'set "OTA_BACKUP={app}.ota-backup"\r\n',
+        f'set "OTA_FAILED={app}.ota-failed"\r\n',
+        f'set "OTA_PATCH_FAILURE_MARKER={failure_marker}"\r\n',
+        f'set "OTA_HEALTH={health_marker}"\r\n',
+    ):
+        require(assignment in patch, f"patch bootstrap binding missing: {assignment.strip()}")
+    require(patch.count(verify_command) == 2,
+            "patch bootstrap must verify both staged and copied executables")
+    require(patch.count(verify_command + "if errorlevel 1 goto") == 2,
+            "patch verification command is not separated from its error gate")
+    require(f'>"{failure_log}" echo Staged patch hash or size verification failed.\r\n' in patch,
+            "patch failure detail is not written to install_failed.txt")
+    require(f'start "" /wait "{payload}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="{app_dir}"\r\n' in full,
+            "full bootstrap installer payload or install directory is misbound")
+    require(full.count(verify_command) == 1,
+            "full bootstrap must verify the installer exactly once")
+    require(f'>"{failure_marker}" echo full_failed\r\n' in full,
+            "full bootstrap failure marker is misbound")
 
 
 def verify_native_cmd_bootstrap_launch() -> None:
@@ -105,6 +228,7 @@ def main() -> int:
     header = read("include/OnlineServicesDialog.h")
     installer = read("installer/QtWidgetsApplication4.iss")
     verify_native_cmd_bootstrap_launch()
+    verify_rendered_ota_bootstrap(app)
 
     for token in (
         "IsStrictOtaVersion",
@@ -286,13 +410,32 @@ def main() -> int:
         "void OnlineServicesDialog::InstallDownloadedPackage()",
         "void OnlineServicesDialog::AppendLog(",
     )
+    renderer = section(
+        app,
+        "QString RenderNamedBatchTemplate(",
+        "bool IsAllowedOtaUrl(",
+    )
+    for token in (
+        "script.count(marker) <= 0",
+        "value.contains(markerPrefix)",
+        "script.replace(marker, value)",
+        "script.contains(markerPrefix) ? QString() : script",
+    ):
+        require(token in renderer, f"named batch renderer is not fail-closed: {token}")
+    bootstrap_generator = section(
+        install,
+        "const qint64 currentPid",
+        "QFile bootstrap(",
+    )
+    require(".arg(" not in bootstrap_generator,
+            "OTA bootstrap generation still depends on positional QString placeholders")
     for token in (
         "Get-Process -Id",
         ".WaitForExit()",
         "Get-FileHash",
         "ExtractExecutablePatchToStaging",
         "[System.IO.File]::Replace",
-        'start \\"\\" /wait \\"%2\\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=',
+        "RenderNamedBatchTemplate",
         "if errorlevel 1 goto",
         "if not errorlevel 0 goto",
         "install_failed.txt",

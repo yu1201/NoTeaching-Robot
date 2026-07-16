@@ -15589,7 +15589,7 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 	if (m_pGroovePointCloudDialog == nullptr)
 	{
 		constexpr int kSkjCameraControlPort = 50006;
-			auto ensureControlTarget = [this, kSkjCameraControlPort](QString* error) -> bool
+		auto ensureControlTarget = [this, kSkjCameraControlPort](QString* error) -> bool
 		{
 			const int unitIndex = CurrentRobotUnitIndex();
 			QString cameraIP;
@@ -15607,7 +15607,56 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 			{
 				m_skjCameraControlClient = new SKJCameraControlClient();
 			}
-				return m_skjCameraControlClient->EnsureConnected(cameraIP, kSkjCameraControlPort, error);
+			return m_skjCameraControlClient->EnsureConnected(cameraIP, kSkjCameraControlPort, error);
+		};
+		auto invokeLiveCameraCommand = [this](
+			const std::function<bool(ScanCameraSkjWorker*, QString*)>& command,
+			QString* error,
+			bool* handled) -> bool
+			{
+				if (handled != nullptr)
+				{
+					*handled = false;
+				}
+				CameraRuntime* runtime = m_scanCameraRuntimes.value(CurrentRobotUnitIndex(), nullptr);
+				if (runtime == nullptr || runtime->tcpWorker == nullptr)
+				{
+					return false; // UDP 共享模式没有 SDK worker，调用方走独立控制连接兜底。
+				}
+				if (handled != nullptr)
+				{
+					*handled = true;
+				}
+				QPointer<ScanCameraSkjWorker> worker(runtime->tcpWorker);
+				if (worker == nullptr || worker->thread() == nullptr || !worker->thread()->isRunning())
+				{
+					if (error != nullptr)
+					{
+						*error = QStringLiteral("相机接收线程未运行，无法下发控制命令。");
+					}
+					return false;
+				}
+
+				bool result = false;
+				if (worker->thread() == QThread::currentThread())
+				{
+					return command(worker.data(), error);
+				}
+				const bool invoked = QMetaObject::invokeMethod(
+					worker.data(),
+					[worker, command, error, &result]()
+					{
+						if (worker != nullptr)
+						{
+							result = command(worker.data(), error);
+						}
+					},
+					Qt::BlockingQueuedConnection);
+				if (!invoked && error != nullptr)
+				{
+					*error = QStringLiteral("无法调用相机接收线程执行控制命令。");
+				}
+				return invoked && result;
 			};
 		auto acquireCameraOperation = [this](const QString& owner, QString* error) -> RobotOperationLease::Ptr
 			{
@@ -15617,12 +15666,24 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 					: nullptr;
 				return RobotOperationLease::TryAcquire(driver, owner, error);
 			};
-		auto refreshCameraParams = [this, ensureControlTarget, acquireCameraOperation](SKJCameraParameterValues& values, QString* error) -> bool
+		auto refreshCameraParams = [this, ensureControlTarget, invokeLiveCameraCommand, acquireCameraOperation](SKJCameraParameterValues& values, QString* error) -> bool
 		{
 			const auto operationLease = acquireCameraOperation(QStringLiteral("读取相机参数"), error);
 			if (!operationLease)
 			{
 				return false;
+			}
+			bool handled = false;
+			const bool workerResult = invokeLiveCameraCommand(
+				[&values](ScanCameraSkjWorker* worker, QString* workerError)
+				{
+					return worker->readControlParameters(&values, workerError);
+				},
+				error,
+				&handled);
+			if (handled)
+			{
+				return workerResult;
 			}
 			if (!ensureControlTarget(error) || m_skjCameraControlClient == nullptr)
 			{
@@ -15630,12 +15691,24 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 			}
 			return m_skjCameraControlClient->ReadParameters(values, error);
 		};
-		auto setCameraParam = [this, ensureControlTarget, acquireCameraOperation](SKJCameraControlClient::Parameter parameter, int value, QString* error) -> bool
+		auto setCameraParam = [this, ensureControlTarget, invokeLiveCameraCommand, acquireCameraOperation](SKJCameraControlClient::Parameter parameter, int value, QString* error) -> bool
 		{
 			const auto operationLease = acquireCameraOperation(QStringLiteral("修改相机参数"), error);
 			if (!operationLease)
 			{
 				return false;
+			}
+			bool handled = false;
+			const bool workerResult = invokeLiveCameraCommand(
+				[parameter, value](ScanCameraSkjWorker* worker, QString* workerError)
+				{
+					return worker->setControlParameter(parameter, value, workerError);
+				},
+				error,
+				&handled);
+			if (handled)
+			{
+				return workerResult;
 			}
 			if (!ensureControlTarget(error) || m_skjCameraControlClient == nullptr)
 			{
@@ -15643,7 +15716,7 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 			}
 			return m_skjCameraControlClient->SetParameter(parameter, value, error);
 		};
-		auto setLaserEnabled = [this, ensureControlTarget, acquireCameraOperation](bool enabled, QString* error) -> bool
+		auto setLaserEnabled = [this, ensureControlTarget, invokeLiveCameraCommand, acquireCameraOperation](bool enabled, QString* error) -> bool
 		{
 			const auto operationLease = acquireCameraOperation(
 				enabled ? QStringLiteral("开启相机激光") : QStringLiteral("关闭相机激光"), error);
@@ -15651,6 +15724,19 @@ void QtWidgetsApplication4::OpenGroovePointCloudDialog()
 			{
 				return false;
 			}
+			bool handled = false;
+			const bool workerResult = invokeLiveCameraCommand(
+				[enabled](ScanCameraSkjWorker* worker, QString* workerError)
+				{
+					return worker->setLaserEnabled(enabled, workerError);
+				},
+				error,
+				&handled);
+			if (handled)
+			{
+					return workerResult;
+			}
+
 			if (m_skjCameraControlClient != nullptr)
 			{
 				m_skjCameraControlClient->Disconnect();
@@ -16006,6 +16092,12 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 		latestFrame = frame;
 		hasFrame = true;
 	}
+	// 图像通路使用独立的 50001 连接，不应被点云 50006 是否已出帧所门控。
+	// 激光关闭或点云暂时为空时仍要显示相机画面，便于现场对焦和诊断。
+	if (m_pGroovePointCloudDialog != nullptr)
+	{
+		static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetCameraImage(cache->LatestImage());
+	}
 	if (!hasFrame)
 	{
 		diagnosticLines << "状态: 暂未从当前机器人专属缓存取到相机帧。";
@@ -16055,10 +16147,6 @@ void QtWidgetsApplication4::UpdateGrooveCameraData()
 			latestFrame,
 			statusText,
 			m_sGrooveCameraStatusText);
-	}
-	if (m_pGroovePointCloudDialog != nullptr)
-	{
-		static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetCameraImage(cache->LatestImage());
 	}
 }
 
