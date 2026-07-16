@@ -40,6 +40,8 @@ def main() -> int:
 
     for token in (
         'kStepCompletionWitnessName = "ntdone"',
+        'kStepCompletionWitnessHoldName = "ntdonewait"',
+        "kStepCompletionWitnessHoldMs = 1500",
         '"INT " << kStepCompletionWitnessName << " := 0"',
         'kStepCompletionWitnessName) + ":=0;"',
         'kStepCompletionWitnessName) + ":=1;"',
@@ -54,7 +56,22 @@ def main() -> int:
         "程序已卸载，但未稳定回读到空程序+eStop终态",
         "VariableIntModifyCmd",
         "VariableIntReadCmd",
-        "STEP程序进入eStop但没有自然完成见证",
+        "STEP程序进入eStop但在%dms稳定窗口内没有自然完成见证",
+        "kStepCompletionWitnessSettleTimeoutMs = 1000",
+        "kStepCompletionWitnessPollIntervalMs = 50",
+        "kStepCompletionWitnessStableReads = 3",
+        "STEP自然完成见证稳定确认",
+        "STEP自然完成运行态令牌已锁存",
+        "StepBuildCompletionMessageToken",
+        "m_completionWitnessRuntimeLatched = true",
+        "std::thread completionObserver",
+        "stopCompletionObserver",
+        "completedBarrierState",
+        "已自动中止并确认暂停程序不可恢复",
+        "returnedToRunningState",
+        "bCompletedBeforeRunConfirmation",
+        "completionWitnessed = VerifyGeneratedProgramCompletionWitnessLocked",
+        "已启动且在启动确认窗口内自然完成",
         "activeRunElapsed.count() >= runTimeoutMs",
         "StopAndConfirmUnverifiedMotion(this)",
     ):
@@ -63,14 +80,66 @@ def main() -> int:
     arc_off = step.find('StepAppendCommand(oss, std::string("ARCOFF(")')
     barrier = step.find('StepAppendCommand(oss, "WaitIsFinished();")')
     witness_set = step.find('StepAppendCommand(oss, std::string(kStepCompletionWitnessName) + ":=1;")')
-    require(0 <= arc_off < barrier < witness_set,
-            "STEP completion witness is not written after ARCOFF and the physical-motion barrier")
+    message_witness = step.find('"Message(\\\"" + StepBuildCompletionMessageToken(programName)', witness_set)
+    witness_hold = step.find('std::string("WaitTime(") + kStepCompletionWitnessHoldName', message_witness)
+    require(0 <= arc_off < barrier < witness_set < message_witness < witness_hold,
+            "STEP runtime completion token is not held after ARCOFF and the physical-motion barrier")
+    require("SaveData(" not in step,
+            "STEP per-motion completion witness must not wear controller storage")
+
+    post_start = step[
+        step.index("bool STEPRobotCtrl::VerifyGeneratedProgramAfterStartWithSdkUnlock"):
+        step.index("bool STEPRobotCtrl::ArmGeneratedProgramContentWitness")
+    ]
+    observer_unlock = post_start.index("sdkLock.unlock()")
+    observer_start = post_start.index("completionObserver = std::thread", observer_unlock)
+    remote_verify = post_start.index("VerifyGeneratedProgramRemoteContentSnapshot", observer_start)
+    observer_join = post_start.index("completionObserver.join()", remote_verify)
+    observer_relock = post_start.index("sdkLock.lock()", observer_join)
+    require(observer_unlock < observer_start < remote_verify < observer_join < observer_relock,
+            "STEP completion token is not observed throughout the unlocked post-START FTP window")
+    require(".detach()" not in post_start,
+            "STEP post-START completion observer can outlive its driver state")
     arm_call = step.find("if (!ArmGeneratedProgramCompletionWitness(")
     start_call = step.find("if (!Prog_startRun_Py())", arm_call)
     require(0 <= arm_call < start_call,
             "STEP completion witness is not reset and read back before START")
-    require("m_completionWitnessProjectName" in step_h,
-            "STEP witness identity is not persisted with tracked motion")
+    start_confirmation = step[
+        start_call:
+        step.index("bool STEPRobotCtrl::ServoOff()", start_call)
+    ]
+    require(
+        start_confirmation.index("nProgramState == STEPROBOTSDK::eStop")
+        < start_confirmation.index(
+            "completionWitnessed = VerifyGeneratedProgramCompletionWitnessLocked")
+        < start_confirmation.index("bCompletedBeforeRunConfirmation = true"),
+        "STEP short program completion is not accepted through the same runtime witness")
+
+    program_mode_command = step.find(
+        "ProgramRunModeCmd(static_cast<int>(STEPROBOTSDK::eContinue))", arm_call)
+    require(0 <= program_mode_command < start_call,
+            "STEP generated motion does not force continuous mode before START")
+    guarded_mode_command = step.rfind(
+        "if (getProgramMode() != STEPROBOTSDK::eContinue)",
+        arm_call,
+        program_mode_command)
+    require(guarded_mode_command < 0,
+            "STEP continuous-mode command is still skipped based on a possibly stale SDK snapshot")
+    for token in (
+        "const int programModeBefore = static_cast<int>(getProgramMode())",
+        "int stableContinueReads = 0",
+        "stableContinueReads >= 3",
+        "STEP ContiMoveAny 连续运行模式确认",
+    ):
+        require(token in step,
+                f"STEP continuous-mode confirmation missing: {token}")
+    for token in (
+        "m_completionWitnessProjectName",
+        "m_completionWitnessMessageToken",
+        "m_completionWitnessRuntimeLatched",
+    ):
+        require(token in step_h,
+                f"STEP witness identity/runtime latch is not persisted: {token}")
 
     for token in (
         "FanucParseIntStrict(payload, done)",

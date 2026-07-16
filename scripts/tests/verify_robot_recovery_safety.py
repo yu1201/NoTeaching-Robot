@@ -98,9 +98,11 @@ require(STEP.count("START后远端SRP/SRD内容复核失败") >= 2
         "normal/resumed START windows are not remotely rechecked and stopped")
 post_start = STEP[STEP.index("bool STEPRobotCtrl::VerifyGeneratedProgramAfterStartWithSdkUnlock"):
                   STEP.index("bool STEPRobotCtrl::ArmGeneratedProgramContentWitness")]
-require(post_start.index("sdkLock.unlock()")
-        < post_start.index("VerifyGeneratedProgramRemoteContentSnapshot")
-        < post_start.index("sdkLock.lock()"),
+post_start_unlock = post_start.index("sdkLock.unlock()")
+post_start_remote_verify = post_start.index(
+    "VerifyGeneratedProgramRemoteContentSnapshot", post_start_unlock)
+post_start_relock = post_start.index("sdkLock.lock()", post_start_remote_verify)
+require(post_start_unlock < post_start_remote_verify < post_start_relock,
         "post-START WinINet verification still holds the STOP-blocking SDK mutex")
 for token in (
     "RemoteContentVerificationGate",

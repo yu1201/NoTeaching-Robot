@@ -1030,6 +1030,12 @@ bool RobotDriverAdaptor::IsStateMonitorRunning() const
     return m_stateMonitorRunning.load();
 }
 
+void RobotDriverAdaptor::ClearStateMonitorSnapshots()
+{
+    std::lock_guard<std::mutex> lock(m_stateMonitorMutex);
+    m_stateMonitorFrames.clear();
+}
+
 bool RobotDriverAdaptor::LatestStateSnapshot(StateSnapshot& snapshot) const
 {
     std::lock_guard<std::mutex> lock(m_stateMonitorMutex);
@@ -1085,15 +1091,16 @@ std::atomic<bool> RobotDriverAdaptor::s_connectDriversAtConstruct{ true };
 
 void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
 {
-    // GUI 启动时驱动构造未连接(为避免阻塞主窗口)，在此后台线程发起首次连接(STEP 重写本钩子；
-    // FANUC/基类为空)。连接的阻塞/超时落在本线程，不影响 UI。CLI 已在构造内连上，此处幂等空过。
-    EnsureConnectionForMonitor();
     while (m_stateMonitorRunning.load())
     {
 		// STEP 等驱动在后台探测并恢复纯连接；具体钩子不得启动程序或运动。
 		// 每轮调用可刷新 atomic 连接快照，GUI 无需等待可能阻塞的 SDK mutex。
 		// FANUC 基类钩子为空，S4/S5 各自按原有策略管理。
 		EnsureConnectionForMonitor();
+		if (!m_stateMonitorRunning.load())
+		{
+			break;
+		}
         const long long nowMs = RobotDriverSteadyMs();
         StateSnapshot snapshot;
         snapshot.robotMs = nowMs;
@@ -1140,6 +1147,10 @@ void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
         }
 
         StoreStateSnapshot(snapshot);
+		if (!m_stateMonitorRunning.load())
+		{
+			break;
+		}
         const int sleepMs = snapshot.valid ? intervalMs : std::max(intervalMs, 200);
         std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
     }
