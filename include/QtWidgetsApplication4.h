@@ -24,10 +24,12 @@ class SKJCameraControlClient;
 class FANUCRobotCtrl;
 class FunctionTestDialog;
 class LaserWeldFilterDialog;
+class ScanSafetyGateDialog;
 class WorkpieceMeshViewerDialog;
 class ModelAlignmentDialog;
 class VirtualWeldTestDialog;
 class ScanDataUploader;
+class OnlineServicesDialog;
 class QAction;
 class QCheckBox;
 class QCloseEvent;
@@ -165,6 +167,7 @@ private:
     void OpenControlUnitManagementDialog();
     void OpenFtpJobManagementDialog();
     void OpenPrecisePointCloudProcessingPage();
+    void OpenScanSafetyGatePage();
     void OpenWorkpieceMeshPage();
     void OpenModelAlignmentPage();
     void OpenVirtualWeldTestPage();
@@ -248,10 +251,10 @@ private:
     QWidget* m_pControlUnitManagementPage;
     QWidget* m_pFtpJobManagementPage;
     QWidget* m_pConfigDatabaseViewerPage;
-    QWidget* m_pOnlineServicesPage = nullptr;              // 「在线服务」嵌入管理栈的页（非独立弹窗）
-    bool m_bOnlineServicesPageRemoteAllowed = false;      // 缓存页构建时的 admin 权限，权限变化则重建
+    OnlineServicesDialog* m_pOnlineServicesPage = nullptr; // 「在线服务」嵌入管理栈的页（非独立弹窗）
     QWidget* m_pProcessLoopTestPage = nullptr;            // 「流程测试」嵌入管理栈的页
     LaserWeldFilterDialog* m_pPrecisePointCloudProcessingPage;
+    ScanSafetyGateDialog* m_pScanSafetyGatePage = nullptr;
     WorkpieceMeshViewerDialog* m_pWorkpieceMeshPage = nullptr;
     ModelAlignmentDialog* m_pModelAlignmentPage = nullptr;
     VirtualWeldTestDialog* m_pVirtualWeldTestPage = nullptr;

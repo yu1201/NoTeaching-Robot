@@ -92,6 +92,66 @@ std::string EncodeIniTextForRobotData(const QString& text)
     return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
 }
 
+void ReadRobotIdentityForModelWelding(
+    const QString& configUnitName,
+    int& robotType,
+    QString& robotModelId)
+{
+    robotType = -1;
+    robotModelId.clear();
+    const QString unitName = configUnitName.trimmed();
+    if (!AppPaths::IsSafePathComponent(unitName))
+    {
+        return;
+    }
+
+    const QString path = RobotDataHelper::BuildProjectPath(
+        QStringLiteral("Data/%1/RobotPara.ini").arg(unitName));
+    QMap<QString, QMap<QString, QString>> snapshot;
+    QString snapshotError;
+    if (!ConfigDatabase::ReadIniFileSnapshot(path, snapshot, &snapshotError))
+    {
+        return;
+    }
+    auto sectionIt = snapshot.cend();
+    for (auto it = snapshot.cbegin(); it != snapshot.cend(); ++it)
+    {
+        if (it.key().compare(QStringLiteral("BaseParam"), Qt::CaseInsensitive) == 0)
+        {
+            sectionIt = it;
+            break;
+        }
+    }
+    if (sectionIt == snapshot.cend())
+    {
+        return;
+    }
+    const QMap<QString, QString>& baseParam = sectionIt.value();
+    const auto valueForKey = [&baseParam](const QString& key) -> QString
+        {
+            for (auto it = baseParam.cbegin(); it != baseParam.cend(); ++it)
+            {
+                if (it.key().compare(key, Qt::CaseInsensitive) == 0)
+                {
+                    return it.value();
+                }
+            }
+            return QString();
+        };
+
+    const QString configuredTypeText = valueForKey(QStringLiteral("RobotType"));
+    if (!configuredTypeText.isEmpty())
+    {
+        bool typeOk = false;
+        const int configuredType = configuredTypeText.trimmed().toInt(&typeOk);
+        if (typeOk)
+        {
+            robotType = configuredType;
+        }
+    }
+    robotModelId = valueForKey(QStringLiteral("RobotModelId")).trimmed().toLower();
+}
+
 QStringList DefaultScanParamLines()
 {
     return QStringList()
@@ -205,6 +265,8 @@ QStringList DefaultWeldParamLines()
         << "CornerTransitionLeadDis=0 ;拐点过渡距离(mm)"
         << "WeldStartSkipDis=0 ;起点跳过距离(mm)"
         << "WeldEndSkipDis=0 ;终点跳过距离(mm)"
+        << "GunDownBackSafeDis=70 ;下枪/收枪安全位回撤距离(mm，必须大于0)"
+        << "WeldSafeRetreatDirection=0 ;安全位水平回撤方向：0自动兼容X-优先，1世界X-，2世界X+，3世界Y-，4世界Y+"
         << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)"
         << "SlopeRzMinDeg=-20 ;爬坡/下坡段RZ负向夹紧(deg)"
         << "SlopeRzMaxDeg=20 ;爬坡/下坡段RZ正向夹紧(deg)";
@@ -466,6 +528,11 @@ QVector<RobotDataHelper::RobotInfo> RobotDataHelper::LoadRobotList(ContralUnit* 
             info.displayName = customName.isEmpty() || customName == robotName
                 ? robotName
                 : QString("%1 (%2)").arg(customName, robotName);
+            info.robotType = -1;
+            ReadRobotIdentityForModelWelding(
+                DecodeConfigTextForRobotData(unitInfo.sUnitName),
+                info.robotType,
+                info.robotModelId);
 
             bool duplicated = false;
             for (const RobotInfo& existing : robots)
@@ -489,6 +556,8 @@ QVector<RobotDataHelper::RobotInfo> RobotDataHelper::LoadRobotList(ContralUnit* 
         info.unitIndex = -1;
         info.robotName = "RobotA";
         info.displayName = "RobotA";
+        info.robotType = -1;
+        info.robotModelId.clear();
         robots.push_back(info);
     }
     return robots;

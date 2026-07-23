@@ -33,6 +33,17 @@
 #define ROBOT_TYPE_STEP 1
 #define ROBOT_TYPE_FANUC 2
 
+// 焊接下枪/收枪安全位的世界坐标水平回撤方向。
+// 0 保持旧算法（按焊道法向和枪轴择向，再以世界 X- 优先），用于兼容既有参数库。
+enum WeldSafeRetreatDirectionMode
+{
+	WELD_SAFE_RETREAT_AUTO_LEGACY_X_NEGATIVE = 0,
+	WELD_SAFE_RETREAT_WORLD_X_NEGATIVE = 1,
+	WELD_SAFE_RETREAT_WORLD_X_POSITIVE = 2,
+	WELD_SAFE_RETREAT_WORLD_Y_NEGATIVE = 3,
+	WELD_SAFE_RETREAT_WORLD_Y_POSITIVE = 4,
+};
+
 struct T_ROBOT_COORS {
 	double dX;
 	double dY;

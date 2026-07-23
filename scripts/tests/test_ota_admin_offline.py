@@ -109,7 +109,11 @@ class FakeGrpDatabase:
         if name == ota.FTP_GROUP:
             return self._ftp_record()
         if name == "devicedata":
-            return types.SimpleNamespace(gr_name="devicedata", gr_gid=self.admin_gid, gr_mem=[])
+            members = sorted(
+                account for account in self.pwd_database.records
+                if account in ota.SHARED_DATA_ACCOUNTS and account != "devicedata"
+            )
+            return types.SimpleNamespace(gr_name="devicedata", gr_gid=self.admin_gid, gr_mem=members)
         record = self.pwd_database.records.get(name)
         if record is not None:
             return types.SimpleNamespace(gr_name=name, gr_gid=record.pw_gid, gr_mem=[])
@@ -129,7 +133,7 @@ class FakeGrpDatabase:
         ]
         return [
             self._ftp_record(),
-            types.SimpleNamespace(gr_name="devicedata", gr_gid=self.admin_gid, gr_mem=[]),
+            self.getgrnam("devicedata"),
             *dynamic,
             *self.extra_records,
         ]
@@ -224,8 +228,9 @@ class AdminFixture(unittest.TestCase):
                 pw_shell=ota.NOLOGIN_SHELL,
                 pw_gid=uid + 4000,
             )
-            (self.data_dir / name).mkdir()
-            os.chmod(self.data_dir / name, ota.DEVICE_DIRECTORY_MODE)
+            if name not in ota.SHARED_DATA_ACCOUNTS:
+                (self.data_dir / name).mkdir()
+                os.chmod(self.data_dir / name, ota.DEVICE_DIRECTORY_MODE)
         ota.set_permission(name, permission)
         ota.write_userlist(names + [name])
 
@@ -475,17 +480,18 @@ class AccountMutationTests(AdminFixture):
             ota.account_update("devicedata", password="new-valid-pass")
         self.assertEqual(before_commands, self.commands)
 
-    def test_retired_shared_uploader_is_never_publishable(self):
-        for operation in (
-            lambda: ota.account_create("uploader", "valid-pass", "upload"),
-            lambda: ota.account_update("uploader", password="valid-pass"),
-            lambda: ota.write_userlist(["uploader"]),
-        ):
-            with self.assertRaises(ota.ApiError):
-                operation()
-        self.userlist.write_text("uploader\n", encoding="utf-8")
-        with self.assertRaises(ota.IntegrityError):
-            ota.list_accounts()
+    def test_three_fixed_shared_accounts_are_publishable_and_permissions_are_fixed(self):
+        ota.account_create("uploader", "valid-pass", "upload")
+        ota.account_create("ftpoperator", "valid-pass", "full")
+        accounts = {item["name"]: item for item in ota.list_accounts()}
+        self.assertEqual("upload", accounts["uploader"]["permission"])
+        self.assertEqual("full", accounts["ftpoperator"]["permission"])
+        self.assertTrue(accounts["uploader"]["protected"])
+        self.assertTrue(accounts["ftpoperator"]["protected"])
+        with self.assertRaises(ota.ApiError):
+            ota.account_update("uploader", permission="full")
+        with self.assertRaises(ota.ApiError):
+            ota.account_update("ftpoperator", permission="upload")
 
     def test_create_transaction_shares_budget_with_rollback(self):
         clock = [100.0]
@@ -1060,14 +1066,21 @@ class HttpApiTests(AdminFixture):
         with self.assertRaises(ota.ConflictError):
             ota.account_create("alpha", "valid-pass", "upload")
 
-    def test_http_rejects_retired_shared_uploader(self):
-        for method, path, payload in (
-            ("POST", "/admin/api/accounts", {"name": "uploader", "password": "valid-pass", "permission": "upload"}),
-            ("PATCH", "/admin/api/accounts/uploader", {"password": "new-valid-pass"}),
-        ):
-            status, _, body = self.request(method, path, payload)
-            self.assertEqual(400, status)
-            self.assertFalse(body["ok"])
+    def test_http_accepts_and_protects_fixed_uploader(self):
+        status, _, body = self.request(
+            "POST", "/admin/api/accounts",
+            {"name": "uploader", "password": "valid-pass", "permission": "upload"},
+        )
+        self.assertEqual(201, status)
+        self.assertTrue(body["ok"])
+        status, _, body = self.request(
+            "PATCH", "/admin/api/accounts/uploader", {"password": "new-valid-pass"}
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(body["ok"])
+        status, _, body = self.request("DELETE", "/admin/api/accounts/uploader")
+        self.assertEqual(400, status)
+        self.assertFalse(body["ok"])
 
 
 class StatsTests(AdminFixture):

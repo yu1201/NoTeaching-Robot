@@ -10,19 +10,6 @@ namespace
 {
 QMap<QString, QString> g_values;
 
-void SetIdentity(const QString& user, const QString& device)
-{
-    g_values.insert(QStringLiteral("FtpUser"), user);
-    g_values.insert(QStringLiteral("DeviceName"), device);
-}
-
-bool ExpectRejected(const QString& user, const QString& device, const QString& reasonPart)
-{
-    SetIdentity(user, device);
-    QString error;
-    return !OnlineServicesConfig::HasDeviceBoundUploadIdentity(&error)
-        && error.contains(reasonPart);
-}
 }
 
 bool ConfigDatabase::ReadScopedSetting(
@@ -57,31 +44,37 @@ bool ConfigDatabase::WriteScopedSetting(
 int main()
 {
     g_values.clear();
-    if (!OnlineServicesConfig::FtpUser().isEmpty()
-        || !OnlineServicesConfig::IsServerAccountName(OnlineServicesConfig::DeviceName()))
+    if (OnlineServicesConfig::FtpUser() != OnlineServicesConfig::UploadOnlyAccount()
+        || OnlineServicesConfig::ServerHost().isEmpty()
+        || OnlineServicesConfig::DeviceName().isEmpty())
     {
-        std::cerr << "default FTP identity is not empty-user/valid-device fail closed\n";
+        std::cerr << "default online-services settings are incomplete\n";
         return 1;
     }
-    if (!ExpectRejected(QStringLiteral("uploader"), QStringLiteral("robot-01"), QStringLiteral("永久退役")))
+    if (!OnlineServicesConfig::IsDefaultFtpAccount(OnlineServicesConfig::FullAccessAccount())
+        || !OnlineServicesConfig::IsDefaultFtpAccount(OnlineServicesConfig::FtpAccessAccount())
+        || !OnlineServicesConfig::IsDefaultFtpAccount(OnlineServicesConfig::UploadOnlyAccount())
+        || OnlineServicesConfig::IsDefaultFtpAccount(QStringLiteral("robot-01")))
     {
-        std::cerr << "shared uploader identity was not rejected\n";
+        std::cerr << "fixed account allow-list is incorrect\n";
         return 2;
     }
-    if (!ExpectRejected(QStringLiteral("robot-02"), QStringLiteral("robot-01"), QStringLiteral("完全一致")))
+    if (OnlineServicesConfig::AccessLevelForAccount(OnlineServicesConfig::FullAccessAccount())
+            != OnlineServicesConfig::AccessLevel::Full
+        || OnlineServicesConfig::AccessLevelForAccount(OnlineServicesConfig::FtpAccessAccount())
+            != OnlineServicesConfig::AccessLevel::Ftp
+        || OnlineServicesConfig::AccessLevelForAccount(OnlineServicesConfig::UploadOnlyAccount())
+            != OnlineServicesConfig::AccessLevel::Upload)
     {
-        std::cerr << "cross-device account/device mismatch was not rejected\n";
+        std::cerr << "account access-level mapping is incorrect\n";
         return 3;
     }
-    if (!ExpectRejected(QStringLiteral("robot-01"), QStringLiteral("Robot-01"), QStringLiteral("必须匹配")))
+    if (!OnlineServicesConfig::HasFtpAccess(OnlineServicesConfig::AccessLevel::Ftp)
+        || !OnlineServicesConfig::HasFtpAccess(OnlineServicesConfig::AccessLevel::Full)
+        || OnlineServicesConfig::HasFtpAccess(OnlineServicesConfig::AccessLevel::Upload)
+        || !OnlineServicesConfig::HasFullAccess(OnlineServicesConfig::AccessLevel::Full))
     {
-        std::cerr << "case-only account/device mismatch was not rejected\n";
-        return 4;
-    }
-
-    if (!ExpectRejected(QStringLiteral("devicedata"), QStringLiteral("devicedata"), QStringLiteral("全权限")))
-    {
-        std::cerr << "full admin identity was accepted for automatic upload\n";
+        std::cerr << "access-level ordering is incorrect\n";
         return 4;
     }
     for (const QString& invalid : {
@@ -93,14 +86,6 @@ int main()
             std::cerr << "server account regex accepted invalid name\n";
             return 5;
         }
-    }
-
-    SetIdentity(QStringLiteral("robot-01"), QStringLiteral("robot-01"));
-    QString error = QStringLiteral("stale");
-    if (!OnlineServicesConfig::HasDeviceBoundUploadIdentity(&error) || !error.isEmpty())
-    {
-        std::cerr << "matching per-device identity was rejected\n";
-        return 6;
     }
 
     const QString ownedName = QStringLiteral("upload_0123456789abcdef0123456789abcdef.zip");
@@ -145,6 +130,6 @@ int main()
         return 10;
     }
 
-    std::cout << "PASS: device identity and stale temporary archive policies fail closed\n";
+    std::cout << "PASS: fixed online-service roles and stale temporary archive policies are valid\n";
     return 0;
 }

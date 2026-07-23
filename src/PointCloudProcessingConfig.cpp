@@ -76,28 +76,46 @@ void ApplyEnforceValidationSafetyBounds(PointCloudProcessingConfig::Settings& se
     {
         return;
     }
-    settings.validationMinFinitePointCount = std::max(300, settings.validationMinFinitePointCount);
-    settings.validationMinProjectedSpanMm = std::max(180.0, settings.validationMinProjectedSpanMm);
-    settings.validationMinStationCoverageRatio = std::max(0.55, settings.validationMinStationCoverageRatio);
-    settings.validationMinLongestContinuousRatio = std::max(0.60, settings.validationMinLongestContinuousRatio);
-    settings.validationMaxRejectedRatio = std::min(0.40, settings.validationMaxRejectedRatio);
-    settings.validationMaxMedianResidualMm =
-        settings.validationMaxMedianResidualMm <= 0.0
-        ? 3.0
-        : std::min(3.0, settings.validationMaxMedianResidualMm);
-    settings.validationMaxP95ResidualMm =
-        settings.validationMaxP95ResidualMm <= 0.0
-        ? 8.0
-        : std::min(8.0, settings.validationMaxP95ResidualMm);
-    settings.validationResidualInlierThresholdMm =
-        settings.validationResidualInlierThresholdMm <= 0.0
-        ? 6.0
-        : std::min(6.0, settings.validationResidualInlierThresholdMm);
-    settings.validationMinResidualInlierRatio = std::max(0.75, settings.validationMinResidualInlierRatio);
-    settings.validationMinKeyPointCount = std::max(6, settings.validationMinKeyPointCount);
-    settings.validationMinCornerCount = std::max(4, settings.validationMinCornerCount);
-    settings.validationMinOutputPointCount = std::max(80, settings.validationMinOutputPointCount);
-    settings.validationMinOutputLengthRatio = std::max(0.70, settings.validationMinOutputLengthRatio);
+    if (settings.validationCoverageEnabled)
+    {
+        settings.validationMinFinitePointCount = std::max(300, settings.validationMinFinitePointCount);
+        settings.validationMinProjectedSpanMm = std::max(180.0, settings.validationMinProjectedSpanMm);
+    }
+    if (settings.validationContinuityEnabled)
+    {
+        settings.validationMinStationCoverageRatio = std::max(0.55, settings.validationMinStationCoverageRatio);
+        settings.validationMinLongestContinuousRatio = std::max(0.60, settings.validationMinLongestContinuousRatio);
+    }
+    if (settings.validationDenoiseRatioEnabled)
+    {
+        settings.validationMaxRejectedRatio = std::min(0.40, settings.validationMaxRejectedRatio);
+    }
+    if (settings.validationResidualEnabled)
+    {
+        settings.validationMaxMedianResidualMm =
+            settings.validationMaxMedianResidualMm <= 0.0
+            ? 3.0
+            : std::min(3.0, settings.validationMaxMedianResidualMm);
+        settings.validationMaxP95ResidualMm =
+            settings.validationMaxP95ResidualMm <= 0.0
+            ? 8.0
+            : std::min(8.0, settings.validationMaxP95ResidualMm);
+        settings.validationResidualInlierThresholdMm =
+            settings.validationResidualInlierThresholdMm <= 0.0
+            ? 6.0
+            : std::min(6.0, settings.validationResidualInlierThresholdMm);
+        settings.validationMinResidualInlierRatio = std::max(0.75, settings.validationMinResidualInlierRatio);
+    }
+    if (settings.validationKeyPointEnabled)
+    {
+        settings.validationMinKeyPointCount = std::max(6, settings.validationMinKeyPointCount);
+        settings.validationMinCornerCount = std::max(4, settings.validationMinCornerCount);
+    }
+    if (settings.validationOutputEnabled)
+    {
+        settings.validationMinOutputPointCount = std::max(80, settings.validationMinOutputPointCount);
+        settings.validationMinOutputLengthRatio = std::max(0.70, settings.validationMinOutputLengthRatio);
+    }
 }
 
 QString ReadSetting(const QString& key, const QString& defaultValue = QString())
@@ -164,6 +182,26 @@ QString PointCloudProcessingConfig::DefaultConfigPath()
 QString PointCloudProcessingConfig::DataConfigPath()
 {
     return RobotDataHelper::BuildProjectPath(QStringLiteral("Data/CorrugatedSheetPointCloudEctration.ini"));
+}
+
+bool PointCloudProcessingConfig::CoreSafetyGatesEnabled(const Settings& settings)
+{
+    return settings.safetyGateProofIntegrityEnabled
+        && settings.safetyGateProductionPurposeEnabled
+        && settings.safetyGateCaseBindingEnabled
+        && settings.safetyGateEndpointBindingEnabled
+        && settings.safetyGateCameraHandEyeBindingEnabled
+        && settings.safetyGateFreshnessEnabled
+        && settings.safetyGatePolicySnapshotEnabled
+        && settings.safetyGateInputEvidenceEnabled
+        && settings.safetyGateAuthorizedPoseIdentityEnabled
+        && settings.safetyGateTrajectoryStructureEnabled
+        && settings.safetyGateMotionPrecheckEnabled;
+}
+
+bool PointCloudProcessingConfig::HasDisabledCoreSafetyGate(const Settings& settings)
+{
+    return !CoreSafetyGatesEnabled(settings);
 }
 
 PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
@@ -258,21 +296,51 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.validationOutputEnabled = ReadBoolSetting("Validation/OutputEnabled", settings.validationOutputEnabled);
     settings.validationMinOutputPointCount = ReadIntSetting("Validation/MinOutputPointCount", settings.validationMinOutputPointCount);
     settings.validationMinOutputLengthRatio = ReadDoubleSetting("Validation/MinOutputLengthRatio", settings.validationMinOutputLengthRatio);
+    settings.safetyGateProofIntegrityEnabled =
+        ReadBoolSetting("SafetyGates/ProofIntegrityEnabled", settings.safetyGateProofIntegrityEnabled);
+    settings.safetyGateProductionPurposeEnabled =
+        ReadBoolSetting("SafetyGates/ProductionPurposeEnabled", settings.safetyGateProductionPurposeEnabled);
+    settings.safetyGateRobotNameBindingEnabled =
+        ReadBoolSetting("SafetyGates/RobotNameBindingEnabled", settings.safetyGateRobotNameBindingEnabled);
+    settings.safetyGateCaseBindingEnabled =
+        ReadBoolSetting("SafetyGates/CaseBindingEnabled", settings.safetyGateCaseBindingEnabled);
+    settings.safetyGateEndpointBindingEnabled =
+        ReadBoolSetting("SafetyGates/EndpointBindingEnabled", settings.safetyGateEndpointBindingEnabled);
+    settings.safetyGateCameraHandEyeBindingEnabled =
+        ReadBoolSetting("SafetyGates/CameraHandEyeBindingEnabled", settings.safetyGateCameraHandEyeBindingEnabled);
+    settings.safetyGateFreshnessEnabled =
+        ReadBoolSetting("SafetyGates/FreshnessEnabled", settings.safetyGateFreshnessEnabled);
+    settings.safetyGatePolicySnapshotEnabled =
+        ReadBoolSetting("SafetyGates/PolicySnapshotEnabled", settings.safetyGatePolicySnapshotEnabled);
+    settings.safetyGateInputEvidenceEnabled =
+        ReadBoolSetting("SafetyGates/InputEvidenceEnabled", settings.safetyGateInputEvidenceEnabled);
+    settings.safetyGateAuthorizedPoseIdentityEnabled =
+        ReadBoolSetting("SafetyGates/AuthorizedPoseIdentityEnabled", settings.safetyGateAuthorizedPoseIdentityEnabled);
+    settings.safetyGateTrajectoryStructureEnabled =
+        ReadBoolSetting("SafetyGates/TrajectoryStructureEnabled", settings.safetyGateTrajectoryStructureEnabled);
+    settings.safetyGateMotionPrecheckEnabled =
+        ReadBoolSetting("SafetyGates/MotionPrecheckEnabled", settings.safetyGateMotionPrecheckEnabled);
 
     // 旧现场数据库曾把六类门禁全部持久化为 0，安装/OTA 又会保留 Data，单靠 C++ 默认值无法恢复。
-    // Profile v1 已用 101 组历史语料完成阈值回算；旧配置升级时直接进入 Enforce，并强制计算全部六类指标。
-    // 只有显式保存 v1+Audit 才允许“只记录不拦截”，不存在可发布的 Off 状态。
+    // Profile v1 已用 101 组历史语料完成阈值回算；仅旧配置升级时进入 Enforce 并打开全部六类指标。
+    // v1+ 配置中的开关是操作员显式选择，必须按原值恢复。
     if (storedValidationProfileVersion < CURRENT_VALIDATION_PROFILE_VERSION)
     {
         settings.validationPolicy = ValidationPolicy::Enforce;
+        settings.validationCoverageEnabled = true;
+        settings.validationContinuityEnabled = true;
+        settings.validationDenoiseRatioEnabled = true;
+        settings.validationResidualEnabled = true;
+        settings.validationKeyPointEnabled = true;
+        settings.validationOutputEnabled = true;
     }
     settings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
-    settings.validationCoverageEnabled = true;
-    settings.validationContinuityEnabled = true;
-    settings.validationDenoiseRatioEnabled = true;
-    settings.validationResidualEnabled = true;
-    settings.validationKeyPointEnabled = true;
-    settings.validationOutputEnabled = true;
+    // 系统核心门禁关闭时，只允许 Audit 处理。机器人名称绑定是唯一例外：
+    // 可按现场逻辑名变化关闭它，但端点、相机、手眼、案例和证明完整性仍须保持验证。
+    if (HasDisabledCoreSafetyGate(settings))
+    {
+        settings.validationPolicy = ValidationPolicy::Audit;
+    }
     if (g_hasRuntimeModeOverride)
     {
         settings.mode = g_runtimeModeOverride;
@@ -386,12 +454,10 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
 {
     Settings normalizedSettings = settings;
     normalizedSettings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
-    normalizedSettings.validationCoverageEnabled = true;
-    normalizedSettings.validationContinuityEnabled = true;
-    normalizedSettings.validationDenoiseRatioEnabled = true;
-    normalizedSettings.validationResidualEnabled = true;
-    normalizedSettings.validationKeyPointEnabled = true;
-    normalizedSettings.validationOutputEnabled = true;
+    if (HasDisabledCoreSafetyGate(normalizedSettings))
+    {
+        normalizedSettings.validationPolicy = ValidationPolicy::Audit;
+    }
     ApplyEnforceValidationSafetyBounds(normalizedSettings);
     QMap<QString, QString> pendingValues;
     const auto write = [&pendingValues](const QString& key, const QString& value)
@@ -462,26 +528,38 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("CloudProjection/SmoothRadius", QString::number(settings.projectionSmoothRadius))
         && write("Validation/ProfileVersion", QString::number(CURRENT_VALIDATION_PROFILE_VERSION))
         && write("Validation/Policy", ValidationPolicyConfigValue(normalizedSettings.validationPolicy))
-        && write("Validation/CoverageEnabled", "1")
+        && write("Validation/CoverageEnabled", normalizedSettings.validationCoverageEnabled ? "1" : "0")
         && write("Validation/MinFinitePointCount", QString::number(normalizedSettings.validationMinFinitePointCount))
         && write("Validation/MinProjectedSpanMm", QString::number(normalizedSettings.validationMinProjectedSpanMm, 'f', 6))
-        && write("Validation/ContinuityEnabled", "1")
+        && write("Validation/ContinuityEnabled", normalizedSettings.validationContinuityEnabled ? "1" : "0")
         && write("Validation/MinStationCoverageRatio", QString::number(normalizedSettings.validationMinStationCoverageRatio, 'f', 6))
         && write("Validation/MinLongestContinuousRatio", QString::number(normalizedSettings.validationMinLongestContinuousRatio, 'f', 6))
-        && write("Validation/DenoiseRatioEnabled", "1")
+        && write("Validation/DenoiseRatioEnabled", normalizedSettings.validationDenoiseRatioEnabled ? "1" : "0")
         && write("Validation/MaxRejectedRatio", QString::number(normalizedSettings.validationMaxRejectedRatio, 'f', 6))
-        && write("Validation/ResidualEnabled", "1")
+        && write("Validation/ResidualEnabled", normalizedSettings.validationResidualEnabled ? "1" : "0")
         && write("Validation/MaxMedianResidualMm", QString::number(normalizedSettings.validationMaxMedianResidualMm, 'f', 6))
         && write("Validation/MaxP95ResidualMm", QString::number(normalizedSettings.validationMaxP95ResidualMm, 'f', 6))
         && write("Validation/ResidualInlierThresholdMm", QString::number(normalizedSettings.validationResidualInlierThresholdMm, 'f', 6))
         && write("Validation/MinResidualInlierRatio", QString::number(normalizedSettings.validationMinResidualInlierRatio, 'f', 6))
-        && write("Validation/KeyPointEnabled", "1")
+        && write("Validation/KeyPointEnabled", normalizedSettings.validationKeyPointEnabled ? "1" : "0")
         && write("Validation/MinKeyPointCount", QString::number(normalizedSettings.validationMinKeyPointCount))
         && write("Validation/MinCornerCount", QString::number(normalizedSettings.validationMinCornerCount))
         && write("Validation/MinSegmentLengthMm", QString::number(normalizedSettings.validationMinSegmentLengthMm, 'f', 6))
-        && write("Validation/OutputEnabled", "1")
+        && write("Validation/OutputEnabled", normalizedSettings.validationOutputEnabled ? "1" : "0")
         && write("Validation/MinOutputPointCount", QString::number(normalizedSettings.validationMinOutputPointCount))
-        && write("Validation/MinOutputLengthRatio", QString::number(normalizedSettings.validationMinOutputLengthRatio, 'f', 6));
+        && write("Validation/MinOutputLengthRatio", QString::number(normalizedSettings.validationMinOutputLengthRatio, 'f', 6))
+        && write("SafetyGates/ProofIntegrityEnabled", settings.safetyGateProofIntegrityEnabled ? "1" : "0")
+        && write("SafetyGates/ProductionPurposeEnabled", settings.safetyGateProductionPurposeEnabled ? "1" : "0")
+        && write("SafetyGates/RobotNameBindingEnabled", settings.safetyGateRobotNameBindingEnabled ? "1" : "0")
+        && write("SafetyGates/CaseBindingEnabled", settings.safetyGateCaseBindingEnabled ? "1" : "0")
+        && write("SafetyGates/EndpointBindingEnabled", settings.safetyGateEndpointBindingEnabled ? "1" : "0")
+        && write("SafetyGates/CameraHandEyeBindingEnabled", settings.safetyGateCameraHandEyeBindingEnabled ? "1" : "0")
+        && write("SafetyGates/FreshnessEnabled", settings.safetyGateFreshnessEnabled ? "1" : "0")
+        && write("SafetyGates/PolicySnapshotEnabled", settings.safetyGatePolicySnapshotEnabled ? "1" : "0")
+        && write("SafetyGates/InputEvidenceEnabled", settings.safetyGateInputEvidenceEnabled ? "1" : "0")
+        && write("SafetyGates/AuthorizedPoseIdentityEnabled", settings.safetyGateAuthorizedPoseIdentityEnabled ? "1" : "0")
+        && write("SafetyGates/TrajectoryStructureEnabled", settings.safetyGateTrajectoryStructureEnabled ? "1" : "0")
+        && write("SafetyGates/MotionPrecheckEnabled", settings.safetyGateMotionPrecheckEnabled ? "1" : "0");
     const bool ok = valuesPrepared && ConfigDatabase::WriteScopedSettings(
         QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues);
     if (!ok && error != nullptr)

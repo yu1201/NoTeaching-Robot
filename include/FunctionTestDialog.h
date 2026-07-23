@@ -44,6 +44,7 @@ private:
     void FanucMovlTest();
     void FanucMovjTest();
     void FanucMoveZeroTest();
+    void EditKinematicsParameters();
     void FanucCaptureKinematicsSample();
     void FitDhParametersFromSamples();
     void OpenLaserWeldFilterTest();

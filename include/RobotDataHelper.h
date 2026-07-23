@@ -22,6 +22,12 @@ public:
         int unitIndex = -1;
         QString robotName;
         QString displayName;
+        // 控制单元 RobotPara.ini 中显式保存的驱动族（STEP/FANUC）与具体机器人型号。
+        // robotType 保留配置值，调用方需要将它与当前运行时驱动类型独立核对。
+        // unitIndex 只用于本次运行，模型焊接资格必须使用 robotModelId，
+        // 不能根据 robotType、IP 或机器人名称猜测具体型号。
+        int robotType = -1;
+        QString robotModelId;
     };
 
     struct CameraInfo

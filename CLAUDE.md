@@ -71,12 +71,12 @@ QtWidgetsApplication4.exe --no-show --fanuc-upload-services --skip-upload-wait  
 
 **6. 手眼标定与几何** — 手眼关系 `robot_local = R_opt*camera + t_opt`，每 (robot,camera) 存 `Data/<robot>/HandEyeMatrix_<CAMERAn>.ini`。`CalcLaserPointInRobot` 是正向 camera→base，`ComputeHandEyeMatrixFromCalibration`（Kabsch/SVD，≥3/6 有效样本，含反射修正）是其逆。**旋转合成随 robotType 不同**：FANUC = `Rz*Ry*Rx`，STEP = `Rx*Ry*Rz`，一律走 `RobotPoseTransform::RotationFromAnglesDeg`。手眼/焊接数学用 **Eigen**，只有驱动里的运动学链用 **KDL**（mm↔m、deg↔rad 转换在 `CoorsToKDLFrame`）。`WeldPoseAverageUpdater` 离线按四段做 MAD 离群过滤的姿态平均，回写 `WeldPoseCompParam.ini`。
 
-**7. 焊接工艺与参数** — 新工艺文件格式（`WeldProcessFile`）：`WeldPara.txt` 每行**严格 84 字段**、`WeaveDate.txt` 每行**15 字段**，TAB 分隔、首行 `USE\t<idx>`、存在 ConfigDatabase（逻辑键），列数不符报「格式已升级，请重新创建工艺内容」。`WeldProcessFile.cpp` 的 `ParseWeldLine/BuildWeldFields` 与 `MeasureThenWeldService.cpp` 里按下标 0..83 的解析器必须**同步改**。真正的 `ARCON/ARCSET/ARCOFF/ARCMODE` + `WEAVEDATA wd0/TRACKDATA td0` + `.srp/.srd` 生成在 **`StepRobotDriver.cpp`**（空跑 `actualWeld=false` 不发 ARC 指令）。`MeasureWeldParam.ini` 按「位置类型」分组（`[MeasureWeldGroups]` + `MeasureGroup<i>.Scan/.Weld`）。补偿分姿态补偿/焊缝补偿，每组恰好 4 段，扁平下标 `g*4+seg`。
+**7. 焊接工艺与参数** — 新工艺文件格式（`WeldProcessFile`）：`WeldPara.txt` 每行**严格 84 字段**、`WeaveDate.txt` 每行**15 字段**，TAB 分隔、首行 `USE\t<idx>`、存在 ConfigDatabase（逻辑键），列数不符报「格式已升级，请重新创建工艺内容」。`WeldProcessFile.cpp` 的 `ParseWeldLine/BuildWeldFields` 与 `MeasureThenWeldService.cpp` 里按下标 0..83 的解析器必须**同步改**。真正的 `ARCON/ARCSET/ARCOFF/ARCMODE` + `WEAVEDATA wd0/TRACKDATA td0` + `.srp/.srd` 生成在 **`StepRobotDriver.cpp`**（空跑 `actualWeld=false` 不发 ARC 指令）。`MeasureWeldParam.ini` 按「位置类型」分组（`[MeasureWeldGroups]` + `MeasureGroup<i>.Scan/.Weld`）。姿态补偿每组仍有低平台/上升边/高平台/下降边 4 个姿态槽（扁平下标 `g*4+seg`）；焊道补偿每组只有一套 Z/枪反向/焊道方向参数，统一应用于整条焊道。
 
 ## 关键约定与不变量（跨子系统，容易踩坑）
 
 - **分类型码是全局不变量**：`1=start 2=end 3=inner_corner 4=outer_corner 5=normal 6=noise`（`RobotCalculation::LowerWeldPointType` 与所有 `*_Classified.txt`），不要重编号。
-- **四类焊段 ↔ 补偿槽硬映射**：`low_platform=0 / rising_edge=1 / high_platform=2 / falling_edge=3`（中文 低平台/上升边/高平台/下降边）。段类由 `AssignSegmentKindsByMeasurementGunDepth` 按枪深投影判定（远=低平台，近=高平台）。
+- **四类焊段 ↔ 姿态补偿槽映射**：仅在姿态补偿选择“按四类段属性匹配”时，`low_platform=0 / rising_edge=1 / high_platform=2 / falling_edge=3`（中文 低平台/上升边/高平台/下降边）；焊道补偿不再按 `segmentKind` 选槽。段类仍由 `AssignSegmentKindsByMeasurementGunDepth` 按枪深投影判定（远=低平台，近=高平台），供姿态匹配、轨迹结构和调试使用。
 - **采样间距**：焊缝轨迹 `_2mm` 文件按 2.0mm 加密；最终**下发轨迹另按 `dFinalWeldTrajectoryStepMm`（默认 4mm）抽样**，另存 `*_FinalSampled`，2mm 文件本身保持稠密。
 - **速度单位随品牌不同**：FANUC 直线命令 mm/s（配置 mm/min ÷60），MOVJ 按百分比（驱动同时接受 `20` 与 `2000` 表示 20%）；STEP 保持 mm/min。一律走 `LinearCommandSpeedForRobot`。
 - **时间戳**：FANUC 用机器人侧 `robot_ms`（S5 帧）；STEP 在 `STEP_SDK_HAS_TIMESTAMP=1` 时用 SDK `getTimestamp()`，否则与脉冲/CheckDone 一样暂用 PC `steady_clock`。内部一律微秒 `qint64`。

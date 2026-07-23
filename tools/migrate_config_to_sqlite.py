@@ -133,13 +133,6 @@ POSE_SEGMENT_TYPES = (
     ("姿态2 / 高平台", "high_platform"),
     ("姿态3 / 下降边", "falling_edge"),
 )
-SEAM_SEGMENT_TYPES = (
-    ("低平台", "low_platform"),
-    ("上升边", "rising_edge"),
-    ("高平台", "high_platform"),
-    ("下降边", "falling_edge"),
-)
-
 MEASURE_WELD_SCAN_DEFAULTS = (
     ("YMaxCar", "0"),
     ("YMinCar", "0"),
@@ -217,6 +210,8 @@ MEASURE_WELD_WELD_DEFAULTS = (
     ("StepOverlapRel", "20"),
     ("FinalWeldTrajectoryStepMm", "4"),
     ("WeldDirection", "1"),
+    ("GunDownBackSafeDis", "70"),
+    ("WeldSafeRetreatDirection", "0"),
     ("WorldCoorDir", "0"),
     ("RobotInstallDir", "0"),
     ("GunAngle", "0"),
@@ -5227,9 +5222,13 @@ def parse_int(value: str | None, fallback: int) -> int:
         return fallback
 
 
-def discover_robot_names(conn: sqlite3.Connection, data_dir: Path) -> list[str]:
+def discover_robot_names(
+    conn: sqlite3.Connection,
+    data_dir: Path,
+    include_disk_directories: bool = True,
+) -> list[str]:
     names: set[str] = set()
-    if data_dir.exists():
+    if include_disk_directories and data_dir.exists():
         for child in data_dir.iterdir():
             if child.is_dir() and child.name.lower().startswith("robot"):
                 names.add(child.name)
@@ -5364,38 +5363,72 @@ def ensure_seam_comp_defaults(
     inserted = 0
     for robot_name in robot_names:
         source_path = f"Data/{robot_name}/WeldSeamCompParam.ini"
-        count = parse_int(read_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompCount"), COMP_SEGMENT_COUNT)
-        group_count = parse_int(read_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompGroupCount"), 0)
-        if group_count <= 0:
-            group_count = max(1, (max(0, count) + COMP_SEGMENT_COUNT - 1) // COMP_SEGMENT_COUNT)
-        expected_count = max(COMP_SEGMENT_COUNT, group_count * COMP_SEGMENT_COUNT)
-        inserted += int(insert_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompCount", str(expected_count), encrypt))
+        schema_text = read_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompSchemaVersion")
+        count_text = read_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompCount")
+        group_count_text = read_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompGroupCount")
+        schema_version = parse_int(schema_text, 0)
+        legacy_identity = build_scoped_ini_identity(
+            source_path, "WeldSeamComp0", "dummy"
+        )
+        legacy_module_pattern = str(legacy_identity["module"])[:-1] + "[0-9]*"
+        has_legacy_slots = (
+            conn.execute(
+                """
+                SELECT 1 FROM settings
+                WHERE scope_type=? AND scope_id=? AND module GLOB ?
+                LIMIT 1
+                """,
+                (
+                    legacy_identity["scope_type"],
+                    legacy_identity["scope_id"],
+                    legacy_module_pattern,
+                ),
+            ).fetchone()
+            is not None
+        )
+
+        # Existing v1 four-slot data remains authoritative until the application
+        # explicitly loads, verifies and saves it as v2.  Adding only the v2 marker
+        # here would make empty group-level values shadow valid legacy slots.
+        if schema_version < 2 and (
+            count_text is not None
+            or group_count_text is not None
+            or has_legacy_slots
+        ):
+            continue
+
+        group_count = max(1, parse_int(group_count_text, parse_int(count_text, 1)))
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompCount", str(group_count), encrypt))
         inserted += int(insert_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompGroupCount", str(group_count), encrypt))
         inserted += int(insert_ini_value(conn, source_path, "ALLWeldSeamComp", "ActiveSeamCompGroupIndex", "0", encrypt))
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldSeamComp", "SimplifyKeepAnchorsOnly", "0", encrypt))
 
         for group_index in range(group_count):
             group_section = f"WeldSeamCompGroup{group_index}"
             group_name = f"焊道补偿组{group_index + 1}"
-            inserted += int(insert_ini_value(conn, source_path, group_section, "Name", group_name, encrypt))
-            for segment_index, (name, segment_kind) in enumerate(SEAM_SEGMENT_TYPES):
-                flat_index = group_index * COMP_SEGMENT_COUNT + segment_index
-                section = f"WeldSeamComp{flat_index}"
-                defaults = (
-                    ("GroupIndex", str(group_index)),
-                    ("GroupName", group_name),
-                    ("Name", name),
-                    ("SegmentKind", segment_kind),
-                    ("WeldZComp", "0.000000"),
-                    ("WeldGunDirComp", "0.000000"),
-                    ("WeldSeamDirComp", "0.000000"),
-                )
-                for key, value in defaults:
-                    inserted += int(insert_ini_value(conn, source_path, section, key, value, encrypt))
+            defaults = (
+                ("Name", group_name),
+                ("WeldZComp", "0.000000"),
+                ("WeldGunDirComp", "0.000000"),
+                ("WeldSeamDirComp", "0.000000"),
+            )
+            for key, value in defaults:
+                inserted += int(insert_ini_value(conn, source_path, group_section, key, value, encrypt))
+        inserted += int(insert_ini_value(conn, source_path, "ALLWeldSeamComp", "SeamCompSchemaVersion", "2", encrypt))
     return inserted
 
 
-def ensure_runtime_defaults(conn: sqlite3.Connection, data_dir: Path, encrypt: bool) -> tuple[int, dict[str, int]]:
-    robot_names = discover_robot_names(conn, data_dir)
+def ensure_runtime_defaults(
+    conn: sqlite3.Connection,
+    data_dir: Path,
+    encrypt: bool,
+    include_disk_directories: bool = True,
+) -> tuple[int, dict[str, int]]:
+    robot_names = discover_robot_names(
+        conn,
+        data_dir,
+        include_disk_directories=include_disk_directories,
+    )
     details = {
         "measure_weld": ensure_measure_weld_defaults(conn, robot_names, encrypt),
         "point_cloud": ensure_point_cloud_defaults(conn, data_dir, encrypt),
@@ -6917,16 +6950,12 @@ def migrate_existing_database_to_current(
                     enforce_no_plaintext_configstore_residue(
                         data_dir, forced_encoding
                     )
-            has_disk_inputs = any(
-                source.kind == "text"
-                or not _is_runtime_only_ini(source.absolute_path, data_dir)
-                for source in disk_source_snapshot
-            )
-            if version != SCHEMA_VERSION and has_disk_inputs:
-                raise SystemExit(
-                    "Existing database upgrade does not import legacy INI/TXT files. "
-                    "Refusing to ignore or scrub them; use an explicit --overwrite migration after reviewing the protected backup."
-                )
+            # ConfigStore is the sole configuration authority once an existing
+            # database is present.  Legacy INI/TXT files may remain beside it
+            # for compatibility with old releases, but their values must never
+            # overwrite or veto a schema upgrade.  The immutable snapshot is
+            # still retained as a transaction guard, and credential-bearing INI
+            # fields are scrubbed only through the separately verified manifest.
 
             backup = (
                 _validated_upgrade_backup_path(db_path, upgrade_backup_path)
@@ -6980,7 +7009,10 @@ def migrate_existing_database_to_current(
                         "Migrated authentication initialization/account/admin state is inconsistent"
                     )
                 default_count, default_details = ensure_runtime_defaults(
-                    conn, data_dir, encrypt_new_values
+                    conn,
+                    data_dir,
+                    encrypt_new_values,
+                    include_disk_directories=False,
                 )
                 drop_legacy_config_tables(conn)
                 set_schema_meta(
@@ -7082,6 +7114,11 @@ def migrate_existing_database_to_current(
     print(f"Upgraded existing database to schema v{SCHEMA_VERSION}: {db_path}")
     print(f"Created and verified DPAPI-protected database backup: {backup}")
     print(f"Legacy rows migrated: INI={legacy_counts[0]}, text={legacy_counts[1]}, app_settings={legacy_counts[2]}")
+    if disk_source_snapshot:
+        print(
+            "Ignored legacy disk configuration values (ConfigStore is authoritative): "
+            f"files={len(disk_source_snapshot)}"
+        )
     print(f"Runtime defaults added: {default_count} ({default_details})")
     return True
 

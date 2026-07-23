@@ -289,15 +289,13 @@ public:
         bool isLapStep = false;  // 搭接错位台阶端点：预览须带它，否则搭接横移被自交/锐角裁剪裁掉、搭接收敛不触发
     };
 
-    // 对话框当前编辑的 4 段补偿值，段下标硬映射：0=低平台 1=上升边 2=高平台 3=下降边。
+    // 对话框当前编辑值：焊道补偿整条统一；姿态补偿仍按四段映射。
     struct CompPreviewEditValues
     {
-        // 焊道补偿(Seam)；seamSegmentKind 为各槽位真实段类（来自配置，可能是 CorrugatedPlate），
-        // 让预览的槽位匹配/回退与下发 FindSeamCompSlotForRecord 完全一致。
-        double weldZComp[4] = { 0.0, 0.0, 0.0, 0.0 };
-        double weldGunDirComp[4] = { 0.0, 0.0, 0.0, 0.0 };
-        double weldSeamDirComp[4] = { 0.0, 0.0, 0.0, 0.0 };
-        QString seamSegmentKind[4];
+        // 焊道补偿(Seam)：一套三方向数值统一应用于整条焊道。
+        double weldZComp = 0.0;
+        double weldGunDirComp = 0.0;
+        double weldSeamDirComp = 0.0;
         // 姿态补偿(Pose)
         double poseRx[4] = { 0.0, 0.0, 0.0, 0.0 };
         double poseRy[4] = { 0.0, 0.0, 0.0, 0.0 };

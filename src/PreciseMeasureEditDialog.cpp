@@ -69,6 +69,8 @@ constexpr auto TAUGHT_WELD_POSE_RZ_KEY = "TaughtWeldPoseRZ";
 constexpr auto NORMAL_WELD_RX_KEY = "NormalWeldRx";
 constexpr auto NORMAL_WELD_RY_KEY = "NormalWeldRy";
 constexpr auto WELD_RZ_GAIN_KEY = "WeldRzGainDeg";
+constexpr auto WELD_SAFE_RETREAT_DIRECTION_KEY = "WeldSafeRetreatDirection";
+constexpr auto GUN_DOWN_BACK_SAFE_DISTANCE_KEY = "GunDownBackSafeDis";
 
 QLineEdit* CreateValueEdit(int minWidth = 76, int maxWidth = kShortValueEditMaxWidth)
 {
@@ -229,6 +231,8 @@ QStringList MinimalWeldSectionLinesForPrecise()
         << "FinalWeldTrajectoryStepMm=4"
         << "ResumeBacktrackDistanceMm=5"
         << "WeldDirection=1"
+        << "GunDownBackSafeDis=70"
+        << "WeldSafeRetreatDirection=0"
         << "NormalWeldRx=0"
         << "NormalWeldRy=0"
         << "UseTaughtWeldPose=0"
@@ -402,6 +406,11 @@ bool IsDedicatedWeldPoseTeachKey(const QString& key)
 bool IsWeldDirectionParamKey(const QString& key)
 {
     return key.trimmed().compare("WeldDirection", Qt::CaseInsensitive) == 0;
+}
+
+bool IsWeldSafeRetreatDirectionParamKey(const QString& key)
+{
+    return key.trimmed().compare(WELD_SAFE_RETREAT_DIRECTION_KEY, Qt::CaseInsensitive) == 0;
 }
 
 
@@ -611,7 +620,8 @@ QString PreciseParamDisplayName(const QString& key)
         { "EndpointSearchDis", "端点搜索长度" },
         { "StartSearchOffeset_RZ", "起点RZ偏移" },
         { "EndSearchOffeset_RZ", "终点RZ偏移" },
-        { "GunDownBackSafeDis", "收下枪安全距" },
+        { GUN_DOWN_BACK_SAFE_DISTANCE_KEY, "收下枪安全距" },
+        { WELD_SAFE_RETREAT_DIRECTION_KEY, "安全位回撤方向" },
         { "ShortSeamThreshold", "短焊缝阈值" },
         { "LengthSeamThreshold", "长焊缝阈值" },
         { "PointSpacing", "测量点间距" },
@@ -712,7 +722,8 @@ QString WeldParamGroupTitleForKey(const QString& key)
         "StandWeldRx", "StandWeldRy", "TransitionsRx",
         "TransitionsRy", "StandWeldScanFreeRx", "StandWeldScanFreeRy", "StandWeldScanDis",
         "StandWeldScanOffsetRz", "WeldNorAngleInHome", "EndpointSearchDis",
-        "StartSearchOffeset_RZ", "EndSearchOffeset_RZ", "GunDownBackSafeDis",
+        "StartSearchOffeset_RZ", "EndSearchOffeset_RZ", GUN_DOWN_BACK_SAFE_DISTANCE_KEY,
+        WELD_SAFE_RETREAT_DIRECTION_KEY,
         "ShortSeamThreshold", "LengthSeamThreshold", "PointSpacing", "StandInitWeldRy"
     };
 
@@ -838,6 +849,42 @@ void AddOtherParamEditor(
         return;
     }
 
+    if (IsWeldSafeRetreatDirectionParamKey(key))
+    {
+        QComboBox* combo = new QComboBox();
+        combo->addItem(QStringLiteral("自动（兼容旧算法，X-优先）"),
+            QString::number(WELD_SAFE_RETREAT_AUTO_LEGACY_X_NEGATIVE));
+        combo->addItem(QStringLiteral("世界 X-"),
+            QString::number(WELD_SAFE_RETREAT_WORLD_X_NEGATIVE));
+        combo->addItem(QStringLiteral("世界 X+"),
+            QString::number(WELD_SAFE_RETREAT_WORLD_X_POSITIVE));
+        combo->addItem(QStringLiteral("世界 Y-"),
+            QString::number(WELD_SAFE_RETREAT_WORLD_Y_NEGATIVE));
+        combo->addItem(QStringLiteral("世界 Y+"),
+            QString::number(WELD_SAFE_RETREAT_WORLD_Y_POSITIVE));
+        bool ok = false;
+        const int configuredMode = displayValue.trimmed().toInt(&ok);
+        const int comboIndex = ok ? combo->findData(QString::number(configuredMode)) : -1;
+        combo->setCurrentIndex(comboIndex >= 0 ? comboIndex : 0);
+        combo->setToolTip(inlineComment.isEmpty() ? key : QString("%1\n%2").arg(key, inlineComment));
+        combo->setProperty("paramSection", sectionName);
+        combo->setProperty("paramKey", key);
+        combo->setProperty("inlineComment", inlineComment);
+        combo->setMinimumWidth(kOtherParamEditorMinWidth);
+        combo->setMaximumWidth(kOtherParamEditorMaxWidth);
+        combo->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        comboEditors.insert(editorId, combo);
+        layout->addWidget(label, row, uiCol);
+        layout->addWidget(combo, row, uiCol + 1, Qt::AlignLeft);
+        ++colInGroup;
+        if (colInGroup >= 2)
+        {
+            ++row;
+            colInGroup = 0;
+        }
+        return;
+    }
+
     QLineEdit* edit = new QLineEdit(displayValue);
     edit->setToolTip(inlineComment.isEmpty() ? key : QString("%1\n%2").arg(key, inlineComment));
     edit->setProperty("paramSection", sectionName);
@@ -849,7 +896,16 @@ void AddOtherParamEditor(
     edit->setAlignment(Qt::AlignRight);
     if (LooksNumericValue(displayValue))
     {
-        edit->setValidator(CreateDoubleValidator(edit));
+        if (key.trimmed().compare(GUN_DOWN_BACK_SAFE_DISTANCE_KEY, Qt::CaseInsensitive) == 0)
+        {
+            QDoubleValidator* validator = new QDoubleValidator(0.000001, 1.0e12, 6, edit);
+            validator->setNotation(QDoubleValidator::StandardNotation);
+            edit->setValidator(validator);
+        }
+        else
+        {
+            edit->setValidator(CreateDoubleValidator(edit));
+        }
         MarkNumericEdit(edit);
     }
     editors.insert(editorId, edit);
@@ -1649,6 +1705,18 @@ bool PreciseMeasureEditDialog::SaveAllParamEdits()
                     return false;
                 }
             }
+            if (paramKey.compare(GUN_DOWN_BACK_SAFE_DISTANCE_KEY, Qt::CaseInsensitive) == 0)
+            {
+                bool valueOk = false;
+                const double safeDistanceMm = edit->text().trimmed().toDouble(&valueOk);
+                if (!valueOk || !std::isfinite(safeDistanceMm) || safeDistanceMm <= 0.0)
+                {
+                    error = QStringLiteral("收下枪安全距必须为大于 0 mm 的有限数值。");
+                    QMessageBox::warning(this, "保存参数", error);
+                    AppendLog("其它参数保存失败：" + error);
+                    return false;
+                }
+            }
             if (!WriteParamValue(sectionName, paramKey, ValueForWriteWithInlineComment(edit), error))
             {
                 QMessageBox::warning(this, "保存参数", error);
@@ -2086,7 +2154,19 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
             currentGroupTitle.clear();
             row = 0;
             colInGroup = 0;
-            const QMap<QString, QString> values = ConfigDatabase::ReadIniSection(path, targetSection);
+            QMap<QString, QString> values = ConfigDatabase::ReadIniSection(path, targetSection);
+            if (weldSection)
+            {
+                if (!values.contains(GUN_DOWN_BACK_SAFE_DISTANCE_KEY))
+                {
+                    values.insert(GUN_DOWN_BACK_SAFE_DISTANCE_KEY, QStringLiteral("70"));
+                }
+                if (!values.contains(WELD_SAFE_RETREAT_DIRECTION_KEY))
+                {
+                    values.insert(WELD_SAFE_RETREAT_DIRECTION_KEY, QString::number(
+                        WELD_SAFE_RETREAT_AUTO_LEGACY_X_NEGATIVE));
+                }
+            }
             QStringList groupOrder;
             QMap<QString, QList<QPair<QString, QString>>> groupedValues;
             for (auto it = values.constBegin(); it != values.constEnd(); ++it)

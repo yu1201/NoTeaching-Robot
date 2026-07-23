@@ -23,6 +23,42 @@ public:
     static bool ImportFromMesh(const QString& name, const WorkpieceMeshBuilder::Mesh& mesh, QString& error);
     // 从已有 .ply 文件导入为基准（先校验是合法网格，再存入库）。
     static bool ImportFromFile(const QString& name, const QString& srcPlyPath, QString& error);
+    // 从 STEP/STP 导入：保留原始 CAD，使用 OCCT 转换为毫米制 PLY，并写入可追溯元数据。
+    // PLY 仍是模板 modelSha256 的运行身份；源 STEP 供后续精确边线/焊缝提取使用。
+    static bool ImportFromStepFile(
+        const QString& name,
+        const QString& srcStepPath,
+        QString& error,
+        QString* summary = nullptr,
+        QString* confirmationToken = nullptr);
+    // 查询上一次中断在“人工确认”之前的 STEP 导入。查询本身不会删除或公开任何模型。
+    static bool InspectPendingStepImport(
+        const QString& name,
+        bool& pending,
+        bool& canConfirm,
+        QString& summary,
+        QString& confirmationToken,
+        QString& error);
+    // STEP 转换完成后仍处于隐藏待确认态；token 将确认动作绑定到界面刚展示的那次导入事务。
+    static bool ConfirmStepImport(
+        const QString& name,
+        const QString& confirmationToken,
+        QString& error);
+    // 仅显式撤销隐藏的待确认/中断 STEP 记录；不会删除已确认模型或普通 PLY 模型。
+    static bool DiscardPendingStepImport(
+        const QString& name,
+        const QString& expectedPendingToken,
+        QString& error);
+    static QString SourceStepPath(const QString& name);
+    static QString ModelMetadataPath(const QString& name);
+    // 返回经过已确认元数据约束的 STEP 外显源。expectedPlySha256 把源 CAD 与
+    // 模板使用的计算 PLY 身份绑定；返回的 sourceSha256 由显示控件在读取前复核。
+    static bool ResolveConfirmedStepDisplaySource(
+        const QString& name,
+        const QString& expectedPlySha256,
+        QString& sourceStepPath,
+        QString& sourceSha256,
+        QString& error);
     // 加载某基准模型为网格。
     static bool LoadModel(
         const QString& name,

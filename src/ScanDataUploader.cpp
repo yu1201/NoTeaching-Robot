@@ -604,6 +604,13 @@ ScanDataUploader::ScanDataUploader(QObject* parent)
 	: QObject(parent)
 {
 	m_log = new RobotLog(OnlineServicesLogPath(), false);
+	connect(this, &ScanDataUploader::uploadStatus, this, [this](const QString& message)
+		{
+			if (m_log != nullptr)
+			{
+				m_log->writeLine(message.toUtf8().toStdString());
+			}
+		});
 	int startupDeleted = 0;
 	if (!CleanupStaleUploadArchives(&m_startupCleanupError, &startupDeleted))
 	{
@@ -787,19 +794,17 @@ void ScanDataUploader::StartWorkerIfIdle()
 	config.user = OnlineServicesConfig::FtpUser().toStdString();
 	config.password = OnlineServicesConfig::FtpPassword().toStdString();
 	config.deviceName = OnlineServicesConfig::DeviceName().trimmed();
-	if (!OnlineServicesConfig::IsServerAccountName(config.deviceName))
+	if (!AppPaths::IsSafePathComponent(config.deviceName))
 	{
 		m_busy.store(false);
 		emit uploadStatus(QStringLiteral(
-			"上传未配置：设备名必须匹配 ^[a-z][a-z0-9_-]{2,31}$。"));
+			"上传未配置：设备名称必须是安全的单一目录名。"));
 		return;
 	}
-	QString identityError;
-	if (!OnlineServicesConfig::HasDeviceBoundUploadIdentity(&identityError))
+	if (!OnlineServicesConfig::IsDefaultFtpAccount(QString::fromStdString(config.user)))
 	{
 		m_busy.store(false);
-		emit uploadStatus(QStringLiteral("上传已失败关闭：%1。请在服务端创建用户名与设备名完全一致的专用 FTP 账号，并将其 ACL 限制为仅写 /data/%2；客户端无法代替该服务端隔离。")
-			.arg(identityError, config.deviceName));
+		emit uploadStatus(QStringLiteral("上传未配置：请先登录在线服务的三级默认账号之一。"));
 		return;
 	}
 	m_worker = std::thread([this, snapshot, config]() { WorkerBody(snapshot, config); });
@@ -840,14 +845,12 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 		return;
 	}
 	const QString snapshotUser = QString::fromStdString(user).trimmed();
-	QString snapshotIdentityError;
-	if (!OnlineServicesConfig::IsDeviceBoundUploadIdentity(
-		snapshotUser, deviceName, &snapshotIdentityError))
+	if (!OnlineServicesConfig::IsDefaultFtpAccount(snapshotUser))
 	{
-		QMetaObject::invokeMethod(this, [this, snapshotIdentityError]()
+		QMetaObject::invokeMethod(this, [this]()
 			{
 				m_busy.store(false);
-				emit uploadStatus(QStringLiteral("上传已拒绝：%1。").arg(snapshotIdentityError));
+				emit uploadStatus(QStringLiteral("上传已拒绝：账号不是程序支持的三级默认账号。"));
 			}, Qt::QueuedConnection);
 		return;
 	}
@@ -897,6 +900,8 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 		m_prog = ProgressSnapshot{};
 		m_prog.totalItems = totalItems;
 	}
+	QMetaObject::invokeMethod(this, [this, totalItems]()
+		{ emit uploadProgress(0, totalItems, QString(), 0, 0, 0.0, 0); }, Qt::QueuedConnection);
 
 	for (const QString& caseDir : items)
 	{
@@ -949,6 +954,8 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 			m_prog.bytesPerSec = 0.0;
 			m_prog.etaSeconds = 0;
 		}
+		QMetaObject::invokeMethod(this, [this, doneItems, totalItems, zipName]()
+			{ emit uploadProgress(doneItems, totalItems, zipName, 0, 0, 0.0, 0); }, Qt::QueuedConnection);
 
 		QString zipError;
 		if (!ZipCaseDir(safeCaseDir, zipPath, &zipError, &m_cancel))
@@ -1060,6 +1067,10 @@ void ScanDataUploader::WorkerBody(const QStringList& items, const UploadConfig& 
 			if (!m_pending.isEmpty())
 			{
 				emit uploadStatus(QStringLiteral("本轮结束，仍有 %1 个待传案例（5 分钟后自动重试）。").arg(m_pending.size()));
+			}
+			else
+			{
+				emit uploadStatus(QStringLiteral("上传队列已全部完成。"));
 			}
 		}, Qt::QueuedConnection);
 }

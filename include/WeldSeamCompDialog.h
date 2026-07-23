@@ -69,9 +69,6 @@ public:
 
     struct SeamCompRow
     {
-        QString sectionName;
-        QString name;
-        QString segmentKind;
         double weldZComp = 0.0;
         double weldGunDirComp = 0.0;
         double weldSeamDirComp = 0.0;
@@ -105,7 +102,7 @@ private:
     QString DefaultPoseRowName(int index) const;
     QString DefaultPoseSegmentKind(int index) const;
     PoseCompRow MakeDefaultPoseRow(int groupIndex, int segmentIndex) const;
-    SeamCompRow MakeDefaultSeamRow(int groupIndex, int segmentIndex) const;
+    SeamCompRow MakeDefaultSeamRow() const;
     int CurrentPoseGroupMatchMode() const;
     void SetCurrentPoseGroupMatchMode(int mode);
     int CurrentGroupCount() const;
@@ -165,6 +162,7 @@ private:
     QPushButton* m_pPoseModeBtn = nullptr;
     QPushButton* m_pSeamModeBtn = nullptr;
     QListWidget* m_pGroupList = nullptr;
+    QLabel* m_pTypeLabel = nullptr;
     QComboBox* m_pTypeCombo = nullptr;
     QPushButton* m_pNewGroupBtn = nullptr;
     QPushButton* m_pRenameGroupBtn = nullptr;
@@ -190,6 +188,10 @@ private:
     QVector<QString> m_seamGroupNames;
     QVector<PoseCompRow> m_poseRows;
     QVector<SeamCompRow> m_seamRows;
+    bool m_seamLoadedFromLegacy = false;
+    bool m_seamLegacyValuesConflict = false;
+    int m_seamLegacySectionCount = 0;
+    int m_seamStoredGroupCount = 0;
     double m_poseMatchMaxErrorDeg = 5.0;
     int m_poseCompMatchMode = 0;
     CompMode m_mode = CompMode::Pose;

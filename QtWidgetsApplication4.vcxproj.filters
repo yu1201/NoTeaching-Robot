@@ -68,6 +68,36 @@
     <ClCompile Include="src\CameraBasicParamDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\OnlineServicesLoginDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ModelWeldingWorkflow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ModelWeldingFlowDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotModelManagerDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\TheoreticalRobotModelStore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\StepModelImporter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\CadModel3DView.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotCadAssemblyLoader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotCollisionEnvelopeStore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotModelCatalogStore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
@@ -130,6 +160,9 @@
     <ClCompile Include="src\LaserWeldFilterDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\ScanSafetyGateDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\MeasureThenWeldDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -167,6 +200,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\WeldSafetyRecoveryStore.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\WeldSeamCompConfig.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\WeldSeamCompDialog.cpp">
@@ -234,6 +270,39 @@
     <ClInclude Include="include\CameraBasicParamDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\OnlineServicesLoginDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ModelWeldingWorkflow.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\TheoreticalRobotModelStore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ModelWeldingFlowDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotModelManagerDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\StepModelImporter.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\CadModel3DView.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotCadAssemblyLoader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotCollisionEnvelopeStore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotModelCatalogStore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\OpenCascadeOperationGuard.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\CameraParamDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -271,6 +340,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\LaserWeldFilterDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ScanSafetyGateDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h">
@@ -361,6 +433,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldExecutionSafety.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\WeldSeamCompConfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldSeamCompDialog.h">

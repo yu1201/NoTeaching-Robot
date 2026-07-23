@@ -3,6 +3,7 @@
 #include <QDialog>
 #include <QString>
 
+#include "OnlineServicesConfig.h"
 #include "RemoteWorkerLifecycle.h"
 
 #include <functional>
@@ -37,12 +38,11 @@ public:
     // uploader 由主窗口持有（常驻，后台自动上传也用它）；flowRunningGuard 返回 true 时禁止安装升级。
     // aboutMode=true 为主页版本号点开的「关于」精简形态：只保留升级区（软件名/当前版本/
     // 可更新版本/更新内容），隐藏上传与服务器配置，打开即自动检查更新。
-    // remoteBrowseAllowed=true（admin 账户）时显示「远程数据」区：浏览服务器上各设备
-    // 上传的数据并下载解压到本地 Result/Remote/<设备>/ 查看。
+    // accessLevel 来自刚刚通过服务器验证的固定账号；在线升级对三级账号均开放。
     OnlineServicesDialog(ScanDataUploader* uploader,
         std::function<bool()> flowRunningGuard,
         bool aboutMode = false,
-        bool remoteBrowseAllowed = false,
+        OnlineServicesConfig::AccessLevel accessLevel = OnlineServicesConfig::AccessLevel::Upload,
         std::function<bool()> privilegedActionGuard = {},
         QWidget* parent = nullptr);
     ~OnlineServicesDialog() override;
@@ -74,7 +74,7 @@ private:
     std::function<bool()> m_flowRunningGuard;
     std::function<bool()> m_privilegedActionGuard;
     bool m_aboutMode = false;
-    bool m_remoteBrowseAllowed = false;
+    OnlineServicesConfig::AccessLevel m_accessLevel = OnlineServicesConfig::AccessLevel::Upload;
     QNetworkAccessManager* m_network = nullptr;
 
     // 升级区
@@ -87,10 +87,16 @@ private:
 
     // 上传区
     void ShowPickCasesDialog();   // 多选案例上传：列出 Result 下全部案例，多选后按名字顺序入队
+    void RefreshUploadUi();
     QCheckBox* m_autoUploadCheck = nullptr;
     QListWidget* m_pendingListWidget = nullptr;
     QPushButton* m_uploadNowBtn = nullptr;
     QPushButton* m_uploadPickBtn = nullptr;
+    QLabel* m_uploadStateLabel = nullptr;
+    QLabel* m_uploadCurrentLabel = nullptr;
+    QLabel* m_uploadDetailLabel = nullptr;
+    QLabel* m_uploadQueueLabel = nullptr;
+    QProgressBar* m_uploadProgressBar = nullptr;
 
     // 远程数据区（admin）：恰好一个 owned/joinable FTP worker。析构和主程序退出
     // 都先置取消并 join；worker 只向本对象投递 generation-bound 回调，绝不向 qApp 投递。
@@ -112,6 +118,7 @@ private:
     bool StartRemoteWorker(std::function<void(quint64)> work);
     bool RemoteWorkerCancelled(quint64 generation) const noexcept;
     void FinishRemoteWorker(quint64 generation);
+    bool AuthorizeFtpAction(const QString& actionName);
     bool AuthorizePrivilegedAction(const QString& actionName);
 
     // 仪表盘：左侧导航 + 右侧页面栈（云控制台式布局），总览页放大数字统计卡与设备资源表
@@ -119,10 +126,19 @@ private:
     QStackedWidget* m_pagesStack = nullptr;
     int m_remoteNavRow = -1;    // 「远程数据」导航行号（-1=未建）
     int m_accountNavRow = -1;   // 「账号管理」导航行号（-1=未建）
-    // 只上传账号（现场设备默认 uploader）不得浏览别的设备数据、也不能进账号管理：
-    // 按当前 FTP 账号名判定，改账号/保存配置后重新评估，灰掉对应导航项。
+    int m_serverConfigNavRow = -1;
     bool IsUploadOnlyAccount() const;
+    bool HasFtpAccess() const;
+    bool HasFullAccess() const;
     void UpdateRestrictedNav();
+    enum class ServerStatusLevel
+    {
+        Info,
+        Success,
+        Error
+    };
+    void SetServerStatusBanner(const QString& message, ServerStatusLevel level);
+    QLabel* m_serverStatusLabel = nullptr;
     QLabel* m_cardDisk = nullptr;       // 磁盘用量百分比（大数字）
     QLabel* m_cardDiskSub = nullptr;    // 已用/总量/剩余
     QProgressBar* m_diskBar = nullptr;  // 磁盘用量进度条
@@ -131,6 +147,7 @@ private:
     QLabel* m_cardQueue = nullptr;      // 本机待传队列（大数字）
     QTableWidget* m_deviceTable = nullptr;   // 设备资源列表（名称/数据量/文件数/最近上传）
     void RefreshServerStats();
+    void RefreshServerStatsViaFtp();
     void UpdateQueueCard();
 
     // 账号管理（admin，经服务器管理接口：nginx /admin/ 反代 + X-Admin-Token）
@@ -143,17 +160,13 @@ private:
 
     // 管理接口通用请求（UI 线程，QNetworkAccessManager 异步；令牌空时提示并回调失败）
     QString AdminApiBase() const;
+    bool CanUseSecureAdminTransport() const;
     void AdminRequest(const QByteArray& verb, const QString& path, const QJsonObject& body,
         std::function<void(bool ok, const QJsonObject& resp)> done);
 
     // 配置区
-    QLineEdit* m_updateBaseUrlEdit = nullptr;
-    QLineEdit* m_ftpHostEdit = nullptr;
-    QLineEdit* m_ftpPortEdit = nullptr;
-    QLineEdit* m_ftpUserEdit = nullptr;
-    QLineEdit* m_ftpPasswordEdit = nullptr;
+    QLineEdit* m_serverHostEdit = nullptr;
     QLineEdit* m_deviceNameEdit = nullptr;
-    QLineEdit* m_adminTokenEdit = nullptr;   // 管理令牌（admin 手填，混淆存储）
 
     QPlainTextEdit* m_logText = nullptr;
 

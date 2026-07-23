@@ -20,6 +20,7 @@
 #include "WeldProcessFile.h"
 #include "WeldProcessValidation.h"
 #include "WeldSafetyRecoveryStore.h"
+#include "WeldSeamCompConfig.h"
 #include "groove/framebuffer.h"
 
 #include <QCryptographicHash>
@@ -98,11 +99,9 @@ constexpr auto SDK_SCHEME_COMPARE_DIR_NAME = "SchemeCompare";
 constexpr int POSE_COMP_MATCH_BY_POSE = 0;
 constexpr int POSE_COMP_MATCH_BY_SEGMENT_CODE = 1;
 constexpr char POSE_COMP_MATCH_MODE_KEY[] = "PoseCompMatchMode";
-constexpr int COMP_SEGMENT_COUNT = 4;
+constexpr int POSE_COMP_SEGMENT_COUNT = 4;
 constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
 constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
-constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
-constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
 constexpr char CORNER_COMP_ENABLED_KEY[] = "Enabled";
 constexpr char INNER_TO_OUTER_CORNER_COMP_KEY[] = "InnerToOuter";
 constexpr char INNER_TO_INNER_CORNER_COMP_KEY[] = "InnerToInner";
@@ -561,6 +560,38 @@ QJsonObject BuildPointCloudQualityThresholds(const PointCloudProcessingConfig::S
         FINAL_MAX_SOURCE_CONTROLLER_EULER_DELTA_DEG);
     thresholds.insert("maxFinalSourcePhysicalOrientationDeltaHardDeg",
         FINAL_MAX_SOURCE_PHYSICAL_ORIENTATION_DELTA_DEG);
+    // 保持“全部开启”的既有 proof 阈值对象字节兼容；只有显式关闭时才写入 false。
+    if (!settings.validationCoverageEnabled)
+    {
+        thresholds.insert("coverageEnabled", false);
+    }
+    if (!settings.validationContinuityEnabled)
+    {
+        thresholds.insert("continuityEnabled", false);
+    }
+    if (!settings.validationDenoiseRatioEnabled)
+    {
+        thresholds.insert("denoiseRatioEnabled", false);
+    }
+    if (!settings.validationResidualEnabled)
+    {
+        thresholds.insert("residualEnabled", false);
+    }
+    if (!settings.validationKeyPointEnabled)
+    {
+        thresholds.insert("keyPointEnabled", false);
+    }
+    if (!settings.validationOutputEnabled)
+    {
+        thresholds.insert("outputEnabled", false);
+    }
+    // 逻辑机器人名称是唯一允许在 Enforce 下单独放宽的系统门禁。
+    // 仅在关闭时写入，既保持默认全开 proof 的既有字节兼容，也确保重新开启后
+    // 关闭期间重建的 proof 因 policyRevisionSha256 不匹配而立即失效。
+    if (!settings.safetyGateRobotNameBindingEnabled)
+    {
+        thresholds.insert("robotNameBindingEnabled", false);
+    }
     return thresholds;
 }
 
@@ -906,6 +937,7 @@ bool LoadValidatedRebuildPointCloudContext(
     const QString& laserDir,
     const QString& expectedRobotName,
     const MeasureThenWeldService::PointCloudProductionExpectation& expectation,
+    const PointCloudProcessingConfig::Settings& settings,
     PointCloudProductionContext& context,
     QString& error,
     const MeasureThenWeldService::StopRequestedCallback& stopRequested)
@@ -945,11 +977,24 @@ bool LoadValidatedRebuildPointCloudContext(
             "旧 schema 1/2 点云质量证明没有本机 HMAC/持久收据，禁止重建为生产授权；请重新扫描。");
         return false;
     }
-    if (root.value("purpose").toString() != QStringLiteral("production")
-        || root.value("robotName").toString().compare(
-            expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0)
+    const QString proofPurpose = root.value("purpose").toString();
+    if (proofPurpose != QStringLiteral("production"))
     {
-        error = QStringLiteral("原点云质量证明的用途或机器人绑定不一致，禁止继承；请重新扫描。");
+        error = QStringLiteral(
+            "原点云质量证明用途为“%1”，不是生产用途 production，禁止继承；请重新扫描。")
+            .arg(proofPurpose.isEmpty() ? QStringLiteral("<空>") : proofPurpose);
+        return false;
+    }
+    const QString proofRobotName = root.value("robotName").toString().trimmed();
+    const QString currentRobotName = expectedRobotName.trimmed();
+    if (settings.safetyGateRobotNameBindingEnabled
+        && proofRobotName.compare(currentRobotName, Qt::CaseInsensitive) != 0)
+    {
+        error = QStringLiteral(
+            "原点云质量证明绑定机器人“%1”，当前控制单元为“%2”，禁止跨机器人继承；"
+            "请选择同一机器人的扫描结果或重新扫描。")
+            .arg(proofRobotName.isEmpty() ? QStringLiteral("<空>") : proofRobotName,
+                currentRobotName.isEmpty() ? QStringLiteral("<空>") : currentRobotName);
         return false;
     }
     const QString expectedCaseId = QFileInfo(dir.absolutePath()).dir().dirName();
@@ -964,7 +1009,8 @@ bool LoadValidatedRebuildPointCloudContext(
         return false;
     }
 
-    if (expectation.robotName.compare(expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0
+    if ((settings.safetyGateRobotNameBindingEnabled
+            && expectation.robotName.compare(expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0)
         || expectation.robotEndpoint.trimmed().isEmpty()
         || expectation.cameraSection.trimmed().isEmpty()
         || !IsSha256Text(expectation.handEyeSha256))
@@ -1376,7 +1422,8 @@ bool VerifyPointCloudQualityGate(
             "点云质量证明不是当前 schema 3 的 Enforce/PASS/authorized 证明，禁止下发/执行；旧证明请重新扫描/重建。");
         return false;
     }
-    if (!expectedRobotName.trimmed().isEmpty()
+    if (currentSettings.safetyGateRobotNameBindingEnabled
+        && !expectedRobotName.trimmed().isEmpty()
         && root.value("robotName").toString().compare(expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0)
     {
         error = QStringLiteral("点云质量证明绑定的机器人与当前机器人不一致。");
@@ -1420,8 +1467,9 @@ bool VerifyPointCloudQualityGate(
         }
     }
     else if (frozenExpectation != nullptr
-        && frozenExpectation->robotName.compare(
-            expectedRobotName.trimmed(), Qt::CaseInsensitive) == 0
+        && (!currentSettings.safetyGateRobotNameBindingEnabled
+            || frozenExpectation->robotName.compare(
+                expectedRobotName.trimmed(), Qt::CaseInsensitive) == 0)
         && !frozenExpectation->robotEndpoint.trimmed().isEmpty()
         && !frozenExpectation->cameraSection.trimmed().isEmpty()
         && IsSha256Text(frozenExpectation->handEyeSha256))
@@ -1540,10 +1588,8 @@ struct WeldPosePreset
         bool validReference = false;
     };
 
-    struct SeamCompSlot
+    struct SeamCompValues
     {
-        QString name;
-        QString segmentKind;
         double weldZComp = 0.0;
         double weldGunDirComp = 0.0;
         double weldSeamDirComp = 0.0;
@@ -1555,7 +1601,6 @@ struct WeldPosePreset
     QString seamCompFilePath;
     QString robotParaPath;
     int robotType = ROBOT_TYPE_FANUC;
-    QString seamKind = "CorrugatedPlate";
     double rx = 0.0;
     double ry = 0.0;
     double measureReferenceRx = 0.0;
@@ -1609,7 +1654,9 @@ struct WeldPosePreset
     T_WeaveDate weaveParam;
     T_TrackData trackParam;
     std::vector<PoseCompSlot> poseCompSlots;
-    std::vector<SeamCompSlot> seamCompSlots;
+    SeamCompValues seamComp;
+    QString seamCompLoadError;
+    QStringList seamCompWarnings;
     bool weldLineFromIni = false;
     bool poseCompFromIni = false;
     bool seamCompFromIni = false;
@@ -1668,6 +1715,7 @@ QString BuildEffectiveWeldExecutionFingerprint(
     addDouble("dryRunSpeed", param.dDryRunSpeedMmPerMin);
     addDouble("safeMoveSpeed", param.dWeldSafeMoveSpeedMmPerMin);
     addDouble("gunBackSafe", param.dGunDownBackSafeDis);
+    addInt("safeRetreatDirection", param.nWeldSafeRetreatDirection);
     addDouble("resumeBacktrack", param.dResumeBacktrackMm);
     addInt("weldDirection", preset.weldDirection);
     addDouble("effectiveFinalStep", effectiveFinalStepMm);
@@ -2025,7 +2073,7 @@ void LoadActivePoseCornerCompensation(
         return;
     }
 
-    const int offset = activeGroupIndex * COMP_SEGMENT_COUNT;
+    const int offset = activeGroupIndex * POSE_COMP_SEGMENT_COUNT;
     params.risingCornerCompensation = ReadCornerCompensationSlot(robotName, offset + 1);
     params.fallingCornerCompensation = ReadCornerCompensationSlot(robotName, offset + 3);
     params.enableCornerCompensation =
@@ -2374,7 +2422,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         }
         if (fitParams.enableEndPeriodCornerRecover)
         {
-            appendLog(QString("端区周期补拐点已启用：端段长≥%1×周期判漏补、相邻同类间距<%2×周期判错删、最小确认弯折角%3°（波纹周期+典型拐角角度，补回端区漏点并删除挨太近的误检同类拐点；对②③④生效）。")
+            appendLog(QString("端区周期补拐点已启用：端段长≥%1×周期判漏补、同类候选段短于%2×同类平台/坡中位且删后恢复正常坡判错删、最小确认弯折角%3°（中间段按IO/OI/II/OO四类分别统计，排除首末与搭接段；对②③④生效）。")
                 .arg(fitParams.endPeriodRatioThreshold, 0, 'f', 2)
                 .arg(fitParams.endPeriodMergeFrac, 0, 'f', 2)
                 .arg(fitParams.endPeriodMinBendDeg, 0, 'f', 1));
@@ -3523,15 +3571,6 @@ void InitializeDefaultPoseCompSlots(std::vector<WeldPosePreset::PoseCompSlot>& p
     }
 }
 
-void InitializeDefaultSeamCompSlots(std::vector<WeldPosePreset::SeamCompSlot>& seamCompCollection)
-{
-    for (int index = 0; index < static_cast<int>(seamCompCollection.size()); ++index)
-    {
-        seamCompCollection[index].name = QString("焊道补偿%1").arg(index + 1);
-        seamCompCollection[index].segmentKind = DefaultPoseCompSlotKind(index);
-    }
-}
-
 constexpr int kTransitionScopeArc = 0;
 constexpr int kTransitionScopeTransition = 1;
 constexpr int kTransitionScopeArcAndTransition = 2;
@@ -3766,8 +3805,6 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
         QString("Data/%1/RobotPara.ini").arg(QString::fromStdString(param.sRobotName)));
     preset.poseCompSlots.resize(4);
     InitializeDefaultPoseCompSlots(preset.poseCompSlots);
-    preset.seamCompSlots.resize(4);
-    InitializeDefaultSeamCompSlots(preset.seamCompSlots);
 
     if (!ConfigDatabase::HasIniFile(preset.weldLineFilePath))
     {
@@ -3865,8 +3902,8 @@ load_pose_comp:
             if (hasPoseGroups && poseGroupCount > 0)
             {
                 activePoseGroupIndex = std::clamp(activePoseGroupIndex, 0, poseGroupCount - 1);
-                sourcePoseOffset = activePoseGroupIndex * COMP_SEGMENT_COUNT;
-                loadedPoseCompCount = COMP_SEGMENT_COUNT;
+                sourcePoseOffset = activePoseGroupIndex * POSE_COMP_SEGMENT_COUNT;
+                loadedPoseCompCount = POSE_COMP_SEGMENT_COUNT;
                 poseIni.SetSectionName(ToUtf8StdString(QString("WeldPoseCompGroup%1").arg(activePoseGroupIndex)));
                 int groupPoseCompMatchMode = preset.poseCompMatchMode;
                 if (poseIni.ReadString(false, POSE_COMP_MATCH_MODE_KEY, &groupPoseCompMatchMode) > 0)
@@ -3916,54 +3953,27 @@ load_pose_comp:
         }
     }
 
-    if (ConfigDatabase::HasIniFile(preset.seamCompFilePath))
     {
-        COPini seamIni;
-        if (seamIni.SetFileName(ToUtf8StdString(preset.seamCompFilePath)))
+        WeldSeamCompConfig::Document seamDocument;
+        QString seamLoadError;
+        if (WeldSeamCompConfig::Load(preset.seamCompFilePath, seamDocument, seamLoadError))
         {
-            int seamCompCount = static_cast<int>(preset.seamCompSlots.size());
-            seamIni.SetSectionName("ALLWeldSeamComp");
-            seamIni.ReadString(false, "SeamCompCount", &seamCompCount);
-            int simplifyKeepAnchorsOnly = preset.keepAnchorsOnly ? 1 : 0;
-            seamIni.ReadString(false, "SimplifyKeepAnchorsOnly", &simplifyKeepAnchorsOnly);
-            preset.keepAnchorsOnly = (simplifyKeepAnchorsOnly != 0);
-            int seamGroupCount = 0;
-            const bool hasSeamGroups = seamIni.ReadString(false, SEAM_GROUP_COUNT_KEY, &seamGroupCount) > 0;
-            int activeSeamGroupIndex = 0;
-            seamIni.ReadString(false, SEAM_ACTIVE_GROUP_INDEX_KEY, &activeSeamGroupIndex);
-            int sourceSeamOffset = 0;
-            int loadedSeamCompCount = std::max(0, seamCompCount);
-            if (hasSeamGroups && seamGroupCount > 0)
+            preset.seamCompWarnings = seamDocument.warnings;
+            preset.keepAnchorsOnly = seamDocument.simplifyKeepAnchorsOnly;
+            if (!seamDocument.groups.isEmpty())
             {
-                activeSeamGroupIndex = std::clamp(activeSeamGroupIndex, 0, seamGroupCount - 1);
-                sourceSeamOffset = activeSeamGroupIndex * COMP_SEGMENT_COUNT;
-                loadedSeamCompCount = COMP_SEGMENT_COUNT;
+                const int activeIndex = std::clamp(
+                    seamDocument.activeGroupIndex, 0, static_cast<int>(seamDocument.groups.size()) - 1);
+                const WeldSeamCompConfig::Values& values = seamDocument.groups[activeIndex].values;
+                preset.seamComp.weldZComp = values.weldZComp;
+                preset.seamComp.weldGunDirComp = values.weldGunDirComp;
+                preset.seamComp.weldSeamDirComp = values.weldSeamDirComp;
             }
-            preset.seamCompSlots.assign(loadedSeamCompCount, WeldPosePreset::SeamCompSlot());
-            InitializeDefaultSeamCompSlots(preset.seamCompSlots);
-            for (int index = 0; index < static_cast<int>(preset.seamCompSlots.size()); ++index)
-            {
-                WeldPosePreset::SeamCompSlot& slot = preset.seamCompSlots[index];
-                seamIni.SetSectionName(ToUtf8StdString(QString("WeldSeamComp%1").arg(sourceSeamOffset + index)));
-
-                std::string slotName;
-                std::string segmentKind;
-                seamIni.ReadString(false, "Name", slotName);
-                seamIni.ReadString(false, "SegmentKind", segmentKind);
-                if (!slotName.empty())
-                {
-                    slot.name = QString::fromStdString(slotName);
-                }
-                if (!segmentKind.empty())
-                {
-                    slot.segmentKind = QString::fromStdString(segmentKind);
-                }
-
-                TryReadIniDouble(seamIni, "WeldZComp", slot.weldZComp);
-                TryReadIniDouble(seamIni, "WeldGunDirComp", slot.weldGunDirComp);
-                TryReadIniDouble(seamIni, "WeldSeamDirComp", slot.weldSeamDirComp);
-            }
-            preset.seamCompFromIni = true;
+            preset.seamCompFromIni = seamDocument.sourceExists;
+        }
+        else
+        {
+            preset.seamCompLoadError = seamLoadError;
         }
     }
 
@@ -4101,6 +4111,7 @@ bool AssignSegmentKindsByMeasurementGunDepth(
     const QVector<RobotCalculation::LowerWeldClassifiedPoint>& points,
     const std::vector<int>& keyPointPositions,
     const WeldPosePreset& preset,
+    double platformFlatSlopeThreshold,
     std::vector<RobotCalculation::LowerWeldPointType>& keyPointTypes,
     QVector<QString>& segmentKinds,
     const MeasureThenWeldService::LogCallback& appendLog)
@@ -4171,38 +4182,199 @@ bool AssignSegmentKindsByMeasurementGunDepth(
     }
     const double depthMidpoint = (minDepth + maxDepth) * 0.5;
 
-    std::vector<bool> keyIsLowPlatform(keyPointPositions.size(), false);
-    for (int index = 0; index < depths.size(); ++index)
+    // 完整周期段已经由几何关键点形成四类拓扑：
+    // inner->outer / outer->inner 为两种坡，inner->inner / outer->outer 为两种平台。
+    // 只用枪深全局中值逐点二分，会让有轻微沿程漂移的长平台两端跨过中值，误判成一条坡。
+    // 因此完整中段先保留四类拓扑的“平台/坡面”属性；首末不完整段没有成对角点，
+    // 再用局部深度变化量和斜率判断。深度仅负责确定坡向或平台高低。
+    const std::vector<PointType> geometryKeyPointTypes = keyPointTypes;
+    const double depthSlopeRatioThreshold =
+        std::max(0.01, platformFlatSlopeThreshold);
+    struct MeasurementDepthSegmentShape
     {
-        keyIsLowPlatform[static_cast<std::size_t>(index)] = depths[index] >= depthMidpoint;
-        if (index == 0)
+        bool isSlope = false;
+        double depthDelta = 0.0;
+    };
+    std::vector<MeasurementDepthSegmentShape> segmentShapes(
+        keyPointPositions.size() - 1);
+    int topologyClassifiedCount = 0;
+    int lapStepClassifiedCount = 0;
+    int endpointGeometryClassifiedCount = 0;
+    for (std::size_t index = 0; index + 1 < keyPointPositions.size(); ++index)
+    {
+        const Eigen::Vector3d segmentDelta =
+            points[keyPointPositions[index + 1]].point
+            - points[keyPointPositions[index]].point;
+        const double segmentLengthSquared = segmentDelta.squaredNorm();
+        const double depthDelta = depths[static_cast<int>(index + 1)]
+            - depths[static_cast<int>(index)];
+        if (!std::isfinite(segmentLengthSquared)
+            || segmentLengthSquared <= 1e-12
+            || !std::isfinite(depthDelta))
         {
-            keyPointTypes[static_cast<std::size_t>(index)] = PointType::Start;
+            return false;
         }
-        else if (index == depths.size() - 1)
+
+        const PointType geometryBeginType = geometryKeyPointTypes[index];
+        const PointType geometryEndType = geometryKeyPointTypes[index + 1];
+        const bool isInteriorWaveSegment =
+            index > 0
+            && index + 1 < keyPointPositions.size() - 1
+            && (geometryBeginType == PointType::InnerCorner
+                || geometryBeginType == PointType::OuterCorner)
+            && (geometryEndType == PointType::InnerCorner
+                || geometryEndType == PointType::OuterCorner);
+        MeasurementDepthSegmentShape& shape = segmentShapes[index];
+        shape.depthDelta = depthDelta;
+        const bool isLapStepSegment =
+            points[keyPointPositions[index]].source == QStringLiteral("geometry_lap_step")
+            && points[keyPointPositions[index + 1]].source == QStringLiteral("geometry_lap_step");
+        if (isLapStepSegment)
         {
-            keyPointTypes[static_cast<std::size_t>(index)] = PointType::End;
+            // 搭接错位段是平台上的刚性横移，不能作为上/下坡参与相邻平台层级传播。
+            // 后续分段逻辑仍会让它无条件继承前一平台的 kind。
+            shape.isSlope = false;
+            ++lapStepClassifiedCount;
+            continue;
         }
-        else
+        if (isInteriorWaveSegment)
         {
-            keyPointTypes[static_cast<std::size_t>(index)] =
-                keyIsLowPlatform[static_cast<std::size_t>(index)]
-                    ? PointType::InnerCorner
-                    : PointType::OuterCorner;
+            shape.isSlope = geometryBeginType != geometryEndType;
+            ++topologyClassifiedCount;
+            continue;
         }
+
+        // 首末段可能从平台或坡面中途截断，不能根据 Start/End 类型硬判。
+        // 去掉枪深分量后，用沿焊道横向跨度计算局部斜率，与点云平台判据保持同一量纲。
+        const double lateralSpanSquared =
+            std::max(0.0, segmentLengthSquared - depthDelta * depthDelta);
+        const double lateralSpan = std::sqrt(lateralSpanSquared);
+        const double depthSlopeRatio = lateralSpan > 1e-9
+            ? std::abs(depthDelta) / lateralSpan
+            : (std::abs(depthDelta) > 1e-9
+                ? std::numeric_limits<double>::infinity()
+                : 0.0);
+        shape.isSlope = depthSlopeRatio >= depthSlopeRatioThreshold;
+        ++endpointGeometryClassifiedCount;
     }
 
+    std::vector<int> lowPlatformVotes(keyPointPositions.size(), 0);
+    std::vector<int> highPlatformVotes(keyPointPositions.size(), 0);
+    int neighborSlopePlatformCount = 0;
+    int midpointFallbackPlatformCount = 0;
+    int midpointCrossingPlatformCount = 0;
     segmentKinds.reserve(static_cast<int>(keyPointPositions.size()) - 1);
     for (std::size_t index = 0; index + 1 < keyPointPositions.size(); ++index)
     {
+        const MeasurementDepthSegmentShape& shape = segmentShapes[index];
+        bool beginIsLowPlatform = false;
+        bool endIsLowPlatform = false;
+        if (shape.isSlope)
+        {
+            // 深度越大越靠远侧（低平台）。低->高为 rising，高->低为 falling。
+            beginIsLowPlatform = shape.depthDelta < 0.0;
+            endIsLowPlatform = !beginIsLowPlatform;
+        }
+        else
+        {
+            // 平台优先继承相邻坡的端点层级，避免长程漂移令整段均值越过全局中值：
+            // rising 前低后高，falling 前高后低。无相邻坡或两侧冲突时才回退段均值。
+            int neighborLowVotes = 0;
+            int neighborHighVotes = 0;
+            if (index > 0 && segmentShapes[index - 1].isSlope)
+            {
+                const bool leftSlopeEndIsLow =
+                    segmentShapes[index - 1].depthDelta >= 0.0;
+                leftSlopeEndIsLow ? ++neighborLowVotes : ++neighborHighVotes;
+            }
+            if (index + 1 < segmentShapes.size() && segmentShapes[index + 1].isSlope)
+            {
+                const bool rightSlopeBeginIsLow =
+                    segmentShapes[index + 1].depthDelta < 0.0;
+                rightSlopeBeginIsLow ? ++neighborLowVotes : ++neighborHighVotes;
+            }
+
+            bool segmentIsLowPlatform = false;
+            if (neighborLowVotes != neighborHighVotes)
+            {
+                segmentIsLowPlatform = neighborLowVotes > neighborHighVotes;
+                ++neighborSlopePlatformCount;
+            }
+            else
+            {
+                const double segmentMiddleDepth =
+                    (depths[static_cast<int>(index)]
+                        + depths[static_cast<int>(index + 1)]) * 0.5;
+                segmentIsLowPlatform = segmentMiddleDepth >= depthMidpoint;
+                ++midpointFallbackPlatformCount;
+            }
+            beginIsLowPlatform = segmentIsLowPlatform;
+            endIsLowPlatform = segmentIsLowPlatform;
+            const bool rawBeginIsLow =
+                depths[static_cast<int>(index)] >= depthMidpoint;
+            const bool rawEndIsLow =
+                depths[static_cast<int>(index + 1)] >= depthMidpoint;
+            if (rawBeginIsLow != rawEndIsLow)
+            {
+                ++midpointCrossingPlatformCount;
+            }
+        }
+
+        if (beginIsLowPlatform)
+        {
+            ++lowPlatformVotes[index];
+        }
+        else
+        {
+            ++highPlatformVotes[index];
+        }
+        if (endIsLowPlatform)
+        {
+            ++lowPlatformVotes[index + 1];
+        }
+        else
+        {
+            ++highPlatformVotes[index + 1];
+        }
         segmentKinds.push_back(SegmentKindFromDepthSide(
-            keyIsLowPlatform[index],
-            keyIsLowPlatform[index + 1]));
+            beginIsLowPlatform,
+            endIsLowPlatform));
+    }
+
+    for (std::size_t index = 0; index < keyPointPositions.size(); ++index)
+    {
+        if (index == 0)
+        {
+            keyPointTypes[index] = PointType::Start;
+        }
+        else if (index + 1 == keyPointPositions.size())
+        {
+            keyPointTypes[index] = PointType::End;
+        }
+        else
+        {
+            const bool isLowPlatform =
+                lowPlatformVotes[index] == highPlatformVotes[index]
+                    ? depths[static_cast<int>(index)] >= depthMidpoint
+                    : lowPlatformVotes[index] > highPlatformVotes[index];
+            keyPointTypes[index] =
+                isLowPlatform ? PointType::InnerCorner : PointType::OuterCorner;
+        }
     }
 
     if (appendLog)
     {
-        appendLog(QString("按测量枪姿重判焊道段属性：枪尖方向=(%1,%2,%3)，深度轴=(%4,%5,%6)，深度范围=%7 mm，远侧=低平台，近侧=高平台。")
+        appendLog(QString("按测量枪姿重判焊道段属性：完整周期段按四类角点拓扑判平台/坡面=%1段，搭接横移段=%2段，"
+            "首末不完整段按局部深度几何判定=%3段（枪深/横向跨度阈值=%4）；"
+            "平台层级由相邻坡传播=%5段、中值回退=%6段，平台两端跨全局中值但仍保持平台=%7段；"
+            "枪尖方向=(%8,%9,%10)，深度轴=(%11,%12,%13)，深度范围=%14 mm，远侧=低平台，近侧=高平台。")
+            .arg(topologyClassifiedCount)
+            .arg(lapStepClassifiedCount)
+            .arg(endpointGeometryClassifiedCount)
+            .arg(depthSlopeRatioThreshold, 0, 'f', 3)
+            .arg(neighborSlopePlatformCount)
+            .arg(midpointFallbackPlatformCount)
+            .arg(midpointCrossingPlatformCount)
             .arg(gunAxis.x(), 0, 'f', 3)
             .arg(gunAxis.y(), 0, 'f', 3)
             .arg(gunAxis.z(), 0, 'f', 3)
@@ -5037,21 +5209,7 @@ bool SaveWeldPoseFileRecords(
     return true;
 }
 
-const WeldPosePreset::SeamCompSlot* FindSeamCompSlotByKind(
-    const WeldPosePreset& preset,
-    const QString& segmentKind)
-{
-    for (const WeldPosePreset::SeamCompSlot& slot : preset.seamCompSlots)
-    {
-        if (slot.segmentKind.compare(segmentKind, Qt::CaseInsensitive) == 0)
-        {
-            return &slot;
-        }
-    }
-    return nullptr;
-}
-
-QString NormalizeSeamCompSegmentKind(QString segmentKind)
+QString NormalizeWeldSegmentKind(QString segmentKind)
 {
     constexpr auto arcSuffix = "_arc";
     if (segmentKind.endsWith(arcSuffix, Qt::CaseInsensitive))
@@ -5069,7 +5227,7 @@ QString NormalizeSeamCompSegmentKind(QString segmentKind)
 
 int WeldSegmentKindCode(const QString& segmentKind)
 {
-    const QString normalized = NormalizeSeamCompSegmentKind(segmentKind).trimmed().toLower();
+    const QString normalized = NormalizeWeldSegmentKind(segmentKind).trimmed().toLower();
     if (normalized == "low_platform")
     {
         return 0;
@@ -5119,21 +5277,6 @@ std::vector<QString> BuildWeldSegmentKindDebugLines(const QVector<WeldPoseFileRe
             .arg(arcFlag));
     }
     return lines;
-}
-
-const WeldPosePreset::SeamCompSlot* FindSeamCompSlotForRecord(
-    const WeldPosePreset& preset,
-    const WeldPoseFileRecord& record)
-{
-    const WeldPosePreset::SeamCompSlot* slot =
-        FindSeamCompSlotByKind(preset, NormalizeSeamCompSegmentKind(record.segmentKind));
-    if (slot != nullptr)
-    {
-        return slot;
-    }
-
-    // 未按具体段类型配置时，回退到当前工件类型的通用焊道补偿槽。
-    return FindSeamCompSlotByKind(preset, preset.seamKind);
 }
 
 Eigen::Vector3d ResolveHorizontalTangentDirection(
@@ -5276,10 +5419,43 @@ double MaxWristDeltaDeg(
     return std::max({ r, b, t });
 }
 
+int NormalizeWeldSafeRetreatDirectionMode(int mode)
+{
+    switch (mode)
+    {
+    case WELD_SAFE_RETREAT_AUTO_LEGACY_X_NEGATIVE:
+    case WELD_SAFE_RETREAT_WORLD_X_NEGATIVE:
+    case WELD_SAFE_RETREAT_WORLD_X_POSITIVE:
+    case WELD_SAFE_RETREAT_WORLD_Y_NEGATIVE:
+    case WELD_SAFE_RETREAT_WORLD_Y_POSITIVE:
+        return mode;
+    default:
+        return WELD_SAFE_RETREAT_AUTO_LEGACY_X_NEGATIVE;
+    }
+}
+
+QString WeldSafeRetreatDirectionText(int mode)
+{
+    switch (NormalizeWeldSafeRetreatDirectionMode(mode))
+    {
+    case WELD_SAFE_RETREAT_WORLD_X_NEGATIVE:
+        return QStringLiteral("世界 X-");
+    case WELD_SAFE_RETREAT_WORLD_X_POSITIVE:
+        return QStringLiteral("世界 X+");
+    case WELD_SAFE_RETREAT_WORLD_Y_NEGATIVE:
+        return QStringLiteral("世界 Y-");
+    case WELD_SAFE_RETREAT_WORLD_Y_POSITIVE:
+        return QStringLiteral("世界 Y+");
+    default:
+        return QStringLiteral("自动（兼容旧算法，X-优先）");
+    }
+}
+
 bool TryBuildWeldSafeCoors(
     const QVector<WeldPoseFileRecord>& records,
     int pointIndex,
     double safeOffsetDistanceMm,
+    int retreatDirectionMode,
     int robotType,
     T_ROBOT_COORS& safeCoors,
     QString& error)
@@ -5296,46 +5472,66 @@ bool TryBuildWeldSafeCoors(
         return false;
     }
 
-    QVector<Eigen::Vector3d> points;
-    points.reserve(records.size());
-    for (const WeldPoseFileRecord& record : records)
-    {
-        points.push_back(record.point);
-    }
-
     const WeldPoseFileRecord& anchor = records[pointIndex];
-    const Eigen::Vector3d seamDirection = ResolveHorizontalTangentDirection(points, pointIndex);
-    if (seamDirection.head<2>().norm() <= 1e-9)
+    Eigen::Vector3d lateralDirection = Eigen::Vector3d::Zero();
+    switch (NormalizeWeldSafeRetreatDirectionMode(retreatDirectionMode))
     {
-        error = QString("第 %1 个焊点附近焊道方向无效，无法计算安全位置。").arg(pointIndex + 1);
-        return false;
-    }
+    case WELD_SAFE_RETREAT_WORLD_X_NEGATIVE:
+        lateralDirection = -Eigen::Vector3d::UnitX();
+        break;
+    case WELD_SAFE_RETREAT_WORLD_X_POSITIVE:
+        lateralDirection = Eigen::Vector3d::UnitX();
+        break;
+    case WELD_SAFE_RETREAT_WORLD_Y_NEGATIVE:
+        lateralDirection = -Eigen::Vector3d::UnitY();
+        break;
+    case WELD_SAFE_RETREAT_WORLD_Y_POSITIVE:
+        lateralDirection = Eigen::Vector3d::UnitY();
+        break;
+    default:
+        {
+            QVector<Eigen::Vector3d> points;
+            points.reserve(records.size());
+            for (const WeldPoseFileRecord& record : records)
+            {
+                points.push_back(record.point);
+            }
 
-    Eigen::Vector3d lateralDirection = HorizontalUnitOrZero(
-        Eigen::Vector3d::UnitZ().cross(seamDirection));
-    if (lateralDirection.head<2>().norm() <= 1e-9)
-    {
-        error = QString("第 %1 个焊点附近横向法向无效，无法计算安全位置。").arg(pointIndex + 1);
-        return false;
-    }
+            const Eigen::Vector3d seamDirection = ResolveHorizontalTangentDirection(points, pointIndex);
+            if (seamDirection.head<2>().norm() <= 1e-9)
+            {
+                error = QString("第 %1 个焊点附近焊道方向无效，无法计算安全位置。").arg(pointIndex + 1);
+                return false;
+            }
 
-    Eigen::Vector3d safeGunAxis = Eigen::Vector3d::UnitY();
-    if (robotType == ROBOT_TYPE_STEP)
-    {
-        safeGunAxis = -safeGunAxis;
-    }
-    const Eigen::Vector3d gunDirection = HorizontalUnitOrZero(
-        RobotPoseTransform::RotationFromAnglesDeg(anchor.rx, anchor.ry, anchor.rz, robotType)
-        * safeGunAxis);
-    if (gunDirection.head<2>().norm() > 1e-9
-        && lateralDirection.head<2>().dot(gunDirection.head<2>()) < 0.0)
-    {
-        lateralDirection = -lateralDirection;
-    }
-    // 焊接下枪/收枪安全位现场约定从世界 X- 侧回撤，避免补偿后枪向判断把安全位推到 X+。
-    if (lateralDirection.x() > 0.0)
-    {
-        lateralDirection = -lateralDirection;
+            lateralDirection = HorizontalUnitOrZero(
+                Eigen::Vector3d::UnitZ().cross(seamDirection));
+            if (lateralDirection.head<2>().norm() <= 1e-9)
+            {
+                error = QString("第 %1 个焊点附近横向法向无效，无法计算安全位置。").arg(pointIndex + 1);
+                return false;
+            }
+
+            Eigen::Vector3d safeGunAxis = Eigen::Vector3d::UnitY();
+            if (robotType == ROBOT_TYPE_STEP)
+            {
+                safeGunAxis = -safeGunAxis;
+            }
+            const Eigen::Vector3d gunDirection = HorizontalUnitOrZero(
+                RobotPoseTransform::RotationFromAnglesDeg(anchor.rx, anchor.ry, anchor.rz, robotType)
+                * safeGunAxis);
+            if (gunDirection.head<2>().norm() > 1e-9
+                && lateralDirection.head<2>().dot(gunDirection.head<2>()) < 0.0)
+            {
+                lateralDirection = -lateralDirection;
+            }
+            // 兼容旧现场：自动模式继续从世界 X- 侧优先回撤。
+            if (lateralDirection.x() > 0.0)
+            {
+                lateralDirection = -lateralDirection;
+            }
+            break;
+        }
     }
 
     const double safeOffsetDistance =
@@ -5752,7 +5948,6 @@ struct WeldSeamCompApplyStats
     int seamDirAdjustedCount = 0;
     int selfIntersectionTrimCount = 0;
     int selfIntersectionRemovedPointCount = 0;
-    QSet<QString> usedSlots;
 };
 
 struct WeldPathIntersection
@@ -6021,9 +6216,9 @@ bool IsWeldSegmentBoundaryAtCorner(
     const WeldPoseFileRecord& corner,
     const WeldPoseFileRecord& next)
 {
-    const QString prevKind = NormalizeSeamCompSegmentKind(prev.segmentKind).trimmed();
-    const QString cornerKind = NormalizeSeamCompSegmentKind(corner.segmentKind).trimmed();
-    const QString nextKind = NormalizeSeamCompSegmentKind(next.segmentKind).trimmed();
+    const QString prevKind = NormalizeWeldSegmentKind(prev.segmentKind).trimmed();
+    const QString cornerKind = NormalizeWeldSegmentKind(corner.segmentKind).trimmed();
+    const QString nextKind = NormalizeWeldSegmentKind(next.segmentKind).trimmed();
     if (prevKind.isEmpty() || cornerKind.isEmpty() || nextKind.isEmpty())
     {
         return false;
@@ -6069,7 +6264,7 @@ double EstimateWeldPoseStepMm(const QVector<WeldPoseFileRecord>& records)
 
 QString WeldArcSegmentKind(const QString& segmentKind)
 {
-    QString normalized = NormalizeSeamCompSegmentKind(segmentKind).trimmed();
+    QString normalized = NormalizeWeldSegmentKind(segmentKind).trimmed();
     if (normalized.isEmpty())
     {
         normalized = "arc";
@@ -7125,7 +7320,7 @@ QVector<int> CollectSameKindLineWindowBefore(
         return indices;
     }
 
-    const QString targetKind = NormalizeSeamCompSegmentKind(records[endIndex].segmentKind)
+    const QString targetKind = NormalizeWeldSegmentKind(records[endIndex].segmentKind)
         .trimmed()
         .toLower();
     for (int index = endIndex; index >= 0 && indices.size() < maxPointCount; --index)
@@ -7134,7 +7329,7 @@ QVector<int> CollectSameKindLineWindowBefore(
         {
             continue;  // 台阶端点侧向跳变会污染平台直线拟合方向，排除出拟合窗口
         }
-        const QString kind = NormalizeSeamCompSegmentKind(records[index].segmentKind)
+        const QString kind = NormalizeWeldSegmentKind(records[index].segmentKind)
             .trimmed()
             .toLower();
         if (!targetKind.isEmpty() && kind != targetKind && indices.size() >= 2)
@@ -7157,7 +7352,7 @@ QVector<int> CollectSameKindLineWindowAfter(
         return indices;
     }
 
-    const QString targetKind = NormalizeSeamCompSegmentKind(records[beginIndex].segmentKind)
+    const QString targetKind = NormalizeWeldSegmentKind(records[beginIndex].segmentKind)
         .trimmed()
         .toLower();
     for (int index = beginIndex; index < records.size() && indices.size() < maxPointCount; ++index)
@@ -7166,7 +7361,7 @@ QVector<int> CollectSameKindLineWindowAfter(
         {
             continue;  // 台阶端点侧向跳变会污染平台直线拟合方向，排除出拟合窗口
         }
-        const QString kind = NormalizeSeamCompSegmentKind(records[index].segmentKind)
+        const QString kind = NormalizeWeldSegmentKind(records[index].segmentKind)
             .trimmed()
             .toLower();
         if (!targetKind.isEmpty() && kind != targetKind && indices.size() >= 2)
@@ -7482,7 +7677,7 @@ QVector<PoseCompSegmentRange> CollectPoseCompSegmentRanges(
 
     auto normalizedKindAt = [&records](int index) -> QString
     {
-        QString kind = NormalizeSeamCompSegmentKind(records[index].segmentKind)
+        QString kind = NormalizeWeldSegmentKind(records[index].segmentKind)
             .trimmed()
             .toLower();
         if (kind.isEmpty())
@@ -7780,54 +7975,32 @@ WeldSeamCompApplyStats ApplyWeldSeamCompToWeldPoseRecords(
     const Eigen::Vector3d overallGunDirection = HorizontalUnitOrZero(
         Eigen::Vector3d::UnitZ().cross(overallSeamDirection));
 
-    QVector<const WeldPosePreset::SeamCompSlot*> recordSeamCompSlots;
-    recordSeamCompSlots.resize(records.size());
-    for (int index = 0; index < records.size(); ++index)
-    {
-        recordSeamCompSlots[index] = FindSeamCompSlotForRecord(preset, records[index]);
-    }
-    // 搭接错位台阶两点强制同槽(后者沿用前者)：使两点 weldZComp/水平补偿完全相同，X 台阶刚性保留不被斜切/加 Z 差。
-    for (int index = 1; index < records.size(); ++index)
-    {
-        if (records[index].isLapStep && records[index - 1].isLapStep)
-        {
-            recordSeamCompSlots[index] = recordSeamCompSlots[index - 1];
-        }
-    }
-
+    const WeldPosePreset::SeamCompValues& seamComp = preset.seamComp;
     for (int index = 0; index < records.size(); ++index)
     {
         WeldPoseFileRecord& record = records[index];
-        const WeldPosePreset::SeamCompSlot* seamCompSlot =
-            recordSeamCompSlots[index];
         Eigen::Vector3d horizontalComp = Eigen::Vector3d::Zero();
-        if (seamCompSlot == nullptr)
-        {
-            continue;
-        }
 
-        stats.usedSlots.insert(seamCompSlot->segmentKind);
-
-        if (std::abs(seamCompSlot->weldZComp) > 1e-6)
+        if (std::abs(seamComp.weldZComp) > 1e-6)
         {
-            record.point.z() += seamCompSlot->weldZComp;
+            record.point.z() += seamComp.weldZComp;
             ++stats.zAdjustedCount;
         }
 
-        if (std::abs(seamCompSlot->weldGunDirComp) > 1e-6)
+        if (std::abs(seamComp.weldGunDirComp) > 1e-6)
         {
-            // 焊道补偿按不随采样顺序翻转的焊道轴计算；同一补偿组时整条轨迹只做刚性平移。
+            // 焊道补偿按不随采样顺序翻转的焊道轴计算；整条轨迹只做同一个刚性平移。
             if (overallGunDirection.head<2>().norm() > 1e-9)
             {
-                horizontalComp += overallGunDirection * seamCompSlot->weldGunDirComp;
+                horizontalComp += overallGunDirection * seamComp.weldGunDirComp;
                 ++stats.gunDirAdjustedCount;
             }
         }
 
-        if (std::abs(seamCompSlot->weldSeamDirComp) > 1e-6
+        if (std::abs(seamComp.weldSeamDirComp) > 1e-6
             && overallSeamDirection.head<2>().norm() > 1e-9)
         {
-            horizontalComp += overallSeamDirection * seamCompSlot->weldSeamDirComp;
+            horizontalComp += overallSeamDirection * seamComp.weldSeamDirComp;
             ++stats.seamDirAdjustedCount;
         }
 
@@ -7913,7 +8086,7 @@ Eigen::Vector3d ApplyPoseCompToPoint(
     {
         // 剥掉 _transition/_arc 后缀再匹配：管线内传入的 segment.kind 本就无后缀（无影响），
         // 预览从 _WeldPose_2mm 文件读回的段类带后缀，不剥会漏补偿过渡点、轨迹出现弯折。
-        const int defaultIndex = DefaultPoseCompSlotIndex(NormalizeSeamCompSegmentKind(segmentKind));
+        const int defaultIndex = DefaultPoseCompSlotIndex(NormalizeWeldSegmentKind(segmentKind));
         if (defaultIndex >= 0 && defaultIndex < static_cast<int>(poseCompSlots.size()))
         {
             slotIndex = defaultIndex;
@@ -7959,6 +8132,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     const RobotCalculation::LowerWeldClassificationResult& result,
     const T_PRECISE_MEASURE_PARAM& param,
     const WeldPosePreset& preset,
+    double platformFlatSlopeThreshold,
     const MeasureThenWeldService::LogCallback& appendLog)
 {
     struct SegmentInfo
@@ -8024,6 +8198,17 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     };
 
     std::vector<QString> lines;
+    if (appendLog)
+    {
+        if (!preset.seamCompLoadError.isEmpty())
+        {
+            appendLog(QStringLiteral("焊道补偿配置读取告警：") + preset.seamCompLoadError);
+        }
+        for (const QString& warning : preset.seamCompWarnings)
+        {
+            appendLog(QStringLiteral("焊道补偿配置兼容告警：") + warning);
+        }
+    }
     if (result.points.isEmpty())
     {
         return lines;
@@ -8078,6 +8263,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             result.points,
             keyPointPositions,
             preset,
+            platformFlatSlopeThreshold,
             keyPointTypes,
             measurementDepthSegmentKinds,
             appendLog);
@@ -8116,7 +8302,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         }
 
         // 搭接错位台阶段(两端均为 geometry_lap_step)：段方向≈侧向，不当独立焊段——继承上一段(平台)类型，
-        // 使其补偿槽/段类型归属于平台而非被误判为斜边。
+        // 使其姿态补偿槽/轨迹段属性归属于平台而非被误判为斜边。
         const bool isLapStepSegment =
             result.points[segment.begin].source == QStringLiteral("geometry_lap_step")
             && result.points[segment.nextBegin].source == QStringLiteral("geometry_lap_step");
@@ -8394,18 +8580,13 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         }
     }
 
-    for (const WeldPosePreset::SeamCompSlot& slot : preset.seamCompSlots)
+    if (appendLog)
     {
-        if (appendLog)
-        {
-            appendLog(QString("焊道补偿槽 %1 [%2]：dZ=%3, dGunDir=%4, dSeamDir=%5, 来源=%6")
-                .arg(slot.name)
-                .arg(slot.segmentKind.isEmpty() ? QString("unassigned") : slot.segmentKind)
-                .arg(slot.weldZComp, 0, 'f', 3)
-                .arg(slot.weldGunDirComp, 0, 'f', 3)
-                .arg(slot.weldSeamDirComp, 0, 'f', 3)
-                .arg(preset.seamCompFromIni ? preset.seamCompFilePath : QString("默认值")));
-        }
+        appendLog(QString("焊道补偿（整条统一）：dZ=%1, dGunDir=%2, dSeamDir=%3, 来源=%4")
+            .arg(preset.seamComp.weldZComp, 0, 'f', 3)
+            .arg(preset.seamComp.weldGunDirComp, 0, 'f', 3)
+            .arg(preset.seamComp.weldSeamDirComp, 0, 'f', 3)
+            .arg(preset.seamCompFromIni ? preset.seamCompFilePath : QString("默认值")));
     }
 
     const int weldBeginCandidate = segments.front().begin;
@@ -8436,18 +8617,9 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     for (size_t segmentIndex = 0; segmentIndex < segments.size(); ++segmentIndex)
     {
         const SegmentInfo& segment = segments[segmentIndex];
-        const WeldPosePreset::SeamCompSlot* seamCompSlot =
-            FindSeamCompSlotByKind(preset, segment.kind);
-        if (seamCompSlot == nullptr)
-        {
-            seamCompSlot = FindSeamCompSlotByKind(preset, preset.seamKind);
-        }
-        const double segmentWeldZComp = seamCompSlot != nullptr ? seamCompSlot->weldZComp : 0.0;
-        const double segmentWeldGunDirComp = seamCompSlot != nullptr ? seamCompSlot->weldGunDirComp : 0.0;
-        const double segmentWeldSeamDirComp = seamCompSlot != nullptr ? seamCompSlot->weldSeamDirComp : 0.0;
         if (appendLog)
         {
-            appendLog(QString("焊道姿态段 %1: 点[%2-%3], 固定RZ=%4 deg, 输出基础RZ=%5 deg, 测量参考RZ=%6 deg, 法向与测量参考夹角=%7 deg, 反向候选RZ=%8 deg, RZ原始偏差=%9 deg, RZ夹紧后=%10 deg, RX=%11 deg, RY=%12 deg, 焊道种类=%13, 过渡起点=%14, 起点跳过=%15 mm, 终点跳过=%16 mm, Z补偿=%17 mm, 枪向补偿=%18 mm, 焊道方向补偿=%19 mm")
+            appendLog(QString("焊道姿态段 %1: 点[%2-%3], 固定RZ=%4 deg, 输出基础RZ=%5 deg, 测量参考RZ=%6 deg, 法向与测量参考夹角=%7 deg, 反向候选RZ=%8 deg, RZ原始偏差=%9 deg, RZ夹紧后=%10 deg, RX=%11 deg, RY=%12 deg, 补偿范围=%13, 过渡起点=%14, 起点跳过=%15 mm, 终点跳过=%16 mm, Z补偿=%17 mm, 枪向补偿=%18 mm, 焊道方向补偿=%19 mm")
                 .arg(segment.kind)
                 .arg(result.points[segment.begin].index)
                 .arg(result.points[segment.end].index)
@@ -8460,15 +8632,15 @@ std::vector<QString> BuildSegmentPoseOutputLines(
                 .arg(segment.clampedRzDeviationFromReference, 0, 'f', 3)
                 .arg(outputPoseRx, 0, 'f', 3)
                 .arg(outputPoseRy, 0, 'f', 3)
-                .arg(preset.seamKind)
+                .arg(QStringLiteral("整条焊道统一"))
                 .arg(segment.transitionBegin == std::numeric_limits<int>::max()
                     ? QString("none")
                     : QString::number(result.points[segment.transitionBegin].index))
                 .arg(preset.weldStartSkipDistance, 0, 'f', 3)
                 .arg(preset.weldEndSkipDistance, 0, 'f', 3)
-                .arg(segmentWeldZComp, 0, 'f', 3)
-                .arg(segmentWeldGunDirComp, 0, 'f', 3)
-                .arg(segmentWeldSeamDirComp, 0, 'f', 3));
+                .arg(preset.seamComp.weldZComp, 0, 'f', 3)
+                .arg(preset.seamComp.weldGunDirComp, 0, 'f', 3)
+                .arg(preset.seamComp.weldSeamDirComp, 0, 'f', 3));
         }
     }
 
@@ -9043,6 +9215,7 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     pWeldIni->ReadString(false, "ResumeBacktrackDistanceMm", &param.dResumeBacktrackMm);
     pWeldIni->ReadString(false, "WeldDirection", &param.nWeldDirection);
     pWeldIni->ReadString(false, "GunDownBackSafeDis", &param.dGunDownBackSafeDis);
+    pWeldIni->ReadString(false, "WeldSafeRetreatDirection", &param.nWeldSafeRetreatDirection);
     pWeldIni->ReadString(false, "WeldRzGainDeg", &param.dWeldRzGainDeg);
     int useTaughtWeldPose = 0;
     pWeldIni->ReadString(false, "UseTaughtWeldPose", &useTaughtWeldPose);
@@ -9106,6 +9279,8 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     {
         param.dGunDownBackSafeDis = WELD_SAFE_OFFSET_DISTANCE_MM;
     }
+    param.nWeldSafeRetreatDirection =
+        NormalizeWeldSafeRetreatDirectionMode(param.nWeldSafeRetreatDirection);
     if (!std::isfinite(param.dWeldRzGainDeg))
     {
         param.dWeldRzGainDeg = 0.0;
@@ -12161,7 +12336,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         appendLog);
     if (appendLog)
     {
-        appendLog(QString("焊接姿态参数：模式=%1, RX=%2, RY=%3, 示教RZ=%4 deg, RZ增益=%5 deg, 爬坡RZ夹紧=[%6, %7] deg, 拐点前过渡=%8 mm, 起点跳过=%9 mm, 终点跳过=%10 mm, 姿态补偿槽=%11, 焊道补偿槽=%12, 基础参数来源=%13, 姿态补偿来源=%14, 焊道补偿来源=%15")
+        appendLog(QString("焊接姿态参数：模式=%1, RX=%2, RY=%3, 示教RZ=%4 deg, RZ增益=%5 deg, 爬坡RZ夹紧=[%6, %7] deg, 拐点前过渡=%8 mm, 起点跳过=%9 mm, 终点跳过=%10 mm, 姿态补偿槽=%11, 焊道补偿=%12, 基础参数来源=%13, 姿态补偿来源=%14, 焊道补偿来源=%15")
             .arg(weldPosePreset.useTaughtWeldPose ? QStringLiteral("示教平台姿态") : QStringLiteral("原始固定姿态"))
             .arg(weldPosePreset.useTaughtWeldPose ? weldPosePreset.taughtWeldPoseRx : weldPosePreset.rx, 0, 'f', 3)
             .arg(weldPosePreset.useTaughtWeldPose ? weldPosePreset.taughtWeldPoseRy : weldPosePreset.ry, 0, 'f', 3)
@@ -12173,7 +12348,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             .arg(weldPosePreset.weldStartSkipDistance, 0, 'f', 3)
             .arg(weldPosePreset.weldEndSkipDistance, 0, 'f', 3)
             .arg(static_cast<int>(weldPosePreset.poseCompSlots.size()))
-            .arg(static_cast<int>(weldPosePreset.seamCompSlots.size()))
+            .arg(QStringLiteral("整条统一"))
             .arg(weldPosePreset.weldLineFromIni
                 ? QString("%1 [%2]").arg(weldPosePreset.weldLineFilePath, weldPosePreset.weldLineSectionName)
                 : QString("扫描起点姿态回退"))
@@ -12191,7 +12366,12 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             ? originalAnalysis.cornerCompensatedClassificationResult
             : originalAnalysis.classificationResult;
     const std::vector<QString> weldPoseLines =
-        BuildSegmentPoseOutputLines(classificationForWeldPose, param, weldPosePreset, appendLog);
+        BuildSegmentPoseOutputLines(
+            classificationForWeldPose,
+            param,
+            weldPosePreset,
+            originalFitParams.platformSnapFlatSlope,
+            appendLog);
     if (!weldPoseLines.empty())
     {
         if (!SaveTextLines(weldPosePath, weldPoseLines, error))
@@ -12410,7 +12590,8 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     if (pointCloudSettings.validationPolicy
         == PointCloudProcessingConfig::ValidationPolicy::Enforce)
     {
-        if (productionExpectation.robotName.trimmed().isEmpty()
+        if ((pointCloudSettings.safetyGateRobotNameBindingEnabled
+                && productionExpectation.robotName.trimmed().isEmpty())
             || productionExpectation.robotEndpoint.trimmed().isEmpty()
             || productionExpectation.cameraSection.trimmed().isEmpty()
             || !IsSha256Text(productionExpectation.handEyeSha256))
@@ -12423,6 +12604,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
                 laserDir,
                 QString::fromStdString(param.sRobotName),
                 productionExpectation,
+                pointCloudSettings,
                 productionContext,
                 error,
                 stopRequested))
@@ -12813,7 +12995,12 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             ? originalAnalysis.cornerCompensatedClassificationResult
             : originalAnalysis.classificationResult;
     const std::vector<QString> weldPoseLines =
-        BuildSegmentPoseOutputLines(classificationForWeldPose, param, weldPosePreset, appendLog);
+        BuildSegmentPoseOutputLines(
+            classificationForWeldPose,
+            param,
+            weldPosePreset,
+            originalFitParams.platformSnapFlatSlope,
+            appendLog);
     if (weldPoseLines.empty())
     {
         error = "焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。";
@@ -13159,11 +13346,9 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
         return false;
     }
 
-    QStringList usedSlots = compStats.usedSlots.values();
-    usedSlots.sort();
-    summary = QString("焊道补偿完成：点数=%1，使用槽位=%2，Z补偿点数=%3，枪反向补偿点数=%4，焊道方向补偿点数=%5，起点裁剪=%6点，终点裁剪=%7点，自交裁剪=%8次，删除回折点=%9，交点校正拐点=%10，丢失拐点=%11，交点恢复=%12，跳过恢复=%13，未过渡拐点补偿=%14，补齐点=%15，过渡后补点=%16，最终补点=%17，最大步长=%18mm，圆弧过渡=%19处，半径=%20mm，新增点=%21，四类属性=%22，配置=%23")
+    summary = QString("焊道补偿完成：点数=%1，作用范围=%2，Z补偿点数=%3，枪反向补偿点数=%4，焊道方向补偿点数=%5，起点裁剪=%6点，终点裁剪=%7点，自交裁剪=%8次，删除回折点=%9，交点校正拐点=%10，丢失拐点=%11，交点恢复=%12，跳过恢复=%13，未过渡拐点补偿=%14，补齐点=%15，过渡后补点=%16，最终补点=%17，最大步长=%18mm，圆弧过渡=%19处，半径=%20mm，新增点=%21，段属性调试=%22，配置=%23")
         .arg(records.size())
-        .arg(usedSlots.isEmpty() ? QString("无匹配槽位") : usedSlots.join(","))
+        .arg(QStringLiteral("整条焊道统一"))
         .arg(compStats.zAdjustedCount)
         .arg(compStats.gunDirAdjustedCount)
         .arg(compStats.seamDirAdjustedCount)
@@ -13185,6 +13370,14 @@ bool MeasureThenWeldService::ApplyWeldSeamCompToPoseFile(
         .arg(finalizeStats.arc.insertedPointCount())
         .arg(QDir::toNativeSeparators(segmentKindDebugPath))
         .arg(QDir::toNativeSeparators(preset.seamCompFilePath));
+    if (!preset.seamCompLoadError.isEmpty())
+    {
+        summary += QStringLiteral("；配置读取告警=") + preset.seamCompLoadError;
+    }
+    if (!preset.seamCompWarnings.isEmpty())
+    {
+        summary += QStringLiteral("；配置兼容告警=") + preset.seamCompWarnings.join(QStringLiteral(" | "));
+    }
     return true;
 }
 
@@ -14000,13 +14193,27 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
         }
     }
     T_ROBOT_COORS startSafeCoors;
-    if (!TryBuildWeldSafeCoors(records, 0, param.dGunDownBackSafeDis, weldPosePreset.robotType, startSafeCoors, error))
+    if (!TryBuildWeldSafeCoors(
+        records,
+        0,
+        param.dGunDownBackSafeDis,
+        param.nWeldSafeRetreatDirection,
+        weldPosePreset.robotType,
+        startSafeCoors,
+        error))
     {
         return false;
     }
 
     T_ROBOT_COORS endSafeCoors;
-    if (!TryBuildWeldSafeCoors(records, records.size() - 1, param.dGunDownBackSafeDis, weldPosePreset.robotType, endSafeCoors, error))
+    if (!TryBuildWeldSafeCoors(
+        records,
+        records.size() - 1,
+        param.dGunDownBackSafeDis,
+        param.nWeldSafeRetreatDirection,
+        weldPosePreset.robotType,
+        endSafeCoors,
+        error))
     {
         return false;
     }
@@ -14213,8 +14420,9 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
 
     if (appendLog)
     {
-        appendLog(QString("焊接安全位：回退距离=%1 mm，横向约束=X-")
-            .arg(param.dGunDownBackSafeDis, 0, 'f', 3));
+        appendLog(QString("焊接安全位：回退距离=%1 mm，水平回撤方向=%2")
+            .arg(param.dGunDownBackSafeDis, 0, 'f', 3)
+            .arg(WeldSafeRetreatDirectionText(param.nWeldSafeRetreatDirection)));
         appendLog(QString("下枪安全位置：%1").arg(RobotCoorsText(startSafeCoors)));
         appendLog(QString("焊接起点：%1").arg(RobotCoorsText(weldStartCoors)));
         appendLog(QString("收枪安全位置：%1").arg(RobotCoorsText(endSafeCoors)));
@@ -15200,23 +15408,11 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
         result.gunAxis[1] = gunDir.y();
         result.gunAxis[2] = gunDir.z();
 
-        // 用对话框当前编辑值构造 4 段焊道补偿槽（段类硬映射 0..3）。
-        // 载入真实焊接预设（含圆弧过渡/裁剪等下发参数），再用对话框当前焊缝补偿值覆盖补偿槽。
+        // 载入真实焊接预设（含圆弧过渡/裁剪等下发参数），再用对话框当前值覆盖整条焊道统一补偿。
         WeldPosePreset preset = LoadWeldPosePreset(BuildMeasureWeldParamShell(robotName));
-        static const char* const kSegmentKinds[4] = { "low_platform", "rising_edge", "high_platform", "falling_edge" };
-        preset.seamCompSlots.assign(4, WeldPosePreset::SeamCompSlot());
-        for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
-        {
-            // 用配置里真实的 segmentKind（可能是 CorrugatedPlate），为空才回退默认四段类；
-            // 配合保留的真实 preset.seamKind，使匹配/回退与下发 FindSeamCompSlotForRecord 完全一致。
-            const QString segmentKind = edits.seamSegmentKind[slotIndex].trimmed().isEmpty()
-                ? QString::fromLatin1(kSegmentKinds[slotIndex])
-                : edits.seamSegmentKind[slotIndex];
-            preset.seamCompSlots[slotIndex].segmentKind = segmentKind;
-            preset.seamCompSlots[slotIndex].weldZComp = edits.weldZComp[slotIndex];
-            preset.seamCompSlots[slotIndex].weldGunDirComp = edits.weldGunDirComp[slotIndex];
-            preset.seamCompSlots[slotIndex].weldSeamDirComp = edits.weldSeamDirComp[slotIndex];
-        }
+        preset.seamComp.weldZComp = edits.weldZComp;
+        preset.seamComp.weldGunDirComp = edits.weldGunDirComp;
+        preset.seamComp.weldSeamDirComp = edits.weldSeamDirComp;
 
         // 复用管线真实焊缝补偿平移 + 完整后处理（端点裁剪/自交/拐点恢复/圆弧过渡/加密），贴近 _SeamComp 下发文件。
         WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
@@ -15799,7 +15995,7 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
     const Eigen::Vector3d seamDir = ResolveOverallHorizontalWeldDirection(basePoints);
     const Eigen::Vector3d gunDir = HorizontalUnitOrZero(Eigen::Vector3d::UnitZ().cross(seamDir));
 
-    // 阶段「焊道补偿」：真实预设 + 当前编辑槽位覆盖（槽位段类用配置真实值，匹配/回退与下发一致）。
+    // 阶段「焊道补偿」：真实预设 + 当前整条焊道统一补偿覆盖。
     const T_PRECISE_MEASURE_PARAM measureParam = BuildMeasureWeldParamShell(robotName);
     WeldPosePreset preset = LoadWeldPosePreset(measureParam);
     // 工艺区域试调覆盖（仅预览联动，不落盘）：圆弧过渡启用/半径 + 实际焊道点间距。
@@ -15810,17 +16006,9 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
             : 0.0;
         preset.finalWeldStepFromProcessMm = currentEdits.processFinalStepMm;
     }
-    preset.seamCompSlots.assign(4, WeldPosePreset::SeamCompSlot());
-    for (int slotIndex = 0; slotIndex < 4; ++slotIndex)
-    {
-        const QString segmentKind = currentEdits.seamSegmentKind[slotIndex].trimmed().isEmpty()
-            ? QString::fromLatin1(kSegmentKinds[slotIndex])
-            : currentEdits.seamSegmentKind[slotIndex];
-        preset.seamCompSlots[slotIndex].segmentKind = segmentKind;
-        preset.seamCompSlots[slotIndex].weldZComp = currentEdits.weldZComp[slotIndex];
-        preset.seamCompSlots[slotIndex].weldGunDirComp = currentEdits.weldGunDirComp[slotIndex];
-        preset.seamCompSlots[slotIndex].weldSeamDirComp = currentEdits.weldSeamDirComp[slotIndex];
-    }
+    preset.seamComp.weldZComp = currentEdits.weldZComp;
+    preset.seamComp.weldGunDirComp = currentEdits.weldGunDirComp;
+    preset.seamComp.weldSeamDirComp = currentEdits.weldSeamDirComp;
     WeldSeamCompApplyStats compStats = ApplyWeldSeamCompToWeldPoseRecords(preset, records);
     if (canceled())
     {
