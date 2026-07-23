@@ -1309,31 +1309,63 @@ def main() -> int:
                 )
                 """
             )
+            database_admin_record = hashlib.sha256(
+                b"database_admin\nConfigStore-Is-Authoritative"
+            ).hexdigest()
+            connection.executemany(
+                """
+                INSERT INTO settings(
+                    scope_type, scope_id, module, key_name, value_text,
+                    value_type, sensitive, encrypted
+                ) VALUES('account', 'database_admin', 'Profile', ?, ?, 'string', ?, 0)
+                """,
+                (
+                    ("PasswordHash", database_admin_record, 1),
+                    ("Role", "admin", 0),
+                ),
+            )
         connection.close()
         write_fixture(unproven_v4_data)
         unproven_v4_db_hash = file_sha256(unproven_v4_db)
-        unproven_v4_source_hashes = {
-            path.relative_to(unproven_v4_data): file_sha256(path)
-            for path in unproven_v4_data.rglob("*.ini")
-        }
-        unproven_v4_result = run_command(
+        unproven_v4_result = run_checked(
             [
                 str(exe), "--source", str(unproven_v4_data), "--db", str(unproven_v4_db),
                 "--encrypt", "--scrub-legacy-credentials",
             ],
             temp,
         )
-        if unproven_v4_result.returncode == 0 or "does not import legacy INI/TXT" not in (
-            unproven_v4_result.stdout + unproven_v4_result.stderr
-        ):
-            raise AssertionError("v4 upgrade scrubbed credential-bearing disk INI without importing it")
-        if file_sha256(unproven_v4_db) != unproven_v4_db_hash:
-            raise AssertionError("Rejected v4 disk-credential migration modified the database")
-        if {
-            path.relative_to(unproven_v4_data): file_sha256(path)
+        if "ConfigStore is authoritative" not in unproven_v4_result.stdout:
+            raise AssertionError("v4 upgrade did not report ignored legacy disk values")
+        if file_sha256(unproven_v4_db) == unproven_v4_db_hash:
+            raise AssertionError("v4 database authority upgrade did not publish schema v5")
+        with closing(sqlite3.connect(unproven_v4_db)) as connection:
+            if connection.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone() != ("5",):
+                raise AssertionError("v4 database authority upgrade did not reach schema v5")
+            if connection.execute(
+                "SELECT value FROM meta WHERE key='legacy_credential_scrub_state'"
+            ).fetchone() != ("complete",):
+                raise AssertionError("v4 database authority upgrade did not complete credential scrub")
+            if connection.execute(
+                """
+                SELECT value_text FROM settings
+                WHERE scope_type='account' AND scope_id='database_admin'
+                  AND module='Profile' AND key_name='PasswordHash'
+                """
+            ).fetchone() != (database_admin_record,):
+                raise AssertionError("legacy disk accounts replaced the authoritative database account")
+        scrubbed_text = "\n".join(
+            path.read_text(encoding="utf-8")
             for path in unproven_v4_data.rglob("*.ini")
-        } != unproven_v4_source_hashes:
-            raise AssertionError("Rejected v4 disk-credential migration modified source INI files")
+        )
+        for forbidden in (
+            "secret-value", "PasswordBase64=", "FTPPassWord=",
+        ):
+            if forbidden in scrubbed_text:
+                raise AssertionError(
+                    f"v4 database authority upgrade retained legacy credential marker: {forbidden}"
+                )
 
         semantic_source = temp / "semantic-upgrade-empty-source"
         semantic_source.mkdir()
@@ -1960,6 +1992,21 @@ def main() -> int:
             connection.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', '4')"
             )
+            nested_admin_record = hashlib.sha256(
+                b"nested_admin\nConfigStore-Is-Authoritative"
+            ).hexdigest()
+            connection.executemany(
+                """
+                INSERT INTO settings(
+                    scope_type, scope_id, module, key_name, value_text,
+                    value_type, sensitive, encrypted
+                ) VALUES('account', 'nested_admin', 'Profile', ?, ?, 'string', ?, 0)
+                """,
+                (
+                    ("PasswordHash", nested_admin_record, 1),
+                    ("Role", "admin", 0),
+                ),
+            )
             connection.commit()
         finally:
             connection.close()
@@ -1972,23 +2019,43 @@ def main() -> int:
             file_sha256(nested_weave),
             file_sha256(nested_weld),
         )
-        nested_text_result = run_command(
+        nested_text_result = run_checked(
             [
                 str(exe), "--source", str(nested_text_data),
                 "--db", str(nested_text_db), "--encrypt",
             ],
             temp,
         )
-        if nested_text_result.returncode == 0 or "does not import legacy INI/TXT" not in (
-            nested_text_result.stdout + nested_text_result.stderr
-        ):
-            raise AssertionError("Nested legacy WeaveDate/WeldPara inputs bypassed the v4 gate")
-        if nested_text_before != (
-            file_sha256(nested_text_db),
+        if "ConfigStore is authoritative" not in nested_text_result.stdout:
+            raise AssertionError("Nested legacy text values were not reported as ignored")
+        if nested_text_before[0] == file_sha256(nested_text_db):
+            raise AssertionError("Nested-text v4 database was not upgraded")
+        if nested_text_before[1:] != (
             file_sha256(nested_weave),
             file_sha256(nested_weld),
         ):
-            raise AssertionError("Rejected nested legacy text migration was not byte-identical")
+            raise AssertionError("Ignored nested legacy text files were modified")
+        with closing(sqlite3.connect(nested_text_db)) as connection:
+            for source_path in (
+                "Data/nested/WeaveDate.txt",
+                "Data/nested/deeper/WeldPara.txt",
+            ):
+                identity = migration_module["build_scoped_file_identity"](
+                    source_path
+                )
+                if connection.execute(
+                    """
+                    SELECT COUNT(*) FROM settings
+                    WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?
+                    """,
+                    (
+                        identity["scope_type"], identity["scope_id"],
+                        identity["module"], identity["key_name"],
+                    ),
+                ).fetchone() != (0,):
+                    raise AssertionError(
+                        f"Ignored nested legacy text was imported: {source_path}"
+                    )
 
         existing_root = temp / "existing-v5-root"
         existing_db = existing_root / "Data" / "ConfigStore.db"

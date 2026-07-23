@@ -180,9 +180,9 @@ output="$(
         --pasv-address ftp.example.test
 )"
 assert_contains "$output" "预演（未修改任何文件）"
-assert_contains "$output" "保留除已退役 uploader 外的既有 FTP 白名单"
-assert_contains "$output" "已退役 uploader"
-assert_contains "$output" "普通账号=write-once + /data/<account>"
+assert_contains "$output" "保留既有 FTP 白名单"
+assert_contains "$output" "ftpoperator=FTP 上传下载"
+assert_contains "$output" "uploader=共享 write-only"
 assert_contains "$output" "FTP 仅允许 10.20.0.0/16"
 assert_contains "$output" "PASV 公网回址: 显式设置为 ftp.example.test"
 diff -ru -- "$before" "$root" >/dev/null || fail "dry-run 修改了临时根目录"
@@ -250,7 +250,7 @@ for restrictive_directive in \
     mv -f -- "${root}/etc/vsftpd.conf.safe" "${root}/etc/vsftpd.conf"
 done
 
-# 共享 uploader 不再有任何可恢复权限模型；旧密码参数必须直接拒绝。
+# 默认账号秘密不进入部署器参数；统一经回环管理接口轮换。
 set +e
 retired_uploader_output="$(
     DEPLOY_OFFLINE_TEST=1 DEPLOY_ROOT="$root" \
@@ -258,8 +258,8 @@ retired_uploader_output="$(
 )"
 retired_uploader_rc=$?
 set -e
-[[ $retired_uploader_rc -ne 0 ]] || fail "退役 uploader 密码参数仍被接受"
-assert_contains "$retired_uploader_output" "永久退役"
+[[ $retired_uploader_rc -ne 0 ]] || fail "uploader 密码参数仍被部署器接受"
+assert_contains "$retired_uploader_output" "不由部署器接收"
 
 # 命令行明文秘密必须被当成未知位置参数拒绝。
 set +e
@@ -601,7 +601,7 @@ legacy-camera:x:1002:1002::/srv/devicedata:/usr/sbin/nologin
 rogue:x:1003:1003::/srv/devicedata:/usr/sbin/nologin
 EOF
 cat > "${nss_fixture}/group" <<'EOF'
-ftpdata:x:995:devicedata,uploader,legacy-camera,rogue
+ftpdata:x:995:devicedata,legacy-camera,rogue
 devicedata:x:2000:
 uploader:x:1001:
 legacy-camera:x:1002:

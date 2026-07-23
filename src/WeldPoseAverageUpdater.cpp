@@ -589,51 +589,6 @@ WeldPoseAverageUpdater::GroupReport BuildGroupReport(
     return report;
 }
 
-bool WriteSeamAverageMetadata(
-    const QString& path,
-    const WeldPoseAverageUpdater::UpdateResult& result,
-    QString& error)
-{
-    COPini ini;
-    ini.SetFileName(false, LocalString(path));
-    ini.SetSectionName("WeldSeamPoseAverage");
-    if (!ini.WriteString("LastUpdateTime", LocalString(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss")))
-        || !ini.WriteString("SourcePoseFile", LocalString(result.inputPoseFilePath))
-        || !ini.WriteString("PoseCompParamPath", LocalString(result.poseCompParamPath))
-        || !ini.WriteString("GroupCount", static_cast<int>(result.groups.size()))
-        || !ini.WriteString("AnyOutlierFiltered", result.anyOutlierFiltered))
-    {
-        error = "写入焊道补偿参数姿态均值摘要失败：" + LocalPath(path);
-        return false;
-    }
-
-    for (int index = 0; index < result.groups.size(); ++index)
-    {
-        const WeldPoseAverageUpdater::GroupReport& group = result.groups[index];
-        ini.SetSectionName(LocalString(QString("WeldSeamPoseAverage%1").arg(index)));
-        if (!ini.WriteString("Name", LocalString(group.displayName))
-            || !ini.WriteString("SegmentKind", LocalString(group.segmentKind))
-            || !ini.WriteString("PoseCompIndex", group.poseCompIndex)
-            || !ini.WriteString("SampleCount", group.sourceCount)
-            || !ini.WriteString("UsedSampleCount", group.usedCount)
-            || !ini.WriteString("FilteredOutlierCount", group.filteredCount)
-            || !ini.WriteString("Rx", group.rx, 6)
-            || !ini.WriteString("Ry", group.ry, 6)
-            || !ini.WriteString("Rz", NormalizeAngleDeg(group.rz), 6)
-            || !ini.WriteString("AddedNewSlot", group.addedNewSlot)
-            || !ini.WriteString("WrotePoseToSlot", group.wrotePoseToSlot)
-            || !ini.WriteString("MatchedDistanceDeg", group.matchedDistanceDeg, 6))
-        {
-            error = QString("写入焊道补偿参数姿态均值分组 %1 失败：%2")
-                .arg(index)
-                .arg(LocalPath(path));
-            return false;
-        }
-    }
-
-    return true;
-}
-
 QString FormatFiniteThreshold(double threshold)
 {
     if (!std::isfinite(threshold))
@@ -668,7 +623,6 @@ void BuildReportLines(
     lines << QString("机器人：%1").arg(result.robotName);
     lines << QString("输入姿态文件：%1").arg(LocalPath(result.inputPoseFilePath));
     lines << QString("姿态补偿库：%1").arg(LocalPath(result.poseCompParamPath));
-    lines << QString("焊道补偿配置：%1").arg(LocalPath(result.seamCompParamPath));
     lines << QString("总姿态点数：%1").arg(result.totalRecordCount);
     lines << QString("姿态复用阈值：%1 deg").arg(matchMaxErrorDeg, 0, 'f', 3);
     lines << QString("姿态库数量：%1 -> %2").arg(previousPoseCompCount).arg(previousPoseCompCount + result.addedSlotCount);
@@ -770,8 +724,6 @@ bool WeldPoseAverageUpdater::UpdateFromInput(
         : robotNameHint.trimmed();
     result.poseCompParamPath = RobotDataHelper::BuildProjectPath(
         QString("Data/%1/WeldPoseCompParam.ini").arg(result.robotName));
-    result.seamCompParamPath = RobotDataHelper::BuildProjectPath(
-        QString("Data/%1/WeldSeamCompParam.ini").arg(result.robotName));
     result.reportPath = BuildReportPath(result.inputPoseFilePath);
     result.totalRecordCount = records.size();
 
@@ -880,11 +832,6 @@ bool WeldPoseAverageUpdater::UpdateFromInput(
     }
 
     if (!SavePoseLibrary(result.poseCompParamPath, library, error))
-    {
-        return false;
-    }
-
-    if (!WriteSeamAverageMetadata(result.seamCompParamPath, result, error))
     {
         return false;
     }

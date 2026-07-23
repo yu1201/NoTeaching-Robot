@@ -7,6 +7,7 @@
 #include "RobotMessage.h"
 #include "RobotOperationLease.h"
 #include "WeldProcessFile.h"
+#include "WeldSeamCompConfig.h"
 #include "WindowStyleHelper.h"
 
 #include <algorithm>
@@ -589,7 +590,7 @@ void ProcessLoopTestDialog::LoadCompCombo(QComboBox* combo, const QString& path,
     {
         return;
     }
-    constexpr int kCompSegmentCount = 4;   // 每组恰好 4 段（低平台/上升边/高平台/下降边）
+    constexpr int kLegacyOrPoseRowsPerGroup = 4;
     combo->clear();
     int activeIndex = 0;
     int groupCount = 1;
@@ -607,9 +608,19 @@ void ProcessLoopTestDialog::LoadCompCombo(QComboBox* combo, const QString& path,
             }
             else
             {
-                int rowCount = kCompSegmentCount;
+                int rowsPerGroup = kLegacyOrPoseRowsPerGroup;
+                if (allSection == QStringLiteral("ALLWeldSeamComp"))
+                {
+                    int schemaVersion = 0;
+                    ini.ReadString(false, "SeamCompSchemaVersion", &schemaVersion);
+                    if (schemaVersion >= WeldSeamCompConfig::SCHEMA_VERSION)
+                    {
+                        rowsPerGroup = 1;
+                    }
+                }
+                int rowCount = rowsPerGroup;
                 ini.ReadString(false, rowCountKey.toUtf8().constData(), &rowCount);
-                groupCount = std::max(1, (std::max(0, rowCount) + kCompSegmentCount - 1) / kCompSegmentCount);
+                groupCount = std::max(1, (std::max(0, rowCount) + rowsPerGroup - 1) / rowsPerGroup);
             }
             activeIndex = std::clamp(activeIndex, 0, groupCount - 1);
             for (int index = 0; index < groupCount; ++index)

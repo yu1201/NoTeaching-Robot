@@ -472,9 +472,11 @@ $notes = @(
     "4. The installer bundles the Microsoft Visual C++ 2015-2022 Redistributable x64 installer and can run it automatically.",
     "5. FANUC WinOLPC compiler tools are not bundled because machine-local files have no release manifest.",
     "6. Only the exact versioned FANUC .tp/.pc runtime manifest is shipped.",
-    "7. SDK\\STEP\\versions is not shipped: STEP SDK .lib archives are link-time only (the SDK is statically linked),",
-    "   and the SRS robot-system upgrade package is archived in the source repository and distributed separately.",
-    "8. Rebuilds (incl. legacy SDK switch via switch_step_sdk.ps1) are done from the source repository."
+    "7. The robot-controller STEP SDK is statically linked; SDK\\STEP\\versions is not shipped because its .lib archives",
+    "   are link-time only, while the SRS robot-system upgrade package is archived in source and distributed separately.",
+    "8. CAD STEP import uses facilities provided by Open CASCADE Technology 7.9.3 through dynamically linked DLLs.",
+    "   Keep those TK*.dll files and licenses\\opencascade\\copyright together with every redistributed package.",
+    "9. Rebuilds (incl. legacy SDK switch via switch_step_sdk.ps1) are done from the source repository."
 )
 $notes | Set-Content -LiteralPath $notesPath -Encoding UTF8
 

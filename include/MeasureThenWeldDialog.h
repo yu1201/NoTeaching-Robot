@@ -63,6 +63,8 @@ struct T_PRECISE_MEASURE_PARAM
     int nWeldDirection = 1;
     // 焊接轨迹下枪/收枪安全位相对首尾焊点的回退距离，对应配置库中的 GunDownBackSafeDis。
     double dGunDownBackSafeDis = 70.0;
+    // 世界坐标水平回撤方向；缺省 0 保持旧现场的自动 X- 优先行为。
+    int nWeldSafeRetreatDirection = WELD_SAFE_RETREAT_AUTO_LEGACY_X_NEGATIVE;
     double dWeldRzGainDeg = 0.0;
     // 焊接平台标准姿态示教：启用后 RX/RY 使用示教值，RZ 以平台示教值为基准修正坡道姿态。
     bool bUseTaughtWeldPose = false;
@@ -126,6 +128,11 @@ private:
     void OnParamGroupChanged(int index);
     void OnWeldProcessChanged(int index);
     QString CurrentRobotName() const;
+    bool ResolveModelWeldingAvailabilityForRow(
+        int row,
+        QString& modelDisplayName,
+        QString& reason) const;
+    void RefreshModelWeldingAvailability();
     int CurrentParamGroupIndex() const;
     int CurrentPoseCompGroupIndex() const;
     int CurrentSeamCompGroupIndex() const;
@@ -162,8 +169,9 @@ private:
 
     // 互锁前置检查：被前置守卫拦下时弹 title 提示并返回 true（表示应当中止启动）。
     bool BlockedByOtherFlow(const QString& title);
-    // 预设参数流程入口和整体大线扫粗定位占位入口。
+    // 预设参数与模型焊接是并列流程驱动；大线扫仍保留独立入口。
     void RunPresetParamFlow();
+    void OpenModelWeldingFlowDialog();
     void RunSkipScanWeldFlow();
     void RunLineScanProcess();
     // 相机时间补偿自动标定：同一工件自动正/反向各扫一次，按拐点分裂量解算相机链路固有延迟并写回补偿参数。
@@ -232,6 +240,7 @@ private:
     QComboBox* m_pPoseCompGroupCombo = nullptr;
     QComboBox* m_pSeamCompGroupCombo = nullptr;
     QPushButton* m_pPresetParamBtn = nullptr;
+    QPushButton* m_pModelWeldingFlowBtn = nullptr;
     QPushButton* m_pSkipScanWeldBtn = nullptr;
     QPushButton* m_pLineScanProcessBtn = nullptr;
     QPushButton* m_pTimeOffsetCalibBtn = nullptr;

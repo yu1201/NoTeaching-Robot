@@ -5,6 +5,7 @@
 #include <QString>
 #include <QRegularExpression>
 #include <QSysInfo>
+#include <QUrl>
 
 // 在线服务配置（OTA 升级 + 扫描数据上传）：全局键，管理页「在线服务」界面编辑。
 // 服务器为自建（xiaomomoyun.cn），OTA 走 HTTP 静态目录
@@ -13,6 +14,13 @@
 // Windows DPAPI CurrentUser 保护；安装包不携带服务器密码。
 namespace OnlineServicesConfig
 {
+	enum class AccessLevel
+	{
+		Upload = 0,
+		Ftp = 1,
+		Full = 2
+	};
+
 	inline QString SettingsGroup()
 	{
 		return QStringLiteral("OnlineServices");
@@ -34,47 +42,114 @@ namespace OnlineServicesConfig
 		ConfigDatabase::WriteScopedSetting(QStringLiteral("global"), QString(), SettingsGroup(), key, value);
 	}
 
-	// —— OTA 更新源 ——
-	// 当前清单地址 = UpdateBaseUrl + "/" + channel + "/latest-v3.json"；
-	// latest.json 保留给已经部署、只理解 schema v2 的旧客户端。
-	// 默认直连服务器 IP（156.239.225.105，:8090，8080 被机上 qqbot 占用）；域名解析就绪后可在界面改回域名。
+	inline QString ReadSecretValue(const QString& key)
+	{
+		QString value;
+		if (!ConfigDatabase::ReadScopedSetting(
+			QStringLiteral("global"), QString(), SettingsGroup(), key, &value))
+		{
+			return QString();
+		}
+		return value;  // 密码不可 trim；服务器允许的首尾空格也是凭据的一部分。
+	}
+
+	inline QString ServerHost()
+	{
+		QString host = ReadValue(QStringLiteral("ServerHost"), QString());
+		if (host.isEmpty())
+		{
+			// 兼容旧数据库：优先沿用原 FTP 主机，其次从完整升级源 URL 提取主机。
+			host = ReadValue(QStringLiteral("FtpHost"), QString());
+		}
+		if (host.isEmpty())
+		{
+			host = QUrl(ReadValue(QStringLiteral("UpdateBaseUrl"), QString())).host();
+		}
+		return host.isEmpty() ? QStringLiteral("103.217.203.52") : host.trimmed();
+	}
+
+	inline void SetServerHost(const QString& host)
+	{
+		WriteValue(QStringLiteral("ServerHost"), host.trimmed());
+	}
+
+	// 服务器配置只保存一个主机/IP，其余固定端口与路径由程序派生。
 	inline QString UpdateBaseUrl()
 	{
-		return ReadValue(QStringLiteral("UpdateBaseUrl"), QStringLiteral("http://103.217.203.52:8090/ota"));
+		return QStringLiteral("http://%1:8090/ota").arg(ServerHost());
 	}
 
-	inline void SetUpdateBaseUrl(const QString& url)
-	{
-		WriteValue(QStringLiteral("UpdateBaseUrl"), url);
-	}
-
-	// —— 数据上传（FTP）——
 	inline QString FtpHost()
 	{
-		return ReadValue(QStringLiteral("FtpHost"), QStringLiteral("103.217.203.52"));
-	}
-
-	inline void SetFtpHost(const QString& host)
-	{
-		WriteValue(QStringLiteral("FtpHost"), host);
+		return ServerHost();
 	}
 
 	inline int FtpPort()
 	{
-		bool ok = false;
-		const int port = ReadValue(QStringLiteral("FtpPort"), QStringLiteral("21")).toInt(&ok);
-		return (ok && port > 0 && port <= 65535) ? port : 21;
+		return 21;
 	}
 
-	inline void SetFtpPort(int port)
+	inline QString FullAccessAccount()
 	{
-		WriteValue(QStringLiteral("FtpPort"), QString::number(port));
+		return QStringLiteral("devicedata");
 	}
 
-	// 共享 uploader 已永久退役。账号与密码都必须由管理员在现场显式配置。
+	inline QString FtpAccessAccount()
+	{
+		return QStringLiteral("ftpoperator");
+	}
+
+	inline QString UploadOnlyAccount()
+	{
+		return QStringLiteral("uploader");
+	}
+
+	inline bool IsDefaultFtpAccount(const QString& account)
+	{
+		const QString normalized = account.trimmed();
+		return normalized == FullAccessAccount()
+			|| normalized == FtpAccessAccount()
+			|| normalized == UploadOnlyAccount();
+	}
+
+	inline bool IsFullAccessAccount(const QString& account)
+	{
+		return account.trimmed() == FullAccessAccount();
+	}
+
+	inline bool IsUploadOnlyAccount(const QString& account)
+	{
+		return account.trimmed() == UploadOnlyAccount();
+	}
+
+	inline AccessLevel AccessLevelForAccount(const QString& account)
+	{
+		if (IsFullAccessAccount(account))
+		{
+			return AccessLevel::Full;
+		}
+		if (account.trimmed() == FtpAccessAccount())
+		{
+			return AccessLevel::Ftp;
+		}
+		return AccessLevel::Upload;
+	}
+
+	inline bool HasFtpAccess(AccessLevel level)
+	{
+		return static_cast<int>(level) >= static_cast<int>(AccessLevel::Ftp);
+	}
+
+	inline bool HasFullAccess(AccessLevel level)
+	{
+		return level == AccessLevel::Full;
+	}
+
+	// 只保存最近一次已经通过服务器 FTP 登录验证的默认账号与密码。
+	// 密码由 ConfigDatabase 以 Windows DPAPI CurrentUser 保护，不在服务器配置页显示。
 	inline QString FtpUser()
 	{
-		return ReadValue(QStringLiteral("FtpUser"), QString());
+		return ReadValue(QStringLiteral("FtpUser"), UploadOnlyAccount());
 	}
 
 	inline void SetFtpUser(const QString& user)
@@ -84,7 +159,7 @@ namespace OnlineServicesConfig
 
 	inline QString FtpPassword()
 	{
-		return ReadValue(QStringLiteral("FtpPassword"), QString());
+		return ReadSecretValue(QStringLiteral("FtpPassword"));
 	}
 
 	inline void SetFtpPassword(const QString& password)
@@ -113,25 +188,11 @@ namespace OnlineServicesConfig
 
 	inline QString DefaultDeviceName()
 	{
-		QString value = QSysInfo::machineHostName().trimmed().toLower();
-		value.replace(QRegularExpression(QStringLiteral("[^a-z0-9_-]+")), QStringLiteral("-"));
-		while (value.startsWith(QLatin1Char('-')) || value.startsWith(QLatin1Char('_')))
-		{
-			value.remove(0, 1);
-		}
-		if (value.isEmpty() || value.front() < QLatin1Char('a') || value.front() > QLatin1Char('z'))
-		{
-			value.prepend(QStringLiteral("device-"));
-		}
-		value = value.left(32);
-		while (value.size() < 3)
-		{
-			value.append(QLatin1Char('0'));
-		}
-		return IsServerAccountName(value) ? value : QStringLiteral("device-unknown");
+		const QString value = QSysInfo::machineHostName().trimmed();
+		return value.isEmpty() ? QStringLiteral("device-unknown") : value;
 	}
 
-	// 设备名同时也是服务端普通 FTP 账号名；必须匹配服务端账号正则。
+	// 设备名只用于服务器 /data/<设备名>/ 目录；登录账号由三级固定账号独立决定。
 	inline QString DeviceName()
 	{
 		return ReadValue(QStringLiteral("DeviceName"), DefaultDeviceName());
@@ -140,51 +201,6 @@ namespace OnlineServicesConfig
 	inline void SetDeviceName(const QString& name)
 	{
 		WriteValue(QStringLiteral("DeviceName"), name);
-	}
-
-	// 自动扫描数据上传不允许使用已退役 uploader 或唯一全权限 devicedata。客户端配置本身不能证明
-	// 服务端 ACL；这里只实施可执行的失败关闭前置条件：必须由服务端为设备配置
-	// 与设备名完全一致的独立 FTP 账号，并在服务端限制该账号只能写 /data/<device>。
-	// 即使通过此函数，真正的跨设备隔离仍由服务端 ACL 完成，不把本地字符串校验
-	// 伪装成服务端身份证明。
-	inline bool IsDeviceBoundUploadIdentity(
-		const QString& userValue,
-		const QString& deviceValue,
-		QString* error = nullptr)
-	{
-		const QString user = userValue.trimmed();
-		const QString device = deviceValue.trimmed();
-		QString reason;
-		if (user.isEmpty() || device.isEmpty())
-		{
-			reason = QStringLiteral("设备专用 FTP 账号或设备名为空");
-		}
-		else if (!IsServerAccountName(user) || !IsServerAccountName(device))
-		{
-			reason = QStringLiteral("账号和设备名必须匹配 ^[a-z][a-z0-9_-]{2,31}$");
-		}
-		else if (user == QStringLiteral("uploader"))
-		{
-			reason = QStringLiteral("共享 uploader 账号已永久退役");
-		}
-		else if (user == QStringLiteral("devicedata"))
-		{
-			reason = QStringLiteral("devicedata 是唯一全权限管理账号，不能作为设备上传身份");
-		}
-		else if (user.compare(device, Qt::CaseSensitive) != 0)
-		{
-			reason = QStringLiteral("设备专用 FTP 用户名必须与设备名完全一致");
-		}
-		if (error != nullptr)
-		{
-			*error = reason;
-		}
-		return reason.isEmpty();
-	}
-
-	inline bool HasDeviceBoundUploadIdentity(QString* error = nullptr)
-	{
-		return IsDeviceBoundUploadIdentity(FtpUser(), DeviceName(), error);
 	}
 
 	// 失败重试队列（JSON 数组字符串，元素为 Result 案例目录绝对路径）。
@@ -199,7 +215,7 @@ namespace OnlineServicesConfig
 	}
 
 	// 服务器管理接口令牌（nginx /admin/ 反代 + X-Admin-Token 鉴权）：账号增删/改权限与磁盘统计用。
-	// 不随包分发，由管理员在「在线服务 → 服务器配置」手填；本地使用 DPAPI CurrentUser 保护。
+	// 不在界面显示或编辑；由部署时写入本机数据库，并仅在全权限会话中自动使用。
 	inline QString AdminToken()
 	{
 		return ReadValue(QStringLiteral("AdminApiToken"), QString());

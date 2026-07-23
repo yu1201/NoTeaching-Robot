@@ -952,7 +952,7 @@ void LaserWeldFilterDialog::BuildUi()
     m_pEndPeriodMinBendSpin->setToolTip("补点最小弯折角(度)：预测窗口内候选点的弯折角 ≥ max(此值, 0.5×典型拐角角) 才补。\n防止在直段误补。波纹真拐角弯折常 7~13°、噪声基线 2~3°，取 5° 较稳。");
     m_pEndPeriodMergeSpin = new QDoubleSpinBox();
     m_pEndPeriodMergeSpin->setRange(0.05, 0.9); m_pEndPeriodMergeSpin->setDecimals(2); m_pEndPeriodMergeSpin->setSingleStep(0.05); m_pEndPeriodMergeSpin->setValue(0.4);
-    m_pEndPeriodMergeSpin->setToolTip("删错阈值(相邻同类间距/周期)：相邻【同类】拐点间距 < 此×周期L 判定其中一个找错→删弯折角离典型更远的那个。\n波纹同类拐角(II/OO)间距≈一个周期，挨太近(如平台重算把两边界角凑到4mm)即误检。0.4 表示间距<40%周期就删。搭接台阶对豁免。");
+    m_pEndPeriodMergeSpin->setToolTip("删错阈值(候选段长/同类完整段中位)：排除首末与搭接段，将中间段按 IO/OI/II/OO 四类分别统计。\n相邻同类角之间若实际为坡、同时短于同类平台与同方向坡中位长度的此倍数，并且删点后坡长恢复正常，才合并；平的真实短平台保留。");
 
     // 按平台边界重定拐点（②③④拟合方案通用）：波纹拐点全在"平台↔坡"交界。检测平的段(平台)，把拐点归位到平台两端。
     m_pPlatformSnapCheck = new QCheckBox("按平台边界重定拐点");
@@ -1049,7 +1049,7 @@ void LaserWeldFilterDialog::BuildUi()
     paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodRatioSpin, "x"), 25, 1);
     paramLayout->addWidget(new QLabel("补点最小弯折角"), 25, 2);
     paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodMinBendSpin, "deg"), 25, 3);
-    paramLayout->addWidget(new QLabel("删错间距(同类/周期)"), 26, 0);
+    paramLayout->addWidget(new QLabel("删错长度(同类段中位)"), 26, 0);
     paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodMergeSpin, "x"), 26, 1);
     paramLayout->addWidget(m_pPlatformSnapCheck, 27, 0, 1, 4);
     paramLayout->addWidget(new QLabel("平台判定斜率上限"), 28, 0);
@@ -1525,24 +1525,18 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
         ? PointCloudProcessingConfig::ValidationPolicy::Audit
         : PointCloudProcessingConfig::ValidationPolicy::Enforce;
     processingSettings.validationProfileVersion = PointCloudProcessingConfig::CURRENT_VALIDATION_PROFILE_VERSION;
-    processingSettings.validationCoverageEnabled = true;
     processingSettings.validationMinFinitePointCount = m_pValidationMinFinitePointSpin->value();
     processingSettings.validationMinProjectedSpanMm = m_pValidationMinProjectedSpanSpin->value();
-    processingSettings.validationContinuityEnabled = true;
     processingSettings.validationMinStationCoverageRatio = m_pValidationMinStationCoverageSpin->value() / 100.0;
     processingSettings.validationMinLongestContinuousRatio = m_pValidationMinLongestContinuousSpin->value() / 100.0;
-    processingSettings.validationDenoiseRatioEnabled = true;
     processingSettings.validationMaxRejectedRatio = m_pValidationMaxRejectedRatioSpin->value() / 100.0;
-    processingSettings.validationResidualEnabled = true;
     processingSettings.validationMaxMedianResidualMm = m_pValidationMaxMedianResidualSpin->value();
     processingSettings.validationMaxP95ResidualMm = m_pValidationMaxP95ResidualSpin->value();
     processingSettings.validationResidualInlierThresholdMm = m_pValidationResidualInlierThresholdSpin->value();
     processingSettings.validationMinResidualInlierRatio = m_pValidationMinResidualInlierRatioSpin->value() / 100.0;
-    processingSettings.validationKeyPointEnabled = true;
     processingSettings.validationMinKeyPointCount = m_pValidationMinKeyPointSpin->value();
     processingSettings.validationMinCornerCount = m_pValidationMinCornerSpin->value();
     processingSettings.validationMinSegmentLengthMm = m_pValidationMinSegmentLengthSpin->value();
-    processingSettings.validationOutputEnabled = true;
     processingSettings.validationMinOutputPointCount = m_pValidationMinOutputPointSpin->value();
     processingSettings.validationMinOutputLengthRatio = m_pValidationMinOutputLengthRatioSpin->value() / 100.0;
     QString localError;

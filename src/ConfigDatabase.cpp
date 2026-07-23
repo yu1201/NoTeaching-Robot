@@ -3137,6 +3137,100 @@ QMap<QString, QString> ConfigDatabase::ReadIniSection(const QString& fileName, c
     return values;
 }
 
+bool ConfigDatabase::ReadIniFileSnapshot(
+    const QString& fileName,
+    QMap<QString, QMap<QString, QString>>& sectionValues,
+    QString* error)
+{
+    sectionValues.clear();
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("配置数据库不可用。");
+        }
+        return false;
+    }
+
+    const ScopedSettingIdentity identity = BuildScopedFileIdentity(
+        fileName, QStringLiteral("snapshot"));
+    if (!identity.valid)
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("INI 文件身份无效：%1").arg(fileName);
+        }
+        return false;
+    }
+
+    const QString baseModule = NormalizeSection(identity.module);
+    const QString modulePrefix = baseModule + QStringLiteral("/");
+    QSqlQuery query(db);
+    query.prepare(
+        "SELECT module, key_name, value_text, encrypted FROM settings "
+        "WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?) "
+        "ORDER BY module COLLATE NOCASE, key_name COLLATE NOCASE");
+    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(baseModule);
+    query.addBindValue(modulePrefix.size());
+    query.addBindValue(modulePrefix);
+    if (!query.exec())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("读取 INI 文件快照失败：%1").arg(query.lastError().text());
+        }
+        return false;
+    }
+
+    // 同一个 SELECT 游标在 SQLite 中固定于一个读快照；写端即使在遍历期间提交，
+    // 本次返回的 metadata、分组和旧槽位也不会跨版本混合。
+    while (query.next())
+    {
+        const QString module = NormalizeSection(query.value(0).toString());
+        const QString keyName = NormalizeSourceKey(query.value(1).toString());
+        if (module == baseModule)
+        {
+            continue;
+        }
+        const QString sectionName = module.mid(modulePrefix.size());
+        QString plainText;
+        if (sectionName.isEmpty() || keyName.isEmpty()
+            || !DecodeStoredText(
+                query.value(2).toString(),
+                query.value(3).toInt(),
+                ProtectionPurpose(identity.scopeType, identity.scopeId, module, keyName),
+                &plainText))
+        {
+            sectionValues.clear();
+            if (error != nullptr)
+            {
+                *error = QStringLiteral("解码 INI 文件快照失败：[%1] %2")
+                    .arg(sectionName, keyName);
+            }
+            return false;
+        }
+        sectionValues[sectionName].insert(keyName, plainText);
+    }
+    if (query.lastError().isValid())
+    {
+        sectionValues.clear();
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("遍历 INI 文件快照失败：%1").arg(query.lastError().text());
+        }
+        return false;
+    }
+    return true;
+}
+
 bool ConfigDatabase::RemoveIniSection(const QString& fileName, const QString& sectionName)
 {
     QSqlDatabase db = OpenDatabase();
@@ -3157,6 +3251,106 @@ bool ConfigDatabase::RemoveIniSection(const QString& fileName, const QString& se
     query.addBindValue(NormalizeScopeId(identity.scopeId));
     query.addBindValue(NormalizeSection(identity.module));
     return query.exec();
+}
+
+bool ConfigDatabase::ReplaceIniSectionsAtomically(
+    const QString& fileName,
+    const QMap<QString, QMap<QString, QString>>& sectionValues,
+    const QStringList& removeSections,
+    QString* error)
+{
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("配置数据库不可用。");
+        }
+        return false;
+    }
+    if (!db.transaction())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("无法开始 INI 配置原子更新：%1").arg(db.lastError().text());
+        }
+        return false;
+    }
+
+    auto rollback = [&db]()
+        {
+            db.rollback();
+        };
+    QSet<QString> removedModules;
+    for (const QString& sectionName : removeSections)
+    {
+        const ScopedSettingIdentity identity = BuildScopedIniIdentity(
+            fileName, sectionName, QStringLiteral("dummy"));
+        if (!identity.valid)
+        {
+            rollback();
+            if (error != nullptr)
+            {
+                *error = QStringLiteral("INI section 身份无效：%1").arg(sectionName);
+            }
+            return false;
+        }
+        const QString normalizedModule = NormalizeSection(identity.module);
+        if (removedModules.contains(normalizedModule))
+        {
+            continue;
+        }
+        QSqlQuery deleteQuery(db);
+        deleteQuery.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND module=?");
+        deleteQuery.addBindValue(NormalizeSection(identity.scopeType).toLower());
+        deleteQuery.addBindValue(NormalizeScopeId(identity.scopeId));
+        deleteQuery.addBindValue(normalizedModule);
+        if (!deleteQuery.exec())
+        {
+            rollback();
+            if (error != nullptr)
+            {
+                *error = QStringLiteral("删除旧 INI section 失败：%1；%2")
+                    .arg(sectionName, deleteQuery.lastError().text());
+            }
+            return false;
+        }
+        removedModules.insert(normalizedModule);
+    }
+
+    for (auto sectionIt = sectionValues.cbegin(); sectionIt != sectionValues.cend(); ++sectionIt)
+    {
+        for (auto valueIt = sectionIt.value().cbegin(); valueIt != sectionIt.value().cend(); ++valueIt)
+        {
+            const ScopedSettingIdentity identity = BuildScopedIniIdentity(
+                fileName, sectionIt.key(), valueIt.key());
+            if (!identity.valid || !WriteScopedSettingValue(db, identity, valueIt.value()))
+            {
+                rollback();
+                if (error != nullptr)
+                {
+                    *error = QStringLiteral("写入 INI 配置失败：[%1] %2")
+                        .arg(sectionIt.key(), valueIt.key());
+                }
+                return false;
+            }
+        }
+    }
+
+    if (!db.commit())
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("提交 INI 配置原子更新失败：%1").arg(db.lastError().text());
+        }
+        return false;
+    }
+    return true;
 }
 
 bool ConfigDatabase::ReadScopedSetting(
@@ -3303,6 +3497,312 @@ bool ConfigDatabase::WriteScopedSetting(
     query.addBindValue(effectiveSensitive ? 1 : 0);
     query.addBindValue(encrypted);
     return query.exec();
+}
+
+bool ConfigDatabase::CompareAndSwapScopedSetting(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QString& keyName,
+    const QString* expectedValue,
+    const QString& newValue,
+    const QString& valueType,
+    bool sensitive,
+    bool* conflict,
+    QString* error)
+{
+    if (conflict != nullptr)
+    {
+        *conflict = false;
+    }
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("配置数据库不可用。");
+        }
+        return false;
+    }
+
+    ScopedSettingIdentity identity;
+    identity.scopeType = scopeType;
+    identity.scopeId = scopeId;
+    identity.module = moduleName;
+    identity.keyName = keyName;
+    identity.valueType = valueType;
+    identity.sensitive = sensitive
+        || IsSensitiveSettingKey(moduleName)
+        || IsSensitiveSettingKey(keyName);
+    identity.valid = !NormalizeSection(scopeType).isEmpty()
+        && !NormalizeScopeId(scopeId).isEmpty()
+        && !NormalizeSection(moduleName).isEmpty()
+        && !NormalizeSourceKey(keyName).isEmpty();
+    if (!identity.valid)
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("配置记录身份无效。");
+        }
+        return false;
+    }
+
+    QSqlQuery transaction(db);
+    if (!transaction.exec(QStringLiteral("BEGIN IMMEDIATE TRANSACTION")))
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("无法开始配置原子更新：%1")
+                .arg(transaction.lastError().text());
+        }
+        return false;
+    }
+    auto rollback = [&db]()
+        {
+            QSqlQuery query(db);
+            query.exec(QStringLiteral("ROLLBACK"));
+        };
+
+    QString currentValue;
+    const ReadStatus status = ReadScopedSettingValueStatus(db, identity, &currentValue);
+    if (status == ReadStatus::Error)
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("原子更新读取当前配置失败。");
+        }
+        return false;
+    }
+    const bool expectedMatches = expectedValue == nullptr
+        ? status == ReadStatus::NotFound
+        : status == ReadStatus::Found && currentValue == *expectedValue;
+    if (!expectedMatches)
+    {
+        rollback();
+        if (conflict != nullptr)
+        {
+            *conflict = true;
+        }
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("配置记录已被其他进程或操作更新。");
+        }
+        return false;
+    }
+    if (!WriteScopedSettingValue(db, identity, newValue))
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("原子更新写入配置失败。");
+        }
+        return false;
+    }
+    QString writtenValue;
+    const ReadStatus writtenStatus = ReadScopedSettingValueStatus(db, identity, &writtenValue);
+    if (writtenStatus != ReadStatus::Found || writtenValue != newValue)
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = writtenStatus == ReadStatus::Error
+                ? QStringLiteral("原子更新写后回读失败。")
+                : QStringLiteral("原子更新写后回读不一致。");
+        }
+        return false;
+    }
+    QSqlQuery commit(db);
+    if (!commit.exec(QStringLiteral("COMMIT")))
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("原子更新提交失败：%1").arg(commit.lastError().text());
+        }
+        return false;
+    }
+    return true;
+}
+
+bool ConfigDatabase::CompareAndSwapScopedSettingWithWitness(
+    const QString& witnessScopeType,
+    const QString& witnessScopeId,
+    const QString& witnessModuleName,
+    const QString& witnessKeyName,
+    const QString& expectedWitnessValue,
+    const QString& targetScopeType,
+    const QString& targetScopeId,
+    const QString& targetModuleName,
+    const QString& targetKeyName,
+    const QString* expectedTargetValue,
+    const QString& newTargetValue,
+    const QString& targetValueType,
+    bool targetSensitive,
+    bool* conflict,
+    QString* error)
+{
+    if (conflict != nullptr)
+    {
+        *conflict = false;
+    }
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    QSqlDatabase db = OpenDatabase();
+    if (!db.isValid() || !db.isOpen())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("配置数据库不可用。");
+        }
+        return false;
+    }
+
+    ScopedSettingIdentity witnessIdentity;
+    witnessIdentity.scopeType = witnessScopeType;
+    witnessIdentity.scopeId = witnessScopeId;
+    witnessIdentity.module = witnessModuleName;
+    witnessIdentity.keyName = witnessKeyName;
+    witnessIdentity.valid = !NormalizeSection(witnessScopeType).isEmpty()
+        && !NormalizeScopeId(witnessScopeId).isEmpty()
+        && !NormalizeSection(witnessModuleName).isEmpty()
+        && !NormalizeSourceKey(witnessKeyName).isEmpty();
+
+    ScopedSettingIdentity targetIdentity;
+    targetIdentity.scopeType = targetScopeType;
+    targetIdentity.scopeId = targetScopeId;
+    targetIdentity.module = targetModuleName;
+    targetIdentity.keyName = targetKeyName;
+    targetIdentity.valueType = targetValueType;
+    targetIdentity.sensitive = targetSensitive
+        || IsSensitiveSettingKey(targetModuleName)
+        || IsSensitiveSettingKey(targetKeyName);
+    targetIdentity.valid = !NormalizeSection(targetScopeType).isEmpty()
+        && !NormalizeScopeId(targetScopeId).isEmpty()
+        && !NormalizeSection(targetModuleName).isEmpty()
+        && !NormalizeSourceKey(targetKeyName).isEmpty();
+    if (!witnessIdentity.valid || !targetIdentity.valid)
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("witness 或 target 配置记录身份无效。");
+        }
+        return false;
+    }
+
+    QSqlQuery transaction(db);
+    if (!transaction.exec(QStringLiteral("BEGIN IMMEDIATE TRANSACTION")))
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("无法开始带 witness 的配置原子更新：%1")
+                .arg(transaction.lastError().text());
+        }
+        return false;
+    }
+    auto rollback = [&db]()
+        {
+            QSqlQuery query(db);
+            query.exec(QStringLiteral("ROLLBACK"));
+        };
+
+    QString currentWitnessValue;
+    const ReadStatus witnessStatus =
+        ReadScopedSettingValueStatus(db, witnessIdentity, &currentWitnessValue);
+    if (witnessStatus == ReadStatus::Error)
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("原子更新读取 witness 配置失败。");
+        }
+        return false;
+    }
+    if (witnessStatus != ReadStatus::Found || currentWitnessValue != expectedWitnessValue)
+    {
+        rollback();
+        if (conflict != nullptr)
+        {
+            *conflict = true;
+        }
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("witness 配置记录已被其他进程或操作更新。");
+        }
+        return false;
+    }
+
+    QString currentTargetValue;
+    const ReadStatus targetStatus =
+        ReadScopedSettingValueStatus(db, targetIdentity, &currentTargetValue);
+    if (targetStatus == ReadStatus::Error)
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("原子更新读取 target 配置失败。");
+        }
+        return false;
+    }
+    const bool targetMatches = expectedTargetValue == nullptr
+        ? targetStatus == ReadStatus::NotFound
+        : targetStatus == ReadStatus::Found && currentTargetValue == *expectedTargetValue;
+    if (!targetMatches)
+    {
+        rollback();
+        if (conflict != nullptr)
+        {
+            *conflict = true;
+        }
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("target 配置记录已被其他进程或操作更新。");
+        }
+        return false;
+    }
+    if (!WriteScopedSettingValue(db, targetIdentity, newTargetValue))
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("带 witness 的原子更新写入 target 失败。");
+        }
+        return false;
+    }
+
+    QString writtenTargetValue;
+    const ReadStatus writtenStatus =
+        ReadScopedSettingValueStatus(db, targetIdentity, &writtenTargetValue);
+    if (writtenStatus != ReadStatus::Found || writtenTargetValue != newTargetValue)
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = writtenStatus == ReadStatus::Error
+                ? QStringLiteral("带 witness 的原子更新写后回读失败。")
+                : QStringLiteral("带 witness 的原子更新写后回读不一致。");
+        }
+        return false;
+    }
+
+    QSqlQuery commit(db);
+    if (!commit.exec(QStringLiteral("COMMIT")))
+    {
+        rollback();
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("带 witness 的原子更新提交失败：%1")
+                .arg(commit.lastError().text());
+        }
+        return false;
+    }
+    return true;
 }
 
 bool ConfigDatabase::WriteScopedSettings(

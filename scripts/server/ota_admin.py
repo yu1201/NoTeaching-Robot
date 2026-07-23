@@ -19,8 +19,9 @@ uploaded device data:
   group of ``devicedata``.  Mode 2770 lets the administrator access it without
   granting another member of the shared ``ftpdata`` group any filesystem
   access;
-* ``uploader`` is retired and may never be allow-listed.  ``devicedata`` is the
-  only full-access account and cannot be deleted.
+* three protected default accounts are server-owned: ``devicedata`` is full,
+  ``ftpoperator`` has full FTP data access (the client hides server management),
+  and ``uploader`` is write-only.  UI capabilities remain a client-side policy.
 
 All file publication uses same-directory atomic replacement.  Account changes
 are serialized in-process and with a deployment-shared ``flock`` because
@@ -73,9 +74,14 @@ CHPASSWD = "/usr/sbin/chpasswd"
 ACCOUNT_LOCK_FILE = "/run/no-teaching-ota/ota-accounts.lock"
 REQUIRED_LOCK_OWNER_UID = 0
 
-FIXED_ACCOUNT_PERMISSIONS = {"devicedata": "full"}
-RETIRED_ACCOUNTS = frozenset({"uploader"})
-PROTECTED = frozenset((*FIXED_ACCOUNT_PERMISSIONS, *RETIRED_ACCOUNTS))
+FIXED_ACCOUNT_PERMISSIONS = {
+    "devicedata": "full",
+    "ftpoperator": "full",
+    "uploader": "upload",
+}
+SHARED_DATA_ACCOUNTS = frozenset(FIXED_ACCOUNT_PERMISSIONS)
+RETIRED_ACCOUNTS = frozenset()
+PROTECTED = SHARED_DATA_ACCOUNTS
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{2,31}$")
 MAX_BODY_BYTES = 16 * 1024
 MAX_CONFIG_BYTES = 64 * 1024
@@ -303,17 +309,13 @@ def _account_operation_scope(exclusive):
 def _validate_name(name):
     if not isinstance(name, str) or NAME_RE.fullmatch(name) is None:
         raise ApiError("账号名需小写字母开头、3-32位（小写字母/数字/_-）")
-    if name in RETIRED_ACCOUNTS:
-        raise ApiError("共享 uploader 账号已退役；请使用与设备名完全一致的独立账号")
     return name
 
 
 def _validate_stored_name(name):
-    """Validate an on-disk account name, including retired-name detection."""
+    """Validate an on-disk managed account name."""
     if not isinstance(name, str) or NAME_RE.fullmatch(name) is None:
         raise IntegrityError("invalid account name in managed state")
-    if name in RETIRED_ACCOUNTS:
-        raise IntegrityError("retired shared uploader account is still published")
     return name
 
 
@@ -527,7 +529,7 @@ def _get_device_admin_record():
         raise IntegrityError("devicedata UID is shared or aliased")
     if len(same_primary_gid) != 1 or same_primary_gid[0].pw_name != "devicedata":
         raise IntegrityError("devicedata primary GID is shared")
-    if any(member != "devicedata" for member in admin_group.gr_mem):
+    if any(member not in SHARED_DATA_ACCOUNTS for member in admin_group.gr_mem):
         raise IntegrityError("devicedata private group has an unexpected member")
     try:
         ftp_group = grp.getgrnam(FTP_GROUP)
@@ -842,7 +844,7 @@ def list_accounts():
             permission = _read_permission_unlocked(name)
             _assert_fixed_account_permission(name, permission)
             record = _assert_managed_system_account(name)
-            if name != "devicedata":
+            if name not in SHARED_DATA_ACCOUNTS:
                 _assert_device_directory(
                     name,
                     account_record=record,
@@ -930,6 +932,10 @@ def _assert_managed_system_account(name):
             or any(member != name for member in private_group.gr_mem)
         ):
             raise IntegrityError("device account primary group is shared or aliased")
+        if name in SHARED_DATA_ACCOUNTS:
+            admin_group = grp.getgrgid(admin_gid)
+            if name not in admin_group.gr_mem:
+                raise IntegrityError("shared default account cannot access the managed data group")
     return record
 
 
@@ -956,7 +962,7 @@ def account_create(name, password, permission):
         conf = _safe_conf_path(name)
         if _snapshot_file(conf) is not None:
             raise ConflictError("账号存在残留权限配置，拒绝覆盖")
-        if name != "devicedata" and os.path.lexists(_safe_device_path(name)):
+        if name not in SHARED_DATA_ACCOUNTS and os.path.lexists(_safe_device_path(name)):
             raise ConflictError("同名设备数据已保留，禁止新 UID 重建账号接管")
 
         user_added = False
@@ -964,7 +970,9 @@ def account_create(name, password, permission):
         try:
             try:
                 run(
-                    [USERADD, "-U", "-M", "-d", FTP_HOME, "-s", NOLOGIN_SHELL, "-G", FTP_GROUP, name],
+                    [USERADD, "-U", "-M", "-d", FTP_HOME, "-s", NOLOGIN_SHELL, "-G",
+                     (FTP_GROUP + ",devicedata") if name in SHARED_DATA_ACCOUNTS and name != "devicedata" else FTP_GROUP,
+                     name],
                     deadline=deadline,
                     reserve_seconds=ROLLBACK_RESERVE_SECONDS,
                 )
@@ -983,14 +991,14 @@ def account_create(name, password, permission):
                 reserve_seconds=ROLLBACK_RESERVE_SECONDS,
             )
             deadline.remaining()
-            if name != "devicedata":
+            if name not in SHARED_DATA_ACCOUNTS:
                 _create_device_directory(name, _assert_managed_system_account(name))
                 device_directory_created = True
             _set_permission_unlocked(name, permission)
             _publish_userlist_document_unlocked(_append_account_line(userlist_document, name))
         except Exception:
             _rollback_file(conf, None, "new account permission")
-            if device_directory_created or (name != "devicedata" and os.path.lexists(_safe_device_path(name))):
+            if device_directory_created or (name not in SHARED_DATA_ACCOUNTS and os.path.lexists(_safe_device_path(name))):
                 _rollback_new_device_directory(name)
             if user_added:
                 try:
@@ -1020,7 +1028,7 @@ def account_update(name, password=None, permission=None):
         if name not in names:
             raise NotFoundError("账号不存在")
         record = _assert_managed_system_account(name)
-        if name != "devicedata":
+        if name not in SHARED_DATA_ACCOUNTS:
             _assert_device_directory(
                 name,
                 account_record=record,

@@ -200,12 +200,13 @@ def main() -> int:
     )
     for token in (
         "AuthorizePrivilegedAction",
+        "AuthorizeFtpAction",
         "m_privilegedActionGuard",
-        "configGroup->setVisible(!m_aboutMode && m_remoteBrowseAllowed)",
-        "升级源、FTP 与管理令牌仅允许有效的本地管理员会话修改",
-        'return user != QStringLiteral("devicedata")',
-        "账号管理仅允许已保存的 devicedata 身份并要求管理令牌",
-        "普通设备账号权限由服务端固定为 upload-only",
+        "configGroup->setVisible(!m_aboutMode)",
+        "当前在线服务会话不能修改服务器 IP 或设备名称",
+        "HasFtpAccess()",
+        "账号管理仅对全权限账号开放",
+        "m_serverConfigNavRow",
     ):
         require(token in online_dialog, f"online-service live admin gate missing: {token}")
 
@@ -216,10 +217,23 @@ def main() -> int:
     )
     require(admin_request_match is not None, "AdminRequest implementation is missing")
     admin_request = admin_request_match.group(0)
-    admin_transport_tokens = (
-        'FtpUser().trimmed() != QStringLiteral("devicedata")',
+    admin_transport_match = re.search(
+        r"bool OnlineServicesDialog::CanUseSecureAdminTransport\(\) const.*?\n\}\n\nvoid OnlineServicesDialog::AdminRequest",
+        online_dialog,
+        re.S,
+    )
+    require(admin_transport_match is not None, "secure admin transport helper is missing")
+    admin_transport = admin_transport_match.group(0)
+    for token in (
         "address.isLoopback()",
-        'scheme != QStringLiteral("https")',
+        'scheme == QStringLiteral("https")',
+        'scheme == QStringLiteral("http")',
+        'host == QStringLiteral("localhost")',
+    ):
+        require(token in admin_transport, f"secure admin transport helper is missing: {token}")
+    admin_transport_tokens = (
+        "IsFullAccessAccount(OnlineServicesConfig::FtpUser())",
+        "CanUseSecureAdminTransport()",
         "禁止公网明文 HTTP",
         "OnlineServicesConfig::AdminToken()",
         "QNetworkRequest::SameOriginRedirectPolicy",
@@ -229,7 +243,7 @@ def main() -> int:
     for token in admin_transport_tokens:
         require(token in admin_request, f"AdminRequest secure transport gate missing: {token}")
     require(
-        admin_request.index('scheme != QStringLiteral("https")')
+        admin_request.index("CanUseSecureAdminTransport()")
         < admin_request.index("OnlineServicesConfig::AdminToken()")
         < admin_request.index("QNetworkRequest::SameOriginRedirectPolicy")
         < admin_request.index('setRawHeader("X-Admin-Token"')
@@ -238,12 +252,12 @@ def main() -> int:
     )
 
     require(
-        re.search(r'FtpPassword\(\).*?ReadValue\(QStringLiteral\("FtpPassword"\),\s*QString\(\)\)', online, re.S),
+        re.search(r'FtpPassword\(\).*?ReadSecretValue\(QStringLiteral\("FtpPassword"\)\)', online, re.S),
         "online FTP password still has a non-empty source default",
     )
     require(
-        re.search(r'FtpUser\(\).*?ReadValue\(QStringLiteral\("FtpUser"\),\s*QString\(\)\)', online, re.S),
-        "retired shared FTP user still has a non-empty source default",
+        re.search(r'FtpUser\(\).*?ReadValue\(QStringLiteral\("FtpUser"\),\s*UploadOnlyAccount\(\)\)', online, re.S),
+        "default online-services account is not the fixed upload-only role",
     )
     require('const std::string& ftpPwd = ' not in ftp, "FtpClient still has a password default argument")
     require("credential.password.clear();" in app, "robot FTP template still injects a password")

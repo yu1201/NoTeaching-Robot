@@ -4167,65 +4167,162 @@ double GeometryKeyDistance(
     return (projected[keyIndexes[secondPosition]].point - projected[keyIndexes[firstPosition]].point).norm();
 }
 
-// 周期/角度删错拐点：相邻【同类】拐点弧长间距 ≪ 周期L(< distFrac*L)说明其中一个找错——波纹同类拐角(II/OO 各
-// 界定一个平台)间距≈一个周期，挨太近多由平台重算把一个平台的两个边界角凑到一起所致。合并成一个：删弯折角离
-// 典型角更远的那个。搭接台阶对(相邻两个 isLapStepKey)豁免(本就该挨着)。端点不动。只删不插、保持原序。
+enum class GeometryWaveSegmentClass
+{
+    InnerToOuter = 0,
+    OuterToInner = 1,
+    InnerPlatform = 2,
+    OuterPlatform = 3,
+    Invalid = 4
+};
+
+GeometryWaveSegmentClass GeometryWaveSegmentClassForTypes(
+    RobotCalculation::LowerWeldPointType firstType,
+    RobotCalculation::LowerWeldPointType secondType)
+{
+    using PointType = RobotCalculation::LowerWeldPointType;
+    if (firstType == PointType::InnerCorner && secondType == PointType::OuterCorner)
+    {
+        return GeometryWaveSegmentClass::InnerToOuter;
+    }
+    if (firstType == PointType::OuterCorner && secondType == PointType::InnerCorner)
+    {
+        return GeometryWaveSegmentClass::OuterToInner;
+    }
+    if (firstType == PointType::InnerCorner && secondType == PointType::InnerCorner)
+    {
+        return GeometryWaveSegmentClass::InnerPlatform;
+    }
+    if (firstType == PointType::OuterCorner && secondType == PointType::OuterCorner)
+    {
+        return GeometryWaveSegmentClass::OuterPlatform;
+    }
+    return GeometryWaveSegmentClass::Invalid;
+}
+
+GeometryWaveSegmentClass GeometryWaveSegmentClassAt(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    int firstPosition)
+{
+    if (firstPosition <= 0 || firstPosition + 1 >= keyIndexes.size() - 1)
+    {
+        return GeometryWaveSegmentClass::Invalid;
+    }
+
+    return GeometryWaveSegmentClassForTypes(
+        GeometryCornerType(projected, keyIndexes, firstPosition),
+        GeometryCornerType(projected, keyIndexes, firstPosition + 1));
+}
+
+bool GeometryWaveSegmentIsPlatform(GeometryWaveSegmentClass segmentClass)
+{
+    return segmentClass == GeometryWaveSegmentClass::InnerPlatform
+        || segmentClass == GeometryWaveSegmentClass::OuterPlatform;
+}
+
+double GeometryWaveSegmentSlope(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    int firstPosition,
+    int secondPosition)
+{
+    if (firstPosition < 0
+        || secondPosition < 0
+        || firstPosition >= keyIndexes.size()
+        || secondPosition >= keyIndexes.size())
+    {
+        return 0.0;
+    }
+    const double ds =
+        projected[keyIndexes[secondPosition]].s - projected[keyIndexes[firstPosition]].s;
+    if (std::abs(ds) < 1e-6)
+    {
+        return 0.0;
+    }
+    return std::abs(
+        (projected[keyIndexes[secondPosition]].smoothH
+            - projected[keyIndexes[firstPosition]].smoothH)
+        / ds);
+}
+
+double GeometryTypicalWaveSegmentLength(
+    const QVector<GeometryProjectedPoint>& projected,
+    const QVector<int>& keyIndexes,
+    const QVector<char>& isLapStepKey,
+    GeometryWaveSegmentClass targetClass,
+    int omittedSegmentPosition,
+    double flatSlopeThreshold,
+    int minimumReferenceCount)
+{
+    QVector<double> lengths;
+    for (int position = 1; position + 1 < keyIndexes.size() - 1; ++position)
+    {
+        if (position == omittedSegmentPosition)
+        {
+            continue;
+        }
+        if ((position < isLapStepKey.size() && isLapStepKey[position])
+            || (position + 1 < isLapStepKey.size() && isLapStepKey[position + 1]))
+        {
+            continue;
+        }
+        const GeometryWaveSegmentClass segmentClass =
+            GeometryWaveSegmentClassAt(projected, keyIndexes, position);
+        if (segmentClass != targetClass)
+        {
+            continue;
+        }
+
+        // 四类统计只接收与类别几何一致的完整段：II/OO 必须是平台，IO/OI 必须是坡。
+        // 这样候选短斜段即使被错标成 II/OO，也不会污染自己的平台长度基准。
+        const double slope =
+            GeometryWaveSegmentSlope(projected, keyIndexes, position, position + 1);
+        if (GeometryWaveSegmentIsPlatform(segmentClass)
+            ? slope >= flatSlopeThreshold
+            : slope < flatSlopeThreshold)
+        {
+            continue;
+        }
+
+        const double length =
+            GeometryKeyDistance(projected, keyIndexes, position, position + 1);
+        if (std::isfinite(length) && length > 0.05)
+        {
+            lengths.push_back(length);
+        }
+    }
+    if (lengths.size() < minimumReferenceCount)
+    {
+        return 0.0;
+    }
+    return GeometryMedianScalar(lengths);
+}
+
+// 四段式周期波删错拐点：排除首末不完整段与搭接段，把中间完整段按 IO/OI/II/OO
+// （两种坡、两种平台）分别统计 3D 长度。相邻同类拐点间若本应是平台，却同时满足
+// “远短于同类平台中位长度”且“实际为坡”，再验证删点后恢复出的 IO/OI 坡长回到
+// 同方向坡的典型范围，说明一个正常坡脚被拆成两个同类角。无可靠恢复方案时保守不删。
 QVector<int> MergeTooCloseSameTypeCorners(
     const QVector<GeometryProjectedPoint>& projected,
     const QVector<int>& keyIndexes,
     const QVector<char>& isLapStepKey,
     double distFrac,
+    double flatSlopeThreshold,
     int* removedCount)
 {
     if (removedCount != nullptr) { *removedCount = 0; }
     const int m0 = keyIndexes.size();
     if (m0 < 5) { return keyIndexes; }
 
-    // 周期 L = 中段段长中位(搭接合成、排除首末段)——与端区补漏 Pass 同口径。
-    std::vector<double> repS;
-    for (int k = 0; k < m0; )
-    {
-        if (k + 1 < m0 && k + 1 < isLapStepKey.size() && isLapStepKey[k] && isLapStepKey[k + 1])
-        {
-            repS.push_back(0.5 * (projected[keyIndexes[k]].s + projected[keyIndexes[k + 1]].s));
-            k += 2;
-        }
-        else
-        {
-            repS.push_back(projected[keyIndexes[k]].s);
-            ++k;
-        }
-    }
-    const int mm = static_cast<int>(repS.size());
-    if (mm < 4) { return keyIndexes; }
-    std::vector<double> seg;
-    for (int k = 1; k <= mm - 3; ++k) { seg.push_back(std::abs(repS[k + 1] - repS[k])); }
-    if (seg.empty()) { return keyIndexes; }
-    std::sort(seg.begin(), seg.end());
-    const double L = seg[seg.size() / 2];
-    if (L <= 2.0) { return keyIndexes; }
-    const double minGap = std::max(0.05, distFrac) * L;
-
-    const int bendWin = 10;
-    std::vector<double> ib;
-    for (int k = 1; k < m0 - 1; ++k)
-    {
-        if (k < isLapStepKey.size() && isLapStepKey[k]) { continue; }
-        const double b = GeometryBendAngleDegAt(projected, keyIndexes[k], bendWin);
-        if (b > 0.0) { ib.push_back(b); }
-    }
-    double typical = 8.0;
-    if (!ib.empty()) { std::sort(ib.begin(), ib.end()); typical = ib[ib.size() / 2]; }
-
     QVector<int> result = keyIndexes;
     QVector<char> lapKey = isLapStepKey;
-    // 段 [posA,posB] 的侧向斜率(|ΔsmoothH/Δs|)：平台≈平(小)、上/下坡≈陡(大)。用来分辨"真平台"与"坡上假双拐点"。
-    const double flatSlopeThresh = 0.15;  // <此≈平台，≥此≈坡(波纹平台斜率≈0.03~0.1，坡≈0.3~0.4)
+    const double flatSlopeThresh = std::max(0.01, flatSlopeThreshold);
+    const double shortFraction = std::min(0.95, std::max(0.05, distFrac));
+    constexpr int minimumReferenceSegments = 3;
     auto segSlope = [&](int posA, int posB) -> double
     {
-        const double ds = projected[result[posB]].s - projected[result[posA]].s;
-        if (std::abs(ds) < 1e-6) { return 0.0; }
-        return std::abs((projected[result[posB]].smoothH - projected[result[posA]].smoothH) / ds);
+        return GeometryWaveSegmentSlope(projected, result, posA, posB);
     };
     int removed = 0;
     bool changed = true;
@@ -4238,24 +4335,90 @@ QVector<int> MergeTooCloseSameTypeCorners(
             if ((k < lapKey.size() && lapKey[k]) || (k + 1 < lapKey.size() && lapKey[k + 1])) { continue; }
             // 必须同类
             if (GeometryCornerType(projected, result, k) != GeometryCornerType(projected, result, k + 1)) { continue; }
-            // 间距(主轴弧长)≥ minGap 则正常，不删
-            const double gap = std::abs(projected[result[k]].s - projected[result[k + 1]].s);
+            const GeometryWaveSegmentClass segmentClass =
+                GeometryWaveSegmentClassAt(projected, result, k);
+            if (!GeometryWaveSegmentIsPlatform(segmentClass)) { continue; }
+            // 对候选做留一统计；至少要有 3 个同类、平坦、完整的参考段才自动删，短工件不自动处理。
+            const double typicalLength = GeometryTypicalWaveSegmentLength(
+                projected,
+                result,
+                lapKey,
+                segmentClass,
+                k,
+                flatSlopeThresh,
+                minimumReferenceSegments);
+            if (typicalLength <= 2.0) { continue; }
+            // 使用原始 3D chord，与四类段各自的典型长度比较；不再混合长平台与短坡。
+            const double gap = GeometryKeyDistance(projected, result, k, k + 1);
+            const double minGap = shortFraction * typicalLength;
             if (gap >= minGap) { continue; }
             // 【平台保护】两同类拐点【之间】若是平的(flat)→这是一段真平台(哪怕很短)，两端都是真边界，绝不删。
             // 只有当它们之间是【坡】(斜率陡)时，才说明一条坡上多切了一个拐点(假双拐点)，才删。
             if (segSlope(k, k + 1) < flatSlopeThresh) { continue; }
-            // 删"坡中"那个(两侧都陡)，保留贴着平台的边界角(另一侧是平台)。两者都/都不像坡中→按弯折角离典型远近。
-            const bool kMidEdge = (k - 1 >= 0) && segSlope(k - 1, k) >= flatSlopeThresh;
-            const bool k1MidEdge = (k + 2 < result.size()) && segSlope(k + 1, k + 2) >= flatSlopeThresh;
-            int removeAt;
-            if (kMidEdge && !k1MidEdge) { removeAt = k; }
-            else if (k1MidEdge && !kMidEdge) { removeAt = k + 1; }
-            else
+
+            // 分别试删两个角：删后跨过该角形成的段必须恢复成 IO/OI 坡，坡长落在同类中位数
+            // 的 60%~160%，且原异常短段还要低于同方向坡中位数的 shortFraction。
+            // 评分只使用几何长度比，因此点序反转时仍会选择同一个物理点。
+            auto recoveryScore = [&](int candidateRemoveAt) -> double
             {
-                const double bk = GeometryBendAngleDegAt(projected, result[k], bendWin);
-                const double bk1 = GeometryBendAngleDegAt(projected, result[k + 1], bendWin);
-                removeAt = (std::abs(bk - typical) >= std::abs(bk1 - typical)) ? k : (k + 1);
+                const int leftPosition = candidateRemoveAt == k ? k - 1 : k;
+                const int rightPosition = candidateRemoveAt == k ? k + 1 : k + 2;
+                if (leftPosition <= 0 || rightPosition >= result.size() - 1)
+                {
+                    return std::numeric_limits<double>::infinity();
+                }
+                const GeometryWaveSegmentClass recoveredClass =
+                    GeometryWaveSegmentClassForTypes(
+                        GeometryCornerType(projected, result, leftPosition),
+                        GeometryCornerType(projected, result, rightPosition));
+                if (recoveredClass == GeometryWaveSegmentClass::Invalid
+                    || GeometryWaveSegmentIsPlatform(recoveredClass))
+                {
+                    return std::numeric_limits<double>::infinity();
+                }
+                // 试删 k 时，k-1->k 是已被截短的坡；试删 k+1 时，k+1->k+2 是已被截短的坡。
+                // 该段不能参与自己的恢复基准，否则少样本时会把坡中位数向异常值拉偏。
+                const int fragmentedSlopePosition =
+                    candidateRemoveAt == k ? k - 1 : k + 1;
+                const double typicalSlopeLength = GeometryTypicalWaveSegmentLength(
+                    projected,
+                    result,
+                    lapKey,
+                    recoveredClass,
+                    fragmentedSlopePosition,
+                    flatSlopeThresh,
+                    minimumReferenceSegments);
+                if (typicalSlopeLength <= 2.0
+                    || gap >= shortFraction * typicalSlopeLength)
+                {
+                    return std::numeric_limits<double>::infinity();
+                }
+                const double recoveredLength =
+                    GeometryKeyDistance(projected, result, leftPosition, rightPosition);
+                const double recoveredRatio = recoveredLength / typicalSlopeLength;
+                if (!std::isfinite(recoveredRatio)
+                    || recoveredRatio < 0.60
+                    || recoveredRatio > 1.60
+                    || segSlope(leftPosition, rightPosition) < flatSlopeThresh)
+                {
+                    return std::numeric_limits<double>::infinity();
+                }
+                return std::abs(std::log(recoveredRatio));
+            };
+
+            const double removeKScore = recoveryScore(k);
+            const double removeK1Score = recoveryScore(k + 1);
+            const bool removeKValid = std::isfinite(removeKScore);
+            const bool removeK1Valid = std::isfinite(removeK1Score);
+            if (!removeKValid && !removeK1Valid) { continue; }
+            // 两个方案几何上近乎等价时没有可靠优胜项，保守不删，避免反序后选择不同物理点。
+            if (removeKValid && removeK1Valid
+                && std::abs(removeKScore - removeK1Score) < 0.05)
+            {
+                continue;
             }
+            const int removeAt =
+                removeKValid && (!removeK1Valid || removeKScore < removeK1Score) ? k : (k + 1);
             result.removeAt(removeAt);
             lapKey.removeAt(removeAt);
             ++removed;
@@ -6304,11 +6467,16 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
                 for (int k = 0; k < keyIndexes.size(); ++k)
                     if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
             }
-            // 周期/角度删错拐点：平台重算等可能把一个平台的两个同类边界角凑到 ≪ 周期(如4mm)，
-            // SDK+拟合路径又跳过了 Prune 去重，这里据"相邻同类拐点间距≪周期=找错"合并清理。搭接对豁免。
+            // 四类段长删错拐点：SDK+拟合路径跳过 Prune，平台重算又可能把一个坡脚拆成
+            // 两个同类角；这里按 IO/OI/II/OO 分别统计完整段，清理短且实际为坡的 II/OO。搭接对豁免。
             int mergedCount = 0;
             keyIndexes = MergeTooCloseSameTypeCorners(
-                projected, keyIndexes, isLapStepKey, params.endPeriodMergeFrac, &mergedCount);
+                projected,
+                keyIndexes,
+                isLapStepKey,
+                params.endPeriodMergeFrac,
+                params.platformSnapFlatSlope,
+                &mergedCount);
             if (mergedCount > 0)
             {
                 isLapStepKey = QVector<char>(keyIndexes.size(), 0);
@@ -6330,6 +6498,24 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
                 isLapStepKey = QVector<char>(keyIndexes.size(), 0);
                 for (int k = 0; k < keyIndexes.size(); ++k)
                     if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
+            }
+            // 平台重定会改变关键点个数/位置；再按四类段长复核一次，避免重定后重新形成坡上同类双角。
+            if (params.enableEndPeriodCornerRecover)
+            {
+                int postSnapMergedCount = 0;
+                keyIndexes = MergeTooCloseSameTypeCorners(
+                    projected,
+                    keyIndexes,
+                    isLapStepKey,
+                    params.endPeriodMergeFrac,
+                    params.platformSnapFlatSlope,
+                    &postSnapMergedCount);
+                if (postSnapMergedCount > 0)
+                {
+                    isLapStepKey = QVector<char>(keyIndexes.size(), 0);
+                    for (int k = 0; k < keyIndexes.size(); ++k)
+                        if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
+                }
             }
         }
     }

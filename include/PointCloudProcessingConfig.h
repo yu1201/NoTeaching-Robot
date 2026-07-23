@@ -138,6 +138,20 @@ public:
         bool validationOutputEnabled = true;
         int validationMinOutputPointCount = 80;
         double validationMinOutputLengthRatio = 0.70;
+        // 系统级安全门禁。除“机器人名称绑定”外，任一门禁关闭时 Load()
+        // 会把有效策略降为 Audit，允许诊断处理，但不签发生产质量证明或运动授权。
+        bool safetyGateProofIntegrityEnabled = true;
+        bool safetyGateProductionPurposeEnabled = true;
+        bool safetyGateRobotNameBindingEnabled = true;
+        bool safetyGateCaseBindingEnabled = true;
+        bool safetyGateEndpointBindingEnabled = true;
+        bool safetyGateCameraHandEyeBindingEnabled = true;
+        bool safetyGateFreshnessEnabled = true;
+        bool safetyGatePolicySnapshotEnabled = true;
+        bool safetyGateInputEvidenceEnabled = true;
+        bool safetyGateAuthorizedPoseIdentityEnabled = true;
+        bool safetyGateTrajectoryStructureEnabled = true;
+        bool safetyGateMotionPrecheckEnabled = true;
     };
 
     static QString DefaultLibraryDir();
@@ -146,6 +160,8 @@ public:
     static QString DataConfigPath();
     static Settings Load();
     static bool Save(const Settings& settings, QString* error = nullptr);
+    static bool CoreSafetyGatesEnabled(const Settings& settings);
+    static bool HasDisabledCoreSafetyGate(const Settings& settings);
     static void SetRuntimeModeOverride(Mode mode);
     static void SetRuntimeScanDirectionOverride(double x, double y, double z);
     static bool RuntimeScanDirectionOverride(double* x, double* y, double* z);

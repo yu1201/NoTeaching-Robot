@@ -14,6 +14,7 @@
 #include "FunctionTestDialog.h"
 #include "HandEyeCalibrationDialog.h"
 #include "LaserWeldFilterDialog.h"
+#include "ScanSafetyGateDialog.h"
 #include "WorkpieceMeshViewerDialog.h"
 #include "ModelAlignmentDialog.h"
 #include "VirtualWeldTestDialog.h"
@@ -23,12 +24,15 @@
 #include "WeldSafetyRecoveryStore.h"
 #include "OnlineServicesConfig.h"
 #include "OnlineServicesDialog.h"
+#include "OnlineServicesLoginDialog.h"
 #include "OPini.h"
 #include "PointCloudProcessingConfig.h"
 #include "ScanDataUploader.h"
 #include "PreciseMeasureEditDialog.h"
 #include "RobotCalculation.h"
 #include "RobotDataHelper.h"
+#include "RobotModelCatalogStore.h"
+#include "RobotModelManagerDialog.h"
 #include "RobotJogDialog.h"
 #include "RobotMessage.h"
 #include "RobotMotionTimeoutPolicy.h"
@@ -75,6 +79,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHostAddress>
+#include <QHash>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLayout>
@@ -2446,7 +2451,7 @@ namespace
 			rootLayout->addWidget(titleLabel);
 
 			QLabel* hintLabel = new QLabel(
-				"这里维护配置库中的控制单元列表，以及每个机器人单元的 IP、端口和 FTP 参数。保存后建议重新加载控制单元，正在运行流程时不要重载。",
+				"这里维护控制单元、机器人型号、IP、端口和 FTP 参数。机器人型号直接决定模型焊接流程使用哪套原始总装与碰撞简模；未配置或资源无效时该流程会禁用。保存后建议重新加载控制单元，正在运行流程时不要重载。",
 				pageWidget);
 			hintLabel->setWordWrap(true);
 			hintLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
@@ -2461,10 +2466,10 @@ namespace
 			QVBoxLayout* listLayout = new QVBoxLayout(listGroup);
 			listLayout->setSpacing(6);
 			m_unitTable = new QTableWidget(listGroup);
-			m_unitTable->setColumnCount(11);
+			m_unitTable->setColumnCount(12);
 			m_unitTable->setHorizontalHeaderLabels(QStringList()
 				<< "序号" << "启用" << "内部名" << "中文名" << "工件"
-				<< "类型" << "相机" << "手眼" << "IP" << "端口" << "FTP");
+				<< "类型" << "机器人型号" << "相机" << "手眼" << "IP" << "端口" << "FTP");
 			m_unitTable->horizontalHeader()->setStretchLastSection(true);
 			m_unitTable->setSelectionBehavior(QAbstractItemView::SelectRows);
 			m_unitTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -2505,6 +2510,15 @@ namespace
 			m_robotTypeCombo = new QComboBox(editGroup);
 			m_robotTypeCombo->addItem("FANUC", ROBOT_TYPE_FANUC);
 			m_robotTypeCombo->addItem("STEP", ROBOT_TYPE_STEP);
+			m_robotModelCombo = new QComboBox(editGroup);
+			QPushButton* robotModelLibraryBtn = new QPushButton("模型库...", editGroup);
+			robotModelLibraryBtn->setFixedWidth(100);
+			QWidget* robotModelRow = new QWidget(editGroup);
+			QHBoxLayout* robotModelRowLayout = new QHBoxLayout(robotModelRow);
+			robotModelRowLayout->setContentsMargins(0, 0, 0, 0);
+			robotModelRowLayout->setSpacing(6);
+			robotModelRowLayout->addWidget(m_robotModelCombo, 1);
+			robotModelRowLayout->addWidget(robotModelLibraryBtn);
 			m_unitTypeEdit = new QLineEdit(editGroup);
 			m_socketIpEdit = new IpAddressEdit(editGroup);
 			m_socketPortEdit = new QLineEdit(editGroup);
@@ -2532,6 +2546,7 @@ namespace
 			m_monitorPortEdit->setValidator(new QIntValidator(0, 65535, m_monitorPortEdit));
 			m_ftpPortEdit->setValidator(new QIntValidator(0, 65535, m_ftpPortEdit));
 			m_robotTypeCombo->setMinimumWidth(160);
+			m_robotModelCombo->setMinimumWidth(260);
 			m_workpieceTypeCombo->setMinimumWidth(160);
 
 			form->addRow("内部名", m_unitNameEdit);
@@ -2542,6 +2557,7 @@ namespace
 			form->addRow("设置状态", m_cameraReadyCheck);
 			form->addRow(QString(), m_handEyeReadyCheck);
 			form->addRow("机器人类型", m_robotTypeCombo);
+			form->addRow("机器人型号", robotModelRow);
 			form->addRow("UnitType", m_unitTypeEdit);
 			form->addRow("Socket IP", m_socketIpEdit);
 			form->addRow("Socket端口", m_socketPortEdit);
@@ -2593,13 +2609,30 @@ namespace
 				});
 			connect(m_robotTypeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]()
 				{
+					const QString selectedModel = m_robotModelCombo != nullptr
+						? m_robotModelCombo->currentData().toString() : QString();
 					ApplyFtpCredentialForRobotType(
 						m_robotTypeCombo->currentData().toInt(),
 						m_ftpUserEdit,
 						m_ftpPasswordEdit,
 						true);
+					PopulateRobotModelCombo(
+						m_robotModelCombo,
+						m_robotTypeCombo->currentData().toInt(),
+						selectedModel);
 					ApplyEditorRobotTypeUi();
 					SyncEditorFtpIpWithSocketIp();
+				});
+			connect(robotModelLibraryBtn, &QPushButton::clicked, this, [this]()
+				{
+					const QString selectedModel = m_robotModelCombo != nullptr
+						? m_robotModelCombo->currentData().toString() : QString();
+					RobotModelManagerDialog dialog(this);
+					dialog.exec();
+					PopulateRobotModelCombo(
+						m_robotModelCombo,
+						m_robotTypeCombo != nullptr ? m_robotTypeCombo->currentData().toInt() : -1,
+						selectedModel);
 				});
 
 			LoadUnits(false);
@@ -2614,6 +2647,7 @@ namespace
 			QString controlType = "R";
 			int unitType = 0;
 			int robotType = ROBOT_TYPE_FANUC;
+			QString robotModelId;
 			QString customName;
 			QString socketIP;
 			int socketPort = 0;
@@ -2714,6 +2748,79 @@ namespace
 			return ini.WriteString(ToIniBytes(key), value);
 		}
 
+		void PopulateRobotModelCombo(
+			QComboBox* combo,
+			int robotType,
+			const QString& selectedModelId) const
+		{
+			if (combo == nullptr)
+			{
+				return;
+			}
+			const QString selected = selectedModelId.trimmed().toLower();
+			const QSignalBlocker blocker(combo);
+			combo->clear();
+			combo->addItem("未配置（模型焊接不可用）", QString());
+			combo->setItemData(0,
+				"只有型号库中同时具有原始 STEP 和预生成碰撞简模的型号，才能使用模型焊接流程。",
+				Qt::ToolTipRole);
+
+			QList<RobotModelCatalogStore::ModelRecord> models;
+			QString catalogError;
+			if (RobotModelCatalogStore::ListModels(models, catalogError))
+			{
+				for (const RobotModelCatalogStore::ModelRecord& model : models)
+				{
+					if (model.sourceRobotType != robotType && model.modelId != selected)
+					{
+						continue;
+					}
+					RobotModelCatalogStore::Eligibility eligibility;
+					QString eligibilityError;
+					const bool resolved = RobotModelCatalogStore::ResolveModelEligibility(
+						model.modelId, robotType, eligibility, eligibilityError);
+					const bool available = resolved && eligibility.eligible;
+					QString text = model.displayName;
+					if (text.trimmed().isEmpty())
+					{
+						text = model.modelId;
+					}
+					if (!available)
+					{
+						text += "（当前不可用）";
+					}
+					const int row = combo->count();
+					combo->addItem(text, model.modelId);
+					combo->setItemData(row, available, Qt::UserRole + 1);
+					combo->setItemData(row,
+						available
+							? QString("型号键：%1\nSTEP：%2…\n碰撞简模：%3…")
+								.arg(model.modelId,
+									model.sourceStep.sha256.left(12),
+									model.collision.profileKeySha256.left(12))
+							: (!eligibility.reason.isEmpty() ? eligibility.reason : eligibilityError),
+						Qt::ToolTipRole);
+				}
+			}
+			else
+			{
+				combo->setToolTip("机器人型号库不可用：" + catalogError);
+			}
+
+			int selectedIndex = selected.isEmpty() ? 0 : combo->findData(selected);
+			if (selectedIndex < 0)
+			{
+				selectedIndex = combo->count();
+				combo->addItem(QString("未登记/类型不匹配：%1").arg(selected), selected);
+				combo->setItemData(selectedIndex, false, Qt::UserRole + 1);
+				combo->setItemData(selectedIndex,
+					"该控制单元保存的型号当前不在可用型号库中，模型焊接流程将保持禁用。",
+					Qt::ToolTipRole);
+			}
+			combo->setCurrentIndex(selectedIndex);
+			combo->setToolTip(combo->itemData(selectedIndex, Qt::ToolTipRole).toString());
+		}
+
 		void AppendLog(const QString& text)
 		{
 			if (m_logText != nullptr)
@@ -2775,6 +2882,7 @@ namespace
 			robotIni.SetSectionName("BaseParam");
 			unit.customName = ReadIniString(robotIni, "CustomName");
 			unit.robotType = ReadIniInt(robotIni, "RobotType", unit.robotType);
+			unit.robotModelId = ReadIniString(robotIni, "RobotModelId").trimmed().toLower();
 			unit.socketIP = ReadIniString(robotIni, "SocketIP");
 			unit.socketPort = ReadIniInt(robotIni, "SocketPort", 0);
 			unit.monitorPort = ReadIniInt(robotIni, "MonitorPort", 0);
@@ -2827,6 +2935,16 @@ namespace
 			}
 			QSignalBlocker blocker(m_unitTable);
 			m_unitTable->setRowCount(0);
+			QHash<QString, QString> modelDisplayNames;
+			QList<RobotModelCatalogStore::ModelRecord> models;
+			QString ignoredCatalogError;
+			if (RobotModelCatalogStore::ListModels(models, ignoredCatalogError))
+			{
+				for (const RobotModelCatalogStore::ModelRecord& model : models)
+				{
+					modelDisplayNames.insert(model.modelId, model.displayName);
+				}
+			}
 			for (int row = 0; row < m_units.size(); ++row)
 			{
 				const UnitConfig& unit = m_units.at(row);
@@ -2843,11 +2961,27 @@ namespace
 				setItem(3, unit.chineseName);
 				setItem(4, WorkpieceDisplayName(unit.workpieceType));
 				setItem(5, unit.robotType == ROBOT_TYPE_STEP ? "STEP" : "FANUC");
-				setItem(6, unit.cameraParamReady ? "已完成" : "未完成");
-				setItem(7, unit.handEyeReady ? "已完成" : "未完成");
-				setItem(8, unit.socketIP);
-				setItem(9, QString::number(unit.socketPort));
-				setItem(10, QString("%1:%2").arg(unit.ftpIP).arg(unit.ftpPort));
+				QString modelDisplay = QStringLiteral("未配置");
+				if (!unit.robotModelId.isEmpty())
+				{
+					const QString registeredName = modelDisplayNames.value(
+						unit.robotModelId,
+						QStringLiteral("未登记：%1").arg(unit.robotModelId));
+					RobotModelCatalogStore::Eligibility eligibility;
+					QString eligibilityError;
+					const bool available = RobotModelCatalogStore::ResolveModelEligibility(
+						unit.robotModelId, unit.robotType, eligibility, eligibilityError)
+						&& eligibility.eligible;
+					modelDisplay = QStringLiteral("%1（%2）")
+						.arg(registeredName,
+							available ? QStringLiteral("可用") : QStringLiteral("不可用"));
+				}
+				setItem(6, modelDisplay);
+				setItem(7, unit.cameraParamReady ? "已完成" : "未完成");
+				setItem(8, unit.handEyeReady ? "已完成" : "未完成");
+				setItem(9, unit.socketIP);
+				setItem(10, QString::number(unit.socketPort));
+				setItem(11, QString("%1:%2").arg(unit.ftpIP).arg(unit.ftpPort));
 			}
 			m_unitTable->resizeColumnsToContents();
 		}
@@ -2908,6 +3042,7 @@ namespace
 			m_handEyeReadyCheck->setChecked(unit.handEyeReady);
 			const int robotTypeIndex = m_robotTypeCombo->findData(unit.robotType);
 			m_robotTypeCombo->setCurrentIndex(robotTypeIndex >= 0 ? robotTypeIndex : 0);
+			PopulateRobotModelCombo(m_robotModelCombo, unit.robotType, unit.robotModelId);
 			m_unitTypeEdit->setText(QString::number(unit.unitType));
 			m_socketIpEdit->setText(unit.socketIP);
 			m_socketPortEdit->setText(QString::number(unit.socketPort));
@@ -3121,6 +3256,15 @@ namespace
 			QComboBox* robotTypeCombo = new QComboBox(basicPage);
 			robotTypeCombo->addItem("FANUC", ROBOT_TYPE_FANUC);
 			robotTypeCombo->addItem("STEP", ROBOT_TYPE_STEP);
+			QComboBox* robotModelCombo = new QComboBox(basicPage);
+			QPushButton* robotModelLibraryBtn = new QPushButton("模型库...", basicPage);
+			robotModelLibraryBtn->setFixedWidth(100);
+			QWidget* robotModelRow = new QWidget(basicPage);
+			QHBoxLayout* robotModelRowLayout = new QHBoxLayout(robotModelRow);
+			robotModelRowLayout->setContentsMargins(0, 0, 0, 0);
+			robotModelRowLayout->setSpacing(6);
+			robotModelRowLayout->addWidget(robotModelCombo, 1);
+			robotModelRowLayout->addWidget(robotModelLibraryBtn);
 			QComboBox* workpieceCombo = new QComboBox(basicPage);
 			workpieceCombo->addItem("波纹板", kWorkpieceCorrugatedPlate);
 			for (QLineEdit* edit : { unitNameEdit, chineseNameEdit, customNameEdit })
@@ -3128,20 +3272,25 @@ namespace
 				edit->setMinimumWidth(300);
 			}
 			robotTypeCombo->setMinimumWidth(180);
+			robotModelCombo->setMinimumWidth(300);
 			workpieceCombo->setMinimumWidth(180);
 			unitNameEdit->setText(unit.unitName);
 			chineseNameEdit->setText(unit.chineseName);
 			customNameEdit->setText(unit.customName);
 			const int defaultTypeIndex = robotTypeCombo->findData(unit.robotType);
 			robotTypeCombo->setCurrentIndex(defaultTypeIndex >= 0 ? defaultTypeIndex : 0);
+			PopulateRobotModelCombo(robotModelCombo, unit.robotType, unit.robotModelId);
 			const int defaultWorkpieceIndex = workpieceCombo->findData(unit.workpieceType);
 			workpieceCombo->setCurrentIndex(defaultWorkpieceIndex >= 0 ? defaultWorkpieceIndex : 0);
 			basicForm->addRow("内部名", unitNameEdit);
 			basicForm->addRow("中文名", chineseNameEdit);
 			basicForm->addRow("显示名", customNameEdit);
 			basicForm->addRow("机器人类型", robotTypeCombo);
+			basicForm->addRow("机器人型号", robotModelRow);
 			basicForm->addRow("工件类型", workpieceCombo);
-			QLabel* basicTip = new QLabel("内部名会作为 Data 下的机器人目录名，例如 RobotC；保存后不建议再改。", basicPage);
+			QLabel* basicTip = new QLabel(
+				"内部名会作为 Data 下的机器人目录名，例如 RobotC；保存后不建议再改。机器人型号来自统一模型库，未选择时不能使用模型焊接流程。",
+				basicPage);
 			basicTip->setWordWrap(true);
 			basicTip->setStyleSheet("QLabel { color: #8EB7BF; }");
 			basicForm->addRow(QString(), basicTip);
@@ -3305,6 +3454,25 @@ namespace
 				};
 			applyTypeDefaults();
 			connect(robotTypeCombo, &QComboBox::currentIndexChanged, &wizard, [applyTypeDefaults]() mutable { applyTypeDefaults(); });
+			connect(robotTypeCombo, &QComboBox::currentIndexChanged, &wizard,
+				[this, robotTypeCombo, robotModelCombo]()
+				{
+					PopulateRobotModelCombo(
+						robotModelCombo,
+						robotTypeCombo->currentData().toInt(),
+						robotModelCombo->currentData().toString());
+				});
+			connect(robotModelLibraryBtn, &QPushButton::clicked, &wizard,
+				[this, &wizard, robotTypeCombo, robotModelCombo]()
+				{
+					const QString selectedModel = robotModelCombo->currentData().toString();
+					RobotModelManagerDialog dialog(&wizard);
+					dialog.exec();
+					PopulateRobotModelCombo(
+						robotModelCombo,
+						robotTypeCombo->currentData().toInt(),
+						selectedModel);
+				});
 
 			QHBoxLayout* buttonLayout = new QHBoxLayout();
 			QPushButton* prevBtn = new QPushButton("上一步", &wizard);
@@ -3439,6 +3607,7 @@ namespace
 						draft.customName = draft.chineseName;
 					}
 					draft.robotType = robotTypeCombo->currentData().toInt();
+					draft.robotModelId = robotModelCombo->currentData().toString().trimmed().toLower();
 					draft.workpieceType = workpieceCombo->currentData().toString();
 					draft.enabled = true;
 					draft.cameraParamReady = cameraReadyCheck->isChecked();
@@ -3543,6 +3712,7 @@ namespace
 				unit.customName = unit.chineseName;
 			}
 			unit.robotType = robotTypeCombo->currentData().toInt();
+			unit.robotModelId = robotModelCombo->currentData().toString().trimmed().toLower();
 			unit.workpieceType = workpieceCombo->currentData().toString();
 			unit.enabled = true;
 			unit.cameraParamReady = cameraReadyCheck->isChecked();
@@ -3600,6 +3770,9 @@ namespace
 			unit.cameraParamReady = m_cameraReadyCheck != nullptr && m_cameraReadyCheck->isChecked();
 			unit.handEyeReady = m_handEyeReadyCheck != nullptr && m_handEyeReadyCheck->isChecked();
 			unit.robotType = m_robotTypeCombo->currentData().toInt();
+			unit.robotModelId = m_robotModelCombo != nullptr
+				? m_robotModelCombo->currentData().toString().trimmed().toLower()
+				: QString();
 			unit.socketIP = m_socketIpEdit->text().trimmed();
 			unit.ftpIP = m_ftpIpEdit->text().trimmed();
 			unit.ftpUser = m_ftpUserEdit->text().trimmed();
@@ -3917,6 +4090,7 @@ namespace
 			ok = ok && WriteIniString(ini, "RobotName", unit.unitName);
 			ok = ok && WriteIniString(ini, "CustomName", unit.customName);
 			ok = ok && WriteIniInt(ini, "RobotType", unit.robotType);
+			ok = ok && WriteIniString(ini, "RobotModelId", unit.robotModelId);
 			ok = ok && WriteIniString(ini, "SocketIP", unit.socketIP);
 			ok = ok && WriteIniInt(ini, "SocketPort", unit.socketPort);
 			if (unit.monitorPort > 0)
@@ -3968,6 +4142,7 @@ namespace
 		QCheckBox* m_cameraReadyCheck = nullptr;
 		QCheckBox* m_handEyeReadyCheck = nullptr;
 		QComboBox* m_robotTypeCombo = nullptr;
+		QComboBox* m_robotModelCombo = nullptr;
 		QLineEdit* m_unitTypeEdit = nullptr;
 		IpAddressEdit* m_socketIpEdit = nullptr;
 		QLineEdit* m_socketPortEdit = nullptr;
@@ -8659,6 +8834,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addMenuAction(managementProcessMenu, createManagementAction("工艺参数", [this, openInManagement]() { openInManagement([this]() { OpenWeldProcessDialog(); }); }));
 	addMenuAction(managementProcessMenu, createManagementAction("焊道补偿", [this, openInManagement]() { openInManagement([this]() { OpenWeldSeamCompDialog(); }); }));
 	addMenuAction(managementProcessMenu, createManagementAction("精测点云处理", [this]() { OpenPrecisePointCloudProcessingPage(); }));
+	addMenuAction(managementProcessMenu, createManagementAction("扫描安全门禁", [this]() { OpenScanSafetyGatePage(); }));
 	addMenuAction(managementProcessMenu, createManagementAction("测量焊接参数", [this, openInManagement]() { openInManagement([this]() { OpenPreciseMeasureEditDialog(); }); }));
 
 	addMenuAction(managementCameraMenu, createManagementAction("相机参数", [this, openInManagement]() { openInManagement([this]() { OpenCameraParamDialog(); }); }));
@@ -9708,7 +9884,8 @@ bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 			|| watched == m_pConfigDatabaseViewerPage
 			|| watched == m_pOnlineServicesPage
 			|| watched == m_pProcessLoopTestPage
-			|| watched == m_pPrecisePointCloudProcessingPage)
+			|| watched == m_pPrecisePointCloudProcessingPage
+			|| watched == m_pScanSafetyGatePage)
 		{
 			QWidget* page = qobject_cast<QWidget*>(watched);
 			const bool inManagementStack = page != nullptr
@@ -12307,6 +12484,39 @@ void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 	ShowManagementEmbeddedPage(m_pPrecisePointCloudProcessingPage);
 }
 
+void QtWidgetsApplication4::OpenScanSafetyGatePage()
+{
+	PageOpenTrace trace("扫描安全门禁");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开扫描安全门禁")))
+	{
+		return;
+	}
+	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
+	{
+		QMessageBox::information(this, "扫描安全门禁", "扫描安全门禁需要工程师或管理员权限。");
+		return;
+	}
+	if (m_pManagementStack == nullptr)
+	{
+		QMessageBox::warning(this, "扫描安全门禁", "管理页面尚未初始化，无法嵌入扫描安全门禁页面。");
+		return;
+	}
+	if (m_pScanSafetyGatePage != nullptr)
+	{
+		ShowManagementEmbeddedPage(m_pScanSafetyGatePage);
+		return;
+	}
+
+	const auto modifyGuard = [this]()
+	{
+		return ValidateCurrentAccountSession(QStringLiteral("保存扫描安全门禁配置"))
+			&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
+	};
+	m_pScanSafetyGatePage = new ScanSafetyGateDialog(modifyGuard, m_pManagementStack);
+	PrepareEmbeddedPage(m_pScanSafetyGatePage, m_pManagementStack);
+	ShowManagementEmbeddedPage(m_pScanSafetyGatePage);
+}
+
 void QtWidgetsApplication4::OpenModelAlignmentPage()
 {
 	PageOpenTrace trace("模型配准");
@@ -12696,7 +12906,7 @@ void QtWidgetsApplication4::OpenAboutDialog()
 		EnsureScanDataUploader(),
 		[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 		true,
-		false,
+		OnlineServicesConfig::AccessLevel::Upload,
 		{},
 		this);
 	dlg->setObjectName(QStringLiteral("OnlineServicesDialogAbout"));
@@ -16596,12 +16806,27 @@ ScanDataUploader* QtWidgetsApplication4::EnsureScanDataUploader()
 void QtWidgetsApplication4::OpenOnlineServicesDialog()
 {
 	PageOpenTrace trace("在线服务");
-	if (!RequirePermission(kRoleEngineer, "在线服务"))
+	if (m_pOnlineServicesPage != nullptr && m_pOnlineServicesPage->IsRemoteOperationBusy())
 	{
+		QMessageBox::information(this, QStringLiteral("在线服务"),
+			QStringLiteral("远程数据操作正在进行，请等待完成后再重新登录。"));
 		return;
 	}
 
-	const bool remoteAllowed = RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);  // admin 才见「远程数据」区
+	OnlineServicesLoginDialog login(this);
+	if (login.exec() != QDialog::Accepted)
+	{
+		return;
+	}
+	const QString onlineAccount = login.Account();
+	OnlineServicesConfig::SetFtpUser(onlineAccount);
+	OnlineServicesConfig::SetFtpPassword(login.Password());
+	const OnlineServicesConfig::AccessLevel accessLevel = login.AccessLevel();
+	auto sessionGuard = [onlineAccount]()
+		{
+			return OnlineServicesConfig::IsDefaultFtpAccount(onlineAccount)
+				&& OnlineServicesConfig::FtpUser().trimmed() == onlineAccount;
+		};
 
 	// 无管理栈（异常兜底）时退回独立模态窗口；正常路径嵌入管理栈，作为管理页显示（不再单独弹窗）。
 	if (m_pManagementStack == nullptr)
@@ -16610,43 +16835,28 @@ void QtWidgetsApplication4::OpenOnlineServicesDialog()
 			EnsureScanDataUploader(),
 			[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 			false,
-			remoteAllowed,
-			[this]()
-			{
-				return ValidateCurrentAccountSession(QStringLiteral("执行在线服务管理员操作"))
-					&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
-			},
+			accessLevel,
+			sessionGuard,
 			this);
 		dialog.exec();
 		return;
 	}
 
-	// 账号权限变化（admin 登出后换低权限账号再进）需重建，避免「远程数据」区串给非 admin。
-	if (m_pOnlineServicesPage != nullptr && m_bOnlineServicesPageRemoteAllowed != remoteAllowed)
-	{
-		m_pManagementStack->removeWidget(m_pOnlineServicesPage);
-		m_pOnlineServicesPage->deleteLater();
-		m_pOnlineServicesPage = nullptr;
-	}
-
+	// 每次服务器登录成功都重建页面，确保旧账号展示过的数据和权限不会串入新会话。
 	if (m_pOnlineServicesPage != nullptr)
 	{
-		ShowManagementEmbeddedPage(m_pOnlineServicesPage);
-		return;
+		m_pManagementStack->removeWidget(m_pOnlineServicesPage);
+		delete m_pOnlineServicesPage;
+		m_pOnlineServicesPage = nullptr;
 	}
 
 	m_pOnlineServicesPage = new OnlineServicesDialog(
 		EnsureScanDataUploader(),
 		[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); },
 		false,
-		remoteAllowed,
-		[this]()
-		{
-			return ValidateCurrentAccountSession(QStringLiteral("执行在线服务管理员操作"))
-				&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
-		},
+		accessLevel,
+		sessionGuard,
 		m_pManagementStack);
-	m_bOnlineServicesPageRemoteAllowed = remoteAllowed;
 	PrepareEmbeddedPage(m_pOnlineServicesPage, m_pManagementStack);
 	ShowManagementEmbeddedPage(m_pOnlineServicesPage);
 }

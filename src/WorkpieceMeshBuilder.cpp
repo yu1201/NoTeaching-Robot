@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QTextStream>
 
 #include <algorithm>
@@ -509,15 +510,56 @@ bool WorkpieceMeshBuilder::SaveMeshPly(const QString& filePath, const Mesh& mesh
         error = "网格为空，未写出模型文件。";
         return false;
     }
-    // 先写临时文件再原子替换：直接 Truncate 覆写时若进程中途终止，截断文件的
-    // header（含缓存标记）已落盘会被 IsMeshCacheValid 误判有效，加载报数据不完整。
-    const QString tempPath = filePath + QStringLiteral(".tmp");
-    QFile file(tempPath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    // SaveMeshPly 是模型库的持久化信任边界。Mesh::IsValid() 只用于轻量判断，
+    // 这里必须完整验证，否则法线缺失会在下面按顶点写出时越界，坏索引也会被永久落盘。
+    if (mesh.normals.size() != mesh.vertices.size())
     {
-        error = QString("写入模型文件失败：%1").arg(tempPath);
+        error = QStringLiteral("网格法线数量与顶点数量不一致，拒绝写出模型文件。");
         return false;
     }
+    if (mesh.indices.size() % 3 != 0)
+    {
+        error = QStringLiteral("网格三角索引数量不是3的整数倍，拒绝写出模型文件。");
+        return false;
+    }
+    constexpr qsizetype kMaximumPersistedVertices = 2'000'000;
+    constexpr qsizetype kMaximumPersistedTriangles = 4'000'000;
+    if (mesh.vertices.size() > kMaximumPersistedVertices
+        || mesh.indices.size() / 3 > kMaximumPersistedTriangles)
+    {
+        error = QStringLiteral("网格超过PLY持久化上限（200万顶点/400万三角形）。");
+        return false;
+    }
+    for (qsizetype i = 0; i < mesh.vertices.size(); ++i)
+    {
+        if (!mesh.vertices.at(i).allFinite() || !mesh.normals.at(i).allFinite())
+        {
+            error = QStringLiteral("网格第%1个顶点或法线包含非有限值，拒绝写出模型文件。")
+                .arg(i);
+            return false;
+        }
+    }
+    for (qsizetype i = 0; i < mesh.indices.size(); ++i)
+    {
+        if (mesh.indices.at(i) >= static_cast<quint32>(mesh.vertices.size()))
+        {
+            error = QStringLiteral("网格第%1个索引越界，拒绝写出模型文件。").arg(i);
+            return false;
+        }
+    }
+    // QSaveFile 在同目录写临时文件并原子提交；禁用 direct-write fallback，确保覆盖失败或
+    // 进程中断时旧模型保持不变，不会先删除旧 PLY 再留下空缺。
+    QSaveFile file(filePath);
+    file.setDirectWriteFallback(false);
+    if (!file.open(QIODevice::WriteOnly))
+    {
+        error = QStringLiteral("写入模型文件失败：%1").arg(file.errorString());
+        return false;
+    }
+    const auto writeBlock = [&file](const QByteArray& block)
+    {
+        return file.write(block) == block.size();
+    };
     const qsizetype faceCount = mesh.indices.size() / 3;
     const QByteArray header = QStringLiteral(
         "ply\n"
@@ -533,7 +575,12 @@ bool WorkpieceMeshBuilder::SaveMeshPly(const QString& filePath, const Mesh& mesh
         .arg(faceCount)
         .arg(QString::fromLatin1(WORKPIECE_MESH_CACHE_TAG))
         .toLatin1();
-    file.write(header);
+    if (!writeBlock(header))
+    {
+        file.cancelWriting();
+        error = QStringLiteral("写入模型文件头失败：%1").arg(file.errorString());
+        return false;
+    }
 
     QByteArray vertexBlock;
     vertexBlock.resize(mesh.vertices.size() * 6 * sizeof(float));
@@ -545,7 +592,12 @@ bool WorkpieceMeshBuilder::SaveMeshPly(const QString& filePath, const Mesh& mesh
         *vp++ = v.x(); *vp++ = v.y(); *vp++ = v.z();
         *vp++ = n.x(); *vp++ = n.y(); *vp++ = n.z();
     }
-    file.write(vertexBlock);
+    if (!writeBlock(vertexBlock))
+    {
+        file.cancelWriting();
+        error = QStringLiteral("写入模型顶点失败：%1").arg(file.errorString());
+        return false;
+    }
 
     QByteArray faceBlock;
     faceBlock.resize(faceCount * (1 + 3 * sizeof(quint32)));
@@ -557,20 +609,16 @@ bool WorkpieceMeshBuilder::SaveMeshPly(const QString& filePath, const Mesh& mesh
         std::memcpy(fp, idx, sizeof(idx));
         fp += sizeof(idx);
     }
-    file.write(faceBlock);
-    if (file.error() != QFileDevice::NoError)
+    if (!writeBlock(faceBlock))
     {
-        file.close();
-        QFile::remove(tempPath);
-        error = QString("写入模型文件失败：%1").arg(tempPath);
+        file.cancelWriting();
+        error = QStringLiteral("写入模型三角形失败：%1").arg(file.errorString());
         return false;
     }
-    file.close();
-    QFile::remove(filePath);
-    if (!QFile::rename(tempPath, filePath))
+    if (!file.commit())
     {
-        QFile::remove(tempPath);
-        error = QString("替换模型文件失败：%1").arg(filePath);
+        error = QStringLiteral("原子提交模型文件失败，旧模型保持不变：%1")
+            .arg(file.errorString());
         return false;
     }
     return true;

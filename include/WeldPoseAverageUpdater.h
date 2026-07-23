@@ -36,7 +36,6 @@ public:
         QString inputPoseFilePath;
         QString robotName;
         QString poseCompParamPath;
-        QString seamCompParamPath;
         QString reportPath;
         int totalRecordCount = 0;
         int addedSlotCount = 0;

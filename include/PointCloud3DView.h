@@ -23,6 +23,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 
@@ -142,7 +143,7 @@ namespace pcview
             setMouseTracking(true);
             setFocusPolicy(Qt::StrongFocus);
             setAttribute(Qt::WA_AcceptTouchEvents, true);
-            SetTopView(false);
+            SetCameraLikeView(false);
         }
 
         void SetLayers(const QVector<Layer>& layers)
@@ -190,35 +191,29 @@ namespace pcview
             m_zoom = 1.0;
             m_pan = QPointF();
             ClearSelectedRotationCenter(false);
+            SetCameraLikeView(false);
             FitToLayers(false);
             update();
         }
 
         void SetTopView(bool updateNow = true)
         {
-            m_right = { 1.0, 0.0, 0.0 };
-            m_up = { 0.0, 1.0, 0.0 };
-            m_forward = { 0.0, 0.0, 1.0 };
-            if (updateNow)
-            {
-                update();
-            }
+            // 机器人右手坐标系：前方 +X、左方 +Y、上方 +Z。
+            // 从 +Z 侧俯视：屏幕上方为 +X，屏幕左方为 +Y。
+            SetViewBasis({ 0.0, -1.0, 0.0 }, { 1.0, 0.0, 0.0 }, updateNow);
         }
 
         void SetFrontView()
         {
-            m_right = { 1.0, 0.0, 0.0 };
-            m_up = { 0.0, 0.0, 1.0 };
-            m_forward = { 0.0, -1.0, 0.0 };
-            update();
+            // 从 -X 侧沿 +X 方向正视：屏幕左方为 +Y，屏幕上方为 +Z。
+            SetViewBasis({ 0.0, -1.0, 0.0 }, { 0.0, 0.0, 1.0 }, true);
         }
 
-        void SetCameraLikeView()
+        void SetCameraLikeView(bool updateNow = true)
         {
-            m_right = NormalizePoint3D({ 0.86, 0.48, 0.0 });
-            m_up = NormalizePoint3D({ -0.18, 0.32, 0.93 });
-            m_forward = NormalizePoint3D(CrossPoint3D(m_right, m_up));
-            update();
+            // 从 -X/-Y/+Z（后方、右方、上方）观察：+Z 向上、+X 向前、+Y 向左。
+            // 这里只设置默认姿态；后续轨迹球旋转不限制观察方向，也不镜像或换轴点云数据。
+            SetViewBasis({ 0.86, -0.48, 0.0 }, { 0.18, 0.32, 0.93 }, updateNow);
         }
 
     protected:
@@ -300,27 +295,25 @@ namespace pcview
 
         void mouseMoveEvent(QMouseEvent* event) override
         {
-            const QPointF delta = event->position() - m_lastMousePos;
-            m_lastMousePos = event->position();
+            const QPointF currentPos = event->position();
+            const QPointF previousPos = m_lastMousePos;
+            const QPointF delta = currentPos - previousPos;
+            m_lastMousePos = currentPos;
             if (m_rotating)
             {
+                QPointF rotationStart = previousPos;
                 if (!m_leftDragActive)
                 {
-                    const QPointF totalDelta = event->position() - m_pressMousePos;
+                    const QPointF totalDelta = currentPos - m_pressMousePos;
                     if (std::hypot(totalDelta.x(), totalDelta.y()) < QApplication::startDragDistance())
                     {
                         event->accept();
                         return;
                     }
                     m_leftDragActive = true;
+                    rotationStart = m_pressMousePos;
                 }
-                const double yaw = delta.x() * 0.008;
-                const double pitch = delta.y() * 0.008;
-                m_right = RotatePoint3D(m_right, m_up, yaw);
-                m_forward = RotatePoint3D(m_forward, m_up, yaw);
-                m_up = RotatePoint3D(m_up, m_right, pitch);
-                m_forward = RotatePoint3D(m_forward, m_right, pitch);
-                NormalizeBasis();
+                RotateViewBetweenScreenPoints(rotationStart, currentPos);
                 event->accept();
                 update();
                 return;
@@ -373,11 +366,97 @@ namespace pcview
         }
 
     private:
-        void NormalizeBasis()
+        static constexpr double kPi = 3.14159265358979323846;
+
+        // m_right / m_up / m_cameraBack 是 world-to-view 纯旋转矩阵的三行。
+        // cameraBack 表示从旋转中心朝观察者的 +view-Z；真正视线方向是它的反方向。
+        void NormalizeViewBasis()
         {
             m_right = NormalizePoint3D(m_right);
-            m_up = NormalizePoint3D(m_up - m_right * DotPoint3D(m_up, m_right));
-            m_forward = NormalizePoint3D(CrossPoint3D(m_right, m_up));
+            if (LengthPoint3D(m_right) <= 1.0e-9)
+            {
+                m_right = { 1.0, 0.0, 0.0 };
+            }
+
+            m_up = m_up - m_right * DotPoint3D(m_up, m_right);
+            if (LengthPoint3D(m_up) <= 1.0e-9)
+            {
+                const PointCloudVec3 fallback = std::abs(m_right.z) < 0.9
+                    ? PointCloudVec3{ 0.0, 0.0, 1.0 }
+                    : PointCloudVec3{ 0.0, 1.0, 0.0 };
+                m_up = fallback - m_right * DotPoint3D(fallback, m_right);
+            }
+            m_up = NormalizePoint3D(m_up);
+            m_cameraBack = NormalizePoint3D(CrossPoint3D(m_right, m_up));
+            // 再由 right/cameraBack 重建 up，抑制累计误差且保持 det(R)=+1。
+            m_up = NormalizePoint3D(CrossPoint3D(m_cameraBack, m_right));
+        }
+
+        void SetViewBasis(const PointCloudVec3& right, const PointCloudVec3& up, bool updateNow)
+        {
+            m_right = right;
+            m_up = up;
+            NormalizeViewBasis();
+            if (updateNow)
+            {
+                update();
+            }
+        }
+
+        PointCloudVec3 MapToArcball(const QPointF& screenPos) const
+        {
+            const double viewWidth = std::max(1, width());
+            const double viewHeight = std::max(1, height());
+            QPointF center = ProjectPoint(RotationCenter());
+            // 平移很大时仍让虚拟球中心留在窗口中央区域，避免交互退化。
+            center.setX(std::clamp(center.x(), viewWidth * 0.25, viewWidth * 0.75));
+            center.setY(std::clamp(center.y(), viewHeight * 0.25, viewHeight * 0.75));
+            const double radius = std::max(1.0, std::min(viewWidth, viewHeight) * 0.5);
+            double x = (screenPos.x() - center.x()) / radius;
+            double y = (center.y() - screenPos.y()) / radius;
+            const double length2 = x * x + y * y;
+            if (length2 > 1.0)
+            {
+                const double invLength = 1.0 / std::sqrt(length2);
+                return { x * invLength, y * invLength, 0.0 };
+            }
+            return { x, y, std::sqrt(std::max(0.0, 1.0 - length2)) };
+        }
+
+        void RotateViewBetweenScreenPoints(const QPointF& previousPos, const QPointF& currentPos)
+        {
+            const PointCloudVec3 previous = MapToArcball(previousPos);
+            const PointCloudVec3 current = MapToArcball(currentPos);
+            PointCloudVec3 axisInView = CrossPoint3D(previous, current);
+            double sinAngle = LengthPoint3D(axisInView);
+            const double cosAngle = std::clamp(DotPoint3D(previous, current), -1.0, 1.0);
+            double angle = 0.0;
+            if (sinAngle <= 1.0e-10)
+            {
+                if (cosAngle > 0.0)
+                {
+                    return;
+                }
+                const PointCloudVec3 reference = std::abs(previous.x) < 0.9
+                    ? PointCloudVec3{ 1.0, 0.0, 0.0 }
+                    : PointCloudVec3{ 0.0, 1.0, 0.0 };
+                axisInView = NormalizePoint3D(CrossPoint3D(previous, reference));
+                angle = kPi;
+            }
+            else
+            {
+                axisInView = axisInView * (1.0 / sinAngle);
+                angle = std::atan2(sinAngle, cosAngle);
+            }
+
+            // Rnew = D * Rold。把 view-space 旋转轴换回世界空间后，等价于用
+            // 反角旋转 R 的三行；三行始终一起旋转，绝不引入反射或单轴取反。
+            const PointCloudVec3 axisInWorld = NormalizePoint3D(
+                m_right * axisInView.x + m_up * axisInView.y + m_cameraBack * axisInView.z);
+            m_right = RotatePoint3D(m_right, axisInWorld, -angle);
+            m_up = RotatePoint3D(m_up, axisInWorld, -angle);
+            m_cameraBack = RotatePoint3D(m_cameraBack, axisInWorld, -angle);
+            NormalizeViewBasis();
         }
 
         PointCloudVec3 RotationCenter() const
@@ -677,25 +756,94 @@ namespace pcview
         {
             const QPointF origin(width() - 58.0, height() - 52.0);
             const double axisLength = 34.0;
-            auto drawAxis = [&](const PointCloudVec3& axis, const QColor& color, const QString& label)
+            struct AxisGlyph
             {
-                const QPointF direction(DotPoint3D(axis, m_right), -DotPoint3D(axis, m_up));
-                const double length = std::max(1.0, std::sqrt(direction.x() * direction.x() + direction.y() * direction.y()));
-                const QPointF normalized(direction.x() / length, direction.y() / length);
-                QPen pen(color);
-                pen.setWidthF(2.0);
-                painter.setPen(pen);
-                const QPointF end = origin + normalized * axisLength;
-                painter.drawLine(origin, end);
-                QFont font = painter.font();
-                font.setPointSize(10);
-                font.setBold(true);
-                painter.setFont(font);
-                painter.drawText(end + normalized * 7.0, label);
+                PointCloudVec3 axis;
+                QColor color;
+                QString label;
+                QPointF direction;
+                double depth = 0.0;
             };
-            drawAxis({ 1.0, 0.0, 0.0 }, QColor(255, 40, 40), "X");
-            drawAxis({ 0.0, 1.0, 0.0 }, QColor(40, 255, 40), "Y");
-            drawAxis({ 0.0, 0.0, 1.0 }, QColor(0, 180, 255), "Z");
+            std::array<AxisGlyph, 3> axes = { {
+                { { 1.0, 0.0, 0.0 }, QColor(255, 40, 40), QStringLiteral("+X") },
+                { { 0.0, 1.0, 0.0 }, QColor(40, 255, 40), QStringLiteral("+Y") },
+                { { 0.0, 0.0, 1.0 }, QColor(0, 180, 255), QStringLiteral("+Z") }
+            } };
+            for (AxisGlyph& glyph : axes)
+            {
+                glyph.direction = QPointF(
+                    DotPoint3D(glyph.axis, m_right),
+                    -DotPoint3D(glyph.axis, m_up));
+                glyph.depth = DotPoint3D(glyph.axis, m_cameraBack);
+            }
+            // 纯 QPainter 没有深度缓冲：先画远离观察者的轴，再画朝向观察者的轴。
+            std::sort(axes.begin(), axes.end(), [](const AxisGlyph& first, const AxisGlyph& second)
+                {
+                    return first.depth < second.depth;
+                });
+
+            painter.save();
+            painter.setRenderHint(QPainter::Antialiasing, true);
+            QFont font = painter.font();
+            font.setPointSize(10);
+            font.setBold(true);
+            painter.setFont(font);
+
+            for (const AxisGlyph& glyph : axes)
+            {
+                const double projectedLength = std::hypot(glyph.direction.x(), glyph.direction.y());
+                const QPointF end = origin + glyph.direction * axisLength;
+                QColor displayColor = glyph.color;
+                QPen pen(displayColor);
+                pen.setWidthF(2.0);
+                pen.setCapStyle(Qt::RoundCap);
+                if (glyph.depth < -0.05)
+                {
+                    displayColor.setAlpha(155);
+                    pen.setColor(displayColor);
+                    pen.setStyle(Qt::DashLine);
+                }
+                painter.setPen(pen);
+                QPointF labelPos;
+                if (projectedLength > 0.08)
+                {
+                    const QPointF unitDirection(
+                        glyph.direction.x() / projectedLength,
+                        glyph.direction.y() / projectedLength);
+                    painter.drawLine(origin, end);
+                    const double linePixels = projectedLength * axisLength;
+                    if (linePixels >= 8.0)
+                    {
+                        const QPointF perpendicular(-unitDirection.y(), unitDirection.x());
+                        const double headLength = std::min(6.0, linePixels * 0.35);
+                        const QPointF headBase = end - unitDirection * headLength;
+                        painter.drawLine(end, headBase + perpendicular * (headLength * 0.45));
+                        painter.drawLine(end, headBase - perpendicular * (headLength * 0.45));
+                    }
+                    // 只归一文字边距；轴线本身保留真实三维投影缩短。
+                    labelPos = end + unitDirection * 7.0;
+                }
+                else
+                {
+                    // 正轴几乎沿视线时：圆点表示朝观察者，圆叉表示背离观察者。
+                    painter.setBrush(Qt::NoBrush);
+                    painter.drawEllipse(origin, 4.5, 4.5);
+                    if (glyph.depth >= 0.0)
+                    {
+                        painter.setBrush(displayColor);
+                        painter.drawEllipse(origin, 1.7, 1.7);
+                    }
+                    else
+                    {
+                        painter.drawLine(origin + QPointF(-3.0, -3.0), origin + QPointF(3.0, 3.0));
+                        painter.drawLine(origin + QPointF(-3.0, 3.0), origin + QPointF(3.0, -3.0));
+                    }
+                    labelPos = origin + QPointF(7.0, -7.0);
+                }
+                painter.setPen(QPen(displayColor));
+                painter.drawText(labelPos, glyph.label);
+            }
+            painter.restore();
         }
 
         void DrawDirectionArrows(QPainter& painter) const
@@ -834,17 +982,6 @@ namespace pcview
             m_lastTouchDistance = 0.0;
         }
 
-        void RotateByScreenDelta(const QPointF& delta)
-        {
-            const double yaw = delta.x() * 0.008;
-            const double pitch = delta.y() * 0.008;
-            m_right = RotatePoint3D(m_right, m_up, yaw);
-            m_forward = RotatePoint3D(m_forward, m_up, yaw);
-            m_up = RotatePoint3D(m_up, m_right, pitch);
-            m_forward = RotatePoint3D(m_forward, m_right, pitch);
-            NormalizeBasis();
-        }
-
         void PanAndZoomFromTouch(const QPointF& currentCenter, double currentDistance)
         {
             const double oldScale = EffectiveScale();
@@ -927,6 +1064,7 @@ namespace pcview
                     }
                     else
                     {
+                        QPointF rotationStart = m_lastTouchPos;
                         if (!m_touchSingleDragActive)
                         {
                             const QPointF totalDelta = pos - m_touchStartPos;
@@ -937,8 +1075,9 @@ namespace pcview
                                 return true;
                             }
                             m_touchSingleDragActive = true;
+                            rotationStart = m_touchStartPos;
                         }
-                        RotateByScreenDelta(pos - m_lastTouchPos);
+                        RotateViewBetweenScreenPoints(rotationStart, pos);
                         m_lastTouchPos = pos;
                         update();
                     }
@@ -982,7 +1121,7 @@ namespace pcview
         QPointF m_pan;
         PointCloudVec3 m_right = { 1.0, 0.0, 0.0 };
         PointCloudVec3 m_up = { 0.0, 1.0, 0.0 };
-        PointCloudVec3 m_forward = { 0.0, 0.0, 1.0 };
+        PointCloudVec3 m_cameraBack = { 0.0, 0.0, 1.0 };
         QPointF m_lastMousePos;
         QPointF m_pressMousePos;
         bool m_rotating = false;

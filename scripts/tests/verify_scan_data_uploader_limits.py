@@ -134,21 +134,20 @@ def main() -> int:
     )
 
     for fragment in (
-        "HasDeviceBoundUploadIdentity",
-        "IsServerAccountName",
-        'user == QStringLiteral("uploader")',
-        'user == QStringLiteral("devicedata")',
-        "user.compare(device, Qt::CaseSensitive)",
-        "真正的跨设备隔离仍由服务端 ACL 完成",
+        "FullAccessAccount",
+        "FtpAccessAccount",
+        "UploadOnlyAccount",
+        "IsDefaultFtpAccount",
+        "AccessLevelForAccount",
     ):
-        require(fragment in config, f"device identity boundary is incomplete: {fragment}")
+        require(fragment in config, f"fixed online-services role mapping is incomplete: {fragment}")
     require(
-        "OnlineServicesConfig::HasDeviceBoundUploadIdentity" in source
-        and "OnlineServicesConfig::IsDeviceBoundUploadIdentity" in source,
-        "device-bound identity is not enforced both before and inside the worker",
+        source.count("OnlineServicesConfig::IsDefaultFtpAccount") >= 2
+        and "AppPaths::IsSafePathComponent(config.deviceName)" in source,
+        "default-account and safe device-directory gates are not enforced before and inside the worker",
     )
 
-    print("PASS: scan uploader has bounded queue/work/archive limits and a fail-closed device identity gate")
+    print("PASS: scan uploader has bounded limits and fixed-account/device-directory gates")
     return 0
 
 

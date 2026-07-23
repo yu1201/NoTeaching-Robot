@@ -443,6 +443,14 @@ class RuntimeIniGateTests(unittest.TestCase):
         db = data / "ConfigStore.db"
         with closing(sqlite3.connect(db)) as connection, connection:
             create_settings_schema(connection)
+            add_legacy_account(
+                connection,
+                "admin",
+                "admin",
+                password_record("admin", "runtime-ini-database-authority"),
+                flat=True,
+                protect=False,
+            )
         return db
 
     def test_only_exact_root_runtime_shape_is_allowed(self) -> None:
@@ -485,7 +493,7 @@ class RuntimeIniGateTests(unittest.TestCase):
             valid.write_bytes(b"ifupright=true\n" + b" " * (128 * 1024))
             self.assertFalse(MIGRATOR["_is_runtime_only_ini"](valid, data))
 
-    def test_legacy_ini_and_invalid_runtime_ini_still_block(self) -> None:
+    def test_legacy_ini_and_invalid_runtime_ini_are_ignored(self) -> None:
         fixtures = (
             (Path("Process.ini"), "[Runtime]\nPassCount=5\n"),
             (
@@ -517,11 +525,21 @@ class RuntimeIniGateTests(unittest.TestCase):
                 candidate.parent.mkdir(parents=True, exist_ok=True)
                 candidate.write_text(content, encoding="utf-8")
                 before = database_snapshot(db)
-                with self.assertRaisesRegex(SystemExit, "does not import legacy"):
+                source_before = candidate.read_bytes()
+                self.assertTrue(
                     MIGRATOR["migrate_existing_database_to_current"](
                         db, db.parent, True
                     )
-                self.assertEqual(before, database_snapshot(db))
+                )
+                self.assertNotEqual(before, database_snapshot(db))
+                self.assertEqual(source_before, candidate.read_bytes())
+                with closing(sqlite3.connect(db)) as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT value FROM meta WHERE key='schema_version'"
+                        ).fetchone(),
+                        (MIGRATOR["SCHEMA_VERSION"],),
+                    )
 
     def test_unneeded_upgrade_does_not_create_requested_backup(self) -> None:
         with tempfile.TemporaryDirectory() as text:
@@ -5979,18 +5997,40 @@ migrator["_atomic_replace_bytes"](
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(self._tree_snapshot(data), before)
 
-    def test_installer_upgrade_staging_keeps_legacy_input_gate(self) -> None:
+    def test_installer_upgrade_uses_v4_database_as_sole_authority(self) -> None:
         with tempfile.TemporaryDirectory() as text:
             data = Path(text) / "Data"
             data.mkdir()
             final_db = data / "ConfigStore.db"
             with closing(sqlite3.connect(final_db)) as connection, connection:
                 create_settings_schema(connection)
+                add_legacy_account(
+                    connection,
+                    "admin",
+                    "admin",
+                    password_record("admin", "database-authority"),
+                    flat=True,
+                    protect=False,
+                )
+                remote_identity = MIGRATOR["build_scoped_ini_identity"](
+                    "Data/Remote.ini", "Remote", "ApiToken"
+                )
+                insert_setting(
+                    connection,
+                    str(remote_identity["scope_type"]),
+                    str(remote_identity["scope_id"]),
+                    str(remote_identity["module"]),
+                    str(remote_identity["key_name"]),
+                    MIGRATOR["protect_legacy_text"]("database-is-authoritative"),
+                    sensitive=1,
+                    encrypted=1,
+                )
             legacy_ini = data / "Remote.ini"
             legacy_ini.write_text(
-                "[Remote]\nApiToken=must-not-be-ignored\nKeepMe=1\n",
+                "[Remote]\nApiToken=must-not-be-imported\nKeepMe=1\n",
                 encoding="utf-8",
             )
+            (data / "RobotDiskOnly").mkdir()
             final_before = final_db.read_bytes()
             source_before = legacy_ini.read_bytes()
             staging = data / (
@@ -6011,14 +6051,57 @@ migrator["_atomic_replace_bytes"](
                 "--installer-staging",
                 "--upgrade-backup", backup,
             )
-            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn(
-                "does not import legacy INI/TXT", result.stdout + result.stderr
+                "Ignored legacy disk configuration values", result.stdout + result.stderr
             )
             self.assertEqual(final_db.read_bytes(), final_before)
-            self.assertEqual(staging.read_bytes(), staging_before)
+            self.assertNotEqual(staging.read_bytes(), staging_before)
             self.assertEqual(legacy_ini.read_bytes(), source_before)
-            self.assertFalse(backup.exists())
+            self.assertTrue(backup.exists())
+            self.assertEqual(
+                MIGRATOR["verify_installer_state"](data, staging)[0],
+                "pending",
+            )
+            with closing(sqlite3.connect(staging)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT value FROM meta WHERE key='schema_version'"
+                    ).fetchone(),
+                    (MIGRATOR["SCHEMA_VERSION"],),
+                )
+                stored = connection.execute(
+                    """
+                    SELECT value_text, encrypted FROM settings
+                    WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?
+                    """,
+                    (
+                        remote_identity["scope_type"],
+                        remote_identity["scope_id"],
+                        remote_identity["module"],
+                        remote_identity["key_name"],
+                    ),
+                ).fetchone()
+                self.assertIsNotNone(stored)
+                self.assertEqual(
+                    MIGRATOR["decode_stored_text"](
+                        str(stored[0]),
+                        stored[1],
+                        MIGRATOR["protection_purpose"](
+                            str(remote_identity["scope_type"]),
+                            str(remote_identity["scope_id"]),
+                            str(remote_identity["module"]),
+                            str(remote_identity["key_name"]),
+                        ),
+                    ),
+                    "database-is-authoritative",
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM settings WHERE scope_id='RobotDiskOnly'"
+                    ).fetchone(),
+                    (0,),
+                )
 
     def test_installer_upgrade_rechecks_staging_and_final_authority(self) -> None:
         with tempfile.TemporaryDirectory() as text:

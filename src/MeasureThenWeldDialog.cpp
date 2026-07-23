@@ -7,7 +7,9 @@
 #include "HandEyeMatrixConfig.h"
 #include "MeasureThenWeldService.h"
 #include "MeasureThenWeldRuntimeConfig.h"
+#include "ModelWeldingFlowDialog.h"
 #include "OPini.h"
+#include "RobotModelCatalogStore.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotDataHelper.h"
 #include "RobotLog.h"
@@ -17,6 +19,7 @@
 #include "WeldProcessFile.h"
 #include "WeldResumePlanner.h"
 #include "WeldSafetyRecoveryStore.h"
+#include "WeldSeamCompConfig.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
 
@@ -67,11 +70,25 @@ constexpr auto WORKPIECE_CLOUD_FILE_NAME = "PreciseLaserPoint_WorkpieceCloud.txt
 constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
 constexpr auto WELD_POSE_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm.txt";
 constexpr auto WELD_POSE_SEAM_COMP_FILE_NAME = "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt";
-constexpr int COMP_SEGMENT_COUNT = 4;
+constexpr int LEGACY_OR_POSE_COMP_ROWS_PER_GROUP = 4;
 constexpr char POSE_GROUP_COUNT_KEY[] = "PoseCompGroupCount";
 constexpr char POSE_ACTIVE_GROUP_INDEX_KEY[] = "ActivePoseCompGroupIndex";
 constexpr char SEAM_GROUP_COUNT_KEY[] = "SeamCompGroupCount";
 constexpr char SEAM_ACTIVE_GROUP_INDEX_KEY[] = "ActiveSeamCompGroupIndex";
+constexpr int ROBOT_BASE_DISPLAY_ROLE = Qt::UserRole + 2;
+constexpr int ROBOT_MODEL_ID_ROLE = Qt::UserRole + 3;
+constexpr int ROBOT_CONFIGURED_TYPE_ROLE = Qt::UserRole + 4;
+constexpr int ROBOT_MODEL_ELIGIBLE_ROLE = Qt::UserRole + 5;
+constexpr int ROBOT_MODEL_NAME_ROLE = Qt::UserRole + 6;
+constexpr int ROBOT_MODEL_REASON_ROLE = Qt::UserRole + 7;
+
+QPointer<ModelWeldingFlowDialog>& ActiveModelWeldingFlowDialog()
+{
+    // 主程序已经有进程级单实例保护；这里再限制进程内只能存在一个模型焊接
+    // 流程窗口，避免两个嵌套窗口分别持有不同的模板/示教内存修订。
+    static QPointer<ModelWeldingFlowDialog> activeDialog;
+    return activeDialog;
+}
 
 QString FormatFlowElapsed(qint64 elapsedMs)
 {
@@ -926,9 +943,19 @@ void LoadCompGroupCombo(
             }
             else
             {
-                int rowCount = COMP_SEGMENT_COUNT;
+                int rowsPerGroup = LEGACY_OR_POSE_COMP_ROWS_PER_GROUP;
+                if (allSection == QStringLiteral("ALLWeldSeamComp"))
+                {
+                    int schemaVersion = 0;
+                    ini.ReadString(false, "SeamCompSchemaVersion", &schemaVersion);
+                    if (schemaVersion >= WeldSeamCompConfig::SCHEMA_VERSION)
+                    {
+                        rowsPerGroup = 1;
+                    }
+                }
+                int rowCount = rowsPerGroup;
                 ini.ReadString(false, ToUtf8StdString(rowCountKey), &rowCount);
-                groupCount = std::max(1, (std::max(0, rowCount) + COMP_SEGMENT_COUNT - 1) / COMP_SEGMENT_COUNT);
+                groupCount = std::max(1, (std::max(0, rowCount) + rowsPerGroup - 1) / rowsPerGroup);
             }
 
             activeIndex = std::clamp(activeIndex, 0, groupCount - 1);
@@ -1106,28 +1133,34 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
 
     QGridLayout* buttonLayout = new QGridLayout();
     m_pPresetParamBtn = new QPushButton("预设参数");
+    m_pModelWeldingFlowBtn = new QPushButton("模型焊接流程");
+    m_pModelWeldingFlowBtn->setToolTip(
+        "打开模型模板、V型槽粗放置、编号特征站和现场扫描示教页面。"
+        "当前阶段只做配置与离线定位验证，不会直接启动机器人运动。");
     m_pSkipScanWeldBtn = new QPushButton("跳过扫描焊接");
     m_pLineScanProcessBtn = new QPushButton("线扫处理");
     m_pTimeOffsetCalibBtn = new QPushButton("相机时间补偿标定");
     m_pTimeOffsetCalibBtn->setToolTip("同一工件自动正/反向各扫一次，按两次拐点在扫描方向的分裂量解算相机链路固有延迟，确认后写入该机器人全部参数组的「相机时间补偿(ms)」。标定前请确认工件/夹持不会移动。");
     m_pPresetParamBtn->setMinimumHeight(64);
+    m_pModelWeldingFlowBtn->setMinimumHeight(64);
     m_pSkipScanWeldBtn->setMinimumHeight(64);
     m_pLineScanProcessBtn->setMinimumHeight(64);
     m_pTimeOffsetCalibBtn->setMinimumHeight(64);
     buttonLayout->addWidget(m_pPresetParamBtn, 0, 0);
-    buttonLayout->addWidget(m_pLineScanProcessBtn, 0, 1);
-    buttonLayout->addWidget(m_pSkipScanWeldBtn, 1, 0);
-    buttonLayout->addWidget(m_pTimeOffsetCalibBtn, 1, 1);
+    buttonLayout->addWidget(m_pModelWeldingFlowBtn, 0, 1);
+    buttonLayout->addWidget(m_pLineScanProcessBtn, 1, 0);
+    buttonLayout->addWidget(m_pSkipScanWeldBtn, 1, 1);
+    buttonLayout->addWidget(m_pTimeOffsetCalibBtn, 2, 0, 1, 2);
     QPushButton* resumeWeldFlowBtn = new QPushButton("断点续焊");
     resumeWeldFlowBtn->setMinimumHeight(64);
     resumeWeldFlowBtn->setToolTip("从上次暂停落盘的V2断点继续焊接：只使用断点绑定的案例与实际执行轨迹，校验机器人端点、参数/工艺指纹和SHA256，再按毫米弧长精确回退。旧版断点不会自动匹配最新结果。");
-    buttonLayout->addWidget(resumeWeldFlowBtn, 2, 0, 1, 2);
+    buttonLayout->addWidget(resumeWeldFlowBtn, 3, 0, 1, 2);
     connect(resumeWeldFlowBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunResumeWeldFlow);
     QPushButton* safeRetreatRecoveryBtn = new QPushButton("焊后安全回撤恢复");
     safeRetreatRecoveryBtn->setMinimumHeight(64);
     safeRetreatRecoveryBtn->setToolTip(
         "仅恢复到持久记录绑定的收枪安全位，不会再次执行焊缝。用于焊接程序已完成、但因取消/STOP/回撤失败而保持闭锁的场景。");
-    buttonLayout->addWidget(safeRetreatRecoveryBtn, 3, 0, 1, 2);
+    buttonLayout->addWidget(safeRetreatRecoveryBtn, 4, 0, 1, 2);
     connect(safeRetreatRecoveryBtn, &QPushButton::clicked,
         this, &MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow);
     flowLayout->addLayout(buttonLayout);
@@ -1199,6 +1232,8 @@ MeasureThenWeldDialog::MeasureThenWeldDialog(ContralUnit* pContralUnit, int unit
     rootLayout->addWidget(m_pLogText);
 
     connect(m_pPresetParamBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunPresetParamFlow);
+    connect(m_pModelWeldingFlowBtn, &QPushButton::clicked,
+        this, &MeasureThenWeldDialog::OpenModelWeldingFlowDialog);
     connect(m_pSkipScanWeldBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunSkipScanWeldFlow);
     connect(m_pLineScanProcessBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunLineScanProcess);
     connect(m_pTimeOffsetCalibBtn, &QPushButton::clicked, this, &MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow);
@@ -1284,6 +1319,9 @@ void MeasureThenWeldDialog::LoadRobotList()
         const int row = m_pRobotCombo->count();
         m_pRobotCombo->addItem(info.displayName, info.unitIndex);
         m_pRobotCombo->setItemData(row, info.robotName, Qt::UserRole + 1);
+        m_pRobotCombo->setItemData(row, info.displayName, ROBOT_BASE_DISPLAY_ROLE);
+        m_pRobotCombo->setItemData(row, info.robotModelId, ROBOT_MODEL_ID_ROLE);
+        m_pRobotCombo->setItemData(row, info.robotType, ROBOT_CONFIGURED_TYPE_ROLE);
         if (info.unitIndex == m_unitIndex)
         {
             selectedIndex = row;
@@ -1301,6 +1339,7 @@ void MeasureThenWeldDialog::LoadRobotList()
     }
 
     m_bLoadingSelectors = false;
+    RefreshModelWeldingAvailability();
     LoadParamGroups();
     LoadWeldProcessList();
     LoadCompGroupLists();
@@ -1466,6 +1505,7 @@ void MeasureThenWeldDialog::OnRobotChanged(int index)
 
     m_unitIndex = m_pRobotCombo->currentData().toInt();
     m_pCameraCache = ResolveCameraCacheForUnit(m_unitIndex);
+    RefreshModelWeldingAvailability();
     LoadParamGroups();
     LoadWeldProcessList();
     LoadCompGroupLists();
@@ -1525,6 +1565,185 @@ QString MeasureThenWeldDialog::CurrentRobotName() const
         return QString::fromStdString(driver->m_sRobotName);
     }
     return QString();
+}
+
+bool MeasureThenWeldDialog::ResolveModelWeldingAvailabilityForRow(
+    int row,
+    QString& modelDisplayName,
+    QString& reason) const
+{
+    modelDisplayName.clear();
+    reason.clear();
+    if (m_pRobotCombo == nullptr || row < 0 || row >= m_pRobotCombo->count())
+    {
+        reason = QStringLiteral("未选择机器人。");
+        return false;
+    }
+
+    bool unitIndexOk = false;
+    const int unitIndex = m_pRobotCombo->itemData(row).toInt(&unitIndexOk);
+    if (!unitIndexOk || unitIndex < 0 || m_pContralUnit == nullptr
+        || unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+    {
+        reason = QStringLiteral("该列表项没有对应的真实机器人控制单元。");
+        return false;
+    }
+
+    RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, unitIndex);
+    if (driver == nullptr)
+    {
+        reason = QStringLiteral("机器人驱动无效。");
+        return false;
+    }
+
+    bool configuredTypeOk = false;
+    const int configuredRobotType = m_pRobotCombo->itemData(row, ROBOT_CONFIGURED_TYPE_ROLE)
+                                        .toInt(&configuredTypeOk);
+    if (!configuredTypeOk || configuredRobotType < 0)
+    {
+        reason = QStringLiteral("控制单元没有有效的机器人类型。");
+        return false;
+    }
+    if (configuredRobotType != driver->m_nRobotType)
+    {
+        reason = QStringLiteral("控制单元机器人类型与当前驱动不一致。");
+        return false;
+    }
+
+    const QString modelId = m_pRobotCombo->itemData(row, ROBOT_MODEL_ID_ROLE).toString().trimmed();
+    if (modelId.isEmpty())
+    {
+        reason = QStringLiteral("控制单元尚未设置机器人型号。");
+        return false;
+    }
+
+    RobotModelCatalogStore::Eligibility eligibility;
+    QString catalogError;
+    if (!RobotModelCatalogStore::ResolveModelEligibility(
+            modelId, driver->m_nRobotType, eligibility, catalogError))
+    {
+        reason = catalogError.trimmed().isEmpty()
+            ? QStringLiteral("机器人模型目录无法可信读取。")
+            : QStringLiteral("机器人模型目录不可用：%1").arg(catalogError.trimmed());
+        return false;
+    }
+    if (!eligibility.eligible)
+    {
+        reason = eligibility.reason.trimmed().isEmpty()
+            ? QStringLiteral("该型号尚未登记有效的适配模型和碰撞简模。")
+            : eligibility.reason.trimmed();
+        return false;
+    }
+
+    modelDisplayName = eligibility.model.displayName.trimmed();
+    if (modelDisplayName.isEmpty())
+    {
+        modelDisplayName = eligibility.model.modelId.left(12);
+    }
+    if (modelDisplayName.isEmpty())
+    {
+        reason = QStringLiteral("适配模型缺少可验证的型号标识。");
+        return false;
+    }
+    return true;
+}
+
+void MeasureThenWeldDialog::RefreshModelWeldingAvailability()
+{
+    if (m_pRobotCombo == nullptr)
+    {
+        if (m_pModelWeldingFlowBtn != nullptr)
+        {
+            m_pModelWeldingFlowBtn->setEnabled(false);
+            m_pModelWeldingFlowBtn->setToolTip(QStringLiteral("未加载机器人列表，模型焊接流程不可用。"));
+        }
+        return;
+    }
+
+    // 每次刷新都重新读取控制单元的 RobotModelId/RobotType，不能只信创建下拉框
+    // 时缓存的角色数据。控制单元刚保存型号后无需重启本页；若单元顺序或名称已
+    // 变化，则匹配失败并关闭入口，等待统一 ReloadSelectors 重建列表。
+    const QVector<RobotDataHelper::RobotInfo> freshRobots =
+        RobotDataHelper::LoadRobotList(m_pContralUnit);
+    for (int row = 0; row < m_pRobotCombo->count(); ++row)
+    {
+        bool unitIndexOk = false;
+        const int unitIndex = m_pRobotCombo->itemData(row).toInt(&unitIndexOk);
+        const QString storedRobotName =
+            m_pRobotCombo->itemData(row, Qt::UserRole + 1).toString().trimmed();
+        const auto fresh = std::find_if(
+            freshRobots.cbegin(), freshRobots.cend(),
+            [unitIndex, unitIndexOk, &storedRobotName](const RobotDataHelper::RobotInfo& info)
+            {
+                return unitIndexOk && info.unitIndex == unitIndex
+                    && info.robotName.compare(storedRobotName, Qt::CaseInsensitive) == 0;
+            });
+        if (fresh != freshRobots.cend())
+        {
+            m_pRobotCombo->setItemData(row, fresh->robotModelId, ROBOT_MODEL_ID_ROLE);
+            m_pRobotCombo->setItemData(row, fresh->robotType, ROBOT_CONFIGURED_TYPE_ROLE);
+        }
+        else
+        {
+            m_pRobotCombo->setItemData(row, QString(), ROBOT_MODEL_ID_ROLE);
+            m_pRobotCombo->setItemData(row, -1, ROBOT_CONFIGURED_TYPE_ROLE);
+        }
+        QString modelDisplayName;
+        QString reason;
+        const bool eligible = ResolveModelWeldingAvailabilityForRow(row, modelDisplayName, reason);
+        QString baseDisplayName = m_pRobotCombo->itemData(row, ROBOT_BASE_DISPLAY_ROLE).toString().trimmed();
+        if (baseDisplayName.isEmpty())
+        {
+            baseDisplayName = m_pRobotCombo->itemData(row, Qt::UserRole + 1).toString().trimmed();
+        }
+        const QString configuredModelId =
+            m_pRobotCombo->itemData(row, ROBOT_MODEL_ID_ROLE).toString().trimmed();
+        const QString modelText = eligible
+            ? modelDisplayName
+            : (configuredModelId.isEmpty() ? QStringLiteral("未设置") : configuredModelId);
+        const QString statusText = eligible ? QStringLiteral("已适配") : QStringLiteral("未适配");
+        m_pRobotCombo->setItemText(
+            row,
+            QStringLiteral("%1 — 型号: %2 / %3").arg(baseDisplayName, modelText, statusText));
+        m_pRobotCombo->setItemData(row, eligible, ROBOT_MODEL_ELIGIBLE_ROLE);
+        m_pRobotCombo->setItemData(row, modelDisplayName, ROBOT_MODEL_NAME_ROLE);
+        m_pRobotCombo->setItemData(row, reason, ROBOT_MODEL_REASON_ROLE);
+        m_pRobotCombo->setItemData(
+            row,
+            eligible
+                ? QStringLiteral("已验证机器人型号及碰撞简模：%1").arg(modelDisplayName)
+                : QStringLiteral("模型焊接流程不可用：%1").arg(reason),
+            Qt::ToolTipRole);
+    }
+
+    if (m_pModelWeldingFlowBtn == nullptr)
+    {
+        return;
+    }
+    const int currentRow = m_pRobotCombo->currentIndex();
+    QString modelDisplayName;
+    QString reason;
+    const bool eligible = ResolveModelWeldingAvailabilityForRow(currentRow, modelDisplayName, reason);
+    m_pModelWeldingFlowBtn->setEnabled(!m_bRunning && eligible);
+    if (!eligible)
+    {
+        m_pModelWeldingFlowBtn->setToolTip(
+            QStringLiteral("当前机器人不能使用模型焊接流程：%1\n"
+                           "请先在控制单元设置机器人型号，并在机器人模型库登记原始模型和碰撞简模。")
+                .arg(reason));
+    }
+    else if (m_bRunning)
+    {
+        m_pModelWeldingFlowBtn->setToolTip(
+            QStringLiteral("当前机器人流程正在运行，请结束后再打开模型焊接流程。"));
+    }
+    else
+    {
+        m_pModelWeldingFlowBtn->setToolTip(
+            QStringLiteral("当前已适配机器人模型：%1。\n"
+                           "打开模型模板、V型槽粗放置、编号特征站和现场扫描示教页面。")
+                .arg(modelDisplayName));
+    }
 }
 
 int MeasureThenWeldDialog::CurrentParamGroupIndex() const
@@ -1945,6 +2164,62 @@ bool MeasureThenWeldDialog::BlockedByOtherFlow(const QString& title)
         }
     }
     return false;
+}
+
+void MeasureThenWeldDialog::OpenModelWeldingFlowDialog()
+{
+    QPointer<ModelWeldingFlowDialog>& activeDialog = ActiveModelWeldingFlowDialog();
+    if (!activeDialog.isNull())
+    {
+        if (activeDialog->isMinimized())
+        {
+            activeDialog->showMaximized();
+        }
+        else
+        {
+            activeDialog->show();
+        }
+        activeDialog->raise();
+        activeDialog->activateWindow();
+        QMessageBox::information(
+            activeDialog,
+            QStringLiteral("模型焊接流程"),
+            QStringLiteral("模型焊接流程窗口已经打开，不能重复打开；已切换到现有窗口。"));
+        return;
+    }
+    if (m_bRunning)
+    {
+        QMessageBox::information(this, QStringLiteral("模型焊接流程"),
+            QStringLiteral("当前机器人流程正在运行，请结束后再配置模型焊接流程。"));
+        return;
+    }
+
+    RefreshModelWeldingAvailability();
+    QString modelDisplayName;
+    QString eligibilityReason;
+    if (!ResolveModelWeldingAvailabilityForRow(
+            m_pRobotCombo != nullptr ? m_pRobotCombo->currentIndex() : -1,
+            modelDisplayName,
+            eligibilityReason))
+    {
+        RefreshModelWeldingAvailability();
+        QMessageBox::warning(
+            this,
+            QStringLiteral("模型焊接流程不可用"),
+            QStringLiteral("当前机器人不能使用模型焊接流程：%1\n\n"
+                           "请先在控制单元设置机器人型号，并在机器人模型库登记原始模型和碰撞简模。")
+                .arg(eligibilityReason));
+        return;
+    }
+    ModelWeldingFlowDialog dialog(m_pContralUnit, m_unitIndex, this);
+    activeDialog = &dialog;
+    dialog.setWindowState(dialog.windowState() | Qt::WindowMaximized);
+    dialog.exec();
+    if (activeDialog == &dialog)
+    {
+        activeDialog.clear();
+    }
+    RefreshModelWeldingAvailability();
 }
 
 void MeasureThenWeldDialog::RunPresetParamFlow()
@@ -4762,6 +5037,7 @@ void MeasureThenWeldDialog::SetRunning(bool running)
     m_bRunning = running;
     RefreshPauseButtonAvailability();
     m_pPresetParamBtn->setEnabled(!running);
+    RefreshModelWeldingAvailability();
     m_pSkipScanWeldBtn->setEnabled(!running);
     m_pLineScanProcessBtn->setEnabled(!running);
     if (m_pTimeOffsetCalibBtn != nullptr)

@@ -44,15 +44,52 @@ def main() -> int:
             "legacy databases are not detected")
     require("storedValidationProfileVersion < CURRENT_VALIDATION_PROFILE_VERSION" in config_cpp,
             "legacy all-off profile is not migrated")
-    for token in (
-        "settings.validationCoverageEnabled = true;",
-        "settings.validationContinuityEnabled = true;",
-        "settings.validationDenoiseRatioEnabled = true;",
-        "settings.validationResidualEnabled = true;",
-        "settings.validationKeyPointEnabled = true;",
-        "settings.validationOutputEnabled = true;",
-    ):
-        require(token in config_cpp, f"mandatory quality check not forced: {token}")
+    quality_switches = (
+        "Coverage", "Continuity", "DenoiseRatio", "Residual", "KeyPoint", "Output",
+    )
+    for name in quality_switches:
+        field = f"validation{name}Enabled"
+        require(f"bool {field} = true;" in config_h, f"quality gate default is not safe-on: {field}")
+        require(f'ReadBoolSetting("Validation/{name}Enabled"' in config_cpp,
+                f"quality gate is not loaded: {field}")
+        require(f'write("Validation/{name}Enabled", normalizedSettings.{field} ? "1" : "0")'
+                in config_cpp, f"quality gate is not persisted as a real switch: {field}")
+        require(f"normalizedSettings.{field} = true;" not in config_cpp,
+                f"Save still silently forces quality gate on: {field}")
+    require("if (storedValidationProfileVersion < CURRENT_VALIDATION_PROFILE_VERSION)" in config_cpp
+            and all(f"settings.validation{name}Enabled = true;" in config_cpp
+                    for name in quality_switches),
+            "legacy profile migration no longer restores all six quality gates")
+
+    safety_gate_names = (
+        "ProofIntegrity", "ProductionPurpose", "RobotNameBinding", "CaseBinding",
+        "EndpointBinding", "CameraHandEyeBinding", "Freshness", "PolicySnapshot",
+        "InputEvidence", "AuthorizedPoseIdentity", "TrajectoryStructure", "MotionPrecheck",
+    )
+    for name in safety_gate_names:
+        field = f"safetyGate{name}Enabled"
+        require(f"bool {field} = true;" in config_h, f"system gate default is not safe-on: {field}")
+        require(f'ReadBoolSetting("SafetyGates/{name}Enabled"' in config_cpp,
+                f"system gate is not loaded: {field}")
+        require(f'write("SafetyGates/{name}Enabled", settings.{field} ? "1" : "0")'
+                in config_cpp, f"system gate is not persisted: {field}")
+    core_helper_start = config_cpp.index(
+        "bool PointCloudProcessingConfig::CoreSafetyGatesEnabled(")
+    core_helper_end = config_cpp.index(
+        "bool PointCloudProcessingConfig::HasDisabledCoreSafetyGate(", core_helper_start)
+    core_helper = config_cpp[core_helper_start:core_helper_end]
+    require("safetyGateRobotNameBindingEnabled" not in core_helper
+            and all(f"safetyGate{name}Enabled" in core_helper
+                    for name in safety_gate_names if name != "RobotNameBinding"),
+            "core-gate helper must cover every system gate except logical robot-name binding")
+    require("if (HasDisabledCoreSafetyGate(settings))" in config_cpp
+            and "settings.validationPolicy = ValidationPolicy::Audit;" in config_cpp,
+            "disabled core gate does not force the effective loaded policy to Audit")
+    save_start = config_cpp.index("bool PointCloudProcessingConfig::Save(")
+    save_body = config_cpp[save_start:]
+    require("if (HasDisabledCoreSafetyGate(normalizedSettings))" in save_body
+            and "normalizedSettings.validationPolicy = ValidationPolicy::Audit;" in save_body,
+            "Save can persist Enforce while a core system gate is disabled")
 
     require("struct PointCloudQualityReport" in calc_h, "missing structured quality report")
     for metric in (
@@ -92,6 +129,17 @@ def main() -> int:
             "pose authorization is not checked at generation/downlink/execution/TOCTOU points")
     require("policyRevisionSha256" in service and "authorizedPose" in service,
             "proof does not bind policy revision and authorized pose")
+    for key, field in (
+        ("coverageEnabled", "validationCoverageEnabled"),
+        ("continuityEnabled", "validationContinuityEnabled"),
+        ("denoiseRatioEnabled", "validationDenoiseRatioEnabled"),
+        ("residualEnabled", "validationResidualEnabled"),
+        ("keyPointEnabled", "validationKeyPointEnabled"),
+        ("outputEnabled", "validationOutputEnabled"),
+    ):
+        require(f'if (!settings.{field})' in service
+                and f'thresholds.insert("{key}", false);' in service,
+                f"proof threshold snapshot does not expose disabled quality gate: {field}")
     require('root.value("caseId").toString().compare(expectedCaseId' in service,
             "proof can be copied across case directories without rejection")
     require("POINT_CLOUD_QUALITY_ALGORITHM_REVISION" in service,
@@ -308,6 +356,22 @@ def main() -> int:
     require("productionExpectation.robotName.trimmed().isEmpty()" in rebuild
             and "离线预览不能生成可运动授权" in rebuild,
             "offline rebuild can synthesize a production proof without robot context")
+    require("const PointCloudProcessingConfig::Settings& settings" in service
+            and "productionExpectation,\n                pointCloudSettings,\n                productionContext"
+                in rebuild,
+            "validated rebuild does not use the same loaded safety-gate snapshot")
+    require(service.count("safetyGateRobotNameBindingEnabled") >= 5,
+            "robot-name gate is not applied consistently to rebuild and execution checks")
+    require('thresholds.insert("robotNameBindingEnabled", false);' in service,
+            "robot-name exception is not bound into the proof policy revision")
+    require("settings.safetyGateRobotNameBindingEnabled\n        && proofRobotName.compare" in service,
+            "old-proof robot-name inheritance ignores its configured switch")
+    require("currentSettings.safetyGateRobotNameBindingEnabled\n        && !expectedRobotName" in service,
+            "production execution robot-name comparison ignores its configured switch")
+    require("expectation.robotEndpoint.trimmed().isEmpty()" in service
+            and "expectation.cameraSection.trimmed().isEmpty()" in service
+            and "IsSha256Text(expectation.handEyeSha256)" in service,
+            "robot-name switch accidentally weakens endpoint/camera/hand-eye binding")
     require("CapturePointCloudProductionExpectation" in service_h
             and "productionExpectation" in dialog
             and "rebuildExpectation" in seam_dialog
@@ -319,6 +383,12 @@ def main() -> int:
 
     require("ApplyEnforceValidationSafetyBounds" in config_cpp,
             "Enforce thresholds can still be weakened to an effective off state")
+    bounds_start = config_cpp.index("void ApplyEnforceValidationSafetyBounds(")
+    bounds_end = config_cpp.index("QString ReadSetting(", bounds_start)
+    bounds = config_cpp[bounds_start:bounds_end]
+    for name in quality_switches:
+        require(f"if (settings.validation{name}Enabled)" in bounds,
+                f"Enforce safety floor is not scoped to enabled quality gate: {name}")
     require("NormalizeFiniteLoadValues(settings);" in config_cpp
             and config_cpp.index("NormalizeFiniteLoadValues(settings);")
             < config_cpp.index("settings.validationMinStationCoverageRatio = std::clamp"),

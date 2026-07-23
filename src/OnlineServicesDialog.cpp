@@ -727,7 +727,7 @@ namespace
 OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 	std::function<bool()> flowRunningGuard,
 	bool aboutMode,
-	bool remoteBrowseAllowed,
+	OnlineServicesConfig::AccessLevel accessLevel,
 	std::function<bool()> privilegedActionGuard,
 	QWidget* parent)
 	: QDialog(parent)
@@ -735,7 +735,7 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 	, m_flowRunningGuard(std::move(flowRunningGuard))
 	, m_privilegedActionGuard(std::move(privilegedActionGuard))
 	, m_aboutMode(aboutMode)
-	, m_remoteBrowseAllowed(remoteBrowseAllowed)
+	, m_accessLevel(accessLevel)
 {
 	setWindowTitle(m_aboutMode ? QStringLiteral("关于") : QStringLiteral("在线服务"));
 	m_network = new QNetworkAccessManager(this);
@@ -749,22 +749,29 @@ OnlineServicesDialog::OnlineServicesDialog(ScanDataUploader* uploader,
 	if (m_uploader != nullptr)
 	{
 		connect(m_uploader, &ScanDataUploader::uploadStatus, this, &OnlineServicesDialog::AppendLog);
+		connect(m_uploader, &ScanDataUploader::uploadStatus, this, [this](const QString&)
+			{
+				RefreshUploadUi();
+			});
 		connect(m_uploader, &ScanDataUploader::pendingChanged, this, [this](int)
 			{
-				if (m_pendingListWidget != nullptr && m_uploader != nullptr)
-				{
-					m_pendingListWidget->clear();
-					m_pendingListWidget->addItems(m_uploader->PendingList());
-				}
+				RefreshUploadUi();
 				UpdateQueueCard();
+			});
+		connect(m_uploader, &ScanDataUploader::uploadProgress, this,
+			[this](int, int, const QString&, qint64, qint64, double, int)
+			{
+				RefreshUploadUi();
 			});
 	}
 
 	if (!m_aboutMode)
 	{
 		UpdateQueueCard();
-		// 配了管理令牌才自动拉服务器统计/账号（没配就静默，卡片显示「待刷新」，避免开页报错刷屏）。
-		if (!OnlineServicesConfig::AdminToken().trimmed().isEmpty())
+		// 账号管理必须走安全管理通道；总览统计在 showEvent 中还可回退到只读 FTP。
+		if (HasFullAccess()
+			&& CanUseSecureAdminTransport()
+			&& !OnlineServicesConfig::AdminToken().trimmed().isEmpty())
 		{
 			QTimer::singleShot(0, this, [this]()
 				{
@@ -805,7 +812,7 @@ void OnlineServicesDialog::showEvent(QShowEvent* event)
 	}
 	// 页面被管理栈缓存复用，构造只跑一次：每次重新显示都把数据刷成最新。
 	UpdateQueueCard();
-	if (!OnlineServicesConfig::AdminToken().trimmed().isEmpty())
+	if (HasFullAccess())
 	{
 		RefreshServerStats();
 	}
@@ -907,58 +914,64 @@ void OnlineServicesDialog::BuildUi()
 	m_uploadNowBtn->setProperty("kind", "primary");
 	m_uploadPickBtn = new QPushButton(QStringLiteral("选择案例上传…"), this);
 	m_uploadPickBtn->setMinimumHeight(40);
+	m_uploadStateLabel = new QLabel(QStringLiteral("空闲"), this);
+	m_uploadStateLabel->setStyleSheet(QStringLiteral(
+		"color: #9ED8DB; font-size: 15px; font-weight: 600;"));
+	m_uploadCurrentLabel = new QLabel(QStringLiteral("当前文件：无"), this);
+	m_uploadCurrentLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	m_uploadCurrentLabel->setStyleSheet(QStringLiteral("color: #E7F3F5;"));
+	m_uploadProgressBar = new QProgressBar(this);
+	m_uploadProgressBar->setRange(0, 100);
+	m_uploadProgressBar->setValue(0);
+	m_uploadProgressBar->setFormat(QStringLiteral("0%"));
+	m_uploadProgressBar->setMinimumHeight(20);
+	m_uploadDetailLabel = new QLabel(QStringLiteral("尚未开始上传"), this);
+	m_uploadDetailLabel->setStyleSheet(QStringLiteral("color: #8FB0BC;"));
+	m_uploadQueueLabel = new QLabel(QStringLiteral("待上传队列：0 项"), this);
+	m_uploadQueueLabel->setStyleSheet(QStringLiteral("color: #9ED8DB; font-weight: 600;"));
+	QFrame* uploadStatusCard = new QFrame(this);
+	uploadStatusCard->setStyleSheet(QStringLiteral(
+		"QFrame { background: #13232B; border: 1px solid #2E4A57; border-radius: 10px; }"
+		"QLabel, QProgressBar { border: none; background: transparent; }"
+		"QProgressBar { background: #0B171D; border: 1px solid #294049; border-radius: 7px; text-align: center; color: #E7F3F5; }"
+		"QProgressBar::chunk { background: #2E9C72; border-radius: 6px; }"));
+	QVBoxLayout* uploadStatusLayout = new QVBoxLayout(uploadStatusCard);
+	uploadStatusLayout->setContentsMargins(14, 12, 14, 12);
+	uploadStatusLayout->setSpacing(7);
+	uploadStatusLayout->addWidget(m_uploadStateLabel);
+	uploadStatusLayout->addWidget(m_uploadCurrentLabel);
+	uploadStatusLayout->addWidget(m_uploadProgressBar);
+	uploadStatusLayout->addWidget(m_uploadDetailLabel);
 	m_pendingListWidget = new QListWidget(this);
-	// 队列列表占满页面剩余高度（不设上限），内容自然贴顶。
 	uploadLayout->addWidget(m_autoUploadCheck, 0, 0);
 	uploadLayout->addWidget(m_uploadNowBtn, 0, 1);
 	uploadLayout->addWidget(m_uploadPickBtn, 0, 2);
-	uploadLayout->addWidget(new QLabel(QStringLiteral("待上传队列："), this), 1, 0);
-	uploadLayout->addWidget(m_pendingListWidget, 2, 0, 1, 3);
-	uploadLayout->setRowStretch(2, 1);
+	uploadLayout->addWidget(uploadStatusCard, 1, 0, 1, 3);
+	uploadLayout->addWidget(m_uploadQueueLabel, 2, 0, 1, 3);
+	uploadLayout->addWidget(m_pendingListWidget, 3, 0, 1, 3);
+	uploadLayout->setRowStretch(3, 1);
 	uploadGroup->setVisible(!m_aboutMode);
 
 	// —— 服务器配置 ——
 	QGroupBox* configGroup = new QGroupBox(QStringLiteral("服务器配置"), this);
 	QGridLayout* configLayout = new QGridLayout(configGroup);
-	m_updateBaseUrlEdit = new QLineEdit(this);
-	m_ftpHostEdit = new QLineEdit(this);
-	m_ftpPortEdit = new QLineEdit(this);
-	m_ftpPortEdit->setMaximumWidth(90);
-	m_ftpUserEdit = new QLineEdit(this);
-	m_ftpPasswordEdit = new QLineEdit(this);
-	m_ftpPasswordEdit->setEchoMode(QLineEdit::Password);
+	m_serverHostEdit = new QLineEdit(this);
+	m_serverHostEdit->setPlaceholderText(QStringLiteral("例如 103.217.203.52"));
 	m_deviceNameEdit = new QLineEdit(this);
 	QPushButton* saveConfigBtn = new QPushButton(QStringLiteral("保存配置"), this);
 	saveConfigBtn->setMinimumHeight(40);
-	configLayout->addWidget(new QLabel(QStringLiteral("升级源地址"), this), 0, 0);
-	configLayout->addWidget(m_updateBaseUrlEdit, 0, 1, 1, 3);
-	configLayout->addWidget(new QLabel(QStringLiteral("FTP 服务器"), this), 1, 0);
-	configLayout->addWidget(m_ftpHostEdit, 1, 1);
-	configLayout->addWidget(new QLabel(QStringLiteral("端口"), this), 1, 2);
-	configLayout->addWidget(m_ftpPortEdit, 1, 3);
-	configLayout->addWidget(new QLabel(QStringLiteral("FTP 账号"), this), 2, 0);
-	configLayout->addWidget(m_ftpUserEdit, 2, 1);
-	configLayout->addWidget(new QLabel(QStringLiteral("FTP 密码"), this), 2, 2);
-	configLayout->addWidget(m_ftpPasswordEdit, 2, 3);
-	configLayout->addWidget(new QLabel(QStringLiteral("设备名"), this), 3, 0);
-	configLayout->addWidget(m_deviceNameEdit, 3, 1);
-	// 管理令牌：服务器管理接口（账号管理/磁盘统计）鉴权用，管理员手填、混淆存储。
-	m_adminTokenEdit = new QLineEdit(this);
-	m_adminTokenEdit->setEchoMode(QLineEdit::Password);
-	m_adminTokenEdit->setPlaceholderText(QStringLiteral("管理令牌（账号管理/服务器统计用，管理员填写）"));
-	configLayout->addWidget(new QLabel(QStringLiteral("管理令牌"), this), 4, 0);
-	configLayout->addWidget(m_adminTokenEdit, 4, 1, 1, 2);
-	configLayout->addWidget(saveConfigBtn, 4, 3);
-	configLayout->setRowStretch(5, 1);   // 配置行贴顶
-	// 升级源、FTP 目的端和管理令牌都会改变软件/数据的信任边界，
-	// 只允许持有实时本地 admin 会话的页面查看和修改。
-	configGroup->setVisible(!m_aboutMode && m_remoteBrowseAllowed);
+	configLayout->addWidget(new QLabel(QStringLiteral("服务器 IP"), this), 0, 0);
+	configLayout->addWidget(m_serverHostEdit, 0, 1, 1, 2);
+	configLayout->addWidget(new QLabel(QStringLiteral("设备名称"), this), 1, 0);
+	configLayout->addWidget(m_deviceNameEdit, 1, 1, 1, 2);
+	configLayout->addWidget(saveConfigBtn, 2, 2);
+	configLayout->setRowStretch(3, 1);
+	configGroup->setVisible(!m_aboutMode);
 
 	// —— 远程数据（admin）：浏览/下载/删除各设备上传到服务器的扫描数据、新建设备目录 ——
 	QGroupBox* remoteGroup = nullptr;
-	if (!m_aboutMode && m_remoteBrowseAllowed)
+	if (!m_aboutMode)
 	{
-		// 只有 devicedata 是全权限账号；空账号和其它设备账号一律按 upload-only 锁定。
 		remoteGroup = new QGroupBox(QStringLiteral("远程数据"), this);
 		// 纵向布局：顶行操作条(靠左) + 文件列表(占满) + 底行按钮(靠右)。
 		// 勿用无列拉伸的 QGridLayout：文件列表撑满页宽后多余宽度会分进中间列，标签和下拉间被拉出大空。
@@ -1022,7 +1035,7 @@ void OnlineServicesDialog::BuildUi()
 
 	// —— 账号管理（admin，经服务器管理接口：nginx /admin/ + X-Admin-Token）——
 	QGroupBox* accountGroup = nullptr;
-	if (!m_aboutMode && m_remoteBrowseAllowed)
+	if (!m_aboutMode)
 	{
 		accountGroup = new QGroupBox(QStringLiteral("FTP 账号管理（管理员）"), this);
 		QVBoxLayout* accLayout = new QVBoxLayout(accountGroup);
@@ -1059,8 +1072,7 @@ void OnlineServicesDialog::BuildUi()
 		m_accountTable->setAlternatingRowColors(true);
 		accLayout->addWidget(m_accountTable, 1);
 		QLabel* accHint = new QLabel(QStringLiteral(
-			"devicedata 是唯一全权限系统账号，需同时配置管理令牌才可管理账号；"
-			"所有其它账号固定为仅上传，并被限制到与账号同名的设备目录。"), this);
+			"账号管理和服务器统计仅对全权限账号开放；管理令牌由程序自动使用，不在界面显示。"), this);
 		accHint->setWordWrap(true);
 		accHint->setStyleSheet("color: #7E9AA6; font-size: 11px;");
 		accLayout->addWidget(accHint);
@@ -1101,6 +1113,14 @@ void OnlineServicesDialog::BuildUi()
 		ovHeader->addStretch();
 		ovHeader->addWidget(statsRefreshBtn);
 		ovLayout->addLayout(ovHeader);
+
+		m_serverStatusLabel = new QLabel(overviewPage);
+		m_serverStatusLabel->setWordWrap(true);
+		m_serverStatusLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		m_serverStatusLabel->setMinimumHeight(38);
+		m_serverStatusLabel->setContentsMargins(12, 8, 12, 8);
+		m_serverStatusLabel->setVisible(false);
+		ovLayout->addWidget(m_serverStatusLabel);
 
 		// 大数字统计卡：标题小字 + 数值大字 + 说明小字（+磁盘卡带用量进度条）。
 		auto makeStatCard = [](QWidget* parent, const QString& caption, QLabel*& valueLabel,
@@ -1186,6 +1206,7 @@ void OnlineServicesDialog::BuildUi()
 			m_accountNavRow = m_navList->count();
 			addNavPage(QStringLiteral("账号管理"), accountGroup);
 		}
+		m_serverConfigNavRow = m_navList->count();
 		addNavPage(QStringLiteral("服务器配置"), configGroup);
 		connect(m_navList, &QListWidget::currentRowChanged, this, [this](int row)
 			{
@@ -1241,12 +1262,13 @@ void OnlineServicesDialog::BuildUi()
 			OnlineServicesConfig::SetAutoUploadEnabled(checked);
 			AppendLog(checked ? QStringLiteral("已开启扫描完成自动上传。") : QStringLiteral("已关闭扫描完成自动上传。"));
 		});
-	connect(m_uploadNowBtn, &QPushButton::clicked, this, [this]()
+		connect(m_uploadNowBtn, &QPushButton::clicked, this, [this]()
 		{
 			SaveConfigFromUi();  // 顺手保存，避免填了账号没点保存直接传
 			if (m_uploader != nullptr)
 			{
 				m_uploader->TriggerUploadNow();
+				QTimer::singleShot(0, this, [this]() { RefreshUploadUi(); });
 			}
 		});
 	connect(m_uploadPickBtn, &QPushButton::clicked, this, [this]()
@@ -1256,9 +1278,6 @@ void OnlineServicesDialog::BuildUi()
 	connect(saveConfigBtn, &QPushButton::clicked, this, [this]()
 		{
 			SaveConfigFromUi();
-			AppendLog(m_remoteBusy
-				? QStringLiteral("其它服务器配置已保存；FTP 配置请在远程数据操作完成后再次保存。")
-				: QStringLiteral("服务器配置已保存。"));
 		});
 
 	resize(m_aboutMode ? 640 : 860, m_aboutMode ? 560 : 780);
@@ -1266,41 +1285,171 @@ void OnlineServicesDialog::BuildUi()
 
 void OnlineServicesDialog::LoadConfigToUi()
 {
-	if (m_remoteBrowseAllowed)
+	if (m_serverHostEdit != nullptr)
 	{
-		m_updateBaseUrlEdit->setText(OnlineServicesConfig::UpdateBaseUrl());
-		m_ftpHostEdit->setText(OnlineServicesConfig::FtpHost());
-		m_ftpPortEdit->setText(QString::number(OnlineServicesConfig::FtpPort()));
-		m_ftpUserEdit->setText(OnlineServicesConfig::FtpUser());
-		m_ftpPasswordEdit->setText(OnlineServicesConfig::FtpPassword());
+		m_serverHostEdit->setText(OnlineServicesConfig::ServerHost());
+	}
+	if (m_deviceNameEdit != nullptr)
+	{
 		m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
-		if (m_adminTokenEdit != nullptr)
-		{
-			m_adminTokenEdit->setText(OnlineServicesConfig::AdminToken());
-		}
 	}
 	m_autoUploadCheck->setChecked(OnlineServicesConfig::AutoUploadEnabled());
-	if (m_uploader != nullptr && m_pendingListWidget != nullptr)
-	{
-		m_pendingListWidget->clear();
-		m_pendingListWidget->addItems(m_uploader->PendingList());
-	}
+	RefreshUploadUi();
 	UpdateRestrictedNav();
+	if (!HasFullAccess())
+	{
+		RefreshServerStats();
+	}
+}
+
+void OnlineServicesDialog::RefreshUploadUi()
+{
+	if (m_uploader == nullptr || m_pendingListWidget == nullptr)
+	{
+		return;
+	}
+	const QStringList pending = m_uploader->PendingList();
+	const bool busy = m_uploader->IsBusy();
+	const ScanDataUploader::ProgressSnapshot progress = m_uploader->CurrentProgress();
+
+	m_pendingListWidget->clear();
+	for (int index = 0; index < pending.size(); ++index)
+	{
+		const QString path = pending.at(index);
+		const QString caseName = QFileInfo(path).fileName();
+		const bool isCurrent = busy && !progress.currentName.isEmpty()
+			&& progress.currentName.contains(caseName, Qt::CaseSensitive);
+		m_pendingListWidget->addItem(QStringLiteral("%1%2.  %3")
+			.arg(isCurrent ? QStringLiteral("正在上传  ") : QStringLiteral("等待  "))
+			.arg(index + 1)
+			.arg(QDir::toNativeSeparators(path)));
+	}
+	if (pending.isEmpty())
+	{
+		m_pendingListWidget->addItem(QStringLiteral("当前没有待上传案例"));
+	}
+	if (m_uploadQueueLabel != nullptr)
+	{
+		m_uploadQueueLabel->setText(QStringLiteral("待上传队列：%1 项").arg(pending.size()));
+	}
+
+	if (m_uploadProgressBar == nullptr || m_uploadStateLabel == nullptr
+		|| m_uploadCurrentLabel == nullptr || m_uploadDetailLabel == nullptr)
+	{
+		return;
+	}
+	if (!busy)
+	{
+		const bool complete = pending.isEmpty();
+		m_uploadStateLabel->setText(complete ? QStringLiteral("上传队列已完成") : QStringLiteral("等待上传"));
+		m_uploadCurrentLabel->setText(QStringLiteral("当前文件：无"));
+		m_uploadProgressBar->setValue(complete ? 100 : 0);
+		m_uploadProgressBar->setFormat(complete ? QStringLiteral("100%") : QStringLiteral("0%"));
+		m_uploadDetailLabel->setText(complete
+			? QStringLiteral("没有待上传案例")
+			: QStringLiteral("%1 个案例等待服务器连接或手动重试").arg(pending.size()));
+		return;
+	}
+
+	const bool transferring = progress.totalBytes > 0;
+	m_uploadStateLabel->setText(transferring ? QStringLiteral("正在上传") : QStringLiteral("正在准备上传"));
+	m_uploadCurrentLabel->setText(progress.currentName.isEmpty()
+		? QStringLiteral("当前文件：正在连接服务器…")
+		: QStringLiteral("当前文件：%1").arg(progress.currentName));
+	const int percent = transferring
+		? qBound(0, static_cast<int>(progress.sentBytes * 100 / progress.totalBytes), 100)
+		: 0;
+	m_uploadProgressBar->setValue(percent);
+	m_uploadProgressBar->setFormat(QStringLiteral("%1%").arg(percent));
+	QString detail = QStringLiteral("本轮 %1 / %2 项")
+		.arg(progress.doneItems)
+		.arg(progress.totalItems > 0 ? progress.totalItems : pending.size());
+	if (transferring)
+	{
+		detail += QStringLiteral("    %1 / %2")
+			.arg(HumanBytes(static_cast<double>(progress.sentBytes)),
+				HumanBytes(static_cast<double>(progress.totalBytes)));
+		if (progress.bytesPerSec > 1.0)
+		{
+			detail += QStringLiteral("    %1/s").arg(HumanBytes(progress.bytesPerSec));
+		}
+		if (progress.etaSeconds > 0)
+		{
+			detail += QStringLiteral("    预计剩余 %1 秒").arg(progress.etaSeconds);
+		}
+	}
+	else
+	{
+		detail += QStringLiteral("    正在压缩或建立 FTP 连接");
+	}
+	m_uploadDetailLabel->setText(detail);
 }
 
 bool OnlineServicesDialog::IsUploadOnlyAccount() const
 {
-	// 服务端模型只有 devicedata 是 full；空账号和所有其它账号都必须失败关闭为
-	// upload-only。权限判断使用已保存配置，不能读取尚未保存的输入框文本。
-	const QString user = OnlineServicesConfig::FtpUser().trimmed();
-	return user != QStringLiteral("devicedata");
+	return m_accessLevel == OnlineServicesConfig::AccessLevel::Upload;
+}
+
+bool OnlineServicesDialog::HasFtpAccess() const
+{
+	return OnlineServicesConfig::HasFtpAccess(m_accessLevel);
+}
+
+bool OnlineServicesDialog::HasFullAccess() const
+{
+	return OnlineServicesConfig::HasFullAccess(m_accessLevel);
+}
+
+void OnlineServicesDialog::SetServerStatusBanner(
+	const QString& message, ServerStatusLevel level)
+{
+	if (m_serverStatusLabel == nullptr)
+	{
+		return;
+	}
+	if (message.trimmed().isEmpty())
+	{
+		m_serverStatusLabel->clear();
+		m_serverStatusLabel->setVisible(false);
+		return;
+	}
+
+	QString foreground;
+	QString background;
+	QString border;
+	switch (level)
+	{
+	case ServerStatusLevel::Success:
+		foreground = QStringLiteral("#A8F0C4");
+		background = QStringLiteral("#123326");
+		border = QStringLiteral("#2E9C72");
+		break;
+	case ServerStatusLevel::Error:
+		foreground = QStringLiteral("#FFD0D0");
+		background = QStringLiteral("#3A1B20");
+		border = QStringLiteral("#D65C68");
+		break;
+	case ServerStatusLevel::Info:
+	default:
+		foreground = QStringLiteral("#BCE9F0");
+		background = QStringLiteral("#132B35");
+		border = QStringLiteral("#3B7C91");
+		break;
+	}
+	m_serverStatusLabel->setStyleSheet(QStringLiteral(
+		"QLabel { color: %1; background: %2; border: 1px solid %3; "
+		"border-radius: 7px; font-size: 12px; font-weight: 600; }")
+		.arg(foreground, background, border));
+	m_serverStatusLabel->setText(message);
+	m_serverStatusLabel->setVisible(true);
 }
 
 void OnlineServicesDialog::UpdateRestrictedNav()
 {
-	const bool restricted = IsUploadOnlyAccount();
-	const bool unrestrictedIdle = !m_remoteBusy && !restricted;
-	const bool canManageAccounts = !restricted
+	const bool ftpAllowed = HasFtpAccess();
+	const bool fullAllowed = HasFullAccess();
+	const bool ftpIdle = !m_remoteBusy && ftpAllowed;
+	const bool canManageAccounts = fullAllowed
 		&& !OnlineServicesConfig::AdminToken().trimmed().isEmpty();
 
 	// 「账号管理」：只上传账号整页禁用（无令牌也无权限）。「远程数据」保持可进，
@@ -1325,102 +1474,74 @@ void OnlineServicesDialog::UpdateRestrictedNav()
 			}
 		};
 	setNavRowEnabled(m_accountNavRow, canManageAccounts,
-		QStringLiteral("账号管理仅允许已保存的 devicedata 身份并要求管理令牌。"));
-	setNavRowEnabled(m_remoteNavRow, true, QString());
+		QStringLiteral("账号管理仅对全权限账号开放。"));
+	setNavRowEnabled(m_remoteNavRow, ftpAllowed,
+		QStringLiteral("远程数据需要 FTP 权限或全权限账号。"));
+	setNavRowEnabled(m_serverConfigNavRow, ftpAllowed,
+		QStringLiteral("服务器 IP 和设备名称需要 FTP 权限或全权限账号。"));
 
 	// 远程数据控件级限制（about 模式/非 admin 登录时这些控件不存在，判空跳过）。
 	if (m_remoteDeviceCombo != nullptr)
 	{
-		m_remoteDeviceCombo->setEnabled(unrestrictedIdle);   // 忙碌或受限时均不可切换设备
-		m_remoteDeviceCombo->setToolTip(restricted
-			? QStringLiteral("只上传账号仅能查看本机设备的数据。") : QString());
+		m_remoteDeviceCombo->setEnabled(ftpIdle);
+		m_remoteDeviceCombo->setToolTip(ftpAllowed ? QString() : QStringLiteral("当前账号只有上传权限。"));
 	}
 	if (m_remoteMkdirBtn != nullptr)
 	{
-		m_remoteMkdirBtn->setEnabled(unrestrictedIdle);
-		m_remoteMkdirBtn->setToolTip(restricted
-			? QStringLiteral("只上传账号不能新建其他设备目录。") : QString());
+		m_remoteMkdirBtn->setEnabled(!m_remoteBusy && fullAllowed);
+		m_remoteMkdirBtn->setToolTip(fullAllowed ? QString() : QStringLiteral("新建设备目录仅对全权限账号开放。"));
 	}
 	if (m_remoteDownloadBtn != nullptr)
 	{
-		m_remoteDownloadBtn->setEnabled(unrestrictedIdle);
-		m_remoteDownloadBtn->setToolTip(restricted
-			? QStringLiteral("只上传账号服务器端禁止下载（download_enable=NO），需下载请改用全权限账号。")
-			: QStringLiteral("下载并自动解压到 Result\\Remote\\<设备>\\，可用点云查看等工具直接打开。"));
+		m_remoteDownloadBtn->setEnabled(ftpIdle);
+		m_remoteDownloadBtn->setToolTip(ftpAllowed
+			? QStringLiteral("下载并自动解压到 Result\\Remote\\<设备>\\。")
+			: QStringLiteral("当前账号只有上传权限。"));
 	}
-	// 受限且设备列表还不是「只有本机」时重置（清掉之前全权限账号刷出的全部设备）。
-	if (restricted && m_remoteDeviceCombo != nullptr)
+	if (m_remoteDeleteBtn != nullptr)
 	{
-		const QString selfDevice = OnlineServicesConfig::DeviceName().trimmed();
-		if (m_remoteDeviceCombo->count() != 1 || m_remoteDeviceCombo->currentText() != selfDevice)
-		{
-			RefreshRemoteDevices();
-		}
+		m_remoteDeleteBtn->setEnabled(!m_remoteBusy && fullAllowed);
+		m_remoteDeleteBtn->setToolTip(fullAllowed ? QString() : QStringLiteral("删除服务器数据仅对全权限账号开放。"));
 	}
 }
 
 void OnlineServicesDialog::SaveConfigFromUi()
 {
-	if (!m_remoteBrowseAllowed
-		|| !m_privilegedActionGuard
+	if (!HasFtpAccess())
+	{
+		return;
+	}
+	if (!m_privilegedActionGuard
 		|| !m_privilegedActionGuard())
 	{
 		if (!m_aboutMode)
 		{
-			AppendLog(QStringLiteral("升级源、FTP 与管理令牌仅允许有效的本地管理员会话修改，本次未保存。"));
+			AppendLog(QStringLiteral("当前在线服务会话不能修改服务器 IP 或设备名称。"));
 		}
 		return;
 	}
-	OnlineServicesConfig::SetUpdateBaseUrl(m_updateBaseUrlEdit->text().trimmed());
-	if (!m_remoteBusy)
+	if (m_remoteBusy)
 	{
-		OnlineServicesConfig::SetFtpHost(m_ftpHostEdit->text().trimmed());
-		bool ok = false;
-		const int port = m_ftpPortEdit->text().trimmed().toInt(&ok);
-		OnlineServicesConfig::SetFtpPort(ok ? port : 21);
-		OnlineServicesConfig::SetFtpPassword(m_ftpPasswordEdit->text());
-		const QString editedUser = m_ftpUserEdit->text().trimmed();
-		const QString editedDeviceName = m_deviceNameEdit->text().trimmed();
-		const bool validDevice = OnlineServicesConfig::IsServerAccountName(editedDeviceName);
-		const bool validUser = editedUser.isEmpty()
-			|| editedUser == QStringLiteral("devicedata")
-			|| (OnlineServicesConfig::IsServerAccountName(editedUser)
-				&& editedUser != QStringLiteral("uploader")
-				&& editedUser == editedDeviceName);
-		if (validDevice && validUser)
-		{
-			OnlineServicesConfig::SetFtpUser(editedUser);
-			OnlineServicesConfig::SetDeviceName(editedDeviceName);
-		}
-		else
-		{
-			AppendLog(QStringLiteral(
-				"FTP 身份未保存：设备名/普通账号必须匹配 ^[a-z][a-z0-9_-]{2,31}$，"
-				"普通账号必须与设备名严格相同；uploader 已退役，只有 devicedata 可作为独立全权限账号。"));
-		}
+		AppendLog(QStringLiteral("远程数据操作进行中，服务器配置暂未保存；请稍后重试。"));
+		return;
 	}
-	else
+	const QString host = m_serverHostEdit == nullptr ? QString() : m_serverHostEdit->text().trimmed();
+	QHostAddress parsedHost;
+	if (!parsedHost.setAddress(host) || parsedHost.protocol() != QAbstractSocket::IPv4Protocol)
 	{
-		// 远程 FTP 请求仍持有旧配置快照时，不允许把预先编辑但未保存的新值写入配置。
-		// 等请求结束后再次保存即可，避免旧回调把另一台服务器/账号的数据落到当前页面。
-		bool portOk = false;
-		const int editedPort = m_ftpPortEdit->text().trimmed().toInt(&portOk);
-		const bool hasPendingFtpChanges =
-			m_ftpHostEdit->text().trimmed() != OnlineServicesConfig::FtpHost()
-			|| !portOk || editedPort != OnlineServicesConfig::FtpPort()
-			|| m_ftpUserEdit->text().trimmed() != OnlineServicesConfig::FtpUser()
-			|| m_ftpPasswordEdit->text() != OnlineServicesConfig::FtpPassword()
-			|| m_deviceNameEdit->text().trimmed() != OnlineServicesConfig::DeviceName();
-		if (hasPendingFtpChanges)
-		{
-			AppendLog(QStringLiteral("远程数据操作进行中，FTP 配置暂未保存；请在操作完成后重试。"));
-		}
+		AppendLog(QStringLiteral("服务器 IP 未保存：请输入有效的 IPv4 地址。"));
+		return;
 	}
-	if (m_adminTokenEdit != nullptr)
+	const QString deviceName = m_deviceNameEdit == nullptr ? QString() : m_deviceNameEdit->text().trimmed();
+	if (!IsSafeRemotePathComponent(deviceName))
 	{
-		OnlineServicesConfig::SetAdminToken(m_adminTokenEdit->text().trimmed());
+		AppendLog(QStringLiteral("设备名称未保存：不能包含路径字符、点目录或控制字符。"));
+		return;
 	}
-	UpdateRestrictedNav();   // 账号可能改了，重新评估「远程数据/账号管理」是否可用
+	OnlineServicesConfig::SetServerHost(host);
+	OnlineServicesConfig::SetDeviceName(deviceName);
+	AppendLog(QStringLiteral("服务器 IP 和设备名称已保存；升级与 FTP 地址已由程序自动补全。"));
+	UpdateRestrictedNav();
 }
 
 QString OnlineServicesDialog::UpdateChannel() const
@@ -2463,6 +2584,14 @@ namespace
 		std::string password;
 	};
 
+	struct FtpDeviceStats
+	{
+		QString name;
+		qulonglong bytes = 0;
+		int files = 0;
+		QString lastModified;
+	};
+
 	// UI 线程读配置快照（ConfigDatabase 不可跨线程）。
 	RemoteFtpConfig CurrentRemoteFtpConfig()
 	{
@@ -2583,13 +2712,27 @@ void OnlineServicesDialog::CancelRemoteOperationAndWait(bool permanentShutdown)
 	m_remoteLifecycle.FinishCancel();
 }
 
-bool OnlineServicesDialog::AuthorizePrivilegedAction(const QString& actionName)
+bool OnlineServicesDialog::AuthorizeFtpAction(const QString& actionName)
 {
-	if (!m_remoteBrowseAllowed
+	if (!HasFtpAccess()
 		|| !m_privilegedActionGuard
 		|| !m_privilegedActionGuard())
 	{
-		const QString message = QStringLiteral("本地管理员会话已失效，已拒绝%1。请重新登录。").arg(actionName);
+		const QString message = QStringLiteral("在线服务登录已失效或当前账号没有 FTP 权限，已拒绝%1。请重新登录。").arg(actionName);
+		AppendLog(message);
+		QMessageBox::warning(this, QStringLiteral("权限已失效"), message);
+		return false;
+	}
+	return true;
+}
+
+bool OnlineServicesDialog::AuthorizePrivilegedAction(const QString& actionName)
+{
+	if (!HasFullAccess()
+		|| !m_privilegedActionGuard
+		|| !m_privilegedActionGuard())
+	{
+		const QString message = QStringLiteral("在线服务登录已失效或当前账号不是全权限，已拒绝%1。请重新登录。").arg(actionName);
 		AppendLog(message);
 		QMessageBox::warning(this, QStringLiteral("权限已失效"), message);
 		return false;
@@ -2610,7 +2753,7 @@ void OnlineServicesDialog::SetRemoteBusy(bool busy)
 	}
 	// FTP 请求使用保存时的配置快照。请求期间锁住这些输入，避免旧请求完成后把
 	// 另一套账号/主机的结果落到当前界面；其它 OTA/管理配置不受影响。
-	for (QLineEdit* edit : { m_ftpHostEdit, m_ftpPortEdit, m_ftpUserEdit, m_ftpPasswordEdit, m_deviceNameEdit })
+	for (QLineEdit* edit : { m_serverHostEdit, m_deviceNameEdit })
 	{
 		if (edit != nullptr)
 		{
@@ -2624,7 +2767,7 @@ void OnlineServicesDialog::SetRemoteBusy(bool busy)
 
 void OnlineServicesDialog::RefreshRemoteDevices()
 {
-	if (!AuthorizePrivilegedAction(QStringLiteral("刷新远程设备")))
+	if (!AuthorizeFtpAction(QStringLiteral("刷新远程设备")))
 	{
 		return;
 	}
@@ -2717,7 +2860,7 @@ void OnlineServicesDialog::RefreshRemoteDevices()
 
 void OnlineServicesDialog::RefreshRemoteFiles()
 {
-	if (!AuthorizePrivilegedAction(QStringLiteral("刷新远程文件")))
+	if (!AuthorizeFtpAction(QStringLiteral("刷新远程文件")))
 	{
 		return;
 	}
@@ -2800,7 +2943,7 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 
 void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 {
-	if (!AuthorizePrivilegedAction(QStringLiteral("下载远程数据")))
+	if (!AuthorizeFtpAction(QStringLiteral("下载远程数据")))
 	{
 		return;
 	}
@@ -3217,6 +3360,19 @@ QString OnlineServicesDialog::AdminApiBase() const
 	return base + QStringLiteral("/admin/api");
 }
 
+bool OnlineServicesDialog::CanUseSecureAdminTransport() const
+{
+	const QUrl adminUrl(AdminApiBase());
+	const QString scheme = adminUrl.scheme().toLower();
+	const QString host = adminUrl.host().toLower();
+	const QHostAddress address(host);
+	const bool isLoopbackHost = host == QStringLiteral("localhost")
+		|| (!address.isNull() && address.isLoopback());
+	return adminUrl.isValid()
+		&& (scheme == QStringLiteral("https")
+			|| (scheme == QStringLiteral("http") && isLoopbackHost));
+}
+
 void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& path,
 	const QJsonObject& body, std::function<void(bool ok, const QJsonObject& resp)> done)
 {
@@ -3228,9 +3384,9 @@ void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& p
 		}
 		return;
 	}
-	if (OnlineServicesConfig::FtpUser().trimmed() != QStringLiteral("devicedata"))
+	if (!OnlineServicesConfig::IsFullAccessAccount(OnlineServicesConfig::FtpUser()))
 	{
-		AppendLog(QStringLiteral("管理接口已拒绝：只有已保存的 devicedata 全权限身份可使用管理令牌。"));
+		AppendLog(QStringLiteral("管理接口已拒绝：只有当前全权限登录可使用管理令牌。"));
 		if (done)
 		{
 			done(false, QJsonObject());
@@ -3238,13 +3394,7 @@ void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& p
 		return;
 	}
 	const QUrl adminUrl(AdminApiBase() + path);
-	const QString scheme = adminUrl.scheme().toLower();
-	const QString host = adminUrl.host().toLower();
-	const QHostAddress address(host);
-	const bool isLoopbackHost = host == QStringLiteral("localhost")
-		|| (!address.isNull() && address.isLoopback());
-	if (!adminUrl.isValid() || (scheme != QStringLiteral("https")
-		&& !(scheme == QStringLiteral("http") && isLoopbackHost)))
+	if (!CanUseSecureAdminTransport() || !adminUrl.isValid())
 	{
 		AppendLog(QStringLiteral(
 			"管理接口已拒绝：令牌和账号变更只能通过 HTTPS 或本机 SSH 隧道发送，禁止公网明文 HTTP。"));
@@ -3257,7 +3407,7 @@ void OnlineServicesDialog::AdminRequest(const QByteArray& verb, const QString& p
 	const QString token = OnlineServicesConfig::AdminToken().trimmed();
 	if (token.isEmpty())
 	{
-		AppendLog(QStringLiteral("未配置管理令牌：请在「服务器配置」页签填写管理令牌并保存。"));
+		AppendLog(QStringLiteral("本机未配置管理令牌，请由部署维护人员写入受保护的配置数据库。"));
 		if (done)
 		{
 			done(false, QJsonObject());
@@ -3341,20 +3491,50 @@ void OnlineServicesDialog::RefreshServerStats()
 	{
 		return;
 	}
+	if (!HasFullAccess())
+	{
+		SetServerStatusBanner(QStringLiteral("当前账号没有查看服务器统计的权限。"),
+			ServerStatusLevel::Info);
+		m_cardDisk->setText(QStringLiteral("无权限"));
+		m_cardCloud->setText(QStringLiteral("无权限"));
+		if (m_cardDevices != nullptr)
+		{
+			m_cardDevices->setText(QStringLiteral("无权限"));
+		}
+		if (m_cardDiskSub != nullptr)
+		{
+			m_cardDiskSub->setText(QStringLiteral("服务器信息仅对全权限账号开放"));
+		}
+		if (m_diskBar != nullptr)
+		{
+			m_diskBar->setVisible(false);
+		}
+		if (m_deviceTable != nullptr)
+		{
+			m_deviceTable->setRowCount(0);
+		}
+		return;
+	}
+	const bool canUseAdmin = CanUseSecureAdminTransport()
+		&& !OnlineServicesConfig::AdminToken().trimmed().isEmpty();
+	if (!canUseAdmin)
+	{
+		SetServerStatusBanner(QStringLiteral(
+			"服务器管理接口未启用安全通道，正在改用 FTP 读取设备和文件统计。"),
+			ServerStatusLevel::Info);
+		RefreshServerStatsViaFtp();
+		return;
+	}
+	SetServerStatusBanner(QStringLiteral("正在读取服务器状态…"), ServerStatusLevel::Info);
 	AdminRequest("GET", QStringLiteral("/stats"), QJsonObject(), [this](bool ok, const QJsonObject& resp)
 		{
 			if (!ok)
 			{
-				m_cardDisk->setText(QStringLiteral("--"));
-				if (m_cardDiskSub != nullptr)
-				{
-					m_cardDiskSub->setText(QStringLiteral("获取失败（查管理令牌/网络）"));
-				}
-				m_cardCloud->setText(QStringLiteral("--"));
-				if (m_cardDevices != nullptr)
-				{
-					m_cardDevices->setText(QStringLiteral("--"));
-				}
+				AppendLog(QStringLiteral("安全管理统计不可用，正在回退到 FTP 只读统计。"));
+				SetServerStatusBanner(QStringLiteral(
+					"服务器管理统计读取失败，正在自动改用 FTP 重试。"),
+					ServerStatusLevel::Info);
+				RefreshServerStatsViaFtp();
 				return;
 			}
 			const QJsonObject disk = resp.value(QStringLiteral("disk")).toObject();
@@ -3370,6 +3550,7 @@ void OnlineServicesDialog::RefreshServerStats()
 			}
 			if (m_diskBar != nullptr)
 			{
+				m_diskBar->setVisible(true);
 				m_diskBar->setValue(percent);
 			}
 			m_cardCloud->setText(HumanBytes(resp.value(QStringLiteral("dataBytes")).toDouble()));
@@ -3395,7 +3576,186 @@ void OnlineServicesDialog::RefreshServerStats()
 						: QStringLiteral("—")));
 				}
 			}
+			SetServerStatusBanner(QStringLiteral("服务器状态读取成功。"),
+				ServerStatusLevel::Success);
 		});
+}
+
+void OnlineServicesDialog::RefreshServerStatsViaFtp()
+{
+	if (!HasFullAccess() || m_cardDisk == nullptr || m_cardCloud == nullptr)
+	{
+		return;
+	}
+	const RemoteFtpConfig cfg = CurrentRemoteFtpConfig();
+	if (cfg.host.empty() || cfg.user.empty() || cfg.password.empty())
+	{
+		SetServerStatusBanner(QStringLiteral(
+			"无法读取服务器：FTP 登录信息不完整，请关闭在线服务并重新登录。"),
+			ServerStatusLevel::Error);
+		m_cardDisk->setText(QStringLiteral("--"));
+		m_cardCloud->setText(QStringLiteral("--"));
+		if (m_cardDevices != nullptr)
+		{
+			m_cardDevices->setText(QStringLiteral("--"));
+		}
+		if (m_cardDiskSub != nullptr)
+		{
+			m_cardDiskSub->setText(QStringLiteral("FTP 登录信息不完整，请重新登录在线服务"));
+		}
+		if (m_diskBar != nullptr)
+		{
+			m_diskBar->setVisible(false);
+		}
+		return;
+	}
+
+	m_cardDisk->setText(QStringLiteral("连接中…"));
+	m_cardCloud->setText(QStringLiteral("读取中…"));
+	if (m_cardDevices != nullptr)
+	{
+		m_cardDevices->setText(QStringLiteral("读取中…"));
+	}
+	if (m_cardDiskSub != nullptr)
+	{
+		m_cardDiskSub->setText(QStringLiteral("正在通过 FTP 读取服务器数据"));
+	}
+	if (m_diskBar != nullptr)
+	{
+		m_diskBar->setVisible(false);
+	}
+	SetServerStatusBanner(QStringLiteral("正在通过 FTP 读取服务器设备和文件统计…"),
+		ServerStatusLevel::Info);
+
+	const bool started = StartRemoteWorker([this, cfg](quint64 generation)
+		{
+			RobotLog log(OnlineServicesLogPath(), false);
+			FtpClient ftp(&log, cfg.host, cfg.port, cfg.user, cfg.password);
+			ftp.setMessageBoxesEnabled(false);
+			std::vector<FtpRemoteFileInfo> rootEntries;
+			bool ok = !RemoteWorkerCancelled(generation)
+				&& ftp.listFiles("/data", rootEntries, m_remoteLifecycle.CancelFlag(), 1000);
+			QList<FtpDeviceStats> deviceStats;
+			qulonglong totalBytes = 0;
+			for (const FtpRemoteFileInfo& rootEntry : rootEntries)
+			{
+				if (!ok || RemoteWorkerCancelled(generation))
+				{
+					break;
+				}
+				const QString deviceName = QString::fromStdString(rootEntry.name);
+				if (!rootEntry.isDirectory || !IsSafeRemotePathComponent(deviceName))
+				{
+					continue;
+				}
+				std::vector<FtpRemoteFileInfo> files;
+				const std::string remoteDir = "/data/" + rootEntry.name;
+				if (!ftp.listFiles(remoteDir, files, m_remoteLifecycle.CancelFlag(), 10000))
+				{
+					ok = false;
+					break;
+				}
+				FtpDeviceStats stats;
+				stats.name = deviceName;
+				for (const FtpRemoteFileInfo& file : files)
+				{
+					if (file.isDirectory)
+					{
+						continue;
+					}
+					stats.bytes += static_cast<qulonglong>(file.size);
+					++stats.files;
+					const QString modified = QString::fromStdString(file.modifiedTime);
+					if (modified > stats.lastModified)
+					{
+						stats.lastModified = modified;
+					}
+				}
+				totalBytes += stats.bytes;
+				deviceStats.push_back(stats);
+			}
+			if (RemoteWorkerCancelled(generation))
+			{
+				return;
+			}
+			QMetaObject::invokeMethod(this,
+				[this, generation, ok, totalBytes, deviceStats]()
+				{
+					if (RemoteWorkerCancelled(generation))
+					{
+						return;
+					}
+					FinishRemoteWorker(generation);
+					if (!ok)
+					{
+						SetServerStatusBanner(QStringLiteral(
+							"服务器读取失败：FTP 无法列出数据目录。请检查服务器网络、账号密码后点击“刷新状态”。"),
+							ServerStatusLevel::Error);
+						m_cardDisk->setText(QStringLiteral("--"));
+						m_cardCloud->setText(QStringLiteral("--"));
+						if (m_cardDevices != nullptr)
+						{
+							m_cardDevices->setText(QStringLiteral("--"));
+						}
+						if (m_cardDiskSub != nullptr)
+						{
+							m_cardDiskSub->setText(QStringLiteral("FTP 读取失败（请重新登录或检查网络）"));
+						}
+						if (m_deviceTable != nullptr)
+						{
+							m_deviceTable->setRowCount(0);
+						}
+						AppendLog(QStringLiteral("FTP 只读统计失败，请检查账号、密码和服务器网络。"));
+						return;
+					}
+					m_cardDisk->setText(QStringLiteral("已连接"));
+					if (m_cardDiskSub != nullptr)
+					{
+						m_cardDiskSub->setText(QStringLiteral("FTP 只读统计 · 磁盘容量需 HTTPS 管理通道"));
+					}
+					m_cardCloud->setText(HumanBytes(static_cast<double>(totalBytes)));
+					if (m_cardDevices != nullptr)
+					{
+						m_cardDevices->setText(QStringLiteral("%1 台").arg(deviceStats.size()));
+					}
+					if (m_deviceTable != nullptr)
+					{
+						m_deviceTable->setRowCount(0);
+						for (const FtpDeviceStats& stats : deviceStats)
+						{
+							const int row = m_deviceTable->rowCount();
+							m_deviceTable->insertRow(row);
+							m_deviceTable->setItem(row, 0, new QTableWidgetItem(stats.name));
+							m_deviceTable->setItem(row, 1, new QTableWidgetItem(HumanBytes(static_cast<double>(stats.bytes))));
+							m_deviceTable->setItem(row, 2, new QTableWidgetItem(QString::number(stats.files)));
+							m_deviceTable->setItem(row, 3, new QTableWidgetItem(stats.lastModified.isEmpty()
+								? QStringLiteral("—") : stats.lastModified.left(16)));
+						}
+					}
+					AppendLog(QStringLiteral("服务器统计已通过 FTP 读取：%1 台设备，%2。")
+						.arg(deviceStats.size()).arg(HumanBytes(static_cast<double>(totalBytes))));
+					SetServerStatusBanner(QStringLiteral(
+						"服务器读取成功：已通过 FTP 获取 %1 台设备、%2 数据。")
+						.arg(deviceStats.size()).arg(HumanBytes(static_cast<double>(totalBytes))),
+						ServerStatusLevel::Success);
+				}, Qt::QueuedConnection);
+		});
+	if (!started)
+	{
+		SetServerStatusBanner(QStringLiteral(
+			"暂时无法刷新：程序正在执行其他远程操作，请操作完成后再次点击“刷新状态”。"),
+			ServerStatusLevel::Info);
+		m_cardDisk->setText(QStringLiteral("FTP 忙碌"));
+		m_cardCloud->setText(QStringLiteral("稍后刷新"));
+		if (m_cardDevices != nullptr)
+		{
+			m_cardDevices->setText(QStringLiteral("稍后刷新"));
+		}
+		if (m_cardDiskSub != nullptr)
+		{
+			m_cardDiskSub->setText(QStringLiteral("正在执行其他远程操作，请完成后刷新"));
+		}
+	}
 }
 
 void OnlineServicesDialog::UpdateQueueCard()
@@ -3413,7 +3773,7 @@ void OnlineServicesDialog::UpdateQueueCard()
 
 void OnlineServicesDialog::RefreshAccounts()
 {
-	if (m_accountTable == nullptr)
+	if (m_accountTable == nullptr || !HasFullAccess())
 	{
 		return;
 	}
@@ -3468,11 +3828,10 @@ void OnlineServicesDialog::ShowAddAccountDialog()
 	}
 	const QString accountName = nameEdit->text().trimmed();
 	if (!OnlineServicesConfig::IsServerAccountName(accountName)
-		|| accountName == QStringLiteral("uploader")
-		|| accountName == QStringLiteral("devicedata"))
+		|| OnlineServicesConfig::IsDefaultFtpAccount(accountName))
 	{
 		AppendLog(QStringLiteral(
-			"账号未创建：必须匹配 ^[a-z][a-z0-9_-]{2,31}$，且不能使用保留名 uploader/devicedata。"));
+			"账号未创建：必须匹配 ^[a-z][a-z0-9_-]{2,31}$，且不能使用三级默认账号名。"));
 		return;
 	}
 	QJsonObject body;

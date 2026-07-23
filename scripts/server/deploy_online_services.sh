@@ -4,7 +4,7 @@
 # 安全约定：
 #   * 默认只做 dry-run；真正修改系统必须同时给出 --apply，并交互确认或给出 --yes。
 #   * 密码和管理令牌只从权限受限的文件读取，绝不接受命令行明文参数，也绝不打印。
-#   * 共享 uploader 永久退役；devicedata 是唯一 full 账号，普通账号必须绑定独立目录。
+#   * 三级默认账号由服务器保存：devicedata=full、ftpoperator=full FTP、uploader=write-only。
 #   * 管理文件先在同目录写临时文件，再原子替换；失败时从受限备份目录回滚。
 #   * 不删除 nginx 的 default/其他站点，不递归改写已有上传数据的属主或权限。
 #
@@ -108,7 +108,7 @@ usage() {
   --yes                           与 --apply 配合，跳过交互确认
   --devicedata-password-file FILE
                                   从 FILE 设置 devicedata 密码；仅新建账号时必需
-  --uploader-password-file FILE   已废弃且拒绝：共享 uploader 永久退役
+  --uploader-password-file FILE   不由部署器接收；默认账号密码通过回环管理接口单独轮换
   --admin-token-file FILE         从 FILE 安装管理令牌；省略则保留或本机生成
   --ota-admin-source FILE         ota_admin.py 来源（默认与本脚本同目录）
   --skip-packages                 确认依赖已在隔离维护窗口预装；--apply 必需
@@ -227,7 +227,7 @@ done
      ${#DATA_FILESYSTEM_MAX_BYTES} -le 20 ) ]] ||
     die "--data-filesystem-max-bytes 必须是 1-20 位正整数字节数"
 [[ -z "$UPLOADER_PASSWORD_FILE" ]] ||
-    die "共享 uploader 已永久退役；禁止再提供 --uploader-password-file"
+    die "默认账号密码不由部署器接收；请通过受保护的回环管理接口单独轮换"
 if [[ -n "$PASV_ADDRESS" ]]; then
     [[ ${#PASV_ADDRESS} -le 253 && "$PASV_ADDRESS" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ &&
        "$PASV_ADDRESS" != *..* ]] ||
@@ -516,7 +516,7 @@ validate_ftpdata_group() {
 }
 
 validate_devicedata_private_group() {
-    local passwd_entry admin_uid admin_gid group_entry group_name group_members aliases users_with_gid ftp_entry ftp_gid
+    local passwd_entry admin_uid admin_gid group_entry group_name group_members aliases users_with_gid ftp_entry ftp_gid member
     passwd_entry="$(lookup_passwd_entry devicedata)" || die "无法读取 devicedata 身份"
     IFS=: read -r _ _ admin_uid admin_gid _ _ _ _ <<< "$passwd_entry"
     [[ "$admin_uid" =~ ^[0-9]+$ && "$admin_uid" -ge 1000 &&
@@ -528,8 +528,13 @@ validate_devicedata_private_group() {
     IFS=: read -r group_name _ _ group_members _ <<< "$group_entry"
     aliases="$(all_group_entries | awk -F: -v gid="$admin_gid" '$3 == gid { print $1 }')"
     [[ "$aliases" == "$group_name" ]] || die "devicedata 私有 GID 存在组别名"
-    [[ -z "$group_members" || "$group_members" == "devicedata" ]] ||
-        die "devicedata 私有组含其它成员，无法隔离普通设备目录"
+    while IFS= read -r member; do
+        [[ -z "$member" ]] && continue
+        case "$member" in
+            devicedata|ftpoperator|uploader) ;;
+            *) die "devicedata 数据访问组含非默认账号 ${member}" ;;
+        esac
+    done < <(tr ',' '\n' <<< "$group_members")
     users_with_gid="$(all_passwd_entries | awk -F: -v gid="$admin_gid" '$4 == gid { print $1 }')"
     [[ "$users_with_gid" == "devicedata" ]] ||
         die "devicedata 主 GID 被其它账号共享，无法作为管理访问边界"
@@ -576,11 +581,6 @@ validate_ftpdata_membership_closure() {
     done < <(all_passwd_entries)
 
     for member in "${!seen_members[@]}"; do
-        if [[ "$member" == "uploader" ]]; then
-            ! grep -Fqx -- uploader "${STAGE_DIR}/vsftpd.userlist" ||
-                die "共享 uploader 已退役，禁止保留在最终 FTP 白名单"
-            continue
-        fi
         grep -Fqx -- "$member" "${STAGE_DIR}/vsftpd.userlist" ||
             die "ftpdata 成员 ${member} 未在最终 vsftpd.userlist，拒绝隐藏组权限"
         validate_existing_ftp_account "$member"
@@ -600,6 +600,22 @@ user_in_ftpdata() {
         [[ "$primary_gid" == "$group_gid" ]]
     else
         id -nG "$account" | tr ' ' '\n' | grep -Fqx ftpdata
+    fi
+}
+
+user_in_devicedata_group() {
+    local account="$1" group_entry group_gid group_members passwd_entry primary_gid
+    if [[ -n "$DEPLOY_NSS_FIXTURE_DIR" ]]; then
+        group_entry="$(lookup_group_entry devicedata)" || return 1
+        IFS=: read -r _ _ group_gid group_members _ <<< "$group_entry"
+        if tr ',' '\n' <<< "$group_members" | grep -Fqx -- "$account"; then
+            return 0
+        fi
+        passwd_entry="$(lookup_passwd_entry "$account")" || return 1
+        IFS=: read -r _ _ _ primary_gid _ _ _ <<< "$passwd_entry"
+        [[ "$primary_gid" == "$group_gid" ]]
+    else
+        id -nG "$account" | tr ' ' '\n' | grep -Fqx devicedata
     fi
 }
 
@@ -1414,19 +1430,6 @@ build_vsftpd_candidate() {
     ' "$source" > "$output" || die "vsftpd 全局配置校验失败"
 }
 
-remove_retired_uploader_candidate() {
-    local source="$1" output="$2"
-    [[ -f "$source" ]] || source="/dev/null"
-    awk '
-        {
-            logical = $0
-            gsub(/^[ \t]+|[ \t]+$/, "", logical)
-            if (logical == "uploader") next
-            print
-        }
-    ' "$source" > "$output"
-}
-
 validate_upload_only_user_conf() {
     local account="$1" path="${VSFTPD_USER_CONF_DIR}/$1"
     [[ -f "$path" && ! -L "$path" ]] ||
@@ -1495,8 +1498,8 @@ validate_upload_only_user_conf() {
 
 validate_device_directory() {
     local account="$1" path="${FTP_DATA}/$1" account_entry admin_entry account_uid admin_gid attrs mode uid gid unsafe
-    [[ "$account" =~ ^[a-z][a-z0-9_-]{2,31}$ && "$account" != "uploader" ]] ||
-        die "设备账号名无效或仍使用已退役 uploader"
+    [[ "$account" =~ ^[a-z][a-z0-9_-]{2,31}$ && "$account" != "uploader" && "$account" != "ftpoperator" ]] ||
+        die "普通设备账号名无效或使用了共享默认账号名"
     [[ -d "$path" && ! -L "$path" ]] ||
         die "账号 ${account} 缺少真实独立目录 ${path}；拒绝共享目录上传"
     unsafe="$(find "$path" -xdev \( -type l -o \( -type f -links +1 \) \) -print -quit)"
@@ -1528,7 +1531,6 @@ verify_userlist_preserved() {
     [[ -f "$original" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "$line" || "$line" == \#* ]] && continue
-        [[ "$line" == "uploader" ]] && continue
         grep -Fqx -- "$line" "$candidate" || die "内部错误: FTP 白名单候选丢失既有账号"
     done < "$original"
 }
@@ -1540,9 +1542,7 @@ refresh_ftp_candidates() {
         : > "${STAGE_DIR}/original-vsftpd.userlist"
     fi
     build_vsftpd_candidate "$VSFTPD_CONFIG" "${STAGE_DIR}/vsftpd.conf"
-    remove_retired_uploader_candidate "$VSFTPD_USERLIST" \
-        "${STAGE_DIR}/vsftpd.userlist.without-uploader"
-    append_line_candidate "${STAGE_DIR}/vsftpd.userlist.without-uploader" \
+    append_line_candidate "$VSFTPD_USERLIST" \
         "${STAGE_DIR}/vsftpd.userlist" "devicedata"
     append_line_candidate "$SHELLS_FILE" "${STAGE_DIR}/shells" "/usr/sbin/nologin"
     verify_userlist_preserved "$VSFTPD_USERLIST" "${STAGE_DIR}/vsftpd.userlist"
@@ -1572,8 +1572,6 @@ validate_ftp_candidates() {
     fi
     grep -Fqx 'devicedata' "${STAGE_DIR}/vsftpd.userlist" ||
         die "内部错误: FTP 白名单缺少 devicedata"
-    ! grep -Fqx 'uploader' "${STAGE_DIR}/vsftpd.userlist" ||
-        die "内部错误: 共享 uploader 未从候选白名单退役"
 }
 
 validate_final_ftp_account_state() {
@@ -1582,8 +1580,6 @@ validate_final_ftp_account_state() {
     while IFS= read -r account || [[ -n "$account" ]]; do
         [[ "$account" =~ ^[a-z][a-z0-9_-]{2,31}$ ]] ||
             die "vsftpd.userlist 含无效账号名: $account"
-        [[ "$account" != "uploader" ]] ||
-            die "共享 uploader 已退役，禁止出现在最终 FTP 白名单"
         [[ ! -v "seen_accounts[$account]" ]] ||
             die "vsftpd.userlist 含重复账号: $account"
         seen_accounts["$account"]=1
@@ -1591,9 +1587,19 @@ validate_final_ftp_account_state() {
         user_in_ftpdata "$account" ||
             die "白名单账号 ${account} 不是 ftpdata 成员"
         conf="${VSFTPD_USER_CONF_DIR}/$account"
-        if [[ "$account" == "devicedata" ]]; then
+        if [[ "$account" == "devicedata" || "$account" == "ftpoperator" ]]; then
             [[ ! -e "$conf" && ! -L "$conf" ]] ||
-                die "devicedata 必须为 full，不能有按用户限制文件"
+                die "全权限默认账号 ${account} 不能有按用户限制文件"
+            if [[ "$account" == "ftpoperator" ]]; then
+                validate_device_private_group "$account"
+                user_in_devicedata_group "$account" ||
+                    die "ftpoperator 未加入 devicedata 数据访问组"
+            fi
+        elif [[ "$account" == "uploader" ]]; then
+            validate_device_private_group "$account"
+            user_in_devicedata_group "$account" ||
+                die "uploader 未加入 devicedata 数据访问组"
+            validate_upload_only_user_conf "$account"
         else
             validate_device_private_group "$account"
             validate_upload_only_user_conf "$account"
@@ -1619,8 +1625,16 @@ validate_preexisting_device_isolation() {
         validate_existing_ftp_account "$account"
         user_in_ftpdata "$account" || die "设备账号 ${account} 不是 ftpdata 成员"
         validate_device_private_group "$account"
-        validate_upload_only_user_conf "$account"
-        validate_device_directory "$account"
+        if [[ "$account" == "ftpoperator" ]]; then
+            user_in_devicedata_group "$account" || die "ftpoperator 未加入 devicedata 数据访问组"
+            [[ ! -e "${VSFTPD_USER_CONF_DIR}/${account}" ]] || die "ftpoperator 必须为 full"
+        elif [[ "$account" == "uploader" ]]; then
+            user_in_devicedata_group "$account" || die "uploader 未加入 devicedata 数据访问组"
+            validate_upload_only_user_conf "$account"
+        else
+            validate_upload_only_user_conf "$account"
+            validate_device_directory "$account"
+        fi
     done < <(awk '{ gsub(/^[ \t]+|[ \t]+$/, ""); if (NF && $0 !~ /^#/) print }' \
         "${STAGE_DIR}/vsftpd.userlist")
 }
@@ -1656,8 +1670,8 @@ if [[ "$MODE" == "dry-run" ]]; then
 将原子管理: ${NGINX_SITE}
              ${VSFTPD_CONFIG}
              ${OTA_ADMIN_UNIT}
-将保留除已退役 uploader 外的既有 FTP 白名单，并在缺少时追加 devicedata。
-账号能力: devicedata=唯一 full；普通账号=write-once + /data/<account> 独立目录。
+将保留既有 FTP 白名单，并在缺少时追加 devicedata。
+账号能力: devicedata=全权限；ftpoperator=FTP 上传下载；uploader=共享 write-only；普通账号保持独立目录。
 PASV 公网回址: ${PASV_STATUS}
 不会删除其他 nginx 站点，不会重置既有 FTP 密码，不会递归改写上传数据。
 UFW 规则: --apply 强制 active，FTP 仅允许 ${FTP_ALLOW_CIDR:-<必须提供的私网/VPN CIDR>}
@@ -1923,10 +1937,12 @@ atomic_install_file "${STAGE_DIR}/vsftpd.conf" "$VSFTPD_CONFIG" 0600 root root
 atomic_install_file "${STAGE_DIR}/vsftpd.userlist" "$VSFTPD_USERLIST" 0600 root root
 atomic_install_file "${STAGE_DIR}/shells" "$SHELLS_FILE" 0644 root root
 verify_userlist_preserved "${STAGE_DIR}/original-vsftpd.userlist" "$VSFTPD_USERLIST"
-# 共享 uploader 已不在 allow-list；删除其旧按用户文件，避免后续误判为可恢复账号。
-if [[ -e "${VSFTPD_USER_CONF_DIR}/uploader" || -L "${VSFTPD_USER_CONF_DIR}/uploader" ]]; then
+# 未发布的 uploader 若遗留旧配置，会阻止后续通过管理接口原子创建默认账号；
+# 仅清理这种 orphan。已在白名单中的 uploader 配置必须保留并在下方按 write-only 校验。
+if ! grep -Fqx uploader "$VSFTPD_USERLIST" &&
+   [[ -e "${VSFTPD_USER_CONF_DIR}/uploader" || -L "${VSFTPD_USER_CONF_DIR}/uploader" ]]; then
     [[ -f "${VSFTPD_USER_CONF_DIR}/uploader" && ! -L "${VSFTPD_USER_CONF_DIR}/uploader" ]] ||
-        die "退役 uploader 配置不是普通文件"
+        die "uploader orphan 配置不是普通文件"
     snapshot_target "${VSFTPD_USER_CONF_DIR}/uploader"
     rm -f -- "${VSFTPD_USER_CONF_DIR}/uploader"
 fi
@@ -2089,5 +2105,5 @@ log "部署和本机验证完成。"
 log "备份目录: $BACKUP_DIR"
 log "管理令牌仅保存在受限文件 /opt/ota-admin/token；本脚本不会显示其内容。"
 log "管理接口默认仅允许 loopback；远程管理必须经 TLS 或 SSH 等可信隧道。"
-log "共享 uploader 已退役；普通账号只写 /data/<account>，devicedata 通过私有组管理。"
+log "三级默认账号策略已启用：devicedata=full、ftpoperator=FTP、uploader=write-only。"
 log "容量边界: ${CAPACITY_STATUS}；当前无 per-device quota。"

@@ -99,11 +99,12 @@ public:
         double truncateHeadMm = 0.0;  // 截掉点列开头(首点侧)的弧长 mm
         double truncateTailMm = 0.0;  // 截掉点列结尾(末点侧)的弧长 mm
         // 端区周期一致性补拐点（②③④拟合方案通用）：波纹拐点近似周期，用中段中位段长L反推端区漏点位置，
-        // 再用典型拐角弯折角确认，补回起点/终点段被检测盲区漏掉的拐点。搭接对合成一段算周期。默认关。
+        // 再用典型拐角弯折角确认，补回起点/终点段被检测盲区漏掉的拐点。删错时排除首末/搭接段，
+        // 将中间完整段按 IO/OI/II/OO 四类分别统计，避免长平台与短坡混算。默认关。
         bool enableEndPeriodCornerRecover = false;
         double endPeriodRatioThreshold = 1.2;  // 端段长/周期L ≥ 此值才判定漏了拐点(部分周期收尾段不补)
         double endPeriodMinBendDeg = 5.0;       // 补点候选最小弯折角(度)：与 0.5×典型角取大者作确认阈值
-        double endPeriodMergeFrac = 0.4;        // 删错:相邻同类拐点间距 < 此×周期L 判定找错→合并(搭接对豁免)
+        double endPeriodMergeFrac = 0.4;        // 删错:短于同类平台/坡中位且删后恢复正常坡→合并
         // 按平台边界重定拐点（②③④拟合方案通用）：波纹拐点全在"平台↔坡"交界。检测平的段(平台)，
         // 保证每平台两端各有边界角、删掉卡平台内部(放错位)的角。治"拐点放平台中间→平台消失"。默认关。
         bool enablePlatformCornerSnap = false;

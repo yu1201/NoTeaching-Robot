@@ -1966,6 +1966,39 @@ function Invoke-ConfigMigrate {
     }
 }
 
+function Get-SafeMigrationFailureDetail {
+    param([Parameter(Mandatory = $true)]$Migration)
+
+    # Never echo raw migrator output into the installer UI: source paths and
+    # malformed configuration text can contain operational or credential data.
+    # Map known failure families to a bounded, user-actionable explanation.
+    $text = ([string]$Migration.StdOut) + "`n" + ([string]$Migration.StdErr)
+    if ($text.IndexOf('DPAPI', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return 'Windows 当前用户无法解密敏感配置或创建受保护备份。'
+    }
+    if ($text.IndexOf('Cannot decode', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $text.IndexOf('account/Profile', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return '账号记录格式或保护状态无法安全转换。'
+    }
+    if ($text.IndexOf('credential scrub', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $text.IndexOf('credential source', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return '旧凭据清理状态或来源校验失败。'
+    }
+    if ($text.IndexOf('integrity', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $text.IndexOf('SQLite', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return '数据库完整性或 SQLite 事务校验失败。'
+    }
+    if ($text.IndexOf('sidecar', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $text.IndexOf('authority', [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $text.IndexOf('changed', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return '升级期间数据库文件状态发生变化，或存在未完成的 SQLite 临时文件。'
+    }
+    if ($text.IndexOf('schema', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return '数据库版本或表结构不受当前升级程序支持。'
+    }
+    return '迁移器拒绝了当前数据；为避免泄露敏感配置，界面未显示原始输出。请保留 Data 目录。'
+}
+
 function Test-SqliteHeader {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -2926,13 +2959,19 @@ try {
                 '--scrub-legacy-credentials'
             )
             if ($finalize.ExitCode -ne 0) {
-                Write-InstallerStatus ('ERROR:DEFERRED_SCRUB_FAILED:{0}' -f $finalize.ExitCode)
+                Write-InstallerStatus (
+                    ('ERROR:DEFERRED_SCRUB_FAILED:{0}' -f $finalize.ExitCode) +
+                    "`r`nDETAIL=" + (Get-SafeMigrationFailureDetail $finalize)
+                )
                 exit 26
             }
         }
         $finalVerification = Invoke-InstallerStateVerification
         if ($finalVerification.ExitCode -ne 0) {
-            Write-InstallerStatus ('ERROR:DEFERRED_SCRUB_READBACK_FAILED:{0}' -f $finalVerification.ExitCode)
+            Write-InstallerStatus (
+                ('ERROR:DEFERRED_SCRUB_READBACK_FAILED:{0}' -f $finalVerification.ExitCode) +
+                "`r`nDETAIL=" + (Get-SafeMigrationFailureDetail $finalVerification)
+            )
             exit 27
         }
         if ((Get-VerifiedCredentialScrubState $finalVerification) -cne 'complete') {
@@ -3139,7 +3178,10 @@ try {
             '--installer-staging'
         )
         if ($create.ExitCode -ne 0) {
-            Write-InstallerStatus ('ERROR:LEGACY_DATABASE_CREATE_FAILED:{0}' -f $create.ExitCode)
+            Write-InstallerStatus (
+                ('ERROR:LEGACY_DATABASE_CREATE_FAILED:{0}' -f $create.ExitCode) +
+                "`r`nDETAIL=" + (Get-SafeMigrationFailureDetail $create)
+            )
             exit 20
         }
         Assert-RegularFileInData $script:CreateStagingPath `
@@ -3151,7 +3193,10 @@ try {
         }
         $createdVerification = Invoke-InstallerStateVerification $script:CreateStagingPath
         if ($createdVerification.ExitCode -ne 0) {
-            Write-InstallerStatus ('ERROR:LEGACY_DATABASE_READBACK_FAILED:{0}' -f $createdVerification.ExitCode)
+            Write-InstallerStatus (
+                ('ERROR:LEGACY_DATABASE_READBACK_FAILED:{0}' -f $createdVerification.ExitCode) +
+                "`r`nDETAIL=" + (Get-SafeMigrationFailureDetail $createdVerification)
+            )
             exit 28
         }
         $createdScrubState = Get-VerifiedCredentialScrubState $createdVerification
@@ -3231,7 +3276,10 @@ try {
         throw 'The final database changed during staging-only migration.'
     }
     if ($migration.ExitCode -ne 0) {
-        Write-InstallerStatus ('ERROR:MIGRATION_FAILED_FINAL_UNCHANGED:{0}' -f $migration.ExitCode)
+        Write-InstallerStatus (
+            ('ERROR:MIGRATION_FAILED_FINAL_UNCHANGED:{0}' -f $migration.ExitCode) +
+            "`r`nDETAIL=" + (Get-SafeMigrationFailureDetail $migration)
+        )
         exit 21
     }
     if (-not $migration.StdOut.Contains('Upgraded existing database to schema v5:')) {
@@ -3251,7 +3299,10 @@ try {
     }
     $verification = Invoke-InstallerStateVerification $script:UpgradeStagingPath
     if ($verification.ExitCode -ne 0) {
-        Write-InstallerStatus ('ERROR:STAGING_READBACK_FAILED:{0}' -f $verification.ExitCode)
+        Write-InstallerStatus (
+            ('ERROR:STAGING_READBACK_FAILED:{0}' -f $verification.ExitCode) +
+            "`r`nDETAIL=" + (Get-SafeMigrationFailureDetail $verification)
+        )
         exit 24
     }
     $upgradeScrubState = Get-VerifiedCredentialScrubState $verification
