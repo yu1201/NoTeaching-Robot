@@ -22,6 +22,8 @@ def main() -> int:
     app = read("src/QtWidgetsApplication4.cpp")
     dialog = read("src/OnlineServicesDialog.cpp")
     uploader = read("src/ScanDataUploader.cpp")
+    ftp = read("src/FTPClient.cpp")
+    measure = read("src/MeasureThenWeldDialog.cpp")
 
     for token in (
         'QStringLiteral("devicedata")',
@@ -43,8 +45,20 @@ def main() -> int:
             "admin token is still exposed in the server configuration UI")
     require("m_serverHostEdit" in dialog and "m_deviceNameEdit" in dialog,
             "consolidated server-IP/device-name configuration is missing")
-    require("m_serverConfigNavRow" in dialog and "setNavRowEnabled(m_serverConfigNavRow, ftpAllowed" in dialog,
-            "upload-only role can still open server configuration")
+    require("m_serverConfigNavRow" in dialog and "setNavRowEnabled(m_serverConfigNavRow, true" in dialog,
+            "upload-only role cannot open the read-only server configuration page")
+    for token in (
+        "RequestServerConfigEdit",
+        "SetServerConfigEditing(false)",
+        "QLineEdit::Password",
+        "IsServerConfigUnlockCode",
+        "QString(6, QLatin1Char('8'))",
+        "edit->setEnabled(m_serverConfigEditing)",
+        "m_saveServerConfigBtn->setEnabled(m_serverConfigEditing",
+    ):
+        require(token in dialog, f"local password-locked server configuration is missing: {token}")
+    require(dialog.count("SaveConfigFromUi();") == 1,
+            "an unrelated online-service action can still implicitly save unlocked configuration")
     require("setNavRowEnabled(m_remoteNavRow, ftpAllowed" in dialog,
             "FTP remote browse/download permission is not wired")
     require("m_remoteDeleteBtn->setEnabled(!m_remoteBusy && fullAllowed)" in dialog,
@@ -78,8 +92,32 @@ def main() -> int:
         require(token in dialog, f"upload progress UI is missing: {token}")
     require('setRange(0, 100)' in dialog and 'setFormat(QStringLiteral("%1%")' in dialog,
             "upload progress is not a determinate percentage bar")
+    for token in (
+        "m_remoteDownloadQueueList",
+        "m_remoteDownloadProgressBar",
+        "BeginRemoteDownloadUi",
+        "UpdateRemoteDownloadUi",
+        "FinishRemoteDownloadUi",
+        "bytesPerSec",
+        "etaSeconds",
+    ):
+        require(token in dialog, f"remote download queue/progress UI is missing: {token}")
+    require("progressCb(received, expectedRemoteBytes)" in ftp,
+            "bounded FTP download does not publish real byte progress")
+    require("NotifyCaseForUpload(scanCycle.caseDir)" in measure,
+            "normal scan results are not queued until after welding")
+    require(
+        measure.index("NotifyCaseForUpload(scanCycle.caseDir)")
+        < measure.index("ExecuteWeldPoseFileWithSafePos(", measure.index("NotifyCaseForUpload(scanCycle.caseDir)")),
+        "automatic upload is still gated by weld execution success",
+    )
+    require("self->NotifyFlowResultForUpload(savedPath)" not in measure,
+            "legacy post-weld-only upload hook remains reachable")
+    require("if (checked && m_uploader != nullptr)" in dialog
+            and "m_uploader->TriggerUploadNow();" in dialog,
+            "re-enabling automatic upload does not resume existing pending items")
 
-    print("PASS: online-service roles, server login, permissions, and upload progress UI are wired")
+    print("PASS: online-service roles, locked config, upload recovery, and transfer progress UI are wired")
     return 0
 
 

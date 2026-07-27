@@ -2023,19 +2023,18 @@ void MeasureThenWeldDialog::SetScanDataUploadHook(std::function<void(const QStri
     m_scanDataUploadHook = std::move(hook);
 }
 
-void MeasureThenWeldDialog::NotifyFlowResultForUpload(const QString& poseFilePath)
+void MeasureThenWeldDialog::NotifyCaseForUpload(const QString& caseDirPath)
 {
-    if (!m_scanDataUploadHook || poseFilePath.isEmpty())
+    if (!m_scanDataUploadHook || caseDirPath.trimmed().isEmpty())
     {
         return;
     }
-    // poseFilePath = Result/<机器人>/<案例>/LaserPoint/xxx.txt → 上传单位是案例目录。
-    QDir caseDir = QFileInfo(poseFilePath).dir();
-    if (!caseDir.cdUp())
+    const QFileInfo caseInfo(caseDirPath);
+    if (!caseInfo.isDir())
     {
         return;
     }
-    const QString casePath = caseDir.absolutePath();
+    const QString casePath = QDir(caseDirPath).absolutePath();
     const auto hook = m_scanDataUploadHook;
     QMetaObject::invokeMethod(qApp, [hook, casePath]() { hook(casePath); }, Qt::QueuedConnection);
 }
@@ -2430,6 +2429,12 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                             }
                         });
                 savedPath = scanCycle.weldPosePath;
+                if (self != nullptr && !scanCycle.caseDir.trimmed().isEmpty())
+                {
+                    // 自动上传的完成边界是扫描案例已经落盘，而不是后续焊接是否执行成功。
+                    // 这样扫描后取消焊接、焊接失败或只做扫描时，现场数据仍会进入待传队列。
+                    self->NotifyCaseForUpload(scanCycle.caseDir);
+                }
                 if (!ok && message.isEmpty())
                 {
                     message = scanCycle.error.isEmpty()
@@ -2527,7 +2532,6 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         if (self != nullptr)
                         {
                             self->AppendLog(QString("焊接轨迹执行完成：%1").arg(executeSummary));
-                            self->NotifyFlowResultForUpload(savedPath);
                         }
                         message = QString("预设参数流程完成。\n结果位置：%1\n执行结果：%2\n下枪安全位置：%3\n收枪安全位置：%4")
                             .arg(savedPath)

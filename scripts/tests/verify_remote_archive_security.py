@@ -33,7 +33,7 @@ require("m_permanentShutdown" in lifecycle_h and "m_cancelCycle" in lifecycle_h,
 require("IsRemoteOperationBusy() const noexcept" in dialog_h, "main-window busy gate API")
 require("CancelRemoteOperationAndWait(bool permanentShutdown = false)" in dialog_h,
         "explicit reversible/permanent cancel+join API")
-require(dialog_cpp.count("StartRemoteWorker([this") == 5, "all five remote FTP entries use owned worker")
+require(dialog_cpp.count("StartRemoteWorker([this") == 6, "all six remote FTP entries use owned worker")
 require(".detach()" not in dialog_cpp, "OnlineServicesDialog has no detached threads")
 
 remote_region = dialog_cpp[dialog_cpp.index("single owned/cancellable/joinable FTP worker"):]
@@ -64,6 +64,7 @@ for token in (
     "CREATE_NEW",
     "maximumBytes",
     "DeleteFileA(localFilePath.c_str())",
+    "progressCb(received, expectedRemoteBytes)",
 ):
     require(token in bounded, f"bounded FTP download missing {token}")
 require("size_t maximumEntries = 10000" in ftp_h
@@ -164,7 +165,7 @@ require(audit.index("deletionCandidates.size()")
 download_worker = dialog_cpp[dialog_cpp.index("StartRemoteWorker([this, cfg, device, archives, localDir]"):
                              dialog_cpp.index("void OnlineServicesDialog::DeleteSelectedRemoteFiles()")]
 require(download_worker.index("AuditAndCleanupStaging(")
-        < download_worker.index("for (const auto& selectedArchive : archives)"),
+        < download_worker.index("for (int archiveIndex = 0; archiveIndex < archives.size(); ++archiveIndex)"),
         "staging residue audit runs before the first batch download")
 require("PromotionStatus::Promoted" in download_worker
         and "案例已落地但 staging 清理失败" in download_worker

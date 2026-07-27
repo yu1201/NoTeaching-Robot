@@ -164,8 +164,8 @@ private:
     bool ConfirmContinue(const QString& actionName);
     bool ShowCheckpointDialog(const QString& title, const QString& detail);
     bool HasLiveSession(const QString& actionName);
-    // 流程线程安全：从姿态文件路径推导案例目录，经队列回 UI 线程调用上传钩子。
-    void NotifyFlowResultForUpload(const QString& poseFilePath);
+    // 流程线程安全：扫描结果案例目录生成后，经队列回 UI 线程调用上传钩子。
+    void NotifyCaseForUpload(const QString& caseDirPath);
 
     // 互锁前置检查：被前置守卫拦下时弹 title 提示并返回 true（表示应当中止启动）。
     bool BlockedByOtherFlow(const QString& title);

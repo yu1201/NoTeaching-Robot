@@ -497,84 +497,84 @@ void ScanSafetyGateDialog::BuildHardGateTable()
             "safetyGateProofIntegrityEnabledCheckBox",
             "证明结构与防篡改",
             "固定 schema/profile；质量证明和 HMAC 收据必须完整、可验签，并与当前案例绑定。",
-            "关闭后仅允许维护审计，不能生成可执行证明或进行生产运动。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_proofIntegrityGateCheck
         },
         {
             "safetyGateProductionPurposeEnabledCheckBox",
             "生产用途",
             "证明用途必须为 production，诊断、预览或测试用途的证明不能进入生产流程。",
-            "关闭后仅允许维护审计，不能把非生产用途证明用于真实焊接。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_productionPurposeGateCheck
         },
         {
             "safetyGateRobotNameBindingEnabledCheckBox",
             "机器人逻辑名称绑定",
             "证明记录的机器人逻辑名称必须与当前所选机器人名称一致。",
-            "仅放宽逻辑名称；TCP 持久端点/控制单元、相机及手眼身份仍继续强制匹配。",
+            "仅记录开关状态；机器人名称及端点、相机、手眼身份仍按固定规则校验。",
             &m_robotNameBindingGateCheck
         },
         {
             "safetyGateCaseBindingEnabledCheckBox",
             "案例目录绑定",
             "证明中的规范化案例目录必须与当前运行案例目录一致。",
-            "关闭后仅允许维护审计，跨案例证据不能用于生产。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_caseBindingGateCheck
         },
         {
             "safetyGateEndpointBindingEnabledCheckBox",
             "TCP 持久端点/控制单元绑定",
             "持久化 TCP 端点和控制单元身份必须与生成证明时一致。",
-            "关闭后仅允许维护审计，不能向真实机器人下发生产运动。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_endpointBindingGateCheck
         },
         {
             "safetyGateCameraHandEyeBindingEnabledCheckBox",
             "相机与手眼绑定",
             "定位相机身份、相机配置和手眼标定身份必须与生成证明时一致。",
-            "关闭后仅允许维护审计；更换相机或重新标定后的旧证明不能用于生产。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_cameraHandEyeBindingGateCheck
         },
         {
             "safetyGateFreshnessEnabledCheckBox",
             "证明新鲜度",
             "质量证明及原始扫描不超过 24 小时；时间戳最多允许未来偏差 5 分钟。",
-            "关闭后仅允许维护审计，过期证明不能生成生产运动。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_freshnessGateCheck
         },
         {
             "safetyGatePolicySnapshotEnabledCheckBox",
             "处理策略与阈值快照",
             "处理模式、特征策略、质量策略和所有 validation 阈值快照必须与当前配置一致。",
-            "关闭后仅允许维护审计，策略变化后的旧证明不能用于生产。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_policySnapshotGateCheck
         },
         {
             "safetyGateInputEvidenceEnabledCheckBox",
             "输入证据身份",
             "原始点云、扫描元数据及关键输入证据的路径、大小和摘要必须匹配。",
-            "关闭后仅允许维护审计，被替换的输入不能用于生产。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_inputEvidenceGateCheck
         },
         {
             "safetyGateAuthorizedPoseIdentityEnabledCheckBox",
             "授权焊道与位姿身份",
             "生成轨迹所依赖的焊道、特征输出和授权位姿身份必须与证明记录一致。",
-            "关闭后仅允许维护审计，未经证明授权的位姿不能用于真实焊接。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_authorizedPoseIdentityGateCheck
         },
         {
             "safetyGateTrajectoryStructureEnabledCheckBox",
             "轨迹结构",
             "轨迹点数量、段结构、字段完整性及数值有限性均需通过结构校验。",
-            "关闭后仅允许维护审计，畸形或非有限轨迹不能下发。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_trajectoryStructureGateCheck
         },
         {
             "safetyGateMotionPrecheckEnabledCheckBox",
             "运动前复核与限值",
             "每次运动前重新读取配置、绑定和证据，并检查机器人位姿、关节/笛卡尔值及工艺限值。",
-            "关闭后仅允许维护审计；禁止真实焊接和机器人生产运动。",
+            "仅记录开关状态；不改变固定校验、证明生成、机器人运动或焊接流程。",
             &m_motionPrecheckGateCheck
         }
     };
@@ -584,7 +584,7 @@ void ScanSafetyGateDialog::BuildHardGateTable()
         QStringLiteral("开关"),
         QStringLiteral("系统门禁"),
         QStringLiteral("复核内容"),
-        QStringLiteral("关闭影响")
+        QStringLiteral("记录说明")
     });
     m_hardGateTable->setRowCount(static_cast<int>(std::size(rows)));
     m_hardGateTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -835,20 +835,11 @@ void ScanSafetyGateDialog::Save()
     if (!disabledGates.isEmpty())
     {
         QString risk = QStringLiteral(
-            "以下门禁将被关闭：\n%1\n\n"
-            "关闭门禁会放宽扫描证明复核。").arg(disabledGates);
-        if (HasDisabledCoreSafetyGateUi())
-        {
-            risk += QStringLiteral(
-                "\n\n维护审计状态：禁止生成可执行证明、真实焊接和机器人生产运动。");
-        }
-        if (!m_robotNameBindingGateCheck->isChecked())
-        {
-            risk += QStringLiteral(
-                "\n\n机器人名称关闭只放宽逻辑名称；TCP 持久端点/控制单元、"
-                "相机及手眼身份仍强制匹配。");
-        }
-        risk += QStringLiteral("\n\n确认以管理员身份保存这些关闭项吗？");
+            "以下配置开关将记录为关闭：\n%1\n\n"
+            "系统安全门禁开关只作为审计记录，不会切换 Validation 策略，"
+            "也不会停止证明生成、机器人运动或焊接流程；固定安全校验仍照常执行。"
+            "\n质量评估开关仍按当前 Validation 策略参与质量判定。"
+            "\n\n确认以管理员身份保存这些记录吗？").arg(disabledGates);
         if (QMessageBox::warning(
                 this,
                 QStringLiteral("确认关闭安全门禁"),
@@ -901,9 +892,6 @@ void ScanSafetyGateDialog::Save()
     settings.safetyGateTrajectoryStructureEnabled = m_trajectoryStructureGateCheck->isChecked();
     settings.safetyGateMotionPrecheckEnabled = m_motionPrecheckGateCheck->isChecked();
 
-    const bool savedInMaintenanceAudit =
-        PointCloudProcessingConfig::HasDisabledCoreSafetyGate(settings);
-
     QString error;
     if (!PointCloudProcessingConfig::Save(settings, &error))
     {
@@ -918,14 +906,9 @@ void ScanSafetyGateDialog::Save()
     QMessageBox::information(
         this,
         QStringLiteral("保存成功"),
-        savedInMaintenanceAudit
-            ? QStringLiteral(
-                "扫描安全门禁已保存并进入维护审计状态。禁止生成可执行证明、"
-                "真实焊接和机器人生产运动；重新开启全部核心系统门禁、"
-                "选择 Enforce 并保存后才能恢复。")
-            : QStringLiteral(
-                "扫描安全门禁已保存。旧质量证明因门禁或阈值快照发生变化而失效；"
-                "继续生产前必须从原始点云重新构建质量证明。"));
+        QStringLiteral(
+            "扫描安全门禁记录已保存。系统门禁开关不会改变正常流程；"
+            "Validation 策略和质量评估参数仍按当前配置执行。"));
 }
 
 void ScanSafetyGateDialog::UpdatePolicyUi()
@@ -933,8 +916,6 @@ void ScanSafetyGateDialog::UpdatePolicyUi()
     const bool configuredEnforce =
         m_validationPolicyCombo->currentData().toInt()
         == static_cast<int>(PointCloudProcessingConfig::ValidationPolicy::Enforce);
-    const bool maintenanceAudit = HasDisabledCoreSafetyGateUi();
-
     // Audit 可以用于诊断性观察；Enforce 的安全地板/上限不能从界面放宽。
     m_minFinitePointCountSpin->setRange(configuredEnforce ? 300 : 0, 10000000);
     m_minProjectedSpanSpin->setRange(configuredEnforce ? 180.0 : 0.0, 999999.0);
@@ -965,28 +946,17 @@ void ScanSafetyGateDialog::UpdatePolicyUi()
     m_minOutputPointCountSpin->setEnabled(m_outputEnabledCheck->isChecked());
     m_minOutputLengthRatioSpin->setEnabled(m_outputEnabledCheck->isChecked());
 
-    if (maintenanceAudit)
-    {
-        m_policyBoundaryLabel->setText(configuredEnforce
-            ? QStringLiteral(
-                "有效策略为 Audit：已有核心系统门禁关闭。配置的 Enforce 数值安全边界仍保留，"
-                "但维护审计状态禁止生成可执行证明、真实焊接和机器人生产运动。")
-            : QStringLiteral(
-                "有效策略为 Audit：已有核心系统门禁关闭。维护审计状态禁止生成可执行证明、"
-                "真实焊接和机器人生产运动。"));
-        m_policyBoundaryLabel->setStyleSheet(QStringLiteral("color:#ff9a9f; font-weight:700;"));
-    }
-    else if (configuredEnforce)
+    if (configuredEnforce)
     {
         m_policyBoundaryLabel->setText(QStringLiteral(
             "已启用质量门禁的 Enforce 安全边界已锁定：有限点≥300、跨度≥180 mm、站位覆盖≥55%、"
             "最长连续段≥60%、剔除≤40%、中位/P95残差≤3/8 mm、残差内点阈值≤6 mm、"
             "内点率≥75%、关键点/拐点≥6/4、输出点≥80、输出长度比≥70%。"));
-        if (!m_robotNameBindingGateCheck->isChecked())
+        if (HasDisabledCoreSafetyGateUi())
         {
             m_policyBoundaryLabel->setText(m_policyBoundaryLabel->text()
                 + QStringLiteral(
-                    "\n机器人逻辑名称已放宽；TCP 持久端点/控制单元、相机及手眼身份仍强制匹配。"));
+                    "\n部分系统门禁开关记录为关闭；该记录不改变 Enforce 策略或固定安全校验。"));
         }
         m_policyBoundaryLabel->setStyleSheet(QStringLiteral("color:#8fe5b2;"));
     }
@@ -994,11 +964,11 @@ void ScanSafetyGateDialog::UpdatePolicyUi()
     {
         m_policyBoundaryLabel->setText(QStringLiteral(
             "Audit 只计算和记录全部门禁指标，不生成可用于机器人生产运动的质量证明。"));
-        if (!m_robotNameBindingGateCheck->isChecked())
+        if (HasDisabledCoreSafetyGateUi())
         {
             m_policyBoundaryLabel->setText(m_policyBoundaryLabel->text()
                 + QStringLiteral(
-                    "\n机器人逻辑名称已放宽；TCP 持久端点/控制单元、相机及手眼身份仍强制匹配。"));
+                    "\n部分系统门禁开关记录为关闭；Audit 是显式策略选择，并非由这些记录触发。"));
         }
         m_policyBoundaryLabel->setStyleSheet(QStringLiteral("color:#ffd878;"));
     }
@@ -1009,7 +979,7 @@ void ScanSafetyGateDialog::UpdateSummary()
     const bool configuredEnforce =
         m_validationPolicyCombo->currentData().toInt()
         == static_cast<int>(PointCloudProcessingConfig::ValidationPolicy::Enforce);
-    const bool maintenanceAudit = HasDisabledCoreSafetyGateUi();
+    const bool hasDisabledSafetyGateRecord = HasDisabledCoreSafetyGateUi();
     const bool qualityRelaxed =
         !m_coverageEnabledCheck->isChecked()
         || !m_continuityEnabledCheck->isChecked()
@@ -1046,22 +1016,18 @@ void ScanSafetyGateDialog::UpdateSummary()
         .arg(enabledCount)
         .arg(gateChecks.size())
         .arg(PointCloudProcessingConfig::CURRENT_VALIDATION_PROFILE_VERSION));
-    m_policySummaryLabel->setText(maintenanceAudit
-        ? QStringLiteral("有效 Audit · 核心门禁关闭")
-        : (configuredEnforce
-            ? QStringLiteral("Enforce · 失败即拒绝")
-            : QStringLiteral("Audit · 仅审计、不可执行")));
-    m_proofSummaryLabel->setText(maintenanceAudit
-        ? QStringLiteral("维护审计状态 · 禁止生产")
-        : (!configuredEnforce
-            ? QStringLiteral("仅审计 · 禁止生产")
-            : (!m_robotNameBindingGateCheck->isChecked() && qualityRelaxed
-                ? QStringLiteral("名称/质量已放宽 · 端点强制")
-                : (!m_robotNameBindingGateCheck->isChecked()
-                    ? QStringLiteral("逻辑名称放宽 · 端点强制")
-                    : (qualityRelaxed
-                        ? QStringLiteral("质量门禁已放宽 · Enforce")
-                        : QStringLiteral("生产安全状态 · 正常"))))));
+    m_policySummaryLabel->setText(configuredEnforce
+        ? QStringLiteral("Enforce · 失败即拒绝")
+        : QStringLiteral("Audit · 仅审计、不可执行"));
+    m_proofSummaryLabel->setText(!configuredEnforce
+        ? QStringLiteral("仅审计 · 禁止生产")
+        : (hasDisabledSafetyGateRecord && qualityRelaxed
+            ? QStringLiteral("系统门禁仅记录 · 质量配置有关闭")
+            : (hasDisabledSafetyGateRecord
+                ? QStringLiteral("系统门禁仅记录 · 流程正常")
+                : (qualityRelaxed
+                    ? QStringLiteral("质量门禁已放宽 · Enforce")
+                    : QStringLiteral("生产安全状态 · 正常")))));
 
     const QString normalSummaryStyle = QStringLiteral(
         "color:#8fe5b2; background:#0b151d; border:1px solid #315163;"
@@ -1072,13 +1038,13 @@ void ScanSafetyGateDialog::UpdateSummary()
     const QString warningSummaryStyle = QStringLiteral(
         "color:#ffd878; background:#392b0c; border:1px solid #8a6820;"
         "border-radius:6px; font-weight:700; padding:5px 10px;");
-    m_policySummaryLabel->setStyleSheet(maintenanceAudit
-        ? dangerSummaryStyle
-        : normalSummaryStyle);
+    m_policySummaryLabel->setStyleSheet(configuredEnforce
+        ? normalSummaryStyle
+        : dangerSummaryStyle);
     m_proofSummaryLabel->setStyleSheet(
-        maintenanceAudit || !configuredEnforce
+        !configuredEnforce
             ? dangerSummaryStyle
-            : (qualityRelaxed || !m_robotNameBindingGateCheck->isChecked()
+            : (qualityRelaxed || hasDisabledSafetyGateRecord
                 ? warningSummaryStyle
                 : normalSummaryStyle));
     UpdateChangeWarning();
@@ -1086,9 +1052,10 @@ void ScanSafetyGateDialog::UpdateSummary()
 
 bool ScanSafetyGateDialog::HasDisabledCoreSafetyGateUi() const
 {
-    // 机器人逻辑名称是唯一允许单独放宽而不进入维护审计状态的系统门禁。
+    // 系统门禁开关只用于显示和记录关闭项，不参与有效策略或生产流程判定。
     return !m_proofIntegrityGateCheck->isChecked()
         || !m_productionPurposeGateCheck->isChecked()
+        || !m_robotNameBindingGateCheck->isChecked()
         || !m_caseBindingGateCheck->isChecked()
         || !m_endpointBindingGateCheck->isChecked()
         || !m_cameraHandEyeBindingGateCheck->isChecked()
@@ -1136,34 +1103,27 @@ void ScanSafetyGateDialog::UpdateChangeWarning()
     if (HasDisabledCoreSafetyGateUi())
     {
         m_changeWarningLabel->setStyleSheet(QStringLiteral(
-            "background:#301216; border:1px solid #a5444d; border-radius:7px;"
-            "color:#ff9a9f; padding:10px 12px; font-weight:700;"));
+            "background:#392b0c; border:1px solid #8a6820; border-radius:7px;"
+            "color:#ffd878; padding:10px 12px; font-weight:600;"));
         m_changeWarningLabel->setText(QStringLiteral(
-            "维护审计状态：禁止生成可执行证明、真实焊接和机器人生产运动。"
-            "重新开启全部核心系统门禁、选择 Enforce 并保存后才能恢复生产。"));
+            "部分系统门禁开关记录为关闭：该状态只写入配置和质量报告，"
+            "不会改变 Validation 策略、固定安全校验、证明生成、机器人运动或焊接流程。"));
         return;
     }
 
     m_changeWarningLabel->setStyleSheet(QStringLiteral(
         "background:#392b0c; border:1px solid #8a6820; border-radius:7px;"
         "color:#ffd878; padding:10px 12px; font-weight:600;"));
-    if (!m_robotNameBindingGateCheck->isChecked())
+    if (m_dirty)
     {
         m_changeWarningLabel->setText(QStringLiteral(
-            "机器人逻辑名称门禁已关闭：只放宽逻辑名称；TCP 持久端点/控制单元、"
-            "相机及手眼身份仍强制匹配，可继续使用 Enforce。"));
-    }
-    else if (m_dirty)
-    {
-        m_changeWarningLabel->setText(QStringLiteral(
-            "存在未保存变更。保存后，使用旧门禁、旧处理策略或旧阈值快照的质量证明都会失效；"
-            "必须从原始点云重新处理并生成新证明。"));
+            "存在未保存变更。系统门禁开关仅作为记录；Validation 策略和质量参数变更"
+            "仍会按现有规则作用于后续处理。"));
     }
     else
     {
         m_changeWarningLabel->setText(QStringLiteral(
-            "安全提示：任何门禁、执行策略或 validation 阈值变更都会使旧质量证明失效；"
-            "继续生产前必须从原始点云重新构建。"));
+            "系统门禁开关仅作为记录，不影响正常流程；固定安全校验始终执行。"));
     }
 }
 

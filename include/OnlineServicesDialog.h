@@ -2,6 +2,7 @@
 
 #include <QDialog>
 #include <QString>
+#include <QStringList>
 
 #include "OnlineServicesConfig.h"
 #include "RemoteWorkerLifecycle.h"
@@ -106,12 +107,33 @@ private:
     QPushButton* m_remoteDownloadBtn = nullptr;
     QPushButton* m_remoteDeleteBtn = nullptr;   // 删除选中数据包（服务器上）
     QPushButton* m_remoteMkdirBtn = nullptr;    // 新建设备目录
+    QLabel* m_remoteDownloadStateLabel = nullptr;
+    QLabel* m_remoteDownloadCurrentLabel = nullptr;
+    QLabel* m_remoteDownloadDetailLabel = nullptr;
+    QLabel* m_remoteDownloadQueueLabel = nullptr;
+    QProgressBar* m_remoteDownloadProgressBar = nullptr;
+    QListWidget* m_remoteDownloadQueueList = nullptr;
+    QStringList m_remoteDownloadNames;
+    QStringList m_remoteDownloadStates;
     bool m_remoteBusy = false;
     std::thread m_remoteWorker;
     RemoteWorkerLifecycle m_remoteLifecycle;
     void RefreshRemoteDevices();
     void RefreshRemoteFiles();
     void DownloadSelectedRemoteFiles();
+    void BeginRemoteDownloadUi(const QStringList& names);
+    void UpdateRemoteDownloadUi(int currentIndex,
+        int completedItems,
+        qulonglong receivedBytes,
+        qulonglong totalBytes,
+        double bytesPerSec,
+        int etaSeconds,
+        const QString& phase,
+        const QString& itemState = QString());
+    void FinishRemoteDownloadUi(int completedItems,
+        bool stoppedEarly,
+        const QString& summary);
+    void RefreshRemoteDownloadQueueUi();
     void DeleteSelectedRemoteFiles();
     void CreateRemoteDeviceDir();
     void SetRemoteBusy(bool busy);
@@ -165,8 +187,13 @@ private:
         std::function<void(bool ok, const QJsonObject& resp)> done);
 
     // 配置区
+    void RequestServerConfigEdit();
+    void SetServerConfigEditing(bool editing);
     QLineEdit* m_serverHostEdit = nullptr;
     QLineEdit* m_deviceNameEdit = nullptr;
+    QPushButton* m_editServerConfigBtn = nullptr;
+    QPushButton* m_saveServerConfigBtn = nullptr;
+    bool m_serverConfigEditing = false;
 
     QPlainTextEdit* m_logText = nullptr;
 

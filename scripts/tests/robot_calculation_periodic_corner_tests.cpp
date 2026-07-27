@@ -57,6 +57,47 @@ QVector<GeometryProjectedPoint> BuildRobotCPeriodicKeys()
     return projected;
 }
 
+QVector<GeometryProjectedPoint> BuildRobotC009PeriodicKeys()
+{
+    // RobotC/20260724_009 反向扫描现场关键点：首尾各有一个真实外拐点被拆成
+    // OO 短段，分别为 5.319 mm 和 4.879 mm。排除候选后每类只有两个完整
+    // 平台/同方向坡参考段，覆盖短工件的两参考段回归。
+    const KeyRow rows[] = {
+        { 21, -412.927672, 1170.920028, -218.363208 },
+        { 149, -349.843657, 1170.891420, -218.251591 },
+        { 157, -344.986638, 1173.060334, -218.287460 },
+        { 179, -339.118701, 1184.164345, -218.504888 },
+        { 391, -234.410387, 1180.863940, -218.252808 },
+        { 415, -228.044600, 1166.305678, -217.942915 },
+        { 609, -130.646847, 1163.944511, -217.723038 },
+        { 635, -123.128378, 1178.052321, -217.999119 },
+        { 841, -19.748357, 1178.919615, -217.834964 },
+        { 867, -12.950016, 1164.911979, -217.535688 },
+        { 1061, 84.348156, 1160.026419, -217.264245 },
+        { 1082, 91.928683, 1173.372690, -217.524636 },
+        { 1294, 195.981796, 1171.388210, -217.300704 },
+        { 1318, 201.425638, 1159.043225, -217.037799 },
+        { 1326, 205.887569, 1157.069873, -216.989447 },
+        { 1454, 269.390085, 1156.628253, -216.868619 },
+    };
+
+    QVector<GeometryProjectedPoint> projected;
+    projected.reserve(static_cast<int>(sizeof(rows) / sizeof(rows[0])));
+    for (const KeyRow& row : rows)
+    {
+        GeometryProjectedPoint point;
+        point.inputIndex = row.sourceIndex;
+        point.point = Eigen::Vector3d(row.x, row.y, row.z);
+        point.s = row.x;
+        point.h = row.y;
+        point.smoothH = row.y;
+        point.n = row.z;
+        point.smoothN = row.z;
+        projected.push_back(point);
+    }
+    return projected;
+}
+
 QVector<int> SequentialIndexes(int count)
 {
     QVector<int> indexes;
@@ -135,7 +176,7 @@ bool VerifyRobotCFalseDoubleCornerIsMerged()
     const QVector<char> lapKeys(keys.size(), 0);
     int removedCount = 0;
     const QVector<int> merged = MergeTooCloseSameTypeCorners(
-        projected, keys, lapKeys, 0.40, 0.15, &removedCount);
+        projected, keys, lapKeys, 0.40, 0.15, 3, &removedCount);
 
     if (removedCount != 1
         || merged.size() != keys.size() - 1
@@ -156,7 +197,7 @@ bool VerifyReverseDirectionIsEquivalent()
     const QVector<char> lapKeys(keys.size(), 0);
     int removedCount = 0;
     const QVector<int> merged = MergeTooCloseSameTypeCorners(
-        projected, keys, lapKeys, 0.40, 0.15, &removedCount);
+        projected, keys, lapKeys, 0.40, 0.15, 3, &removedCount);
 
     if (removedCount != 1
         || ContainsSourceIndex(merged, projected, 1432)
@@ -178,7 +219,7 @@ bool VerifyLapAndTrueFlatPlatformAreProtected()
     lapKeys[15] = 1;
     int removedCount = 0;
     const QVector<int> lapMerged = MergeTooCloseSameTypeCorners(
-        projected, keys, lapKeys, 0.40, 0.15, &removedCount);
+        projected, keys, lapKeys, 0.40, 0.15, 3, &removedCount);
     if (removedCount != 0 || lapMerged != keys)
     {
         std::cerr << "lap-step pair was incorrectly merged\n";
@@ -201,7 +242,7 @@ bool VerifyLapAndTrueFlatPlatformAreProtected()
     removedCount = 0;
     const QVector<char> noLapKeys(keys.size(), 0);
     const QVector<int> flatMerged = MergeTooCloseSameTypeCorners(
-        flatProjected, keys, noLapKeys, 0.40, 0.15, &removedCount);
+        flatProjected, keys, noLapKeys, 0.40, 0.15, 3, &removedCount);
     if (removedCount != 0 || flatMerged != keys)
     {
         std::cerr << "true short flat platform was incorrectly merged\n";
@@ -242,7 +283,7 @@ bool VerifyAmbiguousRecoveryIsConservative()
         const QVector<char> lapKeys(keys.size(), 0);
         int removedCount = 0;
         const QVector<int> merged = MergeTooCloseSameTypeCorners(
-            candidate, keys, lapKeys, 0.40, 0.15, &removedCount);
+            candidate, keys, lapKeys, 0.40, 0.15, 3, &removedCount);
         if (removedCount != 0 || merged != keys)
         {
             std::cerr << label << " ambiguous recovery was not conservative\n";
@@ -251,6 +292,49 @@ bool VerifyAmbiguousRecoveryIsConservative()
         return true;
     };
 
+    if (!verifyDirection(projected, "forward"))
+    {
+        return false;
+    }
+    std::reverse(projected.begin(), projected.end());
+    return verifyDirection(projected, "reverse");
+}
+
+bool VerifyRobotC009TwoReferenceDoubleCornersAreMerged()
+{
+    auto verifyDirection = [](QVector<GeometryProjectedPoint> projected, const char* label)
+    {
+        const QVector<int> keys = SequentialIndexes(projected.size());
+        const QVector<char> lapKeys(keys.size(), 0);
+        int removedCount = 0;
+        const QVector<int> merged = MergeTooCloseSameTypeCorners(
+            projected, keys, lapKeys, 0.40, 0.15, 2, &removedCount);
+        if (removedCount != 2
+            || ContainsSourceIndex(merged, projected, 157)
+            || ContainsSourceIndex(merged, projected, 1318)
+            || !ContainsSourceIndex(merged, projected, 149)
+            || !ContainsSourceIndex(merged, projected, 1326))
+        {
+            std::cerr << label
+                      << " RobotC/20260724_009 two-reference double corners were not merged\n";
+            return false;
+        }
+        return true;
+    };
+
+    QVector<GeometryProjectedPoint> projected = BuildRobotC009PeriodicKeys();
+    {
+        const QVector<int> keys = SequentialIndexes(projected.size());
+        const QVector<char> lapKeys(keys.size(), 0);
+        int removedCount = 0;
+        const QVector<int> conservative = MergeTooCloseSameTypeCorners(
+            projected, keys, lapKeys, 0.40, 0.15, 3, &removedCount);
+        if (removedCount != 0 || conservative != keys)
+        {
+            std::cerr << "minimum reference segment parameter was not honored\n";
+            return false;
+        }
+    }
     if (!verifyDirection(projected, "forward"))
     {
         return false;
@@ -268,6 +352,7 @@ int main(int argc, char** argv)
     if (!VerifyReverseDirectionIsEquivalent()) return 3;
     if (!VerifyLapAndTrueFlatPlatformAreProtected()) return 4;
     if (!VerifyAmbiguousRecoveryIsConservative()) return 5;
+    if (!VerifyRobotC009TwoReferenceDoubleCornersAreMerged()) return 6;
     std::cout << "PASS: four-class periodic corner pairing regression\n";
     return 0;
 }

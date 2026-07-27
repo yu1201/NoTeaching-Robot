@@ -537,25 +537,15 @@ function Assert-InstallerDefinition {
         [pscustomobject]@{
             Name = "ConfigMigrate_Install.ps1"; Source = "..\dist\tools\ConfigMigrate_Install.ps1"; DestDir = "{app}\tools"
             AllowedFields = @("destdir", "flags", "source"); RequiredFlags = @("ignoreversion"); RequiredExcludes = @()
-        },
-        [pscustomobject]@{
-            Name = "pre-install ConfigMigrate.exe"; Source = "..\dist\tools\ConfigMigrate.exe"; DestDir = "{tmp}"
-            AllowedFields = @("destdir", "destname", "flags", "source"); RequiredFlags = @("dontcopy"); RequiredExcludes = @()
-            RequiredDestName = "ConfigMigrate_PreInstall.exe"
-        },
-        [pscustomobject]@{
-            Name = "pre-install ConfigMigrate_Install.ps1"; Source = "..\dist\tools\ConfigMigrate_Install.ps1"; DestDir = "{tmp}"
-            AllowedFields = @("destdir", "destname", "flags", "source"); RequiredFlags = @("dontcopy"); RequiredExcludes = @()
-            RequiredDestName = "ConfigMigrate_PreInstall.ps1"
         }
     )
     if ($fileRecords.Count -ne $required.Count) {
-        throw "Installer [Files] must contain exactly the six approved release Source records; found $($fileRecords.Count): $issPath"
+        throw "Installer [Files] must contain exactly the four approved release Source records; found $($fileRecords.Count): $issPath"
     }
     $actualSources = @($fileRecords | ForEach-Object { [string]$_.source } | Sort-Object)
     $allowedSources = @($required | ForEach-Object { [string]$_.Source } | Sort-Object)
     if (($actualSources -join "`n") -cne ($allowedSources -join "`n")) {
-        throw "Installer [Files] Source set is not exactly the approved migration-safe paths: $($actualSources -join ', ')"
+        throw "Installer [Files] Source set is not exactly the approved database-preserving paths: $($actualSources -join ', ')"
     }
     foreach ($expectation in $required) {
         $matches = @($fileRecords | Where-Object {
@@ -589,40 +579,83 @@ function Assert-InstallerDefinition {
             }
         }
     }
-    foreach ($migrationFragment in @(
-        "function PrepareToInstall(var NeedsRestart: Boolean): string;",
-        "ExtractTemporaryFile('ConfigMigrate_PreInstall.exe');",
-        "ExtractTemporaryFile('ConfigMigrate_PreInstall.ps1');",
+    foreach ($installationSafetyFragment in @(
         "CloseApplications=force",
         "CloseApplicationsFilter={#MyAppExeName}",
-        "RestartApplications=no",
-        "-ApplicationExecutable",
-        "procedure DeinitializeSetup;",
-        "function GetCustomSetupExitCode: Integer;",
-        "-RollbackPendingTransaction",
-        "-CommitPendingTransaction",
-        "AppendPreparationRollbackOutcome(Result);",
-        "OK:PENDING_PUBLISHED_PRESERVED",
-        "OK:PENDING_TRANSACTION_COMMITTED_FINALIZE_REQUIRED",
-        "OK:LEGACY_DATABASE_CREATED_AND_VERIFIED",
-        "if not CommitPendingDatabaseTransaction(CommitStatus) then",
-        "if DatabaseMigrationReady and MigrationNeedsFinalize and",
-        "DatabaseMigrationHelperReady",
-        "if (not DatabaseMigrationAttempted) or (not DatabaseMigrationHelperReady) or",
-        "Check: DatabaseMigrationSucceeded"
+        "RestartApplications=no"
     )) {
-        if (-not $text.Contains($migrationFragment)) {
-            throw "Installer pre-install database migration/rollback wiring is missing: $migrationFragment"
+        if (-not $text.Contains($installationSafetyFragment)) {
+            throw "Installer application replacement safety wiring is missing: $installationSafetyFragment"
         }
     }
-    if ($text.Contains("AllowNoPendingTransaction") -or
-        $text.Contains("NO_PENDING_TRANSACTION_ALLOWED")) {
-        throw "Installer rollback must never accept a missing transaction record after the helper started: $issPath"
+
+    foreach ($forbiddenDatabaseInstallerFragment in @(
+        "ConfigMigrate_PreInstall",
+        "PrepareToInstall",
+        "DatabaseMigration",
+        "MigrateExecutable",
+        "MigrationStatusPath",
+        "CommitPendingDatabaseTransaction",
+        "RollbackPendingDatabaseTransaction",
+        "FinalizeDeferredCredentialScrub",
+        "ConfigMigrate_Install_Failure.txt",
+        "NoTeachingRobotRecovery",
+        "SameVersionRecovery",
+        "GetCustomSetupExitCode",
+        "DeinitializeSetup",
+        "Check: DatabaseMigrationSucceeded"
+    )) {
+        if ($text.Contains($forbiddenDatabaseInstallerFragment)) {
+            throw "Installer must preserve Data and defer all database migration/repair to the application; forbidden wiring found: $forbiddenDatabaseInstallerFragment"
+        }
     }
-    $commitIndex = $text.IndexOf("if not CommitPendingDatabaseTransaction(CommitStatus) then", [System.StringComparison]::Ordinal)
-    $finalizeIndex = $text.IndexOf("not FinalizeDeferredCredentialScrub", [System.StringComparison]::Ordinal)
-    if ($commitIndex -lt 0 -or $finalizeIndex -le $commitIndex) {
-        throw "Installer must publish the staged database before deferred credential scrub: $issPath"
+
+    $runSectionMatches = [regex]::Matches(
+        $text,
+        '(?ms)^\[Run\][\t ]*\r?\n(?<body>.*?)(?=^\[[^\]\r\n]+\][\t ]*\r?$|\z)'
+    )
+    if ($runSectionMatches.Count -ne 1) {
+        throw "Installer must contain exactly one [Run] section: $issPath"
+    }
+    $runLines = @(
+        ($runSectionMatches[0].Groups["body"].Value -split '\r?\n') |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith(";") }
+    )
+    $expectedRunLines = @(
+        'Filename: "{app}\Prerequisites\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Microsoft Visual C++ Runtime..."; Flags: waituntilterminated runhidden; Check: VcRedistInstallerExists and VcRedistNeedsInstall',
+        'Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent'
+    )
+    if (($runLines -join "`n") -cne ($expectedRunLines -join "`n")) {
+        throw "Installer [Run] must be exactly VC runtime plus optional application launch; database tools must never run during setup: $issPath"
+    }
+
+    $codeSectionMatches = [regex]::Matches(
+        $text,
+        '(?ms)^\[Code\][\t ]*\r?\n(?<body>.*)\z'
+    )
+    if ($codeSectionMatches.Count -ne 1) {
+        throw "Installer must contain exactly one terminal [Code] section: $issPath"
+    }
+    $actualCode = (($codeSectionMatches[0].Groups["body"].Value -replace "`r`n", "`n").Trim())
+    $expectedCode = (@(
+        'function VcRedistInstallerExists: Boolean;',
+        'begin',
+        '  Result := FileExists(ExpandConstant(''{app}\Prerequisites\vc_redist.x64.exe''));',
+        'end;',
+        '',
+        'function VcRedistNeedsInstall: Boolean;',
+        'var',
+        '  Installed: Cardinal;',
+        'begin',
+        '  if RegQueryDWordValue(HKLM64, ''SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'', ''Installed'', Installed) then',
+        '    Result := Installed <> 1',
+        '  else',
+        '    Result := True;',
+        'end;'
+    ) -join "`n")
+    if ($actualCode -cne $expectedCode) {
+        throw "Installer [Code] is not the fixed database-preserving VC runtime probe: $issPath"
     }
     return [pscustomobject]@{
         path    = Resolve-ReleaseGatePath $issPath

@@ -37,6 +37,8 @@ public:
     };
 
     static constexpr int CURRENT_VALIDATION_PROFILE_VERSION = 1;
+    // v1 起系统安全门禁开关仅作为审计记录，不再改变 ValidationPolicy 或生产流程。
+    static constexpr int CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 1;
 
     struct Settings
     {
@@ -95,8 +97,13 @@ public:
         // 端区周期一致性补拐点（②③④拟合方案通用，用波纹周期+典型拐角角度补回起/终点段漏掉的拐点）。默认关。
         bool fitEndPeriodRecoverEnable = false;
         double fitEndPeriodRatioThreshold = 1.2;  // 端段长/周期 ≥ 此值判漏拐点
-        double fitEndPeriodMinBendDeg = 5.0;       // 补点候选最小弯折角(度)
-        double fitEndPeriodMergeFrac = 0.4;        // 删错:相邻同类拐点间距 < 此×周期 判找错合并
+        double fitEndPeriodMinBendDeg = 5.0;      // 补点候选最小弯折角(度)
+        // 同类短段多余拐点合并（②③④通用）：与端区补点拆成独立开关，避免“加点/删点”互相绑死。
+        // EndPeriodMergeFrac 保留旧键名以兼容现场 ConfigStore.db。
+        bool fitSameTypeShortMergeEnable = false;
+        double fitEndPeriodMergeFrac = 0.4;       // 候选短段 < 此×同类完整段中位长度
+        int fitSameTypeMinReferenceSegments = 2;  // 每个同类平台/同方向坡至少需要的完整参考段数（最低2）
+        double fitSameTypeFlatSlope = 0.15;       // 侧向斜率 < 此判平台，≥此判坡
         // 按平台边界重定拐点（②③④拟合方案通用，检测平台、把拐点归位到平台两端、删平台内放错的角）。默认关。
         bool fitPlatformSnapEnable = false;
         double fitPlatformSnapFlatSlope = 0.15;    // 侧向斜率 < 此判为平台(平)，≥此为坡
@@ -138,8 +145,8 @@ public:
         bool validationOutputEnabled = true;
         int validationMinOutputPointCount = 80;
         double validationMinOutputLengthRatio = 0.70;
-        // 系统级安全门禁。除“机器人名称绑定”外，任一门禁关闭时 Load()
-        // 会把有效策略降为 Audit，允许诊断处理，但不签发生产质量证明或运动授权。
+        // 系统级安全门禁记录项。开关值只供配置、日志和质量报告审计，
+        // 不改变 ValidationPolicy，也不启停固定的证明、身份、轨迹或运动校验。
         bool safetyGateProofIntegrityEnabled = true;
         bool safetyGateProductionPurposeEnabled = true;
         bool safetyGateRobotNameBindingEnabled = true;

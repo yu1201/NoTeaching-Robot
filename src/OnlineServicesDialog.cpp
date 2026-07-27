@@ -86,6 +86,12 @@ namespace
 	constexpr qint64 kOtaManifestValiditySeconds = 7LL * 24 * 60 * 60;
 	constexpr qint64 kOtaManifestClockSkewSeconds = 10LL * 60;
 	constexpr char kOtaSignatureAlgorithm[] = "RSA-PKCS1-SHA256";
+
+	bool IsServerConfigUnlockCode(const QString& input)
+	{
+		// 本机防误操作口令：不参与服务器认证，也不落库。
+		return input == QString(6, QLatin1Char('8'));
+	}
 	// RSA-3072 公钥；对应私钥仅以 CurrentUser DPAPI 形式保存在仓库外。
 	constexpr char kOtaReleasePublicKeyBlobBase64[] =
 		"UlNBMQAMAAADAAAAgAEAAAAAAAAAAAAAAQAB4ax2i7VFMjmJhtYWOJvaLLN+sAE/nXCUimEtrdo9l1co8mT3rYz2vy5lsB+ztcN+c+iXZ+G6YMy1Xrfp2AN3jKd6ZfXNG9z0UPXDlS/0AlUnONobSyVSkMtarODxrPNKb9Kq7+XkF/sgOxYzfgg9QVU8lfqD4pInm54C8+6OQDD8WpckvmUqOZ4jHeqgEzvavPiRyI+IR0WYDJdFh/NhQRpxGmzgNFvzhvzHyvALJ+KxKh7+YW0/r3+YvRaJeTD+bFJxO0q/ZeoMjtTz+WY9WgCHB+VnH7VKDtpUd2lPxYXc8y1wIkc78FYMQZFWcXGV5GVn7Lf8jG5QVmrOncg+GvkNErdAUlz+B1cntccuVhBQpeXVVK8J9gz802O4dDXU1xKSsHScEDYC4MtwsR/M9YWcackdYsBnMAPSu5fYqzTDWkQR2HbfYRom55QVh8cmVO3fK4DZ0Iyehky8Vi3UWusSbzkYhAsfLrn/c2eY7Jx4COFK/ZVyZWMRgS79sjnz";
@@ -958,14 +964,23 @@ void OnlineServicesDialog::BuildUi()
 	m_serverHostEdit = new QLineEdit(this);
 	m_serverHostEdit->setPlaceholderText(QStringLiteral("例如 103.217.203.52"));
 	m_deviceNameEdit = new QLineEdit(this);
-	QPushButton* saveConfigBtn = new QPushButton(QStringLiteral("保存配置"), this);
-	saveConfigBtn->setMinimumHeight(40);
+	m_editServerConfigBtn = new QPushButton(QStringLiteral("修改配置"), this);
+	m_editServerConfigBtn->setMinimumHeight(40);
+	m_saveServerConfigBtn = new QPushButton(QStringLiteral("保存配置"), this);
+	m_saveServerConfigBtn->setMinimumHeight(40);
+	m_saveServerConfigBtn->setProperty("kind", "primary");
+	QLabel* configHint = new QLabel(QStringLiteral(
+		"服务器配置默认锁定；所有已登录身份均可查看，输入本机修改密码后才可编辑。"), this);
+	configHint->setWordWrap(true);
+	configHint->setStyleSheet(QStringLiteral("color: #7E9AA6; font-size: 12px;"));
 	configLayout->addWidget(new QLabel(QStringLiteral("服务器 IP"), this), 0, 0);
 	configLayout->addWidget(m_serverHostEdit, 0, 1, 1, 2);
 	configLayout->addWidget(new QLabel(QStringLiteral("设备名称"), this), 1, 0);
 	configLayout->addWidget(m_deviceNameEdit, 1, 1, 1, 2);
-	configLayout->addWidget(saveConfigBtn, 2, 2);
-	configLayout->setRowStretch(3, 1);
+	configLayout->addWidget(configHint, 2, 0, 1, 3);
+	configLayout->addWidget(m_editServerConfigBtn, 3, 1);
+	configLayout->addWidget(m_saveServerConfigBtn, 3, 2);
+	configLayout->setRowStretch(4, 1);
 	configGroup->setVisible(!m_aboutMode);
 
 	// —— 远程数据（admin）：浏览/下载/删除各设备上传到服务器的扫描数据、新建设备目录 ——
@@ -988,6 +1003,37 @@ void OnlineServicesDialog::BuildUi()
 		m_remoteDownloadBtn->setMinimumHeight(40);
 		m_remoteDownloadBtn->setToolTip(QStringLiteral("下载并自动解压到 Result\\Remote\\<设备>\\，可用点云查看等工具直接打开。"));
 		m_remoteDownloadBtn->setProperty("kind", "primary");
+		m_remoteDownloadStateLabel = new QLabel(QStringLiteral("下载队列空闲"), this);
+		m_remoteDownloadStateLabel->setStyleSheet(QStringLiteral(
+			"color: #9ED8DB; font-size: 15px; font-weight: 600;"));
+		m_remoteDownloadCurrentLabel = new QLabel(QStringLiteral("当前文件：无"), this);
+		m_remoteDownloadCurrentLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+		m_remoteDownloadDetailLabel = new QLabel(QStringLiteral("尚未开始下载"), this);
+		m_remoteDownloadDetailLabel->setStyleSheet(QStringLiteral("color: #8FB0BC;"));
+		m_remoteDownloadProgressBar = new QProgressBar(this);
+		m_remoteDownloadProgressBar->setRange(0, 100);
+		m_remoteDownloadProgressBar->setValue(0);
+		m_remoteDownloadProgressBar->setFormat(QStringLiteral("0%"));
+		m_remoteDownloadProgressBar->setMinimumHeight(20);
+		m_remoteDownloadQueueLabel = new QLabel(QStringLiteral("下载队列：0 项"), this);
+		m_remoteDownloadQueueLabel->setStyleSheet(QStringLiteral(
+			"color: #9ED8DB; font-weight: 600;"));
+		m_remoteDownloadQueueList = new QListWidget(this);
+		m_remoteDownloadQueueList->setMaximumHeight(145);
+		m_remoteDownloadQueueList->addItem(QStringLiteral("当前没有下载任务"));
+		QFrame* remoteDownloadStatusCard = new QFrame(this);
+		remoteDownloadStatusCard->setStyleSheet(QStringLiteral(
+			"QFrame { background: #13232B; border: 1px solid #2E4A57; border-radius: 10px; }"
+			"QLabel, QProgressBar { border: none; background: transparent; }"
+			"QProgressBar { background: #0B171D; border: 1px solid #294049; border-radius: 7px; text-align: center; color: #E7F3F5; }"
+			"QProgressBar::chunk { background: #2E9C72; border-radius: 6px; }"));
+		QVBoxLayout* remoteDownloadStatusLayout = new QVBoxLayout(remoteDownloadStatusCard);
+		remoteDownloadStatusLayout->setContentsMargins(14, 12, 14, 12);
+		remoteDownloadStatusLayout->setSpacing(7);
+		remoteDownloadStatusLayout->addWidget(m_remoteDownloadStateLabel);
+		remoteDownloadStatusLayout->addWidget(m_remoteDownloadCurrentLabel);
+		remoteDownloadStatusLayout->addWidget(m_remoteDownloadProgressBar);
+		remoteDownloadStatusLayout->addWidget(m_remoteDownloadDetailLabel);
 		m_remoteDeleteBtn = new QPushButton(QStringLiteral("删除选中（服务器）"), this);
 		m_remoteDeleteBtn->setMinimumHeight(40);
 		m_remoteDeleteBtn->setProperty("kind", "danger");
@@ -1003,6 +1049,9 @@ void OnlineServicesDialog::BuildUi()
 		remoteTopRow->addStretch(1);
 		remoteLayout->addLayout(remoteTopRow);
 		remoteLayout->addWidget(m_remoteFileList, 1);
+		remoteLayout->addWidget(remoteDownloadStatusCard);
+		remoteLayout->addWidget(m_remoteDownloadQueueLabel);
+		remoteLayout->addWidget(m_remoteDownloadQueueList);
 		QHBoxLayout* remoteBottomRow = new QHBoxLayout();
 		remoteBottomRow->setSpacing(8);
 		remoteBottomRow->addStretch(1);
@@ -1012,7 +1061,6 @@ void OnlineServicesDialog::BuildUi()
 
 		connect(m_remoteRefreshBtn, &QPushButton::clicked, this, [this]()
 			{
-				SaveConfigFromUi();
 				RefreshRemoteDevices();
 			});
 		connect(m_remoteDeviceCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
@@ -1077,7 +1125,7 @@ void OnlineServicesDialog::BuildUi()
 		accHint->setStyleSheet("color: #7E9AA6; font-size: 11px;");
 		accLayout->addWidget(accHint);
 
-		connect(accRefreshBtn, &QPushButton::clicked, this, [this]() { SaveConfigFromUi(); RefreshAccounts(); });
+		connect(accRefreshBtn, &QPushButton::clicked, this, [this]() { RefreshAccounts(); });
 		connect(accAddBtn, &QPushButton::clicked, this, [this]() { ShowAddAccountDialog(); });
 		connect(accPwBtn, &QPushButton::clicked, this, [this]() { ChangeSelectedAccountPassword(); });
 		connect(accDelBtn, &QPushButton::clicked, this, [this]() { DeleteSelectedAccount(); });
@@ -1103,7 +1151,6 @@ void OnlineServicesDialog::BuildUi()
 		statsRefreshBtn->setMinimumHeight(38);
 		connect(statsRefreshBtn, &QPushButton::clicked, this, [this]()
 			{
-				SaveConfigFromUi();
 				RefreshServerStats();
 				UpdateQueueCard();
 			});
@@ -1221,6 +1268,13 @@ void OnlineServicesDialog::BuildUi()
 					m_navList->setCurrentRow(0);
 					return;
 				}
+				if (row != m_serverConfigNavRow && m_serverConfigEditing)
+				{
+					m_serverHostEdit->setText(OnlineServicesConfig::ServerHost());
+					m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
+					SetServerConfigEditing(false);
+					AppendLog(QStringLiteral("已离开服务器配置页，未保存修改已放弃并重新锁定。"));
+				}
 				m_pagesStack->setCurrentIndex(row);
 				if (row == m_remoteNavRow)
 				{
@@ -1261,10 +1315,15 @@ void OnlineServicesDialog::BuildUi()
 		{
 			OnlineServicesConfig::SetAutoUploadEnabled(checked);
 			AppendLog(checked ? QStringLiteral("已开启扫描完成自动上传。") : QStringLiteral("已关闭扫描完成自动上传。"));
+			if (checked && m_uploader != nullptr)
+			{
+				// 重新开启后立即接续已有待传项，不必再手工点“立即上传”。
+				m_uploader->TriggerUploadNow();
+				QTimer::singleShot(0, this, [this]() { RefreshUploadUi(); });
+			}
 		});
 		connect(m_uploadNowBtn, &QPushButton::clicked, this, [this]()
 		{
-			SaveConfigFromUi();  // 顺手保存，避免填了账号没点保存直接传
 			if (m_uploader != nullptr)
 			{
 				m_uploader->TriggerUploadNow();
@@ -1275,7 +1334,11 @@ void OnlineServicesDialog::BuildUi()
 		{
 			ShowPickCasesDialog();
 		});
-	connect(saveConfigBtn, &QPushButton::clicked, this, [this]()
+	connect(m_editServerConfigBtn, &QPushButton::clicked, this, [this]()
+		{
+			RequestServerConfigEdit();
+		});
+	connect(m_saveServerConfigBtn, &QPushButton::clicked, this, [this]()
 		{
 			SaveConfigFromUi();
 		});
@@ -1293,7 +1356,11 @@ void OnlineServicesDialog::LoadConfigToUi()
 	{
 		m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
 	}
-	m_autoUploadCheck->setChecked(OnlineServicesConfig::AutoUploadEnabled());
+	SetServerConfigEditing(false);
+	{
+		const QSignalBlocker blocker(m_autoUploadCheck);
+		m_autoUploadCheck->setChecked(OnlineServicesConfig::AutoUploadEnabled());
+	}
 	RefreshUploadUi();
 	UpdateRestrictedNav();
 	if (!HasFullAccess())
@@ -1477,8 +1544,7 @@ void OnlineServicesDialog::UpdateRestrictedNav()
 		QStringLiteral("账号管理仅对全权限账号开放。"));
 	setNavRowEnabled(m_remoteNavRow, ftpAllowed,
 		QStringLiteral("远程数据需要 FTP 权限或全权限账号。"));
-	setNavRowEnabled(m_serverConfigNavRow, ftpAllowed,
-		QStringLiteral("服务器 IP 和设备名称需要 FTP 权限或全权限账号。"));
+	setNavRowEnabled(m_serverConfigNavRow, true, QString());
 
 	// 远程数据控件级限制（about 模式/非 admin 登录时这些控件不存在，判空跳过）。
 	if (m_remoteDeviceCombo != nullptr)
@@ -1507,16 +1573,11 @@ void OnlineServicesDialog::UpdateRestrictedNav()
 
 void OnlineServicesDialog::SaveConfigFromUi()
 {
-	if (!HasFtpAccess())
-	{
-		return;
-	}
-	if (!m_privilegedActionGuard
-		|| !m_privilegedActionGuard())
+	if (!m_serverConfigEditing)
 	{
 		if (!m_aboutMode)
 		{
-			AppendLog(QStringLiteral("当前在线服务会话不能修改服务器 IP 或设备名称。"));
+			AppendLog(QStringLiteral("服务器配置处于锁定状态；请先点击“修改配置”并输入本机密码。"));
 		}
 		return;
 	}
@@ -1540,8 +1601,66 @@ void OnlineServicesDialog::SaveConfigFromUi()
 	}
 	OnlineServicesConfig::SetServerHost(host);
 	OnlineServicesConfig::SetDeviceName(deviceName);
+	SetServerConfigEditing(false);
 	AppendLog(QStringLiteral("服务器 IP 和设备名称已保存；升级与 FTP 地址已由程序自动补全。"));
 	UpdateRestrictedNav();
+}
+
+void OnlineServicesDialog::RequestServerConfigEdit()
+{
+	if (m_remoteBusy)
+	{
+		AppendLog(QStringLiteral("远程数据操作进行中，暂不能修改服务器配置。"));
+		return;
+	}
+	bool accepted = false;
+	const QString input = QInputDialog::getText(
+		this,
+		QStringLiteral("修改服务器配置"),
+		QStringLiteral("请输入本机配置修改密码："),
+		QLineEdit::Password,
+		QString(),
+		&accepted);
+	if (!accepted)
+	{
+		return;
+	}
+	if (!IsServerConfigUnlockCode(input))
+	{
+		AppendLog(QStringLiteral("服务器配置修改密码错误，配置保持锁定。"));
+		QMessageBox::warning(
+			this,
+			QStringLiteral("密码错误"),
+			QStringLiteral("本机配置修改密码错误，未开放编辑。"));
+		return;
+	}
+	SetServerConfigEditing(true);
+	AppendLog(QStringLiteral("服务器配置已临时解锁；保存后会自动重新锁定。"));
+	if (m_serverHostEdit != nullptr)
+	{
+		m_serverHostEdit->setFocus();
+		m_serverHostEdit->selectAll();
+	}
+}
+
+void OnlineServicesDialog::SetServerConfigEditing(bool editing)
+{
+	m_serverConfigEditing = editing && !m_remoteBusy;
+	for (QLineEdit* edit : { m_serverHostEdit, m_deviceNameEdit })
+	{
+		if (edit != nullptr)
+		{
+			edit->setEnabled(m_serverConfigEditing);
+		}
+	}
+	if (m_editServerConfigBtn != nullptr)
+	{
+		m_editServerConfigBtn->setEnabled(!m_serverConfigEditing && !m_remoteBusy);
+	}
+	if (m_saveServerConfigBtn != nullptr)
+	{
+		m_saveServerConfigBtn->setEnabled(m_serverConfigEditing && !m_remoteBusy);
+	}
 }
 
 QString OnlineServicesDialog::UpdateChannel() const
@@ -1565,7 +1684,6 @@ void OnlineServicesDialog::CheckForUpdate()
 		AppendLog(QStringLiteral("更新文件正在下载，完成或失败前禁止刷新清单。"));
 		return;
 	}
-	SaveConfigFromUi();
 	// latest.json remains the signed v2 compatibility endpoint for already-deployed
 	// clients. Current clients use a separate v3 endpoint so the transition cannot
 	// strand the installed v2 population.
@@ -2548,6 +2666,12 @@ void OnlineServicesDialog::closeEvent(QCloseEvent* event)
 		}
 		// 无论后台继续还是停止，都放行关闭（停止是异步清理，不阻塞关窗）。
 	}
+	if (m_serverConfigEditing)
+	{
+		m_serverHostEdit->setText(OnlineServicesConfig::ServerHost());
+		m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
+		SetServerConfigEditing(false);
+	}
 	QDialog::closeEvent(event);
 }
 
@@ -2751,15 +2875,20 @@ void OnlineServicesDialog::SetRemoteBusy(bool busy)
 	{
 		m_remoteDeleteBtn->setEnabled(!busy);
 	}
-	// FTP 请求使用保存时的配置快照。请求期间锁住这些输入，避免旧请求完成后把
-	// 另一套账号/主机的结果落到当前界面；其它 OTA/管理配置不受影响。
-	for (QLineEdit* edit : { m_serverHostEdit, m_deviceNameEdit })
+	// FTP 请求使用保存时的配置快照。请求期间始终回到锁定态，避免旧请求完成后
+	// 把另一套主机/设备的结果落到当前界面。
+	if (busy && m_serverConfigEditing)
 	{
-		if (edit != nullptr)
+		if (m_serverHostEdit != nullptr)
 		{
-			edit->setEnabled(!busy);
+			m_serverHostEdit->setText(OnlineServicesConfig::ServerHost());
+		}
+		if (m_deviceNameEdit != nullptr)
+		{
+			m_deviceNameEdit->setText(OnlineServicesConfig::DeviceName());
 		}
 	}
+	SetServerConfigEditing(false);
 	// 设备选择/下载/建目录同时受「后台忙碌」和账号权限约束；统一重算，
 	// 避免异步操作结束时 setEnabled(true) 把 upload-only 账号限制意外撤销。
 	UpdateRestrictedNav();
@@ -2941,6 +3070,182 @@ void OnlineServicesDialog::RefreshRemoteFiles()
 		});
 }
 
+void OnlineServicesDialog::BeginRemoteDownloadUi(const QStringList& names)
+{
+	m_remoteDownloadNames = names;
+	m_remoteDownloadStates.clear();
+	for (int i = 0; i < names.size(); ++i)
+	{
+		m_remoteDownloadStates << QStringLiteral("等待");
+	}
+	if (m_remoteDownloadStateLabel != nullptr)
+	{
+		m_remoteDownloadStateLabel->setText(QStringLiteral("下载队列已建立"));
+	}
+	if (m_remoteDownloadCurrentLabel != nullptr)
+	{
+		m_remoteDownloadCurrentLabel->setText(QStringLiteral("当前文件：等待开始"));
+	}
+	if (m_remoteDownloadProgressBar != nullptr)
+	{
+		m_remoteDownloadProgressBar->setValue(0);
+		m_remoteDownloadProgressBar->setFormat(QStringLiteral("0%"));
+	}
+	if (m_remoteDownloadDetailLabel != nullptr)
+	{
+		m_remoteDownloadDetailLabel->setText(
+			QStringLiteral("共 %1 项，按列表顺序逐项下载、校验并解压").arg(names.size()));
+	}
+	RefreshRemoteDownloadQueueUi();
+}
+
+void OnlineServicesDialog::UpdateRemoteDownloadUi(
+	int currentIndex,
+	int completedItems,
+	qulonglong receivedBytes,
+	qulonglong totalBytes,
+	double bytesPerSec,
+	int etaSeconds,
+	const QString& phase,
+	const QString& itemState)
+{
+	if (currentIndex < 0 || currentIndex >= m_remoteDownloadNames.size())
+	{
+		return;
+	}
+	bool queueChanged = false;
+	if (!itemState.isEmpty()
+		&& currentIndex < m_remoteDownloadStates.size()
+		&& m_remoteDownloadStates.at(currentIndex) != itemState)
+	{
+		m_remoteDownloadStates[currentIndex] = itemState;
+		queueChanged = true;
+	}
+	if (queueChanged)
+	{
+		RefreshRemoteDownloadQueueUi();
+	}
+	if (m_remoteDownloadStateLabel != nullptr)
+	{
+		m_remoteDownloadStateLabel->setText(
+			itemState == QStringLiteral("正在验证")
+				? QStringLiteral("正在验证并解压")
+				: QStringLiteral("正在下载"));
+	}
+	if (m_remoteDownloadCurrentLabel != nullptr)
+	{
+		m_remoteDownloadCurrentLabel->setText(
+			QStringLiteral("当前文件：%1").arg(m_remoteDownloadNames.at(currentIndex)));
+	}
+	const bool hasTotal = totalBytes > 0;
+	const int percent = hasTotal
+		? qBound(0, static_cast<int>(receivedBytes * 100 / totalBytes), 100)
+		: 0;
+	if (m_remoteDownloadProgressBar != nullptr)
+	{
+		m_remoteDownloadProgressBar->setValue(percent);
+		m_remoteDownloadProgressBar->setFormat(QStringLiteral("%1%").arg(percent));
+	}
+	if (m_remoteDownloadQueueLabel != nullptr)
+	{
+		m_remoteDownloadQueueLabel->setText(
+			QStringLiteral("下载队列：%1 项；成功 %2 项")
+				.arg(m_remoteDownloadNames.size())
+				.arg(completedItems));
+	}
+	if (m_remoteDownloadDetailLabel != nullptr)
+	{
+		QString detail = QStringLiteral("第 %1 / %2 项    %3")
+			.arg(currentIndex + 1)
+			.arg(m_remoteDownloadNames.size())
+			.arg(phase);
+		if (hasTotal)
+		{
+			detail += QStringLiteral("    %1 / %2")
+				.arg(HumanBytes(static_cast<double>(receivedBytes)),
+					HumanBytes(static_cast<double>(totalBytes)));
+		}
+		if (bytesPerSec > 1.0)
+		{
+			detail += QStringLiteral("    %1/s").arg(HumanBytes(bytesPerSec));
+		}
+		if (etaSeconds > 0)
+		{
+			detail += QStringLiteral("    预计剩余 %1 秒").arg(etaSeconds);
+		}
+		m_remoteDownloadDetailLabel->setText(detail);
+	}
+}
+
+void OnlineServicesDialog::FinishRemoteDownloadUi(
+	int completedItems,
+	bool stoppedEarly,
+	const QString& summary)
+{
+	for (int i = 0; i < m_remoteDownloadStates.size(); ++i)
+	{
+		if (m_remoteDownloadStates.at(i) == QStringLiteral("等待"))
+		{
+			m_remoteDownloadStates[i] = stoppedEarly
+				? QStringLiteral("未执行")
+				: QStringLiteral("失败");
+		}
+	}
+	RefreshRemoteDownloadQueueUi();
+	if (m_remoteDownloadStateLabel != nullptr)
+	{
+		m_remoteDownloadStateLabel->setText(stoppedEarly
+			? QStringLiteral("下载队列已安全停止")
+			: QStringLiteral("下载队列已完成"));
+	}
+	if (m_remoteDownloadCurrentLabel != nullptr)
+	{
+		m_remoteDownloadCurrentLabel->setText(QStringLiteral("当前文件：无"));
+	}
+	if (m_remoteDownloadProgressBar != nullptr)
+	{
+		m_remoteDownloadProgressBar->setValue(stoppedEarly ? 0 : 100);
+		m_remoteDownloadProgressBar->setFormat(stoppedEarly
+			? QStringLiteral("已停止")
+			: QStringLiteral("100%"));
+	}
+	if (m_remoteDownloadQueueLabel != nullptr)
+	{
+		m_remoteDownloadQueueLabel->setText(
+			QStringLiteral("下载队列：%1 项；成功 %2 项")
+				.arg(m_remoteDownloadNames.size())
+				.arg(completedItems));
+	}
+	if (m_remoteDownloadDetailLabel != nullptr)
+	{
+		m_remoteDownloadDetailLabel->setText(summary);
+	}
+}
+
+void OnlineServicesDialog::RefreshRemoteDownloadQueueUi()
+{
+	if (m_remoteDownloadQueueList == nullptr)
+	{
+		return;
+	}
+	m_remoteDownloadQueueList->clear();
+	for (int i = 0; i < m_remoteDownloadNames.size(); ++i)
+	{
+		const QString state = i < m_remoteDownloadStates.size()
+			? m_remoteDownloadStates.at(i)
+			: QStringLiteral("等待");
+		m_remoteDownloadQueueList->addItem(
+			QStringLiteral("%1  %2.  %3")
+				.arg(state)
+				.arg(i + 1)
+				.arg(m_remoteDownloadNames.at(i)));
+	}
+	if (m_remoteDownloadNames.isEmpty())
+	{
+		m_remoteDownloadQueueList->addItem(QStringLiteral("当前没有下载任务"));
+	}
+}
+
 void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 {
 	if (!AuthorizeFtpAction(QStringLiteral("下载远程数据")))
@@ -2999,7 +3304,13 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 	}
 	AppendLog(QStringLiteral("开始下载 %1 个数据包到 %2 …")
 		.arg(archives.size()).arg(QDir::toNativeSeparators(localDir)));
-	StartRemoteWorker([this, cfg, device, archives, localDir](quint64 generation)
+	QStringList downloadNames;
+	for (const auto& archive : archives)
+	{
+		downloadNames << archive.first;
+	}
+	BeginRemoteDownloadUi(downloadNames);
+	const bool workerStarted = StartRemoteWorker([this, cfg, device, archives, localDir](quint64 generation)
 		{
 			RemoteArchiveSecurity::StagingAuditResult stagingAudit;
 			QString stagingAuditError;
@@ -3014,9 +3325,11 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 							if (!RemoteWorkerCancelled(generation))
 							{
 								FinishRemoteWorker(generation);
-								AppendLog(QStringLiteral(
+								const QString summary = QStringLiteral(
 									"远程 ZIP 批次未启动：staging 残留审计/清理失败（%1）")
-									.arg(stagingAuditError));
+									.arg(stagingAuditError);
+								AppendLog(summary);
+								FinishRemoteDownloadUi(0, true, summary);
 							}
 						}, Qt::QueuedConnection);
 				}
@@ -3028,14 +3341,31 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 			int okCount = 0;
 			bool stoppedForStagingCleanup = false;
 			QString stagingStopReason;
-			for (const auto& selectedArchive : archives)
+			for (int archiveIndex = 0; archiveIndex < archives.size(); ++archiveIndex)
 			{
+				const auto& selectedArchive = archives.at(archiveIndex);
 				if (RemoteWorkerCancelled(generation))
 				{
 					break;
 				}
 				const QString name = selectedArchive.first;
 				const qulonglong listedBytes = selectedArchive.second;
+				QMetaObject::invokeMethod(this,
+					[this, generation, archiveIndex, okCount, listedBytes]()
+					{
+						if (!RemoteWorkerCancelled(generation))
+						{
+							UpdateRemoteDownloadUi(
+								archiveIndex,
+								okCount,
+								0,
+								listedBytes,
+								0.0,
+								0,
+								QStringLiteral("正在准备安全下载"),
+								QStringLiteral("正在下载"));
+						}
+					}, Qt::QueuedConnection);
 				const std::string remotePath = "/data/" + device.toStdString() + "/" + name.toStdString();
 				QString itemMessage;
 				QString capacityError;
@@ -3060,12 +3390,59 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 				RemoteArchiveSecurity::PromotionResult promotion;
 				if (itemMessage.isEmpty())
 				{
+					const int completedBefore = okCount;
+					const auto transferStarted = std::chrono::steady_clock::now();
 					downloaded = ftp.downloadFileBounded(
 						remotePath,
 						localZipBytes.toStdString(),
 						listedBytes,
 						static_cast<unsigned long long>(RemoteArchiveSecurity::MaximumArchiveBytes),
-						m_remoteLifecycle.CancelFlag());
+						m_remoteLifecycle.CancelFlag(),
+						[this, generation, archiveIndex, completedBefore, transferStarted,
+							lastUi = std::chrono::steady_clock::time_point{}](
+								unsigned long long received,
+								unsigned long long total) mutable
+						{
+							if (RemoteWorkerCancelled(generation))
+							{
+								return;
+							}
+							const auto now = std::chrono::steady_clock::now();
+							if (lastUi != std::chrono::steady_clock::time_point{}
+								&& received < total
+								&& std::chrono::duration_cast<std::chrono::milliseconds>(
+									now - lastUi).count() < 120)
+							{
+								return;
+							}
+							lastUi = now;
+							const double elapsedSeconds = std::max(
+								0.001,
+								std::chrono::duration<double>(now - transferStarted).count());
+							const double bytesPerSec =
+								static_cast<double>(received) / elapsedSeconds;
+							const int etaSeconds = bytesPerSec > 1.0 && received < total
+								? static_cast<int>(std::ceil(
+									static_cast<double>(total - received) / bytesPerSec))
+								: 0;
+							QMetaObject::invokeMethod(this,
+								[this, generation, archiveIndex, completedBefore,
+									received, total, bytesPerSec, etaSeconds]()
+								{
+									if (!RemoteWorkerCancelled(generation))
+									{
+										UpdateRemoteDownloadUi(
+											archiveIndex,
+											completedBefore,
+											received,
+											total,
+											bytesPerSec,
+											etaSeconds,
+											QStringLiteral("FTP 传输中"),
+											QStringLiteral("正在下载"));
+									}
+								}, Qt::QueuedConnection);
+						});
 					QString sizeError;
 					if (downloaded
 						&& !RemoteArchiveSecurity::ValidateOpenedArchiveSize(
@@ -3081,6 +3458,22 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 				}
 				if (downloaded && !RemoteWorkerCancelled(generation))
 				{
+					QMetaObject::invokeMethod(this,
+						[this, generation, archiveIndex, okCount, listedBytes]()
+						{
+							if (!RemoteWorkerCancelled(generation))
+							{
+								UpdateRemoteDownloadUi(
+									archiveIndex,
+									okCount,
+									listedBytes,
+									listedBytes,
+									0.0,
+									0,
+									QStringLiteral("正在校验并解压到案例目录"),
+									QStringLiteral("正在验证"));
+							}
+						}, Qt::QueuedConnection);
 					archiveProcessorInvoked = true;
 					promotion = RemoteArchiveSecurity::ExtractValidateAndPromote(
 						localZip,
@@ -3160,11 +3553,25 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 				}
 				if (!RemoteWorkerCancelled(generation))
 				{
-					QMetaObject::invokeMethod(this, [this, generation, itemMessage]()
+					const bool itemSucceeded = promotion.IsCommitted();
+					QMetaObject::invokeMethod(this,
+						[this, generation, itemMessage, archiveIndex, okCount,
+							listedBytes, itemSucceeded]()
 						{
 							if (!RemoteWorkerCancelled(generation))
 							{
 								AppendLog(itemMessage);
+								UpdateRemoteDownloadUi(
+									archiveIndex,
+									okCount,
+									itemSucceeded ? listedBytes : 0,
+									listedBytes,
+									0.0,
+									0,
+									itemMessage,
+									itemSucceeded
+										? QStringLiteral("已完成")
+										: QStringLiteral("失败"));
 							}
 						}, Qt::QueuedConnection);
 				}
@@ -3186,14 +3593,22 @@ void OnlineServicesDialog::DownloadSelectedRemoteFiles()
 						return;
 					}
 					FinishRemoteWorker(generation);
-					AppendLog(stoppedForStagingCleanup
+					const QString summary = stoppedForStagingCleanup
 						? QStringLiteral("下载批次已安全停止：成功落地 %1/%2；%3")
 							.arg(okCount).arg(archives.size()).arg(stagingStopReason)
 						: QStringLiteral("下载完成：成功 %1/%2，数据在 %3（点云查看等工具可直接打开）。")
 							.arg(okCount).arg(archives.size())
-							.arg(QDir::toNativeSeparators(localDir)));
+							.arg(QDir::toNativeSeparators(localDir));
+					AppendLog(summary);
+					FinishRemoteDownloadUi(okCount, stoppedForStagingCleanup, summary);
 				}, Qt::QueuedConnection);
 		});
+	if (!workerStarted)
+	{
+		const QString summary = QStringLiteral("下载任务未启动：当前已有远程操作或后台线程不可用。");
+		AppendLog(summary);
+		FinishRemoteDownloadUi(0, true, summary);
+	}
 }
 
 void OnlineServicesDialog::DeleteSelectedRemoteFiles()
@@ -3989,7 +4404,6 @@ void OnlineServicesDialog::ShowPickCasesDialog()
 		return;
 	}
 	picked.sort(Qt::CaseInsensitive);   // 按名字升序依次入队
-	SaveConfigFromUi();
 	for (const QString& dir : picked)
 	{
 		m_uploader->QueueUpload(dir);

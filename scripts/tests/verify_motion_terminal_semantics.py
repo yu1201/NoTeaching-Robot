@@ -117,18 +117,26 @@ def main() -> int:
 
     program_mode_command = step.find(
         "ProgramRunModeCmd(static_cast<int>(STEPROBOTSDK::eContinue))", arm_call)
+    if program_mode_command < 0:
+        program_mode_command = step.find(
+            "ProgramRunModeCmd(continueProgramMode)", arm_call)
     require(0 <= program_mode_command < start_call,
-            "STEP generated motion does not force continuous mode before START")
+            "STEP generated motion cannot switch to continuous mode before START")
     guarded_mode_command = step.rfind(
-        "if (getProgramMode() != STEPROBOTSDK::eContinue)",
+        "if (programModeBefore != continueProgramMode)",
         arm_call,
         program_mode_command)
-    require(guarded_mode_command < 0,
-            "STEP continuous-mode command is still skipped based on a possibly stale SDK snapshot")
+    require(0 <= guarded_mode_command < program_mode_command,
+            "STEP redundantly writes continuous mode even when it is already active")
     for token in (
+        "const int continueProgramMode = static_cast<int>(STEPROBOTSDK::eContinue)",
         "const int programModeBefore = static_cast<int>(getProgramMode())",
+        "bool programModeCommandIssued = false",
+        "programStateBeforeModeCommand == STEPROBOTSDK::eStop",
+        "切换连续运行模式前程序未稳定停止",
         "int stableContinueReads = 0",
         "stableContinueReads >= 3",
+        "CommandIssued=%d",
         "STEP ContiMoveAny 连续运行模式确认",
     ):
         require(token in step,

@@ -203,10 +203,14 @@ def main() -> int:
         "AuthorizeFtpAction",
         "m_privilegedActionGuard",
         "configGroup->setVisible(!m_aboutMode)",
-        "当前在线服务会话不能修改服务器 IP 或设备名称",
         "HasFtpAccess()",
         "账号管理仅对全权限账号开放",
         "m_serverConfigNavRow",
+        "RequestServerConfigEdit",
+        "SetServerConfigEditing",
+        "QLineEdit::Password",
+        "IsServerConfigUnlockCode",
+        "QString(6, QLatin1Char('8'))",
     ):
         require(token in online_dialog, f"online-service live admin gate missing: {token}")
 

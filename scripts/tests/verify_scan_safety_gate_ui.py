@@ -132,23 +132,34 @@ assert "safetyGateRobotNameBindingEnabled" not in core_helper
 for name in safety_names:
     if name != "RobotNameBinding":
         assert f"safetyGate{name}Enabled" in core_helper
-assert "if (HasDisabledCoreSafetyGate(settings))" in config
-assert "settings.validationPolicy = ValidationPolicy::Audit;" in config
+assert "CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 1" in config_header
+assert 'ReadIntSetting("SafetyGates/BehaviorVersion", 0)' in config
+assert "storedSafetyGateBehaviorVersion < CURRENT_SAFETY_GATE_BEHAVIOR_VERSION" in config
+assert "settings.validationPolicy = ValidationPolicy::Enforce;" in config
+assert "settings.validationPolicy = ValidationPolicy::Audit;" not in config
+assert 'write("SafetyGates/BehaviorVersion"' in config
 
 ui_core_helper = section(
     dialog,
     "bool ScanSafetyGateDialog::HasDisabledCoreSafetyGateUi() const",
     "QString ScanSafetyGateDialog::DisabledGateDescription() const",
 )
-assert "m_robotNameBindingGateCheck" not in ui_core_helper
-assert "维护审计状态" in dialog
-assert "禁止生成可执行证明、真实焊接和机器人生产运动" in dialog
+assert "m_robotNameBindingGateCheck" in ui_core_helper
+assert "维护审计状态" not in dialog
+assert "系统安全门禁开关只作为审计记录" in dialog
+assert "不会改变 Validation 策略" in dialog
+assert "系统门禁仅记录 · 流程正常" in dialog
+assert "记录说明" in dialog
 assert "18" not in dialog or "%1/%2 开启" in dialog
 
-assert service.count("safetyGateRobotNameBindingEnabled") >= 5
-assert 'thresholds.insert("robotNameBindingEnabled", false);' in service
+assert "QJsonObject BuildSafetyGateRecords" in service
+for name in safety_names:
+    assert f"settings.safetyGate{name}Enabled" in service
+assert 'root.insert("safetyGateRecords", BuildSafetyGateRecords(settings));' in service
+assert 'thresholds.insert("robotNameBindingEnabled", false);' not in service
+assert "safetyGateRobotNameBindingEnabled\n        && proofRobotName.compare" not in service
 assert "TCP 持久端点" in dialog
-assert "相机及手眼身份仍强制匹配" in dialog
+assert "固定规则校验" in dialog
 assert "原点云质量证明绑定机器人" in service
 assert "当前控制单元为" in service
 

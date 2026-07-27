@@ -40,6 +40,8 @@ def main() -> int:
 
     require("enum class ValidationPolicy" in config_h, "missing Audit/Enforce policy")
     require("CURRENT_VALIDATION_PROFILE_VERSION = 1" in config_h, "missing versioned quality profile")
+    require("CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 1" in config_h,
+            "missing record-only safety-gate behavior version")
     require('ReadIntSetting("Validation/ProfileVersion", 0)' in config_cpp,
             "legacy databases are not detected")
     require("storedValidationProfileVersion < CURRENT_VALIDATION_PROFILE_VERSION" in config_cpp,
@@ -82,14 +84,21 @@ def main() -> int:
             and all(f"safetyGate{name}Enabled" in core_helper
                     for name in safety_gate_names if name != "RobotNameBinding"),
             "core-gate helper must cover every system gate except logical robot-name binding")
-    require("if (HasDisabledCoreSafetyGate(settings))" in config_cpp
-            and "settings.validationPolicy = ValidationPolicy::Audit;" in config_cpp,
-            "disabled core gate does not force the effective loaded policy to Audit")
+    require('ReadIntSetting("SafetyGates/BehaviorVersion", 0)' in config_cpp
+            and "storedSafetyGateBehaviorVersion < CURRENT_SAFETY_GATE_BEHAVIOR_VERSION"
+                in config_cpp
+            and "settings.validationPolicy == ValidationPolicy::Audit" in config_cpp
+            and "HasDisabledCoreSafetyGate(settings)" in config_cpp
+            and "settings.validationPolicy = ValidationPolicy::Enforce;" in config_cpp,
+            "legacy switch-forced Audit state is not recovered to normal Enforce flow")
     save_start = config_cpp.index("bool PointCloudProcessingConfig::Save(")
     save_body = config_cpp[save_start:]
-    require("if (HasDisabledCoreSafetyGate(normalizedSettings))" in save_body
-            and "normalizedSettings.validationPolicy = ValidationPolicy::Audit;" in save_body,
-            "Save can persist Enforce while a core system gate is disabled")
+    require("HasDisabledCoreSafetyGate(normalizedSettings)" not in save_body
+            and "normalizedSettings.validationPolicy = ValidationPolicy::Audit;" not in save_body,
+            "record-only safety switches still force Audit while saving")
+    require('write("SafetyGates/BehaviorVersion", '
+            "QString::number(CURRENT_SAFETY_GATE_BEHAVIOR_VERSION))" in save_body,
+            "record-only safety-gate behavior version is not persisted")
 
     require("struct PointCloudQualityReport" in calc_h, "missing structured quality report")
     for metric in (
@@ -360,14 +369,21 @@ def main() -> int:
             and "productionExpectation,\n                pointCloudSettings,\n                productionContext"
                 in rebuild,
             "validated rebuild does not use the same loaded safety-gate snapshot")
-    require(service.count("safetyGateRobotNameBindingEnabled") >= 5,
-            "robot-name gate is not applied consistently to rebuild and execution checks")
-    require('thresholds.insert("robotNameBindingEnabled", false);' in service,
-            "robot-name exception is not bound into the proof policy revision")
-    require("settings.safetyGateRobotNameBindingEnabled\n        && proofRobotName.compare" in service,
-            "old-proof robot-name inheritance ignores its configured switch")
-    require("currentSettings.safetyGateRobotNameBindingEnabled\n        && !expectedRobotName" in service,
-            "production execution robot-name comparison ignores its configured switch")
+    require("QJsonObject BuildSafetyGateRecords" in service
+            and 'root.insert("safetyGateRecords", BuildSafetyGateRecords(settings));' in service
+            and all(f"settings.safetyGate{name}Enabled" in service
+                    for name in safety_gate_names),
+            "system safety switches are not retained as report-only records")
+    require('thresholds.insert("robotNameBindingEnabled", false);' not in service
+            and "safetyGateRobotNameBindingEnabled\n        && proofRobotName.compare"
+                not in service,
+            "robot-name record still changes proof policy or flow")
+    require("if (proofRobotName.compare(currentRobotName, Qt::CaseInsensitive) != 0)"
+                in service
+            and "if (!expectedRobotName.trimmed().isEmpty()" in service
+            and "frozenExpectation->robotName.compare(" in service
+            and "if (productionExpectation.robotName.trimmed().isEmpty()" in service,
+            "fixed robot identity checks were weakened while making switches record-only")
     require("expectation.robotEndpoint.trimmed().isEmpty()" in service
             and "expectation.cameraSection.trimmed().isEmpty()" in service
             and "IsSha256Text(expectation.handEyeSha256)" in service,

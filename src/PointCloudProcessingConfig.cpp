@@ -55,6 +55,8 @@ void NormalizeFiniteLoadValues(PointCloudProcessingConfig::Settings& settings)
     useDefaultIfNonFinite(settings.zTruncationValue, defaults.zTruncationValue);
     useDefaultIfNonFinite(settings.resampleStepMm, defaults.resampleStepMm);
     useDefaultIfNonFinite(settings.fitSampleStepMm, defaults.fitSampleStepMm);
+    useDefaultIfNonFinite(settings.fitEndPeriodMergeFrac, defaults.fitEndPeriodMergeFrac);
+    useDefaultIfNonFinite(settings.fitSameTypeFlatSlope, defaults.fitSameTypeFlatSlope);
 
     // std::clamp/std::min/std::max do not sanitize NaN. Restore every floating-point
     // quality threshold before the range clamps and the Enforce safety floors run.
@@ -260,6 +262,14 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.fitPlatformSnapEnable = ReadBoolSetting("Fit/PlatformSnapEnable", settings.fitPlatformSnapEnable);
     settings.fitPlatformSnapFlatSlope = ReadDoubleSetting("Fit/PlatformSnapFlatSlope", settings.fitPlatformSnapFlatSlope);
     settings.fitPlatformSnapMinFrac = ReadDoubleSetting("Fit/PlatformSnapMinFrac", settings.fitPlatformSnapMinFrac);
+    // 兼容旧库：独立开关首次出现前，短段合并与 EndPeriodRecover 共用开关、斜率门共用 PlatformSnap 参数。
+    // 新键不存在时沿用旧行为；保存一次后改为各自独立。
+    settings.fitSameTypeShortMergeEnable =
+        ReadBoolSetting("Fit/SameTypeShortMergeEnable", settings.fitEndPeriodRecoverEnable);
+    settings.fitSameTypeMinReferenceSegments =
+        ReadIntSetting("Fit/SameTypeMinReferenceSegments", settings.fitSameTypeMinReferenceSegments);
+    settings.fitSameTypeFlatSlope =
+        ReadDoubleSetting("Fit/SameTypeFlatSlope", settings.fitPlatformSnapFlatSlope);
     settings.projectionStationWindowMm = ReadDoubleSetting("CloudProjection/StationWindowMm", settings.projectionStationWindowMm);
     settings.projectionTransverseWindowMm = ReadDoubleSetting("CloudProjection/TransverseWindowMm", settings.projectionTransverseWindowMm);
     settings.projectionZBandBelowMm = ReadDoubleSetting("CloudProjection/ZBandBelowMm", settings.projectionZBandBelowMm);
@@ -320,6 +330,8 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
         ReadBoolSetting("SafetyGates/TrajectoryStructureEnabled", settings.safetyGateTrajectoryStructureEnabled);
     settings.safetyGateMotionPrecheckEnabled =
         ReadBoolSetting("SafetyGates/MotionPrecheckEnabled", settings.safetyGateMotionPrecheckEnabled);
+    const int storedSafetyGateBehaviorVersion =
+        ReadIntSetting("SafetyGates/BehaviorVersion", 0);
 
     // 旧现场数据库曾把六类门禁全部持久化为 0，安装/OTA 又会保留 Data，单靠 C++ 默认值无法恢复。
     // Profile v1 已用 101 组历史语料完成阈值回算；仅旧配置升级时进入 Enforce 并打开全部六类指标。
@@ -335,11 +347,14 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
         settings.validationOutputEnabled = true;
     }
     settings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
-    // 系统核心门禁关闭时，只允许 Audit 处理。机器人名称绑定是唯一例外：
-    // 可按现场逻辑名变化关闭它，但端点、相机、手眼、案例和证明完整性仍须保持验证。
-    if (HasDisabledCoreSafetyGate(settings))
+    // 兼容修复：旧版本曾在任一核心记录开关关闭时把 Policy 强制持久化为 Audit。
+    // BehaviorVersion 缺失且仍呈现这一旧组合时，恢复正常 Enforce 流程；以后显式选择的
+    // Audit 会随 BehaviorVersion 一同保存，不会被此兼容分支改写。
+    if (storedSafetyGateBehaviorVersion < CURRENT_SAFETY_GATE_BEHAVIOR_VERSION
+        && settings.validationPolicy == ValidationPolicy::Audit
+        && HasDisabledCoreSafetyGate(settings))
     {
-        settings.validationPolicy = ValidationPolicy::Audit;
+        settings.validationPolicy = ValidationPolicy::Enforce;
     }
     if (g_hasRuntimeModeOverride)
     {
@@ -419,6 +434,9 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.lapStepStationWindowMm = std::max(2.0, settings.lapStepStationWindowMm);
     settings.lapStepSideFlatnessMm = std::max(0.02, settings.lapStepSideFlatnessMm);
     settings.lapStepPlatformSlopeMax = std::max(0.02, settings.lapStepPlatformSlopeMax);
+    settings.fitEndPeriodMergeFrac = std::clamp(settings.fitEndPeriodMergeFrac, 0.05, 0.90);
+    settings.fitSameTypeMinReferenceSegments = std::max(2, settings.fitSameTypeMinReferenceSegments);
+    settings.fitSameTypeFlatSlope = std::clamp(settings.fitSameTypeFlatSlope, 0.03, 0.30);
     // 投影提取参数：负值视为 0（自动派生）；候选上限非正回退默认；层位分位夹到 [0,100] 且上界≥下界。
     settings.projectionStationWindowMm = std::max(0.0, settings.projectionStationWindowMm);
     settings.projectionTransverseWindowMm = std::max(0.0, settings.projectionTransverseWindowMm);
@@ -454,10 +472,6 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
 {
     Settings normalizedSettings = settings;
     normalizedSettings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
-    if (HasDisabledCoreSafetyGate(normalizedSettings))
-    {
-        normalizedSettings.validationPolicy = ValidationPolicy::Audit;
-    }
     ApplyEnforceValidationSafetyBounds(normalizedSettings);
     QMap<QString, QString> pendingValues;
     const auto write = [&pendingValues](const QString& key, const QString& value)
@@ -515,6 +529,9 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("Fit/EndPeriodRatioThreshold", QString::number(settings.fitEndPeriodRatioThreshold, 'f', 6))
         && write("Fit/EndPeriodMinBendDeg", QString::number(settings.fitEndPeriodMinBendDeg, 'f', 6))
         && write("Fit/EndPeriodMergeFrac", QString::number(settings.fitEndPeriodMergeFrac, 'f', 6))
+        && write("Fit/SameTypeShortMergeEnable", settings.fitSameTypeShortMergeEnable ? "1" : "0")
+        && write("Fit/SameTypeMinReferenceSegments", QString::number(settings.fitSameTypeMinReferenceSegments))
+        && write("Fit/SameTypeFlatSlope", QString::number(settings.fitSameTypeFlatSlope, 'f', 6))
         && write("Fit/PlatformSnapEnable", settings.fitPlatformSnapEnable ? "1" : "0")
         && write("Fit/PlatformSnapFlatSlope", QString::number(settings.fitPlatformSnapFlatSlope, 'f', 6))
         && write("Fit/PlatformSnapMinFrac", QString::number(settings.fitPlatformSnapMinFrac, 'f', 6))
@@ -559,7 +576,8 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("SafetyGates/InputEvidenceEnabled", settings.safetyGateInputEvidenceEnabled ? "1" : "0")
         && write("SafetyGates/AuthorizedPoseIdentityEnabled", settings.safetyGateAuthorizedPoseIdentityEnabled ? "1" : "0")
         && write("SafetyGates/TrajectoryStructureEnabled", settings.safetyGateTrajectoryStructureEnabled ? "1" : "0")
-        && write("SafetyGates/MotionPrecheckEnabled", settings.safetyGateMotionPrecheckEnabled ? "1" : "0");
+        && write("SafetyGates/MotionPrecheckEnabled", settings.safetyGateMotionPrecheckEnabled ? "1" : "0")
+        && write("SafetyGates/BehaviorVersion", QString::number(CURRENT_SAFETY_GATE_BEHAVIOR_VERSION));
     const bool ok = valuesPrepared && ConfigDatabase::WriteScopedSettings(
         QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues);
     if (!ok && error != nullptr)
