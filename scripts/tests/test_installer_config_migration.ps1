@@ -1626,51 +1626,39 @@ try {
     Assert-True ($helperText.Contains("'MODE=UPGRADE_PREPARED'") -and $helperText.Contains("'MODE=UPGRADE_VERIFIED'")) 'upgrade write-ahead phases are missing'
     Assert-True ($helperText.Contains("'MODE=CREATE_PREPARED'") -and $helperText.Contains("'MODE=CREATE_VERIFIED'")) 'create write-ahead phases are missing'
 
+    # The helper remains fully tested for application-driven/manual repair, but setup must never invoke it.
     $iss = Get-Content -LiteralPath $installer -Raw
-    Assert-True (-not $iss.Contains('AllowNoPendingTransaction')) 'installer still permits no-record rollback success'
-    Assert-True ($iss.Contains("RollbackStatus = 'OK:PENDING_PUBLISHED_PRESERVED'")) 'installer cannot safely reconcile a previously published transaction on cancellation'
-    Assert-True ($iss.Contains("CommitStatus = 'OK:PENDING_TRANSACTION_COMMITTED_FINALIZE_REQUIRED'") -and
-        $iss.Contains('MigrationNeedsFinalize := True;')) `
-        'installer does not let final commit state require deferred cleanup'
-    Assert-True (($iss.Split('AppendPreparationRollbackOutcome(Result);').Count - 1) -ge 4) 'not every post-helper preparation failure reconciles the transaction record'
-    $postInstall = $iss.IndexOf('if CurStep = ssPostInstall then')
-    $commit = $iss.IndexOf('if not CommitPendingDatabaseTransaction(CommitStatus) then', $postInstall)
-    $finalize = $iss.IndexOf('not FinalizeDeferredCredentialScrub', $postInstall)
-    Assert-True ($postInstall -ge 0 -and $commit -gt $postInstall -and $finalize -gt $commit) 'database publish does not precede deferred scrub in ssPostInstall'
-    $deinitialize = $iss.IndexOf('procedure DeinitializeSetup;')
-    Assert-True ($iss.IndexOf('if RollbackPendingDatabaseTransaction(RollbackStatus) then', $deinitialize) -gt $deinitialize) 'cancellation rollback depends on parsed status fields'
-    Assert-True (-not $iss.Contains("if Pos('OK:', StatusText)")) 'installer accepts arbitrary OK-prefixed status'
-
-    function Test-InstallerStatusContract {
-        param([string]$Status)
-        if ($Status -cin @('OK:NO_DATABASE', 'OK:CURRENT_AND_VERIFIED', "OK:CURRENT_AND_VERIFIED`nFINALIZE=1")) {
-            return $true
-        }
-        if ($Status -cmatch '^OK:MIGRATED_AND_VERIFIED\nBACKUP_NAME=\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-backup\.dpapi\.bak\nBACKUP_SHA256=[0-9a-f]{64}(?:\nFINALIZE=1)?$') {
-            return $true
-        }
-        if ($Status -cmatch '^OK:LEGACY_DATABASE_CREATED_DEFERRED_AND_VERIFIED\nDATABASE_CREATED=1\nCREATED_SHA256=[0-9a-f]{64}\nFINALIZE=1$') {
-            return $true
-        }
-        return $Status -cmatch '^OK:LEGACY_DATABASE_CREATED_AND_VERIFIED\nDATABASE_CREATED=1\nCREATED_SHA256=[0-9a-f]{64}$'
-    }
-    $validUpgradeStatus = "OK:MIGRATED_AND_VERIFIED`nBACKUP_NAME=.ConfigStore.db.install-upgrade-" +
-        ('a' * 32) + ".tmp.install-backup.dpapi.bak`nBACKUP_SHA256=" + ('b' * 64) + "`nFINALIZE=1"
-    Assert-True (Test-InstallerStatusContract $validUpgradeStatus) 'valid staged upgrade status fixture was rejected'
-    Assert-True (Test-InstallerStatusContract $validUpgradeStatus.Replace("`nFINALIZE=1", '')) 'valid scrub-complete upgrade status fixture was rejected'
-    Assert-True (Test-InstallerStatusContract ("OK:LEGACY_DATABASE_CREATED_AND_VERIFIED`nDATABASE_CREATED=1`nCREATED_SHA256=" + ('d' * 64))) 'valid scrub-complete create status fixture was rejected'
-    foreach ($forgedStatus in @(
-        ($validUpgradeStatus + "`nUNKNOWN=1"),
-        $validUpgradeStatus.Replace('FINALIZE=1', 'FINALIZE=0'),
-        $validUpgradeStatus.Replace(('a' * 32), ('A' * 32)),
-        $validUpgradeStatus.Replace('.tmp.install-backup.dpapi.bak', '.tmp..\evil.dpapi.bak'),
-        "OK:LEGACY_DATABASE_CREATED_DEFERRED_AND_VERIFIED`nDATABASE_CREATED=1`nCREATED_SHA256=" + ('c' * 64)
+    Assert-True ($iss.Contains('Excludes: "Data\*,SDK\STEP\versions\*"')) `
+        'installer no longer excludes the field-owned Data directory'
+    foreach ($forbidden in @(
+        'ConfigMigrate_PreInstall',
+        'PrepareToInstall',
+        'DatabaseMigration',
+        'MigrateExecutable',
+        'MigrationStatusPath',
+        'CommitPendingDatabaseTransaction',
+        'RollbackPendingDatabaseTransaction',
+        'FinalizeDeferredCredentialScrub',
+        'ConfigMigrate_Install_Failure.txt',
+        'SameVersionRecovery',
+        'Check: DatabaseMigrationSucceeded'
     )) {
-        Assert-True (-not (Test-InstallerStatusContract $forgedStatus)) "forged installer status unexpectedly matched: $forgedStatus"
+        Assert-True (-not $iss.Contains($forbidden)) `
+            "installer still contains database migration wiring: $forbidden"
     }
-    Assert-True ($iss.Contains('function IsCanonicalUpgradeBackupName(const Value: string): Boolean;')) 'installer lacks canonical staged backup-name validation'
+    foreach ($installedRepairTool in @(
+        'Source: "..\dist\tools\ConfigMigrate.exe"; DestDir: "{app}\tools"; Flags: ignoreversion',
+        'Source: "..\dist\tools\ConfigMigrate_Run.cmd"; DestDir: "{app}\tools"; Flags: ignoreversion',
+        'Source: "..\dist\tools\ConfigMigrate_Install.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion'
+    )) {
+        Assert-True ($iss.Contains($installedRepairTool)) `
+            "application repair component is missing from the installed tools: $installedRepairTool"
+    }
+    Assert-True ($iss.Contains(
+        'Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent'
+    )) 'installer application launch is not independent from database state'
 
-    Write-Host 'PASS: installer staging-only prepare, atomic commit, forced-kill rollback, sidecar rejection, and fail-closed status handoff'
+    Write-Host 'PASS: repair helper transactions remain safe and installer defers all database work to the application'
 }
 finally {
     Remove-Item Env:FAKE_CRASH_KIND,Env:FAKE_CRASH_SIGNAL,Env:FAKE_CRASH_RELEASE,Env:FAKE_WRITE_STAGING_SIDECAR,Env:FAKE_VERIFY_WRITES_SIDECAR,Env:FAKE_CREATE_FINAL_DURING_VERIFY,Env:FAKE_STAGING_SCRUB_COMPLETE -ErrorAction SilentlyContinue

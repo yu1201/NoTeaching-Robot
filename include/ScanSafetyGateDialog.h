@@ -18,7 +18,7 @@ class QString;
 // 管理页中的扫描安全门禁配置页。
 //
 // 页面允许工程师查看全部扫描质量和系统安全门禁；保存或载入安全默认值前必须通过
-// modifyGuard 的管理员身份复核。关闭核心系统门禁只进入维护审计状态，不能生成可执行证明。
+// modifyGuard 的管理员身份复核。系统门禁开关只保存为审计记录，不改变正常生产流程。
 class ScanSafetyGateDialog : public QDialog
 {
 public:

@@ -4565,30 +4565,54 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 		}
 	}
 
-	// 每次启动动态程序前都显式下发连续运行模式。现场控制器可能仍处于单步/运动单步，
-	// 而 SDK 的 getProgramMode() 快照短时间内仍回报 eContinue；若据此跳过命令，
-	// 程序会只执行首条运动便进入 eStop，末尾 ntdone 自然完成见证也不会置位。
+	// 控制器已经处于连续模式时禁止重复写运行模式。ProgramRunModeCmd 只表示命令已受理，
+	// 若紧接着 START，异步模式命令可能在机器人运行后才到达并触发 4009。
+	// 只有明确观察到非连续模式时，才在程序稳定 eStop 的窗口内切换。
+	const int continueProgramMode = static_cast<int>(STEPROBOTSDK::eContinue);
 	const int programModeBefore = static_cast<int>(getProgramMode());
+	bool programModeCommandIssued = false;
+	int programStateBeforeModeCommand = STEPROBOTSDK::eStop;
+	if (programModeBefore != continueProgramMode)
 	{
-		std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
-		if (RobotOperationLease::IsCancellationRequested(this))
 		{
-			return failRunPrepare("安全停止后取消切换连续运行模式", -20000);
+			std::lock_guard<std::recursive_mutex> modeLock(m_sdkCommandMutex);
+			if (RobotOperationLease::IsCancellationRequested(this))
+			{
+				return failRunPrepare("安全停止后取消切换连续运行模式", -20000);
+			}
+			programStateBeforeModeCommand = m_pSTEPRobotClient != nullptr
+				? static_cast<int>(m_pSTEPRobotClient->getProgramState())
+				: -1;
+			if (programStateBeforeModeCommand == STEPROBOTSDK::eStop)
+			{
+				programModeCommandIssued = true;
+				nPrepareRet = m_pSTEPRobotClient->ProgramRunModeCmd(continueProgramMode);
+			}
 		}
-		nPrepareRet = m_pSTEPRobotClient->ProgramRunModeCmd(static_cast<int>(STEPROBOTSDK::eContinue));
-	}
-	if (nPrepareRet != 0)
-	{
-		m_pRobotLog->write(LogColor::ERR,
-			"STEP ContiMoveAny 设置连续运行模式失败 | Before=%d CommandRet=%d",
-			programModeBefore,
-			nPrepareRet);
-		return failRunPrepare("切换连续运行模式", nPrepareRet);
+		if (programStateBeforeModeCommand != STEPROBOTSDK::eStop)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"STEP ContiMoveAny 拒绝切换连续运行模式：程序未停止 | Before=%d State=%d",
+				programModeBefore,
+				programStateBeforeModeCommand);
+			return failRunPrepare("切换连续运行模式前程序未稳定停止",
+				programStateBeforeModeCommand);
+		}
+		if (nPrepareRet != 0)
+		{
+			m_pRobotLog->write(LogColor::ERR,
+				"STEP ContiMoveAny 设置连续运行模式失败 | Before=%d CommandRet=%d",
+				programModeBefore,
+				nPrepareRet);
+			return failRunPrepare("切换连续运行模式", nPrepareRet);
+		}
+
+		// 非连续 -> 连续必须观察到真实状态边沿；命令返回成功不能直接放行 START。
+		Sleep(50);
 	}
 
-	// 命令返回只表示已受理。至少等待一个刷新周期，并要求连续三次稳定回读，
-	// 避免把命令前残留的 eContinue 快照误当作本次切换已生效。
-	Sleep(50);
+	// 无论是否发过命令，都要求连续三次稳定回读 eContinue。已是连续模式时这里只读不写，
+	// 避免重复模式命令与随后 START 竞争。
 	int stableContinueReads = 0;
 	int programModeAfter = static_cast<int>(getProgramMode());
 	for (int i = 0; i < 20; ++i)
@@ -4598,7 +4622,7 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 			return failRunPrepare("安全停止后取消等待连续运行模式", -20000);
 		}
 		programModeAfter = static_cast<int>(getProgramMode());
-		if (programModeAfter == static_cast<int>(STEPROBOTSDK::eContinue))
+		if (programModeAfter == continueProgramMode)
 		{
 			++stableContinueReads;
 			if (stableContinueReads >= 3)
@@ -4614,8 +4638,9 @@ int STEPRobotCtrl::ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_IN
 	}
 	m_pRobotLog->write(
 		stableContinueReads >= 3 ? LogColor::SUCCESS : LogColor::ERR,
-		"STEP ContiMoveAny 连续运行模式确认 | Before=%d CommandRet=%d After=%d StableReads=%d",
+		"STEP ContiMoveAny 连续运行模式确认 | Before=%d CommandIssued=%d CommandRet=%d After=%d StableReads=%d",
 		programModeBefore,
+		programModeCommandIssued ? 1 : 0,
 		nPrepareRet,
 		programModeAfter,
 		stableContinueReads);

@@ -4309,6 +4309,7 @@ QVector<int> MergeTooCloseSameTypeCorners(
     const QVector<char>& isLapStepKey,
     double distFrac,
     double flatSlopeThreshold,
+    int minimumReferenceSegments,
     int* removedCount)
 {
     if (removedCount != nullptr) { *removedCount = 0; }
@@ -4319,7 +4320,9 @@ QVector<int> MergeTooCloseSameTypeCorners(
     QVector<char> lapKey = isLapStepKey;
     const double flatSlopeThresh = std::max(0.01, flatSlopeThreshold);
     const double shortFraction = std::min(0.95, std::max(0.05, distFrac));
-    constexpr int minimumReferenceSegments = 3;
+    // 仍禁止单样本自动删除；两个完整周期是允许配置的最低值。继续要求
+    // “候选短且实际为坡 + 删除后恢复到同方向坡典型长度”双重验证。
+    const int requiredReferenceSegments = std::max(2, minimumReferenceSegments);
     auto segSlope = [&](int posA, int posB) -> double
     {
         return GeometryWaveSegmentSlope(projected, result, posA, posB);
@@ -4338,7 +4341,8 @@ QVector<int> MergeTooCloseSameTypeCorners(
             const GeometryWaveSegmentClass segmentClass =
                 GeometryWaveSegmentClassAt(projected, result, k);
             if (!GeometryWaveSegmentIsPlatform(segmentClass)) { continue; }
-            // 对候选做留一统计；至少要有 3 个同类、平坦、完整的参考段才自动删，短工件不自动处理。
+            // 对候选做留一统计；至少要有 2 个同类、平坦、完整的参考段才自动删，
+            // 单参考段的短工件仍保持保守，不自动处理。
             const double typicalLength = GeometryTypicalWaveSegmentLength(
                 projected,
                 result,
@@ -4346,7 +4350,7 @@ QVector<int> MergeTooCloseSameTypeCorners(
                 segmentClass,
                 k,
                 flatSlopeThresh,
-                minimumReferenceSegments);
+                requiredReferenceSegments);
             if (typicalLength <= 2.0) { continue; }
             // 使用原始 3D chord，与四类段各自的典型长度比较；不再混合长平台与短坡。
             const double gap = GeometryKeyDistance(projected, result, k, k + 1);
@@ -4387,7 +4391,7 @@ QVector<int> MergeTooCloseSameTypeCorners(
                     recoveredClass,
                     fragmentedSlopePosition,
                     flatSlopeThresh,
-                    minimumReferenceSegments);
+                    requiredReferenceSegments);
                 if (typicalSlopeLength <= 2.0
                     || gap >= shortFraction * typicalSlopeLength)
                 {
@@ -6467,15 +6471,19 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
                 for (int k = 0; k < keyIndexes.size(); ++k)
                     if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
             }
-            // 四类段长删错拐点：SDK+拟合路径跳过 Prune，平台重算又可能把一个坡脚拆成
-            // 两个同类角；这里按 IO/OI/II/OO 分别统计完整段，清理短且实际为坡的 II/OO。搭接对豁免。
+        }
+        // 四类段长删错拐点：与端区补点独立。SDK+拟合路径跳过 Prune，平台重算又可能把一个坡脚拆成
+        // 两个同类角；这里按 IO/OI/II/OO 分别统计完整段，清理短且实际为坡的 II/OO。搭接对豁免。
+        if (params.enableSameTypeShortCornerMerge)
+        {
             int mergedCount = 0;
             keyIndexes = MergeTooCloseSameTypeCorners(
                 projected,
                 keyIndexes,
                 isLapStepKey,
                 params.endPeriodMergeFrac,
-                params.platformSnapFlatSlope,
+                params.sameTypeShortFlatSlope,
+                params.sameTypeShortMinReferenceSegments,
                 &mergedCount);
             if (mergedCount > 0)
             {
@@ -6500,7 +6508,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
                     if (lapValues.contains(keyIndexes[k])) isLapStepKey[k] = 1;
             }
             // 平台重定会改变关键点个数/位置；再按四类段长复核一次，避免重定后重新形成坡上同类双角。
-            if (params.enableEndPeriodCornerRecover)
+            if (params.enableSameTypeShortCornerMerge)
             {
                 int postSnapMergedCount = 0;
                 keyIndexes = MergeTooCloseSameTypeCorners(
@@ -6508,7 +6516,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
                     keyIndexes,
                     isLapStepKey,
                     params.endPeriodMergeFrac,
-                    params.platformSnapFlatSlope,
+                    params.sameTypeShortFlatSlope,
+                    params.sameTypeShortMinReferenceSegments,
                     &postSnapMergedCount);
                 if (postSnapMergedCount > 0)
                 {

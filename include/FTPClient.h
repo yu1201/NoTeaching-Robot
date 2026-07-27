@@ -70,7 +70,9 @@ public:
         const std::string& localFilePath,
         unsigned long long expectedRemoteBytes,
         unsigned long long maximumBytes,
-        std::atomic<bool>* cancelFlag);
+        std::atomic<bool>* cancelFlag,
+        const std::function<void(unsigned long long received,
+            unsigned long long total)>& progressCb = {});
     bool deleteFile(const std::string& remoteFilePath, bool askConfirm = true);
     void setMessageBoxesEnabled(bool enabled);
 

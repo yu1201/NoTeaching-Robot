@@ -16680,7 +16680,7 @@ void QtWidgetsApplication4::OpenMeasureThenWeldDialog()
 			}
 			return true;
 		});
-	// 扫描数据在线上传钩子：流程成功后按「自动上传」开关入队（钩子回调已在 UI 线程）。
+	// 扫描数据在线上传钩子：案例目录落盘后按「自动上传」开关入队（钩子回调已在 UI 线程）。
 	page->SetScanDataUploadHook([this](const QString& caseDir)
 		{
 			if (OnlineServicesConfig::AutoUploadEnabled())

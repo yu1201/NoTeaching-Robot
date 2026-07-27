@@ -695,7 +695,9 @@ bool FtpClient::downloadFileBounded(
     const std::string& localFilePath,
     unsigned long long expectedRemoteBytes,
     unsigned long long maximumBytes,
-    std::atomic<bool>* cancelFlag)
+    std::atomic<bool>* cancelFlag,
+    const std::function<void(unsigned long long received,
+        unsigned long long total)>& progressCb)
 {
     auto cancelled = [cancelFlag]()
         { return cancelFlag != nullptr && cancelFlag->load(); };
@@ -771,6 +773,10 @@ bool FtpClient::downloadFileBounded(
     bool ok = true;
     unsigned long long received = 0;
     std::array<unsigned char, 64 * 1024> buffer{};
+    if (progressCb)
+    {
+        progressCb(0, expectedRemoteBytes);
+    }
     while (!cancelled())
     {
         DWORD bytesRead = 0;
@@ -816,6 +822,10 @@ bool FtpClient::downloadFileBounded(
             break;
         }
         received += bytesRead;
+        if (progressCb)
+        {
+            progressCb(received, expectedRemoteBytes);
+        }
     }
     ok = ok
         && !cancelled()

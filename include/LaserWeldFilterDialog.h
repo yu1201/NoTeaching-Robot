@@ -80,11 +80,11 @@ private:
     QSpinBox* m_pProjSmoothRadiusSpin = nullptr;
     QComboBox* m_pFeaturePointStrategyCombo = nullptr;
     QComboBox* m_pAxisCombo = nullptr;
-    QDoubleSpinBox* m_pZThresholdSpin = nullptr;
+    QDoubleSpinBox* m_pZThresholdSpin = nullptr;  // 兼容旧配置，当前算法未消费，不再显示
     QDoubleSpinBox* m_pZJumpThresholdSpin = nullptr;
     QDoubleSpinBox* m_pZContinuityThresholdSpin = nullptr;
     QDoubleSpinBox* m_pSegmentBreakDistanceSpin = nullptr;
-    QCheckBox* m_pKeepLongestSegmentCheck = nullptr;
+    QCheckBox* m_pKeepLongestSegmentCheck = nullptr;  // 兼容旧配置，当前算法未消费，不再显示
     QDoubleSpinBox* m_pStepSpin = nullptr;
     QDoubleSpinBox* m_pWindowSpin = nullptr;
     QDoubleSpinBox* m_pPiecewiseToleranceSpin = nullptr;
@@ -116,7 +116,10 @@ private:
     QCheckBox* m_pEndPeriodRecoverCheck = nullptr;           // 端区周期补拐点总开关(②③④通用)
     QDoubleSpinBox* m_pEndPeriodRatioSpin = nullptr;         // 端段长/周期 判漏阈值
     QDoubleSpinBox* m_pEndPeriodMinBendSpin = nullptr;       // 补点最小弯折角(度)
-    QDoubleSpinBox* m_pEndPeriodMergeSpin = nullptr;         // 删错:相邻同类间距/周期 阈值
+    QCheckBox* m_pSameTypeShortMergeCheck = nullptr;         // 同类短段多余拐点合并总开关(②③④通用)
+    QDoubleSpinBox* m_pEndPeriodMergeSpin = nullptr;         // 删错:候选短段/同类段中位 阈值
+    QSpinBox* m_pSameTypeMinReferenceSpin = nullptr;         // 每类最少完整参考段数
+    QDoubleSpinBox* m_pSameTypeFlatSlopeSpin = nullptr;      // 短段复核用坡/平台斜率分界
     QCheckBox* m_pPlatformSnapCheck = nullptr;               // 按平台边界重定拐点总开关(②③④通用)
     QDoubleSpinBox* m_pPlatformSnapFlatSlopeSpin = nullptr;  // 平台判定斜率上限
     QDoubleSpinBox* m_pPlatformSnapMinFracSpin = nullptr;    // 平台最小长度/周期

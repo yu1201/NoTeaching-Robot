@@ -200,20 +200,26 @@ try {
         -Text ($installerTextOriginal -replace '(?m)^Source: "\.\.\\dist\\tools\\ConfigMigrate_Install\.ps1"; DestDir: "\{app\}\\tools".*(?:\r?\n|$)', '') `
         -Message "missing installed ConfigMigrate_Install.ps1 helper must fail"
     Assert-InstallerTextRejected `
-        -Text ($installerTextOriginal.Replace('DestName: "ConfigMigrate_PreInstall.exe"; Flags: dontcopy', 'DestName: "ConfigMigrate_PreInstall.exe"; Flags: ignoreversion')) `
-        -Message "pre-install migrator without dontcopy must fail"
+        -Text ($installerTextOriginal.Replace('[Icons]', "Source: `"..\dist\tools\ConfigMigrate.exe`"; DestDir: `"{tmp}`"; DestName: `"ConfigMigrate_PreInstall.exe`"; Flags: dontcopy`r`n`r`n[Icons]")) `
+        -Message "installer-embedded pre-install migrator must fail"
     Assert-InstallerTextRejected `
-        -Text ($installerTextOriginal.Replace('DestName: "ConfigMigrate_PreInstall.ps1"', 'DestName: "ConfigMigrate_PreInstall-Tampered.ps1"')) `
-        -Message "pre-install helper DestName drift must fail"
+        -Text ($installerTextOriginal.Replace(
+            '[Code]',
+            "[Code]`r`nfunction PrepareToInstall(var NeedsRestart: Boolean): string;`r`nbegin`r`n  Result := '';`r`nend;`r`n"
+        )) `
+        -Message "installer pre-install database hook must fail"
     Assert-InstallerTextRejected `
-        -Text ($installerTextOriginal.Replace('function PrepareToInstall(var NeedsRestart: Boolean): string;', 'function PrepareDatabaseLater(var NeedsRestart: Boolean): string;')) `
-        -Message "missing PrepareToInstall migration hook must fail"
+        -Text ($installerTextOriginal.Replace(
+            'Flags: nowait postinstall skipifsilent',
+            'Flags: nowait postinstall skipifsilent; Check: DatabaseMigrationSucceeded'
+        )) `
+        -Message "application launch gated by installer database migration must fail"
     Assert-InstallerTextRejected `
-        -Text ($installerTextOriginal.Replace('[Code]', "[Code]`r`n; AllowNoPendingTransaction")) `
-        -Message "installer rollback that permits a missing transaction record must fail"
-    Assert-InstallerTextRejected `
-        -Text ($installerTextOriginal.Replace('if not CommitPendingDatabaseTransaction(CommitStatus) then', 'if False then')) `
-        -Message "missing staged database post-install commit must fail"
+        -Text ($installerTextOriginal.Replace(
+            '[Code]',
+            "[Code]`r`nprocedure CurStepChanged(CurStep: TSetupStep);`r`nbegin`r`n  Exec('ConfigMigrate.exe', '', '', SW_HIDE, ewWaitUntilTerminated, CurStep);`r`nend;`r`n"
+        )) `
+        -Message "installer post-install database command must fail"
     Set-Content -LiteralPath $installerFixturePath -Value $installerTextOriginal -Encoding UTF8
     Assert-InstallerDefinition -RepoRoot $installerFixture -AppVersion $currentAppVersion -Channel neutral | Out-Null
 

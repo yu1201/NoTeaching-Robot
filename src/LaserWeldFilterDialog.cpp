@@ -759,12 +759,14 @@ void LaserWeldFilterDialog::BuildUi()
 
     QGroupBox* paramGroup = new QGroupBox("滤波拟合参数");
     QGridLayout* paramLayout = new QGridLayout(paramGroup);
-    // 去噪/分段参数属于程序滤波链，对走滤波拟合的方法（②③④）统一生效。
-    m_pZThresholdSpin = new QDoubleSpinBox();
+    // 去噪/分段参数按实际方法动态启用：②跳过程序去噪并固定用方位角取角，③④使用程序几何链。
+    // 这两个旧参数仍保留读写兼容，但当前几何拟合链没有消费，界面不再显示。
+    m_pZThresholdSpin = new QDoubleSpinBox(paramGroup);
     m_pZThresholdSpin->setRange(-9999.0, 9999.0);
     m_pZThresholdSpin->setDecimals(3);
     m_pZThresholdSpin->setSingleStep(1.0);
     m_pZThresholdSpin->setValue(-230.0);
+    m_pZThresholdSpin->hide();
 
     m_pZJumpThresholdSpin = new QDoubleSpinBox();
     m_pZJumpThresholdSpin->setRange(0.0, 9999.0);
@@ -772,6 +774,8 @@ void LaserWeldFilterDialog::BuildUi()
     m_pZJumpThresholdSpin->setSingleStep(0.5);
     m_pZJumpThresholdSpin->setValue(3.0);
     m_pZJumpThresholdSpin->setSpecialValueText("关闭");
+    m_pZJumpThresholdSpin->setToolTip("仅方法③且“种子上方Z带”为自动时，用于推导上方候选范围；"
+        "显式设置Z带后此项自动灰掉。");
 
     m_pZContinuityThresholdSpin = new QDoubleSpinBox();
     m_pZContinuityThresholdSpin->setRange(0.0, 9999.0);
@@ -779,6 +783,7 @@ void LaserWeldFilterDialog::BuildUi()
     m_pZContinuityThresholdSpin->setSingleStep(0.5);
     m_pZContinuityThresholdSpin->setValue(2.0);
     m_pZContinuityThresholdSpin->setSpecialValueText("关闭");
+    m_pZContinuityThresholdSpin->setToolTip("方法③④的局部离群点清理阈值；方法②使用SDK已去噪轨迹，跳过此项。");
 
     m_pSegmentBreakDistanceSpin = new QDoubleSpinBox();
     m_pSegmentBreakDistanceSpin->setRange(0.0, 9999.0);
@@ -786,9 +791,12 @@ void LaserWeldFilterDialog::BuildUi()
     m_pSegmentBreakDistanceSpin->setSingleStep(1.0);
     m_pSegmentBreakDistanceSpin->setValue(6.0);
     m_pSegmentBreakDistanceSpin->setSpecialValueText("关闭");
+    m_pSegmentBreakDistanceSpin->setToolTip("方法③④粗拟合阶段清理连续同类拐点游程时的距离基准，"
+        "不是点云断段阈值；方法②固定走方位角分支，不使用。");
 
-    m_pKeepLongestSegmentCheck = new QCheckBox("只保留最长连续段");
+    m_pKeepLongestSegmentCheck = new QCheckBox("只保留最长连续段", paramGroup);
     m_pKeepLongestSegmentCheck->setChecked(true);
+    m_pKeepLongestSegmentCheck->hide();
 
     m_pFeaturePointStrategyCombo = new QComboBox();
     m_pFeaturePointStrategyCombo->addItem(
@@ -816,6 +824,8 @@ void LaserWeldFilterDialog::BuildUi()
     m_pWindowSpin->setDecimals(3);
     m_pWindowSpin->setSingleStep(0.5);
     m_pWindowSpin->setValue(8.0);
+    m_pWindowSpin->setToolTip("仅方法③且“投影横向窗口”为自动时，用于推导横向候选窗口；"
+        "显式设置投影横向窗口后此项自动灰掉。");
 
     m_pPiecewiseToleranceSpin = new QDoubleSpinBox();
     m_pPiecewiseToleranceSpin->setRange(0.1, 9999.0);
@@ -867,7 +877,7 @@ void LaserWeldFilterDialog::BuildUi()
     m_pCornerRefineEnableCheck = new QCheckBox("启用端区补拐点");
     m_pCornerRefineEnableCheck->setChecked(true);
     m_pCornerRefineEnableCheck->setToolTip("总开关：对粗拟合结果再做\"端区相干弓\"补拐点细化。关闭则完全保持原拐点。"
-        "对「SDK点云算法+拟合」与「点云算法+拟合」两种模式都生效。");
+        "对②SDK点云算法+拟合、③点云算法+拟合、④特征点+拟合都生效。");
     m_pCornerRefineOneSidedSpin = new QDoubleSpinBox();
     m_pCornerRefineOneSidedSpin->setRange(50.0, 100.0);
     m_pCornerRefineOneSidedSpin->setDecimals(0);
@@ -892,7 +902,7 @@ void LaserWeldFilterDialog::BuildUi()
     m_pCornerPatternRefitCheck->setChecked(true);
     m_pCornerPatternRefitCheck->setToolTip("按波纹角成对规律(谷=两内角/峰=两外角)把拐点归成平台，每个平台从稠密点云三段拟合"
         "重算恰好 2 个边界角——自动修正源头\"多检\"(一个平台冒出多个同类角)与\"漏检\"(只检到一个)。搭接台阶点豁免。"
-        "默认开，取代上面的\"端区补拐点\"(后者按几何加点、端区易过补)。两种几何拟合模式(SDK拟合/点云拟合)都生效。");
+        "默认开，取代上面的\"端区补拐点\"(后者按几何加点、端区易过补)。对②③④三种拟合模式都生效。");
     m_pCornerPlatformMinSegSpin = new QSpinBox();
     m_pCornerPlatformMinSegSpin->setRange(3, 50);
     m_pCornerPlatformMinSegSpin->setValue(8);
@@ -940,19 +950,36 @@ void LaserWeldFilterDialog::BuildUi()
 
     // 端区周期一致性补拐点（②③④拟合方案通用）：用波纹周期+典型拐角角度补回起/终点段漏掉的拐点。
     m_pEndPeriodRecoverCheck = new QCheckBox("端区周期补拐点");
-    m_pEndPeriodRecoverCheck->setToolTip("对②③④三种拟合方案都生效，治起点/终点段拐点漏检：\n"
+    m_pEndPeriodRecoverCheck->setToolTip("对②③④三种拟合方案都生效，只负责补回起点/终点段漏检拐点：\n"
         "波纹板拐点近似【周期性】。先从中段可靠拐点算\"中位段长L=周期\"，再看端区(起点段/终点段)长度——\n"
         "若 ≥ 阈值×L 说明里面漏了拐点，按周期反推漏点位置，并在该处实测【弯折角】确认(直段≈0°不会误补)。\n"
-        "长度定位 + 角度确认 双判据。搭接台阶两拐点会先合成一段再算周期。只补不删，默认关。");
+        "长度定位 + 角度确认双判据。搭接台阶两拐点会先合成一段再算周期。与下面的同类短段合并独立，默认关。");
     m_pEndPeriodRatioSpin = new QDoubleSpinBox();
     m_pEndPeriodRatioSpin->setRange(1.05, 3.0); m_pEndPeriodRatioSpin->setDecimals(2); m_pEndPeriodRatioSpin->setSingleStep(0.05); m_pEndPeriodRatioSpin->setValue(1.2);
     m_pEndPeriodRatioSpin->setToolTip("判漏阈值：端段长 ÷ 周期L ≥ 此值才认为里面漏了拐点。1.3 表示端段比一个周期长 30% 以上就补。\n太小→收尾的部分周期段会被误判补点；太大→漏点补不回。一般 1.25~1.4。");
     m_pEndPeriodMinBendSpin = new QDoubleSpinBox();
     m_pEndPeriodMinBendSpin->setRange(1.0, 45.0); m_pEndPeriodMinBendSpin->setDecimals(1); m_pEndPeriodMinBendSpin->setSingleStep(1.0); m_pEndPeriodMinBendSpin->setValue(5.0);
     m_pEndPeriodMinBendSpin->setToolTip("补点最小弯折角(度)：预测窗口内候选点的弯折角 ≥ max(此值, 0.5×典型拐角角) 才补。\n防止在直段误补。波纹真拐角弯折常 7~13°、噪声基线 2~3°，取 5° 较稳。");
+    m_pSameTypeShortMergeCheck = new QCheckBox("合并同类短段多余拐点");
+    m_pSameTypeShortMergeCheck->setToolTip("对②③④三种拟合方案都生效，只负责删除多余拐点：\n"
+        "排除首末与搭接段，把中间完整段按 IO/OI/II/OO 四类分别统计中位长度。相邻同类角之间若\n"
+        "短于阈值、实际为坡且删点后恢复到同方向坡的典型长度，才合并；平的真实短平台保留。");
     m_pEndPeriodMergeSpin = new QDoubleSpinBox();
     m_pEndPeriodMergeSpin->setRange(0.05, 0.9); m_pEndPeriodMergeSpin->setDecimals(2); m_pEndPeriodMergeSpin->setSingleStep(0.05); m_pEndPeriodMergeSpin->setValue(0.4);
-    m_pEndPeriodMergeSpin->setToolTip("删错阈值(候选段长/同类完整段中位)：排除首末与搭接段，将中间段按 IO/OI/II/OO 四类分别统计。\n相邻同类角之间若实际为坡、同时短于同类平台与同方向坡中位长度的此倍数，并且删点后坡长恢复正常，才合并；平的真实短平台保留。");
+    m_pEndPeriodMergeSpin->setToolTip("短段阈值(候选段长/同类完整段中位)：越大越容易判为异常短段；越小越保守。"
+        "还必须同时通过坡形和删后恢复长度验证，并非只看长度就删除。");
+    m_pSameTypeMinReferenceSpin = new QSpinBox();
+    m_pSameTypeMinReferenceSpin->setRange(2, 20);
+    m_pSameTypeMinReferenceSpin->setValue(2);
+    m_pSameTypeMinReferenceSpin->setToolTip("每一种同类平台和同方向坡至少需要多少个完整参考段才能自动合并。"
+        "2 适合短工件；调大更保守。为避免单样本误删，最低为 2。");
+    m_pSameTypeFlatSlopeSpin = new QDoubleSpinBox();
+    m_pSameTypeFlatSlopeSpin->setRange(0.03, 0.30);
+    m_pSameTypeFlatSlopeSpin->setDecimals(2);
+    m_pSameTypeFlatSlopeSpin->setSingleStep(0.01);
+    m_pSameTypeFlatSlopeSpin->setValue(0.15);
+    m_pSameTypeFlatSlopeSpin->setToolTip("短段复核的坡/平台斜率分界：|侧向变化/主轴变化| 小于此值判平台，"
+        "大于等于此值判坡。真实短平台不会因长度短被删除。");
 
     // 按平台边界重定拐点（②③④拟合方案通用）：波纹拐点全在"平台↔坡"交界。检测平的段(平台)，把拐点归位到平台两端。
     m_pPlatformSnapCheck = new QCheckBox("按平台边界重定拐点");
@@ -981,76 +1008,78 @@ void LaserWeldFilterDialog::BuildUi()
     // 滤波拟合方案置顶，方便切换；去噪/分段参数随后，再到拟合参数；采样主轴在方法组。
     paramLayout->addWidget(new QLabel("滤波拟合方案"), 0, 0);
     paramLayout->addWidget(m_pFeaturePointStrategyCombo, 0, 1, 1, 3);
-    paramLayout->addWidget(new QLabel("下层 Z 阈值"), 1, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pZThresholdSpin, "mm"), 1, 1);
-    paramLayout->addWidget(new QLabel("Z突变阈值"), 1, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pZJumpThresholdSpin, "mm"), 1, 3);
-    paramLayout->addWidget(new QLabel("Z连续阈值"), 2, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pZContinuityThresholdSpin, "mm"), 2, 1);
-    paramLayout->addWidget(new QLabel("段间跳变阈值"), 2, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pSegmentBreakDistanceSpin, "mm"), 2, 3);
-    paramLayout->addWidget(new QLabel("输出步长"), 3, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pStepSpin, "mm"), 3, 1);
-    paramLayout->addWidget(new QLabel("搜索窗口"), 3, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pWindowSpin, "mm"), 3, 3);
-    paramLayout->addWidget(new QLabel("分段拟合容差"), 4, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pPiecewiseToleranceSpin, "mm"), 4, 3);
-    paramLayout->addWidget(new QLabel("每段最少点数"), 5, 0);
-    paramLayout->addWidget(m_pPiecewiseMinSegmentSpin, 5, 1);
-    paramLayout->addWidget(new QLabel("最小点数"), 5, 2);
-    paramLayout->addWidget(m_pMinPointSpin, 5, 3);
-    paramLayout->addWidget(new QLabel("平滑半径"), 6, 0);
-    paramLayout->addWidget(m_pSmoothRadiusSpin, 6, 1);
-    paramLayout->addWidget(m_pKeepLongestSegmentCheck, 6, 2, 1, 2);
-    paramLayout->addWidget(m_pSlopeConsistentCornerFitCheck, 7, 1, 1, 3);
-    paramLayout->addWidget(m_pExportFitDebugCloudCheck, 8, 0, 1, 4);
-    paramLayout->addWidget(m_pExportWorkpieceFrameDebugCheck, 9, 0, 1, 4);
-    paramLayout->addWidget(new QLabel("拐点转角阈值"), 10, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthTurnThresholdSpin, "deg"), 10, 1);
-    paramLayout->addWidget(new QLabel("拐点NMS弧长"), 10, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthNmsSpanSpin, "mm"), 10, 3);
-    paramLayout->addWidget(new QLabel("拐点拟合窗口"), 11, 0);
-    paramLayout->addWidget(m_pAzimuthHeadingWindowSpin, 11, 1);
-    paramLayout->addWidget(new QLabel("直线化残差"), 11, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthStraightenResidualSpin, "mm"), 11, 3);
-    paramLayout->addWidget(m_pCornerRefineEnableCheck, 12, 0, 1, 4);
-    paramLayout->addWidget(new QLabel("端区细化地板"), 13, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthRefineFloorSpin, "mm"), 13, 1);
-    paramLayout->addWidget(new QLabel("单侧弓出门"), 13, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pCornerRefineOneSidedSpin, "%"), 13, 3);
-    paramLayout->addWidget(new QLabel("中段地板倍数"), 14, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pCornerRefineMidMultipleSpin, "x"), 14, 1);
-    paramLayout->addWidget(new QLabel("端区占比"), 14, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pCornerRefineEndFracSpin, "%"), 14, 3);
-    paramLayout->addWidget(m_pCornerPatternRefitCheck, 15, 0, 1, 4);
-    paramLayout->addWidget(new QLabel("平台最小段点数"), 16, 0);
-    paramLayout->addWidget(m_pCornerPlatformMinSegSpin, 16, 1);
-    paramLayout->addWidget(m_pLapSplitCheck, 17, 0, 1, 4);
-    paramLayout->addWidget(new QLabel("错位台阶高门"), 18, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepHeightSpin, "mm"), 18, 1);
-    paramLayout->addWidget(new QLabel("拟合窗口长度"), 18, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepStationSpin, "mm"), 18, 3);
-    paramLayout->addWidget(new QLabel("平台残差上限"), 19, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepFlatnessSpin, "mm"), 19, 1);
-    paramLayout->addWidget(new QLabel("平台斜率上限"), 19, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pLapStepSlopeSpin, "mm/mm"), 19, 3);
-    paramLayout->addWidget(m_pSdkBasePresmoothCheck, 20, 0, 1, 4);
-    paramLayout->addWidget(new QLabel("预平滑窗口"), 21, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pSdkBasePresmoothWindowSpin, "mm"), 21, 1);
-    paramLayout->addWidget(new QLabel("预平滑保边阈值"), 21, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pSdkBasePresmoothEdgeSpin, "mm"), 21, 3);
-    paramLayout->addWidget(m_pEdgeTruncateCheck, 22, 0, 1, 4);
-    paramLayout->addWidget(new QLabel("开头截断"), 23, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pTruncateHeadSpin, "mm"), 23, 1);
-    paramLayout->addWidget(new QLabel("结尾截断"), 23, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pTruncateTailSpin, "mm"), 23, 3);
-    paramLayout->addWidget(m_pEndPeriodRecoverCheck, 24, 0, 1, 4);
-    paramLayout->addWidget(new QLabel("判漏阈值(段长/周期)"), 25, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodRatioSpin, "x"), 25, 1);
-    paramLayout->addWidget(new QLabel("补点最小弯折角"), 25, 2);
-    paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodMinBendSpin, "deg"), 25, 3);
-    paramLayout->addWidget(new QLabel("删错长度(同类段中位)"), 26, 0);
-    paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodMergeSpin, "x"), 26, 1);
+    paramLayout->addWidget(new QLabel("Z突变阈值"), 1, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pZJumpThresholdSpin, "mm"), 1, 1);
+    paramLayout->addWidget(new QLabel("Z连续阈值"), 1, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pZContinuityThresholdSpin, "mm"), 1, 3);
+    paramLayout->addWidget(new QLabel("短同类段粗清理距离"), 2, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pSegmentBreakDistanceSpin, "mm"), 2, 1);
+    paramLayout->addWidget(new QLabel("输出步长"), 2, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pStepSpin, "mm"), 2, 3);
+    paramLayout->addWidget(new QLabel("搜索窗口"), 3, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pWindowSpin, "mm"), 3, 1);
+    paramLayout->addWidget(new QLabel("分段拟合容差"), 3, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pPiecewiseToleranceSpin, "mm"), 3, 3);
+    paramLayout->addWidget(new QLabel("每段最少点数"), 4, 0);
+    paramLayout->addWidget(m_pPiecewiseMinSegmentSpin, 4, 1);
+    paramLayout->addWidget(new QLabel("最小点数"), 4, 2);
+    paramLayout->addWidget(m_pMinPointSpin, 4, 3);
+    paramLayout->addWidget(new QLabel("平滑半径"), 5, 0);
+    paramLayout->addWidget(m_pSmoothRadiusSpin, 5, 1);
+    paramLayout->addWidget(m_pSlopeConsistentCornerFitCheck, 5, 2, 1, 2);
+    paramLayout->addWidget(m_pExportFitDebugCloudCheck, 6, 0, 1, 4);
+    paramLayout->addWidget(m_pExportWorkpieceFrameDebugCheck, 7, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("拐点转角阈值"), 8, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthTurnThresholdSpin, "deg"), 8, 1);
+    paramLayout->addWidget(new QLabel("拐点NMS弧长"), 8, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthNmsSpanSpin, "mm"), 8, 3);
+    paramLayout->addWidget(new QLabel("拐点拟合窗口"), 9, 0);
+    paramLayout->addWidget(m_pAzimuthHeadingWindowSpin, 9, 1);
+    paramLayout->addWidget(new QLabel("直线化残差"), 9, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthStraightenResidualSpin, "mm"), 9, 3);
+    paramLayout->addWidget(m_pCornerRefineEnableCheck, 10, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("端区细化地板"), 11, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pAzimuthRefineFloorSpin, "mm"), 11, 1);
+    paramLayout->addWidget(new QLabel("单侧弓出门"), 11, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pCornerRefineOneSidedSpin, "%"), 11, 3);
+    paramLayout->addWidget(new QLabel("中段地板倍数"), 12, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pCornerRefineMidMultipleSpin, "x"), 12, 1);
+    paramLayout->addWidget(new QLabel("端区占比"), 12, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pCornerRefineEndFracSpin, "%"), 12, 3);
+    paramLayout->addWidget(m_pCornerPatternRefitCheck, 13, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("平台最小段点数"), 14, 0);
+    paramLayout->addWidget(m_pCornerPlatformMinSegSpin, 14, 1);
+    paramLayout->addWidget(m_pLapSplitCheck, 15, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("错位台阶高门"), 16, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepHeightSpin, "mm"), 16, 1);
+    paramLayout->addWidget(new QLabel("拟合窗口长度"), 16, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepStationSpin, "mm"), 16, 3);
+    paramLayout->addWidget(new QLabel("平台残差上限"), 17, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepFlatnessSpin, "mm"), 17, 1);
+    paramLayout->addWidget(new QLabel("平台斜率上限"), 17, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pLapStepSlopeSpin, "mm/mm"), 17, 3);
+    paramLayout->addWidget(m_pSdkBasePresmoothCheck, 18, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("预平滑窗口"), 19, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pSdkBasePresmoothWindowSpin, "mm"), 19, 1);
+    paramLayout->addWidget(new QLabel("预平滑保边阈值"), 19, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pSdkBasePresmoothEdgeSpin, "mm"), 19, 3);
+    paramLayout->addWidget(m_pEdgeTruncateCheck, 20, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("开头截断"), 21, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pTruncateHeadSpin, "mm"), 21, 1);
+    paramLayout->addWidget(new QLabel("结尾截断"), 21, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pTruncateTailSpin, "mm"), 21, 3);
+    paramLayout->addWidget(m_pEndPeriodRecoverCheck, 22, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("判漏阈值(段长/周期)"), 23, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodRatioSpin, "x"), 23, 1);
+    paramLayout->addWidget(new QLabel("补点最小弯折角"), 23, 2);
+    paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodMinBendSpin, "deg"), 23, 3);
+    paramLayout->addWidget(m_pSameTypeShortMergeCheck, 24, 0, 1, 4);
+    paramLayout->addWidget(new QLabel("短段阈值(/同类中位)"), 25, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pEndPeriodMergeSpin, "x"), 25, 1);
+    paramLayout->addWidget(new QLabel("每类最少参考段"), 25, 2);
+    paramLayout->addWidget(m_pSameTypeMinReferenceSpin, 25, 3);
+    paramLayout->addWidget(new QLabel("坡/平台斜率分界"), 26, 0);
+    paramLayout->addWidget(CreateUnitEditor(m_pSameTypeFlatSlopeSpin, ""), 26, 1);
     paramLayout->addWidget(m_pPlatformSnapCheck, 27, 0, 1, 4);
     paramLayout->addWidget(new QLabel("平台判定斜率上限"), 28, 0);
     paramLayout->addWidget(CreateUnitEditor(m_pPlatformSnapFlatSlopeSpin, ""), 28, 1);
@@ -1232,7 +1261,11 @@ void LaserWeldFilterDialog::BuildUi()
             AppendLog(message);
             QMessageBox::information(this, "精测点云处理", message);
         });
-    connect(m_pFeaturePointStrategyCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { SaveSettings(); });
+    connect(m_pFeaturePointStrategyCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int)
+        {
+            ApplyMethodEnableState();
+            SaveSettings();
+        });
     connect(m_pSlopeConsistentCornerFitCheck, &QCheckBox::toggled, this, [this](bool) { SaveSettings(); });
     connect(m_pExportFitDebugCloudCheck, &QCheckBox::toggled, this, [this](bool) { SaveSettings(); });
     connect(m_pExportWorkpieceFrameDebugCheck, &QCheckBox::toggled, this, [this](bool) { SaveSettings(); });
@@ -1244,6 +1277,26 @@ void LaserWeldFilterDialog::BuildUi()
             SaveSettings();
         });
     connect(m_pAxisCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { SaveSettings(); });
+    const auto refreshParameterEnableState = [this](bool)
+    {
+        ApplyMethodEnableState();
+    };
+    for (QCheckBox* check : {
+        m_pCornerRefineEnableCheck,
+        m_pCornerPatternRefitCheck,
+        m_pLapSplitCheck,
+        m_pSdkBasePresmoothCheck,
+        m_pEdgeTruncateCheck,
+        m_pEndPeriodRecoverCheck,
+        m_pSameTypeShortMergeCheck,
+        m_pPlatformSnapCheck })
+    {
+        connect(check, &QCheckBox::toggled, this, refreshParameterEnableState);
+    }
+    connect(m_pProjTransverseWindowSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this, [this](double) { ApplyMethodEnableState(); });
+    connect(m_pProjZBandAboveSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+        this, [this](double) { ApplyMethodEnableState(); });
 
     ApplyResponsivePageDefaults(this);
 }
@@ -1257,6 +1310,21 @@ void LaserWeldFilterDialog::ApplyMethodEnableState()
     const bool usesFitChain = mode != PointCloudProcessingConfig::Mode::ExternalCorrugatedSheet;
     // 点云投影提取（完整点云→下层轨迹）仅方法③使用。
     const bool usesProjection = mode == PointCloudProcessingConfig::Mode::CloudFit;
+    const bool usesSdkBaseFit = mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
+    const bool usesProgramDenoise = mode == PointCloudProcessingConfig::Mode::CloudFit
+        || mode == PointCloudProcessingConfig::Mode::LegacyLaserPath;
+    const PointCloudProcessingConfig::FeaturePointStrategy strategy = CurrentFeaturePointStrategy();
+    const bool usesSlopeWaveFilter =
+        strategy == PointCloudProcessingConfig::FeaturePointStrategy::SlopeWaveFiltered;
+    const bool usesRobustSegmentedKeys =
+        strategy == PointCloudProcessingConfig::FeaturePointStrategy::RobustSegmentedKeys;
+    const auto setEnabled = [](QWidget* widget, bool enabled)
+    {
+        if (widget != nullptr)
+        {
+            widget->setEnabled(enabled);
+        }
+    };
 
     if (m_pSdkParamGroup != nullptr)
     {
@@ -1270,6 +1338,92 @@ void LaserWeldFilterDialog::ApplyMethodEnableState()
     {
         m_pProjectionGroup->setEnabled(usesProjection);
     }
+
+    // 只改变可编辑状态，不改值、不改勾选；SaveSettings 仍保存所有控件的原状态。
+    setEnabled(m_pFeaturePointStrategyCombo, usesFitChain);
+    setEnabled(m_pZJumpThresholdSpin,
+        usesProjection && m_pProjZBandAboveSpin != nullptr && m_pProjZBandAboveSpin->value() <= 0.0);
+    setEnabled(m_pZContinuityThresholdSpin, usesProgramDenoise);
+    setEnabled(m_pSegmentBreakDistanceSpin, usesProgramDenoise);
+    setEnabled(m_pStepSpin, usesFitChain);
+    setEnabled(m_pWindowSpin,
+        usesProjection && m_pProjTransverseWindowSpin != nullptr && m_pProjTransverseWindowSpin->value() <= 0.0);
+    const bool usesPiecewiseControls = usesProgramDenoise || (usesSdkBaseFit && usesSlopeWaveFilter);
+    setEnabled(m_pPiecewiseToleranceSpin, usesPiecewiseControls);
+    setEnabled(m_pPiecewiseMinSegmentSpin,
+        (usesProgramDenoise && (usesSlopeWaveFilter || usesRobustSegmentedKeys))
+        || (usesSdkBaseFit && usesSlopeWaveFilter));
+    setEnabled(m_pMinPointSpin, usesFitChain);
+    setEnabled(m_pSmoothRadiusSpin, usesPiecewiseControls);
+
+    for (QWidget* widget : {
+        static_cast<QWidget*>(m_pAzimuthTurnThresholdSpin),
+        static_cast<QWidget*>(m_pAzimuthHeadingWindowSpin),
+        static_cast<QWidget*>(m_pAzimuthNmsSpanSpin),
+        static_cast<QWidget*>(m_pAzimuthStraightenResidualSpin) })
+    {
+        setEnabled(widget, usesSdkBaseFit);
+    }
+
+    setEnabled(m_pCornerRefineEnableCheck, usesFitChain);
+    const bool cornerRefineEnabled =
+        usesFitChain && m_pCornerRefineEnableCheck != nullptr && m_pCornerRefineEnableCheck->isChecked();
+    for (QWidget* widget : {
+        static_cast<QWidget*>(m_pAzimuthRefineFloorSpin),
+        static_cast<QWidget*>(m_pCornerRefineOneSidedSpin),
+        static_cast<QWidget*>(m_pCornerRefineMidMultipleSpin),
+        static_cast<QWidget*>(m_pCornerRefineEndFracSpin) })
+    {
+        setEnabled(widget, cornerRefineEnabled);
+    }
+
+    setEnabled(m_pCornerPatternRefitCheck, usesFitChain);
+    setEnabled(m_pCornerPlatformMinSegSpin,
+        usesFitChain && m_pCornerPatternRefitCheck != nullptr && m_pCornerPatternRefitCheck->isChecked());
+
+    setEnabled(m_pLapSplitCheck, usesFitChain);
+    const bool lapSplitEnabled = usesFitChain && m_pLapSplitCheck != nullptr && m_pLapSplitCheck->isChecked();
+    for (QWidget* widget : {
+        static_cast<QWidget*>(m_pLapStepHeightSpin),
+        static_cast<QWidget*>(m_pLapStepStationSpin),
+        static_cast<QWidget*>(m_pLapStepFlatnessSpin),
+        static_cast<QWidget*>(m_pLapStepSlopeSpin) })
+    {
+        setEnabled(widget, lapSplitEnabled);
+    }
+
+    setEnabled(m_pSdkBasePresmoothCheck, usesSdkBaseFit);
+    const bool sdkPresmoothEnabled =
+        usesSdkBaseFit && m_pSdkBasePresmoothCheck != nullptr && m_pSdkBasePresmoothCheck->isChecked();
+    setEnabled(m_pSdkBasePresmoothWindowSpin, sdkPresmoothEnabled);
+    setEnabled(m_pSdkBasePresmoothEdgeSpin, sdkPresmoothEnabled);
+
+    setEnabled(m_pEdgeTruncateCheck, usesFitChain);
+    const bool edgeTruncateEnabled =
+        usesFitChain && m_pEdgeTruncateCheck != nullptr && m_pEdgeTruncateCheck->isChecked();
+    setEnabled(m_pTruncateHeadSpin, edgeTruncateEnabled);
+    setEnabled(m_pTruncateTailSpin, edgeTruncateEnabled);
+
+    setEnabled(m_pEndPeriodRecoverCheck, usesFitChain);
+    const bool endRecoverEnabled =
+        usesFitChain && m_pEndPeriodRecoverCheck != nullptr && m_pEndPeriodRecoverCheck->isChecked();
+    setEnabled(m_pEndPeriodRatioSpin, endRecoverEnabled);
+    setEnabled(m_pEndPeriodMinBendSpin, endRecoverEnabled);
+
+    setEnabled(m_pSameTypeShortMergeCheck, usesFitChain);
+    const bool sameTypeMergeEnabled =
+        usesFitChain && m_pSameTypeShortMergeCheck != nullptr && m_pSameTypeShortMergeCheck->isChecked();
+    setEnabled(m_pEndPeriodMergeSpin, sameTypeMergeEnabled);
+    setEnabled(m_pSameTypeMinReferenceSpin, sameTypeMergeEnabled);
+    setEnabled(m_pSameTypeFlatSlopeSpin, sameTypeMergeEnabled);
+
+    setEnabled(m_pPlatformSnapCheck, usesFitChain);
+    const bool platformSnapEnabled =
+        usesFitChain && m_pPlatformSnapCheck != nullptr && m_pPlatformSnapCheck->isChecked();
+    setEnabled(m_pPlatformSnapFlatSlopeSpin, platformSnapEnabled);
+    setEnabled(m_pPlatformSnapMinFracSpin, platformSnapEnabled);
+    setEnabled(m_pSlopeConsistentCornerFitCheck, usesFitChain);
+    setEnabled(m_pExportFitDebugCloudCheck, usesFitChain);
     if (m_pAlgorithmTabWidget != nullptr)
     {
         // 点云参数页：SDK 组（①②）+ 投影提取组（③），按组禁用；④整页禁用。
@@ -1420,7 +1574,10 @@ void LaserWeldFilterDialog::LoadSettings()
     m_pEndPeriodRecoverCheck->setChecked(processingSettings.fitEndPeriodRecoverEnable);
     m_pEndPeriodRatioSpin->setValue(processingSettings.fitEndPeriodRatioThreshold);
     m_pEndPeriodMinBendSpin->setValue(processingSettings.fitEndPeriodMinBendDeg);
+    m_pSameTypeShortMergeCheck->setChecked(processingSettings.fitSameTypeShortMergeEnable);
     m_pEndPeriodMergeSpin->setValue(processingSettings.fitEndPeriodMergeFrac);
+    m_pSameTypeMinReferenceSpin->setValue(processingSettings.fitSameTypeMinReferenceSegments);
+    m_pSameTypeFlatSlopeSpin->setValue(processingSettings.fitSameTypeFlatSlope);
     m_pPlatformSnapCheck->setChecked(processingSettings.fitPlatformSnapEnable);
     m_pPlatformSnapFlatSlopeSpin->setValue(processingSettings.fitPlatformSnapFlatSlope);
     m_pPlatformSnapMinFracSpin->setValue(processingSettings.fitPlatformSnapMinFrac);
@@ -1503,7 +1660,10 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
     processingSettings.fitEndPeriodRecoverEnable = m_pEndPeriodRecoverCheck->isChecked();
     processingSettings.fitEndPeriodRatioThreshold = m_pEndPeriodRatioSpin->value();
     processingSettings.fitEndPeriodMinBendDeg = m_pEndPeriodMinBendSpin->value();
+    processingSettings.fitSameTypeShortMergeEnable = m_pSameTypeShortMergeCheck->isChecked();
     processingSettings.fitEndPeriodMergeFrac = m_pEndPeriodMergeSpin->value();
+    processingSettings.fitSameTypeMinReferenceSegments = m_pSameTypeMinReferenceSpin->value();
+    processingSettings.fitSameTypeFlatSlope = m_pSameTypeFlatSlopeSpin->value();
     processingSettings.fitPlatformSnapEnable = m_pPlatformSnapCheck->isChecked();
     processingSettings.fitPlatformSnapFlatSlope = m_pPlatformSnapFlatSlopeSpin->value();
     processingSettings.fitPlatformSnapMinFrac = m_pPlatformSnapMinFracSpin->value();
