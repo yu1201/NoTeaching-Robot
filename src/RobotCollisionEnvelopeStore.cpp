@@ -858,6 +858,38 @@ bool RobotCollisionEnvelopeStore::Persist(
     return true;
 }
 
+bool RobotCollisionEnvelopeStore::ImportFile(
+    const QString& sourcePath,
+    StoredAsset& asset,
+    EnvelopeSet& envelope,
+    QString& error)
+{
+    asset = StoredAsset();
+    envelope = EnvelopeSet();
+    error.clear();
+    QByteArray bytes;
+    EnvelopeSet parsed;
+    if (!ReadStableSmallFile(sourcePath, bytes, error)
+        || !ParseDocument(bytes, parsed, error))
+    {
+        return false;
+    }
+    StoredAsset persisted;
+    if (!Persist(parsed, persisted, error))
+    {
+        return false;
+    }
+    EnvelopeSet verified;
+    if (!LoadAsset(persisted, verified, error)
+        || verified.payloadSha256 != parsed.payloadSha256)
+    {
+        return false;
+    }
+    asset = persisted;
+    envelope = verified;
+    return true;
+}
+
 bool RobotCollisionEnvelopeStore::Load(
     const QString& sourceStepSha256,
     const GenerationParameters& parameters,

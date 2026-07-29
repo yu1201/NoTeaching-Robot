@@ -116,6 +116,9 @@ private:
     QString CurrentSeamParamPath() const;
     int CurrentRowCount() const;
     int CurrentTypeIndex() const;
+    QString CurrentPoseSegmentTitle() const;
+    void RefreshSelectedCompHint(
+        const MeasureThenWeldService::CompPreviewStages* stages = nullptr);
 
     // 补偿前 / 补偿后 焊道可视化对比
     QWidget* CreateCompPreviewPanel();
@@ -131,8 +134,10 @@ private:
     void AutoSelectLatestCompPreviewDirectory();
     void ScheduleCompPreview();
     void RecomputeCompPreview();
-    // 由 stages 构建六阶段图层并刷新 3D 视图/箭头/信息（编辑实时预览与异步载入共用的"显示"部分）。
-    void ApplyComputedStages(const MeasureThenWeldService::CompPreviewStages& stages);
+    // 由 stages 构建六阶段图层并刷新 3D 视图/箭头/信息；实时编辑保留相机，首次载入自动适配。
+    void ApplyComputedStages(
+        const MeasureThenWeldService::CompPreviewStages& stages,
+        bool preserveView);
     // 打开/切换目录时后台载入补偿预览：可选重算基准焊道 → 读焊道数据 → 算补偿，进度条+不阻塞 UI。
     struct CompPreviewLoadResult
     {
@@ -169,6 +174,7 @@ private:
     QPushButton* m_pDeleteGroupBtn = nullptr;
     QLabel* m_pPathLabel = nullptr;
     QLabel* m_pHintLabel = nullptr;
+    QLabel* m_pSelectedCompHintLabel = nullptr;
     QWidget* m_pPoseDisplayWidget = nullptr;
     QLabel* m_pPoseMatchModeLabel = nullptr;
     QComboBox* m_pPoseMatchModeCombo = nullptr;
@@ -212,15 +218,18 @@ private:
     QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewOriginal;
     QVector<MeasureThenWeldService::CompPreviewPoint> m_compPreviewRaw;
     QVector<MeasureThenWeldService::CompPreviewArrow> m_compPreviewArrows;  // 全量箭头缓存，按开关过滤显示
+    QVector<int> m_compPreviewHighlightLayerStages; // 第 6 层起的同属性高亮层分别跟随哪个阶段开关
     QVector<PoseCompRow> m_savedPoseRows;   // 加载/保存后的姿态补偿快照（姿态补偿阶段按 delta 计算）
     QString m_compPreviewDir;
     QString m_compPreviewBaselineDir;
     // 焊接方向（工艺值优先、测量页旧值回退，1=起点到终点 / -1=终点到起点），用于预览方向箭头。
     int m_compPreviewWeldDirection = 1;
-    // 扫描轨迹起止点 XY（当前启用组），方向箭头放在扫描位置那一侧（与焊接方向无关）。
+    // 扫描轨迹起止点 XY：优先使用所选结果目录当次保存的机器人轨迹，缺失时才回退当前启用组。
+    // 焊接方向箭头放在机器人扫描位置那一侧（与焊接方向正反无关）。
     bool m_compPreviewScanLineValid = false;
     QPointF m_compPreviewScanStartXY;
     QPointF m_compPreviewScanEndXY;
+    QString m_compPreviewScanLineSource;
     // 防止"载入目录→缺方法文件→自动重算→重新载入"递归。
     bool m_bAutoRebuildingCompPreview = false;
     // 后台异步载入补偿预览：进度框 + 可取消、可 join 的所有权线程。

@@ -11,6 +11,7 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVICE_PATH = ROOT / "src" / "MeasureThenWeldService.cpp"
+DIALOG_PATH = ROOT / "src" / "WeldSeamCompDialog.cpp"
 
 
 def require(value: bool, message: str) -> None:
@@ -84,9 +85,59 @@ def verify_numeric_contract() -> None:
         "fixed segment reference pose does not preserve a straight line",
     )
 
+    # Old junction ownership used the shifted slope Z and then redrew the entire
+    # platform to that point. A slope-only edit therefore tilted platform points.
+    platform_points = [(0.0, 0.0, 0.0), (5.0, 0.0, 0.0), (10.0, 0.0, 0.0)]
+    shifted_slope_owned_junction = (12.0, 0.0, 1.0)
+    old_redrawn_midpoint = tuple(
+        platform_points[0][axis]
+        + (
+            shifted_slope_owned_junction[axis] - platform_points[0][axis]
+        )
+        * (5.0 / 12.0)
+        for axis in range(3)
+    )
+    require(
+        abs(old_redrawn_midpoint[2] - platform_points[1][2]) > 0.4,
+        "numeric fixture no longer exposes slope-to-platform junction coupling",
+    )
+    platform_owned_junction = (12.0, 0.0, 0.0)
+    require(
+        platform_owned_junction[2] == platform_points[-1][2]
+        and platform_points[1] == (5.0, 0.0, 0.0),
+        "platform-owned extension must retain rigidly translated platform points",
+    )
+
+    # For every physical segment, local Y must be the seam normal rather than
+    # the clamped welding-pose Y axis. The 20260728_014 slopes exposed the old
+    # vectors as almost opposite to their seam tangents.
+    slope_fixtures = (
+        ((-0.688, 0.726), (0.726, 0.688), (0.368, -0.929)),
+        ((0.727, 0.687), (0.687, -0.727), (-0.585, -0.805)),
+    )
+    for tangent, weld_normal, old_tool_negative_y in slope_fixtures:
+        seam_negative_y = (-weld_normal[0], -weld_normal[1])
+        seam_dot = sum(
+            seam_negative_y[axis] * tangent[axis]
+            for axis in range(2)
+        )
+        old_dot = sum(
+            old_tool_negative_y[axis] * tangent[axis]
+            for axis in range(2)
+        )
+        require(
+            abs(seam_dot) <= 1e-3,
+            "seam-local Y compensation is not perpendicular to the slope",
+        )
+        require(
+            abs(old_dot) > 0.9,
+            "numeric fixture no longer exposes slope tool-Y/tangent coupling",
+        )
+
 
 def verify_source_contract() -> None:
     source = SERVICE_PATH.read_text(encoding="utf-8", errors="strict")
+    dialog_source = DIALOG_PATH.read_text(encoding="utf-8", errors="strict")
     build_pose = function_body(source, "std::vector<QString> BuildSegmentPoseOutputLines(")
     junctions = function_body(
         source,
@@ -95,6 +146,34 @@ def verify_source_contract() -> None:
     straighten = function_body(
         source,
         "int StraightenPoseCompPhysicalSegments(",
+    )
+    build_junction = function_body(
+        source,
+        "WeldPoseFileRecord BuildPoseCompJunctionRecord(",
+    )
+    apply_junction = function_body(
+        source,
+        "bool TryApplyPoseCompJunctionIntersection(",
+    )
+    intersect_lines = function_body(
+        source,
+        "bool TryIntersectWeldPoseLines2D(",
+    )
+    resolve_world = function_body(
+        source,
+        "Eigen::Vector3d ResolvePoseCompWorldVector(",
+    )
+    recompute_preview = function_body(
+        dialog_source,
+        "void WeldSeamCompDialog::RecomputeCompPreview(",
+    )
+    apply_preview = function_body(
+        dialog_source,
+        "void WeldSeamCompDialog::ApplyComputedStages(",
+    )
+    preview_loaded = function_body(
+        dialog_source,
+        "void WeldSeamCompDialog::OnCompPreviewLoaded(",
     )
     finalize = function_body(
         source,
@@ -152,8 +231,79 @@ def verify_source_contract() -> None:
     )
     require(
         "startPoint + (endPoint - startPoint) * ratio" in straighten
-        and "containsLapStep" in straighten,
-        "physical-segment straightening is missing its 3D chord or lap-step guard",
+        and "containsLapStep" in straighten
+        and "IsPlatformSegmentKind(range.kind)" in straighten,
+        "slope straightening lacks its 3D chord, lap-step guard, or platform exclusion",
+    )
+    require(
+        "firstRatio = Cross2D(delta, secondDirection) / denominator" in intersect_lines
+        and "std::clamp" not in intersect_lines,
+        "pose-compensation junction is no longer calculated from infinite lines",
+    )
+    require(
+        "const PoseCompSegmentRange& elevationRange" in build_junction
+        and "elevationBegin.point.z()" in build_junction
+        and "IsPlatformSegmentKind(leftRange.kind)" in apply_junction,
+        "junction elevation is not anchored to the unchanged platform segment",
+    )
+    require(
+        "ResolvePoseCompSegmentWeldNormals" in source
+        and "ResolvePoseCompPlatformWeldNormals" not in source
+        and "IsPlatformSegmentKind(range.kind) || IsSlopeSegmentKind(range.kind)" in source,
+        "preview does not derive seam normals for all four physical segment types",
+    )
+    require(
+        "IsPlatformSegmentKind(normalizedKind) || IsSlopeSegmentKind(normalizedKind)"
+        in resolve_world
+        and "stableTangent * slot.compX" in resolve_world
+        and "weldNormal * slot.compY" in resolve_world
+        and "Eigen::Vector3d::UnitZ() * slot.compZ" in resolve_world,
+        "physical pose compensation is not mapped through the seam-local XYZ basis",
+    )
+    require(
+        "segment.poseCompWeldNormal" in build_pose
+        and "pendingLapStepPoseCompWeldNormal" in build_pose,
+        "production output or lap-step handling lost its fixed seam-normal reference",
+    )
+    require(
+        all(
+            label in dialog_source
+            for label in (
+                "焊道切向补偿(mm)：",
+                "焊道法向补偿(mm)：",
+                "世界Z补偿(mm)：",
+            )
+        )
+        and "工具X补偿(mm)：" not in dialog_source
+        and "工具Y补偿(mm)：" not in dialog_source
+        and "工具Z补偿(mm)：" not in dialog_source
+        and "坡面工具系补偿" not in dialog_source,
+        "pose-compensation field names still expose the obsolete slope tool frame",
+    )
+    require(
+        "ApplyComputedStages(stages, true)" in recompute_preview
+        and "if (preserveView)" in apply_preview
+        and "SetLayersPreserveView(layers)" in apply_preview,
+        "live compensation preview refresh no longer preserves the current camera",
+    )
+    require(
+        "ApplyComputedStages(result.stages, false)" in preview_loaded
+        and "SetLayers(layers)" in apply_preview,
+        "initial preview load no longer performs its one-time view fit",
+    )
+    require(
+        "Eigen::Vector3d::UnitZ() * currentEdits.weldZComp" in pose_preview
+        and "gunDir * currentEdits.weldGunDirComp" in pose_preview
+        and "seamDir * currentEdits.weldSeamDirComp" in pose_preview
+        and 'QStringLiteral("当前焊道补偿方向")' in pose_preview,
+        "seam preview no longer exposes the production-equivalent combined direction",
+    )
+    require(
+        "当前焊道补偿：整条焊道" in dialog_source
+        and "showSeamHighlight" in apply_preview
+        and "wholeTrack || NormalizePreviewSegmentKind" in apply_preview
+        and "图中单箭头为实际焊道补偿方向" in apply_preview,
+        "seam mode no longer mirrors the pose-mode hint, highlight, and direction display",
     )
     require(
         "ApplyCornerArcTransitionToWeldPoseRecords" in finalize,

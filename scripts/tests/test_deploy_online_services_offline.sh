@@ -344,6 +344,18 @@ grep -Fq 'SSH_PORT=48890' "$DEPLOY_SCRIPT" || fail "默认 SSH 端口漂移"
 grep -Fq 'local_umask"]="002"' "$DEPLOY_SCRIPT" || fail "ftpdata 共享 umask 漂移"
 grep -Fq 'ensure_directory "$FTP_DATA" root devicedata 2771' "$DEPLOY_SCRIPT" ||
     fail "数据根目录 traverse-only/devicedata 私有组门禁漂移"
+grep -Fq 'readonly FTP_ROBOT_MODEL_ROOT="$(target_path /srv/devicedata/模型文件/机器人模型文件)"' "$DEPLOY_SCRIPT" ||
+    fail "机器人模型独立目录常量缺失"
+for model_dir in \
+    FTP_MODEL_ROOT \
+    FTP_ROBOT_MODEL_ROOT \
+    FTP_ROBOT_MODEL_ASSETS \
+    FTP_ROBOT_MODEL_COLLISION \
+    FTP_ROBOT_MODEL_PREVIEWS \
+    FTP_ROBOT_MODEL_CATALOG; do
+    grep -Fq "ensure_directory \"\$$model_dir\" root devicedata 2770" "$DEPLOY_SCRIPT" ||
+        fail "机器人模型目录权限门禁缺失: $model_dir"
+done
 grep -Fq 'local_root 必须保持 root-owned /srv/devicedata chroot' "$DEPLOY_SCRIPT" ||
     fail "root-owned chroot 门禁缺失"
 if grep -Eq 'rm[[:space:]]+-f[[:space:]]+/etc/nginx/sites-enabled/default' "$DEPLOY_SCRIPT"; then

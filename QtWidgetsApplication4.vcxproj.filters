@@ -80,6 +80,12 @@
     <ClCompile Include="src\RobotModelManagerDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\RobotModelRemoteCatalog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotModelOriginalPreview.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\TheoreticalRobotModelStore.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -283,6 +289,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotModelManagerDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotModelRemoteCatalog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotModelOriginalPreview.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\StepModelImporter.h">
