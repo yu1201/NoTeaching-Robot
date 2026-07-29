@@ -310,6 +310,12 @@ readonly OTA_ADMIN_UNIT="$(target_path /etc/systemd/system/ota-admin.service)"
 readonly CLEANUP_CRON="$(target_path /etc/cron.daily/clean-devicedata)"
 readonly FTP_ROOT="$(target_path /srv/devicedata)"
 readonly FTP_DATA="$(target_path /srv/devicedata/data)"
+readonly FTP_MODEL_ROOT="$(target_path /srv/devicedata/模型文件)"
+readonly FTP_ROBOT_MODEL_ROOT="$(target_path /srv/devicedata/模型文件/机器人模型文件)"
+readonly FTP_ROBOT_MODEL_ASSETS="${FTP_ROBOT_MODEL_ROOT}/assets"
+readonly FTP_ROBOT_MODEL_COLLISION="${FTP_ROBOT_MODEL_ROOT}/collision"
+readonly FTP_ROBOT_MODEL_PREVIEWS="${FTP_ROBOT_MODEL_ROOT}/previews"
+readonly FTP_ROBOT_MODEL_CATALOG="${FTP_ROBOT_MODEL_ROOT}/catalog"
 readonly OTA_ROOT="$(target_path /var/www/ota)"
 readonly OFFLINE_ACCOUNT_STATE="$(target_path /var/lib/no-teaching-online-services/test-accounts)"
 readonly ACCOUNT_LOCK_DIR="/run/no-teaching-ota"
@@ -1919,6 +1925,12 @@ fi
 
 ensure_directory "$FTP_ROOT" root root 0755
 ensure_directory "$FTP_DATA" root devicedata 2771
+ensure_directory "$FTP_MODEL_ROOT" root devicedata 2770
+ensure_directory "$FTP_ROBOT_MODEL_ROOT" root devicedata 2770
+ensure_directory "$FTP_ROBOT_MODEL_ASSETS" root devicedata 2770
+ensure_directory "$FTP_ROBOT_MODEL_COLLISION" root devicedata 2770
+ensure_directory "$FTP_ROBOT_MODEL_PREVIEWS" root devicedata 2770
+ensure_directory "$FTP_ROBOT_MODEL_CATALOG" root devicedata 2770
 ensure_directory "$VSFTPD_USER_CONF_DIR" root root 0755
 ensure_directory "$OTA_ROOT" root root 0755
 ensure_directory "${OTA_ROOT}/neutral" root root 0755

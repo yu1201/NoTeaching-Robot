@@ -93,6 +93,14 @@ sudo -H /bin/bash -p /root/no-teaching-deploy/deploy_online_services.sh --apply 
 - `devicedata`：全权限；全局新文件模式为 0644，避免 `ftpdata` 组成员改写彼此文件。
 - 三个固定账号属于 `ftpdata`；`ftpoperator` 与 `uploader` 额外加入 `devicedata` 数据访问组。
   共享根 `/srv/devicedata/data` 为 2771/setgid，`local_umask=002`。
+- 机器人模型库固定为 `/srv/devicedata/模型文件/机器人模型文件`，其 `assets`、`collision`、
+  `previews`、`catalog` 子目录均为 `root:devicedata`、2770。模型资产与 `/data` 扫描案例隔离，
+  不进入 30 天案例清理；FTP 权限和全权限账号可读取并通过客户端发布内容寻址文件，上传权限账号
+  因不能读取清单而不开放模型库。
+- STEP 使用 `<sha256>.step`，简模使用 `<profileKey>.robot-aabb.json`，原始 STEP/B-Rep 缩略图使用
+  `preview-<sha256>.png`；catalog 的预览记录声明 `sourceKind=original-step-v1`，旧版未声明类型的
+  记录只按碰撞简模历史数据兼容读取、不会继续显示。catalog 是带毫秒 revision 和 payload
+  SHA-256 的不可变 JSON 文件；客户端总是读取最高 revision，同 revision 出现不同 payload 时失败关闭。
 - `/etc/vsftpd.userlist` 的既有受管账号与注释会保留；非法、重复、缺失系统身份、UID/GID 别名、
   隐藏组成员或弱权限配置都会使部署停止，不会静默继承。
 - nginx 对外只提供双通道 `latest.json`、`.exe`、`.zip`；`/admin/` 反代仅允许 loopback，且不公开

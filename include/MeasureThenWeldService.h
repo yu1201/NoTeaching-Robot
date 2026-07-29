@@ -266,7 +266,7 @@ public:
     enum class CompPreviewKind
     {
         Seam,   // 焊道补偿：Z向 / 枪反向 / 焊道方向（整段刚性平移）
-        Pose,   // 姿态补偿：compX/Y/Z 在工具系按该点姿态旋到世界后叠加
+        Pose,   // 姿态补偿：四类物理段统一使用焊道基准(X切向/Y法向/Z世界Z)
         Corner  // 拐点补偿：上升/下降边内外拐点沿切线移动
     };
 
@@ -275,7 +275,7 @@ public:
         double x = 0.0;
         double y = 0.0;
         double z = 0.0;
-        double rx = 0.0;       // 姿态补偿需要每点输出姿态做工具系旋转
+        double rx = 0.0;       // 保留输出姿态，用于按姿态匹配补偿槽和焊枪轨迹预览
         double ry = 0.0;
         double rz = 0.0;
         double bx = 0.0;       // 基坐标/外部轴（焊缝后处理保真需原样保留）
@@ -306,6 +306,7 @@ public:
         int poseMatchMode = 0;            // 0=按姿态匹配 1=按段属性
         double poseMatchMaxErrorDeg = 5.0;// 按姿态匹配时的最大角度误差
         int robotType = ROBOT_TYPE_FANUC; // 品牌旋转合成（FANUC=Rz·Ry·Rx / STEP 反序）
+        int posePreviewSegmentIndex = 0;  // UI 当前选中的姿态段；仅用于方向箭头/提示，不参与生产补偿
         // 工艺区域试调覆盖（仅预览联动，不落盘）：圆弧过渡与实际焊道点间距
         bool processOverrideValid = false;  // true=用下面三个值覆盖真实工艺
         bool arcEnabled = false;
@@ -330,7 +331,9 @@ public:
         double origin[3] = { 0.0, 0.0, 0.0 };
         double vector[3] = { 0.0, 0.0, 0.0 };  // 已含长度
         QString label;
-        // 0=Z向蓝 1=枪反向黄 2=焊道方向绿 3=工具X红 4=工具Y绿 5=工具Z蓝 6=拐点位移橙
+        // 0=Z向蓝 1=枪反向黄 2=焊道方向绿
+        // 3/4/5=当前姿态段补偿方向（切向红/法向绿/世界Z蓝）
+        // 6=拐点位移橙 7/8/9=当前焊道补偿方向（世界Z蓝/枪反向黄/焊道方向绿）
         int colorId = 0;
         bool doubleHeaded = true;
     };
@@ -389,14 +392,24 @@ public:
         QVector<CompPreviewPoint> seamComp;   // 焊道补偿后（纯补偿平移）
         QVector<CompPreviewPoint> arc;        // 圆弧过渡后（完整后处理，2mm 稠密执行文件）
         QVector<CompPreviewPoint> actual;     // 实际焊道（按点间距最终抽样 = 机器人逐点执行的轨迹）
-        QVector<CompPreviewArrow> arrows;     // 正负方向箭头
+        QVector<CompPreviewArrow> arrows;     // 焊道坐标轴 + 当前模式的实际补偿方向
+        int selectedPoseSegmentIndex = -1;
+        QString selectedPoseSegmentKind;
+        bool selectedPoseSegmentMatched = false;
+        bool selectedPoseDirectionValid = false;
+        double selectedPoseCompLocal[3] = { 0.0, 0.0, 0.0 };
+        double selectedPoseCompWorld[3] = { 0.0, 0.0, 0.0 };
+        bool selectedSeamDirectionValid = false;
+        // 顺序：世界Z、枪反向、焊道方向。
+        double selectedSeamCompLocal[3] = { 0.0, 0.0, 0.0 };
+        double selectedSeamCompWorld[3] = { 0.0, 0.0, 0.0 };
     };
     CompPreviewStages ComputeCompPreviewStages(
         const QString& robotName,
         const QVector<CompPreviewPoint>& baseline,
         const CompPreviewEditValues& currentEdits,
         const CompPreviewEditValues& savedEdits,
-        bool includePoseArrows,
+        bool showPoseSelection,
         const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
 
 private:

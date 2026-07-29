@@ -38,6 +38,19 @@
 clean-checkout smoke；真正打包前仍必须在准备好的本地双 worktree 上运行完整 PowerShell 测试和
 pair gate，不能用 CI smoke 代替。
 
+机器人模型库协议依赖本机 Qt/Visual Studio，作为本地专项门禁运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/run_robot_collision_envelope_store_tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/run_robot_model_catalog_store_tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/run_robot_model_remote_catalog_tests.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/run_robot_model_original_preview_tests.ps1
+```
+
+远程清单测试覆盖严格 schema、排序和版本文件名、payload 篡改拒绝、新旧预览类型兼容、
+预览 PNG 生成/尺寸/SHA-256/篡改拒绝，以及模型资产稳定哈希边界。原始预览测试使用本机已登记
+机器人 STEP，完整读取 B-Rep、三角化并验证 480×320 原始机器人轮廓实际落盘。
+
 ## 本地复现
 
 ```powershell

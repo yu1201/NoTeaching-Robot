@@ -79,6 +79,73 @@ constexpr char INNER_TO_INNER_CORNER_COMP_KEY[] = "InnerToInner";
 constexpr char OUTER_TO_OUTER_CORNER_COMP_KEY[] = "OuterToOuter";
 constexpr char OUTER_TO_INNER_CORNER_COMP_KEY[] = "OuterToInner";
 
+bool TryReadResultRobotScanLine(
+    const QString& laserDir,
+    QPointF& scanStart,
+    QPointF& scanEnd,
+    QString* sourcePath = nullptr)
+{
+    QDir resultDir(laserDir);
+    if (resultDir.dirName().compare(QStringLiteral("LaserPoint"), Qt::CaseInsensitive) == 0)
+    {
+        resultDir.cdUp();
+    }
+    const QString robotPointPath =
+        resultDir.filePath(QStringLiteral("RobotPoint/PreciseRobotPoint.txt"));
+    QFile file(robotPointPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        return false;
+    }
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    bool found = false;
+    QPointF first;
+    QPointF last;
+    while (!stream.atEnd())
+    {
+        const QString line = stream.readLine().trimmed();
+        if (line.isEmpty())
+        {
+            continue;
+        }
+        const QStringList fields = line.split(',');
+        if (fields.size() < 3)
+        {
+            continue;
+        }
+        bool indexOk = false;
+        bool xOk = false;
+        bool yOk = false;
+        fields[0].trimmed().toLongLong(&indexOk);
+        const double x = fields[1].trimmed().toDouble(&xOk);
+        const double y = fields[2].trimmed().toDouble(&yOk);
+        if (!indexOk || !xOk || !yOk || !std::isfinite(x) || !std::isfinite(y))
+        {
+            continue;
+        }
+        if (!found)
+        {
+            first = QPointF(x, y);
+            found = true;
+        }
+        last = QPointF(x, y);
+    }
+    if (!found)
+    {
+        return false;
+    }
+
+    scanStart = first;
+    scanEnd = last;
+    if (sourcePath != nullptr)
+    {
+        *sourcePath = robotPointPath;
+    }
+    return true;
+}
+
 int NormalizePoseCompMatchMode(int mode)
 {
     return mode == POSE_COMP_MATCH_BY_SEGMENT_CODE
@@ -214,6 +281,21 @@ bool IsCornerCompensationSegmentKind(const QString& segmentKind)
 {
     return segmentKind.compare("rising_edge", Qt::CaseInsensitive) == 0
         || segmentKind.compare("falling_edge", Qt::CaseInsensitive) == 0;
+}
+
+QString NormalizePreviewSegmentKind(QString segmentKind)
+{
+    const QString arcSuffix = QStringLiteral("_arc");
+    if (segmentKind.endsWith(arcSuffix, Qt::CaseInsensitive))
+    {
+        segmentKind.chop(arcSuffix.size());
+    }
+    const QString transitionSuffix = QStringLiteral("_transition");
+    if (segmentKind.endsWith(transitionSuffix, Qt::CaseInsensitive))
+    {
+        segmentKind.chop(transitionSuffix.size());
+    }
+    return segmentKind.trimmed().toLower();
 }
 
 // 现代滑动式开关（iOS 风格）：自绘 QAbstractButton + QVariantAnimation 滑块动画，
@@ -462,7 +544,7 @@ void WeldSeamCompDialog::BuildUi()
     editorLayout->setColumnStretch(1, 0);
     editorLayout->setColumnStretch(2, 0);
     editorLayout->setColumnStretch(5, 1);
-    editorLayout->setRowStretch(9, 1);
+    editorLayout->setRowStretch(10, 1);
 
     m_pPoseMatchModeLabel = new QLabel("姿态匹配：");
     editorLayout->addWidget(m_pPoseMatchModeLabel, 0, 0);
@@ -478,9 +560,16 @@ void WeldSeamCompDialog::BuildUi()
     m_pTypeCombo->setMinimumWidth(240);
     editorLayout->addWidget(m_pTypeCombo, 1, 1, 1, 2, Qt::AlignLeft);
 
+    m_pSelectedCompHintLabel = new QLabel();
+    m_pSelectedCompHintLabel->setWordWrap(true);
+    m_pSelectedCompHintLabel->setStyleSheet(
+        "QLabel { color:#D7FAFC; background:#102B34; border-left:3px solid #55C7D1;"
+        " padding:5px 8px; font-weight:600; }");
+    editorLayout->addWidget(m_pSelectedCompHintLabel, 2, 0, 1, 6);
+
     m_pHintLabel = new QLabel();
     m_pHintLabel->setWordWrap(true);
-    editorLayout->addWidget(m_pHintLabel, 2, 0, 1, 6);
+    editorLayout->addWidget(m_pHintLabel, 3, 0, 1, 6);
 
     QDoubleValidator* validator = new QDoubleValidator(-100000.0, 100000.0, 6, this);
     validator->setNotation(QDoubleValidator::StandardNotation);
@@ -498,7 +587,7 @@ void WeldSeamCompDialog::BuildUi()
         m_pPoseValues[index]->setMinimumWidth(90);
         poseLayout->addWidget(m_pPoseValues[index], 0, index * 2 + 1);
     }
-    editorLayout->addWidget(m_pPoseDisplayWidget, 3, 0, 1, 6, Qt::AlignLeft);
+    editorLayout->addWidget(m_pPoseDisplayWidget, 4, 0, 1, 6, Qt::AlignLeft);
 
     for (int index = 0; index < 3; ++index)
     {
@@ -507,13 +596,13 @@ void WeldSeamCompDialog::BuildUi()
         m_pEditValues[index]->setValidator(validator);
         m_pEditValues[index]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         m_pEditValues[index]->setMinimumWidth(130);
-        editorLayout->addWidget(m_pEditLabels[index], 4 + index, 0);
-        editorLayout->addWidget(m_pEditValues[index], 4 + index, 1, 1, 5, Qt::AlignLeft);
+        editorLayout->addWidget(m_pEditLabels[index], 5 + index, 0);
+        editorLayout->addWidget(m_pEditValues[index], 5 + index, 1, 1, 5, Qt::AlignLeft);
     }
 
     m_pCornerCompensationCheck = new QCheckBox("启用本组拐点补偿并生成补偿后 2mm 点");
     m_pCornerCompensationCheck->setToolTip("启用后，上升边和下降边的拐点补偿值会随当前姿态补偿组保存。");
-    editorLayout->addWidget(m_pCornerCompensationCheck, 7, 0, 1, 6);
+    editorLayout->addWidget(m_pCornerCompensationCheck, 8, 0, 1, 6);
 
     m_pCornerCompensationWidget = new QWidget(editorGroup);
     QGridLayout* cornerCompLayout = new QGridLayout(m_pCornerCompensationWidget);
@@ -532,7 +621,7 @@ void WeldSeamCompDialog::BuildUi()
         m_pCornerCompensationValues[index] = CreateCornerCompensationSpin(m_pCornerCompensationWidget);
         cornerCompLayout->addWidget(m_pCornerCompensationValues[index], index / 2, (index % 2) * 2 + 1);
     }
-    editorLayout->addWidget(m_pCornerCompensationWidget, 8, 0, 1, 6);
+    editorLayout->addWidget(m_pCornerCompensationWidget, 9, 0, 1, 6);
     contentLayout->addWidget(editorGroup, 1);
     contentLayout->addWidget(CreateWeldProcessPanel(), 0);
     editorContentLayout->addLayout(contentLayout);
@@ -779,6 +868,136 @@ QString WeldSeamCompDialog::DefaultPoseSegmentKind(int index) const
         return m_poseTypes[index].segmentKind;
     }
     return QString("PoseGroup%1").arg(std::max(0, index));
+}
+
+QString WeldSeamCompDialog::CurrentPoseSegmentTitle() const
+{
+    const int segmentIndex = std::clamp(m_currentTypeIndex, 0, POSE_COMP_SEGMENT_COUNT - 1);
+    const int flatIndex = m_currentPoseGroupIndex * POSE_COMP_SEGMENT_COUNT + segmentIndex;
+    const QString name = flatIndex >= 0 && flatIndex < m_poseRows.size() && !m_poseRows[flatIndex].name.isEmpty()
+        ? m_poseRows[flatIndex].name
+        : DefaultPoseRowName(segmentIndex);
+    const QString kind = flatIndex >= 0 && flatIndex < m_poseRows.size() && !m_poseRows[flatIndex].segmentKind.isEmpty()
+        ? m_poseRows[flatIndex].segmentKind
+        : DefaultPoseSegmentKind(segmentIndex);
+    return QString("%1（%2）").arg(name, kind);
+}
+
+void WeldSeamCompDialog::RefreshSelectedCompHint(
+    const MeasureThenWeldService::CompPreviewStages* stages)
+{
+    if (m_pSelectedCompHintLabel == nullptr)
+    {
+        return;
+    }
+
+    const bool visible = CurrentGroupCount() > 0;
+    m_pSelectedCompHintLabel->setVisible(visible);
+    if (!visible)
+    {
+        return;
+    }
+
+    if (m_mode == CompMode::Seam)
+    {
+        const int seamCount = static_cast<int>(m_seamRows.size());
+        if (seamCount <= 0)
+        {
+            m_pSelectedCompHintLabel->setText("当前焊道补偿：无");
+            return;
+        }
+        const int seamIndex = std::clamp(m_currentSeamGroupIndex, 0, seamCount - 1);
+
+        const SeamCompRow& row = m_seamRows[seamIndex];
+        QString text = QString(
+            "当前焊道补偿：整条焊道　局部补偿=(世界Z %1，枪反向 %2，焊道方向 %3) mm")
+            .arg(row.weldZComp, 0, 'f', 3)
+            .arg(row.weldGunDirComp, 0, 'f', 3)
+            .arg(row.weldSeamDirComp, 0, 'f', 3);
+        const double localLength = std::sqrt(
+            row.weldZComp * row.weldZComp
+            + row.weldGunDirComp * row.weldGunDirComp
+            + row.weldSeamDirComp * row.weldSeamDirComp);
+        if (localLength <= 1e-9)
+        {
+            text += "　补偿为 0，无方向";
+        }
+        else if (stages == nullptr)
+        {
+            text += "　世界方向：等待焊道预览";
+        }
+        else if (!stages->selectedSeamDirectionValid)
+        {
+            text += "　世界方向：无有效补偿向量";
+        }
+        else
+        {
+            const double wx = stages->selectedSeamCompWorld[0];
+            const double wy = stages->selectedSeamCompWorld[1];
+            const double wz = stages->selectedSeamCompWorld[2];
+            const double worldLength = std::sqrt(wx * wx + wy * wy + wz * wz);
+            text += QString("　世界补偿=(%1, %2, %3) mm　单位方向=(%4, %5, %6)")
+                .arg(wx, 0, 'f', 3)
+                .arg(wy, 0, 'f', 3)
+                .arg(wz, 0, 'f', 3)
+                .arg(wx / worldLength, 0, 'f', 3)
+                .arg(wy / worldLength, 0, 'f', 3)
+                .arg(wz / worldLength, 0, 'f', 3);
+        }
+        m_pSelectedCompHintLabel->setText(text);
+        return;
+    }
+
+    const int segmentIndex = std::clamp(m_currentTypeIndex, 0, POSE_COMP_SEGMENT_COUNT - 1);
+    const int flatIndex = m_currentPoseGroupIndex * POSE_COMP_SEGMENT_COUNT + segmentIndex;
+    if (flatIndex < 0 || flatIndex >= m_poseRows.size())
+    {
+        m_pSelectedCompHintLabel->setText("当前选中段：无");
+        return;
+    }
+
+    const PoseCompRow& row = m_poseRows[flatIndex];
+    QString text = QString(
+        "当前选中段：%1　焊道局部补偿=(切向 %2，法向 %3，世界Z %4) mm")
+        .arg(CurrentPoseSegmentTitle())
+        .arg(row.compX, 0, 'f', 3)
+        .arg(row.compY, 0, 'f', 3)
+        .arg(row.compZ, 0, 'f', 3);
+
+    const double localLength = std::sqrt(
+        row.compX * row.compX + row.compY * row.compY + row.compZ * row.compZ);
+    if (localLength <= 1e-9)
+    {
+        text += "　补偿为 0，无方向";
+    }
+    else if (stages == nullptr
+        || stages->selectedPoseSegmentIndex != segmentIndex)
+    {
+        text += "　世界方向：等待焊道预览";
+    }
+    else if (!stages->selectedPoseSegmentMatched)
+    {
+        text += "　世界方向：当前焊道未匹配到此段";
+    }
+    else if (!stages->selectedPoseDirectionValid)
+    {
+        text += "　世界方向：无有效补偿向量";
+    }
+    else
+    {
+        const double wx = stages->selectedPoseCompWorld[0];
+        const double wy = stages->selectedPoseCompWorld[1];
+        const double wz = stages->selectedPoseCompWorld[2];
+        const double worldLength = std::sqrt(wx * wx + wy * wy + wz * wz);
+        text += QString("　世界补偿=(%1, %2, %3) mm　单位方向=(%4, %5, %6)")
+            .arg(wx, 0, 'f', 3)
+            .arg(wy, 0, 'f', 3)
+            .arg(wz, 0, 'f', 3)
+            .arg(wx / worldLength, 0, 'f', 3)
+            .arg(wy / worldLength, 0, 'f', 3)
+            .arg(wz / worldLength, 0, 'f', 3);
+    }
+    m_pSelectedCompHintLabel->setText(text);
 }
 
 WeldSeamCompDialog::PoseCompRow WeldSeamCompDialog::MakeDefaultPoseRow(int groupIndex, int segmentIndex) const
@@ -1232,10 +1451,13 @@ void WeldSeamCompDialog::RefreshEditor()
 {
     const int index = CurrentTypeIndex();
     m_currentTypeIndex = index;
+    const bool poseMatchByPose = m_mode == CompMode::Pose
+        && CurrentPoseGroupMatchMode() == POSE_COMP_MATCH_BY_POSE;
 
     if (m_pPoseDisplayWidget != nullptr)
     {
-        m_pPoseDisplayWidget->setVisible(m_mode == CompMode::Pose);
+        // 四类段属性直接按段类匹配；RX/RY/RZ 不参与该模式，隐藏但保留已保存值。
+        m_pPoseDisplayWidget->setVisible(poseMatchByPose);
     }
     if (m_pPoseMatchModeLabel != nullptr)
     {
@@ -1270,8 +1492,8 @@ void WeldSeamCompDialog::RefreshEditor()
         if (m_mode == CompMode::Pose)
         {
             m_pHintLabel->setText(CurrentPoseGroupMatchMode() == POSE_COMP_MATCH_BY_SEGMENT_CODE
-                ? QString("姿态补偿：按四类段属性直接匹配低平台、上升边、高平台、下降边，用于特殊件；补偿仍按当前点姿态旋转到世界坐标后叠加。")
-                : QString("姿态补偿：按当前点姿态匹配下方姿态值，匹配成功后将 X/Y/Z 补偿按当前姿态旋转到世界坐标后叠加。"));
+                ? QString("姿态补偿：按四类段属性直接匹配低平台、上升边、高平台、下降边。四类段统一按焊道局部基准补偿：X=稳定焊道切向、Y=焊道法向、Z=世界Z。")
+                : QString("姿态补偿：按当前点姿态匹配下方姿态值；匹配成功后仍统一按所在段焊道局部基准补偿：X=稳定焊道切向、Y=焊道法向、Z=世界Z。"));
         }
         else
         {
@@ -1315,9 +1537,9 @@ void WeldSeamCompDialog::RefreshEditor()
 
     if (!hasRow)
     {
-        if (m_pEditLabels[0] != nullptr) m_pEditLabels[0]->setText(m_mode == CompMode::Pose ? "X补偿(mm)：" : "Z向补偿(mm)：");
-        if (m_pEditLabels[1] != nullptr) m_pEditLabels[1]->setText(m_mode == CompMode::Pose ? "Y补偿(mm)：" : "枪反向补偿(mm)：");
-        if (m_pEditLabels[2] != nullptr) m_pEditLabels[2]->setText(m_mode == CompMode::Pose ? "Z补偿(mm)：" : "焊道方向补偿(mm)：");
+        if (m_pEditLabels[0] != nullptr) m_pEditLabels[0]->setText(m_mode == CompMode::Pose ? "焊道切向补偿(mm)：" : "Z向补偿(mm)：");
+        if (m_pEditLabels[1] != nullptr) m_pEditLabels[1]->setText(m_mode == CompMode::Pose ? "焊道法向补偿(mm)：" : "枪反向补偿(mm)：");
+        if (m_pEditLabels[2] != nullptr) m_pEditLabels[2]->setText(m_mode == CompMode::Pose ? "世界Z补偿(mm)：" : "焊道方向补偿(mm)：");
         for (int valueIndex = 0; valueIndex < 3; ++valueIndex)
         {
             if (m_pEditValues[valueIndex] != nullptr) m_pEditValues[valueIndex]->clear();
@@ -1332,6 +1554,7 @@ void WeldSeamCompDialog::RefreshEditor()
             }
         }
         RefreshCornerCompensationEditor();
+        RefreshSelectedCompHint();
         ScheduleCompPreview();
         return;
     }
@@ -1345,9 +1568,18 @@ void WeldSeamCompDialog::RefreshEditor()
             if (m_pPoseValues[0] != nullptr) m_pPoseValues[0]->setText(FormatNumber(row.poseRx));
             if (m_pPoseValues[1] != nullptr) m_pPoseValues[1]->setText(FormatNumber(row.poseRy));
             if (m_pPoseValues[2] != nullptr) m_pPoseValues[2]->setText(FormatNumber(row.poseRz));
-            if (m_pEditLabels[0] != nullptr) m_pEditLabels[0]->setText("X补偿(mm)：");
-            if (m_pEditLabels[1] != nullptr) m_pEditLabels[1]->setText("Y补偿(mm)：");
-            if (m_pEditLabels[2] != nullptr) m_pEditLabels[2]->setText("Z补偿(mm)：");
+            if (m_pEditLabels[0] != nullptr)
+            {
+                m_pEditLabels[0]->setText("焊道切向补偿(mm)：");
+            }
+            if (m_pEditLabels[1] != nullptr)
+            {
+                m_pEditLabels[1]->setText("焊道法向补偿(mm)：");
+            }
+            if (m_pEditLabels[2] != nullptr)
+            {
+                m_pEditLabels[2]->setText("世界Z补偿(mm)：");
+            }
             if (m_pEditValues[0] != nullptr) m_pEditValues[0]->setText(FormatNumber(row.compX));
             if (m_pEditValues[1] != nullptr) m_pEditValues[1]->setText(FormatNumber(row.compY));
             if (m_pEditValues[2] != nullptr) m_pEditValues[2]->setText(FormatNumber(row.compZ));
@@ -1388,6 +1620,7 @@ void WeldSeamCompDialog::RefreshEditor()
         }
     }
     RefreshCornerCompensationEditor();
+    RefreshSelectedCompHint();
     ScheduleCompPreview();
 }
 
@@ -2188,8 +2421,20 @@ void WeldSeamCompDialog::SetCompPreviewDirectory(const QString& dir)
 
 void WeldSeamCompDialog::RefreshCompPreviewScanLine()
 {
-    // 读取当前机器人当前启用组的扫描起止点（XY），用于把焊接方向箭头放在扫描位置那一侧。
+    // 优先读取所选结果目录当次保存的机器人轨迹，避免查看远程/历史结果时误用当前参数组。
     m_compPreviewScanLineValid = false;
+    m_compPreviewScanLineSource.clear();
+    if (TryReadResultRobotScanLine(
+            m_compPreviewDir,
+            m_compPreviewScanStartXY,
+            m_compPreviewScanEndXY))
+    {
+        m_compPreviewScanLineValid = true;
+        m_compPreviewScanLineSource = QStringLiteral("机器人侧（本次扫描）");
+        return;
+    }
+
+    // 老数据未保存 RobotPoint 时，才回退当前机器人当前启用组的扫描起止点。
     const QString robot = CurrentRobotName();
     if (robot.isEmpty())
     {
@@ -2209,6 +2454,7 @@ void WeldSeamCompDialog::RefreshCompPreviewScanLine()
         m_compPreviewScanStartXY = QPointF(scanStart.dX, scanStart.dY);
         m_compPreviewScanEndXY = QPointF(scanEnd.dX, scanEnd.dY);
         m_compPreviewScanLineValid = true;
+        m_compPreviewScanLineSource = QStringLiteral("机器人侧（当前配置）");
     }
 }
 
@@ -2674,8 +2920,18 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
         m_pCompPreviewView->SetLayerVisible(stageIndex,
             m_pStageToggles[stageIndex] != nullptr && m_pStageToggles[stageIndex]->isChecked());
     }
+    for (int highlightIndex = 0; highlightIndex < m_compPreviewHighlightLayerStages.size(); ++highlightIndex)
+    {
+        const int stageIndex = m_compPreviewHighlightLayerStages[highlightIndex];
+        const bool visible = stageIndex >= 0
+            && stageIndex < 6
+            && m_pStageToggles[stageIndex] != nullptr
+            && m_pStageToggles[stageIndex]->isChecked();
+        m_pCompPreviewView->SetLayerVisible(6 + highlightIndex, visible);
+    }
 
-    // 方向箭头跟随对应图层开关：焊缝三轴(colorId 0-2)随"焊道补偿"，工具系轴(colorId 3-5)随"姿态补偿"。
+    // 方向箭头跟随对应图层开关：焊缝三轴及当前焊道补偿方向随"焊道补偿"，
+    // 当前姿态段补偿方向(colorId 3-5)随"姿态补偿"。
     const bool showPoseArrows = m_pStageToggles[2] != nullptr && m_pStageToggles[2]->isChecked();
     const bool showSeamArrows = m_pStageToggles[3] != nullptr && m_pStageToggles[3]->isChecked();
     QVector<pcview::PointCloud3DView::DirectionArrow> arrows;
@@ -2696,9 +2952,12 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
         {
         case 1: arrow.color = QColor(255, 215, 64); break;   // 枪反向
         case 2: arrow.color = QColor(120, 255, 150); break;  // 焊道方向
-        case 3: arrow.color = QColor(255, 90, 90); break;    // 工具X
-        case 4: arrow.color = QColor(90, 255, 90); break;    // 工具Y
-        case 5: arrow.color = QColor(90, 200, 255); break;   // 工具Z
+        case 3: arrow.color = QColor(255, 90, 90); break;    // 姿态补偿：焊道切向
+        case 4: arrow.color = QColor(90, 255, 90); break;    // 姿态补偿：焊道法向
+        case 5: arrow.color = QColor(90, 200, 255); break;   // 姿态补偿：世界Z
+        case 7: arrow.color = QColor(90, 200, 255); break;   // 焊道补偿：世界Z
+        case 8: arrow.color = QColor(255, 215, 64); break;   // 焊道补偿：枪反向
+        case 9: arrow.color = QColor(120, 255, 150); break;  // 焊道补偿：焊道方向
         default: arrow.color = QColor(90, 200, 255); break;  // Z向
         }
         arrows.push_back(arrow);
@@ -2731,7 +2990,7 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
             const MeasureThenWeldService::CompPreviewPoint& mid =
                 m_compPreviewBaseline[m_compPreviewBaseline.size() / 2];
 
-            // 侧偏方向按扫描位置取：箭头放在扫描时机器人轨迹所在的一侧（焊道中点指向
+            // 侧偏方向按本次扫描机器人位置取：箭头放在机器人所在的一侧（焊道中点指向
             // 扫描线中点的 XY 分量），与焊接方向无关——起点到终点/终点到起点都在同一边。
             Eigen::Vector2d side = Eigen::Vector2d::Zero();
             if (m_compPreviewScanLineValid)
@@ -2744,14 +3003,14 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
             }
             if (side.norm() < 1e-6)
             {
-                // 读不到扫描位置时回退：焊枪轴反向的 XY 侧向分量，再不行用固定左法向。
-                Eigen::Vector2d gunSide = Eigen::Vector2d::Zero();
-                for (const MeasureThenWeldService::CompPreviewPoint& point : m_compPreviewBaseline)
+                // 读不到扫描位置时按世界 X- 侧回退，再投影到焊道法向平面。
+                side = Eigen::Vector2d(-1.0, 0.0);
+                side -= dir * side.dot(dir);
+                if (side.norm() < 1e-6)
                 {
-                    gunSide += Eigen::Vector2d(-point.bx, -point.by);
+                    side = Eigen::Vector2d(-dir.y(), dir.x());
                 }
-                gunSide -= dir * gunSide.dot(dir);
-                side = gunSide.norm() > 1e-6 ? gunSide : Eigen::Vector2d(-dir.y(), dir.x());
+                m_compPreviewScanLineSource = QStringLiteral("机器人侧（焊道法向 X- 回退）");
             }
             side.normalize();
 
@@ -2766,6 +3025,8 @@ void WeldSeamCompDialog::ApplyCompPreviewLayerVisibility()
             weldDirArrow.label = QString("焊接方向（%1）")
                 .arg(m_compPreviewWeldDirection < 0 ? "终点到起点" : "起点到终点");
             weldDirArrow.color = QColor(255, 255, 255);
+            weldDirArrow.originLabel = m_compPreviewScanLineSource;
+            weldDirArrow.robotMarkerAtOrigin = true;
             arrows.push_back(weldDirArrow);
         }
     }
@@ -2822,6 +3083,8 @@ MeasureThenWeldService::CompPreviewEditValues WeldSeamCompDialog::CollectCompPre
     edits.poseMatchMode = CurrentPoseGroupMatchMode();
     edits.poseMatchMaxErrorDeg = m_poseMatchMaxErrorDeg;
     edits.robotType = CurrentRobotType();
+    edits.posePreviewSegmentIndex = std::clamp(
+        m_currentTypeIndex, 0, POSE_COMP_SEGMENT_COUNT - 1);
 
     const int seamIndex = m_currentSeamGroupIndex;
     if (seamIndex >= 0 && seamIndex < m_seamRows.size())
@@ -2866,6 +3129,8 @@ MeasureThenWeldService::CompPreviewEditValues WeldSeamCompDialog::CollectSavedPo
     edits.poseMatchMode = CurrentPoseGroupMatchMode();
     edits.poseMatchMaxErrorDeg = m_poseMatchMaxErrorDeg;
     edits.robotType = CurrentRobotType();
+    edits.posePreviewSegmentIndex = std::clamp(
+        m_currentTypeIndex, 0, POSE_COMP_SEGMENT_COUNT - 1);
     return edits;
 }
 
@@ -2883,6 +3148,7 @@ void WeldSeamCompDialog::RecomputeCompPreview()
     if (m_compPreviewDir.isEmpty())
     {
         m_compPreviewArrows.clear();
+        m_compPreviewHighlightLayerStages.clear();
         m_pCompPreviewView->SetLayers({});
         m_pCompPreviewView->SetDirectionArrows({});
         if (m_pCompPreviewInfoLabel != nullptr)
@@ -2904,6 +3170,7 @@ void WeldSeamCompDialog::RecomputeCompPreview()
         {
             m_compPreviewBaseline.clear();
             m_compPreviewArrows.clear();
+            m_compPreviewHighlightLayerStages.clear();
             m_pCompPreviewView->SetLayers({});
             m_pCompPreviewView->SetDirectionArrows({});
             if (m_pCompPreviewInfoLabel != nullptr)
@@ -2920,12 +3187,16 @@ void WeldSeamCompDialog::RecomputeCompPreview()
     const MeasureThenWeldService::CompPreviewEditValues currentEdits = CollectCompPreviewEditValues();
     const MeasureThenWeldService::CompPreviewEditValues savedEdits = CollectSavedPoseCompEdits();
     const MeasureThenWeldService::CompPreviewStages stages = m_compPreviewService.ComputeCompPreviewStages(
-        CurrentRobotName(), m_compPreviewBaseline, currentEdits, savedEdits, true);
+        CurrentRobotName(), m_compPreviewBaseline, currentEdits, savedEdits,
+        m_mode == CompMode::Pose);
 
-    ApplyComputedStages(stages);
+    // 参数实时编辑只替换图层数据，保留用户当前旋转、缩放和平移。
+    ApplyComputedStages(stages, true);
 }
 
-void WeldSeamCompDialog::ApplyComputedStages(const MeasureThenWeldService::CompPreviewStages& stages)
+void WeldSeamCompDialog::ApplyComputedStages(
+    const MeasureThenWeldService::CompPreviewStages& stages,
+    bool preserveView)
 {
     if (m_pCompPreviewView == nullptr)
     {
@@ -2972,11 +3243,89 @@ void WeldSeamCompDialog::ApplyComputedStages(const MeasureThenWeldService::CompP
     // 实际焊道只画点不连线、点放大，方便直接看出抽样点间距。
     layers.push_back(makeLayer(5, "实际焊道", QColor(255, 92, 160), stages.actual, false, 6.0));
 
-    m_pCompPreviewView->SetLayers(layers);
+    // 姿态模式高亮选中段属性；焊道模式因一套参数作用于整条焊道，高亮补偿后的整条轨迹。
+    // 每个连续段单独成层，避免跨断点连线。各高亮层只用于显示，不参与补偿计算和保存。
+    m_compPreviewHighlightLayerStages.clear();
+    int highlightedActualRuns = 0;
+    int highlightedActualPoints = 0;
+    const bool showPoseHighlight =
+        m_mode == CompMode::Pose && stages.selectedPoseSegmentIndex >= 0;
+    const bool showSeamHighlight =
+        m_mode == CompMode::Seam && CurrentGroupCount() > 0;
+    if (showPoseHighlight || showSeamHighlight)
+    {
+        const bool wholeTrack = showSeamHighlight;
+        const QString selectedKind = showPoseHighlight
+            ? NormalizePreviewSegmentKind(stages.selectedPoseSegmentKind)
+            : QString();
+        const auto appendHighlightRuns = [this, &layers, wholeTrack, &selectedKind,
+            &highlightedActualRuns, &highlightedActualPoints](
+                int stageIndex,
+                const QString& stageName,
+                const QVector<MeasureThenWeldService::CompPreviewPoint>& points)
+        {
+            QVector<pcview::PointCloudVec3> run;
+            const auto flushRun = [this, &layers, &run, stageIndex, &stageName,
+                &highlightedActualRuns, &highlightedActualPoints]()
+            {
+                if (run.isEmpty())
+                {
+                    return;
+                }
+                pcview::PointCloud3DView::Layer layer;
+                layer.name = QStringLiteral("同属性高亮-%1").arg(stageName);
+                layer.color = QColor(82, 255, 126);
+                layer.connectLines = true;
+                layer.pointSize = 7.5;
+                layer.visible = m_pStageToggles[stageIndex] != nullptr
+                    && m_pStageToggles[stageIndex]->isChecked();
+                layer.points = run;
+                layers.push_back(layer);
+                m_compPreviewHighlightLayerStages.push_back(stageIndex);
+                if (stageIndex == 5)
+                {
+                    ++highlightedActualRuns;
+                    highlightedActualPoints += run.size();
+                }
+                run.clear();
+            };
 
-    // 方向箭头：缓存全量，按图层开关过滤显示（焊道补偿开→焊缝三轴；姿态补偿开→工具系轴）。
+            for (const MeasureThenWeldService::CompPreviewPoint& point : points)
+            {
+                if (wholeTrack || NormalizePreviewSegmentKind(point.segmentKind) == selectedKind)
+                {
+                    run.push_back({ point.x, point.y, point.z });
+                }
+                else
+                {
+                    flushRun();
+                }
+            }
+            flushRun();
+        };
+
+        if (showPoseHighlight)
+        {
+            appendHighlightRuns(2, QStringLiteral("姿态补偿"), stages.poseComp);
+        }
+        appendHighlightRuns(3, QStringLiteral("焊道补偿"), stages.seamComp);
+        appendHighlightRuns(4, QStringLiteral("圆弧过渡"), stages.arc);
+        appendHighlightRuns(5, QStringLiteral("实际焊道"), stages.actual);
+    }
+
+    if (preserveView)
+    {
+        m_pCompPreviewView->SetLayersPreserveView(layers);
+    }
+    else
+    {
+        m_pCompPreviewView->SetLayers(layers);
+    }
+
+    // 方向箭头：缓存全量，按图层开关过滤显示；当前模式额外显示实际合成补偿方向。
     m_compPreviewArrows = stages.arrows;
     ApplyCompPreviewLayerVisibility();
+    RefreshSelectedCompHint(&stages);
 
     if (m_pCompPreviewInfoLabel != nullptr)
     {
@@ -2987,6 +3336,27 @@ void WeldSeamCompDialog::ApplyComputedStages(const MeasureThenWeldService::CompP
             .arg(stages.seamComp.size())
             .arg(stages.arc.size())
             .arg(stages.actual.size());
+        if (m_mode == CompMode::Pose && stages.selectedPoseSegmentIndex >= 0)
+        {
+            info += QString("\n当前选中：%1；同属性高亮 %2 段 / %3 点；%4")
+                .arg(CurrentPoseSegmentTitle())
+                .arg(highlightedActualRuns)
+                .arg(highlightedActualPoints)
+                .arg(stages.selectedPoseSegmentMatched
+                    ? (stages.selectedPoseDirectionValid
+                        ? QString("图中单箭头为该段实际补偿方向")
+                        : QString("该段补偿为 0，未绘制方向箭头"))
+                    : QString("当前焊道未匹配到该段，未绘制方向箭头"));
+        }
+        else if (m_mode == CompMode::Seam && CurrentGroupCount() > 0)
+        {
+            info += QString("\n当前选中：整条焊道；全轨迹高亮 %1 段 / %2 点；%3")
+                .arg(highlightedActualRuns)
+                .arg(highlightedActualPoints)
+                .arg(stages.selectedSeamDirectionValid
+                    ? QString("图中单箭头为实际焊道补偿方向")
+                    : QString("焊道补偿为 0，未绘制方向箭头"));
+        }
         if (!stages.ok && !stages.error.isEmpty())
         {
             info += "（" + stages.error + "）";
@@ -3080,6 +3450,7 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
     const QString robotName = CurrentRobotName();
     const MeasureThenWeldService::CompPreviewEditValues currentEdits = CollectCompPreviewEditValues();
     const MeasureThenWeldService::CompPreviewEditValues savedEdits = CollectSavedPoseCompEdits();
+    const bool showPoseSelection = m_mode == CompMode::Pose;
 
     m_bPreviewLoading = true;
     if (m_pCompPreviewTimer != nullptr)
@@ -3099,7 +3470,7 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
     m_pPreviewProgress->show();
 
     auto destroyed = m_destroyed;
-    m_previewWorker = std::thread([this, laserDir, robotName, currentEdits, savedEdits, needRebuild,
+    m_previewWorker = std::thread([this, laserDir, robotName, currentEdits, savedEdits, showPoseSelection, needRebuild,
                  rebuildParam, rebuildExpectation, cancelFlag, destroyed]()
         {
             CompPreviewLoadResult result;
@@ -3179,7 +3550,8 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
                 {
                     setStage("正在计算补偿预览…");
                     result.stages = m_compPreviewService.ComputeCompPreviewStages(
-                        robotName, result.baseline, currentEdits, savedEdits, true, isStopRequested);
+                        robotName, result.baseline, currentEdits, savedEdits,
+                        showPoseSelection, isStopRequested);
                 }
                 if (cancelFlag->load())
                 {
@@ -3221,6 +3593,7 @@ void WeldSeamCompDialog::OnCompPreviewLoaded(const CompPreviewLoadResult& result
     {
         m_compPreviewBaseline.clear();
         m_compPreviewArrows.clear();
+        m_compPreviewHighlightLayerStages.clear();
         m_pCompPreviewView->SetLayers({});
         m_pCompPreviewView->SetDirectionArrows({});
         if (m_pCompPreviewInfoLabel != nullptr)
@@ -3233,7 +3606,8 @@ void WeldSeamCompDialog::OnCompPreviewLoaded(const CompPreviewLoadResult& result
 
     m_compPreviewBaseline = result.baseline;
     m_compPreviewBaselineDir = m_compPreviewDir;
-    ApplyComputedStages(result.stages);
+    // 新目录/重新读取后自动适配一次，便于首次完整看到数据。
+    ApplyComputedStages(result.stages, false);
     AppendLog(QString("补偿预览目录：%1").arg(m_compPreviewDir));
 }
 

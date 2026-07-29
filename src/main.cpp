@@ -143,7 +143,7 @@ int main(int argc, char *argv[])
         return PrintAppPathsJson();
     }
     app.setApplicationName(BrandingConfig::ApplicationName());
-    app.setApplicationVersion(QStringLiteral("2026.07.27.0930"));
+    app.setApplicationVersion(QStringLiteral("2026.07.29.1105"));
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();

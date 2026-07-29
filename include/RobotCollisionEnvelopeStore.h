@@ -90,6 +90,14 @@ public:
         StoredAsset& asset,
         QString& error);
 
+    // 导入服务器下载的碰撞简模：先对任意来源小文件执行完整 schema、payload、
+    // J0-J6 与边界校验，再通过 Persist 的内容寻址和原子回读发布到本地库。
+    static bool ImportFile(
+        const QString& sourcePath,
+        StoredAsset& asset,
+        EnvelopeSet& envelope,
+        QString& error);
+
     // 根据 STEP SHA 和生成参数解析确定性文件名，并完整复核 JSON、payload
     // 哈希、J0...J6 唯一性、边界覆盖及安全余量。
     static bool Load(

@@ -132,8 +132,10 @@ namespace pcview
             PointCloudVec3 origin;
             PointCloudVec3 vector;
             QString label;
+            QString originLabel;
             QColor color = QColor(255, 215, 64);
             bool doubleHeaded = false; // true 时从 origin-vector 画到 origin+vector，两端都画箭头
+            bool robotMarkerAtOrigin = false; // 在箭头起点画机器人位置标记
         };
 
         explicit PointCloud3DView(QWidget* parent = nullptr)
@@ -887,6 +889,22 @@ namespace pcview
                 if (arrow.doubleHeaded)
                 {
                     drawHead(p0, p0 + unit * head);
+                }
+                if (arrow.robotMarkerAtOrigin)
+                {
+                    const QRectF body(p0.x() - 10.0, p0.y() - 8.0, 20.0, 16.0);
+                    painter.setBrush(QColor(10, 28, 36, 220));
+                    painter.drawRoundedRect(body, 3.0, 3.0);
+                    painter.drawLine(QPointF(p0.x(), p0.y() - 8.0), QPointF(p0.x(), p0.y() - 12.0));
+                    painter.drawEllipse(QPointF(p0.x(), p0.y() - 13.5), 1.5, 1.5);
+                    painter.drawEllipse(QPointF(p0.x() - 4.0, p0.y() - 1.0), 1.2, 1.2);
+                    painter.drawEllipse(QPointF(p0.x() + 4.0, p0.y() - 1.0), 1.2, 1.2);
+                    painter.drawLine(QPointF(p0.x() - 5.0, p0.y() + 8.0), QPointF(p0.x() - 5.0, p0.y() + 11.0));
+                    painter.drawLine(QPointF(p0.x() + 5.0, p0.y() + 8.0), QPointF(p0.x() + 5.0, p0.y() + 11.0));
+                }
+                if (!arrow.originLabel.isEmpty())
+                {
+                    painter.drawText(p0 + QPointF(14.0, -10.0), arrow.originLabel);
                 }
                 if (!arrow.label.isEmpty())
                 {

@@ -270,6 +270,39 @@ int main(int argc, char* argv[])
     const QByteArray validBytes = ReadBytes(storedPath);
     if (validBytes.isEmpty()) return Fail(QStringLiteral("cannot snapshot envelope JSON"));
 
+    // 服务器下载入口必须先完整解析任意 staging 文件，再按内容寻址原子落库并回读。
+    const QString downloadedPath =
+        dataRoot.filePath(QStringLiteral("downloaded-envelope.json"));
+    if (!WriteBytes(downloadedPath, validBytes) || !QFile::remove(storedPath))
+        return Fail(QStringLiteral("cannot prepare downloaded-envelope import"));
+    RobotCollisionEnvelopeStore::StoredAsset importedAsset;
+    RobotCollisionEnvelopeStore::EnvelopeSet importedEnvelope;
+    if (!Require(
+            RobotCollisionEnvelopeStore::ImportFile(
+                downloadedPath, importedAsset, importedEnvelope, error)
+                && importedAsset.profileKeySha256 == saved.profileKeySha256
+                && importedAsset.sourceStepSha256 == saved.sourceStepSha256
+                && importedAsset.storedFileName == saved.storedFileName
+                && importedEnvelope.payloadSha256 == generated.payloadSha256
+                && ReadBytes(storedPath) == validBytes,
+            QStringLiteral("downloaded envelope import did not validate/persist/read back: %1")
+                .arg(error)))
+        return 1;
+    QJsonObject invalidImportRoot =
+        QJsonDocument::fromJson(validBytes).object();
+    invalidImportRoot.insert(QStringLiteral("unexpected"), true);
+    if (!WriteBytes(
+            downloadedPath,
+            QJsonDocument(invalidImportRoot).toJson(QJsonDocument::Compact))
+        || !Require(
+            !RobotCollisionEnvelopeStore::ImportFile(
+                downloadedPath, importedAsset, importedEnvelope, error)
+                && importedAsset.storedFileName.isEmpty()
+                && importedEnvelope.joints.isEmpty()
+                && ReadBytes(storedPath) == validBytes,
+            QStringLiteral("invalid downloaded envelope was accepted or changed the store")))
+        return 1;
+
     // schema 不要求数组物理顺序；J0 基座校验必须按 jointIndex 查找。
     QJsonObject reorderedRoot = QJsonDocument::fromJson(validBytes).object();
     QJsonArray reorderedJoints = reorderedRoot.value(QStringLiteral("joints")).toArray();
