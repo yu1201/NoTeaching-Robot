@@ -60,15 +60,28 @@ function Download-FileIfNeeded {
 
     $targetParent = Split-Path -Parent $TargetPath
     New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
-
-    try {
-        Invoke-WebRequest -Uri $Url -OutFile $TargetPath -UseBasicParsing
-        return $true
+    $downloadPath = "$TargetPath.download"
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $downloadPath -UseBasicParsing
+            if (-not (Test-Path -LiteralPath $downloadPath -PathType Leaf) `
+                -or (Get-Item -LiteralPath $downloadPath).Length -le 0) {
+                throw "downloaded file is missing or empty"
+            }
+            Move-Item -LiteralPath $downloadPath -Destination $TargetPath -Force
+            return $true
+        }
+        catch {
+            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+            Write-Warning ("Failed to download prerequisite from {0} (attempt {1}/3). {2}" `
+                -f $Url, $attempt, $_.Exception.Message)
+            if ($attempt -lt 3) {
+                Start-Sleep -Seconds (2 * $attempt)
+            }
+        }
     }
-    catch {
-        Write-Warning ("Failed to download prerequisite from {0}. {1}" -f $Url, $_.Exception.Message)
-        return $false
-    }
+    return $false
 }
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
