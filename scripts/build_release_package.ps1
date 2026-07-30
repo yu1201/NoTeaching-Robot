@@ -286,9 +286,9 @@ if (Test-Path -LiteralPath $packageDir) {
 New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
 
 $ignoredReleaseExtensions = @(".lib", ".exp", ".pdb", ".obj", ".iobj", ".ipdb", ".ilk")
-# The redistributable is downloaded into Prerequisites\ below (the only copy the
-# installer actually runs); a stray copy manually dropped into x64\Release once
-# leaked a duplicate 24 MB vc_redist into the package root.
+# The redistributable is staged into Prerequisites\ below (the only copy the
+# installer actually runs); a stray top-level copy must never leak into the
+# package root.
 # The unique-executable gate above has already rejected any opposite-channel or
 # unrelated top-level exe. Redistributables are staged under Prerequisites only.
 $ignoredReleaseFileNames = @("vc_redist.x64.exe", "vc_redist.x86.exe")
@@ -459,7 +459,22 @@ $redistDir = Join-Path $packageDir "Prerequisites"
 New-Item -ItemType Directory -Path $redistDir -Force | Out-Null
 if (-not $SkipVcRedistDownload) {
     $vcRedistTarget = Join-Path $redistDir "vc_redist.x64.exe"
-    $vcRedistOk = Download-FileIfNeeded -Url "https://aka.ms/vc14/vc_redist.x64.exe" -TargetPath $vcRedistTarget
+    $vcRedistOk = $false
+    $deployedVcRedist = Join-Path $buildDir "vc_redist.x64.exe"
+    if (Test-Path -LiteralPath $deployedVcRedist -PathType Leaf) {
+        $deployedVcRedistSignature = Get-AuthenticodeSignature -LiteralPath $deployedVcRedist
+        if ((Get-Item -LiteralPath $deployedVcRedist).Length -gt 0 `
+            -and $deployedVcRedistSignature.Status -eq [System.Management.Automation.SignatureStatus]::Valid `
+            -and $null -ne $deployedVcRedistSignature.SignerCertificate `
+            -and $deployedVcRedistSignature.SignerCertificate.Subject -match 'CN=Microsoft Corporation') {
+            Copy-Item -LiteralPath $deployedVcRedist -Destination $vcRedistTarget -Force
+            $vcRedistOk = $true
+        }
+    }
+    if (-not $vcRedistOk) {
+        $vcRedistOk = Download-FileIfNeeded `
+            -Url "https://aka.ms/vc14/vc_redist.x64.exe" -TargetPath $vcRedistTarget
+    }
     if (-not $vcRedistOk) {
         throw "VC++ runtime installer download failed; an incomplete release package is forbidden."
     }
