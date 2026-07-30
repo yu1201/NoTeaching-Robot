@@ -27,6 +27,12 @@ void ApplyResponsivePageDefaults(QWidget* widget);
 // 数字输入框默认只保留编辑框，去掉上下调节按钮，减少小屏显示挤压。
 void ApplyEditorOnlySpinBoxes(QWidget* widget);
 
+// 数字编辑框的单位统一显示在输入框外侧，避免单位文本占用可编辑区域。
+QWidget* CreateExternalUnitEditor(
+    QWidget* editor,
+    const QString& unitText,
+    QWidget* parent = nullptr);
+
 // 全局禁用数字框/下拉框的鼠标滚轮改值：滚动页面时悬停在编辑框上会误改参数。
 // main 里安装一次全程序生效；下拉框弹出列表内的滚动不受影响。
 void InstallGlobalWheelGuard(QApplication& app);

@@ -1017,12 +1017,12 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
     m_pAutoMoveSpeedSpin->setDecimals(1);
     m_pAutoMoveSpeedSpin->setSingleStep(50.0);
     m_pAutoMoveSpeedSpin->setValue(kHandEyeAutoMoveSpeedMmPerMin);
-    m_pAutoMoveSpeedSpin->setSuffix(" mm/min");
     m_pAutoMoveSpeedSpin->setAlignment(Qt::AlignRight);
     m_pAutoMoveSpeedSpin->setKeyboardTracking(false);
     m_pAutoMoveSpeedSpin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     autoSpeedLayout->addWidget(autoSpeedLabel);
     autoSpeedLayout->addWidget(m_pAutoMoveSpeedSpin);
+    autoSpeedLayout->addWidget(new QLabel(QStringLiteral("mm/min"), autoSpeedRow));
     autoSpeedLayout->addStretch(1);
     infoLayout->addWidget(autoSpeedRow);
 

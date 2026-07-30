@@ -598,6 +598,12 @@ void LaserWeldFilterDialog::BuildUi()
     m_pCloudAboveZSpin->setDecimals(3);
     m_pCloudAboveZSpin->setSingleStep(0.1);
     m_pCloudAboveZSpin->setToolTip("抬高值（above_z）：SDK 20260624 版新增的平面抬升量，厂商默认 0.5。");
+    m_pCloudPixelNumSpin = new QSpinBox();
+    m_pCloudPixelNumSpin->setRange(0, 9999);
+    m_pCloudPixelNumSpin->setSingleStep(1);
+    m_pCloudPixelNumSpin->setToolTip(
+        "骨架毛刺长度（pixel_num）：SDK 20260729 版新增，作为骨架短支路清理的长度阈值（像素）。\n"
+        "值越大，允许清除的短毛刺/短支路越长；0 表示不按长度清理。默认 10。");
     m_pCloudDiscreteValueSpin = new QSpinBox();
     m_pCloudDiscreteValueSpin->setRange(0, 9999);
     m_pCloudDilateValueSpin = new QSpinBox();
@@ -648,6 +654,8 @@ void LaserWeldFilterDialog::BuildUi()
     cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudSampleSizeSpin, "mm"), 10, 1);
     cloudInnerLayout->addWidget(new QLabel("平面抬高值"), 10, 2);
     cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudAboveZSpin, "mm"), 10, 3);
+    cloudInnerLayout->addWidget(new QLabel("骨架毛刺长度"), 11, 0);
+    cloudInnerLayout->addWidget(CreateUnitEditor(m_pCloudPixelNumSpin, "px"), 11, 1);
     cloudInnerLayout->setColumnStretch(1, 1);
     cloudInnerLayout->setColumnStretch(3, 1);
     cloudInnerLayout->setColumnMinimumWidth(1, 300);
@@ -688,13 +696,11 @@ void LaserWeldFilterDialog::BuildUi()
     m_pProjLayerLowSpin->setRange(0.0, 100.0);
     m_pProjLayerLowSpin->setDecimals(1);
     m_pProjLayerLowSpin->setSingleStep(5.0);
-    m_pProjLayerLowSpin->setSuffix("%");
     m_pProjLayerLowSpin->setToolTip("候选点按 Z 排序后取作底板层的分位下界（默认 35%）。");
     m_pProjLayerHighSpin = new QDoubleSpinBox();
     m_pProjLayerHighSpin->setRange(0.0, 100.0);
     m_pProjLayerHighSpin->setDecimals(1);
     m_pProjLayerHighSpin->setSingleStep(5.0);
-    m_pProjLayerHighSpin->setSuffix("%");
     m_pProjLayerHighSpin->setToolTip("候选点按 Z 排序后取作底板层的分位上界（默认 50%）。");
     m_pProjMaxCandidateSpin = new QSpinBox();
     m_pProjMaxCandidateSpin->setRange(1, 100000);
@@ -712,9 +718,9 @@ void LaserWeldFilterDialog::BuildUi()
     projectionLayout->addWidget(new QLabel("种子上方Z带"), 1, 2);
     projectionLayout->addWidget(CreateUnitEditor(m_pProjZBandAboveSpin, "mm"), 1, 3);
     projectionLayout->addWidget(new QLabel("底板层位下界"), 2, 0);
-    projectionLayout->addWidget(m_pProjLayerLowSpin, 2, 1);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjLayerLowSpin, "%"), 2, 1);
     projectionLayout->addWidget(new QLabel("底板层位上界"), 2, 2);
-    projectionLayout->addWidget(m_pProjLayerHighSpin, 2, 3);
+    projectionLayout->addWidget(CreateUnitEditor(m_pProjLayerHighSpin, "%"), 2, 3);
     projectionLayout->addWidget(new QLabel("每种子候选上限"), 3, 0);
     projectionLayout->addWidget(m_pProjMaxCandidateSpin, 3, 1);
     projectionLayout->addWidget(new QLabel("投影平滑半径"), 3, 2);
@@ -1099,7 +1105,7 @@ void LaserWeldFilterDialog::BuildUi()
     m_pValidationAuditOnlyCheck->setToolTip(
         "仅用于历史数据标定。审计模式可以生成分析产物，但实际焊接、续焊和历史焊道执行会因没有 Enforce 质量证明而被阻止。");
 
-    m_pValidationCoverageCheck = new QCheckBox("采集覆盖检测（强制）");
+    m_pValidationCoverageCheck = new QCheckBox("采集覆盖检测");
     m_pValidationMinFinitePointSpin = new QSpinBox();
     m_pValidationMinFinitePointSpin->setRange(0, 10000000);
     m_pValidationMinProjectedSpanSpin = new QDoubleSpinBox();
@@ -1107,26 +1113,23 @@ void LaserWeldFilterDialog::BuildUi()
     m_pValidationMinProjectedSpanSpin->setDecimals(3);
     m_pValidationMinProjectedSpanSpin->setSingleStep(10.0);
 
-    m_pValidationContinuityCheck = new QCheckBox("连续性检测（强制）");
+    m_pValidationContinuityCheck = new QCheckBox("连续性检测");
     m_pValidationMinStationCoverageSpin = new QDoubleSpinBox();
     m_pValidationMinStationCoverageSpin->setRange(0.0, 100.0);
     m_pValidationMinStationCoverageSpin->setDecimals(1);
     m_pValidationMinStationCoverageSpin->setSingleStep(5.0);
-    m_pValidationMinStationCoverageSpin->setSuffix("%");
     m_pValidationMinLongestContinuousSpin = new QDoubleSpinBox();
     m_pValidationMinLongestContinuousSpin->setRange(0.0, 100.0);
     m_pValidationMinLongestContinuousSpin->setDecimals(1);
     m_pValidationMinLongestContinuousSpin->setSingleStep(5.0);
-    m_pValidationMinLongestContinuousSpin->setSuffix("%");
 
-    m_pValidationDenoiseRatioCheck = new QCheckBox("剔除比例检测（强制）");
+    m_pValidationDenoiseRatioCheck = new QCheckBox("剔除比例检测");
     m_pValidationMaxRejectedRatioSpin = new QDoubleSpinBox();
     m_pValidationMaxRejectedRatioSpin->setRange(0.0, 100.0);
     m_pValidationMaxRejectedRatioSpin->setDecimals(1);
     m_pValidationMaxRejectedRatioSpin->setSingleStep(5.0);
-    m_pValidationMaxRejectedRatioSpin->setSuffix("%");
 
-    m_pValidationResidualCheck = new QCheckBox("拟合残差检测（强制）");
+    m_pValidationResidualCheck = new QCheckBox("拟合残差检测");
     m_pValidationMaxMedianResidualSpin = new QDoubleSpinBox();
     m_pValidationMaxMedianResidualSpin->setRange(0.0, 9999.0);
     m_pValidationMaxMedianResidualSpin->setDecimals(3);
@@ -1140,9 +1143,8 @@ void LaserWeldFilterDialog::BuildUi()
     m_pValidationMinResidualInlierRatioSpin->setRange(0.0, 100.0);
     m_pValidationMinResidualInlierRatioSpin->setDecimals(1);
     m_pValidationMinResidualInlierRatioSpin->setSingleStep(5.0);
-    m_pValidationMinResidualInlierRatioSpin->setSuffix("%");
 
-    m_pValidationKeyPointCheck = new QCheckBox("起终点/拐点检测（强制）");
+    m_pValidationKeyPointCheck = new QCheckBox("起终点/拐点检测");
     m_pValidationMinKeyPointSpin = new QSpinBox();
     m_pValidationMinKeyPointSpin->setRange(0, 9999);
     m_pValidationMinCornerSpin = new QSpinBox();
@@ -1151,14 +1153,13 @@ void LaserWeldFilterDialog::BuildUi()
     m_pValidationMinSegmentLengthSpin->setRange(0.0, 9999.0);
     m_pValidationMinSegmentLengthSpin->setDecimals(3);
 
-    m_pValidationOutputCheck = new QCheckBox("输出结果检测（强制）");
+    m_pValidationOutputCheck = new QCheckBox("输出结果检测");
     m_pValidationMinOutputPointSpin = new QSpinBox();
     m_pValidationMinOutputPointSpin->setRange(0, 10000000);
     m_pValidationMinOutputLengthRatioSpin = new QDoubleSpinBox();
     m_pValidationMinOutputLengthRatioSpin->setRange(0.0, 1000.0);
     m_pValidationMinOutputLengthRatioSpin->setDecimals(1);
     m_pValidationMinOutputLengthRatioSpin->setSingleStep(5.0);
-    m_pValidationMinOutputLengthRatioSpin->setSuffix("%");
 
     validationLayoutGrid->addWidget(m_pValidationCoverageCheck, 0, 0, 1, 2);
     validationLayoutGrid->addWidget(new QLabel("最少有效点"), 0, 2);
@@ -1168,13 +1169,16 @@ void LaserWeldFilterDialog::BuildUi()
 
     validationLayoutGrid->addWidget(m_pValidationContinuityCheck, 2, 0, 1, 2);
     validationLayoutGrid->addWidget(new QLabel("最小采样覆盖率"), 2, 2);
-    validationLayoutGrid->addWidget(m_pValidationMinStationCoverageSpin, 2, 3);
+    validationLayoutGrid->addWidget(
+        CreateUnitEditor(m_pValidationMinStationCoverageSpin, "%"), 2, 3);
     validationLayoutGrid->addWidget(new QLabel("最长连续段比例"), 3, 0);
-    validationLayoutGrid->addWidget(m_pValidationMinLongestContinuousSpin, 3, 1);
+    validationLayoutGrid->addWidget(
+        CreateUnitEditor(m_pValidationMinLongestContinuousSpin, "%"), 3, 1);
 
     validationLayoutGrid->addWidget(m_pValidationDenoiseRatioCheck, 4, 0, 1, 2);
     validationLayoutGrid->addWidget(new QLabel("最大剔除比例"), 4, 2);
-    validationLayoutGrid->addWidget(m_pValidationMaxRejectedRatioSpin, 4, 3);
+    validationLayoutGrid->addWidget(
+        CreateUnitEditor(m_pValidationMaxRejectedRatioSpin, "%"), 4, 3);
 
     validationLayoutGrid->addWidget(m_pValidationResidualCheck, 5, 0, 1, 2);
     validationLayoutGrid->addWidget(new QLabel("中位残差上限"), 5, 2);
@@ -1184,22 +1188,24 @@ void LaserWeldFilterDialog::BuildUi()
     validationLayoutGrid->addWidget(new QLabel("内点残差阈值"), 6, 2);
     validationLayoutGrid->addWidget(CreateUnitEditor(m_pValidationResidualInlierThresholdSpin, "mm"), 6, 3);
     validationLayoutGrid->addWidget(new QLabel("最小内点比例"), 7, 0);
-    validationLayoutGrid->addWidget(m_pValidationMinResidualInlierRatioSpin, 7, 1);
+    validationLayoutGrid->addWidget(
+        CreateUnitEditor(m_pValidationMinResidualInlierRatioSpin, "%"), 7, 1);
 
     validationLayoutGrid->addWidget(m_pValidationKeyPointCheck, 8, 0, 1, 2);
     validationLayoutGrid->addWidget(new QLabel("最少关键点"), 8, 2);
     validationLayoutGrid->addWidget(m_pValidationMinKeyPointSpin, 8, 3);
     validationLayoutGrid->addWidget(new QLabel("最少拐点"), 9, 0);
     validationLayoutGrid->addWidget(m_pValidationMinCornerSpin, 9, 1);
-    validationLayoutGrid->addWidget(new QLabel("最短关键段"), 9, 2);
+    validationLayoutGrid->addWidget(new QLabel("审计建议最短段"), 9, 2);
     validationLayoutGrid->addWidget(CreateUnitEditor(m_pValidationMinSegmentLengthSpin, "mm"), 9, 3);
 
     validationLayoutGrid->addWidget(m_pValidationOutputCheck, 10, 0, 1, 2);
     validationLayoutGrid->addWidget(new QLabel("最少输出点"), 10, 2);
     validationLayoutGrid->addWidget(m_pValidationMinOutputPointSpin, 10, 3);
     validationLayoutGrid->addWidget(new QLabel("输出长度/输入跨度"), 11, 0);
-    validationLayoutGrid->addWidget(m_pValidationMinOutputLengthRatioSpin, 11, 1);
-    const QList<QCheckBox*> mandatoryValidationChecks = {
+    validationLayoutGrid->addWidget(
+        CreateUnitEditor(m_pValidationMinOutputLengthRatioSpin, "%"), 11, 1);
+    const QList<QCheckBox*> validationChecks = {
         m_pValidationCoverageCheck,
         m_pValidationContinuityCheck,
         m_pValidationDenoiseRatioCheck,
@@ -1207,16 +1213,159 @@ void LaserWeldFilterDialog::BuildUi()
         m_pValidationKeyPointCheck,
         m_pValidationOutputCheck
     };
-    for (QCheckBox* check : mandatoryValidationChecks)
+    for (QCheckBox* check : validationChecks)
     {
-        check->setChecked(true);
-        check->setEnabled(false);
-        check->setToolTip("质量策略 v1 要求始终计算该项；如需标定阈值，请切换审计模式，而不是关闭检查。");
+        check->setToolTip(
+            "该检查及其参数只在本页配置。关闭后不参与对应质量判定；"
+            "生产使用 Enforce 时建议保持开启，历史数据标定可使用审计模式。");
     }
     validationLayoutGrid->setColumnStretch(1, 1);
     validationLayoutGrid->setColumnStretch(3, 1);
+
+    auto* fixedValidationGroup = new QGroupBox("焊道有效性门限");
+    fixedValidationGroup->setObjectName("weldPathFixedValidationGroup");
+    auto* fixedValidationLayout = new QGridLayout(fixedValidationGroup);
+    fixedValidationLayout->setHorizontalSpacing(12);
+    fixedValidationLayout->setVerticalSpacing(10);
+    m_pValidationSegmentHardLimitsCheck = new QCheckBox("关键点分段");
+    m_pValidationFinalTrajectoryStepCheck = new QCheckBox("最终轨迹相邻点");
+    m_pValidationFinalLengthBindingCheck = new QCheckBox("最终/补偿前长度");
+    m_pValidationFinalTopologyBindingCheck = new QCheckBox("来源拓扑覆盖");
+    m_pValidationFinalSourceBindingCheck = new QCheckBox("最终姿态来源绑定");
+    m_pValidationFinalSemanticIntegrityCheck = new QCheckBox("最终文件结构与语义");
+    struct ConfigurableLimitField
+    {
+        QString label;
+        QDoubleSpinBox* editor = nullptr;
+        QString unit;
+    };
+    const auto makeLimitSpin = [](
+        double minimum,
+        double maximum,
+        int decimals,
+        double step)
+    {
+        auto* spin = new QDoubleSpinBox();
+        spin->setRange(minimum, maximum);
+        spin->setDecimals(decimals);
+        spin->setSingleStep(step);
+        spin->setKeyboardTracking(false);
+        return spin;
+    };
+    m_pValidationMinNonLapSegmentHardSpin =
+        makeLimitSpin(0.0, 9999.0, 3, 0.1);
+    m_pValidationMinLapOrEndpointSegmentHardSpin =
+        makeLimitSpin(0.0, 9999.0, 3, 0.05);
+    m_pValidationMaxFinalPositionStepSpin =
+        makeLimitSpin(0.001, 999999.0, 3, 1.0);
+    m_pValidationMaxFinalControllerEulerStepSpin =
+        makeLimitSpin(0.001, 360.0, 3, 1.0);
+    m_pValidationMaxFinalPhysicalOrientationStepSpin =
+        makeLimitSpin(0.001, 180.0, 3, 1.0);
+    m_pValidationMinFinalLengthRatioSpin =
+        makeLimitSpin(0.0, 1000.0, 1, 1.0);
+    m_pValidationMaxFinalLengthRatioSpin =
+        makeLimitSpin(0.0, 1000.0, 1, 1.0);
+    m_pValidationMinFinalMatchedArcRatioSpin =
+        makeLimitSpin(0.0, 100.0, 1, 1.0);
+    m_pValidationMinFinalSourceUniqueCoverageRatioSpin =
+        makeLimitSpin(0.0, 100.0, 1, 1.0);
+    m_pValidationMinFinalSourceArcSpanRatioSpin =
+        makeLimitSpin(0.0, 100.0, 1, 1.0);
+    m_pValidationMaxFinalSourceDisplacementSpin =
+        makeLimitSpin(0.001, 999999.0, 3, 1.0);
+    m_pValidationMaxFinalSourcePhysicalOrientationDeltaSpin =
+        makeLimitSpin(0.001, 180.0, 3, 1.0);
+    const auto addConfigurableLimit = [fixedValidationLayout](
+        int row,
+        QCheckBox* enabledCheck,
+        const QList<ConfigurableLimitField>& fields,
+        const QString& objectName)
+    {
+        auto* editor = new QWidget();
+        editor->setObjectName(objectName);
+        auto* editorLayout = new QHBoxLayout(editor);
+        editorLayout->setContentsMargins(0, 0, 0, 0);
+        editorLayout->setSpacing(8);
+        for (const auto& field : fields)
+        {
+            editorLayout->addWidget(new QLabel(field.label));
+            editorLayout->addWidget(field.editor);
+            auto* unitLabel = new QLabel(field.unit);
+            unitLabel->setObjectName("UnitLabel");
+            unitLabel->setMinimumWidth(field.unit == QStringLiteral("°") ? 16 : 28);
+            editorLayout->addWidget(unitLabel);
+        }
+        editorLayout->addStretch(1);
+        enabledCheck->setToolTip(
+            "取消勾选后，对应焊道有效性门禁不再拦截；数值仍会保存，重新开启后继续使用。");
+        editor->setEnabled(enabledCheck->isChecked());
+        QObject::connect(enabledCheck, &QCheckBox::toggled, editor, &QWidget::setEnabled);
+        fixedValidationLayout->addWidget(enabledCheck, row, 0);
+        fixedValidationLayout->addWidget(editor, row, 1);
+    };
+    addConfigurableLimit(
+        0,
+        m_pValidationSegmentHardLimitsCheck,
+        {
+            { "普通段 ≥", m_pValidationMinNonLapSegmentHardSpin, "mm" },
+            { "搭接/端点相邻段 ≥", m_pValidationMinLapOrEndpointSegmentHardSpin, "mm" }
+        },
+        "weldPathMinimumSegmentLimitsLabel");
+    addConfigurableLimit(
+        1,
+        m_pValidationFinalTrajectoryStepCheck,
+        {
+            { "位置 ≤", m_pValidationMaxFinalPositionStepSpin, "mm" },
+            { "控制器欧拉差 ≤", m_pValidationMaxFinalControllerEulerStepSpin, "°" },
+            { "物理姿态差 ≤", m_pValidationMaxFinalPhysicalOrientationStepSpin, "°" }
+        },
+        "finalWeldPoseAdjacentStepLimitsLabel");
+    addConfigurableLimit(
+        2,
+        m_pValidationFinalLengthBindingCheck,
+        {
+            { "最小", m_pValidationMinFinalLengthRatioSpin, "%" },
+            { "最大", m_pValidationMaxFinalLengthRatioSpin, "%" }
+        },
+        "finalWeldPoseLengthRatioLimitsLabel");
+    addConfigurableLimit(
+        3,
+        m_pValidationFinalTopologyBindingCheck,
+        {
+            { "最终匹配弧长 ≥", m_pValidationMinFinalMatchedArcRatioSpin, "%" },
+            { "来源唯一覆盖 ≥", m_pValidationMinFinalSourceUniqueCoverageRatioSpin, "%" },
+            { "来源跨度 ≥", m_pValidationMinFinalSourceArcSpanRatioSpin, "%" }
+        },
+        "finalWeldPoseTopologyLimitsLabel");
+    addConfigurableLimit(
+        4,
+        m_pValidationFinalSourceBindingCheck,
+        {
+            { "来源位移 ≤", m_pValidationMaxFinalSourceDisplacementSpin, "mm" },
+            { "物理姿态差 ≤", m_pValidationMaxFinalSourcePhysicalOrientationDeltaSpin, "°" }
+        },
+        "finalWeldPoseSourceBindingLimitsLabel");
+    auto* semanticIntegrityLabel = new QLabel(
+        "索引连续、标签/角度语义、起终点/拐点/搭接语义、生成文件字节摘要一致");
+    semanticIntegrityLabel->setObjectName("finalWeldPoseSemanticIntegrityLabel");
+    semanticIntegrityLabel->setWordWrap(true);
+    m_pValidationFinalSemanticIntegrityCheck->setToolTip(
+        "取消勾选后，不再执行最终文件的结构与语义一致性拦截。");
+    fixedValidationLayout->addWidget(m_pValidationFinalSemanticIntegrityCheck, 5, 0);
+    fixedValidationLayout->addWidget(semanticIntegrityLabel, 5, 1);
+    auto* fixedValidationHint = new QLabel(
+        "每项均可独立启停。控制器欧拉差仅作跨奇异位形诊断，不作为来源姿态否决条件。"
+        "所有门限都可编辑；开关和值会进入质量证明阈值快照，修改后旧证明失效，需要重新生成焊道。");
+    fixedValidationHint->setObjectName("weldPathConfigurableValidationHint");
+    fixedValidationHint->setWordWrap(true);
+    fixedValidationHint->setStyleSheet("color:#FFD878;");
+    fixedValidationLayout->addWidget(fixedValidationHint, 6, 0, 1, 2);
+    fixedValidationLayout->setColumnStretch(1, 1);
+
     validationLayout->addWidget(m_pValidationAuditOnlyCheck);
     validationLayout->addWidget(validationGroup);
+    validationLayout->addWidget(fixedValidationGroup);
     validationLayout->addStretch(1);
 
     m_pAlgorithmTabWidget->addTab(pointCloudTab, "点云参数");
@@ -1513,26 +1662,62 @@ void LaserWeldFilterDialog::LoadSettings()
     }
     m_pValidationAuditOnlyCheck->setChecked(
         processingSettings.validationPolicy == PointCloudProcessingConfig::ValidationPolicy::Audit);
-    m_pValidationCoverageCheck->setChecked(true);
+    m_pValidationCoverageCheck->setChecked(processingSettings.validationCoverageEnabled);
     m_pValidationMinFinitePointSpin->setValue(processingSettings.validationMinFinitePointCount);
     m_pValidationMinProjectedSpanSpin->setValue(processingSettings.validationMinProjectedSpanMm);
-    m_pValidationContinuityCheck->setChecked(true);
+    m_pValidationContinuityCheck->setChecked(processingSettings.validationContinuityEnabled);
     m_pValidationMinStationCoverageSpin->setValue(processingSettings.validationMinStationCoverageRatio * 100.0);
     m_pValidationMinLongestContinuousSpin->setValue(processingSettings.validationMinLongestContinuousRatio * 100.0);
-    m_pValidationDenoiseRatioCheck->setChecked(true);
+    m_pValidationDenoiseRatioCheck->setChecked(processingSettings.validationDenoiseRatioEnabled);
     m_pValidationMaxRejectedRatioSpin->setValue(processingSettings.validationMaxRejectedRatio * 100.0);
-    m_pValidationResidualCheck->setChecked(true);
+    m_pValidationResidualCheck->setChecked(processingSettings.validationResidualEnabled);
     m_pValidationMaxMedianResidualSpin->setValue(processingSettings.validationMaxMedianResidualMm);
     m_pValidationMaxP95ResidualSpin->setValue(processingSettings.validationMaxP95ResidualMm);
     m_pValidationResidualInlierThresholdSpin->setValue(processingSettings.validationResidualInlierThresholdMm);
     m_pValidationMinResidualInlierRatioSpin->setValue(processingSettings.validationMinResidualInlierRatio * 100.0);
-    m_pValidationKeyPointCheck->setChecked(true);
+    m_pValidationKeyPointCheck->setChecked(processingSettings.validationKeyPointEnabled);
     m_pValidationMinKeyPointSpin->setValue(processingSettings.validationMinKeyPointCount);
     m_pValidationMinCornerSpin->setValue(processingSettings.validationMinCornerCount);
     m_pValidationMinSegmentLengthSpin->setValue(processingSettings.validationMinSegmentLengthMm);
-    m_pValidationOutputCheck->setChecked(true);
+    m_pValidationOutputCheck->setChecked(processingSettings.validationOutputEnabled);
     m_pValidationMinOutputPointSpin->setValue(processingSettings.validationMinOutputPointCount);
     m_pValidationMinOutputLengthRatioSpin->setValue(processingSettings.validationMinOutputLengthRatio * 100.0);
+    m_pValidationSegmentHardLimitsCheck->setChecked(
+        processingSettings.validationSegmentHardLimitsEnabled);
+    m_pValidationMinNonLapSegmentHardSpin->setValue(
+        processingSettings.validationMinNonLapSegmentHardMm);
+    m_pValidationMinLapOrEndpointSegmentHardSpin->setValue(
+        processingSettings.validationMinLapOrEndpointSegmentHardMm);
+    m_pValidationFinalTrajectoryStepCheck->setChecked(
+        processingSettings.validationFinalTrajectoryStepEnabled);
+    m_pValidationMaxFinalPositionStepSpin->setValue(
+        processingSettings.validationMaxFinalPositionStepMm);
+    m_pValidationMaxFinalControllerEulerStepSpin->setValue(
+        processingSettings.validationMaxFinalControllerEulerStepDeg);
+    m_pValidationMaxFinalPhysicalOrientationStepSpin->setValue(
+        processingSettings.validationMaxFinalPhysicalOrientationStepDeg);
+    m_pValidationFinalLengthBindingCheck->setChecked(
+        processingSettings.validationFinalLengthBindingEnabled);
+    m_pValidationMinFinalLengthRatioSpin->setValue(
+        processingSettings.validationMinFinalToPreCompLengthRatio * 100.0);
+    m_pValidationMaxFinalLengthRatioSpin->setValue(
+        processingSettings.validationMaxFinalToPreCompLengthRatio * 100.0);
+    m_pValidationFinalTopologyBindingCheck->setChecked(
+        processingSettings.validationFinalTopologyBindingEnabled);
+    m_pValidationMinFinalMatchedArcRatioSpin->setValue(
+        processingSettings.validationMinFinalMatchedArcRatio * 100.0);
+    m_pValidationMinFinalSourceUniqueCoverageRatioSpin->setValue(
+        processingSettings.validationMinFinalSourceUniqueCoverageRatio * 100.0);
+    m_pValidationMinFinalSourceArcSpanRatioSpin->setValue(
+        processingSettings.validationMinFinalSourceArcSpanRatio * 100.0);
+    m_pValidationFinalSourceBindingCheck->setChecked(
+        processingSettings.validationFinalSourceBindingEnabled);
+    m_pValidationMaxFinalSourceDisplacementSpin->setValue(
+        processingSettings.validationMaxFinalSourceDisplacementMm);
+    m_pValidationMaxFinalSourcePhysicalOrientationDeltaSpin->setValue(
+        processingSettings.validationMaxFinalSourcePhysicalOrientationDeltaDeg);
+    m_pValidationFinalSemanticIntegrityCheck->setChecked(
+        processingSettings.validationFinalSemanticIntegrityEnabled);
     {
         const QSignalBlocker blocker(m_pAxisCombo);
         const int axisIndex = m_pAxisCombo->findData(static_cast<int>(processingSettings.sampleAxisMode));
@@ -1685,20 +1870,71 @@ bool LaserWeldFilterDialog::SaveSettings(QString* error) const
         ? PointCloudProcessingConfig::ValidationPolicy::Audit
         : PointCloudProcessingConfig::ValidationPolicy::Enforce;
     processingSettings.validationProfileVersion = PointCloudProcessingConfig::CURRENT_VALIDATION_PROFILE_VERSION;
+    processingSettings.validationCoverageEnabled = m_pValidationCoverageCheck->isChecked();
     processingSettings.validationMinFinitePointCount = m_pValidationMinFinitePointSpin->value();
     processingSettings.validationMinProjectedSpanMm = m_pValidationMinProjectedSpanSpin->value();
+    processingSettings.validationContinuityEnabled = m_pValidationContinuityCheck->isChecked();
     processingSettings.validationMinStationCoverageRatio = m_pValidationMinStationCoverageSpin->value() / 100.0;
     processingSettings.validationMinLongestContinuousRatio = m_pValidationMinLongestContinuousSpin->value() / 100.0;
+    processingSettings.validationDenoiseRatioEnabled = m_pValidationDenoiseRatioCheck->isChecked();
     processingSettings.validationMaxRejectedRatio = m_pValidationMaxRejectedRatioSpin->value() / 100.0;
+    processingSettings.validationResidualEnabled = m_pValidationResidualCheck->isChecked();
     processingSettings.validationMaxMedianResidualMm = m_pValidationMaxMedianResidualSpin->value();
     processingSettings.validationMaxP95ResidualMm = m_pValidationMaxP95ResidualSpin->value();
     processingSettings.validationResidualInlierThresholdMm = m_pValidationResidualInlierThresholdSpin->value();
     processingSettings.validationMinResidualInlierRatio = m_pValidationMinResidualInlierRatioSpin->value() / 100.0;
+    processingSettings.validationKeyPointEnabled = m_pValidationKeyPointCheck->isChecked();
     processingSettings.validationMinKeyPointCount = m_pValidationMinKeyPointSpin->value();
     processingSettings.validationMinCornerCount = m_pValidationMinCornerSpin->value();
     processingSettings.validationMinSegmentLengthMm = m_pValidationMinSegmentLengthSpin->value();
+    processingSettings.validationOutputEnabled = m_pValidationOutputCheck->isChecked();
     processingSettings.validationMinOutputPointCount = m_pValidationMinOutputPointSpin->value();
     processingSettings.validationMinOutputLengthRatio = m_pValidationMinOutputLengthRatioSpin->value() / 100.0;
+    processingSettings.validationSegmentHardLimitsEnabled =
+        m_pValidationSegmentHardLimitsCheck->isChecked();
+    processingSettings.validationMinNonLapSegmentHardMm =
+        m_pValidationMinNonLapSegmentHardSpin->value();
+    processingSettings.validationMinLapOrEndpointSegmentHardMm =
+        m_pValidationMinLapOrEndpointSegmentHardSpin->value();
+    processingSettings.validationFinalTrajectoryStepEnabled =
+        m_pValidationFinalTrajectoryStepCheck->isChecked();
+    processingSettings.validationMaxFinalPositionStepMm =
+        m_pValidationMaxFinalPositionStepSpin->value();
+    processingSettings.validationMaxFinalControllerEulerStepDeg =
+        m_pValidationMaxFinalControllerEulerStepSpin->value();
+    processingSettings.validationMaxFinalPhysicalOrientationStepDeg =
+        m_pValidationMaxFinalPhysicalOrientationStepSpin->value();
+    processingSettings.validationFinalLengthBindingEnabled =
+        m_pValidationFinalLengthBindingCheck->isChecked();
+    processingSettings.validationMinFinalToPreCompLengthRatio =
+        m_pValidationMinFinalLengthRatioSpin->value() / 100.0;
+    processingSettings.validationMaxFinalToPreCompLengthRatio =
+        m_pValidationMaxFinalLengthRatioSpin->value() / 100.0;
+    if (processingSettings.validationMaxFinalToPreCompLengthRatio
+            < processingSettings.validationMinFinalToPreCompLengthRatio)
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("最终/补偿前长度的最大比例不能小于最小比例。");
+        }
+        return false;
+    }
+    processingSettings.validationFinalTopologyBindingEnabled =
+        m_pValidationFinalTopologyBindingCheck->isChecked();
+    processingSettings.validationMinFinalMatchedArcRatio =
+        m_pValidationMinFinalMatchedArcRatioSpin->value() / 100.0;
+    processingSettings.validationMinFinalSourceUniqueCoverageRatio =
+        m_pValidationMinFinalSourceUniqueCoverageRatioSpin->value() / 100.0;
+    processingSettings.validationMinFinalSourceArcSpanRatio =
+        m_pValidationMinFinalSourceArcSpanRatioSpin->value() / 100.0;
+    processingSettings.validationFinalSourceBindingEnabled =
+        m_pValidationFinalSourceBindingCheck->isChecked();
+    processingSettings.validationMaxFinalSourceDisplacementMm =
+        m_pValidationMaxFinalSourceDisplacementSpin->value();
+    processingSettings.validationMaxFinalSourcePhysicalOrientationDeltaDeg =
+        m_pValidationMaxFinalSourcePhysicalOrientationDeltaSpin->value();
+    processingSettings.validationFinalSemanticIntegrityEnabled =
+        m_pValidationFinalSemanticIntegrityCheck->isChecked();
     QString localError;
     if (!PointCloudProcessingConfig::Save(processingSettings, &localError))
     {
@@ -1751,6 +1987,7 @@ void LaserWeldFilterDialog::LoadExternalAlgorithmConfig()
     m_pCloudSampleCheck->setChecked(PlainIniBoolValue(ReadPlainIniValue(configPath, "is_sample", "false"), false));
     m_pCloudSampleSizeSpin->setValue(ReadPlainIniValue(configPath, "sample_size", "5").toDouble());
     m_pCloudAboveZSpin->setValue(ReadPlainIniValue(configPath, "above_z", "0.5").toDouble());
+    m_pCloudPixelNumSpin->setValue(ReadPlainIniIntValue(configPath, "pixel_num", 10));
     m_pCloudDiscreteValueSpin->setValue(ReadPlainIniIntValue(configPath, "Discrete_Value", 4));
     m_pCloudDilateValueSpin->setValue(ReadPlainIniIntValue(configPath, "Dilate_Value", 13));
     m_pCloudErodeValueSpin->setValue(ReadPlainIniIntValue(configPath, "Erode_Value", 9));
@@ -1785,6 +2022,7 @@ void LaserWeldFilterDialog::SaveExternalAlgorithmConfig(QString* error) const
         { "is_sample", BoolIniText(m_pCloudSampleCheck->isChecked()) },
         { "sample_size", FormatPlainIniNumberLikeCurrent(configPath, "sample_size", m_pCloudSampleSizeSpin->value()) },
         { "above_z", FormatPlainIniNumberLikeCurrent(configPath, "above_z", m_pCloudAboveZSpin->value()) },
+        { "pixel_num", QString::number(m_pCloudPixelNumSpin->value()) },
         { "Discrete_Value", QString::number(m_pCloudDiscreteValueSpin->value()) },
         { "Dilate_Value", QString::number(m_pCloudDilateValueSpin->value()) },
         { "Erode_Value", QString::number(m_pCloudErodeValueSpin->value()) },

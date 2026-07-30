@@ -8,6 +8,7 @@
 #include "WeldSafetyRecoveryStore.h"
 #include "RobotMessage.h"
 #include "RobotOperationLease.h"
+#include "WindowStyleHelper.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -82,16 +83,20 @@ VirtualWeldTestDialog::VirtualWeldTestDialog(ContralUnit* pContralUnit, int unit
     m_lengthSpin->setDecimals(1);
     m_lengthSpin->setSingleStep(10.0);
     m_lengthSpin->setValue(200.0);
-    m_lengthSpin->setSuffix(QStringLiteral(" mm"));
-    paramForm->addRow(QStringLiteral("焊道长度"), m_lengthSpin);
+    paramForm->addRow(
+        QStringLiteral("焊道长度"),
+        CreateExternalUnitEditor(
+            m_lengthSpin, QStringLiteral("mm"), paramGroup));
 
     m_stepSpin = new QDoubleSpinBox(paramGroup);
     m_stepSpin->setRange(0.5, 100.0);
     m_stepSpin->setDecimals(2);
     m_stepSpin->setSingleStep(0.5);
     m_stepSpin->setValue(4.0);
-    m_stepSpin->setSuffix(QStringLiteral(" mm"));
-    paramForm->addRow(QStringLiteral("点间距(机器人逐点)"), m_stepSpin);
+    paramForm->addRow(
+        QStringLiteral("点间距(机器人逐点)"),
+        CreateExternalUnitEditor(
+            m_stepSpin, QStringLiteral("mm"), paramGroup));
 
     m_directionCombo = new QComboBox(paramGroup);
     m_directionCombo->addItem(QStringLiteral("+Y (基坐标)"), 1);

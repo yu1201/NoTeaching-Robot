@@ -28,6 +28,9 @@ def main() -> int:
     extraction_h = read("include/PointCloudExtractionProcessor.h")
     service_h = read("include/MeasureThenWeldService.h")
     service = read("src/MeasureThenWeldService.cpp")
+    weld_pose_limits = read("include/WeldPoseValidationLimits.h")
+    scan_safety_gate = read("src/ScanSafetyGateDialog.cpp")
+    validity_dialog = read("src/LaserWeldFilterDialog.cpp")
     proof_integrity_h = read("include/PointCloudProofIntegrity.h")
     proof_integrity = read("src/PointCloudProofIntegrity.cpp")
     proof_integrity_test = read("scripts/tests/pointcloud_proof_integrity_tests.cpp")
@@ -40,8 +43,8 @@ def main() -> int:
 
     require("enum class ValidationPolicy" in config_h, "missing Audit/Enforce policy")
     require("CURRENT_VALIDATION_PROFILE_VERSION = 1" in config_h, "missing versioned quality profile")
-    require("CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 1" in config_h,
-            "missing record-only safety-gate behavior version")
+    require("CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 2" in config_h,
+            "missing effective safety-gate behavior version")
     require('ReadIntSetting("Validation/ProfileVersion", 0)' in config_cpp,
             "legacy databases are not detected")
     require("storedValidationProfileVersion < CURRENT_VALIDATION_PROFILE_VERSION" in config_cpp,
@@ -62,6 +65,69 @@ def main() -> int:
             and all(f"settings.validation{name}Enabled = true;" in config_cpp
                     for name in quality_switches),
             "legacy profile migration no longer restores all six quality gates")
+    fixed_validation_switches = (
+        ("SegmentHardLimits", "m_pValidationSegmentHardLimitsCheck"),
+        ("FinalTrajectoryStep", "m_pValidationFinalTrajectoryStepCheck"),
+        ("FinalLengthBinding", "m_pValidationFinalLengthBindingCheck"),
+        ("FinalTopologyBinding", "m_pValidationFinalTopologyBindingCheck"),
+        ("FinalSourceBinding", "m_pValidationFinalSourceBindingCheck"),
+        ("FinalSemanticIntegrity", "m_pValidationFinalSemanticIntegrityCheck"),
+    )
+    for name, widget in fixed_validation_switches:
+        field = f"validation{name}Enabled"
+        require(f"bool {field} = true;" in config_h,
+                f"fixed validity gate default is not safe-on: {field}")
+        require(f'ReadBoolSetting("Validation/{name}Enabled"' in config_cpp,
+                f"fixed validity gate is not loaded: {field}")
+        require(f'write("Validation/{name}Enabled", normalizedSettings.{field} ? "1" : "0")'
+                in config_cpp, f"fixed validity gate is not persisted: {field}")
+        require(widget in validity_dialog,
+                f"fixed validity gate is not independently switchable in the UI: {field}")
+    configurable_weld_thresholds = (
+        ("MinNonLapSegmentHardMm", "validationMinNonLapSegmentHardMm",
+         "m_pValidationMinNonLapSegmentHardSpin"),
+        ("MinLapOrEndpointSegmentHardMm", "validationMinLapOrEndpointSegmentHardMm",
+         "m_pValidationMinLapOrEndpointSegmentHardSpin"),
+        ("MaxFinalPositionStepMm", "validationMaxFinalPositionStepMm",
+         "m_pValidationMaxFinalPositionStepSpin"),
+        ("MaxFinalControllerEulerStepDeg", "validationMaxFinalControllerEulerStepDeg",
+         "m_pValidationMaxFinalControllerEulerStepSpin"),
+        ("MaxFinalPhysicalOrientationStepDeg", "validationMaxFinalPhysicalOrientationStepDeg",
+         "m_pValidationMaxFinalPhysicalOrientationStepSpin"),
+        ("MinFinalToPreCompLengthRatio", "validationMinFinalToPreCompLengthRatio",
+         "m_pValidationMinFinalLengthRatioSpin"),
+        ("MaxFinalToPreCompLengthRatio", "validationMaxFinalToPreCompLengthRatio",
+         "m_pValidationMaxFinalLengthRatioSpin"),
+        ("MinFinalMatchedArcRatio", "validationMinFinalMatchedArcRatio",
+         "m_pValidationMinFinalMatchedArcRatioSpin"),
+        ("MinFinalSourceUniqueCoverageRatio", "validationMinFinalSourceUniqueCoverageRatio",
+         "m_pValidationMinFinalSourceUniqueCoverageRatioSpin"),
+        ("MinFinalSourceArcSpanRatio", "validationMinFinalSourceArcSpanRatio",
+         "m_pValidationMinFinalSourceArcSpanRatioSpin"),
+        ("MaxFinalSourceDisplacementMm", "validationMaxFinalSourceDisplacementMm",
+         "m_pValidationMaxFinalSourceDisplacementSpin"),
+        ("MaxFinalSourcePhysicalOrientationDeltaDeg",
+         "validationMaxFinalSourcePhysicalOrientationDeltaDeg",
+         "m_pValidationMaxFinalSourcePhysicalOrientationDeltaSpin"),
+    )
+    for key, field, widget in configurable_weld_thresholds:
+        require(field in config_h, f"configurable weld threshold default missing: {field}")
+        require("ReadDoubleSetting(" in config_cpp
+                and f'"Validation/{key}"' in config_cpp,
+                f"configurable weld threshold is not loaded: {field}")
+        require(f'write("Validation/{key}", QString::number(normalizedSettings.{field}'
+                in config_cpp, f"configurable weld threshold is not persisted: {field}")
+        require(widget in validity_dialog and field in validity_dialog,
+                f"configurable weld threshold is not editable/loadable in the UI: {field}")
+        require(field in service or field in calc_cpp,
+                f"runtime does not consume configurable weld threshold: {field}")
+    require("setSuffix(" not in validity_dialog
+            and 'CreateUnitEditor(m_pValidationMinOutputLengthRatioSpin, "%")'
+                in validity_dialog
+            and 'm_pValidationMaxFinalSourceDisplacementSpin, "mm"' in validity_dialog
+            and 'm_pValidationMaxFinalSourcePhysicalOrientationDeltaSpin, "°"'
+                in validity_dialog,
+            "validity units must be rendered outside their edit controls")
 
     safety_gate_names = (
         "ProofIntegrity", "ProductionPurpose", "RobotNameBinding", "CaseBinding",
@@ -80,12 +146,11 @@ def main() -> int:
     core_helper_end = config_cpp.index(
         "bool PointCloudProcessingConfig::HasDisabledCoreSafetyGate(", core_helper_start)
     core_helper = config_cpp[core_helper_start:core_helper_end]
-    require("safetyGateRobotNameBindingEnabled" not in core_helper
-            and all(f"safetyGate{name}Enabled" in core_helper
-                    for name in safety_gate_names if name != "RobotNameBinding"),
-            "core-gate helper must cover every system gate except logical robot-name binding")
+    require(all(f"safetyGate{name}Enabled" in core_helper
+                for name in safety_gate_names),
+            "core-gate helper must cover every configurable system gate")
     require('ReadIntSetting("SafetyGates/BehaviorVersion", 0)' in config_cpp
-            and "storedSafetyGateBehaviorVersion < CURRENT_SAFETY_GATE_BEHAVIOR_VERSION"
+            and "storedSafetyGateBehaviorVersion < 1"
                 in config_cpp
             and "settings.validationPolicy == ValidationPolicy::Audit" in config_cpp
             and "HasDisabledCoreSafetyGate(settings)" in config_cpp
@@ -95,10 +160,10 @@ def main() -> int:
     save_body = config_cpp[save_start:]
     require("HasDisabledCoreSafetyGate(normalizedSettings)" not in save_body
             and "normalizedSettings.validationPolicy = ValidationPolicy::Audit;" not in save_body,
-            "record-only safety switches still force Audit while saving")
+            "effective safety switches still force Audit while saving")
     require('write("SafetyGates/BehaviorVersion", '
             "QString::number(CURRENT_SAFETY_GATE_BEHAVIOR_VERSION))" in save_body,
-            "record-only safety-gate behavior version is not persisted")
+            "effective safety-gate behavior version is not persisted")
 
     require("struct PointCloudQualityReport" in calc_h, "missing structured quality report")
     for metric in (
@@ -108,14 +173,16 @@ def main() -> int:
     ):
         require(metric in calc_h and metric in calc_cpp, f"quality metric not wired: {metric}")
 
-    require("(isLapStepPair || isEndpointAdjacent) ? 0.25 : 3.0" in calc_cpp,
-            "lap/endpoint short segments and interior hard minimums are not separated")
+    require("params.validationMinLapOrEndpointSegmentHardMm" in calc_cpp
+            and "params.validationMinNonLapSegmentHardMm" in calc_cpp,
+            "configurable lap/endpoint and interior segment minimums are not separated")
     require("validationMinSegmentLengthMm" in calc_cpp and "report.warnings" in calc_cpp,
             "15mm segment threshold must be warning-only after hard structural checks")
     require("startCount != 1 || endCount != 1" in calc_cpp,
             "unique start/end structural gate missing")
-    require("kHardMaxOutputStepMm = 50.0" in calc_cpp,
-            "output discontinuity hard gate missing")
+    require("params.validationFinalTrajectoryStepEnabled" in calc_cpp
+            and "params.validationMaxFinalPositionStepMm" in calc_cpp,
+            "configurable output discontinuity gate missing")
     require("if (!params.validationAuditOnly)" in calc_cpp,
             "Audit mode does not preserve report without enforcing thresholds")
 
@@ -149,12 +216,14 @@ def main() -> int:
         require(f'if (!settings.{field})' in service
                 and f'thresholds.insert("{key}", false);' in service,
                 f"proof threshold snapshot does not expose disabled quality gate: {field}")
-    require('root.value("caseId").toString().compare(expectedCaseId' in service,
+    require('settings.safetyGateCaseBindingEnabled' in service
+            and 'root.value("caseId").toString().compare(' in service
+            and 'expectedCaseId, Qt::CaseInsensitive) != 0' in service,
             "proof can be copied across case directories without rejection")
     require("POINT_CLOUD_QUALITY_ALGORITHM_REVISION" in service,
             "proof policy does not bind an explicit algorithm revision")
-    require('POINT_CLOUD_QUALITY_ALGORITHM_REVISION = "pcq-v3-20260712-a"' in service,
-            "proof algorithm revision was not advanced for topology/orientation changes")
+    require('"pcq-v5-20260730-configurable-validity"' in service,
+            "proof algorithm revision was not advanced for configurable validity thresholds")
     require("POINT_CLOUD_QUALITY_SCHEMA_VERSION = 3" in service
             and 'root.insert("schemaVersion", POINT_CLOUD_QUALITY_SCHEMA_VERSION)' in service,
             "MAC/receipt-bound schema 3 is not the only newly written proof schema")
@@ -265,11 +334,11 @@ def main() -> int:
             and "VerifySyntheticPoseAuthorization" in service,
             "SyntheticVirtualTest remains an unbound public-enum bypass")
     for token in (
-        "FINAL_MIN_PRECOMP_LENGTH_RATIO",
-        "FINAL_MAX_PRECOMP_LENGTH_RATIO",
-        "FINAL_MIN_MATCHED_ARC_RATIO",
-        "FINAL_MIN_SOURCE_UNIQUE_COVERAGE_RATIO",
-        "FINAL_MIN_SOURCE_ARC_SPAN_RATIO",
+        "settings.validationMinFinalToPreCompLengthRatio",
+        "settings.validationMaxFinalToPreCompLengthRatio",
+        "settings.validationMinFinalMatchedArcRatio",
+        "settings.validationMinFinalSourceUniqueCoverageRatio",
+        "settings.validationMinFinalSourceArcSpanRatio",
         "matchedFinalArcMm",
         "uniqueMatchedSourceIndexes",
         "sourceArcSpanRatio",
@@ -289,8 +358,41 @@ def main() -> int:
             and "expectedGeneratedSha256" in service
             and "generatedSeamCompSha256" in service,
             "final artifact validation is not bound to the exact bytes produced by compensation")
-    require("hasNearbySourcePose" in service,
-            "25mm/60deg per-point hard limits can be diluted as unmatched arc")
+    require("hasNearbySourcePose" in service
+            and "settings.validationMaxFinalSourceDisplacementMm" in service
+            and "settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg" in service,
+            "configurable per-point source hard limits can be diluted as unmatched arc")
+    require("SourcePoseMatchDiagnostics" in service
+            and "normalizedHardGateScore" in service
+            and "最优联合候选" in service
+            and "displacementExcessMm" in service
+            and "physicalOrientationExcessDeg" in service,
+            "per-point source hard-gate failure does not report actual values and excess")
+    require("kMaxSourceDisplacementMm = 25.0" in weld_pose_limits
+            and "kMaxSourcePhysicalOrientationDeltaDeg = 60.0" in weld_pose_limits
+            and "kMinimumNonLapSegmentMm = 3.0" in weld_pose_limits
+            and "kMinimumLapOrEndpointAdjacentSegmentMm = 0.25" in weld_pose_limits
+            and "kMaxAdjacentPositionStepMm = 50.0" in weld_pose_limits
+            and "kMaxAdjacentControllerEulerStepDeg = 90.0" in weld_pose_limits
+            and "kMaxAdjacentPhysicalOrientationStepDeg = 90.0" in weld_pose_limits
+            and "kMinFinalToPreCompLengthRatio = 0.93" in weld_pose_limits
+            and "kMaxFinalToPreCompLengthRatio = 1.25" in weld_pose_limits
+            and "kMinFinalMatchedArcRatio = 0.90" in weld_pose_limits
+            and "kMinSourceUniqueCoverageRatio = 0.55" in weld_pose_limits
+            and "kMinSourceArcSpanRatio = 0.90" in weld_pose_limits
+            and "finalWeldPoseSourceBindingLimitsLabel" in validity_dialog
+            and "weldPathMinimumSegmentLimitsLabel" in validity_dialog
+            and "焊道有效性门限" in validity_dialog
+            and "所有门限都可编辑" in validity_dialog
+            and "finalWeldPoseHardGateGroup" not in scan_safety_gate,
+            "default weld validity limits are not centrally defined and editable")
+    require("isArcSourceBindingRecord" in service
+            and "allowedSourceSemanticKeys" in service
+            and "sourceSegmentBasesBySemanticKey" in service
+            and "sourceIndexesByAllowedSemanticKey" in service
+            and "topologySourceIndexesForRecord" in service
+            and "圆弧仅允许匹配相邻进入/离开段" in service,
+            "cross-segment arc records are not bound to both adjacent source semantics")
     require("IsKnownWeldPointType" in service
             and "IsKnownWeldSegmentKind" in service
             and "sourceLapIndexes" in service,
@@ -299,17 +401,19 @@ def main() -> int:
             and "validatedWeldPoseSha256" in service
             and "补偿前焊道在结构验证与质量证明提交之间发生变化" in service,
             "pre-compensation source validation and proof do not bind the same snapshot")
-    require('root.value("thresholds").toObject() != BuildPointCloudQualityThresholds' in service,
+    require('root.value("thresholds").toObject()' in service
+            and '!= BuildPointCloudQualityThresholds(currentSettings)' in service,
             "proof threshold evidence is not compared with the active policy")
     require('QStringLiteral("candidatePose")' in service
             and "Audit：最终焊接姿态结构验证未通过" in service,
             "Audit failures cannot persist an explicitly unauthorized evidence report")
-    require("hasValidatedAuthorizedPose && hasProductionContext" in service
+    require("hasRequiredAuthorizedPose && hasProductionContext" in service
             and "Enforce 质量通过但缺少 live-scan" in service,
             "an offline/missing-context result can still become authorized")
-    require("authorize && inputPaths.isEmpty()" in service
+    require("settings.safetyGateInputEvidenceEnabled" in service
+            and "&& inputPaths.isEmpty()" in service
             and "if (authorize)" in service
-            and "inputs.size() != inputPaths.size()" in service
+            and "&& inputs.size() != inputPaths.size()" in service
             and "预期点云输入为空或不存在" in service,
             "authorized proof can omit a missing/empty expected point-cloud input")
     require("expectedRetainedSourceLengthMm" in service
@@ -358,10 +462,10 @@ def main() -> int:
     require("PointCloudProofReplacementSession qualityGateReplacement" in rebuild,
             "rebuild early returns do not abandon producer privilege through RAII")
     require("旧 schema 1/2 点云质量证明" in service
-            and "VerifyPointCloudProofInputs(root, dir, error, stopRequested)" in service
-            and "return PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error);"
-                in service,
-            "legacy/self-declared proof or modified scan inputs can still be upgraded")
+            and "&& !VerifyPointCloudProofInputs(root, dir, error, stopRequested)" in service
+            and "return !settings.safetyGateProofIntegrityEnabled" in service
+            and "PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error)" in service,
+            "enabled proof/input gates do not reject legacy or modified scan evidence")
     require("productionExpectation.robotName.trimmed().isEmpty()" in rebuild
             and "离线预览不能生成可运动授权" in rebuild,
             "offline rebuild can synthesize a production proof without robot context")
@@ -373,17 +477,18 @@ def main() -> int:
             and 'root.insert("safetyGateRecords", BuildSafetyGateRecords(settings));' in service
             and all(f"settings.safetyGate{name}Enabled" in service
                     for name in safety_gate_names),
-            "system safety switches are not retained as report-only records")
+            "system safety switches are not retained in the proof snapshot")
     require('thresholds.insert("robotNameBindingEnabled", false);' not in service
-            and "safetyGateRobotNameBindingEnabled\n        && proofRobotName.compare"
-                not in service,
-            "robot-name record still changes proof policy or flow")
-    require("if (proofRobotName.compare(currentRobotName, Qt::CaseInsensitive) != 0)"
+            and "settings.safetyGateRobotNameBindingEnabled" in service
+            and "currentSettings.safetyGateRobotNameBindingEnabled" in service,
+            "robot-name switch does not control proof policy and runtime flow")
+    require("proofRobotName.compare(currentRobotName, Qt::CaseInsensitive) != 0"
                 in service
-            and "if (!expectedRobotName.trimmed().isEmpty()" in service
+            and "currentSettings.safetyGateRobotNameBindingEnabled" in service
+            and "&& !expectedRobotName.trimmed().isEmpty()" in service
             and "frozenExpectation->robotName.compare(" in service
             and "if (productionExpectation.robotName.trimmed().isEmpty()" in service,
-            "fixed robot identity checks were weakened while making switches record-only")
+            "robot identity checks lost their expected comparison inputs")
     require("expectation.robotEndpoint.trimmed().isEmpty()" in service
             and "expectation.cameraSection.trimmed().isEmpty()" in service
             and "IsSha256Text(expectation.handEyeSha256)" in service,
@@ -473,17 +578,20 @@ def main() -> int:
     write_gate_start = service.index("bool WritePointCloudQualityGate(")
     write_gate_end = service.index("bool InvalidatePointCloudQualityGate(", write_gate_start)
     write_gate = service[write_gate_start:write_gate_end]
-    require("RequireProofReplacementActive(reportPath, error)" in write_gate,
-            "proof writer can publish outside an active denied replacement session")
+    require("settings.safetyGateProofIntegrityEnabled" in write_gate
+            and "PointCloudProofIntegrity::RequireProofReplacementActive(" in write_gate
+            and "reportPath, error)" in write_gate,
+            "enabled proof-integrity gate can publish outside an active denied replacement session")
 
     verify_gate_start = service.index("bool VerifyPointCloudQualityGate(")
     verify_gate_end = service.index("bool VerifyWeldPoseAuthorization(", verify_gate_start)
     verify_gate = service[verify_gate_start:verify_gate_end]
-    require(verify_gate.index("if (!verifyNotDenied())")
+    require(verify_gate.index("&& !verifyNotDenied())")
             < verify_gate.index("PointCloudProofIntegrity::ReadFileBounded("),
-            "production verifier reads proof bytes before checking the denial tombstone")
-    require("return verifyNotDenied();" in verify_gate,
-            "production verifier does not recheck denial after proof/context/input reads")
+            "enabled proof-integrity verifier reads proof bytes before checking the denial tombstone")
+    require("return !currentSettings.safetyGateProofIntegrityEnabled" in verify_gate
+            and "|| verifyNotDenied();" in verify_gate,
+            "enabled proof-integrity verifier does not recheck denial after proof/context/input reads")
 
     context_start = service.index("bool LoadValidatedRebuildPointCloudContext(")
     context_end = service.index("bool WritePointCloudQualityGate(", context_start)

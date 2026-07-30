@@ -91,7 +91,7 @@ def main() -> int:
             "continue gate still fails open on a missing or stale cached pose")
 
     direction = service.find("ApplyWeldDirectionToExecutionRecords(weldPosePreset, records);")
-    clip = service.find("ClipWeldPoseRecordsAtArcLength(records, resumeStartArcMm")
+    clip = service.find("ClipWeldPoseRecordsAtArcLength(", direction)
     require(0 <= direction < clip, "resume clipping occurs before execution direction is applied")
     for token in (
         "preserveInputRecords",

@@ -8834,7 +8834,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addMenuAction(managementProcessMenu, createManagementAction("工艺参数", [this, openInManagement]() { openInManagement([this]() { OpenWeldProcessDialog(); }); }));
 	addMenuAction(managementProcessMenu, createManagementAction("焊道补偿", [this, openInManagement]() { openInManagement([this]() { OpenWeldSeamCompDialog(); }); }));
 	addMenuAction(managementProcessMenu, createManagementAction("精测点云处理", [this]() { OpenPrecisePointCloudProcessingPage(); }));
-	addMenuAction(managementProcessMenu, createManagementAction("扫描安全门禁", [this]() { OpenScanSafetyGatePage(); }));
+	addMenuAction(managementProcessMenu, createManagementAction("流程与运动安全门禁", [this]() { OpenScanSafetyGatePage(); }));
 	addMenuAction(managementProcessMenu, createManagementAction("测量焊接参数", [this, openInManagement]() { openInManagement([this]() { OpenPreciseMeasureEditDialog(); }); }));
 
 	addMenuAction(managementCameraMenu, createManagementAction("相机参数", [this, openInManagement]() { openInManagement([this]() { OpenCameraParamDialog(); }); }));
@@ -12486,19 +12486,25 @@ void QtWidgetsApplication4::OpenPrecisePointCloudProcessingPage()
 
 void QtWidgetsApplication4::OpenScanSafetyGatePage()
 {
-	PageOpenTrace trace("扫描安全门禁");
-	if (!ValidateCurrentAccountSession(QStringLiteral("打开扫描安全门禁")))
+	PageOpenTrace trace("流程与运动安全门禁");
+	if (!ValidateCurrentAccountSession(QStringLiteral("打开流程与运动安全门禁")))
 	{
 		return;
 	}
 	if (RoleLevel(m_sCurrentUserRole) < RoleLevel(kRoleEngineer))
 	{
-		QMessageBox::information(this, "扫描安全门禁", "扫描安全门禁需要工程师或管理员权限。");
+		QMessageBox::information(
+			this,
+			"流程与运动安全门禁",
+			"流程与运动安全门禁需要工程师或管理员权限。");
 		return;
 	}
 	if (m_pManagementStack == nullptr)
 	{
-		QMessageBox::warning(this, "扫描安全门禁", "管理页面尚未初始化，无法嵌入扫描安全门禁页面。");
+		QMessageBox::warning(
+			this,
+			"流程与运动安全门禁",
+			"管理页面尚未初始化，无法嵌入流程与运动安全门禁页面。");
 		return;
 	}
 	if (m_pScanSafetyGatePage != nullptr)
@@ -12509,7 +12515,7 @@ void QtWidgetsApplication4::OpenScanSafetyGatePage()
 
 	const auto modifyGuard = [this]()
 	{
-		return ValidateCurrentAccountSession(QStringLiteral("保存扫描安全门禁配置"))
+		return ValidateCurrentAccountSession(QStringLiteral("保存流程与运动安全门禁配置"))
 			&& RoleLevel(m_sCurrentUserRole) >= RoleLevel(kRoleAdmin);
 	};
 	m_pScanSafetyGatePage = new ScanSafetyGateDialog(modifyGuard, m_pManagementStack);

@@ -62,6 +62,7 @@ private:
     QCheckBox* m_pCloudSampleCheck = nullptr;       // is_sample：SDK 库内降采样找平面（20260624 版新增，提速/降崩溃）
     QDoubleSpinBox* m_pCloudSampleSizeSpin = nullptr; // sample_size：降采样体素大小
     QDoubleSpinBox* m_pCloudAboveZSpin = nullptr;     // above_z：抬高值
+    QSpinBox* m_pCloudPixelNumSpin = nullptr;         // pixel_num：骨架短毛刺/短支路清理长度（像素）
     QSpinBox* m_pCloudDiscreteValueSpin = nullptr;
     QSpinBox* m_pCloudDilateValueSpin = nullptr;
     QSpinBox* m_pCloudErodeValueSpin = nullptr;
@@ -147,5 +148,23 @@ private:
     QCheckBox* m_pValidationOutputCheck = nullptr;
     QSpinBox* m_pValidationMinOutputPointSpin = nullptr;
     QDoubleSpinBox* m_pValidationMinOutputLengthRatioSpin = nullptr;
+    QCheckBox* m_pValidationSegmentHardLimitsCheck = nullptr;
+    QDoubleSpinBox* m_pValidationMinNonLapSegmentHardSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMinLapOrEndpointSegmentHardSpin = nullptr;
+    QCheckBox* m_pValidationFinalTrajectoryStepCheck = nullptr;
+    QDoubleSpinBox* m_pValidationMaxFinalPositionStepSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMaxFinalControllerEulerStepSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMaxFinalPhysicalOrientationStepSpin = nullptr;
+    QCheckBox* m_pValidationFinalLengthBindingCheck = nullptr;
+    QDoubleSpinBox* m_pValidationMinFinalLengthRatioSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMaxFinalLengthRatioSpin = nullptr;
+    QCheckBox* m_pValidationFinalTopologyBindingCheck = nullptr;
+    QDoubleSpinBox* m_pValidationMinFinalMatchedArcRatioSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMinFinalSourceUniqueCoverageRatioSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMinFinalSourceArcSpanRatioSpin = nullptr;
+    QCheckBox* m_pValidationFinalSourceBindingCheck = nullptr;
+    QDoubleSpinBox* m_pValidationMaxFinalSourceDisplacementSpin = nullptr;
+    QDoubleSpinBox* m_pValidationMaxFinalSourcePhysicalOrientationDeltaSpin = nullptr;
+    QCheckBox* m_pValidationFinalSemanticIntegrityCheck = nullptr;
     QPlainTextEdit* m_pLogText = nullptr;
 };

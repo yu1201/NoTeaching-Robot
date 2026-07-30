@@ -5,20 +5,18 @@
 #include <functional>
 
 class QCheckBox;
-class QComboBox;
-class QDoubleSpinBox;
 class QLabel;
 class QPushButton;
 class QScrollArea;
 class QShowEvent;
-class QSpinBox;
 class QTableWidget;
 class QString;
 
-// 管理页中的扫描安全门禁配置页。
+// 管理页中的流程与机器人运动安全门禁配置页。
 //
-// 页面允许工程师查看全部扫描质量和系统安全门禁；保存或载入安全默认值前必须通过
-// modifyGuard 的管理员身份复核。系统门禁开关只保存为审计记录，不改变正常生产流程。
+// 点云、焊道和最终轨迹的有效性检查统一由“测量参数/有效性检测”页面负责。
+// 本页只控制流程身份、证明链和机器人运动前复核；各开关会在生产校验点实际生效。
+// 保存或载入安全默认值前必须通过 modifyGuard 的管理员身份复核。
 class ScanSafetyGateDialog : public QDialog
 {
 public:
@@ -40,7 +38,6 @@ private:
     bool AuthorizeModification(const QString& actionName);
     void RestoreSafetyDefaults();
     void Save();
-    void UpdatePolicyUi();
     void UpdateSummary();
     void UpdateChangeWarning();
     void SetDirty(bool dirty);
@@ -55,36 +52,7 @@ private:
     QLabel* m_profileSummaryLabel = nullptr;
     QLabel* m_policySummaryLabel = nullptr;
     QLabel* m_proofSummaryLabel = nullptr;
-    QLabel* m_policyBoundaryLabel = nullptr;
     QLabel* m_changeWarningLabel = nullptr;
-
-    QComboBox* m_validationPolicyCombo = nullptr;
-
-    QCheckBox* m_coverageEnabledCheck = nullptr;
-    QSpinBox* m_minFinitePointCountSpin = nullptr;
-    QDoubleSpinBox* m_minProjectedSpanSpin = nullptr;
-
-    QCheckBox* m_continuityEnabledCheck = nullptr;
-    QDoubleSpinBox* m_minStationCoverageSpin = nullptr;
-    QDoubleSpinBox* m_minLongestContinuousSpin = nullptr;
-
-    QCheckBox* m_denoiseRatioEnabledCheck = nullptr;
-    QDoubleSpinBox* m_maxRejectedRatioSpin = nullptr;
-
-    QCheckBox* m_residualEnabledCheck = nullptr;
-    QDoubleSpinBox* m_maxMedianResidualSpin = nullptr;
-    QDoubleSpinBox* m_maxP95ResidualSpin = nullptr;
-    QDoubleSpinBox* m_residualInlierThresholdSpin = nullptr;
-    QDoubleSpinBox* m_minResidualInlierRatioSpin = nullptr;
-
-    QCheckBox* m_keyPointEnabledCheck = nullptr;
-    QSpinBox* m_minKeyPointCountSpin = nullptr;
-    QSpinBox* m_minCornerCountSpin = nullptr;
-    QDoubleSpinBox* m_minSegmentLengthSpin = nullptr;
-
-    QCheckBox* m_outputEnabledCheck = nullptr;
-    QSpinBox* m_minOutputPointCountSpin = nullptr;
-    QDoubleSpinBox* m_minOutputLengthRatioSpin = nullptr;
 
     QCheckBox* m_proofIntegrityGateCheck = nullptr;
     QCheckBox* m_productionPurposeGateCheck = nullptr;

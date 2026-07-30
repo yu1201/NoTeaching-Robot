@@ -31,6 +31,22 @@ AUTH_SEMANTIC_VERSION = "3"
 DPAPI_PREFIX = "dpapi:user:v1:"
 DPAPI_BACKUP_MAGIC = b"NoTeaching-Robot ConfigStore DPAPI backup v1\n"
 DPAPI_BACKUP_PURPOSE = "configstore-database-backup-v1"
+DEBUG_TRANSFER_PRIVATE_KEY_MAGIC = (
+    b"NoTeaching-Robot ConfigStore debug transfer private key v1\n"
+)
+DEBUG_TRANSFER_PRIVATE_KEY_PURPOSE = "configstore-debug-transfer-private-key-v1"
+DEBUG_TRANSFER_PACKAGE_MAGIC = (
+    b"NoTeaching-Robot ConfigStore debug transfer package v1\n"
+)
+DEBUG_TRANSFER_PACKAGE_FORMAT = "configstore-debug-transfer-v1"
+DEBUG_TRANSFER_PROTECTION = "debug-transfer-envelope-v1"
+DEBUG_TRANSFER_VALUE_PREFIX = "debug-transfer:plain:v1:"
+DEBUG_TRANSFER_META_KEYS = {
+    "debug_transfer_format",
+    "debug_transfer_recipient_sha256",
+    "debug_transfer_setting_count",
+    "debug_transfer_source_sha256",
+}
 ATOMIC_REPLACE_TRANSACTION_FORMAT = "NoTeaching-Robot-Atomic-Replace-v1"
 ATOMIC_REPLACE_TRANSACTION_SUFFIX = ".atomic-transaction-v1"
 SCRUB_STATE_KEY = "legacy_credential_scrub_state"
@@ -3957,6 +3973,732 @@ def _restore_dpapi_database_backup_anchored(
     print(f"Restored DPAPI database backup: {db_path}")
 
 
+def _debug_transfer_crypto():
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import (
+            padding as asymmetric_padding,
+            rsa,
+        )
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    except ImportError as exc:
+        raise RuntimeError(
+            "Debug database transfer requires the bundled cryptography runtime"
+        ) from exc
+    return hashes, serialization, asymmetric_padding, rsa, AESGCM
+
+
+def _strict_base64_decode(text: object, label: str) -> bytes:
+    if not isinstance(text, str) or not text:
+        raise ValueError(f"{label} is missing")
+    try:
+        return base64.b64decode(text.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error, ValueError) as exc:
+        raise ValueError(f"{label} is not canonical base64") from exc
+
+
+def _debug_transfer_public_fingerprint(public_key: object) -> str:
+    _hashes, serialization, _padding, _rsa, _aesgcm = _debug_transfer_crypto()
+    public_der = public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return hashlib.sha256(public_der).hexdigest()
+
+
+def _read_locked_file(path: Path, label: str) -> bytes:
+    lexical = _absolute_lexical_path(path)
+    _absolute_regular_nonreparse_file(lexical, label)
+    _reject_pending_atomic_replacement(lexical)
+    with _LockedWin32ReadFile(
+        lexical, label, require_single_link=True
+    ) as locked:
+        content = locked.read_bytes()
+        locked.ensure_single_link()
+        if not hmac.compare_digest(
+            hashlib.sha256(content).digest(),
+            hashlib.sha256(locked.read_bytes()).digest(),
+        ):
+            raise ValueError(f"{label} changed during read-back")
+        return content
+
+
+def _new_debug_transfer_path(path: Path, label: str) -> Path:
+    if not path.is_absolute():
+        raise ValueError(f"{label} path must be absolute")
+    lexical = _absolute_lexical_path(path)
+    if not lexical.parent.is_dir():
+        raise ValueError(f"{label} parent directory does not exist")
+    if os.path.lexists(lexical):
+        raise FileExistsError(f"{label} already exists: {lexical}")
+    _reject_pending_atomic_replacement(lexical)
+    return lexical
+
+
+def create_debug_transfer_key(
+    public_key_path: Path,
+    private_key_path: Path,
+) -> None:
+    public_path = _new_debug_transfer_path(
+        public_key_path, "Debug transfer public key"
+    )
+    private_path = _new_debug_transfer_path(
+        private_key_path, "Debug transfer private key"
+    )
+    if _same_lexical_path(public_path, private_path):
+        raise ValueError("Debug transfer public and private key paths must differ")
+
+    _hashes, serialization, _padding, rsa, _aesgcm = _debug_transfer_crypto()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+    public_key = private_key.public_key()
+    public_bytes = public_key.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    private_der = private_key.private_bytes(
+        serialization.Encoding.DER,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    fingerprint = _debug_transfer_public_fingerprint(public_key)
+    protected_private = _dpapi_crypt(
+        private_der, DEBUG_TRANSFER_PRIVATE_KEY_PURPOSE, True
+    )
+    private_content = (
+        DEBUG_TRANSFER_PRIVATE_KEY_MAGIC
+        + fingerprint.encode("ascii")
+        + b"\n"
+        + base64.b64encode(protected_private)
+        + b"\n"
+    )
+
+    _atomic_replace_bytes(public_path, public_bytes, require_absent=True)
+    _atomic_replace_bytes(private_path, private_content, require_absent=True)
+    if not hmac.compare_digest(
+        hashlib.sha256(_read_locked_file(
+            public_path, "Created debug transfer public key"
+        )).digest(),
+        hashlib.sha256(public_bytes).digest(),
+    ) or not hmac.compare_digest(
+        hashlib.sha256(_read_locked_file(
+            private_path, "Created debug transfer private key"
+        )).digest(),
+        hashlib.sha256(private_content).digest(),
+    ):
+        raise ValueError("Debug transfer key read-back verification failed")
+
+    print(f"Created debug transfer public key: {public_path}")
+    print(f"Created CurrentUser-DPAPI private key: {private_path}")
+    print(f"Debug transfer recipient SHA256: {fingerprint}")
+
+
+def _load_debug_transfer_public_key(path: Path) -> tuple[object, str]:
+    content = _read_locked_file(path, "Debug transfer public key")
+    _hashes, serialization, _padding, rsa, _aesgcm = _debug_transfer_crypto()
+    try:
+        public_key = serialization.load_pem_public_key(content)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Debug transfer public key cannot be parsed") from exc
+    if (
+        not isinstance(public_key, rsa.RSAPublicKey)
+        or public_key.key_size < 3072
+        or public_key.public_numbers().e != 65537
+    ):
+        raise ValueError("Debug transfer public key must be RSA-3072 or stronger")
+    return public_key, _debug_transfer_public_fingerprint(public_key)
+
+
+def _load_debug_transfer_private_key(path: Path) -> tuple[object, str]:
+    content = _read_locked_file(path, "Debug transfer private key")
+    if not content.startswith(DEBUG_TRANSFER_PRIVATE_KEY_MAGIC):
+        raise ValueError("Not a supported debug transfer private key")
+    lines = content[len(DEBUG_TRANSFER_PRIVATE_KEY_MAGIC):].splitlines()
+    if (
+        len(lines) != 2
+        or re.fullmatch(rb"[0-9a-f]{64}", lines[0]) is None
+    ):
+        raise ValueError("Debug transfer private key envelope is invalid")
+    protected = _strict_base64_decode(
+        lines[1].decode("ascii", errors="strict"),
+        "Debug transfer private key payload",
+    )
+    try:
+        private_der = _dpapi_crypt(
+            protected, DEBUG_TRANSFER_PRIVATE_KEY_PURPOSE, False
+        )
+    except OSError as exc:
+        raise ValueError(
+            "Debug transfer private key is not bound to this Windows user"
+        ) from exc
+
+    _hashes, serialization, _padding, rsa, _aesgcm = _debug_transfer_crypto()
+    try:
+        private_key = serialization.load_der_private_key(
+            private_der, password=None
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Debug transfer private key cannot be parsed") from exc
+    if (
+        not isinstance(private_key, rsa.RSAPrivateKey)
+        or private_key.key_size < 3072
+        or private_key.public_key().public_numbers().e != 65537
+    ):
+        raise ValueError("Debug transfer private key must be RSA-3072 or stronger")
+    fingerprint = _debug_transfer_public_fingerprint(private_key.public_key())
+    if not hmac.compare_digest(fingerprint, lines[0].decode("ascii")):
+        raise ValueError("Debug transfer private key fingerprint mismatch")
+    return private_key, fingerprint
+
+
+def _debug_transfer_known_auth_drift(database_bytes: bytes) -> bool:
+    snapshot = _canonical_sqlite_snapshot_bytes(database_bytes)
+    with closing(sqlite3.connect(":memory:")) as connection:
+        if not hasattr(connection, "deserialize"):
+            raise RuntimeError(
+                "This Python SQLite build cannot inspect a private debug snapshot"
+            )
+        connection.deserialize(snapshot)
+        return _has_known_auth3_login_preference_type_drift(connection)
+
+
+def _prepare_debug_transfer_snapshot(
+    source_content: bytes,
+    source_sha256: str,
+    recipient_sha256: str,
+) -> tuple[bytes, int]:
+    snapshot = _canonical_sqlite_snapshot_bytes(source_content)
+    with closing(sqlite3.connect(":memory:")) as connection:
+        if not hasattr(connection, "deserialize") or not hasattr(
+            connection, "serialize"
+        ):
+            raise RuntimeError(
+                "This Python SQLite build cannot prepare a private debug snapshot"
+            )
+        connection.deserialize(snapshot)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            metadata = dict(connection.execute(
+                "SELECT key, value FROM meta"
+            ).fetchall())
+            if (
+                current_schema_version(connection) != SCHEMA_VERSION
+                or not has_current_schema(connection)
+                or str(metadata.get("sensitive_protection", ""))
+                != "dpapi-current-user-v1"
+                or any(key in metadata for key in DEBUG_TRANSFER_META_KEYS)
+            ):
+                raise ValueError(
+                    "Source database is not a clean current ConfigStore"
+                )
+
+            transferred = 0
+            rows = connection.execute(
+                """
+                SELECT scope_type, scope_id, module, key_name, value_text
+                FROM settings
+                ORDER BY scope_type, scope_id, module, key_name
+                """
+            ).fetchall()
+            for scope_type, scope_id, module, key, stored in rows:
+                stored_text_value = str(stored)
+                if not stored_text_value.startswith(DPAPI_PREFIX):
+                    continue
+                purpose = protection_purpose(
+                    str(scope_type), str(scope_id), str(module), str(key)
+                )
+                plain = unprotect_sensitive_text(stored_text_value, purpose)
+                if plain is None:
+                    raise ValueError(
+                        "A field DPAPI setting cannot be decrypted by the "
+                        "current Windows user"
+                    )
+                transfer_value = (
+                    DEBUG_TRANSFER_VALUE_PREFIX
+                    + base64.b64encode(plain.encode("utf-8")).decode("ascii")
+                )
+                cursor = connection.execute(
+                    """
+                    UPDATE settings SET value_text=?
+                    WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?
+                      AND value_text=?
+                    """,
+                    (
+                        transfer_value,
+                        str(scope_type),
+                        str(scope_id),
+                        str(module),
+                        str(key),
+                        stored_text_value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError(
+                        "A field DPAPI setting changed during transfer preparation"
+                    )
+                transferred += 1
+
+            connection.execute(
+                "UPDATE meta SET value=? WHERE key='sensitive_protection'",
+                (DEBUG_TRANSFER_PROTECTION,),
+            )
+            transfer_meta = {
+                "debug_transfer_format": DEBUG_TRANSFER_PACKAGE_FORMAT,
+                "debug_transfer_recipient_sha256": recipient_sha256,
+                "debug_transfer_setting_count": str(transferred),
+                "debug_transfer_source_sha256": source_sha256,
+            }
+            for key, value in transfer_meta.items():
+                connection.execute(
+                    "INSERT INTO meta(key, value) VALUES(?, ?)",
+                    (key, value),
+                )
+            remaining_dpapi = connection.execute(
+                "SELECT COUNT(*) FROM settings WHERE value_text LIKE ?",
+                (DPAPI_PREFIX + "%",),
+            ).fetchone()
+            if remaining_dpapi is None or int(remaining_dpapi[0]) != 0:
+                raise ValueError(
+                    "Debug transfer snapshot retains field DPAPI values"
+                )
+            integrity = connection.execute("PRAGMA integrity_check").fetchall()
+            if integrity != [("ok",)]:
+                raise ValueError(
+                    f"Debug transfer snapshot failed integrity_check: {integrity}"
+                )
+            connection.commit()
+            return (
+                _canonical_sqlite_snapshot_bytes(connection.serialize()),
+                transferred,
+            )
+        except BaseException:
+            connection.rollback()
+            raise
+
+
+def export_debug_database(
+    db_path: Path,
+    package_path: Path,
+    public_key_path: Path,
+) -> None:
+    database_path = _absolute_lexical_path(db_path)
+    package = _new_debug_transfer_path(
+        package_path, "Debug database transfer package"
+    )
+    public_key, recipient_sha256 = _load_debug_transfer_public_key(
+        public_key_path
+    )
+    _absolute_regular_nonreparse_file(
+        database_path, "Field ConfigStore database"
+    )
+    _reject_pending_atomic_replacement(database_path)
+    _reject_sqlite_sidecars(database_path, "Field ConfigStore database")
+
+    with _LockedWin32ReadFile(
+        database_path,
+        "Field ConfigStore database",
+        require_single_link=True,
+    ) as locked_database:
+        source_content = locked_database.read_bytes()
+        source_sha256 = hashlib.sha256(source_content).hexdigest()
+        known_drift = _debug_transfer_known_auth_drift(source_content)
+        verify_current_database(
+            database_path,
+            allow_known_auth3_login_preference_drift=known_drift,
+        )
+        locked_database.ensure_single_link()
+        if not hmac.compare_digest(
+            hashlib.sha256(source_content).digest(),
+            hashlib.sha256(locked_database.read_bytes()).digest(),
+        ):
+            raise ValueError(
+                "Field ConfigStore changed during debug export"
+            )
+        portable_database, transferred = _prepare_debug_transfer_snapshot(
+            source_content, source_sha256, recipient_sha256
+        )
+        locked_database.ensure_single_link()
+
+    hashes, _serialization, asymmetric_padding, _rsa, AESGCM = (
+        _debug_transfer_crypto()
+    )
+    header = {
+        "createdUtc": _dt.datetime.now(_dt.timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+        "format": DEBUG_TRANSFER_PACKAGE_FORMAT,
+        "knownAuth3LoginPreferenceDrift": known_drift,
+        "portableDatabaseSha256": hashlib.sha256(
+            portable_database
+        ).hexdigest(),
+        "recipientKeySha256": recipient_sha256,
+        "sourceDatabaseSha256": source_sha256,
+        "transferredSettingCount": transferred,
+    }
+    associated_data = json.dumps(
+        header, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("ascii")
+    content_key = os.urandom(32)
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(content_key).encrypt(
+        nonce, portable_database, associated_data
+    )
+    wrapped_key = public_key.encrypt(
+        content_key,
+        asymmetric_padding.OAEP(
+            mgf=asymmetric_padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=DEBUG_TRANSFER_PACKAGE_FORMAT.encode("ascii"),
+        ),
+    )
+    payload = dict(header)
+    payload.update({
+        "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        "nonce": base64.b64encode(nonce).decode("ascii"),
+        "wrappedKey": base64.b64encode(wrapped_key).decode("ascii"),
+    })
+    package_content = (
+        DEBUG_TRANSFER_PACKAGE_MAGIC
+        + json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        + b"\n"
+    )
+    _atomic_replace_bytes(package, package_content, require_absent=True)
+    if not hmac.compare_digest(
+        hashlib.sha256(_read_locked_file(
+            package, "Created debug database transfer package"
+        )).digest(),
+        hashlib.sha256(package_content).digest(),
+    ):
+        raise ValueError("Debug database transfer package read-back failed")
+
+    print(f"Created encrypted debug database package: {package}")
+    print(f"Source database SHA256: {source_sha256}")
+    print(f"Transferred DPAPI settings: {transferred}")
+    print(f"Debug transfer recipient SHA256: {recipient_sha256}")
+
+
+def _decrypt_debug_database_package(
+    package_path: Path,
+    private_key_path: Path,
+) -> tuple[bytes, dict[str, object]]:
+    content = _read_locked_file(
+        package_path, "Debug database transfer package"
+    )
+    if not content.startswith(DEBUG_TRANSFER_PACKAGE_MAGIC):
+        raise ValueError("Not a supported debug database transfer package")
+    try:
+        payload = json.loads(
+            content[len(DEBUG_TRANSFER_PACKAGE_MAGIC):].decode("ascii")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Debug database transfer package is invalid") from exc
+    expected_keys = {
+        "ciphertext",
+        "createdUtc",
+        "format",
+        "knownAuth3LoginPreferenceDrift",
+        "nonce",
+        "portableDatabaseSha256",
+        "recipientKeySha256",
+        "sourceDatabaseSha256",
+        "transferredSettingCount",
+        "wrappedKey",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise ValueError("Debug database transfer package fields are invalid")
+    if (
+        payload.get("format") != DEBUG_TRANSFER_PACKAGE_FORMAT
+        or not isinstance(payload.get("createdUtc"), str)
+        or not isinstance(
+            payload.get("knownAuth3LoginPreferenceDrift"), bool
+        )
+        or not isinstance(payload.get("transferredSettingCount"), int)
+        or int(payload["transferredSettingCount"]) < 0
+    ):
+        raise ValueError("Debug database transfer package header is invalid")
+    for key in (
+        "portableDatabaseSha256",
+        "recipientKeySha256",
+        "sourceDatabaseSha256",
+    ):
+        if (
+            not isinstance(payload.get(key), str)
+            or re.fullmatch(r"[0-9a-f]{64}", str(payload[key])) is None
+        ):
+            raise ValueError(
+                f"Debug database transfer package {key} is invalid"
+            )
+
+    private_key, private_fingerprint = _load_debug_transfer_private_key(
+        private_key_path
+    )
+    if not hmac.compare_digest(
+        private_fingerprint, str(payload["recipientKeySha256"])
+    ):
+        raise ValueError(
+            "Debug database package was encrypted for a different recipient key"
+        )
+    header = {
+        key: payload[key]
+        for key in (
+            "createdUtc",
+            "format",
+            "knownAuth3LoginPreferenceDrift",
+            "portableDatabaseSha256",
+            "recipientKeySha256",
+            "sourceDatabaseSha256",
+            "transferredSettingCount",
+        )
+    }
+    associated_data = json.dumps(
+        header, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("ascii")
+    wrapped_key = _strict_base64_decode(
+        payload["wrappedKey"], "Debug package wrapped key"
+    )
+    nonce = _strict_base64_decode(
+        payload["nonce"], "Debug package nonce"
+    )
+    ciphertext = _strict_base64_decode(
+        payload["ciphertext"], "Debug package ciphertext"
+    )
+    if len(nonce) != 12:
+        raise ValueError("Debug package AES-GCM nonce length is invalid")
+
+    hashes, _serialization, asymmetric_padding, _rsa, AESGCM = (
+        _debug_transfer_crypto()
+    )
+    try:
+        content_key = private_key.decrypt(
+            wrapped_key,
+            asymmetric_padding.OAEP(
+                mgf=asymmetric_padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=DEBUG_TRANSFER_PACKAGE_FORMAT.encode("ascii"),
+            ),
+        )
+        portable_database = AESGCM(content_key).decrypt(
+            nonce, ciphertext, associated_data
+        )
+    except Exception as exc:
+        raise ValueError(
+            "Debug database package authentication or decryption failed"
+        ) from exc
+    if not hmac.compare_digest(
+        hashlib.sha256(portable_database).hexdigest(),
+        str(payload["portableDatabaseSha256"]),
+    ):
+        raise ValueError("Debug database package plaintext hash mismatch")
+    _verify_serialized_sqlite_integrity(portable_database)
+    return portable_database, payload
+
+
+def _rebind_debug_transfer_snapshot(
+    portable_database: bytes,
+    package_header: dict[str, object],
+) -> tuple[bytes, int, bool]:
+    snapshot = _canonical_sqlite_snapshot_bytes(portable_database)
+    with closing(sqlite3.connect(":memory:")) as connection:
+        if not hasattr(connection, "deserialize") or not hasattr(
+            connection, "serialize"
+        ):
+            raise RuntimeError(
+                "This Python SQLite build cannot rebind a private debug snapshot"
+            )
+        connection.deserialize(snapshot)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            metadata = dict(connection.execute(
+                "SELECT key, value FROM meta"
+            ).fetchall())
+            expected_count = int(package_header["transferredSettingCount"])
+            if (
+                current_schema_version(connection) != SCHEMA_VERSION
+                or not has_current_schema(connection)
+                or str(metadata.get("sensitive_protection", ""))
+                != DEBUG_TRANSFER_PROTECTION
+                or str(metadata.get("debug_transfer_format", ""))
+                != DEBUG_TRANSFER_PACKAGE_FORMAT
+                or str(metadata.get("debug_transfer_recipient_sha256", ""))
+                != str(package_header["recipientKeySha256"])
+                or str(metadata.get("debug_transfer_source_sha256", ""))
+                != str(package_header["sourceDatabaseSha256"])
+                or str(metadata.get("debug_transfer_setting_count", ""))
+                != str(expected_count)
+            ):
+                raise ValueError(
+                    "Debug database snapshot provenance is incomplete"
+                )
+            if connection.execute(
+                "SELECT COUNT(*) FROM settings WHERE value_text LIKE ?",
+                (DPAPI_PREFIX + "%",),
+            ).fetchone() != (0,):
+                raise ValueError(
+                    "Debug database snapshot contains foreign DPAPI values"
+                )
+
+            rows = connection.execute(
+                """
+                SELECT scope_type, scope_id, module, key_name, value_text
+                FROM settings
+                WHERE value_text LIKE ?
+                ORDER BY scope_type, scope_id, module, key_name
+                """,
+                (DEBUG_TRANSFER_VALUE_PREFIX + "%",),
+            ).fetchall()
+            if len(rows) != expected_count:
+                raise ValueError(
+                    "Debug database transferred-setting count mismatch"
+                )
+            for scope_type, scope_id, module, key, stored in rows:
+                stored_text_value = str(stored)
+                encoded = stored_text_value[len(DEBUG_TRANSFER_VALUE_PREFIX):]
+                plain_bytes = _strict_base64_decode(
+                    encoded, "Debug transferred setting"
+                )
+                try:
+                    plain = plain_bytes.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(
+                        "Debug transferred setting is not UTF-8"
+                    ) from exc
+                purpose = protection_purpose(
+                    str(scope_type), str(scope_id), str(module), str(key)
+                )
+                local_dpapi = protect_sensitive_text(plain, purpose)
+                cursor = connection.execute(
+                    """
+                    UPDATE settings SET value_text=?, encrypted=1
+                    WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?
+                      AND value_text=?
+                    """,
+                    (
+                        local_dpapi,
+                        str(scope_type),
+                        str(scope_id),
+                        str(module),
+                        str(key),
+                        stored_text_value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError(
+                        "A debug transferred setting changed during local rebind"
+                    )
+
+            connection.execute(
+                "UPDATE meta SET value='dpapi-current-user-v1' "
+                "WHERE key='sensitive_protection'"
+            )
+            connection.executemany(
+                "DELETE FROM meta WHERE key=?",
+                [(key,) for key in sorted(DEBUG_TRANSFER_META_KEYS)],
+            )
+            remaining_transfer = connection.execute(
+                "SELECT COUNT(*) FROM settings WHERE value_text LIKE ?",
+                (DEBUG_TRANSFER_VALUE_PREFIX + "%",),
+            ).fetchone()
+            if remaining_transfer != (0,):
+                raise ValueError(
+                    "Local debug database retains transfer plaintext markers"
+                )
+            integrity = connection.execute("PRAGMA integrity_check").fetchall()
+            if integrity != [("ok",)]:
+                raise ValueError(
+                    f"Local debug database failed integrity_check: {integrity}"
+                )
+            known_drift = _has_known_auth3_login_preference_type_drift(
+                connection
+            )
+            if known_drift != bool(
+                package_header["knownAuth3LoginPreferenceDrift"]
+            ):
+                raise ValueError(
+                    "Debug database authentication-drift provenance changed"
+                )
+            connection.commit()
+            return (
+                _canonical_sqlite_snapshot_bytes(connection.serialize()),
+                len(rows),
+                known_drift,
+            )
+        except BaseException:
+            connection.rollback()
+            raise
+
+
+def import_debug_database(
+    package_path: Path,
+    db_path: Path,
+    private_key_path: Path,
+) -> None:
+    database_path = _new_debug_transfer_path(
+        db_path, "Local debug ConfigStore database"
+    )
+    _reject_sqlite_sidecars(
+        database_path, "Local debug ConfigStore database"
+    )
+    portable_database, header = _decrypt_debug_database_package(
+        package_path, private_key_path
+    )
+    local_database, rebound_count, known_drift = (
+        _rebind_debug_transfer_snapshot(portable_database, header)
+    )
+    staging_path = database_path.with_name(
+        f".{database_path.name}.debug-import-{os.urandom(16).hex()}.tmp"
+    )
+    _new_debug_transfer_path(
+        staging_path, "Local debug ConfigStore verification staging"
+    )
+    try:
+        _atomic_replace_bytes(
+            staging_path,
+            local_database,
+            require_absent=True,
+            sqlite_sidecar_base=staging_path,
+        )
+        verify_current_database(
+            staging_path,
+            allow_known_auth3_login_preference_drift=known_drift,
+        )
+        staged_content = _read_locked_file(
+            staging_path, "Verified local debug ConfigStore staging"
+        )
+        if not hmac.compare_digest(
+            hashlib.sha256(staged_content).digest(),
+            hashlib.sha256(local_database).digest(),
+        ):
+            raise ValueError(
+                "Local debug ConfigStore staging bytes changed"
+            )
+        _atomic_replace_bytes(
+            database_path,
+            staged_content,
+            require_absent=True,
+            sqlite_sidecar_base=database_path,
+        )
+        verify_current_database(
+            database_path,
+            allow_known_auth3_login_preference_drift=known_drift,
+        )
+    finally:
+        if os.path.lexists(staging_path):
+            os.unlink(staging_path)
+
+    print(f"Imported locally rebound debug database: {database_path}")
+    print(f"Source database SHA256: {header['sourceDatabaseSha256']}")
+    print(f"Rebound DPAPI settings: {rebound_count}")
+    if known_drift:
+        print(
+            "Imported database retains the known auth3 login-preference "
+            "type drift so the local automatic-repair path can be reproduced."
+        )
+
+
 def decode_stored_text(
     stored: str,
     encrypted: int | str | None,
@@ -7708,6 +8450,49 @@ def main() -> None:
         help="Read-only verification of a current ConfigStore database",
     )
     parser.add_argument(
+        "--create-debug-transfer-key",
+        action="store_true",
+        help=(
+            "Create an RSA recipient public key and a CurrentUser-DPAPI "
+            "private key for encrypted field-database reproduction"
+        ),
+    )
+    parser.add_argument(
+        "--export-debug-database",
+        type=Path,
+        default=None,
+        metavar="PACKAGE",
+        help=(
+            "On the field PC, decrypt --db with its owning Windows user and "
+            "write an end-to-end encrypted reproduction package"
+        ),
+    )
+    parser.add_argument(
+        "--import-debug-database",
+        type=Path,
+        default=None,
+        metavar="PACKAGE",
+        help=(
+            "On the developer PC, decrypt a reproduction package and rebind "
+            "its protected settings into the non-existing --db"
+        ),
+    )
+    parser.add_argument(
+        "--debug-public-key",
+        type=Path,
+        default=None,
+        help="Absolute RSA public-key path for debug key creation or field export",
+    )
+    parser.add_argument(
+        "--debug-private-key",
+        type=Path,
+        default=None,
+        help=(
+            "Absolute CurrentUser-DPAPI private-key path for debug key "
+            "creation or local import"
+        ),
+    )
+    parser.add_argument(
         "--verify-installer-state",
         action="store_true",
         help=(
@@ -7732,6 +8517,72 @@ def main() -> None:
         help="Print the SHA256 of the source embedded in this executable and exit",
     )
     args = parser.parse_args()
+
+    debug_mode_count = sum((
+        bool(args.create_debug_transfer_key),
+        args.export_debug_database is not None,
+        args.import_debug_database is not None,
+    ))
+    if debug_mode_count > 1:
+        parser.error("Debug database transfer modes are mutually exclusive")
+    if debug_mode_count:
+        common_incompatible = (
+            args.source is not None
+            or args.overwrite
+            or args.encrypt
+            or args.scrub_legacy_credentials
+            or args.defer_credential_scrub
+            or args.installer_staging
+            or args.restore_dpapi_backup is not None
+            or args.verify_dpapi_backup_against is not None
+            or args.upgrade_backup is not None
+            or args.verify_current
+            or args.verify_installer_state
+            or args.encoding is not None
+            or args.allow_mojibake
+            or args.print_source_sha256
+        )
+        if common_incompatible:
+            parser.error(
+                "Debug database transfer cannot be combined with migration, "
+                "overwrite, restore, or verify modes"
+            )
+        if args.create_debug_transfer_key:
+            if (
+                args.db is not None
+                or args.debug_public_key is None
+                or args.debug_private_key is None
+            ):
+                parser.error(
+                    "--create-debug-transfer-key requires "
+                    "--debug-public-key and --debug-private-key, without --db"
+                )
+        elif args.export_debug_database is not None:
+            if (
+                args.db is None
+                or args.debug_public_key is None
+                or args.debug_private_key is not None
+            ):
+                parser.error(
+                    "--export-debug-database requires --db and "
+                    "--debug-public-key only"
+                )
+        elif (
+            args.db is None
+            or args.debug_private_key is None
+            or args.debug_public_key is not None
+        ):
+            parser.error(
+                "--import-debug-database requires --db and "
+                "--debug-private-key only"
+            )
+    elif (
+        args.debug_public_key is not None
+        or args.debug_private_key is not None
+    ):
+        parser.error(
+            "Debug transfer key paths require a debug database transfer mode"
+        )
 
     if args.verify_dpapi_backup_against is not None:
         incompatible = (
@@ -7799,6 +8650,25 @@ def main() -> None:
     should_pause = args.pause or launched_from_explorer()
     exit_code = 0
     try:
+        if args.create_debug_transfer_key:
+            create_debug_transfer_key(
+                args.debug_public_key, args.debug_private_key
+            )
+            return
+        if args.export_debug_database is not None:
+            export_debug_database(
+                Path(args.db),
+                args.export_debug_database,
+                args.debug_public_key,
+            )
+            return
+        if args.import_debug_database is not None:
+            import_debug_database(
+                args.import_debug_database,
+                Path(args.db),
+                args.debug_private_key,
+            )
+            return
         source = Path(args.source) if args.source is not None else Path("Data")
         db = Path(args.db) if args.db else source / "ConfigStore.db"
         if args.verify_dpapi_backup_against is not None:

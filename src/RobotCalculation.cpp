@@ -4864,12 +4864,14 @@ bool ValidateGeometryKeyPoints(
     QStringList* warnings,
     QString* error)
 {
-    if (!params.validationKeyPointEnabled)
+    if (!params.validationKeyPointEnabled
+        && !params.validationSegmentHardLimitsEnabled)
     {
         return true;
     }
 
-    if (keyPoints.size() < params.validationMinKeyPointCount)
+    if (params.validationKeyPointEnabled
+        && keyPoints.size() < params.validationMinKeyPointCount)
     {
         if (error != nullptr)
         {
@@ -4899,7 +4901,8 @@ bool ValidateGeometryKeyPoints(
             ++cornerCount;
         }
     }
-    if (startCount != 1 || endCount != 1)
+    if (params.validationKeyPointEnabled
+        && (startCount != 1 || endCount != 1))
     {
         if (error != nullptr)
         {
@@ -4909,7 +4912,8 @@ bool ValidateGeometryKeyPoints(
         }
         return false;
     }
-    if (cornerCount < params.validationMinCornerCount)
+    if (params.validationKeyPointEnabled
+        && cornerCount < params.validationMinCornerCount)
     {
         if (error != nullptr)
         {
@@ -4928,10 +4932,14 @@ bool ValidateGeometryKeyPoints(
         const bool isEndpointAdjacent =
             keyPoints[index - 1].type == RobotCalculation::LowerWeldPointType::Start
             || keyPoints[index].type == RobotCalculation::LowerWeldPointType::End;
-        // SDK 直出不提供搭接语义；首尾裁剪却可能合法地产生 2.5mm 端段。
-        // 因此仅“成对搭接”或“紧邻唯一端点”的段使用 0.25mm 重合硬门限，内部非搭接仍保持 3mm。
-        const double hardMinimumMm = (isLapStepPair || isEndpointAdjacent) ? 0.25 : 3.0;
-        if (!std::isfinite(segmentLength) || segmentLength < hardMinimumMm)
+        // SDK 直出不提供搭接语义；首尾裁剪可能合法地产生短端段。
+        // 成对搭接/紧邻唯一端点与内部非搭接分别使用界面配置的门限。
+        const double hardMinimumMm = (isLapStepPair || isEndpointAdjacent)
+            ? params.validationMinLapOrEndpointSegmentHardMm
+            : params.validationMinNonLapSegmentHardMm;
+        if (!std::isfinite(segmentLength)
+            || (params.validationSegmentHardLimitsEnabled
+                && segmentLength < hardMinimumMm))
         {
             if (error != nullptr)
             {
@@ -4943,7 +4951,8 @@ bool ValidateGeometryKeyPoints(
             }
             return false;
         }
-        if (!isLapStepPair
+        if (params.validationKeyPointEnabled
+            && !isLapStepPair
             && params.validationMinSegmentLengthMm > hardMinimumMm
             && segmentLength < params.validationMinSegmentLengthMm
             && warnings != nullptr)
@@ -4958,7 +4967,9 @@ bool ValidateGeometryKeyPoints(
 
     for (int index = 1; index < keyProjections.size(); ++index)
     {
-        if (keyProjections[index].x() <= keyProjections[index - 1].x() + 1e-6)
+        if (params.validationKeyPointEnabled
+            && keyProjections[index].x()
+                <= keyProjections[index - 1].x() + 1e-6)
         {
             if (error != nullptr)
             {
@@ -5094,14 +5105,14 @@ bool ValidateGeometryOutput(
                 (point - classification.points[index - 1].point).norm());
         }
     }
-    constexpr double kHardMaxOutputStepMm = 50.0;
-    if (maxOutputStepMm > kHardMaxOutputStepMm)
+    if (params.validationFinalTrajectoryStepEnabled
+        && maxOutputStepMm > params.validationMaxFinalPositionStepMm)
     {
         if (error != nullptr)
         {
             *error = QString("点云有效性检测失败：输出焊道相邻点最大跳距 %1 mm，超过结构硬门限 %2 mm。")
                 .arg(maxOutputStepMm, 0, 'f', 3)
-                .arg(kHardMaxOutputStepMm, 0, 'f', 1);
+                .arg(params.validationMaxFinalPositionStepMm, 0, 'f', 3);
         }
         return false;
     }
