@@ -2400,11 +2400,12 @@ void WorkpieceMeshViewerDialog::ShowClusterPanel()
     voxSpin->setSingleStep(0.5);
     voxSpin->setDecimals(2);
     voxSpin->setValue(3.0);
-    voxSpin->setSuffix(" mm");
     QSpinBox* minSpin = new QSpinBox(dlg);
     minSpin->setRange(1, 100000);
     minSpin->setValue(30);
-    form->addRow("体素尺寸", voxSpin);
+    form->addRow(
+        "体素尺寸",
+        CreateExternalUnitEditor(voxSpin, QStringLiteral("mm"), dlg));
     form->addRow("最小簇点数（小于此判为飞点）", minSpin);
     root->addLayout(form);
 

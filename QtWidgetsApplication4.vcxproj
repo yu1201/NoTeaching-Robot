@@ -257,6 +257,7 @@
     <ClInclude Include="include\ScanSafetyGateDialog.h" />
     <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h" />
     <ClInclude Include="include\MeasureThenWeldService.h" />
+    <ClInclude Include="include\WeldPoseValidationLimits.h" />
     <ClInclude Include="include\RobotModelManagerDialog.h" />
     <ClInclude Include="include\RobotModelRemoteCatalog.h" />
     <ClInclude Include="include\RobotModelOriginalPreview.h" />

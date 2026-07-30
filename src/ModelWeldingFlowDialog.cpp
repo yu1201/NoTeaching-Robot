@@ -301,7 +301,6 @@ ModelWeldingFlowDialog::ModelWeldingFlowDialog(
     {
         spin->setRange(10.0, 10000.0);
         spin->setDecimals(1);
-        spin->setSuffix(QStringLiteral(" mm"));
     }
     m_longLengthSpin->setValue(300.0);
     m_shortLengthSpin->setValue(180.0);
@@ -313,9 +312,17 @@ ModelWeldingFlowDialog::ModelWeldingFlowDialog(
     m_vSlotPositionLabel->setWordWrap(true);
     m_vSlotPositionLabel->setStyleSheet(QStringLiteral("color:#ffb74d; font-weight:600;"));
     placementLayout->addWidget(new QLabel(QStringLiteral("长边 +X")), 0, 0);
-    placementLayout->addWidget(m_longLengthSpin, 0, 1);
+    placementLayout->addWidget(
+        CreateExternalUnitEditor(
+            m_longLengthSpin, QStringLiteral("mm"), placementGroup),
+        0,
+        1);
     placementLayout->addWidget(new QLabel(QStringLiteral("短边 +Y")), 0, 2);
-    placementLayout->addWidget(m_shortLengthSpin, 0, 3);
+    placementLayout->addWidget(
+        CreateExternalUnitEditor(
+            m_shortLengthSpin, QStringLiteral("mm"), placementGroup),
+        0,
+        3);
     placementLayout->addWidget(m_vSlotPositionLabel, 1, 0, 1, 4);
     placementLayout->addWidget(new QLabel(
         QStringLiteral("先吸附工件落地大面；左侧视图顶部可分别旋转工件和V槽。"
@@ -336,13 +343,16 @@ ModelWeldingFlowDialog::ModelWeldingFlowDialog(
     m_modelRotationStepSpin = new QDoubleSpinBox();
     m_modelRotationStepSpin->setRange(0.1, 180.0);
     m_modelRotationStepSpin->setDecimals(1);
-    m_modelRotationStepSpin->setSuffix(QStringLiteral("°"));
     m_modelRotationStepSpin->setValue(15.0);
     m_preview->SetRotationStepDegrees(m_modelRotationStepSpin->value());
     QPushButton* rotateGroundMinus = new QPushButton(QStringLiteral("地面内旋转 −"));
     QPushButton* rotateGroundPlus = new QPushButton(QStringLiteral("地面内旋转 +"));
     orientationLayout->addWidget(new QLabel(QStringLiteral("工件每次旋转")), 1, 0);
-    orientationLayout->addWidget(m_modelRotationStepSpin, 1, 1);
+    orientationLayout->addWidget(
+        CreateExternalUnitEditor(
+            m_modelRotationStepSpin, QStringLiteral("°"), orientationGroup),
+        1,
+        1);
     orientationLayout->addWidget(rotateGroundMinus, 1, 2);
     orientationLayout->addWidget(rotateGroundPlus, 1, 3);
     QPushButton* rotateVSlotMinus = new QPushButton(QStringLiteral("V槽旋转 −"));
@@ -448,7 +458,6 @@ ModelWeldingFlowDialog::ModelWeldingFlowDialog(
     {
         spin->setRange(1.0, 100000.0);
         spin->setDecimals(1);
-        spin->setSuffix(QStringLiteral(" mm/min"));
     }
     m_runSpeedSpin->setValue(300.0);
     m_scanSpeedSpin->setValue(100.0);
@@ -459,9 +468,17 @@ ModelWeldingFlowDialog::ModelWeldingFlowDialog(
     teachingLayout->addWidget(new QLabel(QStringLiteral("终点")), 1, 0);
     teachingLayout->addWidget(m_endPoseLabel, 1, 1, 1, 3);
     teachingLayout->addWidget(new QLabel(QStringLiteral("运行速度")), 2, 0);
-    teachingLayout->addWidget(m_runSpeedSpin, 2, 1);
+    teachingLayout->addWidget(
+        CreateExternalUnitEditor(
+            m_runSpeedSpin, QStringLiteral("mm/min"), teachingGroup),
+        2,
+        1);
     teachingLayout->addWidget(new QLabel(QStringLiteral("扫描速度")), 2, 2);
-    teachingLayout->addWidget(m_scanSpeedSpin, 2, 3);
+    teachingLayout->addWidget(
+        CreateExternalUnitEditor(
+            m_scanSpeedSpin, QStringLiteral("mm/min"), teachingGroup),
+        2,
+        3);
     teachingLayout->addWidget(teachStartButton, 3, 0, 1, 2);
     teachingLayout->addWidget(teachEndButton, 3, 2, 1, 2);
     editorLayout->addWidget(teachingGroup);
@@ -3569,9 +3586,10 @@ void ModelWeldingFlowDialog::OpenOfflineRigidFit()
     layout->addWidget(hint);
     QTableWidget* table = new QTableWidget(stations.size(), 8);
     table->setHorizontalHeaderLabels({
-        QStringLiteral("编号"), QStringLiteral("角色"), QStringLiteral("模型X"),
-        QStringLiteral("模型Y"), QStringLiteral("模型Z"), QStringLiteral("实测Base X"),
-        QStringLiteral("实测Base Y"), QStringLiteral("实测Base Z")
+        QStringLiteral("编号"), QStringLiteral("角色"), QStringLiteral("模型X (mm)"),
+        QStringLiteral("模型Y (mm)"), QStringLiteral("模型Z (mm)"),
+        QStringLiteral("实测Base X (mm)"), QStringLiteral("实测Base Y (mm)"),
+        QStringLiteral("实测Base Z (mm)")
     });
     for (int row = 0; row < stations.size(); ++row)
     {
@@ -3592,7 +3610,7 @@ void ModelWeldingFlowDialog::OpenOfflineRigidFit()
         for (int column = 5; column < 8; ++column)
         {
             QLineEdit* edit = new QLineEdit();
-            edit->setPlaceholderText(QStringLiteral("输入mm"));
+            edit->setPlaceholderText(QStringLiteral("输入"));
             table->setCellWidget(row, column, edit);
         }
     }

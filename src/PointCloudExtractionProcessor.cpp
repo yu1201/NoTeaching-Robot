@@ -444,6 +444,15 @@ QString PrepareRuntimeExternalConfigPath(
         changed = true;
     }
 
+    // 20260729 版 DLL 新增 pixel_num，作为骨架短毛刺/短支路清理长度阈值（像素）。
+    // 历史现场 ini 缺少该键时库会按必填参数读取失败，因此在每次调用的临时副本中兜底，
+    // 不改写用户原始配置；界面显式保存过的值保持不变。
+    if (ConfigLineValue(content, "pixel_num").isEmpty())
+    {
+        ReplaceConfigValue(&content, "pixel_num", "10");
+        changed = true;
+    }
+
     const QString normalizedBaseWeldPath = baseWeldOutputPath.trimmed();
     if (!normalizedBaseWeldPath.isEmpty())
     {

@@ -23,6 +23,8 @@
 #include "WeldSeamCompConfig.h"
 #include "groove/framebuffer.h"
 
+#include <Eigen/Geometry>
+
 #include <QCryptographicHash>
 #include <QBuffer>
 #include <QDateTime>
@@ -67,6 +69,7 @@ constexpr double FANUC_WELD_PATH_SPEED_MM_PER_MIN = 400.0;
 constexpr double DEFAULT_WELD_SAFE_MOVE_SPEED_MM_PER_MIN = 1000.0;
 constexpr double DEFAULT_DRY_RUN_SPEED_MM_PER_MIN = 1000.0;
 constexpr double WELD_SAFE_OFFSET_DISTANCE_MM = 70.0;
+constexpr double TAUGHT_TOOL_FRAME_MAX_PHYSICAL_STEP_DEG = 2.0;
 constexpr int DEFAULT_CAMERA_READ_FPS = 100;  // 相机参数缺省/无效帧率时的回退值（≈10ms 轮询，与 worker 默认一致）
 constexpr qint64 ROBOT_SAMPLE_INTERVAL_MS = 50;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_WAIT_MS = 500;
@@ -163,7 +166,8 @@ QString ComputeFileSha256ForResumeGate(const QString& filePath, QString& error)
 }
 
 constexpr auto POINT_CLOUD_QUALITY_GATE_FILE_NAME = "PreciseLaserPoint_QualityGate.json";
-constexpr auto POINT_CLOUD_QUALITY_ALGORITHM_REVISION = "pcq-v3-20260712-a";
+constexpr auto POINT_CLOUD_QUALITY_ALGORITHM_REVISION =
+    "pcq-v5-20260730-configurable-validity";
 constexpr int POINT_CLOUD_QUALITY_SCHEMA_VERSION = 3;
 constexpr int POINT_CLOUD_PRODUCTION_CONTEXT_REVISION = 1;
 constexpr auto POINT_CLOUD_PROOF_SECURITY_MODULE = "PointCloudProofSecurity";
@@ -173,17 +177,6 @@ constexpr auto POINT_CLOUD_PROOF_RECEIPT_MODULE = "QualityGateReceiptV1";
 constexpr auto POINT_CLOUD_PROOF_RECEIPT_KEY = "Receipt";
 constexpr qint64 POINT_CLOUD_PROOF_MAX_AGE_SECONDS = 24 * 60 * 60;
 constexpr qint64 POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS = 5 * 60;
-constexpr double FINAL_MAX_POSITION_STEP_MM = 50.0;
-constexpr double FINAL_MAX_CONTROLLER_EULER_STEP_DEG = 90.0;
-constexpr double FINAL_MAX_PHYSICAL_ORIENTATION_STEP_DEG = 90.0;
-constexpr double FINAL_MIN_PRECOMP_LENGTH_RATIO = 0.93;
-constexpr double FINAL_MAX_PRECOMP_LENGTH_RATIO = 1.25;
-constexpr double FINAL_MIN_MATCHED_ARC_RATIO = 0.90;
-constexpr double FINAL_MIN_SOURCE_UNIQUE_COVERAGE_RATIO = 0.55;
-constexpr double FINAL_MIN_SOURCE_ARC_SPAN_RATIO = 0.90;
-constexpr double FINAL_MAX_SOURCE_DISPLACEMENT_MM = 25.0;
-constexpr double FINAL_MAX_SOURCE_CONTROLLER_EULER_DELTA_DEG = 60.0;
-constexpr double FINAL_MAX_SOURCE_PHYSICAL_ORIENTATION_DELTA_DEG = 60.0;
 
 struct SyntheticPoseAuthorization
 {
@@ -354,10 +347,12 @@ bool ValidatePointCloudProductionContext(
     const QString& expectedRobotEndpoint,
     const QString& expectedCameraSection,
     const QString& expectedHandEyeSha256,
+    const PointCloudProcessingConfig::Settings& settings,
     PointCloudProductionContext* validatedContext,
     QString& error)
 {
-    if (contextObject.value("contextRevision").toInt(-1)
+    if (settings.safetyGateProductionPurposeEnabled
+        && contextObject.value("contextRevision").toInt(-1)
             != POINT_CLOUD_PRODUCTION_CONTEXT_REVISION)
     {
         error = QStringLiteral("点云质量证明缺少受支持的生产上下文版本；旧证明禁止运动，请重新扫描。");
@@ -365,51 +360,63 @@ bool ValidatePointCloudProductionContext(
     }
     const PointCloudProductionContext context = PointCloudProductionContextFromJson(contextObject);
     const QUuid runId(context.scanRunId);
-    if (context.origin != QStringLiteral("liveRobotCameraScan")
-        || runId.isNull()
-        || runId.toString(QUuid::WithoutBraces).compare(context.scanRunId, Qt::CaseInsensitive) != 0
-        || context.robotEndpoint.trimmed().isEmpty()
-        || context.cameraSection.trimmed().isEmpty()
-        || !IsSha256Text(context.handEyeSha256))
+    if ((settings.safetyGateProductionPurposeEnabled
+            && (context.origin != QStringLiteral("liveRobotCameraScan")
+                || runId.isNull()
+                || runId.toString(QUuid::WithoutBraces).compare(
+                    context.scanRunId, Qt::CaseInsensitive) != 0))
+        || (settings.safetyGateEndpointBindingEnabled
+            && context.robotEndpoint.trimmed().isEmpty())
+        || (settings.safetyGateCameraHandEyeBindingEnabled
+            && (context.cameraSection.trimmed().isEmpty()
+                || !IsSha256Text(context.handEyeSha256))))
     {
         error = QStringLiteral("点云质量证明的扫描运行、机器人端点或手眼标定上下文不完整；禁止运动，请重新扫描。");
         return false;
     }
 
-    QDateTime createdUtc;
-    QDateTime scanStartedUtc;
-    if (!ParseStrictUtcTimestamp(proofCreatedUtc, createdUtc)
-        || !ParseStrictUtcTimestamp(context.scanStartedUtc, scanStartedUtc))
+    if (settings.safetyGateFreshnessEnabled)
     {
-        error = QStringLiteral("点云质量证明时间不是明确 UTC 时间；禁止运动，请重新扫描/重建。");
-        return false;
+        QDateTime createdUtc;
+        QDateTime scanStartedUtc;
+        if (!ParseStrictUtcTimestamp(proofCreatedUtc, createdUtc)
+            || !ParseStrictUtcTimestamp(context.scanStartedUtc, scanStartedUtc))
+        {
+            error = QStringLiteral("点云质量证明时间不是明确 UTC 时间；禁止运动，请重新扫描/重建。");
+            return false;
+        }
+        createdUtc = createdUtc.toUTC();
+        scanStartedUtc = scanStartedUtc.toUTC();
+        const QDateTime nowUtc = QDateTime::currentDateTimeUtc();
+        const qint64 proofAgeSeconds = createdUtc.secsTo(nowUtc);
+        const qint64 scanAgeSeconds = scanStartedUtc.secsTo(nowUtc);
+        if (proofAgeSeconds > POINT_CLOUD_PROOF_MAX_AGE_SECONDS
+            || scanAgeSeconds > POINT_CLOUD_PROOF_MAX_AGE_SECONDS)
+        {
+            error = QStringLiteral("点云质量证明或其原始扫描已超过 24 小时新鲜度，禁止运动；请重新扫描。");
+            return false;
+        }
+        if (proofAgeSeconds < -POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS
+            || scanAgeSeconds < -POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS
+            || scanStartedUtc
+                > createdUtc.addSecs(
+                    POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS))
+        {
+            error = QStringLiteral("点云质量证明时间位于未来或扫描/证明时序异常，禁止运动；请校时后重新扫描。");
+            return false;
+        }
     }
-    createdUtc = createdUtc.toUTC();
-    scanStartedUtc = scanStartedUtc.toUTC();
-    const QDateTime nowUtc = QDateTime::currentDateTimeUtc();
-    const qint64 proofAgeSeconds = createdUtc.secsTo(nowUtc);
-    const qint64 scanAgeSeconds = scanStartedUtc.secsTo(nowUtc);
-    if (proofAgeSeconds > POINT_CLOUD_PROOF_MAX_AGE_SECONDS
-        || scanAgeSeconds > POINT_CLOUD_PROOF_MAX_AGE_SECONDS)
-    {
-        error = QStringLiteral("点云质量证明或其原始扫描已超过 24 小时新鲜度，禁止运动；请重新扫描。");
-        return false;
-    }
-    if (proofAgeSeconds < -POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS
-        || scanAgeSeconds < -POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS
-        || scanStartedUtc > createdUtc.addSecs(POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS))
-    {
-        error = QStringLiteral("点云质量证明时间位于未来或扫描/证明时序异常，禁止运动；请校时后重新扫描。");
-        return false;
-    }
-    if (!expectedRobotEndpoint.trimmed().isEmpty()
+    if (settings.safetyGateEndpointBindingEnabled
+        && !expectedRobotEndpoint.trimmed().isEmpty()
         && context.robotEndpoint.compare(expectedRobotEndpoint.trimmed(), Qt::CaseInsensitive) != 0)
     {
         error = QStringLiteral("点云质量证明绑定的机器人持久端点与当前机器人不一致，禁止运动。");
         return false;
     }
-    if (context.cameraSection != expectedCameraSection
-        || context.handEyeSha256.compare(expectedHandEyeSha256, Qt::CaseInsensitive) != 0)
+    if (settings.safetyGateCameraHandEyeBindingEnabled
+        && (context.cameraSection != expectedCameraSection
+            || context.handEyeSha256.compare(
+                expectedHandEyeSha256, Qt::CaseInsensitive) != 0))
     {
         error = QStringLiteral("当前测量相机或已验证手眼标定内容与扫描证明不一致；请重新扫描。");
         return false;
@@ -490,8 +497,14 @@ bool VerifySyntheticPoseAuthorization(
     const QString& expectedRobotName,
     const QString& loadedSha256,
     qint64 loadedSize,
+    const PointCloudProcessingConfig::Settings& settings,
     QString& error)
 {
+    if (!settings.safetyGateRobotNameBindingEnabled
+        && !settings.safetyGateAuthorizedPoseIdentityEnabled)
+    {
+        return true;
+    }
     QMutexLocker<QMutex> locker(&g_syntheticPoseAuthorizationMutex);
     const auto it = g_syntheticPoseAuthorizations.constFind(PoseAuthorizationPathKey(posePath));
     if (it == g_syntheticPoseAuthorizations.cend())
@@ -500,9 +513,12 @@ bool VerifySyntheticPoseAuthorization(
         return false;
     }
     const SyntheticPoseAuthorization& authorization = it.value();
-    if (authorization.robotName.compare(expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0
-        || authorization.size != loadedSize
-        || authorization.sha256 != loadedSha256.toLower())
+    if ((settings.safetyGateRobotNameBindingEnabled
+            && authorization.robotName.compare(
+                expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0)
+        || (settings.safetyGateAuthorizedPoseIdentityEnabled
+            && (authorization.size != loadedSize
+                || authorization.sha256 != loadedSha256.toLower())))
     {
         error = QStringLiteral("虚拟焊道路径、机器人、大小或 SHA256 与本进程生成记录不一致。");
         return false;
@@ -542,24 +558,53 @@ QJsonObject BuildPointCloudQualityThresholds(const PointCloudProcessingConfig::S
     thresholds.insert("minKeyPointCount", settings.validationMinKeyPointCount);
     thresholds.insert("minCornerCount", settings.validationMinCornerCount);
     thresholds.insert("minSegmentWarningMm", settings.validationMinSegmentLengthMm);
-    thresholds.insert("minNonLapSegmentHardMm", 3.0);
-    thresholds.insert("minLapStepSegmentHardMm", 0.25);
-    thresholds.insert("minEndpointAdjacentSegmentHardMm", 0.25);
+    thresholds.insert("minNonLapSegmentHardMm",
+        settings.validationMinNonLapSegmentHardMm);
+    thresholds.insert("minLapStepSegmentHardMm",
+        settings.validationMinLapOrEndpointSegmentHardMm);
+    thresholds.insert("minEndpointAdjacentSegmentHardMm",
+        settings.validationMinLapOrEndpointSegmentHardMm);
     thresholds.insert("minOutputPointCount", settings.validationMinOutputPointCount);
     thresholds.insert("minOutputLengthRatio", settings.validationMinOutputLengthRatio);
-    thresholds.insert("maxOutputStepHardMm", FINAL_MAX_POSITION_STEP_MM);
-    thresholds.insert("maxFinalControllerEulerStepHardDeg", FINAL_MAX_CONTROLLER_EULER_STEP_DEG);
-    thresholds.insert("maxFinalPhysicalOrientationStepHardDeg", FINAL_MAX_PHYSICAL_ORIENTATION_STEP_DEG);
-    thresholds.insert("minFinalToPreCompLengthRatio", FINAL_MIN_PRECOMP_LENGTH_RATIO);
-    thresholds.insert("maxFinalToPreCompLengthRatio", FINAL_MAX_PRECOMP_LENGTH_RATIO);
-    thresholds.insert("minFinalMatchedArcRatio", FINAL_MIN_MATCHED_ARC_RATIO);
-    thresholds.insert("minFinalSourceUniqueCoverageRatio", FINAL_MIN_SOURCE_UNIQUE_COVERAGE_RATIO);
-    thresholds.insert("minFinalSourceArcSpanRatio", FINAL_MIN_SOURCE_ARC_SPAN_RATIO);
-    thresholds.insert("maxFinalSourceDisplacementHardMm", FINAL_MAX_SOURCE_DISPLACEMENT_MM);
-    thresholds.insert("maxFinalSourceControllerEulerDeltaHardDeg",
-        FINAL_MAX_SOURCE_CONTROLLER_EULER_DELTA_DEG);
+    thresholds.insert("maxOutputStepHardMm", settings.validationMaxFinalPositionStepMm);
+    thresholds.insert(
+        "maxFinalControllerEulerStepHardDeg",
+        settings.validationMaxFinalControllerEulerStepDeg);
+    thresholds.insert(
+        "maxFinalPhysicalOrientationStepHardDeg",
+        settings.validationMaxFinalPhysicalOrientationStepDeg);
+    thresholds.insert(
+        "minFinalToPreCompLengthRatio",
+        settings.validationMinFinalToPreCompLengthRatio);
+    thresholds.insert(
+        "maxFinalToPreCompLengthRatio",
+        settings.validationMaxFinalToPreCompLengthRatio);
+    thresholds.insert(
+        "minFinalMatchedArcRatio",
+        settings.validationMinFinalMatchedArcRatio);
+    thresholds.insert(
+        "minFinalSourceUniqueCoverageRatio",
+        settings.validationMinFinalSourceUniqueCoverageRatio);
+    thresholds.insert(
+        "minFinalSourceArcSpanRatio",
+        settings.validationMinFinalSourceArcSpanRatio);
+    thresholds.insert(
+        "maxFinalSourceDisplacementHardMm",
+        settings.validationMaxFinalSourceDisplacementMm);
     thresholds.insert("maxFinalSourcePhysicalOrientationDeltaHardDeg",
-        FINAL_MAX_SOURCE_PHYSICAL_ORIENTATION_DELTA_DEG);
+        settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg);
+    thresholds.insert("segmentHardLimitsEnabled",
+        settings.validationSegmentHardLimitsEnabled);
+    thresholds.insert("finalTrajectoryStepEnabled",
+        settings.validationFinalTrajectoryStepEnabled);
+    thresholds.insert("finalLengthBindingEnabled",
+        settings.validationFinalLengthBindingEnabled);
+    thresholds.insert("finalTopologyBindingEnabled",
+        settings.validationFinalTopologyBindingEnabled);
+    thresholds.insert("finalSourceBindingEnabled",
+        settings.validationFinalSourceBindingEnabled);
+    thresholds.insert("finalSemanticIntegrityEnabled",
+        settings.validationFinalSemanticIntegrityEnabled);
     // 保持“全部开启”的既有 proof 阈值对象字节兼容；只有显式关闭时才写入 false。
     if (!settings.validationCoverageEnabled)
     {
@@ -590,8 +635,7 @@ QJsonObject BuildPointCloudQualityThresholds(const PointCloudProcessingConfig::S
 
 QJsonObject BuildSafetyGateRecords(const PointCloudProcessingConfig::Settings& settings)
 {
-    // 这些开关仅记录操作员配置，不参与策略摘要、证明授权或运动判定。
-    // 固定的证明、身份、轨迹和运动前校验始终由生产流程执行。
+    // 这些开关进入证明快照，并在对应生产校验点作为实际启停条件。
     QJsonObject records;
     records.insert("behaviorVersion",
         PointCloudProcessingConfig::CURRENT_SAFETY_GATE_BEHAVIOR_VERSION);
@@ -610,11 +654,27 @@ QJsonObject BuildSafetyGateRecords(const PointCloudProcessingConfig::Settings& s
     return records;
 }
 
+bool AnyPointCloudProofSafetyGateEnabled(
+    const PointCloudProcessingConfig::Settings& settings)
+{
+    return settings.safetyGateProofIntegrityEnabled
+        || settings.safetyGateProductionPurposeEnabled
+        || settings.safetyGateRobotNameBindingEnabled
+        || settings.safetyGateCaseBindingEnabled
+        || settings.safetyGateEndpointBindingEnabled
+        || settings.safetyGateCameraHandEyeBindingEnabled
+        || settings.safetyGateFreshnessEnabled
+        || settings.safetyGatePolicySnapshotEnabled
+        || settings.safetyGateInputEvidenceEnabled
+        || settings.safetyGateAuthorizedPoseIdentityEnabled;
+}
+
 QString PointCloudQualityPolicyRevision(const PointCloudProcessingConfig::Settings& settings)
 {
     QJsonObject policy;
     policy.insert("policy", PointCloudProcessingConfig::ValidationPolicyConfigValue(settings.validationPolicy));
     policy.insert("thresholds", BuildPointCloudQualityThresholds(settings));
+    policy.insert("safetyGates", BuildSafetyGateRecords(settings));
     return QString::fromLatin1(QCryptographicHash::hash(
         QJsonDocument(policy).toJson(QJsonDocument::Compact),
         QCryptographicHash::Sha256).toHex()).toLower();
@@ -958,9 +1018,15 @@ bool LoadValidatedRebuildPointCloudContext(
     const MeasureThenWeldService::StopRequestedCallback& stopRequested)
 {
     const QDir dir(QDir::fromNativeSeparators(laserDir));
+    if (!AnyPointCloudProofSafetyGateEnabled(settings))
+    {
+        context = PointCloudProductionContext();
+        return true;
+    }
     const QString reportPath = dir.filePath(
         QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
-    if (!PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error))
+    if (settings.safetyGateProofIntegrityEnabled
+        && !PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error))
     {
         error = QStringLiteral("原 live-scan 点云证明已被拒绝闭锁，不能继承重建上下文：") + error;
         return false;
@@ -986,14 +1052,19 @@ bool LoadValidatedRebuildPointCloudContext(
         return false;
     }
     const QJsonObject root = document.object();
-    if (root.value("schemaVersion").toInt(-1) != POINT_CLOUD_QUALITY_SCHEMA_VERSION)
+    context = PointCloudProductionContextFromJson(
+        root.value("productionContext").toObject());
+    if (settings.safetyGatePolicySnapshotEnabled
+        && root.value("schemaVersion").toInt(-1)
+            != POINT_CLOUD_QUALITY_SCHEMA_VERSION)
     {
         error = QStringLiteral(
             "旧 schema 1/2 点云质量证明没有本机 HMAC/持久收据，禁止重建为生产授权；请重新扫描。");
         return false;
     }
     const QString proofPurpose = root.value("purpose").toString();
-    if (proofPurpose != QStringLiteral("production"))
+    if (settings.safetyGateProductionPurposeEnabled
+        && proofPurpose != QStringLiteral("production"))
     {
         error = QStringLiteral(
             "原点云质量证明用途为“%1”，不是生产用途 production，禁止继承；请重新扫描。")
@@ -1002,7 +1073,8 @@ bool LoadValidatedRebuildPointCloudContext(
     }
     const QString proofRobotName = root.value("robotName").toString().trimmed();
     const QString currentRobotName = expectedRobotName.trimmed();
-    if (proofRobotName.compare(currentRobotName, Qt::CaseInsensitive) != 0)
+    if (settings.safetyGateRobotNameBindingEnabled
+        && proofRobotName.compare(currentRobotName, Qt::CaseInsensitive) != 0)
     {
         error = QStringLiteral(
             "原点云质量证明绑定机器人“%1”，当前控制单元为“%2”，禁止跨机器人继承；"
@@ -1012,42 +1084,57 @@ bool LoadValidatedRebuildPointCloudContext(
         return false;
     }
     const QString expectedCaseId = QFileInfo(dir.absolutePath()).dir().dirName();
-    if (root.value("caseId").toString().compare(expectedCaseId, Qt::CaseInsensitive) != 0)
+    if (settings.safetyGateCaseBindingEnabled
+        && root.value("caseId").toString().compare(
+            expectedCaseId, Qt::CaseInsensitive) != 0)
     {
         error = QStringLiteral("原点云质量证明不属于当前案例目录，禁止继承扫描上下文。");
         return false;
     }
-    if (!VerifyPointCloudQualityProofMac(root, error)
-        || !VerifyPointCloudProofReceipt(root, dir, proofPayload, error))
+    if (settings.safetyGateProofIntegrityEnabled
+        && (!VerifyPointCloudQualityProofMac(root, error)
+            || !VerifyPointCloudProofReceipt(root, dir, proofPayload, error)))
     {
         return false;
     }
 
-    if (expectation.robotName.compare(expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0
-        || expectation.robotEndpoint.trimmed().isEmpty()
-        || expectation.cameraSection.trimmed().isEmpty()
-        || !IsSha256Text(expectation.handEyeSha256))
+    if ((settings.safetyGateEndpointBindingEnabled
+            || settings.safetyGateCameraHandEyeBindingEnabled)
+        && (expectation.robotName.compare(
+                expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0
+            || (settings.safetyGateEndpointBindingEnabled
+                && expectation.robotEndpoint.trimmed().isEmpty())
+            || (settings.safetyGateCameraHandEyeBindingEnabled
+                && (expectation.cameraSection.trimmed().isEmpty()
+                    || !IsSha256Text(expectation.handEyeSha256)))))
     {
         error = QStringLiteral("冻结的生产上下文不完整或机器人不匹配，禁止后台重建生产证明。");
         return false;
     }
-    if (!ValidatePointCloudProductionContext(
+    if ((settings.safetyGateProductionPurposeEnabled
+            || settings.safetyGateEndpointBindingEnabled
+            || settings.safetyGateCameraHandEyeBindingEnabled
+            || settings.safetyGateFreshnessEnabled)
+        && !ValidatePointCloudProductionContext(
             root.value("productionContext").toObject(),
             root.value("createdUtc").toString(),
             expectation.robotEndpoint,
             expectation.cameraSection,
             expectation.handEyeSha256,
+            settings,
             &context,
             error))
     {
         return false;
     }
 
-    if (!VerifyPointCloudProofInputs(root, dir, error, stopRequested))
+    if (settings.safetyGateInputEvidenceEnabled
+        && !VerifyPointCloudProofInputs(root, dir, error, stopRequested))
     {
         return false;
     }
-    return PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error);
+    return !settings.safetyGateProofIntegrityEnabled
+        || PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error);
 }
 
 bool WritePointCloudQualityGate(
@@ -1077,7 +1164,9 @@ bool WritePointCloudQualityGate(
     }
     const QString reportPath = dir.filePath(
         QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
-    if (!PointCloudProofIntegrity::RequireProofReplacementActive(reportPath, error))
+    if (settings.safetyGateProofIntegrityEnabled
+        && !PointCloudProofIntegrity::RequireProofReplacementActive(
+            reportPath, error))
     {
         error = QStringLiteral("点云质量证明写入缺少持久拒绝闭锁：") + error;
         return false;
@@ -1101,21 +1190,37 @@ bool WritePointCloudQualityGate(
         productionContext.robotEndpoint,
         productionContext.cameraSection,
         productionContext.handEyeSha256,
+        settings,
         nullptr,
         productionContextError);
-    const bool hasProductionContext = productionContext.origin == QStringLiteral("liveRobotCameraScan")
-        && !QUuid(productionContext.scanRunId).isNull()
-        && !productionContext.robotEndpoint.trimmed().isEmpty()
-        && !productionContext.cameraSection.trimmed().isEmpty()
-        && IsSha256Text(productionContext.handEyeSha256)
-        && !productionContext.scanStartedUtc.trimmed().isEmpty()
-        && (generationMode == QStringLiteral("liveScan")
-            || generationMode == QStringLiteral("validatedRebuild"))
-        && productionContextSemanticallyValid;
+    const bool requireProductionContext =
+        settings.safetyGateProductionPurposeEnabled
+        || settings.safetyGateEndpointBindingEnabled
+        || settings.safetyGateCameraHandEyeBindingEnabled
+        || settings.safetyGateFreshnessEnabled;
+    const bool hasProductionContext = !requireProductionContext
+        || (productionContextSemanticallyValid
+            && (!settings.safetyGateProductionPurposeEnabled
+                || (productionContext.origin
+                        == QStringLiteral("liveRobotCameraScan")
+                    && !QUuid(productionContext.scanRunId).isNull()
+                    && (generationMode == QStringLiteral("liveScan")
+                        || generationMode
+                            == QStringLiteral("validatedRebuild"))))
+            && (!settings.safetyGateEndpointBindingEnabled
+                || !productionContext.robotEndpoint.trimmed().isEmpty())
+            && (!settings.safetyGateCameraHandEyeBindingEnabled
+                || (!productionContext.cameraSection.trimmed().isEmpty()
+                    && IsSha256Text(productionContext.handEyeSha256)))
+            && (!settings.safetyGateFreshnessEnabled
+                || !productionContext.scanStartedUtc.trimmed().isEmpty()));
+    const bool hasRequiredAuthorizedPose =
+        !settings.safetyGateAuthorizedPoseIdentityEnabled
+        || hasValidatedAuthorizedPose;
     const bool authorize = enforce && report.evaluated && report.passed
-        && hasValidatedAuthorizedPose && hasProductionContext;
+        && hasRequiredAuthorizedPose && hasProductionContext;
     if (enforce && report.evaluated && report.passed
-        && hasValidatedAuthorizedPose && !hasProductionContext)
+        && hasRequiredAuthorizedPose && !hasProductionContext)
     {
         error = productionContextError.isEmpty()
             ? QStringLiteral(
@@ -1150,12 +1255,15 @@ bool WritePointCloudQualityGate(
 
     QJsonArray inputs;
     constexpr int maximumInputEvidenceFiles = 8;
-    if (authorize && inputPaths.isEmpty())
+    if (settings.safetyGateInputEvidenceEnabled
+        && authorize
+        && inputPaths.isEmpty())
     {
         error = QStringLiteral("生产质量证明没有预期点云输入，禁止生成 authorized 凭证。");
         return false;
     }
-    if (inputPaths.size() > maximumInputEvidenceFiles)
+    if (settings.safetyGateInputEvidenceEnabled
+        && inputPaths.size() > maximumInputEvidenceFiles)
     {
         error = QStringLiteral("生产质量证明输入文件超过 %1 个硬上限。")
             .arg(maximumInputEvidenceFiles);
@@ -1165,6 +1273,10 @@ bool WritePointCloudQualityGate(
     qint64 totalEvidenceLines = 0;
     for (const QString& inputPath : inputPaths)
     {
+        if (!settings.safetyGateInputEvidenceEnabled)
+        {
+            break;
+        }
         if (stopRequested && stopRequested())
         {
             error = QStringLiteral("生成点云输入证据已取消。");
@@ -1210,7 +1322,9 @@ bool WritePointCloudQualityGate(
         totalEvidenceLines += evidenceLines;
         inputs.push_back(evidence);
     }
-    if (authorize && inputs.size() != inputPaths.size())
+    if (settings.safetyGateInputEvidenceEnabled
+        && authorize
+        && inputs.size() != inputPaths.size())
     {
         error = QStringLiteral("生产质量证明未能为每个预期点云输入建立证据，禁止授权。");
         return false;
@@ -1220,7 +1334,9 @@ bool WritePointCloudQualityGate(
     QJsonObject artifacts;
     if (!weldPosePath.isEmpty())
     {
-        if (!hasValidatedWeldPose && enforce)
+        if (settings.safetyGateAuthorizedPoseIdentityEnabled
+            && !hasValidatedWeldPose
+            && enforce)
         {
             error = QStringLiteral("补偿前焊道缺少与结构验证同一字节快照的 SHA256/大小。");
             return false;
@@ -1239,7 +1355,8 @@ bool WritePointCloudQualityGate(
         {
             return false;
         }
-        if (hasValidatedWeldPose
+        if (settings.safetyGateAuthorizedPoseIdentityEnabled
+            && hasValidatedWeldPose
             && (currentEvidence.value("sha256").toString().toLower()
                 != validatedWeldPoseSha256.toLower()
             || static_cast<qint64>(currentEvidence.value("size").toDouble(-1.0))
@@ -1252,7 +1369,9 @@ bool WritePointCloudQualityGate(
     }
     if (!authorizedPosePath.isEmpty())
     {
-        if (!hasValidatedAuthorizedPose && enforce)
+        if (settings.safetyGateAuthorizedPoseIdentityEnabled
+            && !hasValidatedAuthorizedPose
+            && enforce)
         {
             error = QStringLiteral("授权焊道缺少与结构回读同一字节快照的 SHA256/大小。");
             return false;
@@ -1271,7 +1390,8 @@ bool WritePointCloudQualityGate(
         {
             return false;
         }
-        if (hasValidatedAuthorizedPose
+        if (settings.safetyGateAuthorizedPoseIdentityEnabled
+            && hasValidatedAuthorizedPose
             && (currentEvidence.value("sha256").toString().toLower()
                 != validatedAuthorizedPoseSha256.toLower()
             || static_cast<qint64>(currentEvidence.value("size").toDouble(-1.0))
@@ -1284,7 +1404,8 @@ bool WritePointCloudQualityGate(
             currentEvidence);
     }
     root.insert("artifacts", artifacts);
-    if (!SignPointCloudQualityProof(root, error))
+    if (settings.safetyGateProofIntegrityEnabled
+        && !SignPointCloudQualityProof(root, error))
     {
         return false;
     }
@@ -1326,14 +1447,17 @@ bool WritePointCloudQualityGate(
         error = QString("点云质量报告写后解析失败：%1").arg(parseError.errorString());
         return false;
     }
-    if (!VerifyPointCloudQualityProofMac(verifyDocument.object(), error))
+    if (settings.safetyGateProofIntegrityEnabled
+        && !VerifyPointCloudQualityProofMac(
+            verifyDocument.object(), error))
     {
         verifyFile.close();
         QFile::remove(reportPath);
         return false;
     }
     verifyFile.close();
-    if (hasProductionContext
+    if (settings.safetyGateProofIntegrityEnabled
+        && hasProductionContext
         && !RegisterPointCloudProofReceipt(root, dir, payload, error))
     {
         // 文件和 DB 无法跨介质原子提交；失败时删除新 proof，留下旧/缺失收据只会 fail-closed。
@@ -1378,6 +1502,8 @@ bool VerifyPointCloudQualityGate(
     QString& error)
 {
     error.clear();
+    const PointCloudProcessingConfig::Settings currentSettings =
+        PointCloudProcessingConfig::Load();
     const QFileInfo poseInfo(QDir::fromNativeSeparators(posePath));
     const QDir laserDir = poseInfo.dir();
     if (poseInfo.fileName().isEmpty()
@@ -1389,6 +1515,10 @@ bool VerifyPointCloudQualityGate(
             .arg(posePath);
         return false;
     }
+    if (!AnyPointCloudProofSafetyGateEnabled(currentSettings))
+    {
+        return true;
+    }
     const QString reportPath = laserDir.filePath(QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
     const auto verifyNotDenied = [&]()
     {
@@ -1396,7 +1526,8 @@ bool VerifyPointCloudQualityGate(
             ? PointCloudProofIntegrity::RequireProofReplacementActive(reportPath, error)
             : PointCloudProofIntegrity::VerifyProofNotDenied(reportPath, error);
     };
-    if (!verifyNotDenied())
+    if (currentSettings.safetyGateProofIntegrityEnabled
+        && !verifyNotDenied())
     {
         return false;
     }
@@ -1419,31 +1550,47 @@ bool VerifyPointCloudQualityGate(
         return false;
     }
     const QJsonObject root = document.object();
-    const PointCloudProcessingConfig::Settings currentSettings = PointCloudProcessingConfig::Load();
-    if (root.value("schemaVersion").toInt() != POINT_CLOUD_QUALITY_SCHEMA_VERSION
-        || root.value("profileVersion").toInt() != PointCloudProcessingConfig::CURRENT_VALIDATION_PROFILE_VERSION
-        || root.value("algorithmRevision").toString() != QString::fromLatin1(POINT_CLOUD_QUALITY_ALGORITHM_REVISION)
-        || root.value("purpose").toString() != QStringLiteral("production")
-        || root.value("policy").toString() != QStringLiteral("Enforce")
-        || !root.value("analysisEvaluated").toBool()
-        || !root.value("qualityPassed").toBool()
-        || !root.value("authorized").toBool()
-        || root.value("state").toString() != QStringLiteral("authorized")
-        || (root.value("generationMode").toString() != QStringLiteral("liveScan")
-            && root.value("generationMode").toString() != QStringLiteral("validatedRebuild")))
+    if (currentSettings.safetyGatePolicySnapshotEnabled
+        && (root.value("schemaVersion").toInt()
+                != POINT_CLOUD_QUALITY_SCHEMA_VERSION
+            || root.value("profileVersion").toInt()
+                != PointCloudProcessingConfig::CURRENT_VALIDATION_PROFILE_VERSION
+            || root.value("algorithmRevision").toString()
+                != QString::fromLatin1(
+                    POINT_CLOUD_QUALITY_ALGORITHM_REVISION)))
+    {
+        error = QStringLiteral(
+            "点云质量证明的 schema/profile/算法版本与当前策略不一致。");
+        return false;
+    }
+    if (currentSettings.safetyGateProductionPurposeEnabled
+        && (root.value("purpose").toString() != QStringLiteral("production")
+            || root.value("policy").toString() != QStringLiteral("Enforce")
+            || !root.value("analysisEvaluated").toBool()
+            || !root.value("qualityPassed").toBool()
+            || !root.value("authorized").toBool()
+            || root.value("state").toString()
+                != QStringLiteral("authorized")
+            || (root.value("generationMode").toString()
+                    != QStringLiteral("liveScan")
+                && root.value("generationMode").toString()
+                    != QStringLiteral("validatedRebuild"))))
     {
         error = QStringLiteral(
             "点云质量证明不是当前 schema 3 的 Enforce/PASS/authorized 证明，禁止下发/执行；旧证明请重新扫描/重建。");
         return false;
     }
-    if (!expectedRobotName.trimmed().isEmpty()
+    if (currentSettings.safetyGateRobotNameBindingEnabled
+        && !expectedRobotName.trimmed().isEmpty()
         && root.value("robotName").toString().compare(expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0)
     {
         error = QStringLiteral("点云质量证明绑定的机器人与当前机器人不一致。");
         return false;
     }
     const QString expectedCaseId = QFileInfo(laserDir.absolutePath()).dir().dirName();
-    if (root.value("caseId").toString().compare(expectedCaseId, Qt::CaseInsensitive) != 0)
+    if (currentSettings.safetyGateCaseBindingEnabled
+        && root.value("caseId").toString().compare(
+            expectedCaseId, Qt::CaseInsensitive) != 0)
     {
         error = QStringLiteral("点云质量证明绑定的案例目录与当前轨迹目录不一致。");
         return false;
@@ -1456,16 +1603,23 @@ bool VerifyPointCloudQualityGate(
                 return RobotOperationLease::IsCancellationRequested(expectedDriver);
             })
         : MeasureThenWeldService::StopRequestedCallback();
-    if (!VerifyPointCloudQualityProofMac(root, error)
-        || !VerifyPointCloudProofReceipt(root, laserDir, proofPayload, error)
-        || !VerifyPointCloudProofInputs(root, laserDir, error, evidenceStopRequested))
+    if ((currentSettings.safetyGateProofIntegrityEnabled
+            && (!VerifyPointCloudQualityProofMac(root, error)
+                || !VerifyPointCloudProofReceipt(
+                    root, laserDir, proofPayload, error)))
+        || (currentSettings.safetyGateInputEvidenceEnabled
+            && !VerifyPointCloudProofInputs(
+                root, laserDir, error, evidenceStopRequested)))
     {
         return false;
     }
     QString expectedEndpoint;
     QString expectedCameraSection;
     QString expectedHandEyeSha256;
-    if (expectedDriver != nullptr)
+    const bool requireCurrentProductionContext =
+        currentSettings.safetyGateEndpointBindingEnabled
+        || currentSettings.safetyGateCameraHandEyeBindingEnabled;
+    if (requireCurrentProductionContext && expectedDriver != nullptr)
     {
         if (!LoadCurrentPointCloudContextExpectations(
                 expectedRobotName,
@@ -1479,7 +1633,8 @@ bool VerifyPointCloudQualityGate(
             return false;
         }
     }
-    else if (frozenExpectation != nullptr
+    else if (requireCurrentProductionContext
+        && frozenExpectation != nullptr
         && frozenExpectation->robotName.compare(
             expectedRobotName.trimmed(), Qt::CaseInsensitive) == 0
         && !frozenExpectation->robotEndpoint.trimmed().isEmpty()
@@ -1490,48 +1645,67 @@ bool VerifyPointCloudQualityGate(
         expectedCameraSection = frozenExpectation->cameraSection;
         expectedHandEyeSha256 = frozenExpectation->handEyeSha256;
     }
-    else
+    else if (requireCurrentProductionContext)
     {
         error = QStringLiteral(
             "PointCloudProduction 验证缺少当前机器人或 UI 线程冻结的完整生产上下文；离线只能生成 Audit/unauthorized 产物。");
         return false;
     }
-    if (!ValidatePointCloudProductionContext(
+    if ((currentSettings.safetyGateProductionPurposeEnabled
+            || currentSettings.safetyGateEndpointBindingEnabled
+            || currentSettings.safetyGateCameraHandEyeBindingEnabled
+            || currentSettings.safetyGateFreshnessEnabled)
+        && !ValidatePointCloudProductionContext(
             root.value("productionContext").toObject(),
             root.value("createdUtc").toString(),
             expectedEndpoint,
             expectedCameraSection,
             expectedHandEyeSha256,
+            currentSettings,
             nullptr,
             error))
     {
         return false;
     }
-    if (currentSettings.validationPolicy != PointCloudProcessingConfig::ValidationPolicy::Enforce
-        || root.value("processingMode").toString()
-            != PointCloudProcessingConfig::ModeConfigValue(currentSettings.mode)
-        || root.value("thresholds").toObject() != BuildPointCloudQualityThresholds(currentSettings)
-        || root.value("policyRevisionSha256").toString() != PointCloudQualityPolicyRevision(currentSettings))
+    if (currentSettings.safetyGatePolicySnapshotEnabled
+        && (currentSettings.validationPolicy
+                != PointCloudProcessingConfig::ValidationPolicy::Enforce
+            || root.value("processingMode").toString()
+                != PointCloudProcessingConfig::ModeConfigValue(
+                    currentSettings.mode)
+            || root.value("thresholds").toObject()
+                != BuildPointCloudQualityThresholds(currentSettings)
+            || root.value("safetyGateRecords").toObject()
+                != BuildSafetyGateRecords(currentSettings)
+            || root.value("policyRevisionSha256").toString()
+                != PointCloudQualityPolicyRevision(currentSettings)))
     {
         error = QStringLiteral("当前点云质量策略/阈值与证明快照不一致，旧证明失效；请从原始点云重新生成焊道。");
         return false;
     }
 
     const QJsonObject authorizedPose = root.value("artifacts").toObject().value("authorizedPose").toObject();
-    if (authorizedPose.value("relativePath").toString() != poseInfo.fileName()
-        || static_cast<qint64>(authorizedPose.value("size").toDouble(-1.0)) != loadedPoseSize)
+    if (currentSettings.safetyGateAuthorizedPoseIdentityEnabled
+        && (authorizedPose.value("relativePath").toString()
+                != poseInfo.fileName()
+            || static_cast<qint64>(
+                authorizedPose.value("size").toDouble(-1.0))
+                != loadedPoseSize))
     {
         error = QStringLiteral("点云质量证明绑定的焊道文件名或大小不一致。");
         return false;
     }
-    if (loadedPoseSha256.toLower() != authorizedPose.value("sha256").toString().toLower())
+    if (currentSettings.safetyGateAuthorizedPoseIdentityEnabled
+        && loadedPoseSha256.toLower()
+            != authorizedPose.value("sha256").toString().toLower())
     {
         error = QStringLiteral("点云质量证明绑定的焊道 SHA256 与实际解析字节不一致，文件可能已被修改。");
         return false;
     }
     // Recheck after every proof/input/context read. A replacement that begins
     // while verification is in flight must deny the final authorization.
-    return verifyNotDenied();
+    return !currentSettings.safetyGateProofIntegrityEnabled
+        || verifyNotDenied();
 }
 
 bool VerifyWeldPoseAuthorization(
@@ -1545,6 +1719,8 @@ bool VerifyWeldPoseAuthorization(
     const MeasureThenWeldService::PointCloudProductionExpectation* frozenExpectation = nullptr,
     bool allowActiveProofReplacement = false)
 {
+    const PointCloudProcessingConfig::Settings settings =
+        PointCloudProcessingConfig::Load();
     return poseSource == MeasureThenWeldService::WeldPoseSource::PointCloudProduction
         ? VerifyPointCloudQualityGate(
             posePath,
@@ -1556,7 +1732,12 @@ bool VerifyWeldPoseAuthorization(
             allowActiveProofReplacement,
             error)
         : VerifySyntheticPoseAuthorization(
-            posePath, expectedRobotName, loadedPoseSha256, loadedPoseSize, error);
+            posePath,
+            expectedRobotName,
+            loadedPoseSha256,
+            loadedPoseSize,
+            settings,
+            error);
 }
 
 qint64 SteadyNowMs()
@@ -1632,8 +1813,8 @@ struct WeldPosePreset
     double taughtWeldPoseRx = 0.0;
     double taughtWeldPoseRy = 0.0;
     double taughtWeldPoseRz = 0.0;
-    double slopeRzMinDeg = -20.0;
-    double slopeRzMaxDeg = 20.0;
+    double slopeGeometryAngleMinDeg = -20.0;
+    double slopeGeometryAngleMaxDeg = 20.0;
     double stepOverlapRel = 20.0;
     int weldPostureType = 1; // 焊接姿态/位形(0NULL/1可变/2恒定/3腕关节)，来自基础工艺参数
     int weldDynamicMode = 0; // 动态特性(WLin DYNAMIC)：0=NULL(机器人默认) 非0=ntdyn0(程序速度)，复用工艺 nWeldMethod
@@ -3519,7 +3700,7 @@ bool TryReadIniDouble(COPini& ini, const std::string& key, double& value)
     return ini.ReadString(false, key, &value) > 0;
 }
 
-void NormalizeSlopeRzClamp(double& minDeg, double& maxDeg)
+void NormalizeSlopeGeometryAngleClamp(double& minDeg, double& maxDeg)
 {
     if (!std::isfinite(minDeg))
     {
@@ -3797,9 +3978,11 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
     preset.taughtWeldPoseRx = std::isfinite(param.dTaughtWeldPoseRxDeg) ? param.dTaughtWeldPoseRxDeg : preset.rx;
     preset.taughtWeldPoseRy = std::isfinite(param.dTaughtWeldPoseRyDeg) ? param.dTaughtWeldPoseRyDeg : preset.ry;
     preset.taughtWeldPoseRz = std::isfinite(param.dTaughtWeldPoseRzDeg) ? param.dTaughtWeldPoseRzDeg : param.tStartPos.dRZ;
-    preset.slopeRzMinDeg = param.dSlopeRzMinDeg;
-    preset.slopeRzMaxDeg = param.dSlopeRzMaxDeg;
-    NormalizeSlopeRzClamp(preset.slopeRzMinDeg, preset.slopeRzMaxDeg);
+    preset.slopeGeometryAngleMinDeg = param.dSlopeRzMinDeg;
+    preset.slopeGeometryAngleMaxDeg = param.dSlopeRzMaxDeg;
+    NormalizeSlopeGeometryAngleClamp(
+        preset.slopeGeometryAngleMinDeg,
+        preset.slopeGeometryAngleMaxDeg);
     preset.stepOverlapRel = std::isfinite(param.dStepOverlapRel) ? std::max(0.0, param.dStepOverlapRel) : 20.0;
     preset.weldDirection = param.nWeldDirection < 0 ? -1 : 1;
     preset.measureReferenceRx = param.tStartPos.dRX;
@@ -3844,8 +4027,10 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
             double taughtWeldPoseRx = preset.taughtWeldPoseRx;
             double taughtWeldPoseRy = preset.taughtWeldPoseRy;
             double taughtWeldPoseRz = preset.taughtWeldPoseRz;
-            double slopeRzMinDeg = preset.slopeRzMinDeg;
-            double slopeRzMaxDeg = preset.slopeRzMaxDeg;
+            double slopeGeometryAngleMinDeg =
+                preset.slopeGeometryAngleMinDeg;
+            double slopeGeometryAngleMaxDeg =
+                preset.slopeGeometryAngleMaxDeg;
             double stepOverlapRel = preset.stepOverlapRel;
             const bool hasNormalRx = TryReadIniDouble(ini, "NormalWeldRx", rx);
             const bool hasNormalRy = TryReadIniDouble(ini, "NormalWeldRy", ry);
@@ -3857,8 +4042,14 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
             TryReadIniDouble(ini, "WeldStartSkipDis", weldStartSkipDistance);
             TryReadIniDouble(ini, "WeldEndSkipDis", weldEndSkipDistance);
             TryReadIniDouble(ini, "WeldRzGainDeg", weldRzGainDeg);
-            TryReadIniDouble(ini, "SlopeRzMinDeg", slopeRzMinDeg);
-            TryReadIniDouble(ini, "SlopeRzMaxDeg", slopeRzMaxDeg);
+            TryReadIniDouble(
+                ini,
+                "SlopeRzMinDeg",
+                slopeGeometryAngleMinDeg);
+            TryReadIniDouble(
+                ini,
+                "SlopeRzMaxDeg",
+                slopeGeometryAngleMaxDeg);
             TryReadIniDouble(ini, "StepOverlapRel", stepOverlapRel);
             // 焊接顺序以当前测量焊接参数为准，避免旧 ini 字段覆盖界面选择。
             preset.stepOverlapRel = std::isfinite(stepOverlapRel) ? std::max(0.0, stepOverlapRel) : 20.0;
@@ -3885,9 +4076,13 @@ WeldPosePreset LoadWeldPosePreset(const T_PRECISE_MEASURE_PARAM& param)
             preset.taughtWeldPoseRx = std::isfinite(taughtWeldPoseRx) ? taughtWeldPoseRx : preset.rx;
             preset.taughtWeldPoseRy = std::isfinite(taughtWeldPoseRy) ? taughtWeldPoseRy : preset.ry;
             preset.taughtWeldPoseRz = std::isfinite(taughtWeldPoseRz) ? taughtWeldPoseRz : preset.measureReferenceRz;
-            preset.slopeRzMinDeg = slopeRzMinDeg;
-            preset.slopeRzMaxDeg = slopeRzMaxDeg;
-            NormalizeSlopeRzClamp(preset.slopeRzMinDeg, preset.slopeRzMaxDeg);
+            preset.slopeGeometryAngleMinDeg =
+                slopeGeometryAngleMinDeg;
+            preset.slopeGeometryAngleMaxDeg =
+                slopeGeometryAngleMaxDeg;
+            NormalizeSlopeGeometryAngleClamp(
+                preset.slopeGeometryAngleMinDeg,
+                preset.slopeGeometryAngleMaxDeg);
             preset.weldLineFromIni = true;
         }
     }
@@ -4751,6 +4946,31 @@ double PhysicalOrientationDistanceDeg(
         : std::numeric_limits<double>::infinity();
 }
 
+bool ValidateExecutionTrajectoryStructure(
+    const QVector<WeldPoseFileRecord>& records,
+    QString& error)
+{
+    if (records.size() < 2)
+    {
+        error = QStringLiteral("机器人执行轨迹至少需要 2 个有效点。");
+        return false;
+    }
+    for (int index = 0; index < records.size(); ++index)
+    {
+        const WeldPoseFileRecord& record = records[index];
+        if (record.weldIndex != index + 1
+            || !IsKnownWeldPointType(record.pointType)
+            || !IsKnownWeldSegmentKind(record.segmentKind))
+        {
+            error = QString(
+                "机器人执行轨迹第 %1 条索引或标签结构无效。")
+                .arg(index + 1);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ValidateFinalWeldPoseArtifact(
     const QString& filePath,
     const QString& sourcePosePath,
@@ -4802,23 +5022,26 @@ bool ValidateFinalWeldPoseArtifact(
     {
         return false;
     }
-    if (!IsSha256Text(expectedGeneratedSha256)
-        || expectedGeneratedSize <= 0
-        || validatedSha256.compare(expectedGeneratedSha256, Qt::CaseInsensitive) != 0
-        || validatedSize != expectedGeneratedSize)
+    if (settings.validationFinalSemanticIntegrityEnabled
+        && (!IsSha256Text(expectedGeneratedSha256)
+            || expectedGeneratedSize <= 0
+            || validatedSha256.compare(expectedGeneratedSha256, Qt::CaseInsensitive) != 0
+            || validatedSize != expectedGeneratedSize))
     {
         error = QStringLiteral(
             "最终焊道与补偿算法刚生成的完整字节快照不一致，标签、坐标或顺序可能已变化。");
         return false;
     }
-    if (!qualityReport.evaluated
-        || !std::isfinite(qualityReport.projectedSpanMm)
-        || qualityReport.projectedSpanMm <= 0.0)
+    if (settings.validationOutputEnabled
+        && (!qualityReport.evaluated
+            || !std::isfinite(qualityReport.projectedSpanMm)
+            || qualityReport.projectedSpanMm <= 0.0))
     {
         error = QStringLiteral("最终焊接姿态缺少本次已完成评估的有效点云跨度报告。");
         return false;
     }
-    if (records.size() < settings.validationMinOutputPointCount)
+    if (settings.validationOutputEnabled
+        && records.size() < settings.validationMinOutputPointCount)
     {
         error = QString("最终焊接姿态回读点数过少：当前 %1，要求至少 %2。")
             .arg(records.size())
@@ -4837,16 +5060,19 @@ bool ValidateFinalWeldPoseArtifact(
     QVector<double> sourceArcMm(sourceRecords.size(), 0.0);
     QHash<int, QVector<int>> sourceIndexesByRawIndex;
     QHash<QString, QVector<int>> sourceIndexesBySegmentBase;
+    QVector<int> allSourceIndexes;
     QVector<int> sourceCornerIndexes;
     QVector<int> sourceLapIndexes;
     for (int index = 0; index < sourceRecords.size(); ++index)
     {
         const WeldPoseFileRecord& source = sourceRecords[index];
-        if (!IsKnownWeldPointType(source.pointType)
-            || !IsKnownWeldSegmentKind(source.segmentKind)
-            || !IsReasonableRobotAngleDeg(source.rx)
-            || !IsReasonableRobotAngleDeg(source.ry)
-            || !IsReasonableRobotAngleDeg(source.rz))
+        allSourceIndexes.push_back(index);
+        if (settings.validationFinalSemanticIntegrityEnabled
+            && (!IsKnownWeldPointType(source.pointType)
+                || !IsKnownWeldSegmentKind(source.segmentKind)
+                || !IsReasonableRobotAngleDeg(source.rx)
+                || !IsReasonableRobotAngleDeg(source.ry)
+                || !IsReasonableRobotAngleDeg(source.rz)))
         {
             error = QString("补偿前焊接姿态第 %1 条标签或角度超出允许语义。").arg(index + 1);
             return false;
@@ -4880,35 +5106,201 @@ bool ValidateFinalWeldPoseArtifact(
         sourceLengthMm - std::min(declaredEndSkipMm, sourceLengthMm));
     const double expectedRetainedSourceLengthMm =
         expectedSourceEndArcMm - expectedSourceStartArcMm;
-    if (expectedRetainedSourceLengthMm <= 0.0)
+    if ((settings.validationFinalLengthBindingEnabled
+            || settings.validationFinalTopologyBindingEnabled
+            || settings.validationFinalSourceBindingEnabled)
+        && expectedRetainedSourceLengthMm <= 0.0)
     {
         error = QStringLiteral("声明的起终点裁剪已覆盖全部补偿前轨迹，禁止生成最终焊道。");
         return false;
     }
 
+    // 显式圆弧跨越进入段和离开段：生成阶段对两端姿态做四元数插值，但文件中的
+    // 单个 segmentKind 只能保留一个段标签。若验证时把整段 _arc 强制绑定到该标签，
+    // 大角度坡面圆弧的前半段会被错误地只拿去和离开段比较。这里按连续圆弧簇收集
+    // 前后两个非圆弧段，后续位置/物理姿态硬门限和单调源索引门限仍全部保留。
+    const auto isArcSourceBindingRecord = [](const WeldPoseFileRecord& record)
+        {
+            return record.segmentKind.trimmed().endsWith(
+                       QStringLiteral("_arc"), Qt::CaseInsensitive)
+                || record.pointType.trimmed().endsWith(
+                       QStringLiteral("_arc"), Qt::CaseInsensitive);
+        };
+    QVector<QString> allowedSourceSemanticKeys(records.size());
+    QHash<QString, QStringList> sourceSegmentBasesBySemanticKey;
+    const auto bindAllowedSourceBases =
+        [&](int beginIndex, int endIndex, const QSet<QString>& sourceBases)
+        {
+            QStringList sortedBases;
+            sortedBases.reserve(sourceBases.size());
+            for (const QString& sourceBase : sourceBases)
+            {
+                if (!sourceBase.isEmpty())
+                {
+                    sortedBases.push_back(sourceBase);
+                }
+            }
+            std::sort(sortedBases.begin(), sortedBases.end());
+            sortedBases.erase(
+                std::unique(sortedBases.begin(), sortedBases.end()),
+                sortedBases.end());
+            const QString semanticKey = sortedBases.join(QChar(0x1f));
+            sourceSegmentBasesBySemanticKey.insert(semanticKey, sortedBases);
+            for (int index = beginIndex; index <= endIndex; ++index)
+            {
+                allowedSourceSemanticKeys[index] = semanticKey;
+            }
+        };
+    for (int index = 0; index < records.size();)
+    {
+        if (!isArcSourceBindingRecord(records[index]))
+        {
+            bindAllowedSourceBases(
+                index,
+                index,
+                QSet<QString>{ WeldSegmentBaseKind(records[index].segmentKind) });
+            ++index;
+            continue;
+        }
+
+        const int arcBeginIndex = index;
+        int arcEndIndex = index;
+        QSet<QString> sourceBases;
+        while (arcEndIndex + 1 < records.size()
+            && isArcSourceBindingRecord(records[arcEndIndex + 1]))
+        {
+            ++arcEndIndex;
+        }
+        for (int arcIndex = arcBeginIndex; arcIndex <= arcEndIndex; ++arcIndex)
+        {
+            sourceBases.insert(WeldSegmentBaseKind(records[arcIndex].segmentKind));
+        }
+        if (arcBeginIndex > 0)
+        {
+            sourceBases.insert(
+                WeldSegmentBaseKind(records[arcBeginIndex - 1].segmentKind));
+        }
+        if (arcEndIndex + 1 < records.size())
+        {
+            sourceBases.insert(
+                WeldSegmentBaseKind(records[arcEndIndex + 1].segmentKind));
+        }
+        bindAllowedSourceBases(arcBeginIndex, arcEndIndex, sourceBases);
+        index = arcEndIndex + 1;
+    }
+
+    QHash<QString, QVector<int>> sourceIndexesByAllowedSemanticKey;
+    for (auto semanticIt = sourceSegmentBasesBySemanticKey.constBegin();
+         semanticIt != sourceSegmentBasesBySemanticKey.constEnd();
+         ++semanticIt)
+    {
+        QVector<int> sourceIndexes;
+        for (const QString& sourceBase : semanticIt.value())
+        {
+            sourceIndexes += sourceIndexesBySegmentBase.value(sourceBase);
+        }
+        std::sort(sourceIndexes.begin(), sourceIndexes.end());
+        sourceIndexes.erase(
+            std::unique(sourceIndexes.begin(), sourceIndexes.end()),
+            sourceIndexes.end());
+        sourceIndexesByAllowedSemanticKey.insert(semanticIt.key(), sourceIndexes);
+    }
+    const QVector<int> emptySourceIndexes;
+    const auto semanticSourceIndexesForRecord =
+        [&](int recordIndex) -> const QVector<int>&
+        {
+            if (!settings.validationFinalSemanticIntegrityEnabled)
+            {
+                return allSourceIndexes;
+            }
+            const auto it = sourceIndexesByAllowedSemanticKey.constFind(
+                allowedSourceSemanticKeys.value(recordIndex));
+            return it == sourceIndexesByAllowedSemanticKey.constEnd()
+                ? emptySourceIndexes
+                : it.value();
+        };
+    const auto topologySourceIndexesForRecord =
+        [&](int recordIndex) -> const QVector<int>&
+        {
+            if (isArcSourceBindingRecord(records[recordIndex]))
+            {
+                return semanticSourceIndexesForRecord(recordIndex);
+            }
+            const auto it = sourceIndexesByRawIndex.constFind(
+                records[recordIndex].rawIndex);
+            return it == sourceIndexesByRawIndex.constEnd()
+                ? emptySourceIndexes
+                : it.value();
+        };
+
     const auto hasNearbySource = [&](const QVector<int>& sourceIndexes, const Eigen::Vector3d& point)
         {
             for (int sourceIndex : sourceIndexes)
             {
-                if ((point - sourceRecords[sourceIndex].point).norm()
-                    <= FINAL_MAX_SOURCE_DISPLACEMENT_MM)
+                if (!settings.validationFinalSourceBindingEnabled
+                    || (point - sourceRecords[sourceIndex].point).norm()
+                        <= settings.validationMaxFinalSourceDisplacementMm)
                 {
                     return true;
                 }
             }
             return false;
         };
-    const auto hasNearbySourcePose = [&](const QVector<int>& sourceIndexes,
-                                         const WeldPoseFileRecord& record)
+    struct SourcePoseMatchDiagnostics
+    {
+        int sourceIndex = -1;
+        double displacementMm = std::numeric_limits<double>::infinity();
+        double physicalOrientationDeltaDeg =
+            std::numeric_limits<double>::infinity();
+        double normalizedHardGateScore =
+            std::numeric_limits<double>::infinity();
+    };
+    const auto hasNearbySourcePose =
+        [&](const QVector<int>& sourceIndexes,
+            const WeldPoseFileRecord& record,
+            SourcePoseMatchDiagnostics* diagnostics = nullptr)
         {
             for (int sourceIndex : sourceIndexes)
             {
                 const WeldPoseFileRecord& source = sourceRecords[sourceIndex];
-                if ((record.point - source.point).norm() <= FINAL_MAX_SOURCE_DISPLACEMENT_MM
-                    && ControllerEulerDistanceDeg(source, record)
-                        <= FINAL_MAX_SOURCE_CONTROLLER_EULER_DELTA_DEG
-                    && PhysicalOrientationDistanceDeg(source, record, robotType)
-                        <= FINAL_MAX_SOURCE_PHYSICAL_ORIENTATION_DELTA_DEG)
+                const double displacementMm =
+                    (record.point - source.point).norm();
+                const double physicalOrientationDeltaDeg =
+                    PhysicalOrientationDistanceDeg(source, record, robotType);
+                const double normalizedHardGateScore = std::max(
+                    displacementMm
+                        / settings.validationMaxFinalSourceDisplacementMm,
+                    physicalOrientationDeltaDeg
+                        / settings
+                            .validationMaxFinalSourcePhysicalOrientationDeltaDeg);
+                if (diagnostics != nullptr
+                    && (normalizedHardGateScore
+                            < diagnostics->normalizedHardGateScore
+                        || (std::abs(
+                                normalizedHardGateScore
+                                - diagnostics->normalizedHardGateScore)
+                                <= 1e-9
+                            && (displacementMm < diagnostics->displacementMm
+                                || (std::abs(
+                                        displacementMm
+                                        - diagnostics->displacementMm)
+                                        <= 1e-9
+                                    && physicalOrientationDeltaDeg
+                                        < diagnostics
+                                            ->physicalOrientationDeltaDeg)))))
+                {
+                    diagnostics->sourceIndex = sourceIndex;
+                    diagnostics->displacementMm = displacementMm;
+                    diagnostics->physicalOrientationDeltaDeg =
+                        physicalOrientationDeltaDeg;
+                    diagnostics->normalizedHardGateScore =
+                        normalizedHardGateScore;
+                }
+                if (displacementMm
+                        <= settings.validationMaxFinalSourceDisplacementMm
+                    && physicalOrientationDeltaDeg
+                        <= settings
+                            .validationMaxFinalSourcePhysicalOrientationDeltaDeg)
                 {
                     return true;
                 }
@@ -4922,7 +5314,8 @@ bool ValidateFinalWeldPoseArtifact(
     for (int index = 0; index < records.size(); ++index)
     {
         const WeldPoseFileRecord& record = records[index];
-        if (records[index].weldIndex != index + 1)
+        if (settings.validationFinalSemanticIntegrityEnabled
+            && records[index].weldIndex != index + 1)
         {
             error = QString("最终焊接姿态索引不连续：第 %1 条记录 weld_index=%2，应为 %3。")
                 .arg(index + 1)
@@ -4930,54 +5323,130 @@ bool ValidateFinalWeldPoseArtifact(
                 .arg(index + 1);
             return false;
         }
-        if (!IsKnownWeldPointType(record.pointType)
-            || !IsKnownWeldSegmentKind(record.segmentKind)
-            || !IsReasonableRobotAngleDeg(record.rx)
-            || !IsReasonableRobotAngleDeg(record.ry)
-            || !IsReasonableRobotAngleDeg(record.rz))
+        if (settings.validationFinalSemanticIntegrityEnabled
+            && (!IsKnownWeldPointType(record.pointType)
+                || !IsKnownWeldSegmentKind(record.segmentKind)
+                || !IsReasonableRobotAngleDeg(record.rx)
+                || !IsReasonableRobotAngleDeg(record.ry)
+                || !IsReasonableRobotAngleDeg(record.rz)))
         {
             error = QString("最终焊接姿态第 %1 条标签或角度超出允许语义。").arg(index + 1);
             return false;
         }
         const QString pointType = record.pointType.trimmed().toLower();
-        if ((pointType == QStringLiteral("start") && index != 0)
-            || (pointType == QStringLiteral("end") && index + 1 != records.size()))
+        if (settings.validationFinalSemanticIntegrityEnabled
+            && ((pointType == QStringLiteral("start") && index != 0)
+                || (pointType == QStringLiteral("end")
+                    && index + 1 != records.size())))
         {
             error = QString("最终焊接姿态第 %1 条 start/end 标签位置无效。").arg(index + 1);
             return false;
         }
-        const QString segmentBase = WeldSegmentBaseKind(record.segmentKind);
-        if (!hasNearbySourcePose(sourceIndexesBySegmentBase.value(segmentBase), record))
+        const QVector<int>& semanticSourceIndexes =
+            semanticSourceIndexesForRecord(index);
+        SourcePoseMatchDiagnostics sourcePoseDiagnostics;
+        if (settings.validationFinalSourceBindingEnabled
+            && !hasNearbySourcePose(
+                semanticSourceIndexes,
+                record,
+                &sourcePoseDiagnostics))
         {
-            error = QString("最终焊接姿态第 %1 条在补偿前同段语义中没有同时满足 %2mm / %3deg控制器欧拉 / %4deg物理姿态硬门限的候选。")
-                .arg(index + 1)
-                .arg(FINAL_MAX_SOURCE_DISPLACEMENT_MM, 0, 'f', 1)
-                .arg(FINAL_MAX_SOURCE_CONTROLLER_EULER_DELTA_DEG, 0, 'f', 1)
-                .arg(FINAL_MAX_SOURCE_PHYSICAL_ORIENTATION_DELTA_DEG, 0, 'f', 1);
+            const QString allowedSourceBases =
+                sourceSegmentBasesBySemanticKey.value(
+                    allowedSourceSemanticKeys.value(index)).join('/');
+            if (sourcePoseDiagnostics.sourceIndex >= 0)
+            {
+                const WeldPoseFileRecord& diagnosticSource =
+                    sourceRecords[sourcePoseDiagnostics.sourceIndex];
+                const double displacementExcessMm = std::max(
+                    0.0,
+                    sourcePoseDiagnostics.displacementMm
+                        - settings.validationMaxFinalSourceDisplacementMm);
+                const double physicalOrientationExcessDeg = std::max(
+                    0.0,
+                    sourcePoseDiagnostics.physicalOrientationDeltaDeg
+                        - settings
+                            .validationMaxFinalSourcePhysicalOrientationDeltaDeg);
+                error = QString(
+                    "最终焊接姿态第 %1 条在补偿前允许段语义[%2]中没有同时满足来源硬门限。"
+                    "最优联合候选：补偿前第 %3 条（raw_index=%4，段=%5），"
+                    "位移=%6 mm（门限≤%7 mm，超出=%8 mm），"
+                    "物理姿态差=%9 deg（门限≤%10 deg，超出=%11 deg）。"
+                    "圆弧仅允许匹配相邻进入/离开段；控制器欧拉差仅作诊断，"
+                    "不用于跨奇异位形的源姿态否决。")
+                    .arg(index + 1)
+                    .arg(allowedSourceBases)
+                    .arg(sourcePoseDiagnostics.sourceIndex + 1)
+                    .arg(diagnosticSource.rawIndex)
+                    .arg(diagnosticSource.segmentKind)
+                    .arg(sourcePoseDiagnostics.displacementMm, 0, 'f', 3)
+                    .arg(
+                        settings.validationMaxFinalSourceDisplacementMm,
+                        0,
+                        'f',
+                        3)
+                    .arg(displacementExcessMm, 0, 'f', 3)
+                    .arg(
+                        sourcePoseDiagnostics.physicalOrientationDeltaDeg,
+                        0,
+                        'f',
+                        3)
+                    .arg(
+                        settings
+                            .validationMaxFinalSourcePhysicalOrientationDeltaDeg,
+                        0,
+                        'f',
+                        1)
+                    .arg(physicalOrientationExcessDeg, 0, 'f', 3);
+            }
+            else
+            {
+                error = QString(
+                    "最终焊接姿态第 %1 条在补偿前允许段语义[%2]中没有可计算的来源候选；"
+                    "来源硬门限为位移≤%3 mm、物理姿态差≤%4 deg。"
+                    "圆弧仅允许匹配相邻进入/离开段。")
+                    .arg(index + 1)
+                    .arg(allowedSourceBases)
+                    .arg(
+                        settings.validationMaxFinalSourceDisplacementMm,
+                        0,
+                        'f',
+                        3)
+                    .arg(
+                        settings
+                            .validationMaxFinalSourcePhysicalOrientationDeltaDeg,
+                        0,
+                        'f',
+                        1);
+            }
             return false;
         }
-        if (pointType.contains(QStringLiteral("corner"))
+        if (settings.validationFinalSemanticIntegrityEnabled
+            && pointType.contains(QStringLiteral("corner"))
             && !hasNearbySource(sourceCornerIndexes, record.point))
         {
             error = QString("最终焊接姿态第 %1 条拐点标签在补偿前拐点附近没有对应语义。")
                 .arg(index + 1);
             return false;
         }
-        if (record.isLapStep && !hasNearbySource(sourceLapIndexes, record.point))
+        if (settings.validationFinalSemanticIntegrityEnabled
+            && record.isLapStep
+            && !hasNearbySource(sourceLapIndexes, record.point))
         {
             error = QString("最终焊接姿态第 %1 条搭接台阶标签在补偿前台阶附近没有对应语义。")
                 .arg(index + 1);
             return false;
         }
 
-        const QVector<int> sourceIndexes = sourceIndexesByRawIndex.value(records[index].rawIndex);
+        const QVector<int>& sourceIndexes = topologySourceIndexesForRecord(index);
         int bestSourceIndex = -1;
         double bestSourceDistanceMm = std::numeric_limits<double>::infinity();
         double bestSourceControllerEulerDeltaDeg = std::numeric_limits<double>::infinity();
         double bestSourcePhysicalOrientationDeltaDeg = std::numeric_limits<double>::infinity();
         for (int sourceIndex : sourceIndexes)
         {
-            if (sourceIndex < lastMatchedSourceIndex)
+            if (settings.validationFinalTopologyBindingEnabled
+                && sourceIndex < lastMatchedSourceIndex)
             {
                 continue;
             }
@@ -4986,12 +5455,16 @@ bool ValidateFinalWeldPoseArtifact(
             const double controllerEulerDeltaDeg = ControllerEulerDistanceDeg(source, record);
             const double physicalOrientationDeltaDeg = PhysicalOrientationDistanceDeg(
                 source, record, robotType);
-            if (distanceMm <= FINAL_MAX_SOURCE_DISPLACEMENT_MM
-                && controllerEulerDeltaDeg <= FINAL_MAX_SOURCE_CONTROLLER_EULER_DELTA_DEG
-                && physicalOrientationDeltaDeg <= FINAL_MAX_SOURCE_PHYSICAL_ORIENTATION_DELTA_DEG
+            if ((!settings.validationFinalSourceBindingEnabled
+                    || (distanceMm
+                            <= settings.validationMaxFinalSourceDisplacementMm
+                        && physicalOrientationDeltaDeg
+                            <= settings
+                                .validationMaxFinalSourcePhysicalOrientationDeltaDeg))
                 && (distanceMm < bestSourceDistanceMm
                     || (std::abs(distanceMm - bestSourceDistanceMm) <= 1e-9
-                        && physicalOrientationDeltaDeg < bestSourcePhysicalOrientationDeltaDeg)))
+                        && physicalOrientationDeltaDeg
+                            < bestSourcePhysicalOrientationDeltaDeg)))
             {
                 bestSourceIndex = sourceIndex;
                 bestSourceDistanceMm = distanceMm;
@@ -5033,21 +5506,33 @@ bool ValidateFinalWeldPoseArtifact(
         }
     }
 
-    if (maxStepMm > FINAL_MAX_POSITION_STEP_MM)
+    if (settings.validationFinalTrajectoryStepEnabled
+        && maxStepMm > settings.validationMaxFinalPositionStepMm)
     {
         error = QString("最终焊接姿态最大点距 %1 mm，超过结构硬门限 %2 mm。")
             .arg(maxStepMm, 0, 'f', 3)
-            .arg(FINAL_MAX_POSITION_STEP_MM, 0, 'f', 1);
+            .arg(settings.validationMaxFinalPositionStepMm, 0, 'f', 3);
         return false;
     }
-    if (maxControllerEulerStepDeg > FINAL_MAX_CONTROLLER_EULER_STEP_DEG
-        || maxPhysicalOrientationStepDeg > FINAL_MAX_PHYSICAL_ORIENTATION_STEP_DEG)
+    if (settings.validationFinalTrajectoryStepEnabled
+        && (maxControllerEulerStepDeg
+                > settings.validationMaxFinalControllerEulerStepDeg
+            || maxPhysicalOrientationStepDeg
+                > settings.validationMaxFinalPhysicalOrientationStepDeg))
     {
         error = QString("最终焊接姿态相邻控制器欧拉跳变/物理旋转=%1/%2 deg，超过硬门限 %3/%4 deg。")
             .arg(maxControllerEulerStepDeg, 0, 'f', 3)
             .arg(maxPhysicalOrientationStepDeg, 0, 'f', 3)
-            .arg(FINAL_MAX_CONTROLLER_EULER_STEP_DEG, 0, 'f', 1)
-            .arg(FINAL_MAX_PHYSICAL_ORIENTATION_STEP_DEG, 0, 'f', 1);
+            .arg(
+                settings.validationMaxFinalControllerEulerStepDeg,
+                0,
+                'f',
+                3)
+            .arg(
+                settings.validationMaxFinalPhysicalOrientationStepDeg,
+                0,
+                'f',
+                3);
         return false;
     }
 
@@ -5102,36 +5587,72 @@ bool ValidateFinalWeldPoseArtifact(
         && lastMatchedSourceIndexValue >= firstMatchedSourceIndex
         ? matchedExpectedSourceArcMm / expectedRetainedSourceLengthMm
         : 0.0;
-    if (matchedArcRatio < FINAL_MIN_MATCHED_ARC_RATIO
-        || sourceUniqueCoverageRatio < FINAL_MIN_SOURCE_UNIQUE_COVERAGE_RATIO
-        || sourceArcSpanRatio < FINAL_MIN_SOURCE_ARC_SPAN_RATIO
-        || maxSourceDisplacementMm > FINAL_MAX_SOURCE_DISPLACEMENT_MM
-        || maxSourceControllerEulerDeltaDeg > FINAL_MAX_SOURCE_CONTROLLER_EULER_DELTA_DEG
-        || maxSourcePhysicalOrientationDeltaDeg > FINAL_MAX_SOURCE_PHYSICAL_ORIENTATION_DELTA_DEG)
+    if ((settings.validationFinalTopologyBindingEnabled
+            && (matchedArcRatio
+                    < settings.validationMinFinalMatchedArcRatio
+                || sourceUniqueCoverageRatio
+                    < settings.validationMinFinalSourceUniqueCoverageRatio
+                || sourceArcSpanRatio
+                    < settings.validationMinFinalSourceArcSpanRatio))
+        || (settings.validationFinalSourceBindingEnabled
+            && (maxSourceDisplacementMm
+                    > settings.validationMaxFinalSourceDisplacementMm
+                || maxSourcePhysicalOrientationDeltaDeg
+                    > settings
+                        .validationMaxFinalSourcePhysicalOrientationDeltaDeg)))
     {
-        error = QString("最终焊道与补偿前姿态拓扑不一致：匹配弧长=%1%，源唯一覆盖=%2%，源弧长跨度=%3%，最大位移=%4 mm，控制器/物理姿态差=%5/%6 deg；门限=%7%/%8%/%9%/%10mm/%11deg/%12deg。")
+        error = QString("最终焊道与补偿前姿态拓扑不一致：匹配弧长=%1%，源唯一覆盖=%2%，源弧长跨度=%3%，最大位移=%4 mm，物理姿态差=%5 deg，控制器欧拉表示差=%6 deg（仅诊断）；门限=%7%/%8%/%9%/%10mm/%11deg物理姿态。")
             .arg(matchedArcRatio * 100.0, 0, 'f', 1)
             .arg(sourceUniqueCoverageRatio * 100.0, 0, 'f', 1)
             .arg(sourceArcSpanRatio * 100.0, 0, 'f', 1)
             .arg(maxSourceDisplacementMm, 0, 'f', 3)
-            .arg(maxSourceControllerEulerDeltaDeg, 0, 'f', 3)
             .arg(maxSourcePhysicalOrientationDeltaDeg, 0, 'f', 3)
-            .arg(FINAL_MIN_MATCHED_ARC_RATIO * 100.0, 0, 'f', 0)
-            .arg(FINAL_MIN_SOURCE_UNIQUE_COVERAGE_RATIO * 100.0, 0, 'f', 0)
-            .arg(FINAL_MIN_SOURCE_ARC_SPAN_RATIO * 100.0, 0, 'f', 0)
-            .arg(FINAL_MAX_SOURCE_DISPLACEMENT_MM, 0, 'f', 1)
-            .arg(FINAL_MAX_SOURCE_CONTROLLER_EULER_DELTA_DEG, 0, 'f', 1)
-            .arg(FINAL_MAX_SOURCE_PHYSICAL_ORIENTATION_DELTA_DEG, 0, 'f', 1);
+            .arg(maxSourceControllerEulerDeltaDeg, 0, 'f', 3)
+            .arg(settings.validationMinFinalMatchedArcRatio * 100.0, 0, 'f', 1)
+            .arg(
+                settings.validationMinFinalSourceUniqueCoverageRatio * 100.0,
+                0,
+                'f',
+                1)
+            .arg(
+                settings.validationMinFinalSourceArcSpanRatio * 100.0,
+                0,
+                'f',
+                1)
+            .arg(settings.validationMaxFinalSourceDisplacementMm, 0, 'f', 3)
+            .arg(
+                settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg,
+                0,
+                'f',
+                3);
         return false;
     }
-    const double expectedRetainedPointCloudSpanMm = std::max(
-        0.0,
-        qualityReport.projectedSpanMm - declaredStartSkipMm - declaredEndSkipMm);
-    const double minLengthMm = std::max(
-        expectedRetainedPointCloudSpanMm * settings.validationMinOutputLengthRatio,
-        expectedRetainedSourceLengthMm * FINAL_MIN_PRECOMP_LENGTH_RATIO);
-    const double maxLengthMm = expectedRetainedSourceLengthMm * FINAL_MAX_PRECOMP_LENGTH_RATIO;
-    if (totalLengthMm < minLengthMm || totalLengthMm > maxLengthMm)
+    const double expectedRetainedPointCloudSpanMm =
+        settings.validationOutputEnabled
+        ? std::max(
+            0.0,
+            qualityReport.projectedSpanMm
+                - declaredStartSkipMm
+                - declaredEndSkipMm)
+        : 0.0;
+    double minLengthMm = settings.validationOutputEnabled
+        ? expectedRetainedPointCloudSpanMm
+            * settings.validationMinOutputLengthRatio
+        : 0.0;
+    double maxLengthMm = std::numeric_limits<double>::infinity();
+    if (settings.validationFinalLengthBindingEnabled)
+    {
+        minLengthMm = std::max(
+            minLengthMm,
+            expectedRetainedSourceLengthMm
+                * settings.validationMinFinalToPreCompLengthRatio);
+        maxLengthMm =
+            expectedRetainedSourceLengthMm
+            * settings.validationMaxFinalToPreCompLengthRatio;
+    }
+    if ((settings.validationOutputEnabled
+            || settings.validationFinalLengthBindingEnabled)
+        && (totalLengthMm < minLengthMm || totalLengthMm > maxLengthMm))
     {
         error = QString("最终焊接姿态总长 %1 mm，不在本次点云跨度/声明裁剪后补偿前轨迹绑定区间 [%2,%3] mm（点云跨度 %4 mm，补偿前 %5 mm，声明裁剪=%6+%7 mm）。")
             .arg(totalLengthMm, 0, 'f', 3)
@@ -5337,6 +5858,40 @@ Eigen::Vector3d CanonicalHorizontalWeldAxis(Eigen::Vector3d direction)
         ? direction.y() < 0.0
         : direction.x() < 0.0;
     return reverse ? -direction : direction;
+}
+
+Eigen::Vector3d AlignHorizontalAxisToReference(
+    Eigen::Vector3d direction,
+    const Eigen::Vector3d& reference)
+{
+    direction = HorizontalUnitOrZero(direction);
+    const Eigen::Vector3d horizontalReference = HorizontalUnitOrZero(reference);
+    if (direction.head<2>().norm() <= 1e-9
+        || horizontalReference.head<2>().norm() <= 1e-9)
+    {
+        return direction;
+    }
+    return direction.dot(horizontalReference) < 0.0 ? -direction : direction;
+}
+
+double SignedHorizontalAngleDeg(
+    const Eigen::Vector3d& zeroAxis,
+    const Eigen::Vector3d& targetAxis)
+{
+    const Eigen::Vector3d reference = HorizontalUnitOrZero(zeroAxis);
+    const Eigen::Vector3d target =
+        AlignHorizontalAxisToReference(targetAxis, reference);
+    if (reference.head<2>().norm() <= 1e-9
+        || target.head<2>().norm() <= 1e-9)
+    {
+        return 0.0;
+    }
+
+    const double crossZ =
+        reference.x() * target.y() - reference.y() * target.x();
+    const double dot = std::clamp(reference.dot(target), -1.0, 1.0);
+    // 从平台零轴俯视逆时针旋转为左侧正角，顺时针为右侧负角。
+    return std::atan2(crossZ, dot) * 180.0 / RobotPoseTransform::kPi;
 }
 
 Eigen::Vector3d ResolveOverallHorizontalWeldDirection(
@@ -5591,7 +6146,8 @@ T_ROBOT_COORS BuildWeldPoseCoors(const WeldPoseFileRecord& record)
 QVector<WeldPoseFileRecord> SampleFinalWeldTrajectoryRecords(
     const QVector<WeldPoseFileRecord>& records,
     double sampleStepMm,
-    bool keepAnchorsOnly = false)
+    bool keepAnchorsOnly = false,
+    bool preserveToolOrientationTransitions = false)
 {
     if (records.size() <= 2 || !std::isfinite(sampleStepMm) || sampleStepMm <= 0.0)
     {
@@ -5657,6 +6213,19 @@ QVector<WeldPoseFileRecord> SampleFinalWeldTrajectoryRecords(
         dropPoint[loIdx] = 0; forceKeep[loIdx] = 1;   // X 最小端(横移台阶一侧关键角)
         dropPoint[hiIdx] = 0; forceKeep[hiIdx] = 1;   // X 最大端(横移台阶另一侧关键角)
         i = j;
+    }
+
+    if (preserveToolOrientationTransitions)
+    {
+        for (int index = 0; index < pointCount; ++index)
+        {
+            if (records[index].segmentKind.trimmed().toLower().contains(
+                    QStringLiteral("_transition")))
+            {
+                dropPoint[index] = 0;
+                forceKeep[index] = 1;
+            }
+        }
     }
 
     struct KeptPoint
@@ -5761,7 +6330,8 @@ bool BuildWeldPoseMoveInfos(
         : SampleFinalWeldTrajectoryRecords(
             records,
             NormalizeFinalWeldTrajectorySampleStepMm(effectiveSampleStepMm),
-            preset != nullptr && preset->keepAnchorsOnly);
+            preset != nullptr && preset->keepAnchorsOnly,
+            preset != nullptr && preset->useTaughtWeldPose);
     if (executionRecordsOut != nullptr)
     {
         *executionRecordsOut = executionRecords;
@@ -6055,17 +6625,58 @@ bool TryFindFirstWeldPathSelfIntersection(
 WeldPoseFileRecord InterpolateWeldPoseRecord(
     const WeldPoseFileRecord& begin,
     const WeldPoseFileRecord& end,
-    double ratio)
+    double ratio,
+    int robotType)
 {
     const double safeRatio = std::clamp(ratio, 0.0, 1.0);
     WeldPoseFileRecord record = begin;
     record.rawIndex = static_cast<int>(std::lround(
         begin.rawIndex + (end.rawIndex - begin.rawIndex) * safeRatio));
     record.point = begin.point + (end.point - begin.point) * safeRatio;
-    record.rx = begin.rx + (NormalizeAngleNear(end.rx, begin.rx) - begin.rx) * safeRatio;
-    record.ry = begin.ry + (NormalizeAngleNear(end.ry, begin.ry) - begin.ry) * safeRatio;
-    record.rz = NormalizeAngleToFanucRange(
-        begin.rz + (NormalizeAngleNear(end.rz, begin.rz) - begin.rz) * safeRatio);
+    if (safeRatio <= 1e-12)
+    {
+        record.rx = begin.rx;
+        record.ry = begin.ry;
+        record.rz = begin.rz;
+    }
+    else if (safeRatio >= 1.0 - 1e-12)
+    {
+        record.rx = end.rx;
+        record.ry = end.ry;
+        record.rz = end.rz;
+    }
+    else
+    {
+        Eigen::Quaterniond beginOrientation(
+            RobotPoseTransform::RotationFromAnglesDeg(
+                begin.rx, begin.ry, begin.rz, robotType));
+        Eigen::Quaterniond endOrientation(
+            RobotPoseTransform::RotationFromAnglesDeg(
+                end.rx, end.ry, end.rz, robotType));
+        beginOrientation.normalize();
+        endOrientation.normalize();
+        if (beginOrientation.coeffs().dot(endOrientation.coeffs()) < 0.0)
+        {
+            endOrientation.coeffs() *= -1.0;
+        }
+
+        const Eigen::Matrix3d interpolatedRotation =
+            beginOrientation.slerp(safeRatio, endOrientation)
+                .normalized()
+                .toRotationMatrix();
+        const Eigen::Vector3d eulerReference(
+            begin.rx + (NormalizeAngleNear(end.rx, begin.rx) - begin.rx) * safeRatio,
+            begin.ry + (NormalizeAngleNear(end.ry, begin.ry) - begin.ry) * safeRatio,
+            begin.rz + (NormalizeAngleNear(end.rz, begin.rz) - begin.rz) * safeRatio);
+        const Eigen::Vector3d interpolatedEuler =
+            RobotPoseTransform::AnglesFromRotationDegNear(
+                interpolatedRotation,
+                robotType,
+                eulerReference);
+        record.rx = interpolatedEuler.x();
+        record.ry = interpolatedEuler.y();
+        record.rz = NormalizeAngleToFanucRange(interpolatedEuler.z());
+    }
     record.bx = begin.bx + (end.bx - begin.bx) * safeRatio;
     record.by = begin.by + (end.by - begin.by) * safeRatio;
     record.bz = begin.bz + (end.bz - begin.bz) * safeRatio;
@@ -6077,11 +6688,49 @@ WeldPoseFileRecord InterpolateWeldPoseRecord(
     return record;
 }
 
+int NormalizeWeldPoseEulerContinuity(
+    QVector<WeldPoseFileRecord>& records,
+    int robotType)
+{
+    int adjustedCount = 0;
+    for (int index = 1; index < records.size(); ++index)
+    {
+        WeldPoseFileRecord& record = records[index];
+        const WeldPoseFileRecord& previous = records[index - 1];
+        const Eigen::Matrix3d rotation =
+            RobotPoseTransform::RotationFromAnglesDeg(
+                record.rx,
+                record.ry,
+                record.rz,
+                robotType);
+        const Eigen::Vector3d continuousEuler =
+            RobotPoseTransform::AnglesFromRotationDegNear(
+                rotation,
+                robotType,
+                Eigen::Vector3d(previous.rx, previous.ry, previous.rz));
+        if (!continuousEuler.allFinite())
+        {
+            continue;
+        }
+        if (std::abs(record.rx - continuousEuler.x()) > 1e-9
+            || std::abs(record.ry - continuousEuler.y()) > 1e-9
+            || std::abs(record.rz - continuousEuler.z()) > 1e-9)
+        {
+            record.rx = continuousEuler.x();
+            record.ry = continuousEuler.y();
+            record.rz = continuousEuler.z();
+            ++adjustedCount;
+        }
+    }
+    return adjustedCount;
+}
+
 void RenumberWeldPoseRecords(QVector<WeldPoseFileRecord>& records);
 
 bool ClipWeldPoseRecordsAtArcLength(
     QVector<WeldPoseFileRecord>& records,
     double resumeStartArcMm,
+    int robotType,
     double* actualStartArcMm,
     QString& error)
 {
@@ -6126,7 +6775,11 @@ bool ClipWeldPoseRecordsAtArcLength(
             }
             else
             {
-                clipped.push_back(InterpolateWeldPoseRecord(records[index], records[index + 1], ratio));
+                clipped.push_back(InterpolateWeldPoseRecord(
+                    records[index],
+                    records[index + 1],
+                    ratio,
+                    robotType));
             }
 
             const int remainingBegin = ratio >= 1.0 - 1e-9 ? index + 2 : index + 1;
@@ -6140,6 +6793,7 @@ bool ClipWeldPoseRecordsAtArcLength(
                 return false;
             }
             RenumberWeldPoseRecords(clipped);
+            NormalizeWeldPoseEulerContinuity(clipped, robotType);
             records = clipped;
             if (actualStartArcMm != nullptr)
             {
@@ -6166,6 +6820,7 @@ void RenumberWeldPoseRecords(QVector<WeldPoseFileRecord>& records)
 
 void TrimWeldPathSelfIntersections(
     QVector<WeldPoseFileRecord>& records,
+    int robotType,
     WeldSeamCompApplyStats& stats)
 {
     constexpr int kMaxTrimIterations = 256;
@@ -6187,7 +6842,8 @@ void TrimWeldPathSelfIntersections(
         WeldPoseFileRecord junctionRecord = InterpolateWeldPoseRecord(
             records[secondIndex],
             records[secondIndex + 1],
-            intersection.secondRatio);
+            intersection.secondRatio,
+            robotType);
         junctionRecord.point.x() = intersection.point.x();
         junctionRecord.point.y() = intersection.point.y();
 
@@ -6794,6 +7450,7 @@ bool TryFindWeldPoseCutBefore(
     int cornerIndex,
     int minIndex,
     double targetDistanceMm,
+    int robotType,
     WeldPolylineCutPoint& cutPoint)
 {
     constexpr double kEpsilon = 1e-9;
@@ -6821,7 +7478,11 @@ bool TryFindWeldPoseCutBefore(
             cutPoint.segmentBeginIndex = index - 1;
             cutPoint.segmentEndIndex = index;
             cutPoint.ratio = ratio;
-            cutPoint.record = InterpolateWeldPoseRecord(records[index - 1], records[index], ratio);
+            cutPoint.record = InterpolateWeldPoseRecord(
+                records[index - 1],
+                records[index],
+                ratio,
+                robotType);
             return true;
         }
 
@@ -6836,6 +7497,7 @@ bool TryFindWeldPoseCutAfter(
     int cornerIndex,
     int maxIndex,
     double targetDistanceMm,
+    int robotType,
     WeldPolylineCutPoint& cutPoint)
 {
     constexpr double kEpsilon = 1e-9;
@@ -6863,7 +7525,11 @@ bool TryFindWeldPoseCutAfter(
             cutPoint.segmentBeginIndex = index;
             cutPoint.segmentEndIndex = index + 1;
             cutPoint.ratio = ratio;
-            cutPoint.record = InterpolateWeldPoseRecord(records[index], records[index + 1], ratio);
+            cutPoint.record = InterpolateWeldPoseRecord(
+                records[index],
+                records[index + 1],
+                ratio,
+                robotType);
             return true;
         }
 
@@ -7015,12 +7681,14 @@ WeldCornerArcApplyStats ApplyCornerArcTransitionToWeldPoseRecords(
                 index,
                 incomingLimitIndex,
                 tangentDistanceMm,
+                preset.robotType,
                 tangentInCut)
             || !TryFindWeldPoseCutAfter(
                 records,
                 index,
                 outgoingLimitIndex,
                 tangentDistanceMm,
+                preset.robotType,
                 tangentOutCut)
             || !tangentInCut.valid
             || !tangentOutCut.valid)
@@ -7072,7 +7740,8 @@ WeldCornerArcApplyStats ApplyCornerArcTransitionToWeldPoseRecords(
             WeldPoseFileRecord arcRecord = InterpolateWeldPoseRecord(
                 tangentInCut.record,
                 tangentOutCut.record,
-                ratio);
+                ratio,
+                preset.robotType);
             const double angle = startAngle + candidate.theta * ratio;
             arcRecord.point = center
                 + planeX * (std::cos(angle) * actualRadiusMm)
@@ -7145,7 +7814,8 @@ std::vector<QString> BuildArcTransitionPreviewCloudLines(
 
 int DensifyWeldPoseRecordsByStep(
     QVector<WeldPoseFileRecord>& records,
-    double maxStepMm)
+    double maxStepMm,
+    int robotType)
 {
     if (records.size() < 2 || !std::isfinite(maxStepMm) || maxStepMm <= 0.0)
     {
@@ -7175,7 +7845,11 @@ int DensifyWeldPoseRecordsByStep(
         {
             const double ratio = static_cast<double>(segmentIndex)
                 / static_cast<double>(segmentCount);
-            WeldPoseFileRecord fillRecord = InterpolateWeldPoseRecord(prev, next, ratio);
+            WeldPoseFileRecord fillRecord = InterpolateWeldPoseRecord(
+                prev,
+                next,
+                ratio,
+                robotType);
             // 2mm 加密的填充点一律标 normal：不继承端点(尤其 corner/_arc)的类型，否则单点拐角会被沿线
             // 染成一串假 corner，下游把直线段中部误当拐角顶点。段类 segmentKind 仍保留以维持段/弧归属。
             fillRecord.pointType =
@@ -7192,12 +7866,14 @@ int DensifyWeldPoseRecordsByStep(
         records = std::move(denseRecords);
         RenumberWeldPoseRecords(records);
     }
+    NormalizeWeldPoseEulerContinuity(records, robotType);
     return insertedPointCount;
 }
 
 int SmoothRemainingUnroundedWeldCorners(
     QVector<WeldPoseFileRecord>& records,
-    double maxStepMm)
+    double maxStepMm,
+    int robotType)
 {
     constexpr double kPi = 3.14159265358979323846;
     constexpr double kMinSmoothAngleRad = 35.0 * kPi / 180.0;
@@ -7266,7 +7942,11 @@ int SmoothRemainingUnroundedWeldCorners(
         {
             const double ratio = static_cast<double>(segmentIndex)
                 / static_cast<double>(segmentCount);
-            WeldPoseFileRecord bridgeRecord = InterpolateWeldPoseRecord(before, after, ratio);
+            WeldPoseFileRecord bridgeRecord = InterpolateWeldPoseRecord(
+                before,
+                after,
+                ratio,
+                robotType);
             bridgeRecord.rawIndex = corner.rawIndex;
             bridgeRecord.pointType = isMarkedCorner
                 ? (corner.pointType + "_arc")
@@ -7497,6 +8177,7 @@ bool TryBuildLineIntersectionWeldCorner(
     const QVector<WeldPoseFileRecord>& records,
     int beforeEndIndex,
     int afterBeginIndex,
+    int robotType,
     WeldPoseFileRecord& restoredCorner)
 {
     if (records.size() < 4)
@@ -7566,7 +8247,11 @@ bool TryBuildLineIntersectionWeldCorner(
         ratio = std::clamp((intersection - beforePoint).dot(span) / span.squaredNorm(), 0.0, 1.0);
     }
 
-    restoredCorner = InterpolateWeldPoseRecord(before, after, ratio);
+    restoredCorner = InterpolateWeldPoseRecord(
+        before,
+        after,
+        ratio,
+        robotType);
     restoredCorner.rawIndex = corner.rawIndex;
     restoredCorner.point.x() = intersection.x();
     restoredCorner.point.y() = intersection.y();
@@ -7583,7 +8268,8 @@ bool TryBuildLineIntersectionWeldCorner(
 
 bool TryInsertRestoredWeldCorner(
     const WeldPoseFileRecord& corner,
-    QVector<WeldPoseFileRecord>& records)
+    QVector<WeldPoseFileRecord>& records,
+    int robotType)
 {
     const int insertionIndex = FindWeldCornerInsertionIndex(records, corner);
     if (insertionIndex <= 0 || insertionIndex >= records.size())
@@ -7597,6 +8283,7 @@ bool TryInsertRestoredWeldCorner(
             records,
             insertionIndex - 1,
             insertionIndex,
+            robotType,
             restoredCorner))
     {
         return false;
@@ -7609,7 +8296,8 @@ bool TryInsertRestoredWeldCorner(
 bool TryAdjustExistingWeldCornerByIntersection(
     const WeldPoseFileRecord& sourceCorner,
     int cornerIndex,
-    QVector<WeldPoseFileRecord>& records)
+    QVector<WeldPoseFileRecord>& records,
+    int robotType)
 {
     if (cornerIndex <= 0 || cornerIndex + 1 >= records.size())
     {
@@ -7631,6 +8319,7 @@ bool TryAdjustExistingWeldCornerByIntersection(
             records,
             cornerIndex - 1,
             cornerIndex + 1,
+            robotType,
             restoredCorner))
     {
         return false;
@@ -7647,7 +8336,8 @@ bool TryAdjustExistingWeldCornerByIntersection(
 
 WeldCornerRestoreStats RestoreTrimmedWeldCornersByLineIntersection(
     const QVector<WeldPoseFileRecord>& recordsBeforeTrim,
-    QVector<WeldPoseFileRecord>& records)
+    QVector<WeldPoseFileRecord>& records,
+    int robotType)
 {
     WeldCornerRestoreStats stats;
     if (recordsBeforeTrim.isEmpty() || records.size() < 4)
@@ -7676,7 +8366,11 @@ WeldCornerRestoreStats RestoreTrimmedWeldCornersByLineIntersection(
         const int existingCornerIndex = FindMatchingWeldCornerRecordIndex(records, corner);
         if (existingCornerIndex >= 0)
         {
-            if (TryAdjustExistingWeldCornerByIntersection(corner, existingCornerIndex, records))
+            if (TryAdjustExistingWeldCornerByIntersection(
+                    corner,
+                    existingCornerIndex,
+                    records,
+                    robotType))
             {
                 ++stats.adjustedCornerCount;
                 RenumberWeldPoseRecords(records);
@@ -7685,7 +8379,7 @@ WeldCornerRestoreStats RestoreTrimmedWeldCornersByLineIntersection(
         }
 
         ++stats.missingCornerCount;
-        if (TryInsertRestoredWeldCorner(corner, records))
+        if (TryInsertRestoredWeldCorner(corner, records, robotType))
         {
             ++stats.restoredCornerCount;
             RenumberWeldPoseRecords(records);
@@ -7907,7 +8601,8 @@ WeldPoseFileRecord BuildPoseCompJunctionRecord(
     const QVector<WeldPoseFileRecord>& records,
     const PoseCompSegmentRange& ownerRange,
     const PoseCompSegmentRange& elevationRange,
-    const Eigen::Vector2d& intersection)
+    const Eigen::Vector2d& intersection,
+    int robotType)
 {
     const WeldPoseFileRecord& begin = records[ownerRange.begin];
     const WeldPoseFileRecord& end = records[ownerRange.end];
@@ -7921,7 +8616,11 @@ WeldPoseFileRecord BuildPoseCompJunctionRecord(
         ratio = (intersection - beginPoint).dot(span) / span.squaredNorm();
     }
     const double clampedRatio = std::clamp(ratio, 0.0, 1.0);
-    WeldPoseFileRecord record = InterpolateWeldPoseRecord(begin, end, clampedRatio);
+    WeldPoseFileRecord record = InterpolateWeldPoseRecord(
+        begin,
+        end,
+        clampedRatio,
+        robotType);
     record.point.x() = intersection.x();
     record.point.y() = intersection.y();
 
@@ -7953,6 +8652,7 @@ bool TryApplyPoseCompJunctionIntersection(
     QVector<WeldPoseFileRecord>& records,
     const PoseCompSegmentRange& leftRange,
     const PoseCompSegmentRange& rightRange,
+    int robotType,
     PoseCompJunctionApplyStats& stats)
 {
     constexpr double kMoveEpsilonMm = 1e-5;
@@ -8060,7 +8760,8 @@ bool TryApplyPoseCompJunctionIntersection(
         records,
         rightRange,
         elevationRange,
-        intersection);
+        intersection,
+        robotType);
     const bool moved =
         (records[rightRange.begin].point - junctionRecord.point).norm() > kMoveEpsilonMm;
     if (!moved && removeIndices.isEmpty())
@@ -8082,7 +8783,8 @@ bool TryApplyPoseCompJunctionIntersection(
 }
 
 PoseCompJunctionApplyStats ApplyPoseCompSegmentJunctionIntersections(
-    QVector<WeldPoseFileRecord>& records)
+    QVector<WeldPoseFileRecord>& records,
+    int robotType)
 {
     PoseCompJunctionApplyStats stats;
     int junctionIndex = 0;
@@ -8100,6 +8802,7 @@ PoseCompJunctionApplyStats ApplyPoseCompSegmentJunctionIntersections(
             records,
             ranges[junctionIndex],
             ranges[junctionIndex + 1],
+            robotType,
             stats);
         ++junctionIndex;
     }
@@ -8281,23 +8984,38 @@ SeamCompFinalizeStats FinalizeSeamCompedWeldPoseRecords(
         stats.emptyAfterEndpointTrim = true;
         return stats;
     }
-    TrimWeldPathSelfIntersections(records, compStats);
+    TrimWeldPathSelfIntersections(records, preset.robotType, compStats);
     if (records.isEmpty())
     {
         stats.emptyAfterSelfIntersection = true;
         return stats;
     }
-    stats.cornerRestore = RestoreTrimmedWeldCornersByLineIntersection(recordsBeforeTrim, records);
+    stats.cornerRestore = RestoreTrimmedWeldCornersByLineIntersection(
+        recordsBeforeTrim,
+        records,
+        preset.robotType);
     stats.densifyStepMm = std::min(2.0, EstimateWeldPoseStepMm(records));
-    stats.densifiedPointCount = DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    stats.densifiedPointCount = DensifyWeldPoseRecordsByStep(
+        records,
+        stats.densifyStepMm,
+        preset.robotType);
     stats.arc = ApplyCornerArcTransitionToWeldPoseRecords(preset, records);
-    stats.postArcDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    stats.postArcDensifiedPointCount = DensifyWeldPoseRecordsByStep(
+        records,
+        stats.densifyStepMm,
+        preset.robotType);
     TrimSharpWeldArcEntryPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
     TrimSharpWeldArcExitPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
-    stats.finalDensifiedPointCount = DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    stats.finalDensifiedPointCount = DensifyWeldPoseRecordsByStep(
+        records,
+        stats.densifyStepMm,
+        preset.robotType);
     TrimSharpWeldArcEntryPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
     TrimSharpWeldArcExitPoints(records, kSharpArcAngleRad, std::max(2.0, stats.densifyStepMm * 2.5));
-    stats.finalDensifiedPointCount += DensifyWeldPoseRecordsByStep(records, stats.densifyStepMm);
+    stats.finalDensifiedPointCount += DensifyWeldPoseRecordsByStep(
+        records,
+        stats.densifyStepMm,
+        preset.robotType);
     // 非圆弧拐点保持严格的直线-直线连接；只有上面的显式工艺圆弧允许产生曲线。
     stats.smoothedRemainingCornerCount = 0;
     RenumberWeldPoseRecords(records);
@@ -8434,7 +9152,8 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     const T_PRECISE_MEASURE_PARAM& param,
     const WeldPosePreset& preset,
     double platformFlatSlopeThreshold,
-    const MeasureThenWeldService::LogCallback& appendLog)
+    const MeasureThenWeldService::LogCallback& appendLog,
+    QString* generationError = nullptr)
 {
     struct SegmentInfo
     {
@@ -8450,14 +9169,22 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         QString kind;
         double fixedRz = 0.0;
         double directionDeg = 0.0;
-        double baseRz = 0.0;
+        double platformDirectionDeg = 0.0;
         double normalReferenceDistance = 0.0;
         double rejectedRz = 0.0;
-        double rawRzDeviationFromReference = 0.0;
-        double clampedRzDeviationFromReference = 0.0;
-        bool slopeRzClamped = false;
+        double rawGeometryAngleDeg = 0.0;
+        double limitedGeometryAngleDeg = 0.0;
+        bool geometryAngleClamped = false;
         bool directionValid = false;
+        bool isLapStepSegment = false;
+        Eigen::Vector3d horizontalTangent = Eigen::Vector3d::Zero();
+        Eigen::Vector3d localPlatformAxis = Eigen::Vector3d::Zero();
         Eigen::Vector3d poseCompWeldNormal = Eigen::Vector3d::Zero();
+        Eigen::Matrix3d outputRotation = Eigen::Matrix3d::Identity();
+        double outputRx = 0.0;
+        double outputRy = 0.0;
+        double outputRz = 0.0;
+        double taughtFrameRotationDeg = 0.0;
         QVector<double> distanceToEnd;
     };
 
@@ -8500,6 +9227,10 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     };
 
     std::vector<QString> lines;
+    if (generationError != nullptr)
+    {
+        generationError->clear();
+    }
     if (appendLog)
     {
         if (!preset.seamCompLoadError.isEmpty())
@@ -8556,7 +9287,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
 
     if (appendLog)
     {
-        appendLog("焊道RZ按焊道法向生成：RZ=0表示枪尖指向机器人X-，顺时针为正，180输出为-180；每段先计算焊道方向的两个垂直法向，再用本次测量姿态RZ选择唯一法向；坡面段再按夹紧范围限制相对上一段的偏转。");
+        appendLog("坡段姿态按几何方向生成：相邻平台拟合轴为0°，俯视左侧为正、右侧为负；先限制坡段相对平台的有符号几何夹角，再整体旋转平台示教工具姿态。测量RZ只用于选择平台焊枪法向，不参与坡段角度限幅。");
     }
 
     QVector<QString> measurementDepthSegmentKinds;
@@ -8578,9 +9309,6 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     }
 
     std::vector<SegmentInfo> segments;
-    double previousSegmentRz = preset.measureReferenceRz;
-    Eigen::Vector3d previousPoseCompWeldNormal = HorizontalUnitOrZero(
-        GunDirectionVectorFromRobotRz(preset.measureReferenceRz));
     QString previousSegmentKind;
     for (size_t segmentIndex = 0; segmentIndex + 1 < keyPointPositions.size(); ++segmentIndex)
     {
@@ -8610,6 +9338,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         const bool isLapStepSegment =
             result.points[segment.begin].source == QStringLiteral("geometry_lap_step")
             && result.points[segment.nextBegin].source == QStringLiteral("geometry_lap_step");
+        segment.isLapStepSegment = isLapStepSegment;
         if (isLapStepSegment)
         {
             // 台阶段无条件落到平台 kind(首段即台阶时 previousSegmentKind 为空也兜底)，绝不留几何角/坡道类型。
@@ -8624,72 +9353,17 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             &segmentValid);
         segment.directionDeg = segmentDirectionDeg;
         segment.directionValid = segmentValid;
-        double segmentRz = previousSegmentRz;
         if (segmentValid && !isLapStepSegment)
         {
-            double rejectedRz = 0.0;
-            double normalReferenceDistance = 0.0;
             const Eigen::Vector3d segmentVector =
                 result.points[segment.nextBegin].point - result.points[segment.begin].point;
-            const double normalRzDeg = ComputeLineNormalRobotRz(
-                segmentVector,
-                preset.measureReferenceRy,
-                preset.measureReferenceRz,
-                nullptr,
-                &rejectedRz,
-                &normalReferenceDistance);
-            segment.poseCompWeldNormal = HorizontalUnitOrZero(
-                GunDirectionVectorFromRobotRz(normalRzDeg));
-            const double selectedRz = NormalizeAngleNear(normalRzDeg, previousSegmentRz);
-            const double rawRzDeviation =
-                selectedRz - previousSegmentRz;
-            double clampedRzDeviation = rawRzDeviation;
-            double baseRz = selectedRz;
-            if (IsSlopeSegmentKind(segment.kind))
-            {
-                clampedRzDeviation = std::clamp(
-                    rawRzDeviation,
-                    preset.slopeRzMinDeg,
-                    preset.slopeRzMaxDeg);
-                baseRz = previousSegmentRz + clampedRzDeviation;
-                segment.slopeRzClamped = std::abs(clampedRzDeviation - rawRzDeviation) > 1e-6;
-                if (segment.slopeRzClamped && appendLog)
-                {
-                    appendLog(QString("斜面段 %1 RZ夹紧：相对上一段原始变化=%2 deg，夹紧后=%3 deg，范围=[%4, %5] deg")
-                        .arg(segment.kind)
-                        .arg(rawRzDeviation, 0, 'f', 3)
-                        .arg(clampedRzDeviation, 0, 'f', 3)
-                        .arg(preset.slopeRzMinDeg, 0, 'f', 3)
-                        .arg(preset.slopeRzMaxDeg, 0, 'f', 3));
-                }
-            }
-
-            segment.rawRzDeviationFromReference = rawRzDeviation;
-            segment.clampedRzDeviationFromReference = clampedRzDeviation;
-            segment.normalReferenceDistance = normalReferenceDistance;
-            segment.rejectedRz = rejectedRz;
-            segment.baseRz = NormalizeRobotRzOutputRange(baseRz);
-            segmentRz = NormalizeAngleNear(baseRz, previousSegmentRz);
+            segment.horizontalTangent = HorizontalUnitOrZero(segmentVector);
         }
         else if (isLapStepSegment)
         {
-            // 台阶段：焊枪保持上一平台段姿态横移跨过错位，RZ 沿用 previousSegmentRz、不按焊道法向重算
-            // （台阶段方向≈侧向，按法向算会产生 ~90° 姿态突跳，危及焊枪/工件安全）。
-            segment.baseRz = NormalizeRobotRzOutputRange(previousSegmentRz);
-            segment.poseCompWeldNormal = previousPoseCompWeldNormal;
             segment.directionValid = false;
-            if (appendLog)
-            {
-                appendLog(QString("搭接错位台阶段：RZ 沿用上一段=%1 deg，不按焊道法向重算(避免姿态突跳)。")
-                    .arg(NormalizeRobotRzOutputRange(previousSegmentRz), 0, 'f', 3));
-            }
         }
 
-        segment.fixedRz = NormalizeRobotRzOutputRange(segmentRz);
-        if (HorizontalUnitOrZero(segment.poseCompWeldNormal).head<2>().norm() <= 1e-9)
-        {
-            segment.poseCompWeldNormal = previousPoseCompWeldNormal;
-        }
         segment.distanceToEnd.resize(segment.end - segment.begin + 1);
         double accumulatedDistance = 0.0;
         segment.distanceToEnd[segment.end - segment.begin] = 0.0;
@@ -8723,8 +9397,6 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         }
 
         segments.push_back(segment);
-        previousSegmentRz = segmentRz;
-        previousPoseCompWeldNormal = segment.poseCompWeldNormal;
         previousSegmentKind = segment.kind;
     }
 
@@ -8733,74 +9405,367 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         return lines;
     }
 
+    double platformAxisCos2 = 0.0;
+    double platformAxisSin2 = 0.0;
+    double longestPlatformLength = 0.0;
+    Eigen::Vector3d longestPlatformAxis = Eigen::Vector3d::Zero();
+    bool hasSlopeSegment = false;
+    for (const SegmentInfo& segment : segments)
+    {
+        hasSlopeSegment = hasSlopeSegment || IsSlopeSegmentKind(segment.kind);
+        if (!IsPlatformSegmentKind(segment.kind)
+            || segment.isLapStepSegment
+            || segment.horizontalTangent.head<2>().norm() <= 1e-9)
+        {
+            continue;
+        }
+
+        const double weight = std::max(
+            1e-6,
+            segment.endDistance - segment.beginDistance);
+        const double directionRad = std::atan2(
+            segment.horizontalTangent.y(),
+            segment.horizontalTangent.x());
+        platformAxisCos2 += weight * std::cos(2.0 * directionRad);
+        platformAxisSin2 += weight * std::sin(2.0 * directionRad);
+        if (weight > longestPlatformLength)
+        {
+            longestPlatformLength = weight;
+            longestPlatformAxis = segment.horizontalTangent;
+        }
+    }
+
+    Eigen::Vector3d globalPlatformAxis = Eigen::Vector3d::Zero();
+    if (std::hypot(platformAxisCos2, platformAxisSin2) > 1e-9)
+    {
+        const double meanAxisRad =
+            0.5 * std::atan2(platformAxisSin2, platformAxisCos2);
+        globalPlatformAxis = CanonicalHorizontalWeldAxis(Eigen::Vector3d(
+            std::cos(meanAxisRad),
+            std::sin(meanAxisRad),
+            0.0));
+    }
+    else
+    {
+        globalPlatformAxis = CanonicalHorizontalWeldAxis(longestPlatformAxis);
+    }
+
+    if (hasSlopeSegment && globalPlatformAxis.head<2>().norm() <= 1e-9)
+    {
+        const QString errorText =
+            QStringLiteral("坡段姿态生成被拒绝：未找到有效平台段几何方向，无法建立平台0°与左正右负轴。");
+        if (generationError != nullptr)
+        {
+            *generationError = errorText;
+        }
+        if (appendLog)
+        {
+            appendLog(errorText);
+        }
+        return {};
+    }
+
+    const auto resolveLocalPlatformAxis =
+        [&](int segmentIndex) -> Eigen::Vector3d
+        {
+            const SegmentInfo& current = segments[segmentIndex];
+            if (IsPlatformSegmentKind(current.kind)
+                && !current.isLapStepSegment
+                && current.horizontalTangent.head<2>().norm() > 1e-9)
+            {
+                return AlignHorizontalAxisToReference(
+                    current.horizontalTangent,
+                    globalPlatformAxis);
+            }
+
+            Eigen::Vector3d adjacentAxisSum = Eigen::Vector3d::Zero();
+            for (int index = segmentIndex - 1; index >= 0; --index)
+            {
+                const SegmentInfo& candidate = segments[index];
+                if (IsPlatformSegmentKind(candidate.kind)
+                    && !candidate.isLapStepSegment
+                    && candidate.horizontalTangent.head<2>().norm() > 1e-9)
+                {
+                    adjacentAxisSum += AlignHorizontalAxisToReference(
+                        candidate.horizontalTangent,
+                        globalPlatformAxis);
+                    break;
+                }
+            }
+            for (int index = segmentIndex + 1;
+                 index < static_cast<int>(segments.size());
+                 ++index)
+            {
+                const SegmentInfo& candidate = segments[index];
+                if (IsPlatformSegmentKind(candidate.kind)
+                    && !candidate.isLapStepSegment
+                    && candidate.horizontalTangent.head<2>().norm() > 1e-9)
+                {
+                    adjacentAxisSum += AlignHorizontalAxisToReference(
+                        candidate.horizontalTangent,
+                        globalPlatformAxis);
+                    break;
+                }
+            }
+
+            const Eigen::Vector3d adjacentAxis =
+                HorizontalUnitOrZero(adjacentAxisSum);
+            return adjacentAxis.head<2>().norm() > 1e-9
+                ? adjacentAxis
+                : globalPlatformAxis;
+        };
+
+    double previousFixedRz = preset.measureReferenceRz;
+    Eigen::Vector3d previousPoseCompWeldNormal = HorizontalUnitOrZero(
+        GunDirectionVectorFromRobotRz(previousFixedRz));
+    double risingRawAngleSum = 0.0;
+    double risingLimitedAngleSum = 0.0;
+    double risingWeightSum = 0.0;
+    double fallingRawAngleSum = 0.0;
+    double fallingLimitedAngleSum = 0.0;
+    double fallingWeightSum = 0.0;
+    for (int segmentIndex = 0;
+         segmentIndex < static_cast<int>(segments.size());
+         ++segmentIndex)
+    {
+        SegmentInfo& segment = segments[segmentIndex];
+        if (segment.isLapStepSegment)
+        {
+            segment.fixedRz = NormalizeRobotRzOutputRange(previousFixedRz);
+            segment.poseCompWeldNormal = previousPoseCompWeldNormal;
+            if (segmentIndex > 0)
+            {
+                segment.localPlatformAxis =
+                    segments[segmentIndex - 1].localPlatformAxis;
+                segment.platformDirectionDeg =
+                    segments[segmentIndex - 1].platformDirectionDeg;
+            }
+            if (appendLog)
+            {
+                appendLog(QString("搭接错位台阶段：保持上一平台姿态RZ=%1 deg，不使用台阶侧向几何方向。")
+                    .arg(segment.fixedRz, 0, 'f', 3));
+            }
+            continue;
+        }
+
+        segment.localPlatformAxis = resolveLocalPlatformAxis(segmentIndex);
+        if (segment.localPlatformAxis.head<2>().norm() <= 1e-9)
+        {
+            segment.localPlatformAxis = segment.horizontalTangent;
+        }
+        segment.platformDirectionDeg = std::atan2(
+            segment.localPlatformAxis.y(),
+            segment.localPlatformAxis.x()) * 180.0 / RobotPoseTransform::kPi;
+
+        double platformRejectedRz = 0.0;
+        double platformNormalReferenceDistance = 0.0;
+        const double platformNormalRz = ComputeLineNormalRobotRz(
+            segment.localPlatformAxis,
+            preset.measureReferenceRy,
+            preset.measureReferenceRz,
+            nullptr,
+            &platformRejectedRz,
+            &platformNormalReferenceDistance);
+        segment.normalReferenceDistance = platformNormalReferenceDistance;
+        segment.rejectedRz = platformRejectedRz;
+
+        if (segment.directionValid
+            && segment.horizontalTangent.head<2>().norm() > 1e-9
+            && !IsPlatformSegmentKind(segment.kind))
+        {
+            segment.rawGeometryAngleDeg = SignedHorizontalAngleDeg(
+                segment.localPlatformAxis,
+                segment.horizontalTangent);
+        }
+
+        segment.limitedGeometryAngleDeg = segment.rawGeometryAngleDeg;
+        if (IsSlopeSegmentKind(segment.kind))
+        {
+            segment.limitedGeometryAngleDeg = std::clamp(
+                segment.rawGeometryAngleDeg,
+                preset.slopeGeometryAngleMinDeg,
+                preset.slopeGeometryAngleMaxDeg);
+            segment.geometryAngleClamped =
+                std::abs(segment.limitedGeometryAngleDeg
+                    - segment.rawGeometryAngleDeg) > 1e-6;
+            if (segment.geometryAngleClamped && appendLog)
+            {
+                appendLog(QString("坡段 %1 几何夹角限制：平台方向=%2 deg，原始左正右负夹角=%3 deg，限制后=%4 deg，范围=[%5, %6] deg")
+                    .arg(segment.kind)
+                    .arg(segment.platformDirectionDeg, 0, 'f', 3)
+                    .arg(segment.rawGeometryAngleDeg, 0, 'f', 3)
+                    .arg(segment.limitedGeometryAngleDeg, 0, 'f', 3)
+                    .arg(preset.slopeGeometryAngleMinDeg, 0, 'f', 3)
+                    .arg(preset.slopeGeometryAngleMaxDeg, 0, 'f', 3));
+            }
+        }
+
+        // Robot RZ 的正方向与俯视几何正角相反；这里仅做输出坐标换算，
+        // 限幅本身已经在平台零轴的几何角上完成。
+        segment.fixedRz = NormalizeRobotRzOutputRange(
+            platformNormalRz - segment.limitedGeometryAngleDeg);
+        const Eigen::Vector3d platformWeldNormal = HorizontalUnitOrZero(
+            GunDirectionVectorFromRobotRz(platformNormalRz));
+        segment.poseCompWeldNormal = HorizontalUnitOrZero(
+            RobotPoseTransform::RotZDeg(segment.rawGeometryAngleDeg)
+            * platformWeldNormal);
+        if (segment.poseCompWeldNormal.head<2>().norm() <= 1e-9)
+        {
+            segment.poseCompWeldNormal = previousPoseCompWeldNormal;
+        }
+
+        const double weight = std::max(
+            1e-6,
+            segment.endDistance - segment.beginDistance);
+        if (segment.kind.compare(
+                QStringLiteral("rising_edge"),
+                Qt::CaseInsensitive) == 0)
+        {
+            risingRawAngleSum += segment.rawGeometryAngleDeg * weight;
+            risingLimitedAngleSum += segment.limitedGeometryAngleDeg * weight;
+            risingWeightSum += weight;
+        }
+        else if (segment.kind.compare(
+                     QStringLiteral("falling_edge"),
+                     Qt::CaseInsensitive) == 0)
+        {
+            fallingRawAngleSum += segment.rawGeometryAngleDeg * weight;
+            fallingLimitedAngleSum += segment.limitedGeometryAngleDeg * weight;
+            fallingWeightSum += weight;
+        }
+
+        previousFixedRz = segment.fixedRz;
+        previousPoseCompWeldNormal = segment.poseCompWeldNormal;
+    }
+
+    if (appendLog && globalPlatformAxis.head<2>().norm() > 1e-9)
+    {
+        const double globalPlatformDirectionDeg = std::atan2(
+            globalPlatformAxis.y(),
+            globalPlatformAxis.x()) * 180.0 / RobotPoseTransform::kPi;
+        appendLog(QString("平台几何零轴：方向=%1 deg；坡段采用相邻平台轴，左正右负，配置键兼容沿用SlopeRzMinDeg/SlopeRzMaxDeg。")
+            .arg(globalPlatformDirectionDeg, 0, 'f', 3));
+    }
+
+    if (risingWeightSum > 1e-9 && fallingWeightSum > 1e-9)
+    {
+        const double risingRawAngle = risingRawAngleSum / risingWeightSum;
+        const double risingLimitedAngle =
+            risingLimitedAngleSum / risingWeightSum;
+        const double fallingRawAngle = fallingRawAngleSum / fallingWeightSum;
+        const double fallingLimitedAngle =
+            fallingLimitedAngleSum / fallingWeightSum;
+        constexpr double kGeometrySignEpsilonDeg = 1e-3;
+        const bool clampSpansBothSides =
+            preset.slopeGeometryAngleMinDeg < -kGeometrySignEpsilonDeg
+            && preset.slopeGeometryAngleMaxDeg > kGeometrySignEpsilonDeg;
+        const bool rawAnglesOpposite =
+            risingRawAngle * fallingRawAngle < 0.0
+            && std::abs(risingRawAngle) > kGeometrySignEpsilonDeg
+            && std::abs(fallingRawAngle) > kGeometrySignEpsilonDeg;
+        const bool limitedAnglesOpposite =
+            risingLimitedAngle * fallingLimitedAngle < 0.0
+            && std::abs(risingLimitedAngle) > kGeometrySignEpsilonDeg
+            && std::abs(fallingLimitedAngle) > kGeometrySignEpsilonDeg;
+        if (!clampSpansBothSides || !rawAnglesOpposite || !limitedAnglesOpposite)
+        {
+            const QString errorText = QString(
+                "坡段姿态生成被拒绝：上坡/下坡相对平台的几何方向未保持左右异号。"
+                "原始角 rising=%1 deg, falling=%2 deg；限制后 rising=%3 deg, falling=%4 deg；限制范围=[%5, %6] deg。")
+                .arg(risingRawAngle, 0, 'f', 3)
+                .arg(fallingRawAngle, 0, 'f', 3)
+                .arg(risingLimitedAngle, 0, 'f', 3)
+                .arg(fallingLimitedAngle, 0, 'f', 3)
+                .arg(preset.slopeGeometryAngleMinDeg, 0, 'f', 3)
+                .arg(preset.slopeGeometryAngleMaxDeg, 0, 'f', 3);
+            if (generationError != nullptr)
+            {
+                *generationError = errorText;
+            }
+            if (appendLog)
+            {
+                appendLog(errorText);
+            }
+            return {};
+        }
+    }
+
     const bool useTaughtWeldPose = preset.useTaughtWeldPose;
     const double outputPoseRx = useTaughtWeldPose ? preset.taughtWeldPoseRx : preset.rx;
     const double outputPoseRy = useTaughtWeldPose ? preset.taughtWeldPoseRy : preset.ry;
     double taughtPlatformRz = NormalizeRobotRzOutputRange(preset.taughtWeldPoseRz);
-    double taughtComputedPlatformRz = 0.0;
-    double taughtRzOffset = 0.0;
-    bool hasTaughtRzReference = false;
-    QString taughtReferenceKind;
+    const Eigen::Vector3d taughtPoseEuler(
+        outputPoseRx,
+        outputPoseRy,
+        taughtPlatformRz);
+    const Eigen::Matrix3d taughtPoseRotation =
+        RobotPoseTransform::RotationFromAnglesDeg(
+            taughtPoseEuler.x(),
+            taughtPoseEuler.y(),
+            taughtPoseEuler.z(),
+            preset.robotType);
     if (useTaughtWeldPose)
     {
-        const SegmentInfo* referenceSegment = nullptr;
-        for (const SegmentInfo& segment : segments)
-        {
-            if (IsPlatformSegmentKind(segment.kind))
-            {
-                referenceSegment = &segment;
-                break;
-            }
-        }
-        if (referenceSegment == nullptr)
-        {
-            referenceSegment = &segments.front();
-        }
-
-        taughtComputedPlatformRz = NormalizeAngleNear(referenceSegment->fixedRz, taughtPlatformRz);
-        const double taughtRzNearComputed = NormalizeAngleNear(taughtPlatformRz, taughtComputedPlatformRz);
-        taughtRzOffset = taughtComputedPlatformRz - taughtRzNearComputed;
-        taughtReferenceKind = referenceSegment->kind;
-        hasTaughtRzReference = true;
         if (appendLog)
         {
-            appendLog(QString("启用示教焊接姿态：RX=%1, RY=%2；参考段=%3，计算平台RZ=%4 deg，示教RZ=%5 deg，差值=%6 deg；平台使用示教RZ，坡道使用计算RZ减差值。")
+            appendLog(QString("启用示教焊接姿态：平台姿态 RX=%1, RY=%2, RZ=%3。平台段为几何0°并保持完整示教姿态；坡段按相对平台的左正右负几何角整体旋转工具姿态。")
                 .arg(outputPoseRx, 0, 'f', 3)
                 .arg(outputPoseRy, 0, 'f', 3)
-                .arg(taughtReferenceKind)
-                .arg(taughtComputedPlatformRz, 0, 'f', 3)
-                .arg(taughtRzNearComputed, 0, 'f', 3)
-                .arg(taughtRzOffset, 0, 'f', 3));
+                .arg(taughtPlatformRz, 0, 'f', 3));
         }
     }
 
-    auto taughtAdjustedRzForKind = [&](double calculatedRz, const QString& segmentKind) -> double
+    Eigen::Vector3d previousOutputEuler = taughtPoseEuler;
+    for (SegmentInfo& segment : segments)
     {
-        if (!useTaughtWeldPose || !hasTaughtRzReference)
+        if (!useTaughtWeldPose)
         {
-            return NormalizeRobotRzOutputRange(calculatedRz);
-        }
-        if (IsPlatformSegmentKind(segmentKind))
-        {
-            return taughtPlatformRz;
+            segment.outputRx = outputPoseRx;
+            segment.outputRy = outputPoseRy;
+            segment.outputRz = NormalizeRobotRzOutputRange(
+                segment.fixedRz + preset.weldRzGainDeg);
+            segment.outputRotation = RobotPoseTransform::RotationFromAnglesDeg(
+                segment.outputRx,
+                segment.outputRy,
+                segment.outputRz,
+                preset.robotType);
+            continue;
         }
 
-        const double calculatedNearReference = NormalizeAngleNear(calculatedRz, taughtComputedPlatformRz);
-        return NormalizeRobotRzOutputRange(calculatedNearReference - taughtRzOffset);
-    };
+        if (IsPlatformSegmentKind(segment.kind))
+        {
+            segment.outputRotation = taughtPoseRotation;
+            segment.outputRx = taughtPoseEuler.x();
+            segment.outputRy = taughtPoseEuler.y();
+            segment.outputRz = taughtPoseEuler.z();
+            segment.taughtFrameRotationDeg = 0.0;
+            previousOutputEuler = taughtPoseEuler;
+            continue;
+        }
+
+        segment.taughtFrameRotationDeg =
+            segment.limitedGeometryAngleDeg;
+        segment.outputRotation =
+            RobotPoseTransform::RotZDeg(segment.taughtFrameRotationDeg)
+            * taughtPoseRotation;
+        const Eigen::Vector3d outputEuler =
+            RobotPoseTransform::AnglesFromRotationDegNear(
+                segment.outputRotation,
+                preset.robotType,
+                previousOutputEuler);
+        segment.outputRx = outputEuler.x();
+        segment.outputRy = outputEuler.y();
+        segment.outputRz = outputEuler.z();
+        previousOutputEuler = outputEuler;
+    }
 
     const auto poseCompReferenceRzForSegment =
         [&](const SegmentInfo& segment) -> double
-    {
-        // 焊枪输出姿态可在段尾渐变；这里的固定参考姿态只用于补偿槽匹配，
-        // 位置补偿方向另由该物理段的固定焊道切向/法向基准决定。
-        if (useTaughtWeldPose && hasTaughtRzReference)
         {
-            return NormalizeRobotRzOutputRange(
-                taughtAdjustedRzForKind(segment.fixedRz, segment.kind));
-        }
-        return NormalizeRobotRzOutputRange(segment.fixedRz + preset.weldRzGainDeg);
-    };
+            // 焊枪输出姿态可在段尾渐变；这里的固定参考姿态只用于补偿槽匹配，
+            // 位置补偿方向另由该物理段的固定焊道切向/法向基准决定。
+            return segment.outputRz;
+        };
 
     std::vector<WeldPosePreset::PoseCompSlot> poseCompSlots = preset.poseCompSlots;
     std::vector<PoseCompSlotAccumulator> poseCompAccumulators(poseCompSlots.size());
@@ -8817,8 +9782,8 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             ? std::max(1.0, segment.distanceToEnd.front())
             : std::max(1.0, static_cast<double>(segment.end - segment.begin + 1));
         poseCompAccumulators[slotIndex].Add(
-            outputPoseRx,
-            outputPoseRy,
+            segment.outputRx,
+            segment.outputRy,
             poseCompReferenceRzForSegment(segment),
             segmentLength);
     }
@@ -8903,7 +9868,7 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         {
             appendLog("按四类段属性时，低平台/上升边/高平台/下降边分别匹配姿态补偿槽0/1/2/3。");
         }
-        appendLog("姿态补偿位置变换：低平台、上升边、高平台、下降边统一使用焊道基准(X=稳定切向、Y=焊道法向、Z=世界Z)；段尾RZ渐变和坡面RZ夹紧只作用于焊枪姿态，不改变段内补偿方向。");
+        appendLog("姿态补偿位置变换：低平台、上升边、高平台、下降边统一使用焊道基准(X=稳定切向、Y=焊道法向、Z=世界Z)；段尾姿态渐变和坡段几何夹角限制只作用于焊枪姿态，不改变段内补偿方向。");
     }
 
     if (appendLog)
@@ -8945,19 +9910,19 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         const SegmentInfo& segment = segments[segmentIndex];
         if (appendLog)
         {
-            appendLog(QString("焊道姿态段 %1: 点[%2-%3], 固定RZ=%4 deg, 输出基础RZ=%5 deg, 测量参考RZ=%6 deg, 法向与测量参考夹角=%7 deg, 反向候选RZ=%8 deg, RZ原始偏差=%9 deg, RZ夹紧后=%10 deg, RX=%11 deg, RY=%12 deg, 补偿范围=%13, 过渡起点=%14, 起点跳过=%15 mm, 终点跳过=%16 mm, Z补偿=%17 mm, 枪向补偿=%18 mm, 焊道方向补偿=%19 mm")
+            appendLog(QString("焊道姿态段 %1: 点[%2-%3], 段几何方向=%4 deg, 相邻平台零轴=%5 deg, 原始几何夹角(左正右负)=%6 deg, 限制后=%7 deg, 固定法向RZ=%8 deg, 输出RX/RY/RZ=%9/%10/%11 deg, 工具坐标系旋转=%12 deg, 补偿范围=%13, 过渡起点=%14, 起点跳过=%15 mm, 终点跳过=%16 mm, Z补偿=%17 mm, 枪向补偿=%18 mm, 焊道方向补偿=%19 mm")
                 .arg(segment.kind)
                 .arg(result.points[segment.begin].index)
                 .arg(result.points[segment.end].index)
+                .arg(segment.directionDeg, 0, 'f', 3)
+                .arg(segment.platformDirectionDeg, 0, 'f', 3)
+                .arg(segment.rawGeometryAngleDeg, 0, 'f', 3)
+                .arg(segment.limitedGeometryAngleDeg, 0, 'f', 3)
                 .arg(segment.fixedRz, 0, 'f', 3)
-                .arg(segment.baseRz, 0, 'f', 3)
-                .arg(preset.measureReferenceRz, 0, 'f', 3)
-                .arg(segment.normalReferenceDistance, 0, 'f', 3)
-                .arg(segment.rejectedRz, 0, 'f', 3)
-                .arg(segment.rawRzDeviationFromReference, 0, 'f', 3)
-                .arg(segment.clampedRzDeviationFromReference, 0, 'f', 3)
-                .arg(outputPoseRx, 0, 'f', 3)
-                .arg(outputPoseRy, 0, 'f', 3)
+                .arg(segment.outputRx, 0, 'f', 3)
+                .arg(segment.outputRy, 0, 'f', 3)
+                .arg(segment.outputRz, 0, 'f', 3)
+                .arg(segment.taughtFrameRotationDeg, 0, 'f', 3)
                 .arg(QStringLiteral("整条焊道统一"))
                 .arg(segment.transitionBegin == std::numeric_limits<int>::max()
                     ? QString("none")
@@ -8980,6 +9945,50 @@ std::vector<QString> BuildSegmentPoseOutputLines(
          distance += kPoseCompOutputStepMm)
     {
         sampleDistances.push_back(distance);
+    }
+
+    if (useTaughtWeldPose)
+    {
+        for (int segmentIndex = 0;
+             segmentIndex + 1 < static_cast<int>(segments.size());
+             ++segmentIndex)
+        {
+            const SegmentInfo& segment = segments[segmentIndex];
+            if (segment.transitionBeginDistance
+                    == std::numeric_limits<double>::max()
+                || segment.endDistance
+                    <= segment.transitionBeginDistance + 1e-9)
+            {
+                continue;
+            }
+
+            const Eigen::Matrix3d relativeRotation =
+                segment.outputRotation.transpose()
+                * segments[segmentIndex + 1].outputRotation;
+            const double cosine = std::clamp(
+                (relativeRotation.trace() - 1.0) * 0.5,
+                -1.0,
+                1.0);
+            const double transitionAngleDeg =
+                std::acos(cosine) * 180.0 / RobotPoseTransform::kPi;
+            const int transitionStepCount = std::max(
+                1,
+                static_cast<int>(std::ceil(
+                    transitionAngleDeg
+                    / TAUGHT_TOOL_FRAME_MAX_PHYSICAL_STEP_DEG)));
+            const double transitionLength =
+                segment.endDistance - segment.transitionBeginDistance;
+            for (int stepIndex = 0;
+                 stepIndex <= transitionStepCount;
+                 ++stepIndex)
+            {
+                const double ratio = static_cast<double>(stepIndex)
+                    / static_cast<double>(transitionStepCount);
+                sampleDistances.push_back(
+                    segment.transitionBeginDistance
+                    + transitionLength * ratio);
+            }
+        }
     }
 
     for (int pointIndex = weldStartIndex; pointIndex <= weldEndIndex; ++pointIndex)
@@ -9143,9 +10152,6 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         const double nextSegmentRz = hasNextSegment
             ? NormalizeAngleNear(segments[segmentIndex + 1].fixedRz, segment.fixedRz)
             : segment.fixedRz;
-        const QString nextSegmentKind = hasNextSegment
-            ? segments[segmentIndex + 1].kind
-            : segment.kind;
         const bool inTransition = hasNextSegment
             && segment.transitionBeginDistance < std::numeric_limits<double>::max()
             && sampleDistance >= segment.transitionBeginDistance;
@@ -9159,24 +10165,51 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             pointRz = segment.fixedRz
                 + (nextSegmentRz - segment.fixedRz) * std::clamp(transitionRatio, 0.0, 1.0);
         }
-        // Transition points still change angle. The target RZ at each side of
-        // the transition comes from the segment weld normal, while slope
-        // segments are clamped before interpolation.
-        if (useTaughtWeldPose && hasTaughtRzReference)
+        // 示教模式对完整工具姿态做四元数过渡；旧模式保持原有固定 RX/RY、
+        // 仅按焊道法向插值 RZ 的输出，避免影响未启用示教姿态的历史数据。
+        double pointRx = outputPoseRx;
+        double pointRy = outputPoseRy;
+        if (useTaughtWeldPose)
         {
             if (inTransition && preset.cornerTransitionLeadDistance > 1e-6)
             {
-                const double beginRz = taughtAdjustedRzForKind(segment.fixedRz, segment.kind);
-                const double endRz = NormalizeAngleNear(
-                    taughtAdjustedRzForKind(nextSegmentRz, nextSegmentKind),
-                    beginRz);
-                pointRz = beginRz + (endRz - beginRz) * std::clamp(transitionRatio, 0.0, 1.0);
+                Eigen::Quaterniond beginOrientation(segment.outputRotation);
+                Eigen::Quaterniond endOrientation(
+                    segments[segmentIndex + 1].outputRotation);
+                beginOrientation.normalize();
+                endOrientation.normalize();
+                if (beginOrientation.coeffs().dot(endOrientation.coeffs()) < 0.0)
+                {
+                    endOrientation.coeffs() *= -1.0;
+                }
+                const Eigen::Matrix3d pointRotation =
+                    beginOrientation.slerp(
+                        std::clamp(transitionRatio, 0.0, 1.0),
+                        endOrientation).normalized().toRotationMatrix();
+                const Eigen::Vector3d referenceEuler = records.isEmpty()
+                    ? Eigen::Vector3d(
+                        segment.outputRx,
+                        segment.outputRy,
+                        segment.outputRz)
+                    : Eigen::Vector3d(
+                        records.back().rx,
+                        records.back().ry,
+                        records.back().rz);
+                const Eigen::Vector3d pointEuler =
+                    RobotPoseTransform::AnglesFromRotationDegNear(
+                        pointRotation,
+                        preset.robotType,
+                        referenceEuler);
+                pointRx = pointEuler.x();
+                pointRy = pointEuler.y();
+                pointRz = pointEuler.z();
             }
             else
             {
-                pointRz = taughtAdjustedRzForKind(segment.fixedRz, segment.kind);
+                pointRx = segment.outputRx;
+                pointRy = segment.outputRy;
+                pointRz = segment.outputRz;
             }
-            pointRz = NormalizeRobotRzOutputRange(pointRz);
         }
         else
         {
@@ -9186,8 +10219,6 @@ std::vector<QString> BuildSegmentPoseOutputLines(
         const RobotCalculation::LowerWeldPointType pointType =
             samplePointTypeAtDistance(sampleDistance, sourceIndex);
 
-        double pointRx = outputPoseRx;
-        double pointRy = outputPoseRy;
         Eigen::Vector3d point = sampledPoint;
         point = ApplyPoseCompToPoint(
             poseCompSlots,
@@ -9195,8 +10226,8 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             preset.poseMatchMaxErrorDeg,
             preset.robotType,
             point,
-            pointRx,
-            pointRy,
+            segment.outputRx,
+            segment.outputRy,
             poseCompReferenceRz,
             effectiveSegmentKind,
             poseCompWeldNormal);
@@ -9218,11 +10249,14 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     }
 
     const PoseCompJunctionApplyStats poseCompJunctionStats =
-        ApplyPoseCompSegmentJunctionIntersections(records);
+        ApplyPoseCompSegmentJunctionIntersections(records, preset.robotType);
     const int poseCompStraightenedPointCount =
         StraightenPoseCompPhysicalSegments(records);
     const int poseCompDensifiedPointCount =
-        DensifyWeldPoseRecordsByStep(records, kPoseCompOutputStepMm);
+        DensifyWeldPoseRecordsByStep(
+            records,
+            kPoseCompOutputStepMm,
+            preset.robotType);
     if (appendLog && poseCompJunctionStats.adjustedJunctionCount > 0)
     {
         appendLog(QString("姿态补偿段交点重建：重建平台/坡面交点=%1，裁剪多余采样点=%2。")
@@ -9641,7 +10675,9 @@ bool MeasureThenWeldService::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T
     {
         param.dTaughtWeldPoseRzDeg = 0.0;
     }
-    NormalizeSlopeRzClamp(param.dSlopeRzMinDeg, param.dSlopeRzMaxDeg);
+    NormalizeSlopeGeometryAngleClamp(
+        param.dSlopeRzMinDeg,
+        param.dSlopeRzMaxDeg);
     if (!std::isfinite(param.dScanSafeOffsetDistanceMm) || param.dScanSafeOffsetDistanceMm <= 0.0)
     {
         param.dScanSafeOffsetDistanceMm = 150.0;
@@ -12677,14 +13713,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         appendLog);
     if (appendLog)
     {
-        appendLog(QString("焊接姿态参数：模式=%1, RX=%2, RY=%3, 示教RZ=%4 deg, RZ增益=%5 deg, 爬坡RZ夹紧=[%6, %7] deg, 拐点前过渡=%8 mm, 起点跳过=%9 mm, 终点跳过=%10 mm, 姿态补偿槽=%11, 焊道补偿=%12, 基础参数来源=%13, 姿态补偿来源=%14, 焊道补偿来源=%15")
+        appendLog(QString("焊接姿态参数：模式=%1, RX=%2, RY=%3, 示教RZ=%4 deg, RZ增益=%5 deg, 坡段几何夹角限制(平台0°/左正右负)=[%6, %7] deg, 拐点前过渡=%8 mm, 起点跳过=%9 mm, 终点跳过=%10 mm, 姿态补偿槽=%11, 焊道补偿=%12, 基础参数来源=%13, 姿态补偿来源=%14, 焊道补偿来源=%15")
             .arg(weldPosePreset.useTaughtWeldPose ? QStringLiteral("示教平台姿态") : QStringLiteral("原始固定姿态"))
             .arg(weldPosePreset.useTaughtWeldPose ? weldPosePreset.taughtWeldPoseRx : weldPosePreset.rx, 0, 'f', 3)
             .arg(weldPosePreset.useTaughtWeldPose ? weldPosePreset.taughtWeldPoseRy : weldPosePreset.ry, 0, 'f', 3)
             .arg(weldPosePreset.taughtWeldPoseRz, 0, 'f', 3)
             .arg(weldPosePreset.weldRzGainDeg, 0, 'f', 3)
-            .arg(weldPosePreset.slopeRzMinDeg, 0, 'f', 3)
-            .arg(weldPosePreset.slopeRzMaxDeg, 0, 'f', 3)
+            .arg(weldPosePreset.slopeGeometryAngleMinDeg, 0, 'f', 3)
+            .arg(weldPosePreset.slopeGeometryAngleMaxDeg, 0, 'f', 3)
             .arg(weldPosePreset.cornerTransitionLeadDistance, 0, 'f', 3)
             .arg(weldPosePreset.weldStartSkipDistance, 0, 'f', 3)
             .arg(weldPosePreset.weldEndSkipDistance, 0, 'f', 3)
@@ -12712,7 +13748,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             param,
             weldPosePreset,
             originalFitParams.platformSnapFlatSlope,
-            appendLog);
+            appendLog,
+            &error);
     if (!weldPoseLines.empty())
     {
         if (!SaveTextLines(weldPosePath, weldPoseLines, error))
@@ -12865,7 +13902,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     }
     else
     {
-        error = "焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。";
+        if (error.isEmpty())
+        {
+            error = "焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。";
+        }
         if (appendLog)
         {
             appendLog(error);
@@ -13310,14 +14350,14 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             appendLog(QString("拐点补偿后起终点/拐点文件：%1").arg(cornerCompKeyPointsPath));
             appendLog("焊接姿态将使用拐点补偿后分类点生成。");
         }
-        appendLog(QString("焊接姿态参数：模式=%1, RX=%2, RY=%3, 示教RZ=%4 deg, RZ增益=%5 deg, 爬坡RZ夹紧=[%6, %7] deg, 拐点前过渡=%8 mm, 起点跳过=%9 mm, 终点跳过=%10 mm")
+        appendLog(QString("焊接姿态参数：模式=%1, RX=%2, RY=%3, 示教RZ=%4 deg, RZ增益=%5 deg, 坡段几何夹角限制(平台0°/左正右负)=[%6, %7] deg, 拐点前过渡=%8 mm, 起点跳过=%9 mm, 终点跳过=%10 mm")
             .arg(weldPosePreset.useTaughtWeldPose ? QStringLiteral("示教平台姿态") : QStringLiteral("原始固定姿态"))
             .arg(weldPosePreset.useTaughtWeldPose ? weldPosePreset.taughtWeldPoseRx : weldPosePreset.rx, 0, 'f', 3)
             .arg(weldPosePreset.useTaughtWeldPose ? weldPosePreset.taughtWeldPoseRy : weldPosePreset.ry, 0, 'f', 3)
             .arg(weldPosePreset.taughtWeldPoseRz, 0, 'f', 3)
             .arg(weldPosePreset.weldRzGainDeg, 0, 'f', 3)
-            .arg(weldPosePreset.slopeRzMinDeg, 0, 'f', 3)
-            .arg(weldPosePreset.slopeRzMaxDeg, 0, 'f', 3)
+            .arg(weldPosePreset.slopeGeometryAngleMinDeg, 0, 'f', 3)
+            .arg(weldPosePreset.slopeGeometryAngleMaxDeg, 0, 'f', 3)
             .arg(weldPosePreset.cornerTransitionLeadDistance, 0, 'f', 3)
             .arg(weldPosePreset.weldStartSkipDistance, 0, 'f', 3)
             .arg(weldPosePreset.weldEndSkipDistance, 0, 'f', 3));
@@ -13337,10 +14377,14 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             param,
             weldPosePreset,
             originalFitParams.platformSnapFlatSlope,
-            appendLog);
+            appendLog,
+            &error);
     if (weldPoseLines.empty())
     {
-        error = "焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。";
+        if (error.isEmpty())
+        {
+            error = "焊接姿态生成结果为空，请检查起终点跳过距离或焊道分类结果。";
+        }
         return false;
     }
     if (!SaveTextLines(weldPosePath, weldPoseLines, error, stopRequested))
@@ -13763,6 +14807,8 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     srdPath.clear();
     summary.clear();
     error.clear();
+    const PointCloudProcessingConfig::Settings gateSettings =
+        PointCloudProcessingConfig::Load();
 
     QFileInfo poseInfo(QDir::fromNativeSeparators(poseFilePath.trimmed()));
     if (!poseInfo.isAbsolute())
@@ -13780,6 +14826,11 @@ bool MeasureThenWeldService::GenerateStepWeldProgramFiles(
     qint64 loadedPoseSize = -1;
     if (!LoadWeldPoseFileRecords(
             poseInfo.absoluteFilePath(), records, error, &loadedPoseSha256, &loadedPoseSize))
+    {
+        return false;
+    }
+    if (gateSettings.safetyGateTrajectoryStructureEnabled
+        && !ValidateExecutionTrajectoryStructure(records, error))
     {
         return false;
     }
@@ -14153,6 +15204,8 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
 {
     summary.clear();
     error.clear();
+    const PointCloudProcessingConfig::Settings gateSettings =
+        PointCloudProcessingConfig::Load();
     const double selectedSpeedMmPerMin =
         (std::isfinite(linearSpeedConfigMmPerMin) && linearSpeedConfigMmPerMin > 0.0)
         ? linearSpeedConfigMmPerMin
@@ -14169,6 +15222,11 @@ bool MeasureThenWeldService::DownlinkWeldPoseFile(
     qint64 loadedPoseSize = -1;
     if (!LoadWeldPoseFileRecords(
             poseFilePath, records, error, &loadedPoseSha256, &loadedPoseSize))
+    {
+        return false;
+    }
+    if (gateSettings.safetyGateTrajectoryStructureEnabled
+        && !ValidateExecutionTrajectoryStructure(records, error))
     {
         return false;
     }
@@ -14359,6 +15417,8 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
 {
     summary.clear();
     error.clear();
+    const PointCloudProcessingConfig::Settings safetySettings =
+        PointCloudProcessingConfig::Load();
 
     if (pRobotDriver == nullptr)
     {
@@ -14390,6 +15450,11 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     {
         return false;
     }
+    if (safetySettings.safetyGateTrajectoryStructureEnabled
+        && !ValidateExecutionTrajectoryStructure(records, error))
+    {
+        return false;
+    }
     if (!std::isfinite(resumeStartArcMm)
         || (resumeStartArcMm < 0.0 && resumeStartArcMm != -1.0))
     {
@@ -14406,13 +15471,16 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     }
     if (resumeMode)
     {
-        if (!IsSha256Text(expectedSourceSha256)
-            || loadedPoseSha256.compare(expectedSourceSha256, Qt::CaseInsensitive) != 0)
+        if (safetySettings.safetyGateTrajectoryStructureEnabled
+            && (!IsSha256Text(expectedSourceSha256)
+                || loadedPoseSha256.compare(
+                    expectedSourceSha256, Qt::CaseInsensitive) != 0))
         {
             error = QStringLiteral("V2续焊实际解析轨迹与绑定的预期 SHA256 不一致。");
             return false;
         }
-        if (!QFileInfo(poseFilePath).fileName().endsWith(
+        if (safetySettings.safetyGateTrajectoryStructureEnabled
+            && !QFileInfo(poseFilePath).fileName().endsWith(
                 QStringLiteral("_FinalSampled.txt"), Qt::CaseInsensitive))
         {
             error = QStringLiteral("V2续焊只允许执行绑定案例目录中的 FinalSampled 轨迹。");
@@ -14480,7 +15548,8 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     // Move/START/Call below.  Pure STEP file generation never enters this function
     // and deliberately does not receive a motion lease.
     PointCloudProofIntegrity::ProofUseLease qualityProofUseLease;
-    if (poseSource == WeldPoseSource::PointCloudProduction)
+    if (poseSource == WeldPoseSource::PointCloudProduction
+        && safetySettings.safetyGateProofIntegrityEnabled)
     {
         const QString qualityProofPath = QFileInfo(qualityProofPosePath).dir().filePath(
             QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME));
@@ -14541,7 +15610,12 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     if (resumeStartArcMm >= 0.0)
     {
         double actualStartArcMm = 0.0;
-        if (!ClipWeldPoseRecordsAtArcLength(records, resumeStartArcMm, &actualStartArcMm, error))
+        if (!ClipWeldPoseRecordsAtArcLength(
+                records,
+                resumeStartArcMm,
+                weldPosePreset.robotType,
+                &actualStartArcMm,
+                error))
         {
             return false;
         }
@@ -14737,7 +15811,8 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
 
     // 必须早于旧断点失效和第一条机器人运动。续焊调用方在这里复核机器人、工艺和
     // 轨迹身份；后续 executionPrepared 还会在具体程序 START 前再次复核并冻结暂停上下文。
-    if (executionPreMotion)
+    if (safetySettings.safetyGateMotionPrecheckEnabled
+        && executionPreMotion)
     {
         QString preMotionError;
         if (!executionPreMotion(executionIdentity, preMotionError))
@@ -15909,9 +16984,12 @@ MeasureThenWeldService::CompPreviewResult MeasureThenWeldService::RecomputeCompP
                 record.segmentKind,
                 segmentWeldNormals[index]);
         }
-        ApplyPoseCompSegmentJunctionIntersections(poseRecords);
+        ApplyPoseCompSegmentJunctionIntersections(poseRecords, edits.robotType);
         StraightenPoseCompPhysicalSegments(poseRecords);
-        DensifyWeldPoseRecordsByStep(poseRecords, kPoseCompOutputStepMm);
+        DensifyWeldPoseRecordsByStep(
+            poseRecords,
+            kPoseCompOutputStepMm,
+            edits.robotType);
 
         result.after.reserve(poseRecords.size());
         for (const WeldPoseFileRecord& record : poseRecords)
@@ -16213,9 +17291,19 @@ RobotCalculation::LowerWeldFilterParams MeasureThenWeldService::BuildTrackFitPar
     params.validationMinKeyPointCount = pointCloudSettings.validationMinKeyPointCount;
     params.validationMinCornerCount = pointCloudSettings.validationMinCornerCount;
     params.validationMinSegmentLengthMm = pointCloudSettings.validationMinSegmentLengthMm;
+    params.validationSegmentHardLimitsEnabled =
+        pointCloudSettings.validationSegmentHardLimitsEnabled;
+    params.validationMinNonLapSegmentHardMm =
+        pointCloudSettings.validationMinNonLapSegmentHardMm;
+    params.validationMinLapOrEndpointSegmentHardMm =
+        pointCloudSettings.validationMinLapOrEndpointSegmentHardMm;
     params.validationOutputEnabled = pointCloudSettings.validationOutputEnabled;
     params.validationMinOutputPointCount = pointCloudSettings.validationMinOutputPointCount;
     params.validationMinOutputLengthRatio = pointCloudSettings.validationMinOutputLengthRatio;
+    params.validationFinalTrajectoryStepEnabled =
+        pointCloudSettings.validationFinalTrajectoryStepEnabled;
+    params.validationMaxFinalPositionStepMm =
+        pointCloudSettings.validationMaxFinalPositionStepMm;
     params.enableEdgeTruncate = pointCloudSettings.fitEdgeTruncateEnable;
     params.truncateHeadMm = pointCloudSettings.fitTruncateHeadMm;
     params.truncateTailMm = pointCloudSettings.fitTruncateTailMm;
@@ -16478,9 +17566,12 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
             segmentWeldNormals[index]);
         record.point = basePoint + (withCurrent - basePoint) - (withSaved - basePoint);
     }
-    ApplyPoseCompSegmentJunctionIntersections(records);
+    ApplyPoseCompSegmentJunctionIntersections(records, currentEdits.robotType);
     StraightenPoseCompPhysicalSegments(records);
-    DensifyWeldPoseRecordsByStep(records, kPoseCompOutputStepMm);
+    DensifyWeldPoseRecordsByStep(
+        records,
+        kPoseCompOutputStepMm,
+        currentEdits.robotType);
 
     const auto snapshotRecords = [](const QVector<WeldPoseFileRecord>& sourceRecords)
     {
@@ -16572,7 +17663,8 @@ MeasureThenWeldService::CompPreviewStages MeasureThenWeldService::ComputeCompPre
         : measureParam.dFinalWeldTrajectoryStepMm;
     const QVector<WeldPoseFileRecord> actualRecords =
         SampleFinalWeldTrajectoryRecords(records, NormalizeFinalWeldTrajectorySampleStepMm(actualStepMm),
-            currentEdits.keepAnchorsOnly);
+            currentEdits.keepAnchorsOnly,
+            preset.useTaughtWeldPose);
     stages.actual = snapshotRecords(actualRecords);
 
     // 方向箭头：质心 + 自适应长度。

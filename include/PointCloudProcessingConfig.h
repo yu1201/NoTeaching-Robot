@@ -1,5 +1,7 @@
 #pragma once
 
+#include "WeldPoseValidationLimits.h"
+
 #include <QString>
 
 class PointCloudProcessingConfig
@@ -38,7 +40,7 @@ public:
 
     static constexpr int CURRENT_VALIDATION_PROFILE_VERSION = 1;
     // v1 起系统安全门禁开关仅作为审计记录，不再改变 ValidationPolicy 或生产流程。
-    static constexpr int CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 1;
+    static constexpr int CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 2;
 
     struct Settings
     {
@@ -145,8 +147,39 @@ public:
         bool validationOutputEnabled = true;
         int validationMinOutputPointCount = 80;
         double validationMinOutputLengthRatio = 0.70;
-        // 系统级安全门禁记录项。开关值只供配置、日志和质量报告审计，
-        // 不改变 ValidationPolicy，也不启停固定的证明、身份、轨迹或运动校验。
+        // 焊道与最终姿态门限：开关控制是否拦截，数值由有效性检测页配置。
+        bool validationSegmentHardLimitsEnabled = true;
+        double validationMinNonLapSegmentHardMm =
+            WeldPoseValidationLimits::kMinimumNonLapSegmentMm;
+        double validationMinLapOrEndpointSegmentHardMm =
+            WeldPoseValidationLimits::kMinimumLapOrEndpointAdjacentSegmentMm;
+        bool validationFinalTrajectoryStepEnabled = true;
+        double validationMaxFinalPositionStepMm =
+            WeldPoseValidationLimits::kMaxAdjacentPositionStepMm;
+        double validationMaxFinalControllerEulerStepDeg =
+            WeldPoseValidationLimits::kMaxAdjacentControllerEulerStepDeg;
+        double validationMaxFinalPhysicalOrientationStepDeg =
+            WeldPoseValidationLimits::kMaxAdjacentPhysicalOrientationStepDeg;
+        bool validationFinalLengthBindingEnabled = true;
+        double validationMinFinalToPreCompLengthRatio =
+            WeldPoseValidationLimits::kMinFinalToPreCompLengthRatio;
+        double validationMaxFinalToPreCompLengthRatio =
+            WeldPoseValidationLimits::kMaxFinalToPreCompLengthRatio;
+        bool validationFinalTopologyBindingEnabled = true;
+        double validationMinFinalMatchedArcRatio =
+            WeldPoseValidationLimits::kMinFinalMatchedArcRatio;
+        double validationMinFinalSourceUniqueCoverageRatio =
+            WeldPoseValidationLimits::kMinSourceUniqueCoverageRatio;
+        double validationMinFinalSourceArcSpanRatio =
+            WeldPoseValidationLimits::kMinSourceArcSpanRatio;
+        bool validationFinalSourceBindingEnabled = true;
+        double validationMaxFinalSourceDisplacementMm =
+            WeldPoseValidationLimits::kMaxSourceDisplacementMm;
+        double validationMaxFinalSourcePhysicalOrientationDeltaDeg =
+            WeldPoseValidationLimits::kMaxSourcePhysicalOrientationDeltaDeg;
+        bool validationFinalSemanticIntegrityEnabled = true;
+        // 系统级流程/运动安全门禁。关闭后对应生产校验会被跳过，
+        // 开关状态进入证明快照并由管理员界面持久化。
         bool safetyGateProofIntegrityEnabled = true;
         bool safetyGateProductionPurposeEnabled = true;
         bool safetyGateRobotNameBindingEnabled = true;

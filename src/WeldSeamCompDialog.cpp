@@ -271,7 +271,6 @@ QDoubleSpinBox* CreateCornerCompensationSpin(QWidget* parent)
     spin->setRange(-200.0, 200.0);
     spin->setDecimals(3);
     spin->setSingleStep(0.5);
-    spin->setSuffix(" mm");
     spin->setMinimumWidth(150);
     spin->setValue(0.0);
     return spin;
@@ -610,16 +609,22 @@ void WeldSeamCompDialog::BuildUi()
     cornerCompLayout->setHorizontalSpacing(8);
     cornerCompLayout->setVerticalSpacing(6);
     const char* cornerLabels[4] = {
-        "inner intoout(mm)：",
-        "inner intoin(mm)：",
-        "outer outtoout(mm)：",
-        "outer outtoin(mm)："
+        "inner intoout：",
+        "inner intoin：",
+        "outer outtoout：",
+        "outer outtoin："
     };
     for (int index = 0; index < 4; ++index)
     {
         cornerCompLayout->addWidget(new QLabel(QString::fromUtf8(cornerLabels[index])), index / 2, (index % 2) * 2);
         m_pCornerCompensationValues[index] = CreateCornerCompensationSpin(m_pCornerCompensationWidget);
-        cornerCompLayout->addWidget(m_pCornerCompensationValues[index], index / 2, (index % 2) * 2 + 1);
+        cornerCompLayout->addWidget(
+            CreateExternalUnitEditor(
+                m_pCornerCompensationValues[index],
+                QStringLiteral("mm"),
+                m_pCornerCompensationWidget),
+            index / 2,
+            (index % 2) * 2 + 1);
     }
     editorLayout->addWidget(m_pCornerCompensationWidget, 9, 0, 1, 6);
     contentLayout->addWidget(editorGroup, 1);

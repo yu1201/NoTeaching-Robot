@@ -71,7 +71,8 @@ struct T_PRECISE_MEASURE_PARAM
     double dTaughtWeldPoseRxDeg = 0.0;
     double dTaughtWeldPoseRyDeg = 0.0;
     double dTaughtWeldPoseRzDeg = 0.0;
-    // 爬坡/下坡段按波峰波谷趋势生成姿态时，RZ 相对测量参考 RZ 的夹紧范围。
+    // 坡段姿态使用相邻平台几何方向为0°、左正右负的有符号几何夹角限制。
+    // 配置键沿用 SlopeRzMinDeg/SlopeRzMaxDeg，避免破坏已有参数库。
     double dSlopeRzMinDeg = -20.0;
     double dSlopeRzMaxDeg = 20.0;
 

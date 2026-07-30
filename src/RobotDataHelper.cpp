@@ -268,8 +268,8 @@ QStringList DefaultWeldParamLines()
         << "GunDownBackSafeDis=70 ;下枪/收枪安全位回撤距离(mm，必须大于0)"
         << "WeldSafeRetreatDirection=0 ;安全位水平回撤方向：0自动兼容X-优先，1世界X-，2世界X+，3世界Y-，4世界Y+"
         << "WeldRzGainDeg=0 ;焊接姿态RZ增益(deg)"
-        << "SlopeRzMinDeg=-20 ;爬坡/下坡段RZ负向夹紧(deg)"
-        << "SlopeRzMaxDeg=20 ;爬坡/下坡段RZ正向夹紧(deg)";
+        << "SlopeRzMinDeg=-20 ;坡段相对平台0度轴的右侧负向几何夹角限制(deg，兼容旧键名)"
+        << "SlopeRzMaxDeg=20 ;坡段相对平台0度轴的左侧正向几何夹角限制(deg，兼容旧键名)";
 }
 
 std::string ToUtf8StdString(const QString& text)

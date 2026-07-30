@@ -16,6 +16,7 @@
 #include <QFontDatabase>
 #include <QFrame>
 #include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QComboBox>
 #include <QElapsedTimer>
@@ -655,6 +656,31 @@ void ApplyEditorOnlySpinBoxes(QWidget* widget)
             spinBox->setButtonSymbols(QAbstractSpinBox::NoButtons);
         }
     }
+}
+
+QWidget* CreateExternalUnitEditor(
+    QWidget* editor,
+    const QString& unitText,
+    QWidget* parent)
+{
+    QWidget* container = new QWidget(parent);
+    QHBoxLayout* layout = new QHBoxLayout(container);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+    if (editor != nullptr)
+    {
+        layout->addWidget(editor, 1);
+    }
+    QLabel* unitLabel = new QLabel(unitText, container);
+    unitLabel->setObjectName(QStringLiteral("UnitLabel"));
+    unitLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    unitLabel->setMinimumWidth(
+        unitText == QStringLiteral("°") ? 16
+        : unitText.compare(QStringLiteral("deg"), Qt::CaseInsensitive) == 0 ? 34
+        : unitText.compare(QStringLiteral("mm/min"), Qt::CaseInsensitive) == 0 ? 54
+        : 28);
+    layout->addWidget(unitLabel);
+    return container;
 }
 
 void ApplyResponsivePageDefaults(QWidget* widget)

@@ -54,7 +54,9 @@ def main() -> int:
     )
     actual_gate = execute.find("weldProcessSafetyError")
     move_build = execute.find("BuildWeldPoseMoveInfos(")
-    first_motion = execute.find("if (executionPreMotion)")
+    first_motion = execute.find("if (safetySettings.safetyGateMotionPrecheckEnabled")
+    require("&& executionPreMotion" in execute,
+            "motion precheck callback is not controlled by its safety-gate switch")
     require(0 <= actual_gate < move_build < first_motion,
             "actual-weld process gate is not before move construction and first motion")
 

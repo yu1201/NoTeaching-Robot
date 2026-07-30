@@ -606,8 +606,8 @@ QString PreciseParamDisplayName(const QString& key)
         { "WeldStartSkipDis", "起点跳过距离" },
         { "WeldEndSkipDis", "终点跳过距离" },
         { "WeldRzGainDeg", "焊接RZ增益" },
-        { "SlopeRzMinDeg", "爬坡RZ负向夹紧" },
-        { "SlopeRzMaxDeg", "爬坡RZ正向夹紧" },
+        { "SlopeRzMinDeg", "坡段几何方向负向夹角限制" },
+        { "SlopeRzMaxDeg", "坡段几何方向正向夹角限制" },
         { "StandWeldRx", "立焊RX" },
         { "StandWeldRy", "立焊RY" },
         { "TransitionsRx", "过渡RX" },
@@ -2533,7 +2533,7 @@ void PreciseMeasureEditDialog::UpdateWeldPoseTeachUiState()
     if (m_pUseTaughtWeldPoseCheck->isChecked())
     {
         m_pWeldPoseHintLabel->setText(
-            "启用后：先测后焊生成焊道姿态时 RX/RY 直接使用示教值；平台 RZ 使用示教 RZ，坡道 RZ 按“计算RZ - (计算平台RZ - 示教RZ)”修正。");
+            "启用后：平台段几何方向为0°并使用完整示教 RX/RY/RZ；坡段按相邻平台轴计算左正右负几何夹角，限幅后整体旋转示教工具姿态，RX/RY/RZ 会共同变化。");
     }
     else
     {

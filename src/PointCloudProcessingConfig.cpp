@@ -70,6 +70,79 @@ void NormalizeFiniteLoadValues(PointCloudProcessingConfig::Settings& settings)
     useDefaultIfNonFinite(settings.validationMinResidualInlierRatio, defaults.validationMinResidualInlierRatio);
     useDefaultIfNonFinite(settings.validationMinSegmentLengthMm, defaults.validationMinSegmentLengthMm);
     useDefaultIfNonFinite(settings.validationMinOutputLengthRatio, defaults.validationMinOutputLengthRatio);
+    useDefaultIfNonFinite(
+        settings.validationMinNonLapSegmentHardMm,
+        defaults.validationMinNonLapSegmentHardMm);
+    useDefaultIfNonFinite(
+        settings.validationMinLapOrEndpointSegmentHardMm,
+        defaults.validationMinLapOrEndpointSegmentHardMm);
+    useDefaultIfNonFinite(
+        settings.validationMaxFinalPositionStepMm,
+        defaults.validationMaxFinalPositionStepMm);
+    useDefaultIfNonFinite(
+        settings.validationMaxFinalControllerEulerStepDeg,
+        defaults.validationMaxFinalControllerEulerStepDeg);
+    useDefaultIfNonFinite(
+        settings.validationMaxFinalPhysicalOrientationStepDeg,
+        defaults.validationMaxFinalPhysicalOrientationStepDeg);
+    useDefaultIfNonFinite(
+        settings.validationMinFinalToPreCompLengthRatio,
+        defaults.validationMinFinalToPreCompLengthRatio);
+    useDefaultIfNonFinite(
+        settings.validationMaxFinalToPreCompLengthRatio,
+        defaults.validationMaxFinalToPreCompLengthRatio);
+    useDefaultIfNonFinite(
+        settings.validationMinFinalMatchedArcRatio,
+        defaults.validationMinFinalMatchedArcRatio);
+    useDefaultIfNonFinite(
+        settings.validationMinFinalSourceUniqueCoverageRatio,
+        defaults.validationMinFinalSourceUniqueCoverageRatio);
+    useDefaultIfNonFinite(
+        settings.validationMinFinalSourceArcSpanRatio,
+        defaults.validationMinFinalSourceArcSpanRatio);
+    useDefaultIfNonFinite(
+        settings.validationMaxFinalSourceDisplacementMm,
+        defaults.validationMaxFinalSourceDisplacementMm);
+    useDefaultIfNonFinite(
+        settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg,
+        defaults.validationMaxFinalSourcePhysicalOrientationDeltaDeg);
+}
+
+void NormalizeConfigurableWeldValidationThresholds(
+    PointCloudProcessingConfig::Settings& settings)
+{
+    settings.validationMinNonLapSegmentHardMm =
+        std::clamp(settings.validationMinNonLapSegmentHardMm, 0.0, 9999.0);
+    settings.validationMinLapOrEndpointSegmentHardMm =
+        std::clamp(settings.validationMinLapOrEndpointSegmentHardMm, 0.0, 9999.0);
+    settings.validationMaxFinalPositionStepMm =
+        std::clamp(settings.validationMaxFinalPositionStepMm, 0.001, 999999.0);
+    settings.validationMaxFinalControllerEulerStepDeg =
+        std::clamp(settings.validationMaxFinalControllerEulerStepDeg, 0.001, 360.0);
+    settings.validationMaxFinalPhysicalOrientationStepDeg =
+        std::clamp(settings.validationMaxFinalPhysicalOrientationStepDeg, 0.001, 180.0);
+    settings.validationMinFinalToPreCompLengthRatio =
+        std::clamp(settings.validationMinFinalToPreCompLengthRatio, 0.0, 10.0);
+    settings.validationMaxFinalToPreCompLengthRatio =
+        std::clamp(
+            std::max(
+                settings.validationMaxFinalToPreCompLengthRatio,
+                settings.validationMinFinalToPreCompLengthRatio),
+            0.0,
+            10.0);
+    settings.validationMinFinalMatchedArcRatio =
+        std::clamp(settings.validationMinFinalMatchedArcRatio, 0.0, 1.0);
+    settings.validationMinFinalSourceUniqueCoverageRatio =
+        std::clamp(settings.validationMinFinalSourceUniqueCoverageRatio, 0.0, 1.0);
+    settings.validationMinFinalSourceArcSpanRatio =
+        std::clamp(settings.validationMinFinalSourceArcSpanRatio, 0.0, 1.0);
+    settings.validationMaxFinalSourceDisplacementMm =
+        std::clamp(settings.validationMaxFinalSourceDisplacementMm, 0.001, 999999.0);
+    settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg =
+        std::clamp(
+            settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg,
+            0.001,
+            180.0);
 }
 
 void ApplyEnforceValidationSafetyBounds(PointCloudProcessingConfig::Settings& settings)
@@ -190,6 +263,7 @@ bool PointCloudProcessingConfig::CoreSafetyGatesEnabled(const Settings& settings
 {
     return settings.safetyGateProofIntegrityEnabled
         && settings.safetyGateProductionPurposeEnabled
+        && settings.safetyGateRobotNameBindingEnabled
         && settings.safetyGateCaseBindingEnabled
         && settings.safetyGateEndpointBindingEnabled
         && settings.safetyGateCameraHandEyeBindingEnabled
@@ -306,6 +380,62 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.validationOutputEnabled = ReadBoolSetting("Validation/OutputEnabled", settings.validationOutputEnabled);
     settings.validationMinOutputPointCount = ReadIntSetting("Validation/MinOutputPointCount", settings.validationMinOutputPointCount);
     settings.validationMinOutputLengthRatio = ReadDoubleSetting("Validation/MinOutputLengthRatio", settings.validationMinOutputLengthRatio);
+    settings.validationSegmentHardLimitsEnabled =
+        ReadBoolSetting("Validation/SegmentHardLimitsEnabled", settings.validationSegmentHardLimitsEnabled);
+    settings.validationMinNonLapSegmentHardMm =
+        ReadDoubleSetting("Validation/MinNonLapSegmentHardMm", settings.validationMinNonLapSegmentHardMm);
+    settings.validationMinLapOrEndpointSegmentHardMm =
+        ReadDoubleSetting(
+            "Validation/MinLapOrEndpointSegmentHardMm",
+            settings.validationMinLapOrEndpointSegmentHardMm);
+    settings.validationFinalTrajectoryStepEnabled =
+        ReadBoolSetting("Validation/FinalTrajectoryStepEnabled", settings.validationFinalTrajectoryStepEnabled);
+    settings.validationMaxFinalPositionStepMm =
+        ReadDoubleSetting("Validation/MaxFinalPositionStepMm", settings.validationMaxFinalPositionStepMm);
+    settings.validationMaxFinalControllerEulerStepDeg =
+        ReadDoubleSetting(
+            "Validation/MaxFinalControllerEulerStepDeg",
+            settings.validationMaxFinalControllerEulerStepDeg);
+    settings.validationMaxFinalPhysicalOrientationStepDeg =
+        ReadDoubleSetting(
+            "Validation/MaxFinalPhysicalOrientationStepDeg",
+            settings.validationMaxFinalPhysicalOrientationStepDeg);
+    settings.validationFinalLengthBindingEnabled =
+        ReadBoolSetting("Validation/FinalLengthBindingEnabled", settings.validationFinalLengthBindingEnabled);
+    settings.validationMinFinalToPreCompLengthRatio =
+        ReadDoubleSetting(
+            "Validation/MinFinalToPreCompLengthRatio",
+            settings.validationMinFinalToPreCompLengthRatio);
+    settings.validationMaxFinalToPreCompLengthRatio =
+        ReadDoubleSetting(
+            "Validation/MaxFinalToPreCompLengthRatio",
+            settings.validationMaxFinalToPreCompLengthRatio);
+    settings.validationFinalTopologyBindingEnabled =
+        ReadBoolSetting("Validation/FinalTopologyBindingEnabled", settings.validationFinalTopologyBindingEnabled);
+    settings.validationMinFinalMatchedArcRatio =
+        ReadDoubleSetting(
+            "Validation/MinFinalMatchedArcRatio",
+            settings.validationMinFinalMatchedArcRatio);
+    settings.validationMinFinalSourceUniqueCoverageRatio =
+        ReadDoubleSetting(
+            "Validation/MinFinalSourceUniqueCoverageRatio",
+            settings.validationMinFinalSourceUniqueCoverageRatio);
+    settings.validationMinFinalSourceArcSpanRatio =
+        ReadDoubleSetting(
+            "Validation/MinFinalSourceArcSpanRatio",
+            settings.validationMinFinalSourceArcSpanRatio);
+    settings.validationFinalSourceBindingEnabled =
+        ReadBoolSetting("Validation/FinalSourceBindingEnabled", settings.validationFinalSourceBindingEnabled);
+    settings.validationMaxFinalSourceDisplacementMm =
+        ReadDoubleSetting(
+            "Validation/MaxFinalSourceDisplacementMm",
+            settings.validationMaxFinalSourceDisplacementMm);
+    settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg =
+        ReadDoubleSetting(
+            "Validation/MaxFinalSourcePhysicalOrientationDeltaDeg",
+            settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg);
+    settings.validationFinalSemanticIntegrityEnabled =
+        ReadBoolSetting("Validation/FinalSemanticIntegrityEnabled", settings.validationFinalSemanticIntegrityEnabled);
     settings.safetyGateProofIntegrityEnabled =
         ReadBoolSetting("SafetyGates/ProofIntegrityEnabled", settings.safetyGateProofIntegrityEnabled);
     settings.safetyGateProductionPurposeEnabled =
@@ -347,10 +477,9 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
         settings.validationOutputEnabled = true;
     }
     settings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
-    // 兼容修复：旧版本曾在任一核心记录开关关闭时把 Policy 强制持久化为 Audit。
-    // BehaviorVersion 缺失且仍呈现这一旧组合时，恢复正常 Enforce 流程；以后显式选择的
-    // Audit 会随 BehaviorVersion 一同保存，不会被此兼容分支改写。
-    if (storedSafetyGateBehaviorVersion < CURRENT_SAFETY_GATE_BEHAVIOR_VERSION
+    // 兼容修复：BehaviorVersion 0 曾在任一核心记录开关关闭时把 Policy 强制持久化为
+    // Audit。仅迁移该最早版本；v1 记录型开关和 v2 实际启停开关均保留操作员选择。
+    if (storedSafetyGateBehaviorVersion < 1
         && settings.validationPolicy == ValidationPolicy::Audit
         && HasDisabledCoreSafetyGate(settings))
     {
@@ -464,6 +593,7 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.validationMinSegmentLengthMm = std::max(0.0, settings.validationMinSegmentLengthMm);
     settings.validationMinOutputPointCount = std::max(0, settings.validationMinOutputPointCount);
     settings.validationMinOutputLengthRatio = std::max(0.0, settings.validationMinOutputLengthRatio);
+    NormalizeConfigurableWeldValidationThresholds(settings);
     ApplyEnforceValidationSafetyBounds(settings);
     return settings;
 }
@@ -472,6 +602,8 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
 {
     Settings normalizedSettings = settings;
     normalizedSettings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
+    NormalizeFiniteLoadValues(normalizedSettings);
+    NormalizeConfigurableWeldValidationThresholds(normalizedSettings);
     ApplyEnforceValidationSafetyBounds(normalizedSettings);
     QMap<QString, QString> pendingValues;
     const auto write = [&pendingValues](const QString& key, const QString& value)
@@ -565,6 +697,24 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("Validation/OutputEnabled", normalizedSettings.validationOutputEnabled ? "1" : "0")
         && write("Validation/MinOutputPointCount", QString::number(normalizedSettings.validationMinOutputPointCount))
         && write("Validation/MinOutputLengthRatio", QString::number(normalizedSettings.validationMinOutputLengthRatio, 'f', 6))
+        && write("Validation/SegmentHardLimitsEnabled", normalizedSettings.validationSegmentHardLimitsEnabled ? "1" : "0")
+        && write("Validation/MinNonLapSegmentHardMm", QString::number(normalizedSettings.validationMinNonLapSegmentHardMm, 'f', 6))
+        && write("Validation/MinLapOrEndpointSegmentHardMm", QString::number(normalizedSettings.validationMinLapOrEndpointSegmentHardMm, 'f', 6))
+        && write("Validation/FinalTrajectoryStepEnabled", normalizedSettings.validationFinalTrajectoryStepEnabled ? "1" : "0")
+        && write("Validation/MaxFinalPositionStepMm", QString::number(normalizedSettings.validationMaxFinalPositionStepMm, 'f', 6))
+        && write("Validation/MaxFinalControllerEulerStepDeg", QString::number(normalizedSettings.validationMaxFinalControllerEulerStepDeg, 'f', 6))
+        && write("Validation/MaxFinalPhysicalOrientationStepDeg", QString::number(normalizedSettings.validationMaxFinalPhysicalOrientationStepDeg, 'f', 6))
+        && write("Validation/FinalLengthBindingEnabled", normalizedSettings.validationFinalLengthBindingEnabled ? "1" : "0")
+        && write("Validation/MinFinalToPreCompLengthRatio", QString::number(normalizedSettings.validationMinFinalToPreCompLengthRatio, 'f', 6))
+        && write("Validation/MaxFinalToPreCompLengthRatio", QString::number(normalizedSettings.validationMaxFinalToPreCompLengthRatio, 'f', 6))
+        && write("Validation/FinalTopologyBindingEnabled", normalizedSettings.validationFinalTopologyBindingEnabled ? "1" : "0")
+        && write("Validation/MinFinalMatchedArcRatio", QString::number(normalizedSettings.validationMinFinalMatchedArcRatio, 'f', 6))
+        && write("Validation/MinFinalSourceUniqueCoverageRatio", QString::number(normalizedSettings.validationMinFinalSourceUniqueCoverageRatio, 'f', 6))
+        && write("Validation/MinFinalSourceArcSpanRatio", QString::number(normalizedSettings.validationMinFinalSourceArcSpanRatio, 'f', 6))
+        && write("Validation/FinalSourceBindingEnabled", normalizedSettings.validationFinalSourceBindingEnabled ? "1" : "0")
+        && write("Validation/MaxFinalSourceDisplacementMm", QString::number(normalizedSettings.validationMaxFinalSourceDisplacementMm, 'f', 6))
+        && write("Validation/MaxFinalSourcePhysicalOrientationDeltaDeg", QString::number(normalizedSettings.validationMaxFinalSourcePhysicalOrientationDeltaDeg, 'f', 6))
+        && write("Validation/FinalSemanticIntegrityEnabled", normalizedSettings.validationFinalSemanticIntegrityEnabled ? "1" : "0")
         && write("SafetyGates/ProofIntegrityEnabled", settings.safetyGateProofIntegrityEnabled ? "1" : "0")
         && write("SafetyGates/ProductionPurposeEnabled", settings.safetyGateProductionPurposeEnabled ? "1" : "0")
         && write("SafetyGates/RobotNameBindingEnabled", settings.safetyGateRobotNameBindingEnabled ? "1" : "0")

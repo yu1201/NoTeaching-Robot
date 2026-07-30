@@ -363,6 +363,9 @@
     <ClInclude Include="include\MeasureThenWeldService.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\WeldPoseValidationLimits.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\PointCloudProofIntegrity.h">
       <Filter>Header Files</Filter>
     </ClInclude>

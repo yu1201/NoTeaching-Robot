@@ -58,6 +58,46 @@ def max_chord_residual(points: Iterable[tuple[float, float, float]]) -> float:
     return max(point_line_distance(point, values[0], values[-1]) for point in values[1:-1])
 
 
+def horizontal_axis(direction_deg: float) -> tuple[float, float]:
+    direction_rad = math.radians(direction_deg)
+    return math.cos(direction_rad), math.sin(direction_rad)
+
+
+def aligned_axis(
+    direction_deg: float,
+    reference: tuple[float, float],
+) -> tuple[float, float]:
+    direction = horizontal_axis(direction_deg)
+    if sum(direction[index] * reference[index] for index in range(2)) < 0.0:
+        return -direction[0], -direction[1]
+    return direction
+
+
+def adjacent_platform_axis(
+    before_deg: float,
+    after_deg: float,
+    global_reference: tuple[float, float],
+) -> tuple[float, float]:
+    before = aligned_axis(before_deg, global_reference)
+    after = aligned_axis(after_deg, global_reference)
+    value = before[0] + after[0], before[1] + after[1]
+    norm = math.hypot(*value)
+    return value[0] / norm, value[1] / norm
+
+
+def signed_geometry_angle_deg(
+    platform_axis: tuple[float, float],
+    slope_direction_deg: float,
+) -> float:
+    slope_axis = aligned_axis(slope_direction_deg, platform_axis)
+    cross = (
+        platform_axis[0] * slope_axis[1]
+        - platform_axis[1] * slope_axis[0]
+    )
+    dot = sum(platform_axis[index] * slope_axis[index] for index in range(2))
+    return math.degrees(math.atan2(cross, max(-1.0, min(1.0, dot))))
+
+
 def verify_numeric_contract() -> None:
     local_offset = (0.0, -2.0)
     old_points: list[tuple[float, float, float]] = []
@@ -133,6 +173,57 @@ def verify_numeric_contract() -> None:
             abs(old_dot) > 0.9,
             "numeric fixture no longer exposes slope tool-Y/tangent coupling",
         )
+
+    # 20260730_001: the old measurement-RZ-relative clamp mapped both slope
+    # classes to -30 degrees. Geometry must instead use each neighboring
+    # platform pair as 0 degrees and preserve opposite left/right signs.
+    platform_directions = (85.848, 87.169, 86.662, 87.473, 87.826, 85.342)
+    slope_directions = (
+        ("falling_edge", 40.122),
+        ("rising_edge", 134.488),
+        ("falling_edge", 43.181),
+        ("rising_edge", 135.865),
+        ("falling_edge", 42.715),
+    )
+    doubled_cos = sum(
+        math.cos(math.radians(2.0 * value))
+        for value in platform_directions
+    )
+    doubled_sin = sum(
+        math.sin(math.radians(2.0 * value))
+        for value in platform_directions
+    )
+    global_axis = horizontal_axis(
+        math.degrees(0.5 * math.atan2(doubled_sin, doubled_cos))
+    )
+    raw_angles: dict[str, list[float]] = {
+        "rising_edge": [],
+        "falling_edge": [],
+    }
+    limited_angles: dict[str, list[float]] = {
+        "rising_edge": [],
+        "falling_edge": [],
+    }
+    for index, (kind, direction_deg) in enumerate(slope_directions):
+        platform_axis = adjacent_platform_axis(
+            platform_directions[index],
+            platform_directions[index + 1],
+            global_axis,
+        )
+        raw_angle = signed_geometry_angle_deg(platform_axis, direction_deg)
+        raw_angles[kind].append(raw_angle)
+        limited_angles[kind].append(max(-30.0, min(30.0, raw_angle)))
+
+    require(
+        all(value < 0.0 for value in raw_angles["falling_edge"])
+        and all(value > 0.0 for value in raw_angles["rising_edge"]),
+        f"20260730_001 geometry signs collapsed: {raw_angles}",
+    )
+    require(
+        limited_angles["falling_edge"] == [-30.0, -30.0, -30.0]
+        and limited_angles["rising_edge"] == [30.0, 30.0],
+        f"20260730_001 limited geometry angles are not opposite: {limited_angles}",
+    )
 
 
 def verify_source_contract() -> None:
@@ -210,12 +301,25 @@ def verify_source_contract() -> None:
         "pose output lacks a fixed per-segment compensation reference",
     )
     require(
-        "pointRy,\n            poseCompReferenceRz,\n            effectiveSegmentKind" in build_pose,
-        "pose compensation still uses the per-point output RZ",
+        "segment.outputRy,\n            poseCompReferenceRz,\n            effectiveSegmentKind" in build_pose,
+        "pose compensation does not use the fixed full segment posture reference",
     )
     require(
         "record.rz = pointRz;" in build_pose,
         "output orientation transition was accidentally removed",
+    )
+    require(
+        "SignedHorizontalAngleDeg(" in build_pose
+        and "resolveLocalPlatformAxis" in build_pose
+        and "segment.rawGeometryAngleDeg" in build_pose
+        and "segment.limitedGeometryAngleDeg" in build_pose,
+        "slope posture is not derived from the neighboring platform geometry axis",
+    )
+    require(
+        "rawRzDeviation" not in build_pose
+        and "risingRawAngle * fallingRawAngle < 0.0" in build_pose
+        and "risingLimitedAngle * fallingLimitedAngle < 0.0" in build_pose,
+        "RZ-relative limiting returned or the opposite-sign fail-closed gate is missing",
     )
     require(
         "kMaxPassCount" not in junctions
@@ -226,7 +330,7 @@ def verify_source_contract() -> None:
     require(
         "StraightenPoseCompPhysicalSegments(records)" in build_pose
         and build_pose.index("StraightenPoseCompPhysicalSegments(records)")
-        < build_pose.index("DensifyWeldPoseRecordsByStep(records, kPoseCompOutputStepMm)"),
+        < build_pose.index("DensifyWeldPoseRecordsByStep("),
         "pose output is not rebuilt as straight physical segments before densifying",
     )
     require(

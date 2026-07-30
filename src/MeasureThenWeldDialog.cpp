@@ -2694,7 +2694,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
     AppendLog(QString("PreservePath文件将输出到=%1").arg(preservePath));
     AppendLog(QString("姿态文件=%1").arg(poseFilePath));
     AppendLog(QString("补偿后文件将输出到=%1").arg(seamCompPath));
-    AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min，示教姿态=%5，RZ增益=%6 deg，爬坡RZ夹紧=[%7, %8] deg")
+    AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min，示教姿态=%5，RZ增益=%6 deg，坡段几何夹角限制(平台0°/左正右负)=[%7, %8] deg")
         .arg(param.bDoActualWeld ? QStringLiteral("实际焊接") : QStringLiteral("空跑"))
         .arg(param.dWeldSpeedMmPerMin, 0, 'f', 3)
         .arg(param.dDryRunSpeedMmPerMin, 0, 'f', 3)

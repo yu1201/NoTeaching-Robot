@@ -777,8 +777,7 @@ QString BuildDhParameterReport(
 QDoubleSpinBox* CreateKinematicsValueEditor(
     double minimum,
     double maximum,
-    int decimals,
-    const QString& suffix = QString())
+    int decimals)
 {
     QDoubleSpinBox* editor = new QDoubleSpinBox();
     editor->setRange(minimum, maximum);
@@ -786,10 +785,6 @@ QDoubleSpinBox* CreateKinematicsValueEditor(
     editor->setSingleStep(decimals > 3 ? 0.01 : 0.1);
     editor->setKeyboardTracking(false);
     editor->setAlignment(Qt::AlignRight);
-    if (!suffix.isEmpty())
-    {
-        editor->setSuffix(suffix);
-    }
     return editor;
 }
 
@@ -1028,10 +1023,16 @@ private:
         {
             QLabel* label = new QLabel(labels[index]);
             editors[index] = index < 3
-                ? CreateKinematicsValueEditor(-10000.0, 10000.0, 6, " mm")
-                : CreateKinematicsValueEditor(-3600.0, 3600.0, 6, " deg");
+                ? CreateKinematicsValueEditor(-10000.0, 10000.0, 6)
+                : CreateKinematicsValueEditor(-3600.0, 3600.0, 6);
             layout->addWidget(label, 1, index);
-            layout->addWidget(editors[index], 2, index);
+            layout->addWidget(
+                CreateExternalUnitEditor(
+                    editors[index],
+                    index < 3 ? QStringLiteral("mm") : QStringLiteral("deg"),
+                    group),
+                2,
+                index);
         }
         return group;
     }
@@ -1059,8 +1060,13 @@ private:
         for (int joint = 0; joint < kDhJointCount; ++joint)
         {
             cadLayout->addWidget(new QLabel(QString("J%1").arg(joint + 1)), 1, joint);
-            m_cadPoseEditors[joint] = CreateKinematicsValueEditor(-720.0, 720.0, 6, " deg");
-            cadLayout->addWidget(m_cadPoseEditors[joint], 2, joint);
+            m_cadPoseEditors[joint] =
+                CreateKinematicsValueEditor(-720.0, 720.0, 6);
+            cadLayout->addWidget(
+                CreateExternalUnitEditor(
+                    m_cadPoseEditors[joint], QStringLiteral("deg"), cadGroup),
+                2,
+                joint);
         }
         layout->addWidget(cadGroup);
 
@@ -1099,9 +1105,15 @@ private:
         {
             poseLayout->addWidget(new QLabel(labels[index]), 0, index);
             m_toolEditors[index] = index < 3
-                ? CreateKinematicsValueEditor(-5000.0, 5000.0, 6, " mm")
-                : CreateKinematicsValueEditor(-3600.0, 3600.0, 6, " deg");
-            poseLayout->addWidget(m_toolEditors[index], 1, index);
+                ? CreateKinematicsValueEditor(-5000.0, 5000.0, 6)
+                : CreateKinematicsValueEditor(-3600.0, 3600.0, 6);
+            poseLayout->addWidget(
+                CreateExternalUnitEditor(
+                    m_toolEditors[index],
+                    index < 3 ? QStringLiteral("mm") : QStringLiteral("deg"),
+                    poseGroup),
+                1,
+                index);
             connect(m_toolEditors[index], &QDoubleSpinBox::valueChanged, this, [this]() {
                 m_toolPoseSource = "ManualEntry";
                 m_toolPoseConvention = "Manual_Unverified";

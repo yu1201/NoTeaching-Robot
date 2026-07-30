@@ -6,6 +6,7 @@
 #include "PointCloudModelDenoiser.h"
 #include "ReferenceModelLibrary.h"
 #include "RobotDataHelper.h"
+#include "WindowStyleHelper.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -142,10 +143,11 @@ void ModelAlignmentDialog::BuildUi()
     m_pDistThresh->setRange(0.05, 100.0);
     m_pDistThresh->setSingleStep(0.5);
     m_pDistThresh->setDecimals(2);
-    m_pDistThresh->setSuffix(QStringLiteral(" mm"));
     m_pDistThresh->setToolTip(QStringLiteral("点到形变后模型表面距离 > 此阈值判为噪声剔除"));
     m_pKeepNoSurface = new QCheckBox(QStringLiteral("模型未覆盖区域的点保留（保守，避免误删）"));
-    denoiseForm->addRow(QStringLiteral("距离阈值"), m_pDistThresh);
+    denoiseForm->addRow(
+        QStringLiteral("距离阈值"),
+        CreateExternalUnitEditor(m_pDistThresh, QStringLiteral("mm"), denoiseBox));
     denoiseForm->addRow(QString(), m_pKeepNoSurface);
 
     paramRow->addWidget(bcpdBox, 1);

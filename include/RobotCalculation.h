@@ -147,9 +147,14 @@ public:
         int validationMinKeyPointCount = 6;
         int validationMinCornerCount = 4;
         double validationMinSegmentLengthMm = 15.0;
+        bool validationSegmentHardLimitsEnabled = true;
+        double validationMinNonLapSegmentHardMm = 3.0;
+        double validationMinLapOrEndpointSegmentHardMm = 0.25;
         bool validationOutputEnabled = true;
         int validationMinOutputPointCount = 80;
         double validationMinOutputLengthRatio = 0.70;
+        bool validationFinalTrajectoryStepEnabled = true;
+        double validationMaxFinalPositionStepMm = 50.0;
         CornerCompensation risingCornerCompensation;
         CornerCompensation fallingCornerCompensation;
         // 后台重建/预览可选停止令牌。默认为空，不改变生产流程；

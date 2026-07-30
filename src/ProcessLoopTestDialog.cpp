@@ -138,8 +138,8 @@ void ProcessLoopTestDialog::BuildUi()
     m_repeatSpin = new QSpinBox(collectBox);
     m_repeatSpin->setRange(1, 100000);
     m_repeatSpin->setValue(10);
-    m_repeatSpin->setSuffix(QStringLiteral(" 次"));
-    countRow->addWidget(m_repeatSpin);
+    countRow->addWidget(
+        CreateExternalUnitEditor(m_repeatSpin, QStringLiteral("次"), collectBox));
     m_infiniteCheck = new QCheckBox(QStringLiteral("持续循环（手动停止）"), collectBox);
     connect(m_infiniteCheck, &QCheckBox::toggled, this, [this](bool on) { m_repeatSpin->setDisabled(on); });
     countRow->addWidget(m_infiniteCheck);
@@ -296,11 +296,13 @@ void ProcessLoopTestDialog::BuildUi()
             spin = new QDoubleSpinBox(paramBox);
             spin->setRange(minV, maxV);
             spin->setDecimals(decimals);
-            spin->setSuffix(suffix);
-            spin->setEnabled(false);
-            row->addWidget(spin);
+            QWidget* unitEditor = CreateExternalUnitEditor(
+                spin, suffix.trimmed(), paramBox);
+            unitEditor->setEnabled(false);
+            row->addWidget(unitEditor);
             row->addStretch();
-            QObject::connect(check, &QCheckBox::toggled, spin, &QWidget::setEnabled);
+            QObject::connect(
+                check, &QCheckBox::toggled, unitEditor, &QWidget::setEnabled);
             paramLayout->addLayout(row);
         };
     addOverrideRow(QStringLiteral("扫描速度"), m_ovScanSpeedCheck, m_scanSpeedSpin, 1.0, 100000.0, 1, QStringLiteral(" mm/min"));
