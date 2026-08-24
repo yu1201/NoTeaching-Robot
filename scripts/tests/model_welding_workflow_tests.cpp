@@ -216,6 +216,18 @@ ModelWeldingFlowTemplate ValidTemplate()
     solve.roiHalfExtentMm = Eigen::Vector3d(15.0, 20.0, 8.0);
     solve.candidateConfirmed = true;
     value.stations.push_back(solve);
+
+    ModelWeldingSeamDefinition seam;
+    seam.seamId = QStringLiteral("seam-001");
+    seam.source = ModelWeldingSeamSource::CadSharedEdge;
+    seam.sourceGeometrySha256 = QString(64, QLatin1Char('f'));
+    seam.pathModelMm = {
+        Eigen::Vector3d(0.0, 0.0, 0.0),
+        Eigen::Vector3d(40.0, 0.0, 0.0),
+        Eigen::Vector3d(80.0, 10.0, 0.0)
+    };
+    seam.lengthMm = 40.0 + std::sqrt(1700.0);
+    value.seams.push_back(seam);
     return value;
 }
 
@@ -255,6 +267,7 @@ ModelWeldingFlowTemplate ProductionTemplate()
     backup.role = ModelWeldingStationRole::Backup;
     backup.candidateConfirmed = true;
     value.stations.push_back(backup);
+    value.seams.first().humanConfirmed = true;
     return value;
 }
 
@@ -264,6 +277,13 @@ void TestProductionTeachingRules()
     const ModelWeldingFlowTemplate modelTemplate = ProductionTemplate();
     Check(ModelWeldingWorkflow::ValidateTemplateStructure(modelTemplate, error, true),
         "complete production template should pass");
+
+    ModelWeldingFlowTemplate missingConfirmedSeam = modelTemplate;
+    missingConfirmedSeam.seams.first().humanConfirmed = false;
+    Check(!ModelWeldingWorkflow::ValidateTemplateStructure(
+            missingConfirmedSeam, error, true)
+            && error.contains(QStringLiteral("人工确认焊缝")),
+        "production template must contain a human-confirmed seam");
 
     ModelWeldingRobotTeaching draft;
     draft.teachingId = ModelWeldingWorkflow::CreateStableId();
@@ -360,6 +380,13 @@ void TestAdditionalStrictValidation()
         nonCanonicalYaw, error, false),
         "non-finite V-slot yaw must be rejected");
 
+    ModelWeldingFlowTemplate reverseWithoutSeedIdentity = ValidTemplate();
+    reverseWithoutSeedIdentity.seams.first().source =
+        ModelWeldingSeamSource::ReverseMeshSeedProjection;
+    Check(!ModelWeldingWorkflow::ValidateTemplateStructure(
+        reverseWithoutSeedIdentity, error, false),
+        "reverse-mesh projection must bind the seed file identity");
+
     error = QStringLiteral("stale error");
     ModelWeldingFlowTemplate missing;
     Check(ModelWeldingWorkflow::LoadTemplate(
@@ -399,6 +426,28 @@ void TestJsonRoundTrips()
     Check(decoded.modelSha256 == input.modelSha256, "model hash should survive JSON roundtrip");
     Check(decoded.stations.size() == 1 && decoded.stations.first().stationId == QStringLiteral("S01"),
         "station identity should survive JSON roundtrip");
+    Check(decoded.seams.size() == 1
+            && decoded.seams.first().seamId == QStringLiteral("seam-001")
+            && decoded.seams.first().source == ModelWeldingSeamSource::CadSharedEdge
+            && decoded.seams.first().sourceGeometrySha256 == QString(64, QLatin1Char('f'))
+            && decoded.seams.first().pathModelMm.size() == 3,
+        "seam identity, provenance, and path should survive JSON roundtrip");
+    for (const ModelWeldingSeamSource source : {
+             ModelWeldingSeamSource::CadCorrugatedButtJoint,
+             ModelWeldingSeamSource::CadCorrugatedBaseJoint })
+    {
+        ModelWeldingFlowTemplate semanticTemplate = input;
+        semanticTemplate.seams.first().source = source;
+        const QByteArray semanticJson = ModelWeldingWorkflow::EncodeTemplate(
+            semanticTemplate, error);
+        ModelWeldingFlowTemplate semanticDecoded;
+        Check(!semanticJson.isEmpty()
+                && ModelWeldingWorkflow::DecodeTemplate(
+                    semanticJson, semanticDecoded, error)
+                && semanticDecoded.seams.size() == 1
+                && semanticDecoded.seams.first().source == source,
+            "corrugated CAD seam source should survive JSON roundtrip");
+    }
     Check((decoded.placement.anchorModelMm - input.placement.anchorModelMm).norm() < 1.0e-12,
         "placement anchor should survive JSON roundtrip");
     Check((decoded.placement.axesModel - input.placement.axesModel).cwiseAbs().maxCoeff() < 1.0e-12,
@@ -416,6 +465,17 @@ void TestJsonRoundTrips()
         "legacy template without V-slot yaw should decode");
     Check(Near(legacyDecoded.placement.vSlotYawDegrees, 0.0, 1.0e-12),
         "legacy template without V-slot yaw should default to zero");
+
+    QJsonObject schema1Root = QJsonDocument::fromJson(encoded).object();
+    schema1Root.insert(QStringLiteral("schemaVersion"), 1);
+    schema1Root.remove(QStringLiteral("seams"));
+    ModelWeldingFlowTemplate schema1Decoded;
+    Check(ModelWeldingWorkflow::DecodeTemplate(
+        QJsonDocument(schema1Root).toJson(QJsonDocument::Compact), schema1Decoded, error),
+        "schema v1 template without seams should migrate as a draft");
+    Check(schema1Decoded.schemaVersion == ModelWeldingFlowTemplate::SchemaVersion
+            && schema1Decoded.seams.isEmpty(),
+        "schema v1 migration must require fresh seam extraction and confirmation");
 
     ModelWeldingFlowTemplate zeroYaw = input;
     zeroYaw.placement.vSlotYawDegrees = 0.0;

@@ -61,9 +61,9 @@ require(retreat.index("RevalidateExclusiveRecoveryBinding", terminate_pos)
         "safe-retreat does not revalidate the exclusive binding after STOP/Kill")
 helper = DIALOG[DIALOG.index("bool TerminatePersistedProgramBeforeRecovery"):
                 DIALOG.index("class LaserLineLiveView")]
-require(helper.index("MarkMotionStarted") < helper.index("AbortCurrentProgramSafely")
+require(helper.index("MarkMotionStarted") < helper.index("AbortPersistedMotion")
         < helper.index("MarkMotionCompleted"),
-        "FANUC restart recovery does not make NO_ACTIVE fail closed")
+        "adaptor restart recovery does not make an unknown prior task fail closed")
 
 require("AbortPersistedProgramForRecovery" in STEP,
         "STEP restart recovery termination API is missing")

@@ -126,7 +126,8 @@ def main() -> int:
         ("void RobotJogDialog::StepJog(", "void RobotJogDialog::StopJog()"),
     ):
         require_leased(jog, start, end)
-    require("m_jogOperationLease" in jog and "EndContinuousMoveQueue" in jog,
+    require("m_jogOperationLease" in jog and "EndContinuousJog" in jog
+            and "IsContinuousJogRunning" in jog,
             "continuous jog lease must survive until the driver queue is joined")
     require("setWindowModality(Qt::NonModal)" in jog
             and "QMessageBox::warning" not in jog
@@ -222,7 +223,7 @@ def main() -> int:
     monitor_worker = section(
         driver_adaptor,
         "void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)",
-        "int RobotDriverAdaptor::ContiMoveAny(")
+        "int RobotDriverAdaptor::CheckDone()")
     require(monitor_worker.count("EnsureConnectionForMonitor();") == 1
             and "if (!m_stateMonitorRunning.load())" in monitor_worker,
             "state monitor can start or continue a reconnect after a stop request")
@@ -239,9 +240,12 @@ def main() -> int:
     require_leased(app, "bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(", "ProcessLoopTestDefaults QtWidgetsApplication4::LoadProcessLoopTestDefaults(")
     require("--robot-no-wait 已因全局硬件互锁禁用" in app,
             "CLI no-wait can release the lease while physical motion continues")
-    require("fanucCliLease" in app and "CheckRobotDone" in section(
-        app, "void QtWidgetsApplication4::RunCommandLineActions(", "FANUCRobotCtrl* QtWidgetsApplication4::GetFirstFanucDriverForCli()"),
-        "CLI FANUC operations are not held through completion")
+    cli_actions = section(
+        app,
+        "void QtWidgetsApplication4::RunCommandLineActions(",
+        "void QtWidgetsApplication4::LogCommandLineMessage(")
+    require("fanucCliLease" in cli_actions and "RunProgramAndWait" in cli_actions,
+        "CLI program operations are not held through adaptor-verified completion")
     ftp_task = section(app, "void RunFtpTask(", "void RefreshRemoteFiles()")
     require("FTP Job：%1" in app and "operationLease" in ftp_task,
         "FTP job operations are not covered by the per-robot lease")

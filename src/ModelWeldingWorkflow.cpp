@@ -24,6 +24,9 @@ namespace
 {
 constexpr qsizetype kMaximumTemplateCount = 512;
 constexpr qsizetype kMaximumStationCount = 64;
+constexpr qsizetype kMaximumSeamCount = 32;
+constexpr qsizetype kMaximumSeamPointCount = 4096;
+constexpr qsizetype kMaximumTotalSeamPointCount = 8192;
 constexpr qsizetype kMaximumRecordBytes = 512 * 1024;
 constexpr quint64 kMaximumExactJsonInteger = 9007199254740991ULL;
 const QString kTemplateScope = QStringLiteral("model_weld_template");
@@ -117,6 +120,53 @@ QString RoleText(ModelWeldingStationRole role)
     default:
         return QStringLiteral("solve");
     }
+}
+
+QString SeamSourceText(ModelWeldingSeamSource source)
+{
+    switch (source)
+    {
+    case ModelWeldingSeamSource::CadShapeIntersection:
+        return QStringLiteral("cad_shape_intersection");
+    case ModelWeldingSeamSource::CadCorrugatedButtJoint:
+        return QStringLiteral("cad_corrugated_butt_joint");
+    case ModelWeldingSeamSource::CadCorrugatedBaseJoint:
+        return QStringLiteral("cad_corrugated_base_joint");
+    case ModelWeldingSeamSource::ReverseMeshSeedProjection:
+        return QStringLiteral("reverse_mesh_seed_projection");
+    default:
+        return QStringLiteral("cad_shared_edge");
+    }
+}
+
+bool ParseSeamSource(const QString& text, ModelWeldingSeamSource& source)
+{
+    if (text == QStringLiteral("cad_shared_edge"))
+    {
+        source = ModelWeldingSeamSource::CadSharedEdge;
+        return true;
+    }
+    if (text == QStringLiteral("cad_shape_intersection"))
+    {
+        source = ModelWeldingSeamSource::CadShapeIntersection;
+        return true;
+    }
+    if (text == QStringLiteral("cad_corrugated_butt_joint"))
+    {
+        source = ModelWeldingSeamSource::CadCorrugatedButtJoint;
+        return true;
+    }
+    if (text == QStringLiteral("cad_corrugated_base_joint"))
+    {
+        source = ModelWeldingSeamSource::CadCorrugatedBaseJoint;
+        return true;
+    }
+    if (text == QStringLiteral("reverse_mesh_seed_projection"))
+    {
+        source = ModelWeldingSeamSource::ReverseMeshSeedProjection;
+        return true;
+    }
+    return false;
 }
 
 bool ParseRole(const QString& text, ModelWeldingStationRole& role)
@@ -896,6 +946,12 @@ bool ModelWeldingWorkflow::ValidateTemplateStructure(
         return false;
     }
 
+    if (value.seams.size() > kMaximumSeamCount)
+    {
+        error = QStringLiteral("焊缝定义数量超过上限。");
+        return false;
+    }
+
     QMap<QString, bool> ids;
     QVector<Eigen::Vector3d> confirmedSolvePoints;
     int confirmedVerifyCount = 0;
@@ -927,6 +983,70 @@ bool ModelWeldingWorkflow::ValidateTemplateStructure(
         }
     }
 
+    QMap<QString, bool> seamIds;
+    qsizetype totalSeamPoints = 0;
+    int confirmedSeamCount = 0;
+    for (const ModelWeldingSeamDefinition& seam : value.seams)
+    {
+        const QString id = seam.seamId.trimmed();
+        if (!IsStableIdentifier(id) || id != seam.seamId || seamIds.contains(id))
+        {
+            error = QStringLiteral("焊缝编号为空、格式无效或重复：%1").arg(id);
+            return false;
+        }
+        seamIds.insert(id, true);
+        if (!IsSha256(seam.sourceGeometrySha256)
+            || (!seam.seedPathSha256.isEmpty() && !IsSha256(seam.seedPathSha256))
+            || seam.pathModelMm.size() < 2
+            || seam.pathModelMm.size() > kMaximumSeamPointCount
+            || !Finite(seam.lengthMm) || seam.lengthMm <= 0.0)
+        {
+            error = QStringLiteral("焊缝 %1 的源身份、点数或长度无效。").arg(id);
+            return false;
+        }
+        const bool reverseMesh = seam.source
+            == ModelWeldingSeamSource::ReverseMeshSeedProjection;
+        if ((reverseMesh && !IsSha256(seam.seedPathSha256))
+            || (!reverseMesh && !seam.seedPathSha256.isEmpty()))
+        {
+            error = QStringLiteral("焊缝 %1 的种子身份与来源类型不一致。").arg(id);
+            return false;
+        }
+        totalSeamPoints += seam.pathModelMm.size();
+        if (totalSeamPoints > kMaximumTotalSeamPointCount)
+        {
+            error = QStringLiteral("模板焊缝总点数超过上限。");
+            return false;
+        }
+        double calculatedLength = 0.0;
+        for (int pointIndex = 0; pointIndex < seam.pathModelMm.size(); ++pointIndex)
+        {
+            if (!Finite(seam.pathModelMm.at(pointIndex)))
+            {
+                error = QStringLiteral("焊缝 %1 含非有限坐标。").arg(id);
+                return false;
+            }
+            if (pointIndex > 0)
+            {
+                const double step = (seam.pathModelMm.at(pointIndex)
+                    - seam.pathModelMm.at(pointIndex - 1)).norm();
+                if (!Finite(step) || step <= 1.0e-9 || step > 1000.0)
+                {
+                    error = QStringLiteral("焊缝 %1 含重复点或异常大步长。").arg(id);
+                    return false;
+                }
+                calculatedLength += step;
+            }
+        }
+        const double allowedLengthError = std::max(0.05, calculatedLength * 1.0e-6);
+        if (std::abs(calculatedLength - seam.lengthMm) > allowedLengthError)
+        {
+            error = QStringLiteral("焊缝 %1 的记录长度与点列不一致。").arg(id);
+            return false;
+        }
+        if (seam.humanConfirmed) ++confirmedSeamCount;
+    }
+
     if (requireProductionReady)
     {
         if (!value.humanDatumConfirmed)
@@ -950,6 +1070,11 @@ bool ModelWeldingWorkflow::ValidateTemplateStructure(
         if (confirmedSolvePoints.size() < 3 || confirmedVerifyCount < 1)
         {
             error = QStringLiteral("生产流程至少需要3个已确认求解站和1个已确认验证站。");
+            return false;
+        }
+        if (confirmedSeamCount < 1)
+        {
+            error = QStringLiteral("生产流程至少需要1条已人工确认焊缝。");
             return false;
         }
         Eigen::Vector3d center = Eigen::Vector3d::Zero();
@@ -1173,6 +1298,24 @@ QByteArray ModelWeldingWorkflow::EncodeTemplate(const ModelWeldingFlowTemplate& 
         stations.append(object);
     }
 
+    QJsonArray seams;
+    for (const ModelWeldingSeamDefinition& seam : value.seams)
+    {
+        QJsonArray points;
+        for (const Eigen::Vector3d& point : seam.pathModelMm)
+            points.append(VectorJson(point));
+        QJsonObject object;
+        object.insert(QStringLiteral("seamId"), seam.seamId);
+        object.insert(QStringLiteral("source"), SeamSourceText(seam.source));
+        object.insert(QStringLiteral("sourceGeometrySha256"),
+            seam.sourceGeometrySha256.toLower());
+        object.insert(QStringLiteral("seedPathSha256"), seam.seedPathSha256.toLower());
+        object.insert(QStringLiteral("pathModelMm"), points);
+        object.insert(QStringLiteral("lengthMm"), seam.lengthMm);
+        object.insert(QStringLiteral("humanConfirmed"), seam.humanConfirmed);
+        seams.append(object);
+    }
+
     QJsonObject root;
     root.insert(QStringLiteral("schemaVersion"), value.schemaVersion);
     root.insert(QStringLiteral("templateId"), value.templateId);
@@ -1183,6 +1326,7 @@ QByteArray ModelWeldingWorkflow::EncodeTemplate(const ModelWeldingFlowTemplate& 
     root.insert(QStringLiteral("units"), value.units);
     root.insert(QStringLiteral("placement"), placement);
     root.insert(QStringLiteral("stations"), stations);
+    root.insert(QStringLiteral("seams"), seams);
     root.insert(QStringLiteral("inheritedFromTemplateId"), value.inheritedFromTemplateId);
     root.insert(QStringLiteral("inheritedFromRevision"), static_cast<double>(value.inheritedFromRevision));
     root.insert(QStringLiteral("inheritedFromRecordSha256"), value.inheritedFromRecordSha256.toLower());
@@ -1220,8 +1364,12 @@ bool ModelWeldingWorkflow::DecodeTemplate(
     }
     const QJsonObject root = document.object();
     ModelWeldingFlowTemplate decoded;
-    if (!root.value(QStringLiteral("schemaVersion")).isDouble()
-        || root.value(QStringLiteral("schemaVersion")).toInt(-1) != ModelWeldingFlowTemplate::SchemaVersion
+    const QJsonValue schemaValue = root.value(QStringLiteral("schemaVersion"));
+    const int storedSchemaVersion = schemaValue.isDouble()
+        ? schemaValue.toInt(-1) : -1;
+    if (!schemaValue.isDouble()
+        || (storedSchemaVersion != 1
+            && storedSchemaVersion != ModelWeldingFlowTemplate::SchemaVersion)
         || !JsonString(root, QStringLiteral("templateId"), decoded.templateId)
         || !JsonRevision(root, QStringLiteral("revision"), decoded.revision)
         || !JsonString(root, QStringLiteral("displayName"), decoded.displayName)
@@ -1235,6 +1383,7 @@ bool ModelWeldingWorkflow::DecodeTemplate(
         return false;
     }
     decoded.modelSha256 = decoded.modelSha256.toLower();
+    decoded.schemaVersion = ModelWeldingFlowTemplate::SchemaVersion;
     const QJsonObject placement = root.value(QStringLiteral("placement")).toObject();
     if (!ParseVector(placement.value(QStringLiteral("anchorModelMm")), decoded.placement.anchorModelMm)
         || !ParseMatrix(placement.value(QStringLiteral("axesModel")), decoded.placement.axesModel)
@@ -1286,6 +1435,68 @@ bool ModelWeldingWorkflow::DecodeTemplate(
             return false;
         }
         decoded.stations.push_back(station);
+    }
+
+    const QJsonValue seamsValue = root.value(QStringLiteral("seams"));
+    if (storedSchemaVersion >= 2 && !seamsValue.isArray())
+    {
+        error = QStringLiteral("模型流程模板缺少焊缝定义数组。");
+        return false;
+    }
+    if (seamsValue.isArray())
+    {
+        const QJsonArray seams = seamsValue.toArray();
+        if (seams.size() > kMaximumSeamCount)
+        {
+            error = QStringLiteral("模型流程模板焊缝定义数量超过上限。");
+            return false;
+        }
+        for (const QJsonValue& seamValue : seams)
+        {
+            if (!seamValue.isObject())
+            {
+                error = QStringLiteral("模型流程模板焊缝定义不是对象。");
+                return false;
+            }
+            const QJsonObject object = seamValue.toObject();
+            ModelWeldingSeamDefinition seam;
+            QString source;
+            if (!JsonString(object, QStringLiteral("seamId"), seam.seamId)
+                || !JsonString(object, QStringLiteral("source"), source)
+                || !ParseSeamSource(source, seam.source)
+                || !JsonString(object, QStringLiteral("sourceGeometrySha256"),
+                    seam.sourceGeometrySha256)
+                || !JsonString(object, QStringLiteral("seedPathSha256"),
+                    seam.seedPathSha256, true)
+                || !object.value(QStringLiteral("pathModelMm")).isArray()
+                || !object.value(QStringLiteral("lengthMm")).isDouble()
+                || !JsonBool(object, QStringLiteral("humanConfirmed"), seam.humanConfirmed))
+            {
+                error = QStringLiteral("模型流程模板焊缝定义字段无效。");
+                return false;
+            }
+            seam.sourceGeometrySha256 = seam.sourceGeometrySha256.toLower();
+            seam.seedPathSha256 = seam.seedPathSha256.toLower();
+            seam.lengthMm = object.value(QStringLiteral("lengthMm")).toDouble();
+            const QJsonArray points = object.value(QStringLiteral("pathModelMm")).toArray();
+            if (points.size() < 2 || points.size() > kMaximumSeamPointCount)
+            {
+                error = QStringLiteral("模型流程模板焊缝点数无效。");
+                return false;
+            }
+            seam.pathModelMm.reserve(points.size());
+            for (const QJsonValue& pointValue : points)
+            {
+                Eigen::Vector3d point;
+                if (!ParseVector(pointValue, point))
+                {
+                    error = QStringLiteral("模型流程模板焊缝坐标无效。");
+                    return false;
+                }
+                seam.pathModelMm.push_back(point);
+            }
+            decoded.seams.push_back(seam);
+        }
     }
 
     if (!JsonString(root, QStringLiteral("inheritedFromTemplateId"), decoded.inheritedFromTemplateId, true)

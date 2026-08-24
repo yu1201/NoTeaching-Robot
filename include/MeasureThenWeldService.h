@@ -111,6 +111,31 @@ public:
         bool stopRequestedDuringCycle = false;
     };
 
+    // 扫描变姿态精度测试使用的四段周期。空间位置始终沿示教起终点直线；
+    // 姿态按“下平台(基准) -> 上坡(左转) -> 上平台(基准) -> 下坡(右转)”循环。
+    // 左右旋转与正式焊接示教姿态使用同一合成口径：RotZ(angle) * taughtRotation。
+    struct ScanPoseVariationParams
+    {
+        double lowPlatformLengthMm = 30.0;
+        double risingLengthMm = 30.0;
+        double highPlatformLengthMm = 30.0;
+        double fallingLengthMm = 30.0;
+        double leftRotationDeg = 10.0;
+        double rightRotationDeg = 10.0;
+        double transitionLengthMm = 10.0;
+        double pointStepMm = 2.0;
+    };
+
+    struct ScanPoseVariationPoint
+    {
+        int index = 0;
+        double distanceMm = 0.0;
+        double cycleDistanceMm = 0.0;
+        double commandedRotationDeg = 0.0;
+        QString phase;
+        T_ROBOT_COORS pose;
+    };
+
     // 启动任何会产生新焊道身份的完整流程前调用；失败时必须在第一条机器人运动前中止。
     static bool InvalidateStoredWeldResumeCheckpoint(const QString& robotName, QString& error);
     static bool CapturePointCloudProductionExpectation(
@@ -150,7 +175,9 @@ public:
         const StopRequestedCallback& stopRequested = StopRequestedCallback(),
         const ScanProgressCallback& scanProgress = ScanProgressCallback(),
         const ScanPauseAvailabilityCallback& scanPauseAvailability =
-            ScanPauseAvailabilityCallback()) const;
+            ScanPauseAvailabilityCallback(),
+        const std::vector<T_ROBOT_COORS>* scanTrajectory = nullptr,
+        const QString& cameraSectionOverride = QString()) const;
     bool ScanMoveAndCollect(
         RobotDriverAdaptor* pRobotDriver,
         const T_PRECISE_MEASURE_PARAM& param,
@@ -162,8 +189,24 @@ public:
         const HandEyeMatrixConfig* validatedCalibration = nullptr,
         const ScanProgressCallback& scanProgress = ScanProgressCallback(),
         const ScanPauseAvailabilityCallback& scanPauseAvailability =
-            ScanPauseAvailabilityCallback()) const;
+            ScanPauseAvailabilityCallback(),
+        const std::vector<T_ROBOT_COORS>* scanTrajectory = nullptr,
+        const QString& cameraSectionOverride = QString()) const;
+    bool SaveScanPoseVariationTrajectory(
+        const QString& filePath,
+        const QVector<ScanPoseVariationPoint>& trajectory,
+        QString& error) const;
+    bool GenerateScanPoseVariationTrajectory(
+        const T_ROBOT_COORS& taughtBasePose,
+        const T_ROBOT_COORS& taughtStartPose,
+        const T_ROBOT_COORS& taughtEndPose,
+        int robotType,
+        const ScanPoseVariationParams& params,
+        QVector<ScanPoseVariationPoint>& trajectory,
+        QString& summary,
+        QString& error) const;
     bool RebuildWeldFilesFromLaserDir(
+        RobotDriverAdaptor* pRobotDriver,
         const T_PRECISE_MEASURE_PARAM& param,
         const QString& laserDir,
         QString& preservePath,
@@ -192,8 +235,8 @@ public:
         QString* generatedSha256 = nullptr,
         qint64* generatedSize = nullptr,
         const StopRequestedCallback& stopRequested = StopRequestedCallback()) const;
-    bool GenerateStepWeldProgramFiles(
-        const QString& robotName,
+    bool GenerateRobotWeldProgramFiles(
+        RobotDriverAdaptor* pRobotDriver,
         const QString& poseFilePath,
         const QString& outputDir,
         bool actualWeld,
@@ -211,11 +254,11 @@ public:
         bool allowActiveProofReplacement = false) const;
 
     // 调试用：从机器人当前位姿沿 ±Y 造一条干净的虚拟直线焊道，保持当前焊枪姿态，
-    // 不走点云拟合/姿态补偿/焊缝补偿/起终裁剪/拐点处理，直接生成 srp/srd（摆动/速度/姿态仍读保存的工艺）。
+    // 不走点云拟合/姿态补偿/焊缝补偿/起终裁剪/拐点处理，直接通过适配层生成控制器程序文件。
     // 长度与点间距均可调；点间距=机器人最终逐点执行的轨迹间距（覆盖工艺值，便于测密集点摆动）。
     // 产出的 weldPosePath 既是查看文件，也是下发执行文件（执行不再叠加补偿）。
     bool GenerateVirtualStraightWeldFiles(
-        const QString& robotName,
+        RobotDriverAdaptor* pRobotDriver,
         const T_ROBOT_COORS& startCoors,
         double lengthMm,
         double pointStepMm,

@@ -1,7 +1,7 @@
 #include "PreciseMeasureEditDialog.h"
+#include "RobotDriverAdaptor.h"
 
 #include "ConfigDatabase.h"
-#include "FANUCRobotDriver.h"
 #include "OPini.h"
 #include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
@@ -71,6 +71,20 @@ constexpr auto NORMAL_WELD_RY_KEY = "NormalWeldRy";
 constexpr auto WELD_RZ_GAIN_KEY = "WeldRzGainDeg";
 constexpr auto WELD_SAFE_RETREAT_DIRECTION_KEY = "WeldSafeRetreatDirection";
 constexpr auto GUN_DOWN_BACK_SAFE_DISTANCE_KEY = "GunDownBackSafeDis";
+
+bool RequirePassiveStateForTeaching(
+    QWidget* parent,
+    RobotDriverAdaptor* driver,
+    const QString& title)
+{
+    if (driver != nullptr && driver->Supports(RobotDriverCapability::PassiveState))
+    {
+        return true;
+    }
+    QMessageBox::warning(parent, title,
+        QStringLiteral("当前机器人品牌底层缺少“机器人状态读取”适配能力，示教功能已限制。"));
+    return false;
+}
 
 QLineEdit* CreateValueEdit(int minWidth = 76, int maxWidth = kShortValueEditMaxWidth)
 {
@@ -1482,7 +1496,7 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
 void PreciseMeasureEditDialog::TeachStartPos()
 {
     RobotDriverAdaptor* driver = GetSelectedRobotDriver();
-    if (driver == nullptr)
+    if (!RequirePassiveStateForTeaching(this, driver, QStringLiteral("示教扫描起点")))
     {
         return;
     }
@@ -1507,7 +1521,7 @@ void PreciseMeasureEditDialog::TeachStartPos()
 void PreciseMeasureEditDialog::TeachStartSafePulse()
 {
     RobotDriverAdaptor* driver = GetSelectedRobotDriver();
-    if (driver == nullptr)
+    if (!RequirePassiveStateForTeaching(this, driver, QStringLiteral("示教下枪安全位置")))
     {
         return;
     }
@@ -1529,7 +1543,7 @@ void PreciseMeasureEditDialog::TeachStartSafePulse()
 void PreciseMeasureEditDialog::TeachEndPos()
 {
     RobotDriverAdaptor* driver = GetSelectedRobotDriver();
-    if (driver == nullptr)
+    if (!RequirePassiveStateForTeaching(this, driver, QStringLiteral("示教扫描终点")))
     {
         return;
     }
@@ -1551,7 +1565,7 @@ void PreciseMeasureEditDialog::TeachEndPos()
 void PreciseMeasureEditDialog::TeachEndSafePulse()
 {
     RobotDriverAdaptor* driver = GetSelectedRobotDriver();
-    if (driver == nullptr)
+    if (!RequirePassiveStateForTeaching(this, driver, QStringLiteral("示教收枪安全位置")))
     {
         return;
     }
@@ -2632,7 +2646,7 @@ bool PreciseMeasureEditDialog::SaveWeldPoseTeachParams(QString& error)
 void PreciseMeasureEditDialog::TeachCurrentWeldPlatformPose()
 {
     RobotDriverAdaptor* driver = GetSelectedRobotDriver();
-    if (driver == nullptr)
+    if (!RequirePassiveStateForTeaching(this, driver, QStringLiteral("示教焊接平台姿态")))
     {
         return;
     }

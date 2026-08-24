@@ -2,6 +2,7 @@
 
 #include "ContralUnit.h"
 #include "HandEyeMatrixConfig.h"
+#include "RobotDriverAdaptor.h"
 
 #include <QDialog>
 #include <QPointer>
@@ -10,9 +11,8 @@
 #include <Eigen/Dense>
 #include <atomic>
 #include <functional>
+#include <initializer_list>
 
-class RobotDriverAdaptor;
-class FANUCRobotCtrl;
 class QLabel;
 class QCloseEvent;
 class QDoubleSpinBox;
@@ -20,7 +20,6 @@ class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QTabWidget;
-class FANUCRobotCtrl;
 class CameraFrameCache;
 
 class HandEyeCalibrationDialog : public QDialog
@@ -71,7 +70,14 @@ private:
 
     bool ReadLatestCameraPoint(Eigen::Vector3d& cameraPoint, QString* error = nullptr) const;
     RobotDriverAdaptor* CurrentDriver(QString* error = nullptr) const;
-    FANUCRobotCtrl* CurrentFanucDriver(QString* error = nullptr) const;
+    RobotDriverAdaptor* CurrentDriverWithCapability(
+        RobotDriverCapability capability,
+        const QString& actionName,
+        QString* error = nullptr) const;
+    RobotDriverAdaptor* CurrentDriverWithCapabilities(
+        std::initializer_list<RobotDriverCapability> capabilities,
+        const QString& actionName,
+        QString* error = nullptr) const;
 
     bool ApplyCapturedTargetPoint(const T_ROBOT_COORS& pose, QString* error = nullptr);
     bool ApplyCapturedSample(int index, const T_ROBOT_COORS& pose, const Eigen::Vector3d& cameraPoint, QString* error = nullptr);

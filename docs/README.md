@@ -14,6 +14,8 @@
 - [本地账号与凭据安全](security-credentials.md)
 - [在线服务部署](server-deployment.md)
 - [CI 离线门禁](ci.md)
+- [代码环境搭建说明书](source-environment-setup.md)
+- [第三方依赖离线包说明](third-party-offline-package.md)
 - [波纹板项目方案](wavy-board-plan.md)
 - [问题表摘要](issues.md)
 - [工作记录摘要](worklog.md)

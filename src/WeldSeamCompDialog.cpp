@@ -5,8 +5,7 @@
 #include "PointCloud3DView.h"
 #include "PointCloudProcessingConfig.h"
 #include "RobotDataHelper.h"
-#include "FANUCRobotDriver.h"
-#include "STEPRobotDriver.h"
+#include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
 #include "WeldProcessFile.h"
 #include "WeldSeamCompConfig.h"
@@ -2544,6 +2543,7 @@ bool WeldSeamCompDialog::ExecuteCompPreviewRebuild(bool showErrorBox)
     QString seamCompPath;
     QString summary;
     const bool ok = m_compPreviewService.RebuildWeldFilesFromLaserDir(
+        driver,
         param,
         m_compPreviewDir,
         preservePath,
@@ -3052,14 +3052,7 @@ int WeldSeamCompDialog::CurrentRobotType() const
                 continue;
             }
             RobotDriverAdaptor* driver = static_cast<RobotDriverAdaptor*>(unit.pUnitDriver);
-            if (dynamic_cast<STEPRobotCtrl*>(driver) != nullptr)
-            {
-                return ROBOT_TYPE_STEP;
-            }
-            if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
-            {
-                return ROBOT_TYPE_FANUC;
-            }
+            return driver->DriverDescriptor().poseConventionType;
         }
     }
     return ROBOT_TYPE_FANUC;
@@ -3418,12 +3411,13 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
         || QFileInfo::exists(QDir(laserDir).filePath("PreciseLaserPoint_WorkpieceCloud.txt"));
     bool needRebuild = (forceRebuild || !QFileInfo::exists(methodFilePath)) && hasRebuildInput;
 
-    // 重算需要驱动 + 测量参数：驱动/DB 访问留在 UI 线程，参数拷贝进后台线程。
+    // 重算参数和生产上下文在 UI 线程冻结；后台预览不得捕获裸机器人驱动。
+    // 预览重算不执行机器人通信，也不附带导出控制器程序。
     T_PRECISE_MEASURE_PARAM rebuildParam;
+    RobotDriverAdaptor* contextDriver = nullptr;
     MeasureThenWeldService::PointCloudProductionExpectation rebuildExpectation;
     if (needRebuild)
     {
-        RobotDriverAdaptor* driver = nullptr;
         const QString robot = CurrentRobotName();
         if (m_pContralUnit != nullptr)
         {
@@ -3431,22 +3425,22 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
             {
                 if (QString::fromStdString(unit.sUnitName) == robot && unit.pUnitDriver != nullptr)
                 {
-                    driver = static_cast<RobotDriverAdaptor*>(unit.pUnitDriver);
+                    contextDriver = static_cast<RobotDriverAdaptor*>(unit.pUnitDriver);
                     break;
                 }
             }
         }
         QString paramError;
-        if (driver == nullptr
-            || !m_compPreviewService.LoadPresetParam(driver, rebuildParam, paramError)
+        if (contextDriver == nullptr
+            || !m_compPreviewService.LoadPresetParam(contextDriver, rebuildParam, paramError)
             || !MeasureThenWeldService::CapturePointCloudProductionExpectation(
-                driver,
+                contextDriver,
                 QString::fromStdString(rebuildParam.sRobotName),
                 rebuildExpectation,
                 paramError))
         {
             AppendLog(QString("自动重算跳过：冻结测量参数/生产上下文失败（%1）。")
-                .arg(driver == nullptr ? QString("未找到机器人驱动") : paramError));
+                .arg(contextDriver == nullptr ? QString("未找到机器人驱动") : paramError));
             needRebuild = false;
         }
     }
@@ -3508,7 +3502,7 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
                 QString summary;
                 QString rebuildError;
                 const bool ok = m_compPreviewService.RebuildWeldFilesFromLaserDir(
-                    rebuildParam, laserDir, preservePath, weldPosePath, seamCompPath, summary, rebuildError,
+                    nullptr, rebuildParam, laserDir, preservePath, weldPosePath, seamCompPath, summary, rebuildError,
                     [&result](const QString& text) { result.logs.append("重算基准：" + text); },
                     MeasureThenWeldService::StepCallback(),
                     rebuildExpectation,

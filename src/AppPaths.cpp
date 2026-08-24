@@ -153,7 +153,8 @@ QString DefaultInstallRoot()
             .relativeFilePath(applicationDir)
             .replace('\\', '/')
             .toLower();
-        if (relative == QStringLiteral("x64/debug")
+        if (relative == QStringLiteral("x64")
+            || relative == QStringLiteral("x64/debug")
             || relative == QStringLiteral("x64/release"))
         {
             return developmentRoot;

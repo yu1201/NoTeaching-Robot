@@ -76,13 +76,13 @@ def main() -> int:
     )
     for token in (
         "ActiveWeldCheckpointRecord",
-        "PauseTrackedProgramAndWait",
+        "pRobotDriver->PauseTrackedMotion",
         "activeRecord.programName",
         "SavePausedBreakpointRecord",
         "m_activeWeldCheckpointRecord = pausedEncoded",
         'QStringLiteral("paused"),\n            QStringLiteral("continuing")',
         "m_activeWeldCheckpointRecord = continuingEncoded",
-        "ResumeTrackedProgramFromPause",
+        "pRobotDriver->ResumeTrackedMotion",
     ):
         require(token in pause, f"stable pause checkpoint gate missing: {token}")
     require("Prog_stop_Py()" not in pause,
@@ -114,7 +114,8 @@ def main() -> int:
         "executionPreMotion",
         "机器人运动前复核焊接执行身份失败",
         "WeldSafetyRecoveryStore::InvalidateIfNoPending",
-        'stopBeforeNextWeldAction("启动STEP焊接轨迹程序")',
+        "pRobotDriver->StartTrajectory",
+        "pRobotDriver->WaitTrajectory",
         "PersistProgramCompletedUnretracted",
         "FinishSafelyRetracted",
     ):

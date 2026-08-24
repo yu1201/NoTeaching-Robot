@@ -81,6 +81,19 @@ def assert_static_wiring() -> None:
         if "QDir::temp" in text or "std::filesystem::temp_directory_path" in text:
             raise AssertionError(f"System temp bypass remains in {relative}")
 
+    app_paths_text = (REPO_ROOT / "src" / "AppPaths.cpp").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    for development_output in (
+        'QStringLiteral("x64")',
+        'QStringLiteral("x64/debug")',
+        'QStringLiteral("x64/release")',
+    ):
+        if development_output not in app_paths_text:
+            raise AssertionError(
+                f"Standard development output does not resolve the repository data root: {development_output}"
+            )
+
     online_text = (REPO_ROOT / "src" / "OnlineServicesDialog.cpp").read_text(
         encoding="utf-8", errors="replace"
     )
@@ -323,12 +336,21 @@ def main() -> int:
         default=REPO_ROOT / "x64" / "Release" / "QtWidgetsApplication4.exe",
     )
     parser.add_argument("--static-only", action="store_true")
+    parser.add_argument("--runtime-only", action="store_true")
     args = parser.parse_args()
 
-    assert_static_wiring()
+    if args.static_only and args.runtime_only:
+        parser.error("--static-only and --runtime-only are mutually exclusive")
+    if not args.runtime_only:
+        assert_static_wiring()
     if not args.static_only:
         assert_runtime(args.exe)
-    print("PASS: AppPaths static wiring" + ("" if args.static_only else " and runtime matrix"))
+    if args.runtime_only:
+        print("PASS: AppPaths runtime matrix")
+    elif args.static_only:
+        print("PASS: AppPaths static wiring")
+    else:
+        print("PASS: AppPaths static wiring and runtime matrix")
     return 0
 
 

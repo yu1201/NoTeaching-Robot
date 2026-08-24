@@ -210,8 +210,9 @@ def main() -> int:
             "measure/weld flow does not apply Cartesian timeout admission")
     require(hand_eye.count("AdmitCartesianMove") >= 2,
             "hand-eye automatic moves are not admitted before both MOVL paths")
-    require("FANUC扫描流程已在首条运动前拒绝" in service,
-            "FANUC scan speed is not validated before the first motion")
+    require("扫描流程已在首条运动前由适配层拒绝" in service
+            and "ValidateLinearSpeedMmPerMin" in service,
+            "canonical scan speed is not validated by the adaptor before the first motion")
     require("snapshot.valid = freshPose && finitePose && nonZeroPose" in adaptor,
             "state snapshots can still mark failed/stale zero poses as valid")
     require("const long long validationNowMs = RobotDriverSteadyMs()" in adaptor
@@ -245,8 +246,8 @@ def main() -> int:
             and "m_hasLastTestReturnPose = false" in hand_eye,
             "a failed new hand-eye diagnostic can still expose the previous move target")
     require("ConfirmRobotStoppedBeforeHandEyeMove" in hand_eye
-            and "done != STEPROBOTSDK::eStop" in hand_eye
-            and "done != 1" in hand_eye,
+            and "status.state != RobotMotionState::Idle" in hand_eye
+            and "status.state != RobotMotionState::Completed" in hand_eye,
             "hand-eye MOVL entry can still stack onto running/paused/unknown robot state")
     require(hand_eye.count("ConfirmRobotStoppedBeforeHandEyeMove(driver") >= 2,
             "not every hand-eye MOVL path performs an active stopped-state check")
