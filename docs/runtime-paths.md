@@ -34,6 +34,13 @@ QtWidgetsApplication4.exe --print-app-paths-json --data-root "D:\NoTeachingRobot
 
 它用于确认安装根、数据根、启动 cwd、数据库路径、资源根和内部路径越界门禁。点云子进程及升级重启会继承同一个 `QTWIDGETSAPP4_DATA_ROOT`。
 
+源码仓库内的标准本地测试输出 `x64\QtWidgetsApplication4.exe`、
+`x64\HK-Pathlynx-CORPLA.exe`、`x64\Debug\*.exe` 和
+`x64\Release\*.exe` 自动使用仓库根目录作为数据根，因此统一读取现有的
+`Data\ConfigStore.db`，无需额外传入 `--data-root`。带
+`DEPLOY_NOTES.txt` 或 `BUILD_VERSION.txt` 的正式部署目录仍使用部署目录自身的
+`Data`，不会回借源码仓库数据库。
+
 ## 迁移旧 Data
 
 迁移默认不覆盖已有 `ConfigStore.db`；升级旧 schema 时会先备份并在事务中迁移。把旧安装目录的数据迁到新的 data root：

@@ -1,15 +1,15 @@
 #pragma once
 
 #include "ContralUnit.h"
+#include "RobotDriverAdaptor.h"
 
 #include <QDialog>
+#include <initializer_list>
 #include <QString>
 #include <QVector>
 
 class QPushButton;
 class QPlainTextEdit;
-class FANUCRobotCtrl;
-class RobotDriverAdaptor;
 class QTimer;
 class CameraFrameCache;
 class QWidget;
@@ -25,7 +25,12 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
-    FANUCRobotCtrl* GetFirstFanucDriver();
+    RobotDriverAdaptor* GetFirstDriverWithCapability(
+        RobotDriverCapability capability,
+        const QString& actionName);
+    RobotDriverAdaptor* GetFirstDriverWithCapabilities(
+        std::initializer_list<RobotDriverCapability> capabilities,
+        const QString& actionName);
     RobotDriverAdaptor* GetFirstRobotDriverAdaptor();
     bool IsMotionBusy() const;
     void RefreshMotionButtonState();

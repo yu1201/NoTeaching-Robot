@@ -1360,6 +1360,590 @@ FANUCRobotCtrl::~FANUCRobotCtrl()
 	}
 }
 
+RobotDriverDescriptor FANUCRobotCtrl::DriverDescriptor() const
+{
+	return RobotDriverDescriptor{
+		RobotDriverFamily::Fanuc,
+		ROBOT_TYPE_FANUC,
+		ROBOT_TYPE_FANUC,
+		"FANUC",
+		"FANUC"
+	};
+}
+
+std::uint64_t FANUCRobotCtrl::DriverCapabilities() const
+{
+	return RobotDriverCapabilityBit(RobotDriverCapability::PassiveState)
+		| RobotDriverCapabilityBit(RobotDriverCapability::RobotTimestamp)
+		| RobotDriverCapabilityBit(RobotDriverCapability::LinearMotion)
+		| RobotDriverCapabilityBit(RobotDriverCapability::JointMotion)
+		| RobotDriverCapabilityBit(RobotDriverCapability::ContinuousTrajectory)
+		| RobotDriverCapabilityBit(RobotDriverCapability::ContinuousJog)
+		| RobotDriverCapabilityBit(RobotDriverCapability::PersistentProgramRecovery)
+		| RobotDriverCapabilityBit(RobotDriverCapability::OperationModeControl)
+		| RobotDriverCapabilityBit(RobotDriverCapability::NativeProgramUpload)
+		| RobotDriverCapabilityBit(RobotDriverCapability::DiagnosticCommand)
+		| RobotDriverCapabilityBit(RobotDriverCapability::CartesianRegister)
+		| RobotDriverCapabilityBit(RobotDriverCapability::VerifiedProgramCompletion)
+		| RobotDriverCapabilityBit(RobotDriverCapability::VerifiedSafeAbort)
+		| RobotDriverCapabilityBit(RobotDriverCapability::ExternalAxis)
+		| RobotDriverCapabilityBit(RobotDriverCapability::HandEyeProgramSupport)
+		| RobotDriverCapabilityBit(RobotDriverCapability::ConnectionControl)
+		| RobotDriverCapabilityBit(RobotDriverCapability::AlarmReset)
+		| RobotDriverCapabilityBit(RobotDriverCapability::ServoPowerControl)
+		| RobotDriverCapabilityBit(RobotDriverCapability::ToolDataRead)
+		| RobotDriverCapabilityBit(RobotDriverCapability::IntegerRegister)
+		| RobotDriverCapabilityBit(RobotDriverCapability::TeachPendantSpeedControl)
+		| RobotDriverCapabilityBit(RobotDriverCapability::NativeProgramExecution)
+		| RobotDriverCapabilityBit(RobotDriverCapability::FtpFileTransfer);
+}
+
+bool FANUCRobotCtrl::BuildProgramInventoryQuery(
+	RobotProgramInventoryQuery& query,
+	std::string* error) const
+{
+	query = {};
+	query.robotName = m_sRobotName;
+	query.ftpHost = m_sFTPIP;
+	query.ftpPort = m_nFTPPort;
+	query.ftpUser = m_sFTPUser;
+	query.ftpPassword = m_sFTPPassWord;
+	query.remoteDirectory = "/md/";
+	// TP 与 KAREL PC 都是控制器可执行程序；同名产物按一个程序单元计数。
+	query.programExtensions = { ".tp", ".pc" };
+	if (!query.IsValid())
+	{
+		if (error != nullptr)
+		{
+			*error = "FANUC机器人FTP程序数量检查参数不完整。";
+		}
+		return false;
+	}
+	if (error != nullptr)
+	{
+		error->clear();
+	}
+	return true;
+}
+
+bool FANUCRobotCtrl::ValidateLinearSpeedMmPerMin(double speedMmPerMin, std::string* error) const
+{
+	if (!std::isfinite(speedMmPerMin) || speedMmPerMin < 60.0)
+	{
+		if (error != nullptr)
+		{
+			*error = GetStr(
+				"FANUC线速度无法表示：请求=%.6f mm/min，固定TP最低为60 mm/min。",
+				speedMmPerMin);
+		}
+		return false;
+	}
+	if (error != nullptr)
+	{
+		error->clear();
+	}
+	return true;
+}
+
+bool FANUCRobotCtrl::MoveLinearMmPerMin(
+	const T_ROBOT_COORS& target,
+	double speedMmPerMin,
+	int externalAxleType,
+	const int* configuration)
+{
+	std::string error;
+	if (!ValidateLinearSpeedMmPerMin(speedMmPerMin, &error))
+	{
+		SetLastRobotError(error);
+		return false;
+	}
+	const double nativeMmPerSec = std::floor(speedMmPerMin / 60.0);
+	int nativeConfiguration[7] = {};
+	if (configuration != nullptr)
+	{
+		std::copy(configuration, configuration + 7, nativeConfiguration);
+	}
+	return MoveByJob(
+		target,
+		T_ROBOT_MOVE_SPEED(nativeMmPerSec, 0.0, 0.0),
+		externalAxleType,
+		"MOVL",
+		1,
+		nativeConfiguration);
+}
+
+bool FANUCRobotCtrl::MoveJointPercent(
+	const T_ANGLE_PULSE& target,
+	double speedPercent,
+	int externalAxleType)
+{
+	if (!std::isfinite(speedPercent) || speedPercent <= 0.0 || speedPercent > 100.0)
+	{
+		SetLastRobotError(GetStr("FANUC关节速度百分比无效：%.6f", speedPercent));
+		return false;
+	}
+	return MoveByJob(
+		target,
+		T_ROBOT_MOVE_SPEED(speedPercent, 0.0, 0.0),
+		externalAxleType,
+		"MOVJ");
+}
+
+namespace
+{
+	RobotMotionStatus FanucNormalizedMotionStatus(int rawCode, const std::string& detail)
+	{
+		RobotMotionStatus status;
+		status.rawCode = rawCode;
+		status.detail = detail;
+		if (rawCode == 0)
+		{
+			status.state = RobotMotionState::Running;
+		}
+		else if (rawCode == 1)
+		{
+			status.state = RobotMotionState::Completed;
+		}
+		else
+		{
+			status.state = RobotMotionState::Unknown;
+		}
+		return status;
+	}
+
+	bool FanucCanonicalTrajectoryToNative(
+		const FANUCRobotCtrl* driver,
+		const std::vector<T_ROBOT_MOVE_INFO>& source,
+		std::vector<T_ROBOT_MOVE_INFO>& native,
+		std::string& error)
+	{
+		native = source;
+		for (std::size_t index = 0; index < native.size(); ++index)
+		{
+			T_ROBOT_MOVE_INFO& info = native[index];
+			if (info.nMoveType != MOVL)
+			{
+				continue;
+			}
+			if (!driver->ValidateLinearSpeedMmPerMin(info.tSpeed.dSpeed, &error))
+			{
+				error = GetStr("FANUC轨迹点%u速度无效：%s",
+					static_cast<unsigned>(index), error.c_str());
+				return false;
+			}
+			info.tSpeed.dSpeed = std::floor(info.tSpeed.dSpeed / 60.0);
+		}
+		return true;
+	}
+}
+
+RobotMotionStatus FANUCRobotCtrl::ReadMotionStatus()
+{
+	return FanucNormalizedMotionStatus(CheckDone(), GetRobotStatusText());
+}
+
+RobotMotionStatus FANUCRobotCtrl::ReadMotionStatusPassive(long long* pRobotMs, long long* pPcRecvMs)
+{
+	return FanucNormalizedMotionStatus(
+		CheckDonePassive(pRobotMs, pPcRecvMs),
+		GetStateMonitorSourceText());
+}
+
+bool FANUCRobotCtrl::ReserveTrajectory(
+	RobotTrajectoryPurpose purpose,
+	RobotTrajectoryHandle& handle)
+{
+	(void)purpose;
+	handle = RobotTrajectoryHandle{};
+	handle.programName = FanucMakeTpProgramName(this);
+	return !handle.programName.empty();
+}
+
+bool FANUCRobotCtrl::DownlinkTrajectory(
+	const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
+	RobotTrajectoryPurpose purpose,
+	RobotTrajectoryHandle& handle)
+{
+	if (handle.programName.empty() && !ReserveTrajectory(purpose, handle))
+	{
+		SetLastRobotError("FANUC轨迹身份预留失败。");
+		return false;
+	}
+	std::vector<T_ROBOT_MOVE_INFO> nativeMoveInfos;
+	std::string conversionError;
+	if (!FanucCanonicalTrajectoryToNative(this, moveInfos, nativeMoveInfos, conversionError))
+	{
+		SetLastRobotError(conversionError);
+		return false;
+	}
+	std::string programName;
+	std::string localPath;
+	std::string remotePath;
+	const TrajectoryProgramMode mode = purpose == RobotTrajectoryPurpose::ActualWeld
+		? TrajectoryProgramMode::ActualWeld
+		: TrajectoryProgramMode::DryRun;
+	const int ret = UploadMultiPointTpProgram(
+		nativeMoveInfos,
+		mode,
+		&programName,
+		&localPath,
+		&remotePath,
+		handle.programName);
+	if (ret != 0)
+	{
+		return false;
+	}
+	handle.programName = programName;
+	handle.localProgramPath = localPath;
+	handle.remoteProgramPath = remotePath;
+	handle.prepared = true;
+	return true;
+}
+
+bool FANUCRobotCtrl::ExportTrajectoryProgramFiles(
+	const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
+	RobotTrajectoryPurpose purpose,
+	const std::string& outputDirectory,
+	RobotTrajectoryHandle& handle,
+	std::string* error)
+{
+	(void)moveInfos;
+	(void)purpose;
+	(void)outputDirectory;
+	handle = RobotTrajectoryHandle{};
+	const std::string detail = "FANUC驱动尚未实现不上传控制器的离线轨迹程序导出。";
+	SetLastRobotError(detail);
+	if (error != nullptr) { *error = detail; }
+	return false;
+}
+
+bool FANUCRobotCtrl::StartTrajectory(
+	const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
+	RobotTrajectoryPurpose purpose,
+	RobotTrajectoryHandle& handle)
+{
+	if (!handle.prepared && !DownlinkTrajectory(moveInfos, purpose, handle))
+	{
+		return false;
+	}
+	if (!CallJobWithCompletionState(handle.programName, FANUC_DEFAULT_MOTION_STATE_REG, 1))
+	{
+		return false;
+	}
+	handle.started = true;
+	return true;
+}
+
+bool FANUCRobotCtrl::WaitTrajectory(
+	const RobotTrajectoryHandle& handle,
+	int pollDelayMs,
+	int runTimeoutMs,
+	RobotMotionStatus* terminalStatus)
+{
+	if (!handle.started)
+	{
+		SetLastRobotError("FANUC轨迹尚未启动，禁止等待完成。");
+		return false;
+	}
+	const int ret = CheckRobotDone(pollDelayMs, runTimeoutMs);
+	if (terminalStatus != nullptr)
+	{
+		*terminalStatus = FanucNormalizedMotionStatus(ret > 0 ? 1 : ret, GetRobotStatusText());
+		terminalStatus->terminalVerified = ret > 0;
+	}
+	return ret > 0;
+}
+
+bool FANUCRobotCtrl::GetTrackedMotionIdentity(
+	std::string& projectName,
+	std::string& programName,
+	bool* alreadyStopped)
+{
+	projectName.clear();
+	programName.clear();
+	if (alreadyStopped != nullptr)
+	{
+		*alreadyStopped = false;
+	}
+	SetLastRobotError("FANUC驱动不提供可暂停恢复的受跟踪程序身份。");
+	return false;
+}
+
+bool FANUCRobotCtrl::PauseTrackedMotion(
+	const std::string& expectedProgramName,
+	int& programLine,
+	T_ROBOT_COORS& pausedPose,
+	std::string* projectName,
+	std::string* programName)
+{
+	(void)expectedProgramName;
+	(void)programLine;
+	(void)pausedPose;
+	(void)projectName;
+	(void)programName;
+	SetLastRobotError("FANUC驱动未实现可验证的暂停恢复契约。");
+	return false;
+}
+
+bool FANUCRobotCtrl::ResumeTrackedMotion(
+	const std::string& expectedProgramName,
+	const T_ROBOT_COORS& checkpointPose,
+	double maxPositionDeviationMm,
+	double maxAngleDeviationDeg,
+	double* positionDeviationMm,
+	double* angleDeviationDeg)
+{
+	(void)expectedProgramName;
+	(void)checkpointPose;
+	(void)maxPositionDeviationMm;
+	(void)maxAngleDeviationDeg;
+	(void)positionDeviationMm;
+	(void)angleDeviationDeg;
+	SetLastRobotError("FANUC驱动未实现可验证的暂停恢复契约。");
+	return false;
+}
+
+RobotPersistentRecoveryStrategy FANUCRobotCtrl::PersistentRecoveryStrategy() const
+{
+	return RobotPersistentRecoveryStrategy::AbortUnknownCurrentProgram;
+}
+
+bool FANUCRobotCtrl::AbortPersistedMotion(const std::string& expectedProgramName)
+{
+	if (expectedProgramName.empty())
+	{
+		SetLastRobotError("FANUC持久恢复缺少预期程序身份。");
+		return false;
+	}
+	return AbortCurrentProgramSafely();
+}
+
+bool FANUCRobotCtrl::SetOperationMode(RobotOperationMode mode)
+{
+	return SetSysMode(static_cast<int>(mode));
+}
+
+bool FANUCRobotCtrl::InitializeAfterConnect(std::string* summary)
+{
+	if (summary != nullptr)
+	{
+		*summary = "FANUC连接已建立；控制器模式和伺服状态保持现场设置。";
+	}
+	return true;
+}
+
+bool FANUCRobotCtrl::ShutdownBeforeDisconnect()
+{
+	bool ok = true;
+	if (IsConnected())
+	{
+		ok = StopRobotServices();
+	}
+	StopMonitor();
+	return ok;
+}
+
+void FANUCRobotCtrl::ReloadRuntimeConfiguration()
+{
+}
+
+bool FANUCRobotCtrl::PrepareNativeProgramUpload()
+{
+	return StopRobotServices();
+}
+
+bool FANUCRobotCtrl::StartContinuousJog(int moveType, double canonicalSpeed)
+{
+	if (moveType == MOVL)
+	{
+		std::string error;
+		if (!ValidateLinearSpeedMmPerMin(canonicalSpeed, &error))
+		{
+			SetLastRobotError(error);
+			return false;
+		}
+		canonicalSpeed = std::floor(canonicalSpeed / 60.0);
+	}
+	else if (!std::isfinite(canonicalSpeed) || canonicalSpeed <= 0.0 || canonicalSpeed > 100.0)
+	{
+		SetLastRobotError(GetStr("FANUC连续关节点动速度百分比无效：%.6f", canonicalSpeed));
+		return false;
+	}
+	return StartContinuousMoveQueue(moveType, canonicalSpeed);
+}
+
+bool FANUCRobotCtrl::PushContinuousJogPoint(const T_ROBOT_COORS& target, double speedMmPerMin)
+{
+	std::string error;
+	if (!ValidateLinearSpeedMmPerMin(speedMmPerMin, &error))
+	{
+		SetLastRobotError(error);
+		return false;
+	}
+	return PushContinuousMovePoint(target, std::floor(speedMmPerMin / 60.0));
+}
+
+bool FANUCRobotCtrl::PushContinuousJogPoint(const T_ANGLE_PULSE& target, double speedPercent)
+{
+	if (!std::isfinite(speedPercent) || speedPercent <= 0.0 || speedPercent > 100.0)
+	{
+		SetLastRobotError(GetStr("FANUC连续关节点动速度百分比无效：%.6f", speedPercent));
+		return false;
+	}
+	return PushContinuousMovePoint(target, speedPercent);
+}
+
+void FANUCRobotCtrl::RequestEndContinuousJog()
+{
+	RequestEndContinuousMoveQueue();
+}
+
+void FANUCRobotCtrl::EndContinuousJog()
+{
+	EndContinuousMoveQueue();
+}
+
+bool FANUCRobotCtrl::IsContinuousJogRunning() const
+{
+	return IsContinuousMoveQueueRunning();
+}
+
+int FANUCRobotCtrl::UploadNativeProgramSource(
+	const std::string& localPath,
+	const std::string& remoteDirectory)
+{
+	std::string extension = std::filesystem::path(localPath).extension().string();
+	std::transform(extension.begin(), extension.end(), extension.begin(),
+		[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+	const std::string remote = remoteDirectory.empty() ? "/md/" : remoteDirectory;
+	if (extension == ".kl")
+	{
+		return UploadKlFile(localPath, remote);
+	}
+	if (extension == ".ls")
+	{
+		return UploadLsFile(localPath, remote);
+	}
+	if (extension == ".pc" || extension == ".tp")
+	{
+		std::string remoteDirectoryPath = remote;
+		if (remoteDirectoryPath.back() != '/')
+		{
+			remoteDirectoryPath.push_back('/');
+		}
+		const std::string remotePath = remoteDirectoryPath
+			+ std::filesystem::path(localPath).filename().string();
+		return UploadFile(localPath, remotePath);
+	}
+	SetLastRobotError("FANUC原生程序上传仅支持KL、PC、LS或TP文件：" + localPath);
+	return -1;
+}
+
+std::string FANUCRobotCtrl::SendDiagnosticCommand(const std::string& command)
+{
+	return SendRawCommandForTest(command);
+}
+
+bool FANUCRobotCtrl::WriteCartesianRegister(int index, const double pose[8], int config[7])
+{
+	double writablePose[8] = {};
+	std::copy(pose, pose + 8, writablePose);
+	return SetPosVar(index, writablePose, POSVAR, 1, config, ENGINEEVAR, POSVAR);
+}
+
+bool FANUCRobotCtrl::RunProgramAndWait(
+	const std::string& programName,
+	int startTimeoutMs,
+	int finishTimeoutMs,
+	int pollDelayMs,
+	RobotMotionStatus* terminalStatus)
+{
+	int rawState = -1;
+	const bool ok = CallJobAndWaitStateDone(
+		programName,
+		FANUC_DEFAULT_MOTION_STATE_REG,
+		1,
+		10,
+		20,
+		startTimeoutMs,
+		finishTimeoutMs,
+		pollDelayMs,
+		&rawState,
+		true);
+	if (terminalStatus != nullptr)
+	{
+		*terminalStatus = FanucNormalizedMotionStatus(ok ? 1 : rawState, GetRobotStatusText());
+		terminalStatus->terminalVerified = ok;
+	}
+	return ok;
+}
+
+bool FANUCRobotCtrl::InstallHandEyeSupportPrograms(std::string* summary)
+{
+	const QString autoProgramPath = AppPaths::FindResourcePath("SDK/FANUC/FANUC_HECALIB.ls");
+	const QString validationProgramPath = AppPaths::FindResourcePath("SDK/FANUC/FANUC_HECHECK.ls");
+	if (autoProgramPath.isEmpty() || validationProgramPath.isEmpty())
+	{
+		SetLastRobotError("FANUC手眼辅助程序资源不完整，缺少FANUC_HECALIB.ls或FANUC_HECHECK.ls。");
+		return false;
+	}
+	const int autoRet = UploadLsFile(autoProgramPath.toLocal8Bit().constData(), "/md/");
+	if (autoRet != 0)
+	{
+		SetLastRobotError(GetStr("FANUC自动标定程序上传失败，返回码=%d。", autoRet));
+		return false;
+	}
+	const int validationRet = UploadLsFile(validationProgramPath.toLocal8Bit().constData(), "/md/");
+	if (validationRet != 0)
+	{
+		SetLastRobotError(GetStr("FANUC手眼验证程序上传失败，返回码=%d。", validationRet));
+		return false;
+	}
+	if (summary != nullptr)
+	{
+		*summary = "FANUC_HECALIB与FANUC_HECHECK已上传到控制器。";
+	}
+	return true;
+}
+
+bool FANUCRobotCtrl::RunHandEyeValidation(
+	const T_ROBOT_COORS& robotPose,
+	T_ROBOT_COORS& robotCalculatedPoint)
+{
+	constexpr int startRegister = 79;
+	constexpr int resultRegister = 80;
+	constexpr int stateRegister = 92;
+	constexpr const char* programName = "FANUC_HECHECK";
+	int config[7] = {};
+	double pose[8] =
+	{
+		robotPose.dX, robotPose.dY, robotPose.dZ,
+		robotPose.dRX, robotPose.dRY, robotPose.dRZ,
+		robotPose.dBX, robotPose.dBY
+	};
+	if (!WriteCartesianRegister(startRegister, pose, config))
+	{
+		return false;
+	}
+	int rawState = -1;
+	if (!CallJobAndWaitStateDone(
+		programName, stateRegister, 1, 10, 20, 5000, 10000, 100, &rawState, true))
+	{
+		return false;
+	}
+	double result[6] = {};
+	if (GetPosVar(resultRegister, result, config, POSVAR) != 0)
+	{
+		SetLastRobotError("FANUC手眼验证程序完成，但读取PR[80]失败。");
+		return false;
+	}
+	robotCalculatedPoint = T_ROBOT_COORS();
+	robotCalculatedPoint.dX = result[0];
+	robotCalculatedPoint.dY = result[1];
+	robotCalculatedPoint.dZ = result[2];
+	return true;
+}
+
 namespace
 {
 	constexpr long long FANUC_DONE_STARTUP_GUARD_MS = 5000;
@@ -3737,7 +4321,8 @@ int FANUCRobotCtrl::UploadMultiPointTpProgram(
 	TrajectoryProgramMode mode,
 	std::string* pProgramName,
 	std::string* pLocalLsPath,
-	std::string* pRemoteTpPath)
+	std::string* pRemoteTpPath,
+	const std::string& requestedProgramName)
 {
 	if (vtRobotMoveInfo.empty())
 	{
@@ -3796,7 +4381,9 @@ int FANUCRobotCtrl::UploadMultiPointTpProgram(
 		}
 	}
 
-	const std::string programName = FanucMakeTpProgramName(this);
+	const std::string programName = requestedProgramName.empty()
+		? FanucMakeTpProgramName(this)
+		: requestedProgramName;
 	const std::filesystem::path localDirPath = FanucGeneratedProgramDirectory(this);
 	const std::string lsFileName = programName + ".ls";
 	const std::string localLsPath = FanucLocalPathBytes(localDirPath / lsFileName);
@@ -4375,6 +4962,24 @@ int FANUCRobotCtrl::GetPosVar(long lPvarIndex, double array[6], int config[7], i
 	return 0;
 }
 
+bool FANUCRobotCtrl::GetHandEyeMatrixVariable(
+	const char* variableName,
+	double rotation[9],
+	double translation[3],
+	std::string* error)
+{
+	(void)variableName;
+	(void)rotation;
+	(void)translation;
+	const std::string detail = "FANUC底层未实现直接读取手眼矩阵变量；请使用手眼辅助程序验证能力。";
+	SetLastRobotError(detail);
+	if (error != nullptr)
+	{
+		*error = detail;
+	}
+	return false;
+}
+
 // 设置命名速度变量；兼容旧接口，当前由常驻服务命令转发。
 bool FANUCRobotCtrl::SetSpeed(const char* name, double* speed, int scord)
 {
@@ -4403,6 +5008,11 @@ bool FANUCRobotCtrl::SetSpeed(int nIndex, double adSpeed[5])
 //}
 
 // 读取整数寄存器，默认读取INT<n>。
+bool FANUCRobotCtrl::TryGetIntVar(int nIndex, int& value, const char* cStrPreFix)
+{
+	return TryGetIntVarStrict(nIndex, cStrPreFix, value);
+}
+
 int FANUCRobotCtrl::GetIntVar(int nIndex, const char* cStrPreFix)
 {
 	int value = 0;

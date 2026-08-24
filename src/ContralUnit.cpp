@@ -1,8 +1,7 @@
 #include "ContralUnit.h"
 #include "Const.h"
-#include "FANUCRobotDriver.h"
-#include "STEPRobotDriver.h"
 #include "RobotDriverAdaptor.h"
+#include "RobotDriverRegistry.h"
 #include "RobotLog.h"
 
 namespace
@@ -117,22 +116,27 @@ bool ContralUnit::InitContralUnit()
                     ContralUnitLog->write(LogColor::ERR, "%s 读取 RobotType 失败", info.sUnitName.c_str());
                     bRtn = false;
                 }
-                else if (nRobotType == ROBOT_TYPE_STEP)
-                {
-                    info.pUnitDriver = new STEPRobotCtrl(info.sUnitName, pRobotLog);
-                    ContralUnitLog->write(LogColor::SUCCESS, "创建新时达驱动成功: %s", info.sUnitName.c_str());
-                }
-                else if (nRobotType == ROBOT_TYPE_FANUC)
-                {
-                    info.pUnitDriver = new FANUCRobotCtrl(info.sUnitName, pRobotLog);
-                    ContralUnitLog->write(LogColor::SUCCESS, "创建FANUC驱动成功: %s", info.sUnitName.c_str());
-                }
                 else
                 {
-                    ContralUnitLog->write(LogColor::WARNING,
-                        "%s 的 RobotType=%d 暂未支持，当前未创建驱动",
-                        info.sUnitName.c_str(), nRobotType);
-                    bRtn = false;
+                    std::string createError;
+                    info.pUnitDriver = RobotDriverRegistry::Create(
+                        nRobotType, info.sUnitName, pRobotLog, &createError);
+                    if (info.pUnitDriver == nullptr)
+                    {
+                        ContralUnitLog->write(LogColor::WARNING,
+                            "%s 的 RobotType=%d 未创建驱动：%s",
+                            info.sUnitName.c_str(), nRobotType, createError.c_str());
+                        delete pRobotLog;
+                        pRobotLog = nullptr;
+                        bRtn = false;
+                    }
+                    else
+                    {
+                        ContralUnitLog->write(LogColor::SUCCESS,
+                            "通过注册表创建机器人底层成功: unit=%s type=%d brand=%s",
+                            info.sUnitName.c_str(), nRobotType,
+                            RobotDriverRegistry::DisplayName(nRobotType).c_str());
+                    }
                 }
             }
         }

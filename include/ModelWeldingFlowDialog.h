@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CadSeamCandidateExtractor.h"
 #include "ModelWeldingWorkflow.h"
 
 #include <QDialog>
@@ -83,8 +84,14 @@ private:
     const ModelWeldingScanTeaching* FindTeaching(const QString& stationId) const;
     void TeachStart();
     void TeachEnd();
+    void ExtractCadSeamCandidates();
+    void AddSelectedCadSeamCandidate();
+    void ProjectReverseMeshSeedFile();
+    void RemoveSelectedSeam();
+    void ClearSeamCandidates();
 
     void RefreshStationTable();
+    void RefreshSeamTable();
     void RefreshStationDetails();
     void RefreshPreview(bool preserveView = false);
     bool HasActiveSimilarityInheritance() const;
@@ -121,8 +128,11 @@ private:
     QString m_previewPlySha256;
     QString m_previewSourcePath;
     QString m_previewSourceSha256;
+    QString m_seamCandidateSourcePath;
+    QString m_seamCandidateSourceSha256;
 
     WorkpieceMeshBuilder::Mesh m_mesh;
+    QVector<CadSeamCandidateExtractor::Candidate> m_seamCandidates;
     QVector<ModelWeldingFlowTemplate> m_templates;
     QVector<ModelWeldingRobotTeaching> m_teachings;
     QVector<Eigen::Vector3d> m_groundFaceCentersModel;
@@ -139,10 +149,12 @@ private:
     QComboBox* m_robotCombo = nullptr;
     QComboBox* m_cameraCombo = nullptr;
     QComboBox* m_groundFaceCombo = nullptr;
+    QComboBox* m_seamCandidateCombo = nullptr;
     QLineEdit* m_templateNameEdit = nullptr;
     QDoubleSpinBox* m_longLengthSpin = nullptr;
     QDoubleSpinBox* m_shortLengthSpin = nullptr;
     QDoubleSpinBox* m_modelRotationStepSpin = nullptr;
+    QDoubleSpinBox* m_seamMinimumLengthSpin = nullptr;
     QDoubleSpinBox* m_runSpeedSpin = nullptr;
     QDoubleSpinBox* m_scanSpeedSpin = nullptr;
     QCheckBox* m_datumChecked = nullptr;
@@ -157,6 +169,7 @@ private:
     QLabel* m_endPoseLabel = nullptr;
     QLabel* m_identityLabel = nullptr;
     QLabel* m_statusLabel = nullptr;
+    QTableWidget* m_seamTable = nullptr;
     QTableWidget* m_stationTable = nullptr;
     cadview::CadModel3DView* m_preview = nullptr;
 };

@@ -20,7 +20,7 @@ execute_end = service.index("bool MeasureThenWeldService::LoadCompPreviewBaselin
 execute = service[execute_start:execute_end]
 
 callback_gate = execute.index("if (!executionPrepared || !executionFinished)")
-first_motion = execute.index("MoveByJob(")
+first_motion = execute.index("MoveCoorsAndWait(")
 require(callback_gate < first_motion,
         "callback-less CLI/virtual caller can reach a real robot motion")
 callsite_counts = {

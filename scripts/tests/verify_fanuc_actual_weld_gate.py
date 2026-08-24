@@ -99,21 +99,21 @@ def main() -> int:
         "bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(",
         "bool MeasureThenWeldService::",
     )
-    contract_gate = execution.find("HasVerifiedArcWeldContract")
-    first_motion_gate = execution.find("if (executionPreMotion)")
+    contract_gate = execution.find("RobotDriverCapability::ActualArcWeld")
+    first_motion_gate = execution.find("MoveCoorsAndWait(")
     require(0 <= contract_gate < first_motion_gate,
             "FANUC actual-weld contract is not rejected before the first production motion gate")
-    require("FANUCRobotCtrl::TrajectoryProgramMode::ActualWeld" in execution
-            and "FANUCRobotCtrl::TrajectoryProgramMode::DryRun" in execution,
-            "production FANUC upload does not pass an explicit trajectory mode")
+    require("RobotTrajectoryPurpose::ActualWeld" in execution
+            and "RobotTrajectoryPurpose::WeldDryRun" in execution,
+            "production upload does not pass an explicit adaptor trajectory purpose")
 
     downlink = section(
         service,
         "bool MeasureThenWeldService::DownlinkWeldPoseFile(",
         "bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(",
     )
-    require("FANUCRobotCtrl::TrajectoryProgramMode::DryRun" in downlink,
-            "read-only FANUC downlink path is not explicitly dry-run")
+    require("RobotTrajectoryPurpose::WeldDryRun" in downlink,
+            "read-only downlink path is not explicitly dry-run through the adaptor")
 
     for method, next_method in (
         ("SendWeldTriangleWeaveProgram", "SendWeldLWeaveProgram"),

@@ -3,10 +3,9 @@
 #include "AppPaths.h"
 #include "ConfigDatabase.h"
 #if !defined(WELD_SAFETY_STORE_STORAGE_ONLY_TEST)
-#include "FANUCRobotDriver.h"
 #include "RobotDataHelper.h"
+#include "RobotDriverAdaptor.h"
 #include "RobotOperationLease.h"
-#include "STEPRobotDriver.h"
 #endif
 
 #include <QDateTime>
@@ -1164,10 +1163,7 @@ bool WeldSafetyRecoverySession::Prepare(
     {
         record.robotName = QString::fromStdString(m_driver->m_sRobotName).trimmed();
     }
-    record.robotType = dynamic_cast<STEPRobotCtrl*>(m_driver) != nullptr
-        ? QStringLiteral("STEP")
-        : (dynamic_cast<FANUCRobotCtrl*>(m_driver) != nullptr
-            ? QStringLiteral("FANUC") : QStringLiteral("UNKNOWN"));
+    record.robotType = QString::fromStdString(m_driver->DriverDescriptor().typeName);
     record.robotEndpoint = RobotOperationLease::PersistentEndpointIdentity(m_driver);
     record.paramGroupIndex = m_param.nParamGroupIndex;
     record.paramGroupName = m_param.sParamGroupName;

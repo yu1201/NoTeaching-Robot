@@ -53,13 +53,21 @@ QString HumanSize(qint64 bytes)
 }
 
 ResultArchiveDialog::ResultArchiveDialog(const QString& resultRootDir, QWidget* parent)
-    : QDialog(parent)
+    : QWidget(parent)
     , m_resultRoot(QDir(resultRootDir).absolutePath())
 {
+    setObjectName(QStringLiteral("resultArchivePage"));
     setWindowTitle(QStringLiteral("结果打包压缩"));
-    resize(720, 560);
+    setWindowFlags(Qt::Widget);
 
     auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(16, 16, 16, 16);
+    root->setSpacing(12);
+
+    auto* title = new QLabel(QStringLiteral("结果打包压缩"), this);
+    title->setStyleSheet(QStringLiteral(
+        "font-size: 20px; font-weight: 700; color: #9ED8DB;"));
+    root->addWidget(title);
 
     // 顶部：按日期选择 + 全选/全不选/刷新
     auto* topRow = new QHBoxLayout();
@@ -111,7 +119,7 @@ ResultArchiveDialog::ResultArchiveDialog(const QString& resultRootDir, QWidget* 
     m_startBtn = new QPushButton(QStringLiteral("开始打包"), this);
     m_cancelBtn = new QPushButton(QStringLiteral("取消"), this);
     m_cancelBtn->setEnabled(false);
-    auto* closeBtn = new QPushButton(QStringLiteral("关闭"), this);
+    auto* closeBtn = new QPushButton(QStringLiteral("返回管理首页"), this);
     btnRow->addWidget(m_startBtn);
     btnRow->addWidget(m_cancelBtn);
     btnRow->addWidget(closeBtn);
@@ -511,5 +519,5 @@ void ResultArchiveDialog::closeEvent(QCloseEvent* event)
         m_cancelFlag.store(true);
         JoinWorker();
     }
-    QDialog::closeEvent(event);
+    QWidget::closeEvent(event);
 }

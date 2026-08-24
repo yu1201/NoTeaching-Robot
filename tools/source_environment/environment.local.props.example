@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Copy this file to the repository root as environment.local.props. -->
+  <!-- The copied file is git-ignored and may contain machine-local paths, but never secrets. -->
+  <PropertyGroup>
+    <QtRoot>E:\workspace\soft\QT\6.7.3\msvc2022_64</QtRoot>
+    <QtVersion>6.7.3</QtVersion>
+    <QtMsBuild>$(LOCALAPPDATA)\QtMsBuild</QtMsBuild>
+    <QtInstall>$(QtRoot)</QtInstall>
+
+    <OpenCvRoot>E:\OpenCV4.6.0\build</OpenCvRoot>
+    <OpenCvVersionSuffix>460</OpenCvVersionSuffix>
+    <OpenCvToolsetDir>vc15</OpenCvToolsetDir>
+
+    <EigenRoot>E:\Eigen3.4\eigen-3.4.0</EigenRoot>
+    <OrocosKdlRoot>C:\Program Files\orocos_kdl</OrocosKdlRoot>
+
+    <VcpkgRoot>E:\vcpkg</VcpkgRoot>
+    <OcctRoot>$(VcpkgRoot)\installed\x64-windows</OcctRoot>
+  </PropertyGroup>
+</Project>

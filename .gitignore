@@ -10,6 +10,8 @@ ui_*.h
 qrc_*.cpp
 *_autogen/
 *.user
+environment.local.props
+tools/source_environment/environment.local.psd1
 *.suo
 *.VC.db
 *.VC.opendb

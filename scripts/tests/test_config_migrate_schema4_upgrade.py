@@ -1481,6 +1481,346 @@ class WindowsSchema4UpgradeTests(unittest.TestCase):
                     encrypted=1,
                 )
 
+    def _create_foreign_user_dpapi_database(self, path: Path) -> None:
+        self._create_auth1_database(path, "complete", [])
+        protected_rows = (
+            ("global", "", "LoginState", "RememberPassword", "1", "bool"),
+            ("global", "", "LoginState", "AutoLogin", "1", "bool"),
+            (
+                "global", "", "LoginState/RememberedCredentials",
+                "admin", "remembered-password", "string",
+            ),
+            (
+                "global", "", "OnlineServices",
+                "AdminApiToken", "admin-token", "string",
+            ),
+            (
+                "global", "", "OnlineServices",
+                "FtpPassword", "ftp-password", "string",
+            ),
+            (
+                "robot", "RobotB", "RobotPara/BaseParam",
+                "FTPPassWord", "robot-password", "string",
+            ),
+            (
+                "global", "", "PointCloudProofSecurity",
+                "HmacKeyV1", "proof-key", "secret",
+            ),
+            (
+                "pointcloud-proof-receipt",
+                "11111111-2222-4333-8444-555555555555",
+                "QualityGateReceiptV1", "Receipt", "{}", "json",
+            ),
+        )
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute(
+                "UPDATE meta SET value=? WHERE key='auth_semantic_version'",
+                (MIGRATOR["AUTH_SEMANTIC_VERSION"],),
+            )
+            insert_setting(
+                connection,
+                "robot",
+                "RobotB",
+                "RobotPara/BaseParam",
+                "RobotType",
+                "2",
+            )
+            for scope_type, scope_id, module, key, value, value_type in (
+                protected_rows
+            ):
+                foreign_purpose = MIGRATOR["protection_purpose"](
+                    scope_type, scope_id, module, key
+                ) + "\nforeign-windows-user"
+                insert_setting(
+                    connection,
+                    scope_type,
+                    scope_id,
+                    module,
+                    key,
+                    MIGRATOR["protect_sensitive_text"](
+                        value, foreign_purpose
+                    ),
+                    value_type=value_type,
+                    sensitive=1,
+                    encrypted=1,
+                )
+
+    def test_foreign_user_dpapi_recovery_preserves_portable_state(self) -> None:
+        with tempfile.TemporaryDirectory() as text:
+            data = Path(text) / "Data"
+            data.mkdir()
+            db = data / "ConfigStore.db"
+            self._create_foreign_user_dpapi_database(db)
+            before_snapshot = database_snapshot(db)
+            with closing(sqlite3.connect(db)) as connection:
+                account_before = tuple(connection.execute(
+                    """
+                    SELECT scope_type, scope_id, module, key_name, value_text,
+                           value_type, sensitive, encrypted, updated_at
+                    FROM settings WHERE scope_type='account'
+                    ORDER BY scope_id, module, key_name
+                    """
+                ))
+                business_before = connection.execute(
+                    """
+                    SELECT value_text, value_type, sensitive, encrypted, updated_at
+                    FROM settings
+                    WHERE scope_type='robot' AND scope_id='RobotB'
+                      AND module='RobotPara/BaseParam' AND key_name='RobotType'
+                    """
+                ).fetchone()
+
+            with self.assertRaises(ValueError):
+                MIGRATOR["verify_current_database"](db)
+            self.assertEqual(
+                MIGRATOR["verify_current_database"](
+                    db, allow_foreign_user_dpapi_reset=True
+                ),
+                "complete",
+            )
+
+            backup = data / "ConfigStore.db.foreign-user.dpapi.bak"
+            self.assertTrue(MIGRATOR["migrate_existing_database_to_current"](
+                db,
+                data,
+                True,
+                upgrade_backup_path=backup,
+            ))
+            self.assertTrue(backup.is_file())
+            self.assertEqual(
+                MIGRATOR["verify_current_database"](db), "complete"
+            )
+
+            with closing(sqlite3.connect(db)) as connection:
+                account_after = tuple(connection.execute(
+                    """
+                    SELECT scope_type, scope_id, module, key_name, value_text,
+                           value_type, sensitive, encrypted, updated_at
+                    FROM settings WHERE scope_type='account'
+                    ORDER BY scope_id, module, key_name
+                    """
+                ))
+                business_after = connection.execute(
+                    """
+                    SELECT value_text, value_type, sensitive, encrypted, updated_at
+                    FROM settings
+                    WHERE scope_type='robot' AND scope_id='RobotB'
+                      AND module='RobotPara/BaseParam' AND key_name='RobotType'
+                    """
+                ).fetchone()
+                remaining_disposable = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM settings
+                    WHERE value_text LIKE ?
+                    """,
+                    (MIGRATOR["DPAPI_PREFIX"] + "%",),
+                ).fetchone()
+                preferences = tuple(connection.execute(
+                    """
+                    SELECT key_name, value_text, value_type, sensitive, encrypted
+                    FROM settings
+                    WHERE scope_type='global' AND scope_id=''
+                      AND module='LoginState'
+                      AND key_name IN ('RememberPassword', 'AutoLogin')
+                    ORDER BY key_name
+                    """
+                ))
+            self.assertEqual(account_after, account_before)
+            self.assertEqual(business_after, business_before)
+            self.assertEqual(remaining_disposable, (0,))
+            self.assertEqual(preferences, ())
+
+            restored = data / "foreign-user-backup-restored.tmp"
+            restored.write_bytes(MIGRATOR["_read_dpapi_database_backup"](backup))
+            self.assertEqual(database_snapshot(restored), before_snapshot)
+
+            repaired_before = db.read_bytes()
+            unused_backup = data / "idempotent.dpapi.bak"
+            self.assertFalse(MIGRATOR["migrate_existing_database_to_current"](
+                db,
+                data,
+                True,
+                upgrade_backup_path=unused_backup,
+            ))
+            self.assertEqual(db.read_bytes(), repaired_before)
+            self.assertFalse(unused_backup.exists())
+
+    def test_foreign_user_dpapi_cli_adopts_empty_missing_scrub_provenance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as text:
+            data = Path(text) / "Data"
+            data.mkdir()
+            db = data / "ConfigStore.db"
+            self._create_foreign_user_dpapi_database(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "DELETE FROM meta WHERE key IN (?, ?)",
+                    (
+                        MIGRATOR["SCRUB_STATE_KEY"],
+                        MIGRATOR["SCRUB_MANIFEST_KEY"],
+                    ),
+                )
+                portable_before = tuple(connection.execute(
+                    """
+                    SELECT scope_type, scope_id, module, key_name, value_text,
+                           value_type, sensitive, encrypted, updated_at
+                    FROM settings
+                    WHERE value_text NOT LIKE ?
+                    ORDER BY scope_type, scope_id, module, key_name
+                    """,
+                    (MIGRATOR["DPAPI_PREFIX"] + "%",),
+                ))
+
+            result = self._run_cli(
+                "--source", data,
+                "--db", db,
+                "--encrypt",
+                "--scrub-legacy-credentials",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(
+                MIGRATOR["verify_current_database"](db), "complete"
+            )
+            with closing(sqlite3.connect(db)) as connection:
+                portable_after = tuple(connection.execute(
+                    """
+                    SELECT scope_type, scope_id, module, key_name, value_text,
+                           value_type, sensitive, encrypted, updated_at
+                    FROM settings
+                    WHERE value_text NOT LIKE ?
+                    ORDER BY scope_type, scope_id, module, key_name
+                    """,
+                    (MIGRATOR["DPAPI_PREFIX"] + "%",),
+                ))
+                provenance = dict(connection.execute(
+                    "SELECT key, value FROM meta WHERE key IN (?, ?)",
+                    (
+                        MIGRATOR["SCRUB_STATE_KEY"],
+                        MIGRATOR["SCRUB_MANIFEST_KEY"],
+                    ),
+                ))
+            self.assertEqual(portable_after, portable_before)
+            self.assertEqual(
+                provenance[MIGRATOR["SCRUB_STATE_KEY"]], "complete"
+            )
+            self.assertEqual(
+                MIGRATOR["parse_legacy_credential_scrub_manifest"](
+                    provenance[MIGRATOR["SCRUB_MANIFEST_KEY"]]
+                ),
+                [],
+            )
+            self.assertEqual(len(tuple(data.glob("*.dpapi.bak"))), 1)
+
+    def test_foreign_user_dpapi_cli_missing_provenance_rejects_legacy_secret(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as text:
+            data = Path(text) / "Data"
+            data.mkdir()
+            db = data / "ConfigStore.db"
+            self._create_foreign_user_dpapi_database(db)
+            with closing(sqlite3.connect(db)) as connection, connection:
+                connection.execute(
+                    "DELETE FROM meta WHERE key IN (?, ?)",
+                    (
+                        MIGRATOR["SCRUB_STATE_KEY"],
+                        MIGRATOR["SCRUB_MANIFEST_KEY"],
+                    ),
+                )
+            secret_ini = data / "Secrets.ini"
+            secret_ini.write_text(
+                "[Remote]\nApiToken=must-remain\nKeepMe=1\n",
+                encoding="utf-8",
+            )
+            before = self._tree_snapshot(data)
+
+            result = self._run_cli(
+                "--source", data,
+                "--db", db,
+                "--encrypt",
+                "--scrub-legacy-credentials",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(
+                "automatic recovery requires an empty legacy credential scrub plan",
+                result.stdout + result.stderr,
+            )
+            self.assertEqual(self._tree_snapshot(data), before)
+            self.assertFalse(any(data.glob("*.dpapi.bak")))
+
+    def test_foreign_user_dpapi_recovery_rejects_unproven_state(self) -> None:
+        for case in ("mixed", "malformed", "unknown", "missing", "invalid-account"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as text:
+                data = Path(text) / "Data"
+                data.mkdir()
+                db = data / "ConfigStore.db"
+                self._create_foreign_user_dpapi_database(db)
+                with closing(sqlite3.connect(db)) as connection, connection:
+                    if case == "mixed":
+                        purpose = MIGRATOR["protection_purpose"](
+                            "global", "", "LoginState", "AutoLogin"
+                        )
+                        connection.execute(
+                            """
+                            UPDATE settings SET value_text=?
+                            WHERE scope_type='global' AND scope_id=''
+                              AND module='LoginState' AND key_name='AutoLogin'
+                            """,
+                            (MIGRATOR["protect_sensitive_text"]("0", purpose),),
+                        )
+                    elif case == "malformed":
+                        connection.execute(
+                            """
+                            UPDATE settings SET value_text=?
+                            WHERE scope_type='global' AND scope_id=''
+                              AND module='LoginState' AND key_name='AutoLogin'
+                            """,
+                            (MIGRATOR["DPAPI_PREFIX"] + "not-valid-base64",),
+                        )
+                    elif case == "unknown":
+                        purpose = MIGRATOR["protection_purpose"](
+                            "global", "", "UnknownSecurity", "SecretToken"
+                        ) + "\nforeign-windows-user"
+                        insert_setting(
+                            connection,
+                            "global",
+                            "",
+                            "UnknownSecurity",
+                            "SecretToken",
+                            MIGRATOR["protect_sensitive_text"]("value", purpose),
+                            sensitive=1,
+                            encrypted=1,
+                        )
+                    elif case == "missing":
+                        connection.execute(
+                            """
+                            DELETE FROM settings
+                            WHERE scope_type='global' AND scope_id=''
+                              AND module='LoginState' AND key_name='AutoLogin'
+                            """
+                        )
+                    else:
+                        connection.execute(
+                            """
+                            DELETE FROM settings
+                            WHERE scope_type='account' AND scope_id='admin'
+                              AND module='Profile' AND key_name='Role'
+                            """
+                        )
+
+                before = db.read_bytes()
+                backup = data / "must-not-exist.dpapi.bak"
+                with self.assertRaises((ValueError, SystemExit)):
+                    MIGRATOR["migrate_existing_database_to_current"](
+                        db,
+                        data,
+                        True,
+                        upgrade_backup_path=backup,
+                    )
+                self.assertEqual(db.read_bytes(), before)
+                self.assertFalse(backup.exists())
+
     def test_auth2_settings_plaintext_autologin_upgrades_with_backup(self) -> None:
         with tempfile.TemporaryDirectory() as text:
             data = Path(text) / "Data"

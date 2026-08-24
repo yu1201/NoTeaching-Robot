@@ -77,6 +77,12 @@
     <ClCompile Include="src\ModelWeldingFlowDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\CadSeamCandidateExtractor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ReverseMeshSeamProjector.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\RobotModelManagerDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -124,6 +130,9 @@
     <ClCompile Include="src\RobotDriverAdaptor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\RobotDriverRegistry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\RobotLog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -167,6 +176,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\ScanSafetyGateDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ScanPoseVariationTestDialog.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\MeasureThenWeldDialog.cpp">
@@ -288,6 +300,12 @@
     <ClInclude Include="include\ModelWeldingFlowDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\CadSeamCandidateExtractor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ReverseMeshSeamProjector.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\RobotModelManagerDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -357,6 +375,9 @@
     <ClInclude Include="include\ScanSafetyGateDialog.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\ScanPoseVariationTestDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -397,6 +418,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotDriverAdaptor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotDriverRegistry.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\STEPRobotDriver.h">

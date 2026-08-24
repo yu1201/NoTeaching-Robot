@@ -41,9 +41,31 @@ struct ModelWeldingFeatureStation
     bool candidateConfirmed = false;   // 自动候选必须经人工确认后才能进入生产就绪判断。
 };
 
+enum class ModelWeldingSeamSource
+{
+    CadSharedEdge,
+    CadShapeIntersection,
+    CadCorrugatedButtJoint,
+    CadCorrugatedBaseJoint,
+    ReverseMeshSeedProjection
+};
+
+// 模型坐标中的待确认焊缝定义。自动提取或种子投影只负责生成候选；
+// humanConfirmed 必须由用户在绑定模型身份有效时显式勾选。
+struct ModelWeldingSeamDefinition
+{
+    QString seamId;
+    ModelWeldingSeamSource source = ModelWeldingSeamSource::CadSharedEdge;
+    QString sourceGeometrySha256;
+    QString seedPathSha256;
+    QVector<Eigen::Vector3d> pathModelMm;
+    double lengthMm = 0.0;
+    bool humanConfirmed = false;
+};
+
 struct ModelWeldingFlowTemplate
 {
-    static constexpr int SchemaVersion = 1;
+    static constexpr int SchemaVersion = 2;
 
     int schemaVersion = SchemaVersion;
     QString templateId;
@@ -54,6 +76,7 @@ struct ModelWeldingFlowTemplate
     QString units = QStringLiteral("mm");
     ModelWeldingPlacementGuide placement;
     QVector<ModelWeldingFeatureStation> stations;
+    QVector<ModelWeldingSeamDefinition> seams;
 
     // 相似模型继承只保存来源证明；新模板是快照，不会随来源模板继续变化。
     QString inheritedFromTemplateId;

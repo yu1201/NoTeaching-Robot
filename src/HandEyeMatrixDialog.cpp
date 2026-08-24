@@ -136,6 +136,14 @@ HandEyeMatrixDialog::HandEyeMatrixDialog(ContralUnit* pContralUnit, const QStrin
     QPushButton* reloadBtn = new QPushButton("重新读取");
     QPushButton* saveBtn = new QPushButton("保存参数");
     QPushButton* closeBtn = new QPushButton("关闭");
+    QString readCapabilityError;
+    RobotDriverAdaptor* initialDriver = CurrentDriver(&readCapabilityError);
+    const bool canReadRobotMatrix = initialDriver != nullptr
+        && initialDriver->Supports(RobotDriverCapability::HandEyeMatrixRead);
+    readEyeBtn->setEnabled(canReadRobotMatrix);
+    readEyeBtn->setToolTip(canReadRobotMatrix
+        ? QString()
+        : QStringLiteral("当前机器人品牌底层未实现机器人手眼矩阵读取，功能已限制。"));
     buttonLayout->addWidget(readEyeBtn);
     buttonLayout->addWidget(reloadBtn);
     buttonLayout->addWidget(saveBtn);
@@ -212,6 +220,15 @@ bool HandEyeMatrixDialog::ReadRobotEyeVariable()
     {
         QMessageBox::warning(this, "读取机器人 eye", error);
         AppendLog("读取机器人 eye 失败：" + error);
+        return false;
+    }
+    if (!driver->Supports(RobotDriverCapability::HandEyeMatrixRead))
+    {
+        const QString message = QStringLiteral(
+            "当前机器人品牌底层未实现“机器人手眼矩阵读取”适配能力，功能已限制。"
+            "可继续手工维护矩阵，或使用该品牌支持的手眼辅助程序。");
+        QMessageBox::warning(this, "读取机器人 eye", message);
+        AppendLog(message);
         return false;
     }
 

@@ -3,10 +3,10 @@
 ; AppId 一经发布永不可改；全量升级必须继续识别既有安装目录。
 #define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.07.30.1643"
+  #define MyAppVersion "2026.08.24.1333"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.07.30.1643"
+  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.08.24.1333"
 #endif
 #define MyAppPublisher "海瞰智焊"
 #define MyAppExeName "HK-Pathlynx-CORPLA.exe"
