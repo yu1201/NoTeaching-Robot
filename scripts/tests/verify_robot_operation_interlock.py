@@ -55,7 +55,8 @@ def main() -> int:
     for token in ("std::mutex", "g_activeOperations", "g_newOperationsAllowed",
                   "g_newOperationBlocks", "g_nextOperationBlockToken",
                   "g_newOperationsBlockedReason", "g_nextOperationToken", "second.token == m_token",
-                  "NormalizeSocketHost", "m_sSocketIP", "m_nSocketPort", "m_identityKey"):
+                  "NormalizeSocketHost", "ControlEndpoint()", "endpoint.host", "endpoint.port",
+                  "m_identityKey"):
         require(token in lease_cpp, f"lease registry safety mechanism missing: {token}")
     for token in ("motionCompletionPending", "UnresolvedStop{ m_driver, true }",
                   "AbortCurrentProgramSafely", "ConfirmCancellationHandled"):
@@ -126,7 +127,8 @@ def main() -> int:
         ("void RobotJogDialog::StepJog(", "void RobotJogDialog::StopJog()"),
     ):
         require_leased(jog, start, end)
-    require("m_jogOperationLease" in jog and "EndContinuousMoveQueue" in jog,
+    require("m_jogOperationLease" in jog and "EndContinuousJog" in jog
+            and "IsContinuousJogRunning" in jog,
             "continuous jog lease must survive until the driver queue is joined")
     require("setWindowModality(Qt::NonModal)" in jog
             and "QMessageBox::warning" not in jog
@@ -170,7 +172,7 @@ def main() -> int:
     pending_feedback = disconnect.find("状态: 正在断开机器人连接，请稍候")
     paint_feedback = disconnect.find("ui.FanucMonitorText->repaint();")
     stop_monitor = disconnect.find("pRobotDriver->StopStateMonitor();")
-    close_socket = disconnect.find("pRobotDriver->CloseSocket()")
+    close_socket = disconnect.find("pRobotDriver->Disconnect()")
     clear_snapshots = disconnect.find("pRobotDriver->ClearStateMonitorSnapshots();")
     refresh_ui = disconnect.find("RefreshDashboardConnectionState();")
     result_dialog = disconnect.find("QMessageBox::information(this, \"机器人断开\"")
@@ -197,7 +199,7 @@ def main() -> int:
         app,
         "void QtWidgetsApplication4::FanucConnectTest()",
         "void QtWidgetsApplication4::FanucDisconnectTest()")
-    require(0 <= connect.find("pRobotDriver->InitSocket(") < connect.find("pRobotDriver->StartStateMonitor(50)"),
+    require(0 <= connect.find("pRobotDriver->Connect()") < connect.find("pRobotDriver->StartStateMonitor(50)"),
             "manual reconnect does not restart state monitoring after a successful socket connection")
 
     monitor_ui = section(app, "QTimer* fanucMonitorTimer", "//RobotLog* ContralUnitLog")
@@ -222,7 +224,7 @@ def main() -> int:
     monitor_worker = section(
         driver_adaptor,
         "void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)",
-        "int RobotDriverAdaptor::ContiMoveAny(")
+        "int RobotDriverAdaptor::CheckDone()")
     require(monitor_worker.count("EnsureConnectionForMonitor();") == 1
             and "if (!m_stateMonitorRunning.load())" in monitor_worker,
             "state monitor can start or continue a reconnect after a stop request")
@@ -239,9 +241,12 @@ def main() -> int:
     require_leased(app, "bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(", "ProcessLoopTestDefaults QtWidgetsApplication4::LoadProcessLoopTestDefaults(")
     require("--robot-no-wait 已因全局硬件互锁禁用" in app,
             "CLI no-wait can release the lease while physical motion continues")
-    require("fanucCliLease" in app and "CheckRobotDone" in section(
-        app, "void QtWidgetsApplication4::RunCommandLineActions(", "FANUCRobotCtrl* QtWidgetsApplication4::GetFirstFanucDriverForCli()"),
-        "CLI FANUC operations are not held through completion")
+    cli_actions = section(
+        app,
+        "void QtWidgetsApplication4::RunCommandLineActions(",
+        "void QtWidgetsApplication4::LogCommandLineMessage(")
+    require("fanucCliLease" in cli_actions and "RunProgramAndWait" in cli_actions,
+        "CLI program operations are not held through adaptor-verified completion")
     ftp_task = section(app, "void RunFtpTask(", "void RefreshRemoteFiles()")
     require("FTP Job：%1" in app and "operationLease" in ftp_task,
         "FTP job operations are not covered by the per-robot lease")

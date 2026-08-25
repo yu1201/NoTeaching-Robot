@@ -62,10 +62,10 @@ for token in (
     "unitIndex < 0",
     "RobotDataHelper::GetRobotDriver",
     "driver == nullptr",
-    "configuredRobotType != driver->m_nRobotType",
+    "configuredRobotType != driver->RobotType()",
     "modelId.isEmpty()",
     "ResolveModelEligibility(",
-    "modelId, driver->m_nRobotType",
+    "modelId, driver->RobotType()",
 ):
     assert token in resolve, f"missing fail-closed robot-model gate token: {token}"
 
@@ -139,7 +139,7 @@ flow_save_teaching = section(
 for token in (
     "RobotDataHelper::GetRobotDriver",
     "robot.unitIndex < 0",
-    "robot.robotType != driver->m_nRobotType",
+    "robot.robotType != driver->RobotType()",
     "robot.robotModelId",
     "ResolveModelEligibility(",
     "eligibility.eligible",
@@ -157,7 +157,7 @@ assert flow_load_model.index("ClearTheoreticalRobotModel();") < flow_load_model.
 for token in (
     "CurrentRobotModelId()",
     "CurrentConfiguredRobotType()",
-    "driver->m_nRobotType",
+    "driver->RobotType()",
     "eligibility.collisionEnvelope",
     "eligibility.model.sourceStep.sha256",
     "eligibility.model.collision.profileKeySha256",

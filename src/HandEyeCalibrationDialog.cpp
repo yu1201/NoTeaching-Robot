@@ -1,7 +1,6 @@
 #include "HandEyeCalibrationDialog.h"
 
 #include "CameraFrameCache.h"
-#include "FANUCRobotDriver.h"
 #include "HandEyeMatrixDialog.h"
 #include "RobotCalculation.h"
 #include "RobotDataHelper.h"
@@ -11,7 +10,6 @@
 #include "RobotMotionTimeoutPolicy.h"
 #include "RobotOperationLease.h"
 #include "RobotPoseTransform.h"
-#include "STEPRobotDriver.h"
 #include "WindowStyleHelper.h"
 #include "groove/framebuffer.h"
 
@@ -64,35 +62,23 @@ constexpr int kHandEyeAutoDoneStep = 999;
 constexpr int kHandEyeAutoAbortValue = -1;
 constexpr double kHandEyeAutoMoveSpeedMmPerMin = 500.0;
 constexpr int kHandEyeAutoNoMotionTimeoutMs = 8000;
-constexpr int kHandEyeFanucDoneStartupGuardMs = 1200;
-constexpr int kHandEyeFanucDoneStableSamples = 4;
-constexpr int kHandEyeStepDoneFallbackGuardMs = 1000;
-constexpr int kHandEyeStepDoneStableSamples = 2;
+constexpr int kHandEyeDoneStartupGuardMs = 1200;
+constexpr int kHandEyeDoneStableSamples = 4;
 constexpr double kHandEyeAutoMoveDetectMm = 0.05;
 constexpr double kHandEyeAutoRotateDetectDeg = 0.05;
 constexpr double kHandEyeAutoArrivePositionToleranceMm = 2.0;
 constexpr double kHandEyeAutoArriveRotationToleranceDeg = 3.0;
-constexpr const char* kHandEyeAutoProgramName = "FANUC_HECALIB";
-constexpr int kHandEyeRobotCheckStartPrIndex = 79;
-constexpr int kHandEyeRobotCheckPrIndex = 80;
-constexpr int kHandEyeRobotCheckStateReg = 92;
-constexpr const char* kHandEyeRobotCheckProgramName = "FANUC_HECHECK";
 constexpr int kCameraTimestampCheckDurationMs = 5000;
 
 double HandEyeLinearCommandSpeed(
     RobotDriverAdaptor* driver,
     double speedMmPerMin)
 {
-    if (!std::isfinite(speedMmPerMin) || speedMmPerMin <= 0.0)
+    if (driver == nullptr)
     {
         return 0.0;
     }
-    if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
-    {
-        const double mmPerSec = speedMmPerMin / 60.0;
-        return mmPerSec >= 1.0 ? std::floor(mmPerSec) : 0.0;
-    }
-    return speedMmPerMin;
+    return driver->ValidateLinearSpeedMmPerMin(speedMmPerMin) ? speedMmPerMin : 0.0;
 }
 
 bool ConfirmRobotStoppedBeforeHandEyeMove(RobotDriverAdaptor* driver, QString* error)
@@ -114,7 +100,7 @@ bool ConfirmRobotStoppedBeforeHandEyeMove(RobotDriverAdaptor* driver, QString* e
         return false;
     }
 
-    const int done = driver->CheckDone();
+    const RobotMotionStatus status = driver->ReadMotionStatus();
     if (RobotOperationLease::MotionCompletionPending(driver))
     {
         if (error != nullptr)
@@ -124,44 +110,22 @@ bool ConfirmRobotStoppedBeforeHandEyeMove(RobotDriverAdaptor* driver, QString* e
         return false;
     }
 
-    if (dynamic_cast<STEPRobotCtrl*>(driver) != nullptr)
+    if (status.state != RobotMotionState::Idle
+        && status.state != RobotMotionState::Completed)
     {
-        if (done != STEPROBOTSDK::eStop)
+        if (error != nullptr)
         {
-            if (error != nullptr)
+            *error = QString("机器人运动前状态未被适配层确认为停止/完成，state=%1 raw=%2，已拒绝下发 MOVL。")
+                .arg(static_cast<int>(status.state))
+                .arg(status.rawCode);
+            if (!status.detail.empty())
             {
-                *error = QString("STEP 机器人运动前状态=%1，仅明确停止 eStop(%2) 允许下发 MOVL；运行、暂停或未知状态均已拒绝。")
-                    .arg(done)
-                    .arg(STEPROBOTSDK::eStop);
+                *error += "原因：" + DecodeRobotMessageText(status.detail);
             }
-            return false;
         }
-        return true;
+        return false;
     }
-
-    if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
-    {
-        if (done != 1)
-        {
-            if (error != nullptr)
-            {
-                *error = QString("FANUC 机器人运动前 DONE=%1，仅可信停止 DONE=1 允许下发 MOVL；运行或读取失败均已拒绝。")
-                    .arg(done);
-                if (done < 0)
-                {
-                    *error += "原因：" + DecodeRobotMessageText(driver->GetLastRobotError());
-                }
-            }
-            return false;
-        }
-        return true;
-    }
-
-    if (error != nullptr)
-    {
-        *error = "当前机器人驱动不支持手眼 MOVL 的主动停止状态确认，已拒绝运动。";
-    }
-    return false;
+    return true;
 }
 
 QString FormatDouble(double value, int precision = 6)
@@ -181,16 +145,6 @@ void ApplyHandEyeNumericEdit(QLineEdit* edit)
     edit->setProperty("touchKeyboardLayout", QStringLiteral("numeric"));
     edit->setInputMethodHints(Qt::ImhFormattedNumbersOnly);
     edit->setAlignment(Qt::AlignRight);
-}
-
-QString FindHandEyeAutoProgramPath()
-{
-    return RobotDataHelper::FindProjectFilePath("SDK/FANUC/FANUC_HECALIB.ls");
-}
-
-QString FindHandEyeRobotCheckProgramPath()
-{
-    return RobotDataHelper::FindProjectFilePath("SDK/FANUC/FANUC_HECHECK.ls");
 }
 
 QString BuildHandEyeCalibrationReportPath(const QString& robotName, const QString& cameraSection)
@@ -649,7 +603,6 @@ bool WaitGenericRobotDone(
     int stableDoneCount = 0;
     int lastState = -1;
     int lastLogSecond = -1;
-    const bool isStepDriver = dynamic_cast<STEPRobotCtrl*>(driver) != nullptr;
 
     while (true)
     {
@@ -661,24 +614,26 @@ bool WaitGenericRobotDone(
             }
             return false;
         }
-        lastState = driver->CheckDone();
-        if (lastState < 0)
+        const RobotMotionStatus motionStatus = driver->ReadMotionStatus();
+        lastState = motionStatus.rawCode;
+        if (motionStatus.state == RobotMotionState::Unknown
+            || motionStatus.state == RobotMotionState::Faulted
+            || motionStatus.state == RobotMotionState::Interrupted)
         {
-            return failUnverified(QString("读取机器人运行状态失败，返回码=%1。").arg(lastState), true);
+            return failUnverified(QString("适配层未返回可信机器人运行状态，state=%1 raw=%2：%3")
+                .arg(static_cast<int>(motionStatus.state))
+                .arg(lastState)
+                .arg(DecodeRobotMessageText(motionStatus.detail)), true);
         }
 
         const auto now = std::chrono::steady_clock::now();
         const int elapsedMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - startTime).count());
-        const bool runningState = isStepDriver
-            ? (lastState == STEPROBOTSDK::eRun || lastState == STEPROBOTSDK::ePause)
-            : lastState == 0;
-        const bool trustedDoneState = isStepDriver
-            ? lastState == STEPROBOTSDK::eStop
-            : lastState > 0;
-        if (isStepDriver && !runningState && !trustedDoneState)
-        {
-            return failUnverified(QString("STEP机器人返回非运行/暂停/停止状态：%1。").arg(lastState), true);
-        }
+        const bool pausedState = motionStatus.state == RobotMotionState::Paused;
+        const bool runningState = motionStatus.state == RobotMotionState::Running
+            || motionStatus.state == RobotMotionState::Starting
+            || pausedState;
+        const bool trustedDoneState = motionStatus.state == RobotMotionState::Idle
+            || motionStatus.state == RobotMotionState::Completed;
         if (runningState)
         {
             seenRunning = true;
@@ -700,7 +655,7 @@ bool WaitGenericRobotDone(
 				lastProgressPose = currentPose;
 				lastProgressTime = now;
             }
-			if (isStepDriver && lastState == STEPROBOTSDK::ePause)
+			if (pausedState)
 			{
 				// 可恢复暂停不计入“无进展”；恢复eRun后重新给足完整看门狗窗口。
 				lastProgressPose = currentPose;
@@ -717,7 +672,7 @@ bool WaitGenericRobotDone(
                     .arg(FormatPoseSummary(lastPose)));
             }
 
-            if ((!isStepDriver || lastState == STEPROBOTSDK::eRun)
+			if (!pausedState
 				&& std::chrono::duration_cast<std::chrono::milliseconds>(
 					now - lastProgressTime).count() >= kHandEyeAutoNoMotionTimeoutMs)
             {
@@ -726,16 +681,11 @@ bool WaitGenericRobotDone(
                     .arg(DecodeRobotMessageText(driver->GetRobotStatusText())), true);
             }
         }
-        const bool doneStartupGuardPassed = isStepDriver
-            ? (seenRunning || elapsedMs >= kHandEyeStepDoneFallbackGuardMs)
-            : elapsedMs >= kHandEyeFanucDoneStartupGuardMs;
+        const bool doneStartupGuardPassed = seenRunning || elapsedMs >= kHandEyeDoneStartupGuardMs;
         if (!runningState && trustedDoneState && doneStartupGuardPassed)
         {
             ++stableDoneCount;
-            const int requiredStableDoneSamples = isStepDriver
-                ? kHandEyeStepDoneStableSamples
-                : kHandEyeFanucDoneStableSamples;
-            if (stableDoneCount >= requiredStableDoneSamples)
+            if (stableDoneCount >= kHandEyeDoneStableSamples)
             {
                 // 稳定 stopped 只表示可以开始复核，不是“程序自然完成”证据。
                 // 必须先通过最终位置复核，再进入驱动 CheckRobotDone：
@@ -796,9 +746,7 @@ bool WaitGenericRobotDone(
 
                 if (progressLog)
                 {
-                    progressLog(isStepDriver
-                        ? QStringLiteral("最终位置已通过，正在验证 STEP ntdone 自然完成见证...")
-                        : QStringLiteral("最终位置已通过，正在验证 FANUC 同一次 CALL_JOB 完成见证..."));
+                    progressLog(QStringLiteral("最终位置已通过，正在通过适配层验证控制器自然完成见证..."));
                 }
                 const int witnessedState = driver->CheckRobotDone(pollIntervalMs, remainingTimeoutMs);
                 if (witnessedState <= 0)
@@ -821,9 +769,7 @@ bool WaitGenericRobotDone(
                 }
                 if (progressLog)
                 {
-                    progressLog(isStepDriver
-                        ? QStringLiteral("STEP ntdone 自然完成见证已通过。")
-                        : QStringLiteral("FANUC 同一次 CALL_JOB 完成见证已通过。"));
+                    progressLog(QStringLiteral("适配层控制器自然完成见证已通过。"));
                 }
                 return true;
             }
@@ -1204,7 +1150,7 @@ HandEyeCalibrationDialog::HandEyeCalibrationDialog(
 
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     buttonLayout->setSpacing(10);
-    m_pUploadAutoProgramBtn = new QPushButton("发送FANUC自动程序");
+    m_pUploadAutoProgramBtn = new QPushButton("安装机器人侧手眼辅助程序");
     m_pAutoCalibrationBtn = new QPushButton("自动标定 变量10~16");
     QPushButton* reloadBtn = new QPushButton("重新读取");
     QPushButton* saveBtn = new QPushButton("保存采样数据");
@@ -1415,23 +1361,9 @@ void HandEyeCalibrationDialog::RequestSafetyStop()
     std::thread([self, driver, cancelledOwner]()
         {
             driver->ClearLastRobotError();
-            bool stopOk = false;
-            QString implementation;
-            if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(driver))
-            {
-                implementation = QStringLiteral("FANUC Prog_stop_Py");
-                stopOk = fanucDriver->Prog_stop_Py();
-            }
-            else if (STEPRobotCtrl* stepDriver = dynamic_cast<STEPRobotCtrl*>(driver))
-            {
-                implementation = QStringLiteral("STEP AbortCurrentProgram");
-                stopOk = stepDriver->AbortCurrentProgram();
-            }
-            else
-            {
-                implementation = QStringLiteral("未支持的机器人驱动");
-                driver->SetLastRobotError("当前机器人驱动没有可验证的安全终止实现。");
-            }
+            const QString implementation = QString::fromStdString(
+                driver->DriverDescriptor().displayName) + QStringLiteral(" 适配层安全终止");
+            const bool stopOk = driver->AbortCurrentProgramSafely();
 
             QString detail = DecodeRobotMessageText(driver->GetLastRobotError());
             if (stopOk)
@@ -1649,7 +1581,10 @@ bool HandEyeCalibrationDialog::ApplyCapturedSample(int index, const T_ROBOT_COOR
 bool HandEyeCalibrationDialog::CaptureTcpPoint()
 {
     QString error;
-    RobotDriverAdaptor* driver = CurrentDriver(&error);
+    RobotDriverAdaptor* driver = CurrentDriverWithCapability(
+        RobotDriverCapability::PassiveState,
+        QStringLiteral("读取机器人位姿"),
+        &error);
     if (driver == nullptr)
     {
         QMessageBox::warning(this, "手眼标定", error);
@@ -1692,7 +1627,10 @@ bool HandEyeCalibrationDialog::CaptureSample(int index)
     }
 
     QString error;
-    RobotDriverAdaptor* driver = CurrentDriver(&error);
+    RobotDriverAdaptor* driver = CurrentDriverWithCapability(
+        RobotDriverCapability::PassiveState,
+        QStringLiteral("读取机器人位姿"),
+        &error);
     if (driver == nullptr)
     {
         QMessageBox::warning(this, "手眼标定", error);
@@ -1953,7 +1891,10 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
         };
 
     QString error;
-    RobotDriverAdaptor* driver = CurrentDriver(&error);
+    RobotDriverAdaptor* driver = CurrentDriverWithCapability(
+        RobotDriverCapability::PassiveState,
+        QStringLiteral("手眼矩阵检测"),
+        &error);
     if (driver == nullptr)
     {
         return failBeforeStart(error);
@@ -2068,14 +2009,15 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
     SetRobotTestUiRunning(true);
     AppendLog("手眼参数检测已在后台启动；窗口底部安全停止始终可用。");
 
-    FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(driver);
+    const bool hasRobotHandEyeValidation =
+        driver->Supports(RobotDriverCapability::HandEyeProgramSupport);
     const QString robotName = m_robotName;
     const QString cameraSection = m_cameraSection;
     QPointer<HandEyeCalibrationDialog> self(this);
     std::thread([
         self,
         driver,
-        fanucDriver,
+        hasRobotHandEyeValidation,
         robotName,
         cameraSection,
         matrix,
@@ -2174,87 +2116,48 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
 
             Eigen::Vector3d robotLaserPoint = Eigen::Vector3d::Zero();
             bool hasRobotResult = false;
-            QString robotDetailText = "机器人程序结果：当前驱动不是 FANUC，未执行 TP 对比。";
-            if (outcome.failure.isEmpty() && !outcome.cancelled && fanucDriver != nullptr && hasLocalLaserPoint)
+            QString robotDetailText = "机器人程序结果：当前驱动未声明手眼辅助程序能力，未执行机器人侧对比。";
+            if (outcome.failure.isEmpty() && !outcome.cancelled
+                && hasRobotHandEyeValidation && hasLocalLaserPoint)
             {
-                outcome.logs << QString("机器人手眼检测使用机器人侧现有程序：%1。")
-                    .arg(kHandEyeRobotCheckProgramName);
-
-                int config[7] = { 0 };
-                double prStartSeed[8] =
+                outcome.logs << "机器人手眼检测通过适配层执行机器人侧验证。";
+                T_ROBOT_COORS robotCalculatedPoint;
+                if (!driver->RunHandEyeValidation(outcome.robotPose, robotCalculatedPoint))
                 {
-                    outcome.robotPose.dX, outcome.robotPose.dY, outcome.robotPose.dZ,
-                    outcome.robotPose.dRX, outcome.robotPose.dRY, outcome.robotPose.dRZ,
-                    outcome.robotPose.dBX, outcome.robotPose.dBY
-                };
-                if (!fanucDriver->SetPosVar(
-                    kHandEyeRobotCheckStartPrIndex, prStartSeed, POSVAR, 1, config, ENGINEEVAR, POSVAR))
-                {
-                    outcome.failure = QString("写入 PR[%1] 失败，无法启动机器人手眼检测。")
-                        .arg(kHandEyeRobotCheckStartPrIndex);
+                    outcome.cancelled = operationLease->CancellationRequested();
+                    outcome.failure = outcome.cancelled
+                        ? QStringLiteral("手眼参数检测已由安全停止取消。")
+                        : QStringLiteral("机器人侧手眼验证失败：")
+                            + DecodeRobotMessageText(driver->GetLastRobotError());
                 }
                 else
                 {
-                    outcome.logs << QString("已将当前位置写入 PR[%1]，准备调用机器人手眼检测程序。")
-                        .arg(kHandEyeRobotCheckStartPrIndex);
-                    int robotState = 0;
-                    if (!fanucDriver->CallJobAndWaitStateDone(
-                        kHandEyeRobotCheckProgramName,
-                        kHandEyeRobotCheckStateReg,
-                        1,
-                        10,
-                        20,
-                        5000,
-                        10000,
-                        100,
-                        &robotState,
-                        true))
+                    robotLaserPoint = Eigen::Vector3d(
+                        robotCalculatedPoint.dX,
+                        robotCalculatedPoint.dY,
+                        robotCalculatedPoint.dZ);
+                    hasRobotResult = IsFiniteDiagnosticVector(robotLaserPoint);
+                    if (!hasRobotResult)
                     {
-                        outcome.cancelled = operationLease->CancellationRequested();
-                        outcome.failure = outcome.cancelled
-                            ? QStringLiteral("手眼参数检测已由安全停止取消。")
-                            : QString("机器人程序 %1 未按状态寄存器约定完成，R[%2] 最终=%3。")
-                                .arg(kHandEyeRobotCheckProgramName)
-                                .arg(kHandEyeRobotCheckStateReg)
-                                .arg(robotState);
+                        outcome.failure = "适配层返回的机器人侧手眼验证结果无效。";
                     }
                     else
                     {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        double pr80[6] = { 0.0 };
-                        if (fanucDriver->GetPosVar(kHandEyeRobotCheckPrIndex, pr80, config, POSVAR) != 0)
-                        {
-                            outcome.failure = QString("读取 PR[%1] 失败。").arg(kHandEyeRobotCheckPrIndex);
-                        }
-                        else
-                        {
-                            robotLaserPoint = Eigen::Vector3d(pr80[0], pr80[1], pr80[2]);
-                            hasRobotResult = IsFiniteDiagnosticVector(robotLaserPoint);
-                            if (!hasRobotResult)
-                            {
-                                outcome.failure = QString("读取到的 PR[%1] 结果无效。")
-                                    .arg(kHandEyeRobotCheckPrIndex);
-                            }
-                            else
-                            {
-                                const Eigen::Vector3d delta = robotLaserPoint - laserPoint;
-                                robotDetailText = QString(
-                                    "机器人程序结果（PR[%1]）：\n"
-                                    "X=%2  Y=%3  Z=%4\n"
-                                    "与本地矩阵差值：dX=%5  dY=%6  dZ=%7")
-                                    .arg(kHandEyeRobotCheckPrIndex)
-                                    .arg(robotLaserPoint.x(), 0, 'f', 3)
-                                    .arg(robotLaserPoint.y(), 0, 'f', 3)
-                                    .arg(robotLaserPoint.z(), 0, 'f', 3)
-                                    .arg(delta.x(), 0, 'f', 3)
-                                    .arg(delta.y(), 0, 'f', 3)
-                                    .arg(delta.z(), 0, 'f', 3);
-                            }
-                        }
+                        const Eigen::Vector3d delta = robotLaserPoint - laserPoint;
+                        robotDetailText = QString(
+                            "机器人侧适配结果：\n"
+                            "X=%1  Y=%2  Z=%3\n"
+                            "与本地矩阵差值：dX=%4  dY=%5  dZ=%6")
+                            .arg(robotLaserPoint.x(), 0, 'f', 3)
+                            .arg(robotLaserPoint.y(), 0, 'f', 3)
+                            .arg(robotLaserPoint.z(), 0, 'f', 3)
+                            .arg(delta.x(), 0, 'f', 3)
+                            .arg(delta.y(), 0, 'f', 3)
+                            .arg(delta.z(), 0, 'f', 3);
                     }
                 }
             }
-            else if (fanucDriver != nullptr)
+            else if (hasRobotHandEyeValidation)
             {
                 robotDetailText = "机器人程序结果：当前点检测已跳过，未执行 TP 对比。";
             }
@@ -2312,7 +2215,7 @@ bool HandEyeCalibrationDialog::TestHandEyeMatrix()
                     .arg(robotDetailText);
 
                 outcome.ok = true;
-                outcome.offerMove = fanucDriver != nullptr && hasLocalLaserPoint;
+                outcome.offerMove = hasRobotHandEyeValidation && hasLocalLaserPoint;
                 outcome.moveTarget = outcome.robotPose;
                 outcome.moveTarget.dX = laserPoint.x();
                 outcome.moveTarget.dY = laserPoint.y();
@@ -2431,7 +2334,13 @@ bool HandEyeCalibrationDialog::StartRobotPoseMove(
     }
 
     QString error;
-    RobotDriverAdaptor* driver = CurrentDriver(&error);
+    RobotDriverAdaptor* driver = CurrentDriverWithCapabilities(
+        { RobotDriverCapability::LinearMotion,
+          RobotDriverCapability::PassiveState,
+          RobotDriverCapability::VerifiedProgramCompletion,
+          RobotDriverCapability::VerifiedSafeAbort },
+        actionName,
+        &error);
     if (driver == nullptr)
     {
         m_bRobotTestRunning.store(false);
@@ -2495,15 +2404,11 @@ bool HandEyeCalibrationDialog::StartRobotPoseMove(
                 }
                 else
                 {
-                    const double admissionSpeedMmPerMin =
-                        dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr
-                        ? moveCommandSpeed * 60.0
-                        : moveCommandSpeed;
                     std::string admissionError;
                     if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
                         currentPose,
                         targetPose,
-                        admissionSpeedMmPerMin,
+                        moveCommandSpeed,
                         motionTimeoutMs,
                         &admissionError))
                     {
@@ -2532,11 +2437,8 @@ bool HandEyeCalibrationDialog::StartRobotPoseMove(
             if (ok)
             {
                 moveSubmissionAttempted = true;
-                ok = driver->MoveByJob(
-                    targetPose,
-                    T_ROBOT_MOVE_SPEED(moveCommandSpeed, 0.0, 0.0),
-                    driver->m_nExternalAxleType,
-                    "MOVL");
+                ok = driver->MoveLinearMmPerMin(
+                    targetPose, moveCommandSpeed, driver->ExternalAxleType());
                 if (!ok)
                 {
                     moveError = "下发 MOVL 失败：" + DecodeRobotMessageText(driver->GetLastRobotError());
@@ -2851,14 +2753,17 @@ bool HandEyeCalibrationDialog::CheckCameraTimestampIntervals()
 
 bool HandEyeCalibrationDialog::UploadRobotHandEyeCheckProgram(QString* error)
 {
-    FANUCRobotCtrl* fanucDriver = CurrentFanucDriver(error);
-    if (fanucDriver == nullptr)
+    RobotDriverAdaptor* driver = CurrentDriverWithCapability(
+        RobotDriverCapability::HandEyeSupportProgramInstall,
+        QStringLiteral("安装机器人侧手眼辅助程序"),
+        error);
+    if (driver == nullptr)
     {
         return false;
     }
     QString leaseError;
     const auto operationLease = RobotOperationLease::TryAcquire(
-        fanucDriver, QStringLiteral("上传手眼检测程序"), &leaseError);
+        driver, QStringLiteral("安装手眼辅助程序"), &leaseError);
     if (!operationLease)
     {
         if (error != nullptr)
@@ -2868,28 +2773,18 @@ bool HandEyeCalibrationDialog::UploadRobotHandEyeCheckProgram(QString* error)
         return false;
     }
 
-    const QString lsPath = FindHandEyeRobotCheckProgramPath();
-    if (lsPath.isEmpty() || !QFileInfo::exists(lsPath))
+    std::string summary;
+    if (!driver->InstallHandEyeSupportPrograms(&summary))
     {
         if (error != nullptr)
         {
-            *error = "未找到机器人手眼检测 LS 文件。";
+            *error = "安装机器人侧手眼辅助程序失败："
+                + DecodeRobotMessageText(driver->GetLastRobotError());
         }
         return false;
     }
-
-    const QByteArray lsPathBytes = lsPath.toLocal8Bit();
-    const int uploadRet = fanucDriver->UploadLsFile(lsPathBytes.constData(), "/md/");
-    if (uploadRet != 0)
-    {
-        if (error != nullptr)
-        {
-            *error = QString("上传机器人手眼检测程序失败，返回=%1，文件=%2").arg(uploadRet).arg(lsPath);
-        }
-        return false;
-    }
-
-    AppendLog(QString("机器人手眼检测程序已上传：%1 -> %2").arg(lsPath, kHandEyeRobotCheckProgramName));
+    AppendLog("机器人侧手眼辅助程序已由适配层安装："
+        + DecodeRobotMessageText(summary));
     return true;
 }
 
@@ -3063,18 +2958,31 @@ bool HandEyeCalibrationDialog::ExportCalibrationReport(const HandEyeMatrixConfig
     return RobotDataHelper::SaveTextFileLines(reportPath, lines, error);
 }
 
-FANUCRobotCtrl* HandEyeCalibrationDialog::CurrentFanucDriver(QString* error) const
+RobotDriverAdaptor* HandEyeCalibrationDialog::CurrentDriverWithCapability(
+    RobotDriverCapability capability,
+    const QString& actionName,
+    QString* error) const
+{
+    return CurrentDriverWithCapabilities({ capability }, actionName, error);
+}
+
+RobotDriverAdaptor* HandEyeCalibrationDialog::CurrentDriverWithCapabilities(
+    std::initializer_list<RobotDriverCapability> capabilities,
+    const QString& actionName,
+    QString* error) const
 {
     RobotDriverAdaptor* driver = CurrentDriver(error);
-    FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(driver);
-    if (fanucDriver != nullptr)
+    if (driver != nullptr && driver->SupportsAll(capabilities))
     {
-        return fanucDriver;
+        return driver;
     }
 
-    if (error != nullptr)
+    if (error != nullptr && driver != nullptr)
     {
-        *error = QString("机器人 %1 当前不是 FANUC 驱动，自动标定只支持 FANUC。").arg(m_robotName);
+        *error = QString("机器人 %1 的品牌底层无法执行“%2”，缺少适配能力：%3；功能已限制。")
+            .arg(m_robotName,
+                actionName,
+                QString::fromUtf8(driver->MissingCapabilitiesText(capabilities).c_str()));
     }
     return nullptr;
 }
@@ -3088,15 +2996,18 @@ bool HandEyeCalibrationDialog::UploadAutoCalibrationProgram()
     }
 
     QString error;
-    FANUCRobotCtrl* fanucDriver = CurrentFanucDriver(&error);
-    if (fanucDriver == nullptr)
+    RobotDriverAdaptor* driver = CurrentDriverWithCapability(
+        RobotDriverCapability::HandEyeSupportProgramInstall,
+        QStringLiteral("安装手眼辅助程序"),
+        &error);
+    if (driver == nullptr)
     {
         QMessageBox::warning(this, "手眼标定", error);
         AppendLog("发送自动标定程序失败：" + error);
         return false;
     }
     const auto operationLease = RobotOperationLease::TryAcquire(
-        fanucDriver, QStringLiteral("上传自动标定程序"), &error);
+        driver, QStringLiteral("安装自动标定辅助程序"), &error);
     if (!operationLease)
     {
         QMessageBox::warning(this, "手眼标定", error);
@@ -3104,22 +3015,14 @@ bool HandEyeCalibrationDialog::UploadAutoCalibrationProgram()
         return false;
     }
 
-    const QString lsPath = FindHandEyeAutoProgramPath();
-    if (lsPath.isEmpty())
-    {
-        const QString message = "未找到自动标定程序文件：SDK/FANUC/FANUC_HECALIB.ls";
-        QMessageBox::warning(this, "手眼标定", message);
-        AppendLog(message);
-        return false;
-    }
-
-    const QByteArray lsPathBytes = lsPath.toLocal8Bit();
-    const int ret = fanucDriver->UploadLsFile(lsPathBytes.constData());
-    const QString message = ret == 0
-        ? QString("自动标定程序发送成功：%1 -> %2").arg(lsPath, kHandEyeAutoProgramName)
-        : QString("自动标定程序发送失败，返回码=%1，文件=%2").arg(ret).arg(lsPath);
+    std::string summary;
+    const bool installed = driver->InstallHandEyeSupportPrograms(&summary);
+    const QString message = installed
+        ? QStringLiteral("手眼辅助程序安装成功：") + DecodeRobotMessageText(summary)
+        : QStringLiteral("手眼辅助程序安装失败：")
+            + DecodeRobotMessageText(driver->GetLastRobotError());
     AppendLog(message);
-    if (ret == 0)
+    if (installed)
     {
         QMessageBox::information(this, "手眼标定", message);
         return true;
@@ -3144,7 +3047,14 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
     }
 
     QString error;
-    RobotDriverAdaptor* driver = CurrentDriver(&error);
+    RobotDriverAdaptor* driver = CurrentDriverWithCapabilities(
+        { RobotDriverCapability::LinearMotion,
+          RobotDriverCapability::PassiveState,
+          RobotDriverCapability::CartesianRegister,
+          RobotDriverCapability::VerifiedProgramCompletion,
+          RobotDriverCapability::VerifiedSafeAbort },
+        QStringLiteral("手眼自动标定"),
+        &error);
     if (driver == nullptr)
     {
         m_bAutoCalibrationRunning.store(false);
@@ -3381,16 +3291,12 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                         terminalIsVerified());
                     return;
                 }
-                const double admissionSpeedMmPerMin =
-                    dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr
-                    ? moveCommandSpeed * 60.0
-                    : moveCommandSpeed;
                 int motionTimeoutMs = 0;
                 std::string admissionError;
                 if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
                     currentPose,
                     target.target,
-                    admissionSpeedMmPerMin,
+                    moveCommandSpeed,
                     motionTimeoutMs,
                     &admissionError))
                 {
@@ -3417,12 +3323,10 @@ bool HandEyeCalibrationDialog::StartAutoCalibration()
                     return;
                 }
 
-                const bool moveOk = driver->MoveByJob(
+                const bool moveOk = driver->MoveLinearMmPerMin(
                     target.target,
-                    T_ROBOT_MOVE_SPEED(moveCommandSpeed, 0.0, 0.0),
-                    driver->m_nExternalAxleType,
-                    "MOVL",
-                    1,
+                    moveCommandSpeed,
+                    driver->ExternalAxleType(),
                     config);
                 if (!moveOk)
                 {

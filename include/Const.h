@@ -32,6 +32,7 @@
 
 #define ROBOT_TYPE_STEP 1
 #define ROBOT_TYPE_FANUC 2
+#define ROBOT_TYPE_INOVANCE 3
 
 // 焊接下枪/收枪安全位的世界坐标水平回撤方向。
 // 0 保持旧算法（按焊道法向和枪轴择向，再以世界 X- 优先），用于兼容既有参数库。

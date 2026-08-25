@@ -494,6 +494,300 @@ BEGIN
   ENDIF
 END DoProgramStop
 
+ROUTINE WriteActiveTask(ch : FILE)
+VAR
+  task_name : STRING[36]
+  task_no : INTEGER
+  task_status : INTEGER
+  task_line : INTEGER
+  task_dummy : STRING[2]
+  query_status : INTEGER
+BEGIN
+  task_name = g_active_task_name
+  IF task_name = '' THEN
+    WRITE ch('TASK:NONE,', PG_ABORTED, ',0', CR)
+    RETURN
+  ENDIF
+
+  task_no = 0
+  GET_TSK_INFO(task_name, task_no, TSK_STATUS,
+               task_status, task_dummy, query_status)
+  IF query_status <> 0 THEN
+    WriteErr(ch, 'TASK_STATUS_QUERY_FAIL')
+    RETURN
+  ENDIF
+
+  task_no = 0
+  GET_TSK_INFO(task_name, task_no, TSK_LINENUM,
+               task_line, task_dummy, query_status)
+  IF query_status <> 0 THEN
+    WriteErr(ch, 'TASK_LINE_QUERY_FAIL')
+    RETURN
+  ENDIF
+
+  WRITE ch('TASK:', task_name, ',', task_status, ',', task_line, CR)
+END WriteActiveTask
+
+ROUTINE DoPauseTask(ch : FILE; cmd : STRING)
+VAR
+  task_name : STRING[36]
+  task_no : INTEGER
+  task_status : INTEGER
+  task_line : INTEGER
+  task_dummy : STRING[2]
+  query_status : INTEGER
+  pause_status : INTEGER
+  retry : INTEGER
+BEGIN
+  Payload(cmd, 11, task_name)
+  IF (task_name = '') OR (task_name <> g_active_task_name) THEN
+    WriteErr(ch, 'PAUSE_TASK_IDENTITY_MISMATCH')
+    RETURN
+  ENDIF
+
+  task_no = 0
+  GET_TSK_INFO(task_name, task_no, TSK_STATUS,
+               task_status, task_dummy, query_status)
+  IF query_status <> 0 THEN
+    WriteErr(ch, 'PAUSE_TASK_STATUS_QUERY_FAIL')
+    RETURN
+  ENDIF
+
+  IF task_status <> PG_PAUSED THEN
+    IF (task_status <> PG_RUNNING) AND (task_status <> PG_RUNACCEPT) THEN
+      WriteErr(ch, 'PAUSE_TASK_NOT_RUNNING')
+      RETURN
+    ENDIF
+    PAUSE_TASK(task_name, TRUE, TRUE, pause_status)
+    IF pause_status <> 0 THEN
+      WriteErr(ch, 'PAUSE_TASK_FAIL')
+      RETURN
+    ENDIF
+  ENDIF
+
+  FOR retry = 1 TO 30 DO
+    task_no = 0
+    GET_TSK_INFO(task_name, task_no, TSK_STATUS,
+                 task_status, task_dummy, query_status)
+    IF (query_status = 0) AND (task_status = PG_PAUSED) THEN
+      task_no = 0
+      GET_TSK_INFO(task_name, task_no, TSK_LINENUM,
+                   task_line, task_dummy, query_status)
+      IF query_status = 0 THEN
+        WRITE ch('PAUSED:', task_name, ',', task_line, CR)
+        RETURN
+      ENDIF
+    ENDIF
+    DELAY(50)
+  ENDFOR
+  WriteErr(ch, 'PAUSE_TASK_VERIFY_TIMEOUT')
+END DoPauseTask
+
+ROUTINE DoResumeTask(ch : FILE; cmd : STRING)
+VAR
+  task_name : STRING[36]
+  task_no : INTEGER
+  task_status : INTEGER
+  task_dummy : STRING[2]
+  query_status : INTEGER
+  continue_status : INTEGER
+  retry : INTEGER
+BEGIN
+  Payload(cmd, 12, task_name)
+  IF (task_name = '') OR (task_name <> g_active_task_name) THEN
+    WriteErr(ch, 'RESUME_TASK_IDENTITY_MISMATCH')
+    RETURN
+  ENDIF
+
+  task_no = 0
+  GET_TSK_INFO(task_name, task_no, TSK_STATUS,
+               task_status, task_dummy, query_status)
+  IF (query_status <> 0) OR (task_status <> PG_PAUSED) THEN
+    WriteErr(ch, 'RESUME_TASK_NOT_PAUSED')
+    RETURN
+  ENDIF
+
+  CONT_TASK(task_name, continue_status)
+  IF continue_status <> 0 THEN
+    WriteErr(ch, 'RESUME_TASK_FAIL')
+    RETURN
+  ENDIF
+
+  FOR retry = 1 TO 20 DO
+    task_no = 0
+    GET_TSK_INFO(task_name, task_no, TSK_STATUS,
+                 task_status, task_dummy, query_status)
+    IF (query_status = 0) AND
+       ((task_status = PG_RUNNING) OR (task_status = PG_RUNACCEPT)) THEN
+      WRITE ch('RESUMED:', task_name, ',', task_status, CR)
+      RETURN
+    ENDIF
+    DELAY(50)
+  ENDFOR
+  WriteErr(ch, 'RESUME_TASK_VERIFY_TIMEOUT')
+END DoResumeTask
+
+ROUTINE DoSetReal(ch : FILE; cmd : STRING)
+VAR
+  comma_pos : INTEGER
+  reg_name : STRING[64]
+  reg_value : STRING[64]
+  reg_index : INTEGER
+BEGIN
+  Payload(cmd, 9, g_text1)
+  comma_pos = FindChar(g_text1, ',')
+  IF comma_pos <= 4 THEN
+    WriteErr(ch, 'BAD_SET_REAL')
+    RETURN
+  ENDIF
+
+  reg_name = SUB_STR(g_text1, 1, comma_pos - 1)
+  reg_value = SUB_STR(g_text1, comma_pos + 1, STR_LEN(g_text1) - comma_pos)
+  IF SUB_STR(reg_name, 1, 4) <> 'REAL' THEN
+    WriteErr(ch, 'UNSUPPORTED_REAL_NAME')
+    RETURN
+  ENDIF
+  CNV_STR_INT(SUB_STR(reg_name, 5, STR_LEN(reg_name) - 4), reg_index)
+  CNV_STR_REAL(reg_value, g_real)
+  SET_REAL_REG(reg_index, g_real, g_status)
+  IF g_status = 0 THEN
+    WriteOk(ch, '')
+  ELSE
+    WriteErr(ch, 'SET_REAL_FAIL')
+  ENDIF
+END DoSetReal
+
+ROUTINE DoSetToolNo(ch : FILE; cmd : STRING)
+VAR
+  tool_no : INTEGER
+  readback : INTEGER
+BEGIN
+  Payload(cmd, 12, g_text1)
+  CNV_STR_INT(g_text1, tool_no)
+  IF (tool_no < 1) OR (tool_no > 10) THEN
+    WriteErr(ch, 'BAD_TOOL_NO')
+    RETURN
+  ENDIF
+
+  g_entry = 0
+  SET_VAR(g_entry, '*SYSTEM*', '$MNUTOOLNUM[1]', tool_no, g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'SET_TOOL_NO_FAIL')
+    RETURN
+  ENDIF
+  g_entry = 0
+  GET_VAR(g_entry, '*SYSTEM*', '$MNUTOOLNUM[1]', readback, g_status)
+  IF (g_status <> 0) OR (readback <> tool_no) THEN
+    WriteErr(ch, 'SET_TOOL_NO_VERIFY_FAIL')
+    RETURN
+  ENDIF
+  WRITE ch('TOOL_NO:', readback, CR)
+END DoSetToolNo
+
+ROUTINE DoGetToolData(ch : FILE; cmd : STRING)
+VAR
+  tool_no : INTEGER
+  tool_text : STRING[4]
+  variable_name : STRING[64]
+  values : ARRAY[6] OF REAL
+BEGIN
+  Payload(cmd, 14, g_text1)
+  CNV_STR_INT(g_text1, tool_no)
+  IF (tool_no < 1) OR (tool_no > 10) THEN
+    WriteErr(ch, 'BAD_TOOL_NO')
+    RETURN
+  ENDIF
+  CNV_INT_STR(tool_no, 0, 0, tool_text)
+
+  variable_name = '$MNUTOOL[1,' + tool_text + '].$X'
+  g_entry = 0
+  GET_VAR(g_entry, '*SYSTEM*', variable_name, values[1], g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'GET_TOOL_X_FAIL')
+    RETURN
+  ENDIF
+  variable_name = '$MNUTOOL[1,' + tool_text + '].$Y'
+  g_entry = 0
+  GET_VAR(g_entry, '*SYSTEM*', variable_name, values[2], g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'GET_TOOL_Y_FAIL')
+    RETURN
+  ENDIF
+  variable_name = '$MNUTOOL[1,' + tool_text + '].$Z'
+  g_entry = 0
+  GET_VAR(g_entry, '*SYSTEM*', variable_name, values[3], g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'GET_TOOL_Z_FAIL')
+    RETURN
+  ENDIF
+  variable_name = '$MNUTOOL[1,' + tool_text + '].$W'
+  g_entry = 0
+  GET_VAR(g_entry, '*SYSTEM*', variable_name, values[4], g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'GET_TOOL_W_FAIL')
+    RETURN
+  ENDIF
+  variable_name = '$MNUTOOL[1,' + tool_text + '].$P'
+  g_entry = 0
+  GET_VAR(g_entry, '*SYSTEM*', variable_name, values[5], g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'GET_TOOL_P_FAIL')
+    RETURN
+  ENDIF
+  variable_name = '$MNUTOOL[1,' + tool_text + '].$R'
+  g_entry = 0
+  GET_VAR(g_entry, '*SYSTEM*', variable_name, values[6], g_status)
+  IF g_status <> 0 THEN
+    WriteErr(ch, 'GET_TOOL_R_FAIL')
+    RETURN
+  ENDIF
+
+  WRITE ch('TOOL:',
+           values[1]::10::3, ',', values[2]::10::3, ',',
+           values[3]::10::3, ',', values[4]::10::3, ',',
+           values[5]::10::3, ',', values[6]::10::3, CR)
+END DoGetToolData
+
+ROUTINE DoGetHandEyeMatrix(ch : FILE; cmd : STRING)
+VAR
+  matrix_name : STRING[32]
+  values : ARRAY[12] OF REAL
+  reg_no : INTEGER
+  idx : INTEGER
+  is_real : BOOLEAN
+  int_value : INTEGER
+  real_value : REAL
+  reg_status : INTEGER
+BEGIN
+  Payload(cmd, 14, matrix_name)
+  IF matrix_name <> 'eye' THEN
+    WriteErr(ch, 'UNSUPPORTED_HE_MATRIX_NAME')
+    RETURN
+  ENDIF
+
+  FOR idx = 1 TO 12 DO
+    reg_no = 99 + idx
+    GET_REG(reg_no, is_real, int_value, real_value, reg_status)
+    IF reg_status <> 0 THEN
+      WriteErr(ch, 'GET_HE_MATRIX_REG_FAIL')
+      RETURN
+    ENDIF
+    IF is_real THEN
+      values[idx] = real_value
+    ELSE
+      values[idx] = int_value
+    ENDIF
+  ENDFOR
+
+  WRITE ch('HE_MATRIX:',
+           values[1]::12::6, ',', values[2]::12::6, ',',
+           values[3]::12::6, ',', values[4]::12::6, ',',
+           values[5]::12::6, ',', values[6]::12::6, ',',
+           values[7]::12::6, ',', values[8]::12::6, ',',
+           values[9]::12::6, ',', values[10]::12::6, ',',
+           values[11]::12::6, ',', values[12]::12::6, CR)
+END DoGetHandEyeMatrix
+
 ROUTINE DoSetTpSpeed(ch : FILE; cmd : STRING)
 BEGIN
   Payload(cmd, 13, g_text1)
@@ -687,7 +981,8 @@ BEGIN
     RETURN
   ENDIF
   IF cmd = 'GET_USER_PROGRAM' THEN
-    WRITE ch('PROGRAM:FANUC_RESIDENT_SERVICE;LIB=20260710_ABORT_TASK_STATE_V2', CR)
+    WRITE ch('PROGRAM:FANUC_RESIDENT_SERVICE;LIB=20260825_ADAPTOR_V3;',
+             'ABORT_V2;PAUSE_V1;TOOL_DATA_V1;HAND_EYE_R100_V1', CR)
     RETURN
   ENDIF
   IF cmd = 'GET_USER_PROJECT' THEN
@@ -715,7 +1010,7 @@ BEGIN
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,9) = 'SET_REAL:' THEN
-    WriteOk(ch, '')
+    DoSetReal(ch, cmd)
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,12) = 'SET_POS_VAR:' THEN
@@ -727,67 +1022,83 @@ BEGIN
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,10) = 'SET_SPEED:' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'SET_SPEED_UNSUPPORTED')
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,18) = 'LOAD_USER_PROGRAM:' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'LOAD_USER_PROGRAM_UNSUPPORTED')
     RETURN
   ENDIF
   IF cmd = 'UNLOAD_USER_PROGRAM' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'UNLOAD_USER_PROGRAM_UNSUPPORTED')
     RETURN
   ENDIF
   IF cmd = 'PROGRAM_START' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'PROGRAM_START_UNSUPPORTED')
     RETURN
   ENDIF
   IF cmd = 'PROGRAM_STOP' THEN
     DoProgramStop(ch)
     RETURN
   ENDIF
+  IF cmd = 'GET_ACTIVE_TASK' THEN
+    WriteActiveTask(ch)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,11) = 'PAUSE_TASK:' THEN
+    DoPauseTask(ch, cmd)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,12) = 'RESUME_TASK:' THEN
+    DoResumeTask(ch, cmd)
+    RETURN
+  ENDIF
   IF cmd = 'SERVO_ON' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'SERVO_ON_UNSUPPORTED')
     RETURN
   ENDIF
   IF cmd = 'SERVO_OFF' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'SERVO_OFF_UNSUPPORTED')
     RETURN
   ENDIF
   IF cmd = 'CLEAR_ALARM' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'CLEAR_ALARM_UNSUPPORTED')
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,13) = 'SET_SYS_MODE:' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'SET_SYS_MODE_UNSUPPORTED')
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,12) = 'SET_TOOL_NO:' THEN
-    WriteOk(ch, '')
+    DoSetToolNo(ch, cmd)
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,14) = 'GET_TOOL_DATA:' THEN
-    WriteOk(ch, '')
+    DoGetToolData(ch, cmd)
+    RETURN
+  ENDIF
+  IF SUB_STR(cmd,1,14) = 'GET_HE_MATRIX:' THEN
+    DoGetHandEyeMatrix(ch, cmd)
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,16) = 'AXIS_PULSE_MOVE:' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'AXIS_PULSE_MOVE_UNSUPPORTED')
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,9) = 'POS_MOVE:' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'POS_MOVE_UNSUPPORTED')
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,17) = 'MOVE_BY_JOB_AXIS:' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'MOVE_BY_JOB_AXIS_UNSUPPORTED')
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,16) = 'MOVE_BY_JOB_POS:' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'MOVE_BY_JOB_POS_UNSUPPORTED')
     RETURN
   ENDIF
   IF SUB_STR(cmd,1,19) = 'MOVE_BY_JOB_VECTOR:' THEN
-    WriteOk(ch, '')
+    WriteErr(ch, 'MOVE_BY_JOB_VECTOR_UNSUPPORTED')
     RETURN
   ENDIF
 

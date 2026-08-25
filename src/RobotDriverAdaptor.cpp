@@ -86,13 +86,12 @@ RobotDriverAdaptor::RobotDriverAdaptor(std::string sRobotName,RobotLog* pRobotLo
     : m_nExternalAxleType(0),
     m_nRobotAxisCount(6),
     m_pRobotLog(pRobotLog), // 初始化日志：指定路径+控制台输出
-    m_pFTP(nullptr),
     m_stateMonitorRunning(false),
     m_stateMonitorNextSequence(0)
 {
     LoadRobotKinematicsPara(sRobotName, m_tKinematics, m_tAxisUnit, m_tAxisLimitAngle);
     LoadRobotExternalAxlePara(sRobotName);
-    CreateFanucChain();
+    CreateKinematicsChain();
     m_pRobotLog->write(LogColor::SUCCESS, "RobotDriverAdaptor 初始化完成，机器人链创建成功");
 
 }
@@ -330,12 +329,184 @@ std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ApplyWeaveSpeedCompensation(
 RobotDriverAdaptor::~RobotDriverAdaptor()
 {
     StopStateMonitor();
-    if (m_pFTP != nullptr)
-    {
-        delete m_pFTP;
-        m_pFTP = nullptr;
-    }
     m_pRobotLog->write(LogColor::DEFAULT, "RobotDriverAdaptor 析构完成");
+}
+
+const std::string& RobotDriverAdaptor::RobotName() const noexcept
+{
+    return m_sRobotName;
+}
+
+const std::string& RobotDriverAdaptor::CustomName() const noexcept
+{
+    return m_sCustomName;
+}
+
+int RobotDriverAdaptor::RobotType() const noexcept
+{
+    return m_nRobotType;
+}
+
+int RobotDriverAdaptor::ExternalAxleType() const noexcept
+{
+    return m_nExternalAxleType;
+}
+
+int RobotDriverAdaptor::RobotAxisCount() const noexcept
+{
+    return m_nRobotAxisCount;
+}
+
+E_ROBOT_BRAND RobotDriverAdaptor::RobotBrand() const noexcept
+{
+    return m_eRobotBrand;
+}
+
+const T_KINEMATICS& RobotDriverAdaptor::KinematicsParameters() const noexcept
+{
+    return m_tKinematics;
+}
+
+const T_AXISUNIT& RobotDriverAdaptor::AxisUnit() const noexcept
+{
+    return m_tAxisUnit;
+}
+
+const T_AXISLIMITANGLE& RobotDriverAdaptor::AxisLimitAngles() const noexcept
+{
+    return m_tAxisLimitAngle;
+}
+
+const T_ROBOT_TOOLS& RobotDriverAdaptor::Tools() const noexcept
+{
+    return m_tTools;
+}
+
+const T_ROBOT_COORS& RobotDriverAdaptor::FirstTool() const noexcept
+{
+    return m_tFirstTool;
+}
+
+const T_ANGLE_PULSE& RobotDriverAdaptor::HomePulse() const noexcept
+{
+    return m_tHomePulse;
+}
+
+void RobotDriverAdaptor::SetConfiguredGunTool(const T_ROBOT_COORS& tool)
+{
+    m_tTools.tGunTool = tool;
+}
+
+bool RobotDriverAdaptor::HasLogSink() const noexcept
+{
+    return m_pRobotLog != nullptr;
+}
+
+void RobotDriverAdaptor::WriteLog(LogColor color, const char* format, ...) const
+{
+    if (m_pRobotLog == nullptr || format == nullptr)
+    {
+        return;
+    }
+
+    char message[4096] = {};
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    m_pRobotLog->write(color, "%s", message);
+}
+
+bool RobotDriverAdaptor::Supports(RobotDriverCapability capability) const
+{
+    const std::uint64_t bit = RobotDriverCapabilityBit(capability);
+    return bit != 0 && (DriverCapabilities() & bit) == bit;
+}
+
+bool RobotDriverAdaptor::SupportsMask(std::uint64_t requiredMask) const
+{
+    return requiredMask != 0 && (DriverCapabilities() & requiredMask) == requiredMask;
+}
+
+bool RobotDriverAdaptor::SupportsAll(
+    std::initializer_list<RobotDriverCapability> capabilities) const
+{
+    return std::all_of(
+        capabilities.begin(), capabilities.end(),
+        [this](RobotDriverCapability capability) { return Supports(capability); });
+}
+
+std::string RobotDriverAdaptor::MissingCapabilitiesText(
+    std::initializer_list<RobotDriverCapability> capabilities) const
+{
+	std::uint64_t requiredMask = 0;
+	for (const RobotDriverCapability capability : capabilities)
+	{
+		requiredMask |= RobotDriverCapabilityBit(capability);
+	}
+	return MissingCapabilitiesText(requiredMask);
+}
+
+std::string RobotDriverAdaptor::MissingCapabilitiesText(std::uint64_t requiredMask) const
+{
+    std::ostringstream stream;
+    bool first = true;
+	for (unsigned int bitIndex = 0; bitIndex <= 26; ++bitIndex)
+    {
+		const RobotDriverCapability capability = static_cast<RobotDriverCapability>(1ULL << bitIndex);
+		if ((requiredMask & RobotDriverCapabilityBit(capability)) == 0)
+		{
+			continue;
+		}
+        if (Supports(capability))
+        {
+            continue;
+        }
+        if (!first)
+        {
+            stream << "、";
+        }
+        stream << CapabilityDisplayName(capability);
+        first = false;
+    }
+    return stream.str();
+}
+
+const char* RobotDriverAdaptor::CapabilityDisplayName(RobotDriverCapability capability)
+{
+    switch (capability)
+    {
+    case RobotDriverCapability::PassiveState: return "机器人状态读取";
+    case RobotDriverCapability::RobotTimestamp: return "机器人时间戳";
+    case RobotDriverCapability::LinearMotion: return "直线运动";
+    case RobotDriverCapability::JointMotion: return "关节运动";
+    case RobotDriverCapability::ContinuousTrajectory: return "连续轨迹";
+    case RobotDriverCapability::ContinuousJog: return "连续点动";
+    case RobotDriverCapability::PauseResume: return "暂停与恢复";
+    case RobotDriverCapability::PersistentProgramRecovery: return "持久化程序恢复";
+    case RobotDriverCapability::OperationModeControl: return "运行模式切换";
+    case RobotDriverCapability::NativeProgramUpload: return "原生程序上传";
+    case RobotDriverCapability::DiagnosticCommand: return "诊断命令";
+    case RobotDriverCapability::CartesianRegister: return "直角坐标寄存器";
+    case RobotDriverCapability::VerifiedProgramCompletion: return "程序完成见证";
+    case RobotDriverCapability::VerifiedSafeAbort: return "安全中止见证";
+    case RobotDriverCapability::ActualArcWeld: return "真实起弧焊接";
+    case RobotDriverCapability::ExternalAxis: return "外部轴";
+    case RobotDriverCapability::HandEyeProgramSupport: return "机器人侧手眼验证";
+    case RobotDriverCapability::OfflineTrajectoryExport: return "离线轨迹导出";
+    case RobotDriverCapability::ConnectionControl: return "连接控制";
+    case RobotDriverCapability::AlarmReset: return "报警复位";
+    case RobotDriverCapability::ServoPowerControl: return "伺服上电";
+    case RobotDriverCapability::ToolDataRead: return "工具数据读取";
+    case RobotDriverCapability::IntegerRegister: return "整数寄存器";
+    case RobotDriverCapability::TeachPendantSpeedControl: return "示教速度设置";
+    case RobotDriverCapability::NativeProgramExecution: return "受验证原生程序执行";
+    case RobotDriverCapability::FtpFileTransfer: return "FTP文件传输";
+    case RobotDriverCapability::HandEyeMatrixRead: return "机器人手眼矩阵读取";
+    case RobotDriverCapability::HandEyeSupportProgramInstall: return "手眼辅助程序安装";
+    case RobotDriverCapability::None: return "无";
+    default: return "未知适配能力";
+    }
 }
 
 bool RobotDriverAdaptor::InitRobotDriver(std::string strUnitName)
@@ -343,9 +514,9 @@ bool RobotDriverAdaptor::InitRobotDriver(std::string strUnitName)
     return false;
 }
 // ===================== 核心函数：创建 FANUC 6 轴机器人链 =====================
-void RobotDriverAdaptor::CreateFanucChain()
+void RobotDriverAdaptor::CreateKinematicsChain()
 {
-    m_pFanucChain = KDL::Chain();
+    m_kinematicsChain = KDL::Chain();
 
     struct DhRow
     {
@@ -370,7 +541,7 @@ void RobotDriverAdaptor::CreateFanucChain()
         const double d_m = dh_rows[i].d_mm / 1000.0;
         const double theta_rad = dh_rows[i].theta_deg * M_PI / 180.0;
 
-        m_pFanucChain.addSegment(
+        m_kinematicsChain.addSegment(
             KDL::Segment(
                 KDL::Joint(KDL::Joint::RotZ),
                 KDL::Frame::DH(a_m, alpha_rad, d_m, theta_rad)));
@@ -378,7 +549,7 @@ void RobotDriverAdaptor::CreateFanucChain()
 
     m_pRobotLog->write(LogColor::DEFAULT,
         "机器人链创建完成，共%d个关节段 | DH1(a=%.3f, alpha=%.3f, d=%.3f, th=%.3f)",
-        m_pFanucChain.getNrOfSegments(),
+        m_kinematicsChain.getNrOfSegments(),
         dh_rows[0].a_mm, dh_rows[0].alpha_deg, dh_rows[0].d_mm, dh_rows[0].theta_deg);
 }
 
@@ -424,7 +595,7 @@ bool RobotDriverAdaptor::RobotKinematics(T_ANGLE_PULSE tRobotPulse, T_ROBOT_COOR
     }
 
     // 步骤4：创建机器人KDL模型（和逆解共用同一个DH模型）
-    KDL::Chain robot_chain = m_pFanucChain;  // 复用之前的机器人链创建函数
+    KDL::Chain robot_chain = m_kinematicsChain;
 
     // 步骤5：正解求解器（递归法，KDL默认）
     KDL::ChainFkSolverPos_recursive fk_solver(robot_chain);
@@ -481,7 +652,7 @@ bool RobotDriverAdaptor::RobotInverseKinematics(T_ROBOT_COORS tRobotCoors, T_ROB
         flange_frame.p.x(), flange_frame.p.y(), flange_frame.p.z());
 
     // 4. 创建机器人模型
-    KDL::Chain robot_chain = m_pFanucChain;
+    KDL::Chain robot_chain = m_kinematicsChain;
 
     // 5. 求解所有有效逆解（关节角度，度）
     std::vector<std::vector<double>> all_joint_angles = SolveAllValidIK(robot_chain, flange_frame);
@@ -851,16 +1022,6 @@ int RobotDriverAdaptor::CalculateRobotAxisCountByExternalAxleType(int externalAx
     return 6 + externalAxisCount;
 }
 
-bool RobotDriverAdaptor::InitSocket(const char* ip, unsigned short Port, bool ifRecord)
-{
-    return false;
-}
-
-bool RobotDriverAdaptor::CloseSocket()
-{
-    return true;
-}
-
 bool RobotDriverAdaptor::IsConnected()
 {
     return false;
@@ -1156,11 +1317,6 @@ void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
     }
 }
 
-int RobotDriverAdaptor::ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo)
-{
-    return 0;
-}
-
 int RobotDriverAdaptor::CheckDone()
 {
     return -1;
@@ -1171,37 +1327,6 @@ int RobotDriverAdaptor::CheckRobotDone(int nDelayTime, int runTimeoutMs)
     (void)nDelayTime;
     (void)runTimeoutMs;
     return CheckDone();
-}
-
-bool RobotDriverAdaptor::AbortCurrentProgramSafely()
-{
-    SetLastRobotError("当前机器人驱动未实现可验证的不可恢复程序中止。");
-    return false;
-}
-
-bool RobotDriverAdaptor::CallJob(std::string sJobName)
-{
-    (void)sJobName;
-    return false;
-}
-
-int RobotDriverAdaptor::InitFtp()
-{
-    return -1;
-}
-
-int RobotDriverAdaptor::UploadFile(std::string LocalFilePath, std::string RemoteFilePath)
-{
-    (void)LocalFilePath;
-    (void)RemoteFilePath;
-    return -1;
-}
-
-int RobotDriverAdaptor::DownloadFile(std::string RemoteFilePath, std::string LocalFilePath)
-{
-    (void)RemoteFilePath;
-    (void)LocalFilePath;
-    return -1;
 }
 
 bool RobotDriverAdaptor::SetTpSpeed(int speed)
@@ -1271,36 +1396,5 @@ bool RobotDriverAdaptor::GetHandEyeMatrixVariable(const char* variableName, doub
     {
         *error = message;
     }
-    return false;
-}
-
-bool RobotDriverAdaptor::MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName, int isconfig, int config[7])
-{
-    (void)tRobotJointCoord;
-    (void)tPulseMove;
-    (void)nExternalAxleType;
-    (void)JobName;
-    (void)isconfig;
-    (void)config;
-    return false;
-}
-
-bool RobotDriverAdaptor::MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName)
-{
-    (void)tRobotJointCoord;
-    (void)tPulseMove;
-    (void)nExternalAxleType;
-    (void)JobName;
-    return false;
-}
-
-bool RobotDriverAdaptor::MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType, std::string JobName, int config[7])
-{
-    (void)dRobotJointCoord;
-    (void)tPulseMove;
-    (void)nExternalAxleType;
-    (void)nPVarType;
-    (void)JobName;
-    (void)config;
     return false;
 }

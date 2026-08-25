@@ -7094,7 +7094,6 @@ def _has_known_auth3_login_preference_type_drift(
 
     shapes: set[str] = set()
     for key, stored, value_type, sensitive, encrypted in rows:
-        key_text = str(key)
         stored_text_value = str(stored)
         common_shape = (
             sensitive in (1, "1", True)
@@ -7104,17 +7103,6 @@ def _has_known_auth3_login_preference_type_drift(
         if not common_shape:
             raise ValueError(
                 "Current auth3 login preference drift is not safely recoverable"
-            )
-        decoded = decode_stored_text(
-            stored_text_value,
-            encrypted,
-            protection_purpose(
-                "global", "", "LoginState", key_text
-            ),
-        )
-        if decoded not in {"0", "1"}:
-            raise ValueError(
-                "Current auth3 login preference drift cannot be read safely"
             )
         shapes.add(str(value_type))
 
@@ -7127,6 +7115,18 @@ def _has_known_auth3_login_preference_type_drift(
             "RememberPassword", "AutoLogin"
         }
     ):
+        for key, stored, _value_type, _sensitive, encrypted in rows:
+            decoded = decode_stored_text(
+                str(stored),
+                encrypted,
+                protection_purpose(
+                    "global", "", "LoginState", str(key)
+                ),
+            )
+            if decoded not in {"0", "1"}:
+                raise ValueError(
+                    "Current auth3 login preference drift cannot be read safely"
+                )
         return True
     if shapes == {"string"}:
         raise ValueError(
@@ -7137,11 +7137,188 @@ def _has_known_auth3_login_preference_type_drift(
     )
 
 
+def _valid_dpapi_envelope_shape(stored: str) -> bool:
+    if not stored.startswith(DPAPI_PREFIX):
+        return False
+    try:
+        payload = base64.b64decode(
+            padded_base64(stored[len(DPAPI_PREFIX):]),
+            altchars=b"-_",
+            validate=True,
+        )
+    except (ValueError, UnicodeEncodeError, binascii.Error):
+        return False
+    return 64 <= len(payload) <= 16 * 1024 * 1024
+
+
+def _foreign_user_dpapi_reset_category(
+    scope_type: str,
+    scope_id: str,
+    module: str,
+    key: str,
+    value_type: str,
+    sensitive: object,
+    encrypted: object,
+) -> str | None:
+    """Classify only DPAPI state that is safe to invalidate after a user move."""
+    if sensitive not in (1, "1", True) or encrypted not in (1, "1", True):
+        return None
+    if (
+        scope_type == "global"
+        and scope_id == ""
+        and module == "LoginState"
+        and key in {"RememberPassword", "AutoLogin"}
+        and value_type == "bool"
+    ):
+        return "login_preference"
+    if (
+        scope_type == "global"
+        and scope_id == ""
+        and module in {
+            "LoginState/SavedPasswords",
+            "LoginState/RememberedCredentials",
+        }
+        and value_type == "string"
+        and _is_safe_account_name(key)
+    ):
+        return "remembered_credential"
+    if (
+        scope_type == "global"
+        and scope_id == ""
+        and module == "OnlineServices"
+        and key in {"AdminApiToken", "FtpPassword"}
+        and value_type == "string"
+    ):
+        return "online_service_credential"
+    if (
+        scope_type in {"robot", "workpiece_template"}
+        and 0 < len(scope_id) <= 256
+        and scope_id == scope_id.strip()
+        and not any(character in scope_id for character in "\x00\r\n")
+        and module == "RobotPara/BaseParam"
+        and key == "FTPPassWord"
+        and value_type == "string"
+    ):
+        return "robot_ftp_credential"
+    if (
+        scope_type == "global"
+        and scope_id == ""
+        and module == "PointCloudProofSecurity"
+        and key == "HmacKeyV1"
+        and value_type == "secret"
+    ):
+        return "pointcloud_proof_key"
+    if (
+        scope_type == "pointcloud-proof-receipt"
+        and re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            scope_id,
+        ) is not None
+        and module == "QualityGateReceiptV1"
+        and key == "Receipt"
+        and value_type == "json"
+    ):
+        return "pointcloud_proof_receipt"
+    return None
+
+
+def _foreign_user_dpapi_reset_plan(
+    connection: sqlite3.Connection,
+) -> list[tuple[str, str, str, str, str]] | None:
+    """Recognize a complete CurrentUser-DPAPI binding move, never partial damage."""
+    protected_rows = connection.execute(
+        """
+        SELECT scope_type, scope_id, module, key_name, value_text,
+               value_type, sensitive, encrypted
+        FROM settings
+        WHERE value_text LIKE ?
+        ORDER BY scope_type, scope_id, module, key_name
+        """,
+        (DPAPI_PREFIX + "%",),
+    ).fetchall()
+    if not protected_rows:
+        return None
+
+    readable_count = 0
+    unreadable_rows: list[tuple[object, ...]] = []
+    for row in protected_rows:
+        scope_type, scope_id, module, key, stored, _value_type, _sensitive, encrypted = row
+        decoded = decode_stored_text(
+            str(stored),
+            encrypted,
+            protection_purpose(
+                str(scope_type), str(scope_id), str(module), str(key)
+            ),
+        )
+        if decoded is None:
+            unreadable_rows.append(row)
+        else:
+            readable_count += 1
+
+    if not unreadable_rows:
+        return None
+    if readable_count != 0 or len(unreadable_rows) != len(protected_rows):
+        raise ValueError(
+            "Current ConfigStore has mixed readable and unreadable DPAPI state"
+        )
+
+    plan: list[tuple[str, str, str, str, str]] = []
+    for (
+        scope_type, scope_id, module, key, stored,
+        value_type, sensitive, encrypted,
+    ) in unreadable_rows:
+        scope_text = str(scope_type)
+        scope_id_text = str(scope_id)
+        module_text = str(module)
+        key_text = str(key)
+        if not _valid_dpapi_envelope_shape(str(stored)):
+            raise ValueError(
+                "Current ConfigStore contains a malformed unreadable DPAPI envelope"
+            )
+        category = _foreign_user_dpapi_reset_category(
+            scope_text,
+            scope_id_text,
+            module_text,
+            key_text,
+            str(value_type),
+            sensitive,
+            encrypted,
+        )
+        if category is None:
+            raise ValueError(
+                "Current ConfigStore has unsupported unreadable DPAPI state"
+            )
+        plan.append(
+            (scope_text, scope_id_text, module_text, key_text, category)
+        )
+
+    preference_keys = {
+        key
+        for scope_type, scope_id, module, key, category in plan
+        if category == "login_preference"
+        and scope_type == "global"
+        and scope_id == ""
+        and module == "LoginState"
+    }
+    if preference_keys != {"RememberPassword", "AutoLogin"}:
+        raise ValueError(
+            "Foreign-user DPAPI recovery requires both canonical login preferences"
+        )
+    return plan
+
+
 def verify_current_database(
     db_path: Path,
     *,
     allow_known_auth3_login_preference_drift: bool = False,
+    allow_foreign_user_dpapi_reset: bool = False,
 ) -> str:
+    if (
+        allow_known_auth3_login_preference_drift
+        and allow_foreign_user_dpapi_reset
+    ):
+        raise ValueError("Current ConfigStore verification recovery modes conflict")
     db_path = Path(os.path.abspath(db_path))
     _reject_pending_atomic_replacement(db_path)
     _reject_sqlite_sidecars(db_path, "Current ConfigStore verification")
@@ -7181,6 +7358,19 @@ def verify_current_database(
                 "Current ConfigStore does not contain the exact recoverable "
                 "auth3 login preference drift"
             )
+        foreign_dpapi_plan = (
+            _foreign_user_dpapi_reset_plan(connection)
+            if allow_foreign_user_dpapi_reset
+            else None
+        )
+        if allow_foreign_user_dpapi_reset and not foreign_dpapi_plan:
+            raise ValueError(
+                "Current ConfigStore does not contain an exact recoverable "
+                "foreign-user DPAPI binding"
+            )
+        foreign_dpapi_identities = {
+            entry[:4] for entry in (foreign_dpapi_plan or [])
+        }
 
         duplicate_setting = connection.execute(
             """
@@ -7265,7 +7455,11 @@ def verify_current_database(
                     "global", "", "LoginState", key_text
                 ),
             )
-            if decoded_preference not in {"0", "1"}:
+            identity = ("global", "", "LoginState", key_text)
+            if (
+                decoded_preference not in {"0", "1"}
+                and identity not in foreign_dpapi_identities
+            ):
                 raise ValueError("Current login preference is not a canonical boolean")
 
         for (
@@ -7306,7 +7500,11 @@ def verify_current_database(
                     scope_text, scope_id_text, module_text, key_text
                 ),
             )
-            if decoded_credential is None or decoded_credential == "":
+            identity = (scope_text, scope_id_text, module_text, key_text)
+            if (
+                (decoded_credential is None or decoded_credential == "")
+                and identity not in foreign_dpapi_identities
+            ):
                 raise ValueError(
                     "Current remembered credential cannot be read back"
                 )
@@ -7473,10 +7671,19 @@ def verify_current_database(
                 and not stored_value.startswith(DPAPI_PREFIX)
             ):
                 raise ValueError("A recoverable sensitive setting is not protected by DPAPI")
+            decoded_value = None
+            if stored_value.startswith(DPAPI_PREFIX) or encrypted not in (
+                None, 0, "0", False
+            ):
+                decoded_value = decode_stored_text(
+                    stored_value, encrypted, purpose
+                )
             if (
                 stored_value.startswith(DPAPI_PREFIX)
                 or encrypted not in (None, 0, "0", False)
-            ) and decode_stored_text(stored_value, encrypted, purpose) is None:
+            ) and decoded_value is None and (
+                scope_text, scope_id_text, module_text, key_text
+            ) not in foreign_dpapi_identities:
                 raise ValueError("A protected ConfigStore setting cannot be read back")
         locked_database.ensure_single_link()
         if not hmac.compare_digest(
@@ -7642,6 +7849,13 @@ def migrate_existing_database_to_current(
                 and authentication_semantic_version == AUTH_SEMANTIC_VERSION
                 and _has_known_auth3_login_preference_type_drift(conn)
             )
+            foreign_user_dpapi_reset_plan = (
+                _foreign_user_dpapi_reset_plan(conn)
+                if version == SCHEMA_VERSION
+                and authentication_semantic_version == AUTH_SEMANTIC_VERSION
+                and not known_auth3_login_preference_drift
+                else None
+            )
             if known_auth3_login_preference_drift:
                 # Prove that this exact locked source is otherwise a fully valid
                 # current database before allowing the narrow writer-bug repair.
@@ -7657,15 +7871,34 @@ def migrate_existing_database_to_current(
                     raise ValueError(
                         "Known auth3 login preference source changed during validation"
                     )
+            if foreign_user_dpapi_reset_plan:
+                # A raw database copied to another Windows user keeps portable
+                # account hashes and business configuration, but its CurrentUser
+                # DPAPI values cannot be recovered.  Prove that every unreadable
+                # value belongs to the narrow disposable allowlist before reset.
+                verify_current_database(
+                    db_path,
+                    allow_foreign_user_dpapi_reset=True,
+                )
+                locked_database.ensure_single_link()
+                if not hmac.compare_digest(
+                    hashlib.sha256(source_content).digest(),
+                    hashlib.sha256(locked_database.read_bytes()).digest(),
+                ):
+                    raise ValueError(
+                        "Foreign-user DPAPI source changed during validation"
+                    )
             needs_migration = (
                 has_legacy_tables
                 or has_outdated_current_schema
                 or needs_authentication_semantic_upgrade
                 or known_auth3_login_preference_drift
+                or bool(foreign_user_dpapi_reset_plan)
             )
             if not needs_migration:
                 conn.rollback()
                 return False
+            initialize_empty_scrub_provenance = False
             if version == SCHEMA_VERSION and scrub_manifest is not None:
                 provenance_rows = dict(conn.execute(
                     "SELECT key, value FROM meta WHERE key IN (?, ?)",
@@ -7679,10 +7912,32 @@ def migrate_existing_database_to_current(
                     existing_scrub_state not in {"pending", "complete"}
                     or not isinstance(existing_manifest_text, str)
                 ):
-                    raise SystemExit(
-                        "Current-v5 authentication upgrade has no valid legacy scrub provenance"
+                    provenance_is_absent = (
+                        SCRUB_STATE_KEY not in provenance_rows
+                        and SCRUB_MANIFEST_KEY not in provenance_rows
                     )
-                parse_legacy_credential_scrub_manifest(existing_manifest_text)
+                    exact_current_repair = (
+                        known_auth3_login_preference_drift
+                        or bool(foreign_user_dpapi_reset_plan)
+                    )
+                    if not (
+                        provenance_is_absent
+                        and scrub_manifest == []
+                        and exact_current_repair
+                    ):
+                        raise SystemExit(
+                            "Current-v5 repair has no valid legacy scrub provenance; "
+                            "automatic recovery requires an empty legacy credential scrub plan"
+                        )
+                    # Early schema-v5 databases predate scrub provenance.  An
+                    # exact current-schema repair may adopt an empty manifest,
+                    # but never auto-delete newly discovered legacy credentials.
+                    enforce_no_plaintext_configstore_residue(
+                        data_dir, forced_encoding
+                    )
+                    initialize_empty_scrub_provenance = True
+                else:
+                    parse_legacy_credential_scrub_manifest(existing_manifest_text)
                 if existing_scrub_state == "complete":
                     if scrub_manifest:
                         raise ValueError(
@@ -7733,6 +7988,42 @@ def migrate_existing_database_to_current(
                 default_details = {
                     "auth3_login_preference_type_repair": 2,
                 }
+            elif foreign_user_dpapi_reset_plan:
+                category_counts: dict[str, int] = {}
+                for scope_type, scope_id, module, key, category in (
+                    foreign_user_dpapi_reset_plan
+                ):
+                    deleted = conn.execute(
+                        """
+                        DELETE FROM settings
+                        WHERE scope_type=? AND scope_id=? AND module=? AND key_name=?
+                        """,
+                        (scope_type, scope_id, module, key),
+                    )
+                    if deleted.rowcount != 1:
+                        raise ValueError(
+                            "Foreign-user DPAPI recovery source changed in staging"
+                        )
+                    category_counts[category] = category_counts.get(category, 0) + 1
+                legacy_counts = (0, 0, 0)
+                default_count = 0
+                default_details = {
+                    "foreign_user_dpapi_rows_removed": len(
+                        foreign_user_dpapi_reset_plan
+                    ),
+                    "login_preferences_removed": category_counts.get(
+                        "login_preference", 0
+                    ),
+                    "remembered_credentials_removed": category_counts.get(
+                        "remembered_credential", 0
+                    ),
+                    "service_credentials_removed": category_counts.get(
+                        "online_service_credential", 0
+                    ) + category_counts.get("robot_ftp_credential", 0),
+                    "pointcloud_proof_rows_removed": category_counts.get(
+                        "pointcloud_proof_key", 0
+                    ) + category_counts.get("pointcloud_proof_receipt", 0),
+                }
             else:
                 legacy_counts = migrate_legacy_tables_to_settings(
                     conn, encrypt_new_values
@@ -7764,6 +8055,8 @@ def migrate_existing_database_to_current(
                 )
                 if version != SCHEMA_VERSION:
                     set_legacy_credential_scrub_pending(conn, scrub_manifest)
+            if initialize_empty_scrub_provenance:
+                set_legacy_credential_scrub_pending(conn, scrub_manifest)
             integrity = conn.execute("PRAGMA integrity_check").fetchall()
             if integrity != [("ok",)]:
                 raise ValueError(

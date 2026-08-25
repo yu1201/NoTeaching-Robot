@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "generatedDate": "2026-08-19",
+  "project": "QtWidgetsApplication4",
+  "platform": "Windows x64",
+  "configurations": [
+    "Debug|x64",
+    "Release|x64"
+  ],
+  "toolchain": {
+    "visualStudio": "2022",
+    "msvcToolset": "v143",
+    "msbuildVerifiedVersion": "17.14.40.60911",
+    "cppStandard": "C++17",
+    "cStandard": "C17",
+    "windowsSdk": "10.0"
+  },
+  "dependencies": [
+    {
+      "name": "Qt",
+      "version": "6.7.3",
+      "variant": "msvc2022_64 Debug+Release",
+      "required": true
+    },
+    {
+      "name": "OpenCV",
+      "version": "4.6.0",
+      "variant": "x64/vc15 opencv_world460 Debug+Release",
+      "required": true
+    },
+    {
+      "name": "Eigen",
+      "version": "3.4.0",
+      "variant": "headers",
+      "required": true
+    },
+    {
+      "name": "Orocos KDL",
+      "version": "1.5.3",
+      "variant": "x64 Debug+Release",
+      "required": true
+    },
+    {
+      "name": "vcpkg",
+      "version": "2026-03-04-4b3e4c276b5b87a649e66341e11553e8c577459c",
+      "variant": "classic installed tree",
+      "required": true
+    },
+    {
+      "name": "OpenCASCADE",
+      "version": "7.9.3",
+      "variant": "opencascade[core]:x64-windows Debug+Release",
+      "required": true,
+      "exactVersion": true
+    }
+  ],
+  "notes": [
+    "Project STEP, PointCloudExtration, SKJCamera and BCPD assets are supplied by the Git checkout.",
+    "FANUC .tp and .pc runtime files are not part of the ordinary source-environment kit.",
+    "No credentials, tokens, signing keys or production configuration are included."
+  ]
+}

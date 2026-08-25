@@ -116,6 +116,8 @@ public:
 
 signals:
     void FlowStepChanged(const QString& text);
+    // 仅在预设参数或跳过扫描焊接完整成功后发出；主窗口据此延迟执行只读 FTP 程序数量检查。
+    void WeldFlowCompleted();
 
 protected:
     void closeEvent(QCloseEvent* event) override;

@@ -2,7 +2,9 @@
 
 #include "CadModel3DView.h"
 #include "HandEyeMatrixConfig.h"
+#include "PointCloud3DView.h"
 #include "ReferenceModelLibrary.h"
+#include "ReverseMeshSeamProjector.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
@@ -17,6 +19,7 @@
 #include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -28,6 +31,7 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
+#include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -144,6 +148,69 @@ QColor StationColor(const ModelWeldingFeatureStation& station, bool selected)
         return QColor(158, 158, 158);
     }
     return QColor(102, 187, 106);
+}
+
+QString SeamSourceText(ModelWeldingSeamSource source)
+{
+    switch (source)
+    {
+    case ModelWeldingSeamSource::CadShapeIntersection:
+        return QStringLiteral("实体截交");
+    case ModelWeldingSeamSource::CadCorrugatedButtJoint:
+        return QStringLiteral("板间对接立焊");
+    case ModelWeldingSeamSource::CadCorrugatedBaseJoint:
+        return QStringLiteral("下端波纹平焊");
+    case ModelWeldingSeamSource::ReverseMeshSeedProjection:
+        return QStringLiteral("逆向网格种子投影");
+    default:
+        return QStringLiteral("B-Rep共边");
+    }
+}
+
+QString CandidateSourceText(CadSeamCandidateExtractor::SourceKind source)
+{
+    switch (source)
+    {
+    case CadSeamCandidateExtractor::SourceKind::ShapeIntersection:
+        return QStringLiteral("实体截交");
+    case CadSeamCandidateExtractor::SourceKind::CorrugatedButtJoint:
+        return QStringLiteral("板间对接立焊");
+    case CadSeamCandidateExtractor::SourceKind::CorrugatedBaseJoint:
+        return QStringLiteral("下端波纹平焊");
+    default:
+        return QStringLiteral("B-Rep共边");
+    }
+}
+
+double PolylineLength(const QVector<Eigen::Vector3d>& points)
+{
+    double length = 0.0;
+    for (int index = 1; index < points.size(); ++index)
+        length += (points.at(index) - points.at(index - 1)).norm();
+    return length;
+}
+
+void AppendPolylineGuides(
+    const QVector<Eigen::Vector3d>& points,
+    const QColor& color,
+    double width,
+    QVector<cadview::GuideSegment>& guides)
+{
+    if (points.size() < 2) return;
+    constexpr int kMaximumPreviewSegments = 400;
+    const int stride = std::max(1,
+        static_cast<int>(std::ceil(
+            static_cast<double>(points.size() - 1) / kMaximumPreviewSegments)));
+    for (int first = 0; first < points.size() - 1; first += stride)
+    {
+        const int second = std::min(first + stride, static_cast<int>(points.size()) - 1);
+        cadview::GuideSegment segment;
+        segment.start = ViewPoint(points.at(first));
+        segment.end = ViewPoint(points.at(second));
+        segment.color = color;
+        segment.width = width;
+        guides.push_back(segment);
+    }
 }
 
 class NonClosableProgressDialog final : public QProgressDialog
@@ -428,6 +495,49 @@ ModelWeldingFlowDialog::ModelWeldingFlowDialog(
         });
     editorLayout->addWidget(theoreticalRobotGroup);
 
+    QGroupBox* seamGroup = new QGroupBox(QStringLiteral("焊缝候选（源 STEP / B-Rep）"));
+    QGridLayout* seamLayout = new QGridLayout(seamGroup);
+    m_seamMinimumLengthSpin = new QDoubleSpinBox();
+    m_seamMinimumLengthSpin->setRange(5.0, 10000.0);
+    m_seamMinimumLengthSpin->setDecimals(1);
+    m_seamMinimumLengthSpin->setValue(100.0);
+    m_seamCandidateCombo = new QComboBox();
+    QPushButton* extractSeamsButton = new QPushButton(QStringLiteral("提取候选"));
+    QPushButton* addSeamButton = new QPushButton(QStringLiteral("加入模板"));
+    QPushButton* projectSeedButton = new QPushButton(QStringLiteral("种子投影"));
+    QPushButton* removeSeamButton = new QPushButton(QStringLiteral("移除选中"));
+    seamLayout->addWidget(new QLabel(QStringLiteral("最短长度")), 0, 0);
+    seamLayout->addWidget(
+        CreateExternalUnitEditor(
+            m_seamMinimumLengthSpin, QStringLiteral("mm"), seamGroup),
+        0, 1);
+    seamLayout->addWidget(extractSeamsButton, 0, 2);
+    seamLayout->addWidget(m_seamCandidateCombo, 1, 0, 1, 2);
+    seamLayout->addWidget(addSeamButton, 1, 2);
+    m_seamTable = new QTableWidget(0, 5);
+    m_seamTable->setHorizontalHeaderLabels({
+        QStringLiteral("编号"), QStringLiteral("来源"), QStringLiteral("长度"),
+        QStringLiteral("点数"), QStringLiteral("确认")
+    });
+    m_seamTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_seamTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_seamTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_seamTable->horizontalHeader()->setStretchLastSection(true);
+    m_seamTable->setMinimumHeight(150);
+    seamLayout->addWidget(m_seamTable, 2, 0, 1, 3);
+    QHBoxLayout* seamActions = new QHBoxLayout();
+    seamActions->addWidget(projectSeedButton);
+    seamActions->addWidget(removeSeamButton);
+    seamLayout->addLayout(seamActions, 3, 2);
+    QLabel* seamHint = new QLabel(QStringLiteral(
+        "提取只读源 STEP：优先按装配产品语义识别板间对接立焊和下端波纹平焊，"
+        "同一板件的折弯棱不作为焊缝；旧模型才回退实体截交。候选加入模板后仍为未确认；"
+        "必须在三维视图核对并勾选确认，且本页不会生成机器人姿态或启动运动。"));
+    seamHint->setWordWrap(true);
+    seamHint->setStyleSheet(QStringLiteral("color:#80cbc4;"));
+    seamLayout->addWidget(seamHint, 3, 0, 1, 2);
+    editorLayout->addWidget(seamGroup);
+
     m_stationTable = new QTableWidget(0, 7);
     m_stationTable->setHorizontalHeaderLabels({
         QStringLiteral("编号"), QStringLiteral("角色"), QStringLiteral("模型X"),
@@ -540,6 +650,62 @@ ModelWeldingFlowDialog::ModelWeldingFlowDialog(
     connect(readyButton, &QPushButton::clicked, this, [this]() { CheckProductionReadiness(); });
     connect(teachStartButton, &QPushButton::clicked, this, [this]() { TeachStart(); });
     connect(teachEndButton, &QPushButton::clicked, this, [this]() { TeachEnd(); });
+    connect(extractSeamsButton, &QPushButton::clicked,
+        this, [this]() { ExtractCadSeamCandidates(); });
+    connect(addSeamButton, &QPushButton::clicked,
+        this, [this]() { AddSelectedCadSeamCandidate(); });
+    connect(projectSeedButton, &QPushButton::clicked,
+        this, [this]() { ProjectReverseMeshSeedFile(); });
+    connect(removeSeamButton, &QPushButton::clicked,
+        this, [this]() { RemoveSelectedSeam(); });
+    connect(m_seamCandidateCombo, qOverload<int>(&QComboBox::currentIndexChanged),
+        this, [this](int)
+        {
+            if (!m_loading) RefreshPreview(true);
+        });
+    connect(m_seamTable, &QTableWidget::currentCellChanged,
+        this, [this](int, int, int, int)
+        {
+            if (!m_loading) RefreshPreview(true);
+        });
+    connect(m_seamTable, &QTableWidget::itemChanged, this,
+        [this](QTableWidgetItem* item)
+        {
+            if (m_loading || item == nullptr || item->column() != 4
+                || item->row() < 0 || item->row() >= m_template.seams.size())
+            {
+                return;
+            }
+            ModelWeldingSeamDefinition& seam = m_template.seams[item->row()];
+            const bool checked = item->checkState() == Qt::Checked;
+            const bool reverseMesh = seam.source
+                == ModelWeldingSeamSource::ReverseMeshSeedProjection;
+            if (reverseMesh && checked && !seam.humanConfirmed)
+            {
+                const QSignalBlocker blocker(m_seamTable);
+                item->setCheckState(Qt::Unchecked);
+                SetStatus(QStringLiteral(
+                    "逆向 PLY 焊缝必须通过“种子投影”的点云叠加预览确认，"
+                    "不能在仅显示 STEP 的表格中直接勾选。"), true);
+                return;
+            }
+            const bool sourceMatches = m_modelIdentityValid
+                && (reverseMesh
+                    ? seam.sourceGeometrySha256 == m_template.modelSha256
+                    : (!m_previewSourceSha256.isEmpty()
+                        && seam.sourceGeometrySha256 == m_previewSourceSha256));
+            if (checked && !sourceMatches)
+            {
+                const QSignalBlocker blocker(m_seamTable);
+                item->setCheckState(seam.humanConfirmed ? Qt::Checked : Qt::Unchecked);
+                SetStatus(QStringLiteral(
+                    "源 STEP 身份未通过当前追溯复核，禁止确认焊缝。请重新加载并提取候选。"), true);
+                return;
+            }
+            seam.humanConfirmed = checked;
+            m_templateDirty = true;
+            RefreshPreview(true);
+        });
 
     connect(m_templateCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
         {
@@ -816,7 +982,7 @@ void ModelWeldingFlowDialog::LoadRobots()
             if (isInitialUnit) initialUnitRejection = reason;
             continue;
         }
-        if (robot.robotType < 0 || robot.robotType != driver->m_nRobotType)
+        if (robot.robotType < 0 || robot.robotType != driver->RobotType())
         {
             const QString reason = QStringLiteral("%1：控制单元机器人类型与驱动不一致")
                 .arg(robot.displayName);
@@ -836,7 +1002,7 @@ void ModelWeldingFlowDialog::LoadRobots()
         RobotModelCatalogStore::Eligibility eligibility;
         QString eligibilityError;
         if (!RobotModelCatalogStore::ResolveModelEligibility(
-                modelId, driver->m_nRobotType, eligibility, eligibilityError)
+                modelId, driver->RobotType(), eligibility, eligibilityError)
             || !eligibility.eligible)
         {
             const QString reason = !eligibilityError.trimmed().isEmpty()
@@ -980,6 +1146,7 @@ void ModelWeldingFlowDialog::LoadSelectedTemplate()
     const QString id = m_templateCombo->currentData().toString();
     if (id.isEmpty())
     {
+        ClearSeamCandidates();
         m_template = ModelWeldingFlowTemplate();
         m_teaching = ModelWeldingRobotTeaching();
         m_mesh = WorkpieceMeshBuilder::Mesh();
@@ -994,6 +1161,7 @@ void ModelWeldingFlowDialog::LoadSelectedTemplate()
         m_datumChecked->setChecked(false);
         m_collisionChecked->setChecked(false);
         m_loading = false;
+        RefreshSeamTable();
         RefreshStationTable();
         RefreshPreview(false);
         RefreshIdentityStatus();
@@ -1004,6 +1172,7 @@ void ModelWeldingFlowDialog::LoadSelectedTemplate()
         [&id](const ModelWeldingFlowTemplate& value) { return value.templateId == id; });
     if (it == m_templates.cend())
     {
+        ClearSeamCandidates();
         m_template = ModelWeldingFlowTemplate();
         m_teaching = ModelWeldingRobotTeaching();
         m_mesh = WorkpieceMeshBuilder::Mesh();
@@ -1013,6 +1182,7 @@ void ModelWeldingFlowDialog::LoadSelectedTemplate()
         m_teachingDirty = false;
         m_modelIdentityValid = false;
         m_teachingLoadNotice.clear();
+        RefreshSeamTable();
         RefreshStationTable();
         RefreshPreview(false);
         RefreshIdentityStatus();
@@ -1020,6 +1190,7 @@ void ModelWeldingFlowDialog::LoadSelectedTemplate()
         return;
     }
 
+    ClearSeamCandidates();
     m_template = *it;
     m_templatePersisted = true;
     const bool convertedInactiveInheritance =
@@ -1095,6 +1266,7 @@ void ModelWeldingFlowDialog::LoadSelectedTemplate()
         ? QStringLiteral("普通模板：首次按图放入V型槽建立粗基准。")
         : QStringLiteral("相似模板快照继承：同一工装放置可跳过V型槽实物校准；站点仍须逐项人工确认。"));
     LoadTeachingForCurrentRobot();
+    RefreshSeamTable();
     RefreshStationTable();
     RefreshPreview(false);
     if (!modelLoaded || !modelIdentityMatches)
@@ -1403,6 +1575,7 @@ void ModelWeldingFlowDialog::CreateDraftTemplate()
     m_mesh = std::move(candidateMesh);
     m_modelIdentityValid = true;
     m_template = value;
+    ClearSeamCandidates();
     m_templatePersisted = false;
     m_templateDirty = true;
     {
@@ -1415,6 +1588,7 @@ void ModelWeldingFlowDialog::CreateDraftTemplate()
     m_inheritanceLabel->setText(QStringLiteral(
         "普通模板：首次按图把工件指定位置卡入V型槽；长边为+X，短边为+Y。"));
     LoadTeachingForCurrentRobot();
+    RefreshSeamTable();
     RefreshStationTable();
     RefreshPreview(false);
     SetStatus(QStringLiteral("已生成4个候选站。候选位置仅用于辅助选点，必须逐项人工确认后才可生产。"));
@@ -1574,6 +1748,7 @@ void ModelWeldingFlowDialog::InheritSimilarTemplate()
     m_mesh = std::move(candidateMesh);
     m_modelIdentityValid = true;
     m_template = inherited;
+    ClearSeamCandidates();
     m_templatePersisted = false;
     m_templateDirty = true;
     {
@@ -1647,6 +1822,7 @@ void ModelWeldingFlowDialog::InheritSimilarTemplate()
     m_loading = false;
     m_inheritanceLabel->setText(QStringLiteral(
         "已创建相似模型快照：运行时可跳过V型槽实物粗校准，但所有映射后的编号站必须重新确认。"));
+    RefreshSeamTable();
     RefreshStationTable();
     RefreshStationDetails();
     RefreshPreview(false);
@@ -1911,7 +2087,7 @@ void ModelWeldingFlowDialog::LoadCurrentRobotCatalogModel(bool reportErrors)
     {
         error = QStringLiteral("当前控制单元未设置机器人型号。");
     }
-    else if (configuredRobotType < 0 || configuredRobotType != driver->m_nRobotType)
+    else if (configuredRobotType < 0 || configuredRobotType != driver->RobotType())
     {
         error = QStringLiteral("当前控制单元机器人类型与实际驱动不一致。");
     }
@@ -1919,7 +2095,7 @@ void ModelWeldingFlowDialog::LoadCurrentRobotCatalogModel(bool reportErrors)
     RobotModelCatalogStore::Eligibility eligibility;
     if (error.isEmpty()
         && !RobotModelCatalogStore::ResolveModelEligibility(
-            modelId, driver->m_nRobotType, eligibility, error))
+            modelId, driver->RobotType(), eligibility, error))
     {
         if (error.trimmed().isEmpty())
         {
@@ -2075,6 +2251,32 @@ void ModelWeldingFlowDialog::SaveTemplate()
         QMessageBox::warning(this, QStringLiteral("保存模型模板"),
             QStringLiteral("工件尚未用外包络大平面吸附到地面。请先在三维界面选择候选大面并执行吸附。"));
         return;
+    }
+    QString currentSourcePath;
+    QString currentSourceSha256;
+    QString seamSourceError;
+    if (!ReferenceModelLibrary::ResolveConfirmedStepDisplaySource(
+            m_template.modelLibraryName,
+            m_template.modelSha256,
+            currentSourcePath,
+            currentSourceSha256,
+            seamSourceError))
+    {
+        QMessageBox::warning(this, QStringLiteral("保存模型模板"), seamSourceError);
+        return;
+    }
+    for (const ModelWeldingSeamDefinition& seam : m_template.seams)
+    {
+        const QString expectedSha = seam.source
+            == ModelWeldingSeamSource::ReverseMeshSeedProjection
+            ? m_template.modelSha256 : currentSourceSha256;
+        if (seam.sourceGeometrySha256 != expectedSha)
+        {
+            QMessageBox::warning(this, QStringLiteral("保存模型模板"),
+                QStringLiteral("焊缝 %1 的来源几何 SHA-256 与当前模型不一致，禁止保存旧候选。")
+                    .arg(seam.seamId));
+            return;
+        }
     }
     if (!HasActiveSimilarityInheritance()
         && !m_vSlotWorkpieceSnapped)
@@ -2356,19 +2558,38 @@ void ModelWeldingFlowDialog::CheckProductionReadiness()
     {
         robotModelError = QStringLiteral("当前机器人没有真实驱动。");
     }
+    else if (robotModelError.isEmpty()
+        && !driver->SupportsAll(
+            { RobotDriverCapability::JointMotion,
+              RobotDriverCapability::LinearMotion,
+              RobotDriverCapability::PassiveState,
+              RobotDriverCapability::ContinuousTrajectory,
+              RobotDriverCapability::VerifiedProgramCompletion,
+              RobotDriverCapability::VerifiedSafeAbort }))
+    {
+        robotModelError = QStringLiteral(
+            "当前机器人品牌底层不能满足模型先测后焊，缺少适配能力：%1；生产入口已限制。")
+            .arg(QString::fromUtf8(driver->MissingCapabilitiesText(
+                { RobotDriverCapability::JointMotion,
+                  RobotDriverCapability::LinearMotion,
+                  RobotDriverCapability::PassiveState,
+                  RobotDriverCapability::ContinuousTrajectory,
+                  RobotDriverCapability::VerifiedProgramCompletion,
+                  RobotDriverCapability::VerifiedSafeAbort }).c_str()));
+    }
     else if (robotModelError.isEmpty() && currentRobotModelId.isEmpty())
     {
         robotModelError = QStringLiteral("当前控制单元未设置机器人型号。");
     }
     else if (robotModelError.isEmpty()
-        && (configuredRobotType < 0 || configuredRobotType != driver->m_nRobotType))
+        && (configuredRobotType < 0 || configuredRobotType != driver->RobotType()))
     {
         robotModelError = QStringLiteral("当前控制单元机器人类型与实际驱动不一致。");
     }
     else if (robotModelError.isEmpty()
         && !RobotModelCatalogStore::ResolveModelEligibility(
                  currentRobotModelId,
-                 driver->m_nRobotType,
+                 driver->RobotType(),
                  robotEligibility,
                  robotModelError))
     {
@@ -2455,6 +2676,31 @@ void ModelWeldingFlowDialog::CheckProductionReadiness()
             currentModelHash.isEmpty() ? error : QStringLiteral("模型文件SHA-256已变化，模板失效。"));
         return;
     }
+    QString currentSourcePath;
+    QString currentSourceSha256;
+    if (!ReferenceModelLibrary::ResolveConfirmedStepDisplaySource(
+            m_template.modelLibraryName,
+            m_template.modelSha256,
+            currentSourcePath,
+            currentSourceSha256,
+            error))
+    {
+        QMessageBox::warning(this, QStringLiteral("配置生产就绪检查"), error);
+        return;
+    }
+    for (const ModelWeldingSeamDefinition& seam : m_template.seams)
+    {
+        const QString expectedSha = seam.source
+            == ModelWeldingSeamSource::ReverseMeshSeedProjection
+            ? currentModelHash : currentSourceSha256;
+        if (seam.sourceGeometrySha256 != expectedSha)
+        {
+            QMessageBox::warning(this, QStringLiteral("配置生产就绪检查"),
+                QStringLiteral("焊缝 %1 的来源几何 SHA-256 与当前模型不一致。")
+                    .arg(seam.seamId));
+            return;
+        }
+    }
     if (!ModelWeldingWorkflow::ValidateTeachingStructure(
         m_teaching, &m_template, error, true))
     {
@@ -2479,7 +2725,7 @@ void ModelWeldingFlowDialog::CheckProductionReadiness()
         return;
     }
     QMessageBox::information(this, QStringLiteral("配置生产就绪检查"),
-        QStringLiteral("模板、模型身份、3个求解站、1个验证站、人工示教及运行绑定均已通过配置检查。\n\n"
+        QStringLiteral("模板、模型身份、已确认焊缝、3个求解站、1个验证站、人工示教及运行绑定均已通过配置检查。\n\n"
                        "注意：多站点云纯采集、特征拟合、生产证明和自动焊接执行尚未接通，"
                        "因此本版本仍不会启动机器人。"));
 }
@@ -2592,7 +2838,7 @@ bool ModelWeldingFlowDialog::ReadCurrentRobotModelIdentity(
         error = QStringLiteral("当前控制单元未设置机器人型号。");
         return false;
     }
-    if (configuredRobotType < 0 || configuredRobotType != driver->m_nRobotType)
+    if (configuredRobotType < 0 || configuredRobotType != driver->RobotType())
     {
         error = QStringLiteral("当前控制单元机器人类型与实际驱动不一致。");
         return false;
@@ -2606,7 +2852,7 @@ bool ModelWeldingFlowDialog::ReadCurrentRobotModelIdentity(
 
     RobotModelCatalogStore::Eligibility eligibility;
     if (!RobotModelCatalogStore::ResolveModelEligibility(
-            configuredModelId, driver->m_nRobotType, eligibility, error))
+            configuredModelId, driver->RobotType(), eligibility, error))
     {
         if (error.trimmed().isEmpty())
         {
@@ -2658,6 +2904,12 @@ bool ModelWeldingFlowDialog::ReadCurrentRuntimeIdentity(
     if (driver == nullptr)
     {
         error = QStringLiteral("当前机器人没有可用驱动。");
+        return false;
+    }
+    if (!driver->Supports(RobotDriverCapability::ToolDataRead))
+    {
+        error = QStringLiteral(
+            "当前机器人品牌底层缺少“工具数据读取”适配能力，无法绑定控制器Tool1，功能已限制。");
         return false;
     }
     const QString firstEndpoint =
@@ -2803,6 +3055,12 @@ void ModelWeldingFlowDialog::TeachStart()
             QStringLiteral("请先选择扫描站，并确认当前机器人驱动可用。"));
         return;
     }
+    if (!driver->Supports(RobotDriverCapability::PassiveState))
+    {
+        QMessageBox::warning(this, QStringLiteral("示教扫描起点"),
+            QStringLiteral("当前机器人品牌底层缺少“机器人状态读取”适配能力，示教功能已限制。"));
+        return;
+    }
     const QString endpoint = RobotOperationLease::PersistentEndpointIdentity(driver).trimmed();
     if (endpoint.isEmpty()
         || (!m_teaching.robotEndpoint.isEmpty() && m_teaching.robotEndpoint != endpoint))
@@ -2865,6 +3123,12 @@ void ModelWeldingFlowDialog::TeachEnd()
             QStringLiteral("请先选择扫描站，并确认当前机器人驱动可用。"));
         return;
     }
+    if (!driver->Supports(RobotDriverCapability::PassiveState))
+    {
+        QMessageBox::warning(this, QStringLiteral("示教扫描终点"),
+            QStringLiteral("当前机器人品牌底层缺少“机器人状态读取”适配能力，示教功能已限制。"));
+        return;
+    }
     const QString endpoint = RobotOperationLease::PersistentEndpointIdentity(driver).trimmed();
     if (endpoint.isEmpty()
         || (!m_teaching.robotEndpoint.isEmpty() && m_teaching.robotEndpoint != endpoint))
@@ -2906,6 +3170,571 @@ void ModelWeldingFlowDialog::TeachEnd()
     RefreshStationDetails();
     SetStatus(QStringLiteral("站点 %1 的扫描终点已读取，尚未保存。")
         .arg(stationId));
+}
+
+void ModelWeldingFlowDialog::ClearSeamCandidates()
+{
+    m_seamCandidates.clear();
+    m_seamCandidateSourcePath.clear();
+    m_seamCandidateSourceSha256.clear();
+    if (m_seamCandidateCombo != nullptr)
+    {
+        const QSignalBlocker blocker(m_seamCandidateCombo);
+        m_seamCandidateCombo->clear();
+    }
+}
+
+void ModelWeldingFlowDialog::ExtractCadSeamCandidates()
+{
+    if (m_template.templateId.isEmpty() || !m_modelIdentityValid)
+    {
+        QMessageBox::warning(this, QStringLiteral("提取焊缝候选"),
+            QStringLiteral("请先新建或载入身份有效的模型模板。"));
+        return;
+    }
+    QString sourcePath;
+    QString sourceSha256;
+    QString error;
+    if (!ReferenceModelLibrary::ResolveConfirmedStepDisplaySource(
+            m_template.modelLibraryName,
+            m_template.modelSha256,
+            sourcePath,
+            sourceSha256,
+            error))
+    {
+        ClearSeamCandidates();
+        QMessageBox::warning(this, QStringLiteral("提取焊缝候选"), error);
+        return;
+    }
+
+    QVector<CadSeamCandidateExtractor::Candidate> extracted;
+    CadSeamCandidateExtractor::Statistics statistics;
+    CadSeamCandidateExtractor::Options options;
+    options.minimumLengthMm = m_seamMinimumLengthSpin->value();
+    options.samplingStepMm = 2.0;
+    bool success = false;
+    NonClosableProgressDialog progress(
+        QStringLiteral("正在只读解析源 STEP，并识别板间对接立焊与下端波纹平焊…"),
+        QString(), 0, 0, this);
+    progress.setWindowTitle(QStringLiteral("提取焊缝候选"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setCancelButton(nullptr);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    progress.setMinimumWidth(560);
+    progress.setWindowFlag(Qt::WindowCloseButtonHint, false);
+
+    QEventLoop waitLoop;
+    QThread* worker = QThread::create([&]()
+        {
+            try
+            {
+                success = CadSeamCandidateExtractor::ExtractFromStepFile(
+                    sourcePath, extracted, error, &statistics, &options);
+            }
+            catch (const std::exception& exception)
+            {
+                error = QStringLiteral("焊缝候选提取线程发生异常：%1")
+                    .arg(QString::fromLocal8Bit(exception.what()).simplified());
+                success = false;
+            }
+            catch (...)
+            {
+                error = QStringLiteral("焊缝候选提取线程发生未知异常。");
+                success = false;
+            }
+        });
+    connect(worker, &QThread::finished, &waitLoop, &QEventLoop::quit);
+    connect(worker, &QThread::finished, &progress, &QProgressDialog::accept);
+    progress.show();
+    worker->start();
+    waitLoop.exec();
+    worker->wait();
+    delete worker;
+    progress.accept();
+
+    if (!success)
+    {
+        ClearSeamCandidates();
+        QMessageBox::warning(this, QStringLiteral("提取焊缝候选"), error);
+        return;
+    }
+    QString verifiedPath;
+    QString verifiedSha256;
+    if (!ReferenceModelLibrary::ResolveConfirmedStepDisplaySource(
+            m_template.modelLibraryName,
+            m_template.modelSha256,
+            verifiedPath,
+            verifiedSha256,
+            error)
+        || verifiedPath != sourcePath || verifiedSha256 != sourceSha256)
+    {
+        ClearSeamCandidates();
+        QMessageBox::warning(this, QStringLiteral("提取焊缝候选"),
+            error.isEmpty()
+                ? QStringLiteral("提取期间源 STEP 身份发生变化，候选已丢弃。") : error);
+        return;
+    }
+
+    m_seamCandidates = std::move(extracted);
+    m_seamCandidateSourcePath = sourcePath;
+    m_seamCandidateSourceSha256 = sourceSha256;
+    m_loading = true;
+    m_seamCandidateCombo->clear();
+    for (int index = 0; index < m_seamCandidates.size(); ++index)
+    {
+        const auto& candidate = m_seamCandidates.at(index);
+        QString description = QStringLiteral("%1 | %2 | %3 mm")
+            .arg(candidate.candidateId, CandidateSourceText(candidate.sourceKind))
+            .arg(candidate.lengthMm, 0, 'f', 1);
+        if (candidate.sourceKind == CadSeamCandidateExtractor::SourceKind::SharedEdge)
+            description += QStringLiteral(" | %1°").arg(
+                candidate.dihedralDegrees, 0, 'f', 1);
+        m_seamCandidateCombo->addItem(description, index);
+    }
+    m_loading = false;
+    RefreshPreview(true);
+    SetStatus(QStringLiteral(
+        "已从源 STEP 提取 %1 条候选：板间对接立焊 %2 条、下端波纹平焊 %3 条；"
+        "装配语义=%4，共边候选=%5。当前只预览，不会自动确认或生成机器人轨迹。")
+        .arg(m_seamCandidates.size())
+        .arg(statistics.corrugatedButtJointCount)
+        .arg(statistics.corrugatedBaseJointCount)
+        .arg(statistics.assemblySemanticsUsed
+            ? QStringLiteral("已采用") : QStringLiteral("未识别/已回退"))
+        .arg(statistics.sharedEdgeCount));
+}
+
+void ModelWeldingFlowDialog::AddSelectedCadSeamCandidate()
+{
+    const int comboIndex = m_seamCandidateCombo != nullptr
+        ? m_seamCandidateCombo->currentIndex() : -1;
+    const int candidateIndex = comboIndex >= 0
+        ? m_seamCandidateCombo->itemData(comboIndex).toInt() : -1;
+    if (candidateIndex < 0 || candidateIndex >= m_seamCandidates.size())
+    {
+        QMessageBox::information(this, QStringLiteral("加入焊缝模板"),
+            QStringLiteral("请先提取并选择一条候选。"));
+        return;
+    }
+    QString sourcePath;
+    QString sourceSha256;
+    QString error;
+    if (!m_modelIdentityValid
+        || !ReferenceModelLibrary::ResolveConfirmedStepDisplaySource(
+            m_template.modelLibraryName,
+            m_template.modelSha256,
+            sourcePath,
+            sourceSha256,
+            error)
+        || sourcePath != m_seamCandidateSourcePath
+        || sourceSha256 != m_seamCandidateSourceSha256)
+    {
+        ClearSeamCandidates();
+        QMessageBox::warning(this, QStringLiteral("加入焊缝模板"),
+            error.isEmpty()
+                ? QStringLiteral("源 STEP 身份已变化，请重新提取候选。") : error);
+        RefreshPreview(true);
+        return;
+    }
+    const auto& candidate = m_seamCandidates.at(candidateIndex);
+    const QString seamId = candidate.candidateId.toLower();
+    const auto duplicate = std::find_if(
+        m_template.seams.cbegin(), m_template.seams.cend(),
+        [&seamId](const ModelWeldingSeamDefinition& seam)
+        {
+            return seam.seamId == seamId;
+        });
+    if (duplicate != m_template.seams.cend())
+    {
+        QMessageBox::information(this, QStringLiteral("加入焊缝模板"),
+            QStringLiteral("该候选已在当前模板中。"));
+        return;
+    }
+
+    ModelWeldingSeamDefinition seam;
+    seam.seamId = seamId;
+    switch (candidate.sourceKind)
+    {
+    case CadSeamCandidateExtractor::SourceKind::ShapeIntersection:
+        seam.source = ModelWeldingSeamSource::CadShapeIntersection;
+        break;
+    case CadSeamCandidateExtractor::SourceKind::CorrugatedButtJoint:
+        seam.source = ModelWeldingSeamSource::CadCorrugatedButtJoint;
+        break;
+    case CadSeamCandidateExtractor::SourceKind::CorrugatedBaseJoint:
+        seam.source = ModelWeldingSeamSource::CadCorrugatedBaseJoint;
+        break;
+    default:
+        seam.source = ModelWeldingSeamSource::CadSharedEdge;
+        break;
+    }
+    seam.sourceGeometrySha256 = sourceSha256;
+    seam.pathModelMm = candidate.pointsModelMm;
+    seam.lengthMm = PolylineLength(seam.pathModelMm);
+    seam.humanConfirmed = false;
+    ModelWeldingFlowTemplate candidateTemplate = m_template;
+    candidateTemplate.seams.push_back(seam);
+    if (!ModelWeldingWorkflow::ValidateTemplateStructure(candidateTemplate, error, false)
+        || ModelWeldingWorkflow::EncodeTemplate(candidateTemplate, error).isEmpty())
+    {
+        QMessageBox::warning(this, QStringLiteral("加入焊缝模板"), error);
+        return;
+    }
+    m_template = std::move(candidateTemplate);
+    m_templateDirty = true;
+    RefreshSeamTable();
+    SetStatus(QStringLiteral(
+        "候选 %1 已加入模板，当前仍未确认。请在三维视图核对后勾选“确认”。")
+        .arg(candidate.candidateId));
+}
+
+void ModelWeldingFlowDialog::ProjectReverseMeshSeedFile()
+{
+    bool addToTemplate = !m_template.templateId.isEmpty()
+        && m_modelIdentityValid && m_mesh.IsValid();
+    QString projectionModelName;
+    QString currentModelHash;
+    WorkpieceMeshBuilder::Mesh projectionMesh;
+    QString error;
+    if (addToTemplate)
+    {
+        projectionModelName = m_template.modelLibraryName;
+        currentModelHash = m_template.modelSha256;
+        projectionMesh = m_mesh;
+        QString confirmedStepPath;
+        QString confirmedStepSha256;
+        QString confirmedStepError;
+        if (!ReferenceModelLibrary::ResolveConfirmedStepDisplaySource(
+                projectionModelName,
+                currentModelHash,
+                confirmedStepPath,
+                confirmedStepSha256,
+                confirmedStepError))
+        {
+            // 现有模型焊接模板的地面/V槽复核必须使用源 STEP；纯 PLY 不伪装成
+            // 可保存模板，只走同页的预览确认与带双哈希导出。
+            addToTemplate = false;
+        }
+    }
+    else
+    {
+        projectionModelName = m_modelCombo != nullptr
+            ? m_modelCombo->currentText().trimmed() : QString();
+        if (projectionModelName.isEmpty()
+            || !ReferenceModelLibrary::LoadModel(
+                projectionModelName, projectionMesh, error))
+        {
+            QMessageBox::warning(this, QStringLiteral("逆向网格种子投影"),
+                error.isEmpty()
+                    ? QStringLiteral("请先在模型库选择一个有效的逆向 PLY。") : error);
+            return;
+        }
+        currentModelHash = ModelWeldingWorkflow::ComputeFileSha256(
+            ReferenceModelLibrary::ModelPath(projectionModelName), &error);
+        if (currentModelHash.isEmpty())
+        {
+            QMessageBox::warning(this, QStringLiteral("逆向网格种子投影"), error);
+            return;
+        }
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("选择模型坐标种子点列"),
+        QString(),
+        QStringLiteral("点列文本 (*.txt *.csv);;所有文件 (*)"));
+    if (path.isEmpty()) return;
+
+    QVector<RobotCalculation::IndexedPoint3D> indexedSeed;
+    if (!RobotDataHelper::LoadIndexedPoint3DFile(path, indexedSeed, &error))
+    {
+        QMessageBox::warning(this, QStringLiteral("逆向网格种子投影"), error);
+        return;
+    }
+    QVector<Eigen::Vector3d> seed;
+    seed.reserve(indexedSeed.size());
+    for (const RobotCalculation::IndexedPoint3D& point : indexedSeed)
+        seed.push_back(point.point);
+    const QString seedSha256 = ModelWeldingWorkflow::ComputeFileSha256(path, &error);
+    if (seedSha256.isEmpty())
+    {
+        QMessageBox::warning(this, QStringLiteral("逆向网格种子投影"), error);
+        return;
+    }
+    const QString checkedModelHash = ModelWeldingWorkflow::ComputeFileSha256(
+        ReferenceModelLibrary::ModelPath(projectionModelName), &error);
+    if (checkedModelHash.isEmpty() || checkedModelHash != currentModelHash)
+    {
+        QMessageBox::warning(this, QStringLiteral("逆向网格种子投影"),
+            currentModelHash.isEmpty() ? error
+                : QStringLiteral("计算 PLY 身份已变化，禁止使用缓存网格投影。"));
+        return;
+    }
+
+    ReverseMeshSeamProjector::Options projectionOptions;
+    double minimumSeedX = seed.front().x();
+    double maximumSeedX = minimumSeedX;
+    double minimumSeedY = seed.front().y();
+    double maximumSeedY = minimumSeedY;
+    for (const Eigen::Vector3d& point : seed)
+    {
+        minimumSeedX = std::min(minimumSeedX, point.x());
+        maximumSeedX = std::max(maximumSeedX, point.x());
+        minimumSeedY = std::min(minimumSeedY, point.y());
+        maximumSeedY = std::max(maximumSeedY, point.y());
+    }
+    projectionOptions.sampleAxis = maximumSeedX - minimumSeedX
+        >= maximumSeedY - minimumSeedY
+        ? RobotCalculation::SampleAxis::AxisX
+        : RobotCalculation::SampleAxis::AxisY;
+    ReverseMeshSeamProjector::Result projected;
+    bool success = false;
+    NonClosableProgressDialog progress(
+        QStringLiteral("正在把人工粗种子投影到逆向 PLY 表面…"),
+        QString(), 0, 0, this);
+    progress.setWindowTitle(QStringLiteral("逆向网格种子投影"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setCancelButton(nullptr);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    progress.setWindowFlag(Qt::WindowCloseButtonHint, false);
+    QEventLoop waitLoop;
+    QThread* worker = QThread::create([&]()
+        {
+            try
+            {
+                success = ReverseMeshSeamProjector::Project(
+                    projectionMesh, seed, projected, error, &projectionOptions);
+            }
+            catch (const std::exception& exception)
+            {
+                error = QStringLiteral("逆向网格投影线程发生异常：%1")
+                    .arg(QString::fromLocal8Bit(exception.what()).simplified());
+                success = false;
+            }
+            catch (...)
+            {
+                error = QStringLiteral("逆向网格投影线程发生未知异常。");
+                success = false;
+            }
+        });
+    connect(worker, &QThread::finished, &waitLoop, &QEventLoop::quit);
+    connect(worker, &QThread::finished, &progress, &QProgressDialog::accept);
+    progress.show();
+    worker->start();
+    waitLoop.exec();
+    worker->wait();
+    delete worker;
+    progress.accept();
+    if (!success)
+    {
+        QMessageBox::warning(this, QStringLiteral("逆向网格种子投影"), error);
+        return;
+    }
+
+    QDialog review(this);
+    review.setWindowTitle(QStringLiteral("核对逆向网格投影焊缝"));
+    review.resize(1100, 760);
+    QVBoxLayout* reviewLayout = new QVBoxLayout(&review);
+    QLabel* reviewHint = new QLabel(QStringLiteral(
+        "灰色 = 逆向 PLY 顶点抽样；蓝色 = 输入粗种子；黄色 = 投影结果。"
+        "请旋转、缩放核对整条焊缝。确认只写入模型坐标轨迹，不生成姿态、不启动机器人。"));
+    reviewHint->setWordWrap(true);
+    reviewLayout->addWidget(reviewHint);
+    pcview::PointCloud3DView* reviewView = new pcview::PointCloud3DView(&review);
+    QVector<pcview::PointCloud3DView::Layer> layers;
+    pcview::PointCloud3DView::Layer meshLayer;
+    meshLayer.name = QStringLiteral("逆向 PLY 顶点抽样");
+    meshLayer.color = QColor(144, 164, 174);
+    meshLayer.pointSize = 1.0;
+    constexpr int kMaximumPreviewMeshPoints = 60000;
+    const int previewStride = std::max(1,
+        static_cast<int>(std::ceil(
+            static_cast<double>(projectionMesh.vertices.size()) / kMaximumPreviewMeshPoints)));
+    meshLayer.points.reserve(std::min(
+        static_cast<int>(projectionMesh.vertices.size()), kMaximumPreviewMeshPoints));
+    for (int index = 0; index < projectionMesh.vertices.size(); index += previewStride)
+    {
+        const Eigen::Vector3f& point = projectionMesh.vertices.at(index);
+        meshLayer.points.push_back({ point.x(), point.y(), point.z() });
+    }
+    layers.push_back(std::move(meshLayer));
+    pcview::PointCloud3DView::Layer seedLayer;
+    seedLayer.name = QStringLiteral("输入粗种子");
+    seedLayer.color = QColor(66, 165, 245);
+    seedLayer.connectLines = true;
+    seedLayer.pointSize = 2.6;
+    for (const Eigen::Vector3d& point : seed)
+        seedLayer.points.push_back({ point.x(), point.y(), point.z() });
+    layers.push_back(std::move(seedLayer));
+    pcview::PointCloud3DView::Layer projectedLayer;
+    projectedLayer.name = QStringLiteral("投影焊缝");
+    projectedLayer.color = QColor(255, 214, 64);
+    projectedLayer.connectLines = true;
+    projectedLayer.pointSize = 3.0;
+    for (const Eigen::Vector3d& point : projected.pathModelMm)
+        projectedLayer.points.push_back({ point.x(), point.y(), point.z() });
+    layers.push_back(std::move(projectedLayer));
+    reviewView->SetLayers(layers);
+    reviewLayout->addWidget(reviewView, 1);
+    QDialogButtonBox* reviewButtons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &review);
+    reviewButtons->button(QDialogButtonBox::Ok)->setText(addToTemplate
+        ? QStringLiteral("已核对，加入并确认")
+        : QStringLiteral("已核对，导出点列"));
+    reviewButtons->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    connect(reviewButtons, &QDialogButtonBox::accepted, &review, &QDialog::accept);
+    connect(reviewButtons, &QDialogButtonBox::rejected, &review, &QDialog::reject);
+    reviewLayout->addWidget(reviewButtons);
+    if (review.exec() != QDialog::Accepted) return;
+
+    const QString verifiedModelHash = ModelWeldingWorkflow::ComputeFileSha256(
+        ReferenceModelLibrary::ModelPath(projectionModelName), &error);
+    const QString verifiedSeedHash = ModelWeldingWorkflow::ComputeFileSha256(path, &error);
+    if (verifiedModelHash != currentModelHash || verifiedSeedHash != seedSha256)
+    {
+        QMessageBox::warning(this, QStringLiteral("逆向网格种子投影"),
+            QStringLiteral("投影期间模型或种子文件发生变化，结果已丢弃。"));
+        return;
+    }
+
+    if (!addToTemplate)
+    {
+        const QString outputPath = QFileDialog::getSaveFileName(
+            this,
+            QStringLiteral("导出已确认的逆向网格焊缝点列"),
+            projectionModelName + QStringLiteral("_ReverseMeshSeam.txt"),
+            QStringLiteral("点列文本 (*.txt)"));
+        if (outputPath.isEmpty()) return;
+        QStringList lines;
+        lines.reserve(projected.pathModelMm.size() + 4);
+        lines.push_back(QStringLiteral("# source_model_sha256=%1").arg(currentModelHash));
+        lines.push_back(QStringLiteral("# seed_path_sha256=%1").arg(seedSha256));
+        lines.push_back(QStringLiteral("index x y z"));
+        for (int index = 0; index < projected.pathModelMm.size(); ++index)
+        {
+            const Eigen::Vector3d& point = projected.pathModelMm.at(index);
+            lines.push_back(QStringLiteral("%1 %2 %3 %4")
+                .arg(index + 1)
+                .arg(point.x(), 0, 'f', 6)
+                .arg(point.y(), 0, 'f', 6)
+                .arg(point.z(), 0, 'f', 6));
+        }
+        if (!RobotDataHelper::SaveTextFileLines(outputPath, lines, &error))
+        {
+            QMessageBox::warning(this, QStringLiteral("导出逆向网格焊缝"), error);
+            return;
+        }
+        SetStatus(QStringLiteral(
+            "已导出人工核对后的逆向网格焊缝：%1 点；文件包含模型和种子 SHA-256 证明。")
+            .arg(projected.pathModelMm.size()));
+        return;
+    }
+
+    const QByteArray identityInput = currentModelHash.toLatin1()
+        + ':' + seedSha256.toLatin1();
+    const QString seamId = QStringLiteral("mesh-%1").arg(
+        QString::fromLatin1(QCryptographicHash::hash(
+            identityInput, QCryptographicHash::Sha256).toHex().left(16)));
+    const auto duplicate = std::find_if(
+        m_template.seams.cbegin(), m_template.seams.cend(),
+        [&seamId](const ModelWeldingSeamDefinition& seam)
+        {
+            return seam.seamId == seamId;
+        });
+    if (duplicate != m_template.seams.cend())
+    {
+        QMessageBox::information(this, QStringLiteral("逆向网格种子投影"),
+            QStringLiteral("相同模型与种子文件的投影结果已在模板中。"));
+        return;
+    }
+    ModelWeldingSeamDefinition seam;
+    seam.seamId = seamId;
+    seam.source = ModelWeldingSeamSource::ReverseMeshSeedProjection;
+    seam.sourceGeometrySha256 = currentModelHash;
+    seam.seedPathSha256 = seedSha256;
+    seam.pathModelMm = std::move(projected.pathModelMm);
+    seam.lengthMm = PolylineLength(seam.pathModelMm);
+    seam.humanConfirmed = true;
+    const int outputPointCount = seam.pathModelMm.size();
+    ModelWeldingFlowTemplate candidateTemplate = m_template;
+    candidateTemplate.seams.push_back(seam);
+    if (!ModelWeldingWorkflow::ValidateTemplateStructure(candidateTemplate, error, false)
+        || ModelWeldingWorkflow::EncodeTemplate(candidateTemplate, error).isEmpty())
+    {
+        QMessageBox::warning(this, QStringLiteral("逆向网格种子投影"), error);
+        return;
+    }
+    m_template = std::move(candidateTemplate);
+    m_templateDirty = true;
+    RefreshSeamTable();
+    SetStatus(QStringLiteral(
+        "逆向网格种子投影已加入模板：网格 %1 点、种子 %2 点、输出 %3 点、"
+        "回退 %4 点；已在点云叠加视图中完成人工确认。")
+        .arg(projected.meshVertexCount)
+        .arg(projected.seedPointCount)
+        .arg(outputPointCount)
+        .arg(projected.fallbackPointCount));
+}
+
+void ModelWeldingFlowDialog::RemoveSelectedSeam()
+{
+    const int row = m_seamTable != nullptr ? m_seamTable->currentRow() : -1;
+    if (row < 0 || row >= m_template.seams.size())
+    {
+        QMessageBox::information(this, QStringLiteral("移除焊缝"),
+            QStringLiteral("请先选择模板中的一条焊缝。"));
+        return;
+    }
+    const QString seamId = m_template.seams.at(row).seamId;
+    m_template.seams.removeAt(row);
+    m_templateDirty = true;
+    RefreshSeamTable();
+    SetStatus(QStringLiteral("已从当前模板移除焊缝 %1，尚未保存。").arg(seamId));
+}
+
+void ModelWeldingFlowDialog::RefreshSeamTable()
+{
+    if (m_seamTable == nullptr) return;
+    QString selectedId;
+    const int oldRow = m_seamTable->currentRow();
+    if (oldRow >= 0 && oldRow < m_template.seams.size())
+        selectedId = m_template.seams.at(oldRow).seamId;
+    m_loading = true;
+    m_seamTable->setRowCount(m_template.seams.size());
+    int selectedRow = -1;
+    for (int row = 0; row < m_template.seams.size(); ++row)
+    {
+        const ModelWeldingSeamDefinition& seam = m_template.seams.at(row);
+        const QStringList values = {
+            seam.seamId,
+            SeamSourceText(seam.source),
+            QString::number(seam.lengthMm, 'f', 1),
+            QString::number(seam.pathModelMm.size())
+        };
+        for (int column = 0; column < values.size(); ++column)
+        {
+            QTableWidgetItem* item = new QTableWidgetItem(values.at(column));
+            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+            m_seamTable->setItem(row, column, item);
+        }
+        QTableWidgetItem* confirmed = new QTableWidgetItem();
+        confirmed->setFlags((confirmed->flags() | Qt::ItemIsUserCheckable)
+            & ~Qt::ItemIsEditable);
+        confirmed->setCheckState(seam.humanConfirmed ? Qt::Checked : Qt::Unchecked);
+        m_seamTable->setItem(row, 4, confirmed);
+        if (seam.seamId == selectedId) selectedRow = row;
+    }
+    if (selectedRow < 0 && !m_template.seams.isEmpty()) selectedRow = 0;
+    if (selectedRow >= 0)
+    {
+        m_seamTable->selectRow(selectedRow);
+        m_seamTable->setCurrentCell(selectedRow, 0);
+    }
+    m_loading = false;
+    RefreshPreview(true);
 }
 
 void ModelWeldingFlowDialog::RefreshStationTable()
@@ -3468,6 +4297,36 @@ void ModelWeldingFlowDialog::RefreshPreview(bool preserveView)
         return;
     }
 
+    const int selectedSeamRow = m_seamTable != nullptr ? m_seamTable->currentRow() : -1;
+    for (int seamIndex = 0; seamIndex < m_template.seams.size(); ++seamIndex)
+    {
+        const ModelWeldingSeamDefinition& seam = m_template.seams.at(seamIndex);
+        const bool sourceMatches = seam.source
+            == ModelWeldingSeamSource::ReverseMeshSeedProjection
+            ? seam.sourceGeometrySha256 == m_template.modelSha256
+            : seam.sourceGeometrySha256 == expectedSourceSha256;
+        if (!sourceMatches) continue;
+        const bool selected = seamIndex == selectedSeamRow;
+        const QColor color = selected
+            ? QColor(255, 214, 64)
+            : (seam.humanConfirmed ? QColor(102, 187, 106) : QColor(239, 83, 80));
+        AppendPolylineGuides(
+            seam.pathModelMm, color, selected ? 4.2 : 3.0, guides);
+    }
+    const int candidateComboIndex = m_seamCandidateCombo != nullptr
+        ? m_seamCandidateCombo->currentIndex() : -1;
+    const int selectedCandidateIndex = candidateComboIndex >= 0
+        ? m_seamCandidateCombo->itemData(candidateComboIndex).toInt() : -1;
+    if (selectedCandidateIndex >= 0
+        && selectedCandidateIndex < m_seamCandidates.size()
+        && m_seamCandidateSourcePath == sourcePath
+        && m_seamCandidateSourceSha256 == expectedSourceSha256)
+    {
+        AppendPolylineGuides(
+            m_seamCandidates.at(selectedCandidateIndex).pointsModelMm,
+            QColor(38, 198, 218), 3.4, guides);
+    }
+
     QString displayError;
     const bool loaded = m_preview->SetStepFile(
         sourcePath,
@@ -3514,6 +4373,12 @@ void ModelWeldingFlowDialog::RefreshPreview(bool preserveView)
     m_previewInitialized = loaded;
     if (loaded)
     {
+        if (!m_seamCandidateSourceSha256.isEmpty()
+            && (m_seamCandidateSourcePath != sourcePath
+                || m_seamCandidateSourceSha256 != expectedSourceSha256))
+        {
+            ClearSeamCandidates();
+        }
         m_previewModelName = modelName;
         m_previewPlySha256 = plySha256;
         m_previewSourcePath = sourcePath;

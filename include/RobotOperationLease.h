@@ -12,11 +12,21 @@
 #include <string>
 
 // 独立并发 smoke 只需要端点字段，避免为小测试链接完整机器人 SDK。
+struct RobotConnectionEndpoint
+{
+    std::string host;
+    int port = 0;
+};
+
 class RobotDriverAdaptor final
 {
 public:
     std::string m_sSocketIP;
     int m_nSocketPort = 0;
+    RobotConnectionEndpoint ControlEndpoint() const
+    {
+        return RobotConnectionEndpoint{ m_sSocketIP, m_nSocketPort };
+    }
     bool AbortCurrentProgramSafely() { return false; }
 };
 #else

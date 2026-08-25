@@ -1,7 +1,6 @@
 #include "RobotJogDialog.h"
 
 #include "ConfigDatabase.h"
-#include "FANUCRobotDriver.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
 #include "RobotMotionTimeoutPolicy.h"
@@ -53,15 +52,15 @@ namespace
 
 		switch (axisIndex)
 		{
-		case 0: return driver->m_tAxisUnit.dSPulseUnit;
-		case 1: return driver->m_tAxisUnit.dLPulseUnit;
-		case 2: return driver->m_tAxisUnit.dUPulseUnit;
-		case 3: return driver->m_tAxisUnit.dRPulseUnit;
-		case 4: return driver->m_tAxisUnit.dBPulseUnit;
-		case 5: return driver->m_tAxisUnit.dTPulseUnit;
-		case 6: return driver->m_tAxisUnit.dBXPulseUnit;
-		case 7: return driver->m_tAxisUnit.dBYPulseUnit;
-		case 8: return driver->m_tAxisUnit.dBZPulseUnit;
+		case 0: return driver->AxisUnit().dSPulseUnit;
+		case 1: return driver->AxisUnit().dLPulseUnit;
+		case 2: return driver->AxisUnit().dUPulseUnit;
+		case 3: return driver->AxisUnit().dRPulseUnit;
+		case 4: return driver->AxisUnit().dBPulseUnit;
+		case 5: return driver->AxisUnit().dTPulseUnit;
+		case 6: return driver->AxisUnit().dBXPulseUnit;
+		case 7: return driver->AxisUnit().dBYPulseUnit;
+		case 8: return driver->AxisUnit().dBZPulseUnit;
 		default: return 0.0;
 		}
 	}
@@ -98,15 +97,28 @@ namespace
 	}
 
 	constexpr auto JOG_SETTINGS_MODULE = "RobotJog";
+	constexpr int JOG_CAPABILITY_PASSIVE = 0;
+	constexpr int JOG_CAPABILITY_CARTESIAN = 1;
+	constexpr int JOG_CAPABILITY_JOINT = 2;
 
-	double CartesianCommandSpeed(RobotDriverAdaptor* driver, double speedMmPerMin)
+	bool RequireJogCapabilities(
+		RobotDriverAdaptor* driver,
+		std::initializer_list<RobotDriverCapability> capabilities,
+		const QString& action,
+		QString& error)
 	{
-		if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
+		if (driver == nullptr)
 		{
-			const double mmPerSec = speedMmPerMin / 60.0;
-			return mmPerSec >= 1.0 ? std::floor(mmPerSec) : 0.0;
+			error = QStringLiteral("机器人驱动无效。");
+			return false;
 		}
-		return std::max(1.0, speedMmPerMin);
+		if (driver->SupportsAll(capabilities))
+		{
+			return true;
+		}
+		error = QStringLiteral("当前机器人品牌底层无法执行“%1”，缺少适配能力：%2；功能已限制。")
+			.arg(action, QString::fromUtf8(driver->MissingCapabilitiesText(capabilities).c_str()));
+		return false;
 	}
 
 	QString MotionFailureText(RobotDriverAdaptor* driver, const QString& action, int done)
@@ -133,12 +145,12 @@ namespace
 
 	void LogCartesianPoint(RobotDriverAdaptor* driver, const char* prefix, const T_ROBOT_COORS& pos)
 	{
-		if (driver == nullptr || driver->m_pRobotLog == nullptr || prefix == nullptr)
+		if (driver == nullptr || !driver->HasLogSink() || prefix == nullptr)
 		{
 			return;
 		}
 
-		driver->m_pRobotLog->write(LogColor::DEFAULT,
+		driver->WriteLog(LogColor::DEFAULT,
 			"%s: X=%.3f Y=%.3f Z=%.3f RX=%.3f RY=%.3f RZ=%.3f BX=%.3f BY=%.3f BZ=%.3f",
 			prefix,
 			pos.dX, pos.dY, pos.dZ,
@@ -148,12 +160,12 @@ namespace
 
 	void LogJointPoint(RobotDriverAdaptor* driver, const char* prefix, const T_ANGLE_PULSE& pulse)
 	{
-		if (driver == nullptr || driver->m_pRobotLog == nullptr || prefix == nullptr)
+		if (driver == nullptr || !driver->HasLogSink() || prefix == nullptr)
 		{
 			return;
 		}
 
-		driver->m_pRobotLog->write(LogColor::DEFAULT,
+		driver->WriteLog(LogColor::DEFAULT,
 			"%s: J1=%ld J2=%ld J3=%ld J4=%ld J5=%ld J6=%ld EX1=%ld EX2=%ld EX3=%ld",
 			prefix,
 			pulse.nSPulse, pulse.nLPulse, pulse.nUPulse,
@@ -188,6 +200,7 @@ RobotJogDialog::RobotJogDialog(RobotDriverAdaptor* robotDriver, QWidget* parent)
 	BuildUi();
 	ApplyStyle();
 	LoadSpeedSettings();
+	UpdateMotionButtonState();
 
 	m_jogStartTimer->setSingleShot(true);
 	m_jogStartTimer->setInterval(JOG_HOLD_START_DELAY_MS);
@@ -204,14 +217,14 @@ RobotJogDialog::RobotJogDialog(RobotDriverAdaptor* robotDriver, QWidget* parent)
 RobotJogDialog::~RobotJogDialog()
 {
 	StopJog();
-	if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver))
+	if (m_robotDriver != nullptr && m_robotDriver->Supports(RobotDriverCapability::ContinuousJog))
 	{
-		fanucDriver->EndContinuousMoveQueue();
-		if (fanucDriver->IsContinuousMoveQueueRunning())
+		m_robotDriver->EndContinuousJog();
+		if (m_robotDriver->IsContinuousJogRunning())
 		{
 			// worker 已退出但机器人任务终态未确认时，析构前主动走真实 ABORT；
 			// 失败则 pending 随 lease 析构转为 sticky，绝不静默释放。
-			RobotOperationLease::StopAndConfirmUnverifiedMotion(fanucDriver);
+			RobotOperationLease::StopAndConfirmUnverifiedMotion(m_robotDriver);
 		}
 	}
 	m_jogOperationLease.reset();
@@ -287,8 +300,11 @@ void RobotJogDialog::BuildUi()
 	QHBoxLayout* cartActionLayout = new QHBoxLayout();
 	QPushButton* readCartButton = new QPushButton("读取当前位置");
 	QPushButton* moveCartButton = new QPushButton("运动到指定位置");
+	readCartButton->setProperty("robotCapabilityMode", JOG_CAPABILITY_PASSIVE);
+	moveCartButton->setProperty("robotCapabilityMode", JOG_CAPABILITY_CARTESIAN);
 	cartActionLayout->addWidget(readCartButton);
 	cartActionLayout->addWidget(moveCartButton);
+	m_motionButtons.push_back(readCartButton);
 	m_motionButtons.push_back(moveCartButton);
 	cartBoxLayout->addLayout(cartGrid);
 	cartBoxLayout->addLayout(cartActionLayout);
@@ -309,8 +325,11 @@ void RobotJogDialog::BuildUi()
 	QHBoxLayout* jointActionLayout = new QHBoxLayout();
 	QPushButton* readJointButton = new QPushButton("读取当前位置");
 	QPushButton* moveJointButton = new QPushButton("运动到指定位置");
+	readJointButton->setProperty("robotCapabilityMode", JOG_CAPABILITY_PASSIVE);
+	moveJointButton->setProperty("robotCapabilityMode", JOG_CAPABILITY_JOINT);
 	jointActionLayout->addWidget(readJointButton);
 	jointActionLayout->addWidget(moveJointButton);
+	m_motionButtons.push_back(readJointButton);
 	m_motionButtons.push_back(moveJointButton);
 	jointBoxLayout->addLayout(jointGrid);
 	jointBoxLayout->addLayout(jointActionLayout);
@@ -375,6 +394,10 @@ void RobotJogDialog::AddAxisRow(QGridLayout* layout, int row, const QString& axi
 		: static_cast<QValidator*>(new QDoubleValidator(-999999999.0, 999999999.0, 0, targetEdit)));
 	QPushButton* minusButton = CreateJogButton("-");
 	QPushButton* plusButton = CreateJogButton("+");
+	const int capabilityMode = mode == JogMode::Cartesian
+		? JOG_CAPABILITY_CARTESIAN : JOG_CAPABILITY_JOINT;
+	minusButton->setProperty("robotCapabilityMode", capabilityMode);
+	plusButton->setProperty("robotCapabilityMode", capabilityMode);
 
 	connect(minusButton, &QPushButton::clicked, this, [this, mode, axisIndex]() { StepJog(mode, axisIndex, -1); });
 	connect(plusButton, &QPushButton::clicked, this, [this, mode, axisIndex]() { StepJog(mode, axisIndex, 1); });
@@ -465,8 +488,14 @@ void RobotJogDialog::ShowMessageOnUiThread(QMessageBox::Icon icon, const QString
 
 void RobotJogDialog::ReadCurrentCartesianTarget()
 {
-	if (m_robotDriver == nullptr)
+	QString capabilityError;
+	if (!RequireJogCapabilities(
+		m_robotDriver,
+		{ RobotDriverCapability::PassiveState },
+		QStringLiteral("读取当前位置"),
+		capabilityError))
 	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", capabilityError);
 		return;
 	}
 	T_ROBOT_COORS current;
@@ -483,8 +512,14 @@ void RobotJogDialog::ReadCurrentCartesianTarget()
 
 void RobotJogDialog::ReadCurrentJointTarget()
 {
-	if (m_robotDriver == nullptr)
+	QString capabilityError;
+	if (!RequireJogCapabilities(
+		m_robotDriver,
+		{ RobotDriverCapability::PassiveState },
+		QStringLiteral("读取当前关节"),
+		capabilityError))
 	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", capabilityError);
 		return;
 	}
 	T_ANGLE_PULSE current;
@@ -501,9 +536,17 @@ void RobotJogDialog::ReadCurrentJointTarget()
 
 void RobotJogDialog::MoveToCartesianTarget()
 {
-	if (m_robotDriver == nullptr)
+	QString capabilityError;
+	if (!RequireJogCapabilities(
+		m_robotDriver,
+		{ RobotDriverCapability::LinearMotion,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort },
+		QStringLiteral("直角目标运动"),
+		capabilityError))
 	{
-		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", "机器人驱动无效。");
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", capabilityError);
 		return;
 	}
 	if (IsMotionBusy())
@@ -531,23 +574,19 @@ void RobotJogDialog::MoveToCartesianTarget()
 		return;
 	}
 	const double configuredSpeedMmPerMin = CartesianSpeed();
-	const double robotSpeed = CartesianCommandSpeed(m_robotDriver, configuredSpeedMmPerMin);
-	if (dynamic_cast<FANUCRobotCtrl*>(m_robotDriver) != nullptr && robotSpeed < 1.0)
+	std::string speedError;
+	if (!m_robotDriver->ValidateLinearSpeedMmPerMin(configuredSpeedMmPerMin, &speedError))
 	{
 		ShowMessageOnUiThread(
 			QMessageBox::Warning,
 			"运动到指定位置",
-			"FANUC固定TP最低只能表示1mm/sec（60mm/min），已拒绝静默提速。");
+			DecodeRobotMessageText(speedError));
 		return;
 	}
-	const double admissionSpeedMmPerMin =
-		dynamic_cast<FANUCRobotCtrl*>(m_robotDriver) != nullptr
-		? robotSpeed * 60.0
-		: configuredSpeedMmPerMin;
 	int motionTimeoutMs = 0;
 	std::string admissionError;
 	if (!RobotMotionTimeoutPolicy::AdmitCartesianMove(
-		current, target, admissionSpeedMmPerMin, motionTimeoutMs, &admissionError))
+		current, target, configuredSpeedMmPerMin, motionTimeoutMs, &admissionError))
 	{
 		ShowMessageOnUiThread(
 			QMessageBox::Warning,
@@ -567,13 +606,14 @@ void RobotJogDialog::MoveToCartesianTarget()
 	RobotDriverAdaptor* driver = m_robotDriver;
 	QPointer<RobotJogDialog> self(this);
 	SetMotionTaskRunning(true);
-		std::thread([self, driver, target, robotSpeed, motionTimeoutMs, operationLease]()
+		std::thread([self, driver, target, configuredSpeedMmPerMin, motionTimeoutMs, operationLease]()
 		{
 			if (self == nullptr)
 			{
 				return;
 			}
-			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
+			const bool moveOk = driver->MoveLinearMmPerMin(
+				target, configuredSpeedMmPerMin, driver->ExternalAxleType());
 			const int done = moveOk ? driver->CheckRobotDone(100, motionTimeoutMs) : -1;
 			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "直角坐标运动", done) : QString();
 			QMetaObject::invokeMethod(self.data(), [self, moveOk, done, failureText]()
@@ -593,9 +633,17 @@ void RobotJogDialog::MoveToCartesianTarget()
 
 void RobotJogDialog::MoveToJointTarget()
 {
-	if (m_robotDriver == nullptr)
+	QString capabilityError;
+	if (!RequireJogCapabilities(
+		m_robotDriver,
+		{ RobotDriverCapability::JointMotion,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort },
+		QStringLiteral("关节目标运动"),
+		capabilityError))
 	{
-		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", "机器人驱动无效。");
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", capabilityError);
 		return;
 	}
 	if (IsMotionBusy())
@@ -631,7 +679,7 @@ void RobotJogDialog::MoveToJointTarget()
 			{
 				return;
 			}
-			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
+			const bool moveOk = driver->MoveJointPercent(target, robotSpeed, driver->ExternalAxleType());
 			const int done = moveOk ? driver->CheckRobotDone(100, 1800000) : -1;
 			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "关节脉冲运动", done) : QString();
 			QMetaObject::invokeMethod(self.data(), [self, moveOk, done, failureText]()
@@ -678,6 +726,18 @@ void RobotJogDialog::BeginJog()
 	}
 
 	const JogMode mode = m_currentMode;
+	QString capabilityError;
+	if (!RequireJogCapabilities(
+		m_robotDriver,
+		{ RobotDriverCapability::ContinuousJog,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::VerifiedSafeAbort },
+		QStringLiteral("长按连续点动"),
+		capabilityError))
+	{
+		ShowMessageOnUiThread(QMessageBox::Information, "点动控制", capabilityError);
+		return;
+	}
 	QString leaseError;
 	m_jogOperationLease = RobotOperationLease::TryAcquire(
 		m_robotDriver, QStringLiteral("长按连续点动"), &leaseError);
@@ -718,12 +778,12 @@ void RobotJogDialog::BeginJog()
 	UpdateMotionButtonState();
 
 	const double robotSpeed = mode == JogMode::Cartesian
-		? CartesianCommandSpeed(m_robotDriver, m_streamCartesianSpeed)
+		? m_streamCartesianSpeed
 		: std::clamp(m_streamJointSpeed, 1.0, 100.0);
 
-	if (m_robotDriver->m_pRobotLog != nullptr)
+	if (m_robotDriver->HasLogSink())
 	{
-		m_robotDriver->m_pRobotLog->write(LogColor::DEFAULT,
+		m_robotDriver->WriteLog(LogColor::DEFAULT,
 			"点动界面长按开始: mode=%s axis=%d direction=%d speed=%.3f baseCart=(X=%.3f Y=%.3f Z=%.3f RX=%.3f RY=%.3f RZ=%.3f) baseJoint=(J1=%ld J2=%ld J3=%ld J4=%ld J5=%ld J6=%ld)",
 			mode == JogMode::Cartesian ? "MOVL" : "MOVJ",
 			m_currentAxis,
@@ -735,18 +795,7 @@ void RobotJogDialog::BeginJog()
 			m_streamBasePulse.nRPulse, m_streamBasePulse.nBPulse, m_streamBasePulse.nTPulse);
 	}
 
-	FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver);
-	if (fanucDriver == nullptr)
-	{
-		m_jogActive = false;
-		m_jogOperationLease.reset();
-		UpdateMotionButtonState();
-		ShowMessageOnUiThread(QMessageBox::Information, "点动控制",
-			"当前机器人暂不支持长按连续点动，请使用单击步进或目标点运动。");
-		return;
-	}
-
-	if (!fanucDriver->StartContinuousMoveQueue(mode == JogMode::Cartesian ? MOVL : MOVJ, robotSpeed))
+	if (!m_robotDriver->StartContinuousJog(mode == JogMode::Cartesian ? MOVL : MOVJ, robotSpeed))
 	{
 		m_jogActive = false;
 		m_jogOperationLease.reset();
@@ -765,13 +814,13 @@ void RobotJogDialog::BeginJog()
 		{
 			m_lastStreamPos = BuildCartesianStreamPoint(i);
 			LogCartesianPoint(m_robotDriver, GetStr("点动界面长按预装MOVL点[%d]", i).c_str(), m_lastStreamPos);
-			fanucDriver->PushContinuousMovePoint(m_lastStreamPos, robotSpeed);
+			m_robotDriver->PushContinuousJogPoint(m_lastStreamPos, robotSpeed);
 		}
 		else
 		{
 			m_lastStreamPulse = BuildJointStreamPoint(i);
 			LogJointPoint(m_robotDriver, GetStr("点动界面长按预装MOVJ点[%d]", i).c_str(), m_lastStreamPulse);
-			fanucDriver->PushContinuousMovePoint(m_lastStreamPulse, robotSpeed);
+			m_robotDriver->PushContinuousJogPoint(m_lastStreamPulse, robotSpeed);
 		}
 	}
 
@@ -781,8 +830,25 @@ void RobotJogDialog::BeginJog()
 
 void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 {
-	if (m_robotDriver == nullptr)
+	QString capabilityError;
+	const bool capabilityReady = mode == JogMode::Cartesian
+		? RequireJogCapabilities(
+			m_robotDriver,
+			{ RobotDriverCapability::LinearMotion,
+			  RobotDriverCapability::PassiveState,
+			  RobotDriverCapability::VerifiedProgramCompletion,
+			  RobotDriverCapability::VerifiedSafeAbort },
+			QStringLiteral("直角步进"), capabilityError)
+		: RequireJogCapabilities(
+			m_robotDriver,
+			{ RobotDriverCapability::JointMotion,
+			  RobotDriverCapability::PassiveState,
+			  RobotDriverCapability::VerifiedProgramCompletion,
+			  RobotDriverCapability::VerifiedSafeAbort },
+			QStringLiteral("关节步进"), capabilityError);
+	if (!capabilityReady)
 	{
+		ShowMessageOnUiThread(QMessageBox::Warning, "点动控制", capabilityError);
 		return;
 	}
 	if (IsMotionBusy())
@@ -810,14 +876,14 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 		}
 		const double stepDistance = CartesianSpeed() * STREAM_POINT_TIME_SEC / 60.0;
 		AddCartesianDelta(target, axisIndex, static_cast<double>(direction) * stepDistance);
-		const double robotSpeed = CartesianCommandSpeed(m_robotDriver, CartesianSpeed());
+		const double robotSpeed = CartesianSpeed();
 		LogCartesianPoint(m_robotDriver, "点动界面单击生成直角目标点", target);
 		SetMotionTaskRunning(true);
 		RobotDriverAdaptor* driver = m_robotDriver;
 		QPointer<RobotJogDialog> self(this);
 		std::thread([self, driver, target, robotSpeed, operationLease]()
 			{
-				const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVL");
+				const bool moveOk = driver->MoveLinearMmPerMin(target, robotSpeed, driver->ExternalAxleType());
 				const int done = moveOk ? driver->CheckRobotDone(100, 1800000) : -1;
 				const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "直角步进", done) : QString();
 				QMetaObject::invokeMethod(qApp, [self, moveOk, done, failureText]()
@@ -865,7 +931,7 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 	QPointer<RobotJogDialog> self(this);
 	std::thread([self, driver, target, robotSpeed, operationLease]()
 		{
-			const bool moveOk = driver->MoveByJob(target, T_ROBOT_MOVE_SPEED(robotSpeed, 0.0, 0.0), driver->m_nExternalAxleType, "MOVJ");
+			const bool moveOk = driver->MoveJointPercent(target, robotSpeed, driver->ExternalAxleType());
 			const int done = moveOk ? driver->CheckRobotDone(100, 1800000) : -1;
 			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "关节步进", done) : QString();
 			QMetaObject::invokeMethod(qApp, [self, moveOk, done, failureText]()
@@ -897,10 +963,7 @@ void RobotJogDialog::StopJog()
 	m_jogTimer->stop();
 	if (wasActive && m_robotDriver != nullptr)
 	{
-		if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver))
-		{
-			fanucDriver->RequestEndContinuousMoveQueue();
-		}
+		m_robotDriver->RequestEndContinuousJog();
 	}
 	UpdateMotionButtonState();
 }
@@ -916,25 +979,19 @@ void RobotJogDialog::FeedNextPoint()
 	const T_ROBOT_COORS cartTarget = BuildCartesianStreamPoint(stepIndex);
 	const T_ANGLE_PULSE jointTarget = BuildJointStreamPoint(stepIndex);
 	const double robotSpeed = mode == JogMode::Cartesian
-		? CartesianCommandSpeed(m_robotDriver, m_streamCartesianSpeed)
+		? m_streamCartesianSpeed
 		: std::clamp(m_streamJointSpeed, 1.0, 100.0);
 	if (mode == JogMode::Cartesian)
 	{
 		m_lastStreamPos = cartTarget;
 		LogCartesianPoint(m_robotDriver, GetStr("点动界面长按追加MOVL点[%d]", stepIndex).c_str(), cartTarget);
-		if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver))
-		{
-			fanucDriver->PushContinuousMovePoint(cartTarget, robotSpeed);
-		}
+		m_robotDriver->PushContinuousJogPoint(cartTarget, robotSpeed);
 	}
 	else
 	{
 		m_lastStreamPulse = jointTarget;
 		LogJointPoint(m_robotDriver, GetStr("点动界面长按追加MOVJ点[%d]", stepIndex).c_str(), jointTarget);
-		if (FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver))
-		{
-			fanucDriver->PushContinuousMovePoint(jointTarget, robotSpeed);
-		}
+		m_robotDriver->PushContinuousJogPoint(jointTarget, robotSpeed);
 	}
 	++m_nextStreamStep;
 }
@@ -960,12 +1017,23 @@ void RobotJogDialog::RefreshStateText()
 		pulse = snapshot.pulse;
 		done = snapshot.done;
 	}
-	const QString doneText = done == 0 ? "运行中" : (done == 1 ? "停止/完成" : QString("未知(%1)").arg(done));
+	const RobotMotionStatus motionStatus = m_robotDriver->ReadMotionStatusPassive();
+	QString doneText;
+	switch (motionStatus.state)
+	{
+	case RobotMotionState::Idle: doneText = "空闲"; break;
+	case RobotMotionState::Starting: doneText = "启动中"; break;
+	case RobotMotionState::Running: doneText = "运行中"; break;
+	case RobotMotionState::Paused: doneText = "已暂停"; break;
+	case RobotMotionState::Completed: doneText = "已完成"; break;
+	case RobotMotionState::Interrupted: doneText = "已中断"; break;
+	case RobotMotionState::Faulted: doneText = "故障"; break;
+	default: doneText = QString("未知(%1)").arg(motionStatus.rawCode); break;
+	}
 	const QString sourceText = QString::fromStdString(m_robotDriver->GetStateMonitorSourceText());
 	if (m_jogOperationLease)
 	{
-		FANUCRobotCtrl* fanucDriver = dynamic_cast<FANUCRobotCtrl*>(m_robotDriver);
-		if (fanucDriver == nullptr || !fanucDriver->IsContinuousMoveQueueRunning())
+		if (!m_robotDriver->IsContinuousJogRunning())
 		{
 			m_jogOperationLease.reset();
 		}
@@ -1001,7 +1069,32 @@ void RobotJogDialog::UpdateMotionButtonState()
 	{
 		if (button != nullptr)
 		{
-			button->setEnabled(!busy);
+			const int capabilityMode = button->property("robotCapabilityMode").toInt();
+			bool capabilityReady = m_robotDriver != nullptr;
+			if (capabilityReady && capabilityMode == JOG_CAPABILITY_PASSIVE)
+			{
+				capabilityReady = m_robotDriver->Supports(RobotDriverCapability::PassiveState);
+			}
+			else if (capabilityReady && capabilityMode == JOG_CAPABILITY_CARTESIAN)
+			{
+				capabilityReady = m_robotDriver->SupportsAll(
+					{ RobotDriverCapability::LinearMotion,
+					  RobotDriverCapability::PassiveState,
+					  RobotDriverCapability::VerifiedProgramCompletion,
+					  RobotDriverCapability::VerifiedSafeAbort });
+			}
+			else if (capabilityReady && capabilityMode == JOG_CAPABILITY_JOINT)
+			{
+				capabilityReady = m_robotDriver->SupportsAll(
+					{ RobotDriverCapability::JointMotion,
+					  RobotDriverCapability::PassiveState,
+					  RobotDriverCapability::VerifiedProgramCompletion,
+					  RobotDriverCapability::VerifiedSafeAbort });
+			}
+			button->setEnabled(!busy && capabilityReady);
+			button->setToolTip(capabilityReady
+				? QString()
+				: QStringLiteral("当前机器人品牌底层缺少本操作所需适配能力，功能已限制。"));
 		}
 	}
 }

@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Static safety/contract gate for the Inovance RobotDriverAdaptor driver."""
+
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def read(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def function_body(source: str, signature: str) -> str:
+    start = source.index(signature)
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace : index + 1]
+    raise AssertionError(f"unterminated function: {signature}")
+
+
+def main() -> None:
+    header = read("include/InovanceRobotDriver.h")
+    driver = read("src/InovanceRobotDriver.cpp")
+    registry = read("src/RobotDriverRegistry.cpp")
+    contract = read("docs/robot-driver-adaptor-contract.md")
+    ui = read("src/QtWidgetsApplication4.cpp")
+
+    require(
+        "class InovanceRobotCtrl final : public RobotDriverAdaptor" in header,
+        "Inovance must be a complete RobotDriverAdaptor implementation",
+    )
+    require("ROBOT_TYPE_INOVANCE" in registry, "Inovance type is not registered")
+    require("CreateInovanceDriver" in registry, "Inovance factory is missing")
+    require(
+        '{ "RobotC", 2222, 0, false, 0,' in registry,
+        "Inovance setup must use port 2222 and no fake FTP port",
+    )
+
+    protocol = function_body(driver, "bool InovanceRobotCtrl::SendCommand(")
+    for token in (
+        '"@@" + command + "$$"',
+        'framed.find("$$")',
+        'framed.find("##")',
+        "kMaxProtocolResponse",
+        "m_socketMutex",
+        "CloseSocketLocked()",
+        "ProtocolErrorText(response)",
+    ):
+        require(token in protocol, f"Inovance framed protocol evidence missing: {token}")
+
+    capabilities = function_body(
+        driver, "std::uint64_t InovanceRobotCtrl::DriverCapabilities() const"
+    )
+    for capability in (
+        "PassiveState",
+        "LinearMotion",
+        "JointMotion",
+        "ContinuousTrajectory",
+        "ContinuousJog",
+        "PauseResume",
+        "OperationModeControl",
+        "DiagnosticCommand",
+        "CartesianRegister",
+        "VerifiedProgramCompletion",
+        "VerifiedSafeAbort",
+        "ExternalAxis",
+        "ConnectionControl",
+        "AlarmReset",
+        "ServoPowerControl",
+        "ToolDataRead",
+        "TeachPendantSpeedControl",
+    ):
+        require(
+            f"RobotDriverCapability::{capability}" in capabilities,
+            f"Inovance implemented capability missing: {capability}",
+        )
+    for unsupported in (
+        "RobotTimestamp",
+        "PersistentProgramRecovery",
+        "NativeProgramUpload",
+        "NativeProgramExecution",
+        "FtpFileTransfer",
+        "OfflineTrajectoryExport",
+        "ActualArcWeld",
+        "IntegerRegister",
+        "HandEyeMatrixRead",
+        "HandEyeSupportProgramInstall",
+    ):
+        require(
+            f"RobotDriverCapability::{unsupported}" not in capabilities,
+            f"Inovance must not claim unverified capability: {unsupported}",
+        )
+    require("jointUnitsReady" in capabilities, "JointMotion must be gated by configured AxisUnit")
+    require(
+        "m_nExternalAxleType != 0" in capabilities,
+        "ExternalAxis must only be advertised for a configured external axis",
+    )
+
+    initialize = function_body(
+        driver, "bool InovanceRobotCtrl::InitializeAfterConnect("
+    )
+    permit = function_body(driver, "bool InovanceRobotCtrl::EnsureControlPermit()")
+    ready = function_body(driver, "bool InovanceRobotCtrl::EnsureMotionReady()")
+    for token in ("CurCtrlDev", "CurPermit", "AcqPermit", "ForceControlPermit"):
+        require(token in permit or token in driver, f"permit safety missing: {token}")
+    for token in ("Get_EStopSts", "Get_SysErrSts", "Get_MotorSts"):
+        require(token in ready, f"pre-motion gate missing: {token}")
+    for token in ("Get_ToolCNum", "Get_WobjNum", "UserLogin", "CurUserType"):
+        require(token in initialize, f"initialization identity check missing: {token}")
+
+    cart = function_body(driver, "bool InovanceRobotCtrl::SendCartesianMove(")
+    for token in (
+        "target.dRZ",
+        "target.dRY",
+        "target.dRX",
+        '"MovLRobP "',
+        '"Get_CurCmdNum"',
+        "m_externalValues",
+        "m_armConfig",
+    ):
+        require(token in cart, f"Inovance Cartesian mapping missing: {token}")
+    require("size() > 128" in cart, "MovLRobP must enforce the manual parameter limit")
+    joint = function_body(driver, "bool InovanceRobotCtrl::SendJointMove(")
+    for token in ("MovJAbsRobJP", "dSPulseUnit", "Get_CurCmdNum"):
+        require(token in joint, f"Inovance joint conversion missing: {token}")
+    require("size() > 128" in joint, "MovJAbsRobJP must enforce the manual parameter limit")
+
+    start = function_body(driver, "bool InovanceRobotCtrl::StartTrajectory(")
+    wait = function_body(driver, "bool InovanceRobotCtrl::WaitTrajectory(")
+    abort = function_body(driver, "bool InovanceRobotCtrl::AbortCurrentProgramSafely()")
+    pause = function_body(driver, "bool InovanceRobotCtrl::PauseTrackedMotion(")
+    resume = function_body(driver, "bool InovanceRobotCtrl::ResumeTrackedMotion(")
+    for token in (
+        "FingerprintMoveInfos",
+        "Get_CurCmdCacheNum",
+        "m_maxBufferedCommands",
+        "m_finalCommandId",
+    ):
+        require(token in start, f"trajectory identity/backpressure missing: {token}")
+    for token in ("WaitForCommandDone", 'SetDataStreamMode("OFF", 0)'):
+        require(token in wait, f"trajectory completion missing: {token}")
+    for token in ("Get_CmdSts", "Get_MotionSts", "stableDone >= 2"):
+        require(token in driver, f"exact completion witness missing: {token}")
+    for token in ("Dsmode", "Get_DsMode", "stableStopped >= 3"):
+        require(token in abort, f"verified safe abort missing: {token}")
+    for token in ("PAUSE", "Get_CurCmdNum", "positionDeviation", "angleDeviation"):
+        require(token in pause, f"verified pause missing: {token}")
+    for token in ("CONTINUE", "expectedProgramName", "checkpointPose"):
+        require(token in resume, f"verified resume missing: {token}")
+
+    shutdown = function_body(
+        driver, "bool InovanceRobotCtrl::ShutdownBeforeDisconnect()"
+    )
+    for token in ("AbortCurrentProgramSafely", "Motor OFF", "RemovePermit"):
+        require(token in shutdown, f"safe disconnect sequence missing: {token}")
+
+    for signature, explanation in (
+        ("bool InovanceRobotCtrl::PrepareNativeProgramUpload()", "未定义原生工程文件上传协议"),
+        ("bool InovanceRobotCtrl::RunProgramAndWait(", "按名称原生程序执行保持关闭"),
+        ("bool InovanceRobotCtrl::InstallHandEyeSupportPrograms(", "无法安装机器人侧手眼辅助程序"),
+        ("bool InovanceRobotCtrl::GetHandEyeMatrixVariable(", "未定义可读取的3x3旋转"),
+    ):
+        body = function_body(driver, signature)
+        require("return false;" in body, f"unsupported feature must fail closed: {signature}")
+        require(explanation in body, f"unsupported feature lacks actionable reason: {signature}")
+
+    require("defaultFtpPort > 0" in ui, "configuration UI does not hide unsupported FTP")
+    require(
+        "汇川已登记2222远程以太网底层" in ui,
+        "configuration UI lacks Inovance capability warning",
+    )
+    for token in (
+        "`ROBOT_TYPE_INOVANCE`",
+        "`Get_CmdSts(id)=1`",
+        "`PersistentProgramRecovery`",
+        "`ActualArcWeld`",
+        "首次现场使用前",
+    ):
+        require(token in contract, f"Inovance capability boundary is undocumented: {token}")
+
+    print(
+        "PASS: Inovance adaptor uses verified 2222 framing, identity-bound data stream motion, and explicit capability limits"
+    )
+
+
+if __name__ == "__main__":
+    main()

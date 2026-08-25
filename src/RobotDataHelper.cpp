@@ -513,14 +513,14 @@ QVector<RobotDataHelper::RobotInfo> RobotDataHelper::LoadRobotList(ContralUnit* 
             const T_CONTRAL_UNIT& unitInfo = pContralUnit->m_vtContralUnitInfo[index];
             RobotDriverAdaptor* pDriver = static_cast<RobotDriverAdaptor*>(unitInfo.pUnitDriver);
             const QString robotName = DecodeConfigTextForRobotData(
-                pDriver != nullptr && !pDriver->m_sRobotName.empty() ? pDriver->m_sRobotName : unitInfo.sUnitName);
+                pDriver != nullptr && !pDriver->RobotName().empty() ? pDriver->RobotName() : unitInfo.sUnitName);
             if (robotName.isEmpty())
             {
                 continue;
             }
 
             const QString customName = DecodeConfigTextForRobotData(
-                pDriver != nullptr && !pDriver->m_sCustomName.empty() ? pDriver->m_sCustomName : unitInfo.sChineseName);
+                pDriver != nullptr && !pDriver->CustomName().empty() ? pDriver->CustomName() : unitInfo.sChineseName);
 
             RobotInfo info;
             info.unitIndex = index;

@@ -1,7 +1,7 @@
-"""Static safety guard for STEP scan pause/resume and numeric scan progress.
+"""Static safety guard for adaptor-routed scan pause/resume and progress.
 
 This does not talk to a robot.  It locks down the fail-closed wiring that makes
-the scan Pause button safe: the exact tracked STEP program is frozen, paused
+the scan Pause button safe: the exact tracked robot program is frozen, paused
 frames are excluded, motion timeout counts active running time only, and resume
 drops the camera backlog.  It also verifies that observable robot-position
 progress reaches the GUI through the shared RunScanCycle path.
@@ -87,10 +87,10 @@ def main() -> int:
     )
     for token in (
         "const QString expectedProgram = m_scanPauseProgramName",
-        "PauseTrackedProgramAndWait(",
+        "pRobotDriver->PauseTrackedMotion(",
         "ToUtf8StdString(expectedProgram)",
         "QString::fromStdString(pausedProgram) != expectedProgram",
-        "ResumeTrackedProgramFromPause(",
+        "pRobotDriver->ResumeTrackedMotion(",
         "m_scanMotionPaused = true",
         "m_scanMotionPaused = false",
         'monitor->PauseButton()->setText(QStringLiteral("继续"))',
@@ -115,7 +115,7 @@ def main() -> int:
         "shared scan service must expose progress and pause-availability callbacks",
     )
     for token in (
-        "pStepDriver->GetTrackedMotionIdentity(",
+        "pRobotDriver->GetTrackedMotionIdentity(",
         "trackedProject, trackedProgram, &trackedMotionAlreadyStopped",
         "if (!trackedMotionAlreadyStopped)",
         "publishScanPauseAvailability(true, trackedScanProgram)",
@@ -131,8 +131,8 @@ def main() -> int:
     )
     require(
         "const bool isPausedState" in polling
-        and "motionState == STEPROBOTSDK::ePause" in polling,
-        "STEP ePause must be treated as a distinct resumable scan state",
+        and "motionStatus.state == RobotMotionState::Paused" in polling,
+        "normalized adaptor pause state must remain distinct and resumable",
     )
     require(
         "if (motionStarted && !scanPaused)" in polling
@@ -222,7 +222,7 @@ def main() -> int:
         require(token in preset_flow, f"preset RunScanCycle UI wiring missing: {token}")
 
     print(
-        "PASS: STEP scan pause binds tracked identity, excludes paused samples, "
+        "PASS: adaptor scan pause binds tracked identity, excludes paused samples, "
         "uses active runtime, drops resume backlog, and reports position progress to the UI"
     )
     return 0

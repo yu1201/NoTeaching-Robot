@@ -1,10 +1,10 @@
 #define MyAppName "NoTeaching-Robot"
 #define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.07.30.1643"
+  #define MyAppVersion "2026.08.24.1333"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "NoTeaching-Robot-Setup-v2026.07.30.1643"
+  #define MyOutputBaseFilename "NoTeaching-Robot-Setup-v2026.08.24.1333"
 #endif
 #define MyAppPublisher "yu1201"
 #define MyAppExeName "QtWidgetsApplication4.exe"

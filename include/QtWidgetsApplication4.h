@@ -4,6 +4,7 @@
 #include "ui_QtWidgetsApplication4.h"
 #include "ContralUnit.h"
 #include "ProcessLoopTestDialog.h"   // 流程循环测试：设置/默认结构体 + 回调类型
+#include "RobotDriverAdaptor.h"
 
 #include <atomic>
 #include <QDateTime>
@@ -21,8 +22,9 @@ class ScanCameraTcpClientWorker;
 class CameraFrameCache;
 class CameraParamDialog;
 class SKJCameraControlClient;
-class FANUCRobotCtrl;
 class FunctionTestDialog;
+class ResultArchiveDialog;
+class ScanPoseVariationTestDialog;
 class LaserWeldFilterDialog;
 class ScanSafetyGateDialog;
 class WorkpieceMeshViewerDialog;
@@ -172,6 +174,7 @@ private:
     void OpenModelAlignmentPage();
     void OpenVirtualWeldTestPage();
     void OpenProcessLoopTestPage();
+    void OpenScanPoseVariationTestPage();
     void OpenConfigDatabaseViewerDialog();
     void SetDebugLogMode(bool enabled);
     void RefreshDebugLogButtonUi();
@@ -188,26 +191,28 @@ private:
     void RefreshTouchKeyboardModeUi();
     bool LoadGrooveCameraIP(QString& cameraIP) const;
     bool LoadGrooveCameraIPForUnit(int unitIndex, QString& cameraIP) const;
-    bool LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort, int* pollIntervalMs = nullptr) const;
+    bool LoadGrooveCameraEndpointForUnit(int unitIndex, QString& cameraIP, int& cameraPort,
+        int* pollIntervalMs = nullptr, const QString& cameraSectionOverride = QString()) const;
     void InitializeScanCameraRuntimes();
     void StopScanCameraRuntimes();
     // blockingConnect=false：相机连接异步发起(Qt::QueuedConnection)，不阻塞调用线程。
     // 启动期(InitializeScanCameraRuntimes)用 false，避免相机连不上时 3s 同步超时拖延主窗口显示。
-    bool EnsureScanCameraRunningForUnit(int unitIndex, QString& cameraIP, bool clearCache, bool blockingConnect = true);
+    bool EnsureScanCameraRunningForUnit(int unitIndex, QString& cameraIP, bool clearCache,
+        bool blockingConnect = true, const QString& cameraSectionOverride = QString());
     CameraFrameCache* ScanCameraCacheForUnit(int unitIndex) const;
     void LoadRobotLogFile(const QString& relativePath, bool forceRefresh = false);
     void RunCommandLineActions(const QStringList& arguments);
     void LogCommandLineMessage(const QString& message) const;
     void EnsureCommandLineConsole() const;
     void WaitForCommandLineEnter(const QString& message) const;
-    FANUCRobotCtrl* GetFirstFanucDriverForCli() const;
+    RobotDriverAdaptor* GetFirstDriverWithCapabilityForCli(RobotDriverCapability capability) const;
     RobotDriverAdaptor* GetRobotDriverForCli(
         const QStringList& arguments,
         QString* robotLabelOut = nullptr,
         int* unitIndexOut = nullptr) const;
     void RunRobotMotionForCli(const QStringList& arguments);
-    bool UploadFanucServiceBundleForCli(FANUCRobotCtrl* pFanucDriver);
-    void RunFanucCurposDiagnosticForCli(FANUCRobotCtrl* pFanucDriver);
+    bool UploadFanucServiceBundleForCli(RobotDriverAdaptor* driver);
+    void RunFanucCurposDiagnosticForCli(RobotDriverAdaptor* driver);
     bool RunLaserClassifyForCli(const QString& inputPath, const QString& outputPath) const;
     bool RunLaserClassifyDirForCli(const QString& dirPath) const;
     bool RunRebuildMeasureWeldFilesForCli(const QStringList& arguments, const QString& laserDirPath) const;
@@ -220,6 +225,8 @@ private:
         double weldSpeedMmPerMin) const;
     void RunUpdateWeldPoseAverageForCli(const QString& inputPath) const;
     bool HasRunningMeasureThenWeldFlow() const;
+    // unitIndex<0 检查全部控制单元；后台只读 FTP，失败不影响启动或焊接流程。
+    void ScheduleRobotProgramInventoryCheck(int unitIndex, const QString& trigger);
     ScanDataUploader* EnsureScanDataUploader();
     bool RunMeasureThenWeldScanOnlyRepeatForCli(
         RobotDriverAdaptor* pRobotDriver,
@@ -253,6 +260,9 @@ private:
     QWidget* m_pConfigDatabaseViewerPage;
     OnlineServicesDialog* m_pOnlineServicesPage = nullptr; // 「在线服务」嵌入管理栈的页（非独立弹窗）
     QWidget* m_pProcessLoopTestPage = nullptr;            // 「流程测试」嵌入管理栈的页
+    ResultArchiveDialog* m_pResultArchivePage = nullptr;   // 「结果打包压缩」嵌入管理栈的页
+    ScanPoseVariationTestDialog* m_pScanPoseVariationTestPage = nullptr;
+    int m_nScanPoseVariationTestPageUnitIndex = -1;
     LaserWeldFilterDialog* m_pPrecisePointCloudProcessingPage;
     ScanSafetyGateDialog* m_pScanSafetyGatePage = nullptr;
     WorkpieceMeshViewerDialog* m_pWorkpieceMeshPage = nullptr;
@@ -302,7 +312,7 @@ private:
     QPushButton* m_pDashboardDebugLogBtn;
     QWidget* m_pDashboardToolPanel;
     QList<QPointer<QWidget>> m_robotOperationWidgets;
-    QList<QPointer<QWidget>> m_fanucOnlyWidgets;
+    QList<QPointer<QWidget>> m_nativeProgramUploadWidgets;
     QList<QPointer<QWidget>> m_cameraParamDependentWidgets;
     QList<QPointer<QWidget>> m_handEyeDependentWidgets;
     QPushButton* m_pCameraParamBtn;
@@ -320,9 +330,11 @@ private:
     QHash<int, CameraRuntime*> m_scanCameraRuntimes;
     QHash<int, CameraRuntime*> m_scanCameraReceiversByPort;
     QHash<QString, int> m_scanCameraUnitByIP;
+    QHash<int, QString> m_scanCameraSectionOverrides;  // 调试扫描可临时选择非默认测量相机；普通流程再次确保时清除
     QSet<CameraRuntime*> m_liveScanCameraRuntimes;
     SKJCameraControlClient* m_skjCameraControlClient;
     QHash<int, QPointer<MeasureThenWeldDialog>> m_measureThenWeldPages;
+    QSet<int> m_robotProgramInventoryChecksInFlight;
     // 在线服务：扫描数据上传常驻服务（懒创建，自动上传与管理页共用一个实例）。
     ScanDataUploader* m_pScanDataUploader = nullptr;
     QHash<int, QPointer<RobotJogDialog>> m_robotJogPages;

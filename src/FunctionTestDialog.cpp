@@ -3,7 +3,6 @@
 #include "AppPaths.h"
 
 #include "CameraFrameCache.h"
-#include "FANUCRobotDriver.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
@@ -22,6 +21,7 @@
 #include <QDoubleSpinBox>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -122,11 +122,11 @@ QString NativeAbsolutePath(const QString& path)
 
 QString DefaultRobotName(const RobotDriverAdaptor* pRobotDriverAdaptor)
 {
-    if (pRobotDriverAdaptor == nullptr || pRobotDriverAdaptor->m_sRobotName.empty())
+    if (pRobotDriverAdaptor == nullptr || pRobotDriverAdaptor->RobotName().empty())
     {
         return "RobotA";
     }
-    return QString::fromStdString(pRobotDriverAdaptor->m_sRobotName);
+    return QString::fromStdString(pRobotDriverAdaptor->RobotName());
 }
 
 double WrapAngleDeg(double value)
@@ -294,13 +294,13 @@ bool HasMeaningfulToolOffset(const T_ROBOT_COORS& tool)
 
 T_ROBOT_COORS EffectiveKinematicsTool(const RobotDriverAdaptor* pRobotDriverAdaptor, QString* nameOut = nullptr)
 {
-    if (pRobotDriverAdaptor != nullptr && HasMeaningfulToolOffset(pRobotDriverAdaptor->m_tTools.tGunTool))
+    if (pRobotDriverAdaptor != nullptr && HasMeaningfulToolOffset(pRobotDriverAdaptor->Tools().tGunTool))
     {
         if (nameOut != nullptr)
         {
             *nameOut = "GunTool_d";
         }
-        return pRobotDriverAdaptor->m_tTools.tGunTool;
+        return pRobotDriverAdaptor->Tools().tGunTool;
     }
 
     if (nameOut != nullptr)
@@ -1174,7 +1174,7 @@ private:
         for (QDoubleSpinBox* editor : m_baseEditors) editor->setValue(0.0);
         for (QDoubleSpinBox* editor : m_flangeEditors) editor->setValue(0.0);
 
-        const T_ROBOT_COORS tool = m_driver != nullptr ? m_driver->m_tTools.tGunTool : T_ROBOT_COORS();
+        const T_ROBOT_COORS tool = m_driver != nullptr ? m_driver->Tools().tGunTool : T_ROBOT_COORS();
         const bool localToolValid = SetToolEditors(tool);
         m_toolFixedCheck->setCheckState(Qt::PartiallyChecked);
         m_toolPoseKnownCheck->setChecked(false);
@@ -1225,7 +1225,7 @@ private:
             return;
         }
 
-        const std::array<double, kDhParamCount> parameters = KinematicsToParamArray(m_driver->m_tKinematics);
+        const std::array<double, kDhParamCount> parameters = KinematicsToParamArray(m_driver->KinematicsParameters());
         for (int joint = 0; joint < kDhJointCount; ++joint)
         {
             for (int field = 0; field < 4; ++field)
@@ -1666,6 +1666,12 @@ private:
             QMessageBox::warning(this, "读取Tool1", "当前没有机器人驱动。候选参数未改变。");
             return;
         }
+        if (!m_driver->Supports(RobotDriverCapability::ToolDataRead))
+        {
+            QMessageBox::warning(this, "读取Tool1",
+                "当前机器人品牌底层缺少“工具数据读取”适配能力，功能已限制。候选参数未改变。");
+            return;
+        }
 
         QString leaseError;
         const auto operationLease = RobotOperationLease::TryAcquire(
@@ -1845,7 +1851,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     titleLabel->setStyleSheet("font-size: 20px; font-weight: bold; color: #F4FAFA;");
     outerLayout->addWidget(titleLabel);
 
-    QLabel* hintLabel = new QLabel("这里集中放置设置速度、读取位置、检查运行、往返运动、零位运动等测试功能；FANUC 专用按钮会在非 FANUC 驱动下禁用。");
+    QLabel* hintLabel = new QLabel("这里集中放置设置速度、读取位置、原生程序、诊断、往返运动、零位运动等测试功能；入口按当前机器人底层声明的适配能力开放。");
     hintLabel->setWordWrap(true);
     outerLayout->addWidget(hintLabel);
 
@@ -1871,8 +1877,8 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     QPushButton* checkDoneBtn = CreateTestButton("检查运行完成");
     QPushButton* setGetIntBtn = CreateTestButton("写读INT寄存器");
     QPushButton* callJobBtn = CreateTestButton("调用任务");
-    QPushButton* uploadLsBtn = CreateTestButton("发送FANUC LS");
-    QPushButton* curposDiagBtn = CreateTestButton("FANUC CURPOS诊断");
+    QPushButton* uploadLsBtn = CreateTestButton("发送原生程序");
+    QPushButton* curposDiagBtn = CreateTestButton("机器人诊断");
     QPushButton* timestampDiagBtn = CreateTestButton("机器人+相机时间戳");
     basicLayout->addWidget(setSpeedBtn, 0, 0);
     basicLayout->addWidget(getPosBtn, 0, 1);
@@ -1892,12 +1898,54 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     {
         initialDriver = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
     }
-    const bool initialFanucDriver = dynamic_cast<FANUCRobotCtrl*>(initialDriver) != nullptr;
-    uploadLsBtn->setEnabled(initialFanucDriver);
-    curposDiagBtn->setEnabled(initialFanucDriver);
-    const QString fanucOnlyTip = "该测试依赖 FANUC 常驻服务/LS 程序，当前机器人不是 FANUC 时不可用。";
-    uploadLsBtn->setToolTip(initialFanucDriver ? QString() : fanucOnlyTip);
-    curposDiagBtn->setToolTip(initialFanucDriver ? QString() : fanucOnlyTip);
+    const bool canUploadNativeProgram = initialDriver != nullptr
+        && initialDriver->Supports(RobotDriverCapability::NativeProgramUpload);
+    const bool canRunDiagnostic = initialDriver != nullptr
+        && initialDriver->Supports(RobotDriverCapability::DiagnosticCommand);
+	auto configureCapabilityButton = [initialDriver](
+		QPushButton* button,
+		std::initializer_list<RobotDriverCapability> capabilities,
+		const QString& featureName)
+		{
+			bool enabled = initialDriver != nullptr;
+			qulonglong requiredMask = 0;
+			for (const RobotDriverCapability capability : capabilities)
+			{
+				requiredMask |= static_cast<qulonglong>(RobotDriverCapabilityBit(capability));
+				enabled = enabled && initialDriver->Supports(capability);
+			}
+			button->setProperty("requiredRobotCapabilities", requiredMask);
+			button->setProperty("robotCapabilityFeatureName", featureName);
+			button->setEnabled(enabled);
+			button->setToolTip(enabled
+				? QString()
+				: QString("当前机器人底层未声明“%1”所需的全部适配能力，功能已禁用。")
+					.arg(featureName));
+		};
+	configureCapabilityButton(setSpeedBtn,
+		{ RobotDriverCapability::TeachPendantSpeedControl }, QStringLiteral("设置速度"));
+	configureCapabilityButton(getPosBtn,
+		{ RobotDriverCapability::PassiveState }, QStringLiteral("读取当前位置"));
+	configureCapabilityButton(getPulseBtn,
+		{ RobotDriverCapability::PassiveState }, QStringLiteral("读取关节脉冲"));
+	configureCapabilityButton(checkDoneBtn,
+		{ RobotDriverCapability::PassiveState }, QStringLiteral("检查运行状态"));
+	configureCapabilityButton(setGetIntBtn,
+		{ RobotDriverCapability::IntegerRegister }, QStringLiteral("写读整数寄存器"));
+	configureCapabilityButton(callJobBtn,
+		{ RobotDriverCapability::NativeProgramExecution,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort }, QStringLiteral("调用任务"));
+	configureCapabilityButton(timestampDiagBtn,
+		{ RobotDriverCapability::PassiveState }, QStringLiteral("机器人时间戳诊断"));
+    uploadLsBtn->setEnabled(canUploadNativeProgram);
+    curposDiagBtn->setEnabled(canRunDiagnostic);
+    uploadLsBtn->setToolTip(canUploadNativeProgram
+        ? QString()
+        : QStringLiteral("当前机器人驱动未实现原生程序上传适配接口。"));
+    curposDiagBtn->setToolTip(canRunDiagnostic
+        ? QString()
+        : QStringLiteral("当前机器人驱动未实现诊断命令适配接口。"));
 
     QGroupBox* motionGroup = new QGroupBox("运动测试");
     QGridLayout* motionLayout = new QGridLayout(motionGroup);
@@ -1908,6 +1956,21 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     motionLayout->addWidget(m_pMovjTestBtn, 1, 0);
     motionLayout->addWidget(m_pMoveZeroBtn, 2, 0);
     m_motionButtons = { m_pMovlTestBtn, m_pMovjTestBtn, m_pMoveZeroBtn, callJobBtn };
+	configureCapabilityButton(m_pMovlTestBtn,
+		{ RobotDriverCapability::LinearMotion,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort }, QStringLiteral("MOVL往返测试"));
+	configureCapabilityButton(m_pMovjTestBtn,
+		{ RobotDriverCapability::JointMotion,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort }, QStringLiteral("MOVJ测试"));
+	configureCapabilityButton(m_pMoveZeroBtn,
+		{ RobotDriverCapability::JointMotion,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort }, QStringLiteral("运动到零位"));
     groupLayout->addWidget(motionGroup, 0, 1);
 
     QGroupBox* offlineGroup = new QGroupBox("离线数据处理");
@@ -1923,6 +1986,8 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     QPushButton* saveKinematicsSampleBtn = CreateTestButton("保存关节+直角");
     QPushButton* fitDhBtn = CreateTestButton("拟合DH参数");
     QPushButton* editKinematicsBtn = CreateTestButton("填写DH/MDH参数");
+	configureCapabilityButton(saveKinematicsSampleBtn,
+		{ RobotDriverCapability::PassiveState }, QStringLiteral("保存运动学样本"));
     kinematicsLayout->addWidget(saveKinematicsSampleBtn, 0, 0);
     kinematicsLayout->addWidget(fitDhBtn, 1, 0);
     kinematicsLayout->addWidget(editKinematicsBtn, 2, 0);
@@ -2042,28 +2107,40 @@ void FunctionTestDialog::closeEvent(QCloseEvent* event)
     QDialog::closeEvent(event);
 }
 
-FANUCRobotCtrl* FunctionTestDialog::GetFirstFanucDriver()
+RobotDriverAdaptor* FunctionTestDialog::GetFirstDriverWithCapability(
+    RobotDriverCapability capability,
+    const QString& actionName)
+{
+	return GetFirstDriverWithCapabilities({ capability }, actionName);
+}
+
+RobotDriverAdaptor* FunctionTestDialog::GetFirstDriverWithCapabilities(
+	std::initializer_list<RobotDriverCapability> capabilities,
+	const QString& actionName)
 {
     if (m_pContralUnit == nullptr || m_unitIndex < 0 || m_unitIndex >= static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
-        QMessageBox::warning(this, "FANUC测试", "未找到可用的控制单元。");
+        QMessageBox::warning(this, actionName, "未找到可用的控制单元。");
         return nullptr;
     }
 
     RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
     if (pRobotDriverAdaptor == nullptr)
     {
-        QMessageBox::warning(this, "FANUC测试", "当前控制单元未创建驱动。");
+        QMessageBox::warning(this, actionName, "当前控制单元未创建驱动。");
         return nullptr;
     }
 
-    FANUCRobotCtrl* pFanucDriver = dynamic_cast<FANUCRobotCtrl*>(pRobotDriverAdaptor);
-    if (pFanucDriver == nullptr)
-    {
-        QMessageBox::warning(this, "FANUC测试", "当前控制单元不是 FANUC 驱动。");
-        return nullptr;
-    }
-    return pFanucDriver;
+	if (!pRobotDriverAdaptor->SupportsAll(capabilities))
+	{
+		QMessageBox::warning(this, actionName,
+			QStringLiteral("当前机器人品牌底层缺少以下适配能力，功能已限制：%1。\n"
+				"请在对应品牌驱动完成实现和现场验证后再声明能力位。")
+			.arg(QString::fromUtf8(
+				pRobotDriverAdaptor->MissingCapabilitiesText(capabilities).c_str())));
+		return nullptr;
+	}
+    return pRobotDriverAdaptor;
 }
 
 RobotDriverAdaptor* FunctionTestDialog::GetFirstRobotDriverAdaptor()
@@ -2093,20 +2170,37 @@ bool FunctionTestDialog::IsMotionBusy() const
 void FunctionTestDialog::RefreshMotionButtonState()
 {
     bool busy = IsMotionBusy() || m_bRobotCommandRunning || RobotOperationLease::AnyActive();
+	RobotDriverAdaptor* driver = nullptr;
     if (!busy && m_pContralUnit != nullptr && m_unitIndex >= 0 && m_unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
     {
-        RobotDriverAdaptor* pRobotDriverAdaptor = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
+		driver = static_cast<RobotDriverAdaptor*>(m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
         RobotDriverAdaptor::StateSnapshot snapshot;
-        busy = pRobotDriverAdaptor != nullptr
-            && pRobotDriverAdaptor->LatestStateSnapshot(snapshot)
+		busy = driver != nullptr
+			&& driver->LatestStateSnapshot(snapshot)
             && snapshot.done == 0;
     }
+	else if (m_pContralUnit != nullptr && m_unitIndex >= 0
+		&& m_unitIndex < static_cast<int>(m_pContralUnit->m_vtContralUnitInfo.size()))
+	{
+		driver = static_cast<RobotDriverAdaptor*>(
+			m_pContralUnit->m_vtContralUnitInfo[m_unitIndex].pUnitDriver);
+	}
 
     for (QPushButton* button : m_motionButtons)
     {
         if (button != nullptr)
         {
-            button->setEnabled(!busy);
+			const qulonglong requiredMask = button->property("requiredRobotCapabilities").toULongLong();
+			const bool capabilityReady = driver != nullptr
+				&& requiredMask != 0
+				&& (driver->DriverCapabilities() & requiredMask) == requiredMask;
+			button->setEnabled(!busy && capabilityReady);
+			if (!busy && !capabilityReady)
+			{
+				button->setToolTip(QStringLiteral(
+					"当前机器人品牌底层缺少“%1”所需适配能力，功能已限制。")
+					.arg(button->property("robotCapabilityFeatureName").toString()));
+			}
         }
     }
     // 机器人命令期间整块冻结，避免任意普通按钮再弹 QInputDialog/QMessageBox；
@@ -2168,7 +2262,8 @@ QString FunctionTestDialog::EnsureKinematicsSampleFilePath()
 
 void FunctionTestDialog::FanucGetCurrentPosTest()
 {
-    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriver = GetFirstDriverWithCapability(
+		RobotDriverCapability::PassiveState, QStringLiteral("读取当前位置"));
     if (pRobotDriver == nullptr)
     {
         return;
@@ -2199,7 +2294,8 @@ void FunctionTestDialog::FanucGetCurrentPosTest()
 
 void FunctionTestDialog::FanucGetCurrentPulseTest()
 {
-    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriver = GetFirstDriverWithCapability(
+		RobotDriverCapability::PassiveState, QStringLiteral("读取关节脉冲"));
     if (pRobotDriver == nullptr)
     {
         return;
@@ -2233,49 +2329,71 @@ void FunctionTestDialog::FanucGetCurrentPulseTest()
 
 void FunctionTestDialog::FanucCurposDiagnosticTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* driver = GetFirstDriverWithCapability(
+        RobotDriverCapability::PassiveState, QStringLiteral("机器人诊断"));
+    if (driver == nullptr)
     {
         return;
     }
     QString leaseError;
     const auto operationLease = RobotOperationLease::TryAcquire(
-        pFanucDriver, QStringLiteral("功能测试 CURPOS 诊断"), &leaseError);
+        driver, QStringLiteral("功能测试机器人诊断"), &leaseError);
     if (!operationLease)
     {
-        QMessageBox::warning(this, "CURPOS诊断", leaseError);
+        QMessageBox::warning(this, "机器人诊断", leaseError);
         return;
     }
 
-    const QStringList commands =
-    {
-        "GET_USER_PROGRAM",
-        "GET_CUR_POS",
-        "GET_CUR_POS_00",
-        "GET_CUR_POS_001",
-        "GET_CUR_POS_01",
-        "GET_CUR_POS_10",
-        "GET_CUR_POS_11",
-        "GET_CUR_POS_011",
-        "GET_CUR_POS_111",
-        "GET_POS_VAR:20,0"
-    };
-
     QStringList lines;
-    for (const QString& command : commands)
+    const RobotDriverDescriptor descriptor = driver->DriverDescriptor();
+    const RobotConnectionEndpoint endpoint = driver->ControlEndpoint();
+    lines << QStringLiteral("品牌=%1，端点=%2:%3，连接=%4")
+        .arg(QString::fromStdString(descriptor.displayName))
+        .arg(QString::fromStdString(endpoint.host))
+        .arg(endpoint.port)
+        .arg(driver->IsConnected() ? QStringLiteral("YES") : QStringLiteral("NO"));
+    lines << QStringLiteral("状态=%1")
+        .arg(DecodeRobotMessageText(driver->GetRobotStatusText()));
+
+    T_ROBOT_COORS pose;
+    if (driver->TryGetCurrentPos(pose))
     {
-        const std::string response = pFanucDriver->SendRawCommandForTest(command.toStdString());
-        lines << QString("%1 -> %2").arg(command, DecodeRobotMessageText(response));
+        lines << QStringLiteral("位置 X=%1 Y=%2 Z=%3 RX=%4 RY=%5 RZ=%6")
+            .arg(pose.dX, 0, 'f', 3).arg(pose.dY, 0, 'f', 3).arg(pose.dZ, 0, 'f', 3)
+            .arg(pose.dRX, 0, 'f', 3).arg(pose.dRY, 0, 'f', 3).arg(pose.dRZ, 0, 'f', 3);
     }
+    else
+    {
+        lines << QStringLiteral("位置读取失败=%1")
+            .arg(DecodeRobotMessageText(driver->GetLastRobotError()));
+    }
+    T_ANGLE_PULSE pulse;
+    if (driver->TryGetCurrentPulse(pulse))
+    {
+        lines << QStringLiteral("脉冲 S=%1 L=%2 U=%3 R=%4 B=%5 T=%6")
+            .arg(pulse.nSPulse).arg(pulse.nLPulse).arg(pulse.nUPulse)
+            .arg(pulse.nRPulse).arg(pulse.nBPulse).arg(pulse.nTPulse);
+    }
+    else
+    {
+        lines << QStringLiteral("脉冲读取失败=%1")
+            .arg(DecodeRobotMessageText(driver->GetLastRobotError()));
+    }
+    const RobotMotionStatus motion = driver->ReadMotionStatus();
+    lines << QStringLiteral("运动状态=%1 raw=%2 terminal=%3 detail=%4")
+        .arg(static_cast<int>(motion.state)).arg(motion.rawCode)
+        .arg(motion.terminalVerified ? QStringLiteral("YES") : QStringLiteral("NO"))
+        .arg(QString::fromStdString(motion.detail));
 
     const QString message = lines.join("\n");
-    AppendLog("CURPOS诊断:\n" + message);
-    QMessageBox::information(this, "CURPOS诊断", message);
+    AppendLog("机器人诊断:\n" + message);
+    QMessageBox::information(this, "机器人诊断", message);
 }
 
 void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
 {
-    RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstDriverWithCapability(
+		RobotDriverCapability::PassiveState, QStringLiteral("机器人+相机时间戳"));
     if (pRobotDriverAdaptor == nullptr)
     {
         return;
@@ -2636,7 +2754,8 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
 
 void FunctionTestDialog::FanucCheckDoneTest()
 {
-    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriver = GetFirstDriverWithCapability(
+		RobotDriverCapability::PassiveState, QStringLiteral("检查运行状态"));
     if (pRobotDriver == nullptr)
     {
         return;
@@ -2662,7 +2781,8 @@ void FunctionTestDialog::FanucCheckDoneTest()
 
 void FunctionTestDialog::FanucSetGetIntTest()
 {
-    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriver = GetFirstDriverWithCapability(
+		RobotDriverCapability::IntegerRegister, QStringLiteral("写读INT寄存器"));
     if (pRobotDriver == nullptr)
     {
         return;
@@ -2696,7 +2816,14 @@ void FunctionTestDialog::FanucSetGetIntTest()
         return;
     }
 
-    const int readValue = pRobotDriver->GetIntVar(index);
+    int readValue = 0;
+    if (!pRobotDriver->TryGetIntVar(index, readValue))
+    {
+        QMessageBox::warning(this, "写读INT寄存器",
+            "写入成功，但严格回读失败："
+            + DecodeRobotMessageText(pRobotDriver->GetLastRobotError()));
+        return;
+    }
     const QString message = QString("写入 INT%1=%2, 读取值=%3").arg(index).arg(value).arg(readValue);
     AppendLog(message);
     QMessageBox::information(this, "写读INT寄存器", message);
@@ -2704,7 +2831,8 @@ void FunctionTestDialog::FanucSetGetIntTest()
 
 void FunctionTestDialog::FanucSetTpSpeedTest()
 {
-    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriver = GetFirstDriverWithCapability(
+		RobotDriverCapability::TeachPendantSpeedControl, QStringLiteral("设置速度"));
     if (pRobotDriver == nullptr)
     {
         return;
@@ -2734,14 +2862,20 @@ void FunctionTestDialog::FanucSetTpSpeedTest()
 
 void FunctionTestDialog::FanucCallJobTest()
 {
-    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriver = GetFirstDriverWithCapabilities(
+		{ RobotDriverCapability::NativeProgramExecution,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort },
+		QStringLiteral("调用任务"));
     if (pRobotDriver == nullptr)
     {
         return;
     }
 
     bool ok = false;
-    const QString jobName = QInputDialog::getText(this, "调用任务", "任务/程序名：", QLineEdit::Normal, "FANUC_PORT_OPEN_TEST", &ok);
+    const QString jobName = QInputDialog::getText(
+        this, "调用任务", "任务/程序名（STEP可输入 Project/Program）：",
+        QLineEdit::Normal, QString(), &ok);
     if (!ok || jobName.trimmed().isEmpty())
     {
         return;
@@ -2764,15 +2898,16 @@ void FunctionTestDialog::FanucCallJobTest()
     QPointer<FunctionTestDialog> self(this);
     std::thread([self, pRobotDriver, jobNameBytes, operationLease]()
         {
-            const bool callOk = pRobotDriver->CallJob(jobNameBytes.constData());
-            const int done = callOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
-            const bool flowOk = callOk && done > 0;
+            RobotMotionStatus terminalStatus;
+            const bool flowOk = pRobotDriver->RunProgramAndWait(
+                jobNameBytes.constData(), 5000, 1800000, 200, &terminalStatus);
             const QString detail = DecodeRobotMessageText(pRobotDriver->GetLastRobotError());
-            const QString message = QString("调用任务%1：%2，CallJob=%3，CheckRobotDone=%4，详情=%5")
+            const QString message = QString("调用任务%1：%2，state=%3，raw=%4，terminalVerified=%5，详情=%6")
                 .arg(flowOk ? QStringLiteral("成功") : QStringLiteral("失败"))
                 .arg(QString::fromLocal8Bit(jobNameBytes))
-                .arg(callOk ? QStringLiteral("OK") : QStringLiteral("FAIL"))
-                .arg(done)
+                .arg(static_cast<int>(terminalStatus.state))
+                .arg(terminalStatus.rawCode)
+                .arg(terminalStatus.terminalVerified ? QStringLiteral("YES") : QStringLiteral("NO"))
                 .arg(detail);
             QMetaObject::invokeMethod(qApp, [self, message]()
                 {
@@ -2789,47 +2924,76 @@ void FunctionTestDialog::FanucCallJobTest()
 
 void FunctionTestDialog::FanucUploadLsTest()
 {
-    FANUCRobotCtrl* pFanucDriver = GetFirstFanucDriver();
-    if (pFanucDriver == nullptr)
+    RobotDriverAdaptor* driver = GetFirstDriverWithCapability(
+        RobotDriverCapability::NativeProgramUpload, QStringLiteral("发送原生程序"));
+    if (driver == nullptr)
     {
         return;
     }
 
-    const QString lsPath = FindProjectFilePathForFunctionTest("SDK/FANUC/STARTALL.ls");
-    if (lsPath.isEmpty())
+    const RobotFileTransferProfile profile = driver->FileTransferProfile();
+    QStringList patterns;
+    for (const std::string& filter : profile.localFileFilters)
     {
-        QMessageBox::warning(this, "发送LS程序", "未找到测试程序文件：SDK/FANUC/STARTALL.ls");
+        patterns.push_back(QString::fromStdString(filter));
+    }
+    const QString profileLocalDirectory = QString::fromStdString(profile.defaultLocalDirectory);
+    QString defaultDirectory = AppPaths::FindResourcePath(profileLocalDirectory);
+    const QString writableDirectory = AppPaths::WritablePath(profileLocalDirectory);
+    if (!QFileInfo(defaultDirectory).isDir() && QFileInfo(writableDirectory).isDir())
+    {
+        defaultDirectory = writableDirectory;
+    }
+    const QString filterText = patterns.isEmpty()
+        ? QStringLiteral("所有文件 (*.*)")
+        : QStringLiteral("当前机器人原生程序 (%1);;所有文件 (*.*)")
+            .arg(patterns.join(' '));
+    const QString nativeProgramPath = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("选择要上传的机器人原生程序"),
+        defaultDirectory,
+        filterText);
+    if (nativeProgramPath.isEmpty())
+    {
         return;
     }
 
     QString leaseError;
     const auto operationLease = RobotOperationLease::TryAcquire(
-        pFanucDriver, QStringLiteral("功能测试上传 LS 程序"), &leaseError);
+        driver, QStringLiteral("功能测试上传原生程序"), &leaseError);
     if (!operationLease)
     {
-        QMessageBox::warning(this, "发送LS程序", leaseError);
+        QMessageBox::warning(this, "发送原生程序", leaseError);
         return;
     }
 
-    const QByteArray lsPathBytes = lsPath.toLocal8Bit();
-    const int ret = pFanucDriver->UploadLsFile(lsPathBytes.constData());
+    const QByteArray nativeProgramPathBytes = nativeProgramPath.toLocal8Bit();
+    const int ret = driver->UploadNativeProgramSource(nativeProgramPathBytes.constData());
     const QString message = ret == 0
-        ? QString("LS程序发送成功：%1").arg(lsPath)
-        : QString("LS程序发送失败，返回码=%1，文件=%2").arg(ret).arg(lsPath);
+        ? QString("原生程序发送成功：%1").arg(nativeProgramPath)
+        : QString("原生程序发送失败，返回码=%1，文件=%2，详情=%3")
+            .arg(ret)
+            .arg(nativeProgramPath)
+            .arg(DecodeRobotMessageText(driver->GetLastRobotError()));
     AppendLog(message);
     if (ret == 0)
     {
-        QMessageBox::information(this, "发送LS程序", message);
+        QMessageBox::information(this, "发送原生程序", message);
     }
     else
     {
-        QMessageBox::warning(this, "发送LS程序", message);
+        QMessageBox::warning(this, "发送原生程序", message);
     }
 }
 
 void FunctionTestDialog::FanucMovlTest()
 {
-    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriver = GetFirstDriverWithCapabilities(
+		{ RobotDriverCapability::LinearMotion,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort },
+		QStringLiteral("MOVL往返测试"));
     if (pRobotDriver == nullptr)
     {
         return;
@@ -2865,7 +3029,7 @@ void FunctionTestDialog::FanucMovlTest()
             }
 
             const bool moveOk = currentOk
-                && pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(5.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVL");
+                && pRobotDriver->MoveLinearMmPerMin(target, 300.0, pRobotDriver->ExternalAxleType());
             const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
             const QString message = QString("MOVL %1 100mm, Move=%2, CheckRobotDone=%3")
                 .arg(moveForward ? "Y+" : "Y-")
@@ -2887,7 +3051,12 @@ void FunctionTestDialog::FanucMovlTest()
 
 void FunctionTestDialog::FanucMovjTest()
 {
-    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriver = GetFirstDriverWithCapabilities(
+		{ RobotDriverCapability::JointMotion,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort },
+		QStringLiteral("MOVJ测试"));
     if (pRobotDriver == nullptr)
     {
         return;
@@ -2915,8 +3084,8 @@ void FunctionTestDialog::FanucMovjTest()
         {
             T_ANGLE_PULSE target;
             const bool currentOk = pRobotDriver->TryGetCurrentPulse(target);
-            const double j2PulseUnit = pRobotDriver->m_tAxisUnit.dLPulseUnit;
-            const double j3PulseUnit = pRobotDriver->m_tAxisUnit.dUPulseUnit;
+            const double j2PulseUnit = pRobotDriver->AxisUnit().dLPulseUnit;
+            const double j3PulseUnit = pRobotDriver->AxisUnit().dUPulseUnit;
             const long j2DeltaPulse = j2PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j2PulseUnit));
             const long j3DeltaPulse = j3PulseUnit == 0.0 ? 0 : static_cast<long>(std::lround(5.0 / j3PulseUnit));
             if (currentOk)
@@ -2926,7 +3095,7 @@ void FunctionTestDialog::FanucMovjTest()
             }
 
             const bool moveOk = currentOk
-                && pRobotDriver->MoveByJob(target, T_ROBOT_MOVE_SPEED(1.0, 0.0, 0.0), pRobotDriver->m_nExternalAxleType, "MOVJ");
+                && pRobotDriver->MoveJointPercent(target, 1.0, pRobotDriver->ExternalAxleType());
             const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
             const QString message = QString("MOVJ J2/J3 +5deg, J2DeltaPulse=%1, J3DeltaPulse=%2, Move=%3, CheckRobotDone=%4")
                 .arg(j2DeltaPulse)
@@ -2949,7 +3118,12 @@ void FunctionTestDialog::FanucMovjTest()
 
 void FunctionTestDialog::FanucMoveZeroTest()
 {
-    RobotDriverAdaptor* pRobotDriver = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriver = GetFirstDriverWithCapabilities(
+		{ RobotDriverCapability::JointMotion,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort },
+		QStringLiteral("运动到零位"));
     if (pRobotDriver == nullptr)
     {
         return;
@@ -2988,8 +3162,8 @@ void FunctionTestDialog::FanucMoveZeroTest()
     std::thread([self, pRobotDriver, operationLease]()
         {
             const T_ANGLE_PULSE zeroPulse = T_ANGLE_PULSE();
-            const T_ROBOT_MOVE_SPEED speed(1.0, 0.0, 0.0);
-            const bool moveOk = pRobotDriver->MoveByJob(zeroPulse, speed, pRobotDriver->m_nExternalAxleType, "MOVJ");
+			const bool moveOk = pRobotDriver->MoveJointPercent(
+				zeroPulse, 1.0, pRobotDriver->ExternalAxleType());
             const int done = moveOk ? pRobotDriver->CheckRobotDone(200, 1800000) : -1;
             T_ROBOT_COORS pos;
             T_ANGLE_PULSE pulse;
@@ -3035,7 +3209,8 @@ void FunctionTestDialog::FanucMoveZeroTest()
 
 void FunctionTestDialog::FanucCaptureKinematicsSample()
 {
-    RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstRobotDriverAdaptor();
+    RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstDriverWithCapability(
+		RobotDriverCapability::PassiveState, QStringLiteral("保存运动学样本"));
     if (pRobotDriverAdaptor == nullptr)
     {
         return;
@@ -3047,14 +3222,22 @@ void FunctionTestDialog::FanucCaptureKinematicsSample()
         return;
     }
 
-    const T_ANGLE_PULSE pulse = pRobotDriverAdaptor->GetCurrentPulse();
-    const T_ROBOT_COORS robotPose = pRobotDriverAdaptor->GetCurrentPos();
+    T_ANGLE_PULSE pulse;
+    T_ROBOT_COORS robotPose;
+    if (!pRobotDriverAdaptor->TryGetCurrentPulse(pulse)
+        || !pRobotDriverAdaptor->TryGetCurrentPos(robotPose))
+    {
+        QMessageBox::warning(this, "保存关节+直角",
+            "读取机器人关节或直角坐标失败，样本未保存。\n"
+            + DecodeRobotMessageText(pRobotDriverAdaptor->GetLastRobotError()));
+        return;
+    }
     QString toolName;
     const T_ROBOT_COORS toolCoors = EffectiveKinematicsTool(pRobotDriverAdaptor, &toolName);
     T_ROBOT_COORS modelPose;
     const bool fkOk = ForwardPoseFromDhParams(
-        KinematicsToParamArray(pRobotDriverAdaptor->m_tKinematics),
-        pRobotDriverAdaptor->m_tAxisUnit,
+        KinematicsToParamArray(pRobotDriverAdaptor->KinematicsParameters()),
+        pRobotDriverAdaptor->AxisUnit(),
         pulse,
         toolCoors,
         modelPose);
@@ -3080,7 +3263,7 @@ void FunctionTestDialog::FanucCaptureKinematicsSample()
         sampleIndex,
         timestamp,
         pulse,
-        pRobotDriverAdaptor->m_tAxisUnit,
+        pRobotDriverAdaptor->AxisUnit(),
         robotPose,
         modelPose) << "\n";
     ++m_kinematicsSampleCount;
@@ -3191,8 +3374,8 @@ void FunctionTestDialog::FitDhParametersFromSamples()
     double afterRotationRmse = 0.0;
     const bool fitOk = FitDhParamsByLeastSquares(
         samples,
-        pRobotDriverAdaptor->m_tKinematics,
-        pRobotDriverAdaptor->m_tAxisUnit,
+        pRobotDriverAdaptor->KinematicsParameters(),
+        pRobotDriverAdaptor->AxisUnit(),
         toolCoors,
         fittedParams,
         beforePositionRmse,
@@ -3207,7 +3390,7 @@ void FunctionTestDialog::FitDhParametersFromSamples()
         return;
     }
 
-    const std::array<double, kDhParamCount> initialParams = KinematicsToParamArray(pRobotDriverAdaptor->m_tKinematics);
+    const std::array<double, kDhParamCount> initialParams = KinematicsToParamArray(pRobotDriverAdaptor->KinematicsParameters());
     const QString report = BuildDhParameterReport(
         samples,
         initialParams,

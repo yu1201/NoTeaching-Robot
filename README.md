@@ -13,9 +13,26 @@
 
 - 仓库首页：<https://github.com/yu1201/NoTeaching-Robot>
 - 最新安装包页面：<https://github.com/yu1201/NoTeaching-Robot/releases/latest>
-- 当前源码版本：`v2026.07.30.1643`
+- 当前源码版本：`v2026.08.24.1333`（本地测试候选，尚未发布）
 
 建议普通使用者直接从 `Releases` 页面下载安装包 `NoTeaching-Robot-Setup-v2026.07.30.1643.exe`，不用自己编译源码。
+
+## 2026-08-24 本地测试候选（v2026.08.24.1333，尚未发布）
+
+- 机器人业务统一收敛到 `RobotDriverAdaptor` 能力契约和驱动注册表，补齐 STEP/FANUC 关节、脉冲、程序身份、运动终态与安全中止语义；新建控制单元恢复型号自带的 DH、轴限位和脉冲换算缺省值，无法证明能力时保持失败关闭。
+- 模型焊接补充源 STEP 焊缝候选、逆向 PLY 种子投影、落地大面与模板身份门禁，并新增扫描位姿变化测试入口；当前仍不直接启动生产机器人运动。
+- 配置库自动修复支持严格白名单内的跨 Windows 用户 DPAPI 恢复，以及早期 schema v5/auth3 缺失空凭据清理证明的安全补建；普通业务配置、账号摘要和管理员状态保持不变。
+- 新增机器人 FTP 程序数量后台提醒，以及新 Windows 开发机环境说明、第三方依赖离线包脚本和校验文档。
+- OTA 服务器只读核验确认两个通道、安装包和品牌补丁均在线；当前 `latest-v3.json` 因 7 天签名有效期已于 2026-08-06 到期，正式上架本候选前仍不会改动线上清单。
+
+## 2026-08-24 开发更新（未发版）
+
+- 新增机器人 FTP 程序数量后台提醒：GUI 启动后以及每次预设先测后焊/跳过扫描焊接成功完成后，后台只读检查当前控制器程序目录；STEP 按 `/UserPrograms/PCRobot.sr` 中的 `.srp` 计数，避免 `.srd` 重复，FANUC 按 `/md` 中 `.tp/.pc` 的程序名去重。默认超过 100 个程序时非模态提醒用户人工核对删除，FTP 不可达只写日志且不影响启动、扫描或焊接，程序绝不自动删除机器人文件。阈值可在“管理 → 机器人 → FTP Job 文件”保存到 `ConfigStore.db`。
+- `ConfigStore` 自动修复兼容早期 schema v5 库缺少“旧 INI 凭据清理证明”的情况：仅当当前库属于已严格验证的 auth3 登录偏好修复或跨 Windows 用户 DPAPI 恢复、实时旧凭据清单为空且目录不存在明文数据库残留时，补建空清理证明并继续原子修复。发现任何旧凭据文件、部分证明或未知状态时仍保持源库字节不变并拒绝自动删除。更新后的 `ConfigMigrate.exe` 已用真实旧库副本验证，除白名单中的不可移植 DPAPI 状态外，账号和普通业务配置逐行不变。
+
+## 2026-08-23 开发更新（未发版）
+
+- `ConfigStore` 自动修复新增跨 Windows 用户 DPAPI 恢复：只在 schema、账号、管理员、凭据清理状态及所有其他配置均通过完整校验，且全部不可读 DPAPI 行精确落入登录偏好、记忆密码、在线服务/机器人 FTP 凭据、点云证明密钥与回执白名单时才允许修复。修复前创建并回读整库 CurrentUser-DPAPI 备份；账号密码摘要和业务配置保持不变，不可移植登录偏好删除后按缺省值关闭，凭据需重新输入，旧点云证明全部失效并须重新验证。修复结果不残留开发机 DPAPI，可搬回目标 Windows 用户后再由程序按当地身份写入。混合可读/不可读状态、未知字段、缺少规范登录偏好、损坏信封或其他认证异常仍保持源库字节不变并拒绝修复。
 
 ## 2026-07-30 更新（v2026.07.30.1643）
 
@@ -593,14 +610,21 @@
 
 ## 构建说明
 
-1. 用 Visual Studio 2022 打开 `QtWidgetsApplication4.sln`
-2. 确认本机 Qt / OpenCV / Eigen / Orocos KDL 路径与工程配置一致
-3. 编译 `Debug|x64` 或 `Release|x64`
+完整的新机器环境搭建、版本锁定、路径配置、环境检查和本地构建命令见
+[`docs/source-environment-setup.md`](docs/source-environment-setup.md)。目标机器没有 Qt、OpenCV、Eigen、KDL 或 OpenCASCADE 时，使用
+[`docs/third-party-offline-package.md`](docs/third-party-offline-package.md) 和配套离线依赖包。
+
+1. 安装 Visual Studio 2022（v143、Windows SDK）
+2. 准备 Qt 6.7.3、OpenCV 4.6.0、Eigen 3.4.0、Orocos KDL 1.5.3 与 OpenCASCADE 7.9.3
+3. 复制 `tools/source_environment/environment.local.props.example` 为仓库根目录的 `environment.local.props` 并按本机修改路径
+4. 运行 `tools/source_environment/check_environment.ps1`
+5. 编译 `Debug|x64` 或 `Release|x64`
 
 说明：
 
-- `QtWidgetsApplication4.vcxproj` 当前仍带有本机绝对路径配置，如果换电脑，需要先改 Qt / OpenCV / Eigen / KDL 路径
-- STEP 的 `Robot-SDKd.lib` / `Robot-SDK.lib` 需要自行放到 `SDK/STEP`
+- `QtWidgetsApplication4.vcxproj` 保留当前机器路径作为兼容默认值；换电脑优先用本机私有的 `environment.local.props` 覆盖，不要反复修改工程文件
+- STEP 的 `Robot-SDKd.lib` / `Robot-SDK.lib` 已由 Git 跟踪；完整克隆后应直接存在于 `SDK/STEP`
+- `SDK/STEP/versions/*/*.ARM.zip` 是控制器系统升级包，不是 Windows 源码编译依赖
 
 ## 仓库精简说明
 

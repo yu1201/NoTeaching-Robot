@@ -191,9 +191,9 @@ QString VirtualWeldTestDialog::CurrentRobotName() const
         }
     }
     RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, m_unitIndex);
-    if (driver != nullptr && !driver->m_sRobotName.empty())
+    if (driver != nullptr && !driver->RobotName().empty())
     {
-        return QString::fromStdString(driver->m_sRobotName);
+        return QString::fromStdString(driver->RobotName());
     }
     return QString();
 }
@@ -372,9 +372,9 @@ RobotDriverAdaptor* VirtualWeldTestDialog::ResolveDriver()
 
 QString VirtualWeldTestDialog::ResolveRobotName(RobotDriverAdaptor* driver) const
 {
-    if (driver != nullptr && !driver->m_sRobotName.empty())
+    if (driver != nullptr && !driver->RobotName().empty())
     {
-        return QString::fromStdString(driver->m_sRobotName);
+        return QString::fromStdString(driver->RobotName());
     }
     if (m_pContralUnit != nullptr
         && m_unitIndex >= 0
@@ -427,6 +427,12 @@ void VirtualWeldTestDialog::OnReadCurrentPos()
     {
         return;
     }
+	if (!driver->Supports(RobotDriverCapability::PassiveState))
+	{
+		QMessageBox::warning(this, QStringLiteral("读取当前位置"),
+			QStringLiteral("当前机器人品牌底层缺少“机器人状态读取”适配能力，功能已限制。"));
+		return;
+	}
 	// 每次重新读取都开启一个新的起点代次；无论读取成功与否，旧轨迹都不能再
 	// 与新的/未知起点混用并直接下发。
 	m_hasStartCoors = false;
@@ -505,7 +511,7 @@ void VirtualWeldTestDialog::OnGenerate()
 
     AppendLog(QStringLiteral("———— 开始生成虚拟焊道 ————"));
     const bool ok = service.GenerateVirtualStraightWeldFiles(
-        robotName, m_startCoors, lengthMm, stepMm, dir, actualWeld,
+        ResolveDriver(), m_startCoors, lengthMm, stepMm, dir, actualWeld,
         outputDir, weldPosePath, srpPath, srdPath, programName, summary, error, appendLog);
     if (!ok)
     {
@@ -543,13 +549,33 @@ void VirtualWeldTestDialog::OnRunOnRobot()
     {
         return;
     }
+	const bool actualWeld = m_actualWeldCheck->isChecked();
+	std::initializer_list<RobotDriverCapability> baseCapabilities =
+		{ RobotDriverCapability::LinearMotion,
+		  RobotDriverCapability::PassiveState,
+		  RobotDriverCapability::ContinuousTrajectory,
+		  RobotDriverCapability::VerifiedProgramCompletion,
+		  RobotDriverCapability::VerifiedSafeAbort };
+	if (!driver->SupportsAll(baseCapabilities)
+		|| (actualWeld && !driver->Supports(RobotDriverCapability::ActualArcWeld)))
+	{
+		QString missing = QString::fromUtf8(driver->MissingCapabilitiesText(baseCapabilities).c_str());
+		if (actualWeld && !driver->Supports(RobotDriverCapability::ActualArcWeld))
+		{
+			if (!missing.isEmpty()) missing += QStringLiteral("、");
+			missing += QStringLiteral("真实起弧焊接");
+		}
+		QMessageBox::warning(this, QStringLiteral("下发并运行"),
+			QStringLiteral("当前机器人品牌底层无法执行虚拟焊道测试，缺少适配能力：%1；功能已限制。")
+			.arg(missing));
+		return;
+	}
     if (!driver->IsConnected())
     {
         QMessageBox::warning(this, QStringLiteral("下发并运行"), QStringLiteral("机器人未连接，无法下发运行。"));
         return;
     }
 
-    const bool actualWeld = m_actualWeldCheck->isChecked();
     const QString confirmText = actualWeld
         ? QStringLiteral("即将下发并运行虚拟焊道（实焊模式，含摆动，会真实引弧）。\n"
                          "机器人将先移动到安全位再执行焊道，请确认现场安全（如仅测摆动请断送丝/断气）。\n是否继续？")

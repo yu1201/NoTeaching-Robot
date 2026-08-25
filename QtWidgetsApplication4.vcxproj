@@ -1,5 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildProjectDirectory)\environment.local.props" Condition="Exists('$(MSBuildProjectDirectory)\environment.local.props')" />
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
@@ -16,7 +17,17 @@
     <PreferredToolArchitecture>x64</PreferredToolArchitecture>
     <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">10.0</WindowsTargetPlatformVersion>
     <WindowsTargetPlatformVersion Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">10.0</WindowsTargetPlatformVersion>
-    <QtMsBuild Condition="'$(QtMsBuild)'=='' OR !Exists('$(QtMsBuild)\qt.targets')">$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
+    <QtRoot Condition="'$(QtRoot)' == ''">E:\workspace\soft\QT\6.7.3\msvc2022_64</QtRoot>
+    <QtVersion Condition="'$(QtVersion)' == ''">6.7.3</QtVersion>
+    <OpenCvRoot Condition="'$(OpenCvRoot)' == ''">E:\OpenCV4.6.0\build</OpenCvRoot>
+    <OpenCvVersionSuffix Condition="'$(OpenCvVersionSuffix)' == ''">460</OpenCvVersionSuffix>
+    <OpenCvToolsetDir Condition="'$(OpenCvToolsetDir)' == ''">vc15</OpenCvToolsetDir>
+    <EigenRoot Condition="'$(EigenRoot)' == ''">E:\Eigen3.4\eigen-3.4.0</EigenRoot>
+    <OrocosKdlRoot Condition="'$(OrocosKdlRoot)' == ''">C:\Program Files\orocos_kdl</OrocosKdlRoot>
+    <VcpkgRoot Condition="'$(VcpkgRoot)' == '' and '$(VCPKG_ROOT)' != ''">$(VCPKG_ROOT)</VcpkgRoot>
+    <VcpkgRoot Condition="'$(VcpkgRoot)' == ''">E:\vcpkg</VcpkgRoot>
+    <QtMsBuild Condition="'$(QtMsBuild)' == '' and Exists('$(LOCALAPPDATA)\QtMsBuild\qt.targets')">$(LOCALAPPDATA)\QtMsBuild</QtMsBuild>
+    <QtMsBuild Condition="'$(QtMsBuild)' == ''">$(MSBuildProjectDirectory)\QtMsBuild</QtMsBuild>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
@@ -37,12 +48,12 @@
     <Import Project="$(QtMsBuild)\qt_defaults.props" />
   </ImportGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="QtSettings">
-    <QtInstall>qt6.7</QtInstall>
+    <QtInstall Condition="'$(QtInstall)' == ''">$(QtRoot)</QtInstall>
     <QtModules>core;gui;widgets;network;sql;opengl;openglwidgets</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
-    <QtInstall>qt6.7</QtInstall>
+    <QtInstall Condition="'$(QtInstall)' == ''">$(QtRoot)</QtInstall>
     <QtModules>core;gui;widgets;network;sql;opengl;openglwidgets</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
   </PropertyGroup>
@@ -61,8 +72,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Label="OpenCascade">
-    <OcctRoot Condition="'$(OcctRoot)' == '' and '$(VCPKG_ROOT)' != ''">$(VCPKG_ROOT)\installed\x64-windows</OcctRoot>
-    <OcctRoot Condition="'$(OcctRoot)' == ''">E:\vcpkg\installed\x64-windows</OcctRoot>
+    <OcctRoot Condition="'$(OcctRoot)' == ''">$(VcpkgRoot)\installed\x64-windows</OcctRoot>
     <OcctIncludeDir>$(OcctRoot)\include\opencascade</OcctIncludeDir>
     <OcctLibDir Condition="'$(Configuration)' == 'Debug'">$(OcctRoot)\debug\lib</OcctLibDir>
     <OcctLibDir Condition="'$(Configuration)' != 'Debug'">$(OcctRoot)\lib</OcctLibDir>
@@ -70,18 +80,18 @@
     <OcctBinDir Condition="'$(Configuration)' != 'Debug'">$(OcctRoot)\bin</OcctBinDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
-    <LocalDebuggerEnvironment>PATH=$(OcctBinDir);E:\workspace\soft\QT\6.7.3\msvc2022_64\bin;E:\OpenCV4.6.0\build\x64\vc15\bin;%PATH%</LocalDebuggerEnvironment>
+    <LocalDebuggerEnvironment>PATH=$(OcctBinDir);$(QtRoot)\bin;$(OpenCvRoot)\x64\$(OpenCvToolsetDir)\bin;%PATH%</LocalDebuggerEnvironment>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
-    <LocalDebuggerEnvironment>PATH=$(OcctBinDir);E:\workspace\soft\QT\6.7.3\msvc2022_64\bin;E:\OpenCV4.6.0\build\x64\vc15\bin;%PATH%</LocalDebuggerEnvironment>
+    <LocalDebuggerEnvironment>PATH=$(OcctBinDir);$(QtRoot)\bin;$(OpenCvRoot)\x64\$(OpenCvToolsetDir)\bin;%PATH%</LocalDebuggerEnvironment>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Link>
-      <AdditionalLibraryDirectories>$(OcctLibDir);C:\Program Files\orocos_kdl\lib;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\lib;E:\OpenCV4.6.0\build\x64\vc15\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>TKDESTEP.lib;TKXSBase.lib;TKXCAF.lib;TKVCAF.lib;TKCAF.lib;TKLCAF.lib;TKCDF.lib;TKMesh.lib;TKTopAlgo.lib;TKBRep.lib;TKG3d.lib;TKMath.lib;TKernel.lib;TKPrim.lib;TKService.lib;TKV3d.lib;TKOpenGl.lib;orocos-kdld.lib;Robot-SDKd.lib;Qt6Networkd.lib;Qt6Sqld.lib;Qt6OpenGLd.lib;Qt6OpenGLWidgetsd.lib;opengl32.lib;opencv_world460d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(OcctLibDir);$(OrocosKdlRoot)\lib;$(MSBuildProjectDirectory)\SDK\STEP;$(QtRoot)\lib;$(OpenCvRoot)\x64\$(OpenCvToolsetDir)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>TKDESTEP.lib;TKXSBase.lib;TKXCAF.lib;TKVCAF.lib;TKCAF.lib;TKLCAF.lib;TKCDF.lib;TKMesh.lib;TKBO.lib;TKBool.lib;TKShHealing.lib;TKGeomAlgo.lib;TKGeomBase.lib;TKTopAlgo.lib;TKBRep.lib;TKG2d.lib;TKG3d.lib;TKMath.lib;TKernel.lib;TKPrim.lib;TKService.lib;TKV3d.lib;TKOpenGl.lib;orocos-kdld.lib;Robot-SDKd.lib;Qt6Networkd.lib;Qt6Sqld.lib;Qt6OpenGLd.lib;Qt6OpenGLWidgetsd.lib;opengl32.lib;opencv_world460d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;$(OcctIncludeDir);C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtCore\6.7.3;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;$(OcctIncludeDir);$(OrocosKdlRoot)\include;$(EigenRoot);$(MSBuildProjectDirectory)\SDK\STEP;$(QtRoot)\include;$(QtRoot)\include\QtCore\$(QtVersion);$(QtRoot)\include\QtNetwork;$(QtRoot)\include\QtSql;$(QtRoot)\include\QtOpenGL;$(QtRoot)\include\QtOpenGLWidgets;$(OpenCvRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <DisableSpecificWarnings>4828</DisableSpecificWarnings>
@@ -114,15 +124,15 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalLibraryDirectories>$(OcctLibDir);C:\Program Files\orocos_kdl\lib;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\lib;E:\OpenCV4.6.0\build\x64\vc15\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>TKDESTEP.lib;TKXSBase.lib;TKXCAF.lib;TKVCAF.lib;TKCAF.lib;TKLCAF.lib;TKCDF.lib;TKMesh.lib;TKTopAlgo.lib;TKBRep.lib;TKG3d.lib;TKMath.lib;TKernel.lib;TKPrim.lib;TKService.lib;TKV3d.lib;TKOpenGl.lib;orocos-kdl.lib;Robot-SDK.lib;Qt6Network.lib;Qt6Sql.lib;Qt6OpenGL.lib;Qt6OpenGLWidgets.lib;opengl32.lib;opencv_world460.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(OcctLibDir);$(OrocosKdlRoot)\lib;$(MSBuildProjectDirectory)\SDK\STEP;$(QtRoot)\lib;$(OpenCvRoot)\x64\$(OpenCvToolsetDir)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>TKDESTEP.lib;TKXSBase.lib;TKXCAF.lib;TKVCAF.lib;TKCAF.lib;TKLCAF.lib;TKCDF.lib;TKMesh.lib;TKBO.lib;TKBool.lib;TKShHealing.lib;TKGeomAlgo.lib;TKGeomBase.lib;TKTopAlgo.lib;TKBRep.lib;TKG2d.lib;TKG3d.lib;TKMath.lib;TKernel.lib;TKPrim.lib;TKService.lib;TKV3d.lib;TKOpenGl.lib;orocos-kdl.lib;Robot-SDK.lib;Qt6Network.lib;Qt6Sql.lib;Qt6OpenGL.lib;Qt6OpenGLWidgets.lib;opengl32.lib;opencv_world460.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;$(OcctIncludeDir);C:\Program Files\orocos_kdl\include;E:\Eigen3.4\eigen-3.4.0;$(MSBuildProjectDirectory)\SDK\STEP;E:\workspace\soft\QT\6.7.3\msvc2022_64\include;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtCore\6.7.3;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtNetwork;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtSql;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGL;E:\workspace\soft\QT\6.7.3\msvc2022_64\include\QtOpenGLWidgets;E:\OpenCV4.6.0\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\include;$(OcctIncludeDir);$(OrocosKdlRoot)\include;$(EigenRoot);$(MSBuildProjectDirectory)\SDK\STEP;$(QtRoot)\include;$(QtRoot)\include\QtCore\$(QtVersion);$(QtRoot)\include\QtNetwork;$(QtRoot)\include\QtSql;$(QtRoot)\include\QtOpenGL;$(QtRoot)\include\QtOpenGLWidgets;$(OpenCvRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ResourceCompile>
@@ -142,6 +152,7 @@
     <ClCompile Include="src\CameraParamDialog.cpp" />
     <ClCompile Include="src\FTPClient.cpp" />
     <ClCompile Include="src\FANUCRobotDriver.cpp" />
+    <ClCompile Include="src\InovanceRobotDriver.cpp" />
     <ClCompile Include="src\FanucTpContentIdentity.cpp" />
     <ClCompile Include="src\FunctionTestDialog.cpp" />
     <ClCompile Include="portable\LaserFramePoint3DFilter\LaserFramePoint3DFilter.cpp">
@@ -157,6 +168,7 @@
     <ClCompile Include="src\HandEyeMatrixDialog.cpp" />
     <ClCompile Include="src\LaserWeldFilterDialog.cpp" />
     <ClCompile Include="src\ScanSafetyGateDialog.cpp" />
+    <ClCompile Include="src\ScanPoseVariationTestDialog.cpp" />
     <ClCompile Include="src\MeasureThenWeldDialog.cpp" />
     <ClCompile Include="src\MeasureThenWeldService.cpp" />
     <ClCompile Include="src\PointCloudProofIntegrity.cpp" />
@@ -174,6 +186,10 @@
     <ClCompile Include="src\ModelAlignmentConfig.cpp" />
     <ClCompile Include="src\ModelAlignmentDialog.cpp" />
     <ClCompile Include="src\RobotModelManagerDialog.cpp" />
+    <ClCompile Include="src\CadSeamCandidateExtractor.cpp">
+      <DisableSpecificWarnings>4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <ClCompile Include="src\ReverseMeshSeamProjector.cpp" />
     <ClCompile Include="src\ModelWeldingFlowDialog.cpp" />
     <ClCompile Include="src\ModelWeldingWorkflow.cpp" />
     <ClCompile Include="src\TheoreticalRobotModelStore.cpp" />
@@ -202,6 +218,8 @@
     <ClCompile Include="src\RobotLog.cpp" />
     <ClCompile Include="src\SKJCameraControlClient.cpp" />
     <ClCompile Include="src\RobotDriverAdaptor.cpp" />
+    <ClCompile Include="src\RobotFtpFileTransfer.cpp" />
+    <ClCompile Include="src\RobotDriverRegistry.cpp" />
     <ClCompile Include="src\RobotMessage.cpp" />
     <ClCompile Include="src\RobotOperationLease.cpp" />
     <ClCompile Include="src\ApplicationInstanceGuard.cpp" />
@@ -243,6 +261,7 @@
     <ClInclude Include="include\CameraParamDialog.h" />
     <ClInclude Include="include\ContralUnit.h" />
     <ClInclude Include="include\FANUCRobotDriver.h" />
+    <ClInclude Include="include\InovanceRobotDriver.h" />
     <ClInclude Include="include\FanucTpContentIdentity.h" />
     <ClInclude Include="include\FunctionTestDialog.h" />
     <QtMoc Include="include\groove\clientudpformsensorworker.h" />
@@ -255,12 +274,15 @@
     <ClInclude Include="include\HandEyeMatrixDialog.h" />
     <ClInclude Include="include\LaserWeldFilterDialog.h" />
     <ClInclude Include="include\ScanSafetyGateDialog.h" />
+    <ClInclude Include="include\ScanPoseVariationTestDialog.h" />
     <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h" />
     <ClInclude Include="include\MeasureThenWeldService.h" />
     <ClInclude Include="include\WeldPoseValidationLimits.h" />
     <ClInclude Include="include\RobotModelManagerDialog.h" />
     <ClInclude Include="include\RobotModelRemoteCatalog.h" />
     <ClInclude Include="include\RobotModelOriginalPreview.h" />
+    <ClInclude Include="include\CadSeamCandidateExtractor.h" />
+    <ClInclude Include="include\ReverseMeshSeamProjector.h" />
     <ClInclude Include="include\ModelWeldingFlowDialog.h" />
     <ClInclude Include="include\ModelWeldingWorkflow.h" />
     <ClInclude Include="include\TheoreticalRobotModelStore.h" />
@@ -288,6 +310,8 @@
     <ClInclude Include="include\RobotCalculation.h" />
     <ClInclude Include="include\RobotDataHelper.h" />
     <ClInclude Include="include\RobotDriverAdaptor.h" />
+    <ClInclude Include="include\RobotFtpFileTransfer.h" />
+    <ClInclude Include="include\RobotDriverRegistry.h" />
     <ClInclude Include="include\RobotLog.h" />
     <ClInclude Include="include\SKJCameraControlClient.h" />
     <ClInclude Include="include\RobotMessage.h" />
@@ -320,17 +344,17 @@
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
   <ItemGroup>
-    <OcctImportLib Include="$(OcctLibDir)\TKDESTEP.lib;$(OcctLibDir)\TKXSBase.lib;$(OcctLibDir)\TKXCAF.lib;$(OcctLibDir)\TKVCAF.lib;$(OcctLibDir)\TKCAF.lib;$(OcctLibDir)\TKLCAF.lib;$(OcctLibDir)\TKCDF.lib;$(OcctLibDir)\TKMesh.lib;$(OcctLibDir)\TKTopAlgo.lib;$(OcctLibDir)\TKBRep.lib;$(OcctLibDir)\TKG3d.lib;$(OcctLibDir)\TKMath.lib;$(OcctLibDir)\TKernel.lib;$(OcctLibDir)\TKPrim.lib;$(OcctLibDir)\TKService.lib;$(OcctLibDir)\TKV3d.lib;$(OcctLibDir)\TKOpenGl.lib" />
+    <OcctImportLib Include="$(OcctLibDir)\TKDESTEP.lib;$(OcctLibDir)\TKXSBase.lib;$(OcctLibDir)\TKXCAF.lib;$(OcctLibDir)\TKVCAF.lib;$(OcctLibDir)\TKCAF.lib;$(OcctLibDir)\TKLCAF.lib;$(OcctLibDir)\TKCDF.lib;$(OcctLibDir)\TKMesh.lib;$(OcctLibDir)\TKBO.lib;$(OcctLibDir)\TKBool.lib;$(OcctLibDir)\TKShHealing.lib;$(OcctLibDir)\TKGeomAlgo.lib;$(OcctLibDir)\TKGeomBase.lib;$(OcctLibDir)\TKTopAlgo.lib;$(OcctLibDir)\TKBRep.lib;$(OcctLibDir)\TKG2d.lib;$(OcctLibDir)\TKG3d.lib;$(OcctLibDir)\TKMath.lib;$(OcctLibDir)\TKernel.lib;$(OcctLibDir)\TKPrim.lib;$(OcctLibDir)\TKService.lib;$(OcctLibDir)\TKV3d.lib;$(OcctLibDir)\TKOpenGl.lib" />
   </ItemGroup>
   <ItemGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
-    <OcctRuntimeDll Include="$(OcctBinDir)\TKBO.dll;$(OcctBinDir)\TKBRep.dll;$(OcctBinDir)\TKCAF.dll;$(OcctBinDir)\TKCDF.dll;$(OcctBinDir)\TKDE.dll;$(OcctBinDir)\TKDESTEP.dll;$(OcctBinDir)\TKernel.dll;$(OcctBinDir)\TKG2d.dll;$(OcctBinDir)\TKG3d.dll;$(OcctBinDir)\TKGeomAlgo.dll;$(OcctBinDir)\TKGeomBase.dll;$(OcctBinDir)\TKHLR.dll;$(OcctBinDir)\TKLCAF.dll;$(OcctBinDir)\TKMath.dll;$(OcctBinDir)\TKMesh.dll;$(OcctBinDir)\TKOpenGl.dll;$(OcctBinDir)\TKPrim.dll;$(OcctBinDir)\TKService.dll;$(OcctBinDir)\TKShHealing.dll;$(OcctBinDir)\TKTopAlgo.dll;$(OcctBinDir)\TKV3d.dll;$(OcctBinDir)\TKVCAF.dll;$(OcctBinDir)\TKXCAF.dll;$(OcctBinDir)\TKXSBase.dll" />
+    <OcctRuntimeDll Include="$(OcctBinDir)\TKBO.dll;$(OcctBinDir)\TKBool.dll;$(OcctBinDir)\TKBRep.dll;$(OcctBinDir)\TKCAF.dll;$(OcctBinDir)\TKCDF.dll;$(OcctBinDir)\TKDE.dll;$(OcctBinDir)\TKDESTEP.dll;$(OcctBinDir)\TKernel.dll;$(OcctBinDir)\TKG2d.dll;$(OcctBinDir)\TKG3d.dll;$(OcctBinDir)\TKGeomAlgo.dll;$(OcctBinDir)\TKGeomBase.dll;$(OcctBinDir)\TKHLR.dll;$(OcctBinDir)\TKLCAF.dll;$(OcctBinDir)\TKMath.dll;$(OcctBinDir)\TKMesh.dll;$(OcctBinDir)\TKOpenGl.dll;$(OcctBinDir)\TKPrim.dll;$(OcctBinDir)\TKService.dll;$(OcctBinDir)\TKShHealing.dll;$(OcctBinDir)\TKTopAlgo.dll;$(OcctBinDir)\TKV3d.dll;$(OcctBinDir)\TKVCAF.dll;$(OcctBinDir)\TKXCAF.dll;$(OcctBinDir)\TKXSBase.dll" />
   </ItemGroup>
   <ItemGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
-    <OcctRuntimeDll Include="$(OcctBinDir)\TKBO.dll;$(OcctBinDir)\TKBRep.dll;$(OcctBinDir)\TKCAF.dll;$(OcctBinDir)\TKCDF.dll;$(OcctBinDir)\TKDE.dll;$(OcctBinDir)\TKDESTEP.dll;$(OcctBinDir)\TKernel.dll;$(OcctBinDir)\TKG2d.dll;$(OcctBinDir)\TKG3d.dll;$(OcctBinDir)\TKGeomAlgo.dll;$(OcctBinDir)\TKGeomBase.dll;$(OcctBinDir)\TKHLR.dll;$(OcctBinDir)\TKLCAF.dll;$(OcctBinDir)\TKMath.dll;$(OcctBinDir)\TKMesh.dll;$(OcctBinDir)\TKOpenGl.dll;$(OcctBinDir)\TKPrim.dll;$(OcctBinDir)\TKService.dll;$(OcctBinDir)\TKShHealing.dll;$(OcctBinDir)\TKTopAlgo.dll;$(OcctBinDir)\TKV3d.dll;$(OcctBinDir)\TKVCAF.dll;$(OcctBinDir)\TKXCAF.dll;$(OcctBinDir)\TKXSBase.dll" />
+    <OcctRuntimeDll Include="$(OcctBinDir)\TKBO.dll;$(OcctBinDir)\TKBool.dll;$(OcctBinDir)\TKBRep.dll;$(OcctBinDir)\TKCAF.dll;$(OcctBinDir)\TKCDF.dll;$(OcctBinDir)\TKDE.dll;$(OcctBinDir)\TKDESTEP.dll;$(OcctBinDir)\TKernel.dll;$(OcctBinDir)\TKG2d.dll;$(OcctBinDir)\TKG3d.dll;$(OcctBinDir)\TKGeomAlgo.dll;$(OcctBinDir)\TKGeomBase.dll;$(OcctBinDir)\TKHLR.dll;$(OcctBinDir)\TKLCAF.dll;$(OcctBinDir)\TKMath.dll;$(OcctBinDir)\TKMesh.dll;$(OcctBinDir)\TKOpenGl.dll;$(OcctBinDir)\TKPrim.dll;$(OcctBinDir)\TKService.dll;$(OcctBinDir)\TKShHealing.dll;$(OcctBinDir)\TKTopAlgo.dll;$(OcctBinDir)\TKV3d.dll;$(OcctBinDir)\TKVCAF.dll;$(OcctBinDir)\TKXCAF.dll;$(OcctBinDir)\TKXSBase.dll" />
   </ItemGroup>
   <Target Name="CheckOpenCascadeDependency" BeforeTargets="ClCompile;Link">
     <Error Condition="!Exists('$(OcctIncludeDir)\STEPControl_Reader.hxx') or !Exists('$(OcctIncludeDir)\Standard_Version.hxx')"
-           Text="Open CASCADE 7.9.3 headers are missing under $(OcctIncludeDir). Install with: E:\vcpkg\vcpkg.exe install opencascade[core]:x64-windows, or set /p:OcctRoot=... to the x64-windows triplet prefix." />
+           Text="Open CASCADE 7.9.3 headers are missing under $(OcctIncludeDir). Install opencascade[core]:x64-windows with the tested vcpkg baseline, or set OcctRoot in environment.local.props or /p:OcctRoot=... ." />
     <ReadLinesFromFile File="$(OcctIncludeDir)\Standard_Version.hxx">
       <Output TaskParameter="Lines" ItemName="_OcctVersionHeaderLine" />
     </ReadLinesFromFile>
@@ -348,20 +372,20 @@
            Text="Open CASCADE license and exception notice is missing: $(OcctRoot)\share\opencascade\copyright" />
   </Target>
   <Target Name="AfterBuildDebug" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
-    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types networkinformation,generic &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;$(QtRoot)\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types networkinformation,generic &quot;$(TargetPath)&quot;" />
     <MakeDir Directories="$(TargetDir)translations" />
-    <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460d.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(QtRoot)\translations\qt_zh_CN.qm;$(QtRoot)\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(OpenCvRoot)\x64\$(OpenCvToolsetDir)\bin\opencv_world$(OpenCvVersionSuffix)d.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\SKJCamera.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\avcodec-61.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\avutil-59.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\swresample-5.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Debug\swscale-8.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(OcctRuntimeDll)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <MakeDir Directories="$(TargetDir)licenses\opencascade" />
     <Copy SourceFiles="$(OcctRoot)\share\opencascade\copyright" DestinationFolder="$(TargetDir)licenses\opencascade" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="AfterBuildRelease" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
-    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;E:\workspace\soft\QT\6.7.3\msvc2022_64\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types networkinformation,generic &quot;$(TargetPath)&quot;" />
+    <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;$(QtRoot)\bin\windeployqt.exe&quot; --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types networkinformation,generic &quot;$(TargetPath)&quot;" />
     <MakeDir Directories="$(TargetDir)translations" />
-    <Copy SourceFiles="E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qt_zh_CN.qm;E:\workspace\soft\QT\6.7.3\msvc2022_64\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="E:\OpenCV4.6.0\build\x64\vc15\bin\opencv_world460.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(QtRoot)\translations\qt_zh_CN.qm;$(QtRoot)\translations\qtbase_zh_CN.qm" DestinationFolder="$(TargetDir)translations" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(OpenCvRoot)\x64\$(OpenCvToolsetDir)\bin\opencv_world$(OpenCvVersionSuffix).dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\SKJCamera.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\avcodec-61.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\avutil-59.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\swresample-5.dll;$(MSBuildProjectDirectory)\SDK\SKJCamera\bin\x64\Release\swscale-8.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(OcctRuntimeDll)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
     <MakeDir Directories="$(TargetDir)licenses\opencascade" />

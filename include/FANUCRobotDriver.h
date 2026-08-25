@@ -18,16 +18,58 @@
 #ifndef __FANUC_ROBOT_CTRL
 #define __FANUC_ROBOT_CTRL
 
+class FtpClient;
+
 class FANUCRobotCtrl : public RobotDriverAdaptor
 {
 public:
 	FANUCRobotCtrl(std::string strUnitName, RobotLog* pLog);
 	~FANUCRobotCtrl() override;
+	RobotDriverDescriptor DriverDescriptor() const override;
+	std::uint64_t DriverCapabilities() const override;
+	RobotConnectionEndpoint ControlEndpoint() const override;
+	bool Connect() override;
+	bool Disconnect() override;
+	RobotFileTransferProfile FileTransferProfile() const override;
+	std::shared_ptr<RobotFileTransferSession> CreateFileTransferSession(
+		std::string* error = nullptr) const override;
+	bool ValidateLinearSpeedMmPerMin(double speedMmPerMin, std::string* error = nullptr) const override;
+	bool MoveLinearMmPerMin(const T_ROBOT_COORS& target, double speedMmPerMin, int externalAxleType, const int* configuration = nullptr) override;
+	bool MoveJointPercent(const T_ANGLE_PULSE& target, double speedPercent, int externalAxleType) override;
+	RobotMotionStatus ReadMotionStatus() override;
+	RobotMotionStatus ReadMotionStatusPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
+	bool ReserveTrajectory(RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
+	bool DownlinkTrajectory(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
+	bool ExportTrajectoryProgramFiles(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, const std::string& outputDirectory, RobotTrajectoryHandle& handle, std::string* error = nullptr) override;
+	bool StartTrajectory(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
+	bool WaitTrajectory(const RobotTrajectoryHandle& handle, int pollDelayMs, int runTimeoutMs, RobotMotionStatus* terminalStatus = nullptr) override;
+	bool GetTrackedMotionIdentity(std::string& projectName, std::string& programName, bool* alreadyStopped = nullptr) override;
+	bool PauseTrackedMotion(const std::string& expectedProgramName, int& programLine, T_ROBOT_COORS& pausedPose, std::string* projectName = nullptr, std::string* programName = nullptr) override;
+	bool ResumeTrackedMotion(const std::string& expectedProgramName, const T_ROBOT_COORS& checkpointPose, double maxPositionDeviationMm, double maxAngleDeviationDeg, double* positionDeviationMm = nullptr, double* angleDeviationDeg = nullptr) override;
+	RobotPersistentRecoveryStrategy PersistentRecoveryStrategy() const override;
+	bool AbortPersistedMotion(const std::string& expectedProgramName) override;
+	bool SetOperationMode(RobotOperationMode mode) override;
+	bool InitializeAfterConnect(std::string* summary = nullptr) override;
+	bool ShutdownBeforeDisconnect() override;
+	void ReloadRuntimeConfiguration() override;
+	bool PrepareNativeProgramUpload() override;
+	bool StartContinuousJog(int moveType, double nativeSpeed) override;
+	bool PushContinuousJogPoint(const T_ROBOT_COORS& target, double nativeSpeed) override;
+	bool PushContinuousJogPoint(const T_ANGLE_PULSE& target, double nativeSpeed) override;
+	void RequestEndContinuousJog() override;
+	void EndContinuousJog() override;
+	bool IsContinuousJogRunning() const override;
+	int UploadNativeProgramSource(const std::string& localPath, const std::string& remoteDirectory = std::string()) override;
+	std::string SendDiagnosticCommand(const std::string& command) override;
+	bool WriteCartesianRegister(int index, const double pose[8], int config[7]) override;
+	bool RunProgramAndWait(const std::string& programName, int startTimeoutMs, int finishTimeoutMs, int pollDelayMs, RobotMotionStatus* terminalStatus = nullptr) override;
+	bool InstallHandEyeSupportPrograms(std::string* summary = nullptr) override;
+	bool RunHandEyeValidation(const T_ROBOT_COORS& robotPose, T_ROBOT_COORS& robotCalculatedPoint) override;
 
 public:
 	// 初始化与控制连接：机器人侧S4作为TCP服务器，上位机作为客户端请求/应答。
-	bool InitSocket(const char* ip, unsigned short Port, bool ifRecode = false) override;
-	bool CloseSocket() override;
+	bool InitSocket(const char* ip, unsigned short Port, bool ifRecode = false);
+	bool CloseSocket();
 	bool IsConnected() override;
 	std::string GetRobotStatusText() override;
 	std::string GetStateMonitorSourceText() const override;
@@ -83,7 +125,7 @@ public:
 	void PrepareStateMonitor() override;
 
 	// 连续运动：生成并上传临时程序，适合多点路径/特殊运动；与下方固定TP单点运动区分。
-	int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo) override;
+	int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo);
 	enum class TrajectoryProgramMode
 	{
 		DryRun,
@@ -97,7 +139,8 @@ public:
 		TrajectoryProgramMode mode,
 		std::string* pProgramName = nullptr,
 		std::string* pLocalLsPath = nullptr,
-		std::string* pRemoteTpPath = nullptr);
+		std::string* pRemoteTpPath = nullptr,
+		const std::string& requestedProgramName = std::string());
 	bool StartContinuousMoveQueue(int nMoveType, double dSpeed);
 	bool PushContinuousMovePoint(const T_ROBOT_MOVE_INFO& moveInfo);
 	bool PushContinuousMovePoint(const T_ROBOT_COORS& target, double dSpeed);
@@ -125,7 +168,7 @@ public:
 	bool ServoOn() override;
 	bool cleanAlarm() override;
 	bool SetSysMode(int mode);
-	bool SetTpSpeed(int speed);
+	bool SetTpSpeed(int speed) override;
 
 	// 程序状态查询：用于兼容既有STEP接口命名。
 	std::string GetUserProgram();
@@ -146,15 +189,17 @@ public:
 	//bool SetPosVar(int nIndex, JointsPos eRobotCoors, int scoper = ENGINEEVAR);
 
 	int GetPosVar(long lPvarIndex, double array[6], int config[7] = { 0 }, int MoveType = POSVAR) override;
+	bool GetHandEyeMatrixVariable(const char* variableName, double rotation[9], double translation[3], std::string* error = nullptr) override;
 
 	// 速度与寄存器：R[17]作为固定TP速度寄存器，INT/REAL用于工艺参数或兼容接口。
 	bool SetSpeed(const char* name, double* speed, int scord = ENGINEEVAR);
 	bool SetSpeed(int nIndex, double adSpeed[5]);
 	//bool SetSpeed(int nIndex, SDynamicPercent adSpeed);
-	int GetIntVar(int nIndex, const char* cStrPreFix = "INT");
-	bool SetIntVar(int nIndex, int nValue, int score = 2, const char* cStrPreFix = "INT");
-	bool SetIntVar(const char* name, int value, int score = 2);
-	bool SetRealVar(int nIndex, double value, const char* cStrPreFix = "REAL", int score = 1);
+	bool TryGetIntVar(int nIndex, int& value, const char* cStrPreFix = "INT") override;
+	int GetIntVar(int nIndex, const char* cStrPreFix = "INT") override;
+	bool SetIntVar(int nIndex, int nValue, int score = 2, const char* cStrPreFix = "INT") override;
+	bool SetIntVar(const char* name, int value, int score = 2) override;
+	bool SetRealVar(int nIndex, double value, const char* cStrPreFix = "REAL", int score = 1) override;
 
 	// 运动命令兼容层：旧接口仍保留；单点MOVL/MOVJ使用固定TP以避免重复编译。
 	bool AxisPulseMove(int nAxisNo, long lDist, long lRobotSpd, int nCoorType = POSVAR, int nMovtype = RELVAR, int nToolNo = 1, long lCoordFrm = 1);
@@ -194,6 +239,14 @@ public:
 	std::mutex m_callJobStartMutex;
 
 private:
+	// 品牌通信配置和底层对象只归本驱动所有，不进入适配层公共状态。
+	std::string m_sSocketIP;
+	int m_nSocketPort{ 0 };
+	std::string m_sFTPIP;
+	int m_nFTPPort{ 21 };
+	std::string m_sFTPUser;
+	std::string m_sFTPPassWord;
+	FtpClient* m_pFTP{ nullptr };
 	bool CreateUploadRunTpMove(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos);
 	bool EnsureFixedMoveTpUploaded(
 		int moveType,
@@ -206,6 +259,7 @@ private:
 		int nCompletionDoneState,
 		bool allowManagedUnwitnessed);
 	bool TryGetIntVarStrict(int nIndex, const char* cStrPreFix, int& value);
+	bool HasServiceCapability(const char* capabilityToken);
 	bool HasVerifiedProgramStopCapability();
 	void FinalizeContinuousMoveAfterVerifiedStop();
 	void ContinuousMoveWorker();

@@ -2,8 +2,6 @@
 
 #include "CameraFrameCache.h"
 #include "ConfigDatabase.h"
-#include "FANUCRobotDriver.h"
-#include "STEPRobotDriver.h"
 #include "HandEyeMatrixConfig.h"
 #include "MeasureThenWeldService.h"
 #include "MeasureThenWeldRuntimeConfig.h"
@@ -226,15 +224,9 @@ bool TransitionBreakpointRecordState(
 
 QString RobotDriverTypeName(RobotDriverAdaptor* driver)
 {
-    if (dynamic_cast<STEPRobotCtrl*>(driver) != nullptr)
-    {
-        return QStringLiteral("STEP");
-    }
-    if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
-    {
-        return QStringLiteral("FANUC");
-    }
-    return QStringLiteral("UNKNOWN");
+    return driver != nullptr
+        ? QString::fromStdString(driver->DriverDescriptor().typeName)
+        : QStringLiteral("UNKNOWN");
 }
 
 bool TerminatePersistedProgramBeforeRecovery(
@@ -250,41 +242,43 @@ bool TerminatePersistedProgramBeforeRecovery(
         error = QStringLiteral("持久恢复终止缺少匹配的机器人端点或程序身份，禁止后续运动。");
         return false;
     }
-    if (auto* step = dynamic_cast<STEPRobotCtrl*>(driver))
+    if (!driver->Supports(RobotDriverCapability::PersistentProgramRecovery))
     {
-        if (step->AbortPersistedProgramForRecovery(record.programName.toStdString()))
-        {
-            return true;
-        }
-        error = QStringLiteral("STEP旧程序未得到可验证终止，持久门禁保持有效：")
-            + QString::fromStdString(step->GetLastRobotError());
+        error = QStringLiteral("当前机器人品牌底层缺少持久化程序恢复能力，禁止断点续焊或自动安全回撤。");
         return false;
     }
-    if (dynamic_cast<FANUCRobotCtrl*>(driver) != nullptr)
+    const RobotPersistentRecoveryStrategy strategy = driver->PersistentRecoveryStrategy();
+    if (strategy == RobotPersistentRecoveryStrategy::Unsupported)
     {
-        // 服务重启后 FANUC 会丢失 active task RAM 身份。先在恢复租约上登记未知运动，
-        // 使 ERR:NO_ACTIVE_CALL_JOB 永远不能被 Prog_stop_Py 当作停止证明。
+        error = QStringLiteral("当前机器人驱动没有持久程序终止证明，禁止恢复运动。");
+        return false;
+    }
+    if (strategy == RobotPersistentRecoveryStrategy::AbortUnknownCurrentProgram)
+    {
+        // 无法跨进程保留精确任务身份的驱动必须先登记未知运动，禁止“无活动任务”
+        // 被误当作旧程序已终止的证明。
         QString motionError;
         if (!RobotOperationLease::MarkMotionStarted(driver, false, &motionError))
         {
-            error = QStringLiteral("FANUC持久恢复无法登记旧程序未知终态：") + motionError;
+            error = QStringLiteral("持久恢复无法登记旧程序未知终态：") + motionError;
             return false;
         }
-        if (!driver->AbortCurrentProgramSafely())
-        {
-            error = QStringLiteral("FANUC旧程序STOP/灭弧终态未确认，持久门禁保持有效：")
-                + QString::fromStdString(driver->GetLastRobotError());
-            return false;
-        }
+    }
+    if (!driver->AbortPersistedMotion(record.programName.toStdString()))
+    {
+        error = QStringLiteral("旧程序未得到可验证终止，持久门禁保持有效：")
+            + QString::fromStdString(driver->GetLastRobotError());
+        return false;
+    }
+    if (strategy == RobotPersistentRecoveryStrategy::AbortUnknownCurrentProgram)
+    {
         if (!RobotOperationLease::MarkMotionCompleted(driver))
         {
-            error = QStringLiteral("FANUC旧程序虽返回停止，但恢复租约无法登记稳定终态，禁止后续运动。");
+            error = QStringLiteral("旧程序虽返回停止，但恢复租约无法登记稳定终态，禁止后续运动。");
             return false;
         }
-        return true;
     }
-    error = QStringLiteral("当前机器人类型没有持久程序终止证明，禁止恢复运动。");
-    return false;
+    return true;
 }
 
 // 扫描实时激光线视图：把当前帧 XData/YData 画成散点（自动缩放），与坡口相机预览同源数据、轻量版绘制。
@@ -1560,9 +1554,9 @@ QString MeasureThenWeldDialog::CurrentRobotName() const
     }
 
     RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, m_unitIndex);
-    if (driver != nullptr && !driver->m_sRobotName.empty())
+    if (driver != nullptr && !driver->RobotName().empty())
     {
-        return QString::fromStdString(driver->m_sRobotName);
+        return QString::fromStdString(driver->RobotName());
     }
     return QString();
 }
@@ -1604,7 +1598,7 @@ bool MeasureThenWeldDialog::ResolveModelWeldingAvailabilityForRow(
         reason = QStringLiteral("控制单元没有有效的机器人类型。");
         return false;
     }
-    if (configuredRobotType != driver->m_nRobotType)
+    if (configuredRobotType != driver->RobotType())
     {
         reason = QStringLiteral("控制单元机器人类型与当前驱动不一致。");
         return false;
@@ -1620,7 +1614,7 @@ bool MeasureThenWeldDialog::ResolveModelWeldingAvailabilityForRow(
     RobotModelCatalogStore::Eligibility eligibility;
     QString catalogError;
     if (!RobotModelCatalogStore::ResolveModelEligibility(
-            modelId, driver->m_nRobotType, eligibility, catalogError))
+            modelId, driver->RobotType(), eligibility, catalogError))
     {
         reason = catalogError.trimmed().isEmpty()
             ? QStringLiteral("机器人模型目录无法可信读取。")
@@ -2580,6 +2574,10 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
                         ok ? QMessageBox::Information : QMessageBox::Warning,
                         "预设参数",
                         message);
+                    if (ok)
+                    {
+                        emit self->WeldFlowCompleted();
+                    }
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -2751,6 +2749,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                 ok = self != nullptr
                     && self->m_pService != nullptr
                     && self->m_pService->RebuildWeldFilesFromLaserDir(
+                        pRobotDriver,
                         param,
                         laserDir,
                         rebuildPreservePath,
@@ -2947,6 +2946,10 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
                         ok ? QMessageBox::Information : QMessageBox::Warning,
                         "跳过扫描焊接",
                         message);
+                    if (ok)
+                    {
+                        emit self->WeldFlowCompleted();
+                    }
                 }, Qt::QueuedConnection);
         }).detach();
 }
@@ -2980,7 +2983,8 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
     QString& error)
 {
     error.clear();
-    const bool isStepRobot = dynamic_cast<STEPRobotCtrl*>(pRobotDriver) != nullptr;
+    const bool supportsPauseResume = pRobotDriver != nullptr
+        && pRobotDriver->Supports(RobotDriverCapability::PauseResume);
 
     const QString activeOwner = RobotOperationLease::CurrentOwner(pRobotDriver);
     const bool isResumeFlow = activeOwner == QStringLiteral("断点续焊流程");
@@ -2988,7 +2992,7 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
         && activeOwner != QStringLiteral("跳过扫描焊接流程")
         && !isResumeFlow)
     {
-        error = QStringLiteral("冻结STEP焊接断点上下文失败：当前页面未持有允许的硬件操作租约。");
+        error = QStringLiteral("冻结机器人焊接断点上下文失败：当前页面未持有允许的硬件操作租约。");
         return false;
     }
     if (!resumeCheckpointSupported && isResumeFlow)
@@ -3008,7 +3012,7 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
         || !std::isfinite(effectiveFinalStepMm) || effectiveFinalStepMm <= 0.0
         || parameterFingerprint.size() != 64)
     {
-        error = QStringLiteral("冻结STEP焊接断点上下文失败：程序、轨迹快照、点数、点距或工艺指纹无效。");
+        error = QStringLiteral("冻结机器人焊接断点上下文失败：程序、轨迹快照、点数、点距或工艺指纹无效。");
         return false;
     }
 
@@ -3031,12 +3035,12 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
     record.backtrackMm = param.dResumeBacktrackMm;
 
     if (record.robotName.isEmpty()
-        || (record.robotType != QStringLiteral("STEP") && record.robotType != QStringLiteral("FANUC"))
+        || record.robotType == QStringLiteral("UNKNOWN")
         || record.robotEndpoint.isEmpty()
         || !std::isfinite(record.backtrackMm) || record.backtrackMm < 0.0
         || !std::isfinite(safeMoveSpeedMmPerMin) || safeMoveSpeedMmPerMin <= 0.0)
     {
-        error = QStringLiteral("冻结STEP焊接断点上下文失败：机器人持久端点或回退距离无效。");
+        error = QStringLiteral("冻结机器人焊接断点上下文失败：机器人持久端点或回退距离无效。");
         return false;
     }
 
@@ -3142,7 +3146,7 @@ bool MeasureThenWeldDialog::PrepareActiveWeldCheckpoint(
         m_activeWeldPriorStoredRecord = priorStoredRecord;
         m_activeWeldResumeFlow = isResumeFlow;
     }
-    SetWeldPauseAvailable(isStepRobot && resumeCheckpointSupported);
+    SetWeldPauseAvailable(supportsPauseResume && resumeCheckpointSupported);
     if (!resumeCheckpointSupported)
     {
         const QString reason = resumeUnsupportedReason.isEmpty()
@@ -3396,10 +3400,10 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
 {
     RunMonitorDialog* monitor = static_cast<RunMonitorDialog*>(m_pRunMonitor);
     RobotDriverAdaptor* pRobotDriver = GetRobotDriver();
-    STEPRobotCtrl* pStepDriver = dynamic_cast<STEPRobotCtrl*>(pRobotDriver);
-    if (monitor == nullptr || pStepDriver == nullptr)
+    if (monitor == nullptr || pRobotDriver == nullptr
+        || !pRobotDriver->Supports(RobotDriverCapability::PauseResume))
     {
-        QMessageBox::information(this, "暂停/继续", "暂停功能当前仅支持 STEP 机器人。");
+        QMessageBox::information(this, "暂停/继续", "当前机器人驱动未实现可验证的暂停/继续契约。");
         return;
     }
 
@@ -3425,7 +3429,7 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
                 && activeOwner != QStringLiteral("相机时间补偿标定")))
         {
             QMessageBox::warning(this, "扫描暂停/继续",
-                "当前没有与本次 STEP 扫描一致的受跟踪程序上下文，禁止发送 STOP/START。");
+                "当前没有与本次扫描一致的受跟踪程序上下文，禁止发送暂停/继续命令。");
             SetScanPauseAvailable(false);
             return;
         }
@@ -3436,7 +3440,7 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
             std::string pausedProgram;
             T_ROBOT_COORS stablePose{};
             int stableProgramLine = -1;
-            if (!pStepDriver->PauseTrackedProgramAndWait(
+            if (!pRobotDriver->PauseTrackedMotion(
                 ToUtf8StdString(expectedProgram),
                 stableProgramLine,
                 stablePose,
@@ -3444,7 +3448,7 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
                 &pausedProgram))
             {
                 AppendLog(QString("扫描暂停失败：%1")
-                    .arg(DecodeRobotMessageText(pStepDriver->GetLastRobotError())));
+                    .arg(DecodeRobotMessageText(pRobotDriver->GetLastRobotError())));
                 return;
             }
             if (QString::fromStdString(pausedProgram) != expectedProgram)
@@ -3472,7 +3476,7 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
         double positionDeviationMm = 0.0;
         double angleDeviationDeg = 0.0;
         if (!m_hasPausePose
-            || !pStepDriver->ResumeTrackedProgramFromPause(
+            || !pRobotDriver->ResumeTrackedMotion(
                 ToUtf8StdString(expectedProgram),
                 m_pausePose,
                 2.0,
@@ -3481,7 +3485,7 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
                 &angleDeviationDeg))
         {
             AppendLog(QString("扫描继续失败：%1")
-                .arg(DecodeRobotMessageText(pStepDriver->GetLastRobotError())));
+                .arg(DecodeRobotMessageText(pRobotDriver->GetLastRobotError())));
             return;
         }
         m_scanMotionPaused = false;
@@ -3500,13 +3504,13 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
         || (activeRecord.state != QStringLiteral("prepared")
             && activeRecord.state != QStringLiteral("paused")
             && activeRecord.state != QStringLiteral("continuing"))
-        || activeRecord.robotType != QStringLiteral("STEP")
+        || activeRecord.robotType != RobotDriverTypeName(pRobotDriver)
         || activeRecord.robotName.compare(CurrentRobotName(), Qt::CaseInsensitive) != 0
         || activeRecord.robotEndpoint != RobotOperationLease::PersistentEndpointIdentity(pRobotDriver))
     {
         QMessageBox::warning(this, "暂停/继续",
             recordError.isEmpty()
-                ? QStringLiteral("当前没有与本次STEP焊接程序一致的可验证断点上下文，禁止暂停。")
+                ? QStringLiteral("当前没有与本次机器人焊接程序一致的可验证断点上下文，禁止暂停。")
                 : recordError);
         SetWeldPauseAvailable(false);
         return;
@@ -3518,14 +3522,14 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
         std::string pausedProgram;
         T_ROBOT_COORS stablePose{};
         int stableProgramLine = -1;
-        if (!pStepDriver->PauseTrackedProgramAndWait(
+        if (!pRobotDriver->PauseTrackedMotion(
             ToUtf8StdString(activeRecord.programName),
             stableProgramLine,
             stablePose,
             &pausedProject,
             &pausedProgram))
         {
-            AppendLog(QString("暂停失败：%1").arg(DecodeRobotMessageText(pStepDriver->GetLastRobotError())));
+            AppendLog(QString("暂停失败：%1").arg(DecodeRobotMessageText(pRobotDriver->GetLastRobotError())));
             return;
         }
         if (QString::fromStdString(pausedProgram) != activeRecord.programName)
@@ -3612,7 +3616,7 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
     }
     double positionDeviationMm = 0.0;
     double angleDeviationDeg = 0.0;
-	if (!pStepDriver->ResumeTrackedProgramFromPause(
+	if (!pRobotDriver->ResumeTrackedMotion(
         ToUtf8StdString(activeRecord.programName),
         m_pausePose,
         2.0,
@@ -3621,7 +3625,7 @@ void MeasureThenWeldDialog::OnPauseResumeClicked()
         &angleDeviationDeg))
     {
         AppendLog(QString("继续命令发送失败；断点保持continuing闭锁：%1")
-            .arg(DecodeRobotMessageText(pStepDriver->GetLastRobotError())));
+            .arg(DecodeRobotMessageText(pRobotDriver->GetLastRobotError())));
         return;
     }
     monitor->PauseButton()->setText("暂停");
@@ -3693,7 +3697,7 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
     const QString currentType = RobotDriverTypeName(pRobotDriver);
     if (checkpointRecord.robotName.compare(robotName, Qt::CaseInsensitive) != 0
         || checkpointRecord.robotType != currentType
-        || currentType != QStringLiteral("STEP")
+        || !pRobotDriver->Supports(RobotDriverCapability::PauseResume)
         || currentEndpoint.isEmpty()
         || checkpointRecord.robotEndpoint != currentEndpoint)
     {
@@ -4065,7 +4069,7 @@ void MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow()
     {
         return;
     }
-    const QString robotName = QString::fromStdString(pRobotDriver->m_sRobotName).trimmed();
+    const QString robotName = QString::fromStdString(pRobotDriver->RobotName()).trimmed();
     bool pending = false;
     QString error;
     if (!SafeRetreatPending(robotName, pending, &error))

@@ -14,6 +14,8 @@
 #ifndef __STEP_ROBOT_CTRL
 #define __STEP_ROBOT_CTRL
 
+class FtpClient;
+
 inline const char* GetErrorText(int nErrCode)
 {
 	switch (nErrCode)
@@ -48,10 +50,49 @@ class STEPRobotCtrl : public RobotDriverAdaptor
 public:
 	STEPRobotCtrl(std::string strUnitName, RobotLog* pLog);
 	~STEPRobotCtrl() override;
+	RobotDriverDescriptor DriverDescriptor() const override;
+	std::uint64_t DriverCapabilities() const override;
+	RobotConnectionEndpoint ControlEndpoint() const override;
+	bool Connect() override;
+	bool Disconnect() override;
+	RobotFileTransferProfile FileTransferProfile() const override;
+	std::shared_ptr<RobotFileTransferSession> CreateFileTransferSession(
+		std::string* error = nullptr) const override;
+	bool ValidateLinearSpeedMmPerMin(double speedMmPerMin, std::string* error = nullptr) const override;
+	bool MoveLinearMmPerMin(const T_ROBOT_COORS& target, double speedMmPerMin, int externalAxleType, const int* configuration = nullptr) override;
+	bool MoveJointPercent(const T_ANGLE_PULSE& target, double speedPercent, int externalAxleType) override;
+	RobotMotionStatus ReadMotionStatus() override;
+	RobotMotionStatus ReadMotionStatusPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
+	bool ReserveTrajectory(RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
+	bool DownlinkTrajectory(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
+	bool ExportTrajectoryProgramFiles(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, const std::string& outputDirectory, RobotTrajectoryHandle& handle, std::string* error = nullptr) override;
+	bool StartTrajectory(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
+	bool WaitTrajectory(const RobotTrajectoryHandle& handle, int pollDelayMs, int runTimeoutMs, RobotMotionStatus* terminalStatus = nullptr) override;
+	bool PauseTrackedMotion(const std::string& expectedProgramName, int& programLine, T_ROBOT_COORS& pausedPose, std::string* projectName = nullptr, std::string* programName = nullptr) override;
+	bool ResumeTrackedMotion(const std::string& expectedProgramName, const T_ROBOT_COORS& checkpointPose, double maxPositionDeviationMm, double maxAngleDeviationDeg, double* positionDeviationMm = nullptr, double* angleDeviationDeg = nullptr) override;
+	RobotPersistentRecoveryStrategy PersistentRecoveryStrategy() const override;
+	bool AbortPersistedMotion(const std::string& expectedProgramName) override;
+	bool SetOperationMode(RobotOperationMode mode) override;
+	bool InitializeAfterConnect(std::string* summary = nullptr) override;
+	bool ShutdownBeforeDisconnect() override;
+	void ReloadRuntimeConfiguration() override;
+	bool PrepareNativeProgramUpload() override;
+	bool StartContinuousJog(int moveType, double nativeSpeed) override;
+	bool PushContinuousJogPoint(const T_ROBOT_COORS& target, double nativeSpeed) override;
+	bool PushContinuousJogPoint(const T_ANGLE_PULSE& target, double nativeSpeed) override;
+	void RequestEndContinuousJog() override;
+	void EndContinuousJog() override;
+	bool IsContinuousJogRunning() const override;
+	int UploadNativeProgramSource(const std::string& localPath, const std::string& remoteDirectory = std::string()) override;
+	std::string SendDiagnosticCommand(const std::string& command) override;
+	bool WriteCartesianRegister(int index, const double pose[8], int config[7]) override;
+	bool RunProgramAndWait(const std::string& programName, int startTimeoutMs, int finishTimeoutMs, int pollDelayMs, RobotMotionStatus* terminalStatus = nullptr) override;
+	bool InstallHandEyeSupportPrograms(std::string* summary = nullptr) override;
+	bool RunHandEyeValidation(const T_ROBOT_COORS& robotPose, T_ROBOT_COORS& robotCalculatedPoint) override;
 public:
 
-	bool InitSocket(const char* ip, unsigned short Port, bool ifRecode = false) override;
-	bool CloseSocket() override;
+	bool InitSocket(const char* ip, unsigned short Port, bool ifRecode = false);
+	bool CloseSocket();
 	bool IsConnected() override;
 	void EnsureConnectionForMonitor() override;  // 后台监控线程首连(GUI 路径构造不连，移到此处)
 	std::string GetRobotStatusText() override;
@@ -74,11 +115,14 @@ public:
 	int CheckRobotDone(int nDelayTime = 200, int runTimeoutMs = 1800000) override;
 	bool AbortCurrentProgramSafely() override;
 
-	bool CallJob(std::string sJobName) override;
+	bool CallJob(std::string sJobName);
 
 	//任意点集 坐标类型、插补方式、速度 的连续运动
-	int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo) override;
-	int ContiMoveAnyWithProgramName(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo, const std::string& programName);
+	int ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo);
+	int ContiMoveAnyWithProgramName(
+		const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo,
+		const std::string& programName,
+		const RobotTrajectoryHandle* preparedHandle = nullptr);
 	static std::string MakeTimestampWeldProgramName();
 	static bool WriteContiMoveAnyFiles(
 		const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo,
@@ -97,11 +141,11 @@ public:
 	bool SendWeldProgram(int nWeldTrackNum);
 
 	//初始化ftp
-	int InitFtp() override;
+	int InitFtp();
 	//上传文件给埃斯顿机器人，埃斯顿为RemoteFilePath，本地为LocalFilePath    //  .//MultiPos_Mv1.erd 
-	int UploadFile(std::string LocalFilePath, std::string RemoteFilePath) override;
+	int UploadFile(std::string LocalFilePath, std::string RemoteFilePath);
 	//下载文件,埃斯顿为RemoteFilePath，本地为LocalFilePath
-	int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath) override;
+	int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath);
 
 	bool ServoOff();
 	bool ServoOn() override;
@@ -134,7 +178,7 @@ public:
 	bool GetTrackedMotionIdentity(
 		std::string& projectName,
 		std::string& programName,
-		bool* alreadyStopped = nullptr);
+		bool* alreadyStopped = nullptr) override;
 	// 仅暂停本软件当前跟踪的焊接程序：核对工程/程序身份，等待稳定 ePause，随后直读行号和位姿。
 	// 暂停不会清除 MotionCompletionPending，原程序仍只能在持有同一租约的流程内恢复或安全中止。
 	bool PauseTrackedProgramAndWait(
@@ -194,6 +238,7 @@ public:
 	////摆焊参数
 	//bool SetWeaveDate(const char* name, ESTUN_WeaveDate WeaveDate, int scope = 2);
 	//获取一个指定I变量
+	bool TryGetIntVar(int nIndex, int& value, const char* cStrPreFix = "INT") override;
 	int GetIntVar(int nIndex, const char* cStrPreFix = "INT") override;
 	//设置一个指定I变量
 	bool SetIntVar(int nIndex, int nValue, int score = 2, const char* cStrPreFix = "INT") override;
@@ -212,10 +257,10 @@ public:
 	//基础移动函数
 
 	//通用移动函数	
-	bool MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType = PULSEVAR, std::string JobName = "MOVJ", int config[7] = { 0 }) override;
-	bool MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVL", int isconfig = 1, int config[7] = { 0 }) override;////默认 mode值Cf值为零	
+	bool MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType = PULSEVAR, std::string JobName = "MOVJ", int config[7] = { 0 });
+	bool MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVL", int isconfig = 1, int config[7] = { 0 });////默认 mode值Cf值为零
 
-	bool MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVJ") override;
+	bool MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName = "MOVJ");
 
 
 
@@ -239,6 +284,14 @@ public:
 	static void InvalidateStepSdkInterfaceModeCache();
 
 private:
+	// 品牌通信配置和底层对象只归本驱动所有，不进入适配层公共状态。
+	std::string m_sSocketIP;
+	int m_nSocketPort{ 0 };
+	std::string m_sFTPIP;
+	int m_nFTPPort{ 21 };
+	std::string m_sFTPUser;
+	std::string m_sFTPPassWord;
+	FtpClient* m_pFTP{ nullptr };
 	bool ArmGeneratedProgramContentWitness(
 		const std::string& projectName,
 		const std::string& programName,

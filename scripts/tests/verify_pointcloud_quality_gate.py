@@ -200,8 +200,8 @@ def main() -> int:
             "production quality proof filename missing")
     require("WritePointCloudQualityGate" in service and "VerifyPointCloudQualityGate" in service,
             "quality proof write/verify pair missing")
-    require(service.count("VerifyWeldPoseAuthorization(") >= 8
-            and service.count("verifyLoadedPoseAuthorization()") >= 8,
+    require(service.count("VerifyWeldPoseAuthorization(") >= 6
+            and service.count("verifyLoadedPoseAuthorization()") >= 6,
             "pose authorization is not checked at generation/downlink/execution/TOCTOU points")
     require("policyRevisionSha256" in service and "authorizedPose" in service,
             "proof does not bind policy revision and authorized pose")
@@ -438,7 +438,7 @@ def main() -> int:
     ):
         require(token in proof_integrity_h, f"proof/evidence hard limit missing: {token}")
     require("保存可验证的下发轨迹失败" in service
-            and "保存可验证的 STEP 最终抽样轨迹失败" in service,
+            and "保存可验证的最终抽样轨迹失败" in service,
             "FinalSampled save failure is not fail-closed before generation/downlink")
     require("savedSha256" in service and "sampledPoseSha256" in service_h
             and "identity.sampledPoseSha256" in dialog,
@@ -605,13 +605,13 @@ def main() -> int:
     execute = service[execute_start:execute_end]
     require("PointCloudProofIntegrity::ProofUseLease qualityProofUseLease" in execute
             and execute.index("AcquireProofUseLease(") < execute.index("verifyLoadedPoseAuthorization()")
-            and execute.index("AcquireProofUseLease(") < execute.index("MoveByJob(")
-            and execute.index("AcquireProofUseLease(") < execute.index("CallJobAndWaitStateDone("),
+            and execute.index("AcquireProofUseLease(") < execute.index("MoveCoorsAndWait(")
+            and execute.index("AcquireProofUseLease(") < execute.index("StartTrajectory("),
             "actual motion does not retain a proof use lease across verify and START")
-    generate_start = service.index("bool MeasureThenWeldService::GenerateStepWeldProgramFiles(")
+    generate_start = service.index("bool MeasureThenWeldService::GenerateRobotWeldProgramFiles(")
     generate_end = service.index("bool MeasureThenWeldService::GenerateVirtualStraightWeldFiles(", generate_start)
     require("AcquireProofUseLease(" not in service[generate_start:generate_end],
-            "pure STEP file generation incorrectly acquires a motion proof lease")
+            "pure adaptor file generation incorrectly acquires a motion proof lease")
     for message in (
         "保存SDK提取焊道结果失败",
         "保存先测后焊特征提取结果失败",

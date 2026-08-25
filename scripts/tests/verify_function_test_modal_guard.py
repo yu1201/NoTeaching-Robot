@@ -46,7 +46,7 @@ def main() -> int:
     close = section(
         source,
         "void FunctionTestDialog::closeEvent(",
-        "FANUCRobotCtrl* FunctionTestDialog::GetFirstFanucDriver()",
+        "RobotDriverAdaptor* FunctionTestDialog::GetFirstDriverWithCapability(",
     )
     require("QDialog::closeEvent(event)" in close,
             "embedded page cannot return to the homepage while a robot task runs")

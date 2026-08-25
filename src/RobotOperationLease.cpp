@@ -100,13 +100,14 @@ QString RobotOperationLease::PersistentEndpointIdentity(const RobotDriverAdaptor
     {
         return {};
     }
-    const QString host = NormalizeSocketHost(driver->m_sSocketIP);
-    // 先判断 host，避免读取尚未装载配置的 driver 中可能未初始化的端口字段。
+	const RobotConnectionEndpoint endpoint = driver->ControlEndpoint();
+	const QString host = NormalizeSocketHost(endpoint.host);
+	// 先判断 host，避免把尚未装载完整配置的驱动注册为可共享控制器。
     if (host.isEmpty())
     {
         return {};
     }
-    const int port = driver->m_nSocketPort;
+	const int port = endpoint.port;
     if (port <= 0 || port > 65535)
     {
         return {};
@@ -202,7 +203,7 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireSafetyRecovery(
         return {};
     }
 #if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
-    const QString robotName = QString::fromStdString(driver->m_sRobotName).trimmed();
+    const QString robotName = QString::fromStdString(driver->RobotName()).trimmed();
     const QString endpoint = PersistentEndpointIdentity(driver);
     if (!WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
             robotName,
@@ -248,7 +249,7 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquirePausedResume(
         return {};
     }
 #if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
-    const QString robotName = QString::fromStdString(driver->m_sRobotName).trimmed();
+    const QString robotName = QString::fromStdString(driver->RobotName()).trimmed();
     const QString endpoint = PersistentEndpointIdentity(driver);
     if (!WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
             robotName,
@@ -299,7 +300,7 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
 #if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
     if (!allowPersistentRecovery)
     {
-        const QString robotName = QString::fromStdString(driver->m_sRobotName).trimmed();
+        const QString robotName = QString::fromStdString(driver->RobotName()).trimmed();
         QString persistentReason;
         if (WeldSafetyRecoveryStore::PersistentAdmissionBlocked(
             robotName, identityKey, &persistentReason))
