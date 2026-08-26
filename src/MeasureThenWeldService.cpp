@@ -76,6 +76,9 @@ constexpr int DEFAULT_CAMERA_READ_FPS = 100;  // 相机参数缺省/无效帧率
 constexpr qint64 ROBOT_SAMPLE_INTERVAL_MS = 50;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_WAIT_MS = 500;
 constexpr qint64 CAMERA_ROBOT_MATCH_TAIL_POLL_MS = 10;
+constexpr qint64 POST_SCAN_ENDPOINT_POSE_BUFFER_MS = 250;
+constexpr qint64 CAMERA_PROCESSING_DRAIN_TIMEOUT_MS = 60000;
+constexpr qint64 CAMERA_PROCESSING_PROGRESS_LOG_MS = 2000;
 constexpr int CAMERA_READY_FRAME_TIMEOUT_MS = 5000;
 constexpr qint64 CAMERA_NO_FRAME_FAIL_GAP_US = 1000000;  // 扫描期间连续无新帧超过 1s 判数据不完整、终止流程
 constexpr auto RAW_LASER_FILE_NAME = "PreciseLaserPoint.txt";
@@ -2107,6 +2110,32 @@ struct ProcessedScanCameraSample
     std::vector<ProcessedScanWorkpiecePoint> workpiecePoints;
     int skippedWorkpieceCloudPointCount = 0;
 };
+
+// 同一相机帧中的全部点共享机器人位姿。把两级旋转和两级平移合成为一个仿射变换，
+// 避免对百万级点云中的每个点重复解析机器人欧拉角。
+struct CameraToRobotPointTransform
+{
+    Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d translation = Eigen::Vector3d::Zero();
+
+    Eigen::Vector3d Apply(const Eigen::Vector3d& cameraPoint) const
+    {
+        return rotation * cameraPoint + translation;
+    }
+};
+
+CameraToRobotPointTransform BuildCameraToRobotPointTransform(
+    const T_ROBOT_COORS& robotPose,
+    const HandEyeMatrixConfig& calibration)
+{
+    CameraToRobotPointTransform transform;
+    const Eigen::Matrix3d robotRotation =
+        RobotPoseTransform::RotationFromPose(robotPose, calibration.robotType);
+    transform.rotation = robotRotation * calibration.rotation;
+    transform.translation = robotRotation * calibration.translation
+        + Eigen::Vector3d(robotPose.dX, robotPose.dY, robotPose.dZ);
+    return transform;
+}
 
 RobotInterpolationWindow FindRobotInterpolationWindow(
     const std::vector<RobotCalculation::TimestampedRobotPose>& robotSamples,
@@ -12134,6 +12163,37 @@ bool MeasureThenWeldService::RunScanCycle(
     ScanMotionProgress scanProgress;
     result.scanAttempted = true;
     QString scanOutputPath;
+    bool earlyRetractionAttempted = false;
+    bool earlyRetractionSucceeded = false;
+    const ScanMotionCompletedCallback retractBeforePostProcessing = [&]() -> bool
+        {
+            earlyRetractionAttempted = true;
+            if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+            {
+                if (appendLog)
+                {
+                    appendLog(QStringLiteral(
+                        "扫描运动完成后、点云后处理前检测到安全停止；不再下发自动收枪运动。"));
+                }
+                return false;
+            }
+            if (setFlowStep)
+            {
+                setFlowStep(QStringLiteral("扫描采集已冻结，正在优先移动到收枪安全位置"));
+            }
+            earlyRetractionSucceeded = MoveScanEndSafeAndWait(
+                pRobotDriver,
+                param,
+                safeRunSpeed,
+                appendLog,
+                setFlowStep);
+            if (earlyRetractionSucceeded && appendLog)
+            {
+                appendLog(QStringLiteral(
+                    "扫描安全收枪已在完整点云转换、写盘和焊道分析前完成。"));
+            }
+            return earlyRetractionSucceeded;
+        };
     const bool scanOk = ScanMoveAndCollect(
         pRobotDriver,
         param,
@@ -12146,7 +12206,8 @@ bool MeasureThenWeldService::RunScanCycle(
         scanProgressCallback,
         scanPauseAvailability,
         scanTrajectory,
-        cameraSection);
+        cameraSection,
+        retractBeforePostProcessing);
     if (!scanOutputPath.isEmpty())
     {
         const QFileInfo outputInfo(scanOutputPath);
@@ -12170,7 +12231,8 @@ bool MeasureThenWeldService::RunScanCycle(
         }
     }
     result.scanDataSucceeded = scanOk;
-    if (stopRequested && stopRequested())
+    if (RobotOperationLease::IsCancellationRequested(pRobotDriver)
+        || (stopRequested && stopRequested()))
     {
         result.stopRequestedDuringCycle = true;
     }
@@ -12183,18 +12245,6 @@ bool MeasureThenWeldService::RunScanCycle(
         result.lastPhase = ScanCyclePhase::AtScanEnd;
     }
 
-    if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
-    {
-        result.status = ScanCycleStatus::Stopped;
-        result.stopRequestedDuringCycle = true;
-        result.error = QStringLiteral("扫描期间收到安全停止；已丢弃本轮结果，并禁止自动收枪或后续焊接运动。");
-        if (appendLog)
-        {
-            appendLog(result.error);
-        }
-        return false;
-    }
-
     if (!scanProgress.motionCompleted)
     {
         return fail(
@@ -12205,23 +12255,47 @@ bool MeasureThenWeldService::RunScanCycle(
     }
 
     const bool scanDataOk = scanOk;
-    // 一旦确认机器人到达扫描终点，安全收枪就是强制收尾步骤：停止请求、后处理失败和
-    // GUI 普通确认回调都不得把机器人留在扫描终点。需要立即制止运动时应使用机器人急停，
-    // 而不是让软件在已完成扫描后跳过配置好的安全撤离路径。
-    if (!MoveScanEndSafeAndWait(pRobotDriver, param, safeRunSpeed, appendLog, setFlowStep))
+    if (earlyRetractionAttempted && !earlyRetractionSucceeded)
     {
-        return fail("扫描循环失败：未能到达扫描收枪安全位置。", true);
+        if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+        {
+            result.status = ScanCycleStatus::Stopped;
+            result.stopRequestedDuringCycle = true;
+            result.error = QStringLiteral(
+                "扫描运动已完成，但在安全收枪前收到安全停止；已丢弃本轮结果并禁止后续运动。");
+            if (appendLog)
+            {
+                appendLog(result.error);
+            }
+            return false;
+        }
+        return fail("扫描循环失败：点云后处理前未能到达扫描收枪安全位置。", true);
+    }
+    if (!earlyRetractionAttempted)
+    {
+        if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+        {
+            result.status = ScanCycleStatus::Stopped;
+            result.stopRequestedDuringCycle = true;
+            result.error = QStringLiteral(
+                "扫描期间收到安全停止；已丢弃本轮结果，并禁止自动收枪或后续焊接运动。");
+            if (appendLog)
+            {
+                appendLog(result.error);
+            }
+            return false;
+        }
+        // 扫描在优先回撤回调之前异常返回时的兜底；正常路径已经在重处理前完成收枪。
+        if (!MoveScanEndSafeAndWait(pRobotDriver, param, safeRunSpeed, appendLog, setFlowStep))
+        {
+            return fail("扫描循环失败：未能到达扫描收枪安全位置。", true);
+        }
     }
     result.lastPhase = ScanCyclePhase::AtEndSafe;
     result.safelyRetracted = true;
     if (stopRequested && stopRequested())
     {
         result.stopRequestedDuringCycle = true;
-    }
-
-    if (!scanDataOk)
-    {
-        return fail("扫描运动已完成并安全收枪，但采集、处理或文件保存失败。", false);
     }
 
     if (result.stopRequestedDuringCycle)
@@ -12233,6 +12307,11 @@ bool MeasureThenWeldService::RunScanCycle(
             appendLog(result.error);
         }
         return false;
+    }
+
+    if (!scanDataOk)
+    {
+        return fail("扫描运动已完成并安全收枪，但采集、处理或文件保存失败。", false);
     }
 
     result.status = ScanCycleStatus::Success;
@@ -12252,7 +12331,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     const ScanProgressCallback& scanProgressCallback,
     const ScanPauseAvailabilityCallback& scanPauseAvailability,
     const std::vector<T_ROBOT_COORS>* scanTrajectory,
-    const QString& cameraSectionOverride) const
+    const QString& cameraSectionOverride,
+    const ScanMotionCompletedCallback& motionCompleted) const
 {
     if (progress != nullptr)
     {
@@ -12436,6 +12516,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     std::mutex pendingCameraFramesMutex;
     std::condition_variable pendingCameraFramesCv;
     std::atomic_bool cameraEnqueueFinished(false);
+    std::atomic_bool cameraProcessingAbortRequested(false);
 
     std::vector<ProcessedScanCameraSample> processedCameraSamples;
     std::mutex processedCameraSamplesMutex;
@@ -12726,6 +12807,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     const qint64 processingWallStartMs = SteadyNowMs();
     std::vector<std::thread> processingWorkers;
     processingWorkers.reserve(static_cast<std::size_t>(processingWorkerCount));
+    std::atomic_int remainingProcessingWorkers(processingWorkerCount);
+    std::atomic_int processedCameraFrameCount(0);
+    std::mutex processingWorkersDoneMutex;
+    std::condition_variable processingWorkersDoneCv;
     for (int workerIndex = 0; workerIndex < processingWorkerCount; ++workerIndex)
     {
         processingWorkers.emplace_back([&]()
@@ -12737,8 +12822,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                         std::unique_lock<std::mutex> locker(pendingCameraFramesMutex);
                         pendingCameraFramesCv.wait(locker, [&]()
                             {
-                                return !pendingCameraFrames.empty() || cameraEnqueueFinished.load();
+                                return cameraProcessingAbortRequested.load()
+                                    || !pendingCameraFrames.empty()
+                                    || cameraEnqueueFinished.load();
                             });
+                        if (cameraProcessingAbortRequested.load())
+                        {
+                            break;
+                        }
                         if (pendingCameraFrames.empty())
                         {
                             if (cameraEnqueueFinished.load())
@@ -12818,8 +12909,15 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                         processed.hasRobotPose = true;
                         processed.contributedWorkpieceFrame = !queuedFrame.frame.allResultPoint.empty();
                         processed.workpiecePoints.reserve(queuedFrame.frame.allResultPoint.size());
+                        const CameraToRobotPointTransform pointTransform =
+                            BuildCameraToRobotPointTransform(processed.robotPose, calibration);
                         for (int linePointIndex = 0; linePointIndex < static_cast<int>(queuedFrame.frame.allResultPoint.size()); ++linePointIndex)
                         {
+                            if ((linePointIndex & 0xFF) == 0
+                                && cameraProcessingAbortRequested.load())
+                            {
+                                break;
+                            }
                             const cv::Point3d& sourcePoint = queuedFrame.frame.allResultPoint[static_cast<std::size_t>(linePointIndex)];
                             // 相机底层保证 allResultPoint 与 targetPoint 使用相同设备 XYZ 坐标；
                             // 业务层只消费统一坐标，禁止再按相机品牌修改符号。
@@ -12836,10 +12934,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                             }
 
                             ProcessedScanWorkpiecePoint cloudPoint;
-                            cloudPoint.workpiecePoint =
-                                RobotCalculation::CalcLaserPointInRobot(processed.robotPose, cameraLinePoint, calibration);
+                            cloudPoint.workpiecePoint = pointTransform.Apply(cameraLinePoint);
                             cloudPoint.cameraPoint = cameraLinePoint;
                             processed.workpiecePoints.push_back(cloudPoint);
+                        }
+
+                        if (cameraProcessingAbortRequested.load())
+                        {
+                            break;
                         }
 
                         if (ShouldSkipLaserCalc(processed.sample))
@@ -12849,8 +12951,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                         else
                         {
                             processed.status = "laser_ok";
-                            processed.laserPoint =
-                                RobotCalculation::CalcLaserPointInRobot(processed.robotPose, processed.sample.point, calibration);
+                            processed.laserPoint = pointTransform.Apply(processed.sample.point);
                             processed.hasLaserPoint = true;
                         }
                     }
@@ -12859,14 +12960,91 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                         std::lock_guard<std::mutex> locker(processedCameraSamplesMutex);
                         processedCameraSamples.push_back(std::move(processed));
                     }
+                    ++processedCameraFrameCount;
                 }
+                --remainingProcessingWorkers;
+                processingWorkersDoneCv.notify_all();
             });
     }
-    auto finishCameraProcessingWorkers = [&]()
+    bool processingWorkersJoined = false;
+    auto finishCameraProcessingWorkers = [&](bool discardPending = true) -> bool
         {
+            if (processingWorkersJoined)
+            {
+                return !cameraProcessingAbortRequested.load();
+            }
             cameraEnqueueFinished.store(true);
+            auto requestProcessingAbort = [&]()
+                {
+                    cameraProcessingAbortRequested.store(true);
+                    std::lock_guard<std::mutex> locker(pendingCameraFramesMutex);
+                    pendingCameraFrames.clear();
+                };
+            if (discardPending
+                || RobotOperationLease::IsCancellationRequested(pRobotDriver))
+            {
+                requestProcessingAbort();
+            }
             pendingCameraFramesCv.notify_all();
             robotSamplesCv.notify_all();
+
+            const qint64 drainStartMs = SteadyNowMs();
+            qint64 lastProgressLogMs = drainStartMs;
+            bool drainTimedOut = false;
+            while (remainingProcessingWorkers.load() > 0)
+            {
+                {
+                    std::unique_lock<std::mutex> locker(processingWorkersDoneMutex);
+                    processingWorkersDoneCv.wait_for(
+                        locker,
+                        std::chrono::milliseconds(250),
+                        [&]() { return remainingProcessingWorkers.load() == 0; });
+                }
+                if (remainingProcessingWorkers.load() == 0)
+                {
+                    break;
+                }
+
+                const qint64 nowMs = SteadyNowMs();
+                if (!cameraProcessingAbortRequested.load()
+                    && RobotOperationLease::IsCancellationRequested(pRobotDriver))
+                {
+                    requestProcessingAbort();
+                    pendingCameraFramesCv.notify_all();
+                    robotSamplesCv.notify_all();
+                }
+                if (!cameraProcessingAbortRequested.load()
+                    && (nowMs - drainStartMs) >= CAMERA_PROCESSING_DRAIN_TIMEOUT_MS)
+                {
+                    drainTimedOut = true;
+                    requestProcessingAbort();
+                    pendingCameraFramesCv.notify_all();
+                    robotSamplesCv.notify_all();
+                    if (appendLog)
+                    {
+                        appendLog(QString(
+                            "完整点云后台处理超过 %1 秒安全上限，已取消积压帧并拒绝本轮结果。")
+                            .arg(CAMERA_PROCESSING_DRAIN_TIMEOUT_MS / 1000));
+                    }
+                }
+                if (!discardPending
+                    && appendLog
+                    && (nowMs - lastProgressLogMs) >= CAMERA_PROCESSING_PROGRESS_LOG_MS)
+                {
+                    std::size_t pendingCount = 0;
+                    {
+                        std::lock_guard<std::mutex> locker(pendingCameraFramesMutex);
+                        pendingCount = pendingCameraFrames.size();
+                    }
+                    appendLog(QString(
+                        "完整点云后台处理进度：已处理帧=%1/%2，待处理帧=%3，工作线程=%4。")
+                        .arg(processedCameraFrameCount.load())
+                        .arg(enqueuedCameraSampleCount)
+                        .arg(static_cast<qulonglong>(pendingCount))
+                        .arg(remainingProcessingWorkers.load()));
+                    lastProgressLogMs = nowMs;
+                }
+            }
             for (std::thread& worker : processingWorkers)
             {
                 if (worker.joinable())
@@ -12874,6 +13052,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                     worker.join();
                 }
             }
+            processingWorkersJoined = true;
+            return !drainTimedOut && !cameraProcessingAbortRequested.load();
         };
 
     if (appendLog)
@@ -13336,6 +13516,54 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     // 扫描运动+尾部匹配结束这一刻，对相机 SDK 逐帧取帧状态做快照：此后进入点云处理，相机仍在空转，
     // 必须在此处取，避免处理期的空轮询污染“无新帧间断”统计。除 OK(0) 外的状态稍后逐条写入匹配明细文件。
     const std::vector<CameraFrameCache::PollStatus> pollStatusLog = frameCache->PollStatusSnapshot();
+
+    // 统计校时可能把末帧向后平移几十毫秒。安全收枪前先冻结一小段终点位姿缓冲，
+    // 后续重匹配只使用这份冻结时间轴，绝不能把收枪运动位姿混进扫描点云。
+    if (motionCompleted)
+    {
+        if (setFlowStep)
+        {
+            setFlowStep(QStringLiteral("扫描运动已完成，正在冻结末端位姿缓冲"));
+        }
+        const qint64 endpointBufferStartMs = SteadyNowMs();
+        while ((SteadyNowMs() - endpointBufferStartMs) < POST_SCAN_ENDPOINT_POSE_BUFFER_MS
+            && !RobotOperationLease::IsCancellationRequested(pRobotDriver))
+        {
+            if (!appendRobotPose())
+            {
+                if (appendLog)
+                {
+                    appendLog(QStringLiteral(
+                        "扫描末端位姿缓冲提前停止：没有取得新的严格位姿；继续使用已冻结样本。"));
+                }
+                break;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(CAMERA_ROBOT_MATCH_TAIL_POLL_MS));
+        }
+        if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
+        {
+            finishCameraProcessingWorkers(true);
+            savedPath.clear();
+            return false;
+        }
+        if (!motionCompleted())
+        {
+            if (appendLog)
+            {
+                appendLog(QStringLiteral(
+                    "扫描采集已经冻结，但点云后处理前的安全收枪失败；已取消积压点云。"));
+            }
+            finishCameraProcessingWorkers(true);
+            savedPath.clear();
+            return false;
+        }
+        if (setFlowStep)
+        {
+            setFlowStep(QStringLiteral("扫描已安全收枪，正在整理完整点云"));
+        }
+    }
+
     qint64 maxNoFrameGapUs = 0;       // 扫描期间相邻两帧之间最长的“无新帧”间断
     int okPollCount = 0;              // 实际取到新帧的轮询次数
     int sdkNoDataPollCount = 0;       // -106 无新帧
@@ -13375,9 +13603,20 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     }
 
     const qint64 processingJoinStartMs = SteadyNowMs();
-    finishCameraProcessingWorkers();
+    const bool cameraProcessingCompleted = finishCameraProcessingWorkers(false);
     const qint64 postMotionProcessingWaitMs = SteadyNowMs() - processingJoinStartMs;
     const qint64 parallelProcessingElapsedMs = SteadyNowMs() - processingWallStartMs;
+    if (!cameraProcessingCompleted)
+    {
+        frameCache->Clear();
+        savedPath.clear();
+        if (appendLog)
+        {
+            appendLog(QStringLiteral(
+                "完整点云后台处理已取消、超时或未完整收尾，本轮结果已拒绝。"));
+        }
+        return false;
+    }
     const int nonCanonicalFrameCount = nonCanonicalCameraPointCloudFrameCount.load();
     if (nonCanonicalFrameCount > 0)
     {
@@ -13457,8 +13696,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             statRealignDeltaUs = statOffsetUs - cameraToRobotTimeOffsetUs;
             cameraToRobotTimeOffsetUs = statOffsetUs;
 
-            // 正向修正会把末帧时间戳右移越过位姿末样本。此刻机器人仍静止在扫描终点（收枪安全位
-            // 在 ScanMoveAndCollect 返回后才执行），补采几个位姿样本延长时间轴覆盖，避免尾帧被改判丢弃。
+            // 正向修正可能把末帧时间戳右移。正常 RunScanCycle 已在安全收枪前冻结终点位姿缓冲；
+            // 这里只允许在没有优先收枪回调的旧式直接调用中补采，禁止把收枪运动位姿混入扫描时间轴。
             if (statRealignDeltaUs > 0)
             {
                 qint64 lastFrameNewTimestampUs = 0;
@@ -13474,7 +13713,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                         }
                     }
                 }
-                for (int extraPoll = 0; extraPoll < 20; ++extraPoll)
+                for (int extraPoll = 0; !motionCompleted && extraPoll < 20; ++extraPoll)
                 {
                     if (latestRobotTimestampUs() >= lastFrameNewTimestampUs)
                     {
@@ -13542,12 +13781,13 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 processed.robotWindow = window;
                 processed.robotPose = RobotCalculation::InterpolateRobotPose(interpolationSamples, newTimestampUs);
                 processed.hasRobotPose = true;
+                const CameraToRobotPointTransform pointTransform =
+                    BuildCameraToRobotPointTransform(processed.robotPose, calibration);
                 // 线点云重变换：cameraPoint 为相机系原始点，直接按新位姿重算工件系坐标。
                 // 原先未匹配的帧线点数据未保留（workpiecePoints 为空），无法复活，仅影响边界1~2帧的点云密度。
                 for (ProcessedScanWorkpiecePoint& cloudPoint : processed.workpiecePoints)
                 {
-                    cloudPoint.workpiecePoint =
-                        RobotCalculation::CalcLaserPointInRobot(processed.robotPose, cloudPoint.cameraPoint, calibration);
+                    cloudPoint.workpiecePoint = pointTransform.Apply(cloudPoint.cameraPoint);
                 }
                 if (ShouldSkipLaserCalc(sample))
                 {
@@ -13557,8 +13797,7 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 else
                 {
                     processed.status = QStringLiteral("laser_ok");
-                    processed.laserPoint =
-                        RobotCalculation::CalcLaserPointInRobot(processed.robotPose, sample.point, calibration);
+                    processed.laserPoint = pointTransform.Apply(sample.point);
                     processed.hasLaserPoint = true;
                 }
             }
@@ -13609,6 +13848,14 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             }
         }
     }
+    std::size_t expectedWorkpiecePointCount = 0;
+    for (const ProcessedScanCameraSample& processed : processedCameraSamples)
+    {
+        expectedWorkpiecePointCount += processed.workpiecePoints.size();
+    }
+    workpieceCloudInput.reserve(static_cast<int>((std::min)(
+        expectedWorkpiecePointCount,
+        static_cast<std::size_t>((std::numeric_limits<int>::max)()))));
 
     int droppedHeadCameraCount = 0;
     int droppedTailCameraCount = 0;
@@ -13688,18 +13935,46 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     std::vector<QString> cameraLines;
     std::vector<QString> robotLines;
     std::vector<QString> laserLines;
-    std::vector<QString> workpieceCloudLines;
     std::vector<QString> matchDebugLines;
     cameraLines.reserve(cameraSamples.size() + 1);
     robotLines.reserve(matchedCameraSamples.size() + 1);
     laserLines.reserve(matchedCameraSamples.size() + 1);
-    workpieceCloudLines.reserve(cameraSamples.size() * 16 + 1);
     matchDebugLines.reserve(cameraSamples.size() + 1);
     cameraLines.push_back("index,x,y,z,error");
     robotLines.push_back("index,x,y,z,rx,ry,rz,bx,by,bz");
     laserLines.push_back("index,x,y,z");
-    workpieceCloudLines.push_back("index x y z");
     matchDebugLines.push_back("index,status,camera_raw_timestamp_us,camera_raw_delta_us,mapped_robot_timestamp_us,prev_robot_index,prev_robot_timestamp_us,next_robot_index,next_robot_timestamp_us,interp_ratio,camera_x,camera_y,camera_z,robot_x,robot_y,robot_z,robot_rx,robot_ry,robot_rz,robot_bx,robot_by,robot_bz,laser_x,laser_y,laser_z,error,sdk_status,sdk_recv_timestamp_us");
+
+    // 完整点云通常有数百万点。直接流式写入 QSaveFile，避免先创建数百万个 QString
+    // 再统一落盘造成长时间无响应和数百 MB 的额外峰值内存。
+    QSaveFile workpieceCloudFile(workpieceCloudPath);
+    QString workpieceCloudWriteError;
+    bool workpieceCloudWriteOk = workpieceCloudFile.open(QIODevice::WriteOnly);
+    if (!workpieceCloudWriteOk)
+    {
+        workpieceCloudWriteError = QString("保存完整点云失败：%1").arg(workpieceCloudPath);
+    }
+    constexpr int kWorkpieceCloudFlushBytes = 4 * 1024 * 1024;
+    QByteArray workpieceCloudWriteBuffer;
+    workpieceCloudWriteBuffer.reserve(kWorkpieceCloudFlushBytes + 256);
+    workpieceCloudWriteBuffer.append("index x y z\n");
+    const qint64 saveWorkpieceCloudStartMs = SteadyNowMs();
+    auto flushWorkpieceCloud = [&]() -> bool
+        {
+            if (!workpieceCloudWriteOk || workpieceCloudWriteBuffer.isEmpty())
+            {
+                return workpieceCloudWriteOk;
+            }
+            const qint64 expected = workpieceCloudWriteBuffer.size();
+            if (workpieceCloudFile.write(workpieceCloudWriteBuffer) != expected)
+            {
+                workpieceCloudWriteError = QString("写入完整点云失败：%1").arg(workpieceCloudPath);
+                workpieceCloudWriteOk = false;
+                return false;
+            }
+            workpieceCloudWriteBuffer.clear();
+            return true;
+        };
 
     // 完整点云逐帧调试导出（独立开关，默认关闭——仅排查相机散点时勾选；与目标点/特征点流程无关）：
     // 每点附 frame_index + 相机原始坐标 + 机器人位姿 + 时间戳，CloudCompare 按 frame_index 着色定位散点帧。
@@ -13733,6 +14008,10 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     const qint64 pointComputeStartMs = SteadyNowMs();
     for (const ProcessedScanCameraSample& processed : processedCameraSamples)
     {
+        if (!workpieceCloudWriteOk)
+        {
+            break;
+        }
         const TimestampedCameraPoint& sample = processed.sample;
         const int index = sample.sampleIndex;
         const QString& status = processed.status;
@@ -13763,13 +14042,35 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             for (const ProcessedScanWorkpiecePoint& cloudPoint : processed.workpiecePoints)
             {
                 const int cloudIndex = workpieceCloudPointIndex++;
-                QStringList cloudFields;
-                cloudFields
-                    << QString::number(cloudIndex)
-                    << QString::number(cloudPoint.workpiecePoint.x(), 'f', 6)
-                    << QString::number(cloudPoint.workpiecePoint.y(), 'f', 6)
-                    << QString::number(cloudPoint.workpiecePoint.z(), 'f', 6);
-                workpieceCloudLines.push_back(cloudFields.join(' '));
+                char cloudBuffer[160];
+                const int cloudLength = std::snprintf(
+                    cloudBuffer,
+                    sizeof(cloudBuffer),
+                    "%d %.6f %.6f %.6f\n",
+                    cloudIndex,
+                    cloudPoint.workpiecePoint.x(),
+                    cloudPoint.workpiecePoint.y(),
+                    cloudPoint.workpiecePoint.z());
+                if (cloudLength <= 0
+                    || cloudLength >= static_cast<int>(sizeof(cloudBuffer)))
+                {
+                    workpieceCloudWriteError = QStringLiteral("完整点云文本格式化失败。");
+                    workpieceCloudWriteOk = false;
+                    break;
+                }
+                workpieceCloudWriteBuffer.append(cloudBuffer, cloudLength);
+                if (workpieceCloudWriteBuffer.size() >= kWorkpieceCloudFlushBytes
+                    && !flushWorkpieceCloud())
+                {
+                    break;
+                }
+                if ((cloudIndex & 0xFFF) == 0
+                    && RobotOperationLease::IsCancellationRequested(pRobotDriver))
+                {
+                    workpieceCloudWriteError = QStringLiteral("安全停止已取消完整点云写盘。");
+                    workpieceCloudWriteOk = false;
+                    break;
+                }
 
                 if (exportWorkpieceFrameDebug)
                 {
@@ -13861,6 +14162,25 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         fields << CsvEscape(sample.error);
         fields << "" << "";  // sdk_status / sdk_recv_timestamp_us：匹配行不涉及 SDK 取帧状态，留空
         matchDebugLines.push_back(fields.join(','));
+    }
+    if (workpieceCloudWriteOk)
+    {
+        workpieceCloudWriteOk = flushWorkpieceCloud();
+    }
+    if (workpieceCloudWriteOk && !workpieceCloudFile.commit())
+    {
+        workpieceCloudWriteError = QString("提交完整点云文件失败：%1").arg(workpieceCloudPath);
+        workpieceCloudWriteOk = false;
+    }
+    const qint64 saveWorkpieceCloudElapsedMs = SteadyNowMs() - saveWorkpieceCloudStartMs;
+    if (!workpieceCloudWriteOk)
+    {
+        savedPath.clear();
+        if (appendLog)
+        {
+            appendLog(workpieceCloudWriteError);
+        }
+        return false;
     }
     const qint64 pointComputeElapsedMs = SteadyNowMs() - pointComputeStartMs;
 
@@ -13980,22 +14300,27 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     }
 
     QString error;
-    auto saveTextLinesTimed = [this, &error](const QString& filePath, const std::vector<QString>& lines, qint64& elapsedMs)
+    auto saveTextLinesTimed = [this, &error, pRobotDriver](const QString& filePath, const std::vector<QString>& lines, qint64& elapsedMs)
         {
             const qint64 saveStartMs = SteadyNowMs();
-            const bool ok = SaveTextLines(filePath, lines, error);
+            const bool ok = SaveTextLines(
+                filePath,
+                lines,
+                error,
+                [pRobotDriver]()
+                {
+                    return RobotOperationLease::IsCancellationRequested(pRobotDriver);
+                });
             elapsedMs = SteadyNowMs() - saveStartMs;
             return ok;
         };
     qint64 saveCameraElapsedMs = 0;
     qint64 saveRobotElapsedMs = 0;
     qint64 saveLaserElapsedMs = 0;
-    qint64 saveWorkpieceCloudElapsedMs = 0;
     qint64 saveMatchDebugElapsedMs = 0;
     if (!saveTextLinesTimed(cameraPath, cameraLines, saveCameraElapsedMs)
         || !saveTextLinesTimed(robotPath, robotLines, saveRobotElapsedMs)
         || !saveTextLinesTimed(laserPath, laserLines, saveLaserElapsedMs)
-        || !saveTextLinesTimed(workpieceCloudPath, workpieceCloudLines, saveWorkpieceCloudElapsedMs)
         || !saveTextLinesTimed(matchDebugPath, matchDebugLines, saveMatchDebugElapsedMs))
     {
         if (appendLog)
