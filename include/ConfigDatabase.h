@@ -23,49 +23,36 @@ public:
     };
 
     static QString DatabasePath();
-    static QString NormalizeFilePath(const QString& fileName);
-    static std::string NormalizeFilePath(const std::string& fileName);
 
     static bool IsAvailable();
 
-    static bool HasIniFile(const std::string& fileName);
-    static bool HasIniFile(const QString& fileName);
-    static bool ReadIniValue(
-        const std::string& fileName,
-        const std::string& sectionName,
-        const std::string& keyName,
-        std::string* value);
-    static ReadStatus ReadIniValueStatus(
-        const std::string& fileName,
-        const std::string& sectionName,
-        const std::string& keyName,
-        std::string* value);
-    static bool WriteIniValue(
-        const std::string& fileName,
-        const std::string& sectionName,
-        const std::string& keyName,
-        const std::string& value);
-
-    static bool HasTextFile(const std::string& fileName);
-    static bool HasTextFile(const QString& fileName);
-    static bool ReadTextFile(const std::string& fileName, std::string* content);
-    static bool WriteTextFile(const std::string& fileName, const std::string& content);
-    static bool CopyTextFile(const QString& sourceFileName, const QString& targetFileName, bool overwriteExisting = false);
-    static bool RemoveConfigPathPrefix(const QString& sourcePathPrefix);
-
-    static bool CopyIniFile(const QString& sourceFileName, const QString& targetFileName, bool overwriteExisting = false);
-    static bool RemoveIniGroup(const QString& fileName, const QString& groupName);
-    static QMap<QString, QString> ReadIniSection(const QString& fileName, const QString& sectionName);
-    // 用单条 SQLite 查询读取一个逻辑 INI 文件的全部 section/key，保证结果来自同一快照。
-    static bool ReadIniFileSnapshot(
-        const QString& fileName,
+    static bool HasScopedModule(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName);
+    static bool CopyScopedModule(
+        const QString& sourceScopeType,
+        const QString& sourceScopeId,
+        const QString& sourceModuleName,
+        const QString& targetScopeType,
+        const QString& targetScopeId,
+        const QString& targetModuleName,
+        bool overwriteExisting = false);
+    static bool ReadScopedModuleSnapshot(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName,
         QMap<QString, QMap<QString, QString>>& sectionValues,
         QString* error = nullptr);
-    static bool RemoveIniSection(const QString& fileName, const QString& sectionName);
-    // 在同一个 SQLite 事务中先删除指定 INI section，再写入整批 section/key；
-    // 配合 ReadIniFileSnapshot，读取者只会得到提交前或提交后的完整版本。
-    static bool ReplaceIniSectionsAtomically(
-        const QString& fileName,
+    static bool RemoveScopedModuleSection(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName,
+        const QString& sectionName);
+    static bool ReplaceScopedModuleSectionsAtomically(
+        const QString& scopeType,
+        const QString& scopeId,
+        const QString& moduleName,
         const QMap<QString, QMap<QString, QString>>& sectionValues,
         const QStringList& removeSections,
         QString* error = nullptr);

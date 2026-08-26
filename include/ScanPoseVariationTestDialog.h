@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ConfigSection.h"
+
 #include "Const.h"
 #include "MeasureThenWeldService.h"
 
@@ -40,8 +42,8 @@ public:
 private:
     RobotDriverAdaptor* ResolveDriver(bool showMessage = true) const;
     QString RobotName(RobotDriverAdaptor* driver = nullptr) const;
-    QString ConfigPath() const;
-    QString SelectionConfigPath() const;
+    ConfigLocation TestConfig() const;
+    ConfigLocation SelectionConfig() const;
     QString CurrentCameraSection() const;
     void LoadRobotList(int initialUnitIndex);
     void LoadCameraList(const QString& preferredSection = QString());
@@ -61,6 +63,7 @@ private:
     void UpdateStatusLabels();
     void SetRunning(bool running);
     MeasureThenWeldService::ScanPoseVariationParams CurrentParams() const;
+    MeasureThenWeldService::ScanPostProcessMode CurrentPostProcessMode() const;
 
     ContralUnit* m_controlUnit = nullptr;
     int m_unitIndex = 0;
@@ -85,6 +88,7 @@ private:
     QLabel* m_endLabel = nullptr;
     QComboBox* m_robotCombo = nullptr;
     QComboBox* m_cameraCombo = nullptr;
+    QComboBox* m_postProcessCombo = nullptr;
     QDoubleSpinBox* m_scanSpeedSpin = nullptr;
     QDoubleSpinBox* m_lowPlatformSpin = nullptr;
     QDoubleSpinBox* m_risingSpin = nullptr;

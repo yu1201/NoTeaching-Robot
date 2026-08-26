@@ -264,6 +264,11 @@ public:
         const QVector<IndexedPoint3D>& workpieceCloudInput,
         const QVector<IndexedPoint3D>& seedPathInput,
         const LowerWeldFilterParams& params);
+    // 使用扫描顺序中的相机特征点：复用几何链的局部异常点剔除，再对三维点列做
+    // 有限窗平滑和弧长参数化三次 Hermite 重采样，得到连续一阶切向的平滑曲线。
+    static LowerWeldFilterResult BuildSmoothFeatureCurve(
+        const QVector<IndexedPoint3D>& inputPoints,
+        const LowerWeldFilterParams& params);
     static MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldLowerWeldPathDirect(
         const QVector<IndexedPoint3D>& inputPoints,
         const LowerWeldFilterParams& params);

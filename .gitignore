@@ -64,14 +64,10 @@ SDK/STEP/step_sdk_pdf_extracted.txt
 SDK/STEP/SR.SDK_C++_X64_Win_V2.4.1.20250801/
 SDK/STEP/SR.SDK_C++_X64_Win_V2.4.1.20250801-1/
 Data/RobotA - 副本/
-Data/RobotPara - 副本.ini
-Data/RobotPara - 副本 (2).ini
 Data/**
 Data/ConfigStore.db*
 Data.zip
 Data - */
-Data/Accounts.ini
-Data/LoginState.ini
 _step_remote_download/
 Job/STEP/Weld_*.srp
 Job/STEP/Weld_*.srd

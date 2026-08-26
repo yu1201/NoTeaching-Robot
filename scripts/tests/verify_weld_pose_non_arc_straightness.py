@@ -225,6 +225,25 @@ def verify_numeric_contract() -> None:
         f"20260730_001 limited geometry angles are not opposite: {limited_angles}",
     )
 
+    # 20260825_030: classification retained both lap-step anchors, but the old
+    # pose-compensation junction trim crossed raw indexes 147/149 and erased
+    # the whole step. A junction mutation that touches either anchor must be
+    # rejected atomically instead of leaving a straight bridge.
+    lap_step_raw_indexes = {147, 149}
+    junction_trim_raw_indexes = set(range(139, 150))
+    legacy_preserved = lap_step_raw_indexes - junction_trim_raw_indexes
+    junction_trim_touches_lap_step = bool(
+        lap_step_raw_indexes & junction_trim_raw_indexes
+    )
+    require(
+        not legacy_preserved,
+        "20260825_030 fixture no longer reproduces total lap-step anchor loss",
+    )
+    require(
+        junction_trim_touches_lap_step,
+        "lap-step junction guard did not reject the 20260825_030 trim window",
+    )
+
 
 def verify_source_contract() -> None:
     source = SERVICE_PATH.read_text(encoding="utf-8", errors="strict")
@@ -349,6 +368,24 @@ def verify_source_contract() -> None:
         and "elevationBegin.point.z()" in build_junction
         and "IsPlatformSegmentKind(leftRange.kind)" in apply_junction,
         "junction elevation is not anchored to the unchanged platform segment",
+    )
+    require(
+        "removesLapStepAnchor" in apply_junction
+        and "replacesLapStepAnchor" in apply_junction
+        and "records[index].isLapStep" in apply_junction
+        and "records[rightRange.begin].isLapStep" in apply_junction
+        and apply_junction.index("removesLapStepAnchor")
+        < apply_junction.index("records[rightRange.begin] = junctionRecord"),
+        "pose-compensation junction trim can still delete or replace a lap-step hard anchor",
+    )
+    require(
+        "expectedLapStepRawIndexes" in build_pose
+        and "preservedLapStepRawIndexes" in build_pose
+        and "missingLapStepRawIndexes" in build_pose
+        and "姿态补偿后处理丢失了搭接台阶硬锚点" in build_pose
+        and build_pose.index("missingLapStepRawIndexes")
+        < build_pose.index("lines.push_back(BuildWeldPoseFileRecordLine(record))"),
+        "pose output lacks the fail-closed lap-step source/output invariant",
     )
     require(
         "ResolvePoseCompSegmentWeldNormals" in source

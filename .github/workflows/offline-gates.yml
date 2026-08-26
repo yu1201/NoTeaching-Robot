@@ -76,6 +76,7 @@ jobs:
             "scripts/tests/verify_robot_operation_interlock.py",
             "scripts/tests/verify_scan_cycle_wiring.py",
             "scripts/tests/verify_auth_recovery_ui.py",
+            "scripts/tests/verify_database_native_configuration.py",
             "scripts/tests/verify_security_credentials.py",
             "scripts/tests/verify_weld_resume_binding.py"
           )

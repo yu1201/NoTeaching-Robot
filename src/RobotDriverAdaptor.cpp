@@ -915,8 +915,8 @@ void RobotDriverAdaptor::JointAngleToPulse(const std::vector<double>& joint_angl
 
 void RobotDriverAdaptor::LoadRobotKinematicsPara(std::string strRobotName, T_KINEMATICS& tKinematics, T_AXISUNIT& tAxisUnit, T_AXISLIMITANGLE& tAxisLimitAngle)
 {
-    COPini opini;
-    opini.SetFileName(DATA_PATH + strRobotName + ROBOT_PARA_INI);
+    ConfigSection opini;
+    opini.SetLocation(ConfigLocation::Robot(QString::fromUtf8(strRobotName.c_str()), QStringLiteral("RobotPara")));
     opini.SetSectionName("Kinematics");
     opini.ReadString("dA1", &tKinematics.dA1);
     opini.ReadString("dAL1", &tKinematics.dAL1);
@@ -993,8 +993,8 @@ void RobotDriverAdaptor::LoadRobotKinematicsPara(std::string strRobotName, T_KIN
 
 void RobotDriverAdaptor::LoadRobotExternalAxlePara(std::string strRobotName)
 {
-    COPini opini;
-    opini.SetFileName(DATA_PATH + strRobotName + ROBOT_PARA_INI);
+    ConfigSection opini;
+    opini.SetLocation(ConfigLocation::Robot(QString::fromUtf8(strRobotName.c_str()), QStringLiteral("RobotPara")));
     opini.SetSectionName("ExternalAxle");
 
     m_nExternalAxleType = 0;

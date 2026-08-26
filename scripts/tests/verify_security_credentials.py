@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static SEC1 wiring and no-default-secret release gate."""
+"""Static SEC1 wiring and credential-boundary release gate."""
 
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ def main() -> int:
     migrate_batch = read("tools/ConfigMigrate_Run.cmd")
     online = read("include/OnlineServicesConfig.h")
     ftp = read("include/FTPClient.h")
+    adaptor = read("include/RobotDriverAdaptor.h")
     project = read("QtWidgetsApplication4.vcxproj")
 
     for token in (
@@ -264,7 +265,24 @@ def main() -> int:
         "default online-services account is not the fixed upload-only role",
     )
     require('const std::string& ftpPwd = ' not in ftp, "FtpClient still has a password default argument")
-    require("credential.password.clear();" in app, "robot FTP template still injects a password")
+    require(
+        "credential.password = QString::fromUtf8(setup->defaultFtpPassword);" in app,
+        "robot FTP model defaults are not sourced from the brand setup profile",
+    )
+    require(
+        "defaultFtpPassword" in read("include/RobotDriverRegistry.h")
+        and "defaultFtpPassword" in read("src/InovanceRobotDriver.cpp"),
+        "robot FTP password default is not confined to the registry/brand-driver layer",
+    )
+    transfer_profile = adaptor[
+        adaptor.index("struct RobotFileTransferProfile"):
+        adaptor.index("struct RobotProgramInventoryResult")
+    ]
+    require(
+        "password" not in transfer_profile.lower()
+        and "user" not in transfer_profile.lower(),
+        "robot file-transfer DTO exposes brand FTP credentials to business code",
+    )
     require("QUuid::createUuid()" in scan_uploader and "remoteZipName" in scan_uploader,
             "device uploader does not use a unique remote filename per attempt")
     require(
@@ -332,7 +350,7 @@ def main() -> int:
                     candidates.append(f"{path.relative_to(ROOT)}:{line_number}")
     require(not candidates, "non-empty credential-like source defaults: " + ", ".join(candidates))
 
-    print("PASS: SEC1 credential wiring and no-default-secret gate")
+    print("PASS: SEC1 credential wiring and credential-boundary gate")
     return 0
 
 

@@ -21,7 +21,6 @@
 
 namespace
 {
-constexpr char kSection[] = "Breakpoint";
 constexpr char kRecordKey[] = "RecordV2";
 constexpr char kPendingKey[] = "SafeRetreatPending";
 constexpr char kRecoveryModule[] = "WeldBreakpoint/Breakpoint";
@@ -36,12 +35,6 @@ constexpr qsizetype kMaxStoredRobotRecoveryRecords = 4096;
 std::recursive_mutex g_storeMutex;
 QMap<QString, QString> g_activeEndpointRecoveryBindings;
 
-std::string Utf8(const QString& text)
-{
-    const QByteArray bytes = text.toUtf8();
-    return std::string(bytes.constData(), static_cast<std::size_t>(bytes.size()));
-}
-
 void SetError(QString* error, const QString& text)
 {
     if (error != nullptr)
@@ -50,10 +43,10 @@ void SetError(QString* error, const QString& text)
     }
 }
 
-QString StorePath(const QString& robotName)
+QString StoreLabel(const QString& robotName)
 {
-    return QDir::toNativeSeparators(AppPaths::WritablePath(
-        QString("Data/%1/WeldBreakpoint.ini").arg(robotName.trimmed())));
+    return QStringLiteral("robot/%1/%2").arg(
+        robotName.trimmed(), QString::fromLatin1(kRecoveryModule));
 }
 
 bool ValidateRobotName(const QString& robotName, QString* error)
@@ -109,7 +102,7 @@ QString NormalizePersistentEndpointIdentity(const QString& endpointIdentity)
     return QStringLiteral("tcp:[%1]:%2").arg(host).arg(port);
 }
 
-ConfigDatabase::ReadStatus ReadIniValueStatusLocked(
+ConfigDatabase::ReadStatus ReadRecoveryValueStatusLocked(
     const QString& robotName,
     const char* key,
     std::string& value,
@@ -120,12 +113,19 @@ ConfigDatabase::ReadStatus ReadIniValueStatusLocked(
     {
         return ConfigDatabase::ReadStatus::Error;
     }
-    const ConfigDatabase::ReadStatus status = ConfigDatabase::ReadIniValueStatus(
-        Utf8(StorePath(robotName)), kSection, key, &value);
+    QString stored;
+    const ConfigDatabase::ReadStatus status = ConfigDatabase::ReadScopedSettingStatus(
+        QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+        QString::fromLatin1(key), &stored);
+    if (status == ConfigDatabase::ReadStatus::Found)
+    {
+        const QByteArray bytes = stored.toUtf8();
+        value.assign(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+    }
     if (status == ConfigDatabase::ReadStatus::Error)
     {
-        SetError(error, QString("读取焊接安全恢复存储失败：%1 [%2]/%3")
-            .arg(StorePath(robotName), QString::fromLatin1(kSection), QString::fromLatin1(key)));
+        SetError(error, QString("读取焊接安全恢复存储失败：%1 [%2]")
+            .arg(StoreLabel(robotName), QString::fromLatin1(key)));
     }
     return status;
 }
@@ -137,7 +137,7 @@ ConfigDatabase::ReadStatus ReadRecordValueStatusLocked(
 {
     value.clear();
     std::string bytes;
-    const ConfigDatabase::ReadStatus status = ReadIniValueStatusLocked(
+    const ConfigDatabase::ReadStatus status = ReadRecoveryValueStatusLocked(
         robotName, kRecordKey, bytes, error);
     if (status != ConfigDatabase::ReadStatus::Found)
     {
@@ -168,7 +168,7 @@ ConfigDatabase::ReadStatus ReadPendingValueStatusLocked(
 {
     pending = false;
     std::string value;
-    const ConfigDatabase::ReadStatus status = ReadIniValueStatusLocked(
+    const ConfigDatabase::ReadStatus status = ReadRecoveryValueStatusLocked(
         robotName, kPendingKey, value, error);
     if (status != ConfigDatabase::ReadStatus::Found)
     {
@@ -220,10 +220,11 @@ bool ReadPendingLocked(const QString& robotName, bool& pending, QString* error)
 bool WritePendingLocked(const QString& robotName, bool pending, QString* error)
 {
     if (!ValidateRobotName(robotName, error)
-        || !ConfigDatabase::WriteIniValue(
-            Utf8(StorePath(robotName)), kSection, kPendingKey, pending ? "1" : "0"))
+        || !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+            QString::fromLatin1(kPendingKey), pending ? QStringLiteral("1") : QStringLiteral("0")))
     {
-        SetError(error, QString("写入焊后安全回撤门禁失败：%1").arg(StorePath(robotName)));
+        SetError(error, QString("写入焊后安全回撤门禁失败：%1").arg(StoreLabel(robotName)));
         return false;
     }
     bool readback = !pending;
@@ -248,11 +249,11 @@ bool WriteRecordLocked(const QString& robotName, const QString& encoded, QString
         return false;
     }
     if (!ValidateRobotName(robotName, error)
-        || !ConfigDatabase::WriteIniValue(
-            Utf8(StorePath(robotName)), kSection, kRecordKey,
-            std::string(encodedUtf8.constData(), static_cast<std::size_t>(encodedUtf8.size()))))
+        || !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+            QString::fromLatin1(kRecordKey), encoded))
     {
-        SetError(error, QString("写入焊接恢复记录失败：%1").arg(StorePath(robotName)));
+        SetError(error, QString("写入焊接恢复记录失败：%1").arg(StoreLabel(robotName)));
         return false;
     }
     QString readback;
@@ -714,9 +715,9 @@ void ApplyTerminal(
 #endif
 }
 
-QString WeldSafetyRecoveryStore::StoragePath(const QString& robotName)
+QString WeldSafetyRecoveryStore::StorageLabel(const QString& robotName)
 {
-    return StorePath(robotName);
+    return StoreLabel(robotName);
 }
 
 bool WeldSafetyRecoveryStore::ReadRecord(
@@ -742,17 +743,19 @@ bool WeldSafetyRecoveryStore::DisableLegacy(const QString& robotName, QString* e
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     if (!ValidateRobotName(robotName, error)
-        || !ConfigDatabase::WriteIniValue(
-            Utf8(StorePath(robotName)), kSection, "Valid", "0"))
+        || !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+            QStringLiteral("Valid"), QStringLiteral("0")))
     {
         SetError(error, QStringLiteral("关闭旧版断点标志失败。"));
         return false;
     }
-    std::string readback;
-    if (ConfigDatabase::ReadIniValueStatus(
-            Utf8(StorePath(robotName)), kSection, "Valid", &readback)
+    QString readback;
+    if (ConfigDatabase::ReadScopedSettingStatus(
+            QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+            QStringLiteral("Valid"), &readback)
             != ConfigDatabase::ReadStatus::Found
-        || readback != "0")
+        || readback != QStringLiteral("0"))
     {
         SetError(error, QStringLiteral("旧版断点标志写后回读不一致，保持失败关闭。"));
         return false;

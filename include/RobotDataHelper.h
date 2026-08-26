@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Const.h"
+#include "ConfigSection.h"
 #include "RobotCalculation.h"
 
 #include <QPair>
@@ -22,7 +23,7 @@ public:
         int unitIndex = -1;
         QString robotName;
         QString displayName;
-        // 控制单元 RobotPara.ini 中显式保存的驱动族（STEP/FANUC）与具体机器人型号。
+        // 控制单元 RobotPara 模块中显式保存的驱动族与具体机器人型号。
         // robotType 保留配置值，调用方需要将它与当前运行时驱动类型独立核对。
         // unitIndex 只用于本次运行，模型焊接资格必须使用 robotModelId，
         // 不能根据 robotType、IP 或机器人名称猜测具体型号。
@@ -59,15 +60,15 @@ public:
     static RobotDriverAdaptor* GetRobotDriver(ContralUnit* pContralUnit, int unitIndex);
 
     // ===== 相机参数 =====
-    static QString CameraParamPath(const QString& robotName);
+    static ConfigLocation CameraConfig(const QString& robotName);
     static QVector<CameraInfo> LoadCameraList(const QString& robotName, int* pSelectedIndex = nullptr);
     static QString MeasureCameraSection(const QString& robotName);
     static bool LoadCameraParam(const QString& robotName, const QString& cameraSection, CameraParamData& param, QString* error = nullptr);
     static bool SaveCameraParam(const QString& robotName, const CameraParamData& param, QString* error = nullptr);
 
     // ===== 精测量参数 =====
-    static QString MeasureWeldParamPath(const QString& robotName);
-    static bool EnsureMeasureWeldParamFile(const QString& robotName, QString* error = nullptr);
+    static ConfigLocation MeasureWeldConfig(const QString& robotName);
+    static bool EnsureMeasureWeldParameters(const QString& robotName, QString* error = nullptr);
     static QString MeasureWeldScanSectionName(int groupIndex);
     static QString MeasureWeldWeldSectionName(int groupIndex);
     static int MeasureWeldCurrentGroupIndex(const QString& robotName, QString* error = nullptr);
@@ -86,10 +87,10 @@ public:
         const std::function<bool()>& stopRequested = std::function<bool()>());
     static bool SaveTextFileLines(const QString& filePath, const QStringList& lines, QString* error = nullptr);
 
-    // ===== 底层 ini 读写 =====
-    static bool ReadPulse(const QString& filePath, const QString& sectionName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error = nullptr);
-    static bool WritePulse(const QString& filePath, const QString& sectionName, const QString& prefix, const T_ANGLE_PULSE& pulse, QString* error = nullptr);
-    static bool ReadCoors(const QString& filePath, const QString& sectionName, const QString& prefix, T_ROBOT_COORS& coors, QString* error = nullptr);
-    static bool WriteCoors(const QString& filePath, const QString& sectionName, const QString& prefix, const T_ROBOT_COORS& coors, QString* error = nullptr);
-    static bool WriteParamValue(const QString& filePath, const QString& sectionName, const QString& key, const QString& value, QString* error = nullptr);
+    // ===== 数据库模块读写 =====
+    static bool ReadPulse(const ConfigLocation& location, const QString& sectionName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error = nullptr);
+    static bool WritePulse(const ConfigLocation& location, const QString& sectionName, const QString& prefix, const T_ANGLE_PULSE& pulse, QString* error = nullptr);
+    static bool ReadCoors(const ConfigLocation& location, const QString& sectionName, const QString& prefix, T_ROBOT_COORS& coors, QString* error = nullptr);
+    static bool WriteCoors(const ConfigLocation& location, const QString& sectionName, const QString& prefix, const T_ROBOT_COORS& coors, QString* error = nullptr);
+    static bool WriteParamValue(const ConfigLocation& location, const QString& sectionName, const QString& key, const QString& value, QString* error = nullptr);
 };

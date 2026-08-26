@@ -13,7 +13,9 @@ struct RobotDriverSetupProfile
     int defaultMonitorPort = 0;
     bool usesMonitorPort = false;
     int defaultFtpPort = 21;
+    const char* defaultFtpHost = "";
     const char* defaultFtpUser = "";
+    const char* defaultFtpPassword = "";
     bool usesControllerProject = false;
     const char* defaultControllerProject = "";
     const char* remoteProgramRoot = "";

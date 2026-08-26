@@ -3,6 +3,8 @@
 #include <windows.h>
 
 #include "InovanceRobotDriver.h"
+#include "RobotDriverRegistry.h"
+#include "RobotFtpFileTransfer.h"
 
 #include <algorithm>
 #include <array>
@@ -12,6 +14,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -129,6 +132,85 @@ bool SameProgramHandle(
 {
     return !left.programName.empty() && left.programName == right.programName;
 }
+
+bool NormalizeInovanceRemotePath(
+    std::string path,
+    std::string& normalized,
+    std::string& error)
+{
+    normalized.clear();
+    error.clear();
+    path = Trim(std::move(path));
+    std::replace(path.begin(), path.end(), '\\', '/');
+    if (path.empty() || path.find('\0') != std::string::npos)
+    {
+        error = "远端路径为空或包含无效字符。";
+        return false;
+    }
+
+    std::vector<std::string> components;
+    std::size_t begin = 0;
+    while (begin <= path.size())
+    {
+        const std::size_t end = path.find('/', begin);
+        const std::string component = path.substr(
+            begin, end == std::string::npos ? std::string::npos : end - begin);
+        if (!component.empty() && component != ".")
+        {
+            if (component == "..")
+            {
+                error = "远端路径不允许包含上级目录。";
+                return false;
+            }
+            components.push_back(component);
+        }
+        if (end == std::string::npos) { break; }
+        begin = end + 1;
+    }
+    if (components.empty())
+    {
+        error = "远端路径没有有效目录或文件名。";
+        return false;
+    }
+
+    for (const std::string& component : components)
+    {
+        normalized.push_back('/');
+        normalized += component;
+    }
+    return true;
+}
+
+bool InovanceActiveProjectDirectory(
+    const std::string& taskProgramPath,
+    std::string& directory,
+    std::string& error)
+{
+    std::string normalizedPath;
+    if (!NormalizeInovanceRemotePath(taskProgramPath, normalizedPath, error))
+    {
+        return false;
+    }
+    std::string lowerPath = normalizedPath;
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (lowerPath.rfind("/teachprogram/", 0) != 0
+        || lowerPath.size() <= std::strlen("/teachprogram/x.pro")
+        || lowerPath.substr(lowerPath.size() - 4) != ".pro")
+    {
+        error = "主任务路径不是 TeachProgram/工程名/*.pro，无法确定安全上传目录："
+            + normalizedPath;
+        return false;
+    }
+    const std::size_t slash = normalizedPath.find_last_of('/');
+    if (slash == std::string::npos || slash <= std::strlen("/TeachProgram"))
+    {
+        error = "主任务路径缺少工程目录：" + normalizedPath;
+        return false;
+    }
+    directory = normalizedPath.substr(0, slash);
+    return true;
+}
 }
 
 InovanceRobotCtrl::InovanceRobotCtrl(std::string unitName, RobotLog* log)
@@ -156,8 +238,18 @@ long long InovanceRobotCtrl::SteadyMs()
 
 bool InovanceRobotCtrl::InitRobotDriver(std::string unitName)
 {
-    COPini ini;
-    ini.SetFileName(DATA_PATH + unitName + ROBOT_PARA_INI);
+    if (const RobotDriverSetupProfile* setup =
+        RobotDriverRegistry::SetupProfile(ROBOT_TYPE_INOVANCE))
+    {
+        m_socketPort = setup->defaultSocketPort;
+        m_ftpIp = setup->defaultFtpHost;
+        m_ftpPort = setup->defaultFtpPort;
+        m_ftpUser = setup->defaultFtpUser;
+        m_ftpPassword = setup->defaultFtpPassword;
+    }
+
+    ConfigSection ini;
+    ini.SetLocation(ConfigLocation::Robot(QString::fromUtf8(unitName.c_str()), QStringLiteral("RobotPara")));
     ini.SetSectionName("BaseParam");
     ini.ReadString("RobotName", m_sRobotName);
     ini.ReadString("CustomName", m_sCustomName);
@@ -171,8 +263,14 @@ bool InovanceRobotCtrl::InitRobotDriver(std::string unitName)
     ini.ReadString(false, "ForceControlPermit", &m_forceControlPermit);
     ini.ReadString(false, "ApiUserLevel", &m_apiUserLevel);
     ini.ReadString(false, "ApiPassword", &m_apiPassword);
+    ini.ReadString(false, "FTPIP", &m_ftpIp);
+    ini.ReadString(false, "FTPPort", &m_ftpPort);
+    ini.ReadString(false, "FTPUser", &m_ftpUser);
+    ini.ReadString(false, "FTPPassWord", &m_ftpPassword);
 
     if (m_socketPort <= 0 || m_socketPort > 65535) { m_socketPort = 2222; }
+    if (m_ftpIp.empty()) { m_ftpIp = m_socketIp; }
+    if (m_ftpPort <= 0 || m_ftpPort > 65535) { m_ftpPort = 7777; }
     if (m_nRobotType == 0) { m_nRobotType = ROBOT_TYPE_INOVANCE; }
     m_toolNo = std::clamp(m_toolNo, 0, 15);
     m_wobjNo = std::clamp(m_wobjNo, 0, 15);
@@ -214,6 +312,7 @@ std::uint64_t InovanceRobotCtrl::DriverCapabilities() const
         | RobotDriverCapabilityBit(RobotDriverCapability::ContinuousJog)
         | RobotDriverCapabilityBit(RobotDriverCapability::PauseResume)
         | RobotDriverCapabilityBit(RobotDriverCapability::OperationModeControl)
+        | RobotDriverCapabilityBit(RobotDriverCapability::NativeProgramUpload)
         | RobotDriverCapabilityBit(RobotDriverCapability::DiagnosticCommand)
         | RobotDriverCapabilityBit(RobotDriverCapability::CartesianRegister)
         | RobotDriverCapabilityBit(RobotDriverCapability::VerifiedProgramCompletion)
@@ -222,7 +321,8 @@ std::uint64_t InovanceRobotCtrl::DriverCapabilities() const
         | RobotDriverCapabilityBit(RobotDriverCapability::AlarmReset)
         | RobotDriverCapabilityBit(RobotDriverCapability::ServoPowerControl)
         | RobotDriverCapabilityBit(RobotDriverCapability::ToolDataRead)
-        | RobotDriverCapabilityBit(RobotDriverCapability::TeachPendantSpeedControl);
+        | RobotDriverCapabilityBit(RobotDriverCapability::TeachPendantSpeedControl)
+        | RobotDriverCapabilityBit(RobotDriverCapability::FtpFileTransfer);
     const double mainAxisUnits[6] = {
         m_tAxisUnit.dSPulseUnit, m_tAxisUnit.dLPulseUnit, m_tAxisUnit.dUPulseUnit,
         m_tAxisUnit.dRPulseUnit, m_tAxisUnit.dBPulseUnit, m_tAxisUnit.dTPulseUnit
@@ -512,22 +612,36 @@ RobotFileTransferProfile InovanceRobotCtrl::FileTransferProfile() const
 {
     RobotFileTransferProfile profile;
     profile.robotName = m_sRobotName;
-    profile.endpointDisplay = m_socketIp.empty()
+    profile.endpointDisplay = m_ftpIp.empty()
         ? std::string()
-        : m_socketIp + ":" + std::to_string(m_socketPort);
+        : m_ftpIp + ":" + std::to_string(m_ftpPort);
+    profile.defaultRemoteDirectory = "/TeachProgram";
     profile.defaultLocalDirectory = "Job/Inovance";
+    profile.localFileFilters = { "*.pro", "*.prj", "*.pts", "*.jsn" };
     return profile;
 }
 
 std::shared_ptr<RobotFileTransferSession> InovanceRobotCtrl::CreateFileTransferSession(
     std::string* error) const
 {
-    if (error != nullptr)
+    if (m_ftpIp.empty() || m_ftpPort <= 0 || m_ftpPort > 65535)
     {
-        *error = "汇川远程以太网手册只证明2222端口命令协议，未证明FTP目录、账号和文件语义；"
-            "本品牌文件传输会话保持关闭。";
+        if (error != nullptr)
+        {
+            *error = "汇川机器人FTP参数不完整。";
+        }
+        return {};
     }
-    return {};
+    if (error != nullptr) { error->clear(); }
+    return std::make_shared<RobotFtpFileTransfer>(
+        m_ftpIp,
+        m_ftpPort,
+        m_ftpUser,
+        m_ftpPassword,
+        FileTransferProfile(),
+        std::vector<std::string>{ ".pro", ".prj", ".pts", ".jsn" },
+        std::vector<std::string>{ ".pro" },
+        "Log/InovanceRobotFtp.log");
 }
 
 bool InovanceRobotCtrl::EnsureControlPermit()
@@ -2122,19 +2236,120 @@ bool InovanceRobotCtrl::IsContinuousJogRunning() const
 
 bool InovanceRobotCtrl::PrepareNativeProgramUpload()
 {
-    SetLastRobotError("汇川2222远程以太网手册未定义原生工程文件上传协议；"
-        "如后续确认控制器FTP/工程部署规范，应在汇川底层接入独立文件传输会话后再开放。");
-    return false;
+    std::string error;
+    const std::shared_ptr<RobotFileTransferSession> session =
+        CreateFileTransferSession(&error);
+    if (session == nullptr)
+    {
+        SetLastRobotError("汇川原生程序上传准备失败：" + error);
+        return false;
+    }
+    ClearLastRobotError();
+    return true;
 }
 
 int InovanceRobotCtrl::UploadNativeProgramSource(
     const std::string& localPath,
     const std::string& remoteDirectory)
 {
-    (void)localPath;
-    (void)remoteDirectory;
-    PrepareNativeProgramUpload();
-    return -1;
+    const std::filesystem::path localFile(localPath);
+    std::error_code fileError;
+    if (localPath.empty() || !std::filesystem::is_regular_file(localFile, fileError))
+    {
+        SetLastRobotError("汇川原生程序上传失败：本地文件不存在或不可读：" + localPath);
+        return -1;
+    }
+
+    std::string extension = localFile.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (extension != ".pro" && extension != ".prj"
+        && extension != ".pts" && extension != ".jsn")
+    {
+        SetLastRobotError("汇川原生程序上传仅支持PRO、PRJ、PTS或JSN文件：" + localPath);
+        return -1;
+    }
+
+    std::string sessionError;
+    const std::shared_ptr<RobotFileTransferSession> session =
+        CreateFileTransferSession(&sessionError);
+    if (session == nullptr)
+    {
+        SetLastRobotError("汇川原生程序上传失败：" + sessionError);
+        return -1;
+    }
+
+    std::string resolvedDirectory;
+    std::string directoryError;
+    if (remoteDirectory.empty())
+    {
+        if (!IsConnected())
+        {
+            SetLastRobotError("汇川原生程序上传失败：未连接2222控制通道，"
+                "无法通过 Get_TaskPrgPath 0 确认当前工程目录；也可以显式指定远端目录。");
+            return -1;
+        }
+        int taskStatus = -1;
+        if (!QueryInt("Get_TaskRunSts 0", taskStatus))
+        {
+            return -1;
+        }
+        if (taskStatus == 1)
+        {
+            SetLastRobotError("汇川原生程序上传已拒绝：主任务正在运行，请停止后再覆盖工程文件。");
+            return -1;
+        }
+        std::string taskPathResponse;
+        if (!SendCommand("Get_TaskPrgPath 0", taskPathResponse)
+            || !InovanceActiveProjectDirectory(
+                ValuePart(taskPathResponse), resolvedDirectory, directoryError))
+        {
+            if (!directoryError.empty())
+            {
+                SetLastRobotError("汇川原生程序上传失败：" + directoryError);
+            }
+            return -1;
+        }
+    }
+    else
+    {
+        if (!NormalizeInovanceRemotePath(
+            remoteDirectory, resolvedDirectory, directoryError))
+        {
+            SetLastRobotError("汇川原生程序上传失败：" + directoryError);
+            return -1;
+        }
+        if (IsConnected())
+        {
+            int taskStatus = -1;
+            if (!QueryInt("Get_TaskRunSts 0", taskStatus))
+            {
+                return -1;
+            }
+            if (taskStatus == 1)
+            {
+                SetLastRobotError("汇川原生程序上传已拒绝：主任务正在运行，请停止后再覆盖工程文件。");
+                return -1;
+            }
+        }
+    }
+
+    const std::string remotePath = resolvedDirectory + "/"
+        + localFile.filename().string();
+    if (!session->UploadProgramFile(localPath, remotePath, true))
+    {
+        SetLastRobotError("汇川原生程序上传失败：" + session->LastError()
+            + "，Remote=" + remotePath);
+        return -1;
+    }
+    if (m_pRobotLog != nullptr)
+    {
+        m_pRobotLog->write(LogColor::SUCCESS,
+            "汇川原生程序已通过FTP上传：Local=%s Remote=%s",
+            localPath.c_str(), remotePath.c_str());
+    }
+    ClearLastRobotError();
+    return 0;
 }
 
 std::string InovanceRobotCtrl::SendDiagnosticCommand(const std::string& command)

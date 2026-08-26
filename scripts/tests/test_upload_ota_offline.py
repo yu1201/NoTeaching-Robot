@@ -235,7 +235,8 @@ class CandidateFixture:
             for index in range(ota.EXPECTED_FANUC_PC_COUNT):
                 (dist / "SDK" / "FANUC" / f"runtime-{index:02d}.pc").write_bytes(f"pc-{index}".encode())
         (self.brand_dist / "branding").mkdir()
-        (self.brand_dist / "branding" / "branding.ini").write_bytes(b"brand=1")
+        (self.brand_dist / "branding" / "app_color.ico").write_bytes(b"color-icon")
+        (self.brand_dist / "branding" / "app_nobg.ico").write_bytes(b"nobg-icon")
 
         self.neutral_installer = root / ota._expected_installer_name("neutral", self.VERSION)
         self.brand_installer = root / ota._expected_installer_name("brand", self.VERSION)
@@ -1336,16 +1337,23 @@ class LocalGateTests(unittest.TestCase):
                 ["git", "rev-parse", "refs/heads/hk-pathlynx-corpla"],
                 cwd=REPO_ROOT, text=True,
             ).strip()
-            ota._assert_brand_source_boundary(
-                REPO_ROOT, neutral, brand, main_head, brand_head
-            )
-
+            allowed_delta = "\n".join(sorted(ota._ALLOWED_BRAND_TRACKED_DELTA))
             original_git_text = ota._git_text
-            def malicious_diff(repo_root, *arguments):
-                value = original_git_text(repo_root, *arguments)
+
+            def clean_diff(repo_root, *arguments):
                 if arguments and arguments[0] == "diff":
-                    return value + "\nsrc/Backdoor.cpp"
-                return value
+                    return allowed_delta
+                return original_git_text(repo_root, *arguments)
+
+            with mock.patch.object(ota, "_git_text", side_effect=clean_diff):
+                ota._assert_brand_source_boundary(
+                    REPO_ROOT, neutral, brand, main_head, brand_head
+                )
+
+            def malicious_diff(repo_root, *arguments):
+                if arguments and arguments[0] == "diff":
+                    return allowed_delta + "\nsrc/Backdoor.cpp"
+                return original_git_text(repo_root, *arguments)
             with mock.patch.object(ota, "_git_text", side_effect=malicious_diff), \
                     self.assertRaisesRegex(ota.ReleaseGateError, "allowlist"):
                 ota._assert_brand_source_boundary(
@@ -1358,7 +1366,8 @@ class LocalGateTests(unittest.TestCase):
                 + '\n[Run]\nFilename: "{app}\\evil.exe"\n',
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ota.ReleaseGateError, "功能行"):
+            with mock.patch.object(ota, "_git_text", side_effect=clean_diff), \
+                    self.assertRaisesRegex(ota.ReleaseGateError, "功能行"):
                 ota._assert_brand_source_boundary(
                     REPO_ROOT, neutral, brand, main_head, brand_head
                 )

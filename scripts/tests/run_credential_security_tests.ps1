@@ -69,9 +69,13 @@ foreach ($scenario in @('missing', 'invalid', 'future')) {
         throw "CredentialSecurity auth-semantic-gate '$scenario' test failed: $LASTEXITCODE"
     }
 }
-& $outputExe --legacy-disk-gate
+& $outputExe --legacy-disk-isolation
 if ($LASTEXITCODE -ne 0) {
-    throw "CredentialSecurity legacy-disk-gate test failed: $LASTEXITCODE"
+    throw "CredentialSecurity legacy-disk-isolation test failed: $LASTEXITCODE"
+}
+& $outputExe --database-native-identity-gate
+if ($LASTEXITCODE -ne 0) {
+    throw "CredentialSecurity database-native-identity-gate test failed: $LASTEXITCODE"
 }
 & $outputExe --pending-scrub-gate
 if ($LASTEXITCODE -ne 0) {
@@ -136,9 +140,9 @@ foreach ($scenario in @(
     }
 }
 foreach ($scenario in @('unknown-key', 'section', 'nested', 'credential-key', 'symlink')) {
-    & $outputExe --rejected-runtime-ini $scenario
+    & $outputExe --pointcloud-ini-db-isolation $scenario
     if ($LASTEXITCODE -ne 0) {
-        throw "CredentialSecurity rejected runtime INI '$scenario' test failed: $LASTEXITCODE"
+        throw "CredentialSecurity point-cloud INI database isolation '$scenario' test failed: $LASTEXITCODE"
     }
 }
 

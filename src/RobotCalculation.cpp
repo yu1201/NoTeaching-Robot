@@ -6712,6 +6712,261 @@ RobotCalculation::MeasureThenWeldAnalysisResult RobotCalculation::AnalyzeMeasure
     return AnalyzeMeasureThenWeldLowerWeldPathGeometry(inputPoints, params);
 }
 
+RobotCalculation::LowerWeldFilterResult RobotCalculation::BuildSmoothFeatureCurve(
+    const QVector<IndexedPoint3D>& inputPoints,
+    const LowerWeldFilterParams& params)
+{
+    LowerWeldFilterResult result;
+    result.inputPointCount = inputPoints.size();
+    const GeometryStopScope stopScope(params.stopRequested);
+    const auto canceled = [&params]()
+    {
+        return params.stopRequested && params.stopRequested();
+    };
+    const auto cancelResult = [&result]()
+    {
+        result.ok = false;
+        result.points.clear();
+        result.error = QStringLiteral("已取消直线特征点平滑曲线生成。");
+        return result;
+    };
+
+    if (inputPoints.size() < 3)
+    {
+        result.error = QString("特征点数量不足，仅 %1 个；至少需要 3 个。")
+            .arg(inputPoints.size());
+        return result;
+    }
+    if (!std::isfinite(params.sampleStep) || params.sampleStep <= 0.0)
+    {
+        result.error = QStringLiteral("平滑曲线采样步长必须大于 0。");
+        return result;
+    }
+
+    QVector<IndexedPoint3D> finitePoints;
+    finitePoints.reserve(inputPoints.size());
+    for (int index = 0; index < inputPoints.size(); ++index)
+    {
+        if ((index & 0x3ff) == 0 && canceled())
+        {
+            return cancelResult();
+        }
+        if (IsFinitePoint(inputPoints[index].point))
+        {
+            finitePoints.push_back(inputPoints[index]);
+        }
+    }
+    if (params.enableEdgeTruncate
+        && (params.truncateHeadMm > 0.0 || params.truncateTailMm > 0.0))
+    {
+        finitePoints = TrimLowerWeldPathByArcLength(
+            finitePoints,
+            params.truncateHeadMm,
+            params.truncateTailMm,
+            nullptr,
+            nullptr);
+    }
+
+    int localOutlierCount = 0;
+    QVector<IndexedPoint3D> retainedPoints =
+        RemoveGeometryLocalOutliers(finitePoints, params, &localOutlierCount);
+    if (canceled())
+    {
+        return cancelResult();
+    }
+    if (retainedPoints.size() < 3)
+    {
+        result.error = QString("特征点异常点剔除后仅剩 %1 个，无法生成平滑曲线。")
+            .arg(retainedPoints.size());
+        return result;
+    }
+
+    // 保持采集顺序，合并连续重复点。直线扫描的时间顺序就是曲线参数顺序，
+    // 不按 XYZ 或 PCA 重新排序，避免折返段被错误串接。
+    const double duplicateDistanceMm = std::max(
+        1e-6,
+        std::min(0.05, params.sampleStep * 0.02));
+    QVector<IndexedPoint3D> controls;
+    controls.reserve(retainedPoints.size());
+    for (const IndexedPoint3D& point : retainedPoints)
+    {
+        if (controls.isEmpty()
+            || (point.point - controls.back().point).norm() > duplicateDistanceMm)
+        {
+            controls.push_back(point);
+        }
+    }
+    if (controls.size() < 3)
+    {
+        result.error = QString("合并重复特征点后仅剩 %1 个，无法生成平滑曲线。")
+            .arg(controls.size());
+        return result;
+    }
+
+    // 两次有限窗三角权平滑只消除逐帧抖动；首末特征点保持不动，确保结果仍绑定扫描端点。
+    const int smoothRadius = std::max(1, std::min(12, params.smoothRadius));
+    QVector<IndexedPoint3D> smoothed = controls;
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        const QVector<IndexedPoint3D> source = smoothed;
+        const int sourceCount = static_cast<int>(source.size());
+        for (int index = 1; index + 1 < source.size(); ++index)
+        {
+            if ((index & 0x3ff) == 0 && canceled())
+            {
+                return cancelResult();
+            }
+            const int begin = std::max(0, index - smoothRadius);
+            const int end = std::min(sourceCount - 1, index + smoothRadius);
+            Eigen::Vector3d weighted = Eigen::Vector3d::Zero();
+            double weightSum = 0.0;
+            for (int sample = begin; sample <= end; ++sample)
+            {
+                const double weight = static_cast<double>(
+                    smoothRadius + 1 - std::abs(sample - index));
+                weighted += source[sample].point * weight;
+                weightSum += weight;
+            }
+            if (weightSum > std::numeric_limits<double>::epsilon())
+            {
+                smoothed[index].point = weighted / weightSum;
+            }
+        }
+        smoothed.front().point = controls.front().point;
+        smoothed.back().point = controls.back().point;
+    }
+
+    QVector<IndexedPoint3D> curveControls;
+    curveControls.reserve(smoothed.size());
+    for (const IndexedPoint3D& point : smoothed)
+    {
+        if (curveControls.isEmpty()
+            || (point.point - curveControls.back().point).norm() > duplicateDistanceMm)
+        {
+            curveControls.push_back(point);
+        }
+    }
+    if (curveControls.size() < 3)
+    {
+        result.error = QStringLiteral("平滑后的有效特征点不足，无法建立曲线参数。");
+        return result;
+    }
+
+    QVector<double> arcLength(curveControls.size(), 0.0);
+    for (int index = 1; index < curveControls.size(); ++index)
+    {
+        arcLength[index] = arcLength[index - 1]
+            + (curveControls[index].point - curveControls[index - 1].point).norm();
+    }
+    const double totalLengthMm = arcLength.back();
+    if (!std::isfinite(totalLengthMm)
+        || totalLengthMm <= std::numeric_limits<double>::epsilon())
+    {
+        result.error = QStringLiteral("特征点曲线总长度为零或无效。");
+        return result;
+    }
+
+    const qint64 estimatedOutputCount =
+        static_cast<qint64>(std::ceil(totalLengthMm / params.sampleStep)) + 1;
+    constexpr qint64 kMaximumSmoothCurvePoints = 1000000;
+    if (estimatedOutputCount > kMaximumSmoothCurvePoints)
+    {
+        result.error = QString("平滑曲线预计输出 %1 点，超过上限 %2；请增大采样步长。")
+            .arg(estimatedOutputCount)
+            .arg(kMaximumSmoothCurvePoints);
+        return result;
+    }
+
+    // 弧长参数上的中心差分切向；Hermite 插值保证相邻段一阶切向连续。
+    const int curveControlCount = static_cast<int>(curveControls.size());
+    QVector<Eigen::Vector3d> tangents(curveControlCount, Eigen::Vector3d::Zero());
+    for (int index = 0; index < curveControls.size(); ++index)
+    {
+        const int previous = std::max(0, index - 1);
+        const int next = std::min(curveControlCount - 1, index + 1);
+        const double span = arcLength[next] - arcLength[previous];
+        if (span > std::numeric_limits<double>::epsilon())
+        {
+            tangents[index] =
+                (curveControls[next].point - curveControls[previous].point) / span;
+            // 弧长导数理论模长约为 1；限制异常切向，避免极近控制点造成三次曲线过冲。
+            const double tangentNorm = tangents[index].norm();
+            if (tangentNorm > 2.0)
+            {
+                tangents[index] *= 2.0 / tangentNorm;
+            }
+        }
+    }
+
+    result.points.reserve(static_cast<int>(estimatedOutputCount));
+    int segment = 0;
+    int outputIndex = 1;
+    const auto appendCurvePoint = [&](double distanceMm, const QString& source)
+    {
+        while (segment + 1 < arcLength.size() - 1
+            && distanceMm > arcLength[segment + 1])
+        {
+            ++segment;
+        }
+        const double segmentLength = arcLength[segment + 1] - arcLength[segment];
+        const double u = segmentLength > std::numeric_limits<double>::epsilon()
+            ? std::clamp((distanceMm - arcLength[segment]) / segmentLength, 0.0, 1.0)
+            : 0.0;
+        const double u2 = u * u;
+        const double u3 = u2 * u;
+        const double h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+        const double h10 = u3 - 2.0 * u2 + u;
+        const double h01 = -2.0 * u3 + 3.0 * u2;
+        const double h11 = u3 - u2;
+
+        LowerWeldFilterPoint output;
+        output.index = outputIndex++;
+        output.point = h00 * curveControls[segment].point
+            + h10 * segmentLength * tangents[segment]
+            + h01 * curveControls[segment + 1].point
+            + h11 * segmentLength * tangents[segment + 1];
+        output.source = source;
+        result.points.push_back(output);
+    };
+
+    appendCurvePoint(0.0, QStringLiteral("feature_smooth_start"));
+    for (double distanceMm = params.sampleStep;
+        distanceMm < totalLengthMm - 1e-9;
+        distanceMm += params.sampleStep)
+    {
+        if ((outputIndex & 0x3ff) == 0 && canceled())
+        {
+            return cancelResult();
+        }
+        appendCurvePoint(distanceMm, QStringLiteral("feature_smooth_curve"));
+    }
+    appendCurvePoint(totalLengthMm, QStringLiteral("feature_smooth_end"));
+
+    for (const LowerWeldFilterPoint& point : result.points)
+    {
+        if (!IsFinitePoint(point.point))
+        {
+            result.points.clear();
+            result.error = QStringLiteral("平滑曲线生成了非有限坐标，结果已拒绝。");
+            return result;
+        }
+    }
+
+    result.lowerPointCount = curveControlCount;
+    result.zContinuityRejectedCount =
+        std::max(0, static_cast<int>(inputPoints.size()) - curveControlCount);
+    result.fitSegmentCount = std::max(1, curveControlCount - 1);
+    result.measuredCount = curveControlCount;
+    result.interpolatedCount = result.points.size();
+    result.extendedCount = result.points.size();
+    result.ok = result.points.size() >= 2;
+    if (!result.ok)
+    {
+        result.error = QStringLiteral("平滑曲线输出点不足。");
+    }
+    return result;
+}
+
 RobotCalculation::MeasureThenWeldAnalysisResult::PointCloudQualityReport
 RobotCalculation::EvaluateMeasureThenWeldOutputQuality(
     int inputPointCount,

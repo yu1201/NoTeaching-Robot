@@ -109,13 +109,21 @@ Start 前必须再次核对本地内容并回读远端内容，确认一致后�
   `Get_CmdSts(id)=1` 与 `Get_MotionSts=0` 连续回读。暂停使用 `Dsmode PAUSE`、同一数据流身份、
   稳定停止和两次稳定位姿；恢复前校验检查点偏差。安全中止要求数据流暂停/关闭后连续回读
   `Get_DsMode=0` 且 `Get_MotionSts=0`，不会把非本驱动数据流的运动伪装成已停止。
-- 汇川暂不声明 `RobotTimestamp`、`PersistentProgramRecovery`、`NativeProgramUpload`、
-  `NativeProgramExecution`、`FtpFileTransfer`、`OfflineTrajectoryExport`、`ActualArcWeld`、
-  `IntegerRegister`、`HandEyeMatrixRead`、`HandEyeSupportProgramInstall`。原因分别是：手册没有提供
-  毫秒级同步时间轴；数据流身份不跨上位机重启；没有已验证的FTP/原生工程部署和按名称选程闭环；
-  运动IO尚未绑定现场焊机起弧/灭弧反馈；PLC DInt只证明读取未证明对应写入；没有本程序需要的
-  手眼矩阵变量与辅助工程契约。相关业务入口必须显示缺失能力，不得用 `Prg Start` 启动“当前工程”
-  冒充按名称原生程序执行。
+- 汇川 `FtpFileTransfer` 与 `NativeProgramUpload` 已通过独立 `RobotFtpFileTransfer` 底层接入；型号注册项
+  提供 FTP 主机、端口、用户和密码默认值，创建控制单元时自动带出；`ConfigStore.db` 中该控制单元的
+  `RobotPara/BaseParam` 配置记录仍可覆盖型号默认值。业务代码只使用
+  `ConfigLocation::Robot(<控制单元>, "RobotPara")`，不接受配置文件名或路径。
+  适配层 DTO 与业务界面不返回 FTP 凭据。远端根目录为 `/TeachProgram`，允许上传 `.pro`、`.prj`、
+  `.pts`、`.jsn`；未显式指定目录时，品牌底层先通过 `Get_TaskPrgPath 0` 取得
+  `TeachProgram/工程名/main.pro` 形式的当前主任务路径，解析出精确工程目录，并通过
+  `Get_TaskRunSts 0` 拒绝覆盖运行中的主任务。现场网络仍需验证目录列表、上传和示教器加载回读。
+- 汇川暂不声明 `RobotTimestamp`、`PersistentProgramRecovery`、`NativeProgramExecution`、
+  `OfflineTrajectoryExport`、`ActualArcWeld`、`IntegerRegister`、`HandEyeMatrixRead`、
+  `HandEyeSupportProgramInstall`。汇川状态样本暂以 PC steady 时间同时填写状态时间轴和接收时间，
+  界面会明确显示该来源，不冒充控制器时间戳。其余限制原因分别是：数据流身份不跨上位机重启；
+  尚未实现指定工程/程序身份的选程、启动与完成闭环；运动IO尚未绑定现场焊机起弧/灭弧反馈；
+  PLC DInt只证明读取未证明对应写入；没有本程序需要的手眼矩阵变量与辅助工程契约。相关业务入口
+  必须显示缺失能力，不得用 `Prg Start` 启动“当前工程”冒充按名称原生程序执行。
 - 汇川已通过C++ Release编译和静态适配契约；真实控制器上的连接、模式、伺服、已知点低速运动、
   缓存背压、暂停恢复、外部轴和断开安全顺序仍是上线门禁。控制器切回示教器前必须先通过适配层
   完成运动中止、`Motor OFF`、`RemovePermit`，再断开TCP连接。

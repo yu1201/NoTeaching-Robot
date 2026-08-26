@@ -2,7 +2,7 @@
 #include "RobotDriverAdaptor.h"
 
 #include "ConfigDatabase.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
 
@@ -493,11 +493,14 @@ QMap<QString, QString> ZeroSectionValuesForPrecise(const QMap<QString, QString>&
 }
 
 QMap<QString, QString> ReadSectionMapForPrecise(
-    const QString& path,
+    const ConfigLocation& location,
     const QString& sectionName,
     const QStringList& fallbackLines)
 {
-    QMap<QString, QString> values = ConfigDatabase::ReadIniSection(path, sectionName);
+    QMap<QString, QString> values = ConfigDatabase::ReadScopedSettings(
+        location.scopeType,
+        location.scopeId,
+        location.module + QStringLiteral("/") + sectionName);
     if (values.isEmpty())
     {
         values = SectionMapFromLinesForPrecise(fallbackLines);
@@ -517,14 +520,15 @@ QMap<QString, QString> ReadSectionMapForPrecise(
 }
 
 bool WriteSectionMapForPrecise(
-    const QString& path,
+    const ConfigLocation& location,
     const QString& sectionName,
     const QMap<QString, QString>& values,
     QString& error)
 {
-    if (!ConfigDatabase::RemoveIniSection(path, sectionName))
+    if (!ConfigDatabase::RemoveScopedModuleSection(
+            location.scopeType, location.scopeId, location.module, sectionName))
     {
-        error = QString("清理参数组失败：%1 [%2]").arg(path, sectionName);
+        error = QString("清理参数组失败：%1 [%2]").arg(location.module, sectionName);
         return false;
     }
     for (auto it = values.constBegin(); it != values.constEnd(); ++it)
@@ -533,7 +537,7 @@ bool WriteSectionMapForPrecise(
         {
             continue;
         }
-        if (!RobotDataHelper::WriteParamValue(path, sectionName, it.key(), it.value(), &error))
+        if (!RobotDataHelper::WriteParamValue(location, sectionName, it.key(), it.value(), &error))
         {
             return false;
         }
@@ -1243,14 +1247,13 @@ void PreciseMeasureEditDialog::LoadRobotList()
     for (const RobotDataHelper::RobotInfo& info : robots)
     {
         QString error;
-        const QString paramPath = RobotDataHelper::MeasureWeldParamPath(info.robotName);
-        if (RobotDataHelper::EnsureMeasureWeldParamFile(info.robotName, &error))
+        if (RobotDataHelper::EnsureMeasureWeldParameters(info.robotName, &error))
         {
             m_pRobotCombo->addItem(info.displayName, info.unitIndex);
         }
         else
         {
-            AppendLog(QString("跳过 %1：%2").arg(info.displayName, error.isEmpty() ? paramPath : error));
+            AppendLog(QString("跳过 %1：%2").arg(info.displayName, error.isEmpty() ? QStringLiteral("测量焊接参数不可用") : error));
         }
     }
 
@@ -1291,18 +1294,18 @@ void PreciseMeasureEditDialog::LoadParamGroups()
         return;
     }
     QString error;
-    if (!RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &error))
+    if (!RobotDataHelper::EnsureMeasureWeldParameters(robotName, &error))
     {
         AppendLog("读取参数组失败：" + error);
         m_bLoading = false;
         return;
     }
 
-    COPini ini;
-    const QString path = CurrentParamFilePath();
-    if (!ini.SetFileName(path.toUtf8().constData()))
+    ConfigSection ini;
+    const ConfigLocation location = CurrentParamConfig();
+    if (!ini.SetLocation(location))
     {
-        AppendLog("读取参数组失败：打开参数数据失败：" + path);
+        AppendLog("读取参数组失败：参数数据库位置无效：" + robotName);
         m_bLoading = false;
         return;
     }
@@ -1382,18 +1385,18 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
     }
 
     QString error;
-    if (!RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &error))
+    if (!RobotDataHelper::EnsureMeasureWeldParameters(robotName, &error))
     {
         QMessageBox::warning(this, "删除参数组", error);
         AppendLog("删除参数组失败：" + error);
         return;
     }
 
-    const QString path = CurrentParamFilePath();
-    COPini ini;
-    if (!ini.SetFileName(path.toUtf8().constData()))
+    const ConfigLocation location = CurrentParamConfig();
+    ConfigSection ini;
+    if (!ini.SetLocation(location))
     {
-        error = "打开参数数据失败：" + path;
+        error = "测量焊接参数数据库位置无效：" + robotName;
         QMessageBox::warning(this, "删除参数组", error);
         AppendLog("删除参数组失败：" + error);
         return;
@@ -1452,26 +1455,31 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
             ? QString("参数组%1").arg(newIndex + 1)
             : groupNames.value(oldIndex, QString("参数组%1").arg(newIndex + 1));
         keptGroupNames << newName;
-        keptScanSections << ReadSectionMapForPrecise(path, RobotDataHelper::MeasureWeldScanSectionName(oldIndex), MinimalScanSectionLinesForPrecise());
-        keptWeldSections << ReadSectionMapForPrecise(path, RobotDataHelper::MeasureWeldWeldSectionName(oldIndex), MinimalWeldSectionLinesForPrecise());
+        keptScanSections << ReadSectionMapForPrecise(location, RobotDataHelper::MeasureWeldScanSectionName(oldIndex), MinimalScanSectionLinesForPrecise());
+        keptWeldSections << ReadSectionMapForPrecise(location, RobotDataHelper::MeasureWeldWeldSectionName(oldIndex), MinimalWeldSectionLinesForPrecise());
         ++newIndex;
     }
 
-    if (!ConfigDatabase::RemoveIniSection(path, GroupMetaSectionName()))
+    if (!ConfigDatabase::RemoveScopedModuleSection(
+            location.scopeType, location.scopeId, location.module, GroupMetaSectionName()))
     {
-        error = "清理参数组索引失败：" + path;
+        error = "清理参数组索引失败：" + location.module;
         QMessageBox::warning(this, "删除参数组", error);
         AppendLog("删除参数组失败：" + error);
         return;
     }
     for (int oldIndex = 0; oldIndex < groupCount; ++oldIndex)
     {
-        ConfigDatabase::RemoveIniSection(path, RobotDataHelper::MeasureWeldScanSectionName(oldIndex));
-        ConfigDatabase::RemoveIniSection(path, RobotDataHelper::MeasureWeldWeldSectionName(oldIndex));
+        ConfigDatabase::RemoveScopedModuleSection(
+            location.scopeType, location.scopeId, location.module,
+            RobotDataHelper::MeasureWeldScanSectionName(oldIndex));
+        ConfigDatabase::RemoveScopedModuleSection(
+            location.scopeType, location.scopeId, location.module,
+            RobotDataHelper::MeasureWeldWeldSectionName(oldIndex));
     }
 
-    if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "GroupCount", QString::number(newGroupCount), &error)
-        || !RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "UseGroupNo", QString::number(newUseIndex), &error))
+    if (!RobotDataHelper::WriteParamValue(location, GroupMetaSectionName(), "GroupCount", QString::number(newGroupCount), &error)
+        || !RobotDataHelper::WriteParamValue(location, GroupMetaSectionName(), "UseGroupNo", QString::number(newUseIndex), &error))
     {
         QMessageBox::warning(this, "删除参数组", error);
         AppendLog("删除参数组失败：" + error);
@@ -1479,9 +1487,9 @@ void PreciseMeasureEditDialog::DeleteCurrentParamGroup()
     }
     for (int index = 0; index < newGroupCount; ++index)
     {
-        if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), QString("Group%1Name").arg(index), keptGroupNames.value(index), &error)
-            || !WriteSectionMapForPrecise(path, RobotDataHelper::MeasureWeldScanSectionName(index), keptScanSections.value(index), error)
-            || !WriteSectionMapForPrecise(path, RobotDataHelper::MeasureWeldWeldSectionName(index), keptWeldSections.value(index), error))
+        if (!RobotDataHelper::WriteParamValue(location, GroupMetaSectionName(), QString("Group%1Name").arg(index), keptGroupNames.value(index), &error)
+            || !WriteSectionMapForPrecise(location, RobotDataHelper::MeasureWeldScanSectionName(index), keptScanSections.value(index), error)
+            || !WriteSectionMapForPrecise(location, RobotDataHelper::MeasureWeldWeldSectionName(index), keptWeldSections.value(index), error))
         {
             QMessageBox::warning(this, "删除参数组", error);
             AppendLog("删除参数组失败：" + error);
@@ -1897,13 +1905,13 @@ QString PreciseMeasureEditDialog::CurrentRobotName() const
     return QString::fromStdString(driver->RobotName().empty() ? unitInfo.sUnitName : driver->RobotName());
 }
 
-QString PreciseMeasureEditDialog::CurrentParamFilePath() const
+ConfigLocation PreciseMeasureEditDialog::CurrentParamConfig() const
 {
     if (CurrentRobotName().isEmpty())
     {
-        return QString();
+        return ConfigLocation();
     }
-    return RobotDataHelper::MeasureWeldParamPath(CurrentRobotName());
+    return RobotDataHelper::MeasureWeldConfig(CurrentRobotName());
 }
 
 QString PreciseMeasureEditDialog::CurrentSectionName(QString* error) const
@@ -1946,9 +1954,8 @@ QString PreciseMeasureEditDialog::CurrentGroupName() const
     const int groupIndex = CurrentGroupIndex();
     if (!CurrentRobotName().isEmpty())
     {
-        COPini ini;
-        const QString path = CurrentParamFilePath();
-        if (ini.SetFileName(path.toUtf8().constData()))
+        ConfigSection ini;
+        if (ini.SetLocation(CurrentParamConfig()))
         {
             ini.SetSectionName(ToUtf8StdStringForPrecise(GroupMetaSectionName()));
             std::string groupName;
@@ -2035,7 +2042,7 @@ bool PreciseMeasureEditDialog::ReadPulse(const QString& prefix, T_ANGLE_PULSE& p
         error = "未选择机器人。";
         return false;
     }
-    return RobotDataHelper::ReadPulse(CurrentParamFilePath(), CurrentSectionName(&error), prefix, pulse, &error);
+    return RobotDataHelper::ReadPulse(CurrentParamConfig(), CurrentSectionName(&error), prefix, pulse, &error);
 }
 
 bool PreciseMeasureEditDialog::WritePulse(const QString& prefix, const T_ANGLE_PULSE& pulse, QString& error) const
@@ -2045,7 +2052,7 @@ bool PreciseMeasureEditDialog::WritePulse(const QString& prefix, const T_ANGLE_P
         error = "未选择机器人。";
         return false;
     }
-    return RobotDataHelper::WritePulse(CurrentParamFilePath(), CurrentSectionName(&error), prefix, pulse, &error);
+    return RobotDataHelper::WritePulse(CurrentParamConfig(), CurrentSectionName(&error), prefix, pulse, &error);
 }
 
 bool PreciseMeasureEditDialog::ReadCoors(const QString& prefix, T_ROBOT_COORS& coors, QString& error) const
@@ -2055,7 +2062,7 @@ bool PreciseMeasureEditDialog::ReadCoors(const QString& prefix, T_ROBOT_COORS& c
         error = "未选择机器人。";
         return false;
     }
-    return RobotDataHelper::ReadCoors(CurrentParamFilePath(), CurrentSectionName(&error), prefix, coors, &error);
+    return RobotDataHelper::ReadCoors(CurrentParamConfig(), CurrentSectionName(&error), prefix, coors, &error);
 }
 
 bool PreciseMeasureEditDialog::WriteCoors(const QString& prefix, const T_ROBOT_COORS& coors, QString& error) const
@@ -2065,7 +2072,7 @@ bool PreciseMeasureEditDialog::WriteCoors(const QString& prefix, const T_ROBOT_C
         error = "未选择机器人。";
         return false;
     }
-    return RobotDataHelper::WriteCoors(CurrentParamFilePath(), CurrentSectionName(&error), prefix, coors, &error);
+    return RobotDataHelper::WriteCoors(CurrentParamConfig(), CurrentSectionName(&error), prefix, coors, &error);
 }
 
 bool PreciseMeasureEditDialog::LoadOtherParams()
@@ -2076,10 +2083,10 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
     }
 
     QString error;
-    const QString path = CurrentParamFilePath();
+    const ConfigLocation location = CurrentParamConfig();
     const QString section = CurrentSectionName(&error);
     const QString weldSection = CurrentWeldSectionName(&error);
-    if (path.isEmpty() || section.isEmpty() || weldSection.isEmpty())
+    if (!location.IsValid() || section.isEmpty() || weldSection.isEmpty())
     {
         AppendLog("读取其它参数失败：" + error);
         return false;
@@ -2168,7 +2175,10 @@ bool PreciseMeasureEditDialog::LoadOtherParams()
             currentGroupTitle.clear();
             row = 0;
             colInGroup = 0;
-            QMap<QString, QString> values = ConfigDatabase::ReadIniSection(path, targetSection);
+            QMap<QString, QString> values = ConfigDatabase::ReadScopedSettings(
+                location.scopeType,
+                location.scopeId,
+                location.module + QStringLiteral("/") + targetSection);
             if (weldSection)
             {
                 if (!values.contains(GUN_DOWN_BACK_SAFE_DISTANCE_KEY))
@@ -2356,9 +2366,9 @@ bool PreciseMeasureEditDialog::LoadScanSafeParams()
     }
 
     QString error;
-    const QString path = CurrentParamFilePath();
+    const ConfigLocation location = CurrentParamConfig();
     const QString section = CurrentSectionName(&error);
-    if (path.isEmpty() || section.isEmpty())
+    if (!location.IsValid() || section.isEmpty())
     {
         AppendLog("读取扫描安全推算参数失败：" + error);
         return false;
@@ -2371,8 +2381,8 @@ bool PreciseMeasureEditDialog::LoadScanSafeParams()
     double liftHeight = 150.0;
     double flipWarn = 90.0;
 
-    COPini ini;
-    if (ini.SetFileName(path.toUtf8().constData()))
+    ConfigSection ini;
+    if (ini.SetLocation(location))
     {
         ini.SetSectionName(ToUtf8StdStringForPrecise(section));
         ini.ReadString(false, "UseComputedScanSafe", &useComputed);
@@ -2384,7 +2394,7 @@ bool PreciseMeasureEditDialog::LoadScanSafeParams()
     }
     else
     {
-        AppendLog("读取扫描安全推算参数失败：打开参数数据失败：" + path);
+        AppendLog("读取扫描安全推算参数失败：参数数据库位置无效：" + CurrentRobotName());
         return false;
     }
 
@@ -2403,8 +2413,8 @@ bool PreciseMeasureEditDialog::LoadScanSafeParams()
 
     if (m_pScanSafePathLabel != nullptr)
     {
-        m_pScanSafePathLabel->setText(QString("配置文件：%1\n当前位置类型：%2 [%3]")
-            .arg(QDir::toNativeSeparators(path), CurrentGroupName(), section));
+        m_pScanSafePathLabel->setText(QString("配置模块：%1\n当前位置类型：%2 [%3]")
+            .arg(location.module, CurrentGroupName(), section));
     }
 
     UpdateComputedScanSafeUiState();
@@ -2564,9 +2574,9 @@ bool PreciseMeasureEditDialog::LoadWeldPoseTeachParams()
     }
 
     QString error;
-    const QString path = CurrentParamFilePath();
+    const ConfigLocation location = CurrentParamConfig();
     const QString section = CurrentWeldSectionName(&error);
-    if (path.isEmpty() || section.isEmpty())
+    if (!location.IsValid() || section.isEmpty())
     {
         AppendLog("读取焊接姿态示教参数失败：" + error);
         return false;
@@ -2580,8 +2590,8 @@ bool PreciseMeasureEditDialog::LoadWeldPoseTeachParams()
     m_taughtWeldPoseRyDeg = m_normalWeldRyDeg;
     m_taughtWeldPoseRzDeg = 0.0;
 
-    COPini ini;
-    if (ini.SetFileName(path.toUtf8().constData()))
+    ConfigSection ini;
+    if (ini.SetLocation(location))
     {
         ini.SetSectionName(ToUtf8StdStringForPrecise(section));
         ini.ReadString(false, USE_TAUGHT_WELD_POSE_KEY, &useTaught);
@@ -2596,7 +2606,7 @@ bool PreciseMeasureEditDialog::LoadWeldPoseTeachParams()
     }
     else
     {
-        AppendLog("读取焊接姿态示教参数失败：打开参数数据失败：" + path);
+        AppendLog("读取焊接姿态示教参数失败：参数数据库位置无效：" + CurrentRobotName());
         return false;
     }
 
@@ -2750,13 +2760,13 @@ bool PreciseMeasureEditDialog::WriteParamValue(const QString& sectionName, const
         error = "未选择机器人或参数项为空。";
         return false;
     }
-    return RobotDataHelper::WriteParamValue(CurrentParamFilePath(), sectionName, key, value, &error);
+    return RobotDataHelper::WriteParamValue(CurrentParamConfig(), sectionName, key, value, &error);
 }
 
 bool PreciseMeasureEditDialog::SaveGroupMetadata(QString& error) const
 {
-    const QString path = CurrentParamFilePath();
-    if (path.isEmpty())
+    const ConfigLocation location = CurrentParamConfig();
+    if (!location.IsValid())
     {
         error = "未选择机器人。";
         return false;
@@ -2765,11 +2775,11 @@ bool PreciseMeasureEditDialog::SaveGroupMetadata(QString& error) const
     const QString groupName = m_pGroupNameEdit != nullptr && !m_pGroupNameEdit->text().trimmed().isEmpty()
         ? m_pGroupNameEdit->text().trimmed()
         : QString("参数组%1").arg(groupIndex + 1);
-    if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "UseGroupNo", QString::number(groupIndex), &error))
+    if (!RobotDataHelper::WriteParamValue(location, GroupMetaSectionName(), "UseGroupNo", QString::number(groupIndex), &error))
     {
         return false;
     }
-    if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), QString("Group%1Name").arg(groupIndex), groupName, &error))
+    if (!RobotDataHelper::WriteParamValue(location, GroupMetaSectionName(), QString("Group%1Name").arg(groupIndex), groupName, &error))
     {
         return false;
     }
@@ -2788,16 +2798,16 @@ bool PreciseMeasureEditDialog::CreateParamGroup(bool copyCurrent, QString& error
         error = "未选择机器人。";
         return false;
     }
-    if (!RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &error))
+    if (!RobotDataHelper::EnsureMeasureWeldParameters(robotName, &error))
     {
         return false;
     }
 
-    const QString path = CurrentParamFilePath();
-    COPini ini;
-    if (!ini.SetFileName(path.toUtf8().constData()))
+    const ConfigLocation location = CurrentParamConfig();
+    ConfigSection ini;
+    if (!ini.SetLocation(location))
     {
-        error = "打开参数数据失败：" + path;
+        error = "测量焊接参数数据库位置无效：" + robotName;
         return false;
     }
     int groupCount = 1;
@@ -2806,23 +2816,23 @@ bool PreciseMeasureEditDialog::CreateParamGroup(bool copyCurrent, QString& error
     groupCount = std::max(1, groupCount);
     const int newIndex = groupCount;
     const int sourceIndex = CurrentGroupIndex();
-    QMap<QString, QString> scanValues = ReadSectionMapForPrecise(path, RobotDataHelper::MeasureWeldScanSectionName(sourceIndex), MinimalScanSectionLinesForPrecise());
-    QMap<QString, QString> weldValues = ReadSectionMapForPrecise(path, RobotDataHelper::MeasureWeldWeldSectionName(sourceIndex), MinimalWeldSectionLinesForPrecise());
+    QMap<QString, QString> scanValues = ReadSectionMapForPrecise(location, RobotDataHelper::MeasureWeldScanSectionName(sourceIndex), MinimalScanSectionLinesForPrecise());
+    QMap<QString, QString> weldValues = ReadSectionMapForPrecise(location, RobotDataHelper::MeasureWeldWeldSectionName(sourceIndex), MinimalWeldSectionLinesForPrecise());
     if (!copyCurrent)
     {
         scanValues = ZeroSectionValuesForPrecise(scanValues);
         weldValues = ZeroSectionValuesForPrecise(weldValues);
     }
 
-    if (!RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "GroupCount", QString::number(newIndex + 1), &error)
-        || !RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), "UseGroupNo", QString::number(newIndex), &error)
-        || !RobotDataHelper::WriteParamValue(path, GroupMetaSectionName(), QString("Group%1Name").arg(newIndex), QString("参数组%1").arg(newIndex + 1), &error))
+    if (!RobotDataHelper::WriteParamValue(location, GroupMetaSectionName(), "GroupCount", QString::number(newIndex + 1), &error)
+        || !RobotDataHelper::WriteParamValue(location, GroupMetaSectionName(), "UseGroupNo", QString::number(newIndex), &error)
+        || !RobotDataHelper::WriteParamValue(location, GroupMetaSectionName(), QString("Group%1Name").arg(newIndex), QString("参数组%1").arg(newIndex + 1), &error))
     {
         return false;
     }
 
-    if (!WriteSectionMapForPrecise(path, RobotDataHelper::MeasureWeldScanSectionName(newIndex), scanValues, error)
-        || !WriteSectionMapForPrecise(path, RobotDataHelper::MeasureWeldWeldSectionName(newIndex), weldValues, error))
+    if (!WriteSectionMapForPrecise(location, RobotDataHelper::MeasureWeldScanSectionName(newIndex), scanValues, error)
+        || !WriteSectionMapForPrecise(location, RobotDataHelper::MeasureWeldWeldSectionName(newIndex), weldValues, error))
     {
         return false;
     }

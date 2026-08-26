@@ -1174,7 +1174,7 @@ void WeldProcessDialog::OnRobotChanged(int index)
         return;
     }
     m_unitName = QString::fromUtf8(unit.sUnitName.c_str());
-    LoadToUi();  // 内部 m_file.Init() 用新机器人路径重载 + 刷新工艺列表/参数
+    LoadToUi();  // 内部 m_file.Init() 按新机器人数据库作用域重载并刷新工艺列表/参数
 }
 
 void WeldProcessDialog::UpdateWeaveShapeAvailability()

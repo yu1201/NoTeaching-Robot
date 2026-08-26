@@ -945,8 +945,11 @@ def inspect_dist(dist_dir: os.PathLike[str] | str, channel: str, version: str) -
              f"实际 tp={len(fanuc_tp)} pc={len(fanuc_pc)}。")
     branding_entries = [entry for entry in entries if entry["path"].casefold().startswith("branding/")]
     if channel == "brand":
-        _require(any(entry["path"].casefold() == "branding/branding.ini" for entry in branding_entries),
-                 "brand dist 缺 branding/branding.ini，运行时会误入 neutral OTA 通道。")
+        branding_paths = {entry["path"].casefold() for entry in branding_entries}
+        _require({"branding/app_color.ico", "branding/app_nobg.ico"} <= branding_paths,
+                 "brand dist 缺少品牌图标资源，运行时无法初始化数据库品牌记录。")
+        _require(not any(path.endswith(".ini") for path in branding_paths),
+                 "brand dist 不得携带品牌 INI；品牌配置必须来自 ConfigStore 数据库。")
     else:
         _require(not branding_entries, "neutral dist 混入 branding/，会误入 brand OTA 通道。")
 
@@ -3069,7 +3072,6 @@ _ALLOWED_BRAND_TRACKED_DELTA = frozenset({
     "branding/app_color.png",
     "branding/app_nobg.ico",
     "branding/app_nobg.png",
-    "branding/branding.ini",
 })
 
 

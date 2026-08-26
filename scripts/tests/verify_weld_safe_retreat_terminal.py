@@ -75,7 +75,7 @@ for token in (
     require(token in dialog, f"persistent recovery gate missing: {token}")
 require("std::recursive_mutex g_storeMutex" in store
         and "g_weldBreakpointRecordMutex" not in dialog,
-        "WeldBreakpoint.ini still has multiple unrelated locks/writers")
+        "WeldBreakpoint database module still has multiple unrelated locks/writers")
 begin = store[store.index("bool WeldSafetyRecoveryStore::BeginOrUpdatePending"):
               store.index("bool WeldSafetyRecoveryStore::WriteCompletedAndClearPending")]
 complete = store[store.index("bool WeldSafetyRecoveryStore::WriteCompletedAndClearPending"):
@@ -85,9 +85,9 @@ require(begin.index("WritePendingLocked") < begin.index("WriteRecordLocked"),
 require(complete.index("WriteRecordLocked") < complete.index("WritePendingLocked"),
         "safe completion clears marker before verified RecordV2 write")
 require("写后回读不一致" in store,
-        "shared recovery store does not verify INI writes by readback")
+        "shared recovery store does not verify database writes by readback")
 require("GetPrivateProfileStringW" not in store
-        and "ReadIniValueStatus" in store
+        and "ReadScopedSettingStatus" in store
         and "kMaxRecordUtf8Bytes = 64 * 1024" in store,
         "RecordV2 is not using the bounded tri-state ConfigStore reader")
 lease = (ROOT / "src" / "RobotOperationLease.cpp").read_text(encoding="utf-8")

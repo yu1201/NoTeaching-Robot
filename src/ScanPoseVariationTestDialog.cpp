@@ -2,7 +2,7 @@
 
 #include "CameraFrameCache.h"
 #include "ContralUnit.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
@@ -42,6 +42,37 @@ namespace
 {
 constexpr auto kConfigSection = "ScanPoseVariationTest";
 constexpr auto kSelectionSection = "ScanPoseVariationSelection";
+constexpr auto kPostProcessNone = "none";
+constexpr auto kPostProcessStraightLine = "straight_line";
+constexpr auto kPostProcessCorrugatedBoard = "corrugated_board";
+
+QString PostProcessModeConfigValue(MeasureThenWeldService::ScanPostProcessMode mode)
+{
+    switch (mode)
+    {
+    case MeasureThenWeldService::ScanPostProcessMode::None:
+        return QString::fromLatin1(kPostProcessNone);
+    case MeasureThenWeldService::ScanPostProcessMode::FeaturePointSmoothCurve:
+        return QString::fromLatin1(kPostProcessStraightLine);
+    case MeasureThenWeldService::ScanPostProcessMode::CorrugatedBoard:
+    default:
+        return QString::fromLatin1(kPostProcessCorrugatedBoard);
+    }
+}
+
+QString PostProcessModeDisplayName(MeasureThenWeldService::ScanPostProcessMode mode)
+{
+    switch (mode)
+    {
+    case MeasureThenWeldService::ScanPostProcessMode::None:
+        return QStringLiteral("无");
+    case MeasureThenWeldService::ScanPostProcessMode::FeaturePointSmoothCurve:
+        return QStringLiteral("直线处理");
+    case MeasureThenWeldService::ScanPostProcessMode::CorrugatedBoard:
+    default:
+        return QStringLiteral("波纹板处理");
+    }
+}
 
 QString PoseText(const T_ROBOT_COORS& pose)
 {
@@ -155,9 +186,18 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     targetLayout->setVerticalSpacing(8);
     m_robotCombo = new QComboBox(targetGroup);
     m_cameraCombo = new QComboBox(targetGroup);
+    m_postProcessCombo = new QComboBox(targetGroup);
     m_scanSpeedSpin = new QDoubleSpinBox(targetGroup);
     m_robotCombo->setMinimumWidth(280);
     m_cameraCombo->setMinimumWidth(280);
+    m_postProcessCombo->setMinimumWidth(280);
+    m_postProcessCombo->addItem(
+        QStringLiteral("无"), QString::fromLatin1(kPostProcessNone));
+    m_postProcessCombo->addItem(
+        QStringLiteral("直线处理"), QString::fromLatin1(kPostProcessStraightLine));
+    m_postProcessCombo->addItem(
+        QStringLiteral("波纹板处理"), QString::fromLatin1(kPostProcessCorrugatedBoard));
+    m_postProcessCombo->setCurrentIndex(2);
     m_scanSpeedSpin->setMinimumWidth(180);
     m_scanSpeedSpin->setRange(1.0, 30000.0);
     m_scanSpeedSpin->setDecimals(1);
@@ -170,6 +210,8 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     targetLayout->addWidget(m_cameraCombo, 1, 1);
     targetLayout->addWidget(new QLabel(QStringLiteral("扫描速度"), targetGroup), 2, 0, Qt::AlignRight | Qt::AlignVCenter);
     targetLayout->addWidget(m_scanSpeedSpin, 2, 1);
+    targetLayout->addWidget(new QLabel(QStringLiteral("后处理方式"), targetGroup), 3, 0, Qt::AlignRight | Qt::AlignVCenter);
+    targetLayout->addWidget(m_postProcessCombo, 3, 1);
 
     auto* sourceCard = new QFrame(targetGroup);
     sourceCard->setObjectName(QStringLiteral("scanInputSourceCard"));
@@ -188,12 +230,18 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
         QStringLiteral("相机与空间坐标：扫描图像来自所选相机；运行前校验该相机对应且已验证的手眼矩阵。"),
         sourceCard);
     cameraHint->setWordWrap(true);
+    auto* postProcessHint = new QLabel(
+        QStringLiteral("后处理：无=点云生成后结束；直线处理=采集特征点并生成三维平滑曲线；"
+            "波纹板处理=进入现有特征点、拐点拟合及焊接姿态生成流程。"),
+        sourceCard);
+    postProcessHint->setWordWrap(true);
     sourceLayout->addWidget(sourceTitle);
     sourceLayout->addWidget(inheritedHint);
     sourceLayout->addWidget(cameraHint);
+    sourceLayout->addWidget(postProcessHint);
     sourceLayout->addStretch(1);
 
-    targetLayout->addWidget(sourceCard, 0, 2, 3, 1);
+    targetLayout->addWidget(sourceCard, 0, 2, 4, 1);
     targetLayout->setColumnStretch(2, 1);
     contentLayout->addWidget(targetGroup);
 
@@ -297,6 +345,13 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
             if (!SaveConfiguration(&error))
                 AppendLog(QStringLiteral("扫描速度保存失败：") + error);
         });
+    connect(m_postProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
+        {
+            if (m_loadingSelectors || m_running) return;
+            QString error;
+            if (!SaveConfiguration(&error))
+                AppendLog(QStringLiteral("后处理方式保存失败：") + error);
+        });
     UpdateStatusLabels();
     AppendLog(QStringLiteral("等待示教。运行前会再次显示基础姿态、空间起终点、周期参数和预计控制点，默认拒绝执行。"));
 }
@@ -321,9 +376,9 @@ void ScanPoseVariationTestDialog::LoadRobotList(int initialUnitIndex)
     m_robotCombo->clear();
 
     QString selectedRobotName;
-    COPini selectionIni;
+    ConfigSection selectionIni;
     std::string selectedRobotNameRaw;
-    if (selectionIni.SetFileName(SelectionConfigPath().toUtf8().constData())
+    if (selectionIni.SetLocation(SelectionConfig())
         && selectionIni.SetSectionName(kSelectionSection)
         && selectionIni.ReadString(false, "RobotName", selectedRobotNameRaw) > 0)
     {
@@ -417,9 +472,9 @@ void ScanPoseVariationTestDialog::ChangeRobot(int comboIndex)
         .arg(RobotName()));
 }
 
-QString ScanPoseVariationTestDialog::SelectionConfigPath() const
+ConfigLocation ScanPoseVariationTestDialog::SelectionConfig() const
 {
-    return RobotDataHelper::BuildProjectPath(QStringLiteral("Data/ScanPoseVariationTestSelection.ini"));
+    return ConfigLocation::Global(QStringLiteral("ScanPoseVariationTestSelection"));
 }
 
 QString ScanPoseVariationTestDialog::CurrentCameraSection() const
@@ -432,10 +487,8 @@ QString ScanPoseVariationTestDialog::CurrentCameraSection() const
 bool ScanPoseVariationTestDialog::SaveSelection(QString* error) const
 {
     if (error != nullptr) error->clear();
-    const QString path = SelectionConfigPath();
-    QDir().mkpath(QFileInfo(path).absolutePath());
     return RobotDataHelper::WriteParamValue(
-        path, kSelectionSection, QStringLiteral("RobotName"), RobotName(), error);
+        SelectionConfig(), kSelectionSection, QStringLiteral("RobotName"), RobotName(), error);
 }
 
 void ScanPoseVariationTestDialog::RefreshLiveImage()
@@ -488,10 +541,9 @@ QString ScanPoseVariationTestDialog::RobotName(RobotDriverAdaptor* driver) const
         : QStringLiteral("RobotA");
 }
 
-QString ScanPoseVariationTestDialog::ConfigPath() const
+ConfigLocation ScanPoseVariationTestDialog::TestConfig() const
 {
-    return RobotDataHelper::BuildProjectPath(
-        QStringLiteral("Data/%1/FunctionTestScanPoseVariation.ini").arg(RobotName()));
+    return ConfigLocation::Robot(RobotName(), QStringLiteral("FunctionTestScanPoseVariation"));
 }
 
 bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
@@ -503,15 +555,25 @@ bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
     m_hasStartPulse = false;
 
     QString savedCameraSection;
-    const QString path = ConfigPath();
-    COPini ini;
-    if (ini.SetFileName(path.toUtf8().constData())
+    const ConfigLocation location = TestConfig();
+    ConfigSection ini;
+    if (ini.SetLocation(location)
         && ini.SetSectionName(kConfigSection))
     {
         std::string cameraSectionRaw;
         if (ini.ReadString(false, "CameraSection", cameraSectionRaw) > 0)
         {
             savedCameraSection = QString::fromUtf8(cameraSectionRaw.c_str()).trimmed();
+        }
+        std::string postProcessModeRaw;
+        if (ini.ReadString(false, "PostProcessMode", postProcessModeRaw) > 0)
+        {
+            const int postProcessIndex = m_postProcessCombo->findData(
+                QString::fromUtf8(postProcessModeRaw.c_str()).trimmed());
+            if (postProcessIndex >= 0)
+            {
+                m_postProcessCombo->setCurrentIndex(postProcessIndex);
+            }
         }
     }
     LoadCameraList(savedCameraSection);
@@ -526,10 +588,10 @@ bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
         m_scanSpeedSpin->setValue(presetParam.dScanSpeed);
     }
 
-    if (!ini.SetFileName(path.toUtf8().constData())
+    if (!ini.SetLocation(location)
         || !ini.SetSectionName(kConfigSection))
     {
-        if (error != nullptr) *error = QStringLiteral("无法打开配置：") + path;
+        if (error != nullptr) *error = QStringLiteral("测试配置数据库位置无效：") + RobotName();
         return false;
     }
 
@@ -542,13 +604,13 @@ bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
     ini.ReadString(false, "HasEndPose", &hasEnd);
     ini.ReadString(false, "HasStartPulse", &hasStartPulse);
     m_hasBasePose = hasBase != 0
-        && RobotDataHelper::ReadCoors(path, kConfigSection, QStringLiteral("BasePose"), m_basePose, nullptr);
+        && RobotDataHelper::ReadCoors(location, kConfigSection, QStringLiteral("BasePose"), m_basePose, nullptr);
     m_hasStartPose = hasStart != 0
-        && RobotDataHelper::ReadCoors(path, kConfigSection, QStringLiteral("StartPose"), m_startPose, nullptr);
+        && RobotDataHelper::ReadCoors(location, kConfigSection, QStringLiteral("StartPose"), m_startPose, nullptr);
     m_hasEndPose = hasEnd != 0
-        && RobotDataHelper::ReadCoors(path, kConfigSection, QStringLiteral("EndPose"), m_endPose, nullptr);
+        && RobotDataHelper::ReadCoors(location, kConfigSection, QStringLiteral("EndPose"), m_endPose, nullptr);
     m_hasStartPulse = hasStartPulse != 0
-        && RobotDataHelper::ReadPulse(path, kConfigSection, QStringLiteral("StartPulse"), m_startPulse, nullptr);
+        && RobotDataHelper::ReadPulse(location, kConfigSection, QStringLiteral("StartPulse"), m_startPulse, nullptr);
 
     auto readSpin = [&ini](const char* key, QDoubleSpinBox* spin)
         {
@@ -574,14 +636,14 @@ bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
 bool ScanPoseVariationTestDialog::SaveConfiguration(QString* error) const
 {
     if (error != nullptr) error->clear();
-    const QString path = ConfigPath();
-    QDir().mkpath(QFileInfo(path).absolutePath());
+    const ConfigLocation location = TestConfig();
     const auto params = CurrentParams();
     const QList<QPair<QString, QString>> values = {
-        { QStringLiteral("Schema"), QStringLiteral("1") },
+        { QStringLiteral("Schema"), QStringLiteral("2") },
         { QStringLiteral("RobotName"), RobotName() },
         { QStringLiteral("CameraSection"), CurrentCameraSection() },
         { QStringLiteral("ScanSpeedMmPerMin"), QString::number(m_scanSpeedSpin->value(), 'f', 6) },
+        { QStringLiteral("PostProcessMode"), PostProcessModeConfigValue(CurrentPostProcessMode()) },
         { QStringLiteral("HasBasePose"), m_hasBasePose ? QStringLiteral("1") : QStringLiteral("0") },
         { QStringLiteral("HasStartPose"), m_hasStartPose ? QStringLiteral("1") : QStringLiteral("0") },
         { QStringLiteral("HasEndPose"), m_hasEndPose ? QStringLiteral("1") : QStringLiteral("0") },
@@ -597,28 +659,28 @@ bool ScanPoseVariationTestDialog::SaveConfiguration(QString* error) const
     };
     for (const auto& value : values)
     {
-        if (!RobotDataHelper::WriteParamValue(path, kConfigSection, value.first, value.second, error))
+        if (!RobotDataHelper::WriteParamValue(location, kConfigSection, value.first, value.second, error))
         {
             return false;
         }
     }
     if (m_hasBasePose
-        && !RobotDataHelper::WriteCoors(path, kConfigSection, QStringLiteral("BasePose"), m_basePose, error))
+        && !RobotDataHelper::WriteCoors(location, kConfigSection, QStringLiteral("BasePose"), m_basePose, error))
     {
         return false;
     }
     if (m_hasStartPose
-        && !RobotDataHelper::WriteCoors(path, kConfigSection, QStringLiteral("StartPose"), m_startPose, error))
+        && !RobotDataHelper::WriteCoors(location, kConfigSection, QStringLiteral("StartPose"), m_startPose, error))
     {
         return false;
     }
     if (m_hasEndPose
-        && !RobotDataHelper::WriteCoors(path, kConfigSection, QStringLiteral("EndPose"), m_endPose, error))
+        && !RobotDataHelper::WriteCoors(location, kConfigSection, QStringLiteral("EndPose"), m_endPose, error))
     {
         return false;
     }
     if (m_hasStartPulse
-        && !RobotDataHelper::WritePulse(path, kConfigSection, QStringLiteral("StartPulse"), m_startPulse, error))
+        && !RobotDataHelper::WritePulse(location, kConfigSection, QStringLiteral("StartPulse"), m_startPulse, error))
     {
         return false;
     }
@@ -748,6 +810,22 @@ MeasureThenWeldService::ScanPoseVariationParams ScanPoseVariationTestDialog::Cur
     return params;
 }
 
+MeasureThenWeldService::ScanPostProcessMode ScanPoseVariationTestDialog::CurrentPostProcessMode() const
+{
+    const QString value = m_postProcessCombo != nullptr
+        ? m_postProcessCombo->currentData().toString().trimmed()
+        : QString();
+    if (value == QString::fromLatin1(kPostProcessNone))
+    {
+        return MeasureThenWeldService::ScanPostProcessMode::None;
+    }
+    if (value == QString::fromLatin1(kPostProcessStraightLine))
+    {
+        return MeasureThenWeldService::ScanPostProcessMode::FeaturePointSmoothCurve;
+    }
+    return MeasureThenWeldService::ScanPostProcessMode::CorrugatedBoard;
+}
+
 void ScanPoseVariationTestDialog::GeneratePreview()
 {
     if (!m_hasBasePose || !m_hasStartPose || !m_hasEndPose)
@@ -866,6 +944,9 @@ void ScanPoseVariationTestDialog::RunScan()
     }
 
     const int robotType = driver->DriverDescriptor().poseConventionType;
+    const auto postProcessMode = CurrentPostProcessMode();
+    const QString postProcessModeName = PostProcessModeDisplayName(postProcessMode);
+    const QString postProcessModeConfig = PostProcessModeConfigValue(postProcessMode);
     MeasureThenWeldService service;
     QVector<MeasureThenWeldService::ScanPoseVariationPoint> generated;
     QString summary;
@@ -890,11 +971,12 @@ void ScanPoseVariationTestDialog::RunScan()
 
     const QString confirmation = QStringLiteral(
         "即将进行真实机器人扫描运动。\n\n机器人：%1\n扫描相机：%2（%3）\n扫描速度：%4 mm/min\n"
-        "基础姿态：%5\n扫描起点：%6\n扫描终点：%7\n%8\n\n"
+        "后处理方式：%5\n基础姿态：%6\n扫描起点：%7\n扫描终点：%8\n%9\n\n"
         "流程：到扫描下枪安全位 -> 扫描起点 -> 连续变姿态扫描并采集 -> 扫描收枪安全位。\n"
         "软件停止不能替代控制柜/示教器急停；请确认机器人周围安全、相机和激光已准备好。是否继续？")
         .arg(RobotName(driver), cameraSection, cameraIp)
         .arg(m_scanSpeedSpin->value(), 0, 'f', 1)
+        .arg(postProcessModeName)
         .arg(PoseText(m_basePose), PoseText(m_startPose), PoseText(m_endPose), summary);
     if (QMessageBox::question(this, QStringLiteral("扫描变姿态运行前确认"), confirmation,
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
@@ -934,7 +1016,8 @@ void ScanPoseVariationTestDialog::RunScan()
     QPointer<ScanPoseVariationTestDialog> self(this);
     std::thread([self, driver, cameraCache, operationLease, trajectory, generated,
                  params, basePose, startPose, endPose, startPulse, robotType,
-                 robotName, selectedCameraSection, selectedCameraIp, scanSpeedMmPerMin]()
+                 robotName, selectedCameraSection, selectedCameraIp, scanSpeedMmPerMin,
+                 postProcessMode, postProcessModeName, postProcessModeConfig]()
         {
             MeasureThenWeldService service;
             T_PRECISE_MEASURE_PARAM param;
@@ -1014,7 +1097,8 @@ void ScanPoseVariationTestDialog::RunScan()
                 MeasureThenWeldService::ScanProgressCallback(),
                 MeasureThenWeldService::ScanPauseAvailabilityCallback(),
                 &trajectory,
-                selectedCameraSection);
+                selectedCameraSection,
+                postProcessMode);
 
             QString commandedPath;
             QString saveError;
@@ -1031,6 +1115,8 @@ void ScanPoseVariationTestDialog::RunScan()
                     QStringLiteral("camera_section=%1").arg(selectedCameraSection),
                     QStringLiteral("camera_ip=%1").arg(selectedCameraIp),
                     QStringLiteral("scan_speed_mm_per_min=%1").arg(scanSpeedMmPerMin, 0, 'f', 6),
+                    QStringLiteral("post_process_mode=%1").arg(postProcessModeConfig),
+                    QStringLiteral("post_process_name=%1").arg(postProcessModeName),
                     QStringLiteral("preset_group=%1").arg(param.sParamGroupName),
                     QStringLiteral("safe_move_speed_mm_per_min=%1").arg(param.dRunSpeed, 0, 'f', 6),
                     QStringLiteral("scan_safe_mode=%1").arg(
@@ -1064,13 +1150,13 @@ void ScanPoseVariationTestDialog::RunScan()
             }
 
             QMetaObject::invokeMethod(qApp,
-                [self, ok, result, commandedPath, saveError]()
+                [self, ok, result, commandedPath, saveError, postProcessModeName]()
                 {
                     if (self == nullptr) return;
                     if (ok)
                     {
-                        self->AppendLog(QStringLiteral("扫描变姿态测试完成并已安全收枪。结果目录：")
-                            + QDir::toNativeSeparators(result.caseDir));
+                        self->AppendLog(QStringLiteral("扫描变姿态测试完成并已安全收枪；后处理方式=%1。结果目录：%2")
+                            .arg(postProcessModeName, QDir::toNativeSeparators(result.caseDir)));
                     }
                     else
                     {
@@ -1147,4 +1233,5 @@ void ScanPoseVariationTestDialog::SetRunning(bool running)
     }
     if (m_robotCombo != nullptr) m_robotCombo->setEnabled(!running && m_robotCombo->count() > 0);
     if (m_cameraCombo != nullptr) m_cameraCombo->setEnabled(!running && m_cameraCombo->count() > 0);
+    if (m_postProcessCombo != nullptr) m_postProcessCombo->setEnabled(!running);
 }

@@ -771,7 +771,7 @@ int RunAuthenticationSemanticVersionGateTest(const QString& scenario)
     return 0;
 }
 
-int RunLegacyDiskInputGateTest()
+int RunLegacyDiskIsolationTest()
 {
     QTemporaryDir temp;
     Check(temp.isValid(), QStringLiteral("legacy disk input gate temp root"));
@@ -791,15 +791,56 @@ int RunLegacyDiskInputGateTest()
                           << QStringLiteral("--data-root") << temp.path(),
             &pathError),
         QStringLiteral("initialize legacy disk gate root: %1").arg(pathError));
-    Check(!ConfigDatabase::IsAvailable(), QStringLiteral("runtime refuses to bypass legacy disk migration"));
-    Check(!ConfigDatabase::IsAvailable(), QStringLiteral("legacy disk gate remains closed after reopen"));
+    Check(ConfigDatabase::IsAvailable(), QStringLiteral("runtime opens database without importing legacy disk configuration"));
+    Check(ConfigDatabase::IsAvailable(), QStringLiteral("database-only runtime remains available after reopen"));
     Check(
-        !QFileInfo::exists(temp.filePath(QStringLiteral("Data/ConfigStore.db"))),
-        QStringLiteral("legacy disk gate does not create an empty ConfigStore"));
+        QFileInfo::exists(temp.filePath(QStringLiteral("Data/ConfigStore.db"))),
+        QStringLiteral("database-only runtime creates ConfigStore independently"));
     QFile sourceAfter(accountsPath);
     Check(sourceAfter.open(QIODevice::ReadOnly), QStringLiteral("reopen legacy disk fixture"));
-    Check(sourceAfter.readAll() == source, QStringLiteral("runtime gate leaves legacy credentials byte-identical"));
-    QTextStream(stdout) << "PASS: runtime requires ConfigMigrate before opening legacy disk configuration" << Qt::endl;
+    Check(sourceAfter.readAll() == source, QStringLiteral("runtime leaves ignored legacy input byte-identical"));
+    QTextStream(stdout) << "PASS: runtime ignores legacy disk configuration and uses ConfigStore only" << Qt::endl;
+    return 0;
+}
+
+int RunDatabaseNativeIdentityGateTest()
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("database-native identity gate temp root"));
+    QString pathError;
+    Check(
+        AppPaths::Initialize(
+            QStringList() << QStringLiteral("CredentialSecurityTests")
+                          << QStringLiteral("--data-root") << temp.path(),
+            &pathError),
+        QStringLiteral("initialize database-native identity root: %1").arg(pathError));
+    Check(ConfigDatabase::IsAvailable(), QStringLiteral("open database-native identity fixture"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotA"),
+            QStringLiteral("RobotPara"), QStringLiteral("RobotType"), QStringLiteral("1")),
+        QStringLiteral("native scoped identity writes successfully"));
+    Check(
+        !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotPara.ini"),
+            QStringLiteral("RobotPara"), QStringLiteral("RobotType"), QStringLiteral("1")),
+        QStringLiteral("configuration filename cannot be a scope id"));
+    Check(
+        !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotA"),
+            QStringLiteral("Data/RobotPara.ini"), QStringLiteral("RobotType"), QStringLiteral("1")),
+        QStringLiteral("configuration filepath cannot be a module"));
+    Check(
+        !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotA"),
+            QStringLiteral("C:\\Data\\RobotPara"), QStringLiteral("RobotType"), QStringLiteral("1")),
+        QStringLiteral("drive path cannot be a module"));
+    Check(
+        !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotA"),
+            QStringLiteral("RobotPara"), QStringLiteral("RobotType.ini"), QStringLiteral("1")),
+        QStringLiteral("configuration filename cannot be a key"));
+    QTextStream(stdout) << "PASS: database APIs reject filesystem-backed configuration identities" << Qt::endl;
     return 0;
 }
 
@@ -1931,22 +1972,22 @@ int RunLegacyMigrationRollbackTest(const QString& scenario)
     return 0;
 }
 
-int RunRejectedRuntimeIniTest(const QString& scenario)
+int RunPointCloudIniDatabaseIsolationTest(const QString& scenario)
 {
     QTemporaryDir temp;
-    Check(temp.isValid(), QStringLiteral("runtime INI rejection temp root"));
+    Check(temp.isValid(), QStringLiteral("point-cloud INI isolation temp root"));
     const QString dataDir = temp.filePath(QStringLiteral("Data"));
-    Check(QDir().mkpath(dataDir), QStringLiteral("runtime INI rejection data dir"));
+    Check(QDir().mkpath(dataDir), QStringLiteral("point-cloud INI isolation data dir"));
     const QString dbPath = temp.filePath(QStringLiteral("Data/ConfigStore.db"));
     const QString connectionName = QStringLiteral("runtime_ini_fixture_") + scenario;
     {
         QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
         db.setDatabaseName(dbPath);
-        Check(db.open(), QStringLiteral("open runtime INI rejection fixture"));
+        Check(db.open(), QStringLiteral("open point-cloud INI isolation fixture"));
         CreateSettingsTable(db);
         QSqlQuery query(db);
         Check(query.exec("INSERT INTO meta(key, value) VALUES('schema_version', '4')"),
-            QStringLiteral("write runtime INI schema 4"));
+            QStringLiteral("write point-cloud INI isolation schema 4"));
         InsertFlatLegacyAccount(
             db, QStringLiteral("admin"),
             LegacyPasswordHash(QStringLiteral("admin"), QStringLiteral("Admin-Ini-Test")),
@@ -2026,13 +2067,22 @@ int RunRejectedRuntimeIniTest(const QString& scenario)
     Check(AppPaths::Initialize(
         QStringList() << QStringLiteral("CredentialSecurityTests")
                       << QStringLiteral("--data-root") << temp.path(),
-        &pathError), QStringLiteral("initialize rejected runtime INI root: %1").arg(pathError));
-    Check(!ConfigDatabase::IsAvailable(),
-        QStringLiteral("runtime INI %1 must remain blocked").arg(scenario));
-    Check(FileSha256(dbPath) == before,
-        QStringLiteral("runtime INI %1 leaves schema4 byte-identical").arg(scenario));
-    QTextStream(stdout) << "PASS: runtime INI " << scenario
-        << " remains a blocking legacy input" << Qt::endl;
+        &pathError), QStringLiteral("initialize point-cloud INI isolation root: %1").arg(pathError));
+    Check(ConfigDatabase::IsAvailable(),
+        QStringLiteral("point-cloud INI %1 does not gate database startup").arg(scenario));
+    Check(FileSha256(dbPath) != before,
+        QStringLiteral("point-cloud INI %1 does not block schema upgrade").arg(scenario));
+    QString ignoredValue;
+    Check(
+        ConfigDatabase::ReadScopedSettingStatus(
+            QStringLiteral("global"),
+            QString(),
+            QStringLiteral("PointCloudProcessing"),
+            QStringLiteral("UnexpectedRuntimeKey"),
+            &ignoredValue) == ConfigDatabase::ReadStatus::NotFound,
+        QStringLiteral("point-cloud INI %1 is not imported into ConfigStore").arg(scenario));
+    QTextStream(stdout) << "PASS: point-cloud INI " << scenario
+        << " stays outside ConfigStore" << Qt::endl;
     return 0;
 }
 }
@@ -2082,12 +2132,13 @@ int main(int argc, char* argv[])
     {
         return RunLegacyMigrationRollbackTest(app.arguments().at(legacyRollbackIndex + 1));
     }
-    const int rejectedRuntimeIniIndex = app.arguments().indexOf(
-        QStringLiteral("--rejected-runtime-ini"));
-    if (rejectedRuntimeIniIndex >= 0
-        && rejectedRuntimeIniIndex + 1 < app.arguments().size())
+    const int pointCloudIniIsolationIndex = app.arguments().indexOf(
+        QStringLiteral("--pointcloud-ini-db-isolation"));
+    if (pointCloudIniIsolationIndex >= 0
+        && pointCloudIniIsolationIndex + 1 < app.arguments().size())
     {
-        return RunRejectedRuntimeIniTest(app.arguments().at(rejectedRuntimeIniIndex + 1));
+        return RunPointCloudIniDatabaseIsolationTest(
+            app.arguments().at(pointCloudIniIsolationIndex + 1));
     }
     if (app.arguments().contains(QStringLiteral("--corrupt-dpapi")))
     {
@@ -2113,9 +2164,13 @@ int main(int argc, char* argv[])
         return RunAuthenticationSemanticVersionGateTest(
             app.arguments().at(authenticationSemanticGateIndex + 1));
     }
-    if (app.arguments().contains(QStringLiteral("--legacy-disk-gate")))
+    if (app.arguments().contains(QStringLiteral("--legacy-disk-isolation")))
     {
-        return RunLegacyDiskInputGateTest();
+        return RunLegacyDiskIsolationTest();
+    }
+    if (app.arguments().contains(QStringLiteral("--database-native-identity-gate")))
+    {
+        return RunDatabaseNativeIdentityGateTest();
     }
     if (app.arguments().contains(QStringLiteral("--pending-scrub-gate")))
     {

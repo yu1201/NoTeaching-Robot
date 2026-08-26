@@ -6,6 +6,7 @@
 #include "FanucTpContentIdentity.h"
 #include "FANUCRobotDriver.h"
 #include "FTPClient.h"
+#include "RobotDriverRegistry.h"
 #include "RobotFtpFileTransfer.h"
 #include "RobotOperationLease.h"
 
@@ -1146,72 +1147,6 @@ namespace
 		return std::isfinite(determinant) && std::abs(determinant - 1.0) <= 0.05;
 	}
 
-	std::string FanucToLower(std::string text)
-	{
-		std::transform(text.begin(), text.end(), text.begin(),
-			[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-		return text;
-	}
-
-	std::filesystem::path FanucReadWinOlpcOutputDir()
-	{
-		const std::filesystem::path robotIniPath = FanucFindCompilerToolPath("robot.ini");
-		std::ifstream input(robotIniPath);
-		if (!input.is_open())
-		{
-			return std::filesystem::path();
-		}
-
-		std::string line;
-		while (std::getline(input, line))
-		{
-			if (!FanucStartsWith(line, "Output="))
-			{
-				continue;
-			}
-
-			const std::string outputDir = FanucTrim(line.substr(std::string("Output=").size()));
-			if (!outputDir.empty())
-			{
-				const std::filesystem::path configuredPath = FanucFileSystemPath(
-					FanucDecodeLocalPath(outputDir));
-				return configuredPath.is_absolute()
-					? configuredPath
-					: (robotIniPath.parent_path() / configuredPath).lexically_normal();
-			}
-		}
-
-		return std::filesystem::path();
-	}
-
-	std::filesystem::path FanucFindCompiledTpInOutputDir(const std::filesystem::path& requestedTpPath)
-	{
-		const std::filesystem::path outputDir = FanucReadWinOlpcOutputDir();
-		std::error_code ec;
-		if (outputDir.empty() || !std::filesystem::exists(outputDir, ec))
-		{
-			return std::filesystem::path();
-		}
-
-		const std::string wantedStem = FanucToLower(requestedTpPath.stem().string());
-		for (const auto& entry : std::filesystem::directory_iterator(outputDir, ec))
-		{
-			if (ec || !entry.is_regular_file())
-			{
-				continue;
-			}
-
-			const std::filesystem::path candidate = entry.path();
-			if (FanucToLower(candidate.stem().string()) == wantedStem
-				&& FanucToLower(candidate.extension().string()) == ".tp")
-			{
-				return candidate;
-			}
-		}
-
-		return std::filesystem::path();
-	}
-
 	std::string FanucBuildProgramPath(const std::string& unitName, const std::string& fileName)
 	{
 		const QString unitNameText = FanucDecodeConfigText(unitName);
@@ -1244,7 +1179,7 @@ namespace
 
 	bool FanucCompileKlToPc(const std::string& klPath, const std::string& pcPath, RobotLog* pLog)
 	{
-		// WinOLPC tools share robot.ini/output state and are not safe to run concurrently.
+		// WinOLPC 编译器进程不保证并发安全，统一串行调用。
 		std::lock_guard<std::mutex> compilerLock(g_fanucCompilerMutex);
 		const auto compileStart = std::chrono::steady_clock::now();
 		const std::filesystem::path ktransPath = FanucGetKtransPath();
@@ -1400,28 +1335,6 @@ namespace
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
 
-		if (exitCode == 0 && !FanucFileExists(absoluteTpPath))
-		{
-			const std::filesystem::path fallbackTpPath = FanucFindCompiledTpInOutputDir(absoluteTpPath);
-			if (!fallbackTpPath.empty())
-			{
-				std::filesystem::copy_file(
-					fallbackTpPath,
-					absoluteTpPath,
-					std::filesystem::copy_options::overwrite_existing,
-					ec);
-				if (!ec && pLog != nullptr)
-				{
-					const std::string fallbackPathText = FanucLocalPathBytes(fallbackTpPath);
-					const std::string tpPathText = FanucLocalPathBytes(absoluteTpPath);
-					pLog->write(LogColor::DEFAULT,
-						"FANUC TP编译产物已从 WinOLPC 输出目录复制：%s -> %s",
-						fallbackPathText.c_str(),
-						tpPathText.c_str());
-				}
-			}
-		}
-
 		if (exitCode != 0 || !FanucFileExists(absoluteTpPath))
 		{
 			if (pLog != nullptr)
@@ -1430,7 +1343,7 @@ namespace
 				const std::string tpPathText = FanucLocalPathBytes(absoluteTpPath);
 				const std::string workDirText = FanucLocalPathBytes(maketpWorkDir);
 				pLog->write(LogColor::ERR,
-					"FANUC TP编译失败：maketp 返回码=%lu，LS=%s，TP=%s，WorkDir=%s | 耗时=%lldms",
+					"FANUC TP编译失败：maketp 返回码=%lu，未在显式目标生成TP；LS=%s，TP=%s，WorkDir=%s | 耗时=%lldms",
 					static_cast<unsigned long>(exitCode), lsPathText.c_str(), tpPathText.c_str(), workDirText.c_str(),
 					FanucElapsedMs(compileStart));
 			}
@@ -2623,11 +2536,22 @@ namespace
 
 // ===================== 初始化与控制通道 =====================
 
-// 读取RobotPara.ini中的FANUC基础参数、控制端口、监控端口、FTP参数和工具参数。
+// 读取 ConfigStore.db 中该机器人 RobotPara 模块的基础参数、控制端口、监控端口、FTP参数和工具参数。
 bool FANUCRobotCtrl::InitRobotDriver(std::string strUnitName)
 {
-	COPini cIni;
-	cIni.SetFileName(DATA_PATH + strUnitName + ROBOT_PARA_INI);
+	if (const RobotDriverSetupProfile* setup =
+		RobotDriverRegistry::SetupProfile(ROBOT_TYPE_FANUC))
+	{
+		m_nSocketPort = setup->defaultSocketPort;
+		m_nMonitorPort = setup->defaultMonitorPort;
+		m_sFTPIP = setup->defaultFtpHost;
+		m_nFTPPort = setup->defaultFtpPort;
+		m_sFTPUser = setup->defaultFtpUser;
+		m_sFTPPassWord = setup->defaultFtpPassword;
+	}
+
+	ConfigSection cIni;
+	cIni.SetLocation(ConfigLocation::Robot(QString::fromUtf8(strUnitName.c_str()), QStringLiteral("RobotPara")));
 	cIni.SetSectionName("BaseParam");
 	cIni.ReadString("RobotName", m_sRobotName);
 	cIni.ReadString("CustomName", m_sCustomName);
@@ -2644,6 +2568,10 @@ bool FANUCRobotCtrl::InitRobotDriver(std::string strUnitName)
 	cIni.ReadString("FTPPort", &m_nFTPPort);
 	cIni.ReadString("FTPUser", m_sFTPUser);
 	cIni.ReadString("FTPPassWord", m_sFTPPassWord);
+	if (m_sFTPIP.empty())
+	{
+		m_sFTPIP = m_sSocketIP;
+	}
 
 	LoadRobotExternalAxlePara(strUnitName);
 
@@ -2750,7 +2678,7 @@ bool FANUCRobotCtrl::InitSocket(const char* ip, unsigned short Port, bool ifReco
 	}
 
 	// The runtime endpoint is authoritative for per-controller caches and local
-	// artifact isolation, including callers that reconnect to a non-INI endpoint.
+	// artifact isolation, including callers that reconnect to a different endpoint.
 	m_sSocketIP = socketIp;
 	m_nSocketPort = static_cast<int>(socketPort);
 	InvalidateFixedMoveUploadCache();
@@ -4504,7 +4432,7 @@ void FANUCRobotCtrl::PrepareStateMonitor()
 	StartMonitor();
 }
 
-// 启动S5监控线程；端口默认来自RobotPara.ini的MonitorPort。
+// 启动S5监控线程；端口默认来自 ConfigStore.db 的 RobotPara/BaseParam/MonitorPort。
 bool FANUCRobotCtrl::StartMonitor(int nPort)
 {
 	// The monitor channel is intentionally separate from the control socket.

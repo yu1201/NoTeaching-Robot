@@ -51,39 +51,51 @@ function Get-ProjectRoot {
     return (Get-Location).Path
 }
 
-function Get-IniValue {
+function Get-ConfigDatabaseValue {
     param(
-        [string]$Path,
-        [string]$Section,
+        [string]$Root,
+        [string]$ScopeType,
+        [string]$ScopeId,
+        [string]$Module,
         [string]$Key
     )
 
-    if (-not (Test-Path -LiteralPath $Path)) {
+    $databasePath = Join-Path $Root "Data\ConfigStore.db"
+    if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf)) {
+        throw "ConfigStore database does not exist: $databasePath"
+    }
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $python) {
+        throw "Python is required to read ConfigStore.db for this diagnostic tool."
+    }
+    $query = @'
+import sqlite3, sys
+db, scope_type, scope_id, module, key = sys.argv[1:]
+with sqlite3.connect(db) as connection:
+    row = connection.execute(
+        "SELECT value_text, encrypted FROM settings WHERE lower(scope_type)=lower(?) AND lower(scope_id)=lower(?) AND lower(module)=lower(?) AND lower(key_name)=lower(?) LIMIT 1",
+        (scope_type, scope_id, module, key),
+    ).fetchone()
+if row is None:
+    raise SystemExit(3)
+if int(row[1]) != 0:
+    raise SystemExit("Requested ConfigStore value is protected and cannot be read by this probe.")
+sys.stdout.write(row[0])
+'@
+    $value = & $python.Source -c $query $databasePath $ScopeType $ScopeId $Module $Key
+    if ($LASTEXITCODE -eq 3) {
         return $null
     }
-
-    $inSection = $false
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        $trimmed = $line.Trim()
-        if ($trimmed.Length -eq 0 -or $trimmed.StartsWith("#") -or $trimmed.StartsWith(";")) {
-            continue
-        }
-        if ($trimmed -match '^\[(.+)\]$') {
-            $inSection = ($Matches[1] -eq $Section)
-            continue
-        }
-        if ($inSection -and $trimmed -match ('^{0}\s*=\s*(.*)$' -f [regex]::Escape($Key))) {
-            return $Matches[1].Trim()
-        }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to read ConfigStore value: $ScopeType/$ScopeId/$Module/$Key"
     }
-    return $null
+    return ($value | Out-String).Trim()
 }
 
 function Get-DefaultRobot {
     param([string]$Root)
 
-    $path = Join-Path $Root "Data\ContralUnitInfo.ini"
-    $value = Get-IniValue -Path $path -Section "UnitName" -Key "Unit0"
+    $value = Get-ConfigDatabaseValue -Root $Root -ScopeType "global" -ScopeId "" -Module "ControlUnits/UnitName" -Key "Unit0"
     if ([string]::IsNullOrWhiteSpace($value)) {
         return "RobotA"
     }
@@ -96,36 +108,35 @@ function Resolve-CameraEndpoint {
         [string]$RobotName,
         [string]$Section,
         [int]$DefaultPort,
-        [bool]$UseIniPort
+        [bool]$UseConfiguredPort
     )
 
     if ([string]::IsNullOrWhiteSpace($RobotName)) {
         $RobotName = Get-DefaultRobot -Root $Root
     }
 
-    $cameraIni = Join-Path $Root ("Data\{0}\CameraParam.ini" -f $RobotName)
     if ([string]::IsNullOrWhiteSpace($Section)) {
-        $measureNo = Get-IniValue -Path $cameraIni -Section "Base" -Key "MeasureCameraNo"
+        $measureNo = Get-ConfigDatabaseValue -Root $Root -ScopeType "robot" -ScopeId $RobotName -Module "CameraParam/Base" -Key "MeasureCameraNo"
         if ([string]::IsNullOrWhiteSpace($measureNo)) {
             $measureNo = "0"
         }
         $Section = "CAMERA$measureNo"
     }
 
-    $address = Get-IniValue -Path $cameraIni -Section $Section -Key "DeviceAddress"
-    $configuredPortText = Get-IniValue -Path $cameraIni -Section $Section -Key "DevicePort"
+    $address = Get-ConfigDatabaseValue -Root $Root -ScopeType "robot" -ScopeId $RobotName -Module ("CameraParam/{0}" -f $Section) -Key "DeviceAddress"
+    $configuredPortText = Get-ConfigDatabaseValue -Root $Root -ScopeType "robot" -ScopeId $RobotName -Module ("CameraParam/{0}" -f $Section) -Key "DevicePort"
     $configuredPort = 0
     [void][int]::TryParse($configuredPortText, [ref]$configuredPort)
 
     $targetPort = $DefaultPort
-    if ($UseIniPort -and $configuredPort -gt 0) {
+    if ($UseConfiguredPort -and $configuredPort -gt 0) {
         $targetPort = $configuredPort
     }
 
     [pscustomobject]@{
         Robot = $RobotName
         CameraSection = $Section
-        CameraIni = $cameraIni
+        ConfigDatabase = (Join-Path $Root "Data\ConfigStore.db")
         DeviceAddress = $address
         ConfiguredDevicePort = $configuredPort
         TargetPort = $targetPort
@@ -504,17 +515,17 @@ function Invoke-CameraFpsProbe {
         [string]$RootPath,
         [int]$ConnectTimeout,
         [int]$ReadTimeout,
-        [bool]$UseIniPort
+        [bool]$UseConfiguredPort
     )
 
     $root = Get-ProjectRoot -Root $RootPath
-    $endpoint = Resolve-CameraEndpoint -Root $root -RobotName $RobotName -Section $SectionName -DefaultPort $TargetPort -UseIniPort $UseIniPort
+    $endpoint = Resolve-CameraEndpoint -Root $root -RobotName $RobotName -Section $SectionName -DefaultPort $TargetPort -UseConfiguredPort $UseConfiguredPort
 
     if ([string]::IsNullOrWhiteSpace($TargetHost)) {
         $TargetHost = $endpoint.DeviceAddress
     }
     if ([string]::IsNullOrWhiteSpace($TargetHost)) {
-        throw "Camera host is empty. Pass -HostAddress or check CameraParam.ini."
+        throw "Camera host is empty. Pass -HostAddress or check the CameraParam database module."
     }
     if ($DurationSeconds -le 0) {
         throw "-Seconds must be positive."
@@ -660,7 +671,7 @@ function Invoke-CameraFpsProbe {
             Port = $endpoint.TargetPort
             Robot = $endpoint.Robot
             CameraSection = $endpoint.CameraSection
-            CameraIni = $endpoint.CameraIni
+            ConfigDatabase = $endpoint.ConfigDatabase
             ConfiguredDevicePort = $endpoint.ConfiguredDevicePort
             ElapsedSeconds = $elapsed
             FrameCount = $frameCount
@@ -796,7 +807,7 @@ function Invoke-CameraFpsProbe {
         Port = $endpoint.TargetPort
         Robot = $endpoint.Robot
         CameraSection = $endpoint.CameraSection
-        CameraIni = $endpoint.CameraIni
+        ConfigDatabase = $endpoint.ConfigDatabase
         ConfiguredDevicePort = $endpoint.ConfiguredDevicePort
         ElapsedSeconds = $elapsed
         FrameCount = $frameCount
@@ -945,7 +956,7 @@ function Show-CameraFpsProbeWindow {
                 -RootPath $ProjectRoot `
                 -ConnectTimeout $ConnectTimeoutMs `
                 -ReadTimeout $ReadTimeoutMs `
-                -UseIniPort ([bool]$UseConfiguredDevicePort)
+                -UseConfiguredPort ([bool]$UseConfiguredDevicePort)
 
             if ([string]::IsNullOrWhiteSpace($hostBox.Text.Trim())) {
                 $hostBox.Text = $result.HostAddress
@@ -969,7 +980,7 @@ function Show-CameraFpsProbeWindow {
         if ([string]::IsNullOrWhiteSpace($hostBox.Text)) {
             try {
                 $root = Get-ProjectRoot -Root $ProjectRoot
-                $endpoint = Resolve-CameraEndpoint -Root $root -RobotName $Robot -Section $CameraSection -DefaultPort $Port -UseIniPort ([bool]$UseConfiguredDevicePort)
+                $endpoint = Resolve-CameraEndpoint -Root $root -RobotName $Robot -Section $CameraSection -DefaultPort $Port -UseConfiguredPort ([bool]$UseConfiguredDevicePort)
                 $hostBox.Text = $endpoint.DeviceAddress
             }
             catch {
@@ -998,10 +1009,10 @@ $result = Invoke-CameraFpsProbe `
     -RootPath $ProjectRoot `
     -ConnectTimeout $ConnectTimeoutMs `
     -ReadTimeout $ReadTimeoutMs `
-    -UseIniPort ([bool]$UseConfiguredDevicePort)
+    -UseConfiguredPort ([bool]$UseConfiguredDevicePort)
 
 Write-Host ("camera_fps_probe protocol={0} target={1}:{2} seconds={3:N3}" -f $result.Protocol, $result.HostAddress, $result.Port, $Seconds)
-Write-Host ("config robot={0} section={1} iniPort={2} ini={3}" -f $result.Robot, $result.CameraSection, $result.ConfiguredDevicePort, $result.CameraIni)
+Write-Host ("config robot={0} section={1} configuredPort={2} database={3}" -f $result.Robot, $result.CameraSection, $result.ConfiguredDevicePort, $result.ConfigDatabase)
 if (-not $UseConfiguredDevicePort -and $result.ConfiguredDevicePort -gt 0 -and $result.ConfiguredDevicePort -ne $result.Port) {
     Write-Host ("note using fixed {0} point-cloud port {1}; CameraParam DevicePort is {2}" -f $result.Protocol, $result.Port, $result.ConfiguredDevicePort)
 }

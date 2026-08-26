@@ -696,6 +696,9 @@ function Assert-GitReleaseState {
         if ($trackedBranding.Count -eq 0) {
             throw "Brand release has no git-tracked branding files."
         }
+        if (@($trackedBranding | Where-Object { [System.IO.Path]::GetExtension($_) -ieq '.ini' }).Count -ne 0) {
+            throw "Brand release must not track branding INI files; use ConfigStore global/Branding."
+        }
         foreach ($relative in $trackedBranding) {
             if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $relative) -PathType Leaf)) {
                 throw "Tracked brand asset is missing from the worktree: $relative"
@@ -799,6 +802,9 @@ function Assert-ReleaseChannelAssets {
     else {
         if ($trackedBranding.Count -eq 0 -or -not (Test-Path -LiteralPath $packageBrandingDir -PathType Container)) {
             throw "Brand package is missing its tracked branding assets."
+        }
+        if (@($trackedBranding | Where-Object { [System.IO.Path]::GetExtension($_) -ieq '.ini' }).Count -ne 0) {
+            throw "Brand package source must not contain branding INI files."
         }
         $actualBranding = @(Get-ChildItem -LiteralPath $packageBrandingDir -Recurse -File | ForEach-Object {
             Get-ReleaseRelativePath -Root $PackageDir -Path $_.FullName

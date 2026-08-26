@@ -1,7 +1,7 @@
 #include "WeldSeamCompDialog.h"
 
 #include "ConfigDatabase.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "PointCloud3DView.h"
 #include "PointCloudProcessingConfig.h"
 #include "RobotDataHelper.h"
@@ -162,14 +162,14 @@ QVector<WeldSeamCompDialog::CompType> BuildDefaultPoseTypes()
     };
 }
 
-QString WeldPoseCompParamPath(const QString& robotName)
+ConfigLocation WeldPoseCompConfig(const QString& robotName)
 {
-    return RobotDataHelper::BuildProjectPath(QString("Data/%1/WeldPoseCompParam.ini").arg(robotName));
+    return ConfigLocation::Robot(robotName, QStringLiteral("WeldPoseCompParam"));
 }
 
-QString WeldSeamCompParamPath(const QString& robotName)
+ConfigLocation WeldSeamCompLocation(const QString& robotName)
 {
-    return RobotDataHelper::BuildProjectPath(QString("Data/%1/WeldSeamCompParam.ini").arg(robotName));
+    return ConfigLocation::Robot(robotName, QStringLiteral("WeldSeamCompParam"));
 }
 
 QString DatabaseText(const QString& title)
@@ -253,9 +253,9 @@ QString FormatNumber(double value)
     return QString::number(value, 'f', 3);
 }
 
-bool ReadIniDouble(COPini& ini, const std::string& key, double& value)
+bool ReadConfigDouble(ConfigSection& config, const std::string& key, double& value)
 {
-    return ini.ReadString(false, key, &value) > 0;
+    return config.ReadString(false, key, &value) > 0;
 }
 
 std::string LocalString(const QString& text)
@@ -791,16 +791,16 @@ QString WeldSeamCompDialog::CurrentRobotName() const
     return m_pRobotCombo->currentData().toString();
 }
 
-QString WeldSeamCompDialog::CurrentPoseParamPath() const
+ConfigLocation WeldSeamCompDialog::CurrentPoseConfig() const
 {
     const QString robotName = CurrentRobotName();
-    return robotName.isEmpty() ? QString() : WeldPoseCompParamPath(robotName);
+    return robotName.isEmpty() ? ConfigLocation() : WeldPoseCompConfig(robotName);
 }
 
-QString WeldSeamCompDialog::CurrentSeamParamPath() const
+ConfigLocation WeldSeamCompDialog::CurrentSeamConfig() const
 {
     const QString robotName = CurrentRobotName();
-    return robotName.isEmpty() ? QString() : WeldSeamCompParamPath(robotName);
+    return robotName.isEmpty() ? ConfigLocation() : WeldSeamCompLocation(robotName);
 }
 
 int WeldSeamCompDialog::CurrentTypeIndex() const
@@ -1053,17 +1053,17 @@ void WeldSeamCompDialog::SetCurrentPoseGroupMatchMode(int mode)
 
 void WeldSeamCompDialog::LoadCurrentParam()
 {
-    const QString posePath = CurrentPoseParamPath();
-    const QString seamPath = CurrentSeamParamPath();
-    if (posePath.isEmpty() || seamPath.isEmpty())
+    const ConfigLocation poseConfig = CurrentPoseConfig();
+    const ConfigLocation seamConfig = CurrentSeamConfig();
+    if (!poseConfig.IsValid() || !seamConfig.IsValid())
     {
         AppendLog("未选择机器人，无法读取补偿参数。");
         return;
     }
 
     m_bLoading = true;
-    LoadPoseParam(posePath);
-    LoadSeamParam(seamPath);
+    LoadPoseParam(poseConfig);
+    LoadSeamParam(seamConfig);
     RefreshGroupCombo();
     RefreshTypeCombo();
     m_bLoading = false;
@@ -1106,7 +1106,7 @@ void WeldSeamCompDialog::RefreshCornerCompensationEditor()
     }
 }
 
-void WeldSeamCompDialog::LoadPoseParam(const QString& path)
+void WeldSeamCompDialog::LoadPoseParam(const ConfigLocation& location)
 {
     m_poseCompMatchMode = POSE_COMP_MATCH_BY_POSE;
     m_poseMatchMaxErrorDeg = 5.0;
@@ -1115,7 +1115,8 @@ void WeldSeamCompDialog::LoadPoseParam(const QString& path)
     m_poseGroupCornerCompEnabled.clear();
     m_poseRows.clear();
 
-    if (path.isEmpty() || !ConfigDatabase::HasIniFile(path))
+    if (!location.IsValid()
+        || !ConfigDatabase::HasScopedModule(location.scopeType, location.scopeId, location.module))
     {
         m_poseGroupNames.push_back("姿态补偿组1");
         m_poseGroupMatchModes.push_back(POSE_COMP_MATCH_BY_POSE);
@@ -1131,10 +1132,10 @@ void WeldSeamCompDialog::LoadPoseParam(const QString& path)
         return;
     }
 
-    COPini ini;
-    ini.SetFileName(LocalString(path));
+    ConfigSection ini;
+    ini.SetLocation(location);
     ini.SetSectionName("ALLWeldPoseComp");
-    ReadIniDouble(ini, "PoseMatchMaxErrorDeg", m_poseMatchMaxErrorDeg);
+    ReadConfigDouble(ini, "PoseMatchMaxErrorDeg", m_poseMatchMaxErrorDeg);
     int matchMode = m_poseCompMatchMode;
     if (ini.ReadString(false, POSE_COMP_MATCH_MODE_KEY, &matchMode) > 0)
     {
@@ -1193,12 +1194,12 @@ void WeldSeamCompDialog::LoadPoseParam(const QString& path)
                 row.segmentKind = DefaultPoseSegmentKind(segmentIndex);
             }
 
-            ReadIniDouble(ini, "Rx", row.poseRx);
-            ReadIniDouble(ini, "Ry", row.poseRy);
-            ReadIniDouble(ini, "Rz", row.poseRz);
-            ReadIniDouble(ini, "CompX", row.compX);
-            ReadIniDouble(ini, "CompY", row.compY);
-            ReadIniDouble(ini, "CompZ", row.compZ);
+            ReadConfigDouble(ini, "Rx", row.poseRx);
+            ReadConfigDouble(ini, "Ry", row.poseRy);
+            ReadConfigDouble(ini, "Rz", row.poseRz);
+            ReadConfigDouble(ini, "CompX", row.compX);
+            ReadConfigDouble(ini, "CompY", row.compY);
+            ReadConfigDouble(ini, "CompZ", row.compZ);
 
             m_poseRows.push_back(row);
         }
@@ -1272,13 +1273,13 @@ void WeldSeamCompDialog::LoadPoseCornerCompensationFromDatabase(const QString& r
     }
 }
 
-void WeldSeamCompDialog::LoadSeamParam(const QString& path)
+void WeldSeamCompDialog::LoadSeamParam(const ConfigLocation& location)
 {
     m_seamGroupNames.clear();
     m_seamRows.clear();
     WeldSeamCompConfig::Document document;
     QString error;
-    if (!WeldSeamCompConfig::Load(path, document, error))
+    if (!WeldSeamCompConfig::Load(location, document, error))
     {
         document = WeldSeamCompConfig::MakeDefaultDocument();
         AppendLog("读取焊道补偿失败，使用默认值：" + error);
@@ -2011,13 +2012,13 @@ bool WeldSeamCompDialog::SaveCurrentParam()
         AppendLog(QString("已备份旧补偿数据 → %1（%2）").arg(QDir::toNativeSeparators(backupRoot), backupSummary));
     }
 
-    if (!SavePoseParam(CurrentPoseParamPath(), error))
+    if (!SavePoseParam(CurrentPoseConfig(), error))
     {
         QMessageBox::warning(this, "保存补偿参数", error);
         AppendLog("保存失败：" + error);
         return false;
     }
-    if (!SaveSeamParam(CurrentSeamParamPath(), error))
+    if (!SaveSeamParam(CurrentSeamConfig(), error))
     {
         QMessageBox::warning(this, "保存补偿参数", error);
         AppendLog("保存失败：" + error);
@@ -2045,16 +2046,16 @@ bool WeldSeamCompDialog::SaveCurrentParam()
     return true;
 }
 
-bool WeldSeamCompDialog::SavePoseParam(const QString& path, QString& error) const
+bool WeldSeamCompDialog::SavePoseParam(const ConfigLocation& location, QString& error) const
 {
-    if (path.isEmpty())
+    if (!location.IsValid())
     {
         error = "姿态补偿配置库不可用。";
         return false;
     }
 
-    COPini ini;
-    ini.SetFileName(LocalString(path));
+    ConfigSection ini;
+    ini.SetLocation(location);
     ini.SetSectionName("ALLWeldPoseComp");
     const int poseGroupCount = static_cast<int>(m_poseGroupNames.size());
     const int activeGroupIndex = poseGroupCount <= 0
@@ -2159,7 +2160,7 @@ bool WeldSeamCompDialog::SavePoseCornerCompensationToDatabase(const QString& rob
     return true;
 }
 
-bool WeldSeamCompDialog::SaveSeamParam(const QString& path, QString& error) const
+bool WeldSeamCompDialog::SaveSeamParam(const ConfigLocation& location, QString& error) const
 {
     if (m_seamGroupNames.size() != m_seamRows.size())
     {
@@ -2168,7 +2169,8 @@ bool WeldSeamCompDialog::SaveSeamParam(const QString& path, QString& error) cons
     }
 
     WeldSeamCompConfig::Document document;
-    document.sourceExists = ConfigDatabase::HasIniFile(path);
+    document.sourceExists = ConfigDatabase::HasScopedModule(
+        location.scopeType, location.scopeId, location.module);
     document.activeGroupIndex = m_currentSeamGroupIndex;
     document.simplifyKeepAnchorsOnly = m_simplifyTrajectoryEnabled;
     document.loadedFromLegacy = m_seamLoadedFromLegacy;
@@ -2187,7 +2189,7 @@ bool WeldSeamCompDialog::SaveSeamParam(const QString& path, QString& error) cons
         group.values.weldSeamDirComp = row.weldSeamDirComp;
         document.groups.push_back(group);
     }
-    return WeldSeamCompConfig::SaveV2(path, document, error);
+    return WeldSeamCompConfig::SaveV2(location, document, error);
 }
 
 bool WeldSeamCompDialog::HasUnsavedChanges() const
@@ -2444,7 +2446,7 @@ void WeldSeamCompDialog::RefreshCompPreviewScanLine()
     {
         return;
     }
-    const QString iniPath = RobotDataHelper::MeasureWeldParamPath(robot);
+    const ConfigLocation measureConfig = RobotDataHelper::MeasureWeldConfig(robot);
     const QString section = RobotDataHelper::MeasureWeldCurrentScanSectionName(robot);
     if (section.isEmpty())
     {
@@ -2452,8 +2454,8 @@ void WeldSeamCompDialog::RefreshCompPreviewScanLine()
     }
     T_ROBOT_COORS scanStart;
     T_ROBOT_COORS scanEnd;
-    if (RobotDataHelper::ReadCoors(iniPath, section, "StartPos", scanStart, nullptr)
-        && RobotDataHelper::ReadCoors(iniPath, section, "EndPos", scanEnd, nullptr))
+    if (RobotDataHelper::ReadCoors(measureConfig, section, "StartPos", scanStart, nullptr)
+        && RobotDataHelper::ReadCoors(measureConfig, section, "EndPos", scanEnd, nullptr))
     {
         m_compPreviewScanStartXY = QPointF(scanStart.dX, scanStart.dY);
         m_compPreviewScanEndXY = QPointF(scanEnd.dX, scanEnd.dY);
@@ -3397,7 +3399,7 @@ void WeldSeamCompDialog::OpenCompPreviewDirectoryAsync(const QString& dir, bool 
     {
         m_pCompPreviewDirEdit->setText(m_compPreviewDir);
     }
-    RefreshCompPreviewScanLine();          // 轻量(读 INI)，留在 UI 线程
+    RefreshCompPreviewScanLine();          // 轻量数据库读取，留在 UI 线程
     QString storeError;
     StoreEditorValues(false, storeError);  // 把编辑框当前值写回行，供下方采集补偿编辑值
 

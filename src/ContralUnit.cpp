@@ -34,12 +34,11 @@ ContralUnit::~ContralUnit()
 bool ContralUnit::InitContralUnit()
 {
     bool bRtn = true;
-    COPini opini;
+    ConfigSection opini;
     RobotLog* ContralUnitLog = new RobotLog(".//Log//ContralUnit.txt");
-    // 打开INI文件
-    if (!opini.SetFileName(CONTRAL_UNIT_INFO_INI))
+    if (!opini.SetLocation(ConfigLocation::Global(QStringLiteral("ControlUnits"))))
     {
-        ContralUnitLog->write(LogColor::ERR, "读取配置文件失败：%s", CONTRAL_UNIT_INFO_INI);
+        ContralUnitLog->write(LogColor::ERR, "控制单元数据库位置无效");
         return false;
     }
 
@@ -100,12 +99,12 @@ bool ContralUnit::InitContralUnit()
             std::string sLogPth = GetStr(".//Log//%sLog.txt", info.sUnitName.c_str());
             RobotLog* pRobotLog = new RobotLog(sLogPth);
 
-            COPini robotIni;
-            const std::string robotIniPath = DATA_PATH + info.sUnitName + ROBOT_PARA_INI;
+            ConfigSection robotIni;
             int nRobotType = 0;
-            if (!robotIni.SetFileName(robotIniPath))
+            if (!robotIni.SetLocation(ConfigLocation::Robot(
+                    QString::fromUtf8(info.sUnitName.c_str()), QStringLiteral("RobotPara"))))
             {
-                ContralUnitLog->write(LogColor::ERR, "读取机器人参数数据失败：%s", robotIniPath.c_str());
+                ContralUnitLog->write(LogColor::ERR, "机器人参数数据库位置无效：%s", info.sUnitName.c_str());
                 bRtn = false;
             }
             else

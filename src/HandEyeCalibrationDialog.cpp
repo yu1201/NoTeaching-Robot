@@ -1,5 +1,6 @@
 #include "HandEyeCalibrationDialog.h"
 
+#include "AppPaths.h"
 #include "CameraFrameCache.h"
 #include "HandEyeMatrixDialog.h"
 #include "RobotCalculation.h"
@@ -149,24 +150,24 @@ void ApplyHandEyeNumericEdit(QLineEdit* edit)
 
 QString BuildHandEyeCalibrationReportPath(const QString& robotName, const QString& cameraSection)
 {
-    const QFileInfo calibrationInfo(GetHandEyeCalibrationIniPath(robotName, cameraSection));
-    return QDir::toNativeSeparators(calibrationInfo.dir().filePath(QString("HandEyeCalibrationReport_%1.txt").arg(cameraSection)));
+    const QDir reportDir(AppPaths::WritablePath(QStringLiteral("Result/%1/HandEye").arg(robotName)));
+    return QDir::toNativeSeparators(reportDir.filePath(QString("HandEyeCalibrationReport_%1.txt").arg(cameraSection)));
 }
 
 QString BuildCameraTimestampCheckPath(const QString& robotName, const QString& cameraSection)
 {
-    const QFileInfo calibrationInfo(GetHandEyeCalibrationIniPath(robotName, cameraSection));
+    const QDir reportDir(AppPaths::WritablePath(QStringLiteral("Result/%1/HandEye").arg(robotName)));
     const QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
-    return QDir::toNativeSeparators(calibrationInfo.dir().filePath(
+    return QDir::toNativeSeparators(reportDir.filePath(
         QString("CameraTimestampCheck_%1_%2.csv").arg(cameraSection, stamp)));
 }
 
 QString BuildHandEyeCalibrationDiagnosticPath(const QString& robotName, const QString& cameraSection, const QString& sceneName)
 {
-    const QFileInfo calibrationInfo(GetHandEyeCalibrationIniPath(robotName, cameraSection));
+    const QDir reportDir(AppPaths::WritablePath(QStringLiteral("Result/%1/HandEye").arg(robotName)));
     const QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
     const QString safeSceneName = sceneName.isEmpty() ? QString("Check") : sceneName;
-    return QDir::toNativeSeparators(calibrationInfo.dir().filePath(
+    return QDir::toNativeSeparators(reportDir.filePath(
         QString("HandEyeCalibrationDiagnostic_%1_%2_%3.txt").arg(cameraSection, safeSceneName, stamp)));
 }
 
@@ -2919,8 +2920,10 @@ bool HandEyeCalibrationDialog::ExportCalibrationReport(const HandEyeMatrixConfig
     lines << QString("HandEyeCalibrationReport %1").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"));
     lines << QString("RobotName %1").arg(m_robotName);
     lines << QString("CameraSection %1").arg(m_cameraSection);
-    lines << QString("CalibrationIni %1").arg(GetHandEyeCalibrationIniPath(m_robotName, m_cameraSection));
-    lines << QString("MatrixIni %1").arg(GetHandEyeMatrixIniPath(m_robotName, m_cameraSection));
+    lines << QString("CalibrationConfig %1").arg(GetHandEyeStorageLabel(
+        GetHandEyeCalibrationLocation(m_robotName, m_cameraSection)));
+    lines << QString("MatrixConfig %1").arg(GetHandEyeStorageLabel(
+        GetHandEyeMatrixLocation(m_robotName, m_cameraSection)));
     lines << QString("ReportFile %1").arg(reportPath);
     lines << "";
     lines << "[TargetPoint]";
@@ -3683,27 +3686,27 @@ Eigen::Vector3d HandEyeCalibrationDialog::ReadVectorEditors(const QVector<QLineE
 void HandEyeCalibrationDialog::UpdatePathLabels()
 {
     QString calibrationError;
-    QString calibrationPath;
-    if (EnsureHandEyeCalibrationIni(m_robotName, m_cameraSection, &calibrationError, &calibrationPath))
+    QString calibrationLabel;
+    if (EnsureHandEyeCalibrationConfig(m_robotName, m_cameraSection, &calibrationError, &calibrationLabel))
     {
-        m_pCalibrationPathLabel->setText(QString("标定文件：%1").arg(calibrationPath));
+        m_pCalibrationPathLabel->setText(QString("标定配置：%1").arg(calibrationLabel));
     }
     else
     {
-        m_pCalibrationPathLabel->setText("标定文件：创建失败");
-        AppendLog("标定文件准备失败：" + calibrationError);
+        m_pCalibrationPathLabel->setText("标定配置：创建失败");
+        AppendLog("标定配置准备失败：" + calibrationError);
     }
 
     QString matrixError;
-    QString matrixPath;
-    if (EnsureHandEyeMatrixIni(m_robotName, m_cameraSection, &matrixError, &matrixPath))
+    QString matrixLabel;
+    if (EnsureHandEyeMatrixConfig(m_robotName, m_cameraSection, &matrixError, &matrixLabel))
     {
-        m_pMatrixPathLabel->setText(QString("矩阵文件：%1").arg(matrixPath));
+        m_pMatrixPathLabel->setText(QString("矩阵配置：%1").arg(matrixLabel));
     }
     else
     {
-        m_pMatrixPathLabel->setText("矩阵文件：创建失败");
-        AppendLog("矩阵文件准备失败：" + matrixError);
+        m_pMatrixPathLabel->setText("矩阵配置：创建失败");
+        AppendLog("矩阵配置准备失败：" + matrixError);
     }
 
     if (m_pReportPathLabel != nullptr)

@@ -8,9 +8,8 @@
 #include <vector>
 
 // 配置库中的工艺参数读写层。
-// 主数据为配置库多键格式（scope=robot，module=WeldProcess/Entry<i> 每字段一键），
-// 旧的 84/15 字段 TAB 文本块（逻辑键 Data/<unit>/WeldPara.txt、WeaveDate.txt）作为
-// 兼容镜像双写保留；读取时多键优先，仅有旧文本块时自动惰性迁移成多键。
+// 数据为数据库原生多键格式（scope=robot，module=WeldProcess/Entry<i> 与
+// WeaveData/Entry<i>，每字段一键），不接受配置文件名或路径。
 // 读取后按“工件名 + 焊脚尺寸 + 层号”排序，让同组记录排在一起。
 class WeldProcessFile
 {
@@ -25,8 +24,6 @@ public:
     bool LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo);
     bool LoadFromControlUnit(const ContralUnit& contralUnit, int nUnitIndex = 0);
 
-    const std::string& GetWeaveIniFilePath() const;
-    const std::string& GetWeldIniFilePath() const;
     std::string GetLastError() const;
 
     const std::vector<T_WeaveDate>& GetWeaveTypeList() const;
@@ -48,15 +45,7 @@ public:
     bool ReorderWeldGroups(const std::vector<std::string>& orderedGroupKeys);
 
 private:
-    void EnsureGlobalStorage(int nUnitNo);
-    std::string BuildWeaveIniPath(const std::string& unitName) const;
-    std::string BuildWeldIniPath(const std::string& unitName) const;
-
-    bool LoadWeaveTxt();
-    bool LoadWeldTxt();
-    bool SaveWeaveTxt() const;
-    bool SaveWeldTxt() const;
-    // 配置库多键格式（主数据）：每个工艺/摆动条目的每个字段一键。
+    // 每个工艺/摆动条目的每个字段一键。
     bool TryLoadWeaveFromSettings();
     bool TryLoadWeldFromSettings();
     bool SaveWeaveToSettings() const;
@@ -69,6 +58,7 @@ private:
     bool BindWeldToWeave();
     std::string BuildGroupKey(const T_WELD_PARA& item) const;
 
+    // 纯内存字段编解码工具；不读写任何配置文件或路径。
     std::vector<std::string> SplitLine(const std::string& line, char delimiter) const;
     std::string JoinLine(const std::vector<std::string>& fields, char delimiter) const;
     bool ParseWeaveLine(const std::vector<std::string>& fields, T_WeaveDate& tWeaveDate) const;
@@ -85,8 +75,6 @@ private:
 
 private:
     T_CONTRAL_UNIT m_tContralUnitInfo;
-    std::string m_sWeaveIniFilePath;
-    std::string m_sWeldIniFilePath;
     std::string m_sLastError;
 
     int m_nAllWeaveTypeNum = 0;

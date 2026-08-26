@@ -3,6 +3,7 @@
 #include "WeldExecutionSafety.h"
 
 #include "Const.h"
+#include "ConfigSection.h"
 #include "ContralUnit.h"
 
 #include <QDialog>
@@ -17,7 +18,6 @@
 class MeasureThenWeldService;
 class CameraFrameCache;
 class RobotDriverAdaptor;
-class COPini;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -32,15 +32,15 @@ class RobotDriverAdaptor;
 struct T_PRECISE_MEASURE_PARAM
 {
     std::string sRobotName;
-    std::string sIniFilePath;
+    ConfigLocation configLocation;
     std::string sSectionName = "MeasureGroup0.Scan";
-    std::string sWeldParamFilePath;
+    ConfigLocation weldConfigLocation;
     std::string sWeldSectionName = "MeasureGroup0.Weld";
     int nParamGroupIndex = 0;
     QString sParamGroupName = "参数组1";
 
     // 配置库当前测量焊接参数组中的运行速度、扫描速度和相机时间补偿参数。
-    // 注：相机读取帧率已迁出测量参数，改由相机参数(CameraParam.ini 的 CameraReadFps)维护。
+    // 注：相机读取帧率已迁出测量参数，改由 CameraParam 模块的 CameraReadFps 维护。
     double dScanSpeed = 0.0;
     double dRunSpeed = 0.0;
     double dCameraTimeOffsetMs = 0.0;
@@ -147,9 +147,9 @@ private:
 
     // 读取配置库中当前启用的测量焊接参数组。
     bool LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_PRECISE_MEASURE_PARAM& param, QString& error);
-    bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
-    bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
-    bool ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;
+    bool ReadPulse(ConfigSection& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
+    bool ReadCoors(ConfigSection& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
+    bool ReadPulseList(ConfigSection& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;
 
     // 单段/多段脉冲运动，内部会阻塞等待机器人运动结束。
     bool MovePulseAndWait(RobotDriverAdaptor* pRobotDriver, const T_ANGLE_PULSE& pulse, double speed, const QString& name);

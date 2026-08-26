@@ -44,8 +44,8 @@ def main() -> None:
     require("ROBOT_TYPE_INOVANCE" in registry, "Inovance type is not registered")
     require("CreateInovanceDriver" in registry, "Inovance factory is missing")
     require(
-        '{ "RobotC", 2222, 0, false, 0,' in registry,
-        "Inovance setup must use port 2222 and no fake FTP port",
+        '{ "RobotC", 2222, 0, false, 7777, "192.168.23.25", "robot",' in registry,
+        "Inovance model defaults must bind the 2222 control and configured FTP endpoints",
     )
 
     protocol = function_body(driver, "bool InovanceRobotCtrl::SendCommand(")
@@ -71,6 +71,7 @@ def main() -> None:
         "ContinuousJog",
         "PauseResume",
         "OperationModeControl",
+        "NativeProgramUpload",
         "DiagnosticCommand",
         "CartesianRegister",
         "VerifiedProgramCompletion",
@@ -81,6 +82,7 @@ def main() -> None:
         "ServoPowerControl",
         "ToolDataRead",
         "TeachPendantSpeedControl",
+        "FtpFileTransfer",
     ):
         require(
             f"RobotDriverCapability::{capability}" in capabilities,
@@ -89,9 +91,7 @@ def main() -> None:
     for unsupported in (
         "RobotTimestamp",
         "PersistentProgramRecovery",
-        "NativeProgramUpload",
         "NativeProgramExecution",
-        "FtpFileTransfer",
         "OfflineTrajectoryExport",
         "ActualArcWeld",
         "IntegerRegister",
@@ -166,8 +166,31 @@ def main() -> None:
     for token in ("AbortCurrentProgramSafely", "Motor OFF", "RemovePermit"):
         require(token in shutdown, f"safe disconnect sequence missing: {token}")
 
+    transfer = function_body(
+        driver, "std::shared_ptr<RobotFileTransferSession> InovanceRobotCtrl::CreateFileTransferSession("
+    )
+    for token in ("RobotFtpFileTransfer", "m_ftpIp", "m_ftpPort", "FileTransferProfile()"):
+        require(token in transfer, f"Inovance FTP session wiring missing: {token}")
+    profile = function_body(driver, "RobotFileTransferProfile InovanceRobotCtrl::FileTransferProfile() const")
+    for token in ('"/TeachProgram"', '"*.pro"', '"*.prj"', '"*.pts"', '"*.jsn"'):
+        require(token in profile, f"Inovance FTP profile metadata missing: {token}")
+
+    prepare_upload = function_body(driver, "bool InovanceRobotCtrl::PrepareNativeProgramUpload()")
+    require("CreateFileTransferSession" in prepare_upload and "return true;" in prepare_upload,
+            "Inovance native upload preparation must validate the FTP bottom")
+    upload = function_body(driver, "int InovanceRobotCtrl::UploadNativeProgramSource(")
+    for token in (
+        "is_regular_file",
+        'Get_TaskRunSts 0',
+        'Get_TaskPrgPath 0',
+        "InovanceActiveProjectDirectory",
+        "UploadProgramFile",
+        "return 0;",
+    ):
+        require(token in upload, f"Inovance native program upload gate missing: {token}")
+    require("taskStatus == 1" in upload, "Inovance upload must refuse replacing a running task")
+
     for signature, explanation in (
-        ("bool InovanceRobotCtrl::PrepareNativeProgramUpload()", "未定义原生工程文件上传协议"),
         ("bool InovanceRobotCtrl::RunProgramAndWait(", "按名称原生程序执行保持关闭"),
         ("bool InovanceRobotCtrl::InstallHandEyeSupportPrograms(", "无法安装机器人侧手眼辅助程序"),
         ("bool InovanceRobotCtrl::GetHandEyeMatrixVariable(", "未定义可读取的3x3旋转"),
@@ -178,20 +201,25 @@ def main() -> None:
 
     require("defaultFtpPort > 0" in ui, "configuration UI does not hide unsupported FTP")
     require(
-        "汇川已登记2222远程以太网底层" in ui,
+        "汇川已登记2222远程以太网与FTP/原生程序上传底层" in ui,
         "configuration UI lacks Inovance capability warning",
+    )
+    require(
+        "PC接收steady时间（该品牌未提供控制器时间戳）" in read("src/FunctionTestDialog.cpp"),
+        "timestamp diagnostic does not disclose the Inovance PC-time fallback",
     )
     for token in (
         "`ROBOT_TYPE_INOVANCE`",
         "`Get_CmdSts(id)=1`",
         "`PersistentProgramRecovery`",
         "`ActualArcWeld`",
+        "PC steady",
         "首次现场使用前",
     ):
         require(token in contract, f"Inovance capability boundary is undocumented: {token}")
 
     print(
-        "PASS: Inovance adaptor uses verified 2222 framing, identity-bound data stream motion, and explicit capability limits"
+        "PASS: Inovance adaptor uses verified 2222 framing, model-bound FTP upload, PC-time fallback, and explicit capability limits"
     )
 
 

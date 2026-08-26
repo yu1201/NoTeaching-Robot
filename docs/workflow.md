@@ -14,9 +14,9 @@
 
 ## 控制单元与首次配置
 
-- 管理页面从 `Data` 下读取已保存的机器人文件夹。
+- 管理页面从 `Data/ConfigStore.db` 读取已保存的控制单元与机器人作用域。
 - 每个控制单元可维护中文名、IP、端口、FTP、STEP 工程路径、工件类型和启用状态。
-- 新建控制单元通过向导完成，当前工件类型支持波纹板，并从 `Data/WorkpieceTemplates/CorrugatedPlate` 复制默认参数。
+- 新建控制单元通过向导完成，当前工件类型支持波纹板，并从 `workpiece/CorrugatedPlate/*` 数据库模板模块复制默认参数。
 - 相机参数和手眼标定可跳过；跳过后依赖功能入口会禁用，完成保存后自动解除限制。
 
 ## FANUC 当前落地流程
@@ -36,9 +36,9 @@
 
 先测后焊流程读取：
 
-- `MeasureWeldParam.ini`
-- 相机参数 ini
-- 手眼矩阵 ini
+- 当前机器人 `MeasureWeldParam` 数据库模块
+- 当前机器人 `CameraParam` 数据库模块
+- 当前机器人和相机对应的 `HandEyeMatrix/<CameraSection>` 数据库模块
 
 其中：
 

@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "ContralUnit.h"
+#include "ConfigSection.h"
 #include "MeasureThenWeldService.h"
 
 #include <QDialog>
@@ -80,13 +81,13 @@ private:
     void BuildUi();
     void LoadRobotList();
     void LoadCurrentParam();
-    void LoadPoseParam(const QString& path);
+    void LoadPoseParam(const ConfigLocation& location);
     void LoadPoseCornerCompensationFromDatabase(const QString& robotName);
-    void LoadSeamParam(const QString& path);
+    void LoadSeamParam(const ConfigLocation& location);
     bool SaveCurrentParam();
-    bool SavePoseParam(const QString& path, QString& error) const;
+    bool SavePoseParam(const ConfigLocation& location, QString& error) const;
     bool SavePoseCornerCompensationToDatabase(const QString& robotName, QString& error) const;
-    bool SaveSeamParam(const QString& path, QString& error) const;
+    bool SaveSeamParam(const ConfigLocation& location, QString& error) const;
     void RefreshCornerCompensationEditor();
     void SetMode(CompMode mode);
     void RefreshGroupCombo();
@@ -112,8 +113,8 @@ private:
     void MarkCleanSnapshot();
     void AppendLog(const QString& text);
     QString CurrentRobotName() const;
-    QString CurrentPoseParamPath() const;
-    QString CurrentSeamParamPath() const;
+    ConfigLocation CurrentPoseConfig() const;
+    ConfigLocation CurrentSeamConfig() const;
     int CurrentRowCount() const;
     int CurrentTypeIndex() const;
     QString CurrentPoseSegmentTitle() const;

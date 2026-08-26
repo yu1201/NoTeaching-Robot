@@ -48,7 +48,7 @@ for axis in "SLURBT":
 
 merge = body(
     management,
-    "static void MergeMissingIniValues",
+    "static void MergeMissingConfigValues",
     "static bool ValidateKinematicsValues",
 )
 assert "!TryGetMapValueCaseInsensitive(target, sourceIt.key(), ignored)" in merge
@@ -71,14 +71,14 @@ for token in (
 ensure = body(
     management,
     "bool EnsureRobotKinematics",
-    "static QString WorkpieceTemplatePath",
+    "bool EnsureWorkpieceTemplateModules",
 )
 for token in (
-    "TemplateRobotParaPath(unit.robotType, unit.unitName)",
-    "WorkpieceTemplatePath(",
-    "MergeMissingIniValues(kinematics, factoryDefaults)",
-    "ReplaceIniSectionsAtomically(",
-    "ReadIniFileSnapshot(targetPath, verifiedSnapshot",
+    "TemplateRobotConfig(unit.robotType, unit.unitName)",
+    "ConfigLocation::WorkpieceTemplate(",
+    "MergeMissingConfigValues(kinematics, factoryDefaults)",
+    "ReplaceScopedModuleSectionsAtomically(",
+    "ReadScopedModuleSnapshot(",
     "ValidateKinematicsValues(verified, factoryDefaults, error)",
 ):
     assert token in ensure, f"missing kinematics repair contract: {token}"

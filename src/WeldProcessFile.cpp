@@ -24,15 +24,15 @@ RobotLog& WeldProcessLogger()
     return logger;
 }
 
-constexpr char kDelimiter = '\t';
 constexpr int kWeaveFieldCount = 15;
 constexpr int kWeldCoreFieldCount = 48;
 constexpr int kWeldTrackFieldCount = 33;
 constexpr int kWeldSwitchFieldCount = 2;
 constexpr int kWeldArcModeFieldCount = 1;
-constexpr int kWeldLegacyFieldCount = kWeldCoreFieldCount + kWeldTrackFieldCount + kWeldSwitchFieldCount + kWeldArcModeFieldCount; // 84：旧工艺文件
-constexpr int kWeldExtraFieldCount = 2; // 末尾扩展：姿态 + 圆滑(读时兼容84缺省默认，存时补全到86)
-constexpr int kWeldFieldCount = kWeldLegacyFieldCount + kWeldExtraFieldCount; // 86：当前完整
+constexpr int kWeldLegacyFieldCount =
+    kWeldCoreFieldCount + kWeldTrackFieldCount + kWeldSwitchFieldCount + kWeldArcModeFieldCount;
+constexpr int kWeldExtraFieldCount = 2;
+constexpr int kWeldFieldCount = kWeldLegacyFieldCount + kWeldExtraFieldCount;
 
 int NormalizeArcMode(int mode)
 {
@@ -329,9 +329,6 @@ bool WeldProcessFile::PrepareForRecreate()
         return false;
     }
 
-    m_sWeaveIniFilePath = BuildWeaveIniPath(m_tContralUnitInfo.sUnitName);
-    m_sWeldIniFilePath = BuildWeldIniPath(m_tContralUnitInfo.sUnitName);
-    EnsureGlobalStorage(m_tContralUnitInfo.nUnitNo);
     return true;
 }
 
@@ -339,7 +336,7 @@ bool WeldProcessFile::LoadFromControlUnit(const ContralUnit& contralUnit, int nU
 {
     if (nUnitIndex < 0 || nUnitIndex >= static_cast<int>(contralUnit.m_vtContralUnitInfo.size()))
     {
-        m_sLastError = "控制单元索引越界，无法读取工艺文件。";
+        m_sLastError = "控制单元索引越界，无法读取工艺配置。";
         LogError("%s", m_sLastError.c_str());
         return false;
     }
@@ -360,63 +357,19 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
 
     if (tContralUnitInfo.sUnitName.empty())
     {
-        m_sLastError = "控制单元名称为空，无法定位工艺文件。";
+        m_sLastError = "控制单元名称为空，无法定位工艺配置。";
         LogError("%s", m_sLastError.c_str());
         return false;
     }
 
-    m_sWeaveIniFilePath = BuildWeaveIniPath(tContralUnitInfo.sUnitName);
-    m_sWeldIniFilePath = BuildWeldIniPath(tContralUnitInfo.sUnitName);
-    EnsureGlobalStorage(tContralUnitInfo.nUnitNo);
-
-    // 多键格式（主数据）优先；仅有旧文本块时回退解析并惰性迁移成多键。
-    const bool loadedFromSettings = TryLoadWeaveFromSettings() && TryLoadWeldFromSettings();
-    if (!loadedFromSettings)
+    if (!TryLoadWeaveFromSettings() || !TryLoadWeldFromSettings())
     {
-        // Missing multi-key data may legitimately fall back to the legacy mirror.
-        // Present-but-invalid primary data must never be hidden by that fallback.
-        if (!m_sLastError.empty())
+        if (m_sLastError.empty())
         {
-            LogError("%s", m_sLastError.c_str());
-            return false;
+            m_sLastError = "配置库中未找到完整的焊接工艺与摆动数据。";
         }
-        m_vtWeaveTypeList.clear();
-        m_vtWeldParaList.clear();
-        m_nAllWeaveTypeNum = 0;
-        m_nAllWeldParaNum = 0;
-        m_nUseWeaveTypeNo = 0;
-        m_nUseWeldParaNo = 0;
-
-        if (!ConfigDatabase::HasTextFile(m_sWeaveIniFilePath) || !ConfigDatabase::HasTextFile(m_sWeldIniFilePath))
-        {
-            m_sLastError = GetStr("配置库中未找到工艺数据：%s / %s",
-                m_sWeaveIniFilePath.c_str(),
-                m_sWeldIniFilePath.c_str());
-            LogError("%s", m_sLastError.c_str());
-            return false;
-        }
-
-        if (!LoadWeaveTxt())
-        {
-            LogError("%s", m_sLastError.c_str());
-            return false;
-        }
-        if (!LoadWeldTxt())
-        {
-            LogError("%s", m_sLastError.c_str());
-            return false;
-        }
-
-        // 惰性迁移：把旧文本块写成多键主数据（失败仅记日志，不影响本次读取）。
-        if (!SaveWeaveToSettings() || !SaveWeldToSettings())
-        {
-            LogError("工艺数据迁移多键格式失败（保持文本块读取）：%s", m_sLastError.c_str());
-        }
-        else
-        {
-            LogInfo("工艺数据已从文本块迁移为配置库多键格式，控制单元: %s",
-                tContralUnitInfo.sUnitName.c_str());
-        }
+        LogError("%s", m_sLastError.c_str());
+        return false;
     }
 
     // 迁移/校正：把历史"所有工艺共享 WeaveData[0]"的数据展开成每工艺一份独立摆动（幂等）。
@@ -429,20 +382,9 @@ bool WeldProcessFile::LoadFromControlUnit(const T_CONTRAL_UNIT& tContralUnitInfo
         return false;
     }
 
-    LogInfo("工艺数据读取成功(%s)，控制单元: %s, 摆动类型数: %d, 工艺数: %d",
-        loadedFromSettings ? "多键" : "文本块",
+    LogInfo("工艺数据读取成功(数据库多键)，控制单元: %s, 摆动类型数: %d, 工艺数: %d",
         tContralUnitInfo.sUnitName.c_str(), m_nAllWeaveTypeNum, m_nAllWeldParaNum);
     return true;
-}
-
-const std::string& WeldProcessFile::GetWeaveIniFilePath() const
-{
-    return m_sWeaveIniFilePath;
-}
-
-const std::string& WeldProcessFile::GetWeldIniFilePath() const
-{
-    return m_sWeldIniFilePath;
 }
 
 std::string WeldProcessFile::GetLastError() const
@@ -509,7 +451,7 @@ bool WeldProcessFile::UpdateUseWeaveTypeNo(int nUseWeaveTypeNo)
     }
 
     m_nUseWeaveTypeNo = nUseWeaveTypeNo;
-    if (!SaveWeaveTxt())
+    if (!SaveWeaveToSettings())
     {
         LogError("%s", m_sLastError.c_str());
         ShowError(m_sLastError);
@@ -529,7 +471,7 @@ bool WeldProcessFile::UpdateUseWeldParaNo(int nUseWeldParaNo)
     }
 
     m_nUseWeldParaNo = nUseWeldParaNo;
-    if (!SaveWeldTxt())
+    if (!SaveWeldToSettings())
     {
         LogError("%s", m_sLastError.c_str());
         ShowError(m_sLastError);
@@ -558,7 +500,7 @@ bool WeldProcessFile::UpdateWeaveType(int nTypeNo, const T_WeaveDate& tWeaveDate
     }
 
     m_vtWeaveTypeList[nTypeNo] = tWeaveDate;
-    if (!SaveWeaveTxt())
+    if (!SaveWeaveToSettings())
     {
         LogError("%s", m_sLastError.c_str());
         ShowError(m_sLastError);
@@ -598,7 +540,7 @@ bool WeldProcessFile::UpdateWeldPara(int nParaNo, const T_WELD_PARA& tWeldPara)
         : T_WeaveDate {};
     m_vtWeldParaList[nParaNo] = item;
     NormalizeWeldOrderKeepGroupOrder();  // 内部含 NormalizeWeaveTypeParallel：摆动随工艺同步重排
-    if (!SaveWeaveTxt() || !SaveWeldTxt())  // 摆动列表也可能因重排变化，两个都要存
+    if (!SaveWeaveToSettings() || !SaveWeldToSettings())
     {
         LogError("%s", m_sLastError.c_str());
         ShowError(m_sLastError);
@@ -609,7 +551,7 @@ bool WeldProcessFile::UpdateWeldPara(int nParaNo, const T_WELD_PARA& tWeldPara)
 
 bool WeldProcessFile::AddWeldPara(const T_WELD_PARA& tWeldPara, int& newIndex)
 {
-    if (m_sWeaveIniFilePath.empty() || m_sWeldIniFilePath.empty())
+    if (m_tContralUnitInfo.sUnitName.empty())
     {
         if (!PrepareForRecreate())
         {
@@ -640,7 +582,7 @@ bool WeldProcessFile::AddWeldPara(const T_WELD_PARA& tWeldPara, int& newIndex)
     m_nAllWeldParaNum = static_cast<int>(m_vtWeldParaList.size());
     m_nUseWeldParaNo = static_cast<int>(m_vtWeldParaList.size()) - 1;
     newIndex = m_nUseWeldParaNo;
-    if (!SaveWeaveTxt() || !SaveWeldTxt())
+    if (!SaveWeaveToSettings() || !SaveWeldToSettings())
     {
         LogError("%s", m_sLastError.c_str());
         ShowError(m_sLastError);
@@ -671,7 +613,7 @@ bool WeldProcessFile::RemoveWeldPara(int nParaNo)
         m_nUseWeldParaNo = qBound(0, m_nUseWeldParaNo, m_nAllWeldParaNum - 1);
     }
 
-    if (!SaveWeaveTxt() || !SaveWeldTxt())  // 删工艺已同步丢弃其摆动并重排，两个都要存
+    if (!SaveWeaveToSettings() || !SaveWeldToSettings())
     {
         LogError("%s", m_sLastError.c_str());
         ShowError(m_sLastError);
@@ -769,188 +711,8 @@ bool WeldProcessFile::ReorderWeldGroups(const std::vector<std::string>& orderedG
 
     // 分组重排后让摆动随工艺一起重排，保持每工艺一份独立摆动（一一平行）。
     NormalizeWeaveTypeParallel();
-    if (!SaveWeaveTxt() || !SaveWeldTxt())
+    if (!SaveWeaveToSettings() || !SaveWeldToSettings())
     {
-        return false;
-    }
-    return true;
-}
-
-void WeldProcessFile::EnsureGlobalStorage(int nUnitNo)
-{
-    (void)nUnitNo;
-}
-
-std::string WeldProcessFile::BuildWeaveIniPath(const std::string& unitName) const
-{
-    return "Data/" + unitName + "/WeaveDate.txt";
-}
-
-std::string WeldProcessFile::BuildWeldIniPath(const std::string& unitName) const
-{
-    return "Data/" + unitName + "/WeldPara.txt";
-}
-
-bool WeldProcessFile::LoadWeaveTxt()
-{
-    std::string content;
-    if (!ConfigDatabase::ReadTextFile(m_sWeaveIniFilePath, &content))
-    {
-        m_sLastError = "从配置库读取摆动数据失败。";
-        return false;
-    }
-    std::istringstream in(content);
-
-    m_vtWeaveTypeList.clear();
-    m_nUseWeaveTypeNo = 0;
-
-    std::string line;
-    while (std::getline(in, line))
-    {
-        if (line.empty() || line[0] == '#')
-        {
-            continue;
-        }
-
-        const auto fields = SplitLine(line, kDelimiter);
-        if (fields.empty())
-        {
-            continue;
-        }
-
-        if (fields[0] == "USE")
-        {
-            if (fields.size() < 2 || !TryParseInt(fields[1], m_nUseWeaveTypeNo))
-            {
-                m_sLastError = "读取摆动数据 USE 行失败。";
-                return false;
-            }
-            continue;
-        }
-
-        T_WeaveDate weave {};
-        if (!ParseWeaveLine(fields, weave))
-        {
-            if (m_sLastError.empty())
-            {
-                m_sLastError = "摆动数据行格式错误。";
-            }
-            return false;
-        }
-        m_vtWeaveTypeList.push_back(weave);
-    }
-
-    m_nAllWeaveTypeNum = static_cast<int>(m_vtWeaveTypeList.size());
-    if (m_nAllWeaveTypeNum <= 0)
-    {
-        m_sLastError = "摆动数据中没有有效数据。";
-        return false;
-    }
-    m_nUseWeaveTypeNo = qBound(0, m_nUseWeaveTypeNo, m_nAllWeaveTypeNum - 1);
-    return true;
-}
-
-bool WeldProcessFile::LoadWeldTxt()
-{
-    std::string content;
-    if (!ConfigDatabase::ReadTextFile(m_sWeldIniFilePath, &content))
-    {
-        m_sLastError = "从配置库读取焊接工艺数据失败。";
-        return false;
-    }
-    std::istringstream in(content);
-
-    m_vtWeldParaList.clear();
-    m_nUseWeldParaNo = 0;
-
-    std::string line;
-    while (std::getline(in, line))
-    {
-        if (line.empty() || line[0] == '#')
-        {
-            continue;
-        }
-
-        const auto fields = SplitLine(line, kDelimiter);
-        if (fields.empty())
-        {
-            continue;
-        }
-
-        if (fields[0] == "USE")
-        {
-            if (fields.size() < 2 || !TryParseInt(fields[1], m_nUseWeldParaNo))
-            {
-                m_sLastError = "读取焊接工艺数据 USE 行失败。";
-                return false;
-            }
-            continue;
-        }
-
-        T_WELD_PARA weld {};
-        if (!ParseWeldLine(fields, weld))
-        {
-            if (m_sLastError.empty())
-            {
-                m_sLastError = "焊接工艺数据行格式错误。";
-            }
-            return false;
-        }
-        m_vtWeldParaList.push_back(weld);
-    }
-
-    NormalizeWeldOrderKeepGroupOrder();
-    m_nAllWeldParaNum = static_cast<int>(m_vtWeldParaList.size());
-    if (m_nAllWeldParaNum <= 0)
-    {
-        m_sLastError = "焊接工艺数据中没有有效数据。";
-        return false;
-    }
-    m_nUseWeldParaNo = qBound(0, m_nUseWeldParaNo, m_nAllWeldParaNum - 1);
-    return true;
-}
-
-bool WeldProcessFile::SaveWeaveTxt() const
-{
-    // 主数据：配置库多键；文本块仅作兼容镜像（模板复制/迁移工具仍按文件名访问）。
-    if (!SaveWeaveToSettings())
-    {
-        return false;
-    }
-
-    std::ostringstream out;
-    out << "# WeaveData\n";
-    out << "USE" << kDelimiter << m_nUseWeaveTypeNo << "\n";
-    for (const auto& item : m_vtWeaveTypeList)
-    {
-        out << JoinLine(BuildWeaveFields(item), kDelimiter) << "\n";
-    }
-    if (!ConfigDatabase::WriteTextFile(m_sWeaveIniFilePath, out.str()))
-    {
-        const_cast<WeldProcessFile*>(this)->m_sLastError = "写入配置库摆动数据失败。";
-        return false;
-    }
-    return true;
-}
-
-bool WeldProcessFile::SaveWeldTxt() const
-{
-    // 主数据：配置库多键；文本块仅作兼容镜像（84 字段格式保持不变）。
-    if (!SaveWeldToSettings())
-    {
-        return false;
-    }
-
-    std::ostringstream out;
-    out << "# WeldParameters\n";
-    out << "USE" << kDelimiter << m_nUseWeldParaNo << "\n";
-    for (const auto& item : m_vtWeldParaList)
-    {
-        out << JoinLine(BuildWeldFields(item), kDelimiter) << "\n";
-    }
-    if (!ConfigDatabase::WriteTextFile(m_sWeldIniFilePath, out.str()))
-    {
-        const_cast<WeldProcessFile*>(this)->m_sLastError = "写入配置库焊接工艺数据失败。";
         return false;
     }
     return true;

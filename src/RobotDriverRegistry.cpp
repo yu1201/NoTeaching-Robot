@@ -34,19 +34,19 @@ const std::vector<RobotDriverRegistration>& RobotDriverRegistry::RegisteredTypes
             ROBOT_TYPE_FANUC,
             "FANUC",
             &CreateFanucDriver,
-            { "RobotA", 9000, 9001, true, 21, "anonymous", false, "", "/md", false, "Job/FANUC" }
+            { "RobotA", 9000, 9001, true, 21, "", "anonymous", "", false, "", "/md", false, "Job/FANUC" }
         },
         {
             ROBOT_TYPE_STEP,
             "STEP",
             &CreateStepDriver,
-            { "RobotB", 30312, 0, false, 21, "root", true, "PCRobot", "/UserPrograms", true, "Job/STEP" }
+            { "RobotB", 30312, 0, false, 21, "", "root", "", true, "PCRobot", "/UserPrograms", true, "Job/STEP" }
         },
         {
             ROBOT_TYPE_INOVANCE,
             "汇川 Inovance",
             &CreateInovanceDriver,
-            { "RobotC", 2222, 0, false, 0, "", false, "", "", false, "Job/Inovance" }
+            { "RobotC", 2222, 0, false, 7777, "192.168.23.25", "robot", "123456", false, "", "/TeachProgram", false, "Job/Inovance" }
         },
     };
     return registrations;

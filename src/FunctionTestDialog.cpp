@@ -3,6 +3,7 @@
 #include "AppPaths.h"
 
 #include "CameraFrameCache.h"
+#include "ConfigDatabase.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
@@ -37,7 +38,6 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QSettings>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStringConverter>
@@ -788,6 +788,125 @@ QDoubleSpinBox* CreateKinematicsValueEditor(
     return editor;
 }
 
+class KinematicsCandidateSettings
+{
+public:
+    KinematicsCandidateSettings(const QString& robotName, const QString& candidateId)
+        : m_robotName(robotName.trimmed())
+        , m_candidateId(candidateId.trimmed())
+        , m_module(QStringLiteral("KinematicsCandidates/%1").arg(m_candidateId))
+    {
+        QString ignoredError;
+        ConfigDatabase::ReadScopedModuleSnapshot(
+            QStringLiteral("robot"), m_robotName, m_module, m_sections, &ignoredError);
+        m_originalSections = m_sections.keys();
+    }
+
+    bool HasValues() const
+    {
+        return !m_sections.isEmpty();
+    }
+
+    QVariant value(const QString& path, const QVariant& defaultValue = QVariant()) const
+    {
+        QString section;
+        QString key;
+        if (!SplitPath(path, &section, &key))
+        {
+            return defaultValue;
+        }
+        const auto sectionIt = m_sections.constFind(section);
+        if (sectionIt == m_sections.cend())
+        {
+            return defaultValue;
+        }
+        const auto valueIt = sectionIt->constFind(key);
+        return valueIt == sectionIt->cend() ? defaultValue : QVariant(*valueIt);
+    }
+
+    void setValue(const QString& path, const QVariant& value)
+    {
+        QString section;
+        QString key;
+        if (!SplitPath(path, &section, &key))
+        {
+            m_valid = false;
+            return;
+        }
+        QString text;
+        const int typeId = value.metaType().id();
+        if (typeId == QMetaType::Bool)
+        {
+            text = value.toBool() ? QStringLiteral("true") : QStringLiteral("false");
+        }
+        else if (typeId == QMetaType::Double || typeId == QMetaType::Float)
+        {
+            text = QString::number(value.toDouble(), 'g', 17);
+        }
+        else
+        {
+            text = value.toString();
+        }
+        m_sections[section].insert(key, text);
+    }
+
+    void remove(const QString& path)
+    {
+        QString section;
+        QString key;
+        if (!SplitPath(path, &section, &key))
+        {
+            m_valid = false;
+            return;
+        }
+        auto sectionIt = m_sections.find(section);
+        if (sectionIt == m_sections.end())
+        {
+            return;
+        }
+        sectionIt->remove(key);
+        if (sectionIt->isEmpty())
+        {
+            m_sections.erase(sectionIt);
+        }
+    }
+
+    bool sync(QString* error = nullptr)
+    {
+        if (!m_valid || m_robotName.isEmpty() || m_candidateId.isEmpty())
+        {
+            if (error != nullptr)
+            {
+                *error = QStringLiteral("运动学候选数据库身份无效。");
+            }
+            return false;
+        }
+        return ConfigDatabase::ReplaceScopedModuleSectionsAtomically(
+            QStringLiteral("robot"), m_robotName, m_module,
+            m_sections, m_originalSections, error);
+    }
+
+private:
+    static bool SplitPath(const QString& path, QString* section, QString* key)
+    {
+        const int slash = path.lastIndexOf(QLatin1Char('/'));
+        if (slash <= 0 || slash >= path.size() - 1)
+        {
+            return false;
+        }
+        *section = path.left(slash).trimmed();
+        *key = path.mid(slash + 1).trimmed();
+        return !section->isEmpty() && !key->isEmpty();
+    }
+
+    QString m_robotName;
+    QString m_candidateId;
+    QString m_module;
+    QMap<QString, QMap<QString, QString>> m_sections;
+    QStringList m_originalSections;
+    bool m_valid = true;
+};
+
 class KinematicsDraftDialog final : public QDialog
 {
 public:
@@ -795,10 +914,8 @@ public:
         : QDialog(parent)
         , m_driver(driver)
         , m_robotName(DefaultRobotName(driver))
-        , m_candidateDirectory(RobotDataHelper::BuildProjectPath(
-              QString("Result/KinematicsCandidates/%1").arg(m_robotName)))
     {
-        m_filePath = FindLatestCandidatePath();
+        m_candidateId = FindLatestCandidateId();
         setWindowTitle("机器人运动学参数（候选配置）");
         setModal(true);
         resize(1120, 760);
@@ -806,7 +923,7 @@ public:
         QVBoxLayout* rootLayout = new QVBoxLayout(this);
 
         QLabel* safetyLabel = new QLabel(
-            "本页面只保存候选参数，不修改当前 RobotPara.ini、不重建运行中的KDL链，也不向机器人写入DH。"
+            "本页面只把候选参数保存到配置数据库，不修改当前 RobotPara 模块、不重建运行中的KDL链，也不向机器人写入DH。"
             "填写完成后必须经过控制器正解对比和人工确认，才能另行启用。");
         safetyLabel->setWordWrap(true);
         safetyLabel->setStyleSheet(
@@ -836,7 +953,7 @@ public:
                     this,
                     "导入当前参数",
                     QString("将只用当前机器人 %1 内存中的标准DH覆盖表格前4列，并将约定切换为Standard DH；"
-                            "不会修改限位、速度、Tool1、Base/Flange或CAD姿态，也不会立即写文件。是否继续？")
+                            "不会修改限位、速度、Tool1、Base/Flange或CAD姿态，也不会立即写入数据库。是否继续？")
                         .arg(m_robotName))
                 == QMessageBox::Yes)
             {
@@ -866,9 +983,10 @@ public:
         return m_saved;
     }
 
-    QString DraftPath() const
+    QString DraftStorageLabel() const
     {
-        return m_filePath;
+        return QStringLiteral("robot/%1/KinematicsCandidates/%2")
+            .arg(m_robotName, m_candidateId);
     }
 
 private:
@@ -1129,7 +1247,7 @@ private:
         readToolButton->setMinimumHeight(40);
         layout->addWidget(readToolButton, 0, Qt::AlignLeft);
 
-        m_toolSourceLabel = new QLabel("来源：尚未读取控制器；当前显示本地GunTool或候选文件值。");
+        m_toolSourceLabel = new QLabel("来源：尚未读取控制器；当前显示数据库GunTool或候选记录值。");
         m_toolSourceLabel->setWordWrap(true);
         layout->addWidget(m_toolSourceLabel);
 
@@ -1260,30 +1378,36 @@ private:
     void LoadDraftOrDefaults()
     {
         PopulateSourceDefaults();
-        if (!QFileInfo::exists(m_filePath))
+        if (m_candidateId.isEmpty())
         {
             SetStatus(QString(
-                "尚无候选文件；已载入SA10说明书中的焊接限位和最大速度。"
-                "DH区全零表示待填写，不是有效模型。候选目录：%1")
-                .arg(NativeAbsolutePath(m_candidateDirectory)), false);
+                "配置库中尚无运动学候选；已载入SA10说明书中的焊接限位和最大速度。"
+                "DH区全零表示待填写，不是有效模型。存储范围：robot/%1/KinematicsCandidates")
+                .arg(m_robotName), false);
             return;
         }
 
-        QSettings settings(m_filePath, QSettings::IniFormat);
+        KinematicsCandidateSettings settings(m_robotName, m_candidateId);
+        if (!settings.HasValues())
+        {
+            SetStatus(QString("运动学候选记录不存在或为空：robot/%1/KinematicsCandidates/%2")
+                .arg(m_robotName, m_candidateId), true);
+            return;
+        }
         const QString storedModel = settings.value("Model/RobotModel").toString().trimmed();
         const QString storedRobotName = settings.value("Model/RobotName").toString().trimmed();
         if (storedModel.compare("SA10/2000H", Qt::CaseInsensitive) != 0
             || storedRobotName.compare(m_robotName, Qt::CaseInsensitive) != 0)
         {
-            SetStatus(QString("候选文件与当前目标不匹配，已拒绝加载：%1")
-                .arg(NativeAbsolutePath(m_filePath)), true);
+            SetStatus(QString("候选记录与当前目标不匹配，已拒绝加载：robot/%1/KinematicsCandidates/%2")
+                .arg(m_robotName, m_candidateId), true);
             return;
         }
         QString draftError;
         if (!ValidateDraftSettings(settings, &draftError))
         {
-            SetStatus(QString("候选文件校验失败：%1；已保留说明书默认页面。文件：%2")
-                .arg(draftError, NativeAbsolutePath(m_filePath)), true);
+            SetStatus(QString("候选记录校验失败：%1；已保留说明书默认页面。记录：robot/%2/KinematicsCandidates/%3")
+                .arg(draftError, m_robotName, m_candidateId), true);
             return;
         }
         const QString convention = settings.value("Model/Convention", "StandardDH").toString();
@@ -1315,9 +1439,9 @@ private:
                     settings.value(QString("CadReferencePose/J%1_deg").arg(joint + 1)).toDouble());
             }
         }
-        m_dhSource = settings.value("Source/Dh", "CandidateFile_Unspecified").toString();
-        m_limitSource = settings.value("Source/JointLimits", "CandidateFile_Unspecified").toString();
-        m_speedSource = settings.value("Source/JointSpeed", "CandidateFile_Unspecified").toString();
+        m_dhSource = settings.value("Source/Dh", "CandidateDatabase_Unspecified").toString();
+        m_limitSource = settings.value("Source/JointLimits", "CandidateDatabase_Unspecified").toString();
+        m_speedSource = settings.value("Source/JointSpeed", "CandidateDatabase_Unspecified").toString();
 
         LoadPose(settings, "Base", m_baseKnownCheck, m_baseEditors);
         LoadPose(settings, "Flange", m_flangeKnownCheck, m_flangeEditors);
@@ -1332,23 +1456,23 @@ private:
         {
             LoadSixValues(settings, "Tool1", m_toolEditors);
             m_toolReadFromController = settings.value("Tool1/ReadFromController", false).toBool();
-            m_toolPoseSource = settings.value("Source/ToolPose", "CandidateFile_Unspecified").toString();
-            m_toolPoseConvention = settings.value("Tool1/PoseConvention", "CandidateFile_Unspecified").toString();
-            const QString source = settings.value("Tool1/Source", "候选文件").toString();
+            m_toolPoseSource = settings.value("Source/ToolPose", "CandidateDatabase_Unspecified").toString();
+            m_toolPoseConvention = settings.value("Tool1/PoseConvention", "CandidateDatabase_Unspecified").toString();
+            const QString source = settings.value("Tool1/Source", "候选数据库记录").toString();
             m_toolSourceLabel->setText(QString("来源：%1").arg(source));
         }
         m_toolPoseKnownCheck->setChecked(toolPoseKnown);
         if (!toolPoseKnown)
         {
-            m_toolSourceLabel->setText("来源：候选文件没有已人工确认的TCP；当前显示本地GunTool，未作为候选值载入。");
+            m_toolSourceLabel->setText("来源：候选数据库记录没有已人工确认的TCP；当前显示本地GunTool，未作为候选值载入。");
         }
 
-        SetStatus(QString("已加载候选文件：%1；当前状态仍为未验证，并需重新确认当前机器人本体。")
-            .arg(NativeAbsolutePath(m_filePath)), false);
+        SetStatus(QString("已加载候选记录：robot/%1/KinematicsCandidates/%2；当前状态仍为未验证，并需重新确认当前机器人本体。")
+            .arg(m_robotName, m_candidateId), false);
         UpdateConventionDescription();
     }
 
-    bool ValidateDraftSettings(QSettings& settings, QString* error) const
+    bool ValidateDraftSettings(KinematicsCandidateSettings& settings, QString* error) const
     {
         auto fail = [error](const QString& message) {
             if (error != nullptr)
@@ -1476,7 +1600,7 @@ private:
     }
 
     static void LoadSixValues(
-        QSettings& settings,
+        KinematicsCandidateSettings& settings,
         const QString& group,
         std::array<QDoubleSpinBox*, 6>& editors)
     {
@@ -1488,7 +1612,7 @@ private:
     }
 
     static void LoadPose(
-        QSettings& settings,
+        KinematicsCandidateSettings& settings,
         const QString& group,
         QCheckBox* knownCheck,
         std::array<QDoubleSpinBox*, 6>& editors)
@@ -1501,7 +1625,7 @@ private:
     }
 
     static void SaveSixValues(
-        QSettings& settings,
+        KinematicsCandidateSettings& settings,
         const QString& group,
         const std::array<QDoubleSpinBox*, 6>& editors)
     {
@@ -1567,16 +1691,8 @@ private:
             return false;
         }
 
-        if (!QDir().mkpath(m_candidateDirectory))
-        {
-            if (error != nullptr) *error = "无法创建候选参数目录：" + NativeAbsolutePath(m_candidateDirectory);
-            return false;
-        }
-
-        const QString savePath = QDir(m_candidateDirectory).filePath(
-            QString("KinematicsModelCandidate_%1.ini")
-                .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz")));
-        QSettings settings(savePath, QSettings::IniFormat);
+        const QString candidateId = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+        KinematicsCandidateSettings settings(m_robotName, candidateId);
         settings.setValue("Model/Version", 1);
         settings.setValue("Model/Status", "CandidateUnvalidated");
         settings.setValue("Model/RobotName", m_robotName);
@@ -1648,14 +1764,27 @@ private:
         }
         settings.setValue("Validation/Validated", false);
         settings.setValue("Validation/Reason", "AwaitingControllerFkAndModelValidation");
-        settings.sync();
-
-        if (settings.status() != QSettings::NoError)
+        QString syncError;
+        if (!settings.sync(&syncError))
         {
-            if (error != nullptr) *error = "候选参数写入失败：" + NativeAbsolutePath(savePath);
+            if (error != nullptr)
+            {
+                *error = QString("候选参数写入数据库失败：%1").arg(syncError);
+            }
             return false;
         }
-        m_filePath = savePath;
+        if (!ConfigDatabase::WriteScopedSetting(
+                QStringLiteral("robot"), m_robotName,
+                QStringLiteral("KinematicsCandidates"), QStringLiteral("LatestId"),
+                candidateId, QStringLiteral("string")))
+        {
+            if (error != nullptr)
+            {
+                *error = QStringLiteral("候选参数已写入，但更新最新候选索引失败。");
+            }
+            return false;
+        }
+        m_candidateId = candidateId;
         return true;
     }
 
@@ -1762,7 +1891,7 @@ private:
     }
 
     static void SaveOptionalPose(
-        QSettings& settings,
+        KinematicsCandidateSettings& settings,
         const QString& group,
         QCheckBox* knownCheck,
         const std::array<QDoubleSpinBox*, 6>& editors)
@@ -1776,20 +1905,20 @@ private:
         }
     }
 
-    QString FindLatestCandidatePath() const
+    QString FindLatestCandidateId() const
     {
-        const QFileInfoList candidates = QDir(m_candidateDirectory).entryInfoList(
-            { "KinematicsModelCandidate_*.ini" },
-            QDir::Files | QDir::Readable,
-            QDir::Time);
-        return candidates.isEmpty() ? QString() : candidates.constFirst().absoluteFilePath();
+        QString candidateId;
+        ConfigDatabase::ReadScopedSetting(
+            QStringLiteral("robot"), m_robotName,
+            QStringLiteral("KinematicsCandidates"), QStringLiteral("LatestId"),
+            &candidateId);
+        return candidateId.trimmed();
     }
 
 private:
     RobotDriverAdaptor* m_driver = nullptr;
     QString m_robotName;
-    QString m_candidateDirectory;
-    QString m_filePath;
+    QString m_candidateId;
     QString m_dhSource;
     QString m_limitSource;
     QString m_speedSource;
@@ -1879,7 +2008,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
     QPushButton* callJobBtn = CreateTestButton("调用任务");
     QPushButton* uploadLsBtn = CreateTestButton("发送原生程序");
     QPushButton* curposDiagBtn = CreateTestButton("机器人诊断");
-    QPushButton* timestampDiagBtn = CreateTestButton("机器人+相机时间戳");
+    QPushButton* timestampDiagBtn = CreateTestButton("状态时间轴+相机时间轴");
     basicLayout->addWidget(setSpeedBtn, 0, 0);
     basicLayout->addWidget(getPosBtn, 0, 1);
     basicLayout->addWidget(getPulseBtn, 1, 0);
@@ -1937,7 +2066,7 @@ FunctionTestDialog::FunctionTestDialog(ContralUnit* pContralUnit, int unitIndex,
 		  RobotDriverCapability::VerifiedProgramCompletion,
 		  RobotDriverCapability::VerifiedSafeAbort }, QStringLiteral("调用任务"));
 	configureCapabilityButton(timestampDiagBtn,
-		{ RobotDriverCapability::PassiveState }, QStringLiteral("机器人时间戳诊断"));
+		{ RobotDriverCapability::PassiveState }, QStringLiteral("状态时间轴诊断"));
     uploadLsBtn->setEnabled(canUploadNativeProgram);
     curposDiagBtn->setEnabled(canRunDiagnostic);
     uploadLsBtn->setToolTip(canUploadNativeProgram
@@ -2393,7 +2522,7 @@ void FunctionTestDialog::FanucCurposDiagnosticTest()
 void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
 {
     RobotDriverAdaptor* pRobotDriverAdaptor = GetFirstDriverWithCapability(
-		RobotDriverCapability::PassiveState, QStringLiteral("机器人+相机时间戳"));
+		RobotDriverCapability::PassiveState, QStringLiteral("状态时间轴+相机时间轴"));
     if (pRobotDriverAdaptor == nullptr)
     {
         return;
@@ -2404,11 +2533,16 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
     {
         const QString message = "当前机器人没有可用的专属相机缓存，请确认机器人相机线程已初始化。";
         AppendLog(message);
-        QMessageBox::warning(this, "机器人+相机时间戳", message);
+        QMessageBox::warning(this, "状态时间轴+相机时间轴", message);
         return;
     }
 
     const QString robotName = DefaultRobotName(pRobotDriverAdaptor);
+    const bool hasNativeRobotTimestamp = pRobotDriverAdaptor->Supports(
+        RobotDriverCapability::RobotTimestamp);
+    const QString robotTimelineSource = hasNativeRobotTimestamp
+        ? QStringLiteral("控制器原生时间戳")
+        : QStringLiteral("PC接收steady时间（该品牌未提供控制器时间戳）");
     CameraFrameCache* cameraCache = m_pCameraCache;
     const std::uint64_t beginCameraSequence = cameraCache->Mark();
 
@@ -2420,8 +2554,9 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
     int duplicateRobotReadCount = 0;
     int missingRobotTimestampCount = 0;
 
-    AppendLog(QString("机器人+相机时间戳检测开始：采集 %1 ms；FANUC/STEP 使用 robot_ms，其他使用 PC steady ms。")
-        .arg(kRobotCameraTimestampCheckDurationMs));
+    AppendLog(QString("状态时间轴+相机时间轴检测开始：采集 %1 ms；机器人状态时间轴来源=%2。")
+		.arg(kRobotCameraTimestampCheckDurationMs)
+        .arg(robotTimelineSource));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRobotCameraTimestampCheckDurationMs);
     while (std::chrono::steady_clock::now() < deadline)
     {
@@ -2685,7 +2820,7 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
         && std::abs(robotTotalRatio - 1.0) <= 0.05
         && std::abs(cameraVsRobotScale - 1.0) <= 0.05)
     {
-        conclusion = "结论：相机timestamp、机器人robot_ms与本机接收时间的总时长比例都接近 1，时间单位假设基本成立。";
+        conclusion = "结论：相机timestamp、机器人状态时间轴与本机接收时间的总时长比例都接近 1，时间单位假设基本成立。";
     }
     else
     {
@@ -2699,7 +2834,7 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
     QString saveError;
     const bool saveOk = RobotDataHelper::SaveTextFileLines(csvPath, csvLines, &saveError);
 
-    const QString resultText = QString(
+    QString resultText = QString(
         "采集时长：%1 ms\n"
         "相机帧数：%2，机器人样本数：%3\n"
         "相机总时长：timestamp=%4 ms，system=%5 ms，比例=%6\n"
@@ -2741,15 +2876,16 @@ void FunctionTestDialog::RobotCameraTimestampDiagnosticTest()
         .arg(robotSystemNonIncreasingCount)
         .arg(conclusion)
         .arg(saveOk ? csvPath : QString("保存失败：%1").arg(saveError));
+    resultText.prepend(QString("机器人状态时间轴来源：%1\n").arg(robotTimelineSource));
 
-    AppendLog(QString("机器人+相机时间戳检测完成：相机帧=%1，机器人样本=%2，camera/system=%3，robot/system=%4，camera/robot=%5，CSV=%6")
+    AppendLog(QString("状态时间轴+相机时间轴检测完成：相机帧=%1，机器人样本=%2，camera/system=%3，robot/system=%4，camera/robot=%5，CSV=%6")
         .arg(cameraFrames.size())
         .arg(robotSamples.size())
         .arg(cameraTotalRatio, 0, 'f', 6)
         .arg(robotTotalRatio, 0, 'f', 6)
         .arg(cameraVsRobotScale, 0, 'f', 6)
         .arg(saveOk ? csvPath : QString("保存失败")));
-    QMessageBox::information(this, "机器人+相机时间戳", resultText);
+    QMessageBox::information(this, "状态时间轴+相机时间轴", resultText);
 }
 
 void FunctionTestDialog::FanucCheckDoneTest()
@@ -3325,7 +3461,7 @@ void FunctionTestDialog::EditKinematicsParameters()
     const QString message = QString(
         "运动学候选参数已保存：%1\n"
         "状态：CandidateUnvalidated；当前运行参数和机器人控制器均未改变。")
-        .arg(NativeAbsolutePath(dialog.DraftPath()));
+        .arg(dialog.DraftStorageLabel());
     AppendLog(message);
     QMessageBox::information(this, "填写DH/MDH参数", message);
 }
@@ -3417,7 +3553,7 @@ void FunctionTestDialog::FitDhParametersFromSamples()
         "拟合后 RMSE：位置=%4 mm，姿态=%5 deg\n"
         "拟合使用工具：%6\n"
         "报告：%7\n"
-        "说明：结果未自动写回 ini，请先核对报告再决定是否替换当前参数。")
+        "说明：结果未自动写回数据库，请先核对报告再决定是否替换当前参数。")
         .arg(samples.size())
         .arg(beforePositionRmse, 0, 'f', 4)
         .arg(beforeRotationRmse, 0, 'f', 4)

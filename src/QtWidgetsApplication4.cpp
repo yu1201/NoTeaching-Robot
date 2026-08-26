@@ -23,7 +23,7 @@
 #include "OnlineServicesConfig.h"
 #include "OnlineServicesDialog.h"
 #include "OnlineServicesLoginDialog.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "PointCloudProcessingConfig.h"
 #include "ScanDataUploader.h"
 #include "PreciseMeasureEditDialog.h"
@@ -229,7 +229,7 @@ namespace
 		bool handEyeReady = true;
 	};
 
-	std::string ToIniBytesGlobal(const QString& text)
+	std::string ToConfigBytesGlobal(const QString& text)
 	{
 		return text.toUtf8().toStdString();
 	}
@@ -1176,49 +1176,48 @@ namespace
 		fieldWidget->setVisible(visible);
 	}
 
-	QString RobotParaPathForSetup(const QString& robotName)
+	ConfigLocation RobotConfigForSetup(const QString& robotName)
 	{
-		return RobotDataHelper::BuildProjectPath(QString("Data/%1/RobotPara.ini").arg(robotName));
+		return ConfigLocation::Robot(robotName, QStringLiteral("RobotPara"));
 	}
 
 	bool WriteRobotSetupReadyFlagGlobal(const QString& robotName, const QString& key, QString* error = nullptr)
 	{
-		COPini ini;
-		const QString path = RobotParaPathForSetup(robotName);
-		if (!ini.SetFileName(false, ToIniBytesGlobal(path)))
+		ConfigSection section;
+		if (!section.SetLocation(RobotConfigForSetup(robotName)))
 		{
 			if (error != nullptr)
 			{
-				*error = QString("打开机器人参数数据失败：%1").arg(path);
+				*error = QString("机器人参数数据库位置无效：%1").arg(robotName);
 			}
 			return false;
 		}
-		ini.SetSectionName("SetupStatus");
-		if (!ini.WriteString(ToIniBytesGlobal(key), 1))
+		section.SetSectionName("SetupStatus");
+		if (!section.WriteString(ToConfigBytesGlobal(key), 1))
 		{
 			if (error != nullptr)
 			{
-				*error = QString("写入设置完成状态失败：%1 [%2]").arg(path, key);
+				*error = QString("写入设置完成状态失败：%1 [%2]").arg(robotName, key);
 			}
 			return false;
 		}
 		return true;
 	}
 
-	QString ReadIniStringGlobal(COPini& ini, const QString& key, const QString& fallback = QString())
+	QString ReadConfigStringGlobal(ConfigSection& ini, const QString& key, const QString& fallback = QString())
 	{
 		std::string rawValue;
-		if (ini.ReadString(false, ToIniBytesGlobal(key), rawValue) > 0)
+		if (ini.ReadString(false, ToConfigBytesGlobal(key), rawValue) > 0)
 		{
 			return DecodeConfigText(rawValue);
 		}
 		return fallback;
 	}
 
-	int ReadIniIntGlobal(COPini& ini, const QString& key, int fallback = 0)
+	int ReadConfigIntGlobal(ConfigSection& ini, const QString& key, int fallback = 0)
 	{
 		int value = fallback;
-		if (ini.ReadString(false, ToIniBytesGlobal(key), &value) > 0)
+		if (ini.ReadString(false, ToConfigBytesGlobal(key), &value) > 0)
 		{
 			return value;
 		}
@@ -1236,21 +1235,21 @@ namespace
 			return status;
 		}
 
-		COPini ini;
-		if (!ini.SetFileName(ToIniBytesGlobal(RobotParaPathForSetup(robotName))))
+		ConfigSection ini;
+		if (!ini.SetLocation(RobotConfigForSetup(robotName)))
 		{
 			return status;
 		}
 
 		ini.SetSectionName("SetupStatus");
-		status.enabled = ReadIniIntGlobal(ini, "Enabled", status.enabled ? 1 : 0) != 0;
-		status.workpieceType = ReadIniStringGlobal(ini, "WorkpieceType", status.workpieceType).trimmed();
+		status.enabled = ReadConfigIntGlobal(ini, "Enabled", status.enabled ? 1 : 0) != 0;
+		status.workpieceType = ReadConfigStringGlobal(ini, "WorkpieceType", status.workpieceType).trimmed();
 		if (status.workpieceType.isEmpty())
 		{
 			status.workpieceType = kWorkpieceCorrugatedPlate;
 		}
-		status.cameraParamReady = ReadIniIntGlobal(ini, "CameraParamReady", status.cameraParamReady ? 1 : 0) != 0;
-		status.handEyeReady = ReadIniIntGlobal(ini, "HandEyeReady", status.handEyeReady ? 1 : 0) != 0;
+		status.cameraParamReady = ReadConfigIntGlobal(ini, "CameraParamReady", status.cameraParamReady ? 1 : 0) != 0;
+		status.handEyeReady = ReadConfigIntGlobal(ini, "HandEyeReady", status.handEyeReady ? 1 : 0) != 0;
 		return status;
 	}
 
@@ -2675,10 +2674,25 @@ namespace
 				});
 			connect(m_robotTypeCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this]()
 				{
+					const int robotType = m_robotTypeCombo->currentData().toInt();
+					const RobotDriverSetupProfile* setup =
+						RobotDriverRegistry::SetupProfile(robotType);
 					const QString selectedModel = m_robotModelCombo != nullptr
 						? m_robotModelCombo->currentData().toString() : QString();
+					if (setup != nullptr && setup->defaultFtpPort > 0)
+					{
+						const QString defaultHost = QString::fromUtf8(setup->defaultFtpHost);
+						m_ftpIpEdit->setText(defaultHost.isEmpty()
+							? m_socketIpEdit->text().trimmed() : defaultHost);
+						m_ftpPortEdit->setText(QString::number(setup->defaultFtpPort));
+					}
+					else
+					{
+						m_ftpIpEdit->setText(QString());
+						m_ftpPortEdit->clear();
+					}
 					ApplyFtpCredentialForRobotType(
-						m_robotTypeCombo->currentData().toInt(),
+						robotType,
 						m_ftpUserEdit,
 						m_ftpPasswordEdit,
 						true);
@@ -2735,35 +2749,35 @@ namespace
 			QString password;
 		};
 
-		static QString ControlInfoPath()
+		static ConfigLocation ControlInfoConfig()
 		{
-			return RobotDataHelper::BuildProjectPath("Data/ContralUnitInfo.ini");
+			return ConfigLocation::Global(QStringLiteral("ControlUnits"));
 		}
 
-		static QString RobotParaPath(const QString& unitName)
+		static ConfigLocation RobotConfig(const QString& unitName)
 		{
-			return RobotDataHelper::BuildProjectPath(QString("Data/%1/RobotPara.ini").arg(unitName));
+			return ConfigLocation::Robot(unitName, QStringLiteral("RobotPara"));
 		}
 
-		static std::string ToIniBytes(const QString& text)
+		static std::string ToConfigBytes(const QString& text)
 		{
 			return text.toUtf8().toStdString();
 		}
 
-		static QString ReadIniString(COPini& ini, const QString& key, const QString& fallback = QString())
+		static QString ReadConfigString(ConfigSection& ini, const QString& key, const QString& fallback = QString())
 		{
 			std::string rawValue;
-			if (ini.ReadString(false, ToIniBytes(key), rawValue) > 0)
+			if (ini.ReadString(false, ToConfigBytes(key), rawValue) > 0)
 			{
 				return DecodeConfigText(rawValue);
 			}
 			return fallback;
 		}
 
-		static int ReadIniInt(COPini& ini, const QString& key, int fallback = 0)
+		static int ReadConfigInt(ConfigSection& ini, const QString& key, int fallback = 0)
 		{
 			int value = fallback;
-			if (ini.ReadString(false, ToIniBytes(key), &value) > 0)
+			if (ini.ReadString(false, ToConfigBytes(key), &value) > 0)
 			{
 				return value;
 			}
@@ -2780,15 +2794,15 @@ namespace
 			}
 			const QString templateRobot = QString::fromUtf8(setup->templateUnitName);
 			credential.user = QString::fromUtf8(setup->defaultFtpUser);
-			credential.password.clear();
+			credential.password = QString::fromUtf8(setup->defaultFtpPassword);
 
-			COPini robotIni;
+			ConfigSection robotIni;
 			if (!templateRobot.isEmpty()
-				&& robotIni.SetFileName(ToIniBytes(RobotParaPath(templateRobot))))
+				&& robotIni.SetLocation(RobotConfig(templateRobot)))
 			{
 				robotIni.SetSectionName("BaseParam");
-				credential.user = ReadIniString(robotIni, "FTPUser", credential.user);
-				credential.password = ReadIniString(robotIni, "FTPPassWord", credential.password);
+				credential.user = ReadConfigString(robotIni, "FTPUser", credential.user);
+				credential.password = ReadConfigString(robotIni, "FTPPassWord", credential.password);
 			}
 			return credential;
 		}
@@ -2810,14 +2824,14 @@ namespace
 			}
 		}
 
-		static bool WriteIniString(COPini& ini, const QString& key, const QString& value)
+		static bool WriteConfigString(ConfigSection& ini, const QString& key, const QString& value)
 		{
-			return ini.WriteString(ToIniBytes(key), ToIniBytes(value));
+			return ini.WriteString(ToConfigBytes(key), ToConfigBytes(value));
 		}
 
-		static bool WriteIniInt(COPini& ini, const QString& key, int value)
+		static bool WriteConfigInt(ConfigSection& ini, const QString& key, int value)
 		{
-			return ini.WriteString(ToIniBytes(key), value);
+			return ini.WriteString(ToConfigBytes(key), value);
 		}
 
 		static QMap<QString, QString> DefaultKinematicsForRobotType(int robotType)
@@ -2894,7 +2908,7 @@ namespace
 			return false;
 		}
 
-		static QMap<QString, QString> IniSectionCaseInsensitive(
+		static QMap<QString, QString> ConfigSectionCaseInsensitive(
 			const QMap<QString, QMap<QString, QString>>& snapshot,
 			const QString& sectionName)
 		{
@@ -2908,7 +2922,7 @@ namespace
 			return {};
 		}
 
-		static void MergeMissingIniValues(
+		static void MergeMissingConfigValues(
 			QMap<QString, QString>& target,
 			const QMap<QString, QString>& source)
 		{
@@ -3051,31 +3065,31 @@ namespace
 		{
 			QList<UnitConfig> units;
 			QHash<QString, int> unitRowByName;
-			COPini ini;
-			if (!ini.SetFileName(ToIniBytes(ControlInfoPath())))
+			ConfigSection ini;
+			if (!ini.SetLocation(ControlInfoConfig()))
 			{
 				if (error != nullptr)
 				{
-					*error = "打开控制单元配置失败：" + ControlInfoPath();
+					*error = "打开控制单元数据库模块失败：ControlUnits";
 				}
 				return units;
 			}
 
 			ini.SetSectionName("UnitNum");
-			const int unitCount = ReadIniInt(ini, "UnitNum", 0);
+			const int unitCount = ReadConfigInt(ini, "UnitNum", 0);
 			for (int index = 0; index < unitCount; ++index)
 			{
 				UnitConfig unit;
 				unit.unitNo = index;
 				const QString key = QString("Unit%1").arg(index);
 				ini.SetSectionName("UnitName");
-				unit.unitName = ReadIniString(ini, key);
+				unit.unitName = ReadConfigString(ini, key);
 				ini.SetSectionName("ChineseName");
-				unit.chineseName = ReadIniString(ini, key);
+				unit.chineseName = ReadConfigString(ini, key);
 				ini.SetSectionName("ContralType");
-				unit.controlType = ReadIniString(ini, key, "R");
+				unit.controlType = ReadConfigString(ini, key, "R");
 				ini.SetSectionName("UnitType");
-				unit.unitType = ReadIniInt(ini, key, 0);
+				unit.unitType = ReadConfigInt(ini, key, 0);
 				LoadRobotPara(unit);
 				unit.enabled = true;
 				unitRowByName.insert(unit.unitName.toLower(), units.size());
@@ -3091,36 +3105,49 @@ namespace
 			{
 				return;
 			}
-			COPini robotIni;
-			if (!robotIni.SetFileName(ToIniBytes(RobotParaPath(unit.unitName))))
+			ConfigSection robotIni;
+			if (!robotIni.SetLocation(RobotConfig(unit.unitName)))
 			{
 				return;
 			}
 			robotIni.SetSectionName("BaseParam");
-			unit.customName = ReadIniString(robotIni, "CustomName");
-			unit.robotType = ReadIniInt(robotIni, "RobotType", unit.robotType);
-			unit.robotModelId = ReadIniString(robotIni, "RobotModelId").trimmed().toLower();
-			unit.socketIP = ReadIniString(robotIni, "SocketIP");
-			unit.socketPort = ReadIniInt(robotIni, "SocketPort", 0);
-			unit.monitorPort = ReadIniInt(robotIni, "MonitorPort", 0);
-			unit.ftpIP = ReadIniString(robotIni, "FTPIP");
-			unit.ftpPort = ReadIniInt(robotIni, "FTPPort", 21);
-			unit.ftpUser = ReadIniString(robotIni, "FTPUser");
-			unit.ftpPassword = ReadIniString(robotIni, "FTPPassWord");
-			unit.stepProjectName = ReadIniString(robotIni, "StepProjectName");
+			unit.customName = ReadConfigString(robotIni, "CustomName");
+			unit.robotType = ReadConfigInt(robotIni, "RobotType", unit.robotType);
+			const RobotDriverSetupProfile* setup =
+				RobotDriverRegistry::SetupProfile(unit.robotType);
+			const FtpCredential defaultFtpCredential =
+				DefaultFtpCredentialForRobotType(unit.robotType);
+			unit.robotModelId = ReadConfigString(robotIni, "RobotModelId").trimmed().toLower();
+			unit.socketIP = ReadConfigString(robotIni, "SocketIP");
+			unit.socketPort = ReadConfigInt(robotIni, "SocketPort", 0);
+			unit.monitorPort = ReadConfigInt(robotIni, "MonitorPort", 0);
+			const QString defaultFtpHost = setup != nullptr
+				? QString::fromUtf8(setup->defaultFtpHost) : QString();
+			unit.ftpIP = ReadConfigString(robotIni, "FTPIP",
+				defaultFtpHost.isEmpty() ? unit.socketIP : defaultFtpHost);
+			unit.ftpPort = ReadConfigInt(robotIni, "FTPPort",
+				setup != nullptr ? setup->defaultFtpPort : 21);
+			unit.ftpUser = ReadConfigString(robotIni, "FTPUser", defaultFtpCredential.user);
+			unit.ftpPassword = ReadConfigString(
+				robotIni, "FTPPassWord", defaultFtpCredential.password);
+			unit.stepProjectName = ReadConfigString(robotIni, "StepProjectName");
 			if (unit.stepProjectName.isEmpty())
 			{
-				unit.stepProjectName = ReadIniString(robotIni, "ProjectName");
+				unit.stepProjectName = ReadConfigString(robotIni, "ProjectName");
+			}
+			if (unit.stepProjectName.isEmpty() && setup != nullptr)
+			{
+				unit.stepProjectName = QString::fromUtf8(setup->defaultControllerProject);
 			}
 			robotIni.SetSectionName("SetupStatus");
-			unit.enabled = ReadIniInt(robotIni, "Enabled", unit.enabled ? 1 : 0) != 0;
-			unit.workpieceType = ReadIniString(robotIni, "WorkpieceType", unit.workpieceType).trimmed();
+			unit.enabled = ReadConfigInt(robotIni, "Enabled", unit.enabled ? 1 : 0) != 0;
+			unit.workpieceType = ReadConfigString(robotIni, "WorkpieceType", unit.workpieceType).trimmed();
 			if (unit.workpieceType.isEmpty())
 			{
 				unit.workpieceType = kWorkpieceCorrugatedPlate;
 			}
-			unit.cameraParamReady = ReadIniInt(robotIni, "CameraParamReady", unit.cameraParamReady ? 1 : 0) != 0;
-			unit.handEyeReady = ReadIniInt(robotIni, "HandEyeReady", unit.handEyeReady ? 1 : 0) != 0;
+			unit.cameraParamReady = ReadConfigInt(robotIni, "CameraParamReady", unit.cameraParamReady ? 1 : 0) != 0;
+			unit.handEyeReady = ReadConfigInt(robotIni, "HandEyeReady", unit.handEyeReady ? 1 : 0) != 0;
 		}
 
 		void LoadUnits(bool keepSelection)
@@ -3272,7 +3299,13 @@ namespace
 			m_socketIpEdit->setText(unit.socketIP);
 			m_socketPortEdit->setText(QString::number(unit.socketPort));
 			m_monitorPortEdit->setText(unit.monitorPort > 0 ? QString::number(unit.monitorPort) : QString());
-			m_ftpIpEdit->setText(unit.ftpIP.isEmpty() ? unit.socketIP : unit.ftpIP);
+			const RobotDriverSetupProfile* setup =
+				RobotDriverRegistry::SetupProfile(unit.robotType);
+			const QString defaultFtpHost = setup != nullptr
+				? QString::fromUtf8(setup->defaultFtpHost) : QString();
+			m_ftpIpEdit->setText(unit.ftpIP.isEmpty()
+				? (defaultFtpHost.isEmpty() ? unit.socketIP : defaultFtpHost)
+				: unit.ftpIP);
 			m_ftpPortEdit->setText(QString::number(unit.ftpPort));
 			m_ftpUserEdit->setText(unit.ftpUser);
 			m_ftpPasswordEdit->setText(unit.ftpPassword);
@@ -3297,7 +3330,7 @@ namespace
 			SetFormRowVisible(m_editorForm, m_ftpPasswordEdit, usesFtp);
 			m_robotTypeCombo->setToolTip(setup != nullptr
 				? (robotType == ROBOT_TYPE_INOVANCE
-					? QStringLiteral("汇川已登记2222远程以太网底层；FTP、按名称原生程序、真实起弧和机器人侧手眼功能保持限制。")
+					? QStringLiteral("汇川已登记2222远程以太网与FTP/原生程序上传底层；按名称原生程序执行、真实起弧和机器人侧手眼功能保持限制。")
 					: QStringLiteral("该类型已登记品牌底层。"))
 				: QStringLiteral("该类型未安装品牌底层，不能保存或重载；请选择已登记类型。"));
 		}
@@ -3343,6 +3376,8 @@ namespace
 				unit.socketPort = setup != nullptr ? setup->defaultSocketPort : 0;
 				unit.monitorPort = setup != nullptr ? setup->defaultMonitorPort : 0;
 				unit.ftpPort = setup != nullptr ? setup->defaultFtpPort : 21;
+				unit.ftpIP = setup != nullptr
+					? QString::fromUtf8(setup->defaultFtpHost) : QString();
 				unit.stepProjectName = setup != nullptr
 					? QString::fromUtf8(setup->defaultControllerProject) : QString();
 				const FtpCredential ftpCredential = DefaultFtpCredentialForRobotType(unit.robotType);
@@ -3409,7 +3444,7 @@ namespace
 			const QString displayName = unit.chineseName.isEmpty() ? unit.unitName : unit.chineseName;
 			const QString confirmText = QString(
 				"确定删除控制单元 %1（%2）吗？\n\n"
-				"这会从控制单元列表移除，并删除配置库里 Data/%2 下的机器人、相机、手眼和工艺配置记录。\n"
+				"这会从控制单元列表移除，并删除配置库里 robot/%2 范围内的机器人、相机、手眼和工艺配置记录。\n"
 				"删除后如需让主界面立即生效，请点击“只重载”。")
 				.arg(displayName, unit.unitName);
 			if (QMessageBox::question(this, "删除控制单元", confirmText,
@@ -3422,8 +3457,8 @@ namespace
 			nextUnits.removeAt(unitRow);
 			NormalizeRuntimeUnitNumbers(nextUnits);
 
-			const QString unitConfigPrefix = QString("Data/%1").arg(unit.unitName.trimmed());
-			if (!ConfigDatabase::RemoveConfigPathPrefix(unitConfigPrefix))
+			if (!ConfigDatabase::RemoveScopedSettings(
+					QStringLiteral("robot"), unit.unitName.trimmed()))
 			{
 				QMessageBox::warning(this, "删除控制单元",
 					QString("删除 %1 的配置记录失败，请检查配置库：%2")
@@ -3449,7 +3484,7 @@ namespace
 				m_editingRow = -1;
 				FillEditor(UnitConfig(), false);
 			}
-			AppendLog(QString("已删除控制单元 %1，并清理 Data/%1 下的配置记录。").arg(unit.unitName));
+			AppendLog(QString("已删除控制单元 %1，并清理 robot/%1 范围内的配置记录。").arg(unit.unitName));
 			return true;
 		}
 
@@ -3674,13 +3709,17 @@ namespace
 					socketTip->setText(setup->usesMonitorPort
 						? QString("%1 默认 Socket=%2、监控=%3。").arg(brand).arg(setup->defaultSocketPort).arg(setup->defaultMonitorPort)
 						: QString("%1 默认 Socket=%2；该底层不使用独立监控端口。").arg(brand).arg(setup->defaultSocketPort));
+					const QString defaultFtpHost = QString::fromUtf8(setup->defaultFtpHost);
+					const QString ftpAddressTip = defaultFtpHost.isEmpty()
+						? QStringLiteral("FTP IP 默认跟随机器人 Socket IP")
+						: QStringLiteral("FTP IP 型号默认值为 %1").arg(defaultFtpHost);
 					ftpTip->setText(!usesFtp
 						? QString("%1 当前未声明FTP/原生程序上传能力；这些字段已隐藏，业务入口会显示能力限制。").arg(brand)
 						: setup->usesControllerProject
-						? QString("%1 控制器工程名默认 %2。FTP IP 默认跟随机器人 Socket IP。")
-							.arg(brand, QString::fromUtf8(setup->defaultControllerProject))
-						: QString("%1 不需要控制器工程名；FTP IP 默认跟随机器人 Socket IP。向导完成后还需要点击“保存配置”写入文件。")
-							.arg(brand));
+						? QString("%1 控制器工程名默认 %2；%3。")
+							.arg(brand, QString::fromUtf8(setup->defaultControllerProject), ftpAddressTip)
+						: QString("%1 不需要控制器工程名；%2。向导完成后还需要点击“保存配置”写入配置数据库。")
+							.arg(brand, ftpAddressTip));
 				};
 			ConnectIpAddressEdited(socketIpEdit, &wizard, syncFtpIpWithSocketIp);
 			auto applyTypeDefaults = [&]()
@@ -3720,6 +3759,13 @@ namespace
 						ftpPortEdit->clear();
 						ftpUserEdit->clear();
 						ftpPasswordEdit->clear();
+					}
+					else if (setup != nullptr && forceFtpDefaults)
+					{
+						const QString defaultHost = QString::fromUtf8(setup->defaultFtpHost);
+						ftpIpEdit->setText(defaultHost.isEmpty()
+							? socketIpEdit->text().trimmed() : defaultHost);
+						ftpPortEdit->setText(QString::number(setup->defaultFtpPort));
 					}
 					else if (ftpPortEdit->text().trimmed().isEmpty())
 					{
@@ -4222,7 +4268,7 @@ namespace
 
 		bool WriteControlInfo(const QList<UnitConfig>& units, QString& error) const
 		{
-			const QString controlInfoPath = ControlInfoPath();
+			const ConfigLocation controlConfig = ControlInfoConfig();
 			const QStringList unitSections = {
 				"UnitName",
 				"ChineseName",
@@ -4231,23 +4277,27 @@ namespace
 			};
 			for (const QString& sectionName : unitSections)
 			{
-				if (!ConfigDatabase::RemoveIniSection(controlInfoPath, sectionName))
+				if (!ConfigDatabase::RemoveScopedModuleSection(
+						controlConfig.scopeType,
+						controlConfig.scopeId,
+						controlConfig.module,
+						sectionName))
 				{
 					error = QString("清理控制单元旧列表失败：%1 [%2]")
-						.arg(controlInfoPath, sectionName);
+						.arg(controlConfig.module, sectionName);
 					return false;
 				}
 			}
 
-			COPini ini;
-			if (!ini.SetFileName(false, ToIniBytes(controlInfoPath)))
+			ConfigSection ini;
+			if (!ini.SetLocation(controlConfig))
 			{
-				error = "打开控制单元配置失败：" + controlInfoPath;
+				error = "打开控制单元数据库模块失败：" + controlConfig.module;
 				return false;
 			}
 			ini.SetSectionName("UnitNum");
 			const int enabledCount = std::count_if(units.cbegin(), units.cend(), [](const UnitConfig& unit) { return unit.enabled; });
-			bool ok = WriteIniInt(ini, "UnitNum", enabledCount);
+			bool ok = WriteConfigInt(ini, "UnitNum", enabledCount);
 			int runtimeIndex = 0;
 			for (int index = 0; index < units.size(); ++index)
 			{
@@ -4258,17 +4308,17 @@ namespace
 				}
 				const QString key = QString("Unit%1").arg(runtimeIndex++);
 				ini.SetSectionName("UnitName");
-				ok = ok && WriteIniString(ini, key, unit.unitName);
+				ok = ok && WriteConfigString(ini, key, unit.unitName);
 				ini.SetSectionName("ChineseName");
-				ok = ok && WriteIniString(ini, key, unit.chineseName);
+				ok = ok && WriteConfigString(ini, key, unit.chineseName);
 				ini.SetSectionName("ContralType");
-				ok = ok && WriteIniString(ini, key, unit.controlType.isEmpty() ? "R" : unit.controlType);
+				ok = ok && WriteConfigString(ini, key, unit.controlType.isEmpty() ? "R" : unit.controlType);
 				ini.SetSectionName("UnitType");
-				ok = ok && WriteIniInt(ini, key, unit.unitType);
+				ok = ok && WriteConfigInt(ini, key, unit.unitType);
 			}
 			if (!ok)
 			{
-				error = "写入控制单元配置失败：" + controlInfoPath;
+				error = "写入控制单元数据库模块失败：" + controlConfig.module;
 			}
 			return ok;
 		}
@@ -4282,48 +4332,54 @@ namespace
 			}
 		}
 
-		QString TemplateRobotParaPath(int robotType, const QString& targetUnitName) const
+		ConfigLocation TemplateRobotConfig(int robotType, const QString& targetUnitName) const
 		{
 			const RobotDriverSetupProfile* setup = RobotDriverRegistry::SetupProfile(robotType);
 			if (setup == nullptr)
 			{
-				return QString();
+				return ConfigLocation();
 			}
 			const QString preferredName = QString::fromUtf8(setup->templateUnitName);
-			const QString preferredPath = RobotParaPath(preferredName);
+			const ConfigLocation preferredConfig = RobotConfig(preferredName);
 			if (!preferredName.isEmpty()
 				&& preferredName.compare(targetUnitName, Qt::CaseInsensitive) != 0
-				&& ConfigDatabase::HasIniFile(ToIniBytes(preferredPath)))
+				&& ConfigDatabase::HasScopedModule(
+					preferredConfig.scopeType, preferredConfig.scopeId, preferredConfig.module))
 			{
-				return preferredPath;
+				return preferredConfig;
 			}
 			for (const UnitConfig& unit : m_units)
 			{
 				if (unit.unitName.compare(targetUnitName, Qt::CaseInsensitive) != 0
 					&& unit.robotType == robotType
-					&& ConfigDatabase::HasIniFile(ToIniBytes(RobotParaPath(unit.unitName))))
+					&& ConfigDatabase::HasScopedModule(
+						QStringLiteral("robot"), unit.unitName, QStringLiteral("RobotPara")))
 				{
-					return RobotParaPath(unit.unitName);
+					return RobotConfig(unit.unitName);
 				}
 			}
-			return QString();
+			return ConfigLocation();
 		}
 
-		bool EnsureRobotParaFile(const UnitConfig& unit, bool isNew, QString& error) const
+		bool EnsureRobotParameters(const UnitConfig& unit, bool isNew, QString& error) const
 		{
 			Q_UNUSED(isNew);
-			const QString targetPath = RobotParaPath(unit.unitName);
+			const ConfigLocation targetConfig = RobotConfig(unit.unitName);
 			if (!ConfigDatabase::IsAvailable())
 			{
 				error = QString("配置库不存在或结构无效，请先运行迁移工具：%1").arg(ConfigDatabase::DatabasePath());
 				return false;
 			}
-			if (ConfigDatabase::HasIniFile(ToIniBytes(targetPath)))
+			if (ConfigDatabase::HasScopedModule(
+					targetConfig.scopeType, targetConfig.scopeId, targetConfig.module))
 			{
 				return true;
 			}
-			const QString templatePath = TemplateRobotParaPath(unit.robotType, unit.unitName);
-			if (!templatePath.isEmpty() && ConfigDatabase::CopyIniFile(templatePath, targetPath, false))
+			const ConfigLocation templateConfig = TemplateRobotConfig(unit.robotType, unit.unitName);
+			if (templateConfig.IsValid()
+				&& ConfigDatabase::CopyScopedModule(
+					templateConfig.scopeType, templateConfig.scopeId, templateConfig.module,
+					targetConfig.scopeType, targetConfig.scopeId, targetConfig.module, false))
 			{
 				return true;
 			}
@@ -4332,40 +4388,48 @@ namespace
 
 		bool EnsureRobotKinematics(const UnitConfig& unit, QString& error) const
 		{
-			const QString targetPath = RobotParaPath(unit.unitName);
+			const ConfigLocation targetConfig = RobotConfig(unit.unitName);
 			QMap<QString, QMap<QString, QString>> targetSnapshot;
 			QString snapshotError;
-			if (!ConfigDatabase::ReadIniFileSnapshot(targetPath, targetSnapshot, &snapshotError))
+			if (!ConfigDatabase::ReadScopedModuleSnapshot(
+					targetConfig.scopeType, targetConfig.scopeId, targetConfig.module,
+					targetSnapshot, &snapshotError))
 			{
-				error = QString("读取机器人运动学参数失败：%1；%2").arg(targetPath, snapshotError);
+				error = QString("读取机器人运动学参数失败：%1；%2").arg(targetConfig.module, snapshotError);
 				return false;
 			}
 
-			QMap<QString, QString> kinematics = IniSectionCaseInsensitive(targetSnapshot, "Kinematics");
+			QMap<QString, QString> kinematics = ConfigSectionCaseInsensitive(targetSnapshot, "Kinematics");
 			const QMap<QString, QString> before = kinematics;
-			QString templatePath = TemplateRobotParaPath(unit.robotType, unit.unitName);
+			ConfigLocation templateConfig = TemplateRobotConfig(unit.robotType, unit.unitName);
 			const RobotDriverSetupProfile* setup = RobotDriverRegistry::SetupProfile(unit.robotType);
-			if (templatePath.isEmpty() && setup != nullptr && setup->usesControllerProject)
+			if (!templateConfig.IsValid() && setup != nullptr && setup->usesControllerProject)
 			{
-				const QString workpieceRobotPara = QDir(WorkpieceTemplatePath(
-					unit.workpieceType.isEmpty() ? kWorkpieceCorrugatedPlate : unit.workpieceType))
-					.filePath("RobotPara.ini");
-				if (ConfigDatabase::HasIniFile(workpieceRobotPara))
+				const ConfigLocation workpieceRobotConfig = ConfigLocation::WorkpieceTemplate(
+					unit.workpieceType.isEmpty() ? kWorkpieceCorrugatedPlate : unit.workpieceType,
+					QStringLiteral("RobotPara"));
+				if (ConfigDatabase::HasScopedModule(
+						workpieceRobotConfig.scopeType,
+						workpieceRobotConfig.scopeId,
+						workpieceRobotConfig.module))
 				{
-					templatePath = workpieceRobotPara;
+					templateConfig = workpieceRobotConfig;
 				}
 			}
-			if (!templatePath.isEmpty())
+			if (templateConfig.IsValid())
 			{
 				QMap<QString, QMap<QString, QString>> templateSnapshot;
-				if (!ConfigDatabase::ReadIniFileSnapshot(templatePath, templateSnapshot, &snapshotError))
+				if (!ConfigDatabase::ReadScopedModuleSnapshot(
+						templateConfig.scopeType, templateConfig.scopeId, templateConfig.module,
+						templateSnapshot, &snapshotError))
 				{
-					error = QString("读取机器人运动学模板失败：%1；%2").arg(templatePath, snapshotError);
+					error = QString("读取机器人运动学模板失败：%1；%2")
+						.arg(templateConfig.module, snapshotError);
 					return false;
 				}
-				MergeMissingIniValues(
+				MergeMissingConfigValues(
 					kinematics,
-					IniSectionCaseInsensitive(templateSnapshot, "Kinematics"));
+					ConfigSectionCaseInsensitive(templateSnapshot, "Kinematics"));
 			}
 
 			const QMap<QString, QString> factoryDefaults = DefaultKinematicsForRobotType(unit.robotType);
@@ -4380,7 +4444,7 @@ namespace
 				error = QString("机器人类型 %1 没有可用的出厂运动学模板，未保存控制单元。").arg(unit.robotType);
 				return false;
 			}
-			MergeMissingIniValues(kinematics, factoryDefaults);
+			MergeMissingConfigValues(kinematics, factoryDefaults);
 			if (!ValidateKinematicsValues(kinematics, factoryDefaults, error))
 			{
 				error = QString("%1 的%2").arg(unit.unitName, error);
@@ -4391,21 +4455,24 @@ namespace
 			{
 				QMap<QString, QMap<QString, QString>> replacement;
 				replacement.insert("Kinematics", kinematics);
-				if (!ConfigDatabase::ReplaceIniSectionsAtomically(
-						targetPath, replacement, { "Kinematics" }, &snapshotError))
+				if (!ConfigDatabase::ReplaceScopedModuleSectionsAtomically(
+						targetConfig.scopeType, targetConfig.scopeId, targetConfig.module,
+						replacement, { "Kinematics" }, &snapshotError))
 				{
-					error = QString("补齐机器人运动学参数失败：%1；%2").arg(targetPath, snapshotError);
+					error = QString("补齐机器人运动学参数失败：%1；%2").arg(targetConfig.module, snapshotError);
 					return false;
 				}
 			}
 
 			QMap<QString, QMap<QString, QString>> verifiedSnapshot;
-			if (!ConfigDatabase::ReadIniFileSnapshot(targetPath, verifiedSnapshot, &snapshotError))
+			if (!ConfigDatabase::ReadScopedModuleSnapshot(
+					targetConfig.scopeType, targetConfig.scopeId, targetConfig.module,
+					verifiedSnapshot, &snapshotError))
 			{
-				error = QString("回读机器人运动学参数失败：%1；%2").arg(targetPath, snapshotError);
+				error = QString("回读机器人运动学参数失败：%1；%2").arg(targetConfig.module, snapshotError);
 				return false;
 			}
-			QMap<QString, QString> verified = IniSectionCaseInsensitive(verifiedSnapshot, "Kinematics");
+			QMap<QString, QString> verified = ConfigSectionCaseInsensitive(verifiedSnapshot, "Kinematics");
 			if (!ValidateKinematicsValues(verified, factoryDefaults, error))
 			{
 				error = QString("%1 的运动学参数写入后复核失败：%2").arg(unit.unitName, error);
@@ -4414,62 +4481,53 @@ namespace
 			return true;
 		}
 
-		static QString WorkpieceTemplatePath(const QString& workpieceType)
-		{
-			return RobotDataHelper::BuildProjectPath(QString("Data/WorkpieceTemplates/%1").arg(workpieceType));
-		}
-
-		bool EnsureWorkpieceTemplateFiles(const UnitConfig& unit, bool isNew, QString& error) const
+		bool EnsureWorkpieceTemplateModules(const UnitConfig& unit, bool isNew, QString& error) const
 		{
 			if (!isNew)
 			{
 				return true;
 			}
 
-			const QString templateDirPath = WorkpieceTemplatePath(unit.workpieceType);
 			if (!ConfigDatabase::IsAvailable())
 			{
 				error = QString("配置库不存在或结构无效，请先运行迁移工具：%1").arg(ConfigDatabase::DatabasePath());
 				return false;
 			}
 
-			const QStringList templateFiles = {
-				"CameraParam.ini",
-				"HandEyeCalibration_CAMERA1.ini",
-				"HandEyeMatrix_CAMERA1.ini",
-				"LineCoarseScanParam.ini",
-				"MeasureWeldParam.ini",
-				"WeldPoseCompParam.ini",
-				"WeldSeamCompParam.ini",
-				"WeaveDate.txt",
-				"WeldPara.txt"
+			const QStringList templateModules = {
+				"CameraParam",
+				"HandEyeCalibration/CAMERA1",
+				"HandEyeMatrix/CAMERA1",
+				"LineCoarseScanParam",
+				"MeasureWeldParam",
+				"WeldPoseCompParam",
+				"WeldSeamCompParam",
+				"WeldProcess/WeaveData",
+				"WeldProcess/WeldParameters"
 			};
-			for (const QString& fileName : templateFiles)
+			for (const QString& moduleName : templateModules)
 			{
-				const QString sourcePath = QDir(templateDirPath).filePath(fileName);
-				const QString targetPath = RobotDataHelper::BuildProjectPath(QString("Data/%1/%2").arg(unit.unitName, fileName));
-				const bool isTextFile = fileName.endsWith(".txt", Qt::CaseInsensitive);
-				const bool sourceExists = isTextFile
-					? ConfigDatabase::HasTextFile(ToIniBytes(sourcePath))
-					: ConfigDatabase::HasIniFile(ToIniBytes(sourcePath));
+				const ConfigLocation source = ConfigLocation::WorkpieceTemplate(unit.workpieceType, moduleName);
+				const ConfigLocation target = ConfigLocation::Robot(unit.unitName, moduleName);
+				const bool sourceExists = ConfigDatabase::HasScopedModule(
+					source.scopeType, source.scopeId, source.module);
 				if (!sourceExists)
 				{
 					continue;
 				}
-				const bool targetExists = isTextFile
-					? ConfigDatabase::HasTextFile(ToIniBytes(targetPath))
-					: ConfigDatabase::HasIniFile(ToIniBytes(targetPath));
+				const bool targetExists = ConfigDatabase::HasScopedModule(
+					target.scopeType, target.scopeId, target.module);
 				if (targetExists)
 				{
 					continue;
 				}
-				const bool copied = isTextFile
-					? ConfigDatabase::CopyTextFile(sourcePath, targetPath, false)
-					: ConfigDatabase::CopyIniFile(sourcePath, targetPath, false);
+				const bool copied = ConfigDatabase::CopyScopedModule(
+					source.scopeType, source.scopeId, source.module,
+					target.scopeType, target.scopeId, target.module, false);
 				if (!copied)
 				{
 					error = QString("复制工件模板失败：%1 -> %2")
-						.arg(QDir::toNativeSeparators(sourcePath), QDir::toNativeSeparators(targetPath));
+						.arg(moduleName, unit.unitName);
 					return false;
 				}
 			}
@@ -4478,7 +4536,7 @@ namespace
 
 		bool WriteRobotPara(const UnitConfig& unit, bool isNew, QString& error) const
 		{
-			if (!EnsureRobotParaFile(unit, isNew, error))
+			if (!EnsureRobotParameters(unit, isNew, error))
 			{
 				return false;
 			}
@@ -4486,46 +4544,46 @@ namespace
 			{
 				return false;
 			}
-			if (!EnsureWorkpieceTemplateFiles(unit, isNew, error))
+			if (!EnsureWorkpieceTemplateModules(unit, isNew, error))
 			{
 				return false;
 			}
-			COPini ini;
-			const QString path = RobotParaPath(unit.unitName);
-			if (!ini.SetFileName(false, ToIniBytes(path)))
+			ConfigSection ini;
+			const ConfigLocation location = RobotConfig(unit.unitName);
+			if (!ini.SetLocation(location))
 			{
-				error = "打开机器人参数数据失败：" + path;
+				error = "机器人参数数据库位置无效：" + unit.unitName;
 				return false;
 			}
 			ini.SetSectionName("BaseParam");
 			bool ok = true;
-			ok = ok && WriteIniString(ini, "RobotName", unit.unitName);
-			ok = ok && WriteIniString(ini, "CustomName", unit.customName);
-			ok = ok && WriteIniInt(ini, "RobotType", unit.robotType);
-			ok = ok && WriteIniString(ini, "RobotModelId", unit.robotModelId);
-			ok = ok && WriteIniString(ini, "SocketIP", unit.socketIP);
-			ok = ok && WriteIniInt(ini, "SocketPort", unit.socketPort);
+			ok = ok && WriteConfigString(ini, "RobotName", unit.unitName);
+			ok = ok && WriteConfigString(ini, "CustomName", unit.customName);
+			ok = ok && WriteConfigInt(ini, "RobotType", unit.robotType);
+			ok = ok && WriteConfigString(ini, "RobotModelId", unit.robotModelId);
+			ok = ok && WriteConfigString(ini, "SocketIP", unit.socketIP);
+			ok = ok && WriteConfigInt(ini, "SocketPort", unit.socketPort);
 			if (unit.monitorPort > 0)
 			{
-				ok = ok && WriteIniInt(ini, "MonitorPort", unit.monitorPort);
+				ok = ok && WriteConfigInt(ini, "MonitorPort", unit.monitorPort);
 			}
-			ok = ok && WriteIniString(ini, "FTPIP", unit.ftpIP);
-			ok = ok && WriteIniInt(ini, "FTPPort", unit.ftpPort);
-			ok = ok && WriteIniString(ini, "FTPUser", unit.ftpUser);
-			ok = ok && WriteIniString(ini, "FTPPassWord", unit.ftpPassword);
+			ok = ok && WriteConfigString(ini, "FTPIP", unit.ftpIP);
+			ok = ok && WriteConfigInt(ini, "FTPPort", unit.ftpPort);
+			ok = ok && WriteConfigString(ini, "FTPUser", unit.ftpUser);
+			ok = ok && WriteConfigString(ini, "FTPPassWord", unit.ftpPassword);
 			const RobotDriverSetupProfile* setup = RobotDriverRegistry::SetupProfile(unit.robotType);
 			if ((setup != nullptr && setup->usesControllerProject) || !unit.stepProjectName.isEmpty())
 			{
-				ok = ok && WriteIniString(ini, "StepProjectName", unit.stepProjectName);
+				ok = ok && WriteConfigString(ini, "StepProjectName", unit.stepProjectName);
 			}
 			ini.SetSectionName("SetupStatus");
-			ok = ok && WriteIniInt(ini, "Enabled", unit.enabled ? 1 : 0);
-			ok = ok && WriteIniString(ini, "WorkpieceType", unit.workpieceType.isEmpty() ? kWorkpieceCorrugatedPlate : unit.workpieceType);
-			ok = ok && WriteIniInt(ini, "CameraParamReady", unit.cameraParamReady ? 1 : 0);
-			ok = ok && WriteIniInt(ini, "HandEyeReady", unit.handEyeReady ? 1 : 0);
+			ok = ok && WriteConfigInt(ini, "Enabled", unit.enabled ? 1 : 0);
+			ok = ok && WriteConfigString(ini, "WorkpieceType", unit.workpieceType.isEmpty() ? kWorkpieceCorrugatedPlate : unit.workpieceType);
+			ok = ok && WriteConfigInt(ini, "CameraParamReady", unit.cameraParamReady ? 1 : 0);
+			ok = ok && WriteConfigInt(ini, "HandEyeReady", unit.handEyeReady ? 1 : 0);
 			if (!ok)
 			{
-				error = "写入机器人参数数据失败：" + path;
+				error = "写入机器人参数数据失败：" + unit.unitName;
 			}
 			return ok;
 		}
@@ -4816,17 +4874,17 @@ namespace
 			QString customName;
 		};
 
-		static QString ControlInfoPath()
+		static ConfigLocation ControlInfoConfig()
 		{
-			return RobotDataHelper::BuildProjectPath("Data/ContralUnitInfo.ini");
+			return ConfigLocation::Global(QStringLiteral("ControlUnits"));
 		}
 
-		static QString RobotParaPath(const QString& unitName)
+		static ConfigLocation RobotConfig(const QString& unitName)
 		{
-			return RobotDataHelper::BuildProjectPath(QString("Data/%1/RobotPara.ini").arg(unitName));
+			return ConfigLocation::Robot(unitName, QStringLiteral("RobotPara"));
 		}
 
-		static std::string ToIniBytes(const QString& text)
+		static std::string ToConfigBytes(const QString& text)
 		{
 			return text.toUtf8().toStdString();
 		}
@@ -4843,20 +4901,20 @@ namespace
 			return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
 		}
 
-		static QString ReadIniString(COPini& ini, const QString& key, const QString& fallback = QString())
+		static QString ReadConfigString(ConfigSection& ini, const QString& key, const QString& fallback = QString())
 		{
 			std::string rawValue;
-			if (ini.ReadString(false, ToIniBytes(key), rawValue) > 0)
+			if (ini.ReadString(false, ToConfigBytes(key), rawValue) > 0)
 			{
 				return DecodeConfigText(rawValue);
 			}
 			return fallback;
 		}
 
-		static int ReadIniInt(COPini& ini, const QString& key, int fallback = 0)
+		static int ReadConfigInt(ConfigSection& ini, const QString& key, int fallback = 0)
 		{
 			int value = fallback;
-			if (ini.ReadString(false, ToIniBytes(key), &value) > 0)
+			if (ini.ReadString(false, ToConfigBytes(key), &value) > 0)
 			{
 				return value;
 			}
@@ -4943,24 +5001,24 @@ namespace
 			m_unitCombo->clear();
 
 			QString error;
-			COPini ini;
-			if (!ini.SetFileName(ToIniBytes(ControlInfoPath())))
+			ConfigSection ini;
+			if (!ini.SetLocation(ControlInfoConfig()))
 			{
-				error = "打开控制单元配置失败：" + ControlInfoPath();
+				error = "打开控制单元数据库模块失败：ControlUnits";
 			}
 			else
 			{
 				ini.SetSectionName("UnitNum");
-				const int unitCount = ReadIniInt(ini, "UnitNum", 0);
+				const int unitCount = ReadConfigInt(ini, "UnitNum", 0);
 				for (int index = 0; index < unitCount; ++index)
 				{
 					UnitConfig unit;
 					unit.unitIndex = index;
 					const QString key = QString("Unit%1").arg(index);
 					ini.SetSectionName("UnitName");
-					unit.unitName = ReadIniString(ini, key);
+					unit.unitName = ReadConfigString(ini, key);
 					ini.SetSectionName("ChineseName");
-					unit.chineseName = ReadIniString(ini, key);
+					unit.chineseName = ReadConfigString(ini, key);
 					LoadRobotPara(unit);
 					m_units.push_back(unit);
 				}
@@ -5042,14 +5100,14 @@ namespace
 				return;
 			}
 
-			COPini robotIni;
-			if (!robotIni.SetFileName(ToIniBytes(RobotParaPath(unit.unitName))))
+			ConfigSection robotIni;
+			if (!robotIni.SetLocation(RobotConfig(unit.unitName)))
 			{
 				return;
 			}
 
 			robotIni.SetSectionName("BaseParam");
-			unit.customName = ReadIniString(robotIni, "CustomName");
+			unit.customName = ReadConfigString(robotIni, "CustomName");
 		}
 
 		UnitConfig CurrentUnit() const
@@ -9086,7 +9144,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 		{ "callJob", "调用任务" },
 		{ "uploadLs", "发送原生程序" },
 		{ "curposDiagnostic", "机器人诊断" },
-		{ "timestampDiagnostic", "机器人+相机时间戳" },
+		{ "timestampDiagnostic", "状态时间轴+相机时间轴" },
 		{ "movlTest", "MOVL往返测试" },
 		{ "movjTest", "MOVJ J2/J3 +5deg" },
 		{ "moveZero", "运动到零位" },
@@ -9159,8 +9217,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	setRequiredCapabilities(functionToolButtons.value("curposDiagnostic"),
 		{ RobotDriverCapability::DiagnosticCommand });
 	setRequiredCapabilities(functionToolButtons.value("timestampDiagnostic"),
-		{ RobotDriverCapability::PassiveState,
-		  RobotDriverCapability::RobotTimestamp });
+		{ RobotDriverCapability::PassiveState });
 	setRequiredCapabilities(functionToolButtons.value("movlTest"),
 		{ RobotDriverCapability::LinearMotion,
 		  RobotDriverCapability::PassiveState,
@@ -11617,7 +11674,7 @@ void QtWidgetsApplication4::RefreshDesktopIconBgButtonUi()
 	m_pManagementIconBgBtn->setVisible(active);  // 仅放了本地品牌包时才显示该开关
 	m_pManagementIconBgBtn->setChecked(withBg);
 	m_pManagementIconBgBtn->setText(withBg ? "桌面图标：有底色" : "桌面图标：无底色");
-	m_pManagementIconBgBtn->setToolTip("切换窗口/任务栏/桌面快捷方式图标为有底色或无底色（仅本地品牌包 branding/ 生效）。");
+	m_pManagementIconBgBtn->setToolTip("切换窗口/任务栏/桌面快捷方式图标为有底色或无底色（仅数据库已启用的品牌包生效）。");
 }
 
 void QtWidgetsApplication4::RefreshAllWindowIcons()
@@ -15680,7 +15737,10 @@ bool QtWidgetsApplication4::RunMeasureThenWeldScanOnlyRepeatForCli(
 		LogCommandLineMessage(QString("CLI 第%1/%2次扫描开始：参数=%3 [%4]，ScanSpeed=%5 mm/min%6，CameraTimeOffsetMs=%7%8")
 			.arg(repeatIndex)
 			.arg(repeatCount)
-			.arg(QString::fromStdString(param.sIniFilePath))
+			.arg(QStringLiteral("%1/%2/%3").arg(
+				param.configLocation.scopeType,
+				param.configLocation.scopeId,
+				param.configLocation.module))
 			.arg(QString::fromStdString(param.sSectionName))
 			.arg(param.dScanSpeed, 0, 'f', 3)
 			.arg(std::isfinite(scanSpeedOverrideMmPerMin) && scanSpeedOverrideMmPerMin > 0.0 ? "（CLI覆盖）" : "")
@@ -18376,21 +18436,22 @@ void QtWidgetsApplication4::ReadTool1ToGunTool()
 		return;
 	}
 
-	const std::string iniPath = DATA_PATH + unitInfo->sUnitName + ROBOT_PARA_INI;
-	const QString iniPathText = QDir::toNativeSeparators(DecodeRobotMessageText(iniPath));
-	if (!ConfigDatabase::HasIniFile(iniPath))
+	const QString robotName = DecodeRobotMessageText(unitInfo->sUnitName);
+	const ConfigLocation robotConfig = ConfigLocation::Robot(robotName, QStringLiteral("RobotPara"));
+	const QString storageLabel = QStringLiteral("robot/%1/RobotPara").arg(robotName);
+	if (!ConfigDatabase::HasScopedModule(
+			robotConfig.scopeType, robotConfig.scopeId, robotConfig.module))
 	{
 		QMessageBox::warning(
 			this,
 			"读取Tool1",
-			QString("配置库中未找到机器人参数，无法写入 GunTool：\n%1").arg(iniPathText));
+			QString("配置库中未找到机器人参数，无法写入 GunTool：\n%1").arg(storageLabel));
 		return;
 	}
 
-	COPini ini;
-	ini.SetFileName(iniPath);
-	ini.SetSectionName("Tool");
-	const bool saveOk = ini.WriteString(
+	ConfigSection section(robotConfig);
+	section.SetSectionName("Tool");
+	const bool saveOk = section.WriteString(
 		"GunTool_d",
 		"",
 		tool1,
@@ -18400,16 +18461,17 @@ void QtWidgetsApplication4::ReadTool1ToGunTool()
 		QMessageBox::warning(
 			this,
 			"读取Tool1",
-			QString("Tool1 已读取，但写入 GunTool 失败：\n%1").arg(iniPathText));
+			QString("Tool1 已读取，但写入 GunTool 失败：\n%1").arg(storageLabel));
 		return;
 	}
 
 	pRobotDriver->SetConfiguredGunTool(tool1);
 	if (pRobotDriver->HasLogSink())
 	{
+		const QByteArray storageBytes = storageLabel.toUtf8();
 		pRobotDriver->WriteLog(
 			LogColor::SUCCESS,
-			"读取Tool1并写入GunTool | unit=%s X=%.6f Y=%.6f Z=%.6f RX=%.6f RY=%.6f RZ=%.6f file=%s",
+			"读取Tool1并写入GunTool | unit=%s X=%.6f Y=%.6f Z=%.6f RX=%.6f RY=%.6f RZ=%.6f storage=%s",
 			unitInfo->sUnitName.c_str(),
 			tool1.dX,
 			tool1.dY,
@@ -18417,7 +18479,7 @@ void QtWidgetsApplication4::ReadTool1ToGunTool()
 			tool1.dRX,
 			tool1.dRY,
 			tool1.dRZ,
-			iniPath.c_str());
+			storageBytes.constData());
 	}
 
 	QMessageBox::information(
@@ -18431,7 +18493,7 @@ void QtWidgetsApplication4::ReadTool1ToGunTool()
 		.arg(tool1.dRX, 0, 'f', 6)
 		.arg(tool1.dRY, 0, 'f', 6)
 		.arg(tool1.dRZ, 0, 'f', 6)
-		.arg(iniPathText));
+		.arg(storageLabel));
 }
 
 void QtWidgetsApplication4::FanucGetCurrentPosTest()

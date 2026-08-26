@@ -457,7 +457,6 @@ struct T_SCAN_WELDING_PARAM
 {
 	std::string sRobotName;      // 机器人名称，从 RobotDriverAdaptor 中获取
 	std::string sSectionName;    // 参数分组名，例如 Table1
-	std::string sIniFilePath;    // 线扫参数逻辑键
 
 	T_ANGLE_PULSE tStartPulse;   // 机器人扫描起点脉冲姿态
 	T_ANGLE_PULSE tEndPulse;     // 机器人扫描终点脉冲姿态
@@ -511,10 +510,6 @@ struct T_COARSE_SCAN_PARAM
 //    AUTO_EXT
 //} eMode;
 
-
-const std::string DATA_PATH = ".\\Data\\";
-const std::string ROBOT_PARA_INI = "\\RobotPara.ini";
-const std::string CONTRAL_UNIT_INFO_INI = ".\\Data\\ContralUnitInfo.ini";
 
 std::string GetStr(const char* format, ...);
 #endif

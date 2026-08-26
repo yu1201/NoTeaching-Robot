@@ -7,7 +7,6 @@
 #include <QCryptographicHash>
 #include <QDate>
 #include <QDir>
-#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -46,11 +45,8 @@ struct ScopedSettingIdentity
 
 QString NormalizeSection(const QString& sectionName);
 QString NormalizeSourceKey(const QString& keyName);
-ScopedSettingIdentity BuildScopedFileIdentity(const QString& fileName, const QString& keyName = QString());
-ScopedSettingIdentity BuildScopedIniIdentity(const QString& fileName, const QString& sectionName, const QString& keyName);
 bool WriteScopedSettingValue(QSqlDatabase& db, const ScopedSettingIdentity& identity, const QString& value);
 bool EnsureCurrentSchema(QSqlDatabase& db);
-bool HasLegacyDiskConfigurationInputs(const QString& databasePath);
 bool HasUnsafePlaintextConfigStoreResidue(const QString& databasePath);
 bool HasInstallerTransactionRecord(const QString& databasePath);
 
@@ -168,11 +164,9 @@ QSqlDatabase OpenDatabase()
             return db;
         }
         if (!QFileInfo::exists(db.databaseName())
-            && (HasLegacyDiskConfigurationInputs(db.databaseName())
-                || HasUnsafePlaintextConfigStoreResidue(db.databaseName())))
+            && HasUnsafePlaintextConfigStoreResidue(db.databaseName()))
         {
-            qCritical() << "Legacy INI/TXT configuration exists without ConfigStore; "
-                           "run ConfigMigrate before starting the application.";
+            qCritical() << "Unsafe plaintext ConfigStore residue exists without ConfigStore.";
             return QSqlDatabase();
         }
         if (db.open())
@@ -201,12 +195,9 @@ QSqlDatabase OpenDatabase()
     {
         return QSqlDatabase();
     }
-    if (!dbInfo.exists()
-        && (HasLegacyDiskConfigurationInputs(dbPath)
-            || HasUnsafePlaintextConfigStoreResidue(dbPath)))
+    if (!dbInfo.exists() && HasUnsafePlaintextConfigStoreResidue(dbPath))
     {
-        qCritical() << "Legacy INI/TXT configuration exists without ConfigStore; "
-                       "run ConfigMigrate before starting the application.";
+        qCritical() << "Unsafe plaintext ConfigStore residue exists without ConfigStore.";
         return QSqlDatabase();
     }
     if (dbInfo.exists())
@@ -464,6 +455,80 @@ QString NormalizeScopeId(const QString& scopeId)
     return cleaned.isNull() ? QString::fromLatin1("") : cleaned;
 }
 
+bool HasLegacyConfigFileSuffix(const QString& value)
+{
+    const QString lower = value.trimmed().toLower();
+    return lower.endsWith(QStringLiteral(".ini"))
+        || lower.endsWith(QStringLiteral(".txt"))
+        || lower.endsWith(QStringLiteral(".cfg"))
+        || lower.endsWith(QStringLiteral(".conf"));
+}
+
+bool IsDatabaseNativeIdentityPart(
+    const QString& rawValue,
+    bool allowHierarchy,
+    bool allowEmpty = false,
+    bool allowColon = false)
+{
+    const QString value = rawValue.trimmed();
+    if (value.isEmpty())
+    {
+        return allowEmpty;
+    }
+    if (value.contains(QLatin1Char('\\'))
+        || (!allowColon && value.contains(QLatin1Char(':')))
+        || (allowColon && value.size() >= 2
+            && value.at(0).isLetter() && value.at(1) == QLatin1Char(':'))
+        || (!allowHierarchy && value.contains(QLatin1Char('/')))
+        || value.startsWith(QLatin1Char('/'))
+        || value.endsWith(QLatin1Char('/'))
+        || value.contains(QStringLiteral("//")))
+    {
+        return false;
+    }
+    const QStringList parts = value.split(QLatin1Char('/'));
+    for (const QString& part : parts)
+    {
+        if (part.isEmpty()
+            || part == QStringLiteral(".")
+            || part == QStringLiteral("..")
+            || HasLegacyConfigFileSuffix(part))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsDatabaseNativeScopeIdentity(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    bool allowEmptyModule = false)
+{
+    const QString normalizedScope = NormalizeSection(scopeType).toLower();
+    if (!IsDatabaseNativeIdentityPart(normalizedScope, false)
+        || !IsDatabaseNativeIdentityPart(moduleName, true, allowEmptyModule))
+    {
+        return false;
+    }
+    if (normalizedScope == QStringLiteral("global"))
+    {
+        return scopeId.trimmed().isEmpty();
+    }
+    return IsDatabaseNativeIdentityPart(scopeId, false, false, true);
+}
+
+bool IsDatabaseNativeSettingIdentity(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QString& keyName)
+{
+    return IsDatabaseNativeScopeIdentity(scopeType, scopeId, moduleName)
+        && IsDatabaseNativeIdentityPart(keyName, false);
+}
+
 QString ProtectionPurpose(
     const QString& scopeType,
     const QString& scopeId,
@@ -537,126 +602,7 @@ bool RequiresDpapiProtection(
     return true;
 }
 
-QString ModuleBaseFromStoredFileName(const QString& storedFileName)
-{
-    const QString baseName = QFileInfo(storedFileName).completeBaseName().trimmed();
-    if (baseName.compare(QStringLiteral("ContralUnitInfo"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("ControlUnits");
-    }
-    if (baseName.compare(QStringLiteral("RobotPara"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("RobotPara");
-    }
-    if (baseName.compare(QStringLiteral("CameraParam"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("CameraParam");
-    }
-    if (baseName.startsWith(QStringLiteral("HandEyeMatrix_"), Qt::CaseInsensitive))
-    {
-        return QStringLiteral("HandEyeMatrix/%1").arg(baseName.mid(QStringLiteral("HandEyeMatrix_").size()));
-    }
-    if (baseName.compare(QStringLiteral("HandEyeMatrix"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("HandEyeMatrix");
-    }
-    if (baseName.startsWith(QStringLiteral("HandEyeCalibration_"), Qt::CaseInsensitive))
-    {
-        return QStringLiteral("HandEyeCalibration/%1").arg(baseName.mid(QStringLiteral("HandEyeCalibration_").size()));
-    }
-    if (baseName.compare(QStringLiteral("LineScanParam"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("LineScanParam");
-    }
-    if (baseName.compare(QStringLiteral("LineCoarseScanParam"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("LineCoarseScanParam");
-    }
-    if (baseName.compare(QStringLiteral("MeasureWeldParam"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("MeasureWeldParam");
-    }
-    if (baseName.compare(QStringLiteral("WeldPoseCompParam"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("WeldPoseCompParam");
-    }
-    if (baseName.compare(QStringLiteral("WeldSeamCompParam"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("WeldSeamCompParam");
-    }
-    if (baseName.compare(QStringLiteral("WeaveDate"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("WeldProcess/WeaveData");
-    }
-    if (baseName.compare(QStringLiteral("WeldPara"), Qt::CaseInsensitive) == 0)
-    {
-        return QStringLiteral("WeldProcess/WeldParameters");
-    }
-    return NormalizeSection(baseName.isEmpty() ? QFileInfo(storedFileName).fileName() : baseName);
-}
 
-ScopedSettingIdentity BuildScopedFileIdentity(const QString& fileName, const QString& keyName)
-{
-    ScopedSettingIdentity identity;
-    const QString normalizedPath = ConfigDatabase::NormalizeFilePath(fileName);
-    const QStringList parts = normalizedPath.split('/', Qt::SkipEmptyParts);
-
-    identity.scopeType = QStringLiteral("global");
-    identity.scopeId.clear();
-
-    QString storedFileName = QFileInfo(normalizedPath).fileName();
-    if (!parts.isEmpty() && parts.first().compare(QStringLiteral("Data"), Qt::CaseInsensitive) == 0)
-    {
-        if (parts.size() >= 4 && parts.at(1).compare(QStringLiteral("WorkpieceTemplates"), Qt::CaseInsensitive) == 0)
-        {
-            identity.scopeType = QStringLiteral("workpiece_template");
-            identity.scopeId = parts.at(2).trimmed();
-            storedFileName = parts.mid(3).join('/');
-        }
-        else if (parts.size() >= 3)
-        {
-            identity.scopeType = QStringLiteral("robot");
-            identity.scopeId = parts.at(1).trimmed();
-            storedFileName = parts.mid(2).join('/');
-        }
-        else if (parts.size() >= 2)
-        {
-            storedFileName = parts.mid(1).join('/');
-        }
-    }
-    else if (!parts.isEmpty() && parts.first().compare(QStringLiteral("Result"), Qt::CaseInsensitive) == 0)
-    {
-        identity.scopeType = QStringLiteral("result");
-        if (parts.size() >= 3)
-        {
-            identity.scopeId = parts.at(1).trimmed();
-            storedFileName = parts.mid(2).join('/');
-        }
-    }
-
-    identity.module = NormalizeSection(ModuleBaseFromStoredFileName(storedFileName));
-    identity.keyName = NormalizeSourceKey(keyName.isEmpty() ? QStringLiteral("Content") : keyName);
-    identity.valueType = QStringLiteral("text");
-    identity.sensitive = IsSensitiveSettingKey(identity.keyName);
-    identity.valid = !identity.scopeType.trimmed().isEmpty()
-        && !identity.module.trimmed().isEmpty()
-        && !identity.keyName.trimmed().isEmpty();
-    return identity;
-}
-
-ScopedSettingIdentity BuildScopedIniIdentity(const QString& fileName, const QString& sectionName, const QString& keyName)
-{
-    ScopedSettingIdentity identity = BuildScopedFileIdentity(fileName, keyName);
-    const QString section = NormalizeSection(sectionName);
-    if (!section.isEmpty())
-    {
-        identity.module = NormalizeSection(identity.module + QStringLiteral("/") + section);
-    }
-    identity.valueType = QStringLiteral("string");
-    identity.sensitive = identity.sensitive || IsSensitiveSettingKey(section) || IsSensitiveSettingKey(keyName);
-    identity.valid = identity.valid && !identity.module.isEmpty();
-    return identity;
-}
 
 ConfigDatabase::ReadStatus ReadScopedSettingValueStatus(
     QSqlDatabase& db,
@@ -2321,125 +2267,6 @@ bool ValidateCurrentAuthenticationIntegrity(
     return true;
 }
 
-bool IsKnownRuntimePointCloudIni(
-    const QFileInfo& candidate,
-    const QFileInfo& databaseInfo)
-{
-    if (candidate.fileName().compare(
-            QStringLiteral("CorrugatedSheetPointCloudEctration.ini"),
-            Qt::CaseInsensitive) != 0
-        || candidate.isSymLink()
-        || QDir::cleanPath(candidate.absolutePath()).compare(
-            QDir::cleanPath(databaseInfo.absolutePath()), Qt::CaseInsensitive) != 0
-        || candidate.size() <= 0
-        || candidate.size() > 128 * 1024)
-    {
-        return false;
-    }
-
-    QFile file(candidate.absoluteFilePath());
-    if (!file.open(QIODevice::ReadOnly))
-    {
-        return false;
-    }
-    const QByteArray content = file.readAll();
-    if (content.contains('\0'))
-    {
-        return false;
-    }
-    static const QSet<QByteArray> allowedKeys = {
-        QByteArrayLiteral("ifupright"),
-        QByteArrayLiteral("Plate_thickness"),
-        QByteArrayLiteral("Remove_Floor_ZValue"),
-        QByteArrayLiteral("Thread_Number"),
-        QByteArrayLiteral("Move_distance"),
-        QByteArrayLiteral("DEBUGLOG"),
-        QByteArrayLiteral("LOGPATH"),
-        QByteArrayLiteral("Plane_Threshold"),
-        QByteArrayLiteral("Merge_Lines_Angle_Threshold"),
-        QByteArrayLiteral("Lines_Dis_Threshold"),
-        QByteArrayLiteral("Merge_Lines_Dis_Threshold"),
-        QByteArrayLiteral("ClusterTolerance"),
-        QByteArrayLiteral("if_Cluster"),
-        QByteArrayLiteral("Discrete_Value"),
-        QByteArrayLiteral("Dilate_Value"),
-        QByteArrayLiteral("Erode_Value"),
-        QByteArrayLiteral("Line_Length"),
-        QByteArrayLiteral("X_AXIS"),
-        QByteArrayLiteral("Y_AXIS"),
-        QByteArrayLiteral("Z_AXIS"),
-        QByteArrayLiteral("Save_File_Name"),
-        QByteArrayLiteral("Step"),
-        QByteArrayLiteral("is_remove_noise"),
-        QByteArrayLiteral("is_sample"),
-        QByteArrayLiteral("sample_size"),
-        QByteArrayLiteral("above_z")
-    };
-    QSet<QByteArray> observedKeys;
-    bool hasRuntimeSetting = false;
-    const QList<QByteArray> lines = content.split('\n');
-    for (QByteArray line : lines)
-    {
-        line = line.trimmed();
-        if (line.startsWith("\xEF\xBB\xBF"))
-        {
-            line.remove(0, 3);
-            line = line.trimmed();
-        }
-        if (line.isEmpty()
-            || line.startsWith("//")
-            || line.startsWith('#')
-            || line.startsWith(';'))
-        {
-            continue;
-        }
-        if (line.startsWith('['))
-        {
-            return false;
-        }
-        const int equals = line.indexOf('=');
-        if (equals <= 0)
-        {
-            return false;
-        }
-        const QByteArray key = line.left(equals).trimmed();
-        const QByteArray folded = key.toLower();
-        if (!allowedKeys.contains(key) || observedKeys.contains(folded))
-        {
-            return false;
-        }
-        observedKeys.insert(folded);
-        hasRuntimeSetting = true;
-    }
-    return hasRuntimeSetting;
-}
-
-bool HasLegacyDiskConfigurationInputs(const QString& databasePath)
-{
-    const QFileInfo databaseInfo(databasePath);
-    QDirIterator iterator(
-        databaseInfo.absolutePath(),
-        QDir::Files | QDir::NoDotAndDotDot,
-        QDirIterator::Subdirectories);
-    while (iterator.hasNext())
-    {
-        iterator.next();
-        const QString fileName = iterator.fileName().toLower();
-        if (fileName.endsWith(QStringLiteral(".ini"))
-            && IsKnownRuntimePointCloudIni(iterator.fileInfo(), databaseInfo))
-        {
-            continue;
-        }
-        if (fileName.contains(QStringLiteral(".ini"))
-            || fileName == QStringLiteral("weavedate.txt")
-            || fileName == QStringLiteral("weldpara.txt"))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 bool HasUnsafePlaintextConfigStoreResidue(const QString& databasePath)
 {
     const QDir directory(QFileInfo(databasePath).absolutePath());
@@ -2484,14 +2311,6 @@ bool EnsureCurrentSchema(QSqlDatabase& db)
                        "remove it and rotate affected credentials before starting the application.";
         return false;
     }
-    if ((existingVersion.isEmpty() || existingVersion == QStringLiteral("4"))
-        && HasLegacyDiskConfigurationInputs(db.databaseName()))
-    {
-        qCritical() << "Legacy INI/TXT configuration exists beside a non-current ConfigStore; "
-                       "run ConfigMigrate before starting the application.";
-        return false;
-    }
-
     if (!hasMeta)
     {
         QSqlQuery tablesQuery(db);
@@ -2668,68 +2487,6 @@ QString ConfigDatabase::DatabasePath()
     return AppPaths::WritablePath(QStringLiteral("Data/ConfigStore.db"));
 }
 
-QString ConfigDatabase::NormalizeFilePath(const QString& fileName)
-{
-    QString path = fileName.trimmed();
-    path.replace('\\', '/');
-    path = QDir::cleanPath(path);
-    while (path.startsWith("./"))
-    {
-        path.remove(0, 2);
-    }
-
-    QString lower = path.toLower();
-    if (lower.startsWith("data/"))
-    {
-        return path;
-    }
-    if (lower.startsWith("result/"))
-    {
-        return path;
-    }
-
-    QFileInfo info(path);
-    if (info.isAbsolute())
-    {
-        QDir root(AppPaths::DataRootPath());
-        const QString rel = root.relativeFilePath(info.absoluteFilePath()).replace('\\', '/');
-        const QString relLower = rel.toLower();
-        const bool insideDataRoot = !QFileInfo(rel).isAbsolute()
-            && rel != QStringLiteral("..")
-            && !rel.startsWith(QStringLiteral("../"));
-        if (insideDataRoot && relLower.startsWith("data/"))
-        {
-            return QDir::cleanPath(rel);
-        }
-        if (insideDataRoot && relLower.startsWith("result/"))
-        {
-            return QDir::cleanPath(rel);
-        }
-    }
-
-    // 兼容从旧工程根传入的绝对/带前缀路径。用最后一个段标记，避免
-    // D:/data/site/Data/... 误截成 data/site/Data/...。
-    lower = path.toLower();
-    const int dataPos = lower.lastIndexOf("/data/");
-    if (dataPos >= 0)
-    {
-        return path.mid(dataPos + 1);
-    }
-    const int resultPos = lower.lastIndexOf("/result/");
-    if (resultPos >= 0)
-    {
-        return path.mid(resultPos + 1);
-    }
-
-    return path;
-}
-
-std::string ConfigDatabase::NormalizeFilePath(const std::string& fileName)
-{
-    const QString normalized = NormalizeFilePath(DecodeMaybeLocal(fileName));
-    const QByteArray bytes = normalized.toUtf8();
-    return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
-}
 
 bool ConfigDatabase::IsAvailable()
 {
@@ -2737,189 +2494,46 @@ bool ConfigDatabase::IsAvailable()
     return db.isValid() && db.isOpen();
 }
 
-bool ConfigDatabase::HasIniFile(const std::string& fileName)
+bool ConfigDatabase::HasScopedModule(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName)
 {
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
+    const QString baseModule = NormalizeSection(moduleName);
+    if (!db.isValid() || !db.isOpen()
+        || !IsDatabaseNativeScopeIdentity(scopeType, scopeId, baseModule))
     {
         return false;
     }
 
-    const ScopedSettingIdentity identity = BuildScopedFileIdentity(FromUtf8StdString(NormalizeFilePath(fileName)));
-    if (!identity.valid)
-    {
-        return false;
-    }
-    const QString modulePrefix = NormalizeSection(identity.module) + QStringLiteral("/");
-
+    const QString modulePrefix = baseModule + QStringLiteral("/");
     QSqlQuery query(db);
     query.prepare("SELECT 1 FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?) LIMIT 1");
-    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
-    query.addBindValue(NormalizeScopeId(identity.scopeId));
-    query.addBindValue(NormalizeSection(identity.module));
+    query.addBindValue(NormalizeSection(scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(scopeId));
+    query.addBindValue(baseModule);
     query.addBindValue(modulePrefix.size());
     query.addBindValue(modulePrefix);
     return query.exec() && query.next();
 }
 
-bool ConfigDatabase::HasIniFile(const QString& fileName)
-{
-    const QByteArray bytes = fileName.toUtf8();
-    return HasIniFile(std::string(bytes.constData(), static_cast<size_t>(bytes.size())));
-}
-
-bool ConfigDatabase::ReadIniValue(
-    const std::string& fileName,
-    const std::string& sectionName,
-    const std::string& keyName,
-    std::string* value)
-{
-    return ReadIniValueStatus(fileName, sectionName, keyName, value)
-        == ReadStatus::Found;
-}
-
-ConfigDatabase::ReadStatus ConfigDatabase::ReadIniValueStatus(
-    const std::string& fileName,
-    const std::string& sectionName,
-    const std::string& keyName,
-    std::string* value)
-{
-    if (value == nullptr)
-    {
-        return ReadStatus::Error;
-    }
-    value->clear();
-
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return ReadStatus::Error;
-    }
-
-    const ScopedSettingIdentity scopedIdentity = BuildScopedIniIdentity(
-        FromUtf8StdString(NormalizeFilePath(fileName)),
-        DecodeMaybeLocal(sectionName),
-        DecodeMaybeLocal(keyName));
-    if (!scopedIdentity.valid)
-    {
-        return ReadStatus::Error;
-    }
-    QString scopedValue;
-    const ReadStatus status = ReadScopedSettingValueStatus(db, scopedIdentity, &scopedValue);
-    if (status != ReadStatus::Found)
-    {
-        return status;
-    }
-
-    const QByteArray bytes = scopedValue.toUtf8();
-    *value = std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
-    return ReadStatus::Found;
-}
-
-bool ConfigDatabase::WriteIniValue(
-    const std::string& fileName,
-    const std::string& sectionName,
-    const std::string& keyName,
-    const std::string& value)
+bool ConfigDatabase::CopyScopedModule(
+    const QString& sourceScopeType,
+    const QString& sourceScopeId,
+    const QString& sourceModuleName,
+    const QString& targetScopeType,
+    const QString& targetScopeId,
+    const QString& targetModuleName,
+    bool overwriteExisting)
 {
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return false;
-    }
-
-    const ScopedSettingIdentity scopedIdentity = BuildScopedIniIdentity(
-        FromUtf8StdString(NormalizeFilePath(fileName)),
-        DecodeMaybeLocal(sectionName),
-        DecodeMaybeLocal(keyName));
-    return WriteScopedSettingValue(db, scopedIdentity, DecodeMaybeLocal(value));
-}
-
-bool ConfigDatabase::HasTextFile(const std::string& fileName)
-{
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return false;
-    }
-
-    const ScopedSettingIdentity identity = BuildScopedFileIdentity(FromUtf8StdString(NormalizeFilePath(fileName)));
-    QString value;
-    return ReadScopedSettingValue(db, identity, &value);
-}
-
-bool ConfigDatabase::HasTextFile(const QString& fileName)
-{
-    const QByteArray bytes = fileName.toUtf8();
-    return HasTextFile(std::string(bytes.constData(), static_cast<size_t>(bytes.size())));
-}
-
-bool ConfigDatabase::ReadTextFile(const std::string& fileName, std::string* content)
-{
-    if (content == nullptr)
-    {
-        return false;
-    }
-
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return false;
-    }
-
-    const ScopedSettingIdentity identity = BuildScopedFileIdentity(FromUtf8StdString(NormalizeFilePath(fileName)));
-    QString scopedValue;
-    if (!ReadScopedSettingValue(db, identity, &scopedValue))
-    {
-        return false;
-    }
-    const QByteArray bytes = scopedValue.toUtf8();
-    *content = std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
-    return true;
-}
-
-bool ConfigDatabase::WriteTextFile(const std::string& fileName, const std::string& content)
-{
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return false;
-    }
-
-    ScopedSettingIdentity identity = BuildScopedFileIdentity(FromUtf8StdString(NormalizeFilePath(fileName)));
-    identity.valueType = QStringLiteral("text");
-    return WriteScopedSettingValue(db, identity, DecodeMaybeLocal(content));
-}
-
-bool ConfigDatabase::CopyTextFile(const QString& sourceFileName, const QString& targetFileName, bool overwriteExisting)
-{
-    std::string content;
-    if (!ReadTextFile(sourceFileName.toUtf8().constData(), &content))
-    {
-        return false;
-    }
-    if (!overwriteExisting && HasTextFile(targetFileName))
-    {
-        return true;
-    }
-    return WriteTextFile(targetFileName.toUtf8().constData(), content);
-}
-
-bool ConfigDatabase::RemoveConfigPathPrefix(const QString& sourcePathPrefix)
-{
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return false;
-    }
-
-    QString normalized = NormalizeFilePath(sourcePathPrefix);
-    normalized.replace('\\', '/');
-    while (normalized.endsWith('/'))
-    {
-        normalized.chop(1);
-    }
-    if (normalized.isEmpty())
+    const QString sourceModule = NormalizeSection(sourceModuleName);
+    const QString targetModule = NormalizeSection(targetModuleName);
+    if (!db.isValid() || !db.isOpen()
+        || !IsDatabaseNativeScopeIdentity(sourceScopeType, sourceScopeId, sourceModule)
+        || !IsDatabaseNativeScopeIdentity(targetScopeType, targetScopeId, targetModule)
+        || !HasScopedModule(sourceScopeType, sourceScopeId, sourceModule))
     {
         return false;
     }
@@ -2928,117 +2542,36 @@ bool ConfigDatabase::RemoveConfigPathPrefix(const QString& sourcePathPrefix)
     {
         return false;
     }
-
-    const QStringList prefixParts = normalized.split('/', Qt::SkipEmptyParts);
-    QString deleteScopeType;
-    QString deleteScopeId;
-    if (prefixParts.size() == 2
-        && prefixParts.at(0).compare(QStringLiteral("Data"), Qt::CaseInsensitive) == 0)
-    {
-        deleteScopeType = QStringLiteral("robot");
-        deleteScopeId = prefixParts.at(1);
-    }
-    else if (prefixParts.size() == 3
-        && prefixParts.at(0).compare(QStringLiteral("Data"), Qt::CaseInsensitive) == 0
-        && prefixParts.at(1).compare(QStringLiteral("WorkpieceTemplates"), Qt::CaseInsensitive) == 0)
-    {
-        deleteScopeType = QStringLiteral("workpiece_template");
-        deleteScopeId = prefixParts.at(2);
-    }
-
-    if (!deleteScopeType.isEmpty())
-    {
-        QSqlQuery scopedDelete(db);
-        scopedDelete.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=?");
-        scopedDelete.addBindValue(NormalizeSection(deleteScopeType).toLower());
-        scopedDelete.addBindValue(NormalizeScopeId(deleteScopeId));
-        if (!scopedDelete.exec())
-        {
-            db.rollback();
-            return false;
-        }
-    }
-    else
-    {
-        const ScopedSettingIdentity prefixIdentity = BuildScopedFileIdentity(normalized);
-        if (prefixIdentity.valid)
-        {
-            QSqlQuery scopedDelete(db);
-            if (normalized.endsWith(QStringLiteral(".ini"), Qt::CaseInsensitive)
-                || normalized.endsWith(QStringLiteral(".txt"), Qt::CaseInsensitive))
-            {
-                const QString modulePrefix = NormalizeSection(prefixIdentity.module) + QStringLiteral("/");
-                scopedDelete.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
-                scopedDelete.addBindValue(NormalizeSection(prefixIdentity.scopeType).toLower());
-                scopedDelete.addBindValue(NormalizeScopeId(prefixIdentity.scopeId));
-                scopedDelete.addBindValue(NormalizeSection(prefixIdentity.module));
-                scopedDelete.addBindValue(modulePrefix.size());
-                scopedDelete.addBindValue(modulePrefix);
-            }
-            else
-            {
-                scopedDelete.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=?");
-                scopedDelete.addBindValue(NormalizeSection(prefixIdentity.scopeType).toLower());
-                scopedDelete.addBindValue(NormalizeScopeId(prefixIdentity.scopeId));
-            }
-            if (!scopedDelete.exec())
-            {
-                db.rollback();
-                return false;
-            }
-        }
-    }
-
-    return db.commit();
-}
-
-
-
-bool ConfigDatabase::CopyIniFile(const QString& sourceFileName, const QString& targetFileName, bool overwriteExisting)
-{
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return false;
-    }
-
-    const ScopedSettingIdentity source = BuildScopedFileIdentity(sourceFileName);
-    const ScopedSettingIdentity target = BuildScopedFileIdentity(targetFileName);
-    if (!source.valid || !target.valid || !HasIniFile(sourceFileName))
-    {
-        return false;
-    }
-
+    const auto rollback = [&db]() { db.rollback(); return false; };
     if (overwriteExisting)
     {
         QSqlQuery deleteQuery(db);
-        const QString targetPrefix = NormalizeSection(target.module) + QStringLiteral("/");
+        const QString targetPrefix = targetModule + QStringLiteral("/");
         deleteQuery.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
-        deleteQuery.addBindValue(NormalizeSection(target.scopeType).toLower());
-        deleteQuery.addBindValue(NormalizeScopeId(target.scopeId));
-        deleteQuery.addBindValue(NormalizeSection(target.module));
+        deleteQuery.addBindValue(NormalizeSection(targetScopeType).toLower());
+        deleteQuery.addBindValue(NormalizeScopeId(targetScopeId));
+        deleteQuery.addBindValue(targetModule);
         deleteQuery.addBindValue(targetPrefix.size());
         deleteQuery.addBindValue(targetPrefix);
         if (!deleteQuery.exec())
         {
-            return false;
+            return rollback();
         }
     }
 
     QSqlQuery sourceQuery(db);
-    const QString sourceModule = NormalizeSection(source.module);
     const QString sourcePrefix = sourceModule + QStringLiteral("/");
     sourceQuery.prepare(
         "SELECT module, key_name, value_text, value_type, sensitive, encrypted, updated_at "
         "FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
-    sourceQuery.addBindValue(NormalizeSection(source.scopeType).toLower());
-    sourceQuery.addBindValue(NormalizeScopeId(source.scopeId));
+    sourceQuery.addBindValue(NormalizeSection(sourceScopeType).toLower());
+    sourceQuery.addBindValue(NormalizeScopeId(sourceScopeId));
     sourceQuery.addBindValue(sourceModule);
     sourceQuery.addBindValue(sourcePrefix.size());
     sourceQuery.addBindValue(sourcePrefix);
     if (!sourceQuery.exec())
     {
-        return false;
+        return rollback();
     }
 
     QSqlQuery insertQuery(db);
@@ -3052,93 +2585,27 @@ bool ConfigDatabase::CopyIniFile(const QString& sourceFileName, const QString& t
         const QString suffix = sourceModuleValue == sourceModule
             ? QString()
             : sourceModuleValue.mid(sourceModule.size());
-        insertQuery.addBindValue(NormalizeSection(target.scopeType).toLower());
-        insertQuery.addBindValue(NormalizeScopeId(target.scopeId));
-        insertQuery.addBindValue(NormalizeSection(target.module + suffix));
-        insertQuery.addBindValue(NormalizeSourceKey(sourceQuery.value(1).toString()));
-        insertQuery.addBindValue(sourceQuery.value(2));
-        insertQuery.addBindValue(sourceQuery.value(3));
-        insertQuery.addBindValue(sourceQuery.value(4));
-        insertQuery.addBindValue(sourceQuery.value(5));
-        insertQuery.addBindValue(sourceQuery.value(6));
+        insertQuery.bindValue(0, NormalizeSection(targetScopeType).toLower());
+        insertQuery.bindValue(1, NormalizeScopeId(targetScopeId));
+        insertQuery.bindValue(2, NormalizeSection(targetModule + suffix));
+        insertQuery.bindValue(3, NormalizeSourceKey(sourceQuery.value(1).toString()));
+        insertQuery.bindValue(4, sourceQuery.value(2));
+        insertQuery.bindValue(5, sourceQuery.value(3));
+        insertQuery.bindValue(6, sourceQuery.value(4));
+        insertQuery.bindValue(7, sourceQuery.value(5));
+        insertQuery.bindValue(8, sourceQuery.value(6));
         if (!insertQuery.exec())
         {
-            return false;
+            return rollback();
         }
     }
-    return true;
+    return db.commit();
 }
 
-bool ConfigDatabase::RemoveIniGroup(const QString& fileName, const QString& groupName)
-{
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return false;
-    }
-
-    const ScopedSettingIdentity identity = BuildScopedFileIdentity(fileName);
-    if (!identity.valid)
-    {
-        return false;
-    }
-    const QString normalizedGroup = NormalizeSection(groupName);
-    const QString module = NormalizeSection(identity.module + QStringLiteral("/") + normalizedGroup);
-    const QString modulePrefix = module + QStringLiteral("/");
-    QSqlQuery query(db);
-    query.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
-    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
-    query.addBindValue(NormalizeScopeId(identity.scopeId));
-    query.addBindValue(module);
-    query.addBindValue(modulePrefix.size());
-    query.addBindValue(modulePrefix);
-    return query.exec();
-}
-
-QMap<QString, QString> ConfigDatabase::ReadIniSection(const QString& fileName, const QString& sectionName)
-{
-    QMap<QString, QString> values;
-    QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
-    {
-        return values;
-    }
-
-    const ScopedSettingIdentity identity = BuildScopedIniIdentity(fileName, sectionName, QStringLiteral("dummy"));
-    if (!identity.valid)
-    {
-        return values;
-    }
-
-    QSqlQuery query(db);
-    query.prepare("SELECT key_name, value_text, encrypted FROM settings WHERE scope_type=? AND scope_id=? AND module=? ORDER BY key_name COLLATE NOCASE");
-    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
-    query.addBindValue(NormalizeScopeId(identity.scopeId));
-    query.addBindValue(NormalizeSection(identity.module));
-    if (!query.exec())
-    {
-        return values;
-    }
-
-    while (query.next())
-    {
-        QString plainText;
-        const QString keyName = query.value(0).toString();
-        if (!DecodeStoredText(
-                query.value(1).toString(),
-                query.value(2).toInt(),
-                ProtectionPurpose(identity.scopeType, identity.scopeId, identity.module, keyName),
-                &plainText))
-        {
-            continue;
-        }
-        values.insert(keyName, plainText);
-    }
-    return values;
-}
-
-bool ConfigDatabase::ReadIniFileSnapshot(
-    const QString& fileName,
+bool ConfigDatabase::ReadScopedModuleSnapshot(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
     QMap<QString, QMap<QString, QString>>& sectionValues,
     QString* error)
 {
@@ -3147,37 +2614,26 @@ bool ConfigDatabase::ReadIniFileSnapshot(
     {
         error->clear();
     }
-
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
+    const QString baseModule = NormalizeSection(moduleName);
+    if (!db.isValid() || !db.isOpen()
+        || !IsDatabaseNativeScopeIdentity(scopeType, scopeId, baseModule))
     {
         if (error != nullptr)
         {
-            *error = QStringLiteral("配置数据库不可用。");
+            *error = QStringLiteral("配置数据库位置无效或数据库不可用。");
         }
         return false;
     }
 
-    const ScopedSettingIdentity identity = BuildScopedFileIdentity(
-        fileName, QStringLiteral("snapshot"));
-    if (!identity.valid)
-    {
-        if (error != nullptr)
-        {
-            *error = QStringLiteral("INI 文件身份无效：%1").arg(fileName);
-        }
-        return false;
-    }
-
-    const QString baseModule = NormalizeSection(identity.module);
     const QString modulePrefix = baseModule + QStringLiteral("/");
     QSqlQuery query(db);
     query.prepare(
         "SELECT module, key_name, value_text, encrypted FROM settings "
         "WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?) "
         "ORDER BY module COLLATE NOCASE, key_name COLLATE NOCASE");
-    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
-    query.addBindValue(NormalizeScopeId(identity.scopeId));
+    query.addBindValue(NormalizeSection(scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(scopeId));
     query.addBindValue(baseModule);
     query.addBindValue(modulePrefix.size());
     query.addBindValue(modulePrefix);
@@ -3185,35 +2641,32 @@ bool ConfigDatabase::ReadIniFileSnapshot(
     {
         if (error != nullptr)
         {
-            *error = QStringLiteral("读取 INI 文件快照失败：%1").arg(query.lastError().text());
+            *error = QStringLiteral("读取配置模块快照失败：%1").arg(query.lastError().text());
         }
         return false;
     }
 
-    // 同一个 SELECT 游标在 SQLite 中固定于一个读快照；写端即使在遍历期间提交，
-    // 本次返回的 metadata、分组和旧槽位也不会跨版本混合。
     while (query.next())
     {
         const QString module = NormalizeSection(query.value(0).toString());
-        const QString keyName = NormalizeSourceKey(query.value(1).toString());
         if (module == baseModule)
         {
             continue;
         }
         const QString sectionName = module.mid(modulePrefix.size());
+        const QString keyName = NormalizeSourceKey(query.value(1).toString());
         QString plainText;
         if (sectionName.isEmpty() || keyName.isEmpty()
             || !DecodeStoredText(
                 query.value(2).toString(),
                 query.value(3).toInt(),
-                ProtectionPurpose(identity.scopeType, identity.scopeId, module, keyName),
+                ProtectionPurpose(scopeType, scopeId, module, keyName),
                 &plainText))
         {
             sectionValues.clear();
             if (error != nullptr)
             {
-                *error = QStringLiteral("解码 INI 文件快照失败：[%1] %2")
-                    .arg(sectionName, keyName);
+                *error = QStringLiteral("解码配置模块失败：[%1] %2").arg(sectionName, keyName);
             }
             return false;
         }
@@ -3224,37 +2677,38 @@ bool ConfigDatabase::ReadIniFileSnapshot(
         sectionValues.clear();
         if (error != nullptr)
         {
-            *error = QStringLiteral("遍历 INI 文件快照失败：%1").arg(query.lastError().text());
+            *error = QStringLiteral("遍历配置模块失败：%1").arg(query.lastError().text());
         }
         return false;
     }
     return true;
 }
 
-bool ConfigDatabase::RemoveIniSection(const QString& fileName, const QString& sectionName)
+bool ConfigDatabase::RemoveScopedModuleSection(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
+    const QString& sectionName)
 {
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
+    const QString module = NormalizeSection(moduleName + QStringLiteral("/") + sectionName);
+    if (!db.isValid() || !db.isOpen()
+        || !IsDatabaseNativeScopeIdentity(scopeType, scopeId, module))
     {
         return false;
     }
-
-    const ScopedSettingIdentity identity = BuildScopedIniIdentity(fileName, sectionName, QStringLiteral("dummy"));
-    if (!identity.valid)
-    {
-        return false;
-    }
-
     QSqlQuery query(db);
     query.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND module=?");
-    query.addBindValue(NormalizeSection(identity.scopeType).toLower());
-    query.addBindValue(NormalizeScopeId(identity.scopeId));
-    query.addBindValue(NormalizeSection(identity.module));
+    query.addBindValue(NormalizeSection(scopeType).toLower());
+    query.addBindValue(NormalizeScopeId(scopeId));
+    query.addBindValue(module);
     return query.exec();
 }
 
-bool ConfigDatabase::ReplaceIniSectionsAtomically(
-    const QString& fileName,
+bool ConfigDatabase::ReplaceScopedModuleSectionsAtomically(
+    const QString& scopeType,
+    const QString& scopeId,
+    const QString& moduleName,
     const QMap<QString, QMap<QString, QString>>& sectionValues,
     const QStringList& removeSections,
     QString* error)
@@ -3264,11 +2718,15 @@ bool ConfigDatabase::ReplaceIniSectionsAtomically(
         error->clear();
     }
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
+    const QString normalizedScope = NormalizeSection(scopeType).toLower();
+    const QString normalizedScopeId = NormalizeScopeId(scopeId);
+    const QString baseModule = NormalizeSection(moduleName);
+    if (!db.isValid() || !db.isOpen()
+        || !IsDatabaseNativeScopeIdentity(normalizedScope, normalizedScopeId, baseModule))
     {
         if (error != nullptr)
         {
-            *error = QStringLiteral("配置数据库不可用。");
+            *error = QStringLiteral("配置数据库位置无效或数据库不可用。");
         }
         return false;
     }
@@ -3276,82 +2734,84 @@ bool ConfigDatabase::ReplaceIniSectionsAtomically(
     {
         if (error != nullptr)
         {
-            *error = QStringLiteral("无法开始 INI 配置原子更新：%1").arg(db.lastError().text());
+            *error = QStringLiteral("无法开始配置模块原子更新：%1").arg(db.lastError().text());
         }
         return false;
     }
-
-    auto rollback = [&db]()
+    const auto fail = [&db, error](const QString& message)
         {
             db.rollback();
+            if (error != nullptr)
+            {
+                *error = message;
+            }
+            return false;
         };
+
     QSet<QString> removedModules;
     for (const QString& sectionName : removeSections)
     {
-        const ScopedSettingIdentity identity = BuildScopedIniIdentity(
-            fileName, sectionName, QStringLiteral("dummy"));
-        if (!identity.valid)
+        if (!IsDatabaseNativeIdentityPart(sectionName, true))
         {
-            rollback();
-            if (error != nullptr)
-            {
-                *error = QStringLiteral("INI section 身份无效：%1").arg(sectionName);
-            }
-            return false;
+            return fail(QStringLiteral("配置分区身份不是数据库原生格式：%1").arg(sectionName));
         }
-        const QString normalizedModule = NormalizeSection(identity.module);
-        if (removedModules.contains(normalizedModule))
+        const QString module = NormalizeSection(baseModule + QStringLiteral("/") + sectionName);
+        if (module.isEmpty())
+        {
+            return fail(QStringLiteral("配置分区无效：%1").arg(sectionName));
+        }
+        if (removedModules.contains(module))
         {
             continue;
         }
         QSqlQuery deleteQuery(db);
         deleteQuery.prepare("DELETE FROM settings WHERE scope_type=? AND scope_id=? AND module=?");
-        deleteQuery.addBindValue(NormalizeSection(identity.scopeType).toLower());
-        deleteQuery.addBindValue(NormalizeScopeId(identity.scopeId));
-        deleteQuery.addBindValue(normalizedModule);
+        deleteQuery.addBindValue(normalizedScope);
+        deleteQuery.addBindValue(normalizedScopeId);
+        deleteQuery.addBindValue(module);
         if (!deleteQuery.exec())
         {
-            rollback();
-            if (error != nullptr)
-            {
-                *error = QStringLiteral("删除旧 INI section 失败：%1；%2")
-                    .arg(sectionName, deleteQuery.lastError().text());
-            }
-            return false;
+            return fail(QStringLiteral("删除旧配置分区失败：%1；%2")
+                .arg(sectionName, deleteQuery.lastError().text()));
         }
-        removedModules.insert(normalizedModule);
+        removedModules.insert(module);
     }
 
     for (auto sectionIt = sectionValues.cbegin(); sectionIt != sectionValues.cend(); ++sectionIt)
     {
+        if (!IsDatabaseNativeIdentityPart(sectionIt.key(), true))
+        {
+            return fail(QStringLiteral("配置分区身份不是数据库原生格式：%1").arg(sectionIt.key()));
+        }
+        const QString module = NormalizeSection(baseModule + QStringLiteral("/") + sectionIt.key());
         for (auto valueIt = sectionIt.value().cbegin(); valueIt != sectionIt.value().cend(); ++valueIt)
         {
-            const ScopedSettingIdentity identity = BuildScopedIniIdentity(
-                fileName, sectionIt.key(), valueIt.key());
+            ScopedSettingIdentity identity;
+            identity.scopeType = normalizedScope;
+            identity.scopeId = normalizedScopeId;
+            identity.module = module;
+            identity.keyName = valueIt.key();
+            identity.valueType = QStringLiteral("string");
+            identity.sensitive = IsSensitiveSettingKey(module) || IsSensitiveSettingKey(valueIt.key());
+            identity.valid = IsDatabaseNativeSettingIdentity(
+                normalizedScope, normalizedScopeId, module, valueIt.key());
             if (!identity.valid || !WriteScopedSettingValue(db, identity, valueIt.value()))
             {
-                rollback();
-                if (error != nullptr)
-                {
-                    *error = QStringLiteral("写入 INI 配置失败：[%1] %2")
-                        .arg(sectionIt.key(), valueIt.key());
-                }
-                return false;
+                return fail(QStringLiteral("写入配置失败：[%1] %2")
+                    .arg(sectionIt.key(), valueIt.key()));
             }
         }
     }
-
     if (!db.commit())
     {
-        rollback();
-        if (error != nullptr)
-        {
-            *error = QStringLiteral("提交 INI 配置原子更新失败：%1").arg(db.lastError().text());
-        }
-        return false;
+        return fail(QStringLiteral("提交配置模块原子更新失败：%1").arg(db.lastError().text()));
     }
     return true;
 }
+
+
+
+
 
 bool ConfigDatabase::ReadScopedSetting(
     const QString& scopeType,
@@ -3387,9 +2847,8 @@ ConfigDatabase::ReadStatus ConfigDatabase::ReadScopedSettingStatus(
     identity.module = moduleName;
     identity.keyName = keyName;
     identity.sensitive = IsSensitiveSettingKey(moduleName) || IsSensitiveSettingKey(keyName);
-    identity.valid = !NormalizeSection(scopeType).isEmpty()
-        && !NormalizeSection(moduleName).isEmpty()
-        && !NormalizeSourceKey(keyName).isEmpty();
+    identity.valid = IsDatabaseNativeSettingIdentity(
+        scopeType, scopeId, moduleName, keyName);
     return ReadScopedSettingValueStatus(db, identity, value);
 }
 
@@ -3400,7 +2859,8 @@ QMap<QString, QString> ConfigDatabase::ReadScopedSettings(
 {
     QMap<QString, QString> values;
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
+    if (!db.isValid() || !db.isOpen()
+        || !IsDatabaseNativeScopeIdentity(scopeType, scopeId, moduleName))
     {
         return values;
     }
@@ -3466,7 +2926,8 @@ bool ConfigDatabase::WriteScopedSetting(
     bool sensitive)
 {
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
+    if (!db.isValid() || !db.isOpen()
+        || !IsDatabaseNativeSettingIdentity(scopeType, scopeId, moduleName, keyName))
     {
         return false;
     }
@@ -3538,10 +2999,8 @@ bool ConfigDatabase::CompareAndSwapScopedSetting(
     identity.sensitive = sensitive
         || IsSensitiveSettingKey(moduleName)
         || IsSensitiveSettingKey(keyName);
-    identity.valid = !NormalizeSection(scopeType).isEmpty()
-        && !NormalizeScopeId(scopeId).isEmpty()
-        && !NormalizeSection(moduleName).isEmpty()
-        && !NormalizeSourceKey(keyName).isEmpty();
+    identity.valid = IsDatabaseNativeSettingIdentity(
+        scopeType, scopeId, moduleName, keyName);
     if (!identity.valid)
     {
         if (error != nullptr)
@@ -3669,10 +3128,8 @@ bool ConfigDatabase::CompareAndSwapScopedSettingWithWitness(
     witnessIdentity.scopeId = witnessScopeId;
     witnessIdentity.module = witnessModuleName;
     witnessIdentity.keyName = witnessKeyName;
-    witnessIdentity.valid = !NormalizeSection(witnessScopeType).isEmpty()
-        && !NormalizeScopeId(witnessScopeId).isEmpty()
-        && !NormalizeSection(witnessModuleName).isEmpty()
-        && !NormalizeSourceKey(witnessKeyName).isEmpty();
+    witnessIdentity.valid = IsDatabaseNativeSettingIdentity(
+        witnessScopeType, witnessScopeId, witnessModuleName, witnessKeyName);
 
     ScopedSettingIdentity targetIdentity;
     targetIdentity.scopeType = targetScopeType;
@@ -3683,10 +3140,8 @@ bool ConfigDatabase::CompareAndSwapScopedSettingWithWitness(
     targetIdentity.sensitive = targetSensitive
         || IsSensitiveSettingKey(targetModuleName)
         || IsSensitiveSettingKey(targetKeyName);
-    targetIdentity.valid = !NormalizeSection(targetScopeType).isEmpty()
-        && !NormalizeScopeId(targetScopeId).isEmpty()
-        && !NormalizeSection(targetModuleName).isEmpty()
-        && !NormalizeSourceKey(targetKeyName).isEmpty();
+    targetIdentity.valid = IsDatabaseNativeSettingIdentity(
+        targetScopeType, targetScopeId, targetModuleName, targetKeyName);
     if (!witnessIdentity.valid || !targetIdentity.valid)
     {
         if (error != nullptr)
@@ -3829,6 +3284,17 @@ bool ConfigDatabase::WriteScopedSettings(
     const QString& moduleName,
     const QMap<QString, ScopedSettingValue>& values)
 {
+    if (!IsDatabaseNativeScopeIdentity(scopeType, scopeId, moduleName))
+    {
+        return false;
+    }
+    for (auto it = values.cbegin(); it != values.cend(); ++it)
+    {
+        if (!IsDatabaseNativeIdentityPart(it.key(), false))
+        {
+            return false;
+        }
+    }
     if (values.isEmpty())
     {
         return true;
@@ -3923,7 +3389,8 @@ bool ConfigDatabase::RemoveScopedSetting(
     const QString& keyName)
 {
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
+    if (!db.isValid() || !db.isOpen()
+        || !IsDatabaseNativeSettingIdentity(scopeType, scopeId, moduleName, keyName))
     {
         return false;
     }
@@ -3948,7 +3415,10 @@ bool ConfigDatabase::TryListScopedSettingIds(
     const QString& moduleName,
     QStringList* ids)
 {
-    if (ids == nullptr)
+    if (ids == nullptr
+        || !IsDatabaseNativeIdentityPart(scopeType, false)
+        || (!moduleName.trimmed().isEmpty()
+            && !IsDatabaseNativeIdentityPart(moduleName, true)))
     {
         return false;
     }
@@ -3979,7 +3449,15 @@ bool ConfigDatabase::TryListScopedSettingIds(
     QStringList values;
     while (query.next())
     {
-        values << query.value(0).toString();
+        const QString id = query.value(0).toString();
+        if (IsDatabaseNativeIdentityPart(
+                id,
+                false,
+                NormalizeSection(scopeType).compare(QStringLiteral("global"), Qt::CaseInsensitive) == 0,
+                true))
+        {
+            values << id;
+        }
     }
     *ids = UniqueSorted(values);
     return true;
@@ -3992,7 +3470,10 @@ bool ConfigDatabase::TryListScopedSettingIdsBounded(
     qsizetype maxIdLength,
     QStringList* ids)
 {
-    if (ids == nullptr || maxCount <= 0 || maxIdLength <= 0)
+    if (ids == nullptr || maxCount <= 0 || maxIdLength <= 0
+        || !IsDatabaseNativeIdentityPart(scopeType, false)
+        || (!moduleName.trimmed().isEmpty()
+            && !IsDatabaseNativeIdentityPart(moduleName, true)))
     {
         return false;
     }
@@ -4030,7 +3511,15 @@ bool ConfigDatabase::TryListScopedSettingIdsBounded(
     while (query.next())
     {
         const QString id = query.value(0).toString();
-        if (id.isEmpty() || id.size() > maxIdLength || values.size() >= maxCount)
+        if (!IsDatabaseNativeIdentityPart(
+                id,
+                false,
+                NormalizeSection(scopeType).compare(QStringLiteral("global"), Qt::CaseInsensitive) == 0,
+                true))
+        {
+            continue;
+        }
+        if (id.size() > maxIdLength || values.size() >= maxCount)
         {
             return false;
         }
@@ -4047,7 +3536,9 @@ bool ConfigDatabase::TryListScopedSettingIdsBounded(
 bool ConfigDatabase::RemoveScopedSettings(const QString& scopeType, const QString& scopeId, const QString& moduleName)
 {
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen())
+    if (!db.isValid() || !db.isOpen()
+        || !IsDatabaseNativeScopeIdentity(
+            scopeType, scopeId, moduleName, moduleName.trimmed().isEmpty()))
     {
         return false;
     }

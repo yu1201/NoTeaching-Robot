@@ -201,6 +201,10 @@ private:
 
     std::string m_socketIp;
     int m_socketPort = 2222;
+    std::string m_ftpIp;
+    int m_ftpPort = 7777;
+    std::string m_ftpUser;
+    std::string m_ftpPassword;
     std::uintptr_t m_socketHandle = static_cast<std::uintptr_t>(~0ULL);
     std::atomic_bool m_connected{ false };
     bool m_wsaStarted = false;

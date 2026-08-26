@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ConfigSection.h"
+
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -35,6 +37,6 @@ struct Document
 };
 
 Document MakeDefaultDocument();
-bool Load(const QString& path, Document& document, QString& error);
-bool SaveV2(const QString& path, const Document& document, QString& error);
+bool Load(const ConfigLocation& location, Document& document, QString& error);
+bool SaveV2(const ConfigLocation& location, const Document& document, QString& error);
 }

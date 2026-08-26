@@ -11,11 +11,11 @@
 
 class RobotDriverAdaptor;
 
-// WeldBreakpoint.ini 的唯一读写/锁入口。所有 marker + RecordV2 组合更新均按失败关闭顺序写入并回读。
+// WeldBreakpoint 数据库模块的唯一读写/锁入口。所有 marker + RecordV2 组合更新均按失败关闭顺序写入并回读。
 class WeldSafetyRecoveryStore final
 {
 public:
-    static QString StoragePath(const QString& robotName);
+    static QString StorageLabel(const QString& robotName);
     static bool ReadRecord(
         const QString& robotName,
         WeldResumePlanner::CheckpointRecord& record,

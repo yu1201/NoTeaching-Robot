@@ -3,7 +3,7 @@
 #include "AppPaths.h"
 #include "ConfigDatabase.h"
 #include "ContralUnit.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "RobotDriverAdaptor.h"
 
 #include <QByteArray>
@@ -86,7 +86,7 @@ QString DecodeConfigTextForRobotData(const std::string& text)
     return QString::fromLocal8Bit(bytes.constData(), bytes.size());
 }
 
-std::string EncodeIniTextForRobotData(const QString& text)
+std::string EncodeConfigTextForRobotData(const QString& text)
 {
     const QByteArray bytes = text.toUtf8();
     return std::string(bytes.constData(), static_cast<size_t>(bytes.size()));
@@ -105,11 +105,10 @@ void ReadRobotIdentityForModelWelding(
         return;
     }
 
-    const QString path = RobotDataHelper::BuildProjectPath(
-        QStringLiteral("Data/%1/RobotPara.ini").arg(unitName));
     QMap<QString, QMap<QString, QString>> snapshot;
     QString snapshotError;
-    if (!ConfigDatabase::ReadIniFileSnapshot(path, snapshot, &snapshotError))
+    if (!ConfigDatabase::ReadScopedModuleSnapshot(
+            QStringLiteral("robot"), unitName, QStringLiteral("RobotPara"), snapshot, &snapshotError))
     {
         return;
     }
@@ -305,7 +304,7 @@ QString DefaultIniLineValue(const QString& line)
     return value;
 }
 
-bool WriteDefaultLineIfMissing(COPini& ini, const QString& line)
+bool WriteDefaultLineIfMissing(ConfigSection& ini, const QString& line)
 {
     const QString trimmed = line.trimmed();
     if (trimmed.isEmpty() || trimmed.startsWith('#') || trimmed.startsWith(';'))
@@ -328,7 +327,7 @@ bool WriteDefaultLineIfMissing(COPini& ini, const QString& line)
     return ini.WriteString(keyText, ToUtf8StdString(DefaultIniLineValue(line)));
 }
 
-bool EnsureDefaultLinesInSection(COPini& ini, const QString& sectionName, const QStringList& lines)
+bool EnsureDefaultLinesInSection(ConfigSection& ini, const QString& sectionName, const QStringList& lines)
 {
     ini.SetSectionName(ToUtf8StdString(sectionName));
     for (const QString& line : lines)
@@ -576,9 +575,9 @@ RobotDriverAdaptor* RobotDataHelper::GetRobotDriver(ContralUnit* pContralUnit, i
 
 // ===== 相机参数 =====
 
-QString RobotDataHelper::CameraParamPath(const QString& robotName)
+ConfigLocation RobotDataHelper::CameraConfig(const QString& robotName)
 {
-    return BuildProjectPath(QString("Data/%1/CameraParam.ini").arg(robotName));
+    return ConfigLocation::Robot(robotName, QStringLiteral("CameraParam"));
 }
 
 QVector<RobotDataHelper::CameraInfo> RobotDataHelper::LoadCameraList(const QString& robotName, int* pSelectedIndex)
@@ -586,8 +585,8 @@ QVector<RobotDataHelper::CameraInfo> RobotDataHelper::LoadCameraList(const QStri
     QVector<CameraInfo> cameras;
     int selectedIndex = 0;
 
-    COPini ini;
-    if (ini.SetFileName(ToUtf8StdString(CameraParamPath(robotName))))
+    ConfigSection ini;
+    if (ini.SetLocation(CameraConfig(robotName)))
     {
         int cameraNum = 0;
         int measureCameraNo = 0;
@@ -643,8 +642,8 @@ QVector<RobotDataHelper::CameraInfo> RobotDataHelper::LoadCameraList(const QStri
 
 QString RobotDataHelper::MeasureCameraSection(const QString& robotName)
 {
-    COPini ini;
-    if (!ini.SetFileName(ToUtf8StdString(CameraParamPath(robotName))))
+    ConfigSection ini;
+    if (!ini.SetLocation(CameraConfig(robotName)))
     {
         return "CAMERA0";
     }
@@ -657,13 +656,12 @@ QString RobotDataHelper::MeasureCameraSection(const QString& robotName)
 
 bool RobotDataHelper::LoadCameraParam(const QString& robotName, const QString& cameraSection, CameraParamData& param, QString* error)
 {
-    const QString iniPath = CameraParamPath(robotName);
-    COPini ini;
-    if (!ini.SetFileName(ToUtf8StdString(iniPath)))
+    ConfigSection ini;
+    if (!ini.SetLocation(CameraConfig(robotName)))
     {
         if (error != nullptr)
         {
-            *error = "读取相机参数失败：打开文件失败 " + iniPath;
+            *error = "读取相机参数失败：数据库位置无效 " + robotName;
         }
         return false;
     }
@@ -696,7 +694,7 @@ bool RobotDataHelper::LoadCameraParam(const QString& robotName, const QString& c
     {
         param.cameraType = QString::number(intValue);
     }
-    param.readFps = "100";  // 默认 100fps（≈10ms 轮询）；旧 CameraParam.ini 无此键时回退到该值
+    param.readFps = "100";  // 默认 100fps（约 10ms 轮询）；数据库中无此键时回退到该值
     if (ini.ReadString(false, "CameraReadFps", &intValue) > 0 && intValue > 0)
     {
         param.readFps = QString::number(intValue);
@@ -716,13 +714,12 @@ bool RobotDataHelper::LoadCameraParam(const QString& robotName, const QString& c
 
 bool RobotDataHelper::SaveCameraParam(const QString& robotName, const CameraParamData& param, QString* error)
 {
-    const QString iniPath = CameraParamPath(robotName);
-    COPini ini;
-    if (!ini.SetFileName(ToUtf8StdString(iniPath)))
+    ConfigSection ini;
+    if (!ini.SetLocation(CameraConfig(robotName)))
     {
         if (error != nullptr)
         {
-            *error = "保存相机参数失败：打开文件失败 " + iniPath;
+            *error = "保存相机参数失败：数据库位置无效 " + robotName;
         }
         return false;
     }
@@ -773,16 +770,16 @@ bool RobotDataHelper::SaveCameraParam(const QString& robotName, const CameraPara
 
     if (!saveOk && error != nullptr)
     {
-        *error = QString("保存相机参数失败：%1 [%2]").arg(iniPath, sectionName);
+        *error = QString("保存相机参数失败：%1 [%2]").arg(robotName, sectionName);
     }
     return saveOk;
 }
 
 // ===== 精测量参数 =====
 
-QString RobotDataHelper::MeasureWeldParamPath(const QString& robotName)
+ConfigLocation RobotDataHelper::MeasureWeldConfig(const QString& robotName)
 {
-    return BuildProjectPath(QString("Data/%1/MeasureWeldParam.ini").arg(robotName));
+    return ConfigLocation::Robot(robotName, QStringLiteral("MeasureWeldParam"));
 }
 
 QString RobotDataHelper::MeasureWeldScanSectionName(int groupIndex)
@@ -795,9 +792,8 @@ QString RobotDataHelper::MeasureWeldWeldSectionName(int groupIndex)
     return QString("MeasureGroup%1.Weld").arg(std::max(0, groupIndex));
 }
 
-bool RobotDataHelper::EnsureMeasureWeldParamFile(const QString& robotName, QString* error)
+bool RobotDataHelper::EnsureMeasureWeldParameters(const QString& robotName, QString* error)
 {
-    const QString newPath = MeasureWeldParamPath(robotName);
     if (!ConfigDatabase::IsAvailable())
     {
         if (error != nullptr)
@@ -807,12 +803,12 @@ bool RobotDataHelper::EnsureMeasureWeldParamFile(const QString& robotName, QStri
         return false;
     }
 
-    COPini ini;
-    if (!ini.SetFileName(false, ToUtf8StdString(newPath)))
+    ConfigSection ini;
+    if (!ini.SetLocation(MeasureWeldConfig(robotName)))
     {
         if (error != nullptr)
         {
-            *error = QString("打开配置库测量焊接参数失败：%1").arg(newPath);
+            *error = QString("测量焊接参数数据库位置无效：%1").arg(robotName);
         }
         return false;
     }
@@ -844,7 +840,7 @@ bool RobotDataHelper::EnsureMeasureWeldParamFile(const QString& robotName, QStri
         {
             if (error != nullptr)
             {
-                *error = QString("写入配置库测量焊接默认参数失败：%1").arg(newPath);
+                *error = QString("写入配置库测量焊接默认参数失败：%1").arg(robotName);
             }
             return false;
         }
@@ -855,17 +851,16 @@ bool RobotDataHelper::EnsureMeasureWeldParamFile(const QString& robotName, QStri
 
 int RobotDataHelper::MeasureWeldCurrentGroupIndex(const QString& robotName, QString* error)
 {
-    if (!EnsureMeasureWeldParamFile(robotName, error))
+    if (!EnsureMeasureWeldParameters(robotName, error))
     {
         return 0;
     }
-    COPini ini;
-    const QString path = MeasureWeldParamPath(robotName);
-    if (!ini.SetFileName(path.toUtf8().constData()))
+    ConfigSection ini;
+    if (!ini.SetLocation(MeasureWeldConfig(robotName)))
     {
         if (error != nullptr)
         {
-            *error = "打开测量焊接参数数据失败：" + path;
+            *error = "打开测量焊接参数数据失败：" + robotName;
         }
         return 0;
     }
@@ -898,7 +893,8 @@ double RobotDataHelper::ReadActiveFinalWeldStepFallbackMm(const QString& robotNa
         return kDefaultStepMm;
     }
     const QMap<QString, QString> values =
-        ConfigDatabase::ReadIniSection(MeasureWeldParamPath(robotName), section);
+        ConfigDatabase::ReadScopedSettings(
+            QStringLiteral("robot"), robotName, QStringLiteral("MeasureWeldParam/") + section);
     bool parsed = false;
     const double stepMm = values.value(QStringLiteral("FinalWeldTrajectoryStepMm")).toDouble(&parsed);
     return (parsed && std::isfinite(stepMm) && stepMm > 0.0)
@@ -915,24 +911,25 @@ int RobotDataHelper::ReadActiveWeldDirectionFallback(const QString& robotName)
     {
         return 1;
     }
-    COPini ini;
-    if (ini.SetFileName(MeasureWeldParamPath(robotName).toUtf8().constData()))
+    ConfigSection ini;
+    if (ini.SetLocation(MeasureWeldConfig(robotName)))
     {
+        ini.SetSectionName(ToUtf8StdString(MeasureWeldCurrentWeldSectionName(robotName)));
         ini.ReadString(false, "WeldDirection", &direction);
     }
     return direction < 0 ? -1 : 1;
 }
 
-// ===== 底层 ini 读写 =====
+// ===== 数据库模块读写 =====
 
-bool RobotDataHelper::ReadPulse(const QString& filePath, const QString& sectionName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error)
+bool RobotDataHelper::ReadPulse(const ConfigLocation& location, const QString& sectionName, const QString& prefix, T_ANGLE_PULSE& pulse, QString* error)
 {
-    COPini ini;
-    if (!ini.SetFileName(filePath.toUtf8().constData()))
+    ConfigSection ini;
+    if (!ini.SetLocation(location))
     {
         if (error != nullptr)
         {
-            *error = "打开参数数据失败：" + filePath;
+            *error = "参数数据库位置无效：" + location.module;
         }
         return false;
     }
@@ -965,19 +962,19 @@ bool RobotDataHelper::ReadPulse(const QString& filePath, const QString& sectionN
 
     if (!ok && error != nullptr)
     {
-        *error += QString("，参数=%1，分组=%2").arg(filePath, sectionName);
+        *error += QString("，模块=%1，分组=%2").arg(location.module, sectionName);
     }
     return ok;
 }
 
-bool RobotDataHelper::WritePulse(const QString& filePath, const QString& sectionName, const QString& prefix, const T_ANGLE_PULSE& pulse, QString* error)
+bool RobotDataHelper::WritePulse(const ConfigLocation& location, const QString& sectionName, const QString& prefix, const T_ANGLE_PULSE& pulse, QString* error)
 {
-    COPini ini;
-    if (!ini.SetFileName(filePath.toUtf8().constData()))
+    ConfigSection ini;
+    if (!ini.SetLocation(location))
     {
         if (error != nullptr)
         {
-            *error = "打开参数数据失败：" + filePath;
+            *error = "参数数据库位置无效：" + location.module;
         }
         return false;
     }
@@ -1009,19 +1006,19 @@ bool RobotDataHelper::WritePulse(const QString& filePath, const QString& section
 
     if (!ok && error != nullptr)
     {
-        *error += QString("，参数=%1，分组=%2").arg(filePath, sectionName);
+        *error += QString("，模块=%1，分组=%2").arg(location.module, sectionName);
     }
     return ok;
 }
 
-bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionName, const QString& prefix, T_ROBOT_COORS& coors, QString* error)
+bool RobotDataHelper::ReadCoors(const ConfigLocation& location, const QString& sectionName, const QString& prefix, T_ROBOT_COORS& coors, QString* error)
 {
-    COPini ini;
-    if (!ini.SetFileName(filePath.toUtf8().constData()))
+    ConfigSection ini;
+    if (!ini.SetLocation(location))
     {
         if (error != nullptr)
         {
-            *error = "打开参数数据失败：" + filePath;
+            *error = "参数数据库位置无效：" + location.module;
         }
         return false;
     }
@@ -1059,21 +1056,21 @@ bool RobotDataHelper::ReadCoors(const QString& filePath, const QString& sectionN
         if (error != nullptr)
         {
             *error = QString("读取失败：%1，缺少 %2，参数=%3，分组=%4")
-                .arg(prefix, missingKeys.join(", "), filePath, sectionName);
+                .arg(prefix, missingKeys.join(", "), location.module, sectionName);
         }
         return false;
     }
     return true;
 }
 
-bool RobotDataHelper::WriteCoors(const QString& filePath, const QString& sectionName, const QString& prefix, const T_ROBOT_COORS& coors, QString* error)
+bool RobotDataHelper::WriteCoors(const ConfigLocation& location, const QString& sectionName, const QString& prefix, const T_ROBOT_COORS& coors, QString* error)
 {
-    COPini ini;
-    if (!ini.SetFileName(filePath.toUtf8().constData()))
+    ConfigSection ini;
+    if (!ini.SetLocation(location))
     {
         if (error != nullptr)
         {
-            *error = "打开参数数据失败：" + filePath;
+            *error = "参数数据库位置无效：" + location.module;
         }
         return false;
     }
@@ -1083,30 +1080,30 @@ bool RobotDataHelper::WriteCoors(const QString& filePath, const QString& section
     {
         if (error != nullptr)
         {
-            *error = QString("写入失败：%1，参数=%2，分组=%3").arg(prefix, filePath, sectionName);
+            *error = QString("写入失败：%1，模块=%2，分组=%3").arg(prefix, location.module, sectionName);
         }
         return false;
     }
     return true;
 }
 
-bool RobotDataHelper::WriteParamValue(const QString& filePath, const QString& sectionName, const QString& key, const QString& value, QString* error)
+bool RobotDataHelper::WriteParamValue(const ConfigLocation& location, const QString& sectionName, const QString& key, const QString& value, QString* error)
 {
-    COPini ini;
-    if (!ini.SetFileName(filePath.toUtf8().constData()))
+    ConfigSection ini;
+    if (!ini.SetLocation(location))
     {
         if (error != nullptr)
         {
-            *error = "打开参数数据失败：" + filePath;
+            *error = "参数数据库位置无效：" + location.module;
         }
         return false;
     }
-    ini.SetSectionName(EncodeIniTextForRobotData(sectionName));
-    if (!ini.WriteString(EncodeIniTextForRobotData(key), EncodeIniTextForRobotData(value)))
+    ini.SetSectionName(EncodeConfigTextForRobotData(sectionName));
+    if (!ini.WriteString(EncodeConfigTextForRobotData(key), EncodeConfigTextForRobotData(value)))
     {
         if (error != nullptr)
         {
-            *error = QString("写入失败：%1，参数=%2，分组=%3").arg(key, filePath, sectionName);
+            *error = QString("写入失败：%1，模块=%2，分组=%3").arg(key, location.module, sectionName);
         }
         return false;
     }

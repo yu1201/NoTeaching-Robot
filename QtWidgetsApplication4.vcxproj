@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildProjectDirectory)\environment.local.props" Condition="Exists('$(MSBuildProjectDirectory)\environment.local.props')" />
   <ItemGroup Label="ProjectConfigurations">
@@ -214,7 +214,7 @@
     <ClCompile Include="src\ScanDataUploader.cpp" />
     <ClCompile Include="src\WeldProcessFile.cpp" />
     <ClCompile Include="src\WeldProcessDialog.cpp" />
-    <ClCompile Include="src\OPini.cpp" />
+    <ClCompile Include="src\ConfigSection.cpp" />
     <ClCompile Include="src\RobotLog.cpp" />
     <ClCompile Include="src\SKJCameraControlClient.cpp" />
     <ClCompile Include="src\RobotDriverAdaptor.cpp" />
@@ -297,7 +297,7 @@
     <ClInclude Include="include\PointCloudModelDenoiser.h" />
     <ClInclude Include="include\WorkpieceMeshBuilder.h" />
     <ClInclude Include="include\WorkpieceMeshViewerDialog.h" />
-    <ClInclude Include="include\OPini.h" />
+    <ClInclude Include="include\ConfigSection.h" />
     <ClInclude Include="include\PointCloud3DView.h" />
     <ClInclude Include="include\CadModel3DView.h" />
     <ClInclude Include="include\RobotCadAssemblyLoader.h" />

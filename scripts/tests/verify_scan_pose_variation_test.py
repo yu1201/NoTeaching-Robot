@@ -69,6 +69,10 @@ def main() -> int:
         "使用机器人",
         "扫描相机",
         "扫描速度",
+        "后处理方式",
+        "无=点云生成后结束",
+        "直线处理=采集特征点并生成三维平滑曲线",
+        "波纹板处理=进入现有特征点、拐点拟合及焊接姿态生成流程",
         'setObjectName(QStringLiteral("scanInputSourceCard"))',
         "参数来源（自动继承）",
         "机器人运动与时序",
@@ -80,12 +84,13 @@ def main() -> int:
         "示教扫描终点并保存",
         "生成并保存扫描轨迹",
         "运行扫描并保存数据",
-        "FunctionTestScanPoseVariation.ini",
+        'ConfigLocation::Robot(RobotName(), QStringLiteral("FunctionTestScanPoseVariation"))',
         "RobotDataHelper::WriteCoors",
         "RobotDataHelper::WritePulse",
         'QStringLiteral("RobotName")',
         'QStringLiteral("CameraSection")',
         'QStringLiteral("ScanSpeedMmPerMin")',
+        'QStringLiteral("PostProcessMode")',
     ):
         require(token in dialog, f"teach/config workflow missing: {token}")
     require('targetLayout->addRow(QStringLiteral("继承参数"), inheritedHint)' not in dialog,
@@ -135,6 +140,10 @@ def main() -> int:
         "camera_section=",
         "safe_move_speed_mm_per_min=",
         "camera_time_offset_ms=",
+        "post_process_mode=",
+        "post_process_name=",
+        "CurrentPostProcessMode()",
+        "postProcessMode",
     ):
         require(token in run_scan, f"execution/output workflow missing: {token}")
     for token in ("SetLiveImageEnabled(true)", "LatestImage(&imageTimestamp)"):
@@ -158,6 +167,7 @@ def main() -> int:
         "MoveScanStartSafeAndWait(",
         "MoveScanEndSafeAndWait(",
         "cameraSectionOverride.trimmed().isEmpty()",
+        "postProcessMode",
     ):
         require(token in run_cycle, f"pre-motion/safe-retraction contract missing: {token}")
 
@@ -180,6 +190,21 @@ def main() -> int:
             "custom trajectory can silently fall back to an ordinary endpoint MOVL")
     require("const std::vector<T_ROBOT_COORS>* scanTrajectory = nullptr" in service_header,
             "ordinary scan callers did not retain backward-compatible default behavior")
+    require("enum class ScanPostProcessMode" in service_header
+            and "ScanPostProcessMode::CorrugatedBoard" in service_header,
+            "scan service does not expose a backward-compatible per-run post-process contract")
+    for token in (
+        "runCorrugatedBoardPostProcess",
+        "ScanPostProcessMode::FeaturePointSmoothCurve",
+        "BuildSmoothFeatureCurve",
+    ):
+        require(token in collector, f"post-process branch missing from scan collector: {token}")
+    require("PreciseLaserPoint_FeatureSmoothCurve_2mm.txt" in service,
+            "feature-point smooth-curve output has no dedicated result artifact")
+    raw_only_branch = collector.find("if (!runCorrugatedBoardPostProcess)")
+    feature_analysis = collector.find("AnalyzeMeasureThenWeldPointCloud(")
+    require(0 <= raw_only_branch < feature_analysis,
+            "non-corrugated scan modes do not finish before corrugated feature/corner processing")
     require("RobotOperationLease::IsCancellationRequested(driver)" in run_scan,
             "background test cannot participate in the shared safety-stop contract")
 

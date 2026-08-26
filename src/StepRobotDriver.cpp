@@ -1,5 +1,6 @@
 #include "STEPRobotDriver.h"
 #include "FTPClient.h"
+#include "RobotDriverRegistry.h"
 #include "RobotFtpFileTransfer.h"
 
 #include "AppPaths.h"
@@ -3389,9 +3390,18 @@ bool STEPRobotCtrl::RunHandEyeValidation(
 
 bool STEPRobotCtrl::InitRobotDriver(std::string strUnitName)
 {
-	COPini cIni;
+	ConfigSection cIni;
+	if (const RobotDriverSetupProfile* setup =
+		RobotDriverRegistry::SetupProfile(ROBOT_TYPE_STEP))
+	{
+		m_nSocketPort = setup->defaultSocketPort;
+		m_sFTPIP = setup->defaultFtpHost;
+		m_nFTPPort = setup->defaultFtpPort;
+		m_sFTPUser = setup->defaultFtpUser;
+		m_sFTPPassWord = setup->defaultFtpPassword;
+	}
 
-	cIni.SetFileName(DATA_PATH + strUnitName + ROBOT_PARA_INI);
+	cIni.SetLocation(ConfigLocation::Robot(QString::fromUtf8(strUnitName.c_str()), QStringLiteral("RobotPara")));
 	cIni.SetSectionName("BaseParam");
 	cIni.ReadString("RobotName", m_sRobotName);
 	cIni.ReadString("CustomName", m_sCustomName);
@@ -3404,11 +3414,23 @@ bool STEPRobotCtrl::InitRobotDriver(std::string strUnitName)
 	{
 		cIni.ReadString("ProjectName", m_sStepProjectName);
 	}
+	if (m_sStepProjectName.empty())
+	{
+		if (const RobotDriverSetupProfile* setup =
+			RobotDriverRegistry::SetupProfile(ROBOT_TYPE_STEP))
+		{
+			m_sStepProjectName = setup->defaultControllerProject;
+		}
+	}
 	m_sStepProjectName = StepNormalizeProjectName(m_sStepProjectName);
 	cIni.ReadString("FTPIP", m_sFTPIP);
 	cIni.ReadString("FTPPort", &m_nFTPPort);
 	cIni.ReadString("FTPUser", m_sFTPUser);
 	cIni.ReadString("FTPPassWord", m_sFTPPassWord);
+	if (m_sFTPIP.empty())
+	{
+		m_sFTPIP = m_sSocketIP;
+	}
 
 	cIni.SetSectionName("Tool");
 	cIni.ReadString("PolisherTool_d", "", m_tTools.tPolisherTool, T_ROBOT_COORS(1, 1, 1, 1, 1, 1, -1, -1, -1));

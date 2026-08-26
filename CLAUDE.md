@@ -28,10 +28,6 @@ powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1 -AppVersion
 # 切换 STEP SDK（之后必须重新编译 Debug+Release 两个配置）
 powershell -ExecutionPolicy Bypass -File scripts\switch_step_sdk.ps1 -Mode timestamp|legacy
 
-# 旧 INI/TXT 配置迁移进 ConfigStore.db（现场用 ConfigMigrate.exe，无需 Python）
-tools\ConfigMigrate_Run.cmd --data-root "D:\NoTeachingRobotData" --source "C:\旧版本\Data"
-python tools\migrate_config_to_sqlite.py --source Data --encrypt
-
 # 独立验证可移植滤波模块（唯一的 CMake 子项目，带 example）
 cmake -S portable/MeasureThenWeldFilterFit -B portable/MeasureThenWeldFilterFit/build
 cmake --build portable/MeasureThenWeldFilterFit/build --config Release
@@ -61,17 +57,17 @@ QtWidgetsApplication4.exe --no-show --fanuc-upload-services --skip-upload-wait  
 
 **1. 应用外壳（`QtWidgetsApplication4.cpp`，约 14.8k 行）** — 单窗口三页：`m_pAuthPage`（登录）/`m_pDashboardPage`（大按钮主页，面向操作员）在 `m_pMainStack` 内，而**管理页 `m_pManagementPage` 是独立顶层窗口**，自带 `m_pManagementStack` 和菜单栏。各功能弹窗不是自由对话框，而是通过 `PrepareEmbeddedPage` **嵌入某个 stack**；落到主栈还是管理栈由 `m_bOpenEmbeddedInManagement` 标志决定。账号/角色（operator/engineer/admin，`kRole*`，等级 1/2/3）经 `RequirePermission` 把守：管理页需 engineer+，账号管理/调试日志需 admin。账号摘要使用随机盐 PBKDF2-HMAC-SHA256；旧 SHA256 只在正确登录后原子升级。全新空库不生成公开默认口令，必须由首位本机用户设置初始 `admin` 密码，账号与初始化标志原子提交。
 
-**2. 机器人驱动抽象** — `RobotDriverAdaptor`（基类，声明全套 `virtual` 连接/运动/状态/变量/FTP 接口，并用 **Orocos KDL** 实现品牌无关的 DH FK/IK）。`ContralUnit::InitContralUnit` 读每个单元 `Data\<UnitName>\RobotPara.ini` 的 `[BaseParam]RobotType`：`1`→`STEPRobotCtrl`、`2`→`FANUCRobotCtrl`（`Const.h`：`ROBOT_TYPE_STEP/FANUC`），存为 `T_CONTRAL_UNIT.pUnitDriver`。**全程用基类指针；FANUC 专有功能（常驻服务上传、CURPOS/raw 诊断、固定 TP 点动）必须 `dynamic_cast<FANUCRobotCtrl*>` 并判空。** FANUC 用两条 TCP：S4 控制口（newline 文本协议，`FanucRequest` 经 `m_hMutex` 串行化，出错即 `CloseSocket` 触发重连）+ S5 监控口（后台线程解析 `MON:` 帧填互斥保护的状态缓存，passive 读不占 S4）。STEP 无裸 socket，包 `STEPROBOTSDK::RobotComClient`；连续运动生成 `.srp/.srd` 文本经 FTP（`FtpClient`，WinINet）上传到 `PCRobot` 工程再加载运行。
+**2. 机器人驱动抽象** — `RobotDriverAdaptor` 是机器人功能的唯一业务入口；品牌底层必须实现其能力并由能力矩阵限制未满足功能。`ContralUnit::InitContralUnit` 从数据库的 `robot/<UnitName>/RobotPara/BaseParam/RobotType` 选择 STEP、FANUC 或汇川驱动。业务层不得 `dynamic_cast` 到品牌类或直接调用品牌 SDK。品牌原生程序文件只允许由相应底层在适配层调用内部生成、上传和执行。
 
-**3. 配置与持久化** — 历史上每字段一个 INI/TXT，现已**统一进单个 SQLite `Data/ConfigStore.db`**（Qt `QSQLITE`，schema 版本 **5**）。`COPini`（`OPini.cpp`）保留旧 `ReadString/WriteString` 签名但转发给 `ConfigDatabase`；像 `Data/RobotA/RobotPara.ini` 这样的路径现在只是**逻辑键**，磁盘上没有这些文件——**不要再写代码去 fopen/QFile 这些 .ini/.txt**。`ConfigDatabase` 把 `(file, section, key)` 三元组映射成 scope（`global`/`robot`/`workpiece_template`/`result`/`account`）+ module + key 行；`Data/<RobotName>/…`→scope=robot。可恢复敏感值使用字段绑定的 Windows DPAPI CurrentUser；旧 `enc:v1:` 仅用于读取历史值并在事务迁移中升级，禁止再用于新凭据。非当前 schema 的数据库旁存在旧 INI/TXT 时应用必须拒绝启动，先运行当前 `ConfigMigrate`；v4 与磁盘旧配置并存只能在审查 DPAPI 备份后显式 `--overwrite`，禁止猜测合并或绕过凭据清理证明。
+**3. 配置与持久化** — 业务配置统一进入 SQLite `Data/ConfigStore.db`（Qt `QSQLITE`，schema 版本 **5**）。业务层使用 `ConfigLocation(scopeType/scopeId/module)` + `ConfigSection`，或直接调用 `ConfigDatabase` 的 scoped API；禁止把文件名、相对路径或绝对路径当配置身份，也禁止恢复旧路径兼容接口。唯一例外是厂商点云算法的 `CorrugatedSheetPointCloudEctration.ini` 与运行时派生副本，它们由点云处理模块原生读取。可恢复敏感值使用字段绑定的 Windows DPAPI CurrentUser；旧 `enc:v1:` 仅用于数据库升级时读取历史值，禁止用于新凭据。
 
 **4. 先测后焊核心管线（`MeasureThenWeldService.cpp`，约 9.2k 行，逻辑几乎都在匿名命名空间自由函数里，公有方法在约 6075 行后）** — `MeasureThenWeldDialog::RunPresetParamFlow` 在 detached `std::thread` 上按序驱动、每步弹确认框：开相机 → `MoveScanStartSafeAndWait`（脉冲安全位）→ `MoveCoorsAndWait(起点)` → **`ScanMoveAndCollect`**（核心，约 6681–7931 行）→ `MoveScanEndSafeAndWait` → `ExecuteWeldPoseFileWithSafePos`。`ScanMoveAndCollect` 并发采三路：机器人位姿（~50ms）、相机帧（`CameraFrameCache`）、帧内激光点；**时间插值匹配是关键不变量**——相机时间戳通过一次性偏移对齐到机器人时间轴，`InterpolateRobotPose` 插出该时刻机器人位姿，`CalcLaserPointInRobot`（手眼矩阵）把相机点变换到机器人/基坐标，早于首个/晚于末个机器人采样的帧丢弃。随后 `AnalyzeMeasureThenWeldPointCloud` 走外部 SDK 或旧算法 → PreservePath + 分类关键点 → `BuildSegmentPoseOutputLines` 分四段算 RZ、套姿态补偿、2mm 加密 → `PreciseLaserPoint_WeldPose_2mm.txt` → `ApplyWeldSeamCompToPoseFile` 焊缝补偿 → `…_SeamComp.txt`（最终执行文件）。`RebuildWeldFilesFromLaserDir` 支持从已存 `LaserPoint` 目录离线重建（跳过扫描）。
 
 **5. 激光/点云处理** — 由 `PointCloudProcessingConfig::Mode` 切换两条路径：`ExternalCorrugatedSheet`（把点云喂给外部 **PointCloudExtration.dll**，`LoadLibraryExW` + 按 **MSVC mangled 名字字符串**解析导出函数，返回的 `ExternalTrackPoint*` 必须用 SDK 的 release 释放；**绝不改 `SDK/PointCloudExtration/` 源码**，只写一份 `*.runtime.ini` 传给 DLL）与 `LegacyLaserPath`（`RobotCalculation` 旧特征点几何）。坡口相机接收两模式：`m_bUseSharedScanCameraReceiver=false`→**TCP 独立，固定端口 50006**（每单元一 socket）；`true`→**UDP 共享端口 50004**，按相机 IP 分发到各单元缓存。可移植 `LaserFramePoint3DFilter`（仅依赖 OpenCV，无 Qt/Eigen）做单帧三维滤波保留最长 2-3 条主直线，是运行时真相来源（`FunctionTestDialog` 里那份 `Deprecated...` 拷贝勿用）。
 
-**6. 手眼标定与几何** — 手眼关系 `robot_local = R_opt*camera + t_opt`，每 (robot,camera) 存 `Data/<robot>/HandEyeMatrix_<CAMERAn>.ini`。`CalcLaserPointInRobot` 是正向 camera→base，`ComputeHandEyeMatrixFromCalibration`（Kabsch/SVD，≥3/6 有效样本，含反射修正）是其逆。**旋转合成随 robotType 不同**：FANUC = `Rz*Ry*Rx`，STEP = `Rx*Ry*Rz`，一律走 `RobotPoseTransform::RotationFromAnglesDeg`。手眼/焊接数学用 **Eigen**，只有驱动里的运动学链用 **KDL**（mm↔m、deg↔rad 转换在 `CoorsToKDLFrame`）。`WeldPoseAverageUpdater` 离线按四段做 MAD 离群过滤的姿态平均，回写 `WeldPoseCompParam.ini`。
+**6. 手眼标定与几何** — 手眼关系 `robot_local = R_opt*camera + t_opt`，每个 (robot,camera) 使用数据库模块 `robot/<robot>/HandEyeMatrix/<CAMERAn>`；标定样本使用同作用域的 `HandEyeCalibration/<CAMERAn>`。`CalcLaserPointInRobot` 是正向 camera→base，`ComputeHandEyeMatrixFromCalibration`（Kabsch/SVD，≥3/6 有效样本，含反射修正）是其逆。**旋转合成随 robotType 不同**：FANUC = `Rz*Ry*Rx`，STEP = `Rx*Ry*Rz`，一律走 `RobotPoseTransform::RotationFromAnglesDeg`。手眼/焊接数学用 **Eigen**，只有驱动里的运动学链用 **KDL**（mm↔m、deg↔rad 转换在 `CoorsToKDLFrame`）。`WeldPoseAverageUpdater` 离线按四段做 MAD 离群过滤的姿态平均，回写机器人级姿态补偿数据库模块。
 
-**7. 焊接工艺与参数** — 新工艺文件格式（`WeldProcessFile`）：`WeldPara.txt` 每行**严格 84 字段**、`WeaveDate.txt` 每行**15 字段**，TAB 分隔、首行 `USE\t<idx>`、存在 ConfigDatabase（逻辑键），列数不符报「格式已升级，请重新创建工艺内容」。`WeldProcessFile.cpp` 的 `ParseWeldLine/BuildWeldFields` 与 `MeasureThenWeldService.cpp` 里按下标 0..83 的解析器必须**同步改**。真正的 `ARCON/ARCSET/ARCOFF/ARCMODE` + `WEAVEDATA wd0/TRACKDATA td0` + `.srp/.srd` 生成在 **`StepRobotDriver.cpp`**（空跑 `actualWeld=false` 不发 ARC 指令）。`MeasureWeldParam.ini` 按「位置类型」分组（`[MeasureWeldGroups]` + `MeasureGroup<i>.Scan/.Weld`）。姿态补偿每组仍有低平台/上升边/高平台/下降边 4 个姿态槽（扁平下标 `g*4+seg`）；焊道补偿每组只有一套 Z/枪反向/焊道方向参数，统一应用于整条焊道。
+**7. 焊接工艺与参数** — `WeldProcessFile` 的主数据只在机器人级数据库模块中保存：`WeldProcess` / `WeldProcess/Entry<i>` 与 `WeaveData` / `WeaveData/Entry<i>`，每个字段独立成键，不创建或回退读取 TXT 镜像。测量焊接组、姿态补偿和焊道补偿同样使用机器人级数据库模块。真正的 `ARCON/ARCSET/ARCOFF/ARCMODE` + `WEAVEDATA wd0/TRACKDATA td0` + `.srp/.srd` 生成在 **`StepRobotDriver.cpp`**（空跑 `actualWeld=false` 不发 ARC 指令）。姿态补偿每组仍有低平台/上升边/高平台/下降边 4 个姿态槽（扁平下标 `g*4+seg`）；焊道补偿每组只有一套 Z/枪反向/焊道方向参数，统一应用于整条焊道。
 
 ## 关键约定与不变量（跨子系统，容易踩坑）
 
@@ -92,7 +88,7 @@ QtWidgetsApplication4.exe --no-show --fanuc-upload-services --skip-upload-wait  
 
 ## 数据与产物路径
 
-- 配置：单文件 `Data/ConfigStore.db`；旧 `Data/Accounts.ini`、`Data/LoginState.ini` 只作为一次性迁移输入并被 gitignore。
+- 配置：单文件 `Data/ConfigStore.db`；业务运行不读取旧配置文件或配置路径。点云算法主配置及其运行时派生副本是唯一例外。
 - 扫描结果：`Result/<RobotName>/yyyyMMdd_NNN/{CameraPoint,RobotPoint,LaserPoint}/…`（`NNN` 三位自增）。`CameraPoint/RobotPoint` 为逗号 CSV，`LaserPoint` 点云为空格分隔；落盘用序号排序（内部仍按时间戳插值）。
 - 关键 LaserPoint 文件：`PreciseLaserPoint.txt`（原始）/`_WorkpieceCloud.txt`/`_PreservePath_2mm.txt`/`_Classified.txt` + `_KeyPoints.txt`/`_WeldPose_2mm.txt`/`_WeldPose_2mm_SeamComp.txt`（执行文件）。
 

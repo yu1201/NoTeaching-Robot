@@ -97,6 +97,15 @@ public:
         bool motionCompleted = false;
     };
 
+    // 单次扫描采集完成后的处理范围。生产先测后焊默认保持 CorrugatedBoard；
+    // 调试流程可选择只保存点云，或从相机逐帧特征点生成平滑曲线。
+    enum class ScanPostProcessMode
+    {
+        None = 0,
+        FeaturePointSmoothCurve = 1,
+        CorrugatedBoard = 2
+    };
+
     struct ScanCycleResult
     {
         ScanCycleStatus status = ScanCycleStatus::Failed;
@@ -179,7 +188,9 @@ public:
         const ScanPauseAvailabilityCallback& scanPauseAvailability =
             ScanPauseAvailabilityCallback(),
         const std::vector<T_ROBOT_COORS>* scanTrajectory = nullptr,
-        const QString& cameraSectionOverride = QString()) const;
+        const QString& cameraSectionOverride = QString(),
+        ScanPostProcessMode postProcessMode =
+            ScanPostProcessMode::CorrugatedBoard) const;
     bool ScanMoveAndCollect(
         RobotDriverAdaptor* pRobotDriver,
         const T_PRECISE_MEASURE_PARAM& param,
@@ -195,7 +206,9 @@ public:
         const std::vector<T_ROBOT_COORS>* scanTrajectory = nullptr,
         const QString& cameraSectionOverride = QString(),
         const ScanMotionCompletedCallback& motionCompleted =
-            ScanMotionCompletedCallback()) const;
+            ScanMotionCompletedCallback(),
+        ScanPostProcessMode postProcessMode =
+            ScanPostProcessMode::CorrugatedBoard) const;
     bool SaveScanPoseVariationTrajectory(
         const QString& filePath,
         const QVector<ScanPoseVariationPoint>& trajectory,
@@ -305,9 +318,9 @@ public:
         const QString& expectedSourceSha256 = QString(),
         const WeldExecutionPreMotionCallback& executionPreMotion = WeldExecutionPreMotionCallback(),
         const QString& qualityProofSourcePosePath = QString()) const;
-    bool ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
-    bool ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
-    bool ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;
+    bool ReadPulse(ConfigSection& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const;
+    bool ReadCoors(ConfigSection& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const;
+    bool ReadPulseList(ConfigSection& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const;
 
     // ===== 补偿前后焊道可视化预览（供 WeldSeamCompDialog 实时对比，单一事实源复用真实补偿数学）=====
     enum class CompPreviewKind

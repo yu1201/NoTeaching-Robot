@@ -7,7 +7,6 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QSettings>
 #include <QStandardPaths>
 #include <QStringList>
 
@@ -33,6 +32,9 @@ const QString kDefaultIconResource = QStringLiteral(":/QtWidgetsApplication4/ico
 const QString kCfgScope = QStringLiteral("global");
 const QString kCfgModule = QStringLiteral("Desktop/Icon");
 const QString kCfgKey = QStringLiteral("ShowBackground");
+const QString kBrandingModule = QStringLiteral("Branding");
+const QString kBrandIconColor = QStringLiteral("app_color.ico");
+const QString kBrandIconNoBg = QStringLiteral("app_nobg.ico");
 // 安装快捷方式文件名（installer/*.iss 的 [Icons] 用 MyAppName="NoTeaching-Robot"，运行时按此固定名查找）
 const QString kShortcutBaseName = QStringLiteral("NoTeaching-Robot");
 
@@ -50,7 +52,8 @@ QString ResolveBrandingDir()
             continue;
         }
         const QString candidate = QDir(base).filePath(QStringLiteral("branding"));
-        if (QFileInfo::exists(candidate + QStringLiteral("/branding.ini")))
+        if (QFileInfo::exists(QDir(candidate).filePath(kBrandIconColor))
+            && QFileInfo::exists(QDir(candidate).filePath(kBrandIconNoBg)))
         {
             return QDir(candidate).absolutePath();
         }
@@ -64,48 +67,91 @@ QString BrandingDir()
     return dir;
 }
 
-QString IniValue(const QString& key, const QString& fallback)
+bool ParseBool(const QString& value)
 {
-    const QString dir = BrandingDir();
-    if (dir.isEmpty())
+    const QString normalized = value.trimmed().toLower();
+    return normalized == QStringLiteral("1")
+        || normalized == QStringLiteral("true")
+        || normalized == QStringLiteral("yes");
+}
+
+void EnsureBrandingDatabaseDefaults()
+{
+    QString active;
+    if (ConfigDatabase::ReadScopedSetting(kCfgScope, QString(), kBrandingModule,
+            QStringLiteral("Active"), &active))
+    {
+        return;
+    }
+    const bool hasBrandAssets = !BrandingDir().isEmpty();
+    if (!hasBrandAssets)
+    {
+        return;
+    }
+    QMap<QString, QString> defaults;
+    defaults.insert(QStringLiteral("Active"), QStringLiteral("true"));
+    defaults.insert(QStringLiteral("ApplicationName"), QStringLiteral("海瞰智焊 HK-Pathlynx-CORPLA"));
+    defaults.insert(QStringLiteral("DisplayName"), QStringLiteral("海瞰智焊"));
+    defaults.insert(QStringLiteral("DashboardTitle"), QStringLiteral("海瞰智焊 HK-Pathlynx-CORPLA"));
+    defaults.insert(QStringLiteral("SloganZh"), QStringLiteral("海瞰智焊｜波纹板专属免示教焊接系统"));
+    defaults.insert(QStringLiteral("SloganEn"), QStringLiteral("Auto-Weld for Corrugated Plates, No Teaching Required"));
+    defaults.insert(QStringLiteral("IconColor"), kBrandIconColor);
+    defaults.insert(QStringLiteral("IconNoBg"), kBrandIconNoBg);
+    ConfigDatabase::WriteScopedSettings(kCfgScope, QString(), kBrandingModule, defaults);
+}
+
+QString DatabaseValue(const QString& key, const QString& fallback)
+{
+    EnsureBrandingDatabaseDefaults();
+    QString value;
+    if (!ConfigDatabase::ReadScopedSetting(
+            kCfgScope, QString(), kBrandingModule, key, &value))
     {
         return fallback;
     }
-    QSettings settings(dir + QStringLiteral("/branding.ini"), QSettings::IniFormat);  // Qt6 默认 UTF-8
-    const QVariant v = settings.value(QStringLiteral("Branding/") + key);
-    const QString s = v.toString().trimmed();
-    return s.isEmpty() ? fallback : s;
+    const QString trimmed = value.trimmed();
+    return trimmed.isEmpty() ? fallback : trimmed;
 }
 }  // namespace
 
 bool BrandingConfig::IsActive()
 {
-    return !BrandingDir().isEmpty();
+    EnsureBrandingDatabaseDefaults();
+    QString value;
+    return ConfigDatabase::ReadScopedSetting(
+            kCfgScope, QString(), kBrandingModule, QStringLiteral("Active"), &value)
+        && ParseBool(value);
 }
 
 QString BrandingConfig::ApplicationName()
 {
-    return IniValue(QStringLiteral("ApplicationName"), kDefaultAppName);
+    return IsActive()
+        ? DatabaseValue(QStringLiteral("ApplicationName"), kDefaultAppName)
+        : kDefaultAppName;
 }
 
 QString BrandingConfig::DisplayName()
 {
-    return IniValue(QStringLiteral("DisplayName"), ApplicationName());
+    return IsActive()
+        ? DatabaseValue(QStringLiteral("DisplayName"), ApplicationName())
+        : ApplicationName();
 }
 
 QString BrandingConfig::SloganZh()
 {
-    return IniValue(QStringLiteral("SloganZh"), QString());
+    return IsActive() ? DatabaseValue(QStringLiteral("SloganZh"), QString()) : QString();
 }
 
 QString BrandingConfig::SloganEn()
 {
-    return IniValue(QStringLiteral("SloganEn"), QString());
+    return IsActive() ? DatabaseValue(QStringLiteral("SloganEn"), QString()) : QString();
 }
 
 QString BrandingConfig::DashboardTitle()
 {
-    return IniValue(QStringLiteral("DashboardTitle"), QStringLiteral("机器人控制与调试中心"));
+    return IsActive()
+        ? DatabaseValue(QStringLiteral("DashboardTitle"), QStringLiteral("机器人控制与调试中心"))
+        : QStringLiteral("机器人控制与调试中心");
 }
 
 QString BrandingConfig::DefaultWindowIconResource()
@@ -133,14 +179,18 @@ void BrandingConfig::SetIconWithBackground(bool withBackground)
 
 QString BrandingConfig::CurrentIconFilePath()
 {
+    if (!IsActive())
+    {
+        return QString();
+    }
     const QString dir = BrandingDir();
     if (dir.isEmpty())
     {
         return QString();
     }
     const QString fileName = IconWithBackground()
-        ? IniValue(QStringLiteral("IconColor"), QStringLiteral("app_color.ico"))
-        : IniValue(QStringLiteral("IconNoBg"), QStringLiteral("app_nobg.ico"));
+        ? DatabaseValue(QStringLiteral("IconColor"), kBrandIconColor)
+        : DatabaseValue(QStringLiteral("IconNoBg"), kBrandIconNoBg);
     const QString path = QDir(dir).filePath(fileName);
     return QFileInfo::exists(path) ? QDir::toNativeSeparators(path) : QString();
 }

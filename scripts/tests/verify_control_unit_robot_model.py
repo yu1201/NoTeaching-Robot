@@ -5,6 +5,10 @@ repo = Path(__file__).resolve().parents[2]
 main = (repo / "src" / "QtWidgetsApplication4.cpp").read_text(encoding="utf-8")
 helper = (repo / "src" / "RobotDataHelper.cpp").read_text(encoding="utf-8")
 helper_header = (repo / "include" / "RobotDataHelper.h").read_text(encoding="utf-8")
+registry_header = (repo / "include" / "RobotDriverRegistry.h").read_text(encoding="utf-8")
+fanuc_driver = (repo / "src" / "FANUCRobotDriver.cpp").read_text(encoding="utf-8")
+step_driver = (repo / "src" / "StepRobotDriver.cpp").read_text(encoding="utf-8")
+inovance_driver = (repo / "src" / "InovanceRobotDriver.cpp").read_text(encoding="utf-8")
 
 
 def body(source: str, start: str, end: str) -> str:
@@ -22,8 +26,8 @@ management = body(
 for token in (
     'form->addRow("机器人型号", robotModelRow)',
     'basicForm->addRow("机器人型号", robotModelRow)',
-    'ReadIniString(robotIni, "RobotModelId")',
-    'WriteIniString(ini, "RobotModelId", unit.robotModelId)',
+    'ReadConfigString(robotIni, "RobotModelId")',
+    'WriteConfigString(ini, "RobotModelId", unit.robotModelId)',
     "PopulateRobotModelCombo",
     "RobotModelManagerDialog dialog",
     '<< "类型" << "机器人型号"',
@@ -33,6 +37,17 @@ for token in (
 assert "QString robotModelId;" in management
 assert 'unit.robotModelId = "step.sa10-2000h"' not in management
 assert "DefaultFtpCredentialForRobotType" in management
+for token in ("defaultFtpHost", "defaultFtpPort", "defaultFtpUser", "defaultFtpPassword"):
+    assert token in registry_header, f"missing model-bound FTP default field: {token}"
+    assert f"setup->{token}" in management, f"control-unit UI does not consume model FTP default: {token}"
+for name, source in (
+    ("FANUC", fanuc_driver),
+    ("STEP", step_driver),
+    ("Inovance", inovance_driver),
+):
+    for token in ("setup->defaultFtpHost", "setup->defaultFtpPort",
+                  "setup->defaultFtpUser", "setup->defaultFtpPassword"):
+        assert token in source, f"{name} driver does not consume model FTP default: {token}"
 
 for token in ("int robotType = -1;", "QString robotModelId;"):
     assert token in helper_header, f"missing RobotInfo identity field: {token}"
@@ -60,7 +75,8 @@ assert '"RobotType"' in identity_reader
 for token in (
     "robotType = -1;",
     "AppPaths::IsSafePathComponent(unitName)",
-    "ConfigDatabase::ReadIniFileSnapshot(path, snapshot, &snapshotError)",
+    "ConfigDatabase::ReadScopedModuleSnapshot(",
+    'QStringLiteral("robot"), unitName, QStringLiteral("RobotPara")',
     'QStringLiteral("BaseParam")',
     'valueForKey(QStringLiteral("RobotType"))',
     'valueForKey(QStringLiteral("RobotModelId"))',

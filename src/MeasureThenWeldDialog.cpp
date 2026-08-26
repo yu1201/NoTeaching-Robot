@@ -6,7 +6,7 @@
 #include "MeasureThenWeldService.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "ModelWeldingFlowDialog.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "RobotModelCatalogStore.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotDataHelper.h"
@@ -795,8 +795,8 @@ TimeOffsetCalibrationResult ComputeTimeOffsetCalibration(
 // 把标定出的补偿值写入该机器人全部测量参数组（延迟是相机/链路属性，不随参数组变）。
 bool WriteCameraTimeOffsetToAllScanGroups(const QString& robotName, double valueMs, int* groupsWritten, QString* error)
 {
-    COPini ini;
-    if (!ini.SetFileName(ToUtf8StdString(RobotDataHelper::MeasureWeldParamPath(robotName))))
+    ConfigSection ini;
+    if (!ini.SetLocation(RobotDataHelper::MeasureWeldConfig(robotName)))
     {
         if (error != nullptr)
         {
@@ -892,19 +892,19 @@ int CountWeldProcessLayers(const std::vector<T_WELD_PARA>& weldList, const QStri
     return std::max(1, layerCount);
 }
 
-QString BuildPoseCompParamPath(const QString& robotName)
+ConfigLocation BuildPoseCompConfig(const QString& robotName)
 {
-    return RobotDataHelper::BuildProjectPath(QString("Data/%1/WeldPoseCompParam.ini").arg(robotName));
+    return ConfigLocation::Robot(robotName, QStringLiteral("WeldPoseCompParam"));
 }
 
-QString BuildSeamCompParamPath(const QString& robotName)
+ConfigLocation BuildSeamCompConfig(const QString& robotName)
 {
-    return RobotDataHelper::BuildProjectPath(QString("Data/%1/WeldSeamCompParam.ini").arg(robotName));
+    return ConfigLocation::Robot(robotName, QStringLiteral("WeldSeamCompParam"));
 }
 
 void LoadCompGroupCombo(
     QComboBox* combo,
-    const QString& path,
+    const ConfigLocation& location,
     const QString& allSection,
     const QString& rowCountKey,
     const QString& groupCountKey,
@@ -922,11 +922,12 @@ void LoadCompGroupCombo(
 
     int activeIndex = 0;
     int groupCount = 1;
-    const bool hasConfig = ConfigDatabase::HasIniFile(path);
+    const bool hasConfig = ConfigDatabase::HasScopedModule(
+        location.scopeType, location.scopeId, location.module);
     if (hasConfig)
     {
-        COPini ini;
-        if (ini.SetFileName(ToUtf8StdString(path)))
+        ConfigSection ini;
+        if (ini.SetLocation(location))
         {
             ini.SetSectionName(ToUtf8StdString(allSection));
             ini.ReadString(false, ToUtf8StdString(activeGroupIndexKey), &activeIndex);
@@ -981,24 +982,25 @@ void LoadCompGroupCombo(
 }
 
 bool SaveActiveCompGroupIndex(
-    const QString& path,
+    const ConfigLocation& location,
     const QString& allSection,
     const QString& activeGroupIndexKey,
     int activeIndex,
     QString& error)
 {
-    if (path.isEmpty())
+    if (!location.IsValid())
     {
         error = "补偿参数配置库不可用。";
         return false;
     }
-    if (!ConfigDatabase::HasIniFile(path) && activeIndex <= 0)
+    if (!ConfigDatabase::HasScopedModule(
+            location.scopeType, location.scopeId, location.module) && activeIndex <= 0)
     {
         return true;
     }
 
-    COPini ini;
-    if (!ini.SetFileName(false, ToUtf8StdString(path)))
+    ConfigSection ini;
+    if (!ini.SetLocation(location))
     {
         error = "打开补偿参数失败。";
         return false;
@@ -1352,7 +1354,7 @@ void MeasureThenWeldDialog::LoadParamGroups()
 
     const QString robotName = CurrentRobotName();
     QString error;
-    if (robotName.isEmpty() || !RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &error))
+    if (robotName.isEmpty() || !RobotDataHelper::EnsureMeasureWeldParameters(robotName, &error))
     {
         if (!error.isEmpty())
         {
@@ -1362,11 +1364,10 @@ void MeasureThenWeldDialog::LoadParamGroups()
         return;
     }
 
-    COPini ini;
-    const QString path = RobotDataHelper::MeasureWeldParamPath(robotName);
-    if (!ini.SetFileName(path.toLocal8Bit().constData()))
+    ConfigSection ini;
+    if (!ini.SetLocation(RobotDataHelper::MeasureWeldConfig(robotName)))
     {
-        AppendLog("读取位置类型失败：打开参数数据失败：" + path);
+        AppendLog("读取位置类型失败：参数数据库位置无效：" + robotName);
         m_bLoadingSelectors = false;
         return;
     }
@@ -1470,7 +1471,7 @@ void MeasureThenWeldDialog::LoadCompGroupLists()
     m_bLoadingSelectors = true;
     LoadCompGroupCombo(
         m_pPoseCompGroupCombo,
-        BuildPoseCompParamPath(robotName),
+        BuildPoseCompConfig(robotName),
         "ALLWeldPoseComp",
         "PoseCompCount",
         POSE_GROUP_COUNT_KEY,
@@ -1479,7 +1480,7 @@ void MeasureThenWeldDialog::LoadCompGroupLists()
         "姿态补偿组");
     LoadCompGroupCombo(
         m_pSeamCompGroupCombo,
-        BuildSeamCompParamPath(robotName),
+        BuildSeamCompConfig(robotName),
         "ALLWeldSeamComp",
         "SeamCompCount",
         SEAM_GROUP_COUNT_KEY,
@@ -1776,7 +1777,7 @@ bool MeasureThenWeldDialog::SaveCurrentParamGroupSelection(QString& error) const
         return false;
     }
     return RobotDataHelper::WriteParamValue(
-        RobotDataHelper::MeasureWeldParamPath(robotName),
+        RobotDataHelper::MeasureWeldConfig(robotName),
         "MeasureWeldGroups",
         "UseGroupNo",
         QString::number(CurrentParamGroupIndex()),
@@ -1837,7 +1838,7 @@ bool MeasureThenWeldDialog::SaveCurrentCompGroupSelections(QString& error) const
     }
 
     if (!SaveActiveCompGroupIndex(
-        BuildPoseCompParamPath(robotName),
+        BuildPoseCompConfig(robotName),
         "ALLWeldPoseComp",
         POSE_ACTIVE_GROUP_INDEX_KEY,
         CurrentPoseCompGroupIndex(),
@@ -1847,7 +1848,7 @@ bool MeasureThenWeldDialog::SaveCurrentCompGroupSelections(QString& error) const
     }
 
     if (!SaveActiveCompGroupIndex(
-        BuildSeamCompParamPath(robotName),
+        BuildSeamCompConfig(robotName),
         "ALLWeldSeamComp",
         SEAM_ACTIVE_GROUP_INDEX_KEY,
         CurrentSeamCompGroupIndex(),
@@ -1907,17 +1908,17 @@ bool MeasureThenWeldDialog::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_
     return m_pService != nullptr && m_pService->LoadPresetParam(pRobotDriver, param, error);
 }
 
-bool MeasureThenWeldDialog::ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const
+bool MeasureThenWeldDialog::ReadPulse(ConfigSection& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const
 {
     return m_pService != nullptr && m_pService->ReadPulse(ini, prefix, pulse, error);
 }
 
-bool MeasureThenWeldDialog::ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const
+bool MeasureThenWeldDialog::ReadCoors(ConfigSection& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const
 {
     return m_pService != nullptr && m_pService->ReadCoors(ini, prefix, coors, error);
 }
 
-bool MeasureThenWeldDialog::ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const
+bool MeasureThenWeldDialog::ReadPulseList(ConfigSection& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const
 {
     return m_pService != nullptr && m_pService->ReadPulseList(ini, countKey, prefix, pulses, error);
 }
@@ -2268,7 +2269,10 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
     SetProgress(5, "读取预设参数完成");
     SetFlowStep("读取预设参数完成，准备启动相机");
     AppendLog(QString("已读取参数：%1，位置类型=%2 [%3]")
-        .arg(QString::fromStdString(param.sIniFilePath))
+        .arg(QStringLiteral("%1/%2/%3").arg(
+            param.configLocation.scopeType,
+            param.configLocation.scopeId,
+            param.configLocation.module))
         .arg(param.sParamGroupName)
         .arg(QString::fromStdString(param.sSectionName)));
     AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min")
@@ -4698,11 +4702,8 @@ void MeasureThenWeldDialog::SaveWeldModeToParam(bool doActualWeld)
         return;
     }
 
-    const QString paramPath = QString::fromStdString(param.sWeldParamFilePath.empty()
-        ? param.sIniFilePath
-        : param.sWeldParamFilePath);
     if (!RobotDataHelper::WriteParamValue(
-        paramPath,
+        param.weldConfigLocation.IsValid() ? param.weldConfigLocation : param.configLocation,
         QString::fromStdString(param.sWeldSectionName),
         "WeldEnable",
         doActualWeld ? "1" : "0",

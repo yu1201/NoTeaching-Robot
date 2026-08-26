@@ -6,7 +6,7 @@
 
 #include "AppPaths.h"
 #include "ConfigDatabase.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
 
@@ -388,27 +388,26 @@ void InitializeDefaultPoseSlots(QVector<PoseLibrarySlot>& poseSlots)
     }
 }
 
-bool ReadIniDouble(COPini& ini, const std::string& key, double& value)
+bool ReadConfigDouble(ConfigSection& section, const std::string& key, double& value)
 {
-    return ini.ReadString(false, key, &value) > 0;
+    return section.ReadString(false, key, &value) > 0;
 }
 
-PoseLibrary LoadPoseLibrary(const QString& path)
+PoseLibrary LoadPoseLibrary(const ConfigLocation& location)
 {
     PoseLibrary library;
     int poseCompCount = kDefaultSegmentCount;
-    if (!ConfigDatabase::HasIniFile(path))
+    if (!ConfigDatabase::HasScopedModule(location.scopeType, location.scopeId, location.module))
     {
         library.poseSlots.resize(poseCompCount);
         InitializeDefaultPoseSlots(library.poseSlots);
         return library;
     }
 
-    COPini ini;
-    ini.SetFileName(LocalString(path));
-    ini.SetSectionName("ALLWeldPoseComp");
-    ini.ReadString(false, "PoseCompCount", &poseCompCount);
-    ReadIniDouble(ini, "PoseMatchMaxErrorDeg", library.matchMaxErrorDeg);
+    ConfigSection section(location);
+    section.SetSectionName("ALLWeldPoseComp");
+    section.ReadString(false, "PoseCompCount", &poseCompCount);
+    ReadConfigDouble(section, "PoseMatchMaxErrorDeg", library.matchMaxErrorDeg);
     library.matchMaxErrorDeg = std::max(0.0, library.matchMaxErrorDeg);
 
     library.poseSlots.resize(std::max(0, poseCompCount));
@@ -416,57 +415,56 @@ PoseLibrary LoadPoseLibrary(const QString& path)
     for (int index = 0; index < library.poseSlots.size(); ++index)
     {
         PoseLibrarySlot& slot = library.poseSlots[index];
-        ini.SetSectionName(LocalString(QString("WeldPoseComp%1").arg(index)));
+        section.SetSectionName(LocalString(QString("WeldPoseComp%1").arg(index)));
 
         std::string text;
-        if (ini.ReadString(false, "Name", text) > 0)
+        if (section.ReadString(false, "Name", text) > 0)
         {
             slot.name = DecodeRobotMessageText(text);
         }
-        if (ini.ReadString(false, "SegmentKind", text) > 0)
+        if (section.ReadString(false, "SegmentKind", text) > 0)
         {
             slot.segmentKind = DecodeRobotMessageText(text);
         }
-        ReadIniDouble(ini, "Rx", slot.rx);
-        ReadIniDouble(ini, "Ry", slot.ry);
-        ReadIniDouble(ini, "Rz", slot.rz);
-        ReadIniDouble(ini, "CompX", slot.compX);
-        ReadIniDouble(ini, "CompY", slot.compY);
-        ReadIniDouble(ini, "CompZ", slot.compZ);
+        ReadConfigDouble(section, "Rx", slot.rx);
+        ReadConfigDouble(section, "Ry", slot.ry);
+        ReadConfigDouble(section, "Rz", slot.rz);
+        ReadConfigDouble(section, "CompX", slot.compX);
+        ReadConfigDouble(section, "CompY", slot.compY);
+        ReadConfigDouble(section, "CompZ", slot.compZ);
         slot.rz = NormalizeAngleDeg(slot.rz);
     }
 
     return library;
 }
 
-bool SavePoseLibrary(const QString& path, const PoseLibrary& library, QString& error)
+bool SavePoseLibrary(const ConfigLocation& location, const PoseLibrary& library, QString& error)
 {
-    COPini ini;
-    ini.SetFileName(false, LocalString(path));
-    ini.SetSectionName("ALLWeldPoseComp");
-    if (!ini.WriteString("PoseCompCount", static_cast<int>(library.poseSlots.size()))
-        || !ini.WriteString("PoseMatchMaxErrorDeg", library.matchMaxErrorDeg, 6))
+    ConfigSection section(location);
+    section.SetSectionName("ALLWeldPoseComp");
+    if (!section.WriteString("PoseCompCount", static_cast<int>(library.poseSlots.size()))
+        || !section.WriteString("PoseMatchMaxErrorDeg", library.matchMaxErrorDeg, 6))
     {
-        error = "写入姿态补偿库总配置失败：" + LocalPath(path);
+        error = "写入姿态补偿库总配置失败：" + location.module;
         return false;
     }
 
     for (int index = 0; index < library.poseSlots.size(); ++index)
     {
         const PoseLibrarySlot& slot = library.poseSlots[index];
-        ini.SetSectionName(LocalString(QString("WeldPoseComp%1").arg(index)));
-        if (!ini.WriteString("Name", LocalString(slot.name))
-            || !ini.WriteString("SegmentKind", LocalString(slot.segmentKind))
-            || !ini.WriteString("Rx", slot.rx, 6)
-            || !ini.WriteString("Ry", slot.ry, 6)
-            || !ini.WriteString("Rz", NormalizeAngleDeg(slot.rz), 6)
-            || !ini.WriteString("CompX", slot.compX, 6)
-            || !ini.WriteString("CompY", slot.compY, 6)
-            || !ini.WriteString("CompZ", slot.compZ, 6))
+        section.SetSectionName(LocalString(QString("WeldPoseComp%1").arg(index)));
+        if (!section.WriteString("Name", LocalString(slot.name))
+            || !section.WriteString("SegmentKind", LocalString(slot.segmentKind))
+            || !section.WriteString("Rx", slot.rx, 6)
+            || !section.WriteString("Ry", slot.ry, 6)
+            || !section.WriteString("Rz", NormalizeAngleDeg(slot.rz), 6)
+            || !section.WriteString("CompX", slot.compX, 6)
+            || !section.WriteString("CompY", slot.compY, 6)
+            || !section.WriteString("CompZ", slot.compZ, 6))
         {
             error = QString("写入姿态补偿库槽 %1 失败：%2")
                 .arg(index)
-                .arg(LocalPath(path));
+                .arg(location.module);
             return false;
         }
     }
@@ -622,7 +620,7 @@ void BuildReportLines(
     lines << QString("更新时间：%1").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"));
     lines << QString("机器人：%1").arg(result.robotName);
     lines << QString("输入姿态文件：%1").arg(LocalPath(result.inputPoseFilePath));
-    lines << QString("姿态补偿库：%1").arg(LocalPath(result.poseCompParamPath));
+    lines << QString("姿态补偿库：%1").arg(result.poseCompStorageLabel);
     lines << QString("总姿态点数：%1").arg(result.totalRecordCount);
     lines << QString("姿态复用阈值：%1 deg").arg(matchMaxErrorDeg, 0, 'f', 3);
     lines << QString("姿态库数量：%1 -> %2").arg(previousPoseCompCount).arg(previousPoseCompCount + result.addedSlotCount);
@@ -722,8 +720,10 @@ bool WeldPoseAverageUpdater::UpdateFromInput(
     result.robotName = robotNameHint.trimmed().isEmpty()
         ? InferRobotNameFromResultPath(result.inputPoseFilePath)
         : robotNameHint.trimmed();
-    result.poseCompParamPath = RobotDataHelper::BuildProjectPath(
-        QString("Data/%1/WeldPoseCompParam.ini").arg(result.robotName));
+    const ConfigLocation poseConfig = ConfigLocation::Robot(
+        result.robotName, QStringLiteral("WeldPoseCompParam"));
+    result.poseCompStorageLabel = QStringLiteral("robot/%1/%2")
+        .arg(result.robotName, poseConfig.module);
     result.reportPath = BuildReportPath(result.inputPoseFilePath);
     result.totalRecordCount = records.size();
 
@@ -744,7 +744,7 @@ bool WeldPoseAverageUpdater::UpdateFromInput(
         }
     }
 
-    PoseLibrary library = LoadPoseLibrary(result.poseCompParamPath);
+    PoseLibrary library = LoadPoseLibrary(poseConfig);
     const int previousPoseCompCount = library.poseSlots.size();
     const double matchMaxErrorDeg = library.matchMaxErrorDeg;
     QSet<int> writtenPoseSlotIndexes;
@@ -831,7 +831,7 @@ bool WeldPoseAverageUpdater::UpdateFromInput(
         result.groups.push_back(report);
     }
 
-    if (!SavePoseLibrary(result.poseCompParamPath, library, error))
+    if (!SavePoseLibrary(poseConfig, library, error))
     {
         return false;
     }

@@ -20,7 +20,7 @@
 #include <KDL/chainiksolvervel_pinv.hpp>
 // 引入日志头文件
 #include "RobotLog.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 
 
 enum class RobotDriverFamily
