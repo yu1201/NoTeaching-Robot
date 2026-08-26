@@ -2588,6 +2588,216 @@ int BilateralPresmoothSdkBaseWeld(
     return moved;
 }
 
+struct PlatformRefitSlopeCandidateCheck
+{
+    bool valid = false;
+    int checkedSegmentCount = 0;
+    QStringList failures;
+};
+
+double PlatformRefitCandidatePathValue(
+    const Eigen::Vector3d& point,
+    RobotCalculation::SampleAxis axis)
+{
+    return axis == RobotCalculation::SampleAxis::AxisX
+        ? point.x()
+        : point.y();
+}
+
+double PlatformRefitCandidateProfileValue(
+    const Eigen::Vector3d& point,
+    RobotCalculation::SampleAxis axis)
+{
+    return axis == RobotCalculation::SampleAxis::AxisY
+        ? point.x()
+        : point.y();
+}
+
+bool IsPlatformRefitCandidateCorner(RobotCalculation::LowerWeldPointType type)
+{
+    return type == RobotCalculation::LowerWeldPointType::InnerCorner
+        || type == RobotCalculation::LowerWeldPointType::OuterCorner;
+}
+
+PlatformRefitSlopeCandidateCheck EvaluatePlatformRefitSlopeCandidate(
+    const RobotCalculation::MeasureThenWeldAnalysisResult& analysis,
+    const RobotCalculation::LowerWeldFilterParams& params)
+{
+    PlatformRefitSlopeCandidateCheck check;
+    if (!analysis.ok)
+    {
+        check.failures.push_back(
+            analysis.error.isEmpty()
+                ? QStringLiteral("特征分析未通过")
+                : analysis.error);
+        return check;
+    }
+
+    const double flatSlopeThreshold = std::max(
+        0.01,
+        params.sameTypeShortFlatSlope);
+    for (int index = 0; index + 1 < analysis.keyPoints.size(); ++index)
+    {
+        const RobotCalculation::LowerWeldClassifiedPoint& begin =
+            analysis.keyPoints[index];
+        const RobotCalculation::LowerWeldClassifiedPoint& end =
+            analysis.keyPoints[index + 1];
+        if (!IsPlatformRefitCandidateCorner(begin.type)
+            || !IsPlatformRefitCandidateCorner(end.type)
+            || begin.isLapStepBoundary
+            || end.isLapStepBoundary)
+        {
+            continue;
+        }
+
+        ++check.checkedSegmentCount;
+        const double pathDelta = PlatformRefitCandidatePathValue(
+            end.point,
+            params.sampleAxis) - PlatformRefitCandidatePathValue(
+                begin.point,
+                params.sampleAxis);
+        const double profileDelta = PlatformRefitCandidateProfileValue(
+            end.point,
+            params.sampleAxis) - PlatformRefitCandidateProfileValue(
+                begin.point,
+                params.sampleAxis);
+        const double absPathDelta = std::abs(pathDelta);
+        const double absProfileDelta = std::abs(profileDelta);
+        const double slope = absPathDelta > 1e-9
+            ? absProfileDelta / absPathDelta
+            : std::numeric_limits<double>::infinity();
+        const bool topologyIsSlope = begin.type != end.type;
+        const bool geometryIsSlope = absPathDelta <= 1e-9
+            ? absProfileDelta > 1e-6
+            : slope >= flatSlopeThreshold;
+        if (topologyIsSlope == geometryIsSlope)
+        {
+            continue;
+        }
+
+        const QString beginType = RobotCalculation::LowerWeldPointTypeName(begin.type);
+        const QString endType = RobotCalculation::LowerWeldPointTypeName(end.type);
+        if (topologyIsSlope)
+        {
+            check.failures.push_back(QString(
+                "raw_index=%1->%2，类型=%3->%4，拓扑判为坡段但几何斜率=%5<%6，疑似单一异常斜率或拐点落在平台内部")
+                .arg(begin.index)
+                .arg(end.index)
+                .arg(beginType)
+                .arg(endType)
+                .arg(slope, 0, 'f', 4)
+                .arg(flatSlopeThreshold, 0, 'f', 4));
+        }
+        else
+        {
+            check.failures.push_back(QString(
+                "raw_index=%1->%2，类型=%3->%4，拓扑判为平台但几何斜率=%5>=%6，疑似平台拐点错配")
+                .arg(begin.index)
+                .arg(end.index)
+                .arg(beginType)
+                .arg(endType)
+                .arg(slope, 0, 'f', 4)
+                .arg(flatSlopeThreshold, 0, 'f', 4));
+        }
+    }
+
+    check.valid = check.failures.isEmpty();
+    return check;
+}
+
+QString PlatformRefitSlopeCandidateSummary(
+    const PlatformRefitSlopeCandidateCheck& check)
+{
+    if (check.valid)
+    {
+        return QString("PASS（复核普通内段=%1）")
+            .arg(check.checkedSegmentCount);
+    }
+    return QString("FAIL（%1）")
+        .arg(check.failures.join(QStringLiteral("；")));
+}
+
+RobotCalculation::MeasureThenWeldAnalysisResult
+AnalyzeDirectWithPlatformRefitCandidateSelection(
+    const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
+    const RobotCalculation::LowerWeldFilterParams& params,
+    const MeasureThenWeldService::LogCallback& appendLog)
+{
+    if (!params.cornerPatternRefitEnable)
+    {
+        return RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+            inputPoints,
+            params);
+    }
+
+    // 平台重算开启时，同时计算“关闭/开启”两个候选。这里复用现有平台/坡面斜率分界，
+    // 对每个普通内段逐一核对“拐点类型拓扑”和“实际几何斜率”，不再只看同类坡段平均值。
+    RobotCalculation::LowerWeldFilterParams refitOnParams = params;
+    const RobotCalculation::MeasureThenWeldAnalysisResult refitOn =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+            inputPoints,
+            refitOnParams);
+    const PlatformRefitSlopeCandidateCheck refitOnCheck =
+        EvaluatePlatformRefitSlopeCandidate(refitOn, refitOnParams);
+
+    RobotCalculation::LowerWeldFilterParams refitOffParams = params;
+    refitOffParams.cornerPatternRefitEnable = false;
+    // 备选候选只用于判定，避免覆盖当前启用候选的拟合调试文件；若最终选中关闭候选，
+    // 下方会用原调试配置重跑一次并输出与最终结果一致的调试点云。
+    refitOffParams.exportFitDebugCloud = false;
+    const RobotCalculation::MeasureThenWeldAnalysisResult refitOff =
+        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+            inputPoints,
+            refitOffParams);
+    const PlatformRefitSlopeCandidateCheck refitOffCheck =
+        EvaluatePlatformRefitSlopeCandidate(refitOff, refitOffParams);
+
+    const QString refitOffSummary =
+        PlatformRefitSlopeCandidateSummary(refitOffCheck);
+    const QString refitOnSummary =
+        PlatformRefitSlopeCandidateSummary(refitOnCheck);
+    if (refitOnCheck.valid)
+    {
+        if (appendLog)
+        {
+            appendLog(QString(
+                "平台重算双候选复核：关闭=%1；开启=%2；选择开启候选。")
+                .arg(refitOffSummary, refitOnSummary));
+        }
+        return refitOn;
+    }
+
+    if (refitOffCheck.valid)
+    {
+        if (appendLog)
+        {
+            appendLog(QString(
+                "平台重算双候选复核：关闭=%1；开启=%2；开启候选已淘汰，自动回退关闭候选。")
+                .arg(refitOffSummary, refitOnSummary));
+        }
+        if (!params.exportFitDebugCloud)
+        {
+            return refitOff;
+        }
+
+        RobotCalculation::LowerWeldFilterParams selectedParams = params;
+        selectedParams.cornerPatternRefitEnable = false;
+        return RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
+            inputPoints,
+            selectedParams);
+    }
+
+    RobotCalculation::MeasureThenWeldAnalysisResult failed;
+    failed.error = QString(
+        "平台重算双候选复核失败：关闭=%1；开启=%2；两个结果均存在异常斜率，已停止生成焊接轨迹。")
+        .arg(refitOffSummary, refitOnSummary);
+    if (appendLog)
+    {
+        appendLog(failed.error);
+    }
+    return failed;
+}
+
 RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud(
     const QVector<RobotCalculation::IndexedPoint3D>& legacyLaserInput,
     const QVector<RobotCalculation::IndexedPoint3D>& fullCloudInput,
@@ -2763,8 +2973,10 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                         .arg(workingExtraction.points.size()));
                 }
             }
-            analysis = RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
-                ToIndexedInput(workingExtraction.points), baseWeldParams);
+            analysis = AnalyzeDirectWithPlatformRefitCandidateSelection(
+                ToIndexedInput(workingExtraction.points),
+                baseWeldParams,
+                appendLog);
         }
         else
         {
@@ -2865,8 +3077,10 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 .arg(projectedPath.points.size()));
         }
         RobotCalculation::MeasureThenWeldAnalysisResult analysis =
-            RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
-                ToIndexedInput(projectedPath.points), fitParams);
+            AnalyzeDirectWithPlatformRefitCandidateSelection(
+                ToIndexedInput(projectedPath.points),
+                fitParams,
+                appendLog);
         if (isCanceled())
         {
             return canceledResult();
@@ -2894,7 +3108,10 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             .arg(legacyLaserInput.size()));
     }
     RobotCalculation::MeasureThenWeldAnalysisResult legacyAnalysis =
-        RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(legacyLaserInput, fitParams);
+        AnalyzeDirectWithPlatformRefitCandidateSelection(
+            legacyLaserInput,
+            fitParams,
+            appendLog);
     if (legacyAnalysis.ok)
     {
         SaveMethodBaseTrackFile(
@@ -9544,6 +9761,14 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     double fallingRawAngleSum = 0.0;
     double fallingLimitedAngleSum = 0.0;
     double fallingWeightSum = 0.0;
+    const double minSlopeGeometryAngleDeg = std::atan(
+        std::max(0.01, platformFlatSlopeThreshold))
+        * 180.0 / RobotPoseTransform::kPi;
+    const auto isNaturalCornerType = [](RobotCalculation::LowerWeldPointType type)
+    {
+        return type == RobotCalculation::LowerWeldPointType::InnerCorner
+            || type == RobotCalculation::LowerWeldPointType::OuterCorner;
+    };
     for (int segmentIndex = 0;
          segmentIndex < static_cast<int>(segments.size());
          ++segmentIndex)
@@ -9596,6 +9821,40 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             segment.rawGeometryAngleDeg = SignedHorizontalAngleDeg(
                 segment.localPlatformAxis,
                 segment.horizontalTangent);
+        }
+
+        // 逐段硬门禁：类型拓扑把本段判为坡段时，本段自身必须达到平台/坡面斜率分界。
+        // 旧保护只核对 rising/falling 的加权平均正负号，单个接近 0° 的假坡会被其他正常坡掩盖，
+        // 随后的同类段拉直又会把相邻平台一起连成斜线。搭接台阶不是自然坡段，继续单独豁免。
+        if (IsSlopeSegmentKind(segment.kind)
+            && !segment.isLapStepSegment
+            && isNaturalCornerType(segment.beginType)
+            && isNaturalCornerType(segment.endMarkerType)
+            && (!segment.directionValid
+                || !std::isfinite(segment.rawGeometryAngleDeg)
+                || std::abs(segment.rawGeometryAngleDeg) + 1e-6
+                    < minSlopeGeometryAngleDeg))
+        {
+            const int beginRawIndex = result.points[segment.begin].index;
+            const int endRawIndex = result.points[segment.nextBegin].index;
+            const QString errorText = QString(
+                "坡段姿态生成被拒绝：检测到单一异常斜率，段=%1，raw_index=%2->%3，"
+                "实际相对平台角=%4 deg，小于平台/坡面分界角=%5 deg（斜率阈值=%6）。")
+                .arg(segment.kind)
+                .arg(beginRawIndex)
+                .arg(endRawIndex)
+                .arg(segment.rawGeometryAngleDeg, 0, 'f', 3)
+                .arg(minSlopeGeometryAngleDeg, 0, 'f', 3)
+                .arg(std::max(0.01, platformFlatSlopeThreshold), 0, 'f', 3);
+            if (generationError != nullptr)
+            {
+                *generationError = errorText;
+            }
+            if (appendLog)
+            {
+                appendLog(errorText);
+            }
+            return {};
         }
 
         segment.limitedGeometryAngleDeg = segment.rawGeometryAngleDeg;
