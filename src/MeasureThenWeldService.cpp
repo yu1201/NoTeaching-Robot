@@ -11751,9 +11751,29 @@ bool MeasureThenWeldService::RunScanCycle(
             QString("扫描前置检查失败：当前扫描周期未取得新鲜有效相机帧：%1").arg(readyFrameError),
             false);
     }
+    udpDataShow readyCameraFrame;
+    if (!cameraCache->Latest(readyCameraFrame))
+    {
+        result.fatalFailure = true;
+        return fail(
+            QStringLiteral("扫描前置检查失败：新鲜相机帧在坐标契约检查前已不可用。"),
+            false);
+    }
+    if (!readyCameraFrame.allResultPoint.empty()
+        && !readyCameraFrame.allResultPointCanonical)
+    {
+        result.fatalFailure = true;
+        return fail(
+            QStringLiteral(
+                "扫描前置检查失败：相机底层未把完整点云规范为与 targetPoint 同源 XYZ 坐标；"
+                "已在首条机器人运动前拒绝本轮扫描。"),
+            false);
+    }
     if (appendLog)
     {
-        appendLog(QStringLiteral("扫描前置检查通过：当前扫描周期已取得新鲜有效相机帧。"));
+        appendLog(QStringLiteral(
+            "扫描前置检查通过：当前扫描周期已取得新鲜有效相机帧，"
+            "非空完整点云坐标契约=TargetDeviceXYZ。"));
     }
 
     HandEyeMatrixConfig validatedCalibration;
@@ -12176,6 +12196,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     int cameraTimestampBackwardsCount = 0;
     int cameraTimestampJumpCount = 0;
     int enqueuedCameraSampleCount = 0;
+    std::atomic_int canonicalCameraPointCloudFrameCount(0);
+    std::atomic_int nonCanonicalCameraPointCloudFrameCount(0);
     qint64 lastCameraRawTimestampUs = 0;
     qint64 maxCameraRawDeltaUs = 0;
     const qint64 cameraTimestampJumpWarnUs = std::max<qint64>(50000, cameraReadIntervalMs * 4000);
@@ -12209,8 +12231,19 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         &hasCameraTimeBaseRobotTimestamp,
         &cameraTimeBaseRobotTimestampUs,
         &latestEnqueuedCameraTimestampUs,
-        &enqueuedCameraSampleCount](const udpDataShow& frame)
+        &enqueuedCameraSampleCount,
+        &canonicalCameraPointCloudFrameCount,
+        &nonCanonicalCameraPointCloudFrameCount](const udpDataShow& frame)
         {
+            if (!frame.allResultPoint.empty())
+            {
+                if (!frame.allResultPointCanonical)
+                {
+                    ++nonCanonicalCameraPointCloudFrameCount;
+                    return;
+                }
+                ++canonicalCameraPointCloudFrameCount;
+            }
             const qint64 rawTimestampUs = static_cast<qint64>(frame.timestamp);
             if (rawTimestampUs <= 0)
             {
@@ -12529,8 +12562,9 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                         for (int linePointIndex = 0; linePointIndex < static_cast<int>(queuedFrame.frame.allResultPoint.size()); ++linePointIndex)
                         {
                             const cv::Point3d& sourcePoint = queuedFrame.frame.allResultPoint[static_cast<std::size_t>(linePointIndex)];
-                            // allResultPoint 的 Z 轴符号与 targetPoint 相反；生成工件点云前先统一到 targetPoint 使用的相机坐标约定。
-                            const Eigen::Vector3d cameraLinePoint(sourcePoint.x, sourcePoint.y, -sourcePoint.z);
+                            // 相机底层保证 allResultPoint 与 targetPoint 使用相同设备 XYZ 坐标；
+                            // 业务层只消费统一坐标，禁止再按相机品牌修改符号。
+                            const Eigen::Vector3d cameraLinePoint(sourcePoint.x, sourcePoint.y, sourcePoint.z);
                             constexpr double kZeroPointEps = 1e-9;
                             const bool isZeroPoint =
                                 std::abs(cameraLinePoint.x()) <= kZeroPointEps
@@ -13085,6 +13119,26 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     finishCameraProcessingWorkers();
     const qint64 postMotionProcessingWaitMs = SteadyNowMs() - processingJoinStartMs;
     const qint64 parallelProcessingElapsedMs = SteadyNowMs() - processingWallStartMs;
+    const int nonCanonicalFrameCount = nonCanonicalCameraPointCloudFrameCount.load();
+    if (nonCanonicalFrameCount > 0)
+    {
+        frameCache->Clear();
+        savedPath.clear();
+        if (appendLog)
+        {
+            appendLog(QString(
+                "相机完整点云坐标契约失败：%1 个非空帧未声明为与 targetPoint 同源 XYZ 坐标，"
+                "已丢弃本轮扫描，禁止生成焊道。请在相机底层完成坐标规范化。")
+                .arg(nonCanonicalFrameCount));
+        }
+        return false;
+    }
+    if (appendLog && canonicalCameraPointCloudFrameCount.load() > 0)
+    {
+        appendLog(QString(
+            "相机完整点云坐标契约检查通过：规范帧=%1，坐标约定=TargetDeviceXYZ。")
+            .arg(canonicalCameraPointCloudFrameCount.load()));
+    }
     if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
     {
         frameCache->Clear();

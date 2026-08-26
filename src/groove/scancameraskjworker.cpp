@@ -633,12 +633,15 @@ bool ScanCameraSkjWorker::pollFrameOnce()
         data.allResultPoint.reserve(count3d);
         for (int i = 0; i < count3d; ++i)
         {
-            // 与旧 BuildUdpFrame 一致：绘图取 (y, z)；allResultPoint 保留原始三维点。
+            // SKJ points3d 与 result_point 同属设备 XYZ 坐标，不使用旧 TCP/UDP 的 Z 反向约定。
             data.XData.append(points3d[i].y);
             data.YData.append(points3d[i].z);
-            data.allResultPoint.push_back(cv::Point3d(points3d[i].x, points3d[i].y, points3d[i].z));
+            data.allResultPoint.push_back(CanonicalizeCameraPointCloudPoint(
+                cv::Point3d(points3d[i].x, points3d[i].y, points3d[i].z),
+                CameraNativePointCloudConvention::SameAsTarget));
         }
     }
+    data.allResultPointCanonical = true;
 
     const int count2d = (m_framePoint2DCount != nullptr) ? m_framePoint2DCount(frame) : 0;
     const SkjPoint2d* points2d = static_cast<const SkjPoint2d*>(
