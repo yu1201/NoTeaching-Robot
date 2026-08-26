@@ -27,6 +27,8 @@ public:
     using StopRequestedCallback = std::function<bool()>;
     using ScanProgressCallback = std::function<void(double)>;
     using ScanPauseAvailabilityCallback = std::function<void(bool, const QString&)>;
+    // 扫描运动及末端采样冻结后、百万级点云后处理前执行。RunScanCycle 用它优先完成安全收枪。
+    using ScanMotionCompletedCallback = std::function<bool()>;
 
     struct WeldExecutionIdentity
     {
@@ -191,7 +193,9 @@ public:
         const ScanPauseAvailabilityCallback& scanPauseAvailability =
             ScanPauseAvailabilityCallback(),
         const std::vector<T_ROBOT_COORS>* scanTrajectory = nullptr,
-        const QString& cameraSectionOverride = QString()) const;
+        const QString& cameraSectionOverride = QString(),
+        const ScanMotionCompletedCallback& motionCompleted =
+            ScanMotionCompletedCallback()) const;
     bool SaveScanPoseVariationTrajectory(
         const QString& filePath,
         const QVector<ScanPoseVariationPoint>& trajectory,
