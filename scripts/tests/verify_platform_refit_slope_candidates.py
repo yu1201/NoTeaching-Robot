@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVICE_PATH = ROOT / "src" / "MeasureThenWeldService.cpp"
+VALIDATOR_PATH = ROOT / "src" / "PlatformSemanticValidator.cpp"
 
 
 def require(value: bool, message: str) -> None:
@@ -57,6 +58,7 @@ def verify_numeric_contract() -> None:
 
 def verify_source_contract() -> None:
     source = SERVICE_PATH.read_text(encoding="utf-8", errors="strict")
+    validator = VALIDATOR_PATH.read_text(encoding="utf-8", errors="strict")
     dual_candidate = function_body(
         source,
         "AnalyzeDirectWithPlatformRefitCandidateSelection(",
@@ -69,8 +71,10 @@ def verify_source_contract() -> None:
         "refitOffParams.cornerPatternRefitEnable = false" in dual_candidate
         and "EvaluatePlatformRefitSlopeCandidate(refitOn" in dual_candidate
         and "EvaluatePlatformRefitSlopeCandidate(refitOff" in dual_candidate
+        and "PlatformSemanticValidator::SelectCandidate" in dual_candidate
         and "自动回退关闭候选" in dual_candidate
-        and "两个结果均存在异常斜率" in dual_candidate,
+        and "两个结果均存在异常斜率或平台语义错误" in dual_candidate
+        and "双候选语义冲突" in dual_candidate,
         "platform-refit on/off candidates are not independently checked and selected fail-closed",
     )
     require(
@@ -85,9 +89,30 @@ def verify_source_contract() -> None:
         < build_pose.index("risingRawAngle * fallingRawAngle < 0.0"),
         "pose generation lacks the per-slope hard gate before aggregate sign validation",
     )
+    require(
+        "RequiresTrustedSegmentAttributeCompensation(preset)" in build_pose
+        and "!preset.measurementPoseTrusted" in build_pose
+        and "PlatformSemanticValidator::EvaluateAssignedSegments" in build_pose
+        and "平台属性补偿前复核失败" in build_pose
+        and build_pose.index("PlatformSemanticValidator::EvaluateAssignedSegments")
+        < build_pose.index("DefaultPoseCompSlotIndex(segment.kind)"),
+        "platform attributes are not proven before four-slot pose compensation",
+    )
+    require(
+        "preset.measurementPoseTrusted = true" in source
+        and "fields[statusCol].trimmed() != \"laser_ok\"" in source,
+        "platform depth reference is not bound to laser_ok measurement evidence",
+    )
+    require(
+        "FitTwoBands" in validator
+        and "slope direction conflicts with platform bands" in validator
+        and "invalid segment transition=" in validator
+        and "low platform is not farther along measurement gun depth" in validator,
+        "semantic validator lacks band, direction, sequence, or low/high checks",
+    )
 
 
 if __name__ == "__main__":
     verify_numeric_contract()
     verify_source_contract()
-    print("PASS: platform-refit candidates and individual slope segments fail closed")
+    print("PASS: platform-refit candidates, platform attributes, and compensation gates fail closed")

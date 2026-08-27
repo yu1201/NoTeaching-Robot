@@ -170,6 +170,7 @@
     <ClCompile Include="src\ScanPoseVariationTestDialog.cpp" />
     <ClCompile Include="src\MeasureThenWeldDialog.cpp" />
     <ClCompile Include="src\MeasureThenWeldService.cpp" />
+    <ClCompile Include="src\PlatformSemanticValidator.cpp" />
     <ClCompile Include="src\PointCloudProofIntegrity.cpp" />
     <ClCompile Include="src\RemoteArchiveSecurity.cpp" />
     <ClCompile Include="src\PointCloud3DView.cpp" />
@@ -274,6 +275,7 @@
     <ClInclude Include="include\ScanPoseVariationTestDialog.h" />
     <ClInclude Include="include\MeasureThenWeldRuntimeConfig.h" />
     <ClInclude Include="include\MeasureThenWeldService.h" />
+    <ClInclude Include="include\PlatformSemanticValidator.h" />
     <ClInclude Include="include\WeldPoseValidationLimits.h" />
     <ClInclude Include="include\RobotModelManagerDialog.h" />
     <ClInclude Include="include\RobotModelRemoteCatalog.h" />
