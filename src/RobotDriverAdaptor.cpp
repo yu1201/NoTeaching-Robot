@@ -1228,6 +1228,7 @@ void RobotDriverAdaptor::StoreStateSnapshot(const StateSnapshot& snapshot)
 }
 
 std::atomic<bool> RobotDriverAdaptor::s_connectDriversAtConstruct{ true };
+std::atomic<bool> RobotDriverAdaptor::s_startStateMonitorsAtConstruct{ true };
 
 void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
 {

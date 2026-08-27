@@ -141,7 +141,8 @@ bool ContralUnit::InitContralUnit()
             }
         }
 
-        if (info.pUnitDriver != nullptr)
+        if (info.pUnitDriver != nullptr
+            && RobotDriverAdaptor::s_startStateMonitorsAtConstruct.load())
         {
             RobotDriverAdaptor* driver = static_cast<RobotDriverAdaptor*>(info.pUnitDriver);
             if (!driver->StartStateMonitor(50))
