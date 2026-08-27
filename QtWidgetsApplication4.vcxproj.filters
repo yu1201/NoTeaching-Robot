@@ -193,6 +193,9 @@
     <ClCompile Include="src\MeasureThenWeldService.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\PlatformSemanticValidator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\PointCloudProofIntegrity.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -391,6 +394,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\MeasureThenWeldService.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\PlatformSemanticValidator.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\WeldPoseValidationLimits.h">

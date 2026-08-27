@@ -7,6 +7,7 @@
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "ConfigSection.h"
 #include "PointCloudExtractionProcessor.h"
+#include "PlatformSemanticValidator.h"
 #include "PointCloudProofIntegrity.h"
 #include "PointCloudProcessingConfig.h"
 #include "WorkpieceMeshBuilder.h"
@@ -1828,6 +1829,9 @@ struct WeldPosePreset
     double measureReferenceRx = 0.0;
     double measureReferenceRy = 0.0;
     double measureReferenceRz = 0.0;
+    bool measurementPoseTrusted = false;
+    int measurementPosePointCount = 0;
+    QString measurementPoseSource;
     double gunToolBaseRz = 180.0;
     double poseMatchMaxErrorDeg = 5.0;
     int poseCompMatchMode = POSE_COMP_MATCH_BY_POSE;
@@ -1941,6 +1945,8 @@ QString BuildEffectiveWeldExecutionFingerprint(
     addDouble("resumeBacktrack", param.dResumeBacktrackMm);
     addInt("weldDirection", preset.weldDirection);
     addDouble("effectiveFinalStep", effectiveFinalStepMm);
+    addBool("measurementPoseTrusted", preset.measurementPoseTrusted);
+    addInt("measurementPosePointCount", preset.measurementPosePointCount);
 
     addInt("robotType", preset.robotType);
     addBool("processLoaded", preset.weldProcessLoaded);
@@ -2619,13 +2625,6 @@ int BilateralPresmoothSdkBaseWeld(
     return moved;
 }
 
-struct PlatformRefitSlopeCandidateCheck
-{
-    bool valid = false;
-    int checkedSegmentCount = 0;
-    QStringList failures;
-};
-
 double PlatformRefitCandidatePathValue(
     const Eigen::Vector3d& point,
     RobotCalculation::SampleAxis axis)
@@ -2644,108 +2643,73 @@ double PlatformRefitCandidateProfileValue(
         : point.y();
 }
 
-bool IsPlatformRefitCandidateCorner(RobotCalculation::LowerWeldPointType type)
+PlatformSemanticValidator::CornerType PlatformRefitCandidateCornerType(
+    RobotCalculation::LowerWeldPointType type)
 {
-    return type == RobotCalculation::LowerWeldPointType::InnerCorner
-        || type == RobotCalculation::LowerWeldPointType::OuterCorner;
+    if (type == RobotCalculation::LowerWeldPointType::InnerCorner)
+    {
+        return PlatformSemanticValidator::CornerType::Inner;
+    }
+    if (type == RobotCalculation::LowerWeldPointType::OuterCorner)
+    {
+        return PlatformSemanticValidator::CornerType::Outer;
+    }
+    return PlatformSemanticValidator::CornerType::Other;
 }
 
-PlatformRefitSlopeCandidateCheck EvaluatePlatformRefitSlopeCandidate(
+PlatformSemanticValidator::CandidateCheck EvaluatePlatformRefitSlopeCandidate(
     const RobotCalculation::MeasureThenWeldAnalysisResult& analysis,
     const RobotCalculation::LowerWeldFilterParams& params)
 {
-    PlatformRefitSlopeCandidateCheck check;
+    PlatformSemanticValidator::CandidateCheck check;
     if (!analysis.ok)
     {
-        check.failures.push_back(
-            analysis.error.isEmpty()
-                ? QStringLiteral("特征分析未通过")
-                : analysis.error);
+        check.failures.push_back((analysis.error.isEmpty()
+            ? QStringLiteral("特征分析未通过")
+            : analysis.error).toStdString());
         return check;
     }
 
-    const double flatSlopeThreshold = std::max(
-        0.01,
-        params.sameTypeShortFlatSlope);
-    for (int index = 0; index + 1 < analysis.keyPoints.size(); ++index)
+    std::vector<PlatformSemanticValidator::CandidateKeyPoint> keyPoints;
+    keyPoints.reserve(static_cast<std::size_t>(analysis.keyPoints.size()));
+    for (const RobotCalculation::LowerWeldClassifiedPoint& point : analysis.keyPoints)
     {
-        const RobotCalculation::LowerWeldClassifiedPoint& begin =
-            analysis.keyPoints[index];
-        const RobotCalculation::LowerWeldClassifiedPoint& end =
-            analysis.keyPoints[index + 1];
-        if (!IsPlatformRefitCandidateCorner(begin.type)
-            || !IsPlatformRefitCandidateCorner(end.type)
-            || begin.isLapStepBoundary
-            || end.isLapStepBoundary)
-        {
-            continue;
-        }
-
-        ++check.checkedSegmentCount;
-        const double pathDelta = PlatformRefitCandidatePathValue(
-            end.point,
-            params.sampleAxis) - PlatformRefitCandidatePathValue(
-                begin.point,
-                params.sampleAxis);
-        const double profileDelta = PlatformRefitCandidateProfileValue(
-            end.point,
-            params.sampleAxis) - PlatformRefitCandidateProfileValue(
-                begin.point,
-                params.sampleAxis);
-        const double absPathDelta = std::abs(pathDelta);
-        const double absProfileDelta = std::abs(profileDelta);
-        const double slope = absPathDelta > 1e-9
-            ? absProfileDelta / absPathDelta
-            : std::numeric_limits<double>::infinity();
-        const bool topologyIsSlope = begin.type != end.type;
-        const bool geometryIsSlope = absPathDelta <= 1e-9
-            ? absProfileDelta > 1e-6
-            : slope >= flatSlopeThreshold;
-        if (topologyIsSlope == geometryIsSlope)
-        {
-            continue;
-        }
-
-        const QString beginType = RobotCalculation::LowerWeldPointTypeName(begin.type);
-        const QString endType = RobotCalculation::LowerWeldPointTypeName(end.type);
-        if (topologyIsSlope)
-        {
-            check.failures.push_back(QString(
-                "raw_index=%1->%2，类型=%3->%4，拓扑判为坡段但几何斜率=%5<%6，疑似单一异常斜率或拐点落在平台内部")
-                .arg(begin.index)
-                .arg(end.index)
-                .arg(beginType)
-                .arg(endType)
-                .arg(slope, 0, 'f', 4)
-                .arg(flatSlopeThreshold, 0, 'f', 4));
-        }
-        else
-        {
-            check.failures.push_back(QString(
-                "raw_index=%1->%2，类型=%3->%4，拓扑判为平台但几何斜率=%5>=%6，疑似平台拐点错配")
-                .arg(begin.index)
-                .arg(end.index)
-                .arg(beginType)
-                .arg(endType)
-                .arg(slope, 0, 'f', 4)
-                .arg(flatSlopeThreshold, 0, 'f', 4));
-        }
+        keyPoints.push_back({
+            point.index,
+            PlatformRefitCandidatePathValue(point.point, params.sampleAxis),
+            PlatformRefitCandidateProfileValue(point.point, params.sampleAxis),
+            PlatformRefitCandidateCornerType(point.type),
+            point.isLapStepBoundary
+        });
     }
-
-    check.valid = check.failures.isEmpty();
-    return check;
+    return PlatformSemanticValidator::EvaluateCandidate(
+        keyPoints,
+        params.sameTypeShortFlatSlope);
 }
 
 QString PlatformRefitSlopeCandidateSummary(
-    const PlatformRefitSlopeCandidateCheck& check)
+    const PlatformSemanticValidator::CandidateCheck& check)
 {
     if (check.valid)
     {
-        return QString("PASS（复核普通内段=%1）")
-            .arg(check.checkedSegmentCount);
+        return QString("PASS（普通内段=%1，平台=%2，坡段=%3，双平台证据=%4，带间距=%5 mm，残差RMS=%6 mm，评分=%7）")
+            .arg(check.checkedSegmentCount)
+            .arg(check.platformSegmentCount)
+            .arg(check.slopeSegmentCount)
+            .arg(check.sufficientEvidence ? QStringLiteral("充分") : QStringLiteral("不足"))
+            .arg(check.bandSeparation, 0, 'f', 3)
+            .arg(check.residualRms, 0, 'f', 3)
+            .arg(std::isfinite(check.score)
+                ? QString::number(check.score, 'f', 4)
+                : QStringLiteral("N/A"));
+    }
+    QStringList failures;
+    for (const std::string& failure : check.failures)
+    {
+        failures.push_back(QString::fromStdString(failure));
     }
     return QString("FAIL（%1）")
-        .arg(check.failures.join(QStringLiteral("；")));
+        .arg(failures.join(QStringLiteral("；")));
 }
 
 RobotCalculation::MeasureThenWeldAnalysisResult
@@ -2768,7 +2732,7 @@ AnalyzeDirectWithPlatformRefitCandidateSelection(
         RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
             inputPoints,
             refitOnParams);
-    const PlatformRefitSlopeCandidateCheck refitOnCheck =
+    const PlatformSemanticValidator::CandidateCheck refitOnCheck =
         EvaluatePlatformRefitSlopeCandidate(refitOn, refitOnParams);
 
     RobotCalculation::LowerWeldFilterParams refitOffParams = params;
@@ -2780,30 +2744,32 @@ AnalyzeDirectWithPlatformRefitCandidateSelection(
         RobotCalculation::AnalyzeMeasureThenWeldLowerWeldPathDirect(
             inputPoints,
             refitOffParams);
-    const PlatformRefitSlopeCandidateCheck refitOffCheck =
+    const PlatformSemanticValidator::CandidateCheck refitOffCheck =
         EvaluatePlatformRefitSlopeCandidate(refitOff, refitOffParams);
 
     const QString refitOffSummary =
         PlatformRefitSlopeCandidateSummary(refitOffCheck);
     const QString refitOnSummary =
         PlatformRefitSlopeCandidateSummary(refitOnCheck);
-    if (refitOnCheck.valid)
+    const PlatformSemanticValidator::CandidateSelection selection =
+        PlatformSemanticValidator::SelectCandidate(refitOnCheck, refitOffCheck);
+    if (selection == PlatformSemanticValidator::CandidateSelection::RefitOn)
     {
         if (appendLog)
         {
             appendLog(QString(
-                "平台重算双候选复核：关闭=%1；开启=%2；选择开启候选。")
+                "平台重算双候选语义复核：关闭=%1；开启=%2；选择开启候选。")
                 .arg(refitOffSummary, refitOnSummary));
         }
         return refitOn;
     }
 
-    if (refitOffCheck.valid)
+    if (selection == PlatformSemanticValidator::CandidateSelection::RefitOff)
     {
         if (appendLog)
         {
             appendLog(QString(
-                "平台重算双候选复核：关闭=%1；开启=%2；开启候选已淘汰，自动回退关闭候选。")
+                "平台重算双候选语义复核：关闭=%1；开启=%2；开启候选已淘汰，自动回退关闭候选。")
                 .arg(refitOffSummary, refitOnSummary));
         }
         if (!params.exportFitDebugCloud)
@@ -2819,9 +2785,18 @@ AnalyzeDirectWithPlatformRefitCandidateSelection(
     }
 
     RobotCalculation::MeasureThenWeldAnalysisResult failed;
-    failed.error = QString(
-        "平台重算双候选复核失败：关闭=%1；开启=%2；两个结果均存在异常斜率，已停止生成焊接轨迹。")
-        .arg(refitOffSummary, refitOnSummary);
+    if (selection == PlatformSemanticValidator::CandidateSelection::Ambiguous)
+    {
+        failed.error = QString(
+            "平台重算双候选语义冲突：关闭=%1；开启=%2；两个结果均可局部拟合，但平台带、坡向或拐点序列不一致且评分差距不足，无法证明哪一个正确，已停止生成焊接轨迹。")
+            .arg(refitOffSummary, refitOnSummary);
+    }
+    else
+    {
+        failed.error = QString(
+            "平台重算双候选复核失败：关闭=%1；开启=%2；两个结果均存在异常斜率或平台语义错误，已停止生成焊接轨迹。")
+            .arg(refitOffSummary, refitOnSummary);
+    }
     if (appendLog)
     {
         appendLog(failed.error);
@@ -3923,6 +3898,9 @@ WeldPosePreset ApplyMeasurementPoseReferenceForCalculation(
     preset.measureReferenceRx = reference.rx;
     preset.measureReferenceRy = reference.ry;
     preset.measureReferenceRz = reference.rz;
+    preset.measurementPoseTrusted = true;
+    preset.measurementPosePointCount = reference.count;
+    preset.measurementPoseSource = reference.source;
     if (appendLog)
     {
         appendLog(QString("本次计算使用点云测量姿态作为焊道法向参考，不覆盖固定焊接RX/RY：X=%1, Y=%2, Z=%3, 参考RX=%4, 参考RY=%5, 参考RZ=%6, 固定焊接RX=%7, 固定焊接RY=%8, 有效匹配点=%9, 来源=%10")
@@ -4026,6 +4004,29 @@ int DefaultPoseCompSlotIndex(const QString& segmentKind)
         return 3;
     }
     return -1;
+}
+
+bool RequiresTrustedSegmentAttributeCompensation(const WeldPosePreset& preset)
+{
+    if (NormalizePoseCompMatchMode(preset.poseCompMatchMode)
+        != POSE_COMP_MATCH_BY_SEGMENT_CODE
+        || preset.poseCompSlots.size() < POSE_COMP_SEGMENT_COUNT)
+    {
+        return false;
+    }
+
+    const WeldPosePreset::PoseCompSlot& reference = preset.poseCompSlots.front();
+    for (int index = 1; index < POSE_COMP_SEGMENT_COUNT; ++index)
+    {
+        const WeldPosePreset::PoseCompSlot& slot = preset.poseCompSlots[index];
+        if (std::abs(slot.compX - reference.compX) > 1e-6
+            || std::abs(slot.compY - reference.compY) > 1e-6
+            || std::abs(slot.compZ - reference.compZ) > 1e-6)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 QString DefaultPoseCompSlotKind(int index)
@@ -9547,6 +9548,22 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     {
         return lines;
     }
+    if (RequiresTrustedSegmentAttributeCompensation(preset)
+        && !preset.measurementPoseTrusted)
+    {
+        const QString errorText = QStringLiteral(
+            "平台属性补偿被拒绝：当前按四类段属性应用差异化补偿，但本次点云没有 laser_ok 对应的可信测量姿态；"
+            "不能使用参数组扫描姿态回退来判定高/低平台和上/下坡。请保留本次扫描的匹配明细后重算，或改为不依赖段属性的统一补偿。");
+        if (generationError != nullptr)
+        {
+            *generationError = errorText;
+        }
+        if (appendLog)
+        {
+            appendLog(errorText);
+        }
+        return {};
+    }
 
     lines.reserve(static_cast<size_t>(result.points.size()) + 2);
     lines.push_back("weld_index raw_index x y z rx ry rz bx by bz point_type segment_kind is_lap_step");
@@ -9601,6 +9618,20 @@ std::vector<QString> BuildSegmentPoseOutputLines(
             keyPointTypes,
             measurementDepthSegmentKinds,
             appendLog);
+    if (!hasMeasurementDepthSegmentKinds)
+    {
+        const QString errorText = QStringLiteral(
+            "平台属性生成被拒绝：无法用本次测量枪姿建立有效深度轴并完成四类段属性判定，已禁止回退到未经证明的旧段属性。");
+        if (generationError != nullptr)
+        {
+            *generationError = errorText;
+        }
+        if (appendLog)
+        {
+            appendLog(errorText);
+        }
+        return {};
+    }
 
     QVector<double> distanceFromStart(result.points.size(), 0.0);
     for (int index = 1; index < result.points.size(); ++index)
@@ -9704,6 +9735,100 @@ std::vector<QString> BuildSegmentPoseOutputLines(
     if (segments.empty())
     {
         return lines;
+    }
+
+    const Eigen::Vector3d measurementGunAxis = MeasurementGunTipAxis(preset);
+    const Eigen::Vector3d measurementTravelAxis = UnitVectorOrZero(
+        result.points[keyPointPositions.back()].point
+        - result.points[keyPointPositions.front()].point);
+    Eigen::Vector3d measurementDepthAxis = measurementGunAxis;
+    if (measurementTravelAxis.norm() > 1e-9)
+    {
+        measurementDepthAxis -= measurementTravelAxis
+            * measurementDepthAxis.dot(measurementTravelAxis);
+    }
+    measurementDepthAxis = UnitVectorOrZero(measurementDepthAxis);
+    if (measurementDepthAxis.norm() <= 1e-9)
+    {
+        measurementDepthAxis = measurementGunAxis;
+    }
+    if (measurementDepthAxis.dot(measurementGunAxis) < 0.0)
+    {
+        measurementDepthAxis = -measurementDepthAxis;
+    }
+
+    std::vector<PlatformSemanticValidator::AssignedSegment> semanticSegments;
+    semanticSegments.reserve(segments.size());
+    for (const SegmentInfo& segment : segments)
+    {
+        const Eigen::Vector3d segmentDelta =
+            result.points[segment.nextBegin].point
+            - result.points[segment.begin].point;
+        const double depthBegin =
+            result.points[segment.begin].point.dot(measurementDepthAxis);
+        const double depthEnd =
+            result.points[segment.nextBegin].point.dot(measurementDepthAxis);
+        const double depthDelta = depthEnd - depthBegin;
+        semanticSegments.push_back({
+            result.points[segment.begin].index,
+            result.points[segment.nextBegin].index,
+            distanceFromStart[segment.begin],
+            distanceFromStart[segment.nextBegin],
+            depthBegin,
+            depthEnd,
+            std::sqrt(std::max(0.0,
+                segmentDelta.squaredNorm() - depthDelta * depthDelta)),
+            segment.kind.toStdString(),
+            segment.isLapStepSegment,
+            segment.beginType == RobotCalculation::LowerWeldPointType::Start
+                || segment.endMarkerType == RobotCalculation::LowerWeldPointType::End
+        });
+    }
+    const PlatformSemanticValidator::AssignedCheck semanticCheck =
+        PlatformSemanticValidator::EvaluateAssignedSegments(
+            semanticSegments,
+            platformFlatSlopeThreshold);
+    if (!semanticCheck.valid
+        || (RequiresTrustedSegmentAttributeCompensation(preset)
+            && !semanticCheck.sufficientEvidence))
+    {
+        QStringList failures;
+        for (const std::string& failure : semanticCheck.failures)
+        {
+            failures.push_back(QString::fromStdString(failure));
+        }
+        if (semanticCheck.valid && !semanticCheck.sufficientEvidence)
+        {
+            failures.push_back(QStringLiteral(
+                "高低平台带证据不足：差异化四类补偿要求至少各有2个完整高/低平台段"));
+        }
+        const QString errorText = QString(
+            "平台属性补偿前复核失败：%1；段序列=%2。已停止生成焊接姿态，未应用四类补偿。")
+            .arg(failures.join(QStringLiteral("；")))
+            .arg(QString::fromStdString(semanticCheck.fingerprint));
+        if (generationError != nullptr)
+        {
+            *generationError = errorText;
+        }
+        if (appendLog)
+        {
+            appendLog(errorText);
+        }
+        return {};
+    }
+    if (appendLog)
+    {
+        appendLog(QString(
+            "平台属性补偿前复核通过：普通内段=%1，平台=%2，坡段=%3，双平台证据=%4，低-高深度差=%5 mm，带残差RMS=%6 mm，最大残差=%7 mm，段序列=%8。")
+            .arg(semanticCheck.checkedSegmentCount)
+            .arg(semanticCheck.platformSegmentCount)
+            .arg(semanticCheck.slopeSegmentCount)
+            .arg(semanticCheck.sufficientEvidence
+                ? QStringLiteral("充分") : QStringLiteral("有限"))
+            .arg(semanticCheck.lowHighSeparation, 0, 'f', 3)
+            .arg(semanticCheck.residualRms, 0, 'f', 3)
+            .arg(semanticCheck.maxResidual, 0, 'f', 3)
+            .arg(QString::fromStdString(semanticCheck.fingerprint)));
     }
 
     double platformAxisCos2 = 0.0;
