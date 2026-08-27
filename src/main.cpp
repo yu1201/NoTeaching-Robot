@@ -32,6 +32,17 @@ bool IsHeadlessPathInvocation(const QStringList& arguments)
         || arguments.contains(QStringLiteral("--pointcloud-extract-worker"));
 }
 
+bool IsOfflineWeldFileInvocation(const QStringList& arguments)
+{
+    if (!arguments.contains(QStringLiteral("--no-show")))
+    {
+        return false;
+    }
+
+    return arguments.contains(QStringLiteral("--rebuild-measure-weld-files"))
+        || arguments.contains(QStringLiteral("--generate-step-weld-program"));
+}
+
 int PrintCliHelp()
 {
     QTextStream stream(stdout);
@@ -177,12 +188,17 @@ int main(int argc, char *argv[])
         return 3;
     }
 
-    // GUI 模式(非 --no-show)：机器人驱动构造不再同步连接，连接改由后台状态监控线程发起，
-    // 避免机器人/相机连不上时拖慢主窗口显示(每台不可达 STEP 约 5s OS connect 超时)。
-    // CLI(--no-show)保持构造内同步连接，确保 CLI 命令执行时机器人已连上。须在构造窗口前设置。
-    if (!app.arguments().contains(QStringLiteral("--no-show")))
+    // GUI 模式和纯文件离线 CLI：机器人驱动构造不做同步连接。重建先测后焊文件、生成 STEP
+    // 程序只读取机器人配置与本地点云/姿态文件，不应因现场控制器不可达而阻塞。
+    // 其余 --no-show 机器人动作 CLI 仍保持构造内同步连接。须在构造窗口前设置。
+    if (!app.arguments().contains(QStringLiteral("--no-show"))
+        || IsOfflineWeldFileInvocation(app.arguments()))
     {
         RobotDriverAdaptor::s_connectDriversAtConstruct = false;
+    }
+    if (IsOfflineWeldFileInvocation(app.arguments()))
+    {
+        RobotDriverAdaptor::s_startStateMonitorsAtConstruct = false;
     }
 
     QtWidgetsApplication4 window;

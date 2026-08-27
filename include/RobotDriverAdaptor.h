@@ -347,6 +347,8 @@ public:
     // 驱动构造时是否同步连接机器人：默认 true(旧行为/CLI 用，保证命令执行时已连)；GUI 启动
     // (main 检测到非 --no-show)置 false → 构造不连、监控线程后台连，主窗口立即可见。
     static std::atomic<bool> s_connectDriversAtConstruct;
+    // 纯文件离线 CLI 不需要状态采样，也不允许后台监控线程触发控制器连接。
+    static std::atomic<bool> s_startStateMonitorsAtConstruct;
     virtual bool cleanAlarm() = 0;
     virtual bool ServoOn() = 0;
     void ClearLastRobotError();
