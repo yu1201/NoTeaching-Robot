@@ -59,9 +59,11 @@ private:
     void TeachEndPose();
     void GeneratePreview();
     void RunScan();
+    void RunStraightCurveSimulation();
     void AppendLog(const QString& text);
     void UpdateStatusLabels();
     void SetRunning(bool running);
+    void RefreshStraightCurveSource();
     MeasureThenWeldService::ScanPoseVariationParams CurrentParams() const;
     MeasureThenWeldService::ScanPostProcessMode CurrentPostProcessMode() const;
 
@@ -71,6 +73,7 @@ private:
     StartCameraFunc m_startCamera;
     CameraCacheFunc m_cameraCacheForUnit;
     bool m_running = false;
+    bool m_curveSimulationRunning = false;
     bool m_loadingSelectors = false;
     qint64 m_lastImageTimestamp = 0;
 
@@ -103,8 +106,10 @@ private:
     QPushButton* m_teachEndButton = nullptr;
     QPushButton* m_generateButton = nullptr;
     QPushButton* m_runButton = nullptr;
+    QPushButton* m_simulateCurveButton = nullptr;
     QLabel* m_liveImageLabel = nullptr;
     QLabel* m_liveImageStatusLabel = nullptr;
     QTimer* m_liveImageTimer = nullptr;
     QPlainTextEdit* m_logEdit = nullptr;
+    QString m_lastStraightCurvePath;
 };

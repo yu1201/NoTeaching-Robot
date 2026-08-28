@@ -1,8 +1,9 @@
 """Static contract checks for the embedded scan pose-variation workflow.
 
 This test does not connect to a robot.  It protects the UI entry, taught-pose
-persistence, weld-compatible posture math, fail-closed motion admission and
-reuse of the existing scan acquisition/output chain.
+persistence, weld-compatible posture math, fail-closed motion admission,
+reuse of the existing scan acquisition/output chain and the Tool1 fixed-pose
+2 mm curve dry-run path.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ def main() -> int:
     dialog_header = read("include/ScanPoseVariationTestDialog.h")
     service = read("src/MeasureThenWeldService.cpp")
     service_header = read("include/MeasureThenWeldService.h")
+    safety_store = read("src/WeldSafetyRecoveryStore.cpp")
 
     require("扫描变姿态精度测试" not in function_test,
             "scan pose-variation entry still lives inside the ordinary function-test page")
@@ -84,6 +86,7 @@ def main() -> int:
         "示教扫描终点并保存",
         "生成并保存扫描轨迹",
         "运行扫描并保存数据",
+        "生成并运行直线模拟轨迹",
         'ConfigLocation::Robot(RobotName(), QStringLiteral("FunctionTestScanPoseVariation"))',
         "RobotDataHelper::WriteCoors",
         "RobotDataHelper::WritePulse",
@@ -114,6 +117,28 @@ def main() -> int:
         "禁止在同一空间点产生突变姿态",
     ):
         require(token in generator, f"trajectory contract missing: {token}")
+    for token in (
+        "std::abs(params.leftRotationDeg) > 60.0",
+        "std::abs(params.rightRotationDeg) > 60.0",
+        "std::abs(params.leftRotationDeg) > 1e-9",
+        "params.leftRotationDeg",
+        "-params.rightRotationDeg",
+        "实际RotZ（上坡/下坡）",
+    ):
+        require(token in generator, f"signed slope-angle contract missing: {token}")
+    require("spin->setRange(-60.0, 60.0)" in dialog,
+            "slope-angle editors still reject negative values")
+
+    def phase_angles(left_rotation_deg: float,
+                     right_rotation_deg: float) -> tuple[float, float, float, float]:
+        return (0.0, left_rotation_deg, 0.0, -right_rotation_deg)
+
+    require(phase_angles(10.0, 10.0) == (0.0, 10.0, 0.0, -10.0),
+            "positive slope-angle behavior changed")
+    require(phase_angles(-10.0, -10.0) == (0.0, -10.0, 0.0, 10.0),
+            "negative slope angles do not reverse both named rotation directions")
+    require(phase_angles(-10.0, 10.0) == (0.0, -10.0, 0.0, -10.0),
+            "signed rising/falling inputs are not independently preserved")
     require("ScanPoseVariationParams" in service_header
             and "ScanPoseVariationPoint" in service_header,
             "trajectory types are not exposed by the scan service")
@@ -121,7 +146,7 @@ def main() -> int:
     run_scan = section(
         dialog,
         "void ScanPoseVariationTestDialog::RunScan()",
-        "void ScanPoseVariationTestDialog::AppendLog(",
+        "void ScanPoseVariationTestDialog::RunStraightCurveSimulation()",
     )
     for token in (
         "m_startCamera(m_unitIndex, cameraSection, cameraIp)",
@@ -208,7 +233,76 @@ def main() -> int:
     require("RobotOperationLease::IsCancellationRequested(driver)" in run_scan,
             "background test cannot participate in the shared safety-stop contract")
 
-    print("PASS: scan pose-variation teach, math, motion gates, acquisition and output contracts are wired")
+    curve_generator = section(
+        service,
+        "bool MeasureThenWeldService::GenerateScanPoseVariationDryRunFiles(",
+        "bool MeasureThenWeldService::DownlinkWeldPoseFile(",
+    )
+    for token in (
+        "PreciseLaserPoint_FeatureSmoothCurve_2mm.txt",
+        "index x y z source",
+        "FEATURE_SMOOTH_CURVE_MIN_FULL_SEGMENT_MM",
+        "FEATURE_SMOOTH_CURVE_MAX_SEGMENT_MM",
+        "FEATURE_SMOOTH_CURVE_SUMMARY_FILE_NAME",
+        "ScanPoseVariation_TestSummary.txt",
+        'QStringLiteral("straight_line")',
+        'QStringLiteral("success")',
+        "record.point = curvePoints[index].point",
+        "record.rx = basePose.dRX",
+        "record.ry = basePose.dRY",
+        "record.rz = basePose.dRZ",
+        "curveStartPose = BuildWeldPoseCoors(records.front())",
+        "curveEndPose = BuildWeldPoseCoors(records.back())",
+        "FEATURE_SMOOTH_CURVE_RUN_STEP_MM",
+        "/*actualWeld=*/false",
+        "WeldPoseSource::ScanPoseVariationDryRun",
+        "RegisterLocalTestPoseAuthorization(",
+    ):
+        require(token in curve_generator, f"straight-curve generator contract missing: {token}")
+
+    curve_run = section(
+        dialog,
+        "void ScanPoseVariationTestDialog::RunStraightCurveSimulation()",
+        "void ScanPoseVariationTestDialog::RefreshStraightCurveSource()",
+    )
+    for token in (
+        "RobotDriverCapability::OfflineTrajectoryExport",
+        "GenerateScanPoseVariationDryRunFiles(",
+        "Tool1（焊枪）",
+        "曲线起点TCP",
+        "曲线终点TCP",
+        "不开弧、不送丝、不摆动",
+        "param.bDoActualWeld = false",
+        "param.nWeldDirection = 1",
+        "param.dDryRunSpeedMmPerMin = dryRunSpeedMmPerMin",
+        "param.dFinalWeldTrajectoryStepMm = 2.0",
+        "WeldSafetyRecoverySession",
+        "ExecuteWeldPoseFileWithSafePos(",
+        "WeldPoseSource::ScanPoseVariationDryRun",
+        "RobotOperationLease::IsCancellationRequested(driver)",
+        "机器人程序已启动、正常完成，并已验证收枪安全位置",
+    ):
+        require(token in curve_run, f"straight-curve execution contract missing: {token}")
+    require("ScanPoseVariationDryRun = 2" in service_header,
+            "scan curve dry-run source is not explicit")
+    require("authorization.source != expectedSource" in service,
+            "local test authorization can be reused across virtual and scan-curve sources")
+    require("poseSource == WeldPoseSource::ScanPoseVariationDryRun" in service
+            and "param.bDoActualWeld" in service,
+            "scan curve source is not hard-locked to dry-run execution")
+    for token in (
+        "m_poseSource == MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun",
+        "PreciseLaserPoint_FeatureSmoothCurve_DryRunPose_2mm.txt",
+        "PreciseLaserPoint_FeatureSmoothCurve_DryRunPose_2mm_FinalSampled.txt",
+        "!record.actualWeld",
+        "std::abs(record.finalStepMm - 2.0)",
+        "actualSha.compare(identity.sampledPoseSha256",
+        "actualSourceSha.compare(identity.sourcePoseSha256",
+    ):
+        require(token in safety_store,
+                f"scan curve persistent safety binding missing: {token}")
+
+    print("PASS: scan pose-variation signed slope angles, scan and Tool1 curve dry-run contracts are wired")
     return 0
 
 

@@ -7,6 +7,7 @@
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
 #include "RobotOperationLease.h"
+#include "WeldSafetyRecoveryStore.h"
 #include "WindowStyleHelper.h"
 
 #include <QApplication>
@@ -35,6 +36,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <thread>
 #include <utility>
 
@@ -45,6 +47,35 @@ constexpr auto kSelectionSection = "ScanPoseVariationSelection";
 constexpr auto kPostProcessNone = "none";
 constexpr auto kPostProcessStraightLine = "straight_line";
 constexpr auto kPostProcessCorrugatedBoard = "corrugated_board";
+constexpr auto kFeatureSmoothCurveFileName =
+    "PreciseLaserPoint_FeatureSmoothCurve_2mm.txt";
+
+QString FindLatestStraightCurvePath(const QString& robotName)
+{
+    const QString resultRootPath = RobotDataHelper::BuildProjectPath(
+        QStringLiteral("Result/%1").arg(robotName));
+    const QDir resultRoot(resultRootPath);
+    const QFileInfoList caseDirs = resultRoot.entryInfoList(
+        QDir::Dirs | QDir::NoDotAndDotDot,
+        QDir::Time | QDir::Reversed);
+    QFileInfo newestCurve;
+    for (const QFileInfo& caseInfo : caseDirs)
+    {
+        const QFileInfo curveInfo(QDir(caseInfo.absoluteFilePath()).filePath(
+            QStringLiteral("LaserPoint/%1").arg(
+                QString::fromLatin1(kFeatureSmoothCurveFileName))));
+        if (!curveInfo.isFile() || curveInfo.isSymLink())
+        {
+            continue;
+        }
+        if (!newestCurve.exists()
+            || curveInfo.lastModified() > newestCurve.lastModified())
+        {
+            newestCurve = curveInfo;
+        }
+    }
+    return newestCurve.exists() ? newestCurve.absoluteFilePath() : QString();
+}
 
 QString PostProcessModeConfigValue(MeasureThenWeldService::ScanPostProcessMode mode)
 {
@@ -88,6 +119,14 @@ QString PoseText(const T_ROBOT_COORS& pose)
         .arg(pose.dBZ, 0, 'f', 3);
 }
 
+QString OrientationText(const T_ROBOT_COORS& pose)
+{
+    return QStringLiteral("RX=%1 RY=%2 RZ=%3")
+        .arg(pose.dRX, 0, 'f', 3)
+        .arg(pose.dRY, 0, 'f', 3)
+        .arg(pose.dRZ, 0, 'f', 3);
+}
+
 QDoubleSpinBox* AddLengthEditor(
     QFormLayout* layout,
     const QString& label,
@@ -112,7 +151,7 @@ QDoubleSpinBox* AddAngleEditor(
     QWidget* parent)
 {
     auto* spin = new QDoubleSpinBox(parent);
-    spin->setRange(0.0, 60.0);
+    spin->setRange(-60.0, 60.0);
     spin->setDecimals(2);
     spin->setSingleStep(1.0);
     spin->setValue(value);
@@ -277,6 +316,10 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     m_fallingSpin = AddLengthEditor(leftForm, QStringLiteral("下坡长度"), 30.0, 1.0, 2000.0, paramGroup);
     m_leftAngleSpin = AddAngleEditor(rightForm, QStringLiteral("上坡左旋角度"), 10.0, paramGroup);
     m_rightAngleSpin = AddAngleEditor(rightForm, QStringLiteral("下坡右旋角度"), 10.0, paramGroup);
+    m_leftAngleSpin->setToolTip(QStringLiteral(
+        "允许 -60~60 deg；负数表示改为与上坡左旋相反的方向。"));
+    m_rightAngleSpin->setToolTip(QStringLiteral(
+        "允许 -60~60 deg；负数表示改为与下坡右旋相反的方向。"));
     m_transitionSpin = AddLengthEditor(rightForm, QStringLiteral("段尾姿态过渡长度"), 10.0, 0.1, 500.0, paramGroup);
     m_pointStepSpin = AddLengthEditor(rightForm, QStringLiteral("轨迹名义点距"), 2.0, 0.2, 20.0, paramGroup);
     paramColumns->addLayout(leftForm, 1);
@@ -286,8 +329,14 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     auto* actionRow = new QHBoxLayout();
     m_generateButton = new QPushButton(QStringLiteral("生成并保存扫描轨迹"), content);
     m_runButton = new QPushButton(QStringLiteral("运行扫描并保存数据"), content);
+    m_simulateCurveButton = new QPushButton(
+        QStringLiteral("生成并运行直线模拟轨迹"), content);
+    m_simulateCurveButton->setToolTip(QStringLiteral(
+        "读取最新一次成功的直线处理 2mm 曲线，以曲线XYZ作为Tool1 TCP、基础姿态作为固定姿态，"
+        "生成空跑程序后按先测后焊安全流程下发并运行。"));
     actionRow->addWidget(m_generateButton);
     actionRow->addWidget(m_runButton);
+    actionRow->addWidget(m_simulateCurveButton);
     contentLayout->addLayout(actionRow);
 
     auto* imageGroup = new QGroupBox(QStringLiteral("扫描实时相机图像"), content);
@@ -318,6 +367,8 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     connect(m_teachEndButton, &QPushButton::clicked, this, [this]() { TeachEndPose(); });
     connect(m_generateButton, &QPushButton::clicked, this, [this]() { GeneratePreview(); });
     connect(m_runButton, &QPushButton::clicked, this, [this]() { RunScan(); });
+    connect(m_simulateCurveButton, &QPushButton::clicked,
+        this, [this]() { RunStraightCurveSimulation(); });
 
     m_liveImageTimer = new QTimer(this);
     m_liveImageTimer->setInterval(100);
@@ -353,6 +404,7 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
                 AppendLog(QStringLiteral("后处理方式保存失败：") + error);
         });
     UpdateStatusLabels();
+    RefreshStraightCurveSource();
     AppendLog(QStringLiteral("等待示教。运行前会再次显示基础姿态、空间起终点、周期参数和预计控制点，默认拒绝执行。"));
 }
 
@@ -452,6 +504,7 @@ void ScanPoseVariationTestDialog::ChangeRobot(int comboIndex)
     m_unitIndex = m_robotCombo->itemData(comboIndex).toInt();
     m_cameraCache = m_cameraCacheForUnit ? m_cameraCacheForUnit(m_unitIndex) : nullptr;
     m_lastImageTimestamp = 0;
+    m_lastStraightCurvePath.clear();
     LoadCameraList();
     QString error;
     if (!LoadConfiguration(&error) && !error.isEmpty())
@@ -463,6 +516,7 @@ void ScanPoseVariationTestDialog::ChangeRobot(int comboIndex)
         AppendLog(QStringLiteral("机器人选择保存失败：") + error);
     }
     UpdateStatusLabels();
+    RefreshStraightCurveSource();
     if (m_liveImageLabel != nullptr)
     {
         m_liveImageLabel->setPixmap(QPixmap());
@@ -747,6 +801,7 @@ void ScanPoseVariationTestDialog::TeachBasePose()
         return;
     }
     UpdateStatusLabels();
+    RefreshStraightCurveSource();
     AppendLog(QStringLiteral("基础姿态已示教并保存：") + PoseText(pose));
 }
 
@@ -1150,13 +1205,28 @@ void ScanPoseVariationTestDialog::RunScan()
             }
 
             QMetaObject::invokeMethod(qApp,
-                [self, ok, result, commandedPath, saveError, postProcessModeName]()
+                [self, ok, result, commandedPath, saveError,
+                 postProcessMode, postProcessModeName]()
                 {
                     if (self == nullptr) return;
                     if (ok)
                     {
                         self->AppendLog(QStringLiteral("扫描变姿态测试完成并已安全收枪；后处理方式=%1。结果目录：%2")
                             .arg(postProcessModeName, QDir::toNativeSeparators(result.caseDir)));
+                        if (postProcessMode
+                                == MeasureThenWeldService::ScanPostProcessMode::FeaturePointSmoothCurve
+                            && !result.caseDir.isEmpty())
+                        {
+                            const QString curvePath = QDir(result.caseDir).filePath(
+                                QStringLiteral("LaserPoint/%1").arg(
+                                    QString::fromLatin1(kFeatureSmoothCurveFileName)));
+                            if (QFileInfo::exists(curvePath))
+                            {
+                                self->m_lastStraightCurvePath = QFileInfo(curvePath).absoluteFilePath();
+                                self->AppendLog(QStringLiteral("直线模拟输入已就绪：")
+                                    + QDir::toNativeSeparators(self->m_lastStraightCurvePath));
+                            }
+                        }
                     }
                     else
                     {
@@ -1172,8 +1242,270 @@ void ScanPoseVariationTestDialog::RunScan()
                         self->AppendLog(QStringLiteral("测试元数据保存告警：") + saveError);
                     }
                     self->SetRunning(false);
+                    self->RefreshStraightCurveSource();
                 }, Qt::QueuedConnection);
         }).detach();
+}
+
+void ScanPoseVariationTestDialog::RunStraightCurveSimulation()
+{
+    if (m_running || m_curveSimulationRunning) return;
+    if (!m_hasBasePose)
+    {
+        QMessageBox::information(this, QStringLiteral("运行直线模拟轨迹"),
+            QStringLiteral("请先示教基础姿态；曲线点只提供XYZ，模拟运行的姿态统一取该基础姿态。"));
+        return;
+    }
+    RefreshStraightCurveSource();
+    const QFileInfo curveInfo(m_lastStraightCurvePath);
+    if (!curveInfo.isFile() || curveInfo.isSymLink())
+    {
+        QMessageBox::information(this, QStringLiteral("运行直线模拟轨迹"),
+            QStringLiteral("当前机器人没有可用的直线处理2mm曲线。请先选择“直线处理”并成功完成一次扫描。"));
+        return;
+    }
+
+    RobotDriverAdaptor* driver = ResolveDriver();
+    if (driver == nullptr || !driver->IsConnected())
+    {
+        QMessageBox::warning(this, QStringLiteral("运行直线模拟轨迹"),
+            QStringLiteral("机器人未连接。"));
+        return;
+    }
+    const std::initializer_list<RobotDriverCapability> requiredCapabilities = {
+        RobotDriverCapability::LinearMotion,
+        RobotDriverCapability::PassiveState,
+        RobotDriverCapability::ContinuousTrajectory,
+        RobotDriverCapability::OfflineTrajectoryExport,
+        RobotDriverCapability::VerifiedProgramCompletion,
+        RobotDriverCapability::VerifiedSafeAbort
+    };
+    if (!driver->SupportsAll(requiredCapabilities))
+    {
+        QMessageBox::warning(this, QStringLiteral("运行直线模拟轨迹"),
+            QStringLiteral("当前机器人品牌底层无法生成并运行直线模拟轨迹，缺少适配能力：%1；功能已限制。")
+                .arg(QString::fromUtf8(driver->MissingCapabilitiesText(
+                    requiredCapabilities).c_str())));
+        return;
+    }
+
+    const double dryRunSpeedMmPerMin = m_scanSpeedSpin->value();
+    const T_ROBOT_COORS basePose = m_basePose;
+    const QString curvePath = curveInfo.absoluteFilePath();
+    MeasureThenWeldService service;
+    T_ROBOT_COORS curveStartPose;
+    T_ROBOT_COORS curveEndPose;
+    QString posePath;
+    QString srpPath;
+    QString srdPath;
+    QString programName;
+    QString generatedSummary;
+    QString error;
+    if (!service.GenerateScanPoseVariationDryRunFiles(
+            driver,
+            curvePath,
+            basePose,
+            dryRunSpeedMmPerMin,
+            curveStartPose,
+            curveEndPose,
+            posePath,
+            srpPath,
+            srdPath,
+            programName,
+            generatedSummary,
+            error,
+            [this](const QString& text) { AppendLog(text); }))
+    {
+        AppendLog(QStringLiteral("直线模拟程序生成失败：") + error);
+        QMessageBox::warning(this, QStringLiteral("运行直线模拟轨迹"), error);
+        return;
+    }
+
+    AppendLog(generatedSummary);
+    const QString confirmation = QStringLiteral(
+        "直线模拟文件已生成；确认后将下发并运行真实机器人轨迹。\n\n"
+        "机器人：%1\n曲线文件：%2\n预生成程序：%3\n"
+        "轨迹速度：%4 mm/min\n点距：2 mm（末段允许不足2 mm）\n"
+        "曲线起点TCP：%5\n曲线终点TCP：%6\n"
+        "工具：Tool1（焊枪）\n固定基础姿态：%7\n\n"
+        "本轮为空跑：不开弧、不送丝、不摆动、不应用焊道/姿态补偿。\n"
+        "流程：下枪安全位 -> 曲线起点 -> 下发并启动直线轨迹 -> 确认程序完成 -> 收枪安全位并验证。\n"
+        "软件停止不能替代控制柜/示教器急停；请确认机器人周围安全。是否继续？")
+        .arg(RobotName(driver), QDir::toNativeSeparators(curvePath), programName)
+        .arg(dryRunSpeedMmPerMin, 0, 'f', 1)
+        .arg(PoseText(curveStartPose), PoseText(curveEndPose), OrientationText(basePose));
+    if (QMessageBox::question(this, QStringLiteral("直线模拟运行前确认"), confirmation,
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+    {
+        AppendLog(QStringLiteral("用户取消直线模拟运行；已生成文件，但未发起机器人运动。"));
+        return;
+    }
+
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("扫描变姿态-直线模拟运行"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, QStringLiteral("运行直线模拟轨迹"), leaseError);
+        return;
+    }
+
+    m_curveSimulationRunning = true;
+    SetRunning(true);
+    AppendLog(QStringLiteral("———— 开始生成并运行Tool1直线模拟轨迹 ————"));
+    AppendLog(QStringLiteral("模拟输入：") + QDir::toNativeSeparators(curvePath));
+    AppendLog(QStringLiteral("生成姿态：") + QDir::toNativeSeparators(posePath));
+    AppendLog(QStringLiteral("控制器程序：%1；SRP=%2；SRD=%3")
+        .arg(programName,
+            QDir::toNativeSeparators(srpPath),
+            QDir::toNativeSeparators(srdPath)));
+
+    QPointer<ScanPoseVariationTestDialog> self(this);
+    std::thread([self, driver, operationLease, posePath, dryRunSpeedMmPerMin]()
+        {
+            MeasureThenWeldService service;
+            T_PRECISE_MEASURE_PARAM param;
+            QString error;
+            if (!service.LoadPresetParam(driver, param, error))
+            {
+                QMetaObject::invokeMethod(qApp, [self, error]()
+                    {
+                        if (self == nullptr) return;
+                        self->AppendLog(QStringLiteral("读取当前先测后焊预设失败：") + error);
+                        self->SetRunning(false);
+                        self->m_curveSimulationRunning = false;
+                        self->RefreshStraightCurveSource();
+                        QMessageBox::warning(self, QStringLiteral("直线模拟运行"), error);
+                    }, Qt::QueuedConnection);
+                return;
+            }
+
+            // 曲线模拟严格按文件顺序空跑；不继承实际焊接、反向焊接或工艺点距。
+            param.bDoActualWeld = false;
+            param.nWeldDirection = 1;
+            param.dDryRunSpeedMmPerMin = dryRunSpeedMmPerMin;
+            param.dFinalWeldTrajectoryStepMm = 2.0;
+
+            auto appendLog = [self](const QString& text)
+                {
+                    QMetaObject::invokeMethod(qApp, [self, text]()
+                        {
+                            if (self != nullptr) self->AppendLog(text);
+                        }, Qt::QueuedConnection);
+                };
+            auto setFlowStep = [self](const QString& text)
+                {
+                    QMetaObject::invokeMethod(qApp, [self, text]()
+                        {
+                            if (self != nullptr)
+                                self->AppendLog(QStringLiteral("步骤：") + text);
+                        }, Qt::QueuedConnection);
+                };
+            auto checkpoint = [self](const QString& title, const QString& detail) -> bool
+                {
+                    bool approved = false;
+                    QMetaObject::invokeMethod(qApp, [self, title, detail, &approved]()
+                        {
+                            if (self != nullptr)
+                            {
+                                approved = QMessageBox::question(self, title, detail,
+                                    QMessageBox::Yes | QMessageBox::No,
+                                    QMessageBox::No) == QMessageBox::Yes;
+                            }
+                        }, Qt::BlockingQueuedConnection);
+                    return approved;
+                };
+
+            QString executionSummary;
+            QString executionError;
+            const auto safetySession =
+                std::make_shared<WeldSafetyRecoverySession>(
+                    driver,
+                    param,
+                    MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun);
+            const bool ok = service.ExecuteWeldPoseFileWithSafePos(
+                driver,
+                posePath,
+                param,
+                executionSummary,
+                executionError,
+                nullptr,
+                nullptr,
+                appendLog,
+                setFlowStep,
+                checkpoint,
+                /*overrideFinalStepMm=*/2.0,
+                /*allowPointwiseWeave=*/true,
+                MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun,
+                /*resumeStartArcMm=*/-1.0,
+                /*inputAlreadyInExecutionOrder=*/false,
+                [driver]() { return RobotOperationLease::IsCancellationRequested(driver); },
+                [safetySession](
+                    const MeasureThenWeldService::WeldExecutionIdentity& identity,
+                    QString& prepareError)
+                {
+                    return safetySession->Prepare(identity, prepareError);
+                },
+                [safetySession](
+                    const WeldExecutionTerminalResult& terminal,
+                    QString& finishError)
+                {
+                    return safetySession->Finish(terminal, finishError);
+                });
+
+            QMetaObject::invokeMethod(qApp,
+                [self, ok, executionSummary, executionError]()
+                {
+                    if (self == nullptr) return;
+                    self->AppendLog(ok
+                        ? (QStringLiteral("直线模拟运行完成且已验证安全回撤：") + executionSummary)
+                        : (QStringLiteral("直线模拟运行失败/中止：") + executionError));
+                    self->SetRunning(false);
+                    self->m_curveSimulationRunning = false;
+                    self->RefreshStraightCurveSource();
+                    if (ok)
+                    {
+                        QMessageBox::information(self, QStringLiteral("直线模拟运行"),
+                            QStringLiteral("机器人程序已启动、正常完成，并已验证收枪安全位置。"));
+                    }
+                    else
+                    {
+                        QMessageBox::warning(self, QStringLiteral("直线模拟运行"),
+                            executionError);
+                    }
+                }, Qt::QueuedConnection);
+        }).detach();
+}
+
+void ScanPoseVariationTestDialog::RefreshStraightCurveSource()
+{
+    const QFileInfo currentInfo(m_lastStraightCurvePath);
+    if (!currentInfo.isFile() || currentInfo.isSymLink())
+    {
+        m_lastStraightCurvePath = FindLatestStraightCurvePath(RobotName());
+    }
+    const QFileInfo curveInfo(m_lastStraightCurvePath);
+    const bool curveReady = curveInfo.isFile() && !curveInfo.isSymLink();
+    if (m_simulateCurveButton == nullptr) return;
+
+    m_simulateCurveButton->setEnabled(
+        !m_running && !m_curveSimulationRunning && m_hasBasePose && curveReady);
+    if (!m_hasBasePose)
+    {
+        m_simulateCurveButton->setToolTip(QStringLiteral(
+            "请先示教基础姿态；曲线只提供XYZ，模拟运行需要固定姿态。"));
+    }
+    else if (!curveReady)
+    {
+        m_simulateCurveButton->setToolTip(QStringLiteral(
+            "请先选择直线处理并成功完成一次扫描，生成2mm曲线。"));
+    }
+    else
+    {
+        m_simulateCurveButton->setToolTip(QStringLiteral(
+            "读取：%1\n曲线XYZ直接作为Tool1 TCP，统一使用基础姿态；2mm直线空跑，不起弧、不摆动。")
+            .arg(QDir::toNativeSeparators(curveInfo.absoluteFilePath())));
+    }
 }
 
 void ScanPoseVariationTestDialog::AppendLog(const QString& text)
@@ -1200,13 +1532,26 @@ void ScanPoseVariationTestDialog::SetRunning(bool running)
     m_running = running;
     if (running)
     {
-        m_lastImageTimestamp = 0;
-        if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(true);
-        if (m_liveImageTimer != nullptr) m_liveImageTimer->start();
-        if (m_liveImageStatusLabel != nullptr)
+        if (m_curveSimulationRunning)
         {
-            m_liveImageStatusLabel->setText(
-                QStringLiteral("正在启动 %1 / %2 实时图像...").arg(RobotName(), CurrentCameraSection()));
+            if (m_liveImageTimer != nullptr) m_liveImageTimer->stop();
+            if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(false);
+            if (m_liveImageStatusLabel != nullptr)
+            {
+                m_liveImageStatusLabel->setText(QStringLiteral(
+                    "正在运行Tool1直线模拟轨迹；本过程不启动相机采集。"));
+            }
+        }
+        else
+        {
+            m_lastImageTimestamp = 0;
+            if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(true);
+            if (m_liveImageTimer != nullptr) m_liveImageTimer->start();
+            if (m_liveImageStatusLabel != nullptr)
+            {
+                m_liveImageStatusLabel->setText(
+                    QStringLiteral("正在启动 %1 / %2 实时图像...").arg(RobotName(), CurrentCameraSection()));
+            }
         }
     }
     else
@@ -1215,7 +1560,9 @@ void ScanPoseVariationTestDialog::SetRunning(bool running)
         if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(false);
         if (m_liveImageStatusLabel != nullptr)
         {
-            m_liveImageStatusLabel->setText(QStringLiteral("扫描已结束；本轮图像按相机保存参数归档到结果目录。"));
+            m_liveImageStatusLabel->setText(m_curveSimulationRunning
+                ? QStringLiteral("直线模拟运行已结束；本过程未采集相机图像。")
+                : QStringLiteral("扫描已结束；本轮图像按相机保存参数归档到结果目录。"));
         }
     }
     for (QPushButton* button : {
@@ -1234,4 +1581,5 @@ void ScanPoseVariationTestDialog::SetRunning(bool running)
     if (m_robotCombo != nullptr) m_robotCombo->setEnabled(!running && m_robotCombo->count() > 0);
     if (m_cameraCombo != nullptr) m_cameraCombo->setEnabled(!running && m_cameraCombo->count() > 0);
     if (m_postProcessCombo != nullptr) m_postProcessCombo->setEnabled(!running);
+    RefreshStraightCurveSource();
 }

@@ -32,6 +32,10 @@ constexpr qsizetype kMaxRecordUtf8Bytes = 64 * 1024;
 constexpr qsizetype kMaxEndpointIdentityLength = 512;
 constexpr qsizetype kMaxRobotNameLength = 255;
 constexpr qsizetype kMaxStoredRobotRecoveryRecords = 4096;
+constexpr char kScanCurveDryRunPoseFileName[] =
+    "PreciseLaserPoint_FeatureSmoothCurve_DryRunPose_2mm.txt";
+constexpr char kScanCurveDryRunFinalSampledFileName[] =
+    "PreciseLaserPoint_FeatureSmoothCurve_DryRunPose_2mm_FinalSampled.txt";
 std::recursive_mutex g_storeMutex;
 QMap<QString, QString> g_activeEndpointRecoveryBindings;
 
@@ -1142,8 +1146,9 @@ bool WeldSafetyRecoveryStore::TransitionRecordState(
 #if !defined(WELD_SAFETY_STORE_STORAGE_ONLY_TEST)
 WeldSafetyRecoverySession::WeldSafetyRecoverySession(
     RobotDriverAdaptor* driver,
-    const T_PRECISE_MEASURE_PARAM& param)
-    : m_driver(driver), m_param(param)
+    const T_PRECISE_MEASURE_PARAM& param,
+    MeasureThenWeldService::WeldPoseSource poseSource)
+    : m_driver(driver), m_param(param), m_poseSource(poseSource)
 {
 }
 
@@ -1182,30 +1187,65 @@ bool WeldSafetyRecoverySession::Prepare(
     bool trajectoryBound = false;
     if (record.robotType != QStringLiteral("UNKNOWN") && !record.robotEndpoint.isEmpty())
     {
-        trajectoryBound = WeldResumePlanner::BindTrajectoryIdentity(
-            projectRoot, identity.sampledPosePath, record.robotName, record, &error);
-        if (!trajectoryBound)
+        if (m_poseSource == MeasureThenWeldService::WeldPoseSource::PointCloudProduction)
         {
-            // VirtualWeldTest 的真实运动输入位于 Result/<robot>/VirtualWeld_*/<FinalSampled>，
-            // 不伪装成生产 LaserPoint 结构，但仍由 Service 的不可变快照 SHA/size/pointCount 绑定。
+            trajectoryBound = WeldResumePlanner::BindTrajectoryIdentity(
+                projectRoot, identity.sampledPosePath, record.robotName, record, &error);
+        }
+        else
+        {
             const QFileInfo sampledInfo(identity.sampledPosePath);
-            const QString relative = QDir::cleanPath(QDir(projectRoot).relativeFilePath(
-                sampledInfo.canonicalFilePath().isEmpty()
-                    ? sampledInfo.absoluteFilePath() : sampledInfo.canonicalFilePath()));
+            const QFileInfo sourceInfo(identity.sourcePosePath);
+            const auto canonicalOrAbsolute = [](const QFileInfo& info)
+                {
+                    const QString canonical = info.canonicalFilePath();
+                    return QDir::cleanPath(canonical.isEmpty()
+                        ? info.absoluteFilePath() : canonical);
+                };
+            const QString sampledPath = canonicalOrAbsolute(sampledInfo);
+            const QString sourcePath = canonicalOrAbsolute(sourceInfo);
+            const QString relative = QDir::cleanPath(
+                QDir(projectRoot).relativeFilePath(sampledPath));
             const QStringList parts = QDir::fromNativeSeparators(relative).split(
                 QLatin1Char('/'), Qt::SkipEmptyParts);
             QString hashError;
             const QString actualSha = WeldResumePlanner::ComputeFileSha256(
                 sampledInfo.absoluteFilePath(), &hashError);
-            if (sampledInfo.isFile()
-                && parts.size() == 4
+            QString sourceHashError;
+            const QString actualSourceSha = WeldResumePlanner::ComputeFileSha256(
+                sourceInfo.absoluteFilePath(), &sourceHashError);
+            const bool sharedIdentityValid = sampledInfo.isFile()
+                && sourceInfo.isFile()
+                && !sampledInfo.isSymLink()
+                && !sourceInfo.isSymLink()
+                && parts.size() >= 2
                 && parts[0].compare(QStringLiteral("Result"), Qt::CaseInsensitive) == 0
                 && parts[1].compare(record.robotName, Qt::CaseInsensitive) == 0
-                && parts[2].startsWith(QStringLiteral("VirtualWeld_"), Qt::CaseInsensitive)
-                && parts[3].endsWith(QStringLiteral("_FinalSampled.txt"), Qt::CaseInsensitive)
                 && actualSha.compare(identity.sampledPoseSha256, Qt::CaseInsensitive) == 0
                 && sampledInfo.size() == identity.sampledPoseSize
-                && identity.sampledPointCount >= 2)
+                && actualSourceSha.compare(identity.sourcePoseSha256, Qt::CaseInsensitive) == 0
+                && sourceInfo.size() == identity.sourcePoseSize
+                && QFileInfo(sampledPath).dir().absolutePath().compare(
+                    QFileInfo(sourcePath).dir().absolutePath(), Qt::CaseInsensitive) == 0
+                && identity.sampledPointCount >= 2;
+            const bool virtualStructureValid =
+                m_poseSource == MeasureThenWeldService::WeldPoseSource::SyntheticVirtualTest
+                && parts.size() == 4
+                && parts[2].startsWith(QStringLiteral("VirtualWeld_"), Qt::CaseInsensitive)
+                && parts[3].endsWith(QStringLiteral("_FinalSampled.txt"), Qt::CaseInsensitive);
+            const bool scanCurveStructureValid =
+                m_poseSource == MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun
+                && !record.actualWeld
+                && std::abs(record.finalStepMm - 2.0) <= 1e-9
+                && parts.size() == 5
+                && parts[3].compare(QStringLiteral("LaserPoint"), Qt::CaseInsensitive) == 0
+                && parts[4].compare(
+                    QString::fromLatin1(kScanCurveDryRunFinalSampledFileName),
+                    Qt::CaseInsensitive) == 0
+                && sourceInfo.fileName().compare(
+                    QString::fromLatin1(kScanCurveDryRunPoseFileName),
+                    Qt::CaseInsensitive) == 0;
+            if (sharedIdentityValid && (virtualStructureValid || scanCurveStructureValid))
             {
                 record.caseId = parts[2];
                 record.caseRelativeDir = parts.mid(0, 3).join(QLatin1Char('/'));
@@ -1216,6 +1256,15 @@ bool WeldSafetyRecoverySession::Prepare(
                 record.trajectoryInExecutionOrder = true;
                 trajectoryBound = true;
                 error.clear();
+            }
+            else
+            {
+                error = m_poseSource
+                        == MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun
+                    ? QStringLiteral(
+                        "扫描曲线空跑实际轨迹未通过专用案例路径、源文件、2mm点距或SHA256绑定。")
+                    : QStringLiteral(
+                        "虚拟焊道实际轨迹未通过专用目录、源文件或SHA256绑定。");
             }
         }
     }

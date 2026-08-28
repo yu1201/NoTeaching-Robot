@@ -17,7 +17,8 @@ public:
     enum class WeldPoseSource
     {
         PointCloudProduction = 0,
-        SyntheticVirtualTest = 1
+        SyntheticVirtualTest = 1,
+        ScanPoseVariationDryRun = 2
     };
 
     using LogCallback = std::function<void(const QString&)>;
@@ -124,7 +125,8 @@ public:
 
     // 扫描变姿态精度测试使用的四段周期。空间位置始终沿示教起终点直线；
     // 姿态按“下平台(基准) -> 上坡(左转) -> 上平台(基准) -> 下坡(右转)”循环。
-    // 左右旋转与正式焊接示教姿态使用同一合成口径：RotZ(angle) * taughtRotation。
+    // 左右旋转输入允许 -60~60 deg：正值保持名称所示方向，负值反向；下坡右旋
+    // 对应的实际 RotZ 角为 -rightRotationDeg。旋转合成口径为 RotZ(angle) * taughtRotation。
     struct ScanPoseVariationParams
     {
         double lowPlatformLengthMm = 30.0;
@@ -283,6 +285,23 @@ public:
         bool actualWeld,
         QString& outputDir,       // 入空则自动建 Result/<robot>/VirtualWeld_<时间>；返回解析后的目录
         QString& weldPosePath,
+        QString& srpPath,
+        QString& srdPath,
+        QString& programName,
+        QString& summary,
+        QString& error,
+        const LogCallback& appendLog = LogCallback()) const;
+    // 扫描变姿态测试的“直线处理”结果是基坐标 XYZ 曲线，不含机器人姿态。
+    // 本入口把每个曲线点直接作为 Tool1 TCP，统一使用已示教基础姿态，生成固定 2mm
+    // 空跑姿态文件及控制器程序；不会起弧、摆动或应用焊道/姿态补偿。
+    bool GenerateScanPoseVariationDryRunFiles(
+        RobotDriverAdaptor* pRobotDriver,
+        const QString& featureCurvePath,
+        const T_ROBOT_COORS& basePose,
+        double dryRunSpeedMmPerMin,
+        T_ROBOT_COORS& curveStartPose,
+        T_ROBOT_COORS& curveEndPose,
+        QString& posePath,
         QString& srpPath,
         QString& srdPath,
         QString& programName,

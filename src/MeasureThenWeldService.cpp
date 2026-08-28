@@ -87,6 +87,12 @@ constexpr auto WORKPIECE_CLOUD_FILE_NAME = "PreciseLaserPoint_WorkpieceCloud.txt
 constexpr auto PRESERVE_PATH_FILE_NAME = "PreciseLaserPoint_PreservePath_2mm.txt";
 constexpr auto FEATURE_SMOOTH_CURVE_FILE_NAME = "PreciseLaserPoint_FeatureSmoothCurve_2mm.txt";
 constexpr auto FEATURE_SMOOTH_CURVE_SUMMARY_FILE_NAME = "PreciseLaserPoint_FeatureSmoothCurve_Summary.txt";
+constexpr auto FEATURE_SMOOTH_CURVE_DRY_RUN_POSE_FILE_NAME =
+    "PreciseLaserPoint_FeatureSmoothCurve_DryRunPose_2mm.txt";
+constexpr qint64 FEATURE_SMOOTH_CURVE_MAX_BYTES = 16LL * 1024 * 1024;
+constexpr double FEATURE_SMOOTH_CURVE_RUN_STEP_MM = 2.0;
+constexpr double FEATURE_SMOOTH_CURVE_MIN_FULL_SEGMENT_MM = 1.5;
+constexpr double FEATURE_SMOOTH_CURVE_MAX_SEGMENT_MM = 2.5;
 constexpr auto KEY_POINTS_FILE_NAME = "PreciseLaserPoint_KeyPoints.txt";
 constexpr auto CLASSIFIED_FILE_NAME = "PreciseLaserPoint_Classified.txt";
 constexpr auto CORNER_COMP_KEY_POINTS_FILE_NAME = "PreciseLaserPoint_CornerComp_KeyPoints.txt";
@@ -208,11 +214,13 @@ constexpr auto POINT_CLOUD_PROOF_RECEIPT_KEY = "Receipt";
 constexpr qint64 POINT_CLOUD_PROOF_MAX_AGE_SECONDS = 24 * 60 * 60;
 constexpr qint64 POINT_CLOUD_PROOF_MAX_FUTURE_SKEW_SECONDS = 5 * 60;
 
-struct SyntheticPoseAuthorization
+struct LocalTestPoseAuthorization
 {
     QString robotName;
     QString sha256;
     qint64 size = -1;
+    MeasureThenWeldService::WeldPoseSource source =
+        MeasureThenWeldService::WeldPoseSource::SyntheticVirtualTest;
 };
 
 struct PointCloudProductionContext
@@ -225,8 +233,8 @@ struct PointCloudProductionContext
     QString origin;
 };
 
-QMutex g_syntheticPoseAuthorizationMutex;
-QHash<QString, SyntheticPoseAuthorization> g_syntheticPoseAuthorizations;
+QMutex g_localTestPoseAuthorizationMutex;
+QHash<QString, LocalTestPoseAuthorization> g_localTestPoseAuthorizations;
 QMutex g_pointCloudProofSecurityMutex;
 
 class PointCloudProofReplacementSession
@@ -495,54 +503,57 @@ bool LoadCurrentPointCloudContextExpectations(
     return true;
 }
 
-bool RegisterSyntheticPoseAuthorization(
+bool RegisterLocalTestPoseAuthorization(
     const QString& posePath,
     const QString& robotName,
     const QString& sha256,
     qint64 size,
+    MeasureThenWeldService::WeldPoseSource source,
     QString& error)
 {
     if (!IsSha256Text(sha256) || size <= 0 || robotName.trimmed().isEmpty())
     {
-        error = QStringLiteral("登记虚拟焊道进程内授权失败：路径、机器人、大小或 SHA256 无效。");
+        error = QStringLiteral("登记本地测试轨迹进程内授权失败：路径、机器人、大小或 SHA256 无效。");
         return false;
     }
-    SyntheticPoseAuthorization authorization;
+    LocalTestPoseAuthorization authorization;
     authorization.robotName = robotName.trimmed();
     authorization.sha256 = sha256.toLower();
     authorization.size = size;
-    QMutexLocker<QMutex> locker(&g_syntheticPoseAuthorizationMutex);
-    g_syntheticPoseAuthorizations.insert(PoseAuthorizationPathKey(posePath), authorization);
+    authorization.source = source;
+    QMutexLocker<QMutex> locker(&g_localTestPoseAuthorizationMutex);
+    g_localTestPoseAuthorizations.insert(PoseAuthorizationPathKey(posePath), authorization);
     return true;
 }
 
-void RevokeSyntheticPoseAuthorization(const QString& posePath)
+void RevokeLocalTestPoseAuthorization(const QString& posePath)
 {
-    QMutexLocker<QMutex> locker(&g_syntheticPoseAuthorizationMutex);
-    g_syntheticPoseAuthorizations.remove(PoseAuthorizationPathKey(posePath));
+    QMutexLocker<QMutex> locker(&g_localTestPoseAuthorizationMutex);
+    g_localTestPoseAuthorizations.remove(PoseAuthorizationPathKey(posePath));
 }
 
-bool VerifySyntheticPoseAuthorization(
+bool VerifyLocalTestPoseAuthorization(
     const QString& posePath,
     const QString& expectedRobotName,
     const QString& loadedSha256,
     qint64 loadedSize,
+    MeasureThenWeldService::WeldPoseSource expectedSource,
     const PointCloudProcessingConfig::Settings& settings,
     QString& error)
 {
-    if (!settings.safetyGateRobotNameBindingEnabled
-        && !settings.safetyGateAuthorizedPoseIdentityEnabled)
+    QMutexLocker<QMutex> locker(&g_localTestPoseAuthorizationMutex);
+    const auto it = g_localTestPoseAuthorizations.constFind(PoseAuthorizationPathKey(posePath));
+    if (it == g_localTestPoseAuthorizations.cend())
     {
-        return true;
-    }
-    QMutexLocker<QMutex> locker(&g_syntheticPoseAuthorizationMutex);
-    const auto it = g_syntheticPoseAuthorizations.constFind(PoseAuthorizationPathKey(posePath));
-    if (it == g_syntheticPoseAuthorizations.cend())
-    {
-        error = QStringLiteral("虚拟焊道没有本进程生成授权；重启、换文件或手工创建后必须重新生成。");
+        error = QStringLiteral("本地测试轨迹没有本进程生成授权；重启、换文件或手工创建后必须重新生成。");
         return false;
     }
-    const SyntheticPoseAuthorization& authorization = it.value();
+    const LocalTestPoseAuthorization& authorization = it.value();
+    if (authorization.source != expectedSource)
+    {
+        error = QStringLiteral("本地测试轨迹授权类型与本次运行入口不一致，禁止跨测试来源复用。");
+        return false;
+    }
     if ((settings.safetyGateRobotNameBindingEnabled
             && authorization.robotName.compare(
                 expectedRobotName.trimmed(), Qt::CaseInsensitive) != 0)
@@ -550,7 +561,7 @@ bool VerifySyntheticPoseAuthorization(
             && (authorization.size != loadedSize
                 || authorization.sha256 != loadedSha256.toLower())))
     {
-        error = QStringLiteral("虚拟焊道路径、机器人、大小或 SHA256 与本进程生成记录不一致。");
+        error = QStringLiteral("本地测试轨迹路径、机器人、大小或 SHA256 与本进程生成记录不一致。");
         return false;
     }
     return true;
@@ -1761,11 +1772,12 @@ bool VerifyWeldPoseAuthorization(
             frozenExpectation,
             allowActiveProofReplacement,
             error)
-        : VerifySyntheticPoseAuthorization(
+        : VerifyLocalTestPoseAuthorization(
             posePath,
             expectedRobotName,
             loadedPoseSha256,
             loadedPoseSize,
+            poseSource,
             settings,
             error);
 }
@@ -10894,12 +10906,10 @@ bool MeasureThenWeldService::GenerateScanPoseVariationTrajectory(
     }
     if (!std::isfinite(params.leftRotationDeg)
         || !std::isfinite(params.rightRotationDeg)
-        || params.leftRotationDeg < 0.0
-        || params.rightRotationDeg < 0.0
-        || params.leftRotationDeg > 60.0
-        || params.rightRotationDeg > 60.0)
+        || std::abs(params.leftRotationDeg) > 60.0
+        || std::abs(params.rightRotationDeg) > 60.0)
     {
-        error = QStringLiteral("左右旋转角度必须在 0~60 deg 范围内。");
+        error = QStringLiteral("上坡左旋和下坡右旋角度必须在 -60~60 deg 范围内；负数表示反向旋转。");
         return false;
     }
     if (!std::isfinite(params.transitionLengthMm)
@@ -10909,7 +10919,8 @@ bool MeasureThenWeldService::GenerateScanPoseVariationTrajectory(
         error = QStringLiteral("姿态过渡长度必须不小于 0，且不能超过四种段长中的最小值。");
         return false;
     }
-    if ((params.leftRotationDeg > 1e-9 || params.rightRotationDeg > 1e-9)
+    if ((std::abs(params.leftRotationDeg) > 1e-9
+            || std::abs(params.rightRotationDeg) > 1e-9)
         && params.transitionLengthMm < 0.1)
     {
         error = QStringLiteral(
@@ -11133,7 +11144,8 @@ bool MeasureThenWeldService::GenerateScanPoseVariationTrajectory(
 
     summary = QStringLiteral(
         "扫描变姿态轨迹：直线长度=%1 mm，周期=%2 mm（下平台/上坡/上平台/下坡=%3/%4/%5/%6 mm），"
-        "左右旋转=+%7/-%8 deg，过渡=%9 mm，名义点距=%10 mm，实际控制点=%11，基础姿态=%12/%13/%14")
+        "旋转输入（上坡左旋/下坡右旋）=%7/%8 deg，实际RotZ（上坡/下坡）=%9/%10 deg，"
+        "过渡=%11 mm，名义点距=%12 mm，实际控制点=%13，基础姿态=%14/%15/%16")
         .arg(pathLengthMm, 0, 'f', 3)
         .arg(cycleLengthMm, 0, 'f', 3)
         .arg(params.lowPlatformLengthMm, 0, 'f', 3)
@@ -11142,6 +11154,8 @@ bool MeasureThenWeldService::GenerateScanPoseVariationTrajectory(
         .arg(params.fallingLengthMm, 0, 'f', 3)
         .arg(params.leftRotationDeg, 0, 'f', 3)
         .arg(params.rightRotationDeg, 0, 'f', 3)
+        .arg(phaseAngles[1], 0, 'f', 3)
+        .arg(phaseAngles[3], 0, 'f', 3)
         .arg(params.transitionLengthMm, 0, 'f', 3)
         .arg(params.pointStepMm, 0, 'f', 3)
         .arg(trajectory.size())
@@ -16279,13 +16293,22 @@ bool MeasureThenWeldService::GenerateRobotWeldProgramFiles(
 		error = QStringLiteral("当前机器人底层未实现离线轨迹程序导出适配能力。");
 		return false;
 	}
-	if (actualWeld && !pRobotDriver->Supports(RobotDriverCapability::ActualArcWeld))
+    if (actualWeld && !pRobotDriver->Supports(RobotDriverCapability::ActualArcWeld))
 	{
 		error = QStringLiteral(
 			"当前机器人底层未声明“实际起弧焊接”适配能力，已限制生成实际焊接控制器程序；可改为空跑程序。");
 		pRobotDriver->SetLastRobotError(ToUtf8StdString(error));
 		return false;
 	}
+    if (poseSource == WeldPoseSource::ScanPoseVariationDryRun
+        && (actualWeld
+            || !std::isfinite(overrideFinalStepMm)
+            || std::abs(overrideFinalStepMm - FEATURE_SMOOTH_CURVE_RUN_STEP_MM) > 1e-6))
+    {
+        error = QStringLiteral(
+            "扫描变姿态直线模拟来源只允许生成固定2mm空跑程序，禁止起弧或改用其他点距。");
+        return false;
+    }
 	if (pRobotDriver->ExternalAxleType() != 0
 		&& !pRobotDriver->Supports(RobotDriverCapability::ExternalAxis))
 	{
@@ -16637,11 +16660,12 @@ bool MeasureThenWeldService::GenerateVirtualStraightWeldFiles(
             return false;
         }
     }
-    if (!RegisterSyntheticPoseAuthorization(
+    if (!RegisterLocalTestPoseAuthorization(
             weldPosePath,
             normalizedRobotName,
             loadedPoseSha256,
             loadedPoseSize,
+            WeldPoseSource::SyntheticVirtualTest,
             error))
     {
         return false;
@@ -16664,7 +16688,7 @@ bool MeasureThenWeldService::GenerateVirtualStraightWeldFiles(
             programName, srpPath, srdPath, jobSummary, error, normalizedStep,
             /*allowPointwiseWeave=*/true, WeldPoseSource::SyntheticVirtualTest))
     {
-        RevokeSyntheticPoseAuthorization(weldPosePath);
+        RevokeLocalTestPoseAuthorization(weldPosePath);
         return false;
     }
 
@@ -16674,6 +16698,427 @@ bool MeasureThenWeldService::GenerateVirtualStraightWeldFiles(
         .arg(actualWeld ? QStringLiteral("实焊(含摆动)") : QStringLiteral("空跑"))
         .arg(QDir::toNativeSeparators(weldPosePath))
         .arg(jobSummary);
+    return true;
+}
+
+bool MeasureThenWeldService::GenerateScanPoseVariationDryRunFiles(
+    RobotDriverAdaptor* pRobotDriver,
+    const QString& featureCurvePath,
+    const T_ROBOT_COORS& basePose,
+    double dryRunSpeedMmPerMin,
+    T_ROBOT_COORS& curveStartPose,
+    T_ROBOT_COORS& curveEndPose,
+    QString& posePath,
+    QString& srpPath,
+    QString& srdPath,
+    QString& programName,
+    QString& summary,
+    QString& error,
+    const LogCallback& appendLog) const
+{
+    curveStartPose = T_ROBOT_COORS();
+    curveEndPose = T_ROBOT_COORS();
+    posePath.clear();
+    srpPath.clear();
+    srdPath.clear();
+    programName.clear();
+    summary.clear();
+    error.clear();
+
+    if (pRobotDriver == nullptr)
+    {
+        error = QStringLiteral("直线模拟轨迹生成失败：机器人驱动为空。");
+        return false;
+    }
+    if (!RobotMotionTimeoutPolicy::IsFinitePose(basePose)
+        || !IsReasonableRobotAngleDeg(basePose.dRX)
+        || !IsReasonableRobotAngleDeg(basePose.dRY)
+        || !IsReasonableRobotAngleDeg(basePose.dRZ))
+    {
+        error = QStringLiteral("直线模拟轨迹生成失败：基础姿态含非有限值或角度超出允许范围。");
+        return false;
+    }
+    if (!std::isfinite(dryRunSpeedMmPerMin) || dryRunSpeedMmPerMin <= 0.0)
+    {
+        error = QStringLiteral("直线模拟轨迹生成失败：空跑速度必须为有限正数。");
+        return false;
+    }
+
+    QFileInfo curveInfo(QDir::fromNativeSeparators(featureCurvePath.trimmed()));
+    if (!curveInfo.isAbsolute())
+    {
+        curveInfo = QFileInfo(AppPaths::CommandLinePath(curveInfo.filePath()));
+    }
+    if (!curveInfo.isFile()
+        || curveInfo.isSymLink()
+#ifdef Q_OS_WIN
+        || curveInfo.isJunction()
+#endif
+        || curveInfo.size() <= 0
+        || curveInfo.size() > FEATURE_SMOOTH_CURVE_MAX_BYTES
+        || curveInfo.fileName().compare(
+            QString::fromLatin1(FEATURE_SMOOTH_CURVE_FILE_NAME),
+            Qt::CaseInsensitive) != 0
+        || curveInfo.dir().dirName().compare(
+            QStringLiteral("LaserPoint"), Qt::CaseInsensitive) != 0)
+    {
+        error = QStringLiteral(
+            "直线模拟只接受扫描案例 LaserPoint 下本程序生成的 PreciseLaserPoint_FeatureSmoothCurve_2mm.txt 普通文件。");
+        return false;
+    }
+
+    const QString robotName = QString::fromStdString(pRobotDriver->RobotName()).trimmed();
+    const QString robotResultRoot = QFileInfo(RobotDataHelper::BuildProjectPath(
+        QStringLiteral("Result/%1").arg(robotName))).absoluteFilePath();
+    const QString canonicalRobotResultRoot = QFileInfo(robotResultRoot).canonicalFilePath();
+    const QString canonicalCurvePath = curveInfo.canonicalFilePath();
+    QString relativeCurvePath = QDir(canonicalRobotResultRoot).relativeFilePath(canonicalCurvePath);
+    relativeCurvePath.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    const QStringList relativeParts = relativeCurvePath.split('/', Qt::SkipEmptyParts);
+    if (robotName.isEmpty()
+        || canonicalRobotResultRoot.isEmpty()
+        || canonicalCurvePath.isEmpty()
+        || relativeCurvePath.startsWith(QStringLiteral("../"))
+        || relativeParts.size() != 3
+        || relativeParts[1].compare(QStringLiteral("LaserPoint"), Qt::CaseInsensitive) != 0
+        || relativeParts[2].compare(
+            QString::fromLatin1(FEATURE_SMOOTH_CURVE_FILE_NAME),
+            Qt::CaseInsensitive) != 0)
+    {
+        error = QStringLiteral("直线模拟曲线不属于当前机器人 Result/<robot>/<case>/LaserPoint 案例目录。");
+        return false;
+    }
+
+    QFile curveFile(curveInfo.absoluteFilePath());
+    if (!curveFile.open(QIODevice::ReadOnly))
+    {
+        error = QStringLiteral("打开直线处理曲线失败：") + curveInfo.absoluteFilePath();
+        return false;
+    }
+    const qint64 expectedCurveBytes = curveFile.size();
+    const QByteArray curveBytes = curveFile.readAll();
+    if (curveFile.error() != QFileDevice::NoError
+        || curveBytes.size() != expectedCurveBytes
+        || curveFile.size() != expectedCurveBytes)
+    {
+        error = QStringLiteral("直线处理曲线读取失败或读取期间发生变化。");
+        return false;
+    }
+    QStringDecoder decoder(QStringDecoder::Utf8);
+    const QString curveText = decoder(curveBytes);
+    if (decoder.hasError())
+    {
+        error = QStringLiteral("直线处理曲线不是严格 UTF-8 文件。");
+        return false;
+    }
+    const QString curveSha256 = QString::fromLatin1(
+        QCryptographicHash::hash(curveBytes, QCryptographicHash::Sha256).toHex()).toLower();
+
+    struct CurvePoint
+    {
+        int index = 0;
+        Eigen::Vector3d point = Eigen::Vector3d::Zero();
+        QString source;
+    };
+    QVector<CurvePoint> curvePoints;
+    curvePoints.reserve(1024);
+    static const QRegularExpression kWhitespaceRe(QStringLiteral("\\s+"));
+    const QStringList curveLines = curveText.split(QLatin1Char('\n'));
+    bool headerSeen = false;
+    for (int lineIndex = 0; lineIndex < curveLines.size(); ++lineIndex)
+    {
+        const QString line = curveLines[lineIndex].trimmed();
+        if (line.isEmpty())
+        {
+            continue;
+        }
+        if (!headerSeen)
+        {
+            headerSeen = true;
+            if (line.compare(QStringLiteral("index x y z source"), Qt::CaseInsensitive) != 0)
+            {
+                error = QStringLiteral("直线处理曲线缺少固定表头 index x y z source。");
+                return false;
+            }
+            continue;
+        }
+        const QStringList parts = line.split(kWhitespaceRe, Qt::SkipEmptyParts);
+        bool indexOk = false;
+        bool xOk = false;
+        bool yOk = false;
+        bool zOk = false;
+        CurvePoint point;
+        if (parts.size() != 5)
+        {
+            error = QString("直线处理曲线第 %1 行字段数不是 5。").arg(lineIndex + 1);
+            return false;
+        }
+        point.index = parts[0].toInt(&indexOk);
+        point.point.x() = parts[1].toDouble(&xOk);
+        point.point.y() = parts[2].toDouble(&yOk);
+        point.point.z() = parts[3].toDouble(&zOk);
+        point.source = parts[4].trimmed().toLower();
+        if (!(indexOk && xOk && yOk && zOk)
+            || point.index != curvePoints.size() + 1
+            || !point.point.allFinite())
+        {
+            error = QString("直线处理曲线第 %1 行索引或坐标无效。").arg(lineIndex + 1);
+            return false;
+        }
+        curvePoints.push_back(point);
+        if (curvePoints.size() > static_cast<int>(SCAN_POSE_VARIATION_MAX_POINTS))
+        {
+            error = QString("直线模拟轨迹超过控制器审计上限 %1 点。").arg(SCAN_POSE_VARIATION_MAX_POINTS);
+            return false;
+        }
+    }
+    if (curvePoints.size() < 2
+        || curvePoints.front().source != QStringLiteral("feature_smooth_start")
+        || curvePoints.back().source != QStringLiteral("feature_smooth_end"))
+    {
+        error = QStringLiteral("直线处理曲线至少需要 2 点，且首末点必须带 feature_smooth_start/end 来源标签。");
+        return false;
+    }
+
+    double pathLengthMm = 0.0;
+    for (int index = 0; index < curvePoints.size(); ++index)
+    {
+        if (index > 0 && index + 1 < curvePoints.size()
+            && curvePoints[index].source != QStringLiteral("feature_smooth_curve"))
+        {
+            error = QString("直线处理曲线第 %1 点来源标签无效。").arg(index + 1);
+            return false;
+        }
+        if (index == 0)
+        {
+            continue;
+        }
+        const double segmentMm = (curvePoints[index].point - curvePoints[index - 1].point).norm();
+        if (!std::isfinite(segmentMm)
+            || segmentMm <= 1e-4
+            || (index + 1 < curvePoints.size()
+                && segmentMm < FEATURE_SMOOTH_CURVE_MIN_FULL_SEGMENT_MM)
+            || segmentMm > FEATURE_SMOOTH_CURVE_MAX_SEGMENT_MM)
+        {
+            error = QString(
+                "直线处理曲线第 %1~%2 点间距=%3 mm，不符合 2mm 模拟轨迹（完整段允许 %4~%5 mm，末段允许不足2mm，且不得重复）。")
+                .arg(index)
+                .arg(index + 1)
+                .arg(segmentMm, 0, 'f', 6)
+                .arg(FEATURE_SMOOTH_CURVE_MIN_FULL_SEGMENT_MM, 0, 'f', 1)
+                .arg(FEATURE_SMOOTH_CURVE_MAX_SEGMENT_MM, 0, 'f', 1);
+            return false;
+        }
+        pathLengthMm += segmentMm;
+    }
+    if (!std::isfinite(pathLengthMm) || pathLengthMm < 1.0)
+    {
+        error = QStringLiteral("直线处理曲线总长度不足 1mm，拒绝生成机器人程序。");
+        return false;
+    }
+
+    const auto readKeyValueFile = [&](const QString& path, QHash<QString, QString>& values) -> bool
+        {
+            values.clear();
+            const QFileInfo info(path);
+            if (!info.isFile()
+                || info.isSymLink()
+#ifdef Q_OS_WIN
+                || info.isJunction()
+#endif
+                || info.size() <= 0
+                || info.size() > 1024 * 1024)
+            {
+                return false;
+            }
+            QFile file(info.absoluteFilePath());
+            if (!file.open(QIODevice::ReadOnly))
+            {
+                return false;
+            }
+            const qint64 expectedBytes = file.size();
+            const QByteArray bytes = file.readAll();
+            if (file.error() != QFileDevice::NoError
+                || bytes.size() != expectedBytes
+                || file.size() != expectedBytes)
+            {
+                return false;
+            }
+            QStringDecoder keyValueDecoder(QStringDecoder::Utf8);
+            const QString text = keyValueDecoder(bytes);
+            if (keyValueDecoder.hasError()) return false;
+            for (const QString& rawLine : text.split(QLatin1Char('\n')))
+            {
+                const QString line = rawLine.trimmed();
+                const int separator = line.indexOf(QLatin1Char('='));
+                if (separator <= 0)
+                {
+                    continue;
+                }
+                const QString key = line.left(separator).trimmed();
+                if (values.contains(key)) return false;
+                values.insert(key, line.mid(separator + 1).trimmed());
+            }
+            return true;
+        };
+
+    QHash<QString, QString> curveSummary;
+    const QString curveSummaryPath = curveInfo.dir().filePath(
+        QString::fromLatin1(FEATURE_SMOOTH_CURVE_SUMMARY_FILE_NAME));
+    bool summaryCountOk = false;
+    bool summaryStepOk = false;
+    if (!readKeyValueFile(curveSummaryPath, curveSummary)
+        || curveSummary.value(QStringLiteral("mode")) != QStringLiteral("feature_point_smooth_curve")
+        || QFileInfo(QDir::fromNativeSeparators(
+            curveSummary.value(QStringLiteral("output_file")))).absoluteFilePath().compare(
+                curveInfo.absoluteFilePath(), Qt::CaseInsensitive) != 0
+        || curveSummary.value(QStringLiteral("output_curve_points")).toInt(&summaryCountOk)
+            != curvePoints.size()
+        || !summaryCountOk
+        || std::abs(curveSummary.value(QStringLiteral("sample_step_mm")).toDouble(&summaryStepOk)
+            - FEATURE_SMOOTH_CURVE_RUN_STEP_MM) > 1e-3
+        || !summaryStepOk)
+    {
+        error = QStringLiteral("直线处理曲线摘要缺失、与曲线文件不匹配，或不是固定 2mm 输出。");
+        return false;
+    }
+
+    QDir caseDir = curveInfo.dir();
+    if (!caseDir.cdUp())
+    {
+        error = QStringLiteral("无法解析直线处理曲线所属扫描案例。");
+        return false;
+    }
+    QHash<QString, QString> scanSummary;
+    const QString scanSummaryPath = caseDir.filePath(QStringLiteral("ScanPoseVariation_TestSummary.txt"));
+    if (!readKeyValueFile(scanSummaryPath, scanSummary)
+        || scanSummary.value(QStringLiteral("mode")) != QStringLiteral("scan_pose_variation_accuracy_test")
+        || scanSummary.value(QStringLiteral("robot")).compare(robotName, Qt::CaseInsensitive) != 0
+        || scanSummary.value(QStringLiteral("post_process_mode")) != QStringLiteral("straight_line")
+        || scanSummary.value(QStringLiteral("scan_status")) != QStringLiteral("success"))
+    {
+        error = QStringLiteral("扫描变姿态案例摘要缺失，或机器人/直线处理/成功状态与当前输入不一致。");
+        return false;
+    }
+
+    QVector<WeldPoseFileRecord> records;
+    records.reserve(curvePoints.size());
+    for (int index = 0; index < curvePoints.size(); ++index)
+    {
+        WeldPoseFileRecord record;
+        record.weldIndex = index + 1;
+        record.rawIndex = curvePoints[index].index;
+        record.point = curvePoints[index].point;
+        record.rx = basePose.dRX;
+        record.ry = basePose.dRY;
+        record.rz = basePose.dRZ;
+        // 曲线模拟是 Tool1 六轴 TCP 轨迹；基础示教只提供枪姿态，不带入外部轴。
+        record.bx = 0.0;
+        record.by = 0.0;
+        record.bz = 0.0;
+        record.pointType = index == 0
+            ? QStringLiteral("start")
+            : (index + 1 == curvePoints.size()
+                ? QStringLiteral("end") : QStringLiteral("normal"));
+        record.segmentKind = QStringLiteral("segment");
+        record.isLapStep = false;
+        records.push_back(record);
+    }
+    curveStartPose = BuildWeldPoseCoors(records.front());
+    curveEndPose = BuildWeldPoseCoors(records.back());
+
+    posePath = curveInfo.dir().filePath(
+        QString::fromLatin1(FEATURE_SMOOTH_CURVE_DRY_RUN_POSE_FILE_NAME));
+    std::vector<QString> poseLines;
+    poseLines.reserve(records.size() + 1);
+    poseLines.push_back(
+        QStringLiteral("weld_index raw_index x y z rx ry rz bx by bz point_type segment_kind is_lap_step"));
+    for (const WeldPoseFileRecord& record : records)
+    {
+        poseLines.push_back(BuildWeldPoseFileRecordLine(record));
+    }
+    if (!SaveTextLines(posePath, poseLines, error))
+    {
+        return false;
+    }
+
+    QVector<WeldPoseFileRecord> loadedRecords;
+    QString poseSha256;
+    qint64 poseSize = -1;
+    if (!LoadWeldPoseFileRecords(posePath, loadedRecords, error, &poseSha256, &poseSize)
+        || loadedRecords.size() != records.size())
+    {
+        if (error.isEmpty()) error = QStringLiteral("直线模拟姿态文件写后回读点数不一致。");
+        return false;
+    }
+    constexpr double kWriteBackTolerance = 1e-5;
+    for (int index = 0; index < loadedRecords.size(); ++index)
+    {
+        const WeldPoseFileRecord& actual = loadedRecords[index];
+        const WeldPoseFileRecord& expected = records[index];
+        if (actual.weldIndex != expected.weldIndex
+            || actual.rawIndex != expected.rawIndex
+            || (actual.point - expected.point).norm() > kWriteBackTolerance
+            || std::abs(actual.rx - expected.rx) > kWriteBackTolerance
+            || std::abs(actual.ry - expected.ry) > kWriteBackTolerance
+            || std::abs(actual.rz - expected.rz) > kWriteBackTolerance
+            || std::abs(actual.bx - expected.bx) > kWriteBackTolerance
+            || std::abs(actual.by - expected.by) > kWriteBackTolerance
+            || std::abs(actual.bz - expected.bz) > kWriteBackTolerance
+            || actual.pointType != expected.pointType
+            || actual.segmentKind != QStringLiteral("segment")
+            || actual.isLapStep)
+        {
+            error = QString("直线模拟姿态文件第 %1 点写后身份验证失败。").arg(index + 1);
+            return false;
+        }
+    }
+    if (!RegisterLocalTestPoseAuthorization(
+            posePath,
+            robotName,
+            poseSha256,
+            poseSize,
+            WeldPoseSource::ScanPoseVariationDryRun,
+            error))
+    {
+        return false;
+    }
+
+    QString programSummary;
+    if (!GenerateRobotWeldProgramFiles(
+            pRobotDriver,
+            posePath,
+            curveInfo.absolutePath(),
+            /*actualWeld=*/false,
+            dryRunSpeedMmPerMin,
+            programName,
+            srpPath,
+            srdPath,
+            programSummary,
+            error,
+            FEATURE_SMOOTH_CURVE_RUN_STEP_MM,
+            /*allowPointwiseWeave=*/true,
+            WeldPoseSource::ScanPoseVariationDryRun))
+    {
+        RevokeLocalTestPoseAuthorization(posePath);
+        return false;
+    }
+
+    summary = QString(
+        "扫描直线模拟程序已生成：Tool1 TCP直接使用曲线XYZ，基础姿态固定，点数=%1，"
+        "轨迹长度≈%2 mm，点距=2mm，速度=%3 mm/min，输入SHA256=%4；%5")
+        .arg(records.size())
+        .arg(pathLengthMm, 0, 'f', 3)
+        .arg(dryRunSpeedMmPerMin, 0, 'f', 3)
+        .arg(curveSha256)
+        .arg(programSummary);
+    if (appendLog)
+    {
+        appendLog(summary);
+        appendLog(QStringLiteral("直线模拟姿态文件：") + QDir::toNativeSeparators(posePath));
+        appendLog(QStringLiteral("直线模拟控制器程序：") + QDir::toNativeSeparators(srpPath));
+        appendLog(QStringLiteral("直线模拟控制器数据：") + QDir::toNativeSeparators(srdPath));
+    }
     return true;
 }
 
@@ -16842,7 +17287,7 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     {
         return false;
     }
-    // 本入口始终会下发真实机器人运动；SyntheticVirtualTest 只放宽点云来源，绝不表示离线。
+    // 本入口始终会下发真实机器人运动；本地测试来源只放宽点云生产证明，绝不表示离线。
     // 没有持久准备/终态回调的 CLI、虚拟焊道或未来调用点必须在第一条运动前 fail-closed。
     if (!executionPrepared || !executionFinished)
     {
@@ -16856,6 +17301,17 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     if (!std::isfinite(overrideFinalStepMm) || overrideFinalStepMm < 0.0)
     {
         error = QStringLiteral("最终轨迹点距覆盖值必须为 0 或有限正数。");
+        return false;
+    }
+    if (poseSource == WeldPoseSource::ScanPoseVariationDryRun
+        && (param.bDoActualWeld
+            || std::abs(overrideFinalStepMm - FEATURE_SMOOTH_CURVE_RUN_STEP_MM) > 1e-6
+            || param.nWeldDirection != 1
+            || resumeStartArcMm != -1.0
+            || inputAlreadyInExecutionOrder))
+    {
+        error = QStringLiteral(
+            "扫描变姿态直线模拟只允许按曲线原顺序执行固定2mm完整空跑，禁止起弧、反向或续焊。");
         return false;
     }
 
@@ -16914,11 +17370,11 @@ bool MeasureThenWeldService::ExecuteWeldPoseFileWithSafePos(
     QString qualityProofPosePath = absolutePosePath;
     QString qualityProofPoseSha256 = loadedPoseSha256;
     qint64 qualityProofPoseSize = loadedPoseSize;
-    if (poseSource == WeldPoseSource::SyntheticVirtualTest)
+    if (poseSource != WeldPoseSource::PointCloudProduction)
     {
         if (resumeMode || !qualityProofSourcePosePath.trimmed().isEmpty())
         {
-            error = QStringLiteral("虚拟焊道进程内授权不允许替代生产证明或进入断点续焊。");
+            error = QStringLiteral("本地测试轨迹进程内授权不允许替代生产证明或进入断点续焊。");
             return false;
         }
     }

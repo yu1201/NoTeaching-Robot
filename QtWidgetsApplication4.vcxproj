@@ -51,11 +51,13 @@
     <QtInstall Condition="'$(QtInstall)' == ''">$(QtRoot)</QtInstall>
     <QtModules>core;gui;widgets;network;sql;opengl;openglwidgets</QtModules>
     <QtBuildConfig>debug</QtBuildConfig>
+    <QtInstall>6.7.3_msvc2022_64</QtInstall>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'" Label="QtSettings">
     <QtInstall Condition="'$(QtInstall)' == ''">$(QtRoot)</QtInstall>
     <QtModules>core;gui;widgets;network;sql;opengl;openglwidgets</QtModules>
     <QtBuildConfig>release</QtBuildConfig>
+    <QtInstall>6.7.3_msvc2022_64</QtInstall>
   </PropertyGroup>
   <Target Name="QtMsBuildNotFound" BeforeTargets="CustomBuild;ClCompile" Condition="!Exists('$(QtMsBuild)\qt.targets') or !Exists('$(QtMsBuild)\qt.props')">
     <Message Importance="High" Text="QtMsBuild: could not locate qt.targets, qt.props; project may not build correctly." />
@@ -136,7 +138,7 @@
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;NOMINMAX;WIN32_LEAN_AND_MEAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions Condition="'$(ReleaseVersionMajor)' != '' and '$(ReleaseVersionMinor)' != '' and '$(ReleaseVersionPatch)' != '' and '$(ReleaseVersionBuild)' != '' and '$(ReleaseVersionString)' != '' and '$(ReleaseProductName)' != '' and '$(ReleaseExeName)' != ''">RELEASE_VERSION_NUM=$(ReleaseVersionMajor),$(ReleaseVersionMinor),$(ReleaseVersionPatch),$(ReleaseVersionBuild);RELEASE_VERSION_STR=\&quot;$(ReleaseVersionString)\&quot;;RELEASE_PRODUCT_NAME=\&quot;$(ReleaseProductName)\&quot;;RELEASE_EXE_NAME=\&quot;$(ReleaseExeName)\&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(ReleaseVersionMajor)' != '' and '$(ReleaseVersionMinor)' != '' and '$(ReleaseVersionPatch)' != '' and '$(ReleaseVersionBuild)' != '' and '$(ReleaseVersionString)' != '' and '$(ReleaseProductName)' != '' and '$(ReleaseExeName)' != ''">RELEASE_VERSION_NUM=$(ReleaseVersionMajor),$(ReleaseVersionMinor),$(ReleaseVersionPatch),$(ReleaseVersionBuild);RELEASE_VERSION_STR=\"$(ReleaseVersionString)\";RELEASE_PRODUCT_NAME=\"$(ReleaseProductName)\";RELEASE_EXE_NAME=\"$(ReleaseExeName)\";%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -355,23 +357,17 @@
     <OcctRuntimeDll Include="$(OcctBinDir)\TKBO.dll;$(OcctBinDir)\TKBool.dll;$(OcctBinDir)\TKBRep.dll;$(OcctBinDir)\TKCAF.dll;$(OcctBinDir)\TKCDF.dll;$(OcctBinDir)\TKDE.dll;$(OcctBinDir)\TKDESTEP.dll;$(OcctBinDir)\TKernel.dll;$(OcctBinDir)\TKG2d.dll;$(OcctBinDir)\TKG3d.dll;$(OcctBinDir)\TKGeomAlgo.dll;$(OcctBinDir)\TKGeomBase.dll;$(OcctBinDir)\TKHLR.dll;$(OcctBinDir)\TKLCAF.dll;$(OcctBinDir)\TKMath.dll;$(OcctBinDir)\TKMesh.dll;$(OcctBinDir)\TKOpenGl.dll;$(OcctBinDir)\TKPrim.dll;$(OcctBinDir)\TKService.dll;$(OcctBinDir)\TKShHealing.dll;$(OcctBinDir)\TKTopAlgo.dll;$(OcctBinDir)\TKV3d.dll;$(OcctBinDir)\TKVCAF.dll;$(OcctBinDir)\TKXCAF.dll;$(OcctBinDir)\TKXSBase.dll" />
   </ItemGroup>
   <Target Name="CheckOpenCascadeDependency" BeforeTargets="ClCompile;Link">
-    <Error Condition="!Exists('$(OcctIncludeDir)\STEPControl_Reader.hxx') or !Exists('$(OcctIncludeDir)\Standard_Version.hxx')"
-           Text="Open CASCADE 7.9.3 headers are missing under $(OcctIncludeDir). Install opencascade[core]:x64-windows with the tested vcpkg baseline, or set OcctRoot in environment.local.props or /p:OcctRoot=... ." />
+    <Error Condition="!Exists('$(OcctIncludeDir)\STEPControl_Reader.hxx') or !Exists('$(OcctIncludeDir)\Standard_Version.hxx')" Text="Open CASCADE 7.9.3 headers are missing under $(OcctIncludeDir). Install opencascade[core]:x64-windows with the tested vcpkg baseline, or set OcctRoot in environment.local.props or /p:OcctRoot=... ." />
     <ReadLinesFromFile File="$(OcctIncludeDir)\Standard_Version.hxx">
       <Output TaskParameter="Lines" ItemName="_OcctVersionHeaderLine" />
     </ReadLinesFromFile>
     <ItemGroup>
-      <_OcctExpectedVersionLine Include="@(_OcctVersionHeaderLine)"
-                                Condition="'%(_OcctVersionHeaderLine.Identity)' == '#define OCC_VERSION_COMPLETE &quot;7.9.3&quot;'" />
+      <_OcctExpectedVersionLine Include="@(_OcctVersionHeaderLine)" Condition="'%(_OcctVersionHeaderLine.Identity)' == '#define OCC_VERSION_COMPLETE &quot;7.9.3&quot;'" />
     </ItemGroup>
-    <Error Condition="'@(_OcctExpectedVersionLine)' == ''"
-           Text="Open CASCADE header version must be exactly 7.9.3: $(OcctIncludeDir)\Standard_Version.hxx" />
-    <Error Condition="!Exists('%(OcctImportLib.Identity)')"
-           Text="Required Open CASCADE 7.9.3 import library is missing: %(OcctImportLib.Identity)" />
-    <Error Condition="!Exists('%(OcctRuntimeDll.Identity)')"
-           Text="Required Open CASCADE 7.9.3 runtime DLL is missing: %(OcctRuntimeDll.Identity)" />
-    <Error Condition="!Exists('$(OcctRoot)\share\opencascade\copyright')"
-           Text="Open CASCADE license and exception notice is missing: $(OcctRoot)\share\opencascade\copyright" />
+    <Error Condition="'@(_OcctExpectedVersionLine)' == ''" Text="Open CASCADE header version must be exactly 7.9.3: $(OcctIncludeDir)\Standard_Version.hxx" />
+    <Error Condition="!Exists('%(OcctImportLib.Identity)')" Text="Required Open CASCADE 7.9.3 import library is missing: %(OcctImportLib.Identity)" />
+    <Error Condition="!Exists('%(OcctRuntimeDll.Identity)')" Text="Required Open CASCADE 7.9.3 runtime DLL is missing: %(OcctRuntimeDll.Identity)" />
+    <Error Condition="!Exists('$(OcctRoot)\share\opencascade\copyright')" Text="Open CASCADE license and exception notice is missing: $(OcctRoot)\share\opencascade\copyright" />
   </Target>
   <Target Name="AfterBuildDebug" AfterTargets="Build" Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
     <Exec Command="set VCINSTALLDIR=$(VCInstallDir)&amp;&amp; &quot;$(QtRoot)\bin\windeployqt.exe&quot; --debug --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --exclude-plugins qpdf,qtiff,qtga,qicns,qwbmp,qgif,qsqlodbc,qsqlpsql,qsqlmimer --skip-plugin-types networkinformation,generic &quot;$(TargetPath)&quot;" />

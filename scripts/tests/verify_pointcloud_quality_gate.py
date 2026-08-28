@@ -330,9 +330,10 @@ def main() -> int:
             and "file.readLine(" in service
             and "payloadHash.addData(rawLine)" in service,
             "pose parsing and SHA256 are not derived from the same bounded streamed bytes")
-    require("RegisterSyntheticPoseAuthorization" in service
-            and "VerifySyntheticPoseAuthorization" in service,
-            "SyntheticVirtualTest remains an unbound public-enum bypass")
+    require("RegisterLocalTestPoseAuthorization" in service
+            and "VerifyLocalTestPoseAuthorization" in service
+            and "authorization.source != expectedSource" in service,
+            "local test sources remain an unbound public-enum bypass")
     for token in (
         "settings.validationMinFinalToPreCompLengthRatio",
         "settings.validationMaxFinalToPreCompLengthRatio",

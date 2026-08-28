@@ -80,7 +80,9 @@ class WeldSafetyRecoverySession final
 public:
     WeldSafetyRecoverySession(
         RobotDriverAdaptor* driver,
-        const T_PRECISE_MEASURE_PARAM& param);
+        const T_PRECISE_MEASURE_PARAM& param,
+        MeasureThenWeldService::WeldPoseSource poseSource =
+            MeasureThenWeldService::WeldPoseSource::PointCloudProduction);
 
     bool Prepare(
         const MeasureThenWeldService::WeldExecutionIdentity& identity,
@@ -90,6 +92,8 @@ public:
 private:
     RobotDriverAdaptor* m_driver = nullptr;
     T_PRECISE_MEASURE_PARAM m_param;
+    MeasureThenWeldService::WeldPoseSource m_poseSource =
+        MeasureThenWeldService::WeldPoseSource::PointCloudProduction;
     WeldResumePlanner::CheckpointRecord m_record;
     bool m_prepared = false;
 };

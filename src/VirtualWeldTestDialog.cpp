@@ -653,7 +653,10 @@ void VirtualWeldTestDialog::OnRunOnRobot()
 
             QString summary;
             QString execError;
-            const auto safetySession = std::make_shared<WeldSafetyRecoverySession>(driver, param);
+            const auto safetySession = std::make_shared<WeldSafetyRecoverySession>(
+                driver,
+                param,
+                MeasureThenWeldService::WeldPoseSource::SyntheticVirtualTest);
             const bool ok = service.ExecuteWeldPoseFileWithSafePos(
                 driver, execPath, param, summary, execError,
                 nullptr, nullptr, appendLog, setFlowStep, checkpoint, pointStepMm,
