@@ -4,6 +4,9 @@ from pathlib import Path
 
 repo = Path(__file__).resolve().parents[2]
 main = (repo / "src" / "QtWidgetsApplication4.cpp").read_text(encoding="utf-8")
+registry = (repo / "src" / "RobotDriverRegistry.cpp").read_text(encoding="utf-8")
+registry_header = (repo / "include" / "RobotDriverRegistry.h").read_text(encoding="utf-8")
+config_section = (repo / "src" / "ConfigSection.cpp").read_text(encoding="utf-8")
 
 
 def body(source: str, start: str, end: str) -> str:
@@ -49,7 +52,7 @@ for axis in "SLURBT":
 merge = body(
     management,
     "static void MergeMissingConfigValues",
-    "static bool ValidateKinematicsValues",
+    "bool EnsureRobotTypeTemplate",
 )
 assert "!TryGetMapValueCaseInsensitive(target, sourceIt.key(), ignored)" in merge
 assert "target.insert(sourceIt.key(), sourceIt.value())" in merge
@@ -74,17 +77,69 @@ ensure = body(
     "bool EnsureWorkpieceTemplateModules",
 )
 for token in (
-    "TemplateRobotConfig(unit.robotType, unit.unitName)",
-    "ConfigLocation::WorkpieceTemplate(",
+    "RobotTypeTemplateConfig(unit.robotType)",
+    "templateKinematics",
     "MergeMissingConfigValues(kinematics, factoryDefaults)",
     "ReplaceScopedModuleSectionsAtomically(",
     "ReadScopedModuleSnapshot(",
-    "ValidateKinematicsValues(verified, factoryDefaults, error)",
+    "ValidateKinematicsValues(verified, requiredShape, error)",
 ):
     assert token in ensure, f"missing kinematics repair contract: {token}"
+assert "TemplateRobotConfig" not in management
+assert "ConfigLocation::WorkpieceTemplate(" not in ensure
+assert "templateUnitName" not in registry_header
+assert 'QStringLiteral("robot_type_template")' in config_section
+for template_id in ('"fanuc", 9000', '"step", 30312', '"inovance", 2222'):
+    assert template_id in registry, f"missing independent type template: {template_id}"
+
+template_snapshot = body(
+    management,
+    "static QMap<QString, QMap<QString, QString>> DefaultRobotTypeTemplateSnapshot",
+    "static bool TryGetMapValueCaseInsensitive",
+)
+for token in (
+    'snapshot["TemplateMeta"]',
+    '{ "TemplateId",',
+    '{ "RobotType",',
+    '{ "TemplateRevision", QStringLiteral("1") }',
+):
+    assert token in template_snapshot, f"missing type-template identity data: {token}"
+
+template_gate = body(
+    management,
+    "bool EnsureRobotTypeTemplate",
+    "static bool ValidateKinematicsValues",
+)
+for token in (
+    'TryGetMapValueCaseInsensitive(meta, "TemplateId"',
+    'TryGetMapValueCaseInsensitive(meta, "RobotType"',
+    "ReplaceScopedModuleSectionsAtomically(",
+    "禁止把实际控制单元或其他品牌当作模板",
+):
+    assert token in template_gate, f"missing type-template identity gate: {token}"
+
+parameter_gate = body(
+    management,
+    "bool EnsureRobotParameters",
+    "bool EnsureRobotKinematics",
+)
+for token in (
+    "RobotTypeTemplateConfig(unit.robotType)",
+    "ReadScopedSettingStatus(",
+    "storedType != unit.robotType",
+    "CopyScopedModule(",
+    "true",
+):
+    assert token in parameter_gate, f"missing brand-switch template isolation: {token}"
 
 write_robot = body(management, "bool WriteRobotPara", "void ReloadControlUnits")
 assert write_robot.index("EnsureRobotKinematics(unit, error)") < write_robot.index('ini.SetSectionName("BaseParam")')
+for token in (
+    "!robotTypeChanged && unit.enabled",
+    "!robotTypeChanged && unit.cameraParamReady",
+    "!robotTypeChanged && unit.handEyeReady",
+):
+    assert token in write_robot, f"brand switch does not fail closed: {token}"
 assert "!WriteRobotPara(unit, true, error) || !WriteControlInfo(nextUnits, error)" in management
 assert "!WriteRobotPara(edited, isNew, error) || !WriteControlInfo(nextUnits, error)" in management
 

@@ -77,6 +77,10 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw "CredentialSecurity database-native-identity-gate test failed: $LASTEXITCODE"
 }
+& $outputExe --scoped-module-copy-protection
+if ($LASTEXITCODE -ne 0) {
+    throw "CredentialSecurity scoped-module-copy-protection test failed: $LASTEXITCODE"
+}
 & $outputExe --pending-scrub-gate
 if ($LASTEXITCODE -ne 0) {
     throw "CredentialSecurity pending-scrub-gate test failed: $LASTEXITCODE"

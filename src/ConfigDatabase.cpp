@@ -2562,7 +2562,7 @@ bool ConfigDatabase::CopyScopedModule(
     QSqlQuery sourceQuery(db);
     const QString sourcePrefix = sourceModule + QStringLiteral("/");
     sourceQuery.prepare(
-        "SELECT module, key_name, value_text, value_type, sensitive, encrypted, updated_at "
+        "SELECT module, key_name, value_text, value_type, sensitive, encrypted "
         "FROM settings WHERE scope_type=? AND scope_id=? AND (module=? OR substr(module, 1, ?)=?)");
     sourceQuery.addBindValue(NormalizeSection(sourceScopeType).toLower());
     sourceQuery.addBindValue(NormalizeScopeId(sourceScopeId));
@@ -2574,27 +2574,62 @@ bool ConfigDatabase::CopyScopedModule(
         return rollback();
     }
 
-    QSqlQuery insertQuery(db);
-    insertQuery.prepare(QStringLiteral("INSERT OR %1 INTO settings("
-        "scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .arg(overwriteExisting ? QStringLiteral("REPLACE") : QStringLiteral("IGNORE")));
     while (sourceQuery.next())
     {
         const QString sourceModuleValue = NormalizeSection(sourceQuery.value(0).toString());
         const QString suffix = sourceModuleValue == sourceModule
             ? QString()
             : sourceModuleValue.mid(sourceModule.size());
-        insertQuery.bindValue(0, NormalizeSection(targetScopeType).toLower());
-        insertQuery.bindValue(1, NormalizeScopeId(targetScopeId));
-        insertQuery.bindValue(2, NormalizeSection(targetModule + suffix));
-        insertQuery.bindValue(3, NormalizeSourceKey(sourceQuery.value(1).toString()));
-        insertQuery.bindValue(4, sourceQuery.value(2));
-        insertQuery.bindValue(5, sourceQuery.value(3));
-        insertQuery.bindValue(6, sourceQuery.value(4));
-        insertQuery.bindValue(7, sourceQuery.value(5));
-        insertQuery.bindValue(8, sourceQuery.value(6));
-        if (!insertQuery.exec())
+        const QString sourceKey = NormalizeSourceKey(sourceQuery.value(1).toString());
+        const QString targetModuleValue = NormalizeSection(targetModule + suffix);
+
+        if (!overwriteExisting)
+        {
+            QSqlQuery existingQuery(db);
+            existingQuery.prepare(
+                "SELECT 1 FROM settings WHERE scope_type=? AND scope_id=? AND module=? AND key_name=? LIMIT 1");
+            existingQuery.addBindValue(NormalizeSection(targetScopeType).toLower());
+            existingQuery.addBindValue(NormalizeScopeId(targetScopeId));
+            existingQuery.addBindValue(targetModuleValue);
+            existingQuery.addBindValue(sourceKey);
+            if (!existingQuery.exec())
+            {
+                return rollback();
+            }
+            if (existingQuery.next())
+            {
+                continue;
+            }
+        }
+
+        QString plainText;
+        if (!DecodeStoredText(
+                sourceQuery.value(2).toString(),
+                sourceQuery.value(5).toInt(),
+                ProtectionPurpose(
+                    sourceScopeType, sourceScopeId, sourceModuleValue, sourceKey),
+                &plainText))
+        {
+            return rollback();
+        }
+
+        ScopedSettingIdentity targetIdentity;
+        targetIdentity.scopeType = NormalizeSection(targetScopeType).toLower();
+        targetIdentity.scopeId = NormalizeScopeId(targetScopeId);
+        targetIdentity.module = targetModuleValue;
+        targetIdentity.keyName = sourceKey;
+        targetIdentity.valueType = sourceQuery.value(3).toString();
+        targetIdentity.sensitive = sourceQuery.value(4).toInt() != 0;
+        targetIdentity.valid = IsDatabaseNativeSettingIdentity(
+            targetIdentity.scopeType,
+            targetIdentity.scopeId,
+            targetIdentity.module,
+            targetIdentity.keyName);
+        // DPAPI protection is purpose-bound to scope/module/key.  A raw
+        // ciphertext copy would become unreadable after changing from the
+        // robot-type template scope to an actual control-unit scope.
+        if (!targetIdentity.valid
+            || !WriteScopedSettingValue(db, targetIdentity, plainText))
         {
             return rollback();
         }

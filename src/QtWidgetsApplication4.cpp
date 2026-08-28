@@ -2677,8 +2677,14 @@ namespace
 					const int robotType = m_robotTypeCombo->currentData().toInt();
 					const RobotDriverSetupProfile* setup =
 						RobotDriverRegistry::SetupProfile(robotType);
-					const QString selectedModel = m_robotModelCombo != nullptr
-						? m_robotModelCombo->currentData().toString() : QString();
+					if (setup != nullptr)
+					{
+						m_socketPortEdit->setText(QString::number(setup->defaultSocketPort));
+						m_monitorPortEdit->setText(setup->usesMonitorPort
+							? QString::number(setup->defaultMonitorPort) : QString());
+						m_stepProjectEdit->setText(setup->usesControllerProject
+							? QString::fromUtf8(setup->defaultControllerProject) : QString());
+					}
 					if (setup != nullptr && setup->defaultFtpPort > 0)
 					{
 						const QString defaultHost = QString::fromUtf8(setup->defaultFtpHost);
@@ -2699,7 +2705,7 @@ namespace
 					PopulateRobotModelCombo(
 						m_robotModelCombo,
 						m_robotTypeCombo->currentData().toInt(),
-						selectedModel);
+						QString());
 					ApplyEditorRobotTypeUi();
 					SyncEditorFtpIpWithSocketIp();
 				});
@@ -2715,6 +2721,13 @@ namespace
 						selectedModel);
 				});
 
+			QString templateError;
+			if (!EnsureAllRobotTypeTemplates(templateError))
+			{
+				AppendLog(QStringLiteral("机器人类型模板初始化失败：") + templateError);
+				QMessageBox::warning(this, QStringLiteral("控制单元管理"),
+					QStringLiteral("机器人类型模板初始化失败，保存和重载将保持关闭：") + templateError);
+			}
 			LoadUnits(false);
 		}
 
@@ -2759,6 +2772,17 @@ namespace
 			return ConfigLocation::Robot(unitName, QStringLiteral("RobotPara"));
 		}
 
+		static ConfigLocation RobotTypeTemplateConfig(int robotType)
+		{
+			const RobotDriverSetupProfile* setup = RobotDriverRegistry::SetupProfile(robotType);
+			if (setup == nullptr || setup->templateId == nullptr || setup->templateId[0] == '\0')
+			{
+				return ConfigLocation();
+			}
+			return ConfigLocation::RobotTypeTemplate(
+				QString::fromUtf8(setup->templateId), QStringLiteral("RobotPara"));
+		}
+
 		static std::string ToConfigBytes(const QString& text)
 		{
 			return text.toUtf8().toStdString();
@@ -2792,17 +2816,25 @@ namespace
 			{
 				return credential;
 			}
-			const QString templateRobot = QString::fromUtf8(setup->templateUnitName);
 			credential.user = QString::fromUtf8(setup->defaultFtpUser);
 			credential.password = QString::fromUtf8(setup->defaultFtpPassword);
 
-			ConfigSection robotIni;
-			if (!templateRobot.isEmpty()
-				&& robotIni.SetLocation(RobotConfig(templateRobot)))
+			ConfigSection templateIni;
+			const ConfigLocation templateConfig = RobotTypeTemplateConfig(robotType);
+			if (templateConfig.IsValid() && templateIni.SetLocation(templateConfig))
 			{
-				robotIni.SetSectionName("BaseParam");
-				credential.user = ReadConfigString(robotIni, "FTPUser", credential.user);
-				credential.password = ReadConfigString(robotIni, "FTPPassWord", credential.password);
+				templateIni.SetSectionName("TemplateMeta");
+				const QString storedId = ReadConfigString(templateIni, "TemplateId").trimmed().toLower();
+				const int storedType = ReadConfigInt(templateIni, "RobotType", -1);
+				const QString storedRevision = ReadConfigString(templateIni, "TemplateRevision").trimmed();
+				if (storedId == templateConfig.scopeId
+					&& storedType == robotType
+					&& storedRevision == QStringLiteral("1"))
+				{
+					templateIni.SetSectionName("BaseParam");
+					credential.user = ReadConfigString(templateIni, "FTPUser", credential.user);
+					credential.password = ReadConfigString(templateIni, "FTPPassWord", credential.password);
+				}
 			}
 			return credential;
 		}
@@ -2836,9 +2868,8 @@ namespace
 
 		static QMap<QString, QString> DefaultKinematicsForRobotType(int robotType)
 		{
-			// These values are the factory RobotA/RobotB templates that were shipped before
-			// configuration moved into ConfigStore.db. They are bootstrap values only: when
-			// an existing robot already has a key, EnsureRobotKinematics preserves it.
+			// Brand bootstrap values used only to create the independent robot-type
+			// templates.  Actual control-unit records are never template sources.
 			if (robotType == ROBOT_TYPE_STEP)
 			{
 				return {
@@ -2892,6 +2923,106 @@ namespace
 			return {};
 		}
 
+		static QMap<QString, QMap<QString, QString>> DefaultRobotTypeTemplateSnapshot(
+			int robotType)
+		{
+			QMap<QString, QMap<QString, QString>> snapshot;
+			const RobotDriverSetupProfile* setup = RobotDriverRegistry::SetupProfile(robotType);
+			if (setup == nullptr || setup->templateId == nullptr || setup->templateId[0] == '\0')
+			{
+				return snapshot;
+			}
+
+			snapshot["TemplateMeta"] = {
+				{ "TemplateId", QString::fromUtf8(setup->templateId).trimmed().toLower() },
+				{ "RobotType", QString::number(robotType) },
+				{ "TemplateRevision", QStringLiteral("1") }
+			};
+			QMap<QString, QString> baseParam = {
+				{ "RobotType", QString::number(robotType) },
+				{ "SocketPort", QString::number(setup->defaultSocketPort) },
+				{ "FTPIP", QString::fromUtf8(setup->defaultFtpHost) },
+				{ "FTPPort", QString::number(setup->defaultFtpPort) },
+				{ "FTPUser", QString::fromUtf8(setup->defaultFtpUser) },
+				{ "FTPPassWord", QString::fromUtf8(setup->defaultFtpPassword) }
+			};
+			if (setup->usesMonitorPort)
+			{
+				baseParam.insert("MonitorPort", QString::number(setup->defaultMonitorPort));
+			}
+			if (setup->usesControllerProject)
+			{
+				baseParam.insert("StepProjectName", QString::fromUtf8(setup->defaultControllerProject));
+			}
+			if (robotType == ROBOT_TYPE_INOVANCE)
+			{
+				baseParam.insert("ToolNo", QStringLiteral("0"));
+				baseParam.insert("WobjNo", QStringLiteral("0"));
+				baseParam.insert("MaxBufferedCommands", QStringLiteral("8"));
+				baseParam.insert("ForceControlPermit", QStringLiteral("0"));
+				baseParam.insert("ApiUserLevel", QStringLiteral("0"));
+				snapshot["WeldJob"] = {
+					{ "Enabled", QStringLiteral("0") },
+					{ "ArcEnableDO", QStringLiteral("-1") },
+					{ "ArcEnableActiveValue", QStringLiteral("1") },
+					{ "ReadyDI", QStringLiteral("-1") },
+					{ "ReadyActiveValue", QStringLiteral("1") },
+					{ "ArcEstablishedDI", QStringLiteral("-1") },
+					{ "ArcEstablishedActiveValue", QStringLiteral("1") },
+					{ "CurrentDA", QStringLiteral("-1") },
+					{ "CurrentDAGain", QStringLiteral("0") },
+					{ "CurrentDAOffset", QStringLiteral("0") },
+					{ "CurrentDAMin", QStringLiteral("0") },
+					{ "CurrentDAMax", QStringLiteral("0") },
+					{ "VoltageDA", QStringLiteral("-1") },
+					{ "VoltageDAGain", QStringLiteral("0") },
+					{ "VoltageDAOffset", QStringLiteral("0") },
+					{ "VoltageDAMin", QStringLiteral("0") },
+					{ "VoltageDAMax", QStringLiteral("0") },
+					{ "ReadyTimeoutMs", QStringLiteral("10000") },
+					{ "ArcStartTimeoutMs", QStringLiteral("10000") },
+					{ "ArcEndTimeoutMs", QStringLiteral("10000") },
+					{ "AlarmIndex", QStringLiteral("0") },
+					{ "ArcInterruptId", QStringLiteral("-1") }
+				};
+			}
+			snapshot.insert("BaseParam", baseParam);
+
+			const QMap<QString, QString> kinematics = DefaultKinematicsForRobotType(robotType);
+			if (!kinematics.isEmpty())
+			{
+				snapshot.insert("Kinematics", kinematics);
+			}
+			snapshot["ExternalAxle"] = {
+				{ "ExternalAxleType", QStringLiteral("0") },
+				{ "Coordinate", QStringLiteral("0") },
+				{ "BXPulse", QStringLiteral("0") },
+				{ "BYPulse", QStringLiteral("0") },
+				{ "BZPulse", QStringLiteral("0") },
+				{ "BXMaxPulseNum", QStringLiteral("0") },
+				{ "BXMinPulseNum", QStringLiteral("0") },
+				{ "BYMaxPulseNum", QStringLiteral("0") },
+				{ "BYMinPulseNum", QStringLiteral("0") },
+				{ "BZMaxPulseNum", QStringLiteral("0") },
+				{ "BZMinPulseNum", QStringLiteral("0") }
+			};
+			snapshot["ExternalAxleFuncation"] = {
+				{ "AxisGroupNum", QStringLiteral("0") },
+				{ "LineScanAxis", QStringLiteral("-1") },
+				{ "LineScanAxisInWorld", QStringLiteral("-1") },
+				{ "MeasureAxis", QStringLiteral("-1") },
+				{ "PositionAxis", QStringLiteral("-1") },
+				{ "TrackingAxis", QStringLiteral("-1") }
+			};
+			snapshot["SetupStatus"] = {
+				{ "Enabled", QStringLiteral("0") },
+				{ "WorkpieceType", kWorkpieceCorrugatedPlate },
+				{ "CameraParamReady", QStringLiteral("0") },
+				{ "HandEyeReady", QStringLiteral("0") }
+			};
+			return snapshot;
+		}
+
 		static bool TryGetMapValueCaseInsensitive(
 			const QMap<QString, QString>& values,
 			const QString& key,
@@ -2934,6 +3065,96 @@ namespace
 					target.insert(sourceIt.key(), sourceIt.value());
 				}
 			}
+		}
+
+		bool EnsureRobotTypeTemplate(int robotType, QString& error) const
+		{
+			error.clear();
+			const ConfigLocation location = RobotTypeTemplateConfig(robotType);
+			const QMap<QString, QMap<QString, QString>> defaults =
+				DefaultRobotTypeTemplateSnapshot(robotType);
+			if (!location.IsValid() || defaults.isEmpty())
+			{
+				error = QString("机器人类型 %1 缺少独立模板身份或默认内容。").arg(robotType);
+				return false;
+			}
+
+			QMap<QString, QMap<QString, QString>> existing;
+			QString snapshotError;
+			if (!ConfigDatabase::ReadScopedModuleSnapshot(
+					location.scopeType, location.scopeId, location.module,
+					existing, &snapshotError))
+			{
+				error = QString("读取机器人类型模板失败：%1；%2")
+					.arg(location.scopeId, snapshotError);
+				return false;
+			}
+
+			if (existing.isEmpty())
+			{
+				if (!ConfigDatabase::ReplaceScopedModuleSectionsAtomically(
+						location.scopeType, location.scopeId, location.module,
+						defaults, defaults.keys(), &snapshotError))
+				{
+					error = QString("创建机器人类型模板失败：%1；%2")
+						.arg(location.scopeId, snapshotError);
+					return false;
+				}
+				return true;
+			}
+
+			const QMap<QString, QString> meta = existing.value("TemplateMeta");
+			QString storedId;
+			QString storedType;
+			QString storedRevision;
+			const bool identityValid =
+				TryGetMapValueCaseInsensitive(meta, "TemplateId", storedId)
+				&& TryGetMapValueCaseInsensitive(meta, "RobotType", storedType)
+				&& TryGetMapValueCaseInsensitive(meta, "TemplateRevision", storedRevision)
+				&& storedId.trimmed().compare(location.scopeId, Qt::CaseInsensitive) == 0
+				&& storedType.trimmed() == QString::number(robotType)
+				&& storedRevision.trimmed() == QStringLiteral("1");
+			if (!identityValid)
+			{
+				error = QString("机器人类型模板身份不匹配：scope=%1，RobotType=%2；禁止把实际控制单元或其他品牌当作模板。")
+					.arg(location.scopeId).arg(robotType);
+				return false;
+			}
+
+			QMap<QString, QMap<QString, QString>> replacements;
+			for (auto sectionIt = defaults.cbegin(); sectionIt != defaults.cend(); ++sectionIt)
+			{
+				QMap<QString, QString> merged = existing.value(sectionIt.key());
+				const QMap<QString, QString> before = merged;
+				MergeMissingConfigValues(merged, sectionIt.value());
+				if (merged != before)
+				{
+					replacements.insert(sectionIt.key(), merged);
+				}
+			}
+			if (!replacements.isEmpty()
+				&& !ConfigDatabase::ReplaceScopedModuleSectionsAtomically(
+					location.scopeType, location.scopeId, location.module,
+					replacements, replacements.keys(), &snapshotError))
+			{
+				error = QString("补齐机器人类型模板失败：%1；%2")
+					.arg(location.scopeId, snapshotError);
+				return false;
+			}
+			return true;
+		}
+
+		bool EnsureAllRobotTypeTemplates(QString& error) const
+		{
+			for (const RobotDriverRegistration& registration : RobotDriverRegistry::RegisteredTypes())
+			{
+				if (!EnsureRobotTypeTemplate(registration.typeCode, error))
+				{
+					return false;
+				}
+			}
+			error.clear();
+			return true;
 		}
 
 		static bool ValidateKinematicsValues(
@@ -3330,7 +3551,7 @@ namespace
 			SetFormRowVisible(m_editorForm, m_ftpPasswordEdit, usesFtp);
 			m_robotTypeCombo->setToolTip(setup != nullptr
 				? (robotType == ROBOT_TYPE_INOVANCE
-					? QStringLiteral("汇川已登记2222远程以太网与FTP/原生程序上传底层；按名称原生程序执行、真实起弧和机器人侧手眼功能保持限制。")
+					? QStringLiteral("汇川已登记2222远程以太网、FTP、R/B寄存器和同工程原生JOB执行；上位机生成HK_WELD_JOB.pro，控制器JOB负责运动、起收弧与反馈超时。只有数据库WeldJob现场IO/DA映射完整时才开放实际焊接；原生JOB不支持暂停续行，手眼辅助仍未验证。")
 					: QStringLiteral("该类型已登记品牌底层。"))
 				: QStringLiteral("该类型未安装品牌底层，不能保存或重载；请选择已登记类型。"));
 		}
@@ -3784,7 +4005,7 @@ namespace
 					PopulateRobotModelCombo(
 						robotModelCombo,
 						robotTypeCombo->currentData().toInt(),
-						robotModelCombo->currentData().toString());
+						QString());
 				});
 			connect(robotModelLibraryBtn, &QPushButton::clicked, &wizard,
 				[this, &wizard, robotTypeCombo, robotModelCombo]()
@@ -4332,56 +4553,62 @@ namespace
 			}
 		}
 
-		ConfigLocation TemplateRobotConfig(int robotType, const QString& targetUnitName) const
+		bool EnsureRobotParameters(
+			const UnitConfig& unit,
+			bool* robotTypeChanged,
+			QString& error) const
 		{
-			const RobotDriverSetupProfile* setup = RobotDriverRegistry::SetupProfile(robotType);
-			if (setup == nullptr)
+			if (robotTypeChanged != nullptr)
 			{
-				return ConfigLocation();
+				*robotTypeChanged = false;
 			}
-			const QString preferredName = QString::fromUtf8(setup->templateUnitName);
-			const ConfigLocation preferredConfig = RobotConfig(preferredName);
-			if (!preferredName.isEmpty()
-				&& preferredName.compare(targetUnitName, Qt::CaseInsensitive) != 0
-				&& ConfigDatabase::HasScopedModule(
-					preferredConfig.scopeType, preferredConfig.scopeId, preferredConfig.module))
-			{
-				return preferredConfig;
-			}
-			for (const UnitConfig& unit : m_units)
-			{
-				if (unit.unitName.compare(targetUnitName, Qt::CaseInsensitive) != 0
-					&& unit.robotType == robotType
-					&& ConfigDatabase::HasScopedModule(
-						QStringLiteral("robot"), unit.unitName, QStringLiteral("RobotPara")))
-				{
-					return RobotConfig(unit.unitName);
-				}
-			}
-			return ConfigLocation();
-		}
-
-		bool EnsureRobotParameters(const UnitConfig& unit, bool isNew, QString& error) const
-		{
-			Q_UNUSED(isNew);
 			const ConfigLocation targetConfig = RobotConfig(unit.unitName);
 			if (!ConfigDatabase::IsAvailable())
 			{
 				error = QString("配置库不存在或结构无效，请先运行迁移工具：%1").arg(ConfigDatabase::DatabasePath());
 				return false;
 			}
-			if (ConfigDatabase::HasScopedModule(
-					targetConfig.scopeType, targetConfig.scopeId, targetConfig.module))
+			if (!EnsureRobotTypeTemplate(unit.robotType, error))
 			{
-				return true;
+				return false;
 			}
-			const ConfigLocation templateConfig = TemplateRobotConfig(unit.robotType, unit.unitName);
-			if (templateConfig.IsValid()
-				&& ConfigDatabase::CopyScopedModule(
-					templateConfig.scopeType, templateConfig.scopeId, templateConfig.module,
-					targetConfig.scopeType, targetConfig.scopeId, targetConfig.module, false))
+
+			const ConfigLocation templateConfig = RobotTypeTemplateConfig(unit.robotType);
+			const bool targetExists = ConfigDatabase::HasScopedModule(
+				targetConfig.scopeType, targetConfig.scopeId, targetConfig.module);
+			bool replaceWithTypeTemplate = !targetExists;
+			if (targetExists)
 			{
-				return true;
+				QString storedTypeText;
+				const ConfigDatabase::ReadStatus status = ConfigDatabase::ReadScopedSettingStatus(
+					targetConfig.scopeType,
+					targetConfig.scopeId,
+					targetConfig.module + QStringLiteral("/BaseParam"),
+					QStringLiteral("RobotType"),
+					&storedTypeText);
+				bool typeOk = false;
+				const int storedType = storedTypeText.trimmed().toInt(&typeOk);
+				if (status == ConfigDatabase::ReadStatus::Error)
+				{
+					error = QString("读取 %1 的原机器人类型失败，禁止覆盖品牌参数。").arg(unit.unitName);
+					return false;
+				}
+				replaceWithTypeTemplate = status != ConfigDatabase::ReadStatus::Found
+					|| !typeOk || storedType != unit.robotType;
+				if (replaceWithTypeTemplate && robotTypeChanged != nullptr)
+				{
+					*robotTypeChanged = true;
+				}
+			}
+
+			if (replaceWithTypeTemplate
+				&& !ConfigDatabase::CopyScopedModule(
+					templateConfig.scopeType, templateConfig.scopeId, templateConfig.module,
+					targetConfig.scopeType, targetConfig.scopeId, targetConfig.module, true))
+			{
+				error = QString("从独立机器人类型模板恢复参数失败：%1 -> %2")
+					.arg(templateConfig.scopeId, unit.unitName);
+				return false;
 			}
 			return true;
 		}
@@ -4401,51 +4628,41 @@ namespace
 
 			QMap<QString, QString> kinematics = ConfigSectionCaseInsensitive(targetSnapshot, "Kinematics");
 			const QMap<QString, QString> before = kinematics;
-			ConfigLocation templateConfig = TemplateRobotConfig(unit.robotType, unit.unitName);
-			const RobotDriverSetupProfile* setup = RobotDriverRegistry::SetupProfile(unit.robotType);
-			if (!templateConfig.IsValid() && setup != nullptr && setup->usesControllerProject)
+			if (!EnsureRobotTypeTemplate(unit.robotType, error))
 			{
-				const ConfigLocation workpieceRobotConfig = ConfigLocation::WorkpieceTemplate(
-					unit.workpieceType.isEmpty() ? kWorkpieceCorrugatedPlate : unit.workpieceType,
-					QStringLiteral("RobotPara"));
-				if (ConfigDatabase::HasScopedModule(
-						workpieceRobotConfig.scopeType,
-						workpieceRobotConfig.scopeId,
-						workpieceRobotConfig.module))
-				{
-					templateConfig = workpieceRobotConfig;
-				}
-			}
-			if (templateConfig.IsValid())
-			{
-				QMap<QString, QMap<QString, QString>> templateSnapshot;
-				if (!ConfigDatabase::ReadScopedModuleSnapshot(
-						templateConfig.scopeType, templateConfig.scopeId, templateConfig.module,
-						templateSnapshot, &snapshotError))
-				{
-					error = QString("读取机器人运动学模板失败：%1；%2")
-						.arg(templateConfig.module, snapshotError);
-					return false;
-				}
-				MergeMissingConfigValues(
-					kinematics,
-					ConfigSectionCaseInsensitive(templateSnapshot, "Kinematics"));
-			}
-
-			const QMap<QString, QString> factoryDefaults = DefaultKinematicsForRobotType(unit.robotType);
-			if (factoryDefaults.isEmpty())
-			{
-				// 汇川型号未确定前不能伪造DH、限位或脉冲比例。2222直角数据流可在
-				// 控制器自身运动学下运行；关节脉冲运动会由品牌驱动在缺少AxisUnit时失败关闭。
-				if (unit.robotType == ROBOT_TYPE_INOVANCE)
-				{
-					return true;
-				}
-				error = QString("机器人类型 %1 没有可用的出厂运动学模板，未保存控制单元。").arg(unit.robotType);
 				return false;
 			}
+			const ConfigLocation templateConfig = RobotTypeTemplateConfig(unit.robotType);
+			QMap<QString, QMap<QString, QString>> templateSnapshot;
+			if (!ConfigDatabase::ReadScopedModuleSnapshot(
+					templateConfig.scopeType, templateConfig.scopeId, templateConfig.module,
+					templateSnapshot, &snapshotError))
+			{
+				error = QString("读取独立机器人类型模板失败：%1；%2")
+					.arg(templateConfig.scopeId, snapshotError);
+				return false;
+			}
+			const QMap<QString, QString> templateKinematics =
+				ConfigSectionCaseInsensitive(templateSnapshot, "Kinematics");
+			MergeMissingConfigValues(kinematics, templateKinematics);
+
+			const QMap<QString, QString> factoryDefaults = DefaultKinematicsForRobotType(unit.robotType);
+			if (unit.robotType == ROBOT_TYPE_INOVANCE && templateKinematics.isEmpty())
+			{
+				if (!before.isEmpty())
+				{
+					error = QString("%1 仍保留旧运动学参数，但独立汇川模板尚未配置真实型号参数；"
+						"禁止把其他品牌AxisUnit继续用于汇川。").arg(unit.unitName);
+					return false;
+				}
+				// 汇川型号未确定前不伪造DH、限位或脉冲比例。直角数据流仍可运行，
+				// JointMotion由品牌驱动保持关闭。
+				return true;
+			}
 			MergeMissingConfigValues(kinematics, factoryDefaults);
-			if (!ValidateKinematicsValues(kinematics, factoryDefaults, error))
+			const QMap<QString, QString> requiredShape = factoryDefaults.isEmpty()
+				? DefaultKinematicsForRobotType(ROBOT_TYPE_FANUC) : factoryDefaults;
+			if (!ValidateKinematicsValues(kinematics, requiredShape, error))
 			{
 				error = QString("%1 的%2").arg(unit.unitName, error);
 				return false;
@@ -4473,7 +4690,7 @@ namespace
 				return false;
 			}
 			QMap<QString, QString> verified = ConfigSectionCaseInsensitive(verifiedSnapshot, "Kinematics");
-			if (!ValidateKinematicsValues(verified, factoryDefaults, error))
+			if (!ValidateKinematicsValues(verified, requiredShape, error))
 			{
 				error = QString("%1 的运动学参数写入后复核失败：%2").arg(unit.unitName, error);
 				return false;
@@ -4536,7 +4753,8 @@ namespace
 
 		bool WriteRobotPara(const UnitConfig& unit, bool isNew, QString& error) const
 		{
-			if (!EnsureRobotParameters(unit, isNew, error))
+			bool robotTypeChanged = false;
+			if (!EnsureRobotParameters(unit, &robotTypeChanged, error))
 			{
 				return false;
 			}
@@ -4576,11 +4794,19 @@ namespace
 			{
 				ok = ok && WriteConfigString(ini, "StepProjectName", unit.stepProjectName);
 			}
+			ini.SetSectionName("TemplateMeta");
+			ok = ok && WriteConfigString(ini, "TemplateId",
+				setup != nullptr ? QString::fromUtf8(setup->templateId) : QString());
+			ok = ok && WriteConfigInt(ini, "RobotType", unit.robotType);
+			ok = ok && WriteConfigString(ini, "TemplateRevision", QStringLiteral("1"));
 			ini.SetSectionName("SetupStatus");
-			ok = ok && WriteConfigInt(ini, "Enabled", unit.enabled ? 1 : 0);
+			ok = ok && WriteConfigInt(ini, "Enabled",
+				!robotTypeChanged && unit.enabled ? 1 : 0);
 			ok = ok && WriteConfigString(ini, "WorkpieceType", unit.workpieceType.isEmpty() ? kWorkpieceCorrugatedPlate : unit.workpieceType);
-			ok = ok && WriteConfigInt(ini, "CameraParamReady", unit.cameraParamReady ? 1 : 0);
-			ok = ok && WriteConfigInt(ini, "HandEyeReady", unit.handEyeReady ? 1 : 0);
+			ok = ok && WriteConfigInt(ini, "CameraParamReady",
+				!robotTypeChanged && unit.cameraParamReady ? 1 : 0);
+			ok = ok && WriteConfigInt(ini, "HandEyeReady",
+				!robotTypeChanged && unit.handEyeReady ? 1 : 0);
 			if (!ok)
 			{
 				error = "写入机器人参数数据失败：" + unit.unitName;
@@ -7940,6 +8166,10 @@ namespace
 			{
 				return "控制单元";
 			}
+			if (scopeType.compare("robot_type_template", Qt::CaseInsensitive) == 0)
+			{
+				return "机器人类型模板";
+			}
 			if (scopeType.compare("workpiece_template", Qt::CaseInsensitive) == 0)
 			{
 				return "工件模板";
@@ -8244,8 +8474,8 @@ namespace
 								"SELECT scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at "
 								"FROM settings "
 								"ORDER BY CASE scope_type "
-								"WHEN 'global' THEN 0 WHEN 'robot' THEN 1 WHEN 'workpiece_template' THEN 2 "
-								"WHEN 'account' THEN 3 WHEN 'result' THEN 4 ELSE 9 END, "
+								"WHEN 'global' THEN 0 WHEN 'robot_type_template' THEN 1 WHEN 'robot' THEN 2 "
+								"WHEN 'workpiece_template' THEN 3 WHEN 'account' THEN 4 WHEN 'result' THEN 5 ELSE 9 END, "
 								"scope_id COLLATE NOCASE, module COLLATE NOCASE, key_name COLLATE NOCASE");
 							if (query.exec())
 							{
@@ -18706,7 +18936,21 @@ void QtWidgetsApplication4::FanucCallJobTest()
 	}
 
 	bool ok = false;
-	const QString jobName = QInputDialog::getText(this, "调用任务", "任务/程序名：", QLineEdit::Normal, "FANUC_PORT_OPEN_TEST", &ok);
+	QString programPrompt = QStringLiteral("任务/程序名：");
+	QString programDefault = QStringLiteral("FANUC_PORT_OPEN_TEST");
+	const RobotDriverFamily driverFamily = pRobotDriver->DriverDescriptor().family;
+	if (driverFamily == RobotDriverFamily::Step)
+	{
+		programPrompt = QStringLiteral("STEP工程/程序名（Project/Program）：");
+		programDefault.clear();
+	}
+	else if (driverFamily == RobotDriverFamily::Inovance)
+	{
+		programPrompt = QStringLiteral("当前激活工程的公共模块名（需提供Func Run()，不切换工程）：");
+		programDefault.clear();
+	}
+	const QString jobName = QInputDialog::getText(
+		this, "调用任务", programPrompt, QLineEdit::Normal, programDefault, &ok);
 	if (!ok || jobName.trimmed().isEmpty())
 	{
 		return;

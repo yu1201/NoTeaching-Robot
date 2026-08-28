@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <future>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -177,6 +178,21 @@ private:
         const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
         RobotTrajectoryPurpose purpose,
         std::string& error) const;
+    bool HasVerifiedWeldJobContract(std::string* error = nullptr) const;
+    bool WriteTrajectoryJobFile(
+        const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
+        RobotTrajectoryPurpose purpose,
+        const std::string& outputDirectory,
+        RobotTrajectoryHandle& handle,
+        std::string& error);
+    bool UploadTrajectoryJob(
+        RobotTrajectoryHandle& handle,
+        std::string& error);
+    bool VerifyTrajectoryJobRemoteIdentity(
+        const RobotTrajectoryHandle& handle,
+        std::string& error) const;
+    bool PrepareWeldJobHardware(std::string& error);
+    bool ConfirmWeldArcOutputOff(std::string& error);
     std::uint64_t FingerprintMoveInfos(
         const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
         RobotTrajectoryPurpose purpose) const;
@@ -217,9 +233,39 @@ private:
     bool m_forceControlPermit = false;
     int m_apiUserLevel = 0;
     std::string m_apiPassword;
+
+    // 汇川没有独立焊接协议。实际焊接由底层生成的原生PRO通过RC所属IO/DA控制；
+    // 只有数据库中的现场映射完整且自洽时才声明 ActualArcWeld。
+    bool m_weldJobEnabled = false;
+    int m_weldArcEnableDo = -1;
+    int m_weldArcEnableActiveValue = 1;
+    int m_weldReadyDi = -1;
+    int m_weldReadyActiveValue = 1;
+    int m_weldArcEstablishedDi = -1;
+    int m_weldArcEstablishedActiveValue = 1;
+    int m_weldCurrentDa = -1;
+    double m_weldCurrentDaGain = 0.0;
+    double m_weldCurrentDaOffset = 0.0;
+    double m_weldCurrentDaMin = 0.0;
+    double m_weldCurrentDaMax = 0.0;
+    int m_weldVoltageDa = -1;
+    double m_weldVoltageDaGain = 0.0;
+    double m_weldVoltageDaOffset = 0.0;
+    double m_weldVoltageDaMin = 0.0;
+    double m_weldVoltageDaMax = 0.0;
+    int m_weldReadyTimeoutMs = 10000;
+    int m_weldArcStartTimeoutMs = 10000;
+    int m_weldArcEndTimeoutMs = 10000;
+    int m_weldAlarmIndex = 0;
+    int m_weldArcInterruptId = -1;
     std::atomic_bool m_permitOwned{ false };
     std::atomic_bool m_userLoggedIn{ false };
     std::atomic_bool m_dataStreamEnabled{ false };
+
+    // 原生程序执行与数据流轨迹是两个独立底层。原生程序互斥只保护同一控制器的
+    // main.pro 调度器更新/启动/等待；安全 STOP 不取得此锁，避免等待线程阻塞急停。
+    mutable std::mutex m_nativeProgramMutex;
+    std::atomic_bool m_nativeProgramRunning{ false };
 
     mutable std::mutex m_passiveMutex;
     T_ROBOT_COORS m_passivePose;
@@ -243,6 +289,16 @@ private:
     int m_finalCommandId = -1;
     std::atomic_bool m_trajectoryRunning{ false };
     std::atomic_bool m_trajectoryPaused{ false };
+
+    struct NativeTrajectoryResult
+    {
+        bool success = false;
+        RobotMotionStatus terminalStatus;
+        std::string error;
+    };
+    std::future<NativeTrajectoryResult> m_nativeTrajectoryFuture;
+    bool m_nativeTrajectoryResultCached = false;
+    NativeTrajectoryResult m_nativeTrajectoryCachedResult;
 
     std::atomic_bool m_continuousJogRunning{ false };
     std::atomic_bool m_continuousJogStopRequested{ false };

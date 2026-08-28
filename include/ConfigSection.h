@@ -14,6 +14,7 @@ struct ConfigLocation
 
     static ConfigLocation Global(const QString& moduleName);
     static ConfigLocation Robot(const QString& robotName, const QString& moduleName);
+    static ConfigLocation RobotTypeTemplate(const QString& templateId, const QString& moduleName);
     static ConfigLocation WorkpieceTemplate(const QString& templateName, const QString& moduleName);
     static ConfigLocation Result(const QString& resultId, const QString& moduleName);
 

@@ -65,14 +65,20 @@ Start 前必须再次核对本地内容并回读远端内容，确认一致后�
 
 1. 在驱动层实现全部纯虚函数，并完成标准单位、状态和错误信息转换。
 2. 仅为已验证功能设置能力位；真实焊接能力必须包含起弧、灭弧及焊接完成证明。
-3. 只在 `RobotDriverRegistry` 登记新驱动，并填写 `RobotDriverSetupProfile` 的端口、监控通道、FTP、
-   控制器工程与本地任务目录元数据；注册表会向控制单元工厂和配置界面公开已安装品牌，业务页面无需增加品牌分支。
+3. 只在 `RobotDriverRegistry` 登记新驱动，并填写 `RobotDriverSetupProfile` 的独立 `templateId`、端口、
+   监控通道、FTP、控制器工程与本地任务目录元数据；`templateId` 只能是稳定的品牌模板身份，禁止使用
+   `RobotA/RobotB/RobotC` 等实际控制单元名。注册表会向控制单元工厂和配置界面公开已安装品牌，业务页面无需增加品牌分支。
 4. 运行 `python scripts/tests/verify_robot_driver_adaptor_boundary.py`，确认业务层没有越过适配层。
 5. 运行机器人专项安全测试和 Release 编译。
 6. 上真实机器人前分别验证连接、读状态、单点运动、轨迹完成、安全中止、暂停恢复和断电/重启恢复。
 
 满足全部纯虚契约并声明业务所需的全部能力后，新机器人可复用现有程序功能；只满足部分能力时，
 程序只开放已声明能力覆盖的功能，不允许用默认成功或品牌判断绕过缺失能力。
+
+每个品牌的 `RobotPara` 模板独立存放在数据库作用域
+`robot_type_template/<templateId>/RobotPara`。模板带 `TemplateMeta/TemplateId`、`RobotType` 和修订号身份，
+新建控制单元或切换品牌时只允许从匹配类型模板复制。实际机器人配置、工件模板和其他品牌模板均不得作为
+回退源；品牌切换会清除旧品牌运动学、工具参数和型号绑定，强制停用该控制单元，并把相机/手眼完成状态重新置为未完成。
 
 ## 当前品牌能力边界
 
@@ -99,31 +105,57 @@ Start 前必须再次核对本地内容并回读远端内容，确认一致后�
   控制入口逐项验证 `CurCtrlDev=2`、`CurPermit=1`、急停释放、故障状态、伺服状态；默认禁止强抢
   其它客户端的许可。初始化会校验当前Tool/Wobj与配置一致，管理级登录密码只留在品牌驱动配置内，
   不进入适配层DTO或日志。
-- 汇川当前声明连接、状态、MOVL/MOVJ、数据流轨迹、连续点动、暂停/继续、模式切换、报警复位、
-  伺服上电、全局速度、工具读取、P位置寄存器和前三个外部轴。`X,Y,Z,A,B,C` 按手册语义映射为
+- 汇川当前声明连接、状态、MOVL/MOVJ、扫描数据流轨迹、连续点动、模式切换、报警复位、
+  伺服上电、全局速度、工具读取、P位置寄存器、R/B整数寄存器、同工程原生模块执行和前三个外部轴。
+  通用 `IntegerRegister` 默认映射全局 `R0..R255`，写入使用 `Set_R` 并由 `Get_R` 回读；显式 `B/BYTE`
+  映射全局字节变量，PLC_DINT只读且不会冒充可写寄存器。控制器要求 `Set_R` 在编辑模式及以上使用，
+  因此现场若使用通用整数写入，必须配置相应 `ApiUserLevel/ApiPassword`；原生程序调度使用不依赖编辑登录的
+  B字节状态。`X,Y,Z,A,B,C` 按手册语义映射为
   通用 `X,Y,Z,RZ,RY,RX`；运动前回读并保留ArmType和未由通用结构暴露的E4~E6。首次现场使用前
   必须以已知姿态核验该映射；关节脉冲运动还必须配置真实AxisUnit，驱动在比例为空时不声明
   `JointMotion` 并失败关闭。`ExternalAxis` 也只在当前控制单元实际配置外部轴时声明。
-- 汇川轨迹在 `DownlinkTrajectory` 冻结会话内指纹，`StartTrajectory` 按
+- 汇川扫描轨迹在 `DownlinkTrajectory` 冻结会话内指纹，`StartTrajectory` 按
   `Get_CurCmdCacheNum` 做配置上限背压，并为每条运动取得新的 `Get_CurCmdNum`；自然完成要求末条
   `Get_CmdSts(id)=1` 与 `Get_MotionSts=0` 连续回读。暂停使用 `Dsmode PAUSE`、同一数据流身份、
   稳定停止和两次稳定位姿；恢复前校验检查点偏差。安全中止要求数据流暂停/关闭后连续回读
-  `Get_DsMode=0` 且 `Get_MotionSts=0`，不会把非本驱动数据流的运动伪装成已停止。
+  `Get_DsMode=0` 且 `Get_MotionSts=0`；原生程序则执行 `Prg Stop`、`BackStartLine`，并连续确认
+  `Get_TaskRunSts 0 != 1` 与 `Get_MotionSts=0`，不会把单次命令应答冒充真实停止。
 - 汇川 `FtpFileTransfer` 与 `NativeProgramUpload` 已通过独立 `RobotFtpFileTransfer` 底层接入；型号注册项
-  提供 FTP 主机、端口、用户和密码默认值，创建控制单元时自动带出；`ConfigStore.db` 中该控制单元的
-  `RobotPara/BaseParam` 配置记录仍可覆盖型号默认值。业务代码只使用
+  提供 FTP 主机、端口、用户和密码默认值，独立 `robot_type_template/inovance` 模板保存其数据库备份，
+  创建控制单元时自动带出；`ConfigStore.db` 中该控制单元的 `RobotPara/BaseParam` 配置记录仍可覆盖型号默认值。
+  汇川模板不再绑定或读取 `RobotC`。业务代码只使用
   `ConfigLocation::Robot(<控制单元>, "RobotPara")`，不接受配置文件名或路径。
   适配层 DTO 与业务界面不返回 FTP 凭据。远端根目录为 `/TeachProgram`，允许上传 `.pro`、`.prj`、
   `.pts`、`.jsn`；未显式指定目录时，品牌底层先通过 `Get_TaskPrgPath 0` 取得
   `TeachProgram/工程名/main.pro` 形式的当前主任务路径，解析出精确工程目录，并通过
   `Get_TaskRunSts 0` 拒绝覆盖运行中的主任务。现场网络仍需验证目录列表、上传和示教器加载回读。
-- 汇川暂不声明 `RobotTimestamp`、`PersistentProgramRecovery`、`NativeProgramExecution`、
-  `OfflineTrajectoryExport`、`ActualArcWeld`、`IntegerRegister`、`HandEyeMatrixRead`、
+- 汇川 `NativeProgramExecution` 不切换工程：调用方传 `模块名` 或 `当前工程/模块名`，品牌底层先确认
+  当前激活入口精确为 `TeachProgram/<工程>/main.pro`，再由FTP核对目标模块和控制器最多16个PRO文件的
+  上限。业务模块必须是无 `Start/Main` 入口的公共模块，并提供 `Func Run()`；底层先下载目标模块检查
+  契约，备份原 `main.pro` 到 `Job/Inovance/DispatcherRuns`，生成只包含该模块的适配层调度入口，上传后
+  再下载做字节级身份验证。PC在启动前写读 `B255=0`，调度器进入后写1、自然返回前写10；只有
+  `B255=10`、主任务非运行、机器人非运动、控制器无故障连续三次成立，才由适配层报告完成。
+  启动、等待、取消或未知状态失败时统一进入可验证安全中止；`B255` 为汇川型号底层保留变量。
+- 汇川焊接空跑和实际焊接不再使用上位机实时发运动/IO命令：适配层把通用轨迹生成固定模块
+  `HK_WELD_JOB.pro`，FTP上传并字节回读，启动前再次核对SHA-256/大小，然后通过上述 `main.pro`
+  调度器由控制器运行。空跑只生成运动/停留指令。实际焊接JOB内生成 `Set Out`、`Set DA`、
+  `Wait In`、`ISigIn` 掉弧中断/`Trap`、超时 `Alarm`和安全关弧分支；运动与起收弧时序均在控制器JOB内执行。
+  掉弧检测不使用会强制 `Z[0]` 的运动 `Until`，因此正常焊接轨迹保留 `ZR` 连续过渡；
+  现场必须为该JOB分配不与原工程冲突的 `ArcInterruptId`。
+  固定模块会覆盖更新，不会每条焊缝占用一个PRO槽位；生成器拒绝超过单PRO 2000行限制的轨迹。
+- `OfflineTrajectoryExport` 始终声明；生成MOVL时需要已回读的真实 `ArmType`，不伪造机器人构型。
+  `ActualArcWeld` 只在数据库 `Robot/<控制单元>/RobotPara/WeldJob` 的 `Enabled`、起弧DO、焊机就绪DI、
+  弧建立DI、电流/电压DA线性映射、上下限、超时、报警号和中断ID全部有效时动态声明。启动前还要通过
+  `Get_DOCfg`/`Get_DACfg` 确认通道由RC控制，并对关弧DO做连续三次回读；配置不完整时只允许空跑。
+  当前实际焊接JOB只允许单组稳定工艺参数和上位机已展开的点位摆动；轨迹跟踪、控制器原生摆动、运动间过渡电流/电压会明确拒绝，
+  不会静默忽略。2222协议没有原生程序暂停/续行，因此不声明 `PauseResume`；运行中只能安全停止、确认关弧，并重新审核剩余焊道。
+- 汇川暂不声明 `RobotTimestamp`、`PersistentProgramRecovery`、`HandEyeMatrixRead`、
   `HandEyeSupportProgramInstall`。汇川状态样本暂以 PC steady 时间同时填写状态时间轴和接收时间，
   界面会明确显示该来源，不冒充控制器时间戳。其余限制原因分别是：数据流身份不跨上位机重启；
-  尚未实现指定工程/程序身份的选程、启动与完成闭环；运动IO尚未绑定现场焊机起弧/灭弧反馈；
-  PLC DInt只证明读取未证明对应写入；没有本程序需要的手眼矩阵变量与辅助工程契约。相关业务入口
-  必须显示缺失能力，不得用 `Prg Start` 启动“当前工程”冒充按名称原生程序执行。
+  没有本程序需要的手眼矩阵变量与辅助工程契约。相关业务入口
+  必须显示缺失能力，不能用通信成功代替机器人侧功能完成。
 - 汇川已通过C++ Release编译和静态适配契约；真实控制器上的连接、模式、伺服、已知点低速运动、
-  缓存背压、暂停恢复、外部轴和断开安全顺序仍是上线门禁。控制器切回示教器前必须先通过适配层
+  缓存背压、同工程PRO模块调度、自动生成JOB的PRO语法、B255完成见证、原生程序安全停/原main恢复、
+  焊机IO/DA映射、起收弧反馈与报警分支、外部轴和断开安全顺序
+  仍是上线门禁。控制器切回示教器前必须先通过适配层
   完成运动中止、`Motor OFF`、`RemovePermit`，再断开TCP连接。

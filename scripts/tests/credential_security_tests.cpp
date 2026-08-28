@@ -844,6 +844,137 @@ int RunDatabaseNativeIdentityGateTest()
     return 0;
 }
 
+int RunScopedModuleCopyProtectionTest()
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("scoped-module copy temp root"));
+    QString pathError;
+    Check(
+        AppPaths::Initialize(
+            QStringList() << QStringLiteral("CredentialSecurityTests")
+                          << QStringLiteral("--data-root") << temp.path(),
+            &pathError),
+        QStringLiteral("initialize scoped-module copy root: %1").arg(pathError));
+    Check(ConfigDatabase::IsAvailable(), QStringLiteral("open scoped-module copy fixture"));
+
+    const QString templateScope = QStringLiteral("robot_type_template");
+    const QString templateId = QStringLiteral("inovance");
+    const QString robotScope = QStringLiteral("robot");
+    const QString robotId = QStringLiteral("FieldRobot01");
+    const QString baseParam = QStringLiteral("RobotPara/BaseParam");
+    const QString templateMeta = QStringLiteral("RobotPara/TemplateMeta");
+    const QString password = QStringLiteral("Synthetic-Inovance-Template-Password");
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            templateScope, templateId, baseParam,
+            QStringLiteral("FTPPassWord"), password),
+        QStringLiteral("write protected robot-type template password"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            templateScope, templateId, baseParam,
+            QStringLiteral("SocketPort"), QStringLiteral("2222")),
+        QStringLiteral("write robot-type template socket port"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            templateScope, templateId, templateMeta,
+            QStringLiteral("TemplateId"), templateId),
+        QStringLiteral("write robot-type template identity"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            robotScope, robotId, QStringLiteral("RobotPara/Legacy"),
+            QStringLiteral("OldBrandOnly"), QStringLiteral("must-be-removed")),
+        QStringLiteral("write stale target-brand setting"));
+
+    Check(
+        ConfigDatabase::CopyScopedModule(
+            templateScope, templateId, QStringLiteral("RobotPara"),
+            robotScope, robotId, QStringLiteral("RobotPara"), true),
+        QStringLiteral("copy independent type template into actual robot scope"));
+
+    QString copiedPassword;
+    QString copiedPort;
+    QString copiedTemplateId;
+    QString ignored;
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            robotScope, robotId, baseParam,
+            QStringLiteral("FTPPassWord"), &copiedPassword)
+            && copiedPassword == password,
+        QStringLiteral("copied password is re-protected and readable in target scope"));
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            robotScope, robotId, baseParam,
+            QStringLiteral("SocketPort"), &copiedPort)
+            && copiedPort == QStringLiteral("2222"),
+        QStringLiteral("copied non-sensitive robot template value"));
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            robotScope, robotId, templateMeta,
+            QStringLiteral("TemplateId"), &copiedTemplateId)
+            && copiedTemplateId == templateId,
+        QStringLiteral("copied template identity"));
+    Check(
+        ConfigDatabase::ReadScopedSettingStatus(
+            robotScope, robotId, QStringLiteral("RobotPara/Legacy"),
+            QStringLiteral("OldBrandOnly"), &ignored)
+            == ConfigDatabase::ReadStatus::NotFound,
+        QStringLiteral("brand replacement removes stale target sections"));
+
+    {
+        const QString connectionName = QStringLiteral("scoped_module_copy_verify");
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        db.setDatabaseName(temp.filePath(QStringLiteral("Data/ConfigStore.db")));
+        Check(db.open(), QStringLiteral("open copied ciphertext fixture"));
+        QSqlQuery query(db);
+        query.prepare(
+            "SELECT scope_type, value_text, sensitive, encrypted FROM settings "
+            "WHERE module=? AND key_name=? AND ((scope_type=? AND scope_id=?) OR (scope_type=? AND scope_id=?)) "
+            "ORDER BY scope_type");
+        query.addBindValue(baseParam);
+        query.addBindValue(QStringLiteral("FTPPassWord"));
+        query.addBindValue(robotScope);
+        query.addBindValue(robotId);
+        query.addBindValue(templateScope);
+        query.addBindValue(templateId);
+        Check(query.exec(), QStringLiteral("query source and target protected values"));
+        QMap<QString, QString> protectedValues;
+        while (query.next())
+        {
+            Check(query.value(2).toInt() == 1 && query.value(3).toInt() == 1,
+                QStringLiteral("source and target passwords remain protected"));
+            protectedValues.insert(query.value(0).toString(), query.value(1).toString());
+        }
+        Check(protectedValues.size() == 2,
+            QStringLiteral("source and target protected rows exist"));
+        Check(protectedValues.value(templateScope) != protectedValues.value(robotScope),
+            QStringLiteral("scope-bound password ciphertext is re-encrypted for target"));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(QStringLiteral("scoped_module_copy_verify"));
+
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            robotScope, robotId, baseParam,
+            QStringLiteral("FTPPassWord"), QStringLiteral("Target-Override")),
+        QStringLiteral("write target-specific override"));
+    Check(
+        ConfigDatabase::CopyScopedModule(
+            templateScope, templateId, QStringLiteral("RobotPara"),
+            robotScope, robotId, QStringLiteral("RobotPara"), false),
+        QStringLiteral("non-overwrite type-template copy"));
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            robotScope, robotId, baseParam,
+            QStringLiteral("FTPPassWord"), &copiedPassword)
+            && copiedPassword == QStringLiteral("Target-Override"),
+        QStringLiteral("non-overwrite copy preserves target-specific value"));
+
+    QTextStream(stdout)
+        << "PASS: scoped module copy re-encrypts template credentials and preserves overwrite semantics"
+        << Qt::endl;
+    return 0;
+}
+
 int RunCredentialScrubPendingGateTest()
 {
     QTemporaryDir temp;
@@ -2171,6 +2302,10 @@ int main(int argc, char* argv[])
     if (app.arguments().contains(QStringLiteral("--database-native-identity-gate")))
     {
         return RunDatabaseNativeIdentityGateTest();
+    }
+    if (app.arguments().contains(QStringLiteral("--scoped-module-copy-protection")))
+    {
+        return RunScopedModuleCopyProtectionTest();
     }
     if (app.arguments().contains(QStringLiteral("--pending-scrub-gate")))
     {

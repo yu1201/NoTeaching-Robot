@@ -101,6 +101,17 @@ ConfigLocation ConfigLocation::Robot(const QString& robotName, const QString& mo
     return { QStringLiteral("robot"), robotName.trimmed(), NormalizePart(moduleName) };
 }
 
+ConfigLocation ConfigLocation::RobotTypeTemplate(
+    const QString& templateId,
+    const QString& moduleName)
+{
+    return {
+        QStringLiteral("robot_type_template"),
+        NormalizePart(templateId).toLower(),
+        NormalizePart(moduleName)
+    };
+}
+
 ConfigLocation ConfigLocation::WorkpieceTemplate(const QString& templateName, const QString& moduleName)
 {
     return { QStringLiteral("workpiece_template"), templateName.trimmed(), NormalizePart(moduleName) };

@@ -8,7 +8,9 @@ class RobotLog;
 
 struct RobotDriverSetupProfile
 {
-    const char* templateUnitName = "";
+    // Stable database identity for the brand template.  This must never be a
+    // real control-unit name (RobotA/RobotB/RobotC, etc.).
+    const char* templateId = "";
     int defaultSocketPort = 0;
     int defaultMonitorPort = 0;
     bool usesMonitorPort = false;

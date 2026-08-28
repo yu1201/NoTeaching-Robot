@@ -3010,7 +3010,7 @@ void FunctionTestDialog::FanucCallJobTest()
 
     bool ok = false;
     const QString jobName = QInputDialog::getText(
-        this, "调用任务", "任务/程序名（STEP可输入 Project/Program）：",
+        this, "调用任务", "任务/程序名（STEP可输入Project/Program；汇川输入当前工程的公共模块名，模块需提供Func Run()）：",
         QLineEdit::Normal, QString(), &ok);
     if (!ok || jobName.trimmed().isEmpty())
     {

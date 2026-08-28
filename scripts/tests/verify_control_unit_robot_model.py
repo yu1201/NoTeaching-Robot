@@ -37,9 +37,12 @@ for token in (
 assert "QString robotModelId;" in management
 assert 'unit.robotModelId = "step.sa10-2000h"' not in management
 assert "DefaultFtpCredentialForRobotType" in management
-for token in ("defaultFtpHost", "defaultFtpPort", "defaultFtpUser", "defaultFtpPassword"):
+for token in ("templateId", "defaultFtpHost", "defaultFtpPort", "defaultFtpUser", "defaultFtpPassword"):
     assert token in registry_header, f"missing model-bound FTP default field: {token}"
     assert f"setup->{token}" in management, f"control-unit UI does not consume model FTP default: {token}"
+assert "templateUnitName" not in registry_header
+assert "RobotTypeTemplateConfig(robotType)" in management
+assert "RobotConfig(templateRobot)" not in management
 for name, source in (
     ("FANUC", fanuc_driver),
     ("STEP", step_driver),
