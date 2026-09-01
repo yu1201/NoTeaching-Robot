@@ -24,6 +24,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPixmap>
@@ -39,6 +40,135 @@
 #include <memory>
 #include <thread>
 #include <utility>
+
+// 与先测后焊运行监控一致的实时激光线视图：显示 CameraFrameCache 最新帧中的
+// XData/YData，固定物理标尺，不参与完整点云落盘、手眼变换或后处理。
+class ScanPoseLaserLineLiveView final : public QWidget
+{
+public:
+    explicit ScanPoseLaserLineLiveView(QWidget* parent = nullptr)
+        : QWidget(parent)
+    {
+        setMinimumHeight(170);
+    }
+
+    void SetFrame(const udpDataShow& frame)
+    {
+        m_x = frame.XData;
+        m_y = frame.YData;
+        m_hasFrame = m_x.size() >= 2 && m_x.size() == m_y.size();
+        if (m_hasFrame)
+        {
+            double minY = m_y[0];
+            double maxY = m_y[0];
+            for (int index = 1; index < m_y.size(); ++index)
+            {
+                minY = std::min(minY, m_y[index]);
+                maxY = std::max(maxY, m_y[index]);
+            }
+            const double dataCenterY = (minY + maxY) * 0.5;
+            const double halfSpanY = m_halfSpanXmm
+                * (height() > 0 && width() > 0 ? double(height()) / width() : 1.0);
+            if (!m_hasLockedCenterY
+                || std::abs(dataCenterY - m_lockedCenterY) > halfSpanY * 0.8)
+            {
+                m_lockedCenterY = dataCenterY;
+                m_hasLockedCenterY = true;
+            }
+        }
+        update();
+    }
+
+    void ClearFrame()
+    {
+        m_x.clear();
+        m_y.clear();
+        m_hasFrame = false;
+        m_hasLockedCenterY = false;
+        update();
+    }
+
+    double AdjustPointSize(double delta)
+    {
+        m_pointSize = std::clamp(m_pointSize + delta, 0.5, 6.0);
+        update();
+        return m_pointSize;
+    }
+
+    double AdjustViewSpan(double delta)
+    {
+        const double fullSpan = std::clamp(m_halfSpanXmm * 2.0 + delta, 40.0, 1000.0);
+        m_halfSpanXmm = fullSpan * 0.5;
+        m_hasLockedCenterY = false;
+        update();
+        return fullSpan;
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(0x05, 0x08, 0x0B));
+        painter.setPen(QColor(0x2B, 0x45, 0x52));
+        painter.drawRect(rect().adjusted(0, 0, -1, -1));
+        if (!m_hasFrame)
+        {
+            painter.setPen(QColor(0x6E, 0x88, 0x94));
+            painter.drawText(rect(), Qt::AlignCenter,
+                QStringLiteral("激光线点云：等待相机帧..."));
+            return;
+        }
+
+        const QRectF area = rect().adjusted(10, 10, -10, -10);
+        const double scale = area.width() / (2.0 * m_halfSpanXmm);
+        const double centerX = 0.0;
+        const double centerY = m_hasLockedCenterY ? m_lockedCenterY : 0.0;
+
+        QPen gridPen(QColor(0x24, 0x38, 0x42));
+        gridPen.setStyle(Qt::DashLine);
+        painter.setPen(gridPen);
+        constexpr int kGridCount = 4;
+        QFont labelFont = painter.font();
+        labelFont.setPointSize(9);
+        painter.setFont(labelFont);
+        for (int index = 1; index < kGridCount; ++index)
+        {
+            const double gx = area.left() + area.width() * index / kGridCount;
+            const double gy = area.top() + area.height() * index / kGridCount;
+            painter.drawLine(QPointF(gx, area.top()), QPointF(gx, area.bottom()));
+            painter.drawLine(QPointF(area.left(), gy), QPointF(area.right(), gy));
+        }
+        painter.setPen(QColor(0x5E, 0x78, 0x84));
+        for (int index = 1; index < kGridCount; ++index)
+        {
+            const double gx = area.left() + area.width() * index / kGridCount;
+            const double gy = area.top() + area.height() * index / kGridCount;
+            const double dataX = centerX + (gx - area.center().x()) / scale;
+            const double dataY = centerY - (gy - area.center().y()) / scale;
+            painter.drawText(QPointF(gx + 3.0, area.bottom() - 4.0),
+                QString::number(dataX, 'f', 0));
+            painter.drawText(QPointF(area.left() + 4.0, gy - 3.0),
+                QString::number(dataY, 'f', 0));
+        }
+
+        painter.setPen(QPen(QColor(0x72, 0xD4, 0xDD), m_pointSize));
+        for (int index = 0; index < m_x.size(); ++index)
+        {
+            const double px = area.center().x() + (m_x[index] - centerX) * scale;
+            const double py = area.center().y() - (m_y[index] - centerY) * scale;
+            painter.drawPoint(QPointF(px, py));
+        }
+    }
+
+private:
+    QVector<double> m_x;
+    QVector<double> m_y;
+    bool m_hasFrame = false;
+    bool m_hasLockedCenterY = false;
+    double m_lockedCenterY = 0.0;
+    double m_halfSpanXmm = 120.0;
+    double m_pointSize = 1.0;
+};
 
 namespace
 {
@@ -339,19 +469,110 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     actionRow->addWidget(m_simulateCurveButton);
     contentLayout->addLayout(actionRow);
 
-    auto* imageGroup = new QGroupBox(QStringLiteral("扫描实时相机图像"), content);
-    auto* imageLayout = new QVBoxLayout(imageGroup);
-    m_liveImageStatusLabel = new QLabel(QStringLiteral("等待扫描启动并取得图像帧。"), imageGroup);
+    auto* previewGroup = new QGroupBox(QStringLiteral("扫描实时点云与相机图像"), content);
+    auto* previewLayout = new QVBoxLayout(previewGroup);
+    previewLayout->setSpacing(8);
+
+    auto* viewToolbar = new QHBoxLayout();
+    viewToolbar->setSpacing(8);
+    auto makeViewButton = [previewGroup](const QString& text)
+        {
+            auto* button = new QPushButton(text, previewGroup);
+            button->setMinimumSize(64, 40);
+            return button;
+        };
+    viewToolbar->addWidget(new QLabel(QStringLiteral("点大小:"), previewGroup));
+    auto* pointSmallerButton = makeViewButton(QStringLiteral("−"));
+    auto* pointSizeLabel = new QLabel(QStringLiteral("1.0"), previewGroup);
+    pointSizeLabel->setAlignment(Qt::AlignCenter);
+    pointSizeLabel->setMinimumWidth(44);
+    auto* pointBiggerButton = makeViewButton(QStringLiteral("＋"));
+    viewToolbar->addWidget(pointSmallerButton);
+    viewToolbar->addWidget(pointSizeLabel);
+    viewToolbar->addWidget(pointBiggerButton);
+    viewToolbar->addSpacing(24);
+    viewToolbar->addWidget(new QLabel(QStringLiteral("视野:"), previewGroup));
+    auto* zoomInButton = makeViewButton(QStringLiteral("放大"));
+    auto* viewSpanLabel = new QLabel(QStringLiteral("240 mm"), previewGroup);
+    viewSpanLabel->setAlignment(Qt::AlignCenter);
+    viewSpanLabel->setMinimumWidth(76);
+    auto* zoomOutButton = makeViewButton(QStringLiteral("缩小"));
+    viewToolbar->addWidget(zoomInButton);
+    viewToolbar->addWidget(viewSpanLabel);
+    viewToolbar->addWidget(zoomOutButton);
+    viewToolbar->addStretch(1);
+    previewLayout->addLayout(viewToolbar);
+
+    auto* liveViews = new QHBoxLayout();
+    liveViews->setSpacing(10);
+    auto* pointCloudPreview = new QVBoxLayout();
+    auto* pointCloudTitle = new QLabel(QStringLiteral("实时激光线点云"), previewGroup);
+    pointCloudTitle->setStyleSheet(QStringLiteral("color: #9ED8DB; font-weight: 600;"));
+    m_livePointCloudStatusLabel = new QLabel(QStringLiteral("等待扫描启动并取得点云帧。"), previewGroup);
+    m_livePointCloudStatusLabel->setWordWrap(true);
+    m_livePointCloudView = new ScanPoseLaserLineLiveView(previewGroup);
+    m_livePointCloudView->setMinimumHeight(320);
+    m_livePointCloudView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    pointCloudPreview->addWidget(pointCloudTitle);
+    pointCloudPreview->addWidget(m_livePointCloudStatusLabel);
+    pointCloudPreview->addWidget(m_livePointCloudView, 1);
+
+    auto* imagePreview = new QVBoxLayout();
+    auto* imageTitle = new QLabel(QStringLiteral("实时相机图像"), previewGroup);
+    imageTitle->setStyleSheet(QStringLiteral("color: #9ED8DB; font-weight: 600;"));
+    m_liveImageStatusLabel = new QLabel(QStringLiteral("等待扫描启动并取得图像帧。"), previewGroup);
+    m_liveImageStatusLabel->setWordWrap(true);
     m_liveImageLabel = new QLabel(
-        QStringLiteral("相机图像：等待图像帧...\n（需所选相机图像传输口支持且已开启）"), imageGroup);
+        QStringLiteral("相机图像：等待图像帧...\n（需所选相机图像传输口支持且已开启）"), previewGroup);
     m_liveImageLabel->setAlignment(Qt::AlignCenter);
     m_liveImageLabel->setMinimumHeight(320);
     m_liveImageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     m_liveImageLabel->setStyleSheet(QStringLiteral(
         "QLabel { background: #071017; color: #6E8894; border: 1px solid #2B4552; border-radius: 8px; }"));
-    imageLayout->addWidget(m_liveImageStatusLabel);
-    imageLayout->addWidget(m_liveImageLabel, 1);
-    contentLayout->addWidget(imageGroup);
+    imagePreview->addWidget(imageTitle);
+    imagePreview->addWidget(m_liveImageStatusLabel);
+    imagePreview->addWidget(m_liveImageLabel, 1);
+    liveViews->addLayout(pointCloudPreview, 1);
+    liveViews->addLayout(imagePreview, 1);
+    previewLayout->addLayout(liveViews, 1);
+    contentLayout->addWidget(previewGroup);
+
+    connect(pointSmallerButton, &QPushButton::clicked, this,
+        [this, pointSizeLabel]()
+        {
+            if (m_livePointCloudView != nullptr)
+            {
+                pointSizeLabel->setText(QString::number(
+                    m_livePointCloudView->AdjustPointSize(-0.5), 'f', 1));
+            }
+        });
+    connect(pointBiggerButton, &QPushButton::clicked, this,
+        [this, pointSizeLabel]()
+        {
+            if (m_livePointCloudView != nullptr)
+            {
+                pointSizeLabel->setText(QString::number(
+                    m_livePointCloudView->AdjustPointSize(0.5), 'f', 1));
+            }
+        });
+    connect(zoomInButton, &QPushButton::clicked, this,
+        [this, viewSpanLabel]()
+        {
+            if (m_livePointCloudView != nullptr)
+            {
+                viewSpanLabel->setText(QStringLiteral("%1 mm").arg(
+                    m_livePointCloudView->AdjustViewSpan(-40.0), 0, 'f', 0));
+            }
+        });
+    connect(zoomOutButton, &QPushButton::clicked, this,
+        [this, viewSpanLabel]()
+        {
+            if (m_livePointCloudView != nullptr)
+            {
+                viewSpanLabel->setText(QStringLiteral("%1 mm").arg(
+                    m_livePointCloudView->AdjustViewSpan(40.0), 0, 'f', 0));
+            }
+        });
     contentLayout->addStretch(1);
     scroll->setWidget(content);
     root->addWidget(scroll, 1);
@@ -370,9 +591,9 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     connect(m_simulateCurveButton, &QPushButton::clicked,
         this, [this]() { RunStraightCurveSimulation(); });
 
-    m_liveImageTimer = new QTimer(this);
-    m_liveImageTimer->setInterval(100);
-    connect(m_liveImageTimer, &QTimer::timeout, this, [this]() { RefreshLiveImage(); });
+    m_livePreviewTimer = new QTimer(this);
+    m_livePreviewTimer->setInterval(100);
+    connect(m_livePreviewTimer, &QTimer::timeout, this, [this]() { RefreshLivePreview(); });
 
     LoadRobotList(unitIndex);
     LoadCameraList();
@@ -410,9 +631,9 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
 
 ScanPoseVariationTestDialog::~ScanPoseVariationTestDialog()
 {
-    if (m_liveImageTimer != nullptr)
+    if (m_livePreviewTimer != nullptr)
     {
-        m_liveImageTimer->stop();
+        m_livePreviewTimer->stop();
     }
     if (m_cameraCache != nullptr)
     {
@@ -504,6 +725,7 @@ void ScanPoseVariationTestDialog::ChangeRobot(int comboIndex)
     m_unitIndex = m_robotCombo->itemData(comboIndex).toInt();
     m_cameraCache = m_cameraCacheForUnit ? m_cameraCacheForUnit(m_unitIndex) : nullptr;
     m_lastImageTimestamp = 0;
+    m_lastPointCloudTimestamp = 0;
     m_lastStraightCurvePath.clear();
     LoadCameraList();
     QString error;
@@ -521,6 +743,11 @@ void ScanPoseVariationTestDialog::ChangeRobot(int comboIndex)
     {
         m_liveImageLabel->setPixmap(QPixmap());
         m_liveImageLabel->setText(QStringLiteral("相机图像：等待扫描启动..."));
+    }
+    if (m_livePointCloudView != nullptr) m_livePointCloudView->ClearFrame();
+    if (m_livePointCloudStatusLabel != nullptr)
+    {
+        m_livePointCloudStatusLabel->setText(QStringLiteral("等待扫描启动并取得点云帧。"));
     }
     AppendLog(QStringLiteral("测试机器人已切换为：%1；已读取该机器人的独立示教与扫描参数。")
         .arg(RobotName()));
@@ -545,9 +772,36 @@ bool ScanPoseVariationTestDialog::SaveSelection(QString* error) const
         SelectionConfig(), kSelectionSection, QStringLiteral("RobotName"), RobotName(), error);
 }
 
-void ScanPoseVariationTestDialog::RefreshLiveImage()
+void ScanPoseVariationTestDialog::RefreshLivePreview()
 {
-    if (!m_running || m_cameraCache == nullptr || m_liveImageLabel == nullptr) return;
+    if (!m_running || m_cameraCache == nullptr) return;
+
+    udpDataShow latestFrame;
+    if (m_livePointCloudView != nullptr && m_cameraCache->Latest(latestFrame))
+    {
+        const qint64 frameTimestamp = static_cast<qint64>(latestFrame.timestamp);
+        if (frameTimestamp > 0 && frameTimestamp != m_lastPointCloudTimestamp)
+        {
+            m_lastPointCloudTimestamp = frameTimestamp;
+            m_livePointCloudView->SetFrame(latestFrame);
+            if (m_livePointCloudStatusLabel != nullptr)
+            {
+                m_livePointCloudStatusLabel->setText(
+                    QStringLiteral("实时显示：%1 / %2，三维点=%3，点云时间戳=%4")
+                        .arg(RobotName(), CurrentCameraSection())
+                        .arg(latestFrame.allResultPoint.size())
+                        .arg(frameTimestamp));
+            }
+        }
+    }
+    else if (m_livePointCloudStatusLabel != nullptr)
+    {
+        m_livePointCloudStatusLabel->setText(
+            QStringLiteral("正在等待 %1 / %2 的点云帧。")
+                .arg(RobotName(), CurrentCameraSection()));
+    }
+
+    if (m_liveImageLabel == nullptr) return;
     qint64 imageTimestamp = 0;
     const QImage image = m_cameraCache->LatestImage(&imageTimestamp);
     if (image.isNull() || imageTimestamp <= 0)
@@ -1534,8 +1788,14 @@ void ScanPoseVariationTestDialog::SetRunning(bool running)
     {
         if (m_curveSimulationRunning)
         {
-            if (m_liveImageTimer != nullptr) m_liveImageTimer->stop();
+            if (m_livePreviewTimer != nullptr) m_livePreviewTimer->stop();
             if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(false);
+            if (m_livePointCloudView != nullptr) m_livePointCloudView->ClearFrame();
+            if (m_livePointCloudStatusLabel != nullptr)
+            {
+                m_livePointCloudStatusLabel->setText(QStringLiteral(
+                    "正在运行Tool1直线模拟轨迹；本过程不启动点云采集。"));
+            }
             if (m_liveImageStatusLabel != nullptr)
             {
                 m_liveImageStatusLabel->setText(QStringLiteral(
@@ -1545,8 +1805,15 @@ void ScanPoseVariationTestDialog::SetRunning(bool running)
         else
         {
             m_lastImageTimestamp = 0;
+            m_lastPointCloudTimestamp = 0;
+            if (m_livePointCloudView != nullptr) m_livePointCloudView->ClearFrame();
             if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(true);
-            if (m_liveImageTimer != nullptr) m_liveImageTimer->start();
+            if (m_livePreviewTimer != nullptr) m_livePreviewTimer->start();
+            if (m_livePointCloudStatusLabel != nullptr)
+            {
+                m_livePointCloudStatusLabel->setText(
+                    QStringLiteral("正在启动 %1 / %2 实时点云...").arg(RobotName(), CurrentCameraSection()));
+            }
             if (m_liveImageStatusLabel != nullptr)
             {
                 m_liveImageStatusLabel->setText(
@@ -1556,8 +1823,14 @@ void ScanPoseVariationTestDialog::SetRunning(bool running)
     }
     else
     {
-        if (m_liveImageTimer != nullptr) m_liveImageTimer->stop();
+        if (m_livePreviewTimer != nullptr) m_livePreviewTimer->stop();
         if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(false);
+        if (m_livePointCloudStatusLabel != nullptr)
+        {
+            m_livePointCloudStatusLabel->setText(m_curveSimulationRunning
+                ? QStringLiteral("直线模拟运行已结束；本过程未采集点云。")
+                : QStringLiteral("扫描已结束；保留最后一帧实时点云。"));
+        }
         if (m_liveImageStatusLabel != nullptr)
         {
             m_liveImageStatusLabel->setText(m_curveSimulationRunning

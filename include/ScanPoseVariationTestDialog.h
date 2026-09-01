@@ -12,6 +12,7 @@
 
 class CameraFrameCache;
 class ContralUnit;
+class ScanPoseLaserLineLiveView;
 class QComboBox;
 class QLabel;
 class QDoubleSpinBox;
@@ -48,7 +49,7 @@ private:
     void LoadRobotList(int initialUnitIndex);
     void LoadCameraList(const QString& preferredSection = QString());
     void ChangeRobot(int comboIndex);
-    void RefreshLiveImage();
+    void RefreshLivePreview();
     bool SaveSelection(QString* error = nullptr) const;
     bool LoadConfiguration(QString* error = nullptr);
     bool SaveConfiguration(QString* error = nullptr) const;
@@ -76,6 +77,7 @@ private:
     bool m_curveSimulationRunning = false;
     bool m_loadingSelectors = false;
     qint64 m_lastImageTimestamp = 0;
+    qint64 m_lastPointCloudTimestamp = 0;
 
     bool m_hasBasePose = false;
     bool m_hasStartPose = false;
@@ -107,9 +109,11 @@ private:
     QPushButton* m_generateButton = nullptr;
     QPushButton* m_runButton = nullptr;
     QPushButton* m_simulateCurveButton = nullptr;
+    ScanPoseLaserLineLiveView* m_livePointCloudView = nullptr;
+    QLabel* m_livePointCloudStatusLabel = nullptr;
     QLabel* m_liveImageLabel = nullptr;
     QLabel* m_liveImageStatusLabel = nullptr;
-    QTimer* m_liveImageTimer = nullptr;
+    QTimer* m_livePreviewTimer = nullptr;
     QPlainTextEdit* m_logEdit = nullptr;
     QString m_lastStraightCurvePath;
 };

@@ -80,7 +80,9 @@ def main() -> int:
         "机器人运动与时序",
         "相机与空间坐标",
         "contentLayout->setSizeConstraint(QLayout::SetMinAndMaxSize)",
-        "扫描实时相机图像",
+        "扫描实时点云与相机图像",
+        "实时激光线点云",
+        "实时相机图像",
         "示教基础姿态并保存",
         "示教扫描起点并保存",
         "示教扫描终点并保存",
@@ -171,8 +173,17 @@ def main() -> int:
         "postProcessMode",
     ):
         require(token in run_scan, f"execution/output workflow missing: {token}")
-    for token in ("SetLiveImageEnabled(true)", "LatestImage(&imageTimestamp)"):
-        require(token in dialog, f"live image workflow missing: {token}")
+    for token in (
+        "SetLiveImageEnabled(true)",
+        "Latest(latestFrame)",
+        "LatestImage(&imageTimestamp)",
+        "m_livePointCloudView->SetFrame(latestFrame)",
+        "liveViews->addLayout(pointCloudPreview, 1)",
+        "liveViews->addLayout(imagePreview, 1)",
+        "AdjustPointSize",
+        "AdjustViewSpan",
+    ):
+        require(token in dialog, f"side-by-side live point-cloud/image workflow missing: {token}")
 
     run_cycle = section(
         service,
