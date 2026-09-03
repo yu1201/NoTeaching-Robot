@@ -8,6 +8,7 @@ reuse of the existing scan acquisition/output chain and the Tool1 fixed-pose
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import sys
 
@@ -43,6 +44,7 @@ def main() -> int:
     service = read("src/MeasureThenWeldService.cpp")
     service_header = read("include/MeasureThenWeldService.h")
     safety_store = read("src/WeldSafetyRecoveryStore.cpp")
+    release_package = read("scripts/build_release_package.ps1")
 
     require("扫描变姿态精度测试" not in function_test,
             "scan pose-variation entry still lives inside the ordinary function-test page")
@@ -171,8 +173,43 @@ def main() -> int:
         "post_process_name=",
         "CurrentPostProcessMode()",
         "postProcessMode",
+        "ResolveScanPosePointCloudSdk(",
+        "pointCloudSdkLibraryDirOverride",
+        "pointCloudSdkSha256",
+        "trajectory_sdk_override_dir=",
+        "trajectory_sdk_dll=",
+        "trajectory_sdk_sha256=",
+        "trajectory_sdk_mode=",
+        "trajectory_sdk_resample_step_mm=",
     ):
         require(token in run_scan, f"execution/output workflow missing: {token}")
+    sdk_validation = run_scan.find("ResolveScanPosePointCloudSdk(")
+    motion_confirmation = run_scan.find("QMessageBox::question(")
+    require(0 <= sdk_validation < motion_confirmation,
+            "scan-pose SDK is not identity-checked before robot-motion confirmation")
+    require("925ac6bf19762f76cf249c96a0fe873abfa94151ac6636989c10759ce4a27432" in dialog,
+            "scan-pose SDK SHA-256 is not pinned in the application")
+    scan_pose_sdk_bin = (ROOT / "SDK/PointCloudExtration"
+                         / "findWeldingLine_sdk_x64_Release_20260902_1742/bin")
+    scan_pose_sdk_dll = scan_pose_sdk_bin / "findWeldingLine.dll"
+    require(scan_pose_sdk_dll.is_file(), "bundled scan-pose findWeldingLine.dll is missing")
+    actual_sdk_sha256 = hashlib.sha256(scan_pose_sdk_dll.read_bytes()).hexdigest()
+    require(actual_sdk_sha256 ==
+            "925ac6bf19762f76cf249c96a0fe873abfa94151ac6636989c10759ce4a27432",
+            f"bundled scan-pose SDK hash mismatch: {actual_sdk_sha256}")
+    for dependency in (
+        "opencv_world480.dll",
+        "pcl_common.dll",
+        "pcl_features.dll",
+        "pcl_filters.dll",
+        "pcl_kdtree.dll",
+        "pcl_octree.dll",
+        "pcl_sample_consensus.dll",
+        "pcl_search.dll",
+        "pcl_segmentation.dll",
+    ):
+        require((scan_pose_sdk_bin / dependency).is_file(),
+                f"bundled scan-pose SDK dependency is missing: {dependency}")
     for token in (
         "SetLiveImageEnabled(true)",
         "Latest(latestFrame)",
@@ -182,8 +219,17 @@ def main() -> int:
         "liveViews->addLayout(imagePreview, 1)",
         "AdjustPointSize",
         "AdjustViewSpan",
+        "previewGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding)",
+        "previewGroup->setMinimumHeight(480)",
+        "m_livePointCloudView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding)",
+        "m_liveImageLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding)",
+        "contentLayout->addWidget(previewGroup, 1)",
     ):
         require(token in dialog, f"side-by-side live point-cloud/image workflow missing: {token}")
+    require("QSizePolicy::Ignored" not in dialog,
+            "live preview widgets can still collapse below their display area")
+    require("contentLayout->addStretch(1)" not in dialog,
+            "empty bottom stretch can still consume the live preview display area")
 
     run_cycle = section(
         service,
@@ -204,6 +250,7 @@ def main() -> int:
         "MoveScanEndSafeAndWait(",
         "cameraSectionOverride.trimmed().isEmpty()",
         "postProcessMode",
+        "pointCloudSdkLibraryDirOverride",
     ):
         require(token in run_cycle, f"pre-motion/safe-retraction contract missing: {token}")
 
@@ -233,8 +280,27 @@ def main() -> int:
         "runCorrugatedBoardPostProcess",
         "ScanPostProcessMode::FeaturePointSmoothCurve",
         "BuildSmoothFeatureCurve",
+        "pointCloudSettings.libraryDir",
+        "PointCloudProcessingConfig::Mode::SdkBaseWeldFit",
+        "pointCloudSettings.resampleStepMm = 2.0",
+        "pointCloudSettings.sdkUseWeldedStartTruncation = false",
+        "本轮扫描轨迹计算已锁定为新版SDK返回轨迹+拟合（2mm重采样）",
+        "SDK轨迹已计算但未通过后处理门禁",
     ):
         require(token in collector, f"post-process branch missing from scan collector: {token}")
+    require("useReturnedTrackAsBaseWeld" in service
+            and "workingExtraction.points = extraction.rawPoints" in service,
+            "findWeldingLine returned-track compatibility is missing")
+    require("const QString& pointCloudSdkLibraryDirOverride = QString()" in service_header,
+            "ordinary scan callers did not retain an empty SDK-override default")
+    for token in (
+        "findWeldingLine_sdk_x64_Release_20260902_1742",
+        "bin/findWeldingLine.dll",
+        "925AC6BF19762F76CF249C96A0FE873ABFA94151AC6636989C10759CE4A27432",
+        "Get-FileHash",
+    ):
+        require(token in release_package,
+                f"release package does not pin/copy the scan-pose SDK runtime: {token}")
     require("PreciseLaserPoint_FeatureSmoothCurve_2mm.txt" in service,
             "feature-point smooth-curve output has no dedicated result artifact")
     raw_only_branch = collector.find("if (!runCorrugatedBoardPostProcess)")

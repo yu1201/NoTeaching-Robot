@@ -361,6 +361,42 @@ foreach ($relative in $trackedPointCloudConfig) {
     Copy-TrackedReleaseFile -RelativePath $normalized -DestinationPath (Join-Path $pointCloudExtractionTargetDir $configRelative)
 }
 
+# 扫描变姿态精度测试使用独立、固定版本的新版 SDK。它的依赖必须与
+# findWeldingLine.dll 同目录分发，不能混入上面的旧版 PCL/OpenCV 运行时。
+$scanPoseSdkVersion = "findWeldingLine_sdk_x64_Release_20260902_1742"
+$scanPoseSdkExpectedSha256 = "925AC6BF19762F76CF249C96A0FE873ABFA94151AC6636989C10759CE4A27432"
+$scanPoseSdkRelativeRoot = "SDK/PointCloudExtration/$scanPoseSdkVersion"
+$scanPoseSdkTargetRoot = Join-Path $pointCloudExtractionTargetDir $scanPoseSdkVersion
+$scanPoseSdkRuntimeFiles = @(
+    "README.md",
+    "bin/CONCRT140.dll",
+    "bin/findWeldingLine.dll",
+    "bin/MSVCP140.dll",
+    "bin/opencv_world480.dll",
+    "bin/pcl_common.dll",
+    "bin/pcl_features.dll",
+    "bin/pcl_filters.dll",
+    "bin/pcl_kdtree.dll",
+    "bin/pcl_ml.dll",
+    "bin/pcl_octree.dll",
+    "bin/pcl_sample_consensus.dll",
+    "bin/pcl_search.dll",
+    "bin/pcl_segmentation.dll",
+    "bin/VCRUNTIME140_1.dll",
+    "bin/VCRUNTIME140.dll"
+)
+foreach ($sdkRuntimeFile in $scanPoseSdkRuntimeFiles) {
+    $normalizedSdkFile = $sdkRuntimeFile.Replace('\', '/')
+    Copy-TrackedReleaseFile `
+        -RelativePath "$scanPoseSdkRelativeRoot/$normalizedSdkFile" `
+        -DestinationPath (Join-Path $scanPoseSdkTargetRoot $sdkRuntimeFile)
+}
+$packagedScanPoseSdkDll = Join-Path $scanPoseSdkTargetRoot "bin\findWeldingLine.dll"
+$packagedScanPoseSdkHash = (Get-FileHash -LiteralPath $packagedScanPoseSdkDll -Algorithm SHA256).Hash
+if ($packagedScanPoseSdkHash -cne $scanPoseSdkExpectedSha256) {
+    throw "Scan-pose findWeldingLine.dll SHA-256 mismatch: expected=$scanPoseSdkExpectedSha256 actual=$packagedScanPoseSdkHash"
+}
+
 # SDK\STEP\versions is intentionally NOT shipped at all:
 # - The STEP SDK is statically linked into the exe (dumpbin shows no Robot-SDK.dll),
 #   so the .lib/.hpp archives are link-time material, useless on field machines.

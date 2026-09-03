@@ -2691,7 +2691,10 @@ PlatformSemanticValidator::CandidateCheck EvaluatePlatformRefitSlopeCandidate(
             PlatformRefitCandidatePathValue(point.point, params.sampleAxis),
             PlatformRefitCandidateProfileValue(point.point, params.sampleAxis),
             PlatformRefitCandidateCornerType(point.type),
-            point.isLapStepBoundary
+            point.isLapStepBoundary,
+            point.point.x(),
+            point.point.y(),
+            point.point.z()
         });
     }
     return PlatformSemanticValidator::EvaluateCandidate(
@@ -2722,6 +2725,22 @@ QString PlatformRefitSlopeCandidateSummary(
     }
     return QString("FAIL（%1）")
         .arg(failures.join(QStringLiteral("；")));
+}
+
+void AppendPlatformRefitCandidateDiagnostics(
+    const QString& candidateName,
+    const PlatformSemanticValidator::CandidateCheck& check,
+    const MeasureThenWeldService::LogCallback& appendLog)
+{
+    if (!appendLog)
+    {
+        return;
+    }
+    for (const std::string& diagnostic : check.diagnostics)
+    {
+        appendLog(QString("平台重算候选错误点：候选=%1，%2")
+            .arg(candidateName, QString::fromStdString(diagnostic)));
+    }
 }
 
 RobotCalculation::MeasureThenWeldAnalysisResult
@@ -2758,6 +2777,15 @@ AnalyzeDirectWithPlatformRefitCandidateSelection(
             refitOffParams);
     const PlatformSemanticValidator::CandidateCheck refitOffCheck =
         EvaluatePlatformRefitSlopeCandidate(refitOff, refitOffParams);
+
+    AppendPlatformRefitCandidateDiagnostics(
+        QStringLiteral("关闭"),
+        refitOffCheck,
+        appendLog);
+    AppendPlatformRefitCandidateDiagnostics(
+        QStringLiteral("开启"),
+        refitOnCheck,
+        appendLog);
 
     const QString refitOffSummary =
         PlatformRefitSlopeCandidateSummary(refitOffCheck);
@@ -2894,6 +2922,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         // ②SDK+拟合：SDK 输出基础焊道（稠密），再喂滤波拟合提取特征点。
         // 失败直接报错，不回退其他方法。
         const bool useBaseWeldFit = settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
+        const QDir configuredSdkDir(settings.libraryDir);
+        const bool configuredFindWeldingLine =
+            QFileInfo(configuredSdkDir.filePath(QStringLiteral("findWeldingLine.dll"))).isFile()
+            || QFileInfo(configuredSdkDir.filePath(QStringLiteral("bin/findWeldingLine.dll"))).isFile();
+        // 20260902 findWeldingLine.dll 取消了旧库通过 Save_File_Name 生成基础焊道文件的副作用，
+        // 但返回数组本身就是稠密中心线；SDK+拟合模式直接使用该数组作为基础焊道。
+        const bool useReturnedTrackAsBaseWeld = useBaseWeldFit && configuredFindWeldingLine;
         if (fullCloudInput.size() < 2)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
@@ -2911,7 +2946,9 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 fullCloudInput,
                 settings,
                 BuildScanDirection(param),
-                useBaseWeldFit ? sdkBaseWeldOutputPath : QString(),
+                useBaseWeldFit && !useReturnedTrackAsBaseWeld
+                    ? sdkBaseWeldOutputPath
+                    : QString(),
                 stopRequested);
         if (isCanceled())
         {
@@ -2929,6 +2966,17 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         }
         // 已焊起点截断（开关控制）：SDK 检测到已焊段时，按焊接方向截掉焊道已焊部分只焊剩余段。
         PointCloudExtractionProcessor::ExtractionResult workingExtraction = extraction;
+        if (useReturnedTrackAsBaseWeld)
+        {
+            workingExtraction.points = extraction.rawPoints;
+            if (appendLog)
+            {
+                appendLog(QString(
+                    "新版SDK兼容：使用DLL返回的稠密中心线作为拟合基础焊道，点数=%1；"
+                    "不再等待Save_File_Name文件。")
+                    .arg(workingExtraction.points.size()));
+            }
+        }
         if (settings.sdkUseWeldedStartTruncation)
         {
             if (extraction.hasWeldedStartPoint)
@@ -2936,7 +2984,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 const bool weldFromTrackStart = param.nWeldDirection >= 0;
                 int removedCount = 0;
                 workingExtraction.points = TruncateTrackAtWeldedStart(
-                    extraction.points, extraction.weldedStartPoint, weldFromTrackStart, &removedCount);
+                    workingExtraction.points, extraction.weldedStartPoint, weldFromTrackStart, &removedCount);
                 if (appendLog)
                 {
                     if (removedCount > 0)
@@ -3005,6 +3053,14 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             analysis = PointCloudExtractionProcessor::BuildAnalysisResult(
                 workingExtraction, sdkDirectParams);
         }
+        if (usedExternalLibrary != nullptr)
+        {
+            *usedExternalLibrary = true;
+        }
+        if (externalExtraction != nullptr)
+        {
+            *externalExtraction = extraction;
+        }
         if (!analysis.ok)
         {
             if (appendLog)
@@ -3014,14 +3070,6 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                     .arg(analysis.error));
             }
             return analysis;
-        }
-        if (usedExternalLibrary != nullptr)
-        {
-            *usedExternalLibrary = true;
-        }
-        if (externalExtraction != nullptr)
-        {
-            *externalExtraction = extraction;
         }
         if (appendLog)
         {
@@ -12093,7 +12141,8 @@ bool MeasureThenWeldService::RunScanCycle(
     const ScanPauseAvailabilityCallback& scanPauseAvailability,
     const std::vector<T_ROBOT_COORS>* scanTrajectory,
     const QString& cameraSectionOverride,
-    ScanPostProcessMode postProcessMode) const
+    ScanPostProcessMode postProcessMode,
+    const QString& pointCloudSdkLibraryDirOverride) const
 {
     result = ScanCycleResult{};
 
@@ -12422,7 +12471,8 @@ bool MeasureThenWeldService::RunScanCycle(
         scanTrajectory,
         cameraSection,
         retractBeforePostProcessing,
-        postProcessMode);
+        postProcessMode,
+        pointCloudSdkLibraryDirOverride);
     if (!scanOutputPath.isEmpty())
     {
         const QFileInfo outputInfo(scanOutputPath);
@@ -12548,7 +12598,8 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     const std::vector<T_ROBOT_COORS>* scanTrajectory,
     const QString& cameraSectionOverride,
     const ScanMotionCompletedCallback& motionCompleted,
-    ScanPostProcessMode postProcessMode) const
+    ScanPostProcessMode postProcessMode,
+    const QString& pointCloudSdkLibraryDirOverride) const
 {
     if (progress != nullptr)
     {
@@ -14872,7 +14923,26 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
         return false;
     }
 
-    const PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
+    PointCloudProcessingConfig::Settings pointCloudSettings = PointCloudProcessingConfig::Load();
+    if (!pointCloudSdkLibraryDirOverride.trimmed().isEmpty())
+    {
+        pointCloudSettings.libraryDir =
+            QFileInfo(pointCloudSdkLibraryDirOverride.trimmed()).absoluteFilePath();
+        // 新版 findWeldingLine.dll 直接返回轨迹点，不再生成旧版 SDK 的基础焊道文件；
+        // 本测试固定把其返回数组作为基础焊道再拟合，提取真正拐点并生成完整2mm轨迹。
+        // 避免把 DLL 返回的每个中心线像素都误当成拐点，也不依赖已取消的文件副作用。
+        pointCloudSettings.mode = PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
+        pointCloudSettings.resampleStepMm = 2.0;
+        // 变姿态扫描测试需要复现整条模拟曲线；新版 DLL 的 weldedTerminal 当前返回
+        // 轨迹端点而不是“已焊/未焊”判定，不能套用生产焊接的已焊侧截断开关。
+        pointCloudSettings.sdkUseWeldedStartTruncation = false;
+        if (appendLog)
+        {
+            appendLog(QStringLiteral(
+                "本轮扫描轨迹计算已锁定为新版SDK返回轨迹+拟合（2mm重采样）；独立SDK目录：")
+                + QDir::toNativeSeparators(pointCloudSettings.libraryDir));
+        }
+    }
     RobotCalculation::LowerWeldFilterParams originalFitParams =
         BuildOriginalTrackFitParams(param, pointCloudSettings);
     if (originalFitParams.exportFitDebugCloud && !laserDir.isEmpty())
@@ -14927,6 +14997,46 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
     if (!originalAnalysis.ok)
     {
         error = QString("先测后焊特征分析失败：%1").arg(originalAnalysis.error);
+        // SDK 已成功返回但后续拟合/质量门禁拒绝时，也保留库的原始输出供现场核对。
+        // 这些文件不代表运动授权；质量证明仍保持 denied/rejected，不生成焊接姿态。
+        if (usedExternalLibrary && !externalExtraction.rawPoints.isEmpty())
+        {
+            QDir().mkpath(sdkPointCloudDir);
+            QString sdkArtifactError;
+            const bool rawSaved = SaveTextLines(
+                sdkSeamExtractedPath,
+                BuildSdkTrackOutputLines(externalExtraction.rawPoints, "sdk_extracted_rejected"),
+                sdkArtifactError);
+            const bool sampledSaved = rawSaved && SaveTextLines(
+                sdkSeamExtracted2mmPath,
+                BuildSdkTrackOutputLines(
+                    externalExtraction.keyPointExpandedPoints,
+                    "sdk_keypoint_2mm_rejected"),
+                sdkArtifactError);
+            const QString rejectedBasePath = QDir(laserDir).filePath(
+                QString::fromLatin1(METHOD_TRACK_SDK_BASE_FILE_NAME));
+            const bool baseSaved = sampledSaved && SaveTextLines(
+                rejectedBasePath,
+                BuildMethodTrackLines(externalExtraction.points),
+                sdkArtifactError);
+            if (appendLog)
+            {
+                if (baseSaved)
+                {
+                    appendLog(QString(
+                        "SDK轨迹已计算但未通过后处理门禁；已保留诊断轨迹：原始=%1，2mm=%2，拟合输入=%3。"
+                        "这些文件未获得运动授权。")
+                        .arg(QDir::toNativeSeparators(sdkSeamExtractedPath),
+                             QDir::toNativeSeparators(sdkSeamExtracted2mmPath),
+                             QDir::toNativeSeparators(rejectedBasePath)));
+                }
+                else
+                {
+                    appendLog(QStringLiteral("保存门禁拒绝的SDK诊断轨迹失败：")
+                        + sdkArtifactError);
+                }
+            }
+        }
         QString reportError;
         if (!WritePointCloudQualityGate(
                 laserDir,

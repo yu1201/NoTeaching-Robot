@@ -12,9 +12,11 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
@@ -179,6 +181,76 @@ constexpr auto kPostProcessStraightLine = "straight_line";
 constexpr auto kPostProcessCorrugatedBoard = "corrugated_board";
 constexpr auto kFeatureSmoothCurveFileName =
     "PreciseLaserPoint_FeatureSmoothCurve_2mm.txt";
+constexpr auto kScanPosePointCloudSdkRelativeDir =
+    "SDK/PointCloudExtration/findWeldingLine_sdk_x64_Release_20260902_1742";
+constexpr auto kScanPosePointCloudSdkExpectedSha256 =
+    "925ac6bf19762f76cf249c96a0fe873abfa94151ac6636989c10759ce4a27432";
+
+bool ResolveScanPosePointCloudSdk(
+    QString& libraryDir,
+    QString& dllPath,
+    QString& sha256,
+    QString& error)
+{
+    const QString sdkDllRelativePath = QStringLiteral("%1/bin/findWeldingLine.dll")
+        .arg(QString::fromLatin1(kScanPosePointCloudSdkRelativeDir));
+    dllPath = RobotDataHelper::FindProjectFilePath(
+        sdkDllRelativePath);
+    if (dllPath.isEmpty())
+    {
+        dllPath = RobotDataHelper::BuildProjectPath(
+            sdkDllRelativePath);
+    }
+    const QFileInfo dllInfo(dllPath);
+    if (!dllInfo.isFile() || dllInfo.isSymLink())
+    {
+        error = QStringLiteral("扫描变姿态轨迹计算SDK缺失或不是普通文件：%1")
+            .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()));
+        return false;
+    }
+
+    QFile dll(dllInfo.absoluteFilePath());
+    if (!dll.open(QIODevice::ReadOnly))
+    {
+        error = QStringLiteral("无法读取扫描变姿态轨迹计算SDK：%1；%2")
+            .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()), dll.errorString());
+        return false;
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    while (!dll.atEnd())
+    {
+        const QByteArray block = dll.read(1024 * 1024);
+        if (block.isEmpty() && dll.error() != QFile::NoError)
+        {
+            error = QStringLiteral("读取扫描变姿态轨迹计算SDK失败：%1；%2")
+                .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()), dll.errorString());
+            return false;
+        }
+        hash.addData(block);
+    }
+    sha256 = QString::fromLatin1(hash.result().toHex()).toLower();
+    if (sha256 != QString::fromLatin1(kScanPosePointCloudSdkExpectedSha256))
+    {
+        error = QStringLiteral(
+            "扫描变姿态轨迹计算SDK版本校验失败，已拒绝运行。\n文件：%1\n"
+            "期望SHA-256：%2\n实际SHA-256：%3")
+            .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()),
+                 QString::fromLatin1(kScanPosePointCloudSdkExpectedSha256),
+                 sha256);
+        return false;
+    }
+
+    QDir packageDir = dllInfo.absoluteDir(); // bin
+    if (!packageDir.cdUp())
+    {
+        error = QStringLiteral("无法解析扫描变姿态轨迹计算SDK目录：%1")
+            .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()));
+        return false;
+    }
+    libraryDir = packageDir.absolutePath();
+    dllPath = dllInfo.absoluteFilePath();
+    return true;
+}
 
 QString FindLatestStraightCurvePath(const QString& robotName)
 {
@@ -470,6 +542,8 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     contentLayout->addLayout(actionRow);
 
     auto* previewGroup = new QGroupBox(QStringLiteral("扫描实时点云与相机图像"), content);
+    previewGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
+    previewGroup->setMinimumHeight(480);
     auto* previewLayout = new QVBoxLayout(previewGroup);
     previewLayout->setSpacing(8);
 
@@ -512,7 +586,7 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     m_livePointCloudStatusLabel->setWordWrap(true);
     m_livePointCloudView = new ScanPoseLaserLineLiveView(previewGroup);
     m_livePointCloudView->setMinimumHeight(320);
-    m_livePointCloudView->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    m_livePointCloudView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     pointCloudPreview->addWidget(pointCloudTitle);
     pointCloudPreview->addWidget(m_livePointCloudStatusLabel);
     pointCloudPreview->addWidget(m_livePointCloudView, 1);
@@ -526,7 +600,7 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
         QStringLiteral("相机图像：等待图像帧...\n（需所选相机图像传输口支持且已开启）"), previewGroup);
     m_liveImageLabel->setAlignment(Qt::AlignCenter);
     m_liveImageLabel->setMinimumHeight(320);
-    m_liveImageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    m_liveImageLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_liveImageLabel->setStyleSheet(QStringLiteral(
         "QLabel { background: #071017; color: #6E8894; border: 1px solid #2B4552; border-radius: 8px; }"));
     imagePreview->addWidget(imageTitle);
@@ -535,7 +609,7 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     liveViews->addLayout(pointCloudPreview, 1);
     liveViews->addLayout(imagePreview, 1);
     previewLayout->addLayout(liveViews, 1);
-    contentLayout->addWidget(previewGroup);
+    contentLayout->addWidget(previewGroup, 1);
 
     connect(pointSmallerButton, &QPushButton::clicked, this,
         [this, pointSizeLabel]()
@@ -573,7 +647,6 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
                     m_livePointCloudView->AdjustViewSpan(40.0), 0, 'f', 0));
             }
         });
-    contentLayout->addStretch(1);
     scroll->setWidget(content);
     root->addWidget(scroll, 1);
 
@@ -1256,10 +1329,23 @@ void ScanPoseVariationTestDialog::RunScan()
     const auto postProcessMode = CurrentPostProcessMode();
     const QString postProcessModeName = PostProcessModeDisplayName(postProcessMode);
     const QString postProcessModeConfig = PostProcessModeConfigValue(postProcessMode);
+    QString error;
+    QString pointCloudSdkLibraryDirOverride;
+    QString pointCloudSdkDllPath;
+    QString pointCloudSdkSha256;
+    if (postProcessMode == MeasureThenWeldService::ScanPostProcessMode::CorrugatedBoard
+        && !ResolveScanPosePointCloudSdk(
+            pointCloudSdkLibraryDirOverride,
+            pointCloudSdkDllPath,
+            pointCloudSdkSha256,
+            error))
+    {
+        QMessageBox::warning(this, QStringLiteral("运行扫描"), error);
+        return;
+    }
     MeasureThenWeldService service;
     QVector<MeasureThenWeldService::ScanPoseVariationPoint> generated;
     QString summary;
-    QString error;
     if (!service.GenerateScanPoseVariationTrajectory(
             m_basePose, m_startPose, m_endPose, robotType,
             CurrentParams(), generated, summary, error))
@@ -1278,15 +1364,20 @@ void ScanPoseVariationTestDialog::RunScan()
         return;
     }
 
+    const QString sdkConfirmation = pointCloudSdkDllPath.isEmpty()
+        ? QString()
+        : QStringLiteral("\n轨迹计算SDK：%1\nSDK SHA-256：%2")
+            .arg(QDir::toNativeSeparators(pointCloudSdkDllPath), pointCloudSdkSha256);
     const QString confirmation = QStringLiteral(
         "即将进行真实机器人扫描运动。\n\n机器人：%1\n扫描相机：%2（%3）\n扫描速度：%4 mm/min\n"
-        "后处理方式：%5\n基础姿态：%6\n扫描起点：%7\n扫描终点：%8\n%9\n\n"
+        "后处理方式：%5\n基础姿态：%6\n扫描起点：%7\n扫描终点：%8\n%9%10\n\n"
         "流程：到扫描下枪安全位 -> 扫描起点 -> 连续变姿态扫描并采集 -> 扫描收枪安全位。\n"
         "软件停止不能替代控制柜/示教器急停；请确认机器人周围安全、相机和激光已准备好。是否继续？")
         .arg(RobotName(driver), cameraSection, cameraIp)
         .arg(m_scanSpeedSpin->value(), 0, 'f', 1)
         .arg(postProcessModeName)
-        .arg(PoseText(m_basePose), PoseText(m_startPose), PoseText(m_endPose), summary);
+        .arg(PoseText(m_basePose), PoseText(m_startPose), PoseText(m_endPose), summary)
+        .arg(sdkConfirmation);
     if (QMessageBox::question(this, QStringLiteral("扫描变姿态运行前确认"), confirmation,
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
     {
@@ -1326,7 +1417,9 @@ void ScanPoseVariationTestDialog::RunScan()
     std::thread([self, driver, cameraCache, operationLease, trajectory, generated,
                  params, basePose, startPose, endPose, startPulse, robotType,
                  robotName, selectedCameraSection, selectedCameraIp, scanSpeedMmPerMin,
-                 postProcessMode, postProcessModeName, postProcessModeConfig]()
+                 postProcessMode, postProcessModeName, postProcessModeConfig,
+                 pointCloudSdkLibraryDirOverride, pointCloudSdkDllPath,
+                 pointCloudSdkSha256]()
         {
             MeasureThenWeldService service;
             T_PRECISE_MEASURE_PARAM param;
@@ -1370,6 +1463,12 @@ void ScanPoseVariationTestDialog::RunScan()
                 .arg(param.dDec, 0, 'f', 6)
                 .arg(param.dCameraTimeOffsetMs, 0, 'f', 3)
                 .arg(param.bUseStatTimeAlign ? QStringLiteral("统计") : QStringLiteral("首帧")));
+            if (!pointCloudSdkDllPath.isEmpty())
+            {
+                appendLog(QStringLiteral("本轮轨迹计算SDK已锁定：DLL=%1，SHA-256=%2。")
+                    .arg(QDir::toNativeSeparators(pointCloudSdkDllPath),
+                         pointCloudSdkSha256));
+            }
             auto setFlowStep = [self](const QString& text)
                 {
                     QMetaObject::invokeMethod(qApp, [self, text]()
@@ -1407,7 +1506,8 @@ void ScanPoseVariationTestDialog::RunScan()
                 MeasureThenWeldService::ScanPauseAvailabilityCallback(),
                 &trajectory,
                 selectedCameraSection,
-                postProcessMode);
+                postProcessMode,
+                pointCloudSdkLibraryDirOverride);
 
             QString commandedPath;
             QString saveError;
@@ -1426,6 +1526,17 @@ void ScanPoseVariationTestDialog::RunScan()
                     QStringLiteral("scan_speed_mm_per_min=%1").arg(scanSpeedMmPerMin, 0, 'f', 6),
                     QStringLiteral("post_process_mode=%1").arg(postProcessModeConfig),
                     QStringLiteral("post_process_name=%1").arg(postProcessModeName),
+                    QStringLiteral("trajectory_sdk_override_dir=%1").arg(
+                        QDir::toNativeSeparators(pointCloudSdkLibraryDirOverride)),
+                    QStringLiteral("trajectory_sdk_dll=%1").arg(
+                        QDir::toNativeSeparators(pointCloudSdkDllPath)),
+                    QStringLiteral("trajectory_sdk_sha256=%1").arg(pointCloudSdkSha256),
+                    QStringLiteral("trajectory_sdk_mode=%1").arg(
+                        pointCloudSdkDllPath.isEmpty()
+                            ? QString()
+                            : QStringLiteral("SdkBaseWeldFitReturnedTrack")),
+                    QStringLiteral("trajectory_sdk_resample_step_mm=%1").arg(
+                        pointCloudSdkDllPath.isEmpty() ? QString() : QStringLiteral("2.000000")),
                     QStringLiteral("preset_group=%1").arg(param.sParamGroupName),
                     QStringLiteral("safe_move_speed_mm_per_min=%1").arg(param.dRunSpeed, 0, 'f', 6),
                     QStringLiteral("scan_safe_mode=%1").arg(

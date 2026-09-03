@@ -3300,7 +3300,8 @@ bool ConfigDatabase::WriteScopedSettings(
     const QString& scopeId,
     const QString& moduleName,
     const QMap<QString, QString>& values,
-    const QString& valueType)
+    const QString& valueType,
+    QString* error)
 {
     QMap<QString, ScopedSettingValue> typedValues;
     for (auto it = values.cbegin(); it != values.cend(); ++it)
@@ -3310,23 +3311,38 @@ bool ConfigDatabase::WriteScopedSettings(
         typedValue.valueType = valueType;
         typedValues.insert(it.key(), typedValue);
     }
-    return WriteScopedSettings(scopeType, scopeId, moduleName, typedValues);
+    return WriteScopedSettings(scopeType, scopeId, moduleName, typedValues, error);
 }
 
 bool ConfigDatabase::WriteScopedSettings(
     const QString& scopeType,
     const QString& scopeId,
     const QString& moduleName,
-    const QMap<QString, ScopedSettingValue>& values)
+    const QMap<QString, ScopedSettingValue>& values,
+    QString* error)
 {
+    if (error != nullptr)
+    {
+        error->clear();
+    }
     if (!IsDatabaseNativeScopeIdentity(scopeType, scopeId, moduleName))
     {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("配置作用域或模块身份不是数据库原生格式。");
+        }
         return false;
     }
     for (auto it = values.cbegin(); it != values.cend(); ++it)
     {
-        if (!IsDatabaseNativeIdentityPart(it.key(), false))
+        // 批量配置使用“分区/键名”表达同一模块内的层级，数据库中也按该格式持久化。
+        // 允许合法层级，但仍拒绝路径、空层级、配置文件后缀以及 . / .. 等危险身份。
+        if (!IsDatabaseNativeIdentityPart(it.key(), true))
         {
+            if (error != nullptr)
+            {
+                *error = QStringLiteral("配置键身份不是数据库原生格式：%1").arg(it.key());
+            }
             return false;
         }
     }
@@ -3335,16 +3351,41 @@ bool ConfigDatabase::WriteScopedSettings(
         return true;
     }
     QSqlDatabase db = OpenDatabase();
-    if (!db.isValid() || !db.isOpen() || !db.transaction())
+    if (!db.isValid() || !db.isOpen())
     {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("配置数据库不可用：%1").arg(db.lastError().text());
+        }
+        return false;
+    }
+    if (!db.transaction())
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral("无法开始配置批量写入事务：%1").arg(db.lastError().text());
+        }
         return false;
     }
 
+    const auto fail = [&db, error](const QString& message)
+        {
+            db.rollback();
+            if (error != nullptr)
+            {
+                *error = message;
+            }
+            return false;
+        };
+
     QSqlQuery query(db);
-    query.prepare(
+    if (!query.prepare(
         "INSERT OR REPLACE INTO settings("
         "scope_type, scope_id, module, key_name, value_text, value_type, sensitive, encrypted, updated_at) "
-        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))");
+        "VALUES(?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"))
+    {
+        return fail(QStringLiteral("准备配置批量写入语句失败：%1").arg(query.lastError().text()));
+    }
     const QString normalizedScopeType = NormalizeSection(scopeType).toLower();
     const QString normalizedScopeId = NormalizeScopeId(scopeId);
     const QString normalizedModule = NormalizeSection(moduleName);
@@ -3366,8 +3407,7 @@ bool ConfigDatabase::WriteScopedSettings(
         if (!EncodeStoredText(
                 db, typedValue.value, requiresDpapi, purpose, &storedText, &encrypted))
         {
-            db.rollback();
-            return false;
+            return fail(QStringLiteral("编码配置值失败：%1").arg(it.key()));
         }
         query.bindValue(0, normalizedScopeType);
         query.bindValue(1, normalizedScopeId);
@@ -3379,15 +3419,14 @@ bool ConfigDatabase::WriteScopedSettings(
         query.bindValue(7, encrypted);
         if (!query.exec())
         {
-            db.rollback();
-            return false;
+            return fail(QStringLiteral("写入配置项失败：%1；%2")
+                .arg(it.key(), query.lastError().text()));
         }
         query.finish();
     }
     if (!db.commit())
     {
-        db.rollback();
-        return false;
+        return fail(QStringLiteral("提交配置批量写入事务失败：%1").arg(db.lastError().text()));
     }
     return true;
 }

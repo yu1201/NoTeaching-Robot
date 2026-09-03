@@ -29,6 +29,12 @@
 
 namespace
 {
+constexpr qint64 SDK_WORKER_BASE_TIMEOUT_MS = 300000;
+constexpr qint64 SDK_WORKER_BASE_POINT_COUNT = 2000000;
+constexpr qint64 SDK_WORKER_POINT_BLOCK_SIZE = 1000000;
+constexpr qint64 SDK_WORKER_EXTRA_BLOCK_TIMEOUT_MS = 120000;
+constexpr qint64 SDK_WORKER_MAX_TIMEOUT_MS = 900000;
+
 struct ExternalPoint3D
 {
     double x = 0.0;
@@ -99,6 +105,17 @@ bool IsFinitePoint(const Eigen::Vector3d& point)
     return std::isfinite(point.x()) && std::isfinite(point.y()) && std::isfinite(point.z());
 }
 
+qint64 SdkWorkerTimeoutMs(qint64 finiteInputPointCount)
+{
+    const qint64 extraPointCount = std::max<qint64>(
+        0, finiteInputPointCount - SDK_WORKER_BASE_POINT_COUNT);
+    const qint64 extraBlocks = (extraPointCount + SDK_WORKER_POINT_BLOCK_SIZE - 1)
+        / SDK_WORKER_POINT_BLOCK_SIZE;
+    return std::min(
+        SDK_WORKER_MAX_TIMEOUT_MS,
+        SDK_WORKER_BASE_TIMEOUT_MS + extraBlocks * SDK_WORKER_EXTRA_BLOCK_TIMEOUT_MS);
+}
+
 ExternalPoint3D ToExternalPoint(const Eigen::Vector3d& point)
 {
     ExternalPoint3D external;
@@ -111,6 +128,31 @@ ExternalPoint3D ToExternalPoint(const Eigen::Vector3d& point)
 Eigen::Vector3d FromExternalPoint(const ExternalPoint3D& point)
 {
     return Eigen::Vector3d(point.x, point.y, point.z);
+}
+
+bool EncodeSdkPathLosslessly(
+    const QString& path,
+    const QString& pathPurpose,
+    QByteArray* encodedPath,
+    QString* error)
+{
+    const QByteArray localBytes = path.toLocal8Bit();
+    if (QString::fromLocal8Bit(localBytes) != path)
+    {
+        if (error != nullptr)
+        {
+            *error = QStringLiteral(
+                "SDK %1包含当前 Windows 本地代码页无法表示的字符：%2。"
+                "请将工程/数据目录改为仅含普通 ASCII 字符的路径（例如 NoTeaching-Robot-low-level）。")
+                .arg(pathPurpose, QDir::toNativeSeparators(path));
+        }
+        return false;
+    }
+    if (encodedPath != nullptr)
+    {
+        *encodedPath = localBytes;
+    }
+    return true;
 }
 
 PointCloudExtractionProcessor::TrackPointType FromExternalType(ExternalPointType type)
@@ -381,6 +423,7 @@ QString PrepareRuntimeExternalConfigPath(
     const QString& baseWeldOutputPath,
     const QString& runtimeConfigDir,
     double baseWeldStepMm,
+    bool findWeldingLineCompatibility,
     QString* error)
 {
     QFile file(configPath);
@@ -413,7 +456,13 @@ QString PrepareRuntimeExternalConfigPath(
         const QString fallbackLogPath = QDir::toNativeSeparators(
             AppPaths::WritablePath(QStringLiteral("Log/PointCloudExtration")));
         QDir().mkpath(QDir::fromNativeSeparators(fallbackLogPath));
-        ReplaceConfigValue(&content, "LOGPATH", fallbackLogPath.toLocal8Bit());
+        QByteArray encodedLogPath;
+        if (!EncodeSdkPathLosslessly(
+                fallbackLogPath, QStringLiteral("日志目录"), &encodedLogPath, error))
+        {
+            return QString();
+        }
+        ReplaceConfigValue(&content, "LOGPATH", encodedLogPath);
         changed = true;
     }
 
@@ -453,6 +502,22 @@ QString PrepareRuntimeExternalConfigPath(
         changed = true;
     }
 
+    // 20260902 findWeldingLine.dll 在该现场完整点云上开启 is_remove_noise 时，
+    // 骨架链会退化为仅约 78mm 的局部路径；关闭库内二次去噪后可返回覆盖整次
+    // 扫描的连续中心线。该版本还会按 Move_distance 在实测中心线首尾各外推
+    // 约20mm；测试轨迹必须服从实际点云边界，因此本次调用把外推距离置零。
+    // 兼容项只写入单次调用的临时配置，不改现场主配置。
+    if (findWeldingLineCompatibility)
+    {
+        ReplaceConfigValue(&content, "is_remove_noise", "false");
+        ReplaceConfigValue(&content, "Move_distance", "0");
+        ReplaceConfigValue(
+            &content,
+            "Step",
+            ConfigIntegerValue(baseWeldStepMm > 0.0 ? baseWeldStepMm : 2.0));
+        changed = true;
+    }
+
     const QString normalizedBaseWeldPath = baseWeldOutputPath.trimmed();
     if (!normalizedBaseWeldPath.isEmpty())
     {
@@ -466,10 +531,17 @@ QString PrepareRuntimeExternalConfigPath(
             }
             return QString();
         }
+        const QString nativeOutputPath = QDir::toNativeSeparators(outputInfo.absoluteFilePath());
+        QByteArray encodedOutputPath;
+        if (!EncodeSdkPathLosslessly(
+                nativeOutputPath, QStringLiteral("基础焊道输出路径"), &encodedOutputPath, error))
+        {
+            return QString();
+        }
         ReplaceConfigValue(
             &content,
             "Save_File_Name",
-            QDir::toNativeSeparators(outputInfo.absoluteFilePath()).toLocal8Bit());
+            encodedOutputPath);
         ReplaceConfigValue(
             &content,
             "Step",
@@ -771,15 +843,36 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
         return result;
     }
 
-    QString libraryDir = settings.libraryDir.trimmed().isEmpty()
+    const QString libraryDir = settings.libraryDir.trimmed().isEmpty()
         ? PointCloudProcessingConfig::DefaultLibraryDir()
         : settings.libraryDir.trimmed();
-    QString dllPath = QDir(libraryDir).filePath("PointCloudExtration.dll");
+    const auto resolveSdkDll = [](const QString& directory) -> QString
+        {
+            const QDir root(directory);
+            const QStringList candidates = {
+                QStringLiteral("findWeldingLine.dll"),
+                QStringLiteral("bin/findWeldingLine.dll"),
+                QStringLiteral("PointCloudExtration.dll"),
+                QStringLiteral("bin/PointCloudExtration.dll")
+            };
+            for (const QString& relativePath : candidates)
+            {
+                const QFileInfo candidate(root.filePath(relativePath));
+                if (candidate.isFile() && !candidate.isSymLink())
+                {
+                    return candidate.absoluteFilePath();
+                }
+            }
+            // 保留一个确定的报错路径，便于现场直接定位缺失文件。
+            return QFileInfo(root.filePath(QStringLiteral("bin/findWeldingLine.dll")))
+                .absoluteFilePath();
+        };
+    QString dllPath = resolveSdkDll(libraryDir);
     // 配置目录可能是旧部署/别的盘符遗留（如配置库残留 B:\NoTeaching-Robot\...），在其下找不到 DLL 时
     // 回退到工程内默认目录，避免换机器/换盘符后因数据库里的绝对路径报"未找到精测点云库"。
     if (!QFileInfo::exists(dllPath))
     {
-        const QString fallbackDll = QDir(PointCloudProcessingConfig::DefaultLibraryDir()).filePath("PointCloudExtration.dll");
+        const QString fallbackDll = resolveSdkDll(PointCloudProcessingConfig::DefaultLibraryDir());
         if (QFileInfo::exists(fallbackDll))
         {
             dllPath = fallbackDll;
@@ -824,12 +917,16 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     }
 
     QString runtimeConfigError;
+    const bool findWeldingLineCompatibility =
+        QFileInfo(result.dllPath).fileName().compare(
+            QStringLiteral("findWeldingLine.dll"), Qt::CaseInsensitive) == 0;
     const QString runtimeConfigPath = QDir::toNativeSeparators(
         QFileInfo(PrepareRuntimeExternalConfigPath(
             result.configPath,
             result.baseWeldPath,
             runtimeConfigDirInfo.absoluteFilePath(),
             settings.resampleStepMm,
+            findWeldingLineCompatibility,
             &runtimeConfigError)).absoluteFilePath());
     if (!runtimeConfigError.isEmpty())
     {
@@ -839,6 +936,12 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     if (!QFileInfo::exists(runtimeConfigPath))
     {
         result.error = "未找到新版精测点云运行配置：" + runtimeConfigPath;
+        return result;
+    }
+    QByteArray configPathBytes;
+    if (!EncodeSdkPathLosslessly(
+            runtimeConfigPath, QStringLiteral("运行配置路径"), &configPathBytes, &result.error))
+    {
         return result;
     }
     if (!result.baseWeldPath.isEmpty()
@@ -905,7 +1008,6 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     }
 
     int trackPointCount = 0;
-    const QByteArray configPathBytes = runtimeConfigPath.toLocal8Bit();
     ExternalPoint3D weldedTerminal{};
     bool sdkCrashed = false;
     ExternalTrackPoint* rawTrackPoints = CallSdkExtractGuarded(
@@ -1435,7 +1537,8 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     }
     QElapsedTimer workerTimer;
     workerTimer.start();
-    while (proc.state() != QProcess::NotRunning && workerTimer.elapsed() < 300000)
+    const qint64 workerTimeoutMs = SdkWorkerTimeoutMs(result.finiteInputPointCount);
+    while (proc.state() != QProcess::NotRunning && workerTimer.elapsed() < workerTimeoutMs)
     {
         if (stopRequested && stopRequested())
         {
@@ -1450,7 +1553,11 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
     {
         proc.kill();
         proc.waitForFinished(3000);
-        result.error = "SDK 点云子进程超时未返回（已终止，主程序未受影响）。请检查点云规模或 SDK 配置。";
+        result.error = QString(
+            "SDK 点云子进程超时未返回（等待上限=%1秒，有效输入点=%2；已终止，主程序未受影响）。"
+            "请检查点云规模或 SDK 配置。")
+            .arg(workerTimeoutMs / 1000)
+            .arg(result.finiteInputPointCount);
         return result;
     }
     if (proc.exitStatus() == QProcess::CrashExit)

@@ -728,11 +728,16 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("SafetyGates/TrajectoryStructureEnabled", settings.safetyGateTrajectoryStructureEnabled ? "1" : "0")
         && write("SafetyGates/MotionPrecheckEnabled", settings.safetyGateMotionPrecheckEnabled ? "1" : "0")
         && write("SafetyGates/BehaviorVersion", QString::number(CURRENT_SAFETY_GATE_BEHAVIOR_VERSION));
+    QString databaseError;
     const bool ok = valuesPrepared && ConfigDatabase::WriteScopedSettings(
-        QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues);
+        QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues,
+        QStringLiteral("string"), &databaseError);
     if (!ok && error != nullptr)
     {
-        *error = QStringLiteral("原子写入点云处理配置失败，数据库已回滚，未留下混合版本。");
+        *error = QStringLiteral("原子写入点云处理配置失败，数据库已回滚，未留下混合版本。%1")
+            .arg(databaseError.isEmpty()
+                ? QString()
+                : QStringLiteral("\n原因：%1").arg(databaseError));
     }
     return ok;
 }
