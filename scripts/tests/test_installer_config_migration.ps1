@@ -166,16 +166,14 @@ function Wait-ForCrashResourcesReleased {
     $mutexName = 'Global\NoTeaching-Robot-Hardware-Control-v1-' + $scopeHash
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
-        $streams = [System.Collections.Generic.List[System.IO.FileStream]]::new()
         $mutex = $null
         try {
             foreach ($file in @(Get-ChildItem -LiteralPath $Data -File -Force -ErrorAction Stop)) {
-                $streams.Add([System.IO.File]::Open(
-                    $file.FullName,
-                    [System.IO.FileMode]::Open,
-                    [System.IO.FileAccess]::ReadWrite,
-                    [System.IO.FileShare]::None
-                ))
+                $stream = [System.IO.File]::Open(
+                    $file.FullName, [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None
+                )
+                $stream.Dispose()
             }
             $createdNew = $false
             $mutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
@@ -189,9 +187,6 @@ function Wait-ForCrashResourcesReleased {
         finally {
             if ($null -ne $mutex) {
                 $mutex.Dispose()
-            }
-            foreach ($stream in $streams) {
-                $stream.Dispose()
             }
         }
         Start-Sleep -Milliseconds 50
