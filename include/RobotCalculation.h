@@ -244,6 +244,13 @@ public:
             double outputLengthMm = 0.0;
             double outputLengthRatio = 0.0;
             double maxOutputStepMm = 0.0;
+            int sdkBaseWeldPointCount = 0;
+            double sdkBaseFullCloudProjectedSpanMm = 0.0;
+            double sdkBaseWeldProjectedSpanMm = 0.0;
+            double sdkBaseCloudCoverageRatio = 0.0;
+            double sdkBaseStartEndpointDeviationMm = 0.0;
+            double sdkBaseEndEndpointDeviationMm = 0.0;
+            double sdkBaseMaxEndpointDeviationRatio = 0.0;
             QStringList failures;
             QStringList warnings;
         };

@@ -195,7 +195,7 @@ QString ComputeFileSha256ForResumeGate(const QString& filePath, QString& error)
 
 constexpr auto POINT_CLOUD_QUALITY_GATE_FILE_NAME = "PreciseLaserPoint_QualityGate.json";
 constexpr auto POINT_CLOUD_QUALITY_ALGORITHM_REVISION =
-    "pcq-v5-20260730-configurable-validity";
+    "pcq-v6-20260903-sdkbase-input-binding";
 constexpr int POINT_CLOUD_QUALITY_SCHEMA_VERSION = 3;
 constexpr int POINT_CLOUD_PRODUCTION_CONTEXT_REVISION = 1;
 constexpr auto POINT_CLOUD_PROOF_SECURITY_MODULE = "PointCloudProofSecurity";
@@ -576,6 +576,10 @@ QJsonObject BuildPointCloudQualityThresholds(const PointCloudProcessingConfig::S
             : settings.fitSampleStepMm);
     thresholds.insert("minFinitePointCount", settings.validationMinFinitePointCount);
     thresholds.insert("minProjectedSpanMm", settings.validationMinProjectedSpanMm);
+    thresholds.insert("minSdkBaseCloudCoverageRatio",
+        settings.validationMinSdkBaseCloudCoverageRatio);
+    thresholds.insert("maxSdkBaseEndpointDeviationRatio",
+        settings.validationMaxSdkBaseEndpointDeviationRatio);
     thresholds.insert("minStationCoverageRatio", settings.validationMinStationCoverageRatio);
     thresholds.insert("minLongestContinuousRatio", settings.validationMinLongestContinuousRatio);
     thresholds.insert("maxRejectedRatio", settings.validationMaxRejectedRatio);
@@ -637,6 +641,10 @@ QJsonObject BuildPointCloudQualityThresholds(const PointCloudProcessingConfig::S
     if (!settings.validationCoverageEnabled)
     {
         thresholds.insert("coverageEnabled", false);
+    }
+    if (!settings.validationSdkBaseIntegrityEnabled)
+    {
+        thresholds.insert("sdkBaseIntegrityEnabled", false);
     }
     if (!settings.validationContinuityEnabled)
     {
@@ -730,6 +738,13 @@ QJsonObject PointCloudQualityMetricsToJson(
     metrics.insert("outputLengthMm", report.outputLengthMm);
     metrics.insert("outputLengthRatio", report.outputLengthRatio);
     metrics.insert("maxOutputStepMm", report.maxOutputStepMm);
+    metrics.insert("sdkBaseWeldPointCount", report.sdkBaseWeldPointCount);
+    metrics.insert("sdkBaseFullCloudProjectedSpanMm", report.sdkBaseFullCloudProjectedSpanMm);
+    metrics.insert("sdkBaseWeldProjectedSpanMm", report.sdkBaseWeldProjectedSpanMm);
+    metrics.insert("sdkBaseCloudCoverageRatio", report.sdkBaseCloudCoverageRatio);
+    metrics.insert("sdkBaseStartEndpointDeviationMm", report.sdkBaseStartEndpointDeviationMm);
+    metrics.insert("sdkBaseEndEndpointDeviationMm", report.sdkBaseEndEndpointDeviationMm);
+    metrics.insert("sdkBaseMaxEndpointDeviationRatio", report.sdkBaseMaxEndpointDeviationRatio);
     return metrics;
 }
 
@@ -2880,6 +2895,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         // ②SDK+拟合：SDK 输出基础焊道（稠密），再喂滤波拟合提取特征点。
         // 失败直接报错，不回退其他方法。
         const bool useBaseWeldFit = settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
+        const QDir configuredSdkDir(settings.libraryDir);
+        const bool configuredFindWeldingLine =
+            QFileInfo(configuredSdkDir.filePath(QStringLiteral("findWeldingLine.dll"))).isFile()
+            || QFileInfo(configuredSdkDir.filePath(QStringLiteral("bin/findWeldingLine.dll"))).isFile();
+        // 20260902 findWeldingLine.dll no longer writes the dense base-weld file
+        // configured through Save_File_Name. Its returned array is the dense centerline.
+        const bool useReturnedTrackAsBaseWeld = useBaseWeldFit && configuredFindWeldingLine;
         if (fullCloudInput.size() < 2)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
@@ -2892,12 +2914,15 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             return failed;
         }
         // 进程隔离调用 SDK：SDK(pcl_kdtree 多线程)崩溃时拦截为可报告错误、主程序不挂(防崩护栏)。
+        const Eigen::Vector3d scanDirection = BuildScanDirection(param);
         const PointCloudExtractionProcessor::ExtractionResult extraction =
             PointCloudExtractionProcessor::ExtractCorrugatedSheetIsolated(
                 fullCloudInput,
                 settings,
-                BuildScanDirection(param),
-                useBaseWeldFit ? sdkBaseWeldOutputPath : QString(),
+                scanDirection,
+                useBaseWeldFit && !useReturnedTrackAsBaseWeld
+                    ? sdkBaseWeldOutputPath
+                    : QString(),
                 stopRequested);
         if (isCanceled())
         {
@@ -2913,8 +2938,111 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             }
             return failed;
         }
+
+        PointCloudExtractionProcessor::SdkBaseWeldIntegrityResult sdkBaseIntegrity;
+        const bool auditOnly =
+            settings.validationPolicy == PointCloudProcessingConfig::ValidationPolicy::Audit;
+        const auto applySdkBaseIntegrityMetrics =
+            [&sdkBaseIntegrity, auditOnly](
+                RobotCalculation::MeasureThenWeldAnalysisResult::PointCloudQualityReport& report)
+            {
+                if (!sdkBaseIntegrity.evaluated)
+                {
+                    return;
+                }
+                report.evaluated = true;
+                report.auditOnly = auditOnly;
+                report.sdkBaseWeldPointCount = sdkBaseIntegrity.sdkBaseWeldPointCount;
+                report.sdkBaseFullCloudProjectedSpanMm =
+                    sdkBaseIntegrity.fullCloudProjectedSpanMm;
+                report.sdkBaseWeldProjectedSpanMm =
+                    sdkBaseIntegrity.sdkBaseWeldProjectedSpanMm;
+                report.sdkBaseCloudCoverageRatio = sdkBaseIntegrity.cloudCoverageRatio;
+                report.sdkBaseStartEndpointDeviationMm =
+                    sdkBaseIntegrity.startEndpointDeviationMm;
+                report.sdkBaseEndEndpointDeviationMm =
+                    sdkBaseIntegrity.endEndpointDeviationMm;
+                report.sdkBaseMaxEndpointDeviationRatio =
+                    sdkBaseIntegrity.maxEndpointDeviationRatio;
+                if (!sdkBaseIntegrity.passed
+                    && !report.failures.contains(sdkBaseIntegrity.error))
+                {
+                    report.failures.push_front(sdkBaseIntegrity.error);
+                }
+                report.passed = report.failures.isEmpty();
+            };
+
+        if (useBaseWeldFit && settings.validationSdkBaseIntegrityEnabled)
+        {
+            sdkBaseIntegrity = PointCloudExtractionProcessor::EvaluateSdkBaseWeldIntegrity(
+                fullCloudInput,
+                extraction.points,
+                scanDirection,
+                settings.validationMinSdkBaseCloudCoverageRatio,
+                settings.validationMaxSdkBaseEndpointDeviationRatio,
+                stopRequested);
+            if (sdkBaseIntegrity.canceled || isCanceled())
+            {
+                return canceledResult();
+            }
+            if (!sdkBaseIntegrity.passed)
+            {
+                if (auditOnly)
+                {
+                    if (appendLog)
+                    {
+                        appendLog(QStringLiteral("SDK基础焊道完整性审计不通过（审计模式记录但不拦截）：")
+                            + sdkBaseIntegrity.error);
+                    }
+                }
+                else
+                {
+                    RobotCalculation::MeasureThenWeldAnalysisResult failed;
+                    failed.error = sdkBaseIntegrity.error
+                        + QStringLiteral(" 已在SDKBase平滑、首尾截断、拟合和平台重算前停止。");
+                    failed.qualityReport.inputPointCount = fullCloudInput.size();
+                    failed.qualityReport.finitePointCount =
+                        sdkBaseIntegrity.fullCloudFinitePointCount;
+                    applySdkBaseIntegrityMetrics(failed.qualityReport);
+                    if (appendLog)
+                    {
+                        appendLog(failed.error);
+                    }
+                    return failed;
+                }
+            }
+            else if (appendLog)
+            {
+                appendLog(QString(
+                    "SDK基础焊道完整性门禁通过：完整点云参考跨度=%1 mm，SDKBase点数=%2、首末端跨度=%3 mm，"
+                    "实际覆盖率=%4%（门禁>=%5%），最大单侧端点偏差率=%6%（门禁<=%7%）。")
+                    .arg(sdkBaseIntegrity.fullCloudProjectedSpanMm, 0, 'f', 3)
+                    .arg(sdkBaseIntegrity.sdkBaseWeldPointCount)
+                    .arg(sdkBaseIntegrity.sdkBaseWeldProjectedSpanMm, 0, 'f', 3)
+                    .arg(sdkBaseIntegrity.cloudCoverageRatio * 100.0, 0, 'f', 2)
+                    .arg(settings.validationMinSdkBaseCloudCoverageRatio * 100.0, 0, 'f', 2)
+                    .arg(sdkBaseIntegrity.maxEndpointDeviationRatio * 100.0, 0, 'f', 2)
+                    .arg(settings.validationMaxSdkBaseEndpointDeviationRatio * 100.0, 0, 'f', 2));
+            }
+        }
+        else if (useBaseWeldFit && appendLog)
+        {
+            appendLog(QStringLiteral(
+                "SDK基础焊道完整性门禁已关闭：本次不比较SDKBase与完整点云扫描向覆盖范围。"));
+        }
         // 已焊起点截断（开关控制）：SDK 检测到已焊段时，按焊接方向截掉焊道已焊部分只焊剩余段。
         PointCloudExtractionProcessor::ExtractionResult workingExtraction = extraction;
+        if (useReturnedTrackAsBaseWeld)
+        {
+            workingExtraction.points = extraction.rawPoints;
+            if (appendLog)
+            {
+                appendLog(QString(
+                    "新版SDK兼容：使用DLL返回的稠密中心线作为拟合基础焊道，点数=%1；"
+                    "不再等待Save_File_Name文件。")
+                    .arg(workingExtraction.points.size()));
+            }
+        }
         if (settings.sdkUseWeldedStartTruncation)
         {
             if (extraction.hasWeldedStartPoint)
@@ -2922,7 +3050,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 const bool weldFromTrackStart = param.nWeldDirection >= 0;
                 int removedCount = 0;
                 workingExtraction.points = TruncateTrackAtWeldedStart(
-                    extraction.points, extraction.weldedStartPoint, weldFromTrackStart, &removedCount);
+                    workingExtraction.points, extraction.weldedStartPoint, weldFromTrackStart, &removedCount);
                 if (appendLog)
                 {
                     if (removedCount > 0)
@@ -2991,6 +3119,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             analysis = PointCloudExtractionProcessor::BuildAnalysisResult(
                 workingExtraction, sdkDirectParams);
         }
+        applySdkBaseIntegrityMetrics(analysis.qualityReport);
         if (!analysis.ok)
         {
             if (appendLog)
@@ -3021,6 +3150,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             if (extraction.usedBaseWeldFile)
             {
                 appendLog(QString("SDK基础焊道来自库输出文件：%1").arg(extraction.baseWeldPath));
+            }
+            else if (useBaseWeldFit && !extraction.baseWeldPath.isEmpty())
+            {
+                appendLog(QString(
+                    "SDK基础焊道来自更新版库返回数组：稠密点=%1，"
+                    "Save_File_Name未生成；后续拟合与质量门槛保持原流程。")
+                    .arg(extraction.points.size()));
             }
         }
         SaveMethodBaseTrackFile(
