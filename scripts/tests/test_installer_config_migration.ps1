@@ -1269,7 +1269,14 @@ try {
 
         $resumeStatus = Join-Path $tempRoot ("upgrade-$publishCrashPoint-resume.status")
         $code = Invoke-InstallHelper $publishCrashData $resumeStatus
-        Assert-True ($code -eq 0) "upgrade $publishCrashPoint crash topology could not be reconciled"
+        $resumeStatusText = if (Test-Path -LiteralPath $resumeStatus -PathType Leaf) {
+            (Get-Content -LiteralPath $resumeStatus -Raw).Trim()
+        }
+        else { '<missing>' }
+        Assert-True ($code -eq 0) (
+            "upgrade $publishCrashPoint crash topology could not be reconciled " +
+            "(exit=$code status=$resumeStatusText)"
+        )
         Assert-True (-not (Test-Path -LiteralPath $publishCrashQuarantine)) "upgrade $publishCrashPoint reconciliation left raw quarantine"
         if ($publishCrashPoint -ceq 'after-old-quarantine') {
             Assert-True ((Get-Sha256 $publishCrashDb) -ceq $publishCrashOriginalHash -and (Get-Sha256 $publishCrashStaging) -ceq $publishCrashMigratedHash) 'old-quarantine reconciliation did not restore the original canonical state'
