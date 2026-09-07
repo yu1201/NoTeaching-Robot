@@ -26,7 +26,6 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       # An accidental publish invocation must fail before opening a connection.
       OTA_SIGNING_KEY_FILE: ""
-      OTA_SSH_PASSWORD: ""
 
     steps:
       - name: Check out without persisted credentials
@@ -34,6 +33,15 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Fetch release branch tips for offline boundary tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags --prune --depth=1 origin `
+            "+refs/heads/main:refs/remotes/origin/main" `
+            "+refs/heads/hk-pathlynx-corpla:refs/remotes/origin/hk-pathlynx-corpla"
+          if ($LASTEXITCODE -ne 0) { throw "Release branch tip fetch failed." }
 
       - name: Set up pinned Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0

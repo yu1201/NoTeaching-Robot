@@ -851,7 +851,7 @@ class LocalGateTests(unittest.TestCase):
             with mock.patch.object(
                 ota,
                 "_path_is_reparse_point",
-                side_effect=lambda path: Path(path) == link_like
+                side_effect=lambda path: ota._same_local_path(path, link_like)
                 or original_reparse_check(Path(path)),
             ), self.assertRaisesRegex(ota.ReleaseGateError, "link/reparse"):
                 ota._snapshot_bounded_tree(
@@ -1303,6 +1303,22 @@ class LocalGateTests(unittest.TestCase):
             self.assertNotIn("release-edit", call_order)
 
     def test_brand_source_boundary_rejects_src_or_installer_run_drift(self):
+        def branch_ref(branch: str) -> str:
+            for candidate in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+                completed = subprocess.run(
+                    ["git", "rev-parse", "--verify", "--quiet", candidate],
+                    cwd=REPO_ROOT,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if completed.returncode == 0:
+                    return candidate
+            self.fail(f"missing local or origin release branch ref: {branch}")
+
+        main_ref = branch_ref("main")
+        brand_ref = branch_ref("hk-pathlynx-corpla")
+
         def git_blob(ref: str, relative: str) -> bytes:
             return subprocess.check_output(
                 ["git", "show", f"{ref}:{relative}"], cwd=REPO_ROOT
@@ -1316,8 +1332,7 @@ class LocalGateTests(unittest.TestCase):
             brand.mkdir()
             for relative in (".gitignore", "QtWidgetsApplication4.vcxproj",
                              "installer/QtWidgetsApplication4.iss"):
-                for target, ref in ((neutral, "refs/heads/main"),
-                                    (brand, "refs/heads/hk-pathlynx-corpla")):
+                for target, ref in ((neutral, main_ref), (brand, brand_ref)):
                     path = target / relative
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(git_blob(ref, relative))
@@ -1327,13 +1342,13 @@ class LocalGateTests(unittest.TestCase):
                     continue
                 path = brand / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(git_blob("refs/heads/hk-pathlynx-corpla", relative))
+                path.write_bytes(git_blob(brand_ref, relative))
 
             main_head = subprocess.check_output(
-                ["git", "rev-parse", "refs/heads/main"], cwd=REPO_ROOT, text=True
+                ["git", "rev-parse", main_ref], cwd=REPO_ROOT, text=True
             ).strip()
             brand_head = subprocess.check_output(
-                ["git", "rev-parse", "refs/heads/hk-pathlynx-corpla"],
+                ["git", "rev-parse", brand_ref],
                 cwd=REPO_ROOT, text=True,
             ).strip()
             ota._assert_brand_source_boundary(
