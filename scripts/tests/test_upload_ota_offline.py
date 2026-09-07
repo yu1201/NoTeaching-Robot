@@ -870,7 +870,7 @@ class LocalGateTests(unittest.TestCase):
             real_open = open
 
             def growing_open(path, *args, **kwargs):
-                if Path(path) == growing:
+                if ota._same_local_path(path, growing):
                     return io.BytesIO(b"xx")
                 return real_open(path, *args, **kwargs)
 
