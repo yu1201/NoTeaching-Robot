@@ -46,6 +46,23 @@ public:
         Eigen::Vector3d weldedStartPoint = Eigen::Vector3d::Zero();
     };
 
+    struct SdkBaseWeldIntegrityResult
+    {
+        bool evaluated = false;
+        bool passed = false;
+        bool canceled = false;
+        int fullCloudFinitePointCount = 0;
+        int sdkBaseWeldPointCount = 0;
+        double fullCloudProjectedSpanMm = 0.0;
+        double sdkBaseWeldProjectedSpanMm = 0.0;
+        double cloudCoverageRatio = 0.0;
+        double startEndpointDeviationMm = 0.0;
+        double endEndpointDeviationMm = 0.0;
+        double maxEndpointDeviationRatio = 0.0;
+        QString errorCode;
+        QString error;
+    };
+
     static ExtractionResult ExtractCorrugatedSheet(
         const QVector<RobotCalculation::IndexedPoint3D>& inputPoints,
         const PointCloudProcessingConfig::Settings& settings,
@@ -61,6 +78,16 @@ public:
         const PointCloudProcessingConfig::Settings& settings,
         const Eigen::Vector3d& scanDirection,
         const QString& baseWeldOutputPath = QString(),
+        const std::function<bool()>& stopRequested = std::function<bool()>());
+
+    // 方法②专用：SDKBase 生成后、任何预平滑/首尾截断/拟合/平台重算前，
+    // 用完整点云沿扫描方向的 P0.1~P99.9 稳健跨度复核 SDKBase 首末端覆盖。
+    static SdkBaseWeldIntegrityResult EvaluateSdkBaseWeldIntegrity(
+        const QVector<RobotCalculation::IndexedPoint3D>& fullCloudInput,
+        const QVector<TrackPoint>& sdkBaseWeldPoints,
+        const Eigen::Vector3d& scanDirection,
+        double minimumCloudCoverageRatio,
+        double maximumEndpointDeviationRatio,
         const std::function<bool()>& stopRequested = std::function<bool()>());
 
     // 子进程入口：由 main() 在构造主窗口前拦截 --pointcloud-extract-worker 调用。

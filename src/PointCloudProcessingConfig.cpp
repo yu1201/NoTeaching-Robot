@@ -61,6 +61,12 @@ void NormalizeFiniteLoadValues(PointCloudProcessingConfig::Settings& settings)
     // std::clamp/std::min/std::max do not sanitize NaN. Restore every floating-point
     // quality threshold before the range clamps and the Enforce safety floors run.
     useDefaultIfNonFinite(settings.validationMinProjectedSpanMm, defaults.validationMinProjectedSpanMm);
+    useDefaultIfNonFinite(
+        settings.validationMinSdkBaseCloudCoverageRatio,
+        defaults.validationMinSdkBaseCloudCoverageRatio);
+    useDefaultIfNonFinite(
+        settings.validationMaxSdkBaseEndpointDeviationRatio,
+        defaults.validationMaxSdkBaseEndpointDeviationRatio);
     useDefaultIfNonFinite(settings.validationMinStationCoverageRatio, defaults.validationMinStationCoverageRatio);
     useDefaultIfNonFinite(settings.validationMinLongestContinuousRatio, defaults.validationMinLongestContinuousRatio);
     useDefaultIfNonFinite(settings.validationMaxRejectedRatio, defaults.validationMaxRejectedRatio);
@@ -155,6 +161,13 @@ void ApplyEnforceValidationSafetyBounds(PointCloudProcessingConfig::Settings& se
     {
         settings.validationMinFinitePointCount = std::max(300, settings.validationMinFinitePointCount);
         settings.validationMinProjectedSpanMm = std::max(180.0, settings.validationMinProjectedSpanMm);
+    }
+    if (settings.validationSdkBaseIntegrityEnabled)
+    {
+        settings.validationMinSdkBaseCloudCoverageRatio =
+            std::max(0.60, settings.validationMinSdkBaseCloudCoverageRatio);
+        settings.validationMaxSdkBaseEndpointDeviationRatio =
+            std::min(0.25, settings.validationMaxSdkBaseEndpointDeviationRatio);
     }
     if (settings.validationContinuityEnabled)
     {
@@ -363,6 +376,12 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.validationCoverageEnabled = ReadBoolSetting("Validation/CoverageEnabled", settings.validationCoverageEnabled);
     settings.validationMinFinitePointCount = ReadIntSetting("Validation/MinFinitePointCount", settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = ReadDoubleSetting("Validation/MinProjectedSpanMm", settings.validationMinProjectedSpanMm);
+    settings.validationSdkBaseIntegrityEnabled = ReadBoolSetting(
+        "Validation/SdkBaseIntegrityEnabled", settings.validationSdkBaseIntegrityEnabled);
+    settings.validationMinSdkBaseCloudCoverageRatio = ReadDoubleSetting(
+        "Validation/MinSdkBaseCloudCoverageRatio", settings.validationMinSdkBaseCloudCoverageRatio);
+    settings.validationMaxSdkBaseEndpointDeviationRatio = ReadDoubleSetting(
+        "Validation/MaxSdkBaseEndpointDeviationRatio", settings.validationMaxSdkBaseEndpointDeviationRatio);
     settings.validationContinuityEnabled = ReadBoolSetting("Validation/ContinuityEnabled", settings.validationContinuityEnabled);
     settings.validationMinStationCoverageRatio = ReadDoubleSetting("Validation/MinStationCoverageRatio", settings.validationMinStationCoverageRatio);
     settings.validationMinLongestContinuousRatio = ReadDoubleSetting("Validation/MinLongestContinuousRatio", settings.validationMinLongestContinuousRatio);
@@ -581,6 +600,10 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.projectionSmoothRadius = std::max(0, settings.projectionSmoothRadius);
     settings.validationMinFinitePointCount = std::max(0, settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = std::max(0.0, settings.validationMinProjectedSpanMm);
+    settings.validationMinSdkBaseCloudCoverageRatio =
+        std::clamp(settings.validationMinSdkBaseCloudCoverageRatio, 0.0, 1.0);
+    settings.validationMaxSdkBaseEndpointDeviationRatio =
+        std::clamp(settings.validationMaxSdkBaseEndpointDeviationRatio, 0.0, 1.0);
     settings.validationMinStationCoverageRatio = std::clamp(settings.validationMinStationCoverageRatio, 0.0, 1.0);
     settings.validationMinLongestContinuousRatio = std::clamp(settings.validationMinLongestContinuousRatio, 0.0, 1.0);
     settings.validationMaxRejectedRatio = std::clamp(settings.validationMaxRejectedRatio, 0.0, 1.0);
@@ -680,6 +703,9 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("Validation/CoverageEnabled", normalizedSettings.validationCoverageEnabled ? "1" : "0")
         && write("Validation/MinFinitePointCount", QString::number(normalizedSettings.validationMinFinitePointCount))
         && write("Validation/MinProjectedSpanMm", QString::number(normalizedSettings.validationMinProjectedSpanMm, 'f', 6))
+        && write("Validation/SdkBaseIntegrityEnabled", normalizedSettings.validationSdkBaseIntegrityEnabled ? "1" : "0")
+        && write("Validation/MinSdkBaseCloudCoverageRatio", QString::number(normalizedSettings.validationMinSdkBaseCloudCoverageRatio, 'f', 6))
+        && write("Validation/MaxSdkBaseEndpointDeviationRatio", QString::number(normalizedSettings.validationMaxSdkBaseEndpointDeviationRatio, 'f', 6))
         && write("Validation/ContinuityEnabled", normalizedSettings.validationContinuityEnabled ? "1" : "0")
         && write("Validation/MinStationCoverageRatio", QString::number(normalizedSettings.validationMinStationCoverageRatio, 'f', 6))
         && write("Validation/MinLongestContinuousRatio", QString::number(normalizedSettings.validationMinLongestContinuousRatio, 'f', 6))

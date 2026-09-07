@@ -88,6 +88,9 @@
 #include <QLineF>
 #include <QEasingCurve>
 #include <QIntValidator>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QAction>
 #include <QCheckBox>
 #include <QClipboard>
@@ -7373,7 +7376,16 @@ namespace
 			// 各阶段点云默认外观；完整工件大点云默认白色、小点不连线。
 			const FileSpec kWorkpiece{ "PreciseLaserPoint_WorkpieceCloud.txt", "完整工件点云", QColor(255, 255, 255), false, false, 1.2 };
 			const FileSpec kRaw{ "PreciseLaserPoint.txt", "原始精确点云", QColor(200, 225, 235), false, false, 2.0 };
-			const FileSpec kSdkBase{ "PreciseLaserPoint_SdkBase.txt", "SDK基础焊道", QColor(255, 170, 0), false, true, 0.0 };
+			const QString completedSdkBaseFileName = QStringLiteral("PreciseLaserPoint_SdkBase.txt");
+			const QString rawSdkBaseFileName = QDir(QStringLiteral("SdkPointCloud"))
+				.filePath(QStringLiteral("PreciseLaserPoint_SdkBaseWeld.txt"));
+			const bool useRawSdkBaseFallback =
+				!QFileInfo::exists(dir.filePath(completedSdkBaseFileName))
+				&& QFileInfo::exists(dir.filePath(rawSdkBaseFileName));
+			const FileSpec kSdkBase{
+				useRawSdkBaseFallback ? rawSdkBaseFileName : completedSdkBaseFileName,
+				useRawSdkBaseFallback ? "SDK基础焊道（门禁前原始输出）" : "SDK基础焊道",
+				QColor(255, 170, 0), false, true, 0.0 };
 			const FileSpec kPreserve{ "PreciseLaserPoint_PreservePath_2mm.txt", "保留路径(2mm)", QColor(0, 210, 210), false, true, 0.0 };
 			const FileSpec kClassified{ "PreciseLaserPoint_Classified.txt", "分类点云", QColor(0, 255, 80), true, true, 0.0 };
 			const FileSpec kWeldPose{ "PreciseLaserPoint_WeldPose_2mm_SeamComp.txt", "焊接姿态点云", QColor(255, 230, 90), false, true, 0.0 };
@@ -7398,6 +7410,38 @@ namespace
 				break;
 			}
 			AppendLog(QString("处理方法：%1").arg(PointCloudProcessingConfig::ModeDisplayName(mode)));
+			if (useRawSdkBaseFallback)
+			{
+				AppendLog(QString("正式方法基础焊道未生成，显示SDK门禁前原始输出：%1")
+					.arg(QDir::toNativeSeparators(rawSdkBaseFileName)));
+			}
+
+			QFile qualityGateFile(dir.filePath(QStringLiteral("PreciseLaserPoint_QualityGate.json")));
+			if (qualityGateFile.open(QIODevice::ReadOnly))
+			{
+				QJsonParseError parseError;
+				const QJsonDocument qualityGateDocument =
+					QJsonDocument::fromJson(qualityGateFile.readAll(), &parseError);
+				if (parseError.error == QJsonParseError::NoError && qualityGateDocument.isObject())
+				{
+					const QJsonObject qualityGate = qualityGateDocument.object();
+					if (qualityGate.value(QStringLiteral("state")).toString() == QStringLiteral("rejected"))
+					{
+						QStringList failures;
+						for (const QJsonValue& failure : qualityGate.value(QStringLiteral("failures")).toArray())
+						{
+							const QString text = failure.toString().trimmed();
+							if (!text.isEmpty())
+							{
+								failures.push_back(text);
+							}
+						}
+						AppendLog(failures.isEmpty()
+							? QStringLiteral("点云质量门禁已拒绝本次结果；请查看 PreciseLaserPoint_QualityGate.json。")
+							: QStringLiteral("点云质量门禁拒绝：") + failures.join(QStringLiteral("；")));
+					}
+				}
+			}
 
 			// 重活搬到后台线程：逐文件读盘+解析（带进度回报/取消），完成后回 UI 线程 SetLayers。
 			m_loading = true;

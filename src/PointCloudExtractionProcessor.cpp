@@ -116,6 +116,69 @@ qint64 SdkWorkerTimeoutMs(qint64 finiteInputPointCount)
         SDK_WORKER_BASE_TIMEOUT_MS + extraBlocks * SDK_WORKER_EXTRA_BLOCK_TIMEOUT_MS);
 }
 
+struct RobustProjectionRange
+{
+    bool ok = false;
+    int finitePointCount = 0;
+    double minimum = 0.0;
+    double maximum = 0.0;
+};
+
+double SortedPercentile(const QVector<double>& sortedValues, double percentile)
+{
+    if (sortedValues.isEmpty())
+    {
+        return 0.0;
+    }
+    const double bounded = std::clamp(percentile, 0.0, 1.0);
+    const double position = bounded * static_cast<double>(sortedValues.size() - 1);
+    const qsizetype lower = static_cast<qsizetype>(std::floor(position));
+    const qsizetype upper = static_cast<qsizetype>(std::ceil(position));
+    const double fraction = position - static_cast<double>(lower);
+    return sortedValues[lower] * (1.0 - fraction) + sortedValues[upper] * fraction;
+}
+
+RobustProjectionRange BuildFullCloudProjectionRange(
+    const QVector<RobotCalculation::IndexedPoint3D>& points,
+    const Eigen::Vector3d& direction,
+    const std::function<bool()>& stopRequested)
+{
+    RobustProjectionRange result;
+    QVector<double> projections;
+    projections.reserve(points.size());
+    for (qsizetype index = 0; index < points.size(); ++index)
+    {
+        if ((index & 0x0fff) == 0 && stopRequested && stopRequested())
+        {
+            return result;
+        }
+        if (!IsFinitePoint(points[index].point))
+        {
+            continue;
+        }
+        const double projection = points[index].point.dot(direction);
+        if (std::isfinite(projection))
+        {
+            projections.push_back(projection);
+        }
+    }
+    result.finitePointCount = projections.size();
+    if (projections.size() < 2)
+    {
+        return result;
+    }
+
+    std::sort(projections.begin(), projections.end());
+    // 完整点云是无序面点，不能累加相邻点距离当“长度”。去掉两端各 0.1% 极值后，
+    // 沿本次扫描方向取稳健覆盖区间，避免单个飞点把错误 SDKBase 的覆盖率虚假抬高。
+    result.minimum = SortedPercentile(projections, 0.001);
+    result.maximum = SortedPercentile(projections, 0.999);
+    result.ok = std::isfinite(result.minimum)
+        && std::isfinite(result.maximum)
+        && result.maximum - result.minimum > 1.0e-6;
+    return result;
+}
+
 ExternalPoint3D ToExternalPoint(const Eigen::Vector3d& point)
 {
     ExternalPoint3D external;
@@ -852,6 +915,124 @@ QVector<PointCloudExtractionProcessor::TrackPoint> ResampleTrackPoints(
     }
     return output;
 }
+}
+
+PointCloudExtractionProcessor::SdkBaseWeldIntegrityResult
+PointCloudExtractionProcessor::EvaluateSdkBaseWeldIntegrity(
+    const QVector<RobotCalculation::IndexedPoint3D>& fullCloudInput,
+    const QVector<TrackPoint>& sdkBaseWeldPoints,
+    const Eigen::Vector3d& scanDirection,
+    double minimumCloudCoverageRatio,
+    double maximumEndpointDeviationRatio,
+    const std::function<bool()>& stopRequested)
+{
+    SdkBaseWeldIntegrityResult result;
+    result.sdkBaseWeldPointCount = sdkBaseWeldPoints.size();
+
+    Eigen::Vector3d direction = scanDirection;
+    if (!IsFinitePoint(direction)
+        || direction.norm() <= std::numeric_limits<double>::epsilon())
+    {
+        direction = Eigen::Vector3d::UnitX();
+    }
+    direction.normalize();
+
+    const RobustProjectionRange cloudRange =
+        BuildFullCloudProjectionRange(fullCloudInput, direction, stopRequested);
+    result.fullCloudFinitePointCount = cloudRange.finitePointCount;
+    if (stopRequested && stopRequested())
+    {
+        result.canceled = true;
+        result.errorCode = QStringLiteral("SDK_BASE_INTEGRITY_CANCELED");
+        result.error = QStringLiteral("SDK基础焊道完整性检测已取消。");
+        return result;
+    }
+
+    result.evaluated = true;
+    const double minimumCoverage = std::clamp(minimumCloudCoverageRatio, 0.0, 1.0);
+    const double maximumEndpointDeviation =
+        std::clamp(maximumEndpointDeviationRatio, 0.0, 1.0);
+    if (!cloudRange.ok)
+    {
+        result.errorCode = QStringLiteral("SDK_BASE_REFERENCE_SPAN_INVALID");
+        result.error = QString(
+            "SDK基础焊道完整性门禁失败：错误类型=%1；"
+            "完整点云沿扫描方向的P0.1~P99.9有效跨度无法建立，有限点=%2、实际跨度=%3 mm，"
+            "参考门禁=有限点>=2且稳健跨度>0 mm；SDK覆盖率门禁>=%4%，最大单侧偏差率门禁<=%5%。"
+            "无法证明SDK生成焊道覆盖完整，门禁判定不通过。")
+            .arg(result.errorCode)
+            .arg(result.fullCloudFinitePointCount)
+            .arg(std::max(0.0, cloudRange.maximum - cloudRange.minimum), 0, 'f', 3)
+            .arg(minimumCoverage * 100.0, 0, 'f', 2)
+            .arg(maximumEndpointDeviation * 100.0, 0, 'f', 2);
+        return result;
+    }
+    result.fullCloudProjectedSpanMm = cloudRange.maximum - cloudRange.minimum;
+
+    if (sdkBaseWeldPoints.size() < 2
+        || !IsFinitePoint(sdkBaseWeldPoints.first().point)
+        || !IsFinitePoint(sdkBaseWeldPoints.last().point))
+    {
+        result.errorCode = QStringLiteral("SDK_BASE_ENDPOINT_INVALID");
+        result.error = QString(
+            "SDK基础焊道完整性门禁失败：错误类型=%1；"
+            "SDKBase点数=%2，首末端不是两个有效三维点；完整点云参考跨度=%3 mm，"
+            "端点门禁=点数>=2且首末端均为有限三维点；SDK覆盖率门禁>=%4%，"
+            "最大单侧偏差率门禁<=%5%。无法计算覆盖率，门禁判定不通过。")
+            .arg(result.errorCode)
+            .arg(result.sdkBaseWeldPointCount)
+            .arg(result.fullCloudProjectedSpanMm, 0, 'f', 3)
+            .arg(minimumCoverage * 100.0, 0, 'f', 2)
+            .arg(maximumEndpointDeviation * 100.0, 0, 'f', 2);
+        return result;
+    }
+
+    const double firstProjection = sdkBaseWeldPoints.first().point.dot(direction);
+    const double lastProjection = sdkBaseWeldPoints.last().point.dot(direction);
+    const double sdkMinimum = std::min(firstProjection, lastProjection);
+    const double sdkMaximum = std::max(firstProjection, lastProjection);
+    result.sdkBaseWeldProjectedSpanMm = sdkMaximum - sdkMinimum;
+    result.cloudCoverageRatio = result.sdkBaseWeldProjectedSpanMm
+        / result.fullCloudProjectedSpanMm;
+    result.startEndpointDeviationMm = std::abs(sdkMinimum - cloudRange.minimum);
+    result.endEndpointDeviationMm = std::abs(cloudRange.maximum - sdkMaximum);
+    result.maxEndpointDeviationRatio = std::max(
+        result.startEndpointDeviationMm,
+        result.endEndpointDeviationMm) / result.fullCloudProjectedSpanMm;
+
+    QStringList failureCodes;
+    if (!std::isfinite(result.cloudCoverageRatio)
+        || result.cloudCoverageRatio < minimumCoverage)
+    {
+        failureCodes.push_back(QStringLiteral("SDK_BASE_COVERAGE_TOO_LOW"));
+    }
+    if (!std::isfinite(result.maxEndpointDeviationRatio)
+        || result.maxEndpointDeviationRatio > maximumEndpointDeviation)
+    {
+        failureCodes.push_back(QStringLiteral("SDK_BASE_ENDPOINT_DEVIATION_TOO_LARGE"));
+    }
+    result.passed = failureCodes.isEmpty();
+    result.errorCode = failureCodes.join(QLatin1Char('+'));
+    if (!result.passed)
+    {
+        result.error = QString(
+            "SDK基础焊道完整性门禁失败：错误类型=%1；SDK生成范围与完整点云不一致。"
+            "完整点云参考跨度(P0.1~P99.9)=%2 mm，SDKBase点数=%3、首末端跨度=%4 mm；"
+            "实际覆盖率=%5%，门禁要求>=%6%；"
+            "起点侧端点偏差=%7 mm、终点侧端点偏差=%8 mm，最大单侧偏差率=%9%，门禁要求<=%10%。"
+            "门禁判定不通过。")
+            .arg(result.errorCode)
+            .arg(result.fullCloudProjectedSpanMm, 0, 'f', 3)
+            .arg(result.sdkBaseWeldPointCount)
+            .arg(result.sdkBaseWeldProjectedSpanMm, 0, 'f', 3)
+            .arg(result.cloudCoverageRatio * 100.0, 0, 'f', 2)
+            .arg(minimumCoverage * 100.0, 0, 'f', 2)
+            .arg(result.startEndpointDeviationMm, 0, 'f', 3)
+            .arg(result.endEndpointDeviationMm, 0, 'f', 3)
+            .arg(result.maxEndpointDeviationRatio * 100.0, 0, 'f', 2)
+            .arg(maximumEndpointDeviation * 100.0, 0, 'f', 2);
+    }
+    return result;
 }
 
 PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::ExtractCorrugatedSheet(
