@@ -324,24 +324,28 @@ if ($channelSpec.RequiresBranding) {
 
 $pointCloudExtractionSourceDir = Join-Path $repoRoot "SDK\PointCloudExtration"
 $pointCloudExtractionTargetDir = Join-Path $packageDir "SDK\PointCloudExtration"
-# Ship only the runtime dependency closure of PointCloudExtration.dll (verified with
-# dumpbin /DEPENDENTS, the DLL does not import LoadLibrary so the closure is complete).
-# The vendor directory also contains debug opencv *2413d.dll builds and DLLs outside
-# the closure (pcl_surface/pcl_visualization/opencv calib3d 等) — dead weight (~42 MB).
+# Ship only the runtime dependency closure of the updated PointCloudExtration.dll
+# (verified with dumpbin /DEPENDENTS). The old suffixed OpenCV/PCL files remain in
+# the source SDK archive for reference but are not dependencies of the updated DLL.
 # Do NOT touch the SDK source directory itself; filtering happens only at packaging.
+$pointCloudExtractionExpectedSha256 = "27BA35F9365A7BC4293009DF659235C61A2D9026F1BA286E7EBA4ACE9FAA21B2"
 $pointCloudExtractionRuntimeFiles = @(
     "PointCloudExtration.dll",
-    "OpenNI2.dll",
-    "opencv_core2413.dll", "opencv_highgui2413.dll", "opencv_imgproc2413.dll",
-    "pcl_common_release.dll", "pcl_features_release.dll", "pcl_filters_release.dll",
-    "pcl_io_release.dll", "pcl_io_ply_release.dll", "pcl_kdtree_release.dll",
-    "pcl_ml_release.dll", "pcl_octree_release.dll", "pcl_sample_consensus_release.dll",
-    "pcl_search_release.dll", "pcl_segmentation_release.dll"
+    "CONCRT140.dll", "MSVCP140.dll", "opencv_world480.dll",
+    "pcl_common.dll", "pcl_features.dll", "pcl_filters.dll", "pcl_kdtree.dll",
+    "pcl_ml.dll", "pcl_octree.dll", "pcl_sample_consensus.dll",
+    "pcl_search.dll", "pcl_segmentation.dll",
+    "VCRUNTIME140.dll", "VCRUNTIME140_1.dll"
 )
 New-Item -ItemType Directory -Path $pointCloudExtractionTargetDir -Force | Out-Null
 foreach ($runtimeFile in $pointCloudExtractionRuntimeFiles) {
     $relative = "SDK/PointCloudExtration/$runtimeFile"
     Copy-TrackedReleaseFile -RelativePath $relative -DestinationPath (Join-Path $pointCloudExtractionTargetDir $runtimeFile)
+}
+$packagedPointCloudExtractionDll = Join-Path $pointCloudExtractionTargetDir "PointCloudExtration.dll"
+$packagedPointCloudExtractionHash = (Get-FileHash -LiteralPath $packagedPointCloudExtractionDll -Algorithm SHA256).Hash
+if ($packagedPointCloudExtractionHash -cne $pointCloudExtractionExpectedSha256) {
+    throw "PointCloudExtration.dll SHA-256 mismatch: expected=$pointCloudExtractionExpectedSha256 actual=$packagedPointCloudExtractionHash"
 }
 # config\ holds the default algorithm INI the app reads to derive *.runtime.ini.
 $pointCloudConfigDir = Join-Path $pointCloudExtractionSourceDir "config"

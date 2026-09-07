@@ -679,6 +679,51 @@ bool LoadSdkBaseWeldFile(
     return true;
 }
 
+// 新版 PointCloudExtration.dll 不再写 Save_File_Name，而是直接通过返回数组
+// 给出稠密基础焊道。只在文件确实未生成且返回点足够稠密时启用兼容，
+// 避免把旧库的少量特征点误当成基础焊道。
+bool ReturnedTrackLooksLikeDenseBaseWeld(
+    const QVector<PointCloudExtractionProcessor::TrackPoint>& points,
+    double requestedStepMm)
+{
+    if (points.size() < 16)
+    {
+        return false;
+    }
+
+    QVector<double> segmentLengths;
+    segmentLengths.reserve(points.size() - 1);
+    double totalLength = 0.0;
+    for (int index = 0; index + 1 < points.size(); ++index)
+    {
+        const double length = (points[index + 1].point - points[index].point).norm();
+        if (!std::isfinite(length) || length <= 1e-6)
+        {
+            continue;
+        }
+        segmentLengths.push_back(length);
+        totalLength += length;
+    }
+    if (segmentLengths.size() < 15)
+    {
+        return false;
+    }
+
+    std::sort(segmentLengths.begin(), segmentLengths.end());
+    const double medianLength = segmentLengths[segmentLengths.size() / 2];
+    const double safeRequestedStep =
+        std::isfinite(requestedStepMm) && requestedStepMm > 0.0 ? requestedStepMm : 2.0;
+    const double medianLimit = std::max(2.5, safeRequestedStep * 2.0);
+    const double denseSegmentLimit = std::max(5.0, safeRequestedStep * 3.0);
+    const int denseSegmentCount = static_cast<int>(std::count_if(
+        segmentLengths.cbegin(), segmentLengths.cend(),
+        [denseSegmentLimit](double length) { return length <= denseSegmentLimit; }));
+
+    return totalLength >= std::max(20.0, safeRequestedStep * 10.0)
+        && medianLength <= medianLimit
+        && denseSegmentCount * 5 >= segmentLengths.size() * 4;
+}
+
 void ApplyReturnedKeyPointTypes(
     QVector<PointCloudExtractionProcessor::TrackPoint>* densePoints,
     const QVector<PointCloudExtractionProcessor::TrackPoint>& keyPoints)
@@ -1084,12 +1129,25 @@ PointCloudExtractionProcessor::ExtractionResult PointCloudExtractionProcessor::E
         QVector<TrackPoint> baseWeldPoints;
         if (!LoadSdkBaseWeldFile(result.baseWeldPath, &baseWeldPoints, &baseWeldError))
         {
-            result.error = baseWeldError;
-            return result;
+            if (!QFileInfo::exists(result.baseWeldPath)
+                && ReturnedTrackLooksLikeDenseBaseWeld(rawPoints, settings.resampleStepMm))
+            {
+                result.points = rawPoints;
+                result.points.front().type = TrackPointType::Start;
+                result.points.back().type = TrackPointType::End;
+            }
+            else
+            {
+                result.error = baseWeldError;
+                return result;
+            }
         }
-        ApplyReturnedKeyPointTypes(&baseWeldPoints, rawPoints);
-        result.points = baseWeldPoints;
-        result.usedBaseWeldFile = true;
+        else
+        {
+            ApplyReturnedKeyPointTypes(&baseWeldPoints, rawPoints);
+            result.points = baseWeldPoints;
+            result.usedBaseWeldFile = true;
+        }
     }
     else
     {

@@ -3084,6 +3084,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             {
                 appendLog(QString("SDK基础焊道来自库输出文件：%1").arg(extraction.baseWeldPath));
             }
+            else if (useBaseWeldFit && !extraction.baseWeldPath.isEmpty())
+            {
+                appendLog(QString(
+                    "SDK基础焊道来自更新版库返回数组：稠密点=%1，"
+                    "Save_File_Name未生成；后续拟合与质量门槛保持原流程。")
+                    .arg(extraction.points.size()));
+            }
         }
         SaveMethodBaseTrackFile(
             methodTrackOutputDir, settings.mode, BuildMethodTrackLines(workingExtraction.points), appendLog);
