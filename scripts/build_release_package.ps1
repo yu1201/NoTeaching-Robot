@@ -324,24 +324,28 @@ if ($channelSpec.RequiresBranding) {
 
 $pointCloudExtractionSourceDir = Join-Path $repoRoot "SDK\PointCloudExtration"
 $pointCloudExtractionTargetDir = Join-Path $packageDir "SDK\PointCloudExtration"
-# Ship only the runtime dependency closure of PointCloudExtration.dll (verified with
-# dumpbin /DEPENDENTS, the DLL does not import LoadLibrary so the closure is complete).
-# The vendor directory also contains debug opencv *2413d.dll builds and DLLs outside
-# the closure (pcl_surface/pcl_visualization/opencv calib3d 等) — dead weight (~42 MB).
+# Ship only the runtime dependency closure of the updated PointCloudExtration.dll
+# (verified with dumpbin /DEPENDENTS). The old suffixed OpenCV/PCL files remain in
+# the source SDK archive for reference but are not dependencies of the updated DLL.
 # Do NOT touch the SDK source directory itself; filtering happens only at packaging.
+$pointCloudExtractionExpectedSha256 = "27BA35F9365A7BC4293009DF659235C61A2D9026F1BA286E7EBA4ACE9FAA21B2"
 $pointCloudExtractionRuntimeFiles = @(
     "PointCloudExtration.dll",
-    "OpenNI2.dll",
-    "opencv_core2413.dll", "opencv_highgui2413.dll", "opencv_imgproc2413.dll",
-    "pcl_common_release.dll", "pcl_features_release.dll", "pcl_filters_release.dll",
-    "pcl_io_release.dll", "pcl_io_ply_release.dll", "pcl_kdtree_release.dll",
-    "pcl_ml_release.dll", "pcl_octree_release.dll", "pcl_sample_consensus_release.dll",
-    "pcl_search_release.dll", "pcl_segmentation_release.dll"
+    "CONCRT140.dll", "MSVCP140.dll", "opencv_world480.dll",
+    "pcl_common.dll", "pcl_features.dll", "pcl_filters.dll", "pcl_kdtree.dll",
+    "pcl_ml.dll", "pcl_octree.dll", "pcl_sample_consensus.dll",
+    "pcl_search.dll", "pcl_segmentation.dll",
+    "VCRUNTIME140.dll", "VCRUNTIME140_1.dll"
 )
 New-Item -ItemType Directory -Path $pointCloudExtractionTargetDir -Force | Out-Null
 foreach ($runtimeFile in $pointCloudExtractionRuntimeFiles) {
     $relative = "SDK/PointCloudExtration/$runtimeFile"
     Copy-TrackedReleaseFile -RelativePath $relative -DestinationPath (Join-Path $pointCloudExtractionTargetDir $runtimeFile)
+}
+$packagedPointCloudExtractionDll = Join-Path $pointCloudExtractionTargetDir "PointCloudExtration.dll"
+$packagedPointCloudExtractionHash = (Get-FileHash -LiteralPath $packagedPointCloudExtractionDll -Algorithm SHA256).Hash
+if ($packagedPointCloudExtractionHash -cne $pointCloudExtractionExpectedSha256) {
+    throw "PointCloudExtration.dll SHA-256 mismatch: expected=$pointCloudExtractionExpectedSha256 actual=$packagedPointCloudExtractionHash"
 }
 # config\ holds the default algorithm INI the app reads to derive *.runtime.ini.
 $pointCloudConfigDir = Join-Path $pointCloudExtractionSourceDir "config"
@@ -359,6 +363,42 @@ foreach ($relative in $trackedPointCloudConfig) {
     }
     $configRelative = $normalized.Substring("SDK/PointCloudExtration/".Length).Replace('/', '\')
     Copy-TrackedReleaseFile -RelativePath $normalized -DestinationPath (Join-Path $pointCloudExtractionTargetDir $configRelative)
+}
+
+# 扫描变姿态精度测试使用独立、固定版本的新版 SDK。它的依赖必须与
+# findWeldingLine.dll 同目录分发，不能混入上面的旧版 PCL/OpenCV 运行时。
+$scanPoseSdkVersion = "findWeldingLine_sdk_x64_Release_20260902_1742"
+$scanPoseSdkExpectedSha256 = "925AC6BF19762F76CF249C96A0FE873ABFA94151AC6636989C10759CE4A27432"
+$scanPoseSdkRelativeRoot = "SDK/PointCloudExtration/$scanPoseSdkVersion"
+$scanPoseSdkTargetRoot = Join-Path $pointCloudExtractionTargetDir $scanPoseSdkVersion
+$scanPoseSdkRuntimeFiles = @(
+    "README.md",
+    "bin/CONCRT140.dll",
+    "bin/findWeldingLine.dll",
+    "bin/MSVCP140.dll",
+    "bin/opencv_world480.dll",
+    "bin/pcl_common.dll",
+    "bin/pcl_features.dll",
+    "bin/pcl_filters.dll",
+    "bin/pcl_kdtree.dll",
+    "bin/pcl_ml.dll",
+    "bin/pcl_octree.dll",
+    "bin/pcl_sample_consensus.dll",
+    "bin/pcl_search.dll",
+    "bin/pcl_segmentation.dll",
+    "bin/VCRUNTIME140_1.dll",
+    "bin/VCRUNTIME140.dll"
+)
+foreach ($sdkRuntimeFile in $scanPoseSdkRuntimeFiles) {
+    $normalizedSdkFile = $sdkRuntimeFile.Replace('\', '/')
+    Copy-TrackedReleaseFile `
+        -RelativePath "$scanPoseSdkRelativeRoot/$normalizedSdkFile" `
+        -DestinationPath (Join-Path $scanPoseSdkTargetRoot $sdkRuntimeFile)
+}
+$packagedScanPoseSdkDll = Join-Path $scanPoseSdkTargetRoot "bin\findWeldingLine.dll"
+$packagedScanPoseSdkHash = (Get-FileHash -LiteralPath $packagedScanPoseSdkDll -Algorithm SHA256).Hash
+if ($packagedScanPoseSdkHash -cne $scanPoseSdkExpectedSha256) {
+    throw "Scan-pose findWeldingLine.dll SHA-256 mismatch: expected=$scanPoseSdkExpectedSha256 actual=$packagedScanPoseSdkHash"
 }
 
 # SDK\STEP\versions is intentionally NOT shipped at all:

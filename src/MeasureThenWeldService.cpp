@@ -2880,6 +2880,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         // ②SDK+拟合：SDK 输出基础焊道（稠密），再喂滤波拟合提取特征点。
         // 失败直接报错，不回退其他方法。
         const bool useBaseWeldFit = settings.mode == PointCloudProcessingConfig::Mode::SdkBaseWeldFit;
+        const QDir configuredSdkDir(settings.libraryDir);
+        const bool configuredFindWeldingLine =
+            QFileInfo(configuredSdkDir.filePath(QStringLiteral("findWeldingLine.dll"))).isFile()
+            || QFileInfo(configuredSdkDir.filePath(QStringLiteral("bin/findWeldingLine.dll"))).isFile();
+        // 20260902 findWeldingLine.dll no longer writes the dense base-weld file
+        // configured through Save_File_Name. Its returned array is the dense centerline.
+        const bool useReturnedTrackAsBaseWeld = useBaseWeldFit && configuredFindWeldingLine;
         if (fullCloudInput.size() < 2)
         {
             RobotCalculation::MeasureThenWeldAnalysisResult failed;
@@ -2897,7 +2904,9 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 fullCloudInput,
                 settings,
                 BuildScanDirection(param),
-                useBaseWeldFit ? sdkBaseWeldOutputPath : QString(),
+                useBaseWeldFit && !useReturnedTrackAsBaseWeld
+                    ? sdkBaseWeldOutputPath
+                    : QString(),
                 stopRequested);
         if (isCanceled())
         {
@@ -2915,6 +2924,17 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         }
         // 已焊起点截断（开关控制）：SDK 检测到已焊段时，按焊接方向截掉焊道已焊部分只焊剩余段。
         PointCloudExtractionProcessor::ExtractionResult workingExtraction = extraction;
+        if (useReturnedTrackAsBaseWeld)
+        {
+            workingExtraction.points = extraction.rawPoints;
+            if (appendLog)
+            {
+                appendLog(QString(
+                    "新版SDK兼容：使用DLL返回的稠密中心线作为拟合基础焊道，点数=%1；"
+                    "不再等待Save_File_Name文件。")
+                    .arg(workingExtraction.points.size()));
+            }
+        }
         if (settings.sdkUseWeldedStartTruncation)
         {
             if (extraction.hasWeldedStartPoint)
@@ -2922,7 +2942,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                 const bool weldFromTrackStart = param.nWeldDirection >= 0;
                 int removedCount = 0;
                 workingExtraction.points = TruncateTrackAtWeldedStart(
-                    extraction.points, extraction.weldedStartPoint, weldFromTrackStart, &removedCount);
+                    workingExtraction.points, extraction.weldedStartPoint, weldFromTrackStart, &removedCount);
                 if (appendLog)
                 {
                     if (removedCount > 0)
@@ -3021,6 +3041,13 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             if (extraction.usedBaseWeldFile)
             {
                 appendLog(QString("SDK基础焊道来自库输出文件：%1").arg(extraction.baseWeldPath));
+            }
+            else if (useBaseWeldFit && !extraction.baseWeldPath.isEmpty())
+            {
+                appendLog(QString(
+                    "SDK基础焊道来自更新版库返回数组：稠密点=%1，"
+                    "Save_File_Name未生成；后续拟合与质量门槛保持原流程。")
+                    .arg(extraction.points.size()));
             }
         }
         SaveMethodBaseTrackFile(
