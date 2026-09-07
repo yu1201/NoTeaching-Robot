@@ -794,11 +794,12 @@ void ScanDataUploader::StartWorkerIfIdle()
 	config.user = OnlineServicesConfig::FtpUser().toStdString();
 	config.password = OnlineServicesConfig::FtpPassword().toStdString();
 	config.deviceName = OnlineServicesConfig::DeviceName().trimmed();
-	if (!AppPaths::IsSafePathComponent(config.deviceName))
+	if (!AppPaths::IsSafePathComponent(config.deviceName)
+		|| OnlineServicesConfig::IsServerAccountName(config.deviceName))
 	{
 		m_busy.store(false);
 		emit uploadStatus(QStringLiteral(
-			"上传未配置：设备名称必须是安全的单一目录名。"));
+			"上传未配置：设备名称必须是安全的单一目录名，且不能使用服务器账号格式。"));
 		return;
 	}
 	if (!OnlineServicesConfig::IsDefaultFtpAccount(QString::fromStdString(config.user)))
