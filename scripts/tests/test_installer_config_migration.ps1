@@ -149,6 +149,56 @@ function Wait-ForFile {
     throw "Timed out waiting for crash-window signal: $Path"
 }
 
+function Wait-ForCrashResourcesReleased {
+    param([Parameter(Mandatory = $true)][string]$Data, [int]$TimeoutSeconds = 10)
+    $scopeBytes = [System.Text.Encoding]::UTF8.GetBytes(
+        'QtWidgetsApplication4/robot-hardware-control/v1'
+    )
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $scopeHash = [System.BitConverter]::ToString(
+            $sha256.ComputeHash($scopeBytes)
+        ).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+    $mutexName = 'Global\NoTeaching-Robot-Hardware-Control-v1-' + $scopeHash
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $streams = [System.Collections.Generic.List[System.IO.FileStream]]::new()
+        $mutex = $null
+        try {
+            foreach ($file in @(Get-ChildItem -LiteralPath $Data -File -Force -ErrorAction Stop)) {
+                $streams.Add([System.IO.File]::Open(
+                    $file.FullName,
+                    [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::ReadWrite,
+                    [System.IO.FileShare]::None
+                ))
+            }
+            $createdNew = $false
+            $mutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
+            if ($createdNew) {
+                return
+            }
+        }
+        catch [System.IO.IOException] {
+            # The killed process still owns a file or its named lease.
+        }
+        finally {
+            if ($null -ne $mutex) {
+                $mutex.Dispose()
+            }
+            foreach ($stream in $streams) {
+                $stream.Dispose()
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for crash-process files and application lease to close: $Data"
+}
+
 function Stop-CrashWindowTree {
     param(
         [Parameter(Mandatory = $true)][System.Diagnostics.Process]$HelperProcess,
@@ -648,6 +698,7 @@ try {
     Assert-True ($stagingScrubProcess.WaitForExit(30000)) 'staging after-scrub helper did not terminate'
     Assert-True ($stagingScrubProcess.ExitCode -ne 0) 'staging after-scrub crash hook returned success'
     $stagingScrubProcess.Dispose()
+    Wait-ForCrashResourcesReleased $stagingScrubCrashData
     Assert-True (
         (Test-Path -LiteralPath $stagingScrubPath -PathType Leaf) -and
         (Get-Item -LiteralPath $stagingScrubPath).Length -eq 0 -and
@@ -689,6 +740,7 @@ try {
     Assert-True ($stagingDispositionProcess.WaitForExit(30000)) 'staging after-disposition helper did not terminate'
     Assert-True ($stagingDispositionProcess.ExitCode -ne 0) 'staging after-disposition crash hook returned success'
     $stagingDispositionProcess.Dispose()
+    Wait-ForCrashResourcesReleased $stagingDispositionData
     Assert-True (
         -not (Test-Path -LiteralPath $stagingDispositionPath) -and
         (Test-Path -LiteralPath $stagingDispositionAlias -PathType Leaf) -and
@@ -722,6 +774,7 @@ try {
     Assert-True ($backupScrubProcess.WaitForExit(30000)) 'backup after-scrub helper did not terminate'
     Assert-True ($backupScrubProcess.ExitCode -ne 0) 'backup after-scrub crash hook returned success'
     $backupScrubProcess.Dispose()
+    Wait-ForCrashResourcesReleased $backupScrubData
     Assert-True (
         -not (Test-Path -LiteralPath $backupScrubStaging) -and
         (Test-Path -LiteralPath $backupScrubPath -PathType Leaf) -and
@@ -755,6 +808,7 @@ try {
     Assert-True ($backupDispositionProcess.WaitForExit(30000)) 'backup after-disposition helper did not terminate'
     Assert-True ($backupDispositionProcess.ExitCode -ne 0) 'backup after-disposition crash hook returned success'
     $backupDispositionProcess.Dispose()
+    Wait-ForCrashResourcesReleased $backupDispositionData
     Assert-True (
         -not (Test-Path -LiteralPath $backupDispositionPath) -and
         (Test-Path -LiteralPath $backupDispositionAlias -PathType Leaf) -and
@@ -780,6 +834,7 @@ try {
     Assert-True ($readbackScrubProcess.WaitForExit(30000)) 'readback after-scrub helper did not terminate'
     Assert-True ($readbackScrubProcess.ExitCode -ne 0) 'readback after-scrub crash hook returned success'
     $readbackScrubProcess.Dispose()
+    Wait-ForCrashResourcesReleased $readbackScrubData
     $readbackScrubRecordPath = Join-Path $readbackScrubData $transactionName
     $readbackScrubRecord = Read-KeyValueFile $readbackScrubRecordPath
     $readbackScrubPath = Get-TestReadbackPath $readbackScrubData $readbackScrubRecord.BACKUP_NAME
@@ -809,6 +864,7 @@ try {
     Assert-True ($readbackDispositionProcess.WaitForExit(30000)) 'readback after-disposition helper did not terminate'
     Assert-True ($readbackDispositionProcess.ExitCode -ne 0) 'readback after-disposition crash hook returned success'
     $readbackDispositionProcess.Dispose()
+    Wait-ForCrashResourcesReleased $readbackDispositionData
     $readbackDispositionRecordPath = Join-Path $readbackDispositionData $transactionName
     $readbackDispositionRecord = Read-KeyValueFile $readbackDispositionRecordPath
     $readbackDispositionPath = Get-TestReadbackPath $readbackDispositionData $readbackDispositionRecord.BACKUP_NAME
@@ -996,6 +1052,7 @@ try {
     Assert-True ($directDispositionProcess.WaitForExit(30000)) 'direct disposition crash helper did not terminate'
     Assert-True ($directDispositionProcess.ExitCode -ne 0) 'direct disposition crash hook returned success'
     $directDispositionProcess.Dispose()
+    Wait-ForCrashResourcesReleased $directDispositionCrashData
     Assert-True (
         (Get-Sha256 $directDispositionCrashDb) -ceq $directDispositionRecord.MIGRATED_SHA256 -and
         -not (Test-Path -LiteralPath $directDispositionStaging) -and
@@ -1040,6 +1097,7 @@ try {
     Assert-True ($emptyQuarantineProcess.WaitForExit(30000)) 'empty quarantine crash helper did not terminate'
     Assert-True ($emptyQuarantineProcess.ExitCode -ne 0) 'empty quarantine crash hook returned success'
     $emptyQuarantineProcess.Dispose()
+    Wait-ForCrashResourcesReleased $emptyQuarantineData
     Assert-True (
         (Get-Sha256 $emptyQuarantineDb) -ceq $emptyQuarantineRecord.MIGRATED_SHA256 -and
         -not (Test-Path -LiteralPath $emptyQuarantineStaging) -and
@@ -1083,6 +1141,7 @@ try {
     Assert-True ($recoveryLateOldProcess.WaitForExit(30000)) 'recovery late old helper did not terminate at after-new-publish'
     Assert-True ($recoveryLateOldProcess.ExitCode -ne 0) 'recovery late old crash hook returned success'
     $recoveryLateOldProcess.Dispose()
+    Wait-ForCrashResourcesReleased $recoveryLateOldData
     Assert-True (
         (Get-Sha256 $recoveryLateOldDb) -ceq $recoveryLateOldRecord.MIGRATED_SHA256 -and
         -not (Test-Path -LiteralPath $recoveryLateOldStaging) -and
@@ -1138,6 +1197,7 @@ try {
     Assert-True ($publishForRecoveryProcess.WaitForExit(30000)) 'recovery disposition publish fixture did not crash'
     Assert-True ($publishForRecoveryProcess.ExitCode -ne 0) 'recovery disposition publish crash returned success'
     $publishForRecoveryProcess.Dispose()
+    Wait-ForCrashResourcesReleased $recoveryDispositionCrashData
     Assert-True (
         (Get-Sha256 $recoveryDispositionCrashDb) -ceq $recoveryDispositionRecord.MIGRATED_SHA256 -and
         -not (Test-Path -LiteralPath $recoveryDispositionStaging) -and
@@ -1155,6 +1215,7 @@ try {
     Assert-True ($recoveryDispositionProcess.WaitForExit(30000)) 'recovery disposition helper did not terminate'
     Assert-True ($recoveryDispositionProcess.ExitCode -ne 0) 'recovery disposition crash hook returned success'
     $recoveryDispositionProcess.Dispose()
+    Wait-ForCrashResourcesReleased $recoveryDispositionCrashData
     Assert-True (
         (Get-Sha256 $recoveryDispositionCrashDb) -ceq $recoveryDispositionRecord.MIGRATED_SHA256 -and
         -not (Test-Path -LiteralPath $recoveryDispositionStaging) -and
@@ -1193,6 +1254,7 @@ try {
         Assert-True ($crashProcess.WaitForExit(30000)) "upgrade $publishCrashPoint helper did not terminate at the crash hook"
         Assert-True ($crashProcess.ExitCode -ne 0) "upgrade $publishCrashPoint crash hook returned success"
         $crashProcess.Dispose()
+        Wait-ForCrashResourcesReleased $publishCrashData
         Assert-True (-not (Test-Path -LiteralPath ($publishCrashDb + '-wal')) -and
             -not (Test-Path -LiteralPath ($publishCrashDb + '-journal')) -and
             -not (Test-Path -LiteralPath ($publishCrashDb + '-shm'))) "upgrade $publishCrashPoint crash left reserved sidecar sentinels"
@@ -1244,6 +1306,7 @@ try {
     )
     Assert-True ($backupGateProcess.WaitForExit(30000)) 'backup-gate crash helper did not terminate'
     $backupGateProcess.Dispose()
+    Wait-ForCrashResourcesReleased $backupGateData
     Assert-True ((Get-Sha256 $backupGateQuarantine) -ceq $backupGateOldHash) 'backup-gate crash did not retain exact OLD quarantine'
     [System.IO.File]::WriteAllText($backupGatePath, 'corrupted-protected-backup')
     $code = Invoke-InstallHelper $backupGateData (Join-Path $tempRoot 'backup-gate-rejected.status')
@@ -1513,6 +1576,7 @@ try {
             Assert-True ((Get-Sha256 $crashDb) -ceq $originalHash) 'forced-kill upgrade changed final database before VERIFIED'
         }
         Stop-CrashWindowTree $crashProcess $signal
+        Wait-ForCrashResourcesReleased $crashData
         Remove-Item Env:FAKE_CRASH_KIND,Env:FAKE_CRASH_SIGNAL,Env:FAKE_CRASH_RELEASE,Env:FAKE_WRITE_STAGING_SIDECAR -ErrorAction SilentlyContinue
         $preparedCrashRecordPath = Join-Path $crashData $transactionName
         $preparedCrashRecord = Read-KeyValueFile $preparedCrashRecordPath
