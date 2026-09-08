@@ -316,8 +316,8 @@ foreach ($runtimeDir in @("Data", "Log", "Result", "Temp")) {
 
 Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "icons") -TargetDir (Join-Path $packageDir "icons")
 
-# 品牌覆盖包：仅当 branding/ 被 git 跟踪（品牌分支）才随包分发；
-# main 等中性分支的 branding/ 被 .gitignore、不入包，安装包保持纯中性 NoTeaching-Robot。
+# 品牌覆盖包只分发图标资产；品牌文字与启用状态由 ConfigStore 的 global/Branding 模块管理。
+# main 等中性分支不跟踪 branding/，安装包保持纯中性 NoTeaching-Robot。
 if ($channelSpec.RequiresBranding) {
     Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "branding") -TargetDir (Join-Path $packageDir "branding")
 }

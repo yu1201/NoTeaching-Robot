@@ -55,7 +55,8 @@ def main() -> int:
     for token in ("std::mutex", "g_activeOperations", "g_newOperationsAllowed",
                   "g_newOperationBlocks", "g_nextOperationBlockToken",
                   "g_newOperationsBlockedReason", "g_nextOperationToken", "second.token == m_token",
-                  "NormalizeSocketHost", "m_sSocketIP", "m_nSocketPort", "m_identityKey"):
+                  "NormalizeSocketHost", "ControlEndpoint()", "endpoint.host", "endpoint.port",
+                  "m_identityKey"):
         require(token in lease_cpp, f"lease registry safety mechanism missing: {token}")
     for token in ("motionCompletionPending", "UnresolvedStop{ m_driver, true }",
                   "AbortCurrentProgramSafely", "ConfirmCancellationHandled"):
@@ -171,7 +172,7 @@ def main() -> int:
     pending_feedback = disconnect.find("状态: 正在断开机器人连接，请稍候")
     paint_feedback = disconnect.find("ui.FanucMonitorText->repaint();")
     stop_monitor = disconnect.find("pRobotDriver->StopStateMonitor();")
-    close_socket = disconnect.find("pRobotDriver->CloseSocket()")
+    close_socket = disconnect.find("pRobotDriver->Disconnect()")
     clear_snapshots = disconnect.find("pRobotDriver->ClearStateMonitorSnapshots();")
     refresh_ui = disconnect.find("RefreshDashboardConnectionState();")
     result_dialog = disconnect.find("QMessageBox::information(this, \"机器人断开\"")
@@ -198,7 +199,7 @@ def main() -> int:
         app,
         "void QtWidgetsApplication4::FanucConnectTest()",
         "void QtWidgetsApplication4::FanucDisconnectTest()")
-    require(0 <= connect.find("pRobotDriver->InitSocket(") < connect.find("pRobotDriver->StartStateMonitor(50)"),
+    require(0 <= connect.find("pRobotDriver->Connect()") < connect.find("pRobotDriver->StartStateMonitor(50)"),
             "manual reconnect does not restart state monitoring after a successful socket connection")
 
     monitor_ui = section(app, "QTimer* fanucMonitorTimer", "//RobotLog* ContralUnitLog")

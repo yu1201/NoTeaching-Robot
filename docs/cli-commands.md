@@ -213,7 +213,7 @@ QtWidgetsApplication4.exe --no-show --laser-classify-dir "Result\RobotB"
 
 | 命令 | 参数 | 说明 |
 | --- | --- | --- |
-| `--apply-weld-seam-comp` | `<FILE>` | 对焊道姿态文件应用 `WeldSeamCompParam.ini` 补偿。 |
+| `--apply-weld-seam-comp` | `<FILE>` | 对焊道姿态文件应用当前机器人数据库中的焊道补偿参数。 |
 | `--apply-weld-seam-comp-output` | `<FILE>` | 指定补偿结果输出文件；默认另存 `_SeamComp`。 |
 
 说明：
@@ -280,7 +280,7 @@ QtWidgetsApplication4.exe --no-show --generate-step-weld-program "D:\pose_SeamCo
 
 - 输入可以是文件或目录。
 - 输入为目录时，会查找 `PreciseLaserPoint_WeldPose_2mm.txt`，包括当前目录、`LaserPoint/` 子目录和递归子目录。
-- 默认更新 `Data/<RobotName>/WeldPoseCompParam.ini`。
+- 默认更新当前机器人的姿态补偿数据库模块。
 - 默认报告输出为 `PreciseLaserPoint_WeldPose_2mm_PoseAverageReport.txt`。
 - 当前统计四组典型段：低平台、上升边、高平台、下降边。
 

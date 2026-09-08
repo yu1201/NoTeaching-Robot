@@ -105,17 +105,6 @@ bool IsFinitePoint(const Eigen::Vector3d& point)
     return std::isfinite(point.x()) && std::isfinite(point.y()) && std::isfinite(point.z());
 }
 
-qint64 SdkWorkerTimeoutMs(qint64 finiteInputPointCount)
-{
-    const qint64 extraPointCount = std::max<qint64>(
-        0, finiteInputPointCount - SDK_WORKER_BASE_POINT_COUNT);
-    const qint64 extraBlocks = (extraPointCount + SDK_WORKER_POINT_BLOCK_SIZE - 1)
-        / SDK_WORKER_POINT_BLOCK_SIZE;
-    return std::min(
-        SDK_WORKER_MAX_TIMEOUT_MS,
-        SDK_WORKER_BASE_TIMEOUT_MS + extraBlocks * SDK_WORKER_EXTRA_BLOCK_TIMEOUT_MS);
-}
-
 struct RobustProjectionRange
 {
     bool ok = false;
@@ -177,6 +166,17 @@ RobustProjectionRange BuildFullCloudProjectionRange(
         && std::isfinite(result.maximum)
         && result.maximum - result.minimum > 1.0e-6;
     return result;
+}
+
+qint64 SdkWorkerTimeoutMs(qint64 finiteInputPointCount)
+{
+    const qint64 extraPointCount = std::max<qint64>(
+        0, finiteInputPointCount - SDK_WORKER_BASE_POINT_COUNT);
+    const qint64 extraBlocks = (extraPointCount + SDK_WORKER_POINT_BLOCK_SIZE - 1)
+        / SDK_WORKER_POINT_BLOCK_SIZE;
+    return std::min(
+        SDK_WORKER_MAX_TIMEOUT_MS,
+        SDK_WORKER_BASE_TIMEOUT_MS + extraBlocks * SDK_WORKER_EXTRA_BLOCK_TIMEOUT_MS);
 }
 
 ExternalPoint3D ToExternalPoint(const Eigen::Vector3d& point)

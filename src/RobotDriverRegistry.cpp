@@ -2,6 +2,7 @@
 
 #include "Const.h"
 #include "FANUCRobotDriver.h"
+#include "InovanceRobotDriver.h"
 #include "RobotDriverAdaptor.h"
 #include "STEPRobotDriver.h"
 
@@ -18,6 +19,11 @@ RobotDriverAdaptor* CreateStepDriver(const std::string& unitName, RobotLog* log)
 {
     return new STEPRobotCtrl(unitName, log);
 }
+
+RobotDriverAdaptor* CreateInovanceDriver(const std::string& unitName, RobotLog* log)
+{
+    return new InovanceRobotCtrl(unitName, log);
+}
 }
 
 const std::vector<RobotDriverRegistration>& RobotDriverRegistry::RegisteredTypes()
@@ -28,13 +34,19 @@ const std::vector<RobotDriverRegistration>& RobotDriverRegistry::RegisteredTypes
             ROBOT_TYPE_FANUC,
             "FANUC",
             &CreateFanucDriver,
-            { "RobotA", 9000, 9001, true, 21, "anonymous", false, "", "/md", false, "Job/FANUC" }
+            { "fanuc", 9000, 9001, true, 21, "", "anonymous", "", false, "", "/md", false, "Job/FANUC", true, false }
         },
         {
             ROBOT_TYPE_STEP,
             "STEP",
             &CreateStepDriver,
-            { "RobotB", 30312, 0, false, 21, "root", true, "PCRobot", "/UserPrograms", true, "Job/STEP" }
+            { "step", 30312, 0, false, 21, "", "root", "", true, "PCRobot", "/UserPrograms", true, "Job/STEP", true, true }
+        },
+        {
+            ROBOT_TYPE_INOVANCE,
+            "汇川 Inovance",
+            &CreateInovanceDriver,
+            { "inovance", 2222, 0, false, 7777, "192.168.23.25", "robot", "123456", false, "", "/TeachProgram", false, "Job/Inovance" }
         },
     };
     return registrations;

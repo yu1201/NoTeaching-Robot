@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 
 #include <chrono>
+#include <cmath>
 #include <iostream>
 
 namespace
@@ -49,6 +50,90 @@ bool RunCancelableAnalysis(bool alreadyDenoised, int cancelAtCheck, const char* 
     }
     return true;
 }
+
+bool VerifyStraightFeatureCurve()
+{
+    QVector<RobotCalculation::IndexedPoint3D> points;
+    for (int index = 0; index <= 100; ++index)
+    {
+        RobotCalculation::IndexedPoint3D point;
+        point.index = index;
+        const double x = static_cast<double>(index);
+        point.point = Eigen::Vector3d(x, 2.0 * x, -0.5 * x);
+        points.push_back(point);
+    }
+
+    RobotCalculation::LowerWeldFilterParams params;
+    params.sampleStep = 2.5;
+    params.smoothRadius = 3;
+    const auto result = RobotCalculation::BuildSmoothFeatureCurve(points, params);
+    if (!result.ok || result.points.size() < 80)
+    {
+        std::cerr << "straight feature curve generation failed: "
+                  << result.error.toStdString() << "\n";
+        return false;
+    }
+    for (const auto& point : result.points)
+    {
+        if (std::abs(point.point.y() - 2.0 * point.point.x()) > 1e-8
+            || std::abs(point.point.z() + 0.5 * point.point.x()) > 1e-8)
+        {
+            std::cerr << "straight feature curve left the source line\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool VerifyNoisyFeatureCurveIsSmoothed()
+{
+    QVector<RobotCalculation::IndexedPoint3D> points;
+    double inputSquaredError = 0.0;
+    for (int index = 0; index <= 200; ++index)
+    {
+        const double x = static_cast<double>(index) * 0.5;
+        const double baseY = 0.3 * std::sin(x / 15.0);
+        const double baseZ = 0.1 * std::cos(x / 20.0);
+        const double noiseY = (index % 2 == 0) ? 0.4 : -0.4;
+        const double noiseZ = (index % 3 == 0) ? 0.2 : -0.1;
+        RobotCalculation::IndexedPoint3D point;
+        point.index = index;
+        point.point = Eigen::Vector3d(x, baseY + noiseY, baseZ + noiseZ);
+        points.push_back(point);
+        inputSquaredError += noiseY * noiseY + noiseZ * noiseZ;
+    }
+
+    RobotCalculation::LowerWeldFilterParams params;
+    params.sampleStep = 1.0;
+    params.smoothRadius = 4;
+    params.zContinuityThreshold = 3.0;
+    const auto result = RobotCalculation::BuildSmoothFeatureCurve(points, params);
+    if (!result.ok || result.points.size() < 90)
+    {
+        std::cerr << "noisy feature curve generation failed: "
+                  << result.error.toStdString() << "\n";
+        return false;
+    }
+
+    double outputSquaredError = 0.0;
+    for (const auto& point : result.points)
+    {
+        const double x = point.point.x();
+        const double baseY = 0.3 * std::sin(x / 15.0);
+        const double baseZ = 0.1 * std::cos(x / 20.0);
+        outputSquaredError += std::pow(point.point.y() - baseY, 2.0)
+            + std::pow(point.point.z() - baseZ, 2.0);
+    }
+    const double inputRms = std::sqrt(inputSquaredError / points.size());
+    const double outputRms = std::sqrt(outputSquaredError / result.points.size());
+    if (!(outputRms < inputRms * 0.55))
+    {
+        std::cerr << "feature curve smoothing insufficient: input_rms=" << inputRms
+                  << " output_rms=" << outputRms << "\n";
+        return false;
+    }
+    return true;
+}
 }
 
 int main(int argc, char** argv)
@@ -65,6 +150,14 @@ int main(int argc, char** argv)
     {
         return 2;
     }
-    std::cout << "PASS: geometry hot loops honor the rebuild stop token promptly\n";
+    if (!VerifyStraightFeatureCurve())
+    {
+        return 3;
+    }
+    if (!VerifyNoisyFeatureCurveIsSmoothed())
+    {
+        return 4;
+    }
+    std::cout << "PASS: geometry cancellation and feature-point smooth-curve contracts hold\n";
     return 0;
 }

@@ -7,6 +7,7 @@ dialog = (ROOT / "src" / "MeasureThenWeldDialog.cpp").read_text(encoding="utf-8"
 planner = (ROOT / "src" / "WeldResumePlanner.cpp").read_text(encoding="utf-8")
 store = (ROOT / "src" / "WeldSafetyRecoveryStore.cpp").read_text(encoding="utf-8")
 virtual = (ROOT / "src" / "VirtualWeldTestDialog.cpp").read_text(encoding="utf-8")
+scan_pose = (ROOT / "src" / "ScanPoseVariationTestDialog.cpp").read_text(encoding="utf-8")
 application = (ROOT / "src" / "QtWidgetsApplication4.cpp").read_text(encoding="utf-8")
 
 
@@ -26,11 +27,13 @@ require(callback_gate < first_motion,
 callsite_counts = {
     "MeasureThenWeldDialog.cpp": dialog.count("ExecuteWeldPoseFileWithSafePos("),
     "VirtualWeldTestDialog.cpp": virtual.count("ExecuteWeldPoseFileWithSafePos("),
+    "ScanPoseVariationTestDialog.cpp": scan_pose.count("ExecuteWeldPoseFileWithSafePos("),
     "QtWidgetsApplication4.cpp": application.count("ExecuteWeldPoseFileWithSafePos("),
 }
 require(callsite_counts == {
     "MeasureThenWeldDialog.cpp": 3,
     "VirtualWeldTestDialog.cpp": 1,
+    "ScanPoseVariationTestDialog.cpp": 1,
     "QtWidgetsApplication4.cpp": 1,
 }, f"unreviewed ExecuteWeldPoseFileWithSafePos call-site set: {callsite_counts}")
 require("WeldExecutionTerminalResult& terminal" in dialog,
@@ -44,6 +47,14 @@ require("WeldSafetyRecoverySession" in application
         and "weldSafetySession->Prepare" in application
         and "weldSafetySession->Finish" in application,
         "automatic process-loop weld lacks the shared persistent recovery session")
+require("ScanPoseVariationDryRun" in scan_pose
+        and "WeldSafetyRecoverySession" in scan_pose
+        and "safetySession->Prepare" in scan_pose
+        and "safetySession->Finish" in scan_pose,
+        "scan curve dry-run caller lacks its typed persistent recovery session")
+require("m_poseSource == MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun" in store
+        and "kScanCurveDryRunFinalSampledFileName" in store,
+        "scan curve FinalSampled path has no narrow persistent safety binding")
 
 persist = execute.index("PersistProgramCompletedUnretracted")
 post_confirm = execute.index('"焊后确认"', persist)
@@ -75,7 +86,7 @@ for token in (
     require(token in dialog, f"persistent recovery gate missing: {token}")
 require("std::recursive_mutex g_storeMutex" in store
         and "g_weldBreakpointRecordMutex" not in dialog,
-        "WeldBreakpoint.ini still has multiple unrelated locks/writers")
+        "WeldBreakpoint database module still has multiple unrelated locks/writers")
 begin = store[store.index("bool WeldSafetyRecoveryStore::BeginOrUpdatePending"):
               store.index("bool WeldSafetyRecoveryStore::WriteCompletedAndClearPending")]
 complete = store[store.index("bool WeldSafetyRecoveryStore::WriteCompletedAndClearPending"):
@@ -85,9 +96,12 @@ require(begin.index("WritePendingLocked") < begin.index("WriteRecordLocked"),
 require(complete.index("WriteRecordLocked") < complete.index("WritePendingLocked"),
         "safe completion clears marker before verified RecordV2 write")
 require("写后回读不一致" in store,
-        "shared recovery store does not verify INI writes by readback")
+        "shared recovery store does not verify database writes by readback")
+require("if (!enforcePending)" in store
+        and "PointCloudProcessingConfig::RuntimeSystemInterlocks" in service,
+        "disabled safe-retreat interlock does not reach old-checkpoint invalidation")
 require("GetPrivateProfileStringW" not in store
-        and "ReadIniValueStatus" in store
+        and "ReadScopedSettingStatus" in store
         and "kMaxRecordUtf8Bytes = 64 * 1024" in store,
         "RecordV2 is not using the bounded tri-state ConfigStore reader")
 lease = (ROOT / "src" / "RobotOperationLease.cpp").read_text(encoding="utf-8")

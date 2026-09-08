@@ -92,8 +92,9 @@ def test_runtime_source_contract() -> None:
     assert "record.point.z() += seamComp.weldZComp;" in service
     assert "m_pTypeCombo->setVisible(poseMode);" in dialog
     assert "m_seamRows.push_back(MakeDefaultSeamRow());" in dialog
-    assert "ConfigDatabase::ReadIniFileSnapshot(path, snapshot, &error)" in config
-    assert "COPini" not in config
+    assert "ConfigDatabase::ReadScopedModuleSnapshot(" in config
+    assert "ConfigDatabase::ReplaceScopedModuleSectionsAtomically(" in config
+    assert "SetFileName" not in config
     assert "WeldSeamPoseAverage" not in average_updater
     assert "WeldSeamCompParam" not in average_updater
 

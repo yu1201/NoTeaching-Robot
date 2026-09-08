@@ -18,21 +18,21 @@ constexpr char GROUP_COUNT_KEY[] = "SeamCompGroupCount";
 constexpr char ACTIVE_GROUP_KEY[] = "ActiveSeamCompGroupIndex";
 constexpr char SIMPLIFY_KEY[] = "SimplifyKeepAnchorsOnly";
 
-using IniSection = QMap<QString, QString>;
-using IniFileSnapshot = QMap<QString, IniSection>;
+using ConfigValues = QMap<QString, QString>;
+using ModuleSnapshot = QMap<QString, ConfigValues>;
 
-const IniSection& SnapshotSection(const IniFileSnapshot& snapshot, const QString& sectionName)
+const ConfigValues& SnapshotSection(const ModuleSnapshot& snapshot, const QString& sectionName)
 {
     const auto it = snapshot.constFind(sectionName);
     if (it != snapshot.cend())
     {
         return it.value();
     }
-    static const IniSection empty;
+    static const ConfigValues empty;
     return empty;
 }
 
-bool ReadInt(const IniSection& section, const char* key, int& value)
+bool ReadInt(const ConfigValues& section, const char* key, int& value)
 {
     const auto it = section.constFind(QString::fromLatin1(key));
     if (it == section.cend())
@@ -49,7 +49,7 @@ bool ReadInt(const IniSection& section, const char* key, int& value)
     return true;
 }
 
-bool ReadDouble(const IniSection& section, const char* key, double& value)
+bool ReadDouble(const ConfigValues& section, const char* key, double& value)
 {
     const auto it = section.constFind(QString::fromLatin1(key));
     if (it == section.cend())
@@ -82,7 +82,7 @@ bool NearlyEqual(const WeldSeamCompConfig::Values& left, const WeldSeamCompConfi
         && std::abs(left.weldSeamDirComp - right.weldSeamDirComp) <= epsilon;
 }
 
-bool ReadValues(const IniSection& section, WeldSeamCompConfig::Values& values)
+bool ReadValues(const ConfigValues& section, WeldSeamCompConfig::Values& values)
 {
     bool readAny = false;
     readAny = ReadDouble(section, "WeldZComp", values.weldZComp) || readAny;
@@ -171,17 +171,18 @@ Document MakeDefaultDocument()
     return document;
 }
 
-bool Load(const QString& path, Document& document, QString& error)
+bool Load(const ConfigLocation& location, Document& document, QString& error)
 {
     error.clear();
     document = MakeDefaultDocument();
-    if (path.trimmed().isEmpty())
+    if (!location.IsValid())
     {
-        error = QStringLiteral("焊道补偿配置路径为空。");
+        error = QStringLiteral("焊道补偿数据库位置无效。");
         return false;
     }
-    IniFileSnapshot snapshot;
-    if (!ConfigDatabase::ReadIniFileSnapshot(path, snapshot, &error))
+    ModuleSnapshot snapshot;
+    if (!ConfigDatabase::ReadScopedModuleSnapshot(
+            location.scopeType, location.scopeId, location.module, snapshot, &error))
     {
         return false;
     }
@@ -196,7 +197,7 @@ bool Load(const QString& path, Document& document, QString& error)
     int groupCount = 0;
     int activeGroupIndex = 0;
     int simplify = 0;
-    const IniSection& allSection = SnapshotSection(snapshot, QString::fromLatin1(ALL_SECTION));
+    const ConfigValues& allSection = SnapshotSection(snapshot, QString::fromLatin1(ALL_SECTION));
     ReadInt(allSection, SCHEMA_VERSION_KEY, schemaVersion);
     ReadInt(allSection, COUNT_KEY, count);
     const bool hasGroupCount = ReadInt(allSection, GROUP_COUNT_KEY, groupCount);
@@ -228,7 +229,7 @@ bool Load(const QString& path, Document& document, QString& error)
     {
         Group group;
         group.name = DefaultGroupName(groupIndex);
-        const IniSection& groupSection = SnapshotSection(
+        const ConfigValues& groupSection = SnapshotSection(
             snapshot, QStringLiteral("WeldSeamCompGroup%1").arg(groupIndex));
         const QString encodedName = groupSection.value(QStringLiteral("Name"));
         if (!encodedName.isEmpty())
@@ -253,7 +254,7 @@ bool Load(const QString& path, Document& document, QString& error)
             for (int slotIndex = 0; slotIndex < LEGACY_ROWS_PER_GROUP; ++slotIndex)
             {
                 LegacyCandidate candidate;
-                const IniSection& legacySection = SnapshotSection(
+                const ConfigValues& legacySection = SnapshotSection(
                     snapshot, QStringLiteral("WeldSeamComp%1").arg(baseIndex + slotIndex));
                 const QString encodedKind = legacySection.value(QStringLiteral("SegmentKind"));
                 if (!encodedKind.isEmpty())
@@ -302,12 +303,12 @@ bool Load(const QString& path, Document& document, QString& error)
     return true;
 }
 
-bool SaveV2(const QString& path, const Document& document, QString& error)
+bool SaveV2(const ConfigLocation& location, const Document& document, QString& error)
 {
     error.clear();
-    if (path.trimmed().isEmpty())
+    if (!location.IsValid())
     {
-        error = QStringLiteral("焊道补偿配置路径为空。");
+        error = QStringLiteral("焊道补偿数据库位置无效。");
         return false;
     }
     if (document.groups.size() > MAX_REASONABLE_GROUP_COUNT)
@@ -375,14 +376,16 @@ bool SaveV2(const QString& path, const Document& document, QString& error)
 
     // 分组值、版本标记和旧槽清理在同一事务内提交。已有 v2 配置重复保存时，
     // 其他读取者也只能看到提交前或提交后的完整快照。
-    if (!ConfigDatabase::ReplaceIniSectionsAtomically(path, sections, removeSections, &error))
+    if (!ConfigDatabase::ReplaceScopedModuleSectionsAtomically(
+            location.scopeType, location.scopeId, location.module,
+            sections, removeSections, &error))
     {
         return false;
     }
 
     Document verified;
     QString verifyError;
-    if (!Load(path, verified, verifyError)
+    if (!Load(location, verified, verifyError)
         || verified.loadedFromLegacy
         || verified.groups.size() != document.groups.size()
         || verified.activeGroupIndex != activeGroupIndex

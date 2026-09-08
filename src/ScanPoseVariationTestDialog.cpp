@@ -2,18 +2,21 @@
 
 #include "CameraFrameCache.h"
 #include "ContralUnit.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "RobotDataHelper.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotMessage.h"
 #include "RobotOperationLease.h"
+#include "WeldSafetyRecoveryStore.h"
 #include "WindowStyleHelper.h"
 
 #include <QApplication>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QFrame>
@@ -23,6 +26,7 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPainter>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPixmap>
@@ -35,13 +39,273 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <thread>
 #include <utility>
+
+// 与先测后焊运行监控一致的实时激光线视图：显示 CameraFrameCache 最新帧中的
+// XData/YData，固定物理标尺，不参与完整点云落盘、手眼变换或后处理。
+class ScanPoseLaserLineLiveView final : public QWidget
+{
+public:
+    explicit ScanPoseLaserLineLiveView(QWidget* parent = nullptr)
+        : QWidget(parent)
+    {
+        setMinimumHeight(170);
+    }
+
+    void SetFrame(const udpDataShow& frame)
+    {
+        m_x = frame.XData;
+        m_y = frame.YData;
+        m_hasFrame = m_x.size() >= 2 && m_x.size() == m_y.size();
+        if (m_hasFrame)
+        {
+            double minY = m_y[0];
+            double maxY = m_y[0];
+            for (int index = 1; index < m_y.size(); ++index)
+            {
+                minY = std::min(minY, m_y[index]);
+                maxY = std::max(maxY, m_y[index]);
+            }
+            const double dataCenterY = (minY + maxY) * 0.5;
+            const double halfSpanY = m_halfSpanXmm
+                * (height() > 0 && width() > 0 ? double(height()) / width() : 1.0);
+            if (!m_hasLockedCenterY
+                || std::abs(dataCenterY - m_lockedCenterY) > halfSpanY * 0.8)
+            {
+                m_lockedCenterY = dataCenterY;
+                m_hasLockedCenterY = true;
+            }
+        }
+        update();
+    }
+
+    void ClearFrame()
+    {
+        m_x.clear();
+        m_y.clear();
+        m_hasFrame = false;
+        m_hasLockedCenterY = false;
+        update();
+    }
+
+    double AdjustPointSize(double delta)
+    {
+        m_pointSize = std::clamp(m_pointSize + delta, 0.5, 6.0);
+        update();
+        return m_pointSize;
+    }
+
+    double AdjustViewSpan(double delta)
+    {
+        const double fullSpan = std::clamp(m_halfSpanXmm * 2.0 + delta, 40.0, 1000.0);
+        m_halfSpanXmm = fullSpan * 0.5;
+        m_hasLockedCenterY = false;
+        update();
+        return fullSpan;
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(0x05, 0x08, 0x0B));
+        painter.setPen(QColor(0x2B, 0x45, 0x52));
+        painter.drawRect(rect().adjusted(0, 0, -1, -1));
+        if (!m_hasFrame)
+        {
+            painter.setPen(QColor(0x6E, 0x88, 0x94));
+            painter.drawText(rect(), Qt::AlignCenter,
+                QStringLiteral("激光线点云：等待相机帧..."));
+            return;
+        }
+
+        const QRectF area = rect().adjusted(10, 10, -10, -10);
+        const double scale = area.width() / (2.0 * m_halfSpanXmm);
+        const double centerX = 0.0;
+        const double centerY = m_hasLockedCenterY ? m_lockedCenterY : 0.0;
+
+        QPen gridPen(QColor(0x24, 0x38, 0x42));
+        gridPen.setStyle(Qt::DashLine);
+        painter.setPen(gridPen);
+        constexpr int kGridCount = 4;
+        QFont labelFont = painter.font();
+        labelFont.setPointSize(9);
+        painter.setFont(labelFont);
+        for (int index = 1; index < kGridCount; ++index)
+        {
+            const double gx = area.left() + area.width() * index / kGridCount;
+            const double gy = area.top() + area.height() * index / kGridCount;
+            painter.drawLine(QPointF(gx, area.top()), QPointF(gx, area.bottom()));
+            painter.drawLine(QPointF(area.left(), gy), QPointF(area.right(), gy));
+        }
+        painter.setPen(QColor(0x5E, 0x78, 0x84));
+        for (int index = 1; index < kGridCount; ++index)
+        {
+            const double gx = area.left() + area.width() * index / kGridCount;
+            const double gy = area.top() + area.height() * index / kGridCount;
+            const double dataX = centerX + (gx - area.center().x()) / scale;
+            const double dataY = centerY - (gy - area.center().y()) / scale;
+            painter.drawText(QPointF(gx + 3.0, area.bottom() - 4.0),
+                QString::number(dataX, 'f', 0));
+            painter.drawText(QPointF(area.left() + 4.0, gy - 3.0),
+                QString::number(dataY, 'f', 0));
+        }
+
+        painter.setPen(QPen(QColor(0x72, 0xD4, 0xDD), m_pointSize));
+        for (int index = 0; index < m_x.size(); ++index)
+        {
+            const double px = area.center().x() + (m_x[index] - centerX) * scale;
+            const double py = area.center().y() - (m_y[index] - centerY) * scale;
+            painter.drawPoint(QPointF(px, py));
+        }
+    }
+
+private:
+    QVector<double> m_x;
+    QVector<double> m_y;
+    bool m_hasFrame = false;
+    bool m_hasLockedCenterY = false;
+    double m_lockedCenterY = 0.0;
+    double m_halfSpanXmm = 120.0;
+    double m_pointSize = 1.0;
+};
 
 namespace
 {
 constexpr auto kConfigSection = "ScanPoseVariationTest";
 constexpr auto kSelectionSection = "ScanPoseVariationSelection";
+constexpr auto kPostProcessNone = "none";
+constexpr auto kPostProcessStraightLine = "straight_line";
+constexpr auto kPostProcessCorrugatedBoard = "corrugated_board";
+constexpr auto kFeatureSmoothCurveFileName =
+    "PreciseLaserPoint_FeatureSmoothCurve_2mm.txt";
+constexpr auto kScanPosePointCloudSdkRelativeDir =
+    "SDK/PointCloudExtration/findWeldingLine_sdk_x64_Release_20260902_1742";
+constexpr auto kScanPosePointCloudSdkExpectedSha256 =
+    "925ac6bf19762f76cf249c96a0fe873abfa94151ac6636989c10759ce4a27432";
+
+bool ResolveScanPosePointCloudSdk(
+    QString& libraryDir,
+    QString& dllPath,
+    QString& sha256,
+    QString& error)
+{
+    const QString sdkDllRelativePath = QStringLiteral("%1/bin/findWeldingLine.dll")
+        .arg(QString::fromLatin1(kScanPosePointCloudSdkRelativeDir));
+    dllPath = RobotDataHelper::FindProjectFilePath(
+        sdkDllRelativePath);
+    if (dllPath.isEmpty())
+    {
+        dllPath = RobotDataHelper::BuildProjectPath(
+            sdkDllRelativePath);
+    }
+    const QFileInfo dllInfo(dllPath);
+    if (!dllInfo.isFile() || dllInfo.isSymLink())
+    {
+        error = QStringLiteral("扫描变姿态轨迹计算SDK缺失或不是普通文件：%1")
+            .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()));
+        return false;
+    }
+
+    QFile dll(dllInfo.absoluteFilePath());
+    if (!dll.open(QIODevice::ReadOnly))
+    {
+        error = QStringLiteral("无法读取扫描变姿态轨迹计算SDK：%1；%2")
+            .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()), dll.errorString());
+        return false;
+    }
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    while (!dll.atEnd())
+    {
+        const QByteArray block = dll.read(1024 * 1024);
+        if (block.isEmpty() && dll.error() != QFile::NoError)
+        {
+            error = QStringLiteral("读取扫描变姿态轨迹计算SDK失败：%1；%2")
+                .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()), dll.errorString());
+            return false;
+        }
+        hash.addData(block);
+    }
+    sha256 = QString::fromLatin1(hash.result().toHex()).toLower();
+    if (sha256 != QString::fromLatin1(kScanPosePointCloudSdkExpectedSha256))
+    {
+        error = QStringLiteral(
+            "扫描变姿态轨迹计算SDK版本校验失败，已拒绝运行。\n文件：%1\n"
+            "期望SHA-256：%2\n实际SHA-256：%3")
+            .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()),
+                 QString::fromLatin1(kScanPosePointCloudSdkExpectedSha256),
+                 sha256);
+        return false;
+    }
+
+    QDir packageDir = dllInfo.absoluteDir(); // bin
+    if (!packageDir.cdUp())
+    {
+        error = QStringLiteral("无法解析扫描变姿态轨迹计算SDK目录：%1")
+            .arg(QDir::toNativeSeparators(dllInfo.absoluteFilePath()));
+        return false;
+    }
+    libraryDir = packageDir.absolutePath();
+    dllPath = dllInfo.absoluteFilePath();
+    return true;
+}
+
+QString FindLatestStraightCurvePath(const QString& robotName)
+{
+    const QString resultRootPath = RobotDataHelper::BuildProjectPath(
+        QStringLiteral("Result/%1").arg(robotName));
+    const QDir resultRoot(resultRootPath);
+    const QFileInfoList caseDirs = resultRoot.entryInfoList(
+        QDir::Dirs | QDir::NoDotAndDotDot,
+        QDir::Time | QDir::Reversed);
+    QFileInfo newestCurve;
+    for (const QFileInfo& caseInfo : caseDirs)
+    {
+        const QFileInfo curveInfo(QDir(caseInfo.absoluteFilePath()).filePath(
+            QStringLiteral("LaserPoint/%1").arg(
+                QString::fromLatin1(kFeatureSmoothCurveFileName))));
+        if (!curveInfo.isFile() || curveInfo.isSymLink())
+        {
+            continue;
+        }
+        if (!newestCurve.exists()
+            || curveInfo.lastModified() > newestCurve.lastModified())
+        {
+            newestCurve = curveInfo;
+        }
+    }
+    return newestCurve.exists() ? newestCurve.absoluteFilePath() : QString();
+}
+
+QString PostProcessModeConfigValue(MeasureThenWeldService::ScanPostProcessMode mode)
+{
+    switch (mode)
+    {
+    case MeasureThenWeldService::ScanPostProcessMode::None:
+        return QString::fromLatin1(kPostProcessNone);
+    case MeasureThenWeldService::ScanPostProcessMode::FeaturePointSmoothCurve:
+        return QString::fromLatin1(kPostProcessStraightLine);
+    case MeasureThenWeldService::ScanPostProcessMode::CorrugatedBoard:
+    default:
+        return QString::fromLatin1(kPostProcessCorrugatedBoard);
+    }
+}
+
+QString PostProcessModeDisplayName(MeasureThenWeldService::ScanPostProcessMode mode)
+{
+    switch (mode)
+    {
+    case MeasureThenWeldService::ScanPostProcessMode::None:
+        return QStringLiteral("无");
+    case MeasureThenWeldService::ScanPostProcessMode::FeaturePointSmoothCurve:
+        return QStringLiteral("直线处理");
+    case MeasureThenWeldService::ScanPostProcessMode::CorrugatedBoard:
+    default:
+        return QStringLiteral("波纹板处理");
+    }
+}
 
 QString PoseText(const T_ROBOT_COORS& pose)
 {
@@ -55,6 +319,14 @@ QString PoseText(const T_ROBOT_COORS& pose)
         .arg(pose.dBX, 0, 'f', 3)
         .arg(pose.dBY, 0, 'f', 3)
         .arg(pose.dBZ, 0, 'f', 3);
+}
+
+QString OrientationText(const T_ROBOT_COORS& pose)
+{
+    return QStringLiteral("RX=%1 RY=%2 RZ=%3")
+        .arg(pose.dRX, 0, 'f', 3)
+        .arg(pose.dRY, 0, 'f', 3)
+        .arg(pose.dRZ, 0, 'f', 3);
 }
 
 QDoubleSpinBox* AddLengthEditor(
@@ -81,7 +353,7 @@ QDoubleSpinBox* AddAngleEditor(
     QWidget* parent)
 {
     auto* spin = new QDoubleSpinBox(parent);
-    spin->setRange(0.0, 60.0);
+    spin->setRange(-60.0, 60.0);
     spin->setDecimals(2);
     spin->setSingleStep(1.0);
     spin->setValue(value);
@@ -155,9 +427,18 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     targetLayout->setVerticalSpacing(8);
     m_robotCombo = new QComboBox(targetGroup);
     m_cameraCombo = new QComboBox(targetGroup);
+    m_postProcessCombo = new QComboBox(targetGroup);
     m_scanSpeedSpin = new QDoubleSpinBox(targetGroup);
     m_robotCombo->setMinimumWidth(280);
     m_cameraCombo->setMinimumWidth(280);
+    m_postProcessCombo->setMinimumWidth(280);
+    m_postProcessCombo->addItem(
+        QStringLiteral("无"), QString::fromLatin1(kPostProcessNone));
+    m_postProcessCombo->addItem(
+        QStringLiteral("直线处理"), QString::fromLatin1(kPostProcessStraightLine));
+    m_postProcessCombo->addItem(
+        QStringLiteral("波纹板处理"), QString::fromLatin1(kPostProcessCorrugatedBoard));
+    m_postProcessCombo->setCurrentIndex(2);
     m_scanSpeedSpin->setMinimumWidth(180);
     m_scanSpeedSpin->setRange(1.0, 30000.0);
     m_scanSpeedSpin->setDecimals(1);
@@ -170,6 +451,8 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     targetLayout->addWidget(m_cameraCombo, 1, 1);
     targetLayout->addWidget(new QLabel(QStringLiteral("扫描速度"), targetGroup), 2, 0, Qt::AlignRight | Qt::AlignVCenter);
     targetLayout->addWidget(m_scanSpeedSpin, 2, 1);
+    targetLayout->addWidget(new QLabel(QStringLiteral("后处理方式"), targetGroup), 3, 0, Qt::AlignRight | Qt::AlignVCenter);
+    targetLayout->addWidget(m_postProcessCombo, 3, 1);
 
     auto* sourceCard = new QFrame(targetGroup);
     sourceCard->setObjectName(QStringLiteral("scanInputSourceCard"));
@@ -188,12 +471,18 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
         QStringLiteral("相机与空间坐标：扫描图像来自所选相机；运行前校验该相机对应且已验证的手眼矩阵。"),
         sourceCard);
     cameraHint->setWordWrap(true);
+    auto* postProcessHint = new QLabel(
+        QStringLiteral("后处理：无=点云生成后结束；直线处理=采集特征点并生成三维平滑曲线；"
+            "波纹板处理=进入现有特征点、拐点拟合及焊接姿态生成流程。"),
+        sourceCard);
+    postProcessHint->setWordWrap(true);
     sourceLayout->addWidget(sourceTitle);
     sourceLayout->addWidget(inheritedHint);
     sourceLayout->addWidget(cameraHint);
+    sourceLayout->addWidget(postProcessHint);
     sourceLayout->addStretch(1);
 
-    targetLayout->addWidget(sourceCard, 0, 2, 3, 1);
+    targetLayout->addWidget(sourceCard, 0, 2, 4, 1);
     targetLayout->setColumnStretch(2, 1);
     contentLayout->addWidget(targetGroup);
 
@@ -229,6 +518,10 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     m_fallingSpin = AddLengthEditor(leftForm, QStringLiteral("下坡长度"), 30.0, 1.0, 2000.0, paramGroup);
     m_leftAngleSpin = AddAngleEditor(rightForm, QStringLiteral("上坡左旋角度"), 10.0, paramGroup);
     m_rightAngleSpin = AddAngleEditor(rightForm, QStringLiteral("下坡右旋角度"), 10.0, paramGroup);
+    m_leftAngleSpin->setToolTip(QStringLiteral(
+        "允许 -60~60 deg；负数表示改为与上坡左旋相反的方向。"));
+    m_rightAngleSpin->setToolTip(QStringLiteral(
+        "允许 -60~60 deg；负数表示改为与下坡右旋相反的方向。"));
     m_transitionSpin = AddLengthEditor(rightForm, QStringLiteral("段尾姿态过渡长度"), 10.0, 0.1, 500.0, paramGroup);
     m_pointStepSpin = AddLengthEditor(rightForm, QStringLiteral("轨迹名义点距"), 2.0, 0.2, 20.0, paramGroup);
     paramColumns->addLayout(leftForm, 1);
@@ -238,24 +531,122 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     auto* actionRow = new QHBoxLayout();
     m_generateButton = new QPushButton(QStringLiteral("生成并保存扫描轨迹"), content);
     m_runButton = new QPushButton(QStringLiteral("运行扫描并保存数据"), content);
+    m_simulateCurveButton = new QPushButton(
+        QStringLiteral("生成并运行直线模拟轨迹"), content);
+    m_simulateCurveButton->setToolTip(QStringLiteral(
+        "读取最新一次成功的直线处理 2mm 曲线，以曲线XYZ作为Tool1 TCP、基础姿态作为固定姿态，"
+        "生成空跑程序后按先测后焊安全流程下发并运行。"));
     actionRow->addWidget(m_generateButton);
     actionRow->addWidget(m_runButton);
+    actionRow->addWidget(m_simulateCurveButton);
     contentLayout->addLayout(actionRow);
 
-    auto* imageGroup = new QGroupBox(QStringLiteral("扫描实时相机图像"), content);
-    auto* imageLayout = new QVBoxLayout(imageGroup);
-    m_liveImageStatusLabel = new QLabel(QStringLiteral("等待扫描启动并取得图像帧。"), imageGroup);
+    auto* previewGroup = new QGroupBox(QStringLiteral("扫描实时点云与相机图像"), content);
+    previewGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::MinimumExpanding);
+    previewGroup->setMinimumHeight(480);
+    auto* previewLayout = new QVBoxLayout(previewGroup);
+    previewLayout->setSpacing(8);
+
+    auto* viewToolbar = new QHBoxLayout();
+    viewToolbar->setSpacing(8);
+    auto makeViewButton = [previewGroup](const QString& text)
+        {
+            auto* button = new QPushButton(text, previewGroup);
+            button->setMinimumSize(64, 40);
+            return button;
+        };
+    viewToolbar->addWidget(new QLabel(QStringLiteral("点大小:"), previewGroup));
+    auto* pointSmallerButton = makeViewButton(QStringLiteral("−"));
+    auto* pointSizeLabel = new QLabel(QStringLiteral("1.0"), previewGroup);
+    pointSizeLabel->setAlignment(Qt::AlignCenter);
+    pointSizeLabel->setMinimumWidth(44);
+    auto* pointBiggerButton = makeViewButton(QStringLiteral("＋"));
+    viewToolbar->addWidget(pointSmallerButton);
+    viewToolbar->addWidget(pointSizeLabel);
+    viewToolbar->addWidget(pointBiggerButton);
+    viewToolbar->addSpacing(24);
+    viewToolbar->addWidget(new QLabel(QStringLiteral("视野:"), previewGroup));
+    auto* zoomInButton = makeViewButton(QStringLiteral("放大"));
+    auto* viewSpanLabel = new QLabel(QStringLiteral("240 mm"), previewGroup);
+    viewSpanLabel->setAlignment(Qt::AlignCenter);
+    viewSpanLabel->setMinimumWidth(76);
+    auto* zoomOutButton = makeViewButton(QStringLiteral("缩小"));
+    viewToolbar->addWidget(zoomInButton);
+    viewToolbar->addWidget(viewSpanLabel);
+    viewToolbar->addWidget(zoomOutButton);
+    viewToolbar->addStretch(1);
+    previewLayout->addLayout(viewToolbar);
+
+    auto* liveViews = new QHBoxLayout();
+    liveViews->setSpacing(10);
+    auto* pointCloudPreview = new QVBoxLayout();
+    auto* pointCloudTitle = new QLabel(QStringLiteral("实时激光线点云"), previewGroup);
+    pointCloudTitle->setStyleSheet(QStringLiteral("color: #9ED8DB; font-weight: 600;"));
+    m_livePointCloudStatusLabel = new QLabel(QStringLiteral("等待扫描启动并取得点云帧。"), previewGroup);
+    m_livePointCloudStatusLabel->setWordWrap(true);
+    m_livePointCloudView = new ScanPoseLaserLineLiveView(previewGroup);
+    m_livePointCloudView->setMinimumHeight(320);
+    m_livePointCloudView->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    pointCloudPreview->addWidget(pointCloudTitle);
+    pointCloudPreview->addWidget(m_livePointCloudStatusLabel);
+    pointCloudPreview->addWidget(m_livePointCloudView, 1);
+
+    auto* imagePreview = new QVBoxLayout();
+    auto* imageTitle = new QLabel(QStringLiteral("实时相机图像"), previewGroup);
+    imageTitle->setStyleSheet(QStringLiteral("color: #9ED8DB; font-weight: 600;"));
+    m_liveImageStatusLabel = new QLabel(QStringLiteral("等待扫描启动并取得图像帧。"), previewGroup);
+    m_liveImageStatusLabel->setWordWrap(true);
     m_liveImageLabel = new QLabel(
-        QStringLiteral("相机图像：等待图像帧...\n（需所选相机图像传输口支持且已开启）"), imageGroup);
+        QStringLiteral("相机图像：等待图像帧...\n（需所选相机图像传输口支持且已开启）"), previewGroup);
     m_liveImageLabel->setAlignment(Qt::AlignCenter);
     m_liveImageLabel->setMinimumHeight(320);
-    m_liveImageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    m_liveImageLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     m_liveImageLabel->setStyleSheet(QStringLiteral(
         "QLabel { background: #071017; color: #6E8894; border: 1px solid #2B4552; border-radius: 8px; }"));
-    imageLayout->addWidget(m_liveImageStatusLabel);
-    imageLayout->addWidget(m_liveImageLabel, 1);
-    contentLayout->addWidget(imageGroup);
-    contentLayout->addStretch(1);
+    imagePreview->addWidget(imageTitle);
+    imagePreview->addWidget(m_liveImageStatusLabel);
+    imagePreview->addWidget(m_liveImageLabel, 1);
+    liveViews->addLayout(pointCloudPreview, 1);
+    liveViews->addLayout(imagePreview, 1);
+    previewLayout->addLayout(liveViews, 1);
+    contentLayout->addWidget(previewGroup, 1);
+
+    connect(pointSmallerButton, &QPushButton::clicked, this,
+        [this, pointSizeLabel]()
+        {
+            if (m_livePointCloudView != nullptr)
+            {
+                pointSizeLabel->setText(QString::number(
+                    m_livePointCloudView->AdjustPointSize(-0.5), 'f', 1));
+            }
+        });
+    connect(pointBiggerButton, &QPushButton::clicked, this,
+        [this, pointSizeLabel]()
+        {
+            if (m_livePointCloudView != nullptr)
+            {
+                pointSizeLabel->setText(QString::number(
+                    m_livePointCloudView->AdjustPointSize(0.5), 'f', 1));
+            }
+        });
+    connect(zoomInButton, &QPushButton::clicked, this,
+        [this, viewSpanLabel]()
+        {
+            if (m_livePointCloudView != nullptr)
+            {
+                viewSpanLabel->setText(QStringLiteral("%1 mm").arg(
+                    m_livePointCloudView->AdjustViewSpan(-40.0), 0, 'f', 0));
+            }
+        });
+    connect(zoomOutButton, &QPushButton::clicked, this,
+        [this, viewSpanLabel]()
+        {
+            if (m_livePointCloudView != nullptr)
+            {
+                viewSpanLabel->setText(QStringLiteral("%1 mm").arg(
+                    m_livePointCloudView->AdjustViewSpan(40.0), 0, 'f', 0));
+            }
+        });
     scroll->setWidget(content);
     root->addWidget(scroll, 1);
 
@@ -270,10 +661,12 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
     connect(m_teachEndButton, &QPushButton::clicked, this, [this]() { TeachEndPose(); });
     connect(m_generateButton, &QPushButton::clicked, this, [this]() { GeneratePreview(); });
     connect(m_runButton, &QPushButton::clicked, this, [this]() { RunScan(); });
+    connect(m_simulateCurveButton, &QPushButton::clicked,
+        this, [this]() { RunStraightCurveSimulation(); });
 
-    m_liveImageTimer = new QTimer(this);
-    m_liveImageTimer->setInterval(100);
-    connect(m_liveImageTimer, &QTimer::timeout, this, [this]() { RefreshLiveImage(); });
+    m_livePreviewTimer = new QTimer(this);
+    m_livePreviewTimer->setInterval(100);
+    connect(m_livePreviewTimer, &QTimer::timeout, this, [this]() { RefreshLivePreview(); });
 
     LoadRobotList(unitIndex);
     LoadCameraList();
@@ -297,15 +690,23 @@ ScanPoseVariationTestDialog::ScanPoseVariationTestDialog(
             if (!SaveConfiguration(&error))
                 AppendLog(QStringLiteral("扫描速度保存失败：") + error);
         });
+    connect(m_postProcessCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int)
+        {
+            if (m_loadingSelectors || m_running) return;
+            QString error;
+            if (!SaveConfiguration(&error))
+                AppendLog(QStringLiteral("后处理方式保存失败：") + error);
+        });
     UpdateStatusLabels();
+    RefreshStraightCurveSource();
     AppendLog(QStringLiteral("等待示教。运行前会再次显示基础姿态、空间起终点、周期参数和预计控制点，默认拒绝执行。"));
 }
 
 ScanPoseVariationTestDialog::~ScanPoseVariationTestDialog()
 {
-    if (m_liveImageTimer != nullptr)
+    if (m_livePreviewTimer != nullptr)
     {
-        m_liveImageTimer->stop();
+        m_livePreviewTimer->stop();
     }
     if (m_cameraCache != nullptr)
     {
@@ -321,9 +722,9 @@ void ScanPoseVariationTestDialog::LoadRobotList(int initialUnitIndex)
     m_robotCombo->clear();
 
     QString selectedRobotName;
-    COPini selectionIni;
+    ConfigSection selectionIni;
     std::string selectedRobotNameRaw;
-    if (selectionIni.SetFileName(SelectionConfigPath().toUtf8().constData())
+    if (selectionIni.SetLocation(SelectionConfig())
         && selectionIni.SetSectionName(kSelectionSection)
         && selectionIni.ReadString(false, "RobotName", selectedRobotNameRaw) > 0)
     {
@@ -397,6 +798,8 @@ void ScanPoseVariationTestDialog::ChangeRobot(int comboIndex)
     m_unitIndex = m_robotCombo->itemData(comboIndex).toInt();
     m_cameraCache = m_cameraCacheForUnit ? m_cameraCacheForUnit(m_unitIndex) : nullptr;
     m_lastImageTimestamp = 0;
+    m_lastPointCloudTimestamp = 0;
+    m_lastStraightCurvePath.clear();
     LoadCameraList();
     QString error;
     if (!LoadConfiguration(&error) && !error.isEmpty())
@@ -408,18 +811,24 @@ void ScanPoseVariationTestDialog::ChangeRobot(int comboIndex)
         AppendLog(QStringLiteral("机器人选择保存失败：") + error);
     }
     UpdateStatusLabels();
+    RefreshStraightCurveSource();
     if (m_liveImageLabel != nullptr)
     {
         m_liveImageLabel->setPixmap(QPixmap());
         m_liveImageLabel->setText(QStringLiteral("相机图像：等待扫描启动..."));
     }
+    if (m_livePointCloudView != nullptr) m_livePointCloudView->ClearFrame();
+    if (m_livePointCloudStatusLabel != nullptr)
+    {
+        m_livePointCloudStatusLabel->setText(QStringLiteral("等待扫描启动并取得点云帧。"));
+    }
     AppendLog(QStringLiteral("测试机器人已切换为：%1；已读取该机器人的独立示教与扫描参数。")
         .arg(RobotName()));
 }
 
-QString ScanPoseVariationTestDialog::SelectionConfigPath() const
+ConfigLocation ScanPoseVariationTestDialog::SelectionConfig() const
 {
-    return RobotDataHelper::BuildProjectPath(QStringLiteral("Data/ScanPoseVariationTestSelection.ini"));
+    return ConfigLocation::Global(QStringLiteral("ScanPoseVariationTestSelection"));
 }
 
 QString ScanPoseVariationTestDialog::CurrentCameraSection() const
@@ -432,15 +841,40 @@ QString ScanPoseVariationTestDialog::CurrentCameraSection() const
 bool ScanPoseVariationTestDialog::SaveSelection(QString* error) const
 {
     if (error != nullptr) error->clear();
-    const QString path = SelectionConfigPath();
-    QDir().mkpath(QFileInfo(path).absolutePath());
     return RobotDataHelper::WriteParamValue(
-        path, kSelectionSection, QStringLiteral("RobotName"), RobotName(), error);
+        SelectionConfig(), kSelectionSection, QStringLiteral("RobotName"), RobotName(), error);
 }
 
-void ScanPoseVariationTestDialog::RefreshLiveImage()
+void ScanPoseVariationTestDialog::RefreshLivePreview()
 {
-    if (!m_running || m_cameraCache == nullptr || m_liveImageLabel == nullptr) return;
+    if (!m_running || m_cameraCache == nullptr) return;
+
+    udpDataShow latestFrame;
+    if (m_livePointCloudView != nullptr && m_cameraCache->Latest(latestFrame))
+    {
+        const qint64 frameTimestamp = static_cast<qint64>(latestFrame.timestamp);
+        if (frameTimestamp > 0 && frameTimestamp != m_lastPointCloudTimestamp)
+        {
+            m_lastPointCloudTimestamp = frameTimestamp;
+            m_livePointCloudView->SetFrame(latestFrame);
+            if (m_livePointCloudStatusLabel != nullptr)
+            {
+                m_livePointCloudStatusLabel->setText(
+                    QStringLiteral("实时显示：%1 / %2，三维点=%3，点云时间戳=%4")
+                        .arg(RobotName(), CurrentCameraSection())
+                        .arg(latestFrame.allResultPoint.size())
+                        .arg(frameTimestamp));
+            }
+        }
+    }
+    else if (m_livePointCloudStatusLabel != nullptr)
+    {
+        m_livePointCloudStatusLabel->setText(
+            QStringLiteral("正在等待 %1 / %2 的点云帧。")
+                .arg(RobotName(), CurrentCameraSection()));
+    }
+
+    if (m_liveImageLabel == nullptr) return;
     qint64 imageTimestamp = 0;
     const QImage image = m_cameraCache->LatestImage(&imageTimestamp);
     if (image.isNull() || imageTimestamp <= 0)
@@ -483,15 +917,14 @@ QString ScanPoseVariationTestDialog::RobotName(RobotDriverAdaptor* driver) const
     {
         driver = ResolveDriver(false);
     }
-    return driver != nullptr && !driver->m_sRobotName.empty()
-        ? QString::fromStdString(driver->m_sRobotName)
+    return driver != nullptr && !driver->RobotName().empty()
+        ? QString::fromStdString(driver->RobotName())
         : QStringLiteral("RobotA");
 }
 
-QString ScanPoseVariationTestDialog::ConfigPath() const
+ConfigLocation ScanPoseVariationTestDialog::TestConfig() const
 {
-    return RobotDataHelper::BuildProjectPath(
-        QStringLiteral("Data/%1/FunctionTestScanPoseVariation.ini").arg(RobotName()));
+    return ConfigLocation::Robot(RobotName(), QStringLiteral("FunctionTestScanPoseVariation"));
 }
 
 bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
@@ -503,15 +936,25 @@ bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
     m_hasStartPulse = false;
 
     QString savedCameraSection;
-    const QString path = ConfigPath();
-    COPini ini;
-    if (ini.SetFileName(path.toUtf8().constData())
+    const ConfigLocation location = TestConfig();
+    ConfigSection ini;
+    if (ini.SetLocation(location)
         && ini.SetSectionName(kConfigSection))
     {
         std::string cameraSectionRaw;
         if (ini.ReadString(false, "CameraSection", cameraSectionRaw) > 0)
         {
             savedCameraSection = QString::fromUtf8(cameraSectionRaw.c_str()).trimmed();
+        }
+        std::string postProcessModeRaw;
+        if (ini.ReadString(false, "PostProcessMode", postProcessModeRaw) > 0)
+        {
+            const int postProcessIndex = m_postProcessCombo->findData(
+                QString::fromUtf8(postProcessModeRaw.c_str()).trimmed());
+            if (postProcessIndex >= 0)
+            {
+                m_postProcessCombo->setCurrentIndex(postProcessIndex);
+            }
         }
     }
     LoadCameraList(savedCameraSection);
@@ -526,10 +969,10 @@ bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
         m_scanSpeedSpin->setValue(presetParam.dScanSpeed);
     }
 
-    if (!ini.SetFileName(path.toUtf8().constData())
+    if (!ini.SetLocation(location)
         || !ini.SetSectionName(kConfigSection))
     {
-        if (error != nullptr) *error = QStringLiteral("无法打开配置：") + path;
+        if (error != nullptr) *error = QStringLiteral("测试配置数据库位置无效：") + RobotName();
         return false;
     }
 
@@ -542,13 +985,13 @@ bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
     ini.ReadString(false, "HasEndPose", &hasEnd);
     ini.ReadString(false, "HasStartPulse", &hasStartPulse);
     m_hasBasePose = hasBase != 0
-        && RobotDataHelper::ReadCoors(path, kConfigSection, QStringLiteral("BasePose"), m_basePose, nullptr);
+        && RobotDataHelper::ReadCoors(location, kConfigSection, QStringLiteral("BasePose"), m_basePose, nullptr);
     m_hasStartPose = hasStart != 0
-        && RobotDataHelper::ReadCoors(path, kConfigSection, QStringLiteral("StartPose"), m_startPose, nullptr);
+        && RobotDataHelper::ReadCoors(location, kConfigSection, QStringLiteral("StartPose"), m_startPose, nullptr);
     m_hasEndPose = hasEnd != 0
-        && RobotDataHelper::ReadCoors(path, kConfigSection, QStringLiteral("EndPose"), m_endPose, nullptr);
+        && RobotDataHelper::ReadCoors(location, kConfigSection, QStringLiteral("EndPose"), m_endPose, nullptr);
     m_hasStartPulse = hasStartPulse != 0
-        && RobotDataHelper::ReadPulse(path, kConfigSection, QStringLiteral("StartPulse"), m_startPulse, nullptr);
+        && RobotDataHelper::ReadPulse(location, kConfigSection, QStringLiteral("StartPulse"), m_startPulse, nullptr);
 
     auto readSpin = [&ini](const char* key, QDoubleSpinBox* spin)
         {
@@ -574,14 +1017,14 @@ bool ScanPoseVariationTestDialog::LoadConfiguration(QString* error)
 bool ScanPoseVariationTestDialog::SaveConfiguration(QString* error) const
 {
     if (error != nullptr) error->clear();
-    const QString path = ConfigPath();
-    QDir().mkpath(QFileInfo(path).absolutePath());
+    const ConfigLocation location = TestConfig();
     const auto params = CurrentParams();
     const QList<QPair<QString, QString>> values = {
-        { QStringLiteral("Schema"), QStringLiteral("1") },
+        { QStringLiteral("Schema"), QStringLiteral("2") },
         { QStringLiteral("RobotName"), RobotName() },
         { QStringLiteral("CameraSection"), CurrentCameraSection() },
         { QStringLiteral("ScanSpeedMmPerMin"), QString::number(m_scanSpeedSpin->value(), 'f', 6) },
+        { QStringLiteral("PostProcessMode"), PostProcessModeConfigValue(CurrentPostProcessMode()) },
         { QStringLiteral("HasBasePose"), m_hasBasePose ? QStringLiteral("1") : QStringLiteral("0") },
         { QStringLiteral("HasStartPose"), m_hasStartPose ? QStringLiteral("1") : QStringLiteral("0") },
         { QStringLiteral("HasEndPose"), m_hasEndPose ? QStringLiteral("1") : QStringLiteral("0") },
@@ -597,28 +1040,28 @@ bool ScanPoseVariationTestDialog::SaveConfiguration(QString* error) const
     };
     for (const auto& value : values)
     {
-        if (!RobotDataHelper::WriteParamValue(path, kConfigSection, value.first, value.second, error))
+        if (!RobotDataHelper::WriteParamValue(location, kConfigSection, value.first, value.second, error))
         {
             return false;
         }
     }
     if (m_hasBasePose
-        && !RobotDataHelper::WriteCoors(path, kConfigSection, QStringLiteral("BasePose"), m_basePose, error))
+        && !RobotDataHelper::WriteCoors(location, kConfigSection, QStringLiteral("BasePose"), m_basePose, error))
     {
         return false;
     }
     if (m_hasStartPose
-        && !RobotDataHelper::WriteCoors(path, kConfigSection, QStringLiteral("StartPose"), m_startPose, error))
+        && !RobotDataHelper::WriteCoors(location, kConfigSection, QStringLiteral("StartPose"), m_startPose, error))
     {
         return false;
     }
     if (m_hasEndPose
-        && !RobotDataHelper::WriteCoors(path, kConfigSection, QStringLiteral("EndPose"), m_endPose, error))
+        && !RobotDataHelper::WriteCoors(location, kConfigSection, QStringLiteral("EndPose"), m_endPose, error))
     {
         return false;
     }
     if (m_hasStartPulse
-        && !RobotDataHelper::WritePulse(path, kConfigSection, QStringLiteral("StartPulse"), m_startPulse, error))
+        && !RobotDataHelper::WritePulse(location, kConfigSection, QStringLiteral("StartPulse"), m_startPulse, error))
     {
         return false;
     }
@@ -685,6 +1128,7 @@ void ScanPoseVariationTestDialog::TeachBasePose()
         return;
     }
     UpdateStatusLabels();
+    RefreshStraightCurveSource();
     AppendLog(QStringLiteral("基础姿态已示教并保存：") + PoseText(pose));
 }
 
@@ -746,6 +1190,22 @@ MeasureThenWeldService::ScanPoseVariationParams ScanPoseVariationTestDialog::Cur
     params.transitionLengthMm = m_transitionSpin->value();
     params.pointStepMm = m_pointStepSpin->value();
     return params;
+}
+
+MeasureThenWeldService::ScanPostProcessMode ScanPoseVariationTestDialog::CurrentPostProcessMode() const
+{
+    const QString value = m_postProcessCombo != nullptr
+        ? m_postProcessCombo->currentData().toString().trimmed()
+        : QString();
+    if (value == QString::fromLatin1(kPostProcessNone))
+    {
+        return MeasureThenWeldService::ScanPostProcessMode::None;
+    }
+    if (value == QString::fromLatin1(kPostProcessStraightLine))
+    {
+        return MeasureThenWeldService::ScanPostProcessMode::FeaturePointSmoothCurve;
+    }
+    return MeasureThenWeldService::ScanPostProcessMode::CorrugatedBoard;
 }
 
 void ScanPoseVariationTestDialog::GeneratePreview()
@@ -866,10 +1326,26 @@ void ScanPoseVariationTestDialog::RunScan()
     }
 
     const int robotType = driver->DriverDescriptor().poseConventionType;
+    const auto postProcessMode = CurrentPostProcessMode();
+    const QString postProcessModeName = PostProcessModeDisplayName(postProcessMode);
+    const QString postProcessModeConfig = PostProcessModeConfigValue(postProcessMode);
+    QString error;
+    QString pointCloudSdkLibraryDirOverride;
+    QString pointCloudSdkDllPath;
+    QString pointCloudSdkSha256;
+    if (postProcessMode == MeasureThenWeldService::ScanPostProcessMode::CorrugatedBoard
+        && !ResolveScanPosePointCloudSdk(
+            pointCloudSdkLibraryDirOverride,
+            pointCloudSdkDllPath,
+            pointCloudSdkSha256,
+            error))
+    {
+        QMessageBox::warning(this, QStringLiteral("运行扫描"), error);
+        return;
+    }
     MeasureThenWeldService service;
     QVector<MeasureThenWeldService::ScanPoseVariationPoint> generated;
     QString summary;
-    QString error;
     if (!service.GenerateScanPoseVariationTrajectory(
             m_basePose, m_startPose, m_endPose, robotType,
             CurrentParams(), generated, summary, error))
@@ -888,14 +1364,20 @@ void ScanPoseVariationTestDialog::RunScan()
         return;
     }
 
+    const QString sdkConfirmation = pointCloudSdkDllPath.isEmpty()
+        ? QString()
+        : QStringLiteral("\n轨迹计算SDK：%1\nSDK SHA-256：%2")
+            .arg(QDir::toNativeSeparators(pointCloudSdkDllPath), pointCloudSdkSha256);
     const QString confirmation = QStringLiteral(
         "即将进行真实机器人扫描运动。\n\n机器人：%1\n扫描相机：%2（%3）\n扫描速度：%4 mm/min\n"
-        "基础姿态：%5\n扫描起点：%6\n扫描终点：%7\n%8\n\n"
+        "后处理方式：%5\n基础姿态：%6\n扫描起点：%7\n扫描终点：%8\n%9%10\n\n"
         "流程：到扫描下枪安全位 -> 扫描起点 -> 连续变姿态扫描并采集 -> 扫描收枪安全位。\n"
         "软件停止不能替代控制柜/示教器急停；请确认机器人周围安全、相机和激光已准备好。是否继续？")
         .arg(RobotName(driver), cameraSection, cameraIp)
         .arg(m_scanSpeedSpin->value(), 0, 'f', 1)
-        .arg(PoseText(m_basePose), PoseText(m_startPose), PoseText(m_endPose), summary);
+        .arg(postProcessModeName)
+        .arg(PoseText(m_basePose), PoseText(m_startPose), PoseText(m_endPose), summary)
+        .arg(sdkConfirmation);
     if (QMessageBox::question(this, QStringLiteral("扫描变姿态运行前确认"), confirmation,
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
     {
@@ -934,7 +1416,10 @@ void ScanPoseVariationTestDialog::RunScan()
     QPointer<ScanPoseVariationTestDialog> self(this);
     std::thread([self, driver, cameraCache, operationLease, trajectory, generated,
                  params, basePose, startPose, endPose, startPulse, robotType,
-                 robotName, selectedCameraSection, selectedCameraIp, scanSpeedMmPerMin]()
+                 robotName, selectedCameraSection, selectedCameraIp, scanSpeedMmPerMin,
+                 postProcessMode, postProcessModeName, postProcessModeConfig,
+                 pointCloudSdkLibraryDirOverride, pointCloudSdkDllPath,
+                 pointCloudSdkSha256]()
         {
             MeasureThenWeldService service;
             T_PRECISE_MEASURE_PARAM param;
@@ -978,6 +1463,12 @@ void ScanPoseVariationTestDialog::RunScan()
                 .arg(param.dDec, 0, 'f', 6)
                 .arg(param.dCameraTimeOffsetMs, 0, 'f', 3)
                 .arg(param.bUseStatTimeAlign ? QStringLiteral("统计") : QStringLiteral("首帧")));
+            if (!pointCloudSdkDllPath.isEmpty())
+            {
+                appendLog(QStringLiteral("本轮轨迹计算SDK已锁定：DLL=%1，SHA-256=%2。")
+                    .arg(QDir::toNativeSeparators(pointCloudSdkDllPath),
+                         pointCloudSdkSha256));
+            }
             auto setFlowStep = [self](const QString& text)
                 {
                     QMetaObject::invokeMethod(qApp, [self, text]()
@@ -1014,7 +1505,9 @@ void ScanPoseVariationTestDialog::RunScan()
                 MeasureThenWeldService::ScanProgressCallback(),
                 MeasureThenWeldService::ScanPauseAvailabilityCallback(),
                 &trajectory,
-                selectedCameraSection);
+                selectedCameraSection,
+                postProcessMode,
+                pointCloudSdkLibraryDirOverride);
 
             QString commandedPath;
             QString saveError;
@@ -1031,6 +1524,19 @@ void ScanPoseVariationTestDialog::RunScan()
                     QStringLiteral("camera_section=%1").arg(selectedCameraSection),
                     QStringLiteral("camera_ip=%1").arg(selectedCameraIp),
                     QStringLiteral("scan_speed_mm_per_min=%1").arg(scanSpeedMmPerMin, 0, 'f', 6),
+                    QStringLiteral("post_process_mode=%1").arg(postProcessModeConfig),
+                    QStringLiteral("post_process_name=%1").arg(postProcessModeName),
+                    QStringLiteral("trajectory_sdk_override_dir=%1").arg(
+                        QDir::toNativeSeparators(pointCloudSdkLibraryDirOverride)),
+                    QStringLiteral("trajectory_sdk_dll=%1").arg(
+                        QDir::toNativeSeparators(pointCloudSdkDllPath)),
+                    QStringLiteral("trajectory_sdk_sha256=%1").arg(pointCloudSdkSha256),
+                    QStringLiteral("trajectory_sdk_mode=%1").arg(
+                        pointCloudSdkDllPath.isEmpty()
+                            ? QString()
+                            : QStringLiteral("SdkBaseWeldFitReturnedTrack")),
+                    QStringLiteral("trajectory_sdk_resample_step_mm=%1").arg(
+                        pointCloudSdkDllPath.isEmpty() ? QString() : QStringLiteral("2.000000")),
                     QStringLiteral("preset_group=%1").arg(param.sParamGroupName),
                     QStringLiteral("safe_move_speed_mm_per_min=%1").arg(param.dRunSpeed, 0, 'f', 6),
                     QStringLiteral("scan_safe_mode=%1").arg(
@@ -1064,13 +1570,28 @@ void ScanPoseVariationTestDialog::RunScan()
             }
 
             QMetaObject::invokeMethod(qApp,
-                [self, ok, result, commandedPath, saveError]()
+                [self, ok, result, commandedPath, saveError,
+                 postProcessMode, postProcessModeName]()
                 {
                     if (self == nullptr) return;
                     if (ok)
                     {
-                        self->AppendLog(QStringLiteral("扫描变姿态测试完成并已安全收枪。结果目录：")
-                            + QDir::toNativeSeparators(result.caseDir));
+                        self->AppendLog(QStringLiteral("扫描变姿态测试完成并已安全收枪；后处理方式=%1。结果目录：%2")
+                            .arg(postProcessModeName, QDir::toNativeSeparators(result.caseDir)));
+                        if (postProcessMode
+                                == MeasureThenWeldService::ScanPostProcessMode::FeaturePointSmoothCurve
+                            && !result.caseDir.isEmpty())
+                        {
+                            const QString curvePath = QDir(result.caseDir).filePath(
+                                QStringLiteral("LaserPoint/%1").arg(
+                                    QString::fromLatin1(kFeatureSmoothCurveFileName)));
+                            if (QFileInfo::exists(curvePath))
+                            {
+                                self->m_lastStraightCurvePath = QFileInfo(curvePath).absoluteFilePath();
+                                self->AppendLog(QStringLiteral("直线模拟输入已就绪：")
+                                    + QDir::toNativeSeparators(self->m_lastStraightCurvePath));
+                            }
+                        }
                     }
                     else
                     {
@@ -1086,8 +1607,270 @@ void ScanPoseVariationTestDialog::RunScan()
                         self->AppendLog(QStringLiteral("测试元数据保存告警：") + saveError);
                     }
                     self->SetRunning(false);
+                    self->RefreshStraightCurveSource();
                 }, Qt::QueuedConnection);
         }).detach();
+}
+
+void ScanPoseVariationTestDialog::RunStraightCurveSimulation()
+{
+    if (m_running || m_curveSimulationRunning) return;
+    if (!m_hasBasePose)
+    {
+        QMessageBox::information(this, QStringLiteral("运行直线模拟轨迹"),
+            QStringLiteral("请先示教基础姿态；曲线点只提供XYZ，模拟运行的姿态统一取该基础姿态。"));
+        return;
+    }
+    RefreshStraightCurveSource();
+    const QFileInfo curveInfo(m_lastStraightCurvePath);
+    if (!curveInfo.isFile() || curveInfo.isSymLink())
+    {
+        QMessageBox::information(this, QStringLiteral("运行直线模拟轨迹"),
+            QStringLiteral("当前机器人没有可用的直线处理2mm曲线。请先选择“直线处理”并成功完成一次扫描。"));
+        return;
+    }
+
+    RobotDriverAdaptor* driver = ResolveDriver();
+    if (driver == nullptr || !driver->IsConnected())
+    {
+        QMessageBox::warning(this, QStringLiteral("运行直线模拟轨迹"),
+            QStringLiteral("机器人未连接。"));
+        return;
+    }
+    const std::initializer_list<RobotDriverCapability> requiredCapabilities = {
+        RobotDriverCapability::LinearMotion,
+        RobotDriverCapability::PassiveState,
+        RobotDriverCapability::ContinuousTrajectory,
+        RobotDriverCapability::OfflineTrajectoryExport,
+        RobotDriverCapability::VerifiedProgramCompletion,
+        RobotDriverCapability::VerifiedSafeAbort
+    };
+    if (!driver->SupportsAll(requiredCapabilities))
+    {
+        QMessageBox::warning(this, QStringLiteral("运行直线模拟轨迹"),
+            QStringLiteral("当前机器人品牌底层无法生成并运行直线模拟轨迹，缺少适配能力：%1；功能已限制。")
+                .arg(QString::fromUtf8(driver->MissingCapabilitiesText(
+                    requiredCapabilities).c_str())));
+        return;
+    }
+
+    const double dryRunSpeedMmPerMin = m_scanSpeedSpin->value();
+    const T_ROBOT_COORS basePose = m_basePose;
+    const QString curvePath = curveInfo.absoluteFilePath();
+    MeasureThenWeldService service;
+    T_ROBOT_COORS curveStartPose;
+    T_ROBOT_COORS curveEndPose;
+    QString posePath;
+    QString srpPath;
+    QString srdPath;
+    QString programName;
+    QString generatedSummary;
+    QString error;
+    if (!service.GenerateScanPoseVariationDryRunFiles(
+            driver,
+            curvePath,
+            basePose,
+            dryRunSpeedMmPerMin,
+            curveStartPose,
+            curveEndPose,
+            posePath,
+            srpPath,
+            srdPath,
+            programName,
+            generatedSummary,
+            error,
+            [this](const QString& text) { AppendLog(text); }))
+    {
+        AppendLog(QStringLiteral("直线模拟程序生成失败：") + error);
+        QMessageBox::warning(this, QStringLiteral("运行直线模拟轨迹"), error);
+        return;
+    }
+
+    AppendLog(generatedSummary);
+    const QString confirmation = QStringLiteral(
+        "直线模拟文件已生成；确认后将下发并运行真实机器人轨迹。\n\n"
+        "机器人：%1\n曲线文件：%2\n预生成程序：%3\n"
+        "轨迹速度：%4 mm/min\n点距：2 mm（末段允许不足2 mm）\n"
+        "曲线起点TCP：%5\n曲线终点TCP：%6\n"
+        "工具：Tool1（焊枪）\n固定基础姿态：%7\n\n"
+        "本轮为空跑：不开弧、不送丝、不摆动、不应用焊道/姿态补偿。\n"
+        "流程：下枪安全位 -> 曲线起点 -> 下发并启动直线轨迹 -> 确认程序完成 -> 收枪安全位并验证。\n"
+        "软件停止不能替代控制柜/示教器急停；请确认机器人周围安全。是否继续？")
+        .arg(RobotName(driver), QDir::toNativeSeparators(curvePath), programName)
+        .arg(dryRunSpeedMmPerMin, 0, 'f', 1)
+        .arg(PoseText(curveStartPose), PoseText(curveEndPose), OrientationText(basePose));
+    if (QMessageBox::question(this, QStringLiteral("直线模拟运行前确认"), confirmation,
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+    {
+        AppendLog(QStringLiteral("用户取消直线模拟运行；已生成文件，但未发起机器人运动。"));
+        return;
+    }
+
+    QString leaseError;
+    const auto operationLease = RobotOperationLease::TryAcquire(
+        driver, QStringLiteral("扫描变姿态-直线模拟运行"), &leaseError);
+    if (!operationLease)
+    {
+        QMessageBox::warning(this, QStringLiteral("运行直线模拟轨迹"), leaseError);
+        return;
+    }
+
+    m_curveSimulationRunning = true;
+    SetRunning(true);
+    AppendLog(QStringLiteral("———— 开始生成并运行Tool1直线模拟轨迹 ————"));
+    AppendLog(QStringLiteral("模拟输入：") + QDir::toNativeSeparators(curvePath));
+    AppendLog(QStringLiteral("生成姿态：") + QDir::toNativeSeparators(posePath));
+    AppendLog(QStringLiteral("控制器程序：%1；SRP=%2；SRD=%3")
+        .arg(programName,
+            QDir::toNativeSeparators(srpPath),
+            QDir::toNativeSeparators(srdPath)));
+
+    QPointer<ScanPoseVariationTestDialog> self(this);
+    std::thread([self, driver, operationLease, posePath, dryRunSpeedMmPerMin]()
+        {
+            MeasureThenWeldService service;
+            T_PRECISE_MEASURE_PARAM param;
+            QString error;
+            if (!service.LoadPresetParam(driver, param, error))
+            {
+                QMetaObject::invokeMethod(qApp, [self, error]()
+                    {
+                        if (self == nullptr) return;
+                        self->AppendLog(QStringLiteral("读取当前先测后焊预设失败：") + error);
+                        self->SetRunning(false);
+                        self->m_curveSimulationRunning = false;
+                        self->RefreshStraightCurveSource();
+                        QMessageBox::warning(self, QStringLiteral("直线模拟运行"), error);
+                    }, Qt::QueuedConnection);
+                return;
+            }
+
+            // 曲线模拟严格按文件顺序空跑；不继承实际焊接、反向焊接或工艺点距。
+            param.bDoActualWeld = false;
+            param.nWeldDirection = 1;
+            param.dDryRunSpeedMmPerMin = dryRunSpeedMmPerMin;
+            param.dFinalWeldTrajectoryStepMm = 2.0;
+
+            auto appendLog = [self](const QString& text)
+                {
+                    QMetaObject::invokeMethod(qApp, [self, text]()
+                        {
+                            if (self != nullptr) self->AppendLog(text);
+                        }, Qt::QueuedConnection);
+                };
+            auto setFlowStep = [self](const QString& text)
+                {
+                    QMetaObject::invokeMethod(qApp, [self, text]()
+                        {
+                            if (self != nullptr)
+                                self->AppendLog(QStringLiteral("步骤：") + text);
+                        }, Qt::QueuedConnection);
+                };
+            auto checkpoint = [self](const QString& title, const QString& detail) -> bool
+                {
+                    bool approved = false;
+                    QMetaObject::invokeMethod(qApp, [self, title, detail, &approved]()
+                        {
+                            if (self != nullptr)
+                            {
+                                approved = QMessageBox::question(self, title, detail,
+                                    QMessageBox::Yes | QMessageBox::No,
+                                    QMessageBox::No) == QMessageBox::Yes;
+                            }
+                        }, Qt::BlockingQueuedConnection);
+                    return approved;
+                };
+
+            QString executionSummary;
+            QString executionError;
+            const auto safetySession =
+                std::make_shared<WeldSafetyRecoverySession>(
+                    driver,
+                    param,
+                    MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun);
+            const bool ok = service.ExecuteWeldPoseFileWithSafePos(
+                driver,
+                posePath,
+                param,
+                executionSummary,
+                executionError,
+                nullptr,
+                nullptr,
+                appendLog,
+                setFlowStep,
+                checkpoint,
+                /*overrideFinalStepMm=*/2.0,
+                /*allowPointwiseWeave=*/true,
+                MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun,
+                /*resumeStartArcMm=*/-1.0,
+                /*inputAlreadyInExecutionOrder=*/false,
+                [driver]() { return RobotOperationLease::IsCancellationRequested(driver); },
+                [safetySession](
+                    const MeasureThenWeldService::WeldExecutionIdentity& identity,
+                    QString& prepareError)
+                {
+                    return safetySession->Prepare(identity, prepareError);
+                },
+                [safetySession](
+                    const WeldExecutionTerminalResult& terminal,
+                    QString& finishError)
+                {
+                    return safetySession->Finish(terminal, finishError);
+                });
+
+            QMetaObject::invokeMethod(qApp,
+                [self, ok, executionSummary, executionError]()
+                {
+                    if (self == nullptr) return;
+                    self->AppendLog(ok
+                        ? (QStringLiteral("直线模拟运行完成且已验证安全回撤：") + executionSummary)
+                        : (QStringLiteral("直线模拟运行失败/中止：") + executionError));
+                    self->SetRunning(false);
+                    self->m_curveSimulationRunning = false;
+                    self->RefreshStraightCurveSource();
+                    if (ok)
+                    {
+                        QMessageBox::information(self, QStringLiteral("直线模拟运行"),
+                            QStringLiteral("机器人程序已启动、正常完成，并已验证收枪安全位置。"));
+                    }
+                    else
+                    {
+                        QMessageBox::warning(self, QStringLiteral("直线模拟运行"),
+                            executionError);
+                    }
+                }, Qt::QueuedConnection);
+        }).detach();
+}
+
+void ScanPoseVariationTestDialog::RefreshStraightCurveSource()
+{
+    const QFileInfo currentInfo(m_lastStraightCurvePath);
+    if (!currentInfo.isFile() || currentInfo.isSymLink())
+    {
+        m_lastStraightCurvePath = FindLatestStraightCurvePath(RobotName());
+    }
+    const QFileInfo curveInfo(m_lastStraightCurvePath);
+    const bool curveReady = curveInfo.isFile() && !curveInfo.isSymLink();
+    if (m_simulateCurveButton == nullptr) return;
+
+    m_simulateCurveButton->setEnabled(
+        !m_running && !m_curveSimulationRunning && m_hasBasePose && curveReady);
+    if (!m_hasBasePose)
+    {
+        m_simulateCurveButton->setToolTip(QStringLiteral(
+            "请先示教基础姿态；曲线只提供XYZ，模拟运行需要固定姿态。"));
+    }
+    else if (!curveReady)
+    {
+        m_simulateCurveButton->setToolTip(QStringLiteral(
+            "请先选择直线处理并成功完成一次扫描，生成2mm曲线。"));
+    }
+    else
+    {
+        m_simulateCurveButton->setToolTip(QStringLiteral(
+            "读取：%1\n曲线XYZ直接作为Tool1 TCP，统一使用基础姿态；2mm直线空跑，不起弧、不摆动。")
+            .arg(QDir::toNativeSeparators(curveInfo.absoluteFilePath())));
+    }
 }
 
 void ScanPoseVariationTestDialog::AppendLog(const QString& text)
@@ -1114,22 +1897,56 @@ void ScanPoseVariationTestDialog::SetRunning(bool running)
     m_running = running;
     if (running)
     {
-        m_lastImageTimestamp = 0;
-        if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(true);
-        if (m_liveImageTimer != nullptr) m_liveImageTimer->start();
-        if (m_liveImageStatusLabel != nullptr)
+        if (m_curveSimulationRunning)
         {
-            m_liveImageStatusLabel->setText(
-                QStringLiteral("正在启动 %1 / %2 实时图像...").arg(RobotName(), CurrentCameraSection()));
+            if (m_livePreviewTimer != nullptr) m_livePreviewTimer->stop();
+            if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(false);
+            if (m_livePointCloudView != nullptr) m_livePointCloudView->ClearFrame();
+            if (m_livePointCloudStatusLabel != nullptr)
+            {
+                m_livePointCloudStatusLabel->setText(QStringLiteral(
+                    "正在运行Tool1直线模拟轨迹；本过程不启动点云采集。"));
+            }
+            if (m_liveImageStatusLabel != nullptr)
+            {
+                m_liveImageStatusLabel->setText(QStringLiteral(
+                    "正在运行Tool1直线模拟轨迹；本过程不启动相机采集。"));
+            }
+        }
+        else
+        {
+            m_lastImageTimestamp = 0;
+            m_lastPointCloudTimestamp = 0;
+            if (m_livePointCloudView != nullptr) m_livePointCloudView->ClearFrame();
+            if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(true);
+            if (m_livePreviewTimer != nullptr) m_livePreviewTimer->start();
+            if (m_livePointCloudStatusLabel != nullptr)
+            {
+                m_livePointCloudStatusLabel->setText(
+                    QStringLiteral("正在启动 %1 / %2 实时点云...").arg(RobotName(), CurrentCameraSection()));
+            }
+            if (m_liveImageStatusLabel != nullptr)
+            {
+                m_liveImageStatusLabel->setText(
+                    QStringLiteral("正在启动 %1 / %2 实时图像...").arg(RobotName(), CurrentCameraSection()));
+            }
         }
     }
     else
     {
-        if (m_liveImageTimer != nullptr) m_liveImageTimer->stop();
+        if (m_livePreviewTimer != nullptr) m_livePreviewTimer->stop();
         if (m_cameraCache != nullptr) m_cameraCache->SetLiveImageEnabled(false);
+        if (m_livePointCloudStatusLabel != nullptr)
+        {
+            m_livePointCloudStatusLabel->setText(m_curveSimulationRunning
+                ? QStringLiteral("直线模拟运行已结束；本过程未采集点云。")
+                : QStringLiteral("扫描已结束；保留最后一帧实时点云。"));
+        }
         if (m_liveImageStatusLabel != nullptr)
         {
-            m_liveImageStatusLabel->setText(QStringLiteral("扫描已结束；本轮图像按相机保存参数归档到结果目录。"));
+            m_liveImageStatusLabel->setText(m_curveSimulationRunning
+                ? QStringLiteral("直线模拟运行已结束；本过程未采集相机图像。")
+                : QStringLiteral("扫描已结束；本轮图像按相机保存参数归档到结果目录。"));
         }
     }
     for (QPushButton* button : {
@@ -1147,4 +1964,6 @@ void ScanPoseVariationTestDialog::SetRunning(bool running)
     }
     if (m_robotCombo != nullptr) m_robotCombo->setEnabled(!running && m_robotCombo->count() > 0);
     if (m_cameraCombo != nullptr) m_cameraCombo->setEnabled(!running && m_cameraCombo->count() > 0);
+    if (m_postProcessCombo != nullptr) m_postProcessCombo->setEnabled(!running);
+    RefreshStraightCurveSource();
 }
