@@ -264,6 +264,7 @@ class CandidateFixture:
         for script_name in (
             "build_installer.ps1",
             "build_release_package.ps1",
+            "license_build_gate.ps1",
             "build_config_migrate.ps1",
             "release_gate_common.ps1",
             "verify_release_pair.ps1",
@@ -960,6 +961,27 @@ class LocalGateTests(unittest.TestCase):
             )
         signer.assert_not_called()
         ssh.assert_not_called()
+
+    def test_trusted_release_requires_and_forwards_license_public_key(self):
+        parser = ota._build_parser()
+        host_key = "SHA256:" + "A" * 43
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args([
+                "trusted-release-dual", "--version", CandidateFixture.VERSION,
+                "--runtime-source", ".", "--ssh-password-stdin",
+                "--host-key-sha256", host_key,
+            ])
+        args = parser.parse_args([
+            "trusted-release-dual", "--version", CandidateFixture.VERSION,
+            "--runtime-source", ".", "--license-public-key-header", "C:\\keys\\public-key.h",
+            "--ssh-password-stdin", "--host-key-sha256", host_key,
+        ])
+        self.assertEqual(args.license_public_key_header, "C:\\keys\\public-key.h")
+
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn('"scripts/license_build_gate.ps1"', source)
+        self.assertIn('"-LicenseMode", "Off" if channel == "neutral" else "Enforce"', source)
+        self.assertIn('"-LicensePublicKeyHeader", str(license_public_key_header)', source)
 
     def test_ota_failure_never_creates_github_and_github_failure_is_ambiguous(self):
         host_key = "SHA256:" + "A" * 43

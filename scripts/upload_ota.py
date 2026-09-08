@@ -125,6 +125,7 @@ TRUSTED_RELEASE_FILES = (
     "scripts/verify_release_pair.ps1",
     "scripts/build_installer.ps1",
     "scripts/build_release_package.ps1",
+    "scripts/license_build_gate.ps1",
     "scripts/build_config_migrate.ps1",
 )
 _SENSITIVE_ENVIRONMENT_NAMES = frozenset({
@@ -3063,6 +3064,42 @@ def _safe_verifier_worktree(root: Path, name: str) -> Path:
     return child
 
 
+def _snapshot_license_public_key_header(
+    path_value: os.PathLike[str] | str,
+    verifier_root: Path,
+    repo_root: Path,
+) -> Path:
+    candidate = Path(path_value).expanduser()
+    _require(candidate.is_absolute(), "License public key header 必须使用显式绝对路径。")
+    try:
+        source = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ReleaseGateError("License public key header 不存在或不可访问。") from exc
+    _require(source.is_file() and not source.is_symlink()
+             and not _path_is_reparse_point(source),
+             "License public key header 必须是非链接普通文件。")
+    _require(source.stat().st_size <= 16 * 1024,
+             "License public key header 体积异常。")
+    try:
+        source.relative_to(repo_root)
+    except ValueError:
+        pass
+    else:
+        raise ReleaseGateError("License public key header 必须来自项目目录之外的独立授权服务。")
+
+    payload = source.read_bytes()
+    _require(b"PRIVATE KEY" not in payload.upper(),
+             "License public key header 禁止包含私钥内容。")
+    target = verifier_root / "license-public-key.h"
+    with target.open("xb") as stream:
+        stream.write(payload)
+    _require(target.is_file() and not target.is_symlink()
+             and not _path_is_reparse_point(target)
+             and sha256_file(target) == hashlib.sha256(payload).hexdigest(),
+             "License public key header 可信快照失败。")
+    return target.resolve(strict=True)
+
+
 _ALLOWED_BRAND_TRACKED_DELTA = frozenset({
     ".gitignore",
     "QtWidgetsApplication4.vcxproj",
@@ -3389,6 +3426,9 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
     temporary_root = Path(tempfile.mkdtemp(prefix="noteaching-trusted-release-")).resolve(strict=True)
     neutral_root = _safe_verifier_worktree(temporary_root, "neutral")
     brand_root = _safe_verifier_worktree(temporary_root, "brand")
+    license_public_key_header = _snapshot_license_public_key_header(
+        getattr(args, "license_public_key_header", ""), temporary_root, repo_root
+    )
     powershell = _trusted_windows_powershell()
     git_path = git_tool.path
     try:
@@ -3425,12 +3465,20 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
                 _verify_release_toolchain_dependencies(
                     build_tools, toolchain_closures, protected_tool_roots
                 )
+                license_arguments = [
+                    "-LicenseMode", "Off" if channel == "neutral" else "Enforce",
+                ]
+                if channel == "brand":
+                    license_arguments.extend([
+                        "-LicensePublicKeyHeader", str(license_public_key_header),
+                    ])
                 _run_local_checked(
                     [
                         str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
                         "-ExecutionPolicy", "Bypass", "-File",
                         str(root / "scripts" / "build_installer.ps1"),
                         "-AppVersion", args.version, "-Channel", channel,
+                        *license_arguments,
                         "-MSBuildExecutable", str(msbuild_tool.path),
                         "-MSBuildSha256", msbuild_tool.sha256,
                         "-WinDeployQtExecutable", str(windeployqt_tool.path),
@@ -4323,6 +4371,8 @@ def _build_parser() -> argparse.ArgumentParser:
     trusted.add_argument("--version", required=True)
     trusted.add_argument("--runtime-source", required=True,
                          help="仅作为权威 FANUC manifest 所列 tp/pc 的显式只读来源")
+    trusted.add_argument("--license-public-key-header", required=True,
+                         help="项目外独立授权服务导出的 RSA-3072 公钥头文件")
     trusted.add_argument("--notes", default="")
     trusted.add_argument("--git-exe", default=str(DEFAULT_GIT_EXE),
                          help="受信任且带有效 Authenticode 的 Git for Windows 绝对路径")
