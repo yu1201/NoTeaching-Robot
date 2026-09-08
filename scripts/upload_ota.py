@@ -3441,7 +3441,9 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
                     ],
                     cwd=root,
                     label=f"{channel} clean-HEAD Rebuild + Inno",
-                    timeout=90 * 60,
+                    # A fully isolated x64 rebuild plus deterministic PyInstaller
+                    # packaging can exceed 90 minutes on the release workstation.
+                    timeout=180 * 60,
                 )
                 installer_gates[channel] = (
                     root / "dist" / "release-gates" / f"installer-{channel}-{args.version}.json"
