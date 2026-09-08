@@ -58,6 +58,7 @@ $script:ApplicationMutex = $null
 $script:TransactionFileName = 'ConfigStore.db.install-transaction-v1'
 $script:TransactionPath = ''
 $script:TransactionFormat = 'NoTeaching-Robot-Install-Transaction-v1'
+$script:FailurePhase = 'initialization'
 
 function Write-InstallerStatus {
     param([Parameter(Mandatory = $true)][string]$Value)
@@ -2242,6 +2243,7 @@ function Remove-BoundUpgradeBackup {
     if (-not (Test-Path -LiteralPath $backupPath)) {
         return
     }
+    $script:FailurePhase = 'upgrade-reconcile-backup-metadata'
     Assert-RegularFileInData $backupPath `
         '^\.ConfigStore\.db\.install-upgrade-[0-9a-f]{32}\.tmp\.install-backup\.dpapi\.bak$' `
         'The bound protected upgrade backup'
@@ -2338,6 +2340,7 @@ function Invoke-VerifiedUpgradePublicationReconciliation {
     }
     $comparisonAvailable = (Test-Path -LiteralPath $comparisonPath -PathType Leaf) -and
         (Get-FileSha256 $comparisonPath) -ceq $Record.OriginalSha256
+    $script:FailurePhase = 'upgrade-reconcile-backup-readback'
     Test-ProtectedBackupReadback `
         -BackupPath $backupPath `
         -ExpectedDatabaseSha256 $Record.OriginalSha256 `
@@ -2347,12 +2350,15 @@ function Invoke-VerifiedUpgradePublicationReconciliation {
         throw 'The reconciliation protected upgrade backup changed during read-back.'
     }
 
-    return Invoke-IdentityBoundUpgradeReconciliation `
+    $script:FailurePhase = 'upgrade-reconcile-native'
+    $reconciliationResult = Invoke-IdentityBoundUpgradeReconciliation `
         -Source $stagingPath `
         -Destination $script:DatabasePath `
         -Quarantine $quarantinePath `
         -ExpectedSourceSha256 $Record.MigratedSha256 `
         -ExpectedDestinationSha256 $Record.OriginalSha256
+    $script:FailurePhase = 'upgrade-reconcile-complete'
+    return $reconciliationResult
 }
 
 function Assert-NoUnboundUpgradeQuarantines {
@@ -3344,7 +3350,8 @@ catch {
     }
     if (-not $script:StatusWritten) {
         try {
-            Write-InstallerStatus ('ERROR:INSTALL_MIGRATION_EXCEPTION:{0}:{1}' -f $safeType, $compensation)
+            $safePhase = $script:FailurePhase -replace '[^A-Za-z0-9_.-]', '_'
+            Write-InstallerStatus ('ERROR:INSTALL_MIGRATION_EXCEPTION:{0}:{1}:{2}' -f $safeType, $compensation, $safePhase)
         }
         catch {
             # The installer will also reject a missing status file and report the
