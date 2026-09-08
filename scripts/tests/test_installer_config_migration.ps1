@@ -1273,9 +1273,22 @@ try {
             (Get-Content -LiteralPath $resumeStatus -Raw).Trim()
         }
         else { '<missing>' }
+        $classifyDatabase = {
+            param([string]$Path)
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'missing' }
+            $hash = Get-Sha256 $Path
+            if ($hash -ceq $publishCrashOriginalHash) { return 'OLD' }
+            if ($hash -ceq $publishCrashMigratedHash) { return 'NEW' }
+            return 'other'
+        }
+        $resumeTopology = 'F={0},S={1},Q={2},B={3}' -f `
+            (& $classifyDatabase $publishCrashDb), `
+            (& $classifyDatabase $publishCrashStaging), `
+            (& $classifyDatabase $publishCrashQuarantine), `
+            (Test-Path -LiteralPath (Join-Path $publishCrashData $publishCrashRecord.BACKUP_NAME) -PathType Leaf)
         Assert-True ($code -eq 0) (
             "upgrade $publishCrashPoint crash topology could not be reconciled " +
-            "(exit=$code status=$resumeStatusText)"
+            "(exit=$code status=$resumeStatusText topology=$resumeTopology)"
         )
         Assert-True (-not (Test-Path -LiteralPath $publishCrashQuarantine)) "upgrade $publishCrashPoint reconciliation left raw quarantine"
         if ($publishCrashPoint -ceq 'after-old-quarantine') {
