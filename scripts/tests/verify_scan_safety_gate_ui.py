@@ -17,18 +17,24 @@ def section(text: str, start: str, end: str | None = None) -> str:
 
 
 main = read("src/QtWidgetsApplication4.cpp")
+app_entry = read("src/main.cpp")
 main_header = read("include/QtWidgetsApplication4.h")
 dialog = read("src/ScanSafetyGateDialog.cpp")
 dialog_header = read("include/ScanSafetyGateDialog.h")
+measure_dialog = read("src/MeasureThenWeldDialog.cpp")
 config = read("src/PointCloudProcessingConfig.cpp")
 config_header = read("include/PointCloudProcessingConfig.h")
 service = read("src/MeasureThenWeldService.cpp")
 legacy_processing_dialog = read("src/LaserWeldFilterDialog.cpp")
+operation_lease = read("src/RobotOperationLease.cpp")
+recovery_store = read("src/WeldSafetyRecoveryStore.cpp")
+instance_guard = read("src/ApplicationInstanceGuard.cpp")
 project = read("QtWidgetsApplication4.vcxproj")
 filters = read("QtWidgetsApplication4.vcxproj.filters")
 
 quality_names = (
     "Coverage",
+    "SdkBaseIntegrity",
     "Continuity",
     "DenoiseRatio",
     "Residual",
@@ -115,11 +121,21 @@ legacy_save = section(
 )
 quality_widgets = {
     "Coverage": "m_pValidationCoverageCheck",
+    "SdkBaseIntegrity": "m_pValidationSdkBaseIntegrityCheck",
     "Continuity": "m_pValidationContinuityCheck",
     "DenoiseRatio": "m_pValidationDenoiseRatioCheck",
     "Residual": "m_pValidationResidualCheck",
     "KeyPoint": "m_pValidationKeyPointCheck",
     "Output": "m_pValidationOutputCheck",
+}
+quality_gate_widgets = {
+    "Coverage": "m_coverageGateCheck",
+    "SdkBaseIntegrity": "m_sdkBaseIntegrityGateCheck",
+    "Continuity": "m_continuityGateCheck",
+    "DenoiseRatio": "m_denoiseRatioGateCheck",
+    "Residual": "m_residualGateCheck",
+    "KeyPoint": "m_keyPointGateCheck",
+    "Output": "m_outputGateCheck",
 }
 fixed_validity_widgets = {
     "SegmentHardLimits": "m_pValidationSegmentHardLimitsCheck",
@@ -129,32 +145,47 @@ fixed_validity_widgets = {
     "FinalSourceBinding": "m_pValidationFinalSourceBindingCheck",
     "FinalSemanticIntegrity": "m_pValidationFinalSemanticIntegrityCheck",
 }
+fixed_validity_gate_widgets = {
+    "SegmentHardLimits": "m_segmentHardLimitsGateCheck",
+    "FinalTrajectoryStep": "m_finalTrajectoryStepGateCheck",
+    "FinalLengthBinding": "m_finalLengthBindingGateCheck",
+    "FinalTopologyBinding": "m_finalTopologyBindingGateCheck",
+    "FinalSourceBinding": "m_finalSourceBindingGateCheck",
+    "FinalSemanticIntegrity": "m_finalSemanticIntegrityGateCheck",
+}
 for name in quality_names:
     field = f"validation{name}Enabled"
     assert f"bool {field} = true;" in config_header
-    assert field not in defaults_body
-    assert field not in reload_body
-    assert field not in save_body
-    assert f'ReadBoolSetting("Validation/{name}Enabled"' in config
-    assert f'write("Validation/{name}Enabled"' in config
+    assert f"defaults.{field} = true;" in defaults_body
+    assert field in reload_body
+    assert field in save_body
+    assert f'"Validation/{name}Enabled"' in config
     widget = quality_widgets[name]
-    assert f"{widget}->setChecked(processingSettings.{field})" in legacy_load
-    assert f"processingSettings.{field} = {widget}->isChecked();" in legacy_save
-    assert widget not in dialog
+    assert field in legacy_load
+    assert field in legacy_save
+    assert widget in legacy_save
+    gate_widget = quality_gate_widgets[name]
+    assert gate_widget in dialog_header
+    assert gate_widget in reload_body
+    assert gate_widget in save_body
+    assert f"validation{name}EnabledCheckBox" in dialog
 
 for name, widget in fixed_validity_widgets.items():
     field = f"validation{name}Enabled"
     assert f"bool {field} = true;" in config_header
-    assert field not in defaults_body
-    assert field not in reload_body
-    assert field not in save_body
-    assert f'ReadBoolSetting("Validation/{name}Enabled"' in config
-    assert f'write("Validation/{name}Enabled"' in config
+    assert f"defaults.{field} = true;" in defaults_body
+    assert field in reload_body
+    assert field in save_body
+    assert f'"Validation/{name}Enabled"' in config
     assert (f"{widget}->setChecked(\n"
             f"        processingSettings.{field});") in legacy_load
     assert f"processingSettings.{field} =" in legacy_save
     assert widget in legacy_processing_dialog
-    assert widget not in dialog
+    gate_widget = fixed_validity_gate_widgets[name]
+    assert gate_widget in dialog_header
+    assert gate_widget in reload_body
+    assert gate_widget in save_body
+    assert f"validation{name}EnabledCheckBox" in dialog
 
 for name in safety_names:
     field = f"safetyGate{name}Enabled"
@@ -182,20 +213,78 @@ assert 'write("SafetyGates/BehaviorVersion"' in config
 
 ui_core_helper = section(
     dialog,
-    "bool ScanSafetyGateDialog::HasDisabledCoreSafetyGateUi() const",
+    "bool ScanSafetyGateDialog::HasDisabledConfigurableGateUi() const",
     "QString ScanSafetyGateDialog::DisabledGateDescription() const",
 )
 assert "m_robotNameBindingGateCheck" in ui_core_helper
+assert "m_coverageGateCheck" in ui_core_helper
+assert "m_finalSemanticIntegrityGateCheck" in ui_core_helper
 assert "维护审计状态" not in dialog
 assert "流程与机器人运动安全门禁" in dialog
 assert "测量参数 → 有效性检测" in dialog
-assert "不会改动有效性检测页配置" in dialog
-assert "流程与运动门禁全部开启" in dialog
+assert "25 项可配置门禁" in dialog
+assert "mandatorySystemInterlocksEnabledCheckBox" not in dialog
+assert "%1/10 系统互锁开启%2" in dialog
 assert "关闭后的实际影响" in dialog
-assert "%1/%2 门禁开启" in dialog
-assert "finalWeldPoseHardGateGroup" not in dialog
+assert "%1/%2 可配置门禁开启" in dialog
+assert "qualityGateTable" in dialog
+assert "mandatoryGateTable" in dialog
 assert "validationPolicyComboBox" not in dialog
 assert "validationMinFinitePointCountSpinBox" not in dialog
+assert "m_mandatoryGateChecks" in dialog_header
+assert "SystemInterlockPolicy systemInterlocks;" in config_header
+assert "RuntimeSystemInterlocks" in config_header
+assert "RuntimeSystemInterlocks" in app_entry
+assert "RuntimeSystemInterlocks" in operation_lease
+assert "settings.systemInterlocks.enabled[i]" in config
+assert "SystemInterlockPolicy::keys[i]" in config
+assert "g_runtimeSystemInterlocks = settings.systemInterlocks" in config
+assert "保存成功后立即应用" in dialog
+assert "进程单实例项需重启" in dialog
+assert 'ShowNonModalFlowResult(this, QMessageBox::Warning, "先测后焊",' in " ".join(measure_dialog.split())
+assert "monitor->hide();" in measure_dialog
+
+mandatory_interlocks = (
+    "mandatorySingleProcessInterlock",
+    "mandatoryDriverEndpointIdentityInterlock",
+    "mandatoryAccountSessionInterlock",
+    "mandatoryStateTransitionInterlock",
+    "mandatorySafeRetreatPendingInterlock",
+    "mandatoryVerifiedStopInterlock",
+    "mandatoryExclusiveOperationLeaseInterlock",
+    "mandatoryMotionLeaseOwnershipInterlock",
+    "mandatoryMotionTerminalInterlock",
+    "mandatoryRecoveryIdentityInterlock",
+)
+for object_name in mandatory_interlocks:
+    assert object_name in dialog
+
+mandatory_table = section(
+    dialog,
+    "void ScanSafetyGateDialog::BuildMandatoryGateTable()",
+    "void ScanSafetyGateDialog::ConnectChangeTracking()",
+)
+assert "check->setChecked(true);" in mandatory_table
+assert "check->setEnabled(false);" not in mandatory_table
+
+# Each row is editable and mapped to one persisted policy item.
+assert "ApplicationInstanceGuard::TryAcquire" in instance_guard
+for token in (
+    "PersistentEndpointIdentity",
+    "SetNewOperationsAllowed",
+    "AddNewOperationsBlock",
+    "g_unresolvedStops",
+    "g_activeOperations",
+    "MarkMotionStarted",
+    "motionCompletionPending",
+):
+    assert token in operation_lease
+assert "PersistentAdmissionBlocked" in recovery_store
+assert "AcquireExclusiveRecoveryBinding" in recovery_store
+assert "mandatorySafeRetreatPendingEnabled" not in config_header
+assert "check->setEnabled(false);" not in mandatory_table
+assert "m_mandatorySystemInterlocksCheck" not in mandatory_table
+assert "紧急 STOP" in dialog
 
 assert "QJsonObject BuildSafetyGateRecords" in service
 for name in safety_names:

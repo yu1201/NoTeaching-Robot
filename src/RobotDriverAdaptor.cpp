@@ -1,4 +1,5 @@
 #include "RobotDriverAdaptor.h"
+#include "RobotAxisUnitValidation.h"
 
 #include <algorithm>
 #include <chrono>
@@ -451,7 +452,7 @@ std::string RobotDriverAdaptor::MissingCapabilitiesText(std::uint64_t requiredMa
 {
     std::ostringstream stream;
     bool first = true;
-	for (unsigned int bitIndex = 0; bitIndex <= 26; ++bitIndex)
+	for (unsigned int bitIndex = 0; bitIndex <= RobotDriverCapabilityMaxBitIndex; ++bitIndex)
     {
 		const RobotDriverCapability capability = static_cast<RobotDriverCapability>(1ULL << bitIndex);
 		if ((requiredMask & RobotDriverCapabilityBit(capability)) == 0)
@@ -496,7 +497,7 @@ const char* RobotDriverAdaptor::CapabilityDisplayName(RobotDriverCapability capa
     case RobotDriverCapability::OfflineTrajectoryExport: return "离线轨迹导出";
     case RobotDriverCapability::ConnectionControl: return "连接控制";
     case RobotDriverCapability::AlarmReset: return "报警复位";
-    case RobotDriverCapability::ServoPowerControl: return "伺服上电";
+    case RobotDriverCapability::ServoPowerControl: return "伺服上下电";
     case RobotDriverCapability::ToolDataRead: return "工具数据读取";
     case RobotDriverCapability::IntegerRegister: return "整数寄存器";
     case RobotDriverCapability::TeachPendantSpeedControl: return "示教速度设置";
@@ -504,6 +505,12 @@ const char* RobotDriverAdaptor::CapabilityDisplayName(RobotDriverCapability capa
     case RobotDriverCapability::FtpFileTransfer: return "FTP文件传输";
     case RobotDriverCapability::HandEyeMatrixRead: return "机器人手眼矩阵读取";
     case RobotDriverCapability::HandEyeSupportProgramInstall: return "手眼辅助程序安装";
+    case RobotDriverCapability::CircularMotion: return "圆弧运动";
+    case RobotDriverCapability::RealRegister: return "实数寄存器";
+    case RobotDriverCapability::StructuredControllerStatus: return "结构化控制器状态";
+    case RobotDriverCapability::ControllerKinematicsRead: return "控制器运动学读取";
+    case RobotDriverCapability::ControllerKinematicsCalculate: return "控制器正逆解计算（不运动）";
+    case RobotDriverCapability::CalibrationAssetDiscovery: return "标定资产只读发现";
     case RobotDriverCapability::None: return "无";
     default: return "未知适配能力";
     }
@@ -512,6 +519,52 @@ const char* RobotDriverAdaptor::CapabilityDisplayName(RobotDriverCapability capa
 bool RobotDriverAdaptor::InitRobotDriver(std::string strUnitName)
 {
     return false;
+}
+
+bool RobotDriverAdaptor::RefreshKinematicsFromController(
+    RobotKinematicsValidationResult& result)
+{
+    result = {};
+    SetLastRobotError("当前机器人品牌未实现控制器运动学资产读取。");
+    return false;
+}
+
+bool RobotDriverAdaptor::InstallValidatedKinematicsModel(
+    const T_KINEMATICS& kinematics,
+    const T_AXISUNIT& axisUnit,
+    const T_AXISLIMITANGLE& axisLimits,
+    std::string* error)
+{
+    const double* dh = reinterpret_cast<const double*>(&kinematics);
+    for (int index = 0; index < 24; ++index)
+    {
+        if (!std::isfinite(dh[index]))
+        {
+            if (error != nullptr) { *error = "运动学模型包含NaN或无穷值。"; }
+            return false;
+        }
+    }
+    const double units[6] = {
+        axisUnit.dSPulseUnit, axisUnit.dLPulseUnit, axisUnit.dUPulseUnit,
+        axisUnit.dRPulseUnit, axisUnit.dBPulseUnit, axisUnit.dTPulseUnit
+    };
+    for (int axis = 0; axis < 6; ++axis)
+    {
+        if (!std::isfinite(units[axis]) || std::abs(units[axis]) < 1e-15
+            || !std::isfinite(axisLimits.GetMinAngleByIndex(axis))
+            || !std::isfinite(axisLimits.GetMaxAngleByIndex(axis))
+            || axisLimits.GetMinAngleByIndex(axis) >= axisLimits.GetMaxAngleByIndex(axis))
+        {
+            if (error != nullptr) { *error = "运动学轴单位或关节限位无效。"; }
+            return false;
+        }
+    }
+    m_tKinematics = kinematics;
+    m_tAxisUnit = axisUnit;
+    m_tAxisLimitAngle = axisLimits;
+    CreateKinematicsChain();
+    if (error != nullptr) { error->clear(); }
+    return true;
 }
 // ===================== 核心函数：创建 FANUC 6 轴机器人链 =====================
 void RobotDriverAdaptor::CreateKinematicsChain()
@@ -948,26 +1001,20 @@ void RobotDriverAdaptor::LoadRobotKinematicsPara(std::string strRobotName, T_KIN
     opini.ReadString("dD6", &tKinematics.dD6);
     opini.ReadString("dTH6", &tKinematics.dTH6);
 
-    double dAngle = 0;
-    double dPulse = 0;
-    opini.ReadString("dSAngle", &dAngle);
-    opini.ReadString("dSPulse", &dPulse);
-    tAxisUnit.dSPulseUnit = dAngle / dPulse;
-    opini.ReadString("dLAngle", &dAngle);
-    opini.ReadString("dLPulse", &dPulse);
-    tAxisUnit.dLPulseUnit = dAngle / dPulse;
-    opini.ReadString("dUAngle", &dAngle);
-    opini.ReadString("dUPulse", &dPulse);
-    tAxisUnit.dUPulseUnit = dAngle / dPulse;
-    opini.ReadString("dRAngle", &dAngle);
-    opini.ReadString("dRPulse", &dPulse);
-    tAxisUnit.dRPulseUnit = dAngle / dPulse;
-    opini.ReadString("dBAngle", &dAngle);
-    opini.ReadString("dBPulse", &dPulse);
-    tAxisUnit.dBPulseUnit = dAngle / dPulse;
-    opini.ReadString("dTAngle", &dAngle);
-    opini.ReadString("dTPulse", &dPulse);
-    tAxisUnit.dTPulseUnit = dAngle / dPulse;
+    const auto readAxisUnit = [&opini](const char* angleKey, const char* pulseKey)
+    {
+        double angle = 0.0;
+        double pulse = 0.0;
+        const bool angleRead = opini.ReadString(false, angleKey, &angle) > 0;
+        const bool pulseRead = opini.ReadString(false, pulseKey, &pulse) > 0;
+        return RobotAxisUnitValidation::FromCalibration(angleRead, angle, pulseRead, pulse);
+    };
+    tAxisUnit.dSPulseUnit = readAxisUnit("dSAngle", "dSPulse");
+    tAxisUnit.dLPulseUnit = readAxisUnit("dLAngle", "dLPulse");
+    tAxisUnit.dUPulseUnit = readAxisUnit("dUAngle", "dUPulse");
+    tAxisUnit.dRPulseUnit = readAxisUnit("dRAngle", "dRPulse");
+    tAxisUnit.dBPulseUnit = readAxisUnit("dBAngle", "dBPulse");
+    tAxisUnit.dTPulseUnit = readAxisUnit("dTAngle", "dTPulse");
 
     auto readLimitPair = [&opini](const char* maxKey, const char* minKey,
         const char* altMaxKey, const char* altMinKey,
@@ -1033,6 +1080,11 @@ bool RobotDriverAdaptor::cleanAlarm()
 }
 
 bool RobotDriverAdaptor::ServoOn()
+{
+    return false;
+}
+
+bool RobotDriverAdaptor::ServoOff()
 {
     return false;
 }
@@ -1281,7 +1333,10 @@ void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
 
             snapshot.pose = GetCurrentPosPassive(&poseRobotMs, &posePcRecvMs);
             snapshot.pulse = GetCurrentPulsePassive(&pulseRobotMs, &pulsePcRecvMs);
-            snapshot.done = CheckDonePassive(&doneRobotMs, &donePcRecvMs);
+            snapshot.motion = ReadMotionStatusPassive(&doneRobotMs, &donePcRecvMs);
+            snapshot.done = (snapshot.motion.state == RobotMotionState::Idle
+                || snapshot.motion.state == RobotMotionState::Completed) ? 1
+                : (snapshot.motion.state == RobotMotionState::Unknown ? -1 : 0);
 			const long long validationNowMs = RobotDriverSteadyMs();
 
 			// 位姿样本的两条时间轴必须来自同一次位姿读取。done或本机now只能描述
@@ -1369,6 +1424,15 @@ bool RobotDriverAdaptor::SetIntVar(const char* name, int value, int score)
 }
 
 bool RobotDriverAdaptor::SetRealVar(int nIndex, double value, const char* cStrPreFix, int score)
+{
+    (void)nIndex;
+    (void)value;
+    (void)cStrPreFix;
+    (void)score;
+    return false;
+}
+
+bool RobotDriverAdaptor::TryGetRealVar(int nIndex, double& value, const char* cStrPreFix, int score)
 {
     (void)nIndex;
     (void)value;

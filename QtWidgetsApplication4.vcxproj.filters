@@ -130,6 +130,18 @@
     <ClCompile Include="src\RobotDriverAdaptor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\RobotCalibrationService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotKinematicsModel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\InovanceCalibration.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotCalibrationDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\RobotFtpFileTransfer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -402,6 +414,21 @@
     <ClInclude Include="include\InovanceRobotDriver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\InovanceWeldCalibration.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotCalibrationDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotCalibrationService.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotCalibrationTypes.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotKinematicsModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\FanucTpContentIdentity.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -474,6 +501,48 @@
     <ClInclude Include="include\RobotDriverAdaptor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\RobotAdaptorAcceptanceStore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAdaptorAcceptanceLayout.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAdaptorAcceptancePlan.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAxisUnitValidation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAcceptanceJointMotion.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\InovanceKinematicsSession.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\MeasureThenWeldCapabilityPolicy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAcceptanceAlarmPreparation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotRegisterRoundTrip.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotModePreparationTest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotModePreparationStore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\InovanceModeSequence.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\InovanceConnectionPreparation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\InovanceUserLogin.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\RobotFtpFileTransfer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -499,6 +568,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotOperationLease.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\SystemInterlockPolicy.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\ApplicationInstanceGuard.h">

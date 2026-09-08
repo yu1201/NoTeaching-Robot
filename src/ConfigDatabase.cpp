@@ -519,6 +519,14 @@ bool IsDatabaseNativeScopeIdentity(
     return IsDatabaseNativeIdentityPart(scopeId, false, false, true);
 }
 
+bool IsDatabaseNativeSettingKey(const QString& moduleName, const QString& keyName)
+{
+    // 现场点云配置在同一模块内使用 General/...、Validation/... 等逻辑分组键。
+    // 保留这类既有身份及其加密 purpose，不把它们当作文件路径或搬迁配置值。
+    return IsDatabaseNativeIdentityPart(keyName,
+        NormalizeSection(moduleName) == QStringLiteral("PointCloudProcessing"));
+}
+
 bool IsDatabaseNativeSettingIdentity(
     const QString& scopeType,
     const QString& scopeId,
@@ -526,7 +534,7 @@ bool IsDatabaseNativeSettingIdentity(
     const QString& keyName)
 {
     return IsDatabaseNativeScopeIdentity(scopeType, scopeId, moduleName)
-        && IsDatabaseNativeIdentityPart(keyName, false);
+        && IsDatabaseNativeSettingKey(moduleName, keyName);
 }
 
 QString ProtectionPurpose(
@@ -3325,7 +3333,7 @@ bool ConfigDatabase::WriteScopedSettings(
     }
     for (auto it = values.cbegin(); it != values.cend(); ++it)
     {
-        if (!IsDatabaseNativeIdentityPart(it.key(), false))
+        if (!IsDatabaseNativeSettingKey(moduleName, it.key()))
         {
             return false;
         }

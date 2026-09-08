@@ -3,6 +3,7 @@
 #include <QString>
 #include "WeldResumePlanner.h"
 #include "RobotRecoverySafetyPolicy.h"
+#include "SystemInterlockPolicy.h"
 
 #include <cstdint>
 #include <memory>
@@ -72,6 +73,9 @@ public:
         bool allowed,
         const QString& blockedReason = QString());
     static bool NewOperationsAllowed();
+#if defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    static void SetSystemInterlockForTest(SystemInterlock gate, bool enabled);
+#endif
     // 临时阻止新操作的独立 token。释放 token 只移除自己的阻塞，不会把账号会话等
     // 其他 owner 设置的全局禁止误改为允许。
     using NewOperationBlockToken = std::uint64_t;

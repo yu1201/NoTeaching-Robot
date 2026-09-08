@@ -23,6 +23,9 @@ struct RobotDriverSetupProfile
     const char* remoteProgramRoot = "";
     bool appendProjectSrDirectory = false;
     const char* localJobSubdirectory = "";
+    // Offline configuration metadata; runtime sampling still checks the adaptor capability.
+    bool supportsRobotTimestamp = false;
+    bool usesStepTimestampInterface = false;
 };
 
 struct RobotDriverRegistration

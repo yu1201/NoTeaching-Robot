@@ -3,6 +3,8 @@
 #include "ConfigDatabase.h"
 #include "ConfigSection.h"
 #include "RobotPoseTransform.h"
+#include "RobotDriverAdaptor.h"
+#include "RobotDataHelper.h"
 
 #include <algorithm>
 #include <cmath>
@@ -346,6 +348,65 @@ bool LoadExistingValidatedHandEyeMatrixConfig(
             }
             return false;
         }
+    }
+    return true;
+}
+
+bool ValidateControllerBoundHandEyeMatrix(
+    const QString& robotName,
+    const QString& cameraSection,
+    const HandEyeMatrixConfig& config,
+    RobotDriverAdaptor* driver,
+    QString* error)
+{
+    const ConfigLocation location = GetHandEyeMatrixLocation(robotName, cameraSection);
+    const QMap<QString, QString> metadata = ConfigDatabase::ReadScopedSettings(
+        location.scopeType, location.scopeId, location.module + "/Base");
+    const QString sourceFingerprint = metadata.value("ControllerSourceSha256").trimmed();
+    if (sourceFingerprint.isEmpty())
+    {
+        return true; // Existing local calibration, not a controller import.
+    }
+    auto fail = [error](const QString& detail)
+        {
+            if (error != nullptr) { *error = detail; }
+            return false;
+        };
+    if (driver == nullptr || !driver->IsConnected()
+        || QString::fromStdString(driver->RobotName()) != robotName)
+    {
+        return fail("控制器导入矩阵需要连接其绑定机器人后才能使用。");
+    }
+    bool sensorOk = false;
+    bool toolOk = false;
+    RobotControllerHandEye expected;
+    expected.sensorIndex = metadata.value("ControllerSensor").toInt(&sensorOk);
+    expected.toolIndex = metadata.value("ControllerTool").toInt(&toolOk);
+    expected.cameraAddress = metadata.value("ControllerCameraIP").toStdString();
+    expected.source = metadata.value("ControllerSource").toStdString();
+    expected.sourceFingerprint = sourceFingerprint.toStdString();
+    expected.controllerIdentity = metadata.value("ControllerIdentity").toStdString();
+    expected.toolFingerprint = metadata.value("ControllerToolSha256").toStdString();
+    expected.cameraToTool.topLeftCorner<3, 3>() = config.rotation;
+    expected.cameraToTool.topRightCorner<3, 1>() = config.translation;
+    if (!sensorOk || !toolOk || expected.sensorIndex < 0 || expected.toolIndex < 0
+        || expected.cameraAddress.empty() || expected.source.empty()
+        || expected.controllerIdentity.empty() || expected.toolFingerprint.empty()
+        || metadata.value("ControllerFrame") != "camera-to-tool-tcp")
+    {
+        return fail("控制器导入矩阵的传感器/工具/来源/参考系绑定不完整，禁止使用。");
+    }
+    RobotDataHelper::CameraParamData camera;
+    QString cameraError;
+    if (!RobotDataHelper::LoadCameraParam(robotName, cameraSection, camera, &cameraError)
+        || camera.deviceAddress.trimmed().toStdString() != expected.cameraAddress)
+    {
+        return fail("当前相机IP与控制器标定相机绑定不一致：" + cameraError);
+    }
+    std::string validationError;
+    if (!driver->ValidateControllerHandEyeContext(expected, validationError))
+    {
+        return fail("控制器手眼标定来源绑定失效：" + QString::fromStdString(validationError));
     }
     return true;
 }

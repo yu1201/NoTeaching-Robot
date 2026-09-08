@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <deque>
 #include <filesystem>
 #include <set>
 #include <utility>
@@ -67,7 +68,8 @@ std::size_t CountProgramUnits(
         {
             continue;
         }
-        const std::string normalizedName = Lower(entry.name);
+        const std::string normalizedName = Lower(
+            entry.path.empty() ? entry.name : entry.path);
         const std::size_t dot = normalizedName.find_last_of('.');
         if (dot == std::string::npos || dot == 0 || dot + 1 >= normalizedName.size())
         {
@@ -243,14 +245,56 @@ bool RobotFtpFileTransfer::QueryProgramInventory(
     {
         return false;
     }
-    std::vector<FtpRemoteFileInfo> entries;
-    if (!m_client->listFiles(result.remoteDirectory, entries, nullptr, timeoutMs))
+    // 品牌默认目录通常只是工程根目录（例如汇川 /TeachProgram/cs/Task0）。
+    // 库存必须有限递归读取，否则根目录只有文件夹时会误报“程序=0”。
+    constexpr int kMaximumDepth = 4;
+    constexpr std::size_t kMaximumDirectories = 128;
+    constexpr std::size_t kMaximumTotalEntries = 2000;
+    const std::size_t maximumPerDirectory = static_cast<std::size_t>(
+        std::clamp(timeoutMs, 1, 10000));
+    std::deque<std::pair<std::string, int>> pending;
+    std::set<std::string> visitedDirectories;
+    std::vector<FtpRemoteFileInfo> allEntries;
+    pending.emplace_back(result.remoteDirectory, 0);
+    while (!pending.empty())
     {
-        SetError("机器人FTP程序库存读取失败：" + result.remoteDirectory);
-        return false;
+        const auto [directory, depth] = pending.front();
+        pending.pop_front();
+        if (!visitedDirectories.insert(Lower(directory)).second)
+        {
+            continue;
+        }
+        if (visitedDirectories.size() > kMaximumDirectories)
+        {
+            SetError("机器人FTP程序库存目录超过128个，已停止有限递归读取。");
+            return false;
+        }
+        std::vector<FtpRemoteFileInfo> entries;
+        if (!m_client->listFiles(directory, entries, nullptr, maximumPerDirectory))
+        {
+            SetError("机器人FTP程序库存读取失败：" + directory);
+            return false;
+        }
+        if (allEntries.size() + entries.size() > kMaximumTotalEntries)
+        {
+            SetError("机器人FTP程序库存条目超过2000个，已停止有限递归读取。");
+            return false;
+        }
+        allEntries.insert(allEntries.end(), entries.cbegin(), entries.cend());
+        if (depth >= kMaximumDepth)
+        {
+            continue;
+        }
+        for (const FtpRemoteFileInfo& entry : entries)
+        {
+            if (entry.isDirectory && !entry.path.empty())
+            {
+                pending.emplace_back(entry.path, depth + 1);
+            }
+        }
     }
-    result.entryCount = entries.size();
-    result.programCount = CountProgramUnits(entries, m_inventoryProgramExtensions);
+    result.entryCount = allEntries.size();
+    result.programCount = CountProgramUnits(allEntries, m_inventoryProgramExtensions);
     SetError({});
     return true;
 }

@@ -194,8 +194,15 @@ def main() -> int:
     first_motion = run_cycle.find('allowAction("扫描下枪安全位置")')
     require(0 <= custom_validation < first_motion,
             "custom trajectory is not fully validated before the first safe-position motion")
+    capability_policy = read("include/MeasureThenWeldCapabilityPolicy.h")
+    require("continuousTrajectory ? static_cast<std::uint64_t>(Capability::ContinuousTrajectory)" in capability_policy,
+            "shared scan policy must require continuous capability for a custom trajectory")
+    require("param.bUseComputedScanSafe, scanTrajectory != nullptr" in run_cycle,
+            "scan preflight does not bind capability requirements to the configured route and trajectory")
+    require(0 <= run_cycle.find("RequireRobotCapabilityMask(") < first_motion,
+            "shared scan capability policy is not enforced before the first motion")
     for token in (
-        "RobotDriverCapability::ContinuousTrajectory",
+        "MeasureThenWeldCapabilityPolicy::ScanMask<RobotDriverCapability>",
         "scanTrajectory->size() < 2",
         "IsFinitePose((*scanTrajectory)[index])",
         "endpointMatches(scanTrajectory->front(), param.tStartPos)",

@@ -55,6 +55,20 @@ void SetTableItem(QTableWidget* table, int row, int column, const QString& text)
 PointCloudProcessingConfig::Settings SafetyGateDefaults()
 {
     PointCloudProcessingConfig::Settings defaults;
+    defaults.validationCoverageEnabled = true;
+    defaults.validationSdkBaseIntegrityEnabled = true;
+    defaults.validationContinuityEnabled = true;
+    defaults.validationDenoiseRatioEnabled = true;
+    defaults.validationResidualEnabled = true;
+    defaults.validationKeyPointEnabled = true;
+    defaults.validationOutputEnabled = true;
+    defaults.validationSegmentHardLimitsEnabled = true;
+    defaults.validationFinalTrajectoryStepEnabled = true;
+    defaults.validationFinalLengthBindingEnabled = true;
+    defaults.validationFinalTopologyBindingEnabled = true;
+    defaults.validationFinalSourceBindingEnabled = true;
+    defaults.validationFinalSemanticIntegrityEnabled = true;
+    defaults.systemInterlocks = SystemInterlockPolicy{};
     defaults.safetyGateProofIntegrityEnabled = true;
     defaults.safetyGateProductionPurposeEnabled = true;
     defaults.safetyGateRobotNameBindingEnabled = true;
@@ -202,9 +216,11 @@ void ScanSafetyGateDialog::BuildUi()
     contentLayout->addWidget(heading);
 
     auto* intro = new QLabel(QStringLiteral(
-        "本页只管理流程身份、证明链和机器人运动前复核门禁。"
-        "扫描结果及焊道有效性统一在“测量参数 → 有效性检测”中查看和配置；"
-        "只有通过管理员身份复核后才能保存或恢复本页开关。"));
+        "本页统一列出 25 项可配置门禁和 10 项可独立开启/关闭的系统互锁。"
+        "点云、焊道和最终轨迹的数值门限仍在“测量参数 → 有效性检测”中编辑；"
+        "本页可统一启停它们的拦截开关。只有通过管理员身份复核后才能保存可配置项。"
+        "全局互锁关闭时，普通新机器人操作不再受这 10 类条件的统一准入拦截；"
+        "紧急 STOP 和专用恢复流程自身的必要校验仍保留。"));
     intro->setObjectName(QStringLiteral("scanSafetyGateIntroLabel"));
     intro->setWordWrap(true);
     contentLayout->addWidget(intro);
@@ -215,9 +231,9 @@ void ScanSafetyGateDialog::BuildUi()
     auto* summaryLayout = new QGridLayout(summaryCard);
     summaryLayout->setContentsMargins(16, 14, 16, 14);
     summaryLayout->setHorizontalSpacing(12);
-    summaryLayout->addWidget(MakeFieldLabel(QStringLiteral("流程门禁记录")), 0, 0);
+    summaryLayout->addWidget(MakeFieldLabel(QStringLiteral("可配置门禁")), 0, 0);
     summaryLayout->addWidget(MakeFieldLabel(QStringLiteral("本页职责")), 0, 1);
-    summaryLayout->addWidget(MakeFieldLabel(QStringLiteral("运动前复核状态")), 0, 2);
+    summaryLayout->addWidget(MakeFieldLabel(QStringLiteral("系统互锁")), 0, 2);
     m_profileSummaryLabel = MakeSummaryValue(QStringLiteral("validationProfileSummaryLabel"));
     m_policySummaryLabel = MakeSummaryValue(QStringLiteral("validationPolicySummaryLabel"));
     m_proofSummaryLabel = MakeSummaryValue(QStringLiteral("validationProofSummaryLabel"));
@@ -238,6 +254,17 @@ void ScanSafetyGateDialog::BuildUi()
         "color:#ffd878; padding:10px 12px; font-weight:600;"));
     contentLayout->addWidget(m_changeWarningLabel);
 
+    auto* qualityGateGroup =
+        new QGroupBox(QStringLiteral("点云、焊道与最终轨迹有效性门禁（管理员可配置）"));
+    qualityGateGroup->setObjectName(QStringLiteral("qualityGateGroup"));
+    auto* qualityGateLayout = new QVBoxLayout(qualityGateGroup);
+    qualityGateLayout->setContentsMargins(12, 18, 12, 12);
+    m_qualityGateTable = new QTableWidget();
+    m_qualityGateTable->setObjectName(QStringLiteral("qualityGateTable"));
+    qualityGateLayout->addWidget(m_qualityGateTable);
+    BuildQualityGateTable();
+    contentLayout->addWidget(qualityGateGroup);
+
     auto* hardGateGroup =
         new QGroupBox(QStringLiteral("流程与机器人运动安全门禁（管理员可配置）"));
     hardGateGroup->setObjectName(QStringLiteral("systemHardGateGroup"));
@@ -249,13 +276,31 @@ void ScanSafetyGateDialog::BuildUi()
     BuildHardGateTable();
     contentLayout->addWidget(hardGateGroup);
 
+    auto* mandatoryGateGroup =
+        new QGroupBox(QStringLiteral("全局系统互锁（每项独立开启/关闭）"));
+    mandatoryGateGroup->setObjectName(QStringLiteral("mandatoryGateGroup"));
+    auto* mandatoryGateLayout = new QVBoxLayout(mandatoryGateGroup);
+    mandatoryGateLayout->setContentsMargins(12, 18, 12, 12);
+    auto* mandatoryModeHint = new QLabel(QStringLiteral(
+        "每项开关只控制本行准入条件；保存成功后立即应用。机器人控制进程单实例项在下次启动时生效。"
+        "紧急 STOP 和当前流程取消仍执行；缺失驱动、无效恢复轨迹等基础执行条件仍检查。"));
+    mandatoryModeHint->setObjectName(QStringLiteral("mandatorySystemInterlockModeHint"));
+    mandatoryModeHint->setWordWrap(true);
+    mandatoryGateLayout->addWidget(mandatoryModeHint);
+    m_mandatoryGateTable = new QTableWidget();
+    m_mandatoryGateTable->setObjectName(QStringLiteral("mandatoryGateTable"));
+    mandatoryGateLayout->addWidget(m_mandatoryGateTable);
+    BuildMandatoryGateTable();
+    contentLayout->addWidget(mandatoryGateGroup);
+
     auto* actionCard = new QFrame();
     actionCard->setObjectName(QStringLiteral("scanSafetyGateActionCard"));
     actionCard->setProperty("card", true);
     auto* actionLayout = new QHBoxLayout(actionCard);
     actionLayout->setContentsMargins(14, 12, 14, 12);
     auto* actionHint = new QLabel(QStringLiteral(
-        "保存和载入流程/运动安全默认记录均会重新验证管理员身份。"));
+        "保存和载入安全默认值均会重新验证管理员身份；"
+        "系统互锁保存成功后立即应用，机器人控制进程单实例项需重启生效。"));
     actionHint->setWordWrap(true);
     actionLayout->addWidget(actionHint, 1);
     m_reloadButton = new QPushButton(QStringLiteral("重新加载"));
@@ -279,6 +324,147 @@ void ScanSafetyGateDialog::BuildUi()
     });
     connect(m_saveButton, &QPushButton::clicked, this, [this]() { Save(); });
     ConnectChangeTracking();
+}
+
+void ScanSafetyGateDialog::BuildQualityGateTable()
+{
+    struct QualityGateRow
+    {
+        const char* objectName;
+        const char* name;
+        const char* validation;
+        const char* disabledEffect;
+        QCheckBox** check;
+    };
+
+    const QualityGateRow rows[] = {
+        {
+            "validationCoverageEnabledCheckBox",
+            "点云覆盖与有限点",
+            "检查有限点数和扫描向投影跨度。数值门限在有效性检测页编辑。",
+            "关闭后不因有限点过少或投影跨度不足拒绝点云。",
+            &m_coverageGateCheck
+        },
+        {
+            "validationSdkBaseIntegrityEnabledCheckBox",
+            "SDKBase 完整点云覆盖",
+            "方法②在平滑、截断和拟合前比较 SDKBase 焊道与完整点云的扫描向覆盖和端点偏差。",
+            "关闭后 SDKBase 局部焊道不再因覆盖不足或端点偏差过大被拦截。",
+            &m_sdkBaseIntegrityGateCheck
+        },
+        {
+            "validationContinuityEnabledCheckBox",
+            "扫描向连续性",
+            "检查扫描站位覆盖率和最长连续段比例。",
+            "关闭后不因扫描断层、空洞或最长连续段不足拒绝。",
+            &m_continuityGateCheck
+        },
+        {
+            "validationDenoiseRatioEnabledCheckBox",
+            "去噪拒绝比例",
+            "检查滤除点占输入点的比例是否超过设定上限。",
+            "关闭后大比例点被去除也不再单独导致质量拒绝。",
+            &m_denoiseRatioGateCheck
+        },
+        {
+            "validationResidualEnabledCheckBox",
+            "拟合残差",
+            "检查中位残差、95 分位残差和残差内点率。",
+            "关闭后不因拟合残差过大或内点率不足拒绝。",
+            &m_residualGateCheck
+        },
+        {
+            "validationKeyPointEnabledCheckBox",
+            "拐点与分段充分性",
+            "检查特征点、拐点数量和最小分段长度。",
+            "关闭后不因特征点/拐点过少或分段过短拒绝。",
+            &m_keyPointGateCheck
+        },
+        {
+            "validationOutputEnabledCheckBox",
+            "焊道输出数量与长度",
+            "检查输出点数以及输出长度相对输入的保留比例。",
+            "关闭后输出点过少或焊道长度损失不再单独导致拒绝。",
+            &m_outputGateCheck
+        },
+        {
+            "validationSegmentHardLimitsEnabledCheckBox",
+            "焊道最短分段",
+            "检查普通段、搭接段和端点相邻段的硬性最小长度。",
+            "关闭后过短焊道分段不再被最短段门限拦截。",
+            &m_segmentHardLimitsGateCheck
+        },
+        {
+            "validationFinalTrajectoryStepEnabledCheckBox",
+            "最终轨迹相邻步长",
+            "检查最终执行点的位置步长、控制器欧拉差和物理姿态差。",
+            "关闭后相邻位置或姿态跳变不再由该门禁拦截。",
+            &m_finalTrajectoryStepGateCheck
+        },
+        {
+            "validationFinalLengthBindingEnabledCheckBox",
+            "最终轨迹长度绑定",
+            "检查补偿后最终轨迹长度相对补偿前轨迹的比例。",
+            "关闭后不因最终轨迹长度异常缩短或拉长拒绝。",
+            &m_finalLengthBindingGateCheck
+        },
+        {
+            "validationFinalTopologyBindingEnabledCheckBox",
+            "最终轨迹拓扑绑定",
+            "检查最终轨迹匹配弧长、来源唯一覆盖和来源弧长跨度。",
+            "关闭后不再拦截拓扑映射覆盖不足或来源重复。",
+            &m_finalTopologyBindingGateCheck
+        },
+        {
+            "validationFinalSourceBindingEnabledCheckBox",
+            "最终轨迹来源位姿绑定",
+            "检查最终点相对来源点的位移和物理姿态变化。",
+            "关闭后不再因最终点偏离来源位姿过大拒绝。",
+            &m_finalSourceBindingGateCheck
+        },
+        {
+            "validationFinalSemanticIntegrityEnabledCheckBox",
+            "最终文件结构与语义完整性",
+            "检查索引连续、标签/角度语义、起终点/拐点/搭接语义和生成文件字节摘要。",
+            "关闭后不再执行最终文件的结构与语义一致性拦截。",
+            &m_finalSemanticIntegrityGateCheck
+        }
+    };
+
+    m_qualityGateTable->setColumnCount(4);
+    m_qualityGateTable->setHorizontalHeaderLabels({
+        QStringLiteral("开关"),
+        QStringLiteral("有效性门禁"),
+        QStringLiteral("检查内容"),
+        QStringLiteral("关闭后的实际影响")
+    });
+    m_qualityGateTable->setRowCount(static_cast<int>(std::size(rows)));
+    m_qualityGateTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_qualityGateTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_qualityGateTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_qualityGateTable->setAlternatingRowColors(true);
+    m_qualityGateTable->setWordWrap(true);
+    m_qualityGateTable->verticalHeader()->setVisible(false);
+    m_qualityGateTable->horizontalHeader()->setStretchLastSection(true);
+    m_qualityGateTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_qualityGateTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_qualityGateTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    m_qualityGateTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+
+    for (int row = 0; row < static_cast<int>(std::size(rows)); ++row)
+    {
+        auto* check = new QCheckBox(QStringLiteral("开启"));
+        check->setObjectName(QString::fromLatin1(rows[row].objectName));
+        check->setChecked(true);
+        check->setToolTip(QString::fromUtf8(rows[row].disabledEffect));
+        *rows[row].check = check;
+        m_qualityGateTable->setCellWidget(row, 0, check);
+        SetTableItem(m_qualityGateTable, row, 1, QString::fromUtf8(rows[row].name));
+        SetTableItem(m_qualityGateTable, row, 2, QString::fromUtf8(rows[row].validation));
+        SetTableItem(m_qualityGateTable, row, 3, QString::fromUtf8(rows[row].disabledEffect));
+    }
+    m_qualityGateTable->resizeRowsToContents();
+    m_qualityGateTable->setMinimumHeight(760);
 }
 
 void ScanSafetyGateDialog::BuildHardGateTable()
@@ -415,6 +601,117 @@ void ScanSafetyGateDialog::BuildHardGateTable()
     m_hardGateTable->setMinimumHeight(680);
 }
 
+void ScanSafetyGateDialog::BuildMandatoryGateTable()
+{
+    struct MandatoryGateRow
+    {
+        const char* objectName;
+        const char* name;
+        const char* blockedCondition;
+        const char* recovery;
+    };
+
+    // 这些条目覆盖 ApplicationInstanceGuard 和 RobotOperationLease 的全局准入链，
+    // 以及 WeldSafetyRecoveryStore 的持久恢复链；行序与 SystemInterlock 一一对应。
+    const MandatoryGateRow rows[] = {
+        {
+            "mandatorySingleProcessInterlock",
+            "机器人控制进程单实例",
+            "同一数据根目录已有另一个可构造机器人驱动的进程。",
+            "关闭重复进程，保留唯一控制实例。"
+        },
+        {
+            "mandatoryDriverEndpointIdentityInterlock",
+            "机器人持久端点准入",
+            "TCP 主机/端口无法形成可持久的物理端点身份。关闭后允许进程内驱动身份；驱动仍必须存在。",
+            "修正当前控制单元驱动、IP 和端口配置后重试。"
+        },
+        {
+            "mandatoryAccountSessionInterlock",
+            "账号会话准入",
+            "交互式账号未登录、会话失效或权限身份未通过。",
+            "恢复有效登录会话并通过相应权限复核。"
+        },
+        {
+            "mandatoryStateTransitionInterlock",
+            "系统切换期间新操作闭锁",
+            "系统正在更新、登出、重载配置或其他需要冻结新机器人操作的状态过渡。",
+            "等待所有切换 owner 完成并释放闭锁 token。"
+        },
+        {
+            "mandatorySafeRetreatPendingInterlock",
+            "焊后安全回撤持久闭锁",
+            "SafeRetreatPending=1，或 RecordV2/marker/端点索引缺失、损坏、不唯一；旧焊接程序终态或收枪到位尚未验证。",
+            "仅使用“焊后安全回撤恢复”：先验证终止旧程序，再到绑定安全位并回读确认。"
+        },
+        {
+            "mandatoryVerifiedStopInterlock",
+            "STOP 后新流程准入",
+            "上次停机尚未回读确认。关闭后允许取得新流程租约；当前流程 STOP/取消仍然执行。",
+            "执行安全 STOP/终止并取得控制器稳定停止回读后解锁。"
+        },
+        {
+            "mandatoryExclusiveOperationLeaseInterlock",
+            "同机器人/同物理端点单操作租约",
+            "同一驱动或同一规范化 TCP 端点已有高层操作持有租约。",
+            "等待当前 owner 完成收尾并释放租约；不得通过改名或改配置重复取得。"
+        },
+        {
+            "mandatoryMotionLeaseOwnershipInterlock",
+            "运动命令租约准入",
+            "运动命令未持有对应硬件操作租约。此项不关闭当前流程取消/STOP，也不关闭独立的运动终态检查。",
+            "由合法高层流程重新取得租约；STOP 未确认前不发新运动。"
+        },
+        {
+            "mandatoryMotionTerminalInterlock",
+            "上一条运动稳定终态",
+            "上一条已下发运动尚未得到完成或真实终止的稳定回读。",
+            "等待完成回读；异常时走可验证中止，未确认前不开始下一条运动。"
+        },
+        {
+            "mandatoryRecoveryIdentityInterlock",
+            "恢复记录身份与独占绑定",
+            "断点续焊/安全回撤的 checkpoint、端点、程序、轨迹、SHA256 或完整记录在确认后发生变化，或同端点存在第二恢复者。",
+            "开启时重读完整记录并独占绑定；关闭时使用已确认快照。恢复所需的基础轨迹、程序终止和原子状态迁移仍检查。"
+        }
+    };
+
+    m_mandatoryGateTable->setColumnCount(4);
+    m_mandatoryGateTable->setHorizontalHeaderLabels({
+        QStringLiteral("状态"),
+        QStringLiteral("强制系统互锁"),
+        QStringLiteral("实际拦截条件"),
+        QStringLiteral("解除/恢复方式")
+    });
+    m_mandatoryGateTable->setRowCount(static_cast<int>(std::size(rows)));
+    m_mandatoryGateTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_mandatoryGateTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_mandatoryGateTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_mandatoryGateTable->setAlternatingRowColors(true);
+    m_mandatoryGateTable->setWordWrap(true);
+    m_mandatoryGateTable->verticalHeader()->setVisible(false);
+    m_mandatoryGateTable->horizontalHeader()->setStretchLastSection(true);
+    m_mandatoryGateTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_mandatoryGateTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_mandatoryGateTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    m_mandatoryGateTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+
+    for (int row = 0; row < static_cast<int>(std::size(rows)); ++row)
+    {
+        auto* check = new QCheckBox(QStringLiteral("开启"));
+        check->setObjectName(QString::fromLatin1(rows[row].objectName));
+        check->setChecked(true);
+        m_mandatoryGateChecks.at(static_cast<std::size_t>(row)) = check;
+        check->setToolTip(QStringLiteral("独立控制本行准入检查，保存并重启后生效。"));
+        m_mandatoryGateTable->setCellWidget(row, 0, check);
+        SetTableItem(m_mandatoryGateTable, row, 1, QString::fromUtf8(rows[row].name));
+        SetTableItem(m_mandatoryGateTable, row, 2, QString::fromUtf8(rows[row].blockedCondition));
+        SetTableItem(m_mandatoryGateTable, row, 3, QString::fromUtf8(rows[row].recovery));
+    }
+    m_mandatoryGateTable->resizeRowsToContents();
+    m_mandatoryGateTable->setMinimumHeight(660);
+}
+
 void ScanSafetyGateDialog::ConnectChangeTracking()
 {
     const auto changed = [this]()
@@ -426,6 +723,19 @@ void ScanSafetyGateDialog::ConnectChangeTracking()
     };
 
     const QList<QCheckBox*> gateChecks = {
+        m_coverageGateCheck,
+        m_sdkBaseIntegrityGateCheck,
+        m_continuityGateCheck,
+        m_denoiseRatioGateCheck,
+        m_residualGateCheck,
+        m_keyPointGateCheck,
+        m_outputGateCheck,
+        m_segmentHardLimitsGateCheck,
+        m_finalTrajectoryStepGateCheck,
+        m_finalLengthBindingGateCheck,
+        m_finalTopologyBindingGateCheck,
+        m_finalSourceBindingGateCheck,
+        m_finalSemanticIntegrityGateCheck,
         m_proofIntegrityGateCheck,
         m_productionPurposeGateCheck,
         m_robotNameBindingGateCheck,
@@ -447,6 +757,15 @@ void ScanSafetyGateDialog::ConnectChangeTracking()
             changed();
         });
     }
+    for (auto* check : m_mandatoryGateChecks)
+    {
+        connect(check, &QCheckBox::toggled, this, [this, changed](bool)
+        {
+            UpdateMandatoryGateStatus();
+            UpdateSummary();
+            changed();
+        });
+    }
 }
 
 void ScanSafetyGateDialog::Reload()
@@ -455,6 +774,19 @@ void ScanSafetyGateDialog::Reload()
         PointCloudProcessingConfig::Load();
 
     m_loading = true;
+    m_coverageGateCheck->setChecked(settings.validationCoverageEnabled);
+    m_sdkBaseIntegrityGateCheck->setChecked(settings.validationSdkBaseIntegrityEnabled);
+    m_continuityGateCheck->setChecked(settings.validationContinuityEnabled);
+    m_denoiseRatioGateCheck->setChecked(settings.validationDenoiseRatioEnabled);
+    m_residualGateCheck->setChecked(settings.validationResidualEnabled);
+    m_keyPointGateCheck->setChecked(settings.validationKeyPointEnabled);
+    m_outputGateCheck->setChecked(settings.validationOutputEnabled);
+    m_segmentHardLimitsGateCheck->setChecked(settings.validationSegmentHardLimitsEnabled);
+    m_finalTrajectoryStepGateCheck->setChecked(settings.validationFinalTrajectoryStepEnabled);
+    m_finalLengthBindingGateCheck->setChecked(settings.validationFinalLengthBindingEnabled);
+    m_finalTopologyBindingGateCheck->setChecked(settings.validationFinalTopologyBindingEnabled);
+    m_finalSourceBindingGateCheck->setChecked(settings.validationFinalSourceBindingEnabled);
+    m_finalSemanticIntegrityGateCheck->setChecked(settings.validationFinalSemanticIntegrityEnabled);
     m_proofIntegrityGateCheck->setChecked(settings.safetyGateProofIntegrityEnabled);
     m_productionPurposeGateCheck->setChecked(settings.safetyGateProductionPurposeEnabled);
     m_robotNameBindingGateCheck->setChecked(settings.safetyGateRobotNameBindingEnabled);
@@ -467,6 +799,9 @@ void ScanSafetyGateDialog::Reload()
     m_authorizedPoseIdentityGateCheck->setChecked(settings.safetyGateAuthorizedPoseIdentityEnabled);
     m_trajectoryStructureGateCheck->setChecked(settings.safetyGateTrajectoryStructureEnabled);
     m_motionPrecheckGateCheck->setChecked(settings.safetyGateMotionPrecheckEnabled);
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+        m_mandatoryGateChecks[i]->setChecked(settings.systemInterlocks.enabled[i]);
+    UpdateMandatoryGateStatus();
 
     m_loading = false;
     UpdateSummary();
@@ -489,7 +824,7 @@ bool ScanSafetyGateDialog::AuthorizeModification(const QString& actionName)
         this,
         QStringLiteral("需要管理员权限"),
         QStringLiteral(
-            "%1未通过管理员身份复核。工程师账号可以查看，但不能修改流程与机器人运动安全门禁。")
+            "%1未通过管理员身份复核。工程师账号可以查看，但不能修改有效性、流程或运动复核门禁。")
             .arg(actionName));
     return false;
 }
@@ -503,6 +838,19 @@ void ScanSafetyGateDialog::RestoreSafetyDefaults()
 
     const PointCloudProcessingConfig::Settings defaults = SafetyGateDefaults();
     m_loading = true;
+    m_coverageGateCheck->setChecked(defaults.validationCoverageEnabled);
+    m_sdkBaseIntegrityGateCheck->setChecked(defaults.validationSdkBaseIntegrityEnabled);
+    m_continuityGateCheck->setChecked(defaults.validationContinuityEnabled);
+    m_denoiseRatioGateCheck->setChecked(defaults.validationDenoiseRatioEnabled);
+    m_residualGateCheck->setChecked(defaults.validationResidualEnabled);
+    m_keyPointGateCheck->setChecked(defaults.validationKeyPointEnabled);
+    m_outputGateCheck->setChecked(defaults.validationOutputEnabled);
+    m_segmentHardLimitsGateCheck->setChecked(defaults.validationSegmentHardLimitsEnabled);
+    m_finalTrajectoryStepGateCheck->setChecked(defaults.validationFinalTrajectoryStepEnabled);
+    m_finalLengthBindingGateCheck->setChecked(defaults.validationFinalLengthBindingEnabled);
+    m_finalTopologyBindingGateCheck->setChecked(defaults.validationFinalTopologyBindingEnabled);
+    m_finalSourceBindingGateCheck->setChecked(defaults.validationFinalSourceBindingEnabled);
+    m_finalSemanticIntegrityGateCheck->setChecked(defaults.validationFinalSemanticIntegrityEnabled);
     m_proofIntegrityGateCheck->setChecked(defaults.safetyGateProofIntegrityEnabled);
     m_productionPurposeGateCheck->setChecked(defaults.safetyGateProductionPurposeEnabled);
     m_robotNameBindingGateCheck->setChecked(defaults.safetyGateRobotNameBindingEnabled);
@@ -515,6 +863,9 @@ void ScanSafetyGateDialog::RestoreSafetyDefaults()
     m_authorizedPoseIdentityGateCheck->setChecked(defaults.safetyGateAuthorizedPoseIdentityEnabled);
     m_trajectoryStructureGateCheck->setChecked(defaults.safetyGateTrajectoryStructureEnabled);
     m_motionPrecheckGateCheck->setChecked(defaults.safetyGateMotionPrecheckEnabled);
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+        m_mandatoryGateChecks[i]->setChecked(defaults.systemInterlocks.enabled[i]);
+    UpdateMandatoryGateStatus();
     m_loading = false;
     UpdateSummary();
     SetDirty(true);
@@ -526,7 +877,7 @@ void ScanSafetyGateDialog::Save()
     {
         return;
     }
-    if (!AuthorizeModification(QStringLiteral("保存流程与机器人运动安全门禁")))
+    if (!AuthorizeModification(QStringLiteral("保存全部可配置门禁")))
     {
         return;
     }
@@ -534,11 +885,10 @@ void ScanSafetyGateDialog::Save()
     const QString disabledGates = DisabledGateDescription();
     if (!disabledGates.isEmpty())
     {
-        QString risk = QStringLiteral(
-            "以下门禁将被关闭：\n%1\n\n"
-            "关闭后，对应流程身份、证明链或机器人运动前复核会在下一次流程中真实跳过。"
-            "扫描结果和焊道有效性仍由“有效性检测”页独立控制。"
-            "\n\n确认以管理员身份保存这些记录吗？").arg(disabledGates);
+        const QString risk = QStringLiteral(
+            "以下门禁/互锁将被独立关闭：\n%1\n\n"
+            "各项只跳过本行对应检查；保存成功后立即应用，进程单实例项需重启。"
+            "紧急 STOP 和当前流程取消仍执行。\n\n确认保存？").arg(disabledGates);
         if (QMessageBox::warning(
                 this,
                 QStringLiteral("确认关闭安全门禁"),
@@ -550,10 +900,23 @@ void ScanSafetyGateDialog::Save()
         }
     }
 
-    // 并发安全：保存前重新加载最新处理配置，只覆盖本页负责的流程/运动安全记录，
-    // 不读写有效性页面负责的 Validation 策略、开关或数值。
+    // 并发安全：保存前重新加载最新处理配置，只覆盖本页列出的 25 个门禁开关
+    // 和 10 个独立系统互锁；有效性数值门限和处理算法不修改。
     PointCloudProcessingConfig::Settings settings =
         PointCloudProcessingConfig::Load();
+    settings.validationCoverageEnabled = m_coverageGateCheck->isChecked();
+    settings.validationSdkBaseIntegrityEnabled = m_sdkBaseIntegrityGateCheck->isChecked();
+    settings.validationContinuityEnabled = m_continuityGateCheck->isChecked();
+    settings.validationDenoiseRatioEnabled = m_denoiseRatioGateCheck->isChecked();
+    settings.validationResidualEnabled = m_residualGateCheck->isChecked();
+    settings.validationKeyPointEnabled = m_keyPointGateCheck->isChecked();
+    settings.validationOutputEnabled = m_outputGateCheck->isChecked();
+    settings.validationSegmentHardLimitsEnabled = m_segmentHardLimitsGateCheck->isChecked();
+    settings.validationFinalTrajectoryStepEnabled = m_finalTrajectoryStepGateCheck->isChecked();
+    settings.validationFinalLengthBindingEnabled = m_finalLengthBindingGateCheck->isChecked();
+    settings.validationFinalTopologyBindingEnabled = m_finalTopologyBindingGateCheck->isChecked();
+    settings.validationFinalSourceBindingEnabled = m_finalSourceBindingGateCheck->isChecked();
+    settings.validationFinalSemanticIntegrityEnabled = m_finalSemanticIntegrityGateCheck->isChecked();
     settings.safetyGateProofIntegrityEnabled = m_proofIntegrityGateCheck->isChecked();
     settings.safetyGateProductionPurposeEnabled = m_productionPurposeGateCheck->isChecked();
     settings.safetyGateRobotNameBindingEnabled = m_robotNameBindingGateCheck->isChecked();
@@ -566,6 +929,21 @@ void ScanSafetyGateDialog::Save()
     settings.safetyGateAuthorizedPoseIdentityEnabled = m_authorizedPoseIdentityGateCheck->isChecked();
     settings.safetyGateTrajectoryStructureEnabled = m_trajectoryStructureGateCheck->isChecked();
     settings.safetyGateMotionPrecheckEnabled = m_motionPrecheckGateCheck->isChecked();
+    const auto runtimeBeforeSave = PointCloudProcessingConfig::RuntimeSystemInterlocks();
+    bool immediateInterlockChanged = false;
+    bool singleProcessChanged = false;
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+    {
+        const bool enabled = m_mandatoryGateChecks[i]->isChecked();
+        if (runtimeBeforeSave.enabled[i] != enabled)
+        {
+            if (i == static_cast<std::size_t>(SystemInterlock::SingleProcess))
+                singleProcessChanged = true;
+            else
+                immediateInterlockChanged = true;
+        }
+        settings.systemInterlocks.enabled[i] = enabled;
+    }
 
     QString error;
     if (!PointCloudProcessingConfig::Save(settings, &error))
@@ -574,7 +952,7 @@ void ScanSafetyGateDialog::Save()
             this,
             QStringLiteral("保存失败"),
             error.isEmpty()
-                ? QStringLiteral("流程与机器人运动安全门禁保存失败。")
+                ? QStringLiteral("全部可配置门禁保存失败。")
                 : error);
         return;
     }
@@ -584,14 +962,32 @@ void ScanSafetyGateDialog::Save()
         this,
         QStringLiteral("保存成功"),
         QStringLiteral(
-            "流程与机器人运动安全门禁已保存。"
-            "开关将在后续流程中实际生效；有效性检测页配置未被修改。"));
+            "25 项可配置门禁已保存，将在后续流程中实际生效。"
+            "有效性数值门限未被修改。%1%2")
+            .arg(immediateInterlockChanged
+                ? QStringLiteral("9 项运行互锁的改动已立即应用。")
+                : QStringLiteral("9 项运行互锁状态未改变。"))
+            .arg(singleProcessChanged
+                ? QStringLiteral("机器人控制进程单实例项已保存，将在下次启动时生效。")
+                : QString()));
 }
 
 void ScanSafetyGateDialog::UpdateSummary()
 {
-    const bool hasDisabledSafetyGateRecord = HasDisabledCoreSafetyGateUi();
     const QList<QCheckBox*> gateChecks = {
+        m_coverageGateCheck,
+        m_sdkBaseIntegrityGateCheck,
+        m_continuityGateCheck,
+        m_denoiseRatioGateCheck,
+        m_residualGateCheck,
+        m_keyPointGateCheck,
+        m_outputGateCheck,
+        m_segmentHardLimitsGateCheck,
+        m_finalTrajectoryStepGateCheck,
+        m_finalLengthBindingGateCheck,
+        m_finalTopologyBindingGateCheck,
+        m_finalSourceBindingGateCheck,
+        m_finalSemanticIntegrityGateCheck,
         m_proofIntegrityGateCheck,
         m_productionPurposeGateCheck,
         m_robotNameBindingGateCheck,
@@ -610,30 +1006,68 @@ void ScanSafetyGateDialog::UpdateSummary()
         gateChecks.cend(),
         [](const QCheckBox* check) { return check->isChecked(); }));
 
-    m_profileSummaryLabel->setText(QStringLiteral("%1/%2 门禁开启")
+    m_profileSummaryLabel->setText(QStringLiteral("%1/%2 可配置门禁开启")
         .arg(enabledCount)
         .arg(gateChecks.size()));
-    m_policySummaryLabel->setText(QStringLiteral("流程身份 · 证明链 · 运动前复核"));
-    m_proofSummaryLabel->setText(hasDisabledSafetyGateRecord
-        ? QStringLiteral("存在已关闭门禁 · 后续流程跳过对应复核")
-        : QStringLiteral("流程与运动门禁全部开启"));
+    m_policySummaryLabel->setText(QStringLiteral("有效性 · 流程身份 · 证明链 · 运动前复核"));
+    int enabledInterlocks = 0;
+    int changedInterlocks = 0;
+    bool singleProcessChanged = false;
+    const auto runtime = PointCloudProcessingConfig::RuntimeSystemInterlocks();
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+    {
+        const bool selected = m_mandatoryGateChecks[i]->isChecked();
+        enabledInterlocks += selected ? 1 : 0;
+        if (selected != runtime.enabled[i])
+        {
+            if (i == static_cast<std::size_t>(SystemInterlock::SingleProcess)) singleProcessChanged = true;
+            else ++changedInterlocks;
+        }
+    }
+    m_proofSummaryLabel->setText(QStringLiteral("%1/10 系统互锁开启%2")
+        .arg(enabledInterlocks).arg(changedInterlocks > 0 || singleProcessChanged
+            ? QStringLiteral(" · %1 项待保存%2").arg(changedInterlocks)
+                .arg(singleProcessChanged ? QStringLiteral("，单实例项需重启") : QString())
+            : QString()));
 
     const QString normalSummaryStyle = QStringLiteral(
         "color:#8fe5b2; background:#0b151d; border:1px solid #315163;"
         "border-radius:6px; font-weight:600; padding:5px 10px;");
-    const QString warningSummaryStyle = QStringLiteral(
-        "color:#ffd878; background:#392b0c; border:1px solid #8a6820;"
-        "border-radius:6px; font-weight:700; padding:5px 10px;");
     m_policySummaryLabel->setStyleSheet(normalSummaryStyle);
+    const QString disabledSummaryStyle = QStringLiteral(
+        "color:#ff9b91; background:#351516; border:1px solid #8d3b3f;"
+        "border-radius:6px; font-weight:700; padding:5px 10px;");
     m_proofSummaryLabel->setStyleSheet(
-        hasDisabledSafetyGateRecord ? warningSummaryStyle : normalSummaryStyle);
+        enabledInterlocks == 10 && changedInterlocks == 0 && !singleProcessChanged
+            ? normalSummaryStyle : disabledSummaryStyle);
     UpdateChangeWarning();
 }
 
-bool ScanSafetyGateDialog::HasDisabledCoreSafetyGateUi() const
+void ScanSafetyGateDialog::UpdateMandatoryGateStatus()
 {
-    // 本页开关实际控制流程/运动复核，但不参与焊道或扫描结果有效性判定。
-    return !m_proofIntegrityGateCheck->isChecked()
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+    {
+        auto* check = m_mandatoryGateChecks[i];
+        check->setText(check->isChecked() ? QStringLiteral("开启") : QStringLiteral("关闭"));
+    }
+}
+
+bool ScanSafetyGateDialog::HasDisabledConfigurableGateUi() const
+{
+    return !m_coverageGateCheck->isChecked()
+        || !m_sdkBaseIntegrityGateCheck->isChecked()
+        || !m_continuityGateCheck->isChecked()
+        || !m_denoiseRatioGateCheck->isChecked()
+        || !m_residualGateCheck->isChecked()
+        || !m_keyPointGateCheck->isChecked()
+        || !m_outputGateCheck->isChecked()
+        || !m_segmentHardLimitsGateCheck->isChecked()
+        || !m_finalTrajectoryStepGateCheck->isChecked()
+        || !m_finalLengthBindingGateCheck->isChecked()
+        || !m_finalTopologyBindingGateCheck->isChecked()
+        || !m_finalSourceBindingGateCheck->isChecked()
+        || !m_finalSemanticIntegrityGateCheck->isChecked()
+        || !m_proofIntegrityGateCheck->isChecked()
         || !m_productionPurposeGateCheck->isChecked()
         || !m_robotNameBindingGateCheck->isChecked()
         || !m_caseBindingGateCheck->isChecked()
@@ -657,6 +1091,21 @@ QString ScanSafetyGateDialog::DisabledGateDescription() const
             disabled.push_back(QStringLiteral("• %1").arg(name));
         }
     };
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+        addIfDisabled(m_mandatoryGateChecks[i], m_mandatoryGateTable->item(static_cast<int>(i), 1)->text());
+    addIfDisabled(m_coverageGateCheck, QStringLiteral("点云覆盖与有限点"));
+    addIfDisabled(m_sdkBaseIntegrityGateCheck, QStringLiteral("SDKBase 完整点云覆盖"));
+    addIfDisabled(m_continuityGateCheck, QStringLiteral("扫描向连续性"));
+    addIfDisabled(m_denoiseRatioGateCheck, QStringLiteral("去噪拒绝比例"));
+    addIfDisabled(m_residualGateCheck, QStringLiteral("拟合残差"));
+    addIfDisabled(m_keyPointGateCheck, QStringLiteral("拐点与分段充分性"));
+    addIfDisabled(m_outputGateCheck, QStringLiteral("焊道输出数量与长度"));
+    addIfDisabled(m_segmentHardLimitsGateCheck, QStringLiteral("焊道最短分段"));
+    addIfDisabled(m_finalTrajectoryStepGateCheck, QStringLiteral("最终轨迹相邻步长"));
+    addIfDisabled(m_finalLengthBindingGateCheck, QStringLiteral("最终轨迹长度绑定"));
+    addIfDisabled(m_finalTopologyBindingGateCheck, QStringLiteral("最终轨迹拓扑绑定"));
+    addIfDisabled(m_finalSourceBindingGateCheck, QStringLiteral("最终轨迹来源位姿绑定"));
+    addIfDisabled(m_finalSemanticIntegrityGateCheck, QStringLiteral("最终文件结构与语义完整性"));
     addIfDisabled(m_proofIntegrityGateCheck, QStringLiteral("流程证明结构与防篡改"));
     addIfDisabled(m_productionPurposeGateCheck, QStringLiteral("生产用途"));
     addIfDisabled(m_robotNameBindingGateCheck, QStringLiteral("机器人逻辑名称绑定"));
@@ -674,14 +1123,41 @@ QString ScanSafetyGateDialog::DisabledGateDescription() const
 
 void ScanSafetyGateDialog::UpdateChangeWarning()
 {
-    if (HasDisabledCoreSafetyGateUi())
+    QStringList changed;
+    QStringList disabled;
+    const auto runtime = PointCloudProcessingConfig::RuntimeSystemInterlocks();
+    bool singleProcessChanged = false;
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+    {
+        const QString name = m_mandatoryGateTable->item(static_cast<int>(i), 1)->text();
+        const bool enabled = m_mandatoryGateChecks[i]->isChecked();
+        if (enabled != runtime.enabled[i])
+        {
+            if (i == static_cast<std::size_t>(SystemInterlock::SingleProcess)) singleProcessChanged = true;
+            else changed.append(name);
+        }
+        if (!enabled) disabled.append(name);
+    }
+    if (!changed.isEmpty() || !disabled.isEmpty())
+    {
+        m_changeWarningLabel->setStyleSheet(QStringLiteral(
+            "background:#351516; border:1px solid #8d3b3f; border-radius:7px;"
+            "color:#ffaaa2; padding:10px 12px; font-weight:700;"));
+        m_changeWarningLabel->setText(
+            (disabled.isEmpty() ? QString() : QStringLiteral("已选择关闭：%1。").arg(disabled.join(QStringLiteral("、"))))
+            + (changed.isEmpty() ? QStringLiteral("其他运行互锁独立生效。")
+                : QStringLiteral("以下项与当前运行状态不同，保存后立即应用：%1。").arg(changed.join(QStringLiteral("、"))))
+            + (singleProcessChanged ? QStringLiteral("机器人控制进程单实例项需重启生效。") : QString()));
+        return;
+    }
+    if (HasDisabledConfigurableGateUi())
     {
         m_changeWarningLabel->setStyleSheet(QStringLiteral(
             "background:#392b0c; border:1px solid #8a6820; border-radius:7px;"
             "color:#ffd878; padding:10px 12px; font-weight:600;"));
         m_changeWarningLabel->setText(QStringLiteral(
-            "部分流程/运动安全门禁已关闭：后续流程会真实跳过对应复核。"
-            "扫描结果和焊道有效性配置不受本页影响。"));
+            "部分可配置门禁已关闭：后续流程会真实跳过对应有效性检查或流程/运动复核。"
+            "10 项系统互锁均为开启。"));
         return;
     }
 
@@ -691,14 +1167,14 @@ void ScanSafetyGateDialog::UpdateChangeWarning()
     if (m_dirty)
     {
         m_changeWarningLabel->setText(QStringLiteral(
-            "存在未保存变更。本页只保存流程身份、证明链和机器人运动前复核门禁，"
-            "保存后会在后续流程中实际生效；不会改动有效性检测页配置。"));
+            "存在未保存变更。本页保存 25 项有效性/流程/运动复核开关；"
+            "系统互锁逐项保存并立即应用；机器人控制进程单实例项需重启生效。"));
     }
     else
     {
         m_changeWarningLabel->setText(QStringLiteral(
-            "本页所有流程与机器人运动安全门禁均已开启；"
-            "扫描结果和焊道有效性由有效性检测页独立管理。"));
+            "25 项可配置门禁均已开启；10 项独立系统互锁当前已开启。"
+            "有效性数值门限仍在“测量参数 → 有效性检测”编辑。"));
     }
 }
 

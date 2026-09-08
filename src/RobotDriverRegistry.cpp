@@ -34,13 +34,13 @@ const std::vector<RobotDriverRegistration>& RobotDriverRegistry::RegisteredTypes
             ROBOT_TYPE_FANUC,
             "FANUC",
             &CreateFanucDriver,
-            { "fanuc", 9000, 9001, true, 21, "", "anonymous", "", false, "", "/md", false, "Job/FANUC" }
+            { "fanuc", 9000, 9001, true, 21, "", "anonymous", "", false, "", "/md", false, "Job/FANUC", true, false }
         },
         {
             ROBOT_TYPE_STEP,
             "STEP",
             &CreateStepDriver,
-            { "step", 30312, 0, false, 21, "", "root", "", true, "PCRobot", "/UserPrograms", true, "Job/STEP" }
+            { "step", 30312, 0, false, 21, "", "root", "", true, "PCRobot", "/UserPrograms", true, "Job/STEP", true, true }
         },
         {
             ROBOT_TYPE_INOVANCE,

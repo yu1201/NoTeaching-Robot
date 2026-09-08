@@ -61,8 +61,15 @@ require(retreat.index("RevalidateExclusiveRecoveryBinding", terminate_pos)
         "safe-retreat does not revalidate the exclusive binding after STOP/Kill")
 helper = DIALOG[DIALOG.index("bool TerminatePersistedProgramBeforeRecovery"):
                 DIALOG.index("class LaserLineLiveView")]
-require(helper.index("MarkMotionStarted") < helper.index("AbortPersistedMotion")
-        < helper.index("MarkMotionCompleted"),
+disabled_identity = helper[helper.index("if (!enforceRecoveryIdentity)"):
+                           helper.index("if (record.programName")]
+require(disabled_identity.index("MarkMotionStarted")
+        < disabled_identity.index("AbortCurrentProgramSafely")
+        < disabled_identity.index("MarkMotionCompleted"),
+        "disabled recovery identity does not stop the current controller program safely")
+strict_identity = helper[helper.index("if (record.programName"):]
+require(strict_identity.index("MarkMotionStarted") < strict_identity.index("AbortPersistedMotion")
+        < strict_identity.index("MarkMotionCompleted"),
         "adaptor restart recovery does not make an unknown prior task fail closed")
 
 require("AbortPersistedProgramForRecovery" in STEP,

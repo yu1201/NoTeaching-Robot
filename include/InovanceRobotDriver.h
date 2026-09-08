@@ -1,11 +1,17 @@
 #pragma once
 
 #include "RobotDriverAdaptor.h"
+#include "InovanceModeSequence.h"
+#include "InovanceConnectionPreparation.h"
+#include "RobotModePreparationStore.h"
+#include "InovanceUserLogin.h"
+#include "InovanceKinematicsSession.h"
 
 #include <atomic>
 #include <cstdint>
 #include <future>
 #include <mutex>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -20,6 +26,8 @@ public:
 
     bool InitRobotDriver(std::string unitName) override;
     RobotDriverDescriptor DriverDescriptor() const override;
+    std::string AcceptanceRegisterName(bool real, int index) const override
+    { return std::string(real ? "D[" : "R[") + std::to_string(index) + "]"; }
     std::uint64_t DriverCapabilities() const override;
     RobotConnectionEndpoint ControlEndpoint() const override;
     bool Connect() override;
@@ -29,6 +37,8 @@ public:
     RobotFileTransferProfile FileTransferProfile() const override;
     std::shared_ptr<RobotFileTransferSession> CreateFileTransferSession(
         std::string* error = nullptr) const override;
+    bool RefreshKinematicsFromController(
+        RobotKinematicsValidationResult& result) override;
 
     bool ValidateLinearSpeedMmPerMin(
         double speedMmPerMin, std::string* error = nullptr) const override;
@@ -37,6 +47,13 @@ public:
         double speedMmPerMin,
         int externalAxleType,
         const int* configuration = nullptr) override;
+    bool MoveCircularMmPerMin(
+        const T_ROBOT_COORS& via,
+        const T_ROBOT_COORS& target,
+        double speedMmPerMin,
+        int externalAxleType,
+        const int* viaConfiguration = nullptr,
+        const int* targetConfiguration = nullptr) override;
     bool MoveJointPercent(
         const T_ANGLE_PULSE& target,
         double speedPercent,
@@ -44,6 +61,11 @@ public:
     RobotMotionStatus ReadMotionStatus() override;
     RobotMotionStatus ReadMotionStatusPassive(
         long long* robotMs = nullptr, long long* pcRecvMs = nullptr) override;
+    RobotControllerStatus ReadControllerStatus() override;
+    std::vector<RobotModePreparationTestCase> ModePreparationTestCases() const override;
+    bool RunModePreparationTestCase(const std::string& id, RobotModePreparationTestResult& result) override;
+    bool UseVerifiedModePreparation(const std::string& id) override;
+    std::string ActiveModePreparationId() const override;
 
     bool ReserveTrajectory(
         RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
@@ -120,6 +142,7 @@ public:
 
     bool IsConnected() override;
     bool cleanAlarm() override;
+    bool ServoOff() override;
     bool ServoOn() override;
     std::string GetRobotStatusText() override;
     std::string GetStateMonitorSourceText() const override;
@@ -146,6 +169,8 @@ public:
     bool SetIntVar(
         int index, int value, int scope = 2, const char* prefix = "INT") override;
     bool SetIntVar(const char* name, int value, int scope = 2) override;
+    bool TryGetRealVar(
+        int index, double& value, const char* prefix = "REAL", int scope = 1) override;
     bool SetRealVar(
         int index, double value, const char* prefix = "REAL", int scope = 1) override;
     int GetPosVar(
@@ -158,22 +183,44 @@ public:
         double rotation[9],
         double translation[3],
         std::string* error = nullptr) override;
+    bool ReadKinematicsReference(const RobotKinematicsProfile& profile,
+        RobotKinematicsReference& result, std::string& error) override;
+    bool CalculateControllerForward(const RobotKinematicsReference& reference,
+        const Eigen::Matrix<double,6,1>& joints, RobotKinematicsPoint& result, std::string& error) override;
+    bool CalculateControllerInverse(const RobotKinematicsReference& reference,
+        const RobotKinematicsPoint& target, RobotKinematicsPoint& result, std::string& error) override;
+    bool DiscoverCalibrationAssets(RobotCalibrationDiscovery& result,
+        std::atomic_bool& cancel, std::string& error) override;
+    bool ReadControllerHandEye(int sensorIndex, RobotControllerHandEye& result, std::string& error) override;
+    bool ValidateControllerHandEyeContext(const RobotControllerHandEye& expected, std::string& error) override;
 
 private:
+    bool ReadCalibrationSource(const std::string& remotePath, std::string& bytes,
+        std::atomic_bool& cancel, std::string& error);
+    bool ConnectWithPolicy(bool explicitRetry);
     bool CloseSocketLocked();
+    bool LoginUserLocked();
+    void RestoreModePreparation();
+    bool SendCommandLocked(const std::string& command, std::string& response, int timeoutMs = 3000);
+    bool QueryIntLocked(const std::string& command, int& value);
     bool SendCommand(
         const std::string& command,
         std::string& response,
         int timeoutMs = 3000);
     bool QueryInt(const std::string& command, int& value);
+    bool QueryLeadingInt(const std::string& command, int& value);
+    bool QuerySystemErrorCode(int& value);
     bool QueryDoubles(
         const std::string& command,
         std::vector<double>& values,
         std::size_t minimumCount = 1);
     bool EnsureControlPermit();
     bool EnsureMotionReady();
+    InovanceModeSequence::Ops ModeSequenceOps(std::uint64_t expectedEpoch);
     bool SetDataStreamMode(const char* action, int expectedMode);
     bool WaitForCommandDone(int commandId, int pollDelayMs, int timeoutMs);
+    bool BeginTrackedDirectMotion(int commandId, const char* operationName);
+    bool FinalizeCompletedDataStreamMotion();
     bool ValidateMoveInfos(
         const std::vector<T_ROBOT_MOVE_INFO>& moveInfos,
         RobotTrajectoryPurpose purpose,
@@ -184,6 +231,9 @@ private:
         RobotTrajectoryPurpose purpose,
         const std::string& outputDirectory,
         RobotTrajectoryHandle& handle,
+        std::string& error);
+    bool ReadControllerProgramRobotName(
+        std::string& robotName,
         std::string& error);
     bool UploadTrajectoryJob(
         RobotTrajectoryHandle& handle,
@@ -202,6 +252,14 @@ private:
         int zone,
         const int* configuration,
         int* commandId = nullptr);
+    bool SendCircularMove(
+        const T_ROBOT_COORS& via,
+        const T_ROBOT_COORS& target,
+        double speedMmPerMin,
+        int zone,
+        const int* viaConfiguration,
+        const int* targetConfiguration,
+        int* commandId = nullptr);
     bool SendJointMove(
         const T_ANGLE_PULSE& target,
         double speedPercent,
@@ -216,6 +274,17 @@ private:
     static std::string ProtocolErrorText(const std::string& response);
 
     std::string m_socketIp;
+    mutable std::mutex m_modePreparationMutex;
+    std::map<std::string, std::uint64_t> m_verifiedModePreparations;
+    std::map<std::string, RobotModePreparationStore::Record> m_modePreparationTestRecords;
+    RobotModePreparationStore::Binding m_modePreparationBinding;
+    std::uint64_t m_modePreparationBindingEpoch = 0;
+    std::string m_persistedModePreparation;
+    std::string m_modePreparationLoadError;
+    std::string m_activeModePreparation;
+    std::atomic<std::uint64_t> m_modeConnectionEpoch{ 1 };
+    std::atomic<int> m_dataStreamEntryMode{ -1 };
+    std::atomic<int> m_dataStreamEntryMotor{ -1 };
     int m_socketPort = 2222;
     std::string m_ftpIp;
     int m_ftpPort = 7777;
@@ -223,15 +292,23 @@ private:
     std::string m_ftpPassword;
     std::uintptr_t m_socketHandle = static_cast<std::uintptr_t>(~0ULL);
     std::atomic_bool m_connected{ false };
+    std::atomic_bool m_connectionReady{ false };
     bool m_wsaStarted = false;
     mutable std::mutex m_socketMutex;
+    InovanceUserLogin::RetryGate m_loginRetry; // Protected by m_socketMutex.
     std::atomic<long long> m_lastConnectAttemptMs{ 0 };
+    // Refresh/install is serialized independently from the protocol socket.
+    // Never hold m_socketMutex while entering RefreshKinematicsFromController.
+    mutable std::mutex m_kinematicsRefreshMutex;
+    InovanceKinematicsSession m_kinematicsSession;
+    std::atomic_bool m_kinematicsReadInProgress{ false };
 
-    int m_toolNo = 0;
-    int m_wobjNo = 0;
+    int m_toolNo = kApplicationGunToolNumber;
+    // 汇川现场标定及原生JOB固定使用 Wobj[1]。
+    int m_wobjNo = 1;
     int m_maxBufferedCommands = 8;
     bool m_forceControlPermit = false;
-    int m_apiUserLevel = 0;
+    int m_apiUserLevel = 2;
     std::string m_apiPassword;
 
     // 汇川没有独立焊接协议。实际焊接由底层生成的原生PRO通过RC所属IO/DA控制；

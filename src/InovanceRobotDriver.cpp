@@ -3,12 +3,22 @@
 #include <windows.h>
 
 #include "AppPaths.h"
+#include "FTPClient.h"
 #include "InovanceRobotDriver.h"
+#include "InovanceUserLogin.h"
 #include "RobotDriverRegistry.h"
 #include "RobotFtpFileTransfer.h"
 #include "RobotOperationLease.h"
+#include "ConfigDatabase.h"
 
 #include <QCryptographicHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QFile>
+#include <QTemporaryDir>
+#include <QDateTime>
 
 #include <algorithm>
 #include <array>
@@ -24,6 +34,7 @@
 #include <iomanip>
 #include <limits>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -37,12 +48,76 @@ constexpr double kMaxLinearSpeedMmPerMin = 120000.0;
 constexpr int kInovanceProgramFileLimit = 16;
 constexpr int kInovanceProgramInstructionLimit = 2000;
 constexpr const char* kInovanceManagedTrajectoryModule = "HK_WELD_JOB";
+constexpr const char* kInovanceCallableFunction = "func1";
+constexpr int kInovanceArcDataIndex = 0;
+constexpr int kInovanceWeaveDataIndex = 0;
+constexpr int kInovanceRpmIndex = 0;
 // B255 为汇川型号底层保留的原生程序状态字节：0=待启动、1=已进入、10=自然完成。
 // 使用 B 而不是 R，避免原生程序执行依赖编辑级登录；通用整数寄存器仍映射到 R。
 constexpr int kInovanceNativeProgramStateByte = 255;
 constexpr std::size_t kMaxNativeProgramBytes = 4U * 1024U * 1024U;
-constexpr const char* kInovanceDispatcherMarker =
-    "QTWIDGETSAPP4_INOVANCE_DISPATCHER_V1";
+constexpr const char* kInovanceMachineParametersPath =
+    "/RobotParams/MachineParams.json";
+constexpr std::uint64_t kMaxInovanceMachineParametersBytes = 1024U * 1024U;
+
+bool JsonDoubleArray(
+    const QJsonObject& object,
+    const char* key,
+    int minimumSize,
+    std::vector<double>& values)
+{
+    values.clear();
+    const QJsonArray array = object.value(QString::fromLatin1(key)).toArray();
+    if (array.size() < minimumSize) { return false; }
+    values.reserve(static_cast<std::size_t>(array.size()));
+    for (const QJsonValue& value : array)
+    {
+        if (!value.isDouble() || !std::isfinite(value.toDouble())) { return false; }
+        values.push_back(value.toDouble());
+    }
+    return true;
+}
+
+bool NearlyEqualArray(
+    const std::vector<double>& protocol,
+    const std::vector<double>& file,
+    int count,
+    double tolerance)
+{
+    if (protocol.size() < static_cast<std::size_t>(count)
+        || file.size() < static_cast<std::size_t>(count)) { return false; }
+    for (int index = 0; index < count; ++index)
+    {
+        if (std::abs(protocol[index] - file[index]) > tolerance) { return false; }
+    }
+    return true;
+}
+
+KDL::Frame InovancePoseFrame(const T_ROBOT_COORS& pose)
+{
+    return KDL::Frame(
+        KDL::Rotation::RPY(
+            pose.dRX * M_PI / 180.0,
+            pose.dRY * M_PI / 180.0,
+            pose.dRZ * M_PI / 180.0),
+        KDL::Vector(pose.dX / 1000.0, pose.dY / 1000.0, pose.dZ / 1000.0));
+}
+
+T_ROBOT_COORS InovanceFramePose(const KDL::Frame& frame)
+{
+    T_ROBOT_COORS pose;
+    pose.dX = frame.p.x() * 1000.0;
+    pose.dY = frame.p.y() * 1000.0;
+    pose.dZ = frame.p.z() * 1000.0;
+    double rx = 0.0;
+    double ry = 0.0;
+    double rz = 0.0;
+    frame.M.GetRPY(rx, ry, rz);
+    pose.dRX = rx * 180.0 / M_PI;
+    pose.dRY = ry * 180.0 / M_PI;
+    pose.dRZ = rz * 180.0 / M_PI;
+    return pose;
+}
 
 SOCKET ToSocket(std::uintptr_t handle)
 {
@@ -107,6 +182,14 @@ std::string FormatProgramDouble(double value)
     return stream.str();
 }
 
+std::string FormatProgramNumber(double value)
+{
+    std::string text = FormatProgramDouble(value);
+    while (text.size() > 1 && text.back() == '0') { text.pop_back(); }
+    if (!text.empty() && text.back() == '.') { text.pop_back(); }
+    return text == "-0" ? std::string("0") : text;
+}
+
 std::string InovanceContentSha256(const std::string& content)
 {
     const QByteArray bytes(content.data(), static_cast<int>(content.size()));
@@ -124,15 +207,128 @@ std::string InovancePcTimestamp()
     return stamp.str();
 }
 
-const char* InovanceIoValue(int value)
+std::string InovancePcProgramTimestamp()
 {
-    return value == 0 ? "OFF" : "ON";
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t current = std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+    localtime_s(&localTime, &current);
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % std::chrono::seconds(1);
+    std::ostringstream stamp;
+    stamp << std::put_time(&localTime, "%Y-%m-%d %H:%M:%S") << '.'
+        << std::setw(3) << std::setfill('0') << milliseconds.count();
+    return stamp.str();
+}
+
+std::string InovanceProgramInfo(const std::string& robotName)
+{
+    std::string safeRobotName = robotName;
+    std::replace_if(safeRobotName.begin(), safeRobotName.end(), [](unsigned char ch)
+        { return ch < 0x20 || ch == '"' || ch == '\\'; }, '_');
+    std::ostringstream source;
+    source << "ProgramInfo\r\n"
+        << "    Version = \"S4.24\"\r\n"
+        << "    VRC = \"V4R24C1\"\r\n"
+        << "    Model = \"\"\r\n"
+        << "    Time = \"" << InovancePcProgramTimestamp() << "\"\r\n"
+        << "    RobotName = \"" << safeRobotName << "\"\r\n"
+        << "EndProgramInfo\r\n";
+    return source.str();
+}
+
+bool ParseInovanceProgramRobotName(
+    const std::string& content,
+    std::string& robotName,
+    std::string& error)
+{
+    robotName.clear();
+    const std::regex declaration(
+        R"((^|[\r\n])[\t ]*RobotName[\t ]*=[\t ]*\"([^\"\r\n]+)\"[\t ]*)",
+        std::regex_constants::icase);
+    std::sregex_iterator match(content.begin(), content.end(), declaration);
+    const std::sregex_iterator end;
+    if (match == end)
+    {
+        error = "PRO的ProgramInfo缺少RobotName。";
+        return false;
+    }
+    robotName = Trim((*match)[2].str());
+    ++match;
+    if (match != end)
+    {
+        error = "PRO包含多个RobotName声明。";
+        robotName.clear();
+        return false;
+    }
+    if (robotName.empty() || robotName.size() > 128)
+    {
+        error = "PRO的RobotName为空或超过128字节。";
+        robotName.clear();
+        return false;
+    }
+    error.clear();
+    return true;
 }
 
 bool IsInovanceNativeTrajectoryPurpose(RobotTrajectoryPurpose purpose)
 {
     return purpose == RobotTrajectoryPurpose::WeldDryRun
         || purpose == RobotTrajectoryPurpose::ActualWeld;
+}
+
+bool InovanceNativeWeaveShape(int commonShape, int& controllerShape)
+{
+    switch (static_cast<EWeaveShape>(commonShape))
+    {
+    case EWeaveShape::eSin:
+    case EWeaveShape::eSinFreq:
+        controllerShape = 1;
+        return true;
+    default:
+        controllerShape = -1;
+        return false;
+    }
+}
+
+bool SameProgramValue(double left, double right)
+{
+    return std::abs(left - right) <= 1e-9;
+}
+
+bool SameInovanceWeldParameters(
+    const T_ROBOT_MOVE_INFO& left,
+    const T_ROBOT_MOVE_INFO& right)
+{
+    return SameProgramValue(left.dWeldCurrent, right.dWeldCurrent)
+        && SameProgramValue(left.dWeldVoltage, right.dWeldVoltage)
+        && SameProgramValue(left.dWeldSpeedMmPerMin, right.dWeldSpeedMmPerMin);
+}
+
+bool SameInovanceWeaveParameters(const T_WeaveDate& left, const T_WeaveDate& right)
+{
+    return left.nWeaveType == right.nWeaveType
+        && left.nWeaveShape == right.nWeaveShape
+        && SameProgramValue(left.dWeaveFrequencyHz, right.dWeaveFrequencyHz)
+        && SameProgramValue(left.dWeaveAmplitudeMm, right.dWeaveAmplitudeMm)
+        && left.nPauseTime1Ms == right.nPauseTime1Ms
+        && left.nPauseTime2Ms == right.nPauseTime2Ms;
+}
+
+void AppendInovanceWeaveCommand(
+    std::ostringstream& source,
+    const char* command,
+    const T_WeaveDate& weave)
+{
+    int shape = 1;
+    (void)InovanceNativeWeaveShape(weave.nWeaveShape, shape);
+    source << command << " WeaveData[" << kInovanceWeaveDataIndex << "],Shape["
+        << shape << "],Freq[" << FormatProgramNumber(weave.dWeaveFrequencyHz)
+        << "],RAmp[" << FormatProgramNumber(weave.dWeaveAmplitudeMm)
+        << "],LAmp[" << FormatProgramNumber(weave.dWeaveAmplitudeMm)
+        << "],RT[" << FormatProgramNumber(static_cast<double>(weave.nPauseTime1Ms) / 1000.0)
+        << "],LT[" << FormatProgramNumber(static_cast<double>(weave.nPauseTime2Ms) / 1000.0)
+        << "];\r\n";
 }
 
 long PulseAt(const T_ANGLE_PULSE& pulse, int index)
@@ -369,13 +565,21 @@ bool InovanceActiveMainProgram(
         error = "当前主任务入口不是固定的 main.pro：" + normalizedPath;
         return false;
     }
-    const std::size_t projectSlash = projectDirectory.find_last_of('/');
-    if (projectSlash == std::string::npos || projectSlash + 1 >= projectDirectory.size())
+    constexpr const char* teachPrefix = "/TeachProgram/";
+    const std::size_t projectBegin = std::strlen(teachPrefix);
+    const std::size_t projectEnd = normalizedPath.find('/', projectBegin);
+    if (projectBegin >= normalizedPath.size())
     {
         error = "当前任务路径缺少工程名：" + normalizedPath;
         return false;
     }
-    projectName = projectDirectory.substr(projectSlash + 1);
+    projectName = normalizedPath.substr(projectBegin,
+        projectEnd == std::string::npos ? std::string::npos : projectEnd - projectBegin);
+    if (projectName.empty())
+    {
+        error = "当前任务路径缺少工程名：" + normalizedPath;
+        return false;
+    }
     return true;
 }
 
@@ -409,10 +613,186 @@ bool ReadBoundedTextFile(
     return true;
 }
 
+bool RegisterInovanceProgramInProject(
+    const std::string& projectContent,
+    const std::string& programFile,
+    std::string& updatedContent,
+    bool& changed,
+    std::string& error)
+{
+    updatedContent.clear();
+    changed = false;
+    error.clear();
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(
+        QByteArray(projectContent.data(), static_cast<int>(projectContent.size())),
+        &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject())
+    {
+        error = "PRJ不是有效JSON：" + parseError.errorString().toStdString();
+        return false;
+    }
+    QJsonObject root = document.object();
+    if (root.value(QStringLiteral("FileType")).toString()
+            != QStringLiteral("RobotProjectConfigFile")
+        || root.value(QStringLiteral("Company")).toString().compare(
+            QStringLiteral("Inovance"), Qt::CaseInsensitive) != 0)
+    {
+        error = "PRJ缺少汇川RobotProjectConfigFile身份。";
+        return false;
+    }
+
+    const QString requested = QString::fromUtf8(programFile.c_str());
+    const auto updateProgramFiles = [&requested, &changed, &error](
+        QJsonObject& owner) -> bool
+        {
+            QJsonArray files = owner.value(QStringLiteral("ProgramFiles")).toArray();
+            bool mainFound = false;
+            bool targetFound = false;
+            for (const QJsonValue& value : files)
+            {
+                const QString name = value.toString();
+                mainFound = mainFound || name.compare(
+                    QStringLiteral("main.pro"), Qt::CaseInsensitive) == 0;
+                targetFound = targetFound || name.compare(requested, Qt::CaseInsensitive) == 0;
+            }
+            if (!mainFound)
+            {
+                error = "PRJ程序清单未登记固定入口main.pro。";
+                return false;
+            }
+            if (!targetFound)
+            {
+                if (files.size() >= kInovanceProgramFileLimit)
+                {
+                    error = "PRJ程序清单已达到16个文件上限。";
+                    return false;
+                }
+                files.append(requested);
+                changed = true;
+            }
+            if (owner.value(QStringLiteral("ProgramFiles")) != files
+                || owner.value(QStringLiteral("ProgramFilesCount")).toInt(-1) != files.size())
+            {
+                changed = true;
+            }
+            owner.insert(QStringLiteral("ProgramFiles"), files);
+            owner.insert(QStringLiteral("ProgramFilesCount"), files.size());
+            return true;
+        };
+
+    QJsonArray tasks = root.value(QStringLiteral("MultiTaskInfos")).toArray();
+    if (!tasks.isEmpty())
+    {
+        int activeTaskIndex = -1;
+        for (int index = 0; index < tasks.size(); ++index)
+        {
+            const QJsonObject task = tasks.at(index).toObject();
+            if (task.value(QStringLiteral("TaskId")).toInt(-1) == 0
+                && task.value(QStringLiteral("EnterProgramFile")).toString().compare(
+                    QStringLiteral("main.pro"), Qt::CaseInsensitive) == 0)
+            {
+                activeTaskIndex = index;
+                break;
+            }
+        }
+        if (activeTaskIndex < 0)
+        {
+            error = "V3 PRJ未找到Task0/main.pro任务清单。";
+            return false;
+        }
+        QJsonObject task = tasks.at(activeTaskIndex).toObject();
+        // Some field projects contain both project-level modules at the root and a
+        // Task0 record without ProgramFiles/ProgramFilesCount.  Root ProgramFiles
+        // must stay at the project root (its PRO files are stored there); only repair
+        // the missing Task0 list with the task entry program.  Never move root modules
+        // into Task0 because that changes their controller path.
+        if (!task.value(QStringLiteral("ProgramFiles")).isArray())
+        {
+            const QString enterProgram = task.value(
+                QStringLiteral("EnterProgramFile")).toString().trimmed();
+            if (enterProgram.isEmpty())
+            {
+                error = "V3 PRJ的Task0缺少ProgramFiles，且EnterProgramFile为空，无法安全修复。";
+                return false;
+            }
+            QJsonArray migratedFiles;
+            migratedFiles.append(enterProgram);
+            task.insert(QStringLiteral("ProgramFiles"), migratedFiles);
+            task.insert(QStringLiteral("ProgramFilesCount"), migratedFiles.size());
+            changed = true;
+        }
+        if (!updateProgramFiles(task)) { return false; }
+        tasks.replace(activeTaskIndex, task);
+        root.insert(QStringLiteral("MultiTaskInfos"), tasks);
+        if (root.value(QStringLiteral("MultiTaskCount")).toInt(-1) != tasks.size())
+        {
+            root.insert(QStringLiteral("MultiTaskCount"), tasks.size());
+            changed = true;
+        }
+        const bool hasRootProgramFiles = root.value(
+            QStringLiteral("ProgramFiles")).isArray();
+        std::set<std::string> rootPrograms;
+        for (const QJsonValue& fileValue :
+            root.value(QStringLiteral("ProgramFiles")).toArray())
+        {
+            const std::string name = LowerAscii(fileValue.toString().toStdString());
+            if (!name.empty()) { rootPrograms.insert(name); }
+        }
+        std::set<std::string> projectPrograms = rootPrograms;
+        for (const QJsonValue& taskValue : tasks)
+        {
+            for (const QJsonValue& fileValue :
+                taskValue.toObject().value(QStringLiteral("ProgramFiles")).toArray())
+            {
+                projectPrograms.insert(LowerAscii(fileValue.toString().toStdString()));
+            }
+        }
+        if (projectPrograms.size() > kInovanceProgramFileLimit)
+        {
+            error = "PRJ程序清单合计超过16个文件上限。";
+            return false;
+        }
+        // Normal V3 exports omit root ProgramFiles and use the root count as the
+        // aggregate task count.  Hybrid exports pair a root ProgramFiles array
+        // with project-level modules stored outside Task0; in that form the count
+        // belongs to that root array.  Preserve the controller's two valid forms.
+        const int projectProgramCount = static_cast<int>(
+            hasRootProgramFiles ? rootPrograms.size() : projectPrograms.size());
+        if (root.value(QStringLiteral("ProgramFilesCount")).toInt(-1)
+            != projectProgramCount)
+        {
+            changed = true;
+        }
+        root.insert(QStringLiteral("ProgramFilesCount"), projectProgramCount);
+    }
+    else
+    {
+        if (!updateProgramFiles(root)) { return false; }
+    }
+
+    const QByteArray serialized = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (serialized.isEmpty())
+    {
+        error = "PRJ序列化结果为空。";
+        return false;
+    }
+    updatedContent.assign(serialized.constData(), static_cast<std::size_t>(serialized.size()));
+    return true;
+}
+
 bool ValidateInovanceCallableModule(const std::string& content, std::string& error)
 {
-    const std::regex runFunction(
-        R"((^|[\r\n])[\t ]*Func[\t ]*Run[\t ]*\([\t ]*\))",
+    const std::regex moduleScopeComment(
+        R"(EndProgramInfo(?:[\t ]*\r?\n)*[\t ]*//)",
+        std::regex_constants::icase);
+    if (std::regex_search(content, moduleScopeComment))
+    {
+        error = "ProgramInfo后、局部点声明前不能放置模块级注释。";
+        return false;
+    }
+    const std::regex callableFunction(
+        R"((^|[\r\n])[\t ]*Func[\t ]*func1[\t ]*\([\t ]*\))",
         std::regex_constants::icase);
     const std::regex startEntry(
         R"((^|[\r\n])[\t ]*Start[\t ]*;)",
@@ -420,15 +800,46 @@ bool ValidateInovanceCallableModule(const std::string& content, std::string& err
     const std::regex mainEntry(
         R"((^|[\r\n])[\t ]*Main[\t ]*\()",
         std::regex_constants::icase);
-    if (!std::regex_search(content, runFunction))
+    if (!std::regex_search(content, callableFunction))
     {
-        error = "模块缺少适配层约定的无参数公共入口 Func Run()。";
+        error = "模块缺少汇川Call调度约定的无参数入口 Func func1()。";
         return false;
     }
     if (std::regex_search(content, startEntry) || std::regex_search(content, mainEntry))
     {
         error = "公共模块包含 Start/Main 任务入口；同一工程只能由 main.pro 保留入口函数。";
         return false;
+    }
+    const std::regex localPointDeclaration(
+        R"((^|[\r\n])[\t ]*LP[\t ]*\[[\t ]*([0-9]+)[\t ]*\][\t ]*=)",
+        std::regex_constants::icase);
+    std::set<int> localPointIndexes;
+    for (std::sregex_iterator match(
+             content.begin(), content.end(), localPointDeclaration), end;
+         match != end; ++match)
+    {
+        int index = -1;
+        try
+        {
+            index = std::stoi((*match)[2].str());
+        }
+        catch (...)
+        {
+            error = "公共模块包含无法解析的LP变量序号。";
+            return false;
+        }
+        if (index < 0 || index > 9999)
+        {
+            error = "公共模块LP[" + std::to_string(index)
+                + "]超出0..9999范围。";
+            return false;
+        }
+        if (!localPointIndexes.insert(index).second)
+        {
+            error = "公共模块重复声明LP[" + std::to_string(index)
+                + "]；同一PRO内局部点序号必须唯一。";
+            return false;
+        }
     }
     error.clear();
     return true;
@@ -437,15 +848,16 @@ bool ValidateInovanceCallableModule(const std::string& content, std::string& err
 bool WriteInovanceDispatcher(
     const std::filesystem::path& path,
     const std::string& moduleName,
+    const std::string& robotName,
     std::string& content,
     std::string& error)
 {
     std::ostringstream source;
-    source << "// " << kInovanceDispatcherMarker << "\r\n"
-        << "Include \"" << moduleName << ".pro\";\r\n"
+    source << InovanceProgramInfo(robotName)
         << "Start;\r\n"
         << "B[" << kInovanceNativeProgramStateByte << "] = 1;\r\n"
-        << moduleName << ".Run();\r\n"
+        << "Call \"" << moduleName << ".pro\",\""
+        << kInovanceCallableFunction << "\";\r\n"
         << "B[" << kInovanceNativeProgramStateByte << "] = 10;\r\n"
         << "End;\r\n";
     content = source.str();
@@ -546,6 +958,7 @@ long long InovanceRobotCtrl::SteadyMs()
 
 bool InovanceRobotCtrl::InitRobotDriver(std::string unitName)
 {
+    m_kinematicsSession.Invalidate();
     m_weldJobEnabled = false;
     m_weldArcEnableDo = -1;
     m_weldArcEnableActiveValue = 1;
@@ -592,8 +1005,13 @@ bool InovanceRobotCtrl::InitRobotDriver(std::string unitName)
     ini.ReadString(false, "WobjNo", &m_wobjNo);
     ini.ReadString(false, "MaxBufferedCommands", &m_maxBufferedCommands);
     ini.ReadString(false, "ForceControlPermit", &m_forceControlPermit);
-    ini.ReadString(false, "ApiUserLevel", &m_apiUserLevel);
-    ini.ReadString(false, "ApiPassword", &m_apiPassword);
+    int configuredUserLevel = 0;
+    std::string configuredPassword;
+    ini.ReadString(false, "ApiUserLevel", &configuredUserLevel);
+    ini.ReadString(false, "ApiPassword", &configuredPassword);
+    const auto login = InovanceUserLogin::Resolve(configuredUserLevel, configuredPassword);
+    m_apiUserLevel = login.level;
+    m_apiPassword = login.password;
     ini.ReadString(false, "FTPIP", &m_ftpIp);
     ini.ReadString(false, "FTPPort", &m_ftpPort);
     ini.ReadString(false, "FTPUser", &m_ftpUser);
@@ -603,10 +1021,31 @@ bool InovanceRobotCtrl::InitRobotDriver(std::string unitName)
     if (m_ftpIp.empty()) { m_ftpIp = m_socketIp; }
     if (m_ftpPort <= 0 || m_ftpPort > 65535) { m_ftpPort = 7777; }
     if (m_nRobotType == 0) { m_nRobotType = ROBOT_TYPE_INOVANCE; }
-    m_toolNo = std::clamp(m_toolNo, 0, 15);
-    m_wobjNo = std::clamp(m_wobjNo, 0, 15);
+    // 早期汇川模板曾把现场坐标错误写成 Tool0/Wobj0。当前控制器标定、扫描、
+    // 手眼和原生JOB均绑定 Tool[1] + Wobj[1]；加载时修复旧数据并回写数据库。
+    if (m_toolNo == 0)
+    {
+        m_toolNo = kApplicationGunToolNumber;
+        if (!ini.WriteString("ToolNo", m_toolNo) && m_pRobotLog != nullptr)
+        {
+            m_pRobotLog->write(LogColor::WARNING,
+                "汇川旧Tool0配置已在本次运行按Tool1使用，但回写数据库失败 | unit=%s",
+                unitName.c_str());
+        }
+    }
+    if (m_wobjNo == 0)
+    {
+        m_wobjNo = 1;
+        if (!ini.WriteString("WobjNo", m_wobjNo) && m_pRobotLog != nullptr)
+        {
+            m_pRobotLog->write(LogColor::WARNING,
+                "汇川旧Wobj0配置已在本次运行按Wobj1使用，但回写数据库失败 | unit=%s",
+                unitName.c_str());
+        }
+    }
+    m_toolNo = std::clamp(m_toolNo, 1, 15);
+    m_wobjNo = std::clamp(m_wobjNo, 1, 15);
     m_maxBufferedCommands = std::clamp(m_maxBufferedCommands, 1, 32);
-    m_apiUserLevel = std::clamp(m_apiUserLevel, 0, 3);
 
     ini.SetSectionName("WeldJob");
     ini.ReadString(false, "Enabled", &m_weldJobEnabled);
@@ -679,15 +1118,15 @@ std::uint64_t InovanceRobotCtrl::DriverCapabilities() const
         | RobotDriverCapabilityBit(RobotDriverCapability::ToolDataRead)
         | RobotDriverCapabilityBit(RobotDriverCapability::TeachPendantSpeedControl)
         | RobotDriverCapabilityBit(RobotDriverCapability::FtpFileTransfer)
-        | RobotDriverCapabilityBit(RobotDriverCapability::OfflineTrajectoryExport);
-    const double mainAxisUnits[6] = {
-        m_tAxisUnit.dSPulseUnit, m_tAxisUnit.dLPulseUnit, m_tAxisUnit.dUPulseUnit,
-        m_tAxisUnit.dRPulseUnit, m_tAxisUnit.dBPulseUnit, m_tAxisUnit.dTPulseUnit
-    };
-    const bool jointUnitsReady = std::all_of(
-        std::begin(mainAxisUnits), std::end(mainAxisUnits),
-        [](double unit) { return std::isfinite(unit) && std::abs(unit) >= 1e-15; });
-    if (jointUnitsReady)
+        | RobotDriverCapabilityBit(RobotDriverCapability::HandEyeMatrixRead)
+        | RobotDriverCapabilityBit(RobotDriverCapability::OfflineTrajectoryExport)
+        | RobotDriverCapabilityBit(RobotDriverCapability::CircularMotion)
+        | RobotDriverCapabilityBit(RobotDriverCapability::RealRegister)
+        | RobotDriverCapabilityBit(RobotDriverCapability::StructuredControllerStatus)
+        | RobotDriverCapabilityBit(RobotDriverCapability::ControllerKinematicsRead)
+        | RobotDriverCapabilityBit(RobotDriverCapability::ControllerKinematicsCalculate)
+        | RobotDriverCapabilityBit(RobotDriverCapability::CalibrationAssetDiscovery);
+    if (m_connectionReady.load() && m_kinematicsSession.Ready())
     {
         capabilities |= RobotDriverCapabilityBit(RobotDriverCapability::JointMotion);
     }
@@ -709,6 +1148,16 @@ RobotConnectionEndpoint InovanceRobotCtrl::ControlEndpoint() const
 
 bool InovanceRobotCtrl::CloseSocketLocked()
 {
+    m_connectionReady.store(false);
+    m_kinematicsSession.Invalidate();
+    {
+        std::lock_guard<std::mutex> passiveLock(m_passiveMutex);
+        m_passivePulseValid = false;
+    }
+    m_userLoggedIn.store(false);
+    m_modeConnectionEpoch.fetch_add(1);
+    m_dataStreamEntryMode.store(-1);
+    m_dataStreamEntryMotor.store(-1);
     const SOCKET socket = ToSocket(m_socketHandle);
     if (socket != INVALID_SOCKET)
     {
@@ -730,6 +1179,22 @@ bool InovanceRobotCtrl::CloseSocketLocked()
 
 bool InovanceRobotCtrl::Connect()
 {
+    // An explicit connection action permits one new authentication attempt.
+    return ConnectWithPolicy(true);
+}
+
+bool InovanceRobotCtrl::ConnectWithPolicy(bool explicitRetry)
+{
+    // Keep the TCP handshake and authentication atomic against all commands,
+    // concurrent Connect calls and Disconnect. IsConnected is false until verified.
+    std::unique_lock<std::mutex> lock(m_socketMutex);
+    if (m_connectionReady.load()) { return true; }
+    std::string blockedError;
+    if (!m_loginRetry.Begin(explicitRetry, blockedError))
+    {
+        SetLastRobotError(blockedError);
+        return false;
+    }
     ClearLastRobotError();
     const RobotConnectionEndpoint endpoint = ControlEndpoint();
     if (!endpoint.IsValid())
@@ -739,8 +1204,8 @@ bool InovanceRobotCtrl::Connect()
     }
 
     {
-        std::lock_guard<std::mutex> lock(m_socketMutex);
-        if (m_connected.load()) { return true; }
+        if (m_connectionReady.load()) { return true; }
+        if (m_connected.load()) { CloseSocketLocked(); }
         if (!m_wsaStarted)
         {
             WSADATA data = {};
@@ -797,18 +1262,40 @@ bool InovanceRobotCtrl::Connect()
     }
 
     int connectionState = 0;
-    if (!QueryInt("Get_ConnectState", connectionState) || connectionState != 1)
+    if (!QueryIntLocked("Get_ConnectState", connectionState) || connectionState != 1)
     {
         SetLastRobotError("汇川TCP已建立，但Get_ConnectState未确认上位机连接状态为1。");
-        Disconnect();
+        CloseSocketLocked();
         return false;
     }
+    if (!LoginUserLocked())
+    {
+        CloseSocketLocked();
+        return false;
+    }
+    m_connectionReady.store(true);
     ClearLastRobotError();
     if (m_pRobotLog != nullptr)
     {
         m_pRobotLog->write(LogColor::SUCCESS,
-            "汇川远程以太网已连接：%s:%d", endpoint.host.c_str(), endpoint.port);
+            "汇川远程以太网已连接：%s:%d，用户级别=%d（CurUserType已确认）",
+            endpoint.host.c_str(), endpoint.port, m_apiUserLevel);
     }
+    // Live read-only acquisition, not a cached AxisUnit grant. Release the
+    // command lock first: the fixed recipe issues ordinary query commands.
+    lock.unlock();
+    // Restore the selected recipe only. This never runs a test, changes mode,
+    // acquires control permit, enables the motor or starts the data stream.
+    RestoreModePreparation();
+    RobotKinematicsValidationResult kinematics;
+    if (!RefreshKinematicsFromController(kinematics))
+    {
+        if (m_pRobotLog != nullptr)
+        { m_pRobotLog->write(LogColor::ERR, "汇川控制连接保留，关节运动未就绪：%s", GetLastRobotError().c_str()); }
+        return IsConnected();
+    }
+    if (m_pRobotLog != nullptr)
+    { m_pRobotLog->write(LogColor::SUCCESS, "汇川连接后运动学已实时校验并保存数据库：%s", kinematics.acquisitionSummary.c_str()); }
     return true;
 }
 
@@ -828,7 +1315,7 @@ void InovanceRobotCtrl::EnsureConnectionForMonitor()
     {
         return;
     }
-    Connect();
+    ConnectWithPolicy(false);
 }
 
 std::string InovanceRobotCtrl::ProtocolErrorText(const std::string& response)
@@ -836,6 +1323,10 @@ std::string InovanceRobotCtrl::ProtocolErrorText(const std::string& response)
     std::string code = Trim(response);
     const std::size_t end = code.find_first_of(" ,;:");
     if (end != std::string::npos) { code.resize(end); }
+    if (code == "e1") return "指令语法错误";
+    if (code == "e2") return "参数数量错误";
+    if (code == "e3") return "参数值不合法";
+    if (code == "e4") return "当前模式不允许此操作";
     if (code == "e11") return "运动缓存仍有未完成指令";
     if (code == "e16") return "当前状态不允许暂停";
     if (code == "e18") return "控制器模式冲突";
@@ -852,6 +1343,22 @@ bool InovanceRobotCtrl::SendCommand(
     std::string& response,
     int timeoutMs)
 {
+    std::lock_guard<std::mutex> lock(m_socketMutex);
+    if (!m_connectionReady.load())
+    {
+        response.clear();
+        SetLastRobotError(m_loginRetry.Error().empty()
+            ? "汇川命令未发送：连接或自动登录尚未完成。" : m_loginRetry.Error());
+        return false;
+    }
+    return SendCommandLocked(command, response, timeoutMs);
+}
+
+bool InovanceRobotCtrl::SendCommandLocked(
+    const std::string& command,
+    std::string& response,
+    int timeoutMs)
+{
     response.clear();
     if (command.empty() || command.size() > 16384
         || command.find("@@") != std::string::npos
@@ -861,17 +1368,27 @@ bool InovanceRobotCtrl::SendCommand(
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(m_socketMutex);
     if (!m_connected.load() || ToSocket(m_socketHandle) == INVALID_SOCKET)
     {
         SetLastRobotError("汇川命令失败：机器人未连接。");
         return false;
     }
+    // Startup acquisition has no high-level operation lease (stage 6 already
+    // owns one). Enforce exclusion here as well; safety Stop/OFF still pass.
+    if (m_kinematicsReadInProgress.load()
+        && (command.rfind("Mov", 0) == 0 || command.rfind("Set_", 0) == 0
+            || command == "Prg Start" || command == "Motor ON"
+            || command == "Dsmode ON" || command == "Dsmode CONTINUE"))
+    {
+        SetLastRobotError("汇川正在只读校验运动学资产，暂不接受运动、上电、程序启动或参数写入；安全停止仍可使用。");
+        return false;
+    }
     // 与安全 STOP 共用 socket 互斥锁后再检查取消锁存，关闭
     // “检查通过 -> STOP -> 随后才发送 Prg Start”的竞态窗口。
-    if (command == "Prg Start" && RobotOperationLease::IsCancellationRequested(this))
+    if ((command == "Prg Start" || command == "Motor ON" || command == "Dsmode ON"
+        || command == "Dsmode CONTINUE") && RobotOperationLease::IsCancellationRequested(this))
     {
-        SetLastRobotError("汇川硬件操作已被安全停止取消，Prg Start 未发送。");
+        SetLastRobotError("汇川硬件操作已被安全停止取消，" + command + " 未发送。");
         return false;
     }
 
@@ -932,7 +1449,14 @@ bool InovanceRobotCtrl::SendCommand(
     response = Trim(framed.substr(begin + 2, finish - (begin + 2)));
     if (!response.empty() && (response.front() == 'e' || response.front() == 'E'))
     {
-        const std::string operation = command.substr(0, command.find(' '));
+        if (command.rfind("UserLogin ", 0) == 0)
+        {
+            SetLastRobotError("汇川UserLogin失败：" + InovanceUserLogin::RejectionDetail(response));
+            return false;
+        }
+        const std::string operation = command.rfind("Dsmode ", 0) == 0
+            || command.rfind("Motor ", 0) == 0 || command.rfind("Set_Mode ", 0) == 0
+            ? command : command.substr(0, command.find(' '));
         SetLastRobotError("汇川命令 " + operation + " 失败："
             + ProtocolErrorText(response) + "（" + response + "）。");
         return false;
@@ -943,8 +1467,20 @@ bool InovanceRobotCtrl::SendCommand(
 
 bool InovanceRobotCtrl::QueryInt(const std::string& command, int& value)
 {
+    std::lock_guard<std::mutex> lock(m_socketMutex);
+    if (!m_connectionReady.load())
+    {
+        SetLastRobotError(m_loginRetry.Error().empty()
+            ? "汇川查询未发送：连接或自动登录尚未完成。" : m_loginRetry.Error());
+        return false;
+    }
+    return QueryIntLocked(command, value);
+}
+
+bool InovanceRobotCtrl::QueryIntLocked(const std::string& command, int& value)
+{
     std::string response;
-    if (!SendCommand(command, response)) { return false; }
+    if (!SendCommandLocked(command, response)) { return false; }
     const std::string text = ValuePart(response);
     char* end = nullptr;
     errno = 0;
@@ -960,6 +1496,55 @@ bool InovanceRobotCtrl::QueryInt(const std::string& command, int& value)
         || parsed > std::numeric_limits<int>::max())
     {
         SetLastRobotError("汇川命令 " + command + " 返回的整数格式无效。");
+        return false;
+    }
+    value = static_cast<int>(parsed);
+    return true;
+}
+
+bool InovanceRobotCtrl::QueryLeadingInt(const std::string& command, int& value)
+{
+    std::string response;
+    if (!SendCommand(command, response)) { return false; }
+    const std::string text = ValuePart(response);
+    char* end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(text.c_str(), &end, 0);
+    if (errno != 0 || end == text.c_str()
+        || parsed < std::numeric_limits<int>::min()
+        || parsed > std::numeric_limits<int>::max())
+    {
+        SetLastRobotError("汇川命令 " + command + " 返回值缺少有效的首个整数。");
+        return false;
+    }
+    value = static_cast<int>(parsed);
+    return true;
+}
+
+bool InovanceRobotCtrl::QuerySystemErrorCode(int& value)
+{
+    std::string response;
+    if (!SendCommand("Get_SysErr", response)) { return false; }
+    std::string text = Trim(ValuePart(response));
+    int base = 0;
+    if (!text.empty() && (text.back() == 'h' || text.back() == 'H'))
+    {
+        text.pop_back();
+        base = 16;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(text.c_str(), &end, base);
+    while (end != nullptr && *end != '\0'
+        && std::isspace(static_cast<unsigned char>(*end)))
+    {
+        ++end;
+    }
+    if (errno != 0 || end == text.c_str() || (end != nullptr && *end != '\0')
+        || parsed < std::numeric_limits<int>::min()
+        || parsed > std::numeric_limits<int>::max())
+    {
+        SetLastRobotError("汇川命令 Get_SysErr 返回的十六进制故障码格式无效。");
         return false;
     }
     value = static_cast<int>(parsed);
@@ -992,7 +1577,8 @@ RobotFileTransferProfile InovanceRobotCtrl::FileTransferProfile() const
         : m_ftpIp + ":" + std::to_string(m_ftpPort);
     profile.defaultRemoteDirectory = "/TeachProgram";
     profile.defaultLocalDirectory = "Job/Inovance";
-    profile.localFileFilters = { "*.pro", "*.prj", "*.pts", "*.jsn" };
+    profile.localFileFilters = { "*.pro", "*.prj", "*.pts", "*.jsn", "*.dat" };
+    profile.acceptanceProgramExtensions = { ".pro" };
     return profile;
 }
 
@@ -1014,9 +1600,386 @@ std::shared_ptr<RobotFileTransferSession> InovanceRobotCtrl::CreateFileTransferS
         m_ftpUser,
         m_ftpPassword,
         FileTransferProfile(),
-        std::vector<std::string>{ ".pro", ".prj", ".pts", ".jsn" },
+        std::vector<std::string>{ ".pro", ".prj", ".pts", ".jsn", ".dat" },
         std::vector<std::string>{ ".pro" },
         "Log/InovanceRobotFtp.log");
+}
+
+bool InovanceRobotCtrl::RefreshKinematicsFromController(
+    RobotKinematicsValidationResult& result)
+{
+    std::lock_guard<std::mutex> refreshLock(m_kinematicsRefreshMutex);
+    InovanceKinematicsReadScope readOnlyScope(m_kinematicsReadInProgress);
+    const std::uint64_t generation = m_kinematicsSession.Invalidate();
+    {
+        std::lock_guard<std::mutex> passiveLock(m_passiveMutex);
+        m_passivePulseValid = false;
+    }
+    result = {};
+    const auto fail = [this](const std::string& message)
+    {
+        SetLastRobotError("汇川运动学资产读取失败：" + message);
+        return false;
+    };
+    if (!IsConnected()) { return fail("2222控制通道未连接。"); }
+    int motion = -1;
+    if (m_trajectoryRunning.load() || m_nativeProgramRunning.load()
+        || m_continuousJogRunning.load() || RobotOperationLease::MotionCompletionPending(this)
+        || !QueryInt("Get_MotionSts", motion) || motion != 0)
+    { return fail("机器人未确认静止，暂不装载轴单位；停止后请重新连接或执行流程6。"); }
+
+    std::string modelResponse;
+    std::string firmwareResponse;
+    if (!SendCommand("Get_RobotType", modelResponse)
+        || !SendCommand("Get_FwVersion", firmwareResponse)) { return false; }
+    result.modelName = ValuePart(modelResponse);
+    if (result.modelName.empty() || result.modelName.size() > 128)
+    { return fail("Get_RobotType返回无效。"); }
+    if (ValuePart(firmwareResponse).empty()) { return fail("Get_FwVersion返回无效。"); }
+
+    std::vector<double> structure;
+    std::vector<double> angularCompensation;
+    std::vector<double> reductionRatios;
+    std::vector<double> couplingMaster;
+    std::vector<double> couplingSlave;
+    std::vector<double> absoluteZero;
+    if (!QueryDoubles("Get_StrPara", structure, 6)
+        || !QueryDoubles("Get_StrParaComp", angularCompensation, 6)
+        || !QueryDoubles("Get_RdctRatio", reductionRatios, 6)
+        || !QueryDoubles("Get_CpParaM", couplingMaster, 6)
+        || !QueryDoubles("Get_CpParaS", couplingSlave, 6)
+        || !QueryDoubles("Get_ZeroPos", absoluteZero, 6))
+    {
+        return false;
+    }
+
+    T_AXISLIMITANGLE limits;
+    for (int axis = 0; axis < 6; ++axis)
+    {
+        std::vector<double> negative;
+        std::vector<double> positive;
+        const std::string name = "J" + std::to_string(axis + 1);
+        if (!QueryDoubles("Get_AxisNLim " + name, negative, 1)
+            || !QueryDoubles("Get_AxisPLim " + name, positive, 1)
+            || negative[0] >= positive[0])
+        {
+            return fail("关节" + name + "限位读取或范围校验失败。");
+        }
+        double* limitStorage = reinterpret_cast<double*>(&limits);
+        limitStorage[axis * 2] = positive[0];
+        limitStorage[axis * 2 + 1] = negative[0];
+    }
+
+    // 远程协议没有返回编码器位数和d3/d5/a4/a5长度补偿；只读下载厂商
+    // MachineParams.json补齐。该文件只作本次内存解析，随后立即删除临时副本。
+    const QString localDirectory = AppPaths::WritablePath(
+        QStringLiteral("Temp/InovanceKinematics"));
+    std::error_code fileError;
+    std::filesystem::create_directories(
+        std::filesystem::path(localDirectory.toStdWString()), fileError);
+    if (fileError) { return fail("无法创建参数只读下载临时目录。"); }
+    // Each robot/refresh owns its temporary copy; parallel RobotA/RobotC reads
+    // cannot delete or parse one another's MachineParams.json.
+    QTemporaryDir downloadDirectory(localDirectory + QStringLiteral("/read-XXXXXX"));
+    if (!downloadDirectory.isValid()) { return fail("无法创建独立参数下载目录。"); }
+    const QString localFile = downloadDirectory.filePath(QStringLiteral("MachineParams.json"));
+
+    FtpClient ftp(m_pRobotLog, m_ftpIp, m_ftpPort, m_ftpUser, m_ftpPassword);
+    ftp.setMessageBoxesEnabled(false);
+    if (!ftp.connect()) { return fail("FTP连接失败，无法补齐编码器和长度补偿参数。"); }
+    std::vector<FtpRemoteFileInfo> parameterFiles;
+    if (!ftp.listFiles("/RobotParams", parameterFiles, nullptr, 256))
+    { return fail("FTP无法列出/RobotParams。"); }
+    const auto machineFile = std::find_if(parameterFiles.cbegin(), parameterFiles.cend(),
+        [](const FtpRemoteFileInfo& entry)
+        {
+            return !entry.isDirectory && LowerAscii(entry.name) == "machineparams.json";
+        });
+    if (machineFile == parameterFiles.cend() || machineFile->size == 0
+        || machineFile->size > kMaxInovanceMachineParametersBytes)
+    { return fail("MachineParams.json不存在、为空或超过1MiB上限。"); }
+    std::atomic_bool cancelDownload{ false };
+    if (!ftp.downloadFileBounded(
+        kInovanceMachineParametersPath,
+        localFile.toStdString(),
+        machineFile->size,
+        kMaxInovanceMachineParametersBytes,
+        &cancelDownload))
+    { return fail("MachineParams.json只读下载失败。"); }
+
+    QFile input(localFile);
+    if (!input.open(QIODevice::ReadOnly))
+    {
+        std::filesystem::remove(std::filesystem::path(localFile.toStdWString()), fileError);
+        return fail("MachineParams.json临时副本无法读取。");
+    }
+    const QByteArray jsonBytes = input.readAll();
+    input.close();
+    std::filesystem::remove(std::filesystem::path(localFile.toStdWString()), fileError);
+    QJsonParseError jsonError;
+    const QJsonDocument document = QJsonDocument::fromJson(jsonBytes, &jsonError);
+    if (jsonError.error != QJsonParseError::NoError || !document.isObject())
+    { return fail("MachineParams.json格式无效。"); }
+
+    const QJsonObject root = document.object();
+    const QJsonObject body = root.value(QStringLiteral("stRobotBody")).toObject();
+    if (body.value(QStringLiteral("cRobotName")).toString().toStdString() != result.modelName
+        || !body.value(QStringLiteral("cRobotName")).toString().startsWith(QStringLiteral("IR-R"))
+        || body.value(QStringLiteral("RobotType")).toInt() != 6
+        || body.value(QStringLiteral("stBase")).toObject().value(QStringLiteral("i32AxisNum")).toInt() != 6)
+    { return fail("TCP/FTP型号不一致或不是已支持的IR-R六轴机构。"); }
+    const QJsonObject joint = root.value(QStringLiteral("stJoint")).toObject();
+    const QJsonObject kinematicsFile = root.value(QStringLiteral("stRobotBody")).toObject()
+        .value(QStringLiteral("stKinematics")).toObject();
+    const QJsonObject install = root.value(QStringLiteral("stMotion")).toObject()
+        .value(QStringLiteral("stSpace")).toObject()
+        .value(QStringLiteral("stInstall")).toObject()
+        .value(QStringLiteral("stInstallMode")).toObject();
+    std::vector<double> encoderBits;
+    std::vector<double> fileRatios;
+    std::vector<double> fileZero;
+    std::vector<double> filePositiveLimits;
+    std::vector<double> fileNegativeLimits;
+    std::vector<double> fileStructure;
+    std::vector<double> fileCouplingMaster;
+    std::vector<double> fileCouplingSlave;
+    if (!JsonDoubleArray(joint, "i32EncBit", 6, encoderBits)
+        || !JsonDoubleArray(joint, "dRatio", 6, fileRatios)
+        || !JsonDoubleArray(joint, "dAbsZero", 6, fileZero)
+        || !JsonDoubleArray(joint, "dPosLimit", 6, filePositiveLimits)
+        || !JsonDoubleArray(joint, "dNegLimit", 6, fileNegativeLimits)
+        || !JsonDoubleArray(joint, "dCoupParamMaster", 6, fileCouplingMaster)
+        || !JsonDoubleArray(joint, "dCoupParamSlave", 6, fileCouplingSlave)
+        || !JsonDoubleArray(kinematicsFile, "dRobotStructureParam", 6, fileStructure))
+    { return fail("MachineParams.json缺少机械参数字段。"); }
+
+    const double fileAnglesRaw[6] = {
+        install.value(QStringLiteral("alpha1")).toDouble(std::numeric_limits<double>::quiet_NaN()),
+        install.value(QStringLiteral("alpha2")).toDouble(std::numeric_limits<double>::quiet_NaN()),
+        install.value(QStringLiteral("alpha3")).toDouble(std::numeric_limits<double>::quiet_NaN()),
+        install.value(QStringLiteral("alpha4")).toDouble(std::numeric_limits<double>::quiet_NaN()),
+        install.value(QStringLiteral("alpha5")).toDouble(std::numeric_limits<double>::quiet_NaN()),
+        install.value(QStringLiteral("beta2")).toDouble(std::numeric_limits<double>::quiet_NaN())
+    };
+    const std::vector<double> fileAngles(std::begin(fileAnglesRaw), std::end(fileAnglesRaw));
+    const double d3 = install.value(QStringLiteral("d3")).toDouble(
+        std::numeric_limits<double>::quiet_NaN());
+    const double d5 = install.value(QStringLiteral("d5")).toDouble(
+        std::numeric_limits<double>::quiet_NaN());
+    const double a4 = install.value(QStringLiteral("a4")).toDouble(
+        std::numeric_limits<double>::quiet_NaN());
+    const double a5 = install.value(QStringLiteral("a5")).toDouble(
+        std::numeric_limits<double>::quiet_NaN());
+    if (!std::all_of(fileAngles.cbegin(), fileAngles.cend(),
+            [](double value) { return std::isfinite(value); })
+        || !std::isfinite(d3) || !std::isfinite(d5)
+        || !std::isfinite(a4) || !std::isfinite(a5))
+    { return fail("MachineParams.json缺少完整安装补偿参数。"); }
+    std::vector<double> lengthCompensation;
+    if (!QueryDoubles("Get_SupplementaryStrParamComp", lengthCompensation, 4)
+        || !NearlyEqualArray(lengthCompensation, {d3, d5, a4, a5}, 4, 0.002))
+    { return fail("2222长度补偿与FTP参数不一致，拒绝装载混合设备或旧备份模型。"); }
+
+    // 同一控制器的两条只读来源必须一致，防止拿到备份文件或其它本体参数。
+    if (!NearlyEqualArray(structure, fileStructure, 6, 0.002)
+        || !NearlyEqualArray(angularCompensation, fileAngles, 6, 0.002)
+        || !NearlyEqualArray(reductionRatios, fileRatios, 6, 0.002)
+        || !NearlyEqualArray(absoluteZero, fileZero, 6, 0.51)
+        || !NearlyEqualArray(couplingMaster, fileCouplingMaster, 6, 0.002)
+        || !NearlyEqualArray(couplingSlave, fileCouplingSlave, 6, 0.002))
+    { return fail("2222接口值与FTP MachineParams.json不一致，拒绝装载混合模型。"); }
+    for (int axis = 0; axis < 6; ++axis)
+    {
+        if (std::abs(limits.GetMaxAngleByIndex(axis) - filePositiveLimits[axis]) > 0.002
+            || std::abs(limits.GetMinAngleByIndex(axis) - fileNegativeLimits[axis]) > 0.002)
+        { return fail("2222关节限位与FTP参数不一致。"); }
+    }
+
+    T_AXISUNIT units = m_tAxisUnit; // Preserve separately configured external axes.
+    double* unitStorage = reinterpret_cast<double*>(&units);
+    for (int axis = 0; axis < 6; ++axis)
+    {
+        const int bits = static_cast<int>(std::llround(encoderBits[axis]));
+        if (bits < 8 || bits > 32 || encoderBits[axis] != bits || fileRatios[axis] <= 0.0)
+        { return fail("编码器位数或减速比范围无效。"); }
+        unitStorage[axis] = 360.0 / (std::ldexp(1.0, bits) * fileRatios[axis]);
+    }
+
+    // 汇川IR-R六轴模型：结构长度为a1/a2/a3/d4/d6/d1；安装补偿给出
+    // alpha1..alpha5/beta2及d3/d5/a4/a5，J2固定+90度零位偏置。
+    T_KINEMATICS model;
+    model.dA1 = fileStructure[0]; model.dAL1 = fileAngles[0]; model.dD1 = fileStructure[5]; model.dTH1 = 0.0;
+    model.dA2 = fileStructure[1]; model.dAL2 = fileAngles[1]; model.dD2 = 0.0; model.dTH2 = 90.0;
+    model.dA3 = fileStructure[2]; model.dAL3 = fileAngles[2]; model.dD3 = d3; model.dTH3 = 0.0;
+    model.dA4 = a4; model.dAL4 = fileAngles[3]; model.dD4 = fileStructure[3]; model.dTH4 = 0.0;
+    model.dA5 = a5; model.dAL5 = fileAngles[4]; model.dD5 = d5; model.dTH5 = 0.0;
+    model.dA6 = 0.0; model.dAL6 = fileAngles[5]; model.dD6 = fileStructure[4]; model.dTH6 = 0.0;
+
+    std::vector<double> joints;
+    std::vector<double> rawPulses;
+    if (!QueryInt("Get_MotionSts", motion) || motion != 0
+        || !QueryDoubles("Get_RobJPHere", joints, 14)
+        || !QueryDoubles("Get_PosHerePulse", rawPulses, 6))
+    { return false; }
+    for (int axis = 0; axis < 6; ++axis)
+    { result.currentJointDegrees[axis] = joints[axis]; }
+
+    const QJsonArray couplingMatrix = joint.value(QStringLiteral("dCoupParam")).toArray();
+    if (couplingMatrix.size() < 6 || couplingMatrix.at(5).toArray().size() < 6)
+    { return fail("MachineParams.json缺少完整关节耦合矩阵。"); }
+    const double j6FromJ5 = couplingMatrix.at(5).toArray().at(4).toDouble(
+        std::numeric_limits<double>::quiet_NaN());
+    if (!std::isfinite(j6FromJ5)) { return fail("J5/J6耦合系数无效。"); }
+    double maxPulseJointError = 0.0;
+    for (int axis = 0; axis < 6; ++axis)
+    {
+        double reconstructed = (rawPulses[axis] - fileZero[axis]) * unitStorage[axis];
+        if (axis == 5) { reconstructed -= j6FromJ5 * joints[4]; }
+        if (!std::isfinite(reconstructed) || !std::isfinite(reconstructed - joints[axis]))
+        { return fail("脉冲/关节换算出现非有限结果。"); }
+        maxPulseJointError = std::max(maxPulseJointError,
+            std::abs(reconstructed - joints[axis]));
+    }
+    if (maxPulseJointError > 0.01)
+    { return fail("绝对零点/编码器/耦合换算与Get_RobJPHere不一致。"); }
+
+    int activeTool = -1;
+    int activeWobj = -1;
+    if (!QueryInt("Get_ToolCNum", activeTool)
+        || !QueryInt("Get_WobjNum", activeWobj))
+    { return false; }
+    T_ROBOT_COORS tool;
+    if (!GetToolData(activeTool, tool)) { return false; }
+    std::vector<double> wobjValues;
+    if (!QueryDoubles("Get_WobjData " + std::to_string(activeWobj), wobjValues, 14))
+    { return false; }
+    if (std::llround(wobjValues[1]) != 1)
+    { return fail("当前工件坐标系不是固定工件，接口测试暂不支持关联外部机械单元。"); }
+    T_ROBOT_COORS userFrame;
+    userFrame.dX = wobjValues[2]; userFrame.dY = wobjValues[3]; userFrame.dZ = wobjValues[4];
+    userFrame.dRZ = wobjValues[5]; userFrame.dRY = wobjValues[6]; userFrame.dRX = wobjValues[7];
+    T_ROBOT_COORS objectFrame;
+    objectFrame.dX = wobjValues[8]; objectFrame.dY = wobjValues[9]; objectFrame.dZ = wobjValues[10];
+    objectFrame.dRZ = wobjValues[11]; objectFrame.dRY = wobjValues[12]; objectFrame.dRX = wobjValues[13];
+    if (!ReadCartesianPosition(result.controllerTcpInActiveWorkobject, nullptr))
+    { return false; }
+    std::vector<double> finalJoints;
+    int finalTool = -1;
+    int finalWobj = -1;
+    std::string finalModel;
+    std::string finalFirmware;
+    if (!QueryDoubles("Get_RobJPHere", finalJoints, 14)
+        || !QueryInt("Get_MotionSts", motion) || motion != 0
+        || !InovanceKinematicsSession::StationarySample(joints, finalJoints)
+        || !QueryInt("Get_ToolCNum", finalTool) || finalTool != activeTool
+        || !QueryInt("Get_WobjNum", finalWobj) || finalWobj != activeWobj
+        || !SendCommand("Get_RobotType", finalModel) || finalModel != modelResponse
+        || !SendCommand("Get_FwVersion", finalFirmware) || finalFirmware != firmwareResponse)
+    { return fail("采样期间关节、工具、工件或设备身份发生变化，拒绝混合时刻校验结果。"); }
+    const KDL::Frame controllerFlange = InovancePoseFrame(userFrame)
+        * InovancePoseFrame(objectFrame)
+        * InovancePoseFrame(result.controllerTcpInActiveWorkobject)
+        * InovancePoseFrame(tool).Inverse();
+    result.controllerFlangeInBase = InovanceFramePose(controllerFlange);
+
+    KDL::Chain chain;
+    const double* dh = reinterpret_cast<const double*>(&model);
+    for (int axis = 0; axis < 6; ++axis)
+    {
+        chain.addSegment(KDL::Segment(
+            KDL::Joint(KDL::Joint::RotZ),
+            KDL::Frame::DH(
+                dh[axis * 4] / 1000.0,
+                dh[axis * 4 + 1] * M_PI / 180.0,
+                dh[axis * 4 + 2] / 1000.0,
+                dh[axis * 4 + 3] * M_PI / 180.0)));
+    }
+    KDL::JntArray jointArray(6);
+    for (int axis = 0; axis < 6; ++axis)
+    { jointArray(axis) = joints[axis] * M_PI / 180.0; }
+    KDL::ChainFkSolverPos_recursive fk(chain);
+    KDL::Frame calculatedFlange;
+    if (fk.JntToCart(jointArray, calculatedFlange) < 0)
+    { return fail("当前关节正运动学计算失败。"); }
+    result.calculatedFlangeInBase = InovanceFramePose(calculatedFlange);
+    result.positionErrorMm = (calculatedFlange.p - controllerFlange.p).Norm() * 1000.0;
+    result.orientationErrorDeg = KDL::diff(controllerFlange, calculatedFlange).rot.Norm()
+        * 180.0 / M_PI;
+    if (!std::isfinite(result.positionErrorMm) || !std::isfinite(result.orientationErrorDeg)
+        || result.positionErrorMm > 2.0 || result.orientationErrorDeg > 0.1)
+    {
+        std::ostringstream error;
+        error << std::fixed << std::setprecision(4)
+            << "当前关节/直角闭环超差：位置=" << result.positionErrorMm
+            << "mm，姿态=" << result.orientationErrorDeg << "deg。";
+        return fail(error.str());
+    }
+
+    std::ostringstream summary;
+    summary << std::fixed << std::setprecision(4)
+        << "2222:Get_RobotType/Get_StrPara/Get_StrParaComp/Get_RdctRatio/"
+        << "Get_CpParaM/Get_CpParaS/Get_ZeroPos/Get_AxisNLim/Get_AxisPLim/"
+        << "Get_RobJPHere/Get_RobPHere/Get_PosHerePulse/Get_ToolData/Get_WobjData；"
+        << "FTP:" << kInovanceMachineParametersPath
+        << "(i32EncBit,d3,d5,a4,a5,dCoupParam)；"
+        << "活动Tool=" << activeTool << "，Wobj=" << activeWobj
+        << "，脉冲关节最大误差=" << maxPulseJointError << "deg。";
+    result.acquisitionSummary = summary.str();
+    // Persist an independent branded evidence snapshot, never write the shared
+    // RobotPara template and never restore a cache without the live recipe above.
+    const auto jsonArray = [](const double* values, int count)
+    {
+        QJsonArray array;
+        for (int index = 0; index < count; ++index) { array.append(values[index]); }
+        return array;
+    };
+    QJsonObject snapshot;
+    snapshot.insert(QStringLiteral("schema"), QStringLiteral("InovanceLiveKinematics-v1"));
+    snapshot.insert(QStringLiteral("robot"), QString::fromStdString(m_sRobotName));
+    snapshot.insert(QStringLiteral("controlHost"), QString::fromStdString(m_socketIp));
+    snapshot.insert(QStringLiteral("controlPort"), m_socketPort);
+    snapshot.insert(QStringLiteral("ftpHost"), QString::fromStdString(m_ftpIp));
+    snapshot.insert(QStringLiteral("ftpPort"), m_ftpPort);
+    snapshot.insert(QStringLiteral("model"), QString::fromStdString(result.modelName));
+    snapshot.insert(QStringLiteral("firmware"), QString::fromStdString(ValuePart(firmwareResponse)));
+    snapshot.insert(QStringLiteral("sourcePath"), QString::fromLatin1(kInovanceMachineParametersPath));
+    snapshot.insert(QStringLiteral("sourceSha256"), QString::fromLatin1(
+        QCryptographicHash::hash(jsonBytes, QCryptographicHash::Sha256).toHex()));
+    snapshot.insert(QStringLiteral("sourceMachineParameters"), root);
+    snapshot.insert(QStringLiteral("dh"), jsonArray(reinterpret_cast<const double*>(&model), 24));
+    snapshot.insert(QStringLiteral("axisUnit"), jsonArray(unitStorage, 9));
+    snapshot.insert(QStringLiteral("axisLimits"), jsonArray(reinterpret_cast<const double*>(&limits), 12));
+    snapshot.insert(QStringLiteral("pulseJointErrorDeg"), maxPulseJointError);
+    snapshot.insert(QStringLiteral("positionErrorMm"), result.positionErrorMm);
+    snapshot.insert(QStringLiteral("orientationErrorDeg"), result.orientationErrorDeg);
+    snapshot.insert(QStringLiteral("acquisitionSummary"), QString::fromStdString(result.acquisitionSummary));
+    snapshot.insert(QStringLiteral("validatedAt"), QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs));
+    snapshot.insert(QStringLiteral("requiresLiveValidationOnConnect"), true);
+    const QString serialized = QString::fromUtf8(QJsonDocument(snapshot).toJson(QJsonDocument::Compact));
+
+    // Database I/O can wait on SQLite; never hold the command/STOP socket lock
+    // while persisting. Snapshot publication is rechecked under that lock below.
+    if (!m_connectionReady.load() || generation != m_kinematicsSession.Generation())
+    { return fail("运动学采集期间连接已改变，本次结果已作废。"); }
+    const QString robot = QString::fromStdString(m_sRobotName);
+    const QString module = QStringLiteral("InovanceKinematics");
+    const QString key = QStringLiteral("ValidatedSnapshot");
+    QString readback;
+    if (!ConfigDatabase::WriteScopedSetting(QStringLiteral("robot"), robot, module, key, serialized, QStringLiteral("json"))
+        || !ConfigDatabase::ReadScopedSetting(QStringLiteral("robot"), robot, module, key, &readback)
+        || readback != serialized)
+    { return fail("实时验证通过，但数据库快照保存/回读失败，关节运动保持关闭。"); }
+    std::lock_guard<std::mutex> socketLock(m_socketMutex);
+    if (!m_connectionReady.load() || generation != m_kinematicsSession.Generation())
+    { return fail("数据库保存期间连接已改变，快照仅供诊断，本会话关节运动保持关闭。"); }
+    std::string installError;
+    if (!InstallValidatedKinematicsModel(model, units, limits, &installError))
+    { return fail(installError); }
+    if (!m_kinematicsSession.Publish(generation))
+    { return fail("运动学结果不属于当前连接，拒绝启用关节运动。"); }
+    result.valid = true;
+    ClearLastRobotError();
+    return true;
 }
 
 bool InovanceRobotCtrl::EnsureControlPermit()
@@ -1030,11 +1993,16 @@ bool InovanceRobotCtrl::EnsureControlPermit()
     }
 
     int owner = -1;
-    if (!QueryInt("CurPermit", owner)) { return false; }
+    if (!QueryLeadingInt("CurPermit", owner)) { return false; }
     if (owner == 1)
     {
         m_permitOwned.store(true);
         return true;
+    }
+    if (owner != 0 && owner != 2)
+    {
+        SetLastRobotError("汇川控制许可归属回读无效，未申请许可或发送控制指令。");
+        return false;
     }
     if (owner == 2 && !m_forceControlPermit)
     {
@@ -1053,7 +2021,7 @@ bool InovanceRobotCtrl::EnsureControlPermit()
         }
         return false;
     }
-    if (!QueryInt("CurPermit", owner) || owner != 1)
+    if (!QueryLeadingInt("CurPermit", owner) || owner != 1)
     {
         SetLastRobotError("汇川控制器未确认当前连接拥有控制许可。");
         return false;
@@ -1091,110 +2059,578 @@ bool InovanceRobotCtrl::EnsureMotionReady()
     return true;
 }
 
+InovanceModeSequence::Ops InovanceRobotCtrl::ModeSequenceOps(std::uint64_t expectedEpoch)
+{
+    InovanceModeSequence::Ops ops;
+    const auto epoch = expectedEpoch;
+    ops.read = [this, epoch](InovanceModeSequence::State& state, std::string& error)
+    {
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load())
+        { error = "组合测试期间连接已变化，禁止跨连接继续测试或恢复。"; return false; }
+        const bool ok = QueryIntLocked("Get_Mode", state.mode)
+            && QueryIntLocked("Get_MotorSts", state.motor) && QueryIntLocked("Get_DsMode", state.stream)
+            && QueryIntLocked("Get_MotionSts", state.motion) && QueryIntLocked("Get_TaskRunSts 0", state.task)
+            && QueryIntLocked("Get_EStopSts", state.estop) && QueryIntLocked("Get_SysErrSts", state.fault)
+            && IsConnected() && epoch == m_modeConnectionEpoch.load();
+        error = ok ? std::string() : GetLastRobotError();
+        return ok;
+    };
+    ops.send = [this, epoch](const std::string& command, std::string& reply)
+    {
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load())
+        { reply = "组合测试期间连接已变化，命令未发送。"; return false; }
+        std::string response;
+        const bool ok = SendCommandLocked(command, response) && response == "ok";
+        reply = ok ? response : (GetLastRobotError().empty() ? "非预期应答：" + response : GetLastRobotError());
+        return ok;
+    };
+    ops.cancelled = [this, epoch]() { return epoch != m_modeConnectionEpoch.load()
+        || RobotOperationLease::IsCancellationRequested(this); };
+    ops.delay = []() { std::this_thread::sleep_for(std::chrono::milliseconds(25)); };
+    return ops;
+}
+
+void InovanceRobotCtrl::RestoreModePreparation()
+{
+    RobotModePreparationStore::Binding binding;
+    std::uint64_t epoch = 0;
+    std::string identityError;
+    {
+        // Capture identity on a single live connection. Do not hold the socket
+        // mutex during SQLite I/O or take the socket mutex under the mode mutex.
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected()) { return; }
+        epoch = m_modeConnectionEpoch.load();
+        binding.robotName = QString::fromUtf8(m_sRobotName.c_str());
+        binding.driver = QStringLiteral("Inovance");
+        binding.host = QString::fromUtf8(m_socketIp.c_str());
+        binding.port = m_socketPort;
+        binding.revision = InovanceModeSequence::kStrategyRevision;
+        std::string model, firmware;
+        if (!SendCommandLocked("Get_RobotType", model)
+            || !SendCommandLocked("Get_FwVersion", firmware))
+        { identityError = "控制器型号/固件读取失败：" + GetLastRobotError(); }
+        else
+        {
+            binding.controllerModel = QString::fromUtf8(ValuePart(model).c_str()).trimmed();
+            binding.firmware = QString::fromUtf8(ValuePart(firmware).c_str()).trimmed();
+            if (binding.controllerModel.isEmpty() || binding.controllerModel.size() > 128
+                || binding.firmware.isEmpty() || binding.firmware.size() > 128)
+            { identityError = "控制器型号/固件返回无效，不能恢复已固化组合。"; }
+        }
+    }
+    RobotModePreparationStore::Record record;
+    QString error;
+    const auto status = identityError.empty()
+        ? RobotModePreparationStore::Load(binding, record, error)
+        : RobotModePreparationStore::LoadStatus::Error;
+    if (!identityError.empty()) { error = QString::fromUtf8(identityError.c_str()); }
+    InovanceModeSequence::Plan plan;
+    const bool restored = status == RobotModePreparationStore::LoadStatus::Found
+        && InovanceModeSequence::Find(record.planId.toStdString(), plan);
+    if (status == RobotModePreparationStore::LoadStatus::Found && !restored)
+    { error = QStringLiteral("已固化组合不在当前驱动支持列表中，需重新测试并固化。"); }
+    if (!restored && error.isEmpty())
+    { error = QStringLiteral("尚无已固化组合；旧验收报告不能代替策略配置，请在流程4测试通过后选用固化一次。"); }
+    {
+        std::lock_guard<std::mutex> modeLock(m_modePreparationMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load()) { return; }
+        m_verifiedModePreparations.clear();
+        m_modePreparationTestRecords.clear();
+        m_activeModePreparation.clear();
+        m_persistedModePreparation.clear();
+        m_modePreparationBinding = binding;
+        m_modePreparationBindingEpoch = identityError.empty() ? epoch : 0;
+        m_modePreparationLoadError = restored ? std::string() : error.toStdString();
+        if (restored)
+        {
+            m_activeModePreparation = plan.id;
+            m_persistedModePreparation = plan.id;
+        }
+    }
+    if (m_pRobotLog != nullptr)
+    {
+        if (restored)
+        { m_pRobotLog->write(LogColor::SUCCESS, "汇川已恢复固化数据流组合：%s；仅恢复策略，未上电/开流，运行时仍检查安全状态。", plan.id.c_str()); }
+        else
+        { m_pRobotLog->write(LogColor::ERR, "汇川数据流策略未恢复：%s", error.toStdString().c_str()); }
+    }
+}
+
+std::vector<RobotModePreparationTestCase> InovanceRobotCtrl::ModePreparationTestCases() const
+{
+    std::vector<RobotModePreparationTestCase> result;
+    std::lock_guard<std::mutex> lock(m_modePreparationMutex);
+    for (const auto& plan : InovanceModeSequence::Plans())
+    {
+        const auto found = m_verifiedModePreparations.find(plan.id);
+        const bool verified = m_connected.load() && found != m_verifiedModePreparations.end()
+            && found->second == m_modeConnectionEpoch.load();
+        const bool persisted = m_connectionReady.load()
+            && m_modePreparationBindingEpoch == m_modeConnectionEpoch.load()
+            && m_persistedModePreparation == plan.id && m_activeModePreparation == plan.id;
+        result.push_back({ plan.id, plan.name + (persisted
+            ? (verified ? "【本连接通过·已固化】" : "【已恢复固化策略】")
+            : (verified ? "【本连接已通过·待固化】" : "【未验证】")) });
+    }
+    return result;
+}
+
+bool InovanceRobotCtrl::RunModePreparationTestCase(const std::string& id, RobotModePreparationTestResult& result)
+{
+    result = {};
+    InovanceModeSequence::Plan plan;
+    if (!InovanceModeSequence::Find(id, plan) || !IsConnected() || !EnsureControlPermit())
+    { result.evidence = "测试组合无效、未连接或没有控制许可：" + GetLastRobotError(); return false; }
+    const auto epoch = m_modeConnectionEpoch.load();
+    {
+        std::lock_guard<std::mutex> lock(m_modePreparationMutex);
+        m_verifiedModePreparations.erase(id);
+        m_modePreparationTestRecords.erase(id);
+        if (m_modePreparationBindingEpoch != epoch)
+        {
+            result.evidence = "当前连接型号/固件身份未确认，不能测试并固化组合；请重新连接。";
+            SetLastRobotError(result.evidence);
+            return false;
+        }
+        if (m_persistedModePreparation == id)
+        {
+            // Retesting withdraws the old PASS durably before touching the
+            // controller. A failed retest must not resurrect it after restart.
+            QString revokeError;
+            m_activeModePreparation.clear();
+            if (!RobotModePreparationStore::Revoke(m_modePreparationBinding, revokeError))
+            {
+                result.evidence = "旧组合撤销保存失败，未开始测试：" + revokeError.toStdString();
+                SetLastRobotError(result.evidence);
+                return false;
+            }
+            m_persistedModePreparation.clear();
+            m_modePreparationLoadError = "已固化组合已进入重测，需测试通过并再次选用固化。";
+        }
+    }
+    if (!IsConnected() || epoch != m_modeConnectionEpoch.load())
+    { result.evidence = "组合测试准备期间连接已变化，未开始测试。"; return false; }
+    result.evidence = "组合 " + id + "：" + plan.name + "（无位移、不启动JOB）\n";
+    result.passed = InovanceModeSequence::Test(ModeSequenceOps(epoch), plan, result.restoreVerified, result.evidence);
+    result.restoreVerified = result.restoreVerified && epoch == m_modeConnectionEpoch.load() && IsConnected();
+    result.passed = result.passed && result.restoreVerified;
+    if (result.passed)
+    {
+        std::lock_guard<std::mutex> lock(m_modePreparationMutex);
+        if (IsConnected() && epoch == m_modeConnectionEpoch.load()
+            && m_modePreparationBindingEpoch == epoch)
+        {
+            m_verifiedModePreparations[id] = epoch;
+            RobotModePreparationStore::Record record;
+            record.planId = QString::fromStdString(id);
+            record.verifiedAtUtc = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+            record.evidence = QString::fromUtf8(result.evidence.c_str());
+            m_modePreparationTestRecords[id] = std::move(record);
+        }
+        else { result.passed = false; result.restoreVerified = false; result.evidence += "测试结果发布时连接已变化，未授予选用资格。\n"; }
+    }
+    if (!result.passed) { SetLastRobotError(result.evidence); }
+    return result.passed;
+}
+
+bool InovanceRobotCtrl::UseVerifiedModePreparation(const std::string& id)
+{
+    // Keep selection atomic against a new business operation starting after
+    // the UI's busy check. Never replace a recipe while its exit order is in use.
+    struct SelectionBlock
+    {
+        RobotOperationLease::NewOperationBlockToken token =
+            RobotOperationLease::AddNewOperationsBlock(QStringLiteral("正在固化机器人运动准备策略，请稍后启动操作。"));
+        ~SelectionBlock() { RobotOperationLease::RemoveNewOperationsBlock(token); }
+    } selectionBlock;
+    if (RobotOperationLease::AnyActive() || RobotOperationLease::MotionCompletionPending(this)
+        || m_dataStreamEnabled.load() || m_dataStreamEntryMode.load() >= 0
+        || m_trajectoryRunning.load() || m_nativeProgramRunning.load() || m_continuousJogRunning.load())
+    { SetLastRobotError("机器人存在活动操作或未完成的数据流，禁止更换固化策略；停止并确认恢复后再选用。"); return false; }
+    std::lock_guard<std::mutex> lock(m_modePreparationMutex);
+    const auto epoch = m_modeConnectionEpoch.load();
+    if (!IsConnected() || m_modePreparationBindingEpoch != epoch)
+    { SetLastRobotError("当前连接型号/固件尚未核对，不能固化组合。"); return false; }
+    if (m_persistedModePreparation == id && m_activeModePreparation == id)
+    { return true; }
+    const auto found = m_verifiedModePreparations.find(id);
+    const auto record = m_modePreparationTestRecords.find(id);
+    if (found == m_verifiedModePreparations.end() || found->second != epoch
+        || record == m_modePreparationTestRecords.end())
+    { SetLastRobotError("该组合尚未在当前连接中通过准备和恢复验证，不能固化；历史报告不会自动转换为策略。"); return false; }
+    QString error;
+    if (!RobotModePreparationStore::SaveVerified(m_modePreparationBinding, record->second, error))
+    { SetLastRobotError("组合固化保存/回读失败，未选用：" + error.toStdString()); return false; }
+    // Disk contains a verified recipe, not a grant for a disconnected session.
+    if (!IsConnected() || epoch != m_modeConnectionEpoch.load())
+    { SetLastRobotError("组合已保存，但连接已变化；本连接未激活，重连后将重新核对身份。"); return false; }
+    m_activeModePreparation = id;
+    m_persistedModePreparation = id;
+    m_modePreparationLoadError.clear();
+    return true;
+}
+
+std::string InovanceRobotCtrl::ActiveModePreparationId() const
+{
+    std::lock_guard<std::mutex> lock(m_modePreparationMutex);
+    return m_connectionReady.load() && m_modePreparationBindingEpoch == m_modeConnectionEpoch.load()
+        && !m_persistedModePreparation.empty() && m_activeModePreparation == m_persistedModePreparation
+        ? m_activeModePreparation : std::string();
+}
+
 bool InovanceRobotCtrl::SetDataStreamMode(const char* action, int expectedMode)
 {
+    const auto epoch = m_modeConnectionEpoch.load();
     if (action == nullptr)
     {
         SetLastRobotError("汇川数据流模式动作为空。");
         return false;
     }
-    int currentMode = -1;
-    if (QueryInt("Get_DsMode", currentMode) && currentMode == expectedMode)
+    const auto queryStream = [this, epoch](int& mode)
     {
-        m_dataStreamEnabled.store(currentMode != 0);
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load())
+        { SetLastRobotError("数据流操作期间连接已变化，未跨连接执行。"); return false; }
+        return QueryIntLocked("Get_DsMode", mode);
+    };
+    int currentMode = -1;
+    if (!queryStream(currentMode)) { return false; }
+    if (std::string(action) == "ON")
+    {
+        if (!EnsureControlPermit()) { return false; }
+        InovanceModeSequence::Plan plan;
+        if (!InovanceModeSequence::Find(ActiveModePreparationId(), plan))
+        {
+            std::lock_guard<std::mutex> modeLock(m_modePreparationMutex);
+            SetLastRobotError("汇川数据流准备策略不可用：" + m_modePreparationLoadError
+                + " 请在适配验收流程4测试通过后选用固化；已固化策略在同一配置下重启/重连会自动恢复。");
+            return false;
+        }
+        if (currentMode == 1 && m_dataStreamEntryMode.load() >= 0)
+        {
+            InovanceModeSequence::State owned;
+            std::string trace;
+            const auto ops = ModeSequenceOps(epoch);
+            if (InovanceModeSequence::Read(ops, owned, trace, "已归属数据流回读")
+                && InovanceModeSequence::RuntimeReady(owned, plan.mode) && owned.stream == 1)
+            { return IsConnected() && epoch == m_modeConnectionEpoch.load(); }
+            SetLastRobotError("汇川已归属数据流不再满足已验收模式/伺服常驻运行条件：\n" + trace);
+            return false;
+        }
+        if (currentMode != 0)
+        { SetLastRobotError("汇川存在未归属本次准备的数据流，禁止接管或清空已有运动队列。"); return false; }
+        auto ops = ModeSequenceOps(epoch);
+        InovanceModeSequence::State before;
+        std::string trace;
+        if (plan.streamFirst)
+        {
+            SetLastRobotError("汇川当前固化组合要求先开数据流再上电，不能用于伺服常驻生产运行；"
+                "请在流程4选用同一模式的“上电→开数据流”已通过组合。");
+            return false;
+        }
+        if (!InovanceModeSequence::Read(ops, before, trace, "数据流进入前")
+            || !before.Safe() || before.stream != 0)
+        { SetLastRobotError(trace); return false; }
+        if (!InovanceModeSequence::OpenRuntimeStream(ops, plan.mode, trace))
+        {
+            SetLastRobotError("汇川生产数据流准备失败；验收证据组合=" + plan.id
+                + "。连接基线保持自动和上电；直连运动按该组合切换一次模式并保持伺服，"
+                "JOB执行前会独立恢复自动模式：\n" + trace);
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> socketLock(m_socketMutex);
+            if (!IsConnected() || epoch != m_modeConnectionEpoch.load())
+            { SetLastRobotError("数据流准备完成时连接已变化，未发布旧连接准备结果。"); return false; }
+            m_dataStreamEntryMode.store(plan.mode);
+            m_dataStreamEntryMotor.store(1);
+            m_dataStreamEnabled.store(true);
+        }
         return true;
     }
-    std::string response;
-    if (!SendCommand(std::string("Dsmode ") + action, response) || response != "ok")
+    if (expectedMode == 0 && m_dataStreamEntryMode.load() >= 0
+        && m_dataStreamEntryMotor.load() == 1)
     {
+        std::string trace;
+        const int runtimeMode = m_dataStreamEntryMode.load();
+        if (!InovanceModeSequence::CloseRuntimeStream(ModeSequenceOps(epoch), runtimeMode, trace))
+        {
+            SetLastRobotError("汇川生产数据流关闭失败；未执行模式切换或伺服下电：\n" + trace);
+            return false;
+        }
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load()) { return false; }
+        m_dataStreamEnabled.store(false);
+        m_dataStreamEntryMode.store(-1);
+        m_dataStreamEntryMotor.store(-1);
+        return true;
+    }
+    if (expectedMode == 0 && m_dataStreamEntryMode.load() >= 0
+        && m_dataStreamEntryMotor.load() == 0)
+    {
+        InovanceModeSequence::Plan plan;
+        if (!InovanceModeSequence::Find(ActiveModePreparationId(), plan))
+        { SetLastRobotError("汇川退出数据流时组合身份失效，需安全中止并检查连接。"); return false; }
+        if (plan.powerOffFirst && currentMode != 0)
+        {
+            std::string trace;
+            const auto ops = ModeSequenceOps(epoch);
+            if (!InovanceModeSequence::Step(ops, "Motor OFF",
+                [](const InovanceModeSequence::State& state) { return state.motor == 0; }, trace, true))
+            {
+                const bool restored = InovanceModeSequence::RestoreOff(ops, m_dataStreamEntryMode.load(), trace);
+                SetLastRobotError("汇川选定的先下电退出顺序失败，恢复="
+                    + std::string(restored ? "OK\n" : "FAIL\n") + trace);
+                return false;
+            }
+        }
+    }
+    if (currentMode == expectedMode)
+    {
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load()) { return false; }
+        m_dataStreamEnabled.store(currentMode != 0);
+    }
+    else
+    {
+        std::string response;
+        if (!ModeSequenceOps(epoch).send(std::string("Dsmode ") + action, response))
+        { SetLastRobotError(response); return false; }
+        bool verified = false;
+        for (int attempt = 0; attempt < 20; ++attempt)
+        {
+            if (!queryStream(currentMode)) { return false; }
+            if (currentMode == expectedMode)
+            { verified = true; break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        if (!verified)
+        { SetLastRobotError("汇川数据流模式动作未通过Get_DsMode回读确认：期望=" + std::to_string(expectedMode)
+            + "，实际=" + std::to_string(currentMode) + "。"); return false; }
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load()) { return false; }
+        m_dataStreamEnabled.store(currentMode != 0);
+    }
+    if (expectedMode == 0 && m_dataStreamEntryMode.load() >= 0)
+    {
+        const int originalMode = m_dataStreamEntryMode.load();
+        std::string trace;
+        // A test started with the motor OFF must power down before restoring
+        // its mode, exactly as witnessed in the no-motion combination test.
+        const bool restored = m_dataStreamEntryMotor.load() == 0
+            ? InovanceModeSequence::RestoreOff(ModeSequenceOps(epoch), originalMode, trace)
+            : InovanceModeSequence::SetMode(ModeSequenceOps(epoch), originalMode, trace, true);
+        if (!restored)
+        { SetLastRobotError("汇川数据流关闭后模式恢复失败：" + trace); return false; }
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load()) { return false; }
+        m_dataStreamEntryMode.store(-1);
+        m_dataStreamEntryMotor.store(-1);
+    }
+    return true;
+}
+
+bool InovanceRobotCtrl::LoginUserLocked()
+{
+    m_userLoggedIn.store(false);
+    InovanceUserLogin::Ops ops;
+    ops.send = [this](const std::string& command, std::string& response)
+    { return SendCommandLocked(command, response); };
+    ops.query = [this](const std::string& command, int& value)
+    { return QueryIntLocked(command, value); };
+    std::string error;
+    if (!InovanceUserLogin::Login({m_apiUserLevel, m_apiPassword}, ops, error))
+    {
+        // Diagnostic queries are read-only and never establish login success.
+        // Keep the original failure before these queries change LastRobotError.
+        std::string firmware;
+        std::string response;
+        if (SendCommandLocked("Get_FwVersion", response))
+        {
+            const auto value = ValuePart(response);
+            if (value.size() >= 2 && value.size() <= 64 && value.front() == 'V'
+                && value.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-+")
+                    == std::string::npos) { firmware = value; }
+        }
+        int controlDevice = -1;
+        int currentUser = -1;
+        int permitOwner = -1;
+        if (!QueryIntLocked("CurCtrlDev", controlDevice) || controlDevice < 0 || controlDevice > 2)
+        { controlDevice = -1; }
+        if (!QueryIntLocked("CurUserType", currentUser) || currentUser < 0 || currentUser > 3)
+        { currentUser = -1; }
+        if (SendCommandLocked("CurPermit", response))
+        {
+            std::istringstream input(ValuePart(response));
+            int value = -1;
+            if (input >> value && value >= 0 && value <= 2) { permitOwner = value; }
+        }
+        error += "\n登录诊断：固件=" + (firmware.empty() ? std::string("读取失败") : firmware)
+            + "，控制设备=" + std::to_string(controlDevice)
+            + "，API用户级别=" + std::to_string(currentUser)
+            + "，许可归属=" + std::to_string(permitOwner)
+            + "（-1表示读取失败；API登录独立于示教器登录）。";
+        m_loginRetry.Block(error);
+        SetLastRobotError(m_loginRetry.Error());
+        if (m_pRobotLog != nullptr)
+        { m_pRobotLog->write(LogColor::ERR, "%s", m_loginRetry.Error().c_str()); }
         return false;
     }
-    int mode = -1;
-    for (int attempt = 0; attempt < 20; ++attempt)
-    {
-        if (QueryInt("Get_DsMode", mode) && mode == expectedMode)
-        {
-            m_dataStreamEnabled.store(mode != 0);
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    }
-    SetLastRobotError("汇川数据流模式动作未通过Get_DsMode回读确认：期望="
-        + std::to_string(expectedMode) + "，实际=" + std::to_string(mode) + "。");
-    return false;
+    m_userLoggedIn.store(true);
+    return true;
 }
 
 bool InovanceRobotCtrl::InitializeAfterConnect(std::string* summary)
 {
-    if (!IsConnected() && !Connect()) { return false; }
-    if (!EnsureControlPermit()) { return false; }
-
-    if (m_apiUserLevel > 0)
+    if (summary != nullptr) { summary->clear(); }
+    if (!IsConnected())
+    { SetLastRobotError("汇川连接后初始化要求已建立并验证2222连接；不会在初始化中自动重连。 "); return false; }
+    if (RobotOperationLease::CurrentOwner(this).isEmpty())
     {
-        if (m_apiPassword.empty())
-        {
-            SetLastRobotError("汇川配置要求登录编辑/管理模式，但ApiPassword为空。");
-            return false;
-        }
-        std::string response;
-        if (!SendCommand("UserLogin " + std::to_string(m_apiUserLevel) + " " + m_apiPassword, response)
-            || response != "ok")
-        {
-            return false;
-        }
-        int actualLevel = -1;
-        if (!QueryInt("CurUserType", actualLevel) || actualLevel < m_apiUserLevel)
-        {
-            SetLastRobotError("汇川用户级别登录后未通过CurUserType回读确认。");
-            return false;
-        }
-        m_userLoggedIn.store(true);
-    }
-
-    // 工具/工件切换属于管理级控制动作；仅在配置明确指定时设置并逐项回读。
-    if (m_toolNo != 0 || m_apiUserLevel >= 2)
-    {
-        std::string response;
-        int actual = -1;
-        if (!SendCommand("Set_ToolCNum " + std::to_string(m_toolNo), response)
-            || response != "ok" || !QueryInt("Get_ToolCNum", actual) || actual != m_toolNo)
-        {
-            SetLastRobotError("汇川激活工具号设置或回读失败；确认用户级别及ToolNo配置。");
-            return false;
-        }
-    }
-    int activeTool = -1;
-    if (!QueryInt("Get_ToolCNum", activeTool) || activeTool != m_toolNo)
-    {
-        SetLastRobotError("汇川当前激活工具号与ToolNo配置不一致；"
-            "请在示教器切换工具，或配置ApiUserLevel=2及密码后由驱动设置。");
+        SetLastRobotError("汇川连接后初始化只能由持有机器人操作租约的显式连接流程调用；后台重连不会自动上电。");
         return false;
     }
-    if (m_wobjNo != 0 || m_apiUserLevel >= 2)
+    const std::uint64_t epoch = m_modeConnectionEpoch.load();
+    InovanceConnectionPreparation::Ops ops;
+    ops.cancelled = [this, epoch]()
     {
-        std::string response;
-        int actual = -1;
-        if (!SendCommand("Set_WobjNum " + std::to_string(m_wobjNo), response)
-            || response != "ok" || !QueryInt("Get_WobjNum", actual) || actual != m_wobjNo)
+        return epoch != m_modeConnectionEpoch.load() || !IsConnected()
+            || RobotOperationLease::IsCancellationRequested(this);
+    };
+    ops.delay = []() { std::this_thread::sleep_for(std::chrono::milliseconds(25)); };
+    ops.read = [this, epoch](InovanceConnectionPreparation::State& state, std::string& error)
+    {
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load())
+        { error = "连接已变化，禁止在新连接继续旧初始化。"; return false; }
+        std::string permitReply;
+        int permit = -1;
+        bool permitOk = SendCommandLocked("CurPermit", permitReply);
+        if (permitOk)
         {
-            SetLastRobotError("汇川激活工件号设置或回读失败；确认用户级别及WobjNo配置。");
+            std::istringstream input(ValuePart(permitReply));
+            permitOk = static_cast<bool>(input >> permit) && permit >= 0 && permit <= 2;
+        }
+        const bool ok = QueryIntLocked("Get_Mode", state.mode)
+            && QueryIntLocked("Get_MotorSts", state.motor)
+            && QueryIntLocked("Get_DsMode", state.stream)
+            && QueryIntLocked("Get_MotionSts", state.motion)
+            && QueryIntLocked("Get_TaskRunSts 0", state.task)
+            && QueryIntLocked("Get_EStopSts", state.estop)
+            && QueryIntLocked("Get_SysErrSts", state.fault)
+            && QueryIntLocked("CurCtrlDev", state.controlDevice)
+            && permitOk && IsConnected() && epoch == m_modeConnectionEpoch.load();
+        state.permit = permit;
+        if (permitOk) { m_permitOwned.store(permit == 1); }
+        error = ok ? std::string() : GetLastRobotError();
+        if (!permitOk && error.empty()) { error = "CurPermit返回格式无效。"; }
+        return ok;
+    };
+    ops.send = [this, epoch](const std::string& command, std::string& reply)
+    {
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load())
+        { reply = "连接已变化，命令未发送。"; return false; }
+        std::string response;
+        const bool ok = SendCommandLocked(command, response) && response == "ok"
+            && IsConnected() && epoch == m_modeConnectionEpoch.load();
+        reply = ok ? response : (GetLastRobotError().empty() ? response : GetLastRobotError());
+        return ok;
+    };
+    ops.prepareCoordinates = [this, epoch](std::string& evidence)
+    {
+        if (m_toolNo != kApplicationGunToolNumber)
+        {
+            evidence = "应用焊枪固定使用已标定Tool1，但数据库ToolNo="
+                + std::to_string(m_toolNo) + "；拒绝选择其他工具。";
             return false;
         }
-    }
-    int activeWobj = -1;
-    if (!QueryInt("Get_WobjNum", activeWobj) || activeWobj != m_wobjNo)
+        if (m_wobjNo != 1)
+        {
+            evidence = "汇川现场流程固定使用已标定Wobj1，但数据库WobjNo="
+                + std::to_string(m_wobjNo) + "；拒绝选择其他工件坐标。";
+            return false;
+        }
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        const auto stillSafe = [this, epoch](std::string& error)
+        {
+            int motion = -1, task = -1, stream = -1, estop = -1, fault = -1, controlDevice = -1;
+            std::string permitReply;
+            int permit = -1;
+            if (!IsConnected() || epoch != m_modeConnectionEpoch.load()
+                || !QueryIntLocked("Get_MotionSts", motion)
+                || !QueryIntLocked("Get_TaskRunSts 0", task)
+                || !QueryIntLocked("Get_DsMode", stream)
+                || !QueryIntLocked("Get_EStopSts", estop)
+                || !QueryIntLocked("Get_SysErrSts", fault)
+                || !QueryIntLocked("CurCtrlDev", controlDevice)
+                || !SendCommandLocked("CurPermit", permitReply))
+            { error = GetLastRobotError(); return false; }
+            std::istringstream input(ValuePart(permitReply));
+            if (!(input >> permit) || motion != 0 || (task != 0 && task != 10)
+                || stream != 0 || estop != 0 || fault != 0 || controlDevice != 2 || permit != 1
+                || epoch != m_modeConnectionEpoch.load())
+            { error = "坐标设置前实时状态不再满足静止、无急停/报警、远程许可及数据流关闭条件。"; return false; }
+            return true;
+        };
+        if (!stillSafe(evidence)) { return false; }
+        const auto setAndVerify = [this, epoch, &stillSafe](const char* setName, const char* getName,
+            int configured, const char* label, std::string& error)
+        {
+            if (!stillSafe(error)) { return false; }
+            std::string response;
+            if (!SendCommandLocked(std::string(setName) + " " + std::to_string(configured), response)
+                || response != "ok")
+            { error = std::string(label) + "设置失败：" + GetLastRobotError(); return false; }
+            int actual = -1;
+            if (!QueryIntLocked(getName, actual) || actual != configured
+                || epoch != m_modeConnectionEpoch.load())
+            { error = std::string(label) + "回读与配置不一致，期望=" + std::to_string(configured)
+                    + "，实际=" + std::to_string(actual) + "。"; return false; }
+            return true;
+        };
+        if (!setAndVerify("Set_ToolCNum", "Get_ToolCNum", m_toolNo, "工具号", evidence)
+            || !setAndVerify("Set_WobjNum", "Get_WobjNum", m_wobjNo, "工件号", evidence))
+        { return false; }
+        evidence = "Tool=" + std::to_string(m_toolNo) + "，Wobj=" + std::to_string(m_wobjNo) + "，写后回读一致。";
+        return true;
+    };
+    ops.prepareKinematics = [this, epoch](std::string& evidence)
     {
-        SetLastRobotError("汇川当前激活工件号与WobjNo配置不一致；"
-            "请在示教器切换工件，或配置ApiUserLevel=2及密码后由驱动设置。");
+        if (!IsConnected() || epoch != m_modeConnectionEpoch.load())
+        {
+            evidence = "连接已变化，未读取运动学资产。";
+            return false;
+        }
+        if (m_kinematicsSession.Ready())
+        {
+            evidence = "本连接的运动学资产已经过实时校验，SKIP。";
+            return true;
+        }
+        RobotKinematicsValidationResult validation;
+        if (!RefreshKinematicsFromController(validation))
+        {
+            evidence = GetLastRobotError().empty()
+                ? "中断态恢复后运动学资产实时校验失败。" : GetLastRobotError();
+            return false;
+        }
+        evidence = validation.acquisitionSummary.empty()
+            ? "中断态恢复后已重新实时校验。" : validation.acquisitionSummary;
+        return IsConnected() && epoch == m_modeConnectionEpoch.load();
+    };
+
+    std::string evidence;
+    const bool ok = InovanceConnectionPreparation::Prepare(ops, evidence);
+    if (summary != nullptr) { *summary = evidence; }
+    if (!ok)
+    {
+        SetLastRobotError("汇川连接已建立，但前置初始化失败（未启动运动）：\n" + evidence);
         return false;
     }
-
-    if (summary != nullptr)
-    {
-        *summary = "汇川2222远程以太网连接和控制许可已确认；工具="
-            + std::to_string(m_toolNo) + "，工件=" + std::to_string(m_wobjNo)
-            + "。伺服与运行模式保持现场状态。";
-    }
+    m_permitOwned.store(true);
     ClearLastRobotError();
     return true;
 }
@@ -1210,42 +2646,11 @@ bool InovanceRobotCtrl::ShutdownBeforeDisconnect()
     };
     if (!IsConnected()) { return true; }
 
-    int motion = -1;
-    int dataStreamMode = -1;
-    int taskStatus = -1;
-    if (QueryInt("Get_MotionSts", motion)
-        && QueryInt("Get_DsMode", dataStreamMode)
-        && QueryInt("Get_TaskRunSts 0", taskStatus)
-        && (motion != 0 || dataStreamMode != 0 || taskStatus == 1
-            || m_nativeProgramRunning.load()))
-    {
-        if (!AbortCurrentProgramSafely())
-        {
-            rememberFailure("汇川断开前安全中止失败。");
-            ok = false;
-        }
-    }
-
     std::string response;
-    if (!SendCommand("Motor OFF", response) || response != "ok")
+    if (!ServoOff())
     {
-        rememberFailure("汇川断开前Motor OFF失败。");
+        rememberFailure("汇川断开前安全停止和Motor OFF失败。");
         ok = false;
-    }
-    else
-    {
-        int motor = -1;
-        for (int attempt = 0; attempt < 20; ++attempt)
-        {
-            if (QueryInt("Get_MotorSts", motor) && motor == 0) { break; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(25));
-        }
-        if (motor != 0)
-        {
-            SetLastRobotError("汇川断开前Motor OFF未通过状态回读确认。");
-            rememberFailure("汇川断开前Motor OFF回读失败。");
-            ok = false;
-        }
     }
     if (m_userLoggedIn.load())
     {
@@ -1281,17 +2686,39 @@ bool InovanceRobotCtrl::ShutdownBeforeDisconnect()
 
 void InovanceRobotCtrl::ReloadRuntimeConfiguration()
 {
-    if (m_trajectoryRunning.load() || m_nativeProgramRunning.load())
+    if (m_trajectoryRunning.load() || m_nativeProgramRunning.load()
+        || m_continuousJogRunning.load() || RobotOperationLease::MotionCompletionPending(this)
+        || !RobotOperationLease::CurrentOwner(this).isEmpty())
     {
         SetLastRobotError("汇川运动或原生JOB运行期间禁止重载机器人配置；"
-            "避免焊接IO/DA映射与已启动JOB发生变化。");
+            "避免工具、工件坐标和可选关弧IO见证与已启动JOB发生变化。");
         if (m_pRobotLog != nullptr)
         {
             m_pRobotLog->write(LogColor::ERR, "%s", GetLastRobotError().c_str());
         }
         return;
     }
-    InitRobotDriver(m_sRobotName);
+    bool wasConnected = false;
+    {
+        std::lock_guard<std::mutex> refreshLock(m_kinematicsRefreshMutex);
+        InovanceKinematicsReadScope readOnlyScope(m_kinematicsReadInProgress);
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        wasConnected = m_connectionReady.load();
+        int motion = -1;
+        if (m_trajectoryRunning.load() || m_nativeProgramRunning.load()
+            || m_continuousJogRunning.load() || RobotOperationLease::MotionCompletionPending(this)
+            || !RobotOperationLease::CurrentOwner(this).isEmpty()
+            || (wasConnected && (!QueryIntLocked("Get_MotionSts", motion) || motion != 0)))
+        {
+            SetLastRobotError("汇川仍有活动操作或未确认停止，拒绝断开并重载配置。");
+            return;
+        }
+        // Endpoint/authentication/FTP changes must never leave the old live
+        // socket paired with the newly loaded calibration source.
+        CloseSocketLocked();
+        InitRobotDriver(m_sRobotName);
+    }
+    if (wasConnected) { ConnectWithPolicy(false); }
 }
 
 bool InovanceRobotCtrl::SetOperationMode(RobotOperationMode mode)
@@ -1351,6 +2778,48 @@ bool InovanceRobotCtrl::ServoOn()
     return true;
 }
 
+bool InovanceRobotCtrl::ServoOff()
+{
+    if (!IsConnected() && !Connect()) { return false; }
+    if (!EnsureControlPermit()) { return false; }
+    const auto epoch = m_modeConnectionEpoch.load();
+
+    int motion = -1;
+    int dataStreamMode = -1;
+    int taskStatus = -1;
+    if (!QueryInt("Get_MotionSts", motion)
+        || !QueryInt("Get_DsMode", dataStreamMode)
+        || !QueryInt("Get_TaskRunSts 0", taskStatus))
+    {
+        return false;
+    }
+    if (motion != 0 || dataStreamMode != 0 || taskStatus == 1
+        || m_nativeProgramRunning.load())
+    {
+        if (!AbortCurrentProgramSafely())
+        {
+            if (GetLastRobotError().empty())
+            {
+                SetLastRobotError("汇川伺服下电前无法确认运动和程序已经安全中止。");
+            }
+            return false;
+        }
+    }
+
+    int originalMode = -1;
+    if (!QueryInt("Get_Mode", originalMode) || (originalMode != 1 && originalMode != 2))
+    { SetLastRobotError("汇川下电前运行模式未知，未尝试切换模式。"); return false; }
+    std::string trace;
+    if (!InovanceModeSequence::RestoreOff(ModeSequenceOps(epoch), originalMode, trace))
+    { SetLastRobotError("汇川伺服下电/恢复失败：\n" + trace); return false; }
+    std::lock_guard<std::mutex> socketLock(m_socketMutex);
+    if (!IsConnected() || epoch != m_modeConnectionEpoch.load()) { return false; }
+    m_dataStreamEntryMode.store(-1);
+    m_dataStreamEntryMotor.store(-1);
+    ClearLastRobotError();
+    return true;
+}
+
 bool InovanceRobotCtrl::SetTpSpeed(int speed)
 {
     if (speed < 1 || speed > 100)
@@ -1375,7 +2844,7 @@ bool InovanceRobotCtrl::SetTpSpeed(int speed)
 
 bool InovanceRobotCtrl::IsConnected()
 {
-    return m_connected.load();
+    return m_connected.load() && m_connectionReady.load();
 }
 
 std::string InovanceRobotCtrl::GetRobotStatusText()
@@ -1403,7 +2872,8 @@ std::string InovanceRobotCtrl::GetRobotStatusText()
         << " 故障=" << systemError
         << " 伺服=" << motor
         << " 模式=" << mode
-        << " 运动=" << motion;
+        << " 运动=" << motion
+        << " 关节运动学=" << (m_kinematicsSession.Ready() ? "实时校验就绪" : "未就绪（停止后重连或执行流程6）");
     return text.str();
 }
 
@@ -1488,21 +2958,52 @@ double InovanceRobotCtrl::GetCurrentPos(int axisNo)
 
 bool InovanceRobotCtrl::TryGetCurrentPulse(T_ANGLE_PULSE& pulse)
 {
-    std::vector<double> values;
-    if (!QueryDoubles("Get_PosHerePulse", values, 6)) { return false; }
-    pulse = T_ANGLE_PULSE(
-        static_cast<long>(std::llround(values[0])),
-        static_cast<long>(std::llround(values[1])),
-        static_cast<long>(std::llround(values[2])),
-        static_cast<long>(std::llround(values[3])),
-        static_cast<long>(std::llround(values[4])),
-        static_cast<long>(std::llround(values[5])),
-        0, 0, 0);
+    // Monitoring must not wait behind the FTP calibration download.
+    std::unique_lock<std::mutex> refreshLock(m_kinematicsRefreshMutex, std::try_to_lock);
+    if (!refreshLock.owns_lock() || !m_connectionReady.load() || !m_kinematicsSession.Ready())
+    {
+        SetLastRobotError("汇川当前连接的轴单位尚未实时校验，无法返回通用关节脉冲；请停止后重连或执行流程6。厂商绝对编码器脉冲不能代替通用脉冲。");
+        return false;
+    }
+    const std::uint64_t generation = m_kinematicsSession.Generation();
+    const double mainUnits[6] = {
+        m_tAxisUnit.dSPulseUnit, m_tAxisUnit.dLPulseUnit, m_tAxisUnit.dUPulseUnit,
+        m_tAxisUnit.dRPulseUnit, m_tAxisUnit.dBPulseUnit, m_tAxisUnit.dTPulseUnit
+    };
+    const bool normalizedUnitsReady = std::all_of(
+        std::begin(mainUnits), std::end(mainUnits),
+        [](double unit) { return std::isfinite(unit) && std::abs(unit) >= 1e-15; });
+    std::vector<double> joints;
+    if (normalizedUnitsReady)
+    {
+        // 通用T_ANGLE_PULSE是“关节角/AxisUnit”的零点相对表示。汇川
+        // Get_PosHerePulse返回绝对编码器脉冲，含零点和腕部耦合，不能直接泄漏给业务层。
+        if (!QueryDoubles("Get_RobJPHere", joints, 14)) { return false; }
+        for (int axis = 0; axis < 6; ++axis)
+        {
+            const double converted = joints[axis] / mainUnits[axis];
+            if (!std::isfinite(converted) || converted < (std::numeric_limits<long>::min)()
+                || converted > (std::numeric_limits<long>::max)())
+            { SetLastRobotError("汇川关节值超出通用脉冲整数范围。"); return false; }
+        }
+        pulse = T_ANGLE_PULSE(
+            static_cast<long>(std::llround(joints[0] / mainUnits[0])),
+            static_cast<long>(std::llround(joints[1] / mainUnits[1])),
+            static_cast<long>(std::llround(joints[2] / mainUnits[2])),
+            static_cast<long>(std::llround(joints[3] / mainUnits[3])),
+            static_cast<long>(std::llround(joints[4] / mainUnits[4])),
+            static_cast<long>(std::llround(joints[5] / mainUnits[5])),
+            0, 0, 0);
+    }
+    else
+    {
+        SetLastRobotError("汇川已验证轴单位无效，拒绝返回错误的通用关节脉冲。");
+        return false;
+    }
 
     if (m_nExternalAxleType != 0)
     {
-        std::vector<double> joints;
-        if (!QueryDoubles("Get_RobJPHere", joints, 14)) { return false; }
+        if (joints.empty() && !QueryDoubles("Get_RobJPHere", joints, 14)) { return false; }
         const double units[3] = {
             m_tAxisUnit.dBXPulseUnit,
             m_tAxisUnit.dBYPulseUnit,
@@ -1520,7 +3021,13 @@ bool InovanceRobotCtrl::TryGetCurrentPulse(T_ANGLE_PULSE& pulse)
             *outputs[index] = static_cast<long>(std::llround(joints[8 + index] / units[index]));
         }
     }
-    StorePassivePulse(pulse, SteadyMs());
+    {
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!m_connectionReady.load() || !m_kinematicsSession.Ready()
+            || generation != m_kinematicsSession.Generation())
+        { SetLastRobotError("汇川关节读取期间连接已改变，本次脉冲结果已作废。"); return false; }
+        StorePassivePulse(pulse, SteadyMs());
+    }
     return true;
 }
 
@@ -1554,9 +3061,10 @@ T_ANGLE_PULSE InovanceRobotCtrl::GetCurrentPulsePassive(
     T_ANGLE_PULSE active;
     TryGetCurrentPulse(active);
     std::lock_guard<std::mutex> lock(m_passiveMutex);
-    if (robotMs != nullptr) { *robotMs = m_passivePulsePcMs; }
-    if (pcRecvMs != nullptr) { *pcRecvMs = m_passivePulsePcMs; }
-    return m_passivePulseValid ? m_passivePulse : T_ANGLE_PULSE();
+    const bool valid = m_kinematicsSession.Ready() && m_passivePulseValid;
+    if (robotMs != nullptr) { *robotMs = valid ? m_passivePulsePcMs : 0; }
+    if (pcRecvMs != nullptr) { *pcRecvMs = valid ? m_passivePulsePcMs : 0; }
+    return valid ? m_passivePulse : T_ANGLE_PULSE();
 }
 
 RobotMotionStatus InovanceRobotCtrl::ReadMotionStatus()
@@ -1676,6 +3184,93 @@ RobotMotionStatus InovanceRobotCtrl::ReadMotionStatusPassive(
     return m_passiveMotionValid ? m_passiveMotion : RobotMotionStatus{};
 }
 
+RobotControllerStatus InovanceRobotCtrl::ReadControllerStatus()
+{
+    RobotControllerStatus status;
+    status.connected = IsConnected();
+    status.pcRecvMs = SteadyMs();
+    if (!status.connected)
+    {
+        status.detail = "汇川控制器未连接。";
+        return status;
+    }
+
+    int rawMode = -1;
+    int emergencyStop = -1;
+    int motor = -1;
+    int rawMotion = -1;
+    int systemErrorStatus = -1;
+    int systemErrorCode = -1;
+    int controlOwner = -1;
+    int permit = -1;
+    if (!QueryInt("Get_Mode", rawMode)
+        || !QueryInt("Get_EStopSts", emergencyStop)
+        || !QueryInt("Get_MotorSts", motor)
+        || !QueryInt("Get_MotionSts", rawMotion)
+        || !QueryInt("Get_SysErrSts", systemErrorStatus)
+        || !QuerySystemErrorCode(systemErrorCode)
+        || !QueryInt("CurCtrlDev", controlOwner)
+        || !QueryLeadingInt("CurPermit", permit))
+    {
+        status.detail = GetLastRobotError().empty()
+            ? "汇川结构化状态读取不完整。" : GetLastRobotError();
+        return status;
+    }
+
+    status.rawOperationMode = rawMode;
+    if (rawMode == 1) { status.operationMode = RobotOperationMode::Manual; }
+    else if (rawMode == 2) { status.operationMode = RobotOperationMode::Automatic; }
+    status.emergencyStopKnown = true;
+    status.emergencyStop = emergencyStop != 0;
+    status.servoPowerKnown = true;
+    status.servoPowered = motor == 1;
+    status.systemFaultKnown = true;
+    status.systemFault = (systemErrorStatus & 0x1) != 0;
+    status.systemWarning = (systemErrorStatus & 0x2) != 0;
+    status.systemErrorCode = systemErrorCode;
+    status.controlOwnerKnown = true;
+    status.controlOwnedByApi = controlOwner == 2;
+    status.rawControlOwner = controlOwner;
+    status.controlPermitKnown = true;
+    status.hasControlPermit = permit == 1;
+    status.rawPermitState = permit;
+    status.motion.rawCode = rawMotion;
+    if (rawMotion == 0)
+    {
+        status.motion.state = RobotMotionState::Idle;
+        status.motion.terminalVerified = true;
+        status.motion.detail = "汇川机器人已停止";
+    }
+    else if (rawMotion == 1)
+    {
+        status.motion.state = RobotMotionState::Running;
+        status.motion.detail = "汇川机器人运动中";
+    }
+    else if (rawMotion == 2)
+    {
+        status.motion.state = RobotMotionState::Interrupted;
+        status.motion.detail = "汇川机器人运动中断";
+    }
+    else
+    {
+        status.motion.state = RobotMotionState::Unknown;
+        status.motion.detail = "汇川未知运动状态=" + std::to_string(rawMotion);
+    }
+    status.valid = true;
+    std::ostringstream detail;
+    detail << "模式=" << rawMode
+        << " 急停=" << emergencyStop
+        << " 伺服=" << motor
+        << " 运动=" << rawMotion
+        << " 故障状态=" << systemErrorStatus
+        << " 故障码=0x" << std::hex << std::uppercase << systemErrorCode
+        << std::dec << " 控制设备=" << controlOwner
+        << " 许可=" << permit;
+    status.detail = detail.str();
+    ClearLastRobotError();
+    return status;
+}
+
 int InovanceRobotCtrl::CheckDone()
 {
     const RobotMotionStatus status = ReadMotionStatus();
@@ -1698,6 +3293,28 @@ int InovanceRobotCtrl::CheckRobotDone(int delayMs, int runTimeoutMs)
         return 0;
     }
     delayMs = std::clamp(delayMs, 20, 1000);
+
+    // Direct Move* and data-stream trajectories share the same frozen final
+    // command identity. Wait on that identity here (not inside Move*) so scan
+    // and calibration workers can collect data while the robot is moving.
+    int trackedCommandId = -1;
+    {
+        std::lock_guard<std::mutex> lock(m_trajectoryMutex);
+        if (m_activeHandle.started
+            && !IsInovanceNativeTrajectoryPurpose(m_preparedPurpose))
+        {
+            trackedCommandId = m_finalCommandId;
+        }
+    }
+    if (trackedCommandId >= 0)
+    {
+        if (!WaitForCommandDone(trackedCommandId, delayMs, runTimeoutMs))
+        {
+            return 0;
+        }
+        return FinalizeCompletedDataStreamMotion() ? 1 : 0;
+    }
+
     const long long deadline = SteadyMs() + runTimeoutMs;
     while (SteadyMs() < deadline)
     {
@@ -1705,6 +3322,10 @@ int InovanceRobotCtrl::CheckRobotDone(int delayMs, int runTimeoutMs)
         if ((status.state == RobotMotionState::Completed && status.terminalVerified)
             || status.state == RobotMotionState::Idle)
         {
+            if (!FinalizeCompletedDataStreamMotion())
+            {
+                return 0;
+            }
             return 1;
         }
         if (status.state == RobotMotionState::Interrupted
@@ -1820,12 +3441,110 @@ bool InovanceRobotCtrl::SendCartesianMove(
     return true;
 }
 
+bool InovanceRobotCtrl::SendCircularMove(
+    const T_ROBOT_COORS& via,
+    const T_ROBOT_COORS& target,
+    double speedMmPerMin,
+    int zone,
+    const int* viaConfiguration,
+    const int* targetConfiguration,
+    int* commandId)
+{
+    std::string validationError;
+    if (!ValidateLinearSpeedMmPerMin(speedMmPerMin, &validationError))
+    {
+        SetLastRobotError(validationError);
+        return false;
+    }
+    const double components[18] = {
+        via.dX, via.dY, via.dZ, via.dRX, via.dRY, via.dRZ,
+        via.dBX, via.dBY, via.dBZ,
+        target.dX, target.dY, target.dZ, target.dRX, target.dRY, target.dRZ,
+        target.dBX, target.dBY, target.dBZ
+    };
+    if (!std::all_of(std::begin(components), std::end(components),
+        [](double value) { return std::isfinite(value); }))
+    {
+        SetLastRobotError("汇川圆弧运动中间点或目标点包含非有限坐标。");
+        return false;
+    }
+
+    int arm[4] = {};
+    double baseExternal[6] = {};
+    {
+        std::lock_guard<std::mutex> lock(m_passiveMutex);
+        std::copy(std::begin(m_armConfig), std::end(m_armConfig), arm);
+        std::copy(std::begin(m_externalValues), std::end(m_externalValues), baseExternal);
+    }
+    // 通用 configuration 不表达汇川 ArmType；与 MOVL 相同，复用当前位置的真实 ArmType。
+    (void)viaConfiguration;
+    (void)targetConfiguration;
+
+    const auto makeParameter = [this, &arm, &baseExternal](const T_ROBOT_COORS& pose)
+    {
+        double external[6] = {};
+        std::copy(std::begin(baseExternal), std::end(baseExternal), external);
+        if (m_nExternalAxleType & 1) { external[0] = pose.dBX; }
+        if (m_nExternalAxleType & 2) { external[1] = pose.dBY; }
+        if (m_nExternalAxleType & 4) { external[2] = pose.dBZ; }
+        std::ostringstream parameter;
+        parameter << '['
+            << FormatDouble(pose.dX) << ',' << FormatDouble(pose.dY) << ','
+            << FormatDouble(pose.dZ) << ','
+            << FormatDouble(pose.dRZ) << ',' << FormatDouble(pose.dRY) << ','
+            << FormatDouble(pose.dRX) << "; "
+            << arm[0] << ',' << arm[1] << ',' << arm[2] << ',' << arm[3] << "; "
+            << FormatDouble(external[0]) << ',' << FormatDouble(external[1]) << ','
+            << FormatDouble(external[2]) << ',' << FormatDouble(external[3]) << ','
+            << FormatDouble(external[4]) << ',' << FormatDouble(external[5]) << ']';
+        return parameter.str();
+    };
+    const std::string viaParameter = makeParameter(via);
+    const std::string targetParameter = makeParameter(target);
+    if (viaParameter.size() > 128 || targetParameter.size() > 128)
+    {
+        SetLastRobotError("汇川MovCRobP中间点或目标点参数超过手册规定的128字符上限。");
+        return false;
+    }
+
+    const double speedMmPerSecond = speedMmPerMin / 60.0;
+    std::ostringstream command;
+    command << "MovCRobP " << viaParameter << ' ' << targetParameter << ' '
+        << "1,100,1," << FormatDouble(speedMmPerSecond)
+        << ",180.000000,2.000000,1.000000 "
+        << std::clamp(zone, -2, 200) << " 0";
+
+    int before = -1;
+    QueryInt("Get_CurCmdNum", before);
+    std::string response;
+    if (!SendCommand(command.str(), response) || response != "ok") { return false; }
+    int after = before;
+    for (int attempt = 0; attempt < 40; ++attempt)
+    {
+        if (QueryInt("Get_CurCmdNum", after) && after != before) { break; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    if (after < 0 || after == before)
+    {
+        SetLastRobotError("汇川MovCRobP返回ok，但Get_CurCmdNum未产生新的指令编号，拒绝伪造完成身份。");
+        return false;
+    }
+    if (commandId != nullptr) { *commandId = after; }
+    return true;
+}
+
 bool InovanceRobotCtrl::SendJointMove(
     const T_ANGLE_PULSE& target,
     double speedPercent,
     int zone,
     int* commandId)
 {
+    std::unique_lock<std::mutex> refreshLock(m_kinematicsRefreshMutex, std::try_to_lock);
+    if (!refreshLock.owns_lock() || !m_connectionReady.load() || !m_kinematicsSession.Ready())
+    {
+        SetLastRobotError("汇川当前连接未完成轴单位实时校验，关节运动未发送。");
+        return false;
+    }
     if (!std::isfinite(speedPercent) || speedPercent < 1.0 || speedPercent > 100.0)
     {
         SetLastRobotError("汇川关节速度必须为1..100百分比。");
@@ -1889,7 +3608,12 @@ bool InovanceRobotCtrl::SendJointMove(
     int before = -1;
     QueryInt("Get_CurCmdNum", before);
     std::string response;
-    if (!SendCommand(command.str(), response) || response != "ok") { return false; }
+    {
+        std::lock_guard<std::mutex> socketLock(m_socketMutex);
+        if (!m_connectionReady.load() || !m_kinematicsSession.Ready())
+        { SetLastRobotError("汇川关节运动发送前连接已改变，目标已作废。"); return false; }
+        if (!SendCommandLocked(command.str(), response) || response != "ok") { return false; }
+    }
     int after = before;
     for (int attempt = 0; attempt < 40; ++attempt)
     {
@@ -1915,6 +3639,7 @@ bool InovanceRobotCtrl::WaitForCommandDone(int commandId, int pollDelayMs, int t
     pollDelayMs = std::clamp(pollDelayMs, 20, 1000);
     const long long deadline = SteadyMs() + timeoutMs;
     int stableDone = 0;
+    int stableInterrupted = 0;
     while (SteadyMs() < deadline)
     {
         int done = 0;
@@ -1923,15 +3648,96 @@ bool InovanceRobotCtrl::WaitForCommandDone(int commandId, int pollDelayMs, int t
         if (!QueryInt("Get_MotionSts", motion)) { return false; }
         if (motion == 2)
         {
-            SetLastRobotError("汇川运动在等待到位期间被中断。");
-            return false;
+            // The controller can expose a single stale/intermediate interrupted
+            // sample while the data stream is closed and reopened between two
+            // direct moves.  Do not release the frozen command identity on one
+            // sample: the field trace showed the same command return to running
+            // immediately afterwards.  A real interruption remains fail-closed
+            // after three consecutive confirmations and no completion witness.
+            ++stableInterrupted;
+            stableDone = 0;
+            if (stableInterrupted >= 3)
+            {
+                SetLastRobotError(
+                    "汇川运动中断状态已连续确认3次，指令编号="
+                    + std::to_string(commandId)
+                    + "，Get_CmdSts=" + std::to_string(done)
+                    + "，Get_MotionSts=2。");
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(pollDelayMs));
+            continue;
         }
+        stableInterrupted = 0;
         stableDone = (done == 1 && motion == 0) ? stableDone + 1 : 0;
         if (stableDone >= 2) { return true; }
         std::this_thread::sleep_for(std::chrono::milliseconds(pollDelayMs));
     }
     SetLastRobotError("汇川运动等待Get_CmdSts精确到位超时。");
     return false;
+}
+
+bool InovanceRobotCtrl::BeginTrackedDirectMotion(
+    int commandId,
+    const char* operationName)
+{
+    if (commandId < 0)
+    {
+        SetLastRobotError("汇川单点运动已受理但没有取得有效指令编号，禁止报告启动成功。");
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(m_trajectoryMutex);
+    if (m_trajectoryRunning.load() || m_nativeProgramRunning.load()
+        || m_continuousJogRunning.load())
+    {
+        SetLastRobotError("汇川上一项运动仍由适配层跟踪，禁止覆盖单点运动身份。");
+        return false;
+    }
+
+    RobotTrajectoryHandle handle;
+    handle.programName = "INOVANCE_DIRECT_"
+        + std::string(operationName != nullptr ? operationName : "MOVE")
+        + "_" + std::to_string(++m_trajectoryCounter);
+    handle.prepared = true;
+    handle.started = true;
+    m_preparedMoveInfos.clear();
+    m_preparedPurpose = RobotTrajectoryPurpose::ScanDryRun;
+    m_preparedFingerprint = 0;
+    m_activeHandle = handle;
+    m_finalCommandId = commandId;
+    m_trajectoryRunning.store(true);
+    m_trajectoryPaused.store(false);
+    ClearLastRobotError();
+    return true;
+}
+
+bool InovanceRobotCtrl::FinalizeCompletedDataStreamMotion()
+{
+    bool hasTrackedDataStreamMotion = false;
+    {
+        std::lock_guard<std::mutex> lock(m_trajectoryMutex);
+        hasTrackedDataStreamMotion = m_activeHandle.started
+            && !IsInovanceNativeTrajectoryPurpose(m_preparedPurpose)
+            && m_finalCommandId >= 0;
+    }
+    if (!hasTrackedDataStreamMotion)
+    {
+        return true;
+    }
+    if (!SetDataStreamMode("OFF", 0))
+    {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_trajectoryMutex);
+        m_trajectoryRunning.store(false);
+        m_trajectoryPaused.store(false);
+        m_activeHandle.started = false;
+        m_finalCommandId = -1;
+    }
+    ClearLastRobotError();
+    return true;
 }
 
 bool InovanceRobotCtrl::MoveLinearMmPerMin(
@@ -1945,7 +3751,7 @@ bool InovanceRobotCtrl::MoveLinearMmPerMin(
         SetLastRobotError("汇川直线运动外部轴类型与当前驱动配置不一致。");
         return false;
     }
-    if (!EnsureMotionReady() || !SetDataStreamMode("ON", 1)) { return false; }
+    if (!SetDataStreamMode("ON", 1) || !EnsureMotionReady()) { return false; }
     // 首次运动前必须取得真实ArmType和未暴露的E4..E6，防止以默认值覆盖控制器位形。
     T_ROBOT_COORS current;
     if (!ReadCartesianPosition(current, nullptr))
@@ -1955,11 +3761,68 @@ bool InovanceRobotCtrl::MoveLinearMmPerMin(
     }
     int commandId = -1;
     const bool sent = SendCartesianMove(target, speedMmPerMin, -1, configuration, &commandId);
-    const bool completed = sent && WaitForCommandDone(commandId, 25, 1800000);
-    const std::string motionError = completed ? std::string() : GetLastRobotError();
-    const bool stopped = SetDataStreamMode("OFF", 0);
-    if (!completed && !motionError.empty()) { SetLastRobotError(motionError); }
-    return completed && stopped;
+    if (sent && BeginTrackedDirectMotion(commandId, "MOVL"))
+    {
+        return true;
+    }
+    const std::string motionError = GetLastRobotError();
+    if (sent)
+    {
+        const bool stopped = AbortCurrentProgramSafely();
+        SetLastRobotError(motionError + (stopped
+            ? "；运动身份冻结失败后已执行可验证安全中止。"
+            : "；运动身份冻结失败且安全中止未确认：" + GetLastRobotError()));
+    }
+    else
+    {
+        SetDataStreamMode("OFF", 0);
+        if (!motionError.empty()) { SetLastRobotError(motionError); }
+    }
+    return false;
+}
+
+bool InovanceRobotCtrl::MoveCircularMmPerMin(
+    const T_ROBOT_COORS& via,
+    const T_ROBOT_COORS& target,
+    double speedMmPerMin,
+    int externalAxleType,
+    const int* viaConfiguration,
+    const int* targetConfiguration)
+{
+    if (externalAxleType != m_nExternalAxleType)
+    {
+        SetLastRobotError("汇川圆弧运动外部轴类型与当前驱动配置不一致。");
+        return false;
+    }
+    if (!SetDataStreamMode("ON", 1) || !EnsureMotionReady()) { return false; }
+    T_ROBOT_COORS current;
+    if (!ReadCartesianPosition(current, nullptr))
+    {
+        SetDataStreamMode("OFF", 0);
+        return false;
+    }
+    int commandId = -1;
+    const bool sent = SendCircularMove(
+        via, target, speedMmPerMin, -1,
+        viaConfiguration, targetConfiguration, &commandId);
+    if (sent && BeginTrackedDirectMotion(commandId, "MOVC"))
+    {
+        return true;
+    }
+    const std::string motionError = GetLastRobotError();
+    if (sent)
+    {
+        const bool stopped = AbortCurrentProgramSafely();
+        SetLastRobotError(motionError + (stopped
+            ? "；运动身份冻结失败后已执行可验证安全中止。"
+            : "；运动身份冻结失败且安全中止未确认：" + GetLastRobotError()));
+    }
+    else
+    {
+        SetDataStreamMode("OFF", 0);
+        if (!motionError.empty()) { SetLastRobotError(motionError); }
+    }
+    return false;
 }
 
 bool InovanceRobotCtrl::MoveJointPercent(
@@ -1972,7 +3835,7 @@ bool InovanceRobotCtrl::MoveJointPercent(
         SetLastRobotError("汇川关节运动外部轴类型与当前驱动配置不一致。");
         return false;
     }
-    if (!EnsureMotionReady() || !SetDataStreamMode("ON", 1)) { return false; }
+    if (!SetDataStreamMode("ON", 1) || !EnsureMotionReady()) { return false; }
     T_ROBOT_COORS current;
     if (!ReadCartesianPosition(current, nullptr))
     {
@@ -1981,11 +3844,24 @@ bool InovanceRobotCtrl::MoveJointPercent(
     }
     int commandId = -1;
     const bool sent = SendJointMove(target, speedPercent, -1, &commandId);
-    const bool completed = sent && WaitForCommandDone(commandId, 25, 1800000);
-    const std::string motionError = completed ? std::string() : GetLastRobotError();
-    const bool stopped = SetDataStreamMode("OFF", 0);
-    if (!completed && !motionError.empty()) { SetLastRobotError(motionError); }
-    return completed && stopped;
+    if (sent && BeginTrackedDirectMotion(commandId, "MOVJ"))
+    {
+        return true;
+    }
+    const std::string motionError = GetLastRobotError();
+    if (sent)
+    {
+        const bool stopped = AbortCurrentProgramSafely();
+        SetLastRobotError(motionError + (stopped
+            ? "；运动身份冻结失败后已执行可验证安全中止。"
+            : "；运动身份冻结失败且安全中止未确认：" + GetLastRobotError()));
+    }
+    else
+    {
+        SetDataStreamMode("OFF", 0);
+        if (!motionError.empty()) { SetLastRobotError(motionError); }
+    }
+    return false;
 }
 
 std::uint64_t InovanceRobotCtrl::FingerprintMoveInfos(
@@ -2040,89 +3916,73 @@ std::uint64_t InovanceRobotCtrl::FingerprintMoveInfos(
             move.bHasTrackParam
         };
         mixBytes(flags, sizeof(flags));
+        if (move.bHasWeaveParam)
+        {
+            const int weaveIntegers[] = {
+                move.tWeaveParam.nWeaveType,
+                move.tWeaveParam.nWeaveShape,
+                move.tWeaveParam.nPauseTime1Ms,
+                move.tWeaveParam.nPauseTime2Ms,
+                move.tWeaveParam.nPauseTime3Ms,
+                move.tWeaveParam.nPauseTime4Ms,
+                move.tWeaveParam.nPauseContinue
+            };
+            const double weaveValues[] = {
+                move.tWeaveParam.dWeaveFrequencyHz,
+                move.tWeaveParam.dWeaveAmplitudeMm,
+                move.tWeaveParam.dSwingDirectionDeg,
+                move.tWeaveParam.dWeavePlaneAngleDeg,
+                move.tWeaveParam.dSpaceAngleDeg,
+                move.tWeaveParam.dEndLengthMm,
+                move.tWeaveParam.dEndWidthMm,
+                move.tWeaveParam.dCenterHeightMm
+            };
+            mixBytes(weaveIntegers, sizeof(weaveIntegers));
+            mixBytes(weaveValues, sizeof(weaveValues));
+        }
+        if (move.bHasTrackParam)
+        {
+            const int trackIntegers[] = {
+                move.tTrackParam.nLateralBeginCycle,
+                move.tTrackParam.nVerticalModeFlag,
+                move.tTrackParam.nVerticalBeginCycle,
+                move.tTrackParam.nVerticalSustainCycle,
+                move.tTrackParam.nTimeOrDistanceMode,
+                move.tTrackParam.nTimeIntervalMs,
+                move.tTrackParam.nDistanceIntervalMm
+            };
+            const double trackValues[] = {
+                move.tTrackParam.dLateralGain,
+                move.tTrackParam.dLeftAreaCoefficient,
+                move.tTrackParam.dRightAreaCoefficient,
+                move.tTrackParam.dVerticalReferenceCurrent,
+                move.tTrackParam.dVerticalCycleLength,
+                move.tTrackParam.dVerticalGain,
+                move.tTrackParam.dLateralMinCompPerCycle,
+                move.tTrackParam.dLateralMaxCompPerCycle,
+                move.tTrackParam.dLateralMaxCompTotal,
+                move.tTrackParam.dLateralAsymmetryCoefficient,
+                move.tTrackParam.dVerticalMinCompPerCycle,
+                move.tTrackParam.dVerticalMaxCompPerCycle,
+                move.tTrackParam.dVerticalMaxCompTotal,
+                move.tTrackParam.dVerticalAsymmetryCoefficient
+            };
+            mixBytes(trackIntegers, sizeof(trackIntegers));
+            mixBytes(trackValues, sizeof(trackValues));
+        }
     }
-    if (purpose == RobotTrajectoryPurpose::ActualWeld)
-    {
-        const int weldIntegers[] = {
-            m_weldJobEnabled ? 1 : 0,
-            m_weldArcEnableDo, m_weldArcEnableActiveValue,
-            m_weldReadyDi, m_weldReadyActiveValue,
-            m_weldArcEstablishedDi, m_weldArcEstablishedActiveValue,
-            m_weldCurrentDa, m_weldVoltageDa,
-            m_weldReadyTimeoutMs, m_weldArcStartTimeoutMs,
-            m_weldArcEndTimeoutMs, m_weldAlarmIndex, m_weldArcInterruptId
-        };
-        const double weldValues[] = {
-            m_weldCurrentDaGain, m_weldCurrentDaOffset,
-            m_weldCurrentDaMin, m_weldCurrentDaMax,
-            m_weldVoltageDaGain, m_weldVoltageDaOffset,
-            m_weldVoltageDaMin, m_weldVoltageDaMax
-        };
-        mixBytes(weldIntegers, sizeof(weldIntegers));
-        mixBytes(weldValues, sizeof(weldValues));
-    }
+    const int nativeProgramSettings[] = { m_toolNo, m_wobjNo };
+    mixBytes(nativeProgramSettings, sizeof(nativeProgramSettings));
     return hash;
 }
 
 bool InovanceRobotCtrl::HasVerifiedWeldJobContract(std::string* error) const
 {
-    std::vector<std::string> missing;
-    const auto require = [&missing](bool condition, const char* name)
-        {
-            if (!condition) { missing.emplace_back(name); }
-        };
-    const auto validBit = [](int value) { return value == 0 || value == 1; };
-    const auto validDa = [](int channel)
-        { return (channel >= 0 && channel <= 15) || (channel >= 64 && channel <= 79); };
-    const auto validScale = [](double gain, double offset, double minimum, double maximum)
-        {
-            return std::isfinite(gain) && std::abs(gain) >= 1e-12
-                && std::isfinite(offset) && std::isfinite(minimum)
-                && std::isfinite(maximum) && minimum < maximum;
-        };
-
-    require(m_weldJobEnabled, "Enabled=1");
-    require(m_weldArcEnableDo >= 0 && m_weldArcEnableDo <= 13823, "ArcEnableDO");
-    require(validBit(m_weldArcEnableActiveValue), "ArcEnableActiveValue(0/1)");
-    require(m_weldReadyDi >= 0 && m_weldReadyDi <= 13823, "ReadyDI");
-    require(validBit(m_weldReadyActiveValue), "ReadyActiveValue(0/1)");
-    require(m_weldArcEstablishedDi >= 0 && m_weldArcEstablishedDi <= 13823,
-        "ArcEstablishedDI");
-    require(validBit(m_weldArcEstablishedActiveValue),
-        "ArcEstablishedActiveValue(0/1)");
-    require(validDa(m_weldCurrentDa), "CurrentDA(0..15/64..79)");
-    require(validScale(m_weldCurrentDaGain, m_weldCurrentDaOffset,
-        m_weldCurrentDaMin, m_weldCurrentDaMax),
-        "CurrentDAGain/Offset/Min/Max");
-    require(validDa(m_weldVoltageDa), "VoltageDA(0..15/64..79)");
-    require(validScale(m_weldVoltageDaGain, m_weldVoltageDaOffset,
-        m_weldVoltageDaMin, m_weldVoltageDaMax),
-        "VoltageDAGain/Offset/Min/Max");
-    require(m_weldCurrentDa != m_weldVoltageDa, "CurrentDA!=VoltageDA");
-    require(m_weldReadyTimeoutMs > 0 && m_weldReadyTimeoutMs <= 65535000,
-        "ReadyTimeoutMs");
-    require(m_weldArcStartTimeoutMs > 0 && m_weldArcStartTimeoutMs <= 65535000,
-        "ArcStartTimeoutMs");
-    require(m_weldArcEndTimeoutMs > 0 && m_weldArcEndTimeoutMs <= 65535000,
-        "ArcEndTimeoutMs");
-    require(m_weldAlarmIndex >= 0 && m_weldAlarmIndex <= 15, "AlarmIndex(0..15)");
-    require(m_weldArcInterruptId >= 0 && m_weldArcInterruptId <= 127,
-        "ArcInterruptId(0..127)");
-
-    if (!missing.empty())
+    if (m_toolNo != kApplicationGunToolNumber || m_wobjNo != 1)
     {
         if (error != nullptr)
         {
-            std::ostringstream detail;
-            detail << "汇川实际焊接JOB映射未完成，数据库 Robot/" << m_sRobotName
-                << "/RobotPara/WeldJob 缺少或无效：";
-            for (std::size_t index = 0; index < missing.size(); ++index)
-            {
-                if (index > 0) { detail << ", "; }
-                detail << missing[index];
-            }
-            detail << "。未完成现场映射时只允许空跑JOB。";
-            *error = detail.str();
+            *error = "汇川原生焊接JOB必须使用已标定Tool1和Wobj1。";
         }
         return false;
     }
@@ -2151,21 +4011,8 @@ bool InovanceRobotCtrl::ValidateMoveInfos(
     {
         return false;
     }
-    const T_ROBOT_MOVE_INFO& firstMove = moveInfos.front();
-    const T_ROBOT_MOVE_INFO& lastMove = moveInfos.back();
-    if (actualWeld
-        && (!firstMove.bArcStartBeforeMove || !lastMove.bArcEndAfterMove))
-    {
-        error = "汇川实际焊接JOB要求首点明确起弧、末点明确收弧。";
-        return false;
-    }
-    const auto mappedDaInRange = [](double processValue, double gain,
-        double offset, double minimum, double maximum)
-        {
-            const double output = processValue * gain + offset;
-            return std::isfinite(processValue) && std::isfinite(output)
-                && output >= minimum && output <= maximum;
-        };
+    bool arcActive = false;
+    int arcSegments = 0;
     for (std::size_t index = 0; index < moveInfos.size(); ++index)
     {
         const T_ROBOT_MOVE_INFO& move = moveInfos[index];
@@ -2174,11 +4021,22 @@ bool InovanceRobotCtrl::ValidateMoveInfos(
             move.tCoord.dRX, move.tCoord.dRY, move.tCoord.dRZ,
             move.tCoord.dBX, move.tCoord.dBY, move.tCoord.dBZ
         };
-        if (move.nMoveType == MOVL
+        if ((move.nMoveType == MOVL || (nativeJob && move.nPosType == POSVAR))
             && !std::all_of(std::begin(poseValues), std::end(poseValues),
                 [](double value) { return std::isfinite(value); }))
         {
             error = "汇川第" + std::to_string(index + 1) + "个直线点包含非有限位姿。";
+            return false;
+        }
+        if (move.nMoveType == MOVL && move.nPosType != POSVAR)
+        {
+            error = "汇川第" + std::to_string(index + 1)
+                + "个MOVL点必须提供笛卡尔POSVAR位姿。";
+            return false;
+        }
+        if (nativeJob && move.nMoveType == MOVJ && move.nPosType != POSVAR)
+        {
+            error = "汇川原生JOB暂不覆盖工程全局JP.pts；MOVJ请提供POSVAR，底层将生成Movj LP局部点。";
             return false;
         }
         if (!nativeJob
@@ -2196,76 +4054,85 @@ bool InovanceRobotCtrl::ValidateMoveInfos(
         }
         if (nativeJob && move.bHasTrackParam)
         {
-            error = "汇川原生JOB尚未实现跟踪参数，已拒绝忽略轨迹跟踪语义。";
+            error = "汇川现场已确认ArcTrackData引用指令，但尚未取得ArcTrackData变量文件格式；"
+                "当前拒绝忽略通用TRACKDATA参数，请先关闭跟踪或补充控制器导出的跟踪数据文件。";
             return false;
         }
         if (nativeJob && move.bHasWeaveParam && !move.bAppPointwiseWeave)
         {
-            error = "汇川原生JOB尚未实现控制器原生摆动；请改用上位机已展开的pointwise摆动轨迹。";
-            return false;
+            int shape = -1;
+            const T_WeaveDate& weave = move.tWeaveParam;
+            const bool unsupportedFields = weave.nWeaveType != 0
+                || weave.nPauseTime3Ms != 0 || weave.nPauseTime4Ms != 0
+                || weave.nPauseContinue != 0
+                || !SameProgramValue(weave.dSwingDirectionDeg, 0.0)
+                || !SameProgramValue(weave.dWeavePlaneAngleDeg, 0.0)
+                || !SameProgramValue(weave.dSpaceAngleDeg, 0.0)
+                || !SameProgramValue(weave.dEndLengthMm, 0.0)
+                || !SameProgramValue(weave.dEndWidthMm, 0.0)
+                || !SameProgramValue(weave.dCenterHeightMm, 0.0);
+            if (!InovanceNativeWeaveShape(weave.nWeaveShape, shape)
+                || unsupportedFields
+                || !std::isfinite(weave.dWeaveFrequencyHz)
+                || weave.dWeaveFrequencyHz <= 0.0
+                || !std::isfinite(weave.dWeaveAmplitudeMm)
+                || weave.dWeaveAmplitudeMm < 0.0
+                || weave.nPauseTime1Ms < 0 || weave.nPauseTime2Ms < 0)
+            {
+                error = "汇川当前已接入现场验证的对称正弦原生摆动：Shape[1]、Freq、"
+                    "RAmp=LAmp、RT、LT；第" + std::to_string(index + 1)
+                    + "点包含尚无等价汇川JOB字段的摆动参数。";
+                return false;
+            }
         }
         if (actualWeld)
         {
-            if (move.nMoveType != MOVL || !move.bWeldProcessEnabled)
+            if (move.bArcStartBeforeMove)
             {
-                error = "汇川实际焊接JOB的所有焊道点必须是启用焊接工艺的MOVL点。";
-                return false;
-            }
-            if ((index != 0 && move.bArcStartBeforeMove)
-                || (index + 1 != moveInfos.size() && move.bArcEndAfterMove))
-            {
-                error = "汇川实际焊接JOB只允许首点起弧、末点收弧。";
-                return false;
-            }
-            if (move.bUseTransitionWeldParams)
-            {
-                error = "汇川JOB中的Set DA会打断相邻运动预处理；过渡电流/电压尚无连续切换证明，实际焊接保持限制。";
-                return false;
-            }
-            if (!mappedDaInRange(move.dArcStartCurrent,
-                    m_weldCurrentDaGain, m_weldCurrentDaOffset,
-                    m_weldCurrentDaMin, m_weldCurrentDaMax)
-                || !mappedDaInRange(move.dArcEndCurrent,
-                    m_weldCurrentDaGain, m_weldCurrentDaOffset,
-                    m_weldCurrentDaMin, m_weldCurrentDaMax)
-                || !mappedDaInRange(move.dWeldCurrent,
-                    m_weldCurrentDaGain, m_weldCurrentDaOffset,
-                    m_weldCurrentDaMin, m_weldCurrentDaMax)
-                || !mappedDaInRange(move.dArcStartVoltage,
-                    m_weldVoltageDaGain, m_weldVoltageDaOffset,
-                    m_weldVoltageDaMin, m_weldVoltageDaMax)
-                || !mappedDaInRange(move.dArcEndVoltage,
-                    m_weldVoltageDaGain, m_weldVoltageDaOffset,
-                    m_weldVoltageDaMin, m_weldVoltageDaMax)
-                || !mappedDaInRange(move.dWeldVoltage,
-                    m_weldVoltageDaGain, m_weldVoltageDaOffset,
-                    m_weldVoltageDaMin, m_weldVoltageDaMax)
-                || !std::isfinite(move.dArcStartWaitTime)
-                || move.dArcStartWaitTime < 0.0 || move.dArcStartWaitTime > 65535.0
-                || !std::isfinite(move.dArcEndWaitTime)
-                || move.dArcEndWaitTime < 0.0 || move.dArcEndWaitTime > 65535.0)
-            {
-                error = "汇川第" + std::to_string(index + 1)
-                    + "点的焊接电流/电压映射越过配置DA范围，或起收弧等待时间无效。";
-                return false;
-            }
-            if (index > 0)
-            {
-                const T_ROBOT_MOVE_INFO& reference = moveInfos.front();
-                const auto differs = [](double left, double right)
-                    { return std::abs(left - right) > 1e-9; };
-                if (differs(move.dArcStartCurrent, reference.dArcStartCurrent)
-                    || differs(move.dArcStartVoltage, reference.dArcStartVoltage)
-                    || differs(move.dArcStartWaitTime, reference.dArcStartWaitTime)
-                    || differs(move.dWeldCurrent, reference.dWeldCurrent)
-                    || differs(move.dWeldVoltage, reference.dWeldVoltage)
-                    || differs(move.dArcEndCurrent, reference.dArcEndCurrent)
-                    || differs(move.dArcEndVoltage, reference.dArcEndVoltage)
-                    || differs(move.dArcEndWaitTime, reference.dArcEndWaitTime))
+                if (arcActive || !move.bWeldProcessEnabled)
                 {
-                    error = "汇川实际焊接JOB当前只允许一组稳定起弧/焊接/收弧参数；检测到点间工艺参数变化。";
+                    error = "汇川第" + std::to_string(index + 1)
+                        + "点的起弧标志重复，或该点未启用焊接工艺。";
                     return false;
                 }
+                arcActive = true;
+                ++arcSegments;
+            }
+            if (move.bWeldProcessEnabled != arcActive)
+            {
+                error = "汇川第" + std::to_string(index + 1)
+                    + "点的焊接启用状态与起收弧状态不一致。";
+                return false;
+            }
+            if (move.bWeldProcessEnabled)
+            {
+                const double processValues[] = {
+                    move.dArcStartCurrent, move.dArcStartVoltage,
+                    move.dWeldCurrent, move.dWeldVoltage,
+                    move.dArcEndCurrent, move.dArcEndVoltage
+                };
+                if (move.nMoveType != MOVL
+                    || !std::all_of(std::begin(processValues), std::end(processValues),
+                        [](double value) { return std::isfinite(value) && value >= 0.0; })
+                    || !std::isfinite(move.dArcStartWaitTime)
+                    || move.dArcStartWaitTime < 0.0 || move.dArcStartWaitTime > 65535.0
+                    || !std::isfinite(move.dArcEndWaitTime)
+                    || move.dArcEndWaitTime < 0.0 || move.dArcEndWaitTime > 65.535)
+                {
+                    error = "汇川第" + std::to_string(index + 1)
+                        + "个焊接点必须是MOVL，电流/电压须为非负有限值，"
+                        "起弧等待须为0..65535秒，ArcOffT须为0..65535毫秒。";
+                    return false;
+                }
+            }
+            if (move.bArcEndAfterMove)
+            {
+                if (!arcActive)
+                {
+                    error = "汇川第" + std::to_string(index + 1) + "点收弧时电弧未开启。";
+                    return false;
+                }
+                arcActive = false;
             }
         }
         if (move.nMoveType == MOVL)
@@ -2287,15 +4154,13 @@ bool InovanceRobotCtrl::ValidateMoveInfos(
                     + "个关节点速度必须为1..100百分比。";
                 return false;
             }
-            const double units[6] = {
-                m_tAxisUnit.dSPulseUnit, m_tAxisUnit.dLPulseUnit, m_tAxisUnit.dUPulseUnit,
-                m_tAxisUnit.dRPulseUnit, m_tAxisUnit.dBPulseUnit, m_tAxisUnit.dTPulseUnit
-            };
-            if (!std::all_of(std::begin(units), std::end(units),
-                [](double unit) { return std::isfinite(unit) && std::abs(unit) >= 1e-15; }))
+            if (!nativeJob)
             {
-                error = "汇川轨迹包含关节点，但当前机器人未配置真实AxisUnit；JointMotion能力未开放。";
-                return false;
+                if (!m_connectionReady.load() || !m_kinematicsSession.Ready())
+                {
+                    error = "汇川轨迹包含关节点，但当前机器人未配置真实AxisUnit；JointMotion能力未开放。";
+                    return false;
+                }
             }
         }
         else
@@ -2303,6 +4168,13 @@ bool InovanceRobotCtrl::ValidateMoveInfos(
             error = "汇川轨迹只支持MOVL和MOVJ。";
             return false;
         }
+    }
+    if (actualWeld && (arcSegments == 0 || arcActive))
+    {
+        error = arcSegments == 0
+            ? "汇川实际焊接JOB没有任何明确的起弧段。"
+            : "汇川实际焊接JOB结束时电弧仍处于开启状态，缺少收弧标志。";
+        return false;
     }
     error.clear();
     return true;
@@ -2335,7 +4207,7 @@ bool InovanceRobotCtrl::WriteTrajectoryJobFile(
     bool needsCartesianArm = false;
     for (const T_ROBOT_MOVE_INFO& move : moveInfos)
     {
-        needsCartesianArm = needsCartesianArm || move.nMoveType == MOVL;
+        needsCartesianArm = needsCartesianArm || move.nPosType == POSVAR;
     }
     if (needsCartesianArm)
     {
@@ -2362,178 +4234,173 @@ bool InovanceRobotCtrl::WriteTrajectoryJobFile(
         std::copy(std::begin(m_armConfig), std::end(m_armConfig), arm);
         std::copy(std::begin(m_externalValues), std::end(m_externalValues), passiveExternal);
     }
-    const double axisUnits[9] = {
-        m_tAxisUnit.dSPulseUnit, m_tAxisUnit.dLPulseUnit, m_tAxisUnit.dUPulseUnit,
-        m_tAxisUnit.dRPulseUnit, m_tAxisUnit.dBPulseUnit, m_tAxisUnit.dTPulseUnit,
-        m_tAxisUnit.dBXPulseUnit, m_tAxisUnit.dBYPulseUnit, m_tAxisUnit.dBZPulseUnit
-    };
-
     const bool actualWeld = purpose == RobotTrajectoryPurpose::ActualWeld;
-    const int arcInactiveValue = m_weldArcEnableActiveValue == 0 ? 1 : 0;
-    const int arcLostValue = m_weldArcEstablishedActiveValue == 0 ? 1 : 0;
-    const auto mappedCurrent = [this](double current)
-        { return current * m_weldCurrentDaGain + m_weldCurrentDaOffset; };
-    const auto mappedVoltage = [this](double voltage)
-        { return voltage * m_weldVoltageDaGain + m_weldVoltageDaOffset; };
-    const auto timeoutSeconds = [](int timeoutMs)
-        { return static_cast<double>(timeoutMs) / 1000.0; };
+
+    std::string controllerRobotName;
+    if (!ReadControllerProgramRobotName(controllerRobotName, error))
+    {
+        error = "汇川原生JOB无法绑定控制器真实机型：" + error;
+        return false;
+    }
 
     std::ostringstream source;
-    source << "// QTWIDGETSAPP4_INOVANCE_TRAJECTORY_JOB_V1\r\n"
-        << "// PC_TIMESTAMP=" << InovancePcTimestamp() << "\r\n"
-        << "Func Run()\r\n";
+    // The pendant parser expects local-point declarations to follow
+    // ProgramInfo directly.  Module-scope comments before the first LP are
+    // displayed as instructions and make the generated module unusable.
+    source << InovanceProgramInfo(controllerRobotName);
     for (std::size_t index = 0; index < moveInfos.size(); ++index)
     {
         const T_ROBOT_MOVE_INFO& move = moveInfos[index];
-        if (move.nMoveType == MOVL)
-        {
-            const double external[6] = {
-                move.tCoord.dBX, move.tCoord.dBY, move.tCoord.dBZ,
-                passiveExternal[3], passiveExternal[4], passiveExternal[5]
-            };
-            source << "LP[" << index << "] = {(" << FormatProgramDouble(move.tCoord.dX)
-                << ',' << FormatProgramDouble(move.tCoord.dY)
-                << ',' << FormatProgramDouble(move.tCoord.dZ)
-                // 汇川PRO使用A,B,C；通用适配层使用RX,RY,RZ。
-                << ',' << FormatProgramDouble(move.tCoord.dRZ)
-                << ',' << FormatProgramDouble(move.tCoord.dRY)
-                << ',' << FormatProgramDouble(move.tCoord.dRX) << "),("
-                << arm[0] << ',' << arm[1] << ',' << arm[2] << ',' << arm[3] << "),("
-                << FormatProgramDouble(external[0]) << ',' << FormatProgramDouble(external[1])
-                << ',' << FormatProgramDouble(external[2]) << ',' << FormatProgramDouble(external[3])
-                << ',' << FormatProgramDouble(external[4]) << ',' << FormatProgramDouble(external[5])
-                << ")};\r\n";
-        }
-        else
-        {
-            source << "JP[" << index << "] = {("
-                << FormatProgramDouble(static_cast<double>(move.tPulse.nSPulse) * axisUnits[0]) << ','
-                << FormatProgramDouble(static_cast<double>(move.tPulse.nLPulse) * axisUnits[1]) << ','
-                << FormatProgramDouble(static_cast<double>(move.tPulse.nUPulse) * axisUnits[2]) << ','
-                << FormatProgramDouble(static_cast<double>(move.tPulse.nRPulse) * axisUnits[3]) << ','
-                << FormatProgramDouble(static_cast<double>(move.tPulse.nBPulse) * axisUnits[4]) << ','
-                << FormatProgramDouble(static_cast<double>(move.tPulse.nTPulse) * axisUnits[5]) << "),("
-                << FormatProgramDouble(static_cast<double>(move.tPulse.lBXPulse) * axisUnits[6]) << ','
-                << FormatProgramDouble(static_cast<double>(move.tPulse.lBYPulse) * axisUnits[7]) << ','
-                << FormatProgramDouble(static_cast<double>(move.tPulse.lBZPulse) * axisUnits[8])
-                << ",0.000000,0.000000,0.000000)};\r\n";
-        }
+        const double external[6] = {
+            move.tCoord.dBX, move.tCoord.dBY, move.tCoord.dBZ,
+            passiveExternal[3], passiveExternal[4], passiveExternal[5]
+        };
+        // A controller-created local-point variable is serialized in PRO as
+        // three semicolon-delimited fields without braces or parentheses:
+        //   LP[n] = X,Y,Z,A,B,C; arm0,arm1,arm2,arm3; E1,...,E6;
+        // This deliberately mirrors the controller export instead of applying
+        // C/C++ aggregate-initializer syntax to the built-in LP variable.
+        source << "LP[" << index << "] =  " << FormatProgramDouble(move.tCoord.dX)
+            << ", " << FormatProgramDouble(move.tCoord.dY)
+            << ", " << FormatProgramDouble(move.tCoord.dZ)
+            // 汇川PRO使用A,B,C；通用适配层使用RX,RY,RZ。
+            << ", " << FormatProgramDouble(move.tCoord.dRZ)
+            << ", " << FormatProgramDouble(move.tCoord.dRY)
+            << ", " << FormatProgramDouble(move.tCoord.dRX) << "; "
+            << arm[0] << ", " << arm[1] << ", " << arm[2] << ", " << arm[3] << "; "
+            << FormatProgramDouble(external[0]) << ", " << FormatProgramDouble(external[1])
+            << ", " << FormatProgramDouble(external[2]) << ", " << FormatProgramDouble(external[3])
+            << ", " << FormatProgramDouble(external[4]) << ", " << FormatProgramDouble(external[5])
+            << ";\r\n";
     }
+    source << "Func " << kInovanceCallableFunction << "()\r\n";
 
-    if (actualWeld)
-    {
-        const T_ROBOT_MOVE_INFO& process = moveInfos.front();
-        source << "Set Out[" << m_weldArcEnableDo << "],"
-            << InovanceIoValue(arcInactiveValue) << ";\r\n"
-            << "Wait In[" << m_weldReadyDi << "] == "
-            << InovanceIoValue(m_weldReadyActiveValue) << ",T["
-            << FormatProgramDouble(timeoutSeconds(m_weldReadyTimeoutMs))
-            << "],Goto L[900];\r\n"
-            << "Set DA[" << m_weldCurrentDa << "],"
-            << FormatProgramDouble(mappedCurrent(process.dArcStartCurrent)) << ";\r\n"
-            << "Set DA[" << m_weldVoltageDa << "],"
-            << FormatProgramDouble(mappedVoltage(process.dArcStartVoltage)) << ";\r\n"
-            << "IDelete " << m_weldArcInterruptId << ";\r\n"
-            << "IConnect " << m_weldArcInterruptId << ",ArcLostTrap();\r\n"
-            << "ISigIn(ONCE," << m_weldArcInterruptId << ','
-            << m_weldArcEstablishedDi << ',' << InovanceIoValue(arcLostValue)
-            << ");\r\n"
-            << "IActive " << m_weldArcInterruptId << ";\r\n"
-            << "IEnable;\r\n"
-            << "Set Out[" << m_weldArcEnableDo << "],"
-            << InovanceIoValue(m_weldArcEnableActiveValue) << ";\r\n"
-            << "Wait In[" << m_weldArcEstablishedDi << "] == "
-            << InovanceIoValue(m_weldArcEstablishedActiveValue) << ",T["
-            << FormatProgramDouble(timeoutSeconds(m_weldArcStartTimeoutMs))
-            << "],Goto L[901];\r\n";
-        if (process.dArcStartWaitTime > 0.0)
+    bool arcActive = false;
+    bool nativeWeaveActive = false;
+    const T_ROBOT_MOVE_INFO* activeWeldParameters = nullptr;
+    const T_WeaveDate* activeWeaveParameters = nullptr;
+    const auto weldSpeedMmPerSecond = [](const T_ROBOT_MOVE_INFO& move)
         {
-            source << "Wait T[" << FormatProgramDouble(process.dArcStartWaitTime) << "];\r\n";
-        }
-        source << "Set DA[" << m_weldCurrentDa << "],"
-            << FormatProgramDouble(mappedCurrent(process.dWeldCurrent)) << ";\r\n"
-            << "Set DA[" << m_weldVoltageDa << "],"
-            << FormatProgramDouble(mappedVoltage(process.dWeldVoltage)) << ";\r\n";
-    }
+            const double mmPerMinute = move.dWeldSpeedMmPerMin > 0.0
+                ? move.dWeldSpeedMmPerMin : move.tSpeed.dSpeed;
+            return mmPerMinute / 60.0;
+        };
+    const auto appendWeldSet = [&source, &weldSpeedMmPerSecond](
+        const T_ROBOT_MOVE_INFO& move)
+        {
+            source << "WeldSet ArcData[" << kInovanceArcDataIndex << "],AC["
+                << FormatProgramNumber(move.dWeldCurrent) << "],AV["
+                << FormatProgramNumber(move.dWeldVoltage) << "],WS["
+                << FormatProgramNumber(weldSpeedMmPerSecond(move)) << "];\r\n";
+        };
 
     for (std::size_t index = 0; index < moveInfos.size(); ++index)
     {
         const T_ROBOT_MOVE_INFO& move = moveInfos[index];
-        const bool exact = index == 0 || index + 1 == moveInfos.size()
-            || !std::isfinite(move.dOverlapRel) || move.dOverlapRel <= 0.0;
-        const std::string zone = exact ? std::string("Fine")
-            : "ZR[" + std::to_string(std::clamp(
-                static_cast<int>(std::lround(move.dOverlapRel)), 1, 200)) + "]";
+        // Match the pendant-authored instruction form exactly.  In particular,
+        // the field controller's editor accepts integer Speed[] and Fine, but the
+        // current controller rejects the configured blend zone in generated
+        // trajectory programs. Keep
+        // every point exact until a controller-verified blending form is available.
+        // The field-verified controller form binds every move explicitly to the
+        // calibrated Tool[1] and Wobj[1]; do not rely on a previous instruction's
+        // active coordinate state.
+        const std::string zone = "Fine";
+
+        if (actualWeld && move.bArcStartBeforeMove)
+        {
+            source << "WeldOn ArcData[" << kInovanceArcDataIndex << "],AC["
+                << FormatProgramNumber(move.dArcStartCurrent) << "],AV["
+                << FormatProgramNumber(move.dArcStartVoltage) << "],WS["
+                << FormatProgramNumber(weldSpeedMmPerSecond(move)) << "],RPM["
+                << kInovanceRpmIndex << "];\r\n";
+            if (move.dArcStartWaitTime > 0.0)
+            {
+                source << "Wait T[" << FormatProgramNumber(move.dArcStartWaitTime)
+                    << "];\r\n";
+            }
+            appendWeldSet(move);
+            activeWeldParameters = &move;
+            arcActive = true;
+        }
+        else if (actualWeld && arcActive && move.bWeldProcessEnabled
+            && (activeWeldParameters == nullptr
+                || !SameInovanceWeldParameters(*activeWeldParameters, move)))
+        {
+            appendWeldSet(move);
+            activeWeldParameters = &move;
+        }
+
+        const bool wantsNativeWeave = move.bHasWeaveParam && !move.bAppPointwiseWeave;
+        if (wantsNativeWeave && !nativeWeaveActive)
+        {
+            AppendInovanceWeaveCommand(source, "WeaveOn", move.tWeaveParam);
+            activeWeaveParameters = &move.tWeaveParam;
+            nativeWeaveActive = true;
+        }
+        else if (wantsNativeWeave && activeWeaveParameters != nullptr
+            && !SameInovanceWeaveParameters(*activeWeaveParameters, move.tWeaveParam))
+        {
+            AppendInovanceWeaveCommand(source, "WeaveSet", move.tWeaveParam);
+            activeWeaveParameters = &move.tWeaveParam;
+        }
+        else if (!wantsNativeWeave && nativeWeaveActive)
+        {
+            source << "WeaveOff;\r\n";
+            nativeWeaveActive = false;
+            activeWeaveParameters = nullptr;
+        }
+
         if (move.nMoveType == MOVL)
         {
             const double speedMmPerMin = move.dWeldSpeedMmPerMin > 0.0
                 ? move.dWeldSpeedMmPerMin : move.tSpeed.dSpeed;
+            const int speedMmPerSecond = std::clamp(
+                static_cast<int>(std::lround(speedMmPerMin / 60.0)), 1, 15000);
             source << "Movl LP[" << index << "],Speed["
-                << FormatProgramDouble(speedMmPerMin / 60.0)
-                << "].Bstatic:1," << zone << ",Tool[" << m_toolNo
+                << speedMmPerSecond << "]," << zone << ",Tool[" << m_toolNo
                 << "],Wobj[" << m_wobjNo << "];\r\n";
         }
         else
         {
-            source << "MovAbsJ JP[" << index << "],V["
+            source << "Movj LP[" << index << "],V["
                 << std::clamp(static_cast<int>(std::lround(move.tSpeed.dSpeed)), 1, 100)
-                << "]," << zone << ",Tool[" << m_toolNo << "],Wobj["
-                << m_wobjNo << "];\r\n";
+                << "]," << zone << ",Tool[" << m_toolNo
+                << "],Wobj[" << m_wobjNo << "];\r\n";
         }
         if (move.nDwellMs > 0)
         {
             source << "Wait T["
-                << FormatProgramDouble(static_cast<double>(move.nDwellMs) / 1000.0)
+                << FormatProgramNumber(static_cast<double>(move.nDwellMs) / 1000.0)
                 << "];\r\n";
         }
-    }
 
-    if (actualWeld)
-    {
-        const T_ROBOT_MOVE_INFO& process = moveInfos.back();
-        source << "Set DA[" << m_weldCurrentDa << "],"
-            << FormatProgramDouble(mappedCurrent(process.dArcEndCurrent)) << ";\r\n"
-            << "Set DA[" << m_weldVoltageDa << "],"
-            << FormatProgramDouble(mappedVoltage(process.dArcEndVoltage)) << ";\r\n";
-        if (process.dArcEndWaitTime > 0.0)
+        if (actualWeld && move.bArcEndAfterMove)
         {
-            source << "Wait T[" << FormatProgramDouble(process.dArcEndWaitTime) << "];\r\n";
+            const long long arcOffMilliseconds = std::llround(move.dArcEndWaitTime * 1000.0);
+            source << "WeldOff ArcData[" << kInovanceArcDataIndex << "],AC["
+                << FormatProgramNumber(move.dArcEndCurrent) << "],AV["
+                << FormatProgramNumber(move.dArcEndVoltage) << "],ArcOffT["
+                << arcOffMilliseconds << "];\r\n";
+            arcActive = false;
+            activeWeldParameters = nullptr;
+            if (nativeWeaveActive)
+            {
+                source << "WeaveOff;\r\n";
+                nativeWeaveActive = false;
+                activeWeaveParameters = nullptr;
+            }
         }
-        source << "IDeactive " << m_weldArcInterruptId << ";\r\n"
-            << "IDisable;\r\n"
-            << "IDelete " << m_weldArcInterruptId << ";\r\n"
-            << "Set Out[" << m_weldArcEnableDo << "],"
-            << InovanceIoValue(arcInactiveValue) << ";\r\n"
-            << "Wait In[" << m_weldArcEstablishedDi << "] == "
-            << InovanceIoValue(arcLostValue) << ",T["
-            << FormatProgramDouble(timeoutSeconds(m_weldArcEndTimeoutMs))
-            << "],Goto L[903];\r\n"
-            << "Goto L[999];\r\n"
-            << "L[900]:\r\nSet Out[" << m_weldArcEnableDo << "],"
-            << InovanceIoValue(arcInactiveValue)
-            << ";\r\nPrint \"WELDER NOT READY\";\r\nAlarm[" << m_weldAlarmIndex << "];\r\n"
-            << "L[901]:\r\nIDeactive " << m_weldArcInterruptId << ";\r\n"
-            << "IDisable;\r\n"
-            << "IDelete " << m_weldArcInterruptId << ";\r\n"
-            << "Set Out[" << m_weldArcEnableDo << "],"
-            << InovanceIoValue(arcInactiveValue) << ";\r\n"
-            << "Print \"ARC START TIMEOUT\";\r\nAlarm[" << m_weldAlarmIndex << "];\r\n"
-            << "L[903]:\r\nSet Out[" << m_weldArcEnableDo << "],"
-            << InovanceIoValue(arcInactiveValue)
-            << ";\r\nPrint \"ARC OFF TIMEOUT\";\r\nAlarm[" << m_weldAlarmIndex << "];\r\n"
-            << "L[999]:\r\n";
     }
+    if (nativeWeaveActive) { source << "WeaveOff;\r\n"; }
     source << "EndFunc;\r\n";
-    if (actualWeld)
-    {
-        source << "Trap ArcLostTrap()\r\n"
-            << "Set Out[" << m_weldArcEnableDo << "],"
-            << InovanceIoValue(arcInactiveValue) << ";\r\n"
-            << "Print \"ARC LOST\";\r\n"
-            << "Alarm[" << m_weldAlarmIndex << "];\r\n"
-            << "EndTrap;\r\n";
-    }
     const std::string content = source.str();
+    std::string generatedModuleError;
+    if (!ValidateInovanceCallableModule(content, generatedModuleError))
+    {
+        error = "汇川原生JOB生成内容不满足公共模块契约：" + generatedModuleError;
+        return false;
+    }
     const int lineCount = static_cast<int>(std::count(content.cbegin(), content.cend(), '\n'));
     if (lineCount > kInovanceProgramInstructionLimit)
     {
@@ -2584,6 +4451,36 @@ bool InovanceRobotCtrl::WriteTrajectoryJobFile(
     return true;
 }
 
+bool InovanceRobotCtrl::ReadControllerProgramRobotName(
+    std::string& robotName,
+    std::string& error)
+{
+    robotName.clear();
+    if (!IsConnected())
+    {
+        error = "2222控制通道未连接。";
+        return false;
+    }
+    std::string response;
+    if (!SendCommand("Get_RobotType", response))
+    {
+        error = GetLastRobotError();
+        if (error.empty()) { error = "Get_RobotType调用失败。"; }
+        return false;
+    }
+    robotName = Trim(ValuePart(response));
+    if (robotName.empty() || robotName.size() > 128
+        || robotName.rfind("IR-R", 0) != 0
+        || robotName.find_first_of("\"\\\r\n") != std::string::npos)
+    {
+        error = "Get_RobotType返回的真实机型不能用于PRO的RobotName：" + robotName;
+        robotName.clear();
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 bool InovanceRobotCtrl::UploadTrajectoryJob(
     RobotTrajectoryHandle& handle,
     std::string& error)
@@ -2597,6 +4494,35 @@ bool InovanceRobotCtrl::UploadTrajectoryJob(
     if (!IsConnected())
     {
         error = "汇川原生JOB上传前2222控制通道未连接。";
+        return false;
+    }
+    std::string localContent;
+    std::string localError;
+    if (!ReadBoundedTextFile(handle.localProgramPath, localContent, localError)
+        || localContent.size() != handle.programContentSize
+        || InovanceContentSha256(localContent) != handle.programContentSha256
+        || !ValidateInovanceCallableModule(localContent, localError))
+    {
+        error = "汇川原生JOB上传前本地PRO身份或模块契约无效："
+            + (localError.empty() ? std::string("SHA-256或大小不一致。") : localError);
+        return false;
+    }
+    std::string moduleRobotName;
+    if (!ParseInovanceProgramRobotName(localContent, moduleRobotName, localError))
+    {
+        error = "汇川原生JOB上传前无法确认PRO机型：" + localError;
+        return false;
+    }
+    std::string controllerRobotName;
+    if (!ReadControllerProgramRobotName(controllerRobotName, localError))
+    {
+        error = "汇川原生JOB上传前无法确认控制器真实机型：" + localError;
+        return false;
+    }
+    if (moduleRobotName != controllerRobotName)
+    {
+        error = "汇川原生JOB的RobotName与当前控制器不一致：PRO="
+            + moduleRobotName + "，Controller=" + controllerRobotName + "。";
         return false;
     }
     int taskStatus = -1;
@@ -2623,6 +4549,65 @@ bool InovanceRobotCtrl::UploadTrajectoryJob(
         error = "汇川原生JOB无法建立FTP底层：" + sessionError;
         return false;
     }
+    const std::string targetFile = handle.programName + ".pro";
+    const std::size_t projectDirectoryEnd = activeDirectory.find(
+        '/', std::strlen("/TeachProgram/"));
+    const std::string activeProjectDirectory = projectDirectoryEnd == std::string::npos
+        ? activeDirectory : activeDirectory.substr(0, projectDirectoryEnd);
+    const std::string remoteProjectPath = activeProjectDirectory + "/"
+        + activeProject + ".prj";
+    const std::filesystem::path auditDirectory =
+        std::filesystem::path(handle.localProgramPath).parent_path();
+    const std::filesystem::path projectBackupPath = auditDirectory
+        / (activeProject + "_before.prj");
+    const std::filesystem::path registeredProjectPath = auditDirectory
+        / (activeProject + "_registered.prj");
+    const std::filesystem::path projectVerifyPath = auditDirectory
+        / (activeProject + "_uploaded_verify.prj");
+    if (!session->DownloadProgramFile(remoteProjectPath, projectBackupPath.string()))
+    {
+        error = "汇川原生JOB上传前无法备份当前PRJ：" + session->LastError();
+        return false;
+    }
+    std::string projectContent;
+    std::string projectReadError;
+    if (!ReadBoundedTextFile(projectBackupPath, projectContent, projectReadError))
+    {
+        error = "汇川当前PRJ备份无效：" + projectReadError;
+        return false;
+    }
+    std::string registeredProjectContent;
+    bool projectChanged = false;
+    std::string registrationError;
+    if (!RegisterInovanceProgramInProject(
+        projectContent, targetFile, registeredProjectContent,
+        projectChanged, registrationError))
+    {
+        error = "汇川轨迹模块无法登记到当前PRJ：" + registrationError;
+        return false;
+    }
+    if (!projectChanged)
+    {
+        registeredProjectContent = projectContent;
+    }
+    else
+    {
+        std::ofstream projectOutput(
+            registeredProjectPath, std::ios::binary | std::ios::trunc);
+        if (!projectOutput)
+        {
+            error = "汇川无法创建已登记轨迹模块的本地PRJ。";
+            return false;
+        }
+        projectOutput.write(registeredProjectContent.data(),
+            static_cast<std::streamsize>(registeredProjectContent.size()));
+        projectOutput.flush();
+        if (!projectOutput)
+        {
+            error = "汇川写入已登记轨迹模块的本地PRJ失败。";
+            return false;
+        }
+    }
     std::vector<RobotControllerFileInfo> entries;
     if (!session->ListProgramFiles(activeDirectory, entries, 10000))
     {
@@ -2632,11 +4617,15 @@ bool InovanceRobotCtrl::UploadTrajectoryJob(
     int proCount = 0;
     bool mainFound = false;
     bool targetFound = false;
-    const std::string targetFile = handle.programName + ".pro";
+    bool dynamicDirectoryFound = false;
     for (const RobotControllerFileInfo& entry : entries)
     {
-        if (entry.isDirectory) { continue; }
         const std::string lower = LowerAscii(entry.name);
+        if (entry.isDirectory)
+        {
+            dynamicDirectoryFound = dynamicDirectoryFound || lower == "dynamiccall";
+            continue;
+        }
         if (lower.size() < 4 || lower.substr(lower.size() - 4) != ".pro") { continue; }
         ++proCount;
         mainFound = mainFound || lower == "main.pro";
@@ -2655,17 +4644,75 @@ bool InovanceRobotCtrl::UploadTrajectoryJob(
     }
 
     const std::string remotePath = activeDirectory + "/" + targetFile;
-    if (!session->UploadProgramFile(handle.localProgramPath, remotePath, true))
+    const std::string dynamicDirectory = activeDirectory + "/DynamicCall";
+    const std::string dynamicRemotePath = dynamicDirectory + "/" + targetFile;
+    const std::filesystem::path previousProgramPath = auditDirectory
+        / (handle.programName + "_before.pro");
+    const std::filesystem::path previousDynamicProgramPath = auditDirectory
+        / (handle.programName + "_dynamic_before.pro");
+    bool dynamicTargetFound = false;
+    if (dynamicDirectoryFound)
     {
-        error = "汇川原生JOB上传失败：" + session->LastError();
+        std::vector<RobotControllerFileInfo> dynamicEntries;
+        if (!session->ListProgramFiles(dynamicDirectory, dynamicEntries, 10000))
+        {
+            error = "汇川原生JOB上传前无法读取DynamicCall文件清单："
+                + session->LastError();
+            return false;
+        }
+        for (const RobotControllerFileInfo& entry : dynamicEntries)
+        {
+            dynamicTargetFound = dynamicTargetFound
+                || (!entry.isDirectory && LowerAscii(entry.name) == LowerAscii(targetFile));
+        }
+    }
+    if (targetFound
+        && !session->DownloadProgramFile(remotePath, previousProgramPath.string()))
+    {
+        error = "汇川覆盖既有轨迹模块前无法建立PRO备份：" + session->LastError();
         return false;
     }
+    if (dynamicTargetFound
+        && !session->DownloadProgramFile(
+            dynamicRemotePath, previousDynamicProgramPath.string()))
+    {
+        error = "汇川覆盖DynamicCall轨迹模块前无法建立PRO备份："
+            + session->LastError();
+        return false;
+    }
+    const auto rollbackTargetProgram = [&]() -> bool
+        {
+            return targetFound
+                ? session->UploadProgramFile(
+                    previousProgramPath.string(), remotePath, false)
+                : session->DeleteProgramFile(remotePath);
+        };
+    const auto rollbackDynamicProgram = [&]() -> bool
+        {
+            return dynamicTargetFound
+                ? session->UploadProgramFile(
+                    previousDynamicProgramPath.string(), dynamicRemotePath, false)
+                : session->DeleteProgramFile(dynamicRemotePath);
+        };
+    if (!session->UploadProgramFile(handle.localProgramPath, remotePath, false))
+    {
+        const std::string uploadError = session->LastError();
+        const bool restored = rollbackTargetProgram();
+        error = "汇川原生JOB上传失败：" + uploadError
+            + (restored ? "；已恢复上传前PRO状态。" : "；PRO状态恢复失败。 ");
+        return false;
+    }
+    const std::filesystem::path& frozenProjectPath = projectChanged
+        ? registeredProjectPath : projectBackupPath;
     const std::filesystem::path verifyPath =
         std::filesystem::path(handle.localProgramPath).parent_path()
         / (handle.programName + "_uploaded_verify.pro");
     if (!session->DownloadProgramFile(remotePath, verifyPath.string()))
     {
-        error = "汇川原生JOB上传后无法回读：" + session->LastError();
+        const std::string verifyError = session->LastError();
+        const bool restored = rollbackTargetProgram();
+        error = "汇川原生JOB上传后无法回读：" + verifyError
+            + (restored ? "；已恢复上传前PRO状态。" : "；PRO状态恢复失败。 ");
         return false;
     }
     std::string uploadedContent;
@@ -2674,12 +4721,113 @@ bool InovanceRobotCtrl::UploadTrajectoryJob(
         || uploadedContent.size() != handle.programContentSize
         || InovanceContentSha256(uploadedContent) != handle.programContentSha256)
     {
+        const bool restored = rollbackTargetProgram();
         error = "汇川原生JOB上传后字节身份不一致："
-            + (readError.empty() ? std::string("SHA-256或大小不一致。") : readError);
+            + (readError.empty() ? std::string("SHA-256或大小不一致。") : readError)
+            + (restored ? "；已恢复上传前PRO状态。" : "；PRO状态恢复失败。 ");
         return false;
     }
-    handle.remoteProgramPath = remotePath;
-    handle.remoteDataPath.clear();
+    if (!session->UploadProgramFile(
+            handle.localProgramPath, dynamicRemotePath, false))
+    {
+        const std::string uploadError = session->LastError();
+        const bool dynamicRestored = rollbackDynamicProgram();
+        const bool programRestored = rollbackTargetProgram();
+        error = "汇川原生JOB无法同步到Call执行目录DynamicCall：" + uploadError
+            + (dynamicRestored ? "；已恢复DynamicCall上传前状态。"
+                : "；DynamicCall状态恢复失败。")
+            + (programRestored ? "；已恢复工程根目录PRO状态。"
+                : "；工程根目录PRO状态恢复失败。 ");
+        return false;
+    }
+    const std::filesystem::path dynamicVerifyPath = auditDirectory
+        / (handle.programName + "_dynamic_uploaded_verify.pro");
+    if (!session->DownloadProgramFile(
+            dynamicRemotePath, dynamicVerifyPath.string()))
+    {
+        const std::string verifyError = session->LastError();
+        const bool dynamicRestored = rollbackDynamicProgram();
+        const bool programRestored = rollbackTargetProgram();
+        error = "汇川原生JOB同步到DynamicCall后无法回读：" + verifyError
+            + (dynamicRestored ? "；已恢复DynamicCall上传前状态。"
+                : "；DynamicCall状态恢复失败。")
+            + (programRestored ? "；已恢复工程根目录PRO状态。"
+                : "；工程根目录PRO状态恢复失败。 ");
+        return false;
+    }
+    std::string dynamicUploadedContent;
+    if (!ReadBoundedTextFile(dynamicVerifyPath, dynamicUploadedContent, readError)
+        || dynamicUploadedContent.size() != handle.programContentSize
+        || InovanceContentSha256(dynamicUploadedContent) != handle.programContentSha256
+        || dynamicUploadedContent != uploadedContent)
+    {
+        const bool dynamicRestored = rollbackDynamicProgram();
+        const bool programRestored = rollbackTargetProgram();
+        error = "汇川DynamicCall轨迹模块回读身份不一致："
+            + (readError.empty() ? std::string("根目录与执行目录内容不一致。") : readError)
+            + (dynamicRestored ? "；已恢复DynamicCall上传前状态。"
+                : "；DynamicCall状态恢复失败。")
+            + (programRestored ? "；已恢复工程根目录PRO状态。"
+                : "；工程根目录PRO状态恢复失败。 ");
+        return false;
+    }
+    if (projectChanged
+        && !session->UploadProgramFile(
+            frozenProjectPath.string(), remoteProjectPath, false))
+    {
+        const std::string uploadError = session->LastError();
+        const bool restored = session->UploadProgramFile(
+            projectBackupPath.string(), remoteProjectPath, false);
+        const bool dynamicRestored = rollbackDynamicProgram();
+        const bool programRestored = rollbackTargetProgram();
+        error = "汇川轨迹模块PRO已上传并验证，但登记当前工程PRJ失败："
+            + uploadError + (restored
+                ? "；已回传原PRJ备份。"
+                : "；原PRJ恢复失败，备份位于 " + projectBackupPath.string())
+            + (dynamicRestored ? "；已恢复DynamicCall上传前状态。"
+                : "；DynamicCall状态恢复失败。")
+            + (programRestored ? "；已恢复上传前PRO状态。" : "；PRO状态恢复失败。 ");
+        return false;
+    }
+    if (!session->DownloadProgramFile(remoteProjectPath, projectVerifyPath.string()))
+    {
+        const std::string verifyError = session->LastError();
+        const bool restored = !projectChanged || session->UploadProgramFile(
+            projectBackupPath.string(), remoteProjectPath, false);
+        const bool dynamicRestored = rollbackDynamicProgram();
+        const bool programRestored = rollbackTargetProgram();
+        error = "汇川轨迹模块上传后无法回读PRJ：" + verifyError
+            + (!projectChanged ? std::string()
+                : restored ? "；已回传原PRJ备份。"
+                : "；原PRJ恢复失败，备份位于 " + projectBackupPath.string())
+            + (dynamicRestored ? "；已恢复DynamicCall上传前状态。"
+                : "；DynamicCall状态恢复失败。")
+            + (programRestored ? "；已恢复上传前PRO状态。" : "；PRO状态恢复失败。 ");
+        return false;
+    }
+    std::string uploadedProjectContent;
+    if (!ReadBoundedTextFile(projectVerifyPath, uploadedProjectContent, readError)
+        || uploadedProjectContent != registeredProjectContent)
+    {
+        const bool restored = !projectChanged || session->UploadProgramFile(
+            projectBackupPath.string(), remoteProjectPath, false);
+        const bool dynamicRestored = rollbackDynamicProgram();
+        const bool programRestored = rollbackTargetProgram();
+        error = "汇川轨迹模块登记后的PRJ字节身份不一致："
+            + (readError.empty() ? std::string("内容不一致。") : readError)
+            + (!projectChanged ? std::string()
+                : restored ? "；已回传原PRJ备份。"
+                : "；原PRJ恢复失败，备份位于 " + projectBackupPath.string())
+            + (dynamicRestored ? "；已恢复DynamicCall上传前状态。"
+                : "；DynamicCall状态恢复失败。")
+            + (programRestored ? "；已恢复上传前PRO状态。" : "；PRO状态恢复失败。 ");
+        return false;
+    }
+    handle.remoteProgramPath = dynamicRemotePath;
+    handle.localDataPath = frozenProjectPath.string();
+    handle.remoteDataPath = remoteProjectPath;
+    handle.dataContentSha256 = InovanceContentSha256(registeredProjectContent);
+    handle.dataContentSize = static_cast<std::uint64_t>(registeredProjectContent.size());
     error.clear();
     return true;
 }
@@ -2689,9 +4837,11 @@ bool InovanceRobotCtrl::VerifyTrajectoryJobRemoteIdentity(
     std::string& error) const
 {
     if (handle.remoteProgramPath.empty() || handle.localProgramPath.empty()
-        || handle.programContentSha256.size() != 64 || handle.programContentSize == 0)
+        || handle.programContentSha256.size() != 64 || handle.programContentSize == 0
+        || handle.remoteDataPath.empty() || handle.localDataPath.empty()
+        || handle.dataContentSha256.size() != 64 || handle.dataContentSize == 0)
     {
-        error = "汇川原生JOB缺少远端路径或冻结内容身份。";
+        error = "汇川原生JOB缺少PRO/PRJ远端路径或冻结内容身份。";
         return false;
     }
     std::string sessionError;
@@ -2720,6 +4870,23 @@ bool InovanceRobotCtrl::VerifyTrajectoryJobRemoteIdentity(
             + (readError.empty() ? std::string("SHA-256或大小不一致。") : readError);
         return false;
     }
+    const std::filesystem::path projectVerifyPath =
+        std::filesystem::path(handle.localProgramPath).parent_path()
+        / (handle.programName + "_project_start_verify.prj");
+    if (!session->DownloadProgramFile(handle.remoteDataPath, projectVerifyPath.string()))
+    {
+        error = "汇川原生JOB启动前PRJ回读失败：" + session->LastError();
+        return false;
+    }
+    std::string projectContent;
+    if (!ReadBoundedTextFile(projectVerifyPath, projectContent, readError)
+        || projectContent.size() != handle.dataContentSize
+        || InovanceContentSha256(projectContent) != handle.dataContentSha256)
+    {
+        error = "汇川原生JOB启动前PRJ登记身份发生变化："
+            + (readError.empty() ? std::string("SHA-256或大小不一致。") : readError);
+        return false;
+    }
     error.clear();
     return true;
 }
@@ -2731,6 +4898,18 @@ bool InovanceRobotCtrl::PrepareWeldJobHardware(std::string& error)
         if (error.empty()) { error = GetLastRobotError(); }
         return false;
     }
+    // 原生WeldOn/WeldSet/WeldOff由控制器的ArcData负责焊机握手。
+    // WeldJob IO/DA配置仅保留为可选的额外关弧见证，不再是实际焊接能力前提。
+    if (!m_weldJobEnabled)
+    {
+        error.clear();
+        return true;
+    }
+    if (m_weldArcEnableDo < 0 || m_weldCurrentDa < 0 || m_weldVoltageDa < 0)
+    {
+        error = "汇川已启用可选WeldJob硬件见证，但ArcEnableDO/CurrentDA/VoltageDA不完整。";
+        return false;
+    }
     int arcDoCfg = 0;
     int currentDaCfg = 0;
     int voltageDaCfg = 0;
@@ -2739,7 +4918,8 @@ bool InovanceRobotCtrl::PrepareWeldJobHardware(std::string& error)
         || !QueryInt("Get_DACfg " + std::to_string(m_weldVoltageDa), voltageDaCfg)
         || arcDoCfg != 1 || currentDaCfg != 1 || voltageDaCfg != 1)
     {
-        error = "汇川焊接JOB要求ArcEnableDO、CurrentDA、VoltageDA均由RC控制；现场配置权回读未通过。";
+        error = "汇川可选WeldJob硬件见证要求ArcEnableDO、CurrentDA、VoltageDA均由RC控制；"
+            "现场配置权回读未通过。";
         return false;
     }
     return ConfirmWeldArcOutputOff(error);
@@ -2926,9 +5106,11 @@ bool InovanceRobotCtrl::StartTrajectory(
     if (IsInovanceNativeTrajectoryPurpose(purpose))
     {
         if (handle.localProgramPath.empty() || handle.remoteProgramPath.empty()
-            || handle.programContentSha256.size() != 64 || handle.programContentSize == 0)
+            || handle.programContentSha256.size() != 64 || handle.programContentSize == 0
+            || handle.localDataPath.empty() || handle.remoteDataPath.empty()
+            || handle.dataContentSha256.size() != 64 || handle.dataContentSize == 0)
         {
-            SetLastRobotError("汇川原生轨迹JOB尚未完成生成、上传和内容身份冻结，禁止启动。");
+            SetLastRobotError("汇川原生轨迹JOB尚未完成PRO生成、PRJ登记、上传和内容身份冻结，禁止启动。");
             return false;
         }
         if (m_nativeTrajectoryFuture.valid())
@@ -3050,7 +5232,7 @@ bool InovanceRobotCtrl::StartTrajectory(
         return false;
     }
 
-    if (!EnsureMotionReady() || !SetDataStreamMode("ON", 1)) { return false; }
+    if (!SetDataStreamMode("ON", 1) || !EnsureMotionReady()) { return false; }
     T_ROBOT_COORS current;
     if (!ReadCartesianPosition(current, nullptr))
     {
@@ -3199,7 +5381,8 @@ bool InovanceRobotCtrl::WaitTrajectory(
             }
         }
 
-        if (result.success && m_preparedPurpose == RobotTrajectoryPurpose::ActualWeld)
+        if (result.success && m_preparedPurpose == RobotTrajectoryPurpose::ActualWeld
+            && m_weldJobEnabled && m_weldArcEnableDo >= 0)
         {
             std::string arcOffError;
             if (!ConfirmWeldArcOutputOff(arcOffError))
@@ -3503,6 +5686,39 @@ bool InovanceRobotCtrl::AbortCurrentProgramSafely()
         SetLastRobotError("汇川Prg Stop后未获得任务非运行且机器人非运动的连续三次见证。");
         return false;
     }
+    bool returnedToStart = false;
+    if (motion == 2)
+    {
+        // Get_MotionSts=2 is a stopped-but-interrupted controller state, not a
+        // natural terminal witness. Once the data stream and task are both
+        // stopped, BackStartLine is the documented no-motion project reset.
+        // Never clear the software interlock until motion=0 is read back three
+        // consecutive times.
+        std::string response;
+        if (!SendCommand("BackStartLine", response) || response != "ok")
+        {
+            SetLastRobotError("汇川安全中止后的运动中断态清理失败：BackStartLine未被控制器确认。");
+            return false;
+        }
+        returnedToStart = true;
+        stableStopped = 0;
+        for (int attempt = 0; attempt < 40; ++attempt)
+        {
+            if (!QueryInt("Get_TaskRunSts 0", taskStatus)
+                || !QueryInt("Get_MotionSts", motion))
+            {
+                return false;
+            }
+            stableStopped = (taskStatus != 1 && motion == 0) ? stableStopped + 1 : 0;
+            if (stableStopped >= 3) { break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        if (stableStopped < 3)
+        {
+            SetLastRobotError("汇川BackStartLine后未连续确认Get_MotionSts=0，中断态仍未清除。");
+            return false;
+        }
+    }
     if (m_weldJobEnabled && m_weldArcEnableDo >= 0)
     {
         std::string arcOffError;
@@ -3512,7 +5728,7 @@ bool InovanceRobotCtrl::AbortCurrentProgramSafely()
             return false;
         }
     }
-    if (nativeProgramTracked)
+    if (nativeProgramTracked && !returnedToStart)
     {
         std::string response;
         if (!SendCommand("BackStartLine", response) || response != "ok")
@@ -3581,7 +5797,7 @@ bool InovanceRobotCtrl::StartContinuousJog(int moveType, double canonicalSpeed)
         SetLastRobotError("汇川连续点动已经运行。");
         return false;
     }
-    if (!EnsureMotionReady() || !SetDataStreamMode("ON", 1))
+    if (!SetDataStreamMode("ON", 1) || !EnsureMotionReady())
     {
         m_continuousJogRunning.store(false);
         return false;
@@ -3690,9 +5906,9 @@ int InovanceRobotCtrl::UploadNativeProgramSource(
     std::transform(extension.begin(), extension.end(), extension.begin(),
         [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     if (extension != ".pro" && extension != ".prj"
-        && extension != ".pts" && extension != ".jsn")
+        && extension != ".pts" && extension != ".jsn" && extension != ".dat")
     {
-        SetLastRobotError("汇川原生程序上传仅支持PRO、PRJ、PTS或JSN文件：" + localPath);
+        SetLastRobotError("汇川原生程序上传仅支持PRO、PRJ、PTS、JSN或DAT文件：" + localPath);
         return -1;
     }
 
@@ -3847,6 +6063,7 @@ bool InovanceRobotCtrl::WriteCartesianRegister(
         SetLastRobotError("汇川SetMemRobP位置参数超过手册规定的128字符上限。");
         return false;
     }
+    if (!EnsureControlPermit()) { return false; }
     std::string response;
     if (!SendCommand(commandText, response) || response != "ok") { return false; }
 
@@ -4080,6 +6297,7 @@ bool InovanceRobotCtrl::RunProgramAndWait(
             + "_" + LowerAscii(actualModuleName));
     const std::filesystem::path backupMainPath = runDirectory / "main_before.pro";
     const std::filesystem::path moduleCopyPath = runDirectory / actualModuleFile;
+    const std::filesystem::path projectCopyPath = runDirectory / "project_before_start.prj";
     const std::filesystem::path dispatcherPath = runDirectory / "main.pro";
     const std::filesystem::path verifiedDispatcherPath = runDirectory / "main_uploaded_verify.pro";
     const std::filesystem::path restoredMainVerifyPath = runDirectory / "main_restored_verify.pro";
@@ -4092,7 +6310,17 @@ bool InovanceRobotCtrl::RunProgramAndWait(
     }
 
     const std::string remoteMainPath = activeDirectory + "/main.pro";
-    const std::string remoteModulePath = activeDirectory + "/" + actualModuleFile;
+    // Call resolves its target from Task0/DynamicCall on this controller. The
+    // root copy remains registered for pendant visibility, while this byte-identical
+    // copy is the executable identity verified immediately before dispatch.
+    const std::string remoteModulePath = activeDirectory
+        + "/DynamicCall/" + actualModuleFile;
+    const std::size_t projectDirectoryEnd = activeDirectory.find(
+        '/', std::strlen("/TeachProgram/"));
+    const std::string activeProjectDirectory = projectDirectoryEnd == std::string::npos
+        ? activeDirectory : activeDirectory.substr(0, projectDirectoryEnd);
+    const std::string remoteProjectPath = activeProjectDirectory + "/"
+        + activeProject + ".prj";
     if (!session->DownloadProgramFile(remoteMainPath, backupMainPath.string()))
     {
         return failWithoutMotion("汇川覆盖 main.pro 前无法建立本地备份："
@@ -4116,8 +6344,59 @@ bool InovanceRobotCtrl::RunProgramAndWait(
         return failWithoutMotion("汇川目标模块 " + actualModuleFile
             + " 不满足适配层公共模块契约：" + moduleError);
     }
+    std::string moduleRobotName;
+    if (!ParseInovanceProgramRobotName(moduleContent, moduleRobotName, moduleError))
+    {
+        return failWithoutMotion("汇川目标模块 " + actualModuleFile
+            + " 无法确认PRO机型：" + moduleError);
+    }
+    std::string controllerRobotName;
+    if (!ReadControllerProgramRobotName(controllerRobotName, moduleError))
+    {
+        return failWithoutMotion("汇川原生程序启动前无法确认控制器真实机型："
+            + moduleError);
+    }
+    if (moduleRobotName != controllerRobotName)
+    {
+        return failWithoutMotion("汇川目标模块的RobotName与当前控制器不一致：PRO="
+            + moduleRobotName + "，Controller=" + controllerRobotName + "。");
+    }
+    std::string mainRobotName;
+    if (!ParseInovanceProgramRobotName(backupMainContent, mainRobotName, moduleError)
+        || mainRobotName != controllerRobotName)
+    {
+        return failWithoutMotion("汇川当前main.pro与控制器真实机型不一致："
+            + (moduleError.empty()
+                ? "Main=" + mainRobotName + "，Controller=" + controllerRobotName + "。"
+                : moduleError));
+    }
+    if (!session->DownloadProgramFile(remoteProjectPath, projectCopyPath.string()))
+    {
+        return failWithoutMotion("汇川无法下载并校验当前PRJ程序登记："
+            + session->LastError());
+    }
+    std::string projectContent;
+    std::string projectError;
+    if (!ReadBoundedTextFile(projectCopyPath, projectContent, projectError))
+    {
+        return failWithoutMotion("汇川当前PRJ内容无效：" + projectError);
+    }
+    std::string registeredProjectContent;
+    bool projectWouldChange = false;
+    if (!RegisterInovanceProgramInProject(
+            projectContent, actualModuleFile, registeredProjectContent,
+            projectWouldChange, projectError)
+        || projectWouldChange)
+    {
+        return failWithoutMotion(projectWouldChange
+            ? "汇川Call目标未登记在当前PRJ的ProgramFiles中，禁止启动。"
+            : "汇川当前PRJ程序清单无效：" + projectError);
+    }
     std::string expectedTrajectorySha256;
     std::uint64_t expectedTrajectorySize = 0;
+    std::string expectedProjectSha256;
+    std::uint64_t expectedProjectSize = 0;
+    std::string expectedProjectRemotePath;
     {
         std::lock_guard<std::mutex> lock(m_trajectoryMutex);
         if (m_activeHandle.started
@@ -4125,6 +6404,9 @@ bool InovanceRobotCtrl::RunProgramAndWait(
         {
             expectedTrajectorySha256 = m_activeHandle.programContentSha256;
             expectedTrajectorySize = m_activeHandle.programContentSize;
+            expectedProjectSha256 = m_activeHandle.dataContentSha256;
+            expectedProjectSize = m_activeHandle.dataContentSize;
+            expectedProjectRemotePath = m_activeHandle.remoteDataPath;
         }
     }
     if (!expectedTrajectorySha256.empty()
@@ -4133,6 +6415,20 @@ bool InovanceRobotCtrl::RunProgramAndWait(
     {
         return failWithoutMotion("汇川原生轨迹模块在StartTrajectory冻结后发生变化，"
             "远端PRO的SHA-256或大小与句柄不一致。");
+    }
+    if (!expectedProjectSha256.empty())
+    {
+        if (LowerAscii(expectedProjectRemotePath) != LowerAscii(remoteProjectPath))
+        {
+            return failWithoutMotion("汇川原生轨迹句柄绑定的PRJ路径与当前激活工程不一致。");
+        }
+        if (projectContent.size() != expectedProjectSize
+            || InovanceContentSha256(projectContent) != expectedProjectSha256)
+        {
+            return failWithoutMotion("汇川原生轨迹模块在StartTrajectory冻结后发生变化，"
+                "远端PRJ的SHA-256或大小与句柄不一致："
+                "内容不一致。");
+        }
     }
     if (RobotOperationLease::IsCancellationRequested(this))
     {
@@ -4149,16 +6445,22 @@ bool InovanceRobotCtrl::RunProgramAndWait(
     std::string dispatcherContent;
     std::string dispatcherError;
     if (!WriteInovanceDispatcher(
-        dispatcherPath, actualModuleName, dispatcherContent, dispatcherError))
+        dispatcherPath, actualModuleName, controllerRobotName,
+        dispatcherContent, dispatcherError))
     {
         return failWithoutMotion("汇川生成 main.pro 调度器失败：" + dispatcherError);
     }
 
     bool dispatcherInstalled = false;
+    bool keepPermanentDispatcher = false;
     bool mainRestoreVerified = true;
     const auto restoreOriginalMain = [&]()
         {
             if (!dispatcherInstalled) { return std::string(); }
+            if (keepPermanentDispatcher)
+            {
+                return std::string("；main.pro永久Call调度器已保留。 ");
+            }
             if (!session->UploadProgramFile(backupMainPath.string(), remoteMainPath, true))
             {
                 mainRestoreVerified = false;
@@ -4206,6 +6508,11 @@ bool InovanceRobotCtrl::RunProgramAndWait(
         return failWithoutMotion("汇川 main.pro 上传后内容身份不一致："
             + (verifyError.empty() ? std::string("字节内容不一致。") : verifyError) + restore);
     }
+    // Once the dispatcher has passed byte-for-byte readback it becomes the
+    // permanent Task0 entry.  The backup is retained for audit/recovery only;
+    // normal completion, stop and fault paths must not replace it with the old
+    // main.pro.
+    keepPermanentDispatcher = true;
 
     std::string response;
     if (!SendCommand("BackStartLine", response) || response != "ok")
@@ -4286,6 +6593,20 @@ bool InovanceRobotCtrl::RunProgramAndWait(
             return false;
         };
     QString motionError;
+    // Native JOB execution has its own automatic-mode preparation, independent
+    // of the selected data-stream recipe. Mode transitions are asynchronous on
+    // the field controller, so wait for mode 2 to settle and then (re-)enable
+    // servo before START instead of trusting the first Get_Mode read.
+    std::string automaticPreparationTrace;
+    if (!EnsureControlPermit()
+        || !InovanceModeSequence::EnsureRuntimeReady(
+            ModeSequenceOps(m_modeConnectionEpoch.load()), 2, automaticPreparationTrace))
+    {
+        const std::string error = GetLastRobotError();
+        return failWithoutMotion("汇川原生JOB自动模式准备失败："
+            + (error.empty() ? automaticPreparationTrace : error + "\n" + automaticPreparationTrace)
+            + restoreOriginalMain());
+    }
     if (!RobotOperationLease::MarkMotionStarted(this, false, &motionError))
     {
         const std::string restore = restoreOriginalMain();
@@ -4346,8 +6667,18 @@ bool InovanceRobotCtrl::RunProgramAndWait(
             }
             return true;
         };
+    const auto controllerFaultDetail = [this](const char* phase, int faultStatus)
+        {
+            std::string faultCode;
+            const bool codeRead = SendCommand("Get_SysErr", faultCode);
+            return std::string("汇川控制器在原生程序") + phase
+                + "期间报告故障，Get_SysErrSts=" + std::to_string(faultStatus)
+                + "，Get_SysErr=" + (codeRead && !faultCode.empty()
+                    ? faultCode : std::string("读取失败：") + GetLastRobotError())
+                + "。";
+        };
     const auto completeRun = [this, terminalStatus, &motionMarked,
-        &activeProject, &actualModuleName, &backupMainPath](const ProgramSnapshot& snapshot)
+        &activeProject, &actualModuleName](const ProgramSnapshot& snapshot)
         {
             if (!RobotOperationLease::MarkMotionCompleted(this))
             {
@@ -4359,8 +6690,7 @@ bool InovanceRobotCtrl::RunProgramAndWait(
             const std::string detail = "汇川原生程序自然完成：Project=" + activeProject
                 + " Module=" + actualModuleName + ".pro Line="
                 + std::to_string(snapshot.line)
-                + "；B255=10且任务/运动连续稳定停止；原main已恢复，备份="
-                + backupMainPath.string();
+                + "；B255=10且任务/运动连续稳定停止；main.pro永久Call调度器已保留。";
             if (m_pRobotLog != nullptr)
             {
                 m_pRobotLog->write(LogColor::SUCCESS, "%s", detail.c_str());
@@ -4395,8 +6725,7 @@ bool InovanceRobotCtrl::RunProgramAndWait(
         }
         if (snapshot.fault != 0)
         {
-            return failRun("汇川控制器在原生程序启动期间报告故障，Get_SysErrSts="
-                + std::to_string(snapshot.fault) + "。", snapshot.task);
+            return failRun(controllerFaultDetail("启动", snapshot.fault), snapshot.task);
         }
         executionObserved = executionObserved || snapshot.task == 1
             || snapshot.stateByte == 1 || snapshot.stateByte == 10
@@ -4450,8 +6779,7 @@ bool InovanceRobotCtrl::RunProgramAndWait(
         }
         if (snapshot.fault != 0)
         {
-            return failRun("汇川控制器在原生程序运行期间报告故障，Get_SysErrSts="
-                + std::to_string(snapshot.fault) + "。", snapshot.task);
+            return failRun(controllerFaultDetail("运行", snapshot.fault), snapshot.task);
         }
         stableCompleted = (snapshot.stateByte == 10
             && snapshot.task != 1 && snapshot.motion != 1) ? stableCompleted + 1 : 0;
@@ -4581,6 +6909,7 @@ bool InovanceRobotCtrl::SetIntVar(
         return false;
     }
 
+    if (!EnsureControlPermit()) { return false; }
     std::string response;
     if (!SendCommand(command, response) || response != "ok")
     {
@@ -4618,12 +6947,80 @@ bool InovanceRobotCtrl::SetIntVar(const char* name, int value, int scope)
 bool InovanceRobotCtrl::SetRealVar(
     int index, double value, const char* prefix, int scope)
 {
-    (void)index;
-    (void)value;
-    (void)prefix;
-    (void)scope;
-    SetLastRobotError("汇川字符串API表未证明通用REAL变量写入语义。");
-    return false;
+    if (index < 0 || index > 255)
+    {
+        SetLastRobotError("汇川全局D实数变量索引范围为0..255。");
+        return false;
+    }
+    const std::string type = LowerAscii(Trim(prefix == nullptr ? "REAL" : prefix));
+    if (type != "real" && type != "d")
+    {
+        SetLastRobotError("汇川实数变量只支持REAL或D前缀，并映射到全局D[0..255]。");
+        return false;
+    }
+    if (scope != 1)
+    {
+        SetLastRobotError("汇川远程以太网Set_D只提供全局D变量；适配层scope必须为1。");
+        return false;
+    }
+    if (!std::isfinite(value) || value < -9999999.999 || value > 9999999.999)
+    {
+        SetLastRobotError("汇川全局D实数变量值范围为-9999999.999..9999999.999。");
+        return false;
+    }
+    if (!EnsureControlPermit()) { return false; }
+    std::string response;
+    if (!SendCommand("Set_D " + std::to_string(index) + " "
+        + FormatProgramNumber(value), response) || response != "ok")
+    {
+        return false;
+    }
+    double verified = 0.0;
+    if (!TryGetRealVar(index, verified, "D", 1)
+        || std::abs(verified - value) > 1.1e-6)
+    {
+        SetLastRobotError("汇川D变量写入后回读不一致：Index="
+            + std::to_string(index) + " Expected=" + FormatProgramNumber(value)
+            + " Actual=" + FormatProgramNumber(verified) + "。");
+        return false;
+    }
+    ClearLastRobotError();
+    return true;
+}
+
+bool InovanceRobotCtrl::TryGetRealVar(
+    int index, double& value, const char* prefix, int scope)
+{
+    value = 0.0;
+    if (index < 0 || index > 255)
+    {
+        SetLastRobotError("汇川全局D实数变量索引范围为0..255。");
+        return false;
+    }
+    const std::string type = LowerAscii(Trim(prefix == nullptr ? "REAL" : prefix));
+    if (type != "real" && type != "d")
+    {
+        SetLastRobotError("汇川实数变量读取只支持REAL或D前缀。");
+        return false;
+    }
+    if (scope != 1)
+    {
+        SetLastRobotError("汇川远程以太网Get_D只提供全局D变量；适配层scope必须为1。");
+        return false;
+    }
+    std::vector<double> values;
+    if (!QueryDoubles("Get_D " + std::to_string(index), values, 1)
+        || values.size() != 1)
+    {
+        if (GetLastRobotError().empty())
+        {
+            SetLastRobotError("汇川Get_D必须返回且只返回一个实数。");
+        }
+        return false;
+    }
+    value = values.front();
+    ClearLastRobotError();
+    return true;
 }
 
 bool InovanceRobotCtrl::InstallHandEyeSupportPrograms(std::string* summary)
@@ -4650,11 +7047,42 @@ bool InovanceRobotCtrl::GetHandEyeMatrixVariable(
     double translation[3],
     std::string* error)
 {
-    (void)variableName;
-    (void)rotation;
-    (void)translation;
-    const std::string message = "汇川手册未定义可读取的3x3旋转+毫米平移手眼矩阵变量契约。";
-    SetLastRobotError(message);
-    if (error != nullptr) { *error = message; }
-    return false;
+    if (rotation == nullptr || translation == nullptr)
+    {
+        const std::string message = "手眼矩阵输出缓冲区为空。";
+        SetLastRobotError(message);
+        if (error != nullptr) { *error = message; }
+        return false;
+    }
+    const std::string name = variableName == nullptr ? std::string() : std::string(variableName);
+    if (name != "eye" && name != "laser0" && name != "sensor0")
+    {
+        const std::string message = "汇川手眼名称仅支持 eye/laser0/sensor0，固定映射到弧焊激光传感器0。";
+        SetLastRobotError(message);
+        if (error != nullptr) { *error = message; }
+        return false;
+    }
+    RobotControllerHandEye value;
+    std::string message;
+    if (!ReadControllerHandEye(0, value, message))
+    {
+        SetLastRobotError(message);
+        if (error != nullptr) { *error = message; }
+        return false;
+    }
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int col = 0; col < 3; ++col)
+        {
+            rotation[row * 3 + col] = value.cameraToTool(row, col);
+        }
+        translation[row] = value.cameraToTool(row, 3);
+    }
+    ClearLastRobotError();
+    if (error != nullptr)
+    {
+        *error = "来源=" + value.source + "；相机=" + value.cameraAddress
+            + "；绑定Tool=" + std::to_string(value.toolIndex) + "；参考系=camera-to-tool-tcp";
+    }
+    return true;
 }

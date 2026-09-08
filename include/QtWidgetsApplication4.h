@@ -72,6 +72,8 @@ private slots:
     void RobotRunTest();
     void OpenWeldProcessDialog();
     void OpenFunctionTestDialog();
+    void OpenRobotAdaptorAcceptanceDialog();
+    bool OpenRobotAdaptorAcceptanceWorkflow(const QString& workflowId, int unitIndex);
     void OpenMeasureThenWeldDialog();
     void OpenPreciseMeasureEditDialog();
     void OpenPositionTeachDialog();
@@ -120,6 +122,7 @@ private:
     void RefreshDashboardConnectionState();
     bool EnsureRobotUiActionIdle(const QString& actionName);
     void RunFunctionTestDashboardTool(const QString& actionId);
+    void OpenFunctionTestPage(bool showAdaptorAcceptance);
     bool IsCurrentRobotConnected();
     void ToggleCurrentRobotConnection();
     int CurrentRobotUnitIndex() const;
@@ -186,8 +189,6 @@ private:
     void RefreshDesktopIconBgButtonUi();
     void SetDesktopIconWithBackground(bool withBackground);
     void RefreshAllWindowIcons();
-    void RefreshScanTimestampSourceUi();
-    void RefreshStepSdkInterfaceModeUi();
     void RefreshTouchKeyboardModeUi();
     bool LoadGrooveCameraIP(QString& cameraIP) const;
     bool LoadGrooveCameraIPForUnit(int unitIndex, QString& cameraIP) const;
@@ -286,8 +287,6 @@ private:
     QAction* m_pAccountManagementAction;
     QPushButton* m_pManagementCameraReceiveModeBtn;
     QPushButton* m_pManagementIconBgBtn = nullptr;
-    QComboBox* m_pScanTimestampSourceCombo;
-    QComboBox* m_pStepSdkInterfaceModeCombo;
     QComboBox* m_pTouchKeyboardModeCombo;
     QLabel* m_pAuthTitleLabel;
     QLabel* m_pAuthHintLabel;

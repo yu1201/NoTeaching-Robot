@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace
 {
@@ -22,6 +23,9 @@ double g_runtimeScanDirectionX = 1.0;
 double g_runtimeScanDirectionY = 0.0;
 double g_runtimeScanDirectionZ = 0.0;
 thread_local const QMap<QString, QString>* g_activeSettingsSnapshot = nullptr;
+std::mutex g_runtimeSystemInterlocksMutex;
+bool g_runtimeSystemInterlocksLoaded = false;
+SystemInterlockPolicy g_runtimeSystemInterlocks;
 
 class SettingsSnapshotScope
 {
@@ -61,6 +65,12 @@ void NormalizeFiniteLoadValues(PointCloudProcessingConfig::Settings& settings)
     // std::clamp/std::min/std::max do not sanitize NaN. Restore every floating-point
     // quality threshold before the range clamps and the Enforce safety floors run.
     useDefaultIfNonFinite(settings.validationMinProjectedSpanMm, defaults.validationMinProjectedSpanMm);
+    useDefaultIfNonFinite(
+        settings.validationMinSdkBaseCloudCoverageRatio,
+        defaults.validationMinSdkBaseCloudCoverageRatio);
+    useDefaultIfNonFinite(
+        settings.validationMaxSdkBaseEndpointDeviationRatio,
+        defaults.validationMaxSdkBaseEndpointDeviationRatio);
     useDefaultIfNonFinite(settings.validationMinStationCoverageRatio, defaults.validationMinStationCoverageRatio);
     useDefaultIfNonFinite(settings.validationMinLongestContinuousRatio, defaults.validationMinLongestContinuousRatio);
     useDefaultIfNonFinite(settings.validationMaxRejectedRatio, defaults.validationMaxRejectedRatio);
@@ -156,6 +166,13 @@ void ApplyEnforceValidationSafetyBounds(PointCloudProcessingConfig::Settings& se
         settings.validationMinFinitePointCount = std::max(300, settings.validationMinFinitePointCount);
         settings.validationMinProjectedSpanMm = std::max(180.0, settings.validationMinProjectedSpanMm);
     }
+    if (settings.validationSdkBaseIntegrityEnabled)
+    {
+        settings.validationMinSdkBaseCloudCoverageRatio =
+            std::max(0.60, settings.validationMinSdkBaseCloudCoverageRatio);
+        settings.validationMaxSdkBaseEndpointDeviationRatio =
+            std::min(0.25, settings.validationMaxSdkBaseEndpointDeviationRatio);
+    }
     if (settings.validationContinuityEnabled)
     {
         settings.validationMinStationCoverageRatio = std::max(0.55, settings.validationMinStationCoverageRatio);
@@ -218,6 +235,43 @@ bool ReadBoolSetting(const QString& key, bool defaultValue)
     return value == "1" || value == "true" || value == "yes";
 }
 
+bool ParseStrictBool(const QString& value, bool* parsed)
+{
+    if (parsed == nullptr)
+    {
+        return false;
+    }
+    const QString normalized = value.trimmed().toLower();
+    if (normalized == QStringLiteral("1")
+        || normalized == QStringLiteral("true")
+        || normalized == QStringLiteral("yes"))
+    {
+        *parsed = true;
+        return true;
+    }
+    if (normalized == QStringLiteral("0")
+        || normalized == QStringLiteral("false")
+        || normalized == QStringLiteral("no"))
+    {
+        *parsed = false;
+        return true;
+    }
+    return false;
+}
+
+SystemInterlockPolicy ReadSystemInterlocksFromSnapshot()
+{
+    SystemInterlockPolicy policy;
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+    {
+        bool enabled = true;
+        policy.enabled[i] = ParseStrictBool(
+            ReadSetting(QString::fromLatin1(SystemInterlockPolicy::keys[i]), QStringLiteral("1")),
+            &enabled) ? enabled : true;
+    }
+    return policy;
+}
+
 int ReadIntSetting(const QString& key, int defaultValue)
 {
     bool ok = false;
@@ -257,6 +311,20 @@ QString PointCloudProcessingConfig::DefaultConfigPath()
 QString PointCloudProcessingConfig::DataConfigPath()
 {
     return RobotDataHelper::BuildProjectPath(QStringLiteral("Data/CorrugatedSheetPointCloudEctration.ini"));
+}
+
+SystemInterlockPolicy PointCloudProcessingConfig::RuntimeSystemInterlocks()
+{
+    std::lock_guard<std::mutex> lock(g_runtimeSystemInterlocksMutex);
+    if (!g_runtimeSystemInterlocksLoaded)
+    {
+        const auto snapshot = ConfigDatabase::ReadScopedSettings(
+            QStringLiteral("global"), QString(), SETTINGS_GROUP);
+        const SettingsSnapshotScope scope(snapshot);
+        g_runtimeSystemInterlocks = ReadSystemInterlocksFromSnapshot();
+        g_runtimeSystemInterlocksLoaded = true;
+    }
+    return g_runtimeSystemInterlocks;
 }
 
 bool PointCloudProcessingConfig::CoreSafetyGatesEnabled(const Settings& settings)
@@ -363,6 +431,12 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.validationCoverageEnabled = ReadBoolSetting("Validation/CoverageEnabled", settings.validationCoverageEnabled);
     settings.validationMinFinitePointCount = ReadIntSetting("Validation/MinFinitePointCount", settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = ReadDoubleSetting("Validation/MinProjectedSpanMm", settings.validationMinProjectedSpanMm);
+    settings.validationSdkBaseIntegrityEnabled = ReadBoolSetting(
+        "Validation/SdkBaseIntegrityEnabled", settings.validationSdkBaseIntegrityEnabled);
+    settings.validationMinSdkBaseCloudCoverageRatio = ReadDoubleSetting(
+        "Validation/MinSdkBaseCloudCoverageRatio", settings.validationMinSdkBaseCloudCoverageRatio);
+    settings.validationMaxSdkBaseEndpointDeviationRatio = ReadDoubleSetting(
+        "Validation/MaxSdkBaseEndpointDeviationRatio", settings.validationMaxSdkBaseEndpointDeviationRatio);
     settings.validationContinuityEnabled = ReadBoolSetting("Validation/ContinuityEnabled", settings.validationContinuityEnabled);
     settings.validationMinStationCoverageRatio = ReadDoubleSetting("Validation/MinStationCoverageRatio", settings.validationMinStationCoverageRatio);
     settings.validationMinLongestContinuousRatio = ReadDoubleSetting("Validation/MinLongestContinuousRatio", settings.validationMinLongestContinuousRatio);
@@ -436,6 +510,7 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
             settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg);
     settings.validationFinalSemanticIntegrityEnabled =
         ReadBoolSetting("Validation/FinalSemanticIntegrityEnabled", settings.validationFinalSemanticIntegrityEnabled);
+    settings.systemInterlocks = ReadSystemInterlocksFromSnapshot();
     settings.safetyGateProofIntegrityEnabled =
         ReadBoolSetting("SafetyGates/ProofIntegrityEnabled", settings.safetyGateProofIntegrityEnabled);
     settings.safetyGateProductionPurposeEnabled =
@@ -581,6 +656,10 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.projectionSmoothRadius = std::max(0, settings.projectionSmoothRadius);
     settings.validationMinFinitePointCount = std::max(0, settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = std::max(0.0, settings.validationMinProjectedSpanMm);
+    settings.validationMinSdkBaseCloudCoverageRatio =
+        std::clamp(settings.validationMinSdkBaseCloudCoverageRatio, 0.0, 1.0);
+    settings.validationMaxSdkBaseEndpointDeviationRatio =
+        std::clamp(settings.validationMaxSdkBaseEndpointDeviationRatio, 0.0, 1.0);
     settings.validationMinStationCoverageRatio = std::clamp(settings.validationMinStationCoverageRatio, 0.0, 1.0);
     settings.validationMinLongestContinuousRatio = std::clamp(settings.validationMinLongestContinuousRatio, 0.0, 1.0);
     settings.validationMaxRejectedRatio = std::clamp(settings.validationMaxRejectedRatio, 0.0, 1.0);
@@ -680,6 +759,9 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("Validation/CoverageEnabled", normalizedSettings.validationCoverageEnabled ? "1" : "0")
         && write("Validation/MinFinitePointCount", QString::number(normalizedSettings.validationMinFinitePointCount))
         && write("Validation/MinProjectedSpanMm", QString::number(normalizedSettings.validationMinProjectedSpanMm, 'f', 6))
+        && write("Validation/SdkBaseIntegrityEnabled", normalizedSettings.validationSdkBaseIntegrityEnabled ? "1" : "0")
+        && write("Validation/MinSdkBaseCloudCoverageRatio", QString::number(normalizedSettings.validationMinSdkBaseCloudCoverageRatio, 'f', 6))
+        && write("Validation/MaxSdkBaseEndpointDeviationRatio", QString::number(normalizedSettings.validationMaxSdkBaseEndpointDeviationRatio, 'f', 6))
         && write("Validation/ContinuityEnabled", normalizedSettings.validationContinuityEnabled ? "1" : "0")
         && write("Validation/MinStationCoverageRatio", QString::number(normalizedSettings.validationMinStationCoverageRatio, 'f', 6))
         && write("Validation/MinLongestContinuousRatio", QString::number(normalizedSettings.validationMinLongestContinuousRatio, 'f', 6))
@@ -728,11 +810,26 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("SafetyGates/TrajectoryStructureEnabled", settings.safetyGateTrajectoryStructureEnabled ? "1" : "0")
         && write("SafetyGates/MotionPrecheckEnabled", settings.safetyGateMotionPrecheckEnabled ? "1" : "0")
         && write("SafetyGates/BehaviorVersion", QString::number(CURRENT_SAFETY_GATE_BEHAVIOR_VERSION));
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+    {
+        pendingValues.insert(QString::fromLatin1(SystemInterlockPolicy::keys[i]),
+            settings.systemInterlocks.enabled[i] ? QStringLiteral("1") : QStringLiteral("0"));
+    }
     const bool ok = valuesPrepared && ConfigDatabase::WriteScopedSettings(
         QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues);
+    if (ok)
+    {
+        std::lock_guard<std::mutex> lock(g_runtimeSystemInterlocksMutex);
+        const bool singleProcessEnabled = g_runtimeSystemInterlocksLoaded
+            ? g_runtimeSystemInterlocks.IsEnabled(SystemInterlock::SingleProcess)
+            : settings.systemInterlocks.IsEnabled(SystemInterlock::SingleProcess);
+        g_runtimeSystemInterlocks = settings.systemInterlocks;
+        g_runtimeSystemInterlocks.SetEnabled(SystemInterlock::SingleProcess, singleProcessEnabled);
+        g_runtimeSystemInterlocksLoaded = true;
+    }
     if (!ok && error != nullptr)
     {
-        *error = QStringLiteral("原子写入点云处理配置失败，数据库已回滚，未留下混合版本。");
+        *error = QStringLiteral("点云处理配置未保存。配置身份校验、数据库打开或原子写入失败；请检查数据库可用性及写入权限。");
     }
     return ok;
 }

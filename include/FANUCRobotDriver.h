@@ -26,6 +26,8 @@ public:
 	FANUCRobotCtrl(std::string strUnitName, RobotLog* pLog);
 	~FANUCRobotCtrl() override;
 	RobotDriverDescriptor DriverDescriptor() const override;
+	std::string AcceptanceRegisterName(bool real, int index) const override
+	{ (void)real; return "R[" + std::to_string(index) + "]"; }
 	std::uint64_t DriverCapabilities() const override;
 	RobotConnectionEndpoint ControlEndpoint() const override;
 	bool Connect() override;
@@ -35,9 +37,11 @@ public:
 		std::string* error = nullptr) const override;
 	bool ValidateLinearSpeedMmPerMin(double speedMmPerMin, std::string* error = nullptr) const override;
 	bool MoveLinearMmPerMin(const T_ROBOT_COORS& target, double speedMmPerMin, int externalAxleType, const int* configuration = nullptr) override;
+	bool MoveCircularMmPerMin(const T_ROBOT_COORS& via, const T_ROBOT_COORS& target, double speedMmPerMin, int externalAxleType, const int* viaConfiguration = nullptr, const int* targetConfiguration = nullptr) override;
 	bool MoveJointPercent(const T_ANGLE_PULSE& target, double speedPercent, int externalAxleType) override;
 	RobotMotionStatus ReadMotionStatus() override;
 	RobotMotionStatus ReadMotionStatusPassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
+	RobotControllerStatus ReadControllerStatus() override;
 	bool ReserveTrajectory(RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
 	bool DownlinkTrajectory(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, RobotTrajectoryHandle& handle) override;
 	bool ExportTrajectoryProgramFiles(const std::vector<T_ROBOT_MOVE_INFO>& moveInfos, RobotTrajectoryPurpose purpose, const std::string& outputDirectory, RobotTrajectoryHandle& handle, std::string* error = nullptr) override;
@@ -164,7 +168,7 @@ public:
 	int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath);
 
 	// 机器人基础控制：当前大多通过常驻服务命令转发，未实现的命令由机器人侧返回或占位OK。
-	bool ServoOff();
+	bool ServoOff() override;
 	bool ServoOn() override;
 	bool cleanAlarm() override;
 	bool SetSysMode(int mode);
@@ -199,6 +203,7 @@ public:
 	int GetIntVar(int nIndex, const char* cStrPreFix = "INT") override;
 	bool SetIntVar(int nIndex, int nValue, int score = 2, const char* cStrPreFix = "INT") override;
 	bool SetIntVar(const char* name, int value, int score = 2) override;
+	bool TryGetRealVar(int nIndex, double& value, const char* cStrPreFix = "REAL", int score = 1) override;
 	bool SetRealVar(int nIndex, double value, const char* cStrPreFix = "REAL", int score = 1) override;
 
 	// 运动命令兼容层：旧接口仍保留；单点MOVL/MOVJ使用固定TP以避免重复编译。

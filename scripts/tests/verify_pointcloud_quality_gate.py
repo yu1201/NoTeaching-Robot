@@ -186,6 +186,50 @@ def main() -> int:
     require("if (!params.validationAuditOnly)" in calc_cpp,
             "Audit mode does not preserve report without enforcing thresholds")
 
+    require("bool validationSdkBaseIntegrityEnabled = true;" in config_h,
+            "SDKBase integrity gate is not safe-on by default")
+    for key, field, widget in (
+        ("MinSdkBaseCloudCoverageRatio", "validationMinSdkBaseCloudCoverageRatio",
+         "m_pValidationMinSdkBaseCloudCoverageSpin"),
+        ("MaxSdkBaseEndpointDeviationRatio", "validationMaxSdkBaseEndpointDeviationRatio",
+         "m_pValidationMaxSdkBaseEndpointDeviationSpin"),
+    ):
+        require(f'"Validation/{key}"' in config_cpp and field in config_cpp,
+                f"SDKBase integrity threshold is not loaded: {field}")
+        require(f'write("Validation/{key}", QString::number(normalizedSettings.{field}'
+                in config_cpp, f"SDKBase integrity threshold is not persisted: {field}")
+        require(widget in validity_dialog and field in validity_dialog,
+                f"SDKBase integrity threshold is not in the unified validity UI: {field}")
+    require('ReadBoolSetting(\n        "Validation/SdkBaseIntegrityEnabled"' in config_cpp
+            and 'write("Validation/SdkBaseIntegrityEnabled", '
+                'normalizedSettings.validationSdkBaseIntegrityEnabled ? "1" : "0")'
+                in config_cpp
+            and "m_pValidationSdkBaseIntegrityCheck" in validity_dialog,
+            "SDKBase integrity gate switch is not loadable, persistent, and visible")
+    require("EvaluateSdkBaseWeldIntegrity" in extraction_h
+            and "BuildFullCloudProjectionRange" in extraction
+            and "SortedPercentile(projections, 0.001)" in extraction
+            and "SDK_BASE_COVERAGE_TOO_LOW" in extraction
+            and "SDK_BASE_ENDPOINT_DEVIATION_TOO_LARGE" in extraction,
+            "SDKBase gate does not use robust full-cloud span and explicit failure types")
+    sdk_gate_call = service.index("EvaluateSdkBaseWeldIntegrity(")
+    require(sdk_gate_call < service.index("TruncateTrackAtWeldedStart(", sdk_gate_call)
+            and sdk_gate_call < service.index("BilateralPresmoothSdkBaseWeld(", sdk_gate_call)
+            and sdk_gate_call < service.index("AnalyzeDirectWithPlatformRefitCandidateSelection(", sdk_gate_call),
+            "SDKBase integrity gate must run before truncation, smoothing, fitting, and platform refit")
+    for metric in (
+        "sdkBaseWeldPointCount", "sdkBaseFullCloudProjectedSpanMm",
+        "sdkBaseWeldProjectedSpanMm", "sdkBaseCloudCoverageRatio",
+        "sdkBaseStartEndpointDeviationMm", "sdkBaseEndEndpointDeviationMm",
+        "sdkBaseMaxEndpointDeviationRatio",
+    ):
+        require(metric in calc_h and metric in service,
+                f"SDKBase measured value is missing from quality proof metrics: {metric}")
+    require("实际覆盖率=%5%，门禁要求>=%6%" in extraction
+            and "最大单侧偏差率=%9%，门禁要求<=%10%" in extraction
+            and "已在SDKBase平滑、首尾截断、拟合和平台重算前停止" in service,
+            "SDKBase rejection does not report actual values, thresholds, and stop stage")
+
     require("EvaluateMeasureThenWeldOutputQuality" in extraction,
             "SDK direct output still bypasses shared quality evaluation")
     require("finiteInputPointCount" in extraction_h and "invalidInputPointCount" in extraction_h,
@@ -222,8 +266,8 @@ def main() -> int:
             "proof can be copied across case directories without rejection")
     require("POINT_CLOUD_QUALITY_ALGORITHM_REVISION" in service,
             "proof policy does not bind an explicit algorithm revision")
-    require('"pcq-v5-20260730-configurable-validity"' in service,
-            "proof algorithm revision was not advanced for configurable validity thresholds")
+    require('"pcq-v6-20260903-sdkbase-input-binding"' in service,
+            "proof algorithm revision was not advanced for SDKBase input binding")
     require("POINT_CLOUD_QUALITY_SCHEMA_VERSION = 3" in service
             and 'root.insert("schemaVersion", POINT_CLOUD_QUALITY_SCHEMA_VERSION)' in service,
             "MAC/receipt-bound schema 3 is not the only newly written proof schema")

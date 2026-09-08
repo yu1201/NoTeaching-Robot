@@ -37,7 +37,7 @@ constexpr char kScanCurveDryRunPoseFileName[] =
 constexpr char kScanCurveDryRunFinalSampledFileName[] =
     "PreciseLaserPoint_FeatureSmoothCurve_DryRunPose_2mm_FinalSampled.txt";
 std::recursive_mutex g_storeMutex;
-QMap<QString, QString> g_activeEndpointRecoveryBindings;
+QMultiMap<QString, QString> g_activeEndpointRecoveryBindings;
 
 void SetError(QString* error, const QString& text)
 {
@@ -801,7 +801,10 @@ bool WeldSafetyRecoveryStore::WriteCompletedAndClearPending(
         && WritePendingLocked(robotName, false, error);
 }
 
-bool WeldSafetyRecoveryStore::InvalidateIfNoPending(const QString& robotName, QString& error)
+bool WeldSafetyRecoveryStore::InvalidateIfNoPending(
+    const QString& robotName,
+    QString& error,
+    bool enforcePending)
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     bool pending = false;
@@ -811,6 +814,13 @@ bool WeldSafetyRecoveryStore::InvalidateIfNoPending(const QString& robotName, QS
     }
     if (pending)
     {
+        if (!enforcePending)
+        {
+            // 关闭该互锁只跳过旧记录准入，不清除或伪造持久安全终态。
+            // 后续若重新开启互锁，原 pending 记录仍可恢复。
+            error.clear();
+            return true;
+        }
         error = QStringLiteral(
             "该机器人仍有未验证完成的焊后安全回撤。禁止使记录失效、重新扫描、自动运动或再次执行焊缝；"
             "请使用“焊后安全回撤恢复”，确认到达记录绑定的收枪安全位后再继续。");
@@ -829,12 +839,18 @@ bool WeldSafetyRecoveryStore::InvalidateIfNoPending(const QString& robotName, QS
 bool WeldSafetyRecoveryStore::PersistentAdmissionBlocked(
     const QString& robotName,
     const QString& endpointIdentity,
-    QString* reason)
+    QString* reason,
+    bool requireEndpoint)
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     const QString normalizedRobot = robotName.trimmed();
     const QString endpoint = NormalizePersistentEndpointIdentity(endpointIdentity);
     QString validationError;
+    if (!requireEndpoint && endpoint.isEmpty())
+    {
+        // 端点准入关闭时，持久回撤门禁仍按机器人身份独立检查。
+        return ProbeRobotAdmissionBlockedLocked(normalizedRobot, QString(), false, true, reason);
+    }
     if (!ValidateRobotName(normalizedRobot, &validationError)
         || endpoint.isEmpty()
         || endpoint != endpointIdentity.trimmed())
@@ -970,7 +986,8 @@ bool WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
     const WeldResumePlanner::CheckpointRecord& expected,
     RobotRecoverySafetyPolicy::RecoveryBindingMode mode,
     RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding* binding,
-    QString* error)
+    QString* error,
+    bool enforceIdentity)
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     if (binding == nullptr)
@@ -985,14 +1002,22 @@ bool WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
         SetError(error, QStringLiteral("恢复绑定端点无效。"));
         return false;
     }
-    if (g_activeEndpointRecoveryBindings.contains(endpoint))
+    if (enforceIdentity && g_activeEndpointRecoveryBindings.contains(endpoint))
     {
         SetError(error, QStringLiteral("同一物理端点已有持 Store 绑定的恢复流程。"));
         return false;
     }
 
     EndpointRecoveryCandidate selected;
-    if (!ValidateExclusiveRecoverySnapshotLocked(
+    if (!enforceIdentity)
+    {
+        selected.robotScope = robotName.trimmed();
+        selected.record = expected;
+        selected.encoded = WeldResumePlanner::EncodeRecord(expected, error);
+        if (selected.encoded.isEmpty() || !ValidateRobotName(selected.robotScope, error)) return false;
+        selected.encodedSha256 = EncodedRecordSha256(selected.encoded);
+    }
+    else if (!ValidateExclusiveRecoverySnapshotLocked(
             robotName, endpoint, expected, mode, selected, error))
     {
         return false;
@@ -1000,6 +1025,7 @@ bool WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
     const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
     g_activeEndpointRecoveryBindings.insert(endpoint, token);
     binding->token = token;
+    binding->enforceIdentity = enforceIdentity;
     binding->mode = mode;
     binding->robotScope = selected.robotScope;
     binding->endpointIdentity = endpoint;
@@ -1019,11 +1045,7 @@ void WeldSafetyRecoveryStore::ReleaseExclusiveRecoveryBinding(
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     const QString endpoint = NormalizePersistentEndpointIdentity(endpointIdentity);
-    const auto it = g_activeEndpointRecoveryBindings.find(endpoint);
-    if (it != g_activeEndpointRecoveryBindings.end() && it.value() == token)
-    {
-        g_activeEndpointRecoveryBindings.erase(it);
-    }
+    g_activeEndpointRecoveryBindings.remove(endpoint, token);
 }
 
 bool WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(
@@ -1032,11 +1054,12 @@ bool WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     if (!binding.IsValid()
-        || g_activeEndpointRecoveryBindings.value(binding.endpointIdentity) != binding.token)
+        || !g_activeEndpointRecoveryBindings.contains(binding.endpointIdentity, binding.token))
     {
         SetError(error, QStringLiteral("恢复端点独占绑定已失效。"));
         return false;
     }
+    if (!binding.enforceIdentity) return true;
     EndpointRecoveryCandidate selected;
     if (!ValidateExclusiveRecoverySnapshotLocked(
             binding.robotScope,
@@ -1066,10 +1089,20 @@ bool WeldSafetyRecoveryStore::TransitionBoundRecordState(
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     if (binding == nullptr
         || !binding->IsValid()
-        || g_activeEndpointRecoveryBindings.value(binding->endpointIdentity) != binding->token)
+        || !g_activeEndpointRecoveryBindings.contains(binding->endpointIdentity, binding->token))
     {
         SetError(error, QStringLiteral("绑定状态迁移缺少有效的端点独占 token。"));
         return false;
+    }
+    if (!binding->enforceIdentity)
+    {
+        // 关闭完整身份/独占复核后仍执行原子状态迁移，不伪造恢复记录或跳过停机动作。
+        if (!TransitionRecordState(binding->robotScope, binding->record.checkpointId,
+                expectedState, newState, error)) return false;
+        binding->record.state = newState;
+        binding->encodedRecord = WeldResumePlanner::EncodeRecord(binding->record, error);
+        binding->encodedSha256 = EncodedRecordSha256(binding->encodedRecord);
+        return !binding->encodedRecord.isEmpty();
     }
     EndpointRecoveryCandidate selected;
     if (!ValidateExclusiveRecoverySnapshotLocked(

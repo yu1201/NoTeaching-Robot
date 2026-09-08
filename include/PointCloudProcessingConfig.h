@@ -1,6 +1,7 @@
 #pragma once
 
 #include "WeldPoseValidationLimits.h"
+#include "SystemInterlockPolicy.h"
 
 #include <QString>
 
@@ -130,6 +131,11 @@ public:
         bool validationCoverageEnabled = true;
         int validationMinFinitePointCount = 300;
         double validationMinProjectedSpanMm = 180.0;
+        // SDK基础焊道独立完整性门禁（仅方法②）：在任何平滑、截断、拟合和平台重算前，
+        // 用完整点云沿扫描方向的稳健跨度约束 SDKBase 首末端覆盖，避免局部错误焊道因点密度高而漏过固定点数门限。
+        bool validationSdkBaseIntegrityEnabled = true;
+        double validationMinSdkBaseCloudCoverageRatio = 0.60;
+        double validationMaxSdkBaseEndpointDeviationRatio = 0.25;
         bool validationContinuityEnabled = true;
         double validationMinStationCoverageRatio = 0.55;
         double validationMinLongestContinuousRatio = 0.60;
@@ -178,6 +184,9 @@ public:
         double validationMaxFinalSourcePhysicalOrientationDeltaDeg =
             WeldPoseValidationLimits::kMaxSourcePhysicalOrientationDeltaDeg;
         bool validationFinalSemanticIntegrityEnabled = true;
+        // 每项独立选择；保存成功后除进程单实例外立即更新线程安全运行快照。
+        // 进程单实例由 main() 持有系统锁，只能在下次启动时应用。
+        SystemInterlockPolicy systemInterlocks;
         // 系统级流程/运动安全门禁。关闭后对应生产校验会被跳过，
         // 开关状态进入证明快照并由管理员界面持久化。
         bool safetyGateProofIntegrityEnabled = true;
@@ -200,6 +209,7 @@ public:
     static QString DataConfigPath();
     static Settings Load();
     static bool Save(const Settings& settings, QString* error = nullptr);
+    static SystemInterlockPolicy RuntimeSystemInterlocks();
     static bool CoreSafetyGatesEnabled(const Settings& settings);
     static bool HasDisabledCoreSafetyGate(const Settings& settings);
     static void SetRuntimeModeOverride(Mode mode);
