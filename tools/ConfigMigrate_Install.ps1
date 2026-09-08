@@ -2101,6 +2101,7 @@ function Test-ProtectedBackupReadback {
     if ($ExpectedDatabaseSha256 -cnotmatch '^[0-9a-f]{64}$') {
         throw 'The expected original database hash is invalid.'
     }
+    $script:FailurePhase = 'upgrade-reconcile-backup-restore'
     $backupSha256Before = Get-FileSha256 $BackupPath
     $stagingPath = Restore-ProtectedBackupToStaging $BackupPath
     try {
@@ -2109,18 +2110,22 @@ function Test-ProtectedBackupReadback {
         # page bytes than the source file, so a raw restored-file SHA comparison
         # is not a valid equivalence check.  While the original database is still
         # present, require the signed migrator to compare canonical snapshots.
+        $script:FailurePhase = 'upgrade-reconcile-backup-logical-availability'
         $originalAvailable = (
             (Test-Path -LiteralPath $ComparisonDatabasePath -PathType Leaf) -and
             (Get-FileSha256 $ComparisonDatabasePath) -ceq $ExpectedDatabaseSha256
         )
         if ($originalAvailable) {
+            $script:FailurePhase = 'upgrade-reconcile-backup-logical-command'
             $logicalVerification = Invoke-ConfigMigrate @(
                 '--verify-dpapi-backup-against', $BackupPath,
                 '--db', $ComparisonDatabasePath
             )
             if ($logicalVerification.ExitCode -ne 0) {
+                $script:FailurePhase = 'upgrade-reconcile-backup-logical-exit-' + $logicalVerification.ExitCode
                 throw 'The protected backup does not match the original database logical snapshot.'
             }
+            $script:FailurePhase = 'upgrade-reconcile-backup-original-stability'
             if ((Get-FileSha256 $ComparisonDatabasePath) -cne $ExpectedDatabaseSha256) {
                 throw 'The original database changed during protected-backup verification.'
             }
@@ -2128,6 +2133,7 @@ function Test-ProtectedBackupReadback {
         elseif (-not $AllowOriginalUnavailable) {
             throw 'The original database is unavailable for protected-backup comparison.'
         }
+        $script:FailurePhase = 'upgrade-reconcile-backup-envelope-stability'
         if ((Get-FileSha256 $BackupPath) -cne $backupSha256Before) {
             throw 'The protected backup changed during logical read-back verification.'
         }
