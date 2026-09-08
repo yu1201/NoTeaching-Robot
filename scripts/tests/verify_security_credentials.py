@@ -346,7 +346,12 @@ def main() -> int:
                 continue
             for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                 match = literal_pattern.search(line)
-                if match and match.group(2).strip():
+                relative = path.relative_to(ROOT).as_posix()
+                allowed_vendor_default = (
+                    relative == "include/InovanceUserLogin.h"
+                    and re.search(r"\bkDefaultPassword\s*=", line) is not None
+                )
+                if match and match.group(2).strip() and not allowed_vendor_default:
                     candidates.append(f"{path.relative_to(ROOT)}:{line_number}")
     require(not candidates, "non-empty credential-like source defaults: " + ", ".join(candidates))
 

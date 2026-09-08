@@ -22,7 +22,11 @@ def main() -> None:
         ["git", "ls-files", "*.ini"], cwd=ROOT, text=True, encoding="utf-8"
     ).splitlines()
     require(
-        tracked_ini == ["SDK/PointCloudExtration/config/CorrugatedSheetPointCloudEctration.ini"],
+        tracked_ini
+        == [
+            "SDK/PointCloudExtration/config/CorrugatedSheetPointCloudEctration.ini",
+            "SDK/PointCloudExtration/findWeldingLine_sdk_x64_Release_20260902_1742/config/CorrugatedSheetPointCloudEctration.ini",
+        ],
         f"unexpected tracked INI configuration: {tracked_ini}",
     )
 
