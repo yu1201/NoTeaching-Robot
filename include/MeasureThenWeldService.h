@@ -192,7 +192,8 @@ public:
         const std::vector<T_ROBOT_COORS>* scanTrajectory = nullptr,
         const QString& cameraSectionOverride = QString(),
         ScanPostProcessMode postProcessMode =
-            ScanPostProcessMode::CorrugatedBoard) const;
+            ScanPostProcessMode::CorrugatedBoard,
+        const QString& pointCloudSdkLibraryDirOverride = QString()) const;
     bool ScanMoveAndCollect(
         RobotDriverAdaptor* pRobotDriver,
         const T_PRECISE_MEASURE_PARAM& param,
@@ -210,7 +211,8 @@ public:
         const ScanMotionCompletedCallback& motionCompleted =
             ScanMotionCompletedCallback(),
         ScanPostProcessMode postProcessMode =
-            ScanPostProcessMode::CorrugatedBoard) const;
+            ScanPostProcessMode::CorrugatedBoard,
+        const QString& pointCloudSdkLibraryDirOverride = QString()) const;
     bool SaveScanPoseVariationTrajectory(
         const QString& filePath,
         const QVector<ScanPoseVariationPoint>& trajectory,

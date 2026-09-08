@@ -65,13 +65,22 @@ def main() -> int:
         require(fragment in dialog + dialog_h, f"owned preview-worker contract missing: {fragment}")
 
     for fragment in (
-        "workerTimer.elapsed() < 300000",
+        "const qint64 workerTimeoutMs = SdkWorkerTimeoutMs(result.finiteInputPointCount)",
+        "workerTimer.elapsed() < workerTimeoutMs",
         "proc.waitForFinished(50)",
         "proc.kill()",
         "已取消 SDK 点云提取（子进程已终止）",
         "WriteWorkerCloudFile(cloudFile, inputPoints, stopRequested)",
     ):
         require(fragment in pointcloud, f"SDK worker cancellation missing: {fragment}")
+    for fragment in (
+        "SDK_WORKER_BASE_TIMEOUT_MS = 300000",
+        "SDK_WORKER_BASE_POINT_COUNT = 2000000",
+        "SDK_WORKER_EXTRA_BLOCK_TIMEOUT_MS = 120000",
+        "SDK_WORKER_MAX_TIMEOUT_MS = 900000",
+        "等待上限=%1秒，有效输入点=%2",
+    ):
+        require(fragment in pointcloud, f"SDK worker adaptive timeout missing: {fragment}")
     require("lineCount++ & 0x3ffU" in helper and "stopRequested && stopRequested()" in helper,
             "large point-file parsing is not cancelable")
 
