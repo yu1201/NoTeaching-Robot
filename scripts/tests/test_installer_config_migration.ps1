@@ -1276,15 +1276,19 @@ try {
         $classifyDatabase = {
             param([string]$Path)
             if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'missing' }
+            if ((Get-Item -LiteralPath $Path -Force).Length -eq 0) { return 'empty' }
             $hash = Get-Sha256 $Path
             if ($hash -ceq $publishCrashOriginalHash) { return 'OLD' }
             if ($hash -ceq $publishCrashMigratedHash) { return 'NEW' }
             return 'other'
         }
-        $resumeTopology = 'F={0},S={1},Q={2},B={3}' -f `
+        $resumeReadback = Get-TestReadbackPath `
+            $publishCrashData $publishCrashRecord.BACKUP_NAME
+        $resumeTopology = 'F={0},S={1},Q={2},R={3},B={4}' -f `
             (& $classifyDatabase $publishCrashDb), `
             (& $classifyDatabase $publishCrashStaging), `
             (& $classifyDatabase $publishCrashQuarantine), `
+            (& $classifyDatabase $resumeReadback), `
             (Test-Path -LiteralPath (Join-Path $publishCrashData $publishCrashRecord.BACKUP_NAME) -PathType Leaf)
         Assert-True ($code -eq 0) (
             "upgrade $publishCrashPoint crash topology could not be reconciled " +
