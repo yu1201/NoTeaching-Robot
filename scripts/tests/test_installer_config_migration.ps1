@@ -1751,3 +1751,7 @@ finally {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
+# Expected native-process failures are asserted above; do not leak their exit
+# code to a caller after the complete lifecycle suite has passed.
+$global:LASTEXITCODE = 0
