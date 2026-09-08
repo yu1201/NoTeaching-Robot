@@ -50,6 +50,11 @@
     <ClCompile Include="src\AppPaths.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\LicenseManager.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\LicenseDialog.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="include\LicenseManager.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="include\LicenseDialog.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="include\LicenseBuildConfig.h"><Filter>Header Files</Filter></ClInclude>
     <ClCompile Include="src\CliHelp.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

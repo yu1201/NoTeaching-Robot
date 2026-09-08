@@ -73,6 +73,27 @@
     <Import Project="$(QtMsBuild)\Qt.props" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Label="CommercialLicense">
+    <LicenseChannel Condition="'$(LicenseChannel)' == '' and '$(ReleaseExeName)' == 'HK-Pathlynx-CORPLA.exe'">brand</LicenseChannel>
+    <LicenseChannel Condition="'$(LicenseChannel)' == ''">neutral</LicenseChannel>
+    <LicenseMode Condition="'$(LicenseMode)' == '' and '$(LicenseChannel)' == 'brand'">2</LicenseMode>
+    <LicenseMode Condition="'$(LicenseMode)' == ''">0</LicenseMode>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>HK_LICENSE_MODE=$(LicenseMode);HK_LICENSE_CHANNEL=&quot;$(LicenseChannel)&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ForcedIncludeFiles Condition="'$(LicensePublicKeyHeader)' != ''">$(LicensePublicKeyHeader);%(ForcedIncludeFiles)</ForcedIncludeFiles>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>bcrypt.lib;crypt32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <Target Name="ValidateCommercialLicenseBuild" BeforeTargets="ClCompile">
+    <Error Condition="'$(LicenseMode)' != '0' and '$(LicenseMode)' != '1' and '$(LicenseMode)' != '2'" Text="LicenseMode must be 0 (Off), 1 (Audit), or 2 (Enforce)." />
+    <Error Condition="'$(LicenseChannel)' != 'neutral' and '$(LicenseChannel)' != 'brand'" Text="LicenseChannel must be neutral or brand." />
+    <Error Condition="'$(LicensePublicKeyHeader)' != '' and !Exists('$(LicensePublicKeyHeader)')" Text="License public key header does not exist: $(LicensePublicKeyHeader)" />
+    <Error Condition="'$(LicenseMode)' != '0' and '$(LicensePublicKeyHeader)' == ''" Text="An enabled license build requires an explicit LicensePublicKeyHeader exported by the license server." />
+  </Target>
   <PropertyGroup Label="OpenCascade">
     <OcctRoot Condition="'$(OcctRoot)' == ''">$(VcpkgRoot)\installed\x64-windows</OcctRoot>
     <OcctIncludeDir>$(OcctRoot)\include\opencascade</OcctIncludeDir>
@@ -142,6 +163,8 @@
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\LicenseManager.cpp" />
+    <ClCompile Include="src\LicenseDialog.cpp" />
     <ClCompile Include="src\AppPaths.cpp" />
     <ClCompile Include="src\CliHelp.cpp" />
     <ClCompile Include="src\BrandingConfig.cpp" />
@@ -255,6 +278,9 @@
     <ClCompile Include="src\main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\LicenseBuildConfig.h" />
+    <ClInclude Include="include\LicenseManager.h" />
+    <ClInclude Include="include\LicenseDialog.h" />
     <ClInclude Include="include\AppPaths.h" />
     <ClInclude Include="include\CliHelp.h" />
     <ClInclude Include="include\BrandingConfig.h" />

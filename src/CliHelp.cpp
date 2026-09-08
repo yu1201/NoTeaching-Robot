@@ -8,6 +8,7 @@ void WriteCliHelp(QTextStream& out)
     out << "  --no-show                         不显示主窗口，适合自动测试\n";
     out << "  --data-root <DIR>                 指定 Data/Result/Log/Temp/Job 的统一可写根目录\n";
     out << "  --print-app-paths-json            输出路径诊断 JSON 后退出（自动化验收用）\n";
+    out << "  --print-license-build-json        输出固化的授权模式、通道和公钥摘要后退出\n";
     out << "  --open-function-test              打开机器人功能测试窗口\n";
     out << "  --open-jog                        打开机器人点动控制窗口\n";
     out << "  --open-precise-measure            打开测量焊接参数窗口\n";

@@ -106,6 +106,8 @@ public:
 
     MeasureThenWeldDialog(ContralUnit* pContralUnit, int unitIndex, StartCameraFunc startCamera, StopCameraFunc stopCamera, CameraCacheFunc cameraCacheForUnit, QWidget* parent = nullptr);
     bool IsRunning() const;
+    // 授权到期页的专用恢复入口；仅复用带持久身份校验的安全回撤，不显示业务主页。
+    void StartSafeRetreatRecoveryForLicense() { RunSafeRetreatRecoveryFlow(); }
     void ReloadSelectors();
     // 流程成功后回调（UI 线程，参数=Result 案例目录），主窗口接在线上传。
     void SetScanDataUploadHook(std::function<void(const QString&)> hook);
