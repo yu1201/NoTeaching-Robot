@@ -96,7 +96,7 @@ public:
 	int CheckDonePassive(long long* pRobotMs = nullptr, long long* pPcRecvMs = nullptr) override;
 
 	// 程序调用与监控通道：CallJob走S4控制通道，Monitor走S5独立推送通道。
-	bool CallJob(std::string sJobName) override;
+	bool CallJob(std::string sJobName);
 	bool CallJobWithCompletionState(std::string sJobName, int nStateReg, int nDoneState);
 	// 通用TP完成检测：约定程序启动后写入运行态(默认10/20)，完成时写入完成态(默认1)。
 	bool CallJobAndWaitStateDone(
@@ -163,9 +163,9 @@ public:
 	int UploadLsFile(std::string localLsPath, std::string remoteDir = "/md/");
 
 	// FTP通用接口：供固定程序/特殊程序上传下载复用。
-	int InitFtp() override;
-	int UploadFile(std::string LocalFilePath, std::string RemoteFilePath) override;
-	int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath) override;
+	int InitFtp();
+	int UploadFile(std::string LocalFilePath, std::string RemoteFilePath);
+	int DownloadFile(std::string RemoteFilePath, std::string LocalFilePath);
 
 	// 机器人基础控制：当前大多通过常驻服务命令转发，未实现的命令由机器人侧返回或占位OK。
 	bool ServoOff() override;

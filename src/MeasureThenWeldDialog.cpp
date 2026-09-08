@@ -256,20 +256,12 @@ bool TerminatePersistedProgramBeforeRecovery(
                 + QString::fromStdString(driver->GetLastRobotError());
             return false;
         }
-    }
-    if (!driver->AbortPersistedMotion(record.programName.toStdString()))
-    {
-        error = QStringLiteral("旧程序未得到可验证终止，持久门禁保持有效：")
-            + QString::fromStdString(driver->GetLastRobotError());
-        return false;
-    }
-    if (strategy == RobotPersistentRecoveryStrategy::AbortUnknownCurrentProgram)
-    {
         if (!RobotOperationLease::MarkMotionCompleted(driver))
         {
             error = QStringLiteral("控制器已返回停止，但无法登记稳定终态，禁止后续运动。");
             return false;
         }
+        return true;
     }
     if (record.programName.trimmed().isEmpty()
         || RobotOperationLease::PersistentEndpointIdentity(driver) != record.robotEndpoint)
