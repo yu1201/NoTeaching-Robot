@@ -45,6 +45,30 @@ int main()
     const auto* secondDriver = &secondDriverStorage;
 
     using Gate = SystemInterlock;
+    // 授权不能由账号开关、状态切换开关或重新登录解除。
+    RobotOperationLease::SetLicenseOperationsAllowed(false, QStringLiteral("license-suspended"));
+    RobotOperationLease::SetSystemInterlockForTest(Gate::AccountSession, false);
+    RobotOperationLease::SetSystemInterlockForTest(Gate::StateTransition, false);
+    RobotOperationLease::SetNewOperationsAllowed(true);
+    QString licenseReason;
+    Check(!RobotOperationLease::NewOperationsAllowed(), "editable interlocks bypassed license");
+    Check(!RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("locked"), &licenseReason)
+        && licenseReason == QStringLiteral("license-suspended"), "license did not block admission");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::MotionLeaseOwnership, false);
+    Check(!RobotOperationLease::MarkMotionStarted(firstDriver, false, &licenseReason)
+        && licenseReason == QStringLiteral("license-suspended"), "unleased motion bypassed license");
+    RobotOperationLease::SetSystemInterlockForTest(Gate::MotionLeaseOwnership, true);
+    WeldResumePlanner::CheckpointRecord resumeRecord;
+    RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding resumeBinding;
+    Check(!RobotOperationLease::TryAcquirePausedResume(firstDriver, QStringLiteral("resume"),
+        resumeRecord, &resumeBinding, &licenseReason)
+        && licenseReason == QStringLiteral("license-suspended"), "paused resume bypassed license");
+    RobotOperationLease::TryAcquireSafetyRecovery(firstDriver, QStringLiteral("safe-retreat"),
+        resumeRecord, &resumeBinding, &licenseReason);
+    Check(licenseReason != QStringLiteral("license-suspended"), "license blocked safe recovery");
+    RobotOperationLease::SetLicenseOperationsAllowed(true);
+    RobotOperationLease::SetSystemInterlockForTest(Gate::AccountSession, true);
+    RobotOperationLease::SetSystemInterlockForTest(Gate::StateTransition, true);
     RobotOperationLease::SetSystemInterlockForTest(Gate::AccountSession, false);
     RobotOperationLease::SetNewOperationsAllowed(false, QStringLiteral("session"));
     auto sessionBypass = RobotOperationLease::TryAcquire(firstDriver, QStringLiteral("session-bypass"));

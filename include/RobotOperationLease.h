@@ -73,6 +73,8 @@ public:
         bool allowed,
         const QString& blockedReason = QString());
     static bool NewOperationsAllowed();
+    // 商业授权独立于可编辑的系统互锁开关；只放行显式安全回撤，不能借续焊绕过。
+    static void SetLicenseOperationsAllowed(bool allowed, const QString& reason = QString());
 #if defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
     static void SetSystemInterlockForTest(SystemInterlock gate, bool enabled);
 #endif
@@ -125,7 +127,8 @@ private:
         const RobotDriverAdaptor* driver,
         const QString& requestedOwner,
         bool allowPersistentRecovery,
-        QString* reason);
+        QString* reason,
+        bool allowLicenseSafetyRecovery = false);
     RobotOperationLease(
         const RobotDriverAdaptor* driver,
         QString identityKey,

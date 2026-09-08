@@ -8,8 +8,16 @@
 #include "PointCloudExtractionProcessor.h"
 #include "PointCloudProcessingConfig.h"
 #include "RobotDriverAdaptor.h"
+#include "LicenseManager.h"
+#include "LicenseDialog.h"
+#include "LicenseBuildConfig.h"
+#include "RobotOperationLease.h"
 
 #include <QDir>
+#include <QCryptographicHash>
+#include <QEventLoop>
+#include <QProgressDialog>
+#include <QTimer>
 #include <QIcon>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -140,6 +148,19 @@ int main(int argc, char *argv[])
     {
         return PrintCliHelp();
     }
+    if (arguments.contains(QStringLiteral("--print-license-build-json")))
+    {
+        const QJsonObject build = {
+            {QStringLiteral("schemaVersion"), 1},
+            {QStringLiteral("licenseMode"), HK_LICENSE_MODE},
+            {QStringLiteral("licenseChannel"), QString::fromUtf8(HK_LICENSE_CHANNEL)},
+            {QStringLiteral("keyId"), QString::fromUtf8(HK_LICENSE_KEY_ID)},
+            {QStringLiteral("publicKeySha256"), QString::fromLatin1(QCryptographicHash::hash(
+                QByteArray::fromBase64(HK_LICENSE_PUBLIC_KEY_B64), QCryptographicHash::Sha256).toHex())}
+        };
+        QTextStream(stdout) << QJsonDocument(build).toJson(QJsonDocument::Compact) << Qt::endl;
+        return 0;
+    }
     QString pathError;
     if (!AppPaths::Initialize(arguments, &pathError))
     {
@@ -161,6 +182,49 @@ int main(int argc, char *argv[])
     ConfigureApplicationFontFallback();
     InstallGlobalWheelGuard(app);
     app.setWindowIcon(BrandingConfig::WindowIcon());
+
+    auto& license = LicenseManager::Instance();
+    const bool extractionWorker = arguments.contains(QStringLiteral("--pointcloud-extract-worker"));
+    license.Initialize(extractionWorker);
+    if (!extractionWorker) license.Start();
+    if (!extractionWorker && license.IsEnforced() && license.IsNetworkBusy())
+    {
+        app.setQuitOnLastWindowClosed(false);
+        QEventLoop initialSync;
+        QTimer poll;
+        poll.setInterval(50);
+        QObject::connect(&poll, &QTimer::timeout, &initialSync, [&]()
+            { if (!license.IsNetworkBusy()) initialSync.quit(); });
+        QProgressDialog checking(QStringLiteral("正在同步授权状态…"), QStringLiteral("退出"), 0, 0);
+        checking.setStyleSheet(LicenseDialog::ThemeStyleSheet());
+        ApplyUnifiedWindowChrome(&checking);
+        checking.setWindowTitle(QStringLiteral("软件授权"));
+        checking.setWindowModality(Qt::ApplicationModal);
+        checking.setMinimumDuration(0);
+        bool cancelled = false;
+        QObject::connect(&checking, &QProgressDialog::canceled, &initialSync, [&]()
+            { cancelled = true; initialSync.quit(); });
+        if (!arguments.contains(QStringLiteral("--no-show"))) checking.show();
+        QTimer::singleShot(16000, &initialSync, &QEventLoop::quit);
+        poll.start();
+        initialSync.exec();
+        QObject::disconnect(&checking, nullptr, &initialSync, nullptr);
+        checking.close();
+        if (cancelled) return 4;
+    }
+    if (!license.CanStartProtectedOperation())
+    {
+        if (arguments.contains(QStringLiteral("--no-show")) || extractionWorker)
+        {
+            QTextStream(stderr) << license.StatusText() << Qt::endl;
+            return 4;
+        }
+        // 先显示过期/激活界面；此时尚未构造主窗口，也未构造机器人驱动。
+        app.setQuitOnLastWindowClosed(false);
+        license.ShowDialog(nullptr, {}, {}, {}, true);
+        if (!license.CanStartProtectedOperation()) return 4;
+    }
+    RobotOperationLease::SetLicenseOperationsAllowed(license.CanStartProtectedOperation(), license.StatusText());
 
     // SDK 点云提取子进程模式：隔离 SDK DLL(pcl_kdtree 多线程)崩溃。在构造主窗口/连接机器人之前拦截，
     // 只调 SDK 提取后即退；子进程崩溃不会拖垮主程序(由 ExtractCorrugatedSheetIsolated 检测处理)。
@@ -222,6 +286,7 @@ int main(int argc, char *argv[])
     {
         window.show();
     }
+    app.setQuitOnLastWindowClosed(true);
     window.ApplyStartupArguments(arguments);
     return app.exec();
 }

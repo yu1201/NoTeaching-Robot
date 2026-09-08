@@ -119,6 +119,12 @@ private:
     void ShowCurrentEmbeddedPage(QWidget* page);
     void RefreshRobotSelectorUi();
     void RefreshRobotOperationAvailability();
+    void RefreshLicenseState();
+    void StopTrackedRobotOperations(bool notifyWhenEmpty, bool notifySuccess);
+    bool m_licenseLockEpisode = false;
+    bool m_licenseStopPending = false;
+    bool m_licenseExpiryShown = false;
+    bool m_licenseStateRefreshing = false;
     void RefreshDashboardConnectionState();
     bool EnsureRobotUiActionIdle(const QString& actionName);
     void RunFunctionTestDashboardTool(const QString& actionId);
