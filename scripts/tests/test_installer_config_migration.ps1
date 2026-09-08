@@ -7,8 +7,10 @@ Set-StrictMode -Version Latest
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $helper = Join-Path $repoRoot 'tools\ConfigMigrate_Install.ps1'
 $installer = Join-Path $repoRoot 'installer\QtWidgetsApplication4.iss'
+# Keep this fixture below legacy MAX_PATH: the Add-Type test console app has no
+# long-path-aware manifest. Spaces and parentheses still exercise native quoting.
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
-    'NoTeaching Robot Installer Staging Tests (' + [Guid]::NewGuid().ToString('N') + ')'
+    'NTR Mig (' + [Guid]::NewGuid().ToString('N') + ')'
 )
 $fakeMigrator = Join-Path $tempRoot 'Fake ConfigMigrate.exe'
 $transactionName = 'ConfigStore.db.install-transaction-v1'
