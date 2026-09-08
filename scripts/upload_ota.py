@@ -3914,10 +3914,37 @@ def _publish_github_release(
         timeout=30 * 60,
     )
 
+    # GitHub does not guarantee that GET /releases/tags/{tag} can resolve a draft:
+    # the tag ref is normally created only when the draft is published.  Resolve
+    # the just-created quarantined draft from the authenticated release list, then
+    # bind every subsequent read and the publish transition to its immutable ID.
+    release_list_json = _run_gh_checked(
+        gh,
+        ["api", f"repos/{repo_name}/releases?per_page=100"],
+        cwd=repo_root,
+        label="定位新建 GitHub draft release ID",
+    ).stdout
+    release_list = _load_json_bytes(
+        release_list_json.encode("utf-8"), "GitHub draft release list"
+    )
+    matching_drafts = [
+        item for item in release_list
+        if isinstance(item, dict)
+        and item.get("tag_name") == tag
+        and item.get("target_commitish") == "main"
+        and item.get("draft") is True
+        and item.get("prerelease") is False
+        and isinstance(item.get("id"), int)
+        and item["id"] > 0
+    ] if isinstance(release_list, list) else []
+    _require(len(matching_drafts) == 1,
+             "无法唯一定位刚创建的 GitHub draft release ID。")
+    release_id = matching_drafts[0]["id"]
+
     def read_and_validate_release(*, expected_draft: bool, label: str) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         release_json = _run_gh_checked(
             gh,
-            ["api", f"repos/{repo_name}/releases/tags/{tag}"],
+            ["api", f"repos/{repo_name}/releases/{release_id}"],
             cwd=repo_root,
             label=label,
         ).stdout
@@ -3986,7 +4013,8 @@ def _publish_github_release(
     # explicit inspection/cleanup instead of exposing bad assets.
     _run_gh_checked(
         gh,
-        ["release", "edit", tag, "--repo", repo_name, "--draft=false"],
+        ["api", "--method", "PATCH", f"repos/{repo_name}/releases/{release_id}",
+         "-F", "draft=false"],
         cwd=repo_root,
         label="公开已完整验证的 GitHub Release",
     )

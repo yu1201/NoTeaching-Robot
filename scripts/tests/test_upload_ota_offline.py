@@ -1243,6 +1243,7 @@ class LocalGateTests(unittest.TestCase):
                 "tag": f"v{CandidateFixture.VERSION}",
             }
             metadata = {
+                "id": 987654,
                 "tag_name": preflight["tag"],
                 "target_commitish": "main",
                 "draft": True,
@@ -1268,6 +1269,16 @@ class LocalGateTests(unittest.TestCase):
                             "ref": "refs/heads/main",
                             "object": {"type": "commit", "sha": neutral_head},
                         }))
+                    if arguments[1].endswith("/releases?per_page=100"):
+                        call_order.append("draft-list")
+                        return types.SimpleNamespace(stdout=json.dumps([metadata]))
+                    if "--method" in arguments and "PATCH" in arguments:
+                        call_order.append("release-edit")
+                        self.assertIn("draft=false", arguments)
+                        state["published"] = True
+                        response = dict(metadata)
+                        response["draft"] = False
+                        return types.SimpleNamespace(stdout=json.dumps(response))
                     call_order.append("published-api" if state["published"] else "draft-api")
                     response = dict(metadata)
                     response["draft"] = not state["published"]
@@ -1278,9 +1289,6 @@ class LocalGateTests(unittest.TestCase):
                     neutral_bytes = b"corrupt" if state["corruptDownload"] else neutral.read_bytes()
                     (destination / neutral.name).write_bytes(neutral_bytes)
                     (destination / brand.name).write_bytes(brand.read_bytes())
-                if arguments[:2] == ["release", "edit"]:
-                    call_order.append("release-edit")
-                    state["published"] = True
                 return types.SimpleNamespace(stdout="")
 
             original_fake_gh = fake_gh
