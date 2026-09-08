@@ -1,6 +1,7 @@
 #include "RobotOperationLease.h"
 
 #if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+#include "LicenseManager.h"
 #include "PointCloudProcessingConfig.h"
 #include "RobotDriverAdaptor.h"
 #include "WeldSafetyRecoveryStore.h"
@@ -41,6 +42,8 @@ std::multimap<QString, ActiveOperation> g_activeOperations;
 std::map<QString, UnresolvedStop> g_unresolvedStops;
 bool g_newOperationsAllowed = true;
 QString g_newOperationsBlockedReason;
+bool g_licenseOperationsAllowed = true;
+QString g_licenseBlockedReason;
 std::map<RobotOperationLease::NewOperationBlockToken, QString> g_newOperationBlocks;
 std::atomic<std::uint64_t> g_nextOperationToken{ 1 };
 std::atomic<std::uint64_t> g_nextOperationBlockToken{ 1 };
@@ -159,8 +162,20 @@ void RobotOperationLease::SetNewOperationsAllowed(
 bool RobotOperationLease::NewOperationsAllowed()
 {
     std::lock_guard<std::mutex> lock(g_operationMutex);
-    return (!InterlockEnabled(SystemInterlock::AccountSession) || g_newOperationsAllowed)
+    bool licenseAllowed = g_licenseOperationsAllowed;
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    licenseAllowed = licenseAllowed && LicenseManager::Instance().CanStartProtectedOperation();
+#endif
+    return licenseAllowed
+        && (!InterlockEnabled(SystemInterlock::AccountSession) || g_newOperationsAllowed)
         && (!InterlockEnabled(SystemInterlock::StateTransition) || g_newOperationBlocks.empty());
+}
+
+void RobotOperationLease::SetLicenseOperationsAllowed(bool allowed, const QString& reason)
+{
+    std::lock_guard<std::mutex> lock(g_operationMutex);
+    g_licenseOperationsAllowed = allowed;
+    g_licenseBlockedReason = allowed ? QString() : reason;
 }
 
 #if defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
@@ -219,7 +234,7 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireSafetyRecovery(
         }
         return {};
     }
-    const Ptr lease = TryAcquireImpl(driver, requestedOwner, true, reason);
+    const Ptr lease = TryAcquireImpl(driver, requestedOwner, true, reason, true);
     if (!lease)
     {
         return {};
@@ -302,7 +317,8 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
     const RobotDriverAdaptor* driver,
     const QString& requestedOwner,
     bool allowPersistentRecovery,
-    QString* reason)
+    QString* reason,
+    bool allowLicenseSafetyRecovery)
 {
     if (reason != nullptr)
     {
@@ -349,6 +365,25 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
     // 先构造未注册租约以保证异常安全：map 插入失败时不会留下幽灵占用。
     Ptr lease(new RobotOperationLease(driver, identityKey, 0, owner));
     std::lock_guard<std::mutex> lock(g_operationMutex);
+    if (!allowLicenseSafetyRecovery)
+    {
+        QString licenseReason = g_licenseBlockedReason;
+        bool licenseAllowed = g_licenseOperationsAllowed;
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+        licenseAllowed = LicenseManager::Instance().CanStartProtectedOperation(&licenseReason)
+            && licenseAllowed;
+#endif
+        if (!licenseAllowed)
+        {
+            if (reason != nullptr)
+            {
+                *reason = licenseReason.isEmpty()
+                    ? QStringLiteral("软件授权不允许启动新任务；安全停止和安全回撤仍可使用。")
+                    : licenseReason;
+            }
+            return {};
+        }
+    }
     const bool sessionBlocked = InterlockEnabled(SystemInterlock::AccountSession) && !g_newOperationsAllowed;
     const bool transitionBlocked = InterlockEnabled(SystemInterlock::StateTransition) && !g_newOperationBlocks.empty();
     if (sessionBlocked || transitionBlocked)
@@ -656,6 +691,23 @@ bool RobotOperationLease::MarkMotionStarted(
         }
     }
     auto active = std::find_if(g_activeOperations.begin(), g_activeOperations.end(), matches);
+    const bool hasOwnedLease = std::any_of(g_activeOperations.cbegin(), g_activeOperations.cend(),
+        [&matches](const auto& operation) { return matches(operation) && operation.second.token != 0; });
+    if (!hasOwnedLease)
+    {
+        QString licenseReason = g_licenseBlockedReason;
+        bool licenseAllowed = g_licenseOperationsAllowed;
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+        licenseAllowed = LicenseManager::Instance().CanStartProtectedOperation(&licenseReason)
+            && licenseAllowed;
+#endif
+        if (!licenseAllowed)
+        {
+            if (reason) *reason = licenseReason.isEmpty()
+                ? QStringLiteral("授权无效，不能通过关闭运动租约门禁启动新运动。") : licenseReason;
+            return false;
+        }
+    }
     if (active == g_activeOperations.end() && InterlockEnabled(SystemInterlock::MotionLeaseOwnership))
     {
         if (reason) *reason = QStringLiteral("当前运动命令没有持有机器人硬件操作租约，已拒绝下发。");

@@ -23,6 +23,8 @@
 #include "WeldSafetyRecoveryStore.h"
 #include "OnlineServicesConfig.h"
 #include "OnlineServicesDialog.h"
+#include "LicenseManager.h"
+#include <QScopedValueRollback>
 #include "OnlineServicesLoginDialog.h"
 #include "ConfigSection.h"
 #include "PointCloudProcessingConfig.h"
@@ -3375,6 +3377,47 @@ namespace
 				units.push_back(unit);
 			}
 
+			// ControlUnits is the runtime inventory and intentionally contains only
+			// enabled units.  The management page must also recover disabled units
+			// from their retained robot-scoped configuration; otherwise unchecking
+			// "enabled" makes a fully configured unit disappear from this page.
+			QStringList configuredUnitNames;
+			if (!ConfigDatabase::TryListScopedSettingIds(
+					QStringLiteral("robot"),
+					QStringLiteral("RobotPara/BaseParam"),
+					&configuredUnitNames))
+			{
+				if (error != nullptr && error->isEmpty())
+				{
+					*error = "读取已停用控制单元列表失败：robot/RobotPara/BaseParam";
+				}
+				return units;
+			}
+			for (const QString& configuredUnitName : configuredUnitNames)
+			{
+				const QString unitName = configuredUnitName.trimmed();
+				const QString lookupName = unitName.toLower();
+				if (unitName.isEmpty() || unitRowByName.contains(lookupName))
+				{
+					continue;
+				}
+
+				UnitConfig unit;
+				unit.unitNo = -1;
+				unit.unitName = unitName;
+				LoadRobotPara(unit);
+				// A unit absent from the runtime inventory is fail-closed even if an
+				// interrupted earlier save left SetupStatus/Enabled=1 behind.
+				unit.enabled = false;
+				if (unit.chineseName.trimmed().isEmpty())
+				{
+					unit.chineseName = unit.customName.trimmed().isEmpty()
+						? unit.unitName : unit.customName;
+				}
+				unitRowByName.insert(lookupName, units.size());
+				units.push_back(unit);
+			}
+
 			return units;
 		}
 
@@ -3390,7 +3433,17 @@ namespace
 				return;
 			}
 			robotIni.SetSectionName("BaseParam");
+			const QString scopedChineseName = ReadConfigString(robotIni, "ChineseName");
+			if (unit.chineseName.trimmed().isEmpty() && !scopedChineseName.trimmed().isEmpty())
+			{
+				unit.chineseName = scopedChineseName;
+			}
 			unit.customName = ReadConfigString(robotIni, "CustomName");
+			if (unit.chineseName.trimmed().isEmpty())
+			{
+				unit.chineseName = unit.customName.trimmed().isEmpty()
+					? unit.unitName : unit.customName;
+			}
 			unit.robotType = ReadConfigInt(robotIni, "RobotType", unit.robotType);
 			unit.scanTimestampSource = MeasureThenWeldRuntimeConfig::ToStorageString(
 				MeasureThenWeldRuntimeConfig::LoadScanTimestampSource(unit.unitName));
@@ -4880,6 +4933,7 @@ namespace
 			ini.SetSectionName("BaseParam");
 			bool ok = true;
 			ok = ok && WriteConfigString(ini, "RobotName", unit.unitName);
+			ok = ok && WriteConfigString(ini, "ChineseName", unit.chineseName);
 			ok = ok && WriteConfigString(ini, "CustomName", unit.customName);
 			ok = ok && WriteConfigInt(ini, "RobotType", unit.robotType);
 			ok = ok && WriteConfigString(ini, "RobotModelId", unit.robotModelId);
@@ -9484,6 +9538,11 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	authButtonLayout->addStretch(1);
 	authCardLayout->addLayout(authButtonLayout);
 	authCardLayout->addWidget(m_pGuestLoginBtn, 0, Qt::AlignHCenter);
+	auto* authLicenseButton = new QPushButton(QStringLiteral("软件授权 / 激活"), authCard);
+	authLicenseButton->setFlat(true);
+	connect(authLicenseButton, &QPushButton::clicked, this, [this]()
+		{ LicenseManager::Instance().ShowDialog(this); });
+	authCardLayout->addWidget(authLicenseButton, 0, Qt::AlignHCenter);
 
 	m_pAccountLogText = new QPlainTextEdit(authCard);
 	m_pAccountLogText->setReadOnly(true);
@@ -9604,6 +9663,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	homeHintLabel->setWordWrap(true);
 	homeHintLabel->setStyleSheet("QLabel { color: #AFC8CE; font-size: 14px; }");
 	dashboardLayout->addWidget(homeHintLabel);
+	auto* licenseStatusLabel = new QLabel(m_pDashboardPage);
+	licenseStatusLabel->setObjectName(QStringLiteral("LicenseStatusLabel"));
+	licenseStatusLabel->setWordWrap(true);
+	licenseStatusLabel->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
+	licenseStatusLabel->setStyleSheet(QStringLiteral("QLabel { color: #E4BE77; font-size: 13px; }"));
+	connect(licenseStatusLabel, &QLabel::linkActivated, this, [this](const QString&)
+		{ LicenseManager::Instance().ShowDialog(this); });
+	dashboardLayout->addWidget(licenseStatusLabel);
 
 	auto makeLargeButton = [](const QString& text, QWidget* parent) -> QPushButton*
 		{
@@ -9916,6 +9983,7 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	addMenuAction(managementDebugMenu, createManagementAction("扫描变姿态精度测试", [this]() { OpenScanPoseVariationTestPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("结果打包压缩", [this]() { OpenResultArchiveDialog(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("在线服务", [this]() { OpenOnlineServicesDialog(); }));
+	addMenuAction(managementDebugMenu, createManagementAction("软件授权 / 激活", [this]() { LicenseManager::Instance().ShowDialog(this); }));
 	addMenuAction(managementDebugMenu, createManagementAction("工件模型", [this]() { OpenWorkpieceMeshPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("模型配准", [this]() { OpenModelAlignmentPage(); }));
 	addMenuAction(managementDebugMenu, createManagementAction("虚拟焊道测试", [this]() { OpenVirtualWeldTestPage(); }));
@@ -10391,6 +10459,14 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 			}
 		});
 	accountSessionTimer->start();
+	auto* licenseStateTimer = new QTimer(this);
+	licenseStateTimer->setInterval(250);
+	connect(licenseStateTimer, &QTimer::timeout, this, &QtWidgetsApplication4::RefreshLicenseState);
+	licenseStateTimer->start();
+	QPointer<QtWidgetsApplication4> licenseWindow(this);
+	LicenseManager::Instance().onPolicyChanged = [licenseWindow]()
+		{ if (licenseWindow) licenseWindow->RefreshLicenseState(); };
+	QTimer::singleShot(0, this, &QtWidgetsApplication4::RefreshLicenseState);
 
 	EnsureDefaultAdminAccount();
 	RefreshAccountUi();
@@ -10957,6 +11033,15 @@ void QtWidgetsApplication4::closeEvent(QCloseEvent* event)
 
 bool QtWidgetsApplication4::eventFilter(QObject* watched, QEvent* event)
 {
+	// 激活入口必须在账号未登录/失效时仍可操作。
+	if (auto* licenseWidget = qobject_cast<QWidget*>(watched))
+	{
+		if (licenseWidget->window()->objectName() == QStringLiteral("LicenseDialog")
+			|| licenseWidget->window()->property("_license_dialog").toBool())
+		{
+			return QMainWindow::eventFilter(watched, event);
+		}
+	}
 	if (event != nullptr && event->type() == QEvent::Show)
 	{
 		QWidget* shownWindow = qobject_cast<QWidget*>(watched);
@@ -11420,6 +11505,103 @@ int QtWidgetsApplication4::FindFirstReadyRobotUnitIndex() const
         }
     }
     return -1;
+}
+
+void QtWidgetsApplication4::RefreshLicenseState()
+{
+	if (m_licenseStateRefreshing) return;
+	QScopedValueRollback<bool> refreshing(m_licenseStateRefreshing, true);
+	auto& license = LicenseManager::Instance();
+	QString reason;
+	const bool denied = !license.CanStartProtectedOperation(&reason);
+	const bool busy = RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow();
+	bool beginStop = false;
+	if (denied && !m_licenseLockEpisode)
+	{
+		m_licenseLockEpisode = true;
+		m_licenseStopPending = busy;
+		beginStop = busy;
+	}
+	if (m_licenseStopPending && !busy)
+	{
+		m_licenseStopPending = false;
+	}
+	if (!denied && !m_licenseStopPending)
+	{
+		m_licenseLockEpisode = false;
+	}
+	RobotOperationLease::SetLicenseOperationsAllowed(!denied && !m_licenseStopPending,
+		m_licenseStopPending ? QStringLiteral("授权策略正在等待机器人安全停止确认。") : reason);
+	if (m_licenseStopPending)
+	{
+		license.SetRuntimeState(QStringLiteral("robotBusy"));
+		license.SetEffectStatus(QStringLiteral("pendingSafeStop"));
+		// 停机尚未回读确认，绝不向管理端确认已应用。
+	}
+	else
+	{
+		license.SetRuntimeState(busy
+			? (denied ? QStringLiteral("safeRecovery") : QStringLiteral("robotBusy"))
+			: QStringLiteral("idle"));
+		license.SetEffectStatus(denied ? QStringLiteral("locked") : QStringLiteral("active"));
+		license.AcknowledgeAppliedPolicy();
+	}
+	if (auto* label = findChild<QLabel*>(QStringLiteral("LicenseStatusLabel")))
+	{
+		QString state = license.StatusText();
+		label->setVisible(license.Mode() != LicenseManager::LicenseMode::Off);
+		label->setToolTip(state);
+		state = state.section(QLatin1Char('\n'), 0, 1);
+		if (m_licenseStopPending) state += QStringLiteral(" | 等待安全停止确认");
+		const QString text = state.toHtmlEscaped()
+			+ QStringLiteral("　<a style='color:#9ED8DB' href='license'>软件授权 / 激活</a>");
+		if (label->text() != text) label->setText(text);
+	}
+	if (beginStop)
+	{
+		StopTrackedRobotOperations(false, false);
+	}
+	if (denied && !busy && !m_licenseExpiryShown)
+	{
+		m_licenseExpiryShown = true;
+		// 到期/锁定只展示授权界面；恢复有效授权之后才重新展示原窗口。
+		const bool previousQuitOnLastWindowClosed = QApplication::quitOnLastWindowClosed();
+		QApplication::setQuitOnLastWindowClosed(false);
+		QList<QPointer<QWidget>> visibleWindows;
+		for (QWidget* window : QApplication::topLevelWidgets())
+		{
+			if (window && window->isVisible()
+				&& window->objectName() != QStringLiteral("LicenseDialog"))
+			{
+				visibleWindows.append(window);
+				window->hide();
+			}
+		}
+		std::function<void()> safetyRecovery;
+		if (m_pMeasureThenWeldPage != nullptr)
+		{
+			QPointer<MeasureThenWeldDialog> recoveryPage(m_pMeasureThenWeldPage);
+			safetyRecovery = [recoveryPage]()
+				{ if (recoveryPage) recoveryPage->StartSafeRetreatRecoveryForLicense(); };
+		}
+		license.ShowDialog(nullptr, safetyRecovery,
+			[this]() { StopTrackedRobotOperations(false, false); },
+			[this]() { return RobotOperationLease::AnyActive() || HasRunningMeasureThenWeldFlow(); }, true);
+		if (license.CanStartProtectedOperation())
+		{
+			for (const auto& window : visibleWindows)
+			{
+				if (window) window->show();
+			}
+			QApplication::setQuitOnLastWindowClosed(previousQuitOnLastWindowClosed);
+			m_licenseExpiryShown = false;
+			RefreshLicenseState();
+		}
+		else
+		{
+			QCoreApplication::quit();
+		}
+	}
 }
 
 void QtWidgetsApplication4::RefreshRobotOperationAvailability()
@@ -17466,30 +17648,50 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 {
 	if (checked)
 	{
+		// The preview window is also the camera diagnostic surface.  Always show
+		// it first, then report configuration/connection state inside the window.
+		OpenGroovePointCloudDialog();
+		auto showDisconnected = [this](const QString& reason)
+		{
+			m_sGrooveCameraStatusText = reason;
+			if (m_pGroovePointCloudDialog != nullptr)
+			{
+				static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(
+					QStringLiteral("相机未连接"), reason);
+			}
+		};
+
 		QString setupIssue;
 		if (!IsCurrentRobotSetupReady(true, false, &setupIssue))
 		{
-			QMessageBox::warning(this, "坡口相机测试", setupIssue);
-			ui.GrooveCameraTestBtn->setChecked(false);
+			showDisconnected(setupIssue);
 			RefreshRobotOperationAvailability();
 			return;
 		}
 		QString cameraIP;
 		const int unitIndex = CurrentRobotUnitIndex();
+		int configuredCameraPort = 0;
+		if (!LoadGrooveCameraEndpointForUnit(unitIndex, cameraIP, configuredCameraPort)
+			|| cameraIP.trimmed().isEmpty())
+		{
+			showDisconnected(QStringLiteral(
+				"当前机器人未配置扫描相机 DeviceAddress。请在“相机参数”中保存测量相机地址后重试。"));
+			return;
+		}
 		RobotDriverAdaptor* cameraDriver = RobotDataHelper::GetRobotDriver(m_pContralUnit, unitIndex);
 		const QString cameraOwner = RobotOperationLease::CurrentOwner(cameraDriver);
 		if (!cameraOwner.isEmpty())
 		{
-			QMessageBox::warning(this, "坡口相机测试",
-				QString("当前机器人正在执行“%1”，不能打开预览并清空本轮相机缓存。").arg(cameraOwner));
-			ui.GrooveCameraTestBtn->setChecked(false);
+			showDisconnected(
+				QString("当前机器人正在执行“%1”，预览暂未连接，且不会清空本轮相机缓存。")
+					.arg(cameraOwner));
 			RefreshRobotOperationAvailability();
 			return;
 		}
-		if (!EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true))
+		if (!EnsureScanCameraRunningForUnit(unitIndex, cameraIP, true, false))
 		{
-			QMessageBox::warning(this, "坡口相机测试", "未读取到当前机器人扫描相机的 DeviceAddress。");
-			ui.GrooveCameraTestBtn->setChecked(false);
+			showDisconnected(QString("相机 %1 连接启动失败，请检查网络、端口和相机状态。")
+				.arg(cameraIP));
 			return;
 		}
 
@@ -17507,13 +17709,20 @@ void QtWidgetsApplication4::GrooveCameraTest(bool checked)
 			.arg(portName)
 			.arg(cameraPort > 0 ? cameraPort : (m_bUseSharedScanCameraReceiver ? 50004 : 50006))
 			.arg(receiveMode);
-		OpenGroovePointCloudDialog();
 		if (m_pGroovePointCloudDialog != nullptr)
 		{
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->ClearPreview(
-				"正在等待相机帧...",
+				"正在连接相机...",
 				m_sGrooveCameraStatusText);
-			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->RefreshCameraControlParams();
+			QPointer<GroovePointCloudDialog> previewDialog =
+				static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog);
+			QTimer::singleShot(0, previewDialog, [previewDialog]()
+				{
+					if (previewDialog != nullptr)
+					{
+						previewDialog->RefreshCameraControlParams();
+					}
+				});
 			static_cast<GroovePointCloudDialog*>(m_pGroovePointCloudDialog)->SetImageTransportToggleHandler(
 				[this, unitIndex](bool enabled)
 				{
@@ -18667,6 +18876,11 @@ void QtWidgetsApplication4::RobotClearAlarmTest()
 
 void QtWidgetsApplication4::RobotEmergencyStop()
 {
+	StopTrackedRobotOperations(true, true);
+}
+
+void QtWidgetsApplication4::StopTrackedRobotOperations(bool notifyWhenEmpty, bool notifySuccess)
+{
 	struct StopTarget
 	{
 		RobotDriverAdaptor* driver = nullptr;
@@ -18695,7 +18909,8 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 	if (targets.empty())
 	{
 		RefreshDashboardConnectionState();
-		QMessageBox::information(this, "安全停止", "当前没有本软件跟踪的活动机器人硬件流程。");
+		if (notifyWhenEmpty)
+			QMessageBox::information(this, "安全停止", "当前没有本软件跟踪的活动机器人硬件流程。");
 		return;
 	}
 
@@ -18708,7 +18923,7 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 	}
 
 	QPointer<QtWidgetsApplication4> self(this);
-	std::thread([self, targets = std::move(targets)]() mutable
+	std::thread([self, targets = std::move(targets), notifySuccess]() mutable
 		{
 			std::vector<StopResult> results(targets.size());
 			std::vector<std::thread> workers;
@@ -18755,7 +18970,7 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 				worker.join();
 			}
 
-			QMetaObject::invokeMethod(qApp, [self, results = std::move(results)]()
+			QMetaObject::invokeMethod(qApp, [self, results = std::move(results), notifySuccess]()
 				{
 					if (self == nullptr)
 					{
@@ -18777,7 +18992,7 @@ void QtWidgetsApplication4::RobotEmergencyStop()
 					self->RefreshDashboardConnectionState();
 					if (allOk)
 					{
-						QMessageBox::information(self, "安全停止", lines.join('\n'));
+						if (notifySuccess) QMessageBox::information(self, "安全停止", lines.join('\n'));
 					}
 					else
 					{

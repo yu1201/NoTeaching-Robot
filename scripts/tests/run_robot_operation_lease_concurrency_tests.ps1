@@ -1,10 +1,19 @@
 [CmdletBinding()]
-param()
+param([string]$QtRoot)
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $vsDevCmd = 'C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat'
-$qtRoot = 'E:\workspace\soft\QT\6.7.3\msvc2022_64'
+if ([string]::IsNullOrWhiteSpace($QtRoot)) {
+    $localProps = Join-Path $repo 'environment.local.props'
+    if (Test-Path -LiteralPath $localProps) {
+        [xml]$environmentProps = Get-Content -LiteralPath $localProps -Raw
+        $QtRoot = [string]$environmentProps.Project.PropertyGroup.QtRoot
+    }
+}
+if ([string]::IsNullOrWhiteSpace($QtRoot)) {
+    $QtRoot = 'E:\workspace\soft\QT\6.7.3\msvc2022_64'
+}
 $outputDir = Join-Path $repo 'tmp\RobotOperationLeaseConcurrencyTests'
 $outputExe = Join-Path $outputDir 'RobotOperationLeaseConcurrencyTests.exe'
 
