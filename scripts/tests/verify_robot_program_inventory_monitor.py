@@ -38,7 +38,7 @@ def function_body(text: str, signature: str) -> str:
 
 def main() -> None:
     adaptor_h = read("include/RobotDriverAdaptor.h")
-    adaptor_cpp = read("src/RobotDriverAdaptor.cpp")
+    ftp_bottom = read("src/RobotFtpFileTransfer.cpp")
     step = read("src/StepRobotDriver.cpp")
     fanuc = read("src/FANUCRobotDriver.cpp")
     dialog_h = read("include/MeasureThenWeldDialog.h")
@@ -48,21 +48,25 @@ def main() -> None:
 
     for text in (adaptor_h, app_h):
         require(text, "RobotProgramInventory", "inventory contract must be declared")
-    require(adaptor_h, "BuildProgramInventoryQuery", "drivers must own brand-specific rules")
-    require(adaptor_h, "CountRemoteProgramUnits", "program-unit counting must be shared")
+    require(adaptor_h, "RobotFileTransferSession", "FTP functionality must be an adaptor contract")
+    require(adaptor_h, "CreateFileTransferSession", "drivers must create brand-specific FTP sessions")
+    if "ftpPassword" in adaptor_h or '#include "FTPClient.h"' in adaptor_h:
+        raise AssertionError("adaptor contract must not expose FTP credentials or the FTP transport")
 
-    count = function_body(adaptor_cpp, "RobotDriverAdaptor::CountRemoteProgramUnits")
+    count = function_body(ftp_bottom, "CountProgramUnits")
     require(count, "std::set<std::string> programNames", "same program stem must be deduplicated")
     require(count, "entry.isDirectory", "directories must not be counted as programs")
     require(count, "find_last_of('.')", "counting must use the executable extension")
 
-    step_query = function_body(step, "STEPRobotCtrl::BuildProgramInventoryQuery")
-    require(step_query, "StepBuildRemoteProjectDir(kStepDynamicJobProjectName)", "STEP must inspect PCRobot")
-    require(step_query, '{ ".srp" }', "STEP SRD data files must not double-count")
+    step_query = function_body(step, "STEPRobotCtrl::CreateFileTransferSession")
+    step_profile = function_body(step, "STEPRobotCtrl::FileTransferProfile")
+    require(step_profile, "m_sStepProjectName.empty()", "STEP inventory must use the configured project")
+    require(step_profile, "kStepDynamicJobProjectName", "STEP inventory must fall back to PCRobot")
+    require(step_query, 'std::vector<std::string>{ ".srp" }', "STEP SRD data files must not double-count")
 
-    fanuc_query = function_body(fanuc, "FANUCRobotCtrl::BuildProgramInventoryQuery")
-    require(fanuc_query, '"/md/"', "FANUC must inspect MD")
-    require(fanuc_query, '{ ".tp", ".pc" }', "FANUC executable types must be counted")
+    fanuc_query = function_body(fanuc, "FANUCRobotCtrl::CreateFileTransferSession")
+    require(fanuc, 'profile.defaultRemoteDirectory = "/md"', "FANUC must inspect MD")
+    require(fanuc_query, 'std::vector<std::string>{ ".tp", ".pc" }', "FANUC executable types must be counted")
 
     require(dialog_h, "void WeldFlowCompleted();", "successful workflow signal is missing")
     if dialog_cpp.count("emit self->WeldFlowCompleted();") != 2:
@@ -71,8 +75,7 @@ def main() -> None:
     schedule = function_body(app, "QtWidgetsApplication4::ScheduleRobotProgramInventoryCheck")
     for needle in (
         "std::thread",
-        "ftp.setMessageBoxesEnabled(false)",
-        "ftp.listFiles",
+        "fileTransfer->QueryProgramInventory",
         "programCount <= static_cast<std::size_t>(threshold)",
         "Qt::NonModal",
         "本软件不会自动删除机器人文件",
@@ -80,6 +83,8 @@ def main() -> None:
         require(schedule, needle, "background read-only monitor contract is incomplete")
     if "deleteFile(" in schedule:
         raise AssertionError("inventory monitor must never delete robot files")
+    if "FtpClient" in schedule or "ftpPassword" in schedule:
+        raise AssertionError("inventory monitor must not access the FTP transport or credentials")
 
     require(app, "QTimer::singleShot(8000", "GUI startup check is missing")
     require(app, 'QStringLiteral("程序启动")', "startup trigger must be identified")

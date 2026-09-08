@@ -771,7 +771,7 @@ int RunAuthenticationSemanticVersionGateTest(const QString& scenario)
     return 0;
 }
 
-int RunLegacyDiskInputGateTest()
+int RunLegacyDiskIsolationTest()
 {
     QTemporaryDir temp;
     Check(temp.isValid(), QStringLiteral("legacy disk input gate temp root"));
@@ -791,15 +791,211 @@ int RunLegacyDiskInputGateTest()
                           << QStringLiteral("--data-root") << temp.path(),
             &pathError),
         QStringLiteral("initialize legacy disk gate root: %1").arg(pathError));
-    Check(!ConfigDatabase::IsAvailable(), QStringLiteral("runtime refuses to bypass legacy disk migration"));
-    Check(!ConfigDatabase::IsAvailable(), QStringLiteral("legacy disk gate remains closed after reopen"));
+    Check(ConfigDatabase::IsAvailable(), QStringLiteral("runtime opens database without importing legacy disk configuration"));
+    Check(ConfigDatabase::IsAvailable(), QStringLiteral("database-only runtime remains available after reopen"));
     Check(
-        !QFileInfo::exists(temp.filePath(QStringLiteral("Data/ConfigStore.db"))),
-        QStringLiteral("legacy disk gate does not create an empty ConfigStore"));
+        QFileInfo::exists(temp.filePath(QStringLiteral("Data/ConfigStore.db"))),
+        QStringLiteral("database-only runtime creates ConfigStore independently"));
     QFile sourceAfter(accountsPath);
     Check(sourceAfter.open(QIODevice::ReadOnly), QStringLiteral("reopen legacy disk fixture"));
-    Check(sourceAfter.readAll() == source, QStringLiteral("runtime gate leaves legacy credentials byte-identical"));
-    QTextStream(stdout) << "PASS: runtime requires ConfigMigrate before opening legacy disk configuration" << Qt::endl;
+    Check(sourceAfter.readAll() == source, QStringLiteral("runtime leaves ignored legacy input byte-identical"));
+    QTextStream(stdout) << "PASS: runtime ignores legacy disk configuration and uses ConfigStore only" << Qt::endl;
+    return 0;
+}
+
+int RunDatabaseNativeIdentityGateTest()
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("database-native identity gate temp root"));
+    QString pathError;
+    Check(
+        AppPaths::Initialize(
+            QStringList() << QStringLiteral("CredentialSecurityTests")
+                          << QStringLiteral("--data-root") << temp.path(),
+            &pathError),
+        QStringLiteral("initialize database-native identity root: %1").arg(pathError));
+    Check(ConfigDatabase::IsAvailable(), QStringLiteral("open database-native identity fixture"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotA"),
+            QStringLiteral("RobotPara"), QStringLiteral("RobotType"), QStringLiteral("1")),
+        QStringLiteral("native scoped identity writes successfully"));
+    Check(
+        !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotPara.ini"),
+            QStringLiteral("RobotPara"), QStringLiteral("RobotType"), QStringLiteral("1")),
+        QStringLiteral("configuration filename cannot be a scope id"));
+    Check(
+        !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotA"),
+            QStringLiteral("Data/RobotPara.ini"), QStringLiteral("RobotType"), QStringLiteral("1")),
+        QStringLiteral("configuration filepath cannot be a module"));
+    Check(
+        !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotA"),
+            QStringLiteral("C:\\Data\\RobotPara"), QStringLiteral("RobotType"), QStringLiteral("1")),
+        QStringLiteral("drive path cannot be a module"));
+    Check(
+        !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), QStringLiteral("RobotA"),
+            QStringLiteral("RobotPara"), QStringLiteral("RobotType.ini"), QStringLiteral("1")),
+        QStringLiteral("configuration filename cannot be a key"));
+    QMap<QString, QString> hierarchicalValues;
+    hierarchicalValues.insert(QStringLiteral("General/ProcessingMode"), QStringLiteral("Builtin"));
+    hierarchicalValues.insert(QStringLiteral("External/ResampleStepMm"), QStringLiteral("2.000000"));
+    QString batchError;
+    Check(
+        ConfigDatabase::WriteScopedSettings(
+            QStringLiteral("global"), QString(), QStringLiteral("PointCloudProcessing"),
+            hierarchicalValues, QStringLiteral("string"), &batchError),
+        QStringLiteral("database-native hierarchical batch keys write successfully: %1").arg(batchError));
+    const QMap<QString, QString> storedBatchValues = ConfigDatabase::ReadScopedSettings(
+        QStringLiteral("global"), QString(), QStringLiteral("PointCloudProcessing"));
+    Check(
+        storedBatchValues.value(QStringLiteral("General/ProcessingMode")) == QStringLiteral("Builtin")
+            && storedBatchValues.value(QStringLiteral("External/ResampleStepMm"))
+                == QStringLiteral("2.000000"),
+        QStringLiteral("hierarchical batch key round-trips without changing its identity"));
+    QMap<QString, QString> unsafeHierarchicalValues;
+    unsafeHierarchicalValues.insert(QStringLiteral("External/../ConfigPath"), QStringLiteral("blocked"));
+    Check(
+        !ConfigDatabase::WriteScopedSettings(
+            QStringLiteral("global"), QString(), QStringLiteral("PointCloudProcessing"),
+            unsafeHierarchicalValues, QStringLiteral("string"), &batchError)
+            && batchError.contains(QStringLiteral("External/../ConfigPath")),
+        QStringLiteral("hierarchical batch keys still reject traversal identities with a useful error"));
+    QTextStream(stdout) << "PASS: database APIs reject filesystem-backed configuration identities" << Qt::endl;
+    return 0;
+}
+
+int RunScopedModuleCopyProtectionTest()
+{
+    QTemporaryDir temp;
+    Check(temp.isValid(), QStringLiteral("scoped-module copy temp root"));
+    QString pathError;
+    Check(
+        AppPaths::Initialize(
+            QStringList() << QStringLiteral("CredentialSecurityTests")
+                          << QStringLiteral("--data-root") << temp.path(),
+            &pathError),
+        QStringLiteral("initialize scoped-module copy root: %1").arg(pathError));
+    Check(ConfigDatabase::IsAvailable(), QStringLiteral("open scoped-module copy fixture"));
+
+    const QString templateScope = QStringLiteral("robot_type_template");
+    const QString templateId = QStringLiteral("inovance");
+    const QString robotScope = QStringLiteral("robot");
+    const QString robotId = QStringLiteral("FieldRobot01");
+    const QString baseParam = QStringLiteral("RobotPara/BaseParam");
+    const QString templateMeta = QStringLiteral("RobotPara/TemplateMeta");
+    const QString password = QStringLiteral("Synthetic-Inovance-Template-Password");
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            templateScope, templateId, baseParam,
+            QStringLiteral("FTPPassWord"), password),
+        QStringLiteral("write protected robot-type template password"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            templateScope, templateId, baseParam,
+            QStringLiteral("SocketPort"), QStringLiteral("2222")),
+        QStringLiteral("write robot-type template socket port"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            templateScope, templateId, templateMeta,
+            QStringLiteral("TemplateId"), templateId),
+        QStringLiteral("write robot-type template identity"));
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            robotScope, robotId, QStringLiteral("RobotPara/Legacy"),
+            QStringLiteral("OldBrandOnly"), QStringLiteral("must-be-removed")),
+        QStringLiteral("write stale target-brand setting"));
+
+    Check(
+        ConfigDatabase::CopyScopedModule(
+            templateScope, templateId, QStringLiteral("RobotPara"),
+            robotScope, robotId, QStringLiteral("RobotPara"), true),
+        QStringLiteral("copy independent type template into actual robot scope"));
+
+    QString copiedPassword;
+    QString copiedPort;
+    QString copiedTemplateId;
+    QString ignored;
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            robotScope, robotId, baseParam,
+            QStringLiteral("FTPPassWord"), &copiedPassword)
+            && copiedPassword == password,
+        QStringLiteral("copied password is re-protected and readable in target scope"));
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            robotScope, robotId, baseParam,
+            QStringLiteral("SocketPort"), &copiedPort)
+            && copiedPort == QStringLiteral("2222"),
+        QStringLiteral("copied non-sensitive robot template value"));
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            robotScope, robotId, templateMeta,
+            QStringLiteral("TemplateId"), &copiedTemplateId)
+            && copiedTemplateId == templateId,
+        QStringLiteral("copied template identity"));
+    Check(
+        ConfigDatabase::ReadScopedSettingStatus(
+            robotScope, robotId, QStringLiteral("RobotPara/Legacy"),
+            QStringLiteral("OldBrandOnly"), &ignored)
+            == ConfigDatabase::ReadStatus::NotFound,
+        QStringLiteral("brand replacement removes stale target sections"));
+
+    {
+        const QString connectionName = QStringLiteral("scoped_module_copy_verify");
+        QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+        db.setDatabaseName(temp.filePath(QStringLiteral("Data/ConfigStore.db")));
+        Check(db.open(), QStringLiteral("open copied ciphertext fixture"));
+        QSqlQuery query(db);
+        query.prepare(
+            "SELECT scope_type, value_text, sensitive, encrypted FROM settings "
+            "WHERE module=? AND key_name=? AND ((scope_type=? AND scope_id=?) OR (scope_type=? AND scope_id=?)) "
+            "ORDER BY scope_type");
+        query.addBindValue(baseParam);
+        query.addBindValue(QStringLiteral("FTPPassWord"));
+        query.addBindValue(robotScope);
+        query.addBindValue(robotId);
+        query.addBindValue(templateScope);
+        query.addBindValue(templateId);
+        Check(query.exec(), QStringLiteral("query source and target protected values"));
+        QMap<QString, QString> protectedValues;
+        while (query.next())
+        {
+            Check(query.value(2).toInt() == 1 && query.value(3).toInt() == 1,
+                QStringLiteral("source and target passwords remain protected"));
+            protectedValues.insert(query.value(0).toString(), query.value(1).toString());
+        }
+        Check(protectedValues.size() == 2,
+            QStringLiteral("source and target protected rows exist"));
+        Check(protectedValues.value(templateScope) != protectedValues.value(robotScope),
+            QStringLiteral("scope-bound password ciphertext is re-encrypted for target"));
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(QStringLiteral("scoped_module_copy_verify"));
+
+    Check(
+        ConfigDatabase::WriteScopedSetting(
+            robotScope, robotId, baseParam,
+            QStringLiteral("FTPPassWord"), QStringLiteral("Target-Override")),
+        QStringLiteral("write target-specific override"));
+    Check(
+        ConfigDatabase::CopyScopedModule(
+            templateScope, templateId, QStringLiteral("RobotPara"),
+            robotScope, robotId, QStringLiteral("RobotPara"), false),
+        QStringLiteral("non-overwrite type-template copy"));
+    Check(
+        ConfigDatabase::ReadScopedSetting(
+            robotScope, robotId, baseParam,
+            QStringLiteral("FTPPassWord"), &copiedPassword)
+            && copiedPassword == QStringLiteral("Target-Override"),
+        QStringLiteral("non-overwrite copy preserves target-specific value"));
+
+    QTextStream(stdout)
+        << "PASS: scoped module copy re-encrypts template credentials and preserves overwrite semantics"
+        << Qt::endl;
     return 0;
 }
 
@@ -1931,22 +2127,22 @@ int RunLegacyMigrationRollbackTest(const QString& scenario)
     return 0;
 }
 
-int RunRejectedRuntimeIniTest(const QString& scenario)
+int RunPointCloudIniDatabaseIsolationTest(const QString& scenario)
 {
     QTemporaryDir temp;
-    Check(temp.isValid(), QStringLiteral("runtime INI rejection temp root"));
+    Check(temp.isValid(), QStringLiteral("point-cloud INI isolation temp root"));
     const QString dataDir = temp.filePath(QStringLiteral("Data"));
-    Check(QDir().mkpath(dataDir), QStringLiteral("runtime INI rejection data dir"));
+    Check(QDir().mkpath(dataDir), QStringLiteral("point-cloud INI isolation data dir"));
     const QString dbPath = temp.filePath(QStringLiteral("Data/ConfigStore.db"));
     const QString connectionName = QStringLiteral("runtime_ini_fixture_") + scenario;
     {
         QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
         db.setDatabaseName(dbPath);
-        Check(db.open(), QStringLiteral("open runtime INI rejection fixture"));
+        Check(db.open(), QStringLiteral("open point-cloud INI isolation fixture"));
         CreateSettingsTable(db);
         QSqlQuery query(db);
         Check(query.exec("INSERT INTO meta(key, value) VALUES('schema_version', '4')"),
-            QStringLiteral("write runtime INI schema 4"));
+            QStringLiteral("write point-cloud INI isolation schema 4"));
         InsertFlatLegacyAccount(
             db, QStringLiteral("admin"),
             LegacyPasswordHash(QStringLiteral("admin"), QStringLiteral("Admin-Ini-Test")),
@@ -2026,13 +2222,22 @@ int RunRejectedRuntimeIniTest(const QString& scenario)
     Check(AppPaths::Initialize(
         QStringList() << QStringLiteral("CredentialSecurityTests")
                       << QStringLiteral("--data-root") << temp.path(),
-        &pathError), QStringLiteral("initialize rejected runtime INI root: %1").arg(pathError));
-    Check(!ConfigDatabase::IsAvailable(),
-        QStringLiteral("runtime INI %1 must remain blocked").arg(scenario));
-    Check(FileSha256(dbPath) == before,
-        QStringLiteral("runtime INI %1 leaves schema4 byte-identical").arg(scenario));
-    QTextStream(stdout) << "PASS: runtime INI " << scenario
-        << " remains a blocking legacy input" << Qt::endl;
+        &pathError), QStringLiteral("initialize point-cloud INI isolation root: %1").arg(pathError));
+    Check(ConfigDatabase::IsAvailable(),
+        QStringLiteral("point-cloud INI %1 does not gate database startup").arg(scenario));
+    Check(FileSha256(dbPath) != before,
+        QStringLiteral("point-cloud INI %1 does not block schema upgrade").arg(scenario));
+    QString ignoredValue;
+    Check(
+        ConfigDatabase::ReadScopedSettingStatus(
+            QStringLiteral("global"),
+            QString(),
+            QStringLiteral("PointCloudProcessing"),
+            QStringLiteral("UnexpectedRuntimeKey"),
+            &ignoredValue) == ConfigDatabase::ReadStatus::NotFound,
+        QStringLiteral("point-cloud INI %1 is not imported into ConfigStore").arg(scenario));
+    QTextStream(stdout) << "PASS: point-cloud INI " << scenario
+        << " stays outside ConfigStore" << Qt::endl;
     return 0;
 }
 }
@@ -2082,12 +2287,13 @@ int main(int argc, char* argv[])
     {
         return RunLegacyMigrationRollbackTest(app.arguments().at(legacyRollbackIndex + 1));
     }
-    const int rejectedRuntimeIniIndex = app.arguments().indexOf(
-        QStringLiteral("--rejected-runtime-ini"));
-    if (rejectedRuntimeIniIndex >= 0
-        && rejectedRuntimeIniIndex + 1 < app.arguments().size())
+    const int pointCloudIniIsolationIndex = app.arguments().indexOf(
+        QStringLiteral("--pointcloud-ini-db-isolation"));
+    if (pointCloudIniIsolationIndex >= 0
+        && pointCloudIniIsolationIndex + 1 < app.arguments().size())
     {
-        return RunRejectedRuntimeIniTest(app.arguments().at(rejectedRuntimeIniIndex + 1));
+        return RunPointCloudIniDatabaseIsolationTest(
+            app.arguments().at(pointCloudIniIsolationIndex + 1));
     }
     if (app.arguments().contains(QStringLiteral("--corrupt-dpapi")))
     {
@@ -2113,9 +2319,17 @@ int main(int argc, char* argv[])
         return RunAuthenticationSemanticVersionGateTest(
             app.arguments().at(authenticationSemanticGateIndex + 1));
     }
-    if (app.arguments().contains(QStringLiteral("--legacy-disk-gate")))
+    if (app.arguments().contains(QStringLiteral("--legacy-disk-isolation")))
     {
-        return RunLegacyDiskInputGateTest();
+        return RunLegacyDiskIsolationTest();
+    }
+    if (app.arguments().contains(QStringLiteral("--database-native-identity-gate")))
+    {
+        return RunDatabaseNativeIdentityGateTest();
+    }
+    if (app.arguments().contains(QStringLiteral("--scoped-module-copy-protection")))
+    {
+        return RunScopedModuleCopyProtectionTest();
     }
     if (app.arguments().contains(QStringLiteral("--pending-scrub-gate")))
     {

@@ -6,6 +6,7 @@
 #include "WindowStyleHelper.h"
 #include "BrandingConfig.h"
 #include "PointCloudExtractionProcessor.h"
+#include "PointCloudProcessingConfig.h"
 #include "RobotDriverAdaptor.h"
 
 #include <QDir>
@@ -154,7 +155,7 @@ int main(int argc, char *argv[])
         return PrintAppPathsJson();
     }
     app.setApplicationName(BrandingConfig::ApplicationName());
-    app.setApplicationVersion(QStringLiteral("2026.09.07.2052"));
+    app.setApplicationVersion(QStringLiteral("2026.09.08.2143"));
     app.setOrganizationName("yu1201");
     InstallChineseQtTranslations(app);
     ConfigureApplicationFontFallback();
@@ -172,20 +173,34 @@ int main(int argc, char *argv[])
         }
     }
 
-    // RobotOperationLease 的活动表和 STOP 锁存均为进程内状态。除上面的只读/隔离 worker
-    // 入口外，中性 GUI、品牌 GUI 与 --no-show CLI 必须共享同一个跨进程单实例锁，避免
-    // 第二个进程绕过租约并同时控制实体机器人。
-    QString instanceGuardError;
-    auto instanceGuard = ApplicationInstanceGuard::TryAcquire(
-        ApplicationInstanceGuard::RobotControlScope(), &instanceGuardError);
-    if (!instanceGuard)
+    // 独立互锁在启动时冻结；进程单实例只受其对应开关控制。
+    const bool singleProcessInterlockEnabled =
+        PointCloudProcessingConfig::RuntimeSystemInterlocks().IsEnabled(SystemInterlock::SingleProcess);
+    ApplicationInstanceGuard::Ptr instanceGuard;
+    if (singleProcessInterlockEnabled)
     {
-        QTextStream(stderr) << instanceGuardError << Qt::endl;
+        QString instanceGuardError;
+        instanceGuard = ApplicationInstanceGuard::TryAcquire(
+            ApplicationInstanceGuard::RobotControlScope(), &instanceGuardError);
+        if (!instanceGuard)
+        {
+            QTextStream(stderr) << instanceGuardError << Qt::endl;
+            if (!arguments.contains(QStringLiteral("--no-show")))
+            {
+                QMessageBox::critical(nullptr, QStringLiteral("机器人控制进程互锁"), instanceGuardError);
+            }
+            return 3;
+        }
+    }
+    else
+    {
+        const QString warning = QStringLiteral(
+            "机器人控制进程单实例互锁已关闭：本进程未取得单实例锁。其他系统互锁按各自开关执行。");
+        QTextStream(stderr) << warning << Qt::endl;
         if (!arguments.contains(QStringLiteral("--no-show")))
         {
-            QMessageBox::critical(nullptr, QStringLiteral("机器人控制进程互锁"), instanceGuardError);
+            QMessageBox::warning(nullptr, QStringLiteral("单实例互锁已关闭"), warning);
         }
-        return 3;
     }
 
     // GUI 模式和纯文件离线 CLI：机器人驱动构造不做同步连接。重建先测后焊文件、生成 STEP

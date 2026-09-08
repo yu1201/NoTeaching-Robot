@@ -222,6 +222,7 @@ enum class RecoveryBindingMode
 
 struct ExclusiveRecoveryBinding
 {
+    bool enforceIdentity = true;
     QString token;
     RecoveryBindingMode mode = RecoveryBindingMode::SafeRetreat;
     QString robotScope;

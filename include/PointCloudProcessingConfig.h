@@ -1,6 +1,7 @@
 #pragma once
 
 #include "WeldPoseValidationLimits.h"
+#include "SystemInterlockPolicy.h"
 
 #include <QString>
 
@@ -183,6 +184,9 @@ public:
         double validationMaxFinalSourcePhysicalOrientationDeltaDeg =
             WeldPoseValidationLimits::kMaxSourcePhysicalOrientationDeltaDeg;
         bool validationFinalSemanticIntegrityEnabled = true;
+        // 每项独立选择；保存成功后除进程单实例外立即更新线程安全运行快照。
+        // 进程单实例由 main() 持有系统锁，只能在下次启动时应用。
+        SystemInterlockPolicy systemInterlocks;
         // 系统级流程/运动安全门禁。关闭后对应生产校验会被跳过，
         // 开关状态进入证明快照并由管理员界面持久化。
         bool safetyGateProofIntegrityEnabled = true;
@@ -205,6 +209,7 @@ public:
     static QString DataConfigPath();
     static Settings Load();
     static bool Save(const Settings& settings, QString* error = nullptr);
+    static SystemInterlockPolicy RuntimeSystemInterlocks();
     static bool CoreSafetyGatesEnabled(const Settings& settings);
     static bool HasDisabledCoreSafetyGate(const Settings& settings);
     static void SetRuntimeModeOverride(Mode mode);

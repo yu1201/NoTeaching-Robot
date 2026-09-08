@@ -1,5 +1,6 @@
 #include "PlatformSemanticValidator.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <string>
@@ -91,10 +92,28 @@ int main()
         "drift fit recovers 30 mm platform separation");
 
     std::vector<CandidateKeyPoint> singleBadSlope = MakeCandidate();
+    singleBadSlope[1].x = 1.0;
+    singleBadSlope[1].y = 2.0;
+    singleBadSlope[1].z = 3.0;
+    singleBadSlope[2].x = 4.0;
+    singleBadSlope[2].y = 5.0;
+    singleBadSlope[2].z = 6.0;
     singleBadSlope[2].profile = singleBadSlope[1].profile + 0.2;
     const CandidateCheck badSlope = PlatformSemanticValidator::EvaluateCandidate(
         singleBadSlope, flatSlopeThreshold);
     Expect(!badSlope.valid, "single abnormal slope is rejected");
+    Expect(std::any_of(
+        badSlope.diagnostics.begin(),
+        badSlope.diagnostics.end(),
+        [](const std::string& failure)
+        {
+            return failure.find("raw_index=120->140") != std::string::npos
+                && failure.find("begin_xyz=(1.000,2.000,3.000)") != std::string::npos
+                && failure.find("end_xyz=(4.000,5.000,6.000)") != std::string::npos
+                && failure.find("path=") != std::string::npos
+                && failure.find("profile=") != std::string::npos;
+        }),
+        "abnormal segment log includes indexes, XYZ, path, and profile coordinates");
 
     const CandidateCheck noisyOn = PlatformSemanticValidator::EvaluateCandidate(
         MakeCandidate(2.0), flatSlopeThreshold);

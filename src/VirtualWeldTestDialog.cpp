@@ -191,9 +191,9 @@ QString VirtualWeldTestDialog::CurrentRobotName() const
         }
     }
     RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, m_unitIndex);
-    if (driver != nullptr && !driver->m_sRobotName.empty())
+    if (driver != nullptr && !driver->RobotName().empty())
     {
-        return QString::fromStdString(driver->m_sRobotName);
+        return QString::fromStdString(driver->RobotName());
     }
     return QString();
 }
@@ -372,9 +372,9 @@ RobotDriverAdaptor* VirtualWeldTestDialog::ResolveDriver()
 
 QString VirtualWeldTestDialog::ResolveRobotName(RobotDriverAdaptor* driver) const
 {
-    if (driver != nullptr && !driver->m_sRobotName.empty())
+    if (driver != nullptr && !driver->RobotName().empty())
     {
-        return QString::fromStdString(driver->m_sRobotName);
+        return QString::fromStdString(driver->RobotName());
     }
     if (m_pContralUnit != nullptr
         && m_unitIndex >= 0
@@ -653,7 +653,10 @@ void VirtualWeldTestDialog::OnRunOnRobot()
 
             QString summary;
             QString execError;
-            const auto safetySession = std::make_shared<WeldSafetyRecoverySession>(driver, param);
+            const auto safetySession = std::make_shared<WeldSafetyRecoverySession>(
+                driver,
+                param,
+                MeasureThenWeldService::WeldPoseSource::SyntheticVirtualTest);
             const bool ok = service.ExecuteWeldPoseFileWithSafePos(
                 driver, execPath, param, summary, execError,
                 nullptr, nullptr, appendLog, setFlowStep, checkpoint, pointStepMm,

@@ -3,6 +3,7 @@
 #include <QString>
 #include "WeldResumePlanner.h"
 #include "RobotRecoverySafetyPolicy.h"
+#include "SystemInterlockPolicy.h"
 
 #include <cstdint>
 #include <memory>
@@ -12,11 +13,21 @@
 #include <string>
 
 // 独立并发 smoke 只需要端点字段，避免为小测试链接完整机器人 SDK。
+struct RobotConnectionEndpoint
+{
+    std::string host;
+    int port = 0;
+};
+
 class RobotDriverAdaptor final
 {
 public:
     std::string m_sSocketIP;
     int m_nSocketPort = 0;
+    RobotConnectionEndpoint ControlEndpoint() const
+    {
+        return RobotConnectionEndpoint{ m_sSocketIP, m_nSocketPort };
+    }
     bool AbortCurrentProgramSafely() { return false; }
 };
 #else
@@ -62,6 +73,9 @@ public:
         bool allowed,
         const QString& blockedReason = QString());
     static bool NewOperationsAllowed();
+#if defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    static void SetSystemInterlockForTest(SystemInterlock gate, bool enabled);
+#endif
     // 临时阻止新操作的独立 token。释放 token 只移除自己的阻塞，不会把账号会话等
     // 其他 owner 设置的全局禁止误改为允许。
     using NewOperationBlockToken = std::uint64_t;

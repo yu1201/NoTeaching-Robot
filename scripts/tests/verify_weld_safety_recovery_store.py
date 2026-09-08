@@ -16,8 +16,8 @@ def require(condition: bool, message: str) -> None:
 
 
 require("enum class ReadStatus" in HEADER, "ConfigStore reads do not distinguish missing from error")
-require("ReadIniValueStatus" in HEADER and "ReadScopedSettingStatus" in HEADER,
-        "tri-state read APIs are missing")
+require("ReadScopedSettingStatus" in HEADER and "ReadIniValueStatus" not in HEADER,
+        "database-native tri-state read API is missing or path compatibility remains")
 require("query.lastError().isValid()" in DATABASE
         and "QTWIDGETSAPP4_TEST_CONFIG_CURSOR_ERROR" in DATABASE,
         "single-value cursor failures can still collapse to NotFound")

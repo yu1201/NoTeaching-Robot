@@ -1,4 +1,5 @@
 #include "RobotDriverAdaptor.h"
+#include "RobotAxisUnitValidation.h"
 
 #include <algorithm>
 #include <cctype>
@@ -88,7 +89,6 @@ RobotDriverAdaptor::RobotDriverAdaptor(std::string sRobotName,RobotLog* pRobotLo
     : m_nExternalAxleType(0),
     m_nRobotAxisCount(6),
     m_pRobotLog(pRobotLog), // 初始化日志：指定路径+控制台输出
-    m_pFTP(nullptr),
     m_stateMonitorRunning(false),
     m_stateMonitorNextSequence(0)
 {
@@ -332,59 +332,92 @@ std::vector<T_ROBOT_MOVE_INFO> RobotDriverAdaptor::ApplyWeaveSpeedCompensation(
 RobotDriverAdaptor::~RobotDriverAdaptor()
 {
     StopStateMonitor();
-    if (m_pFTP != nullptr)
-    {
-        delete m_pFTP;
-        m_pFTP = nullptr;
-    }
     m_pRobotLog->write(LogColor::DEFAULT, "RobotDriverAdaptor 析构完成");
 }
 
-std::size_t RobotDriverAdaptor::CountRemoteProgramUnits(
-    const std::vector<FtpRemoteFileInfo>& entries,
-    const std::vector<std::string>& programExtensions)
+const std::string& RobotDriverAdaptor::RobotName() const noexcept
 {
-    auto lower = [](std::string text)
-        {
-            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch)
-                { return static_cast<char>(std::tolower(ch)); });
-            return text;
-        };
+    return m_sRobotName;
+}
 
-    std::set<std::string> normalizedExtensions;
-    for (std::string extension : programExtensions)
+const std::string& RobotDriverAdaptor::CustomName() const noexcept
+{
+    return m_sCustomName;
+}
+
+int RobotDriverAdaptor::RobotType() const noexcept
+{
+    return m_nRobotType;
+}
+
+int RobotDriverAdaptor::ExternalAxleType() const noexcept
+{
+    return m_nExternalAxleType;
+}
+
+int RobotDriverAdaptor::RobotAxisCount() const noexcept
+{
+    return m_nRobotAxisCount;
+}
+
+E_ROBOT_BRAND RobotDriverAdaptor::RobotBrand() const noexcept
+{
+    return m_eRobotBrand;
+}
+
+const T_KINEMATICS& RobotDriverAdaptor::KinematicsParameters() const noexcept
+{
+    return m_tKinematics;
+}
+
+const T_AXISUNIT& RobotDriverAdaptor::AxisUnit() const noexcept
+{
+    return m_tAxisUnit;
+}
+
+const T_AXISLIMITANGLE& RobotDriverAdaptor::AxisLimitAngles() const noexcept
+{
+    return m_tAxisLimitAngle;
+}
+
+const T_ROBOT_TOOLS& RobotDriverAdaptor::Tools() const noexcept
+{
+    return m_tTools;
+}
+
+const T_ROBOT_COORS& RobotDriverAdaptor::FirstTool() const noexcept
+{
+    return m_tFirstTool;
+}
+
+const T_ANGLE_PULSE& RobotDriverAdaptor::HomePulse() const noexcept
+{
+    return m_tHomePulse;
+}
+
+void RobotDriverAdaptor::SetConfiguredGunTool(const T_ROBOT_COORS& tool)
+{
+    m_tTools.tGunTool = tool;
+}
+
+bool RobotDriverAdaptor::HasLogSink() const noexcept
+{
+    return m_pRobotLog != nullptr;
+}
+
+void RobotDriverAdaptor::WriteLog(LogColor color, const char* format, ...) const
+{
+    if (m_pRobotLog == nullptr || format == nullptr)
     {
-        extension = lower(extension);
-        if (!extension.empty() && extension.front() != '.')
-        {
-            extension.insert(extension.begin(), '.');
-        }
-        if (extension.size() > 1)
-        {
-            normalizedExtensions.insert(extension);
-        }
+        return;
     }
 
-    std::set<std::string> programNames;
-    for (const FtpRemoteFileInfo& entry : entries)
-    {
-        if (entry.isDirectory || entry.name.empty())
-        {
-            continue;
-        }
-        const std::string normalizedName = lower(entry.name);
-        const std::size_t dot = normalizedName.find_last_of('.');
-        if (dot == std::string::npos || dot == 0 || dot + 1 >= normalizedName.size())
-        {
-            continue;
-        }
-        if (normalizedExtensions.find(normalizedName.substr(dot)) == normalizedExtensions.end())
-        {
-            continue;
-        }
-        programNames.insert(normalizedName.substr(0, dot));
-    }
-    return programNames.size();
+    char message[4096] = {};
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    m_pRobotLog->write(color, "%s", message);
 }
 
 bool RobotDriverAdaptor::Supports(RobotDriverCapability capability) const
@@ -421,7 +454,7 @@ std::string RobotDriverAdaptor::MissingCapabilitiesText(std::uint64_t requiredMa
 {
     std::ostringstream stream;
     bool first = true;
-	for (unsigned int bitIndex = 0; bitIndex <= 26; ++bitIndex)
+	for (unsigned int bitIndex = 0; bitIndex <= RobotDriverCapabilityMaxBitIndex; ++bitIndex)
     {
 		const RobotDriverCapability capability = static_cast<RobotDriverCapability>(1ULL << bitIndex);
 		if ((requiredMask & RobotDriverCapabilityBit(capability)) == 0)
@@ -462,17 +495,24 @@ const char* RobotDriverAdaptor::CapabilityDisplayName(RobotDriverCapability capa
     case RobotDriverCapability::VerifiedSafeAbort: return "安全中止见证";
     case RobotDriverCapability::ActualArcWeld: return "真实起弧焊接";
     case RobotDriverCapability::ExternalAxis: return "外部轴";
-    case RobotDriverCapability::HandEyeProgramSupport: return "手眼辅助程序";
+    case RobotDriverCapability::HandEyeProgramSupport: return "机器人侧手眼验证";
     case RobotDriverCapability::OfflineTrajectoryExport: return "离线轨迹导出";
     case RobotDriverCapability::ConnectionControl: return "连接控制";
     case RobotDriverCapability::AlarmReset: return "报警复位";
-    case RobotDriverCapability::ServoPowerControl: return "伺服上电";
+    case RobotDriverCapability::ServoPowerControl: return "伺服上下电";
     case RobotDriverCapability::ToolDataRead: return "工具数据读取";
     case RobotDriverCapability::IntegerRegister: return "整数寄存器";
     case RobotDriverCapability::TeachPendantSpeedControl: return "示教速度设置";
     case RobotDriverCapability::NativeProgramExecution: return "受验证原生程序执行";
     case RobotDriverCapability::FtpFileTransfer: return "FTP文件传输";
     case RobotDriverCapability::HandEyeMatrixRead: return "机器人手眼矩阵读取";
+    case RobotDriverCapability::HandEyeSupportProgramInstall: return "手眼辅助程序安装";
+    case RobotDriverCapability::CircularMotion: return "圆弧运动";
+    case RobotDriverCapability::RealRegister: return "实数寄存器";
+    case RobotDriverCapability::StructuredControllerStatus: return "结构化控制器状态";
+    case RobotDriverCapability::ControllerKinematicsRead: return "控制器运动学读取";
+    case RobotDriverCapability::ControllerKinematicsCalculate: return "控制器正逆解计算（不运动）";
+    case RobotDriverCapability::CalibrationAssetDiscovery: return "标定资产只读发现";
     case RobotDriverCapability::None: return "无";
     default: return "未知适配能力";
     }
@@ -481,6 +521,52 @@ const char* RobotDriverAdaptor::CapabilityDisplayName(RobotDriverCapability capa
 bool RobotDriverAdaptor::InitRobotDriver(std::string strUnitName)
 {
     return false;
+}
+
+bool RobotDriverAdaptor::RefreshKinematicsFromController(
+    RobotKinematicsValidationResult& result)
+{
+    result = {};
+    SetLastRobotError("当前机器人品牌未实现控制器运动学资产读取。");
+    return false;
+}
+
+bool RobotDriverAdaptor::InstallValidatedKinematicsModel(
+    const T_KINEMATICS& kinematics,
+    const T_AXISUNIT& axisUnit,
+    const T_AXISLIMITANGLE& axisLimits,
+    std::string* error)
+{
+    const double* dh = reinterpret_cast<const double*>(&kinematics);
+    for (int index = 0; index < 24; ++index)
+    {
+        if (!std::isfinite(dh[index]))
+        {
+            if (error != nullptr) { *error = "运动学模型包含NaN或无穷值。"; }
+            return false;
+        }
+    }
+    const double units[6] = {
+        axisUnit.dSPulseUnit, axisUnit.dLPulseUnit, axisUnit.dUPulseUnit,
+        axisUnit.dRPulseUnit, axisUnit.dBPulseUnit, axisUnit.dTPulseUnit
+    };
+    for (int axis = 0; axis < 6; ++axis)
+    {
+        if (!std::isfinite(units[axis]) || std::abs(units[axis]) < 1e-15
+            || !std::isfinite(axisLimits.GetMinAngleByIndex(axis))
+            || !std::isfinite(axisLimits.GetMaxAngleByIndex(axis))
+            || axisLimits.GetMinAngleByIndex(axis) >= axisLimits.GetMaxAngleByIndex(axis))
+        {
+            if (error != nullptr) { *error = "运动学轴单位或关节限位无效。"; }
+            return false;
+        }
+    }
+    m_tKinematics = kinematics;
+    m_tAxisUnit = axisUnit;
+    m_tAxisLimitAngle = axisLimits;
+    CreateKinematicsChain();
+    if (error != nullptr) { error->clear(); }
+    return true;
 }
 // ===================== 核心函数：创建 FANUC 6 轴机器人链 =====================
 void RobotDriverAdaptor::CreateKinematicsChain()
@@ -884,8 +970,8 @@ void RobotDriverAdaptor::JointAngleToPulse(const std::vector<double>& joint_angl
 
 void RobotDriverAdaptor::LoadRobotKinematicsPara(std::string strRobotName, T_KINEMATICS& tKinematics, T_AXISUNIT& tAxisUnit, T_AXISLIMITANGLE& tAxisLimitAngle)
 {
-    COPini opini;
-    opini.SetFileName(DATA_PATH + strRobotName + ROBOT_PARA_INI);
+    ConfigSection opini;
+    opini.SetLocation(ConfigLocation::Robot(QString::fromUtf8(strRobotName.c_str()), QStringLiteral("RobotPara")));
     opini.SetSectionName("Kinematics");
     opini.ReadString("dA1", &tKinematics.dA1);
     opini.ReadString("dAL1", &tKinematics.dAL1);
@@ -917,26 +1003,20 @@ void RobotDriverAdaptor::LoadRobotKinematicsPara(std::string strRobotName, T_KIN
     opini.ReadString("dD6", &tKinematics.dD6);
     opini.ReadString("dTH6", &tKinematics.dTH6);
 
-    double dAngle = 0;
-    double dPulse = 0;
-    opini.ReadString("dSAngle", &dAngle);
-    opini.ReadString("dSPulse", &dPulse);
-    tAxisUnit.dSPulseUnit = dAngle / dPulse;
-    opini.ReadString("dLAngle", &dAngle);
-    opini.ReadString("dLPulse", &dPulse);
-    tAxisUnit.dLPulseUnit = dAngle / dPulse;
-    opini.ReadString("dUAngle", &dAngle);
-    opini.ReadString("dUPulse", &dPulse);
-    tAxisUnit.dUPulseUnit = dAngle / dPulse;
-    opini.ReadString("dRAngle", &dAngle);
-    opini.ReadString("dRPulse", &dPulse);
-    tAxisUnit.dRPulseUnit = dAngle / dPulse;
-    opini.ReadString("dBAngle", &dAngle);
-    opini.ReadString("dBPulse", &dPulse);
-    tAxisUnit.dBPulseUnit = dAngle / dPulse;
-    opini.ReadString("dTAngle", &dAngle);
-    opini.ReadString("dTPulse", &dPulse);
-    tAxisUnit.dTPulseUnit = dAngle / dPulse;
+    const auto readAxisUnit = [&opini](const char* angleKey, const char* pulseKey)
+    {
+        double angle = 0.0;
+        double pulse = 0.0;
+        const bool angleRead = opini.ReadString(false, angleKey, &angle) > 0;
+        const bool pulseRead = opini.ReadString(false, pulseKey, &pulse) > 0;
+        return RobotAxisUnitValidation::FromCalibration(angleRead, angle, pulseRead, pulse);
+    };
+    tAxisUnit.dSPulseUnit = readAxisUnit("dSAngle", "dSPulse");
+    tAxisUnit.dLPulseUnit = readAxisUnit("dLAngle", "dLPulse");
+    tAxisUnit.dUPulseUnit = readAxisUnit("dUAngle", "dUPulse");
+    tAxisUnit.dRPulseUnit = readAxisUnit("dRAngle", "dRPulse");
+    tAxisUnit.dBPulseUnit = readAxisUnit("dBAngle", "dBPulse");
+    tAxisUnit.dTPulseUnit = readAxisUnit("dTAngle", "dTPulse");
 
     auto readLimitPair = [&opini](const char* maxKey, const char* minKey,
         const char* altMaxKey, const char* altMinKey,
@@ -962,8 +1042,8 @@ void RobotDriverAdaptor::LoadRobotKinematicsPara(std::string strRobotName, T_KIN
 
 void RobotDriverAdaptor::LoadRobotExternalAxlePara(std::string strRobotName)
 {
-    COPini opini;
-    opini.SetFileName(DATA_PATH + strRobotName + ROBOT_PARA_INI);
+    ConfigSection opini;
+    opini.SetLocation(ConfigLocation::Robot(QString::fromUtf8(strRobotName.c_str()), QStringLiteral("RobotPara")));
     opini.SetSectionName("ExternalAxle");
 
     m_nExternalAxleType = 0;
@@ -991,16 +1071,6 @@ int RobotDriverAdaptor::CalculateRobotAxisCountByExternalAxleType(int externalAx
     return 6 + externalAxisCount;
 }
 
-bool RobotDriverAdaptor::InitSocket(const char* ip, unsigned short Port, bool ifRecord)
-{
-    return false;
-}
-
-bool RobotDriverAdaptor::CloseSocket()
-{
-    return true;
-}
-
 bool RobotDriverAdaptor::IsConnected()
 {
     return false;
@@ -1012,6 +1082,11 @@ bool RobotDriverAdaptor::cleanAlarm()
 }
 
 bool RobotDriverAdaptor::ServoOn()
+{
+    return false;
+}
+
+bool RobotDriverAdaptor::ServoOff()
 {
     return false;
 }
@@ -1260,7 +1335,10 @@ void RobotDriverAdaptor::StateMonitorWorker(int intervalMs)
 
             snapshot.pose = GetCurrentPosPassive(&poseRobotMs, &posePcRecvMs);
             snapshot.pulse = GetCurrentPulsePassive(&pulseRobotMs, &pulsePcRecvMs);
-            snapshot.done = CheckDonePassive(&doneRobotMs, &donePcRecvMs);
+            snapshot.motion = ReadMotionStatusPassive(&doneRobotMs, &donePcRecvMs);
+            snapshot.done = (snapshot.motion.state == RobotMotionState::Idle
+                || snapshot.motion.state == RobotMotionState::Completed) ? 1
+                : (snapshot.motion.state == RobotMotionState::Unknown ? -1 : 0);
 			const long long validationNowMs = RobotDriverSteadyMs();
 
 			// 位姿样本的两条时间轴必须来自同一次位姿读取。done或本机now只能描述
@@ -1307,31 +1385,6 @@ int RobotDriverAdaptor::CheckRobotDone(int nDelayTime, int runTimeoutMs)
     (void)nDelayTime;
     (void)runTimeoutMs;
     return CheckDone();
-}
-
-bool RobotDriverAdaptor::CallJob(std::string sJobName)
-{
-    (void)sJobName;
-    return false;
-}
-
-int RobotDriverAdaptor::InitFtp()
-{
-    return -1;
-}
-
-int RobotDriverAdaptor::UploadFile(std::string LocalFilePath, std::string RemoteFilePath)
-{
-    (void)LocalFilePath;
-    (void)RemoteFilePath;
-    return -1;
-}
-
-int RobotDriverAdaptor::DownloadFile(std::string RemoteFilePath, std::string LocalFilePath)
-{
-    (void)RemoteFilePath;
-    (void)LocalFilePath;
-    return -1;
 }
 
 bool RobotDriverAdaptor::SetTpSpeed(int speed)
@@ -1381,6 +1434,15 @@ bool RobotDriverAdaptor::SetRealVar(int nIndex, double value, const char* cStrPr
     return false;
 }
 
+bool RobotDriverAdaptor::TryGetRealVar(int nIndex, double& value, const char* cStrPreFix, int score)
+{
+    (void)nIndex;
+    (void)value;
+    (void)cStrPreFix;
+    (void)score;
+    return false;
+}
+
 int RobotDriverAdaptor::GetPosVar(long lPvarIndex, double array[6], int config[7], int MoveType)
 {
     (void)lPvarIndex;
@@ -1401,36 +1463,5 @@ bool RobotDriverAdaptor::GetHandEyeMatrixVariable(const char* variableName, doub
     {
         *error = message;
     }
-    return false;
-}
-
-bool RobotDriverAdaptor::MoveByJob(T_ROBOT_COORS tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName, int isconfig, int config[7])
-{
-    (void)tRobotJointCoord;
-    (void)tPulseMove;
-    (void)nExternalAxleType;
-    (void)JobName;
-    (void)isconfig;
-    (void)config;
-    return false;
-}
-
-bool RobotDriverAdaptor::MoveByJob(T_ANGLE_PULSE tRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, std::string JobName)
-{
-    (void)tRobotJointCoord;
-    (void)tPulseMove;
-    (void)nExternalAxleType;
-    (void)JobName;
-    return false;
-}
-
-bool RobotDriverAdaptor::MoveByJob(double* dRobotJointCoord, T_ROBOT_MOVE_SPEED tPulseMove, int nExternalAxleType, int nPVarType, std::string JobName, int config[7])
-{
-    (void)dRobotJointCoord;
-    (void)tPulseMove;
-    (void)nExternalAxleType;
-    (void)nPVarType;
-    (void)JobName;
-    (void)config;
     return false;
 }

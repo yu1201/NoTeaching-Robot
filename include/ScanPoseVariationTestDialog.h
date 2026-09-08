@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ConfigSection.h"
+
 #include "Const.h"
 #include "MeasureThenWeldService.h"
 
@@ -10,6 +12,7 @@
 
 class CameraFrameCache;
 class ContralUnit;
+class ScanPoseLaserLineLiveView;
 class QComboBox;
 class QLabel;
 class QDoubleSpinBox;
@@ -40,13 +43,13 @@ public:
 private:
     RobotDriverAdaptor* ResolveDriver(bool showMessage = true) const;
     QString RobotName(RobotDriverAdaptor* driver = nullptr) const;
-    QString ConfigPath() const;
-    QString SelectionConfigPath() const;
+    ConfigLocation TestConfig() const;
+    ConfigLocation SelectionConfig() const;
     QString CurrentCameraSection() const;
     void LoadRobotList(int initialUnitIndex);
     void LoadCameraList(const QString& preferredSection = QString());
     void ChangeRobot(int comboIndex);
-    void RefreshLiveImage();
+    void RefreshLivePreview();
     bool SaveSelection(QString* error = nullptr) const;
     bool LoadConfiguration(QString* error = nullptr);
     bool SaveConfiguration(QString* error = nullptr) const;
@@ -57,10 +60,13 @@ private:
     void TeachEndPose();
     void GeneratePreview();
     void RunScan();
+    void RunStraightCurveSimulation();
     void AppendLog(const QString& text);
     void UpdateStatusLabels();
     void SetRunning(bool running);
+    void RefreshStraightCurveSource();
     MeasureThenWeldService::ScanPoseVariationParams CurrentParams() const;
+    MeasureThenWeldService::ScanPostProcessMode CurrentPostProcessMode() const;
 
     ContralUnit* m_controlUnit = nullptr;
     int m_unitIndex = 0;
@@ -68,8 +74,10 @@ private:
     StartCameraFunc m_startCamera;
     CameraCacheFunc m_cameraCacheForUnit;
     bool m_running = false;
+    bool m_curveSimulationRunning = false;
     bool m_loadingSelectors = false;
     qint64 m_lastImageTimestamp = 0;
+    qint64 m_lastPointCloudTimestamp = 0;
 
     bool m_hasBasePose = false;
     bool m_hasStartPose = false;
@@ -85,6 +93,7 @@ private:
     QLabel* m_endLabel = nullptr;
     QComboBox* m_robotCombo = nullptr;
     QComboBox* m_cameraCombo = nullptr;
+    QComboBox* m_postProcessCombo = nullptr;
     QDoubleSpinBox* m_scanSpeedSpin = nullptr;
     QDoubleSpinBox* m_lowPlatformSpin = nullptr;
     QDoubleSpinBox* m_risingSpin = nullptr;
@@ -99,8 +108,12 @@ private:
     QPushButton* m_teachEndButton = nullptr;
     QPushButton* m_generateButton = nullptr;
     QPushButton* m_runButton = nullptr;
+    QPushButton* m_simulateCurveButton = nullptr;
+    ScanPoseLaserLineLiveView* m_livePointCloudView = nullptr;
+    QLabel* m_livePointCloudStatusLabel = nullptr;
     QLabel* m_liveImageLabel = nullptr;
     QLabel* m_liveImageStatusLabel = nullptr;
-    QTimer* m_liveImageTimer = nullptr;
+    QTimer* m_livePreviewTimer = nullptr;
     QPlainTextEdit* m_logEdit = nullptr;
+    QString m_lastStraightCurvePath;
 };

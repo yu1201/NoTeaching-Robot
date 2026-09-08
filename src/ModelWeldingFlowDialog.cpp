@@ -982,7 +982,7 @@ void ModelWeldingFlowDialog::LoadRobots()
             if (isInitialUnit) initialUnitRejection = reason;
             continue;
         }
-        if (robot.robotType < 0 || robot.robotType != driver->m_nRobotType)
+        if (robot.robotType < 0 || robot.robotType != driver->RobotType())
         {
             const QString reason = QStringLiteral("%1：控制单元机器人类型与驱动不一致")
                 .arg(robot.displayName);
@@ -1002,7 +1002,7 @@ void ModelWeldingFlowDialog::LoadRobots()
         RobotModelCatalogStore::Eligibility eligibility;
         QString eligibilityError;
         if (!RobotModelCatalogStore::ResolveModelEligibility(
-                modelId, driver->m_nRobotType, eligibility, eligibilityError)
+                modelId, driver->RobotType(), eligibility, eligibilityError)
             || !eligibility.eligible)
         {
             const QString reason = !eligibilityError.trimmed().isEmpty()
@@ -2087,7 +2087,7 @@ void ModelWeldingFlowDialog::LoadCurrentRobotCatalogModel(bool reportErrors)
     {
         error = QStringLiteral("当前控制单元未设置机器人型号。");
     }
-    else if (configuredRobotType < 0 || configuredRobotType != driver->m_nRobotType)
+    else if (configuredRobotType < 0 || configuredRobotType != driver->RobotType())
     {
         error = QStringLiteral("当前控制单元机器人类型与实际驱动不一致。");
     }
@@ -2095,7 +2095,7 @@ void ModelWeldingFlowDialog::LoadCurrentRobotCatalogModel(bool reportErrors)
     RobotModelCatalogStore::Eligibility eligibility;
     if (error.isEmpty()
         && !RobotModelCatalogStore::ResolveModelEligibility(
-            modelId, driver->m_nRobotType, eligibility, error))
+            modelId, driver->RobotType(), eligibility, error))
     {
         if (error.trimmed().isEmpty())
         {
@@ -2582,14 +2582,14 @@ void ModelWeldingFlowDialog::CheckProductionReadiness()
         robotModelError = QStringLiteral("当前控制单元未设置机器人型号。");
     }
     else if (robotModelError.isEmpty()
-        && (configuredRobotType < 0 || configuredRobotType != driver->m_nRobotType))
+        && (configuredRobotType < 0 || configuredRobotType != driver->RobotType()))
     {
         robotModelError = QStringLiteral("当前控制单元机器人类型与实际驱动不一致。");
     }
     else if (robotModelError.isEmpty()
         && !RobotModelCatalogStore::ResolveModelEligibility(
                  currentRobotModelId,
-                 driver->m_nRobotType,
+                 driver->RobotType(),
                  robotEligibility,
                  robotModelError))
     {
@@ -2838,7 +2838,7 @@ bool ModelWeldingFlowDialog::ReadCurrentRobotModelIdentity(
         error = QStringLiteral("当前控制单元未设置机器人型号。");
         return false;
     }
-    if (configuredRobotType < 0 || configuredRobotType != driver->m_nRobotType)
+    if (configuredRobotType < 0 || configuredRobotType != driver->RobotType())
     {
         error = QStringLiteral("当前控制单元机器人类型与实际驱动不一致。");
         return false;
@@ -2852,7 +2852,7 @@ bool ModelWeldingFlowDialog::ReadCurrentRobotModelIdentity(
 
     RobotModelCatalogStore::Eligibility eligibility;
     if (!RobotModelCatalogStore::ResolveModelEligibility(
-            configuredModelId, driver->m_nRobotType, eligibility, error))
+            configuredModelId, driver->RobotType(), eligibility, error))
     {
         if (error.trimmed().isEmpty())
         {
@@ -2941,6 +2941,12 @@ bool ModelWeldingFlowDialog::ReadCurrentRuntimeIdentity(
         robotName, cameraSection, firstHandEye, &error, nullptr))
     {
         error = QStringLiteral("手眼参数未达到运动使用条件：%1").arg(error);
+        return false;
+    }
+    if (!ValidateControllerBoundHandEyeMatrix(
+        robotName, cameraSection, firstHandEye, driver, &error))
+    {
+        error = QStringLiteral("控制器导入手眼矩阵绑定失效：%1").arg(error);
         return false;
     }
     const QString firstHandEyeSha256 =

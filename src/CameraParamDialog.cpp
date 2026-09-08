@@ -4,7 +4,7 @@
 #include "HandEyeCalibrationDialog.h"
 #include "HandEyeMatrixConfig.h"
 #include "HandEyeMatrixDialog.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "RobotDataHelper.h"
 #include "WindowStyleHelper.h"
 
@@ -27,29 +27,28 @@
 
 namespace
 {
-    std::string ToIniBytes(const QString& text)
+    std::string ToConfigBytes(const QString& text)
     {
         return text.toUtf8().toStdString();
     }
 
     bool WriteRobotSetupReadyFlag(const QString& robotName, const QString& key, QString* error = nullptr)
     {
-        const QString path = RobotDataHelper::BuildProjectPath(QString("Data/%1/RobotPara.ini").arg(robotName));
-        COPini ini;
-        if (!ini.SetFileName(false, ToIniBytes(path)))
+        ConfigSection ini;
+        if (!ini.SetLocation(ConfigLocation::Robot(robotName, QStringLiteral("RobotPara"))))
         {
             if (error != nullptr)
             {
-                *error = QString("打开机器人参数数据失败：%1").arg(path);
+                *error = QString("机器人参数数据库位置无效：%1").arg(robotName);
             }
             return false;
         }
         ini.SetSectionName("SetupStatus");
-        if (!ini.WriteString(ToIniBytes(key), 1))
+        if (!ini.WriteString(ToConfigBytes(key), 1))
         {
             if (error != nullptr)
             {
-                *error = QString("写入设置完成状态失败：%1 [%2]").arg(path, key);
+                *error = QString("写入设置完成状态失败：%1 [%2]").arg(robotName, key);
             }
             return false;
         }
@@ -231,16 +230,16 @@ void CameraParamDialog::UpdateCurrentCameraInfo()
 {
     const QString robotName = CurrentRobotName();
     QString error;
-    QString filePath;
-    if (!EnsureHandEyeMatrixIni(robotName, CurrentCameraSection(), &error, &filePath))
+    QString storageLabel;
+    if (!EnsureHandEyeMatrixConfig(robotName, CurrentCameraSection(), &error, &storageLabel))
     {
         m_pPathLabel->setText("手眼参数数据：创建失败");
         AppendLog("手眼矩阵参数准备失败：" + error);
         return;
     }
 
-    m_pPathLabel->setText(QString("手眼参数数据：%1").arg(filePath));
-    m_pCameraPathLabel->setText(QString("相机参数数据：%1").arg(RobotDataHelper::CameraParamPath(robotName)));
+    m_pPathLabel->setText(QString("手眼参数数据库：%1").arg(storageLabel));
+    m_pCameraPathLabel->setText(QString("相机参数数据库：robot/%1/CameraParam").arg(robotName));
     if (m_pCameraSectionLabel != nullptr)
     {
         m_pCameraSectionLabel->setText(QString("当前分组：%1").arg(CurrentCameraSection()));

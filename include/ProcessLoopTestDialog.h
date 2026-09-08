@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ConfigSection.h"
+
 #include <QDialog>
 #include <QString>
 #include <QList>
@@ -104,7 +106,7 @@ private:
     void ReloadSelectorsForCurrentUnit();     // 单元切换/打开时装载四个选择器
     void LoadParamGroupCombo();               // 位置类型（MeasureWeldGroups UseGroupNo）
     void LoadProcessCombo();                  // 焊接工艺（WeldProcessFile UseWeldParaNo）
-    void LoadCompCombo(QComboBox* combo, const QString& path, const QString& allSection,
+    void LoadCompCombo(QComboBox* combo, const ConfigLocation& location, const QString& allSection,
         const QString& rowCountKey, const QString& groupCountKey,
         const QString& activeKey, const QString& groupSectionPrefix,
         const QString& defaultNamePrefix);    // 姿态/焊道补偿组通用装载
