@@ -8,17 +8,24 @@ class RobotLog;
 
 struct RobotDriverSetupProfile
 {
-    const char* templateUnitName = "";
+    // Stable database identity for the brand template.  This must never be a
+    // real control-unit name (RobotA/RobotB/RobotC, etc.).
+    const char* templateId = "";
     int defaultSocketPort = 0;
     int defaultMonitorPort = 0;
     bool usesMonitorPort = false;
     int defaultFtpPort = 21;
+    const char* defaultFtpHost = "";
     const char* defaultFtpUser = "";
+    const char* defaultFtpPassword = "";
     bool usesControllerProject = false;
     const char* defaultControllerProject = "";
     const char* remoteProgramRoot = "";
     bool appendProjectSrDirectory = false;
     const char* localJobSubdirectory = "";
+    // Offline configuration metadata; runtime sampling still checks the adaptor capability.
+    bool supportsRobotTimestamp = false;
+    bool usesStepTimestampInterface = false;
 };
 
 struct RobotDriverRegistration

@@ -307,6 +307,14 @@ CandidateCheck EvaluateCandidate(
         if (!IsFinite(pathDelta) || !IsFinite(profileDelta))
         {
             check.failures.push_back("non-finite corner segment");
+            check.diagnostics.push_back(
+                "raw_index=" + std::to_string(begin.rawIndex) + "->"
+                + std::to_string(end.rawIndex)
+                + ", begin_xyz=(" + FormatDouble(begin.x) + ","
+                + FormatDouble(begin.y) + "," + FormatDouble(begin.z) + ")"
+                + ", end_xyz=(" + FormatDouble(end.x) + ","
+                + FormatDouble(end.y) + "," + FormatDouble(end.z) + ")"
+                + ", non-finite corner segment");
             continue;
         }
         const double slope = std::abs(pathDelta) > kEpsilon
@@ -336,11 +344,32 @@ CandidateCheck EvaluateCandidate(
                 + std::to_string(end.rawIndex) + ", topology="
                 + (topologyIsSlope ? "slope" : "platform")
                 + ", geometric_slope=" + FormatDouble(slope, 4));
+            check.diagnostics.push_back(
+                "raw_index=" + std::to_string(begin.rawIndex) + "->"
+                + std::to_string(end.rawIndex)
+                + ", begin_xyz=(" + FormatDouble(begin.x) + ","
+                + FormatDouble(begin.y) + "," + FormatDouble(begin.z) + ")"
+                + ", end_xyz=(" + FormatDouble(end.x) + ","
+                + FormatDouble(end.y) + "," + FormatDouble(end.z) + ")"
+                + ", path=" + FormatDouble(begin.path) + "->"
+                + FormatDouble(end.path)
+                + ", profile=" + FormatDouble(begin.profile) + "->"
+                + FormatDouble(end.profile)
+                + ", topology="
+                + (topologyIsSlope ? "slope" : "platform")
+                + ", geometric_slope=" + FormatDouble(slope, 4));
         }
         if (previousShapeKnown && previousWasSlope == topologyIsSlope)
         {
             check.failures.push_back(
                 "raw_index=" + std::to_string(begin.rawIndex)
+                + ", adjacent segment shapes do not alternate");
+            check.diagnostics.push_back(
+                "raw_index=" + std::to_string(begin.rawIndex)
+                + ", xyz=(" + FormatDouble(begin.x) + ","
+                + FormatDouble(begin.y) + "," + FormatDouble(begin.z) + ")"
+                + ", path=" + FormatDouble(begin.path)
+                + ", profile=" + FormatDouble(begin.profile)
                 + ", adjacent segment shapes do not alternate");
         }
         previousShapeKnown = true;
@@ -391,6 +420,18 @@ CandidateCheck EvaluateCandidate(
                 check.failures.push_back(
                     "raw_index=" + std::to_string(begin.rawIndex) + "->"
                     + std::to_string(end.rawIndex)
+                    + ", slope direction conflicts with platform bands");
+                check.diagnostics.push_back(
+                    "raw_index=" + std::to_string(begin.rawIndex) + "->"
+                    + std::to_string(end.rawIndex)
+                    + ", begin_xyz=(" + FormatDouble(begin.x) + ","
+                    + FormatDouble(begin.y) + "," + FormatDouble(begin.z) + ")"
+                    + ", end_xyz=(" + FormatDouble(end.x) + ","
+                    + FormatDouble(end.y) + "," + FormatDouble(end.z) + ")"
+                    + ", path=" + FormatDouble(begin.path) + "->"
+                    + FormatDouble(end.path)
+                    + ", profile=" + FormatDouble(begin.profile) + "->"
+                    + FormatDouble(end.profile)
                     + ", slope direction conflicts with platform bands");
             }
             directionResidualSum += std::abs(actualDelta - expectedDelta)

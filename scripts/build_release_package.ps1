@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("neutral", "brand")]
     [string]$Channel,
+    [ValidateSet('', 'Off', 'Audit', 'Enforce')][string]$LicenseMode = '',
+    [string]$LicensePublicKeyHeader = '',
     [switch]$SkipBuild,
     [switch]$SkipVcRedistDownload,
     [switch]$SkipFanucCompilerTools,
@@ -91,6 +93,8 @@ if (-not (Test-Path -LiteralPath $gateCommon -PathType Leaf)) {
     throw "Release gate helpers were not found: $gateCommon"
 }
 . $gateCommon
+. (Join-Path $scriptRoot 'license_build_gate.ps1')
+$licenseSpec = Get-LicenseBuildSpec -Channel $Channel -Mode $LicenseMode -PublicKeyHeader $LicensePublicKeyHeader
 
 $msbuildPath = Assert-ReleaseExternalTool `
     -Path $MSBuildExecutable `
@@ -194,6 +198,9 @@ $msbuildPath = Assert-ReleaseExternalTool `
     "/p:ReleaseVersionString=$AppVersion" `
     "/p:ReleaseProductName=$($channelSpec.AppName)" `
     "/p:ReleaseExeName=$($channelSpec.ExeName)" `
+    "/p:LicenseChannel=$Channel" `
+    "/p:LicenseMode=$($licenseSpec.Value)" `
+    "/p:LicensePublicKeyHeader=$($licenseSpec.Header)" `
     /v:m
 if ($LASTEXITCODE -ne 0) {
     throw "MSBuild failed with exit code $LASTEXITCODE."
@@ -229,6 +236,7 @@ $windeployqtPath = Assert-ReleaseExternalTool `
 if ($LASTEXITCODE -ne 0) {
     throw "windeployqt failed with exit code $LASTEXITCODE."
 }
+$licenseBuildMetadata = Assert-ExecutableLicenseBuild -Executable $exePath -Expected $licenseSpec
 $windeployqtPath = Assert-ReleaseExternalTool `
     -Path $windeployqtPath -ExpectedSha256 $WinDeployQtSha256 `
     -ExpectedFileName "windeployqt.exe" -PublisherPattern '(?i)The Qt Company'
@@ -316,8 +324,8 @@ foreach ($runtimeDir in @("Data", "Log", "Result", "Temp")) {
 
 Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "icons") -TargetDir (Join-Path $packageDir "icons")
 
-# 品牌覆盖包：仅当 branding/ 被 git 跟踪（品牌分支）才随包分发；
-# main 等中性分支的 branding/ 被 .gitignore、不入包，安装包保持纯中性 NoTeaching-Robot。
+# 品牌覆盖包只分发图标资产；品牌文字与启用状态由 ConfigStore 的 global/Branding 模块管理。
+# main 等中性分支不跟踪 branding/，安装包保持纯中性 NoTeaching-Robot。
 if ($channelSpec.RequiresBranding) {
     Copy-DirectoryContent -SourceDir (Join-Path $repoRoot "branding") -TargetDir (Join-Path $packageDir "branding")
 }
@@ -513,6 +521,9 @@ $buildInfoPath = Join-Path $packageDir "BUILD_VERSION.txt"
     $channelSpec.AppName,
     "Version: $AppVersion",
     "Channel: $Channel",
+    "LicenseMode: $($licenseSpec.Mode)",
+    "LicenseKeyId: $($licenseBuildMetadata.keyId)",
+    "LicensePublicKeySha256: $($licenseBuildMetadata.publicKeySha256)",
     "Commit: $($gitState.head)",
     "Installer: $($channelSpec.OutputPrefix)$AppVersion.exe",
     "BuiltAtUtc: $([DateTime]::UtcNow.ToString('o'))"

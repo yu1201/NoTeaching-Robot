@@ -5,16 +5,15 @@
 #include <QString>
 #include <QIcon>
 
-// 本地品牌覆盖：工程根下若存在 branding/branding.ini 则启用品牌名与品牌图标，否则保持默认。
-// 该目录不纳入 git（.gitignore 排除），因此 git 仓库里呈现的名称/图标始终是默认的
-// NoTeaching-Robot + 原资源图标——品牌化只在放了 branding/ 的本地机器上生效。
+// 品牌文字和启用状态存于 ConfigStore 数据库的 global/Branding 模块；
+// branding/ 目录只承载图标资源，不再承载配置文件。
 class BrandingConfig
 {
 public:
-    // branding/branding.ini 是否存在（决定是否启用品牌覆盖）
+    // global/Branding/Active（首次发现完整品牌图标资源时会写入品牌默认值）。
     static bool IsActive();
 
-    // 应用名：启用时返回 branding.ini 的 ApplicationName，否则 "NoTeaching-Robot"
+    // 应用名：启用时返回数据库 Branding/ApplicationName，否则 "NoTeaching-Robot"
     static QString ApplicationName();
     static QString DisplayName();
     static QString SloganZh();

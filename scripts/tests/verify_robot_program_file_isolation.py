@@ -47,10 +47,11 @@ def verify_step(step: str) -> None:
     require(step, "StepProcessNonce()", "STEP names need a process nonce")
     require(step, "StepControllerIdentity", "STEP names need controller identity")
     for identity_part in (
-        "ctrl->m_sSocketIP",
-        "ctrl->m_nSocketPort",
-        "ctrl->m_sFTPIP",
-        "ctrl->m_nFTPPort",
+        "ctrl->ControlEndpoint()",
+        "ctrl->FileTransferProfile()",
+        "controlEndpoint.host",
+        "controlEndpoint.port",
+        "fileTransfer.endpointDisplay",
         "GetCurrentProcessId()",
         "reinterpret_cast<std::uintptr_t>(ctrl)",
     ):

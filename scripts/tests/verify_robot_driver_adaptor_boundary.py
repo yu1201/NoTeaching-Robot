@@ -11,17 +11,44 @@ ALLOWED = {
     Path("src/RobotDriverAdaptor.cpp"),
     Path("src/FANUCRobotDriver.cpp"),
     Path("src/StepRobotDriver.cpp"),
+    Path("src/InovanceRobotDriver.cpp"),
+    Path("src/InovanceCalibration.cpp"),
     Path("src/RobotDriverRegistry.cpp"),
+    Path("src/RobotFtpFileTransfer.cpp"),
+    Path("src/FTPClient.cpp"),
+    # These FTP users target the online archive/model service, not a robot controller.
+    Path("src/OnlineServicesDialog.cpp"),
+    Path("src/OnlineServicesLoginDialog.cpp"),
+    Path("src/ScanDataUploader.cpp"),
+    Path("src/RobotModelManagerDialog.cpp"),
     Path("include/FANUCRobotDriver.h"),
     Path("include/STEPRobotDriver.h"),
+    Path("include/InovanceRobotDriver.h"),
+    Path("include/InovanceWeldCalibration.h"),
+    Path("include/FTPClient.h"),
+    Path("include/RobotFtpFileTransfer.h"),
+    Path("include/OnlineServicesConfig.h"),
+    Path("include/ScanDataUploader.h"),
 }
 FORBIDDEN = {
     "concrete FANUC driver type": re.compile(r"\bFANUCRobotCtrl\b"),
     "concrete STEP driver type": re.compile(r"\bSTEPRobotCtrl\b"),
+    "concrete Inovance driver type": re.compile(r"\bInovanceRobotCtrl\b"),
     "FANUC driver header": re.compile(r"FANUCRobotDriver\.h"),
     "STEP driver header": re.compile(r"STEPRobotDriver\.h"),
+    "Inovance driver header": re.compile(r"InovanceRobotDriver\.h"),
     "raw STEP SDK status": re.compile(r"STEPROBOTSDK::"),
     "raw FANUC motion register": re.compile(r"FANUC_MOTION_STATE_REG"),
+    "direct FTP transport": re.compile(r"\b(?:FtpClient|FtpRemoteFileInfo)\b"),
+    "direct configured socket call": re.compile(r"\b(?:InitSocket|CloseSocket)\s*\("),
+    "direct robot transport field": re.compile(
+        r"->m_(?:sSocketIP|nSocketPort|sFTPIP|nFTPPort|sFTPUser|sFTPPassWord|pFTP)\b"
+    ),
+    "direct robot adaptor state": re.compile(
+        r"->m_(?:tKinematics|tAxisUnit|tAxisLimitAngle|tTools|tFirstTool|tHomePulse|"
+        r"nRobotNo|sRobotName|sCustomName|nRobotType|nExternalAxleType|nRobotAxisCount|"
+        r"eRobotBrand|pRobotLog)\b"
+    ),
     "legacy business MoveByJob": re.compile(r"\bMoveByJob\s*\("),
     "legacy business ContiMoveAny": re.compile(r"\bContiMoveAny\s*\("),
     "legacy business CallJob": re.compile(r"\bCallJob\s*\("),
@@ -56,40 +83,100 @@ adaptor = (ROOT / "include/RobotDriverAdaptor.h").read_text(encoding="utf-8")
 required_contract = (
     "DriverDescriptor() const = 0",
     "DriverCapabilities() const = 0",
+    "ControlEndpoint() const = 0",
+    "Connect() = 0",
+    "Disconnect() = 0",
+    "CreateFileTransferSession(",
+    "RobotName() const noexcept",
+    "ExternalAxleType() const noexcept",
+    "KinematicsParameters() const noexcept",
+    "AxisUnit() const noexcept",
+    "Tools() const noexcept",
+    "SetConfiguredGunTool(",
+    "WriteLog(LogColor color, const char* format, ...) const",
     "MoveLinearMmPerMin(",
+    "MoveCircularMmPerMin(",
     "MoveJointPercent(",
     "ReadMotionStatus() = 0",
+    "ReadControllerStatus() = 0",
     "ReserveTrajectory(",
     "DownlinkTrajectory(",
     "StartTrajectory(",
     "WaitTrajectory(",
     "AbortCurrentProgramSafely() = 0",
-    "InitSocket(const char* ip, unsigned short Port, bool ifRecode = false) = 0",
-    "CloseSocket() = 0",
+    "ServoOff() = 0",
     "TryGetCurrentPos(T_ROBOT_COORS& pos) = 0",
     "TryGetCurrentPulse(T_ANGLE_PULSE& pulse) = 0",
     "CheckRobotDone(int nDelayTime = 200, int runTimeoutMs = 1800000) = 0",
     "GetToolData(int nToolNo, T_ROBOT_COORS& robotToolData) = 0",
     "TryGetIntVar(int nIndex, int& value, const char* cStrPreFix = \"INT\") = 0",
+    "TryGetRealVar(",
     "GetHandEyeMatrixVariable(const char* variableName, double rotation[9], double translation[3], std::string* error = nullptr) = 0",
-    "ContiMoveAny(const std::vector<T_ROBOT_MOVE_INFO>& vtRobotMoveInfo) = 0",
+    "ReadKinematicsReference(",
+    "CalculateControllerForward(",
+    "CalculateControllerInverse(",
+    "DiscoverCalibrationAssets(",
+    "ReadControllerHandEye(",
+    "ValidateControllerHandEyeContext(",
 )
 for token in required_contract:
     if token not in adaptor:
         fail(f"mandatory adaptor contract token is missing: {token}")
 
-for implementation in ("FANUCRobotDriver.cpp", "StepRobotDriver.cpp"):
+for implementation in (
+    "FANUCRobotDriver.cpp", "StepRobotDriver.cpp", "InovanceRobotDriver.cpp"
+):
     text = (ROOT / "src" / implementation).read_text(encoding="utf-8")
     for token in (
         "DriverCapabilities() const",
+        "ControlEndpoint() const",
+        "CreateFileTransferSession(",
         "MoveLinearMmPerMin(",
+        "MoveCircularMmPerMin(",
         "ReadMotionStatus()",
+        "ReadControllerStatus()",
         "StartTrajectory(",
         "WaitTrajectory(",
         "AbortCurrentProgramSafely()",
+        "ServoOff()",
+        "TryGetRealVar(",
     ):
         if token not in text:
             fail(f"{implementation} does not implement required contract token: {token}")
+
+step_driver = (ROOT / "src/StepRobotDriver.cpp").read_text(encoding="utf-8")
+if "RobotDriverCapability::RealRegister" not in step_driver:
+    fail("STEP must advertise the completed real-register read/write contract")
+for token in ("VariableRealReadCmd", "VariableRealModifyCmd"):
+    if token not in step_driver:
+        fail(f"STEP real-register bottom is incomplete: {token}")
+step_set_real = step_driver.split("bool STEPRobotCtrl::SetRealVar(", 1)[1].split(
+    "bool STEPRobotCtrl::TryGetRealVar(", 1
+)[0]
+if "TryGetRealVar" not in step_set_real or "回读不一致" not in step_set_real:
+    fail("STEP real-register write must be verified by the adaptor read interface")
+
+fanuc_capabilities = (ROOT / "src/FanucRobotDriver.cpp").read_text(encoding="utf-8")
+fanuc_capability_body = fanuc_capabilities.split(
+    "std::uint64_t FANUCRobotCtrl::DriverCapabilities() const", 1
+)[1].split("RobotFileTransferProfile FANUCRobotCtrl::FileTransferProfile() const", 1)[0]
+for unsupported in ("CircularMotion", "RealRegister", "StructuredControllerStatus"):
+    if f"RobotDriverCapability::{unsupported}" in fanuc_capability_body:
+        fail(f"FANUC must not advertise unproved capability: {unsupported}")
+
+if '#include "FTPClient.h"' in adaptor or "ftpPassword" in adaptor:
+    fail("RobotDriverAdaptor must declare FTP functionality without owning the FTP transport or credentials")
+
+for raw_hook in (
+    "InitSocket", "CloseSocket", "ContiMoveAny", "CallJob",
+    "InitFtp", "UploadFile", "DownloadFile", "MoveByJob",
+):
+    if raw_hook in adaptor:
+        fail(f"RobotDriverAdaptor still declares brand-bottom hook: {raw_hook}")
+
+state_marker = "//----------------------------------------变量类--------------------------------------------//"
+if state_marker not in adaptor or "protected:" not in adaptor.split(state_marker, 1)[1].split("private:", 1)[0]:
+    fail("RobotDriverAdaptor runtime state must remain protected behind functional accessors")
 
 registry = (ROOT / "src/RobotDriverRegistry.cpp").read_text(encoding="utf-8")
 for token in (
@@ -97,6 +184,8 @@ for token in (
     "ROBOT_TYPE_STEP",
     "CreateFanucDriver",
     "CreateStepDriver",
+    "ROBOT_TYPE_INOVANCE",
+    "CreateInovanceDriver",
     "RobotDriverRegistry::SetupProfile",
 ):
     if token not in registry:

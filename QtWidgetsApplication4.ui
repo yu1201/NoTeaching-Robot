@@ -206,7 +206,7 @@
      </rect>
     </property>
     <property name="text">
-     <string>发送LS程序</string>
+     <string>发送原生程序</string>
     </property>
    </widget>
    <widget class="QPushButton" name="FanucMovlTestBtn">

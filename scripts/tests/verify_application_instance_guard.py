@@ -35,6 +35,8 @@ def main() -> int:
             "cross-process guard API is missing")
     require("ApplicationInstanceGuard::TryAcquire" in main_cpp,
             "main does not acquire the cross-process robot-control guard")
+    require("RuntimeSystemInterlocks" in main_cpp,
+            "main does not honor the independent process interlock")
 
     path_probe = main_cpp.find("arguments.contains(QStringLiteral(\"--print-app-paths-json\"))")
     worker = main_cpp.find("--pointcloud-extract-worker")
@@ -47,6 +49,8 @@ def main() -> int:
             "isolated point-cloud worker is not exempt before the process guard")
     require(guard < drivers < window,
             "robot-control process guard is not acquired before driver/window construction")
+    require("if (singleProcessInterlockEnabled)" in main_cpp[path_probe:guard],
+            "cross-process guard is not controlled by the process interlock")
     require("arguments.contains(QStringLiteral(\"--no-show\"))" in main_cpp[guard:drivers],
             "headless hardware CLI does not receive a deterministic lock failure path")
 

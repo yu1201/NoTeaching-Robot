@@ -60,10 +60,10 @@
 
 ### 输入
 
-- `Data/<RobotName>/MeasureWeldParam.ini`
-- `Data/<RobotName>/CameraParam*.ini`
-- `Data/<RobotName>/HandEyeMatrix_*.ini`
-- `Data/WorkpieceTemplates/CorrugatedPlate/*`
+- `robot/<RobotName>/MeasureWeldParam` 数据库模块
+- `robot/<RobotName>/CameraParam` 数据库模块
+- `robot/<RobotName>/HandEyeMatrix/<CameraSection>` 数据库模块
+- `workpiece/CorrugatedPlate/*` 数据库模板模块
 
 ### 扫描中采集
 
@@ -111,7 +111,7 @@
 
 - `ScanSpeed`：`mm/min`
 - `RunSpeed`：FANUC `MOVJ` 百分比兼容值
-- 焊接速度、空跑速度、安全位移动速度和 RZ 增益统一放在 `MeasureWeldParam.ini` 的焊接参数里
+- 焊接速度、空跑速度、安全位移动速度和 RZ 增益统一放在 `MeasureWeldParam` 数据库模块的焊接参数里
 
 ## 当前风险
 

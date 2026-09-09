@@ -1,6 +1,8 @@
 #include "RobotOperationLease.h"
 
 #if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+#include "LicenseManager.h"
+#include "PointCloudProcessingConfig.h"
 #include "RobotDriverAdaptor.h"
 #include "WeldSafetyRecoveryStore.h"
 #endif
@@ -35,14 +37,19 @@ struct UnresolvedStop
 
 std::mutex g_operationMutex;
 // 键为规范化 TCP 端点；只有端点不可用时才退回 driver 指针身份。
-std::map<QString, ActiveOperation> g_activeOperations;
+std::multimap<QString, ActiveOperation> g_activeOperations;
 // STOP 发出后直到机器人侧真实停机回读成功前持续闭锁；即使原流程先释放租约也不清除。
 std::map<QString, UnresolvedStop> g_unresolvedStops;
 bool g_newOperationsAllowed = true;
 QString g_newOperationsBlockedReason;
+bool g_licenseOperationsAllowed = true;
+QString g_licenseBlockedReason;
 std::map<RobotOperationLease::NewOperationBlockToken, QString> g_newOperationBlocks;
 std::atomic<std::uint64_t> g_nextOperationToken{ 1 };
 std::atomic<std::uint64_t> g_nextOperationBlockToken{ 1 };
+#if defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+SystemInterlockPolicy g_testSystemInterlocks;
+#endif
 
 QString PointerIdentity(const RobotDriverAdaptor* driver)
 {
@@ -92,6 +99,15 @@ QString ResolveDriverIdentity(const RobotDriverAdaptor* driver)
     const QString persistentIdentity = RobotOperationLease::PersistentEndpointIdentity(driver);
     return persistentIdentity.isEmpty() ? PointerIdentity(driver) : persistentIdentity;
 }
+
+bool InterlockEnabled(SystemInterlock gate)
+{
+#if defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    return g_testSystemInterlocks.IsEnabled(gate);
+#else
+    return PointCloudProcessingConfig::RuntimeSystemInterlocks().IsEnabled(gate);
+#endif
+}
 }
 
 QString RobotOperationLease::PersistentEndpointIdentity(const RobotDriverAdaptor* driver)
@@ -100,13 +116,14 @@ QString RobotOperationLease::PersistentEndpointIdentity(const RobotDriverAdaptor
     {
         return {};
     }
-    const QString host = NormalizeSocketHost(driver->m_sSocketIP);
-    // 先判断 host，避免读取尚未装载配置的 driver 中可能未初始化的端口字段。
+	const RobotConnectionEndpoint endpoint = driver->ControlEndpoint();
+	const QString host = NormalizeSocketHost(endpoint.host);
+	// 先判断 host，避免把尚未装载完整配置的驱动注册为可共享控制器。
     if (host.isEmpty())
     {
         return {};
     }
-    const int port = driver->m_nSocketPort;
+	const int port = endpoint.port;
     if (port <= 0 || port > 65535)
     {
         return {};
@@ -145,8 +162,29 @@ void RobotOperationLease::SetNewOperationsAllowed(
 bool RobotOperationLease::NewOperationsAllowed()
 {
     std::lock_guard<std::mutex> lock(g_operationMutex);
-    return g_newOperationsAllowed && g_newOperationBlocks.empty();
+    bool licenseAllowed = g_licenseOperationsAllowed;
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    licenseAllowed = licenseAllowed && LicenseManager::Instance().CanStartProtectedOperation();
+#endif
+    return licenseAllowed
+        && (!InterlockEnabled(SystemInterlock::AccountSession) || g_newOperationsAllowed)
+        && (!InterlockEnabled(SystemInterlock::StateTransition) || g_newOperationBlocks.empty());
 }
+
+void RobotOperationLease::SetLicenseOperationsAllowed(bool allowed, const QString& reason)
+{
+    std::lock_guard<std::mutex> lock(g_operationMutex);
+    g_licenseOperationsAllowed = allowed;
+    g_licenseBlockedReason = allowed ? QString() : reason;
+}
+
+#if defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+void RobotOperationLease::SetSystemInterlockForTest(SystemInterlock gate, bool enabled)
+{
+    // Tests change policy only while no concurrent test worker is running.
+    g_testSystemInterlocks.SetEnabled(gate, enabled);
+}
+#endif
 
 RobotOperationLease::NewOperationBlockToken RobotOperationLease::AddNewOperationsBlock(
     const QString& blockedReason)
@@ -196,13 +234,13 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireSafetyRecovery(
         }
         return {};
     }
-    const Ptr lease = TryAcquireImpl(driver, requestedOwner, true, reason);
+    const Ptr lease = TryAcquireImpl(driver, requestedOwner, true, reason, true);
     if (!lease)
     {
         return {};
     }
 #if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
-    const QString robotName = QString::fromStdString(driver->m_sRobotName).trimmed();
+    const QString robotName = QString::fromStdString(driver->RobotName()).trimmed();
     const QString endpoint = PersistentEndpointIdentity(driver);
     if (!WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
             robotName,
@@ -210,7 +248,8 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireSafetyRecovery(
             expectedRecord,
             RobotRecoverySafetyPolicy::RecoveryBindingMode::SafeRetreat,
             binding,
-            reason))
+            reason,
+            InterlockEnabled(SystemInterlock::RecoveryIdentity)))
     {
         return {};
     }
@@ -248,7 +287,7 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquirePausedResume(
         return {};
     }
 #if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
-    const QString robotName = QString::fromStdString(driver->m_sRobotName).trimmed();
+    const QString robotName = QString::fromStdString(driver->RobotName()).trimmed();
     const QString endpoint = PersistentEndpointIdentity(driver);
     if (!WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
             robotName,
@@ -256,7 +295,8 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquirePausedResume(
             expectedRecord,
             RobotRecoverySafetyPolicy::RecoveryBindingMode::PausedResume,
             binding,
-            reason))
+            reason,
+            InterlockEnabled(SystemInterlock::RecoveryIdentity)))
     {
         return {};
     }
@@ -277,7 +317,8 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
     const RobotDriverAdaptor* driver,
     const QString& requestedOwner,
     bool allowPersistentRecovery,
-    QString* reason)
+    QString* reason,
+    bool allowLicenseSafetyRecovery)
 {
     if (reason != nullptr)
     {
@@ -296,13 +337,20 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
         ? QStringLiteral("未命名硬件操作")
         : requestedOwner.trimmed();
     const QString identityKey = ResolveDriverIdentity(driver);
-#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
-    if (!allowPersistentRecovery)
+    if (InterlockEnabled(SystemInterlock::DriverEndpointIdentity)
+        && PersistentEndpointIdentity(driver).isEmpty())
     {
-        const QString robotName = QString::fromStdString(driver->m_sRobotName).trimmed();
+        if (reason != nullptr) *reason = QStringLiteral("机器人持久 TCP 端点无效，无法取得操作租约。");
+        return {};
+    }
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+    if (!allowPersistentRecovery && InterlockEnabled(SystemInterlock::SafeRetreatPending))
+    {
+        const QString robotName = QString::fromStdString(driver->RobotName()).trimmed();
         QString persistentReason;
         if (WeldSafetyRecoveryStore::PersistentAdmissionBlocked(
-            robotName, identityKey, &persistentReason))
+            robotName, PersistentEndpointIdentity(driver), &persistentReason,
+            InterlockEnabled(SystemInterlock::DriverEndpointIdentity)))
         {
             if (reason != nullptr)
             {
@@ -317,11 +365,32 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
     // 先构造未注册租约以保证异常安全：map 插入失败时不会留下幽灵占用。
     Ptr lease(new RobotOperationLease(driver, identityKey, 0, owner));
     std::lock_guard<std::mutex> lock(g_operationMutex);
-    if (!g_newOperationsAllowed || !g_newOperationBlocks.empty())
+    if (!allowLicenseSafetyRecovery)
+    {
+        QString licenseReason = g_licenseBlockedReason;
+        bool licenseAllowed = g_licenseOperationsAllowed;
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+        licenseAllowed = LicenseManager::Instance().CanStartProtectedOperation(&licenseReason)
+            && licenseAllowed;
+#endif
+        if (!licenseAllowed)
+        {
+            if (reason != nullptr)
+            {
+                *reason = licenseReason.isEmpty()
+                    ? QStringLiteral("软件授权不允许启动新任务；安全停止和安全回撤仍可使用。")
+                    : licenseReason;
+            }
+            return {};
+        }
+    }
+    const bool sessionBlocked = InterlockEnabled(SystemInterlock::AccountSession) && !g_newOperationsAllowed;
+    const bool transitionBlocked = InterlockEnabled(SystemInterlock::StateTransition) && !g_newOperationBlocks.empty();
+    if (sessionBlocked || transitionBlocked)
     {
         if (reason != nullptr)
         {
-            if (!g_newOperationsAllowed)
+            if (sessionBlocked)
             {
                 *reason = g_newOperationsBlockedReason.isEmpty()
                     ? QStringLiteral("账号会话未通过，禁止开始新的机器人硬件操作。")
@@ -341,7 +410,7 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
         {
             return stop.first == identityKey || stop.second.driver == driver;
         });
-    if (unresolved != g_unresolvedStops.cend())
+    if (InterlockEnabled(SystemInterlock::VerifiedStop) && unresolved != g_unresolvedStops.cend())
     {
         if (reason != nullptr)
         {
@@ -352,7 +421,8 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
     // 同一 driver 在持租约期间即使配置字段被改写，也绝不能借新端点 key 二次取得租约。
     for (const auto& operation : g_activeOperations)
     {
-        if (operation.second.acquiringDriver == driver)
+        if (InterlockEnabled(SystemInterlock::ExclusiveOperationLease)
+            && operation.second.acquiringDriver == driver)
         {
             if (reason != nullptr)
             {
@@ -363,7 +433,7 @@ RobotOperationLease::Ptr RobotOperationLease::TryAcquireImpl(
         }
     }
     const auto active = g_activeOperations.find(identityKey);
-    if (active != g_activeOperations.end())
+    if (InterlockEnabled(SystemInterlock::ExclusiveOperationLease) && active != g_activeOperations.end())
     {
         if (reason != nullptr)
         {
@@ -413,22 +483,27 @@ bool RobotOperationLease::RequestCancellation(
     }
     const QString identityKey = ResolveDriverIdentity(driver);
     std::lock_guard<std::mutex> lock(g_operationMutex);
+    bool found = false;
     for (auto& operation : g_activeOperations)
     {
         if (operation.second.acquiringDriver == driver || operation.first == identityKey)
         {
             operation.second.cancellationRequested = true;
+            const auto previous = g_unresolvedStops.find(operation.first);
+            const bool pending = operation.second.motionCompletionPending
+                || (previous != g_unresolvedStops.end() && previous->second.motionCompletionPending);
             g_unresolvedStops[operation.first] = UnresolvedStop{
                 operation.second.acquiringDriver,
-                operation.second.motionCompletionPending
+                pending
             };
             if (cancelledOwner != nullptr)
             {
                 *cancelledOwner = operation.second.owner;
             }
-            return true;
+            found = true;
         }
     }
+    if (found) return true;
     for (const auto& unresolved : g_unresolvedStops)
     {
         if (unresolved.second.driver == driver || unresolved.first == identityKey)
@@ -468,9 +543,12 @@ std::vector<RobotOperationLease::CancellationTarget> RobotOperationLease::LatchG
     for (auto& operation : g_activeOperations)
     {
         operation.second.cancellationRequested = true;
+        const auto previous = g_unresolvedStops.find(operation.first);
+        const bool pending = operation.second.motionCompletionPending
+            || (previous != g_unresolvedStops.end() && previous->second.motionCompletionPending);
         g_unresolvedStops[operation.first] = UnresolvedStop{
             operation.second.acquiringDriver,
-            operation.second.motionCompletionPending
+            pending
         };
         appendTarget(operation.second.acquiringDriver, operation.second.owner);
     }
@@ -528,12 +606,14 @@ bool RobotOperationLease::ConfirmCancellationHandled(const RobotDriverAdaptor* d
     {
         // Confirm 的契约本身就是“机器人侧真实停止已回读”；与 unresolved 同一把锁内
         // 原子清 pending，避免 stop 成功与原 lease 析构交错时重新制造闭锁。
-        for (auto& operation : g_activeOperations)
+        for (auto operation = g_activeOperations.begin(); operation != g_activeOperations.end();)
         {
-            if (operation.second.acquiringDriver == driver || operation.first == identityKey)
+            if (operation->second.acquiringDriver == driver || operation->first == identityKey)
             {
-                operation.second.motionCompletionPending = false;
+                operation->second.motionCompletionPending = false;
+                if (operation->second.token == 0) { operation = g_activeOperations.erase(operation); continue; }
             }
+            ++operation;
         }
     }
     return erased > 0;
@@ -557,7 +637,8 @@ bool RobotOperationLease::IsCancellationRequested(const RobotDriverAdaptor* driv
     }
     for (const auto& unresolved : g_unresolvedStops)
     {
-        if (unresolved.second.driver == driver || unresolved.first == identityKey)
+        if (InterlockEnabled(SystemInterlock::VerifiedStop)
+            && (unresolved.second.driver == driver || unresolved.first == identityKey))
         {
             return true;
         }
@@ -585,38 +666,82 @@ bool RobotOperationLease::MarkMotionStarted(
 
     const QString identityKey = ResolveDriverIdentity(driver);
     std::lock_guard<std::mutex> lock(g_operationMutex);
-    auto active = std::find_if(
-        g_activeOperations.begin(),
-        g_activeOperations.end(),
-        [driver, &identityKey](const auto& operation)
+    const auto matches = [driver, &identityKey](const auto& operation)
+    {
+        return operation.second.acquiringDriver == driver || operation.first == identityKey;
+    };
+    // 当前流程 STOP/取消始终有效；独立“停机确认”仅控制跨流程的未确认停止准入。
+    for (const auto& operation : g_activeOperations)
+    {
+        if (matches(operation) && operation.second.cancellationRequested)
         {
-            return operation.second.acquiringDriver == driver || operation.first == identityKey;
-        });
+            if (reason) *reason = QStringLiteral("机器人安全停止已锁存，已拒绝下发新的运动命令。");
+            return false;
+        }
+    }
+    if (InterlockEnabled(SystemInterlock::VerifiedStop))
+    {
+        for (const auto& stop : g_unresolvedStops)
+        {
+            if (stop.second.driver == driver || stop.first == identityKey)
+            {
+                if (reason) *reason = QStringLiteral("机器人 STOP 尚未确认，拒绝下发新的运动命令。");
+                return false;
+            }
+        }
+    }
+    auto active = std::find_if(g_activeOperations.begin(), g_activeOperations.end(), matches);
+    const bool hasOwnedLease = std::any_of(g_activeOperations.cbegin(), g_activeOperations.cend(),
+        [&matches](const auto& operation) { return matches(operation) && operation.second.token != 0; });
+    if (!hasOwnedLease)
+    {
+        QString licenseReason = g_licenseBlockedReason;
+        bool licenseAllowed = g_licenseOperationsAllowed;
+#if !defined(ROBOT_OPERATION_LEASE_TEST_STUB_DRIVER)
+        licenseAllowed = LicenseManager::Instance().CanStartProtectedOperation(&licenseReason)
+            && licenseAllowed;
+#endif
+        if (!licenseAllowed)
+        {
+            if (reason) *reason = licenseReason.isEmpty()
+                ? QStringLiteral("授权无效，不能通过关闭运动租约门禁启动新运动。") : licenseReason;
+            return false;
+        }
+    }
+    if (active == g_activeOperations.end() && InterlockEnabled(SystemInterlock::MotionLeaseOwnership))
+    {
+        if (reason) *reason = QStringLiteral("当前运动命令没有持有机器人硬件操作租约，已拒绝下发。");
+        return false;
+    }
+    if (InterlockEnabled(SystemInterlock::MotionTerminal) && !allowExistingPending)
+    {
+        for (const auto& operation : g_activeOperations)
+        {
+            if (matches(operation) && operation.second.motionCompletionPending)
+            {
+                if (reason) *reason = QStringLiteral("上一条机器人运动尚未得到稳定终态确认，已拒绝启动下一条运动。");
+                return false;
+            }
+        }
+        for (const auto& stop : g_unresolvedStops)
+        {
+            if ((stop.second.driver == driver || stop.first == identityKey) && stop.second.motionCompletionPending)
+            {
+                if (reason) *reason = QStringLiteral("上一条机器人运动尚未得到稳定终态确认。");
+                return false;
+            }
+        }
+    }
     if (active == g_activeOperations.end())
     {
-        if (reason != nullptr)
-        {
-            *reason = QStringLiteral("当前运动命令没有持有机器人硬件操作租约，已拒绝下发。");
-        }
-        return false;
+        // 即使关闭“运动租约准入”，仍独立记录终态和 STOP 目标。
+        g_activeOperations.emplace(identityKey, ActiveOperation{0, QStringLiteral("无租约运动"), driver, false, true});
     }
-    if (active->second.cancellationRequested)
+    else
     {
-        if (reason != nullptr)
-        {
-            *reason = QStringLiteral("机器人安全停止已锁存，已拒绝下发新的运动命令。");
-        }
-        return false;
+        for (auto& operation : g_activeOperations)
+            if (matches(operation)) operation.second.motionCompletionPending = true;
     }
-    if (active->second.motionCompletionPending && !allowExistingPending)
-    {
-        if (reason != nullptr)
-        {
-            *reason = QStringLiteral("上一条机器人运动尚未得到稳定终态确认，已拒绝启动下一条运动。");
-        }
-        return false;
-    }
-    active->second.motionCompletionPending = true;
     return true;
 }
 
@@ -629,17 +754,15 @@ bool RobotOperationLease::MarkMotionCompleted(const RobotDriverAdaptor* driver)
     const QString identityKey = ResolveDriverIdentity(driver);
     std::lock_guard<std::mutex> lock(g_operationMutex);
     bool found = false;
-    auto active = std::find_if(
-        g_activeOperations.begin(),
-        g_activeOperations.end(),
-        [driver, &identityKey](const auto& operation)
-        {
-            return operation.second.acquiringDriver == driver || operation.first == identityKey;
-        });
-    if (active != g_activeOperations.end())
+    for (auto active = g_activeOperations.begin(); active != g_activeOperations.end();)
     {
-        active->second.motionCompletionPending = false;
-        found = true;
+        if (active->second.acquiringDriver == driver || active->first == identityKey)
+        {
+            active->second.motionCompletionPending = false;
+            found = true;
+            if (active->second.token == 0) { active = g_activeOperations.erase(active); continue; }
+        }
+        ++active;
     }
     // STOP 可能在本轮完成检查之后、Mark 之前锁存 unresolved=true。
     // 可信终态确认必须同步把 provenance 降为 false，但保留取消条目等待 Confirm。
@@ -660,6 +783,10 @@ bool RobotOperationLease::MotionCompletionPending(const RobotDriverAdaptor* driv
     {
         return false;
     }
+    if (!InterlockEnabled(SystemInterlock::MotionTerminal))
+    {
+        return false;
+    }
     const QString identityKey = ResolveDriverIdentity(driver);
     std::lock_guard<std::mutex> lock(g_operationMutex);
     const auto active = std::find_if(
@@ -667,9 +794,10 @@ bool RobotOperationLease::MotionCompletionPending(const RobotDriverAdaptor* driv
         g_activeOperations.cend(),
         [driver, &identityKey](const auto& operation)
         {
-            return operation.second.acquiringDriver == driver || operation.first == identityKey;
+            return (operation.second.acquiringDriver == driver || operation.first == identityKey)
+                && operation.second.motionCompletionPending;
         });
-    if (active != g_activeOperations.cend() && active->second.motionCompletionPending)
+    if (active != g_activeOperations.cend())
     {
         return true;
     }
@@ -760,8 +888,10 @@ RobotOperationLease::~RobotOperationLease()
     }
     {
         std::lock_guard<std::mutex> lock(g_operationMutex);
-        const auto active = g_activeOperations.find(m_identityKey);
-        if (active != g_activeOperations.end() && active->second.token == m_token)
+        const auto range = g_activeOperations.equal_range(m_identityKey);
+        const auto active = std::find_if(range.first, range.second,
+            [this](const auto& entry) { return entry.second.token == m_token; });
+        if (active != range.second)
         {
             if (active->second.motionCompletionPending)
             {

@@ -32,6 +32,7 @@
 
 #define ROBOT_TYPE_STEP 1
 #define ROBOT_TYPE_FANUC 2
+#define ROBOT_TYPE_INOVANCE 3
 
 // 焊接下枪/收枪安全位的世界坐标水平回撤方向。
 // 0 保持旧算法（按焊道法向和枪轴择向，再以世界 X- 优先），用于兼容既有参数库。
@@ -456,7 +457,6 @@ struct T_SCAN_WELDING_PARAM
 {
 	std::string sRobotName;      // 机器人名称，从 RobotDriverAdaptor 中获取
 	std::string sSectionName;    // 参数分组名，例如 Table1
-	std::string sIniFilePath;    // 线扫参数逻辑键
 
 	T_ANGLE_PULSE tStartPulse;   // 机器人扫描起点脉冲姿态
 	T_ANGLE_PULSE tEndPulse;     // 机器人扫描终点脉冲姿态
@@ -510,10 +510,6 @@ struct T_COARSE_SCAN_PARAM
 //    AUTO_EXT
 //} eMode;
 
-
-const std::string DATA_PATH = ".\\Data\\";
-const std::string ROBOT_PARA_INI = "\\RobotPara.ini";
-const std::string CONTRAL_UNIT_INFO_INI = ".\\Data\\ContralUnitInfo.ini";
 
 std::string GetStr(const char* format, ...);
 #endif

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -50,6 +50,11 @@
     <ClCompile Include="src\AppPaths.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\LicenseManager.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\LicenseDialog.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClInclude Include="include\LicenseManager.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="include\LicenseDialog.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="include\LicenseBuildConfig.h"><Filter>Header Files</Filter></ClInclude>
     <ClCompile Include="src\CliHelp.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -130,6 +135,21 @@
     <ClCompile Include="src\RobotDriverAdaptor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\RobotCalibrationService.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotKinematicsModel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\InovanceCalibration.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotCalibrationDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RobotFtpFileTransfer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\RobotDriverRegistry.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -139,7 +159,7 @@
     <ClCompile Include="src\SKJCameraControlClient.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\OPini.cpp">
+    <ClCompile Include="src\ConfigSection.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\StepRobotDriver.cpp">
@@ -158,6 +178,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\FANUCRobotDriver.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\InovanceRobotDriver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\FanucTpContentIdentity.cpp">
@@ -268,6 +291,45 @@
     <ClCompile Include="src\groove\scancameraskjworker.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\BrandingConfig.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\BcpdModelAligner.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ModelAlignmentConfig.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ModelAlignmentDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ReferenceModelLibrary.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\PointCloudModelDenoiser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\WorkpieceMeshBuilder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\WorkpieceMeshViewerDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\VirtualWeldTestDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ResultArchiveDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\OnlineServicesDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ProcessLoopTestDialog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ScanDataUploader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Const.h">
@@ -354,6 +416,24 @@
     <ClInclude Include="include\FANUCRobotDriver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\InovanceRobotDriver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\InovanceWeldCalibration.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotCalibrationDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotCalibrationService.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotCalibrationTypes.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotKinematicsModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="include\FanucTpContentIdentity.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -402,7 +482,7 @@
     <ClInclude Include="include\RemoteWorkerLifecycle.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="include\OPini.h">
+    <ClInclude Include="include\ConfigSection.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\PointCloud3DView.h">
@@ -424,6 +504,51 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotDriverAdaptor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAdaptorAcceptanceStore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAdaptorAcceptanceLayout.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAdaptorAcceptancePlan.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAxisUnitValidation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAcceptanceJointMotion.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\InovanceKinematicsSession.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\MeasureThenWeldCapabilityPolicy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotAcceptanceAlarmPreparation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotRegisterRoundTrip.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotModePreparationTest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotModePreparationStore.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\InovanceModeSequence.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\InovanceConnectionPreparation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\InovanceUserLogin.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\RobotFtpFileTransfer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotDriverRegistry.h">
@@ -448,6 +573,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\RobotOperationLease.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\SystemInterlockPolicy.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="include\ApplicationInstanceGuard.h">
@@ -495,6 +623,33 @@
     <ClInclude Include="include\groove\pointcloundresultframe.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\BrandingConfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\OnlineServicesConfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\BcpdModelAligner.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ModelAlignmentConfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ModelAlignmentDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\ReferenceModelLibrary.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\PointCloudModelDenoiser.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\WorkpieceMeshBuilder.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="include\WorkpieceMeshViewerDialog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="include\groove\clientudpformsensorworker.h">
@@ -504,6 +659,21 @@
       <Filter>Header Files</Filter>
     </QtMoc>
     <QtMoc Include="include\groove\scancameraskjworker.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="include\VirtualWeldTestDialog.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="include\ResultArchiveDialog.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="include\OnlineServicesDialog.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="include\ProcessLoopTestDialog.h">
+      <Filter>Header Files</Filter>
+    </QtMoc>
+    <QtMoc Include="include\ScanDataUploader.h">
       <Filter>Header Files</Filter>
     </QtMoc>
   </ItemGroup>

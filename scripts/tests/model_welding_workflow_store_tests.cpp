@@ -56,6 +56,19 @@ ModelWeldingFlowTemplate CompleteTemplate()
         station.candidateConfirmed = true;
         value.stations.push_back(station);
     }
+
+    ModelWeldingSeamDefinition seam;
+    seam.seamId = QStringLiteral("seam-store-001");
+    seam.source = ModelWeldingSeamSource::CadSharedEdge;
+    seam.sourceGeometrySha256 = value.modelSha256;
+    seam.pathModelMm = {
+        Eigen::Vector3d(0.0, 0.0, 0.0),
+        Eigen::Vector3d(50.0, 0.0, 0.0),
+        Eigen::Vector3d(100.0, 10.0, 0.0)
+    };
+    seam.lengthMm = 50.0 + std::sqrt(2600.0);
+    seam.humanConfirmed = true;
+    value.seams.push_back(seam);
     return value;
 }
 

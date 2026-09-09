@@ -11,11 +11,11 @@
 
 class RobotDriverAdaptor;
 
-// WeldBreakpoint.ini 的唯一读写/锁入口。所有 marker + RecordV2 组合更新均按失败关闭顺序写入并回读。
+// WeldBreakpoint 数据库模块的唯一读写/锁入口。所有 marker + RecordV2 组合更新均按失败关闭顺序写入并回读。
 class WeldSafetyRecoveryStore final
 {
 public:
-    static QString StoragePath(const QString& robotName);
+    static QString StorageLabel(const QString& robotName);
     static bool ReadRecord(
         const QString& robotName,
         WeldResumePlanner::CheckpointRecord& record,
@@ -32,11 +32,15 @@ public:
         const QString& robotName,
         const QString& encoded,
         QString* error = nullptr);
-    static bool InvalidateIfNoPending(const QString& robotName, QString& error);
+    static bool InvalidateIfNoPending(
+        const QString& robotName,
+        QString& error,
+        bool enforcePending = true);
     static bool PersistentAdmissionBlocked(
         const QString& robotName,
         const QString& endpointIdentity,
-        QString* reason = nullptr);
+        QString* reason = nullptr,
+        bool requireEndpoint = true);
     // 专用 paused 恢复租约取得后调用：在同一存储锁内原子重读 marker + RecordV2，
     // 严格绑定 checkpoint/端点/程序/轨迹，避免确认页与实际恢复之间的 TOCTOU。
     static bool ReadPausedResumeBinding(
@@ -53,7 +57,8 @@ public:
         const WeldResumePlanner::CheckpointRecord& expected,
         RobotRecoverySafetyPolicy::RecoveryBindingMode mode,
         RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding* binding,
-        QString* error = nullptr);
+        QString* error = nullptr,
+        bool enforceIdentity = true);
     static void ReleaseExclusiveRecoveryBinding(
         const QString& endpointIdentity,
         const QString& token);
@@ -80,7 +85,9 @@ class WeldSafetyRecoverySession final
 public:
     WeldSafetyRecoverySession(
         RobotDriverAdaptor* driver,
-        const T_PRECISE_MEASURE_PARAM& param);
+        const T_PRECISE_MEASURE_PARAM& param,
+        MeasureThenWeldService::WeldPoseSource poseSource =
+            MeasureThenWeldService::WeldPoseSource::PointCloudProduction);
 
     bool Prepare(
         const MeasureThenWeldService::WeldExecutionIdentity& identity,
@@ -90,6 +97,8 @@ public:
 private:
     RobotDriverAdaptor* m_driver = nullptr;
     T_PRECISE_MEASURE_PARAM m_param;
+    MeasureThenWeldService::WeldPoseSource m_poseSource =
+        MeasureThenWeldService::WeldPoseSource::PointCloudProduction;
     WeldResumePlanner::CheckpointRecord m_record;
     bool m_prepared = false;
 };
