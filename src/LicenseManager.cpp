@@ -71,9 +71,13 @@ bool Fail(QString* error, const QString& message)
 bool IsDigest(const QString& text)
 {
     if (text.size() != 64) return false;
-    for (const QChar ch : text)
+    bool zeros = true, fs = true;
+    for (const QChar ch : text) {
         if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) return false;
-    return true;
+        zeros = zeros && ch == '0';
+        fs = fs && ch == 'f';
+    }
+    return !zeros && !fs;
 }
 
 bool IsUsefulIdentifier(QString value)
@@ -185,23 +189,33 @@ QJsonObject MachineFingerprint()
     };
 }
 
+bool EligibleFingerprint(const QJsonObject& fingerprint)
+{
+    // Preserve the wire schema: unavailable components are explicit empty strings.
+    // A malformed nonempty value or a duplicated digest is not missing hardware.
+    if (fingerprint.size() != 3) return false;
+    QStringList valid;
+    for (const char* name : {"system", "baseboard", "disk"}) {
+        const QJsonValue component = fingerprint.value(name);
+        if (!component.isString()) return false;
+        const QString digest = component.toString();
+        if (digest.isEmpty()) continue;
+        if (!IsDigest(digest) || valid.contains(digest)) return false;
+        valid.append(digest);
+    }
+    return valid.size() >= 2;
+}
+
 bool FingerprintMatches(const QJsonObject& expected, const QJsonObject& current)
 {
+    if (!EligibleFingerprint(expected) || !EligibleFingerprint(current)) return false;
     int matches = 0;
     for (const char* name : {"system", "baseboard", "disk"}) {
         const QString saved = expected.value(name).toString();
         const QString local = current.value(name).toString();
-        if (!IsDigest(saved)) return false;
-        if (IsDigest(local) && saved == local) ++matches;
+        if (!saved.isEmpty() && saved == local) ++matches;
     }
     return matches >= 2;
-}
-
-bool CompleteFingerprint(const QJsonObject& fingerprint)
-{
-    return IsDigest(fingerprint.value("system").toString())
-        && IsDigest(fingerprint.value("baseboard").toString())
-        && IsDigest(fingerprint.value("disk").toString());
 }
 
 QString DefaultStatePath()
@@ -357,6 +371,8 @@ struct LicenseManager::Data
 #ifdef HK_LICENSE_TEST_BUILD
     qint64 testNow = 0;
     QByteArray testPublicBlob;
+    QJsonObject testLastRequest;
+    QString testLastEndpoint;
 #endif
 
     qint64 WallNow() const
@@ -648,6 +664,10 @@ void LicenseManager::Start()
         QMutexLocker lock(&d->mutex);
         if (d->started || d->readOnly || Mode() == LicenseMode::Off) return;
         d->started = true;
+#ifdef HK_LICENSE_TEST_BUILD
+        // Synthetic registration tests must never contact a licensing service.
+        if (d->testNow > 0) return;
+#endif
         d->network = new QNetworkAccessManager(this);
         d->timer = new QTimer(this);
         d->timer->setInterval(60 * 1000);
@@ -768,8 +788,8 @@ void LicenseManager::Register(const QString& activationCode)
     {
         QMutexLocker lock(&d->mutex);
         if (Mode() == LicenseMode::Off || d->readOnly) return;
-        if (!CompleteFingerprint(d->fingerprint) && d->deviceToken.isEmpty()) {
-            d->syncMessage = QStringLiteral("无法获取完整机器标识，请联系管理员检查系统、主板和系统盘信息。");
+        if (!EligibleFingerprint(d->fingerprint)) {
+            d->syncMessage = QStringLiteral("无法获取至少两项有效机器标识，请检查系统、主板和系统盘信息。");
             lock.unlock();
             NotifyChanged();
             return;
@@ -817,6 +837,13 @@ void LicenseManager::Post(const QString& endpoint, QJsonObject body, bool regist
     QNetworkAccessManager* network = nullptr;
     {
         QMutexLocker lock(&d->mutex);
+#ifdef HK_LICENSE_TEST_BUILD
+        if (d->testNow > 0) {
+            d->testLastEndpoint = endpoint;
+            d->testLastRequest = body;
+            return;
+        }
+#endif
         if (d->requestInFlight || !d->network || d->readOnly || Mode() == LicenseMode::Off) return;
         if (d->PublicBlob().isEmpty()) {
             d->syncMessage = QStringLiteral("缺少发布授权公钥，无法联网激活。");
@@ -919,8 +946,8 @@ bool LicenseManager::ExportOfflineRequest(const QString& path, QString* error)
         QMutexLocker lock(&d->mutex);
         if (Mode() == LicenseMode::Off || d->readOnly)
             return Fail(error, QStringLiteral("当前构建未启用授权，不能导出申请。"));
-        if (!CompleteFingerprint(d->fingerprint))
-            return Fail(error, QStringLiteral("缺少有效机器标识，无法导出离线申请。"));
+        if (!EligibleFingerprint(d->fingerprint))
+            return Fail(error, QStringLiteral("至少需要两项有效机器标识，才能导出离线申请。"));
         d->pendingOfflineNonce = NewNonce();
         if (!d->Save(error)) return false; // Persist nonce before exposing the request.
         request = {
@@ -976,9 +1003,10 @@ void LicenseManager::ShowDialog(QWidget* parent, std::function<void()> safetyRec
 
 #ifdef HK_LICENSE_TEST_BUILD
 void LicenseManager::ResetForTest(const QString& statePath, const QJsonObject& fingerprint,
-    const QByteArray& publicBlob, const QString& installationId, qint64 now)
+    const QByteArray& publicBlob, const QString& installationId, qint64 now,
+    const QString& deviceToken)
 {
-    Q_ASSERT(!d->started);
+    Q_ASSERT(!d->network && !d->timer);
     d = std::make_unique<Data>();
     d->initialized = true;
     d->statePath = statePath;
@@ -986,6 +1014,17 @@ void LicenseManager::ResetForTest(const QString& statePath, const QJsonObject& f
     d->testPublicBlob = publicBlob;
     d->installationId = installationId;
     d->testNow = now;
+    d->deviceToken = deviceToken;
+}
+QJsonObject LicenseManager::LastRequestForTest() const
+{
+    QMutexLocker lock(&d->mutex);
+    return d->testLastRequest;
+}
+QString LicenseManager::LastRequestEndpointForTest() const
+{
+    QMutexLocker lock(&d->mutex);
+    return d->testLastEndpoint;
 }
 void LicenseManager::SetNowForTest(qint64 now)
 {

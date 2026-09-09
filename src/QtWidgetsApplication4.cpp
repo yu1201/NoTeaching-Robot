@@ -9666,10 +9666,12 @@ QtWidgetsApplication4::QtWidgetsApplication4(QWidget* parent)
 	auto* licenseStatusLabel = new QLabel(m_pDashboardPage);
 	licenseStatusLabel->setObjectName(QStringLiteral("LicenseStatusLabel"));
 	licenseStatusLabel->setWordWrap(true);
-	licenseStatusLabel->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
+	licenseStatusLabel->setTextFormat(Qt::RichText);
+	licenseStatusLabel->setOpenExternalLinks(false);
+	licenseStatusLabel->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
 	licenseStatusLabel->setStyleSheet(QStringLiteral("QLabel { color: #E4BE77; font-size: 13px; }"));
-	connect(licenseStatusLabel, &QLabel::linkActivated, this, [this](const QString&)
-		{ LicenseManager::Instance().ShowDialog(this); });
+	connect(licenseStatusLabel, &QLabel::linkActivated, this, [this](const QString& target)
+		{ if (target == QStringLiteral("license")) LicenseManager::Instance().ShowDialog(this); });
 	dashboardLayout->addWidget(licenseStatusLabel);
 
 	auto makeLargeButton = [](const QString& text, QWidget* parent) -> QPushButton*
@@ -11550,10 +11552,17 @@ void QtWidgetsApplication4::RefreshLicenseState()
 	{
 		QString state = license.StatusText();
 		label->setVisible(license.Mode() != LicenseManager::LicenseMode::Off);
-		label->setToolTip(state);
+		label->setToolTip(QStringLiteral("<qt>")
+			+ state.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"))
+			+ QStringLiteral("</qt>"));
 		state = state.section(QLatin1Char('\n'), 0, 1);
 		if (m_licenseStopPending) state += QStringLiteral(" | 等待安全停止确认");
-		const QString text = state.toHtmlEscaped()
+		// AutoText 只启发式识别首行；状态在链接前含换行时会把整段显示为原始 HTML。
+		// 每次刷新重申格式，避免后续通用样式/属性更新把此专用链接标签切回纯文本。
+		label->setTextFormat(Qt::RichText);
+		label->setOpenExternalLinks(false);
+		label->setTextInteractionFlags(Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard);
+		const QString text = state.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br/>"))
 			+ QStringLiteral("　<a style='color:#9ED8DB' href='license'>软件授权 / 激活</a>");
 		if (label->text() != text) label->setText(text);
 	}
