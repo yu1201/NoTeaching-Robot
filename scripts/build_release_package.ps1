@@ -158,12 +158,28 @@ if (-not $intermediateFull.StartsWith($intermediatePrefix, [System.StringCompari
     throw "Release intermediate cleanup escaped the controlled tmp/ReleaseBuild directory: $intermediateDir"
 }
 
-if (Test-Path -LiteralPath $buildDir) {
-    Remove-Item -LiteralPath $buildDir -Recurse -Force
+function Remove-ControlledReleaseDirectory {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        }
+        catch [System.IO.IOException] {
+            $lastError = $_
+        }
+        catch [System.UnauthorizedAccessException] {
+            $lastError = $_
+        }
+        if ($attempt -lt 20) { Start-Sleep -Milliseconds 500 }
+    }
+    throw "Controlled Release directory stayed locked after 10 seconds: $Path`n$lastError"
 }
-if (Test-Path -LiteralPath $intermediateDir) {
-    Remove-Item -LiteralPath $intermediateDir -Recurse -Force
-}
+
+Remove-ControlledReleaseDirectory -Path $buildDir
+Remove-ControlledReleaseDirectory -Path $intermediateDir
 if (Test-Path -LiteralPath $buildDir) {
     throw "Controlled Release build directory could not be cleaned: $buildDir"
 }
