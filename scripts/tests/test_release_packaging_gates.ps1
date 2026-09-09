@@ -132,6 +132,10 @@ try {
             (Join-Path $repoRoot $relative), [ref]$tokens, [ref]$errors) | Out-Null
         Assert-True ($errors.Count -eq 0) "$relative has PowerShell parse errors"
     }
+    $packageScriptText = Get-Content -LiteralPath (Join-Path $repoRoot "scripts\build_release_package.ps1") -Raw
+    Assert-True ($packageScriptText.Contains('function Normalize-WindowsCommandFile')) "package build must normalize .cmd bytes"
+    Assert-True ($packageScriptText.Contains('Normalize-WindowsCommandFile -Path $DestinationPath')) "tracked .cmd copies must be normalized"
+    Assert-True ($packageScriptText.Contains('Normalize-WindowsCommandFile -Path $toolDestination')) "installer-tool .cmd copies must be normalized"
 
     Assert-ReleaseVersion "2026.07.12.1200"
     Assert-Throws { Assert-ReleaseVersion "v2026.07.12.1200" } "version with v prefix must fail"
