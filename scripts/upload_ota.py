@@ -67,7 +67,10 @@ MAX_MANIFEST_JSON_BYTES = 256 * 1024
 MAX_REMOTE_JSON_BYTES = 4 * 1024 * 1024
 MAX_UPDATE_PAYLOAD_BYTES = 512 * 1024 * 1024
 SFTP_IO_TIMEOUT_SECONDS = 30
-SFTP_TOTAL_TIMEOUT_SECONDS = 30 * 60
+# Two full installers plus the brand patch can exceed 30 minutes on a constrained
+# field uplink. Keep the per-I/O stall timeout strict while allowing active,
+# continuously progressing transfers enough end-to-end time to finish.
+SFTP_TOTAL_TIMEOUT_SECONDS = 2 * 60 * 60
 EXPECTED_FANUC_TP_COUNT = 12
 EXPECTED_FANUC_PC_COUNT = 9
 PUBLISH_ATTESTATION_MAX_AGE_SECONDS = 5 * 60
