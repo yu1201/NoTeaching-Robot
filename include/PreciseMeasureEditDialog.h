@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Const.h"
+#include "ConfigSection.h"
 #include "ContralUnit.h"
 
 #include <QDialog>
@@ -62,7 +63,7 @@ private:
 
     RobotDriverAdaptor* GetSelectedRobotDriver();
     QString CurrentRobotName() const;
-    QString CurrentParamFilePath() const;
+    ConfigLocation CurrentParamConfig() const;
     QString CurrentSectionName(QString* error = nullptr) const;
     QString CurrentWeldSectionName(QString* error = nullptr) const;
     int CurrentGroupIndex() const;

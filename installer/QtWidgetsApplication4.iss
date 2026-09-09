@@ -1,12 +1,10 @@
 #define MyAppName "HK-Pathlynx-CORPLA"
-; AppId/MyAppGuid 与中性通道共用 A5A7E2A0（历史值，所有存量装机的注册表键都挂在它下面）。
-; AppId 一经发布永不可改；全量升级必须继续识别既有安装目录。
 #define MyAppGuid "A5A7E2A0-8226-40BB-B126-94C5D298B3CF"
 #ifndef MyAppVersion
-  #define MyAppVersion "2026.08.24.1333"
+  #define MyAppVersion "2026.09.09.0132"
 #endif
 #ifndef MyOutputBaseFilename
-  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.08.24.1333"
+  #define MyOutputBaseFilename "HK-Pathlynx-CORPLA-Setup-v2026.09.09.0132"
 #endif
 #define MyAppPublisher "海瞰智焊"
 #define MyAppExeName "HK-Pathlynx-CORPLA.exe"

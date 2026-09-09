@@ -26,7 +26,6 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       # An accidental publish invocation must fail before opening a connection.
       OTA_SIGNING_KEY_FILE: ""
-      OTA_SSH_PASSWORD: ""
 
     steps:
       - name: Check out without persisted credentials
@@ -34,6 +33,15 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Fetch release branch tips for offline boundary tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags --prune --depth=1 origin `
+            "+refs/heads/main:refs/remotes/origin/main" `
+            "+refs/heads/hk-pathlynx-corpla:refs/remotes/origin/hk-pathlynx-corpla"
+          if ($LASTEXITCODE -ne 0) { throw "Release branch tip fetch failed." }
 
       - name: Set up pinned Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -76,7 +84,26 @@ jobs:
             "scripts/tests/verify_robot_operation_interlock.py",
             "scripts/tests/verify_scan_cycle_wiring.py",
             "scripts/tests/verify_auth_recovery_ui.py",
+            "scripts/tests/verify_camera_point_coordinate_contract.py",
+            "scripts/tests/verify_control_unit_timestamp_ui.py",
+            "scripts/tests/verify_database_native_configuration.py",
+            "scripts/tests/verify_inovance_driver_adaptor.py",
+            "scripts/tests/verify_inovance_kinematics_acquisition.py",
+            "scripts/tests/verify_inovance_kinematics_lifecycle.py",
+            "scripts/tests/verify_inovance_mode_preparation_persistence.py",
+            "scripts/tests/verify_inovance_tool1_contract.py",
+            "scripts/tests/verify_measure_then_weld_capability_policy.py",
+            "scripts/tests/verify_mode_preparation_persistence_ui.py",
+            "scripts/tests/verify_robot_adaptor_acceptance_flow.py",
+            "scripts/tests/verify_robot_connection_initialization_ui.py",
+            "scripts/tests/verify_robot_driver_adaptor_boundary.py",
+            "scripts/tests/verify_robot_recovery_safety.py",
+            "scripts/tests/verify_robot_runtime_timestamp_scope.py",
+            "scripts/tests/verify_scan_pose_variation_test.py",
+            "scripts/tests/verify_scan_safety_gate_ui.py",
             "scripts/tests/verify_security_credentials.py",
+            "scripts/tests/verify_weld_safe_retreat_terminal.py",
+            "scripts/tests/verify_weld_safety_recovery_store.py",
             "scripts/tests/verify_weld_resume_binding.py"
           )
           foreach ($test in $tests) {

@@ -2,7 +2,7 @@
 
 #include "ConfigDatabase.h"
 #include "ContralUnit.h"
-#include "OPini.h"
+#include "ConfigSection.h"
 #include "RobotDataHelper.h"
 #include "RobotMessage.h"
 #include "RobotOperationLease.h"
@@ -213,7 +213,7 @@ void ProcessLoopTestDialog::BuildUi()
             QString error;
             const QString robot = CurrentRobotName();
             if (robot.isEmpty() || !RobotDataHelper::WriteParamValue(
-                RobotDataHelper::MeasureWeldParamPath(robot),
+                RobotDataHelper::MeasureWeldConfig(robot),
                 QStringLiteral("MeasureWeldGroups"), QStringLiteral("UseGroupNo"),
                 QString::number(std::max(0, m_paramGroupCombo->currentData().toInt())), &error))
             {
@@ -244,7 +244,7 @@ void ProcessLoopTestDialog::BuildUi()
             }
             AppendLog(QStringLiteral("焊接工艺已切换为：%1").arg(m_processCombo->currentText()));
         });
-    auto saveCompSelection = [this](QComboBox* combo, const QString& fileName,
+    auto saveCompSelection = [this](QComboBox* combo, const QString& moduleName,
         const QString& allSection, const QString& activeKey, const QString& what)
         {
             if (m_loadingSelectors || m_running.load() || combo == nullptr)
@@ -258,7 +258,7 @@ void ProcessLoopTestDialog::BuildUi()
             }
             QString error;
             if (!RobotDataHelper::WriteParamValue(
-                RobotDataHelper::BuildProjectPath(QStringLiteral("Data/%1/%2").arg(robot, fileName)),
+                ConfigLocation::Robot(robot, moduleName),
                 allSection, activeKey,
                 QString::number(std::max(0, combo->currentData().toInt())), &error))
             {
@@ -270,13 +270,13 @@ void ProcessLoopTestDialog::BuildUi()
     connect(m_poseCompCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
         [this, saveCompSelection](int)
         {
-            saveCompSelection(m_poseCompCombo, QStringLiteral("WeldPoseCompParam.ini"),
+            saveCompSelection(m_poseCompCombo, QStringLiteral("WeldPoseCompParam"),
                 QStringLiteral("ALLWeldPoseComp"), QStringLiteral("ActivePoseCompGroupIndex"), QStringLiteral("姿态补偿组"));
         });
     connect(m_seamCompCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
         [this, saveCompSelection](int)
         {
-            saveCompSelection(m_seamCompCombo, QStringLiteral("WeldSeamCompParam.ini"),
+            saveCompSelection(m_seamCompCombo, QStringLiteral("WeldSeamCompParam"),
                 QStringLiteral("ALLWeldSeamComp"), QStringLiteral("ActiveSeamCompGroupIndex"), QStringLiteral("焊道补偿组"));
         });
 
@@ -485,12 +485,12 @@ void ProcessLoopTestDialog::ReloadSelectorsForCurrentUnit()
     LoadProcessCombo();
     const QString robot = CurrentRobotName();
     LoadCompCombo(m_poseCompCombo,
-        RobotDataHelper::BuildProjectPath(QStringLiteral("Data/%1/WeldPoseCompParam.ini").arg(robot)),
+        ConfigLocation::Robot(robot, QStringLiteral("WeldPoseCompParam")),
         QStringLiteral("ALLWeldPoseComp"), QStringLiteral("PoseCompCount"),
         QStringLiteral("PoseCompGroupCount"), QStringLiteral("ActivePoseCompGroupIndex"),
         QStringLiteral("WeldPoseCompGroup"), QStringLiteral("姿态补偿组"));
     LoadCompCombo(m_seamCompCombo,
-        RobotDataHelper::BuildProjectPath(QStringLiteral("Data/%1/WeldSeamCompParam.ini").arg(robot)),
+        ConfigLocation::Robot(robot, QStringLiteral("WeldSeamCompParam")),
         QStringLiteral("ALLWeldSeamComp"), QStringLiteral("SeamCompCount"),
         QStringLiteral("SeamCompGroupCount"), QStringLiteral("ActiveSeamCompGroupIndex"),
         QStringLiteral("WeldSeamCompGroup"), QStringLiteral("焊道补偿组"));
@@ -506,13 +506,12 @@ void ProcessLoopTestDialog::LoadParamGroupCombo()
     m_paramGroupCombo->clear();
     const QString robot = CurrentRobotName();
     QString error;
-    if (robot.isEmpty() || !RobotDataHelper::EnsureMeasureWeldParamFile(robot, &error))
+    if (robot.isEmpty() || !RobotDataHelper::EnsureMeasureWeldParameters(robot, &error))
     {
         return;
     }
-    COPini ini;
-    const QString path = RobotDataHelper::MeasureWeldParamPath(robot);
-    if (!ini.SetFileName(path.toUtf8().constData()))
+    ConfigSection ini;
+    if (!ini.SetLocation(RobotDataHelper::MeasureWeldConfig(robot)))
     {
         return;
     }
@@ -584,7 +583,7 @@ void ProcessLoopTestDialog::LoadProcessCombo()
     }
 }
 
-void ProcessLoopTestDialog::LoadCompCombo(QComboBox* combo, const QString& path, const QString& allSection,
+void ProcessLoopTestDialog::LoadCompCombo(QComboBox* combo, const ConfigLocation& location, const QString& allSection,
     const QString& rowCountKey, const QString& groupCountKey, const QString& activeKey,
     const QString& groupSectionPrefix, const QString& defaultNamePrefix)
 {
@@ -596,10 +595,10 @@ void ProcessLoopTestDialog::LoadCompCombo(QComboBox* combo, const QString& path,
     combo->clear();
     int activeIndex = 0;
     int groupCount = 1;
-    if (ConfigDatabase::HasIniFile(path))
+    if (ConfigDatabase::HasScopedModule(location.scopeType, location.scopeId, location.module))
     {
-        COPini ini;
-        if (ini.SetFileName(path.toUtf8().constData()))
+        ConfigSection ini;
+        if (ini.SetLocation(location))
         {
             ini.SetSectionName(allSection.toUtf8().constData());
             ini.ReadString(false, activeKey.toUtf8().constData(), &activeIndex);

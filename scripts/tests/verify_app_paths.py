@@ -40,7 +40,7 @@ def assert_static_wiring() -> None:
             'WritablePath(QStringLiteral("Temp/OnlineUpload"))',
             "ResolveSafeResultCaseDir",
             'WritableChildPath(\n\t\t\tQStringLiteral("Temp/OnlineUpload"), localZipName)',
-            "OnlineServicesConfig::IsServerAccountName(config.deviceName)",
+            "AppPaths::IsSafePathComponent(config.deviceName)",
         ),
         "src/PointCloudExtractionProcessor.cpp": ('WritablePath(QStringLiteral("Temp/PointCloudWorkers"))',),
         "src/BcpdModelAligner.cpp": ('WritablePath(QStringLiteral("Temp/BCPD"))',),

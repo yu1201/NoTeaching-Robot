@@ -235,7 +235,8 @@ class CandidateFixture:
             for index in range(ota.EXPECTED_FANUC_PC_COUNT):
                 (dist / "SDK" / "FANUC" / f"runtime-{index:02d}.pc").write_bytes(f"pc-{index}".encode())
         (self.brand_dist / "branding").mkdir()
-        (self.brand_dist / "branding" / "branding.ini").write_bytes(b"brand=1")
+        (self.brand_dist / "branding" / "app_color.ico").write_bytes(b"color-icon")
+        (self.brand_dist / "branding" / "app_nobg.ico").write_bytes(b"nobg-icon")
 
         self.neutral_installer = root / ota._expected_installer_name("neutral", self.VERSION)
         self.brand_installer = root / ota._expected_installer_name("brand", self.VERSION)
@@ -263,6 +264,7 @@ class CandidateFixture:
         for script_name in (
             "build_installer.ps1",
             "build_release_package.ps1",
+            "license_build_gate.ps1",
             "build_config_migrate.ps1",
             "release_gate_common.ps1",
             "verify_release_pair.ps1",
@@ -851,7 +853,7 @@ class LocalGateTests(unittest.TestCase):
             with mock.patch.object(
                 ota,
                 "_path_is_reparse_point",
-                side_effect=lambda path: Path(path) == link_like
+                side_effect=lambda path: ota._same_local_path(path, link_like)
                 or original_reparse_check(Path(path)),
             ), self.assertRaisesRegex(ota.ReleaseGateError, "link/reparse"):
                 ota._snapshot_bounded_tree(
@@ -870,7 +872,7 @@ class LocalGateTests(unittest.TestCase):
             real_open = open
 
             def growing_open(path, *args, **kwargs):
-                if Path(path) == growing:
+                if ota._same_local_path(path, growing):
                     return io.BytesIO(b"xx")
                 return real_open(path, *args, **kwargs)
 
@@ -959,6 +961,27 @@ class LocalGateTests(unittest.TestCase):
             )
         signer.assert_not_called()
         ssh.assert_not_called()
+
+    def test_trusted_release_requires_and_forwards_license_public_key(self):
+        parser = ota._build_parser()
+        host_key = "SHA256:" + "A" * 43
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args([
+                "trusted-release-dual", "--version", CandidateFixture.VERSION,
+                "--runtime-source", ".", "--ssh-password-stdin",
+                "--host-key-sha256", host_key,
+            ])
+        args = parser.parse_args([
+            "trusted-release-dual", "--version", CandidateFixture.VERSION,
+            "--runtime-source", ".", "--license-public-key-header", "C:\\keys\\public-key.h",
+            "--ssh-password-stdin", "--host-key-sha256", host_key,
+        ])
+        self.assertEqual(args.license_public_key_header, "C:\\keys\\public-key.h")
+
+        source = MODULE_PATH.read_text(encoding="utf-8")
+        self.assertIn('"scripts/license_build_gate.ps1"', source)
+        self.assertIn('"-LicenseMode", "Off" if channel == "neutral" else "Enforce"', source)
+        self.assertIn('"-LicensePublicKeyHeader", str(license_public_key_header)', source)
 
     def test_ota_failure_never_creates_github_and_github_failure_is_ambiguous(self):
         host_key = "SHA256:" + "A" * 43
@@ -1220,6 +1243,7 @@ class LocalGateTests(unittest.TestCase):
                 "tag": f"v{CandidateFixture.VERSION}",
             }
             metadata = {
+                "id": 987654,
                 "tag_name": preflight["tag"],
                 "target_commitish": "main",
                 "draft": True,
@@ -1245,6 +1269,16 @@ class LocalGateTests(unittest.TestCase):
                             "ref": "refs/heads/main",
                             "object": {"type": "commit", "sha": neutral_head},
                         }))
+                    if arguments[1].endswith("/releases?per_page=100"):
+                        call_order.append("draft-list")
+                        return types.SimpleNamespace(stdout=json.dumps([metadata]))
+                    if "--method" in arguments and "PATCH" in arguments:
+                        call_order.append("release-edit")
+                        self.assertIn("draft=false", arguments)
+                        state["published"] = True
+                        response = dict(metadata)
+                        response["draft"] = False
+                        return types.SimpleNamespace(stdout=json.dumps(response))
                     call_order.append("published-api" if state["published"] else "draft-api")
                     response = dict(metadata)
                     response["draft"] = not state["published"]
@@ -1255,9 +1289,6 @@ class LocalGateTests(unittest.TestCase):
                     neutral_bytes = b"corrupt" if state["corruptDownload"] else neutral.read_bytes()
                     (destination / neutral.name).write_bytes(neutral_bytes)
                     (destination / brand.name).write_bytes(brand.read_bytes())
-                if arguments[:2] == ["release", "edit"]:
-                    call_order.append("release-edit")
-                    state["published"] = True
                 return types.SimpleNamespace(stdout="")
 
             original_fake_gh = fake_gh
@@ -1303,6 +1334,22 @@ class LocalGateTests(unittest.TestCase):
             self.assertNotIn("release-edit", call_order)
 
     def test_brand_source_boundary_rejects_src_or_installer_run_drift(self):
+        def branch_ref(branch: str) -> str:
+            for candidate in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
+                completed = subprocess.run(
+                    ["git", "rev-parse", "--verify", "--quiet", candidate],
+                    cwd=REPO_ROOT,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if completed.returncode == 0:
+                    return candidate
+            self.fail(f"missing local or origin release branch ref: {branch}")
+
+        main_ref = branch_ref("main")
+        brand_ref = branch_ref("hk-pathlynx-corpla")
+
         def git_blob(ref: str, relative: str) -> bytes:
             return subprocess.check_output(
                 ["git", "show", f"{ref}:{relative}"], cwd=REPO_ROOT
@@ -1316,8 +1363,7 @@ class LocalGateTests(unittest.TestCase):
             brand.mkdir()
             for relative in (".gitignore", "QtWidgetsApplication4.vcxproj",
                              "installer/QtWidgetsApplication4.iss"):
-                for target, ref in ((neutral, "refs/heads/main"),
-                                    (brand, "refs/heads/hk-pathlynx-corpla")):
+                for target, ref in ((neutral, main_ref), (brand, brand_ref)):
                     path = target / relative
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(git_blob(ref, relative))
@@ -1327,25 +1373,32 @@ class LocalGateTests(unittest.TestCase):
                     continue
                 path = brand / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(git_blob("refs/heads/hk-pathlynx-corpla", relative))
+                path.write_bytes(git_blob(brand_ref, relative))
 
             main_head = subprocess.check_output(
-                ["git", "rev-parse", "refs/heads/main"], cwd=REPO_ROOT, text=True
+                ["git", "rev-parse", main_ref], cwd=REPO_ROOT, text=True
             ).strip()
             brand_head = subprocess.check_output(
-                ["git", "rev-parse", "refs/heads/hk-pathlynx-corpla"],
+                ["git", "rev-parse", brand_ref],
                 cwd=REPO_ROOT, text=True,
             ).strip()
-            ota._assert_brand_source_boundary(
-                REPO_ROOT, neutral, brand, main_head, brand_head
-            )
-
+            allowed_delta = "\n".join(sorted(ota._ALLOWED_BRAND_TRACKED_DELTA))
             original_git_text = ota._git_text
-            def malicious_diff(repo_root, *arguments):
-                value = original_git_text(repo_root, *arguments)
+
+            def clean_diff(repo_root, *arguments):
                 if arguments and arguments[0] == "diff":
-                    return value + "\nsrc/Backdoor.cpp"
-                return value
+                    return allowed_delta
+                return original_git_text(repo_root, *arguments)
+
+            with mock.patch.object(ota, "_git_text", side_effect=clean_diff):
+                ota._assert_brand_source_boundary(
+                    REPO_ROOT, neutral, brand, main_head, brand_head
+                )
+
+            def malicious_diff(repo_root, *arguments):
+                if arguments and arguments[0] == "diff":
+                    return allowed_delta + "\nsrc/Backdoor.cpp"
+                return original_git_text(repo_root, *arguments)
             with mock.patch.object(ota, "_git_text", side_effect=malicious_diff), \
                     self.assertRaisesRegex(ota.ReleaseGateError, "allowlist"):
                 ota._assert_brand_source_boundary(
@@ -1358,7 +1411,8 @@ class LocalGateTests(unittest.TestCase):
                 + '\n[Run]\nFilename: "{app}\\evil.exe"\n',
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ota.ReleaseGateError, "功能行"):
+            with mock.patch.object(ota, "_git_text", side_effect=clean_diff), \
+                    self.assertRaisesRegex(ota.ReleaseGateError, "功能行"):
                 ota._assert_brand_source_boundary(
                     REPO_ROOT, neutral, brand, main_head, brand_head
                 )

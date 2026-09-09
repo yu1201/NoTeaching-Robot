@@ -1665,10 +1665,8 @@ void OnlineServicesDialog::SetServerConfigEditing(bool editing)
 
 QString OnlineServicesDialog::UpdateChannel() const
 {
-	// 通道按品牌覆盖是否生效判定：品牌包随安装包分发 branding/branding.ini（打包脚本仅在
-	// branding/ 被 git 跟踪的品牌分支才拷入），装到设备后 IsActive()=true → brand 通道；
-	// 中性包不含 branding/ → neutral。exe 文件名两通道相同(QtWidgetsApplication4.exe)不可用作判据。
-	// 若品牌设备 branding/ 被误删，程序整体已退化为中性(名称/图标全默认)，走 neutral 通道装中性包与之一致。
+	// 通道按数据库 global/Branding/Active 判定；品牌包首次发现完整品牌图标资源时初始化该记录。
+	// 中性包不含 branding/ 资源，不会创建品牌记录。exe 文件名两通道相同，不可用作判据。
 	return BrandingConfig::IsActive() ? QStringLiteral("brand") : QStringLiteral("neutral");
 }
 

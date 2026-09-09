@@ -19,6 +19,9 @@ struct CandidateKeyPoint
     double profile = 0.0;
     CornerType type = CornerType::Other;
     bool lapBoundary = false;
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
 };
 
 struct CandidateCheck
@@ -35,6 +38,7 @@ struct CandidateCheck
     int bandDirection = 0;
     std::string fingerprint;
     std::vector<std::string> failures;
+    std::vector<std::string> diagnostics;
 };
 
 CandidateCheck EvaluateCandidate(

@@ -6,7 +6,8 @@
 #include "MeasureThenWeldService.h"
 #include "MeasureThenWeldRuntimeConfig.h"
 #include "ModelWeldingFlowDialog.h"
-#include "OPini.h"
+#include "ConfigSection.h"
+#include "PointCloudProcessingConfig.h"
 #include "RobotModelCatalogStore.h"
 #include "RobotDriverAdaptor.h"
 #include "RobotDataHelper.h"
@@ -232,11 +233,37 @@ QString RobotDriverTypeName(RobotDriverAdaptor* driver)
 bool TerminatePersistedProgramBeforeRecovery(
     RobotDriverAdaptor* driver,
     const WeldResumePlanner::CheckpointRecord& record,
-    QString& error)
+    QString& error,
+    bool enforceRecoveryIdentity)
 {
     error.clear();
-    if (driver == nullptr
-        || record.programName.trimmed().isEmpty()
+    if (driver == nullptr)
+    {
+        error = QStringLiteral("持久恢复终止缺少机器人驱动，禁止后续运动。");
+        return false;
+    }
+    if (!enforceRecoveryIdentity)
+    {
+        QString motionError;
+        if (!RobotOperationLease::MarkMotionStarted(driver, false, &motionError))
+        {
+            error = QStringLiteral("关闭恢复身份核验后无法登记当前程序终态：") + motionError;
+            return false;
+        }
+        if (!driver->AbortCurrentProgramSafely())
+        {
+            error = QStringLiteral("当前控制器程序未能安全停止：")
+                + QString::fromStdString(driver->GetLastRobotError());
+            return false;
+        }
+        if (!RobotOperationLease::MarkMotionCompleted(driver))
+        {
+            error = QStringLiteral("控制器已返回停止，但无法登记稳定终态，禁止后续运动。");
+            return false;
+        }
+        return true;
+    }
+    if (record.programName.trimmed().isEmpty()
         || RobotOperationLease::PersistentEndpointIdentity(driver) != record.robotEndpoint)
     {
         error = QStringLiteral("持久恢复终止缺少匹配的机器人端点或程序身份，禁止后续运动。");
@@ -795,8 +822,8 @@ TimeOffsetCalibrationResult ComputeTimeOffsetCalibration(
 // 把标定出的补偿值写入该机器人全部测量参数组（延迟是相机/链路属性，不随参数组变）。
 bool WriteCameraTimeOffsetToAllScanGroups(const QString& robotName, double valueMs, int* groupsWritten, QString* error)
 {
-    COPini ini;
-    if (!ini.SetFileName(ToUtf8StdString(RobotDataHelper::MeasureWeldParamPath(robotName))))
+    ConfigSection ini;
+    if (!ini.SetLocation(RobotDataHelper::MeasureWeldConfig(robotName)))
     {
         if (error != nullptr)
         {
@@ -892,19 +919,19 @@ int CountWeldProcessLayers(const std::vector<T_WELD_PARA>& weldList, const QStri
     return std::max(1, layerCount);
 }
 
-QString BuildPoseCompParamPath(const QString& robotName)
+ConfigLocation BuildPoseCompConfig(const QString& robotName)
 {
-    return RobotDataHelper::BuildProjectPath(QString("Data/%1/WeldPoseCompParam.ini").arg(robotName));
+    return ConfigLocation::Robot(robotName, QStringLiteral("WeldPoseCompParam"));
 }
 
-QString BuildSeamCompParamPath(const QString& robotName)
+ConfigLocation BuildSeamCompConfig(const QString& robotName)
 {
-    return RobotDataHelper::BuildProjectPath(QString("Data/%1/WeldSeamCompParam.ini").arg(robotName));
+    return ConfigLocation::Robot(robotName, QStringLiteral("WeldSeamCompParam"));
 }
 
 void LoadCompGroupCombo(
     QComboBox* combo,
-    const QString& path,
+    const ConfigLocation& location,
     const QString& allSection,
     const QString& rowCountKey,
     const QString& groupCountKey,
@@ -922,11 +949,12 @@ void LoadCompGroupCombo(
 
     int activeIndex = 0;
     int groupCount = 1;
-    const bool hasConfig = ConfigDatabase::HasIniFile(path);
+    const bool hasConfig = ConfigDatabase::HasScopedModule(
+        location.scopeType, location.scopeId, location.module);
     if (hasConfig)
     {
-        COPini ini;
-        if (ini.SetFileName(ToUtf8StdString(path)))
+        ConfigSection ini;
+        if (ini.SetLocation(location))
         {
             ini.SetSectionName(ToUtf8StdString(allSection));
             ini.ReadString(false, ToUtf8StdString(activeGroupIndexKey), &activeIndex);
@@ -981,24 +1009,25 @@ void LoadCompGroupCombo(
 }
 
 bool SaveActiveCompGroupIndex(
-    const QString& path,
+    const ConfigLocation& location,
     const QString& allSection,
     const QString& activeGroupIndexKey,
     int activeIndex,
     QString& error)
 {
-    if (path.isEmpty())
+    if (!location.IsValid())
     {
         error = "补偿参数配置库不可用。";
         return false;
     }
-    if (!ConfigDatabase::HasIniFile(path) && activeIndex <= 0)
+    if (!ConfigDatabase::HasScopedModule(
+            location.scopeType, location.scopeId, location.module) && activeIndex <= 0)
     {
         return true;
     }
 
-    COPini ini;
-    if (!ini.SetFileName(false, ToUtf8StdString(path)))
+    ConfigSection ini;
+    if (!ini.SetLocation(location))
     {
         error = "打开补偿参数失败。";
         return false;
@@ -1352,7 +1381,7 @@ void MeasureThenWeldDialog::LoadParamGroups()
 
     const QString robotName = CurrentRobotName();
     QString error;
-    if (robotName.isEmpty() || !RobotDataHelper::EnsureMeasureWeldParamFile(robotName, &error))
+    if (robotName.isEmpty() || !RobotDataHelper::EnsureMeasureWeldParameters(robotName, &error))
     {
         if (!error.isEmpty())
         {
@@ -1362,11 +1391,10 @@ void MeasureThenWeldDialog::LoadParamGroups()
         return;
     }
 
-    COPini ini;
-    const QString path = RobotDataHelper::MeasureWeldParamPath(robotName);
-    if (!ini.SetFileName(path.toLocal8Bit().constData()))
+    ConfigSection ini;
+    if (!ini.SetLocation(RobotDataHelper::MeasureWeldConfig(robotName)))
     {
-        AppendLog("读取位置类型失败：打开参数数据失败：" + path);
+        AppendLog("读取位置类型失败：参数数据库位置无效：" + robotName);
         m_bLoadingSelectors = false;
         return;
     }
@@ -1470,7 +1498,7 @@ void MeasureThenWeldDialog::LoadCompGroupLists()
     m_bLoadingSelectors = true;
     LoadCompGroupCombo(
         m_pPoseCompGroupCombo,
-        BuildPoseCompParamPath(robotName),
+        BuildPoseCompConfig(robotName),
         "ALLWeldPoseComp",
         "PoseCompCount",
         POSE_GROUP_COUNT_KEY,
@@ -1479,7 +1507,7 @@ void MeasureThenWeldDialog::LoadCompGroupLists()
         "姿态补偿组");
     LoadCompGroupCombo(
         m_pSeamCompGroupCombo,
-        BuildSeamCompParamPath(robotName),
+        BuildSeamCompConfig(robotName),
         "ALLWeldSeamComp",
         "SeamCompCount",
         SEAM_GROUP_COUNT_KEY,
@@ -1554,9 +1582,9 @@ QString MeasureThenWeldDialog::CurrentRobotName() const
     }
 
     RobotDriverAdaptor* driver = RobotDataHelper::GetRobotDriver(m_pContralUnit, m_unitIndex);
-    if (driver != nullptr && !driver->m_sRobotName.empty())
+    if (driver != nullptr && !driver->RobotName().empty())
     {
-        return QString::fromStdString(driver->m_sRobotName);
+        return QString::fromStdString(driver->RobotName());
     }
     return QString();
 }
@@ -1598,7 +1626,7 @@ bool MeasureThenWeldDialog::ResolveModelWeldingAvailabilityForRow(
         reason = QStringLiteral("控制单元没有有效的机器人类型。");
         return false;
     }
-    if (configuredRobotType != driver->m_nRobotType)
+    if (configuredRobotType != driver->RobotType())
     {
         reason = QStringLiteral("控制单元机器人类型与当前驱动不一致。");
         return false;
@@ -1614,7 +1642,7 @@ bool MeasureThenWeldDialog::ResolveModelWeldingAvailabilityForRow(
     RobotModelCatalogStore::Eligibility eligibility;
     QString catalogError;
     if (!RobotModelCatalogStore::ResolveModelEligibility(
-            modelId, driver->m_nRobotType, eligibility, catalogError))
+            modelId, driver->RobotType(), eligibility, catalogError))
     {
         reason = catalogError.trimmed().isEmpty()
             ? QStringLiteral("机器人模型目录无法可信读取。")
@@ -1776,7 +1804,7 @@ bool MeasureThenWeldDialog::SaveCurrentParamGroupSelection(QString& error) const
         return false;
     }
     return RobotDataHelper::WriteParamValue(
-        RobotDataHelper::MeasureWeldParamPath(robotName),
+        RobotDataHelper::MeasureWeldConfig(robotName),
         "MeasureWeldGroups",
         "UseGroupNo",
         QString::number(CurrentParamGroupIndex()),
@@ -1837,7 +1865,7 @@ bool MeasureThenWeldDialog::SaveCurrentCompGroupSelections(QString& error) const
     }
 
     if (!SaveActiveCompGroupIndex(
-        BuildPoseCompParamPath(robotName),
+        BuildPoseCompConfig(robotName),
         "ALLWeldPoseComp",
         POSE_ACTIVE_GROUP_INDEX_KEY,
         CurrentPoseCompGroupIndex(),
@@ -1847,7 +1875,7 @@ bool MeasureThenWeldDialog::SaveCurrentCompGroupSelections(QString& error) const
     }
 
     if (!SaveActiveCompGroupIndex(
-        BuildSeamCompParamPath(robotName),
+        BuildSeamCompConfig(robotName),
         "ALLWeldSeamComp",
         SEAM_ACTIVE_GROUP_INDEX_KEY,
         CurrentSeamCompGroupIndex(),
@@ -1907,17 +1935,17 @@ bool MeasureThenWeldDialog::LoadPresetParam(RobotDriverAdaptor* pRobotDriver, T_
     return m_pService != nullptr && m_pService->LoadPresetParam(pRobotDriver, param, error);
 }
 
-bool MeasureThenWeldDialog::ReadPulse(COPini& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const
+bool MeasureThenWeldDialog::ReadPulse(ConfigSection& ini, const std::string& prefix, T_ANGLE_PULSE& pulse, QString& error) const
 {
     return m_pService != nullptr && m_pService->ReadPulse(ini, prefix, pulse, error);
 }
 
-bool MeasureThenWeldDialog::ReadCoors(COPini& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const
+bool MeasureThenWeldDialog::ReadCoors(ConfigSection& ini, const std::string& prefix, T_ROBOT_COORS& coors, QString& error) const
 {
     return m_pService != nullptr && m_pService->ReadCoors(ini, prefix, coors, error);
 }
 
-bool MeasureThenWeldDialog::ReadPulseList(COPini& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const
+bool MeasureThenWeldDialog::ReadPulseList(ConfigSection& ini, const std::string& countKey, const std::string& prefix, std::vector<T_ANGLE_PULSE>& pulses, QString& error) const
 {
     return m_pService != nullptr && m_pService->ReadPulseList(ini, countKey, prefix, pulses, error);
 }
@@ -2257,7 +2285,7 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
     if (!MeasureThenWeldService::InvalidateStoredWeldResumeCheckpoint(
         QString::fromStdString(param.sRobotName), invalidateError))
     {
-        QMessageBox::warning(this, "先测后焊",
+        ShowNonModalFlowResult(this, QMessageBox::Warning, "先测后焊",
             invalidateError + QStringLiteral("；未开始相机或机器人动作。"));
         return;
     }
@@ -2268,7 +2296,10 @@ void MeasureThenWeldDialog::RunPresetParamFlow()
     SetProgress(5, "读取预设参数完成");
     SetFlowStep("读取预设参数完成，准备启动相机");
     AppendLog(QString("已读取参数：%1，位置类型=%2 [%3]")
-        .arg(QString::fromStdString(param.sIniFilePath))
+        .arg(QStringLiteral("%1/%2/%3").arg(
+            param.configLocation.scopeType,
+            param.configLocation.scopeId,
+            param.configLocation.module))
         .arg(param.sParamGroupName)
         .arg(QString::fromStdString(param.sSectionName)));
     AppendLog(QString("焊接执行模式：%1，焊接速度=%2 mm/min，空跑速度=%3 mm/min，安全位速度=%4 mm/min")
@@ -2678,7 +2709,7 @@ void MeasureThenWeldDialog::RunSkipScanWeldFlow()
     if (!MeasureThenWeldService::InvalidateStoredWeldResumeCheckpoint(
         QString::fromStdString(param.sRobotName), invalidateError))
     {
-        QMessageBox::warning(this, "跳过扫描焊接",
+        ShowNonModalFlowResult(this, QMessageBox::Warning, "跳过扫描焊接",
             invalidateError + QStringLiteral("；未开始处理或机器人动作。"));
         return;
     }
@@ -3854,14 +3885,17 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
         return;
     }
     checkpointRecord = pausedRecoveryBinding.record;
+    const bool enforceRecoveryIdentity = PointCloudProcessingConfig::RuntimeSystemInterlocks()
+        .IsEnabled(SystemInterlock::RecoveryIdentity);
     QString revalidatedPosePath;
     QString revalidateError;
-    if (RobotOperationLease::PersistentEndpointIdentity(pRobotDriver) != checkpointRecord.robotEndpoint
-        || RobotDriverTypeName(pRobotDriver) != checkpointRecord.robotType
-        || !WeldResumePlanner::ResolveBoundTrajectory(
-            projectRoot, robotName, checkpointRecord, revalidatedPosePath, &revalidateError)
-        || QFileInfo(revalidatedPosePath).canonicalFilePath().compare(
-            QFileInfo(posePath).canonicalFilePath(), Qt::CaseInsensitive) != 0)
+    if (enforceRecoveryIdentity
+        && (RobotOperationLease::PersistentEndpointIdentity(pRobotDriver) != checkpointRecord.robotEndpoint
+            || RobotDriverTypeName(pRobotDriver) != checkpointRecord.robotType
+            || !WeldResumePlanner::ResolveBoundTrajectory(
+                projectRoot, robotName, checkpointRecord, revalidatedPosePath, &revalidateError)
+            || QFileInfo(revalidatedPosePath).canonicalFilePath().compare(
+                QFileInfo(posePath).canonicalFilePath(), Qt::CaseInsensitive) != 0))
     {
         QMessageBox::warning(this, "断点续焊",
             revalidateError.isEmpty()
@@ -3871,7 +3905,7 @@ void MeasureThenWeldDialog::RunResumeWeldFlow()
     }
     QString terminatePausedError;
     if (!TerminatePersistedProgramBeforeRecovery(
-            pRobotDriver, checkpointRecord, terminatePausedError))
+            pRobotDriver, checkpointRecord, terminatePausedError, enforceRecoveryIdentity))
     {
         QMessageBox::warning(this, "断点续焊",
             QStringLiteral("旧 paused 程序未终止，未切换 resuming、未发起任何运动：")
@@ -4069,12 +4103,14 @@ void MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow()
     {
         return;
     }
-    const QString robotName = QString::fromStdString(pRobotDriver->m_sRobotName).trimmed();
+    const QString robotName = QString::fromStdString(pRobotDriver->RobotName()).trimmed();
+    const bool enforceRecoveryIdentity = PointCloudProcessingConfig::RuntimeSystemInterlocks()
+        .IsEnabled(SystemInterlock::RecoveryIdentity);
     bool pending = false;
     QString error;
     if (!SafeRetreatPending(robotName, pending, &error))
     {
-        QMessageBox::warning(this, "焊后安全回撤恢复", error);
+        ShowNonModalFlowResult(this, QMessageBox::Warning, "焊后安全回撤恢复", error);
         return;
     }
     if (!pending)
@@ -4088,21 +4124,22 @@ void MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow()
     if (!ReadBreakpointRecord(robotName, record, &encoded, &error)
         || !WeldResumePlanner::ValidateSafeRetreatRecoveryRecord(record, &error))
     {
-        QMessageBox::warning(this, "焊后安全回撤恢复",
+        ShowNonModalFlowResult(this, QMessageBox::Warning, "焊后安全回撤恢复",
             error + QStringLiteral("\n记录无效时禁止自动运动；请人工确认现场并由维护人员处理持久门禁。"));
         return;
     }
     const QString currentEndpoint = RobotOperationLease::PersistentEndpointIdentity(pRobotDriver);
-    if (currentEndpoint.isEmpty() || currentEndpoint != record.robotEndpoint)
+    if (enforceRecoveryIdentity
+        && (currentEndpoint.isEmpty() || currentEndpoint != record.robotEndpoint))
     {
-        QMessageBox::warning(this, "焊后安全回撤恢复",
+        ShowNonModalFlowResult(this, QMessageBox::Warning, "焊后安全回撤恢复",
             QString("记录绑定端点与当前机器人不一致，禁止运动。\nRecord=%1\nCurrent=%2")
                 .arg(record.robotEndpoint, currentEndpoint));
         return;
     }
     if (RobotOperationLease::IsCancellationRequested(pRobotDriver))
     {
-        QMessageBox::warning(this, "焊后安全回撤恢复",
+        ShowNonModalFlowResult(this, QMessageBox::Warning, "焊后安全回撤恢复",
             QStringLiteral("机器人 STOP/安全停止仍处于锁存状态。请先通过全局安全停止流程真实确认机器人已停止并解除内存停机锁；本入口不会绕过 STOP。"));
         return;
     }
@@ -4145,7 +4182,7 @@ void MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow()
         &safeRecoveryBinding, &leaseError);
     if (!operationLease)
     {
-        QMessageBox::warning(this, "焊后安全回撤恢复", leaseError);
+        ShowNonModalFlowResult(this, QMessageBox::Warning, "焊后安全回撤恢复", leaseError);
         return;
     }
     SetRunning(true);
@@ -4160,7 +4197,7 @@ void MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow()
 
     QPointer<MeasureThenWeldDialog> self(this);
     std::thread([self, pRobotDriver, robotName, record, requiredSafePose,
-        safeRecoveryBinding, operationLease]()
+        safeRecoveryBinding, operationLease, enforceRecoveryIdentity]()
         {
             bool ok = false;
             QString recoveryError;
@@ -4172,10 +4209,12 @@ void MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow()
             }
             else if (!WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(
                     safeRecoveryBinding, &recoveryError)
-                || current.checkpointId != record.checkpointId
-                || current.safetyWitnessSha256 != record.safetyWitnessSha256
+                || (enforceRecoveryIdentity
+                    && (current.checkpointId != record.checkpointId
+                        || current.safetyWitnessSha256 != record.safetyWitnessSha256
+                        || RobotOperationLease::PersistentEndpointIdentity(pRobotDriver) != record.robotEndpoint))
                 || !WeldResumePlanner::ValidateSafeRetreatRecoveryRecord(current, &recoveryError)
-                || RobotOperationLease::PersistentEndpointIdentity(pRobotDriver) != record.robotEndpoint)
+                )
             {
                 if (recoveryError.isEmpty())
                 {
@@ -4188,7 +4227,7 @@ void MeasureThenWeldDialog::RunSafeRetreatRecoveryFlow()
             }
             else if (current.state == QStringLiteral("interrupted")
                 && !TerminatePersistedProgramBeforeRecovery(
-                    pRobotDriver, current, recoveryError))
+                    pRobotDriver, current, recoveryError, enforceRecoveryIdentity))
             {
                 // pending 保持 1；终止未验证时绝不发送第一条 Move。
             }
@@ -4293,8 +4332,11 @@ void MeasureThenWeldDialog::RunCameraTimeOffsetCalibrationFlow()
     param.bDoActualWeld = false;  // 标定只扫描，不进入焊接
     bool safeRetreatPending = false;
     QString safeRetreatError;
-    if (!SafeRetreatPending(QString::fromStdString(param.sRobotName), safeRetreatPending, &safeRetreatError)
-        || safeRetreatPending)
+    const bool enforceSafeRetreatPending = PointCloudProcessingConfig::RuntimeSystemInterlocks()
+        .IsEnabled(SystemInterlock::SafeRetreatPending);
+    if (enforceSafeRetreatPending
+        && (!SafeRetreatPending(QString::fromStdString(param.sRobotName), safeRetreatPending, &safeRetreatError)
+            || safeRetreatPending))
     {
         QMessageBox::warning(this, "相机时间补偿标定",
             safeRetreatError.isEmpty()
@@ -4698,11 +4740,8 @@ void MeasureThenWeldDialog::SaveWeldModeToParam(bool doActualWeld)
         return;
     }
 
-    const QString paramPath = QString::fromStdString(param.sWeldParamFilePath.empty()
-        ? param.sIniFilePath
-        : param.sWeldParamFilePath);
     if (!RobotDataHelper::WriteParamValue(
-        paramPath,
+        param.weldConfigLocation.IsValid() ? param.weldConfigLocation : param.configLocation,
         QString::fromStdString(param.sWeldSectionName),
         "WeldEnable",
         doActualWeld ? "1" : "0",
@@ -4977,6 +5016,12 @@ void MeasureThenWeldDialog::FinishProgress(bool ok, const QString& text)
         RunMonitorDialog* monitor = static_cast<RunMonitorDialog*>(m_pRunMonitor);
         monitor->SetStep(m_sProgressText);
         monitor->SetProgressResult(ok, m_nProgressValue);
+        if (!ok)
+        {
+            // 失败提示由非模态消息继续展示；立即退回功能页，避免最大化监控页
+            // 和错误提示叠加后让用户误以为整个程序已卡死。
+            monitor->hide();
+        }
     }
     if (m_pProgressCard != nullptr)
     {

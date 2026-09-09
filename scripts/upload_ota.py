@@ -125,6 +125,7 @@ TRUSTED_RELEASE_FILES = (
     "scripts/verify_release_pair.ps1",
     "scripts/build_installer.ps1",
     "scripts/build_release_package.ps1",
+    "scripts/license_build_gate.ps1",
     "scripts/build_config_migrate.ps1",
 )
 _SENSITIVE_ENVIRONMENT_NAMES = frozenset({
@@ -945,8 +946,11 @@ def inspect_dist(dist_dir: os.PathLike[str] | str, channel: str, version: str) -
              f"实际 tp={len(fanuc_tp)} pc={len(fanuc_pc)}。")
     branding_entries = [entry for entry in entries if entry["path"].casefold().startswith("branding/")]
     if channel == "brand":
-        _require(any(entry["path"].casefold() == "branding/branding.ini" for entry in branding_entries),
-                 "brand dist 缺 branding/branding.ini，运行时会误入 neutral OTA 通道。")
+        branding_paths = {entry["path"].casefold() for entry in branding_entries}
+        _require({"branding/app_color.ico", "branding/app_nobg.ico"} <= branding_paths,
+                 "brand dist 缺少品牌图标资源，运行时无法初始化数据库品牌记录。")
+        _require(not any(path.endswith(".ini") for path in branding_paths),
+                 "brand dist 不得携带品牌 INI；品牌配置必须来自 ConfigStore 数据库。")
     else:
         _require(not branding_entries, "neutral dist 混入 branding/，会误入 brand OTA 通道。")
 
@@ -3060,6 +3064,42 @@ def _safe_verifier_worktree(root: Path, name: str) -> Path:
     return child
 
 
+def _snapshot_license_public_key_header(
+    path_value: os.PathLike[str] | str,
+    verifier_root: Path,
+    repo_root: Path,
+) -> Path:
+    candidate = Path(path_value).expanduser()
+    _require(candidate.is_absolute(), "License public key header 必须使用显式绝对路径。")
+    try:
+        source = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ReleaseGateError("License public key header 不存在或不可访问。") from exc
+    _require(source.is_file() and not source.is_symlink()
+             and not _path_is_reparse_point(source),
+             "License public key header 必须是非链接普通文件。")
+    _require(source.stat().st_size <= 16 * 1024,
+             "License public key header 体积异常。")
+    try:
+        source.relative_to(repo_root)
+    except ValueError:
+        pass
+    else:
+        raise ReleaseGateError("License public key header 必须来自项目目录之外的独立授权服务。")
+
+    payload = source.read_bytes()
+    _require(b"PRIVATE KEY" not in payload.upper(),
+             "License public key header 禁止包含私钥内容。")
+    target = verifier_root / "license-public-key.h"
+    with target.open("xb") as stream:
+        stream.write(payload)
+    _require(target.is_file() and not target.is_symlink()
+             and not _path_is_reparse_point(target)
+             and sha256_file(target) == hashlib.sha256(payload).hexdigest(),
+             "License public key header 可信快照失败。")
+    return target.resolve(strict=True)
+
+
 _ALLOWED_BRAND_TRACKED_DELTA = frozenset({
     ".gitignore",
     "QtWidgetsApplication4.vcxproj",
@@ -3069,7 +3109,6 @@ _ALLOWED_BRAND_TRACKED_DELTA = frozenset({
     "branding/app_color.png",
     "branding/app_nobg.ico",
     "branding/app_nobg.png",
-    "branding/branding.ini",
 })
 
 
@@ -3387,6 +3426,9 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
     temporary_root = Path(tempfile.mkdtemp(prefix="noteaching-trusted-release-")).resolve(strict=True)
     neutral_root = _safe_verifier_worktree(temporary_root, "neutral")
     brand_root = _safe_verifier_worktree(temporary_root, "brand")
+    license_public_key_header = _snapshot_license_public_key_header(
+        getattr(args, "license_public_key_header", ""), temporary_root, repo_root
+    )
     powershell = _trusted_windows_powershell()
     git_path = git_tool.path
     try:
@@ -3423,12 +3465,20 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
                 _verify_release_toolchain_dependencies(
                     build_tools, toolchain_closures, protected_tool_roots
                 )
+                license_arguments = [
+                    "-LicenseMode", "Off" if channel == "neutral" else "Enforce",
+                ]
+                if channel == "brand":
+                    license_arguments.extend([
+                        "-LicensePublicKeyHeader", str(license_public_key_header),
+                    ])
                 _run_local_checked(
                     [
                         str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
                         "-ExecutionPolicy", "Bypass", "-File",
                         str(root / "scripts" / "build_installer.ps1"),
                         "-AppVersion", args.version, "-Channel", channel,
+                        *license_arguments,
                         "-MSBuildExecutable", str(msbuild_tool.path),
                         "-MSBuildSha256", msbuild_tool.sha256,
                         "-WinDeployQtExecutable", str(windeployqt_tool.path),
@@ -3441,7 +3491,9 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
                     ],
                     cwd=root,
                     label=f"{channel} clean-HEAD Rebuild + Inno",
-                    timeout=90 * 60,
+                    # A fully isolated x64 rebuild plus deterministic PyInstaller
+                    # packaging can exceed 90 minutes on the release workstation.
+                    timeout=180 * 60,
                 )
                 installer_gates[channel] = (
                     root / "dist" / "release-gates" / f"installer-{channel}-{args.version}.json"
@@ -3864,10 +3916,37 @@ def _publish_github_release(
         timeout=30 * 60,
     )
 
+    # GitHub does not guarantee that GET /releases/tags/{tag} can resolve a draft:
+    # the tag ref is normally created only when the draft is published.  Resolve
+    # the just-created quarantined draft from the authenticated release list, then
+    # bind every subsequent read and the publish transition to its immutable ID.
+    release_list_json = _run_gh_checked(
+        gh,
+        ["api", f"repos/{repo_name}/releases?per_page=100"],
+        cwd=repo_root,
+        label="定位新建 GitHub draft release ID",
+    ).stdout
+    release_list = _load_json_bytes(
+        release_list_json.encode("utf-8"), "GitHub draft release list"
+    )
+    matching_drafts = [
+        item for item in release_list
+        if isinstance(item, dict)
+        and item.get("tag_name") == tag
+        and item.get("target_commitish") == "main"
+        and item.get("draft") is True
+        and item.get("prerelease") is False
+        and isinstance(item.get("id"), int)
+        and item["id"] > 0
+    ] if isinstance(release_list, list) else []
+    _require(len(matching_drafts) == 1,
+             "无法唯一定位刚创建的 GitHub draft release ID。")
+    release_id = matching_drafts[0]["id"]
+
     def read_and_validate_release(*, expected_draft: bool, label: str) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         release_json = _run_gh_checked(
             gh,
-            ["api", f"repos/{repo_name}/releases/tags/{tag}"],
+            ["api", f"repos/{repo_name}/releases/{release_id}"],
             cwd=repo_root,
             label=label,
         ).stdout
@@ -3936,7 +4015,8 @@ def _publish_github_release(
     # explicit inspection/cleanup instead of exposing bad assets.
     _run_gh_checked(
         gh,
-        ["release", "edit", tag, "--repo", repo_name, "--draft=false"],
+        ["api", "--method", "PATCH", f"repos/{repo_name}/releases/{release_id}",
+         "-F", "draft=false"],
         cwd=repo_root,
         label="公开已完整验证的 GitHub Release",
     )
@@ -4321,6 +4401,8 @@ def _build_parser() -> argparse.ArgumentParser:
     trusted.add_argument("--version", required=True)
     trusted.add_argument("--runtime-source", required=True,
                          help="仅作为权威 FANUC manifest 所列 tp/pc 的显式只读来源")
+    trusted.add_argument("--license-public-key-header", required=True,
+                         help="项目外独立授权服务导出的 RSA-3072 公钥头文件")
     trusted.add_argument("--notes", default="")
     trusted.add_argument("--git-exe", default=str(DEFAULT_GIT_EXE),
                          help="受信任且带有效 Authenticode 的 Git for Windows 绝对路径")

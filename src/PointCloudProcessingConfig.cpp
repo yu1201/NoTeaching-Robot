@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 namespace
 {
@@ -22,6 +23,9 @@ double g_runtimeScanDirectionX = 1.0;
 double g_runtimeScanDirectionY = 0.0;
 double g_runtimeScanDirectionZ = 0.0;
 thread_local const QMap<QString, QString>* g_activeSettingsSnapshot = nullptr;
+std::mutex g_runtimeSystemInterlocksMutex;
+bool g_runtimeSystemInterlocksLoaded = false;
+SystemInterlockPolicy g_runtimeSystemInterlocks;
 
 class SettingsSnapshotScope
 {
@@ -231,6 +235,43 @@ bool ReadBoolSetting(const QString& key, bool defaultValue)
     return value == "1" || value == "true" || value == "yes";
 }
 
+bool ParseStrictBool(const QString& value, bool* parsed)
+{
+    if (parsed == nullptr)
+    {
+        return false;
+    }
+    const QString normalized = value.trimmed().toLower();
+    if (normalized == QStringLiteral("1")
+        || normalized == QStringLiteral("true")
+        || normalized == QStringLiteral("yes"))
+    {
+        *parsed = true;
+        return true;
+    }
+    if (normalized == QStringLiteral("0")
+        || normalized == QStringLiteral("false")
+        || normalized == QStringLiteral("no"))
+    {
+        *parsed = false;
+        return true;
+    }
+    return false;
+}
+
+SystemInterlockPolicy ReadSystemInterlocksFromSnapshot()
+{
+    SystemInterlockPolicy policy;
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+    {
+        bool enabled = true;
+        policy.enabled[i] = ParseStrictBool(
+            ReadSetting(QString::fromLatin1(SystemInterlockPolicy::keys[i]), QStringLiteral("1")),
+            &enabled) ? enabled : true;
+    }
+    return policy;
+}
+
 int ReadIntSetting(const QString& key, int defaultValue)
 {
     bool ok = false;
@@ -270,6 +311,20 @@ QString PointCloudProcessingConfig::DefaultConfigPath()
 QString PointCloudProcessingConfig::DataConfigPath()
 {
     return RobotDataHelper::BuildProjectPath(QStringLiteral("Data/CorrugatedSheetPointCloudEctration.ini"));
+}
+
+SystemInterlockPolicy PointCloudProcessingConfig::RuntimeSystemInterlocks()
+{
+    std::lock_guard<std::mutex> lock(g_runtimeSystemInterlocksMutex);
+    if (!g_runtimeSystemInterlocksLoaded)
+    {
+        const auto snapshot = ConfigDatabase::ReadScopedSettings(
+            QStringLiteral("global"), QString(), SETTINGS_GROUP);
+        const SettingsSnapshotScope scope(snapshot);
+        g_runtimeSystemInterlocks = ReadSystemInterlocksFromSnapshot();
+        g_runtimeSystemInterlocksLoaded = true;
+    }
+    return g_runtimeSystemInterlocks;
 }
 
 bool PointCloudProcessingConfig::CoreSafetyGatesEnabled(const Settings& settings)
@@ -455,6 +510,7 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
             settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg);
     settings.validationFinalSemanticIntegrityEnabled =
         ReadBoolSetting("Validation/FinalSemanticIntegrityEnabled", settings.validationFinalSemanticIntegrityEnabled);
+    settings.systemInterlocks = ReadSystemInterlocksFromSnapshot();
     settings.safetyGateProofIntegrityEnabled =
         ReadBoolSetting("SafetyGates/ProofIntegrityEnabled", settings.safetyGateProofIntegrityEnabled);
     settings.safetyGateProductionPurposeEnabled =
@@ -754,11 +810,31 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("SafetyGates/TrajectoryStructureEnabled", settings.safetyGateTrajectoryStructureEnabled ? "1" : "0")
         && write("SafetyGates/MotionPrecheckEnabled", settings.safetyGateMotionPrecheckEnabled ? "1" : "0")
         && write("SafetyGates/BehaviorVersion", QString::number(CURRENT_SAFETY_GATE_BEHAVIOR_VERSION));
+    for (std::size_t i = 0; i < SystemInterlockCount; ++i)
+    {
+        pendingValues.insert(QString::fromLatin1(SystemInterlockPolicy::keys[i]),
+            settings.systemInterlocks.enabled[i] ? QStringLiteral("1") : QStringLiteral("0"));
+    }
+    QString databaseError;
     const bool ok = valuesPrepared && ConfigDatabase::WriteScopedSettings(
-        QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues);
+        QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues,
+        QStringLiteral("string"), &databaseError);
+    if (ok)
+    {
+        std::lock_guard<std::mutex> lock(g_runtimeSystemInterlocksMutex);
+        const bool singleProcessEnabled = g_runtimeSystemInterlocksLoaded
+            ? g_runtimeSystemInterlocks.IsEnabled(SystemInterlock::SingleProcess)
+            : settings.systemInterlocks.IsEnabled(SystemInterlock::SingleProcess);
+        g_runtimeSystemInterlocks = settings.systemInterlocks;
+        g_runtimeSystemInterlocks.SetEnabled(SystemInterlock::SingleProcess, singleProcessEnabled);
+        g_runtimeSystemInterlocksLoaded = true;
+    }
     if (!ok && error != nullptr)
     {
-        *error = QStringLiteral("原子写入点云处理配置失败，数据库已回滚，未留下混合版本。");
+        *error = QStringLiteral("原子写入点云处理配置失败，数据库已回滚，未留下混合版本。%1")
+            .arg(databaseError.isEmpty()
+                ? QString()
+                : QStringLiteral("\n原因：%1").arg(databaseError));
     }
     return ok;
 }

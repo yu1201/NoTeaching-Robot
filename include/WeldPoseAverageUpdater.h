@@ -35,7 +35,7 @@ public:
     {
         QString inputPoseFilePath;
         QString robotName;
-        QString poseCompParamPath;
+        QString poseCompStorageLabel;
         QString reportPath;
         int totalRecordCount = 0;
         int addedSlotCount = 0;

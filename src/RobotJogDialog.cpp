@@ -52,15 +52,15 @@ namespace
 
 		switch (axisIndex)
 		{
-		case 0: return driver->m_tAxisUnit.dSPulseUnit;
-		case 1: return driver->m_tAxisUnit.dLPulseUnit;
-		case 2: return driver->m_tAxisUnit.dUPulseUnit;
-		case 3: return driver->m_tAxisUnit.dRPulseUnit;
-		case 4: return driver->m_tAxisUnit.dBPulseUnit;
-		case 5: return driver->m_tAxisUnit.dTPulseUnit;
-		case 6: return driver->m_tAxisUnit.dBXPulseUnit;
-		case 7: return driver->m_tAxisUnit.dBYPulseUnit;
-		case 8: return driver->m_tAxisUnit.dBZPulseUnit;
+		case 0: return driver->AxisUnit().dSPulseUnit;
+		case 1: return driver->AxisUnit().dLPulseUnit;
+		case 2: return driver->AxisUnit().dUPulseUnit;
+		case 3: return driver->AxisUnit().dRPulseUnit;
+		case 4: return driver->AxisUnit().dBPulseUnit;
+		case 5: return driver->AxisUnit().dTPulseUnit;
+		case 6: return driver->AxisUnit().dBXPulseUnit;
+		case 7: return driver->AxisUnit().dBYPulseUnit;
+		case 8: return driver->AxisUnit().dBZPulseUnit;
 		default: return 0.0;
 		}
 	}
@@ -145,12 +145,12 @@ namespace
 
 	void LogCartesianPoint(RobotDriverAdaptor* driver, const char* prefix, const T_ROBOT_COORS& pos)
 	{
-		if (driver == nullptr || driver->m_pRobotLog == nullptr || prefix == nullptr)
+		if (driver == nullptr || !driver->HasLogSink() || prefix == nullptr)
 		{
 			return;
 		}
 
-		driver->m_pRobotLog->write(LogColor::DEFAULT,
+		driver->WriteLog(LogColor::DEFAULT,
 			"%s: X=%.3f Y=%.3f Z=%.3f RX=%.3f RY=%.3f RZ=%.3f BX=%.3f BY=%.3f BZ=%.3f",
 			prefix,
 			pos.dX, pos.dY, pos.dZ,
@@ -160,12 +160,12 @@ namespace
 
 	void LogJointPoint(RobotDriverAdaptor* driver, const char* prefix, const T_ANGLE_PULSE& pulse)
 	{
-		if (driver == nullptr || driver->m_pRobotLog == nullptr || prefix == nullptr)
+		if (driver == nullptr || !driver->HasLogSink() || prefix == nullptr)
 		{
 			return;
 		}
 
-		driver->m_pRobotLog->write(LogColor::DEFAULT,
+		driver->WriteLog(LogColor::DEFAULT,
 			"%s: J1=%ld J2=%ld J3=%ld J4=%ld J5=%ld J6=%ld EX1=%ld EX2=%ld EX3=%ld",
 			prefix,
 			pulse.nSPulse, pulse.nLPulse, pulse.nUPulse,
@@ -613,7 +613,7 @@ void RobotJogDialog::MoveToCartesianTarget()
 				return;
 			}
 			const bool moveOk = driver->MoveLinearMmPerMin(
-				target, configuredSpeedMmPerMin, driver->m_nExternalAxleType);
+				target, configuredSpeedMmPerMin, driver->ExternalAxleType());
 			const int done = moveOk ? driver->CheckRobotDone(100, motionTimeoutMs) : -1;
 			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "直角坐标运动", done) : QString();
 			QMetaObject::invokeMethod(self.data(), [self, moveOk, done, failureText]()
@@ -679,7 +679,7 @@ void RobotJogDialog::MoveToJointTarget()
 			{
 				return;
 			}
-			const bool moveOk = driver->MoveJointPercent(target, robotSpeed, driver->m_nExternalAxleType);
+			const bool moveOk = driver->MoveJointPercent(target, robotSpeed, driver->ExternalAxleType());
 			const int done = moveOk ? driver->CheckRobotDone(100, 1800000) : -1;
 			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "关节脉冲运动", done) : QString();
 			QMetaObject::invokeMethod(self.data(), [self, moveOk, done, failureText]()
@@ -781,9 +781,9 @@ void RobotJogDialog::BeginJog()
 		? m_streamCartesianSpeed
 		: std::clamp(m_streamJointSpeed, 1.0, 100.0);
 
-	if (m_robotDriver->m_pRobotLog != nullptr)
+	if (m_robotDriver->HasLogSink())
 	{
-		m_robotDriver->m_pRobotLog->write(LogColor::DEFAULT,
+		m_robotDriver->WriteLog(LogColor::DEFAULT,
 			"点动界面长按开始: mode=%s axis=%d direction=%d speed=%.3f baseCart=(X=%.3f Y=%.3f Z=%.3f RX=%.3f RY=%.3f RZ=%.3f) baseJoint=(J1=%ld J2=%ld J3=%ld J4=%ld J5=%ld J6=%ld)",
 			mode == JogMode::Cartesian ? "MOVL" : "MOVJ",
 			m_currentAxis,
@@ -883,7 +883,7 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 		QPointer<RobotJogDialog> self(this);
 		std::thread([self, driver, target, robotSpeed, operationLease]()
 			{
-				const bool moveOk = driver->MoveLinearMmPerMin(target, robotSpeed, driver->m_nExternalAxleType);
+				const bool moveOk = driver->MoveLinearMmPerMin(target, robotSpeed, driver->ExternalAxleType());
 				const int done = moveOk ? driver->CheckRobotDone(100, 1800000) : -1;
 				const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "直角步进", done) : QString();
 				QMetaObject::invokeMethod(qApp, [self, moveOk, done, failureText]()
@@ -931,7 +931,7 @@ void RobotJogDialog::StepJog(JogMode mode, int axisIndex, int direction)
 	QPointer<RobotJogDialog> self(this);
 	std::thread([self, driver, target, robotSpeed, operationLease]()
 		{
-			const bool moveOk = driver->MoveJointPercent(target, robotSpeed, driver->m_nExternalAxleType);
+			const bool moveOk = driver->MoveJointPercent(target, robotSpeed, driver->ExternalAxleType());
 			const int done = moveOk ? driver->CheckRobotDone(100, 1800000) : -1;
 			const QString failureText = (!moveOk || done <= 0) ? MotionFailureText(driver, "关节步进", done) : QString();
 			QMetaObject::invokeMethod(qApp, [self, moveOk, done, failureText]()

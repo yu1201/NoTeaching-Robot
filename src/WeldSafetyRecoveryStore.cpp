@@ -21,7 +21,6 @@
 
 namespace
 {
-constexpr char kSection[] = "Breakpoint";
 constexpr char kRecordKey[] = "RecordV2";
 constexpr char kPendingKey[] = "SafeRetreatPending";
 constexpr char kRecoveryModule[] = "WeldBreakpoint/Breakpoint";
@@ -33,14 +32,12 @@ constexpr qsizetype kMaxRecordUtf8Bytes = 64 * 1024;
 constexpr qsizetype kMaxEndpointIdentityLength = 512;
 constexpr qsizetype kMaxRobotNameLength = 255;
 constexpr qsizetype kMaxStoredRobotRecoveryRecords = 4096;
+constexpr char kScanCurveDryRunPoseFileName[] =
+    "PreciseLaserPoint_FeatureSmoothCurve_DryRunPose_2mm.txt";
+constexpr char kScanCurveDryRunFinalSampledFileName[] =
+    "PreciseLaserPoint_FeatureSmoothCurve_DryRunPose_2mm_FinalSampled.txt";
 std::recursive_mutex g_storeMutex;
-QMap<QString, QString> g_activeEndpointRecoveryBindings;
-
-std::string Utf8(const QString& text)
-{
-    const QByteArray bytes = text.toUtf8();
-    return std::string(bytes.constData(), static_cast<std::size_t>(bytes.size()));
-}
+QMultiMap<QString, QString> g_activeEndpointRecoveryBindings;
 
 void SetError(QString* error, const QString& text)
 {
@@ -50,10 +47,10 @@ void SetError(QString* error, const QString& text)
     }
 }
 
-QString StorePath(const QString& robotName)
+QString StoreLabel(const QString& robotName)
 {
-    return QDir::toNativeSeparators(AppPaths::WritablePath(
-        QString("Data/%1/WeldBreakpoint.ini").arg(robotName.trimmed())));
+    return QStringLiteral("robot/%1/%2").arg(
+        robotName.trimmed(), QString::fromLatin1(kRecoveryModule));
 }
 
 bool ValidateRobotName(const QString& robotName, QString* error)
@@ -109,7 +106,7 @@ QString NormalizePersistentEndpointIdentity(const QString& endpointIdentity)
     return QStringLiteral("tcp:[%1]:%2").arg(host).arg(port);
 }
 
-ConfigDatabase::ReadStatus ReadIniValueStatusLocked(
+ConfigDatabase::ReadStatus ReadRecoveryValueStatusLocked(
     const QString& robotName,
     const char* key,
     std::string& value,
@@ -120,12 +117,19 @@ ConfigDatabase::ReadStatus ReadIniValueStatusLocked(
     {
         return ConfigDatabase::ReadStatus::Error;
     }
-    const ConfigDatabase::ReadStatus status = ConfigDatabase::ReadIniValueStatus(
-        Utf8(StorePath(robotName)), kSection, key, &value);
+    QString stored;
+    const ConfigDatabase::ReadStatus status = ConfigDatabase::ReadScopedSettingStatus(
+        QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+        QString::fromLatin1(key), &stored);
+    if (status == ConfigDatabase::ReadStatus::Found)
+    {
+        const QByteArray bytes = stored.toUtf8();
+        value.assign(bytes.constData(), static_cast<std::size_t>(bytes.size()));
+    }
     if (status == ConfigDatabase::ReadStatus::Error)
     {
-        SetError(error, QString("读取焊接安全恢复存储失败：%1 [%2]/%3")
-            .arg(StorePath(robotName), QString::fromLatin1(kSection), QString::fromLatin1(key)));
+        SetError(error, QString("读取焊接安全恢复存储失败：%1 [%2]")
+            .arg(StoreLabel(robotName), QString::fromLatin1(key)));
     }
     return status;
 }
@@ -137,7 +141,7 @@ ConfigDatabase::ReadStatus ReadRecordValueStatusLocked(
 {
     value.clear();
     std::string bytes;
-    const ConfigDatabase::ReadStatus status = ReadIniValueStatusLocked(
+    const ConfigDatabase::ReadStatus status = ReadRecoveryValueStatusLocked(
         robotName, kRecordKey, bytes, error);
     if (status != ConfigDatabase::ReadStatus::Found)
     {
@@ -168,7 +172,7 @@ ConfigDatabase::ReadStatus ReadPendingValueStatusLocked(
 {
     pending = false;
     std::string value;
-    const ConfigDatabase::ReadStatus status = ReadIniValueStatusLocked(
+    const ConfigDatabase::ReadStatus status = ReadRecoveryValueStatusLocked(
         robotName, kPendingKey, value, error);
     if (status != ConfigDatabase::ReadStatus::Found)
     {
@@ -220,10 +224,11 @@ bool ReadPendingLocked(const QString& robotName, bool& pending, QString* error)
 bool WritePendingLocked(const QString& robotName, bool pending, QString* error)
 {
     if (!ValidateRobotName(robotName, error)
-        || !ConfigDatabase::WriteIniValue(
-            Utf8(StorePath(robotName)), kSection, kPendingKey, pending ? "1" : "0"))
+        || !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+            QString::fromLatin1(kPendingKey), pending ? QStringLiteral("1") : QStringLiteral("0")))
     {
-        SetError(error, QString("写入焊后安全回撤门禁失败：%1").arg(StorePath(robotName)));
+        SetError(error, QString("写入焊后安全回撤门禁失败：%1").arg(StoreLabel(robotName)));
         return false;
     }
     bool readback = !pending;
@@ -248,11 +253,11 @@ bool WriteRecordLocked(const QString& robotName, const QString& encoded, QString
         return false;
     }
     if (!ValidateRobotName(robotName, error)
-        || !ConfigDatabase::WriteIniValue(
-            Utf8(StorePath(robotName)), kSection, kRecordKey,
-            std::string(encodedUtf8.constData(), static_cast<std::size_t>(encodedUtf8.size()))))
+        || !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+            QString::fromLatin1(kRecordKey), encoded))
     {
-        SetError(error, QString("写入焊接恢复记录失败：%1").arg(StorePath(robotName)));
+        SetError(error, QString("写入焊接恢复记录失败：%1").arg(StoreLabel(robotName)));
         return false;
     }
     QString readback;
@@ -714,9 +719,9 @@ void ApplyTerminal(
 #endif
 }
 
-QString WeldSafetyRecoveryStore::StoragePath(const QString& robotName)
+QString WeldSafetyRecoveryStore::StorageLabel(const QString& robotName)
 {
-    return StorePath(robotName);
+    return StoreLabel(robotName);
 }
 
 bool WeldSafetyRecoveryStore::ReadRecord(
@@ -742,17 +747,19 @@ bool WeldSafetyRecoveryStore::DisableLegacy(const QString& robotName, QString* e
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     if (!ValidateRobotName(robotName, error)
-        || !ConfigDatabase::WriteIniValue(
-            Utf8(StorePath(robotName)), kSection, "Valid", "0"))
+        || !ConfigDatabase::WriteScopedSetting(
+            QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+            QStringLiteral("Valid"), QStringLiteral("0")))
     {
         SetError(error, QStringLiteral("关闭旧版断点标志失败。"));
         return false;
     }
-    std::string readback;
-    if (ConfigDatabase::ReadIniValueStatus(
-            Utf8(StorePath(robotName)), kSection, "Valid", &readback)
+    QString readback;
+    if (ConfigDatabase::ReadScopedSettingStatus(
+            QStringLiteral("robot"), robotName.trimmed(), QString::fromLatin1(kRecoveryModule),
+            QStringLiteral("Valid"), &readback)
             != ConfigDatabase::ReadStatus::Found
-        || readback != "0")
+        || readback != QStringLiteral("0"))
     {
         SetError(error, QStringLiteral("旧版断点标志写后回读不一致，保持失败关闭。"));
         return false;
@@ -794,7 +801,10 @@ bool WeldSafetyRecoveryStore::WriteCompletedAndClearPending(
         && WritePendingLocked(robotName, false, error);
 }
 
-bool WeldSafetyRecoveryStore::InvalidateIfNoPending(const QString& robotName, QString& error)
+bool WeldSafetyRecoveryStore::InvalidateIfNoPending(
+    const QString& robotName,
+    QString& error,
+    bool enforcePending)
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     bool pending = false;
@@ -804,6 +814,13 @@ bool WeldSafetyRecoveryStore::InvalidateIfNoPending(const QString& robotName, QS
     }
     if (pending)
     {
+        if (!enforcePending)
+        {
+            // 关闭该互锁只跳过旧记录准入，不清除或伪造持久安全终态。
+            // 后续若重新开启互锁，原 pending 记录仍可恢复。
+            error.clear();
+            return true;
+        }
         error = QStringLiteral(
             "该机器人仍有未验证完成的焊后安全回撤。禁止使记录失效、重新扫描、自动运动或再次执行焊缝；"
             "请使用“焊后安全回撤恢复”，确认到达记录绑定的收枪安全位后再继续。");
@@ -822,12 +839,18 @@ bool WeldSafetyRecoveryStore::InvalidateIfNoPending(const QString& robotName, QS
 bool WeldSafetyRecoveryStore::PersistentAdmissionBlocked(
     const QString& robotName,
     const QString& endpointIdentity,
-    QString* reason)
+    QString* reason,
+    bool requireEndpoint)
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     const QString normalizedRobot = robotName.trimmed();
     const QString endpoint = NormalizePersistentEndpointIdentity(endpointIdentity);
     QString validationError;
+    if (!requireEndpoint && endpoint.isEmpty())
+    {
+        // 端点准入关闭时，持久回撤门禁仍按机器人身份独立检查。
+        return ProbeRobotAdmissionBlockedLocked(normalizedRobot, QString(), false, true, reason);
+    }
     if (!ValidateRobotName(normalizedRobot, &validationError)
         || endpoint.isEmpty()
         || endpoint != endpointIdentity.trimmed())
@@ -963,7 +986,8 @@ bool WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
     const WeldResumePlanner::CheckpointRecord& expected,
     RobotRecoverySafetyPolicy::RecoveryBindingMode mode,
     RobotRecoverySafetyPolicy::ExclusiveRecoveryBinding* binding,
-    QString* error)
+    QString* error,
+    bool enforceIdentity)
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     if (binding == nullptr)
@@ -978,14 +1002,22 @@ bool WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
         SetError(error, QStringLiteral("恢复绑定端点无效。"));
         return false;
     }
-    if (g_activeEndpointRecoveryBindings.contains(endpoint))
+    if (enforceIdentity && g_activeEndpointRecoveryBindings.contains(endpoint))
     {
         SetError(error, QStringLiteral("同一物理端点已有持 Store 绑定的恢复流程。"));
         return false;
     }
 
     EndpointRecoveryCandidate selected;
-    if (!ValidateExclusiveRecoverySnapshotLocked(
+    if (!enforceIdentity)
+    {
+        selected.robotScope = robotName.trimmed();
+        selected.record = expected;
+        selected.encoded = WeldResumePlanner::EncodeRecord(expected, error);
+        if (selected.encoded.isEmpty() || !ValidateRobotName(selected.robotScope, error)) return false;
+        selected.encodedSha256 = EncodedRecordSha256(selected.encoded);
+    }
+    else if (!ValidateExclusiveRecoverySnapshotLocked(
             robotName, endpoint, expected, mode, selected, error))
     {
         return false;
@@ -993,6 +1025,7 @@ bool WeldSafetyRecoveryStore::AcquireExclusiveRecoveryBinding(
     const QString token = QUuid::createUuid().toString(QUuid::WithoutBraces);
     g_activeEndpointRecoveryBindings.insert(endpoint, token);
     binding->token = token;
+    binding->enforceIdentity = enforceIdentity;
     binding->mode = mode;
     binding->robotScope = selected.robotScope;
     binding->endpointIdentity = endpoint;
@@ -1012,11 +1045,7 @@ void WeldSafetyRecoveryStore::ReleaseExclusiveRecoveryBinding(
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     const QString endpoint = NormalizePersistentEndpointIdentity(endpointIdentity);
-    const auto it = g_activeEndpointRecoveryBindings.find(endpoint);
-    if (it != g_activeEndpointRecoveryBindings.end() && it.value() == token)
-    {
-        g_activeEndpointRecoveryBindings.erase(it);
-    }
+    g_activeEndpointRecoveryBindings.remove(endpoint, token);
 }
 
 bool WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(
@@ -1025,11 +1054,12 @@ bool WeldSafetyRecoveryStore::RevalidateExclusiveRecoveryBinding(
 {
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     if (!binding.IsValid()
-        || g_activeEndpointRecoveryBindings.value(binding.endpointIdentity) != binding.token)
+        || !g_activeEndpointRecoveryBindings.contains(binding.endpointIdentity, binding.token))
     {
         SetError(error, QStringLiteral("恢复端点独占绑定已失效。"));
         return false;
     }
+    if (!binding.enforceIdentity) return true;
     EndpointRecoveryCandidate selected;
     if (!ValidateExclusiveRecoverySnapshotLocked(
             binding.robotScope,
@@ -1059,10 +1089,20 @@ bool WeldSafetyRecoveryStore::TransitionBoundRecordState(
     const std::lock_guard<std::recursive_mutex> lock(g_storeMutex);
     if (binding == nullptr
         || !binding->IsValid()
-        || g_activeEndpointRecoveryBindings.value(binding->endpointIdentity) != binding->token)
+        || !g_activeEndpointRecoveryBindings.contains(binding->endpointIdentity, binding->token))
     {
         SetError(error, QStringLiteral("绑定状态迁移缺少有效的端点独占 token。"));
         return false;
+    }
+    if (!binding->enforceIdentity)
+    {
+        // 关闭完整身份/独占复核后仍执行原子状态迁移，不伪造恢复记录或跳过停机动作。
+        if (!TransitionRecordState(binding->robotScope, binding->record.checkpointId,
+                expectedState, newState, error)) return false;
+        binding->record.state = newState;
+        binding->encodedRecord = WeldResumePlanner::EncodeRecord(binding->record, error);
+        binding->encodedSha256 = EncodedRecordSha256(binding->encodedRecord);
+        return !binding->encodedRecord.isEmpty();
     }
     EndpointRecoveryCandidate selected;
     if (!ValidateExclusiveRecoverySnapshotLocked(
@@ -1139,8 +1179,9 @@ bool WeldSafetyRecoveryStore::TransitionRecordState(
 #if !defined(WELD_SAFETY_STORE_STORAGE_ONLY_TEST)
 WeldSafetyRecoverySession::WeldSafetyRecoverySession(
     RobotDriverAdaptor* driver,
-    const T_PRECISE_MEASURE_PARAM& param)
-    : m_driver(driver), m_param(param)
+    const T_PRECISE_MEASURE_PARAM& param,
+    MeasureThenWeldService::WeldPoseSource poseSource)
+    : m_driver(driver), m_param(param), m_poseSource(poseSource)
 {
 }
 
@@ -1161,7 +1202,7 @@ bool WeldSafetyRecoverySession::Prepare(
     record.robotName = QString::fromStdString(m_param.sRobotName).trimmed();
     if (record.robotName.isEmpty())
     {
-        record.robotName = QString::fromStdString(m_driver->m_sRobotName).trimmed();
+        record.robotName = QString::fromStdString(m_driver->RobotName()).trimmed();
     }
     record.robotType = QString::fromStdString(m_driver->DriverDescriptor().typeName);
     record.robotEndpoint = RobotOperationLease::PersistentEndpointIdentity(m_driver);
@@ -1179,30 +1220,65 @@ bool WeldSafetyRecoverySession::Prepare(
     bool trajectoryBound = false;
     if (record.robotType != QStringLiteral("UNKNOWN") && !record.robotEndpoint.isEmpty())
     {
-        trajectoryBound = WeldResumePlanner::BindTrajectoryIdentity(
-            projectRoot, identity.sampledPosePath, record.robotName, record, &error);
-        if (!trajectoryBound)
+        if (m_poseSource == MeasureThenWeldService::WeldPoseSource::PointCloudProduction)
         {
-            // VirtualWeldTest 的真实运动输入位于 Result/<robot>/VirtualWeld_*/<FinalSampled>，
-            // 不伪装成生产 LaserPoint 结构，但仍由 Service 的不可变快照 SHA/size/pointCount 绑定。
+            trajectoryBound = WeldResumePlanner::BindTrajectoryIdentity(
+                projectRoot, identity.sampledPosePath, record.robotName, record, &error);
+        }
+        else
+        {
             const QFileInfo sampledInfo(identity.sampledPosePath);
-            const QString relative = QDir::cleanPath(QDir(projectRoot).relativeFilePath(
-                sampledInfo.canonicalFilePath().isEmpty()
-                    ? sampledInfo.absoluteFilePath() : sampledInfo.canonicalFilePath()));
+            const QFileInfo sourceInfo(identity.sourcePosePath);
+            const auto canonicalOrAbsolute = [](const QFileInfo& info)
+                {
+                    const QString canonical = info.canonicalFilePath();
+                    return QDir::cleanPath(canonical.isEmpty()
+                        ? info.absoluteFilePath() : canonical);
+                };
+            const QString sampledPath = canonicalOrAbsolute(sampledInfo);
+            const QString sourcePath = canonicalOrAbsolute(sourceInfo);
+            const QString relative = QDir::cleanPath(
+                QDir(projectRoot).relativeFilePath(sampledPath));
             const QStringList parts = QDir::fromNativeSeparators(relative).split(
                 QLatin1Char('/'), Qt::SkipEmptyParts);
             QString hashError;
             const QString actualSha = WeldResumePlanner::ComputeFileSha256(
                 sampledInfo.absoluteFilePath(), &hashError);
-            if (sampledInfo.isFile()
-                && parts.size() == 4
+            QString sourceHashError;
+            const QString actualSourceSha = WeldResumePlanner::ComputeFileSha256(
+                sourceInfo.absoluteFilePath(), &sourceHashError);
+            const bool sharedIdentityValid = sampledInfo.isFile()
+                && sourceInfo.isFile()
+                && !sampledInfo.isSymLink()
+                && !sourceInfo.isSymLink()
+                && parts.size() >= 2
                 && parts[0].compare(QStringLiteral("Result"), Qt::CaseInsensitive) == 0
                 && parts[1].compare(record.robotName, Qt::CaseInsensitive) == 0
-                && parts[2].startsWith(QStringLiteral("VirtualWeld_"), Qt::CaseInsensitive)
-                && parts[3].endsWith(QStringLiteral("_FinalSampled.txt"), Qt::CaseInsensitive)
                 && actualSha.compare(identity.sampledPoseSha256, Qt::CaseInsensitive) == 0
                 && sampledInfo.size() == identity.sampledPoseSize
-                && identity.sampledPointCount >= 2)
+                && actualSourceSha.compare(identity.sourcePoseSha256, Qt::CaseInsensitive) == 0
+                && sourceInfo.size() == identity.sourcePoseSize
+                && QFileInfo(sampledPath).dir().absolutePath().compare(
+                    QFileInfo(sourcePath).dir().absolutePath(), Qt::CaseInsensitive) == 0
+                && identity.sampledPointCount >= 2;
+            const bool virtualStructureValid =
+                m_poseSource == MeasureThenWeldService::WeldPoseSource::SyntheticVirtualTest
+                && parts.size() == 4
+                && parts[2].startsWith(QStringLiteral("VirtualWeld_"), Qt::CaseInsensitive)
+                && parts[3].endsWith(QStringLiteral("_FinalSampled.txt"), Qt::CaseInsensitive);
+            const bool scanCurveStructureValid =
+                m_poseSource == MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun
+                && !record.actualWeld
+                && std::abs(record.finalStepMm - 2.0) <= 1e-9
+                && parts.size() == 5
+                && parts[3].compare(QStringLiteral("LaserPoint"), Qt::CaseInsensitive) == 0
+                && parts[4].compare(
+                    QString::fromLatin1(kScanCurveDryRunFinalSampledFileName),
+                    Qt::CaseInsensitive) == 0
+                && sourceInfo.fileName().compare(
+                    QString::fromLatin1(kScanCurveDryRunPoseFileName),
+                    Qt::CaseInsensitive) == 0;
+            if (sharedIdentityValid && (virtualStructureValid || scanCurveStructureValid))
             {
                 record.caseId = parts[2];
                 record.caseRelativeDir = parts.mid(0, 3).join(QLatin1Char('/'));
@@ -1213,6 +1289,15 @@ bool WeldSafetyRecoverySession::Prepare(
                 record.trajectoryInExecutionOrder = true;
                 trajectoryBound = true;
                 error.clear();
+            }
+            else
+            {
+                error = m_poseSource
+                        == MeasureThenWeldService::WeldPoseSource::ScanPoseVariationDryRun
+                    ? QStringLiteral(
+                        "扫描曲线空跑实际轨迹未通过专用案例路径、源文件、2mm点距或SHA256绑定。")
+                    : QStringLiteral(
+                        "虚拟焊道实际轨迹未通过专用目录、源文件或SHA256绑定。");
             }
         }
     }

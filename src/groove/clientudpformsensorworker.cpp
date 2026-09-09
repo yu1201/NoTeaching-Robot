@@ -195,7 +195,12 @@ udpDataShow BuildUdpFrame(const PointCloundResultFrame& frame)
     udpFrame.targetY = targetY;
     udpFrame.errorMessage = frame.errorMsg;
     udpFrame.targetPoint = targetPoint;
-    udpFrame.allResultPoint = frame.dataPoints3D;
+    // 旧 UDP 协议与 TCP 协议相同：线点云 Z 与 resultPoints3D 相反。
+    // 在相机底层统一后再写入共享缓存，业务层不再识别协议来源。
+    udpFrame.allResultPoint = CanonicalizeCameraPointCloud(
+        frame.dataPoints3D,
+        CameraNativePointCloudConvention::LegacyCloudZOppositeTarget);
+    udpFrame.allResultPointCanonical = true;
     udpFrame.mFps = frame.calcFrameRate;
     udpFrame.timestamp = frame.timestamp;
     return udpFrame;

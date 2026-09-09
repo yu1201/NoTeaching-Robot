@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("neutral", "brand")]
     [string]$Channel,
+    [ValidateSet('', 'Off', 'Audit', 'Enforce')][string]$LicenseMode = '',
+    [string]$LicensePublicKeyHeader = '',
     [switch]$SkipPackageBuild,
     [string]$PackageGateReport = "",
     [string]$OutputBaseFilename = "",
@@ -27,6 +29,8 @@ if (-not (Test-Path -LiteralPath $gateCommon -PathType Leaf)) {
     throw "Release gate helpers were not found: $gateCommon"
 }
 . $gateCommon
+. (Join-Path $scriptRoot 'license_build_gate.ps1')
+$licenseSpec = Get-LicenseBuildSpec -Channel $Channel -Mode $LicenseMode -PublicKeyHeader $LicensePublicKeyHeader
 
 Set-ReleasePythonTool -PythonExecutable $PythonExecutable -PythonSha256 $PythonSha256
 $isccPath = Assert-ReleaseExternalTool `
@@ -61,6 +65,8 @@ if (-not $SkipPackageBuild) {
     & $packageScript `
         -AppVersion $AppVersion `
         -Channel $Channel `
+        -LicenseMode $LicenseMode `
+        -LicensePublicKeyHeader $LicensePublicKeyHeader `
         -MSBuildExecutable $MSBuildExecutable `
         -MSBuildSha256 $MSBuildSha256 `
         -WinDeployQtExecutable $WinDeployQtExecutable `
@@ -87,6 +93,7 @@ $packageReport = Assert-PackageGateReport `
 if (-not (Test-ReleaseGateSamePath ([string]$packageReport.packageDir) $packageDir)) {
     throw "Package gate report points at a non-canonical package directory."
 }
+Assert-ExecutableLicenseBuild -Executable (Join-Path $packageDir $channelSpec.ExeName) -Expected $licenseSpec | Out-Null
 
 $installerPath = Join-Path (Join-Path $repoRoot "dist\installer") "$OutputBaseFilename.exe"
 if (Test-Path -LiteralPath $installerPath) {
