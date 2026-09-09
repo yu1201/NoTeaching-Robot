@@ -33,15 +33,9 @@ public:
         AxisY = 2
     };
 
-    enum class ValidationPolicy
-    {
-        Audit = 0,
-        Enforce = 1
-    };
-
     static constexpr int CURRENT_VALIDATION_PROFILE_VERSION = 1;
-    // v1 起系统安全门禁开关仅作为审计记录，不再改变 ValidationPolicy 或生产流程。
-    static constexpr int CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 2;
+    // v3 删除全局 Audit/Enforce 选择：每个门禁开关与阈值独立决定实际拦截行为。
+    static constexpr int CURRENT_SAFETY_GATE_BEHAVIOR_VERSION = 3;
 
     struct Settings
     {
@@ -126,7 +120,6 @@ public:
         // 调试：导出完整点云逐帧文件(每点带帧号/相机原始坐标/机器人位姿/时间戳，647MB级)排查散点。
         // 默认关闭——仅排查相机散点时手动勾选，否则每次扫描生成大文件会明显拖慢流程。
         bool exportWorkpieceFrameDebug = false;
-        ValidationPolicy validationPolicy = ValidationPolicy::Enforce;
         int validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
         bool validationCoverageEnabled = true;
         int validationMinFinitePointCount = 300;
@@ -210,8 +203,6 @@ public:
     static Settings Load();
     static bool Save(const Settings& settings, QString* error = nullptr);
     static SystemInterlockPolicy RuntimeSystemInterlocks();
-    static bool CoreSafetyGatesEnabled(const Settings& settings);
-    static bool HasDisabledCoreSafetyGate(const Settings& settings);
     static void SetRuntimeModeOverride(Mode mode);
     static void SetRuntimeScanDirectionOverride(double x, double y, double z);
     static bool RuntimeScanDirectionOverride(double* x, double* y, double* z);
@@ -222,8 +213,6 @@ public:
     static QString FeaturePointStrategyDisplayName(FeaturePointStrategy strategy);
     static QString FeaturePointStrategyConfigValue(FeaturePointStrategy strategy);
     static FeaturePointStrategy FeaturePointStrategyFromConfigValue(const QString& value);
-    static QString ValidationPolicyConfigValue(ValidationPolicy policy);
-    static ValidationPolicy ValidationPolicyFromConfigValue(const QString& value);
     static QString SampleAxisModeConfigValue(SampleAxisMode mode);
     static SampleAxisMode SampleAxisModeFromConfigValue(const QString& value);
 };

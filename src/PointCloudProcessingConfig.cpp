@@ -63,7 +63,7 @@ void NormalizeFiniteLoadValues(PointCloudProcessingConfig::Settings& settings)
     useDefaultIfNonFinite(settings.fitSameTypeFlatSlope, defaults.fitSameTypeFlatSlope);
 
     // std::clamp/std::min/std::max do not sanitize NaN. Restore every floating-point
-    // quality threshold before the range clamps and the Enforce safety floors run.
+    // quality threshold before applying its representable input range.
     useDefaultIfNonFinite(settings.validationMinProjectedSpanMm, defaults.validationMinProjectedSpanMm);
     useDefaultIfNonFinite(
         settings.validationMinSdkBaseCloudCoverageRatio,
@@ -153,61 +153,6 @@ void NormalizeConfigurableWeldValidationThresholds(
             settings.validationMaxFinalSourcePhysicalOrientationDeltaDeg,
             0.001,
             180.0);
-}
-
-void ApplyEnforceValidationSafetyBounds(PointCloudProcessingConfig::Settings& settings)
-{
-    if (settings.validationPolicy != PointCloudProcessingConfig::ValidationPolicy::Enforce)
-    {
-        return;
-    }
-    if (settings.validationCoverageEnabled)
-    {
-        settings.validationMinFinitePointCount = std::max(300, settings.validationMinFinitePointCount);
-        settings.validationMinProjectedSpanMm = std::max(180.0, settings.validationMinProjectedSpanMm);
-    }
-    if (settings.validationSdkBaseIntegrityEnabled)
-    {
-        settings.validationMinSdkBaseCloudCoverageRatio =
-            std::max(0.60, settings.validationMinSdkBaseCloudCoverageRatio);
-        settings.validationMaxSdkBaseEndpointDeviationRatio =
-            std::min(0.25, settings.validationMaxSdkBaseEndpointDeviationRatio);
-    }
-    if (settings.validationContinuityEnabled)
-    {
-        settings.validationMinStationCoverageRatio = std::max(0.55, settings.validationMinStationCoverageRatio);
-        settings.validationMinLongestContinuousRatio = std::max(0.60, settings.validationMinLongestContinuousRatio);
-    }
-    if (settings.validationDenoiseRatioEnabled)
-    {
-        settings.validationMaxRejectedRatio = std::min(0.40, settings.validationMaxRejectedRatio);
-    }
-    if (settings.validationResidualEnabled)
-    {
-        settings.validationMaxMedianResidualMm =
-            settings.validationMaxMedianResidualMm <= 0.0
-            ? 3.0
-            : std::min(3.0, settings.validationMaxMedianResidualMm);
-        settings.validationMaxP95ResidualMm =
-            settings.validationMaxP95ResidualMm <= 0.0
-            ? 8.0
-            : std::min(8.0, settings.validationMaxP95ResidualMm);
-        settings.validationResidualInlierThresholdMm =
-            settings.validationResidualInlierThresholdMm <= 0.0
-            ? 6.0
-            : std::min(6.0, settings.validationResidualInlierThresholdMm);
-        settings.validationMinResidualInlierRatio = std::max(0.75, settings.validationMinResidualInlierRatio);
-    }
-    if (settings.validationKeyPointEnabled)
-    {
-        settings.validationMinKeyPointCount = std::max(6, settings.validationMinKeyPointCount);
-        settings.validationMinCornerCount = std::max(4, settings.validationMinCornerCount);
-    }
-    if (settings.validationOutputEnabled)
-    {
-        settings.validationMinOutputPointCount = std::max(80, settings.validationMinOutputPointCount);
-        settings.validationMinOutputLengthRatio = std::max(0.70, settings.validationMinOutputLengthRatio);
-    }
 }
 
 QString ReadSetting(const QString& key, const QString& defaultValue = QString())
@@ -327,27 +272,6 @@ SystemInterlockPolicy PointCloudProcessingConfig::RuntimeSystemInterlocks()
     return g_runtimeSystemInterlocks;
 }
 
-bool PointCloudProcessingConfig::CoreSafetyGatesEnabled(const Settings& settings)
-{
-    return settings.safetyGateProofIntegrityEnabled
-        && settings.safetyGateProductionPurposeEnabled
-        && settings.safetyGateRobotNameBindingEnabled
-        && settings.safetyGateCaseBindingEnabled
-        && settings.safetyGateEndpointBindingEnabled
-        && settings.safetyGateCameraHandEyeBindingEnabled
-        && settings.safetyGateFreshnessEnabled
-        && settings.safetyGatePolicySnapshotEnabled
-        && settings.safetyGateInputEvidenceEnabled
-        && settings.safetyGateAuthorizedPoseIdentityEnabled
-        && settings.safetyGateTrajectoryStructureEnabled
-        && settings.safetyGateMotionPrecheckEnabled;
-}
-
-bool PointCloudProcessingConfig::HasDisabledCoreSafetyGate(const Settings& settings)
-{
-    return !CoreSafetyGatesEnabled(settings);
-}
-
 PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
 {
     const QMap<QString, QString> settingsSnapshot = ConfigDatabase::ReadScopedSettings(
@@ -426,8 +350,6 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     const int storedValidationProfileVersion =
         ReadIntSetting("Validation/ProfileVersion", 0);
     settings.validationProfileVersion = storedValidationProfileVersion;
-    settings.validationPolicy = ValidationPolicyFromConfigValue(
-        ReadSetting("Validation/Policy", ValidationPolicyConfigValue(settings.validationPolicy)));
     settings.validationCoverageEnabled = ReadBoolSetting("Validation/CoverageEnabled", settings.validationCoverageEnabled);
     settings.validationMinFinitePointCount = ReadIntSetting("Validation/MinFinitePointCount", settings.validationMinFinitePointCount);
     settings.validationMinProjectedSpanMm = ReadDoubleSetting("Validation/MinProjectedSpanMm", settings.validationMinProjectedSpanMm);
@@ -535,15 +457,11 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
         ReadBoolSetting("SafetyGates/TrajectoryStructureEnabled", settings.safetyGateTrajectoryStructureEnabled);
     settings.safetyGateMotionPrecheckEnabled =
         ReadBoolSetting("SafetyGates/MotionPrecheckEnabled", settings.safetyGateMotionPrecheckEnabled);
-    const int storedSafetyGateBehaviorVersion =
-        ReadIntSetting("SafetyGates/BehaviorVersion", 0);
-
     // 旧现场数据库曾把六类门禁全部持久化为 0，安装/OTA 又会保留 Data，单靠 C++ 默认值无法恢复。
-    // Profile v1 已用 101 组历史语料完成阈值回算；仅旧配置升级时进入 Enforce 并打开全部六类指标。
+    // Profile v1 已用 101 组历史语料完成阈值回算；仅旧配置升级时打开全部六类指标。
     // v1+ 配置中的开关是操作员显式选择，必须按原值恢复。
     if (storedValidationProfileVersion < CURRENT_VALIDATION_PROFILE_VERSION)
     {
-        settings.validationPolicy = ValidationPolicy::Enforce;
         settings.validationCoverageEnabled = true;
         settings.validationContinuityEnabled = true;
         settings.validationDenoiseRatioEnabled = true;
@@ -552,14 +470,6 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
         settings.validationOutputEnabled = true;
     }
     settings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
-    // 兼容修复：BehaviorVersion 0 曾在任一核心记录开关关闭时把 Policy 强制持久化为
-    // Audit。仅迁移该最早版本；v1 记录型开关和 v2 实际启停开关均保留操作员选择。
-    if (storedSafetyGateBehaviorVersion < 1
-        && settings.validationPolicy == ValidationPolicy::Audit
-        && HasDisabledCoreSafetyGate(settings))
-    {
-        settings.validationPolicy = ValidationPolicy::Enforce;
-    }
     if (g_hasRuntimeModeOverride)
     {
         settings.mode = g_runtimeModeOverride;
@@ -673,7 +583,6 @@ PointCloudProcessingConfig::Settings PointCloudProcessingConfig::Load()
     settings.validationMinOutputPointCount = std::max(0, settings.validationMinOutputPointCount);
     settings.validationMinOutputLengthRatio = std::max(0.0, settings.validationMinOutputLengthRatio);
     NormalizeConfigurableWeldValidationThresholds(settings);
-    ApplyEnforceValidationSafetyBounds(settings);
     return settings;
 }
 
@@ -683,7 +592,6 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
     normalizedSettings.validationProfileVersion = CURRENT_VALIDATION_PROFILE_VERSION;
     NormalizeFiniteLoadValues(normalizedSettings);
     NormalizeConfigurableWeldValidationThresholds(normalizedSettings);
-    ApplyEnforceValidationSafetyBounds(normalizedSettings);
     QMap<QString, QString> pendingValues;
     const auto write = [&pendingValues](const QString& key, const QString& value)
     {
@@ -755,7 +663,8 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         && write("CloudProjection/LayerHighPercent", QString::number(settings.projectionLayerHighPercent, 'f', 6))
         && write("CloudProjection/SmoothRadius", QString::number(settings.projectionSmoothRadius))
         && write("Validation/ProfileVersion", QString::number(CURRENT_VALIDATION_PROFILE_VERSION))
-        && write("Validation/Policy", ValidationPolicyConfigValue(normalizedSettings.validationPolicy))
+        // 保留旧键仅用于现场数据库兼容；运行时已没有可切换的全局审计策略。
+        && write("Validation/Policy", "Enforce")
         && write("Validation/CoverageEnabled", normalizedSettings.validationCoverageEnabled ? "1" : "0")
         && write("Validation/MinFinitePointCount", QString::number(normalizedSettings.validationMinFinitePointCount))
         && write("Validation/MinProjectedSpanMm", QString::number(normalizedSettings.validationMinProjectedSpanMm, 'f', 6))
@@ -983,20 +892,6 @@ QString PointCloudProcessingConfig::SampleAxisModeConfigValue(SampleAxisMode mod
     default:
         return "auto";
     }
-}
-
-QString PointCloudProcessingConfig::ValidationPolicyConfigValue(ValidationPolicy policy)
-{
-    return policy == ValidationPolicy::Audit ? "Audit" : "Enforce";
-}
-
-PointCloudProcessingConfig::ValidationPolicy PointCloudProcessingConfig::ValidationPolicyFromConfigValue(
-    const QString& value)
-{
-    const QString normalized = value.trimmed().toLower();
-    return normalized == "audit" || normalized == "0"
-        ? ValidationPolicy::Audit
-        : ValidationPolicy::Enforce;
 }
 
 PointCloudProcessingConfig::SampleAxisMode PointCloudProcessingConfig::SampleAxisModeFromConfigValue(const QString& value)

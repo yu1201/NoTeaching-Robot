@@ -742,7 +742,7 @@ bool AnyPointCloudProofSafetyGateEnabled(
 QString PointCloudQualityPolicyRevision(const PointCloudProcessingConfig::Settings& settings)
 {
     QJsonObject policy;
-    policy.insert("policy", PointCloudProcessingConfig::ValidationPolicyConfigValue(settings.validationPolicy));
+    policy.insert("policy", QStringLiteral("Enforce"));
     policy.insert("thresholds", BuildPointCloudQualityThresholds(settings));
     policy.insert("safetyGates", BuildSafetyGateRecords(settings));
     return QString::fromLatin1(QCryptographicHash::hash(
@@ -1249,7 +1249,6 @@ bool WritePointCloudQualityGate(
         return false;
     }
 
-    const bool enforce = settings.validationPolicy == PointCloudProcessingConfig::ValidationPolicy::Enforce;
     const bool hasValidatedAuthorizedPose = !authorizedPosePath.isEmpty()
         && IsSha256Text(validatedAuthorizedPoseSha256)
         && validatedAuthorizedPoseSize > 0;
@@ -1294,14 +1293,14 @@ bool WritePointCloudQualityGate(
     const bool hasRequiredAuthorizedPose =
         !settings.safetyGateAuthorizedPoseIdentityEnabled
         || hasValidatedAuthorizedPose;
-    const bool authorize = enforce && report.evaluated && report.passed
+    const bool authorize = report.evaluated && report.passed
         && hasRequiredAuthorizedPose && hasProductionContext;
-    if (enforce && report.evaluated && report.passed
+    if (report.evaluated && report.passed
         && hasRequiredAuthorizedPose && !hasProductionContext)
     {
         error = productionContextError.isEmpty()
             ? QStringLiteral(
-                "Enforce 质量通过但缺少 live-scan 端点/运行/标定上下文，禁止生成生产授权。")
+                "质量通过但缺少 live-scan 端点/运行/标定上下文，禁止生成生产授权。")
             : productionContextError;
         return false;
     }
@@ -1315,7 +1314,7 @@ bool WritePointCloudQualityGate(
     root.insert("caseId", dir.dirName().compare(QStringLiteral("LaserPoint"), Qt::CaseInsensitive) == 0
         ? QFileInfo(dir.absolutePath()).dir().dirName()
         : QString());
-    root.insert("policy", PointCloudProcessingConfig::ValidationPolicyConfigValue(settings.validationPolicy));
+    root.insert("policy", QStringLiteral("Enforce"));
     root.insert("profileVersion", PointCloudProcessingConfig::CURRENT_VALIDATION_PROFILE_VERSION);
     root.insert("algorithmRevision", QString::fromLatin1(POINT_CLOUD_QUALITY_ALGORITHM_REVISION));
     root.insert("processingMode", PointCloudProcessingConfig::ModeConfigValue(settings.mode));
@@ -1323,7 +1322,7 @@ bool WritePointCloudQualityGate(
     root.insert("analysisEvaluated", report.evaluated);
     root.insert("qualityPassed", report.passed);
     root.insert("authorized", authorize);
-    root.insert("state", authorize ? "authorized" : (enforce ? "rejected" : "audit"));
+    root.insert("state", authorize ? "authorized" : "rejected");
     root.insert("failures", StringListToJsonArray(report.failures));
     root.insert("warnings", StringListToJsonArray(report.warnings));
     root.insert("metrics", PointCloudQualityMetricsToJson(report));
@@ -1412,8 +1411,7 @@ bool WritePointCloudQualityGate(
     if (!weldPosePath.isEmpty())
     {
         if (settings.safetyGateAuthorizedPoseIdentityEnabled
-            && !hasValidatedWeldPose
-            && enforce)
+            && !hasValidatedWeldPose)
         {
             error = QStringLiteral("补偿前焊道缺少与结构验证同一字节快照的 SHA256/大小。");
             return false;
@@ -1447,8 +1445,7 @@ bool WritePointCloudQualityGate(
     if (!authorizedPosePath.isEmpty())
     {
         if (settings.safetyGateAuthorizedPoseIdentityEnabled
-            && !hasValidatedAuthorizedPose
-            && enforce)
+            && !hasValidatedAuthorizedPose)
         {
             error = QStringLiteral("授权焊道缺少与结构回读同一字节快照的 SHA256/大小。");
             return false;
@@ -1725,7 +1722,7 @@ bool VerifyPointCloudQualityGate(
     else if (requireCurrentProductionContext)
     {
         error = QStringLiteral(
-            "PointCloudProduction 验证缺少当前机器人或 UI 线程冻结的完整生产上下文；离线只能生成 Audit/unauthorized 产物。");
+            "PointCloudProduction 验证缺少当前机器人或 UI 线程冻结的完整生产上下文。");
         return false;
     }
     if ((currentSettings.safetyGateProductionPurposeEnabled
@@ -1745,9 +1742,7 @@ bool VerifyPointCloudQualityGate(
         return false;
     }
     if (currentSettings.safetyGatePolicySnapshotEnabled
-        && (currentSettings.validationPolicy
-                != PointCloudProcessingConfig::ValidationPolicy::Enforce
-            || root.value("processingMode").toString()
+        && (root.value("processingMode").toString()
                 != PointCloudProcessingConfig::ModeConfigValue(
                     currentSettings.mode)
             || root.value("thresholds").toObject()
@@ -3011,10 +3006,8 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
         }
 
         PointCloudExtractionProcessor::SdkBaseWeldIntegrityResult sdkBaseIntegrity;
-        const bool auditOnly =
-            settings.validationPolicy == PointCloudProcessingConfig::ValidationPolicy::Audit;
         const auto applySdkBaseIntegrityMetrics =
-            [&sdkBaseIntegrity, auditOnly](
+            [&sdkBaseIntegrity](
                 RobotCalculation::MeasureThenWeldAnalysisResult::PointCloudQualityReport& report)
             {
                 if (!sdkBaseIntegrity.evaluated)
@@ -3022,7 +3015,7 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
                     return;
                 }
                 report.evaluated = true;
-                report.auditOnly = auditOnly;
+                report.auditOnly = false;
                 report.sdkBaseWeldPointCount = sdkBaseIntegrity.sdkBaseWeldPointCount;
                 report.sdkBaseFullCloudProjectedSpanMm =
                     sdkBaseIntegrity.fullCloudProjectedSpanMm;
@@ -3058,29 +3051,18 @@ RobotCalculation::MeasureThenWeldAnalysisResult AnalyzeMeasureThenWeldPointCloud
             }
             if (!sdkBaseIntegrity.passed)
             {
-                if (auditOnly)
+                RobotCalculation::MeasureThenWeldAnalysisResult failed;
+                failed.error = sdkBaseIntegrity.error
+                    + QStringLiteral(" 已在SDKBase平滑、首尾截断、拟合和平台重算前停止。");
+                failed.qualityReport.inputPointCount = fullCloudInput.size();
+                failed.qualityReport.finitePointCount =
+                    sdkBaseIntegrity.fullCloudFinitePointCount;
+                applySdkBaseIntegrityMetrics(failed.qualityReport);
+                if (appendLog)
                 {
-                    if (appendLog)
-                    {
-                        appendLog(QStringLiteral("SDK基础焊道完整性审计不通过（审计模式记录但不拦截）：")
-                            + sdkBaseIntegrity.error);
-                    }
+                    appendLog(failed.error);
                 }
-                else
-                {
-                    RobotCalculation::MeasureThenWeldAnalysisResult failed;
-                    failed.error = sdkBaseIntegrity.error
-                        + QStringLiteral(" 已在SDKBase平滑、首尾截断、拟合和平台重算前停止。");
-                    failed.qualityReport.inputPointCount = fullCloudInput.size();
-                    failed.qualityReport.finitePointCount =
-                        sdkBaseIntegrity.fullCloudFinitePointCount;
-                    applySdkBaseIntegrityMetrics(failed.qualityReport);
-                    if (appendLog)
-                    {
-                        appendLog(failed.error);
-                    }
-                    return failed;
-                }
+                return failed;
             }
             else if (appendLog)
             {
@@ -15610,25 +15592,11 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
                 });
         if (!finalArtifactValid)
         {
-            if (pointCloudSettings.validationPolicy
-                == PointCloudProcessingConfig::ValidationPolicy::Enforce)
-            {
-                if (appendLog)
-                {
-                    appendLog(QString("最终焊接姿态写后回读验证失败：%1").arg(error));
-                }
-                return false;
-            }
             if (appendLog)
             {
-                appendLog(QString("Audit：最终焊接姿态结构验证未通过，仅保留未授权审计证据：%1")
-                    .arg(error));
+                appendLog(QString("最终焊接姿态写后回读验证失败：%1").arg(error));
             }
-            error.clear();
-            validatedSourcePoseSha256.clear();
-            validatedSourcePoseSize = -1;
-            validatedPoseSha256.clear();
-            validatedPoseSize = -1;
+            return false;
         }
         if (!WritePointCloudQualityGate(
                 laserDir,
@@ -15663,24 +15631,6 @@ bool MeasureThenWeldService::ScanMoveAndCollect(
             appendLog(QString("焊道补偿摘要：%1").arg(seamCompSummary));
             appendLog(QString("点云质量报告：%1")
                 .arg(QDir(laserDir).filePath(QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME))));
-        }
-        if (pointCloudSettings.validationPolicy == PointCloudProcessingConfig::ValidationPolicy::Audit)
-        {
-            if (appendLog)
-            {
-                appendLog("当前为点云质量审计模式：已生成分析产物，但不会生成可执行证明或进入焊接。");
-            }
-            savedPath.clear();
-            if (!qualityGateReplacement.Complete(qualityGateError))
-            {
-                if (appendLog)
-                {
-                    appendLog(QStringLiteral("审计产物已生成，但解除点云证明拒绝闭锁失败：")
-                        + qualityGateError);
-                }
-                return false;
-            }
-            return true;
         }
         // 焊道补偿生成后立即同步生成 STEP job(srp/srd)到焊道同目录，便于提取查看，不必等下枪执行才保存。
         {
@@ -15764,18 +15714,8 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
     const PointCloudProcessingConfig::Settings pointCloudSettings =
         PointCloudProcessingConfig::Load();
     PointCloudProductionContext productionContext;
-    if (pointCloudSettings.validationPolicy
-        == PointCloudProcessingConfig::ValidationPolicy::Enforce)
+    if (AnyPointCloudProofSafetyGateEnabled(pointCloudSettings))
     {
-        if (productionExpectation.robotName.trimmed().isEmpty()
-            || productionExpectation.robotEndpoint.trimmed().isEmpty()
-            || productionExpectation.cameraSection.trimmed().isEmpty()
-            || !IsSha256Text(productionExpectation.handEyeSha256))
-        {
-            error = QStringLiteral(
-                "Enforce 生产重建必须提供当前机器人上下文；离线预览不能生成可运动授权。");
-            return false;
-        }
         if (!LoadValidatedRebuildPointCloudContext(
                 laserDir,
                 QString::fromStdString(param.sRobotName),
@@ -16233,21 +16173,7 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
             stopRequested);
     if (!finalArtifactValid)
     {
-        if (pointCloudSettings.validationPolicy
-            == PointCloudProcessingConfig::ValidationPolicy::Enforce)
-        {
-            return false;
-        }
-        if (appendLog)
-        {
-            appendLog(QString("Audit：最终焊接姿态结构验证未通过，仅保留未授权审计证据：%1")
-                .arg(error));
-        }
-        error.clear();
-        validatedSourcePoseSha256.clear();
-        validatedSourcePoseSize = -1;
-        validatedPoseSha256.clear();
-        validatedPoseSize = -1;
+        return false;
     }
     if (!WritePointCloudQualityGate(
             laserDir,
@@ -16283,22 +16209,6 @@ bool MeasureThenWeldService::RebuildWeldFilesFromLaserDir(
         appendLog(QString("焊道补偿摘要：%1").arg(seamCompSummary));
         appendLog(QString("点云质量报告：%1")
             .arg(dir.filePath(QString::fromLatin1(POINT_CLOUD_QUALITY_GATE_FILE_NAME))));
-    }
-    if (pointCloudSettings.validationPolicy == PointCloudProcessingConfig::ValidationPolicy::Audit)
-    {
-        summary = QString("审计完成：已生成点云分析与姿态产物，但没有可执行质量证明；%1")
-            .arg(seamCompSummary);
-        seamCompPath.clear();
-        if (appendLog)
-        {
-            appendLog("当前为点云质量审计模式：跳过 STEP job 生成并禁止进入焊接。");
-        }
-        if (!qualityGateReplacement.Complete(error))
-        {
-            error = QStringLiteral("审计重建完成，但解除点云证明拒绝闭锁失败：") + error;
-            return false;
-        }
-        return true;
     }
     // 有活跃驱动上下文时，通过适配层同步导出控制器程序。纯预览后台重算没有
     // 驱动生命周期保证，只生成焊道文件，不捕获或使用裸驱动指针。
@@ -19228,8 +19138,7 @@ RobotCalculation::LowerWeldFilterParams MeasureThenWeldService::BuildTrackFitPar
     params.projectionSmoothRadius = pointCloudSettings.projectionSmoothRadius;
     params.useSlopeConsistentCornerFit = pointCloudSettings.slopeConsistentCornerFit;
     params.exportFitDebugCloud = pointCloudSettings.exportFitDebugCloud;
-    params.validationAuditOnly =
-        pointCloudSettings.validationPolicy == PointCloudProcessingConfig::ValidationPolicy::Audit;
+    params.validationAuditOnly = false;
     params.validationCoverageEnabled = pointCloudSettings.validationCoverageEnabled;
     params.validationMinFinitePointCount = pointCloudSettings.validationMinFinitePointCount;
     params.validationMinProjectedSpanMm = pointCloudSettings.validationMinProjectedSpanMm;
