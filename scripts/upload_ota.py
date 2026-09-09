@@ -5,7 +5,7 @@
 ``prepare-dual`` 仅供离线诊断/交付测试，不产生发布权限；外部
 ``publish-dual --report`` 已永久禁用。唯一可外发入口 ``trusted-release-dual``
 在同一父进程内从 clean ``refs/heads/main`` 与 ``refs/heads/hk-pathlynx-corpla``
-创建 verifier-owned detached linked worktrees，自行构建/打包/验收唯一候选，全部
+绑定用户维护的 main/品牌固定工作区，自行构建/打包/验收唯一候选，全部
 通过后才验证 origin 双分支与 GitHub tag/release 前置状态。随后先发布并回读 OTA
 双通道，再以同一候选创建 target=main、恰好包含两份安装包的 GitHub Release；
 GitHub 资产先隔离在 draft，远端 size/hash 与 main 绑定全部回读通过才公开。
@@ -35,7 +35,6 @@ import os
 import posixpath
 import re
 import secrets
-import shutil
 import socket
 import stat as stat_module
 import subprocess
@@ -223,6 +222,7 @@ class _BuiltReleaseContext:
         protected_tool_roots: tuple[tuple[str, Path], ...],
         python_runtime_root: Path,
         python_runtime_sha256: str,
+        external_file_sha256: dict[Path, str] | None = None,
     ) -> None:
         self.report = report
         self.verifier_root = verifier_root
@@ -238,6 +238,7 @@ class _BuiltReleaseContext:
         self.protected_tool_roots = tuple(protected_tool_roots)
         self.python_runtime_root = python_runtime_root
         self.python_runtime_sha256 = python_runtime_sha256
+        self.external_file_sha256 = dict(external_file_sha256 or {})
         self.cleanup_errors: list[str] = []
 
 
@@ -3055,18 +3056,48 @@ def _require_release_launcher_is_clean_main(repo_root: Path) -> tuple[str, str]:
     return main_head, brand_head
 
 
-def _safe_verifier_worktree(root: Path, name: str) -> Path:
-    _require(name in {"neutral", "brand"}, "非法 verifier worktree 名称。")
-    root = root.resolve(strict=True)
-    child = (root / name).resolve()
-    _require(child.parent == root and child.name == name,
-             "verifier worktree 路径逃逸临时根目录。")
-    return child
+def _require_fixed_release_workspaces(repo_root: Path) -> tuple[Path, Path, str, str]:
+    """Bind a release to the two user-managed, permanent branch workspaces."""
+    workspace_root = repo_root.parent.resolve(strict=True)
+    neutral_root = (workspace_root / "QtWidgetsApplication4").resolve(strict=True)
+    brand_root = (workspace_root / "QtWidgetsApplication4-brand").resolve(strict=True)
+    _require(repo_root.resolve(strict=True) == neutral_root,
+             "trusted-release-dual 必须从固定主分支目录 QtWidgetsApplication4 启动。")
+
+    identities = (
+        ("neutral", neutral_root, "main"),
+        ("brand", brand_root, "hk-pathlynx-corpla"),
+    )
+    heads: dict[str, str] = {}
+    for channel, root, branch in identities:
+        _require(root.is_dir() and not root.is_symlink() and not _path_is_reparse_point(root),
+                 f"{channel} 固定工作区缺失或为链接/重解析点：{root}")
+        top = Path(_git_text(root, "rev-parse", "--show-toplevel")).resolve(strict=True)
+        _require(top == root, f"{channel} 固定目录不是对应 Git 工作区根：{root}")
+        actual_branch = _git_text(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+        _require(actual_branch == branch,
+                 f"{channel} 固定工作区分支错误：expected={branch} actual={actual_branch}")
+        head = _git_text(root, "rev-parse", "HEAD")
+        _require(head == _git_text(root, "rev-parse", f"refs/heads/{branch}"),
+                 f"{channel} 固定工作区 HEAD 未绑定 refs/heads/{branch}。")
+        _require(re.fullmatch(r"[0-9a-f]{40}", head) is not None,
+                 f"{channel} 固定工作区 HEAD 非法。")
+        dirty = _git_text(root, "status", "--porcelain=v1", "--untracked-files=all")
+        _require(not dirty, f"{channel} 固定工作区含未提交/未跟踪变更，拒绝正式发布。")
+        heads[channel] = head
+
+    git_path = (_ACTIVE_GIT_TOOL.path if _ACTIVE_GIT_TOOL is not None else DEFAULT_GIT_EXE)
+    _run_local_checked(
+        [str(git_path), "merge-base", "--is-ancestor", heads["neutral"], heads["brand"]],
+        cwd=neutral_root,
+        label="验证 main 是品牌分支祖先",
+        timeout=5 * 60,
+    )
+    return neutral_root, brand_root, heads["neutral"], heads["brand"]
 
 
-def _snapshot_license_public_key_header(
+def _validate_license_public_key_header(
     path_value: os.PathLike[str] | str,
-    verifier_root: Path,
     repo_root: Path,
 ) -> Path:
     candidate = Path(path_value).expanduser()
@@ -3090,14 +3121,10 @@ def _snapshot_license_public_key_header(
     payload = source.read_bytes()
     _require(b"PRIVATE KEY" not in payload.upper(),
              "License public key header 禁止包含私钥内容。")
-    target = verifier_root / "license-public-key.h"
-    with target.open("xb") as stream:
-        stream.write(payload)
-    _require(target.is_file() and not target.is_symlink()
-             and not _path_is_reparse_point(target)
-             and sha256_file(target) == hashlib.sha256(payload).hexdigest(),
-             "License public key header 可信快照失败。")
-    return target.resolve(strict=True)
+    expected_sha = hashlib.sha256(payload).hexdigest()
+    _require(sha256_file(source) == expected_sha,
+             "License public key header 回读校验失败。")
+    return source
 
 
 _ALLOWED_BRAND_TRACKED_DELTA = frozenset({
@@ -3247,7 +3274,7 @@ def _assert_brand_source_boundary(
              "brand icons/app.ico 必须与 branding/app_color.ico 完全一致。")
 
 
-def _copy_verified_fanuc_runtime(runtime_source_value: str, targets: Iterable[Path]) -> None:
+def _verify_fixed_fanuc_runtime(runtime_source_value: str, targets: Iterable[Path]) -> None:
     try:
         runtime_source = Path(runtime_source_value).expanduser().resolve(strict=True)
     except OSError as exc:
@@ -3309,11 +3336,11 @@ def _copy_verified_fanuc_runtime(runtime_source_value: str, targets: Iterable[Pa
                  f"{target.name} clean HEAD 的 FANUC manifest 与 runtime-source 不一致。")
         for source_file, relative in validated_files:
             destination = target / Path(relative)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source_file, destination)
-            _require(destination.stat().st_size == source_file.stat().st_size
+            _require(destination.is_file() and not destination.is_symlink()
+                     and destination.resolve(strict=True).is_relative_to(target)
+                     and destination.stat().st_size == source_file.stat().st_size
                      and sha256_file(destination) == sha256_file(source_file),
-                     f"复制 FANUC runtime 后回读失败：{target.name}/{relative}")
+                     f"{target.name} 自有 FANUC runtime 缺失或与权威清单不一致：{relative}")
 
 
 def _create_single_exe_patch(brand_root: Path, version: str) -> Path:
@@ -3331,7 +3358,7 @@ def _create_single_exe_patch(brand_root: Path, version: str) -> Path:
 
 @contextlib.contextmanager
 def _build_trusted_release_candidate(args: argparse.Namespace):
-    """Build the only publishable candidate in verifier-owned linked worktrees."""
+    """Build the only publishable candidate in the two fixed branch workspaces."""
     global _ACTIVE_GIT_TOOL, _ACTIVE_GH_TOOL, _ACTIVE_PYTHON_TOOL
     repo_root = Path(__file__).resolve().parents[1]
     git_tool = _resolve_and_verify_trusted_tool(
@@ -3420,183 +3447,158 @@ def _build_trusted_release_candidate(args: argparse.Namespace):
     python_runtime_root, python_runtime_sha256 = (
         _verify_and_snapshot_python_build_runtime(python_tool)
     )
-    worktrees_added: list[Path] = []
-    context: _BuiltReleaseContext | None = None
-    yielded = False
-    temporary_root = Path(tempfile.mkdtemp(prefix="noteaching-trusted-release-")).resolve(strict=True)
-    neutral_root = _safe_verifier_worktree(temporary_root, "neutral")
-    brand_root = _safe_verifier_worktree(temporary_root, "brand")
-    license_public_key_header = _snapshot_license_public_key_header(
-        getattr(args, "license_public_key_header", ""), temporary_root, repo_root
-    )
     powershell = _trusted_windows_powershell()
-    git_path = git_tool.path
     try:
-        main_head, brand_head = _require_release_launcher_is_clean_main(repo_root)
-        try:
-            for root, head, channel in (
-                (neutral_root, main_head, "neutral"),
-                (brand_root, brand_head, "brand"),
-            ):
-                _run_local_checked(
-                    [str(git_path), "worktree", "add", "--detach", str(root), head],
-                    cwd=repo_root,
-                    label=f"创建 verifier-owned {channel} detached worktree",
-                    timeout=5 * 60,
-                )
-                worktrees_added.append(root)
-                _require(root.resolve(strict=True).parent == temporary_root,
-                         "git worktree 创建后路径逃逸 verifier 临时根。")
+        neutral_root, brand_root, main_head, brand_head = (
+            _require_fixed_release_workspaces(repo_root)
+        )
+        license_public_key_header = _validate_license_public_key_header(
+            getattr(args, "license_public_key_header", ""), repo_root
+        )
+        fixed_build_launcher = (
+            repo_root.parent / "工具箱" / "授权服务管理工具" / "scripts"
+            / "build-field-test-client.ps1"
+        ).resolve(strict=True)
+        _require(fixed_build_launcher.is_file() and not fixed_build_launcher.is_symlink()
+                 and not _path_is_reparse_point(fixed_build_launcher),
+                 "固定工作区构建入口缺失或为链接/重解析点。")
+        external_file_sha256 = {
+            fixed_build_launcher: sha256_file(fixed_build_launcher),
+            license_public_key_header: sha256_file(license_public_key_header),
+        }
+        trusted_file_sha256 = {
+            relative: sha256_file(neutral_root / Path(relative))
+            for relative in TRUSTED_RELEASE_FILES
+        }
+        _assert_brand_source_boundary(
+            repo_root, neutral_root, brand_root, main_head, brand_head
+        )
+        _verify_fixed_fanuc_runtime(args.runtime_source, (neutral_root, brand_root))
 
-            trusted_file_sha256 = {
-                relative: sha256_file(neutral_root / Path(relative))
-                for relative in TRUSTED_RELEASE_FILES
-            }
-            for relative, expected_sha in trusted_file_sha256.items():
-                _require(sha256_file(repo_root / Path(relative)) == expected_sha,
-                         f"启动器发布代码不等于初始 main HEAD：{relative}")
-            _assert_brand_source_boundary(
-                repo_root, neutral_root, brand_root, main_head, brand_head
+        installer_gates: dict[str, Path] = {}
+        for channel, root in (("neutral", neutral_root), ("brand", brand_root)):
+            _verify_release_toolchain_dependencies(
+                build_tools, toolchain_closures, protected_tool_roots
             )
-            _copy_verified_fanuc_runtime(args.runtime_source, (neutral_root, brand_root))
-
-            installer_gates: dict[str, Path] = {}
-            for channel, root in (("neutral", neutral_root), ("brand", brand_root)):
-                _verify_release_toolchain_dependencies(
-                    build_tools, toolchain_closures, protected_tool_roots
-                )
-                license_arguments = [
-                    "-LicenseMode", "Off" if channel == "neutral" else "Enforce",
-                ]
-                if channel == "brand":
-                    license_arguments.extend([
-                        "-LicensePublicKeyHeader", str(license_public_key_header),
-                    ])
-                _run_local_checked(
-                    [
-                        str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
-                        "-ExecutionPolicy", "Bypass", "-File",
-                        str(root / "scripts" / "build_installer.ps1"),
-                        "-AppVersion", args.version, "-Channel", channel,
-                        *license_arguments,
-                        "-MSBuildExecutable", str(msbuild_tool.path),
-                        "-MSBuildSha256", msbuild_tool.sha256,
-                        "-WinDeployQtExecutable", str(windeployqt_tool.path),
-                        "-WinDeployQtSha256", windeployqt_tool.sha256,
-                        "-QtMsBuildPath", str(qt_msbuild_root),
-                        "-InnoCompilerExecutable", str(iscc_tool.path),
-                        "-InnoCompilerSha256", iscc_tool.sha256,
-                        "-PythonExecutable", str(python_tool.path),
-                        "-PythonSha256", python_tool.sha256,
-                    ],
-                    cwd=root,
-                    label=f"{channel} clean-HEAD Rebuild + Inno",
-                    # A fully isolated x64 rebuild plus deterministic PyInstaller
-                    # packaging can exceed 90 minutes on the release workstation.
-                    timeout=180 * 60,
-                )
-                installer_gates[channel] = (
-                    root / "dist" / "release-gates" / f"installer-{channel}-{args.version}.json"
-                )
-                _require(installer_gates[channel].is_file(),
-                         f"{channel} build 未产生 canonical installer gate。")
-                _verify_release_toolchain_dependencies(
-                    build_tools, toolchain_closures, protected_tool_roots
-                )
-
-            brand_patch = _create_single_exe_patch(brand_root, args.version)
-            pair_path = (
-                neutral_root / "dist" / "release-gates" / f"release-pair-{args.version}.json"
+            _require(sha256_file(fixed_build_launcher)
+                     == external_file_sha256[fixed_build_launcher],
+                     "固定工作区构建入口在发版过程中发生变化。")
+            field_build = [
+                str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", str(fixed_build_launcher),
+                "-Channel", channel, "-MainRoot", str(root),
+            ]
+            if channel == "brand":
+                field_build.extend(["-PublicKeyHeader", str(license_public_key_header)])
+            _run_local_checked(
+                field_build,
+                cwd=root,
+                label=f"{channel} 固定工作区 Release 身份构建",
+                timeout=180 * 60,
             )
+
+            license_arguments = [
+                "-LicenseMode", "Off" if channel == "neutral" else "Enforce",
+            ]
+            if channel == "brand":
+                license_arguments.extend([
+                    "-LicensePublicKeyHeader", str(license_public_key_header),
+                ])
             _run_local_checked(
                 [
                     str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
                     "-ExecutionPolicy", "Bypass", "-File",
-                    str(neutral_root / "scripts" / "verify_release_pair.ps1"),
-                    "-NeutralInstallerGateReport", str(installer_gates["neutral"]),
-                    "-BrandInstallerGateReport", str(installer_gates["brand"]),
-                    "-OutputPath", str(pair_path),
+                    str(root / "scripts" / "build_installer.ps1"),
+                    "-AppVersion", args.version, "-Channel", channel,
+                    *license_arguments,
+                    "-MSBuildExecutable", str(msbuild_tool.path),
+                    "-MSBuildSha256", msbuild_tool.sha256,
+                    "-WinDeployQtExecutable", str(windeployqt_tool.path),
+                    "-WinDeployQtSha256", windeployqt_tool.sha256,
+                    "-QtMsBuildPath", str(qt_msbuild_root),
+                    "-InnoCompilerExecutable", str(iscc_tool.path),
+                    "-InnoCompilerSha256", iscc_tool.sha256,
                     "-PythonExecutable", str(python_tool.path),
                     "-PythonSha256", python_tool.sha256,
                 ],
-                cwd=neutral_root,
-                label="创建 clean-HEAD 双通道 pair gate",
-                timeout=30 * 60,
+                cwd=root,
+                label=f"{channel} 固定工作区打包 + Inno",
+                timeout=180 * 60,
+            )
+            installer_gates[channel] = (
+                root / "dist" / "release-gates" / f"installer-{channel}-{args.version}.json"
+            )
+            _require(installer_gates[channel].is_file(),
+                     f"{channel} build 未产生 canonical installer gate。")
+            _verify_release_toolchain_dependencies(
+                build_tools, toolchain_closures, protected_tool_roots
             )
 
-            report = prepare_dual_candidate(
-                args.version,
-                neutral_root / "dist" / "QtWidgetsApplication4",
-                neutral_root / "dist" / "installer" / _expected_installer_name("neutral", args.version),
-                brand_root / "dist" / "QtWidgetsApplication4",
-                brand_root / "dist" / "installer" / _expected_installer_name("brand", args.version),
-                brand_patch,
-                pair_path,
-                args.notes,
-            )
+        brand_patch = _create_single_exe_patch(brand_root, args.version)
+        pair_path = (
+            neutral_root / "dist" / "release-gates" / f"release-pair-{args.version}.json"
+        )
+        _run_local_checked(
+            [
+                str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File",
+                str(neutral_root / "scripts" / "verify_release_pair.ps1"),
+                "-NeutralInstallerGateReport", str(installer_gates["neutral"]),
+                "-BrandInstallerGateReport", str(installer_gates["brand"]),
+                "-OutputPath", str(pair_path),
+                "-PythonExecutable", str(python_tool.path),
+                "-PythonSha256", python_tool.sha256,
+            ],
+            cwd=neutral_root,
+            label="创建固定工作区双通道 pair gate",
+            timeout=30 * 60,
+        )
 
-            # Regressions are intentionally inside the same parent process phase and before
-            # any signing-key read, password read, socket, or remote publish lock.
-            for command, cwd, label, timeout in (
-                ([str(python_tool.path), "-I", "-B",
-                  str(neutral_root / "scripts" / "tests" / "verify_ota_release_gate.py")],
-                 neutral_root, "OTA client/release static regression", 10 * 60),
-                ([str(python_tool.path), "-I", "-B",
-                  str(neutral_root / "scripts" / "tests" / "test_upload_ota_offline.py")],
-                 neutral_root, "OTA offline publish regression", 15 * 60),
-                ([str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
-                  "-ExecutionPolicy", "Bypass", "-File",
-                  str(neutral_root / "scripts" / "tests" / "test_release_packaging_gates.ps1")],
-                 neutral_root, "release packaging gate regression", 30 * 60),
-            ):
-                _run_local_checked(command, cwd=cwd, label=label, timeout=timeout)
+        report = prepare_dual_candidate(
+            args.version,
+            neutral_root / "dist" / "QtWidgetsApplication4",
+            neutral_root / "dist" / "installer" / _expected_installer_name("neutral", args.version),
+            brand_root / "dist" / "QtWidgetsApplication4",
+            brand_root / "dist" / "installer" / _expected_installer_name("brand", args.version),
+            brand_patch,
+            pair_path,
+            args.notes,
+        )
 
-            context = _BuiltReleaseContext(
-                report=report,
-                verifier_root=neutral_root,
-                brand_verifier_root=brand_root,
-                main_head=main_head,
-                brand_head=brand_head,
-                trusted_file_sha256=trusted_file_sha256,
-                git_tool=git_tool,
-                gh_tool=gh_tool,
-                python_tool=python_tool,
-                build_tools=build_tools,
-                toolchain_closures=toolchain_closures,
-                protected_tool_roots=protected_tool_roots,
-                python_runtime_root=python_runtime_root,
-                python_runtime_sha256=python_runtime_sha256,
-            )
-            _revalidate_built_release_context(repo_root, context)
-            yielded = True
-            yield context
-        finally:
-            cleanup_errors = context.cleanup_errors if context is not None else []
-            for root in reversed(worktrees_added):
-                try:
-                    _require(root.parent == temporary_root and root.name in {"neutral", "brand"},
-                             "拒绝清理不在 verifier 临时根下的 worktree。")
-                    _run_local_checked(
-                        [str(git_path), "worktree", "remove", "--force", str(root)],
-                        cwd=repo_root,
-                        label=f"清理 verifier worktree {root.name}",
-                        timeout=10 * 60,
-                    )
-                except Exception as exc:
-                    cleanup_errors.append(f"worktree {root.name}: {type(exc).__name__}")
-            try:
-                if temporary_root.exists():
-                    shutil.rmtree(temporary_root)
-            except Exception as exc:
-                cleanup_errors.append(f"temporary root: {type(exc).__name__}")
-            active_error = sys.exc_info()[1]
-            if cleanup_errors and active_error is not None and hasattr(active_error, "add_note"):
-                active_error.add_note(
-                    "verifier 本地清理同时失败（主异常保持不变）："
-                    + "；".join(cleanup_errors)
-                )
-            elif cleanup_errors and not yielded:
-                raise ReleaseGateError("verifier 本地清理失败：" + "；".join(cleanup_errors))
+        # Regressions remain before signing-key/password reads and external publication.
+        for command, cwd, label, timeout in (
+            ([str(python_tool.path), "-I", "-B",
+              str(neutral_root / "scripts" / "tests" / "verify_ota_release_gate.py")],
+             neutral_root, "OTA client/release static regression", 10 * 60),
+            ([str(python_tool.path), "-I", "-B",
+              str(neutral_root / "scripts" / "tests" / "test_upload_ota_offline.py")],
+             neutral_root, "OTA offline publish regression", 15 * 60),
+            ([str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
+              "-ExecutionPolicy", "Bypass", "-File",
+              str(neutral_root / "scripts" / "tests" / "test_release_packaging_gates.ps1")],
+             neutral_root, "release packaging gate regression", 30 * 60),
+        ):
+            _run_local_checked(command, cwd=cwd, label=label, timeout=timeout)
+
+        context = _BuiltReleaseContext(
+            report=report,
+            verifier_root=neutral_root,
+            brand_verifier_root=brand_root,
+            main_head=main_head,
+            brand_head=brand_head,
+            trusted_file_sha256=trusted_file_sha256,
+            git_tool=git_tool,
+            gh_tool=gh_tool,
+            python_tool=python_tool,
+            build_tools=build_tools,
+            toolchain_closures=toolchain_closures,
+            protected_tool_roots=protected_tool_roots,
+            python_runtime_root=python_runtime_root,
+            python_runtime_sha256=python_runtime_sha256,
+            external_file_sha256=external_file_sha256,
+        )
+        _revalidate_built_release_context(repo_root, context)
+        yield context
     finally:
         _ACTIVE_GIT_TOOL, _ACTIVE_GH_TOOL, _ACTIVE_PYTHON_TOOL = (
             previous_git, previous_gh, previous_python
@@ -3622,21 +3624,28 @@ def _revalidate_built_release_context(repo_root: Path, context: _BuiltReleaseCon
              == context.brand_head,
              "本地 release refs 在 clean build 后发生变化。")
     _require(_git_text(context.verifier_root, "rev-parse", "HEAD") == context.main_head,
-             "neutral verifier worktree HEAD 已漂移。")
+             "neutral 固定工作区 HEAD 已漂移。")
     _require(_git_text(context.brand_verifier_root, "rev-parse", "HEAD")
              == context.brand_head,
-             "brand verifier worktree HEAD 已漂移。")
-    for channel, root in (
-        ("neutral", context.verifier_root),
-        ("brand", context.brand_verifier_root),
+             "brand 固定工作区 HEAD 已漂移。")
+    for channel, root, branch in (
+        ("neutral", context.verifier_root, "main"),
+        ("brand", context.brand_verifier_root, "hk-pathlynx-corpla"),
     ):
+        _require(_git_text(root, "symbolic-ref", "--quiet", "--short", "HEAD") == branch,
+                 f"{channel} 固定工作区分支已漂移。")
         tracked_dirty = _git_text(
             root, "status", "--porcelain=v1", "--untracked-files=no"
         )
-        _require(not tracked_dirty, f"{channel} verifier worktree 的 tracked 字节已漂移。")
+        _require(not tracked_dirty, f"{channel} 固定工作区的 tracked 字节已漂移。")
         for relative, expected_sha in context.trusted_file_sha256.items():
             _require(sha256_file(root / Path(relative)) == expected_sha,
                      f"外发前 {channel} 受信任发布文件已漂移：{relative}")
+    for path, expected_sha in context.external_file_sha256.items():
+        _require(path.is_file() and not path.is_symlink()
+                 and not _path_is_reparse_point(path)
+                 and sha256_file(path) == expected_sha,
+                 f"外发前外部构建输入已漂移：{path.name}")
     pair = context.report.get("pairGate", {})
     _require(isinstance(pair, dict)
              and pair.get("neutral", {}).get("head") == context.main_head
@@ -4262,7 +4271,7 @@ def trusted_release_dual(
     _ota_publisher: Any = None,
     _github_publisher: Any = None,
 ) -> dict[str, Any]:
-    """Build and publish both OTA and GitHub from one verifier-owned candidate.
+    """Build and publish both OTA and GitHub from the two fixed workspaces.
 
     The build context remains alive through both external publications.  OTA is
     deliberately first; a failed OTA publication must never create a GitHub
@@ -4310,7 +4319,7 @@ def trusted_release_dual(
         else:
             # Only dependency-injected offline tests may use the legacy report-shaped builder.
             _require(_candidate_builder is not None,
-                     "生产 candidate builder 必须返回 verifier-owned release context。")
+                     "生产 candidate builder 必须返回 fixed-workspace release context。")
             trusted_report = trust_factory(built_value)
         # Build/regressions and the fresh in-process trust gate are complete before
         # any network preflight, signing-key read, password read, or remote lock.
@@ -4396,7 +4405,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     trusted = subparsers.add_parser(
         "trusted-release-dual",
-        help="在 verifier-owned clean detached worktrees 内构建唯一候选并直接发布",
+        help="在 main/品牌固定工作区内构建唯一候选并直接发布",
     )
     trusted.add_argument("--version", required=True)
     trusted.add_argument("--runtime-source", required=True,
