@@ -43,7 +43,10 @@ public:
 
 #ifdef HK_LICENSE_TEST_BUILD
     void ResetForTest(const QString& statePath, const QJsonObject& fingerprint,
-        const QByteArray& publicBlob, const QString& installationId, qint64 now);
+        const QByteArray& publicBlob, const QString& installationId, qint64 now,
+        const QString& deviceToken = QString());
+    QJsonObject LastRequestForTest() const;
+    QString LastRequestEndpointForTest() const;
     void SetNowForTest(qint64 now);
     bool ApplyPolicyForTest(const QJsonObject& policy, const QString& nonce,
         QString* error = nullptr, bool online = true);
