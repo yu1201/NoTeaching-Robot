@@ -815,8 +815,10 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
         pendingValues.insert(QString::fromLatin1(SystemInterlockPolicy::keys[i]),
             settings.systemInterlocks.enabled[i] ? QStringLiteral("1") : QStringLiteral("0"));
     }
+    QString databaseError;
     const bool ok = valuesPrepared && ConfigDatabase::WriteScopedSettings(
-        QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues);
+        QStringLiteral("global"), QString(), SETTINGS_GROUP, pendingValues,
+        QStringLiteral("string"), &databaseError);
     if (ok)
     {
         std::lock_guard<std::mutex> lock(g_runtimeSystemInterlocksMutex);
@@ -829,7 +831,10 @@ bool PointCloudProcessingConfig::Save(const Settings& settings, QString* error)
     }
     if (!ok && error != nullptr)
     {
-        *error = QStringLiteral("点云处理配置未保存。配置身份校验、数据库打开或原子写入失败；请检查数据库可用性及写入权限。");
+        *error = QStringLiteral("原子写入点云处理配置失败，数据库已回滚，未留下混合版本。%1")
+            .arg(databaseError.isEmpty()
+                ? QString()
+                : QStringLiteral("\n原因：%1").arg(databaseError));
     }
     return ok;
 }

@@ -840,6 +840,30 @@ int RunDatabaseNativeIdentityGateTest()
             QStringLiteral("robot"), QStringLiteral("RobotA"),
             QStringLiteral("RobotPara"), QStringLiteral("RobotType.ini"), QStringLiteral("1")),
         QStringLiteral("configuration filename cannot be a key"));
+    QMap<QString, QString> hierarchicalValues;
+    hierarchicalValues.insert(QStringLiteral("General/ProcessingMode"), QStringLiteral("Builtin"));
+    hierarchicalValues.insert(QStringLiteral("External/ResampleStepMm"), QStringLiteral("2.000000"));
+    QString batchError;
+    Check(
+        ConfigDatabase::WriteScopedSettings(
+            QStringLiteral("global"), QString(), QStringLiteral("PointCloudProcessing"),
+            hierarchicalValues, QStringLiteral("string"), &batchError),
+        QStringLiteral("database-native hierarchical batch keys write successfully: %1").arg(batchError));
+    const QMap<QString, QString> storedBatchValues = ConfigDatabase::ReadScopedSettings(
+        QStringLiteral("global"), QString(), QStringLiteral("PointCloudProcessing"));
+    Check(
+        storedBatchValues.value(QStringLiteral("General/ProcessingMode")) == QStringLiteral("Builtin")
+            && storedBatchValues.value(QStringLiteral("External/ResampleStepMm"))
+                == QStringLiteral("2.000000"),
+        QStringLiteral("hierarchical batch key round-trips without changing its identity"));
+    QMap<QString, QString> unsafeHierarchicalValues;
+    unsafeHierarchicalValues.insert(QStringLiteral("External/../ConfigPath"), QStringLiteral("blocked"));
+    Check(
+        !ConfigDatabase::WriteScopedSettings(
+            QStringLiteral("global"), QString(), QStringLiteral("PointCloudProcessing"),
+            unsafeHierarchicalValues, QStringLiteral("string"), &batchError)
+            && batchError.contains(QStringLiteral("External/../ConfigPath")),
+        QStringLiteral("hierarchical batch keys still reject traversal identities with a useful error"));
     QTextStream(stdout) << "PASS: database APIs reject filesystem-backed configuration identities" << Qt::endl;
     return 0;
 }

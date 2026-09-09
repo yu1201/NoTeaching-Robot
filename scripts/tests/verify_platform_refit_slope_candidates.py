@@ -72,6 +72,7 @@ def verify_source_contract() -> None:
         and "EvaluatePlatformRefitSlopeCandidate(refitOn" in dual_candidate
         and "EvaluatePlatformRefitSlopeCandidate(refitOff" in dual_candidate
         and "PlatformSemanticValidator::SelectCandidate" in dual_candidate
+        and "AppendPlatformRefitCandidateDiagnostics" in dual_candidate
         and "自动回退关闭候选" in dual_candidate
         and "两个结果均存在异常斜率或平台语义错误" in dual_candidate
         and "双候选语义冲突" in dual_candidate,

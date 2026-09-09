@@ -118,12 +118,14 @@ public:
         const QString& scopeId,
         const QString& moduleName,
         const QMap<QString, QString>& values,
-        const QString& valueType = QStringLiteral("string"));
+        const QString& valueType = QStringLiteral("string"),
+        QString* error = nullptr);
     static bool WriteScopedSettings(
         const QString& scopeType,
         const QString& scopeId,
         const QString& moduleName,
-        const QMap<QString, ScopedSettingValue>& values);
+        const QMap<QString, ScopedSettingValue>& values,
+        QString* error = nullptr);
     static bool WriteLoginState(
         const QStringList& accountHistory,
         const QString& userName,
