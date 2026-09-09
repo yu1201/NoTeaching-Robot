@@ -63,8 +63,8 @@
     },
     {
       "path": "SDK/FANUC/FanucServiceLib.pc",
-      "size": 7085,
-      "sha256": "97f8c765b5365a30932175156c74df4521101b35f0c6c527a8f6c3fc31169dbc"
+      "size": 9816,
+      "sha256": "93ba34f2945a4181a9bfe9304b294fd9e70607d037f3335fbb5a8f527e8fe508"
     },
     {
       "path": "SDK/FANUC/LOADJOGBUF.pc",
