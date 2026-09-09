@@ -289,6 +289,60 @@ CandidateCheck EvaluateCandidate(
         }
     }
 
+    // 端点不是自然拐点。若“端点→首/尾角”和紧邻的同类角平台段都呈平面，说明首/尾角没有形成
+    // 平台↔坡面的几何过渡，而是端区重算强行制造的冗余边界。把该候选判无效，让双候选逻辑回退
+    // 到没有伪角的结果；不能仅因 O-O/II 本身平坦就把它当成一个完整平台。
+    auto segmentSlope = [](const CandidateKeyPoint& begin, const CandidateKeyPoint& end)
+    {
+        const double pathDelta = end.path - begin.path;
+        const double profileDelta = end.profile - begin.profile;
+        if (!IsFinite(pathDelta) || !IsFinite(profileDelta)
+            || std::abs(pathDelta) <= kEpsilon)
+        {
+            return std::numeric_limits<double>::infinity();
+        }
+        return std::abs(profileDelta) / std::abs(pathDelta);
+    };
+    auto rejectRedundantEndpointCorner = [&]
+        (const CandidateKeyPoint& endpoint,
+            const CandidateKeyPoint& boundary,
+            const CandidateKeyPoint& sameTypeNeighbor,
+            const char* endpointName)
+    {
+        if (IsCorner(endpoint.type)
+            || !IsCorner(boundary.type)
+            || boundary.type != sameTypeNeighbor.type
+            || boundary.lapBoundary
+            || sameTypeNeighbor.lapBoundary
+            || segmentSlope(endpoint, boundary) >= threshold
+            || segmentSlope(boundary, sameTypeNeighbor) >= threshold)
+        {
+            return;
+        }
+        check.failures.push_back(
+            std::string(endpointName) + " endpoint-adjacent corner is redundant, raw_index="
+            + std::to_string(endpoint.rawIndex) + "->"
+            + std::to_string(boundary.rawIndex) + "->"
+            + std::to_string(sameTypeNeighbor.rawIndex));
+        check.diagnostics.push_back(
+            std::string(endpointName) + " endpoint flat continuation has a redundant corner, xyz=("
+            + FormatDouble(endpoint.x) + "," + FormatDouble(endpoint.y) + ","
+            + FormatDouble(endpoint.z) + ")->(" + FormatDouble(boundary.x) + ","
+            + FormatDouble(boundary.y) + "," + FormatDouble(boundary.z) + ")->("
+            + FormatDouble(sameTypeNeighbor.x) + "," + FormatDouble(sameTypeNeighbor.y)
+            + "," + FormatDouble(sameTypeNeighbor.z) + ")");
+    };
+    if (keyPoints.size() >= 3)
+    {
+        rejectRedundantEndpointCorner(
+            keyPoints[0], keyPoints[1], keyPoints[2], "start");
+        rejectRedundantEndpointCorner(
+            keyPoints[keyPoints.size() - 1],
+            keyPoints[keyPoints.size() - 2],
+            keyPoints[keyPoints.size() - 3],
+            "end");
+    }
+
     bool previousShapeKnown = false;
     bool previousWasSlope = false;
     for (std::size_t index = 0; index + 1 < keyPoints.size(); ++index)
