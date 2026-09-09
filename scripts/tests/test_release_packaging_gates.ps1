@@ -466,7 +466,9 @@ try {
         -and $configBuilderText.Contains('PythonSha256')) "ConfigMigrate must use explicit hash-bound isolated Python"
     Assert-True (-not $installerText.Contains("Set-Content -LiteralPath `$buildInfoPath")) "installer must not relabel package metadata after package gate"
     Assert-True ($installerText.Contains("-PackageGateReport") -and $installerText.Contains("Assert-PackageGateReport")) "SkipPackageBuild must consume a gate report"
-    Assert-True ($releaseText.Contains('Remove-Item -LiteralPath $buildDir -Recurse -Force')) "release build directory must be cleaned before Rebuild"
+    Assert-True ($releaseText.Contains('function Remove-ControlledReleaseDirectory') `
+        -and $releaseText.Contains('Remove-ControlledReleaseDirectory -Path $buildDir') `
+        -and $releaseText.Contains('Controlled Release directory stayed locked after 10 seconds')) "release build directory must use bounded cleanup retry before Rebuild"
     Assert-True ($releaseText.Contains('Read-FanucRuntimeManifest') -and -not $releaseText.Contains('Get-ChildItem -LiteralPath $fanucSourceDir -File')) "FANUC packaging must use only the versioned manifest"
     Assert-True ($commonText.Contains('FileVersionInfo') -and $commonText.Contains('0x8664') -and -not $commonText.Contains('ASCII.GetString')) "main executable gate must use x64 PE VersionInfo, not byte markers"
     Assert-True ($pairText.Contains("2MB") -and $pairText.Contains("Assert-ReleaseInventoryMatches") -and $pairText.Contains("Assert-LinkedReleaseWorktrees")) "pair verifier must enforce size, inventory, and linked ancestry gates"
