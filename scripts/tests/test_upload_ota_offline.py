@@ -982,6 +982,11 @@ class LocalGateTests(unittest.TestCase):
         self.assertIn('"scripts/license_build_gate.ps1"', source)
         self.assertIn('"-LicenseMode", "Off" if channel == "neutral" else "Enforce"', source)
         self.assertIn('"-LicensePublicKeyHeader", str(license_public_key_header)', source)
+        self.assertIn('"build-field-test-client.ps1"', source)
+        self.assertIn('_require_fixed_release_workspaces(repo_root)', source)
+        self.assertIn('_verify_fixed_fanuc_runtime(args.runtime_source', source)
+        self.assertNotIn('"worktree", "add", "--detach"', source)
+        self.assertNotIn('shutil.copyfile(source_file, destination)', source)
 
     def test_ota_failure_never_creates_github_and_github_failure_is_ambiguous(self):
         host_key = "SHA256:" + "A" * 43
